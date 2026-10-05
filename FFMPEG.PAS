@@ -3896,6 +3896,7 @@ Begin
   End;
  End;
  If N>=16 Then If (B[0]=119) And (B[1]=87) And (B[2]=16) And (B[3]=0) Then Begin Probe:='avs'; Exit; End;
+ If N>=8 Then If (B[0]=77) And (B[1]=65) And (B[2]=67) And (B[3]=32) Then Begin Probe:='ape'; Exit; End;
  If N>=20 Then If (B[0]=84) And (B[1]=72) And (B[2]=80) And (B[3]=0) Then Begin Probe:='thp'; Exit; End;
  If N>=24 Then If (B[0]=0) And (B[1]=255) And (B[10]=255) And (B[11]=0) And (B[$11]<32) And ((B[$12] And $0E)<>0) Then Begin Probe:='psxstr'; Exit; End;
  If N>=8 Then If (B[0]=0) And (B[1]=10) And (B[2]=83) And (B[3]=77) And (B[4]=74) And (B[5]=80) And
@@ -14367,6 +14368,510 @@ Begin
 End;
 
 
+{ ---- Monkey's Audio (APE): decodeur, versions de fichier 3930..3990, 8 et 16 bits ---- }
+Type
+ TAPI32=Array[0..4000000] Of LongInt; PAPI32=^TAPI32;
+ TAPI16=Array[0..8000000] Of SmallInt; PAPI16=^TAPI16;
+ TAPFilter=Record
+  Order,Frac,D,A: LongInt; Coef,Hist: PAPI16; Avg: Int64;
+ End;
+Const
+ APEOrders: Array[0..4,0..2] Of Integer=((0,0,0),(16,0,0),(64,0,0),(32,256,0),(16,256,1280));
+ APEFrac: Array[0..4,0..2] Of Integer=((0,0,0),(11,0,0),(11,0,0),(10,13,0),(11,13,15));
+ APECnt3970: Array[0..21] Of Word=(0,14824,28224,39348,47855,53994,58171,60926,62682,63786,64463,64878,65126,65276,65365,65419,65450,65469,65480,65487,65491,65493);
+ APEDif3970: Array[0..20] Of Word=(14824,13400,11124,8507,6139,4177,2755,1756,1104,677,415,248,150,89,54,31,19,11,7,4,2);
+ APECnt3980: Array[0..21] Of Word=(0,19578,36160,48417,56323,60899,63265,64435,64971,65232,65351,65416,65447,65466,65476,65482,65485,65488,65490,65491,65492,65493);
+ APEDif3980: Array[0..20] Of Word=(19578,16582,12257,7906,4576,2366,1170,536,261,119,65,31,19,10,6,3,3,2,1,1,1);
+ APEM32=$FFFFFFFF;
+ APEYDelayA=50; APEYDelayB=42; APEXDelayA=34; APEXDelayB=26;
+ APEYAdaptA=18; APEXAdaptA=14; APEYAdaptB=10; APEXAdaptB=5;
+ APEChunk=4608;
+Var
+ APEVer,APELevel,APEFlags,APEFset,APECh,APEBps,APEFrameFlags,APEPtr,APEEnd,APEDLen,APEPos,APEFiles: LongInt;
+ APEData: PEABuffer; APEErr: Boolean;
+ APELow,APERange,APEHelp,APEBuf: Int64;
+ APEKX,APEKY: LongInt; APESX,APESY: Int64;
+ APEDec: Array[0..1] Of PAPI32;
+ APEPB: Array[0..575] Of Int64;
+ APELastA,APEFilA,APEFilB: Array[0..1] Of Int64;
+ APECoefA: Array[0..1,0..3] Of Int64; APECoefB: Array[0..1,0..4] Of Int64;
+ APEFilt: Array[0..2,0..1] Of TAPFilter;
+
+Function APEW32(X: Int64): LongInt;
+Begin
+ X:=X And APEM32; If X>=$80000000 Then X:=X-$100000000; APEW32:=X;
+End;
+
+Function APESign(X: Int64): LongInt;
+Begin
+ If X<0 Then APESign:=1 Else If X>0 Then APESign:=-1 Else APESign:=0;
+End;
+
+Function APEByteAt(P: LongInt): LongInt;
+Begin
+ If (P<0) Or (P>=APEDLen) Then APEByteAt:=0 Else APEByteAt:=APEData^[P];
+End;
+
+Procedure APERcStart;
+Begin
+ APEBuf:=APEByteAt(APEPtr); Inc(APEPtr);
+ APELow:=APEBuf Shr 1; APERange:=128;
+End;
+
+Procedure APERcNorm;
+Begin
+ While APERange<=$800000 Do Begin
+  APEBuf:=(APEBuf Shl 8) And APEM32;
+  If APEPtr<APEEnd Then Begin APEBuf:=(APEBuf+APEByteAt(APEPtr)) And APEM32; Inc(APEPtr); End
+  Else APEErr:=True;
+  APELow:=((APELow Shl 8) Or ((APEBuf Shr 1) And 255)) And APEM32;
+  APERange:=(APERange Shl 8) And APEM32;
+ End;
+End;
+
+Function APECulFreq(Tot: LongInt): LongInt;
+Begin
+ APERcNorm; APEHelp:=APERange Div Tot;
+ If APEHelp=0 Then Begin APEErr:=True; APEHelp:=1; End;
+ APECulFreq:=APELow Div APEHelp;
+End;
+
+Function APECulShift(Shift: LongInt): LongInt;
+Begin
+ APERcNorm; APEHelp:=APERange Shr Shift;
+ If APEHelp=0 Then Begin APEErr:=True; APEHelp:=1; End;
+ APECulShift:=APELow Div APEHelp;
+End;
+
+Procedure APEUpdate(Sy,Lt: LongInt);
+Begin
+ APELow:=(APELow-APEHelp*Lt) And APEM32; APERange:=(APEHelp*Sy) And APEM32;
+End;
+
+Function APEBits(N: LongInt): LongInt;
+Var S: LongInt;
+Begin
+ S:=APECulShift(N); APEUpdate(1,S); APEBits:=S;
+End;
+
+Function APESymbol(V3980: Boolean): LongInt;
+Var Sym,Cf: LongInt;
+Begin
+ Cf:=APECulShift(16);
+ If Cf>65492 Then Begin
+  Sym:=Cf-65535+63; APEUpdate(1,Cf);
+  If Cf>65535 Then APEErr:=True;
+  APESymbol:=Sym; Exit;
+ End;
+ Sym:=0;
+ If V3980 Then Begin
+  While APECnt3980[Sym+1]<=Cf Do Inc(Sym);
+  APEUpdate(APEDif3980[Sym],APECnt3980[Sym]);
+ End Else Begin
+  While APECnt3970[Sym+1]<=Cf Do Inc(Sym);
+  APEUpdate(APEDif3970[Sym],APECnt3970[Sym]);
+ End;
+ APESymbol:=Sym;
+End;
+
+Procedure APEUpdateRice(Var K: LongInt; Var KSum: Int64; X: Int64);
+Var Lim: Int64;
+Begin
+ If K<>0 Then Lim:=Int64(1) Shl (K+4) Else Lim:=0;
+ KSum:=(KSum+(((X+1) And APEM32) Shr 1)-((KSum+16) Shr 5)) And APEM32;
+ If KSum<Lim Then Dec(K)
+ Else If (KSum>=(Int64(1) Shl (K+5))) And (K<24) Then Inc(K);
+End;
+
+Function APESigned(X: Int64): LongInt;
+Var R: Int64;
+Begin
+ If (X And 1)=0 Then R:=(X Shr 1) Xor APEM32 Else R:=X Shr 1;
+ APESigned:=APEW32(R+1);
+End;
+
+Function APEValue(Y: Boolean): LongInt;
+Var
+ K: LongInt; KSum,X,Ov,Pivot,Base,BHi,BLo: Int64; TmpK,BBits: LongInt;
+Begin
+ If Y Then Begin K:=APEKY; KSum:=APESY; End Else Begin K:=APEKX; KSum:=APESX; End;
+ If APEVer>=3990 Then Begin
+  Pivot:=KSum Shr 5; If Pivot<1 Then Pivot:=1;
+  Ov:=APESymbol(True);
+  If Ov=63 Then Begin
+   Ov:=Int64(APEBits(16)) Shl 16; Ov:=Ov Or APEBits(16);
+  End;
+  If Pivot<$10000 Then Begin
+   Base:=APECulFreq(Pivot); APEUpdate(1,Base);
+  End Else Begin
+   BHi:=Pivot; BBits:=0;
+   While (BHi And Not Int64($FFFF))<>0 Do Begin BHi:=BHi Shr 1; Inc(BBits); End;
+   BHi:=APECulFreq(BHi+1); APEUpdate(1,BHi);
+   BLo:=APECulFreq(1 Shl BBits); APEUpdate(1,BLo);
+   Base:=(BHi Shl BBits)+BLo;
+  End;
+  X:=(Base+Ov*Pivot) And APEM32;
+ End Else Begin
+  Ov:=APESymbol(False);
+  If Ov=63 Then Begin TmpK:=APEBits(5); Ov:=0; End
+  Else If K<1 Then TmpK:=0 Else TmpK:=K-1;
+  If TmpK<=16 Then X:=APEBits(TmpK)
+  Else If TmpK<=31 Then Begin X:=APEBits(16); X:=X Or (Int64(APEBits(TmpK-16)) Shl 16); End
+  Else Begin APEErr:=True; X:=0; End;
+  X:=(X+(Ov Shl TmpK)) And APEM32;
+ End;
+ APEUpdateRice(K,KSum,X);
+ If Y Then Begin APEKY:=K; APESY:=KSum; End Else Begin APEKX:=K; APESX:=KSum; End;
+ APEValue:=APESigned(X);
+End;
+
+Procedure APEEntropy(Count: LongInt; Stereo: Boolean);
+Var I: LongInt;
+Begin
+ If Not Stereo Then Begin
+  For I:=0 To Count-1 Do APEDec[0]^[I]:=APEValue(True);
+ End Else For I:=0 To Count-1 Do Begin
+  APEDec[0]^[I]:=APEValue(True); APEDec[1]^[I]:=APEValue(False);
+ End;
+End;
+
+Procedure APEFilterRun(Var F: TAPFilter; Data: PAPI32; Count: LongInt);
+Var
+ N,J,Mul,Res,D,Ord: LongInt; Sum,Wide,AbsR: Int64; X: LongInt; Sg: LongInt;
+Begin
+ Ord:=F.Order;
+ For N:=0 To Count-1 Do Begin
+  X:=Data^[N]; Mul:=APESign(X); Sum:=0;
+  If Mul<>0 Then Begin
+   For J:=0 To Ord-1 Do Begin
+    Sum:=Sum+Int64(F.Coef^[J])*F.Hist^[F.D-Ord+J];
+    F.Coef^[J]:=SmallInt(F.Coef^[J]+Mul*F.Hist^[F.A-Ord+J]);
+   End;
+  End Else For J:=0 To Ord-1 Do Sum:=Sum+Int64(F.Coef^[J])*F.Hist^[F.D-Ord+J];
+  Res:=APEW32(Sum);
+  Wide:=AVSar(Int64(Res)+(Int64(1) Shl (F.Frac-1)),F.Frac);
+  Res:=APEW32(APEW32(Wide)+Int64(X));
+  Data^[N]:=Res;
+  If Res>32767 Then F.Hist^[F.D]:=32767 Else If Res<-32768 Then F.Hist^[F.D]:=-32768 Else F.Hist^[F.D]:=Res;
+  Inc(F.D);
+  If APEVer<3980 Then Begin
+   If Res=0 Then F.Hist^[F.A]:=0 Else If Res<0 Then F.Hist^[F.A]:=4 Else F.Hist^[F.A]:=-4;
+   F.Hist^[F.A-4]:=(F.Hist^[F.A-4]-(F.Hist^[F.A-4] And 1)) Div 2;
+   F.Hist^[F.A-8]:=(F.Hist^[F.A-8]-(F.Hist^[F.A-8] And 1)) Div 2;
+  End Else Begin
+   If Res<0 Then AbsR:=-Int64(Res) Else AbsR:=Res;
+   If AbsR<>0 Then Begin
+    Sg:=8;
+    If AbsR>F.Avg*3 Then Sg:=Sg Shl 1;
+    If AbsR>((F.Avg+F.Avg Div 3) And APEM32) Then Sg:=Sg Shl 1;
+    F.Hist^[F.A]:=APESign(Res)*Sg;
+   End Else F.Hist^[F.A]:=0;
+   F.Avg:=(F.Avg+(APEW32(AbsR-F.Avg) Div 16)) And APEM32;
+   F.Hist^[F.A-1]:=(F.Hist^[F.A-1]-(F.Hist^[F.A-1] And 1)) Div 2;
+   F.Hist^[F.A-2]:=(F.Hist^[F.A-2]-(F.Hist^[F.A-2] And 1)) Div 2;
+   F.Hist^[F.A-8]:=(F.Hist^[F.A-8]-(F.Hist^[F.A-8] And 1)) Div 2;
+  End;
+  Inc(F.A);
+  If F.D=512+Ord*2 Then Begin
+   D:=F.D-Ord*2; Move(F.Hist^[D],F.Hist^[0],Ord*2*2);
+   F.D:=Ord*2; F.A:=Ord;
+  End;
+ End;
+End;
+
+Procedure APEApplyFilters(Count: LongInt; Stereo: Boolean);
+Var I: Integer;
+Begin
+ For I:=0 To 2 Do Begin
+  If APEOrders[APEFset,I]=0 Then Break;
+  APEFilterRun(APEFilt[I,0],APEDec[0],Count);
+  If Stereo Then APEFilterRun(APEFilt[I,1],APEDec[1],Count);
+ End;
+End;
+
+Procedure APEHistWrap;
+Begin
+ Inc(APEPos);
+ If APEPos=512 Then Begin
+  Move(APEPB[APEPos],APEPB[0],50*SizeOf(Int64)); APEPos:=0;
+ End;
+End;
+
+Function APEUpd3930(Decoded: LongInt; F,DA: LongInt): LongInt;
+Var D: Array[0..3] Of Int64; PA,Sg: Int64; K: Integer;
+Begin
+ APEPB[APEPos+DA]:=APELastA[F];
+ D[0]:=APEPB[APEPos+DA];
+ D[1]:=APEW32(APEPB[APEPos+DA]-APEPB[APEPos+DA-1]);
+ D[2]:=APEW32(APEPB[APEPos+DA-1]-APEPB[APEPos+DA-2]);
+ D[3]:=APEW32(APEPB[APEPos+DA-2]-APEPB[APEPos+DA-3]);
+ PA:=APEW32(D[0]*APECoefA[F,0]+D[1]*APECoefA[F,1]+D[2]*APECoefA[F,2]+D[3]*APECoefA[F,3]);
+ APELastA[F]:=APEW32(Int64(Decoded)+AVSar(PA,9));
+ APEFilA[F]:=APEW32(APELastA[F]+AVSar(APEW32(APEFilA[F]*31),5));
+ Sg:=APESign(Decoded);
+ For K:=0 To 3 Do Begin
+  If D[K]<0 Then APECoefA[F,K]:=APEW32(APECoefA[F,K]+Sg) Else APECoefA[F,K]:=APEW32(APECoefA[F,K]-Sg);
+ End;
+ APEUpd3930:=APEFilA[F];
+End;
+
+Function APEUpd3950(Decoded: LongInt; F,DA,DB,AA,AB: LongInt): LongInt;
+Var PA,PB,Sg: Int64; K: Integer; P: LongInt;
+Begin
+ P:=APEPos;
+ APEPB[P+DA]:=APELastA[F];
+ APEPB[P+AA]:=APESign(APEPB[P+DA]);
+ APEPB[P+DA-1]:=APEPB[P+DA]-APEPB[P+DA-1];
+ APEPB[P+AA-1]:=APESign(APEPB[P+DA-1]);
+ PA:=0; For K:=0 To 3 Do PA:=PA+APEPB[P+DA-K]*APECoefA[F,K];
+ APEPB[P+DB]:=APEFilA[F xor 1]-AVSar(APEFilB[F]*31,5);
+ APEPB[P+AB]:=APESign(APEPB[P+DB]);
+ APEPB[P+DB-1]:=APEPB[P+DB]-APEPB[P+DB-1];
+ APEPB[P+AB-1]:=APESign(APEPB[P+DB-1]);
+ APEFilB[F]:=APEFilA[F xor 1];
+ PB:=0; For K:=0 To 4 Do PB:=PB+APEPB[P+DB-K]*APECoefB[F,K];
+ PA:=APEW32(PA); PB:=APEW32(PB);
+ APELastA[F]:=APEW32(Int64(Decoded)+AVSar(APEW32(PA+AVSar(PB,1)),10));
+ APEFilA[F]:=APELastA[F]+AVSar(APEFilA[F]*31,5);
+ Sg:=APESign(Decoded);
+ For K:=0 To 3 Do APECoefA[F,K]:=APECoefA[F,K]+APEPB[P+AA-K]*Sg;
+ For K:=0 To 4 Do APECoefB[F,K]:=APECoefB[F,K]+APEPB[P+AB-K]*Sg;
+ APEUpd3950:=APEW32(APEFilA[F]);
+End;
+
+Procedure APEPredictor(Count: LongInt; Stereo: Boolean);
+Var I: LongInt; A0,A1,CurA,PA,Sg,A: Int64;
+Begin
+ APEApplyFilters(Count,Stereo);
+ If APEVer<3950 Then Begin
+  For I:=0 To Count-1 Do Begin
+   If Stereo Then Begin
+    A0:=APEDec[1]^[I]; A1:=APEDec[0]^[I];
+    APEDec[0]^[I]:=APEUpd3930(A0,0,APEYDelayA);
+    APEDec[1]^[I]:=APEUpd3930(A1,1,APEXDelayA);
+   End Else APEDec[0]^[I]:=APEUpd3930(APEDec[0]^[I],0,APEYDelayA);
+   APEHistWrap;
+  End;
+  Exit;
+ End;
+ If Stereo Then Begin
+  APEPos:=0;
+  For I:=0 To Count-1 Do Begin
+   A0:=APEUpd3950(APEDec[0]^[I],0,APEYDelayA,APEYDelayB,APEYAdaptA,APEYAdaptB);
+   A1:=APEUpd3950(APEDec[1]^[I],1,APEXDelayA,APEXDelayB,APEXAdaptA,APEXAdaptB);
+   APEDec[0]^[I]:=A0; APEDec[1]^[I]:=A1;
+   APEHistWrap;
+  End;
+ End Else Begin
+  CurA:=APELastA[0];
+  For I:=0 To Count-1 Do Begin
+   A:=APEDec[0]^[I];
+   APEPB[APEPos+APEYDelayA]:=CurA;
+   APEPB[APEPos+APEYDelayA-1]:=APEPB[APEPos+APEYDelayA]-APEPB[APEPos+APEYDelayA-1];
+   PA:=APEW32(APEPB[APEPos+APEYDelayA]*APECoefA[0,0]+APEPB[APEPos+APEYDelayA-1]*APECoefA[0,1]+
+    APEPB[APEPos+APEYDelayA-2]*APECoefA[0,2]+APEPB[APEPos+APEYDelayA-3]*APECoefA[0,3]);
+   CurA:=APEW32(A+AVSar(PA,10));
+   APEPB[APEPos+APEYAdaptA]:=APESign(APEPB[APEPos+APEYDelayA]);
+   APEPB[APEPos+APEYAdaptA-1]:=APESign(APEPB[APEPos+APEYDelayA-1]);
+   Sg:=APESign(A);
+   APECoefA[0,0]:=APECoefA[0,0]+APEPB[APEPos+APEYAdaptA]*Sg;
+   APECoefA[0,1]:=APECoefA[0,1]+APEPB[APEPos+APEYAdaptA-1]*Sg;
+   APECoefA[0,2]:=APECoefA[0,2]+APEPB[APEPos+APEYAdaptA-2]*Sg;
+   APECoefA[0,3]:=APECoefA[0,3]+APEPB[APEPos+APEYAdaptA-3]*Sg;
+   APEHistWrap;
+   APEFilA[0]:=CurA+AVSar(APEFilA[0]*31,5);
+   APEDec[0]^[I]:=APEW32(APEFilA[0]);
+  End;
+  APELastA[0]:=CurA;
+ End;
+End;
+
+Procedure APEInitFrame;
+Var I,J,Ord: LongInt;
+Begin
+ APEKX:=10; APESX:=16384; APEKY:=10; APESY:=16384;
+ FillChar(APEPB,SizeOf(APEPB),0); APEPos:=0;
+ For I:=0 To 1 Do Begin
+  APECoefA[I,0]:=360; APECoefA[I,1]:=317; APECoefA[I,2]:=-109; APECoefA[I,3]:=98;
+  For J:=0 To 4 Do APECoefB[I,J]:=0;
+  APEFilA[I]:=0; APEFilB[I]:=0; APELastA[I]:=0;
+ End;
+ For I:=0 To 2 Do For J:=0 To 1 Do Begin
+  Ord:=APEOrders[APEFset,I];
+  With APEFilt[I,J] Do Begin
+   Order:=Ord; Frac:=APEFrac[APEFset,I]; D:=Ord*2; A:=Ord; Avg:=0;
+   If Ord>0 Then Begin
+    FillChar(Coef^,Ord*2,0); FillChar(Hist^,(Ord*2+512+16)*2,0);
+   End;
+  End;
+ End;
+End;
+
+{ Decode un paquet (trame APE inversee par mots de 32 bits): PCM16 via EAPut. }
+Procedure APEDecodePacket(Pk: PEABuffer; PkSize: LongInt);
+Var
+ Base,Offset,Samples,N,I,C: LongInt; NBlocks,Crc: Int64; Mono: Boolean; Left,Right: Int64;
+Function BE32(At: LongInt): Int64;
+Begin
+ BE32:=Int64(APEByteAt(At))*16777216+APEByteAt(At+1)*65536+APEByteAt(At+2)*256+APEByteAt(At+3);
+End;
+Begin
+ If PkSize<8 Then Exit;
+ Base:=PkSize And Not 3; APEDLen:=Base+64;
+ GetMem(APEData,Base+64); FillChar(APEData^,Base+64,0);
+ I:=0;
+ While I<Base Do Begin
+  APEData^[I]:=Pk^[I+3]; APEData^[I+1]:=Pk^[I+2]; APEData^[I+2]:=Pk^[I+1]; APEData^[I+3]:=Pk^[I];
+  Inc(I,4);
+ End;
+ If APEVer<3950 Then APEEnd:=Base+2 Else APEEnd:=Base;
+ NBlocks:=BE32(0); Offset:=LongInt(BE32(4)); APEPtr:=8;
+ If (NBlocks=0) Or (NBlocks>268435440) Or (BE32(4)>3) Or (APEEnd-APEPtr<Offset) Or (APEEnd-APEPtr-Offset<6) Then Begin
+  FreeMem(APEData,Base+64); Exit;
+ End;
+ Inc(APEPtr,Offset);
+ Crc:=BE32(APEPtr); Inc(APEPtr,4); APEFrameFlags:=0;
+ If (APEVer>3820) And ((Crc And $80000000)<>0) Then Begin
+  If APEEnd-APEPtr<6 Then Begin FreeMem(APEData,Base+64); Exit; End;
+  APEFrameFlags:=LongInt(BE32(APEPtr) And $FF); Inc(APEPtr,4);
+ End;
+ Inc(APEPtr); APERcStart;
+ APEInitFrame;
+ Samples:=NBlocks;
+ Mono:=(APECh=1) Or ((APEFrameFlags And 4)<>0);
+ While Samples>0 Do Begin
+  N:=Samples; If N>APEChunk Then N:=APEChunk;
+  FillChar(APEDec[0]^,(N+8)*4,0); FillChar(APEDec[1]^,(N+8)*4,0);
+  APEErr:=False;
+  If Mono Then Begin
+   If (APEFrameFlags And 3)=0 Then Begin
+    APEEntropy(N,False);
+    If Not APEErr Then Begin
+     APEPredictor(N,False);
+     If APECh=2 Then Move(APEDec[0]^,APEDec[1]^,N*4);
+    End;
+   End;
+  End Else If (APEFrameFlags And 3)<>3 Then Begin
+   APEEntropy(N,True);
+   If Not APEErr Then Begin
+    APEPredictor(N,True);
+    For I:=0 To N-1 Do Begin
+     Left:=APEW32(Int64(APEDec[1]^[I])-Int64(APEDec[0]^[I] Div 2));
+     Right:=APEW32(Left+APEDec[0]^[I]);
+     APEDec[0]^[I]:=Left; APEDec[1]^[I]:=Right;
+    End;
+   End;
+  End;
+  If APEErr Then Break;
+  For I:=0 To N-1 Do For C:=0 To APECh-1 Do Begin
+   If APEBps=8 Then EAPut((((APEDec[C]^[I]+128) And 255)-128)*256)
+   Else EAPut(APEDec[C]^[I] And 65535);
+  End;
+  Dec(Samples,N);
+ End;
+ FreeMem(APEData,Base+64);
+End;
+
+Procedure DecodeAPE(Const Source,Target: String);
+Type TI64=Array[0..50000000] Of Int64; PI64=^TI64;
+Var
+ H: Array[0..63] Of Byte; Cur,Limit,Junk,FileSize: Int64; I,J,Bytes,Take: LongInt;
+ Descriptor,HeaderLen,SeekLen,WavHeader,WavTail,TotalFrames,FinalBlocks,BlocksPerFrame,Rate,Level,Flags,FinalSize: Int64;
+ FPos,FSize: PI64; FSkip: PAPI32; Pk: PEABuffer; Avail,Want,Pos0,Entry: Int64; NBlocks: Int64; Ord: LongInt;
+Function R16: LongInt;
+Begin
+ If Cur+2>Limit Then Fail('ape: en-tete tronque.');
+ ReadAt(Cur,H,2); Inc(Cur,2); R16:=H[0]+H[1]*256;
+End;
+Function R32: Int64;
+Begin
+ If Cur+4>Limit Then Fail('ape: en-tete tronque.');
+ ReadAt(Cur,H,4); Inc(Cur,4); R32:=Int64(H[0])+Int64(H[1])*256+Int64(H[2])*65536+Int64(H[3])*16777216;
+End;
+Begin
+ OpenRead(Source); Limit:=InputSize; FileSize:=Limit; Cur:=0; Junk:=0;
+ If Limit>=10 Then Begin
+  ReadAt(0,H,10);
+  If (H[0]=73) And (H[1]=68) And (H[2]=51) Then Begin
+   Junk:=10+(Int64(H[6] And 127) Shl 21)+(Int64(H[7] And 127) Shl 14)+(Int64(H[8] And 127) Shl 7)+(H[9] And 127);
+   If (H[5] And 16)<>0 Then Inc(Junk,10);
+   Cur:=Junk;
+  End;
+ End;
+ If R32<>$2043414D Then Fail('ape: signature MAC requise.');
+ APEVer:=R16;
+ If (APEVer<3800) Or (APEVer>3990) Then Fail('ape: version de fichier 3.80..3.99 requise.');
+ If APEVer<3930 Then Fail('ape: versions de fichier inferieures a 3.93 non supportees.');
+ If APEVer>=3980 Then Begin
+  R16; Descriptor:=R32; HeaderLen:=R32; SeekLen:=R32; WavHeader:=R32; R32; R32; WavTail:=R32; Inc(Cur,16);
+  If Descriptor>52 Then Inc(Cur,Descriptor-52);
+  Level:=R16; Flags:=R16; BlocksPerFrame:=R32; FinalBlocks:=R32; TotalFrames:=R32; APEBps:=R16; APECh:=R16; Rate:=R32;
+ End Else Begin
+  Descriptor:=0; HeaderLen:=32;
+  Level:=R16; Flags:=R16; APECh:=R16; Rate:=R32; WavHeader:=R32; WavTail:=R32; TotalFrames:=R32; FinalBlocks:=R32;
+  If (Flags And 4)<>0 Then Begin Inc(Cur,4); Inc(HeaderLen,4); End;
+  If (Flags And 16)<>0 Then Begin SeekLen:=R32*4; Inc(HeaderLen,4); End Else SeekLen:=TotalFrames*4;
+  If (Flags And 1)<>0 Then APEBps:=8 Else If (Flags And 8)<>0 Then APEBps:=24 Else APEBps:=16;
+  If APEVer>=3950 Then BlocksPerFrame:=73728*4 Else BlocksPerFrame:=73728;
+  If (Flags And 32)=0 Then Inc(Cur,WavHeader);
+ End;
+ APELevel:=Level; APEFlags:=Flags;
+ If (TotalFrames=0) Or (TotalFrames*4>Limit) Then Fail('ape: aucune trame dans le fichier.');
+ If SeekLen Div 4<TotalFrames Then Fail('ape: table de positions incomplete.');
+ If (APECh<1) Or (APECh>2) Then Fail('ape: mono ou stereo requis.');
+ If (APEBps<>8) And (APEBps<>16) Then Fail('ape: 8 ou 16 bits requis (24 bits non supporte).');
+ If (Level Mod 1000<>0) Or (Level>5000) Or (Level=0) Then Fail('ape: niveau de compression incorrect.');
+ If (Rate<1) Or (Rate>768000) Then Fail('ape: frequence incorrecte.');
+ APEFset:=Level Div 1000-1;
+ GetMem(FPos,TotalFrames*8); GetMem(FSize,TotalFrames*8); GetMem(FSkip,TotalFrames*4);
+ FPos^[0]:=Junk+Descriptor+HeaderLen+SeekLen+WavHeader; FSkip^[0]:=0; Pos0:=FPos^[0];
+ R32;
+ For I:=1 To TotalFrames-1 Do Begin
+  Entry:=R32; FPos^[I]:=Entry+Junk; FSize^[I-1]:=FPos^[I]-FPos^[I-1];
+  FSkip^[I]:=(FPos^[I]-Pos0) And 3;
+ End;
+ Cur:=Cur+(SeekLen Div 4-TotalFrames)*4;
+ FinalSize:=FileSize-FPos^[TotalFrames-1]-WavTail; FinalSize:=FinalSize-(FinalSize And 3);
+ If FinalSize<=0 Then FinalSize:=FinalBlocks*8;
+ FSize^[TotalFrames-1]:=FinalSize;
+ For I:=0 To TotalFrames-1 Do Begin
+  If FSkip^[I]<>0 Then Begin Dec(FPos^[I],FSkip^[I]); Inc(FSize^[I],FSkip^[I]); End;
+  If FSize^[I]>2147483640 Then Fail('ape: taille de trame incorrecte.');
+  FSize^[I]:=(FSize^[I]+3) And Not Int64(3);
+ End;
+ For I:=0 To 1 Do GetMem(APEDec[I],(APEChunk+16)*4);
+ For I:=0 To 2 Do For J:=0 To 1 Do Begin
+  Ord:=APEOrders[APEFset,I]; APEFilt[I,J].Coef:=Nil; APEFilt[I,J].Hist:=Nil;
+  If Ord>0 Then Begin GetMem(APEFilt[I,J].Coef,Ord*2); GetMem(APEFilt[I,J].Hist,(Ord*2+512+16)*2); End;
+ End;
+ EAReset; OpenWrite(Target); ADPCMWaveHeader(Rate,APECh,0);
+ For I:=0 To TotalFrames-1 Do Begin
+  If FSize^[I]<=0 Then Continue;
+  Avail:=FileSize-FPos^[I]; If Avail<=0 Then Break;
+  Want:=FSize^[I]; If Want>Avail Then Want:=Avail;
+  If I=TotalFrames-1 Then NBlocks:=FinalBlocks Else NBlocks:=BlocksPerFrame;
+  GetMem(Pk,Want+16+8); Cur:=0;
+  While Cur<Want Do Begin
+   If Want-Cur>60000 Then Take:=60000 Else Take:=Want-Cur;
+   ReadAt(FPos^[I]+Cur,Pk^[8+Cur],Take); Inc(Cur,Take);
+  End;
+  Pk^[0]:=NBlocks And 255; Pk^[1]:=(NBlocks Shr 8) And 255; Pk^[2]:=(NBlocks Shr 16) And 255; Pk^[3]:=(NBlocks Shr 24) And 255;
+  Pk^[4]:=FSkip^[I]; Pk^[5]:=0; Pk^[6]:=0; Pk^[7]:=0;
+  APEDecodePacket(Pk,LongInt(Want)+8);
+  FreeMem(Pk,Want+16+8);
+ End;
+ EAFlush;
+ If EAWritten=0 Then Fail('ape: aucune donnee audio decodee.');
+ ADPCMPatchHeader(Rate,APECh,EAWritten);
+ For I:=0 To 1 Do FreeMem(APEDec[I],(APEChunk+16)*4);
+ For I:=0 To 2 Do For J:=0 To 1 Do Begin
+  Ord:=APEOrders[APEFset,I];
+  If Ord>0 Then Begin FreeMem(APEFilt[I,J].Coef,Ord*2); FreeMem(APEFilt[I,J].Hist,(Ord*2+512+16)*2); End;
+ End;
+ FreeMem(FPos,TotalFrames*8); FreeMem(FSize,TotalFrames*8); FreeMem(FSkip,TotalFrames*4);
+ CloseRead; CloseWrite;
+End;
+
 Procedure NormalizeWave(Const Source,Target: String; ForMP3: Boolean);
 Type
  TBytes = Array[0..4095] Of Byte;
@@ -16236,6 +16741,7 @@ Begin
  WriteLn(' D  ea              Electronic Arts Multimedia (audio adpcm_ea, r1, r2, r3, xas)');
  WriteLn(' D  xa              Maxis XA (adpcm_ea_maxis_xa)');
  WriteLn(' D  amv             AMV (audio adpcm_ima_amv; video amv vers Y4M)');
+ WriteLn(' D  ape             Monkey''s Audio (versions 3.93-3.99, 8/16 bits) vers WAV/MP3/...');
  WriteLn(' DE avi (asv1/asv2) AVI ASUS V1/V2: decodage vers Y4M, encodage Y4M -c:v asv1|asv2');
  WriteLn(' D  avs             Argonaut Creature Shock AVS (video vers Y4M/PNG)');
  WriteLn(' D  iss             Funcom ISS (adpcm_ima_iss)');
@@ -16520,6 +17026,7 @@ BEGIN
    WriteLn(' D = decodage, E = encodage, A = audio, V = video');
    WriteLn('D V    4xm             4X Movie');
    WriteLn('D V    amv             AMV Video');
+   WriteLn('D A    ape             Monkey''s Audio');
    WriteLn('DEV    asv1            ASUS V1');
    WriteLn('DEV    asv2            ASUS V2');
    WriteLn('D V    avs             AVS (Audio Video Standard) video');
@@ -17024,6 +17531,7 @@ BEGIN
    If InputFormat='wsaud' Then DecodeWSAud(InputPath,Temps[0]) Else
    If InputFormat='amv' Then DecodeAMV(InputPath,Temps[0]) Else
    If InputFormat='iss' Then DecodeISS(InputPath,Temps[0]) Else
+   If InputFormat='ape' Then DecodeAPE(InputPath,Temps[0]) Else
    If (InputFormat='aiff') And IsAIFFIma4(InputPath) Then DecodeAIFFIma4(InputPath,Temps[0]) Else
    If InputFormat='aiff' Then DecodeAIFF(InputPath,Temps[0]) Else
    If InputFormat='voc' Then DecodeVOC(InputPath,Temps[0]) Else
