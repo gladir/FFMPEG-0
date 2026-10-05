@@ -3814,6 +3814,8 @@ Begin
  Until False;
  CloseRead;
  Probe:='';
+ If N>=10 Then If ((B[0]=101) And (B[1]=97) And (B[2]=51) And (B[3]>=2) And (B[3]<=4)) Or
+  ((B[0]=69) And (B[1]=65) And (B[2]=51) And (B[4]=0) And (B[5]=96)) Then Begin Probe:='oma'; Exit; End;
  If N>=9 Then If (B[0]=89) And (B[1]=85) And (B[2]=86) And (B[3]=52) And
   (B[4]=77) And (B[5]=80) And (B[6]=69) And (B[7]=71) And (B[8]=50) Then Begin
   Probe:='yuv4mpegpipe'; Exit;
@@ -14872,6 +14874,527 @@ Begin
  CloseRead; CloseWrite;
 End;
 
+{ ---- ATRAC3 (Sony): decodeur WAV 0x270 et OMA, simple et joint stereo ---- }
+Type
+ TSg=Array[0..1069] Of Single; PSg=^TSg;
+ TATMant=Array[0..127] Of LongInt;
+ TATCos=Array[0..131071] Of Double; PATCos=^TATCos;
+ TATGain=Record Num: LongInt; Lev,Loc: Array[0..6] Of LongInt; End;
+ TATComp=Record Pos,Num: LongInt; Coef: Array[0..7] Of Single; End;
+ TATUnit=Record
+  BandsCoded,NumComp,Switch: LongInt;
+  Prev: Array[0..1023] Of Single;
+  Comp: Array[0..63] Of TATComp;
+  Gain: Array[0..1,0..3] Of TATGain;
+  Spec: Array[0..1023] Of Single;
+  Imdct: Array[0..511] Of Single;
+  D1,D2,D3: Array[0..45] Of Single;
+ End;
+ PATUnit=^TATUnit;
+ TATVlc=Record Len: Array[0..255] Of Byte; Sym: Array[0..255] Of ShortInt; End;
+Const
+ ATHuff: Array[0..138,0..1] Of Byte=(
+  (31,1),(32,3),(33,3),(34,4),(35,4),(36,5),(37,5),(38,5),(39,5),
+  (31,1),(32,3),(30,3),(33,3),(29,3),
+  (31,1),(32,3),(30,3),(33,4),(29,4),(34,4),(28,4),
+  (31,1),(32,3),(30,3),(33,4),(29,4),(34,5),(28,5),(35,5),(27,5),
+  (31,2),(32,3),(30,3),(33,4),(29,4),(34,4),(28,4),(38,4),(24,4),(35,5),(27,5),(36,6),(26,6),(37,6),(25,6),
+  (31,3),(32,4),(30,4),(33,4),(29,4),(34,4),(28,4),(46,4),(16,4),(35,5),(27,5),(36,5),(26,5),(37,5),(25,5),(38,6),(24,6),(39,6),
+  (23,6),(40,6),(22,6),(41,6),(21,6),(42,7),(20,7),(43,7),(19,7),(44,7),(18,7),(45,7),(17,7),
+  (31,3),(62,4),(0,4),(32,5),(30,5),(33,5),(29,5),(34,5),(28,5),(35,5),(27,5),(36,5),(26,5),(37,6),(25,6),(38,6),(24,6),(39,6),
+  (23,6),(40,6),(22,6),(41,6),(21,6),(42,6),(20,6),(43,6),(19,6),(44,6),(18,6),(45,7),(17,7),(46,7),(16,7),(47,7),(15,7),(48,7),
+  (14,7),(49,7),(13,7),(50,7),(12,7),(51,7),(11,7),(52,8),(10,8),(53,8),(9,8),(54,8),(8,8),(55,8),(7,8),(56,8),(6,8),(57,8),
+  (5,8),(58,8),(4,8),(59,8),(3,8),(60,8),(2,8),(61,8),(1,8));
+ ATHuffSize: Array[0..6] Of Byte=(9,5,7,9,15,31,63);
+ ATClcLen: Array[0..7] Of Byte=(0,4,3,3,4,4,5,6);
+ ATMantClc: Array[0..3] Of ShortInt=(0,1,-2,-1);
+ ATMantVlc: Array[0..17] Of ShortInt=(0,0,0,1,0,-1,1,0,-1,0,1,1,1,-1,-1,1,-1,-1);
+ ATInvMax: Array[0..7] Of Single=(0.0,1.0/1.5,1.0/2.5,1.0/3.5,1.0/4.5,1.0/7.5,1.0/15.5,1.0/31.5);
+ ATSubband: Array[0..32] Of Word=(0,8,16,24,32,40,48,56,64,80,96,112,128,144,160,176,192,224,256,288,320,352,384,416,448,480,512,576,640,704,768,896,1024);
+ ATMatrix: Array[0..7] Of Single=(0.0,2.0,2.0,2.0,0.0,0.0,1.0,1.0);
+ ATQmfHalf: Array[0..23] Of Single=(-0.00001461907,-0.00009205479,-0.000056157569,0.00030117269,
+  0.0002422519,-0.00085293897,-0.0005205574,0.0020340169,0.00078333891,-0.0042153862,-0.00075614988,0.0078402944,
+  -0.000061169922,-0.01344162,0.0024626821,0.021736089,-0.007801671,-0.034090221,0.01880949,0.054326009,
+  -0.043596379,-0.099384367,0.13207909,0.46424159);
+Var
+ ATBuf: PEABuffer; ATLen,ATPos: LongInt;
+ ATVlc: Array[0..6] Of TATVlc;
+ ATSf: Array[0..63] Of Single; ATWin: Array[0..511] Of Single; ATQmf: Array[0..47] Of Single;
+ ATG1: Array[0..15] Of Single; ATG2: Array[0..30] Of Single;
+ ATCos: PATCos;
+ ATUnits: Array[0..7] Of PATUnit; ATOut: Array[0..7] Of PSg;
+ ATCh,ATMode,ATAlign: LongInt;
+ ATMPrev,ATMNow,ATMNext: Array[0..3,0..3] Of LongInt; ATWDelay: Array[0..3,0..5] Of LongInt;
+ ATTemp: TSg;
+
+Function ATI2F(I: LongInt): Single;
+Begin ATI2F:=I; End;
+
+Function ATGet(N: LongInt): LongInt;
+Var V: Int64; I,P,B: LongInt;
+Begin
+ V:=0;
+ For I:=0 To N-1 Do Begin
+  P:=ATPos+I; B:=P Shr 3;
+  If (B<ATLen) And (ATBuf<>Nil) Then V:=V*2+((ATBuf^[B] Shr (7-(P And 7))) And 1) Else V:=V*2;
+ End;
+ Inc(ATPos,N); ATGet:=V;
+End;
+
+Function ATGetS(N: LongInt): LongInt;
+Var V: LongInt;
+Begin
+ V:=ATGet(N); If V>=(1 Shl (N-1)) Then V:=V-(1 Shl N); ATGetS:=V;
+End;
+
+Procedure ATInitTables;
+Var I,J,K,L: Integer; Code: Int64; Base: Integer; Wi,Wj,W: Single; Idx,Hi,Lo: LongInt;
+Begin
+ For I:=0 To 63 Do ATSf[I]:=Exp(Ln(2.0)*((I-15)/3.0));
+ For I:=0 To 23 Do Begin
+  ATQmf[I]:=Single(Double(ATQmfHalf[I])*2.0); ATQmf[47-I]:=ATQmf[I];
+ End;
+ J:=255;
+ For I:=0 To 127 Do Begin
+  Wi:=Sin(((I+0.5)/256.0-0.5)*Pi)+1.0; Wj:=Sin(((J+0.5)/256.0-0.5)*Pi)+1.0;
+  W:=0.5*(Double(Wi)*Wi+Double(Wj)*Wj);
+  ATWin[I]:=Wi/W; ATWin[511-I]:=ATWin[I]; ATWin[J]:=Wj/W; ATWin[511-J]:=ATWin[J];
+  Dec(J);
+ End;
+ For I:=0 To 15 Do ATG1[I]:=Exp(Ln(2.0)*(4-I));
+ For I:=-15 To 15 Do ATG2[I+15]:=Exp(Ln(2.0)*(-1.0/8*I));
+ Base:=0;
+ For I:=0 To 6 Do Begin
+  FillChar(ATVlc[I],SizeOf(ATVlc[I]),0); Code:=0;
+  For J:=0 To ATHuffSize[I]-1 Do Begin
+   L:=ATHuff[Base+J,1]; Idx:=ATHuff[Base+J,0]-31;
+   Lo:=(Code Shr (32-L)) Shl (8-L); Hi:=Lo+(1 Shl (8-L))-1;
+   For K:=Lo To Hi Do Begin ATVlc[I].Len[K]:=L; ATVlc[I].Sym[K]:=Idx; End;
+   Code:=Code+(Int64(1) Shl (32-L));
+  End;
+  Inc(Base,ATHuffSize[I]);
+ End;
+ GetMem(ATCos,131072*8);
+ For I:=0 To 511 Do For K:=0 To 255 Do
+  ATCos^[I*256+K]:=-Cos(Pi/256*(I+0.5+128)*(K+0.5))/32768.0;
+End;
+
+Function ATVlcGet(T: Integer): LongInt;
+Var Peek: LongInt; L: Integer;
+Begin
+ Peek:=ATGet(8); Dec(ATPos,8);
+ L:=ATVlc[T].Len[Peek];
+ If L=0 Then Begin ATVlcGet:=0; Exit; End;
+ Inc(ATPos,L); ATVlcGet:=ATVlc[T].Sym[Peek];
+End;
+
+Procedure ATReadMantissas(Selector,CodingFlag: LongInt; Var Mant: TATMant; Num: LongInt);
+Var I,Code,NB,Sym: LongInt;
+Begin
+ If Selector=1 Then Num:=Num Div 2;
+ If CodingFlag<>0 Then Begin
+  NB:=ATClcLen[Selector];
+  If Selector>1 Then Begin
+   For I:=0 To Num-1 Do Begin
+    If NB<>0 Then Code:=ATGetS(NB) Else Code:=0;
+    Mant[I]:=Code;
+   End;
+  End Else For I:=0 To Num-1 Do Begin
+   If NB<>0 Then Code:=ATGet(NB) Else Code:=0;
+   Mant[I*2]:=ATMantClc[Code Shr 2]; Mant[I*2+1]:=ATMantClc[Code And 3];
+  End;
+ End Else Begin
+  If Selector<>1 Then Begin
+   For I:=0 To Num-1 Do Mant[I]:=ATVlcGet(Selector-1);
+  End Else For I:=0 To Num-1 Do Begin
+   Sym:=ATVlcGet(0);
+   Mant[I*2]:=ATMantVlc[Sym*2]; Mant[I*2+1]:=ATMantVlc[Sym*2+1];
+  End;
+ End;
+End;
+
+Function ATDecodeSpectrum(Out: PSg): LongInt;
+Var
+ NumSub,Mode,I,J,First,Last,Size: LongInt; VlcIdx,SfIdx: Array[0..31] Of LongInt; Mant: TATMant; Scale: Single;
+Begin
+ NumSub:=ATGet(5); Mode:=ATGet(1);
+ For I:=0 To NumSub Do VlcIdx[I]:=ATGet(3);
+ For I:=0 To NumSub Do If VlcIdx[I]<>0 Then SfIdx[I]:=ATGet(6);
+ For I:=0 To NumSub Do Begin
+  First:=ATSubband[I]; Last:=ATSubband[I+1]; Size:=Last-First;
+  If VlcIdx[I]<>0 Then Begin
+   ATReadMantissas(VlcIdx[I],Mode,Mant,Size);
+   Scale:=ATSf[SfIdx[I]]*ATInvMax[VlcIdx[I]];
+   J:=0;
+   While First<Last Do Begin Out^[First]:=ATI2F(Mant[J])*Scale; Inc(First); Inc(J); End;
+  End Else For J:=First To Last-1 Do Out^[J]:=0;
+ End;
+ First:=ATSubband[NumSub+1];
+ For J:=First To 1023 Do Out^[J]:=0;
+ ATDecodeSpectrum:=NumSub;
+End;
+
+Function ATDecodeTonal(U: PATUnit; NumBands: LongInt): LongInt;
+Var
+ I,B,C,M,NbComp,Sel,Mode,Cnt,PerComp,Quant,Coded,CompsInBand,SfIdx,MaxCoded: LongInt;
+ Flags: Array[0..3] Of LongInt; Mant: TATMant; Scale: Single;
+Begin
+ Cnt:=0; NbComp:=ATGet(5);
+ If NbComp=0 Then Begin ATDecodeTonal:=0; Exit; End;
+ Sel:=ATGet(2);
+ If Sel=2 Then Begin ATDecodeTonal:=-1; Exit; End;
+ Mode:=Sel And 1;
+ For I:=0 To NbComp-1 Do Begin
+  For B:=0 To NumBands Do Flags[B]:=ATGet(1);
+  PerComp:=ATGet(3); Quant:=ATGet(3);
+  If Quant<=1 Then Begin ATDecodeTonal:=-1; Exit; End;
+  If Sel=3 Then Mode:=ATGet(1);
+  For B:=0 To (NumBands+1)*4-1 Do Begin
+   If Flags[B Shr 2]=0 Then Continue;
+   CompsInBand:=ATGet(3);
+   For C:=0 To CompsInBand-1 Do Begin
+    SfIdx:=ATGet(6);
+    If Cnt>=64 Then Begin ATDecodeTonal:=-1; Exit; End;
+    U^.Comp[Cnt].Pos:=B*64+ATGet(6);
+    MaxCoded:=1024-U^.Comp[Cnt].Pos; Coded:=PerComp+1; If MaxCoded<Coded Then Coded:=MaxCoded;
+    Scale:=ATSf[SfIdx]*ATInvMax[Quant];
+    ATReadMantissas(Quant,Mode,Mant,Coded);
+    U^.Comp[Cnt].Num:=Coded;
+    For M:=0 To Coded-1 Do U^.Comp[Cnt].Coef[M]:=ATI2F(Mant[M])*Scale;
+    Inc(Cnt);
+   End;
+  End;
+ End;
+ ATDecodeTonal:=Cnt;
+End;
+
+Function ATDecodeGain(U: PATUnit; G,NumBands: LongInt): Boolean;
+Var B,J: LongInt;
+Begin
+ ATDecodeGain:=False;
+ For B:=0 To NumBands Do Begin
+  U^.Gain[G,B].Num:=ATGet(3);
+  For J:=0 To U^.Gain[G,B].Num-1 Do Begin
+   U^.Gain[G,B].Lev[J]:=ATGet(4); U^.Gain[G,B].Loc[J]:=ATGet(5);
+   If (J>0) And (U^.Gain[G,B].Loc[J]<=U^.Gain[G,B].Loc[J-1]) Then Exit;
+  End;
+ End;
+ For B:=NumBands+1 To 3 Do U^.Gain[G,B].Num:=0;
+ ATDecodeGain:=True;
+End;
+
+Procedure ATImlt(U: PATUnit; Band,Odd: LongInt);
+Var Inp: Array[0..255] Of Single; I,K,N: LongInt; Acc: Double; T: Single;
+Begin
+ For I:=0 To 255 Do Inp[I]:=U^.Spec[Band*256+I];
+ If Odd<>0 Then For I:=0 To 127 Do Begin T:=Inp[I]; Inp[I]:=Inp[255-I]; Inp[255-I]:=T; End;
+ For N:=0 To 511 Do Begin
+  Acc:=0;
+  For K:=0 To 255 Do Acc:=Acc+Double(Inp[K])*ATCos^[N*256+K];
+  T:=Acc; U^.Imdct[N]:=T*ATWin[N];
+ End;
+End;
+
+Procedure ATGainComp(U: PATUnit; Band,GNow,GNext: LongInt; Outp: PSg);
+Var Lev,GcScale,Inc2,T: Single; I,Pos,Last,PO: LongInt; Now,Next: TATGain; InB: PSg;
+Begin
+ PO:=Band*256; Now:=U^.Gain[GNow,Band]; Next:=U^.Gain[GNext,Band]; InB:=PSg(@U^.Imdct);
+ If Next.Num<>0 Then GcScale:=ATG1[Next.Lev[0]] Else GcScale:=1.0;
+ If Now.Num=0 Then Begin
+  For Pos:=0 To 255 Do Begin T:=InB^[Pos]*GcScale; Outp^[PO+Pos]:=T+U^.Prev[PO+Pos]; End;
+ End Else Begin
+  Pos:=0;
+  For I:=0 To Now.Num-1 Do Begin
+   Last:=Now.Loc[I] Shl 3;
+   Lev:=ATG1[Now.Lev[I]];
+   If I+1<Now.Num Then Inc2:=ATG2[Now.Lev[I+1]-Now.Lev[I]+15] Else Inc2:=ATG2[4-Now.Lev[I]+15];
+   While Pos<Last Do Begin
+    T:=InB^[Pos]*GcScale; T:=T+U^.Prev[PO+Pos]; Outp^[PO+Pos]:=T*Lev; Inc(Pos);
+   End;
+   While Pos<Last+8 Do Begin
+    T:=InB^[Pos]*GcScale; T:=T+U^.Prev[PO+Pos]; Outp^[PO+Pos]:=T*Lev; Lev:=Lev*Inc2; Inc(Pos);
+   End;
+  End;
+  While Pos<256 Do Begin T:=InB^[Pos]*GcScale; Outp^[PO+Pos]:=T+U^.Prev[PO+Pos]; Inc(Pos); End;
+ End;
+ For I:=0 To 255 Do U^.Prev[PO+I]:=InB^[256+I];
+End;
+
+Function ATDecodeUnit(U: PATUnit; Outp: PSg; Chan,Mode: LongInt): Boolean;
+Var
+ Band,NumSub,LastTonal,NumBands,I,J,G1,G2: LongInt;
+Begin
+ ATDecodeUnit:=False;
+ G1:=U^.Switch; G2:=1-U^.Switch;
+ If (Mode=$12) And ((Chan And 1)=1) Then Begin
+  If ATGet(2)<>3 Then Exit;
+ End Else If ATGet(6)<>$28 Then Exit;
+ U^.BandsCoded:=ATGet(2);
+ If Not ATDecodeGain(U,G2,U^.BandsCoded) Then Exit;
+ U^.NumComp:=ATDecodeTonal(U,U^.BandsCoded);
+ If U^.NumComp<0 Then Exit;
+ NumSub:=ATDecodeSpectrum(PSg(@U^.Spec));
+ LastTonal:=-1;
+ For I:=0 To U^.NumComp-1 Do Begin
+  If U^.Comp[I].Pos+U^.Comp[I].Num>LastTonal Then LastTonal:=U^.Comp[I].Pos+U^.Comp[I].Num;
+  For J:=0 To U^.Comp[I].Num-1 Do U^.Spec[U^.Comp[I].Pos+J]:=U^.Spec[U^.Comp[I].Pos+J]+U^.Comp[I].Coef[J];
+ End;
+ NumBands:=(ATSubband[NumSub+1]-1) Shr 8;
+ If LastTonal>=0 Then If ((LastTonal+256) Shr 8)>NumBands Then NumBands:=(LastTonal+256) Shr 8;
+ For Band:=0 To 3 Do Begin
+  If Band<=NumBands Then ATImlt(U,Band,Band And 1) Else FillChar(U^.Imdct,SizeOf(U^.Imdct),0);
+  ATGainComp(U,Band,G1,G2,Outp);
+ End;
+ U^.Switch:=U^.Switch Xor 1;
+ ATDecodeUnit:=True;
+End;
+
+Function ATInterp(Old,New: Single; N: LongInt): Double;
+Var Diff: Single;
+Begin
+ Diff:=New-Old;
+ ATInterp:=Double(Old)+(N*0.125)*Double(Diff);
+End;
+
+Procedure ATReverseMatrix(Su1,Su2: PSg; Pair: Integer);
+Var
+ I,Band,N,S1,S2: LongInt; C1,C2,T: Single; D: Double; Mc1l,Mc1r,Mc2l,Mc2r: Single;
+Begin
+ Band:=0;
+ For I:=0 To 3 Do Begin
+  S1:=ATMPrev[Pair,I]; S2:=ATMNow[Pair,I]; N:=Band;
+  If S1<>S2 Then Begin
+   Mc1l:=ATMatrix[S1*2]; Mc1r:=ATMatrix[S1*2+1]; Mc2l:=ATMatrix[S2*2]; Mc2r:=ATMatrix[S2*2+1];
+   While N<Band+8 Do Begin
+    C1:=Su1^[N]; C2:=Su2^[N];
+    D:=Double(C1)*ATInterp(Mc1l,Mc2l,N-Band)+Double(C2)*ATInterp(Mc1r,Mc2r,N-Band);
+    C2:=D;
+    Su1^[N]:=C2; D:=Double(C1)*2.0-Double(C2); Su2^[N]:=D;
+    Inc(N);
+   End;
+  End;
+  Case S2 Of
+   0: While N<Band+256 Do Begin
+       C1:=Su1^[N]; C2:=Su2^[N];
+       Su1^[N]:=Double(C2)*2.0; T:=C1-C2; Su2^[N]:=Double(T)*2.0; Inc(N);
+      End;
+   1: While N<Band+256 Do Begin
+       C1:=Su1^[N]; C2:=Su2^[N];
+       T:=C1+C2; Su1^[N]:=Double(T)*2.0; Su2^[N]:=Double(C2)*(-2.0); Inc(N);
+      End;
+   Else While N<Band+256 Do Begin
+       C1:=Su1^[N]; C2:=Su2^[N];
+       T:=C1+C2; Su1^[N]:=T; T:=C1-C2; Su2^[N]:=T; Inc(N);
+      End;
+  End;
+  Inc(Band,256);
+ End;
+End;
+
+Procedure ATWeights(Index,Flag: LongInt; Var W0,W1: Single);
+Var T: Single;
+Begin
+ If Index=7 Then Begin W0:=1.0; W1:=1.0; End Else Begin
+  W0:=(Index And 7)/7.0; W1:=Sqrt(2.0-Double(W0)*W0);
+  If Flag<>0 Then Begin T:=W0; W0:=W1; W1:=T; End;
+ End;
+End;
+
+Procedure ATChanWeight(Su1,Su2: PSg; Pair: Integer);
+Var Band,N: LongInt; Wa0,Wa1,Wb0,Wb1: Single; D: Double; P: Array[0..5] Of LongInt;
+Begin
+ For N:=0 To 5 Do P[N]:=ATWDelay[Pair,N];
+ If (P[1]<>7) Or (P[3]<>7) Then Begin
+  ATWeights(P[1],P[0],Wa0,Wa1); ATWeights(P[3],P[2],Wb0,Wb1);
+  Band:=256;
+  While Band<1024 Do Begin
+   N:=Band;
+   While N<Band+8 Do Begin
+    D:=Double(Su1^[N])*ATInterp(Wa0,Wa1,N-Band); Su1^[N]:=D;
+    D:=Double(Su2^[N])*ATInterp(Wb0,Wb1,N-Band); Su2^[N]:=D;
+    Inc(N);
+   End;
+   While N<Band+256 Do Begin
+    Su1^[N]:=Su1^[N]*Wb0; Su2^[N]:=Su2^[N]*Wb1; Inc(N);
+   End;
+   Inc(Band,256);
+  End;
+ End;
+End;
+
+Procedure ATIqmf(Lo: PSg; LoOff: LongInt; Hi: PSg; HiOff: LongInt; NIn: LongInt; Outp: PSg; OutOff: LongInt; Delay: PSg);
+Var I,J,P1: LongInt; S1,S2,T: Single;
+Begin
+ Move(Delay^,ATTemp,46*4);
+ I:=0;
+ While I<NIn Do Begin
+  ATTemp[46+2*I]:=Lo^[LoOff+I]+Hi^[HiOff+I];
+  ATTemp[46+2*I+1]:=Lo^[LoOff+I]-Hi^[HiOff+I];
+  ATTemp[46+2*I+2]:=Lo^[LoOff+I+1]+Hi^[HiOff+I+1];
+  ATTemp[46+2*I+3]:=Lo^[LoOff+I+1]-Hi^[HiOff+I+1];
+  Inc(I,2);
+ End;
+ P1:=0;
+ For J:=NIn Downto 1 Do Begin
+  S1:=0; S2:=0; I:=0;
+  While I<48 Do Begin
+   T:=ATTemp[P1+I]*ATQmf[I]; S1:=S1+T;
+   T:=ATTemp[P1+I+1]*ATQmf[I+1]; S2:=S2+T;
+   Inc(I,2);
+  End;
+  Outp^[OutOff]:=S2; Outp^[OutOff+1]:=S1;
+  Inc(P1,2); Inc(OutOff,2);
+ End;
+ Move(ATTemp[NIn*2],Delay^,46*4);
+End;
+
+Function ATDecodeBlock(Data: PEABuffer): Boolean;
+Var
+ Chn,Pair,I,JA,P: LongInt; Rev: PEABuffer; Ok: Boolean; U: PATUnit;
+Begin
+ ATDecodeBlock:=False;
+ If ATMode=$12 Then Begin
+  JA:=(ATAlign Div ATCh)*2;
+  GetMem(Rev,JA+16);
+  Chn:=0;
+  While Chn<ATCh Do Begin
+   Pair:=Chn Div 2;
+   ATBuf:=PEABuffer(@Data^[Pair*JA]); ATLen:=JA; ATPos:=0;
+   If Not ATDecodeUnit(ATUnits[Chn],ATOut[Chn],Chn,ATMode) Then Begin FreeMem(Rev,JA+16); Exit; End;
+   FillChar(Rev^,JA+16,0);
+   For I:=0 To JA-1 Do Rev^[I]:=Data^[Pair*JA+JA-1-I];
+   P:=0; I:=4;
+   While Rev^[P]=$F8 Do Begin
+    If I>=JA Then Begin FreeMem(Rev,JA+16); Exit; End;
+    Inc(I); Inc(P);
+   End;
+   ATBuf:=PEABuffer(@Rev^[P]); ATLen:=JA-P; ATPos:=0;
+   For I:=0 To 3 Do ATWDelay[Pair,I]:=ATWDelay[Pair,I+2];
+   ATWDelay[Pair,4]:=ATGet(1); ATWDelay[Pair,5]:=ATGet(3);
+   For I:=0 To 3 Do Begin
+    ATMPrev[Pair,I]:=ATMNow[Pair,I]; ATMNow[Pair,I]:=ATMNext[Pair,I]; ATMNext[Pair,I]:=ATGet(2);
+   End;
+   If Not ATDecodeUnit(ATUnits[Chn+1],ATOut[Chn+1],Chn+1,ATMode) Then Begin FreeMem(Rev,JA+16); Exit; End;
+   ATReverseMatrix(ATOut[Chn],ATOut[Chn+1],Pair);
+   ATChanWeight(ATOut[Chn],ATOut[Chn+1],Pair);
+   Inc(Chn,2);
+  End;
+  FreeMem(Rev,JA+16);
+ End Else Begin
+  For Chn:=0 To ATCh-1 Do Begin
+   ATBuf:=PEABuffer(@Data^[Chn*(ATAlign Div ATCh)]); ATLen:=ATAlign Div ATCh; ATPos:=0;
+   If Not ATDecodeUnit(ATUnits[Chn],ATOut[Chn],Chn,ATMode) Then Exit;
+  End;
+ End;
+ For Chn:=0 To ATCh-1 Do Begin
+  U:=ATUnits[Chn];
+  ATIqmf(ATOut[Chn],0,ATOut[Chn],256,256,ATOut[Chn],0,PSg(@U^.D1));
+  ATIqmf(ATOut[Chn],768,ATOut[Chn],512,256,ATOut[Chn],512,PSg(@U^.D2));
+  ATIqmf(ATOut[Chn],0,ATOut[Chn],512,512,ATOut[Chn],0,PSg(@U^.D3));
+ End;
+ ATDecodeBlock:=True;
+End;
+
+{ Decode un fichier ATRAC3 (WAV tag 0x270 ou OMA non chiffre) en WAV PCM16. }
+Procedure DecodeATRAC3(Const Source,Target: String);
+Var
+ H: Array[0..127] Of Byte; Limit,Pos,Size,DataPos,DataSize,Rate: Int64; Tag,Chn,Align,CbSize,Count,I,J,FF: LongInt;
+ ModeFlag,Blocks,Blk,Left: LongInt; IsOma: Boolean; Fmt: Boolean; Params,Tag3: Int64; Blkbuf: PEABuffer; Sample: Double; V: LongInt;
+Begin
+ OpenRead(Source); Limit:=InputSize; Pos:=0; DataPos:=-1; DataSize:=0; Fmt:=False; IsOma:=False;
+ If Limit<12 Then Fail('atrac3: fichier trop court.');
+ ReadAt(0,H,12);
+ If (H[0]=82) And (H[1]=73) And (H[2]=70) And (H[3]=70) And (H[8]=87) And (H[9]=65) Then Begin
+  Pos:=12; Count:=0;
+  While (Limit-Pos>=8) And (Count<256) Do Begin
+   ReadAt(Pos,H,8); Inc(Pos,8); Inc(Count);
+   Size:=Int64(H[4])+Int64(H[5])*256+Int64(H[6])*65536+Int64(H[7])*16777216;
+   If (H[0]=102) And (H[1]=109) And (H[2]=116) And (H[3]=32) Then Begin
+    If (Size<16) Or (Limit-Pos<Size) Then Fail('atrac3: bloc fmt incorrect.');
+    If Size>120 Then Fail('atrac3: bloc fmt trop long.');
+    ReadAt(Pos,H,Size);
+    Tag:=H[0]+H[1]*256; Chn:=H[2]+H[3]*256; Rate:=Int64(H[4])+H[5]*256+Int64(H[6])*65536+Int64(H[7])*16777216;
+    Align:=H[12]+H[13]*256;
+    If Tag<>$270 Then Fail('atrac3: WAV de type 0x270 requis.');
+    If Size<18 Then Fail('atrac3: donnees supplementaires ATRAC3 absentes.');
+    CbSize:=H[16]+H[17]*256;
+    If (CbSize<>14) Or (Size<32) Then Fail('atrac3: extradata de 14 octets requis.');
+    ModeFlag:=H[16+2+6]+H[16+2+7]*256;
+    FF:=H[16+2+10]+H[16+2+11]*256;
+    Fmt:=True;
+   End Else If (H[0]=100) And (H[1]=97) And (H[2]=116) And (H[3]=97) Then Begin
+    DataPos:=Pos; DataSize:=Size; If DataPos+DataSize>Limit Then DataSize:=Limit-DataPos;
+    Break;
+   End;
+   If Size>Limit-Pos Then Break;
+   Inc(Pos,Size); If Odd(Size) Then Inc(Pos);
+  End;
+  If Not Fmt Or (DataPos<0) Then Fail('atrac3: blocs fmt/data requis.');
+  If ModeFlag<>0 Then ModeFlag:=$12 Else ModeFlag:=2;
+  If (Align<>96*Chn*FF) And (Align<>152*Chn*FF) And (Align<>192*Chn*FF) Then Fail('atrac3: configuration bloc/canaux incorrecte.');
+ End Else Begin
+  { OMA: etiquette ID3v2 "ea3" puis en-tete EA3 de 96 octets }
+  Pos:=0;
+  If (H[0]=101) And (H[1]=97) And (H[2]=51) Then Begin
+   ReadAt(0,H,10);
+   Pos:=10+(Int64(H[6] And 127) Shl 21)+(Int64(H[7] And 127) Shl 14)+(Int64(H[8] And 127) Shl 7)+(H[9] And 127);
+   If (H[5] And 16)<>0 Then Inc(Pos,10);
+  End;
+  If Limit-Pos<96 Then Fail('atrac3: en-tete EA3 tronque.');
+  ReadAt(Pos,H,96);
+  If (H[0]<>69) Or (H[1]<>65) Or (H[2]<>51) Or (H[4]<>0) Or (H[5]<>96) Then Fail('atrac3: signature EA3 ou RIFF/WAVE requise.');
+  If ((H[6]*256+H[7])<>$FFFF) And ((H[6]*256+H[7])<>$FF80) Then Fail('atrac3: fichier OMA chiffre non supporte.');
+  If H[32]<>0 Then Fail('atrac3: seul le codec ATRAC3 est supporte dans OMA.');
+  Params:=Int64(H[33])*65536+H[34]*256+H[35];
+  I:=(Params Shr 13) And 7;
+  Case I Of 0: Rate:=32000; 1: Rate:=44100; 2: Rate:=48000; 3: Rate:=88200; 4: Rate:=96000; Else Rate:=0; End;
+  If Rate=0 Then Fail('atrac3: frequence OMA non supportee.');
+  Align:=(Params And $3FF)*8; Chn:=2;
+  If ((Params Shr 17) And 1)<>0 Then ModeFlag:=$12 Else ModeFlag:=2;
+  FF:=1; IsOma:=True;
+  DataPos:=Pos+96; DataSize:=Limit-DataPos;
+  If (Align<>96*Chn*FF) And (Align<>152*Chn*FF) And (Align<>192*Chn*FF) Then Fail('atrac3: taille de trame OMA incorrecte.');
+ End;
+ If (Chn<1) Or (Chn>2) Then Fail('atrac3: mono ou stereo requis (sortie WAV de ce programme limitee a 2 canaux).');
+ If (ModeFlag=$12) And Odd(Chn) Then Fail('atrac3: stereo conjoint avec nombre de canaux pair requis.');
+ If (Align>4096) Or (Align<=0) Then Fail('atrac3: taille de bloc incorrecte.');
+ If (Rate<8000) Or (Rate>192000) Then Fail('atrac3: frequence incorrecte.');
+ ATCh:=Chn; ATMode:=ModeFlag; ATAlign:=Align;
+ ATInitTables;
+ For I:=0 To Chn-1 Do Begin
+  GetMem(ATUnits[I],SizeOf(TATUnit)); FillChar(ATUnits[I]^,SizeOf(TATUnit),0);
+  GetMem(ATOut[I],SizeOf(TSg)); FillChar(ATOut[I]^,SizeOf(TSg),0);
+ End;
+ For I:=0 To 3 Do Begin
+  ATWDelay[I,0]:=0; ATWDelay[I,1]:=7; ATWDelay[I,2]:=0; ATWDelay[I,3]:=7; ATWDelay[I,4]:=0; ATWDelay[I,5]:=7;
+  For J:=0 To 3 Do Begin ATMPrev[I,J]:=3; ATMNow[I,J]:=3; ATMNext[I,J]:=3; End;
+ End;
+ EAReset; OpenWrite(Target); ADPCMWaveHeader(Rate,Chn,0);
+ GetMem(Blkbuf,Align+16);
+ Blocks:=DataSize Div Align;
+ For Blk:=0 To Blocks-1 Do Begin
+  FillChar(Blkbuf^,Align+16,0);
+  Pos:=DataPos+Int64(Blk)*Align; Count:=0;
+  While Count<Align Do Begin
+   If Align-Count>60000 Then Left:=60000 Else Left:=Align-Count;
+   ReadAt(Pos+Count,Blkbuf^[Count],Left); Inc(Count,Left);
+  End;
+  If Not ATDecodeBlock(Blkbuf) Then Continue;
+  For I:=0 To 1023 Do For J:=0 To Chn-1 Do Begin
+   Sample:=Double(ATOut[J]^[I])*32768.0;
+   If (Sample>=2147483647.0) Or (Sample<=-2147483648.0) Or (Sample<>Sample) Then V:=-32768 Else V:=Round(Sample);
+   If V>32767 Then V:=32767 Else If V<-32768 Then V:=-32768;
+   EAPut(V);
+  End;
+ End;
+ FreeMem(Blkbuf,Align+16); EAFlush;
+ If EAWritten=0 Then Fail('atrac3: aucune donnee audio decodee.');
+ ADPCMPatchHeader(Rate,Chn,EAWritten);
+ For I:=0 To Chn-1 Do Begin FreeMem(ATUnits[I],SizeOf(TATUnit)); FreeMem(ATOut[I],SizeOf(TSg)); End;
+ FreeMem(ATCos,131072*8);
+ CloseRead; CloseWrite;
+End;
+
 Procedure NormalizeWave(Const Source,Target: String; ForMP3: Boolean);
 Type
  TBytes = Array[0..4095] Of Byte;
@@ -16742,6 +17265,7 @@ Begin
  WriteLn(' D  xa              Maxis XA (adpcm_ea_maxis_xa)');
  WriteLn(' D  amv             AMV (audio adpcm_ima_amv; video amv vers Y4M)');
  WriteLn(' D  ape             Monkey''s Audio (versions 3.93-3.99, 8/16 bits) vers WAV/MP3/...');
+ WriteLn(' D  oma             Sony OpenMG (ATRAC3 non chiffre); WAV 0x270 (ATRAC3) vers WAV/MP3/...');
  WriteLn(' DE avi (asv1/asv2) AVI ASUS V1/V2: decodage vers Y4M, encodage Y4M -c:v asv1|asv2');
  WriteLn(' D  avs             Argonaut Creature Shock AVS (video vers Y4M/PNG)');
  WriteLn(' D  iss             Funcom ISS (adpcm_ima_iss)');
@@ -17027,6 +17551,7 @@ BEGIN
    WriteLn('D V    4xm             4X Movie');
    WriteLn('D V    amv             AMV Video');
    WriteLn('D A    ape             Monkey''s Audio');
+   WriteLn('D A    atrac3          ATRAC3 (Adaptive TRansform Acoustic Coding 3)');
    WriteLn('DEV    asv1            ASUS V1');
    WriteLn('DEV    asv2            ASUS V2');
    WriteLn('D V    avs             AVS (Audio Video Standard) video');
@@ -17532,6 +18057,7 @@ BEGIN
    If InputFormat='amv' Then DecodeAMV(InputPath,Temps[0]) Else
    If InputFormat='iss' Then DecodeISS(InputPath,Temps[0]) Else
    If InputFormat='ape' Then DecodeAPE(InputPath,Temps[0]) Else
+   If InputFormat='oma' Then DecodeATRAC3(InputPath,Temps[0]) Else
    If (InputFormat='aiff') And IsAIFFIma4(InputPath) Then DecodeAIFFIma4(InputPath,Temps[0]) Else
    If InputFormat='aiff' Then DecodeAIFF(InputPath,Temps[0]) Else
    If InputFormat='voc' Then DecodeVOC(InputPath,Temps[0]) Else
@@ -17540,6 +18066,8 @@ BEGIN
    Intermediate:=Temps[0];
   End Else If IsWaveCT(InputPath) Then Begin
    Temps[0]:=NewTemporary; DecodeWaveCT(InputPath,Temps[0]); Intermediate:=Temps[0];
+  End Else If WaveFormatTag(InputPath)=$270 Then Begin
+   Temps[0]:=NewTemporary; DecodeATRAC3(InputPath,Temps[0]); Intermediate:=Temps[0];
   End Else If (WaveFormatTag(InputPath)=$61) Or (WaveFormatTag(InputPath)=$62) Or
   (WaveFormatTag(InputPath)=$11) Or (WaveFormatTag(InputPath)=$02) Or (WaveFormatTag(InputPath)=$20) Then Begin
    Temps[0]:=NewTemporary; DecodeWaveBlocks(InputPath,Temps[0]); Intermediate:=Temps[0];
