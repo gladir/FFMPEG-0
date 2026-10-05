@@ -3490,6 +3490,7 @@ Var
  HLSListOpen,AllStreams,NoVideo,NoAudio: Boolean;
  VideoCodec: String;
  AspectNum,AspectDen: LongInt;
+ AsvTag: String[4];
  HasAlbum,FourMV,HasVideoBitrate,HasBFrames,HasVideoTolerance,HasBQuant,HasVideoBuffer,HasComment: Boolean;
  BFrames:Integer;
  VideoBitrate,VideoTolerance,VideoBuffer: LongInt;
@@ -13799,6 +13800,573 @@ Begin
  CloseRead; If Not PNGMode Then CloseWrite;
 End;
 
+{ ASUS V1/V2 (video): decodeur et encodeur adaptes de FFmpeg libavcodec/asv.c, asvdec.c,
+  asvenc.c et jfdctint_template.c (LGPL-2.1-or-later); conteneur AVI. }
+Const
+ ASVScan: Array[0..63] Of Byte=(
+  $00,$08,$01,$09,$10,$18,$11,$19,$02,$0A,$03,$0B,$12,$1A,$13,$1B,
+  $04,$0C,$05,$0D,$20,$28,$21,$29,$06,$0E,$07,$0F,$14,$1C,$15,$1D,
+  $22,$2A,$23,$2B,$30,$38,$31,$39,$16,$1E,$17,$1F,$24,$2C,$25,$2D,
+  $32,$3A,$33,$3B,$26,$2E,$27,$2F,$34,$3C,$35,$3D,$36,$3E,$37,$3F);
+ ASVCcp: Array[0..16,0..1] Of Byte=((2,2),(7,5),(11,5),(3,5),(13,5),(5,5),(9,5),(1,5),(14,5),(6,5),(10,5),(2,5),(12,5),(4,5),(8,5),(3,2),(15,5));
+ ASVLevel: Array[0..6,0..1] Of Byte=((3,4),(3,3),(3,2),(0,3),(2,2),(2,3),(2,4));
+ ASVDcCcp: Array[0..7,0..1] Of Byte=((2,2),(11,4),(15,4),(3,4),(5,3),(7,4),(1,3),(0,2));
+ ASVAcCcp: Array[0..15,0..1] Of Byte=((0,2),(55,6),(5,4),(23,6),(2,3),(39,6),(15,6),(7,6),(6,3),(47,6),(1,4),(31,5),(9,4),(13,4),(11,4),(3,4));
+ ASV2Level: Array[0..62,0..1] Of Word=(
+  ($3F0,10),($3D0,10),($3B0,10),($390,10),($370,10),($350,10),($330,10),($310,10),($2F0,10),($2D0,10),
+  ($2B0,10),($290,10),($270,10),($250,10),($230,10),($210,10),
+  ($0F8,8),($0E8,8),($0D8,8),($0C8,8),($0B8,8),($0A8,8),($098,8),($088,8),
+  ($03C,6),($034,6),($02C,6),($024,6),($00E,4),($00A,4),($003,2),($000,5),($001,2),($002,4),($006,4),
+  ($004,6),($00C,6),($014,6),($01C,6),
+  ($008,8),($018,8),($028,8),($038,8),($048,8),($058,8),($068,8),($078,8),
+  ($010,10),($030,10),($050,10),($070,10),($090,10),($0B0,10),($0D0,10),($0F0,10),($110,10),($130,10),
+  ($150,10),($170,10),($190,10),($1B0,10),($1D0,10),($1F0,10));
+ ASVMat: Array[0..63] Of Byte=(
+  8,16,19,22,26,27,29,34,16,16,22,24,27,29,34,37,19,22,26,27,29,34,34,38,22,22,26,27,29,34,37,40,
+  22,26,27,29,32,35,40,48,26,27,29,32,35,40,48,58,26,27,29,34,38,46,56,69,27,29,35,38,46,56,69,83);
+Var
+ ASVBuf: PEABuffer; ASVSize,ASVBit: LongInt; ASVLE: Boolean;
+ ASVIntra: Array[0..63] Of LongInt;
+
+Function ASVGetBit: Integer;
+Var P,W,Bb: LongInt;
+Begin
+ P:=ASVBit; Inc(ASVBit);
+ If ASVLE Then Begin
+  ASVGetBit:=(EAByte(ASVBuf,ASVSize,P Shr 3) Shr (P And 7)) And 1;
+ End Else Begin
+  W:=P Shr 5; Bb:=(P Shr 3) And 3;
+  ASVGetBit:=(EAByte(ASVBuf,ASVSize,W*4+(3-Bb)) Shr (7-(P And 7))) And 1;
+ End;
+End;
+
+Function ASVBits(N: Integer): LongInt;
+Var V: LongInt; I: Integer;
+Begin
+ V:=0;
+ If ASVLE Then Begin For I:=0 To N-1 Do V:=V Or (ASVGetBit Shl I); End
+ Else For I:=1 To N Do V:=V*2+ASVGetBit;
+ ASVBits:=V;
+End;
+
+{ Symbole VLC (indice dans la table). Tb: 0 ccp, 1 level1, 2 dc_ccp, 3 ac_ccp, 4 level2. }
+Function ASVVlc(Tb: Integer): Integer;
+Var
+ L,I,N,V,Save: LongInt; Code,Len: Integer; Found: Boolean;
+Begin
+ Case Tb Of 0: N:=17; 1: N:=7; 2: N:=8; 3: N:=16; Else N:=63; End;
+ Save:=ASVBit; V:=0;
+ For L:=1 To 10 Do Begin
+  If ASVLE Then V:=V Or (ASVGetBit Shl (L-1)) Else V:=V*2+ASVGetBit;
+  For I:=0 To N-1 Do Begin
+   Case Tb Of
+    0: Begin Code:=ASVCcp[I,0]; Len:=ASVCcp[I,1]; End;
+    1: Begin Code:=ASVLevel[I,0]; Len:=ASVLevel[I,1]; End;
+    2: Begin Code:=ASVDcCcp[I,0]; Len:=ASVDcCcp[I,1]; End;
+    3: Begin Code:=ASVAcCcp[I,0]; Len:=ASVAcCcp[I,1]; End;
+    Else Begin Code:=ASV2Level[I,0]; Len:=ASV2Level[I,1]; End;
+   End;
+   If (Len=L) And (Code=V) Then Begin ASVVlc:=I; Exit; End;
+  End;
+ End;
+ ASVBit:=Save; ASVVlc:=-1;
+End;
+
+Function ASVLevel1: LongInt;
+Var C,V: LongInt;
+Begin
+ C:=ASVVlc(1);
+ If C=3 Then Begin V:=ASVBits(8); If V>=128 Then Dec(V,256); ASVLevel1:=V; End Else ASVLevel1:=C-3;
+End;
+
+Function ASVLevel2: LongInt;
+Var C,V: LongInt;
+Begin
+ C:=ASVVlc(4);
+ If C=31 Then Begin V:=ASVBits(8); If V>=128 Then Dec(V,256); ASVLevel2:=V; End Else ASVLevel2:=C-31;
+End;
+
+Function ASVDecodeBlock(Var Blk: TAMVBlock; V2: Boolean): Boolean;
+Var
+ I,Ccp,Count,K: Integer;
+Begin
+ ASVDecodeBlock:=False; FillChar(Blk,SizeOf(Blk),0);
+ If Not V2 Then Begin
+  Blk[0]:=8*ASVBits(8);
+  For I:=0 To 10 Do Begin
+   Ccp:=ASVVlc(0);
+   If Ccp<>0 Then Begin
+    If Ccp=16 Then Break;
+    If (Ccp<0) Or (I>=10) Then Exit;
+    For K:=0 To 3 Do If (Ccp And (8 Shr K))<>0 Then
+     Blk[ASVScan[4*I+K]]:=ADPCMSar(ASVLevel1*ASVIntra[4*I+K],4);
+   End;
+  End;
+ End Else Begin
+  Count:=ASVBits(4); Blk[0]:=8*ASVBits(8);
+  Ccp:=ASVVlc(2);
+  If Ccp<0 Then Exit;
+  If Ccp<>0 Then
+   For K:=1 To 3 Do If (Ccp And (8 Shr K))<>0 Then
+    Blk[ASVScan[K]]:=ADPCMSar(ASVLevel2*ASVIntra[K],4);
+  For I:=1 To Count Do Begin
+   Ccp:=ASVVlc(3);
+   If Ccp<0 Then Exit;
+   If Ccp<>0 Then
+    For K:=0 To 3 Do If (Ccp And (8 Shr K))<>0 Then
+     Blk[ASVScan[4*I+K]]:=ADPCMSar(ASVLevel2*ASVIntra[4*I+K],4);
+  End;
+ End;
+ ASVDecodeBlock:=True;
+End;
+
+Procedure ASVInitMatrix(InvQ: LongInt; V2: Boolean);
+Var I,Scale: LongInt;
+Begin
+ If V2 Then Scale:=2 Else Scale:=1;
+ If InvQ=0 Then Begin If V2 Then InvQ:=10 Else InvQ:=6; End;
+ For I:=0 To 63 Do ASVIntra[I]:=64*Scale*ASVMat[ASVScan[I]] Div InvQ;
+End;
+
+{ Decodage d'une image: Y,U,V = plans remplis (largeur Mw*16 / Mw*8). }
+Function ASVDecodeFrame(P: PEABuffer; Size,W,H: LongInt; V2: Boolean; Y,U,V: PEABuffer): Boolean;
+Var
+ Mw,Mh,Mw2,Mh2,MX,MY,B: LongInt; Blk: Array[0..5] Of TAMVBlock;
+Function DoMB(X,Yy: LongInt): Boolean;
+Var K: Integer;
+Begin
+ DoMB:=False;
+ For K:=0 To 5 Do If Not ASVDecodeBlock(Blk[K],V2) Then Exit;
+ AVIdctPut(Blk[0],@Y^[(Yy*16)*Mw*16+X*16],Mw*16);
+ AVIdctPut(Blk[1],@Y^[(Yy*16)*Mw*16+X*16+8],Mw*16);
+ AVIdctPut(Blk[2],@Y^[(Yy*16+8)*Mw*16+X*16],Mw*16);
+ AVIdctPut(Blk[3],@Y^[(Yy*16+8)*Mw*16+X*16+8],Mw*16);
+ AVIdctPut(Blk[4],@U^[(Yy*8)*Mw*8+X*8],Mw*8);
+ AVIdctPut(Blk[5],@V^[(Yy*8)*Mw*8+X*8],Mw*8);
+ DoMB:=True;
+End;
+Begin
+ ASVDecodeFrame:=False;
+ Mw:=(W+15) Div 16; Mh:=(H+15) Div 16; Mw2:=W Div 16; Mh2:=H Div 16;
+ If Size*8<Mh*Mw*13 Then Exit;
+ ASVBuf:=P; ASVSize:=Size; ASVBit:=0; ASVLE:=V2;
+ For MY:=0 To Mh2-1 Do For MX:=0 To Mw2-1 Do If Not DoMB(MX,MY) Then Exit;
+ If Mw2<>Mw Then For MY:=0 To Mh2-1 Do If Not DoMB(Mw2,MY) Then Exit;
+ If Mh2<>Mh Then For MX:=0 To Mw-1 Do If Not DoMB(MX,Mh2) Then Exit;
+ ASVDecodeFrame:=True;
+End;
+
+{ Lecture AVI minimale: renvoie les parametres du flux video et les blocs. }
+Function AVIVideoFourCC(Const Name: String): String;
+Var
+ H: Array[0..15] Of Byte; Limit,Pos,Size,Streams: LongInt; Count: Integer; Tag: String[4];
+ Found: Boolean;
+Function T4: String;
+Var S4: String[4]; J: Integer;
+Begin S4:=''; For J:=0 To 3 Do S4:=S4+Chr(H[J]); T4:=S4; End;
+Begin
+ AVIVideoFourCC:=''; OpenRead(Name); Limit:=InputSize; Found:=False;
+ If Limit>=12 Then Begin
+  ReadAt(0,H,12);
+  If (T4='RIFF') And (H[8]=65) And (H[9]=86) And (H[10]=73) And (H[11]=32) Then Begin
+   Pos:=12; Count:=0;
+   While (Limit-Pos>=8) And (Count<200) And Not Found Do Begin
+    ReadAt(Pos,H,8); Tag:=T4; Inc(Count);
+    Size:=LongInt(H[4])+LongInt(H[5])*256+LongInt(H[6])*65536+LongInt(H[7])*16777216;
+    If H[7]>=128 Then Break;
+    If Tag='LIST' Then Begin
+     ReadAt(Pos+8,H,4);
+     If (H[0]=109) And (H[1]=111) And (H[2]=118) And (H[3]=105) Then Break;
+     Inc(Pos,12);
+    End Else Begin
+     If (Tag='strh') And (Size>=8) And (Limit-Pos>=24) Then Begin
+      ReadAt(Pos+8,H,8);
+      If (H[0]=118) And (H[1]=105) And (H[2]=100) And (H[3]=115) Then Begin
+       AVIVideoFourCC:=Chr(H[4])+Chr(H[5])+Chr(H[6])+Chr(H[7]); Found:=True;
+      End;
+     End;
+     Inc(Pos,8+Size+(Size And 1));
+    End;
+   End;
+  End;
+ End;
+ Streams:=0; CloseRead;
+End;
+
+Procedure DecodeASVAVI(Const Source,Target: String);
+Var
+ H: Array[0..63] Of Byte;
+ Limit,Pos,Size,W,Hh,Rate,Scale,InvQ,Frames,I,Take,Row,Mw,Mh,CW,CH: LongInt;
+ Y,U,V,Buf: PEABuffer; V2,InMovie,Opened,HaveStrf: Boolean; Tag: String[4]; Hdr,S: String;
+ Vids: Boolean; Count: Integer; RN,RD: LongInt;
+Function T4: String;
+Var S4: String[4]; J: Integer;
+Begin S4:=''; For J:=0 To 3 Do S4:=S4+Chr(H[J]); T4:=S4; End;
+Begin
+ OpenRead(Source); Limit:=InputSize; ReadAt(0,H,12);
+ Pos:=12; Rate:=0; Scale:=1; InvQ:=0; W:=0; Hh:=0; InMovie:=False; Vids:=False; V2:=False; HaveStrf:=False; Count:=0;
+ While (Limit-Pos>=8) And Not InMovie And (Count<500) Do Begin
+  ReadAt(Pos,H,8); Tag:=T4; Inc(Count);
+  Size:=LongInt(H[4])+LongInt(H[5])*256+LongInt(H[6])*65536+LongInt(H[7])*16777216;
+  If H[7]>=128 Then Fail('asv: taille de bloc excessive.');
+  If Tag='LIST' Then Begin
+   ReadAt(Pos+8,H,4);
+   If (H[0]=109) And (H[1]=111) And (H[2]=118) And (H[3]=105) Then InMovie:=True;
+   Inc(Pos,12);
+  End Else Begin
+   If (Tag='strh') And (Size>=28) And (Limit-Pos>=36) And Not HaveStrf Then Begin
+    ReadAt(Pos+8,H,28);
+    Vids:=(H[0]=118) And (H[1]=105) And (H[2]=100) And (H[3]=115);
+    V2:=(H[4]=65) And (H[5]=83) And (H[6]=86) And (H[7]=50);
+    Scale:=LongInt(H[20])+LongInt(H[21])*256+LongInt(H[22])*65536;
+    Rate:=LongInt(H[24])+LongInt(H[25])*256+LongInt(H[26])*65536;
+   End Else If (Tag='strf') And Vids And Not HaveStrf And (Size>=44) And (Limit-Pos>=8+Size) Then Begin
+    ReadAt(Pos+8,H,44);
+    W:=LongInt(H[4])+LongInt(H[5])*256+LongInt(H[6])*65536; Hh:=LongInt(H[8])+LongInt(H[9])*256+LongInt(H[10])*65536;
+    InvQ:=H[40]; HaveStrf:=True;
+   End;
+   Inc(Pos,8+Size+(Size And 1));
+  End;
+ End;
+ If Not InMovie Or Not HaveStrf Then Fail('asv: flux video AVI introuvable.');
+ If (W<16) Or (W>4096) Or (Hh<16) Or (Hh>4096) Then Fail('asv: dimensions incorrectes.');
+ If (Rate<=0) Or (Scale<=0) Then Begin Rate:=25; Scale:=1; End;
+ ASVInitMatrix(InvQ,V2);
+ Mw:=(W+15) Div 16; Mh:=(Hh+15) Div 16; CW:=(W+1) Div 2; CH:=(Hh+1) Div 2;
+ GetMem(Y,Mw*16*Mh*16); GetMem(U,Mw*8*Mh*8); GetMem(V,Mw*8*Mh*8);
+ FillChar(Y^,Mw*16*Mh*16,0); FillChar(U^,Mw*8*Mh*8,0); FillChar(V^,Mw*8*Mh*8,0);
+ I:=Rate; Take:=Scale; While Take<>0 Do Begin Row:=I Mod Take; I:=Take; Take:=Row; End;
+ RN:=Rate Div I; RD:=Scale Div I; Opened:=False; Frames:=0;
+ While Limit-Pos>=8 Do Begin
+  ReadAt(Pos,H,8); Tag:=T4;
+  If H[7]>=128 Then Break;
+  Size:=LongInt(H[4])+LongInt(H[5])*256+LongInt(H[6])*65536+LongInt(H[7])*16777216;
+  If Tag='LIST' Then Begin Inc(Pos,12); Continue; End;
+  If Size>Limit-Pos-8 Then Size:=Limit-Pos-8;
+  If (H[0]=48) And (H[1]=48) And ((H[2]=100) Or (H[2]=119)) And ((H[3]=99) Or (H[3]=98)) And (Size>0) Then Begin
+   GetMem(Buf,Size); I:=0;
+   While I<Size Do Begin
+    If Size-I>16384 Then Take:=16384 Else Take:=Size-I;
+    ReadAt(Pos+8+I,Buf^[I],Take); Inc(I,Take);
+   End;
+   If ASVDecodeFrame(Buf,Size,W,Hh,V2,Y,U,V) Then Begin
+    If Not Opened Then Begin
+     OpenWrite(Target); Opened:=True;
+     Str(W,S); Hdr:='YUV4MPEG2 W'+S; Str(Hh,S); Hdr:=Hdr+' H'+S;
+     Str(RN,S); Hdr:=Hdr+' F'+S; Str(RD,S); Hdr:=Hdr+':'+S+' Ip A1:1 C420jpeg'+#10;
+     WriteBytes(Hdr[1],Length(Hdr));
+    End;
+    Hdr:='FRAME'+#10; WriteBytes(Hdr[1],Length(Hdr));
+    For Row:=0 To Hh-1 Do WriteBytes(Y^[Row*Mw*16],W);
+    For Row:=0 To CH-1 Do WriteBytes(U^[Row*Mw*8],CW);
+    For Row:=0 To CH-1 Do WriteBytes(V^[Row*Mw*8],CW);
+    Inc(Frames);
+   End;
+   FreeMem(Buf,Size);
+  End;
+  Inc(Pos,8+Size+(Size And 1));
+ End;
+ FreeMem(Y,Mw*16*Mh*16); FreeMem(U,Mw*8*Mh*8); FreeMem(V,Mw*8*Mh*8);
+ If Frames=0 Then Fail('asv: aucune image video decodee.');
+ CloseRead; CloseWrite;
+End;
+
+{ ---- Encodeur ---- }
+Var
+ ASVOut: PEABuffer; ASVOBit: LongInt;
+ ASVQ: Array[0..63] Of LongInt;
+
+Procedure ASVPutBE(N: Integer; V: Int64);
+Var K: Integer;
+Begin
+ For K:=N-1 DownTo 0 Do Begin
+  If ((V Shr K) And 1)<>0 Then ASVOut^[ASVOBit Shr 3]:=ASVOut^[ASVOBit Shr 3] Or (128 Shr (ASVOBit And 7));
+  Inc(ASVOBit);
+ End;
+End;
+
+Procedure ASVPutLE(N: Integer; V: Int64);
+Var K: Integer;
+Begin
+ For K:=0 To N-1 Do Begin
+  If ((V Shr K) And 1)<>0 Then ASVOut^[ASVOBit Shr 3]:=ASVOut^[ASVOBit Shr 3] Or (1 Shl (ASVOBit And 7));
+  Inc(ASVOBit);
+ End;
+End;
+
+Procedure ASVFdct(Var D: TAMVBlock);
+Const F0541=4433; F0765=6270; F1847=15137; F1175=9633; F0298=2446; F2053=16819; F3072=25172; F1501=12299;
+ F0899=7373; F2562=20995; F1961=16069; F0390=3196;
+Var
+ I: Integer; T0,T1,T2,T3,T4,T5,T6,T7,T10,T11,T12,T13,Z1,Z2,Z3,Z4,Z5: Int64;
+Function Ds(X: Int64; N: Integer): Int64;
+Begin Ds:=AVSar(X+(Int64(1) Shl (N-1)),N); End;
+Begin
+ For I:=0 To 7 Do Begin
+  T0:=D[I*8]+D[I*8+7]; T7:=D[I*8]-D[I*8+7]; T1:=D[I*8+1]+D[I*8+6]; T6:=D[I*8+1]-D[I*8+6];
+  T2:=D[I*8+2]+D[I*8+5]; T5:=D[I*8+2]-D[I*8+5]; T3:=D[I*8+3]+D[I*8+4]; T4:=D[I*8+3]-D[I*8+4];
+  T10:=T0+T3; T13:=T0-T3; T11:=T1+T2; T12:=T1-T2;
+  D[I*8]:=(T10+T11)*16; D[I*8+4]:=(T10-T11)*16;
+  Z1:=(T12+T13)*F0541;
+  D[I*8+2]:=Ds(Z1+T13*F0765,9); D[I*8+6]:=Ds(Z1+T12*(-F1847),9);
+  Z1:=T4+T7; Z2:=T5+T6; Z3:=T4+T6; Z4:=T5+T7; Z5:=(Z3+Z4)*F1175;
+  T4:=T4*F0298; T5:=T5*F2053; T6:=T6*F3072; T7:=T7*F1501;
+  Z1:=Z1*(-F0899); Z2:=Z2*(-F2562); Z3:=Z3*(-F1961); Z4:=Z4*(-F0390);
+  Inc(Z3,Z5); Inc(Z4,Z5);
+  D[I*8+7]:=Ds(T4+Z1+Z3,9); D[I*8+5]:=Ds(T5+Z2+Z4,9); D[I*8+3]:=Ds(T6+Z2+Z3,9); D[I*8+1]:=Ds(T7+Z1+Z4,9);
+ End;
+ For I:=0 To 7 Do Begin
+  T0:=D[I]+D[56+I]; T7:=D[I]-D[56+I]; T1:=D[8+I]+D[48+I]; T6:=D[8+I]-D[48+I];
+  T2:=D[16+I]+D[40+I]; T5:=D[16+I]-D[40+I]; T3:=D[24+I]+D[32+I]; T4:=D[24+I]-D[32+I];
+  T10:=T0+T3; T13:=T0-T3; T11:=T1+T2; T12:=T1-T2;
+  D[I]:=Ds(T10+T11,4); D[32+I]:=Ds(T10-T11,4);
+  Z1:=(T12+T13)*F0541;
+  D[16+I]:=Ds(Z1+T13*F0765,17); D[48+I]:=Ds(Z1+T12*(-F1847),17);
+  Z1:=T4+T7; Z2:=T5+T6; Z3:=T4+T6; Z4:=T5+T7; Z5:=(Z3+Z4)*F1175;
+  T4:=T4*F0298; T5:=T5*F2053; T6:=T6*F3072; T7:=T7*F1501;
+  Z1:=Z1*(-F0899); Z2:=Z2*(-F2562); Z3:=Z3*(-F1961); Z4:=Z4*(-F0390);
+  Inc(Z3,Z5); Inc(Z4,Z5);
+  D[56+I]:=Ds(T4+Z1+Z3,17); D[40+I]:=Ds(T5+Z2+Z4,17); D[24+I]:=Ds(T6+Z2+Z3,17); D[8+I]:=Ds(T7+Z1+Z4,17);
+ End;
+End;
+
+Procedure ASVPutLevel1(L: LongInt);
+Begin
+ If (L+3>=0) And (L+3<=6) Then ASVPutBE(ASVLevel[L+3,1],ASVLevel[L+3,0])
+ Else ASVPutBE(11,L And 255);
+End;
+
+Procedure ASVPutLevel2(L: LongInt);
+Begin
+ If (L+31>=0) And (L+31<=62) Then ASVPutLE(ASV2Level[L+31,1],ASV2Level[L+31,0])
+ Else Begin
+  If L<-128 Then L:=-128; If L>127 Then L:=127;
+  ASVPutLE(13,(L And 255) Shl 5);
+ End;
+End;
+
+Function ASVQuant(Var D: TAMVBlock; K: Integer): Integer;
+Var V: Int64;
+Begin
+ V:=AVSar(Int64(D[K])*ASVQ[K]+32768,16); D[K]:=V; ASVQuant:=D[K];
+End;
+
+Procedure ASVEncodeBlock(Var D: TAMVBlock; V2: Boolean);
+Var
+ I,Index,Ccp,Count,NcBits,NcVal: LongInt; V: Int64;
+Begin
+ If Not V2 Then Begin
+  ASVPutBE(8,AVSar(D[0]+32,6) And 255); D[0]:=0; NcBits:=0; NcVal:=0;
+  For I:=0 To 9 Do Begin
+   Index:=ASVScan[4*I]; Ccp:=0;
+   If ASVQuant(D,Index)<>0 Then Ccp:=Ccp Or 8;
+   If ASVQuant(D,Index+8)<>0 Then Ccp:=Ccp Or 4;
+   If ASVQuant(D,Index+1)<>0 Then Ccp:=Ccp Or 2;
+   If ASVQuant(D,Index+9)<>0 Then Ccp:=Ccp Or 1;
+   If Ccp<>0 Then Begin
+    ASVPutBE(NcBits+ASVCcp[Ccp,1],(Int64(NcVal) Shl ASVCcp[Ccp,1]) Or ASVCcp[Ccp,0]);
+    NcBits:=0; NcVal:=0;
+    If (Ccp And 8)<>0 Then ASVPutLevel1(D[Index]);
+    If (Ccp And 4)<>0 Then ASVPutLevel1(D[Index+8]);
+    If (Ccp And 2)<>0 Then ASVPutLevel1(D[Index+1]);
+    If (Ccp And 1)<>0 Then ASVPutLevel1(D[Index+9]);
+   End Else Begin Inc(NcBits,2); NcVal:=(NcVal Shl 2) Or 2; End;
+  End;
+  ASVPutBE(5,15);
+ End Else Begin
+  Count:=63;
+  While Count>3 Do Begin
+   Index:=ASVScan[Count];
+   V:=AVSar(Int64(D[Index])*ASVQ[Index]+32768,16);
+   If V<>0 Then Break;
+   Dec(Count);
+  End;
+  Count:=Count Shr 2;
+  ASVPutLE(12,Count Or ((AVSar(D[0]+32,6) And 255) Shl 4)); D[0]:=0;
+  For I:=0 To Count Do Begin
+   Index:=ASVScan[4*I]; Ccp:=0;
+   If ASVQuant(D,Index)<>0 Then Ccp:=Ccp Or 8;
+   If ASVQuant(D,Index+8)<>0 Then Ccp:=Ccp Or 4;
+   If ASVQuant(D,Index+1)<>0 Then Ccp:=Ccp Or 2;
+   If ASVQuant(D,Index+9)<>0 Then Ccp:=Ccp Or 1;
+   If I>0 Then ASVPutLE(ASVAcCcp[Ccp,1],ASVAcCcp[Ccp,0]) Else ASVPutLE(ASVDcCcp[Ccp,1],ASVDcCcp[Ccp,0]);
+   If Ccp<>0 Then Begin
+    If (Ccp And 8)<>0 Then ASVPutLevel2(D[Index]);
+    If (Ccp And 4)<>0 Then ASVPutLevel2(D[Index+8]);
+    If (Ccp And 2)<>0 Then ASVPutLevel2(D[Index+1]);
+    If (Ccp And 1)<>0 Then ASVPutLevel2(D[Index+9]);
+   End;
+  End;
+ End;
+End;
+
+Procedure EncodeASV(Const Source,Target: String; V2: Boolean);
+Var
+ H: Array[0..255] Of Byte;
+ Limit,Cur,W,Hh,FN,FD,Frames,I,K,Mw,Mh,Mw2,Mh2,MX,MY,CW,CH,FrameBytes,Size,Row,Col,InvQ,Scale,Q,OutPos,Fix: LongInt;
+ Y,U,V,Pk: PEABuffer; Line,Token: String; Blk: Array[0..5] Of TAMVBlock; Code: Integer;
+ Sizes: PALLong; Out: Array[0..255] Of Byte; Used: Integer;
+Procedure PutB(X: LongInt);Begin Out[Used]:=X And 255; Inc(Used); Inc(OutPos); If Used>=250 Then Begin WriteBytes(Out,Used); Used:=0; End; End;
+Procedure PutL16(X: LongInt);Begin PutB(X); PutB(X Shr 8); End;
+Procedure PutL32(X: LongInt);Begin PutL16(X); PutL16(X Shr 16); End;
+Procedure PutTag(Const T: String);
+Var Z: Integer;
+Begin For Z:=1 To 4 Do PutB(Ord(T[Z])); End;
+Procedure Flush;Begin If Used>0 Then Begin WriteBytes(Out,Used); Used:=0; End; End;
+Procedure Patch32(At,Value: LongInt);
+Var Z: Integer; Code2: Integer; B4: Array[0..3] Of Byte;
+Begin
+ Flush;
+ {$I-}Seek(ActiveOutput,At); Code2:=IOResult;{$I+}
+ If Code2<>0 Then Fail('asv: positionnement AVI impossible.');
+ For Z:=0 To 3 Do Begin B4[Z]:=Value And 255; Value:=Value Shr 8; End;
+ WriteBytes(B4,4);
+End;
+Procedure GetPixels(Var B: TAMVBlock; Plane: PEABuffer; Stride,X0,Y0: LongInt);
+Var A,C: Integer;
+Begin
+ For A:=0 To 7 Do For C:=0 To 7 Do B[A*8+C]:=Plane^[(Y0+A)*Stride+X0+C];
+End;
+Procedure EncodeMB;
+Var Z: Integer;
+Begin
+ For Z:=0 To 5 Do ASVEncodeBlock(Blk[Z],V2);
+End;
+{ MB partiel: X0,Y0 en pixels luma; VW,VH pixels valides }
+Procedure Partial(X0,Y0,VW,VH: LongInt);
+Const Desc: Array[0..5,0..3] Of Byte=((0,0,0,0),(8,0,0,0),(0,8,0,0),(8,8,0,0),(0,0,1,1),(0,0,2,1));
+Var
+ Z,WA,HA,A,C,Stride,PX,PY,Last: LongInt; Plane: PEABuffer;
+Begin
+ For Z:=0 To 5 Do Begin
+  If Desc[Z,3]=0 Then Begin WA:=VW-Desc[Z,0]; HA:=VH-Desc[Z,1]; End
+  Else Begin WA:=(VW+1) Div 2-Desc[Z,0]; HA:=(VH+1) Div 2-Desc[Z,1]; End;
+  If (WA<=0) Or (HA<=0) Then Begin FillChar(Blk[Z],SizeOf(Blk[Z]),0); Continue; End;
+  If WA>8 Then WA:=8; If HA>8 Then HA:=8;
+  Case Desc[Z,2] Of
+   0: Begin Plane:=Y; Stride:=W; PX:=X0; PY:=Y0; End;
+   1: Begin Plane:=U; Stride:=CW; PX:=X0 Div 2; PY:=Y0 Div 2; End;
+   Else Begin Plane:=V; Stride:=CW; PX:=X0 Div 2; PY:=Y0 Div 2; End;
+  End;
+  Inc(PX,Desc[Z,0]); Inc(PY,Desc[Z,1]);
+  For A:=0 To 7 Do Begin
+   If A<HA Then Begin
+    For C:=0 To WA-1 Do Blk[Z][A*8+C]:=Plane^[(PY+A)*Stride+PX+C];
+    Last:=Blk[Z][A*8+WA-1];
+    For C:=WA To 7 Do Blk[Z][A*8+C]:=Last;
+   End Else For C:=0 To 7 Do Blk[Z][A*8+C]:=Blk[Z][(HA-1)*8+C];
+  End;
+  ASVFdct(Blk[Z]);
+ End;
+ EncodeMB;
+End;
+Function ReadLine: String;
+Var R: String;
+Begin
+ R:='';
+ While Cur<Limit Do Begin ReadAt(Cur,H,1); Inc(Cur); If H[0]=10 Then Break; If Length(R)<250 Then R:=R+Chr(H[0]); End;
+ ReadLine:=R;
+End;
+Procedure ReadPlane(Plane: PEABuffer; At,Count: LongInt);
+Var N: LongInt;
+Begin
+ N:=0;
+ While N<Count Do Begin
+  If Count-N>4096 Then Q:=4096 Else Q:=Count-N;
+  ReadAt(At+N,Plane^[N],Q); Inc(N,Q);
+ End;
+End;
+Begin
+ OpenRead(Source); Limit:=InputSize; Cur:=0;
+ Line:=ReadLine;
+ If Copy(Line,1,9)<>'YUV4MPEG2' Then Fail('asv: entree Y4M requise.');
+ W:=0; Hh:=0; FN:=25; FD:=1;
+ Line:=Copy(Line,11,255);
+ While Line<>'' Do Begin
+  K:=Pos(' ',Line); If K=0 Then K:=Length(Line)+1;
+  Token:=Copy(Line,1,K-1); Line:=Copy(Line,K+1,255);
+  If Token='' Then Continue;
+  Case Token[1] Of
+   'W': Val(Copy(Token,2,20),W,Code);
+   'H': Val(Copy(Token,2,20),Hh,Code);
+   'F': Begin K:=Pos(':',Token); If K>0 Then Begin Val(Copy(Token,2,K-2),FN,Code); Val(Copy(Token,K+1,20),FD,Code); End; End;
+   'C': If (Token<>'C420') And (Token<>'C420jpeg') And (Token<>'C420mpeg2') And (Token<>'C420paldv') Then Fail('asv: Y4M YUV420 8 bits requis.');
+   'I': If Token<>'Ip' Then Fail('asv: video progressive requise.');
+  End;
+ End;
+ If (W<2) Or (Hh<2) Or (W>4096) Or (Hh>4096) Then Fail('asv: dimensions Y4M incorrectes.');
+ If (FN<=0) Or (FD<=0) Then Begin FN:=25; FD:=1; End;
+ CW:=(W+1) Div 2; CH:=(Hh+1) Div 2; FrameBytes:=W*Hh+2*CW*CH;
+ Mw:=(W+15) Div 16; Mh:=(Hh+15) Div 16; Mw2:=W Div 16; Mh2:=Hh Div 16;
+ If V2 Then Scale:=2 Else Scale:=1;
+ InvQ:=(32*Scale*118+472 Div 2) Div 472;
+ For I:=0 To 63 Do Begin
+  Q:=32*Scale*ASVMat[I]; ASVQ[I]:=((InvQ Shl 16)+Q Div 2) Div Q;
+ End;
+ GetMem(Y,W*Hh); GetMem(U,CW*CH); GetMem(V,CW*CH);
+ Size:=Mh*Mw*720+64; GetMem(Pk,Size); GetMem(Sizes,1048576*4);
+ Frames:=0; OutPos:=0; Used:=0;
+ OpenWrite(Target);
+ PutTag('RIFF'); PutL32(0); PutTag('AVI '); PutTag('LIST'); PutL32(200); PutTag('hdrl');
+ PutTag('avih'); PutL32(56); PutL32(Round(1000000.0*FD/FN)); PutL32(0); PutL32(0); PutL32($10); PutL32(0); PutL32(0); PutL32(1);
+ PutL32(Size); PutL32(W); PutL32(Hh); PutL32(0); PutL32(0); PutL32(0); PutL32(0);
+ PutTag('LIST'); PutL32(124); PutTag('strl');
+ PutTag('strh'); PutL32(56); PutTag('vids'); If V2 Then PutTag('ASV2') Else PutTag('ASV1');
+ PutL32(0); PutL16(0); PutL16(0); PutL32(0); PutL32(FD); PutL32(FN); PutL32(0); PutL32(0); PutL32(Size); PutL32(-1); PutL32(0);
+ PutL16(0); PutL16(0); PutL16(W); PutL16(Hh);
+ PutTag('strf'); PutL32(48); PutL32(48); PutL32(W); PutL32(Hh); PutL16(1); PutL16(24);
+ If V2 Then PutTag('ASV2') Else PutTag('ASV1');
+ PutL32(Size); PutL32(0); PutL32(0); PutL32(0); PutL32(0);
+ PutL32(InvQ); PutTag('ASUS');
+ PutTag('LIST'); PutL32(0); PutTag('movi'); Flush;
+ While Cur<Limit Do Begin
+  Line:=ReadLine;
+  If Copy(Line,1,5)<>'FRAME' Then Fail('asv: marqueur FRAME requis.');
+  If FrameBytes>Limit-Cur Then Break;
+  ReadPlane(Y,Cur,W*Hh); ReadPlane(U,Cur+W*Hh,CW*CH); ReadPlane(V,Cur+W*Hh+CW*CH,CW*CH);
+  Inc(Cur,FrameBytes);
+  ASVOut:=Pk; ASVOBit:=0; FillChar(Pk^,Size,0);
+  For MY:=0 To Mh2-1 Do For MX:=0 To Mw2-1 Do Begin
+   GetPixels(Blk[0],Y,W,MX*16,MY*16); GetPixels(Blk[1],Y,W,MX*16+8,MY*16);
+   GetPixels(Blk[2],Y,W,MX*16,MY*16+8); GetPixels(Blk[3],Y,W,MX*16+8,MY*16+8);
+   For K:=0 To 3 Do ASVFdct(Blk[K]);
+   GetPixels(Blk[4],U,CW,MX*8,MY*8); GetPixels(Blk[5],V,CW,MX*8,MY*8);
+   ASVFdct(Blk[4]); ASVFdct(Blk[5]);
+   EncodeMB;
+  End;
+  If (W And 15)<>0 Then For MY:=0 To Mh2-1 Do Partial(Mw2*16,MY*16,W And 15,16);
+  If (Hh And 15)<>0 Then Begin
+   Col:=W; MX:=0;
+   Repeat
+    Partial(MX*16,Mh2*16,Col,Hh And 15);
+    If Col<=16 Then Break;
+    Dec(Col,16); Inc(MX);
+   Until False;
+  End;
+  K:=((ASVOBit+7) Div 8+3) Div 4;
+  If Not V2 Then
+   For Row:=0 To K-1 Do Begin
+    Q:=Pk^[Row*4]; Pk^[Row*4]:=Pk^[Row*4+3]; Pk^[Row*4+3]:=Q;
+    Q:=Pk^[Row*4+1]; Pk^[Row*4+1]:=Pk^[Row*4+2]; Pk^[Row*4+2]:=Q;
+   End;
+  Sizes^[Frames]:=K*4;
+  PutTag('00dc'); PutL32(K*4); Flush; WriteBytes(Pk^,K*4); Inc(OutPos,K*4);
+  Inc(Frames);
+  If Frames>=1048576 Then Break;
+ End;
+ If Frames=0 Then Fail('asv: aucune image Y4M.');
+ Fix:=OutPos;
+ PutTag('idx1'); PutL32(16*Frames); K:=4;
+ For I:=0 To Frames-1 Do Begin
+  PutTag('00dc'); PutL32($10); PutL32(K); PutL32(Sizes^[I]); Inc(K,8+Sizes^[I]);
+ End;
+ Flush;
+ Patch32(4,OutPos-8); Patch32(224,Fix-228); Patch32(48,Frames); Patch32(140,Frames);
+ FreeMem(Y,W*Hh); FreeMem(U,CW*CH); FreeMem(V,CW*CH); FreeMem(Pk,Size); FreeMem(Sizes,1048576*4);
+ CloseRead; CloseWrite;
+End;
+
+
 Procedure NormalizeWave(Const Source,Target: String; ForMP3: Boolean);
 Type
  TBytes = Array[0..4095] Of Byte;
@@ -15668,6 +16236,7 @@ Begin
  WriteLn(' D  ea              Electronic Arts Multimedia (audio adpcm_ea, r1, r2, r3, xas)');
  WriteLn(' D  xa              Maxis XA (adpcm_ea_maxis_xa)');
  WriteLn(' D  amv             AMV (audio adpcm_ima_amv; video amv vers Y4M)');
+ WriteLn(' DE avi (asv1/asv2) AVI ASUS V1/V2: decodage vers Y4M, encodage Y4M -c:v asv1|asv2');
  WriteLn(' D  avs             Argonaut Creature Shock AVS (video vers Y4M/PNG)');
  WriteLn(' D  iss             Funcom ISS (adpcm_ima_iss)');
  WriteLn(' D  smjpeg          Loki SDL MJPEG (adpcm_ima_smjpeg)');
@@ -15951,6 +16520,8 @@ BEGIN
    WriteLn(' D = decodage, E = encodage, A = audio, V = video');
    WriteLn('D V    4xm             4X Movie');
    WriteLn('D V    amv             AMV Video');
+   WriteLn('DEV    asv1            ASUS V1');
+   WriteLn('DEV    asv2            ASUS V2');
    WriteLn('D V    avs             AVS (Audio Video Standard) video');
    WriteLn('D V    8bps            QuickTime 8BPS video (8/24/32 bits)');
    WriteLn('D A    8svx_fib        8SVX fibonacci');
@@ -16030,8 +16601,9 @@ BEGIN
    If InputPath='' Then Fail('Codec video de sortie attendu apres -i.');
    VideoCodec:=Lower(NextArgument);
    If (VideoCodec<>'png') And (VideoCodec<>'gif') And (VideoCodec<>'copy') And
-    (VideoCodec<>'ffv1') And (VideoCodec<>'flv') And (VideoCodec<>'mpeg4') And (VideoCodec<>'mpeg1video') And (VideoCodec<>'mpeg2video') And (VideoCodec<>'rawvideo') Then
-    Fail('Codec video: png/gif, copy, ffv1, flv, mpeg4, mpeg1video, mpeg2video, rawvideo.');
+    (VideoCodec<>'ffv1') And (VideoCodec<>'flv') And (VideoCodec<>'mpeg4') And (VideoCodec<>'mpeg1video') And (VideoCodec<>'mpeg2video') And (VideoCodec<>'rawvideo') And
+    (VideoCodec<>'asv1') And (VideoCodec<>'asv2') Then
+    Fail('Codec video: png/gif, copy, ffv1, flv, mpeg4, mpeg1video, mpeg2video, rawvideo, asv1, asv2.');
   End Else If (Argument='-vframes') Or (Argument='-frames:v') Then Begin
    If InputPath='' Then Fail('Nombre d''images attendu apres -i.');
    Value:=NextArgument; Val(Value,Number,Code);
@@ -16169,6 +16741,25 @@ BEGIN
    Fail('Decodeur impose: adpcm_ea, adpcm_ea_maxis_xa, adpcm_ea_r1, adpcm_ea_r2, adpcm_ea_r3, adpcm_ea_xas, adpcm_ima_ea_eacs ou adpcm_ima_ea_sead.');
   If (InputFormat='xa') And (InputCodec<>'adpcm_ea_maxis_xa') Then
    Fail('Le conteneur xa exige le decodeur adpcm_ea_maxis_xa.');
+ End;
+ If (InputFormat='avi') And Not IsHTTP(InputPath) And ((OutputFormat='yuv4mpegpipe') Or (VideoCodec='mpeg4') Or (VideoCodec='mpeg1video') Or
+  (VideoCodec='mpeg2video') Or (VideoCodec='ffv1') Or (VideoCodec='flv') Or (VideoCodec='asv1') Or (VideoCodec='asv2') Or FourMV) Then Begin
+  AsvTag:=AVIVideoFourCC(Intermediate);
+  If (AsvTag='ASV1') Or (AsvTag='ASV2') Then Begin
+   If NoVideo Or (VideoCodec='copy') Or (AudioCodec<>'') Or HasBitrate Or (RequestedRate<>0) Or
+    (RequestedChannels<>0) Or (ImageWidth<>0) Or (VideoFrames<>0) Then
+    Fail('asv: video locale decodee, sans copie ni conversion audio requise.');
+   NoAudio:=True; Temps[6]:=NewTemporary; DecodeASVAVI(Intermediate,Temps[6]); Intermediate:=Temps[6];
+   InputFormat:='yuv4mpegpipe'; DecodedVideo:=True;
+  End;
+ End;
+ If (InputFormat='yuv4mpegpipe') And ((VideoCodec='asv1') Or (VideoCodec='asv2')) Then Begin
+  If IsHTTP(InputPath) Or (OutputFormat<>'avi') Or NoVideo Or (AudioCodec<>'') Or HasBitrate Or HasVideoBitrate Or
+   (RequestedRate<>0) Or (RequestedChannels<>0) Or (VideoFrames<>0) Or (ImageWidth<>0) Then
+   Fail('asv: Y4M local vers sortie AVI requis, sans autres options.');
+  If HasCrop Then Fail('asv: -crop non supporte avec cet encodeur.');
+  Temps[2]:=NewTemporary; EncodeASV(Intermediate,Temps[2],VideoCodec='asv2');
+  Commit(Temps[2]); Temps[2]:=''; WriteLn('Video ASV creee: ',OutputPath); Halt(0);
  End;
  If ((InputFormat='mp4') Or (InputFormat='avi')) And ((OutputFormat='yuv4mpegpipe') Or (VideoCodec='mpeg4') Or (VideoCodec='mpeg1video') Or
   (VideoCodec='mpeg2video') Or (VideoCodec='ffv1') Or (VideoCodec='flv') Or FourMV) Then Begin
