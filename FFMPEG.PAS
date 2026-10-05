@@ -13314,6 +13314,289 @@ Begin
  CloseRead; CloseWrite;
 End;
 
+{ AMV Video: JPEG baseline 4:2:0 a tables fixes (decodeur Sunplus/AMV de FFmpeg), image retournee
+  verticalement; IDCT simple 8 bits de FFmpeg; sortie Y4M. }
+Const
+ AMVDHT: Array[0..415] Of Byte=(
+  0,0,1,5,1,1,1,1,1,1,0,0,0,0,0,0,
+  0,0,1,2,3,4,5,6,7,8,9,10,11,1,0,3,
+  1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,1,
+  2,3,4,5,6,7,8,9,10,11,16,0,2,1,3,3,
+  2,4,3,5,5,4,4,0,0,1,125,1,2,3,0,4,
+  17,5,18,33,49,65,6,19,81,97,7,34,113,20,50,129,
+  145,161,8,35,66,177,193,21,82,209,240,36,51,98,114,130,
+  9,10,22,23,24,25,26,37,38,39,40,41,42,52,53,54,
+  55,56,57,58,67,68,69,70,71,72,73,74,83,84,85,86,
+  87,88,89,90,99,100,101,102,103,104,105,106,115,116,117,118,
+  119,120,121,122,131,132,133,134,135,136,137,138,146,147,148,149,
+  150,151,152,153,154,162,163,164,165,166,167,168,169,170,178,179,
+  180,181,182,183,184,185,186,194,195,196,197,198,199,200,201,202,
+  210,211,212,213,214,215,216,217,218,225,226,227,228,229,230,231,
+  232,233,234,241,242,243,244,245,246,247,248,249,250,17,0,2,
+  1,2,4,4,3,4,7,5,4,4,0,1,2,119,0,1,
+  2,3,17,4,5,33,49,6,18,65,81,7,97,113,19,34,
+  50,129,8,20,66,145,161,177,193,9,35,51,82,240,21,98,
+  114,209,10,22,36,52,225,37,241,23,24,25,26,38,39,40,
+  41,42,53,54,55,56,57,58,67,68,69,70,71,72,73,74,
+  83,84,85,86,87,88,89,90,99,100,101,102,103,104,105,106,
+  115,116,117,118,119,120,121,122,130,131,132,133,134,135,136,137,
+  138,146,147,148,149,150,151,152,153,154,162,163,164,165,166,167,
+  168,169,170,178,179,180,181,182,183,184,185,186,194,195,196,197,
+  198,199,200,201,202,210,211,212,213,214,215,216,217,218,226,227,
+  228,229,230,231,232,233,234,242,243,244,245,246,247,248,249,250);
+ AMVQ0: Array[0..63] Of Byte=(
+  13,9,10,11,10,8,13,11,10,11,14,14,13,15,19,32,
+  21,19,18,18,19,39,28,30,23,32,46,41,49,48,46,41,
+  45,44,51,58,74,62,51,54,70,55,44,45,64,87,65,70,
+  76,78,82,83,82,50,62,90,97,90,80,96,74,81,82,79);
+ AMVQ1: Array[0..63] Of Byte=(
+  14,14,14,19,17,19,38,21,21,38,79,53,45,53,79,79,
+  79,79,79,79,79,79,79,79,79,79,79,79,79,79,79,79,
+  79,79,79,79,79,79,79,79,79,79,79,79,79,79,79,79,
+  79,79,79,79,79,79,79,79,79,79,79,79,79,79,79,79);
+ AMVZig: Array[0..63] Of Byte=(0,1,8,16,9,2,3,10,17,24,32,25,18,11,4,5,12,19,26,33,40,48,41,34,27,20,13,6,7,14,21,28,35,42,49,56,57,50,43,36,29,22,15,23,30,37,44,51,58,59,52,45,38,31,39,46,53,60,61,54,47,55,62,63);
+Type
+ TAMVHuff=Record
+  Min,Max,Ptr: Array[1..16] Of LongInt; Vals: Array[0..255] Of Byte;
+ End;
+ TAMVBlock=Array[0..63] Of SmallInt;
+Var
+ AVH: Array[0..3] Of TAMVHuff;
+ AVBuf: PEABuffer; AVPos,AVEnd: LongInt; AVBitBuf,AVBitCnt: Integer;
+ AVLastDC: Array[0..2] Of LongInt;
+
+Procedure AVBuildTables;
+Var
+ P,T,L,K,Code,N: LongInt; Counts: Array[1..16] Of LongInt;
+Begin
+ P:=0;
+ For T:=0 To 3 Do Begin
+  Inc(P); K:=0; Code:=0;
+  For L:=1 To 16 Do Begin Counts[L]:=AMVDHT[P]; Inc(P); End;
+  N:=0; For L:=1 To 16 Do Inc(N,Counts[L]);
+  For L:=0 To N-1 Do AVH[T].Vals[L]:=AMVDHT[P+L];
+  Inc(P,N);
+  For L:=1 To 16 Do Begin
+   AVH[T].Ptr[L]:=K; AVH[T].Min[L]:=Code; Inc(Code,Counts[L]); Inc(K,Counts[L]);
+   If Counts[L]>0 Then AVH[T].Max[L]:=Code-1 Else AVH[T].Max[L]:=-1;
+   Code:=Code*2;
+  End;
+ End;
+End;
+
+Function AVBit: Integer;
+Var B: Integer;
+Begin
+ If AVBitCnt=0 Then Begin
+  If AVPos>=AVEnd Then B:=0
+  Else Begin
+   B:=AVBuf^[AVPos]; Inc(AVPos);
+   If B=$FF Then Begin
+    If (AVPos<AVEnd) And (AVBuf^[AVPos]=0) Then Inc(AVPos)
+    Else Begin B:=0; Dec(AVPos); End;
+   End;
+  End;
+  AVBitBuf:=B; AVBitCnt:=8;
+ End;
+ Dec(AVBitCnt); AVBit:=(AVBitBuf Shr AVBitCnt) And 1;
+End;
+
+Function AVBits(N: Integer): LongInt;
+Var V: LongInt; I: Integer;
+Begin
+ V:=0; For I:=1 To N Do V:=V*2+AVBit; AVBits:=V;
+End;
+
+Function AVHuff(T: Integer): Integer;
+Var Code,L: LongInt;
+Begin
+ Code:=0;
+ For L:=1 To 16 Do Begin
+  Code:=Code*2+AVBit;
+  If (AVH[T].Max[L]>=0) And (Code<=AVH[T].Max[L]) And (Code>=AVH[T].Min[L]) Then Begin
+   AVHuff:=AVH[T].Vals[AVH[T].Ptr[L]+Code-AVH[T].Min[L]]; Exit;
+  End;
+ End;
+ AVHuff:=0;
+End;
+
+Function AVExtend(N: Integer): LongInt;
+Var V: LongInt;
+Begin
+ If N=0 Then Begin AVExtend:=0; Exit; End;
+ V:=AVBits(N); If V<(LongInt(1) Shl (N-1)) Then V:=V-(LongInt(1) Shl N)+1; AVExtend:=V;
+End;
+
+Function AVSar(V: Int64; N: Integer): Int64;
+Begin
+ If V>=0 Then AVSar:=V Shr N Else AVSar:=-1-((-1-V) Shr N);
+End;
+
+{ IDCT simple 8 bits (simple_idct_template.c) puis ecriture bornee a 0..255. }
+Procedure AVIdctPut(Var Blk: TAMVBlock; Dest: PEABuffer; Stride: LongInt);
+Const W1=22725; W2=21407; W3=19266; W4=16383; W5=12873; W6=8867; W7=4520;
+Var
+ I,K: Integer; A0,A1,A2,A3,B0,B1,B2,B3: Int64; R: Array[0..7] Of Int64; V: Int64;
+Procedure Put(Col,Row: Integer; X: Int64);
+Begin
+ X:=AVSar(X,20); If X<0 Then X:=0; If X>255 Then X:=255;
+ Dest^[Row*Stride+Col]:=X;
+End;
+Begin
+ For I:=0 To 7 Do Begin
+  For K:=0 To 7 Do R[K]:=Blk[I*8+K];
+  If (R[1] Or R[2] Or R[3] Or R[4] Or R[5] Or R[6] Or R[7])=0 Then Begin
+   V:=SmallInt(R[0]*8); For K:=0 To 7 Do Blk[I*8+K]:=V;
+  End Else Begin
+   A0:=W4*R[0]+(1 Shl 10); A1:=A0; A2:=A0; A3:=A0;
+   Inc(A0,W2*R[2]); Inc(A1,W6*R[2]); Dec(A2,W6*R[2]); Dec(A3,W2*R[2]);
+   B0:=W1*R[1]+W3*R[3]; B1:=W3*R[1]-W7*R[3]; B2:=W5*R[1]-W1*R[3]; B3:=W7*R[1]-W5*R[3];
+   If (R[4] Or R[5] Or R[6] Or R[7])<>0 Then Begin
+    Inc(A0,W4*R[4]+W6*R[6]); Inc(A1,-W4*R[4]-W2*R[6]); Inc(A2,-W4*R[4]+W2*R[6]); Inc(A3,W4*R[4]-W6*R[6]);
+    Inc(B0,W5*R[5]+W7*R[7]); Inc(B1,-W1*R[5]-W5*R[7]); Inc(B2,W7*R[5]+W3*R[7]); Inc(B3,W3*R[5]-W1*R[7]);
+   End;
+   Blk[I*8+0]:=AVSar(A0+B0,11); Blk[I*8+7]:=AVSar(A0-B0,11);
+   Blk[I*8+1]:=AVSar(A1+B1,11); Blk[I*8+6]:=AVSar(A1-B1,11);
+   Blk[I*8+2]:=AVSar(A2+B2,11); Blk[I*8+5]:=AVSar(A2-B2,11);
+   Blk[I*8+3]:=AVSar(A3+B3,11); Blk[I*8+4]:=AVSar(A3-B3,11);
+  End;
+ End;
+ For I:=0 To 7 Do Begin
+  For K:=0 To 7 Do R[K]:=Blk[K*8+I];
+  A0:=W4*(R[0]+32); A1:=A0; A2:=A0; A3:=A0;
+  Inc(A0,W2*R[2]); Inc(A1,W6*R[2]); Dec(A2,W6*R[2]); Dec(A3,W2*R[2]);
+  B0:=W1*R[1]+W3*R[3]; B1:=W3*R[1]-W7*R[3]; B2:=W5*R[1]-W1*R[3]; B3:=W7*R[1]-W5*R[3];
+  If R[4]<>0 Then Begin Inc(A0,W4*R[4]); Dec(A1,W4*R[4]); Dec(A2,W4*R[4]); Inc(A3,W4*R[4]); End;
+  If R[5]<>0 Then Begin Inc(B0,W5*R[5]); Dec(B1,W1*R[5]); Inc(B2,W7*R[5]); Inc(B3,W3*R[5]); End;
+  If R[6]<>0 Then Begin Inc(A0,W6*R[6]); Dec(A1,W2*R[6]); Inc(A2,W2*R[6]); Dec(A3,W6*R[6]); End;
+  If R[7]<>0 Then Begin Inc(B0,W7*R[7]); Dec(B1,W5*R[7]); Inc(B2,W3*R[7]); Dec(B3,W1*R[7]); End;
+  Put(I,0,A0+B0); Put(I,1,A1+B1); Put(I,2,A2+B2); Put(I,3,A3+B3);
+  Put(I,4,A3-B3); Put(I,5,A2-B2); Put(I,6,A1-B1); Put(I,7,A0-B0);
+ End;
+End;
+
+{ Decode un bloc 8x8 (composante Comp: 0=Y, 1=Cb, 2=Cr) et l'ecrit dans le plan. }
+Procedure AVDecodeBlock(Comp: Integer; Dest: PEABuffer; Stride: LongInt);
+Var
+ Blk: TAMVBlock; Q: Array[0..63] Of Byte;
+ I,K,Code,Run,Size,DcT,AcT: Integer; V,Level: LongInt;
+Begin
+ FillChar(Blk,SizeOf(Blk),0);
+ { ordre des tables du DHT: DC luma, DC chroma, AC luma, AC chroma }
+ If Comp=0 Then Begin DcT:=0; AcT:=2; For I:=0 To 63 Do Q[I]:=AMVQ0[I]; End
+ Else Begin DcT:=1; AcT:=3; For I:=0 To 63 Do Q[I]:=AMVQ1[I]; End;
+ Size:=AVHuff(DcT); V:=AVExtend(Size);
+ V:=V*Q[0]+AVLastDC[Comp]; AVLastDC[Comp]:=V;
+ If V<-32768 Then Blk[0]:=-32768 Else If V>32767 Then Blk[0]:=32767 Else Blk[0]:=V;
+ K:=1;
+ While K<=63 Do Begin
+  Code:=AVHuff(AcT); Run:=Code Shr 4; Size:=Code And 15;
+  If Size=0 Then Begin
+   If Run=15 Then Begin Inc(K,16); Continue; End;
+   Break;
+  End;
+  Inc(K,Run); If K>63 Then Break;
+  Level:=AVExtend(Size);
+  Blk[AMVZig[K]]:=Level*Q[K];
+  Inc(K);
+ End;
+ AVIdctPut(Blk,Dest,Stride);
+End;
+
+{ Decode une image AMV (octets 2..taille-2 du bloc video) vers trois plans 4:2:0. }
+Procedure AVDecodeFrame(P: PEABuffer; Size,MbW,MbH: LongInt; Y,U,V: PEABuffer);
+Var
+ MX,MY,B: LongInt; YW,CW: LongInt;
+Begin
+ AVBuf:=P; AVPos:=2; AVEnd:=Size-2; AVBitCnt:=0; AVBitBuf:=0;
+ AVLastDC[0]:=1024; AVLastDC[1]:=1024; AVLastDC[2]:=1024; { decalage de niveau +128 replie dans le DC }
+ YW:=MbW*16; CW:=MbW*8;
+ For MY:=0 To MbH-1 Do For MX:=0 To MbW-1 Do Begin
+  For B:=0 To 3 Do AVDecodeBlock(0,@Y^[(MY*16+(B Shr 1)*8)*YW+MX*16+(B And 1)*8],YW);
+  AVDecodeBlock(1,@U^[(MY*8)*CW+MX*8],CW);
+  AVDecodeBlock(2,@V^[(MY*8)*CW+MX*8],CW);
+ End;
+End;
+
+Procedure DecodeAMVVideo(Const Source,Target: String);
+Var
+ H: Array[0..63] Of Byte;
+ Limit,Pos,Size,Period,W,Hh,MbW,MbH,CW,CH,Frames,I,Take,Row,RN,RD: LongInt;
+ Y,U,V,Buf: PEABuffer;
+ InMovie,Opened: Boolean;
+ Tag: String[4];
+ Hdr,S: String;
+ R: Double;
+Function T4: String;
+Var S4: String[4]; J: Integer;
+Begin S4:=''; For J:=0 To 3 Do S4:=S4+Chr(H[J]); T4:=S4; End;
+Begin
+ AVBuildTables; OpenRead(Source); Limit:=InputSize;
+ If Limit<12 Then Fail('amv: fichier tronque.');
+ ReadAt(0,H,12);
+ If (T4<>'RIFF') Or (H[8]<>65) Or (H[9]<>77) Or (H[10]<>86) Or (H[11]<>32) Then
+  Fail('amv: signature RIFF/AMV requise.');
+ Pos:=12; Period:=0; W:=0; Hh:=0; InMovie:=False; Opened:=False; Frames:=0;
+ While (Limit-Pos>=8) And Not InMovie Do Begin
+  ReadAt(Pos,H,8); Tag:=T4;
+  Size:=LongInt(H[4])+LongInt(H[5])*256+LongInt(H[6])*65536+LongInt(H[7])*16777216;
+  If H[7]>=128 Then Fail('amv: taille de bloc excessive.');
+  If Tag='LIST' Then Begin
+   If Limit-Pos<12 Then Fail('amv: LIST tronquee.');
+   ReadAt(Pos+8,H,4);
+   If (H[0]=109) And (H[1]=111) And (H[2]=118) And (H[3]=105) Then InMovie:=True;
+   Inc(Pos,12);
+  End Else Begin
+   If (Tag='amvh') And (Size>=40) And (Limit-Pos>=48) Then Begin
+    ReadAt(Pos+8,H,40);
+    Period:=LongInt(H[0])+LongInt(H[1])*256+LongInt(H[2])*65536+LongInt(H[3])*16777216;
+    W:=LongInt(H[32])+LongInt(H[33])*256+LongInt(H[34])*65536;
+    Hh:=LongInt(H[36])+LongInt(H[37])*256+LongInt(H[38])*65536;
+   End;
+   Pos:=Pos+8+Size+(Size And 1);
+  End;
+ End;
+ If Not InMovie Then Fail('amv: liste movi absente.');
+ If (W<16) Or (W>4096) Or (Hh<16) Or (Hh>4096) Or (Period<=0) Then Fail('amv: dimensions ou cadence incorrectes.');
+ MbW:=(W+15) Div 16; MbH:=(Hh+15) Div 16; CW:=(W+1) Div 2; CH:=(Hh+1) Div 2;
+ GetMem(Y,MbW*16*MbH*16); GetMem(U,MbW*8*MbH*8); GetMem(V,MbW*8*MbH*8);
+ R:=1000000.0/Period;
+ If Abs(R-Round(R))<0.01 Then Begin RN:=Round(R); RD:=1; End Else Begin RN:=1000000; RD:=Period; End;
+ While Limit-Pos>=8 Do Begin
+  ReadAt(Pos,H,8); Tag:=T4;
+  If H[7]>=128 Then Break;
+  Size:=LongInt(H[4])+LongInt(H[5])*256+LongInt(H[6])*65536+LongInt(H[7])*16777216;
+  If Size>Limit-Pos-8 Then Size:=Limit-Pos-8;
+  If (H[0]=48) And (H[1]=48) And (H[2]=100) And (H[3]=99) And (Size>=6) Then Begin
+   GetMem(Buf,Size); I:=0;
+   While I<Size Do Begin
+    If Size-I>16384 Then Take:=16384 Else Take:=Size-I;
+    ReadAt(Pos+8+I,Buf^[I],Take); Inc(I,Take);
+   End;
+   AVDecodeFrame(Buf,Size,MbW,MbH,Y,U,V); FreeMem(Buf,Size);
+   If Not Opened Then Begin
+    OpenWrite(Target); Opened:=True;
+    Str(W,S); Hdr:='YUV4MPEG2 W'+S; Str(Hh,S); Hdr:=Hdr+' H'+S;
+    Str(RN,S); Hdr:=Hdr+' F'+S; Str(RD,S); Hdr:=Hdr+':'+S+' Ip A1:1 C420jpeg'+#10;
+    WriteBytes(Hdr[1],Length(Hdr));
+   End;
+   Hdr:='FRAME'+#10; WriteBytes(Hdr[1],Length(Hdr));
+   For Row:=Hh-1 DownTo 0 Do WriteBytes(Y^[Row*MbW*16],W);
+   For Row:=CH-1 DownTo 0 Do WriteBytes(U^[Row*MbW*8],CW);
+   For Row:=CH-1 DownTo 0 Do WriteBytes(V^[Row*MbW*8],CW);
+   Inc(Frames);
+  End;
+  Pos:=Pos+8+Size;
+  If Odd(Size) And (Limit-Pos>=2) Then Begin
+   ReadAt(Pos,H,2);
+   If Not ((H[0]>=48) And (H[0]<=57) And (H[1]>=48) And (H[1]<=57)) Then Inc(Pos);
+  End;
+ End;
+ FreeMem(Y,MbW*16*MbH*16); FreeMem(U,MbW*8*MbH*8); FreeMem(V,MbW*8*MbH*8);
+ If Frames=0 Then Fail('amv: aucune image video.');
+ CloseRead; CloseWrite;
+End;
+
 Procedure NormalizeWave(Const Source,Target: String; ForMP3: Boolean);
 Type
  TBytes = Array[0..4095] Of Byte;
@@ -15182,7 +15465,7 @@ Begin
  WriteLn(' DE adx             CRI ADX (adpcm_adx, mono/stereo)');
  WriteLn(' D  ea              Electronic Arts Multimedia (audio adpcm_ea, r1, r2, r3, xas)');
  WriteLn(' D  xa              Maxis XA (adpcm_ea_maxis_xa)');
- WriteLn(' D  amv             AMV (audio adpcm_ima_amv)');
+ WriteLn(' D  amv             AMV (audio adpcm_ima_amv; video amv vers Y4M)');
  WriteLn(' D  iss             Funcom ISS (adpcm_ima_iss)');
  WriteLn(' D  smjpeg          Loki SDL MJPEG (adpcm_ima_smjpeg)');
  WriteLn(' D  thp             Nintendo THP (audio adpcm_thp)');
@@ -15464,6 +15747,7 @@ BEGIN
    WriteLn('Codecs:');
    WriteLn(' D = decodage, E = encodage, A = audio, V = video');
    WriteLn('D V    4xm             4X Movie');
+   WriteLn('D V    amv             AMV Video');
    WriteLn('D V    8bps            QuickTime 8BPS video (8/24/32 bits)');
    WriteLn('D A    8svx_fib        8SVX fibonacci');
    WriteLn('D A    8svx_exp        8SVX exponential');
@@ -15701,6 +15985,17 @@ BEGIN
    Fail('4xm: sortie Y4M ou encodeur video natif requis.');
   Temps[6]:=NewTemporary; Decode4XM(Intermediate,Temps[6]); Intermediate:=Temps[6];
   InputFormat:='yuv4mpegpipe'; DecodedVideo:=True;
+ End;
+ If (InputFormat='amv') And Not ((OutputFormat='wav') Or (OutputFormat='mp3') Or (OutputFormat='ac3') Or
+  (OutputFormat='adx') Or (OutputFormat='aiff') Or (OutputFormat='flv') Or ((OutputFormat='mp4') And (AudioCodec='alac'))) Then Begin
+  If NoVideo Or (VideoCodec='copy') Or (AudioCodec<>'') Or HasBitrate Or (RequestedRate<>0) Or
+   (RequestedChannels<>0) Or (ImageWidth<>0) Or (VideoFrames<>0) Or IsHTTP(InputPath) Then
+   Fail('amv: video locale decodee, sans copie ni conversion audio requise.');
+  If Not ((OutputFormat='yuv4mpegpipe') Or (VideoCodec='mpeg4') Or (VideoCodec='mpeg1video') Or
+   (VideoCodec='mpeg2video') Or (VideoCodec='ffv1') Or (VideoCodec='flv') Or FourMV) Then
+   Fail('amv: sortie Y4M ou encodeur video natif requis.');
+  Temps[6]:=NewTemporary; DecodeAMVVideo(Intermediate,Temps[6]); Intermediate:=Temps[6];
+  InputFormat:='yuv4mpegpipe'; DecodedVideo:=True; NoAudio:=True;
  End;
  If HasCrop Then Begin
   If NoVideo Or (VideoCodec='copy') Or (AudioCodec='copy') Then Fail('Crop: decodage/reencodage requis; incompatible avec copy ou -vn.');
