@@ -3894,6 +3894,7 @@ Begin
    If (ADXOffset>=8) And (ADXOffset<=1048575) Then Begin Probe:='ea'; Exit; End;
   End;
  End;
+ If N>=16 Then If (B[0]=119) And (B[1]=87) And (B[2]=16) And (B[3]=0) Then Begin Probe:='avs'; Exit; End;
  If N>=20 Then If (B[0]=84) And (B[1]=72) And (B[2]=80) And (B[3]=0) Then Begin Probe:='thp'; Exit; End;
  If N>=24 Then If (B[0]=0) And (B[1]=255) And (B[10]=255) And (B[11]=0) And (B[$11]<32) And ((B[$12] And $0E)<>0) Then Begin Probe:='psxstr'; Exit; End;
  If N>=8 Then If (B[0]=0) And (B[1]=10) And (B[2]=83) And (B[3]=77) And (B[4]=74) And (B[5]=80) And
@@ -13597,6 +13598,207 @@ Begin
  CloseRead; CloseWrite;
 End;
 
+{ AVS (Argonaut Creature Shock): video 318x198 palette 8 bits, quantification vectorielle.
+  Adapte de FFmpeg libavcodec/avs.c et libavformat/avs.c (LGPL-2.1-or-later). }
+Var
+ AVSPix: Array[0..63083] Of Byte;
+ AVSR,AVSG,AVSB: Array[0..255] Of Byte;
+ CRC32Table: Array[0..255] Of LongInt; CRC32Ready: Boolean;
+
+Procedure AVSBuildCRC;
+Var N,K: Integer; C: Int64;
+Begin
+ For N:=0 To 255 Do Begin
+  C:=N;
+  For K:=1 To 8 Do If (C And 1)<>0 Then C:=$EDB88320 Xor (C Shr 1) Else C:=C Shr 1;
+  CRC32Table[N]:=ALWrap32(C);
+ End;
+ CRC32Ready:=True;
+End;
+
+Procedure AVSWritePNG(Const Target: String; Rgb: PEABuffer; W,H: LongInt);
+Var
+ Raw: PEABuffer; Total,Row,Blocks,B,Take,At,I,Size,A,Bv: LongInt;
+ Out: Array[0..255] Of Byte; Used: Integer; Crc: Int64;
+Procedure PutB(V: LongInt);Begin Out[Used]:=V And 255; Inc(Used); If Used>=250 Then Begin WriteBytes(Out,Used); Used:=0; End; End;
+Procedure PutBE32(V: LongInt);Begin PutB(V Shr 24); PutB(V Shr 16); PutB(V Shr 8); PutB(V); End;
+Procedure CrcByte(V: LongInt);
+Begin
+ Crc:=(Crc Shr 8) Xor (CRC32Table[(Crc Xor V) And 255] And $FFFFFFFF);
+End;
+Procedure PutC(V: LongInt);Begin CrcByte(V And 255); PutB(V); End;
+Procedure PutC32(V: LongInt);Begin PutC(V Shr 24); PutC(V Shr 16); PutC(V Shr 8); PutC(V); End;
+Procedure Chunk(Const Tag: String; Len: LongInt);
+Var K: Integer;
+Begin
+ PutBE32(Len); Crc:=$FFFFFFFF; For K:=1 To 4 Do PutC(Ord(Tag[K]));
+End;
+Procedure EndChunk;Begin PutBE32(ALWrap32(Crc Xor $FFFFFFFF)); End;
+Begin
+ If Not CRC32Ready Then AVSBuildCRC;
+ Total:=H*(1+3*W); GetMem(Raw,Total);
+ For Row:=0 To H-1 Do Begin Raw^[Row*(1+3*W)]:=0; Move(Rgb^[Row*3*W],Raw^[Row*(1+3*W)+1],3*W); End;
+ A:=1; Bv:=0;
+ For I:=0 To Total-1 Do Begin A:=(A+Raw^[I]) Mod 65521; Bv:=(Bv+A) Mod 65521; End;
+ Blocks:=(Total+65534) Div 65535; Used:=0;
+ OpenWrite(Target);
+ PutB(137); PutB(80); PutB(78); PutB(71); PutB(13); PutB(10); PutB(26); PutB(10);
+ Chunk('IHDR',13); PutC32(W); PutC32(H); PutC(8); PutC(2); PutC(0); PutC(0); PutC(0); EndChunk;
+ Size:=2+Blocks*5+Total+4; Chunk('IDAT',Size); PutC($78); PutC($01);
+ At:=0;
+ For B:=1 To Blocks Do Begin
+  Take:=Total-At; If Take>65535 Then Take:=65535;
+  If B=Blocks Then PutC(1) Else PutC(0);
+  PutC(Take); PutC(Take Shr 8); PutC(Not Take); PutC((Not Take) Shr 8);
+  For I:=0 To Take-1 Do PutC(Raw^[At+I]);
+  Inc(At,Take);
+ End;
+ PutC32((Bv Shl 16) Or A); EndChunk;
+ Chunk('IEND',0); EndChunk;
+ If Used>0 Then WriteBytes(Out,Used);
+ CloseWrite; FreeMem(Raw,Total);
+End;
+
+Procedure DecodeAVS(Const Source,Target: String; PNGMode: Boolean);
+Var
+ H: Array[0..15] Of Byte;
+ Limit,Pos,Remaining,FrameSize,BSz,Frames,Fps,I,J,K,X,Y,VW,VH,Sub,Typ,First,Cnt,MapSize,PalSize: LongInt;
+ Pal: Array[0..771] Of Byte;
+ Buf,PalBuf: PEABuffer;
+ Opened,HavePal: Boolean;
+ Hdr,S: String;
+ Row: Array[0..1023] Of Byte;
+ Rgb: PEABuffer;
+ UVal,VVal: LongInt;
+ Bits,BitAt,MapAt,TableAt,B: LongInt;
+Function Y4(R,G,Bb: LongInt): LongInt;Begin Y4:=(8414*R+16519*G+3208*Bb+(16 Shl 15)+(1 Shl 14)) Shr 15; End;
+Function U4(R,G,Bb: LongInt): LongInt;Begin U4:=ADPCMSar(-4865*R-9528*G+14392*Bb+(257 Shl 14),15); End;
+Function V4(R,G,Bb: LongInt): LongInt;Begin V4:=ADPCMSar(14392*R-12061*G-2332*Bb+(257 Shl 14),15); End;
+Procedure Palette(P: PEABuffer; Size: LongInt);
+Var F2,L2,Q: LongInt;
+Begin
+ If Size<4 Then Exit;
+ F2:=EAByte(P,Size,0)+EAByte(P,Size,1)*256; L2:=F2+EAByte(P,Size,2)+EAByte(P,Size,3)*256;
+ If (F2>=256) Or (L2>256) Or (Size<4+3*(L2-F2)) Then Exit;
+ For Q:=F2 To L2-1 Do Begin
+  AVSR[Q]:=((P^[4+3*(Q-F2)] And 63) Shl 2) Or ((P^[4+3*(Q-F2)] And 63) Shr 4);
+  AVSG[Q]:=((P^[5+3*(Q-F2)] And 63) Shl 2) Or ((P^[5+3*(Q-F2)] And 63) Shr 4);
+  AVSB[Q]:=((P^[6+3*(Q-F2)] And 63) Shl 2) Or ((P^[6+3*(Q-F2)] And 63) Shr 4);
+ End;
+End;
+Procedure VideoBlock(P: PEABuffer; Size,SubType: LongInt);
+Var BX,BY,Q,R,V: LongInt; Tbl,Map: LongInt; Changed: Boolean;
+Begin
+ Case SubType Of
+  0,1: Begin VW:=3; VH:=3; End;
+  2: Begin VW:=2; VH:=2; End;
+  3: Begin VW:=2; VH:=3; End;
+  Else Exit;
+ End;
+ If Size<256*VW*VH Then Exit;
+ TableAt:=256*VW*VH;
+ If SubType<>0 Then Begin
+  MapSize:=((318 Div VW+7) Div 8)*(198 Div VH);
+  If Size-TableAt<MapSize Then Exit;
+  MapAt:=TableAt; Inc(TableAt,MapSize);
+ End;
+ BY:=0;
+ While BY<198 Do Begin
+  BX:=0; BitAt:=0;
+  While BX<318 Do Begin
+   Changed:=True;
+   If SubType<>0 Then Begin
+    V:=EAByte(P,Size,MapAt+(BitAt Shr 3)); Changed:=((V Shr (7-(BitAt And 7))) And 1)<>0; Inc(BitAt);
+   End;
+   If Changed Then Begin
+    If Size-TableAt<1 Then Exit;
+    V:=EAByte(P,Size,TableAt); Inc(TableAt); Q:=V*VW*VH;
+    For R:=0 To VW-1 Do Begin
+     AVSPix[BY*318+BX+R]:=EAByte(P,Size,Q+R);
+     AVSPix[(BY+1)*318+BX+R]:=EAByte(P,Size,Q+VW+R);
+     If VH=3 Then AVSPix[(BY+2)*318+BX+R]:=EAByte(P,Size,Q+2*VW+R);
+    End;
+   End;
+   Inc(BX,VW);
+  End;
+  If SubType<>0 Then Begin Inc(MapAt,(BitAt+7) Shr 3); End;
+  Inc(BY,VH);
+ End;
+End;
+Begin
+ EAReset; OpenRead(Source); Limit:=InputSize; Opened:=False; Frames:=0;
+ FillChar(AVSPix,SizeOf(AVSPix),0); FillChar(AVSR,SizeOf(AVSR),0); FillChar(AVSG,SizeOf(AVSG),0); FillChar(AVSB,SizeOf(AVSB),0);
+ If Limit<16 Then Fail('avs: fichier tronque.');
+ ReadAt(0,H,16);
+ If (H[0]<>119) Or (H[1]<>87) Or (H[2]<>16) Or (H[3]<>0) Then Fail('avs: signature wW requise.');
+ If (LongInt(H[4])+H[5]*256<>318) Or (LongInt(H[6])+H[7]*256<>198) Then Fail('avs: 318x198 requis.');
+ Fps:=LongInt(H[10])+LongInt(H[11])*256; If Fps<1 Then Fps:=10;
+ Pos:=16; GetMem(PalBuf,800); GetMem(Rgb,318*198*3);
+ While Limit-Pos>=4 Do Begin
+  ReadAt(Pos,H,4); FrameSize:=LongInt(H[0])+LongInt(H[1])*256;
+  If FrameSize=0 Then Break;
+  Remaining:=LongInt(H[2])+LongInt(H[3])*256-4; Inc(Pos,4); HavePal:=False; PalSize:=0;
+  While Remaining>0 Do Begin
+   If Limit-Pos<4 Then Break;
+   ReadAt(Pos,H,4); Sub:=H[0]; Typ:=H[1]; BSz:=LongInt(H[2])+LongInt(H[3])*256;
+   If (BSz<4) Or (Pos+BSz>Limit) Then Break;
+   Dec(Remaining,BSz);
+   If Typ=3 Then Begin
+    If BSz-4<=800 Then Begin
+     PalSize:=BSz-4; I:=0;
+     While I<PalSize Do Begin
+      If PalSize-I>4096 Then K:=4096 Else K:=PalSize-I;
+      ReadAt(Pos+4+I,PalBuf^[I],K); Inc(I,K);
+     End;
+     HavePal:=True;
+    End;
+   End Else If Typ=1 Then Begin
+    GetMem(Buf,BSz); I:=0;
+    While I<BSz-4 Do Begin
+     If BSz-4-I>16384 Then K:=16384 Else K:=BSz-4-I;
+     ReadAt(Pos+4+I,Buf^[I],K); Inc(I,K);
+    End;
+    If HavePal Then Palette(PalBuf,PalSize);
+    HavePal:=False; PalSize:=0;
+    VideoBlock(Buf,BSz-4,Sub); FreeMem(Buf,BSz);
+    { image prete }
+    If PNGMode Then Begin
+     For I:=0 To 318*198-1 Do Begin
+      Rgb^[3*I]:=AVSR[AVSPix[I]]; Rgb^[3*I+1]:=AVSG[AVSPix[I]]; Rgb^[3*I+2]:=AVSB[AVSPix[I]];
+     End;
+     AVSWritePNG(Target,Rgb,318,198); Opened:=True; Frames:=1; Break;
+    End;
+    If Not Opened Then Begin
+     OpenWrite(Target); Opened:=True;
+     Str(Fps,S); Hdr:='YUV4MPEG2 W318 H198 F'+S+':1 Ip A1:1 C420jpeg'+#10; WriteBytes(Hdr[1],Length(Hdr));
+    End;
+    Hdr:='FRAME'+#10; WriteBytes(Hdr[1],Length(Hdr));
+    For Y:=0 To 197 Do Begin
+     For X:=0 To 317 Do Row[X]:=Y4(AVSR[AVSPix[Y*318+X]],AVSG[AVSPix[Y*318+X]],AVSB[AVSPix[Y*318+X]]);
+     WriteBytes(Row,318);
+    End;
+    For K:=0 To 1 Do For Y:=0 To 98 Do Begin
+     For X:=0 To 158 Do Begin
+      UVal:=0;
+      For J:=0 To 3 Do Begin
+       I:=AVSPix[(2*Y+(J Shr 1))*318+2*X+(J And 1)];
+       If K=0 Then Inc(UVal,U4(AVSR[I],AVSG[I],AVSB[I])) Else Inc(UVal,V4(AVSR[I],AVSG[I],AVSB[I]));
+      End;
+      Row[X]:=(UVal+2) Div 4;
+     End;
+     WriteBytes(Row,159);
+    End;
+    Inc(Frames);
+   End;
+   Inc(Pos,BSz);
+  End;
+  If PNGMode And (Frames>0) Then Break;
+ End;
+ FreeMem(PalBuf,800); FreeMem(Rgb,318*198*3);
+ If Frames=0 Then Fail('avs: aucune image video.');
+ CloseRead; If Not PNGMode Then CloseWrite;
+End;
+
 Procedure NormalizeWave(Const Source,Target: String; ForMP3: Boolean);
 Type
  TBytes = Array[0..4095] Of Byte;
@@ -15466,6 +15668,7 @@ Begin
  WriteLn(' D  ea              Electronic Arts Multimedia (audio adpcm_ea, r1, r2, r3, xas)');
  WriteLn(' D  xa              Maxis XA (adpcm_ea_maxis_xa)');
  WriteLn(' D  amv             AMV (audio adpcm_ima_amv; video amv vers Y4M)');
+ WriteLn(' D  avs             Argonaut Creature Shock AVS (video vers Y4M/PNG)');
  WriteLn(' D  iss             Funcom ISS (adpcm_ima_iss)');
  WriteLn(' D  smjpeg          Loki SDL MJPEG (adpcm_ima_smjpeg)');
  WriteLn(' D  thp             Nintendo THP (audio adpcm_thp)');
@@ -15748,6 +15951,7 @@ BEGIN
    WriteLn(' D = decodage, E = encodage, A = audio, V = video');
    WriteLn('D V    4xm             4X Movie');
    WriteLn('D V    amv             AMV Video');
+   WriteLn('D V    avs             AVS (Audio Video Standard) video');
    WriteLn('D V    8bps            QuickTime 8BPS video (8/24/32 bits)');
    WriteLn('D A    8svx_fib        8SVX fibonacci');
    WriteLn('D A    8svx_exp        8SVX exponential');
@@ -15995,6 +16199,22 @@ BEGIN
    (VideoCodec='mpeg2video') Or (VideoCodec='ffv1') Or (VideoCodec='flv') Or FourMV) Then
    Fail('amv: sortie Y4M ou encodeur video natif requis.');
   Temps[6]:=NewTemporary; DecodeAMVVideo(Intermediate,Temps[6]); Intermediate:=Temps[6];
+  InputFormat:='yuv4mpegpipe'; DecodedVideo:=True; NoAudio:=True;
+ End;
+ If InputFormat='avs' Then Begin
+  If NoVideo Or (VideoCodec='copy') Or (AudioCodec<>'') Or HasBitrate Or (RequestedRate<>0) Or
+   (RequestedChannels<>0) Or (ImageWidth<>0) Or IsHTTP(InputPath) Then
+   Fail('avs: video locale decodee, sans copie ni conversion audio requise.');
+  If (VideoCodec='png') Or (OutputFormat='png') Then Begin
+   If VideoFrames<>1 Then Fail('avs: extraction PNG avec -frames:v 1 requise.');
+   Temps[2]:=NewTemporary; DecodeAVS(Intermediate,Temps[2],True);
+   Commit(Temps[2]); Temps[2]:=''; WriteLn('Image creee: ',OutputPath); Halt(0);
+  End;
+  If VideoFrames<>0 Then Fail('avs: -frames:v reserve a la sortie PNG.');
+  If Not ((OutputFormat='yuv4mpegpipe') Or (VideoCodec='mpeg4') Or (VideoCodec='mpeg1video') Or
+   (VideoCodec='mpeg2video') Or (VideoCodec='ffv1') Or (VideoCodec='flv') Or FourMV) Then
+   Fail('avs: sortie Y4M, PNG ou encodeur video natif requis.');
+  Temps[6]:=NewTemporary; DecodeAVS(Intermediate,Temps[6],False); Intermediate:=Temps[6];
   InputFormat:='yuv4mpegpipe'; DecodedVideo:=True; NoAudio:=True;
  End;
  If HasCrop Then Begin
