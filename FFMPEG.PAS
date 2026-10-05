@@ -3811,6 +3811,11 @@ Begin
    If (ADXOffset>=8) And (ADXOffset<=1048575) Then Begin Probe:='ea'; Exit; End;
   End;
  End;
+ If N>=15 Then If (B[0]=73) And (B[1]=77) And (B[2]=65) And (B[3]=95) And (B[4]=65) And (B[5]=68) And
+  (B[6]=80) And (B[7]=67) And (B[8]=77) And (B[9]=95) And (B[10]=83) And (B[11]=111) And (B[12]=117) And
+  (B[13]=110) And (B[14]=100) Then Begin Probe:='iss'; Exit; End;
+ If N>=12 Then If (B[0]=82) And (B[1]=73) And (B[2]=70) And (B[3]=70) And (B[8]=65) And (B[9]=77) And
+  (B[10]=86) And (B[11]=32) Then Begin Probe:='amv'; Exit; End;
  If N>=7 Then If (B[0]=$0B) And (B[1]=$77) Then Begin Probe:='ac3'; Exit; End;
  If N>=7 Then If (B[0]=$FF) And ((B[1] And $F6)=$F0) Then Begin Probe:='aac'; Exit; End;
  If N>=4 Then If (B[0]=$FF) And ((B[1] And $E6)=$E6) Then Begin
@@ -10867,8 +10872,198 @@ Begin
  EADecodeMaxis:=True;
 End;
 
+{ ADPCM IMA: AMV, DK3, DK4, EA EACS, EA SEAD, ISS et QuickTime. Adapte de FFmpeg
+  libavcodec/adpcm.c et adpcmenc.c, LGPL-2.1-or-later. Codes de paquet: 6 EACS, 7 SEAD. }
+Var
+ IMAPred,IMAIdx: Array[0..1] Of LongInt;
+
+Procedure IMAReset;
+Var I: Integer;
+Begin For I:=0 To 1 Do Begin IMAPred[I]:=0; IMAIdx[I]:=0; End; End;
+
+{ IMA standard avec decalage Shift (3 pour AMV/DK/ISS/EACS, 6 pour SEAD). }
+Function IMAExpand(C: Integer; Nibble,Shift: Integer): LongInt;
+Var
+ Diff,NewIndex,P: LongInt;
+Begin
+ Diff:=((2*LongInt(Nibble And 7)+1)*ADPCMStepTable[IMAIdx[C]]) Shr Shift;
+ NewIndex:=IMAIdx[C]+ADPCMIndexTable[Nibble];
+ If NewIndex<0 Then NewIndex:=0; If NewIndex>88 Then NewIndex:=88;
+ If (Nibble And 8)<>0 Then P:=IMAPred[C]-Diff Else P:=IMAPred[C]+Diff;
+ IMAPred[C]:=ADPCMClip16(P); IMAIdx[C]:=NewIndex; IMAExpand:=IMAPred[C];
+End;
+
+{ IMA QuickTime: diff construit bit par bit. }
+Function IMAExpandQT(C: Integer; Nibble: Integer): LongInt;
+Var
+ Step,Diff,NewIndex,P: LongInt;
+Begin
+ Step:=ADPCMStepTable[IMAIdx[C]];
+ NewIndex:=IMAIdx[C]+ADPCMIndexTable[Nibble];
+ If NewIndex<0 Then NewIndex:=0; If NewIndex>88 Then NewIndex:=88;
+ Diff:=Step Shr 3;
+ If (Nibble And 4)<>0 Then Inc(Diff,Step);
+ If (Nibble And 2)<>0 Then Inc(Diff,Step Shr 1);
+ If (Nibble And 1)<>0 Then Inc(Diff,Step Shr 2);
+ If (Nibble And 8)<>0 Then P:=IMAPred[C]-Diff Else P:=IMAPred[C]+Diff;
+ IMAPred[C]:=ADPCMClip16(P); IMAIdx[C]:=NewIndex; IMAExpandQT:=IMAPred[C];
+End;
+
+{ Un bloc QuickTime: 34 octets par canal, 64 echantillons par canal. }
+Function IMADecodeQT(P: PEABuffer; Size: LongInt; Ch: Integer): Boolean;
+Var
+ Plane: Array[0..1,0..63] Of LongInt;
+ C,M,I: Integer;
+ V,Idx,Pred,B: LongInt;
+ Keep: Boolean;
+Begin
+ IMADecodeQT:=False;
+ If Size<34*Ch Then Exit;
+ For C:=0 To Ch-1 Do Begin
+  V:=EABE16(P,Size,C*34); Idx:=V And $7F; Pred:=V And (Not LongInt($7F));
+  Keep:=False;
+  If IMAIdx[C]=Idx Then If Abs(Pred-IMAPred[C])<=$7F Then Keep:=True;
+  If Not Keep Then Begin IMAIdx[C]:=Idx; IMAPred[C]:=Pred; End;
+  If IMAIdx[C]>88 Then Exit;
+  For M:=0 To 31 Do Begin
+   B:=EAByte(P,Size,C*34+2+M);
+   Plane[C,2*M]:=IMAExpandQT(C,B And 15); Plane[C,2*M+1]:=IMAExpandQT(C,B Shr 4);
+  End;
+ End;
+ For I:=0 To 63 Do For C:=0 To Ch-1 Do EAPut(Plane[C,I]);
+ IMADecodeQT:=True;
+End;
+
+{ AMV: mono, en-tete de 8 octets (predicteur, index, nombre d'echantillons). }
+Function IMADecodeAMV(P: PEABuffer; Size: LongInt): Boolean;
+Var
+ Coded,N,I,V: LongInt;
+Begin
+ IMADecodeAMV:=False; Coded:=EA32(P,Size,4,False);
+ If (Coded<=0) Or (Coded>(Size-8)*2) Then Exit;
+ IMAPred[0]:=EALE16(P,Size,0); IMAIdx[0]:=EAByte(P,Size,2);
+ If IMAIdx[0]>88 Then Exit;
+ N:=Coded Shr 1;
+ For I:=0 To N-1 Do Begin
+  V:=EAByte(P,Size,8+I);
+  EAPut(IMAExpand(0,V Shr 4,3)); EAPut(IMAExpand(0,V And 15,3));
+ End;
+ If Odd(Coded) Then EAPut(IMAExpand(0,EAByte(P,Size,8+N) Shr 4,3));
+ IMADecodeAMV:=True;
+End;
+
+{ Funcom ISS: 4 octets d'en-tete par canal; mono: quartets inverses. }
+Function IMADecodeISS(P: PEABuffer; Size: LongInt; Ch: Integer): Boolean;
+Var
+ C: Integer;
+ N,I,V,V1,V2: LongInt;
+Begin
+ IMADecodeISS:=False;
+ If (Size-4*Ch)*2 Div Ch<=0 Then Exit;
+ For C:=0 To Ch-1 Do Begin
+  IMAPred[C]:=EALE16(P,Size,4*C); IMAIdx[C]:=EALE16(P,Size,4*C+2);
+  If (IMAIdx[C]<0) Or (IMAIdx[C]>88) Then Exit;
+ End;
+ N:=(Size-4*Ch)*2 Div Ch Shr (2-Ch);
+ For I:=0 To N-1 Do Begin
+  V:=EAByte(P,Size,4*Ch+I);
+  If Ch=2 Then Begin V1:=V Shr 4; V2:=V And 15; End Else Begin V2:=V Shr 4; V1:=V And 15; End;
+  EAPut(IMAExpand(0,V1,3)); EAPut(IMAExpand(Ch-1,V2,3));
+ End;
+ IMADecodeISS:=True;
+End;
+
+{ Duck DK4: premier echantillon de chaque canal dans l'en-tete. Consomme Used octets. }
+Function IMADecodeDK4(P: PEABuffer; Size: LongInt; Ch: Integer; Var Used: LongInt): Boolean;
+Var
+ C: Integer;
+ Nb,N,I,V: LongInt;
+Begin
+ IMADecodeDK4:=False; Used:=Size;
+ If Size<4*Ch Then Exit;
+ Nb:=1+((Size-4*Ch)*2) Div Ch; N:=(Nb-1) Shr (2-Ch);
+ For C:=0 To Ch-1 Do Begin
+  IMAPred[C]:=EALE16(P,Size,4*C); IMAIdx[C]:=EALE16(P,Size,4*C+2);
+  If (IMAIdx[C]<0) Or (IMAIdx[C]>88) Then Exit;
+  EAPut(IMAPred[C]);
+ End;
+ For I:=0 To N-1 Do Begin
+  V:=EAByte(P,Size,4*Ch+I);
+  EAPut(IMAExpand(0,V Shr 4,3)); EAPut(IMAExpand(Ch-1,V And 15,3));
+ End;
+ Used:=4*Ch+N; IMADecodeDK4:=True;
+End;
+
+{ Duck DK3: stereo somme/difference, trois quartets pour quatre echantillons. }
+Function IMADecodeDK3(P: PEABuffer; Size: LongInt; Var Used: LongInt): Boolean;
+Var
+ Frames,Count,At,Last: LongInt;
+ Top: Boolean;
+Function Nibble: LongInt;Begin
+ If Top Then Begin Nibble:=Last Shr 4; Top:=False; End
+ Else Begin Last:=EAByte(P,Size,At); Inc(At); Nibble:=Last And 15; Top:=True; End;
+End;
+Function Wrap(V: LongInt): LongInt;Begin Wrap:=((V+32768) And 65535)-32768; End;
+Begin
+ IMADecodeDK3:=False; Used:=Size;
+ Frames:=((Size-16)*2 Div 3*4) Div 2;
+ If Frames<=0 Then Exit;
+ IMAPred[0]:=EALE16(P,Size,10); IMAPred[1]:=EALE16(P,Size,12);
+ IMAIdx[0]:=EAByte(P,Size,14); IMAIdx[1]:=EAByte(P,Size,15);
+ If (IMAIdx[0]>88) Or (IMAIdx[1]>88) Then Exit;
+ At:=16; Top:=False; Last:=0; Count:=0;
+ While Count<Frames*2 Do Begin
+  IMAExpand(0,Nibble,3); IMAExpand(1,Nibble,3);
+  EAPut(Wrap(IMAPred[0]+IMAPred[1])); EAPut(Wrap(IMAPred[0]-IMAPred[1]));
+  IMAExpand(0,Nibble,3);
+  EAPut(Wrap(IMAPred[0]+IMAPred[1])); EAPut(Wrap(IMAPred[0]-IMAPred[1]));
+  Inc(Count,4);
+ End;
+ If Odd(At) Then Inc(At);
+ If At>Size Then At:=Size;
+ Used:=At; IMADecodeDK3:=True;
+End;
+
+{ EA EACS: en-tete 4 + 8 octets par canal. }
+Function IMADecodeEACS(P: PEABuffer; Size: LongInt; Ch: Integer): Boolean;
+Var
+ C: Integer;
+ Coded,Nb,I,V: LongInt;
+Begin
+ IMADecodeEACS:=False;
+ Coded:=EA32(P,Size,0,False); Nb:=((Size-(4+8*Ch))*2) Div Ch;
+ If (Coded<=0) Or (Coded>Nb) Then Exit;
+ For C:=0 To Ch-1 Do Begin
+  IMAIdx[C]:=EA32(P,Size,4+4*C,False);
+  If (IMAIdx[C]<0) Or (IMAIdx[C]>88) Then Exit;
+ End;
+ For C:=0 To Ch-1 Do Begin
+  IMAPred[C]:=EA32(P,Size,4+4*Ch+4*C,False);
+  If Abs(IMAPred[C])>65536 Then Exit;
+ End;
+ For I:=0 To (Coded Shr (2-Ch))-1 Do Begin
+  V:=EAByte(P,Size,4+8*Ch+I);
+  EAPut(IMAExpand(0,V Shr 4,3)); EAPut(IMAExpand(Ch-1,V And 15,3));
+ End;
+ IMADecodeEACS:=True;
+End;
+
+{ EA SEAD: flux de quartets continu, etat conserve entre paquets, decalage 6. }
+Function IMADecodeSEAD(P: PEABuffer; Size: LongInt; Ch: Integer): Boolean;
+Var
+ I,V: LongInt;
+Begin
+ For I:=0 To Size-1 Do Begin
+  V:=EAByte(P,Size,I);
+  EAPut(IMAExpand(0,V Shr 4,6)); EAPut(IMAExpand(Ch-1,V And 15,6));
+ End;
+ IMADecodeSEAD:=Size>0;
+End;
+
 Function EADecodePacket(Codec: Integer; P: PEABuffer; Size: LongInt; Ch: Integer): Boolean;Begin
  Case Codec Of
+  6: EADecodePacket:=IMADecodeEACS(P,Size,Ch);
+  7: EADecodePacket:=IMADecodeSEAD(P,Size,Ch);
   0: EADecodePacket:=EADecodeEA(P,Size,Ch);
   1: EADecodePacket:=EADecodeMaxis(P,Size,Ch);
   2,3,4: EADecodePacket:=EADecodeR(P,Size,Ch,Codec);
@@ -10883,6 +11078,8 @@ Function EACodecNumber(Const Name: String): Integer;Begin
  Else If Name='adpcm_ea_r2' Then EACodecNumber:=3
  Else If Name='adpcm_ea_r3' Then EACodecNumber:=4
  Else If Name='adpcm_ea_xas' Then EACodecNumber:=5
+ Else If Name='adpcm_ima_ea_eacs' Then EACodecNumber:=6
+ Else If Name='adpcm_ima_ea_sead' Then EACodecNumber:=7
  Else EACodecNumber:=-1;
 End;
 
@@ -10890,7 +11087,7 @@ End;
   impose avec -c:a avant -i (par exemple adpcm_ea_xas). }
 Procedure DecodeEAContainer(Const Source,Target,Forced: String);
 Var
- Limit,Pos,Chunk,Take,Done,Value,Cur: LongInt;
+ Limit,Pos,Chunk,Take,Done,Value,Cur,Skip: LongInt;
  Size: Int64;
  Big,Found,InHeader,InSub,Eof: Boolean;
  Codec,Channels,Compression,Revision,Revision2,Rate,I,Kind: LongInt;
@@ -10985,7 +11182,7 @@ Procedure Choose;Begin
  If Rate=-1 Then Begin If Revision=3 Then Rate:=48000 Else Rate:=22050; End;
 End;
 Begin
- EAReset; OpenRead(Source); Limit:=InputSize; Found:=False; Big:=False; Eof:=False;
+ EAReset; IMAReset; OpenRead(Source); Limit:=InputSize; Found:=False; Big:=False; Eof:=False;
  If Limit<8 Then Fail('ea: fichier tronque.');
  Pos:=0; I:=0;
  While (I<5) And (Limit-Pos>=8) And Not Found Do Begin
@@ -10998,8 +11195,14 @@ Begin
    If Tag4(Cur-4)='GSTR' Then Inc(Cur,4)
     Else If (Value And 255)<>80 Then Inc(Cur,4);
    Elements; Choose; Found:=True;
-  End Else If Tag='1SNh' Then Fail('ea: audio EACS (1SNh) non pris en charge.')
-  Else If Tag='SEAD' Then Fail('ea: audio SEAD non pris en charge.');
+  End Else If Tag='1SNh' Then Begin
+   If Tag4(Pos+8)<>'EACS' Then Fail('ea: en-tete 1SNh inconnu.');
+   Cur:=Pos+12; Rate:=U32(Cur,Big); Inc(Cur,4); RB; Channels:=RB; Compression:=RB;
+   If Compression=2 Then Kind:=6 Else Kind:=100;
+   Found:=True;
+  End Else If Tag='SEAD' Then Begin
+   Rate:=U32(Pos+8,False); Channels:=U32(Pos+16,False); Kind:=7; Found:=True;
+  End;
   If Size>Limit-Pos Then Break;
   Inc(Pos,Size); Inc(I);
  End;
@@ -11017,20 +11220,25 @@ Begin
  While Limit-Pos>=8 Do Begin
   Tag:=Tag4(Pos); Size:=U32(Pos+4,Big);
   If Size<8 Then Break;
-  If (Tag='SCDl') Or (Tag='SNDC') Or (Tag='SDEN') Then Begin
+  If (Tag='SCDl') Or (Tag='SNDC') Or (Tag='SDEN') Or (Tag='1SNd') Or (Tag='1SNh') Then Begin
    If Size-8>Limit-Pos-8 Then Chunk:=Limit-Pos-8 Else Chunk:=Size-8;
+   Skip:=0;
+   If Tag='1SNh' Then Begin
+    If Chunk<32 Then Break;
+    Skip:=32; Dec(Chunk,32);
+   End;
    If Chunk>0 Then Begin
     If Chunk>67108864 Then Fail('ea: bloc audio trop grand.');
-    If (Codec<>1) And (Codec<>5) And (Chunk<4) Then Break;
+    If (Codec In [0,2,3,4,6]) And (Chunk<4) Then Break;
     GetMem(Buf,Chunk); Done:=0;
     While Done<Chunk Do Begin
      Take:=SizeOf(Raw); If Chunk-Done<Take Then Take:=Chunk-Done;
-     ReadAt(Pos+8+Done,Raw,Take); Move(Raw,Buf^[Done],Take); Inc(Done,Take);
+     ReadAt(Pos+8+Skip+Done,Raw,Take); Move(Raw,Buf^[Done],Take); Inc(Done,Take);
     End;
     EADecodePacket(Codec,Buf,Chunk,Channels); FreeMem(Buf,Chunk);
    End;
    Pos:=Pos+Size;
-  End Else If (Tag='SCEl') Or (Tag='SEND') Or (Tag='SEEN') Or (Size=0) Then Begin
+  End Else If (Tag='SCEl') Or (Tag='SEND') Or (Tag='SEEN') Or (Tag='1SNe') Or (Size=0) Then Begin
    Inc(Pos,8);
    While Limit-Pos>=4 Do Begin
     Tag:=Tag4(Pos);
@@ -11076,6 +11284,361 @@ Begin
  EAFlush;
  If EAWritten=0 Then Fail('xa: aucune donnee audio decodee.');
  ADPCMPatchHeader(Rate,Channels,EAWritten); CloseRead; CloseWrite;
+End;
+
+{ Etiquette de format d'un WAV (-1 si absent ou invalide). }
+Function WaveFormatTag(Const Name: String): LongInt;
+Var
+ B: Array[0..15] Of Byte;
+ Limit,Position,Size: LongInt;
+ Count: Integer;
+Begin
+ WaveFormatTag:=-1; OpenRead(Name); Limit:=InputSize;
+ If Limit>=12 Then Begin
+  ReadAt(0,B,12);
+  If (B[0]=82) And (B[1]=73) And (B[2]=70) And (B[3]=70) And (B[8]=87) And (B[9]=65) Then Begin
+   Position:=12; Count:=0;
+   While (Limit-Position>=8) And (Count<64) Do Begin
+    ReadAt(Position,B,8); Inc(Position,8); Inc(Count);
+    If B[7]>=128 Then Break;
+    Size:=LongInt(B[4])+LongInt(B[5])*256+LongInt(B[6])*65536+LongInt(B[7])*16777216;
+    If (B[0]=102) And (B[1]=109) And (B[2]=116) And (B[3]=32) Then Begin
+     If (Size>=2) And (Limit-Position>=2) Then Begin
+      ReadAt(Position,B,2); WaveFormatTag:=LongInt(B[0])+LongInt(B[1])*256;
+     End;
+     Break;
+    End;
+    If Size>Limit-Position Then Break;
+    Inc(Position,Size); If Odd(Size) Then Inc(Position);
+   End;
+  End;
+ End;
+ CloseRead;
+End;
+
+{ WAV Duck DK3 (0x0062) et DK4 (0x0061). }
+Procedure DecodeWaveDK(Const Source,Target: String);
+Var
+ B: Array[0..23] Of Byte;
+ Limit,Position,Size,Rate,DataAt,DataSize,Take,Used,Tag: LongInt;
+ Channels,Align,Count: LongInt;
+ Buf: PEABuffer;
+ HasFormat,HasData,Ok: Boolean;
+Begin
+ IMAReset; EAReset; OpenRead(Source); Limit:=InputSize; ReadAt(0,B,12);
+ Position:=12; Count:=0; HasFormat:=False; HasData:=False; Tag:=0;
+ Rate:=0; Channels:=0; Align:=0; DataAt:=0; DataSize:=0;
+ While (Limit-Position>=8) And (Count<64) And Not HasData Do Begin
+  ReadAt(Position,B,8); Inc(Position,8); Inc(Count);
+  If B[7]>=128 Then Fail('adpcm_ima_dk: taille de bloc WAV excessive.');
+  Size:=LongInt(B[4])+LongInt(B[5])*256+LongInt(B[6])*65536+LongInt(B[7])*16777216;
+  If (B[0]=102) And (B[1]=109) And (B[2]=116) And (B[3]=32) Then Begin
+   If (Size<16) Or (Limit-Position<16) Then Fail('adpcm_ima_dk: bloc fmt tronque.');
+   ReadAt(Position,B,16); Tag:=LongInt(B[0])+LongInt(B[1])*256;
+   Channels:=LongInt(B[2])+LongInt(B[3])*256;
+   Rate:=LongInt(B[4])+LongInt(B[5])*256+LongInt(B[6])*65536+LongInt(B[7])*16777216;
+   Align:=LongInt(B[12])+LongInt(B[13])*256;
+   HasFormat:=True;
+  End Else If (B[0]=100) And (B[1]=97) And (B[2]=116) And (B[3]=97) Then Begin
+   DataAt:=Position; DataSize:=Size; If DataSize>Limit-Position Then DataSize:=Limit-Position;
+   HasData:=True;
+  End;
+  Inc(Position,Size); If Odd(Size) Then Inc(Position);
+ End;
+ If Not HasFormat Or Not HasData Or (DataSize=0) Then Fail('adpcm_ima_dk: blocs fmt et data requis.');
+ If (Rate<4000) Or (Rate>192000) Then Fail('adpcm_ima_dk: frequence 4000..192000 Hz requise.');
+ If (Align<4) Or (Align>65535) Then Fail('adpcm_ima_dk: alignement de bloc incorrect.');
+ If Tag=$62 Then Begin
+  If Channels<>2 Then Fail('adpcm_ima_dk3: stereo requis.');
+ End Else If (Channels<1) Or (Channels>2) Then Fail('adpcm_ima_dk4: mono ou stereo requis.');
+ OpenWrite(Target); ADPCMWaveHeader(Rate,Channels,0);
+ GetMem(Buf,Align);
+ While DataSize>0 Do Begin
+  Take:=Align; If DataSize<Take Then Take:=DataSize;
+  ReadAt(DataAt,Buf^,Take); Used:=Take;
+  If Tag=$62 Then Ok:=IMADecodeDK3(Buf,Take,Used) Else Ok:=IMADecodeDK4(Buf,Take,Channels,Used);
+  If (Not Ok) Or (Used<1) Then Used:=Take;
+  Inc(DataAt,Used); Dec(DataSize,Used);
+ End;
+ FreeMem(Buf,Align); EAFlush;
+ If EAWritten=0 Then Fail('adpcm_ima_dk: aucune donnee audio decodee.');
+ ADPCMPatchHeader(Rate,Channels,EAWritten); CloseRead; CloseWrite;
+End;
+
+{ Funcom ISS: en-tete textuel de dix elements separes par des espaces. }
+Procedure DecodeISS(Const Source,Target: String);
+Var
+ Limit,Pos,PacketSize,Rate,Divisor,Start,Code,Take: LongInt;
+ Channels: Integer;
+ Tokens: Array[1..10] Of String[24];
+ I,N: Integer;
+ C: Byte;
+ Buf: PEABuffer;
+Begin
+ IMAReset; EAReset; OpenRead(Source); Limit:=InputSize; Pos:=0;
+ For I:=1 To 10 Do Begin
+  Tokens[I]:=''; N:=0;
+  Repeat
+   If Pos>=Limit Then Fail('iss: en-tete tronque.');
+   ReadAt(Pos,C,1); Inc(Pos);
+   If C=0 Then Begin
+    If Pos<Limit Then Inc(Pos);
+    Break;
+   End;
+   If C=32 Then Break;
+   If N<23 Then Begin Tokens[I]:=Tokens[I]+Chr(C); Inc(N); End;
+  Until False;
+ End;
+ If Tokens[1]<>'IMA_ADPCM_Sound' Then Fail('iss: signature IMA_ADPCM_Sound requise.');
+ Val(Tokens[2],PacketSize,Code); If (Code<>0) Or (PacketSize<=0) Or (PacketSize>65535) Then
+  Fail('iss: taille de paquet incorrecte.');
+ Val(Tokens[5],N,Code); If Code<>0 Then Fail('iss: indicateur stereo incorrect.');
+ If N<>0 Then Channels:=2 Else Channels:=1;
+ Val(Tokens[7],Divisor,Code); If Code<>0 Then Fail('iss: diviseur de frequence incorrect.');
+ Rate:=44100; If Divisor>0 Then Rate:=Rate Div Divisor;
+ If (Rate<4000) Or (Rate>192000) Then Fail('iss: frequence 4000..192000 Hz requise.');
+ Start:=Pos; OpenWrite(Target); ADPCMWaveHeader(Rate,Channels,0);
+ GetMem(Buf,PacketSize);
+ While Limit-Pos>=PacketSize Do Begin
+  ReadAt(Pos,Buf^,PacketSize); Inc(Pos,PacketSize);
+  IMADecodeISS(Buf,PacketSize,Channels);
+ End;
+ FreeMem(Buf,PacketSize); EAFlush; Take:=Start;
+ If EAWritten=0 Then Fail('iss: aucune donnee audio decodee.');
+ ADPCMPatchHeader(Rate,Channels,EAWritten); CloseRead; CloseWrite;
+End;
+
+{ AMV: AVI simplifie, audio ADPCM IMA AMV dans les blocs 01wb. }
+Procedure DecodeAMV(Const Source,Target: String);
+Var
+ H: Array[0..31] Of Byte;
+ Limit,Pos,Size,Rate,Streams,Take: LongInt;
+ Channels: LongInt;
+ Buf: PEABuffer;
+ InMovie: Boolean;
+ Tag: String[4];
+ I: Integer;
+Function T4: String;
+Var S: String[4]; J: Integer;
+Begin S:=''; For J:=0 To 3 Do S:=S+Chr(H[J]); T4:=S; End;
+Begin
+ IMAReset; EAReset; OpenRead(Source); Limit:=InputSize;
+ If Limit<12 Then Fail('amv: fichier tronque.');
+ ReadAt(0,H,12);
+ If (T4<>'RIFF') Or (H[8]<>65) Or (H[9]<>77) Or (H[10]<>86) Or (H[11]<>32) Then
+  Fail('amv: signature RIFF/AMV requise.');
+ Pos:=12; Streams:=0; Rate:=0; Channels:=0; InMovie:=False;
+ While (Limit-Pos>=8) And Not InMovie Do Begin
+  ReadAt(Pos,H,8); Tag:=T4;
+  Size:=LongInt(H[4])+LongInt(H[5])*256+LongInt(H[6])*65536+LongInt(H[7])*16777216;
+  If H[7]>=128 Then Fail('amv: taille de bloc excessive.');
+  If Tag='LIST' Then Begin
+   If Limit-Pos<12 Then Fail('amv: LIST tronquee.');
+   ReadAt(Pos+8,H,4);
+   If (H[0]=109) And (H[1]=111) And (H[2]=118) And (H[3]=105) Then InMovie:=True;
+   Inc(Pos,12);
+  End Else Begin
+   If Tag='strh' Then Inc(Streams)
+   Else If (Tag='strf') And (Streams=2) And (Size>=8) And (Limit-Pos>=16) Then Begin
+    ReadAt(Pos+8,H,8);
+    Channels:=LongInt(H[2])+LongInt(H[3])*256;
+    Rate:=LongInt(H[4])+LongInt(H[5])*256+LongInt(H[6])*65536+LongInt(H[7])*16777216;
+   End;
+   Pos:=Pos+8+Size+(Size And 1);
+  End;
+ End;
+ If Not InMovie Then Fail('amv: liste movi absente.');
+ If Streams<2 Then Fail('amv: piste audio absente.');
+ If Channels<>1 Then Fail('amv: audio mono requis.');
+ If (Rate<4000) Or (Rate>192000) Then Fail('amv: frequence 4000..192000 Hz requise.');
+ OpenWrite(Target); ADPCMWaveHeader(Rate,Channels,0);
+ While Limit-Pos>=8 Do Begin
+  ReadAt(Pos,H,8); Tag:=T4;
+  If H[7]>=128 Then Break;
+  Size:=LongInt(H[4])+LongInt(H[5])*256+LongInt(H[6])*65536+LongInt(H[7])*16777216;
+  If Size>Limit-Pos-8 Then Size:=Limit-Pos-8;
+  If (H[0]=48) And (H[1]=49) And (H[2]=119) And (H[3]=98) And (Size>0) Then Begin
+   GetMem(Buf,Size); I:=0;
+   While I<Size Do Begin
+    If Size-I>16384 Then Take:=16384 Else Take:=Size-I;
+    ReadAt(Pos+8+I,Buf^[I],Take); Inc(I,Take);
+   End;
+   IMADecodeAMV(Buf,Size); FreeMem(Buf,Size);
+  End;
+  { Les blocs impairs ne sont pas toujours bourres dans les fichiers AMV. }
+  Pos:=Pos+8+Size;
+  If Odd(Size) And (Limit-Pos>=2) Then Begin
+   ReadAt(Pos,H,2);
+   If Not ((H[0]>=48) And (H[0]<=57) And (H[1]>=48) And (H[1]<=57)) Then Inc(Pos);
+  End;
+ End;
+ EAFlush;
+ If EAWritten=0 Then Fail('amv: aucune donnee audio decodee.');
+ ADPCMPatchHeader(Rate,Channels,EAWritten); CloseRead; CloseWrite;
+End;
+
+{ AIFF-C: compression 'ima4' (ADPCM IMA QuickTime). }
+Function IsAIFFIma4(Const Name: String): Boolean;
+Var
+ B: Array[0..23] Of Byte;
+ Limit,Position,Size: LongInt;
+ Count: Integer;
+Begin
+ IsAIFFIma4:=False; OpenRead(Name); Limit:=InputSize;
+ If Limit>=12 Then Begin
+  ReadAt(0,B,12);
+  If (B[8]=65) And (B[9]=73) And (B[10]=70) And (B[11]=67) Then Begin
+   Position:=12; Count:=0;
+   While (Limit-Position>=8) And (Count<64) Do Begin
+    ReadAt(Position,B,8); Inc(Position,8); Inc(Count);
+    If B[4]>=128 Then Break;
+    Size:=LongInt(B[7])+LongInt(B[6])*256+LongInt(B[5])*65536+LongInt(B[4])*16777216;
+    If (B[0]=67) And (B[1]=79) And (B[2]=77) And (B[3]=77) Then Begin
+     If (Size>=22) And (Limit-Position>=22) Then Begin
+      ReadAt(Position,B,22);
+      IsAIFFIma4:=(B[18]=105) And (B[19]=109) And (B[20]=97) And (B[21]=52);
+     End;
+     Break;
+    End;
+    If Size>Limit-Position Then Break;
+    Inc(Position,Size); If Odd(Size) Then Inc(Position);
+   End;
+  End;
+ End;
+ CloseRead;
+End;
+
+Procedure DecodeAIFFIma4(Const Source,Target: String);
+Var
+ B: Array[0..23] Of Byte;
+ Limit,Position,Size,Rate,DataAt,DataSize,Take,Exponent: LongInt;
+ Channels,Count,J: Integer;
+ Value: Double;
+ Buf: PEABuffer;
+ HasFormat,HasData: Boolean;
+Begin
+ IMAReset; EAReset; OpenRead(Source); Limit:=InputSize; ReadAt(0,B,12);
+ Position:=12; Count:=0; HasFormat:=False; HasData:=False; Rate:=0; Channels:=0;
+ DataAt:=0; DataSize:=0;
+ While (Limit-Position>=8) And (Count<64) And Not HasData Do Begin
+  ReadAt(Position,B,8); Inc(Position,8); Inc(Count);
+  If B[4]>=128 Then Fail('aifc: taille de bloc excessive.');
+  Size:=LongInt(B[7])+LongInt(B[6])*256+LongInt(B[5])*65536+LongInt(B[4])*16777216;
+  If (B[0]=67) And (B[1]=79) And (B[2]=77) And (B[3]=77) Then Begin
+   If (Size<22) Or (Limit-Position<22) Then Fail('aifc: bloc COMM tronque.');
+   ReadAt(Position,B,18);
+   Channels:=LongInt(B[0])*256+B[1];
+   Exponent:=LongInt(B[8])*256+B[9]-16383;
+   If ((B[8] And $80)<>0) Or (Exponent<0) Or (Exponent>30) Then Fail('aifc: frequence incorrecte.');
+   Value:=0; For J:=17 DownTo 10 Do Value:=(Value+B[J])/256;
+   Value:=Value*2; For J:=1 To Exponent Do Value:=Value*2;
+   Rate:=Round(Value); HasFormat:=True;
+  End Else If (B[0]=83) And (B[1]=83) And (B[2]=78) And (B[3]=68) Then Begin
+   If (Size<8) Or (Limit-Position<8) Then Fail('aifc: bloc SSND tronque.');
+   ReadAt(Position,B,8);
+   DataAt:=Position+8+LongInt(B[3])+LongInt(B[2])*256+LongInt(B[1])*65536+LongInt(B[0])*16777216;
+   DataSize:=Size-8-(DataAt-Position-8); If DataSize>Limit-DataAt Then DataSize:=Limit-DataAt;
+   HasData:=True;
+  End;
+  Inc(Position,Size); If Odd(Size) Then Inc(Position);
+ End;
+ If Not HasFormat Or Not HasData Or (DataSize<=0) Then Fail('aifc: blocs COMM et SSND requis.');
+ If (Channels<1) Or (Channels>2) Then Fail('aifc: mono ou stereo requis.');
+ If (Rate<4000) Or (Rate>192000) Then Fail('aifc: frequence 4000..192000 Hz requise.');
+ OpenWrite(Target); ADPCMWaveHeader(Rate,Channels,0);
+ GetMem(Buf,34*Channels); Take:=34*Channels;
+ While DataSize>=Take Do Begin
+  ReadAt(DataAt,Buf^,Take); IMADecodeQT(Buf,Take,Channels);
+  Inc(DataAt,Take); Dec(DataSize,Take);
+ End;
+ FreeMem(Buf,34*Channels); EAFlush;
+ If EAWritten=0 Then Fail('aifc: aucune donnee audio decodee.');
+ ADPCMPatchHeader(Rate,Channels,EAWritten); CloseRead; CloseWrite;
+End;
+
+{ Encodeur adpcm_ima_qt: WAV PCM16 normalise vers AIFF-C 'ima4'. }
+Procedure EncodeIMAQT(Const Source,Target: String);
+Var
+ Head: Array[0..43] Of Byte;
+ Raw: Array[0..255] Of Byte;
+ Block: Array[0..67] Of Byte;
+ Limit,Rate,Frames,Done,Blocks,SizeData,Delta,Step,Diff,Nibble,Sample,Total: LongInt;
+ Channels,C,I,J,Take,Used: Integer;
+ Smp: Array[0..1,0..63] Of LongInt;
+ Pred,Idx: Array[0..1] Of LongInt;
+ Bits: Int64;
+ Exponent: LongInt;
+ Out: Array[0..63] Of Byte;
+Procedure PutByte(V: LongInt);Begin Out[Used]:=V And 255; Inc(Used); End;
+Procedure PutBE32(V: LongInt);Begin PutByte(V Shr 24); PutByte(V Shr 16); PutByte(V Shr 8); PutByte(V); End;
+Procedure PutTag(Const T: String);
+Var K: Integer;
+Begin For K:=1 To 4 Do PutByte(Ord(T[K])); End;
+Procedure Flush;Begin If Used>0 Then Begin WriteBytes(Out,Used); Used:=0; End; End;
+Function Compress(C: Integer; S: LongInt): Integer;
+Var
+ Dl,Df,St,Nb: LongInt;
+Begin
+ Dl:=S-Pred[C]; St:=ADPCMStepTable[Idx[C]]; Nb:=0;
+ If Dl<0 Then Nb:=8;
+ Dl:=Abs(Dl); Df:=Dl+(St Shr 3);
+ If Dl>=St Then Begin Nb:=Nb Or 4; Dl:=Dl-St; End;
+ St:=St Shr 1;
+ If Dl>=St Then Begin Nb:=Nb Or 2; Dl:=Dl-St; End;
+ St:=St Shr 1;
+ If Dl>=St Then Begin Nb:=Nb Or 1; Dl:=Dl-St; End;
+ Df:=Df-Dl;
+ If (Nb And 8)<>0 Then Pred[C]:=Pred[C]-Df Else Pred[C]:=Pred[C]+Df;
+ Pred[C]:=ADPCMClip16(Pred[C]);
+ Idx[C]:=Idx[C]+ADPCMIndexTable[Nb];
+ If Idx[C]<0 Then Idx[C]:=0; If Idx[C]>88 Then Idx[C]:=88;
+ Compress:=Nb;
+End;
+Begin
+ OpenRead(Source); Limit:=InputSize;
+ If Limit<44 Then Fail('adpcm_ima_qt: WAV intermediaire tronque.');
+ ReadAt(0,Head,44); Channels:=Head[22];
+ Rate:=LongInt(Head[24])+LongInt(Head[25])*256+LongInt(Head[26])*65536;
+ If (Channels<1) Or (Channels>2) Or (Head[36]<>100) Then Fail('adpcm_ima_qt: WAV PCM16 mono/stereo requis.');
+ Frames:=(Limit-44) Div (Channels*2);
+ If Frames=0 Then Fail('adpcm_ima_qt: aucune donnee audio.');
+ Blocks:=(Frames+63) Div 64; SizeData:=Blocks*34*Channels;
+ For C:=0 To 1 Do Begin Pred[C]:=0; Idx[C]:=0; End;
+ OpenWrite(Target); Used:=0;
+ PutTag('FORM'); PutBE32(64+SizeData+(SizeData And 1)); PutTag('AIFC');
+ PutTag('FVER'); PutBE32(4); PutBE32(LongInt($A2805140));
+ PutTag('COMM'); PutBE32(24); PutByte(0); PutByte(Channels); PutBE32(Blocks); PutByte(0); PutByte(4);
+ { frequence: reel IEEE 80 bits depuis un entier }
+ Exponent:=0; Total:=Rate; While Total>1 Do Begin Total:=Total Shr 1; Inc(Exponent); End;
+ PutByte((16383+Exponent) Shr 8); PutByte(16383+Exponent);
+ Bits:=Int64(Rate) Shl (63-Exponent);
+ For J:=7 DownTo 0 Do PutByte(Bits Shr (J*8));
+ PutTag('ima4'); PutByte(0); PutByte(0);
+ PutTag('SSND'); PutBE32(8+SizeData); PutBE32(0); PutBE32(0);
+ Flush; Done:=0;
+ While Done<Frames Do Begin
+  Take:=64; If Frames-Done<Take Then Take:=Frames-Done;
+  For I:=0 To 63 Do For C:=0 To Channels-1 Do Begin
+   If I<Take Then Begin
+    ReadAt(44+(Done+I)*Channels*2+C*2,Raw,2);
+    Sample:=LongInt(Raw[0])+LongInt(Raw[1])*256; If Sample>=32768 Then Dec(Sample,65536);
+   End Else Sample:=0;
+   Smp[C,I]:=Sample;
+  End;
+  For C:=0 To Channels-1 Do Begin
+   Used:=0;
+   Sample:=((Pred[C] And $FFFF) Shr 7);
+   Block[0]:=(Sample Shr 1) And 255; Block[1]:=((Sample And 1) Shl 7) Or Idx[C];
+   For J:=0 To 31 Do Begin
+    Nibble:=Compress(C,Smp[C,2*J]); Delta:=Compress(C,Smp[C,2*J+1]);
+    Block[2+J]:=(Delta Shl 4) Or Nibble;
+   End;
+   WriteBytes(Block,34);
+  End;
+  Inc(Done,Take);
+ End;
+ Used:=0; If Odd(SizeData) Then Begin PutByte(0); Flush; End;
+ CloseRead; CloseWrite;
 End;
 
 Procedure NormalizeWave(Const Source,Target: String; ForMP3: Boolean);
@@ -12946,9 +13509,11 @@ Begin
  WriteLn(' DE adx             CRI ADX (adpcm_adx, mono/stereo)');
  WriteLn(' D  ea              Electronic Arts Multimedia (audio adpcm_ea, r1, r2, r3, xas)');
  WriteLn(' D  xa              Maxis XA (adpcm_ea_maxis_xa)');
+ WriteLn(' D  amv             AMV (audio adpcm_ima_amv)');
+ WriteLn(' D  iss             Funcom ISS (adpcm_ima_iss)');
  WriteLn(' D  aac             AAC ADTS (AAC-LC mono/stereo; alias: adts)');
  WriteLn(' D  iff             IFF 8SVX, Fibonacci/exponentiel (alias: 8svx, svx)');
- WriteLn(' D  aiff            AIFF/AIFF-C PCM (alias: aif, aifc)');
+ WriteLn(' DE aiff            AIFF/AIFF-C PCM; ima4 (adpcm_ima_qt) en decodage et encodage AIFF-C');
  WriteLn(' D  asf             ASF, audio WMA2 seulement (alias: wma, wmv)');
  WriteLn(' DE avi             AVI H264/MPEG4, AAC/MP3 (copie); decodeurs FFV1, Autodesk RLE');
  WriteLn(' DE flv             FLV1 intra natif; extraction image H264 CAVLC');
@@ -13029,6 +13594,8 @@ Procedure Help;Begin
  WriteLn(' adx: -i entree.adx sortie.wav; -i entree.wav -c:a adpcm_adx sortie.adx (mono/stereo).');
  WriteLn(' adpcm_ct: -i entree.wav|entree.voc (ADPCM Creative, WAV 0x0200) sortie.wav.');
  WriteLn(' adpcm_ea*: -i entree.ea|entree.xa sortie.wav; -c:a adpcm_ea_xas avant -i impose le decodeur.');
+ WriteLn(' adpcm_ima_*: -i entree.amv|entree.iss|dk3.wav|dk4.wav|ima4.aifc|entree.ea sortie.wav;');
+ WriteLn('              -i entree.wav -c:a adpcm_ima_qt sortie.aifc (encodage QuickTime ima4).');
  WriteLn(' -croptop N, -cropbottom N       Retirer N pixels en haut/en bas.');
  WriteLn(' -cropleft N, -cropright N       Retirer N pixels a gauche/a droite.');
  WriteLn(' -f wav|mp3|aiff|voc|iff|libopenmpt Avant -i; -f wav|mp3 avant sortie');
@@ -13229,6 +13796,13 @@ BEGIN
    WriteLn('D A    adpcm_ea_r2     ADPCM Electronic Arts R2');
    WriteLn('D A    adpcm_ea_r3     ADPCM Electronic Arts R3');
    WriteLn('D A    adpcm_ea_xas    ADPCM Electronic Arts XAS');
+   WriteLn('D A    adpcm_ima_amv   ADPCM IMA AMV');
+   WriteLn('D A    adpcm_ima_dk3   ADPCM IMA Duck DK3');
+   WriteLn('D A    adpcm_ima_dk4   ADPCM IMA Duck DK4');
+   WriteLn('D A    adpcm_ima_ea_eacs ADPCM IMA Electronic Arts EACS');
+   WriteLn('D A    adpcm_ima_ea_sead ADPCM IMA Electronic Arts SEAD');
+   WriteLn('D A    adpcm_ima_iss   ADPCM IMA Funcom ISS');
+   WriteLn('DEA    adpcm_ima_qt    ADPCM IMA QuickTime');
    WriteLn('DEA    ac3             ATSC A/52A (AC-3)');
    WriteLn('D A    aac             Advanced Audio Coding (AAC-LC ADTS mono/stereo)');
    WriteLn('D V D  aasc            Autodesk RLE (AVI AASC/AAS4, 8/16/24 bits)');
@@ -13409,7 +13983,7 @@ BEGIN
   If (InputFormat<>'ea') And (InputFormat<>'xa') Then
    Fail('Decodeur impose (-c:a avant -i): conteneurs ea et xa seulement.');
   If EACodecNumber(InputCodec)<0 Then
-   Fail('Decodeur impose: adpcm_ea, adpcm_ea_maxis_xa, adpcm_ea_r1, adpcm_ea_r2, adpcm_ea_r3 ou adpcm_ea_xas.');
+   Fail('Decodeur impose: adpcm_ea, adpcm_ea_maxis_xa, adpcm_ea_r1, adpcm_ea_r2, adpcm_ea_r3, adpcm_ea_xas, adpcm_ima_ea_eacs ou adpcm_ima_ea_sead.');
   If (InputFormat='xa') And (InputCodec<>'adpcm_ea_maxis_xa') Then
    Fail('Le conteneur xa exige le decodeur adpcm_ea_maxis_xa.');
  End;
@@ -13602,12 +14176,13 @@ BEGIN
  If NoAudio Then Fail('-an: aucune piste a ecrire dans une sortie audio seule.');
  If VideoCodec<>'' Then Fail('Codec video incompatible avec une sortie audio seule.');
  If (OutputFormat<>'wav') And (OutputFormat<>'mp3') And (OutputFormat<>'ac3') And
- (OutputFormat<>'adx') Then Fail(
- 'Sorties audio WAV, MP3, AC3 et ADX prises en charge.');
+ (OutputFormat<>'adx') And (OutputFormat<>'aiff') Then Fail(
+ 'Sorties audio WAV, MP3, AC3, ADX et AIFF-C (adpcm_ima_qt) prises en charge.');
  If AudioCodec='' Then If OutputFormat='wav' Then AudioCodec:=
- 'pcm_s16le' Else If OutputFormat='adx' Then AudioCodec:='adpcm_adx' Else AudioCodec:=OutputFormat;
+ 'pcm_s16le' Else If OutputFormat='adx' Then AudioCodec:='adpcm_adx'
+ Else If OutputFormat='aiff' Then AudioCodec:='adpcm_ima_qt' Else AudioCodec:=OutputFormat;
  If (AudioCodec<>'copy') And Not (((OutputFormat='wav') And (AudioCodec='pcm_s16le')) Or
- ((OutputFormat='adx') And (AudioCodec='adpcm_adx')) Or
+ ((OutputFormat='adx') And (AudioCodec='adpcm_adx')) Or ((OutputFormat='aiff') And (AudioCodec='adpcm_ima_qt')) Or
  ((OutputFormat='mp3') And (AudioCodec='mp3')) Or ((OutputFormat='ac3') And (AudioCodec='ac3'))) Then Fail(
  'Codec de sortie non pris en charge pour ce conteneur.');
  If HasBitrate And (((OutputFormat<>'mp3') And (OutputFormat<>'ac3')) Or (AudioCodec='copy')) Then Fail(
@@ -13636,6 +14211,9 @@ BEGIN
    If InputFormat='4xm' Then Decode4XMAudio(InputPath,Temps[0]) Else
    If InputFormat='ea' Then DecodeEAContainer(InputPath,Temps[0],InputCodec) Else
    If InputFormat='xa' Then DecodeMaxisXA(InputPath,Temps[0]) Else
+   If InputFormat='amv' Then DecodeAMV(InputPath,Temps[0]) Else
+   If InputFormat='iss' Then DecodeISS(InputPath,Temps[0]) Else
+   If (InputFormat='aiff') And IsAIFFIma4(InputPath) Then DecodeAIFFIma4(InputPath,Temps[0]) Else
    If InputFormat='aiff' Then DecodeAIFF(InputPath,Temps[0]) Else
    If InputFormat='voc' Then DecodeVOC(InputPath,Temps[0]) Else
    If InputFormat='libopenmpt' Then DecodeMOD(InputPath,Temps[0])
@@ -13643,11 +14221,17 @@ BEGIN
    Intermediate:=Temps[0];
   End Else If IsWaveCT(InputPath) Then Begin
    Temps[0]:=NewTemporary; DecodeWaveCT(InputPath,Temps[0]); Intermediate:=Temps[0];
+  End Else If (WaveFormatTag(InputPath)=$61) Or (WaveFormatTag(InputPath)=$62) Then Begin
+   Temps[0]:=NewTemporary; DecodeWaveDK(InputPath,Temps[0]); Intermediate:=Temps[0];
   End;
   If OutputFormat='wav' Then NormalizeWave(Intermediate,Temps[2],False)
    Else If OutputFormat='adx' Then Begin
     Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False);
     EncodeADX(Temps[1],Temps[2]);
+   End
+   Else If OutputFormat='aiff' Then Begin
+    Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False);
+    EncodeIMAQT(Temps[1],Temps[2]);
    End
    Else If OutputFormat='ac3' Then Begin
     Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False);
