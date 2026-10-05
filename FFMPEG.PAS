@@ -3587,7 +3587,7 @@ Function FormatName(S: String): String;Begin
  If (S='8svx') Or (S='svx') Then S:='iff';
  If S='adts' Then S:='aac';
  If S='mod' Then S:='libopenmpt';
- If (S='mov') Or (S='qt') Then S:='mp4';
+ If (S='mov') Or (S='qt') Or (S='m4a') Then S:='mp4';
  If S='m3u8' Then S:='hls';
  If (S='mpg') Or (S='mpe') Then S:='mpeg';
  If S='y4m' Then S:='yuv4mpegpipe';
@@ -12634,6 +12634,686 @@ Begin
  CloseRead; CloseWrite;
 End;
 
+{ ALAC (Apple Lossless): decodeur et encodeur adaptes de FFmpeg libavcodec/alac.c,
+  alacenc.c, alacdsp.c et lpc.c (LGPL-2.1-or-later); conteneur MP4/M4A. }
+Type
+ TALLong=Array[0..268435455] Of LongInt; PALLong=^TALLong;
+Var
+ ALP: PEABuffer; ALSize,ALBit: LongInt;
+ ALMax,ALSampleSize,ALHistMult,ALInitHist,ALLimit,ALChannels,ALExtraBits,ALCount: LongInt;
+ ALErr,ALOut,ALExtra: Array[0..1] Of PALLong;
+
+Function ALWrap32(V: Int64): LongInt;Begin
+ V:=V And $FFFFFFFF; If V>=2147483648 Then V:=V-4294967296; ALWrap32:=V;
+End;
+
+Function ALSignExt(V: Int64; Bps: Integer): LongInt;
+Var M: Int64;
+Begin
+ If Bps>=32 Then Begin ALSignExt:=ALWrap32(V); Exit; End;
+ M:=Int64(1) Shl (Bps-1); V:=V And ((Int64(1) Shl Bps)-1);
+ If V>=M Then V:=V-2*M; ALSignExt:=V;
+End;
+
+Function ALLog2(V: Int64): Integer;
+Var N: Integer;
+Begin
+ N:=0; While V>1 Do Begin V:=V Shr 1; Inc(N); End; ALLog2:=N;
+End;
+
+Function ALBits(N: Integer): Int64;
+Var V: Int64; I: Integer;
+Begin
+ V:=0;
+ For I:=1 To N Do Begin
+  V:=V*2+((EAByte(ALP,ALSize,ALBit Shr 3) Shr (7-(ALBit And 7))) And 1); Inc(ALBit);
+ End;
+ ALBits:=V;
+End;
+
+Function ALPeek(N: Integer): Int64;
+Var Save: LongInt;
+Begin Save:=ALBit; ALPeek:=ALBits(N); ALBit:=Save; End;
+
+Function ALScalar(K,Bps: Integer): Int64;
+Var X,Extra: Int64; I: Integer;
+Begin
+ I:=0;
+ While I<9 Do Begin If ALBits(1)=0 Then Break; Inc(I); End;
+ X:=I;
+ If X>8 Then X:=ALBits(Bps)
+ Else If K<>1 Then Begin
+  Extra:=ALPeek(K); X:=(X Shl K)-X;
+  If Extra>1 Then Begin X:=X+Extra-1; Inc(ALBit,K); End Else Inc(ALBit,K-1);
+ End;
+ ALScalar:=X;
+End;
+
+Function ALRice(Out: PALLong; Nb,Bps,Mult: LongInt): Boolean;
+Var
+ I,K,BlockSize: LongInt; X,History: Int64; Sign: Integer;
+Begin
+ ALRice:=False; History:=ALInitHist; Sign:=0; I:=0;
+ While I<Nb Do Begin
+  If ALBit>=ALSize*8 Then Exit;
+  K:=ALLog2((History Shr 9)+3); If K>ALLimit Then K:=ALLimit;
+  X:=ALScalar(K,Bps)+Sign; Sign:=0;
+  If Odd(X) Then Out^[I]:=ALWrap32(-(X Shr 1)-1) Else Out^[I]:=ALWrap32(X Shr 1);
+  If X>$FFFF Then History:=$FFFF
+  Else History:=(History+X*Mult-((History*Mult) Shr 9)) And $FFFFFFFF;
+  If (History<128) And (I+1<Nb) Then Begin
+   K:=7-ALLog2(History)+((History+16) Shr 6); If K>ALLimit Then K:=ALLimit;
+   BlockSize:=ALScalar(K,16);
+   If BlockSize>0 Then Begin
+    If BlockSize>=Nb-I Then BlockSize:=Nb-I-1;
+    FillChar(Out^[I+1],BlockSize*4,0); Inc(I,BlockSize);
+   End;
+   If BlockSize<=$FFFF Then Sign:=1;
+   History:=0;
+  End;
+  Inc(I);
+ End;
+ ALRice:=True;
+End;
+
+Function ALSignOf(V: LongInt): Integer;Begin
+ If V>0 Then ALSignOf:=1 Else If V<0 Then ALSignOf:=-1 Else ALSignOf:=0;
+End;
+
+Procedure ALLPC(Err,Out: PALLong; Nb,Bps: LongInt; Var Coef: Array Of LongInt; Order,Quant: LongInt);
+Var
+ I,J,D,B: LongInt; Val: Int64; ErrVal,V,Sg,ES: LongInt;
+Begin
+ Out^[0]:=Err^[0];
+ If Nb<=1 Then Exit;
+ If Order=0 Then Begin
+  For I:=1 To Nb-1 Do Out^[I]:=Err^[I]; Exit;
+ End;
+ If Order=31 Then Begin
+  For I:=1 To Nb-1 Do Out^[I]:=ALSignExt(Int64(Out^[I-1])+Err^[I],Bps);
+  Exit;
+ End;
+ I:=1;
+ While (I<=Order) And (I<Nb) Do Begin
+  Out^[I]:=ALSignExt(Int64(Out^[I-1])+Err^[I],Bps); Inc(I);
+ End;
+ While I<Nb Do Begin
+  B:=I-Order-1; D:=Out^[B]; ErrVal:=Err^[I]; Val:=0;
+  For J:=0 To Order-1 Do Val:=Val+Int64(Out^[B+1+J]-D)*Coef[J];
+  Val:=ALWrap32(Val);
+  Val:=Val+(Int64(1) Shl (Quant-1));
+  If Val<0 Then Val:=-1-((-1-Val) Shr Quant) Else Val:=Val Shr Quant;
+  Val:=ALWrap32(Val+D+ErrVal);
+  Out^[I]:=ALSignExt(Val,Bps);
+  ES:=ALSignOf(ErrVal);
+  If ES<>0 Then Begin
+   J:=0;
+   While (J<Order) And (ALWrap32(Int64(ErrVal)*ES)>0) Do Begin
+    V:=ALWrap32(Int64(D)-Out^[B+1+J]);
+    Sg:=ALSignOf(V)*ES; Coef[J]:=Coef[J]-Sg;
+    V:=ALWrap32(Int64(V)*Sg);
+    ErrVal:=ALWrap32(Int64(ErrVal)-Int64(ADPCMSar(V,Quant))*(J+1));
+    Inc(J);
+   End;
+  End;
+  Inc(I);
+ End;
+End;
+
+{ Un element (SCE: 1 canal, CPE: 2 canaux). Retourne False si invalide. }
+Function ALElement(Ch: Integer; Var NbOut: LongInt): Boolean;
+Var
+ HasSize,Compressed: Boolean;
+ Bps,DecShift,DecWeight,C,I,J,Nb: LongInt;
+ PType,Quant,Mult,Order: Array[0..1] Of LongInt;
+ Coef: Array[0..1,0..31] Of LongInt;
+ A,B: Int64;
+Begin
+ ALElement:=False;
+ ALBits(4); ALBits(12);
+ HasSize:=ALBits(1)=1; ALExtraBits:=ALBits(2)*8;
+ Bps:=ALSampleSize-ALExtraBits+Ch-1;
+ If (Bps>32) Or (Bps<1) Then Exit;
+ Compressed:=ALBits(1)=0;
+ If HasSize Then Nb:=ALBits(32) Else Nb:=ALMax;
+ If (Nb<=0) Or (Nb>ALMax) Then Exit;
+ If (ALCount<>0) And (Nb<>ALCount) Then Exit;
+ ALCount:=Nb; NbOut:=Nb;
+ If Compressed Then Begin
+  If ALLimit=0 Then Exit;
+  DecShift:=ALBits(8); DecWeight:=ALBits(8);
+  If (Ch=2) And (DecWeight<>0) And (DecShift>31) Then Exit;
+  For C:=0 To Ch-1 Do Begin
+   PType[C]:=ALBits(4); Quant[C]:=ALBits(4); Mult[C]:=ALBits(3); Order[C]:=ALBits(5);
+   If (Order[C]>=ALMax) Or (Quant[C]=0) Then Exit;
+   For I:=Order[C]-1 DownTo 0 Do Coef[C,I]:=ALSignExt(ALBits(16),16);
+  End;
+  If ALExtraBits<>0 Then Begin
+   If ALSize*8-ALBit<Int64(Nb)*Ch*ALExtraBits Then Exit;
+   For I:=0 To Nb-1 Do For C:=0 To Ch-1 Do ALExtra[C]^[I]:=ALBits(ALExtraBits);
+  End;
+  For C:=0 To Ch-1 Do Begin
+   If Not ALRice(ALErr[C],Nb,Bps,Mult[C]*ALHistMult Div 4) Then Exit;
+   If PType[C]=15 Then ALLPC(ALErr[C],ALErr[C],Nb,Bps,Coef[C],31,0);
+   ALLPC(ALErr[C],ALOut[C],Nb,Bps,Coef[C],Order[C],Quant[C]);
+  End;
+ End Else Begin
+  If ALSize*8-ALBit<Int64(Nb)*Ch*ALSampleSize Then Exit;
+  For I:=0 To Nb-1 Do For C:=0 To Ch-1 Do ALOut[C]^[I]:=ALSignExt(ALBits(ALSampleSize),ALSampleSize);
+  ALExtraBits:=0; DecShift:=0; DecWeight:=0;
+ End;
+ If Ch=2 Then Begin
+  If DecWeight<>0 Then
+   For I:=0 To Nb-1 Do Begin
+    A:=ALOut[0]^[I]; B:=ALOut[1]^[I];
+    A:=ALWrap32(A-ADPCMSar(ALWrap32(B*DecWeight),DecShift));
+    B:=ALWrap32(B+A);
+    ALOut[0]^[I]:=B; ALOut[1]^[I]:=A;
+   End;
+  If ALExtraBits<>0 Then
+   For C:=0 To 1 Do For I:=0 To Nb-1 Do
+    ALOut[C]^[I]:=ALWrap32((Int64(ALOut[C]^[I]) Shl ALExtraBits) Or ALExtra[C]^[I]);
+ End Else If ALExtraBits<>0 Then
+  For I:=0 To Nb-1 Do ALOut[0]^[I]:=ALWrap32((Int64(ALOut[0]^[I]) Shl ALExtraBits) Or ALExtra[0]^[I]);
+ ALElement:=True;
+End;
+
+Function ALToPCM16(V: LongInt): LongInt;
+Var X: Int64;
+Begin
+ Case ALSampleSize Of
+  16: X:=ALSignExt(V,16);
+  20: X:=(Int64(V)*4096+32768) Div 65536;
+  24: X:=(Int64(V)*256+32768) Div 65536;
+  Else X:=(Int64(V)+32768) Div 65536;
+ End;
+ If ALSampleSize>16 Then Begin
+  If X>32767 Then X:=32767; If X<-32768 Then X:=-32768;
+ End;
+ ALToPCM16:=X;
+End;
+
+Function ALDecodePacket(P: PEABuffer; Size: LongInt): Boolean;
+Var
+ Element,Ch,Got,Nb,I,C: LongInt; Ok: Boolean;
+Begin
+ ALDecodePacket:=False; ALP:=P; ALSize:=Size; ALBit:=0; ALCount:=0; Got:=0; Nb:=0; Ok:=False;
+ While Size*8-ALBit>=3 Do Begin
+  Element:=ALBits(3);
+  If Element=7 Then Begin Ok:=True; Break; End;
+  If (Element>1) Then Exit;
+  If Element=1 Then Ch:=2 Else Ch:=1;
+  If Got+Ch>ALChannels Then Exit;
+  If Not ALElement(Ch,Nb) Then Exit;
+  Inc(Got,Ch);
+ End;
+ If (Not Ok) Or (Got<>ALChannels) Or (ALCount=0) Then Exit;
+ For I:=0 To ALCount-1 Do For C:=0 To ALChannels-1 Do EAPut(ALToPCM16(ALOut[C]^[I]));
+ ALDecodePacket:=True;
+End;
+
+{ ---- Conteneur MP4/M4A ---- }
+Function MP4BE32(At: LongInt): LongInt;
+Var Q: Array[0..3] Of Byte;
+Begin
+ ReadAt(At,Q,4); If Q[0]>=128 Then Fail('mp4: taille d''atome superieure a 2 Go.');
+ MP4BE32:=LongInt(Q[0])*16777216+LongInt(Q[1])*65536+LongInt(Q[2])*256+Q[3];
+End;
+
+Function MP4Tag(At: LongInt): String;
+Var Q: Array[0..3] Of Byte; J: Integer; S: String[4];
+Begin
+ ReadAt(At,Q,4); S:=''; For J:=0 To 3 Do S:=S+Chr(Q[J]); MP4Tag:=S;
+End;
+
+Function MP4Find(Start,Finish: LongInt; Const Name: String; Var APos,ASize: LongInt): Boolean;
+Var P,Sz: LongInt;
+Begin
+ MP4Find:=False; P:=Start;
+ While Finish-P>=8 Do Begin
+  Sz:=MP4BE32(P);
+  If Sz=0 Then Sz:=Finish-P;
+  If (Sz<8) Or (Sz>Finish-P) Then Exit;
+  If MP4Tag(P+4)=Name Then Begin APos:=P; ASize:=Sz; MP4Find:=True; Exit; End;
+  Inc(P,Sz);
+ End;
+End;
+
+{ Cherche la piste ALAC: renvoie la position de l'atome stbl et de l'entree stsd. }
+Function MP4FindALAC(Var StblPos,StblSize,EntryPos,EntrySize: LongInt): Boolean;
+Var
+ Limit,MoovPos,MoovSize,P,Sz,TrakPos,TrakSize,MdiaPos,MdiaSize,MinfPos,MinfSize,StsdPos,StsdSize: LongInt;
+Begin
+ MP4FindALAC:=False; Limit:=InputSize;
+ If Not MP4Find(0,Limit,'moov',MoovPos,MoovSize) Then Exit;
+ P:=MoovPos+8;
+ While MP4Find(P,MoovPos+MoovSize,'trak',TrakPos,TrakSize) Do Begin
+  If MP4Find(TrakPos+8,TrakPos+TrakSize,'mdia',MdiaPos,MdiaSize) Then
+   If MP4Find(MdiaPos+8,MdiaPos+MdiaSize,'minf',MinfPos,MinfSize) Then
+    If MP4Find(MinfPos+8,MinfPos+MinfSize,'stbl',StblPos,StblSize) Then
+     If MP4Find(StblPos+8,StblPos+StblSize,'stsd',StsdPos,StsdSize) Then
+      If StsdSize>=24 Then Begin
+       EntryPos:=StsdPos+16; EntrySize:=MP4BE32(EntryPos);
+       If (EntrySize>=36) And (MP4Tag(EntryPos+4)='alac') Then Begin MP4FindALAC:=True; Exit; End;
+      End;
+  P:=TrakPos+TrakSize;
+ End;
+End;
+
+Function MP4HasALAC(Const Name: String): Boolean;
+Var A,B,C,D: LongInt;
+Begin
+ OpenRead(Name); MP4HasALAC:=MP4FindALAC(A,B,C,D); CloseRead;
+End;
+
+Procedure DecodeALAC(Const Source,Target: String);
+Var
+ StblPos,StblSize,EntryPos,EntrySize,CookiePos,CookieSize,P,Sz,Ver,ChildAt: LongInt;
+ Cookie: Array[0..35] Of Byte;
+ SzPos,SzSize,ScPos,ScSize,CoPos,CoSize,Count,FixedSize,Samples,Chunks,Rate: LongInt;
+ Sizes: PALLong; Table: PALLong;
+ Chunk,Sample,PerChunk,Next,I,J,Pos,Take,Cnt,Entries,K,FirstChunk,C: LongInt;
+ Buf: PEABuffer;
+ Is64: Boolean;
+ Q: Array[0..11] Of Byte;
+Begin
+ YAMReset; EAReset; OpenRead(Source);
+ If Not MP4FindALAC(StblPos,StblSize,EntryPos,EntrySize) Then Fail('alac: aucune piste ALAC dans le fichier MP4/M4A.');
+ ReadAt(EntryPos+16,Q,2); Ver:=Q[0]*256+Q[1];
+ ChildAt:=EntryPos+36; If Ver=1 Then Inc(ChildAt,16) Else If Ver=2 Then Inc(ChildAt,36);
+ If Not MP4Find(ChildAt,EntryPos+EntrySize,'alac',CookiePos,CookieSize) Then Fail('alac: atome de configuration absent.');
+ If CookieSize<36 Then Fail('alac: configuration trop courte.');
+ ReadAt(CookiePos,Cookie,36);
+ ALMax:=LongInt(Cookie[12])*16777216+LongInt(Cookie[13])*65536+LongInt(Cookie[14])*256+Cookie[15];
+ ALSampleSize:=Cookie[17]; ALHistMult:=Cookie[18]; ALInitHist:=Cookie[19]; ALLimit:=Cookie[20]; ALChannels:=Cookie[21];
+ Rate:=LongInt(Cookie[32])*16777216+LongInt(Cookie[33])*65536+LongInt(Cookie[34])*256+Cookie[35];
+ If (ALMax<=0) Or (ALMax>1048576) Then Fail('alac: taille de trame incorrecte.');
+ If (ALChannels<1) Or (ALChannels>2) Then Fail('alac: mono ou stereo requis.');
+ If Not (ALSampleSize In [16,20,24,32]) Then Fail('alac: profondeur 16, 20, 24 ou 32 bits requise.');
+ If (Rate<4000) Or (Rate>192000) Then Fail('alac: frequence 4000..192000 Hz requise.');
+ If Not MP4Find(StblPos+8,StblPos+StblSize,'stsz',SzPos,SzSize) Then Fail('alac: stsz absent.');
+ If Not MP4Find(StblPos+8,StblPos+StblSize,'stsc',ScPos,ScSize) Then Fail('alac: stsc absent.');
+ Is64:=False;
+ If Not MP4Find(StblPos+8,StblPos+StblSize,'stco',CoPos,CoSize) Then Begin
+  If Not MP4Find(StblPos+8,StblPos+StblSize,'co64',CoPos,CoSize) Then Fail('alac: stco absent.');
+  Is64:=True;
+ End;
+ FixedSize:=MP4BE32(SzPos+12); Samples:=MP4BE32(SzPos+16);
+ If (Samples<=0) Or (Samples>16777216) Then Fail('alac: nombre d''echantillons incorrect.');
+ GetMem(Sizes,Samples*4);
+ For I:=0 To Samples-1 Do If FixedSize<>0 Then Sizes^[I]:=FixedSize Else Sizes^[I]:=MP4BE32(SzPos+20+4*I);
+ Entries:=MP4BE32(ScPos+12); If (Entries<1) Or (Entries>1048576) Then Fail('alac: stsc incorrect.');
+ GetMem(Table,Entries*8);
+ For I:=0 To Entries-1 Do Begin Table^[2*I]:=MP4BE32(ScPos+16+12*I); Table^[2*I+1]:=MP4BE32(ScPos+20+12*I); End;
+ Chunks:=MP4BE32(CoPos+12);
+ For C:=0 To 1 Do Begin
+  GetMem(ALErr[C],ALMax*4); GetMem(ALOut[C],ALMax*4); GetMem(ALExtra[C],ALMax*4);
+ End;
+ OpenWrite(Target); ADPCMWaveHeader(Rate,ALChannels,0);
+ Sample:=0; K:=0;
+ For Chunk:=1 To Chunks Do Begin
+  While (K+1<Entries) And (Table^[2*(K+1)]<=Chunk) Do Inc(K);
+  PerChunk:=Table^[2*K+1];
+  If Is64 Then Begin
+   ReadAt(CoPos+16+8*(Chunk-1),Q,8); Pos:=LongInt(Q[4])*16777216+LongInt(Q[5])*65536+LongInt(Q[6])*256+Q[7];
+  End Else Pos:=MP4BE32(CoPos+16+4*(Chunk-1));
+  For J:=1 To PerChunk Do Begin
+   If Sample>=Samples Then Break;
+   Take:=Sizes^[Sample];
+   If (Take>0) And (Pos+Take<=InputSize) Then Begin
+    GetMem(Buf,Take); I:=0;
+    While I<Take Do Begin
+     If Take-I>16384 Then Cnt:=16384 Else Cnt:=Take-I;
+     ReadAt(Pos+I,Buf^[I],Cnt); Inc(I,Cnt);
+    End;
+    ALDecodePacket(Buf,Take); FreeMem(Buf,Take);
+   End;
+   Inc(Pos,Take); Inc(Sample);
+  End;
+ End;
+ EAFlush;
+ If EAWritten=0 Then Fail('alac: aucune donnee audio decodee.');
+ ADPCMPatchHeader(Rate,ALChannels,EAWritten); CloseRead; CloseWrite;
+End;
+
+{ ---- Encodeur ALAC (niveau de compression 2 de FFmpeg) ---- }
+Var
+ ALPack: Array[0..131071] Of Byte; ALPackBits: LongInt;
+ ALSmp,ALRes,ALOrig: Array[0..1,0..4095] Of LongInt;
+ ALLpcOrder,ALLpcQuant: Array[0..1] Of LongInt;
+ ALLpcCoef: Array[0..1,0..31] Of LongInt;
+ ALIlShift,ALIlWeight,ALFrameN: LongInt;
+ ALVerb: Boolean;
+
+Procedure ALPut(V: Int64; N: Integer);
+Var K: Integer;
+Begin
+ For K:=N-1 DownTo 0 Do Begin
+  If ((V Shr K) And 1)<>0 Then ALPack[ALPackBits Shr 3]:=ALPack[ALPackBits Shr 3] Or (128 Shr (ALPackBits And 7));
+  Inc(ALPackBits);
+ End;
+End;
+
+Procedure ALEncodeScalar(X: LongInt; K,WriteSize: Integer);
+Var Dv,Q,R: LongInt;
+Begin
+ If K>14 Then K:=14;
+ Dv:=(LongInt(1) Shl K)-1; Q:=X Div Dv; R:=X Mod Dv;
+ If Q>8 Then Begin ALPut($1FF,9); ALPut(X,WriteSize); End
+ Else Begin
+  If Q>0 Then ALPut((LongInt(1) Shl Q)-1,Q);
+  ALPut(0,1);
+  If K<>1 Then Begin
+   If R>0 Then ALPut(R+1,K) Else ALPut(0,K-1);
+  End;
+ End;
+End;
+
+Procedure ALAnalyze(Ch,N: Integer);
+Const
+ MaxOrder = 6; MinOrder = 4; Precision = 9;
+Var
+ W: Array[0..4097] Of Double;
+ Autoc: Array[0..MaxOrder] Of Double;
+ Lpc: Array[0..MaxOrder-1,0..MaxOrder-1] Of Double;
+ Ref: Array[0..MaxOrder-1] Of Double;
+ Err,R,C,Wt,F,B,CMax,Error,Scale,Sum0,Sum1: Double;
+ I,J,N2,Est,Sh,QMax,Q: LongInt;
+Begin
+ { fenetre de Welch; W[k+1] = donnee k, W[0] = 0 }
+ FillChar(W,SizeOf(W),0);
+ If N=1 Then W[1]:=0
+ Else Begin
+  N2:=N Shr 1; C:=2.0/(N-1.0);
+  If Odd(N) Then Begin
+   For I:=0 To N2-1 Do Begin
+    Wt:=C-I-1.0; Wt:=1.0-Wt*Wt;
+    W[I+1]:=ALSmp[Ch,I]*Wt; W[N-1-I+1]:=ALSmp[Ch,N-1-I]*Wt;
+   End;
+   W[N2+1]:=0.0;
+  End Else Begin
+   For I:=0 To N2-1 Do Begin
+    Wt:=C-N2+I; Wt:=1.0-Wt*Wt;
+    W[N2-I-1+1]:=ALSmp[Ch,N2-I-1]*Wt; W[N2+I+1]:=ALSmp[Ch,N2+I]*Wt;
+   End;
+  End;
+ End;
+ J:=0;
+ While J<MaxOrder Do Begin
+  Sum0:=1.0; Sum1:=1.0;
+  For I:=J To N-1 Do Begin
+   Sum0:=Sum0+W[I+1]*W[I-J+1]; Sum1:=Sum1+W[I+1]*W[I-J];
+  End;
+  Autoc[J]:=Sum0; Autoc[J+1]:=Sum1; Inc(J,2);
+ End;
+ If J=MaxOrder Then Begin
+  Sum0:=1.0; For I:=J-1 To N-1 Do Sum0:=Sum0+W[I+1]*W[I-J+1];
+  Autoc[J]:=Sum0;
+ End;
+ { Levinson-Durbin }
+ FillChar(Lpc,SizeOf(Lpc),0); Err:=Autoc[0];
+ For I:=0 To MaxOrder-1 Do Begin
+  R:=-Autoc[I+1];
+  If I>0 Then For J:=0 To I-1 Do R:=R-Lpc[I-1,J]*Autoc[I-J];
+  If Err<>0 Then R:=R/Err;
+  Err:=Err*(1.0-R*R);
+  If I>0 Then Begin
+   For J:=0 To I-1 Do Lpc[I,J]:=Lpc[I-1,J];
+  End;
+  Lpc[I,I]:=R;
+  If I>0 Then Begin
+   For J:=0 To ((I+1) Shr 1)-1 Do Begin
+    F:=Lpc[I-1,J]; B:=Lpc[I-1,I-1-J];
+    Lpc[I,J]:=F+R*B; Lpc[I,I-1-J]:=B+R*F;
+   End;
+  End;
+ End;
+ For I:=0 To MaxOrder-1 Do Ref[I]:=Abs(Lpc[I,I]);
+ Est:=MinOrder;
+ For I:=MaxOrder-1 DownTo MinOrder-1 Do If Ref[I]>0.10 Then Begin Est:=I+1; Break; End;
+ { quantification }
+ I:=Est-1; QMax:=(LongInt(1) Shl (Precision-1))-1;
+ CMax:=0.0; For J:=0 To I Do If Abs(Lpc[I,J])>CMax Then CMax:=Abs(Lpc[I,J]);
+ ALLpcOrder[Ch]:=Est;
+ If CMax*(LongInt(1) Shl 9)<1.0 Then Begin
+  ALLpcQuant[Ch]:=1; For J:=0 To I Do ALLpcCoef[Ch,J]:=0; Exit;
+ End;
+ Sh:=9; While (CMax*(LongInt(1) Shl Sh)>QMax) And (Sh>0) Do Dec(Sh);
+ If (Sh=0) And (CMax>QMax) Then Begin
+  Scale:=QMax/CMax; For J:=0 To I Do Lpc[I,J]:=Lpc[I,J]*Scale;
+ End;
+ Error:=0;
+ For J:=0 To I Do Begin
+  Error:=Error-Lpc[I,J]*(LongInt(1) Shl Sh);
+  Q:=Round(Single(Error));
+  If Q<-QMax Then Q:=-QMax; If Q>QMax Then Q:=QMax;
+  ALLpcCoef[Ch,J]:=Q; Error:=Error-Q;
+ End;
+ ALLpcQuant[Ch]:=Sh;
+End;
+
+Procedure ALPredict(Ch,N,WriteSize: Integer);
+Var
+ Coef: Array[0..31] Of LongInt;
+ I,J,Base,Order,Quant,Sum,ResVal,Index,Neg,Sg,Val: LongInt;
+Begin
+ Order:=ALLpcOrder[Ch]; Quant:=ALLpcQuant[Ch];
+ For J:=0 To 31 Do Coef[J]:=ALLpcCoef[Ch,J];
+ ALRes[Ch,0]:=ALSmp[Ch,0];
+ For I:=1 To Order Do ALRes[Ch,I]:=ALSignExt(Int64(ALSmp[Ch,I])-ALSmp[Ch,I-1],WriteSize);
+ For I:=Order+1 To N-1 Do Begin
+  Base:=I-Order-1;
+  Sum:=LongInt(1) Shl (Quant-1);
+  For J:=0 To Order-1 Do Sum:=Sum+(ALSmp[Ch,Base+Order-J]-ALSmp[Ch,Base])*Coef[J];
+  Sum:=ADPCMSar(Sum,Quant)+ALSmp[Ch,Base];
+  ALRes[Ch,I]:=ALSignExt(Int64(ALSmp[Ch,Base+Order+1])-Sum,WriteSize);
+  ResVal:=ALRes[Ch,I];
+  If ResVal<>0 Then Begin
+   Index:=Order-1; Neg:=Ord(ResVal<0);
+   While (Index>=0) And (((Neg=1) And (ResVal<0)) Or ((Neg=0) And (ResVal>0))) Do Begin
+    Val:=ALSmp[Ch,Base]-ALSmp[Ch,Base+Order-Index];
+    If Val>0 Then Sg:=1 Else If Val<0 Then Sg:=-1 Else Sg:=0;
+    If Neg=1 Then Sg:=-Sg;
+    Coef[Index]:=Coef[Index]-Sg;
+    Val:=Val*Sg;
+    ResVal:=ResVal-ADPCMSar(Val,Quant)*(Order-Index);
+    Dec(Index);
+   End;
+  End;
+ End;
+End;
+
+Procedure ALEntropy(Ch,N,WriteSize: Integer);
+Var
+ History,SignMod,I,K,X,BlockSize: LongInt; H64: Int64;
+Begin
+ H64:=10; SignMod:=0; I:=0;
+ While I<N Do Begin
+  K:=ALLog2((H64 Shr 9)+3);
+  X:=-2*ALRes[Ch,I]-1; If X<0 Then X:=-X-1; { x ^= x>>31 }
+  Inc(I);
+  ALEncodeScalar(X-SignMod,K,WriteSize);
+  H64:=(H64+Int64(X)*40-((H64*40) Shr 9)) And $FFFFFFFF;
+  SignMod:=0;
+  If X>$FFFF Then H64:=$FFFF;
+  If (H64<128) And (I<N) Then Begin
+   K:=7-ALLog2(H64)+((H64+16) Shr 6); BlockSize:=0;
+   While (I<N) And (ALRes[Ch,I]=0) Do Begin Inc(I); Inc(BlockSize); End;
+   ALEncodeScalar(BlockSize,K,16);
+   If BlockSize<=$FFFF Then SignMod:=1;
+   H64:=0;
+  End;
+ End;
+End;
+
+Function ALEstimateStereo(N: Integer): Integer;
+Var
+ I,Best: Integer; Lt,Rt: LongInt; Sum,Score: Array[0..3] Of Int64;
+Begin
+ For I:=0 To 3 Do Sum[I]:=0;
+ For I:=2 To N-1 Do Begin
+  Lt:=ALSmp[0,I]-2*ALSmp[0,I-1]+ALSmp[0,I-2];
+  Rt:=ALSmp[1,I]-2*ALSmp[1,I-1]+ALSmp[1,I-2];
+  Sum[2]:=Sum[2]+Abs(ADPCMSar(Lt+Rt,1)); Sum[3]:=Sum[3]+Abs(Lt-Rt);
+  Sum[0]:=Sum[0]+Abs(Lt); Sum[1]:=Sum[1]+Abs(Rt);
+ End;
+ Score[0]:=Sum[0]+Sum[1]; Score[1]:=Sum[0]+Sum[3]; Score[2]:=Sum[1]+Sum[3]; Score[3]:=Sum[2]+Sum[3];
+ Best:=0; For I:=1 To 3 Do If Score[I]<Score[Best] Then Best:=I;
+ ALEstimateStereo:=Best;
+End;
+
+{ Ecrit une trame (tous les canaux) dans ALPack; retourne la taille en octets. }
+Function ALWriteFrame(Channels,N: Integer): LongInt;
+Var
+ Ch,I,J,Mode,WriteSize: LongInt; Tmp: LongInt; EncodeFS: Integer;
+Begin
+ ALPackBits:=0; FillChar(ALPack,SizeOf(ALPack),0);
+ If N<4096 Then EncodeFS:=1 Else EncodeFS:=0;
+ If Channels=2 Then ALPut(1,3) Else ALPut(0,3);
+ ALPut(0,4); ALPut(0,12); ALPut(EncodeFS,1); ALPut(0,2); ALPut(Ord(ALVerb),1);
+ If EncodeFS=1 Then ALPut(N,32);
+ If ALVerb Then Begin
+  For I:=0 To N-1 Do For J:=0 To Channels-1 Do ALPut(ALOrig[J,I] And $FFFF,16);
+ End Else Begin
+  WriteSize:=16+Channels-1;
+  For J:=0 To Channels-1 Do For I:=0 To N-1 Do ALSmp[J,I]:=ALOrig[J,I];
+  If Channels=2 Then Begin
+   Mode:=ALEstimateStereo(N);
+   Case Mode Of
+    0: Begin ALIlWeight:=0; ALIlShift:=0; End;
+    1: Begin
+     For I:=0 To N-1 Do ALSmp[1,I]:=ALSmp[0,I]-ALSmp[1,I];
+     ALIlWeight:=1; ALIlShift:=0;
+    End;
+    2: Begin
+     For I:=0 To N-1 Do Begin
+      Tmp:=ALSmp[1,I]; ALSmp[1,I]:=ALSmp[0,I]-ALSmp[1,I];
+      ALSmp[0,I]:=Tmp+ADPCMSar(ALSmp[1,I],31);
+     End;
+     ALIlWeight:=1; ALIlShift:=31;
+    End;
+    Else Begin
+     For I:=0 To N-1 Do Begin
+      Tmp:=ALSmp[0,I]; ALSmp[0,I]:=ADPCMSar(Tmp+ALSmp[1,I],1); ALSmp[1,I]:=Tmp-ALSmp[1,I];
+     End;
+     ALIlWeight:=1; ALIlShift:=1;
+    End;
+   End;
+  End Else Begin ALIlShift:=0; ALIlWeight:=0; End;
+  ALPut(ALIlShift,8); ALPut(ALIlWeight,8);
+  For Ch:=0 To Channels-1 Do Begin
+   ALAnalyze(Ch,N);
+   ALPut(0,4); ALPut(ALLpcQuant[Ch],4); ALPut(4,3); ALPut(ALLpcOrder[Ch],5);
+   For J:=0 To ALLpcOrder[Ch]-1 Do ALPut(ALLpcCoef[Ch,J] And $FFFF,16);
+  End;
+  For Ch:=0 To Channels-1 Do Begin
+   ALPredict(Ch,N,WriteSize); ALEntropy(Ch,N,WriteSize);
+  End;
+ End;
+ ALPut(7,3);
+ ALWriteFrame:=(ALPackBits+7) Div 8;
+End;
+
+{ Encodeur adpcm alac vers M4A: WAV PCM16 normalise. }
+Procedure EncodeALACM4A(Const Source,Target: String);
+Var
+ Head: Array[0..43] Of Byte;
+ Raw: Array[0..3] Of Byte;
+ Out: Array[0..255] Of Byte;
+ Limit,Rate,Frames,Done,Packets,MaxFrame,DataBytes,Sample,N,Total,I,Rem,NFull,Entries,MdatAt: LongInt;
+ Channels,C,Used: Integer;
+ Sizes: PALLong;
+ Cookie: Array[0..35] Of Byte;
+ StblSize,MinfSize,MdiaSize,TrakSize,MoovSize,SttsSize,StszSize,HB: LongInt;
+Procedure PutByte(V: LongInt);Begin Out[Used]:=V And 255; Inc(Used); If Used>=250 Then Begin WriteBytes(Out,Used); Used:=0; End; End;
+Procedure PutB16(V: LongInt);Begin PutByte(V Shr 8); PutByte(V); End;
+Procedure PutB32(V: LongInt);Begin PutB16(V Shr 16); PutB16(V); End;
+Procedure PutTag(Const T: String);
+Var K: Integer;
+Begin For K:=1 To 4 Do PutByte(Ord(T[K])); End;
+Procedure PutZero(Cnt: Integer);
+Var K: Integer;
+Begin For K:=1 To Cnt Do PutByte(0); End;
+Procedure Flush;Begin If Used>0 Then Begin WriteBytes(Out,Used); Used:=0; End; End;
+Procedure PutAtom(Size: LongInt; Const T: String);Begin PutB32(Size); PutTag(T); End;
+Procedure PutMatrix;Begin
+ PutB32($10000); PutZero(12); PutB32($10000); PutZero(12); PutB32($40000000);
+End;
+Begin
+ OpenRead(Source); Limit:=InputSize;
+ If Limit<44 Then Fail('alac: WAV intermediaire tronque.');
+ ReadAt(0,Head,44); Channels:=Head[22];
+ Rate:=LongInt(Head[24])+LongInt(Head[25])*256+LongInt(Head[26])*65536;
+ If (Channels<1) Or (Channels>2) Or (Head[36]<>100) Then Fail('alac: WAV PCM16 mono/stereo requis.');
+ Frames:=(Limit-44) Div (Channels*2);
+ If Frames=0 Then Fail('alac: aucune donnee audio.');
+ Packets:=(Frames+4095) Div 4096; GetMem(Sizes,Packets*4);
+ HB:=23; MaxFrame:=((HB+16*Channels*4096+3+7) And (Not LongInt(7))) Div 8;
+ OpenWrite(Target); Used:=0;
+ { ftyp, mdat (taille corrigee ensuite) }
+ PutAtom(28,'ftyp'); PutTag('M4A '); PutB32(512); PutTag('M4A '); PutTag('mp42'); PutTag('isom');
+ MdatAt:=28; PutAtom(8,'mdat'); Flush;
+ Done:=0; Total:=0; I:=0;
+ While Done<Frames Do Begin
+  N:=4096; If Frames-Done<N Then N:=Frames-Done;
+  For Sample:=0 To N-1 Do For C:=0 To Channels-1 Do Begin
+   ReadAt(44+(Done+Sample)*Channels*2+C*2,Raw,2);
+   ALOrig[C,Sample]:=ALSignExt(LongInt(Raw[0])+LongInt(Raw[1])*256,16);
+  End;
+  If N<4096 Then Begin
+   HB:=55; MaxFrame:=((HB+16*Channels*N+3+7) And (Not LongInt(7))) Div 8;
+  End;
+  ALVerb:=False; DataBytes:=ALWriteFrame(Channels,N);
+  If DataBytes>MaxFrame Then Begin ALVerb:=True; DataBytes:=ALWriteFrame(Channels,N); End;
+  WriteBytes(ALPack,DataBytes); Sizes^[I]:=DataBytes; Inc(I); Inc(Total,DataBytes); Inc(Done,N);
+ End;
+ { cookie ALAC de 36 octets }
+ FillChar(Cookie,SizeOf(Cookie),0);
+ Cookie[3]:=36; Cookie[4]:=97; Cookie[5]:=108; Cookie[6]:=97; Cookie[7]:=99;
+ Cookie[14]:=16; Cookie[17]:=16; Cookie[18]:=40; Cookie[19]:=10; Cookie[20]:=14; Cookie[21]:=Channels;
+ HB:=23; MaxFrame:=((HB+16*Channels*4096+3+7) And (Not LongInt(7))) Div 8;
+ Cookie[24]:=MaxFrame Shr 24; Cookie[25]:=MaxFrame Shr 16; Cookie[26]:=MaxFrame Shr 8; Cookie[27]:=MaxFrame;
+ HB:=Rate*Channels*16; Cookie[28]:=HB Shr 24; Cookie[29]:=HB Shr 16; Cookie[30]:=HB Shr 8; Cookie[31]:=HB;
+ Cookie[32]:=Rate Shr 24; Cookie[33]:=Rate Shr 16; Cookie[34]:=Rate Shr 8; Cookie[35]:=Rate;
+ NFull:=Frames Div 4096; Rem:=Frames Mod 4096; Entries:=0;
+ If NFull>0 Then Inc(Entries); If Rem>0 Then Inc(Entries);
+ SttsSize:=16+8*Entries; StszSize:=20+4*Packets;
+ StblSize:=8+88+SttsSize+28+StszSize+20; MinfSize:=8+16+36+StblSize;
+ MdiaSize:=8+32+45+MinfSize; TrakSize:=8+92+MdiaSize; MoovSize:=8+108+TrakSize;
+ PutAtom(MoovSize,'moov');
+ PutAtom(108,'mvhd'); PutB32(0); PutB32(0); PutB32(0); PutB32(1000); PutB32((Frames*1000) Div Rate);
+ PutB32($10000); PutB16($100); PutZero(10); PutMatrix; PutZero(24); PutB32(2);
+ PutAtom(TrakSize,'trak');
+ PutAtom(92,'tkhd'); PutB32(3); PutB32(0); PutB32(0); PutB32(1); PutB32(0); PutB32((Frames*1000) Div Rate);
+ PutZero(8); PutB16(0); PutB16(0); PutB16($100); PutB16(0); PutMatrix; PutB32(0); PutB32(0);
+ PutAtom(MdiaSize,'mdia');
+ PutAtom(32,'mdhd'); PutB32(0); PutB32(0); PutB32(0); PutB32(Rate); PutB32(Frames); PutB16($55C4); PutB16(0);
+ PutAtom(45,'hdlr'); PutB32(0); PutB32(0); PutTag('soun'); PutZero(12);
+ PutTag('Soun'); PutTag('dHan'); PutTag('dler'); PutByte(0);
+ PutAtom(MinfSize,'minf');
+ PutAtom(16,'smhd'); PutB32(0); PutB32(0);
+ PutAtom(36,'dinf'); PutAtom(28,'dref'); PutB32(0); PutB32(1); PutAtom(12,'url '); PutB32(1);
+ PutAtom(StblSize,'stbl');
+ PutAtom(88,'stsd'); PutB32(0); PutB32(1);
+ PutAtom(72,'alac'); PutZero(6); PutB16(1); PutB16(0); PutB16(0); PutB32(0); PutB16(Channels); PutB16(16);
+ PutB16(0); PutB16(0); PutB32(Rate Shl 16);
+ For C:=0 To 35 Do PutByte(Cookie[C]);
+ PutAtom(SttsSize,'stts'); PutB32(0); PutB32(Entries);
+ If NFull>0 Then Begin PutB32(NFull); PutB32(4096); End;
+ If Rem>0 Then Begin PutB32(1); PutB32(Rem); End;
+ PutAtom(28,'stsc'); PutB32(0); PutB32(1); PutB32(1); PutB32(Packets); PutB32(1);
+ PutAtom(StszSize,'stsz'); PutB32(0); PutB32(0); PutB32(Packets);
+ For I:=0 To Packets-1 Do PutB32(Sizes^[I]);
+ PutAtom(20,'stco'); PutB32(0); PutB32(1); PutB32(MdatAt+8);
+ Flush;
+ { taille de l'atome mdat }
+ {$I-}Seek(ActiveOutput,MdatAt); I:=IOResult;{$I+}
+ If I<>0 Then Fail('alac: positionnement mdat impossible.');
+ PutB32(8+Total); Flush;
+ FreeMem(Sizes,Packets*4);
+ CloseRead; CloseWrite;
+End;
+
 Procedure NormalizeWave(Const Source,Target: String; ForMP3: Boolean);
 Type
  TBytes = Array[0..4095] Of Byte;
@@ -14506,6 +15186,7 @@ Begin
  WriteLn(' D  iss             Funcom ISS (adpcm_ima_iss)');
  WriteLn(' D  smjpeg          Loki SDL MJPEG (adpcm_ima_smjpeg)');
  WriteLn(' D  thp             Nintendo THP (audio adpcm_thp)');
+ WriteLn(' DE m4a             MP4/M4A audio ALAC (decodage et encodage, -f mp4 ou extension .m4a)');
  WriteLn(' D  psxstr          Sony PlayStation STR / RIFF CDXA (audio adpcm_xa)');
  WriteLn(' D  wsaud           Westwood Studios audio (adpcm_ima_ws)');
  WriteLn(' D  aac             AAC ADTS (AAC-LC mono/stereo; alias: adts)');
@@ -14809,6 +15490,7 @@ BEGIN
    WriteLn('D A    adpcm_thp       ADPCM Nintendo Gamecube THP');
    WriteLn('D A    adpcm_xa        ADPCM CDROM XA');
    WriteLn('DEA    adpcm_yamaha    ADPCM Yamaha');
+   WriteLn('DEA    alac            ALAC (Apple Lossless Audio Codec)');
    WriteLn('DEA    adpcm_ms        ADPCM Microsoft');
    WriteLn('D A    adpcm_sbpro_2   ADPCM Sound Blaster Pro 2-bit');
    WriteLn('D A    adpcm_sbpro_3   ADPCM Sound Blaster Pro 2.6-bit');
@@ -14989,6 +15671,9 @@ BEGIN
  'Format impose incompatible avec la signature du fichier.');
  If InputFormat='' Then Fail('Format entree non reconnu ou non pris en charge.');
  If OutputFormat='' Then OutputFormat:=FormatName(Extension(OutputPath));
+ If (InputFormat='mp4') And ((OutputFormat='wav') Or (OutputFormat='adx') Or (OutputFormat='aiff') Or
+  (OutputFormat='flv') Or (OutputFormat='mp3') Or (OutputFormat='ac3') Or ((OutputFormat='mp4') And (AudioCodec='alac'))) Then
+  If Not IsHTTP(InputPath) Then If MP4HasALAC(InputPath) Then InputFormat:='alac';
  If InputCodec<>'' Then Begin
   If (InputFormat<>'ea') And (InputFormat<>'xa') Then
    Fail('Decodeur impose (-c:a avant -i): conteneurs ea et xa seulement.');
@@ -15186,14 +15871,16 @@ BEGIN
  If NoAudio Then Fail('-an: aucune piste a ecrire dans une sortie audio seule.');
  If VideoCodec<>'' Then Fail('Codec video incompatible avec une sortie audio seule.');
  If (OutputFormat<>'wav') And (OutputFormat<>'mp3') And (OutputFormat<>'ac3') And
- (OutputFormat<>'adx') And (OutputFormat<>'aiff') And (OutputFormat<>'flv') Then Fail(
+ (OutputFormat<>'adx') And (OutputFormat<>'aiff') And (OutputFormat<>'flv') And (OutputFormat<>'mp4') Then Fail(
  'Sorties audio WAV, MP3, AC3, ADX et AIFF-C (adpcm_ima_qt) prises en charge.');
  If AudioCodec='' Then If OutputFormat='wav' Then AudioCodec:=
  'pcm_s16le' Else If OutputFormat='adx' Then AudioCodec:='adpcm_adx'
  Else If OutputFormat='aiff' Then AudioCodec:='adpcm_ima_qt'
- Else If OutputFormat='flv' Then AudioCodec:='adpcm_swf' Else AudioCodec:=OutputFormat;
+ Else If OutputFormat='flv' Then AudioCodec:='adpcm_swf'
+ Else If OutputFormat='mp4' Then AudioCodec:='alac' Else AudioCodec:=OutputFormat;
  If (AudioCodec<>'copy') And Not (((OutputFormat='wav') And ((AudioCodec='pcm_s16le') Or (AudioCodec='adpcm_ima_wav') Or
   (AudioCodec='adpcm_ms') Or (AudioCodec='adpcm_yamaha'))) Or ((OutputFormat='flv') And (AudioCodec='adpcm_swf')) Or
+ ((OutputFormat='mp4') And (AudioCodec='alac')) Or
  ((OutputFormat='adx') And (AudioCodec='adpcm_adx')) Or ((OutputFormat='aiff') And (AudioCodec='adpcm_ima_qt')) Or
  ((OutputFormat='mp3') And (AudioCodec='mp3')) Or ((OutputFormat='ac3') And (AudioCodec='ac3'))) Then Fail(
  'Codec de sortie non pris en charge pour ce conteneur.');
@@ -15223,6 +15910,7 @@ BEGIN
    If InputFormat='4xm' Then Decode4XMAudio(InputPath,Temps[0]) Else
    If InputFormat='ea' Then DecodeEAContainer(InputPath,Temps[0],InputCodec) Else
    If InputFormat='xa' Then DecodeMaxisXA(InputPath,Temps[0]) Else
+   If InputFormat='alac' Then DecodeALAC(InputPath,Temps[0]) Else
    If InputFormat='thp' Then DecodeTHP(InputPath,Temps[0]) Else
    If InputFormat='psxstr' Then DecodeXASectors(InputPath,Temps[0]) Else
    If InputFormat='flv' Then DecodeFLVAudio(InputPath,Temps[0]) Else
@@ -15251,6 +15939,9 @@ BEGIN
   End Else If (OutputFormat='wav') And (AudioCodec='adpcm_yamaha') Then Begin
    Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False);
    EncodeWaveYamaha(Temps[1],Temps[2]);
+  End Else If OutputFormat='mp4' Then Begin
+   Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False);
+   EncodeALACM4A(Temps[1],Temps[2]);
   End Else If OutputFormat='flv' Then Begin
    Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False);
    EncodeFLVSWF(Temps[1],Temps[2]);
