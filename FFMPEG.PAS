@@ -3894,6 +3894,8 @@ Begin
    If (ADXOffset>=8) And (ADXOffset<=1048575) Then Begin Probe:='ea'; Exit; End;
   End;
  End;
+ If N>=20 Then If (B[0]=84) And (B[1]=72) And (B[2]=80) And (B[3]=0) Then Begin Probe:='thp'; Exit; End;
+ If N>=24 Then If (B[0]=0) And (B[1]=255) And (B[10]=255) And (B[11]=0) And (B[$11]<32) And ((B[$12] And $0E)<>0) Then Begin Probe:='psxstr'; Exit; End;
  If N>=8 Then If (B[0]=0) And (B[1]=10) And (B[2]=83) And (B[3]=77) And (B[4]=74) And (B[5]=80) And
   (B[6]=69) And (B[7]=71) Then Begin Probe:='smjpeg'; Exit; End;
  If N>=15 Then If (B[0]=73) And (B[1]=77) And (B[2]=65) And (B[3]=95) And (B[4]=65) And (B[5]=68) And
@@ -11363,6 +11365,193 @@ Begin
  SBDecodePacket:=True;
 End;
 
+{ ADPCM Yamaha, SWF, Nintendo THP et CD-ROM XA. }
+Const
+ YAMScale: Array[0..15] Of Integer=(230,230,230,230,307,409,512,614,230,230,230,230,307,409,512,614);
+ XATable: Array[0..4,0..1] Of Integer=((0,0),(60,0),(115,-52),(98,-55),(122,-60));
+ SWFIndex2: Array[0..1] Of ShortInt=(-1,2);
+ SWFIndex3: Array[0..3] Of ShortInt=(-1,-1,2,4);
+ SWFIndex4: Array[0..7] Of ShortInt=(-1,-1,-1,-1,2,4,6,8);
+ SWFIndex5: Array[0..15] Of ShortInt=(-1,-1,-1,-1,-1,-1,-1,-1,1,2,4,6,8,10,13,16);
+Var
+ YAPred,YAStep,XAS1,XAS2,THS1,THS2: Array[0..1] Of LongInt;
+ THStarted: Boolean;
+
+Procedure YAMReset;
+Var I: Integer;
+Begin
+ For I:=0 To 1 Do Begin YAPred[I]:=0; YAStep[I]:=0; XAS1[I]:=0; XAS2[I]:=0; THS1[I]:=0; THS2[I]:=0; End;
+ THStarted:=False;
+End;
+
+Function YAMExpand(C: Integer; Nibble: Integer): LongInt;
+Var
+ St: LongInt;
+Begin
+ If YAStep[C]=0 Then Begin YAPred[C]:=0; YAStep[C]:=127; End;
+ YAPred[C]:=ADPCMClip16(YAPred[C]+(YAStep[C]*IMADiff[Nibble]) Div 8);
+ St:=ADPCMSar(YAStep[C]*YAMScale[Nibble],8);
+ If St<127 Then St:=127; If St>24576 Then St:=24576;
+ YAStep[C]:=St; YAMExpand:=YAPred[C];
+End;
+
+Function YAMDecodeBlock(P: PEABuffer; Size: LongInt; Ch: Integer): Boolean;
+Var
+ N,I,V: LongInt;
+Begin
+ N:=((Size*2) Div Ch) Shr (2-Ch);
+ For I:=0 To N-1 Do Begin
+  V:=EAByte(P,Size,I);
+  EAPut(YAMExpand(0,V And 15)); EAPut(YAMExpand(Ch-1,V Shr 4));
+ End;
+ YAMDecodeBlock:=Size>0;
+End;
+
+{ Un paquet ADPCM SWF: champs de bits big-endian, blocs de 4096 echantillons. }
+Function SWFDecodePacket(P: PEABuffer; Size: LongInt; Ch: Integer): Boolean;
+Var
+ Pos,Total,NbBits,K0,SignMask,Count,Delta,Step,Vp,K,C: LongInt;
+ Pred,Idx: Array[0..1] Of LongInt;
+Function Bits(N: Integer): LongInt;
+Var V: LongInt; I: Integer;
+Begin
+ V:=0;
+ For I:=1 To N Do Begin
+  V:=V*2+((EAByte(P,Size,Pos Shr 3) Shr (7-(Pos And 7))) And 1); Inc(Pos);
+ End;
+ Bits:=V;
+End;
+Function SignedBits(N: Integer): LongInt;
+Var V: LongInt;
+Begin
+ V:=Bits(N); If V>=(LongInt(1) Shl (N-1)) Then Dec(V,LongInt(1) Shl N); SignedBits:=V;
+End;
+Function Tbl(D: LongInt): LongInt;
+Begin
+ Case NbBits Of
+  2: Tbl:=SWFIndex2[D];
+  3: Tbl:=SWFIndex3[D];
+  4: Tbl:=SWFIndex4[D];
+  Else Tbl:=SWFIndex5[D];
+ End;
+End;
+Begin
+ SWFDecodePacket:=False; Total:=Size*8; Pos:=0;
+ If Size<1 Then Exit;
+ NbBits:=Bits(2)+2; K0:=LongInt(1) Shl (NbBits-2); SignMask:=LongInt(1) Shl (NbBits-1);
+ While Pos<=Total-22*Ch Do Begin
+  For C:=0 To Ch-1 Do Begin
+   Pred[C]:=SignedBits(16); Idx[C]:=Bits(6); EAPut(Pred[C]);
+  End;
+  Count:=0;
+  While (Pos<=Total-NbBits*Ch) And (Count<4095) Do Begin
+   For C:=0 To Ch-1 Do Begin
+    Delta:=Bits(NbBits); Step:=ADPCMStepTable[Idx[C]]; Vp:=0; K:=K0;
+    Repeat
+     If (Delta And K)<>0 Then Inc(Vp,Step);
+     Step:=Step Shr 1; K:=K Shr 1;
+    Until K=0;
+    Inc(Vp,Step);
+    If (Delta And SignMask)<>0 Then Pred[C]:=Pred[C]-Vp Else Pred[C]:=Pred[C]+Vp;
+    Idx[C]:=Idx[C]+Tbl(Delta And (Not SignMask));
+    If Idx[C]<0 Then Idx[C]:=0; If Idx[C]>88 Then Idx[C]:=88;
+    Pred[C]:=ADPCMClip16(Pred[C]); EAPut(Pred[C]);
+   End;
+   Inc(Count);
+  End;
+ End;
+ SWFDecodePacket:=True;
+End;
+
+{ Nintendo THP: table de 16 coefficients big-endian par canal dans chaque paquet. }
+Function THPDecodePacket(P: PEABuffer; Size: LongInt; Ch: Integer): Boolean;
+Var
+ Plane: Array[0..1] Of PEAPlane;
+ Table: Array[0..1,0..15] Of LongInt;
+ Buf,Nb,Coded,At,I,N,B,Index,Ex,Sample,F1,F2,C: LongInt;
+ Used: LongInt;
+ V: Int64;
+Begin
+ THPDecodePacket:=False;
+ Buf:=(Size-(8+36*Ch)) Div Ch; Nb:=(Buf Div 8)*14;
+ If (Buf Mod 8)>1 Then Inc(Nb,((Buf Mod 8)-1)*2);
+ Coded:=EA32(P,Size,4,True);
+ If (Coded<=0) Or (Coded>Nb) Then Exit;
+ At:=8;
+ For C:=0 To Ch-1 Do For I:=0 To 15 Do Begin Table[C,I]:=EABE16(P,Size,At); Inc(At,2); End;
+ If Not THStarted Then Begin
+  For C:=0 To Ch-1 Do Begin
+   THS1[C]:=EABE16(P,Size,At); THS2[C]:=EABE16(P,Size,At+2); Inc(At,4);
+  End;
+  THStarted:=True;
+ End Else Inc(At,4*Ch);
+ For C:=0 To Ch-1 Do GetMem(Plane[C],Coded*2);
+ For C:=0 To Ch-1 Do Begin
+  Used:=0;
+  For I:=0 To (Coded+13) Div 14-1 Do Begin
+   B:=EAByte(P,Size,At); Inc(At);
+   Index:=(B Shr 4) And 7; Ex:=B And 15; F1:=Table[C,Index*2]; F2:=Table[C,Index*2+1];
+   N:=0;
+   While (N<14) And (I*14+N<Coded) Do Begin
+    If Odd(N) Then Sample:=EANibble(B)
+     Else Begin B:=EAByte(P,Size,At); Inc(At); Sample:=EANibble(B Shr 4); End;
+    V:=Int64(THS1[C])*F1+Int64(THS2[C])*F2;
+    V:=(V Div 2048)-Ord((V<0) And ((V Mod 2048)<>0));
+    Sample:=ADPCMClip16(V+Int64(Sample)*(LongInt(1) Shl Ex));
+    THS2[C]:=THS1[C]; THS1[C]:=Sample; Plane[C]^[Used]:=Sample; Inc(Used);
+    Inc(N);
+   End;
+  End;
+ End;
+ For I:=0 To Coded-1 Do For C:=0 To Ch-1 Do EAPut(Plane[C]^[I]);
+ For C:=0 To Ch-1 Do FreeMem(Plane[C],Coded*2);
+ THPDecodePacket:=True;
+End;
+
+{ CD-ROM XA: blocs de 128 octets; 18 blocs par secteur de donnees (2304 octets). }
+Function XADecodeSector(P: PEABuffer; Size: LongInt; Ch: Integer): Boolean;
+Var
+ Out0,Out1: Array[0..4095] Of LongInt;
+ Offset,Base,Block,I,J,Shift,Filter,F0,F1,S1,S2,D,S,T,Per: LongInt;
+ O0,O1: LongInt;
+ K: LongInt;
+Begin
+ Offset:=0; Per:=28*(3-Ch)*4;
+ For Block:=0 To Size Div 128-1 Do Begin
+  Base:=Block*128; O0:=Offset;
+  If Ch=1 Then O1:=O0+28 Else O1:=Offset;
+  For I:=0 To 3 Do Begin
+
+   Shift:=12-(EAByte(P,Size,Base+4+I*2) And 15); Filter:=EAByte(P,Size,Base+4+I*2) Shr 4;
+   If Filter>=5 Then Filter:=0; If Shift<0 Then Shift:=0;
+   F0:=XATable[Filter,0]; F1:=XATable[Filter,1];
+   S1:=XAS1[0]; S2:=XAS2[0];
+   For J:=0 To 27 Do Begin
+    D:=EAByte(P,Size,Base+16+I+J*4); T:=EANibble(D);
+    S:=ADPCMClip16(T*(LongInt(1) Shl Shift)+ADPCMSar(S1*F0+S2*F1+32,6));
+    S2:=S1; S1:=S; Out0[O0+J]:=S;
+   End;
+   If Ch=2 Then Begin XAS1[0]:=S1; XAS2[0]:=S2; S1:=XAS1[1]; S2:=XAS2[1]; End;
+   Shift:=12-(EAByte(P,Size,Base+5+I*2) And 15); Filter:=EAByte(P,Size,Base+5+I*2) Shr 4;
+   If Filter>=5 Then Filter:=0; If Shift<0 Then Shift:=0;
+   F0:=XATable[Filter,0]; F1:=XATable[Filter,1];
+   For J:=0 To 27 Do Begin
+    D:=EAByte(P,Size,Base+16+I+J*4); T:=EANibble(D Shr 4);
+    S:=ADPCMClip16(T*(LongInt(1) Shl Shift)+ADPCMSar(S1*F0+S2*F1+32,6));
+    S2:=S1; S1:=S;
+    If Ch=1 Then Out0[O1+J]:=S Else Out1[O1+J]:=S;
+   End;
+   If Ch=2 Then Begin XAS1[1]:=S1; XAS2[1]:=S2; End Else Begin XAS1[0]:=S1; XAS2[0]:=S2; End;
+   Inc(O0,28*(3-Ch)); Inc(O1,28*(3-Ch));
+  End;
+  Inc(Offset,Per);
+ End;
+ If Ch=2 Then Begin
+  For K:=0 To Offset-1 Do Begin EAPut(Out0[K]); EAPut(Out1[K]); End;
+ End Else For K:=0 To Offset-1 Do EAPut(Out0[K]);
+ XADecodeSector:=Size>=128;
+End;
+
 Function EADecodePacket(Codec: Integer; P: PEABuffer; Size: LongInt; Ch: Integer): Boolean;Begin
  Case Codec Of
   6: EADecodePacket:=IMADecodeEACS(P,Size,Ch);
@@ -11654,6 +11843,7 @@ Begin
  If Tag=$62 Then Begin
   If Channels<>2 Then Fail('adpcm_ima_dk3: stereo requis.');
  End Else If (Channels<1) Or (Channels>2) Then Fail('adpcm_ima_dk4/wav/ms: mono ou stereo requis.');
+ If (Tag=$20) And ((Channels<1) Or (Channels>2)) Then Fail('adpcm_yamaha: mono ou stereo requis.');
  If (Tag=$11) And ((Bits<2) Or (Bits>5)) Then Fail('adpcm_ima_wav: 2 a 5 bits par echantillon requis.');
  MSReset;
  OpenWrite(Target); ADPCMWaveHeader(Rate,Channels,0);
@@ -11664,8 +11854,9 @@ Begin
   If Tag=$62 Then Ok:=IMADecodeDK3(Buf,Take,Used)
   Else If Tag=$11 Then Ok:=IMADecodeWAV(Buf,Take,Channels,Bits)
   Else If Tag=$02 Then Ok:=MSDecodeBlock(Buf,Take,Channels)
+  Else If Tag=$20 Then Ok:=YAMDecodeBlock(Buf,Take,Channels)
   Else Ok:=IMADecodeDK4(Buf,Take,Channels,Used);
-  If (Tag=$11) Or (Tag=$02) Then Used:=Take;
+  If (Tag=$11) Or (Tag=$02) Or (Tag=$20) Then Used:=Take;
   If (Not Ok) Or (Used<1) Then Used:=Take;
   Inc(DataAt,Used); Dec(DataSize,Used);
  End;
@@ -12167,6 +12358,275 @@ Begin
     Block[Pos]:=(Nib Shl 4) Or Nib2; Inc(Pos);
     If Channels=2 Then Inc(I) Else Inc(I,2);
    End;
+  End;
+  WriteBytes(Block,BlockSize);
+  Inc(Done,Take);
+ End;
+ CloseRead; CloseWrite;
+End;
+
+{ Nintendo THP: audio du premier composant audio. }
+Procedure DecodeTHP(Const Source,Target: String);
+Var
+ H: Array[0..31] Of Byte;
+ Limit,Pos,FrameCount,CompOff,FirstFrame,FirstSize,NextFrame,NextSize,Rate,VSize,ASize,Take,I,Frame: LongInt;
+ Version,CompCount,Channels,K: LongInt;
+ Comp: Array[0..15] Of Byte;
+ HasAudio: Boolean;
+ Buf: PEABuffer;
+Function BE(At: LongInt): LongInt;
+Var Q: Array[0..3] Of Byte;
+Begin
+ ReadAt(At,Q,4); If Q[0]>=128 Then Fail('thp: entier hors limites.');
+ BE:=LongInt(Q[0])*16777216+LongInt(Q[1])*65536+LongInt(Q[2])*256+Q[3];
+End;
+Begin
+ YAMReset; EAReset; OpenRead(Source); Limit:=InputSize;
+ If Limit<48 Then Fail('thp: entete tronque.');
+ ReadAt(0,H,4);
+ If (H[0]<>84) Or (H[1]<>72) Or (H[2]<>80) Or (H[3]<>0) Then Fail('thp: signature THP requise.');
+ Version:=BE(4); FrameCount:=BE(20); FirstSize:=BE(24); CompOff:=BE(32); FirstFrame:=BE(40);
+ CompCount:=BE(CompOff);
+ If (CompCount<1) Or (CompCount>16) Then Fail('thp: composants incorrects.');
+ ReadAt(CompOff+4,Comp,16); Pos:=CompOff+20; HasAudio:=False; Channels:=0; Rate:=0;
+ For I:=0 To CompCount-1 Do Begin
+  If Comp[I]=0 Then Begin
+   Inc(Pos,8); If Version=$11000 Then Inc(Pos,4);
+  End Else If (Comp[I]=1) And Not HasAudio Then Begin
+   Channels:=BE(Pos); Rate:=BE(Pos+4); Inc(Pos,12); HasAudio:=True;
+  End;
+ End;
+ If Not HasAudio Then Fail('thp: aucune piste audio.');
+ If (Channels<1) Or (Channels>2) Then Fail('thp: mono ou stereo requis.');
+ If (Rate<4000) Or (Rate>192000) Then Fail('thp: frequence 4000..192000 Hz requise.');
+ OpenWrite(Target); ADPCMWaveHeader(Rate,Channels,0);
+ NextFrame:=FirstFrame; NextSize:=FirstSize;
+ For Frame:=1 To FrameCount Do Begin
+  If NextFrame+16>Limit Then Break;
+  Pos:=NextFrame; If NextSize<1 Then Inc(NextFrame) Else Inc(NextFrame,NextSize);
+  NextSize:=BE(Pos); VSize:=BE(Pos+8); ASize:=BE(Pos+12);
+  If (VSize<0) Or (ASize<0) Or (Pos+16+VSize>Limit) Then Break;
+  If (ASize>0) And (Pos+16+VSize+ASize<=Limit) Then Begin
+   GetMem(Buf,ASize); K:=0;
+   While K<ASize Do Begin
+    If ASize-K>16384 Then Take:=16384 Else Take:=ASize-K;
+    ReadAt(Pos+16+VSize+K,Buf^[K],Take); Inc(K,Take);
+   End;
+   THPDecodePacket(Buf,ASize,Channels); FreeMem(Buf,ASize);
+  End;
+ End;
+ EAFlush;
+ If EAWritten=0 Then Fail('thp: aucune donnee audio decodee.');
+ ADPCMPatchHeader(Rate,Channels,EAWritten); CloseRead; CloseWrite;
+End;
+
+{ Secteurs CD-ROM XA bruts de 2352 octets (STR PlayStation, RIFF CDXA): premier canal audio. }
+Procedure DecodeXASectors(Const Source,Target: String);
+Var
+ S: Array[0..2351] Of Byte;
+ Limit,Pos,Rate: LongInt;
+ Channels,Chan: Integer;
+ Found: Boolean;
+ Buf: PEABuffer;
+Begin
+ YAMReset; EAReset; OpenRead(Source); Limit:=InputSize; Pos:=0; Found:=False; Chan:=-1; Rate:=0; Channels:=1;
+ If Limit<2352 Then Fail('xa: fichier trop petit.');
+ ReadAt(0,S,12);
+ If (S[0]=82) And (S[1]=73) And (S[2]=70) And (S[3]=70) Then Pos:=44;
+ While Limit-Pos>=2352 Do Begin
+  ReadAt(Pos,S,2352); Inc(Pos,2352);
+  If (S[$12] And $0E)=4 Then Begin
+   If Not Found Then Begin
+    Chan:=S[$11]; Channels:=(S[$13] And 1)+1; If (S[$13] And 4)<>0 Then Rate:=18900 Else Rate:=37800;
+    OpenWrite(Target); ADPCMWaveHeader(Rate,Channels,0); Found:=True;
+   End;
+   If S[$11]=Chan Then Begin
+    Buf:=@S[24]; XADecodeSector(Buf,2304,Channels);
+   End;
+  End;
+ End;
+ If Not Found Then Fail('xa: aucun secteur audio XA.');
+ EAFlush;
+ If EAWritten=0 Then Fail('xa: aucune donnee audio decodee.');
+ ADPCMPatchHeader(Rate,Channels,EAWritten); CloseRead; CloseWrite;
+End;
+
+{ FLV: audio ADPCM (format 1, ADPCM SWF). }
+Procedure DecodeFLVAudio(Const Source,Target: String);
+Var
+ H: Array[0..15] Of Byte;
+ Limit,Pos,Size,Rate,Take,K: LongInt;
+ Channels: Integer;
+ Found: Boolean;
+ Buf: PEABuffer;
+Begin
+ YAMReset; EAReset; OpenRead(Source); Limit:=InputSize; Found:=False; Rate:=0; Channels:=1;
+ If Limit<13 Then Fail('flv: fichier tronque.');
+ ReadAt(0,H,9);
+ If (H[0]<>70) Or (H[1]<>76) Or (H[2]<>86) Then Fail('flv: signature FLV requise.');
+ Pos:=LongInt(H[5])*16777216+LongInt(H[6])*65536+LongInt(H[7])*256+H[8]+4;
+ While Limit-Pos>=12 Do Begin
+  ReadAt(Pos,H,12);
+  Size:=LongInt(H[1])*65536+LongInt(H[2])*256+H[3];
+  If Pos+11+Size>Limit Then Break;
+  If (H[0]=8) And (Size>1) Then Begin
+   If (H[11] Shr 4)<>1 Then Fail('flv: seul l''audio ADPCM (format 1) est pris en charge.');
+   If Not Found Then Begin
+    Rate:=44100 Shr (3-((H[11] Shr 2) And 3)); Channels:=(H[11] And 1)+1; Found:=True;
+    OpenWrite(Target); ADPCMWaveHeader(Rate,Channels,0);
+   End;
+   GetMem(Buf,Size-1); K:=0;
+   While K<Size-1 Do Begin
+    If Size-1-K>16384 Then Take:=16384 Else Take:=Size-1-K;
+    ReadAt(Pos+12+K,Buf^[K],Take); Inc(K,Take);
+   End;
+   SWFDecodePacket(Buf,Size-1,Channels); FreeMem(Buf,Size-1);
+  End;
+  Pos:=Pos+11+Size+4;
+ End;
+ If Not Found Then Fail('flv: aucune piste audio.');
+ EAFlush;
+ If EAWritten=0 Then Fail('flv: aucune donnee audio decodee.');
+ ADPCMPatchHeader(Rate,Channels,EAWritten); CloseRead; CloseWrite;
+End;
+
+{ Encodeur adpcm_swf vers FLV audio seul (paquets de 4096 echantillons). }
+Procedure EncodeFLVSWF(Const Source,Target: String);
+Var
+ Head: Array[0..43] Of Byte;
+ Raw: Array[0..3] Of Byte;
+ Pkt: Array[0..16511] Of Byte;
+ Out: Array[0..31] Of Byte;
+ Limit,Rate,Frames,Done,Sample,Ts,Bits,PrevSize: LongInt;
+ Channels,C,I,Take,Used,RateCode: Integer;
+ Smp: Array[0..4095,0..1] Of LongInt;
+ Pred,Idx: Array[0..1] Of LongInt;
+ BitPos: LongInt;
+Procedure PutBitsN(V: LongInt; N: Integer);
+Var K: Integer;
+Begin
+ For K:=N-1 DownTo 0 Do Begin
+  If ((V Shr K) And 1)<>0 Then Pkt[BitPos Shr 3]:=Pkt[BitPos Shr 3] Or (128 Shr (BitPos And 7));
+  Inc(BitPos);
+ End;
+End;
+Procedure PutByte(V: LongInt);Begin Out[Used]:=V And 255; Inc(Used); End;
+Procedure PutBE24(V: LongInt);Begin PutByte(V Shr 16); PutByte(V Shr 8); PutByte(V); End;
+Procedure PutBE32(V: LongInt);Begin PutByte(V Shr 24); PutBE24(V); End;
+Procedure Flush;Begin If Used>0 Then Begin WriteBytes(Out,Used); Used:=0; End; End;
+Function CompressIMA(Ch: Integer; X: LongInt): Integer;
+Var Dl,St,Nb: LongInt;
+Begin
+ Dl:=X-Pred[Ch]; St:=ADPCMStepTable[Idx[Ch]];
+ Nb:=Abs(Dl)*4 Div St; If Nb>7 Then Nb:=7; If Dl<0 Then Inc(Nb,8);
+ Pred[Ch]:=ADPCMClip16(Pred[Ch]+(St*IMADiff[Nb]) Div 8);
+ Idx[Ch]:=Idx[Ch]+ADPCMIndexTable[Nb];
+ If Idx[Ch]<0 Then Idx[Ch]:=0; If Idx[Ch]>88 Then Idx[Ch]:=88;
+ CompressIMA:=Nb;
+End;
+Begin
+ OpenRead(Source); Limit:=InputSize;
+ If Limit<44 Then Fail('adpcm_swf: WAV intermediaire tronque.');
+ ReadAt(0,Head,44); Channels:=Head[22];
+ Rate:=LongInt(Head[24])+LongInt(Head[25])*256+LongInt(Head[26])*65536;
+ If (Channels<1) Or (Channels>2) Or (Head[36]<>100) Then Fail('adpcm_swf: WAV PCM16 mono/stereo requis.');
+ RateCode:=0;
+ Case Rate Of
+  5512: RateCode:=0; 11025: RateCode:=1; 22050: RateCode:=2; 44100: RateCode:=3;
+  Else Fail('FLV: frequences 5512, 11025, 22050 ou 44100 Hz (utiliser -ar).');
+ End;
+ Frames:=(Limit-44) Div (Channels*2);
+ If Frames=0 Then Fail('adpcm_swf: aucune donnee audio.');
+ For C:=0 To 1 Do Begin Pred[C]:=0; Idx[C]:=0; End;
+ OpenWrite(Target); Used:=0;
+ PutByte(70); PutByte(76); PutByte(86); PutByte(1); PutByte(4); PutBE32(9); PutBE32(0); Flush;
+ Done:=0;
+ While Done<Frames Do Begin
+  Take:=4096; If Frames-Done<Take Then Take:=Frames-Done;
+  For I:=0 To 4095 Do For C:=0 To Channels-1 Do Begin
+   If I<Take Then Begin
+    ReadAt(44+(Done+I)*Channels*2+C*2,Raw,2);
+    Sample:=LongInt(Raw[0])+LongInt(Raw[1])*256; If Sample>=32768 Then Dec(Sample,65536);
+   End Else Sample:=0;
+   Smp[I,C]:=Sample;
+  End;
+  FillChar(Pkt,SizeOf(Pkt),0); BitPos:=0;
+  PutBitsN(2,2);
+  For C:=0 To Channels-1 Do Begin
+   If Idx[C]>63 Then Idx[C]:=63;
+   PutBitsN(Smp[0,C] And $FFFF,16); PutBitsN(Idx[C],6); Pred[C]:=Smp[0,C];
+  End;
+  For I:=1 To 4095 Do For C:=0 To Channels-1 Do PutBitsN(CompressIMA(C,Smp[I,C]),4);
+  Bits:=(BitPos+7) Div 8;
+  Ts:=(Done*1000+Rate Div 2) Div Rate;
+  PutByte(8); PutBE24(Bits+1); PutBE24(Ts); PutByte((Ts Shr 24) And $7F); PutBE24(0);
+  PutByte($10 Or (RateCode Shl 2) Or 2 Or (Channels-1)); Flush;
+  WriteBytes(Pkt,Bits);
+  PrevSize:=11+Bits+1; PutBE32(PrevSize); Flush;
+  Inc(Done,Take);
+ End;
+ CloseRead; CloseWrite;
+End;
+
+{ Encodeur adpcm_yamaha: WAV tag 0x0020, blocs de 1024 octets. }
+Procedure EncodeWaveYamaha(Const Source,Target: String);
+Const
+ BlockSize = 1024;
+Var
+ Head: Array[0..43] Of Byte;
+ Raw: Array[0..3] Of Byte;
+ Block: Array[0..1023] Of Byte;
+ Out: Array[0..63] Of Byte;
+ Limit,Rate,Frames,Done,Blocks,DataSize,FrameSize,Sample,Pos: LongInt;
+ Channels,C,I,Take,Used,Nib,Nib2: Integer;
+ Smp: Array[0..2047,0..1] Of LongInt;
+Procedure PutByte(X: LongInt);Begin Out[Used]:=X And 255; Inc(Used); End;
+Procedure PutLE16(X: LongInt);Begin PutByte(X); PutByte(X Shr 8); End;
+Procedure PutLE32(X: LongInt);Begin PutLE16(X); PutLE16(X Shr 16); End;
+Procedure PutTag(Const T: String);
+Var K: Integer;
+Begin For K:=1 To 4 Do PutByte(Ord(T[K])); End;
+Function Compress(Ch: Integer; X: LongInt): Integer;
+Var Dl,Nb: LongInt;
+Begin
+ If YAStep[Ch]=0 Then Begin YAPred[Ch]:=0; YAStep[Ch]:=127; End;
+ Dl:=X-YAPred[Ch];
+ Nb:=Abs(Dl)*4 Div YAStep[Ch]; If Nb>7 Then Nb:=7; If Dl<0 Then Inc(Nb,8);
+ YAMExpand(Ch,Nb);
+ Compress:=Nb;
+End;
+Begin
+ YAMReset; OpenRead(Source); Limit:=InputSize;
+ If Limit<44 Then Fail('adpcm_yamaha: WAV intermediaire tronque.');
+ ReadAt(0,Head,44); Channels:=Head[22];
+ Rate:=LongInt(Head[24])+LongInt(Head[25])*256+LongInt(Head[26])*65536;
+ If (Channels<1) Or (Channels>2) Or (Head[36]<>100) Then Fail('adpcm_yamaha: WAV PCM16 mono/stereo requis.');
+ Frames:=(Limit-44) Div (Channels*2);
+ If Frames=0 Then Fail('adpcm_yamaha: aucune donnee audio.');
+ FrameSize:=BlockSize*2 Div Channels;
+ Blocks:=(Frames+FrameSize-1) Div FrameSize; DataSize:=Blocks*BlockSize;
+ OpenWrite(Target); Used:=0;
+ PutTag('RIFF'); PutLE32(4+8+18+12+8+DataSize); PutTag('WAVE'); PutTag('fmt '); PutLE32(18); PutLE16($20);
+ PutLE16(Channels); PutLE32(Rate); PutLE32(Rate*BlockSize Div FrameSize); PutLE16(BlockSize); PutLE16(4); PutLE16(0);
+ PutTag('fact'); PutLE32(4); PutLE32(Frames); PutTag('data'); PutLE32(DataSize);
+ WriteBytes(Out,Used); Used:=0; Done:=0;
+ While Done<Frames Do Begin
+  Take:=FrameSize; If Frames-Done<Take Then Take:=Frames-Done;
+  For I:=0 To FrameSize-1 Do For C:=0 To Channels-1 Do Begin
+   If I<Take Then Begin
+    ReadAt(44+(Done+I)*Channels*2+C*2,Raw,2);
+    Sample:=LongInt(Raw[0])+LongInt(Raw[1])*256; If Sample>=32768 Then Dec(Sample,65536);
+   End Else Sample:=0;
+   Smp[I,C]:=Sample;
+  End;
+  Pos:=0; I:=0;
+  While Pos<BlockSize Do Begin
+   If Channels=2 Then Begin
+    Nib:=Compress(0,Smp[I,0]); Nib2:=Compress(1,Smp[I,1]); Inc(I);
+   End Else Begin
+    Nib:=Compress(0,Smp[I,0]); Nib2:=Compress(0,Smp[I+1,0]); Inc(I,2);
+   End;
+   Block[Pos]:=Nib Or (Nib2 Shl 4); Inc(Pos);
   End;
   WriteBytes(Block,BlockSize);
   Inc(Done,Take);
@@ -14045,6 +14505,8 @@ Begin
  WriteLn(' D  amv             AMV (audio adpcm_ima_amv)');
  WriteLn(' D  iss             Funcom ISS (adpcm_ima_iss)');
  WriteLn(' D  smjpeg          Loki SDL MJPEG (adpcm_ima_smjpeg)');
+ WriteLn(' D  thp             Nintendo THP (audio adpcm_thp)');
+ WriteLn(' D  psxstr          Sony PlayStation STR / RIFF CDXA (audio adpcm_xa)');
  WriteLn(' D  wsaud           Westwood Studios audio (adpcm_ima_ws)');
  WriteLn(' D  aac             AAC ADTS (AAC-LC mono/stereo; alias: adts)');
  WriteLn(' D  iff             IFF 8SVX, Fibonacci/exponentiel (alias: 8svx, svx)');
@@ -14343,6 +14805,10 @@ BEGIN
    WriteLn('DEA    adpcm_ima_qt    ADPCM IMA QuickTime');
    WriteLn('DEA    adpcm_ima_wav   ADPCM IMA WAV');
    WriteLn('D A    adpcm_ima_ws    ADPCM IMA Westwood');
+   WriteLn('DEA    adpcm_swf       ADPCM Shockwave Flash');
+   WriteLn('D A    adpcm_thp       ADPCM Nintendo Gamecube THP');
+   WriteLn('D A    adpcm_xa        ADPCM CDROM XA');
+   WriteLn('DEA    adpcm_yamaha    ADPCM Yamaha');
    WriteLn('DEA    adpcm_ms        ADPCM Microsoft');
    WriteLn('D A    adpcm_sbpro_2   ADPCM Sound Blaster Pro 2-bit');
    WriteLn('D A    adpcm_sbpro_3   ADPCM Sound Blaster Pro 2.6-bit');
@@ -14720,13 +15186,14 @@ BEGIN
  If NoAudio Then Fail('-an: aucune piste a ecrire dans une sortie audio seule.');
  If VideoCodec<>'' Then Fail('Codec video incompatible avec une sortie audio seule.');
  If (OutputFormat<>'wav') And (OutputFormat<>'mp3') And (OutputFormat<>'ac3') And
- (OutputFormat<>'adx') And (OutputFormat<>'aiff') Then Fail(
+ (OutputFormat<>'adx') And (OutputFormat<>'aiff') And (OutputFormat<>'flv') Then Fail(
  'Sorties audio WAV, MP3, AC3, ADX et AIFF-C (adpcm_ima_qt) prises en charge.');
  If AudioCodec='' Then If OutputFormat='wav' Then AudioCodec:=
  'pcm_s16le' Else If OutputFormat='adx' Then AudioCodec:='adpcm_adx'
- Else If OutputFormat='aiff' Then AudioCodec:='adpcm_ima_qt' Else AudioCodec:=OutputFormat;
+ Else If OutputFormat='aiff' Then AudioCodec:='adpcm_ima_qt'
+ Else If OutputFormat='flv' Then AudioCodec:='adpcm_swf' Else AudioCodec:=OutputFormat;
  If (AudioCodec<>'copy') And Not (((OutputFormat='wav') And ((AudioCodec='pcm_s16le') Or (AudioCodec='adpcm_ima_wav') Or
-  (AudioCodec='adpcm_ms'))) Or
+  (AudioCodec='adpcm_ms') Or (AudioCodec='adpcm_yamaha'))) Or ((OutputFormat='flv') And (AudioCodec='adpcm_swf')) Or
  ((OutputFormat='adx') And (AudioCodec='adpcm_adx')) Or ((OutputFormat='aiff') And (AudioCodec='adpcm_ima_qt')) Or
  ((OutputFormat='mp3') And (AudioCodec='mp3')) Or ((OutputFormat='ac3') And (AudioCodec='ac3'))) Then Fail(
  'Codec de sortie non pris en charge pour ce conteneur.');
@@ -14756,6 +15223,9 @@ BEGIN
    If InputFormat='4xm' Then Decode4XMAudio(InputPath,Temps[0]) Else
    If InputFormat='ea' Then DecodeEAContainer(InputPath,Temps[0],InputCodec) Else
    If InputFormat='xa' Then DecodeMaxisXA(InputPath,Temps[0]) Else
+   If InputFormat='thp' Then DecodeTHP(InputPath,Temps[0]) Else
+   If InputFormat='psxstr' Then DecodeXASectors(InputPath,Temps[0]) Else
+   If InputFormat='flv' Then DecodeFLVAudio(InputPath,Temps[0]) Else
    If InputFormat='smjpeg' Then DecodeSMJPEG(InputPath,Temps[0]) Else
    If InputFormat='wsaud' Then DecodeWSAud(InputPath,Temps[0]) Else
    If InputFormat='amv' Then DecodeAMV(InputPath,Temps[0]) Else
@@ -14769,7 +15239,7 @@ BEGIN
   End Else If IsWaveCT(InputPath) Then Begin
    Temps[0]:=NewTemporary; DecodeWaveCT(InputPath,Temps[0]); Intermediate:=Temps[0];
   End Else If (WaveFormatTag(InputPath)=$61) Or (WaveFormatTag(InputPath)=$62) Or
-  (WaveFormatTag(InputPath)=$11) Or (WaveFormatTag(InputPath)=$02) Then Begin
+  (WaveFormatTag(InputPath)=$11) Or (WaveFormatTag(InputPath)=$02) Or (WaveFormatTag(InputPath)=$20) Then Begin
    Temps[0]:=NewTemporary; DecodeWaveBlocks(InputPath,Temps[0]); Intermediate:=Temps[0];
   End;
   If (OutputFormat='wav') And (AudioCodec='adpcm_ima_wav') Then Begin
@@ -14778,6 +15248,12 @@ BEGIN
   End Else If (OutputFormat='wav') And (AudioCodec='adpcm_ms') Then Begin
    Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False);
    EncodeWaveBlocks(Temps[1],Temps[2],1);
+  End Else If (OutputFormat='wav') And (AudioCodec='adpcm_yamaha') Then Begin
+   Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False);
+   EncodeWaveYamaha(Temps[1],Temps[2]);
+  End Else If OutputFormat='flv' Then Begin
+   Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False);
+   EncodeFLVSWF(Temps[1],Temps[2]);
   End Else If OutputFormat='wav' Then NormalizeWave(Intermediate,Temps[2],False)
    Else If OutputFormat='adx' Then Begin
     Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False);
