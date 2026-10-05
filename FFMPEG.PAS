@@ -49,6 +49,60 @@ Uses DOS;
                                Var Size: LongWord): LongBool;
  stdcall; external 'wininet.dll';
 {$ENDIF}
+{ Primitives ADPCM communes (ADX, 4X Movie, Creative CT), adaptees de FFmpeg
+  libavcodec/adpcm.c et adpcm_data.c, LGPL-2.1-or-later. }
+Const
+ ADPCMStepTable: Array[0..88] Of Integer=(
+  7,8,9,10,11,12,13,14,16,17,
+  19,21,23,25,28,31,34,37,41,45,
+  50,55,60,66,73,80,88,97,107,118,
+  130,143,157,173,190,209,230,253,279,307,
+  337,371,408,449,494,544,598,658,724,796,
+  876,963,1060,1166,1282,1411,1552,1707,1878,2066,
+  2272,2499,2749,3024,3327,3660,4026,4428,4871,5358,
+  5894,6484,7132,7845,8630,9493,10442,11487,12635,13899,
+  15289,16818,18500,20350,22385,24623,27086,29794,32767);
+ ADPCMIndexTable: Array[0..15] Of ShortInt=(-1,-1,-1,-1,2,4,6,8,-1,-1,-1,-1,2,4,6,8);
+ ADPCMCTAdapt: Array[0..7] Of Integer=(230,230,230,230,307,409,512,614);
+
+{ Decalage arithmetique a droite (valeur signee). }
+Function ADPCMSar(V: LongInt; N: Integer): LongInt;
+Var
+ D: LongInt;
+Begin
+ D:=LongInt(1) Shl N;
+ If V>=0 Then ADPCMSar:=V Div D Else ADPCMSar:=-1-((-1-V) Div D);
+End;
+
+Function ADPCMClip16(V: LongInt): LongInt;Begin
+ If V<-32768 Then V:=-32768; If V>32767 Then V:=32767; ADPCMClip16:=V;
+End;
+
+{ adpcm_ct: Pred et Step initialises a 0 et 511. }
+Function ADPCMExpandCT(Var Pred,Step: LongInt; Nibble: Integer): Integer;
+Var
+ Diff,NewStep: LongInt;
+Begin
+ Diff:=((2*LongInt(Nibble And 7)+1)*Step) Shr 3;
+ If (Nibble And 8)<>0 Then Diff:=-Diff;
+ Pred:=ADPCMClip16(ADPCMSar(Pred*254,8)+Diff);
+ NewStep:=(LongInt(ADPCMCTAdapt[Nibble And 7])*Step) Shr 8;
+ If NewStep<511 Then NewStep:=511; If NewStep>32767 Then NewStep:=32767;
+ Step:=NewStep; ADPCMExpandCT:=Pred;
+End;
+
+{ IMA 4X Movie: decalage 4, index borne a 0..88. }
+Function ADPCMExpandIMA(Var Pred,Index: LongInt; Nibble: Integer): Integer;
+Var
+ Diff,NewIndex: LongInt;
+Begin
+ Diff:=((2*LongInt(Nibble And 7)+1)*ADPCMStepTable[Index]) Shr 4;
+ NewIndex:=Index+ADPCMIndexTable[Nibble];
+ If NewIndex<0 Then NewIndex:=0; If NewIndex>88 Then NewIndex:=88;
+ If (Nibble And 8)<>0 Then Pred:=Pred-Diff Else Pred:=Pred+Diff;
+ Pred:=ADPCMClip16(Pred); Index:=NewIndex; ADPCMExpandIMA:=Pred;
+End;
+
 { Moteur integre depuis MP32WAV.PAS }
 
 Procedure DecodeMP3(Const Source,Target: String);
@@ -1663,7 +1717,7 @@ Procedure Help;Begin
  WriteLn;
  WriteLn('Creative VOC PCM 8/16 bits -> WAV PCM16, mono/stereo.');
  WriteLn('Continuations, silences et boucles internes finies pris en charge.');
- WriteLn('ADPCM, A-law, mu-law et changements de frequence/canaux refuses.');
+ WriteLn('ADPCM CT pris en charge; autres ADPCM, A-law, mu-law et changements de frequence/canaux refuses.');
  WriteLn('Sans sortie explicite: meme chemin avec extension .wav.');
  WriteLn('Fichiers < 2 Go; aucune sortie existante ecrasee. Aide: /? ou --help');
 End;
@@ -1755,6 +1809,7 @@ End;
 
 Var
  HaveFormat, HaveSound: Boolean;
+ CTPred, CTStep: Array[0..1] Of LongInt;
 
 Procedure SetFormat(Rate: LongInt; Channels: Integer);Begin
  If (Rate < 4000) Or (Rate > 192000) Or Not (Channels In [1,2]) Then  Fail(
@@ -1780,6 +1835,22 @@ Var
  N, J, OutCount, Align: Integer;
  Value: LongInt;
 Begin
+ If Bits = 4 Then Begin
+  { ADPCM Creative Technology (codec 0x0200): deux echantillons par octet. }
+  If Count > 0 Then HaveSound := True;
+  While Count > 0 Do Begin
+   If Count > 1024 Then N := 1024 Else N := Count;
+   ReadAt(Position, Raw, N); OutCount := 0;
+   For J := 0 To N-1 Do Begin
+    Value := ADPCMExpandCT(CTPred[0], CTStep[0], Raw[J] Shr 4);
+    PCM[OutCount] := Value And 255; PCM[OutCount+1] := (Value Shr 8) And 255; Inc(OutCount, 2);
+    Value := ADPCMExpandCT(CTPred[Header.Channels-1], CTStep[Header.Channels-1], Raw[J] And 15);
+    PCM[OutCount] := Value And 255; PCM[OutCount+1] := (Value Shr 8) And 255; Inc(OutCount, 2);
+   End;
+   SubmitPCM(OutCount); Inc(Position, N); Dec(Count, N);
+  End;
+  Exit;
+ End;
  Align := Header.Channels * (Bits Div 8);
  If (Count Mod Align) <> 0 Then Fail('Echantillon VOC incomplet.');
  If Count > 0 Then HaveSound := True;
@@ -1839,6 +1910,7 @@ Begin
  HaveFormat := False; HaveSound := False;
  Extended := False; Terminated := False; Depth := 0; Bits := 0; Steps := 0;
  ExtendedRate := 0; ExtendedChannels := 0;
+ CTPred[0] := 0; CTPred[1] := 0; CTStep[0] := 511; CTStep[1] := 511;
  Assign(InputFile, InputName); OldMode := FileMode; FileMode := 0;
  {$I-}Reset(InputFile, 1); Code := IOResult;{$I+}
  FileMode := OldMode;
@@ -1935,8 +2007,9 @@ Begin
    If Size < 12 Then Fail('Bloc VOC 9 trop court.');
    ReadAt(Position, B, 12);
    Rate := LE32(B,0); Bits := B[4]; Channels := B[5]; Codec := LE16(B,6);
-   If Not (((Bits = 8) And (Codec = 0)) Or ((Bits = 16) And (Codec = 4))) Then     Fail(
-   'Bloc VOC 9: PCM 8 bits (codec 0) ou 16 bits (codec 4) requis.');
+   If Not (((Bits = 8) And (Codec = 0)) Or ((Bits = 16) And (Codec = 4)) Or
+    ((Bits = 4) And (Codec = $0200))) Then     Fail(
+   'Bloc VOC 9: PCM 8 bits (codec 0), 16 bits (codec 4) ou ADPCM CT (codec $0200) requis.');
    SetFormat(Rate, Channels); ConvertData(Position+12, Size-12, Bits);
   End;
   Else Fail('Type de bloc VOC inconnu.');
@@ -3636,7 +3709,7 @@ Function Probe(Const Name: String): String;
 Var
  B: Array[0..1083] Of Byte;
  N,J: Integer;
- Size,StartPos,TagSize: LongInt;
+ Size,StartPos,TagSize,ADXOffset: LongInt;
  Tag: String[4];
 Begin
  OpenRead(Name); Size:=InputSize; StartPos:=0;
@@ -3713,6 +3786,12 @@ Begin
   (B[8]=56) And (B[9]=83) And (B[10]=86) And (B[11]=88) Then Begin Probe:='iff'; Exit; End;
  If N>=26 Then If (B[0]=67) And (B[1]=114) And (B[2]=101) And (B[19]=$1A) Then Begin
   Probe:='voc'; Exit;
+ End;
+ If N>=8 Then If (B[0]=$80) And (B[1]=0) Then Begin
+  ADXOffset:=LongInt(B[2])*256+B[3];
+  If (ADXOffset>=8) And (ADXOffset<=N-4) Then
+   If (B[ADXOffset-2]=40) And (B[ADXOffset-1]=99) And (B[ADXOffset]=41) And
+    (B[ADXOffset+1]=67) And (B[ADXOffset+2]=82) And (B[ADXOffset+3]=73) Then Begin Probe:='adx'; Exit; End;
  End;
  If N>=7 Then If (B[0]=$0B) And (B[1]=$77) Then Begin Probe:='ac3'; Exit; End;
  If N>=7 Then If (B[0]=$FF) And ((B[1] And $F6)=$F0) Then Begin Probe:='aac'; Exit; End;
@@ -10163,6 +10242,393 @@ Begin
 End;
 
 
+{ ADPCM SEGA CRI ADX, 4X Movie et Creative Technology (CT). Adapte de FFmpeg
+  libavcodec/adx.c, adxdec.c, adxenc.c, adpcm.c et libavformat/adxdec.c, 4xm.c,
+  LGPL-2.1-or-later; voir THIRD_PARTY_NOTICES.md. }
+Procedure ADPCMWaveHeader(Rate: LongInt; Channels: Integer; DataSize: LongInt);
+Var
+ H: Array[0..43] Of Byte;
+Procedure P32(At: Integer; V: LongInt);
+Var I: Integer;
+Begin For I:=0 To 3 Do Begin H[At+I]:=V And 255; V:=V Shr 8; End; End;
+Procedure P16(At: Integer; V: Integer);
+Begin H[At]:=V And 255; H[At+1]:=(V Shr 8) And 255; End;
+Begin
+ H[0]:=82; H[1]:=73; H[2]:=70; H[3]:=70; P32(4,36+DataSize);
+ H[8]:=87; H[9]:=65; H[10]:=86; H[11]:=69;
+ H[12]:=102; H[13]:=109; H[14]:=116; H[15]:=32; P32(16,16); P16(20,1);
+ P16(22,Channels); P32(24,Rate); P32(28,Rate*Channels*2); P16(32,Channels*2); P16(34,16);
+ H[36]:=100; H[37]:=97; H[38]:=116; H[39]:=97; P32(40,DataSize);
+ WriteBytes(H,44);
+End;
+
+Procedure ADPCMPatchHeader(Rate: LongInt; Channels: Integer; DataSize: LongInt);
+Var
+ Code: Integer;
+Begin
+ {$I-}Seek(ActiveOutput,0); Code:=IOResult;{$I+}
+ If Code<>0 Then Fail('Positionnement entete WAV impossible.');
+ ADPCMWaveHeader(Rate,Channels,DataSize);
+End;
+
+Function ADXCoefficient(Cutoff,Rate: LongInt; Index: Integer): LongInt;
+Var
+ A,B,C,Product: Double;
+Begin
+ A:=Sqrt(2.0)-Cos(2.0*Pi*Cutoff/Rate); B:=Sqrt(2.0)-1.0; Product:=(A+B)*(A-B);
+ If Product<0 Then Fail('adx: frequence de coupure incorrecte.');
+ C:=(A-Sqrt(Product))/B;
+ If Index=0 Then ADXCoefficient:=Round(Single(C*2.0*4096.0))
+  Else ADXCoefficient:=Round(Single(-(C*C)*4096.0));
+End;
+
+Procedure DecodeADX(Const Source,Target: String);
+Var
+ Head: Array[0..23] Of Byte;
+ Copyright: Array[0..5] Of Byte;
+ Frame: Array[0..107] Of Byte;
+ Buf: Array[0..4095] Of Byte;
+ Limit,At,Rate,Written,Scale,D,S0,Coef0,Coef1: LongInt;
+ Channels,Cutoff,C,I,J,Used,FrameBytes: Integer;
+ Offset: LongInt;
+ S1,S2: Array[0..5] Of LongInt;
+ Samples: Array[0..5,0..31] Of Integer;
+ Stop: Boolean;
+Begin
+ OpenRead(Source); Limit:=InputSize;
+ If Limit<24 Then Fail('adx: entete tronque.');
+ ReadAt(0,Head,24);
+ If (Head[0]<>$80) Or (Head[1]<>0) Then Fail('adx: signature 0x8000 requise.');
+ Offset:=LongInt(Head[2])*256+Head[3]+4;
+ If (Offset<24) Or (Offset>Limit) Then Fail('adx: position des donnees incorrecte.');
+ ReadAt(Offset-6,Copyright,6);
+ If (Copyright[0]<>40) Or (Copyright[1]<>99) Or (Copyright[2]<>41) Or (Copyright[3]<>67) Or
+  (Copyright[4]<>82) Or (Copyright[5]<>73) Then Fail('adx: signature (c)CRI absente.');
+ If (Head[4]<>3) Or (Head[5]<>18) Or (Head[6]<>4) Then
+  Fail('adx: seul le codage 3 (ADPCM, blocs de 18 octets) est pris en charge.');
+ Channels:=Head[7];
+ If (Channels<1) Or (Channels>2) Then Fail('adx: mono ou stereo requis.');
+ If Head[8]>=128 Then Fail('adx: frequence incorrecte.');
+ Rate:=LongInt(Head[8])*16777216+LongInt(Head[9])*65536+LongInt(Head[10])*256+Head[11];
+ If (Rate<4000) Or (Rate>192000) Then Fail('adx: frequence 4000..192000 Hz requise.');
+ Cutoff:=LongInt(Head[16])*256+Head[17];
+ Coef0:=ADXCoefficient(Cutoff,Rate,0); Coef1:=ADXCoefficient(Cutoff,Rate,1);
+ For C:=0 To 5 Do Begin S1[C]:=0; S2[C]:=0; End;
+ OpenWrite(Target); ADPCMWaveHeader(Rate,Channels,0);
+ FrameBytes:=18*Channels; At:=Offset; Written:=0; Used:=0; Stop:=False;
+ While (Limit-At>=FrameBytes) And Not Stop Do Begin
+  ReadAt(At,Frame,FrameBytes); Inc(At,FrameBytes);
+  For C:=0 To Channels-1 Do If (Frame[C*18] And $80)<>0 Then Stop:=True;
+  If Not Stop Then Begin
+   For C:=0 To Channels-1 Do Begin
+    Scale:=LongInt(Frame[C*18])*256+Frame[C*18+1];
+    For I:=0 To 31 Do Begin
+     If Odd(I) Then D:=Frame[C*18+2+I Div 2] And 15 Else D:=Frame[C*18+2+I Div 2] Shr 4;
+     If D>=8 Then Dec(D,16);
+     S0:=D*Scale+ADPCMSar(Coef0*S1[C]+Coef1*S2[C],12);
+     S2[C]:=S1[C]; S1[C]:=ADPCMClip16(S0); Samples[C,I]:=S1[C];
+    End;
+   End;
+   If Written>2147483600-LongInt(32)*Channels*2 Then Fail('adx: sortie PCM superieure a 2 Go.');
+   For I:=0 To 31 Do For C:=0 To Channels-1 Do Begin
+    D:=Samples[C,I]; If D<0 Then Inc(D,65536);
+    Buf[Used]:=D And 255; Buf[Used+1]:=D Shr 8; Inc(Used,2);
+    If Used=4096 Then Begin WriteBytes(Buf,Used); Inc(Written,Used); Used:=0; End;
+   End;
+  End;
+ End;
+ If Used>0 Then Begin WriteBytes(Buf,Used); Inc(Written,Used); End;
+ If Written=0 Then Fail('adx: aucune donnee audio.');
+ ADPCMPatchHeader(Rate,Channels,Written); CloseRead; CloseWrite;
+End;
+
+{ Source: WAV PCM16 normalise (entete de 44 octets). Cible: ADX brut (en-tete 36
+  octets avec nombre total d'echantillons, blocs de 18 octets par
+  canal, bloc de fin 0x8001). }
+Procedure EncodeADX(Const Source,Target: String);
+Const
+ Cutoff = 500;
+Var
+ Head: Array[0..43] Of Byte;
+ Raw: Array[0..127] Of Byte;
+ Block: Array[0..17] Of Byte;
+ Out: Array[0..71] Of Byte;
+ Limit,Rate,Frames,Done,Coef0,Coef1: LongInt;
+ Channels,C,I,J,Take,Used: Integer;
+ Prev1,Prev2: Array[0..1] Of LongInt;
+ Smp: Array[0..1,0..31] Of LongInt;
+ S0,S1,S2,D,MaxD,MinD,Scale,Q: LongInt;
+Procedure PutByte(V: Integer);Begin Out[Used]:=V And 255; Inc(Used); End;
+Procedure PutBlock;Begin
+ If Used>0 Then Begin WriteBytes(Out,Used); Used:=0; End;
+End;
+Begin
+ OpenRead(Source); Limit:=InputSize;
+ If Limit<44 Then Fail('adx: WAV intermediaire tronque.');
+ ReadAt(0,Head,44); Channels:=Head[22];
+ Rate:=LongInt(Head[24])+LongInt(Head[25])*256+LongInt(Head[26])*65536;
+ If (Channels<1) Or (Channels>2) Or (Head[36]<>100) Then Fail('adx: WAV PCM16 mono/stereo requis.');
+ Frames:=(Limit-44) Div (Channels*2);
+ If Frames=0 Then Fail('adx: aucune donnee audio.');
+ Coef0:=ADXCoefficient(Cutoff,Rate,0); Coef1:=ADXCoefficient(Cutoff,Rate,1);
+ For C:=0 To 1 Do Begin Prev1[C]:=0; Prev2[C]:=0; End;
+ OpenWrite(Target); Used:=0;
+ { En-tete ADX: signature, copyright, codage 3, blocs 18, 4 bits. }
+ PutByte($80); PutByte(0); PutByte(0); PutByte(32); PutByte(3); PutByte(18); PutByte(4);
+ PutByte(Channels);
+ PutByte(Rate Shr 24); PutByte(Rate Shr 16); PutByte(Rate Shr 8); PutByte(Rate);
+ { Total FFmpeg: octets de donnees, bloc de fin inclus, divises par 18*canaux. }
+ Done:=((((Frames+31) Div 32)*18*Channels+18) Div (18*Channels))*32;
+ PutByte(Done Shr 24); PutByte(Done Shr 16); PutByte(Done Shr 8); PutByte(Done);
+ PutByte(Cutoff Shr 8); PutByte(Cutoff); PutByte(3); PutByte(0);
+ For I:=1 To 10 Do PutByte(0);
+ PutByte(40); PutByte(99); PutByte(41); PutByte(67); PutByte(82); PutByte(73);
+ PutBlock;
+ Done:=0;
+ While Done<Frames Do Begin
+  Take:=32; If Frames-Done<Take Then Take:=Frames-Done;
+  ReadAt(44+Done*Channels*2,Raw,Take*Channels*2);
+  For C:=0 To Channels-1 Do For J:=0 To 31 Do Begin
+   If J<Take Then Begin
+    D:=LongInt(Raw[(J*Channels+C)*2])+LongInt(Raw[(J*Channels+C)*2+1])*256;
+    If D>=32768 Then Dec(D,65536);
+   End Else D:=0;
+   Smp[C,J]:=D;
+  End;
+  For C:=0 To Channels-1 Do Begin
+   S1:=Prev1[C]; S2:=Prev2[C]; MaxD:=0; MinD:=0;
+   For J:=0 To 31 Do Begin
+    S0:=Smp[C,J]; D:=S0+ADPCMSar(-Coef0*S1-Coef1*S2,12);
+    If MaxD<D Then MaxD:=D; If MinD>D Then MinD:=D;
+    S2:=S1; S1:=S0;
+   End;
+   FillChar(Block,SizeOf(Block),0);
+   If (MaxD=0) And (MinD=0) Then Begin
+    Prev1[C]:=S1; Prev2[C]:=S2;
+   End Else Begin
+    If MaxD Div 7>(-MinD) Div 8 Then Scale:=MaxD Div 7 Else Scale:=(-MinD) Div 8;
+    If Scale=0 Then Scale:=1;
+    Block[0]:=Scale Shr 8; Block[1]:=Scale And 255;
+    S1:=Prev1[C]; S2:=Prev2[C];
+    For J:=0 To 31 Do Begin
+     D:=Smp[C,J]+ADPCMSar(-Coef0*S1-Coef1*S2,12);
+     If D>=0 Then Q:=(D+Scale Div 2) Div Scale Else Q:=(D-Scale Div 2) Div Scale;
+     If Q<-8 Then Q:=-8; If Q>7 Then Q:=7;
+     If Odd(J) Then Block[2+J Div 2]:=Block[2+J Div 2] Or (Q And 15)
+      Else Block[2+J Div 2]:=(Q And 15) Shl 4;
+     S0:=Q*Scale+ADPCMSar(Coef0*S1+Coef1*S2,12); S2:=S1; S1:=S0;
+    End;
+    Prev1[C]:=S1; Prev2[C]:=S2;
+   End;
+   WriteBytes(Block,18);
+  End;
+  Inc(Done,Take);
+ End;
+ FillChar(Block,SizeOf(Block),0); Block[0]:=$80; Block[1]:=1; Block[3]:=14;
+ WriteBytes(Block,18);
+ CloseRead; CloseWrite;
+End;
+
+{ WAV avec etiquette de format 0x0200 (ADPCM Creative Technology). }
+Function IsWaveCT(Const Name: String): Boolean;
+Var
+ B: Array[0..15] Of Byte;
+ Limit,Position,Size: LongInt;
+ Count: Integer;
+Begin
+ IsWaveCT:=False; OpenRead(Name); Limit:=InputSize;
+ If Limit>=12 Then Begin
+  ReadAt(0,B,12);
+  If (B[0]=82) And (B[1]=73) And (B[2]=70) And (B[3]=70) And (B[8]=87) And (B[9]=65) Then Begin
+   Position:=12; Count:=0;
+   While (Limit-Position>=8) And (Count<64) Do Begin
+    ReadAt(Position,B,8); Inc(Position,8); Inc(Count);
+    If B[7]>=128 Then Break;
+    Size:=LongInt(B[4])+LongInt(B[5])*256+LongInt(B[6])*65536+LongInt(B[7])*16777216;
+    If (B[0]=102) And (B[1]=109) And (B[2]=116) And (B[3]=32) Then Begin
+     If (Size>=2) And (Limit-Position>=2) Then Begin
+      ReadAt(Position,B,2); IsWaveCT:=(B[0]=0) And (B[1]=2);
+     End;
+     Break;
+    End;
+    If Size>Limit-Position Then Break;
+    Inc(Position,Size); If Odd(Size) Then Inc(Position);
+   End;
+  End;
+ End;
+ CloseRead;
+End;
+
+Procedure DecodeWaveCT(Const Source,Target: String);
+Var
+ B: Array[0..15] Of Byte;
+ Raw: Array[0..1023] Of Byte;
+ Buf: Array[0..4095] Of Byte;
+ Limit,Position,Size,Rate,DataAt,DataSize,Written,V: LongInt;
+ Channels: LongInt;
+ Count,Take,J,Used,Second: Integer;
+ Pred,Step: Array[0..1] Of LongInt;
+ HasFormat,HasData: Boolean;
+Procedure PutSample(S: LongInt);Begin
+ If S<0 Then Inc(S,65536);
+ Buf[Used]:=S And 255; Buf[Used+1]:=S Shr 8; Inc(Used,2);
+End;
+Begin
+ OpenRead(Source); Limit:=InputSize; ReadAt(0,B,12);
+ Position:=12; Count:=0; HasFormat:=False; HasData:=False;
+ Rate:=0; Channels:=0; DataAt:=0; DataSize:=0;
+ While (Limit-Position>=8) And (Count<64) And Not HasData Do Begin
+  ReadAt(Position,B,8); Inc(Position,8); Inc(Count);
+  If B[7]>=128 Then Fail('adpcm_ct: taille de bloc WAV excessive.');
+  Size:=LongInt(B[4])+LongInt(B[5])*256+LongInt(B[6])*65536+LongInt(B[7])*16777216;
+  If (B[0]=102) And (B[1]=109) And (B[2]=116) And (B[3]=32) Then Begin
+   If (Size<16) Or (Limit-Position<16) Then Fail('adpcm_ct: bloc fmt tronque.');
+   ReadAt(Position,B,16); Channels:=LongInt(B[2])+LongInt(B[3])*256;
+   Rate:=LongInt(B[4])+LongInt(B[5])*256+LongInt(B[6])*65536+LongInt(B[7])*16777216;
+   If (Channels<1) Or (Channels>2) Or (Rate<4000) Or (Rate>192000) Then
+    Fail('adpcm_ct: mono ou stereo, 4000..192000 Hz requis.');
+   HasFormat:=True;
+  End Else If (B[0]=100) And (B[1]=97) And (B[2]=116) And (B[3]=97) Then Begin
+   DataAt:=Position; DataSize:=Size; If DataSize>Limit-Position Then DataSize:=Limit-Position;
+   HasData:=True;
+  End;
+  Inc(Position,Size); If Odd(Size) Then Inc(Position);
+ End;
+ If Not HasFormat Or Not HasData Or (DataSize=0) Then Fail('adpcm_ct: blocs fmt et data requis.');
+ If DataSize>536870000 Then Fail('adpcm_ct: sortie PCM superieure a 2 Go.');
+ Pred[0]:=0; Pred[1]:=0; Step[0]:=511; Step[1]:=511; Second:=Channels-1;
+ OpenWrite(Target); ADPCMWaveHeader(Rate,Channels,0); Written:=0; Used:=0;
+ While DataSize>0 Do Begin
+  Take:=1024; If DataSize<Take Then Take:=DataSize;
+  ReadAt(DataAt,Raw,Take); Inc(DataAt,Take); Dec(DataSize,Take);
+  For J:=0 To Take-1 Do Begin
+   PutSample(ADPCMExpandCT(Pred[0],Step[0],Raw[J] Shr 4));
+   PutSample(ADPCMExpandCT(Pred[Second],Step[Second],Raw[J] And 15));
+  End;
+  WriteBytes(Buf,Used); Inc(Written,Used); Used:=0;
+ End;
+ V:=Written; ADPCMPatchHeader(Rate,Channels,V); CloseRead; CloseWrite;
+End;
+
+{ 4X Movie: extrait la premiere piste audio (strk/snd_) vers WAV PCM16;
+  adpcm_4xm (IMA 4 bits planaire) ou PCM 8/16 bits. }
+Procedure Decode4XMAudio(Const Source,Target: String);
+Var
+ Limit,Written,Rate: LongInt;
+ Track,Channels,Bits,Adpcm: LongInt;
+ Found,Opened: Boolean;
+ Buf: Array[0..8191] Of Byte;
+ Chunk: Array[0..1,0..1023] Of Byte;
+ Used: Integer;
+Function LE(At: LongInt): LongInt;
+Var
+ B: Array[0..3] Of Byte;
+Begin
+ ReadAt(At,B,4); If B[3]>=128 Then Fail('4xm: entier hors limites.');
+ LE:=LongInt(B[0])+LongInt(B[1])*256+LongInt(B[2])*65536+LongInt(B[3])*16777216;
+End;
+Procedure PutSample(S: LongInt);Begin
+ If S<0 Then Inc(S,65536);
+ Buf[Used]:=S And 255; Buf[Used+1]:=S Shr 8; Inc(Used,2);
+End;
+Procedure Flush;Begin
+ If Used>0 Then Begin WriteBytes(Buf,Used); Inc(Written,Used); Used:=0; End;
+ If Written>2147483000 Then Fail('4xm: sortie PCM superieure a 2 Go.');
+End;
+Procedure Sound(At,Size: LongInt);
+Var
+ Pred,Index: Array[0..1] Of LongInt;
+ H: Array[0..7] Of Byte;
+ PerChannel,Offset,Take,I,J,C: LongInt;
+ Raw: Array[0..4095] Of Byte;
+ Skip: Boolean;
+Begin
+ If Adpcm<>0 Then Begin
+  If Size<=4*Channels Then Exit;
+  ReadAt(At,H,4*Channels); Skip:=False;
+  For C:=0 To Channels-1 Do Begin
+   Pred[C]:=LongInt(H[2*C])+LongInt(H[2*C+1])*256; If Pred[C]>=32768 Then Dec(Pred[C],65536);
+   Index[C]:=LongInt(H[2*Channels+2*C])+LongInt(H[2*Channels+2*C+1])*256;
+   If Index[C]>=32768 Then Dec(Index[C],65536);
+   If (Index[C]<0) Or (Index[C]>88) Then Skip:=True;
+  End;
+  If Skip Then Exit;
+  PerChannel:=((Size-4*Channels)*2 Div Channels) Div 2; Offset:=0;
+  While Offset<PerChannel Do Begin
+   Take:=1024; If PerChannel-Offset<Take Then Take:=PerChannel-Offset;
+   For C:=0 To Channels-1 Do ReadAt(At+4*Channels+C*PerChannel+Offset,Chunk[C],Take);
+   For I:=0 To Take-1 Do For J:=0 To 1 Do For C:=0 To Channels-1 Do Begin
+    If J=0 Then PutSample(ADPCMExpandIMA(Pred[C],Index[C],Chunk[C,I] And 15))
+     Else PutSample(ADPCMExpandIMA(Pred[C],Index[C],Chunk[C,I] Shr 4));
+    If Used+4>SizeOf(Buf) Then Flush;
+   End;
+   Inc(Offset,Take);
+  End;
+  Flush;
+ End Else Begin
+  Offset:=0;
+  If Bits=8 Then Size:=Size-Size Mod Channels Else Size:=Size-Size Mod (2*Channels);
+  While Offset<Size Do Begin
+   Take:=4096; If Size-Offset<Take Then Take:=Size-Offset;
+   ReadAt(At+Offset,Raw,Take);
+   If Bits=8 Then Begin
+    For I:=0 To Take-1 Do PutSample((LongInt(Raw[I])-128)*256);
+   End Else Begin
+    I:=0;
+    While I<Take Do Begin
+     J:=LongInt(Raw[I])+LongInt(Raw[I+1])*256; If J>=32768 Then Dec(J,65536); PutSample(J); Inc(I,2);
+    End;
+   End;
+   Inc(Offset,Take); Flush;
+  End;
+ End;
+End;
+Procedure Scan(Start,Finish: LongInt; Depth: Integer);
+Var
+ P,N,At,EndAt: LongInt;
+ H: Array[0..7] Of Byte;
+ Kind: String[4];
+ I: Integer;
+Begin
+ If Depth>16 Then Fail('4xm: imbrication excessive.');
+ P:=Start;
+ While P<Finish Do Begin
+  If Finish-P<8 Then Fail('4xm: entete de bloc tronquee.');
+  ReadAt(P,H,8); Kind:='';
+  For I:=0 To 3 Do Kind:=Kind+Chr(H[I]);
+  N:=LE(P+4); At:=P+8;
+  If N>Finish-At Then Fail('4xm: bloc hors conteneur.');
+  EndAt:=At+N;
+  If Kind='LIST' Then Begin
+   If N<4 Then Fail('4xm: LIST tronquee.');
+   Scan(At+4,EndAt,Depth+1);
+  End Else If (Kind='strk') And Not Found Then Begin
+   If N<>40 Then Fail('4xm: piste audio strk invalide.');
+   Track:=LE(At); Adpcm:=LE(At+4); Channels:=LE(At+28); Rate:=LE(At+32); Bits:=LE(At+36);
+   If (Channels<1) Or (Channels>2) Or (Rate<4000) Or (Rate>192000) Then
+    Fail('4xm: audio mono/stereo 4000..192000 Hz requis.');
+   If (Adpcm=0) And (Bits<8) Then Fail('4xm: profondeur PCM incorrecte.');
+   If Bits<>8 Then Bits:=16;
+   Found:=True; OpenWrite(Target); Opened:=True; ADPCMWaveHeader(Rate,Channels,0);
+  End Else If (Kind='snd_') And Found And (N>=8) Then Begin
+   If LE(At)=Track Then Sound(At+8,N-8);
+  End;
+  P:=EndAt;
+ End;
+End;
+Begin
+ OpenRead(Source); Limit:=InputSize; Found:=False; Opened:=False; Written:=0; Used:=0;
+ Track:=0; Channels:=0; Rate:=0; Bits:=0; Adpcm:=0;
+ If Limit<12 Then Fail('4xm: fichier tronque.');
+ ReadAt(0,Buf,12);
+ If (Buf[0]<>82) Or (Buf[1]<>73) Or (Buf[2]<>70) Or (Buf[3]<>70) Or (Buf[8]<>52) Or
+  (Buf[9]<>88) Or (Buf[10]<>77) Or (Buf[11]<>86) Then Fail('4xm: signature RIFF/4XMV requise.');
+ Scan(12,Limit,0);
+ If Not Found Then Fail('4xm: aucune piste audio.');
+ If Written=0 Then Fail('4xm: aucune donnee audio.');
+ ADPCMPatchHeader(Rate,Channels,Written); CloseRead; CloseWrite;
+End;
+
 Procedure NormalizeWave(Const Source,Target: String; ForMP3: Boolean);
 Type
  TBytes = Array[0..4095] Of Byte;
@@ -10283,7 +10749,9 @@ Begin
  PutTag('data'); Put32(OutFrames*OutChannels*2);
  CacheBase:=-1; CacheFrames:=0; Used:=0;
  For J:=0 To OutFrames-1 Do Begin
-  Value:=J*(Rate*1.0)/OutRate; Index:=Trunc(Value); Fraction:=Value-Index;
+  If OutRate=Rate Then Begin Index:=J; Fraction:=0; End Else Begin
+   Value:=J*(Rate*1.0)/OutRate; Index:=Trunc(Value); Fraction:=Value-Index;
+  End;
   Left:=Sample(Index,0)*(1-Fraction)+Sample(Index+1,0)*Fraction;
   Right:=Left;
   If Channels=2 Then Right:=Sample(Index,1)*(1-Fraction)+Sample(Index+1,1)*Fraction;
@@ -12024,8 +12492,9 @@ Begin
  WriteLn(' D. = Demuxage (lecture)');
  WriteLn(' .E = Muxage (ecriture)');
  WriteLn(' --');
- WriteLn(' D  4xm             4X Movie (video versions 0..4 vers Y4M)');
+ WriteLn(' D  4xm             4X Movie (video versions 0..4 vers Y4M; audio adpcm_4xm/PCM vers WAV)');
  WriteLn(' DE ac3             AC-3 brut, decodeur et encodeur natifs');
+ WriteLn(' DE adx             CRI ADX (adpcm_adx, mono/stereo)');
  WriteLn(' D  aac             AAC ADTS (AAC-LC mono/stereo; alias: adts)');
  WriteLn(' D  iff             IFF 8SVX, Fibonacci/exponentiel (alias: 8svx, svx)');
  WriteLn(' D  aiff            AIFF/AIFF-C PCM (alias: aif, aifc)');
@@ -12093,7 +12562,7 @@ Procedure Help;Begin
  WriteLn(' -b_qfactor F, -b_qoffset O      QP des images B; defauts 1.25 et 1.25.');
  WriteLn(' -bt TOLERANCE                  Tolerance video, defaut 4000k; 0: budget strict.');
  WriteLn(' -bufsize BITS                  Tampon video, 0 desactive; suffixes k/M.');
- WriteLn(' -c:a pcm_s16le|mp3|copy        (-acodec et -codec:a accept'+#130+'s)');
+ WriteLn(' -c:a pcm_s16le|mp3|ac3|adpcm_adx|copy (-acodec et -codec:a accept'+#130+'s)');
  WriteLn(' -c:v mpeg4                      Y4M 420 vers M4V/AVI/MP4, images I/P, debit cible -b.');
  WriteLn(' -c:v mpeg1video|mpeg2video      Y4M vers M1V/M2V (I/B); M1V/MPEG1 vers Y4M.');
  WriteLn(' -c copy                        Changement de conteneur, pas de r'+#130+'encodage vid'+#130'o.');
@@ -12105,7 +12574,9 @@ Procedure Help;Begin
  WriteLn(' 8svx_fib/exp: -i entree.8svx sortie.wav (mono/stereo, compressions 1/2).');
  WriteLn(' aasc: -i entree.avi -an sortie.y4m (Autodesk RLE natif).');
  WriteLn(' 8bps: -i entree.mov -an sortie.y4m (alpha non conserve dans Y4M).');
- WriteLn(' 4xm: -i entree.4xm -an sortie.y4m (audio ignore).');
+ WriteLn(' 4xm: -i entree.4xm -an sortie.y4m (audio ignore); -i entree.4xm sortie.wav (audio adpcm_4xm).');
+ WriteLn(' adx: -i entree.adx sortie.wav; -i entree.wav -c:a adpcm_adx sortie.adx (mono/stereo).');
+ WriteLn(' adpcm_ct: -i entree.wav|entree.voc (ADPCM Creative, WAV 0x0200) sortie.wav.');
  WriteLn(' -croptop N, -cropbottom N       Retirer N pixels en haut/en bas.');
  WriteLn(' -cropleft N, -cropright N       Retirer N pixels a gauche/a droite.');
  WriteLn(' -f wav|mp3|aiff|voc|iff|libopenmpt Avant -i; -f wav|mp3 avant sortie');
@@ -12297,6 +12768,9 @@ BEGIN
    WriteLn('D V    8bps            QuickTime 8BPS video (8/24/32 bits)');
    WriteLn('D A    8svx_fib        8SVX fibonacci');
    WriteLn('D A    8svx_exp        8SVX exponential');
+   WriteLn('D A    adpcm_4xm       ADPCM 4X Movie');
+   WriteLn('DEA    adpcm_adx       SEGA CRI ADX ADPCM');
+   WriteLn('D A    adpcm_ct        ADPCM Creative Technology');
    WriteLn('DEA    ac3             ATSC A/52A (AC-3)');
    WriteLn('D A    aac             Advanced Audio Coding (AAC-LC ADTS mono/stereo)');
    WriteLn('D V D  aasc            Autodesk RLE (AVI AASC/AAS4, 8/16/24 bits)');
@@ -12481,7 +12955,8 @@ BEGIN
   RemuxVideo(Intermediate,Temps[6],InputFormat,'yuv4mpegpipe'); Intermediate:=Temps[6];
   InputFormat:='yuv4mpegpipe'; DecodedVideo:=True;
  End;
- If InputFormat='4xm' Then Begin
+ If (InputFormat='4xm') And Not ((OutputFormat='wav') Or (OutputFormat='mp3') Or
+  (OutputFormat='ac3') Or (OutputFormat='adx')) Then Begin
   If NoVideo Or (VideoCodec='copy') Or (AudioCodec<>'') Or HasBitrate Or (RequestedRate<>0) Or
    (RequestedChannels<>0) Or (ImageWidth<>0) Or (VideoFrames<>0) Or IsHTTP(InputPath) Then
    Fail('4xm: video locale decodee, sans copie ni conversion audio requise.');
@@ -12659,11 +13134,13 @@ BEGIN
  End;
  If NoAudio Then Fail('-an: aucune piste a ecrire dans une sortie audio seule.');
  If VideoCodec<>'' Then Fail('Codec video incompatible avec une sortie audio seule.');
- If (OutputFormat<>'wav') And (OutputFormat<>'mp3') And (OutputFormat<>'ac3') Then Fail(
- 'Sorties audio WAV, MP3 et AC3 prises en charge.');
+ If (OutputFormat<>'wav') And (OutputFormat<>'mp3') And (OutputFormat<>'ac3') And
+ (OutputFormat<>'adx') Then Fail(
+ 'Sorties audio WAV, MP3, AC3 et ADX prises en charge.');
  If AudioCodec='' Then If OutputFormat='wav' Then AudioCodec:=
- 'pcm_s16le' Else AudioCodec:=OutputFormat;
+ 'pcm_s16le' Else If OutputFormat='adx' Then AudioCodec:='adpcm_adx' Else AudioCodec:=OutputFormat;
  If (AudioCodec<>'copy') And Not (((OutputFormat='wav') And (AudioCodec='pcm_s16le')) Or
+ ((OutputFormat='adx') And (AudioCodec='adpcm_adx')) Or
  ((OutputFormat='mp3') And (AudioCodec='mp3')) Or ((OutputFormat='ac3') And (AudioCodec='ac3'))) Then Fail(
  'Codec de sortie non pris en charge pour ce conteneur.');
  If HasBitrate And (((OutputFormat<>'mp3') And (OutputFormat<>'ac3')) Or (AudioCodec='copy')) Then Fail(
@@ -12688,13 +13165,21 @@ BEGIN
    If InputFormat='ac3' Then ProcessAC3(InputPath,Temps[0],False,0) Else
    If InputFormat='aac' Then DecodeAAC(InputPath,Temps[0]) Else
    If InputFormat='iff' Then Decode8SVX(InputPath,Temps[0]) Else
+   If InputFormat='adx' Then DecodeADX(InputPath,Temps[0]) Else
+   If InputFormat='4xm' Then Decode4XMAudio(InputPath,Temps[0]) Else
    If InputFormat='aiff' Then DecodeAIFF(InputPath,Temps[0]) Else
    If InputFormat='voc' Then DecodeVOC(InputPath,Temps[0]) Else
    If InputFormat='libopenmpt' Then DecodeMOD(InputPath,Temps[0])
                                Else Fail('Decodeur non implemente.');
    Intermediate:=Temps[0];
+  End Else If IsWaveCT(InputPath) Then Begin
+   Temps[0]:=NewTemporary; DecodeWaveCT(InputPath,Temps[0]); Intermediate:=Temps[0];
   End;
   If OutputFormat='wav' Then NormalizeWave(Intermediate,Temps[2],False)
+   Else If OutputFormat='adx' Then Begin
+    Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False);
+    EncodeADX(Temps[1],Temps[2]);
+   End
    Else If OutputFormat='ac3' Then Begin
     Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False);
     If Not HasBitrate Then RequestedBitRateK:=192; ProcessAC3(Temps[1],Temps[2],True,RequestedBitRateK);
