@@ -3491,7 +3491,7 @@ Var
  VideoCodec: String;
  AspectNum,AspectDen: LongInt;
  AsvTag: String[4]; NVKind,NVSelMode: LongInt; NVAudioOut: Boolean;
- HasAlbum,FourMV,HasVideoBitrate,HasBFrames,HasVideoTolerance,HasBQuant,HasVideoBuffer,HasComment: Boolean;
+ DNxProfile: String; HasAlbum,FourMV,HasVideoBitrate,HasBFrames,HasVideoTolerance,HasBQuant,HasVideoBuffer,HasComment: Boolean;
  BFrames:Integer;
  VideoBitrate,VideoTolerance,VideoBuffer: LongInt;
  VideoBufferAvailable:Double;
@@ -16592,6 +16592,410 @@ Begin
  Else If Kind>=7 Then DecodeAVIVideo(Source,Target,Mode,Kind) Else DecodeNV(Kind,Source,Target,Mode);
 End;
 
+{ ---- VC3/DNxHD: encodeur (libavcodec/dnxhdenc.c), progressif, qscale global ajuste a la taille de trame ---- }
+Type
+ TDEBlk=Array[0..63] Of LongInt;
+ TDEShort=Array[0..200000000] Of SmallInt; PDEShort=^TDEShort;
+Var
+ DECo: PDEShort; DEOut: PEABuffer; DEAcc: Int64; DEAccN,DEOutPos,DETotal: LongInt; DEWrite: Boolean;
+ DEVCode: Array[0..4096,0..1] Of LongInt; DEVBits: Array[0..4096,0..1] Of Byte;
+ DERunCode: Array[0..63] Of LongInt; DERunBits: Array[0..63] Of Byte;
+ DEMaxA,DESh,DEBias,DELast0,DELast1,DELast2: LongInt;
+
+Procedure DEPut(N: LongInt; V: Int64);
+Begin
+ Inc(DETotal,N);
+ If Not DEWrite Then Exit;
+ DEAcc:=(DEAcc Shl N) Or (V And ((Int64(1) Shl N)-1)); Inc(DEAccN,N);
+ While DEAccN>=8 Do Begin
+  Dec(DEAccN,8); DEOut^[DEOutPos]:=(DEAcc Shr DEAccN) And 255; Inc(DEOutPos);
+ End;
+ DEAcc:=DEAcc And ((Int64(1) Shl DEAccN)-1);
+End;
+
+Procedure DEFdct(Var D: TDEBlk);
+Const F0541=4433; F0765=6270; F1847=15137; F1175=9633; F0298=2446; F2053=16819; F3072=25172; F1501=12299;
+ F0899=7373; F2562=20995; F1961=16069; F0390=3196;
+Var
+ I: Integer; T0,T1,T2,T3,T4,T5,T6,T7,T10,T11,T12,T13,Z1,Z2,Z3,Z4,Z5: Int64;
+Function Ds(X: Int64; N: Integer): Int64;
+Begin Ds:=AVSar(X+(Int64(1) Shl (N-1)),N); End;
+Begin
+ For I:=0 To 7 Do Begin
+  T0:=D[I*8]+D[I*8+7]; T7:=D[I*8]-D[I*8+7]; T1:=D[I*8+1]+D[I*8+6]; T6:=D[I*8+1]-D[I*8+6];
+  T2:=D[I*8+2]+D[I*8+5]; T5:=D[I*8+2]-D[I*8+5]; T3:=D[I*8+3]+D[I*8+4]; T4:=D[I*8+3]-D[I*8+4];
+  T10:=T0+T3; T13:=T0-T3; T11:=T1+T2; T12:=T1-T2;
+  D[I*8]:=(T10+T11)*16; D[I*8+4]:=(T10-T11)*16;
+  Z1:=(T12+T13)*F0541;
+  D[I*8+2]:=Ds(Z1+T13*F0765,9); D[I*8+6]:=Ds(Z1+T12*(-F1847),9);
+  Z1:=T4+T7; Z2:=T5+T6; Z3:=T4+T6; Z4:=T5+T7; Z5:=(Z3+Z4)*F1175;
+  T4:=T4*F0298; T5:=T5*F2053; T6:=T6*F3072; T7:=T7*F1501;
+  Z1:=Z1*(-F0899); Z2:=Z2*(-F2562); Z3:=Z3*(-F1961); Z4:=Z4*(-F0390);
+  Inc(Z3,Z5); Inc(Z4,Z5);
+  D[I*8+7]:=Ds(T4+Z1+Z3,9); D[I*8+5]:=Ds(T5+Z2+Z4,9); D[I*8+3]:=Ds(T6+Z2+Z3,9); D[I*8+1]:=Ds(T7+Z1+Z4,9);
+ End;
+ For I:=0 To 7 Do Begin
+  T0:=D[I]+D[56+I]; T7:=D[I]-D[56+I]; T1:=D[8+I]+D[48+I]; T6:=D[8+I]-D[48+I];
+  T2:=D[16+I]+D[40+I]; T5:=D[16+I]-D[40+I]; T3:=D[24+I]+D[32+I]; T4:=D[24+I]-D[32+I];
+  T10:=T0+T3; T13:=T0-T3; T11:=T1+T2; T12:=T1-T2;
+  D[I]:=Ds(T10+T11,4); D[32+I]:=Ds(T10-T11,4);
+  Z1:=(T12+T13)*F0541;
+  D[16+I]:=Ds(Z1+T13*F0765,17); D[48+I]:=Ds(Z1+T12*(-F1847),17);
+  Z1:=T4+T7; Z2:=T5+T6; Z3:=T4+T6; Z4:=T5+T7; Z5:=(Z3+Z4)*F1175;
+  T4:=T4*F0298; T5:=T5*F2053; T6:=T6*F3072; T7:=T7*F1501;
+  Z1:=Z1*(-F0899); Z2:=Z2*(-F2562); Z3:=Z3*(-F1961); Z4:=Z4*(-F0390);
+  Inc(Z3,Z5); Inc(Z4,Z5);
+  D[56+I]:=Ds(T4+Z1+Z3,17); D[40+I]:=Ds(T5+Z2+Z4,17); D[24+I]:=Ds(T6+Z2+Z3,17); D[8+I]:=Ds(T7+Z1+Z4,17);
+ End;
+End;
+
+{ Tables VLC niveau/course selon dnxhd_init_vlc }
+Procedure DEBuildVlc(Bd: LongInt);
+Var A,R,Off,AL,J,K,Best: LongInt;
+Begin
+ DEMaxA:=64*((1 Shl DXIndexBits)-1)+64;
+ If DEMaxA>(1 Shl (Bd+2))-1 Then DEMaxA:=(1 Shl (Bd+2))-1;
+ If DEMaxA>4096 Then DEMaxA:=4096;
+ For A:=1 To DEMaxA Do For R:=0 To 1 Do Begin
+  Off:=0; AL:=A;
+  If AL>64 Then Begin Off:=(AL-1) Shr 6; AL:=AL-(Off Shl 6); End;
+  Best:=-1;
+  For J:=0 To 256 Do
+   If (DXAcInfo[2*J] Shr 1=AL) And (((DXAcInfo[2*J+1] And 1)<>0)=(Off<>0)) And (((DXAcInfo[2*J+1] And 2)<>0)=(R=1)) Then Begin Best:=J; Break; End;
+  If Best<0 Then
+   For J:=0 To 256 Do
+    If (DXAcInfo[2*J] Shr 1=AL) And ((Off=0) Or ((DXAcInfo[2*J+1] And 1)<>0)) And ((R=0) Or ((DXAcInfo[2*J+1] And 2)<>0)) Then Begin Best:=J; Break; End;
+  If Best<0 Then Begin DEVBits[A,R]:=0; Continue; End;
+  DEVCode[A,R]:=(DXAcCodes[Best] Shl 1);
+  DEVBits[A,R]:=DXAcBits[Best]+1;
+  If Off<>0 Then DEVBits[A,R]:=DEVBits[A,R]+DXIndexBits;
+ End;
+ FillChar(DERunBits,SizeOf(DERunBits),0);
+ For K:=0 To 61 Do Begin DERunCode[DXRun[K]]:=DXRunCodes[K]; DERunBits[DXRun[K]]:=DXRunBits[K]; End;
+ { memorise Best pour reconstruire le code avec decalage d'index: on recalcule a l'ecriture }
+End;
+
+Procedure DEPutLevel(A,R,Sg: LongInt);
+Var Off,AL,Code: LongInt;
+Begin
+ Off:=0; AL:=A;
+ If AL>64 Then Begin Off:=(AL-1) Shr 6; AL:=AL-(Off Shl 6); End;
+ Code:=DEVCode[A,R] Or Sg;
+ If Off<>0 Then Begin Code:=(Code Shl DXIndexBits) Or Off; End;
+ DEPut(DEVBits[A,R],Code);
+End;
+
+Procedure DEPutDC(Diff: LongInt);
+Var N,V,T: LongInt;
+Begin
+ If Diff<0 Then T:=-2*Diff Else T:=2*Diff;
+ N:=0; While (T Shr (N+1))<>0 Do Inc(N);
+ If T=0 Then N:=0;
+ If Diff<0 Then Dec(Diff);
+ If N>=DXNDc Then N:=DXNDc-1;
+ V:=Diff And ((1 Shl N)-1);
+ DEPut(DXDcBits[N]+N,(Int64(DXDcCodes[N]) Shl N)+V);
+End;
+
+{ Quantifie et (ou) ecrit un bloc. Retourne rien; DETotal s'incremente. }
+Procedure DEBlock(Co: PDEShort; Qs,Comp: LongInt; Chroma: Boolean);
+Var
+ I,C,AC,W,Sc,Bs,X,A0,A,Best,R0,E,BestE,Last,Run,Rf,Sg,Diff,Cand: LongInt; Last0: ^LongInt;
+Begin
+ Case Comp Of 0: Last0:=@DELast0; 1: Last0:=@DELast1; Else Last0:=@DELast2; End;
+ Diff:=Co^[0]-Last0^; Last0^:=Co^[0];
+ DEPutDC(Diff);
+ Last:=0;
+ For I:=1 To 63 Do Begin
+  C:=Co^[DXZig[I]];
+  If C=0 Then Continue;
+  If C<0 Then Begin AC:=-C; Sg:=1; End Else Begin AC:=C; Sg:=0; End;
+  If Chroma Then W:=DXChroma[I] Else W:=DXLuma[I];
+  Sc:=Qs*W;
+  If (DEBias<32) Or (W<>DEBias) Then Bs:=DEBias Else Bs:=0;
+  X:=(Int64(AC) Shl DESh) Div Sc;
+  A0:=X Div 2;
+  Best:=0; BestE:=AC;
+  For Cand:=A0-1 To A0+1 Do Begin
+   If Cand<1 Then Continue;
+   A:=Cand; If A>DEMaxA Then A:=DEMaxA;
+   R0:=((2*A+1)*Int64(Sc)+(Sc Shr 1)+Bs) Shr DESh;
+   E:=Abs(R0-AC);
+   If E<BestE Then Begin BestE:=E; Best:=A; End;
+  End;
+  If Best=0 Then Continue;
+  Run:=I-Last-1; If Run>0 Then Rf:=1 Else Rf:=0;
+  If DEVBits[Best,Rf]=0 Then Continue;
+  DEPutLevel(Best,Rf,Sg);
+  If Run>0 Then DEPut(DERunBits[Run],DERunCode[Run]);
+  Last:=I;
+ End;
+ DEPut(DXAcBits[DXEob],DXAcCodes[DXEob]);
+End;
+
+Function DEClampX(V,Hi: LongInt): LongInt;
+Begin If V<0 Then V:=0; If V>Hi Then V:=Hi; DEClampX:=V; End;
+
+{ Encode un fichier Y4M en DNxHD/DNxHR. Profil: '' (DNxHD, debit en Mbit/s), dnxhr_lb/sq/hq/hqx/444. IsAvi: sortie AVI, sinon flux brut. }
+Procedure EncodeDNxHD(Const Source,Target: String; IsAvi: Boolean; Const Profile: String; Mbps: LongInt);
+Var
+ H: Array[0..255] Of Byte;
+ Limit,Cur,W,Hh,FN,FD,Frames,I,K,Q,Code,CW,Bd,Sub,Fmt,Cid,Idx,FrameSize,DataOff,Mw,Mh,Nb,Mx,My,N,Qs,Lo,Hi,Mid,OutPos,Fix,Used,Bp,CHh,Row,Bits,Avail,Total,Ofs,Lsb,Mode,Z,Dx,Dy,MbN,PQ,Hr,Is444: LongInt;
+ Y,U,V,Pk,Hd: PEABuffer; Line,Token: String; Blk: TDEBlk; Sizes: PALLong; OutB: Array[0..255] Of Byte; Chroma420,Found: Boolean;
+ RowBytes: Array[0..511] Of LongInt;
+Procedure PutB(X: LongInt);Begin OutB[Used]:=X And 255; Inc(Used); Inc(OutPos); If Used>=250 Then Begin WriteBytes(OutB,Used); Used:=0; End; End;
+Procedure PutL16(X: LongInt);Begin PutB(X); PutB(X Shr 8); End;
+Procedure PutL32(X: LongInt);Begin PutL16(X); PutL16(X Shr 16); End;
+Procedure PutTag(Const T: String);
+Var Z2: Integer;
+Begin For Z2:=1 To 4 Do PutB(Ord(T[Z2])); End;
+Procedure Flush;Begin If Used>0 Then Begin WriteBytes(OutB,Used); Used:=0; End; End;
+Procedure Patch32(At,Value: LongInt);
+Var Z2: Integer; Code2: Integer; B4: Array[0..3] Of Byte;
+Begin
+ Flush;
+ {$I-}Seek(ActiveOutput,At); Code2:=IOResult;{$I+}
+ If Code2<>0 Then Fail('dnxhd: positionnement AVI impossible.');
+ For Z2:=0 To 3 Do Begin B4[Z2]:=Value And 255; Value:=Value Shr 8; End;
+ WriteBytes(B4,4);
+End;
+Function ReadLine: String;
+Var R: String;
+Begin
+ R:='';
+ While Cur<Limit Do Begin ReadAt(Cur,H,1); Inc(Cur); If H[0]=10 Then Break; If Length(R)<250 Then R:=R+Chr(H[0]); End;
+ ReadLine:=R;
+End;
+Procedure ReadPlane(Plane: PEABuffer; At,Count: LongInt);
+Var Nn: LongInt;
+Begin
+ Nn:=0;
+ While Nn<Count Do Begin
+  If Count-Nn>4096 Then Q:=4096 Else Q:=Count-Nn;
+  ReadAt(At+Nn,Plane^[Nn],Q); Inc(Nn,Q);
+ End;
+End;
+Function Sample(P: PEABuffer; Stride,PW,PH,X,Yy: LongInt): LongInt;
+Var O: LongInt;
+Begin
+ X:=DEClampX(X,PW-1); Yy:=DEClampX(Yy,PH-1);
+ If Bd=8 Then Sample:=P^[Yy*Stride+X]
+ Else Begin O:=(Yy*Stride+X)*2; Sample:=P^[O]+P^[O+1]*256; End;
+End;
+{ Calcule les coefficients DCT d'un bloc 8x8 }
+Procedure Load(Dest: LongInt; P: PEABuffer; Stride,PW,PH,X0,Y0: LongInt);
+Var A,C: Integer;
+Begin
+ For A:=0 To 7 Do For C:=0 To 7 Do Blk[A*8+C]:=Sample(P,Stride,PW,PH,X0+C,Y0+A);
+ DEFdct(Blk);
+ For A:=0 To 63 Do DECo^[Dest*64+A]:=AVSar(Blk[A]+4,3);
+End;
+Procedure Put32(Pos,Vv: LongInt);
+Begin Pk^[Pos]:=(Vv Shr 24) And 255; Pk^[Pos+1]:=(Vv Shr 16) And 255; Pk^[Pos+2]:=(Vv Shr 8) And 255; Pk^[Pos+3]:=Vv And 255; End;
+Procedure Put16(Pos,Vv: LongInt);
+Begin Pk^[Pos]:=(Vv Shr 8) And 255; Pk^[Pos+1]:=Vv And 255; End;
+{ Un passage sur la trame: ecrit si DEWrite, retourne la taille totale des lignes en bits (alignees 32 bits) }
+Function Pass(Qv: LongInt): LongInt;
+Var Ry,Rx,Bn,Mbi,Bits0,Tot: LongInt; IsCh: Boolean; Cp: LongInt;
+Begin
+ Tot:=0;
+ For Ry:=0 To Mh-1 Do Begin
+  If DEWrite Then Begin DEAcc:=0; DEAccN:=0; DEOutPos:=DataOff+Tot Div 8; End;
+  DETotal:=0;
+  DELast0:=1 Shl (Bd+2); DELast1:=DELast0; DELast2:=DELast0;
+  For Rx:=0 To Mw-1 Do Begin
+   Mbi:=Ry*Mw+Rx;
+   DEPut(11,Qv); DEPut(1,Ord(Is444<>0));
+   For Bn:=0 To Nb-1 Do Begin
+    If Is444=0 Then Begin If (Bn And 2)<>0 Then Begin Cp:=1+(Bn And 1); IsCh:=True; End Else Begin Cp:=0; IsCh:=False; End; End
+    Else Begin Cp:=(Bn Shr 1) Mod 3; IsCh:=Cp<>0; End;
+    DEBlock(@DECo^[(Mbi*Nb+Bn)*64],Qv,Cp,IsCh);
+   End;
+  End;
+  Bits0:=(32-(DETotal And 31)) And 31;
+  If Bits0<>0 Then DEPut(Bits0,0);
+  RowBytes[Ry]:=DETotal Div 8;
+  Tot:=Tot+DETotal;
+ End;
+ Pass:=Tot;
+End;
+Begin
+ OpenRead(Source); Limit:=InputSize; Cur:=0;
+ Line:=ReadLine;
+ If Copy(Line,1,9)<>'YUV4MPEG2' Then Fail('dnxhd: entree Y4M requise.');
+ W:=0; Hh:=0; FN:=25; FD:=1; Bd:=8; Sub:=2; Chroma420:=False;
+ Line:=Copy(Line,11,255);
+ While Line<>'' Do Begin
+  K:=Pos(' ',Line); If K=0 Then K:=Length(Line)+1;
+  Token:=Copy(Line,1,K-1); Line:=Copy(Line,K+1,255);
+  If Token='' Then Continue;
+  Case Token[1] Of
+   'W': Val(Copy(Token,2,20),W,Code);
+   'H': Val(Copy(Token,2,20),Hh,Code);
+   'F': Begin K:=Pos(':',Token); If K>0 Then Begin Val(Copy(Token,2,K-2),FN,Code); Val(Copy(Token,K+1,20),FD,Code); End; End;
+   'C': Begin
+         If (Token='C422') Then Begin Bd:=8; Sub:=2; End
+         Else If Token='C422p10' Then Begin Bd:=10; Sub:=2; End
+         Else If Token='C444p10' Then Begin Bd:=10; Sub:=1; End
+         Else If (Token='C420') Or (Token='C420jpeg') Or (Token='C420mpeg2') Or (Token='C420paldv') Then Begin Bd:=8; Sub:=2; Chroma420:=True; End
+         Else Fail('dnxhd: Y4M 4:2:0, 4:2:2 ou 4:4:4 requis (8 bits, ou 10 bits en 4:2:2/4:4:4).');
+        End;
+   'I': If Token<>'Ip' Then Fail('dnxhd: video progressive requise (entrelace non pris en charge).');
+  End;
+ End;
+ If (W<256) Or (Hh<120) Or (W>8192) Or (Hh>4320) Then Fail('dnxhd: dimensions minimales 256x120.');
+ If (FN<=0) Or (FD<=0) Then Begin FN:=25; FD:=1; End;
+ If Bd=8 Then Bp:=1 Else Bp:=2;
+ If Sub=1 Then CW:=W Else CW:=(W+1) Div 2;
+ CHh:=Hh;
+ Is444:=0; Cid:=0;
+ If Profile='' Then Begin
+  { DNxHD: recherche de cid par taille / profondeur / debit }
+  If Sub=1 Then Fail('dnxhd: 4:4:4 exige -profile:v dnxhr_444.');
+  Found:=False;
+  For Idx:=0 To 14 Do Begin
+   DXSelectCid(Idx);
+   If (DXW=W) And (DXH=Hh) And ((DXFlags And 5)=0) And (DXTabDepth=Bd) Then
+    For K:=0 To 4 Do If (DXRates[K]=Mbps) And (Mbps>0) Then Begin Found:=True; Cid:=DXCid; End;
+   If Found Then Break;
+  End;
+  If Not Found Then Fail('dnxhd: profil DNxHD introuvable pour ces dimensions/debit (-b:v en Mbit/s entier, ex. 36M, 120M, 185M, et yuv422p ou yuv422p10 adapte).');
+ End Else Begin
+  If Profile='dnxhr_444' Then Cid:=1270 Else If Profile='dnxhr_hqx' Then Cid:=1271 Else If Profile='dnxhr_hq' Then Cid:=1272
+  Else If Profile='dnxhr_sq' Then Cid:=1273 Else If Profile='dnxhr_lb' Then Cid:=1274
+  Else Fail('dnxhd: profil inconnu: '+Profile);
+  If Cid=1270 Then Begin If (Sub<>1) Or (Bd<>10) Then Fail('dnxhd: dnxhr_444 exige yuv444p10.'); End
+  Else If Cid=1271 Then Begin If (Sub<>2) Or (Bd<>10) Then Fail('dnxhd: dnxhr_hqx exige yuv422p10.'); End
+  Else If (Sub<>2) Or (Bd<>8) Then Fail('dnxhd: dnxhr_lb/sq/hq exigent yuv422p (8 bits).');
+ End;
+ If (Cid=1270) Then Is444:=1;
+ Idx:=DXFindCid(Cid); DXSelectCid(Idx); DXCurIdx:=-1;
+ Mw:=(W+15) Div 16; Mh:=(Hh+15) Div 16;
+ If DXFrameSize>0 Then Begin FrameSize:=DXFrameSize; End Else Begin
+  FrameSize:=((Int64(Mh)*Mw*DXPSN Div DXPSD)+2048) Div 4096*4096;
+  If FrameSize<8192 Then FrameSize:=8192;
+ End;
+ If Mh>68 Then DataOff:=$170+(Mh Shl 2) Else DataOff:=$280;
+ If Mh>256 Then Fail('dnxhd: hauteur trop grande.');
+ If Is444<>0 Then Nb:=12 Else Nb:=8;
+ If Is444<>0 Then Mode:=2 Else If Bd=8 Then Mode:=0 Else If Cid=1271 Then Mode:=2 Else Mode:=1;
+ If Mode=1 Then Begin DEBias:=8; DESh:=4; End Else Begin DEBias:=32; DESh:=6; End;
+ DEBuildVlc(Bd);
+ Avail:=(FrameSize-DataOff-4)*8;
+ GetMem(Y,W*Hh*Bp+64); GetMem(U,CW*CHh*Bp+64); GetMem(V,CW*CHh*Bp+64);
+ GetMem(Pk,FrameSize+64); GetMem(Sizes,1048576*4);
+ GetMem(DECo,Int64(Mw)*Mh*Nb*128+64);
+ DEOut:=Pk;
+ Frames:=0; OutPos:=0; Used:=0;
+ OpenWrite(Target);
+ If IsAvi Then Begin
+  PutTag('RIFF'); PutL32(0); PutTag('AVI '); PutTag('LIST'); PutL32(192); PutTag('hdrl');
+  PutTag('avih'); PutL32(56); PutL32(Round(1000000.0*FD/FN)); PutL32(0); PutL32(0); PutL32($10); PutL32(0); PutL32(0); PutL32(1);
+  PutL32(FrameSize); PutL32(W); PutL32(Hh); PutL32(0); PutL32(0); PutL32(0); PutL32(0);
+  PutTag('LIST'); PutL32(116); PutTag('strl');
+  PutTag('strh'); PutL32(56); PutTag('vids'); If Cid>=1270 Then PutTag('AVdh') Else PutTag('AVdn');
+  PutL32(0); PutL16(0); PutL16(0); PutL32(0); PutL32(FD); PutL32(FN); PutL32(0); PutL32(0); PutL32(FrameSize); PutL32(-1); PutL32(0);
+  PutL16(0); PutL16(0); PutL16(W); PutL16(Hh);
+  PutTag('strf'); PutL32(40); PutL32(40); PutL32(W); PutL32(Hh); PutL16(1); PutL16(24);
+  If Cid>=1270 Then PutTag('AVdh') Else PutTag('AVdn');
+  PutL32(FrameSize); PutL32(0); PutL32(0); PutL32(0); PutL32(0);
+  PutTag('LIST'); PutL32(0); PutTag('movi'); Flush;
+ End;
+ While Cur<Limit Do Begin
+  Line:=ReadLine;
+  If Copy(Line,1,5)<>'FRAME' Then Fail('dnxhd: marqueur FRAME requis.');
+  If Chroma420 Then Begin
+   Z:=W*Hh+2*((W+1) Div 2)*((Hh+1) Div 2);
+   If Z>Limit-Cur Then Break;
+   ReadPlane(Y,Cur,W*Hh);
+   { chroma 4:2:0 -> 4:2:2 par interpolation verticale 3:1 }
+   GetMem(Hd,CW*((Hh+1) Div 2)+64);
+   For K:=0 To 1 Do Begin
+    ReadPlane(Hd,Cur+W*Hh+K*CW*((Hh+1) Div 2),CW*((Hh+1) Div 2));
+    For Row:=0 To Hh-1 Do Begin
+     Dx:=Row Div 2; If (Row And 1)=0 Then Dy:=Dx-1 Else Dy:=Dx+1;
+     If Dy<0 Then Dy:=0; If Dy>(Hh+1) Div 2-1 Then Dy:=(Hh+1) Div 2-1;
+     For I:=0 To CW-1 Do Begin
+      Z:=(3*Hd^[Dx*CW+I]+Hd^[Dy*CW+I]+2) Shr 2;
+      If K=0 Then U^[Row*CW+I]:=Z Else V^[Row*CW+I]:=Z;
+     End;
+    End;
+   End;
+   FreeMem(Hd,CW*((Hh+1) Div 2)+64);
+   Inc(Cur,W*Hh+2*CW*((Hh+1) Div 2));
+  End Else Begin
+   If W*Hh*Bp+2*CW*CHh*Bp>Limit-Cur Then Break;
+   ReadPlane(Y,Cur,W*Hh*Bp); ReadPlane(U,Cur+W*Hh*Bp,CW*CHh*Bp); ReadPlane(V,Cur+W*Hh*Bp+CW*CHh*Bp,CW*CHh*Bp);
+   Inc(Cur,W*Hh*Bp+2*CW*CHh*Bp);
+  End;
+  { DCT de toutes les macroblocs }
+  For My:=0 To Mh-1 Do For Mx:=0 To Mw-1 Do Begin
+   N:=(My*Mw+Mx)*Nb;
+   If Is444=0 Then Begin
+    Load(N+0,Y,W,W,Hh,Mx*16,My*16); Load(N+1,Y,W,W,Hh,Mx*16+8,My*16);
+    Load(N+4,Y,W,W,Hh,Mx*16,My*16+8); Load(N+5,Y,W,W,Hh,Mx*16+8,My*16+8);
+    Load(N+2,U,CW,CW,CHh,Mx*8,My*16); Load(N+3,V,CW,CW,CHh,Mx*8,My*16);
+    Load(N+6,U,CW,CW,CHh,Mx*8,My*16+8); Load(N+7,V,CW,CW,CHh,Mx*8,My*16+8);
+   End Else Begin
+    Load(N+0,Y,W,W,Hh,Mx*16,My*16); Load(N+1,Y,W,W,Hh,Mx*16+8,My*16);
+    Load(N+6,Y,W,W,Hh,Mx*16,My*16+8); Load(N+7,Y,W,W,Hh,Mx*16+8,My*16+8);
+    Load(N+2,U,CW,CW,CHh,Mx*16,My*16); Load(N+3,U,CW,CW,CHh,Mx*16+8,My*16);
+    Load(N+8,U,CW,CW,CHh,Mx*16,My*16+8); Load(N+9,U,CW,CW,CHh,Mx*16+8,My*16+8);
+    Load(N+4,V,CW,CW,CHh,Mx*16,My*16); Load(N+5,V,CW,CW,CHh,Mx*16+8,My*16);
+    Load(N+10,V,CW,CW,CHh,Mx*16,My*16+8); Load(N+11,V,CW,CW,CHh,Mx*16+8,My*16+8);
+   End;
+  End;
+  { recherche du plus petit qscale qui tient dans la trame }
+  DEWrite:=False;
+  Lo:=1; Hi:=1023;
+  If Pass(Hi)>Avail Then Fail('dnxhd: image trop complexe pour ce profil/debit.');
+  While Lo<Hi Do Begin
+   Mid:=(Lo+Hi) Div 2;
+   If Pass(Mid)<=Avail Then Hi:=Mid Else Lo:=Mid+1;
+  End;
+  Qs:=Lo;
+  { en-tete }
+  FillChar(Pk^,FrameSize,0);
+  Put16(2,DataOff);
+  If Cid>=1270 Then Pk^[4]:=3 Else Pk^[4]:=1;
+  Pk^[5]:=1; Pk^[6]:=$80; Pk^[7]:=$A0;
+  Put16($18,Hh); Put16($1A,W); Put16($1D,Hh);
+  If Bd=10 Then Pk^[$21]:=$58 Else Pk^[$21]:=$38;
+  Pk^[$22]:=$88;
+  Put32($28,Cid);
+  Pk^[$2C]:=$80 Or (Is444 Shl 6) Or Ord((Is444<>0));
+  Pk^[$5F]:=1; Pk^[$167]:=2;
+  Put16($16A,Mh*4+4); Put16($16C,Mh); Pk^[$16F]:=$10;
+  DEWrite:=True; DEOutPos:=DataOff;
+  Total:=Pass(Qs);
+  Ofs:=0;
+  For K:=0 To Mh-1 Do Begin Put32($170+K*4,Ofs); Inc(Ofs,RowBytes[K]); End;
+  Put32(FrameSize-4,$600DC0DE);
+  Sizes^[Frames]:=FrameSize;
+  If IsAvi Then Begin PutTag('00dc'); PutL32(FrameSize); End;
+  Flush; K:=0;
+  While K<FrameSize Do Begin
+   If FrameSize-K>32768 Then Q:=32768 Else Q:=FrameSize-K;
+   WriteBytes(Pk^[K],Q); Inc(K,Q);
+  End;
+  Inc(OutPos,FrameSize);
+  Inc(Frames);
+  If Frames>=1048576 Then Break;
+ End;
+ If Frames=0 Then Fail('dnxhd: aucune image Y4M.');
+ If IsAvi Then Begin
+  Fix:=OutPos;
+  PutTag('idx1'); PutL32(16*Frames); K:=4;
+  For I:=0 To Frames-1 Do Begin
+   PutTag('00dc'); PutL32($10); PutL32(K); PutL32(Sizes^[I]); Inc(K,8+Sizes^[I]);
+  End;
+  Flush;
+  Patch32(4,OutPos-8); Patch32(216,Fix-220); Patch32(48,Frames); Patch32(140,Frames);
+ End;
+ FreeMem(Y,W*Hh*Bp+64); FreeMem(U,CW*CHh*Bp+64); FreeMem(V,CW*CHh*Bp+64); FreeMem(Pk,FrameSize+64); FreeMem(Sizes,1048576*4);
+ CloseRead; CloseWrite;
+End;
+
 Var AVSWantBMP: Boolean;
 
 Procedure DecodeAVS(Const Source,Target: String; PNGMode: Boolean);
@@ -20209,6 +20613,8 @@ Begin
  WriteLn(' D  avi (camstudio, camtasia)  AVI CSCD / tscc (zlib, LZO, RLE) vers Y4M/PNG/BMP');
  WriteLn(' D  oma             Sony OpenMG (ATRAC3 non chiffre); WAV 0x270 (ATRAC3) vers WAV/MP3/...');
  WriteLn(' DE avi (asv1/asv2) AVI ASUS V1/V2: decodage vers Y4M, encodage Y4M -c:v asv1|asv2');
+ WriteLn(' DE dnxhd           VC3/DNxHD, DNxHR (.dnxhd ou AVI; encodage Y4M progressif: -profile:v dnxhr_lb|sq|hq|hqx|444, ou -b:v en Mbit/s pour DNxHD)');
+ WriteLn(' D  avi (cljr, cyuv, cinepak)  AVI Cirrus Logic AccuPak, Creative YUV, Cinepak vers Y4M/PNG/BMP');
  WriteLn(' D  avs             Argonaut Creature Shock AVS (video vers Y4M/PNG)');
  WriteLn(' D  iss             Funcom ISS (adpcm_ima_iss)');
  WriteLn(' D  smjpeg          Loki SDL MJPEG (adpcm_ima_smjpeg)');
@@ -20455,7 +20861,7 @@ End;
 
 BEGIN
  HasBFrames:=False; BFrames:=0; HasBQuant:=False; BQuantFactor:=1.25; BQuantOffset:=1.25;
- HasVideoBitrate:=False; VideoBitrate:=200000;
+ DNxProfile:=''; HasVideoBitrate:=False; VideoBitrate:=200000;
  HasVideoTolerance:=False; VideoTolerance:=4000000; HasVideoBuffer:=False; VideoBuffer:=0;
  HasComment:=False; CommentName:=''; CommentWideSize:=0; CommentUTF8Size:=0;
  FourMV:=False; HasAlbum:=False; AlbumName:=''; AlbumWideSize:=0; AlbumUTF8Size:=0;
@@ -20586,8 +20992,8 @@ BEGIN
    VideoCodec:=Lower(NextArgument);
    If (VideoCodec<>'png') And (VideoCodec<>'gif') And (VideoCodec<>'copy') And
     (VideoCodec<>'ffv1') And (VideoCodec<>'flv') And (VideoCodec<>'mpeg4') And (VideoCodec<>'mpeg1video') And (VideoCodec<>'mpeg2video') And (VideoCodec<>'rawvideo') And
-    (VideoCodec<>'asv1') And (VideoCodec<>'asv2') And (VideoCodec<>'bmp') Then
-    Fail('Codec video: png/gif, bmp, copy, ffv1, flv, mpeg4, mpeg1video, mpeg2video, rawvideo, asv1, asv2.');
+    (VideoCodec<>'asv1') And (VideoCodec<>'asv2') And (VideoCodec<>'bmp') And (VideoCodec<>'dnxhd') Then
+    Fail('Codec video: png/gif, bmp, copy, ffv1, flv, mpeg4, mpeg1video, mpeg2video, rawvideo, asv1, asv2, dnxhd.');
   End Else If (Argument='-vframes') Or (Argument='-frames:v') Then Begin
    If InputPath='' Then Fail('Nombre d''images attendu apres -i.');
    Value:=NextArgument; Val(Value,Number,Code);
@@ -20638,7 +21044,11 @@ BEGIN
    BFrames:=Number; HasBFrames:=True;
   End
   Else If (Argument='-b') Or (Argument='-b:v') Then Begin
-   VideoBitrate:=ParseVideoRate(NextArgument,'-b',1,100000000); HasVideoBitrate:=True;
+   VideoBitrate:=ParseVideoRate(NextArgument,'-b',1,1000000000); HasVideoBitrate:=True;
+  End
+  Else If (Argument='-profile:v') Or (Argument='-profile') Then Begin
+   DNxProfile:=Lower(NextArgument);
+   If DNxProfile='dnxhd' Then DNxProfile:='';
   End
   Else If Argument='-b_qfactor' Then Begin
    BQuantFactor:=ParseBQuant(NextArgument,'-b_qfactor'); HasBQuant:=True;
@@ -20771,6 +21181,14 @@ BEGIN
    NoAudio:=True; Temps[6]:=NewTemporary; DecodeASVAVI(Intermediate,Temps[6]); Intermediate:=Temps[6];
    InputFormat:='yuv4mpegpipe'; DecodedVideo:=True;
   End;
+ End;
+ If (InputFormat='yuv4mpegpipe') And (VideoCodec='dnxhd') Then Begin
+  If IsHTTP(InputPath) Or ((OutputFormat<>'avi') And (OutputFormat<>'dnxhd')) Or NoVideo Or (AudioCodec<>'') Or HasBitrate Or
+   (RequestedRate<>0) Or (RequestedChannels<>0) Or (VideoFrames<>0) Or (ImageWidth<>0) Then
+   Fail('dnxhd: Y4M local vers sortie .dnxhd ou AVI requis, sans autres options.');
+  If HasCrop Then Fail('dnxhd: -crop non supporte avec cet encodeur.');
+  Temps[2]:=NewTemporary; EncodeDNxHD(Intermediate,Temps[2],OutputFormat='avi',DNxProfile,VideoBitrate Div 1000000);
+  Commit(Temps[2]); Temps[2]:=''; WriteLn('Video DNxHD creee: ',OutputPath); Halt(0);
  End;
  If (InputFormat='yuv4mpegpipe') And ((VideoCodec='asv1') Or (VideoCodec='asv2')) Then Begin
   If IsHTTP(InputPath) Or (OutputFormat<>'avi') Or NoVideo Or (AudioCodec<>'') Or HasBitrate Or HasVideoBitrate Or
