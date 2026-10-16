@@ -13905,6 +13905,7 @@ Var
  NVMode,NVW,NVH,NVFmt,NVFrames,NVFpsN,NVFpsD,NVSarN,NVSarD: LongInt;
  NVHasAlpha,NVOpened,NVDone,NVYC,NVInitDup: Boolean; NVTarget: String;
  NVPalR,NVPalG,NVPalB: Array[0..255] Of Byte;
+ NVVN,NVVD,NVSubX,NVSubY,NVCW,NVCH: LongInt; NVYTag: String[16];
  NVLast: PEABuffer; NVLastSize,NVGap: LongInt; NVHaveLast: Boolean;
  NVLastPalR,NVLastPalG,NVLastPalB,NVSavePalR,NVSavePalG,NVSavePalB: Array[0..255] Of Byte;
  NVCur: PEABuffer;
@@ -13912,17 +13913,40 @@ Var
 
 Function NVBpp(F: LongInt): LongInt;
 Begin
- Case F Of 0,4: NVBpp:=1; 1: NVBpp:=3; 3: NVBpp:=4; Else NVBpp:=2; End;
+ Case F Of 0,4,7: NVBpp:=1; 1,9: NVBpp:=3; 3: NVBpp:=4; Else NVBpp:=2; End;
+End;
+
+Function NVFrameBytes: LongInt;
+Begin
+ If NVFmt=7 Then NVFrameBytes:=NVW*NVH+2*NVCW*NVCH
+ Else If NVFmt=8 Then NVFrameBytes:=2*(NVW*NVH+2*NVCW*NVCH)
+ Else NVFrameBytes:=NVW*NVH*NVBpp(NVFmt);
 End;
 
 { conversion d'un pixel natif vers R,G,B (8 bits) }
 Procedure NVPixel(P: PEABuffer; At: LongInt; Var R,G,B: LongInt);
-Var V: LongInt;
+Var V,Q,PX,PY,CIdx,Yv,Uv,Vv: LongInt;
 Begin
  Case NVFmt Of
   0: Begin V:=P^[At]; R:=NVPalR[V]; G:=NVPalG[V]; B:=NVPalB[V]; End;
   1,3: Begin B:=P^[At]; G:=P^[At+1]; R:=P^[At+2]; End;
   4: Begin R:=P^[At]; G:=R; B:=R; End;
+  7,8: Begin
+   Q:=At; If NVFmt=8 Then Q:=At Shr 1;
+   PX:=Q Mod NVW; PY:=Q Div NVW;
+   CIdx:=NVW*NVH+(PY Shr NVSubY)*NVCW+(PX Shr NVSubX);
+   If NVFmt=7 Then Begin Yv:=P^[Q]; Uv:=P^[CIdx]; Vv:=P^[CIdx+NVCW*NVCH]; End
+   Else Begin
+    Yv:=(P^[Q*2]+P^[Q*2+1]*256) Shr 2; Uv:=(P^[CIdx*2]+P^[CIdx*2+1]*256) Shr 2;
+    Vv:=(P^[(CIdx+NVCW*NVCH)*2]+P^[(CIdx+NVCW*NVCH)*2+1]*256) Shr 2;
+   End;
+   Yv:=Yv-16; Uv:=Uv-128; Vv:=Vv-128;
+   R:=(298*Yv+409*Vv+128) Div 256; G:=(298*Yv-100*Uv-208*Vv+128) Div 256; B:=(298*Yv+516*Uv+128) Div 256;
+   If R<0 Then R:=0 Else If R>255 Then R:=255;
+   If G<0 Then G:=0 Else If G>255 Then G:=255;
+   If B<0 Then B:=0 Else If B>255 Then B:=255;
+  End;
+  9: Begin R:=P^[At]; G:=P^[At+1]; B:=P^[At+2]; End;
   2: Begin
    V:=P^[At]+P^[At+1]*256;
    R:=((V Shr 10) And 31) Shl 3; G:=((V Shr 5) And 31) Shl 3; B:=(V And 31) Shl 3;
@@ -13994,7 +14018,7 @@ Begin
  Bpp:=NVBpp(NVFmt); Comp:=0; PalEntries:=0;
  Case NVFmt Of
   0,4: Begin Bits:=8; PalEntries:=256; End;
-  1: Bits:=24;
+  1,9: Bits:=24;
   3: If NVHasAlpha Then Bits:=32 Else Bits:=24;
   2: Bits:=16;
   5,6: Begin Bits:=16; Comp:=3; PalEntries:=3; End;
@@ -14030,7 +14054,9 @@ Begin
    End;
    WriteBytes(Row,RowBytes);
   End Else Begin
-   Move(P^[Y*NVW*Bpp],Row,RowBytes); WriteBytes(Row,RowBytes);
+   Move(P^[Y*NVW*Bpp],Row,RowBytes);
+   If NVFmt=9 Then For X:=0 To NVW-1 Do Begin I:=Row[X*3]; Row[X*3]:=Row[X*3+2]; Row[X*3+2]:=I; End;
+   WriteBytes(Row,RowBytes);
   End;
   If Pad>0 Then WriteBytes(Zero,Pad);
  End;
@@ -14041,10 +14067,29 @@ Function NVY4(R,G,B: LongInt): LongInt;Begin NVY4:=(8414*R+16519*G+3208*B+(16 Sh
 Function NVU4(R,G,B: LongInt): LongInt;Begin NVU4:=ADPCMSar(-4865*R-9528*G+14392*B+(257 Shl 14),15); End;
 Function NVV4(R,G,B: LongInt): LongInt;Begin NVV4:=ADPCMSar(14392*R-12061*G-2332*B+(257 Shl 14),15); End;
 
+Procedure NVWriteY4MPlanar(P: PEABuffer);
+Var Hdr,S: String; At,Tot,Q: LongInt;
+Begin
+ If Not NVOpened Then Begin
+  OpenWrite(NVTarget); NVOpened:=True;
+  Str(NVW,S); Hdr:='YUV4MPEG2 W'+S; Str(NVH,S); Hdr:=Hdr+' H'+S;
+  Str(NVFpsN,S); Hdr:=Hdr+' F'+S; Str(NVFpsD,S); Hdr:=Hdr+':'+S+' Ip A';
+  Str(NVSarN,S); Hdr:=Hdr+S; Str(NVSarD,S); Hdr:=Hdr+':'+S+' '+NVYTag+#10;
+  WriteBytes(Hdr[1],Length(Hdr));
+ End;
+ Hdr:='FRAME'+#10; WriteBytes(Hdr[1],Length(Hdr));
+ Tot:=NVFrameBytes; At:=0;
+ While At<Tot Do Begin
+  If Tot-At>8192 Then Q:=8192 Else Q:=Tot-At;
+  WriteBytes(P^[At],Q); Inc(At,Q);
+ End;
+End;
+
 Procedure NVWriteY4M(P: PEABuffer);
 Var
  Hdr,S: String; X,Y,K,J,R,G,B,Sum,CW,CH,PX,PY: LongInt; Row: Array[0..65535] Of Byte;
 Begin
+ If (NVFmt=7) Or (NVFmt=8) Then Begin NVWriteY4MPlanar(P); Exit; End;
  If Not NVOpened Then Begin
   OpenWrite(NVTarget); NVOpened:=True;
   Str(NVW,S); Hdr:='YUV4MPEG2 W'+S; Str(NVH,S); Hdr:=Hdr+' H'+S;
@@ -14082,7 +14127,7 @@ Procedure NVEmit(P: PEABuffer);
 Var Rgb: PEABuffer; I,R,G,B,Bpp,Size: LongInt;
 Begin
  If NVDone Then Exit;
- Size:=NVW*NVH*NVBpp(NVFmt);
+ Size:=NVFrameBytes;
  If NVMode=0 Then Begin
   If NVLast=Nil Then Begin GetMem(NVLast,Size); NVLastSize:=Size; End;
   If NVHaveLast And (NVGap>=2) Then Begin
@@ -14146,6 +14191,16 @@ Begin
  Try(80,1); Try(120,1); Try(240,1);
  Try(24000,1001); Try(30000,1001); Try(60000,1001); Try(12000,1001); Try(15000,1001); Try(48000,1001);
  If (CN=0) Or (Best>0.1) Then Begin N:=0; D:=1; End Else Begin N:=CN; D:=CD; End;
+End;
+
+Procedure NVGcd(Var A,B: LongInt);
+Forward;
+Procedure NVAviSar(W,H: LongInt);
+Var A,B: LongInt;
+Begin
+ If (NVVN>0) And (NVVD>0) Then Begin
+  A:=NVVN*H; B:=NVVD*W; NVGcd(A,B); NVSarN:=A; NVSarD:=B;
+ End;
 End;
 
 Procedure NVGcd(Var A,B: LongInt);
@@ -14757,6 +14812,7 @@ Begin S4:=''; For Z:=0 To 3 Do S4:=S4+Chr(EAByte(F,Size,At+Z)); T4:=S4; End;
 Begin
  NVLoad(Source,F,Size);
  If (T4(0)<>'RIFF') Or (T4(8)<>'AVI ') Then Fail('avi: signature RIFF/AVI requise.');
+ NVVN:=0; NVVD:=0;
  Pos:=12; Vids:=False; HaveFmt:=False; InMovie:=False; Cnt:=0; Rate:=25; Scale:=1; Fcc:=''; Bits:=0; W:=0; H:=0;
  FillChar(Pal,SizeOf(Pal),0);
  While (Pos+8<=Size) And Not InMovie And (Cnt<500) Do Begin
@@ -14778,6 +14834,7 @@ Begin
     End;
     HaveFmt:=True;
    End;
+   If Tag='vprp' Then Begin NVVD:=NVRL16(F,Size,Pos+8+20); NVVN:=NVRL16(F,Size,Pos+8+22); End;
    Inc(Pos,8+Sz+(Sz And 1));
   End;
  End;
@@ -14795,7 +14852,7 @@ Begin
   Case Bits Of 16: Fmt:=2; 24: Fmt:=1; 32: Fmt:=3; Else Begin Fail('camstudio: profondeur invalide.'); Exit; End; End;
  End;
  Bpp:=NVBpp(Fmt); LineLen:=W*Bpp;
- NVBegin(Mode,Target,W,H,Fmt,RN,RD);
+ NVBegin(Mode,Target,W,H,Fmt,RN,RD); NVAviSar(W,H);
  If Fmt=3 Then Begin NVHasAlpha:=False; NVYC:=True; End;
  GetMem(Pic,W*H*Bpp+64); FillChar(Pic^,W*H*Bpp+64,0);
  If Camtasia Then Begin
@@ -14932,6 +14989,382 @@ Begin
  End;
 End;
 
+
+
+{ ---- cljr (Cirrus Logic AccuPak), cyuv (Creative YUV), cinepak: AVI -> image ---- }
+Type TCVBook=Array[0..255,0..11] Of Byte;
+ TCVStrip=Record V4,V1: TCVBook; End;
+Var CVStrips: Array[0..31] Of TCVStrip;
+
+Function CVClip(V: LongInt): LongInt;Begin If V<0 Then CVClip:=0 Else If V>255 Then CVClip:=255 Else CVClip:=V; End;
+
+Procedure CVCodebook(Var Book: TCVBook; ChunkId,Size: LongInt; Data: PEABuffer; DOff: LongInt);
+Var EOD,Flag,Mask,N,I,K,KK,R,G,B,U,V,PP: LongInt; Flg: Int64;
+Function BE32At(At: LongInt): Int64;Begin BE32At:=Int64(Data^[At])*16777216+Data^[At+1]*65536+Data^[At+2]*256+Data^[At+3]; End;
+Var Cur: LongInt; M2: Int64;
+Begin
+ Cur:=DOff; EOD:=DOff+Size;
+ If (ChunkId And 4)<>0 Then N:=4 Else N:=6;
+ Flg:=0; M2:=0;
+ For I:=0 To 255 Do Begin
+  If ((ChunkId And 1)<>0) Then Begin
+   M2:=M2 Shr 1;
+   If M2=0 Then Begin
+    If Cur+4>EOD Then Break;
+    Flg:=BE32At(Cur); Inc(Cur,4); M2:=$80000000;
+   End;
+  End;
+  If ((ChunkId And 1)=0) Or ((Flg And M2)<>0) Then Begin
+   If Cur+N>EOD Then Break;
+   PP:=0;
+   For K:=0 To 3 Do Begin
+    R:=Data^[Cur]; Inc(Cur);
+    For KK:=0 To 2 Do Begin Book[I,PP]:=R; Inc(PP); End;
+   End;
+   If N=6 Then Begin
+    U:=ShortInt(Data^[Cur]); V:=ShortInt(Data^[Cur+1]); Inc(Cur,2);
+    PP:=0;
+    For K:=0 To 3 Do Begin
+     R:=Book[I,PP]+V*2; G:=Book[I,PP]-(U Div 2)-V; B:=Book[I,PP+2]+U*2;
+     Book[I,PP]:=CVClip(R); Book[I,PP+1]:=CVClip(G); Book[I,PP+2]:=CVClip(B);
+     Inc(PP,3);
+    End;
+   End;
+  End;
+ End;
+End;
+
+{ Retourne 0 si OK, -1 si erreur }
+Function CVVectors(Var Strip: TCVStrip; Pic: PEABuffer; Stride,Pal,Hgt: LongInt; X1,Y1,X2,Y2,ChunkId,Size: LongInt; Data: PEABuffer; DOff: LongInt): LongInt;
+Var
+ EOD,Y,X,Cur,I0,I1,I2,I3,Q: LongInt; Flag,Mask: Int64; P: LongInt; C0,C1,C2,C3: LongInt; Bpp: LongInt;
+Procedure Cp(Dst,Src: LongInt; Var Book: TCVBook; Idx,Cnt: LongInt);
+Var Z: LongInt;
+Begin For Z:=0 To Cnt-1 Do Pic^[Dst+Z]:=Book[Idx,Src+Z]; End;
+Begin
+ Cur:=DOff; EOD:=DOff+Size; Flag:=0; Mask:=0;
+ If Pal<>0 Then Bpp:=1 Else Bpp:=3;
+ Y:=Y1;
+ While Y<Y2 Do Begin
+  I0:=Y*Stride+X1*Bpp; I1:=I0; I2:=I0; I3:=I0;
+  If Hgt-Y>1 Then Begin
+   I1:=I0+Stride;
+   If Hgt-Y>2 Then Begin I2:=I1+Stride; If Hgt-Y>3 Then I3:=I2+Stride; End;
+  End;
+  X:=X1;
+  While X<X2 Do Begin
+   If ((ChunkId And 1)<>0) Then Begin
+    Mask:=Mask Shr 1;
+    If Mask=0 Then Begin
+     If Cur+4>EOD Then Begin CVVectors:=-1; Exit; End;
+     Flag:=Int64(Data^[Cur])*16777216+Data^[Cur+1]*65536+Data^[Cur+2]*256+Data^[Cur+3]; Inc(Cur,4); Mask:=$80000000;
+    End;
+   End;
+   If ((ChunkId And 1)=0) Or ((Flag And Mask)<>0) Then Begin
+    If ((ChunkId And 2)=0) Then Begin
+     Mask:=Mask Shr 1;
+     If Mask=0 Then Begin
+      If Cur+4>EOD Then Begin CVVectors:=-1; Exit; End;
+      Flag:=Int64(Data^[Cur])*16777216+Data^[Cur+1]*65536+Data^[Cur+2]*256+Data^[Cur+3]; Inc(Cur,4); Mask:=$80000000;
+     End;
+    End;
+    If ((ChunkId And 2)<>0) Or ((Not Flag And Mask)<>0) Then Begin
+     If Cur>=EOD Then Begin CVVectors:=-1; Exit; End;
+     Q:=Data^[Cur]; Inc(Cur);
+     If Pal<>0 Then Begin
+      Pic^[I3]:=Strip.V1[Q,6]; Pic^[I3+1]:=Strip.V1[Q,6]; Pic^[I2]:=Strip.V1[Q,6]; Pic^[I2+1]:=Strip.V1[Q,6];
+      Pic^[I3+2]:=Strip.V1[Q,9]; Pic^[I3+3]:=Strip.V1[Q,9]; Pic^[I2+2]:=Strip.V1[Q,9]; Pic^[I2+3]:=Strip.V1[Q,9];
+      Pic^[I1]:=Strip.V1[Q,0]; Pic^[I1+1]:=Strip.V1[Q,0]; Pic^[I0]:=Strip.V1[Q,0]; Pic^[I0+1]:=Strip.V1[Q,0];
+      Pic^[I1+2]:=Strip.V1[Q,3]; Pic^[I1+3]:=Strip.V1[Q,3]; Pic^[I0+2]:=Strip.V1[Q,3]; Pic^[I0+3]:=Strip.V1[Q,3];
+     End Else Begin
+      Cp(I3,6,Strip.V1,Q,3); Cp(I3+3,6,Strip.V1,Q,3); Cp(I2,6,Strip.V1,Q,3); Cp(I2+3,6,Strip.V1,Q,3);
+      Cp(I3+6,9,Strip.V1,Q,3); Cp(I3+9,9,Strip.V1,Q,3); Cp(I2+6,9,Strip.V1,Q,3); Cp(I2+9,9,Strip.V1,Q,3);
+      Cp(I1,0,Strip.V1,Q,3); Cp(I1+3,0,Strip.V1,Q,3); Cp(I0,0,Strip.V1,Q,3); Cp(I0+3,0,Strip.V1,Q,3);
+      Cp(I1+6,3,Strip.V1,Q,3); Cp(I1+9,3,Strip.V1,Q,3); Cp(I0+6,3,Strip.V1,Q,3); Cp(I0+9,3,Strip.V1,Q,3);
+     End;
+    End Else If (Flag And Mask)<>0 Then Begin
+     If Cur+4>EOD Then Begin CVVectors:=-1; Exit; End;
+     C0:=Data^[Cur]; C1:=Data^[Cur+1]; C2:=Data^[Cur+2]; C3:=Data^[Cur+3]; Inc(Cur,4);
+     If Pal<>0 Then Begin
+      Pic^[I3]:=Strip.V4[C2,6]; Pic^[I3+1]:=Strip.V4[C2,9]; Pic^[I3+2]:=Strip.V4[C3,6]; Pic^[I3+3]:=Strip.V4[C3,9];
+      Pic^[I2]:=Strip.V4[C2,0]; Pic^[I2+1]:=Strip.V4[C2,3]; Pic^[I2+2]:=Strip.V4[C3,0]; Pic^[I2+3]:=Strip.V4[C3,3];
+      Pic^[I1]:=Strip.V4[C0,6]; Pic^[I1+1]:=Strip.V4[C0,9]; Pic^[I1+2]:=Strip.V4[C1,6]; Pic^[I1+3]:=Strip.V4[C1,9];
+      Pic^[I0]:=Strip.V4[C0,0]; Pic^[I0+1]:=Strip.V4[C0,3]; Pic^[I0+2]:=Strip.V4[C1,0]; Pic^[I0+3]:=Strip.V4[C1,3];
+     End Else Begin
+      Cp(I3,6,Strip.V4,C2,6); Cp(I3+6,6,Strip.V4,C3,6);
+      Cp(I2,0,Strip.V4,C2,6); Cp(I2+6,0,Strip.V4,C3,6);
+      Cp(I1,6,Strip.V4,C0,6); Cp(I1+6,6,Strip.V4,C1,6);
+      Cp(I0,0,Strip.V4,C0,6); Cp(I0+6,0,Strip.V4,C1,6);
+     End;
+    End;
+   End;
+   If Pal<>0 Then Begin Inc(I0,4); Inc(I1,4); Inc(I2,4); Inc(I3,4); End
+   Else Begin Inc(I0,12); Inc(I1,12); Inc(I2,12); Inc(I3,12); End;
+   Inc(X,4);
+  End;
+  Inc(Y,4);
+ End;
+ CVVectors:=0;
+End;
+
+{ Decode un paquet cinepak dans Pic; retourne False si le paquet est rejete (aucune image). }
+Function CVDecode(Pk: PEABuffer; Size,W4,H4,Hgt,Pal: LongInt; Pic: PEABuffer; Stride: LongInt; Var SegaSkip: LongInt): Boolean;
+Var
+ NumStrips,Enc,I,Cur,EOD,StripSize,FrameFlags,Y0,ChunkId,ChunkSize,Res,SX1,SY1,SX2,SY2,SId,Pos2,SStart,SEnd,R2: LongInt; Done: Boolean;
+Function RB16(At: LongInt): LongInt;Begin RB16:=Pk^[At]*256+Pk^[At+1]; End;
+Function RB24(At: LongInt): LongInt;Begin RB24:=Pk^[At]*65536+Pk^[At+1]*256+Pk^[At+2]; End;
+Begin
+ CVDecode:=False;
+ If Size<10 Then Exit;
+ NumStrips:=RB16(8);
+ If NumStrips=0 Then Exit;
+ Enc:=RB24(1);
+ { predecode check (discard_damaged_percentage = 95 par defaut) }
+ If Size<Int64(Enc)*(100-95) Div 100 Then Exit;
+ If SegaSkip=-1 Then Begin
+  If Enc=0 Then Exit;
+  If (Enc<>Size) And ((Size Mod Enc)<>0) Then Begin
+   If (Size>=16) And (Pk^[10]=$FE) And (Pk^[11]=0) And (Pk^[12]=0) And (Pk^[13]=6) And (Pk^[14]=0) And (Pk^[15]=0) Then SegaSkip:=6 Else SegaSkip:=2;
+  End Else SegaSkip:=0;
+ End;
+ If Size<10+SegaSkip+NumStrips*12 Then Exit;
+ StripSize:=RB24(10+SegaSkip+1);
+ If (StripSize<12) Or (StripSize>Enc) Then Exit;
+ CVDecode:=True;
+ { cinepak_decode }
+ EOD:=Size; FrameFlags:=Pk^[0]; Cur:=10+SegaSkip; Y0:=0;
+ If NumStrips>32 Then NumStrips:=32;
+ For I:=0 To NumStrips-1 Do Begin
+  If Cur+12>EOD Then Exit;
+  SId:=Pk^[Cur];
+  SY1:=RB16(Cur+4);
+  If SY1=0 Then Begin SY1:=Y0; SY2:=SY1+RB16(Cur+8); End Else SY2:=RB16(Cur+8);
+  SX1:=RB16(Cur+6); SX2:=RB16(Cur+10);
+  StripSize:=RB24(Cur+1)-12;
+  If StripSize<0 Then Exit;
+  Inc(Cur,12);
+  If Cur+StripSize>EOD Then StripSize:=EOD-Cur;
+  If (I>0) And ((FrameFlags And 1)=0) Then Begin
+   CVStrips[I].V4:=CVStrips[I-1].V4; CVStrips[I].V1:=CVStrips[I-1].V1;
+  End;
+  { cinepak_decode_strip }
+  If (SX2>W4) Or (SY2>H4) Or (SX1>=SX2) Or (SY1>=SY2) Then Exit;
+  Pos2:=Cur; SEnd:=Cur+StripSize; Done:=False; Res:=-1;
+  While (Pos2+4<=SEnd) And Not Done Do Begin
+   ChunkId:=Pk^[Pos2]; ChunkSize:=RB24(Pos2+1)-4;
+   If ChunkSize<0 Then Exit;
+   Inc(Pos2,4);
+   If Pos2+ChunkSize>SEnd Then ChunkSize:=SEnd-Pos2;
+   Case ChunkId Of
+    $20,$21,$24,$25: CVCodebook(CVStrips[I].V4,ChunkId,ChunkSize,Pk,Pos2);
+    $22,$23,$26,$27: CVCodebook(CVStrips[I].V1,ChunkId,ChunkSize,Pk,Pos2);
+    $30,$31,$32: Begin
+     Res:=CVVectors(CVStrips[I],Pic,Stride,Pal,Hgt,SX1,SY1,SX2,SY2,ChunkId,ChunkSize,Pk,Pos2); Done:=True;
+    End;
+   End;
+   If Not Done Then Inc(Pos2,ChunkSize);
+  End;
+  If Res<>0 Then Exit;
+  Inc(Cur,StripSize);
+  Y0:=SY2;
+ End;
+End;
+
+{ Kind: 7 cljr, 8 cyuv, 9 cinepak. Mode: 0 Y4M, 1 PNG, 2 BMP }
+Procedure DecodeAVIVideo(Const Source,Target: String; Mode,Kind: LongInt);
+Var
+ Raw422: Boolean;
+ F: PEABuffer; Size,Pos,W,H,Bits,Rate,Scale,I,J,K,Cnt,Sz,MoviePos,N,RN,RD,Pal4,H4,W4,Stride,Row,X,Y,Rr,CW,Q,SegaSkip: LongInt;
+ Tag: String[4]; Vids,HaveFmt,InMovie,Ok: Boolean; Pal: Array[0..255] Of LongWord; Fcc: String[4];
+ Pk,Pic,Out2,PY,PU,PV: PEABuffer; OutSz: LongInt; Cb,V: LongInt; Luma: LongInt; Fmt: LongInt; CurFmt: LongInt;
+ PalPending: Boolean;
+Function T4(At: LongInt): String;
+Var S4: String[4]; Z: Integer;
+Begin S4:=''; For Z:=0 To 3 Do S4:=S4+Chr(EAByte(F,Size,At+Z)); T4:=S4; End;
+Function G5(Var BitPos: LongInt; Nb: LongInt; Base: PEABuffer; Len: LongInt): LongInt;
+Var Z,Vv: LongInt;
+Begin
+ Vv:=0;
+ For Z:=1 To Nb Do Begin
+  Vv:=Vv*2+((EAByte(Base,Len,BitPos Shr 3) Shr (7-(BitPos And 7))) And 1); Inc(BitPos);
+ End;
+ G5:=Vv;
+End;
+Var BP: LongInt;
+Begin
+ NVLoad(Source,F,Size);
+ If (T4(0)<>'RIFF') Or (T4(8)<>'AVI ') Then Fail('avi: signature RIFF/AVI requise.');
+ NVVN:=0; NVVD:=0;
+ Pos:=12; Vids:=False; HaveFmt:=False; InMovie:=False; Cnt:=0; Rate:=25; Scale:=1; Fcc:=''; Bits:=0; W:=0; H:=0;
+ FillChar(Pal,SizeOf(Pal),0); MoviePos:=0;
+ While (Pos+8<=Size) And Not InMovie And (Cnt<500) Do Begin
+  Tag:=T4(Pos); Sz:=NVRL32(F,Size,Pos+4); Inc(Cnt);
+  If Sz<0 Then Break;
+  If Tag='LIST' Then Begin
+   If T4(Pos+8)='movi' Then Begin InMovie:=True; MoviePos:=Pos+12; End;
+   Inc(Pos,12);
+  End Else Begin
+   If (Tag='strh') And Not HaveFmt Then Begin
+    Vids:=T4(Pos+8)='vids';
+    If Vids Then Begin Scale:=NVRL32(F,Size,Pos+8+20); Rate:=NVRL32(F,Size,Pos+8+24); End;
+   End Else If (Tag='strf') And Vids And Not HaveFmt Then Begin
+    W:=NVRL32(F,Size,Pos+8+4); H:=NVRL32(F,Size,Pos+8+8); Bits:=NVRL16(F,Size,Pos+8+14); Fcc:=T4(Pos+8+16);
+    If Bits<=8 Then Begin
+     N:=(Sz-40) Div 4; If N>(1 Shl Bits) Then N:=1 Shl Bits;
+     For I:=0 To N-1 Do Pal[I]:=$FF000000 Or LongWord(NVRL32(F,Size,Pos+8+40+4*I) And $FFFFFF);
+    End;
+    HaveFmt:=True;
+   End;
+   If Tag='vprp' Then Begin NVVD:=NVRL16(F,Size,Pos+8+20); NVVN:=NVRL16(F,Size,Pos+8+22); End;
+   Inc(Pos,8+Sz+(Sz And 1));
+  End;
+ End;
+ If Not InMovie Or Not HaveFmt Then Fail('avi: flux video introuvable.');
+ Case Kind Of
+  7: If (Fcc<>'CLJR') And (Fcc<>'cljr') Then Fail('cljr: flux AVI CLJR requis.');
+  8: If (Fcc<>'cyuv') And (Fcc<>'CYUV') Then Fail('cyuv: flux AVI cyuv requis.');
+  9: If (Fcc<>'cvid') And (Fcc<>'CVID') Then Fail('cinepak: flux AVI cvid requis.');
+ End;
+ If H<0 Then H:=-H;
+ If (W<1) Or (H<1) Or (W>8192) Or (H>8192) Then Fail('avi: dimensions incorrectes.');
+ If (Rate<=0) Or (Scale<=0) Then Begin Rate:=25; Scale:=1; End;
+ RN:=Rate; RD:=Scale; NVGcd(RN,RD);
+ If (Kind=8) And ((W And 3)<>0) Then Fail('cyuv: largeur multiple de 4 requise.');
+ W4:=(W+3) And Not 3; H4:=(H+3) And Not 3;
+ Pal4:=0;
+ Case Kind Of
+  7: Begin Fmt:=7; NVSubX:=2; NVSubY:=0; NVCW:=(W+3) Div 4; NVCH:=H; NVYTag:='C411'; End;
+  8: Begin Fmt:=7; NVSubX:=2; NVSubY:=0; NVCW:=W Div 4; NVCH:=H; NVYTag:='C411'; End;
+  9: Begin If Bits=8 Then Begin Fmt:=0; Pal4:=1; End Else Fmt:=9; End;
+ End;
+ NVBegin(Mode,Target,W,H,Fmt,RN,RD); NVAviSar(W,H); If Fmt=9 Then NVYC:=True;
+ If Kind<>9 Then Begin
+  NVSubX:=2; NVSubY:=0; If Kind=7 Then NVCW:=(W+3) Div 4 Else NVCW:=W Div 4; NVCH:=H; NVYTag:='C411';
+  If Kind=8 Then Begin
+   { detection du mode UYVY brut d'apres le premier paquet video }
+   J:=MoviePos; Raw422:=False;
+   While J+8<=Size Do Begin
+    N:=NVRL32(F,Size,J+4);
+    If (N<0) Or (T4(J)='LIST') Then Begin If T4(J)='LIST' Then Begin Inc(J,12); Continue; End; Break; End;
+    If (F^[J]=48) And (F^[J+1]=48) And ((F^[J+2]=100) Or (F^[J+2]=119)) Then Begin
+     If N=H*((W+1) And Not 1)*2 Then Raw422:=True;
+     Break;
+    End;
+    Inc(J,8+N+(N And 1));
+   End;
+   If Raw422 Then Begin NVSubX:=1; NVCW:=(W+1) Div 2; NVYTag:='C422'; End;
+  End;
+ End;
+ For I:=0 To 255 Do Begin NVPalR[I]:=(Pal[I] Shr 16) And 255; NVPalG[I]:=(Pal[I] Shr 8) And 255; NVPalB[I]:=Pal[I] And 255; End;
+ SegaSkip:=-1; FillChar(CVStrips,SizeOf(CVStrips),0);
+ If Kind=9 Then Begin
+  If Pal4<>0 Then Stride:=W4 Else Stride:=W4*3;
+  GetMem(Pic,Stride*H4+64); FillChar(Pic^,Stride*H4+64,0);
+  GetMem(Out2,W*H*3+64);
+ End Else Begin
+  Pic:=Nil; GetMem(Out2,W4*H*3+W4*H+64);
+ End;
+ Pos:=MoviePos;
+ While Pos+8<=Size Do Begin
+  Tag:=T4(Pos); Sz:=NVRL32(F,Size,Pos+4);
+  If Sz<0 Then Break;
+  If Tag='LIST' Then Begin Inc(Pos,12); Continue; End;
+  If Pos+8+Sz>Size Then Sz:=Size-Pos-8;
+  If (Tag[1]='0') And (Tag[2]='0') And (Tag[3]='p') And (Tag[4]='c') And (Kind=9) And (Bits<=8) Then Begin
+   K:=F^[Pos+8]; N:=F^[Pos+9]; If N=0 Then N:=256;
+   For I:=0 To N-1 Do If (K+I<256) And (4+4*I+3<Sz) Then Begin
+    NVPalR[K+I]:=F^[Pos+8+4+4*I]; NVPalG[K+I]:=F^[Pos+8+4+4*I+1]; NVPalB[K+I]:=F^[Pos+8+4+4*I+2];
+   End;
+  End Else If (Tag[1]='0') And (Tag[2]='0') And ((Tag[3]='d') Or (Tag[3]='w')) And ((Tag[4]='c') Or (Tag[4]='b')) Then Begin
+   Pk:=PEABuffer(@F^[Pos+8]); Ok:=False;
+   Case Kind Of
+    7: If (Sz Div H>=W) Then Begin
+     { 411 : 4 octets par groupe de 4 pixels }
+     PY:=Out2; PU:=PEABuffer(@Out2^[W4*H]); PV:=PEABuffer(@Out2^[W4*H+NVCW*H]);
+     BP:=0;
+     For Y:=0 To H-1 Do Begin
+      X:=0;
+      While X<W Do Begin
+       PY^[Y*W4+X+3]:=(G5(BP,5,Pk,Sz)*33) Shr 2; PY^[Y*W4+X+2]:=(G5(BP,5,Pk,Sz)*33) Shr 2;
+       PY^[Y*W4+X+1]:=(G5(BP,5,Pk,Sz)*33) Shr 2; PY^[Y*W4+X]:=(G5(BP,5,Pk,Sz)*33) Shr 2;
+       PU^[Y*NVCW+(X Shr 2)]:=G5(BP,6,Pk,Sz) Shl 2; PV^[Y*NVCW+(X Shr 2)]:=G5(BP,6,Pk,Sz) Shl 2;
+       Inc(X,4);
+      End;
+     End;
+     Ok:=True;
+    End;
+    8: Begin
+     If Not Raw422 And (Sz=48+H*(W*3 Div 4)) Then Begin
+      { yuv411p }
+      PY:=Out2; PU:=PEABuffer(@Out2^[W*H]); PV:=PEABuffer(@Out2^[W*H+NVCW*H]);
+      Cb:=48;
+      For Y:=0 To H-1 Do Begin
+       Q:=Pk^[Cb]; Inc(Cb);
+       PU^[Y*NVCW]:=Q And $F0; I:=(Q And $0F) Shl 4; PY^[Y*W]:=I; K:=I; { y_pred }
+       J:=Q And $F0; { u_pred }
+       Q:=Pk^[Cb]; Inc(Cb);
+       PV^[Y*NVCW]:=Q And $F0; Cnt:=Q And $F0; { v_pred }
+       K:=(K+ShortInt(Pk^[Q And $0F])) And 255; PY^[Y*W+1]:=K;
+       Q:=Pk^[Cb]; Inc(Cb);
+       K:=(K+ShortInt(Pk^[Q And $0F])) And 255; PY^[Y*W+2]:=K;
+       K:=(K+ShortInt(Pk^[(Q And $F0) Shr 4])) And 255; PY^[Y*W+3]:=K;
+       For X:=1 To W Div 4-1 Do Begin
+        Q:=Pk^[Cb]; Inc(Cb);
+        J:=(J+ShortInt(Pk^[16+((Q And $F0) Shr 4)])) And 255; PU^[Y*NVCW+X]:=J;
+        K:=(K+ShortInt(Pk^[Q And $0F])) And 255; PY^[Y*W+X*4]:=K;
+        Q:=Pk^[Cb]; Inc(Cb);
+        Cnt:=(Cnt+ShortInt(Pk^[32+((Q And $F0) Shr 4)])) And 255; PV^[Y*NVCW+X]:=Cnt;
+        K:=(K+ShortInt(Pk^[Q And $0F])) And 255; PY^[Y*W+X*4+1]:=K;
+        Q:=Pk^[Cb]; Inc(Cb);
+        K:=(K+ShortInt(Pk^[Q And $0F])) And 255; PY^[Y*W+X*4+2]:=K;
+        K:=(K+ShortInt(Pk^[(Q And $F0) Shr 4])) And 255; PY^[Y*W+X*4+3]:=K;
+       End;
+      End;
+      Ok:=True;
+     End Else If Raw422 And (Sz=H*((W+1) And Not 1)*2) Then Begin
+      { UYVY422 -> yuv422p, lignes inversees }
+      PY:=Out2; PU:=PEABuffer(@Out2^[W*H]); PV:=PEABuffer(@Out2^[W*H+NVCW*H]);
+      For Y:=0 To H-1 Do Begin
+       Rr:=H-1-Y;
+       For X:=0 To NVCW-1 Do Begin
+        PU^[Rr*NVCW+X]:=Pk^[Y*NVCW*4+X*4]; PY^[Rr*W+X*2]:=Pk^[Y*NVCW*4+X*4+1];
+        PV^[Rr*NVCW+X]:=Pk^[Y*NVCW*4+X*4+2]; PY^[Rr*W+X*2+1]:=Pk^[Y*NVCW*4+X*4+3];
+       End;
+      End;
+      Ok:=True;
+     End;
+    End;
+    9: Begin
+     Ok:=CVDecode(Pk,Sz,W4,H4,H,Pal4,Pic,Stride,SegaSkip);
+     If Ok Then Begin
+      If Pal4<>0 Then Begin
+       For Y:=0 To H-1 Do Move(Pic^[Y*Stride],Out2^[Y*W],W);
+      End Else For Y:=0 To H-1 Do Move(Pic^[Y*Stride],Out2^[Y*W*3],W*3);
+     End;
+    End;
+   End;
+   If Ok Then Begin
+    If Kind=8 Then NVEmit(Out2)
+    Else If Kind=7 Then Begin
+     { compacter les lignes luma W4 -> W }
+     For Y:=0 To H-1 Do Move(Out2^[Y*W4],Out2^[Y*W],W);
+     Move(Out2^[W4*H],Out2^[W*H],2*NVCW*H);
+     NVEmit(Out2);
+    End Else NVEmit(Out2);
+   End Else NVRepeat;
+   If NVDone Then Break;
+  End;
+  Inc(Pos,8+Sz+(Sz And 1));
+ End;
+ If Pic<>Nil Then FreeMem(Pic,Stride*H4+64);
+ FreeMem(F,Size+64);
+ If Kind=9 Then NVFinish('cinepak') Else If Kind=7 Then NVFinish('cljr') Else NVFinish('cyuv');
+End;
+
+Procedure DecodeNV2(Kind: LongInt; Const Source,Target: String; Mode: LongInt);
+Begin
+ If Kind>=7 Then DecodeAVIVideo(Source,Target,Mode,Kind) Else DecodeNV(Kind,Source,Target,Mode);
+End;
 
 Var AVSWantBMP: Boolean;
 
@@ -18840,6 +19273,9 @@ BEGIN
    WriteLn('D V    c93             Interplay C93');
    WriteLn('D V    camstudio       CamStudio');
    WriteLn('D V    camtasia        TechSmith Screen Capture Codec');
+   WriteLn('D V    cinepak         Cinepak');
+   WriteLn('D V    cljr            Cirrus Logic AccuPak');
+   WriteLn('D V    cyuv            Creative YUV (CYUV)');
    WriteLn('D A    atrac3          ATRAC3 (Adaptive TRansform Acoustic Coding 3)');
    WriteLn('DEV    asv1            ASUS V1');
    WriteLn('DEV    asv2            ASUS V2');
@@ -19068,7 +19504,9 @@ BEGIN
  Else If InputFormat='bmp' Then NVKind:=4
  Else If (InputFormat='avi') And Not IsHTTP(InputPath) Then Begin
   AsvTag:=AVIVideoFourCC(Intermediate);
-  If AsvTag='CSCD' Then NVKind:=5 Else If (AsvTag='tscc') Or (AsvTag='TSCC') Then NVKind:=6;
+  If AsvTag='CSCD' Then NVKind:=5 Else If (AsvTag='tscc') Or (AsvTag='TSCC') Then NVKind:=6
+  Else If (AsvTag='CLJR') Or (AsvTag='cljr') Then NVKind:=7 Else If (AsvTag='cyuv') Or (AsvTag='CYUV') Then NVKind:=8
+  Else If (AsvTag='cvid') Or (AsvTag='CVID') Then NVKind:=9;
  End;
  NVAudioOut:=(OutputFormat='wav') Or (OutputFormat='mp3') Or (OutputFormat='ac3') Or (OutputFormat='adx') Or (OutputFormat='aiff');
  If (NVKind<>0) And Not (((NVKind=1) Or (NVKind=2)) And NVAudioOut) Then Begin
@@ -19079,14 +19517,14 @@ BEGIN
   Else If (VideoCodec='png') Or (OutputFormat='png') Then NVSelMode:=1 Else NVSelMode:=0;
   If NVSelMode<>0 Then Begin
    If (VideoFrames<>1) And (NVKind<>4) Then Fail('Extraction PNG/BMP avec -frames:v 1 requise.');
-   Temps[2]:=NewTemporary; DecodeNV(NVKind,Intermediate,Temps[2],NVSelMode);
+   Temps[2]:=NewTemporary; DecodeNV2(NVKind,Intermediate,Temps[2],NVSelMode);
    Commit(Temps[2]); Temps[2]:=''; WriteLn('Image creee: ',OutputPath); Halt(0);
   End;
   If VideoFrames<>0 Then Fail('-frames:v reserve a la sortie PNG/BMP pour cette entree.');
   If Not ((OutputFormat='yuv4mpegpipe') Or (VideoCodec='mpeg4') Or (VideoCodec='mpeg1video') Or
    (VideoCodec='mpeg2video') Or (VideoCodec='ffv1') Or (VideoCodec='flv') Or FourMV) Then
    Fail('Sortie Y4M, PNG, BMP ou encodeur video natif requis.');
-  Temps[6]:=NewTemporary; DecodeNV(NVKind,Intermediate,Temps[6],0); Intermediate:=Temps[6];
+  Temps[6]:=NewTemporary; DecodeNV2(NVKind,Intermediate,Temps[6],0); Intermediate:=Temps[6];
   InputFormat:='yuv4mpegpipe'; DecodedVideo:=True; NoAudio:=True;
  End;
  If ((VideoCodec='bmp') Or (OutputFormat='bmp')) And (InputFormat='yuv4mpegpipe') Then Begin
