@@ -13903,9 +13903,10 @@ End;
 { ---- sortie image commune ---- }
 Var
  NVMode,NVW,NVH,NVFmt,NVFrames,NVFpsN,NVFpsD,NVSarN,NVSarD: LongInt;
- NVHasAlpha,NVOpened,NVDone: Boolean; NVTarget: String;
+ NVHasAlpha,NVOpened,NVDone,NVYC,NVInitDup: Boolean; NVTarget: String;
  NVPalR,NVPalG,NVPalB: Array[0..255] Of Byte;
- NVLast: PEABuffer; NVLastSize: LongInt; NVHaveLast: Boolean;
+ NVLast: PEABuffer; NVLastSize,NVGap: LongInt; NVHaveLast: Boolean;
+ NVLastPalR,NVLastPalG,NVLastPalB,NVSavePalR,NVSavePalG,NVSavePalB: Array[0..255] Of Byte;
  NVCur: PEABuffer;
 { Formats natifs: 0 PAL8, 1 BGR24, 2 RGB555LE, 3 BGRA/BGR0 (octets B,G,R,A), 4 GRAY8, 5 RGB565LE, 6 RGB444LE }
 
@@ -14053,7 +14054,11 @@ Begin
  End;
  Hdr:='FRAME'+#10; WriteBytes(Hdr[1],Length(Hdr));
  For Y:=0 To NVH-1 Do Begin
-  For X:=0 To NVW-1 Do Begin NVPixel(P,(Y*NVW+X)*NVBpp(NVFmt),R,G,B); Row[X]:=NVY4(R,G,B); End;
+  For X:=0 To NVW-1 Do Begin
+   NVPixel(P,(Y*NVW+X)*NVBpp(NVFmt),R,G,B);
+   If (NVFmt=0) Or (NVFmt=4) Then Row[X]:=NVY4(R,G,B) Else If Odd(NVW) Or NVYC Then Row[X]:=(8414*R+16519*G+3208*B+540928) Shr 15
+   Else Row[X]:=(8414*R+16519*G+3208*B+524288) Shr 15;
+  End;
   WriteBytes(Row,NVW);
  End;
  CW:=(NVW+1) Div 2; CH:=(NVH+1) Div 2;
@@ -14080,7 +14085,17 @@ Begin
  Size:=NVW*NVH*NVBpp(NVFmt);
  If NVMode=0 Then Begin
   If NVLast=Nil Then Begin GetMem(NVLast,Size); NVLastSize:=Size; End;
-  Move(P^,NVLast^,Size); NVHaveLast:=True;
+  If NVHaveLast And (NVGap>=2) Then Begin
+   Move(NVPalR,NVSavePalR,256); Move(NVPalG,NVSavePalG,256); Move(NVPalB,NVSavePalB,256);
+   Move(NVLastPalR,NVPalR,256); Move(NVLastPalG,NVPalG,256); Move(NVLastPalB,NVPalB,256);
+   For I:=1 To NVGap-1 Do Begin NVWriteY4M(NVLast); Inc(NVFrames); End;
+   Move(NVSavePalR,NVPalR,256); Move(NVSavePalG,NVPalG,256); Move(NVSavePalB,NVPalB,256);
+  End;
+  Move(P^,NVLast^,Size); Move(NVPalR,NVLastPalR,256); Move(NVPalG,NVLastPalG,256); Move(NVPalB,NVLastPalB,256);
+  If NVHaveLast And (NVGap>=1) Then Begin NVWriteY4M(P); Inc(NVFrames); End;
+  If Not NVHaveLast And NVInitDup And (NVGap>=1) Then
+   For I:=1 To NVGap Do Begin NVWriteY4M(P); Inc(NVFrames); End;
+  NVHaveLast:=True; NVGap:=0;
   NVWriteY4M(P); Inc(NVFrames);
  End Else If NVMode=1 Then Begin
   If NVHasAlpha And (NVFmt=3) Then Bpp:=4 Else Bpp:=3;
@@ -14098,13 +14113,13 @@ End;
 { Repete la derniere image (image perdue: duplication CFR de ffmpeg). }
 Procedure NVRepeat;
 Begin
- If (NVMode=0) And NVHaveLast And Not NVDone Then Begin NVWriteY4M(NVLast); Inc(NVFrames); End;
+ If (NVMode=0) And (NVHaveLast Or NVInitDup) And Not NVDone Then Inc(NVGap);
 End;
 
 Procedure NVBegin(Mode: LongInt; Const Target: String; W,H,Fmt,FpsN,FpsD: LongInt);
 Begin
  NVMode:=Mode; NVTarget:=Target; NVW:=W; NVH:=H; NVFmt:=Fmt; NVFrames:=0; NVFpsN:=FpsN; NVFpsD:=FpsD;
- NVSarN:=1; NVSarD:=1; NVOpened:=False; NVDone:=False; NVLast:=Nil; NVHaveLast:=False; NVHasAlpha:=False;
+ NVSarN:=0; NVSarD:=0; NVYC:=False; NVInitDup:=False; NVOpened:=False; NVDone:=False; NVLast:=Nil; NVHaveLast:=False; NVGap:=0; NVHasAlpha:=False;
 End;
 
 Procedure NVFinish(Const Who: String);
@@ -14112,6 +14127,25 @@ Begin
  If NVLast<>Nil Then Begin FreeMem(NVLast,NVLastSize); NVLast:=Nil; End;
  If NVFrames=0 Then Fail(Who+': aucune image decodee.');
  CloseRead; If NVOpened Then CloseWrite;
+End;
+
+{ Cadence "r_frame_rate" de ffmpeg pour une duree d'image T secondes (candidats standard de libavformat). }
+Procedure NVStdRate(T: Double; Var N,D: LongInt);
+Var Best,E,X,C: Double; J: LongInt; CN,CD: LongInt;
+Procedure Try(PN,PD: LongInt);
+Begin
+ C:=PN/PD; X:=T*C;
+ If Round(X)<1 Then Exit;
+ E:=Abs(X-Round(X));
+ If E<Best Then Begin Best:=E; CN:=PN; CD:=PD; End;
+End;
+Begin
+ Best:=1e9; CN:=0; CD:=1;
+ For J:=1 To 360 Do Try(J,12);
+ For J:=31 To 60 Do Try(J,1);
+ Try(80,1); Try(120,1); Try(240,1);
+ Try(24000,1001); Try(30000,1001); Try(60000,1001); Try(12000,1001); Try(15000,1001); Try(48000,1001);
+ If (CN=0) Or (Best>0.1) Then Begin N:=0; D:=1; End Else Begin N:=CN; D:=CD; End;
 End;
 
 Procedure NVGcd(Var A,B: LongInt);
@@ -14345,13 +14379,18 @@ Function NVRL16(P: PEABuffer; Size,At: LongInt): LongInt;Begin NVRL16:=EAByte(P,
 Function NVRL32(P: PEABuffer; Size,At: LongInt): LongInt;Begin NVRL32:=LongInt(EA32(P,Size,At,False)); End;
 
 { Mode: 0 Y4M, 1 PNG, 2 BMP, 3 audio WAV }
+Var NVDurs: Array[0..63] Of LongInt; NVNDur,NVNVid,NVScanRate: LongInt;
+
 Procedure DecodeBethsoft(Const Source,Target: String; Mode: LongInt);
 Var
  F: PEABuffer; Size,W,H,Delay,Pos,Bt,Rate,Code,Copied,NPix,Dur,I,J,K,Len,PktN,FirstDur,Dst,Remaining,Yoff,Cd,L2: LongInt;
  AudioRate: LongInt; Pk: PEABuffer; Pal: Array[0..767] Of Byte; PalPending,Bad,HaveVideo,AudioStarted,FirstFrame,GotPal: Boolean;
- Frame: PEABuffer; Pp: Int64; Fin: Boolean; PkPos: LongInt; V: Int64; SrcRate: LongInt;
+ Frame: PEABuffer; Pp: Int64; Fin: Boolean; PkPos: LongInt; V: Int64; SrcRate,Q2: LongInt; Acc: Double;
 Function PG: LongInt;Begin If PkPos<PktN Then PG:=Pk^[PkPos] Else PG:=0; Inc(PkPos); End;
 Begin
+ If Mode<3 Then Begin
+  NVNDur:=0; NVNVid:=0; DecodeBethsoft(Source,Target,4);
+ End;
  NVLoad(Source,F,Size);
  If (F^[0]<>86) Or (F^[1]<>73) Or (F^[2]<>68) Or (F^[3]<>0) Then Fail('bethsoftvid: signature VID requise.');
  W:=NVRL16(F,Size,7); H:=NVRL16(F,Size,9); Delay:=NVRL16(F,Size,11);
@@ -14408,14 +14447,30 @@ Begin
      End;
      If Copied>NPix Then Begin Bad:=True; Break; End;
     Until Code=0;
-    If Bad Then Break;
+    If Bad Then Begin If HaveVideo Then Break Else Continue; End;
+    If Mode=4 Then Begin
+     HaveVideo:=True;
+     If NVNVid=0 Then NVScanRate:=Rate;
+     Inc(NVNVid); If NVNDur<64 Then Begin NVDurs[NVNDur]:=Dur; Inc(NVNDur); End;
+     Continue;
+    End;
     If Mode=3 Then Continue;
     If Not HaveVideo Then Begin
      HaveVideo:=True; FirstDur:=Dur;
      SrcRate:=Rate;
      If Dur<1 Then Dur:=1;
-     NVBegin(Mode,Target,W,H,0,SrcRate,185*Dur);
-     NVGcd(NVFpsN,NVFpsD);
+     NVBegin(Mode,Target,W,H,0,SrcRate,185*Dur); NVInitDup:=True;
+     K:=0; For I:=0 To NVNDur-1 Do Begin If I>=20 Then Break; L2:=NVDurs[I]; J:=K; While L2<>0 Do Begin Q2:=J Mod L2; J:=L2; L2:=Q2; End; K:=J; End;
+     Acc:=0; L2:=0;
+     For I:=0 To NVNDur-1 Do Begin Acc:=Acc+185.0*NVDurs[I]/SrcRate; Inc(L2); If Acc>=5.0 Then Break; End;
+     If L2+1>NVNVid-1 Then L2:=NVNVid-1 Else L2:=L2+1;
+     If (L2>15) And (K>1) Then Begin
+      NVFpsN:=SrcRate; NVFpsD:=185*K; NVGcd(NVFpsN,NVFpsD);
+     End Else Begin
+      NVStdRate(185.0*Dur/SrcRate,I,J);
+      If I>0 Then Begin NVFpsN:=I; NVFpsD:=J; End;
+      NVGcd(NVFpsN,NVFpsD);
+     End;
     End;
     { decodeur }
     If PalPending Then Begin
@@ -14458,10 +14513,11 @@ Begin
     If NVDone Then Break;
    End;
    $14: Break;
-   Else Break;
+   Else If HaveVideo Then Break;
   End;
  End;
  FreeMem(Frame,NPix+64); FreeMem(Pk,NPix*2+4096); FreeMem(F,Size+64);
+ If Mode=4 Then Begin CloseRead; Exit; End;
  If Mode=3 Then Begin
   EAFlush;
   If EAWritten=0 Then Fail('bethsoftvid: aucun bloc audio.');
@@ -14473,7 +14529,7 @@ End;
 Procedure DecodeBFI(Const Source,Target: String; Mode: LongInt);
 Var
  F: PEABuffer; Size,W,H,ChunkHeader,NFrames,Fps,Rate,Pos,ChunkSize,AOff,VOff,ASize,VSize,I,J,K,Len,Offset,Code,Dst,FrameEnd,Frames: LongInt;
- Dstb,Pk: PEABuffer; Pal: Array[0..767] Of Byte; Found: Boolean; State: LongWord; Bad: Boolean; B,Byte2,C1,C2,GP: LongInt;
+ V32: Int64; ChunkNo: LongInt; Dstb,Pk: PEABuffer; Pal: Array[0..767] Of Byte; Found: Boolean; State: LongWord; Bad: Boolean; B,Byte2,C1,C2,GP: LongInt;
 Const LenTab: Array[0..3] Of Integer=(0,2,0,1);
 Function G: LongInt;Begin If GP<VSize Then G:=Pk^[GP] Else G:=0; Inc(GP); End;
 Begin
@@ -14488,24 +14544,26 @@ Begin
  If Rate<=0 Then Fail('bfi: frequence audio incorrecte.');
  If Fps<=0 Then Fail('bfi: cadence incorrecte.');
  For I:=0 To 255 Do Begin
-  NVPalR[I]:=((Pal[3*I] Shl 2) Or (Pal[3*I] Shr 4)) And 255;
-  NVPalG[I]:=((Pal[3*I+1] Shl 2) Or (Pal[3*I+1] Shr 4)) And 255;
-  NVPalB[I]:=((Pal[3*I+2] Shl 2) Or (Pal[3*I+2] Shr 4)) And 255;
+  V32:=Int64($FF000000)+(Int64((Pal[3*I] Shl 2) Or (Pal[3*I] Shr 4)) Shl 16)+(Int64((Pal[3*I+1] Shl 2) Or (Pal[3*I+1] Shr 4)) Shl 8)+Int64((Pal[3*I+2] Shl 2) Or (Pal[3*I+2] Shr 4));
+  NVPalR[I]:=(V32 Shr 16) And 255; NVPalG[I]:=(V32 Shr 8) And 255; NVPalB[I]:=V32 And 255;
  End;
- Pos:=ChunkHeader-3; Frames:=0;
+ Pos:=ChunkHeader-3; Frames:=0; ChunkNo:=0;
  GetMem(Dstb,W*H+64); FillChar(Dstb^,W*H+64,0);
  If Mode=3 Then Begin EAReset; OpenWrite(Target); ADPCMWaveHeader(Rate,1,0); End
- Else NVBegin(Mode,Target,W,H,0,Fps,1);
+ Else Begin NVBegin(Mode,Target,W,H,0,Fps,1); NVInitDup:=True; End;
  While (NFrames>0) And (Pos<Size) Do Begin
   State:=0; Found:=False;
   While Pos<Size Do Begin
    State:=((State Shl 8) Or F^[Pos]) And $FFFFFFFF; Inc(Pos);
-   If State=$53415649 Then Begin Found:=True; Break; End;
+   If State=$49564153 Then Begin Found:=True; Break; End;
   End;
   If Not Found Then Break;
   ChunkSize:=NVRL32(F,Size,Pos); AOff:=NVRL32(F,Size,Pos+8); VOff:=NVRL32(F,Size,Pos+16);
   Inc(Pos,20);
-  If (AOff<0) Or (VOff<AOff) Or (ChunkSize<VOff) Then Break;
+  If (AOff<0) Or (VOff<AOff) Or (ChunkSize<VOff) Then Begin
+   If ChunkNo=0 Then Begin Inc(ChunkNo); Continue; End Else Break;
+  End;
+  Inc(ChunkNo);
   ASize:=VOff-AOff; VSize:=ChunkSize-VOff;
   If Pos+ASize>Size Then ASize:=Size-Pos;
   If Mode=3 Then For I:=0 To ASize-1 Do EAPut((F^[Pos+I]-128)*256);
@@ -14738,7 +14796,7 @@ Begin
  End;
  Bpp:=NVBpp(Fmt); LineLen:=W*Bpp;
  NVBegin(Mode,Target,W,H,Fmt,RN,RD);
- If Fmt=3 Then NVHasAlpha:=False;
+ If Fmt=3 Then Begin NVHasAlpha:=False; NVYC:=True; End;
  GetMem(Pic,W*H*Bpp+64); FillChar(Pic^,W*H*Bpp+64,0);
  If Camtasia Then Begin
   DecSize:=(((W*Bits+7) Shr 3)+3*W+2)*H+2;
@@ -19005,6 +19063,39 @@ BEGIN
   If (InputFormat='xa') And (InputCodec<>'adpcm_ea_maxis_xa') Then
    Fail('Le conteneur xa exige le decodeur adpcm_ea_maxis_xa.');
  End;
+ NVKind:=0;
+ If InputFormat='bethsoftvid' Then NVKind:=1 Else If InputFormat='bfi' Then NVKind:=2 Else If InputFormat='c93' Then NVKind:=3
+ Else If InputFormat='bmp' Then NVKind:=4
+ Else If (InputFormat='avi') And Not IsHTTP(InputPath) Then Begin
+  AsvTag:=AVIVideoFourCC(Intermediate);
+  If AsvTag='CSCD' Then NVKind:=5 Else If (AsvTag='tscc') Or (AsvTag='TSCC') Then NVKind:=6;
+ End;
+ NVAudioOut:=(OutputFormat='wav') Or (OutputFormat='mp3') Or (OutputFormat='ac3') Or (OutputFormat='adx') Or (OutputFormat='aiff');
+ If (NVKind<>0) And Not (((NVKind=1) Or (NVKind=2)) And NVAudioOut) Then Begin
+  If NoVideo Or (VideoCodec='copy') Or (AudioCodec<>'') Or HasBitrate Or (RequestedRate<>0) Or
+   (RequestedChannels<>0) Or (ImageWidth<>0) Or IsHTTP(InputPath) Then
+   Fail('Decodage video local sans copie, sans -vn ni conversion audio requis.');
+  If (VideoCodec='bmp') Or (OutputFormat='bmp') Then NVSelMode:=2
+  Else If (VideoCodec='png') Or (OutputFormat='png') Then NVSelMode:=1 Else NVSelMode:=0;
+  If NVSelMode<>0 Then Begin
+   If (VideoFrames<>1) And (NVKind<>4) Then Fail('Extraction PNG/BMP avec -frames:v 1 requise.');
+   Temps[2]:=NewTemporary; DecodeNV(NVKind,Intermediate,Temps[2],NVSelMode);
+   Commit(Temps[2]); Temps[2]:=''; WriteLn('Image creee: ',OutputPath); Halt(0);
+  End;
+  If VideoFrames<>0 Then Fail('-frames:v reserve a la sortie PNG/BMP pour cette entree.');
+  If Not ((OutputFormat='yuv4mpegpipe') Or (VideoCodec='mpeg4') Or (VideoCodec='mpeg1video') Or
+   (VideoCodec='mpeg2video') Or (VideoCodec='ffv1') Or (VideoCodec='flv') Or FourMV) Then
+   Fail('Sortie Y4M, PNG, BMP ou encodeur video natif requis.');
+  Temps[6]:=NewTemporary; DecodeNV(NVKind,Intermediate,Temps[6],0); Intermediate:=Temps[6];
+  InputFormat:='yuv4mpegpipe'; DecodedVideo:=True; NoAudio:=True;
+ End;
+ If ((VideoCodec='bmp') Or (OutputFormat='bmp')) And (InputFormat='yuv4mpegpipe') Then Begin
+  If VideoFrames<>1 Then Fail('Sortie BMP: -frames:v 1 requis.');
+  If NoVideo Or (AudioCodec<>'') Or HasBitrate Or (RequestedRate<>0) Or (RequestedChannels<>0) Or (ImageWidth<>0) Or IsHTTP(InputPath) Or HasCrop Then
+   Fail('Sortie BMP: entree Y4M locale sans autre option requise.');
+  Temps[2]:=NewTemporary; EncodeBMPFromY4M(Intermediate,Temps[2]);
+  Commit(Temps[2]); Temps[2]:=''; WriteLn('Image creee: ',OutputPath); Halt(0);
+ End;
  If (InputFormat='avi') And Not IsHTTP(InputPath) And ((OutputFormat='yuv4mpegpipe') Or (VideoCodec='mpeg4') Or (VideoCodec='mpeg1video') Or
   (VideoCodec='mpeg2video') Or (VideoCodec='ffv1') Or (VideoCodec='flv') Or (VideoCodec='asv1') Or (VideoCodec='asv2') Or FourMV) Then Begin
   AsvTag:=AVIVideoFourCC(Intermediate);
@@ -19071,39 +19162,6 @@ BEGIN
    Fail('avs: sortie Y4M, PNG ou encodeur video natif requis.');
   Temps[6]:=NewTemporary; DecodeAVS(Intermediate,Temps[6],False); Intermediate:=Temps[6];
   InputFormat:='yuv4mpegpipe'; DecodedVideo:=True; NoAudio:=True;
- End;
- NVKind:=0;
- If InputFormat='bethsoftvid' Then NVKind:=1 Else If InputFormat='bfi' Then NVKind:=2 Else If InputFormat='c93' Then NVKind:=3
- Else If InputFormat='bmp' Then NVKind:=4
- Else If (InputFormat='avi') And Not IsHTTP(InputPath) Then Begin
-  AsvTag:=AVIVideoFourCC(Intermediate);
-  If AsvTag='CSCD' Then NVKind:=5 Else If (AsvTag='tscc') Or (AsvTag='TSCC') Then NVKind:=6;
- End;
- NVAudioOut:=(OutputFormat='wav') Or (OutputFormat='mp3') Or (OutputFormat='ac3') Or (OutputFormat='adx') Or (OutputFormat='aiff');
- If (NVKind<>0) And Not (((NVKind=1) Or (NVKind=2)) And NVAudioOut) Then Begin
-  If NoVideo Or (VideoCodec='copy') Or (AudioCodec<>'') Or HasBitrate Or (RequestedRate<>0) Or
-   (RequestedChannels<>0) Or (ImageWidth<>0) Or IsHTTP(InputPath) Then
-   Fail('Decodage video local sans copie, sans -vn ni conversion audio requis.');
-  If (VideoCodec='bmp') Or (OutputFormat='bmp') Then NVSelMode:=2
-  Else If (VideoCodec='png') Or (OutputFormat='png') Then NVSelMode:=1 Else NVSelMode:=0;
-  If NVSelMode<>0 Then Begin
-   If (VideoFrames<>1) And (NVKind<>4) Then Fail('Extraction PNG/BMP avec -frames:v 1 requise.');
-   Temps[2]:=NewTemporary; DecodeNV(NVKind,Intermediate,Temps[2],NVSelMode);
-   Commit(Temps[2]); Temps[2]:=''; WriteLn('Image creee: ',OutputPath); Halt(0);
-  End;
-  If VideoFrames<>0 Then Fail('-frames:v reserve a la sortie PNG/BMP pour cette entree.');
-  If Not ((OutputFormat='yuv4mpegpipe') Or (VideoCodec='mpeg4') Or (VideoCodec='mpeg1video') Or
-   (VideoCodec='mpeg2video') Or (VideoCodec='ffv1') Or (VideoCodec='flv') Or FourMV) Then
-   Fail('Sortie Y4M, PNG, BMP ou encodeur video natif requis.');
-  Temps[6]:=NewTemporary; DecodeNV(NVKind,Intermediate,Temps[6],0); Intermediate:=Temps[6];
-  InputFormat:='yuv4mpegpipe'; DecodedVideo:=True; NoAudio:=True;
- End;
- If ((VideoCodec='bmp') Or (OutputFormat='bmp')) And (InputFormat='yuv4mpegpipe') Then Begin
-  If VideoFrames<>1 Then Fail('Sortie BMP: -frames:v 1 requis.');
-  If NoVideo Or (AudioCodec<>'') Or HasBitrate Or (RequestedRate<>0) Or (RequestedChannels<>0) Or (ImageWidth<>0) Or IsHTTP(InputPath) Or HasCrop Then
-   Fail('Sortie BMP: entree Y4M locale sans autre option requise.');
-  Temps[2]:=NewTemporary; EncodeBMPFromY4M(Intermediate,Temps[2]);
-  Commit(Temps[2]); Temps[2]:=''; WriteLn('Image creee: ',OutputPath); Halt(0);
  End;
  If HasCrop Then Begin
   If NoVideo Or (VideoCodec='copy') Or (AudioCodec='copy') Then Fail('Crop: decodage/reencodage requis; incompatible avec copy ou -vn.');
