@@ -3597,6 +3597,7 @@ Function FormatName(S: String): String;Begin
  If (S='wmv') Or (S='wma') Then S:='asf';
  If S='dnx' Then S:='dnxhd';
  If S='rmvb' Then S:='rm';
+ If S='cavs' Then S:='cavsvideo';
  FormatName:=S;
 End;
 
@@ -3825,6 +3826,7 @@ Begin
  If N>=4 Then If (B[0]=0) And (B[1]=0) And (B[2]=1) And (B[3]=$B3) Then Begin
   Probe:='mpeg1video'; Exit;
  End;
+ If N>=8 Then If (B[0]=0) And (B[1]=0) And (B[2]=1) And (B[3]=$B0) And (B[4]=$20) Then Begin Probe:='cavsvideo'; Exit; End;
  If N>=5 Then If (B[0]=0) And (B[1]=0) And (B[2]=1) And
   ((B[3]=$B0) Or (B[3]=$B5) Or (B[3]<=$2F)) Then Begin
   Probe:='m4v'; Exit;
@@ -16589,9 +16591,11 @@ Begin
  NVFinish('dnxhd');
 End;
 
+Procedure DecodeCAVS(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeNV2(Kind: LongInt; Const Source,Target: String; Mode: LongInt);
 Begin
- If Kind=10 Then DecodeDNxHD(Source,Target,Mode,False)
+ If Kind=12 Then DecodeCAVS(Source,Target,Mode)
+ Else If Kind=10 Then DecodeDNxHD(Source,Target,Mode,False)
  Else If Kind=11 Then DecodeDNxHD(Source,Target,Mode,True)
  Else If Kind>=7 Then DecodeAVIVideo(Source,Target,Mode,Kind) Else DecodeNV(Kind,Source,Target,Mode);
 End;
@@ -20973,6 +20977,1520 @@ Begin
  FreeMem(F,Size+64); FreeMem(PktBuf,W*H+64);
 End;
 
+{ ---- AVS1-P2 (Chinese AVS, profil JiZhun): decodeur adapte de libavcodec/cavs.c, cavsdec.c, cavsdsp.c (LGPL-2.1-or-later) ---- }
+Const
+ CASIntraRl: Array[0..1238] Of ShortInt=(
+  1,1,1,-1,1,1,1,2,1,-1,2,1,1,3,1,-1,3,1,
+  1,4,1,-1,4,1,1,5,1,-1,5,1,1,6,1,-1,6,1,
+  1,7,1,-1,7,1,1,8,1,-1,8,1,1,9,1,-1,9,1,
+  1,10,1,-1,10,1,1,11,1,-1,11,1,2,1,2,-2,1,2,
+  1,12,1,-1,12,1,1,13,1,-1,13,1,1,14,1,-1,14,1,
+  1,15,1,-1,15,1,2,2,2,-2,2,2,1,16,1,-1,16,1,
+  1,17,1,-1,17,1,3,1,3,-3,1,3,1,18,1,-1,18,1,
+  1,19,1,-1,19,1,2,3,2,-2,3,2,1,20,1,-1,20,1,
+  1,21,1,-1,21,1,2,4,2,-2,4,2,1,22,1,-1,22,1,
+  2,5,2,-2,5,2,1,23,1,-1,23,1,0,0,0,1,1,0,
+  -1,1,0,1,2,0,-1,2,0,2,1,1,-2,1,1,1,3,0,
+  -1,3,0,0,0,0,1,4,0,-1,4,0,1,5,0,-1,5,0,
+  1,6,0,-1,6,0,3,1,2,-3,1,2,2,2,1,-2,2,1,
+  1,7,0,-1,7,0,1,8,0,-1,8,0,1,9,0,-1,9,0,
+  2,3,1,-2,3,1,4,1,2,-4,1,2,1,10,0,-1,10,0,
+  1,11,0,-1,11,0,2,4,1,-2,4,1,3,2,2,-3,2,2,
+  1,12,0,-1,12,0,2,5,1,-2,5,1,5,1,3,-5,1,3,
+  1,13,0,-1,13,0,2,6,1,-2,6,1,1,14,0,-1,14,0,
+  2,7,1,-2,7,1,2,8,1,-2,8,1,3,3,2,-3,3,2,
+  6,1,3,-6,1,3,1,15,0,-1,15,0,1,1,0,-1,1,0,
+  2,1,0,-2,1,0,1,2,0,-1,2,0,3,1,1,-3,1,1,
+  0,0,0,1,3,0,-1,3,0,2,2,0,-2,2,0,4,1,1,
+  -4,1,1,1,4,0,-1,4,0,5,1,2,-5,1,2,1,5,0,
+  -1,5,0,3,2,1,-3,2,1,2,3,0,-2,3,0,1,6,0,
+  -1,6,0,6,1,2,-6,1,2,2,4,0,-2,4,0,1,7,0,
+  -1,7,0,4,2,1,-4,2,1,7,1,2,-7,1,2,3,3,1,
+  -3,3,1,2,5,0,-2,5,0,1,8,0,-1,8,0,2,6,0,
+  -2,6,0,8,1,3,-8,1,3,1,9,0,-1,9,0,5,2,2,
+  -5,2,2,3,4,1,-3,4,1,2,7,0,-2,7,0,9,1,3,
+  -9,1,3,1,10,0,-1,10,0,1,1,0,-1,1,0,2,1,0,
+  -2,1,0,3,1,0,-3,1,0,1,2,0,-1,2,0,0,0,0,
+  4,1,0,-4,1,0,5,1,1,-5,1,1,2,2,0,-2,2,0,
+  1,3,0,-1,3,0,6,1,1,-6,1,1,3,2,0,-3,2,0,
+  7,1,1,-7,1,1,1,4,0,-1,4,0,8,1,2,-8,1,2,
+  2,3,0,-2,3,0,4,2,0,-4,2,0,1,5,0,-1,5,0,
+  9,1,2,-9,1,2,5,2,1,-5,2,1,2,4,0,-2,4,0,
+  10,1,2,-10,1,2,3,3,0,-3,3,0,1,6,0,-1,6,0,
+  11,1,3,-11,1,3,6,2,1,-6,2,1,1,7,0,-1,7,0,
+  2,5,0,-2,5,0,3,4,0,-3,4,0,12,1,3,-12,1,3,
+  4,3,0,-4,3,0,1,1,0,-1,1,0,2,1,0,-2,1,0,
+  3,1,0,-3,1,0,0,0,0,4,1,0,-4,1,0,5,1,0,
+  -5,1,0,6,1,0,-6,1,0,1,2,0,-1,2,0,7,1,0,
+  -7,1,0,8,1,1,-8,1,1,2,2,0,-2,2,0,9,1,1,
+  -9,1,1,10,1,1,-10,1,1,1,3,0,-1,3,0,3,2,0,
+  -3,2,0,11,1,2,-11,1,2,4,2,0,-4,2,0,12,1,2,
+  -12,1,2,13,1,2,-13,1,2,5,2,0,-5,2,0,1,4,0,
+  -1,4,0,2,3,0,-2,3,0,14,1,2,-14,1,2,6,2,0,
+  -6,2,0,15,1,2,-15,1,2,16,1,2,-16,1,2,3,3,0,
+  -3,3,0,1,5,0,-1,5,0,7,2,0,-7,2,0,17,1,2,
+  -17,1,2,0,0,0,1,1,0,-1,1,0,2,1,0,-2,1,0,
+  3,1,0,-3,1,0,4,1,0,-4,1,0,5,1,0,-5,1,0,
+  6,1,0,-6,1,0,7,1,0,-7,1,0,8,1,0,-8,1,0,
+  9,1,0,-9,1,0,10,1,0,-10,1,0,1,2,0,-1,2,0,
+  11,1,1,-11,1,1,12,1,1,-12,1,1,13,1,1,-13,1,1,
+  2,2,0,-2,2,0,14,1,1,-14,1,1,15,1,1,-15,1,1,
+  3,2,0,-3,2,0,16,1,1,-16,1,1,1,3,0,-1,3,0,
+  17,1,1,-17,1,1,4,2,0,-4,2,0,18,1,1,-18,1,1,
+  5,2,0,-5,2,0,19,1,1,-19,1,1,20,1,1,-20,1,1,
+  6,2,0,-6,2,0,21,1,1,-21,1,1,2,3,0,-2,3,0,
+  0,0,0,1,1,0,-1,1,0,2,1,0,-2,1,0,3,1,0,
+  -3,1,0,4,1,0,-4,1,0,5,1,0,-5,1,0,6,1,0,
+  -6,1,0,7,1,0,-7,1,0,8,1,0,-8,1,0,9,1,0,
+  -9,1,0,10,1,0,-10,1,0,11,1,0,-11,1,0,12,1,0,
+  -12,1,0,13,1,0,-13,1,0,14,1,0,-14,1,0,15,1,0,
+  -15,1,0,16,1,0,-16,1,0,1,2,0,-1,2,0,17,1,0,
+  -17,1,0,18,1,0,-18,1,0,19,1,0,-19,1,0,20,1,0,
+  -20,1,0,21,1,0,-21,1,0,2,2,0,-2,2,0,22,1,0,
+  -22,1,0,23,1,0,-23,1,0,24,1,0,-24,1,0,25,1,0,
+  -25,1,0,3,2,0,-3,2,0,26,1,0,-26,1,0);
+ CASIntraAdd: Array[0..188] Of ShortInt=(
+  0,4,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,
+  2,2,2,2,2,2,-1,-1,-1,0,7,4,4,3,3,3,3,3,
+  2,2,2,2,2,2,2,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+  0,10,6,4,4,3,3,3,2,2,2,-1,-1,-1,-1,-1,-1,-1,
+  -1,-1,-1,-1,-1,-1,-1,-1,-1,0,13,7,5,4,3,2,2,-1,
+  -1,-2,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,0,
+  0,18,8,4,2,2,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+  -1,-1,-1,-1,-1,-1,-1,-1,-1,0,22,7,3,-1,-1,-1,-1,-1,
+  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+  0,27,4,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+  -1,-1,-1,-1,-1,-1,-1,-1,-1);
+ CASIntraGol: Array[0..6] Of LongInt=(
+  2,2,2,2,2,2,2);
+ CASIntraInc: Array[0..6] Of LongInt=(
+  0,1,2,4,7,10,2147483647);
+ CASIntraMax: Array[0..6] Of LongInt=(
+  23,15,10,7,5,3,2);
+ CASInterRl: Array[0..1238] Of ShortInt=(
+  1,1,1,-1,1,1,1,2,1,-1,2,1,1,3,1,-1,3,1,
+  1,4,1,-1,4,1,1,5,1,-1,5,1,1,6,1,-1,6,1,
+  1,7,1,-1,7,1,1,8,1,-1,8,1,1,9,1,-1,9,1,
+  1,10,1,-1,10,1,1,11,1,-1,11,1,1,12,1,-1,12,1,
+  1,13,1,-1,13,1,2,1,2,-2,1,2,1,14,1,-1,14,1,
+  1,15,1,-1,15,1,1,16,1,-1,16,1,1,17,1,-1,17,1,
+  1,18,1,-1,18,1,1,19,1,-1,19,1,3,1,3,-3,1,3,
+  1,20,1,-1,20,1,1,21,1,-1,21,1,2,2,2,-2,2,2,
+  1,22,1,-1,22,1,1,23,1,-1,23,1,1,24,1,-1,24,1,
+  1,25,1,-1,25,1,1,26,1,-1,26,1,0,0,0,1,1,0,
+  -1,1,0,0,0,0,1,2,0,-1,2,0,1,3,0,-1,3,0,
+  1,4,0,-1,4,0,1,5,0,-1,5,0,1,6,0,-1,6,0,
+  2,1,1,-2,1,1,1,7,0,-1,7,0,1,8,0,-1,8,0,
+  1,9,0,-1,9,0,1,10,0,-1,10,0,2,2,1,-2,2,1,
+  1,11,0,-1,11,0,1,12,0,-1,12,0,3,1,2,-3,1,2,
+  1,13,0,-1,13,0,1,14,0,-1,14,0,2,3,1,-2,3,1,
+  1,15,0,-1,15,0,2,4,1,-2,4,1,1,16,0,-1,16,0,
+  2,5,1,-2,5,1,1,17,0,-1,17,0,4,1,3,-4,1,3,
+  2,6,1,-2,6,1,1,18,0,-1,18,0,1,19,0,-1,19,0,
+  2,7,1,-2,7,1,3,2,2,-3,2,2,1,1,0,-1,1,0,
+  0,0,0,1,2,0,-1,2,0,2,1,0,-2,1,0,1,3,0,
+  -1,3,0,1,4,0,-1,4,0,3,1,1,-3,1,1,2,2,0,
+  -2,2,0,1,5,0,-1,5,0,1,6,0,-1,6,0,1,7,0,
+  -1,7,0,2,3,0,-2,3,0,4,1,2,-4,1,2,1,8,0,
+  -1,8,0,3,2,1,-3,2,1,2,4,0,-2,4,0,1,9,0,
+  -1,9,0,1,10,0,-1,10,0,5,1,2,-5,1,2,2,5,0,
+  -2,5,0,1,11,0,-1,11,0,2,6,0,-2,6,0,1,12,0,
+  -1,12,0,3,3,1,-3,3,1,6,1,2,-6,1,2,4,2,2,
+  -4,2,2,1,13,0,-1,13,0,2,7,0,-2,7,0,3,4,1,
+  -3,4,1,1,14,0,-1,14,0,1,1,0,-1,1,0,0,0,0,
+  2,1,0,-2,1,0,1,2,0,-1,2,0,3,1,0,-3,1,0,
+  1,3,0,-1,3,0,2,2,0,-2,2,0,4,1,1,-4,1,1,
+  1,4,0,-1,4,0,5,1,1,-5,1,1,1,5,0,-1,5,0,
+  3,2,0,-3,2,0,2,3,0,-2,3,0,1,6,0,-1,6,0,
+  6,1,1,-6,1,1,2,4,0,-2,4,0,1,7,0,-1,7,0,
+  4,2,1,-4,2,1,7,1,2,-7,1,2,3,3,0,-3,3,0,
+  1,8,0,-1,8,0,2,5,0,-2,5,0,8,1,2,-8,1,2,
+  1,9,0,-1,9,0,3,4,0,-3,4,0,2,6,0,-2,6,0,
+  5,2,1,-5,2,1,1,10,0,-1,10,0,9,1,2,-9,1,2,
+  4,3,1,-4,3,1,1,1,0,-1,1,0,0,0,0,2,1,0,
+  -2,1,0,3,1,0,-3,1,0,1,2,0,-1,2,0,4,1,0,
+  -4,1,0,5,1,0,-5,1,0,2,2,0,-2,2,0,1,3,0,
+  -1,3,0,6,1,0,-6,1,0,3,2,0,-3,2,0,7,1,1,
+  -7,1,1,1,4,0,-1,4,0,8,1,1,-8,1,1,2,3,0,
+  -2,3,0,4,2,0,-4,2,0,1,5,0,-1,5,0,9,1,1,
+  -9,1,1,5,2,0,-5,2,0,2,4,0,-2,4,0,1,6,0,
+  -1,6,0,10,1,2,-10,1,2,3,3,0,-3,3,0,11,1,2,
+  -11,1,2,1,7,0,-1,7,0,6,2,0,-6,2,0,3,4,0,
+  -3,4,0,2,5,0,-2,5,0,12,1,2,-12,1,2,4,3,0,
+  -4,3,0,0,0,0,1,1,0,-1,1,0,2,1,0,-2,1,0,
+  3,1,0,-3,1,0,4,1,0,-4,1,0,5,1,0,-5,1,0,
+  1,2,0,-1,2,0,6,1,0,-6,1,0,7,1,0,-7,1,0,
+  8,1,0,-8,1,0,2,2,0,-2,2,0,9,1,0,-9,1,0,
+  1,3,0,-1,3,0,10,1,1,-10,1,1,3,2,0,-3,2,0,
+  11,1,1,-11,1,1,4,2,0,-4,2,0,12,1,1,-12,1,1,
+  1,4,0,-1,4,0,2,3,0,-2,3,0,13,1,1,-13,1,1,
+  5,2,0,-5,2,0,14,1,1,-14,1,1,6,2,0,-6,2,0,
+  1,5,0,-1,5,0,15,1,1,-15,1,1,3,3,0,-3,3,0,
+  16,1,1,-16,1,1,2,4,0,-2,4,0,7,2,0,-7,2,0,
+  0,0,0,1,1,0,-1,1,0,2,1,0,-2,1,0,3,1,0,
+  -3,1,0,4,1,0,-4,1,0,5,1,0,-5,1,0,6,1,0,
+  -6,1,0,7,1,0,-7,1,0,1,2,0,-1,2,0,8,1,0,
+  -8,1,0,9,1,0,-9,1,0,10,1,0,-10,1,0,11,1,0,
+  -11,1,0,12,1,0,-12,1,0,2,2,0,-2,2,0,13,1,0,
+  -13,1,0,1,3,0,-1,3,0,14,1,0,-14,1,0,15,1,0,
+  -15,1,0,3,2,0,-3,2,0,16,1,0,-16,1,0,17,1,0,
+  -17,1,0,18,1,0,-18,1,0,4,2,0,-4,2,0,19,1,0,
+  -19,1,0,20,1,0,-20,1,0,2,3,0,-2,3,0,1,4,0,
+  -1,4,0,5,2,0,-5,2,0,21,1,0,-21,1,0);
+ CASInterAdd: Array[0..188] Of ShortInt=(
+  0,4,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,
+  2,2,2,2,2,2,2,2,2,0,5,4,3,3,3,3,3,2,
+  2,2,2,2,2,2,2,2,2,2,2,-1,-1,-1,-1,-1,-1,-1,
+  0,7,5,4,4,3,3,3,2,2,2,2,2,2,2,-1,-1,-1,
+  -1,-1,-1,-1,-1,-1,-1,-1,-1,0,10,6,5,4,3,3,2,2,
+  2,2,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+  0,13,7,5,4,3,2,2,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+  -1,-1,-1,-1,-1,-1,-1,-1,-1,0,17,8,4,3,2,-1,-1,-1,
+  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+  0,22,6,3,2,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+  -1,-1,-1,-1,-1,-1,-1,-1,-1);
+ CASInterGol: Array[0..6] Of LongInt=(
+  3,2,2,2,2,2,2);
+ CASInterInc: Array[0..6] Of LongInt=(
+  0,1,2,3,6,9,2147483647);
+ CASInterMax: Array[0..6] Of LongInt=(
+  26,19,14,10,7,5,4);
+ CASChromaRl: Array[0..884] Of ShortInt=(
+  1,1,1,-1,1,1,1,2,1,-1,2,1,1,3,1,-1,3,1,
+  1,4,1,-1,4,1,1,5,1,-1,5,1,1,6,1,-1,6,1,
+  1,7,1,-1,7,1,2,1,2,-2,1,2,1,8,1,-1,8,1,
+  1,9,1,-1,9,1,1,10,1,-1,10,1,1,11,1,-1,11,1,
+  1,12,1,-1,12,1,1,13,1,-1,13,1,1,14,1,-1,14,1,
+  1,15,1,-1,15,1,3,1,3,-3,1,3,1,16,1,-1,16,1,
+  1,17,1,-1,17,1,1,18,1,-1,18,1,1,19,1,-1,19,1,
+  1,20,1,-1,20,1,1,21,1,-1,21,1,1,22,1,-1,22,1,
+  2,2,2,-2,2,2,1,23,1,-1,23,1,1,24,1,-1,24,1,
+  1,25,1,-1,25,1,4,1,3,-4,1,3,0,0,0,0,0,0,
+  1,1,0,-1,1,0,1,2,0,-1,2,0,2,1,1,-2,1,1,
+  1,3,0,-1,3,0,1,4,0,-1,4,0,1,5,0,-1,5,0,
+  1,6,0,-1,6,0,3,1,2,-3,1,2,1,7,0,-1,7,0,
+  1,8,0,-1,8,0,2,2,1,-2,2,1,1,9,0,-1,9,0,
+  1,10,0,-1,10,0,1,11,0,-1,11,0,4,1,2,-4,1,2,
+  1,12,0,-1,12,0,1,13,0,-1,13,0,1,14,0,-1,14,0,
+  2,3,1,-2,3,1,1,15,0,-1,15,0,2,4,1,-2,4,1,
+  5,1,3,-5,1,3,3,2,2,-3,2,2,1,16,0,-1,16,0,
+  1,17,0,-1,17,0,1,18,0,-1,18,0,2,5,1,-2,5,1,
+  1,19,0,-1,19,0,1,20,0,-1,20,0,1,1,0,-1,1,0,
+  0,0,0,2,1,0,-2,1,0,1,2,0,-1,2,0,3,1,1,
+  -3,1,1,1,3,0,-1,3,0,4,1,1,-4,1,1,2,2,0,
+  -2,2,0,1,4,0,-1,4,0,5,1,2,-5,1,2,1,5,0,
+  -1,5,0,3,2,1,-3,2,1,2,3,0,-2,3,0,1,6,0,
+  -1,6,0,6,1,2,-6,1,2,1,7,0,-1,7,0,2,4,0,
+  -2,4,0,7,1,2,-7,1,2,1,8,0,-1,8,0,4,2,1,
+  -4,2,1,1,9,0,-1,9,0,3,3,1,-3,3,1,2,5,0,
+  -2,5,0,2,6,0,-2,6,0,8,1,2,-8,1,2,1,10,0,
+  -1,10,0,1,11,0,-1,11,0,9,1,2,-9,1,2,5,2,2,
+  -5,2,2,3,4,1,-3,4,1,0,0,0,1,1,0,-1,1,0,
+  2,1,0,-2,1,0,3,1,0,-3,1,0,4,1,0,-4,1,0,
+  1,2,0,-1,2,0,5,1,1,-5,1,1,2,2,0,-2,2,0,
+  6,1,1,-6,1,1,1,3,0,-1,3,0,7,1,1,-7,1,1,
+  3,2,0,-3,2,0,8,1,1,-8,1,1,1,4,0,-1,4,0,
+  2,3,0,-2,3,0,9,1,1,-9,1,1,4,2,0,-4,2,0,
+  1,5,0,-1,5,0,10,1,1,-10,1,1,3,3,0,-3,3,0,
+  5,2,1,-5,2,1,2,4,0,-2,4,0,11,1,1,-11,1,1,
+  1,6,0,-1,6,0,12,1,1,-12,1,1,1,7,0,-1,7,0,
+  6,2,1,-6,2,1,13,1,1,-13,1,1,2,5,0,-2,5,0,
+  1,8,0,-1,8,0,0,0,0,1,1,0,-1,1,0,2,1,0,
+  -2,1,0,3,1,0,-3,1,0,4,1,0,-4,1,0,5,1,0,
+  -5,1,0,6,1,0,-6,1,0,7,1,0,-7,1,0,8,1,0,
+  -8,1,0,1,2,0,-1,2,0,9,1,0,-9,1,0,10,1,0,
+  -10,1,0,11,1,0,-11,1,0,2,2,0,-2,2,0,12,1,0,
+  -12,1,0,13,1,0,-13,1,0,3,2,0,-3,2,0,14,1,0,
+  -14,1,0,1,3,0,-1,3,0,15,1,0,-15,1,0,4,2,0,
+  -4,2,0,16,1,0,-16,1,0,17,1,0,-17,1,0,5,2,0,
+  -5,2,0,1,4,0,-1,4,0,2,3,0,-2,3,0,18,1,0,
+  -18,1,0,6,2,0,-6,2,0,19,1,0,-19,1,0,1,5,0,
+  -1,5,0);
+ CASChromaAdd: Array[0..134] Of ShortInt=(
+  0,5,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,
+  2,2,2,2,2,2,2,2,-1,0,6,4,3,3,3,2,2,2,
+  2,2,2,2,2,2,2,2,2,2,2,2,-1,-1,-1,-1,-1,-1,
+  0,10,6,4,4,3,3,2,2,2,2,2,-1,-1,-1,-1,-1,-1,
+  -1,-1,-1,-1,-1,-1,-1,-1,-1,0,14,7,4,3,3,2,2,2,
+  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+  0,20,7,3,2,2,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+  -1,-1,-1,-1,-1,-1,-1,-1,-1);
+ CASChromaGol: Array[0..4] Of LongInt=(
+  2,0,1,1,0);
+ CASChromaInc: Array[0..4] Of LongInt=(
+  0,1,2,4,2147483647);
+ CASChromaMax: Array[0..4] Of LongInt=(
+  25,20,11,8,5);
+ CASCbp: Array[0..127] Of Byte=(
+  63,0,15,15,31,63,47,31,0,16,14,32,13,47,11,13,
+  7,14,5,11,10,12,8,5,12,10,61,7,4,48,55,3,
+  1,2,2,8,59,4,3,1,62,61,9,55,6,59,29,62,
+  45,29,51,27,23,23,39,19,27,30,46,28,53,9,30,6,
+  43,60,37,21,60,44,16,26,21,51,28,35,19,18,35,20,
+  42,24,26,53,44,17,32,37,58,39,24,45,20,58,17,43,
+  18,42,48,46,22,36,33,33,25,34,49,40,40,52,36,49,
+  34,50,50,56,52,25,54,22,41,54,56,57,38,41,57,38);
+ CASDqShift: Array[0..63] Of Byte=(
+  14,14,14,14,14,14,14,14,13,13,13,13,13,13,13,13,
+  13,12,12,12,12,12,12,12,11,11,11,11,11,11,11,11,
+  11,10,10,10,10,10,10,10,10,9,9,9,9,9,9,9,
+  9,8,8,8,8,8,8,8,7,7,7,7,7,7,7,7);
+ CASDqMul: Array[0..63] Of Word=(
+  32768,36061,38968,42495,46341,50535,55437,60424,32932,35734,38968,42495,46177,50535,55109,59933,
+  65535,35734,38968,42577,46341,50617,55027,60097,32809,35734,38968,42454,46382,50576,55109,60056,
+  65535,35734,38968,42495,46320,50515,55109,60076,65535,35744,38968,42495,46341,50535,55099,60087,
+  65535,35734,38973,42500,46341,50535,55109,60097,32771,35734,38965,42497,46341,50535,55109,60099);
+ CASAlpha: Array[0..63] Of Byte=(
+  0,0,0,0,0,0,1,1,1,1,1,2,2,2,3,3,
+  4,4,5,5,6,7,8,9,10,11,12,13,15,16,18,20,
+  22,24,26,28,30,33,33,35,35,36,37,37,39,39,42,44,
+  46,48,50,52,53,54,55,56,57,58,59,60,61,62,63,64);
+ CASBeta: Array[0..63] Of Byte=(
+  0,0,0,0,0,0,1,1,1,1,1,1,1,2,2,2,
+  2,2,3,3,3,3,4,4,4,4,5,5,5,5,6,6,
+  6,7,7,7,8,8,8,9,9,10,10,11,11,12,13,14,
+  15,16,17,18,19,20,21,22,23,23,24,24,25,25,26,27);
+ CASTc: Array[0..63] Of Byte=(
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  1,1,1,1,1,1,1,1,1,1,1,1,1,1,2,2,
+  2,2,2,2,2,2,3,3,3,3,3,3,3,4,4,4,
+  5,5,5,6,6,6,7,7,7,7,8,8,8,9,9,9);
+ CASChromaQp: Array[0..63] Of Byte=(
+  0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,
+  16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,
+  32,33,34,35,36,37,38,39,40,41,42,42,43,43,44,44,
+  45,45,46,46,47,47,48,48,48,49,49,49,50,50,50,51);
+
+
+Type
+ TCASMv=Record X,Y,Dist,Ref: SmallInt; End;
+ TCASMvArr=Array[0..65535] Of TCASMv; PCASMvArr=^TCASMvArr;
+ TCASBlk=Array[0..63] Of SmallInt;
+Const
+ CASAvailA=1; CASAvailB=2; CASAvailC=4; CASAvailD=8; CASNotAvail=-1; CASRefIntra=-2; CASRefDir=-3;
+ CASFwd0=$01; CASFwd1=$02; CASBwd0=$04; CASBwd1=$08; CASSym0=$10; CASSym1=$20; CASSplitH=$40; CASSplitV=$80;
+ CASBwdOffs=12;
+ { types de macrobloc }
+ CASI8x8=0; CASPSkip=1; CASP16x16=2; CASP16x8=3; CASP8x16=4; CASP8x8=5; CASBSkip=6; CASBDirect=7; CASBFwd16=8; CASBBwd16=9; CASBSym16=10; CASB8x8=29;
+ { emplacements MV }
+ CAMvFwdD3=0; CAMvFwdB2=1; CAMvFwdB3=2; CAMvFwdC2=3; CAMvFwdA1=4; CAMvFwdX0=5; CAMvFwdX1=6; CAMvFwdA3=8; CAMvFwdX2=9; CAMvFwdX3=10;
+ CAMvBwdD3=12; CAMvBwdB2=13; CAMvBwdB3=14; CAMvBwdC2=15; CAMvBwdA1=16; CAMvBwdX0=17; CAMvBwdX1=18; CAMvBwdA3=20; CAMvBwdX2=21; CAMvBwdX3=22;
+ CAPredMedian=0; CAPredLeft=1; CAPredTop=2; CAPredTopRight=3; CAPredPSkip=4; CAPredBSkip=5;
+ CABlk16x16=0; CABlk16x8=1; CABlk8x16=2; CABlk8x8=3;
+ CASPartFlags: Array[0..29] Of Byte=(0,0,0,CASSplitH,CASSplitV,CASSplitH Or CASSplitV,CASSplitH Or CASSplitV,CASSplitH Or CASSplitV,0,0,0,
+  CASFwd0 Or CASFwd1 Or CASSplitH,CASFwd0 Or CASFwd1 Or CASSplitV,CASBwd0 Or CASBwd1 Or CASSplitH,CASBwd0 Or CASBwd1 Or CASSplitV,
+  CASFwd0 Or CASBwd1 Or CASSplitH,CASFwd0 Or CASBwd1 Or CASSplitV,CASBwd0 Or CASFwd1 Or CASSplitH,CASBwd0 Or CASFwd1 Or CASSplitV,
+  CASFwd0 Or CASFwd1 Or CASSym1 Or CASSplitH,CASFwd0 Or CASFwd1 Or CASSym1 Or CASSplitV,CASBwd0 Or CASFwd1 Or CASSym1 Or CASSplitH,CASBwd0 Or CASFwd1 Or CASSym1 Or CASSplitV,
+  CASFwd0 Or CASFwd1 Or CASSym0 Or CASSplitH,CASFwd0 Or CASFwd1 Or CASSym0 Or CASSplitV,CASFwd0 Or CASBwd1 Or CASSym0 Or CASSplitH,CASFwd0 Or CASBwd1 Or CASSym0 Or CASSplitV,
+  CASFwd0 Or CASFwd1 Or CASSym0 Or CASSym1 Or CASSplitH,CASFwd0 Or CASFwd1 Or CASSym0 Or CASSym1 Or CASSplitV,CASSplitH Or CASSplitV);
+ CASLeftModL: Array[0..7] Of ShortInt=(0,-1,6,-1,-1,7,6,7);
+ CASTopModL: Array[0..7] Of ShortInt=(-1,1,5,-1,-1,5,7,7);
+ CASLeftModC: Array[0..6] Of ShortInt=(5,-1,2,-1,6,5,6);
+ CASTopModC: Array[0..6] Of ShortInt=(4,1,-1,-1,4,6,6);
+ CASScan3: Array[0..3] Of Byte=(4,5,7,8);
+ CASMvScan: Array[0..3] Of Byte=(CAMvFwdX0,CAMvFwdX1,CAMvFwdX2,CAMvFwdX3);
+ CASZig: Array[0..63] Of Byte=(0,1,8,16,9,2,3,10,17,24,32,25,18,11,4,5,12,19,26,33,40,48,41,34,27,20,13,6,7,14,21,28,35,42,49,56,57,50,43,36,29,22,15,23,30,37,44,51,58,59,52,45,38,31,39,46,53,60,61,54,47,55,62,63);
+ CASRates: Array[0..15,0..1] Of LongInt=((0,0),(24000,1001),(24,1),(25,1),(30000,1001),(30,1),(50,1),(60000,1001),(60,1),(15,1),(5,1),(10,1),(12,1),(15,1),(0,0),(0,0));
+Var
+ CASData: PEABuffer; CASDataSize: LongInt;
+ CASGB: PEABuffer; CASGBit,CASGSize: LongInt;
+ CASW,CASH,CASMbW,CASMbH,CASLowDelay,CASProfile,CASLevel,CASAspect,CASRateCode,CASStreamRev,CASProgressive,CASPicStruct,CASSkipMode,CASLoopOff,CASAlphaOff,CASBetaOff,CASRefFlag: LongInt;
+ CASMbx,CASMby,CASMbIdx,CASFlags,CASStc,CASLeftQp,CASQp,CASQpFixed,CASPicQpFixed,CASCbpV,CASPictType,CASGotKey: LongInt;
+ CASFY,CASFU,CASFV: Array[0..2] Of PEABuffer; CASPoc: Array[0..2] Of LongInt; CASHas: Array[0..2] Of Boolean;
+ CASCurF,CASD0,CASD1: LongInt;
+ CASLs,CASCs,CASFrameY,CASFrameC: LongInt;
+ CASCy,CASCu,CASCv: LongInt;
+ CASDist: Array[0..1] Of LongInt; CASSymFactor: LongInt; CASDirectDen,CASScaleDen: Array[0..1] Of LongInt;
+ CASMv: Array[0..23] Of TCASMv; CASTopMv: Array[0..1] Of PCASMvArr; CASColMv: PCASMvArr; CASColType: PEABuffer;
+ CASPredY: Array[0..8] Of LongInt; CASTopPredY: PALLong; CASTopQp: PEABuffer;
+ CASTopBY,CASTopBU,CASTopBV: PEABuffer;
+ CASLeftBY: Array[0..25] Of Byte; CASLeftBU,CASLeftBV: Array[0..9] Of Byte; CASInternBY: Array[0..25] Of Byte;
+ CASTopLeftY,CASTopLeftU,CASTopLeftV: Byte;
+ CASLumaScan: Array[0..3] Of LongInt;
+ CASBlock: TCASBlk;
+ CASInited: Boolean;
+ CASUnMv,CASIntraMv,CASDirMv: TCASMv;
+ CASFail: Boolean;
+
+Function CASBits(N: LongInt): LongInt;
+Var V: Int64; I,B: LongInt;
+Begin
+ V:=0;
+ For I:=1 To N Do Begin
+  B:=CASGBit Shr 3;
+  If B<CASGSize Then V:=V*2+((CASGB^[B] Shr (7-(CASGBit And 7))) And 1) Else V:=V*2;
+  Inc(CASGBit);
+ End;
+ CASBits:=V;
+End;
+Function CASShow(N: LongInt): Int64;
+Var V: Int64; I,B,P: LongInt;
+Begin
+ V:=0;
+ For I:=0 To N-1 Do Begin
+  P:=CASGBit+I; B:=P Shr 3;
+  If B<CASGSize Then V:=V*2+((CASGB^[B] Shr (7-(P And 7))) And 1) Else V:=V*2;
+ End;
+ CASShow:=V;
+End;
+Function CASLeft: LongInt;Begin CASLeft:=CASGSize*8-CASGBit; End;
+Function CASUe: Int64;
+Var Z: LongInt; V: Int64;
+Begin
+ Z:=0;
+ While (Z<32) And (CASBits(1)=0) Do Inc(Z);
+ If Z>=32 Then Begin CASUe:=$FFFFFFFF; Exit; End;
+ V:=(Int64(1) Shl Z)-1;
+ If Z>0 Then V:=V+CASBits(Z);
+ CASUe:=V;
+End;
+Function CASSe: LongInt;
+Var K: Int64;
+Begin
+ K:=CASUe;
+ If (K And 1)<>0 Then CASSe:=(K+1) Shr 1 Else CASSe:=-(K Shr 1);
+End;
+{ code exp-golomb d'ordre K, -1 si trop grand }
+Function CASUeCode(Order: LongInt): LongInt;
+Var R: Int64;
+Begin
+ R:=CASUe;
+ If R>=(Int64(1) Shl (31-Order)) Then Begin CASUeCode:=-1; Exit; End;
+ If Order<>0 Then CASUeCode:=(R Shl Order)+CASBits(Order) Else CASUeCode:=R;
+End;
+
+Function CASClip8(X: LongInt): LongInt;Begin If X<0 Then X:=0; If X>255 Then X:=255; CASClip8:=X; End;
+Function CASClip(X,Lo,Hi: LongInt): LongInt;Begin If X<Lo Then X:=Lo; If X>Hi Then X:=Hi; CASClip:=X; End;
+Function CASS16(X: LongInt): LongInt;
+Begin X:=X And $FFFF; If X>=32768 Then X:=X-65536; CASS16:=X; End;
+Function CASMid(A,B,C: LongInt): LongInt;
+Begin
+ If A>B Then Begin If B>C Then CASMid:=B Else If A>C Then CASMid:=C Else CASMid:=A; End
+ Else Begin If A>C Then CASMid:=A Else If B>C Then CASMid:=C Else CASMid:=B; End;
+End;
+
+{ ---- predictions intra (cavs.c) ; Top/Left: index 0 = coin ---- }
+Procedure CASPredVert(D: PEABuffer; Dof: LongInt; T,L: PEABuffer; St: LongInt);
+Var X,Y: LongInt;
+Begin For Y:=0 To 7 Do For X:=0 To 7 Do D^[Dof+Y*St+X]:=T^[1+X]; End;
+Procedure CASPredHoriz(D: PEABuffer; Dof: LongInt; T,L: PEABuffer; St: LongInt);
+Var X,Y: LongInt;
+Begin For Y:=0 To 7 Do For X:=0 To 7 Do D^[Dof+Y*St+X]:=L^[1+Y]; End;
+Procedure CASPredDc128(D: PEABuffer; Dof: LongInt; T,L: PEABuffer; St: LongInt);
+Var X,Y: LongInt;
+Begin For Y:=0 To 7 Do For X:=0 To 7 Do D^[Dof+Y*St+X]:=128; End;
+Procedure CASPredPlane(D: PEABuffer; Dof: LongInt; T,L: PEABuffer; St: LongInt);
+Var X,Y,Ia,Ih,Iv: LongInt;
+Begin
+ Ih:=0; Iv:=0;
+ For X:=0 To 3 Do Begin
+  Inc(Ih,(X+1)*(T^[5+X]-T^[3-X]));
+  Inc(Iv,(X+1)*(L^[5+X]-L^[3-X]));
+ End;
+ Ia:=(T^[8]+L^[8]) Shl 4;
+ Ih:=AVSar(17*Ih+16,5); Iv:=AVSar(17*Iv+16,5);
+ For Y:=0 To 7 Do For X:=0 To 7 Do
+  D^[Dof+Y*St+X]:=CASClip8(AVSar(Ia+(X-3)*Ih+(Y-3)*Iv+16,5));
+End;
+Function CASLp(A: PEABuffer; I: LongInt): LongInt;
+Begin CASLp:=(A^[I-1]+2*A^[I]+A^[I+1]+2) Shr 2; End;
+Procedure CASPredLp(D: PEABuffer; Dof: LongInt; T,L: PEABuffer; St: LongInt);
+Var X,Y: LongInt;
+Begin For Y:=0 To 7 Do For X:=0 To 7 Do D^[Dof+Y*St+X]:=(CASLp(T,X+1)+CASLp(L,Y+1)) Shr 1; End;
+Procedure CASPredDownLeft(D: PEABuffer; Dof: LongInt; T,L: PEABuffer; St: LongInt);
+Var X,Y: LongInt;
+Begin For Y:=0 To 7 Do For X:=0 To 7 Do D^[Dof+Y*St+X]:=(CASLp(T,X+Y+2)+CASLp(L,X+Y+2)) Shr 1; End;
+Procedure CASPredDownRight(D: PEABuffer; Dof: LongInt; T,L: PEABuffer; St: LongInt);
+Var X,Y: LongInt;
+Begin
+ For Y:=0 To 7 Do For X:=0 To 7 Do
+  If X=Y Then D^[Dof+Y*St+X]:=(L^[1]+2*T^[0]+T^[1]+2) Shr 2
+  Else If X>Y Then D^[Dof+Y*St+X]:=CASLp(T,X-Y)
+  Else D^[Dof+Y*St+X]:=CASLp(L,Y-X);
+End;
+Procedure CASPredLpLeft(D: PEABuffer; Dof: LongInt; T,L: PEABuffer; St: LongInt);
+Var X,Y: LongInt;
+Begin For Y:=0 To 7 Do For X:=0 To 7 Do D^[Dof+Y*St+X]:=CASLp(L,Y+1); End;
+Procedure CASPredLpTop(D: PEABuffer; Dof: LongInt; T,L: PEABuffer; St: LongInt);
+Var X,Y: LongInt;
+Begin For Y:=0 To 7 Do For X:=0 To 7 Do D^[Dof+Y*St+X]:=CASLp(T,X+1); End;
+Procedure CASIntraL(Mode: LongInt; D: PEABuffer; Dof: LongInt; T,L: PEABuffer; St: LongInt);
+Begin
+ Case Mode Of
+  0: CASPredVert(D,Dof,T,L,St); 1: CASPredHoriz(D,Dof,T,L,St); 2: CASPredLp(D,Dof,T,L,St); 3: CASPredDownLeft(D,Dof,T,L,St);
+  4: CASPredDownRight(D,Dof,T,L,St); 5: CASPredLpLeft(D,Dof,T,L,St); 6: CASPredLpTop(D,Dof,T,L,St); Else CASPredDc128(D,Dof,T,L,St);
+ End;
+End;
+Procedure CASIntraC(Mode: LongInt; D: PEABuffer; Dof: LongInt; T,L: PEABuffer; St: LongInt);
+Begin
+ Case Mode Of
+  0: CASPredLp(D,Dof,T,L,St); 1: CASPredHoriz(D,Dof,T,L,St); 2: CASPredVert(D,Dof,T,L,St); 3: CASPredPlane(D,Dof,T,L,St);
+  4: CASPredLpLeft(D,Dof,T,L,St); 5: CASPredLpTop(D,Dof,T,L,St); Else CASPredDc128(D,Dof,T,L,St);
+ End;
+End;
+
+{ ---- IDCT 8x8 (cavsdsp.c) ---- }
+Procedure CASIdct8Add(D: PEABuffer; Dof: LongInt; Var Blk: TCASBlk; St: LongInt);
+Var
+ I: LongInt; A0,A1,A2,A3,A4,A5,A6,A7,B0,B1,B2,B3,B4,B5,B6,B7: LongInt; S: Array[0..7,0..7] Of LongInt;
+Begin
+ Blk[0]:=CASS16(Blk[0]+8);
+ For I:=0 To 7 Do Begin
+  A0:=3*Blk[I*8+1]-2*Blk[I*8+7]; A1:=3*Blk[I*8+3]+2*Blk[I*8+5]; A2:=2*Blk[I*8+3]-3*Blk[I*8+5]; A3:=2*Blk[I*8+1]+3*Blk[I*8+7];
+  B4:=2*(A0+A1+A3)+A1; B5:=2*(A0-A1+A2)+A0; B6:=2*(A3-A2-A1)+A3; B7:=2*(A0-A2-A3)-A2;
+  A7:=4*Blk[I*8+2]-10*Blk[I*8+6]; A6:=4*Blk[I*8+6]+10*Blk[I*8+2];
+  A5:=8*(Blk[I*8+0]-Blk[I*8+4])+4; A4:=8*(Blk[I*8+0]+Blk[I*8+4])+4;
+  B0:=A4+A6; B1:=A5+A7; B2:=A5-A7; B3:=A4-A6;
+  Blk[I*8+0]:=CASS16(AVSar(B0+B4,3)); Blk[I*8+1]:=CASS16(AVSar(B1+B5,3)); Blk[I*8+2]:=CASS16(AVSar(B2+B6,3)); Blk[I*8+3]:=CASS16(AVSar(B3+B7,3));
+  Blk[I*8+4]:=CASS16(AVSar(B3-B7,3)); Blk[I*8+5]:=CASS16(AVSar(B2-B6,3)); Blk[I*8+6]:=CASS16(AVSar(B1-B5,3)); Blk[I*8+7]:=CASS16(AVSar(B0-B4,3));
+ End;
+ For I:=0 To 7 Do Begin
+  A0:=3*Blk[8+I]-2*Blk[56+I]; A1:=3*Blk[24+I]+2*Blk[40+I]; A2:=2*Blk[24+I]-3*Blk[40+I]; A3:=2*Blk[8+I]+3*Blk[56+I];
+  B4:=2*(A0+A1+A3)+A1; B5:=2*(A0-A1+A2)+A0; B6:=2*(A3-A2-A1)+A3; B7:=2*(A0-A2-A3)-A2;
+  A7:=4*Blk[16+I]-10*Blk[48+I]; A6:=4*Blk[48+I]+10*Blk[16+I];
+  A5:=8*(Blk[I]-Blk[32+I]); A4:=8*(Blk[I]+Blk[32+I]);
+  B0:=A4+A6; B1:=A5+A7; B2:=A5-A7; B3:=A4-A6;
+  D^[Dof+I]:=CASClip8(D^[Dof+I]+AVSar(B0+B4,7));
+  D^[Dof+St+I]:=CASClip8(D^[Dof+St+I]+AVSar(B1+B5,7));
+  D^[Dof+2*St+I]:=CASClip8(D^[Dof+2*St+I]+AVSar(B2+B6,7));
+  D^[Dof+3*St+I]:=CASClip8(D^[Dof+3*St+I]+AVSar(B3+B7,7));
+  D^[Dof+4*St+I]:=CASClip8(D^[Dof+4*St+I]+AVSar(B3-B7,7));
+  D^[Dof+5*St+I]:=CASClip8(D^[Dof+5*St+I]+AVSar(B2-B6,7));
+  D^[Dof+6*St+I]:=CASClip8(D^[Dof+6*St+I]+AVSar(B1-B5,7));
+  D^[Dof+7*St+I]:=CASClip8(D^[Dof+7*St+I]+AVSar(B0-B4,7));
+ End;
+End;
+
+{ ---- filtre de boucle (cavsdsp.c) ; O = offset de Q0, St = pas a travers le bord ---- }
+Procedure CASLoopL2(B: PEABuffer; O,St,Alpha,Beta: LongInt);
+Var P0,Q0,P1,P2,Q1,Q2,S: LongInt;
+Begin
+ P0:=B^[O-St]; Q0:=B^[O]; P1:=B^[O-2*St]; P2:=B^[O-3*St]; Q1:=B^[O+St]; Q2:=B^[O+2*St];
+ If (Abs(P0-Q0)<Alpha) And (Abs(P1-P0)<Beta) And (Abs(Q1-Q0)<Beta) Then Begin
+  S:=P0+Q0+2;
+  Alpha:=(Alpha Shr 2)+2;
+  If (Abs(P2-P0)<Beta) And (Abs(P0-Q0)<Alpha) Then Begin
+   B^[O-St]:=(P1+P0+S) Shr 2;
+   B^[O-2*St]:=(2*P1+S) Shr 2;
+  End Else B^[O-St]:=(2*P1+S) Shr 2;
+  If (Abs(Q2-Q0)<Beta) And (Abs(Q0-P0)<Alpha) Then Begin
+   B^[O]:=(Q1+Q0+S) Shr 2;
+   B^[O+St]:=(2*Q1+S) Shr 2;
+  End Else B^[O]:=(2*Q1+S) Shr 2;
+ End;
+End;
+Procedure CASLoopL1(B: PEABuffer; O,St,Alpha,Beta,Tc: LongInt);
+Var P0,Q0,P1,P2,Q1,Q2,Delta,NP0,NQ0: LongInt;
+Begin
+ P0:=B^[O-St]; Q0:=B^[O]; P1:=B^[O-2*St]; P2:=B^[O-3*St]; Q1:=B^[O+St]; Q2:=B^[O+2*St];
+ If (Abs(P0-Q0)<Alpha) And (Abs(P1-P0)<Beta) And (Abs(Q1-Q0)<Beta) Then Begin
+  Delta:=CASClip(AVSar((Q0-P0)*3+P1-Q1+4,3),-Tc,Tc);
+  NP0:=CASClip8(P0+Delta); NQ0:=CASClip8(Q0-Delta);
+  B^[O-St]:=NP0; B^[O]:=NQ0;
+  If Abs(P2-P0)<Beta Then Begin
+   Delta:=CASClip(AVSar((NP0-P1)*3+P2-NQ0+4,3),-Tc,Tc);
+   B^[O-2*St]:=CASClip8(P1+Delta);
+  End;
+  If Abs(Q2-Q0)<Beta Then Begin
+   Delta:=CASClip(AVSar((Q1-NQ0)*3+NP0-Q2+4,3),-Tc,Tc);
+   B^[O+St]:=CASClip8(Q1-Delta);
+  End;
+ End;
+End;
+Procedure CASLoopC2(B: PEABuffer; O,St,Alpha,Beta: LongInt);
+Var P0,Q0,P1,P2,Q1,Q2,S: LongInt;
+Begin
+ P0:=B^[O-St]; Q0:=B^[O]; P1:=B^[O-2*St]; P2:=B^[O-3*St]; Q1:=B^[O+St]; Q2:=B^[O+2*St];
+ If (Abs(P0-Q0)<Alpha) And (Abs(P1-P0)<Beta) And (Abs(Q1-Q0)<Beta) Then Begin
+  S:=P0+Q0+2;
+  Alpha:=(Alpha Shr 2)+2;
+  If (Abs(P2-P0)<Beta) And (Abs(P0-Q0)<Alpha) Then B^[O-St]:=(P1+P0+S) Shr 2 Else B^[O-St]:=(2*P1+S) Shr 2;
+  If (Abs(Q2-Q0)<Beta) And (Abs(Q0-P0)<Alpha) Then B^[O]:=(Q1+Q0+S) Shr 2 Else B^[O]:=(2*Q1+S) Shr 2;
+ End;
+End;
+Procedure CASLoopC1(B: PEABuffer; O,St,Alpha,Beta,Tc: LongInt);
+Var P0,Q0,P1,Q1,Delta: LongInt;
+Begin
+ P0:=B^[O-St]; Q0:=B^[O]; P1:=B^[O-2*St]; Q1:=B^[O+St];
+ If (Abs(P0-Q0)<Alpha) And (Abs(P1-P0)<Beta) And (Abs(Q1-Q0)<Beta) Then Begin
+  Delta:=CASClip(AVSar((Q0-P0)*3+P1-Q1+4,3),-Tc,Tc);
+  B^[O-St]:=CASClip8(P0+Delta); B^[O]:=CASClip8(Q0-Delta);
+ End;
+End;
+{ Dir=0: bord vertical (echantillons voisins horizontaux), 1: bord horizontal. N: nombre de lignes par demi-bord (8 luma, 4 chroma) }
+Procedure CASFilterEdge(B: PEABuffer; O,Stride,Alpha,Beta,Tc,Bs1,Bs2: LongInt; Horiz,Chroma: Boolean);
+Var I,N,Along,Across: LongInt;
+Begin
+ If Chroma Then N:=4 Else N:=8;
+ If Horiz Then Begin Across:=Stride; Along:=1; End Else Begin Across:=1; Along:=Stride; End;
+ If Bs1=2 Then Begin
+  For I:=0 To 2*N-1 Do
+   If Chroma Then CASLoopC2(B,O+I*Along,Across,Alpha,Beta) Else CASLoopL2(B,O+I*Along,Across,Alpha,Beta);
+ End Else Begin
+  If Bs1<>0 Then For I:=0 To N-1 Do
+   If Chroma Then CASLoopC1(B,O+I*Along,Across,Alpha,Beta,Tc) Else CASLoopL1(B,O+I*Along,Across,Alpha,Beta,Tc);
+  If Bs2<>0 Then For I:=N To 2*N-1 Do
+   If Chroma Then CASLoopC1(B,O+I*Along,Across,Alpha,Beta,Tc) Else CASLoopL1(B,O+I*Along,Across,Alpha,Beta,Tc);
+ End;
+End;
+
+
+{ ---- compensation de mouvement ---- }
+Type TCASWin=Array[0..(24*24)-1] Of SmallInt;
+Var CASWin: Array[0..24*24-1] Of LongInt; CASWin2: Array[0..24*24-1] Of LongInt;
+{ Copie une fenetre (W x H) de la reference Plane (PW x PH) depuis (X0,Y0), replication des bords }
+Procedure CASFetch(Plane: PEABuffer; PW,PH,X0,Y0,W,H: LongInt; Var Win: Array Of LongInt);
+Var X,Y,XX,YY: LongInt;
+Begin
+ For Y:=0 To H-1 Do Begin
+  YY:=Y0+Y; If YY<0 Then YY:=0; If YY>PH-1 Then YY:=PH-1;
+  For X:=0 To W-1 Do Begin
+   XX:=X0+X; If XX<0 Then XX:=0; If XX>PW-1 Then XX:=PW-1;
+   Win[Y*24+X]:=Plane^[YY*PW+XX];
+  End;
+ End;
+End;
+
+{ Filtre luma sur une fenetre dont (2,2) est le pixel de reference. Size = 8 ou 16. Ecrit dans Dst (offset Dof, stride St), mode put ou avg }
+Procedure CASLumaMc(Xy,Size: LongInt; Const Win: Array Of LongInt; Dst: PEABuffer; Dof,St: LongInt; Avg: Boolean);
+Var
+ X,Y,I,V: LongInt; Tmp: Array[0..23,0..15] Of LongInt;
+ AH,BH,CH,DH,EH,FH,AV,BV,CV,DV,EV,FV: LongInt; Sh,Rn,Full: LongInt; Src2X,Src2Y: LongInt;
+ Mode: LongInt;
+Function W2(Xc,Yc: LongInt): LongInt;Begin W2:=Win[(Yc+2)*24+(Xc+2)]; End;
+Procedure Put(Xp,Yp,Val,Shift,Round: LongInt);
+Var R: LongInt;
+Begin
+ R:=CASClip8(AVSar(Val+Round,Shift));
+ If Avg Then Dst^[Dof+Yp*St+Xp]:=(Dst^[Dof+Yp*St+Xp]+R+1) Shr 1 Else Dst^[Dof+Yp*St+Xp]:=R;
+End;
+Procedure FiltH(A,B,C,D,E,F,Shift,Round: LongInt);
+Var Xp,Yp: LongInt;
+Begin
+ For Yp:=0 To Size-1 Do For Xp:=0 To Size-1 Do
+  Put(Xp,Yp,A*W2(Xp-2,Yp)+B*W2(Xp-1,Yp)+C*W2(Xp,Yp)+D*W2(Xp+1,Yp)+E*W2(Xp+2,Yp)+F*W2(Xp+3,Yp),Shift,Round);
+End;
+Procedure FiltV(A,B,C,D,E,F,Shift,Round: LongInt);
+Var Xp,Yp: LongInt;
+Begin
+ For Yp:=0 To Size-1 Do For Xp:=0 To Size-1 Do
+  Put(Xp,Yp,A*W2(Xp,Yp-2)+B*W2(Xp,Yp-1)+C*W2(Xp,Yp)+D*W2(Xp,Yp+1)+E*W2(Xp,Yp+2)+F*W2(Xp,Yp+3),Shift,Round);
+End;
+{ hv: filtre horizontal (AH..FH) en int16, puis vertical (AV..FV); Full: ajoute 64*src2 }
+Procedure FiltHV(AH,BH,CH,DH,EH,FH,AV,BV,CV,DV,EV,FV,Full,Sx,Sy,Shift,Round: LongInt);
+Var Xp,Yp,Row: LongInt; T: Array[0..20,0..15] Of LongInt; Val: LongInt;
+Begin
+ For Row:=0 To Size+4 Do
+  For Xp:=0 To Size-1 Do
+   T[Row,Xp]:=CASS16(AH*W2(Xp-2,Row-2)+BH*W2(Xp-1,Row-2)+CH*W2(Xp,Row-2)+DH*W2(Xp+1,Row-2)+EH*W2(Xp+2,Row-2)+FH*W2(Xp+3,Row-2));
+ For Yp:=0 To Size-1 Do For Xp:=0 To Size-1 Do Begin
+  Val:=AV*T[Yp,Xp]+BV*T[Yp+1,Xp]+CV*T[Yp+2,Xp]+DV*T[Yp+3,Xp]+EV*T[Yp+4,Xp]+FV*T[Yp+5,Xp];
+  If Full<>0 Then Val:=Val+64*W2(Xp+Sx,Yp+Sy);
+  Put(Xp,Yp,Val,Shift,Round);
+ End;
+End;
+Begin
+ Case Xy Of
+  0: For Y:=0 To Size-1 Do For X:=0 To Size-1 Do Begin
+      V:=W2(X,Y);
+      If Avg Then Dst^[Dof+Y*St+X]:=(Dst^[Dof+Y*St+X]+V+1) Shr 1 Else Dst^[Dof+Y*St+X]:=V;
+     End;
+  1: FiltH(-1,-2,96,42,-7,0,7,64);
+  2: FiltH(0,-1,5,5,-1,0,3,4);
+  3: FiltH(0,-7,42,96,-2,-1,7,64);
+  4: FiltV(-1,-2,96,42,-7,0,7,64);
+  8: FiltV(0,-1,5,5,-1,0,3,4);
+  12: FiltV(0,-7,42,96,-2,-1,7,64);
+  10: FiltHV(0,-1,5,5,-1,0,0,-1,5,5,-1,0,0,0,0,6,32);
+  5: FiltHV(0,-1,5,5,-1,0,0,-1,5,5,-1,0,1,0,0,7,64);
+  13: FiltHV(0,-1,5,5,-1,0,0,-1,5,5,-1,0,1,0,1,7,64);
+  7: FiltHV(0,-1,5,5,-1,0,0,-1,5,5,-1,0,1,1,0,7,64);
+  15: FiltHV(0,-1,5,5,-1,0,0,-1,5,5,-1,0,1,1,1,7,64);
+  6: FiltHV(0,-1,5,5,-1,0,-1,-2,96,42,-7,0,0,0,0,10,512);
+  9: FiltHV(-1,-2,96,42,-7,0,0,-1,5,5,-1,0,0,0,0,10,512);
+  11: FiltHV(0,-7,42,96,-2,-1,0,-1,5,5,-1,0,0,0,0,10,512);
+  14: FiltHV(0,-1,5,5,-1,0,0,-7,42,96,-2,-1,0,0,0,10,512);
+ End;
+End;
+
+{ Chroma: bloc W x H a partir de la fenetre 9x9 (0,0 = reference), mx,my en 1/8 }
+Procedure CASChromaMc(Const Win: Array Of LongInt; W,H,Mx,My: LongInt; Dst: PEABuffer; Dof,St: LongInt; Avg: Boolean);
+Var X,Y,A,B,C,D,V: LongInt;
+Begin
+ A:=(8-Mx)*(8-My); B:=Mx*(8-My); C:=(8-Mx)*My; D:=Mx*My;
+ For Y:=0 To H-1 Do For X:=0 To W-1 Do Begin
+  V:=(A*Win[Y*24+X]+B*Win[Y*24+X+1]+C*Win[(Y+1)*24+X]+D*Win[(Y+1)*24+X+1]+32) Shr 6;
+  If Avg Then Dst^[Dof+Y*St+X]:=(Dst^[Dof+Y*St+X]+V+1) Shr 1 Else Dst^[Dof+Y*St+X]:=V;
+ End;
+End;
+
+{ Une direction de prediction d'une partition. Size: 16 ou 8 (luma); XOff,YOff en unites de 2 pixels luma / 1 pixel chroma }
+Procedure CASMcDir(Fr: LongInt; Const MvR: TCASMv; XOffPix,YOffPix,Size: LongInt; Avg: Boolean);
+Var
+ Mx,My,LumaXy,Fx,Fy,CS: LongInt; DofY,DofC,Cx,Cy: LongInt;
+Begin
+ { XOffPix/YOffPix: decalage dans le macrobloc en pixels luma ; MB position }
+ Mx:=MvR.X+(XOffPix Div 2+8*CASMbx)*8;   { (x_offset en unites chroma) * 8 }
+ My:=MvR.Y+(YOffPix Div 2+8*CASMby)*8;
+ LumaXy:=(Mx And 3)+((My And 3) Shl 2);
+ If Not CASHas[Fr] Then Exit;
+ DofY:=CASCy+XOffPix+YOffPix*CASLs;
+ DofC:=CASCu+(XOffPix Div 2)+(YOffPix Div 2)*CASCs;
+ CASFetch(CASFY[Fr],CASMbW*16,CASMbH*16,AVSar(Mx,2)-2,AVSar(My,2)-2,Size+5,Size+5,CASWin);
+ CASLumaMc(LumaXy,Size,CASWin,CASFY[CASCurF],DofY,CASLs,Avg);
+ CS:=Size Div 2;
+ Cx:=AVSar(Mx,3); Cy:=AVSar(My,3);
+ CASFetch(CASFU[Fr],CASMbW*8,CASMbH*8,Cx,Cy,CS+1,CS+1,CASWin);
+ CASChromaMc(CASWin,CS,CS,Mx And 7,My And 7,CASFU[CASCurF],DofC-CASCu+CASCu,CASCs,Avg);
+ CASFetch(CASFV[Fr],CASMbW*8,CASMbH*8,Cx,Cy,CS+1,CS+1,CASWin);
+ CASChromaMc(CASWin,CS,CS,Mx And 7,My And 7,CASFV[CASCurF],DofC-CASCu+CASCv,CASCs,Avg);
+End;
+
+
+Function CASBsF(IP,IQ: LongInt; B: Boolean): LongInt;
+Var P,Q: TCASMv;
+Begin
+ CASBsF:=0;
+ P:=CASMv[IP]; Q:=CASMv[IQ];
+ If (P.Ref=CASRefIntra) Or (Q.Ref=CASRefIntra) Then Begin CASBsF:=2; Exit; End;
+ If (Abs(P.X-Q.X)>=4) Or (Abs(P.Y-Q.Y)>=4) Or (P.Ref<>Q.Ref) Then Begin CASBsF:=1; Exit; End;
+ If B Then Begin
+  P:=CASMv[IP+CASBwdOffs]; Q:=CASMv[IQ+CASBwdOffs];
+  If (Abs(P.X-Q.X)>=4) Or (Abs(P.Y-Q.Y)>=4) Or (P.Ref<>Q.Ref) Then CASBsF:=1;
+ End;
+End;
+
+Procedure CASSetMvs(Idx: LongInt; Size: LongInt);
+Begin
+ Case Size Of
+  CABlk16x16: Begin CASMv[Idx+4]:=CASMv[Idx]; CASMv[Idx+5]:=CASMv[Idx]; CASMv[Idx+1]:=CASMv[Idx]; End;
+  CABlk16x8: CASMv[Idx+1]:=CASMv[Idx];
+  CABlk8x16: CASMv[Idx+4]:=CASMv[Idx];
+ End;
+End;
+
+{ filtre de boucle d'un macrobloc (ff_cavs_filter) }
+Procedure CASFilter(MbType: LongInt);
+Var Bs: Array[0..7] Of LongInt; QpAvg,Alpha,Beta,Tc,I: LongInt; Bwd: Boolean; AnyBs: Boolean;
+Procedure SetParams;
+Begin
+ Alpha:=CASAlpha[CASClip(QpAvg+CASAlphaOff,0,63)]; Beta:=CASBeta[CASClip(QpAvg+CASBetaOff,0,63)]; Tc:=CASTc[CASClip(QpAvg+CASAlphaOff,0,63)];
+End;
+Begin
+ { sauvegarde des lignes non filtrees }
+ CASTopLeftY:=CASTopBY^[CASMbx*16+15]; CASTopLeftU:=CASTopBU^[CASMbx*10+8]; CASTopLeftV:=CASTopBV^[CASMbx*10+8];
+ For I:=0 To 15 Do CASTopBY^[CASMbx*16+I]:=CASFY[CASCurF]^[CASCy+15*CASLs+I];
+ For I:=0 To 7 Do Begin
+  CASTopBU^[CASMbx*10+1+I]:=CASFU[CASCurF]^[CASCu+7*CASCs+I];
+  CASTopBV^[CASMbx*10+1+I]:=CASFV[CASCurF]^[CASCv+7*CASCs+I];
+ End;
+ For I:=0 To 7 Do Begin
+  CASLeftBY[I*2+1]:=CASFY[CASCurF]^[CASCy+15+(I*2)*CASLs];
+  CASLeftBY[I*2+2]:=CASFY[CASCurF]^[CASCy+15+(I*2+1)*CASLs];
+  CASLeftBU[I+1]:=CASFU[CASCurF]^[CASCu+7+I*CASCs];
+  CASLeftBV[I+1]:=CASFV[CASCurF]^[CASCv+7+I*CASCs];
+ End;
+ If CASLoopOff=0 Then Begin
+  Bwd:=MbType>CASP8x8;
+  If MbType=CASI8x8 Then Begin For I:=0 To 7 Do Bs[I]:=2; End
+  Else Begin
+   FillChar(Bs,SizeOf(Bs),0);
+   If (CASPartFlags[MbType] And CASSplitV)<>0 Then Begin
+    Bs[2]:=CASBsF(CAMvFwdX0,CAMvFwdX1,Bwd); Bs[3]:=CASBsF(CAMvFwdX2,CAMvFwdX3,Bwd);
+   End;
+   If (CASPartFlags[MbType] And CASSplitH)<>0 Then Begin
+    Bs[6]:=CASBsF(CAMvFwdX0,CAMvFwdX2,Bwd); Bs[7]:=CASBsF(CAMvFwdX1,CAMvFwdX3,Bwd);
+   End;
+   Bs[0]:=CASBsF(CAMvFwdA1,CAMvFwdX0,Bwd); Bs[1]:=CASBsF(CAMvFwdA3,CAMvFwdX2,Bwd);
+   Bs[4]:=CASBsF(CAMvFwdB2,CAMvFwdX0,Bwd); Bs[5]:=CASBsF(CAMvFwdB3,CAMvFwdX1,Bwd);
+  End;
+  AnyBs:=False; For I:=0 To 7 Do If Bs[I]<>0 Then AnyBs:=True;
+  If AnyBs Then Begin
+   If (CASFlags And CASAvailA)<>0 Then Begin
+    QpAvg:=(CASQp+CASLeftQp+1) Shr 1; SetParams;
+    CASFilterEdge(CASFY[CASCurF],CASCy,CASLs,Alpha,Beta,Tc,Bs[0],Bs[1],False,False);
+    QpAvg:=(CASChromaQp[CASQp]+CASChromaQp[CASLeftQp]+1) Shr 1; SetParams;
+    CASFilterEdge(CASFU[CASCurF],CASCu,CASCs,Alpha,Beta,Tc,Bs[0],Bs[1],False,True);
+    CASFilterEdge(CASFV[CASCurF],CASCv,CASCs,Alpha,Beta,Tc,Bs[0],Bs[1],False,True);
+   End;
+   QpAvg:=CASQp; SetParams;
+   CASFilterEdge(CASFY[CASCurF],CASCy+8,CASLs,Alpha,Beta,Tc,Bs[2],Bs[3],False,False);
+   CASFilterEdge(CASFY[CASCurF],CASCy+8*CASLs,CASLs,Alpha,Beta,Tc,Bs[6],Bs[7],True,False);
+   If (CASFlags And CASAvailB)<>0 Then Begin
+    QpAvg:=(CASQp+CASTopQp^[CASMbx]+1) Shr 1; SetParams;
+    CASFilterEdge(CASFY[CASCurF],CASCy,CASLs,Alpha,Beta,Tc,Bs[4],Bs[5],True,False);
+    QpAvg:=(CASChromaQp[CASQp]+CASChromaQp[CASTopQp^[CASMbx]]+1) Shr 1; SetParams;
+    CASFilterEdge(CASFU[CASCurF],CASCu,CASCs,Alpha,Beta,Tc,Bs[4],Bs[5],True,True);
+    CASFilterEdge(CASFV[CASCurF],CASCv,CASCs,Alpha,Beta,Tc,Bs[4],Bs[5],True,True);
+   End;
+  End;
+ End;
+ CASLeftQp:=CASQp;
+ CASTopQp^[CASMbx]:=CASQp;
+End;
+
+{ chargement des bords pour la prediction intra luma (ff_cavs_load_intra_pred_luma) ; Top: tableau de 18 octets ; LeftOff: indice de depart du bord gauche (0 = left_border_y, 8, ou intern) }
+Var CASLeftSel: LongInt; { 0: left_border_y+0, 1: intern_border_y+0, 2: left_border_y+8, 3: intern_border_y+8 }
+Procedure CASLoadIntraLuma(Var Top: Array Of Byte; Block: LongInt);
+Var I: LongInt;
+Begin
+ Case Block Of
+  0: Begin
+      CASLeftSel:=0;
+      CASLeftBY[0]:=CASLeftBY[1];
+      For I:=17 To 25 Do CASLeftBY[I]:=CASLeftBY[16];
+      For I:=0 To 15 Do Top[1+I]:=CASTopBY^[CASMbx*16+I];
+      Top[17]:=Top[16]; Top[0]:=Top[1];
+      If ((CASFlags And CASAvailA)<>0) And ((CASFlags And CASAvailB)<>0) Then Begin CASLeftBY[0]:=CASTopLeftY; Top[0]:=CASTopLeftY; End;
+     End;
+  1: Begin
+      CASLeftSel:=1;
+      For I:=0 To 7 Do CASInternBY[I+1]:=CASFY[CASCurF]^[CASCy+7+I*CASLs];
+      For I:=9 To 17 Do CASInternBY[I]:=CASInternBY[8];
+      CASInternBY[0]:=CASInternBY[1];
+      For I:=0 To 7 Do Top[1+I]:=CASTopBY^[CASMbx*16+8+I];
+      If (CASFlags And CASAvailC)<>0 Then For I:=0 To 7 Do Top[9+I]:=CASTopBY^[(CASMbx+1)*16+I]
+      Else For I:=9 To 17 Do Top[I]:=Top[8];
+      Top[17]:=Top[16]; Top[0]:=Top[1];
+      If (CASFlags And CASAvailB)<>0 Then Begin CASInternBY[0]:=CASTopBY^[CASMbx*16+7]; Top[0]:=CASInternBY[0]; End;
+     End;
+  2: Begin
+      CASLeftSel:=2;
+      For I:=0 To 15 Do Top[1+I]:=CASFY[CASCurF]^[CASCy+7*CASLs+I];
+      Top[17]:=Top[16]; Top[0]:=Top[1];
+      If (CASFlags And CASAvailA)<>0 Then Top[0]:=CASLeftBY[8];
+     End;
+  3: Begin
+      CASLeftSel:=3;
+      For I:=0 To 7 Do CASInternBY[I+9]:=CASFY[CASCurF]^[CASCy+7+(I+8)*CASLs];
+      For I:=17 To 25 Do CASInternBY[I]:=CASInternBY[16];
+      For I:=0 To 8 Do Top[I]:=CASFY[CASCurF]^[CASCy+7+7*CASLs+I];
+      For I:=9 To 17 Do Top[I]:=Top[8];
+     End;
+ End;
+End;
+
+Procedure CASLoadIntraChroma;
+Begin
+ CASLeftBU[9]:=CASLeftBU[8]; CASLeftBV[9]:=CASLeftBV[8];
+ If (CASFlags And CASAvailC)<>0 Then Begin
+  CASTopBU^[CASMbx*10+9]:=CASTopBU^[CASMbx*10+11]; CASTopBV^[CASMbx*10+9]:=CASTopBV^[CASMbx*10+11];
+ End Else Begin
+  CASTopBU^[CASMbx*10+9]:=CASTopBU^[CASMbx*10+8]; CASTopBV^[CASMbx*10+9]:=CASTopBV^[CASMbx*10+8];
+ End;
+ If ((CASFlags And CASAvailA)<>0) And ((CASFlags And CASAvailB)<>0) Then Begin
+  CASTopBU^[CASMbx*10]:=CASTopLeftU; CASLeftBU[0]:=CASTopLeftU;
+  CASTopBV^[CASMbx*10]:=CASTopLeftV; CASLeftBV[0]:=CASTopLeftV;
+ End Else Begin
+  CASLeftBU[0]:=CASLeftBU[1]; CASLeftBV[0]:=CASLeftBV[1];
+  CASTopBU^[CASMbx*10]:=CASTopBU^[CASMbx*10+1]; CASTopBV^[CASMbx*10]:=CASTopBV^[CASMbx*10+1];
+ End;
+End;
+
+Procedure CASModifyPred(Const Tab: Array Of ShortInt; Var Mode: LongInt);
+Begin
+ Mode:=Tab[Mode];
+ If Mode<0 Then Mode:=0;
+End;
+
+Procedure CASModifyMbI(Var PredUv: LongInt);
+Begin
+ CASPredY[3]:=CASPredY[5]; CASPredY[6]:=CASPredY[8];
+ CASTopPredY^[CASMbx*2+0]:=CASPredY[7]; CASTopPredY^[CASMbx*2+1]:=CASPredY[8];
+ If (CASFlags And CASAvailA)=0 Then Begin
+  CASModifyPred(CASLeftModL,CASPredY[4]); CASModifyPred(CASLeftModL,CASPredY[7]); CASModifyPred(CASLeftModC,PredUv);
+ End;
+ If (CASFlags And CASAvailB)=0 Then Begin
+  CASModifyPred(CASTopModL,CASPredY[4]); CASModifyPred(CASTopModL,CASPredY[5]); CASModifyPred(CASTopModC,PredUv);
+ End;
+End;
+
+Procedure CASInterPred(MbType: LongInt);
+Var Fl: Byte;
+Procedure Part(MvIdx,XOff,YOff,Size: LongInt);
+Var Mv0: TCASMv;
+Begin
+ Mv0:=CASMv[MvIdx];
+ If Mv0.Ref>=0 Then Begin
+  If Mv0.Ref=0 Then CASMcDir(CASD0,Mv0,XOff,YOff,Size,False) Else CASMcDir(CASD1,Mv0,XOff,YOff,Size,False);
+  If CASMv[MvIdx+CASBwdOffs].Ref>=0 Then CASMcDir(CASD0,CASMv[MvIdx+CASBwdOffs],XOff,YOff,Size,True);
+ End Else If CASMv[MvIdx+CASBwdOffs].Ref>=0 Then
+  CASMcDir(CASD0,CASMv[MvIdx+CASBwdOffs],XOff,YOff,Size,False);
+End;
+Begin
+ Fl:=CASPartFlags[MbType];
+ If Fl=0 Then Part(CAMvFwdX0,0,0,16)
+ Else Begin
+  Part(CAMvFwdX0,0,0,8); Part(CAMvFwdX1,8,0,8); Part(CAMvFwdX2,0,8,8); Part(CAMvFwdX3,8,8,8);
+ End;
+End;
+
+{ ---- prediction de vecteurs ---- }
+Procedure CASScaleMv(Var Dx,Dy: LongInt; Const Src: TCASMv; DistP: LongInt);
+Var Den: Int64; R: LongInt;
+Begin
+ R:=Src.Ref; If R<0 Then R:=0;
+ Den:=CASScaleDen[R];
+ Dx:=AVSar(Int64(Src.X)*DistP*Den+256+Ord(Src.X<0)*(-1),9);
+ Dy:=AVSar(Int64(Src.Y)*DistP*Den+256+Ord(Src.Y<0)*(-1),9);
+End;
+
+Procedure CASMvPredMedian(Var MvP: TCASMv; Const A,B,C: TCASMv);
+Var Ax,Ay,Bx,By,Cx,Cy,LenAB,LenBC,LenCA,LenMid: LongInt;
+Begin
+ CASScaleMv(Ax,Ay,A,MvP.Dist); CASScaleMv(Bx,By,B,MvP.Dist); CASScaleMv(Cx,Cy,C,MvP.Dist);
+ LenAB:=Abs(Ax-Bx)+Abs(Ay-By); LenBC:=Abs(Bx-Cx)+Abs(By-Cy); LenCA:=Abs(Cx-Ax)+Abs(Cy-Ay);
+ LenMid:=CASMid(LenAB,LenBC,LenCA);
+ If LenMid=LenAB Then Begin MvP.X:=Cx; MvP.Y:=Cy; End
+ Else If LenMid=LenBC Then Begin MvP.X:=Ax; MvP.Y:=Ay; End
+ Else Begin MvP.X:=Bx; MvP.Y:=By; End;
+End;
+
+Procedure CASMvPred(NP,NC,Mode,Size,Ref: LongInt);
+Var MvA,MvB,MvC,P2: TCASMv; HaveP2: Boolean; Mx,My: LongInt; Vp: TCASMv;
+Begin
+ Vp:=CASMv[NP];
+ MvA:=CASMv[NP-1]; MvB:=CASMv[NP-4]; MvC:=CASMv[NC];
+ Vp.Ref:=Ref; Vp.Dist:=CASDist[Vp.Ref];
+ If (MvC.Ref=CASNotAvail) Or (NP=CAMvFwdX3) Or (NP=CAMvBwdX3) Then MvC:=CASMv[NP-5];
+ HaveP2:=False;
+ If (Mode=CAPredPSkip) And ((MvA.Ref=CASNotAvail) Or (MvB.Ref=CASNotAvail) Or ((MvA.X Or MvA.Y Or MvA.Ref)=0) Or ((MvB.X Or MvB.Y Or MvB.Ref)=0)) Then Begin
+  P2:=CASUnMv; HaveP2:=True;
+ End Else If (MvA.Ref>=0) And (MvB.Ref<0) And (MvC.Ref<0) Then Begin P2:=MvA; HaveP2:=True; End
+ Else If (MvA.Ref<0) And (MvB.Ref>=0) And (MvC.Ref<0) Then Begin P2:=MvB; HaveP2:=True; End
+ Else If (MvA.Ref<0) And (MvB.Ref<0) And (MvC.Ref>=0) Then Begin P2:=MvC; HaveP2:=True; End
+ Else If (Mode=CAPredLeft) And (MvA.Ref=Ref) Then Begin P2:=MvA; HaveP2:=True; End
+ Else If (Mode=CAPredTop) And (MvB.Ref=Ref) Then Begin P2:=MvB; HaveP2:=True; End
+ Else If (Mode=CAPredTopRight) And (MvC.Ref=Ref) Then Begin P2:=MvC; HaveP2:=True; End;
+ If HaveP2 Then Begin Vp.X:=P2.X; Vp.Y:=P2.Y; End
+ Else CASMvPredMedian(Vp,MvA,MvB,MvC);
+ If Mode<CAPredPSkip Then Begin
+  Mx:=CASSe+Vp.X; My:=CASSe+Vp.Y;
+  If (Mx<>CASS16(Mx)) Or (My<>CASS16(My)) Then Begin End
+  Else Begin Vp.X:=Mx; Vp.Y:=My; End;
+ End;
+ CASMv[NP]:=Vp;
+ CASSetMvs(NP,Size);
+End;
+
+
+Procedure CASInitMb;
+Var I: LongInt;
+Begin
+ For I:=0 To 2 Do Begin
+  CASMv[CAMvFwdB2+I]:=CASTopMv[0]^[CASMbx*2+I];
+  CASMv[CAMvBwdB2+I]:=CASTopMv[1]^[CASMbx*2+I];
+ End;
+ CASPredY[1]:=CASTopPredY^[CASMbx*2+0];
+ CASPredY[2]:=CASTopPredY^[CASMbx*2+1];
+ If (CASFlags And CASAvailB)=0 Then Begin
+  CASMv[CAMvFwdB2]:=CASUnMv; CASMv[CAMvFwdB3]:=CASUnMv; CASMv[CAMvBwdB2]:=CASUnMv; CASMv[CAMvBwdB3]:=CASUnMv;
+  CASPredY[1]:=CASNotAvail; CASPredY[2]:=CASNotAvail;
+  CASFlags:=CASFlags And Not (CASAvailC Or CASAvailD);
+ End Else If CASMbx<>0 Then CASFlags:=CASFlags Or CASAvailD;
+ If CASMbx=CASMbW-1 Then CASFlags:=CASFlags And Not CASAvailC;
+ If (CASFlags And CASAvailC)=0 Then Begin CASMv[CAMvFwdC2]:=CASUnMv; CASMv[CAMvBwdC2]:=CASUnMv; End;
+ If (CASFlags And CASAvailD)=0 Then Begin CASMv[CAMvFwdD3]:=CASUnMv; CASMv[CAMvBwdD3]:=CASUnMv; End;
+End;
+
+{ retourne False en fin d'image }
+Function CASNextMb: Boolean;
+Var I: LongInt;
+Begin
+ CASNextMb:=True;
+ CASFlags:=CASFlags Or CASAvailA;
+ Inc(CASCy,16); Inc(CASCu,8); Inc(CASCv,8);
+ I:=0;
+ While I<=20 Do Begin CASMv[I]:=CASMv[I+2]; Inc(I,4); End;
+ CASTopMv[0]^[CASMbx*2+0]:=CASMv[CAMvFwdX2]; CASTopMv[0]^[CASMbx*2+1]:=CASMv[CAMvFwdX3];
+ CASTopMv[1]^[CASMbx*2+0]:=CASMv[CAMvBwdX2]; CASTopMv[1]^[CASMbx*2+1]:=CASMv[CAMvBwdX3];
+ Inc(CASMbIdx); Inc(CASMbx);
+ If CASMbx=CASMbW Then Begin
+  CASFlags:=CASAvailB Or CASAvailC;
+  CASPredY[3]:=CASNotAvail; CASPredY[6]:=CASNotAvail;
+  I:=0; While I<=20 Do Begin CASMv[I]:=CASUnMv; Inc(I,4); End;
+  CASMbx:=0; Inc(CASMby);
+  CASCy:=CASMby*16*CASLs; CASCu:=CASMby*8*CASCs; CASCv:=CASCu;
+  If CASMby=CASMbH Then CASNextMb:=False;
+ End;
+End;
+
+Procedure CASInitPic;
+Var I: LongInt;
+Begin
+ I:=0; While I<=20 Do Begin CASMv[I]:=CASUnMv; Inc(I,4); End;
+ CASMv[CAMvBwdX0]:=CASDirMv; CASSetMvs(CAMvBwdX0,CABlk16x16);
+ CASMv[CAMvFwdX0]:=CASDirMv; CASSetMvs(CAMvFwdX0,CABlk16x16);
+ CASPredY[3]:=CASNotAvail; CASPredY[6]:=CASNotAvail;
+ CASCy:=0; CASCu:=0; CASCv:=0;
+ CASLumaScan[0]:=0; CASLumaScan[1]:=8; CASLumaScan[2]:=8*CASLs; CASLumaScan[3]:=8*CASLs+8;
+ CASMbx:=0; CASMby:=0; CASMbIdx:=0; CASFlags:=0;
+End;
+
+{ ---- residus ---- }
+Function CASDecodeResidualBlock(Set_,EscOrder,Qp: LongInt; Plane: PEABuffer; Dof,St: LongInt): Boolean;
+Var
+ I,EscCode,Level,Mask,T,Run,LevelCode,Pos2,Coef,GOrd,Idx,Rr: LongInt;
+ LevelBuf: Array[0..64] Of LongInt; RunBuf: Array[0..64] Of LongInt; Mul,Shift,Rnd,MaxTab: LongInt;
+Function Rl(Tb,K,J: LongInt): LongInt;
+Begin
+ Case Set_ Of
+  0: Rl:=CASIntraRl[(Tb*59+K)*3+J];
+  1: Rl:=CASInterRl[(Tb*59+K)*3+J];
+  Else Rl:=CASChromaRl[(Tb*59+K)*3+J];
+ End;
+End;
+Function LAdd(Tb,K: LongInt): LongInt;
+Begin
+ Case Set_ Of 0: LAdd:=CASIntraAdd[Tb*27+K]; 1: LAdd:=CASInterAdd[Tb*27+K]; Else LAdd:=CASChromaAdd[Tb*27+K]; End;
+End;
+Function Golomb(Tb: LongInt): LongInt;
+Begin Case Set_ Of 0: Golomb:=CASIntraGol[Tb]; 1: Golomb:=CASInterGol[Tb]; Else Golomb:=CASChromaGol[Tb]; End; End;
+Function IncLim(Tb: LongInt): LongInt;
+Begin Case Set_ Of 0: IncLim:=CASIntraInc[Tb]; 1: IncLim:=CASInterInc[Tb]; Else IncLim:=CASChromaInc[Tb]; End; End;
+Function MaxRun(Tb: LongInt): LongInt;
+Begin Case Set_ Of 0: MaxRun:=CASIntraMax[Tb]; 1: MaxRun:=CASInterMax[Tb]; Else MaxRun:=CASChromaMax[Tb]; End; End;
+Begin
+ CASDecodeResidualBlock:=False;
+ Idx:=0; I:=0;
+ While I<65 Do Begin
+  LevelCode:=CASUeCode(Golomb(Idx));
+  If LevelCode<0 Then Exit;
+  If LevelCode>=59 Then Begin
+   Run:=((LevelCode-59) Shr 1)+1;
+   If Run>64 Then Exit;
+   EscCode:=CASUeCode(EscOrder);
+   If (EscCode<0) Or (EscCode>32767) Then Exit;
+   If Run>MaxRun(Idx) Then Level:=EscCode+1 Else Level:=EscCode+LAdd(Idx,Run);
+   While Level>IncLim(Idx) Do Inc(Idx);
+   Mask:=-(LevelCode And 1);
+   Level:=(Level Xor Mask)-Mask;
+  End Else Begin
+   Level:=Rl(Idx,LevelCode,0);
+   If Level=0 Then Break;
+   Run:=Rl(Idx,LevelCode,1);
+   Inc(Idx,Rl(Idx,LevelCode,2));
+  End;
+  LevelBuf[I]:=Level; RunBuf[I]:=Run;
+  Inc(I);
+ End;
+ { quantification inverse + balayage }
+ Mul:=CASDqMul[Qp]; Shift:=CASDqShift[Qp]; Rnd:=1 Shl (Shift-1);
+ Pos2:=-1; T:=I;
+ While T>0 Do Begin
+  Dec(T);
+  Inc(Pos2,RunBuf[T]);
+  If Pos2>63 Then Exit;
+  CASBlock[CASZig[Pos2]]:=CASS16(AVSar(CASS16(LevelBuf[T])*Mul+Rnd,Shift));
+ End;
+ CASIdct8Add(Plane,Dof,CASBlock,St);
+ FillChar(CASBlock,SizeOf(CASBlock),0);
+ CASDecodeResidualBlock:=True;
+End;
+
+Function CASResidualChroma: Boolean;
+Begin
+ CASResidualChroma:=True;
+ If (CASCbpV And 16)<>0 Then
+  If Not CASDecodeResidualBlock(2,0,CASChromaQp[CASQp],CASFU[CASCurF],CASCu,CASCs) Then Begin CASResidualChroma:=False; Exit; End;
+ If (CASCbpV And 32)<>0 Then
+  If Not CASDecodeResidualBlock(2,0,CASChromaQp[CASQp],CASFV[CASCurF],CASCv,CASCs) Then Begin CASResidualChroma:=False; Exit; End;
+End;
+
+Function CASResidualInter: Boolean;
+Var Cbp,Blk: LongInt;
+Begin
+ CASResidualInter:=False;
+ Cbp:=CASUe;
+ If Cbp>63 Then Exit;
+ CASCbpV:=CASCbp[Cbp*2+1];
+ If (CASCbpV<>0) And (CASQpFixed=0) Then CASQp:=(CASQp+CASSe) And 63;
+ For Blk:=0 To 3 Do
+  If (CASCbpV And (1 Shl Blk))<>0 Then
+   CASDecodeResidualBlock(1,0,CASQp,CASFY[CASCurF],CASCy+CASLumaScan[Blk],CASLs);
+ CASResidualChroma;
+ CASResidualInter:=True;
+End;
+
+Procedure CASSetMvIntra;
+Begin
+ CASMv[CAMvFwdX0]:=CASIntraMv; CASSetMvs(CAMvFwdX0,CABlk16x16);
+ CASMv[CAMvBwdX0]:=CASIntraMv; CASSetMvs(CAMvBwdX0,CABlk16x16);
+ If CASPictType<>3 Then CASColType^[CASMbIdx]:=CASI8x8;
+End;
+
+Function CASDecodeMbI(CbpCode: LongInt): Boolean;
+Var
+ Block,NA,NB,PredPred,Pos2,Rem,PredUv,I: LongInt; Top: Array[0..17] Of Byte; D: LongInt; LeftP: PEABuffer;
+Begin
+ CASDecodeMbI:=False;
+ CASInitMb;
+ For Block:=0 To 3 Do Begin
+  Pos2:=CASScan3[Block];
+  NA:=CASPredY[Pos2-1]; NB:=CASPredY[Pos2-3];
+  If NA<NB Then PredPred:=NA Else PredPred:=NB;
+  If PredPred=CASNotAvail Then PredPred:=2;
+  If CASBits(1)=0 Then Begin
+   Rem:=CASBits(2);
+   If Rem>=PredPred Then PredPred:=Rem+1 Else PredPred:=Rem;
+  End;
+  CASPredY[Pos2]:=PredPred;
+ End;
+ PredUv:=CASUe;
+ If PredUv>6 Then Exit;
+ CASModifyMbI(PredUv);
+ If CASPictType=1 Then CbpCode:=CASUe;
+ If (CbpCode>63) Or (CbpCode<0) Then Exit;
+ CASCbpV:=CASCbp[CbpCode*2];
+ If (CASCbpV<>0) And (CASQpFixed=0) Then CASQp:=(CASQp+CASSe) And 63;
+ For Block:=0 To 3 Do Begin
+  D:=CASCy+CASLumaScan[Block];
+  CASLoadIntraLuma(Top,Block);
+  Case CASLeftSel Of
+   0: LeftP:=PEABuffer(@CASLeftBY[0]);
+   1: LeftP:=PEABuffer(@CASInternBY[0]);
+   2: LeftP:=PEABuffer(@CASLeftBY[8]);
+   Else LeftP:=PEABuffer(@CASInternBY[8]);
+  End;
+  CASIntraL(CASPredY[CASScan3[Block]],CASFY[CASCurF],D,PEABuffer(@Top[0]),LeftP,CASLs);
+  If (CASCbpV And (1 Shl Block))<>0 Then
+   If Not CASDecodeResidualBlock(0,1,CASQp,CASFY[CASCurF],D,CASLs) Then Exit;
+ End;
+ CASLoadIntraChroma;
+ CASIntraC(PredUv,CASFU[CASCurF],CASCu,PEABuffer(@CASTopBU^[CASMbx*10]),PEABuffer(@CASLeftBU[0]),CASCs);
+ CASIntraC(PredUv,CASFV[CASCurF],CASCv,PEABuffer(@CASTopBV^[CASMbx*10]),PEABuffer(@CASLeftBV[0]),CASCs);
+ If Not CASResidualChroma Then Exit;
+ CASFilter(CASI8x8);
+ CASSetMvIntra;
+ CASDecodeMbI:=True;
+End;
+
+
+Procedure CASStoreMvs;
+Begin
+ CASColMv^[CASMbIdx*4+0]:=CASMv[CAMvFwdX0]; CASColMv^[CASMbIdx*4+1]:=CASMv[CAMvFwdX1];
+ CASColMv^[CASMbIdx*4+2]:=CASMv[CAMvFwdX2]; CASColMv^[CASMbIdx*4+3]:=CASMv[CAMvFwdX3];
+End;
+
+Procedure CASSetIntraModeDefault;
+Begin
+ If CASStreamRev>0 Then Begin
+  CASPredY[3]:=CASNotAvail; CASPredY[6]:=CASNotAvail;
+  CASTopPredY^[CASMbx*2+0]:=CASNotAvail; CASTopPredY^[CASMbx*2+1]:=CASNotAvail;
+ End Else Begin
+  CASPredY[3]:=2; CASPredY[6]:=2;
+  CASTopPredY^[CASMbx*2+0]:=2; CASTopPredY^[CASMbx*2+1]:=2;
+ End;
+End;
+
+Procedure CASDecodeMbP(MbType: LongInt);
+Var Ref: Array[0..3] Of LongInt;
+Function RefBit: LongInt;
+Begin If CASRefFlag<>0 Then RefBit:=0 Else RefBit:=CASBits(1); End;
+Begin
+ CASInitMb;
+ Case MbType Of
+  CASPSkip: CASMvPred(CAMvFwdX0,CAMvFwdC2,CAPredPSkip,CABlk16x16,0);
+  CASP16x16: Begin Ref[0]:=RefBit; CASMvPred(CAMvFwdX0,CAMvFwdC2,CAPredMedian,CABlk16x16,Ref[0]); End;
+  CASP16x8: Begin
+    Ref[0]:=RefBit; Ref[2]:=RefBit;
+    CASMvPred(CAMvFwdX0,CAMvFwdC2,CAPredTop,CABlk16x8,Ref[0]);
+    CASMvPred(CAMvFwdX2,CAMvFwdA1,CAPredLeft,CABlk16x8,Ref[2]);
+   End;
+  CASP8x16: Begin
+    Ref[0]:=RefBit; Ref[1]:=RefBit;
+    CASMvPred(CAMvFwdX0,CAMvFwdB3,CAPredLeft,CABlk8x16,Ref[0]);
+    CASMvPred(CAMvFwdX1,CAMvFwdC2,CAPredTopRight,CABlk8x16,Ref[1]);
+   End;
+  CASP8x8: Begin
+    Ref[0]:=RefBit; Ref[1]:=RefBit; Ref[2]:=RefBit; Ref[3]:=RefBit;
+    CASMvPred(CAMvFwdX0,CAMvFwdB3,CAPredMedian,CABlk8x8,Ref[0]);
+    CASMvPred(CAMvFwdX1,CAMvFwdC2,CAPredMedian,CABlk8x8,Ref[1]);
+    CASMvPred(CAMvFwdX2,CAMvFwdX1,CAPredMedian,CABlk8x8,Ref[2]);
+    CASMvPred(CAMvFwdX3,CAMvFwdX0,CAPredMedian,CABlk8x8,Ref[3]);
+   End;
+ End;
+ CASInterPred(MbType);
+ CASSetIntraModeDefault;
+ CASStoreMvs;
+ If MbType<>CASPSkip Then CASResidualInter;
+ CASFilter(MbType);
+ CASColType^[CASMbIdx]:=MbType;
+End;
+
+Procedure CASMvPredDirect(Idx: LongInt; Const Col: TCASMv);
+Var Den,M,T,U,V: Int64; Fw,Bw: TCASMv; Mu: Int64;
+Const M32=$FFFFFFFF;
+Function Calc(Cv,Dist: LongInt; Fwd: Boolean): LongInt;
+Var Mm,Mmu: Int64; Tt,Uu,Vv: Int64;
+Begin
+ If Cv<0 Then Mm:=-1 Else Mm:=0;
+ Mmu:=Mm And M32;
+ Tt:=((Den*(Int64(Cv) And M32)) And M32)*(Int64(Dist) And M32) And M32;
+ Tt:=Tt Xor Mmu;
+ Uu:=(Den+Tt-Mmu-1) And M32;
+ Uu:=Uu Shr 14;
+ Vv:=Uu Xor Mmu;
+ If Fwd Then Vv:=(Vv-Mmu) And M32 Else Vv:=(Mmu-Vv) And M32;
+ Vv:=Vv And $FFFF;
+ If Vv>=32768 Then Vv:=Vv-65536;
+ Calc:=Vv;
+End;
+Begin
+ Den:=CASDirectDen[Col.Ref] And M32;
+ Fw:=CASMv[Idx]; Bw:=CASMv[Idx+CASBwdOffs];
+ Fw.Dist:=CASDist[1]; Bw.Dist:=CASDist[0];
+ Fw.Ref:=1; Bw.Ref:=0;
+ Fw.X:=Calc(Col.X,Fw.Dist,True); Bw.X:=Calc(Col.X,Bw.Dist,False);
+ Fw.Y:=Calc(Col.Y,Fw.Dist,True); Bw.Y:=Calc(Col.Y,Bw.Dist,False);
+ CASMv[Idx]:=Fw; CASMv[Idx+CASBwdOffs]:=Bw;
+End;
+
+Procedure CASMvPredSym(Idx,Size: LongInt);
+Var Src,Dst: TCASMv;
+Begin
+ Src:=CASMv[Idx]; Dst:=CASMv[Idx+CASBwdOffs];
+ Dst.X:=-AVSar(Int64(Src.X)*CASSymFactor+256,9);
+ Dst.Y:=-AVSar(Int64(Src.Y)*CASSymFactor+256,9);
+ Dst.Ref:=0; Dst.Dist:=CASDist[0];
+ CASMv[Idx+CASBwdOffs]:=Dst;
+ CASSetMvs(Idx+CASBwdOffs,Size);
+End;
+
+Function CASDecodeMbB(MbType: LongInt): Boolean;
+Var
+ Block,Flags,Fl: LongInt; Sub: Array[0..3] Of LongInt;
+Begin
+ CASDecodeMbB:=False;
+ CASInitMb;
+ CASMv[CAMvFwdX0]:=CASDirMv; CASSetMvs(CAMvFwdX0,CABlk16x16);
+ CASMv[CAMvBwdX0]:=CASDirMv; CASSetMvs(CAMvBwdX0,CABlk16x16);
+ Case MbType Of
+  CASBSkip,CASBDirect: Begin
+    If CASColType^[CASMbIdx]=0 Then Begin
+     CASMvPred(CAMvFwdX0,CAMvFwdC2,CAPredBSkip,CABlk16x16,1);
+     CASMvPred(CAMvBwdX0,CAMvBwdC2,CAPredBSkip,CABlk16x16,0);
+    End Else
+     For Block:=0 To 3 Do CASMvPredDirect(CASMvScan[Block],CASColMv^[CASMbIdx*4+Block]);
+   End;
+  CASBFwd16: CASMvPred(CAMvFwdX0,CAMvFwdC2,CAPredMedian,CABlk16x16,1);
+  CASBSym16: Begin CASMvPred(CAMvFwdX0,CAMvFwdC2,CAPredMedian,CABlk16x16,1); CASMvPredSym(CAMvFwdX0,CABlk16x16); End;
+  CASBBwd16: CASMvPred(CAMvBwdX0,CAMvBwdC2,CAPredMedian,CABlk16x16,0);
+  CASB8x8: Begin
+    Flags:=0;
+    For Block:=0 To 3 Do Sub[Block]:=CASBits(2);
+    For Block:=0 To 3 Do Begin
+     Case Sub[Block] Of
+      0: Begin
+          If CASColType^[CASMbIdx]=0 Then Begin
+           If Flags=0 Then Begin
+            If Block>0 Then Begin CASMv[7]:=CASMv[CAMvFwdX0]; CASMv[7+CASBwdOffs]:=CASMv[CAMvFwdX0+CASBwdOffs]; End;
+            CASMvPred(CAMvFwdX0,CAMvFwdC2,CAPredBSkip,CABlk8x8,1);
+            CASMvPred(CAMvFwdX0+CASBwdOffs,CAMvFwdC2+CASBwdOffs,CAPredBSkip,CABlk8x8,0);
+            If Block>0 Then Begin
+             Flags:=CASMvScan[Block];
+             CASMv[Flags]:=CASMv[CAMvFwdX0]; CASMv[Flags+CASBwdOffs]:=CASMv[CAMvFwdX0+CASBwdOffs];
+             CASMv[CAMvFwdX0]:=CASMv[7]; CASMv[CAMvFwdX0+CASBwdOffs]:=CASMv[7+CASBwdOffs];
+            End Else Flags:=CAMvFwdX0;
+           End Else Begin
+            CASMv[CASMvScan[Block]]:=CASMv[Flags]; CASMv[CASMvScan[Block]+CASBwdOffs]:=CASMv[Flags+CASBwdOffs];
+           End;
+          End Else
+           CASMvPredDirect(CASMvScan[Block],CASColMv^[CASMbIdx*4+Block]);
+         End;
+      1: CASMvPred(CASMvScan[Block],CASMvScan[Block]-3,CAPredMedian,CABlk8x8,1);
+      3: Begin CASMvPred(CASMvScan[Block],CASMvScan[Block]-3,CAPredMedian,CABlk8x8,1); CASMvPredSym(CASMvScan[Block],CABlk8x8); End;
+     End;
+    End;
+    For Block:=0 To 3 Do
+     If Sub[Block]=2 Then CASMvPred(CASMvScan[Block]+CASBwdOffs,CASMvScan[Block]+CASBwdOffs-3,CAPredMedian,CABlk8x8,0);
+   End;
+  Else Begin
+    If MbType<=CASBSym16 Then Exit;
+    Fl:=CASPartFlags[MbType];
+    If (MbType And 1)<>0 Then Begin
+     If (Fl And CASFwd0)<>0 Then CASMvPred(CAMvFwdX0,CAMvFwdC2,CAPredTop,CABlk16x8,1);
+     If (Fl And CASSym0)<>0 Then CASMvPredSym(CAMvFwdX0,CABlk16x8);
+     If (Fl And CASFwd1)<>0 Then CASMvPred(CAMvFwdX2,CAMvFwdA1,CAPredLeft,CABlk16x8,1);
+     If (Fl And CASSym1)<>0 Then CASMvPredSym(CAMvFwdX2,CABlk16x8);
+     If (Fl And CASBwd0)<>0 Then CASMvPred(CAMvBwdX0,CAMvBwdC2,CAPredTop,CABlk16x8,0);
+     If (Fl And CASBwd1)<>0 Then CASMvPred(CAMvBwdX2,CAMvBwdA1,CAPredLeft,CABlk16x8,0);
+    End Else Begin
+     If (Fl And CASFwd0)<>0 Then CASMvPred(CAMvFwdX0,CAMvFwdB3,CAPredLeft,CABlk8x16,1);
+     If (Fl And CASSym0)<>0 Then CASMvPredSym(CAMvFwdX0,CABlk8x16);
+     If (Fl And CASFwd1)<>0 Then CASMvPred(CAMvFwdX1,CAMvFwdC2,CAPredTopRight,CABlk8x16,1);
+     If (Fl And CASSym1)<>0 Then CASMvPredSym(CAMvFwdX1,CABlk8x16);
+     If (Fl And CASBwd0)<>0 Then CASMvPred(CAMvBwdX0,CAMvBwdB3,CAPredLeft,CABlk8x16,0);
+     If (Fl And CASBwd1)<>0 Then CASMvPred(CAMvBwdX1,CAMvBwdC2,CAPredTopRight,CABlk8x16,0);
+    End;
+   End;
+ End;
+ CASInterPred(MbType);
+ CASSetIntraModeDefault;
+ If MbType<>CASBSkip Then CASResidualInter;
+ CASFilter(MbType);
+ CASDecodeMbB:=True;
+End;
+
+
+Function CASCheckForSlice: Boolean;
+Var Align: LongInt; V: Int64;
+Begin
+ CASCheckForSlice:=False;
+ If CASMbx<>0 Then Exit;
+ Align:=(-CASGBit) And 7;
+ If (Align=0) And (CASShow(8)=$80) Then Align:=8;
+ V:=CASShow(24+Align) And $FFFFFF;
+ If V=1 Then Begin
+  CASBits(24+Align);
+  CASStc:=CASBits(8);
+  If CASStc>=CASMbH Then Exit;
+  { en-tete de tranche }
+  CASMby:=CASStc; CASMbIdx:=CASMby*CASMbW;
+  CASFlags:=CASFlags And Not (CASAvailB Or CASAvailC);
+  If CASPicQpFixed=0 Then Begin CASQpFixed:=CASBits(1); CASQp:=CASBits(6); End;
+  If (CASPictType<>1) Or ((CASPicStruct=0) And (CASMby>=CASMbW Div 2)) Then CASBits(1);
+  CASCheckForSlice:=True;
+ End;
+End;
+
+Procedure CASAllocFrames;
+Var I: LongInt;
+Begin
+ CASLs:=CASMbW*16; CASCs:=CASMbW*8; CASFrameY:=CASLs*CASMbH*16; CASFrameC:=CASCs*CASMbH*8;
+ For I:=0 To 2 Do Begin
+  GetMem(CASFY[I],CASFrameY+64); GetMem(CASFU[I],CASFrameC+64); GetMem(CASFV[I],CASFrameC+64);
+  FillChar(CASFY[I]^,CASFrameY,0); FillChar(CASFU[I]^,CASFrameC,0); FillChar(CASFV[I]^,CASFrameC,0);
+  CASHas[I]:=False; CASPoc[I]:=0;
+ End;
+ CASCurF:=0; CASD0:=1; CASD1:=2;
+ GetMem(CASTopQp,CASMbW+8); FillChar(CASTopQp^,CASMbW+8,0);
+ GetMem(CASTopMv[0],(CASMbW*2+1)*SizeOf(TCASMv)); GetMem(CASTopMv[1],(CASMbW*2+1)*SizeOf(TCASMv));
+ FillChar(CASTopMv[0]^,(CASMbW*2+1)*SizeOf(TCASMv),0); FillChar(CASTopMv[1]^,(CASMbW*2+1)*SizeOf(TCASMv),0);
+ GetMem(CASTopPredY,CASMbW*2*4+8); FillChar(CASTopPredY^,CASMbW*2*4,0);
+ GetMem(CASTopBY,(CASMbW+1)*16+16); FillChar(CASTopBY^,(CASMbW+1)*16,0);
+ GetMem(CASTopBU,CASMbW*10+16); FillChar(CASTopBU^,CASMbW*10,0);
+ GetMem(CASTopBV,CASMbW*10+16); FillChar(CASTopBV^,CASMbW*10,0);
+ GetMem(CASColMv,CASMbW*CASMbH*4*SizeOf(TCASMv)); FillChar(CASColMv^,CASMbW*CASMbH*4*SizeOf(TCASMv),0);
+ GetMem(CASColType,CASMbW*CASMbH+8); FillChar(CASColType^,CASMbW*CASMbH,0);
+End;
+
+{ en-tete de sequence ; retourne False si non pris en charge }
+Function CASSeqHeader: Boolean;
+Var W,H,Rc: LongInt;
+Begin
+ CASSeqHeader:=False;
+ CASProfile:=CASBits(8);
+ If CASProfile<>$20 Then Exit;
+ CASLevel:=CASBits(8);
+ CASBits(1);
+ W:=CASBits(14); H:=CASBits(14);
+ If ((CASW<>0) Or (CASH<>0)) And ((CASW<>W) Or (CASH<>H)) Then Exit;
+ If (W<=0) Or (H<=0) Then Exit;
+ CASBits(2); CASBits(3);
+ CASAspect:=CASBits(4);
+ Rc:=CASBits(4);
+ If (Rc=0) Or (Rc>13) Then Rc:=1;
+ CASRateCode:=Rc;
+ CASBits(18); CASBits(1); CASBits(12);
+ CASLowDelay:=CASBits(1);
+ CASW:=W; CASH:=H; CASMbW:=(W+15) Shr 4; CASMbH:=(H+15) Shr 4;
+ If Not CASInited Then Begin CASAllocFrames; CASInited:=True; End;
+ CASSeqHeader:=True;
+End;
+
+Function CASDecodePic(Stc: LongInt): Boolean;
+Var
+ Ret,SkipCount,MbType,I: LongInt; Ok: Boolean; Tmp,Dd: LongInt; DoSkip: Boolean;
+Begin
+ CASDecodePic:=False;
+ If Not CASInited Then Exit;
+ CASBits(16);
+ If Stc=$B6 Then Begin
+  CASPictType:=CASBits(2)+1;
+  If CASPictType>3 Then Exit;
+  If (Not CASHas[CASD0]) Or ((Not CASHas[CASD1]) And (CASPictType=3)) Then Exit;
+ End Else Begin
+  CASPictType:=1;
+  If CASBits(1)<>0 Then CASBits(24);
+  If (CASLowDelay<>0) Or ((CASShow(9) And 1)=0) Then CASStreamRev:=1
+  Else If (CASShow(11) And 3)<>0 Then CASStreamRev:=1;
+  If CASStreamRev>0 Then CASBits(1);
+ End;
+ If CASLeft<23 Then Exit;
+ { image courante: premier emplacement libre }
+ CASHas[CASCurF]:=False;
+ CASInitPic;
+ CASPoc[CASCurF]:=CASBits(8)*2;
+ If CASPictType<>3 Then CASDist[0]:=(CASPoc[CASCurF]-CASPoc[CASD0]) And 511
+ Else CASDist[0]:=(CASPoc[CASD0]-CASPoc[CASCurF]) And 511;
+ CASDist[1]:=(CASPoc[CASCurF]-CASPoc[CASD1]) And 511;
+ If CASDist[0]<>0 Then CASScaleDen[0]:=512 Div CASDist[0] Else CASScaleDen[0]:=0;
+ If CASDist[1]<>0 Then CASScaleDen[1]:=512 Div CASDist[1] Else CASScaleDen[1]:=0;
+ If CASPictType=3 Then Begin
+  CASSymFactor:=CASDist[0]*CASScaleDen[1];
+  If Abs(CASSymFactor)>32768 Then Exit;
+ End Else Begin
+  If CASDist[0]<>0 Then CASDirectDen[0]:=16384 Div CASDist[0] Else CASDirectDen[0]:=0;
+  If CASDist[1]<>0 Then CASDirectDen[1]:=16384 Div CASDist[1] Else CASDirectDen[1]:=0;
+ End;
+ If CASLowDelay<>0 Then CASUe;
+ CASProgressive:=CASBits(1);
+ CASPicStruct:=1;
+ If CASProgressive=0 Then CASPicStruct:=CASBits(1);
+ If (CASPicStruct=0) And (Stc=$B6) Then CASBits(1);
+ CASBits(1); CASBits(1);
+ CASQpFixed:=CASBits(1); CASPicQpFixed:=CASQpFixed;
+ CASQp:=CASBits(6);
+ If CASPictType=1 Then Begin
+  If (CASProgressive=0) And (CASPicStruct=0) Then CASBits(1);
+  CASBits(4);
+ End Else Begin
+  If Not ((CASPictType=3) And (CASPicStruct=1)) Then CASRefFlag:=CASBits(1);
+  CASBits(4);
+  CASSkipMode:=CASBits(1);
+ End;
+ CASLoopOff:=CASBits(1);
+ If (CASLoopOff=0) And (CASBits(1)<>0) Then Begin
+  CASAlphaOff:=CASSe; CASBetaOff:=CASSe;
+  If (CASAlphaOff<-64) Or (CASAlphaOff>64) Or (CASBetaOff<-64) Or (CASBetaOff>64) Then Begin
+   CASAlphaOff:=0; CASBetaOff:=0; Exit;
+  End;
+ End Else Begin CASAlphaOff:=0; CASBetaOff:=0; End;
+ Ret:=0; SkipCount:=-1;
+ If CASPictType=1 Then Begin
+  Repeat
+   CASCheckForSlice;
+   If Not CASDecodeMbI(0) Then Begin Ret:=-1; Break; End;
+  Until Not CASNextMb;
+ End Else If CASPictType=2 Then Begin
+  Repeat
+   If CASCheckForSlice Then SkipCount:=-1;
+   If (CASSkipMode<>0) And (SkipCount<0) Then Begin
+    If CASLeft<1 Then Begin Ret:=-1; Break; End;
+    SkipCount:=CASUe;
+   End;
+   DoSkip:=False;
+   If CASSkipMode<>0 Then Begin DoSkip:=SkipCount<>0; Dec(SkipCount); End;
+   If DoSkip Then CASDecodeMbP(CASPSkip)
+   Else Begin
+    If CASLeft<1 Then Begin Ret:=-1; Break; End;
+    MbType:=CASUe+CASPSkip+CASSkipMode;
+    If MbType>CASP8x8 Then Begin
+     If Not CASDecodeMbI(MbType-CASP8x8-1) Then Begin Ret:=-1; Break; End;
+    End Else CASDecodeMbP(MbType);
+   End;
+  Until Not CASNextMb;
+ End Else Begin
+  Repeat
+   If CASCheckForSlice Then SkipCount:=-1;
+   If (CASSkipMode<>0) And (SkipCount<0) Then Begin
+    If CASLeft<1 Then Begin Ret:=-1; Break; End;
+    SkipCount:=CASUe;
+   End;
+   DoSkip:=False;
+   If CASSkipMode<>0 Then Begin DoSkip:=SkipCount<>0; Dec(SkipCount); End;
+   If DoSkip Then Begin
+    If Not CASDecodeMbB(CASBSkip) Then Begin Ret:=-1; Break; End;
+   End Else Begin
+    If CASLeft<1 Then Begin Ret:=-1; Break; End;
+    MbType:=CASUe+CASBSkip+CASSkipMode;
+    If MbType>CASB8x8 Then Begin
+     If Not CASDecodeMbI(MbType-CASB8x8-1) Then Begin Ret:=-1; Break; End;
+    End Else If Not CASDecodeMbB(MbType) Then Begin Ret:=-1; Break; End;
+   End;
+  Until Not CASNextMb;
+ End;
+ If Ret<0 Then Exit;
+ CASHas[CASCurF]:=True;
+ If CASPictType<>3 Then Begin
+  { echange: nouvelle D0 = courante, D1 = ancienne D0, courante = ancienne D1 (liberee) }
+  CASHas[CASD1]:=False;
+  Tmp:=CASCurF; CASCurF:=CASD1; CASD1:=CASD0; CASD0:=Tmp;
+ End;
+ CASDecodePic:=True;
+End;
+
+
+{ Decode un flux elementaire AVS1-P2 (profil JiZhun, .avs/.cavs) vers Y4M/PNG/BMP. }
+Procedure DecodeCAVS(Const Source,Target: String; Mode: LongInt);
+Var
+ F: PEABuffer; Size,K,Q,P,UnitEnd,Code,Q2,FpsN,FpsD,Slot: LongInt; Started: Boolean; Out: PEABuffer; OutSize: LongInt;
+Procedure Boundary(From: LongInt; Var Pos2: LongInt);
+Var I: LongInt;
+Begin
+ I:=From;
+ While I+3<Size Do Begin
+  If (F^[I]=0) And (F^[I+1]=0) And (F^[I+2]=1) And ((F^[I+3]=$B0) Or (F^[I+3]=$B3) Or (F^[I+3]=$B6)) Then Begin Pos2:=I; Exit; End;
+  Inc(I);
+ End;
+ Pos2:=Size;
+End;
+Procedure Emit(Fr: LongInt);
+Var Y,CW,CH,Pk: LongInt;
+Begin
+ CW:=(CASW+1) Div 2; CH:=(CASH+1) Div 2;
+ If Not Started Then Begin
+  FpsN:=CASRates[CASRateCode,0]; FpsD:=CASRates[CASRateCode,1];
+  NVBegin(Mode,Target,CASW,CASH,7,FpsN,FpsD);
+  NVSubX:=1; NVSubY:=1; NVCW:=CW; NVCH:=CH; NVYTag:='C420jpeg'; NVIl:='p';
+  OutSize:=CASW*CASH+2*CW*CH; GetMem(Out,OutSize+64);
+  Started:=True;
+ End;
+ Pk:=0;
+ For Y:=0 To CASH-1 Do Begin Move(CASFY[Fr]^[Y*CASLs],Out^[Pk],CASW); Inc(Pk,CASW); End;
+ For Y:=0 To CH-1 Do Begin Move(CASFU[Fr]^[Y*CASCs],Out^[Pk],CW); Inc(Pk,CW); End;
+ For Y:=0 To CH-1 Do Begin Move(CASFV[Fr]^[Y*CASCs],Out^[Pk],CW); Inc(Pk,CW); End;
+ NVEmit(Out);
+End;
+Begin
+ OpenRead(Source); Size:=InputSize;
+ GetMem(F,Size+64); K:=0;
+ While K<Size Do Begin
+  If Size-K>4096 Then Q:=4096 Else Q:=Size-K;
+  ReadAt(K,F^[K],Q); Inc(K,Q);
+ End;
+ Started:=False; CASInited:=False; CASW:=0; CASH:=0; CASGotKey:=0; CASStreamRev:=0; CASRefFlag:=0; CASSkipMode:=0; CASLowDelay:=0;
+ CASUnMv.X:=0; CASUnMv.Y:=0; CASUnMv.Dist:=1; CASUnMv.Ref:=CASNotAvail;
+ CASIntraMv.X:=0; CASIntraMv.Y:=0; CASIntraMv.Dist:=1; CASIntraMv.Ref:=CASRefIntra;
+ CASDirMv.X:=0; CASDirMv.Y:=0; CASDirMv.Dist:=1; CASDirMv.Ref:=CASRefDir;
+ FillChar(CASMv,SizeOf(CASMv),0); CASMv[7]:=CASUnMv; CASMv[19]:=CASUnMv;
+ FillChar(CASBlock,SizeOf(CASBlock),0);
+ FillChar(CASDist,SizeOf(CASDist),0); FillChar(CASDirectDen,SizeOf(CASDirectDen),0); FillChar(CASScaleDen,SizeOf(CASScaleDen),0);
+ CASLeftQp:=0; CASQp:=0; CASQpFixed:=0; CASPicQpFixed:=0; CASAlphaOff:=0; CASBetaOff:=0; CASSymFactor:=0;
+ P:=0;
+ While P+3<Size Do Begin
+  If Not ((F^[P]=0) And (F^[P+1]=0) And (F^[P+2]=1)) Then Begin Inc(P); Continue; End;
+  Code:=F^[P+3];
+  If Code=$B0 Then Begin
+   Boundary(P+4,UnitEnd);
+   CASGB:=PEABuffer(@F^[P+4]); CASGSize:=UnitEnd-(P+4); CASGBit:=0;
+   CASSeqHeader;
+  End Else If (Code=$B3) Or (Code=$B6) Then Begin
+   Boundary(P+4,UnitEnd);
+   If Code=$B3 Then Begin
+    If CASGotKey=0 Then Begin
+     CASGotKey:=1;
+     If CASInited Then Begin For Slot:=0 To 2 Do CASHas[Slot]:=False; End;
+    End;
+   End;
+   If CASGotKey<>0 Then Begin
+    CASGB:=PEABuffer(@F^[P+4]); CASGSize:=UnitEnd-(P+4); CASGBit:=0; CASStc:=Code;
+    If CASDecodePic(Code) Then Begin
+     If CASPictType<>3 Then Begin
+      If CASLowDelay=0 Then Slot:=CASD1 Else Slot:=CASD0;
+      If CASHas[Slot] Then Emit(Slot);
+     End Else Emit(CASCurF);
+    End;
+   End;
+  End;
+  Inc(P,4);
+ End;
+ If CASInited And (CASLowDelay=0) And CASHas[CASD0] Then Emit(CASD0);
+ If Not Started Then Fail('cavs: aucune image decodee.');
+ NVFinish('cavs');
+End;
+
 Var AVSWantBMP: Boolean;
 
 Procedure DecodeAVS(Const Source,Target: String; PNGMode: Boolean);
@@ -24600,6 +26118,7 @@ Begin
  WriteLn(' D  c93             Interplay C93 (video seule)');
  WriteLn(' D  avi (camstudio, camtasia)  AVI CSCD / tscc (zlib, LZO, RLE) vers Y4M/PNG/BMP');
  WriteLn(' D  rm              RealMedia .rm/.rmvb: son Cook (RealAudio G2, entrelacement genr; mono, stereo, joint stereo, multicanal) vers WAV/MP3/...');
+ WriteLn(' D  cavsvideo       AVS1-P2 (Chinese AVS, profil JiZhun) flux elementaire .avs/.cavs: I/P/B, vers Y4M/PNG/BMP');
  WriteLn(' D  dts             DTS Coherent Acoustics brut (core 16 bits BE/LE, 14 bits; sans extensions) vers WAV (jusqu''a 5.1)/MP3 stereo/...');
  WriteLn(' D  oma             Sony OpenMG (ATRAC3 non chiffre); WAV 0x270 (ATRAC3) vers WAV/MP3/...');
  WriteLn(' DE avi (asv1/asv2) AVI ASUS V1/V2: decodage vers Y4M, encodage Y4M -c:v asv1|asv2');
@@ -24897,6 +26416,7 @@ BEGIN
    WriteLn('D V    camtasia        TechSmith Screen Capture Codec');
    WriteLn('D V    cinepak         Cinepak');
    WriteLn('D V    cljr            Cirrus Logic AccuPak');
+   WriteLn('D V    cavs            Chinese AVS video (AVS1-P2, JiZhun profile)');
    WriteLn('D A    cook            COOK');
    WriteLn('D A    dca             DCA (DTS Coherent Acoustics)');
    WriteLn('DEV    dnxhd           VC3/DNxHD');
@@ -25130,7 +26650,7 @@ BEGIN
  End;
  NVKind:=0;
  If InputFormat='bethsoftvid' Then NVKind:=1 Else If InputFormat='bfi' Then NVKind:=2 Else If InputFormat='c93' Then NVKind:=3
- Else If InputFormat='bmp' Then NVKind:=4 Else If InputFormat='dnxhd' Then NVKind:=10
+ Else If InputFormat='bmp' Then NVKind:=4 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12
  Else If (InputFormat='avi') And Not IsHTTP(InputPath) Then Begin
   AsvTag:=AVIVideoFourCC(Intermediate);
   If AsvTag='CSCD' Then NVKind:=5 Else If (AsvTag='tscc') Or (AsvTag='TSCC') Then NVKind:=6
