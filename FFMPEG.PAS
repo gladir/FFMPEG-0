@@ -3596,6 +3596,7 @@ Function FormatName(S: String): String;Begin
  If S='m2v' Then S:='mpeg2video';
  If (S='wmv') Or (S='wma') Then S:='asf';
  If S='dnx' Then S:='dnxhd';
+ If S='rmvb' Then S:='rm';
  FormatName:=S;
 End;
 
@@ -3900,6 +3901,7 @@ Begin
  End;
  If N>=16 Then If (B[0]=119) And (B[1]=87) And (B[2]=16) And (B[3]=0) Then Begin Probe:='avs'; Exit; End;
  If N>=8 Then If (B[0]=77) And (B[1]=65) And (B[2]=67) And (B[3]=32) Then Begin Probe:='ape'; Exit; End;
+ If N>=8 Then If (B[0]=$2E) And (B[1]=$52) And (B[2]=$4D) And (B[3]=$46) And (B[4]=0) And (B[5]=0) Then Begin Probe:='rm'; Exit; End;
  If N>=16 Then If ((B[0]=$7F) And (B[1]=$FE) And (B[2]=$80) And (B[3]=$01)) Or ((B[0]=$FE) And (B[1]=$7F) And (B[2]=$01) And (B[3]=$80)) Or
   ((B[0]=$1F) And (B[1]=$FF) And (B[2]=$E8) And (B[3]=$00)) Or ((B[0]=$FF) And (B[1]=$1F) And (B[2]=$00) And (B[3]=$E8)) Then Begin Probe:='dts'; Exit; End;
  If N>=5 Then If (B[0]=86) And (B[1]=73) And (B[2]=68) And (B[3]=0) Then Begin Probe:='bethsoftvid'; Exit; End;
@@ -20088,6 +20090,889 @@ Begin
 End;
 
 
+{ ---- Cook (RealAudio G2): decodeur adapte de libavcodec/cook.c, cookdata.h et du demultiplexeur RealMedia libavformat/rmdec.c (LGPL-2.1-or-later). Seuls .rm/.rmvb avec entrelacement genr sont pris en charge. ---- }
+Const
+ CKExpBits: Array[0..7] Of LongInt=(
+  52,47,43,37,29,22,16,0);
+ CKDither: Array[0..8] Of LongInt=(
+  0,0,0,0,0,1043662088,1048576000,1060439287,1065353216);
+ CKCentroid: Array[0..97] Of LongInt=(
+  0,1053340729,1061343461,1066359849,1069354582,1072332538,1074509382,1076010942,1077487337,1078963732,1080444322,1081887162,1082734412,1083648770,
+  0,1057702806,1065856532,1070076002,1074027037,1076136772,1078238118,1080293327,1082277233,1083430666,0,0,0,0,
+  0,1061091803,1069245530,1074496799,1077441200,1080385602,1082793132,0,0,0,0,0,0,0,
+  0,1065403548,1073741824,1077906768,1082067517,0,0,0,0,0,0,0,0,0,
+  0,1068045959,1076690420,1082059129,0,0,0,0,0,0,0,0,0,0,
+  0,1070864531,1079995531,0,0,0,0,0,0,0,0,0,0,0,
+  0,1073439834,0,0,0,0,0,0,0,0,0,0,0,0);
+ CKInvRadix: Array[0..6] Of LongInt=(
+  74899,104858,149797,209716,262144,349526,524288);
+ CKKmax: Array[0..6] Of LongInt=(
+  13,9,6,4,3,2,1);
+ CKVd: Array[0..6] Of LongInt=(
+  2,2,2,4,4,5,5);
+ CKVpr: Array[0..6] Of LongInt=(
+  10,10,10,5,5,4,4);
+ CKVhBits: Array[0..6] Of LongInt=(
+  8,7,7,10,9,9,6);
+ CKEnvCnt: Array[0..207] Of Byte=(
+  0,0,3,8,3,1,1,1,1,0,2,4,0,0,0,0,
+  0,0,6,2,3,1,1,1,1,1,1,1,1,0,3,2,
+  0,0,3,8,3,1,1,1,1,1,1,1,1,2,0,0,
+  0,0,5,4,3,0,3,0,3,1,1,0,4,0,0,0,
+  0,0,5,3,4,3,1,1,1,1,1,1,1,2,0,0,
+  0,0,5,4,3,0,2,3,1,1,1,1,1,2,0,0,
+  0,1,4,2,3,1,1,1,1,1,1,1,1,0,2,4,
+  0,1,4,2,3,0,3,0,3,1,1,1,0,3,2,0,
+  0,0,6,2,2,2,2,2,3,1,1,1,2,0,0,0,
+  0,0,6,2,2,3,0,3,1,1,1,1,0,4,0,0,
+  0,1,3,4,2,3,0,2,3,1,1,1,1,2,0,0,
+  0,1,3,4,3,1,1,1,1,1,1,1,1,1,0,4,
+  0,1,4,2,3,0,3,1,1,1,1,0,1,6,0,0);
+ CKEnvSym: Array[0..311] Of Byte=(
+  10,11,12,0,4,5,6,7,8,9,13,2,3,14,1,15,16,17,18,19,20,21,22,23,
+  6,7,8,9,10,11,5,12,3,4,13,2,14,1,15,0,16,17,18,19,20,21,22,23,
+  11,12,13,5,6,7,8,9,10,14,15,4,16,17,3,18,2,19,1,20,0,21,22,23,
+  9,10,11,12,13,8,14,15,16,6,7,17,4,5,18,2,3,19,1,20,0,21,22,23,
+  10,11,12,13,14,8,9,15,6,7,16,17,4,5,18,19,3,20,2,21,0,1,22,23,
+  9,10,11,12,13,7,8,14,15,6,16,17,5,18,3,4,19,2,20,1,0,21,22,23,
+  12,9,10,11,13,8,14,7,15,16,6,17,5,18,4,19,3,20,0,2,1,21,22,23,
+  12,10,11,13,14,9,15,7,8,16,5,6,17,4,18,19,3,2,20,0,1,21,22,23,
+  8,9,10,11,12,13,7,14,6,15,5,16,4,17,3,18,0,1,2,19,20,21,22,23,
+  8,9,10,11,12,13,7,14,6,15,4,5,16,3,17,18,19,2,20,1,0,21,22,23,
+  12,10,11,13,7,8,9,14,6,15,4,5,16,3,17,2,18,19,1,20,21,0,22,23,
+  12,11,13,14,8,9,10,15,6,7,16,5,17,18,4,19,3,2,1,20,0,21,22,23,
+  12,10,11,13,14,9,15,8,16,17,6,7,18,5,19,4,20,0,1,2,3,21,22,23);
+ CKCvhCnt: Array[0..111] Of Byte=(
+  1,0,0,2,2,5,8,15,31,33,28,17,15,8,8,8,
+  1,0,0,2,4,5,7,16,18,12,11,7,3,5,1,2,
+  1,0,1,2,4,2,5,8,7,8,2,3,1,1,1,2,
+  0,1,0,2,5,12,7,27,22,41,32,41,55,23,32,220,
+  0,1,0,5,7,4,8,9,17,10,13,17,12,14,92,0,
+  0,1,0,5,6,8,8,8,4,7,11,23,21,10,80,0,
+  1,0,0,5,0,9,1,7,4,3,2,0,0,0,0,0);
+ CKCvhSym: Array[0..1275] Of Word=(
+  0,1,14,15,28,2,3,16,29,42,4,5,17,18,30,43,56,57,6,7,8,19,20,31,
+  32,44,58,70,71,84,85,98,99,9,10,21,22,23,24,33,34,35,36,45,46,47,48,59,
+  60,61,72,73,74,86,87,100,101,112,113,114,126,127,140,141,11,25,37,38,39,49,50,51,
+  52,62,63,64,65,75,76,77,78,88,89,102,103,115,116,117,128,129,130,131,142,143,154,155,
+  156,12,13,26,27,40,53,66,67,79,80,90,91,92,104,105,106,118,119,132,144,145,157,158,
+  168,169,170,182,183,41,54,68,81,93,94,107,108,120,122,133,134,146,159,160,171,184,55,69,
+  82,95,96,109,121,147,148,161,172,173,174,185,186,83,110,123,135,136,149,150,187,97,111,124,
+  151,162,163,175,188,125,137,138,164,176,177,189,190,0,1,10,2,11,20,21,3,12,22,30,
+  31,4,13,14,23,32,40,41,5,6,15,16,24,25,33,34,42,43,50,51,52,60,61,62,
+  7,17,18,26,27,35,36,44,45,53,54,63,70,71,72,80,81,82,8,9,28,37,46,55,
+  56,64,73,83,90,91,19,29,38,47,48,57,65,66,74,84,92,39,58,67,75,76,85,93,
+  49,68,94,59,77,78,86,95,69,87,96,0,7,1,8,2,9,14,15,16,22,3,10,17,
+  21,23,4,11,18,24,28,29,30,35,5,12,25,31,36,37,42,6,13,19,20,26,32,38,
+  43,39,44,27,33,45,46,34,40,41,47,0,1,125,5,6,25,30,150,2,7,26,31,126,
+  130,131,151,155,156,250,275,10,35,36,50,55,175,180,3,8,11,12,27,32,37,56,127,132,
+  136,152,157,160,161,176,181,251,255,256,276,280,281,300,305,375,400,15,16,40,41,51,60,61,
+  75,80,135,162,177,185,186,200,205,301,306,405,425,500,525,4,9,13,17,20,28,33,38,42,
+  52,57,81,85,128,133,137,140,141,158,165,166,182,187,191,206,210,257,261,277,282,285,286,310,
+  311,325,330,376,380,401,406,430,21,29,46,62,65,66,76,86,100,105,142,153,163,190,201,211,
+  225,230,252,260,262,287,302,307,381,402,426,431,450,455,505,550,14,18,34,43,45,53,58,67,
+  70,71,77,87,138,146,167,168,171,178,183,192,207,216,235,258,265,283,291,312,315,316,326,331,
+  332,335,336,350,407,410,411,530,555,22,39,47,59,63,82,90,91,101,106,110,111,129,134,145,
+  154,159,170,172,188,195,196,202,212,215,226,231,236,253,263,266,267,278,288,290,292,303,317,337,
+  355,356,377,382,385,386,432,436,451,456,460,501,506,526,531,551,68,72,115,147,164,184,272,295,
+  296,297,309,333,340,360,387,416,427,435,437,480,510,532,556,19,44,54,83,97,104,107,143,173,
+  193,208,237,268,313,320,327,341,351,352,378,403,412,441,442,457,475,511,515,527,528,536,552,23,
+  24,48,49,64,69,73,78,79,84,88,89,92,93,94,95,96,98,102,103,108,109,112,113,116,
+  117,118,120,121,139,144,148,149,169,174,179,189,194,197,198,203,204,209,213,214,217,218,219,220,
+  221,222,223,227,228,229,232,233,234,238,240,241,242,243,245,246,254,259,264,269,270,271,273,279,
+  284,289,293,294,298,304,308,314,318,319,321,322,323,328,329,334,338,339,342,343,345,346,347,353,
+  357,358,361,362,363,365,366,367,379,383,384,388,389,390,391,392,393,394,395,396,397,398,404,408,
+  409,413,414,415,417,418,419,420,421,422,423,428,429,433,434,438,439,440,443,445,446,447,452,453,
+  454,458,459,461,462,463,465,466,467,468,470,471,476,477,478,481,482,483,485,486,487,490,491,502,
+  503,504,507,508,509,512,513,516,517,518,520,521,529,533,534,535,537,538,540,541,542,543,545,546,
+  553,557,558,560,561,562,563,565,566,567,575,576,577,578,580,581,582,583,585,586,587,590,591,600,
+  601,605,606,0,1,4,16,64,80,5,17,20,21,65,68,84,69,81,85,128,2,6,8,25,
+  32,96,100,144,9,22,24,36,37,89,101,132,148,18,33,66,70,72,73,82,86,88,97,129,
+  133,145,149,160,164,192,3,7,10,26,40,41,104,105,112,208,12,13,28,29,48,52,74,90,
+  102,116,152,161,165,19,23,34,38,83,93,98,113,134,136,137,150,153,193,196,209,212,42,49,
+  53,67,71,77,87,92,117,130,146,197,11,44,45,56,76,106,108,131,168,169,176,180,213,224,
+  14,15,27,30,31,35,39,43,46,50,51,54,55,57,58,60,61,75,78,79,91,94,95,99,
+  103,107,109,110,114,115,118,119,120,121,122,124,125,135,138,139,140,141,142,147,151,154,155,156,
+  157,158,162,163,166,167,170,172,173,177,178,181,182,184,185,194,195,198,199,200,201,202,204,205,
+  210,211,214,215,216,217,218,220,221,225,226,228,229,230,232,233,240,241,244,245,0,1,3,9,
+  27,81,4,12,36,82,84,108,10,13,28,30,39,90,109,117,31,37,40,85,91,93,111,120,
+  2,54,94,112,118,121,162,189,5,6,18,135,7,15,21,45,63,163,171,11,16,19,48,57,
+  83,87,99,144,165,198,14,29,32,33,34,42,46,58,66,86,88,96,102,114,126,127,129,138,
+  166,172,174,190,192,22,38,41,43,49,55,64,92,100,103,110,130,136,139,145,147,148,175,193,
+  199,201,8,24,95,97,115,119,123,153,180,216,17,20,23,25,35,44,47,50,51,52,56,59,
+  60,61,65,67,68,69,70,72,73,75,76,89,98,101,104,105,106,113,116,122,124,125,128,131,
+  132,133,137,140,141,142,146,149,150,151,154,156,157,164,167,168,169,173,176,177,178,181,183,184,
+  191,194,195,196,200,202,203,204,205,207,208,210,211,217,219,220,225,226,228,229,0,1,2,4,
+  8,16,3,5,6,9,10,12,17,20,24,18,7,11,14,19,22,26,28,13,21,25,30,15,
+  27,29,23,31);
+ CKCcplSym: Array[0..118] Of Byte=(
+  1,0,2,3,2,4,5,1,0,6,7,6,8,5,9,4,10,3,11,2,12,0,1,13,
+  14,15,14,16,12,13,17,18,10,11,19,20,8,9,21,22,6,7,23,24,4,5,25,26,
+  0,1,2,3,27,28,29,30,31,30,32,28,29,33,34,26,27,35,36,22,23,24,25,37,
+  38,39,40,18,19,20,21,41,42,43,44,13,14,15,16,17,45,46,47,48,9,10,11,12,
+  49,50,51,52,53,5,6,7,8,54,55,56,57,4,58,3,59,2,60,61,1,0,62);
+ CKCcplCnt: Array[0..79] Of Byte=(
+  1,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  1,1,1,1,1,2,0,0,0,0,0,0,0,0,0,0,
+  1,0,2,2,2,2,2,4,0,0,0,0,0,0,0,0,
+  1,0,2,0,4,4,4,4,4,8,0,0,0,0,0,0,
+  1,0,1,1,4,4,8,8,9,9,8,2,2,3,1,2);
+ CKCplBand: Array[0..50] Of Byte=(
+  0,1,2,3,4,5,6,7,8,9,10,11,11,12,12,13,
+  13,14,14,14,15,15,15,15,16,16,16,16,16,17,17,17,
+  17,17,17,18,18,18,18,18,18,18,19,19,19,19,19,19,
+  19,19,19);
+ CKCplScale: Array[0..128] Of LongInt=(
+  1065353216,1064565033,1060439283,1050351212,0,1065353216,1065039143,1064296211,
+  1063271742,1060439283,1056375058,1051909157,1044723111,0,1065353216,1065210387,
+  1064904409,1064565033,1064181051,1063733430,1063184697,1062437008,1060439283,1058028377,
+  1056687205,1054571728,1052509300,1050351212,1047217240,1040536888,0,1065353216,
+  1065284872,1065143796,1064996305,1064841607,1064678735,1064506491,1064323367,1064127408,
+  1063916016,1063685609,1063430999,1063144191,1062811650,1062406831,1061860760,1060439283,
+  1058822469,1058072478,1057454133,1056829841,1055782772,1054771589,1053775456,1052777657,
+  1051762437,1050712489,1049605867,1048245065,1045567478,1042369025,1035512590,0,
+  1065353216,1065319761,1065251827,1065182466,1065111600,1065039143,1064965003,1064889075,
+  1064811247,1064731393,1064649374,1064565033,1064478195,1064388663,1064296211,1064200583,
+  1064101483,1063998567,1063891433,1063779602,1063662502,1063539437,1063409546,1063271742,
+  1063124626,1062966336,1062794311,1062604851,1062392261,1062146926,1061850035,1061452850,
+  1060439283,1059330613,1058836359,1058440327,1058093664,1057777431,1057481875,1057201149,
+  1056898162,1056375058,1055864240,1055362440,1054866959,1054375480,1053885931,1053396388,
+  1052904994,1052409892,1051909157,1051400719,1050882282,1050351212,1049804384,1049237972,
+  1048647116,1047474786,1046151803,1044723111,1043147023,1041348867,1038143560,1031881976,
+  0);
+ CKLfgInit: Array[0..63] Of LongInt=(
+  0,0,0,0,0,0,0,0,
+  993487710,-177477789,-878532612,-1756253497,1528817306,-2046098001,723931338,-1834385488,
+  1930815723,-1956477021,769382579,487165090,1785050232,-911069772,-1774715953,-733841100,
+  -1282350411,-1834463950,554741894,631838767,596809201,-956807433,1549482577,-425215436,
+  -698780891,-1523063841,-880745164,-353570084,-1682215983,782810385,-1945711008,1750707997,
+  -245762482,-1038893818,710768517,-433988524,-1194616178,-425422344,-2049450203,-1854039314,
+  -1319713517,1540958685,-156640591,-1007919318,1377116941,-491358249,1881028327,1409671879,
+  -573883678,-1783077142,514931866,879118018,-1952152282,-1289360961,703626569,-913912008);
+
+Type
+ TCKF=Array[0..4095] Of Single; PCKF=^TCKF;
+Var
+ CKMaskAll,CKRate,CKChan,CKBlock,CKSps,CKNSub,CKSpc,CKGsf,CKNumVectors: LongInt;
+ CKSub: Array[0..4] Of Record
+  Ver,Subbands,JsStart,JsBits,Spc,Log2Nv,Total,NumCh,Joint,Mask,BitsSub,BitsDiv,NvSize,Size,ChIdx: LongInt;
+  Gnow1,Gprev1,Gnow2,Gprev2: Array[0..8] Of LongInt;
+  Prev1,Prev2: Array[0..1023] Of Single;
+ End;
+ CKPow2,CKRootPow2: Array[0..126] Of Single;
+ CKGainTab: Array[0..30] Of Single;
+ CKWin: Array[0..1023] Of Single;
+ CKBuf0: Array[0..1059] Of Single; CKBuf1,CKBuf2: Array[0..1023] Of Single; CKMdct: Array[0..2047] Of Single;
+ CKLfg: Array[0..63] Of LongInt; CKLfgIdx: LongInt;
+ CKCosN: LongInt;
+ CKCent,CKDith: Array[0..127] Of Single; CKCplS: Array[0..128] Of Single;
+ CKVSym: Array[0..1799] Of Word; CKVLen: Array[0..1799] Of Byte; CKVCode: Array[0..1799] Of LongInt;
+ CKVStart,CKVNum: Array[0..24] Of LongInt; CKVOff: Array[0..24] Of LongInt; CKVMax: Array[0..24] Of LongInt; CKVBuilt: Array[0..24] Of Boolean;
+ CKGB: PEABuffer; CKGBit,CKGSize,CKGLimit: LongInt;
+ CKDec: Array[0..8191] Of Byte;
+ CKDiscard: LongInt;
+ CKPkt: PEABuffer; CKPktSize: LongInt;
+
+Function CKBits(N: LongInt): LongInt;
+Var V: Int64; I,B: LongInt;
+Begin
+ V:=0;
+ For I:=1 To N Do Begin
+  B:=CKGBit Shr 3;
+  If B<CKGSize Then V:=V*2+((CKGB^[B] Shr (7-(CKGBit And 7))) And 1) Else V:=V*2;
+  Inc(CKGBit);
+ End;
+ CKBits:=V;
+End;
+
+Function CKLfgGet: Int64;
+Var A: Int64;
+Begin
+ A:=(Int64(CKLfg[(CKLfgIdx-24) And 63]) And $FFFFFFFF)+(Int64(CKLfg[(CKLfgIdx-55) And 63]) And $FFFFFFFF);
+ A:=A And $FFFFFFFF;
+ If A>=$80000000 Then CKLfg[CKLfgIdx And 63]:=A-$100000000 Else CKLfg[CKLfgIdx And 63]:=A;
+ Inc(CKLfgIdx);
+ CKLfgGet:=A;
+End;
+
+{ Construit la table VLC T a partir des comptes par longueur (build_vlc) }
+Procedure CKBuildVlc(T: LongInt; Const Counts: Array Of Byte; CBase: LongInt; SymW: Boolean; SymBase,Off: LongInt);
+Var I,N,K,L: LongInt; Cd: Int64; P: LongInt;
+Begin
+ If T=0 Then P:=0 Else P:=CKVStart[T-1]+CKVNum[T-1];
+ CKVStart[T]:=P; N:=0; Cd:=0; CKVMax[T]:=0;
+ For I:=0 To 15 Do
+  For K:=1 To Counts[CBase+I] Do Begin
+   L:=I+1;
+   CKVLen[P+N]:=L; CKVCode[P+N]:=Cd Shr (32-L);
+   Cd:=Cd+(Int64(1) Shl (32-L));
+   If L>CKVMax[T] Then CKVMax[T]:=L;
+   Inc(N);
+  End;
+ CKVNum[T]:=N; CKVOff[T]:=Off;
+ CKVBuilt[T]:=True;
+End;
+
+Function CKVlc(T: LongInt): LongInt;
+Var V: Int64; L,E,S: LongInt;
+Begin
+ V:=0; S:=CKVStart[T];
+ For L:=1 To CKVMax[T] Do Begin
+  V:=V*2+CKBits(1);
+  For E:=0 To CKVNum[T]-1 Do
+   If (CKVLen[S+E]=L) And (CKVCode[S+E]=V) Then Begin CKVlc:=CKVSym[S+E]+CKVOff[T]; Exit; End;
+ End;
+ CKVlc:=0;
+End;
+
+Procedure CKInitTables;
+Var I,J,K,N,P,S: LongInt; Ex,Rt: Single; Sq: Single;
+Begin
+ Move(CKDither,CKDith,36); Move(CKCentroid,CKCent,392); Move(CKCplScale,CKCplS,516);
+ Ex:=1; For I:=1 To 63 Do Ex:=Ex/2;
+ Rt:=1; For I:=1 To 32 Do Rt:=Rt/2;
+ Sq:=1.41421356237309504880;
+ For I:=-63 To 63 Do Begin
+  If (I And 1)=0 Then Rt:=Rt*2;
+  CKPow2[63+I]:=Ex;
+  If (I And 1)<>0 Then CKRootPow2[63+I]:=Rt*Sq Else CKRootPow2[63+I]:=Rt;
+  Ex:=Ex*2;
+ End;
+ For I:=0 To 63 Do CKLfg[I]:=CKLfgInit[I];
+ CKLfgIdx:=0;
+ { symboles des tables VLC }
+ N:=0;
+ For I:=0 To 12 Do Begin
+  CKBuildVlc(I,CKEnvCnt,I*16,False,0,-12);
+  P:=CKVStart[I]; S:=0; For J:=0 To 15 Do Inc(S,CKEnvCnt[I*16+J]);
+  For J:=0 To S-1 Do CKVSym[P+J]:=CKEnvSym[I*24+J];
+ End;
+ P:=0;
+ For I:=0 To 6 Do Begin
+  CKBuildVlc(13+I,CKCvhCnt,I*16,False,0,0);
+  S:=0; For J:=0 To 15 Do Inc(S,CKCvhCnt[I*16+J]);
+  For J:=0 To S-1 Do CKVSym[CKVStart[13+I]+J]:=CKCvhSym[P+J];
+  Inc(P,S);
+ End;
+ P:=0;
+ For I:=0 To 4 Do Begin
+  CKBuildVlc(20+I,CKCcplCnt,I*16,False,0,0);
+  S:=0; For J:=0 To 15 Do Inc(S,CKCcplCnt[I*16+J]);
+  For J:=0 To S-1 Do CKVSym[CKVStart[20+I]+J]:=CKCcplSym[P+J];
+  Inc(P,S);
+ End;
+End;
+
+Procedure CKGainInfo(Var Gain: Array Of LongInt);
+Var I,N,Idx,G,Left: LongInt;
+Begin
+ Left:=CKGLimit-CKGBit; N:=0;
+ While (N<Left) And (CKBits(1)<>0) Do Inc(N);
+ I:=0;
+ While N>0 Do Begin
+  Dec(N);
+  Idx:=CKBits(3);
+  If CKBits(1)<>0 Then G:=CKBits(4)-7 Else G:=-1;
+  While I<=Idx Do Begin Gain[I]:=G; Inc(I); End;
+ End;
+ While I<=8 Do Begin Gain[I]:=0; Inc(I); End;
+End;
+
+Function CKEnvelope(P: LongInt; Var QT: Array Of LongInt): Boolean;
+Var I,J,V: LongInt;
+Begin
+ CKEnvelope:=False;
+ QT[0]:=CKBits(6)-6;
+ For I:=1 To CKSub[P].Total-1 Do Begin
+  V:=I;
+  If I>=CKSub[P].JsStart*2 Then V:=V-CKSub[P].JsStart
+  Else Begin V:=V Div 2; If V<1 Then V:=1; End;
+  If V>13 Then V:=13;
+  J:=CKVlc(V-1);
+  QT[I]:=QT[I-1]+J;
+  If (QT[I]>63) Or (QT[I]<-63) Then Exit;
+ End;
+ CKEnvelope:=True;
+End;
+
+Procedure CKCategorize(P: LongInt; Const QT: Array Of LongInt; Var Cat,CatIdx: Array Of LongInt);
+Var
+ ExpIdx,Bias,TB1,TB2,BitsLeft,NumBits,Index,V,I,J,Mx,Mn: LongInt;
+ E2,E1: Array[0..101] Of LongInt; Tmp: Array[0..255] Of LongInt; T1,T2: LongInt;
+Function Clip3(X: LongInt): LongInt;
+Begin If X<0 Then X:=0; If X>7 Then X:=7; Clip3:=X; End;
+Begin
+ FillChar(E2,SizeOf(E2),0); FillChar(E1,SizeOf(E1),0); FillChar(Tmp,SizeOf(Tmp),0);
+ T1:=CKSub[P].NvSize; T2:=CKSub[P].NvSize;
+ BitsLeft:=CKSub[P].BitsSub-CKGBit;
+ If BitsLeft>CKSpc Then BitsLeft:=CKSpc+((BitsLeft-CKSpc)*5) Div 8;
+ Bias:=-32;
+ I:=32;
+ While I>0 Do Begin
+  NumBits:=0; Index:=0;
+  For J:=CKSub[P].Total DownTo 1 Do Begin
+   ExpIdx:=Clip3((I-QT[Index]+Bias) Div 2);
+   Inc(Index);
+   Inc(NumBits,CKExpBits[ExpIdx]);
+  End;
+  If NumBits>=BitsLeft-32 Then Inc(Bias,I);
+  I:=I Div 2;
+ End;
+ NumBits:=0;
+ For I:=0 To CKSub[P].Total-1 Do Begin
+  ExpIdx:=Clip3((Bias-QT[I]) Div 2);
+  Inc(NumBits,CKExpBits[ExpIdx]);
+  E1[I]:=ExpIdx; E2[I]:=ExpIdx;
+ End;
+ TB1:=NumBits; TB2:=NumBits;
+ For J:=1 To CKSub[P].NvSize-1 Do Begin
+  If TB1+TB2>2*BitsLeft Then Begin
+   Mx:=-999999; Index:=-1;
+   For I:=0 To CKSub[P].Total-1 Do
+    If E1[I]<7 Then Begin
+     V:=(-2*E1[I])-QT[I]+Bias;
+     If V>=Mx Then Begin Mx:=V; Index:=I; End;
+    End;
+   If Index=-1 Then Break;
+   Tmp[T1]:=Index; Inc(T1);
+   Dec(TB1,CKExpBits[E1[Index]]-CKExpBits[E1[Index]+1]);
+   Inc(E1[Index]);
+  End Else Begin
+   Mn:=999999; Index:=-1;
+   For I:=0 To CKSub[P].Total-1 Do
+    If E2[I]>0 Then Begin
+     V:=(-2*E2[I])-QT[I]+Bias;
+     If V<Mn Then Begin Mn:=V; Index:=I; End;
+    End;
+   If Index=-1 Then Break;
+   Dec(T2); Tmp[T2]:=Index;
+   Dec(TB2,CKExpBits[E2[Index]]-CKExpBits[E2[Index]-1]);
+   Dec(E2[Index]);
+  End;
+ End;
+ For I:=0 To CKSub[P].Total-1 Do Cat[I]:=E2[I];
+ For I:=0 To CKSub[P].NvSize-2 Do Begin CatIdx[I]:=Tmp[T2]; Inc(T2); End;
+End;
+
+Procedure CKDequant(Idx,QI: LongInt; Const CI,CS: Array Of LongInt; Dest: PCKF; Base: LongInt);
+Var I: LongInt; F1: Single;
+Begin
+ For I:=0 To 19 Do Begin
+  If CI[I]<>0 Then Begin
+   F1:=CKCent[Idx*14+CI[I]];
+   If CS[I]<>0 Then F1:=-F1;
+  End Else Begin
+   F1:=CKDith[Idx];
+   If CKLfgGet<$80000000 Then F1:=-F1;
+  End;
+  Dest^[Base+I]:=F1*CKRootPow2[QI+63];
+ End;
+End;
+
+Function CKUnpackSQVH(P,Cat: LongInt; Var CI,CS: Array Of LongInt): Boolean;
+Var I,J,Vlc,Vd,Tmp: LongInt; Res: Boolean;
+Begin
+ Vd:=CKVd[Cat]; Res:=False;
+ For I:=0 To CKVpr[Cat]-1 Do Begin
+  Vlc:=CKVlc(13+Cat);
+  If CKSub[P].BitsSub<CKGBit Then Begin Vlc:=0; Res:=True; End;
+  For J:=Vd-1 DownTo 0 Do Begin
+   Tmp:=(Vlc*CKInvRadix[Cat]) Div $100000;
+   CI[Vd*I+J]:=Vlc-Tmp*(CKKmax[Cat]+1);
+   Vlc:=Tmp;
+  End;
+  For J:=0 To Vd-1 Do Begin
+   If CI[I*Vd+J]<>0 Then Begin
+    If CKGBit<CKSub[P].BitsSub Then CS[I*Vd+J]:=CKBits(1)
+    Else Begin Res:=True; CS[I*Vd+J]:=0; End;
+   End Else CS[I*Vd+J]:=0;
+  End;
+ End;
+ CKUnpackSQVH:=Res;
+End;
+
+Procedure CKDecodeVectors(P: LongInt; Var Cat: Array Of LongInt; Const QT: Array Of LongInt; Dest: PCKF);
+Var CI,CS: Array[0..19] Of LongInt; Band,J,Index: LongInt;
+Begin
+ For Band:=0 To CKSub[P].Total-1 Do Begin
+  Index:=Cat[Band];
+  If Cat[Band]<7 Then
+   If CKUnpackSQVH(P,Cat[Band],CI,CS) Then Begin
+    Index:=7;
+    For J:=0 To CKSub[P].Total-1 Do Cat[Band+J]:=7;
+   End;
+  If Index>=7 Then Begin FillChar(CI,SizeOf(CI),0); FillChar(CS,SizeOf(CS),0); End;
+  CKDequant(Index,QT[Band],CI,CS,Dest,Band*20);
+ End;
+End;
+
+Function CKMonoDecode(P: LongInt; Dest: PCKF): Boolean;
+Var CatIdx,Cat: Array[0..127] Of LongInt; QT: Array[0..101] Of LongInt; I,Idx: LongInt;
+Begin
+ CKMonoDecode:=False;
+ FillChar(CatIdx,SizeOf(CatIdx),0); FillChar(Cat,SizeOf(Cat),0);
+ If Not CKEnvelope(P,QT) Then Exit;
+ CKNumVectors:=CKBits(CKSub[P].Log2Nv);
+ CKCategorize(P,QT,Cat,CatIdx);
+ For I:=0 To CKNumVectors-1 Do Begin
+  Idx:=CatIdx[I];
+  Inc(Cat[Idx]);
+  If Cat[Idx]>=9 Then Dec(Cat[Idx]);
+ End;
+ For I:=0 To CKSub[P].Total-1 Do If Cat[I]>7 Then Exit;
+ CKDecodeVectors(P,Cat,QT,Dest);
+ CKMonoDecode:=True;
+End;
+
+{ DCT-IV de taille N par FFT complexe de taille N/2 (twiddles en exp(-i*pi*(n+1/8)/N)) }
+Var CKFN: LongInt; CKTwC,CKTwS,CKFw: Array[0..1023] Of Double; CKFC,CKFS: Array[0..1023] Of Double; CKFRev: Array[0..1023] Of LongInt;
+Procedure CKDct4Setup(N: LongInt);
+Var M,I,J,Bits,R,Lg: LongInt;
+Begin
+ M:=N Div 2; CKFN:=N;
+ For I:=0 To M-1 Do Begin
+  CKTwC[I]:=Cos(Pi*(I+0.125)/N); CKTwS[I]:=Sin(Pi*(I+0.125)/N);
+  CKFC[I]:=Cos(2*Pi*I/M); CKFS[I]:=-Sin(2*Pi*I/M);
+ End;
+ Lg:=0; While (1 Shl Lg)<M Do Inc(Lg);
+ For I:=0 To M-1 Do Begin
+  R:=0; For J:=0 To Lg-1 Do If (I And (1 Shl J))<>0 Then R:=R Or (1 Shl (Lg-1-J));
+  CKFRev[I]:=R;
+ End;
+End;
+Procedure CKDct4(N: LongInt; Inp: PCKF; Var B: Array Of Double);
+Var M,I,K,Len,Half,Step,J,P,Q: LongInt; Re,Im: Array[0..511] Of Double; A,Bq,Tr,Ti,Wr,Wi,Yr,Yi: Double;
+Begin
+ If CKFN<>N Then CKDct4Setup(N);
+ M:=N Div 2;
+ For I:=0 To M-1 Do Begin
+  A:=Inp^[2*I]; Bq:=Inp^[N-1-2*I];
+  { z = (a + i b) * (c - i s) }
+  Re[CKFRev[I]]:=A*CKTwC[I]+Bq*CKTwS[I];
+  Im[CKFRev[I]]:=Bq*CKTwC[I]-A*CKTwS[I];
+ End;
+ Len:=2;
+ While Len<=M Do Begin
+  Half:=Len Div 2; Step:=M Div Len;
+  I:=0;
+  While I<M Do Begin
+   For J:=0 To Half-1 Do Begin
+    Wr:=CKFC[J*Step]; Wi:=CKFS[J*Step];
+    P:=I+J; Q:=P+Half;
+    Tr:=Re[Q]*Wr-Im[Q]*Wi; Ti:=Re[Q]*Wi+Im[Q]*Wr;
+    Re[Q]:=Re[P]-Tr; Im[Q]:=Im[P]-Ti;
+    Re[P]:=Re[P]+Tr; Im[P]:=Im[P]+Ti;
+   End;
+   Inc(I,Len);
+  End;
+  Len:=Len*2;
+ End;
+ For K:=0 To M-1 Do Begin
+  Yr:=Re[K]*CKTwC[K]+Im[K]*CKTwS[K];
+  Yi:=Im[K]*CKTwC[K]-Re[K]*CKTwS[K];
+  B[2*K]:=Yr; B[N-1-2*K]:=-Yi;
+ End;
+End;
+
+{ IMDCT complete (type FULL_IMDCT de libavutil/tx): Out[n] = -1/32768 * sum In[k] cos(pi/N (n+1/2+N/2)(k+1/2)), n=0..2N-1 }
+Procedure CKImdct(N: LongInt; Inp: PCKF; Out: PCKF);
+Var M,Nn: LongInt; B: Array[0..1023] Of Double; Acc: Double; Sc: Double;
+Begin
+ CKDct4(N,Inp,B);
+ Sc:=1.0/32768.0;
+ For Nn:=0 To 2*N-1 Do Begin
+  M:=Nn+N Div 2;
+  If M<N Then Acc:=B[M]
+  Else If M<2*N Then Acc:=-B[2*N-1-M]
+  Else Acc:=-B[M-2*N];
+  Out^[Nn]:=-Sc*Acc;
+ End;
+End;
+
+Procedure CKInterpolate(Buf: PCKF; Base,Gi,Gn: LongInt);
+Var I: LongInt; Fc1,Fc2: Single;
+Begin
+ Fc1:=CKPow2[Gi+63];
+ If Gi=Gn Then Begin
+  For I:=0 To CKGsf-1 Do Buf^[Base+I]:=Buf^[Base+I]*Fc1;
+ End Else Begin
+  Fc2:=CKGainTab[15+(Gn-Gi)];
+  For I:=0 To CKGsf-1 Do Begin
+   Buf^[Base+I]:=Buf^[Base+I]*Fc1;
+   Fc1:=Fc1*Fc2;
+  End;
+ End;
+End;
+
+{ imlt_gain + saturation: Coef = coefficients MLT, Now/Prev = gains, PrevBuf = tampon de recouvrement, Out = sortie (Nil si rejetee) }
+Procedure CKImltGain(Coef: PCKF; Const Now,Prev: Array Of LongInt; PrevBuf: PCKF; Out: PCKF);
+Var I: LongInt; Fc,T1,T2: Single; B1: PCKF;
+Begin
+ CKImdct(CKSpc,Coef,PCKF(@CKMdct));
+ B1:=PCKF(@CKMdct[CKSpc]);
+ Fc:=CKPow2[Prev[0]+63];
+ For I:=0 To CKSpc-1 Do Begin
+  T1:=B1^[I]*Fc; T1:=T1*CKWin[I];
+  T2:=PrevBuf^[I]*CKWin[CKSpc-1-I];
+  B1^[I]:=T1-T2;
+ End;
+ For I:=0 To 7 Do
+  If (Now[I]<>0) Or (Now[I+1]<>0) Then CKInterpolate(B1,CKGsf*I,Now[I],Now[I+1]);
+ Move(CKMdct[0],PrevBuf^,CKSpc*4);
+ If Out<>Nil Then
+  For I:=0 To CKSpc-1 Do Begin
+   T1:=B1^[I]; If T1>1.0 Then T1:=1.0; If T1<-1.0 Then T1:=-1.0;
+   Out^[I]:=T1;
+  End;
+End;
+
+Function CKDecoupleInfo(P: LongInt; Var Tab: Array Of LongInt): Boolean;
+Var Vlc,Start,EndB,Len,I,V: LongInt;
+Begin
+ CKDecoupleInfo:=False;
+ Vlc:=CKBits(1);
+ Start:=CKCplBand[CKSub[P].JsStart]; EndB:=CKCplBand[CKSub[P].Subbands-1];
+ Len:=EndB-Start+1;
+ If Start>EndB Then Begin CKDecoupleInfo:=True; Exit; End;
+ If Vlc<>0 Then
+  For I:=0 To Len-1 Do Tab[Start+I]:=CKVlc(20+CKSub[P].JsBits-2)
+ Else
+  For I:=0 To Len-1 Do Begin
+   V:=CKBits(CKSub[P].JsBits);
+   If V=(1 Shl CKSub[P].JsBits)-1 Then Exit;
+   Tab[Start+I]:=V;
+  End;
+ CKDecoupleInfo:=True;
+End;
+
+Function CKJointDecode(P: LongInt; L,R: PCKF): Boolean;
+Var Tab: Array[0..19] Of LongInt; I,J,Idx,CT,Sb,Tmp: LongInt; F1,F2: Single; Off: LongInt;
+Begin
+ CKJointDecode:=False;
+ FillChar(Tab,SizeOf(Tab),0);
+ FillChar(CKBuf0,SizeOf(CKBuf0),0);
+ FillChar(L^,4096,0); FillChar(R^,4096,0);
+ If Not CKDecoupleInfo(P,Tab) Then Exit;
+ If Not CKMonoDecode(P,PCKF(@CKBuf0)) Then Exit;
+ For I:=0 To CKSub[P].JsStart-1 Do
+  For J:=0 To 19 Do Begin
+   L^[I*20+J]:=CKBuf0[I*40+J];
+   R^[I*20+J]:=CKBuf0[I*40+20+J];
+  End;
+ Idx:=(1 Shl CKSub[P].JsBits)-1;
+ Off:=0; For I:=2 To CKSub[P].JsBits-1 Do Inc(Off,(1 Shl I)+1);
+ For Sb:=CKSub[P].JsStart To CKSub[P].Subbands-1 Do Begin
+  CT:=CKCplBand[Sb];
+  Dec(Idx,Tab[CT]);
+  F1:=CKCplS[Off+Tab[CT]+1];
+  F2:=CKCplS[Off+Idx];
+  For J:=0 To 19 Do Begin
+   Tmp:=((CKSub[P].JsStart+Sb)*20)+J;
+   L^[20*Sb+J]:=F1*CKBuf0[Tmp];
+   R^[20*Sb+J]:=F2*CKBuf0[Tmp];
+  End;
+  Idx:=(1 Shl CKSub[P].JsBits)-1;
+ End;
+ CKJointDecode:=True;
+End;
+
+{ copie les octets du sous-paquet en les dechiffrant (cle 37 C5 11 F2 repetee) }
+Procedure CKDecodeBytes(Base,Bytes,LimitBits: LongInt);
+Const Key: Array[0..3] Of Byte=($37,$C5,$11,$F2);
+Var J,Words: LongInt;
+Begin
+ Words:=(Bytes+3) Div 4;
+ FillChar(CKDec,SizeOf(CKDec),0);
+ For J:=0 To Words*4-1 Do
+  If Base+J<CKPktSize Then CKDec[J]:=CKPkt^[Base+J] Xor Key[J And 3] Else CKDec[J]:=Key[J And 3];
+ CKGB:=PEABuffer(@CKDec); CKGSize:=Words*4+4; CKGLimit:=LimitBits; CKGBit:=0;
+End;
+
+Procedure CKBytesAndGain(P: LongInt; Base: LongInt; Second: Boolean);
+Var T: Array[0..8] Of LongInt;
+Begin
+ CKDecodeBytes(Base,CKSub[P].BitsSub Div 8,CKSub[P].BitsSub);
+ If Not Second Then Begin
+  CKGainInfo(CKSub[P].Gnow1);
+  Move(CKSub[P].Gnow1,T,36); Move(CKSub[P].Gprev1,CKSub[P].Gnow1,36); Move(T,CKSub[P].Gprev1,36);
+ End Else Begin
+  CKGainInfo(CKSub[P].Gnow2);
+  Move(CKSub[P].Gnow2,T,36); Move(CKSub[P].Gprev2,CKSub[P].Gnow2,36); Move(T,CKSub[P].Gprev2,36);
+ End;
+End;
+
+Function CKDecodeSubpacket(P,Base: LongInt; Outs: Array Of PCKF): Boolean;
+Var O1,O2: PCKF;
+Begin
+ CKDecodeSubpacket:=False;
+ FillChar(CKBuf1,SizeOf(CKBuf1),0);
+ CKBytesAndGain(P,Base,False);
+ If CKSub[P].Joint<>0 Then Begin
+  If Not CKJointDecode(P,PCKF(@CKBuf1),PCKF(@CKBuf2)) Then Exit;
+ End Else Begin
+  If Not CKMonoDecode(P,PCKF(@CKBuf1)) Then Exit;
+  If CKSub[P].NumCh=2 Then Begin
+   CKBytesAndGain(P,Base+CKSub[P].Size Div 2,True);
+   If Not CKMonoDecode(P,PCKF(@CKBuf2)) Then Exit;
+  End;
+ End;
+ O1:=Outs[CKSub[P].ChIdx]; O2:=Nil;
+ If CKSub[P].NumCh=2 Then O2:=Outs[CKSub[P].ChIdx+1];
+ CKImltGain(PCKF(@CKBuf1),CKSub[P].Gnow1,CKSub[P].Gprev1,PCKF(@CKSub[P].Prev1),O1);
+ If CKSub[P].NumCh=2 Then Begin
+  If CKSub[P].Joint<>0 Then CKImltGain(PCKF(@CKBuf2),CKSub[P].Gnow1,CKSub[P].Gprev1,PCKF(@CKSub[P].Prev2),O2)
+  Else CKImltGain(PCKF(@CKBuf2),CKSub[P].Gnow2,CKSub[P].Gprev2,PCKF(@CKSub[P].Prev2),O2);
+ End;
+ CKDecodeSubpacket:=True;
+End;
+
+Function CKInitStream(Const Extra: Array Of Byte; ExtraLen: LongInt): Boolean;
+Var
+ S,Pos2,SamplesPerFrame,TotalCh,ChMaskAll: LongInt; Ok: Boolean;
+Function B32: LongInt;
+Begin
+ B32:=0;
+ If Pos2+4<=ExtraLen Then B32:=Extra[Pos2]*16777216+Extra[Pos2+1]*65536+Extra[Pos2+2]*256+Extra[Pos2+3];
+ Inc(Pos2,4);
+End;
+Function B16: LongInt;
+Begin
+ B16:=0;
+ If Pos2+2<=ExtraLen Then B16:=Extra[Pos2]*256+Extra[Pos2+1];
+ Inc(Pos2,2);
+End;
+Function Pop(V: LongInt): LongInt;
+Var C: LongInt;
+Begin C:=0; While V<>0 Do Begin If (V And 1)<>0 Then Inc(C); V:=V Shr 1; End; Pop:=C; End;
+Begin
+ CKInitStream:=False;
+ If ExtraLen<8 Then Exit;
+ Pos2:=0; S:=0; TotalCh:=0; ChMaskAll:=0; CKNSub:=0;
+ While Pos2<ExtraLen Do Begin
+  If S>=5 Then Exit;
+  If S>=CKSps Then Exit;
+  CKSub[S].Ver:=B32;
+  SamplesPerFrame:=B16;
+  CKSub[S].Subbands:=B16;
+  B32;
+  CKSub[S].JsStart:=B16;
+  If CKSub[S].JsStart>=51 Then Exit;
+  CKSub[S].JsBits:=B16;
+  CKSub[S].Spc:=SamplesPerFrame Div CKChan;
+  CKSub[S].BitsSub:=CKSps*8;
+  CKSub[S].Log2Nv:=5; CKSub[S].Total:=CKSub[S].Subbands; CKSub[S].NumCh:=1; CKSub[S].BitsDiv:=0;
+  CKSub[S].Joint:=0; CKSub[S].Mask:=0;
+  Case CKSub[S].Ver Of
+   $1000001: If CKChan<>1 Then Exit;
+   $1000002: If CKChan<>1 Then Begin CKSub[S].BitsDiv:=1; CKSub[S].NumCh:=2; End;
+   $1000003: Begin
+     If CKChan<>2 Then Exit;
+     If ExtraLen>=16 Then Begin
+      CKSub[S].Total:=CKSub[S].Subbands+CKSub[S].JsStart; CKSub[S].Joint:=1; CKSub[S].NumCh:=2;
+     End;
+     If CKSub[S].Spc>256 Then CKSub[S].Log2Nv:=6;
+     If CKSub[S].Spc>512 Then CKSub[S].Log2Nv:=7;
+    End;
+   $2000000: Begin
+     CKSub[S].Mask:=B32; ChMaskAll:=ChMaskAll Or CKSub[S].Mask;
+     If Pop(CKSub[S].Mask)>1 Then Begin
+      CKSub[S].Total:=CKSub[S].Subbands+CKSub[S].JsStart; CKSub[S].Joint:=1; CKSub[S].NumCh:=2;
+      CKSub[S].Spc:=SamplesPerFrame Shr 1;
+      If CKSub[S].Spc>256 Then CKSub[S].Log2Nv:=6;
+      If CKSub[S].Spc>512 Then CKSub[S].Log2Nv:=7;
+     End Else CKSub[S].Spc:=SamplesPerFrame;
+    End;
+   Else Exit;
+  End;
+  If (S>1) And (CKSub[S].Spc<>CKSpc) Then Exit;
+  CKSpc:=CKSub[0].Spc;
+  CKSub[S].NvSize:=1 Shl CKSub[S].Log2Nv;
+  If CKSub[S].Total>53 Then Exit;
+  If (CKSub[S].JsBits>6) Or (CKSub[S].JsBits<2*CKSub[S].Joint) Then Exit;
+  If CKSub[S].Subbands>50 Then Exit;
+  If CKSub[S].Subbands=0 Then Exit;
+  FillChar(CKSub[S].Gnow1,36,0); FillChar(CKSub[S].Gprev1,36,0); FillChar(CKSub[S].Gnow2,36,0); FillChar(CKSub[S].Gprev2,36,0);
+  FillChar(CKSub[S].Prev1,SizeOf(CKSub[S].Prev1),0); FillChar(CKSub[S].Prev2,SizeOf(CKSub[S].Prev2),0);
+  If TotalCh+CKSub[S].NumCh>CKChan Then Exit;
+  Inc(TotalCh,CKSub[S].NumCh);
+  Inc(CKNSub); Inc(S);
+ End;
+ If (CKSpc<>256) And (CKSpc<>512) And (CKSpc<>1024) Then Exit;
+ CKMaskAll:=ChMaskAll;
+ CKInitStream:=True;
+End;
+
+{ Decode un fichier RealMedia (.rm/.rmvb) contenant du son Cook (RealAudio G2, entrelacement genr) vers un WAV PCM 16 bits. }
+Procedure DecodeCook(Const Source,Target: String);
+Var
+ F: PEABuffer; Size,Pos2,K,Q,Tag,TSize,P,Q2,SId,TsdStart,TsdSize,Ver,H,W,Sps,Cfs,NPktBlocks,Y,X,Cnt,Flags,Num,Len,PStart,I,J,Ch,Code,OutBytes,FrameSz,Cnt2: LongInt;
+ State: Int64; Found,Got: Boolean; Extra: Array[0..255] Of Byte; ExtraLen: LongInt; Deint,CodecTag: LongInt;
+ PktBuf: PEABuffer; Outs: Array[0..7] Of PCKF; OutBufs: Array[0..7] Of PCKF; Pcm: Array[0..8191] Of Byte; Used,V,MaskW: LongInt; T: Single;
+ Wr: Array[0..71] Of Byte; Started: Boolean; Ok: Boolean; Chk: LongInt;
+Function R16(At: LongInt): LongInt;Begin If At+2<=Size Then R16:=F^[At]*256+F^[At+1] Else R16:=0; End;
+Function R32(At: LongInt): LongInt;Begin If At+4<=Size Then R32:=F^[At]*16777216+F^[At+1]*65536+F^[At+2]*256+F^[At+3] Else R32:=0; End;
+Procedure P32(At: LongInt; Vv: LongInt);
+Var Z: Integer;
+Begin For Z:=0 To 3 Do Begin Wr[At+Z]:=Vv And 255; Vv:=Vv Shr 8; End; End;
+Procedure P16(At: LongInt; Vv: LongInt);
+Begin Wr[At]:=Vv And 255; Wr[At+1]:=(Vv Shr 8) And 255; End;
+Procedure Header(NCh,Rate,Bytes,MaskV: LongInt);
+Begin
+ FillChar(Wr,SizeOf(Wr),0);
+ Wr[0]:=82; Wr[1]:=73; Wr[2]:=70; Wr[3]:=70; Wr[8]:=87; Wr[9]:=65; Wr[10]:=86; Wr[11]:=69;
+ Wr[12]:=102; Wr[13]:=109; Wr[14]:=116; Wr[15]:=32;
+ If NCh<=2 Then Begin
+  P32(4,36+Bytes); P32(16,16); P16(20,1); P16(22,NCh); P32(24,Rate); P32(28,Rate*NCh*2); P16(32,NCh*2); P16(34,16);
+  Wr[36]:=100; Wr[37]:=97; Wr[38]:=116; Wr[39]:=97; P32(40,Bytes); WriteBytes(Wr,44);
+ End Else Begin
+  P32(4,60+Bytes); P32(16,40); P16(20,$FFFE); P16(22,NCh); P32(24,Rate); P32(28,Rate*NCh*2); P16(32,NCh*2); P16(34,16);
+  P16(36,22); P16(38,16); P32(40,MaskV);
+  Wr[44]:=1; Wr[50]:=16; Wr[52]:=128; Wr[55]:=170; Wr[57]:=56; Wr[58]:=155; Wr[59]:=113;
+  Wr[60]:=100; Wr[61]:=97; Wr[62]:=116; Wr[63]:=97; P32(64,Bytes); WriteBytes(Wr,68);
+ End;
+End;
+Procedure FlushPcm;Begin If Used>0 Then Begin WriteBytes(Pcm,Used); Used:=0; End; End;
+{ decode un bloc de block_align octets; retourne True si une trame audio a ete produite }
+Function DecodeBlock(Blk: PEABuffer; Idx: LongInt): Boolean;
+Var Z,Off,ChI,S: LongInt; Ok2: Boolean; OA: Array[0..7] Of PCKF;
+Begin
+ DecodeBlock:=False;
+ CKPkt:=Blk; CKPktSize:=CKBlock;
+ CKSub[0].Size:=CKBlock;
+ For Z:=1 To CKNSub-1 Do Begin
+  CKSub[Z].Size:=2*Blk^[CKBlock-CKNSub+Z];
+  Dec(CKSub[0].Size,CKSub[Z].Size+1);
+  If CKSub[0].Size<0 Then Exit;
+ End;
+ For Z:=0 To 7 Do If CKDiscard>=2 Then OA[Z]:=OutBufs[Z] Else OA[Z]:=Nil;
+ Off:=0; ChI:=0;
+ For S:=0 To CKNSub-1 Do Begin
+  CKSub[S].BitsSub:=(CKSub[S].Size*8) Shr CKSub[S].BitsDiv;
+  CKSub[S].ChIdx:=ChI;
+  If Not CKDecodeSubpacket(S,Off,OA) Then Exit;
+  Inc(Off,CKSub[S].Size); Inc(ChI,CKSub[S].NumCh);
+ End;
+ If CKDiscard<2 Then Begin Inc(CKDiscard); Exit; End;
+ DecodeBlock:=True;
+End;
+Begin
+ OpenRead(Source); Size:=InputSize;
+ GetMem(F,Size+64); K:=0;
+ While K<Size Do Begin
+  If Size-K>4096 Then Q:=4096 Else Q:=Size-K;
+  ReadAt(K,F^[K],Q); Inc(K,Q);
+ End;
+ CloseRead;
+ If (Size<20) Or (F^[0]<>$2E) Or (F^[1]<>$52) Or (F^[2]<>$4D) Or (F^[3]<>$46) Then Fail('cook: fichier RealMedia (.RMF) requis.');
+ Pos2:=R32(4); Found:=False; PStart:=0; CKChan:=0; Deint:=0; ExtraLen:=0; CodecTag:=0; H:=0; W:=0; Sps:=0; Cfs:=0; SId:=-1;
+ While Pos2+10<=Size Do Begin
+  Tag:=R32(Pos2); TSize:=R32(Pos2+4);
+  If Tag=$44415441 Then Begin PStart:=Pos2+18; Break; End;
+  If TSize<10 Then Fail('cook: bloc RealMedia invalide.');
+  If (Tag=$4D445052) And Not Found Then Begin
+   P:=Pos2+10; Q:=R16(P); Inc(P,2+28);
+   Inc(P,1+F^[P]);
+   Inc(P,1+F^[P]);
+   TsdSize:=R32(P); Inc(P,4); TsdStart:=P;
+   If (R32(TsdStart)=$2E7261FD) Then Begin
+    P:=TsdStart+4; Ver:=R16(P); Inc(P,2);
+    If (Ver=4) Or (Ver=5) Then Begin
+     Inc(P,2); Inc(P,4); Inc(P,4); Inc(P,2); Inc(P,4);
+     Inc(P,2); { flavor }
+     Cfs:=R32(P); Inc(P,4); Inc(P,4); Inc(P,4); Inc(P,4);
+     H:=R16(P); Inc(P,2); W:=R16(P); Inc(P,2); Sps:=R16(P); Inc(P,2); Inc(P,2);
+     If Ver=5 Then Inc(P,6);
+     CKRate:=R16(P); Inc(P,2); Inc(P,4); CKChan:=R16(P); Inc(P,2);
+     If Ver=5 Then Begin
+      Deint:=F^[P]+F^[P+1]*256+F^[P+2]*65536+F^[P+3]*16777216; Inc(P,4);
+      CodecTag:=F^[P]+F^[P+1]*256+F^[P+2]*65536+F^[P+3]*16777216; Inc(P,4);
+     End Else Begin
+      Deint:=0; Q2:=F^[P]; For I:=Q2-1 DownTo 0 Do If I<4 Then Deint:=Deint*256+F^[P+1+I];
+      Inc(P,1+Q2);
+      Q2:=F^[P]; CodecTag:=0; For I:=Q2-1 DownTo 0 Do If I<4 Then CodecTag:=CodecTag*256+F^[P+1+I];
+      Inc(P,1+Q2);
+     End;
+     If CodecTag=$6B6F6F63 Then Begin
+      Inc(P,2); Inc(P,1); If Ver=5 Then Inc(P,1);
+      ExtraLen:=R32(P); Inc(P,4);
+      If (ExtraLen<8) Or (ExtraLen>256) Or (P+ExtraLen>Size) Then Fail('cook: donnees additionnelles (extradata) invalides.');
+      Move(F^[P],Extra,ExtraLen);
+      SId:=Q; Found:=True;
+     End;
+    End;
+   End;
+  End;
+  Inc(Pos2,TSize);
+ End;
+ If Not Found Then Fail('cook: aucun flux audio Cook dans ce fichier RealMedia.');
+ If PStart=0 Then Fail('cook: bloc DATA introuvable.');
+ If Deint<>$726E6567 Then Fail('cook: seul l''entrelacement genr est pris en charge.');
+ CKBlock:=Sps;
+ If (Sps<=0) Or (Sps>W) Or (W Mod Sps<>0) Or (CKBlock<=0) Or (CKBlock>4000) Or (H<=0) Or (H>64) Or (W*H>1000000) Or (CKChan<1) Or (CKChan>6) Or (CKRate<4000) Then Fail('cook: parametres du flux RealAudio invalides.');
+ CKSps:=Sps;
+ If Not CKInitStream(Extra,ExtraLen) Then Fail('cook: parametres Cook invalides ou non pris en charge.');
+ CKGsf:=CKSpc Div 8;
+ CKInitTables;
+ For I:=0 To 30 Do CKGainTab[I]:=Exp(((I-15)/CKGsf)*0.69314718055994530942);
+ For I:=0 To CKSpc-1 Do Begin
+  T:=Sin(Single((I+0.5)*(Pi/(2.0*CKSpc))));
+  CKWin[I]:=Double(T)*Sqrt(2.0/CKSpc);
+ End;
+ CKFN:=0; CKDiscard:=0;
+ FillChar(CKBuf0,SizeOf(CKBuf0),0); FillChar(CKBuf1,SizeOf(CKBuf1),0); FillChar(CKBuf2,SizeOf(CKBuf2),0);
+ GetMem(PktBuf,W*H+64);
+ For I:=0 To 7 Do OutBufs[I]:=Nil;
+ For I:=0 To CKChan-1 Do GetMem(OutBufs[I],4096*4);
+ MaskW:=CKMaskAll;
+ If MaskW=0 Then Case CKChan Of 1: MaskW:=4; 2: MaskW:=3; 3: MaskW:=7; 4: MaskW:=$107; 5: MaskW:=$37; Else MaskW:=$3F; End;
+ OpenWrite(Target); Used:=0; Started:=False; OutBytes:=0;
+ Header(CKChan,CKRate,0,MaskW); Started:=True;
+ { paquets }
+ State:=$FFFFFFFF; Cnt:=0; P:=PStart;
+ While P<Size Do Begin
+  State:=((State Shl 8)+F^[P]) And $FFFFFFFF; Inc(P);
+  If State=$494E4458 Then Break;
+  If (State>$FFFF) Or (State<=12) Then Continue;
+  Len:=State-12; State:=$FFFFFFFF;
+  If P+8>Size Then Break;
+  Num:=R16(P); Flags:=F^[P+7]; Inc(P,8);
+  If Num<>SId Then Begin Inc(P,Len); Continue; End;
+  { entrelacement genr }
+  Y:=Cnt;
+  If (Flags And 2)<>0 Then Begin Y:=0; Cnt:=0; End;
+  For X:=0 To W Div Sps-1 Do Begin
+   Q:=Sps*(H*X+((H+1) Div 2)*(Y And 1)+(Y Shr 1));
+   For J:=0 To Sps-1 Do If P+J<Size Then PktBuf^[Q+J]:=F^[P+J] Else PktBuf^[Q+J]:=0;
+   Inc(P,Sps);
+  End;
+  Inc(Cnt);
+  If Cnt<H Then Continue;
+  Cnt:=0;
+  For I:=0 To H*W Div Sps-1 Do Begin
+   If DecodeBlock(PEABuffer(@PktBuf^[I*Sps]),I) Then Begin
+    For J:=0 To CKSpc-1 Do
+     For Ch:=0 To CKChan-1 Do Begin
+      T:=OutBufs[Ch]^[J]*32768.0;
+      V:=Round(T);
+      If V>32767 Then V:=32767; If V<-32768 Then V:=-32768;
+      If V<0 Then Inc(V,65536);
+      Pcm[Used]:=V And 255; Pcm[Used+1]:=V Shr 8; Inc(Used,2);
+      If Used>=8190 Then FlushPcm;
+     End;
+    Inc(OutBytes,CKSpc*CKChan*2);
+    If OutBytes>2000000000 Then Fail('cook: sortie superieure a 2 Go.');
+   End;
+  End;
+ End;
+ FlushPcm;
+ If OutBytes=0 Then Fail('cook: aucune trame Cook decodable.');
+ {$I-}Seek(ActiveOutput,0); Code:=IOResult;{$I+}
+ If Code<>0 Then Fail('cook: positionnement entete WAV impossible.');
+ Header(CKChan,CKRate,OutBytes,MaskW);
+ CloseWrite;
+ FreeMem(F,Size+64); FreeMem(PktBuf,W*H+64);
+End;
+
 Var AVSWantBMP: Boolean;
 
 Procedure DecodeAVS(Const Source,Target: String; PNGMode: Boolean);
@@ -23714,6 +24599,7 @@ Begin
  WriteLn(' DE bmp             image BMP (decodage vers PNG/BMP/Y4M; encodage BMP depuis Y4M ou sources PAL8)');
  WriteLn(' D  c93             Interplay C93 (video seule)');
  WriteLn(' D  avi (camstudio, camtasia)  AVI CSCD / tscc (zlib, LZO, RLE) vers Y4M/PNG/BMP');
+ WriteLn(' D  rm              RealMedia .rm/.rmvb: son Cook (RealAudio G2, entrelacement genr; mono, stereo, joint stereo, multicanal) vers WAV/MP3/...');
  WriteLn(' D  dts             DTS Coherent Acoustics brut (core 16 bits BE/LE, 14 bits; sans extensions) vers WAV (jusqu''a 5.1)/MP3 stereo/...');
  WriteLn(' D  oma             Sony OpenMG (ATRAC3 non chiffre); WAV 0x270 (ATRAC3) vers WAV/MP3/...');
  WriteLn(' DE avi (asv1/asv2) AVI ASUS V1/V2: decodage vers Y4M, encodage Y4M -c:v asv1|asv2');
@@ -24011,6 +24897,7 @@ BEGIN
    WriteLn('D V    camtasia        TechSmith Screen Capture Codec');
    WriteLn('D V    cinepak         Cinepak');
    WriteLn('D V    cljr            Cirrus Logic AccuPak');
+   WriteLn('D A    cook            COOK');
    WriteLn('D A    dca             DCA (DTS Coherent Acoustics)');
    WriteLn('DEV    dnxhd           VC3/DNxHD');
    WriteLn('D V    cyuv            Creative YUV (CYUV)');
@@ -24569,6 +25456,7 @@ BEGIN
    If InputFormat='iss' Then DecodeISS(InputPath,Temps[0]) Else
    If InputFormat='ape' Then DecodeAPE(InputPath,Temps[0]) Else
    If InputFormat='dts' Then DecodeDCA(InputPath,Temps[0]) Else
+   If InputFormat='rm' Then DecodeCook(InputPath,Temps[0]) Else
    If InputFormat='oma' Then DecodeATRAC3(InputPath,Temps[0]) Else
    If InputFormat='bethsoftvid' Then DecodeBethsoft(InputPath,Temps[0],3) Else
    If InputFormat='bfi' Then DecodeBFI(InputPath,Temps[0],3) Else
