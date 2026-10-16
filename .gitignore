@@ -1,0 +1,5 @@
+FFMPEG
+FFMPEG.o
+FFMPEG_dbg
+*.o
+*.ppu
