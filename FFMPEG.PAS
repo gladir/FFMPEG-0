@@ -3490,7 +3490,7 @@ Var
  HLSListOpen,AllStreams,NoVideo,NoAudio: Boolean;
  VideoCodec: String;
  AspectNum,AspectDen: LongInt;
- AsvTag: String[4];
+ AsvTag: String[4]; NVKind,NVSelMode: LongInt; NVAudioOut: Boolean;
  HasAlbum,FourMV,HasVideoBitrate,HasBFrames,HasVideoTolerance,HasBQuant,HasVideoBuffer,HasComment: Boolean;
  BFrames:Integer;
  VideoBitrate,VideoTolerance,VideoBuffer: LongInt;
@@ -3792,7 +3792,7 @@ End;
 Function Probe(Const Name: String): String;
 Var
  B: Array[0..1083] Of Byte;
- N,J: Integer;
+ N,J,K0: Integer;
  Size,StartPos,TagSize,ADXOffset: LongInt;
  EASize: Int64;
  Tag: String[4];
@@ -3899,6 +3899,17 @@ Begin
  End;
  If N>=16 Then If (B[0]=119) And (B[1]=87) And (B[2]=16) And (B[3]=0) Then Begin Probe:='avs'; Exit; End;
  If N>=8 Then If (B[0]=77) And (B[1]=65) And (B[2]=67) And (B[3]=32) Then Begin Probe:='ape'; Exit; End;
+ If N>=5 Then If (B[0]=86) And (B[1]=73) And (B[2]=68) And (B[3]=0) Then Begin Probe:='bethsoftvid'; Exit; End;
+ If N>=4 Then If (B[0]=66) And (B[1]=70) And (B[2]=38) And (B[3]=73) Then Begin Probe:='bfi'; Exit; End;
+ If N>=16 Then Begin
+  K0:=1;
+  For J:=0 To 3 Do Begin
+   If (B[J*4]+B[J*4+1]*256<>K0) Or (B[J*4+2]=0) Or (B[J*4+3]=0) Then K0:=-1;
+   If K0>=0 Then Inc(K0,B[J*4+2]);
+  End;
+  If K0>=0 Then Begin Probe:='c93'; Exit; End;
+ End;
+ If N>=18 Then If (B[0]=66) And (B[1]=77) And (B[6]=0) And (B[7]=0) And (B[8]=0) And (B[9]=0) And (B[14] In [12,40,56,64,108,124]) And (B[15]=0) Then Begin Probe:='bmp'; Exit; End;
  If N>=20 Then If (B[0]=84) And (B[1]=72) And (B[2]=80) And (B[3]=0) Then Begin Probe:='thp'; Exit; End;
  If N>=24 Then If (B[0]=0) And (B[1]=255) And (B[10]=255) And (B[11]=0) And (B[$11]<32) And ((B[$12] And $0E)<>0) Then Begin Probe:='psxstr'; Exit; End;
  If N>=8 Then If (B[0]=0) And (B[1]=10) And (B[2]=83) And (B[3]=77) And (B[4]=74) And (B[5]=80) And
@@ -13663,6 +13674,1209 @@ Begin
  CloseWrite; FreeMem(Raw,Total);
 End;
 
+{ ---- Lot video 2: bethsoftvid, bfi, bmp, c93, camstudio (cscd), camtasia (tscc).
+  Adapte de FFmpeg libavcodec/bethsoftvideo.c, bfi.c, bmp.c, bmpenc.c, c93.c, cscd.c, tscc.c, msrledec.c
+  et libavutil/lzo.c, libavformat/bethsoftvid.c, bfi.c, c93.c (LGPL-2.1-or-later). ---- }
+Type
+ TNVRow=Array[0..65535] Of Byte;
+Var
+ INSrc: PEABuffer; INLen,INPos,INBitBuf,INBitCnt,INCap,INOut,INErr: LongInt; INDst: PEABuffer;
+ INCount: Array[0..15] Of Integer; INSym: Array[0..319] Of Integer;
+ INLCount,INDCount: Array[0..15] Of Integer; INLSym,INDSym: Array[0..319] Of Integer;
+
+Function INBits(N: LongInt): LongInt;
+Var V: LongInt;
+Begin
+ V:=INBitBuf;
+ While INBitCnt<N Do Begin
+  If INPos>=INLen Then Begin INErr:=2; INBits:=0; Exit; End;
+  V:=V Or (LongInt(INSrc^[INPos]) Shl INBitCnt); Inc(INPos); Inc(INBitCnt,8);
+ End;
+ INBitBuf:=V Shr N; Dec(INBitCnt,N);
+ INBits:=V And ((1 Shl N)-1);
+End;
+
+Procedure INBuild(Var Cnt: Array Of Integer; Var Sym: Array Of Integer; Const Lens: Array Of Integer; N: Integer);
+Var Offs: Array[0..15] Of Integer; I: Integer;
+Begin
+ For I:=0 To 15 Do Cnt[I]:=0;
+ For I:=0 To N-1 Do Inc(Cnt[Lens[I]]);
+ Offs[1]:=0; For I:=1 To 14 Do Offs[I+1]:=Offs[I]+Cnt[I];
+ For I:=0 To N-1 Do If Lens[I]<>0 Then Begin Sym[Offs[Lens[I]]]:=I; Inc(Offs[Lens[I]]); End;
+End;
+
+Function INDecode(Const Cnt: Array Of Integer; Const Sym: Array Of Integer): LongInt;
+Var Code,First,Index,Len,C: LongInt;
+Begin
+ Code:=0; First:=0; Index:=0;
+ For Len:=1 To 15 Do Begin
+  Code:=Code Or INBits(1); If INErr<>0 Then Begin INDecode:=-1; Exit; End;
+  C:=Cnt[Len];
+  If Code-C<First Then Begin INDecode:=Sym[Index+(Code-First)]; Exit; End;
+  Inc(Index,C); Inc(First,C); First:=First Shl 1; Code:=Code Shl 1;
+ End;
+ INErr:=1; INDecode:=-1;
+End;
+
+Const
+ INLBase: Array[0..28] Of Integer=(3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258);
+ INLExt: Array[0..28] Of Integer=(0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0);
+ INDBase: Array[0..29] Of Integer=(1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577);
+ INDExt: Array[0..29] Of Integer=(0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13);
+ INOrder: Array[0..18] Of Integer=(16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15);
+
+{ Retourne 0 = fin de flux zlib correcte, 1 = erreur de donnees (Z_DATA_ERROR), 2 = tampon (Z_BUF_ERROR). }
+Function NVInflate(Src: PEABuffer; SrcLen: LongInt; Dst: PEABuffer; Cap: LongInt; Var OutLen: LongInt): Integer;
+Var
+ Last,Typ,I,Sym,Len,Dist,NLen,NDist,NCode,Idx,Rep,Prev: LongInt; Lens: Array[0..319] Of Integer;
+ A,B2: Int64; Stored: LongInt; Fin: Boolean;
+Begin
+ INSrc:=Src; INLen:=SrcLen; INPos:=0; INBitBuf:=0; INBitCnt:=0; INDst:=Dst; INCap:=Cap; INOut:=0; INErr:=0; OutLen:=0;
+ NVInflate:=2;
+ If SrcLen<2 Then Exit;
+ If ((Src^[0]*256+Src^[1]) Mod 31<>0) Or ((Src^[0] And 15)<>8) Or ((Src^[0] Shr 4)>7) Then Begin NVInflate:=1; Exit; End;
+ If (Src^[1] And 32)<>0 Then Begin NVInflate:=1; Exit; End;
+ INPos:=2;
+ Repeat
+  Last:=INBits(1); Typ:=INBits(2);
+  If INErr<>0 Then Break;
+  If Typ=0 Then Begin
+   INBitBuf:=0; INBitCnt:=0;
+   If INPos+4>INLen Then Begin INErr:=2; Break; End;
+   Stored:=Src^[INPos]+Src^[INPos+1]*256; Len:=Src^[INPos+2]+Src^[INPos+3]*256; Inc(INPos,4);
+   If (Stored Xor $FFFF)<>Len Then Begin INErr:=1; Break; End;
+   If INPos+Stored>INLen Then Begin INErr:=2; Break; End;
+   If INOut+Stored>INCap Then Begin INErr:=2; Break; End;
+   Move(Src^[INPos],Dst^[INOut],Stored); Inc(INPos,Stored); Inc(INOut,Stored);
+  End Else If Typ=3 Then Begin INErr:=1; Break; End
+  Else Begin
+   If Typ=1 Then Begin
+    For I:=0 To 143 Do Lens[I]:=8; For I:=144 To 255 Do Lens[I]:=9; For I:=256 To 279 Do Lens[I]:=7; For I:=280 To 287 Do Lens[I]:=8;
+    INBuild(INLCount,INLSym,Lens,288);
+    For I:=0 To 29 Do Lens[I]:=5;
+    INBuild(INDCount,INDSym,Lens,30);
+   End Else Begin
+    NLen:=INBits(5)+257; NDist:=INBits(5)+1; NCode:=INBits(4)+4;
+    If INErr<>0 Then Break;
+    If (NLen>286) Or (NDist>30) Then Begin INErr:=1; Break; End;
+    For I:=0 To 18 Do Lens[I]:=0;
+    For I:=0 To NCode-1 Do Lens[INOrder[I]]:=INBits(3);
+    If INErr<>0 Then Break;
+    INBuild(INCount,INSym,Lens,19);
+    Idx:=0;
+    While Idx<NLen+NDist Do Begin
+     Sym:=INDecode(INCount,INSym);
+     If INErr<>0 Then Break;
+     If Sym<16 Then Begin Lens[Idx]:=Sym; Inc(Idx); End
+     Else Begin
+      Prev:=0;
+      If Sym=16 Then Begin
+       If Idx=0 Then Begin INErr:=1; Break; End;
+       Prev:=Lens[Idx-1]; Rep:=3+INBits(2);
+      End Else If Sym=17 Then Rep:=3+INBits(3) Else Rep:=11+INBits(7);
+      If INErr<>0 Then Break;
+      If Idx+Rep>NLen+NDist Then Begin INErr:=1; Break; End;
+      While Rep>0 Do Begin Lens[Idx]:=Prev; Inc(Idx); Dec(Rep); End;
+     End;
+    End;
+    If INErr<>0 Then Break;
+    If Lens[256]=0 Then Begin INErr:=1; Break; End;
+    INBuild(INLCount,INLSym,Lens,NLen);
+    For I:=0 To NDist-1 Do Lens[I]:=Lens[NLen+I];
+    INBuild(INDCount,INDSym,Lens,NDist);
+   End;
+   Repeat
+    Sym:=INDecode(INLCount,INLSym);
+    If INErr<>0 Then Break;
+    If Sym<256 Then Begin
+     If INOut>=INCap Then Begin INErr:=2; Break; End;
+     Dst^[INOut]:=Sym; Inc(INOut);
+    End Else If Sym=256 Then Break
+    Else Begin
+     Dec(Sym,257);
+     If Sym>=29 Then Begin INErr:=1; Break; End;
+     Len:=INLBase[Sym]+INBits(INLExt[Sym]);
+     Sym:=INDecode(INDCount,INDSym);
+     If INErr<>0 Then Break;
+     If Sym>=30 Then Begin INErr:=1; Break; End;
+     Dist:=INDBase[Sym]+INBits(INDExt[Sym]);
+     If INErr<>0 Then Break;
+     If Dist>INOut Then Begin INErr:=1; Break; End;
+     If INOut+Len>INCap Then Begin INErr:=2; Break; End;
+     While Len>0 Do Begin Dst^[INOut]:=Dst^[INOut-Dist]; Inc(INOut); Dec(Len); End;
+    End;
+   Until False;
+   If INErr<>0 Then Break;
+  End;
+ Until Last<>0;
+ OutLen:=INOut;
+ If INErr<>0 Then Begin NVInflate:=INErr; Exit; End;
+ { somme Adler-32 }
+ INBitBuf:=0; INBitCnt:=0;
+ If INPos+4>INLen Then Begin NVInflate:=2; Exit; End;
+ A:=1; B2:=0;
+ For I:=0 To INOut-1 Do Begin A:=(A+Dst^[I]) Mod 65521; B2:=(B2+A) Mod 65521; End;
+ If (Int64(Src^[INPos])*16777216+Src^[INPos+1]*65536+Src^[INPos+2]*256+Src^[INPos+3])<>((B2 Shl 16) Or A) Then Begin NVInflate:=1; Exit; End;
+ NVInflate:=0;
+End;
+
+{ LZO1X (libavutil/lzo.c): OutLen recoit l'espace restant, retourne le code d'erreur (0 = OK). }
+Function NVLzo(Src: PEABuffer; SrcLen: LongInt; Dst: PEABuffer; Var OutLen: LongInt): LongInt;
+Var
+ InP,OutP,OutEnd,Err,State,X,Cnt,Back: LongInt;
+Function GetB: LongInt;Begin
+ If InP<SrcLen Then GetB:=Src^[InP] Else GetB:=0;
+ Inc(InP);
+End;
+Function GetByteChk: LongInt;Begin
+ If InP<SrcLen Then Begin GetByteChk:=Src^[InP]; Inc(InP); End Else Begin Err:=Err Or 1; GetByteChk:=1; End;
+End;
+Function GetLen(Xv,Mask: LongInt): LongInt;
+Var C,V: LongInt;
+Begin
+ C:=Xv And Mask;
+ If C=0 Then Begin
+  V:=GetByteChk;
+  While V=0 Do Begin
+   If C>=2147482647 Then Begin Err:=Err Or 8; Break; End;
+   Inc(C,255); V:=GetByteChk;
+  End;
+  C:=C+Mask+V;
+ End;
+ GetLen:=C;
+End;
+Procedure Copy(C: LongInt);
+Begin
+ If C>SrcLen-InP Then Begin C:=SrcLen-InP; If C<0 Then C:=0; Err:=Err Or 1; End;
+ If C>OutEnd-OutP Then Begin C:=OutEnd-OutP; If C<0 Then C:=0; Err:=Err Or 2; End;
+ If C>0 Then Move(Src^[InP],Dst^[OutP],C);
+ Inc(InP,C); Inc(OutP,C);
+End;
+Procedure BackPtr(Bk,C: LongInt);
+Var K: LongInt;
+Begin
+ If OutP<Bk Then Begin Err:=Err Or 4; Exit; End;
+ If C>OutEnd-OutP Then Begin C:=OutEnd-OutP; If C<0 Then C:=0; Err:=Err Or 2; End;
+ For K:=1 To C Do Begin Dst^[OutP]:=Dst^[OutP-Bk]; Inc(OutP); End;
+End;
+Begin
+ If (OutLen<=0) Or (SrcLen<=0) Then Begin
+  Err:=0; If OutLen<=0 Then Err:=Err Or 2; If SrcLen<=0 Then Err:=Err Or 1; NVLzo:=Err; Exit;
+ End;
+ InP:=0; OutP:=0; OutEnd:=OutLen; Err:=0; State:=0;
+ X:=GetB;
+ If X>17 Then Begin
+  Copy(X-17); X:=GetB;
+  If X<16 Then Err:=Err Or 8;
+ End;
+ If InP>SrcLen Then Err:=Err Or 1;
+ While Err=0 Do Begin
+  If X>15 Then Begin
+   If X>63 Then Begin
+    Cnt:=(X Shr 5)-1; Back:=(GetB Shl 3)+((X Shr 2) And 7)+1;
+   End Else If X>31 Then Begin
+    Cnt:=GetLen(X,31); X:=GetB; Back:=(GetB Shl 6)+(X Shr 2)+1;
+   End Else Begin
+    Cnt:=GetLen(X,7); Back:=(1 Shl 14)+((X And 8) Shl 11);
+    X:=GetB; Back:=Back+(GetB Shl 6)+(X Shr 2);
+    If Back=(1 Shl 14) Then Begin
+     If Cnt<>1 Then Err:=Err Or 8;
+     Break;
+    End;
+   End;
+  End Else If State=0 Then Begin
+   Cnt:=GetLen(X,15); Copy(Cnt+3); X:=GetB;
+   If X>15 Then Continue;
+   Cnt:=1; Back:=(1 Shl 11)+(GetB Shl 2)+(X Shr 2)+1;
+  End Else Begin
+   Cnt:=0; Back:=(GetB Shl 2)+(X Shr 2)+1;
+  End;
+  BackPtr(Back,Cnt+2);
+  Cnt:=X And 3; State:=Cnt;
+  Copy(Cnt);
+  X:=GetB;
+ End;
+ OutLen:=OutEnd-OutP;
+ NVLzo:=Err;
+End;
+
+{ ---- sortie image commune ---- }
+Var
+ NVMode,NVW,NVH,NVFmt,NVFrames,NVFpsN,NVFpsD,NVSarN,NVSarD: LongInt;
+ NVHasAlpha,NVOpened,NVDone: Boolean; NVTarget: String;
+ NVPalR,NVPalG,NVPalB: Array[0..255] Of Byte;
+ NVLast: PEABuffer; NVLastSize: LongInt; NVHaveLast: Boolean;
+ NVCur: PEABuffer;
+{ Formats natifs: 0 PAL8, 1 BGR24, 2 RGB555LE, 3 BGRA/BGR0 (octets B,G,R,A), 4 GRAY8, 5 RGB565LE, 6 RGB444LE }
+
+Function NVBpp(F: LongInt): LongInt;
+Begin
+ Case F Of 0,4: NVBpp:=1; 1: NVBpp:=3; 3: NVBpp:=4; Else NVBpp:=2; End;
+End;
+
+{ conversion d'un pixel natif vers R,G,B (8 bits) }
+Procedure NVPixel(P: PEABuffer; At: LongInt; Var R,G,B: LongInt);
+Var V: LongInt;
+Begin
+ Case NVFmt Of
+  0: Begin V:=P^[At]; R:=NVPalR[V]; G:=NVPalG[V]; B:=NVPalB[V]; End;
+  1,3: Begin B:=P^[At]; G:=P^[At+1]; R:=P^[At+2]; End;
+  4: Begin R:=P^[At]; G:=R; B:=R; End;
+  2: Begin
+   V:=P^[At]+P^[At+1]*256;
+   R:=((V Shr 10) And 31) Shl 3; G:=((V Shr 5) And 31) Shl 3; B:=(V And 31) Shl 3;
+   R:=R Or (R Shr 5); G:=G Or (G Shr 5); B:=B Or (B Shr 5);
+  End;
+  5: Begin
+   V:=P^[At]+P^[At+1]*256;
+   R:=((V Shr 11) And 31) Shl 3; G:=((V Shr 5) And 63) Shl 2; B:=(V And 31) Shl 3;
+   R:=R Or (R Shr 5); G:=G Or (G Shr 6); B:=B Or (B Shr 5);
+  End;
+  Else Begin
+   V:=P^[At]+P^[At+1]*256;
+   R:=((V Shr 8) And 15) Shl 4; G:=((V Shr 4) And 15) Shl 4; B:=(V And 15) Shl 4;
+  End;
+ End;
+End;
+
+Procedure NVWritePNG(Rgb: PEABuffer; Bpp: LongInt);
+Var
+ Raw: PEABuffer; Total,Row,Blocks,B,Take,At,I,Size,A,Bv,W,H: LongInt;
+ Out: Array[0..255] Of Byte; Used: Integer; Crc: Int64;
+Procedure PutB(V: LongInt);Begin Out[Used]:=V And 255; Inc(Used); If Used>=250 Then Begin WriteBytes(Out,Used); Used:=0; End; End;
+Procedure PutBE32(V: LongInt);Begin PutB(V Shr 24); PutB(V Shr 16); PutB(V Shr 8); PutB(V); End;
+Procedure CrcByte(V: LongInt);
+Begin
+ Crc:=(Crc Shr 8) Xor (CRC32Table[(Crc Xor V) And 255] And $FFFFFFFF);
+End;
+Procedure PutC(V: LongInt);Begin CrcByte(V And 255); PutB(V); End;
+Procedure PutC32(V: LongInt);Begin PutC(V Shr 24); PutC(V Shr 16); PutC(V Shr 8); PutC(V); End;
+Procedure Chunk(Const Tag: String; Len: LongInt);
+Var K: Integer;
+Begin
+ PutBE32(Len); Crc:=$FFFFFFFF; For K:=1 To 4 Do PutC(Ord(Tag[K]));
+End;
+Procedure EndChunk;Begin PutBE32(ALWrap32(Crc Xor $FFFFFFFF)); End;
+Begin
+ W:=NVW; H:=NVH;
+ If Not CRC32Ready Then AVSBuildCRC;
+ Total:=H*(1+Bpp*W); GetMem(Raw,Total);
+ For Row:=0 To H-1 Do Begin Raw^[Row*(1+Bpp*W)]:=0; Move(Rgb^[Row*Bpp*W],Raw^[Row*(1+Bpp*W)+1],Bpp*W); End;
+ A:=1; Bv:=0;
+ For I:=0 To Total-1 Do Begin A:=(A+Raw^[I]) Mod 65521; Bv:=(Bv+A) Mod 65521; End;
+ Blocks:=(Total+65534) Div 65535; Used:=0;
+ OpenWrite(NVTarget);
+ PutB(137); PutB(80); PutB(78); PutB(71); PutB(13); PutB(10); PutB(26); PutB(10);
+ Chunk('IHDR',13); PutC32(W); PutC32(H); PutC(8); If Bpp=4 Then PutC(6) Else PutC(2); PutC(0); PutC(0); PutC(0); EndChunk;
+ Size:=2+Blocks*5+Total+4; Chunk('IDAT',Size); PutC($78); PutC($01);
+ At:=0;
+ For B:=1 To Blocks Do Begin
+  Take:=Total-At; If Take>65535 Then Take:=65535;
+  If B=Blocks Then PutC(1) Else PutC(0);
+  PutC(Take); PutC(Take Shr 8); PutC(Not Take); PutC((Not Take) Shr 8);
+  For I:=0 To Take-1 Do PutC(Raw^[At+I]);
+  Inc(At,Take);
+ End;
+ PutC32((Bv Shl 16) Or A); EndChunk;
+ Chunk('IEND',0); EndChunk;
+ If Used>0 Then WriteBytes(Out,Used);
+ CloseWrite; FreeMem(Raw,Total);
+End;
+
+Procedure NVWriteBMP(P: PEABuffer);
+Var
+ Bpp,RowBytes,Pad,HSize,Bits,Comp,PalEntries,Y,X,I,V,R,G,B: LongInt; Row: Array[0..65535] Of Byte; Hd: Array[0..53] Of Byte; Zero: Array[0..3] Of Byte;
+ Out: Array[0..255] Of Byte; Used: Integer; Tot: Int64;
+Procedure P32(At: Integer; V: LongInt);Var J: Integer;Begin For J:=0 To 3 Do Begin Hd[At+J]:=V And 255; V:=V Shr 8; End; End;
+Procedure P16(At: Integer; V: LongInt);Begin Hd[At]:=V And 255; Hd[At+1]:=(V Shr 8) And 255; End;
+Begin
+ Bpp:=NVBpp(NVFmt); Comp:=0; PalEntries:=0;
+ Case NVFmt Of
+  0,4: Begin Bits:=8; PalEntries:=256; End;
+  1: Bits:=24;
+  3: If NVHasAlpha Then Bits:=32 Else Bits:=24;
+  2: Bits:=16;
+  5,6: Begin Bits:=16; Comp:=3; PalEntries:=3; End;
+ End;
+ RowBytes:=(NVW*Bits+7) Div 8; Pad:=(4-RowBytes) And 3;
+ HSize:=54+PalEntries*4;
+ Tot:=Int64(HSize)+Int64(NVH)*(RowBytes+Pad);
+ If Tot>2147483000 Then Fail('bmp: image trop grande.');
+ FillChar(Hd,SizeOf(Hd),0);
+ Hd[0]:=66; Hd[1]:=77; P32(2,Tot); P32(10,HSize); P32(14,40); P32(18,NVW); P32(22,NVH); P16(26,1); P16(28,Bits);
+ P32(30,Comp); P32(34,NVH*(RowBytes+Pad));
+ OpenWrite(NVTarget); WriteBytes(Hd,54);
+ Used:=0;
+ If NVFmt=0 Then Begin
+  For I:=0 To 255 Do Begin Out[0]:=NVPalB[I]; Out[1]:=NVPalG[I]; Out[2]:=NVPalR[I]; Out[3]:=0; WriteBytes(Out,4); End;
+ End Else If NVFmt=4 Then Begin
+  For I:=0 To 255 Do Begin Out[0]:=I; Out[1]:=I; Out[2]:=I; Out[3]:=0; WriteBytes(Out,4); End;
+ End Else If NVFmt=5 Then Begin
+  Out[0]:=0; Out[1]:=$F8; Out[2]:=0; Out[3]:=0; WriteBytes(Out,4);
+  Out[0]:=$E0; Out[1]:=$07; WriteBytes(Out,4);
+  Out[0]:=$1F; Out[1]:=0; WriteBytes(Out,4);
+ End Else If NVFmt=6 Then Begin
+  Out[0]:=0; Out[1]:=$0F; Out[2]:=0; Out[3]:=0; WriteBytes(Out,4);
+  Out[0]:=$F0; Out[1]:=0; WriteBytes(Out,4);
+  Out[0]:=$0F; Out[1]:=0; WriteBytes(Out,4);
+ End;
+ FillChar(Zero,4,0);
+ For Y:=NVH-1 Downto 0 Do Begin
+  If NVFmt=3 Then Begin
+   If NVHasAlpha Then Move(P^[Y*NVW*4],Row,NVW*4)
+   Else For X:=0 To NVW-1 Do Begin
+    Row[X*3]:=P^[(Y*NVW+X)*4]; Row[X*3+1]:=P^[(Y*NVW+X)*4+1]; Row[X*3+2]:=P^[(Y*NVW+X)*4+2];
+   End;
+   WriteBytes(Row,RowBytes);
+  End Else Begin
+   Move(P^[Y*NVW*Bpp],Row,RowBytes); WriteBytes(Row,RowBytes);
+  End;
+  If Pad>0 Then WriteBytes(Zero,Pad);
+ End;
+ CloseWrite;
+End;
+
+Function NVY4(R,G,B: LongInt): LongInt;Begin NVY4:=(8414*R+16519*G+3208*B+(16 Shl 15)+(1 Shl 14)) Shr 15; End;
+Function NVU4(R,G,B: LongInt): LongInt;Begin NVU4:=ADPCMSar(-4865*R-9528*G+14392*B+(257 Shl 14),15); End;
+Function NVV4(R,G,B: LongInt): LongInt;Begin NVV4:=ADPCMSar(14392*R-12061*G-2332*B+(257 Shl 14),15); End;
+
+Procedure NVWriteY4M(P: PEABuffer);
+Var
+ Hdr,S: String; X,Y,K,J,R,G,B,Sum,CW,CH,PX,PY: LongInt; Row: Array[0..65535] Of Byte;
+Begin
+ If Not NVOpened Then Begin
+  OpenWrite(NVTarget); NVOpened:=True;
+  Str(NVW,S); Hdr:='YUV4MPEG2 W'+S; Str(NVH,S); Hdr:=Hdr+' H'+S;
+  Str(NVFpsN,S); Hdr:=Hdr+' F'+S; Str(NVFpsD,S); Hdr:=Hdr+':'+S+' Ip A';
+  Str(NVSarN,S); Hdr:=Hdr+S; Str(NVSarD,S); Hdr:=Hdr+':'+S+' C420jpeg'+#10;
+  WriteBytes(Hdr[1],Length(Hdr));
+ End;
+ Hdr:='FRAME'+#10; WriteBytes(Hdr[1],Length(Hdr));
+ For Y:=0 To NVH-1 Do Begin
+  For X:=0 To NVW-1 Do Begin NVPixel(P,(Y*NVW+X)*NVBpp(NVFmt),R,G,B); Row[X]:=NVY4(R,G,B); End;
+  WriteBytes(Row,NVW);
+ End;
+ CW:=(NVW+1) Div 2; CH:=(NVH+1) Div 2;
+ For K:=0 To 1 Do For Y:=0 To CH-1 Do Begin
+  For X:=0 To CW-1 Do Begin
+   Sum:=0;
+   For J:=0 To 3 Do Begin
+    PX:=2*X+(J And 1); PY:=2*Y+(J Shr 1);
+    If PX>=NVW Then PX:=NVW-1; If PY>=NVH Then PY:=NVH-1;
+    NVPixel(P,(PY*NVW+PX)*NVBpp(NVFmt),R,G,B);
+    If K=0 Then Inc(Sum,NVU4(R,G,B)) Else Inc(Sum,NVV4(R,G,B));
+   End;
+   Row[X]:=(Sum+2) Div 4;
+  End;
+  WriteBytes(Row,CW);
+ End;
+End;
+
+{ Recoit une image native (haut vers bas, NVW*bpp octets par ligne). }
+Procedure NVEmit(P: PEABuffer);
+Var Rgb: PEABuffer; I,R,G,B,Bpp,Size: LongInt;
+Begin
+ If NVDone Then Exit;
+ Size:=NVW*NVH*NVBpp(NVFmt);
+ If NVMode=0 Then Begin
+  If NVLast=Nil Then Begin GetMem(NVLast,Size); NVLastSize:=Size; End;
+  Move(P^,NVLast^,Size); NVHaveLast:=True;
+  NVWriteY4M(P); Inc(NVFrames);
+ End Else If NVMode=1 Then Begin
+  If NVHasAlpha And (NVFmt=3) Then Bpp:=4 Else Bpp:=3;
+  GetMem(Rgb,NVW*NVH*Bpp);
+  For I:=0 To NVW*NVH-1 Do Begin
+   NVPixel(P,I*NVBpp(NVFmt),R,G,B); Rgb^[I*Bpp]:=R; Rgb^[I*Bpp+1]:=G; Rgb^[I*Bpp+2]:=B;
+   If Bpp=4 Then Rgb^[I*4+3]:=P^[I*4+3];
+  End;
+  NVWritePNG(Rgb,Bpp); FreeMem(Rgb,NVW*NVH*Bpp); NVDone:=True; Inc(NVFrames);
+ End Else Begin
+  NVWriteBMP(P); NVDone:=True; Inc(NVFrames);
+ End;
+End;
+
+{ Repete la derniere image (image perdue: duplication CFR de ffmpeg). }
+Procedure NVRepeat;
+Begin
+ If (NVMode=0) And NVHaveLast And Not NVDone Then Begin NVWriteY4M(NVLast); Inc(NVFrames); End;
+End;
+
+Procedure NVBegin(Mode: LongInt; Const Target: String; W,H,Fmt,FpsN,FpsD: LongInt);
+Begin
+ NVMode:=Mode; NVTarget:=Target; NVW:=W; NVH:=H; NVFmt:=Fmt; NVFrames:=0; NVFpsN:=FpsN; NVFpsD:=FpsD;
+ NVSarN:=1; NVSarD:=1; NVOpened:=False; NVDone:=False; NVLast:=Nil; NVHaveLast:=False; NVHasAlpha:=False;
+End;
+
+Procedure NVFinish(Const Who: String);
+Begin
+ If NVLast<>Nil Then Begin FreeMem(NVLast,NVLastSize); NVLast:=Nil; End;
+ If NVFrames=0 Then Fail(Who+': aucune image decodee.');
+ CloseRead; If NVOpened Then CloseWrite;
+End;
+
+Procedure NVGcd(Var A,B: LongInt);
+Var X,Y,T: LongInt;
+Begin
+ X:=A; Y:=B; While Y<>0 Do Begin T:=X Mod Y; X:=Y; Y:=T; End;
+ If X>1 Then Begin A:=A Div X; B:=B Div X; End;
+End;
+
+{ ---- BMP ---- }
+Procedure NVRLE(Pic: PEABuffer; Stride,W,H,Depth: LongInt; Src: PEABuffer; SrcLen: LongInt);
+Var
+ SP,Line,Pos,P1,P2,I,K,OutP,OutEnd,Width,Bpp,Odd2,Rc,Extra,Q: LongInt;
+Function GB: LongInt;Begin If SP<SrcLen Then GB:=Src^[SP] Else GB:=0; Inc(SP); End;
+Begin
+ SP:=0;
+ If Depth=4 Then Begin
+  Line:=H-1; Pos:=0;
+  While (Line>=0) And (Pos<=W) Do Begin
+   If SP>=SrcLen Then Exit;
+   Rc:=GB;
+   If Rc=0 Then Begin
+    P2:=GB;
+    If P2=0 Then Begin Dec(Line); Pos:=0; End
+    Else If P2=1 Then Exit
+    Else If P2=2 Then Begin Inc(Pos,GB); Dec(Line,GB); End
+    Else Begin
+     Odd2:=P2 And 1; Rc:=(P2+1) Div 2; Extra:=Rc And 1;
+     If (Pos+2*Rc-Odd2>W) Or (SrcLen-SP<Rc) Then Exit;
+     For I:=0 To Rc-1 Do Begin
+      If Pos>=W Then Break;
+      Q:=GB; Pic^[Line*Stride+Pos]:=Q Shr 4; Inc(Pos);
+      If (I+1=Rc) And (Odd2<>0) Then Break;
+      If Pos>=W Then Break;
+      Pic^[Line*Stride+Pos]:=Q And 15; Inc(Pos);
+     End;
+     If Extra<>0 Then Inc(SP);
+    End;
+   End Else Begin
+    If Pos+Rc>W+1 Then Exit;
+    Q:=GB;
+    For I:=0 To Rc-1 Do Begin
+     If Pos>=W Then Break;
+     If (I And 1)=0 Then Pic^[Line*Stride+Pos]:=Q Shr 4 Else Pic^[Line*Stride+Pos]:=Q And 15;
+     Inc(Pos);
+    End;
+   End;
+  End;
+  Exit;
+ End;
+ Bpp:=Depth Shr 3; Width:=Stride Div Bpp; Line:=H-1; Pos:=0;
+ OutP:=Line*Stride; OutEnd:=OutP+Stride;
+ While SP<SrcLen Do Begin
+  P1:=GB;
+  If P1=0 Then Begin
+   P2:=GB;
+   If P2=0 Then Begin
+    Dec(Line);
+    If Line<0 Then Exit;
+    OutP:=Line*Stride; OutEnd:=OutP+Stride; Pos:=0; Continue;
+   End Else If P2=1 Then Exit
+   Else If P2=2 Then Begin
+    P1:=GB; P2:=GB; Dec(Line,P2); Inc(Pos,P1);
+    If (Line<0) Or (Pos>=Width) Then Exit;
+    OutP:=Line*Stride+Pos*Bpp; OutEnd:=Line*Stride+Stride; Continue;
+   End;
+   If OutP+P2*Bpp>OutEnd Then Begin Inc(SP,2*Bpp); Continue; End
+   Else If SrcLen-SP<P2*Bpp Then Exit;
+   Move(Src^[SP],Pic^[OutP],P2*Bpp); Inc(SP,P2*Bpp); Inc(OutP,P2*Bpp);
+   If (Depth=8) And ((P2 And 1)<>0) Then Inc(SP);
+   Inc(Pos,P2);
+  End Else Begin
+   If OutP+P1*Bpp>OutEnd Then Continue;
+   For K:=0 To P1-1 Do Begin
+    For I:=0 To Bpp-1 Do Pic^[OutP+I]:=EAByte(Src,SrcLen,SP+I);
+    Inc(OutP,Bpp);
+   End;
+   Inc(SP,Bpp); Inc(Pos,P1);
+  End;
+ End;
+End;
+
+Procedure DecodeBMP(Const Source,Target: String; Mode: LongInt);
+Var
+ Size,Fsize,Hsize,Ihsize,Width,Height,Depth,Comp,I,J,N,Dsize,Colors,T,Pal0,RowSrc: LongInt;
+ Buf,Pic,Tmp: PEABuffer; Rgb: Array[0..2] Of LongInt; Alpha,V,TopDown: LongInt; Fmt: LongInt; Stride,BytesPp: LongInt; Q: LongInt;
+ Pad: LongInt; Img: PEABuffer; Bottom,HasA: Boolean;
+Function R16(At: LongInt): LongInt;Begin R16:=EAByte(Buf,Size,At)+EAByte(Buf,Size,At+1)*256; End;
+Function R32(At: LongInt): LongInt;Begin R32:=LongInt(EA32(Buf,Size,At,False)); End;
+Function R32U(At: LongInt): Int64;Begin R32U:=Int64(EAByte(Buf,Size,At))+Int64(EAByte(Buf,Size,At+1))*256+Int64(EAByte(Buf,Size,At+2))*65536+Int64(EAByte(Buf,Size,At+3))*16777216; End;
+Begin
+ OpenRead(Source); Size:=InputSize;
+ If (Size<14) Or (Size>400000000) Then Fail('bmp: taille de fichier incorrecte.');
+ GetMem(Buf,Size+64); FillChar(Buf^,Size+64,0);
+ I:=0; While I<Size Do Begin If Size-I>60000 Then J:=60000 Else J:=Size-I; ReadAt(I,Buf^[I],J); Inc(I,J); End;
+ If (Buf^[0]<>66) Or (Buf^[1]<>77) Then Fail('bmp: signature BM requise.');
+ Fsize:=R32U(2) And $7FFFFFFF; If Fsize>Size Then Fsize:=Size;
+ Hsize:=R32(10); Ihsize:=R32(14);
+ If (Ihsize<0) Or (Hsize<0) Or (Int64(Ihsize)+14>Hsize) Then Fail('bmp: taille d''en-tete incorrecte.');
+ If (Fsize=14) Or (Fsize=Ihsize+14) Then Fsize:=Size-2;
+ If Fsize<=Hsize Then Fail('bmp: taille de fichier declaree inferieure a l''en-tete.');
+ Case Ihsize Of
+  40,56,64,108,124: Begin Width:=R32(18); Height:=R32(22); Q:=26; End;
+  12: Begin Width:=R16(18); Height:=R16(20); Q:=22; End;
+  Else Begin Fail('bmp: taille d''en-tete d''information non supportee.'); Exit; End;
+ End;
+ If R16(Q)<>1 Then Fail('bmp: en-tete incorrect (plans).');
+ Depth:=R16(Q+2);
+ If Ihsize>=40 Then Comp:=R32(Q+4) Else Comp:=0;
+ If Not (Comp In [0,1,2,3]) Then Fail('bmp: compression non supportee.');
+ Alpha:=0; Rgb[0]:=0; Rgb[1]:=0; Rgb[2]:=0;
+ If Comp=3 Then Begin
+  Rgb[0]:=R32(Q+4+4+20); Rgb[1]:=R32(Q+4+4+24); Rgb[2]:=R32(Q+4+4+28);
+  If Ihsize>40 Then Alpha:=R32(Q+4+4+32);
+ End;
+ If (Width<=0) Or (Height=0) Or (Width>16000) Or (Abs(Height)>16000) Then Fail('bmp: dimensions incorrectes.');
+ TopDown:=0; If Height<0 Then Begin TopDown:=1; Height:=-Height; End;
+ Fmt:=-1; NVHasAlpha:=False;
+ Case Depth Of
+  32: Begin
+   If Comp=3 Then Begin
+    If (Rgb[0]=LongInt($FF000000)) And (Rgb[1]=$00FF0000) And (Rgb[2]=$0000FF00) Then Fmt:=3
+    Else If (Rgb[0]=$00FF0000) And (Rgb[1]=$0000FF00) And (Rgb[2]=$000000FF) Then Fmt:=3
+    Else If (Rgb[0]=$0000FF00) And (Rgb[1]=$00FF0000) And (Rgb[2]=LongInt($FF000000)) Then Fmt:=3
+    Else If (Rgb[0]=$000000FF) And (Rgb[1]=$0000FF00) And (Rgb[2]=$00FF0000) Then Fmt:=3
+    Else Fail('bmp: masques de bits inconnus.');
+    NVHasAlpha:=Alpha<>0;
+   End Else Begin Fmt:=3; NVHasAlpha:=True; End;
+  End;
+  24: Fmt:=1;
+  16: Begin
+   If Comp=0 Then Fmt:=2
+   Else If Comp=3 Then Begin
+    If (Rgb[0]=$F800) And (Rgb[1]=$07E0) And (Rgb[2]=$001F) Then Fmt:=5
+    Else If (Rgb[0]=$7C00) And (Rgb[1]=$03E0) And (Rgb[2]=$001F) Then Fmt:=2
+    Else If (Rgb[0]=$0F00) And (Rgb[1]=$00F0) And (Rgb[2]=$000F) Then Fmt:=6
+    Else Fail('bmp: masques de bits inconnus.');
+   End;
+  End;
+  8: If Hsize-Ihsize-14>0 Then Fmt:=0 Else Fmt:=4;
+  1,4: Begin
+   If Hsize-Ihsize-14>0 Then Fmt:=0 Else Fail('bmp: palette inconnue pour une image 2/16 couleurs.');
+  End;
+  Else Fail('bmp: profondeur non supportee.');
+ End;
+ If Fmt<0 Then Fail('bmp: format de pixel non supporte.');
+ HasA:=NVHasAlpha; NVBegin(Mode,Target,Width,Height,Fmt,25,1); NVHasAlpha:=HasA; NVSarN:=0; NVSarD:=0;
+ BytesPp:=NVBpp(Fmt); Stride:=((Width*BytesPp+31) Div 32)*32;
+ Dsize:=Size-Hsize;
+ N:=((Width*Depth+31) Div 8) And Not 3;
+ If (Int64(N)*Height>Dsize) And (Comp<>1) And (Comp<>2) Then Begin
+  N:=(Width*Depth+7) Div 8;
+  If Int64(N)*Height>Dsize Then Fail('bmp: donnees insuffisantes.');
+ End;
+ GetMem(Pic,Stride*Height+64); FillChar(Pic^,Stride*Height+64,0);
+ FillChar(NVPalR,256,0); FillChar(NVPalG,256,0); FillChar(NVPalB,256,0);
+ If Fmt=0 Then Begin
+  Colors:=1 Shl Depth;
+  If Ihsize>=36 Then Begin
+   T:=R32(46);
+   If (T<0) Or (T>(1 Shl Depth)) Then T:=0 Else If T<>0 Then Colors:=T;
+  End Else Begin
+   Colors:=(Hsize-Ihsize-14) Div 3; If Colors>256 Then Colors:=256;
+  End;
+  Pal0:=14+Ihsize;
+  If (Hsize-Ihsize-14)<(Colors*4) Then Begin
+   If (Hsize-Ihsize-14)<Colors*3 Then Fail('bmp: palette hors de l''en-tete.');
+   For I:=0 To Colors-1 Do Begin NVPalB[I]:=Buf^[Pal0+3*I]; NVPalG[I]:=Buf^[Pal0+3*I+1]; NVPalR[I]:=Buf^[Pal0+3*I+2]; End;
+  End Else
+   For I:=0 To Colors-1 Do Begin NVPalB[I]:=Buf^[Pal0+4*I]; NVPalG[I]:=Buf^[Pal0+4*I+1]; NVPalR[I]:=Buf^[Pal0+4*I+2]; End;
+ End;
+ If (Comp=1) Or (Comp=2) Then Begin
+  If Depth<>4 Then Begin
+   If (Depth<>8) Then Fail('bmp: RLE seulement en 4 ou 8 bits.');
+  End;
+  NVRLE(Pic,Stride,Width,Height,Depth,PEABuffer(@Buf^[Hsize]),Dsize);
+  If TopDown<>0 Then Begin
+   GetMem(Tmp,Stride); For I:=0 To (Height Div 2)-1 Do Begin
+    Move(Pic^[I*Stride],Tmp^,Stride); Move(Pic^[(Height-1-I)*Stride],Pic^[I*Stride],Stride); Move(Tmp^,Pic^[(Height-1-I)*Stride],Stride);
+   End; FreeMem(Tmp,Stride);
+  End;
+ End Else Begin
+  For I:=0 To Height-1 Do Begin
+   If TopDown<>0 Then J:=I Else J:=Height-1-I;
+   RowSrc:=Hsize+I*N;
+   Case Depth Of
+    1: For Q:=0 To Width-1 Do Pic^[J*Stride+Q]:=(Buf^[RowSrc+(Q Shr 3)] Shr (7-(Q And 7))) And 1;
+    4: For Q:=0 To Width-1 Do If (Q And 1)=0 Then Pic^[J*Stride+Q]:=Buf^[RowSrc+(Q Shr 1)] Shr 4 Else Pic^[J*Stride+Q]:=Buf^[RowSrc+(Q Shr 1)] And 15;
+    Else Move(Buf^[RowSrc],Pic^[J*Stride],Width*BytesPp);
+   End;
+  End;
+ End;
+ { compactage des lignes (stride -> largeur*bpp) et permutation des canaux 32 bits }
+ GetMem(Img,Width*Height*BytesPp+16);
+ For I:=0 To Height-1 Do Begin
+  Move(Pic^[I*Stride],Img^[I*Width*BytesPp],Width*BytesPp);
+  If (Fmt=3) And (Comp=3) Then
+   For J:=0 To Width-1 Do Begin
+    Q:=(I*Width+J)*4;
+    If Rgb[0]=LongInt($FF000000) Then Begin
+     T:=Img^[Q]; V:=Img^[Q+1]; Img^[Q]:=V; Img^[Q+1]:=Img^[Q+2]; Img^[Q+2]:=Img^[Q+3]; Img^[Q+3]:=T;
+    End Else If Rgb[0]=$0000FF00 Then Begin
+     T:=Img^[Q]; V:=Img^[Q+1]; Img^[Q]:=Img^[Q+3]; Img^[Q+3]:=T; Img^[Q+1]:=Img^[Q+2]; Img^[Q+2]:=V;
+    End Else If Rgb[0]=$000000FF Then Begin
+     T:=Img^[Q]; Img^[Q]:=Img^[Q+2]; Img^[Q+2]:=T;
+    End;
+   End;
+ End;
+ If (Fmt=3) And (Comp=0) Then Begin
+  { BGRA sans masques: image sans alpha si tous les alpha sont nuls }
+  NVHasAlpha:=False;
+  For I:=0 To Width*Height-1 Do If Img^[I*4+3]<>0 Then Begin NVHasAlpha:=True; Break; End;
+ End;
+ NVEmit(Img);
+ FreeMem(Img,Width*Height*BytesPp+16); FreeMem(Pic,Stride*Height+64); FreeMem(Buf,Size+64);
+ NVFinish('bmp');
+End;
+
+{ ---- Bethesda VID ---- }
+Type TNVFileBuf=Record P: PEABuffer; Size: LongInt; End;
+Procedure NVLoad(Const Source: String; Var P: PEABuffer; Var Size: LongInt);
+Var I,J: LongInt;
+Begin
+ OpenRead(Source); Size:=InputSize;
+ If (Size<16) Or (Size>400000000) Then Fail('fichier incorrect ou trop volumineux.');
+ GetMem(P,Size+64); FillChar(P^,Size+64,0);
+ I:=0; While I<Size Do Begin If Size-I>60000 Then J:=60000 Else J:=Size-I; ReadAt(I,P^[I],J); Inc(I,J); End;
+End;
+
+Function NVRL16(P: PEABuffer; Size,At: LongInt): LongInt;Begin NVRL16:=EAByte(P,Size,At)+EAByte(P,Size,At+1)*256; End;
+Function NVRL32(P: PEABuffer; Size,At: LongInt): LongInt;Begin NVRL32:=LongInt(EA32(P,Size,At,False)); End;
+
+{ Mode: 0 Y4M, 1 PNG, 2 BMP, 3 audio WAV }
+Procedure DecodeBethsoft(Const Source,Target: String; Mode: LongInt);
+Var
+ F: PEABuffer; Size,W,H,Delay,Pos,Bt,Rate,Code,Copied,NPix,Dur,I,J,K,Len,PktN,FirstDur,Dst,Remaining,Yoff,Cd,L2: LongInt;
+ AudioRate: LongInt; Pk: PEABuffer; Pal: Array[0..767] Of Byte; PalPending,Bad,HaveVideo,AudioStarted,FirstFrame,GotPal: Boolean;
+ Frame: PEABuffer; Pp: Int64; Fin: Boolean; PkPos: LongInt; V: Int64; SrcRate: LongInt;
+Function PG: LongInt;Begin If PkPos<PktN Then PG:=Pk^[PkPos] Else PG:=0; Inc(PkPos); End;
+Begin
+ NVLoad(Source,F,Size);
+ If (F^[0]<>86) Or (F^[1]<>73) Or (F^[2]<>68) Or (F^[3]<>0) Then Fail('bethsoftvid: signature VID requise.');
+ W:=NVRL16(F,Size,7); H:=NVRL16(F,Size,9); Delay:=NVRL16(F,Size,11);
+ If (W<1) Or (H<1) Or (W*H>16000000) Then Fail('bethsoftvid: dimensions incorrectes.');
+ NPix:=W*H; Pos:=15; Rate:=11111; PalPending:=False; HaveVideo:=False; AudioStarted:=False;
+ GetMem(Frame,NPix+64); FillChar(Frame^,NPix+64,0); GetMem(Pk,NPix*2+4096); FirstDur:=0;
+ FillChar(NVPalR,256,0); FillChar(NVPalG,256,0); FillChar(NVPalB,256,0);
+ AudioRate:=11111;
+ If Mode=3 Then Begin EAReset; OpenWrite(Target); ADPCMWaveHeader(11111,1,0); End;
+ While Pos<Size Do Begin
+  Bt:=F^[Pos]; Inc(Pos);
+  Case Bt Of
+   2: Begin
+    If Pos+768>Size Then Break;
+    Move(F^[Pos],Pal,768); Inc(Pos,768); PalPending:=True;
+   End;
+   $7C,$7D: Begin
+    If Bt=$7C Then Begin
+     If Pos+3>Size Then Break;
+     L2:=F^[Pos+2]; Inc(Pos,3); Rate:=1000000 Div (256-L2);
+    End;
+    If Pos+2>Size Then Break;
+    Len:=NVRL16(F,Size,Pos); Inc(Pos,2);
+    If Pos+Len>Size Then Break;
+    If Not AudioStarted Then AudioRate:=Rate;
+    AudioStarted:=True;
+    If Mode=3 Then Begin
+     For I:=0 To Len-1 Do EAPut((F^[Pos+I]-128)*256);
+    End;
+    Inc(Pos,Len);
+   End;
+   1,3,4: Begin
+    If Pos+2>Size Then Break;
+    Dur:=Delay+NVRL16(F,Size,Pos); Inc(Pos,2);
+    PktN:=0; Pk^[PktN]:=Bt; Inc(PktN);
+    If Bt=4 Then Begin
+     If Pos+2>Size Then Break;
+     Pk^[PktN]:=F^[Pos]; Pk^[PktN+1]:=F^[Pos+1]; Inc(PktN,2); Inc(Pos,2);
+    End;
+    Copied:=0; Bad:=False;
+    Repeat
+     If Pos>=Size Then Begin Bad:=True; Break; End;
+     Code:=F^[Pos]; Inc(Pos); Pk^[PktN]:=Code; Inc(PktN);
+     If Code>=$80 Then Begin
+      If Bt=3 Then Begin If Pos>=Size Then Begin Bad:=True; Break; End; Pk^[PktN]:=F^[Pos]; Inc(PktN); Inc(Pos); End;
+     End Else If Code<>0 Then Begin
+      If Pos+Code>Size Then Begin Bad:=True; Break; End;
+      Move(F^[Pos],Pk^[PktN],Code); Inc(PktN,Code); Inc(Pos,Code);
+     End;
+     Inc(Copied,Code And $7F);
+     If Copied=NPix Then Begin
+      If (Pos<Size) And (F^[Pos]<>0) Then Else If Pos<Size Then Inc(Pos);
+      Break;
+     End;
+     If Copied>NPix Then Begin Bad:=True; Break; End;
+    Until Code=0;
+    If Bad Then Break;
+    If Mode=3 Then Continue;
+    If Not HaveVideo Then Begin
+     HaveVideo:=True; FirstDur:=Dur;
+     SrcRate:=Rate;
+     If Dur<1 Then Dur:=1;
+     NVBegin(Mode,Target,W,H,0,SrcRate,185*Dur);
+     NVGcd(NVFpsN,NVFpsD);
+    End;
+    { decodeur }
+    If PalPending Then Begin
+     For I:=0 To 255 Do Begin
+      V:=Int64($FF000000) Or ((Int64(Pal[3*I])*65536+Pal[3*I+1]*256+Pal[3*I+2])*4);
+      V:=V And $FFFFFFFF;
+      V:=V Or ((V Shr 6) And $30303);
+      NVPalR[I]:=(V Shr 16) And 255; NVPalG[I]:=(V Shr 8) And 255; NVPalB[I]:=V And 255;
+     End;
+     PalPending:=False;
+    End;
+    PkPos:=1; Dst:=0; Remaining:=W; Fin:=False;
+    If Bt=4 Then Begin
+     Yoff:=Pk^[1]+Pk^[2]*256; PkPos:=3;
+     If Yoff>=H Then Begin NVRepeat; Continue; End;
+     Dst:=Yoff*W;
+    End;
+    Cd:=PG;
+    While Cd<>0 Do Begin
+     Len:=Cd And $7F;
+     While Len>Remaining Do Begin
+      If Cd<$80 Then Begin
+       For K:=0 To Remaining-1 Do Begin If PkPos<PktN Then Begin Frame^[Dst+K]:=Pk^[PkPos]; Inc(PkPos); End; End;
+      End Else If Bt=3 Then Begin
+       For K:=0 To Remaining-1 Do Frame^[Dst+K]:=EAByte(Pk,PktN,PkPos);
+      End;
+      Dec(Len,Remaining); Inc(Dst,Remaining); Remaining:=W;
+      If Dst=NPix Then Begin Fin:=True; Break; End;
+     End;
+     If Fin Then Break;
+     If Cd<$80 Then Begin
+      For K:=0 To Len-1 Do Begin If PkPos<PktN Then Begin Frame^[Dst+K]:=Pk^[PkPos]; Inc(PkPos); End; End;
+     End Else If Bt=3 Then Begin
+      L2:=PG; For K:=0 To Len-1 Do Frame^[Dst+K]:=L2;
+     End;
+     Dec(Remaining,Len); Inc(Dst,Len);
+     Cd:=PG;
+    End;
+    NVEmit(Frame);
+    If NVDone Then Break;
+   End;
+   $14: Break;
+   Else Break;
+  End;
+ End;
+ FreeMem(Frame,NPix+64); FreeMem(Pk,NPix*2+4096); FreeMem(F,Size+64);
+ If Mode=3 Then Begin
+  EAFlush;
+  If EAWritten=0 Then Fail('bethsoftvid: aucun bloc audio.');
+  ADPCMPatchHeader(AudioRate,1,EAWritten); CloseRead; CloseWrite;
+ End Else NVFinish('bethsoftvid');
+End;
+
+{ ---- Brute Force & Ignorance ---- }
+Procedure DecodeBFI(Const Source,Target: String; Mode: LongInt);
+Var
+ F: PEABuffer; Size,W,H,ChunkHeader,NFrames,Fps,Rate,Pos,ChunkSize,AOff,VOff,ASize,VSize,I,J,K,Len,Offset,Code,Dst,FrameEnd,Frames: LongInt;
+ Dstb,Pk: PEABuffer; Pal: Array[0..767] Of Byte; Found: Boolean; State: LongWord; Bad: Boolean; B,Byte2,C1,C2,GP: LongInt;
+Const LenTab: Array[0..3] Of Integer=(0,2,0,1);
+Function G: LongInt;Begin If GP<VSize Then G:=Pk^[GP] Else G:=0; Inc(GP); End;
+Begin
+ NVLoad(Source,F,Size);
+ If (F^[0]<>66) Or (F^[1]<>70) Or (F^[2]<>38) Or (F^[3]<>73) Then Fail('bfi: signature BF&I requise.');
+ ChunkHeader:=NVRL32(F,Size,8); NFrames:=NVRL32(F,Size,12); Fps:=NVRL32(F,Size,28);
+ W:=NVRL32(F,Size,44); H:=NVRL32(F,Size,48);
+ If (ChunkHeader<3) Or (NFrames<0) Then Fail('bfi: en-tete incorrect.');
+ If (W<1) Or (H<1) Or (W*H>16000000) Then Fail('bfi: dimensions incorrectes.');
+ If Size<60+768+4 Then Fail('bfi: fichier tronque.');
+ Move(F^[60],Pal,768); Rate:=NVRL32(F,Size,60+768);
+ If Rate<=0 Then Fail('bfi: frequence audio incorrecte.');
+ If Fps<=0 Then Fail('bfi: cadence incorrecte.');
+ For I:=0 To 255 Do Begin
+  NVPalR[I]:=((Pal[3*I] Shl 2) Or (Pal[3*I] Shr 4)) And 255;
+  NVPalG[I]:=((Pal[3*I+1] Shl 2) Or (Pal[3*I+1] Shr 4)) And 255;
+  NVPalB[I]:=((Pal[3*I+2] Shl 2) Or (Pal[3*I+2] Shr 4)) And 255;
+ End;
+ Pos:=ChunkHeader-3; Frames:=0;
+ GetMem(Dstb,W*H+64); FillChar(Dstb^,W*H+64,0);
+ If Mode=3 Then Begin EAReset; OpenWrite(Target); ADPCMWaveHeader(Rate,1,0); End
+ Else NVBegin(Mode,Target,W,H,0,Fps,1);
+ While (NFrames>0) And (Pos<Size) Do Begin
+  State:=0; Found:=False;
+  While Pos<Size Do Begin
+   State:=((State Shl 8) Or F^[Pos]) And $FFFFFFFF; Inc(Pos);
+   If State=$53415649 Then Begin Found:=True; Break; End;
+  End;
+  If Not Found Then Break;
+  ChunkSize:=NVRL32(F,Size,Pos); AOff:=NVRL32(F,Size,Pos+8); VOff:=NVRL32(F,Size,Pos+16);
+  Inc(Pos,20);
+  If (AOff<0) Or (VOff<AOff) Or (ChunkSize<VOff) Then Break;
+  ASize:=VOff-AOff; VSize:=ChunkSize-VOff;
+  If Pos+ASize>Size Then ASize:=Size-Pos;
+  If Mode=3 Then For I:=0 To ASize-1 Do EAPut((F^[Pos+I]-128)*256);
+  Inc(Pos,ASize);
+  If VSize>0 Then Begin
+   If Pos+VSize>Size Then VSize:=Size-Pos;
+   Pk:=PEABuffer(@F^[Pos]); Inc(Pos,VSize); Dec(NFrames);
+   If Mode<>3 Then Begin
+    GP:=0; G; G; G; G; Dst:=0; FrameEnd:=W*H; Bad:=False;
+    While Dst<>FrameEnd Do Begin
+     B:=G; Code:=B Shr 6; Len:=B And 63; Offset:=0;
+     If GP>=VSize Then Begin Bad:=True; Break; End;
+     If Len=0 Then Begin
+      If Code=1 Then Begin Len:=G; Offset:=G; Offset:=Offset+G*256; End
+      Else Begin Len:=G; Len:=Len+G*256; If (Code=2) And (Len=0) Then Break; End;
+     End Else If Code=1 Then Offset:=G;
+     If Dst+(Len Shl LenTab[Code])>FrameEnd Then Break;
+     Case Code Of
+      0: Begin
+       If Len>=VSize-GP Then Begin Bad:=True; Break; End;
+       Move(Pk^[GP],Dstb^[Dst],Len); Inc(GP,Len); Inc(Dst,Len);
+      End;
+      1: Begin
+       K:=Dst-Offset; Len:=Len*4;
+       If K>=0 Then While Len>0 Do Begin Dstb^[Dst]:=Dstb^[K]; Inc(Dst); Inc(K); Dec(Len); End;
+      End;
+      2: Inc(Dst,Len);
+      3: Begin
+       C1:=G; C2:=G;
+       While Len>0 Do Begin Dstb^[Dst]:=C1; Dstb^[Dst+1]:=C2; Inc(Dst,2); Dec(Len); End;
+      End;
+     End;
+    End;
+    If Bad Then NVRepeat Else NVEmit(Dstb);
+    If NVDone Then Break;
+   End;
+  End;
+ End;
+ FreeMem(Dstb,W*H+64);
+ If Mode=3 Then Begin
+  EAFlush; FreeMem(F,Size+64);
+  If EAWritten=0 Then Fail('bfi: aucune donnee audio.');
+  ADPCMPatchHeader(Rate,1,EAWritten); CloseRead; CloseWrite;
+ End Else Begin FreeMem(F,Size+64); NVFinish('bfi'); End;
+End;
+
+{ ---- Interplay C93 ---- }
+Procedure DecodeC93(Const Source,Target: String; Mode: LongInt);
+Const
+ Wd=320; Ht=192;
+Var
+ F: PEABuffer; Size,I,J,K,CB,CF,Pos,DSize,PSize,N,Frames,Idx,BlkLen: LongInt;
+ Recs: Array[0..511] Of Record Index: LongInt; Len,Fr: LongInt; End;
+ Offs: Array[0..31] Of LongInt; NextAudio,Bad: Boolean;
+ Pic: Array[0..1] Of PEABuffer; PalOf: Array[0..1] Of Array[0..255] Of LongInt; HaveOld: Boolean; Cur: LongInt;
+ Pk: PEABuffer; PkN: LongInt; PalStart: Boolean;
+ Pr,Pg,Pb: Array[0..1,0..255] Of Byte;
+ B,X,Y,Bt,Typ,GP: LongInt; Cols,Grps: Array[0..3] Of Byte; Old,New2: PEABuffer;
+Function G: LongInt;Begin If GP<PkN Then G:=Pk^[GP] Else G:=0; Inc(GP); End;
+Function G16: LongInt;Var A: LongInt;Begin A:=G; G16:=A+G*256; End;
+Function G32: Int64;Var A,Bq,C,D: LongInt;Begin A:=G; Bq:=G; C:=G; D:=G; G32:=Int64(A)+Int64(Bq)*256+Int64(C)*65536+Int64(D)*16777216; End;
+Function CopyBlk(ToP: PEABuffer; ToOff: LongInt; From: PEABuffer; Offset,Hh: LongInt): Boolean;
+Var Wd2,FromX,FromY,Overflow,Q,R: LongInt;
+Begin
+ CopyBlk:=True;
+ If From=Nil Then Exit;
+ Wd2:=Hh; FromX:=Offset Mod Wd; FromY:=Offset Div Wd; Overflow:=FromX+Wd2-Wd;
+ If FromY+Hh>Ht Then Begin CopyBlk:=False; Exit; End;
+ If Overflow>0 Then Begin
+  Dec(Wd2,Overflow);
+  For Q:=0 To Hh-1 Do For R:=0 To Overflow-1 Do ToP^[ToOff+Q*Wd+Wd2+R]:=From^[(FromY+Q)*Wd+R];
+ End;
+ For Q:=0 To Hh-1 Do For R:=0 To Wd2-1 Do ToP^[ToOff+Q*Wd+R]:=From^[(FromY+Q)*Wd+FromX+R];
+End;
+Procedure DrawN(OutP: PEABuffer; OutOff,Ww,Hh,Bpp: LongInt; UseGrps: Boolean; Col: Int64);
+Var Xx,Yy: LongInt;
+Begin
+ For Yy:=0 To Hh-1 Do Begin
+  If UseGrps Then Cols[0]:=Grps[3*(Yy Shr 1)];
+  For Xx:=0 To Ww-1 Do Begin
+   If UseGrps Then Cols[1]:=Grps[(Xx Shr 1)+1];
+   OutP^[OutOff+Xx+Yy*Wd]:=Cols[Col And ((1 Shl Bpp)-1)];
+   Col:=Col Shr Bpp;
+  End;
+ End;
+End;
+Begin
+ NVLoad(Source,F,Size);
+ If Size<2048 Then Fail('c93: fichier trop court.');
+ For I:=0 To 511 Do Begin
+  Recs[I].Index:=NVRL16(F,Size,I*4); Recs[I].Len:=F^[I*4+2]; Recs[I].Fr:=F^[I*4+3];
+  If Recs[I].Fr>32 Then Fail('c93: trop d''images dans un bloc.');
+ End;
+ NVBegin(Mode,Target,Wd,Ht,0,25,2); NVSarN:=5; NVSarD:=6;
+ GetMem(Pic[0],Wd*Ht+64); GetMem(Pic[1],Wd*Ht+64); FillChar(Pic[0]^,Wd*Ht+64,0); FillChar(Pic[1]^,Wd*Ht+64,0);
+ FillChar(Pr,SizeOf(Pr),0); FillChar(Pg,SizeOf(Pg),0); FillChar(Pb,SizeOf(Pb),0);
+ GetMem(Pk,200000); Cur:=0; HaveOld:=False;
+ CB:=0; CF:=0; NextAudio:=False;
+ Repeat
+  If NextAudio Then Begin Inc(CF); NextAudio:=False; End;
+  If CF>=Recs[CB].Fr Then Begin
+   If (CB>=511) Or (Recs[CB+1].Len=0) Then Break;
+   Inc(CB); CF:=0;
+  End;
+  If CF=0 Then Begin
+   For I:=0 To 31 Do Offs[I]:=NVRL32(F,Size,Recs[CB].Index*2048+I*4);
+  End;
+  Pos:=Recs[CB].Index*2048+Offs[CF];
+  If (Pos<0) Or (Pos+2>Size) Then Break;
+  DSize:=NVRL16(F,Size,Pos); Inc(Pos,2);
+  If (DSize>60000) Or (Pos+DSize+2>Size) Then Break;
+  Pk^[0]:=0; Move(F^[Pos],Pk^[1],DSize); PkN:=DSize+1; Inc(Pos,DSize);
+  PSize:=NVRL16(F,Size,Pos); Inc(Pos,2);
+  If PSize<>0 Then Begin
+   If PSize<>768 Then Break;
+   If Pos+768>Size Then Break;
+   Pk^[0]:=Pk^[0] Or 1; Move(F^[Pos],Pk^[PkN],768); Inc(PkN,768);
+  End;
+  NextAudio:=True;
+  If (CB=0) And (CF=0) Then Pk^[0]:=Pk^[0] Or 2;
+  { decodage }
+  Idx:=Cur; Cur:=Cur xor 1; New2:=Pic[Idx]; Old:=Pic[Idx xor 1]; If Not HaveOld Then Old:=Nil;
+  GP:=0; B:=G; Bt:=0; Bad:=False;
+  Y:=0;
+  While (Y<Ht) And Not Bad Do Begin
+   X:=0;
+   While (X<Wd) And Not Bad Do Begin
+    If Bt=0 Then Bt:=G;
+    Typ:=Bt And 15;
+    Case Typ Of
+     2: Begin I:=G16; If Not CopyBlk(New2,Y*Wd+X,Old,I,8) Then Bad:=True; End;
+     6,7: Begin
+      For J:=0 To 1 Do For I:=0 To 1 Do Begin
+       K:=G16;
+       If Typ=7 Then Begin
+        If ((K Div Wd)=Y+J*4) And ((Abs((K Mod Wd)-X-I*4)<4) Or (Abs((K Mod Wd)-X-I*4)>Wd-4)) Then Bad:=True
+        Else If Not CopyBlk(New2,(Y+J*4)*Wd+X+I*4,New2,K,4) Then Bad:=True;
+       End Else If Not CopyBlk(New2,(Y+J*4)*Wd+X+I*4,Old,K,4) Then Bad:=True;
+       If Bad Then Break;
+      End;
+     End;
+     8: Begin
+      Cols[0]:=G; Cols[1]:=G;
+      For I:=0 To 7 Do DrawN(New2,Y*Wd+X+I*Wd,8,1,1,False,G);
+     End;
+     10,11,13: Begin
+      For J:=0 To 1 Do For I:=0 To 1 Do Begin
+       If Typ=10 Then Begin
+        Cols[0]:=G; Cols[1]:=G; DrawN(New2,(Y+J*4)*Wd+X+I*4,4,4,1,False,G16);
+       End Else If Typ=13 Then Begin
+        Cols[0]:=G; Cols[1]:=G; Cols[2]:=G; Cols[3]:=G; DrawN(New2,(Y+J*4)*Wd+X+I*4,4,4,2,False,G32);
+       End Else Begin
+        Grps[0]:=G; Grps[1]:=G; Grps[2]:=G; Grps[3]:=G; DrawN(New2,(Y+J*4)*Wd+X+I*4,4,4,1,True,G16);
+       End;
+      End;
+     End;
+     14: ;
+     15: For J:=0 To 7 Do For I:=0 To 7 Do New2^[(Y+J)*Wd+X+I]:=G;
+     Else Bad:=True;
+    End;
+    Bt:=Bt Shr 4;
+    Inc(X,8);
+   End;
+   Inc(Y,8);
+  End;
+  If Not Bad Then Begin
+   If (B And 1)<>0 Then Begin
+    For I:=0 To 255 Do Begin Pr[Idx,I]:=G; Pg[Idx,I]:=G; Pb[Idx,I]:=G; End;
+   End Else If HaveOld Then Begin
+    Move(Pr[Idx xor 1],Pr[Idx],256); Move(Pg[Idx xor 1],Pg[Idx],256); Move(Pb[Idx xor 1],Pb[Idx],256);
+   End;
+   Move(Pr[Idx],NVPalR,256); Move(Pg[Idx],NVPalG,256); Move(Pb[Idx],NVPalB,256);
+   HaveOld:=True;
+   NVEmit(New2);
+  End Else Begin NVRepeat; HaveOld:=True; End;
+  If NVDone Then Break;
+ Until False;
+ FreeMem(Pic[0],Wd*Ht+64); FreeMem(Pic[1],Wd*Ht+64); FreeMem(Pk,200000); FreeMem(F,Size+64);
+ NVFinish('c93');
+End;
+
+{ ---- AVI: CamStudio (CSCD) et Camtasia (TSCC) ---- }
+Procedure DecodeScreenAVI(Const Source,Target: String; Mode: LongInt; Camtasia: Boolean);
+Var
+ F: PEABuffer; Size,Pos,W,H,Bits,Rate,Scale,I,J,K,Cnt,CSize,Sz,MoviePos,Stride,Bpp,LineLen,Fmt,DecSize,Q,N,BugDelta,Res,OutLen: LongInt;
+ Tag: String[4]; Vids,HaveFmt,InMovie: Boolean; Pic,Dec,Pk: PEABuffer; Pal: Array[0..255] Of LongWord; Fcc: String[4]; Ok,PalChanged,Key,HavePic: Boolean;
+ RN,RD,Comp,St,ColorsN,FirstEnt,NEnt,Row,Rr,SrcStride: LongInt; Img: PEABuffer;
+Function T4(At: LongInt): String;
+Var S4: String[4]; Z: Integer;
+Begin S4:=''; For Z:=0 To 3 Do S4:=S4+Chr(EAByte(F,Size,At+Z)); T4:=S4; End;
+Begin
+ NVLoad(Source,F,Size);
+ If (T4(0)<>'RIFF') Or (T4(8)<>'AVI ') Then Fail('avi: signature RIFF/AVI requise.');
+ Pos:=12; Vids:=False; HaveFmt:=False; InMovie:=False; Cnt:=0; Rate:=25; Scale:=1; Fcc:=''; Bits:=0; W:=0; H:=0;
+ FillChar(Pal,SizeOf(Pal),0);
+ While (Pos+8<=Size) And Not InMovie And (Cnt<500) Do Begin
+  Tag:=T4(Pos); Sz:=NVRL32(F,Size,Pos+4); Inc(Cnt);
+  If Sz<0 Then Break;
+  If Tag='LIST' Then Begin
+   If T4(Pos+8)='movi' Then Begin InMovie:=True; MoviePos:=Pos+12; End;
+   Inc(Pos,12);
+  End Else Begin
+   If (Tag='strh') And Not HaveFmt Then Begin
+    Vids:=T4(Pos+8)='vids';
+    If Vids Then Begin Scale:=NVRL32(F,Size,Pos+8+20); Rate:=NVRL32(F,Size,Pos+8+24); End;
+   End Else If (Tag='strf') And Vids And Not HaveFmt Then Begin
+    W:=NVRL32(F,Size,Pos+8+4); H:=NVRL32(F,Size,Pos+8+8); Bits:=NVRL16(F,Size,Pos+8+14); Fcc:=T4(Pos+8+16);
+    ColorsN:=NVRL32(F,Size,Pos+8+32);
+    If Bits<=8 Then Begin
+     N:=(Sz-40) Div 4; If N>(1 Shl Bits) Then N:=1 Shl Bits;
+     For I:=0 To N-1 Do Pal[I]:=$FF000000 Or LongWord(NVRL32(F,Size,Pos+8+40+4*I) And $FFFFFF);
+    End;
+    HaveFmt:=True;
+   End;
+   Inc(Pos,8+Sz+(Sz And 1));
+  End;
+ End;
+ If Not InMovie Or Not HaveFmt Then Fail('avi: flux video introuvable.');
+ If Camtasia Then Begin
+  If Not ((Fcc='tscc') Or (Fcc='TSCC')) Then Fail('camtasia: flux AVI tscc requis.');
+ End Else If Fcc<>'CSCD' Then Fail('camstudio: flux AVI CSCD requis.');
+ If H<0 Then H:=-H;
+ If (W<1) Or (H<1) Or (W>8192) Or (H>8192) Then Fail('avi: dimensions incorrectes.');
+ If (Rate<=0) Or (Scale<=0) Then Begin Rate:=25; Scale:=1; End;
+ RN:=Rate; RD:=Scale; NVGcd(RN,RD);
+ If Camtasia Then Begin
+  Case Bits Of 8: Fmt:=0; 16: Fmt:=2; 24: Fmt:=1; 32: Fmt:=3; Else Begin Fail('camtasia: profondeur non supportee.'); Exit; End; End;
+ End Else Begin
+  Case Bits Of 16: Fmt:=2; 24: Fmt:=1; 32: Fmt:=3; Else Begin Fail('camstudio: profondeur invalide.'); Exit; End; End;
+ End;
+ Bpp:=NVBpp(Fmt); LineLen:=W*Bpp;
+ NVBegin(Mode,Target,W,H,Fmt,RN,RD);
+ If Fmt=3 Then NVHasAlpha:=False;
+ GetMem(Pic,W*H*Bpp+64); FillChar(Pic^,W*H*Bpp+64,0);
+ If Camtasia Then Begin
+  DecSize:=(((W*Bits+7) Shr 3)+3*W+2)*H+2;
+ End Else Begin
+  Stride:=((LineLen+3) Div 4)*4; DecSize:=H*Stride;
+ End;
+ GetMem(Dec,DecSize+256);
+ For I:=0 To 255 Do Begin NVPalR[I]:=(Pal[I] Shr 16) And 255; NVPalG[I]:=(Pal[I] Shr 8) And 255; NVPalB[I]:=Pal[I] And 255; End;
+ Pos:=MoviePos; HavePic:=False;
+ While Pos+8<=Size Do Begin
+  Tag:=T4(Pos); Sz:=NVRL32(F,Size,Pos+4);
+  If Sz<0 Then Break;
+  If Tag='LIST' Then Begin Inc(Pos,12); Continue; End;
+  If Pos+8+Sz>Size Then Sz:=Size-Pos-8;
+  If (Tag[1]='0') And (Tag[2]='0') And (Tag[3]='p') And (Tag[4]='c') And Camtasia And (Bits<=8) Then Begin
+   FirstEnt:=F^[Pos+8]; NEnt:=F^[Pos+9]; If NEnt=0 Then NEnt:=256;
+   For I:=0 To NEnt-1 Do If (FirstEnt+I<256) And (4+4*I+3<Sz) Then Begin
+    NVPalR[FirstEnt+I]:=F^[Pos+8+4+4*I]; NVPalG[FirstEnt+I]:=F^[Pos+8+4+4*I+1]; NVPalB[FirstEnt+I]:=F^[Pos+8+4+4*I+2];
+   End;
+  End Else If (Tag[1]='0') And (Tag[2]='0') And ((Tag[3]='d') Or (Tag[3]='w')) And ((Tag[4]='c') Or (Tag[4]='b')) Then Begin
+   Pk:=PEABuffer(@F^[Pos+8]); Ok:=False;
+   If Camtasia Then Begin
+    { TSCC: zlib + RLE MS }
+    Res:=NVInflate(Pk,Sz,Dec,DecSize,OutLen);
+    If (Res=1) Then Ok:=False
+    Else If Res=2 Then Ok:=False
+    Else Begin
+     SrcStride:=((W*Bpp+31) Div 32)*32;
+     If Bpp>1 Then Begin
+      { RLE en profondeur Bits: tampon avec stride aligne }
+      GetMem(Img,SrcStride*H+64);
+      For Row:=0 To H-1 Do Move(Pic^[Row*LineLen],Img^[Row*SrcStride],LineLen);
+      NVRLE(Img,SrcStride,W,H,Bits,Dec,OutLen);
+      For Row:=0 To H-1 Do Move(Img^[Row*SrcStride],Pic^[Row*LineLen],LineLen);
+      FreeMem(Img,SrcStride*H+64);
+     End Else Begin
+      GetMem(Img,SrcStride*H+64);
+      For Row:=0 To H-1 Do Move(Pic^[Row*LineLen],Img^[Row*SrcStride],LineLen);
+      NVRLE(Img,SrcStride,W,H,8,Dec,OutLen);
+      For Row:=0 To H-1 Do Move(Img^[Row*SrcStride],Pic^[Row*LineLen],LineLen);
+      FreeMem(Img,SrcStride*H+64);
+     End;
+     Ok:=True;
+    End;
+   End Else Begin
+    If Sz>=2 Then Begin
+     Comp:=(Pk^[0] Shr 1) And 7; Key:=(Pk^[0] And 1)<>0;
+     BugDelta:=((W*Bpp+3) Div 4)*4*H-(W And Not 3)*Bpp*H;
+     OutLen:=DecSize;
+     If Comp=0 Then Begin
+      Res:=NVLzo(PEABuffer(@Pk^[2]),Sz-2,Dec,OutLen);
+      Ok:=(Res=0) And ((OutLen=0) Or (OutLen=BugDelta));
+     End Else If Comp=1 Then Begin
+      Res:=NVInflate(PEABuffer(@Pk^[2]),Sz-2,Dec,DecSize,OutLen);
+      Ok:=(Res=0) And ((OutLen=DecSize) Or (OutLen=DecSize-BugDelta));
+     End;
+     If Ok Then Begin
+      For Row:=0 To H-1 Do Begin
+       Rr:=H-1-Row;
+       If Key Then Move(Dec^[Row*Stride],Pic^[Rr*LineLen],LineLen)
+       Else For Q:=0 To LineLen-1 Do Pic^[Rr*LineLen+Q]:=(Pic^[Rr*LineLen+Q]+Dec^[Row*Stride+Q]) And 255;
+      End;
+     End;
+    End;
+   End;
+   If Ok Then Begin
+    For I:=0 To 255 Do Begin End;
+    NVEmit(Pic); HavePic:=True;
+   End Else NVRepeat;
+   If NVDone Then Break;
+  End;
+  Inc(Pos,8+Sz+(Sz And 1));
+ End;
+ FreeMem(Pic,W*H*Bpp+64); FreeMem(Dec,DecSize+256); FreeMem(F,Size+64);
+ If Camtasia Then NVFinish('camtasia') Else NVFinish('camstudio');
+End;
+
+
+{ Y4M (4:2:0) vers BMP 24 bits: premiere image; conversion BT.601 approchee (swscale non reproduit). }
+Procedure EncodeBMPFromY4M(Const Source,Target: String);
+Var
+ Limit,Cur,At: LongInt; H: Array[0..255] Of Byte; Line,Token: String; W,Hh,K,Code,X,Y,CW,CH,C,D,E,R,G,B,Yv,Uv,Vv: LongInt;
+ Yp,Up,Vp,Img: PEABuffer; Q: LongInt;
+Function Clip(V: LongInt): LongInt;Begin If V<0 Then Clip:=0 Else If V>255 Then Clip:=255 Else Clip:=V; End;
+Begin
+ OpenRead(Source); Limit:=InputSize; Cur:=0; Line:='';
+ While Cur<Limit Do Begin ReadAt(Cur,H,1); Inc(Cur); If H[0]=10 Then Break; If Length(Line)<250 Then Line:=Line+Chr(H[0]); End;
+ If Copy(Line,1,9)<>'YUV4MPEG2' Then Fail('bmp: entree Y4M requise.');
+ W:=0; Hh:=0; Line:=Copy(Line,11,255);
+ While Line<>'' Do Begin
+  K:=Pos(' ',Line); If K=0 Then K:=Length(Line)+1;
+  Token:=Copy(Line,1,K-1); Line:=Copy(Line,K+1,255);
+  If Token='' Then Continue;
+  Case Token[1] Of
+   'W': Val(Copy(Token,2,20),W,Code);
+   'H': Val(Copy(Token,2,20),Hh,Code);
+   'C': If (Token<>'C420') And (Token<>'C420jpeg') And (Token<>'C420mpeg2') And (Token<>'C420paldv') Then Fail('bmp: Y4M YUV420 8 bits requis.');
+  End;
+ End;
+ If (W<1) Or (Hh<1) Or (W>16000) Or (Hh>16000) Then Fail('bmp: dimensions Y4M incorrectes.');
+ CW:=(W+1) Div 2; CH:=(Hh+1) Div 2;
+ If Cur+6+W*Hh+2*CW*CH>Limit Then Fail('bmp: aucune image Y4M.');
+ ReadAt(Cur,H,5); If (H[0]<>70) Or (H[1]<>82) Then Fail('bmp: marqueur FRAME requis.');
+ Cur:=Cur+5; While Cur<Limit Do Begin ReadAt(Cur,H,1); Inc(Cur); If H[0]=10 Then Break; End;
+ GetMem(Yp,W*Hh); GetMem(Up,CW*CH); GetMem(Vp,CW*CH); GetMem(Img,W*Hh*4+16);
+ At:=0; While At<W*Hh Do Begin If W*Hh-At>60000 Then Q:=60000 Else Q:=W*Hh-At; ReadAt(Cur+At,Yp^[At],Q); Inc(At,Q); End;
+ Inc(Cur,W*Hh);
+ At:=0; While At<CW*CH Do Begin If CW*CH-At>60000 Then Q:=60000 Else Q:=CW*CH-At; ReadAt(Cur+At,Up^[At],Q); Inc(At,Q); End;
+ Inc(Cur,CW*CH);
+ At:=0; While At<CW*CH Do Begin If CW*CH-At>60000 Then Q:=60000 Else Q:=CW*CH-At; ReadAt(Cur+At,Vp^[At],Q); Inc(At,Q); End;
+ For Y:=0 To Hh-1 Do For X:=0 To W-1 Do Begin
+  Yv:=Yp^[Y*W+X]; Uv:=Up^[(Y Shr 1)*CW+(X Shr 1)]; Vv:=Vp^[(Y Shr 1)*CW+(X Shr 1)];
+  C:=Yv-16; D:=Uv-128; E:=Vv-128;
+  R:=Clip((298*C+409*E+128) Shr 8); G:=Clip((298*C-100*D-208*E+128) Shr 8); B:=Clip((298*C+516*D+128) Shr 8);
+  Q:=(Y*W+X)*4; Img^[Q]:=B; Img^[Q+1]:=G; Img^[Q+2]:=R; Img^[Q+3]:=255;
+ End;
+ NVBegin(2,Target,W,Hh,3,25,1); NVHasAlpha:=False;
+ NVEmit(Img);
+ FreeMem(Yp,W*Hh); FreeMem(Up,CW*CH); FreeMem(Vp,CW*CH); FreeMem(Img,W*Hh*4+16);
+ NVFinish('bmp');
+End;
+
+{ Kind: 1 bethsoftvid, 2 bfi, 3 c93, 4 bmp, 5 camstudio (AVI CSCD), 6 camtasia (AVI tscc); Mode: 0 Y4M, 1 PNG, 2 BMP, 3 audio }
+Procedure DecodeNV(Kind: LongInt; Const Source,Target: String; Mode: LongInt);
+Begin
+ Case Kind Of
+  1: DecodeBethsoft(Source,Target,Mode);
+  2: DecodeBFI(Source,Target,Mode);
+  3: DecodeC93(Source,Target,Mode);
+  4: DecodeBMP(Source,Target,Mode);
+  5: DecodeScreenAVI(Source,Target,Mode,False);
+  6: DecodeScreenAVI(Source,Target,Mode,True);
+ End;
+End;
+
+
+Var AVSWantBMP: Boolean;
+
 Procedure DecodeAVS(Const Source,Target: String; PNGMode: Boolean);
 Var
  H: Array[0..15] Of Byte;
@@ -13766,6 +14980,11 @@ Begin
     HavePal:=False; PalSize:=0;
     VideoBlock(Buf,BSz-4,Sub); FreeMem(Buf,BSz);
     { image prete }
+    If PNGMode And AVSWantBMP Then Begin
+     NVBegin(2,Target,318,198,0,25,1);
+     Move(AVSR,NVPalR,256); Move(AVSG,NVPalG,256); Move(AVSB,NVPalB,256);
+     NVEmit(PEABuffer(@AVSPix)); Opened:=True; Frames:=1; Break;
+    End;
     If PNGMode Then Begin
      For I:=0 To 318*198-1 Do Begin
       Rgb^[3*I]:=AVSR[AVSPix[I]]; Rgb^[3*I+1]:=AVSG[AVSPix[I]]; Rgb^[3*I+2]:=AVSB[AVSPix[I]];
@@ -17265,6 +18484,12 @@ Begin
  WriteLn(' D  xa              Maxis XA (adpcm_ea_maxis_xa)');
  WriteLn(' D  amv             AMV (audio adpcm_ima_amv; video amv vers Y4M)');
  WriteLn(' D  ape             Monkey''s Audio (versions 3.93-3.99, 8/16 bits) vers WAV/MP3/...');
+
+ WriteLn(' D  bethsoftvid     Bethesda Softworks VID (video + audio PCM 8 bits)');
+ WriteLn(' D  bfi             Brute Force & Ignorance (video + audio PCM 8 bits)');
+ WriteLn(' DE bmp             image BMP (decodage vers PNG/BMP/Y4M; encodage BMP depuis Y4M ou sources PAL8)');
+ WriteLn(' D  c93             Interplay C93 (video seule)');
+ WriteLn(' D  avi (camstudio, camtasia)  AVI CSCD / tscc (zlib, LZO, RLE) vers Y4M/PNG/BMP');
  WriteLn(' D  oma             Sony OpenMG (ATRAC3 non chiffre); WAV 0x270 (ATRAC3) vers WAV/MP3/...');
  WriteLn(' DE avi (asv1/asv2) AVI ASUS V1/V2: decodage vers Y4M, encodage Y4M -c:v asv1|asv2');
  WriteLn(' D  avs             Argonaut Creature Shock AVS (video vers Y4M/PNG)');
@@ -17551,6 +18776,12 @@ BEGIN
    WriteLn('D V    4xm             4X Movie');
    WriteLn('D V    amv             AMV Video');
    WriteLn('D A    ape             Monkey''s Audio');
+   WriteLn('D V    bethsoftvid     Bethesda VID video');
+   WriteLn('D V    bfi             Brute Force & Ignorance');
+   WriteLn('DEV    bmp             BMP image');
+   WriteLn('D V    c93             Interplay C93');
+   WriteLn('D V    camstudio       CamStudio');
+   WriteLn('D V    camtasia        TechSmith Screen Capture Codec');
    WriteLn('D A    atrac3          ATRAC3 (Adaptive TRansform Acoustic Coding 3)');
    WriteLn('DEV    asv1            ASUS V1');
    WriteLn('DEV    asv2            ASUS V2');
@@ -17634,8 +18865,8 @@ BEGIN
    VideoCodec:=Lower(NextArgument);
    If (VideoCodec<>'png') And (VideoCodec<>'gif') And (VideoCodec<>'copy') And
     (VideoCodec<>'ffv1') And (VideoCodec<>'flv') And (VideoCodec<>'mpeg4') And (VideoCodec<>'mpeg1video') And (VideoCodec<>'mpeg2video') And (VideoCodec<>'rawvideo') And
-    (VideoCodec<>'asv1') And (VideoCodec<>'asv2') Then
-    Fail('Codec video: png/gif, copy, ffv1, flv, mpeg4, mpeg1video, mpeg2video, rawvideo, asv1, asv2.');
+    (VideoCodec<>'asv1') And (VideoCodec<>'asv2') And (VideoCodec<>'bmp') Then
+    Fail('Codec video: png/gif, bmp, copy, ffv1, flv, mpeg4, mpeg1video, mpeg2video, rawvideo, asv1, asv2.');
   End Else If (Argument='-vframes') Or (Argument='-frames:v') Then Begin
    If InputPath='' Then Fail('Nombre d''images attendu apres -i.');
    Value:=NextArgument; Val(Value,Number,Code);
@@ -17828,8 +19059,9 @@ BEGIN
   If NoVideo Or (VideoCodec='copy') Or (AudioCodec<>'') Or HasBitrate Or (RequestedRate<>0) Or
    (RequestedChannels<>0) Or (ImageWidth<>0) Or IsHTTP(InputPath) Then
    Fail('avs: video locale decodee, sans copie ni conversion audio requise.');
-  If (VideoCodec='png') Or (OutputFormat='png') Then Begin
-   If VideoFrames<>1 Then Fail('avs: extraction PNG avec -frames:v 1 requise.');
+  AVSWantBMP:=(VideoCodec='bmp') Or (OutputFormat='bmp');
+  If (VideoCodec='png') Or (OutputFormat='png') Or AVSWantBMP Then Begin
+   If VideoFrames<>1 Then Fail('avs: extraction PNG/BMP avec -frames:v 1 requise.');
    Temps[2]:=NewTemporary; DecodeAVS(Intermediate,Temps[2],True);
    Commit(Temps[2]); Temps[2]:=''; WriteLn('Image creee: ',OutputPath); Halt(0);
   End;
@@ -17839,6 +19071,39 @@ BEGIN
    Fail('avs: sortie Y4M, PNG ou encodeur video natif requis.');
   Temps[6]:=NewTemporary; DecodeAVS(Intermediate,Temps[6],False); Intermediate:=Temps[6];
   InputFormat:='yuv4mpegpipe'; DecodedVideo:=True; NoAudio:=True;
+ End;
+ NVKind:=0;
+ If InputFormat='bethsoftvid' Then NVKind:=1 Else If InputFormat='bfi' Then NVKind:=2 Else If InputFormat='c93' Then NVKind:=3
+ Else If InputFormat='bmp' Then NVKind:=4
+ Else If (InputFormat='avi') And Not IsHTTP(InputPath) Then Begin
+  AsvTag:=AVIVideoFourCC(Intermediate);
+  If AsvTag='CSCD' Then NVKind:=5 Else If (AsvTag='tscc') Or (AsvTag='TSCC') Then NVKind:=6;
+ End;
+ NVAudioOut:=(OutputFormat='wav') Or (OutputFormat='mp3') Or (OutputFormat='ac3') Or (OutputFormat='adx') Or (OutputFormat='aiff');
+ If (NVKind<>0) And Not (((NVKind=1) Or (NVKind=2)) And NVAudioOut) Then Begin
+  If NoVideo Or (VideoCodec='copy') Or (AudioCodec<>'') Or HasBitrate Or (RequestedRate<>0) Or
+   (RequestedChannels<>0) Or (ImageWidth<>0) Or IsHTTP(InputPath) Then
+   Fail('Decodage video local sans copie, sans -vn ni conversion audio requis.');
+  If (VideoCodec='bmp') Or (OutputFormat='bmp') Then NVSelMode:=2
+  Else If (VideoCodec='png') Or (OutputFormat='png') Then NVSelMode:=1 Else NVSelMode:=0;
+  If NVSelMode<>0 Then Begin
+   If (VideoFrames<>1) And (NVKind<>4) Then Fail('Extraction PNG/BMP avec -frames:v 1 requise.');
+   Temps[2]:=NewTemporary; DecodeNV(NVKind,Intermediate,Temps[2],NVSelMode);
+   Commit(Temps[2]); Temps[2]:=''; WriteLn('Image creee: ',OutputPath); Halt(0);
+  End;
+  If VideoFrames<>0 Then Fail('-frames:v reserve a la sortie PNG/BMP pour cette entree.');
+  If Not ((OutputFormat='yuv4mpegpipe') Or (VideoCodec='mpeg4') Or (VideoCodec='mpeg1video') Or
+   (VideoCodec='mpeg2video') Or (VideoCodec='ffv1') Or (VideoCodec='flv') Or FourMV) Then
+   Fail('Sortie Y4M, PNG, BMP ou encodeur video natif requis.');
+  Temps[6]:=NewTemporary; DecodeNV(NVKind,Intermediate,Temps[6],0); Intermediate:=Temps[6];
+  InputFormat:='yuv4mpegpipe'; DecodedVideo:=True; NoAudio:=True;
+ End;
+ If ((VideoCodec='bmp') Or (OutputFormat='bmp')) And (InputFormat='yuv4mpegpipe') Then Begin
+  If VideoFrames<>1 Then Fail('Sortie BMP: -frames:v 1 requis.');
+  If NoVideo Or (AudioCodec<>'') Or HasBitrate Or (RequestedRate<>0) Or (RequestedChannels<>0) Or (ImageWidth<>0) Or IsHTTP(InputPath) Or HasCrop Then
+   Fail('Sortie BMP: entree Y4M locale sans autre option requise.');
+  Temps[2]:=NewTemporary; EncodeBMPFromY4M(Intermediate,Temps[2]);
+  Commit(Temps[2]); Temps[2]:=''; WriteLn('Image creee: ',OutputPath); Halt(0);
  End;
  If HasCrop Then Begin
   If NoVideo Or (VideoCodec='copy') Or (AudioCodec='copy') Then Fail('Crop: decodage/reencodage requis; incompatible avec copy ou -vn.');
@@ -18058,6 +19323,8 @@ BEGIN
    If InputFormat='iss' Then DecodeISS(InputPath,Temps[0]) Else
    If InputFormat='ape' Then DecodeAPE(InputPath,Temps[0]) Else
    If InputFormat='oma' Then DecodeATRAC3(InputPath,Temps[0]) Else
+   If InputFormat='bethsoftvid' Then DecodeBethsoft(InputPath,Temps[0],3) Else
+   If InputFormat='bfi' Then DecodeBFI(InputPath,Temps[0],3) Else
    If (InputFormat='aiff') And IsAIFFIma4(InputPath) Then DecodeAIFFIma4(InputPath,Temps[0]) Else
    If InputFormat='aiff' Then DecodeAIFF(InputPath,Temps[0]) Else
    If InputFormat='voc' Then DecodeVOC(InputPath,Temps[0]) Else
