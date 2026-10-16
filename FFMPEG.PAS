@@ -14162,7 +14162,15 @@ Begin
   End;
   NVWritePNG(Rgb,Bpp); FreeMem(Rgb,NVW*NVH*Bpp); NVDone:=True; Inc(NVFrames);
  End Else Begin
-  NVWriteBMP(P); NVDone:=True; Inc(NVFrames);
+  If (NVFmt=7) Or (NVFmt=8) Then Begin
+   GetMem(Rgb,NVW*NVH*3);
+   For I:=0 To NVW*NVH-1 Do Begin
+    NVPixel(P,I*NVBpp(NVFmt),R,G,B); Rgb^[I*3]:=R; Rgb^[I*3+1]:=G; Rgb^[I*3+2]:=B;
+   End;
+   Bpp:=NVFmt; NVFmt:=9; NVWriteBMP(Rgb); NVFmt:=Bpp;
+   FreeMem(Rgb,NVW*NVH*3);
+  End Else NVWriteBMP(P);
+  NVDone:=True; Inc(NVFrames);
  End;
 End;
 
