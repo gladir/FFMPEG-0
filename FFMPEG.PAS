@@ -13908,7 +13908,7 @@ Var
  NVMode,NVW,NVH,NVFmt,NVFrames,NVFpsN,NVFpsD,NVSarN,NVSarD: LongInt;
  NVHasAlpha,NVOpened,NVDone,NVYC,NVInitDup: Boolean; NVTarget: String;
  NVPalR,NVPalG,NVPalB: Array[0..255] Of Byte;
- NVVN,NVVD,NVSubX,NVSubY,NVCW,NVCH: LongInt; NVIl: Char; NVYTag: String[16];
+ NVVN,NVVD,NVSubX,NVSubY,NVCW,NVCH: LongInt; NVIl: Char; NVBT709: Boolean; NVYTag: String[16];
  NVLast: PEABuffer; NVLastSize,NVGap: LongInt; NVHaveLast: Boolean;
  NVLastPalR,NVLastPalG,NVLastPalB,NVSavePalR,NVSavePalG,NVSavePalB: Array[0..255] Of Byte;
  NVCur: PEABuffer;
@@ -13944,7 +13944,8 @@ Begin
     Vv:=(P^[(CIdx+NVCW*NVCH)*2]+P^[(CIdx+NVCW*NVCH)*2+1]*256) Shr 2;
    End;
    Yv:=Yv-16; Uv:=Uv-128; Vv:=Vv-128;
-   R:=(298*Yv+409*Vv+128) Div 256; G:=(298*Yv-100*Uv-208*Vv+128) Div 256; B:=(298*Yv+516*Uv+128) Div 256;
+   If NVBT709 Then Begin R:=(298*Yv+459*Vv+128) Div 256; G:=(298*Yv-55*Uv-136*Vv+128) Div 256; B:=(298*Yv+541*Uv+128) Div 256; End
+   Else Begin R:=(298*Yv+409*Vv+128) Div 256; G:=(298*Yv-100*Uv-208*Vv+128) Div 256; B:=(298*Yv+516*Uv+128) Div 256; End;
    If R<0 Then R:=0 Else If R>255 Then R:=255;
    If G<0 Then G:=0 Else If G>255 Then G:=255;
    If B<0 Then B:=0 Else If B>255 Then B:=255;
@@ -14168,7 +14169,7 @@ End;
 Procedure NVBegin(Mode: LongInt; Const Target: String; W,H,Fmt,FpsN,FpsD: LongInt);
 Begin
  NVMode:=Mode; NVTarget:=Target; NVW:=W; NVH:=H; NVFmt:=Fmt; NVFrames:=0; NVFpsN:=FpsN; NVFpsD:=FpsD;
- NVSarN:=0; NVSarD:=0; NVYC:=False; NVInitDup:=False; NVIl:='p'; NVOpened:=False; NVDone:=False; NVLast:=Nil; NVHaveLast:=False; NVGap:=0; NVHasAlpha:=False;
+ NVSarN:=0; NVSarD:=0; NVYC:=False; NVInitDup:=False; NVIl:='p'; NVBT709:=False; NVOpened:=False; NVDone:=False; NVLast:=Nil; NVHaveLast:=False; NVGap:=0; NVHasAlpha:=False;
 End;
 
 Procedure NVFinish(Const Who: String);
@@ -16521,7 +16522,7 @@ Begin
    NVBegin(Mode,Target,DXWidth,DXHeight,NeedFmt,RN,RD);
    DXSetupSink(Mode,Target,RN,RD);
    If DXIlFrame Then Begin If DXTffFrame Then NVIl:='t' Else NVIl:='b'; End Else NVIl:='p';
-   NVAviSar(DXWidth,DXHeight);
+   NVAviSar(DXWidth,DXHeight); NVBT709:=True;
    GetMem(DXOut,DXWidth*DXHeight*3*2+64); DXOutSize:=DXWidth*DXHeight*3*2+64;
    Started:=True;
   End;
@@ -16552,7 +16553,7 @@ Begin
    End;
   End;
   If Not InMovie Or Not HaveFmt Then Fail('dnxhd: flux video AVI introuvable.');
-  If (Fcc<>'AVdn') And (Fcc<>'AVDN') Then Fail('dnxhd: flux AVI AVdn requis.');
+  If (Fcc<>'AVdn') And (Fcc<>'AVDN') And (Fcc<>'AVdh') Then Fail('dnxhd: flux AVI AVdn/AVdh requis.');
   If (Rate<=0) Or (Scale<=0) Then Begin Rate:=25; Scale:=1; End;
   RN:=Rate; RD:=Scale; NVGcd(RN,RD);
   Pos:=MoviePos;
@@ -20732,7 +20733,7 @@ BEGIN
   AsvTag:=AVIVideoFourCC(Intermediate);
   If AsvTag='CSCD' Then NVKind:=5 Else If (AsvTag='tscc') Or (AsvTag='TSCC') Then NVKind:=6
   Else If (AsvTag='CLJR') Or (AsvTag='cljr') Then NVKind:=7 Else If (AsvTag='cyuv') Or (AsvTag='CYUV') Then NVKind:=8
-  Else If (AsvTag='cvid') Or (AsvTag='CVID') Then NVKind:=9 Else If (AsvTag='AVdn') Or (AsvTag='AVDN') Then NVKind:=11;
+  Else If (AsvTag='cvid') Or (AsvTag='CVID') Then NVKind:=9 Else If (AsvTag='AVdn') Or (AsvTag='AVDN') Or (AsvTag='AVdh') Then NVKind:=11;
  End;
  NVAudioOut:=(OutputFormat='wav') Or (OutputFormat='mp3') Or (OutputFormat='ac3') Or (OutputFormat='adx') Or (OutputFormat='aiff');
  If (NVKind<>0) And Not (((NVKind=1) Or (NVKind=2)) And NVAudioOut) Then Begin
