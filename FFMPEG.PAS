@@ -39023,7 +39023,7 @@ Type
   Mv: Array[0..1] Of Pointer; Ref: Array[0..1] Of Pointer; RefId: Array[0..1] Of Pointer;
   Id,FrameNum,FrameNumWrap,Poc,PocTop,PocBot,LongIdx,RefState: LongInt;
   Output,NonExist,Idr,Mmco5,Cleared: Boolean;
-  Pts: Int64; Seq: LongInt;
+  Pts,Dur: Int64; Seq: LongInt;
  End;
 Var
  H4Pics: Array[0..H4MaxPics-1] Of TH4Pic;
@@ -40692,6 +40692,7 @@ Var
  H4NalBuf: PEABuffer; H4NalCap: LongInt;
  H4Mode: LongInt; H4Target: String; H4OutBuf: PEABuffer; H4OutW,H4OutH,H4OutSize: LongInt;
  H4Began: Boolean; H4FpsN,H4FpsD: LongInt;
+ H4Timing,H4RateSet,H4PtsAuto: Boolean; H4Start,H4CurDur: Int64;
  H4FramesOut: LongInt;
  H4PicOpen: Boolean;            { une image est en cours de decodage }
  H4PicSeqW,H4PicSeqH: LongInt;
@@ -40734,7 +40735,7 @@ Begin
 End;
 
 Procedure H4EmitPic(I: LongInt);
-Var S: ^TH4Sps; CL,CR,CT,CB,W,H,Y,CW,CH: LongInt; Ow,Cw2: Int64; P: ^TH4Pic; A,B,T: Int64; Tag: String;
+Var S: ^TH4Sps; CL,CR,CT,CB,W,H,Y,CW,CH: LongInt; Ow,Cw2: Int64; P: ^TH4Pic; A,B,T: Int64; Tag: String; NbF,NbP: Int64;
 Begin
  S:=@H4Sps[H4ActSps]; P:=@H4Pics[I];
  CL:=S^.CropL*2; CR:=S^.CropR*2; CT:=S^.CropT*2; CB:=S^.CropB*2;
@@ -40743,11 +40744,13 @@ Begin
  CW:=(W+1) Div 2; CH:=(H+1) Div 2;
  If Not H4Began Then Begin
   H4Began:=True;
-  H4FpsN:=25; H4FpsD:=1;
-  If (S^.TimingInfo<>0) And (S^.NumUnitsInTick>0) And (S^.TimeScale>0) Then Begin
-   A:=S^.TimeScale; B:=2*S^.NumUnitsInTick; T:=A; Ow:=B;
-   While Ow<>0 Do Begin Cw2:=T Mod Ow; T:=Ow; Ow:=Cw2; End;
-   If (A Div T<2147483647) And (B Div T<2147483647) Then Begin H4FpsN:=A Div T; H4FpsD:=B Div T; End;
+  If Not H4RateSet Then Begin
+   H4FpsN:=25; H4FpsD:=1;
+   If (S^.TimingInfo<>0) And (S^.NumUnitsInTick>0) And (S^.TimeScale>0) Then Begin
+    A:=S^.TimeScale; B:=2*S^.NumUnitsInTick; T:=A; Ow:=B;
+    While Ow<>0 Do Begin Cw2:=T Mod Ow; T:=Ow; Ow:=Cw2; End;
+    If (A Div T<2147483647) And (B Div T<2147483647) Then Begin H4FpsN:=A Div T; H4FpsD:=B Div T; End;
+   End;
   End;
   NVBegin(H4Mode,H4Target,W,H,7,H4FpsN,H4FpsD);
   NVSubX:=1; NVSubY:=1; NVCW:=CW; NVCH:=CH;
@@ -40768,7 +40771,15 @@ Begin
  For Y:=0 To H-1 Do Move(P^.Y^[(CT+Y)*H4StrideY+CL],H4OutBuf^[Y*W],W);
  For Y:=0 To CH-1 Do Move(P^.U^[(CT Div 2+Y)*H4StrideC+CL Div 2],H4OutBuf^[W*H+Y*CW],CW);
  For Y:=0 To CH-1 Do Move(P^.V^[(CT Div 2+Y)*H4StrideC+CL Div 2],H4OutBuf^[W*H+CW*CH+Y*CW],CW);
- NVEmit(H4OutBuf);
+ If H4Timing Then Begin
+  If H4PtsAuto Then CFSync(H4FramesOut,1,NbF,NbP)
+  Else Begin
+   If P^.Pts<H4Start Then Exit;
+   CFSync(P^.Pts-H4Start,P^.Dur,NbF,NbP);
+  End;
+  NVEmitN(H4OutBuf,NbP,NbF);
+  Inc(CFNext,NbF); Inc(CFFrameNo,NbF);
+ End Else NVEmit(H4OutBuf);
  Inc(H4FramesOut);
 End;
 
@@ -40951,7 +40962,7 @@ Begin
     If Not H4Activate(H4Pp^.SpsId) Then Begin Inc(H4ErrCount); Exit; End;
     H4StartPicture(Sh);
     If H4Err Then Exit;
-    H4Pics[H4Cur].Pts:=Pts;
+    H4Pics[H4Cur].Pts:=Pts; H4Pics[H4Cur].Dur:=H4CurDur;
    End;
    If Not H4PicOpen Then Exit;
    Inc(H4SliceNum);
@@ -41583,6 +41594,7 @@ Begin
  For I:=0 To H4MaxPics-1 Do H4Pics[I].Used:=False;
  H4Started:=False; H4PicOpen:=False; H4Began:=False; H4Cur:=-1; H4OutCount:=0; H4FramesOut:=0; H4ErrCount:=0;
  H4PrevPocMsb:=0; H4PrevPocLsb:=0; H4PrevFrameNumOffset:=0; H4FrameNumOffset:=0; H4PrevFrameNum:=0; H4PrevRefFrameNum:=0;
+ H4Timing:=False; H4RateSet:=False; H4PtsAuto:=False; H4Start:=0; H4CurDur:=0;
  H4PrevHadMmco5:=False; H4NextId:=1; H4Seq:=0; H4NalBuf:=Nil; H4NalCap:=0; H4SliceTab:=Nil; H4ActSps:=-1; H4MbW:=0; H4MbH:=0;
  H4InitTabs;
 End;
@@ -41610,12 +41622,82 @@ Begin
  H4Bump(True);
 End;
 
+Function H4Gcd(A,B: Int64): Int64;
+Var T: Int64;
+Begin
+ While B<>0 Do Begin T:=A Mod B; A:=B; B:=T; End;
+ H4Gcd:=A;
+End;
+
+{ av_guess_frame_rate : r_frame_rate (RN/RD), avg_frame_rate (AvN/AvD), cadence du codec (CN/CD, ticks_per_frame=2) }
+Procedure H4GuessRate(RN,RD,AvN,AvD,CN,CD: Int64; Var ON,OD: LongInt);
+Var FrN,FrD,G: Int64; Fr,Av,Co: Double;
+Begin
+ FrN:=RN; FrD:=RD;
+ If (AvN>0) And (AvD>0) And (FrN>0) And (FrD>0) Then
+  If (AvN/AvD<70) And (FrN/FrD>210) Then Begin FrN:=AvN; FrD:=AvD; End;
+ If (CN>0) And (CD>0) Then Begin
+  Co:=CN/CD;
+  If FrN=0 Then Begin FrN:=CN; FrD:=CD; End
+  Else Begin
+   Fr:=FrN/FrD; Av:=0;
+   If (AvN>0) And (AvD>0) Then Av:=(AvN/AvD)/Fr;
+   If (Co<Fr*0.7) And (Abs(1.0-Av)>0.1) Then Begin FrN:=CN; FrD:=CD; End;
+  End;
+ End;
+ If FrN<=0 Then Begin FrN:=25; FrD:=1; End;
+ G:=H4Gcd(FrN,FrD); If G<1 Then G:=1;
+ ON:=FrN Div G; OD:=FrD Div G;
+End;
+
+{ cadence de sortie d'un flux brut (demuxeur h264 : framerate 25 par defaut, r_frame_rate estime sur les dts du parseur) }
+Procedure H4RawRate(Var ON,OD: LongInt);
+Var I,K: LongInt; S: ^TH4Sps; Dts,Dur: PTLArr; Sz: PGFArr; FN,FD,Step,G: Int64; RN,RD: LongInt;
+Begin
+ S:=Nil;
+ For I:=0 To 31 Do If H4Sps[I].Valid Then Begin S:=@H4Sps[I]; Break; End;
+ FN:=0; FD:=1;
+ If (S<>Nil) And (S^.TimingInfo<>0) And (S^.NumUnitsInTick>0) And (S^.TimeScale>0) Then Begin
+  FN:=S^.TimeScale; FD:=2*S^.NumUnitsInTick; G:=H4Gcd(FN,FD); FN:=FN Div G; FD:=FD Div G;
+ End;
+ If FN>0 Then Step:=(Int64(1200000)*FD+FN Div 2) Div FN Else Step:=1200000 Div 25;
+ GetMem(Dts,64*8); GetMem(Dur,64*8); GetMem(Sz,64*4);
+ For K:=0 To 63 Do Begin Dts^[K]:=K*(Step Div 2); Dur^[K]:=Step Div 2; Sz^[K]:=1000; End;
+ TLRFrameRate(Dts,Dur,Sz,64,1,1200000,True,25,1,FN,FD,RN,RD);
+ FreeMem(Dts); FreeMem(Dur); FreeMem(Sz);
+ H4GuessRate(RN,RD,25,1,FN,FD,ON,OD);
+End;
+
 Procedure DecodeH264Raw(Const Source,Target: String; Mode: LongInt);
-Var F: PEABuffer; Size: LongInt;
+Var F: PEABuffer; Size,I,Start,E,RN,RD,FN,FD: LongInt; Found: Boolean; PN,PD: LongInt;
 Begin
  NVLoad(Source,F,Size);
  H4InitState;
+ H4Mode:=Mode; H4Target:=Target;
+ { premier SPS pour la cadence }
+ I:=0; Found:=False;
+ While (I+3<Size) And Not Found Do Begin
+  If (F^[I]=0) And (F^[I+1]=0) And (F^[I+2]=1) And ((F^[I+3] And 31)=7) Then Begin
+   Start:=I+3; E:=Start+1; While (E+2<Size) And Not ((F^[E]=0) And (F^[E+1]=0) And (F^[E+2]<=1)) Do Inc(E);
+   If E+2>=Size Then E:=Size;
+   H4HandleNal(PEABuffer(@F^[Start]),E-Start,0); Found:=True;
+  End Else Inc(I);
+ End;
+ H4RawRate(RN,RD);
+ H4FpsN:=RN; H4FpsD:=RD; H4RateSet:=True;
+ { chronologie : dts uniformes de pas 1/f ; sortie CFR a la cadence choisie }
+ FN:=0; FD:=1;
+ For I:=0 To 31 Do If H4Sps[I].Valid Then Begin
+  If (H4Sps[I].TimingInfo<>0) And (H4Sps[I].NumUnitsInTick>0) And (H4Sps[I].TimeScale>0) Then Begin
+   FN:=H4Sps[I].TimeScale; FD:=2*H4Sps[I].NumUnitsInTick; PN:=H4Gcd(FN,FD); FN:=FN Div PN; FD:=FD Div PN;
+  End;
+  Break;
+ End;
+ If FN=0 Then Begin FN:=25; FD:=1; End;
+ H4Timing:=True; H4Start:=0; H4PtsAuto:=True;
+ CFTbN:=FD; CFTbD:=FN; CFFn:=RN; CFFd:=RD; CFNext:=0; CFFrameNo:=0; CFHist[0]:=0; CFHist[1]:=0; CFHist[2]:=0; CFLastDropped:=False; CFVscfr:=True;
  H4Annexb(F,Size,Mode,Target);
+ If H4Began And Not NVDone Then CFFlush(H4OutBuf);
  If NVLast<>Nil Then Begin FreeMem(NVLast,NVLastSize); NVLast:=Nil; End;
  If Not H4Began Then Fail('h264: aucune image decodee.');
  CloseRead; If NVOpened Then CloseWrite;
@@ -41641,7 +41723,7 @@ Begin
     5: Inc(Idr);
     7: Begin If (Buf^[I+2] And 3)<>0 Then Exit; Inc(Sps); End;
     8: Inc(Pps);
-    9: If (Buf^[I+1] And 31)<>0 Then Exit;
+    9: If (Buf^[I+1] And 31)<>16 Then Exit;
    End;
   End;
  End;
