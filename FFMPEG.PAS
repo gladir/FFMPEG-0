@@ -16978,6 +16978,8 @@ Procedure DecodeAVIX(Const Source,Target: String; Mode,Kind: LongInt); Forward;
 Procedure DecodeRPL(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeFLIC(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeGIF(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure DecodeH263Raw(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure DecodeFLVH263(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeFLVScreen(Const Source,Target: String; Mode: LongInt); Forward;
 Function FLVVideoCodec(Const Name: String): LongInt; Forward;
 Function EAVDetect(Const Source: String): LongInt; Forward;
@@ -16994,6 +16996,8 @@ Begin
  Else If Kind=22 Then DecodeFLVScreen(Source,Target,Mode)
  Else If Kind=23 Then DecodeFLIC(Source,Target,Mode)
  Else If Kind=25 Then DecodeGIF(Source,Target,Mode)
+ Else If Kind=27 Then DecodeFLVH263(Source,Target,Mode)
+ Else If Kind=28 Then DecodeH263Raw(Source,Target,Mode)
  Else If ((Kind>=18) And (Kind<=24)) Or (Kind=26) Then DecodeAVIX(Source,Target,Mode,Kind)
  Else If Kind>=7 Then DecodeAVIVideo(Source,Target,Mode,Kind) Else DecodeNV(Kind,Source,Target,Mode);
 End;
@@ -30497,32 +30501,37 @@ Begin
  End;
 End;
 
-{ r_frame_rate de libavformat/demux.c (ff_rfps_add_frame + ff_rfps_calculate) pour la base de temps 1/100 }
-Procedure GFRFrameRate(Pkt: PGFArr; NPk: LongInt; AvgN,AvgD: Int64; Var RN,RD: LongInt);
+Type TTLArr=Array[0..100000000] Of Int64; PTLArr=^TTLArr;
+
+{ r_frame_rate de libavformat/demux.c (boucle de avformat_find_stream_info, ff_rfps_add_frame, ff_rfps_calculate).
+  Dts/Dur/Sz: horodatage, duree et taille des paquets dans l'ordre de lecture ; la base de temps est TbN/TbD.
+  Unrel: tb_unreliable ; CN/CD: cadence du codec (0 si inconnue) ; renvoie aussi le debit moyen deduit. }
+Procedure TLRFrameRate(Dts,Dur: PTLArr; Sz: PGFArr; NPk: LongInt; TbN,TbD: Int64; Unrel: Boolean; AvgN,AvgD,CN,CD: Int64; Var RN,RD: LongInt);
 Var
  Err: Array[0..1,0..1,0..398] Of Double;
- K,I,J,KK,DurCount,ReadSize: LongInt; RSum,G,CodecDur,Last,Dts,Ts,T,T2,Duration,Ticks: Int64; HaveLast: Boolean;
+ K,I,J,KK,DurCount,ReadSize,FpsAn: LongInt; RSum,G,CodecDur,Last,Ts,T,T2,Duration,Ticks: Int64; HaveLast: Boolean;
  SDts,E,A,N,A0,A1,E0,E1,BestErr: Double; Num: Int64; Ref: Double; Fr: Int64;
- RnN,RnD,GG: Int64; TbQ,K115,K96,Tmp: Double;
+ GG: Int64; TbQ,K115,K96,Tmp,Q12: Double;
 Begin
- Tmp:=100.0; TbQ:=1.0/Tmp; Tmp:=1001; K115:=Tmp*11.5; K96:=Tmp*12.0; Tmp:=0.8; K96:=K96*Tmp;
+ Tmp:=TbD; TbQ:=TbN/Tmp; Tmp:=1001; K115:=Tmp*11.5; K96:=Tmp*12.0; Tmp:=0.8; K96:=K96*Tmp;
  FillChar(Err,SizeOf(Err),0);
- DurCount:=0; RSum:=0; G:=0; CodecDur:=0; HaveLast:=False; Last:=0; ReadSize:=0; Dts:=0;
+ DurCount:=0; RSum:=0; G:=0; CodecDur:=0; HaveLast:=False; Last:=0; ReadSize:=0;
+ FpsAn:=20; If TbN*2000>TbD Then FpsAn:=40;
+ If Not Unrel Then FpsAn:=0;
  For K:=0 To NPk-1 Do Begin
-  If DurCount>=40 Then Break;
+  If DurCount>=FpsAn Then Break;
   If ReadSize>=5000000 Then Break;
-  Ts:=Dts;
-  Inc(ReadSize,GFPE^[K]-GFPS^[K]);
+  Ts:=Dts^[K];
+  Inc(ReadSize,Sz^[K]);
   If K>=2 Then Begin
-   T:=CodecDur*10000;
+   T:=(CodecDur*TbN*2000000+TbD) Div (2*TbD);
    If AvgN>0 Then Begin
     T2:=(Int64(K)*AvgD*1000000*2+AvgN) Div (2*AvgN);
     If T2>T Then T:=T2;
    End;
    If T>=5000000 Then Break;
-   If GFPD^[K]>0 Then Inc(CodecDur,GFPD^[K]);
+   If Dur^[K]>0 Then Inc(CodecDur,Dur^[K]);
   End;
-  { ff_rfps_add_frame }
   If HaveLast And (Ts>Last) Then Begin
    Duration:=Ts-Last;
    For I:=0 To 398 Do
@@ -30547,37 +30556,54 @@ Begin
    If DurCount>3 Then G:=GFGcd(G,Duration);
   End;
   Last:=Ts; HaveLast:=True;
-  Dts:=Dts+GFPD^[K];
  End;
  RN:=0; RD:=1;
- If (DurCount>15) And (G>1) Then Begin
-  GG:=GFGcd(100,G); RN:=100 Div GG; RD:=G Div GG;
- End;
- If (DurCount>1) And (RN=0) Then Begin
-  Num:=0; BestErr:=0.01;
-  If RN<>0 Then Ref:=RN/RD Else Ref:=100.0;
-  For J:=0 To 398 Do Begin
-   Fr:=GFStdRate(J);
-   If (CodecDur<>0) And (TbQ*CodecDur<K115/Fr) Then Continue;
-   If (CodecDur=0) And (Fr<1001*12) Then Continue;
-   If TbQ*RSum/DurCount<K96/Fr Then Continue;
-   For KK:=0 To 1 Do Begin
-    N:=DurCount;
-    A:=Err[KK,0,J]/N; E:=Err[KK,1,J]/N-A*A;
-    If (E<BestErr) And (BestErr>0.000000001) Then Begin BestErr:=E; Num:=Fr; End;
+ If Unrel Then Begin
+  Tmp:=TbD; Tmp:=Tmp/(500.0*TbN);
+  If (DurCount>15) And (G>TbD Div (500*TbN)) And (G>1) Then Begin
+   GG:=GFGcd(TbD,TbN*G); RN:=TbD Div GG; RD:=(TbN*G) Div GG;
+  End;
+  If (DurCount>1) And (RN=0) Then Begin
+   Num:=0; BestErr:=0.01;
+   If RN<>0 Then Ref:=RN/RD Else Begin Ref:=TbD; Ref:=Ref/TbN; End;
+   For J:=0 To 398 Do Begin
+    Fr:=GFStdRate(J);
+    If (CodecDur<>0) And (TbQ*CodecDur<K115/Fr) Then Continue;
+    If (CodecDur=0) And (Fr<1001*12) Then Continue;
+    If TbQ*RSum/DurCount<K96/Fr Then Continue;
+    For KK:=0 To 1 Do Begin
+     N:=DurCount;
+     A:=Err[KK,0,J]/N; E:=Err[KK,1,J]/N-A*A;
+     If (E<BestErr) And (BestErr>0.000000001) Then Begin BestErr:=E; Num:=Fr; End;
+    End;
+   End;
+   Tmp:=1.01;
+   Q12:=12*1001;
+   If (Num<>0) And (Num/Q12<Tmp*Ref) Then Begin
+    GG:=GFGcd(Num,12*1001); RN:=Num Div GG; RD:=(12*1001) Div GG;
    End;
   End;
-  Tmp:=1.01;
-  If (Num<>0) And (Num/(12*1001)<Tmp*Ref) Then Begin
-   GG:=GFGcd(Num,12*1001); RN:=Num Div GG; RD:=(12*1001) Div GG;
-  End;
  End;
- If RN=0 Then Begin RN:=100; RD:=1; End;
+ If RN=0 Then Begin
+  If (CN>0) And (CD>0) And (TbN*CN<=CD*TbD) Then Begin RN:=CN; RD:=CD; End
+  Else Begin RN:=TbD; RD:=TbN; End;
+ End;
+End;
+
+{ r_frame_rate des GIF : base de temps 1/100, dts cumulatifs }
+Procedure GFRFrameRate(Pkt: PGFArr; NPk: LongInt; AvgN,AvgD: Int64; Var RN,RD: LongInt);
+Var Dts,Dur: PTLArr; Sz: PGFArr; K: LongInt; Acc: Int64;
+Begin
+ GetMem(Dts,(NPk+1)*8); GetMem(Dur,(NPk+1)*8); GetMem(Sz,(NPk+1)*4);
+ Acc:=0;
+ For K:=0 To NPk-1 Do Begin Dts^[K]:=Acc; Dur^[K]:=GFPD^[K]; Sz^[K]:=GFPE^[K]-GFPS^[K]; Inc(Acc,GFPD^[K]); End;
+ TLRFrameRate(Dts,Dur,Sz,NPk,1,100,True,AvgN,AvgD,0,0,RN,RD);
+ FreeMem(Dts); FreeMem(Dur); FreeMem(Sz);
 End;
 
 { synchronisation CFR de fftools/ffmpeg_filter.c (video_sync_process) }
 Var
- CFNext,CFFrameNo: Int64; CFHist: Array[0..2] Of LongInt; CFLastDropped: Boolean; CFFn,CFFd: LongInt; CFHavePrev: Boolean;
+ CFTbN,CFTbD,CFNext,CFFrameNo: Int64; CFHist: Array[0..2] Of LongInt; CFLastDropped: Boolean; CFFn,CFFd: LongInt; CFHavePrev: Boolean;
 
 Function CFRescale(A,Num,Den: Int64): Int64; { arrondi au plus proche, egalite loin de zero }
 Begin
@@ -30590,12 +30616,12 @@ Var
  ExtraBits: LongInt; FPts,Delta0,Delta,Duration,Tbo: Double; Lg: LongInt; X: Int64;
  SInt: Int64; C11,C06,C001,CHalf: Double;
 Begin
- C11:=11; C11:=C11/10; C06:=6; C06:=C06/10; C001:=1; C001:=C001/100; CHalf:=0.5;
+ C11:=11; C11:=C11/10; C06:=6; C06:=C06/10; C001:=CFTbD; C001:=CFTbN/C001; CHalf:=0.5;
  Lg:=0; X:=CFFn; While X>1 Do Begin X:=X Shr 1; Inc(Lg); End;
  ExtraBits:=29-Lg; If ExtraBits<0 Then ExtraBits:=0; If ExtraBits>16 Then ExtraBits:=16;
  Tbo:=CFFd/CFFn;
  Duration:=Dur*C001/Tbo;
- SInt:=CFRescale(Pts,Int64(CFFn) Shl ExtraBits,100*Int64(CFFd));
+ SInt:=CFRescale(Pts*CFTbN,Int64(CFFn) Shl ExtraBits,CFTbD*Int64(CFFd));
  FPts:=SInt/(Int64(1) Shl ExtraBits);
  If FPts<>Round(FPts) Then Begin If FPts>0 Then FPts:=FPts+1.0/(1 Shl 17) Else If FPts<0 Then FPts:=FPts-1.0/(1 Shl 17); End;
  Delta0:=FPts-CFNext; Delta:=Delta0+Duration;
@@ -30655,7 +30681,7 @@ Begin
  GFRFrameRate(GFPD,GFNP,AvgN,AvgD,RN,RD);
  { av_guess_frame_rate }
  If (AvgN>0) And (AvgD>0) And (AvgN/AvgD<70) And (RN/RD>210) Then Begin RN:=AvgN; RD:=AvgD; End;
- CFFn:=RN; CFFd:=RD; CFNext:=0; CFFrameNo:=0; CFHist[0]:=0; CFHist[1]:=0; CFHist[2]:=0; CFLastDropped:=False;
+ CFTbN:=1; CFTbD:=100; CFFn:=RN; CFFd:=RD; CFNext:=0; CFFrameNo:=0; CFHist[0]:=0; CFHist[1]:=0; CFHist[2]:=0; CFLastDropped:=False;
  { etat du decodeur }
  GFSW:=CurW; GFSH:=CurH;
  FillChar(GFGlobal,SizeOf(GFGlobal),0); FillChar(GFLocal,SizeOf(GFLocal),0);
@@ -34005,7 +34031,7 @@ Var A,B,T: LongInt;
 Begin
  NVBegin(Mode,Target,H3Wd,H3Ht,7,RN,RD);
  NVSubX:=1; NVSubY:=1; NVCW:=(H3Wd+1) Div 2; NVCH:=(H3Ht+1) Div 2; NVYTag:='C420jpeg XYSCSS=420JPEG';
- If H3Aspect[0]>0 Then Begin
+ If (H3Aspect[0]>0) And (H3Codec=0) Then Begin
   A:=H3Aspect[0]; B:=H3Aspect[1]; T:=A; While B<>0 Do Begin A:=T Mod B; T:=B; B:=A; End;
   NVSarN:=H3Aspect[0] Div T; NVSarD:=H3Aspect[1] Div T;
  End;
@@ -34019,6 +34045,164 @@ Begin
  H3ChromaTab:=False; H3Aspect[0]:=12; H3Aspect[1]:=11; H3FpsN:=30000; H3FpsD:=1001; H3MbSkipped:=0; H3AcPred:=0; H3AicDir:=0;
  H3Wd:=0; H3Ht:=0; H3PictType:=0; H3Qscale:=1; H3CurI:=-1; H3RefI:=-1;
  H3InitTables;
+End;
+
+{ copies de la derniere image au vidage (mid_pred des trois derniers nb_frames_prev) }
+Procedure CFFlush(P: PEABuffer);
+Var A,B,G,I: LongInt;
+Begin
+ If NVDone Then Exit;
+ A:=CFHist[0]; B:=CFHist[1]; G:=CFHist[2];
+ If A>B Then Begin I:=A; A:=B; B:=I; End;
+ If B>G Then B:=G;
+ If A>B Then B:=A;
+ If B>0 Then NVEmitN(P,B,B);
+End;
+
+{ probe du demuxeur h263 brut (libavformat/h263dec.c) sur Buf[0..N-1] }
+Function H3Probe(Buf: PEABuffer; N: LongInt): Boolean;
+Var
+ Code: QWord; I,Valid,Invalid,ResChange,SrcFmt,LastSrc,LastGn,Tr,LastTr,Gn,Score: LongInt; Skip: Boolean;
+Begin
+ Code:=QWord($FFFFFFFFFFFFFFFF); Valid:=0; Invalid:=0; ResChange:=0; LastSrc:=-1; LastGn:=0; LastTr:=-1;
+ For I:=0 To N-1 Do Begin
+  Code:=(Code Shl 8)+Buf^[I];
+  Skip:=False;
+  If (Code And QWord($FFFFFC000000))=QWord($80000000) Then Begin
+   Tr:=(Code Shr 18) And $FF;
+   SrcFmt:=(Code Shr 10) And 7;
+   If (SrcFmt<>LastSrc) And (LastSrc>0) And (LastSrc<6) And (SrcFmt<6) Then Inc(ResChange);
+   If Tr=LastTr Then Begin Inc(Invalid); Skip:=True; End;
+   If Not Skip Then
+    If (SrcFmt<>7) And ((Code And (1 Shl 9))=0) And ((Code And (1 Shl 5))<>0) Then Begin Inc(Invalid); Skip:=True; End;
+   If Not Skip Then Begin
+    If ((Code And $30000)=$20000) And (SrcFmt<>0) Then Begin Inc(Valid); LastGn:=0; End
+    Else Inc(Invalid);
+    LastSrc:=SrcFmt; LastTr:=Tr;
+   End;
+  End Else If (Code And QWord($FFFF80000000))=QWord($80000000) Then Begin
+   Gn:=(Code Shr (31-5)) And $1F;
+   If Gn<LastGn Then Inc(Invalid) Else LastGn:=Gn;
+  End;
+ End;
+ H3Probe:=Valid>2*Invalid+2*ResChange+3;
+End;
+
+Function H3ProbeFile(Const Name: String): Boolean;
+Var B: PEABuffer; Sz,Got,J,K: LongInt;
+Begin
+ H3ProbeFile:=False;
+ OpenRead(Name); Sz:=InputSize; If Sz>1048576 Then Sz:=1048576;
+ If Sz<6 Then Begin CloseRead; Exit; End;
+ GetMem(B,Sz+64); FillChar(B^,Sz+64,0);
+ Got:=0; While Got<Sz Do Begin If Sz-Got>60000 Then K:=60000 Else K:=Sz-Got; ReadAt(Got,B^[Got],K); Inc(Got,K); End;
+ CloseRead;
+ H3ProbeFile:=H3Probe(B,Sz);
+ FreeMem(B,Sz+64);
+End;
+
+{ h263 brut : paquets decoupes aux codes de debut d'image (h263_parser.c) }
+Procedure DecodeH263Raw(Const Source,Target: String; Mode: LongInt);
+Var
+ F: PEABuffer; Size,I,Start,P0,Pn: LongInt; Ok,Begun: Boolean; State: LongWord; Found: Boolean;
+ Starts: Array[0..0] Of LongInt;
+Procedure DoFrame(S,E: LongInt);
+Begin
+ If E<=S Then Exit;
+ Ok:=H3Frame(PEABuffer(@F^[S]),E-S)=1;
+ If Ok Then Ok:=H3Pack;
+ If Ok Then Begin
+  If Not Begun Then Begin H3BeginNV(Mode,Target,H3FpsN,H3FpsD); Begun:=True; End;
+  NVEmit(H3OutBuf);
+ End;
+End;
+Begin
+ NVLoad(Source,F,Size);
+ H3Reset; H3Codec:=0; Begun:=False; NVVN:=0; NVVD:=0;
+ State:=$FFFFFFFF; Found:=False; Start:=0;
+ I:=0;
+ While I<Size Do Begin
+  State:=(State Shl 8) Or F^[I];
+  If (State Shr 10)=$20 Then Begin
+   If Found Then Begin
+    DoFrame(Start,I-3); Start:=I-3;
+    If NVDone Then Break;
+   End Else Found:=True;
+  End;
+  Inc(I);
+ End;
+ If Not NVDone Then DoFrame(Start,Size);
+ If NVLast<>Nil Then Begin FreeMem(NVLast,NVLastSize); NVLast:=Nil; End;
+ If Not Begun Then Fail('h263: aucune image decodee.');
+ CloseRead; If NVOpened Then CloseWrite;
+End;
+
+{ FLV / Sorenson Spark : lecture des etiquettes (flvdec.c) et synchronisation CFR }
+Procedure DecodeFLVH263(Const Source,Target: String; Mode: LongInt);
+Var
+ F: PEABuffer; Size,At,N,TS,I,K,Cnt,Kind: LongInt; Fps: Double; Bits: Int64;
+ FOff,FSz: PGFArr; FTs: PTLArr; Dts,Dur: PTLArr; Ok,Begun: Boolean;
+ RN,RD: LongInt; AvgN,AvgD,Start,AudioFirst: Int64; NbF,NbP: Int64; Cap: LongInt;
+ G: Int64; Best: Double;
+Begin
+ NVLoad(Source,F,Size);
+ If (F^[0]<>70) Or (F^[1]<>76) Or (F^[2]<>86) Or (F^[3]<>1) Then Fail('flv: entete invalide.');
+ Cap:=Size Div 16+16;
+ GetMem(FOff,Cap*4); GetMem(FSz,Cap*4); GetMem(FTs,Cap*8);
+ At:=F^[5]*16777216+F^[6]*65536+F^[7]*256+F^[8]+4;
+ Cnt:=0; Fps:=0; AudioFirst:=-1;
+ While At+15<=Size Do Begin
+  Kind:=F^[At]; N:=F^[At+1]*65536+F^[At+2]*256+F^[At+3];
+  TS:=F^[At+4]*65536+F^[At+5]*256+F^[At+6]+F^[At+7]*16777216;
+  If At+11+N>Size Then Break;
+  If Kind=9 Then Begin
+   If (N>=1) And ((F^[At+11] And 15)<>2) Then Fail('flv: codec video non pris en charge pour ce chemin (Sorenson H.263 requis).');
+   If (N>=2) And (Cnt<Cap) And ((F^[At+11] Shr 4)<>5) Then Begin FOff^[Cnt]:=At+12; FSz^[Cnt]:=N-1; FTs^[Cnt]:=TS; Inc(Cnt); End;
+  End Else If Kind=8 Then Begin
+   If AudioFirst<0 Then AudioFirst:=TS;
+  End Else If Kind=18 Then Begin
+   For I:=At+11 To At+11+N-12 Do
+    If (F^[I]=0) And (F^[I+1]=9) And (F^[I+2]=102) And (F^[I+3]=114) And (F^[I+4]=97) And (F^[I+5]=109) And (F^[I+6]=101) And (F^[I+7]=114) And (F^[I+8]=97) And (F^[I+9]=116) And (F^[I+10]=101) And (F^[I+11]=0) Then Begin
+     If I+20<=At+11+N Then Begin
+      Bits:=0; For K:=0 To 7 Do Bits:=Bits*256+F^[I+12+K];
+      Move(Bits,Fps,8);
+     End;
+     Break;
+    End;
+  End;
+  Inc(At,N+15);
+ End;
+ If Cnt=0 Then Fail('flv: aucune image video.');
+ { debit moyen annonce par les metadonnees }
+ AvgN:=0; AvgD:=0;
+ If (Fps>0) And (Fps<1000) Then Begin
+  For K:=1 To 1001000 Do Begin
+   Best:=Fps*K;
+   If Abs(Best-Round(Best))<1e-7*K Then Begin AvgN:=Round(Best); AvgD:=K; Break; End;
+  End;
+ End;
+ GetMem(Dts,Cnt*8); GetMem(Dur,Cnt*8);
+ For I:=0 To Cnt-1 Do Begin Dts^[I]:=FTs^[I]; Dur^[I]:=0; End;
+ TLRFrameRate(Dts,Dur,FSz,Cnt,1,1000,True,AvgN,AvgD,0,0,RN,RD);
+ If (AvgN>0) And (AvgD>0) And (AvgN/AvgD<70) And (RN/RD>210) Then Begin RN:=AvgN; RD:=AvgD; End;
+ Start:=FTs^[0]; If (AudioFirst>=0) And (AudioFirst<Start) Then Start:=AudioFirst;
+ H3Reset; H3Codec:=1; H3Aspect[0]:=0; H3Aspect[1]:=1; Begun:=False; NVVN:=0; NVVD:=0;
+ CFTbN:=1; CFTbD:=1000; CFFn:=RN; CFFd:=RD; CFNext:=0; CFFrameNo:=0; CFHist[0]:=0; CFHist[1]:=0; CFHist[2]:=0; CFLastDropped:=False;
+ For I:=0 To Cnt-1 Do Begin
+  Ok:=H3Frame(PEABuffer(@F^[FOff^[I]]),FSz^[I])=1;
+  If Ok Then Ok:=H3Pack;
+  If Ok Then Begin
+   If Not Begun Then Begin H3BeginNV(Mode,Target,RN,RD); Begun:=True; End;
+   CFSync(FTs^[I]-Start,0,NbF,NbP);
+   NVEmitN(H3OutBuf,NbP,NbF);
+   Inc(CFNext,NbF); Inc(CFFrameNo,NbF);
+   If NVDone Then Break;
+  End;
+ End;
+ If Begun Then CFFlush(H3OutBuf);
+ If NVLast<>Nil Then Begin FreeMem(NVLast,NVLastSize); NVLast:=Nil; End;
+ If Not Begun Then Fail('flv: aucune image decodee.');
+ CloseRead; If NVOpened Then CloseWrite;
 End;
 
 Procedure DecodeAVIX(Const Source,Target: String; Mode,Kind: LongInt);
@@ -38633,8 +38817,9 @@ BEGIN
  Commit(Temps[2]); Temps[2]:=''; Halt(0);
  {$ENDIF}
  Detected:=Probe(Intermediate);
+ If (Detected='') And Not IsHTTP(Intermediate) And (InputFormat<>'h261') Then If H3ProbeFile(Intermediate) Then Detected:='h263';
  If InputFormat='' Then InputFormat:=Detected Else
- If (InputFormat<>Detected) And Not ((InputFormat='dvbsub') And (Detected='')) And Not (((InputFormat='g726') Or (InputFormat='g726le')) And (Detected='')) And Not ((InputFormat='eac3') And (Detected='ac3')) Then Fail(
+ If (InputFormat<>Detected) And Not ((InputFormat='dvbsub') And (Detected='')) And Not (((InputFormat='g726') Or (InputFormat='g726le')) And (Detected='')) And Not (((InputFormat='h263') Or (InputFormat='h261')) And (Detected='')) And Not ((InputFormat='eac3') And (Detected='ac3')) Then Fail(
  'Format impose incompatible avec la signature du fichier.');
  If InputFormat='' Then Fail('Format entree non reconnu ou non pris en charge.');
  If OutputFormat='' Then OutputFormat:=FormatName(Extension(OutputPath));
@@ -38659,7 +38844,7 @@ BEGIN
  End;
  NVKind:=0;
  If InputFormat='bethsoftvid' Then NVKind:=1 Else If InputFormat='bfi' Then NVKind:=2 Else If InputFormat='c93' Then NVKind:=3
- Else If InputFormat='bmp' Then NVKind:=4 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22 Else If (InputFormat='flic') And Not IsHTTP(InputPath) Then NVKind:=23 Else If (InputFormat='gif') And Not IsHTTP(InputPath) Then NVKind:=25
+ Else If InputFormat='bmp' Then NVKind:=4 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22 Else If (InputFormat='flic') And Not IsHTTP(InputPath) Then NVKind:=23 Else If (InputFormat='gif') And Not IsHTTP(InputPath) Then NVKind:=25 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=2) Then NVKind:=27 Else If (InputFormat='h263') And Not IsHTTP(InputPath) Then NVKind:=28
  Else If (InputFormat='avi') And Not IsHTTP(InputPath) Then Begin
   AsvTag:=AVIVideoFourCC(Intermediate);
   If AsvTag='CSCD' Then NVKind:=5 Else If (AsvTag='tscc') Or (AsvTag='TSCC') Then NVKind:=6
