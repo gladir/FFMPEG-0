@@ -14175,35 +14175,43 @@ End;
 
 { ---- conversion RGB -> YUV420P (libswscale: input.c, utils.c initFilter bicubique, rgb2rgb_template.c, output.c) ---- }
 Type TSwsI64=Array[0..4000000] Of Int64; PSwsI64=^TSwsI64; TSwsI32=Array[0..4000000] Of LongInt; PSwsI32=^TSwsI32;
-Var
- SwsFPos: Array[0..8191] Of LongInt; SwsCoef: PSwsI32; SwsFS: LongInt;
+ TSwsF=Record Pos,Coef: PSwsI32; FS,N: LongInt; End;
 
 Function SwsRDiv(A,B: Int64): Int64;
 Begin
  If A>=0 Then SwsRDiv:=(A+(B Shr 1)) Div B Else SwsRDiv:=(A-(B Shr 1)) Div B;
 End;
 
-{ initFilter pour le filtre vertical des chromas : bicubique, sans filtre source/destination, srcPos=dstPos }
-Procedure SwsInitV(SrcW,DstW,SrcPos,DstPos: LongInt);
+{ initFilter bicubique (libswscale/utils.c), sans filtre source/destination ; One = 1<<14 (horizontal) ou 1<<12 (vertical) }
+Procedure SwsInitF(Var Fl: TSwsF; SrcW,DstW,SrcPos,DstPos: LongInt; One: Int64);
 Var
- XInc,Fone,XDst,D,Dd,Ddd,Coeff,B,C,Cut,Sum,Err,V,Acc,One: Int64;
+ XInc,Fone,XDst,D,Dd,Ddd,Coeff,B,C,Cut,Sum,Err,V,Acc: Int64;
  FSz,I,J,K,Xx,MinF,Mn,Shift,L,Q: LongInt;
- Fl,F2: PSwsI64; Lim,DFone,DCut: Double; IntV: Int64;
+ Ft,F2: PSwsI64; Lim,DFone,DCut: Double; IntV: Int64; FPos: PSwsI32;
 Begin
- One:=1 Shl 12;
  XInc:=((Int64(SrcW) Shl 16)+(DstW Shr 1)) Div DstW;
  Q:=SrcW Div DstW; L:=0; While Q>1 Do Begin Q:=Q Shr 1; Inc(L); End; If L>8 Then L:=8;
  Fone:=Int64(1) Shl (54-L);
  B:=0; C:=10066329;
- FSz:=1;
+ GetMem(FPos,(Int64(DstW)+4)*4);
+ Fl.N:=DstW;
+ If (Abs(XInc-$10000)<10) And (SrcPos=DstPos) Then Begin
+  { filtre unitaire }
+  Fl.FS:=1; Fl.Pos:=FPos; GetMem(Fl.Coef,(Int64(DstW)+4)*4);
+  For I:=0 To DstW-1 Do Begin
+   FPos^[I]:=I;
+   Fl.Coef^[I]:=LongInt(SwsRDiv(Fone,(Fone+One Div 2) Div One));
+  End;
+  Exit;
+ End;
  If XInc>(1 Shl 16) Then FSz:=1+(4*SrcW+DstW-1) Div DstW Else FSz:=1+4;
  If FSz>SrcW-2 Then FSz:=SrcW-2;
  If FSz<1 Then FSz:=1;
- GetMem(Fl,Int64(DstW)*FSz*8+64); GetMem(F2,Int64(DstW)*FSz*8+64);
+ GetMem(Ft,Int64(DstW)*FSz*8+64); GetMem(F2,Int64(DstW)*FSz*8+64);
  XDst:=((Int64(DstPos)*XInc) Shr 7)-((Int64(SrcPos)*$10000) Shr 7);
  For I:=0 To DstW-1 Do Begin
   Xx:=LongInt((XDst-Int64(FSz-2)*(Int64(1) Shl 16)) Div (Int64(1) Shl 17));
-  SwsFPos[I]:=Xx;
+  FPos^[I]:=Xx;
   For J:=0 To FSz-1 Do Begin
    D:=Abs(Int64(Xx)*(Int64(1) Shl 17)-XDst) Shl 13;
    If XInc>(1 Shl 16) Then D:=D*DstW Div SrcW;
@@ -14216,12 +14224,12 @@ Begin
      Coeff:=(-B-6*C)*Ddd+(6*B+30*C)*Dd+(-12*B-48*C)*D+(8*B+24*C)*(Int64(1) Shl 30);
     Coeff:=Coeff Div ((Int64(1) Shl 54) Div Fone);
    End;
-   Fl^[I*FSz+J]:=Coeff;
+   Ft^[I*FSz+J]:=Coeff;
    Inc(Xx);
   End;
   XDst:=XDst+2*XInc;
  End;
- For I:=0 To DstW-1 Do For J:=0 To FSz-1 Do F2^[I*FSz+J]:=Fl^[I*FSz+J];
+ For I:=0 To DstW-1 Do For J:=0 To FSz-1 Do F2^[I*FSz+J]:=Ft^[I*FSz+J];
  DFone:=Fone; Lim:=0.002*DFone;
  MinF:=0;
  For I:=DstW-1 DownTo 0 Do Begin
@@ -14229,10 +14237,10 @@ Begin
   For J:=0 To FSz-1 Do Begin
    Cut:=Cut+Abs(F2^[I*FSz]);
    DCut:=Cut; If DCut>Lim Then Break;
-   If (I<DstW-1) And (SwsFPos[I]>=SwsFPos[I+1]) Then Break;
+   If (I<DstW-1) And (FPos^[I]>=FPos^[I+1]) Then Break;
    For K:=1 To FSz-1 Do F2^[I*FSz+K-1]:=F2^[I*FSz+K];
    F2^[I*FSz+FSz-1]:=0;
-   Inc(SwsFPos[I]);
+   Inc(FPos^[I]);
   End;
   Cut:=0;
   For J:=FSz-1 DownTo 1 Do Begin
@@ -14242,41 +14250,46 @@ Begin
   End;
   If Mn>MinF Then MinF:=Mn;
  End;
- SwsFS:=MinF;
- For I:=0 To DstW-1 Do For J:=0 To MinF-1 Do Fl^[I*MinF+J]:=F2^[I*FSz+J];
- { bords }
+ For I:=0 To DstW-1 Do For J:=0 To MinF-1 Do Ft^[I*MinF+J]:=F2^[I*FSz+J];
  For I:=0 To DstW-1 Do Begin
-  If SwsFPos[I]<0 Then Begin
+  If FPos^[I]<0 Then Begin
    For J:=1 To MinF-1 Do Begin
-    K:=J+SwsFPos[I]; If K<0 Then K:=0;
-    Fl^[I*MinF+K]:=Fl^[I*MinF+K]+Fl^[I*MinF+J]; Fl^[I*MinF+J]:=0;
+    K:=J+FPos^[I]; If K<0 Then K:=0;
+    Ft^[I*MinF+K]:=Ft^[I*MinF+K]+Ft^[I*MinF+J]; Ft^[I*MinF+J]:=0;
    End;
-   SwsFPos[I]:=0;
+   FPos^[I]:=0;
   End;
-  If SwsFPos[I]+MinF>SrcW Then Begin
+  If FPos^[I]+MinF>SrcW Then Begin
    Q:=MinF-SrcW; If Q>0 Then Q:=0;
-   Shift:=SwsFPos[I]+Q; Acc:=0;
-   For J:=MinF-1 DownTo 0 Do If SwsFPos[I]+J>=SrcW Then Begin Acc:=Acc+Fl^[I*MinF+J]; Fl^[I*MinF+J]:=0; End;
+   Shift:=FPos^[I]+Q; Acc:=0;
+   For J:=MinF-1 DownTo 0 Do If FPos^[I]+J>=SrcW Then Begin Acc:=Acc+Ft^[I*MinF+J]; Ft^[I*MinF+J]:=0; End;
    For J:=MinF-1 DownTo 0 Do
-    If J<Shift Then Fl^[I*MinF+J]:=0 Else Fl^[I*MinF+J]:=Fl^[I*MinF+J-Shift];
-   SwsFPos[I]:=SwsFPos[I]-Shift;
-   Fl^[I*MinF+SrcW-1-SwsFPos[I]]:=Fl^[I*MinF+SrcW-1-SwsFPos[I]]+Acc;
+    If J<Shift Then Ft^[I*MinF+J]:=0 Else Ft^[I*MinF+J]:=Ft^[I*MinF+J-Shift];
+   FPos^[I]:=FPos^[I]-Shift;
+   Ft^[I*MinF+SrcW-1-FPos^[I]]:=Ft^[I*MinF+SrcW-1-FPos^[I]]+Acc;
   End;
  End;
- GetMem(SwsCoef,Int64(DstW)*MinF*4+64);
+ Fl.FS:=MinF; Fl.Pos:=FPos; GetMem(Fl.Coef,Int64(DstW)*MinF*4+64);
  For I:=0 To DstW-1 Do Begin
   Err:=0; Sum:=0;
-  For J:=0 To MinF-1 Do Sum:=Sum+Fl^[I*MinF+J];
+  For J:=0 To MinF-1 Do Sum:=Sum+Ft^[I*MinF+J];
   Sum:=(Sum+One Div 2) Div One;
   If Sum=0 Then Sum:=1;
   For J:=0 To MinF-1 Do Begin
-   V:=Fl^[I*MinF+J]+Err;
+   V:=Ft^[I*MinF+J]+Err;
    IntV:=SwsRDiv(V,Sum);
-   SwsCoef^[I*MinF+J]:=LongInt(IntV);
+   Fl.Coef^[I*MinF+J]:=LongInt(IntV);
    Err:=V-IntV*Sum;
   End;
  End;
- FreeMem(Fl,Int64(DstW)*FSz*8+64); FreeMem(F2,Int64(DstW)*FSz*8+64);
+ FreeMem(Ft,Int64(DstW)*FSz*8+64); FreeMem(F2,Int64(DstW)*FSz*8+64);
+End;
+
+Procedure SwsFreeF(Var Fl: TSwsF);
+Begin
+ If Fl.Pos<>Nil Then FreeMem(Fl.Pos,(Int64(Fl.N)+4)*4);
+ If Fl.Coef<>Nil Then FreeMem(Fl.Coef,Int64(Fl.N)*Fl.FS*4+64);
+ Fl.Pos:=Nil; Fl.Coef:=Nil;
 End;
 
 { ecrit les 3 plans YUV420P d'une image RGB native (formats 1 BGR24, 2 RGB555, 3 BGRA, 5 RGB565, 6 RGB444, 9 RGB24) }
@@ -14284,7 +14297,7 @@ Procedure NVSwsPlanes(P: PEABuffer);
 Const RY=8414; GY=16519; BY=3208; RU=-4865; GU=-9528; BU=14392; RV=14392; GV=-12061; BV=-2332;
 Var
  CW,CH,X,Y,Rr,I,J,Bp,FS: LongInt; Row: PEABuffer; U15,V15: PSwsI32; Val,Vv: Int64;
- R0,G0,B0,R1,G1,B1: Int64;
+ R0,G0,B0,R1,G1,B1: Int64; VF: TSwsF;
 Function Px16(Rw,Col: LongInt): LongInt;
 Begin
  If Col>=NVW Then Px16:=0 Else Px16:=P^[(Rw*NVW+Col)*2]+P^[(Rw*NVW+Col)*2+1]*256;
@@ -14374,23 +14387,72 @@ Begin
   Vv:=R0*2; If Vv>32767 Then Vv:=32767; U15^[Y*CW+X]:=Vv;
   Vv:=G0*2; If Vv>32767 Then Vv:=32767; V15^[Y*CW+X]:=Vv;
  End;
- SwsInitV(NVH,CH,128,128);
- FS:=SwsFS;
+ SwsInitF(VF,NVH,CH,128,128,4096);
+ FS:=VF.FS;
  For I:=0 To 1 Do Begin
   For Y:=0 To CH-1 Do Begin
    For X:=0 To CW-1 Do Begin
     Val:=Int64(64) Shl 12;
     For J:=0 To FS-1 Do Begin
-     Bp:=(SwsFPos[Y]+J)*CW+X;
-     If I=0 Then Val:=Val+Int64(U15^[Bp])*SwsCoef^[Y*FS+J] Else Val:=Val+Int64(V15^[Bp])*SwsCoef^[Y*FS+J];
+     Bp:=(VF.Pos^[Y]+J)*CW+X;
+     If I=0 Then Val:=Val+Int64(U15^[Bp])*VF.Coef^[Y*FS+J] Else Val:=Val+Int64(V15^[Bp])*VF.Coef^[Y*FS+J];
     End;
     Row^[X]:=Clip8(AVSar(Val,19));
    End;
    WriteBytes(Row^,CW);
   End;
  End;
- FreeMem(SwsCoef,Int64(CH)*FS*4+64);
+ SwsFreeF(VF);
  FreeMem(U15,Int64(NVH)*CW*4+64); FreeMem(V15,Int64(NVH)*CW*4+64); FreeMem(Row,NVW+CW+64);
+End;
+
+
+{ PAL8 -> YUV420P (swscale : palette convertie en YUV 8 bits, chroma reduite par filtres bicubiques horizontal puis vertical) }
+Procedure NVSwsPal(P: PEABuffer);
+Var
+ CW,CH,X,Y,I,J,FS,HFS,Bp: LongInt; Row: PEABuffer; PY,PU,PV: Array[0..255] Of LongInt;
+ Hu,Hv: PSwsI32; HF,VF: TSwsF; Val,Su,Sv: Int64; Ix: LongInt;
+Function C8(V: Int64): LongInt;
+Begin If V<0 Then C8:=0 Else If V>255 Then C8:=255 Else C8:=V; End;
+Begin
+ CW:=(NVW+1) Div 2; CH:=(NVH+1) Div 2;
+ For I:=0 To 255 Do Begin
+  PY[I]:=C8(AVSar(8414*Int64(NVPalR[I])+16519*Int64(NVPalG[I])+3208*Int64(NVPalB[I])+(Int64(33) Shl 14),15));
+  PU[I]:=C8(AVSar(-4865*Int64(NVPalR[I])-9528*Int64(NVPalG[I])+14392*Int64(NVPalB[I])+(Int64(257) Shl 14),15));
+  PV[I]:=C8(AVSar(14392*Int64(NVPalR[I])-12061*Int64(NVPalG[I])-2332*Int64(NVPalB[I])+(Int64(257) Shl 14),15));
+ End;
+ GetMem(Row,NVW+CW+64);
+ For Y:=0 To NVH-1 Do Begin
+  For X:=0 To NVW-1 Do Row^[X]:=PY[P^[Y*NVW+X]];
+  WriteBytes(Row^,NVW);
+ End;
+ GetMem(Hu,Int64(NVH)*CW*4+64); GetMem(Hv,Int64(NVH)*CW*4+64);
+ SwsInitF(HF,NVW,CW,128,128,16384); HFS:=HF.FS;
+ For Y:=0 To NVH-1 Do For X:=0 To CW-1 Do Begin
+  Su:=0; Sv:=0;
+  For J:=0 To HFS-1 Do Begin
+   Ix:=P^[Y*NVW+HF.Pos^[X]+J];
+   Su:=Su+Int64(PU[Ix] Shl 6)*HF.Coef^[X*HFS+J]; Sv:=Sv+Int64(PV[Ix] Shl 6)*HF.Coef^[X*HFS+J];
+  End;
+  Su:=AVSar(Su,13); If Su>32767 Then Su:=32767; Sv:=AVSar(Sv,13); If Sv>32767 Then Sv:=32767;
+  Hu^[Y*CW+X]:=Su; Hv^[Y*CW+X]:=Sv;
+ End;
+ SwsInitF(VF,NVH,CH,128,128,4096); FS:=VF.FS;
+ For I:=0 To 1 Do Begin
+  For Y:=0 To CH-1 Do Begin
+   For X:=0 To CW-1 Do Begin
+    Val:=Int64(64) Shl 12;
+    For J:=0 To FS-1 Do Begin
+     Bp:=(VF.Pos^[Y]+J)*CW+X;
+     If I=0 Then Val:=Val+Int64(Hu^[Bp])*VF.Coef^[Y*FS+J] Else Val:=Val+Int64(Hv^[Bp])*VF.Coef^[Y*FS+J];
+    End;
+    Row^[X]:=C8(AVSar(Val,19));
+   End;
+   WriteBytes(Row^,CW);
+  End;
+ End;
+ SwsFreeF(VF); SwsFreeF(HF);
+ FreeMem(Hu,Int64(NVH)*CW*4+64); FreeMem(Hv,Int64(NVH)*CW*4+64); FreeMem(Row,NVW+CW+64);
 End;
 
 Procedure NVWriteY4M(P: PEABuffer);
@@ -14407,6 +14469,7 @@ Begin
  End;
  Hdr:='FRAME'+#10; WriteBytes(Hdr[1],Length(Hdr));
  If (NVFmt=1) Or (NVFmt=2) Or (NVFmt=3) Or (NVFmt=5) Or (NVFmt=6) Or (NVFmt=9) Then Begin NVSwsPlanes(P); Exit; End;
+ If NVFmt=0 Then Begin NVSwsPal(P); Exit; End;
  For Y:=0 To NVH-1 Do Begin
   For X:=0 To NVW-1 Do Begin
    NVPixel(P,(Y*NVW+X)*NVBpp(NVFmt),R,G,B);
