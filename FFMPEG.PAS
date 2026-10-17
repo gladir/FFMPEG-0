@@ -31740,6 +31740,219 @@ Begin
  NVFinish('flashsv');
 End;
 
+{ ---- Fraps (FPS1), adapte de FFmpeg libavcodec/fraps.c et huffman.c, LGPL-2.1-or-later ---- }
+Var
+ FRFmt,FRBegun: LongInt; FROut: PEABuffer; FROutSize: LongInt;
+ FRCnt: Array[0..511] Of Int64; FRSym,FRN0: Array[0..511] Of LongInt;
+ FRBitPos,FRBitLen,FRBase: LongInt; FRSrc: PEABuffer; FRSrcLen: LongInt;
+
+{ comparateur huff_cmp de fraps.c (arithmetique 32 bits non signee) puis AV_QSORT de libavutil/qsort.h }
+Function FRCmp(A,B: LongInt): LongInt;
+Var V: Int64;
+Begin
+ V:=((FRCnt[A]-FRCnt[B])*256+FRSym[A]-FRSym[B]) And $FFFFFFFF;
+ If V>=2147483648 Then V:=V-4294967296;
+ FRCmp:=V;
+End;
+Procedure FRSwap(A,B: LongInt);
+Var TC: Int64; TS,TN: LongInt;
+Begin
+ TC:=FRCnt[A]; TS:=FRSym[A]; TN:=FRN0[A];
+ FRCnt[A]:=FRCnt[B]; FRSym[A]:=FRSym[B]; FRN0[A]:=FRN0[B];
+ FRCnt[B]:=TC; FRSym[B]:=TS; FRN0[B]:=TN;
+End;
+Procedure FRQSort;
+Var
+ StkA,StkB: Array[0..63] Of LongInt; Sp,Start,Fin,Left,Right,Mid: LongInt; CheckSort,Stop: Boolean;
+Begin
+ Sp:=1; StkA[0]:=0; StkB[0]:=255;
+ While Sp>0 Do Begin
+  Dec(Sp); Start:=StkA[Sp]; Fin:=StkB[Sp];
+  While Start<Fin Do Begin
+   If Start<Fin-1 Then Begin
+    CheckSort:=False; Right:=Fin-2; Left:=Start+1; Mid:=Start+((Fin-Start) Shr 1);
+    If FRCmp(Start,Fin)>0 Then Begin
+     If FRCmp(Fin,Mid)>0 Then FRSwap(Start,Mid) Else FRSwap(Start,Fin);
+    End Else Begin
+     If FRCmp(Start,Mid)>0 Then FRSwap(Start,Mid) Else CheckSort:=True;
+    End;
+    If FRCmp(Mid,Fin)>0 Then Begin FRSwap(Mid,Fin); CheckSort:=False; End;
+    If Start=Fin-2 Then Break;
+    FRSwap(Fin-1,Mid);
+    While Left<=Right Do Begin
+     While (Left<=Right) And (FRCmp(Left,Fin-1)<0) Do Inc(Left);
+     While (Left<=Right) And (FRCmp(Right,Fin-1)>0) Do Dec(Right);
+     If Left<=Right Then Begin FRSwap(Left,Right); Inc(Left); Dec(Right); End;
+    End;
+    FRSwap(Fin-1,Left);
+    If CheckSort And ((Mid=Left-1) Or (Mid=Left)) Then Begin
+     Mid:=Start;
+     While (Mid<Fin) And (FRCmp(Mid,Mid+1)<=0) Do Inc(Mid);
+     If Mid=Fin Then Break;
+    End;
+    If Fin-Left<Left-Start Then Begin
+     StkA[Sp]:=Start; StkB[Sp]:=Right; Inc(Sp); Start:=Left+1;
+    End Else Begin
+     StkA[Sp]:=Left+1; StkB[Sp]:=Fin; Inc(Sp); Fin:=Right;
+    End;
+   End Else Begin
+    If FRCmp(Start,Fin)>0 Then FRSwap(Start,Fin);
+    Break;
+   End;
+  End;
+ End;
+End;
+
+{ construit l'arbre de huffman de ff_huff_build_tree (FF_HUFFMAN_FLAG_ZERO_COUNT); faux si impossible }
+Function FRBuild(Src: PEABuffer; SrcLen,At: LongInt): Boolean;
+Var I,J,Cur: LongInt; Sum,CC: Int64; TS,TN: LongInt; TC: Int64;
+ Depth: Array[0..511] Of LongInt; Stk: Array[0..600] Of LongInt; Sp,Nd,MaxD: LongInt;
+Begin
+ FRBuild:=False; Sum:=0;
+ For I:=0 To 255 Do Begin
+  FRCnt[I]:=Int64(EAByte(Src,SrcLen,At+I*4))+Int64(EAByte(Src,SrcLen,At+I*4+1))*256+Int64(EAByte(Src,SrcLen,At+I*4+2))*65536+Int64(EAByte(Src,SrcLen,At+I*4+3))*16777216;
+  FRSym[I]:=I; FRN0[I]:=-2; Inc(Sum,FRCnt[I]);
+ End;
+ If (Sum Shr 31)<>0 Then Exit;
+ FRQSort;
+ Cur:=256; FRCnt[511]:=0;
+ I:=0;
+ While I<511 Do Begin
+  CC:=(FRCnt[I]+FRCnt[I+1]) And $FFFFFFFF;
+  J:=Cur;
+  While J>I+2 Do Begin
+   If CC>=FRCnt[J-1] Then Break;
+   FRCnt[J]:=FRCnt[J-1]; FRSym[J]:=FRSym[J-1]; FRN0[J]:=FRN0[J-1];
+   Dec(J);
+  End;
+  FRSym[J]:=-1; FRCnt[J]:=CC; FRN0[J]:=I;
+  Inc(Cur); Inc(I,2);
+ End;
+ { profondeur maximale (VLC limite a 32 bits) }
+ Sp:=0; Stk[0]:=510; Depth[510]:=0; Sp:=1; MaxD:=0;
+ While Sp>0 Do Begin
+  Dec(Sp); Nd:=Stk[Sp];
+  If Depth[Nd]>MaxD Then MaxD:=Depth[Nd];
+  If FRSym[Nd]=-1 Then Begin
+   Depth[FRN0[Nd]]:=Depth[Nd]+1; Depth[FRN0[Nd]+1]:=Depth[Nd]+1;
+   Stk[Sp]:=FRN0[Nd]; Stk[Sp+1]:=FRN0[Nd]+1; Inc(Sp,2);
+  End;
+ End;
+ If MaxD>32 Then Exit;
+ FRBuild:=True;
+End;
+
+Function FRBit: LongInt;
+Var Idx: LongInt;
+Begin
+ Idx:=(FRBitPos Shr 5)*4+3-((FRBitPos And 31) Shr 3);
+ If Idx<(FRSrcLen And -4) Then FRBit:=(FRSrc^[FRBase+Idx] Shr (7-(FRBitPos And 7))) And 1 Else FRBit:=0;
+ Inc(FRBitPos);
+End;
+
+Function FRSymbol: LongInt;
+Var Nd: LongInt;
+Begin
+ Nd:=510;
+ While FRSym[Nd]=-1 Do Nd:=FRN0[Nd]+FRBit;
+ FRSymbol:=FRSym[Nd];
+End;
+
+{ un plan v2: ecrit dans Dst a partir de Start, ligne a ligne (Stride peut etre negatif) }
+Function FRPlane(Src: PEABuffer; SrcLen,Off,Size: LongInt; Dst: PEABuffer; Start,Stride,W,H,Step,UOff: LongInt): Boolean;
+Var I,J,At,V: LongInt;
+Begin
+ FRPlane:=False;
+ If Size-1024<=0 Then Exit;
+ If Not FRBuild(Src,SrcLen,Off) Then Exit;
+ FRSrc:=Src; FRBase:=Off+1024; FRSrcLen:=Size-1024; FRBitPos:=0; FRBitLen:=FRSrcLen*8;
+ For J:=0 To H-1 Do Begin
+  I:=0;
+  While I<W*Step Do Begin
+   At:=Start+J*Stride+I;
+   V:=FRSymbol;
+   If J>0 Then V:=(V+Dst^[At-Stride]) And 255
+   Else If UOff<>0 Then V:=(V+$80) And 255;
+   Dst^[At]:=V;
+   If FRBitPos>FRBitLen Then Exit;
+   Inc(I,Step);
+  End;
+ End;
+ FRPlane:=True;
+End;
+
+{ Fmt resultant dans FRFmt (0 PAL8, 1 BGR24, 7 yuvj420p), image dans FROut }
+Function FRFrame(Pk: PEABuffer; Sz,W,H: LongInt; Var Fmt: LongInt): Boolean;
+Var
+ Header: Int64; Version,HdrSize,Need,I,J,Y,X,CW,CH,B0,At: LongInt; IsPal: Boolean;
+ Offs: Array[0..3] Of Int64; Needed: Int64; PO: LongInt; Row: LongInt;
+Begin
+ FRFrame:=False;
+ If Sz<4 Then Exit;
+ Header:=Int64(Pk^[0])+Int64(Pk^[1])*256+Int64(Pk^[2])*65536+Int64(Pk^[3])*16777216;
+ Version:=Header And 255;
+ IsPal:=(Pk^[1]=2) And (Version=1);
+ If (Header And (Int64(1) Shl 30))<>0 Then HdrSize:=8 Else HdrSize:=4;
+ If Version>5 Then Exit;
+ If IsPal Then Begin
+  Needed:=Int64(W)*H+1024+HdrSize;
+  If Sz<>Needed Then Exit;
+ End Else If Version<2 Then Begin
+  Needed:=Int64(W)*H*3; If Version=0 Then Needed:=Needed Div 2; Inc(Needed,HdrSize);
+  If (Header And (Int64(1) Shl 31))<>0 Then Exit;
+  If Sz<>Needed Then Exit;
+ End Else Begin
+  If Sz=8 Then Exit;
+  If (EAByte(Pk,Sz,HdrSize)<>70) Or (EAByte(Pk,Sz,HdrSize+1)<>80) Or (EAByte(Pk,Sz,HdrSize+2)<>83) Or (EAByte(Pk,Sz,HdrSize+3)<>120) Or (Sz<3*1024+24) Then Exit;
+  For I:=0 To 2 Do Begin
+   Offs[I]:=Int64(EAByte(Pk,Sz,HdrSize+4+I*4))+Int64(EAByte(Pk,Sz,HdrSize+5+I*4))*256+Int64(EAByte(Pk,Sz,HdrSize+6+I*4))*65536+Int64(EAByte(Pk,Sz,HdrSize+7+I*4))*16777216;
+   If (Offs[I]>=Sz-HdrSize) Or ((I>0) And (Offs[I]<=Offs[I-1]+1024)) Then Exit;
+  End;
+  Offs[3]:=Sz-HdrSize;
+ End;
+ If (Version And 1)=0 Then Fmt:=7 Else If IsPal Then Fmt:=0 Else Fmt:=1;
+ CW:=(W+1) Div 2; CH:=(H+1) Div 2;
+ Case Fmt Of 7: FROutSize:=W*H+2*CW*CH; 0: FROutSize:=W*H; Else FROutSize:=W*H*3; End;
+ If FROut=Nil Then GetMem(FROut,W*H*3+2*CW*CH+64);
+ FillChar(FROut^,W*H*3+2*CW*CH+64,0);
+ PO:=HdrSize;
+ Case Version Of
+  0: Begin
+   If ((W Mod 8)<>0) Or ((H Mod 2)<>0) Then Exit;
+   At:=PO;
+   For Y:=0 To (H Div 2)-1 Do
+    For X:=0 To (W Div 8)-1 Do Begin
+     Move(Pk^[At],FROut^[(Y*2)*W+X*8],8); Inc(At,8);
+     Move(Pk^[At],FROut^[(Y*2+1)*W+X*8],8); Inc(At,8);
+     Move(Pk^[At],FROut^[W*H+Y*CW+X*4],4); Inc(At,4);
+     Move(Pk^[At],FROut^[W*H+CW*CH+Y*CW+X*4],4); Inc(At,4);
+    End;
+  End;
+  1: If IsPal Then Begin
+   For I:=0 To 255 Do Begin
+    NVPalB[I]:=Pk^[PO+I*4]; NVPalG[I]:=Pk^[PO+I*4+1]; NVPalR[I]:=Pk^[PO+I*4+2];
+   End;
+   Move(Pk^[PO+1024],FROut^,W*H);
+  End Else
+   For Y:=0 To H-1 Do Move(Pk^[PO+Y*W*3],FROut^[(H-Y-1)*W*3],3*W);
+  2,4: Begin
+   If Not FRPlane(Pk,Sz,PO+Offs[0],Offs[1]-Offs[0],FROut,0,W,W,H,1,0) Then Exit;
+   If Not FRPlane(Pk,Sz,PO+Offs[1],Offs[2]-Offs[1],FROut,W*H,CW,W Shr 1,H Shr 1,1,1) Then Exit;
+   If Not FRPlane(Pk,Sz,PO+Offs[2],Offs[3]-Offs[2],FROut,W*H+CW*CH,CW,W Shr 1,H Shr 1,1,1) Then Exit;
+  End;
+  3,5: Begin
+   For I:=0 To 2 Do
+    If Not FRPlane(Pk,Sz,PO+Offs[I],Offs[I+1]-Offs[I],FROut,I+(H-1)*W*3,-W*3,W,H,3,0) Then Exit;
+   For Y:=0 To H-1 Do For X:=0 To W-1 Do Begin
+    At:=(Y*W+X)*3;
+    FROut^[At]:=(FROut^[At]+FROut^[At+1]) And 255;
+    FROut^[At+2]:=(FROut^[At+2]+FROut^[At+1]) And 255;
+   End;
+  End;
+ End;
+ FRFrame:=True;
+End;
+
 Procedure DecodeAVIX(Const Source,Target: String; Mode,Kind: LongInt);
 Var Pos,PkPos,PkLen,RN,RD,I,Y,X,Cw,Ch,Bs,Msg2: LongInt; Ok,FFBegun: Boolean; Msg: String;
 Begin
@@ -31775,6 +31988,10 @@ Begin
    End;
    HYOutSize:=NVFrameBytes+64; GetMem(HYOut,HYOutSize);
   End;
+  24: Begin
+   If AXFcc<>'FPS1' Then Fail('fraps: flux AVI FPS1 requis.');
+   FROut:=Nil; FRBegun:=-1;
+  End;
   21: Begin
    If AXFcc<>'FFV1' Then Fail('ffv1: flux AVI FFV1 requis.');
    Msg:=F1InitDecoder(PEABuffer(@AXF^[AXExtra]),AXExtraLen,AXW,AXH);
@@ -31786,6 +32003,15 @@ Begin
   Ok:=False;
   Case Kind Of
    18: Ok:=FSVFrame(PEABuffer(@AXF^[PkPos]),PkLen);
+   24: Begin
+    Ok:=FRFrame(PEABuffer(@AXF^[PkPos]),PkLen,AXW,AXH,Bs);
+    If Ok Then Begin
+     If FRBegun<0 Then Begin
+      NVBegin(Mode,Target,AXW,AXH,Bs,RN,RD); NVAviSar(AXW,AXH); FRBegun:=Bs; FFBegun:=True;
+      If Bs=7 Then Begin NVSubX:=1; NVSubY:=1; NVCW:=(AXW+1) Div 2; NVCH:=(AXH+1) Div 2; NVYTag:='C420jpeg XYSCSS=420JPEG XCOLORRANGE=FULL'; End;
+     End Else If FRBegun<>Bs Then Ok:=False;
+    End;
+   End;
    21: Begin
     Ok:=F1Frame(PEABuffer(@AXF^[PkPos]),PkLen);
     If Ok Then Begin
@@ -31843,8 +32069,9 @@ Begin
    Case Kind Of
     18: NVEmit(FSVPic);
     20,21: NVEmit(HYOut);
+    24: NVEmit(FROut);
    End;
-  End Else If (Kind<>21) Or FFBegun Then NVRepeat;
+  End Else If ((Kind<>21) And (Kind<>24)) Or FFBegun Then NVRepeat;
   If NVDone Then Break;
  End;
  FreeMem(AXF,AXSize+64);
@@ -36362,7 +36589,8 @@ BEGIN
   Else If (AsvTag='dvsd') Or (AsvTag='DVSD') Or (AsvTag='dvcs') Or (AsvTag='DVCS') Or (AsvTag='dv25') Or (AsvTag='dvsl') Or (AsvTag='DVSL') Or (AsvTag='dv50') Or (AsvTag='dvc ') Or (AsvTag='cdvc') Or (AsvTag='CDVC') Or (AsvTag='dvcp') Or (AsvTag='dvpp') Then NVKind:=14
   Else If AsvTag='FSV1' Then NVKind:=18
   Else If (AsvTag='HFYU') Or (AsvTag='FFVH') Or (AsvTag='hfyu') Then NVKind:=20
-  Else If AsvTag='FFV1' Then NVKind:=21;
+  Else If AsvTag='FFV1' Then NVKind:=21
+  Else If AsvTag='FPS1' Then NVKind:=24;
  End;
  NVAudioOut:=(OutputFormat='wav') Or (OutputFormat='mp3') Or (OutputFormat='ac3') Or (OutputFormat='adx') Or (OutputFormat='aiff');
  If (NVKind<>0) And Not (((NVKind=1) Or (NVKind=2) Or (NVKind=15) Or (NVKind=17) Or (NVKind=22)) And NVAudioOut) Then Begin
