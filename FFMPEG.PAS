@@ -8209,7 +8209,7 @@ Begin
      Val(Copy(Token,2,K-2),Num,Code); If (Code<>0) Or (Num<=0) Or (Num>1000000) Then Fail('Y4M: cadence invalide.');
      Val(Copy(Token,K+1,255),Den,Code); If (Code<>0) Or (Den<=0) Or (Den>1000000) Then Fail('Y4M: cadence invalide.');
     End;
-    'C': If (Token<>'C420') And (Token<>'C420jpeg') Then Fail('Y4M: C420jpeg 8 bits requis.');
+    'C': If (Token<>'C420') And (Token<>'C420jpeg') And (Token<>'C420mpeg2') And (Token<>'C420paldv') Then Fail('Y4M: C420jpeg 8 bits requis.');
     'I': If Token<>'Ip' Then Fail('Y4M: video progressive requise.');
     'A': If (Token<>'A1:1') And (Token<>'A0:0') Then Fail('Y4M: pixels carres requis.');
     'X': ;
@@ -38599,7 +38599,7 @@ Const
   Tables CAVLC/CABAC/deblocage extraites de libavcodec/h264_cavlc.c, h264_cabac.c, h264_loopfilter.c, h264data.c, h264_ps.c (LGPL-2.1-or-later). }
 Type
  PWordArr=^TWordArr; TWordArr=Array[0..1048575] Of Word;
- PSmallArr=^TSmallArr; TSmallArr=Array[0..2097151] Of SmallInt;
+ PSmallArr=^TSmallArr; TSmallArr=Array[0..4800000] Of SmallInt;
  PLongArr=^TLongArr; TLongArr=Array[0..1048575] Of LongInt;
  TH4Sps=Record
   Valid: Boolean;
@@ -39460,6 +39460,35 @@ Function H4Clip(V: LongInt): LongInt;
 Begin If V<0 Then H4Clip:=0 Else If V>255 Then H4Clip:=255 Else H4Clip:=V; End;
 Function H4Clip3(Lo,Hi,V: LongInt): LongInt;
 Begin If V<Lo Then H4Clip3:=Lo Else If V>Hi Then H4Clip3:=Hi Else H4Clip3:=V; End;
+
+{ le mode de prediction intra demande est-il realisable avec les voisins disponibles ? }
+Function H4OkMode(Mode: LongInt; L,T,TL: Boolean): Boolean;
+Begin
+ Case Mode Of
+  0,3,7: H4OkMode:=T;
+  1,8: H4OkMode:=L;
+  2: H4OkMode:=True;
+ Else H4OkMode:=L And T And TL;
+ End;
+End;
+Function H4OkMode16(Mode: LongInt; L,T,TL: Boolean): Boolean;
+Begin
+ Case Mode Of
+  0: H4OkMode16:=T;
+  1: H4OkMode16:=L;
+  2: H4OkMode16:=True;
+ Else H4OkMode16:=L And T And TL;
+ End;
+End;
+Function H4OkModeC(Mode: LongInt; L,T,TL: Boolean): Boolean;
+Begin
+ Case Mode Of
+  0: H4OkModeC:=True;
+  1: H4OkModeC:=L;
+  2: H4OkModeC:=T;
+ Else H4OkModeC:=L And T And TL;
+ End;
+End;
 
 Procedure H4Pred4x4(Pl: PEABuffer; Stride,X,Y,Mode: LongInt; AvL,AvT,AvTR,AvTL: Boolean);
 Var T: Array[0..7] Of LongInt; L: Array[0..3] Of LongInt; Tl,I,J,Z,Sum,V,Q: LongInt; E: Array[0..8] Of LongInt; Pr: Array[0..3,0..3] Of LongInt;
@@ -40525,6 +40554,7 @@ Begin
    If By=0 Then Begin If Bx<3 Then AvTR:=H4IiB Else AvTR:=H4IiC; End
    Else If Bx=3 Then AvTR:=False
    Else AvTR:=H4BlkOrder[(By-1)*4+Bx+1]<H4BlkOrder[By*4+Bx];
+   If Not H4OkMode(H4Ipm[By*4+Bx],AvL,AvT,AvTL) Then Begin H4Err:=True; Exit; End;
    H4Pred4x4(Pl,H4StrideY,X0+Bx*4,Y0+By*4,H4Ipm[By*4+Bx],AvL,AvT,AvTR,AvTL);
    If ((CbpL Shr (Blk Shr 2)) And 1)<>0 Then H4AddLuma4(Blk,H4Qp,0,False,0);
   End;
@@ -40534,10 +40564,12 @@ Begin
    AvL:=(Bx>0) Or H4IiA; AvT:=(By>0) Or H4IiB;
    If (Bx>0) And (By>0) Then AvTL:=True Else If Bx>0 Then AvTL:=H4IiB Else If By>0 Then AvTL:=H4IiA Else AvTL:=H4IiD;
    Case B8 Of 0: AvTR:=H4IiB; 1: AvTR:=H4IiC; 2: AvTR:=True; Else AvTR:=False; End;
+   If Not H4OkMode(H4Ipm[By*4+Bx],AvL,AvT,AvTL) Then Begin H4Err:=True; Exit; End;
    H4Pred8x8(Pl,H4StrideY,X0+Bx*4,Y0+By*4,H4Ipm[By*4+Bx],AvL,AvT,AvTR,AvTL);
    If ((CbpL Shr B8) And 1)<>0 Then H4AddLuma8(B8,H4Qp,0);
   End;
  End Else Begin
+  If Not H4OkMode16(H4I16Mode,H4IiA,H4IiB,H4IiD) Then Begin H4Err:=True; Exit; End;
   H4Pred16x16(Pl,H4StrideY,X0,Y0,H4I16Mode,H4IiA,H4IiB);
   H4LumaDcTransform(H4LumaDc,Dc,H4Qp);
   For Blk:=0 To 15 Do Begin
@@ -40546,6 +40578,7 @@ Begin
   End;
  End;
  { chroma }
+ If Not H4OkModeC(H4ChromaMode,H4IiA,H4IiB,H4IiD) Then Begin H4Err:=True; Exit; End;
  H4PredChroma(H4Pics[H4Cur].U,H4StrideC,H4MbX*8,H4MbY*8,H4ChromaMode,H4IiA,H4IiB);
  H4PredChroma(H4Pics[H4Cur].V,H4StrideC,H4MbX*8,H4MbY*8,H4ChromaMode,H4IiA,H4IiB);
  H4AddChroma(True);
@@ -40760,6 +40793,7 @@ Begin
   End;
   NVBegin(H4Mode,H4Target,W,H,7,H4FpsN,H4FpsD);
   NVSubX:=1; NVSubY:=1; NVCW:=CW; NVCH:=CH;
+  If S^.FullRange=1 Then Tag:='C420jpeg XYSCSS=420JPEG' Else
   Case S^.ChromaLoc Of
    1: Tag:='C420mpeg2 XYSCSS=420MPEG2';
    3: Tag:='C420paldv XYSCSS=420PALDV';
@@ -40767,7 +40801,7 @@ Begin
   End;
   If S^.FullRange=1 Then Tag:=Tag+' XCOLORRANGE=FULL' Else If S^.FullRange=0 Then Tag:=Tag+' XCOLORRANGE=LIMITED';
   NVYTag:=Tag;
-  If (S^.SarNum>0) And (S^.SarDen>0) Then Begin
+  If (S^.SarNum>0) And (S^.SarDen>0) And (S^.SarNum<=32*S^.SarDen) And (S^.SarDen<=32*S^.SarNum) Then Begin
    A:=S^.SarNum; B:=S^.SarDen; T:=A; While B<>0 Do Begin Ow:=T Mod B; T:=B; B:=Ow; End;
    NVSarN:=S^.SarNum Div T; NVSarD:=S^.SarDen Div T;
   End;
@@ -41056,6 +41090,7 @@ Procedure H4SetPart(L,Bx,By,W4,Hp,Ref,Mx,My: LongInt);
 Var I,J,Addr: LongInt;
 Begin
  Addr:=H4MbAddr;
+ If (Mx<-32768) Or (Mx>32767) Or (My<-32768) Or (My>32767) Then Begin H4Err:=True; Mx:=0; My:=0; End;
  For J:=By To By+Hp-1 Do For I:=Bx To Bx+W4-1 Do Begin
   PSmallArr(H4Pics[H4Cur].Mv[L])^[(Addr*16+J*4+I)*2]:=Mx;
   PSmallArr(H4Pics[H4Cur].Mv[L])^[(Addr*16+J*4+I)*2+1]:=My;
@@ -41208,10 +41243,10 @@ Begin
   Exit;
  End;
  If Fx<>0 Then
-  For R:=0 To Bh+4 Do For C:=0 To Bw Do
+  For R:=0 To Bh+4 Do For C:=0 To Bw-1 Do
    Hb[R*PS+C]:=Tap(P[R*PS+C],P[R*PS+C+1],P[R*PS+C+2],P[R*PS+C+3],P[R*PS+C+4],P[R*PS+C+5]);
  If Fy<>0 Then
-  For R:=0 To Bh Do For C:=0 To Bw+4 Do
+  For R:=0 To Bh-1 Do For C:=0 To Bw+4 Do
    Vh[R*PS+C]:=Tap(P[R*PS+C],P[(R+1)*PS+C],P[(R+2)*PS+C],P[(R+3)*PS+C],P[(R+4)*PS+C],P[(R+5)*PS+C]);
  For J:=0 To Bh-1 Do For I:=0 To Bw-1 Do Begin
   G:=P[(J+2)*PS+I+2];
@@ -41675,7 +41710,7 @@ Begin
 End;
 
 Procedure DecodeH264Raw(Const Source,Target: String; Mode: LongInt);
-Var F: PEABuffer; Size,I,Start,E,RN,RD,FN,FD: LongInt; Found: Boolean; PN,PD: LongInt;
+Var F: PEABuffer; Size,I,Start,E,RN,RD: LongInt; FN,FD: Int64; Found: Boolean; PN,PD: Int64;
 Begin
  NVLoad(Source,F,Size);
  H4InitState;
@@ -41841,7 +41876,7 @@ Var
  SOff,SSize: PGFArr; SDts,SPts,SDur: PTLArr; Cto: Int64;
  Dts,Dur: PTLArr; Sz: PGFArr; T: ^TH4Trk; Delay,MediaTime,Shift,Floor_,First,AudioStart: Int64; HaveEdit: Boolean;
  AvN,AvD,CN,CD: Int64; RN,RD: LongInt; ON,OD: LongInt; SumDur: Int64; MovTs: Int64; G: Int64;
- Npk: LongInt; Mp: PEABuffer;
+ Npk: LongInt; Mp: PEABuffer; NalLen64: Int64;
 Begin
  NVLoad(Source,M4F,M4Size);
  H4InitState;
@@ -41967,8 +42002,10 @@ Begin
   If (SOff^[I]<0) Or (SOff^[I]+SSize^[I]>M4Size) Then Break;
   Pos:=SOff^[I]; E:=Pos+SSize^[I]; H4CurDur:=(T^.Ts*RD+RN Div 2) Div RN;
   While Pos+NalSz<=E Do Begin
-   NalLen:=0;
-   For J:=0 To NalSz-1 Do NalLen:=NalLen*256+M4F^[Pos+J];
+    NalLen64:=0;
+   For J:=0 To NalSz-1 Do NalLen64:=NalLen64*256+M4F^[Pos+J];
+   If NalLen64>2000000000 Then Break;
+   NalLen:=NalLen64;
    Inc(Pos,NalSz);
    If (NalLen<=0) Or (Pos+NalLen>E) Then Break;
    H4HandleNal(PEABuffer(@M4F^[Pos]),NalLen,SPts^[I]);
@@ -42160,7 +42197,7 @@ End;
 
 Procedure DecodeH264Flv(Const Source,Target: String; Mode: LongInt);
 Var
- F: PEABuffer; Size,At,N,TS,I,K,Cnt,Kind,Cap,NalSz,Cts: LongInt; Fps: Double; Bits: Int64;
+ F: PEABuffer; Size,At,N,I,K,Cnt,Kind,Cap,NalSz,Cts: LongInt; TS: Int64; Fps: Double; Bits: Int64;
  FOff,FSz,FCts: PGFArr; FTs: PTLArr; Dts,Dur: PTLArr; RN,RD,ON,OD: LongInt;
  AvgN,AvgD,CN,CD,Start,AudioFirst,Pts0,PtsMin: Int64; Best: Double; HaveCfg: Boolean; CfgOff,CfgLen: LongInt;
 Begin
@@ -42174,7 +42211,7 @@ Begin
  Cnt:=0; Fps:=0; AudioFirst:=-1; HaveCfg:=False; CfgOff:=0; CfgLen:=0;
  While At+15<=Size Do Begin
   Kind:=F^[At]; N:=F^[At+1]*65536+F^[At+2]*256+F^[At+3];
-  TS:=F^[At+4]*65536+F^[At+5]*256+F^[At+6]+F^[At+7]*16777216;
+  TS:=F^[At+4]*65536+F^[At+5]*256+F^[At+6]+Int64(F^[At+7])*16777216;
   If At+11+N>Size Then Break;
   If Kind=9 Then Begin
    If (N>=1) And ((F^[At+11] And 15)<>7) Then Fail('flv: codec video H.264 (id 7) requis pour ce chemin.');
@@ -43835,7 +43872,7 @@ Begin
      Val(Copy(Token,2,J-2),Num,Code); If (Code<>0) Or (Num<1) Or (Num>60000) Then Fail('Cadence MPEG1 incorrecte.');
      Val(Copy(Token,J+1,255),Den,Code); If (Code<>0) Or (Den<1) Or (Den>1001) Then Fail('Cadence MPEG1 incorrecte.'); End;
     'I':If Token<>'Ip' Then Fail('MPEG1: Y4M progressif requis.');
-    'C':If (Token<>'C420') And (Token<>'C420jpeg') Then Fail('MPEG1: YUV420 8 bits requis.');
+    'C':If (Token<>'C420') And (Token<>'C420jpeg') And (Token<>'C420mpeg2') And (Token<>'C420paldv') Then Fail('MPEG1: YUV420 8 bits requis.');
     'A':If (Token<>'A1:1') And (Token<>'A0:0') Then Fail('MPEG1: pixels carres requis.');
     'X':;
     Else Fail('MPEG1: parametre Y4M inconnu.'); End;
@@ -44183,7 +44220,7 @@ Begin
     Val(Copy(Token,J+1,255),Den,Code); If (Code<>0) Or (Den<1) Or (Den>Num) Then Fail('MPEG4: cadence hors limites.');
     If Num>Den*30 Then Fail('MPEG4: cadence maximale 30 images/s.'); End;
    'I': If Token<>'Ip' Then Fail('MPEG4: video progressive requise.');
-   'C': If (Token<>'C420') And (Token<>'C420jpeg') Then Fail('MPEG4: YUV420 8 bits requis.');
+   'C': If (Token<>'C420') And (Token<>'C420jpeg') And (Token<>'C420mpeg2') And (Token<>'C420paldv') Then Fail('MPEG4: YUV420 8 bits requis.');
    'A': If (Token<>'A1:1') And (Token<>'A0:0') Then Fail('MPEG4: pixels carres requis en entree.');
    'X': ;
    Else Fail('MPEG4: option Y4M non prise en charge.');
@@ -45057,7 +45094,7 @@ Begin
    If Token[1]='W' Then Begin If W<>0 Then Fail('Crop: largeur dupliquee.'); W:=P; End
    Else Begin If H<>0 Then Fail('Crop: hauteur dupliquee.'); H:=P; End;
   End Else Begin
-   If (Token[1]='C') And (Token<>'C420') And (Token<>'C420jpeg') Then Fail('Crop: YUV420 8 bits requis.');
+   If (Token[1]='C') And (Token<>'C420') And (Token<>'C420jpeg') And (Token<>'C420mpeg2') And (Token<>'C420paldv') Then Fail('Crop: YUV420 8 bits requis.');
    If (Token[1]='I') And (Token<>'Ip') Then Fail('Crop: video progressive requise.');
    If Not ((Token[1]='A') And (AspectNum>0) And (OutputFormat='yuv4mpegpipe')) Then Extra:=Extra+' '+Token;
   End;
@@ -45188,6 +45225,7 @@ Begin
  WriteLn(' D  g726le          G.726 little-endian brut (-code_size 2..5, -sample_rate; decodage vers WAV/MP3/...)');
  WriteLn(' DE gif             CompuServe GIF anime (decodage vers Y4M/PNG/BMP, rythme et synchro CFR comme ffmpeg)');
  WriteLn(' D  h261            H.261 brut (.h261) ou AVI H261, vers Y4M/PNG/BMP');
+ WriteLn(' D  h264            H.264 brut Annex B (detecte par le contenu ou -f h264), vers Y4M/PNG/BMP; aussi MP4/AVI/FLV H.264');
  WriteLn(' D  h263            H.263/H.263+ brut (detecte par le contenu ou -f h263) ou AVI H263, vers Y4M/PNG/BMP');
  WriteLn('  E gif             GIF, une image, palette 256 couleurs');
  WriteLn(' D  hls             HLS fMP4 VOD (alias: m3u8); copie vers MP4');
@@ -45544,7 +45582,7 @@ BEGIN
    WriteLn(' EV    h263p           H.263+ / H.263-1998 (encodeur I/P 16x16 demi-pixel, formats personnalises multiples de 4, AVI; decodeur: voir h263)');
    WriteLn('DEVS D ffv1            FFmpeg video codec #1 (decodeur v0-v4; encodeur v1 YUV420 8 bits)');
    WriteLn('DEV    gif             GIF (decodeur anime complet; encodeur palette RGB 3/3/2, LZW, une image)');
-   WriteLn('D V    h264            H264 (premiere IDR CAVLC 8 bits 4:2:0 progressive)');
+   WriteLn('D V D  h264            H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 (decodeur progressif 4:2:0 8 bits: CAVLC/CABAC, I/P/B, 8x8, ponderation; .h264, MP4, AVI, FLV)');
    WriteLn('D A    mp1             MP1 (MPEG audio layer 1)');
    WriteLn('DEA    mp3             MP3 (decodeur Layer III; encodeur MPEG-1 CBR 32..320k)');
    WriteLn('DEV    mpeg1video      MPEG-1 video (encodeur I/B; decodeur I/P/B)');
