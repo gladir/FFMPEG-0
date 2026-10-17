@@ -42275,6 +42275,764 @@ Begin
 End;
 { H264-END }
 
+{ IMC-BEGIN }
+Const
+ IMCBandTab: Array[0..32] Of SmallInt=(0,3,6,9,12,16,20,24,29,34,40,46,53,60,68,76,84,93,102,111,121,131,141,151,162,173,184,195,207,219,231,243,256);
+ IMCCycl: Array[0..31] Of ShortInt=(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,20,21,22,23,24,25,26,27,28,29,30,31,32,32);
+ IMCCycl2: Array[0..31] Of ShortInt=(-1,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,17,18,19,20,21,22,23,24,25,26,27,28,29);
+ IMCW1Bits: Array[0..30] Of LongWord=($3DF4EE39,$3DFC2870,$3E044AE8,$3DCC4347,$3DA7C73F,$3DC4D819,$3DB3CA75,$3DB05E52,$3DB8802A,$3DCB1770,$3DE767D3,$3E0645E5,$3E1C8E26,$3E358C09,$3E631AD2,$3E7ACB86,$3E88E6D1,$3E9D16FD,$3EA56649,$3EACB146,$3EBBC9AC,$3EC8FD3B,$3ECBD09E,$3ECE7D9A,$3ED95960,$3EE3B9D0,$3EE5FBF8,$3EE93016,$3EF4A926,$3F002BD8,$3F02A93F);
+ IMCW2Bits: Array[0..30] Of LongWord=($3B53FC97,$3B654D21,$3B828D4E,$3B01D659,$3A98A72B,$3AEAFD64,$3AB7FD07,$3AAEAF55,$3AC54B23,$3AFFAC9E,$3B35D814,$3B87E5A8,$3BCDB453,$3C196B81,$3C8C688E,$3CB78B1C,$3CE8A109,$3D28A0B8,$3D41CEF2,$3D59C18D,$3D8885C6,$3DA4023E,$3DAA4F29,$3DB06A03,$3DCA9817,$3DE5C78A,$3DEBFC22,$3DF4F7A9,$3E0B7132,$3E1E2824,$3E2696E6);
+ IMCQ1Bits: Array[0..31] Of LongWord=($3F5824D5,$3EF27979,$3FB963AA,$3E8A9E4D,$3F3E96E6,$3F9EF990,$3FEC38D2,$00000000,$3F5E6784,$3EF4039B,$3FBD3672,$3E8371DA,$3F417A9A,$3FA95793,$40023348,$00000000,$3F424841,$3F1F6B1A,$3FA2BAAE,$3EB22079,$3F40D035,$3F934C55,$3FD071E7,$00000000,$3F43E7E2,$3F250796,$3FA1C4FC,$3EB0E2E3,$3F438B9C,$3F9B739F,$3FE1C6C9,$00000000);
+ IMCQ2Bits: Array[0..111] Of LongWord=($3E0E93E2,$3EB37B07,$3F187150,$3F5B93CD,$3F8F8EC9,$3FB1B175,$3FD912A9,$40082218,$3D93E89B,$3E3D9F0A,$3E9726AF,$3ED33C1D,$3F0A6A66,$3F2D4270,$3F4FDD33,$3F729952,$3F89FBE7,$3F9A0981,$3FAB2B80,$3FBDADF3,$3FD1EAEE,$3FE84A41,$40047D2C,$401CCA8A,$3D19BD40,$3DD25FE9,$3E240F24,$3E5D3A60,$3E8B6D01,$3EA9170D,$3EC7CBB4,$3EE7DBD3,$3F04984E,$3F15D5E5,$3F2769A9,$3F391EEB,$3F4AA045,$3F5BE187,$3F6D9AA6,$3F7F3F75,$3F87F4A1,$3F9014F9,$3F984C7B,$3FA0C89B,$3FA98833,$3FB2A0C3,$3FBC051D,$3FC5C550,$3FD03044,$3FDB1338,$3FE6BF0A,$3FF4826B,$40036AE4,$400E4B0A,$401EE981,$4050368B,$3DE4AADA,$3EB57CF6,$3F246F26,$3F7616F8,$3FA5C44C,$3FCF1316,$3FFEB30B,$4020B55F,$3D6C6DE7,$3E2DF4C3,$3E985D96,$3EE08E9B,$3F172464,$3F3FD545,$3F6A9164,$3F8B2C8C,$3FA1A1D3,$3FB6E3F8,$3FCD52C1,$3FE534AD,$40000AF2,$400F536D,$40298EA8,$40A8D50D,$3CF37B8D,$3DB2D341,$3E13EB3A,$3E512620,$3E899F80,$3EACA149,$3ED14FAD,$3EF754F3,$3F0F7C89,$3F23B9E0,$3F386F26,$3F4DE54B,$3F63AB86,$3F79B23E,$3F87FEB9,$3F935561,$3F9EC00E,$3FA9D1CC,$3FB4CD3A,$3FC01073,$3FCBBE6E,$3FD7DC62,$3FE482B6,$3FF213EC,$40005409,$40082BED,$401156A8,$401E73EF,$402E343B,$404686EC,$4095F575,$40C75228);
+ IMCXTabBits: Array[0..13] Of LongWord=($40F33333,$40666666,$408CCCCD,$406CCCCD,$40C33333,$40A33333,$40133333,$3FCCCCCD,$40C66666,$3FC00000,$3FE66666,$3F99999A,$00000000,$00000000);
+ IMCExpBits: Array[0..31] Of LongWord=($393A7757,$39A5CB60,$3A136A16,$3A83126F,$3AE9152D,$3B4F3E39,$3BB8449B,$3C23D70A,$3C91AD3C,$3D0186E3,$3D6655C2,$3DCCCCCD,$3E36188B,$3EA1E89C,$3F0FF599,$3F800000,$3FE39EAE,$404A62C3,$40B3F300,$41200000,$418E432D,$41FCFB74,$4260EFC0,$42C80000,$4331D3F8,$439E1D29,$440C95D8,$447A0000,$44DE48F6,$4545A473,$45AFBB4E,$461C4000);
+ IMCCbSel: Array[0..3,0..31] Of Byte=((1,1,1,1,1,1,3,3,3,3,3,3,3,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,2,2,2),(0,2,0,3,2,3,3,0,0,0,0,0,0,0,0,0,0,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1),(1,1,1,1,1,1,1,3,3,3,3,3,3,3,3,3,3,3,3,3,3,0,0,0,0,0,0,0,2,2,2,2),(0,1,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,0,0,0,0,0,0,0,0,0,0,0,0));
+ IMCHuffSizes: Array[0..3] Of Byte=(17,17,18,18);
+ IMCHuffLens: Array[0..3,0..3,0..17] Of Byte=(((1,2,5,6,11,12,15,16,16,14,13,10,9,8,7,4,3,0),(2,3,3,4,4,4,6,6,7,7,7,8,9,10,11,11,2,0),(1,4,4,7,9,10,12,15,15,14,13,11,8,6,5,4,2,0),(2,2,4,8,9,14,15,15,13,12,11,10,7,6,5,3,2,0)),((2,2,3,4,7,7,10,11,12,14,14,13,9,8,7,5,2,0),(2,3,14,14,13,12,11,10,9,8,7,6,5,4,3,3,2,0),(2,3,3,4,4,5,7,9,11,12,13,13,10,8,6,4,2,0),(2,3,3,4,4,5,7,9,11,12,13,13,10,8,6,4,2,0)),((3,5,8,9,12,15,17,17,16,14,13,11,10,7,6,4,2,1),(4,7,8,10,11,12,15,16,16,14,13,9,6,5,3,2,2,2),(4,5,6,7,12,13,17,17,16,15,14,11,10,9,8,3,2,1),(2,5,7,8,14,15,16,16,13,12,11,10,9,6,4,3,2,2)),((2,4,7,9,10,12,13,15,16,16,14,11,8,6,5,3,2,2),(3,5,5,7,10,11,11,9,8,6,5,4,4,3,3,3,3,3),(5,8,9,9,7,6,6,6,5,5,5,4,4,4,3,3,3,2),(2,3,5,7,8,11,12,13,15,15,14,10,9,6,4,3,3,2)));
+ IMCHuffSyms: Array[0..3,0..3,0..17] Of Byte=(((7,8,5,10,3,13,1,0,15,14,2,12,11,4,16,9,6,0),(8,9,6,10,5,4,11,3,16,12,2,1,13,0,14,15,7,0),(8,6,9,11,12,13,14,1,0,2,15,3,4,5,10,16,7,0),(8,6,5,3,12,16,15,14,0,13,1,2,11,4,10,9,7,0)),((8,7,9,5,16,4,2,13,1,15,0,14,12,3,11,10,6,0),(8,16,0,15,1,14,2,13,12,3,11,4,10,5,6,9,7,0),(8,6,9,10,16,4,3,13,14,1,0,15,2,12,11,5,7,0),(8,6,9,10,16,4,3,13,14,1,0,15,2,12,11,5,7,0)),((6,5,4,11,2,14,15,17,0,1,13,12,3,10,16,9,8,7),(5,11,3,12,2,13,0,17,15,14,1,16,4,10,9,6,7,8),(16,9,5,10,1,12,15,17,14,13,0,2,11,3,4,6,8,7),(8,5,4,12,1,15,0,17,14,2,13,16,3,11,10,9,6,7)),((7,9,4,11,2,12,0,14,17,15,13,1,3,10,5,16,8,6),(8,17,15,5,2,1,0,3,4,16,6,7,14,13,9,10,12,11),(4,16,0,1,2,3,17,15,14,13,11,5,12,10,9,7,6,8),(7,9,4,11,3,13,1,0,15,17,14,2,12,16,10,6,5,8)));
+ IMCWinBits: Array[0..255] Of LongWord=($3B8E2C0A,$3C55415F,$3CB1B556,$3CF8C846,$3D1FEC68,$3D437323,$3D66F7FB,$3D853D4C,$3D96FD53,$3DA8BBE5,$3DBA78D6,$3DCC33FC,$3DDDED2A,$3DEFA433,$3E00AC77,$3E098597,$3E125D63,$3E1B33C6,$3E2408AB,$3E2CDBFB,$3E35AD9F,$3E3E7D85,$3E474B94,$3E5017B8,$3E58E1D8,$3E61A9E4,$3E6A6FC1,$3E73335C,$3E7BF4A0,$3E8259BB,$3E86B7E4,$3E8B14C0,$3E8F7046,$3E93CA6A,$3E982321,$3E9C7A61,$3EA0D01E,$3EA5244F,$3EA976E8,$3EADC7DF,$3EB2172A,$3EB664BC,$3EBAB08D,$3EBEFA93,$3EC342C0,$3EC78909,$3ECBCD69,$3ED00FD1,$3ED45039,$3ED88E93,$3EDCCAD9,$3EE104FB,$3EE53CF4,$3EE972B7,$3EEDA639,$3EF1D772,$3EF60655,$3EFA32DB,$3EFE5CF6,$3F01424F,$3F0354E4,$3F056635,$3F07763D,$3F0984F6,$3F0B925C,$3F0D9E6A,$3F0FA91B,$3F11B269,$3F13BA4F,$3F15C0C8,$3F17C5D2,$3F19C963,$3F1BCB7A,$3F1DCC10,$3F1FCB21,$3F21C8A7,$3F23C49E,$3F25BF02,$3F27B7CC,$3F29AEF9,$3F2BA482,$3F2D9864,$3F2F8A9A,$3F317B20,$3F3369ED,$3F355702,$3F374257,$3F392BE7,$3F3B13AF,$3F3CF9A9,$3F3EDDD2,$3F40C022,$3F42A097,$3F447F2C,$3F465BDD,$3F4836A4,$3F4A0F7C,$3F4BE663,$3F4DBB52,$3F4F8E45,$3F515F39,$3F532E27,$3F54FB0E,$3F56C5E6,$3F588EAB,$3F5A555B,$3F5C19F1,$3F5DDC67,$3F5F9CB9,$3F615AE4,$3F6316E4,$3F64D0B3,$3F66884C,$3F683DAF,$3F69F0D3,$3F6BA1B5,$3F6D5052,$3F6EFCA7,$3F70A6AC,$3F724E62,$3F73F3C1,$3F7596C6,$3F77376C,$3F78D5B1,$3F7A7191,$3F7C0B05,$3F7DA20C,$3F7F36A1,$3F806460,$3F812C33,$3F81F2C8,$3F82B81B,$3F837C2C,$3F843EF9,$3F85007F,$3F85C0BD,$3F867FB2,$3F873D5A,$3F87F9B5,$3F88B4BF,$3F896E7A,$3F8A26E0,$3F8ADDF2,$3F8B93AD,$3F8C4810,$3F8CFB19,$3F8DACC6,$3F8E5D15,$3F8F0C05,$3F8FB994,$3F9065C1,$3F911088,$3F91B9EA,$3F9261E5,$3F930877,$3F93AD9E,$3F945157,$3F94F3A4,$3F959481,$3F9633EC,$3F96D1E6,$3F976E6B,$3F98097A,$3F98A312,$3F993B32,$3F99D1D7,$3F9A6702,$3F9AFAAE,$3F9B8CDD,$3F9C1D8C,$3F9CACB9,$3F9D3A64,$3F9DC68B,$3F9E512D,$3F9EDA48,$3F9F61DB,$3F9FE7E5,$3FA06C65,$3FA0EF58,$3FA170BF,$3FA1F097,$3FA26EE0,$3FA2EB97,$3FA366BD,$3FA3E050,$3FA4584E,$3FA4CEB7,$3FA54389,$3FA5B6C3,$3FA62864,$3FA6986C,$3FA706D9,$3FA773A9,$3FA7DEDD,$3FA84871,$3FA8B067,$3FA916BC,$3FA97B71,$3FA9DE83,$3FAA3FF2,$3FAA9FBD,$3FAAFDE3,$3FAB5A63,$3FABB53B,$3FAC0E6D,$3FAC65F6,$3FACBBD6,$3FAD100C,$3FAD6296,$3FADB374,$3FAE02A6,$3FAE502B,$3FAE9C02,$3FAEE629,$3FAF2EA2,$3FAF756A,$3FAFBA81,$3FAFFDE6,$3FB03F9A,$3FB07F9A,$3FB0BDE7,$3FB0FA7F,$3FB13563,$3FB16E92,$3FB1A60C,$3FB1DBCE,$3FB20FDA,$3FB2422E,$3FB272CB,$3FB2A1B0,$3FB2CEDB,$3FB2FA4D,$3FB32406,$3FB34C05,$3FB37249,$3FB396D3,$3FB3B9A2,$3FB3DAB5,$3FB3FA0C,$3FB417A7,$3FB43386,$3FB44DA8,$3FB4660D,$3FB47CB6,$3FB491A1,$3FB4A4CE,$3FB4B63E,$3FB4C5F0,$3FB4D3E4,$3FB4E019,$3FB4EA90,$3FB4F349,$3FB4FA43,$3FB4FF7F,$3FB502FC,$3FB504BB);
+ IMCExp2Bits: Array[0..127] Of Int64=($3FF0000000000000,$3FF23EC9856BE2F2,$3FF4CE3BCFE6EF4F,$3FF7B9A87DF76B5A,$3FFB0DF7CCCA68AD,$3FFED9E1A7B0CBC5,$400197175CBB53B0,$40040F014F9E1F1C,$4006DF98426ADBAC,$400A154DD05F34F5,$400DBE529D150D72,$4010F56A87E669B9,$401356A46E267E55,$40160D5C4ACA6799,$401925915980B1BF,$401CACF1D18F672B,$4020598BB04516E3,$4022A4E610DA33C3,$402542ACA1796B1B,$40283E70597C91F4,$402BA561B294CA6D,$402F868AF79FDDF4,$4031F98961141107,$40347F43E6400E28,$40375F9BB3D55EE5,$403AA74809A541E9,$403E64C8F5BA8342,$40415453B75CA679,$4043C2DF368C436E,$404688C7232E6799,$4049B24DDD6B1BFD,$404D4D6E2D0C183F,$4050B50C8756BCAA,$40530D3E168D086F,$4055B9A91F30922F,$4058C61F53F5E413,$405C401AFF5978EA,$40601B7D4C645435,$40625E225B201107,$4064F1FAC35F1FCF,$4067E26B9606FA8A,$406B3C733D3FECE4,$406F0EE2EDFB182B,$4071B550148A5020,$40743177B6D3C586,$407706E4B365F7F1,$407A421E06A78190,$407DF16CB566169E,$4081128D79F41562,$408377DE14D9CC2E,$4086333F88336366,$408950C5AC5767B6,$408CDE3639AB8ACA,$409075A2D5A1B9CF,$4092C4EE5660352D,$40956733A3309A1E,$4098681792A1EAC9,$409BD4E1477C53DD,$409FBCB4E3C42D35,$40A2186B3C3B2C0F,$40A4A27B2CF41AE2,$40A787C4151DF80A,$40AAD5130D5A0C19,$40AE99010D587E27,$40B17219BA2D533C,$40B3E4D2D001B87E,$40B6AF7E6B64881A,$40B9DE73FC812610,$40BD7FC64FCC660F,$40C0D1C0E2B1BF5D,$40C32DF9A1BE848B,$40C5DEFC8EC895DC,$40C8F0AFAAF0C064,$40CC70A4689CF064,$40D03729D37FB612,$40D27DB10C388F3D,$40D515F72100A466,$40D80B74B685EE40,$40DB6B3E8A0583D1,$40DF443F45830981,$40E1D3BCB8BAE0C8,$40E4542953B92751,$40E72E74A920902A,$40EA6F3B3B3C0644,$40EE24DE99F002ED,$40F12FE27B2657D4,$40F39950D107711A,$40F65963DDC83519,$40F97C4439D0F6A1,$40FD0FCF4709052C,$410091EA3E085B03,$4102E52DA4B5180A,$41058BF966C7D1FC,$410892065C290094,$410C04B277A6A728,$410FF33BDED1194E,$41123782265C0BAF,$4114C5EEF4B77333,$4117B0317505EF62,$411B032CBE41C7C1,$411ECD92DC8DDE0D,$41219012E44BDD60,$41240700BE6B5CA7,$4126D67838154171,$412A0AE5F5A84211,$412DB274F188463A,$4130EEA68F31020B,$41334EED69C05BBB,$413604901F7AF83C,$41391B8922D14419,$413CA18135DB4D25,$41405305E67716B4,$41429D75F53D5A0C,$41453A31524F9567,$414834C457C6F2C0,$414B9A5A3C505B0E,$414F79F74ABEE15E,$4151F25DA28288EC,$415477168C088B1F,$41575648979B66E8,$415A9CA5F264D5FE,$415E58A8E18B010E,$41614D69E17EC428,$4163BAFD04C2B3F2,$41667FC9BB5F6A4B,$4169A80D81759DCF,$416D41BD8B15939B,$4170AE623C640D91);
+ IMCPow2Bits: Array[0..127] Of Int64=($3FF0000000000000,$3FF23EC9856BE2F2,$3FF4CE3BCFE6EF4F,$3FF7B9A87DF76B5A,$3FFB0DF7CCCA68AD,$3FFED9E1A7B0CBC5,$400197175CBB53B0,$40040F014F9E1F1C,$4006DF98426ADBAC,$400A154DD05F34F5,$400DBE529D150D72,$4010F56A87E669B9,$401356A46E267E55,$40160D5C4ACA6799,$401925915980B1BF,$401CACF1D18F672B,$4020598BB04516E3,$4022A4E610DA33C3,$402542ACA1796B1B,$40283E70597C91F4,$402BA561B294CA6D,$402F868AF79FDDF4,$4031F98961141107,$40347F43E6400E28,$40375F9BB3D55EE5,$403AA74809A541E9,$403E64C8F5BA8342,$40415453B75CA679,$4043C2DF368C436E,$404688C7232E6799,$4049B24DDD6B1BFD,$404D4D6E2D0C183F,$4050B50C8756BCAA,$40530D3E168D086F,$4055B9A91F30922F,$4058C61F53F5E413,$405C401AFF5978EA,$40601B7D4C645435,$40625E225B201107,$4064F1FAC35F1FCF,$4067E26B9606FA8A,$406B3C733D3FECE4,$406F0EE2EDFB182B,$4071B550148A5020,$40743177B6D3C586,$407706E4B365F7F1,$407A421E06A78190,$407DF16CB566169E,$4081128D79F41562,$408377DE14D9CC2E,$4086333F88336366,$408950C5AC5767B6,$408CDE3639AB8ACA,$409075A2D5A1B9CF,$4092C4EE5660352D,$40956733A3309A1E,$4098681792A1EAC9,$409BD4E1477C53DD,$409FBCB4E3C42D35,$40A2186B3C3B2C0F,$40A4A27B2CF41AE2,$40A787C4151DF80A,$40AAD5130D5A0C19,$40AE99010D587E27,$40B17219BA2D533C,$40B3E4D2D001B87E,$40B6AF7E6B64881A,$40B9DE73FC812610,$40BD7FC64FCC660F,$40C0D1C0E2B1BF5D,$40C32DF9A1BE848B,$40C5DEFC8EC895DC,$40C8F0AFAAF0C064,$40CC70A4689CF064,$40D03729D37FB612,$40D27DB10C388F3D,$40D515F72100A466,$40D80B74B685EE40,$40DB6B3E8A0583D1,$40DF443F45830981,$40E1D3BCB8BAE0C8,$40E4542953B92751,$40E72E74A920902A,$40EA6F3B3B3C0644,$40EE24DE99F002ED,$40F12FE27B2657D4,$40F39950D107711A,$40F65963DDC83519,$40F97C4439D0F6A1,$40FD0FCF4709052C,$410091EA3E085B03,$4102E52DA4B5180A,$41058BF966C7D1FC,$410892065C290094,$410C04B277A6A728,$410FF33BDED1194E,$41123782265C0BAF,$4114C5EEF4B77333,$4117B0317505EF62,$411B032CBE41C7C1,$411ECD92DC8DDE0D,$41219012E44BDD60,$41240700BE6B5CA7,$4126D67838154171,$412A0AE5F5A84211,$412DB274F188463A,$4130EEA68F31020B,$41334EED69C05BBB,$413604901F7AF83C,$41391B8922D14419,$413CA18135DB4D25,$41405305E67716B4,$41429D75F53D5A0C,$41453A31524F9567,$414834C457C6F2C0,$414B9A5A3C505B0E,$414F79F74ABEE15E,$4151F25DA28288EC,$415477168C088B1F,$41575648979B66E8,$415A9CA5F264D5FE,$415E58A8E18B010E,$41614D69E17EC428,$4163BAFD04C2B3F2,$41667FC9BB5F6A4B,$4169A80D81759DCF,$416D41BD8B15939B,$4170AE623C640D91);
+ IMCPowfBits: Array[0..15] Of LongWord=($3F800000,$3EBAF81A,$3E088D77,$3D47763F,$3C91AD39,$3BD4CA14,$3B1B690D,$3A6301E2,$39A5CB5F,$38F22CE3,$3830DF51,$37812DAC,$36BCB0C1,$3609CF4B,$35494C56,$3493048E);
+
+{ ---- IMC (Intel Music Coder) : decodeur mono, blocs de 64 octets, MDCT de 256 coefficients (libavcodec/imc.c, libavutil/tx) ---- }
+Type
+ TIMCSa=Array[0..31] Of Single;
+ TIMCIa=Array[0..31] Of LongInt;
+Const
+ IMCPi: Double = 3.14159265358979323846;
+ IMCSqrt2: Double = 1.4142135623730951;
+Var
+ IMCW1,IMCW2: Array[0..30] Of Single;
+ IMCQ1: Array[0..3,0..7] Of Single;
+ IMCQ2: Array[0..1,0..55] Of Single;
+ IMCXTab: Array[0..13] Of Single;
+ IMCExp: Array[0..31] Of Single;
+ IMCOldFloor,IMCFl1,IMCFl2,IMCFl3,IMCFl4,IMCFl5,IMCFl6: TIMCSa;
+ IMCCWd: Array[0..255] Of Single;
+ IMCBandW,IMCBitsBand,IMCLevl,IMCBandFlags,IMCSumLen,IMCSkipRaw,IMCSkipBits,IMCSkipCnt: TIMCIa;
+ IMCCWlen,IMCSkip,IMCCodewords: Array[0..255] Of LongInt;
+ IMCReset: Boolean;
+ IMCPrev: Array[0..127] Of Single;
+ IMCWin: Array[0..255] Of Single;
+ IMCSqrt: Array[0..29] Of Single;
+ IMCCoef0: LongInt;
+ IMCBuf: Array[0..79] Of Byte; IMCPos: LongInt;
+ IMCOut: Array[0..255] Of Single;
+ { MDCT inverse }
+ IMCTab: Array[3..7,0..33] Of Single;     { tables de cosinus 8, 16, 32, 64, 128 (indice = log2) }
+ IMCMap: Array[0..127] Of LongInt;
+ IMCExpRe,IMCExpIm: Array[0..255] Of Single;
+ IMCZr,IMCZi: Array[0..127] Of Single;
+ IMCTempOut: Array[0..255] Of Single;
+ IMCReady: Boolean;
+ IMCExp2T,IMCPow2T: Array[0..127] Of Double;
+ IMCPowfT: Array[0..15] Of Single;
+ IMCCodes: Array[0..3,0..3,0..17] Of LongWord;
+
+Function IMCD(X: Single): Double; Begin IMCD:=X; End;
+Function IMCS(X: Double): Single; Begin IMCS:=X; End;
+
+Procedure IMCLoadFloats(Const Src; N: LongInt; Var Dst);
+Begin Move(Src,Dst,N*4); End;
+
+Function IMCSplitPerm(I,Len,Inv: LongInt): LongInt;
+Begin
+ Len:=Len Shr 1;
+ If Len<=1 Then Begin IMCSplitPerm:=I And 1; Exit; End;
+ If (I And Len)=0 Then Begin IMCSplitPerm:=IMCSplitPerm(I,Len,Inv)*2; Exit; End;
+ Len:=Len Shr 1;
+ If (I And Len)=0 Then IMCSplitPerm:=IMCSplitPerm(I,Len,Inv)*4+1-2*(1 Xor Inv)
+ Else IMCSplitPerm:=IMCSplitPerm(I,Len,Inv)*4+1-2*(0 Xor Inv);
+End;
+
+Procedure IMCInit;
+Var I,J,K,L: LongInt; Freq,Alpha,Sc,Dv: Double; Cd: LongWord; Sg: Single;
+Begin
+ If IMCReady Then Exit;
+ SetMXCSR(GetMXCSR Or $1F80);
+ IMCLoadFloats(IMCW1Bits,31,IMCW1); IMCLoadFloats(IMCW2Bits,31,IMCW2);
+ IMCLoadFloats(IMCQ1Bits,32,IMCQ1); IMCLoadFloats(IMCQ2Bits,112,IMCQ2);
+ Move(IMCExp2Bits,IMCExp2T,SizeOf(IMCExp2T)); Move(IMCPow2Bits,IMCPow2T,SizeOf(IMCPow2T)); Move(IMCPowfBits,IMCPowfT,SizeOf(IMCPowfT));
+ IMCLoadFloats(IMCXTabBits,14,IMCXTab); IMCLoadFloats(IMCExpBits,32,IMCExp);
+ { fenetre sinus normalisee par sqrt(2) }
+ For I:=0 To 255 Do Begin
+  Move(IMCWinBits[I],IMCWin[I],4);
+ End;
+ For I:=0 To 29 Do IMCSqrt[I]:=Sqrt(I);
+ { tables de cosinus du FFT split-radix }
+ For L:=3 To 7 Do Begin
+  K:=1 Shl L; Freq:=2*IMCPi/K;
+  For I:=0 To K Div 4-1 Do Begin Dv:=Cos(I*Freq); IMCTab[L,I]:=Dv; End;
+  IMCTab[L,K Div 4]:=0;
+ End;
+ { permutation du FFT 128 (inverse) et twiddles du MDCT }
+ For I:=0 To 127 Do IMCMap[I]:=(-IMCSplitPerm(I,128,1)) And 127;
+ Sc:=Sqrt(Abs(IMCD(1.0/16384)));
+ For I:=0 To 127 Do Begin
+  Alpha:=(IMCPi/2)*(I+0.125)/128;
+  Dv:=Cos(Alpha); Dv:=Dv*Sc; IMCExpRe[128+I]:=Dv; Dv:=Sin(Alpha); Dv:=Dv*Sc; IMCExpIm[128+I]:=Dv;
+ End;
+ For I:=0 To 127 Do Begin IMCExpRe[I]:=IMCExpRe[128+IMCMap[I]]; IMCExpIm[I]:=IMCExpIm[128+IMCMap[I]]; End;
+ For I:=0 To 127 Do IMCMap[I]:=IMCMap[I] Shl 1;
+ { codes de Huffman canoniques : code += 2^(32-len) dans l'ordre des tables }
+ For I:=0 To 3 Do For J:=0 To 3 Do Begin
+  Cd:=0;
+  For K:=0 To IMCHuffSizes[I]-1 Do Begin
+   IMCCodes[I,J,K]:=Cd;
+   Cd:=Cd+(LongWord(1) Shl (32-IMCHuffLens[I,J,K]));
+  End;
+ End;
+ IMCReady:=True;
+End;
+
+{ ---- lecture de bits (flux deja permute par mots de 16 bits) ---- }
+Function IMCGetBits(N: LongInt): LongInt;
+Var V,I,B: LongInt;
+Begin
+ V:=0;
+ For I:=1 To N Do Begin
+  If IMCPos<512 Then B:=(IMCBuf[IMCPos Shr 3] Shr (7-(IMCPos And 7))) And 1 Else B:=0;
+  V:=V*2+B; Inc(IMCPos);
+ End;
+ IMCGetBits:=V;
+End;
+Function IMCGetVlc(S,T: LongInt): LongInt;
+Var Peek: LongWord; I,B,L: LongInt;
+Begin
+ Peek:=0;
+ For I:=0 To 31 Do Begin
+  If IMCPos+I<512 Then B:=(IMCBuf[(IMCPos+I) Shr 3] Shr (7-((IMCPos+I) And 7))) And 1 Else B:=0;
+  Peek:=Peek*2+LongWord(B);
+ End;
+ For I:=0 To IMCHuffSizes[S]-1 Do Begin
+  L:=IMCHuffLens[S,T,I];
+  If (Peek Shr (32-L))=(IMCCodes[S,T,I] Shr (32-L)) Then Begin
+   Inc(IMCPos,L); IMCGetVlc:=IMCHuffSyms[S,T,I]; Exit;
+  End;
+ End;
+ IMCGetVlc:=0; Inc(IMCPos,1);
+End;
+
+{ ---- MDCT inverse : FFT split-radix en place et rotations (libavutil/tx_template.c, versions C) ---- }
+Procedure IMCButterflies(A0,A1,A2,A3: LongInt; T1,T2,T5,T6: Single);
+Var R0,I0,R1,I1,T3,T4: Single;
+Begin
+ R0:=IMCZr[A0]; I0:=IMCZi[A0]; R1:=IMCZr[A1]; I1:=IMCZi[A1];
+ T3:=T5-T1; T5:=T5+T1;
+ IMCZr[A2]:=R0-T5; IMCZr[A0]:=R0+T5;
+ IMCZi[A3]:=I1-T3; IMCZi[A1]:=I1+T3;
+ T4:=T2-T6; T6:=T2+T6;
+ IMCZr[A3]:=R1-T4; IMCZr[A1]:=R1+T4;
+ IMCZi[A2]:=I0-T6; IMCZi[A0]:=I0+T6;
+End;
+Procedure IMCTransform(A0,A1,A2,A3: LongInt; Wre,Wim: Single);
+Var T1,T2,T5,T6,Nw: Single;
+Begin
+ Nw:=-Wim;
+ T1:=IMCZr[A2]*Wre-IMCZi[A2]*Nw;
+ T2:=IMCZr[A2]*Nw+IMCZi[A2]*Wre;
+ T5:=IMCZr[A3]*Wre-IMCZi[A3]*Wim;
+ T6:=IMCZr[A3]*Wim+IMCZi[A3]*Wre;
+ IMCButterflies(A0,A1,A2,A3,T1,T2,T5,T6);
+End;
+Procedure IMCFft2(B: LongInt);
+Var Tr,Ti: Single;
+Begin
+ Tr:=IMCZr[B]-IMCZr[B+1]; IMCZr[B]:=IMCZr[B]+IMCZr[B+1];
+ Ti:=IMCZi[B]-IMCZi[B+1]; IMCZi[B]:=IMCZi[B]+IMCZi[B+1];
+ IMCZr[B+1]:=Tr; IMCZi[B+1]:=Ti;
+End;
+Procedure IMCFft4(B: LongInt);
+Var T1,T2,T3,T4,T5,T6,T7,T8: Single;
+Begin
+ T3:=IMCZr[B]-IMCZr[B+1]; T1:=IMCZr[B]+IMCZr[B+1];
+ T8:=IMCZr[B+3]-IMCZr[B+2]; T6:=IMCZr[B+3]+IMCZr[B+2];
+ IMCZr[B+2]:=T1-T6; IMCZr[B]:=T1+T6;
+ T4:=IMCZi[B]-IMCZi[B+1]; T2:=IMCZi[B]+IMCZi[B+1];
+ T7:=IMCZi[B+2]-IMCZi[B+3]; T5:=IMCZi[B+2]+IMCZi[B+3];
+ IMCZi[B+3]:=T4-T8; IMCZi[B+1]:=T4+T8;
+ IMCZr[B+3]:=T3-T7; IMCZr[B+1]:=T3+T7;
+ IMCZi[B+2]:=T2-T5; IMCZi[B]:=T2+T5;
+End;
+Procedure IMCFft8(B: LongInt);
+Var T1,T2,T5,T6,Nr,Ni: Single;
+Begin
+ IMCFft4(B);
+ Nr:=-IMCZr[B+5]; T1:=IMCZr[B+4]-Nr; IMCZr[B+5]:=IMCZr[B+4]+Nr;
+ Ni:=-IMCZi[B+5]; T2:=IMCZi[B+4]-Ni; IMCZi[B+5]:=IMCZi[B+4]+Ni;
+ Nr:=-IMCZr[B+7]; T5:=IMCZr[B+6]-Nr; IMCZr[B+7]:=IMCZr[B+6]+Nr;
+ Ni:=-IMCZi[B+7]; T6:=IMCZi[B+6]-Ni; IMCZi[B+7]:=IMCZi[B+6]+Ni;
+ IMCButterflies(B+0,B+2,B+4,B+6,T1,T2,T5,T6);
+ IMCTransform(B+1,B+3,B+5,B+7,IMCTab[3,1],IMCTab[3,1]);
+End;
+Procedure IMCFft16(B: LongInt);
+Var T1,T2,T5,T6,C1,C2,C3: Single;
+Begin
+ C1:=IMCTab[4,1]; C2:=IMCTab[4,2]; C3:=IMCTab[4,3];
+ IMCFft8(B); IMCFft4(B+8); IMCFft4(B+12);
+ T1:=IMCZr[B+8]; T2:=IMCZi[B+8]; T5:=IMCZr[B+12]; T6:=IMCZi[B+12];
+ IMCButterflies(B+0,B+4,B+8,B+12,T1,T2,T5,T6);
+ IMCTransform(B+2,B+6,B+10,B+14,C2,C2);
+ IMCTransform(B+1,B+5,B+9,B+13,C1,C3);
+ IMCTransform(B+3,B+7,B+11,B+15,C3,C1);
+End;
+Procedure IMCCombine(B,L,Len: LongInt);
+Var O1,O2,O3,I,C,W: LongInt;
+Begin
+ O1:=2*Len; O2:=4*Len; O3:=6*Len;
+ C:=0; W:=O1-7; I:=0;
+ While I<Len Do Begin
+  IMCTransform(B+0,B+O1+0,B+O2+0,B+O3+0,IMCTab[L,C+0],IMCTab[L,W+7]);
+  IMCTransform(B+2,B+O1+2,B+O2+2,B+O3+2,IMCTab[L,C+2],IMCTab[L,W+5]);
+  IMCTransform(B+4,B+O1+4,B+O2+4,B+O3+4,IMCTab[L,C+4],IMCTab[L,W+3]);
+  IMCTransform(B+6,B+O1+6,B+O2+6,B+O3+6,IMCTab[L,C+6],IMCTab[L,W+1]);
+  IMCTransform(B+1,B+O1+1,B+O2+1,B+O3+1,IMCTab[L,C+1],IMCTab[L,W+6]);
+  IMCTransform(B+3,B+O1+3,B+O2+3,B+O3+3,IMCTab[L,C+3],IMCTab[L,W+4]);
+  IMCTransform(B+5,B+O1+5,B+O2+5,B+O3+5,IMCTab[L,C+5],IMCTab[L,W+2]);
+  IMCTransform(B+7,B+O1+7,B+O2+7,B+O3+7,IMCTab[L,C+7],IMCTab[L,W+0]);
+  Inc(I,4); Inc(B,8); Inc(C,8); Dec(W,8);
+ End;
+End;
+Procedure IMCFft(N,B,L: LongInt);
+Begin
+ Case N Of
+  2: IMCFft2(B);
+  4: IMCFft4(B);
+  8: IMCFft8(B);
+  16: IMCFft16(B);
+ Else Begin
+  IMCFft(N Div 2,B,L-1);
+  IMCFft(N Div 4,B+N Div 2,L-2);
+  IMCFft(N Div 4,B+(N Div 4)*3,L-2);
+  IMCCombine(B,L,(N Div 4) Shr 1);
+ End;
+ End;
+End;
+
+{ MDCT inverse (demi-longueur) de 256 coefficients : Src -> IMCTempOut[0..255], echelle 1/16384 }
+Procedure IMCMdct(Const Src: Array Of Single);
+Var I,K,I0,I1: LongInt; Tr,Ti,S1r,S1i,S0r,S0i: Single;
+Begin
+ For I:=0 To 127 Do Begin
+  K:=IMCMap[I];
+  Tr:=Src[255-K]; Ti:=Src[K];
+  IMCZr[I]:=Tr*IMCExpRe[I]-Ti*IMCExpIm[I];
+  IMCZi[I]:=Tr*IMCExpIm[I]+Ti*IMCExpRe[I];
+ End;
+ IMCFft(128,0,7);
+ For I:=0 To 63 Do Begin
+  I0:=64+I; I1:=63-I;
+  S1r:=IMCZi[I1]; S1i:=IMCZr[I1];
+  S0r:=IMCZi[I0]; S0i:=IMCZr[I0];
+  IMCZr[I1]:=S1r*IMCExpIm[128+I1]-S1i*IMCExpRe[128+I1];
+  IMCZi[I0]:=S1r*IMCExpRe[128+I1]+S1i*IMCExpIm[128+I1];
+  IMCZr[I0]:=S0r*IMCExpIm[128+I0]-S0i*IMCExpRe[128+I0];
+  IMCZi[I1]:=S0r*IMCExpRe[128+I0]+S0i*IMCExpIm[128+I0];
+ End;
+ For I:=0 To 127 Do Begin IMCTempOut[2*I]:=IMCZr[I]; IMCTempOut[2*I+1]:=IMCZi[I]; End;
+End;
+
+{ ---- decodage d'un bloc IMC ---- }
+Function IMCLog2f(X: Single): Single;
+Var D: Extended;
+Begin
+ D:=X;
+ If D<=0 Then Begin IMCLog2f:=-1E38; Exit; End;
+ D:=Ln(D)/Ln(2.0);
+ IMCLog2f:=D;
+End;
+
+Procedure IMCCalcCoeffs;
+Var W1,W2,W3: TIMCSa; Snr,Accum,Sg: Single; I,C2: LongInt; Dv: Double;
+Begin
+ Snr:=1E-30; Accum:=0.0;
+ For I:=0 To 31 Do Begin
+  IMCFl5[I]:=0.0; W2[I]:=0.0;
+  If IMCBandW[I]<>0 Then Begin
+   W1[I]:=IMCFl1[I]*IMCFl1[I];
+   Dv:=IMCFl2[I]; Dv:=2.0*Dv; IMCFl3[I]:=Dv;
+  End Else Begin
+   W1[I]:=0.0; IMCFl3[I]:=-30000.0;
+  End;
+  Sg:=IMCBandW[I]; Sg:=Sg*W1[I]; Dv:=Sg; Dv:=Dv*0.01; W3[I]:=Dv;
+  If W3[I]<=Snr Then W3[I]:=0.0;
+ End;
+ For I:=0 To 31 Do Begin
+  C2:=I;
+  While C2<IMCCycl[I] Do Begin IMCFl5[C2]:=IMCFl5[C2]+W3[I]; Inc(C2); End;
+  W2[C2-1]:=W2[C2-1]+W3[I];
+ End;
+ For I:=1 To 31 Do Begin
+  Accum:=(W2[I-1]+Accum)*IMCW1[I-1];
+  IMCFl5[I]:=IMCFl5[I]+Accum;
+ End;
+ For I:=0 To 31 Do W2[I]:=0.0;
+ For I:=0 To 31 Do Begin
+  C2:=I-1;
+  While C2>IMCCycl2[I] Do Begin IMCFl5[C2]:=IMCFl5[C2]+W3[I]; Dec(C2); End;
+  W2[C2+1]:=W2[C2+1]+W3[I];
+ End;
+ Accum:=0.0;
+ For I:=30 DownTo 0 Do Begin
+  Accum:=(W2[I+1]+Accum)*IMCW2[I];
+  IMCFl5[I]:=IMCFl5[I]+Accum;
+ End;
+End;
+
+Procedure IMCReadLevels(Sfc: LongInt);
+Var I,S,Start: LongInt;
+Begin
+ S:=Sfc Shr 1; Start:=0;
+ If (Sfc And 4)<>0 Then Start:=1;
+ If Start<>0 Then IMCLevl[0]:=IMCGetBits(7);
+ For I:=Start To 31 Do Begin
+  IMCLevl[I]:=IMCGetVlc(S,IMCCbSel[S,I]);
+  If IMCLevl[I]=17 Then Inc(IMCLevl[I],IMCGetBits(4));
+ End;
+End;
+Procedure IMCReadLevelsRaw;
+Var I: LongInt;
+Begin
+ IMCCoef0:=IMCGetBits(5);
+ IMCLevl[0]:=IMCGetBits(7);
+ For I:=1 To 31 Do IMCLevl[I]:=IMCGetBits(4);
+End;
+
+Procedure IMCDecLevels;
+Var I,Level: LongInt; Tmp,Tmp2: Single; Dv: Double;
+Begin
+ Dv:=20000.0/IMCExp2T[IMCLevl[0] And 127]; IMCFl1[0]:=Dv;
+ IMCFl2[0]:=IMCLog2f(IMCFl1[0]);
+ Tmp:=IMCFl1[0]; Tmp2:=IMCFl2[0];
+ For I:=1 To 31 Do Begin
+  Level:=IMCLevl[I];
+  If Level=16 Then Begin IMCFl1[I]:=1.0; IMCFl2[I]:=0.0; End
+  Else Begin
+   If Level<17 Then Dec(Level,7) Else If Level<=24 Then Dec(Level,32) Else Dec(Level,16);
+   Tmp:=Tmp*IMCExp[15+Level];
+   Dv:=Tmp2; Dv:=Dv+0.83048*Level; Tmp2:=Dv;
+   IMCFl1[I]:=Tmp; IMCFl2[I]:=Tmp2;
+  End;
+ End;
+End;
+
+Procedure IMCDecLevels2;
+Var I: LongInt; Dv: Double;
+Begin
+ For I:=0 To 31 Do Begin
+  IMCFl1[I]:=0;
+  If IMCLevl[I]<16 Then Begin
+   IMCFl1[I]:=IMCExp[8+IMCLevl[I]]*IMCOldFloor[I];
+   Dv:=(IMCLevl[I]-7)*0.83048; Dv:=Dv+IMCD(IMCFl2[I]); IMCFl2[I]:=Dv;
+  End Else IMCFl1[I]:=IMCOldFloor[I];
+ End;
+End;
+
+Procedure IMCDecLevelsRaw;
+Var I,Level,Pos,K: LongInt; Tmp,Tmp2: Single; Dv: Double; A: Single;
+Begin
+ Pos:=IMCCoef0;
+ Dv:=20000.0/IMCPow2T[IMCLevl[0] And 127]; IMCFl1[Pos]:=Dv;
+ IMCFl2[Pos]:=IMCLog2f(IMCFl1[Pos]);
+ Tmp:=IMCFl1[Pos]; Tmp2:=IMCFl2[Pos];
+ K:=1;
+ For I:=0 To 31 Do Begin
+  If I=Pos Then Continue;
+  Level:=IMCLevl[K]; Inc(K);
+  A:=IMCPowfT[Level And 15];
+  IMCFl1[I]:=Tmp*A;
+  Dv:=Tmp2; Dv:=Dv-1.4533435415*Level; IMCFl2[I]:=Dv;
+ End;
+End;
+
+{ allocation des bits ; renvoie False en cas d'erreur }
+Function IMCBitAlloc(Sfc,FreeBits,Flag: LongInt): Boolean;
+Var I,J,Indx,T1,T2,Iacc,Summer,Rres,Cwlen,Flg,FoundIdx,LowIdx,Bw,St: LongInt;
+ Limit,Highest,Summa,Lowest,X,Y: Single; WorkT: TIMCSa; Dv: Double;
+Begin
+ IMCBitAlloc:=False;
+ Limit:=-1E20; Highest:=0.0; T1:=0; T2:=1; Summa:=0.0; Iacc:=0; Summer:=0; Lowest:=1E10; LowIdx:=0; FoundIdx:=0;
+ For I:=0 To 31 Do If IMCFl1[I]>Highest Then Highest:=IMCFl1[I];
+ For I:=0 To 30 Do Begin
+  If IMCFl5[I]<=0 Then Exit;
+  IMCFl4[I]:=IMCFl3[I]-IMCLog2f(IMCFl5[I]);
+ End;
+ IMCFl4[31]:=Limit;
+ Dv:=Highest; Dv:=Dv*0.25; Highest:=Dv;
+ For I:=0 To 31 Do Begin
+  Indx:=-1;
+  Bw:=IMCBandTab[I+1]-IMCBandTab[I];
+  If Bw=IMCBandW[I] Then Indx:=0;
+  If Bw>IMCBandW[I] Then Indx:=1;
+  If (Bw Div 2)>=IMCBandW[I] Then Indx:=2;
+  If Indx=-1 Then Exit;
+  IMCFl4[I]:=IMCFl4[I]+IMCXTab[(Indx*2+Ord(IMCFl1[I]<Highest))*2+Flag];
+ End;
+ If (Sfc And 2)<>0 Then Begin IMCFl4[0]:=Limit; IMCFl4[1]:=Limit; IMCFl4[2]:=Limit; IMCFl4[3]:=Limit; End;
+ If (Sfc And 2)<>0 Then St:=4 Else St:=0;
+ For I:=St To 30 Do Begin
+  Inc(Iacc,IMCBandW[I]);
+  X:=IMCBandW[I]; X:=X*IMCFl4[I]; Summa:=Summa+X;
+ End;
+ If Iacc=0 Then Exit;
+ IMCBandW[31]:=0;
+ Dv:=Summa; Dv:=Dv*0.5; Dv:=Dv-FreeBits; Dv:=Dv/Iacc; Summa:=Dv;
+ For I:=0 To 15 Do Begin
+  Rres:=Summer-FreeBits;
+  If (Rres>=-8) And (Rres<=8) Then Break;
+  Summer:=0; Iacc:=0;
+  For J:=St To 31 Do Begin
+   Dv:=IMCFl4[J]; Dv:=Dv*0.5; Dv:=Dv-IMCD(Summa); Dv:=Dv+0.5; X:=Dv;
+   If Not (X>0) Then X:=0;
+   If X>6 Then X:=6;
+   Cwlen:=Trunc(X);
+   IMCBitsBand[J]:=Cwlen;
+   Inc(Summer,IMCBandW[J]*Cwlen);
+   If Cwlen>0 Then Inc(Iacc,IMCBandW[J]);
+  End;
+  Flg:=T2; T2:=1;
+  If FreeBits<Summer Then T2:=-1;
+  If I=0 Then Flg:=T2;
+  If Flg<>T2 Then Inc(T1);
+  { (float)(summer - freebits) / ((t1 + 1) * iacc) + summa : tout en float }
+  X:=Summer-FreeBits; Y:=(T1+1)*Iacc; X:=X/Y; Summa:=X+Summa;
+ End;
+ For I:=St To 31 Do
+  For J:=IMCBandTab[I] To IMCBandTab[I+1]-1 Do IMCCWlen[J]:=IMCBitsBand[I];
+ If FreeBits>Summer Then Begin
+  For I:=0 To 31 Do Begin
+   If IMCBitsBand[I]=6 Then WorkT[I]:=-1E20
+   Else Begin X:=IMCBitsBand[I]*-2; X:=X+IMCFl4[I]; Dv:=X; Dv:=Dv-0.415; WorkT[I]:=Dv; End;
+  End;
+  Highest:=0.0;
+  Repeat
+   If Highest<=-1E20 Then Break;
+   FoundIdx:=0; Highest:=-1E20;
+   For I:=0 To 31 Do If WorkT[I]>Highest Then Begin Highest:=WorkT[I]; FoundIdx:=I; End;
+   If Highest>-1E20 Then Begin
+    Dv:=WorkT[FoundIdx]; Dv:=Dv-2.0; WorkT[FoundIdx]:=Dv;
+    Inc(IMCBitsBand[FoundIdx]);
+    If IMCBitsBand[FoundIdx]=6 Then WorkT[FoundIdx]:=-1E20;
+    J:=IMCBandTab[FoundIdx];
+    While (J<IMCBandTab[FoundIdx+1]) And (FreeBits>Summer) Do Begin
+     Inc(IMCCWlen[J]); Inc(Summer); Inc(J);
+    End;
+   End;
+  Until FreeBits<=Summer;
+ End;
+ If FreeBits<Summer Then Begin
+  For I:=0 To 31 Do Begin
+   If IMCBitsBand[I]<>0 Then Begin X:=IMCBitsBand[I]*-2; X:=X+IMCFl4[I]; Dv:=X; Dv:=Dv+1.585; WorkT[I]:=Dv; End
+   Else WorkT[I]:=1E20;
+  End;
+  If (Sfc And 2)<>0 Then Begin WorkT[0]:=1E20; WorkT[1]:=1E20; WorkT[2]:=1E20; WorkT[3]:=1E20; End;
+  While FreeBits<Summer Do Begin
+   Lowest:=1E10; LowIdx:=0;
+   For I:=0 To 31 Do If WorkT[I]<Lowest Then Begin Lowest:=WorkT[I]; LowIdx:=I; End;
+   Dv:=Lowest; Dv:=Dv+2.0; WorkT[LowIdx]:=Dv;
+   Dec(IMCBitsBand[LowIdx]);
+   If IMCBitsBand[LowIdx]=0 Then WorkT[LowIdx]:=1E20;
+   J:=IMCBandTab[LowIdx];
+   While (J<IMCBandTab[LowIdx+1]) And (FreeBits<Summer) Do Begin
+    If IMCCWlen[J]>0 Then Begin Dec(IMCCWlen[J]); Dec(Summer); End;
+    Inc(J);
+   End;
+  End;
+ End;
+ IMCBitAlloc:=True;
+End;
+
+Procedure IMCGetSkip;
+Var I,J: LongInt;
+Begin
+ FillChar(IMCSkipBits,SizeOf(IMCSkipBits),0);
+ FillChar(IMCSkipCnt,SizeOf(IMCSkipCnt),0);
+ For I:=0 To 31 Do Begin
+  If (IMCBandFlags[I]=0) Or (IMCBandW[I]=0) Then Continue;
+  If IMCSkipRaw[I]=0 Then Begin
+   IMCSkipBits[I]:=IMCBandTab[I+1]-IMCBandTab[I];
+   For J:=IMCBandTab[I] To IMCBandTab[I+1]-1 Do Begin
+    IMCSkip[J]:=IMCGetBits(1);
+    If IMCSkip[J]<>0 Then Inc(IMCSkipCnt[I]);
+   End;
+  End Else Begin
+   J:=IMCBandTab[I];
+   While J<IMCBandTab[I+1]-1 Do Begin
+    If IMCGetBits(1)=0 Then Begin
+     Inc(IMCSkipBits[I]);
+     IMCSkip[J]:=1; IMCSkip[J+1]:=1; Inc(IMCSkipCnt[I],2);
+    End Else Begin
+     If IMCGetBits(1)<>0 Then Begin
+      Inc(IMCSkipBits[I],2);
+      IMCSkip[J]:=0; IMCSkip[J+1]:=1; Inc(IMCSkipCnt[I]);
+     End Else Begin
+      Inc(IMCSkipBits[I],3);
+      IMCSkip[J+1]:=0;
+      If IMCGetBits(1)=0 Then Begin IMCSkip[J]:=1; Inc(IMCSkipCnt[I]); End
+      Else IMCSkip[J]:=0;
+     End;
+    End;
+    Inc(J,2);
+   End;
+   If J<IMCBandTab[I+1] Then Begin
+    Inc(IMCSkipBits[I]);
+    IMCSkip[J]:=IMCGetBits(1);
+    If IMCSkip[J]<>0 Then Inc(IMCSkipCnt[I]);
+   End;
+  End;
+ End;
+End;
+
+Procedure IMCAdjustAlloc(Summer: LongInt);
+Var WorkT: TIMCSa; Corrected,I,J,FoundIdx: LongInt; Highest,X: Single; Dv: Double;
+Begin
+ Corrected:=0; Highest:=0; FoundIdx:=0;
+ For I:=0 To 31 Do Begin
+  If IMCBitsBand[I]=6 Then WorkT[I]:=-1E20
+  Else Begin X:=IMCBitsBand[I]*-2; X:=X+IMCFl4[I]; Dv:=X; Dv:=Dv-0.415; WorkT[I]:=Dv; End;
+ End;
+ While Corrected<Summer Do Begin
+  If Highest<=-1E20 Then Break;
+  Highest:=-1E20;
+  For I:=0 To 31 Do If WorkT[I]>Highest Then Begin Highest:=WorkT[I]; FoundIdx:=I; End;
+  If Highest>-1E20 Then Begin
+   Dv:=WorkT[FoundIdx]; Dv:=Dv-2.0; WorkT[FoundIdx]:=Dv;
+   Inc(IMCBitsBand[FoundIdx]);
+   If IMCBitsBand[FoundIdx]=6 Then WorkT[FoundIdx]:=-1E20;
+   J:=IMCBandTab[FoundIdx];
+   While (J<IMCBandTab[FoundIdx+1]) And (Corrected<Summer) Do Begin
+    If (IMCSkip[J]=0) And (IMCCWlen[J]<6) Then Begin Inc(IMCCWlen[J]); Inc(Corrected); End;
+    Inc(J);
+   End;
+  End;
+ End;
+End;
+
+Function IMCInvQuant(Sfc: LongInt): Boolean;
+Var I,J,MidVal,CwLen,MaxSize,Q: LongInt; Qv: Single;
+Begin
+ IMCInvQuant:=False;
+ For I:=0 To 31 Do
+  For J:=IMCBandTab[I] To IMCBandTab[I+1]-1 Do Begin
+   IMCCWd[J]:=0;
+   CwLen:=IMCCWlen[J];
+   If (CwLen<=0) Or (IMCSkip[J]<>0) Then Continue;
+   MaxSize:=1 Shl CwLen; MidVal:=MaxSize Shr 1;
+   If (IMCCodewords[J]>=MaxSize) Or (IMCCodewords[J]<0) Then Exit;
+   If CwLen>=4 Then Begin
+    Q:=(Sfc And 2) Shr 1;
+    If IMCCodewords[J]>=MidVal Then Qv:=IMCQ2[Q,IMCCodewords[J]-8]*IMCFl6[I]
+    Else Qv:=-IMCQ2[Q,MaxSize-IMCCodewords[J]-8-1]*IMCFl6[I];
+   End Else Begin
+    Q:=((Sfc And 2) Shr 1) Or (IMCBandFlags[I] Shl 1);
+    If IMCCodewords[J]>=MidVal Then Qv:=IMCQ1[Q,IMCCodewords[J]-1]*IMCFl6[I]
+    Else Qv:=-IMCQ1[Q,MaxSize-2-IMCCodewords[J]]*IMCFl6[I];
+   End;
+   IMCCWd[J]:=Qv;
+  End;
+ IMCInvQuant:=True;
+End;
+
+Procedure IMCGetCoeffs;
+Var I,J,CwLen,Cw: LongInt;
+Begin
+ For I:=0 To 31 Do Begin
+  If IMCSumLen[I]=0 Then Continue;
+  If (IMCBandFlags[I]<>0) Or (IMCBandW[I]<>0) Then
+   For J:=IMCBandTab[I] To IMCBandTab[I+1]-1 Do Begin
+    CwLen:=IMCCWlen[J]; Cw:=0;
+    If (CwLen<>0) And ((IMCBandFlags[I]=0) Or (IMCSkip[J]=0)) Then Begin
+     If IMCPos+CwLen<=512 Then Cw:=IMCGetBits(CwLen);
+    End;
+    IMCCodewords[J]:=Cw;
+   End;
+ End;
+End;
+
+Procedure IMCRefineAlloc;
+Var I,J,Summer: LongInt;
+Begin
+ For I:=0 To 31 Do Begin
+  IMCSumLen[I]:=0; IMCSkipRaw[I]:=0;
+  For J:=IMCBandTab[I] To IMCBandTab[I+1]-1 Do Inc(IMCSumLen[I],IMCCWlen[J]);
+  If IMCBandFlags[I]<>0 Then
+   If (Trunc((IMCBandTab[I+1]-IMCBandTab[I])*1.5)>IMCSumLen[I]) And (IMCSumLen[I]>0) Then IMCSkipRaw[I]:=1;
+ End;
+ IMCGetSkip;
+ For I:=0 To 31 Do Begin
+  IMCFl6[I]:=IMCFl1[I];
+  If (IMCBandFlags[I]<>0) And ((IMCBandTab[I+1]-IMCBandTab[I])<>IMCSkipCnt[I]) Then
+   IMCFl6[I]:=IMCFl6[I]*(IMCSqrt[IMCBandTab[I+1]-IMCBandTab[I]]/IMCSqrt[IMCBandTab[I+1]-IMCBandTab[I]-IMCSkipCnt[I]]);
+ End;
+ Summer:=0;
+ For I:=0 To 31 Do
+  If IMCBandFlags[I]<>0 Then Begin
+   For J:=IMCBandTab[I] To IMCBandTab[I+1]-1 Do
+    If IMCSkip[J]<>0 Then Begin Inc(Summer,IMCCWlen[J]); IMCCWlen[J]:=0; End;
+   Dec(Summer,IMCSkipBits[I]);
+  End;
+ IMCAdjustAlloc(Summer);
+End;
+
+Function IMCDecodeBlock: Boolean;
+Var Hdr,Sfc,I,J,Flag,Bits,BitsCount,K: LongInt; Dv: Double; S0,S1,Wi,Wj: Single;
+Begin
+ IMCDecodeBlock:=False;
+ Hdr:=IMCGetBits(9);
+ If (Hdr And $18)<>0 Then Exit;
+ Sfc:=IMCGetBits(3);
+ If (Sfc And 4)<>0 Then IMCReset:=True;
+ If IMCReset Then Begin
+  For I:=0 To 31 Do IMCOldFloor[I]:=1.0;
+  For I:=0 To 255 Do IMCCWd[I]:=0;
+  IMCReset:=False;
+ End;
+ Flag:=IMCGetBits(1);
+ If (Sfc And 1)<>0 Then IMCReadLevelsRaw Else IMCReadLevels(Sfc);
+ If (Sfc And 1)<>0 Then IMCDecLevelsRaw
+ Else If (Sfc And 4)<>0 Then IMCDecLevels
+ Else IMCDecLevels2;
+ For I:=0 To 31 Do If IMCFl1[I]>2147483648.0 Then Exit;
+ IMCOldFloor:=IMCFl1;
+ If (Sfc And 1)<>0 Then Begin
+  For I:=0 To 31 Do Begin
+   IMCBandW[I]:=IMCBandTab[I+1]-IMCBandTab[I];
+   IMCBandFlags[I]:=0;
+   Dv:=IMCFl2[I]; Dv:=Dv*2; IMCFl3[I]:=Dv;
+   IMCFl5[I]:=1.0;
+  End;
+ End Else Begin
+  For I:=0 To 31 Do
+   If IMCLevl[I]=16 Then IMCBandW[I]:=0 Else IMCBandW[I]:=IMCBandTab[I+1]-IMCBandTab[I];
+  FillChar(IMCBandFlags,SizeOf(IMCBandFlags),0);
+  For I:=0 To 30 Do If IMCBandW[I]<>0 Then IMCBandFlags[I]:=IMCGetBits(1);
+  IMCCalcCoeffs;
+ End;
+ BitsCount:=0;
+ If (Sfc And 2)<>0 Then Begin
+  Inc(BitsCount,15);
+  IMCBitsBand[0]:=5; IMCCWlen[0]:=5; IMCCWlen[1]:=5; IMCCWlen[2]:=5;
+  For I:=1 To 3 Do Begin
+   If (Sfc And 1)<>0 Then Bits:=5
+   Else If IMCLevl[I]=16 Then Bits:=0 Else Bits:=5;
+   IMCBitsBand[I]:=Bits;
+   For J:=IMCBandTab[I] To IMCBandTab[I+1]-1 Do Begin IMCCWlen[J]:=Bits; Inc(BitsCount,Bits); End;
+  End;
+ End;
+ If Not IMCBitAlloc(Sfc,512-BitsCount-IMCPos,Flag) Then Begin IMCReset:=True; Exit; End;
+ If (Sfc And 1)<>0 Then Begin
+  For I:=0 To 31 Do IMCSkip[I]:=0;
+ End Else IMCRefineAlloc;
+ For I:=0 To 31 Do Begin
+  IMCSumLen[I]:=0;
+  For J:=IMCBandTab[I] To IMCBandTab[I+1]-1 Do If IMCSkip[J]=0 Then Inc(IMCSumLen[I],IMCCWlen[J]);
+ End;
+ FillChar(IMCCodewords,SizeOf(IMCCodewords),0);
+ IMCGetCoeffs;
+ If Not IMCInvQuant(Sfc) Then Begin IMCReset:=True; Exit; End;
+ FillChar(IMCSkip,SizeOf(IMCSkip),0);
+ IMCMdct(IMCCWd);
+ { vector_fmul_window(out, prev, temp, window, 128) }
+ For K:=0 To 127 Do Begin
+  S0:=IMCPrev[K]; S1:=IMCTempOut[127-K]; Wi:=IMCWin[K]; Wj:=IMCWin[255-K];
+  IMCOut[K]:=S0*Wj-S1*Wi;
+  IMCOut[255-K]:=S0*Wi+S1*Wj;
+ End;
+ For K:=0 To 127 Do IMCPrev[K]:=IMCTempOut[128+K];
+ IMCDecodeBlock:=True;
+End;
+
+Procedure IMCSetBlock(Src: PEABuffer);
+Var I: LongInt;
+Begin
+ For I:=0 To 31 Do Begin IMCBuf[2*I]:=Src^[2*I+1]; IMCBuf[2*I+1]:=Src^[2*I]; End;
+ For I:=64 To 79 Do IMCBuf[I]:=0;
+ IMCPos:=0;
+End;
+
+{ WAV 0x0401 (Intel Music Coder) -> WAV PCM 16 bits mono }
+Procedure DecodeIMC(Const Source,Target: String);
+Var
+ H: Array[0..127] Of Byte; Limit,Pos,Size,DataPos,DataSize,Rate,Left,Cnt,Real_: Int64; Tag,Chn,Align,Count,I,J,V,Take,Done: LongInt;
+ Fmt: Boolean; Pk: PEABuffer; Sg: Single; Dv: Double; V64: Int64;
+Begin
+ OpenRead(Source); Limit:=InputSize; Pos:=0; DataPos:=-1; DataSize:=0; Fmt:=False;
+ If Limit<12 Then Fail('imc: fichier trop court.');
+ ReadAt(0,H,12);
+ If Not ((H[0]=82) And (H[1]=73) And (H[2]=70) And (H[3]=70) And (H[8]=87) And (H[9]=65)) Then Fail('imc: signature RIFF/WAVE requise.');
+ Pos:=12; Count:=0; Align:=0; Rate:=0; Chn:=1;
+ While (Limit-Pos>=8) And (Count<256) Do Begin
+  ReadAt(Pos,H,8); Inc(Pos,8); Inc(Count);
+  Size:=Int64(H[4])+Int64(H[5])*256+Int64(H[6])*65536+Int64(H[7])*16777216;
+  If (H[0]=102) And (H[1]=109) And (H[2]=116) And (H[3]=32) Then Begin
+   If (Size<16) Or (Limit-Pos<Size) Then Fail('imc: bloc fmt incorrect.');
+   Real_:=Size;
+   If Size>120 Then Size:=120;
+   ReadAt(Pos,H,Size);
+   Tag:=H[0]+H[1]*256; Chn:=H[2]+H[3]*256; Rate:=Int64(H[4])+H[5]*256+Int64(H[6])*65536+Int64(H[7])*16777216;
+   Align:=H[12]+H[13]*256;
+   If Tag<>$401 Then Fail('imc: WAV de type 0x401 requis.');
+   Fmt:=True; Size:=Real_;
+  End Else If (H[0]=100) And (H[1]=97) And (H[2]=116) And (H[3]=97) Then Begin
+   DataPos:=Pos; DataSize:=Size; If DataPos+DataSize>Limit Then DataSize:=Limit-DataPos;
+   Break;
+  End;
+  If Size>Limit-Pos Then Break;
+  Inc(Pos,Size); If Odd(Size) Then Inc(Pos);
+ End;
+ If Not Fmt Or (DataPos<0) Then Fail('imc: blocs fmt/data requis.');
+ If (Rate<1) Or (Rate>4000000) Then Fail('imc: frequence incorrecte.');
+ IMCInit;
+ FillChar(IMCPrev,SizeOf(IMCPrev),0);
+ FillChar(IMCSkip,SizeOf(IMCSkip),0);
+ FillChar(IMCCWd,SizeOf(IMCCWd),0);
+ FillChar(IMCCWlen,SizeOf(IMCCWlen),0);
+ FillChar(IMCFl1,SizeOf(IMCFl1),0); FillChar(IMCFl2,SizeOf(IMCFl2),0); FillChar(IMCFl3,SizeOf(IMCFl3),0);
+ FillChar(IMCFl4,SizeOf(IMCFl4),0); FillChar(IMCFl5,SizeOf(IMCFl5),0); FillChar(IMCFl6,SizeOf(IMCFl6),0);
+ FillChar(IMCBitsBand,SizeOf(IMCBitsBand),0); FillChar(IMCLevl,SizeOf(IMCLevl),0);
+ FillChar(IMCSumLen,SizeOf(IMCSumLen),0); FillChar(IMCSkipRaw,SizeOf(IMCSkipRaw),0);
+ IMCReset:=True;
+ for I:=0 To 31 Do IMCOldFloor[I]:=1.0;
+ EAReset; OpenWrite(Target); ADPCMWaveHeader(Rate,1,0);
+ GetMem(Pk,4096+16);
+ Left:=DataSize; Pos:=DataPos;
+ While Left>0 Do Begin
+  { paquet du demuxeur WAV : 4096 octets, multiple de block_align }
+  Take:=4096;
+  If Align>1 Then Begin If Take<Align Then Take:=Align; Take:=(Take Div Align)*Align; End;
+  If Take>Left Then Take:=Left;
+  If Take>4096 Then Take:=4096;
+  Done:=0;
+  While Done<Take Do Begin
+   If Take-Done>60000 Then J:=60000 Else J:=Take-Done;
+   ReadAt(Pos+Done,Pk^[Done],J); Inc(Done,J);
+  End;
+  Inc(Pos,Take); Dec(Left,Take);
+  I:=0;
+  While Take-I>=64 Do Begin
+   IMCSetBlock(PEABuffer(@Pk^[I]));
+   Inc(I,64);
+   If Not IMCDecodeBlock Then Break;
+   For J:=0 To 255 Do Begin
+    Sg:=IMCOut[J]; Dv:=Sg; Dv:=Dv*32768.0;
+    { lrintf puis av_clip_int16(int) : l'entier 64 bits est tronque a 32 bits avant l'ecretage }
+    If (Dv>=9.2E18) Or (Dv<=-9.2E18) Or (Dv<>Dv) Then V64:=0
+    Else Begin
+     V64:=Round(Dv) And $FFFFFFFF;
+     If V64>=2147483648 Then V64:=V64-4294967296;
+    End;
+    If V64>32767 Then V:=32767 Else If V64<-32768 Then V:=-32768 Else V:=V64;
+    EAPut(V);
+   End;
+  End;
+ End;
+ FreeMem(Pk,4096+16); EAFlush;
+ ADPCMPatchHeader(Rate,1,EAWritten);
+ CloseRead; CloseWrite;
+End;
+{ IMC-END }
+
 { ---- Monkey's Audio (APE): decodeur, versions de fichier 3930..3990, 8 et 16 bits ---- }
 Type
  TAPI32=Array[0..4000000] Of LongInt; PAPI32=^TAPI32;
@@ -45243,7 +46001,7 @@ Begin
  WriteLn('  E png             PNG RGB24, une image');
  WriteLn('  E rawvideo        Alias de sortie PNG/GIF; pas de pixels bruts');
  WriteLn(' D  voc             Creative Voice PCM');
- WriteLn(' DE wav             RIFF/WAVE PCM; decodage et encodage adpcm_ima_wav, adpcm_ms; DK3, DK4, CT');
+ WriteLn(' DE wav             RIFF/WAVE PCM; decodage et encodage adpcm_ima_wav, adpcm_ms; DK3, DK4, CT; IMC (0x401)');
  WriteLn(' D  webm            WebM VP9/Opus; copie vers MP4');
  WriteLn;
  WriteLn('D/E indique le conteneur; les codecs et conversions restent limites.');
@@ -45556,6 +46314,7 @@ BEGIN
    WriteLn('D A    adpcm_ima_smjpeg ADPCM IMA Loki SDL MJPEG');
    WriteLn('DEA    adpcm_ima_qt    ADPCM IMA QuickTime');
    WriteLn('DEA    adpcm_ima_wav   ADPCM IMA WAV');
+   WriteLn('D A    imc             IMC (Intel Music Coder; WAV 0x401 mono, MDCT flottant identique a libavutil/tx)');
    WriteLn('D A    adpcm_ima_ws    ADPCM IMA Westwood');
    WriteLn('DEA    adpcm_swf       ADPCM Shockwave Flash');
    WriteLn('D A    adpcm_thp       ADPCM Nintendo Gamecube THP');
@@ -46182,6 +46941,8 @@ BEGIN
    Temps[0]:=NewTemporary; DecodeWaveCT(InputPath,Temps[0]); Intermediate:=Temps[0];
   End Else If WaveFormatTag(InputPath)=$45 Then Begin
    Temps[0]:=NewTemporary; DecodeG726(InputPath,Temps[0],False,4,8000); Intermediate:=Temps[0];
+  End Else If WaveFormatTag(InputPath)=$401 Then Begin
+   Temps[0]:=NewTemporary; DecodeIMC(InputPath,Temps[0]); Intermediate:=Temps[0];
   End Else If WaveFormatTag(InputPath)=$270 Then Begin
    Temps[0]:=NewTemporary; DecodeATRAC3(InputPath,Temps[0]); Intermediate:=Temps[0];
   End Else If (WaveFormatTag(InputPath)=$61) Or (WaveFormatTag(InputPath)=$62) Or
