@@ -3937,6 +3937,7 @@ Begin
   (B[$28]=0) And (B[$29]=0) And (B[$2A]*256+B[$2B]>=1235) And (B[$2A]*256+B[$2B]<=1274) Then Begin Probe:='dnxhd'; Exit; End;
  If N>=80*6 Then If (B[0]=$1F) And (B[1]=$07) And (B[2]=0) And ((B[3]=$3F) Or (B[3]=$BF)) Then Begin Probe:='dv'; Exit; End;
  If N>=4 Then If (B[0]=66) And (B[1]=70) And (B[2]=38) And (B[3]=73) Then Begin Probe:='bfi'; Exit; End;
+ If N>=15 Then If (B[0]=68) And (B[1]=69) And (B[2]=88) And (B[3]=65) And ((B[11]*256+B[12])>0) And ((B[11]*256+B[12])<=2048) And ((B[13]*256+B[14])>0) And ((B[13]*256+B[14])<=2048) Then Begin Probe:='dxa'; Exit; End;
  If N>=18 Then If (B[0]=0) And (B[1]=0) And (B[2]=$AA) And (B[3]=$55) And (B[12]=$22) And (B[13]=$56) And (B[14]=0) And (B[15]=0) And (B[16]=16) And (B[17]=0) Then Begin Probe:='dsicin'; Exit; End;
  If N>=16 Then Begin
   K0:=1;
@@ -16630,11 +16631,13 @@ End;
 Procedure DecodeCAVS(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeDV(Const Source,Target: String; Mode: LongInt; IsAvi: Boolean); Forward;
 Procedure DecodeDSICin(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure DecodeDXA(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeNV2(Kind: LongInt; Const Source,Target: String; Mode: LongInt);
 Begin
  If Kind=12 Then DecodeCAVS(Source,Target,Mode)
  Else If Kind=13 Then DecodeDV(Source,Target,Mode,False)
  Else If Kind=15 Then DecodeDSICin(Source,Target,Mode)
+ Else If Kind=16 Then DecodeDXA(Source,Target,Mode)
  Else If Kind=14 Then DecodeDV(Source,Target,Mode,True)
  Else If Kind=10 Then DecodeDNxHD(Source,Target,Mode,False)
  Else If Kind=11 Then DecodeDNxHD(Source,Target,Mode,True)
@@ -26134,6 +26137,226 @@ Begin
  XSReset;
 End;
 
+
+{ ---- DXA (Feeble Files / ScummVM): conteneur et decodeur (libavformat/dxa.c, libavcodec/dxa.c) ---- }
+Var DXAPal: Array[0..255] Of LongInt; DXABuf: PEABuffer; DXABufSize: LongInt; DXAPrev,DXACur: PEABuffer; DXAHavePrev: Boolean;
+
+Function DXADecode13(Dst: PEABuffer; Stride,W,H: LongInt; Src: PEABuffer; SrcSize: LongInt; Ref: PEABuffer): Boolean;
+Const Shift1: Array[0..5] Of Byte=(0,8,8,8,4,4); Shift2: Array[0..5] Of Byte=(0,0,8,4,0,4);
+Var
+ Code,Data,Mv,Msk,I,J,K,Typ,X,Y,D,D2,Tp,T2p,Mask,Sz1,Sz2,Rb: LongInt; Mval: LongInt;
+ Dp,Rp: LongInt; { offsets de ligne dst/ref }
+Function B(At: LongInt): LongInt;
+Begin B:=EAByte(Src,SrcSize+256,At); End;
+Function RB32(At: LongInt): LongInt; Begin RB32:=(B(At) Shl 24) Or (B(At+1) Shl 16) Or (B(At+2) Shl 8) Or B(At+3); End;
+Begin
+ DXADecode13:=False;
+ Sz1:=RB32(0); Sz2:=RB32(4);
+ If Int64(12)+((W*H) Shr 4)+Sz1+Sz2>SrcSize Then Exit;
+ Code:=12; Data:=Code+((W*H) Shr 4); Mv:=Data+Sz1; Msk:=Mv+Sz2;
+ Dp:=0; Rp:=0; J:=0;
+ While J<H Do Begin
+  I:=0;
+  While I<W Do Begin
+   If (Data>SrcSize) Or (Mv>SrcSize) Or (Msk>SrcSize) Then Exit;
+   Tp:=Dp+I; T2p:=Rp+I;
+   Typ:=B(Code); Inc(Code);
+   Case Typ Of
+    4,0,5: Begin
+     If Typ=4 Then Begin
+      Mval:=B(Mv); X:=Mval Shr 4; If (X And 8)<>0 Then X:=8-X;
+      Y:=Mval And 15; Inc(Mv); If (Y And 8)<>0 Then Y:=8-Y;
+      If (I<-X) Or (W-I-4<X) Or (J<-Y) Or (H-J-4<Y) Then Exit;
+      Inc(T2p,X+Y*Stride);
+     End;
+     For Y:=0 To 3 Do Begin
+      Move(Ref^[T2p],Dst^[Tp],4); Inc(Tp,Stride); Inc(T2p,Stride);
+     End;
+    End;
+    1,10,11,12,13,14,15: Begin
+     If Typ=1 Then Begin Mask:=(B(Msk) Shl 8) Or B(Msk+1); Inc(Msk,2); End
+     Else Begin
+      Dec(Typ,10);
+      Mask:=((B(Msk) And $F0) Shl Shift1[Typ]) Or ((B(Msk) And $F) Shl Shift2[Typ]);
+      Inc(Msk);
+     End;
+     For Y:=0 To 3 Do Begin
+      For X:=0 To 3 Do Begin
+       If (Mask And $8000)<>0 Then Begin Dst^[Tp+X]:=B(Data); Inc(Data); End Else Dst^[Tp+X]:=Ref^[T2p+X];
+       Mask:=(Mask Shl 1) And $FFFFFFFF;
+      End;
+      Inc(Tp,Stride); Inc(T2p,Stride);
+     End;
+    End;
+    2: Begin
+     For Y:=0 To 3 Do Begin FillChar(Dst^[Tp],4,B(Data)); Inc(Tp,Stride); End;
+     Inc(Data);
+    End;
+    3: Begin
+     For Y:=0 To 3 Do Begin
+      For X:=0 To 3 Do Dst^[Tp+X]:=B(Data+X);
+      Inc(Data,4); Inc(Tp,Stride);
+     End;
+    End;
+    8: Begin
+     Mask:=B(Msk); Inc(Msk);
+     For K:=0 To 3 Do Begin
+      D:=((K And 1) Shl 1)+((K And 2)*Stride);
+      D2:=D;
+      T2p:=Rp+I+D2;
+      Case Mask And $C0 Of
+       $80: Begin
+        Mval:=B(Mv); X:=Mval Shr 4; If (X And 8)<>0 Then X:=8-X;
+        Y:=Mval And 15; Inc(Mv); If (Y And 8)<>0 Then Y:=8-Y;
+        If (I+2*(K And 1)<-X) Or (W-I-2*(K And 1)-2<X) Or (J+(K And 2)<-Y) Or (H-J-(K And 2)-2<Y) Then Exit;
+        Inc(T2p,X+Y*Stride);
+        Dst^[Tp+D]:=Ref^[T2p]; Dst^[Tp+D+1]:=Ref^[T2p+1]; Dst^[Tp+D+Stride]:=Ref^[T2p+Stride]; Dst^[Tp+D+1+Stride]:=Ref^[T2p+1+Stride];
+       End;
+       $00: Begin
+        Dst^[Tp+D]:=Ref^[T2p]; Dst^[Tp+D+1]:=Ref^[T2p+1]; Dst^[Tp+D+Stride]:=Ref^[T2p+Stride]; Dst^[Tp+D+1+Stride]:=Ref^[T2p+1+Stride];
+       End;
+       $40: Begin
+        Rb:=B(Data);
+        Dst^[Tp+D]:=Rb; Dst^[Tp+D+1]:=Rb; Dst^[Tp+D+Stride]:=Rb; Dst^[Tp+D+1+Stride]:=Rb;
+        Inc(Data);
+       End;
+       $C0: Begin
+        Dst^[Tp+D]:=B(Data); Dst^[Tp+D+1]:=B(Data+1); Dst^[Tp+D+Stride]:=B(Data+2); Dst^[Tp+D+1+Stride]:=B(Data+3);
+        Inc(Data,4);
+       End;
+      End;
+      Mask:=(Mask Shl 2) And $FFFFFFFF;
+     End;
+    End;
+    32: Begin
+     Mask:=(B(Msk) Shl 8) Or B(Msk+1); Inc(Msk,2);
+     For Y:=0 To 3 Do Begin
+      For X:=0 To 3 Do Begin Dst^[Tp+X]:=B(Data+(Mask And 1)); Mask:=Mask Shr 1; End;
+      Inc(Tp,Stride);
+     End;
+     Inc(Data,2);
+    End;
+    33,34: Begin
+     Mask:=RB32(Msk); Inc(Msk,4);
+     For Y:=0 To 3 Do Begin
+      For X:=0 To 3 Do Begin Dst^[Tp+X]:=B(Data+(Mask And 3)); Mask:=Mask Shr 2; End;
+      Inc(Tp,Stride);
+     End;
+     Inc(Data,Typ-30);
+    End;
+    Else Exit;
+   End;
+   Inc(I,4);
+  End;
+  Inc(Dp,Stride*4); Inc(Rp,Stride*4);
+  Inc(J,4);
+ End;
+ DXADecode13:=True;
+End;
+
+Procedure DecodeDXA(Const Source,Target: String; Mode: LongInt);
+Var
+ F: PEABuffer; Size,Pos,Frames,W,H,Flags,Fps,Wave,VidPos,Sz,I,Compr,N: LongInt; Tag: String[4]; Started,Ok,Pc: Boolean;
+ Pk: PEABuffer; PkLen,PalSize,Dsize,Z,Res,PalAt,Hdr,X: LongInt; Dur: Double; RN,RD: LongInt; Frm: PEABuffer;
+Function T4(At: LongInt): String;
+Var S4: String[4]; K: Integer;
+Begin S4:=''; For K:=0 To 3 Do S4:=S4+Chr(EAByte(F,Size,At+K)); T4:=S4; End;
+Function RB32(At: LongInt): LongInt;
+Begin RB32:=(EAByte(F,Size,At) Shl 24) Or (EAByte(F,Size,At+1) Shl 16) Or (EAByte(F,Size,At+2) Shl 8) Or EAByte(F,Size,At+3); End;
+Function RB16(At: LongInt): LongInt;
+Begin RB16:=(EAByte(F,Size,At) Shl 8) Or EAByte(F,Size,At+1); End;
+{ decode un paquet; Pk de longueur PkLen; retourne False si erreur }
+Function Decode: Boolean;
+Var P,Cmp,J: LongInt; HaveNull: Boolean; Src,Tmp: PEABuffer; Stride: LongInt;
+Begin
+ Decode:=False; P:=0; Stride:=W;
+ If (PkLen>=4) And (Pk^[0]=Ord('C')) And (Pk^[1]=Ord('M')) And (Pk^[2]=Ord('A')) And (Pk^[3]=Ord('P')) Then Begin
+  For J:=0 To 255 Do DXAPal[J]:=(EAByte(Pk,PkLen,4+J*3) Shl 16) Or (EAByte(Pk,PkLen,5+J*3) Shl 8) Or EAByte(Pk,PkLen,6+J*3);
+  P:=772;
+ End;
+ HaveNull:=(EAByte(Pk,PkLen,P)=Ord('N')) And (EAByte(Pk,PkLen,P+1)=Ord('U')) And (EAByte(Pk,PkLen,P+2)=Ord('L')) And (EAByte(Pk,PkLen,P+3)=Ord('L'));
+ Inc(P,4);
+ If HaveNull Then Cmp:=-1 Else Begin Cmp:=EAByte(Pk,PkLen,P); Inc(P); End;
+ Dsize:=W*H*2;
+ If (Cmp<>4) And (Cmp<>-1) Then Begin
+  Inc(P,4);
+  Res:=NVInflate(PEABuffer(@Pk^[P]),PkLen-P,DXABuf,Dsize,N);
+  If Res<>0 Then Exit;
+  Dsize:=N;
+  FillChar(DXABuf^[Dsize],16,0);
+ End;
+ Src:=DXABuf;
+ Case Cmp Of
+  -1: Begin
+   If DXAHavePrev Then Move(DXAPrev^,DXACur^,W*H) Else FillChar(DXACur^,W*H,0);
+  End;
+  2,4: Move(Src^,DXACur^,W*H);
+  3,5: Begin
+   If Not DXAHavePrev Then Exit;
+   For J:=0 To W*H-1 Do DXACur^[J]:=Src^[J] Xor DXAPrev^[J];
+  End;
+  12,13: Begin
+   If Not DXAHavePrev Then Exit;
+   FillChar(DXACur^,W*H,0);
+   DXADecode13(DXACur,Stride,W,H,Src,Dsize,DXAPrev);
+  End;
+  Else Exit;
+ End;
+ Move(DXACur^,DXAPrev^,W*H); DXAHavePrev:=True;
+ Decode:=True;
+End;
+Begin
+ NVLoad(Source,F,Size);
+ If T4(0)<>'DEXA' Then Fail('dxa: signature DEXA requise.');
+ Flags:=F^[4]; Frames:=RB16(5); Fps:=RB32(7); If Fps>=2147483648 Then Fps:=Fps-4294967296;
+ W:=RB16(11); H:=RB16(13);
+ If Frames=0 Then Fail('dxa: aucune image.');
+ If (W=0) Or (H=0) Or (W>2048) Or (H>2048) Then Fail('dxa: dimensions incorrectes.');
+ If T4(15)='WAVE' Then VidPos:=23+RB32(19) Else VidPos:=19;
+ If (Flags And $C0)<>0 Then H:=H Shr 1;
+ If ((W Mod 4)<>0) Or ((H Mod 4)<>0) Then Fail('dxa: dimensions non multiples de 4.');
+ If Fps>0 Then Dur:=Fps/1000.0 Else If Fps<0 Then Dur:=-Fps/100000.0 Else Dur:=0.1;
+ If Fps>0 Then Begin RN:=1000; RD:=Fps; End Else If Fps<0 Then Begin RN:=100000; RD:=-Fps; End Else Begin RN:=10; RD:=1; End;
+ NVGcd(RN,RD);
+ DXABufSize:=W*H*2+16+512; GetMem(DXABuf,DXABufSize); FillChar(DXABuf^,DXABufSize,0);
+ GetMem(DXAPrev,W*H+64); GetMem(DXACur,W*H+64); DXAHavePrev:=False; FillChar(DXAPal,SizeOf(DXAPal),0);
+ NVBegin(Mode,Target,W,H,0,RN,RD);
+ Pos:=VidPos; PalSize:=0; PalAt:=0; Started:=True;
+ GetMem(Pk,16777216+1024);
+ While (Pos+4<=Size) And (Frames>0) Do Begin
+  Tag:=T4(Pos); Inc(Pos,4);
+  If Tag='CMAP' Then Begin
+   Move(F^[Pos-4],Pk^[0],4);
+   If Pos+768>Size Then Break;
+   Move(F^[Pos],Pk^[4],768); Inc(Pos,768); PalSize:=772;
+  End Else If Tag='NULL' Then Begin
+   Move(F^[Pos-4],Pk^[PalSize],4); PkLen:=PalSize+4;
+   Dec(Frames); PalSize:=0;
+   If Decode Then Begin
+    For I:=0 To 255 Do Begin NVPalR[I]:=(DXAPal[I] Shr 16) And 255; NVPalG[I]:=(DXAPal[I] Shr 8) And 255; NVPalB[I]:=DXAPal[I] And 255; End;
+    NVEmit(DXACur);
+   End Else NVRepeat;
+   If NVDone Then Break;
+  End Else If Tag='FRAM' Then Begin
+   If Pos+5>Size Then Break;
+   Sz:=RB32(Pos+1);
+   If (Sz<0) Or (Sz>$FFFFFF) Then Break;
+   If Pos+5+Sz>Size Then Break;
+   Move(F^[Pos-4],Pk^[PalSize],9); Move(F^[Pos+5],Pk^[PalSize+9],Sz);
+   PkLen:=PalSize+9+Sz; Inc(Pos,5+Sz);
+   Dec(Frames);
+     PalSize:=0;
+   If Decode Then Begin
+    For I:=0 To 255 Do Begin NVPalR[I]:=(DXAPal[I] Shr 16) And 255; NVPalG[I]:=(DXAPal[I] Shr 8) And 255; NVPalB[I]:=DXAPal[I] And 255; End;
+    NVEmit(DXACur);
+   End Else NVRepeat;
+   If NVDone Then Break;
+  End Else Break;
+ End;
+ FreeMem(Pk,16777216+1024); FreeMem(DXABuf,DXABufSize); FreeMem(DXAPrev,W*H+64); FreeMem(DXACur,W*H+64); FreeMem(F,Size+64);
+ NVFinish('dxa');
+End;
+
 Var AVSWantBMP: Boolean;
 
 Procedure DecodeAVS(Const Source,Target: String; PNGMode: Boolean);
@@ -29765,6 +29988,7 @@ Begin
  WriteLn(' D  dts             DTS Coherent Acoustics brut (core 16 bits BE/LE, 14 bits; sans extensions) vers WAV (jusqu''a 5.1)/MP3 stereo/...');
  WriteLn(' D  oma             Sony OpenMG (ATRAC3 non chiffre); WAV 0x270 (ATRAC3) vers WAV/MP3/...');
  WriteLn(' DE avi (asv1/asv2) AVI ASUS V1/V2: decodage vers Y4M, encodage Y4M -c:v asv1|asv2');
+ WriteLn(' D  dxa             Feeble Files/ScummVM DXA (video dxa PAL8 vers Y4M/PNG/BMP; audio WAV non extrait)');
  WriteLn(' D  dsicin          Delphine Software International CIN (video dsicinvideo PAL8 vers Y4M/PNG/BMP, audio dsicinaudio vers WAV/MP3/...)');
  WriteLn(' DE vobsub          VobSub (.idx + .sub, sous-titres DVD dvdsub): decodage vers .psub (manifeste + PNG RGBA), encodage depuis .psub');
  WriteLn(' DE mpegts          MPEG-TS: flux de sous-titres DVB (dvbsub, PID type 0x06 + descripteur 0x59) vers .psub; ecriture depuis .psub (PAT/PMT/PES)');
@@ -30075,6 +30299,7 @@ BEGIN
    WriteLn('DES    dvbsub          DVB subtitles');
    WriteLn('DES    dvdsub          DVD subtitles');
    WriteLn('D A    dsicinaudio     Delphine Software International CIN audio');
+   WriteLn('D V    dxa             Feeble Files/ScummVM DXA');
    WriteLn('D V    dsicinvideo     Delphine Software International CIN video');
    WriteLn('DEV    dvvideo         DV (Digital Video)');
    WriteLn('D V    cyuv            Creative YUV (CYUV)');
@@ -30319,7 +30544,7 @@ BEGIN
  End;
  NVKind:=0;
  If InputFormat='bethsoftvid' Then NVKind:=1 Else If InputFormat='bfi' Then NVKind:=2 Else If InputFormat='c93' Then NVKind:=3
- Else If InputFormat='bmp' Then NVKind:=4 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15
+ Else If InputFormat='bmp' Then NVKind:=4 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16
  Else If (InputFormat='avi') And Not IsHTTP(InputPath) Then Begin
   AsvTag:=AVIVideoFourCC(Intermediate);
   If AsvTag='CSCD' Then NVKind:=5 Else If (AsvTag='tscc') Or (AsvTag='TSCC') Then NVKind:=6
