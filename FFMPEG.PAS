@@ -3958,6 +3958,7 @@ Begin
   (B[13]=110) And (B[14]=100) Then Begin Probe:='iss'; Exit; End;
  If N>=12 Then If (B[0]=82) And (B[1]=73) And (B[2]=70) And (B[3]=70) And (B[8]=65) And (B[9]=77) And
   (B[10]=86) And (B[11]=32) Then Begin Probe:='amv'; Exit; End;
+ If N>=22 Then If ((B[4]=$11) Or (B[4]=$12) Or (B[4]=$44)) And (B[5]=$AF) And ((B[8]+B[9]*256)<=4096) And ((B[10]+B[11]*256)<=4096) And (((B[16]=$FA) And (B[17]=$F1)) Or ((B[16]+B[17]*256+B[18]*65536+B[19]*16777216)<=2000)) Then Begin Probe:='flic'; Exit; End;
  If N>=4 Then If (B[0]=102) And (B[1]=76) And (B[2]=97) And (B[3]=67) Then Begin Probe:='flac'; Exit; End;
  If N>=8 Then If (B[0]=65) And (B[1]=82) And (B[2]=77) And (B[3]=111) And (B[4]=118) And (B[5]=105) And (B[6]=101) And (B[7]=10) Then Begin Probe:='rpl'; Exit; End;
  If N>=7 Then If (B[0]=$0B) And (B[1]=$77) Then Begin
@@ -16974,6 +16975,7 @@ Procedure DecodeDXA(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeEAVideo(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeAVIX(Const Source,Target: String; Mode,Kind: LongInt); Forward;
 Procedure DecodeRPL(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure DecodeFLIC(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeFLVScreen(Const Source,Target: String; Mode: LongInt); Forward;
 Function FLVVideoCodec(Const Name: String): LongInt; Forward;
 Function EAVDetect(Const Source: String): LongInt; Forward;
@@ -16988,6 +16990,7 @@ Begin
  Else If Kind=11 Then DecodeDNxHD(Source,Target,Mode,True)
  Else If Kind=19 Then DecodeRPL(Source,Target,Mode)
  Else If Kind=22 Then DecodeFLVScreen(Source,Target,Mode)
+ Else If Kind=23 Then DecodeFLIC(Source,Target,Mode)
  Else If (Kind>=18) And (Kind<=24) Then DecodeAVIX(Source,Target,Mode,Kind)
  Else If Kind>=7 Then DecodeAVIVideo(Source,Target,Mode,Kind) Else DecodeNV(Kind,Source,Target,Mode);
 End;
@@ -29764,6 +29767,383 @@ Begin
  EAFlush; ADPCMPatchHeader(Rate,1,EAWritten); CloseRead; CloseWrite;
 End;
 
+{ ---- FLI/FLC/FLX (Autodesk Animator Flic), adapte de FFmpeg libavformat/flic.c et libavcodec/flicvideo.c, LGPL-2.1-or-later ---- }
+Var
+ FLX: PEABuffer; FLXSize,FLXPos: LongInt;
+ FLXPix: PEABuffer; FLXStride,FLXW,FLXH,FLXBpp,FLXLimit,FLXType: LongInt;
+ FLXPal: Array[0..255] Of LongInt;
+
+Function FLXGet8: LongInt;
+Begin
+ If FLXPos<FLXSize Then Begin FLXGet8:=FLX^[FLXPos]; Inc(FLXPos); End Else FLXGet8:=0;
+End;
+Function FLXGet16: LongInt;
+Begin
+ If FLXSize-FLXPos<2 Then Begin FLXPos:=FLXSize; FLXGet16:=0; End
+ Else Begin FLXGet16:=FLX^[FLXPos]+FLX^[FLXPos+1]*256; Inc(FLXPos,2); End;
+End;
+Function FLXGet24: LongInt;
+Begin
+ If FLXSize-FLXPos<3 Then Begin FLXPos:=FLXSize; FLXGet24:=0; End
+ Else Begin FLXGet24:=FLX^[FLXPos]+FLX^[FLXPos+1]*256+FLX^[FLXPos+2]*65536; Inc(FLXPos,3); End;
+End;
+Function FLXGet32: Int64;
+Begin
+ If FLXSize-FLXPos<4 Then Begin FLXPos:=FLXSize; FLXGet32:=0; End
+ Else Begin
+  FLXGet32:=Int64(FLX^[FLXPos])+Int64(FLX^[FLXPos+1])*256+Int64(FLX^[FLXPos+2])*65536+Int64(FLX^[FLXPos+3])*16777216;
+  Inc(FLXPos,4);
+ End;
+End;
+Procedure FLXSkip(N: Int64);
+Begin
+ If N<0 Then Inc(N,4294967296);
+ If N>FLXSize-FLXPos Then N:=FLXSize-FLXPos;
+ Inc(FLXPos,N);
+End;
+Function FLXS8(V: LongInt): LongInt;Begin If V>=128 Then FLXS8:=V-256 Else FLXS8:=V; End;
+Function FLXS16(V: LongInt): LongInt;Begin If V>=32768 Then FLXS16:=V-65536 Else FLXS16:=V; End;
+Function FLXBad(Ptr,N: LongInt): Boolean;Begin FLXBad:=Ptr+N>FLXLimit; End;
+Procedure FLXPut(At,V: LongInt);Begin FLXPix^[At]:=V And 255; End;
+
+{ une image: Depth = 8, 15, 16 ou 24; faux = erreur (image perdue) }
+Function FLXFrame(Depth: LongInt): Boolean;
+Var
+ FrameSize,ChunkSize,AfterChunk,NChunks,CType,I,J,Y,YPtr,PPtr,Cnt,Run,Skip,LinePk,Lines,CL,SL,PalPtr,CP,CC,Shift: LongInt;
+ R,G,B,Entry,Pixel,Idx1,Idx2,Value,Ph: LongInt; Limit: LongInt; FSz,CS64: Int64;
+ Ok: Boolean;
+Begin
+ FLXFrame:=False;
+ FLXPos:=0;
+ If (FLXSize<16) Then Exit;
+ If Depth=8 Then Begin If FLXSize>2147483647-(3*256+64) Then Exit; End;
+ FSz:=FLXGet32; If FSz>FLXSize Then FSz:=FLXSize;
+ FLXSkip(2); NChunks:=FLXGet16; FLXSkip(8);
+ If FSz<16 Then Exit;
+ FrameSize:=FSz-16;
+ If Depth=8 Then Limit:=6 Else Limit:=1;
+ While (FrameSize>=Limit) And (NChunks>0) And (FLXSize-FLXPos>=4) Do Begin
+  CS64:=FLXGet32;
+  If CS64>FrameSize Then CS64:=FrameSize;
+  ChunkSize:=CS64;
+  AfterChunk:=FLXPos-4+ChunkSize;
+  CType:=FLXGet16;
+  If (Depth=8) Then Begin
+   Case CType Of
+    4,11: Begin
+     If (CType=4) And (FLXType<>$AF13) Then Shift:=0 Else Shift:=2;
+     CP:=FLXGet16; PalPtr:=0;
+     For I:=0 To CP-1 Do Begin
+      Inc(PalPtr,FLXGet8);
+      CC:=FLXGet8; If CC=0 Then CC:=256;
+      If FLXPos+CC*3>AfterChunk Then Break;
+      For J:=0 To CC-1 Do Begin
+       If (PalPtr<0) Or (PalPtr>=256) Then PalPtr:=0;
+       R:=(FLXGet8 Shl Shift) And 255; G:=(FLXGet8 Shl Shift) And 255; B:=(FLXGet8 Shl Shift) And 255;
+       If Shift=2 Then Begin R:=R Or (R Shr 6); G:=G Or (G Shr 6); B:=B Or (B Shr 6); End;
+       FLXPal[PalPtr]:=(R Shl 16) Or (G Shl 8) Or B; Inc(PalPtr);
+      End;
+     End;
+    End;
+    7: Begin
+     YPtr:=0; CL:=FLXGet16;
+     While CL>0 Do Begin
+      If FLXPos+2>AfterChunk Then Break;
+      If FLXBad(YPtr,0) Then Exit;
+      LinePk:=FLXS16(FLXGet16);
+      If (LinePk And $C000)=$C000 Then Begin
+       LinePk:=-LinePk;
+       If LinePk>FLXH Then Exit;
+       Inc(YPtr,LinePk*FLXStride);
+      End Else If (LinePk And $C000)=$4000 Then Begin
+      End Else If (LinePk And $C000)=$8000 Then Begin
+       PPtr:=YPtr+FLXStride-1;
+       If FLXBad(PPtr,0) Then Exit;
+       FLXPut(PPtr,LinePk And 255);
+      End Else Begin
+       Dec(CL); PPtr:=YPtr;
+       If FLXBad(PPtr,0) Then Exit;
+       For I:=0 To LinePk-1 Do Begin
+        If FLXPos+2>AfterChunk Then Break;
+        Skip:=FLXGet8; Inc(PPtr,Skip);
+        Run:=FLXS8(FLXGet8);
+        If Run<0 Then Begin
+         Run:=-Run; Idx1:=FLXGet8; Idx2:=FLXGet8;
+         If FLXBad(PPtr,Run*2) Then Exit;
+         For J:=1 To Run Do Begin FLXPut(PPtr,Idx1); Inc(PPtr); FLXPut(PPtr,Idx2); Inc(PPtr); End;
+        End Else Begin
+         If FLXBad(PPtr,Run*2) Then Exit;
+         If FLXPos+Run*2>AfterChunk Then Break;
+         For J:=1 To Run*2 Do Begin FLXPut(PPtr,FLXGet8); Inc(PPtr); End;
+        End;
+       End;
+       Inc(YPtr,FLXStride);
+      End;
+     End;
+    End;
+    12: Begin
+     SL:=FLXGet16;
+     If SL>=FLXH Then Exit;
+     YPtr:=SL*FLXStride; CL:=FLXGet16;
+     While CL>0 Do Begin
+      PPtr:=YPtr;
+      If FLXBad(PPtr,0) Then Exit;
+      If FLXPos+1>AfterChunk Then Break;
+      LinePk:=FLXGet8;
+      If LinePk>0 Then
+       For I:=0 To LinePk-1 Do Begin
+        If FLXPos+1>AfterChunk Then Break;
+        Skip:=FLXGet8; Inc(PPtr,Skip);
+        Run:=FLXS8(FLXGet8);
+        If Run>0 Then Begin
+         If FLXBad(PPtr,Run) Then Exit;
+         If FLXPos+Run>AfterChunk Then Break;
+         For J:=1 To Run Do Begin FLXPut(PPtr,FLXGet8); Inc(PPtr); End;
+        End Else If Run<0 Then Begin
+         Run:=-Run; Idx1:=FLXGet8;
+         If FLXBad(PPtr,Run) Then Exit;
+         For J:=1 To Run Do Begin FLXPut(PPtr,Idx1); Inc(PPtr); End;
+        End;
+       End;
+      Inc(YPtr,FLXStride); Dec(CL);
+     End;
+    End;
+    13: For Y:=0 To FLXH-1 Do FillChar(FLXPix^[Y*FLXStride],FLXW,0);
+    15: Begin
+     YPtr:=0;
+     For Y:=0 To FLXH-1 Do Begin
+      PPtr:=YPtr; FLXSkip(1); Cnt:=FLXW;
+      While Cnt>0 Do Begin
+       If FLXPos+1>AfterChunk Then Break;
+       Run:=FLXS8(FLXGet8);
+       If Run=0 Then Exit;
+       If Run>0 Then Begin
+        Idx1:=FLXGet8;
+        If FLXBad(PPtr,Run) Then Exit;
+        For J:=1 To Run Do Begin FLXPut(PPtr,Idx1); Inc(PPtr); Dec(Cnt); End;
+       End Else Begin
+        Run:=-Run;
+        If FLXBad(PPtr,Run) Then Exit;
+        If FLXPos+Run>AfterChunk Then Break;
+        For J:=1 To Run Do Begin FLXPut(PPtr,FLXGet8); Inc(PPtr); Dec(Cnt); End;
+       End;
+      End;
+      Inc(YPtr,FLXStride);
+     End;
+    End;
+    16: Begin
+     If ChunkSize-6<>((FLXW+3) And -4)*FLXH Then FLXSkip(Int64(ChunkSize)-6)
+     Else Begin
+      YPtr:=0;
+      While Not FLXBad(YPtr,FLXW) Do Begin
+       For J:=0 To FLXW-1 Do Begin
+        If FLXPos<FLXSize Then Begin FLXPut(YPtr+J,FLX^[FLXPos]); Inc(FLXPos); End;
+       End;
+       If (FLXW And 3)<>0 Then FLXSkip(4-(FLXW And 3));
+       Inc(YPtr,FLXStride);
+      End;
+     End;
+    End;
+    18: ;
+   Else ;
+   End;
+  End Else Begin
+   Case CType Of
+    4,11: FLXSkip(Int64(ChunkSize)-6);
+    7,27: Begin
+     YPtr:=0; CL:=FLXGet16;
+     While CL>0 Do Begin
+      If FLXPos+2>AfterChunk Then Break;
+      If FLXBad(YPtr,0) Then Exit;
+      LinePk:=FLXS16(FLXGet16);
+      If LinePk<0 Then Begin
+       LinePk:=-LinePk;
+       If LinePk>FLXH Then Exit;
+       Inc(YPtr,LinePk*FLXStride);
+      End Else Begin
+       Dec(CL); PPtr:=YPtr;
+       If FLXBad(PPtr,0) Then Exit;
+       For I:=0 To LinePk-1 Do Begin
+        If FLXPos+2>AfterChunk Then Break;
+        Skip:=FLXGet8; Inc(PPtr,Skip*FLXBpp);
+        Run:=FLXS8(FLXGet8);
+        If Run<0 Then Begin
+         Run:=-Run;
+         If FLXBpp=2 Then Pixel:=FLXGet16 Else Pixel:=FLXGet24;
+         If FLXBad(PPtr,FLXBpp*Run) Then Exit;
+         For J:=1 To Run Do Begin
+          FLXPut(PPtr,Pixel); FLXPut(PPtr+1,Pixel Shr 8); If FLXBpp=3 Then FLXPut(PPtr+2,Pixel Shr 16);
+          Inc(PPtr,FLXBpp);
+         End;
+        End Else Begin
+         If FLXPos+2*Run>AfterChunk Then Break;
+         If FLXBad(PPtr,FLXBpp*Run) Then Exit;
+         For J:=1 To Run Do Begin
+          If FLXBpp=2 Then Pixel:=FLXGet16 Else Pixel:=FLXGet24;
+          FLXPut(PPtr,Pixel); FLXPut(PPtr+1,Pixel Shr 8); If FLXBpp=3 Then FLXPut(PPtr+2,Pixel Shr 16);
+          Inc(PPtr,FLXBpp);
+         End;
+        End;
+       End;
+       Inc(YPtr,FLXStride);
+      End;
+     End;
+    End;
+    12: FLXSkip(Int64(ChunkSize)-6);
+    13: For Y:=0 To FLXH-1 Do FillChar(FLXPix^[Y*FLXStride],FLXW*FLXBpp,0);
+    15: Begin
+     YPtr:=0;
+     For Y:=0 To FLXH-1 Do Begin
+      PPtr:=YPtr; FLXSkip(1); Cnt:=FLXW*FLXBpp;
+      While Cnt>0 Do Begin
+       If FLXPos+1>AfterChunk Then Break;
+       Run:=FLXS8(FLXGet8);
+       If Run>0 Then Begin
+        Idx1:=FLXGet8;
+        If FLXBad(PPtr,Run) Then Exit;
+        For J:=1 To Run Do Begin FLXPut(PPtr,Idx1); Inc(PPtr); Dec(Cnt); End;
+       End Else Begin
+        Run:=-Run;
+        If FLXPos+Run>AfterChunk Then Break;
+        If FLXBad(PPtr,Run) Then Exit;
+        For J:=1 To Run Do Begin FLXPut(PPtr,FLXGet8); Inc(PPtr); Dec(Cnt); End;
+       End;
+      End;
+      Inc(YPtr,FLXStride);
+     End;
+    End;
+    25: Begin
+     YPtr:=0;
+     For Y:=0 To FLXH-1 Do Begin
+      PPtr:=YPtr; FLXSkip(1); Cnt:=FLXW;
+      While Cnt>0 Do Begin
+       If FLXPos+1>AfterChunk Then Break;
+       Run:=FLXS8(FLXGet8);
+       If Run>0 Then Begin
+        If FLXBpp=2 Then Pixel:=FLXGet16 Else Pixel:=FLXGet24;
+        If FLXBad(PPtr,FLXBpp*Run) Then Exit;
+        For J:=1 To Run Do Begin
+         FLXPut(PPtr,Pixel); FLXPut(PPtr+1,Pixel Shr 8); If FLXBpp=3 Then FLXPut(PPtr+2,Pixel Shr 16);
+         Inc(PPtr,FLXBpp); Dec(Cnt);
+        End;
+       End Else Begin
+        Run:=-Run;
+        If FLXPos+FLXBpp*Run>AfterChunk Then Break;
+        If FLXBad(PPtr,FLXBpp*Run) Then Exit;
+        For J:=1 To Run Do Begin
+         If FLXBpp=2 Then Pixel:=FLXGet16 Else Pixel:=FLXGet24;
+         FLXPut(PPtr,Pixel); FLXPut(PPtr+1,Pixel Shr 8); If FLXBpp=3 Then FLXPut(PPtr+2,Pixel Shr 16);
+         Inc(PPtr,FLXBpp); Dec(Cnt);
+        End;
+       End;
+      End;
+      Inc(YPtr,FLXStride);
+     End;
+    End;
+    16,26: Begin
+     If Int64(ChunkSize)-6>Int64((FLXW+1) And -2)*FLXH*FLXBpp Then FLXSkip(Int64(ChunkSize)-6)
+     Else Begin
+      If Depth<24 Then Begin
+       If FLXSize-FLXPos<2*FLXW*FLXH Then Exit;
+       YPtr:=0;
+       While Not FLXBad(YPtr,2*FLXW) Do Begin
+        For J:=0 To FLXW-1 Do Begin Pixel:=FLXGet16; FLXPut(YPtr+J*2,Pixel); FLXPut(YPtr+J*2+1,Pixel Shr 8); End;
+        If (FLXW And 1)<>0 Then FLXSkip(2);
+        Inc(YPtr,FLXStride);
+       End;
+      End Else Begin
+       YPtr:=0;
+       While Not FLXBad(YPtr,3*FLXW) Do Begin
+        For J:=0 To 3*FLXW-1 Do Begin
+         If FLXPos<FLXSize Then Begin FLXPut(YPtr+J,FLX^[FLXPos]); Inc(FLXPos); End;
+        End;
+        If (FLXW And 1)<>0 Then FLXSkip(3);
+        Inc(YPtr,FLXStride);
+       End;
+      End;
+     End;
+    End;
+    18: FLXSkip(Int64(ChunkSize)-6);
+   Else ;
+   End;
+  End;
+  If AfterChunk-FLXPos>=0 Then FLXSkip(AfterChunk-FLXPos) Else Break;
+  Dec(FrameSize,ChunkSize); Dec(NChunks);
+ End;
+ FLXFrame:=True;
+End;
+
+Procedure DecodeFLIC(Const Source,Target: String; Mode: LongInt);
+Var
+ Buf: PEABuffer; Size,Depth,Magic,Speed,P,I,Y,Fmt,Start,FpsN,FpsD,G,Bytes,Row: LongInt; PSz: Int64; PMagic: LongInt;
+ Pic: PEABuffer; Ok,Tftd,Mc: Boolean; Align: LongInt; Tmp: Int64;
+Function RL16(At: LongInt): LongInt;Begin RL16:=EAByte(Buf,Size,At)+EAByte(Buf,Size,At+1)*256; End;
+Function RL32(At: LongInt): Int64;
+Begin RL32:=Int64(EAByte(Buf,Size,At))+Int64(EAByte(Buf,Size,At+1))*256+Int64(EAByte(Buf,Size,At+2))*65536+Int64(EAByte(Buf,Size,At+3))*16777216; End;
+Function Gcd(A,B: LongInt): LongInt;Var T: LongInt;Begin While B<>0 Do Begin T:=A Mod B; A:=B; B:=T; End; Gcd:=A; End;
+Begin
+ NVLoad(Source,Buf,Size);
+ If Size<134 Then Fail('flic: fichier trop court.');
+ Magic:=RL16(4); Speed:=RL32(16); If Speed=0 Then Speed:=5;
+ FLXW:=RL16(8); FLXH:=RL16(10);
+ If (FLXW=0) Or (FLXH=0) Then Begin FLXW:=640; FLXH:=480; End;
+ Tftd:=RL16(128+4)=$AAAA; Mc:=Not Tftd And (RL16(16)=$F1FA);
+ Start:=128;
+ FLXType:=Magic; Depth:=RL16(12);
+ If Mc Then Begin FLXType:=$AF13; Depth:=8; Start:=12; End;
+ If Depth=0 Then Depth:=8;
+ If (FLXType=$AF12) And (Depth=16) Then Depth:=15;
+ If Tftd Then Begin
+  PSz:=RL32(128); If PSz<=0 Then Fail('flic: flux audio TFTD incorrect.');
+  FpsN:=22050; FpsD:=PSz;
+ End Else If Mc Then Begin FpsN:=70; FpsD:=5; End
+ Else If Magic=$AF11 Then Begin FpsN:=70; FpsD:=Speed; End
+ Else If (Magic=$AF12) Or (Magic=$AF44) Then Begin FpsN:=1000; FpsD:=Speed; End
+ Else Fail('flic: signature de fichier invalide.');
+ G:=Gcd(FpsN,FpsD); FpsN:=FpsN Div G; FpsD:=FpsD Div G;
+ If Depth=8 Then Begin FLXBpp:=1; Fmt:=0; Align:=64; End
+ Else If Depth=15 Then Begin FLXBpp:=2; Fmt:=2; Align:=32; End
+ Else If Depth=16 Then Begin FLXBpp:=2; Fmt:=5; Align:=32; End
+ Else If Depth=24 Then Begin FLXBpp:=3; Fmt:=1; Align:=64; End
+ Else Begin
+  If Depth=1 Then Fail('flic: profondeur 1 bit (monoblack) non prise en charge.');
+  Fail('flic: profondeur inconnue.');
+ End;
+ FLXStride:=((FLXW+Align-1) Div Align)*Align*FLXBpp;
+ FLXLimit:=FLXH*FLXStride;
+ GetMem(FLXPix,FLXLimit+256); FillChar(FLXPix^,FLXLimit+256,0);
+ FillChar(FLXPal,SizeOf(FLXPal),0);
+ Row:=FLXW*FLXBpp; GetMem(Pic,Row*FLXH);
+ NVVN:=0; NVVD:=0;
+ NVBegin(Mode,Target,FLXW,FLXH,Fmt,FpsN,FpsD);
+ P:=Start;
+ While (P+6<=Size) And Not NVDone Do Begin
+  PSz:=RL32(P); PMagic:=RL16(P+4);
+  If ((PMagic=$F1FA) Or (PMagic=$F5FA)) And (PSz>6) Then Begin
+   If P+PSz>Size Then Break;
+   FLX:=PEABuffer(@Buf^[P]); FLXSize:=PSz;
+   Ok:=FLXFrame(Depth);
+   If Ok Then Begin
+    If Depth=8 Then
+     For I:=0 To 255 Do Begin
+      NVPalR[I]:=(FLXPal[I] Shr 16) And 255; NVPalG[I]:=(FLXPal[I] Shr 8) And 255; NVPalB[I]:=FLXPal[I] And 255;
+     End;
+    For Y:=0 To FLXH-1 Do Move(FLXPix^[Y*FLXStride],Pic^[Y*Row],Row);
+    NVEmit(Pic);
+   End Else NVRepeat;
+   Inc(P,PSz);
+  End Else If PMagic=$AAAA Then Begin
+   Inc(P,6+10+PSz); { audio TFTD: ignore }
+  End Else Begin
+   If PSz<6 Then Break;
+   Inc(P,PSz);
+  End;
+ End;
+ FreeMem(Pic,Row*FLXH); FreeMem(FLXPix,FLXLimit+256);
+ FreeMem(Buf,Size+64);
+ NVFinish('flic');
+End;
+
 { ---- Decodeurs video AVI/RPL supplementaires: flashsv (flashsv.c), escape124 (escape124.c + rpl.c), huffyuv/ffvhuff, ffv1 ---- }
 Var
  AXF: PEABuffer; AXSize,AXW,AXH,AXBits,AXRate,AXScale,AXMovie,AXExtra,AXExtraLen: LongInt; AXFcc: String[4];
@@ -35973,7 +36353,7 @@ BEGIN
  End;
  NVKind:=0;
  If InputFormat='bethsoftvid' Then NVKind:=1 Else If InputFormat='bfi' Then NVKind:=2 Else If InputFormat='c93' Then NVKind:=3
- Else If InputFormat='bmp' Then NVKind:=4 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22
+ Else If InputFormat='bmp' Then NVKind:=4 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22 Else If (InputFormat='flic') And Not IsHTTP(InputPath) Then NVKind:=23
  Else If (InputFormat='avi') And Not IsHTTP(InputPath) Then Begin
   AsvTag:=AVIVideoFourCC(Intermediate);
   If AsvTag='CSCD' Then NVKind:=5 Else If (AsvTag='tscc') Or (AsvTag='TSCC') Then NVKind:=6
