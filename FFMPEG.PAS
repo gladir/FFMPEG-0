@@ -39737,6 +39737,11 @@ Var
  H4Ipm: Array[0..15] Of LongInt;
  H4Nnz: Array[0..47] Of LongInt;        { luma 0..15, Cb 16..19, Cr 20..23 : nombres de coefficients du macrobloc courant }
  H4QpC: Array[0..1] Of LongInt;
+ H4CabacOn: Boolean;
+ H4CbSt: Array[0..1023] Of Byte;          { (etat shl 1) or valMPS }
+ H4CbRange,H4CbOffset: LongInt;
+ H4DcBits: LongInt;                        { bits 6,7 : DC chroma Cb/Cr ; bit 8 : DC luma (comme cbp_table de libavcodec) }
+ H4CurDir8: Array[0..3] Of Byte;           { blocs 8x8 predits en mode direct (macrobloc courant) }
 
 Procedure H4SetupQuant;
 Const N4: Array[0..5,0..2] Of Byte=((10,16,13),(11,18,14),(13,20,16),(14,23,18),(16,25,20),(18,29,23));
@@ -39773,6 +39778,7 @@ Procedure H4SetupNeighbors;
 Var A: LongInt;
 Begin
  A:=H4MbAddr;
+ FillChar(H4MvdTab^[A*64],64,0); H4DcBits:=0; FillChar(H4CurDir8,4,0);
  H4AvA:=(H4MbX>0) And (H4SliceTab^[A-1]=H4SliceNum);
  H4AvB:=(H4MbY>0) And (H4SliceTab^[A-H4MbW]=H4SliceNum);
  H4AvC:=(H4MbY>0) And (H4MbX<H4MbW-1) And (H4SliceTab^[A-H4MbW+1]=H4SliceNum);
@@ -39848,10 +39854,448 @@ Begin
   If Qd>=6 Then Out[I]:=(F[I]*Ls) Shl (Qd-6) Else Out[I]:=H4Sar(F[I]*Ls+(1 Shl (5-Qd)),6-Qd);
 End;
 
+Const
+ H4CabacLps: Array[0..255] Of Byte=(
+  128,176,208,240,128,167,197,227,128,158,187,216,123,150,178,205,
+  116,142,169,195,111,135,160,185,105,128,152,175,100,122,144,166,
+  95,116,137,158,90,110,130,150,85,104,123,142,81,99,117,135,
+  77,94,111,128,73,89,105,122,69,85,100,116,66,80,95,110,
+  62,76,90,104,59,72,86,99,56,69,81,94,53,65,77,89,
+  51,62,73,85,48,59,69,80,46,56,66,76,43,53,63,72,
+  41,50,59,69,39,48,56,65,37,45,54,62,35,43,51,59,
+  33,41,48,56,32,39,46,53,30,37,43,50,29,35,41,48,
+  27,33,39,45,26,31,37,43,24,30,35,41,23,28,33,39,
+  22,27,32,37,21,26,30,35,20,24,29,33,19,23,27,31,
+  18,22,26,30,17,21,25,28,16,20,23,27,15,19,22,25,
+  14,18,21,24,14,17,20,23,13,16,19,22,12,15,18,21,
+  12,14,17,20,11,14,16,19,11,13,15,18,10,12,15,17,
+  10,12,14,16,9,11,13,15,9,11,12,14,8,10,12,14,
+  8,9,11,13,7,9,11,12,7,9,10,12,7,8,10,11,
+  6,8,9,11,6,7,9,10,6,7,8,9,2,2,2,2
+ );
+ H4CabacTransLps: Array[0..63] Of Byte=(
+  0,0,1,2,2,4,4,5,6,7,8,9,9,11,11,12,
+  13,13,15,15,16,16,18,18,19,19,21,21,22,22,23,24,
+  24,25,26,26,27,27,28,29,29,30,30,30,31,32,32,33,
+  33,33,34,34,35,35,35,36,36,36,37,37,37,38,38,63
+ );
+ H4CabacLast8: Array[0..62] Of Byte=(
+  0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+  2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,
+  3,3,3,3,3,3,3,3,4,4,4,4,4,4,4,4,
+  5,5,5,5,6,6,6,6,7,7,7,7,8,8,8
+ );
+ H4CabacSig8: Array[0..62] Of Byte=(
+  0,1,2,3,4,5,5,4,4,3,3,4,4,4,5,5,
+  4,4,4,4,3,3,6,7,7,7,8,9,10,9,8,7,
+  7,6,11,12,13,11,6,7,8,9,14,10,9,8,6,11,
+  12,13,11,6,9,14,10,9,11,12,13,11,14,10,12
+ );
+
+{ ---- CABAC (9.3) : moteur arithmetique, elements de syntaxe et residu ---- }
+
+Procedure H4CabacInit(SliceQp,InitIdc: LongInt; IsI: Boolean);
+Var I,M,N,Pre: LongInt;
+Begin
+ For I:=0 To 1023 Do Begin
+  If IsI Then Begin M:=H4CabacInitI[2*I]; N:=H4CabacInitI[2*I+1]; End
+  Else Begin M:=H4CabacInitPB[InitIdc*2048+2*I]; N:=H4CabacInitPB[InitIdc*2048+2*I+1]; End;
+  Pre:=H4Clip3(1,126,H4Sar(M*H4Clip3(0,51,SliceQp),4)+N);
+  If Pre<=63 Then H4CbSt[I]:=(63-Pre)*2 Else H4CbSt[I]:=(Pre-64)*2+1;
+ End;
+ H4Pos:=(H4Pos+7) And -8;
+ H4CbRange:=510; H4CbOffset:=H4Bits(9);
+End;
+
+Function H4CbDec(Ctx: LongInt): LongInt;
+Var S,St,Mps,RLps,N: LongInt;
+Begin
+ S:=H4CbSt[Ctx]; St:=S Shr 1; Mps:=S And 1;
+ RLps:=H4CabacLps[St*4+((H4CbRange Shr 6) And 3)];
+ Dec(H4CbRange,RLps);
+ If H4CbOffset>=H4CbRange Then Begin
+  Dec(H4CbOffset,H4CbRange); H4CbRange:=RLps; H4CbDec:=1-Mps;
+  If St=0 Then Mps:=1-Mps;
+  St:=H4CabacTransLps[St];
+ End Else Begin
+  H4CbDec:=Mps;
+  If St<62 Then Inc(St);
+ End;
+ H4CbSt[Ctx]:=St*2+Mps;
+ If H4CbRange<256 Then Begin
+  N:=0; While (H4CbRange Shl N)<256 Do Inc(N);
+  H4CbRange:=H4CbRange Shl N; H4CbOffset:=(H4CbOffset Shl N) Or H4Bits(N);
+ End;
+End;
+Function H4CbByp: LongInt;
+Begin
+ H4CbOffset:=(H4CbOffset Shl 1) Or H4Bit;
+ If H4CbOffset>=H4CbRange Then Begin Dec(H4CbOffset,H4CbRange); H4CbByp:=1; End Else H4CbByp:=0;
+End;
+Function H4CbTerm: LongInt;
+Begin
+ Dec(H4CbRange,2);
+ If H4CbOffset>=H4CbRange Then H4CbTerm:=1
+ Else Begin
+  H4CbTerm:=0;
+  If H4CbRange<256 Then Begin H4CbRange:=H4CbRange Shl 1; H4CbOffset:=(H4CbOffset Shl 1) Or H4Bit; End;
+ End;
+End;
+
+{ ---- elements de syntaxe ---- }
+Function H4CbSkip: Boolean;
+Var Ctx: LongInt;
+Begin
+ Ctx:=0;
+ If H4AvA Then If (H4Pics[H4Cur].MbType^[H4MbAddr-1] And MT_SKIP)=0 Then Inc(Ctx);
+ If H4AvB Then If (H4Pics[H4Cur].MbType^[H4MbAddr-H4MbW] And MT_SKIP)=0 Then Inc(Ctx);
+ If H4SliceType=1 Then Inc(Ctx,13);
+ H4CbSkip:=H4CbDec(11+Ctx)<>0;
+End;
+
+{ type de macrobloc intra : 0 I_NxN, 1..24 I16x16, 25 PCM ; Base 3 (tranche I) / 17 (P) / 32 (B) }
+Function H4CbIntraType(Base: LongInt; IntraSlice: Boolean): LongInt;
+Var Ctx,S,T: LongInt;
+Begin
+ S:=Base;
+ If IntraSlice Then Begin
+  Ctx:=0;
+  If H4AvA Then If (H4Pics[H4Cur].MbType^[H4MbAddr-1] And (MT_I16 Or MT_PCM))<>0 Then Inc(Ctx);
+  If H4AvB Then If (H4Pics[H4Cur].MbType^[H4MbAddr-H4MbW] And (MT_I16 Or MT_PCM))<>0 Then Inc(Ctx);
+  If H4CbDec(S+Ctx)=0 Then Begin H4CbIntraType:=0; Exit; End;
+  Inc(S,2);
+ End Else Begin
+  If H4CbDec(S)=0 Then Begin H4CbIntraType:=0; Exit; End;
+ End;
+ If H4CbTerm<>0 Then Begin H4CbIntraType:=25; Exit; End;
+ T:=1;
+ Inc(T,12*H4CbDec(S+1));
+ If H4CbDec(S+2)<>0 Then Begin
+  If IntraSlice Then Inc(T,4+4*H4CbDec(S+3)) Else Inc(T,4+4*H4CbDec(S+2));
+ End;
+ If IntraSlice Then Begin Inc(T,2*H4CbDec(S+4)); Inc(T,H4CbDec(S+5)); End
+ Else Begin Inc(T,2*H4CbDec(S+3)); Inc(T,H4CbDec(S+3)); End;
+ H4CbIntraType:=T;
+End;
+
+{ type de macrobloc d'une tranche P : 0..3 inter, 5+x intra }
+Function H4CbMbTypeP: LongInt;
+Begin
+ If H4CbDec(14)=0 Then Begin
+  If H4CbDec(15)=0 Then H4CbMbTypeP:=3*H4CbDec(16) Else H4CbMbTypeP:=2-H4CbDec(17);
+ End Else H4CbMbTypeP:=5+H4CbIntraType(17,False);
+End;
+
+{ type de macrobloc d'une tranche B : 0..22 inter, 23+x intra }
+Function H4CbMbTypeB: LongInt;
+Var Ctx,Bits: LongInt;
+Begin
+ Ctx:=0;
+ If H4AvA Then If (H4Pics[H4Cur].MbType^[H4MbAddr-1] And MT_DIRECT)=0 Then Inc(Ctx);
+ If H4AvB Then If (H4Pics[H4Cur].MbType^[H4MbAddr-H4MbW] And MT_DIRECT)=0 Then Inc(Ctx);
+ If H4CbDec(27+Ctx)=0 Then Begin H4CbMbTypeB:=0; Exit; End;
+ If H4CbDec(27+3)=0 Then Begin H4CbMbTypeB:=1+H4CbDec(27+5); Exit; End;
+ Bits:=H4CbDec(27+4) Shl 3;
+ Bits:=Bits+(H4CbDec(27+5) Shl 2);
+ Bits:=Bits+(H4CbDec(27+5) Shl 1);
+ Bits:=Bits+H4CbDec(27+5);
+ If Bits<8 Then H4CbMbTypeB:=Bits+3
+ Else If Bits=13 Then H4CbMbTypeB:=23+H4CbIntraType(32,False)
+ Else If Bits=14 Then H4CbMbTypeB:=11
+ Else If Bits=15 Then H4CbMbTypeB:=22
+ Else Begin
+  Bits:=(Bits Shl 1)+H4CbDec(27+5);
+  H4CbMbTypeB:=Bits-4;
+ End;
+End;
+
+Function H4CbSubP: LongInt;
+Begin
+ If H4CbDec(21)<>0 Then Begin H4CbSubP:=0; Exit; End;
+ If H4CbDec(22)=0 Then Begin H4CbSubP:=1; Exit; End;
+ If H4CbDec(23)<>0 Then H4CbSubP:=2 Else H4CbSubP:=3;
+End;
+Function H4CbSubB: LongInt;
+Var T: LongInt;
+Begin
+ If H4CbDec(36)=0 Then Begin H4CbSubB:=0; Exit; End;
+ If H4CbDec(37)=0 Then Begin H4CbSubB:=1+H4CbDec(39); Exit; End;
+ T:=3;
+ If H4CbDec(38)<>0 Then Begin
+  If H4CbDec(39)<>0 Then Begin H4CbSubB:=11+H4CbDec(39); Exit; End;
+  Inc(T,4);
+ End;
+ Inc(T,2*H4CbDec(39));
+ Inc(T,H4CbDec(39));
+ H4CbSubB:=T;
+End;
+
+Function H4CbIpm(Pm: LongInt): LongInt;
+Var M: LongInt;
+Begin
+ If H4CbDec(68)<>0 Then Begin H4CbIpm:=Pm; Exit; End;
+ M:=H4CbDec(69);
+ Inc(M,2*H4CbDec(69));
+ Inc(M,4*H4CbDec(69));
+ If M>=Pm Then Inc(M);
+ H4CbIpm:=M;
+End;
+
+Function H4CbChromaMode: LongInt;
+Var Ctx: LongInt;
+Begin
+ Ctx:=0;
+ If H4AvA Then If H4CpmTab^[H4MbAddr-1]<>0 Then Inc(Ctx);
+ If H4AvB Then If H4CpmTab^[H4MbAddr-H4MbW]<>0 Then Inc(Ctx);
+ If H4CbDec(64+Ctx)=0 Then Begin H4CbChromaMode:=0; Exit; End;
+ If H4CbDec(67)=0 Then Begin H4CbChromaMode:=1; Exit; End;
+ If H4CbDec(67)=0 Then H4CbChromaMode:=2 Else H4CbChromaMode:=3;
+End;
+
+Function H4CbTx8: Boolean;
+Var Ctx: LongInt;
+Begin
+ Ctx:=0;
+ If H4AvA Then If H4Tx8Tab^[H4MbAddr-1]<>0 Then Inc(Ctx);
+ If H4AvB Then If H4Tx8Tab^[H4MbAddr-H4MbW]<>0 Then Inc(Ctx);
+ H4CbTx8:=H4CbDec(399+Ctx)<>0;
+End;
+
+Function H4CbCbp(Intra: Boolean): LongInt;
+Var Lw,Tw,Cbp,Ctx,Ca,Cb: LongInt;
+Begin
+ If Intra Then Begin Lw:=$7CF; Tw:=$7CF; End Else Begin Lw:=$00F; Tw:=$00F; End;
+ If H4AvA Then Lw:=H4CbpTab^[H4MbAddr-1];
+ If H4AvB Then Tw:=H4CbpTab^[H4MbAddr-H4MbW];
+ Ctx:=Ord((Lw And 2)=0)+2*Ord((Tw And 4)=0);
+ Cbp:=H4CbDec(73+Ctx);
+ Ctx:=Ord((Cbp And 1)=0)+2*Ord((Tw And 8)=0);
+ Cbp:=Cbp+(H4CbDec(73+Ctx) Shl 1);
+ Ctx:=Ord((Lw And 8)=0)+2*Ord((Cbp And 1)=0);
+ Cbp:=Cbp+(H4CbDec(73+Ctx) Shl 2);
+ Ctx:=Ord((Cbp And 4)=0)+2*Ord((Cbp And 2)=0);
+ Cbp:=Cbp+(H4CbDec(73+Ctx) Shl 3);
+ Ca:=(Lw Shr 4) And 3; Cb:=(Tw Shr 4) And 3;
+ Ctx:=Ord(Ca>0)+2*Ord(Cb>0);
+ If H4CbDec(77+Ctx)<>0 Then Begin
+  Ctx:=4+Ord(Ca=2)+2*Ord(Cb=2);
+  Cbp:=Cbp+((1+H4CbDec(77+Ctx)) Shl 4);
+ End;
+ H4CbCbp:=Cbp;
+End;
+
+Function H4CbDqp: LongInt;
+Var Val,Ctx: LongInt;
+Begin
+ If H4CbDec(60+Ord(H4LastDqp<>0))=0 Then Begin H4CbDqp:=0; Exit; End;
+ Val:=1; Ctx:=2;
+ While H4CbDec(60+Ctx)<>0 Do Begin
+  Ctx:=3; Inc(Val);
+  If Val>104 Then Begin H4Err:=True; H4CbDqp:=0; Exit; End;
+ End;
+ If Odd(Val) Then H4CbDqp:=(Val+1) Div 2 Else H4CbDqp:=-((Val+1) Div 2);
+End;
+
+{ voisin pour l'indice de reference : R=-2 indisponible, -1 intra/liste inutilisee ; Dir : predit en mode direct }
+Procedure H4NbRef(L,Bx,By: LongInt; Var R: LongInt; Var Dir: Boolean);
+Var Addr,Blk,B8: LongInt; Ok: Boolean;
+Begin
+ R:=-2; Dir:=False; Addr:=H4MbAddr; Ok:=False; Blk:=0;
+ If By<0 Then Begin Ok:=H4AvB; Addr:=H4MbAddr-H4MbW; Blk:=12+Bx; End
+ Else If Bx<0 Then Begin Ok:=H4AvA; Addr:=H4MbAddr-1; Blk:=By*4+3; End
+ Else Begin Ok:=True; Blk:=By*4+Bx; End;
+ If Not Ok Then Exit;
+ B8:=(Blk Shr 3)*2+((Blk And 3) Shr 1);
+ R:=-1;
+ If Addr<>H4MbAddr Then Begin
+  If (H4Pics[H4Cur].MbType^[Addr] And MT_INTRA)<>0 Then Exit;
+  Dir:=H4Dir8Tab^[Addr*4+B8]<>0;
+ End Else Dir:=H4CurDir8[B8]<>0;
+ R:=ShortInt(PEABuffer(H4Pics[H4Cur].Ref[L])^[Addr*4+B8]);
+End;
+
+Function H4CbRef(L,Bx,By: LongInt): LongInt;
+Var Ra,Rb,Ctx,Ref: LongInt; Da,Db: Boolean;
+Begin
+ H4NbRef(L,Bx-1,By,Ra,Da); H4NbRef(L,Bx,By-1,Rb,Db);
+ Ctx:=0;
+ If (Ra>0) And Not Da Then Inc(Ctx);
+ If (Rb>0) And Not Db Then Inc(Ctx,2);
+ Ref:=0;
+ While H4CbDec(54+Ctx)<>0 Do Begin
+  Inc(Ref); Ctx:=(Ctx Shr 2)+4;
+  If Ref>=32 Then Begin H4Err:=True; H4CbRef:=0; Exit; End;
+ End;
+ H4CbRef:=Ref;
+End;
+
+{ valeur absolue de mvd du voisin }
+Function H4NbMvd(L,Bx,By,Comp: LongInt): LongInt;
+Var Addr,Blk: LongInt;
+Begin
+ H4NbMvd:=0; Addr:=H4MbAddr;
+ If By<0 Then Begin If Not H4AvB Then Exit; Addr:=H4MbAddr-H4MbW; Blk:=12+Bx; End
+ Else If Bx<0 Then Begin If Not H4AvA Then Exit; Addr:=H4MbAddr-1; Blk:=By*4+3; End
+ Else Blk:=By*4+Bx;
+ H4NbMvd:=H4MvdTab^[(((Addr*2+L)*16+Blk) Shl 1)+Comp];
+End;
+
+Function H4CbMvd(CtxBase,Amvd: LongInt; Var Mva: LongInt): LongInt;
+Var Mvd,K: LongInt;
+Begin
+ If Amvd<3 Then K:=0 Else If Amvd>32 Then K:=2 Else K:=1;
+ If H4CbDec(CtxBase+K)=0 Then Begin Mva:=0; H4CbMvd:=0; Exit; End;
+ Mvd:=1; K:=CtxBase+3;
+ While (Mvd<9) And (H4CbDec(K)<>0) Do Begin
+  If Mvd<4 Then Inc(K);
+  Inc(Mvd);
+ End;
+ If Mvd>=9 Then Begin
+  K:=3;
+  While H4CbByp<>0 Do Begin
+   Inc(Mvd,1 Shl K); Inc(K);
+   If K>24 Then Begin H4Err:=True; Mva:=0; H4CbMvd:=0; Exit; End;
+  End;
+  While K>0 Do Begin Dec(K); Inc(Mvd,H4CbByp Shl K); End;
+  If Mvd<70 Then Mva:=Mvd Else Mva:=70;
+ End Else Mva:=Mvd;
+ If H4CbByp<>0 Then H4CbMvd:=-Mvd Else H4CbMvd:=Mvd;
+End;
+
+{ ---- residu ---- }
+Function H4CbResidual(Cat,MaxCoeff,CbfCtx: LongInt; Var Lev: Array Of LongInt): LongInt;
+Const SigOff: Array[0..5] Of Word=(105,120,134,149,152,402);
+ LastOff: Array[0..5] Of Word=(166,181,195,210,213,417);
+ AbsOff: Array[0..5] Of Word=(227,237,247,257,266,426);
+Var I,Count,SigI,LastI,K,Eq1,Gt1,Abs_,Ab,Cx,Mx: LongInt; Idx: Array[0..63] Of LongInt; Last: Boolean;
+Begin
+ For I:=0 To MaxCoeff-1 Do Lev[I]:=0;
+ H4CbResidual:=0;
+ If CbfCtx>=0 Then If H4CbDec(CbfCtx)=0 Then Exit;
+ Count:=0; Last:=False;
+ For I:=0 To MaxCoeff-2 Do Begin
+  If Cat=5 Then Begin SigI:=H4CabacSig8[I]; LastI:=H4CabacLast8[I]; End
+  Else If Cat=3 Then Begin If I<2 Then SigI:=I Else SigI:=2; LastI:=SigI; End
+  Else Begin SigI:=I; LastI:=I; End;
+  If H4CbDec(SigOff[Cat]+SigI)<>0 Then Begin
+   Idx[Count]:=I; Inc(Count);
+   If H4CbDec(LastOff[Cat]+LastI)<>0 Then Begin Last:=True; Break; End;
+  End;
+ End;
+ If Not Last Then Begin Idx[Count]:=MaxCoeff-1; Inc(Count); End;
+ H4CbResidual:=Count;
+ Eq1:=0; Gt1:=0;
+ If Cat=3 Then Mx:=3 Else Mx:=4;
+ For K:=Count-1 DownTo 0 Do Begin
+  If Gt1<>0 Then Cx:=0 Else Begin Cx:=1+Eq1; If Cx>4 Then Cx:=4; End;
+  If H4CbDec(AbsOff[Cat]+Cx)=0 Then Begin
+   Abs_:=1; Inc(Eq1);
+  End Else Begin
+   Cx:=Gt1; If Cx>Mx Then Cx:=Mx;
+   Cx:=AbsOff[Cat]+5+Cx;
+   Abs_:=2;
+   While (Abs_<15) And (H4CbDec(Cx)<>0) Do Inc(Abs_);
+   If Abs_>=15 Then Begin
+    Ab:=0;
+    While (H4CbByp<>0) And (Ab<23) Do Inc(Ab);
+    Abs_:=1;
+    While Ab>0 Do Begin Dec(Ab); Abs_:=Abs_+Abs_+H4CbByp; End;
+    Inc(Abs_,14);
+   End;
+   Inc(Gt1);
+  End;
+  If H4CbByp<>0 Then Lev[Idx[K]]:=-Abs_ Else Lev[Idx[K]]:=Abs_;
+ End;
+End;
+
+{ condition de voisinage pour le drapeau de bloc code d'un bloc 4x4 : Plane 0 luma, 1/2 chroma }
+Function H4CbfInc(Plane,Bx,By: LongInt): LongInt;
+Var Base,Gw,Na,Nb: LongInt; Intra: Boolean;
+Begin
+ If Plane=0 Then Begin Gw:=4; Base:=0; End Else Begin Gw:=2; Base:=16+(Plane-1)*4; End;
+ Intra:=(H4CurType And MT_INTRA)<>0;
+ If Bx>0 Then Na:=H4Nnz[Base+By*Gw+Bx-1]
+ Else If H4AvA Then Na:=H4NnzTab^[(H4MbAddr-1)*48+Base+By*Gw+Gw-1]
+ Else Na:=Ord(Intra);
+ If By>0 Then Nb:=H4Nnz[Base+(By-1)*Gw+Bx]
+ Else If H4AvB Then Nb:=H4NnzTab^[(H4MbAddr-H4MbW)*48+Base+(Gw-1)*Gw+Bx]
+ Else Nb:=Ord(Intra);
+ H4CbfInc:=Ord(Na>0)+2*Ord(Nb>0);
+End;
+Function H4CbfDcInc(Bit: LongInt): LongInt;
+Var Na,Nb,Def: LongInt;
+Begin
+ If (H4CurType And MT_INTRA)<>0 Then Def:=1 Else Def:=0;
+ If H4AvA Then Na:=(H4CbpTab^[H4MbAddr-1] Shr Bit) And 1 Else Na:=Def;
+ If H4AvB Then Nb:=(H4CbpTab^[H4MbAddr-H4MbW] Shr Bit) And 1 Else Nb:=Def;
+ H4CbfDcInc:=Na+2*Nb;
+End;
+
+Function H4LumaCabac(Tx8,I16: Boolean; CbpL: LongInt): Boolean;
+Var B8,I4,Blk,Bx,By,N,K,Mx,Cat: LongInt; Lev: Array[0..63] Of LongInt;
+Begin
+ H4LumaCabac:=False;
+ FillChar(H4Coef,SizeOf(H4Coef),0);
+ FillChar(H4LumaDc,SizeOf(H4LumaDc),0);
+ If I16 Then Begin
+  N:=H4CbResidual(0,16,85+H4CbfDcInc(8),Lev);
+  If H4Err Then Exit;
+  If N>0 Then H4DcBits:=H4DcBits Or $100;
+  For K:=0 To 15 Do H4LumaDc[H4Zigzag4[K]]:=Lev[K];
+ End;
+ For B8:=0 To 3 Do Begin
+  If ((CbpL Shr B8) And 1)<>0 Then Begin
+   If Tx8 Then Begin
+    N:=H4CbResidual(5,64,-1,Lev);
+    If H4Err Then Exit;
+    For K:=0 To 63 Do If Lev[K]<>0 Then H4Coef[B8*64+H4Zigzag8[K]]:=Lev[K];
+    For I4:=0 To 3 Do Begin Blk:=B8*4+I4; H4Nnz[H4BlkY[Blk]*4+H4BlkX[Blk]]:=N; End;
+   End Else Begin
+    For I4:=0 To 3 Do Begin
+     Blk:=B8*4+I4; Bx:=H4BlkX[Blk]; By:=H4BlkY[Blk];
+     If I16 Then Begin Cat:=1; Mx:=15; End Else Begin Cat:=2; Mx:=16; End;
+     N:=H4CbResidual(Cat,Mx,85+4*Cat+H4CbfInc(0,Bx,By),Lev);
+     If H4Err Then Exit;
+     H4Nnz[By*4+Bx]:=N;
+     If I16 Then Begin For K:=0 To 14 Do If Lev[K]<>0 Then H4Coef[Blk*16+H4Zigzag4[K+1]]:=Lev[K]; End
+     Else For K:=0 To 15 Do If Lev[K]<>0 Then H4Coef[Blk*16+H4Zigzag4[K]]:=Lev[K];
+    End;
+   End;
+  End Else Begin
+   For I4:=0 To 3 Do Begin Blk:=B8*4+I4; H4Nnz[H4BlkY[Blk]*4+H4BlkX[Blk]]:=0; End;
+  End;
+ End;
+ H4LumaCabac:=True;
+End;
+
+Function H4ChromaCabac(CbpC: LongInt): Boolean;
+Var C,Blk,N,K: LongInt; Lev: Array[0..15] Of LongInt;
+Begin
+ H4ChromaCabac:=False;
+ FillChar(H4ChromaDc,SizeOf(H4ChromaDc),0);
+ If CbpC<>0 Then Begin
+  For C:=0 To 1 Do Begin
+   N:=H4CbResidual(3,4,97+H4CbfDcInc(6+C),Lev);
+   If H4Err Then Exit;
+   If N>0 Then H4DcBits:=H4DcBits Or ($40 Shl C);
+   For K:=0 To 3 Do H4ChromaDc[C,K]:=Lev[K];
+  End;
+ End;
+ For C:=0 To 1 Do For Blk:=0 To 3 Do H4Nnz[16+C*4+Blk]:=0;
+ If CbpC=2 Then Begin
+  For C:=0 To 1 Do For Blk:=0 To 3 Do Begin
+   N:=H4CbResidual(4,15,101+H4CbfInc(1+C,Blk And 1,Blk Shr 1),Lev);
+   If H4Err Then Exit;
+   H4Nnz[16+C*4+Blk]:=N;
+   For K:=0 To 14 Do If Lev[K]<>0 Then H4Coef[256+C*64+Blk*16+H4Zigzag4[K+1]]:=Lev[K];
+  End;
+ End;
+ H4ChromaCabac:=True;
+End;
+
 
 { ---- couche macrobloc : intra / residu CAVLC ---- }
 Const H4BlkOrder: Array[0..15] Of Byte=(0,1,4,5,2,3,6,7,8,9,12,13,10,11,14,15);
-Var H4CabacOn: Boolean;
 
 Function H4NbIpm(Avail: Boolean; Addr,Idx: LongInt): LongInt;  { -1 : mode DC force }
 Begin
@@ -39976,7 +40420,8 @@ Begin
  H4Pics[H4Cur].MbType^[A]:=H4CurType;
  If (H4CurType And MT_PCM)<>0 Then H4QpTab^[A]:=0 Else H4QpTab^[A]:=H4Qp;
  For I:=0 To 23 Do H4NnzTab^[A*48+I]:=H4Nnz[I];
- H4CbpTab^[A]:=H4CurCbp;
+ H4CbpTab^[A]:=(H4CurCbp And $3F) Or H4DcBits;
+ For I:=0 To 3 Do H4Dir8Tab^[A*4+I]:=H4CurDir8[I];
  H4Tx8Tab^[A]:=H4CurTx8;
  H4CpmTab^[A]:=H4ChromaMode;
  If (H4CurType And (MT_I4 Or MT_I8))<>0 Then For I:=0 To 15 Do H4IpmTab^[A*16+I]:=H4Ipm[I]
@@ -39994,6 +40439,7 @@ Begin
   { I_PCM }
   H4CurType:=MT_PCM;
   H4Pos:=(H4Pos+7) And -8;
+  H4DcBits:=$1C0;
   Pl:=H4Pics[H4Cur].Y;
   For J:=0 To 15 Do For I:=0 To 15 Do Pl^[(Y0+J)*H4StrideY+X0+I]:=H4Bits(8);
   Pl:=H4Pics[H4Cur].U;
@@ -40001,55 +40447,67 @@ Begin
   Pl:=H4Pics[H4Cur].V;
   For J:=0 To 7 Do For I:=0 To 7 Do Pl^[(H4MbY*8+J)*H4StrideC+H4MbX*8+I]:=H4Bits(8);
   For I:=0 To 23 Do H4Nnz[I]:=16;
+  If H4CabacOn Then Begin H4CbRange:=510; H4CbOffset:=H4Bits(9); End;
   H4CurCbp:=$2F; H4LastDqp:=0;
   H4StoreMb(False);
   Exit;
  End;
  Tx8:=False;
  If T=0 Then Begin
-  If H4Pp^.Transform8x8<>0 Then Tx8:=H4Bit<>0;
+  If H4Pp^.Transform8x8<>0 Then Begin If H4CabacOn Then Tx8:=H4CbTx8 Else Tx8:=H4Bit<>0; End;
   If Tx8 Then H4CurType:=MT_I8 Else H4CurType:=MT_I4;
   If Tx8 Then H4CurTx8:=1;
   If Tx8 Then Begin
    For B8:=0 To 3 Do Begin
     Bx:=(B8 And 1)*2; By:=(B8 Shr 1)*2;
     Pm:=H4PredIpm(Bx,By);
-    Prev:=H4Bit;
-    If Prev<>0 Then Mode:=Pm Else Begin Rem:=H4Bits(3); If Rem<Pm Then Mode:=Rem Else Mode:=Rem+1; End;
+    If H4CabacOn Then Mode:=H4CbIpm(Pm) Else Begin
+     Prev:=H4Bit;
+     If Prev<>0 Then Mode:=Pm Else Begin Rem:=H4Bits(3); If Rem<Pm Then Mode:=Rem Else Mode:=Rem+1; End;
+    End;
     H4Ipm[By*4+Bx]:=Mode; H4Ipm[By*4+Bx+1]:=Mode; H4Ipm[(By+1)*4+Bx]:=Mode; H4Ipm[(By+1)*4+Bx+1]:=Mode;
    End;
   End Else Begin
    For Blk:=0 To 15 Do Begin
     Bx:=H4BlkX[Blk]; By:=H4BlkY[Blk];
     Pm:=H4PredIpm(Bx,By);
-    Prev:=H4Bit;
-    If Prev<>0 Then Mode:=Pm Else Begin Rem:=H4Bits(3); If Rem<Pm Then Mode:=Rem Else Mode:=Rem+1; End;
+    If H4CabacOn Then Mode:=H4CbIpm(Pm) Else Begin
+     Prev:=H4Bit;
+     If Prev<>0 Then Mode:=Pm Else Begin Rem:=H4Bits(3); If Rem<Pm Then Mode:=Rem Else Mode:=Rem+1; End;
+    End;
     H4Ipm[By*4+Bx]:=Mode;
    End;
   End;
-  H4ChromaMode:=H4Ue;
+  If H4CabacOn Then H4ChromaMode:=H4CbChromaMode Else H4ChromaMode:=H4Ue;
   If H4ChromaMode>3 Then Begin H4Err:=True; Exit; End;
-  I:=H4Ue;
-  If I>47 Then Begin H4Err:=True; Exit; End;
-  H4CurCbp:=H4GolombToIntra4X4Cbp[I];
+  If H4CabacOn Then H4CurCbp:=H4CbCbp(True) Else Begin
+   I:=H4Ue;
+   If I>47 Then Begin H4Err:=True; Exit; End;
+   H4CurCbp:=H4GolombToIntra4X4Cbp[I];
+  End;
  End Else Begin
   H4CurType:=MT_I16;
   Pm:=(T-1) And 3; CbpC:=((T-1) Shr 2) Mod 3; If T>=13 Then CbpL:=15 Else CbpL:=0;
   H4I16Mode:=Pm;
   H4CurCbp:=CbpL Or (CbpC Shl 4);
-  H4ChromaMode:=H4Ue;
+  If H4CabacOn Then H4ChromaMode:=H4CbChromaMode Else H4ChromaMode:=H4Ue;
   If H4ChromaMode>3 Then Begin H4Err:=True; Exit; End;
  End;
  CbpL:=H4CurCbp And 15; CbpC:=H4CurCbp Shr 4;
  If (H4CurCbp>0) Or (H4CurType=MT_I16) Then Begin
-  Dq:=H4Se;
+  If H4CabacOn Then Dq:=H4CbDqp Else Dq:=H4Se;
   If (Dq<-26) Or (Dq>25) Then Begin H4Err:=True; Exit; End;
   H4Qp:=(H4Qp+Dq+52) Mod 52;
   If Dq<>0 Then H4LastDqp:=1 Else H4LastDqp:=0;
  End Else H4LastDqp:=0;
  H4QpC[0]:=H4ChromaQp(H4Qp,H4Pp^.ChromaQpOffset); H4QpC[1]:=H4ChromaQp(H4Qp,H4Pp^.ChromaQpOffset2);
- Ok:=H4LumaCavlc(Tx8,H4CurType=MT_I16,CbpL);
- If Ok Then Ok:=H4ChromaCavlc(CbpC);
+ If H4CabacOn Then Begin
+  Ok:=H4LumaCabac(Tx8,H4CurType=MT_I16,CbpL);
+  If Ok Then Ok:=H4ChromaCabac(CbpC);
+ End Else Begin
+  Ok:=H4LumaCavlc(Tx8,H4CurType=MT_I16,CbpL);
+  If Ok Then Ok:=H4ChromaCavlc(CbpC);
+ End;
  If Not Ok Then Begin H4Err:=True; Exit; End;
  { reconstruction luma }
  Pl:=H4Pics[H4Cur].Y;
@@ -40373,9 +40831,43 @@ End;
 Procedure H4InterMb(T: LongInt); Forward;   { macrobloc inter (P/B) : ajoute plus loin }
 Procedure H4SkipMb; Forward;
 
+Procedure H4SliceDataCabac(Var Sh: TH4Slice);
+Var T: LongInt; Skip,Fin: Boolean;
+Begin
+ H4MbAddr:=Sh.FirstMb;
+ If H4MbAddr>=H4MbNum Then Begin H4Err:=True; Exit; End;
+ H4Qp:=Sh.Qp; H4LastDqp:=0; H4SliceType:=Sh.SliceType;
+ H4CabacInit(Sh.Qp,Sh.CabacInitIdc,(Sh.SliceType=2) Or (Sh.SliceType=4));
+ Repeat
+  If H4MbAddr>=H4MbNum Then Break;
+  H4MbX:=H4MbAddr Mod H4MbW; H4MbY:=H4MbAddr Div H4MbW;
+  H4SetupNeighbors;
+  Skip:=False;
+  If (H4SliceType<>2) And (H4SliceType<>4) Then Skip:=H4CbSkip;
+  If Skip Then H4SkipMb Else Begin
+   Case H4SliceType Of
+    2,4: T:=H4CbIntraType(3,True);
+    1: T:=H4CbMbTypeB;
+   Else T:=H4CbMbTypeP;
+   End;
+   If H4Err Then Exit;
+   Case H4SliceType Of
+    2,4: H4DecodeIntraMb(T);
+    0,3: If T<5 Then H4InterMb(T) Else H4DecodeIntraMb(T-5);
+    1: If T<23 Then H4InterMb(T) Else H4DecodeIntraMb(T-23);
+   End;
+  End;
+  If H4Err Then Exit;
+  Fin:=H4CbTerm<>0;
+  Inc(H4MbAddr);
+ Until Fin;
+End;
+
 Procedure H4SliceData(Var Sh: TH4Slice);
 Var T,Run,I: LongInt; More,PrevSkipped: Boolean;
 Begin
+ H4CabacOn:=H4Pp^.Cabac<>0;
+ If H4CabacOn Then Begin H4SliceDataCabac(Sh); Exit; End;
  H4MbAddr:=Sh.FirstMb;
  If H4MbAddr>=H4MbNum Then Begin H4Err:=True; Exit; End;
  H4Qp:=Sh.Qp; H4LastDqp:=0; H4SliceType:=Sh.SliceType;
@@ -40552,6 +41044,28 @@ Begin
   PSmallArr(H4Pics[H4Cur].Mv[L])^[(Addr*16+J*4+I)*2+1]:=My;
   PEABuffer(H4Pics[H4Cur].Ref[L])^[Addr*4+(J Shr 1)*2+(I Shr 1)]:=Ref And 255;
   H4Done:=H4Done Or (1 Shl (J*4+I));
+ End;
+End;
+
+Procedure H4PutRef(L,Bx,By,W4,Hp,Ref: LongInt);
+Var I,J: LongInt;
+Begin
+ For J:=By Shr 1 To (By+Hp-1) Shr 1 Do For I:=Bx Shr 1 To (Bx+W4-1) Shr 1 Do
+  PEABuffer(H4Pics[H4Cur].Ref[L])^[H4MbAddr*4+J*2+I]:=Ref And 255;
+End;
+
+{ lecture d'une difference de vecteur (CAVLC : deux se(v) ; CABAC : contextes mvd) }
+Procedure H4ReadMvd(L,Bx,By,W4,Hp: LongInt; Var Dx,Dy: LongInt);
+Var Ax,Ay,Mx,My,I,J: LongInt;
+Begin
+ If Not H4CabacOn Then Begin Dx:=H4Se; Dy:=H4Se; Exit; End;
+ Ax:=H4NbMvd(L,Bx-1,By,0)+H4NbMvd(L,Bx,By-1,0);
+ Ay:=H4NbMvd(L,Bx-1,By,1)+H4NbMvd(L,Bx,By-1,1);
+ Dx:=H4CbMvd(40,Ax,Mx);
+ Dy:=H4CbMvd(47,Ay,My);
+ For J:=By To By+Hp-1 Do For I:=Bx To Bx+W4-1 Do Begin
+  H4MvdTab^[(((H4MbAddr*2+L)*16+J*4+I) Shl 1)]:=Mx;
+  H4MvdTab^[(((H4MbAddr*2+L)*16+J*4+I) Shl 1)+1]:=My;
  End;
 End;
 
@@ -40889,6 +41403,7 @@ Begin
  H4CurType:=MT_INTER Or MT_SKIP;
  If H4SliceType=1 Then Begin
   H4CurType:=H4CurType Or MT_DIRECT;
+  FillChar(H4CurDir8,4,1);
   H4Direct(15);
   If H4Err Then Exit;
  End Else Begin
@@ -40937,11 +41452,13 @@ Begin
  End;
  If Shape=3 Then Begin
   For B8:=0 To 3 Do Begin
-   I:=H4Ue;
+   If H4CabacOn Then Begin
+    If H4SliceType=1 Then I:=H4CbSubB Else I:=H4CbSubP;
+   End Else I:=H4Ue;
    If H4SliceType=1 Then Begin
     If I>12 Then Begin H4Err:=True; Exit; End;
     SubPred[B8]:=H4SubBPred[I]; SubShape[B8]:=H4SubBShape[I]; SubDir[B8]:=I=0;
-    If I=0 Then Begin DirMask:=DirMask Or (1 Shl B8); If H4Sp^.Direct8x8Inference=0 Then Small:=True; End;
+    If I=0 Then Begin DirMask:=DirMask Or (1 Shl B8); H4CurDir8[B8]:=1; If H4Sp^.Direct8x8Inference=0 Then Small:=True; End;
    End Else Begin
     If I>3 Then Begin H4Err:=True; Exit; End;
     SubPred[B8]:=1; SubShape[B8]:=I;
@@ -40951,22 +41468,30 @@ Begin
  End;
  If H4Err Then Exit;
  If DirectAll Then Begin
+  FillChar(H4CurDir8,4,1);
   H4Direct(15);
   If H4Sp^.Direct8x8Inference=0 Then Small:=True;
   H4SetRefIds;
  End Else Begin
   If DirMask<>0 Then Begin H4Direct(DirMask); If H4Err Then Exit; End;
   { indices de reference }
+  For L:=0 To 1 Do For B8:=0 To 3 Do If Not SubDir[B8] Then PEABuffer(H4Pics[H4Cur].Ref[L])^[H4MbAddr*4+B8]:=255;
   For L:=0 To Lmax Do Begin
    If Shape=3 Then Begin
     For B8:=0 To 3 Do If (Not SubDir[B8]) And ((SubPred[B8] And (1 Shl L))<>0) Then Begin
-     If Ref0Mode Or (NRef[L]<=1) Then Rf[L,B8]:=0 Else Rf[L,B8]:=H4Te(NRef[L]-1);
-     If (Rf[L,B8]<0) Or (Rf[L,B8]>=NRef[L]) Then Begin H4Err:=True; Exit; End;
+     If Ref0Mode Or (NRef[L]<=1) Then Rf[L,B8]:=0
+     Else If H4CabacOn Then Rf[L,B8]:=H4CbRef(L,(B8 And 1)*2,(B8 Shr 1)*2)
+     Else Rf[L,B8]:=H4Te(NRef[L]-1);
+     If (Rf[L,B8]<0) Or (Rf[L,B8]>=NRef[L]) Or H4Err Then Begin H4Err:=True; Exit; End;
+     H4PutRef(L,(B8 And 1)*2,(B8 Shr 1)*2,2,2,Rf[L,B8]);
     End;
    End Else
     For I:=0 To NP-1 Do If (PPred[I] And (1 Shl L))<>0 Then Begin
-     If NRef[L]<=1 Then Rf[L,I]:=0 Else Rf[L,I]:=H4Te(NRef[L]-1);
-     If (Rf[L,I]<0) Or (Rf[L,I]>=NRef[L]) Then Begin H4Err:=True; Exit; End;
+     If NRef[L]<=1 Then Rf[L,I]:=0
+     Else If H4CabacOn Then Rf[L,I]:=H4CbRef(L,PBx[I],PBy[I])
+     Else Rf[L,I]:=H4Te(NRef[L]-1);
+     If (Rf[L,I]<0) Or (Rf[L,I]>=NRef[L]) Or H4Err Then Begin H4Err:=True; Exit; End;
+     H4PutRef(L,PBx[I],PBy[I],PW4[I],PHp[I],Rf[L,I]);
     End;
   End;
   If H4Err Then Exit;
@@ -40994,7 +41519,7 @@ Begin
        Else Begin I:=K And 1; J:=K Shr 1; End;
        End;
        H4PredMv(L,Bx+I,By+J,W4,Rf[L,B8],0,Mx,My);
-       Dx:=H4Se; Dy:=H4Se;
+       H4ReadMvd(L,Bx+I,By+J,W4,Hp,Dx,Dy);
        H4SetPart(L,Bx+I,By+J,W4,Hp,Rf[L,B8],Mx+Dx,My+Dy);
       End;
      End;
@@ -41004,7 +41529,7 @@ Begin
      If (PPred[I] And (1 Shl L))=0 Then H4SetPart(L,PBx[I],PBy[I],PW4[I],PHp[I],-1,0,0)
      Else Begin
       H4PredMv(L,PBx[I],PBy[I],PW4[I],Rf[L,I],PShape[I],Mx,My);
-      Dx:=H4Se; Dy:=H4Se;
+      H4ReadMvd(L,PBx[I],PBy[I],PW4[I],PHp[I],Dx,Dy);
       H4SetPart(L,PBx[I],PBy[I],PW4[I],PHp[I],Rf[L,I],Mx+Dx,My+Dy);
      End;
     End;
@@ -41016,21 +41541,29 @@ Begin
  H4McMb;
  If H4Err Then Exit;
  { residu }
- I:=H4Ue;
- If I>47 Then Begin H4Err:=True; Exit; End;
- Cbp:=H4GolombToInterCbp[I]; H4CurCbp:=Cbp; CbpL:=Cbp And 15; CbpC:=Cbp Shr 4;
+ If H4CabacOn Then Cbp:=H4CbCbp(False) Else Begin
+  I:=H4Ue;
+  If I>47 Then Begin H4Err:=True; Exit; End;
+  Cbp:=H4GolombToInterCbp[I];
+ End;
+ H4CurCbp:=Cbp; CbpL:=Cbp And 15; CbpC:=Cbp Shr 4;
  Tx8:=False;
- If (CbpL<>0) And (H4Pp^.Transform8x8<>0) And (Not Small) Then Tx8:=H4Bit<>0;
+ If (CbpL<>0) And (H4Pp^.Transform8x8<>0) And (Not Small) Then Begin If H4CabacOn Then Tx8:=H4CbTx8 Else Tx8:=H4Bit<>0; End;
  If Tx8 Then H4CurTx8:=1;
  If Cbp<>0 Then Begin
-  Dq:=H4Se;
+  If H4CabacOn Then Dq:=H4CbDqp Else Dq:=H4Se;
   If (Dq<-26) Or (Dq>25) Then Begin H4Err:=True; Exit; End;
   H4Qp:=(H4Qp+Dq+52) Mod 52;
   If Dq<>0 Then H4LastDqp:=1 Else H4LastDqp:=0;
  End Else H4LastDqp:=0;
  H4QpC[0]:=H4ChromaQp(H4Qp,H4Pp^.ChromaQpOffset); H4QpC[1]:=H4ChromaQp(H4Qp,H4Pp^.ChromaQpOffset2);
- Ok:=H4LumaCavlc(Tx8,False,CbpL);
- If Ok Then Ok:=H4ChromaCavlc(CbpC);
+ If H4CabacOn Then Begin
+  Ok:=H4LumaCabac(Tx8,False,CbpL);
+  If Ok Then Ok:=H4ChromaCabac(CbpC);
+ End Else Begin
+  Ok:=H4LumaCavlc(Tx8,False,CbpL);
+  If Ok Then Ok:=H4ChromaCavlc(CbpC);
+ End;
  If Not Ok Then Begin H4Err:=True; Exit; End;
  If Tx8 Then Begin
   For B8:=0 To 3 Do If ((CbpL Shr B8) And 1)<>0 Then H4AddLuma8(B8,H4Qp,1);
