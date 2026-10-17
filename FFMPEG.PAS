@@ -8212,6 +8212,7 @@ Begin
     'C': If (Token<>'C420') And (Token<>'C420jpeg') Then Fail('Y4M: C420jpeg 8 bits requis.');
     'I': If Token<>'Ip' Then Fail('Y4M: video progressive requise.');
     'A': If (Token<>'A1:1') And (Token<>'A0:0') Then Fail('Y4M: pixels carres requis.');
+    'X': ;
     Else Fail('Y4M: parametre non pris en charge: '+Token);
    End;
   End;
@@ -37253,6 +37254,263 @@ Begin
 End;
 
 
+{ ---- Encodeur HuffYUV (libavcodec/huffyuvenc.c, huffman.c, huffyuv.c): yuv422p, prediction gauche, tables statiques, AVI ---- }
+Procedure HYGenLen(Var Dst: Array Of Byte; Const Stats: Array Of Int64; N: LongInt);
+Type THeapEl=Record Val: Int64; Name: LongInt; End;
+Var
+ H: Array[0..255] Of THeapEl; Up: Array[0..511] Of LongInt; Len: Array[0..511] Of LongInt; Map: Array[0..255] Of LongInt;
+ Size,Offset,I,Nxt: LongInt; Min1v: Int64; Over: Boolean; T: THeapEl;
+Procedure Sift(Root,Sz: LongInt);
+Var Child: LongInt;
+Begin
+ While Root*2+1<Sz Do Begin
+  Child:=Root*2+1;
+  If (Child<Sz-1) And (H[Child].Val>H[Child+1].Val) Then Inc(Child);
+  If H[Root].Val>H[Child].Val Then Begin T:=H[Root]; H[Root]:=H[Child]; H[Child]:=T; Root:=Child; End
+  Else Break;
+ End;
+End;
+Begin
+ Size:=0;
+ For I:=0 To N-1 Do Begin Dst[I]:=255; Map[Size]:=I; Inc(Size); End;
+ Offset:=1;
+ While True Do Begin
+  For I:=0 To Size-1 Do Begin H[I].Name:=I; H[I].Val:=(Stats[Map[I]] Shl 14)+Offset; End;
+  For I:=Size Div 2-1 DownTo 0 Do Sift(I,Size);
+  For Nxt:=Size To Size*2-2 Do Begin
+   Min1v:=H[0].Val;
+   Up[H[0].Name]:=Nxt;
+   H[0].Val:=High(Int64);
+   Sift(0,Size);
+   Up[H[0].Name]:=Nxt;
+   H[0].Name:=Nxt;
+   H[0].Val:=H[0].Val+Min1v;
+   Sift(0,Size);
+  End;
+  Len[2*Size-2]:=0;
+  For I:=2*Size-3 DownTo Size Do Len[I]:=Len[Up[I]]+1;
+  Over:=False;
+  For I:=0 To Size-1 Do Begin
+   Dst[Map[I]]:=Len[Up[I]]+1;
+   If Dst[Map[I]]>=32 Then Begin Over:=True; Break; End;
+  End;
+  If Not Over Then Break;
+  Offset:=Offset Shl 1;
+ End;
+End;
+
+Procedure EncodeHuffyuv(Const Source,Target: String);
+Var
+ Hd: Array[0..255] Of Byte;
+ Limit,Cur,W,Hh,FN,FD,Frames,I,K,CW,FrameBytes,Q,OutPos,N,Y,X,MaxPk,Lf,L2,Rate,Scale,G2,Aw,Ah: LongInt;
+ Yp,Up,Vp,Ty,Tu,Tv,Pk: PEABuffer; Line,Token: String; Code: Integer; Sizes: PALLong;
+ Stats: Array[0..255] Of Int64; Len: Array[0..255] Of Byte; Bits: Array[0..255] Of Int64; Fix: LongInt;
+ Extra: Array[0..511] Of Byte; ExtraLen,PkSize,PkCap: LongInt; C422,C420: Boolean; SrcCH,Jv: LongInt; VF: TSwsF; U15,SrcU,SrcV: PEABuffer; Vsum: Int64;
+ Acc,NB: Int64; AccN: LongInt; PkPos: LongInt;
+ Out: Array[0..255] Of Byte; Used: Integer;
+Procedure PutB(X: LongInt);Begin Out[Used]:=X And 255; Inc(Used); Inc(OutPos); If Used>=250 Then Begin WriteBytes(Out,Used); Used:=0; End; End;
+Procedure PutL16(X: LongInt);Begin PutB(X); PutB(X Shr 8); End;
+Procedure PutL32(X: LongInt);Begin PutL16(X); PutL16(X Shr 16); End;
+Procedure PutTag(Const T: String);
+Var Z: Integer;
+Begin For Z:=1 To 4 Do PutB(Ord(T[Z])); End;
+Procedure PutZ(Cnt: LongInt);
+Var Z: LongInt;
+Begin For Z:=1 To Cnt Do PutB(0); End;
+Procedure Flush;Begin If Used>0 Then Begin WriteBytes(Out,Used); Used:=0; End; End;
+Procedure Patch32(At,Value: LongInt);
+Var Z: Integer; Code2: Integer; B4: Array[0..3] Of Byte;
+Begin
+ Flush;
+ {$I-}Seek(ActiveOutput,At); Code2:=IOResult;{$I+}
+ If Code2<>0 Then Fail('huffyuv: positionnement AVI impossible.');
+ For Z:=0 To 3 Do Begin B4[Z]:=Value And 255; Value:=Value Shr 8; End;
+ WriteBytes(B4,4);
+ {$I-}Seek(ActiveOutput,OutPos); Code2:=IOResult;{$I+}
+End;
+Function ReadLine: String;
+Var R: String;
+Begin
+ R:='';
+ While Cur<Limit Do Begin ReadAt(Cur,Hd,1); Inc(Cur); If Hd[0]=10 Then Break; If Length(R)<250 Then R:=R+Chr(Hd[0]); End;
+ ReadLine:=R;
+End;
+Procedure ReadPlane(Plane: PEABuffer; At,Count: LongInt);
+Var Nn: LongInt;
+Begin
+ Nn:=0;
+ While Nn<Count Do Begin
+  If Count-Nn>4096 Then Q:=4096 Else Q:=Count-Nn;
+  ReadAt(At+Nn,Plane^[Nn],Q); Inc(Nn,Q);
+ End;
+End;
+Procedure PutBits(Cnt,V: LongInt);
+Begin
+ Acc:=(Acc Shl Cnt) Or (Int64(V) And ((Int64(1) Shl Cnt)-1)); Inc(AccN,Cnt);
+ While AccN>=32 Do Begin
+  Dec(AccN,32);
+  PkSize:=PkSize+4;
+  Pk^[PkPos]:=(Acc Shr (AccN)) And 255; Pk^[PkPos+1]:=(Acc Shr (AccN+8)) And 255;
+  Pk^[PkPos+2]:=(Acc Shr (AccN+16)) And 255; Pk^[PkPos+3]:=(Acc Shr (AccN+24)) And 255;
+  Inc(PkPos,4);
+  Acc:=Acc And ((Int64(1) Shl AccN)-1);
+ End;
+End;
+{ prediction gauche d'une ligne, memorisee dans Dst ; renvoie le dernier echantillon }
+Function SubLeft(Dst,Src: PEABuffer; SrcOff,Wd,Left: LongInt): LongInt;
+Var Z,Tt: LongInt;
+Begin
+ For Z:=0 To Wd-1 Do Begin Tt:=Src^[SrcOff+Z]; Dst^[Z]:=(Tt-Left) And 255; Left:=Tt; End;
+ SubLeft:=Left;
+End;
+Procedure Enc422(Off,Count: LongInt);
+Var Z,Y0,Y1,U0,V0: LongInt;
+Begin
+ For Z:=0 To (Count Div 2)-1 Do Begin
+  Y0:=Ty^[Off+2*Z]; Y1:=Ty^[Off+2*Z+1]; U0:=Tu^[Off Div 2+Z]; V0:=Tv^[Off Div 2+Z];
+  PutBits(Len[Y0],Bits[Y0]); PutBits(Len[U0],Bits[U0]); PutBits(Len[Y1],Bits[Y1]); PutBits(Len[V0],Bits[V0]);
+ End;
+End;
+Procedure StoreTable;
+Var Z,Val,Rep: LongInt;
+Begin
+ Z:=0;
+ While Z<256 Do Begin
+  Val:=Len[Z]; Rep:=0;
+  While (Z<256) And (Len[Z]=Val) And (Rep<255) Do Begin Inc(Rep); Inc(Z); End;
+  If Rep>7 Then Begin Extra[ExtraLen]:=Val; Extra[ExtraLen+1]:=Rep; Inc(ExtraLen,2); End
+  Else Begin Extra[ExtraLen]:=Val Or (Rep Shl 5); Inc(ExtraLen); End;
+ End;
+End;
+Begin
+ OpenRead(Source); Limit:=InputSize; Cur:=0;
+ Line:=ReadLine;
+ If Copy(Line,1,9)<>'YUV4MPEG2' Then Fail('huffyuv: entree Y4M requise.');
+ W:=0; Hh:=0; FN:=25; FD:=1; C422:=False; C420:=False;
+ Line:=Copy(Line,11,255);
+ While Line<>'' Do Begin
+  K:=Pos(' ',Line); If K=0 Then K:=Length(Line)+1;
+  Token:=Copy(Line,1,K-1); Line:=Copy(Line,K+1,255);
+  If Token='' Then Continue;
+  Case Token[1] Of
+   'W': Val(Copy(Token,2,20),W,Code);
+   'H': Val(Copy(Token,2,20),Hh,Code);
+   'F': Begin K:=Pos(':',Token); If K>0 Then Begin Val(Copy(Token,2,K-2),FN,Code); Val(Copy(Token,K+1,20),FD,Code); End; End;
+   'C': If (Token='C422') Or (Token='C422jpeg') Then C422:=True
+        Else If (Token='C420') Or (Token='C420jpeg') Or (Token='C420mpeg2') Or (Token='C420paldv') Then C420:=True
+        Else Fail('huffyuv: Y4M yuv422p ou yuv420p 8 bits requis.');
+  End;
+ End;
+ If Not (C422 Or C420) Then Fail('huffyuv: Y4M yuv422p ou yuv420p 8 bits requis.');
+ If (W<2) Or (Hh<1) Or (W>16384) Or (Hh>16384) Then Fail('huffyuv: dimensions Y4M incorrectes.');
+ If Odd(W) Then Fail('huffyuv: largeur paire requise pour ce format de pixels.');
+ If (FN<=0) Or (FD<=0) Then Begin FN:=25; FD:=1; End;
+ CW:=W Div 2;
+ If C420 Then Begin SrcCH:=(Hh+1) Div 2; FrameBytes:=W*Hh+2*CW*SrcCH; End Else Begin SrcCH:=Hh; FrameBytes:=W*Hh+2*CW*Hh; End;
+ { tables statiques (stats = 1e8/(d*d+1)) }
+ For I:=0 To 255 Do Begin
+  K:=I; If 256-I<K Then K:=256-I;
+  Stats[I]:=100000000 Div (Int64(K)*K+1);
+ End;
+ HYGenLen(Len,Stats,256);
+ { ff_huffyuv_generate_bits_table }
+ NB:=0;
+ For K:=32 DownTo 1 Do Begin
+  For I:=0 To 255 Do If Len[I]=K Then Begin Bits[I]:=NB; Inc(NB); End;
+  If Odd(NB) Then Fail('huffyuv: erreur de generation de la table Huffman.');
+  NB:=NB Shr 1;
+ End;
+ Extra[0]:=0; Extra[1]:=16; Extra[2]:=$20; Extra[3]:=0; ExtraLen:=4;
+ For I:=0 To 2 Do StoreTable;
+ GetMem(Yp,W*Hh+64); GetMem(Up,CW*Hh+64); GetMem(Vp,CW*Hh+64);
+ GetMem(Ty,W+64); GetMem(Tu,CW+64); GetMem(Tv,CW+64); GetMem(SrcU,CW*SrcCH+64); GetMem(SrcV,CW*SrcCH+64);
+ PkCap:=W*Hh*12+65536; GetMem(Pk,PkCap); GetMem(Sizes,1048576*4);
+ Frames:=0; OutPos:=0; Used:=0; MaxPk:=0;
+ Rate:=FN; Scale:=FD; G2:=Rate; K:=Scale; While K<>0 Do Begin I:=G2 Mod K; G2:=K; K:=I; End;
+ Rate:=Rate Div G2; Scale:=Scale Div G2;
+ OpenWrite(Target);
+ PutTag('RIFF'); PutL32(0); PutTag('AVI ');
+ If ExtraLen<>106 Then Fail('huffyuv: tables Huffman inattendues.');
+ PutTag('LIST'); PutL32(4770); PutTag('hdrl');
+ PutTag('avih'); PutL32(56); PutL32(Trunc(1000000.0*Scale/Rate)); PutL32(25000); PutL32(0); PutL32(2320); PutL32(0); PutL32(0); PutL32(1);
+ PutL32(1048576); PutL32(W); PutL32(Hh); PutL32(0); PutL32(0); PutL32(0); PutL32(0);
+ PutTag('LIST'); PutL32(4426); PutTag('strl');
+ PutTag('strh'); PutL32(56); PutTag('vids'); PutTag('HFYU');
+ PutL32(0); PutL16(0); PutL16(0); PutL32(0); PutL32(Scale); PutL32(Rate); PutL32(0); PutL32(0); PutL32(0); PutL32(-1); PutL32(0);
+ PutL16(0); PutL16(0); PutL16(W); PutL16(Hh);
+ PutTag('strf'); PutL32(40+ExtraLen); PutL32(40+ExtraLen); PutL32(W); PutL32(Hh); PutL16(1); PutL16(16);
+ PutTag('HFYU'); PutL32(W*Hh*2); PutL32(0); PutL32(0); PutL32(0); PutL32(0);
+ For I:=0 To ExtraLen-1 Do PutB(Extra[I]);
+ If Odd(ExtraLen) Then PutB(0);
+ PutTag('JUNK'); PutL32(4120); PutL16(4); PutL16(0); PutL32(0); PutTag('00dc'); PutZ(4120-12);
+ PutTag('vprp'); PutL32(68); PutL32(0); PutL32(0); PutL32((2*Rate+Scale-1) Div (2*Scale));
+ PutL32(W); PutL32(Hh);
+ Aw:=W; Ah:=Hh; G2:=Aw; K:=Ah; While K<>0 Do Begin I:=G2 Mod K; G2:=K; K:=I; End; Aw:=Aw Div G2; Ah:=Ah Div G2;
+ PutL32((Aw Shl 16) Or Ah); PutL32(W); PutL32(Hh); PutL32(1);
+ PutL32(Hh); PutL32(W); PutL32(Hh); PutL32(W); PutL32(0); PutL32(0); PutL32(0); PutL32(0);
+ PutTag('JUNK'); PutL32(260); PutTag('odml'); PutTag('dmlh'); PutL32(248); PutZ(248);
+ PutTag('LIST'); PutL32(26); PutTag('INFO'); PutTag('ISFT'); PutL32(14);
+ PutTag('Lavf'); PutTag('60.1'); PutTag('6.10'); PutB(48); PutB(0);
+ PutTag('JUNK'); PutL32(1016); PutZ(1016);
+ PutTag('LIST'); PutL32(0); PutTag('movi'); Flush;
+ While Cur<Limit Do Begin
+  Line:=ReadLine;
+  If Copy(Line,1,5)<>'FRAME' Then Fail('huffyuv: marqueur FRAME requis.');
+  If FrameBytes>Limit-Cur Then Break;
+  ReadPlane(Yp,Cur,W*Hh);
+  If C420 Then Begin
+   { yuv420p -> yuv422p : chroma etiree verticalement par le filtre bicubique de swscale }
+   ReadPlane(SrcU,Cur+W*Hh,CW*SrcCH); ReadPlane(SrcV,Cur+W*Hh+CW*SrcCH,CW*SrcCH);
+   SwsInitF(VF,SrcCH,Hh,128,128,4096);
+   For K:=0 To 1 Do
+    For Y:=0 To Hh-1 Do
+     For X:=0 To CW-1 Do Begin
+      Vsum:=Int64(64) Shl 12;
+      For Jv:=0 To VF.FS-1 Do Begin
+       If K=0 Then I:=SrcU^[(VF.Pos^[Y]+Jv)*CW+X] Else I:=SrcV^[(VF.Pos^[Y]+Jv)*CW+X];
+       Vsum:=Vsum+Int64(I)*128*VF.Coef^[Y*VF.FS+Jv];
+      End;
+      Vsum:=AVSar(Vsum,19); If Vsum<0 Then Vsum:=0 Else If Vsum>255 Then Vsum:=255;
+      If K=0 Then Up^[Y*CW+X]:=Vsum Else Vp^[Y*CW+X]:=Vsum;
+     End;
+   SwsFreeF(VF);
+  End Else Begin ReadPlane(Up,Cur+W*Hh,CW*Hh); ReadPlane(Vp,Cur+W*Hh+CW*Hh,CW*Hh); End;
+  Inc(Cur,FrameBytes);
+  PkPos:=0; PkSize:=0; Acc:=0; AccN:=0;
+  PutBits(8,Vp^[0]); PutBits(8,Yp^[1]); PutBits(8,Up^[0]); PutBits(8,Yp^[0]);
+  Lf:=SubLeft(Ty,Yp,0,W,0); L2:=SubLeft(Tu,Up,0,CW,0); I:=SubLeft(Tv,Vp,0,CW,0);
+  K:=I; { gauche V }
+  Enc422(2,W-2);
+  For Y:=1 To Hh-1 Do Begin
+   Lf:=SubLeft(Ty,Yp,Y*W,W,Lf); L2:=SubLeft(Tu,Up,Y*CW,CW,L2); K:=SubLeft(Tv,Vp,Y*CW,CW,K);
+   Enc422(0,W);
+  End;
+  { fin: bourrage a un mot de 32 bits }
+  If AccN>0 Then PutBits(32-AccN,0);
+  Sizes^[Frames]:=PkSize;
+  If PkSize>MaxPk Then MaxPk:=PkSize;
+  PutTag('00dc'); PutL32(PkSize); Flush;
+  K:=0;
+  While K<PkSize Do Begin
+   If PkSize-K>32768 Then Q:=32768 Else Q:=PkSize-K;
+   WriteBytes(Pk^[K],Q); Inc(K,Q);
+  End;
+  Inc(OutPos,PkSize);
+  Inc(Frames);
+  If Frames>=1048576 Then Break;
+ End;
+ If Frames=0 Then Fail('huffyuv: aucune image Y4M.');
+ Fix:=OutPos-5860;
+ PutTag('idx1'); PutL32(16*Frames); K:=4;
+ For I:=0 To Frames-1 Do Begin
+  PutTag('00dc'); PutL32($10); PutL32(K); PutL32(Sizes^[I]); Inc(K,8+Sizes^[I]);
+ End;
+ Flush;
+ Patch32(4,OutPos-8); Patch32(48,Frames); Patch32(140,Frames); Patch32(144,MaxPk); Patch32(5852,4+Fix);
+ FreeMem(Yp,W*Hh+64); FreeMem(Up,CW*Hh+64); FreeMem(Vp,CW*Hh+64);
+ CloseRead; CloseWrite;
+End;
+
 { ---- Monkey's Audio (APE): decodeur, versions de fichier 3930..3990, 8 et 16 bits ---- }
 Type
  TAPI32=Array[0..4000000] Of LongInt; PAPI32=^TAPI32;
@@ -38852,6 +39110,7 @@ Begin
     'I':If Token<>'Ip' Then Fail('MPEG1: Y4M progressif requis.');
     'C':If (Token<>'C420') And (Token<>'C420jpeg') Then Fail('MPEG1: YUV420 8 bits requis.');
     'A':If (Token<>'A1:1') And (Token<>'A0:0') Then Fail('MPEG1: pixels carres requis.');
+    'X':;
     Else Fail('MPEG1: parametre Y4M inconnu.'); End;
    End;
   End;
@@ -39199,6 +39458,7 @@ Begin
    'I': If Token<>'Ip' Then Fail('MPEG4: video progressive requise.');
    'C': If (Token<>'C420') And (Token<>'C420jpeg') Then Fail('MPEG4: YUV420 8 bits requis.');
    'A': If (Token<>'A1:1') And (Token<>'A0:0') Then Fail('MPEG4: pixels carres requis en entree.');
+   'X': ;
    Else Fail('MPEG4: option Y4M non prise en charge.');
    End;
   End;
@@ -40498,7 +40758,7 @@ BEGIN
    WriteLn('D V D  escape124       Escape 124');
    WriteLn('D V D  flashsv         Flash Screen Video');
    WriteLn('D VSD  ffvhuff         Huffyuv FFmpeg variant');
-   WriteLn('D VSD  huffyuv         HuffYUV / Huffyuv');
+   WriteLn('DEVSD  huffyuv         HuffYUV / Huffyuv (decodeur; encodeur yuv422p, prediction gauche, AVI identique a ffmpeg)');
    WriteLn('D V D  eacmv           Electronic Arts CMV video');
    WriteLn('D V D  eatgq           Electronic Arts TGQ video');
    WriteLn('D V    eatgv           Electronic Arts TGV video');
@@ -40604,8 +40864,8 @@ BEGIN
    VideoCodec:=Lower(NextArgument);
    If (VideoCodec<>'png') And (VideoCodec<>'gif') And (VideoCodec<>'copy') And
     (VideoCodec<>'ffv1') And (VideoCodec<>'flv') And (VideoCodec<>'mpeg4') And (VideoCodec<>'mpeg1video') And (VideoCodec<>'mpeg2video') And (VideoCodec<>'rawvideo') And
-    (VideoCodec<>'asv1') And (VideoCodec<>'asv2') And (VideoCodec<>'bmp') And (VideoCodec<>'dnxhd') And (VideoCodec<>'dvvideo') Then
-    Fail('Codec video: png/gif, bmp, copy, ffv1, flv, mpeg4, mpeg1video, mpeg2video, rawvideo, asv1, asv2, dnxhd, dvvideo.');
+    (VideoCodec<>'asv1') And (VideoCodec<>'asv2') And (VideoCodec<>'huffyuv') And (VideoCodec<>'bmp') And (VideoCodec<>'dnxhd') And (VideoCodec<>'dvvideo') Then
+    Fail('Codec video: png/gif, bmp, copy, ffv1, flv, mpeg4, mpeg1video, mpeg2video, rawvideo, asv1, asv2, huffyuv, dnxhd, dvvideo.');
   End Else If (Argument='-vframes') Or (Argument='-frames:v') Then Begin
    If InputPath='' Then Fail('Nombre d''images attendu apres -i.');
    Value:=NextArgument; Val(Value,Number,Code);
@@ -40813,7 +41073,7 @@ BEGIN
   Commit(Temps[2]); Temps[2]:=''; WriteLn('Image creee: ',OutputPath); Halt(0);
  End;
  If (InputFormat='avi') And Not IsHTTP(InputPath) And ((OutputFormat='yuv4mpegpipe') Or (VideoCodec='mpeg4') Or (VideoCodec='mpeg1video') Or
-  (VideoCodec='mpeg2video') Or (VideoCodec='ffv1') Or (VideoCodec='flv') Or (VideoCodec='asv1') Or (VideoCodec='asv2') Or FourMV) Then Begin
+  (VideoCodec='mpeg2video') Or (VideoCodec='ffv1') Or (VideoCodec='flv') Or (VideoCodec='asv1') Or (VideoCodec='asv2') Or (VideoCodec='huffyuv') Or FourMV) Then Begin
   AsvTag:=AVIVideoFourCC(Intermediate);
   If (AsvTag='ASV1') Or (AsvTag='ASV2') Then Begin
    If NoVideo Or (VideoCodec='copy') Or (AudioCodec<>'') Or HasBitrate Or (RequestedRate<>0) Or
@@ -40838,6 +41098,14 @@ BEGIN
   If HasCrop Then Fail('dvvideo: -crop non supporte avec cet encodeur.');
   Temps[2]:=NewTemporary; EncodeDV(Intermediate,Temps[2],OutputFormat='avi','');
   Commit(Temps[2]); Temps[2]:=''; WriteLn('Video DV creee: ',OutputPath); Halt(0);
+ End;
+ If (InputFormat='yuv4mpegpipe') And (VideoCodec='huffyuv') Then Begin
+  If IsHTTP(InputPath) Or (OutputFormat<>'avi') Or NoVideo Or (AudioCodec<>'') Or HasBitrate Or HasVideoBitrate Or
+   (RequestedRate<>0) Or (RequestedChannels<>0) Or (VideoFrames<>0) Or (ImageWidth<>0) Then
+   Fail('huffyuv: Y4M local vers sortie AVI requis, sans autres options.');
+  If HasCrop Then Fail('huffyuv: -crop non supporte avec cet encodeur.');
+  Temps[2]:=NewTemporary; EncodeHuffyuv(Intermediate,Temps[2]);
+  Commit(Temps[2]); Temps[2]:=''; WriteLn('Video HuffYUV creee: ',OutputPath); Halt(0);
  End;
  If (InputFormat='yuv4mpegpipe') And ((VideoCodec='asv1') Or (VideoCodec='asv2')) Then Begin
   If IsHTTP(InputPath) Or (OutputFormat<>'avi') Or NoVideo Or (AudioCodec<>'') Or HasBitrate Or HasVideoBitrate Or
