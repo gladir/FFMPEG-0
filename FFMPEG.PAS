@@ -3912,6 +3912,7 @@ Begin
   (B[$28]=0) And (B[$29]=0) And (B[$2A]*256+B[$2B]>=1235) And (B[$2A]*256+B[$2B]<=1274) Then Begin Probe:='dnxhd'; Exit; End;
  If N>=80*6 Then If (B[0]=$1F) And (B[1]=$07) And (B[2]=0) And ((B[3]=$3F) Or (B[3]=$BF)) Then Begin Probe:='dv'; Exit; End;
  If N>=4 Then If (B[0]=66) And (B[1]=70) And (B[2]=38) And (B[3]=73) Then Begin Probe:='bfi'; Exit; End;
+ If N>=18 Then If (B[0]=0) And (B[1]=0) And (B[2]=$AA) And (B[3]=$55) And (B[12]=$22) And (B[13]=$56) And (B[14]=0) And (B[15]=0) And (B[16]=16) And (B[17]=0) Then Begin Probe:='dsicin'; Exit; End;
  If N>=16 Then Begin
   K0:=1;
   For J:=0 To 3 Do Begin
@@ -16603,10 +16604,12 @@ End;
 
 Procedure DecodeCAVS(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeDV(Const Source,Target: String; Mode: LongInt; IsAvi: Boolean); Forward;
+Procedure DecodeDSICin(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeNV2(Kind: LongInt; Const Source,Target: String; Mode: LongInt);
 Begin
  If Kind=12 Then DecodeCAVS(Source,Target,Mode)
  Else If Kind=13 Then DecodeDV(Source,Target,Mode,False)
+ Else If Kind=15 Then DecodeDSICin(Source,Target,Mode)
  Else If Kind=14 Then DecodeDV(Source,Target,Mode,True)
  Else If Kind=10 Then DecodeDNxHD(Source,Target,Mode,False)
  Else If Kind=11 Then DecodeDNxHD(Source,Target,Mode,True)
@@ -23641,6 +23644,224 @@ Begin
  CloseRead; CloseWrite;
 End;
 
+
+{ ---- Delphine Software International CIN: demuxeur (libavformat/dsicin.c), video dsicinvideo et audio dsicinaudio ---- }
+Const
+ DCINDelta: Array[0..255] Of SmallInt=(
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,-30210,-27853,-25680,-23677,-21829,
+  -20126,-18556,-17108,-15774,-14543,-13408,-12362,-11398,
+  -10508,-9689,-8933,-8236,-7593,-7001,-6455,-5951,
+  -5487,-5059,-4664,-4300,-3964,-3655,-3370,-3107,
+  -2865,-2641,-2435,-2245,-2070,-1908,-1759,-1622,
+  -1495,-1379,-1271,-1172,-1080,-996,-918,-847,
+  -781,-720,-663,-612,-564,-520,-479,-442,
+  -407,-376,-346,-319,-294,-271,-250,-230,
+  -212,-196,-181,-166,-153,-141,-130,-120,
+  -111,-102,-94,-87,-80,-74,-68,-62,
+  -58,-53,-49,-45,-41,-38,-35,-32,
+  -30,-27,-25,-23,-21,-20,-18,-17,
+  -15,-14,-13,-12,-11,-10,-9,-8,
+  -7,-6,-5,-4,-3,-2,-1,0,
+  0,1,2,3,4,5,6,7,
+  8,9,10,11,12,13,14,15,
+  17,18,20,21,23,25,27,30,
+  32,35,38,41,45,49,53,58,
+  62,68,74,80,87,94,102,111,
+  120,130,141,153,166,181,196,212,
+  230,250,271,294,319,346,376,407,
+  442,479,520,564,612,663,720,781,
+  847,918,996,1080,1172,1271,1379,1495,
+  1622,1759,1908,2070,2245,2435,2641,2865,
+  3107,3370,3655,3964,4300,4664,5059,5487,
+  5951,6455,7001,7593,8236,8933,9689,10508,
+  11398,12362,13408,14543,15774,17108,18556,20126,
+  21829,23677,25680,27853,30210,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0);
+
+Var
+ DCNBmp: Array[0..2] Of PEABuffer; DCNSize: LongInt; DCNPal: Array[0..255] Of LongInt;
+
+Procedure DCNApplyDelta(Src,Dst: PEABuffer; Size: LongInt);
+Var I: LongInt;
+Begin
+ For I:=0 To Size-1 Do Dst^[I]:=(Dst^[I]+Src^[I]) And 255;
+End;
+
+Function DCNHuffman(Src: PEABuffer; SrcSize: LongInt; Dst: PEABuffer; DstSize: LongInt): LongInt;
+Var Tab: Array[0..14] Of Byte; Sp,Dp,H,B,I: LongInt;
+Begin
+ For I:=0 To 14 Do Tab[I]:=EAByte(Src,SrcSize,I);
+ Sp:=15; Dp:=0;
+ While Sp<SrcSize Do Begin
+  H:=Src^[Sp]; Inc(Sp);
+  If (H Shr 4)=15 Then Begin
+   B:=H Shl 4; H:=EAByte(Src,SrcSize,Sp); Inc(Sp);
+   Dst^[Dp]:=(B Or (H Shr 4)) And 255; Inc(Dp);
+  End Else Begin Dst^[Dp]:=Tab[H Shr 4]; Inc(Dp); End;
+  If Dp>=DstSize Then Break;
+  H:=H And 15;
+  If H=15 Then Begin Dst^[Dp]:=EAByte(Src,SrcSize,Sp); Inc(Sp); Inc(Dp); End
+  Else Begin Dst^[Dp]:=Tab[H]; Inc(Dp); End;
+  If Dp>=DstSize Then Break;
+ End;
+ DCNHuffman:=Dp;
+End;
+
+Function DCNLzss(Src: PEABuffer; SrcSize: LongInt; Dst: PEABuffer; DstSize: LongInt): LongInt;
+Var Sp,Dp,Code,I,Cmd,Off,Sz: LongInt;
+Begin
+ Sp:=0; Dp:=0; DCNLzss:=0;
+ While (Sp<SrcSize) And (Dp<DstSize) Do Begin
+  Code:=Src^[Sp]; Inc(Sp);
+  I:=0;
+  While (I<8) And (Sp<SrcSize) And (Dp<DstSize) Do Begin
+   If (Code And (1 Shl I))<>0 Then Begin Dst^[Dp]:=Src^[Sp]; Inc(Dp); Inc(Sp); End
+   Else Begin
+    Cmd:=EAByte(Src,SrcSize,Sp)+EAByte(Src,SrcSize,Sp+1)*256; Inc(Sp,2);
+    Off:=Cmd Shr 4;
+    If Dp<Off+1 Then Begin DCNLzss:=-1; Exit; End;
+    Sz:=(Cmd And 15)+2;
+    If Sz>DstSize-Dp Then Sz:=DstSize-Dp;
+    While Sz>0 Do Begin Dst^[Dp]:=Dst^[Dp-Off-1]; Inc(Dp); Dec(Sz); End;
+   End;
+   Inc(I);
+  End;
+ End;
+ If DstSize-Dp>DstSize-DstSize Div 10 Then DCNLzss:=-1;
+End;
+
+Function DCNRle(Src: PEABuffer; SrcSize: LongInt; Dst: PEABuffer; DstSize: LongInt): LongInt;
+Var Sp,Dp,Code,Len,N,I: LongInt;
+Begin
+ Sp:=0; Dp:=0; DCNRle:=0;
+ While (Sp+1<SrcSize) And (Dp<DstSize) Do Begin
+  Code:=Src^[Sp]; Inc(Sp);
+  If (Code And $80)<>0 Then Begin
+   Len:=Code-$7F; N:=Len; If N>DstSize-Dp Then N:=DstSize-Dp;
+   For I:=0 To N-1 Do Dst^[Dp+I]:=Src^[Sp];
+   Inc(Sp);
+  End Else Begin
+   Len:=Code+1;
+   If Len>SrcSize-Sp Then Begin DCNRle:=-1; Exit; End;
+   N:=Len; If N>DstSize-Dp Then N:=DstSize-Dp; If N>SrcSize-Sp Then N:=SrcSize-Sp;
+   For I:=0 To N-1 Do Dst^[Dp+I]:=Src^[Sp+I];
+   Inc(Sp,Len);
+  End;
+  Inc(Dp,Len);
+ End;
+ If DstSize-Dp>DstSize-DstSize Div 10 Then DCNRle:=-1;
+End;
+
+{ decode un paquet video (palette_type, nb couleurs, type, donnees); Frame = image haut->bas; False si invalide }
+Function DCNVideoPacket(Pk: PEABuffer; Size,W,H: LongInt; Frame: PEABuffer): Boolean;
+Var PalType,PalCount,BmpType,BmpSize,I,Y,Res,Sp: LongInt; T: PEABuffer;
+Begin
+ DCNVideoPacket:=False;
+ PalType:=EAByte(Pk,Size,0); PalCount:=EAByte(Pk,Size,1)+EAByte(Pk,Size,2)*256; BmpType:=EAByte(Pk,Size,3);
+ Sp:=4; BmpSize:=Size-4;
+ If PalType<>0 Then I:=4 Else I:=3;
+ If BmpSize<PalCount*I Then Exit;
+ If PalType=0 Then Begin
+  If PalCount>256 Then Exit;
+  For I:=0 To PalCount-1 Do Begin
+   DCNPal[I]:=EAByte(Pk,Size,Sp)+EAByte(Pk,Size,Sp+1)*256+EAByte(Pk,Size,Sp+2)*65536; Inc(Sp,3); Dec(BmpSize,3);
+  End;
+ End Else Begin
+  For I:=0 To PalCount-1 Do Begin
+   DCNPal[EAByte(Pk,Size,Sp)]:=EAByte(Pk,Size,Sp+1)+EAByte(Pk,Size,Sp+2)*256+EAByte(Pk,Size,Sp+3)*65536; Inc(Sp,4); Dec(BmpSize,4);
+  End;
+ End;
+ Res:=0;
+ Case BmpType Of
+  9: Begin Res:=DCNRle(PEABuffer(@Pk^[Sp]),BmpSize,DCNBmp[0],DCNSize); If Res<0 Then Exit; End;
+  34: Begin Res:=DCNRle(PEABuffer(@Pk^[Sp]),BmpSize,DCNBmp[0],DCNSize); If Res<0 Then Exit; DCNApplyDelta(DCNBmp[1],DCNBmp[0],DCNSize); End;
+  35: Begin
+   BmpSize:=DCNHuffman(PEABuffer(@Pk^[Sp]),BmpSize,DCNBmp[2],DCNSize);
+   Res:=DCNRle(DCNBmp[2],BmpSize,DCNBmp[0],DCNSize); If Res<0 Then Exit;
+  End;
+  36: Begin
+   BmpSize:=DCNHuffman(PEABuffer(@Pk^[Sp]),BmpSize,DCNBmp[2],DCNSize);
+   Res:=DCNRle(DCNBmp[2],BmpSize,DCNBmp[0],DCNSize); If Res<0 Then Exit;
+   DCNApplyDelta(DCNBmp[1],DCNBmp[0],DCNSize);
+  End;
+  37: Begin
+   Res:=DCNHuffman(PEABuffer(@Pk^[Sp]),BmpSize,DCNBmp[0],DCNSize);
+   If DCNSize-(95*DCNSize) Div 100>Res Then Exit;
+  End;
+  38: Begin Res:=DCNLzss(PEABuffer(@Pk^[Sp]),BmpSize,DCNBmp[0],DCNSize); If Res<0 Then Exit; End;
+  39: Begin Res:=DCNLzss(PEABuffer(@Pk^[Sp]),BmpSize,DCNBmp[0],DCNSize); If Res<0 Then Exit; DCNApplyDelta(DCNBmp[1],DCNBmp[0],DCNSize); End;
+ End;
+ For Y:=0 To H-1 Do Move(DCNBmp[0]^[Y*W],Frame^[(H-1-Y)*W],W);
+ For I:=0 To 255 Do Begin NVPalB[I]:=DCNPal[I] And 255; NVPalG[I]:=(DCNPal[I] Shr 8) And 255; NVPalR[I]:=(DCNPal[I] Shr 16) And 255; End;
+ T:=DCNBmp[0]; DCNBmp[0]:=DCNBmp[1]; DCNBmp[1]:=T;
+ DCNVideoPacket:=True;
+End;
+
+{ Mode 3: audio vers WAV mono 22050 Hz; sinon video (PAL8) vers Y4M/PNG/BMP }
+Procedure DecodeDSICin(Const Source,Target: String; Mode: LongInt);
+Var
+ F,Pk,Fr: PEABuffer; Size,W,H,Pos,VSz,ASz,PalCnt,PalType,PkSize,I,Delta,N: LongInt; First: Boolean;
+Begin
+ NVLoad(Source,F,Size);
+ If (NVRL32(F,Size,0)<>$55AA0000) Or (NVRL32(F,Size,12)<>22050) Or (F^[16]<>16) Or (F^[17]<>0) Then Fail('dsicin: en-tete CIN (22050 Hz, 16 bits, mono) requis.');
+ W:=NVRL16(F,Size,8); H:=NVRL16(F,Size,10);
+ If (Mode<>3) And ((W<1) Or (H<1) Or (W*H>16000000)) Then Fail('dsicin: dimensions incorrectes.');
+ Pos:=20; First:=True; Delta:=0; Fr:=Nil;
+ If Mode=3 Then Begin EAReset; OpenWrite(Target); ADPCMWaveHeader(22050,1,0); End
+ Else Begin
+  DCNSize:=W*H; For I:=0 To 2 Do Begin GetMem(DCNBmp[I],DCNSize+64); FillChar(DCNBmp[I]^,DCNSize+64,0); End;
+  FillChar(DCNPal,SizeOf(DCNPal),0); GetMem(Fr,DCNSize+64);
+  NVBegin(Mode,Target,W,H,0,12,1); NVInitDup:=True;
+ End;
+ While Pos+16<=Size Do Begin
+  If NVRL32(F,Size,Pos+12)<>LongInt($AA55AA55) Then Break;
+  VSz:=NVRL32(F,Size,Pos+4); ASz:=NVRL32(F,Size,Pos+8);
+  If (VSz<0) Or (ASz<0) Then Break;
+  PalCnt:=NVRL16(F,Size,Pos+2); PalType:=0;
+  If PalCnt>=32768 Then Begin PalCnt:=65536-PalCnt; PalType:=1; End;
+  PkSize:=(PalType+3)*PalCnt+VSz;
+  Inc(Pos,16);
+  If PkSize>Size-Pos Then PkSize:=Size-Pos;
+  If Mode<>3 Then Begin
+   GetMem(Pk,PkSize+68); FillChar(Pk^,PkSize+68,0);
+   Pk^[0]:=PalType; Pk^[1]:=PalCnt And 255; Pk^[2]:=PalCnt Shr 8; Pk^[3]:=F^[Pos-16];
+   Move(F^[Pos],Pk^[4],PkSize);
+   If DCNVideoPacket(Pk,4+PkSize,W,H,Fr) Then NVEmit(Fr) Else NVRepeat;
+   FreeMem(Pk,PkSize+68);
+   If NVDone Then Break;
+  End;
+  Inc(Pos,PkSize);
+  If ASz>0 Then Begin
+   N:=ASz; If N>Size-Pos Then N:=Size-Pos;
+   If N<=0 Then Break;
+   If Mode=3 Then Begin
+    I:=0;
+    If First Then Begin
+     First:=False;
+     If N>=2 Then Begin
+      Delta:=F^[Pos]+F^[Pos+1]*256; If Delta>=32768 Then Dec(Delta,65536);
+      EAPut(Delta); I:=2;
+     End Else I:=N;
+    End;
+    While I<N Do Begin
+     Delta:=Delta+DCINDelta[F^[Pos+I]];
+     If Delta>32767 Then Delta:=32767 Else If Delta<-32768 Then Delta:=-32768;
+     EAPut(Delta); Inc(I);
+    End;
+   End;
+   Inc(Pos,N);
+  End;
+ End;
+ If Mode=3 Then Begin
+  EAFlush; FreeMem(F,Size+64);
+  If EAWritten=0 Then Fail('dsicin: aucune donnee audio.');
+  ADPCMPatchHeader(22050,1,EAWritten); CloseRead; CloseWrite;
+ End Else Begin
+  FreeMem(F,Size+64); FreeMem(Fr,DCNSize+64);
+  NVFinish('dsicin');
+ End;
+End;
+
 Var AVSWantBMP: Boolean;
 
 Procedure DecodeAVS(Const Source,Target: String; PNGMode: Boolean);
@@ -27272,6 +27493,7 @@ Begin
  WriteLn(' D  dts             DTS Coherent Acoustics brut (core 16 bits BE/LE, 14 bits; sans extensions) vers WAV (jusqu''a 5.1)/MP3 stereo/...');
  WriteLn(' D  oma             Sony OpenMG (ATRAC3 non chiffre); WAV 0x270 (ATRAC3) vers WAV/MP3/...');
  WriteLn(' DE avi (asv1/asv2) AVI ASUS V1/V2: decodage vers Y4M, encodage Y4M -c:v asv1|asv2');
+ WriteLn(' D  dsicin          Delphine Software International CIN (video dsicinvideo PAL8 vers Y4M/PNG/BMP, audio dsicinaudio vers WAV/MP3/...)');
  WriteLn(' DE dv              DV (Digital Video) .dv ou AVI dvsd: SD 25 et 50 Mbit/s (NTSC 4:1:1, PAL 4:2:0/4:1:1, DV50 4:2:2), video seule; decodage vers Y4M/PNG/BMP, encodage Y4M -c:v dvvideo (sortie .dv ou AVI)');
  WriteLn(' DE dnxhd           VC3/DNxHD, DNxHR (.dnxhd ou AVI; encodage Y4M progressif: -profile:v dnxhr_lb|sq|hq|hqx|444, ou -b:v en Mbit/s pour DNxHD)');
  WriteLn(' D  avi (cljr, cyuv, cinepak)  AVI Cirrus Logic AccuPak, Creative YUV, Cinepak vers Y4M/PNG/BMP');
@@ -27571,6 +27793,8 @@ BEGIN
    WriteLn('D A    cook            COOK');
    WriteLn('D A    dca             DCA (DTS Coherent Acoustics)');
    WriteLn('DEV    dnxhd           VC3/DNxHD');
+   WriteLn('D A    dsicinaudio     Delphine Software International CIN audio');
+   WriteLn('D V    dsicinvideo     Delphine Software International CIN video');
    WriteLn('DEV    dvvideo         DV (Digital Video)');
    WriteLn('D V    cyuv            Creative YUV (CYUV)');
    WriteLn('D A    atrac3          ATRAC3 (Adaptive TRansform Acoustic Coding 3)');
@@ -27802,7 +28026,7 @@ BEGIN
  End;
  NVKind:=0;
  If InputFormat='bethsoftvid' Then NVKind:=1 Else If InputFormat='bfi' Then NVKind:=2 Else If InputFormat='c93' Then NVKind:=3
- Else If InputFormat='bmp' Then NVKind:=4 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13
+ Else If InputFormat='bmp' Then NVKind:=4 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15
  Else If (InputFormat='avi') And Not IsHTTP(InputPath) Then Begin
   AsvTag:=AVIVideoFourCC(Intermediate);
   If AsvTag='CSCD' Then NVKind:=5 Else If (AsvTag='tscc') Or (AsvTag='TSCC') Then NVKind:=6
@@ -27811,7 +28035,7 @@ BEGIN
   Else If (AsvTag='dvsd') Or (AsvTag='DVSD') Or (AsvTag='dvcs') Or (AsvTag='DVCS') Or (AsvTag='dv25') Or (AsvTag='dvsl') Or (AsvTag='DVSL') Or (AsvTag='dv50') Or (AsvTag='dvc ') Or (AsvTag='cdvc') Or (AsvTag='CDVC') Or (AsvTag='dvcp') Or (AsvTag='dvpp') Then NVKind:=14;
  End;
  NVAudioOut:=(OutputFormat='wav') Or (OutputFormat='mp3') Or (OutputFormat='ac3') Or (OutputFormat='adx') Or (OutputFormat='aiff');
- If (NVKind<>0) And Not (((NVKind=1) Or (NVKind=2)) And NVAudioOut) Then Begin
+ If (NVKind<>0) And Not (((NVKind=1) Or (NVKind=2) Or (NVKind=15)) And NVAudioOut) Then Begin
   If NoVideo Or (VideoCodec='copy') Or (AudioCodec<>'') Or HasBitrate Or (RequestedRate<>0) Or
    (RequestedChannels<>0) Or (ImageWidth<>0) Or IsHTTP(InputPath) Then
    Fail('Decodage video local sans copie, sans -vn ni conversion audio requis.');
@@ -28141,6 +28365,7 @@ BEGIN
    If InputFormat='oma' Then DecodeATRAC3(InputPath,Temps[0]) Else
    If InputFormat='bethsoftvid' Then DecodeBethsoft(InputPath,Temps[0],3) Else
    If InputFormat='bfi' Then DecodeBFI(InputPath,Temps[0],3) Else
+   If InputFormat='dsicin' Then DecodeDSICin(InputPath,Temps[0],3) Else
    If (InputFormat='aiff') And IsAIFFIma4(InputPath) Then DecodeAIFFIma4(InputPath,Temps[0]) Else
    If InputFormat='aiff' Then DecodeAIFF(InputPath,Temps[0]) Else
    If InputFormat='voc' Then DecodeVOC(InputPath,Temps[0]) Else
