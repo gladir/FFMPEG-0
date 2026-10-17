@@ -3479,7 +3479,7 @@ Var
  Temps: Array[0..6] Of String;
  SavedExit: Pointer;
  InputPath,OutputPath,InputFormat,OutputFormat,AudioCodec,PendingFormat,InputCodec: String;
- RequestedRate: LongInt;
+ RequestedRate,G726CodeSize,G726Rate: LongInt;
  RequestedChannels,RequestedBitRateK: Integer;
  Overwrite,NoOverwrite,HideBanner,HasBitrate: Boolean;
  ActiveInput,ActiveOutput: File;
@@ -29581,6 +29581,189 @@ Begin
  ADPCMPatchHeader(FLStreamRate,FLStreamCh,EAWritten); CloseRead; CloseWrite;
 End;
 
+{ ---- G.726 ADPCM (g726/g726le), adapte de FFmpeg libavcodec/g726.c, LGPL-2.1-or-later ---- }
+Type
+ TG726F=Record Sign,Exp,Mant: LongInt; End;
+Const
+ G726I16: Array[0..3] Of LongInt=(116,365,365,116);
+ G726I24: Array[0..7] Of LongInt=(-32768,135,273,373,373,273,135,-32768);
+ G726I32: Array[0..15] Of LongInt=(-32768,4,135,213,273,323,373,425,425,373,323,273,213,135,4,-32768);
+ G726I40: Array[0..31] Of LongInt=(-32768,-66,28,104,169,224,274,318,358,395,429,459,488,514,539,566,
+  566,539,514,488,459,429,395,358,318,274,224,169,104,28,-66,-32768);
+ G726W16: Array[0..3] Of LongInt=(-22,439,439,-22);
+ G726W24: Array[0..7] Of LongInt=(-4,30,137,582,582,137,30,-4);
+ G726W32: Array[0..15] Of LongInt=(-12,18,41,64,112,198,355,1122,1122,355,198,112,64,41,18,-12);
+ G726W40: Array[0..31] Of LongInt=(14,14,24,39,40,41,58,100,141,179,219,280,358,440,529,696,
+  696,529,440,358,280,219,179,141,100,58,41,40,39,24,14,14);
+ G726F16: Array[0..3] Of LongInt=(0,7,7,0);
+ G726F24: Array[0..7] Of LongInt=(0,1,2,7,7,2,1,0);
+ G726F32: Array[0..15] Of LongInt=(0,0,0,1,1,1,3,7,7,3,1,1,1,0,0,0);
+ G726F40: Array[0..31] Of LongInt=(0,0,0,0,0,1,1,1,1,1,2,3,4,5,6,6,6,6,5,4,3,2,1,1,1,1,1,0,0,0,0,0);
+Var
+ G726Sr: Array[0..1] Of TG726F; G726Dq: Array[0..5] Of TG726F;
+ G726A,G726Pk: Array[0..1] Of LongInt; G726B: Array[0..5] Of LongInt;
+ G726Ap,G726Yu,G726Yl,G726Dms,G726Dml,G726Td,G726Se,G726Sez,G726Y,G726Code: LongInt;
+ G726IQ,G726WT,G726FT: Array[0..31] Of LongInt;
+
+Function G726Log2(V: LongInt): LongInt;
+Var N: LongInt;
+Begin
+ N:=0; V:=V And $FFFF;
+ If V>=256 Then Begin N:=8; V:=V Shr 8; End;
+ While V>1 Do Begin Inc(N); V:=V Shr 1; End;
+ G726Log2:=N;
+End;
+
+Procedure G726I2F(I: LongInt; Var F: TG726F);
+Begin
+ If I<0 Then Begin F.Sign:=1; I:=-I; End Else F.Sign:=0;
+ F.Exp:=G726Log2(I); If I<>0 Then Inc(F.Exp);
+ If I<>0 Then F.Mant:=(I Shl 6) Shr F.Exp Else F.Mant:=32;
+End;
+
+Function G726Mult(Const F1,F2: TG726F): LongInt;
+Var Res,Ex: LongInt;
+Begin
+ Ex:=F1.Exp+F2.Exp; Res:=((F1.Mant*F2.Mant)+$30) Shr 4;
+ If Ex>19 Then Res:=Res Shl (Ex-19) Else Res:=Res Shr (19-Ex);
+ If (F1.Sign Xor F2.Sign)<>0 Then G726Mult:=-Res Else G726Mult:=Res;
+End;
+
+Function G726Sgn(V: LongInt): LongInt;Begin If V<0 Then G726Sgn:=-1 Else G726Sgn:=1; End;
+Function G726Clip(V,Lo,Hi: LongInt): LongInt;Begin If V<Lo Then V:=Lo; If V>Hi Then V:=Hi; G726Clip:=V; End;
+
+Procedure G726Reset(Size: LongInt);
+Var I: Integer;
+Begin
+ G726Code:=Size;
+ Case Size Of
+  2: For I:=0 To 3 Do Begin G726IQ[I]:=G726I16[I]; G726WT[I]:=G726W16[I]; G726FT[I]:=G726F16[I]; End;
+  3: For I:=0 To 7 Do Begin G726IQ[I]:=G726I24[I]; G726WT[I]:=G726W24[I]; G726FT[I]:=G726F24[I]; End;
+  4: For I:=0 To 15 Do Begin G726IQ[I]:=G726I32[I]; G726WT[I]:=G726W32[I]; G726FT[I]:=G726F32[I]; End;
+ Else For I:=0 To 31 Do Begin G726IQ[I]:=G726I40[I]; G726WT[I]:=G726W40[I]; G726FT[I]:=G726F40[I]; End;
+ End;
+ For I:=0 To 1 Do Begin G726Sr[I].Sign:=0; G726Sr[I].Exp:=0; G726Sr[I].Mant:=32; G726Pk[I]:=1; G726A[I]:=0; End;
+ For I:=0 To 5 Do Begin G726Dq[I].Sign:=0; G726Dq[I].Exp:=0; G726Dq[I].Mant:=32; G726B[I]:=0; End;
+ G726Yu:=544; G726Yl:=34816; G726Y:=544; G726Ap:=0; G726Dms:=0; G726Dml:=0; G726Td:=0; G726Se:=0; G726Sez:=0;
+End;
+
+Function G726InvQuant(I: LongInt): LongInt;
+Var Dql,Dex,Dqt: LongInt;
+Begin
+ Dql:=G726IQ[I]+AVSar(G726Y,2);
+ Dex:=AVSar(Dql,7) And 15; Dqt:=128+(Dql And 127);
+ If Dql<0 Then G726InvQuant:=0 Else G726InvQuant:=(Dqt Shl Dex) Shr 7;
+End;
+
+Function G726Decode(I: LongInt): LongInt;
+Var Dq,ReSignal,Pk0,Fa1,K,Tr,Ylint,Ylfrac,Thr2,Al,Dq0,ISig: LongInt; F: TG726F;
+Begin
+ ISig:=I Shr (G726Code-1);
+ Dq:=G726InvQuant(I);
+ Ylint:=G726Yl Shr 15; Ylfrac:=(G726Yl Shr 10) And $1F;
+ If Ylint>9 Then Thr2:=$1F Shl 10 Else Thr2:=($20+Ylfrac) Shl Ylint;
+ If (G726Td=1) And (Dq>((3*Thr2) Shr 2)) Then Tr:=1 Else Tr:=0;
+ If ISig<>0 Then Dq:=-Dq;
+ ReSignal:=SmallInt((G726Se+Dq) And $FFFF);
+ If (G726Sez+Dq)<>0 Then Pk0:=G726Sgn(G726Sez+Dq) Else Pk0:=0;
+ If Dq<>0 Then Dq0:=G726Sgn(Dq) Else Dq0:=0;
+ If Tr<>0 Then Begin
+  G726A[0]:=0; G726A[1]:=0; For K:=0 To 5 Do G726B[K]:=0;
+ End Else Begin
+  Fa1:=G726Clip(AVSar(-G726A[0]*G726Pk[0]*Pk0,5),-256,255);
+  G726A[1]:=G726A[1]+128*Pk0*G726Pk[1]+Fa1-AVSar(G726A[1],7);
+  G726A[1]:=G726Clip(G726A[1],-12288,12288);
+  G726A[0]:=G726A[0]+64*3*Pk0*G726Pk[0]-AVSar(G726A[0],8);
+  G726A[0]:=G726Clip(G726A[0],-(15360-G726A[1]),15360-G726A[1]);
+  For K:=0 To 5 Do G726B[K]:=G726B[K]+128*Dq0*G726Sgn(-G726Dq[K].Sign)-AVSar(G726B[K],8);
+ End;
+ G726Pk[1]:=G726Pk[0]; If Pk0<>0 Then G726Pk[0]:=Pk0 Else G726Pk[0]:=1;
+ G726Sr[1]:=G726Sr[0]; G726I2F(ReSignal,G726Sr[0]);
+ For K:=5 DownTo 1 Do G726Dq[K]:=G726Dq[K-1];
+ G726I2F(Dq,G726Dq[0]); G726Dq[0].Sign:=ISig;
+ If G726A[1]<-11776 Then G726Td:=1 Else G726Td:=0;
+ Inc(G726Dms,(G726FT[I] Shl 4)+AVSar(-G726Dms,5));
+ Inc(G726Dml,(G726FT[I] Shl 4)+AVSar(-G726Dml,7));
+ If Tr<>0 Then G726Ap:=256 Else Begin
+  Inc(G726Ap,AVSar(-G726Ap,4));
+  If (G726Y<=1535) Or (G726Td<>0) Or (Abs((G726Dms Shl 2)-G726Dml)>=AVSar(G726Dml,3)) Then Inc(G726Ap,$20);
+ End;
+ G726Yu:=G726Clip(G726Y+G726WT[I]+AVSar(-G726Y,5),544,5120);
+ Inc(G726Yl,G726Yu+AVSar(-G726Yl,6));
+ If G726Ap>=256 Then Al:=64 Else Al:=G726Ap Shr 2;
+ G726Y:=AVSar(G726Yl+(G726Yu-AVSar(G726Yl,6))*Al,6);
+ G726Se:=0;
+ For K:=0 To 5 Do Begin G726I2F(AVSar(G726B[K],2),F); Inc(G726Se,G726Mult(F,G726Dq[K])); End;
+ G726Sez:=AVSar(G726Se,1);
+ For K:=0 To 1 Do Begin G726I2F(AVSar(G726A[K],2),F); Inc(G726Se,G726Mult(F,G726Sr[K])); End;
+ G726Se:=AVSar(G726Se,1);
+ G726Decode:=G726Clip(ReSignal*4,-$FFFF,$FFFF);
+End;
+
+{ paquets independants: les bits restants d'un paquet sont perdus (comme ffmpeg) }
+Procedure G726Packet(P: PEABuffer; Size: LongInt; Little: Boolean);
+Var N,K,Bit,Code,V,J: LongInt;
+Begin
+ N:=(Size*8) Div G726Code; Bit:=0;
+ For K:=1 To N Do Begin
+  Code:=0;
+  If Little Then Begin
+   For J:=0 To G726Code-1 Do Begin
+    V:=(P^[(Bit+J) Shr 3] Shr ((Bit+J) And 7)) And 1; Code:=Code Or (V Shl J);
+   End;
+  End Else Begin
+   For J:=0 To G726Code-1 Do Begin
+    V:=(P^[(Bit+J) Shr 3] Shr (7-((Bit+J) And 7))) And 1; Code:=(Code Shl 1) Or V;
+   End;
+  End;
+  Inc(Bit,G726Code);
+  V:=G726Decode(Code);
+  EAPut(V);
+ End;
+End;
+
+Procedure DecodeG726(Const Source,Target: String; Little: Boolean; Size,Rate: LongInt);
+Var
+ Buf: PEABuffer; Total,P,Len,Pk,Align,DataAt,DataLen,Ch: LongInt; IsWav: Boolean;
+ Tag: String[4];
+Begin
+ EAReset; NVLoad(Source,Buf,Total);
+ IsWav:=(Total>=12) And (EAByte(Buf,Total,0)=82) And (EAByte(Buf,Total,1)=73) And (EAByte(Buf,Total,8)=87);
+ DataAt:=0; DataLen:=Total; Pk:=1020;
+ If IsWav Then Begin
+  P:=12; DataAt:=-1; Align:=0; Ch:=1; Little:=False;
+  While P+8<=Total Do Begin
+   Tag:=Chr(Buf^[P])+Chr(Buf^[P+1])+Chr(Buf^[P+2])+Chr(Buf^[P+3]);
+   Len:=EAByte(Buf,Total,P+4)+EAByte(Buf,Total,P+5)*256+EAByte(Buf,Total,P+6)*65536+EAByte(Buf,Total,P+7)*16777216;
+   If Len<0 Then Break;
+   If Tag='fmt ' Then Begin
+    Ch:=EAByte(Buf,Total,P+10); Rate:=EAByte(Buf,Total,P+12)+EAByte(Buf,Total,P+13)*256+EAByte(Buf,Total,P+14)*65536;
+    Align:=EAByte(Buf,Total,P+20)+EAByte(Buf,Total,P+21)*256;
+    Size:=EAByte(Buf,Total,P+22)+EAByte(Buf,Total,P+23)*256;
+   End;
+   If Tag='data' Then Begin
+    DataAt:=P+8; DataLen:=Len; If DataLen>Total-DataAt Then DataLen:=Total-DataAt; Break;
+   End;
+   Inc(P,8+Len+(Len And 1));
+  End;
+  If DataAt<0 Then Fail('g726: chunk data absent.');
+  If Ch<>1 Then Fail('g726: seul le mono est pris en charge.');
+  Pk:=4096;
+  If Align>1 Then Begin If Pk<Align Then Pk:=Align; Pk:=(Pk Div Align)*Align; End;
+ End;
+ If (Size<2) Or (Size>5) Then Fail('g726: nombre de bits invalide.');
+ If Rate<=0 Then Fail('g726: frequence invalide.');
+ G726Reset(Size);
+ OpenWrite(Target); ADPCMWaveHeader(Rate,1,0);
+ P:=DataAt;
+ While P<DataAt+DataLen Do Begin
+  Len:=Pk; If Len>DataAt+DataLen-P Then Len:=DataAt+DataLen-P;
+  G726Packet(@Buf^[P],Len,Little);
+  Inc(P,Len);
+ End;
+ EAFlush; ADPCMPatchHeader(Rate,1,EAWritten); CloseRead; CloseWrite;
+End;
+
 { ---- Decodeurs video AVI/RPL supplementaires: flashsv (flashsv.c), escape124 (escape124.c + rpl.c), huffyuv/ffvhuff, ffv1 ---- }
 Var
  AXF: PEABuffer; AXSize,AXW,AXH,AXBits,AXRate,AXScale,AXMovie,AXExtra,AXExtraLen: LongInt; AXFcc: String[4];
@@ -35486,7 +35669,7 @@ BEGIN
  {$ENDIF}
  For J:=0 To 6 Do Temps[J]:='';
  InputPath:=''; OutputPath:=''; InputFormat:=''; OutputFormat:='';
- AudioCodec:=''; InputCodec:=''; PendingFormat:=''; RequestedRate:=0; RequestedChannels:=0; RequestedBitRateK:=320;
+ AudioCodec:=''; InputCodec:=''; PendingFormat:=''; G726CodeSize:=4; G726Rate:=8000; RequestedRate:=0; RequestedChannels:=0; RequestedBitRateK:=320;
  Overwrite:=False; NoOverwrite:=False; HideBanner:=False; HasBitrate:=False;
  SavedExit:=ExitProc; ExitProc:=@ExitCleanup; Randomize;
  I:=1;
@@ -35648,6 +35831,16 @@ BEGIN
    If Not IsHTTP(HLSBase) Then Fail('-hls_base_url exige une URL HTTP/HTTPS.');
   End
   Else If Argument='-f' Then PendingFormat:=FormatName(NextArgument) Else
+  If (Argument='-sample_rate') And (InputPath='') Then Begin
+   Value:=NextArgument; Val(Value,Number,Code);
+   If (Code<>0) Or (Number<1) Then Fail('-sample_rate invalide.');
+   G726Rate:=Number;
+  End Else
+  If Argument='-code_size' Then Begin
+   Value:=NextArgument; Val(Value,Number,Code);
+   If (Code<>0) Or (Number<2) Or (Number>5) Then Fail('-code_size attendu: 2..5.');
+   G726CodeSize:=Number;
+  End Else
   If Argument='-i' Then Begin
    If InputPath<>'' Then Fail('Une seule entree est prise en charge.');
    InputPath:=NextArgument; InputFormat:=PendingFormat; PendingFormat:='';
@@ -35755,7 +35948,7 @@ BEGIN
  {$ENDIF}
  Detected:=Probe(Intermediate);
  If InputFormat='' Then InputFormat:=Detected Else
- If (InputFormat<>Detected) And Not ((InputFormat='dvbsub') And (Detected='')) And Not ((InputFormat='eac3') And (Detected='ac3')) Then Fail(
+ If (InputFormat<>Detected) And Not ((InputFormat='dvbsub') And (Detected='')) And Not (((InputFormat='g726') Or (InputFormat='g726le')) And (Detected='')) And Not ((InputFormat='eac3') And (Detected='ac3')) Then Fail(
  'Format impose incompatible avec la signature du fichier.');
  If InputFormat='' Then Fail('Format entree non reconnu ou non pris en charge.');
  If OutputFormat='' Then OutputFormat:=FormatName(Extension(OutputPath));
@@ -36104,6 +36297,7 @@ BEGIN
    If InputFormat='ac3' Then ProcessAC3(InputPath,Temps[0],False,0) Else
    If InputFormat='eac3' Then DecodeEAC3(InputPath,Temps[0]) Else
    If InputFormat='flac' Then DecodeFLAC(InputPath,Temps[0]) Else
+   If (InputFormat='g726') Or (InputFormat='g726le') Then DecodeG726(InputPath,Temps[0],InputFormat='g726le',G726CodeSize,G726Rate) Else
    If InputFormat='aac' Then DecodeAAC(InputPath,Temps[0]) Else
    If InputFormat='iff' Then Decode8SVX(InputPath,Temps[0]) Else
    If InputFormat='adx' Then DecodeADX(InputPath,Temps[0]) Else
@@ -36133,6 +36327,8 @@ BEGIN
    Intermediate:=Temps[0];
   End Else If IsWaveCT(InputPath) Then Begin
    Temps[0]:=NewTemporary; DecodeWaveCT(InputPath,Temps[0]); Intermediate:=Temps[0];
+  End Else If WaveFormatTag(InputPath)=$45 Then Begin
+   Temps[0]:=NewTemporary; DecodeG726(InputPath,Temps[0],False,4,8000); Intermediate:=Temps[0];
   End Else If WaveFormatTag(InputPath)=$270 Then Begin
    Temps[0]:=NewTemporary; DecodeATRAC3(InputPath,Temps[0]); Intermediate:=Temps[0];
   End Else If (WaveFormatTag(InputPath)=$61) Or (WaveFormatTag(InputPath)=$62) Or
