@@ -29574,8 +29574,595 @@ Begin
  FSVFrame:=True;
 End;
 
+
+{ ---- HuffYUV / FFmpeg HuffYUV (libavcodec/huffyuvdec.c, huffyuv.c, huffyuvdsp.c, lossless_videodsp.c) ---- }
+Const HYMaxVlc=16384;
+Var
+ HYVer,HYPred,HYInterlaced,HYDecor,HYBpp,HYBps,HYN,HYVlcN,HYAlpha,HYChroma,HYYuv,HYChH,HYChV,HYContext,HYW,HYH,HYNPl: LongInt;
+ HYLenT: Array[0..3,0..HYMaxVlc-1] Of Byte; HYBitsT: Array[0..3,0..HYMaxVlc-1] Of LongWord;
+ HYFast: Array[0..3,0..4095] Of LongInt; HYNLong: Array[0..3] Of LongInt;
+ HYLongLen: Array[0..3,0..HYMaxVlc-1] Of Byte; HYLongCode: Array[0..3,0..HYMaxVlc-1] Of Int64; HYLongSym: Array[0..3,0..HYMaxVlc-1] Of Word;
+ HYPlane: Array[0..3] Of PEABuffer; HYStr,HYPw,HYPh: Array[0..3] Of LongInt; HYT: Array[0..3] Of PEABuffer;
+ HYBuf: PEABuffer; HYBufBytes,HYPos,HYBits: LongInt; HYErr: Boolean;
+ HYFmt: LongInt; { format NV de sortie }
+Const
+ HYShiftLuma: Array[0..41] Of Byte=(34,36,35,69,135,232,9,16,10,24,11,23,12,16,13,10,14,8,15,8,16,8,17,20,16,10,207,206,205,236,11,8,10,21,9,23,8,8,199,70,69,68);
+ HYShiftChroma: Array[0..58] Of Byte=(66,36,37,38,39,40,41,75,76,77,110,239,144,81,82,83,84,85,118,183,56,57,88,89,56,89,154,57,58,57,26,141,57,56,58,57,58,57,184,119,214,245,116,83,82,49,80,79,78,77,44,75,41,40,39,38,37,36,34);
+ HYAddLuma: Array[0..255] Of Byte=(
+  3,9,5,12,10,35,32,29,27,50,48,45,44,41,39,37,
+  73,70,68,65,64,61,58,56,53,50,49,46,44,41,38,36,
+  68,65,63,61,58,55,53,51,48,46,45,43,41,39,38,36,
+  35,33,32,30,29,27,26,25,48,47,46,44,43,41,40,39,
+  37,36,35,34,32,31,30,28,27,26,24,23,22,20,19,37,
+  35,34,33,31,30,29,27,26,24,23,21,20,18,17,15,29,
+  27,26,24,22,21,19,17,16,14,26,25,23,21,19,18,16,
+  15,27,25,23,21,19,17,16,14,26,25,23,21,18,17,14,
+  12,17,19,13,4,9,2,11,1,7,8,0,16,3,14,6,
+  12,10,5,15,18,11,10,13,15,16,19,20,22,24,27,15,
+  18,20,22,24,26,14,17,20,22,24,27,15,18,20,23,25,
+  28,16,19,22,25,28,32,36,21,25,29,33,38,42,45,49,
+  28,31,34,37,40,42,44,47,49,50,52,54,56,57,59,60,
+  62,64,66,67,69,35,37,39,40,42,43,45,47,48,51,52,
+  54,55,57,59,60,62,63,66,67,69,71,72,38,40,42,43,
+  46,47,49,51,26,28,30,31,33,34,18,19,11,13,7,8);
+ HYAddChroma: Array[0..255] Of Byte=(
+  3,1,2,2,2,2,3,3,7,5,7,5,8,6,11,9,
+  7,13,11,10,9,8,7,5,9,7,6,4,7,5,8,7,
+  11,8,13,11,19,15,22,23,20,33,32,28,27,29,51,77,
+  43,45,76,81,46,82,75,55,56,144,58,80,60,74,147,63,
+  143,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,
+  80,81,82,83,84,85,86,87,88,89,90,91,27,30,21,22,
+  17,14,5,6,100,54,47,50,51,53,106,107,108,109,110,111,
+  112,113,114,115,4,117,118,92,94,121,122,3,124,103,2,1,
+  0,129,130,131,120,119,126,125,136,137,138,139,140,141,142,134,
+  135,132,133,104,64,101,62,57,102,95,93,59,61,28,97,96,
+  52,49,48,29,32,25,24,46,23,98,45,44,43,20,42,41,
+  19,18,99,40,15,39,38,16,13,12,11,37,10,9,8,36,
+  7,128,127,105,123,116,35,34,33,145,31,79,42,146,78,26,
+  83,48,49,50,44,47,26,31,30,18,17,19,21,24,25,13,
+  14,16,17,18,20,21,12,14,15,9,10,6,9,6,5,8,
+  6,12,8,10,7,9,6,4,6,2,2,3,3,3,3,2);
+
+{ lecture MSB, au-dela de la fin : zeros (remplissage), pas de plafonnement (UNCHECKED_BITSTREAM_READER) }
+Function HYGet(N: LongInt): LongInt;
+Var V: Int64; I,B: LongInt; Q: LongInt;
+Begin
+ If (N=0) Then Begin HYGet:=0; Exit; End;
+ If (HYPos>=0) And (HYPos+40<=HYBits) Then Begin
+  Q:=HYPos Shr 3;
+  V:=(Int64(HYBuf^[Q]) Shl 32) Or (Int64(HYBuf^[Q+1]) Shl 24) Or (Int64(HYBuf^[Q+2]) Shl 16) Or (Int64(HYBuf^[Q+3]) Shl 8) Or HYBuf^[Q+4];
+  V:=(V Shr (40-(HYPos And 7)-N)) And ((Int64(1) Shl N)-1);
+  Inc(HYPos,N); HYGet:=LongInt(V And $FFFFFFFF); Exit;
+ End;
+ V:=0;
+ For I:=1 To N Do Begin
+  If (HYPos<HYBits) And (HYPos>=0) Then B:=(HYBuf^[HYPos Shr 3] Shr (7-(HYPos And 7))) And 1 Else B:=0;
+  V:=V*2+B; Inc(HYPos);
+ End;
+ HYGet:=LongInt(V And $FFFFFFFF);
+End;
+Function HYPeek(N: LongInt): LongInt;
+Var Sv,R: LongInt;
+Begin Sv:=HYPos; R:=HYGet(N); HYPos:=Sv; HYPeek:=R; End;
+
+{ read_len_table : 0 ok, -1 erreur }
+Function HYReadLen(P: LongInt; N: LongInt): LongInt;
+Var I,Val,Rep: LongInt;
+Begin
+ I:=0;
+ While I<N Do Begin
+  Rep:=HYGet(3); Val:=HYGet(5);
+  If Rep=0 Then Rep:=HYGet(8);
+  If (I+Rep>N) Or (HYPos>HYBits) Then Begin HYReadLen:=-1; Exit; End;
+  While Rep>0 Do Begin HYLenT[P,I]:=Val; Inc(I); Dec(Rep); End;
+ End;
+ HYReadLen:=0;
+End;
+
+{ ff_huffyuv_generate_bits_table : 0 ok }
+Function HYGenBits(P,N: LongInt): LongInt;
+Var Lens: Array[0..32] Of LongInt; Codes: Array[0..32] Of Int64; I: LongInt;
+Begin
+ HYGenBits:=-1;
+ FillChar(Lens,SizeOf(Lens),0);
+ For I:=0 To N-1 Do Inc(Lens[HYLenT[P,I]]);
+ Codes[32]:=0;
+ For I:=32 DownTo 1 Do Begin
+  If ((Lens[I]+Codes[I]) And 1)<>0 Then Exit;
+  Codes[I-1]:=(Lens[I]+Codes[I]) Shr 1;
+ End;
+ For I:=0 To N-1 Do If HYLenT[P,I]<>0 Then Begin
+  HYBitsT[P,I]:=Codes[HYLenT[P,I]]; Codes[HYLenT[P,I]]:=Codes[HYLenT[P,I]]+1;
+ End;
+ HYGenBits:=0;
+End;
+
+{ tables de decodage a partir de (HYLenT, HYBitsT) }
+Procedure HYBuildFrom(P,N: LongInt);
+Var I,L,K: LongInt; Code: Int64;
+Begin
+ FillChar(HYFast[P],SizeOf(HYFast[P]),0);
+ HYNLong[P]:=0;
+ For I:=0 To N-1 Do If HYLenT[P,I]<>0 Then Begin
+  L:=HYLenT[P,I]; Code:=HYBitsT[P,I];
+  If L<=12 Then Begin
+   Code:=Code Shl (12-L);
+   For K:=0 To (1 Shl (12-L))-1 Do If Code+K<4096 Then HYFast[P,Code+K]:=(L Shl 16) Or I;
+  End Else Begin
+   HYLongLen[P,HYNLong[P]]:=L; HYLongCode[P,HYNLong[P]]:=Code; HYLongSym[P,HYNLong[P]]:=I; Inc(HYNLong[P]);
+  End;
+ End;
+End;
+
+Function HYSym(P: LongInt): LongInt;
+Var E,L,K: LongInt; V: Int64;
+Begin
+ E:=HYFast[P,HYPeek(12)];
+ If E<>0 Then Begin Inc(HYPos,E Shr 16); HYSym:=E And $FFFF; Exit; End;
+ V:=HYGet(12);
+ For L:=13 To 32 Do Begin
+  V:=V*2+HYGet(1);
+  For K:=0 To HYNLong[P]-1 Do
+   If (HYLongLen[P,K]=L) And (HYLongCode[P,K]=V) Then Begin HYSym:=HYLongSym[P,K]; Exit; End;
+ End;
+ HYSym:=0;
+End;
+
+Function HYReadTables(Src: PEABuffer; Len: LongInt): LongInt;
+Var I,Count: LongInt;
+Begin
+ HYReadTables:=-1;
+ HYBuf:=Src; HYBits:=Len*8; HYPos:=0;
+ Count:=3; If HYVer>2 Then Count:=1+HYAlpha+2*HYChroma;
+ HYNPl:=Count;
+ For I:=0 To Count-1 Do Begin
+  If HYReadLen(I,HYVlcN)<0 Then Exit;
+  If HYGenBits(I,HYVlcN)<0 Then Exit;
+  HYBuildFrom(I,HYVlcN);
+ End;
+ HYReadTables:=(HYPos+7) Div 8;
+End;
+
+Function HYOldTables: Boolean;
+Var I: LongInt; B: Array[0..255] Of Byte;
+Begin
+ HYOldTables:=False;
+ HYVlcN:=256;
+ FillChar(B,SizeOf(B),0); Move(HYShiftLuma,B,42);
+ HYBuf:=@B; HYBits:=42*8; HYPos:=0;
+ If HYReadLen(0,256)<0 Then Exit;
+ FillChar(B,SizeOf(B),0); Move(HYShiftChroma,B,59);
+ HYPos:=0; HYBits:=59*8;
+ If HYReadLen(1,256)<0 Then Exit;
+ For I:=0 To 255 Do Begin HYBitsT[0,I]:=HYAddLuma[I]; HYBitsT[1,I]:=HYAddChroma[I]; End;
+ If HYBpp>=24 Then Begin Move(HYBitsT[0],HYBitsT[1],256*4); Move(HYLenT[0],HYLenT[1],256); End;
+ Move(HYBitsT[1],HYBitsT[2],256*4); Move(HYLenT[1],HYLenT[2],256);
+ For I:=0 To 3 Do HYBuildFrom(I,256);
+ HYNPl:=3;
+ HYOldTables:=True;
+End;
+
+Procedure HYDecInit; { reinitialise l'etat lie au flux }
+Begin
+ FillChar(HYLenT,SizeOf(HYLenT),0); FillChar(HYBitsT,SizeOf(HYBitsT),0);
+ HYAlpha:=0; HYChroma:=1; HYYuv:=0; HYChH:=0; HYChV:=0; HYDecor:=0; HYContext:=0;
+End;
+
+{ ---- decodage des lignes (temp) ---- }
+Function HYLeft: LongInt; Begin HYLeft:=HYBits-HYPos; End;
+
+Type THYW=Array[0..0] Of Word; PHYW=^THYW;
+
+Procedure HY422(Count: LongInt); { decode_422_bitstream }
+Var I: LongInt;
+Begin
+ Count:=Count Div 2; I:=0;
+ While (I<Count) And (HYLeft>0) Do Begin
+  HYT[0]^[2*I]:=HYSym(0); HYT[1]^[I]:=HYSym(1);
+  If HYLeft<=0 Then Break;
+  HYT[0]^[2*I+1]:=HYSym(0); HYT[2]^[I]:=HYSym(2);
+  Inc(I);
+ End;
+ While I<Count Do Begin
+  HYT[0]^[2*I]:=0; HYT[1]^[I]:=0; HYT[0]^[2*I+1]:=0; HYT[2]^[I]:=0; Inc(I);
+ End;
+End;
+
+Procedure HYGray(Count: LongInt); { decode_gray_bitstream }
+Var I: LongInt;
+Begin
+ Count:=Count Div 2; I:=0;
+ While (I<Count) And (HYLeft>0) Do Begin
+  HYT[0]^[2*I]:=HYSym(0); HYT[0]^[2*I+1]:=HYSym(0); Inc(I);
+ End;
+End;
+
+Procedure HYPlaneRow(Width,Pl: LongInt); { decode_plane_bitstream }
+Var I,Count,V: LongInt; W16: PHYW;
+Begin
+ Count:=Width Div 2; W16:=PHYW(HYT[0]);
+ If HYBps<=8 Then Begin
+  I:=0;
+  While (I<Count) And (HYLeft>0) Do Begin
+   HYT[0]^[2*I]:=HYSym(Pl); HYT[0]^[2*I+1]:=HYSym(Pl); Inc(I);
+  End;
+  If Odd(Width) And (HYLeft>0) Then HYT[0]^[Width-1]:=HYSym(Pl);
+ End Else If HYBps<=14 Then Begin
+  I:=0;
+  While (I<Count) And (HYLeft>0) Do Begin
+   V:=HYSym(Pl); W16^[2*I]:=V And $FFFF; V:=HYSym(Pl); W16^[2*I+1]:=V And $FFFF; Inc(I);
+  End;
+  If Odd(Width) And (HYLeft>0) Then W16^[Width-1]:=HYSym(Pl) And $FFFF;
+ End Else Begin
+  I:=0;
+  While (I<Count) And (HYLeft>0) Do Begin
+   V:=HYSym(Pl)*4; V:=V+HYGet(2); W16^[2*I]:=V And $FFFF;
+   V:=HYSym(Pl)*4; V:=V+HYGet(2); W16^[2*I+1]:=V And $FFFF; Inc(I);
+  End;
+  If Odd(Width) And (HYLeft>0) Then Begin V:=HYSym(Pl)*4; V:=V+HYGet(2); W16^[Width-1]:=V And $FFFF; End;
+ End;
+End;
+
+Procedure HYBgr(Count: LongInt); { decode_bgr_bitstream : temp[0] = B,G,R,A par pixel }
+Var I,Cd: LongInt; T: PEABuffer; Al: Boolean;
+Begin
+ T:=HYT[0]; Al:=HYBpp<>24; I:=0;
+ While (I<Count) And (HYLeft>0) Do Begin
+  If HYDecor<>0 Then Begin
+   T^[4*I+1]:=HYSym(1);
+   Cd:=HYSym(0); T^[4*I]:=(Cd+T^[4*I+1]) And 255;
+   Cd:=HYSym(2); T^[4*I+2]:=(Cd+T^[4*I+1]) And 255;
+  End Else Begin
+   T^[4*I]:=HYSym(0); T^[4*I+1]:=HYSym(1); T^[4*I+2]:=HYSym(2);
+  End;
+  If Al Then T^[4*I+3]:=HYSym(2) Else T^[4*I+3]:=0;
+  Inc(I);
+ End;
+End;
+
+Procedure HYLeftBgr(Dst: PEABuffer; W: LongInt; Var LC: Array Of Byte);
+Var I: LongInt; B,G,R,A: LongInt;
+Begin
+ B:=LC[0]; G:=LC[1]; R:=LC[2]; A:=LC[3];
+ For I:=0 To W-1 Do Begin
+  B:=(B+HYT[0]^[4*I]) And 255; G:=(G+HYT[0]^[4*I+1]) And 255; R:=(R+HYT[0]^[4*I+2]) And 255; A:=(A+HYT[0]^[4*I+3]) And 255;
+  Dst^[4*I]:=B; Dst^[4*I+1]:=G; Dst^[4*I+2]:=R; Dst^[4*I+3]:=A;
+ End;
+ LC[0]:=B; LC[1]:=G; LC[2]:=R; LC[3]:=A;
+End;
+
+{ ---- predicteurs (lossless_videodsp.c / huffyuvdsp.c) ---- }
+Function HYAddLeft8(Dst,Src: PEABuffer; W,Acc: LongInt): LongInt;
+Var I: LongInt;
+Begin
+ For I:=0 To W-1 Do Begin Acc:=(Acc+Src^[I]) And 255; Dst^[I]:=Acc; End;
+ HYAddLeft8:=Acc;
+End;
+Function HYAddLeft16(Dst,Src: PHYW; Mask,W,Acc: LongInt): LongInt;
+Var I: LongInt;
+Begin
+ For I:=0 To W-1 Do Begin Acc:=(Acc+Src^[I]) And Mask; Dst^[I]:=Acc; End;
+ HYAddLeft16:=Acc;
+End;
+Procedure HYAddBytes8(Dst,Src: PEABuffer; W: LongInt);
+Var I: LongInt;
+Begin For I:=0 To W-1 Do Dst^[I]:=(Dst^[I]+Src^[I]) And 255; End;
+Procedure HYAddBytes16(Dst,Src: PHYW; Mask,W: LongInt);
+Var I: LongInt;
+Begin For I:=0 To W-1 Do Dst^[I]:=(Dst^[I]+Src^[I]) And Mask; End;
+Function HYMid(A,B,C: LongInt): LongInt;
+Begin
+ If A>B Then Begin
+  If C>B Then Begin If C>A Then HYMid:=A Else HYMid:=C; End Else HYMid:=B;
+ End Else Begin
+  If C>A Then Begin If C>B Then HYMid:=B Else HYMid:=C; End Else HYMid:=A;
+ End;
+End;
+{ mid_pred(a,b,c) = median }
+Procedure HYMedian8(Dst,Src1,Diff: PEABuffer; W: LongInt; Var Left,LeftTop: LongInt);
+Var I,L,Lt: LongInt;
+Begin
+ L:=Left And 255; Lt:=LeftTop And 255;
+ For I:=0 To W-1 Do Begin
+  L:=(HYMid(L,Src1^[I],(L+Src1^[I]-Lt) And 255)+Diff^[I]) And 255;
+  Lt:=Src1^[I]; Dst^[I]:=L;
+ End;
+ Left:=L; LeftTop:=Lt;
+End;
+Procedure HYMedian16(Dst,Src1,Diff: PHYW; Mask,W: LongInt; Var Left,LeftTop: LongInt);
+Var I,L,Lt: LongInt;
+Begin
+ L:=Left And $FFFF; Lt:=LeftTop And $FFFF;
+ For I:=0 To W-1 Do Begin
+  L:=(HYMid(L,Src1^[I],(L+Src1^[I]-Lt) And Mask)+Diff^[I]) And Mask;
+  Lt:=Src1^[I]; Dst^[I]:=L;
+ End;
+ Left:=L; LeftTop:=Lt;
+End;
+
+Var HYBSwap: PEABuffer; HYBSwapSize: LongInt;
+
+Function HYRowPtr(Pl,Row: LongInt): PEABuffer;
+Begin HYRowPtr:=PEABuffer(@HYPlane[Pl]^[Int64(Row)*HYStr[Pl]]); End;
+Function HYAt(P: PEABuffer; Off: LongInt): PEABuffer;
+Begin HYAt:=PEABuffer(@P^[Off]); End;
+
+Procedure HYLeftRow(Row: PEABuffer; Tmp: PEABuffer; W: LongInt; Var Acc: LongInt);
+Begin
+ If HYBps<=8 Then Acc:=HYAddLeft8(Row,Tmp,W,Acc)
+ Else Acc:=HYAddLeft16(PHYW(Row),PHYW(Tmp),HYN-1,W,Acc);
+End;
+Procedure HYAddRow(Pl,Row,Back,W: LongInt);
+Begin
+ If HYBps<=8 Then HYAddBytes8(HYRowPtr(Pl,Row),HYRowPtr(Pl,Row-Back),W)
+ Else HYAddBytes16(PHYW(HYRowPtr(Pl,Row)),PHYW(HYRowPtr(Pl,Row-Back)),HYN-1,W);
+End;
+
+{ decode_slice : True si la trame est produite }
+Function HYSlice(BufSize,TableSize: LongInt): Boolean;
+Var
+ Pl,W,H,Y,Cy,LeftV,LeftY,LeftU,Left,LeftTop,LtY,LtU,LtV,Wd,Wd2,LastLine,Il,I,Bk: LongInt;
+ LC: Array[0..3] Of Byte; Yd,Ud,Vd,Pr,Dst: PEABuffer; Bpr,Back: LongInt;
+Begin
+ HYSlice:=False;
+ HYBuf:=PEABuffer(@HYBSwap^[TableSize]); HYBits:=(BufSize-TableSize)*8; HYPos:=0;
+ Wd:=HYW; Wd2:=HYW Shr 1; Il:=HYInterlaced; Back:=1+Il;
+ If HYVer>2 Then Begin
+  For Pl:=0 To HYNPl-1 Do Begin
+   W:=HYW; H:=HYH;
+   If (HYChroma<>0) And ((Pl=1) Or (Pl=2)) Then Begin W:=W Shr HYChH; H:=H Shr HYChV; End;
+   If HYPred<=1 Then Begin
+    HYPlaneRow(W,Pl); Left:=0; HYLeftRow(HYRowPtr(Pl,0),HYT[0],W,Left);
+    For Y:=1 To H-1 Do Begin
+     HYPlaneRow(W,Pl); HYLeftRow(HYRowPtr(Pl,Y),HYT[0],W,Left);
+     If HYPred=1 Then If Y>Il Then HYAddRow(Pl,Y,Back,W);
+    End;
+   End Else If HYPred=2 Then Begin
+    HYPlaneRow(W,Pl); Left:=0; HYLeftRow(HYRowPtr(Pl,0),HYT[0],W,Left);
+    Y:=1;
+    If Y<H Then Begin
+     If Il<>0 Then Begin HYPlaneRow(W,Pl); HYLeftRow(HYRowPtr(Pl,1),HYT[0],W,Left); Inc(Y); End;
+     If Y<H Then Begin
+      LeftTop:=HYPlane[Pl]^[0];
+      HYPlaneRow(W,Pl);
+      If HYBps<=8 Then HYMedian8(HYRowPtr(Pl,Y),HYRowPtr(Pl,0),HYT[0],W,Left,LeftTop)
+      Else HYMedian16(PHYW(HYRowPtr(Pl,Y)),PHYW(HYRowPtr(Pl,0)),PHYW(HYT[0]),HYN-1,W,Left,LeftTop);
+      Inc(Y);
+      While Y<H Do Begin
+       HYPlaneRow(W,Pl);
+       If HYBps<=8 Then HYMedian8(HYRowPtr(Pl,Y),HYRowPtr(Pl,Y-Back),HYT[0],W,Left,LeftTop)
+       Else HYMedian16(PHYW(HYRowPtr(Pl,Y)),PHYW(HYRowPtr(Pl,Y-Back)),PHYW(HYT[0]),HYN-1,W,Left,LeftTop);
+       Inc(Y);
+      End;
+     End;
+    End;
+   End;
+  End;
+ End Else If HYBpp<24 Then Begin
+  LeftV:=HYGet(8); HYPlane[2]^[0]:=LeftV;
+  LeftY:=HYGet(8); HYPlane[0]^[1]:=LeftY;
+  LeftU:=HYGet(8); HYPlane[1]^[0]:=LeftU;
+  HYPlane[0]^[0]:=HYGet(8);
+  HY422(Wd-2);
+  LeftY:=HYAddLeft8(HYAt(HYRowPtr(0,0),2),HYT[0],Wd-2,LeftY);
+  LeftU:=HYAddLeft8(HYAt(HYRowPtr(1,0),1),HYT[1],Wd2-1,LeftU);
+  LeftV:=HYAddLeft8(HYAt(HYRowPtr(2,0),1),HYT[2],Wd2-1,LeftV);
+  If HYPred<=1 Then Begin
+   Cy:=1; Y:=1;
+   While Y<HYH Do Begin
+    If HYBpp=12 Then Begin
+     HYGray(Wd); Yd:=HYRowPtr(0,Y);
+     LeftY:=HYAddLeft8(Yd,HYT[0],Wd,LeftY);
+     If HYPred=1 Then If Y>Il Then HYAddBytes8(Yd,HYRowPtr(0,Y-Back),Wd);
+     Inc(Y); If Y>=HYH Then Break;
+    End;
+    Yd:=HYRowPtr(0,Y); Ud:=HYRowPtr(1,Cy); Vd:=HYRowPtr(2,Cy);
+    HY422(Wd);
+    LeftY:=HYAddLeft8(Yd,HYT[0],Wd,LeftY);
+    LeftU:=HYAddLeft8(Ud,HYT[1],Wd2,LeftU);
+    LeftV:=HYAddLeft8(Vd,HYT[2],Wd2,LeftV);
+    If HYPred=1 Then If Cy>Il Then Begin
+     HYAddBytes8(Yd,HYRowPtr(0,Y-Back),Wd);
+     HYAddBytes8(Ud,HYRowPtr(1,Cy-Back),Wd2);
+     HYAddBytes8(Vd,HYRowPtr(2,Cy-Back),Wd2);
+    End;
+    Inc(Y); Inc(Cy);
+   End;
+  End Else If HYPred=2 Then Begin
+   Cy:=1; Y:=1;
+   If Y<HYH Then Begin
+    If Il<>0 Then Begin
+     HY422(Wd);
+     LeftY:=HYAddLeft8(HYRowPtr(0,1),HYT[0],Wd,LeftY);
+     LeftU:=HYAddLeft8(HYRowPtr(1,1),HYT[1],Wd2,LeftU);
+     LeftV:=HYAddLeft8(HYRowPtr(2,1),HYT[2],Wd2,LeftV);
+     Inc(Y); Inc(Cy);
+    End;
+    If Y<HYH Then Begin
+     HY422(4);
+     LeftY:=HYAddLeft8(HYRowPtr(0,Back),HYT[0],4,LeftY);
+     LeftU:=HYAddLeft8(HYRowPtr(1,Back),HYT[1],2,LeftU);
+     LeftV:=HYAddLeft8(HYRowPtr(2,Back),HYT[2],2,LeftV);
+     LtY:=HYPlane[0]^[3];
+     HY422(Wd-4);
+     HYMedian8(HYAt(HYRowPtr(0,Back),4),HYAt(HYRowPtr(0,0),4),HYT[0],Wd-4,LeftY,LtY);
+     LtU:=HYPlane[1]^[1]; LtV:=HYPlane[2]^[1];
+     HYMedian8(HYAt(HYRowPtr(1,Back),2),HYAt(HYRowPtr(1,0),2),HYT[1],Wd2-2,LeftU,LtU);
+     HYMedian8(HYAt(HYRowPtr(2,Back),2),HYAt(HYRowPtr(2,0),2),HYT[2],Wd2-2,LeftV,LtV);
+     Inc(Y); Inc(Cy);
+     While Y<HYH Do Begin
+      If HYBpp=12 Then Begin
+       While 2*Cy>Y Do Begin
+        HYGray(Wd); Yd:=HYRowPtr(0,Y);
+        HYMedian8(Yd,HYRowPtr(0,Y-Back),HYT[0],Wd,LeftY,LtY);
+        Inc(Y);
+       End;
+       If Y>=HYH Then Break;
+      End;
+      HY422(Wd);
+      Yd:=HYRowPtr(0,Y); Ud:=HYRowPtr(1,Cy); Vd:=HYRowPtr(2,Cy);
+      HYMedian8(Yd,HYRowPtr(0,Y-Back),HYT[0],Wd,LeftY,LtY);
+      HYMedian8(Ud,HYRowPtr(1,Cy-Back),HYT[1],Wd2,LeftU,LtU);
+      HYMedian8(Vd,HYRowPtr(2,Cy-Back),HYT[2],Wd2,LeftV,LtV);
+      Inc(Y); Inc(Cy);
+     End;
+    End;
+   End;
+  End;
+ End Else Begin
+  Bpr:=HYStr[0]; LastLine:=(HYH-1)*Bpr;
+  Dst:=HYPlane[0];
+  If HYBpp=32 Then Begin
+   LC[3]:=HYGet(8); LC[2]:=HYGet(8); LC[1]:=HYGet(8); LC[0]:=HYGet(8);
+  End Else Begin
+   LC[2]:=HYGet(8); LC[1]:=HYGet(8); LC[0]:=HYGet(8); LC[3]:=255; HYGet(8);
+  End;
+  For I:=0 To 3 Do Dst^[LastLine+I]:=LC[I];
+  If HYPred<=1 Then Begin
+   HYBgr(Wd-1);
+   HYLeftBgr(HYAt(Dst,LastLine+4),Wd-1,LC);
+   For Y:=HYH-2 DownTo 0 Do Begin
+    HYBgr(Wd);
+    HYLeftBgr(HYAt(Dst,Y*Bpr),Wd,LC);
+    If HYPred=1 Then Begin
+     If HYBpp<>32 Then LC[3]:=0;
+     If Y<HYH-1-Il Then HYAddBytes8(HYAt(Dst,Y*Bpr),HYAt(Dst,Y*Bpr+Back*Bpr),4*Wd);
+    End;
+   End;
+  End;
+ End;
+ HYSlice:=True;
+End;
+
+Var HYOut: PEABuffer; HYOutSize: LongInt; HYStrictFmt: Boolean;
+
+{ initialisation d'apres l'en-tete AVI ; retourne '' ou un message d'erreur }
+Function HYInit(Ext: PEABuffer; ExtLen,Bits,W,H: LongInt; IsFFVH: Boolean): String;
+Var Method,Interlace,Code,I,Pw,Ph,BytesPer: LongInt; Ok: Boolean;
+Begin
+ HYInit:='';
+ HYDecInit; HYW:=W; HYH:=H;
+ HYInterlaced:=Ord(H>288);
+ If ExtLen>0 Then Begin
+  If ((Bits And 7)<>0) And (Bits<>12) Then HYVer:=1
+  Else If (ExtLen>3) And (Ext^[3]=0) Then HYVer:=2 Else HYVer:=3;
+ End Else HYVer:=0;
+ HYBps:=8; HYN:=256; HYVlcN:=256; HYChroma:=1; HYYuv:=0; HYAlpha:=0;
+ If HYVer>=2 Then Begin
+  If ExtLen<4 Then Begin HYInit:='huffyuv: extradata incorrect.'; Exit; End;
+  Method:=Ext^[0]; HYDecor:=Ord((Method And 64)<>0); HYPred:=Method And 63;
+  If HYVer=2 Then Begin
+   HYBpp:=Ext^[1]; If HYBpp=0 Then HYBpp:=Bits And Not 7;
+  End Else Begin
+   HYBps:=(Ext^[1] Shr 4)+1; HYN:=1 Shl HYBps; HYVlcN:=HYN; If HYVlcN>HYMaxVlc Then HYVlcN:=HYMaxVlc;
+   HYChH:=Ext^[1] And 3; HYChV:=(Ext^[1] Shr 2) And 3;
+   HYYuv:=Ext^[2] And 1; HYChroma:=Ord((Ext^[2] And 3)<>0); HYAlpha:=Ord((Ext^[2] And 4)<>0);
+  End;
+  Interlace:=(Ext^[2] And $30) Shr 4;
+  If Interlace=1 Then HYInterlaced:=1 Else If Interlace=2 Then HYInterlaced:=0;
+  HYContext:=Ord((Ext^[2] And $40)<>0);
+  If HYReadTables(PEABuffer(@Ext^[4]),ExtLen-4)<0 Then Begin HYInit:='huffyuv: tables Huffman incorrectes.'; Exit; End;
+ End Else Begin
+  Case Bits And 7 Of
+   1: Begin HYPred:=0; HYDecor:=0; End;
+   2: Begin HYPred:=0; HYDecor:=1; End;
+   3: Begin HYPred:=1; HYDecor:=Ord(Bits>=24); End;
+   4: Begin HYPred:=2; HYDecor:=0; End;
+   Else Begin HYPred:=0; HYDecor:=0; End;
+  End;
+  HYBpp:=Bits And Not 7; HYContext:=0;
+  If Not HYOldTables Then Begin HYInit:='huffyuv: tables Huffman incorrectes.'; Exit; End;
+ End;
+ BytesPer:=1;
+ If HYVer<=2 Then Begin
+  Case HYBpp Of
+   12: Begin HYChH:=1; HYChV:=1; HYYuv:=1; HYFmt:=7; End;
+   16: Begin HYChH:=1; HYChV:=0; HYYuv:=1; HYFmt:=7; End;
+   24: HYFmt:=3;
+   32: Begin HYFmt:=3; HYAlpha:=1; End;
+   Else Begin HYInit:='huffyuv: profondeur incorrecte.'; Exit; End;
+  End;
+  HYNPl:=3;
+ End Else Begin
+  Ok:=False;
+  If (HYChroma=0) And (HYYuv=0) And (HYAlpha=0) And ((HYBps=8) Or (HYBps=16)) And (HYChH=0) And (HYChV=0) Then Begin Ok:=True; HYFmt:=7; End
+  Else If (HYChroma<>0) And (HYYuv=0) And (HYChH=0) And (HYChV=0) And (HYAlpha=0) And (HYBps in [8,9,10,12,14,16]) Then Begin Ok:=True; HYFmt:=9; End
+  Else If (HYChroma<>0) And (HYYuv=0) And (HYChH=0) And (HYChV=0) And (HYAlpha<>0) And (HYBps=8) Then Begin Ok:=True; HYFmt:=9; End
+  Else If (HYChroma<>0) And (HYYuv<>0) Then Begin
+   If ((HYChH=0) And (HYChV=0)) Or ((HYChH=1) And (HYChV=0)) Or ((HYChH=1) And (HYChV=1)) Then Begin
+    If HYAlpha=0 Then Ok:=HYBps in [8,9,10,12,14,16] Else Ok:=HYBps in [8,9,10,16];
+   End Else If ((HYChH=2) And (HYChV=0)) Or ((HYChH=0) And (HYChV=1)) Or ((HYChH=2) And (HYChV=2)) Then
+    Ok:=(HYBps=8) And (HYAlpha=0);
+   HYFmt:=7;
+  End;
+  If Not Ok Then Begin HYInit:='huffyuv: format de pixels non pris en charge.'; Exit; End;
+  If (HYFmt=9) And (HYBps>8) Then Begin HYInit:='huffyuv: GBR >8 bits non pris en charge.'; Exit; End;
+  If HYBps>8 Then HYFmt:=8;
+ End;
+ If Odd(W) And (HYAlpha=0) Then Begin
+  If (HYVer<=2) And (HYBpp<24) Then Begin HYInit:='huffyuv: largeur paire requise.'; Exit; End;
+  If (HYVer>2) And (HYBps=8) And (HYChroma<>0) And (HYYuv<>0) And (HYChH=1) And (HYChV<=1) Then Begin HYInit:='huffyuv: largeur paire requise.'; Exit; End;
+ End;
+ If (HYPred=2) And ((W Mod 4)<>0) And (HYAlpha=0) Then Begin
+  If ((HYVer<=2) And (HYBpp=16)) Or ((HYVer>2) And (HYBps=8) And (HYChroma<>0) And (HYYuv<>0) And (HYChH=1) And (HYChV=0)) Then Begin HYInit:='huffyuv: largeur multiple de 4 requise.'; Exit; End;
+ End;
+ If (HYVer>2) And (HYBps>8) Then BytesPer:=2;
+ { plans }
+ For I:=0 To 3 Do Begin HYPlane[I]:=Nil; HYT[I]:=Nil; End;
+ If (HYVer<=2) And (HYBpp>=24) Then Begin
+  HYStr[0]:=4*W; HYPw[0]:=W; HYPh[0]:=H; HYNPl:=1;
+ End Else If HYVer<=2 Then Begin
+  HYStr[0]:=W; HYPw[0]:=W; HYPh[0]:=H;
+  Pw:=(W+1) Div 2; If HYBpp=12 Then Ph:=(H+1) Div 2 Else Ph:=H;
+  HYStr[1]:=Pw; HYPw[1]:=Pw; HYPh[1]:=Ph; HYStr[2]:=Pw; HYPw[2]:=Pw; HYPh[2]:=Ph;
+ End Else Begin
+  HYPw[0]:=W; HYPh[0]:=H; HYStr[0]:=W*BytesPer;
+  For I:=1 To 2 Do
+   If HYChroma<>0 Then Begin
+    HYPw[I]:=(W+(1 Shl HYChH)-1) Shr HYChH; HYPh[I]:=(H+(1 Shl HYChV)-1) Shr HYChV; HYStr[I]:=HYPw[I]*BytesPer;
+   End;
+  If HYAlpha<>0 Then Begin HYPw[3]:=W; HYPh[3]:=H; HYStr[3]:=W*BytesPer; End;
+ End;
+ For I:=0 To 3 Do If HYT[I]=Nil Then Begin GetMem(HYT[I],4*W+16+64); FillChar(HYT[I]^,4*W+16+64,0); End;
+End;
+
+Procedure HYFreeFrame;
+Var I: LongInt;
+Begin
+ For I:=0 To 3 Do If HYPlane[I]<>Nil Then Begin FreeMem(HYPlane[I],Int64(HYStr[I])*HYPh[I]+64); HYPlane[I]:=Nil; End;
+End;
+
+{ une trame ; True si une image est produite dans HYPlane }
+Function HYFrame(Pk: PEABuffer; Sz: LongInt): Boolean;
+Var I,TableSize,NPl: LongInt; T: Byte;
+Begin
+ HYFrame:=False;
+ If Sz<(HYW*HYH+7) Div 8 Then Exit;
+ If HYBSwapSize<Sz+128 Then Begin
+  If HYBSwap<>Nil Then FreeMem(HYBSwap,HYBSwapSize);
+  HYBSwapSize:=Sz+128; GetMem(HYBSwap,HYBSwapSize);
+ End;
+ FillChar(HYBSwap^,HYBSwapSize,0);
+ I:=0;
+ While I+4<=Sz Do Begin
+  HYBSwap^[I]:=Pk^[I+3]; HYBSwap^[I+1]:=Pk^[I+2]; HYBSwap^[I+2]:=Pk^[I+1]; HYBSwap^[I+3]:=Pk^[I]; Inc(I,4);
+ End;
+ TableSize:=0;
+ If HYContext<>0 Then Begin
+  HYBuf:=HYBSwap; HYBits:=Sz*8;
+  TableSize:=HYReadTables(HYBSwap,Sz);
+  If TableSize<0 Then Exit;
+ End;
+ HYFreeFrame;
+ NPl:=HYNPl; If HYVer<=2 Then Begin If HYBpp>=24 Then NPl:=1 Else NPl:=3; End;
+ For I:=0 To NPl-1 Do Begin
+  GetMem(HYPlane[I],Int64(HYStr[I])*HYPh[I]+64); FillChar(HYPlane[I]^,Int64(HYStr[I])*HYPh[I]+64,0);
+ End;
+ HYFrame:=HYSlice(Sz,TableSize);
+End;
+
 Procedure DecodeAVIX(Const Source,Target: String; Mode,Kind: LongInt);
-Var Pos,PkPos,PkLen,RN,RD: LongInt; Ok: Boolean;
+Var Pos,PkPos,PkLen,RN,RD,I,Y,X,Cw,Ch,Bs,Msg2: LongInt; Ok: Boolean; Msg: String;
 Begin
  AXScan(Source);
  RN:=AXRate; RD:=AXScale; NVGcd(RN,RD);
@@ -29585,16 +30172,58 @@ Begin
    NVBegin(Mode,Target,AXW,AXH,1,RN,RD); NVAviSar(AXW,AXH);
    GetMem(FSVPic,AXW*AXH*3+64); FillChar(FSVPic^,AXW*AXH*3+64,0); FSVTmp:=Nil; FSVTmpSize:=0;
   End;
+  20: Begin
+   If (AXFcc<>'HFYU') And (AXFcc<>'FFVH') And (AXFcc<>'hfyu') Then Fail('huffyuv: flux AVI HFYU ou FFVH requis.');
+   Msg:=HYInit(PEABuffer(@AXF^[AXExtra]),AXExtraLen,AXBits,AXW,AXH,AXFcc='FFVH');
+   If Msg<>'' Then Fail(Msg);
+   NVBegin(Mode,Target,AXW,AXH,HYFmt,RN,RD); NVAviSar(AXW,AXH);
+   If HYFmt=3 Then NVHasAlpha:=HYAlpha<>0;
+   If (HYFmt=7) Or (HYFmt=8) Then Begin
+    If HYChroma=0 Then Begin
+     NVSubX:=0; NVSubY:=0; NVCW:=0; NVCH:=0;
+     If HYFmt=7 Then NVYTag:='Cmono' Else NVYTag:='Cmono16';
+    End Else Begin
+     NVSubX:=HYChH; NVSubY:=HYChV; NVCW:=(AXW+(1 Shl HYChH)-1) Shr HYChH; NVCH:=(AXH+(1 Shl HYChV)-1) Shr HYChV;
+     If (HYChH=1) And (HYChV=1) Then NVYTag:='C420' Else If (HYChH=1) And (HYChV=0) Then NVYTag:='C422'
+     Else If (HYChH=0) And (HYChV=0) Then NVYTag:='C444' Else If HYChH=2 Then Begin If HYChV=0 Then NVYTag:='C411' Else NVYTag:='C410'; End
+     Else NVYTag:='C440';
+     If HYFmt=7 Then Begin If NVYTag='C420' Then NVYTag:='C420jpeg'; End
+     Else Begin
+      NVYTag:=NVYTag+'p'+Chr(48+HYBps Div 10)+Chr(48+HYBps Mod 10);
+      If HYBps<10 Then Begin NVYTag:=Copy(NVYTag,1,Length(NVYTag)-2)+Chr(48+HYBps); End;
+     End;
+    End;
+   End;
+   HYOutSize:=NVFrameBytes+64; GetMem(HYOut,HYOutSize);
+  End;
  End;
  Pos:=AXMovie;
  While AXNext(Pos,PkPos,PkLen) Do Begin
   Ok:=False;
   Case Kind Of
    18: Ok:=FSVFrame(PEABuffer(@AXF^[PkPos]),PkLen);
+   20: Begin
+    Ok:=HYFrame(PEABuffer(@AXF^[PkPos]),PkLen);
+    If Ok Then Begin
+     FillChar(HYOut^,HYOutSize,0);
+     If HYFmt=3 Then Move(HYPlane[0]^,HYOut^,AXW*AXH*4)
+     Else If HYFmt=9 Then Begin
+      For Y:=0 To AXH-1 Do For X:=0 To AXW-1 Do Begin
+       HYOut^[(Y*AXW+X)*3]:=HYPlane[2]^[Y*HYStr[2]+X]; HYOut^[(Y*AXW+X)*3+1]:=HYPlane[0]^[Y*HYStr[0]+X]; HYOut^[(Y*AXW+X)*3+2]:=HYPlane[1]^[Y*HYStr[1]+X];
+      End;
+     End Else Begin
+      If HYFmt=7 Then Bs:=1 Else Bs:=2;
+      For Y:=0 To AXH-1 Do Move(HYPlane[0]^[Y*HYStr[0]],HYOut^[Y*AXW*Bs],AXW*Bs);
+      If HYChroma<>0 Then For I:=1 To 2 Do
+       For Y:=0 To NVCH-1 Do Move(HYPlane[I]^[Y*HYStr[I]],HYOut^[(AXW*AXH+(I-1)*NVCW*NVCH+Y*NVCW)*Bs],NVCW*Bs);
+     End;
+    End;
+   End;
   End;
   If Ok Then Begin
    Case Kind Of
     18: NVEmit(FSVPic);
+    20: NVEmit(HYOut);
    End;
   End Else NVRepeat;
   If NVDone Then Break;
@@ -33844,6 +34473,7 @@ BEGIN
    WriteLn('D A    flac            FLAC (Free Lossless Audio Codec)');
    WriteLn('D V D  escape124       Escape 124');
    WriteLn('D V D  flashsv         Flash Screen Video');
+   WriteLn('DEVSD  ffvhuff         Huffyuv FFmpeg variant (decodeur natif)');
    WriteLn('D V D  eacmv           Electronic Arts CMV video');
    WriteLn('D V D  eatgq           Electronic Arts TGQ video');
    WriteLn('D V    eatgv           Electronic Arts TGV video');
@@ -34099,7 +34729,8 @@ BEGIN
   Else If (AsvTag='CLJR') Or (AsvTag='cljr') Then NVKind:=7 Else If (AsvTag='cyuv') Or (AsvTag='CYUV') Then NVKind:=8
   Else If (AsvTag='cvid') Or (AsvTag='CVID') Then NVKind:=9 Else If (AsvTag='AVdn') Or (AsvTag='AVDN') Or (AsvTag='AVdh') Then NVKind:=11
   Else If (AsvTag='dvsd') Or (AsvTag='DVSD') Or (AsvTag='dvcs') Or (AsvTag='DVCS') Or (AsvTag='dv25') Or (AsvTag='dvsl') Or (AsvTag='DVSL') Or (AsvTag='dv50') Or (AsvTag='dvc ') Or (AsvTag='cdvc') Or (AsvTag='CDVC') Or (AsvTag='dvcp') Or (AsvTag='dvpp') Then NVKind:=14
-  Else If AsvTag='FSV1' Then NVKind:=18;
+  Else If AsvTag='FSV1' Then NVKind:=18
+  Else If (AsvTag='HFYU') Or (AsvTag='FFVH') Or (AsvTag='hfyu') Then NVKind:=20;
  End;
  NVAudioOut:=(OutputFormat='wav') Or (OutputFormat='mp3') Or (OutputFormat='ac3') Or (OutputFormat='adx') Or (OutputFormat='aiff');
  If (NVKind<>0) And Not (((NVKind=1) Or (NVKind=2) Or (NVKind=15) Or (NVKind=17)) And NVAudioOut) Then Begin
