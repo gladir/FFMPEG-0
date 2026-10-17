@@ -3598,6 +3598,7 @@ Function FormatName(S: String): String;Begin
  If S='dnx' Then S:='dnxhd';
  If S='dif' Then S:='dv';
  If S='idx' Then S:='vobsub';
+ If (S='ts') Or (S='m2ts') Then S:='mpegts';
  If S='rmvb' Then S:='rm';
  If S='cavs' Then S:='cavsvideo';
  FormatName:=S;
@@ -3794,6 +3795,25 @@ Begin
  If VideoRateLimited>0 Then WriteLn(VideoRateLimited,' image(s): budget depasse (quantification maximale ou QP B impose).');
 End;
 
+Function ProbeDvbSub(Var B: Array Of Byte; N: LongInt): Boolean;
+Var I,J,K,Mn,Typ,Len,MaxScore,P: LongInt; Hist: Array[0..5] Of Byte;
+Begin
+ MaxScore:=0;
+ For I:=0 To N-1 Do If B[I]=$0F Then Begin
+  P:=I; FillChar(Hist,SizeOf(Hist),0); Mn:=255; J:=0;
+  While 6<N-P Do Begin
+   If B[P]<>$0F Then Break;
+   Typ:=B[P+1]; Len:=B[P+4]*256+B[P+5];
+   If Typ=$80 Then Else If (Typ>=$10) And (Typ<=$14) Then Inc(Hist[Typ-$10]) Else Break;
+   If 6+Len>N-P Then Break;
+   Inc(P,6+Len); Inc(J);
+  End;
+  For K:=0 To 3 Do If Hist[K]<Mn Then Mn:=Hist[K];
+  If (Mn<>0) And (J>MaxScore) Then MaxScore:=J;
+ End;
+ ProbeDvbSub:=MaxScore>5;
+End;
+
 Function Probe(Const Name: String): String;
 Var
  B: Array[0..1083] Of Byte;
@@ -3819,6 +3839,8 @@ Begin
  Until False;
  CloseRead;
  Probe:='';
+ If N>=752 Then If (B[0]=$47) And (B[188]=$47) And (B[376]=$47) And (B[564]=$47) And (B[752]=$47) Then Begin Probe:='mpegts'; Exit; End;
+ If N>=60 Then If ProbeDvbSub(B,N) Then Begin Probe:='dvbsub'; Exit; End;
  If N>=20 Then If (B[0]=35) And (B[1]=32) And (B[2]=86) And (B[3]=111) And (B[4]=98) And (B[5]=83) And (B[6]=117) And (B[7]=98) And (B[8]=32) And (B[9]=105) And (B[10]=110) And (B[11]=100) And (B[12]=101) And (B[13]=120) And (B[14]=32) And (B[15]=102) And (B[16]=105) And (B[17]=108) And (B[18]=101) And (B[19]=44) Then Begin Probe:='vobsub'; Exit; End;
  If N>=8 Then If (B[0]=80) And (B[1]=78) And (B[2]=71) And (B[3]=83) And (B[4]=85) And (B[5]=66) And (B[6]=32) And (B[7]=49) Then Begin Probe:='psub'; Exit; End;
  If N>=10 Then If ((B[0]=101) And (B[1]=97) And (B[2]=51) And (B[3]>=2) And (B[3]<=4)) Or
@@ -23875,7 +23897,7 @@ Type
  End;
  PXSEv=^TXSEv;
 Var
- XSEvs: Array[0..19999] Of PXSEv; XSN: LongInt; XSW,XSH: LongInt;
+ XSEvs: Array[0..19999] Of PXSEv; XSN: LongInt; XSW,XSH: LongInt; XSFromPng: Boolean;
 
 Function XSPos(Const Sub,S: String): LongInt;
 Begin XSPos:=Pos(Sub,S); End;
@@ -24108,6 +24130,8 @@ Begin
   If Found Then Break;
  End;
  If Not Found Then Fail('sous-titre: image trop riche en couleurs.');
+ { l'indice 0 est la couleur transparente quand il y en a une (fond des regions DVB) }
+ For J:=1 To N-1 Do If Keys[J]=0 Then Begin Keys[J]:=Keys[0]; Keys[0]:=0; Break; End;
  R^.NCol:=N;
  For J:=0 To N-1 Do R^.Pal[J]:=0;
  For Y:=0 To R^.H-1 Do For X:=0 To R^.W-1 Do Begin
@@ -24878,7 +24902,7 @@ End;
 Procedure XSLoadPsub(Const Source: String);
 Var F: PEABuffer; Size,P,K,I,W,H,Code,Q: LongInt; Line,Dir,Tok,Fn: String; T0,T1: Int64; Rgba: PEABuffer; E: PXSEv; Parts: Array[0..3] Of String;
 Begin
- NVLoad(Source,F,Size); CloseRead; Dir:=XSDirOf(Source); P:=0; XSN:=0; XSW:=0; XSH:=0;
+ NVLoad(Source,F,Size); CloseRead; Dir:=XSDirOf(Source); P:=0; XSN:=0; XSW:=0; XSH:=0; XSFromPng:=True;
  While P<Size Do Begin
   K:=P; While (K<Size) And (F^[K]<>10) And (F^[K]<>13) Do Inc(K);
   Line:=''; For I:=P To K-1 Do If Length(Line)<250 Then Line:=Line+Chr(F^[I]);
@@ -24950,15 +24974,1162 @@ Begin
  FreeMem(Pk,70000); FreeMem(Sb,SubSize+64);
 End;
 
+{ ---- DVB subtitles: decodeur (libavcodec/dvbsubdec.c) ---- }
+Type
+ PDBClut=^TDBClut;
+ TDBClut=Record Id,Version: LongInt; C4: Array[0..3] Of LongInt; C16: Array[0..15] Of LongInt; C256: Array[0..255] Of LongInt; Next: PDBClut; End;
+ PDBObjDisp=^TDBObjDisp;
+ TDBObjDisp=Record ObjectId,RegionId,XPos,YPos,Fg,Bg: LongInt; RegionNext,ObjectNext: PDBObjDisp; End;
+ PDBObject=^TDBObject;
+ TDBObject=Record Id,Version,Typ: LongInt; DisplayList: PDBObjDisp; Next: PDBObject; End;
+ PDBRegDisp=^TDBRegDisp;
+ TDBRegDisp=Record RegionId,XPos,YPos: LongInt; Next: PDBRegDisp; End;
+ PDBRegion=^TDBRegion;
+ TDBRegion=Record
+  Id,Version,Width,Height,Depth,Clut,Bgcolor: LongInt;
+  Computed: Array[0..1023] Of Byte; HasComputed: Boolean; Pbuf: PEABuffer; BufSize: LongInt; Dirty: Boolean;
+  DisplayList: PDBObjDisp; Next: PDBRegion;
+ End;
+Var
+ DBDefClut: TDBClut; DBDefInit: Boolean;
+ DBVersion,DBTimeOut: LongInt; DBRegions: PDBRegion; DBCluts: PDBClut; DBObjects: PDBObject; DBDisplays: PDBRegDisp;
+ DBDefDef: Boolean; DBDefVersion,DBDefX,DBDefY,DBDefW,DBDefH: LongInt;
+ DBCount2: Array[0..256,0..255] Of LongInt;
+ DBEvPts: Int64; DBHaveSub: Boolean; DBSubEv: PXSEv;
+
+Function DBRgba(R,G,B,A: LongInt): LongInt;
+Begin DBRgba:=LongInt((Int64(A) Shl 24) Or (Int64(R) Shl 16) Or (Int64(G) Shl 8) Or B); End;
+
+Procedure DBInitDefaults;
+Var I,R,G,B,A: LongInt;
+Begin
+ If DBDefInit Then Exit;
+ DBDefInit:=True; A:=0;
+ FillChar(DBDefClut,SizeOf(DBDefClut),0); DBDefClut.Id:=-1;
+ DBDefClut.C4[0]:=DBRgba(0,0,0,0); DBDefClut.C4[1]:=DBRgba(255,255,255,255); DBDefClut.C4[2]:=DBRgba(0,0,0,255); DBDefClut.C4[3]:=DBRgba(127,127,127,255);
+ DBDefClut.C16[0]:=DBRgba(0,0,0,0);
+ For I:=1 To 15 Do Begin
+  If I<8 Then Begin
+   If (I And 1)<>0 Then R:=255 Else R:=0; If (I And 2)<>0 Then G:=255 Else G:=0; If (I And 4)<>0 Then B:=255 Else B:=0;
+  End Else Begin
+   If (I And 1)<>0 Then R:=127 Else R:=0; If (I And 2)<>0 Then G:=127 Else G:=0; If (I And 4)<>0 Then B:=127 Else B:=0;
+  End;
+  DBDefClut.C16[I]:=DBRgba(R,G,B,255);
+ End;
+ DBDefClut.C256[0]:=DBRgba(0,0,0,0);
+ For I:=1 To 255 Do Begin
+  R:=0; G:=0; B:=0;
+  If I<8 Then Begin
+   If (I And 1)<>0 Then R:=255 Else R:=0; If (I And 2)<>0 Then G:=255 Else G:=0; If (I And 4)<>0 Then B:=255 Else B:=0;
+   A:=63;
+  End Else Begin
+   Case I And $88 Of
+    $00: Begin
+     R:=0; If (I And 1)<>0 Then R:=85; If (I And $10)<>0 Then R:=R+170;
+     G:=0; If (I And 2)<>0 Then G:=85; If (I And $20)<>0 Then G:=G+170;
+     B:=0; If (I And 4)<>0 Then B:=85; If (I And $40)<>0 Then B:=B+170;
+     A:=255;
+    End;
+    $08: Begin
+     R:=0; If (I And 1)<>0 Then R:=85; If (I And $10)<>0 Then R:=R+170;
+     G:=0; If (I And 2)<>0 Then G:=85; If (I And $20)<>0 Then G:=G+170;
+     B:=0; If (I And 4)<>0 Then B:=85; If (I And $40)<>0 Then B:=B+170;
+     A:=127;
+    End;
+    $80: Begin
+     R:=127; If (I And 1)<>0 Then R:=R+43; If (I And $10)<>0 Then R:=R+85;
+     G:=127; If (I And 2)<>0 Then G:=G+43; If (I And $20)<>0 Then G:=G+85;
+     B:=127; If (I And 4)<>0 Then B:=B+43; If (I And $40)<>0 Then B:=B+85;
+     A:=255;
+    End;
+    Else Begin
+     R:=0; If (I And 1)<>0 Then R:=43; If (I And $10)<>0 Then R:=R+85;
+     G:=0; If (I And 2)<>0 Then G:=43; If (I And $20)<>0 Then G:=G+85;
+     B:=0; If (I And 4)<>0 Then B:=43; If (I And $40)<>0 Then B:=B+85;
+     A:=255;
+    End;
+   End;
+  End;
+  DBDefClut.C256[I]:=DBRgba(R,G,B,A);
+ End;
+End;
+
+Function DBGetObject(Id: LongInt): PDBObject;
+Var P: PDBObject;
+Begin P:=DBObjects; While (P<>Nil) And (P^.Id<>Id) Do P:=P^.Next; DBGetObject:=P; End;
+Function DBGetClut(Id: LongInt): PDBClut;
+Var P: PDBClut;
+Begin P:=DBCluts; While (P<>Nil) And (P^.Id<>Id) Do P:=P^.Next; DBGetClut:=P; End;
+Function DBGetRegion(Id: LongInt): PDBRegion;
+Var P: PDBRegion;
+Begin P:=DBRegions; While (P<>Nil) And (P^.Id<>Id) Do P:=P^.Next; DBGetRegion:=P; End;
+
+Procedure DBDeleteRegionDisplayList(Rg: PDBRegion);
+Var Obj,Obj2: PDBObject; Disp,ObjDisp: PDBObjDisp; Pp: ^PDBObjDisp; Pp2: ^PDBObject;
+Begin
+ While Rg^.DisplayList<>Nil Do Begin
+  Disp:=Rg^.DisplayList;
+  Obj:=DBGetObject(Disp^.ObjectId);
+  If Obj<>Nil Then Begin
+   Pp:=@Obj^.DisplayList; ObjDisp:=Pp^;
+   While (ObjDisp<>Nil) And (ObjDisp<>Disp) Do Begin Pp:=@ObjDisp^.ObjectNext; ObjDisp:=Pp^; End;
+   If ObjDisp<>Nil Then Begin
+    Pp^:=ObjDisp^.ObjectNext;
+    If Obj^.DisplayList=Nil Then Begin
+     Pp2:=@DBObjects; Obj2:=Pp2^;
+     While Obj2<>Obj Do Begin Pp2:=@Obj2^.Next; Obj2:=Pp2^; End;
+     Pp2^:=Obj2^.Next;
+     Dispose(Obj2);
+    End;
+   End;
+  End;
+  Rg^.DisplayList:=Disp^.RegionNext;
+  Dispose(Disp);
+ End;
+End;
+
+Procedure DBDeleteCluts;
+Var C: PDBClut;
+Begin While DBCluts<>Nil Do Begin C:=DBCluts; DBCluts:=C^.Next; Dispose(C); End; End;
+Procedure DBDeleteObjects;
+Var O: PDBObject;
+Begin While DBObjects<>Nil Do Begin O:=DBObjects; DBObjects:=O^.Next; Dispose(O); End; End;
+Procedure DBDeleteRegions;
+Var R: PDBRegion;
+Begin
+ While DBRegions<>Nil Do Begin
+  R:=DBRegions; DBRegions:=R^.Next;
+  DBDeleteRegionDisplayList(R);
+  If R^.Pbuf<>Nil Then FreeMem(R^.Pbuf,R^.BufSize+64);
+  Dispose(R);
+ End;
+End;
+
+Procedure DBReset;
+Var D: PDBRegDisp;
+Begin
+ DBDeleteRegions; DBDeleteObjects; DBDeleteCluts;
+ While DBDisplays<>Nil Do Begin D:=DBDisplays; DBDisplays:=D^.Next; Dispose(D); End;
+ DBVersion:=-1; DBTimeOut:=0; DBDefDef:=False; DBHaveSub:=False; DBSubEv:=Nil;
+End;
+
+{ lecteur de bits MSB d'une chaine de pixels }
+Var DBBitBuf: PEABuffer; DBBitSize,DBBitPos,DBPktLen: LongInt;
+Function DBBits(N: LongInt): LongInt;
+Var V,I: LongInt;
+Begin
+ V:=0;
+ For I:=1 To N Do Begin
+  V:=(V Shl 1) Or ((EAByte(DBBitBuf,DBBitSize,DBBitPos Shr 3) Shr (7-(DBBitPos And 7))) And 1);
+  Inc(DBBitPos);
+ End;
+ DBBits:=V;
+End;
+
+Type TDBMap=Array[0..15] Of Byte; PDBMap=^TDBMap;
+
+{ Src/Pos: tampon et position (avancee); retourne pixels_read }
+Function DBRead2Bit(Dest: PEABuffer; DLen: LongInt; Src: PEABuffer; Var Pos: LongInt; BufSize: LongInt; NonMod: LongInt; Map: PDBMap; XPos: LongInt): LongInt;
+Var Bits,Run,Px,Dp: LongInt;
+Procedure Put(V: LongInt);
+Begin If Map<>Nil Then V:=Map^[V]; Dest^[Dp]:=V; Inc(Dp); End;
+Begin
+ DBBitBuf:=PEABuffer(@Src^[Pos]); DBBitSize:=DBPktLen-Pos; DBBitPos:=0;
+ Px:=XPos; Dp:=XPos;
+ While (DBBitPos<BufSize*8) And (Px<DLen) Do Begin
+  Bits:=DBBits(2);
+  If Bits<>0 Then Begin
+   If (NonMod<>1) Or (Bits<>1) Then Begin Put(Bits); End;
+   Inc(Px);
+  End Else Begin
+   Bits:=DBBits(1);
+   If Bits=1 Then Begin
+    Run:=DBBits(3)+3; Bits:=DBBits(2);
+    If (NonMod=1) And (Bits=1) Then Inc(Px,Run)
+    Else Begin
+     If Map<>Nil Then Bits:=Map^[Bits];
+     While (Run>0) And (Px<DLen) Do Begin Dest^[Dp]:=Bits; Inc(Dp); Inc(Px); Dec(Run); End;
+    End;
+   End Else Begin
+    Bits:=DBBits(1);
+    If Bits=0 Then Begin
+     Bits:=DBBits(2);
+     If Bits=2 Then Begin
+      Run:=DBBits(4)+12; Bits:=DBBits(2);
+      If (NonMod=1) And (Bits=1) Then Inc(Px,Run)
+      Else Begin
+       If Map<>Nil Then Bits:=Map^[Bits];
+       While (Run>0) And (Px<DLen) Do Begin Dest^[Dp]:=Bits; Inc(Dp); Inc(Px); Dec(Run); End;
+      End;
+     End Else If Bits=3 Then Begin
+      Run:=DBBits(8)+29; Bits:=DBBits(2);
+      If (NonMod=1) And (Bits=1) Then Inc(Px,Run)
+      Else Begin
+       If Map<>Nil Then Bits:=Map^[Bits];
+       While (Run>0) And (Px<DLen) Do Begin Dest^[Dp]:=Bits; Inc(Dp); Inc(Px); Dec(Run); End;
+      End;
+     End Else If Bits=1 Then Begin
+      If Map<>Nil Then Bits:=Map^[0] Else Bits:=0;
+      Run:=2;
+      While (Run>0) And (Px<DLen) Do Begin Dest^[Dp]:=Bits; Inc(Dp); Inc(Px); Dec(Run); End;
+     End Else Begin
+      Inc(Pos,(DBBitPos+7) Shr 3); DBRead2Bit:=Px; Exit;
+     End;
+    End Else Begin
+     If Map<>Nil Then Bits:=Map^[0] Else Bits:=0;
+     Dest^[Dp]:=Bits; Inc(Dp); Inc(Px);
+    End;
+   End;
+  End;
+ End;
+ DBBits(6);
+ Inc(Pos,(DBBitPos+7) Shr 3);
+ DBRead2Bit:=Px;
+End;
+
+Function DBRead4Bit(Dest: PEABuffer; DLen: LongInt; Src: PEABuffer; Var Pos: LongInt; BufSize: LongInt; NonMod: LongInt; Map: PDBMap; XPos: LongInt): LongInt;
+Var Bits,Run,Px,Dp: LongInt;
+Procedure Put(V: LongInt);
+Begin If Map<>Nil Then V:=Map^[V]; Dest^[Dp]:=V; Inc(Dp); End;
+Begin
+ DBBitBuf:=PEABuffer(@Src^[Pos]); DBBitSize:=DBPktLen-Pos; DBBitPos:=0;
+ Px:=XPos; Dp:=XPos;
+ While (DBBitPos<BufSize*8) And (Px<DLen) Do Begin
+  Bits:=DBBits(4);
+  If Bits<>0 Then Begin
+   If (NonMod<>1) Or (Bits<>1) Then Put(Bits);
+   Inc(Px);
+  End Else Begin
+   Bits:=DBBits(1);
+   If Bits=0 Then Begin
+    Run:=DBBits(3);
+    If Run=0 Then Begin Inc(Pos,(DBBitPos+7) Shr 3); DBRead4Bit:=Px; Exit; End;
+    Inc(Run,2);
+    If Map<>Nil Then Bits:=Map^[0] Else Bits:=0;
+    While (Run>0) And (Px<DLen) Do Begin Dest^[Dp]:=Bits; Inc(Dp); Inc(Px); Dec(Run); End;
+   End Else Begin
+    Bits:=DBBits(1);
+    If Bits=0 Then Begin
+     Run:=DBBits(2)+4; Bits:=DBBits(4);
+     If (NonMod=1) And (Bits=1) Then Inc(Px,Run)
+     Else Begin
+      If Map<>Nil Then Bits:=Map^[Bits];
+      While (Run>0) And (Px<DLen) Do Begin Dest^[Dp]:=Bits; Inc(Dp); Inc(Px); Dec(Run); End;
+     End;
+    End Else Begin
+     Bits:=DBBits(2);
+     If Bits=2 Then Begin
+      Run:=DBBits(4)+9; Bits:=DBBits(4);
+      If (NonMod=1) And (Bits=1) Then Inc(Px,Run)
+      Else Begin
+       If Map<>Nil Then Bits:=Map^[Bits];
+       While (Run>0) And (Px<DLen) Do Begin Dest^[Dp]:=Bits; Inc(Dp); Inc(Px); Dec(Run); End;
+      End;
+     End Else If Bits=3 Then Begin
+      Run:=DBBits(8)+25; Bits:=DBBits(4);
+      If (NonMod=1) And (Bits=1) Then Inc(Px,Run)
+      Else Begin
+       If Map<>Nil Then Bits:=Map^[Bits];
+       While (Run>0) And (Px<DLen) Do Begin Dest^[Dp]:=Bits; Inc(Dp); Inc(Px); Dec(Run); End;
+      End;
+     End Else If Bits=1 Then Begin
+      If Map<>Nil Then Bits:=Map^[0] Else Bits:=0;
+      Run:=2;
+      While (Run>0) And (Px<DLen) Do Begin Dest^[Dp]:=Bits; Inc(Dp); Inc(Px); Dec(Run); End;
+     End Else Begin
+      If Map<>Nil Then Bits:=Map^[0] Else Bits:=0;
+      Dest^[Dp]:=Bits; Inc(Dp); Inc(Px);
+     End;
+    End;
+   End;
+  End;
+ End;
+ DBBits(8);
+ Inc(Pos,(DBBitPos+7) Shr 3);
+ DBRead4Bit:=Px;
+End;
+
+Function DBRead8Bit(Dest: PEABuffer; DLen: LongInt; Src: PEABuffer; Var Pos: LongInt; BufSize: LongInt; NonMod: LongInt; XPos: LongInt): LongInt;
+Var Bits,Run,Px,Dp,SEnd: LongInt;
+Begin
+ SEnd:=Pos+BufSize; Px:=XPos; Dp:=XPos;
+ While (Pos<SEnd) And (Px<DLen) Do Begin
+  Bits:=Src^[Pos]; Inc(Pos);
+  If Bits<>0 Then Begin
+   If (NonMod<>1) Or (Bits<>1) Then Begin Dest^[Dp]:=Bits; Inc(Dp); End;
+   Inc(Px);
+  End Else Begin
+   Bits:=EAByte(Src,DBPktLen,Pos); Inc(Pos);
+   Run:=Bits And $7F;
+   If (Bits And $80)=0 Then Begin
+    If Run=0 Then Begin DBRead8Bit:=Px; Exit; End;
+    Bits:=0;
+   End Else Begin Bits:=EAByte(Src,DBPktLen,Pos); Inc(Pos); End;
+   If (NonMod=1) And (Bits=1) Then Inc(Px,Run)
+   Else Begin
+    While (Run>0) And (Px<DLen) Do Begin Dest^[Dp]:=Bits; Inc(Dp); Inc(Px); Dec(Run); End;
+   End;
+  End;
+ End;
+ Inc(Pos);
+ DBRead8Bit:=Px;
+End;
+
+Procedure DBComputeDefaultClut(Clut: PEABuffer; Pix: PEABuffer; W,H: LongInt);
+Var
+ List: Array[0..255] Of Byte; ListInv: Array[0..255] Of Byte; CountTab: Array[0..255] Of LongInt;
+ Count,I,X,Y,V,Vl,Vr,Vt,Vb,Best,BestV,ScoreV,Score: LongInt; Cv: LongInt;
+Function Px(Xx,Yy: LongInt): LongInt;
+Begin Px:=Pix^[Xx+Yy*W]; End;
+Begin
+ FillChar(List,SizeOf(List),0); FillChar(CountTab,SizeOf(CountTab),0); FillChar(DBCount2,SizeOf(DBCount2),0);
+ For Y:=0 To H-1 Do For X:=0 To W-1 Do Begin
+  V:=Px(X,Y)+1;
+  If X<>0 Then Vl:=Px(X-1,Y)+1 Else Vl:=0;
+  If X+1<W Then Vr:=Px(X+1,Y)+1 Else Vr:=0;
+  If Y<>0 Then Vt:=Px(X,Y-1)+1 Else Vt:=0;
+  If Y+1<H Then Vb:=Px(X,Y+1)+1 Else Vb:=0;
+  If (V<>Vl) Or (V<>Vr) Or (V<>Vt) Or (V<>Vb) Then Inc(CountTab[V-1]);
+  Inc(DBCount2[Vl,V-1]); Inc(DBCount2[Vr,V-1]); Inc(DBCount2[Vt,V-1]); Inc(DBCount2[Vb,V-1]);
+ End;
+ For I:=0 To 255 Do DBCount2[I+1,I]:=0;
+ I:=0;
+ While I<256 Do Begin
+  Best:=0; BestV:=0;
+  For X:=0 To 255 Do Begin
+   ScoreV:=0;
+   If List[X]<>0 Then Continue;
+   Inc(ScoreV,DBCount2[0,X]);
+   For Y:=0 To 255 Do Inc(ScoreV,List[Y]*DBCount2[Y+1,X]);
+   If ScoreV<>0 Then Begin
+    Score:=(Int64(1024)*ScoreV) Div CountTab[X];
+    If Score>Best Then Begin Best:=Score; BestV:=X; End;
+   End;
+  End;
+  If Best=0 Then Break;
+  List[BestV]:=1; ListInv[I]:=BestV;
+  Inc(I);
+ End;
+ Count:=I-1; If Count<1 Then Count:=1;
+ Dec(I);
+ While I>=0 Do Begin
+  V:=I*255 Div Count;
+  Cv:=DBRgba(V Div 2,V,V Div 2,V);
+  PLongInt(@Clut^[4*ListInv[I]])^:=Cv;
+  Dec(I);
+ End;
+End;
+
+Type PDBLong=^LongInt;
+
+Procedure DBSaveSubtitleSet(Pts: Int64);
+Var
+ D: PDBRegDisp; Rg: PDBRegion; E: PXSEv; R: PXSRect; OffX,OffY,I,N: LongInt; Cl: PDBClut; UseDef: Boolean; Tab: PDBClut;
+Begin
+ OffX:=0; OffY:=0;
+ If DBHaveSub Then Begin If DBSubEv^.NR>0 Then Exit; XSDropLast; End;
+ If DBDefDef Then Begin OffX:=DBDefX; OffY:=DBDefY; End;
+ E:=XSNew; E^.T0:=Pts; E^.T1:=Pts+Int64(DBTimeOut)*1000;
+ D:=DBDisplays;
+ While D<>Nil Do Begin
+  Rg:=DBGetRegion(D^.RegionId);
+  If (Rg<>Nil) And Rg^.Dirty Then Begin
+   R:=XSAddRect(E,D^.XPos+OffX,D^.YPos+OffY,Rg^.Width,Rg^.Height);
+   R^.NCol:=1 Shl Rg^.Depth;
+   Cl:=DBGetClut(Rg^.Clut); UseDef:=(Cl=Nil);
+   If Cl=Nil Then Cl:=@DBDefClut;
+   Case Rg^.Depth Of
+    2: For I:=0 To 3 Do R^.Pal[I]:=Cl^.C4[I];
+    8: For I:=0 To 255 Do R^.Pal[I]:=Cl^.C256[I];
+    Else For I:=0 To 15 Do R^.Pal[I]:=Cl^.C16[I];
+   End;
+   If Rg^.BufSize>0 Then Move(Rg^.Pbuf^,R^.Bmp^,Rg^.BufSize);
+   If UseDef Then Begin
+    If Not Rg^.HasComputed Then Begin
+     FillChar(Rg^.Computed,SizeOf(Rg^.Computed),0);
+     DBComputeDefaultClut(PEABuffer(@Rg^.Computed),R^.Bmp,R^.W,R^.H);
+     Rg^.HasComputed:=True;
+    End;
+    For I:=0 To 255 Do R^.Pal[I]:=PDBLong(@Rg^.Computed[4*I])^;
+   End;
+  End;
+  D:=D^.Next;
+ End;
+ DBSubEv:=E; DBHaveSub:=True;
+End;
+
+Procedure DBParsePixelBlock(Disp: PDBObjDisp; Buf: PEABuffer; Pos0,BufSize,TopBottom,NonMod: LongInt);
+Var
+ Rg: PDBRegion; Pos,BufEnd,XPos,YPos,I: LongInt; Pbuf: PEABuffer;
+ Map2To4: TDBMap; Map2To8: TDBMap; Map4To8: TDBMap; Map: PDBMap; Op: LongInt;
+Begin
+ Rg:=DBGetRegion(Disp^.RegionId);
+ FillChar(Map2To4,SizeOf(Map2To4),0); Map2To4[0]:=0; Map2To4[1]:=7; Map2To4[2]:=8; Map2To4[3]:=15;
+ FillChar(Map2To8,SizeOf(Map2To8),0); Map2To8[0]:=0; Map2To8[1]:=$77; Map2To8[2]:=$88; Map2To8[3]:=$FF;
+ For I:=0 To 15 Do Map4To8[I]:=I*17;
+ If Rg=Nil Then Exit;
+ Pbuf:=Rg^.Pbuf; Rg^.Dirty:=True;
+ XPos:=Disp^.XPos; YPos:=Disp^.YPos+TopBottom;
+ Pos:=Pos0; BufEnd:=Pos0+BufSize;
+ While Pos<BufEnd Do Begin
+  If ((Buf^[Pos]<>$F0) And (XPos>=Rg^.Width)) Or (YPos>=Rg^.Height) Then Exit;
+  Op:=Buf^[Pos]; Inc(Pos);
+  Case Op Of
+   $10: Begin
+    If Rg^.Depth=8 Then Map:=@Map2To8 Else If Rg^.Depth=4 Then Map:=@Map2To4 Else Map:=Nil;
+    XPos:=DBRead2Bit(PEABuffer(@Pbuf^[YPos*Rg^.Width]),Rg^.Width,Buf,Pos,BufEnd-Pos,NonMod,Map,XPos);
+   End;
+   $11: Begin
+    If Rg^.Depth<4 Then Exit;
+    If Rg^.Depth=8 Then Map:=@Map4To8 Else Map:=Nil;
+    XPos:=DBRead4Bit(PEABuffer(@Pbuf^[YPos*Rg^.Width]),Rg^.Width,Buf,Pos,BufEnd-Pos,NonMod,Map,XPos);
+   End;
+   $12: Begin
+    If Rg^.Depth<8 Then Exit;
+    XPos:=DBRead8Bit(PEABuffer(@Pbuf^[YPos*Rg^.Width]),Rg^.Width,Buf,Pos,BufEnd-Pos,NonMod,XPos);
+   End;
+   $20: Begin
+    Map2To4[0]:=Buf^[Pos] Shr 4; Map2To4[1]:=Buf^[Pos] And 15; Inc(Pos);
+    Map2To4[2]:=Buf^[Pos] Shr 4; Map2To4[3]:=Buf^[Pos] And 15; Inc(Pos);
+   End;
+   $21: For I:=0 To 3 Do Begin Map2To8[I]:=EAByte(Buf,DBPktLen,Pos); Inc(Pos); End;
+   $22: For I:=0 To 15 Do Begin Map4To8[I]:=EAByte(Buf,DBPktLen,Pos); Inc(Pos); End;
+   $F0: Begin XPos:=Disp^.XPos; Inc(YPos,2); End;
+   Else ;
+  End;
+ End;
+ { has_computed_clut est remis a zero sauf compute_clut == -2 }
+ Rg^.HasComputed:=False;
+End;
+
+Function DBParseObjectSegment(Buf: PEABuffer; Pos,Size: LongInt): LongInt;
+Var
+ BufEnd,ObjectId,Coding,NonMod,TopLen,BotLen,Bfl,Block: LongInt; Obj: PDBObject; Disp: PDBObjDisp; B: LongInt;
+Begin
+ DBParseObjectSegment:=0; BufEnd:=Pos+Size;
+ ObjectId:=EAByte(Buf,DBPktLen,Pos)*256+EAByte(Buf,DBPktLen,Pos+1); Inc(Pos,2);
+ Obj:=DBGetObject(ObjectId);
+ If Obj=Nil Then Begin DBParseObjectSegment:=-1; Exit; End;
+ B:=EAByte(Buf,DBPktLen,Pos); Inc(Pos);
+ Coding:=(B Shr 2) And 3; NonMod:=(B Shr 1) And 1;
+ If Coding=0 Then Begin
+  TopLen:=EAByte(Buf,DBPktLen,Pos)*256+EAByte(Buf,DBPktLen,Pos+1); Inc(Pos,2);
+  BotLen:=EAByte(Buf,DBPktLen,Pos)*256+EAByte(Buf,DBPktLen,Pos+1); Inc(Pos,2);
+  If Pos+TopLen+BotLen>BufEnd Then Begin DBParseObjectSegment:=-1; Exit; End;
+  Disp:=Obj^.DisplayList;
+  While Disp<>Nil Do Begin
+   Block:=Pos; Bfl:=BotLen;
+   DBParsePixelBlock(Disp,Buf,Block,TopLen,0,NonMod);
+   If BotLen>0 Then Block:=Pos+TopLen Else Bfl:=TopLen;
+   DBParsePixelBlock(Disp,Buf,Block,Bfl,1,NonMod);
+   Disp:=Disp^.ObjectNext;
+  End;
+ End Else If (Coding=1) Or (Coding=2) Then DBParseObjectSegment:=-2
+ Else DBParseObjectSegment:=-1;
+End;
+
+Function DBParseClutSegment(Buf: PEABuffer; Pos,Size: LongInt): LongInt;
+Var
+ BufEnd,ClutId,Version,EntryId,Depth,FullRange,Y,Cr,Cb,Alpha,Rgb: LongInt; Cl: PDBClut; B0,B1: LongInt;
+Begin
+ DBParseClutSegment:=0; BufEnd:=Pos+Size;
+ ClutId:=Buf^[Pos]; Inc(Pos);
+ Version:=(Buf^[Pos] Shr 4) And 15; Inc(Pos);
+ Cl:=DBGetClut(ClutId);
+ If Cl=Nil Then Begin
+  New(Cl); Cl^:=DBDefClut; Cl^.Id:=ClutId; Cl^.Version:=-1; Cl^.Next:=DBCluts; DBCluts:=Cl;
+ End;
+ If Cl^.Version<>Version Then Begin
+  Cl^.Version:=Version;
+  While Pos+4<BufEnd Do Begin
+   EntryId:=Buf^[Pos]; Inc(Pos);
+   Depth:=Buf^[Pos] And $E0; FullRange:=Buf^[Pos] And 1; Inc(Pos);
+   If FullRange<>0 Then Begin
+    Y:=Buf^[Pos]; Cr:=Buf^[Pos+1]; Cb:=Buf^[Pos+2]; Alpha:=Buf^[Pos+3]; Inc(Pos,4);
+   End Else Begin
+    B0:=Buf^[Pos]; B1:=Buf^[Pos+1];
+    Y:=B0 And $FC;
+    Cr:=(((B0 And 3) Shl 2) Or ((B1 Shr 6) And 3)) Shl 4;
+    Cb:=(B1 Shl 2) And $F0;
+    Alpha:=(B1 Shl 6) And $C0;
+    Inc(Pos,2);
+   End;
+   If Y=0 Then Alpha:=$FF;
+   Rgb:=DSUYuvToRgb(Y,Cb,Cr);
+   If ((Depth And $80)<>0) And (EntryId<4) Then Cl^.C4[EntryId]:=Rgb Or (Int64(255-Alpha) Shl 24)
+   Else If ((Depth And $40)<>0) And (EntryId<16) Then Cl^.C16[EntryId]:=Rgb Or (Int64(255-Alpha) Shl 24)
+   Else If (Depth And $20)<>0 Then Cl^.C256[EntryId]:=Rgb Or (Int64(255-Alpha) Shl 24);
+  End;
+ End;
+End;
+
+Function DBParseRegionSegment(Buf: PEABuffer; Pos,Size: LongInt): LongInt;
+Var
+ BufEnd,RegionId,ObjectId,Fill,B: LongInt; Rg: PDBRegion; Obj: PDBObject; Disp: PDBObjDisp; Ok: Boolean;
+Begin
+ DBParseRegionSegment:=0; BufEnd:=Pos+Size;
+ If Size<10 Then Begin DBParseRegionSegment:=-1; Exit; End;
+ RegionId:=Buf^[Pos]; Inc(Pos);
+ Rg:=DBGetRegion(RegionId);
+ If Rg=Nil Then Begin
+  New(Rg); FillChar(Rg^,SizeOf(Rg^),0); Rg^.Id:=RegionId; Rg^.Version:=-1; Rg^.Next:=DBRegions; DBRegions:=Rg;
+ End;
+ Fill:=(Buf^[Pos] Shr 3) And 1; Inc(Pos);
+ Rg^.Width:=Buf^[Pos]*256+Buf^[Pos+1]; Inc(Pos,2);
+ Rg^.Height:=Buf^[Pos]*256+Buf^[Pos+1]; Inc(Pos,2);
+ Ok:=(Rg^.Width>0) And (Rg^.Height>0) And ((Int64(Rg^.Width)+128)*(Int64(Rg^.Height)+128)<268435455) And (Int64(Rg^.Width)*Rg^.Height*2<=320*1024*8);
+ If Not Ok Then Begin
+  { av_image_check_size2 refuse aussi 0xN: region->width=height=0 }
+  Rg^.Width:=0; Rg^.Height:=0; DBParseRegionSegment:=-1; Exit;
+ End;
+ If Rg^.Width*Rg^.Height<>Rg^.BufSize Then Begin
+  If Rg^.Pbuf<>Nil Then FreeMem(Rg^.Pbuf,Rg^.BufSize+64);
+  Rg^.BufSize:=Rg^.Width*Rg^.Height;
+  GetMem(Rg^.Pbuf,Rg^.BufSize+64); FillChar(Rg^.Pbuf^,Rg^.BufSize+64,0);
+  Fill:=1; Rg^.Dirty:=False;
+ End;
+ B:=(Buf^[Pos] Shr 2) And 7; Inc(Pos);
+ Rg^.Depth:=1 Shl B;
+ If (Rg^.Depth<2) Or (Rg^.Depth>8) Then Rg^.Depth:=4;
+ Rg^.Clut:=Buf^[Pos]; Inc(Pos);
+ If Rg^.Depth=8 Then Begin Rg^.Bgcolor:=Buf^[Pos]; Inc(Pos,2); End
+ Else Begin
+  Inc(Pos);
+  If Rg^.Depth=4 Then Rg^.Bgcolor:=(Buf^[Pos] Shr 4) And 15 Else Rg^.Bgcolor:=(Buf^[Pos] Shr 2) And 3;
+  Inc(Pos);
+ End;
+ If Fill<>0 Then FillChar(Rg^.Pbuf^,Rg^.BufSize,Rg^.Bgcolor);
+ DBDeleteRegionDisplayList(Rg);
+ While Pos+5<BufEnd Do Begin
+  ObjectId:=Buf^[Pos]*256+Buf^[Pos+1]; Inc(Pos,2);
+  Obj:=DBGetObject(ObjectId);
+  If Obj=Nil Then Begin
+   New(Obj); FillChar(Obj^,SizeOf(Obj^),0); Obj^.Id:=ObjectId; Obj^.Next:=DBObjects; DBObjects:=Obj;
+  End;
+  Obj^.Typ:=Buf^[Pos] Shr 6;
+  New(Disp); FillChar(Disp^,SizeOf(Disp^),0);
+  Disp^.ObjectId:=ObjectId; Disp^.RegionId:=RegionId;
+  Disp^.XPos:=(Buf^[Pos]*256+Buf^[Pos+1]) And $FFF; Inc(Pos,2);
+  Disp^.YPos:=(Buf^[Pos]*256+Buf^[Pos+1]) And $FFF; Inc(Pos,2);
+  If (Disp^.XPos>=Rg^.Width) Or (Disp^.YPos>=Rg^.Height) Then Begin Dispose(Disp); DBParseRegionSegment:=-1; Exit; End;
+  If ((Obj^.Typ=1) Or (Obj^.Typ=2)) And (Pos+1<BufEnd) Then Begin Disp^.Fg:=Buf^[Pos]; Disp^.Bg:=Buf^[Pos+1]; Inc(Pos,2); End;
+  Disp^.RegionNext:=Rg^.DisplayList; Rg^.DisplayList:=Disp;
+  Disp^.ObjectNext:=Obj^.DisplayList; Obj^.DisplayList:=Disp;
+ End;
+End;
+
+Function DBParsePageSegment(Buf: PEABuffer; Pos,Size: LongInt; Pts: Int64): LongInt;
+Var
+ BufEnd,Timeout,Version,PageState,RegionId: LongInt; D,Tmp,Cur: PDBRegDisp; Pp: ^PDBRegDisp; Dup: Boolean;
+Begin
+ DBParsePageSegment:=0; BufEnd:=Pos+Size;
+ If Size<1 Then Begin DBParsePageSegment:=-1; Exit; End;
+ Timeout:=Buf^[Pos]; Inc(Pos);
+ Version:=(Buf^[Pos] Shr 4) And 15; PageState:=(Buf^[Pos] Shr 2) And 3; Inc(Pos);
+ If DBVersion=Version Then Exit;
+ DBTimeOut:=Timeout; DBVersion:=Version;
+ If (PageState=1) Or (PageState=2) Then Begin DBDeleteRegions; DBDeleteObjects; DBDeleteCluts; End;
+ Tmp:=DBDisplays; DBDisplays:=Nil;
+ While Pos+5<BufEnd Do Begin
+  RegionId:=Buf^[Pos]; Inc(Pos,2);
+  D:=DBDisplays; While (D<>Nil) And (D^.RegionId<>RegionId) Do D:=D^.Next;
+  If D<>Nil Then Break;
+  D:=Tmp; Pp:=@Tmp;
+  While (D<>Nil) And (D^.RegionId<>RegionId) Do Begin Pp:=@D^.Next; D:=D^.Next; End;
+  If D=Nil Then Begin New(D); FillChar(D^,SizeOf(D^),0); End;
+  D^.RegionId:=RegionId;
+  D^.XPos:=Buf^[Pos]*256+Buf^[Pos+1]; Inc(Pos,2);
+  D^.YPos:=Buf^[Pos]*256+Buf^[Pos+1]; Inc(Pos,2);
+  Pp^:=D^.Next;
+  D^.Next:=DBDisplays; DBDisplays:=D;
+ End;
+ While Tmp<>Nil Do Begin D:=Tmp; Tmp:=D^.Next; Dispose(D); End;
+End;
+
+Function DBParseDisplayDefinition(Buf: PEABuffer; Pos,Size: LongInt): LongInt;
+Var Info,Ver: LongInt;
+Begin
+ DBParseDisplayDefinition:=0;
+ If Size<5 Then Begin DBParseDisplayDefinition:=-1; Exit; End;
+ Info:=Buf^[Pos]; Inc(Pos); Ver:=Info Shr 4;
+ If DBDefDef And (DBDefVersion=Ver) Then Exit;
+ DBDefDef:=True; DBDefVersion:=Ver; DBDefX:=0; DBDefY:=0;
+ DBDefW:=Buf^[Pos]*256+Buf^[Pos+1]+1; DBDefH:=Buf^[Pos+2]*256+Buf^[Pos+3]+1; Inc(Pos,4);
+ If (XSW=0) Or (XSH=0) Then Begin XSW:=DBDefW; XSH:=DBDefH; End;
+ If (Info And 8)<>0 Then Begin
+  If Size<13 Then Begin DBParseDisplayDefinition:=-1; Exit; End;
+  DBDefX:=Buf^[Pos]*256+Buf^[Pos+1]; DBDefW:=Buf^[Pos+2]*256+Buf^[Pos+3]-DBDefX+1;
+  DBDefY:=Buf^[Pos+4]*256+Buf^[Pos+5]; DBDefH:=Buf^[Pos+6]*256+Buf^[Pos+7]-DBDefY+1;
+ End;
+End;
+
+{ un paquet = segments 0x0F...; retourne True si un ensemble d'affichage est produit (dans DBSubEv) }
+Function DBDecodePacket(Buf: PEABuffer; Size: LongInt; Pts: Int64): Boolean;
+Var P,PEnd,SegType,SegLen,Got,GotDds: LongInt; Ret: LongInt;
+Begin
+ DBDecodePacket:=False; DBHaveSub:=False; DBSubEv:=Nil; DBPktLen:=Size;
+ DBInitDefaults;
+ If (Size<=6) Or (Buf^[0]<>$0F) Then Exit;
+ P:=0; PEnd:=Size; Got:=0; GotDds:=0;
+ While (PEnd-P>=6) And (Buf^[P]=$0F) Do Begin
+  SegType:=Buf^[P+1]; SegLen:=Buf^[P+4]*256+Buf^[P+5]; Inc(P,6);
+  If PEnd-P<SegLen Then Break;
+  Ret:=0;
+  Case SegType Of
+   $10: Begin Ret:=DBParsePageSegment(Buf,P,SegLen,Pts); Got:=Got Or 1; End;
+   $11: Begin Ret:=DBParseRegionSegment(Buf,P,SegLen); Got:=Got Or 2; End;
+   $12: Begin Ret:=DBParseClutSegment(Buf,P,SegLen); Got:=Got Or 4; End;
+   $13: Begin Ret:=DBParseObjectSegment(Buf,P,SegLen); Got:=Got Or 8; End;
+   $14: Begin Ret:=DBParseDisplayDefinition(Buf,P,SegLen); GotDds:=1; End;
+   $80: Begin
+    If Not DBHaveSub Then DBSaveSubtitleSet(Pts);
+    If (Got=15) And (GotDds=0) And ((XSW=0) Or (XSH=0)) Then Begin XSW:=720; XSH:=576; End;
+    Got:=Got Or 16;
+   End;
+   Else ;
+  End;
+  If Ret<0 Then Begin
+   If DBHaveSub Then Begin XSDropLast; DBHaveSub:=False; DBSubEv:=Nil; End;
+   Exit;
+  End;
+  Inc(P,SegLen);
+ End;
+ If Got=15 Then Begin If Not DBHaveSub Then DBSaveSubtitleSet(Pts); End;
+ DBDecodePacket:=DBHaveSub;
+End;
+
+{ ---- DVB subtitles: encodeur (libavcodec/dvbsubenc.c), MPEG-TS et flux brut ---- }
+Var DBeOut: PEABuffer; DBeQ,DBeBb,DBeBc: LongInt; DBeObjVer: LongInt;
+
+Function DBeHeight(R: PXSRect): LongInt;
+Begin DBeHeight:=R^.H; End;
+
+Procedure DBeP8(V: LongInt);Begin DBeOut^[DBeQ]:=V And 255; Inc(DBeQ); End;
+Procedure DBeP16(V: LongInt);Begin DBeP8(V Shr 8); DBeP8(V); End;
+Procedure DBePatch16(At,V: LongInt);Begin DBeOut^[At]:=(V Shr 8) And 255; DBeOut^[At+1]:=V And 255; End;
+
+Procedure DBePut2(V: LongInt);
+Begin
+ DBeBb:=DBeBb Or (V Shl DBeBc); Dec(DBeBc,2);
+ If DBeBc<0 Then Begin DBeBc:=6; DBeP8(DBeBb); DBeBb:=0; End;
+End;
+Procedure DBePut4(V: LongInt);
+Begin
+ DBeBb:=DBeBb Or (V Shl DBeBc); Dec(DBeBc,4);
+ If DBeBc<0 Then Begin DBeBc:=4; DBeP8(DBeBb); DBeBb:=0; End;
+End;
+
+{ retourne la taille ou -1 si le tampon est trop petit }
+Function DBeRle2(Bmp: PEABuffer; Linesize,W,H,BufSize: LongInt): LongInt;
+Var Y,X,X1,Len,V,Color,Q0,LineBegin: LongInt; Base: LongInt;
+Begin
+ Q0:=DBeQ; Base:=0;
+ For Y:=0 To H-1 Do Begin
+  If BufSize*8<W*3+32 Then Begin DBeRle2:=-1; Exit; End;
+  LineBegin:=DBeQ;
+  DBeP8($10); DBeBb:=0; DBeBc:=6;
+  X:=0;
+  While X<W Do Begin
+   X1:=X; Color:=Bmp^[Base+X1]; Inc(X1);
+   While (X1<W) And (Bmp^[Base+X1]=Color) Do Inc(X1);
+   Len:=X1-X;
+   If (Color=0) And (Len=2) Then Begin DBePut2(0); DBePut2(0); DBePut2(1); End
+   Else If (Len>=3) And (Len<=10) Then Begin
+    V:=Len-3; DBePut2(0); DBePut2((V Shr 2) Or 2); DBePut2(V And 3); DBePut2(Color);
+   End Else If (Len>=12) And (Len<=27) Then Begin
+    V:=Len-12; DBePut2(0); DBePut2(0); DBePut2(2); DBePut2(V Shr 2); DBePut2(V And 3); DBePut2(Color);
+   End Else If Len>=29 Then Begin
+    If Len>284 Then Len:=284;
+    V:=Len-29; DBePut2(0); DBePut2(0); DBePut2(3); DBePut2(V Shr 6); DBePut2((V Shr 4) And 3); DBePut2((V Shr 2) And 3); DBePut2(V And 3); DBePut2(Color);
+   End Else Begin
+    DBePut2(Color);
+    If Color=0 Then DBePut2(1);
+    Len:=1;
+   End;
+   Inc(X,Len);
+  End;
+  DBePut2(0); DBePut2(0); DBePut2(0);
+  If DBeBc<>6 Then DBeP8(DBeBb);
+  DBeP8($F0);
+  Inc(Base,Linesize);
+  Dec(BufSize,DBeQ-LineBegin);
+ End;
+ DBeRle2:=DBeQ-Q0;
+End;
+
+Function DBeRle4(Bmp: PEABuffer; Linesize,W,H,BufSize: LongInt): LongInt;
+Var Y,X,X1,Len,V,Color,Q0,LineBegin: LongInt; Base: LongInt;
+Begin
+ Q0:=DBeQ; Base:=0;
+ For Y:=0 To H-1 Do Begin
+  If BufSize*8<W*6+32 Then Begin DBeRle4:=-1; Exit; End;
+  LineBegin:=DBeQ;
+  DBeP8($11); DBeBb:=0; DBeBc:=4;
+  X:=0;
+  While X<W Do Begin
+   X1:=X; Color:=Bmp^[Base+X1]; Inc(X1);
+   While (X1<W) And (Bmp^[Base+X1]=Color) Do Inc(X1);
+   Len:=X1-X;
+   If (Color=0) And (Len=2) Then Begin DBePut4(0); DBePut4($D); End
+   Else If (Color=0) And (Len>=3) And (Len<=9) Then Begin DBePut4(0); DBePut4(Len-2); End
+   Else If (Len>=4) And (Len<=7) Then Begin DBePut4(0); DBePut4(8+Len-4); DBePut4(Color); End
+   Else If (Len>=9) And (Len<=24) Then Begin DBePut4(0); DBePut4($E); DBePut4(Len-9); DBePut4(Color); End
+   Else If Len>=25 Then Begin
+    If Len>280 Then Len:=280;
+    V:=Len-25; DBePut4(0); DBePut4($F); DBePut4(V Shr 4); DBePut4(V And $F); DBePut4(Color);
+   End Else Begin
+    DBePut4(Color);
+    If Color=0 Then DBePut4($C);
+    Len:=1;
+   End;
+   Inc(X,Len);
+  End;
+  DBePut4(0); DBePut4(0);
+  If DBeBc<>4 Then DBeP8(DBeBb);
+  DBeP8($F0);
+  Inc(Base,Linesize);
+  Dec(BufSize,DBeQ-LineBegin);
+ End;
+ DBeRle4:=DBeQ-Q0;
+End;
+
+Function DBeRle8(Bmp: PEABuffer; Linesize,W,H,BufSize: LongInt): LongInt;
+Var Y,X,X1,Len,Color,Q0,LineBegin: LongInt; Base: LongInt;
+Begin
+ Q0:=DBeQ; Base:=0;
+ For Y:=0 To H-1 Do Begin
+  If BufSize*8<W*12+24 Then Begin DBeRle8:=-1; Exit; End;
+  LineBegin:=DBeQ;
+  DBeP8($12);
+  X:=0;
+  While X<W Do Begin
+   X1:=X; Color:=Bmp^[Base+X1]; Inc(X1);
+   While (X1<W) And (Bmp^[Base+X1]=Color) Do Inc(X1);
+   Len:=X1-X;
+   If (Len=1) And (Color<>0) Then DBeP8(Color)
+   Else Begin
+    If Color=0 Then Begin
+     If Len>127 Then Len:=127;
+     DBeP8(0); DBeP8(Len);
+    End Else If Len>2 Then Begin
+     If Len>127 Then Len:=127;
+     DBeP8(0); DBeP8($80+Len); DBeP8(Color);
+    End Else If Len=2 Then Begin DBeP8(Color); DBeP8(Color); End
+    Else Begin DBeP8(Color); Len:=1; End;
+   End;
+   Inc(X,Len);
+  End;
+  DBeP8(0); DBeP8($F0);
+  Inc(Base,Linesize);
+  Dec(BufSize,DBeQ-LineBegin);
+ End;
+ DBeRle8:=DBeQ-Q0;
+End;
+
+Function DBeRgbY(R,G,B: LongInt): LongInt;
+Begin DBeRgbY:=AVSar(263*R+516*G+100*B+512+(16 Shl 10),10); End;
+Function DBeRgbU(R,G,B: LongInt): LongInt;
+Begin DBeRgbU:=AVSar(-152*R-298*G+450*B+512-1,10)+128; End;
+Function DBeRgbV(R,G,B: LongInt): LongInt;
+Begin DBeRgbV:=AVSar(450*R-377*G-73*B+512-1,10)+128; End;
+
+{ ffmpeg n'encode que h>>1 lignes par trame: une hauteur impaire perdrait la derniere ligne; on ajoute une ligne transparente }
+Procedure DBePadEven(E: PXSEv);
+Var I,J,T: LongInt; R: PXSRect; Nb: PEABuffer;
+Begin
+ For I:=0 To E^.NR-1 Do Begin
+  R:=E^.Rc[I];
+  If (R^.H And 1)=0 Then Continue;
+  T:=-1;
+  For J:=0 To R^.NCol-1 Do If ((R^.Pal[J] Shr 24) And 255)=0 Then Begin T:=J; Break; End;
+  If T<0 Then Begin
+   If R^.NCol>=256 Then Continue;
+   T:=R^.NCol; R^.Pal[T]:=0; Inc(R^.NCol);
+  End;
+  GetMem(Nb,R^.W*(R^.H+1)+64);
+  Move(R^.Bmp^,Nb^,R^.W*R^.H);
+  FillChar(Nb^[R^.W*R^.H],R^.W,T);
+  FreeMem(R^.Bmp,R^.W*R^.H+64);
+  R^.Bmp:=Nb; Inc(R^.H);
+ End;
+End;
+
+{ ensemble d'affichage DVB pour E (Nil = page vide); retourne la taille ou -1 }
+Function DBeEncode(E: PXSEv; Out: PEABuffer; BufSize: LongInt): LongInt;
+Var
+ PageId,I,J,Bpp,NR,SegStart,Cnt,Ret,TopLen,BotLen,TopPtr,BotPtr,Ptop,Pbot,Hh: LongInt; Rc: PXSRect; Pb: PEABuffer; X: LongInt; A,R,G,B: LongInt;
+Begin
+ DBeOut:=Out; DBeQ:=0; PageId:=1; DBeEncode:=-1;
+ If E=Nil Then NR:=0 Else NR:=E^.NR;
+ If (E<>Nil) And XSFromPng Then DBePadEven(E);
+ If (XSW>0) And (XSH>0) Then Begin
+  If BufSize<11 Then Exit;
+  DBeP8($0F); DBeP8($14); DBeP16(PageId); SegStart:=DBeQ; DBeQ:=DBeQ+2;
+  DBeP8(0); DBeP16(XSW-1); DBeP16(XSH-1);
+  DBePatch16(SegStart,DBeQ-SegStart-2);
+  Dec(BufSize,11);
+ End;
+ If BufSize<8+NR*6 Then Exit;
+ DBeP8($0F); DBeP8($10); DBeP16(PageId); SegStart:=DBeQ; DBeQ:=DBeQ+2;
+ DBeP8(30);
+ DBeP8((DBeObjVer Shl 4) Or (2 Shl 2) Or 3);
+ For I:=0 To NR-1 Do Begin
+  DBeP8(I); DBeP8($FF); DBeP16(E^.Rc[I]^.X); DBeP16(E^.Rc[I]^.Y);
+ End;
+ DBePatch16(SegStart,DBeQ-SegStart-2);
+ Dec(BufSize,8+NR*6);
+ If NR>0 Then Begin
+  For I:=0 To NR-1 Do Begin
+   Rc:=E^.Rc[I];
+   If BufSize<6+Rc^.NCol*6 Then Exit;
+   If Rc^.NCol<=4 Then Bpp:=0 Else If Rc^.NCol<=16 Then Bpp:=1 Else If Rc^.NCol<=256 Then Bpp:=2 Else Exit;
+   DBeP8($0F); DBeP8($12); DBeP16(PageId); SegStart:=DBeQ; DBeQ:=DBeQ+2;
+   DBeP8(I); DBeP8($0F);
+   For J:=0 To Rc^.NCol-1 Do Begin
+    DBeP8(J);
+    DBeP8((1 Shl (7-Bpp)) Or (15 Shl 1) Or 1);
+    X:=Rc^.Pal[J] And $FFFFFFFF;
+    A:=(X Shr 24) And 255; R:=(X Shr 16) And 255; G:=(X Shr 8) And 255; B:=X And 255;
+    DBeP8(DBeRgbY(R,G,B)); DBeP8(DBeRgbV(R,G,B)); DBeP8(DBeRgbU(R,G,B)); DBeP8(255-A);
+   End;
+   DBePatch16(SegStart,DBeQ-SegStart-2);
+   Dec(BufSize,6+Rc^.NCol*6);
+  End;
+  If BufSize<NR*22 Then Exit;
+  For I:=0 To NR-1 Do Begin
+   Rc:=E^.Rc[I];
+   If Rc^.NCol<=4 Then Bpp:=0 Else If Rc^.NCol<=16 Then Bpp:=1 Else If Rc^.NCol<=256 Then Bpp:=2 Else Exit;
+   DBeP8($0F); DBeP8($11); DBeP16(PageId); SegStart:=DBeQ; DBeQ:=DBeQ+2;
+   DBeP8(I); DBeP8((DBeObjVer Shl 4) Or 7);
+   DBeP16(Rc^.W); DBeP16(Rc^.H);
+   DBeP8(((1+Bpp) Shl 5) Or ((1+Bpp) Shl 2) Or 3);
+   DBeP8(I); DBeP8(0); DBeP8(3);
+   DBeP16(I); DBeP8(0); DBeP8(0); DBeP8($F0); DBeP8(0);
+   DBePatch16(SegStart,DBeQ-SegStart-2);
+  End;
+  Dec(BufSize,NR*22);
+  For I:=0 To NR-1 Do Begin
+   Rc:=E^.Rc[I]; Hh:=DBeHeight(Rc);
+   If BufSize<13 Then Exit;
+   DBeP8($0F); DBeP8($13); DBeP16(PageId); SegStart:=DBeQ; DBeQ:=DBeQ+2;
+   DBeP16(I);
+   DBeP8((DBeObjVer Shl 4) Or 1);
+   Ptop:=DBeQ; DBeQ:=DBeQ+2; Pbot:=DBeQ; DBeQ:=DBeQ+2;
+   Dec(BufSize,13);
+   TopPtr:=DBeQ;
+   Pb:=Rc^.Bmp;
+   If Rc^.NCol<=4 Then Ret:=DBeRle2(Pb,Rc^.W*2,Rc^.W,Hh Shr 1,BufSize)
+   Else If Rc^.NCol<=16 Then Ret:=DBeRle4(Pb,Rc^.W*2,Rc^.W,Hh Shr 1,BufSize)
+   Else Ret:=DBeRle8(Pb,Rc^.W*2,Rc^.W,Hh Shr 1,BufSize);
+   If Ret<0 Then Exit;
+   Dec(BufSize,Ret);
+   BotPtr:=DBeQ;
+   If Rc^.NCol<=4 Then Ret:=DBeRle2(PEABuffer(@Pb^[Rc^.W]),Rc^.W*2,Rc^.W,Hh Shr 1,BufSize)
+   Else If Rc^.NCol<=16 Then Ret:=DBeRle4(PEABuffer(@Pb^[Rc^.W]),Rc^.W*2,Rc^.W,Hh Shr 1,BufSize)
+   Else Ret:=DBeRle8(PEABuffer(@Pb^[Rc^.W]),Rc^.W*2,Rc^.W,Hh Shr 1,BufSize);
+   If Ret<0 Then Exit;
+   Dec(BufSize,Ret);
+   DBePatch16(Ptop,BotPtr-TopPtr); DBePatch16(Pbot,DBeQ-BotPtr);
+   DBePatch16(SegStart,DBeQ-SegStart-2);
+  End;
+ End;
+ If BufSize<6 Then Exit;
+ DBeP8($0F); DBeP8($80); DBeP16(PageId); SegStart:=DBeQ; DBeQ:=DBeQ+2;
+ DBePatch16(SegStart,DBeQ-SegStart-2);
+ DBeObjVer:=(DBeObjVer+1) And 15;
+ DBeEncode:=DBeQ;
+End;
+
+{ ---- MPEG-TS: ecriture PAT/PMT et PES de sous-titres DVB ---- }
+Var XSCrcTab: Array[0..255] Of Int64; XSCrcReady: Boolean; XSTsCc: Array[0..8191] Of Byte;
+
+Procedure XSCrcInit;
+Var I,K: LongInt; C: Int64;
+Begin
+ For I:=0 To 255 Do Begin
+  C:=Int64(I) Shl 24;
+  For K:=1 To 8 Do If (C And $80000000)<>0 Then C:=((C Shl 1) Xor $04C11DB7) And $FFFFFFFF Else C:=(C Shl 1) And $FFFFFFFF;
+  XSCrcTab[I]:=C;
+ End;
+ XSCrcReady:=True;
+End;
+
+Function XSMpegCrc(B: PEABuffer; Len: LongInt): Int64;
+Var I: LongInt; C: Int64;
+Begin
+ If Not XSCrcReady Then XSCrcInit;
+ C:=$FFFFFFFF;
+ For I:=0 To Len-1 Do C:=((C Shl 8) And $FFFFFFFF) Xor XSCrcTab[((C Shr 24) Xor B^[I]) And 255];
+ XSMpegCrc:=C;
+End;
+
+{ ecrit un paquet TS sur la sortie ouverte }
+Procedure XSTsPacket(Pid: LongInt; Pusi: Boolean; Data: PEABuffer; Len: LongInt);
+Var Pk: Array[0..187] Of Byte; Af,I: LongInt;
+Begin
+ FillChar(Pk,SizeOf(Pk),$FF);
+ Pk[0]:=$47; Pk[1]:=(Pid Shr 8) And $1F; If Pusi Then Pk[1]:=Pk[1] Or $40; Pk[2]:=Pid And 255;
+ If Len>=184 Then Begin
+  Pk[3]:=$10 Or (XSTsCc[Pid] And 15); Move(Data^,Pk[4],184);
+ End Else Begin
+  Pk[3]:=$30 Or (XSTsCc[Pid] And 15);
+  Af:=183-Len; Pk[4]:=Af;
+  If Af>0 Then Begin Pk[5]:=0; End;
+  Move(Data^,Pk[4+1+Af],Len);
+ End;
+ XSTsCc[Pid]:=(XSTsCc[Pid]+1) And 15;
+ WriteBytes(Pk,188);
+End;
+
+Procedure XSTsPsi(Pid: LongInt; Sec: PEABuffer; Len: LongInt);
+Var Buf: Array[0..183] Of Byte; Crc: Int64;
+Begin
+ FillChar(Buf,SizeOf(Buf),$FF);
+ Buf[0]:=0; Move(Sec^,Buf[1],Len);
+ XSTsPacket(Pid,True,PEABuffer(@Buf),184);
+End;
+
+Procedure XSTsWritePatPmt(SubPid: LongInt);
+Var Sec: Array[0..255] Of Byte; N: LongInt; Crc: Int64;
+Begin
+ { PAT }
+ FillChar(Sec,SizeOf(Sec),0);
+ Sec[0]:=$00; Sec[1]:=$B0; Sec[2]:=13; Sec[3]:=0; Sec[4]:=1; Sec[5]:=$C1; Sec[6]:=0; Sec[7]:=0;
+ Sec[8]:=0; Sec[9]:=1; Sec[10]:=$E0 Or ($1000 Shr 8); Sec[11]:=$1000 And 255;
+ Crc:=XSMpegCrc(PEABuffer(@Sec),12);
+ Sec[12]:=(Crc Shr 24) And 255; Sec[13]:=(Crc Shr 16) And 255; Sec[14]:=(Crc Shr 8) And 255; Sec[15]:=Crc And 255;
+ XSTsPsi(0,PEABuffer(@Sec),16);
+ { PMT: un flux sous-titres 0x06 avec descripteur subtitling 0x59 }
+ FillChar(Sec,SizeOf(Sec),0);
+ Sec[0]:=2; Sec[1]:=$B0; Sec[2]:=0; Sec[3]:=0; Sec[4]:=1; Sec[5]:=$C1; Sec[6]:=0; Sec[7]:=0;
+ Sec[8]:=$E0 Or (SubPid Shr 8); Sec[9]:=SubPid And 255; Sec[10]:=$F0; Sec[11]:=0;
+ Sec[12]:=6; Sec[13]:=$E0 Or (SubPid Shr 8); Sec[14]:=SubPid And 255; Sec[15]:=$F0; Sec[16]:=10;
+ Sec[17]:=$59; Sec[18]:=8; Sec[19]:=Ord('e'); Sec[20]:=Ord('n'); Sec[21]:=Ord('g'); Sec[22]:=$10; Sec[23]:=0; Sec[24]:=1; Sec[25]:=0; Sec[26]:=1;
+ N:=27; Sec[2]:=N+4-3;
+ Crc:=XSMpegCrc(PEABuffer(@Sec),N);
+ Sec[N]:=(Crc Shr 24) And 255; Sec[N+1]:=(Crc Shr 16) And 255; Sec[N+2]:=(Crc Shr 8) And 255; Sec[N+3]:=Crc And 255;
+ XSTsPsi($1000,PEABuffer(@Sec),N+4);
+End;
+
+Procedure XSTsPes(Pid: LongInt; Pts: Int64; Seg: PEABuffer; SegLen: LongInt);
+Var Pes: PEABuffer; Total,Pl,Off,N: LongInt;
+Begin
+ GetMem(Pes,SegLen+64);
+ Pl:=3+5+2+SegLen+1;
+ Pes^[0]:=0; Pes^[1]:=0; Pes^[2]:=1; Pes^[3]:=$BD; Pes^[4]:=Pl Shr 8; Pes^[5]:=Pl And 255;
+ Pes^[6]:=$84; Pes^[7]:=$80; Pes^[8]:=5;
+ XSPutPts(Pes,9,Pts,2);
+ Pes^[14]:=$20; Pes^[15]:=0;
+ Move(Seg^,Pes^[16],SegLen);
+ Pes^[16+SegLen]:=$FF;
+ Total:=6+Pl; Off:=0;
+ While Off<Total Do Begin
+  N:=Total-Off; If N>184 Then N:=184;
+  XSTsPacket(Pid,Off=0,PEABuffer(@Pes^[Off]),N);
+  Inc(Off,N);
+ End;
+ FreeMem(Pes,SegLen+64);
+End;
+
+Procedure XSWriteTS(Const Target: String);
+Var I,Len: LongInt; Seg: PEABuffer; Base: Int64; SubPid: LongInt;
+Begin
+ If XSN=0 Then Fail('sous-titres: aucun evenement.');
+ FillChar(XSTsCc,SizeOf(XSTsCc),0); GetMem(Seg,70000); DBeObjVer:=0; SubPid:=$100; Base:=90000;
+ OpenWrite(Target);
+ For I:=0 To XSN-1 Do Begin
+  XSTsWritePatPmt(SubPid);
+  Len:=DBeEncode(XSEvs[I],Seg,65000);
+  If Len<0 Then Fail('sous-titre DVB: evenement incompatible (plus de 256 couleurs ou trop grand).');
+  XSTsPes(SubPid,Base+XSEvs[I]^.T0*90,Seg,Len);
+  Len:=DBeEncode(Nil,Seg,65000);
+  If Len<0 Then Fail('sous-titre DVB: encodage de la page vide impossible.');
+  XSTsPes(SubPid,Base+XSEvs[I]^.T1*90,Seg,Len);
+ End;
+ CloseWrite; FreeMem(Seg,70000);
+End;
+
+Procedure XSWriteDvbRaw(Const Target: String);
+Var I,Len: LongInt; Seg: PEABuffer;
+Begin
+ If XSN=0 Then Fail('sous-titres: aucun evenement.');
+ GetMem(Seg,70000); DBeObjVer:=0;
+ OpenWrite(Target);
+ For I:=0 To XSN-1 Do Begin
+  Len:=DBeEncode(XSEvs[I],Seg,65000);
+  If Len<0 Then Fail('sous-titre DVB: evenement incompatible (plus de 256 couleurs ou trop grand).');
+  WriteBytes(Seg^,Len);
+  Len:=DBeEncode(Nil,Seg,65000);
+  If Len<0 Then Fail('sous-titre DVB: encodage de la page vide impossible.');
+  WriteBytes(Seg^,Len);
+ End;
+ CloseWrite; FreeMem(Seg,70000);
+End;
+
+{ ---- MPEG-TS: lecture du flux de sous-titres DVB ---- }
+Var XSMinPts: Int64; XSBasePts: Int64; XSPktEv: LongInt;
+
+{ passe un paquet DVB (segments) au decodeur; ajuste les fins d'affichage }
+Procedure XSFeedDvb(Buf: PEABuffer; Size: LongInt; PtsMs: Int64);
+Var E,Pv: PXSEv;
+Begin
+ If Not DBDecodePacket(Buf,Size,PtsMs) Then Exit;
+ E:=DBSubEv;
+ If XSN>=2 Then Begin
+  Pv:=XSEvs[XSN-2];
+  If Pv^.T1>E^.T0 Then Pv^.T1:=E^.T0;
+ End;
+ If E^.NR=0 Then XSDropLast;
+End;
+
+Function XSPesPts(P: PEABuffer; Len: LongInt; Var Pts: Int64): Boolean;
+Begin
+ XSPesPts:=False;
+ If Len<14 Then Exit;
+ If (P^[0]<>0) Or (P^[1]<>0) Or (P^[2]<>1) Then Exit;
+ If (P^[7] And $80)=0 Then Exit;
+ Pts:=(Int64((P^[9] Shr 1) And 7) Shl 30) Or (Int64(P^[10]) Shl 22) Or (Int64(P^[11] Shr 1) Shl 15) Or (Int64(P^[12]) Shl 7) Or (P^[13] Shr 1);
+ XSPesPts:=True;
+End;
+
+Procedure XSLoadTS(Const Source: String);
+Var
+ F,Pes: PEABuffer; Size,Off,Sync,P,Pid,Pusi,Afc,Hdr,K,Tb,SecLen,ProgPid,PmtPid,SubPid,I,J,Es,EsLen,DescEnd,PesLen,PesCap,HdrLen,Pl: LongInt;
+ Pts: Int64; Have: Boolean; PmtPids: Array[0..15] Of LongInt; NPmt: LongInt; SubFound: Boolean; Typ: LongInt;
+ Cont: LongInt;
+Procedure Flush;
+Var Payload: LongInt; Pp: Int64; Ms: Int64;
+Begin
+ If PesLen<14 Then Begin PesLen:=0; Exit; End;
+ If ((Pes^[4]*256+Pes^[5])>0) And (6+Pes^[4]*256+Pes^[5]<PesLen) Then PesLen:=6+Pes^[4]*256+Pes^[5];
+ HdrLen:=9+Pes^[8];
+ If (PesLen>HdrLen+2) And (Pes^[HdrLen]=$20) And (Pes^[HdrLen+1]=0) And XSPesPts(Pes,PesLen,Pp) Then Begin
+  Payload:=PesLen-HdrLen-2;
+  { retire le marqueur de fin 0xFF }
+  While (Payload>0) And (Pes^[HdrLen+2+Payload-1]=$FF) Do Dec(Payload);
+  Ms:=((Pp-XSMinPts)*1000) Div 90000;
+  If Pp<XSMinPts Then Ms:=0;
+  XSFeedDvb(PEABuffer(@Pes^[HdrLen+2]),Payload,Ms);
+ End;
+ PesLen:=0;
+End;
+Begin
+ NVLoad(Source,F,Size); CloseRead;
+ Sync:=-1;
+ For Off:=0 To 187 Do If (F^[Off]=$47) And (Off+188*3<Size) And (F^[Off+188]=$47) And (F^[Off+376]=$47) Then Begin Sync:=Off; Break; End;
+ If Sync<0 Then Fail('mpegts: synchronisation 0x47 introuvable.');
+ { passe 1: PAT, PMT, PTS minimal }
+ XSMinPts:=-1; NPmt:=0; SubPid:=-1; SubFound:=False; P:=Sync;
+ While P+188<=Size Do Begin
+  If F^[P]<>$47 Then Begin Inc(P,188); Continue; End;
+  Pid:=((F^[P+1] And $1F) Shl 8) Or F^[P+2]; Pusi:=(F^[P+1] Shr 6) And 1; Afc:=(F^[P+3] Shr 4) And 3;
+  Hdr:=4;
+  If (Afc And 2)<>0 Then Hdr:=5+F^[P+4];
+  If ((Afc And 1)<>0) And (Hdr<188) Then Begin
+   If Pid=0 Then Begin
+    If Pusi=1 Then Begin
+     Tb:=P+Hdr+1+F^[P+Hdr];
+     If F^[Tb]=0 Then Begin
+      SecLen:=((F^[Tb+1] And $F) Shl 8) Or F^[Tb+2];
+      K:=Tb+8;
+      While K+4<=Tb+3+SecLen-4 Do Begin
+       If ((F^[K]*256+F^[K+1])<>0) And (NPmt<16) Then Begin PmtPids[NPmt]:=((F^[K+2] And $1F) Shl 8) Or F^[K+3]; Inc(NPmt); End;
+       Inc(K,4);
+      End;
+     End;
+    End;
+   End Else Begin
+    Have:=False; For I:=0 To NPmt-1 Do If PmtPids[I]=Pid Then Have:=True;
+    If Have And (Pusi=1) And Not SubFound Then Begin
+     Tb:=P+Hdr+1+F^[P+Hdr];
+     If F^[Tb]=2 Then Begin
+      SecLen:=((F^[Tb+1] And $F) Shl 8) Or F^[Tb+2];
+      EsLen:=((F^[Tb+10] And $F) Shl 8) Or F^[Tb+11];
+      K:=Tb+12+EsLen;
+      While K+5<=Tb+3+SecLen-4 Do Begin
+       Typ:=F^[K]; I:=((F^[K+1] And $1F) Shl 8) Or F^[K+2]; EsLen:=((F^[K+3] And $F) Shl 8) Or F^[K+4];
+       DescEnd:=K+5+EsLen; J:=K+5;
+       While J+2<=DescEnd Do Begin
+        If (Typ=6) And (F^[J]=$59) And Not SubFound Then Begin SubPid:=I; SubFound:=True; End;
+        Inc(J,2+F^[J+1]);
+       End;
+       K:=DescEnd;
+      End;
+     End;
+    End;
+    If (Pusi=1) And (P+Hdr+14<=P+188) And (F^[P+Hdr]=0) And (F^[P+Hdr+1]=0) And (F^[P+Hdr+2]=1) And ((F^[P+Hdr+7] And $80)<>0) Then Begin
+     Pts:=(Int64((F^[P+Hdr+9] Shr 1) And 7) Shl 30) Or (Int64(F^[P+Hdr+10]) Shl 22) Or (Int64(F^[P+Hdr+11] Shr 1) Shl 15) Or (Int64(F^[P+Hdr+12]) Shl 7) Or (F^[P+Hdr+13] Shr 1);
+     If (XSMinPts<0) Or (Pts<XSMinPts) Then XSMinPts:=Pts;
+    End;
+   End;
+  End;
+  Inc(P,188);
+ End;
+ If SubPid<0 Then Fail('mpegts: aucun flux de sous-titres DVB (type 0x06 + descripteur subtitling 0x59).');
+ If XSMinPts<0 Then XSMinPts:=0;
+ { passe 2: reassemblage PES du flux de sous-titres }
+ GetMem(Pes,1048576); PesLen:=0; DBReset; XSW:=0; XSH:=0; P:=Sync;
+ While P+188<=Size Do Begin
+  If F^[P]<>$47 Then Begin Inc(P,188); Continue; End;
+  Pid:=((F^[P+1] And $1F) Shl 8) Or F^[P+2];
+  If Pid=SubPid Then Begin
+   Pusi:=(F^[P+1] Shr 6) And 1; Afc:=(F^[P+3] Shr 4) And 3; Hdr:=4;
+   If (Afc And 2)<>0 Then Hdr:=5+F^[P+4];
+   If ((Afc And 1)<>0) And (Hdr<188) Then Begin
+    If Pusi=1 Then Flush;
+    If (Pusi=1) Or (PesLen>0) Then Begin
+     If PesLen+188-Hdr<=1048576 Then Begin Move(F^[P+Hdr],Pes^[PesLen],188-Hdr); Inc(PesLen,188-Hdr); End;
+    End;
+   End;
+  End;
+  Inc(P,188);
+ End;
+ Flush;
+ FreeMem(Pes,1048576); FreeMem(F,Size+64);
+ If XSN=0 Then Fail('mpegts: aucun sous-titre DVB decode.');
+ If (XSW=0) Or (XSH=0) Then Begin XSW:=720; XSH:=576; End;
+End;
+
+{ flux brut dvbsub: segments 0x0F... consecutifs; ensembles d'affichage sans horodatage (debuts successifs) }
+Procedure XSLoadDvbRaw(Const Source: String);
+Var F: PEABuffer; Size,P,Q,SegLen,SegType,Start: LongInt; T: Int64; Pk: PEABuffer; Before: LongInt;
+Begin
+ NVLoad(Source,F,Size); CloseRead; DBReset; XSW:=0; XSH:=0; T:=0;
+ P:=0;
+ While P<Size Do Begin
+  While (P<Size) And (F^[P]<>$0F) Do Inc(P);
+  If P>=Size Then Break;
+  Start:=P; Q:=P;
+  { un paquet = segments jusqu'au segment de fin d'affichage inclus }
+  While (Q+6<=Size) And (F^[Q]=$0F) Do Begin
+   SegType:=F^[Q+1]; SegLen:=F^[Q+4]*256+F^[Q+5];
+   If Q+6+SegLen>Size Then Begin Q:=Size; Break; End;
+   Inc(Q,6+SegLen);
+   If SegType=$80 Then Break;
+  End;
+  Before:=XSN;
+  XSFeedDvb(PEABuffer(@F^[Start]),Q-Start,T);
+  If XSN>Before Then T:=T+Int64(DBTimeOut)*1000;
+  P:=Q;
+ End;
+ FreeMem(F,Size+64);
+ If XSN=0 Then Fail('dvbsub: aucun sous-titre decode.');
+ If (XSW=0) Or (XSH=0) Then Begin XSW:=720; XSH:=576; End;
+End;
+
 { conversion de sous-titres bitmap: vobsub | psub | dvbsub -> psub | vobsub | dvbsub }
 Procedure XSConvert(Const Source,Target,InFmt,OutFmt: String);
 Begin
  XSN:=0;
  If InFmt='vobsub' Then XSLoadVobSub(Source)
  Else If InFmt='psub' Then XSLoadPsub(Source)
+ Else If InFmt='mpegts' Then XSLoadTS(Source)
+ Else If InFmt='dvbsub' Then XSLoadDvbRaw(Source)
  Else Fail('sous-titres: format d''entree non pris en charge: '+InFmt);
  If OutFmt='psub' Then XSWritePsub(Target)
  Else If OutFmt='vobsub' Then XSWriteVobSub(Target)
+ Else If OutFmt='mpegts' Then XSWriteTS(Target)
+ Else If OutFmt='dvbsub' Then XSWriteDvbRaw(Target)
  Else Fail('sous-titres: format de sortie non pris en charge: '+OutFmt);
  XSReset;
 End;
@@ -28596,6 +29767,8 @@ Begin
  WriteLn(' DE avi (asv1/asv2) AVI ASUS V1/V2: decodage vers Y4M, encodage Y4M -c:v asv1|asv2');
  WriteLn(' D  dsicin          Delphine Software International CIN (video dsicinvideo PAL8 vers Y4M/PNG/BMP, audio dsicinaudio vers WAV/MP3/...)');
  WriteLn(' DE vobsub          VobSub (.idx + .sub, sous-titres DVD dvdsub): decodage vers .psub (manifeste + PNG RGBA), encodage depuis .psub');
+ WriteLn(' DE mpegts          MPEG-TS: flux de sous-titres DVB (dvbsub, PID type 0x06 + descripteur 0x59) vers .psub; ecriture depuis .psub (PAT/PMT/PES)');
+ WriteLn(' DE dvbsub          flux brut de segments DVB (entree: -f dvbsub si non detecte; sans horodatage, debuts successifs); sortie .dvbsub');
  WriteLn(' DE psub            Liste de sous-titres PNG: ligne PNGSUB 1, size L H, puis sub hh:mm:ss.mmm hh:mm:ss.mmm image.png');
  WriteLn(' DE dv              DV (Digital Video) .dv ou AVI dvsd: SD 25 et 50 Mbit/s (NTSC 4:1:1, PAL 4:2:0/4:1:1, DV50 4:2:2), video seule; decodage vers Y4M/PNG/BMP, encodage Y4M -c:v dvvideo (sortie .dv ou AVI)');
  WriteLn(' DE dnxhd           VC3/DNxHD, DNxHR (.dnxhd ou AVI; encodage Y4M progressif: -profile:v dnxhr_lb|sq|hq|hqx|444, ou -b:v en Mbit/s pour DNxHD)');
@@ -28653,6 +29826,9 @@ Procedure Help;Begin
  WriteLn('       FLV H264 CAVLC 8 bits progressif: premiere image IDR; PNG RGB / GIF 256 couleurs natifs.');
  WriteLn('-vcodec png|gif (-c:v/-codec:v); -frames:v 1; -s optionnel; -f image2 accept'+#130+'.');
  WriteLn('         GIF: Image unique, palette 256 couleurs RGB 3/3/2, LZW Pascal.');
+ WriteLn('Sous-titres bitmap dvdsub/dvbsub: -i film.idx sous.psub (decode: manifeste + PNG RGBA), -i sous.psub film.idx (VobSub)');
+ WriteLn('         -i flux.ts sous.psub / -i sous.psub flux.ts (sous-titres DVB dans MPEG-TS); aussi .idx <-> .ts directement.');
+ WriteLn('DV: -i video.dv|.avi sortie.y4m (SD 25/50 Mbit/s); -i entree.y4m -c:v dvvideo sortie.dv|.avi (NTSC 411, PAL 420/411, 422).');
  WriteLn('Video locale: MP4 vers AVI, AVI vers MP4, WebM VP9/Opus vers MP4.');
  WriteLn('FFV1 v1 YUV420 8 bits: -i entree.y4m -c:v ffv1 sortie.avi');
  WriteLn('D'+#130+'codage FFV1 v0/1 range d'+#130+'faut: -i entree.avi sortie.y4m');
@@ -28896,6 +30072,7 @@ BEGIN
    WriteLn('D A    cook            COOK');
    WriteLn('D A    dca             DCA (DTS Coherent Acoustics)');
    WriteLn('DEV    dnxhd           VC3/DNxHD');
+   WriteLn('DES    dvbsub          DVB subtitles');
    WriteLn('DES    dvdsub          DVD subtitles');
    WriteLn('D A    dsicinaudio     Delphine Software International CIN audio');
    WriteLn('D V    dsicinvideo     Delphine Software International CIN video');
@@ -29117,7 +30294,7 @@ BEGIN
  {$ENDIF}
  Detected:=Probe(Intermediate);
  If InputFormat='' Then InputFormat:=Detected Else
- If InputFormat<>Detected Then Fail(
+ If (InputFormat<>Detected) And Not ((InputFormat='dvbsub') And (Detected='')) Then Fail(
  'Format impose incompatible avec la signature du fichier.');
  If InputFormat='' Then Fail('Format entree non reconnu ou non pris en charge.');
  If OutputFormat='' Then OutputFormat:=FormatName(Extension(OutputPath));
@@ -29132,7 +30309,7 @@ BEGIN
   If (InputFormat='xa') And (InputCodec<>'adpcm_ea_maxis_xa') Then
    Fail('Le conteneur xa exige le decodeur adpcm_ea_maxis_xa.');
  End;
- If (InputFormat='vobsub') Or (InputFormat='psub') Or (InputFormat='dvbsub') Then Begin
+ If (InputFormat='vobsub') Or (InputFormat='psub') Or (InputFormat='dvbsub') Or (InputFormat='mpegts') Then Begin
   If IsHTTP(InputPath) Or NoVideo Or (VideoCodec<>'') Or (AudioCodec<>'') Or HasBitrate Or HasVideoBitrate Or (RequestedRate<>0) Or
    (RequestedChannels<>0) Or (VideoFrames<>0) Or (ImageWidth<>0) Or HasCrop Then
    Fail('Sous-titres bitmap: entree locale, sans option audio/video.');
