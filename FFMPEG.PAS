@@ -33600,6 +33600,68 @@ Begin
  H3FlvHeader:=0;
 End;
 
+{ en-tete Intel H.263 (ff_intel_h263_decode_picture_header) }
+Function H3IntelHeader: LongInt;
+Var Fmt,Ar,Width,Height: LongInt;
+Begin
+ H3IntelHeader:=-1;
+ If H3Left=64 Then Exit; { trame factice }
+ If H3Bits(22)<>$20 Then Exit;
+ H3PicNum:=H3Bits(8);
+ If H3Bit<>1 Then Exit;
+ If H3Bit<>0 Then Exit;
+ H3Skip(3);
+ Fmt:=H3Bits(3);
+ If (Fmt=0) Or (Fmt=6) Then Exit;
+ H3Plus:=0;
+ H3PictType:=H3Bit;
+ H3LongVec:=H3Bit;
+ If H3Bit<>0 Then Exit;
+ H3Obmc:=H3Bit;
+ H3PbFrame:=H3Bit;
+ If Fmt<6 Then Begin
+  Width:=H3Format[Fmt*2]; Height:=H3Format[Fmt*2+1];
+  If Width=0 Then Exit;
+  H3Wd:=Width; H3Ht:=Height;
+  H3Aspect[0]:=12; H3Aspect[1]:=11;
+ End Else Begin
+  Fmt:=H3Bits(3);
+  If (Fmt=0) Or (Fmt=7) Then Exit;
+  H3Skip(2);
+  H3Loop:=H3Bit;
+  H3Skip(1);
+  If H3Bit<>0 Then H3PbFrame:=2;
+  H3Skip(5); H3Skip(5);
+ End;
+ If Fmt=6 Then Begin
+  Ar:=H3Bits(4);
+  H3Skip(9); H3Bit; H3Skip(9);
+  If Ar=15 Then Begin H3Aspect[0]:=H3Bits(8); H3Aspect[1]:=H3Bits(8); End
+  Else Case Ar Of
+   1: Begin H3Aspect[0]:=1; H3Aspect[1]:=1; End;
+   2: Begin H3Aspect[0]:=12; H3Aspect[1]:=11; End;
+   3: Begin H3Aspect[0]:=10; H3Aspect[1]:=11; End;
+   4: Begin H3Aspect[0]:=16; H3Aspect[1]:=11; End;
+   5: Begin H3Aspect[0]:=40; H3Aspect[1]:=33; End;
+  Else Begin H3Aspect[0]:=0; H3Aspect[1]:=1; End;
+  End;
+ End;
+ H3Qscale:=H3Bits(5); H3ChromaQscale:=H3Qscale;
+ H3Skip(1);
+ If H3PbFrame<>0 Then Begin H3Skip(3); H3Skip(2); End;
+ If (H3Wd<=0) Or (H3Ht<=0) Then Exit;
+ H3MbW:=(H3Wd+15) Div 16; H3MbH:=(H3Ht+15) Div 16; H3MbNum:=H3MbW*H3MbH;
+ If H3PictType<>2 Then Begin
+  H3Time:=H3PicNum; H3PpTime:=H3Time-H3LastNonB; H3LastNonB:=H3Time;
+ End;
+ If H3Left<=0 Then Begin H3IntelHeader:=H3InvalidData; Exit; End;
+ While H3Bit<>0 Do Begin
+  H3Skip(8);
+  If H3Left<=0 Then Begin H3IntelHeader:=H3InvalidData; Exit; End;
+ End;
+ H3IntelHeader:=0;
+End;
+
 { ---- reconstruction (mpegvideo_motion.c, mpv_reconstruct_mb_template.c, h263dsp.c, simple_idct) ---- }
 Var H3Emu: Array[0..24*24-1] Of Byte;
  H3ObmcBuf: Array[0..4,0..63] Of Byte;
@@ -34109,7 +34171,7 @@ Begin
  End;
  Move(Pk^,H3PkBuf^,Len); FillChar(H3PkBuf^[Len],128,0);
  H3Buf:=H3PkBuf; H3Size:=Len; H3Pos:=0;
- If H3Codec=1 Then Ret:=H3FlvHeader Else Ret:=H3PicHeader;
+ If H3Codec=1 Then Ret:=H3FlvHeader Else If H3Codec=3 Then Ret:=H3IntelHeader Else Ret:=H3PicHeader;
  If Ret<0 Then Begin
   If H3HaveCtx Then Begin H3Wd:=H3CtxW; H3Ht:=H3CtxH; End;
   Exit;
@@ -34166,7 +34228,7 @@ Var A,B,T: LongInt;
 Begin
  NVBegin(Mode,Target,H3Wd,H3Ht,7,RN,RD);
  NVSubX:=1; NVSubY:=1; NVCW:=(H3Wd+1) Div 2; NVCH:=(H3Ht+1) Div 2; NVYTag:='C420jpeg XYSCSS=420JPEG';
- If (H3Aspect[0]>0) And (H3Codec=0) Then Begin
+ If (H3Aspect[0]>0) And ((H3Codec=0) Or (H3Codec=3)) Then Begin
   A:=H3Aspect[0]; B:=H3Aspect[1]; T:=A; While B<>0 Do Begin A:=T Mod B; T:=B; B:=A; End;
   NVSarN:=H3Aspect[0] Div T; NVSarD:=H3Aspect[1] Div T;
  End;
@@ -36050,7 +36112,8 @@ Begin
   End;
   26: Begin
    H3Reset;
-   If AXFcc='FLV1' Then H3Codec:=1 Else If (AXFcc='H261') Or (AXFcc='h261') Then H3Codec:=2 Else H3Codec:=0;
+   If AXFcc='FLV1' Then H3Codec:=1 Else If (AXFcc='H261') Or (AXFcc='h261') Then H3Codec:=2 Else If (AXFcc='I263') Or (AXFcc='i263') Then H3Codec:=3 Else H3Codec:=0;
+   If H3Codec=3 Then Begin H3Wd:=AXW; H3Ht:=AXH; End;
    FFBegun:=False;
   End;
   24: Begin
@@ -40489,6 +40552,7 @@ BEGIN
    WriteLn('D V D  fraps           Fraps (FPS1 v0-v5, AVI)');
    WriteLn('D A    g726            G.726 ADPCM (16, 24, 32 et 40 kbit/s; g726le; WAV 0x45 ou brut)');
    WriteLn('D V    h261            H.261 (QCIF/CIF, AVI ou .h261 brut)');
+   WriteLn('D V    h263i           Intel H.263 (AVI I263, memes outils que h263 sans B)');
    WriteLn('D V    h263            H.263 / H.263-1996, H.263+ (I/P; 4MV, OBMC, UMV, AIC, deblocage, tranches; AVI ou .h263 brut)');
    WriteLn('DEVS D ffv1            FFmpeg video codec #1 (decodeur v0-v4; encodeur v1 YUV420 8 bits)');
    WriteLn('DEV    gif             GIF (decodeur anime complet; encodeur palette RGB 3/3/2, LZW, une image)');
@@ -40717,7 +40781,7 @@ BEGIN
   Else If (AsvTag='HFYU') Or (AsvTag='FFVH') Or (AsvTag='hfyu') Then NVKind:=20
   Else If AsvTag='FFV1' Then NVKind:=21
   Else If AsvTag='FPS1' Then NVKind:=24
-  Else If (AsvTag='H263') Or (AsvTag='h263') Or (AsvTag='X263') Or (AsvTag='T263') Or (AsvTag='L263') Or (AsvTag='M263') Or (AsvTag='N263') Or (AsvTag='U263') Or (AsvTag='s263') Or (AsvTag='VX1K') Or (AsvTag='ZyGo') Or (AsvTag='FLV1') Or (AsvTag='H261') Or (AsvTag='h261') Then NVKind:=26
+  Else If (AsvTag='H263') Or (AsvTag='h263') Or (AsvTag='X263') Or (AsvTag='T263') Or (AsvTag='L263') Or (AsvTag='M263') Or (AsvTag='N263') Or (AsvTag='U263') Or (AsvTag='s263') Or (AsvTag='VX1K') Or (AsvTag='ZyGo') Or (AsvTag='FLV1') Or (AsvTag='H261') Or (AsvTag='h261') Or (AsvTag='I263') Or (AsvTag='i263') Then NVKind:=26
   Else If AsvTag='RT21' Then NVKind:=31
   Else If (AsvTag='IV31') Or (AsvTag='IV32') Or (AsvTag='iv31') Or (AsvTag='iv32') Then NVKind:=32;
  End;
