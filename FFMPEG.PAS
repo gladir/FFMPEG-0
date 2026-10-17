@@ -27714,10 +27714,10 @@ Var
  EC3NRemat: LongInt; EC3RematF: Array[0..3] Of LongInt;
  EC3Fixed: Array[0..6] Of TEC3Frm;
  EC3Coef: Array[0..6,0..255] Of Single;
- EC3Delay: Array[0..6,0..127] Of Single;
+ EC3Delay: Array[0..14,0..127] Of Single;
  EC3Tmp: Array[0..255] Of Single;
- EC3Outb: Array[0..5,0..1535] Of Single;   { sortie par canal code, 6 blocs }
- EC3Last: Array[0..5,0..255] Of Single;
+ EC3Outb: Array[0..15,0..1535] Of Single;   { sortie par position, 6 blocs; 7.. = sous-flux dependant }
+ EC3Last: Array[0..15,0..255] Of Single; EC3Off,EC3ChanMap,EC3OutMode,EC3PrevMode: LongInt;
  EC3DynRange: Array[0..1] Of Single;
  EC3Fail,EC3Downmixed: Boolean;
  EC3DiscSamples: LongInt;
@@ -27912,6 +27912,23 @@ Begin
  EC3ParseAc3:=0;
 End;
 
+
+Const
+ EC3LocMask: Array[0..15] Of Int64=(
+  1,4,2,$200,$400,$C0,$30,$100,$800,$600000000,$180000000,$5000,$2000,$28000,$800000000,8);
+ EC3LocSingle: Array[0..15] Of Byte=(1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,1);
+ EC3LayoutTab: Array[0..7] Of LongInt=($3,$4,$3,$7,$103,$107,$603,$607);
+Function EC3PopCount(V: Int64): LongInt;
+Var N: LongInt;
+Begin N:=0; While V<>0 Do Begin If (V And 1)<>0 Then Inc(N); V:=V Shr 1; End; EC3PopCount:=N; End;
+{ nombre de canaux de la disposition decrite par une carte de canaux personnalisee (chanmap) }
+Function EC3PopLoc(Map: LongInt): LongInt;
+Var Ch: LongInt; M: Int64;
+Begin
+ M:=0;
+ For Ch:=0 To 15 Do If (Map And (1 Shl (15-Ch)))<>0 Then M:=M Or EC3LocMask[Ch];
+ EC3PopLoc:=EC3PopCount(M);
+End;
 { ff_eac3_parse_header; 0 ok, 5 sous-flux ignore, 100+ erreur fatale }
 Function EC3ParseEac3: LongInt;
 Var I,Blk,Ch,N,Frm,AExp,ParseAht,ParseSpx,ParseTrans,NumCplBlk,Csn,Snr: LongInt; UseAht: Boolean;
@@ -27929,7 +27946,8 @@ Begin
  If EC3FType=1 Then Begin
   If EC3Bits(1)<>0 Then Begin
    Frm:=EC3Bits(16);
-   { carte de canaux personnalisee: sous-flux dependants non pris en charge }
+   EC3ChanMap:=Frm;
+   If EC3PopLoc(Frm)>16 Then Begin EC3ParseEac3:=101; Exit; End;
   End;
  End;
  If EC3Bits(1)<>0 Then Begin
@@ -28581,20 +28599,20 @@ Begin
   For I:=0 To 127 Do Begin Ev[I]:=EC3Coef[Ch,2*I]; Od[I]:=EC3Coef[Ch,2*I+1]; End;
   EC3Half(Ev,128,T2);
   For I:=0 To 127 Do Begin
-   S0:=EC3Delay[Ch,I]; S1:=T2[127-I];
+   S0:=EC3Delay[Ch+EC3Off,I]; S1:=T2[127-I];
    P1:=S0*EC3Win[255-I]; P2:=S1*EC3Win[I]; EC3Outb[Pos,Base+I]:=P1-P2;
    P1:=S0*EC3Win[I]; P2:=S1*EC3Win[255-I]; EC3Outb[Pos,Base+255-I]:=P1+P2;
   End;
   EC3Half(Od,128,T2);
-  For I:=0 To 127 Do EC3Delay[Ch,I]:=T2[I];
+  For I:=0 To 127 Do EC3Delay[Ch+EC3Off,I]:=T2[I];
  End Else Begin
   EC3Half(EC3Coef[Ch],256,EC3Tmp);
   For I:=0 To 127 Do Begin
-   S0:=EC3Delay[Ch,I]; S1:=EC3Tmp[127-I];
+   S0:=EC3Delay[Ch+EC3Off,I]; S1:=EC3Tmp[127-I];
    P1:=S0*EC3Win[255-I]; P2:=S1*EC3Win[I]; EC3Outb[Pos,Base+I]:=P1-P2;
    P1:=S0*EC3Win[I]; P2:=S1*EC3Win[255-I]; EC3Outb[Pos,Base+255-I]:=P1+P2;
   End;
-  For I:=0 To 127 Do EC3Delay[Ch,I]:=EC3Tmp[128+I];
+  For I:=0 To 127 Do EC3Delay[Ch+EC3Off,I]:=EC3Tmp[128+I];
  End;
 End;
 
@@ -28819,15 +28837,64 @@ Begin
  End;
 End;
 
-{ decode un fichier .eac3 brut (trames independantes du sous-flux 0) vers WAV PCM16 }
+{ decode une trame deja chargee dans EC3In (en-tete analyse); Off = 0 (independante) ou 7 (dependante) }
+Procedure EC3DecodeBlocks;
+Var Blk,Ch,K: LongInt; Bad: Boolean; Map: Array[0..5] Of Byte;
+Begin
+ For K:=0 To 5 Do Map[K]:=EC3Map[EC3Mode,EC3LfeOn,K];
+ For K:=0 To EC3NCh-1 Do EC3PosOf[Map[K]]:=K+EC3Off;
+ Bad:=False;
+ For Blk:=0 To EC3NBlk-1 Do Begin
+  If Not Bad Then If Not EC3Block(Blk) Then Bad:=True;
+  If Bad Then
+   { dissimulation: copie du bloc precedent }
+   For Ch:=0 To EC3NCh-1 Do
+    If Blk>0 Then Move(EC3Outb[Ch+EC3Off,(Blk-1)*256],EC3Outb[Ch+EC3Off,Blk*256],1024)
+    Else Move(EC3Last[Ch+EC3Off],EC3Outb[Ch+EC3Off,0],1024);
+ End;
+ For Ch:=0 To EC3NCh-1 Do Move(EC3Outb[Ch+EC3Off,(EC3NBlk-1)*256],EC3Last[Ch+EC3Off],1024);
+End;
+
+{ decode un fichier .eac3 brut vers WAV PCM16: trame independante du sous-flux 0 et trames dependantes associees }
 Procedure DecodeEAC3(Const Source,Target: String);
 Var
- F: PEABuffer; Size,P,Q,Blk,Ch,Pos,I,Err,FrameStart,Total,NOut,Rate,OutCh,K: LongInt;
- Started,Have,Bad: Boolean; V: Single; S: LongInt; Map: Array[0..5] Of Byte;
+ F: PEABuffer; Size,P,Q,Blk,Ch,I,J,Err,Rate,OutCh,K,NDep,Layout,MapSize,Extend,NLay,Idx: LongInt;
+ Started,Drop: Boolean; V: Single; S: LongInt; Ext: Array[0..15] Of LongInt; Lay: Int64; LayIdx: Array[0..63] Of LongInt;
+ Cm: Array[0..5] Of Byte; Loc: Int64;
+Function Index(Bit: LongInt): LongInt;
+Var Cnt,B2: LongInt;
+Begin
+ If (Lay And (Int64(1) Shl Bit))=0 Then Begin Index:=-1; Exit; End;
+ Cnt:=0; For B2:=0 To Bit-1 Do If (Lay And (Int64(1) Shl B2))<>0 Then Inc(Cnt);
+ Index:=Cnt;
+End;
+Procedure Output(NCh,NBlkOut: LongInt);
+Var Bk,C2: LongInt;
+Begin
+ For Bk:=0 To NBlkOut*256-1 Do
+  For C2:=0 To NCh-1 Do Begin
+   V:=EC3Outb[Ext[C2],Bk]*32768.0;
+   S:=Round(V);
+   If S>32767 Then S:=32767 Else If S<-32768 Then S:=-32768;
+   EAPut(S);
+  End;
+End;
+{ charge la trame situee en Q dans EC3In et analyse l'en-tete; vrai si le mot de synchronisation et l'en-tete sont valides }
+Function LoadFrame(At: LongInt): Boolean;
+Begin
+ LoadFrame:=False;
+ If At+7>Size Then Exit;
+ If Not ((F^[At]=$0B) And (F^[At+1]=$77)) Then Exit;
+ EC3Data:=PEABuffer(@F^[At]); EC3Lim:=Size-At; If EC3Lim>32768 Then EC3Lim:=32768;
+ EC3BP:=0; EC3Cap:=EC3Lim*8+8;
+ If EC3ParseHdr<>0 Then Exit;
+ If HFSize>Size-At Then Exit;
+ LoadFrame:=True;
+End;
 Begin
  If Not EC3Init Then EC3Tables;
  EC3LfgInit(0);
- FillChar(EC3Delay,SizeOf(EC3Delay),0); FillChar(EC3Last,SizeOf(EC3Last),0);
+ FillChar(EC3Delay,SizeOf(EC3Delay),0); FillChar(EC3Last,SizeOf(EC3Last),0); FillChar(EC3Outb,SizeOf(EC3Outb),0);
  FillChar(EC3Dexp,SizeOf(EC3Dexp),0); FillChar(EC3Bap,SizeOf(EC3Bap),0);
  FillChar(EC3Coef,SizeOf(EC3Coef),0); FillChar(EC3Fixed,SizeOf(EC3Fixed),0);
  FillChar(EC3Snr,SizeOf(EC3Snr),0); FillChar(EC3Fgain,SizeOf(EC3Fgain),0);
@@ -28836,53 +28903,90 @@ Begin
  FillChar(EC3DbaMode,SizeOf(EC3DbaMode),0); FillChar(EC3Dither,SizeOf(EC3Dither),0); FillChar(EC3BlkSw,SizeOf(EC3BlkSw),0);
  FillChar(EC3CplUse,SizeOf(EC3CplUse),0); FillChar(EC3ExpStr,SizeOf(EC3ExpStr),0);
  FillChar(EC3DynRange,SizeOf(EC3DynRange),0);
- EC3NCh:=0; EC3SpxUse:=0; EC3NRemat:=0; FillChar(EC3In,SizeOf(EC3In),0); EC3Downmixed:=True;
+ EC3NCh:=0; EC3SpxUse:=0; EC3NRemat:=0; FillChar(EC3In,SizeOf(EC3In),0); EC3Downmixed:=True; EC3ChanMap:=0; EC3Off:=0;
  NVLoad(Source,F,Size);
- EAReset; Started:=False; Rate:=0; OutCh:=0; Total:=0;
+ EAReset; Started:=False; Rate:=0; OutCh:=0;
  P:=0;
  While P+7<=Size Do Begin
-  { recherche du mot de synchronisation }
-  If Not ((F^[P]=$0B) And (F^[P+1]=$77)) Then Begin Inc(P); Continue; End;
-  EC3Data:=PEABuffer(@F^[P]); EC3Lim:=Size-P; If EC3Lim>32768 Then EC3Lim:=32768;
-  EC3BP:=0; EC3Cap:=EC3Lim*8+8;
-  Err:=EC3ParseHdr;
-  If Err<>0 Then Begin Inc(P); Continue; End;
-  { l'en-tete est valide: longueur de trame }
-  If HFSize>Size-P Then Break;
+  If Not LoadFrame(P) Then Begin Inc(P); Continue; End;
+  { trame dependante sans trame independante, ou sous-flux supplementaire: ignores }
+  If (HFType=1) Or (HSub<>0) Then Begin Inc(P,HFSize); Continue; End;
   Move(F^[P],EC3In,HFSize);
   EC3Data:=PEABuffer(@EC3In); EC3Lim:=32768; EC3Cap:=HFSize*8+8; EC3BP:=0;
+  EC3Off:=0;
   Err:=EC3ParseFrame;
-  If (HFType=1) Or (HSub<>0) Or (Err=5) Then Begin Inc(P,HFSize); Continue; End;
-  If Err>=100 Then Begin Inc(P,HFSize); Continue; End;
-  If (Err<>0) Then Begin Inc(P,HFSize); Continue; End;
-  If EC3NCh<1 Then Begin Inc(P,HFSize); Continue; End;
-  If Not Started Then Begin
-   Rate:=EC3Rate; OutCh:=EC3NCh;
-   OpenWrite(Target); ADPCMWaveHeader(Rate,OutCh,0); Started:=True;
-  End Else If (EC3Rate<>Rate) Or (EC3NCh<>OutCh) Then Begin Inc(P,HFSize); Continue; End;
-  { carte des canaux de sortie }
-  For K:=0 To 5 Do Map[K]:=EC3Map[EC3Mode,EC3LfeOn,K];
-  For K:=0 To EC3NCh-1 Do EC3PosOf[Map[K]]:=K;
-  Bad:=False;
-  For Blk:=0 To EC3NBlk-1 Do Begin
-   If Not Bad Then If Not EC3Block(Blk) Then Bad:=True;
-   If Bad Then Begin
-    { dissimulation: copie du bloc precedent }
-    For Ch:=0 To EC3NCh-1 Do
-     If Blk>0 Then Move(EC3Outb[Ch,(Blk-1)*256],EC3Outb[Ch,Blk*256],1024)
-     Else Move(EC3Last[Ch],EC3Outb[Ch,0],1024);
+  If (Err<>0) Or (EC3NCh<1) Then Begin Inc(P,HFSize); Continue; End;
+  EC3OutMode:=EC3Mode; If EC3LfeOn<>0 Then EC3OutMode:=EC3OutMode Or 8;
+  EC3DecodeBlocks;
+  Q:=P+HFSize; NDep:=0; Drop:=False;
+  { trames dependantes qui suivent }
+  While LoadFrame(Q) Do Begin
+   If HFType<>1 Then Break;
+   If (HNBlk<>EC3NBlk) Or (HRate<>EC3Rate) Then Begin
+    { dependante incompatible: ignoree ainsi que les suivantes }
+    While LoadFrame(Q) And (HFType=1) Do Inc(Q,HFSize);
+    Break;
+   End;
+   If HSub<>0 Then Begin Drop:=True; Inc(Q,HFSize); Continue; End;
+   EC3PrevMode:=EC3OutMode;
+   Move(F^[Q],EC3In,HFSize);
+   EC3Data:=PEABuffer(@EC3In); EC3Lim:=32768; EC3Cap:=HFSize*8+8; EC3BP:=0;
+   EC3Off:=7;
+   Err:=EC3ParseFrame;
+   If Err<>0 Then Begin Drop:=True; Inc(Q,HFSize); EC3Off:=0; Continue; End;
+   EC3OutMode:=EC3Mode; If EC3LfeOn<>0 Then EC3OutMode:=EC3OutMode Or 8;
+   EC3DecodeBlocks;
+   EC3Downmixed:=True;
+   Inc(NDep);
+   Inc(Q,HFSize);
+  End;
+  EC3Off:=0;
+  If Not Drop Then Begin
+   If NDep=0 Then Begin
+    OutCh:=EC3NCh;
+    If Not Started Then Begin Rate:=EC3Rate; OpenWrite(Target); ADPCMWaveHeader(Rate,OutCh,0); Started:=True; End;
+    If (EC3Rate=Rate) And (EC3NCh=OutCh) Then Begin
+     For K:=0 To 15 Do Ext[K]:=K;
+     Output(EC3NCh,EC3NBlk);
+    End;
+   End Else Begin
+    { disposition etendue par la carte de canaux (extended_channel_map de ffmpeg) }
+    Lay:=EC3LayoutTab[EC3PrevMode And 7]; If (EC3PrevMode And 8)<>0 Then Lay:=Lay Or 8;
+    For K:=0 To 15 Do If (EC3ChanMap And (1 Shl (15-K)))<>0 Then Lay:=Lay Or EC3LocMask[K];
+    If EC3PopCount(Lay)<=16 Then Begin
+     NLay:=EC3PopCount(Lay);
+     For K:=0 To 15 Do Ext[K]:=K;
+     For K:=0 To 5 Do Cm[K]:=EC3Map[EC3Mode,EC3LfeOn,K];
+     MapSize:=EC3Chans[EC3Mode]+EC3LfeOn; Extend:=0;
+     Err:=0;
+     For Ch:=0 To 15 Do
+      If (EC3ChanMap And (1 Shl (15-Ch)))<>0 Then Begin
+       If EC3LocSingle[Ch]<>0 Then Begin
+        Loc:=EC3LocMask[Ch]; J:=0; While (Loc And (Int64(1) Shl J))=0 Do Inc(J);
+        Idx:=Index(J);
+        If Idx<0 Then Err:=1;
+        If (Err=0) And (Extend<MapSize) Then Begin Ext[Idx]:=7+Cm[Extend]; Inc(Extend); End
+        Else If Extend>=MapSize Then Break;
+       End Else Begin
+        For J:=0 To 63 Do
+         If (EC3LocMask[Ch] And (Int64(1) Shl J))<>0 Then Begin
+          Idx:=Index(J);
+          If Idx<0 Then Err:=1;
+          If Err<>0 Then Break;
+          If Extend>=MapSize Then Break;
+          Ext[Idx]:=7+Cm[Extend]; Inc(Extend);
+         End;
+       End;
+       If Err<>0 Then Break;
+      End;
+     If Err=0 Then Begin
+      If Not Started Then Begin Rate:=EC3Rate; OutCh:=NLay; OpenWrite(Target); ADPCMWaveHeader(Rate,OutCh,0); Started:=True; End;
+      If (EC3Rate=Rate) And (NLay=OutCh) Then Output(NLay,EC3NBlk);
+     End;
+    End;
    End;
   End;
-  For Ch:=0 To EC3NCh-1 Do Move(EC3Outb[Ch,(EC3NBlk-1)*256],EC3Last[Ch],1024);
-  For Blk:=0 To EC3NBlk*256-1 Do
-   For Ch:=0 To EC3NCh-1 Do Begin
-    V:=EC3Outb[Ch,Blk]*32768.0;
-    S:=Round(V);
-    If S>32767 Then S:=32767 Else If S<-32768 Then S:=-32768;
-    EAPut(S);
-   End;
-  Inc(Total,EC3NBlk*256);
-  Inc(P,HFSize);
+  P:=Q;
  End;
  FreeMem(F,Size+64);
  If Not Started Then Fail('eac3: aucune trame valide.');
@@ -30715,7 +30819,7 @@ Begin
    If HasFormat Or (Size<16) Then Fail('Bloc fmt incorrect.');
    ReadAt(Position,B,16); If (U16(0)<>1) And Not ((U16(0)=$FFFE) And (Size>=40)) Then Fail('WAV PCM entier requis.');
    Channels:=U16(2); Rate:=U32(4); Bits:=U16(14); Align:=U16(12);
-   If Not (Channels In [1..6]) Or Not (Bits In [8,16,24,32]) Or (Rate<4000) Or (Rate>
+   If Not (Channels In [1..8]) Or Not (Bits In [8,16,24,32]) Or (Rate<4000) Or (Rate>
    192000) Then Fail('Format PCM non pris en charge.');
    If (Align<>Channels*(Bits Div 8)) Or (U32(8)<>Rate*Align) Then Fail(
    'Alignement PCM incorrect.');
