@@ -28520,17 +28520,57 @@ Begin
 End;
 
 { transformee inverse + fenetrage (do_imdct pour un canal) }
-Var EC3Cos: Array[0..2047] Of Double; EC3CosInit: Boolean;
-Procedure EC3Half(Var X: Array of Single; N,Off,Step: LongInt; Var Y: Array of Single);
-Var I,K,M,Q: LongInt; Sum: Double;
+Type TEC3Fft=Record
+ N,M: LongInt;
+ PreC,PreS,PostC,PostS: Array[0..127] Of Double;
+ WC,WS: Array[0..63] Of Double;
+ Rev: Array[0..127] Of Byte;
+End;
+Var EC3Ft: Array[0..1] Of TEC3Fft; EC3FtInit: Boolean;
+Procedure EC3FftInit(Var T: TEC3Fft; N: LongInt);
+Var I,J,K,Bits_,R: LongInt;
 Begin
- For I:=0 To N-1 Do Begin
-  Sum:=0; Q:=2*I+1+2*N;
-  For K:=0 To N-1 Do Begin
-   M:=((2*K+1)*Q) Mod (8*N);
-   Sum:=Sum+X[Off+K*Step]*EC3Cos[M*(256 Div N)];
+ T.N:=N; T.M:=N Div 2;
+ For I:=0 To T.M-1 Do Begin
+  T.PreC[I]:=Cos(-Pi*(I+0.25)/N); T.PreS[I]:=Sin(-Pi*(I+0.25)/N);
+  T.PostC[I]:=Cos(-Pi*I/N); T.PostS[I]:=Sin(-Pi*I/N);
+ End;
+ For I:=0 To T.M Div 2-1 Do Begin T.WC[I]:=Cos(-2*Pi*I/T.M); T.WS[I]:=Sin(-2*Pi*I/T.M); End;
+ Bits_:=0; K:=T.M; While K>1 Do Begin K:=K Shr 1; Inc(Bits_); End;
+ For I:=0 To T.M-1 Do Begin
+  R:=0; For J:=0 To Bits_-1 Do If (I And (1 Shl J))<>0 Then R:=R Or (1 Shl (Bits_-1-J));
+  T.Rev[I]:=R;
+ End;
+End;
+{ transformee inverse "demi" de l'AC-3: Y = DCT-IV de X renversee, via une FFT complexe de N/2 points }
+Procedure EC3Half(Var X: Array of Single; N: LongInt; Var Y: Array of Single);
+Var T: ^TEC3Fft; Re,Im: Array[0..127] Of Double; I,J,Len,Half,Step,M: LongInt; A,B,Tr,Ti,Ur,Ui,Wr,Wi,Vr,Vi: Double;
+Begin
+ If Not EC3FtInit Then Begin EC3FftInit(EC3Ft[0],256); EC3FftInit(EC3Ft[1],128); EC3FtInit:=True; End;
+ If N=256 Then T:=@EC3Ft[0] Else T:=@EC3Ft[1];
+ M:=T^.M;
+ For I:=0 To M-1 Do Begin
+  A:=X[2*I]; B:=X[N-1-2*I];
+  Tr:=A*T^.PreC[I]-B*T^.PreS[I]; Ti:=A*T^.PreS[I]+B*T^.PreC[I];
+  Re[T^.Rev[I]]:=Tr; Im[T^.Rev[I]]:=Ti;
+ End;
+ Len:=2;
+ While Len<=M Do Begin
+  Half:=Len Shr 1; Step:=M Div Len; I:=0;
+  While I<M Do Begin
+   For J:=0 To Half-1 Do Begin
+    Wr:=T^.WC[J*Step]; Wi:=T^.WS[J*Step];
+    Vr:=Re[I+J+Half]*Wr-Im[I+J+Half]*Wi; Vi:=Re[I+J+Half]*Wi+Im[I+J+Half]*Wr;
+    Ur:=Re[I+J]; Ui:=Im[I+J];
+    Re[I+J]:=Ur+Vr; Im[I+J]:=Ui+Vi; Re[I+J+Half]:=Ur-Vr; Im[I+J+Half]:=Ui-Vi;
+   End;
+   Inc(I,Len);
   End;
-  Y[I]:=-Sum;
+  Len:=Len Shl 1;
+ End;
+ For I:=0 To M-1 Do Begin
+  Ur:=Re[I]*T^.PostC[I]-Im[I]*T^.PostS[I]; Ui:=Re[I]*T^.PostS[I]+Im[I]*T^.PostC[I];
+  Y[N-1-2*I]:=Ur; Y[2*I]:=-Ui;
  End;
 End;
 Procedure EC3Imdct(Ch,Pos,Blk: LongInt);
@@ -28539,16 +28579,16 @@ Begin
  Base:=Blk*256;
  If EC3BlkSw[Ch]<>0 Then Begin
   For I:=0 To 127 Do Begin Ev[I]:=EC3Coef[Ch,2*I]; Od[I]:=EC3Coef[Ch,2*I+1]; End;
-  EC3Half(Ev,128,0,1,T2);
+  EC3Half(Ev,128,T2);
   For I:=0 To 127 Do Begin
    S0:=EC3Delay[Ch,I]; S1:=T2[127-I];
    P1:=S0*EC3Win[255-I]; P2:=S1*EC3Win[I]; EC3Outb[Pos,Base+I]:=P1-P2;
    P1:=S0*EC3Win[I]; P2:=S1*EC3Win[255-I]; EC3Outb[Pos,Base+255-I]:=P1+P2;
   End;
-  EC3Half(Od,128,0,1,T2);
+  EC3Half(Od,128,T2);
   For I:=0 To 127 Do EC3Delay[Ch,I]:=T2[I];
  End Else Begin
-  EC3Half(EC3Coef[Ch],256,0,1,EC3Tmp);
+  EC3Half(EC3Coef[Ch],256,EC3Tmp);
   For I:=0 To 127 Do Begin
    S0:=EC3Delay[Ch,I]; S1:=EC3Tmp[127-I];
    P1:=S0*EC3Win[255-I]; P2:=S1*EC3Win[I]; EC3Outb[Pos,Base+I]:=P1-P2;
@@ -28786,8 +28826,7 @@ Var
  Started,Have,Bad: Boolean; V: Single; S: LongInt; Map: Array[0..5] Of Byte;
 Begin
  If Not EC3Init Then EC3Tables;
- EC3LfgInit(0); EC3CosInit:=False;
- For I:=0 To 2047 Do EC3Cos[I]:=Cos(Pi*I/1024);
+ EC3LfgInit(0);
  FillChar(EC3Delay,SizeOf(EC3Delay),0); FillChar(EC3Last,SizeOf(EC3Last),0);
  FillChar(EC3Dexp,SizeOf(EC3Dexp),0); FillChar(EC3Bap,SizeOf(EC3Bap),0);
  FillChar(EC3Coef,SizeOf(EC3Coef),0); FillChar(EC3Fixed,SizeOf(EC3Fixed),0);
