@@ -14178,7 +14178,12 @@ Begin
   OpenWrite(NVTarget); NVOpened:=True;
   Str(NVW,S); Hdr:='YUV4MPEG2 W'+S; Str(NVH,S); Hdr:=Hdr+' H'+S;
   Str(NVFpsN,S); Hdr:=Hdr+' F'+S; Str(NVFpsD,S); Hdr:=Hdr+':'+S+' Ip A';
-  Str(NVSarN,S); Hdr:=Hdr+S; Str(NVSarD,S); Hdr:=Hdr+':'+S+' '+NVYTag+#10;
+  Str(NVSarN,S); Hdr:=Hdr+S; Str(NVSarD,S); Hdr:=Hdr+':'+S+' '+NVYTag;
+  If (Pos('XYSCSS',NVYTag)=0) And (Copy(NVYTag,1,2)='C4') Then Begin
+   S:=Copy(NVYTag,2,60); For K:=1 To Length(S) Do S[K]:=UpCase(S[K]);
+   Hdr:=Hdr+' XYSCSS='+S;
+  End;
+  Hdr:=Hdr+#10;
   If NVIl<>'p' Then Begin K:=Pos('Ip A',Hdr); If K>0 Then Hdr[K+1]:=NVIl; End;
   WriteBytes(Hdr[1],Length(Hdr));
  End;
