@@ -3919,7 +3919,7 @@ Begin
  If N>=8 Then Begin
   Tag:=Chr(B[0])+Chr(B[1])+Chr(B[2])+Chr(B[3]);
   If (Tag='1SNh') Or (Tag='SCHl') Or (Tag='SEAD') Or (Tag='SHEN') Or (Tag='kVGT') Or
-   (Tag='MADk') Or (Tag='MPCh') Or (Tag='MVhd') Or (Tag='MVIh') Or (Tag='AVP6') Then Begin
+   (Tag='MADk') Or (Tag='MPCh') Or (Tag='MVhd') Or (Tag='MVIh') Or (Tag='AVP6') Or (Tag='TGQs') Or (Tag='pQGT') Or (Tag='pIQT') Then Begin
    EASize:=Int64(B[4])+Int64(B[5])*256+Int64(B[6])*65536+Int64(B[7])*16777216;
    If EASize>1048575 Then
     EASize:=Int64(B[7])+Int64(B[6])*256+Int64(B[5])*65536+Int64(B[4])*16777216;
@@ -16632,12 +16632,14 @@ Procedure DecodeCAVS(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeDV(Const Source,Target: String; Mode: LongInt; IsAvi: Boolean); Forward;
 Procedure DecodeDSICin(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeDXA(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure DecodeEAVideo(Const Source,Target: String; Mode: LongInt); Forward;
+Function EAVDetect(Const Source: String): LongInt; Forward;
 Procedure DecodeNV2(Kind: LongInt; Const Source,Target: String; Mode: LongInt);
 Begin
  If Kind=12 Then DecodeCAVS(Source,Target,Mode)
  Else If Kind=13 Then DecodeDV(Source,Target,Mode,False)
  Else If Kind=15 Then DecodeDSICin(Source,Target,Mode)
- Else If Kind=16 Then DecodeDXA(Source,Target,Mode)
+ Else If Kind=16 Then DecodeDXA(Source,Target,Mode) Else If Kind=17 Then DecodeEAVideo(Source,Target,Mode)
  Else If Kind=14 Then DecodeDV(Source,Target,Mode,True)
  Else If Kind=10 Then DecodeDNxHD(Source,Target,Mode,False)
  Else If Kind=11 Then DecodeDNxHD(Source,Target,Mode,True)
@@ -26357,6 +26359,641 @@ Begin
  NVFinish('dxa');
 End;
 
+{ ---- Electronic Arts video: conteneur (libavformat/electronicarts.c) et decodeurs eacmv, eatgv, eatgq, eatqi
+  (libavcodec/eacmv.c, eatgv.c, eatgq.c, eatqi.c, eaidct.c) ---- }
+Type TEAVBlk=Array[0..63] Of SmallInt; TEAV8=Array[0..7] Of LongInt;
+Const
+ EAVAan: Array[0..63] Of Word=(
+ 4096,2953,3135,3483,4096,5213,7568,14846,
+ 2953,2129,2260,2511,2953,3759,5457,10703,
+ 3135,2260,2399,2666,3135,3990,5793,11363,
+ 3483,2511,2666,2962,3483,4433,6436,12625,
+ 4096,2953,3135,3483,4096,5213,7568,14846,
+ 5213,3759,3990,4433,5213,6635,9633,18895,
+ 7568,5457,5793,6436,7568,9633,13985,27432,
+ 14846,10703,11363,12625,14846,18895,27432,53809);
+ EAVMat: Array[0..63] Of Byte=(
+ 8,16,19,22,26,27,29,34,
+ 16,16,22,24,27,29,34,37,
+ 19,22,26,27,29,34,34,38,
+ 22,22,26,27,29,34,37,40,
+ 22,26,27,29,32,35,40,48,
+ 26,27,29,32,35,40,48,58,
+ 26,27,29,34,38,46,56,69,
+ 27,29,35,38,46,56,69,83);
+ EAVDCLCode: Array[0..11] Of Integer=(4,0,1,5,6,14,30,62,126,254,510,511);
+ EAVDCLBits: Array[0..11] Of Integer=(3,2,2,3,3,4,5,6,7,8,9,9);
+ EAVDCCCode: Array[0..11] Of Integer=(0,1,2,6,14,30,62,126,254,510,1022,1023);
+ EAVDCCBits: Array[0..11] Of Integer=(2,2,2,3,4,5,6,7,8,9,10,10);
+ EAVMCode: Array[0..112] Of Word=(3,4,5,6,38,33,10,29,24,19,16,26,25,24,23,31,
+ 30,29,28,27,26,25,24,23,22,21,20,19,18,17,16,24,
+ 23,22,21,20,19,18,17,16,3,6,37,12,27,22,21,31,
+ 30,29,28,27,26,25,19,18,17,16,5,4,11,20,20,7,
+ 36,28,19,6,15,18,7,9,18,5,30,20,4,21,7,17,
+ 5,17,39,16,35,26,34,25,32,24,14,23,13,22,8,21,
+ 31,26,25,23,22,31,30,29,28,27,31,30,29,28,27,1,
+ 2);
+ EAVMBits: Array[0..112] Of Byte=(2,4,5,7,8,8,10,12,12,12,12,13,13,13,13,14,
+ 14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,15,
+ 15,15,15,15,15,15,15,15,3,6,8,10,12,13,13,15,
+ 15,15,15,15,15,15,16,16,16,16,4,7,10,12,13,5,
+ 8,12,13,5,10,12,6,10,13,6,12,16,6,12,7,12,
+ 7,13,8,13,8,16,8,16,8,16,10,16,10,16,10,16,
+ 12,12,12,12,12,13,13,13,13,13,16,16,16,16,16,6,
+ 2);
+ EAVMRun: Array[0..110] Of Byte=(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+ 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+ 0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,
+ 1,1,1,1,1,1,1,1,1,1,2,2,2,2,2,3,
+ 3,3,3,4,4,4,5,5,5,6,6,6,7,7,8,8,
+ 9,9,10,10,11,11,12,12,13,13,14,14,15,15,16,16,
+ 17,18,19,20,21,22,23,24,25,26,27,28,29,30,31);
+ EAVMLev: Array[0..110] Of Byte=(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,
+ 17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,
+ 33,34,35,36,37,38,39,40,1,2,3,4,5,6,7,8,
+ 9,10,11,12,13,14,15,16,17,18,1,2,3,4,5,1,
+ 2,3,4,1,2,3,1,2,3,1,2,3,1,2,1,2,
+ 1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,
+ 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1);
+Var
+ EAVBuf: PEABuffer; EAVLim,EAVBP,EAVCap: LongInt;
+ EAVQ: Array[0..63] Of LongInt;
+ EAVLut: Array[0..65535] Of SmallInt; EAVLutInit: Boolean;
+ EAVW,EAVH,EAVCodec,EAVLs,EAVCs,EAVAH: LongInt;
+ EAVPal: Array[0..255] Of LongInt;
+ EAVCur,EAVLast,EAVLast2,EAVTgvB,EAVY,EAVU,EAVV: PEABuffer; EAVHave1,EAVHave2,EAVDims: Boolean;
+ EAVMvs: Array[0..65535,0..1] Of SmallInt; EAVCb: Array[0..65535,0..15] Of Byte;
+ EAVYs,EAVUs,EAVVs: Array[0..1] Of PEABuffer; EAVPool: LongInt;
+ EAVBlk: Array[0..5] Of TEAVBlk; EAVLastDC: Array[0..2] Of LongInt;
+
+Function EAVW16(V: LongInt): LongInt;
+Begin V:=V And $FFFF; If V>=32768 Then V:=V-65536; EAVW16:=V; End;
+Function EAVLE(N: LongInt): LongInt;
+Var V,K,P: LongInt;
+Begin
+ V:=0; For K:=0 To N-1 Do Begin
+  P:=EAVBP+K; If (P Shr 3)<EAVLim Then V:=V Or (((EAVBuf^[P Shr 3] Shr (P And 7)) And 1) Shl K);
+ End; EAVLE:=V;
+End;
+Procedure EAVSkip(N: LongInt);
+Begin Inc(EAVBP,N); If EAVBP>EAVCap Then EAVBP:=EAVCap; End;
+Function EAVGetLE(N: LongInt): LongInt;
+Begin EAVGetLE:=EAVLE(N); EAVSkip(N); End;
+Function EAVSbitsLE(N: LongInt): LongInt;
+Var V: LongInt;
+Begin V:=EAVGetLE(N); If V>=(LongInt(1) Shl (N-1)) Then V:=V-(LongInt(1) Shl N); EAVSbitsLE:=V; End;
+Function EAVBE(N: LongInt): LongInt;
+Var V,K,P: LongInt;
+Begin
+ V:=0; For K:=0 To N-1 Do Begin
+  P:=EAVBP+K; V:=V*2; If (P Shr 3)<EAVLim Then V:=V Or ((EAVBuf^[P Shr 3] Shr (7-(P And 7))) And 1);
+ End; EAVBE:=V;
+End;
+Function EAVGetBE(N: LongInt): LongInt;
+Begin EAVGetBE:=EAVBE(N); EAVSkip(N); End;
+
+{ IDCT d'Electronic Arts (eaidct.c) }
+Procedure EAVTrans(Var S,D: TEAV8; Row: Boolean);
+Var a0,a1,a2,a3,a4,a5,a6,a7,b0,b1,b2,b3,t,u,v,K: LongInt; O: TEAV8;
+Begin
+ a1:=S[1]+S[7]; a7:=S[1]-S[7]; a5:=S[5]+S[3]; a3:=S[5]-S[3];
+ a2:=S[2]+S[6]; a6:=AVSar(181*(S[2]-S[6]),8);
+ a0:=S[0]+S[4]; a4:=S[0]-S[4];
+ t:=AVSar(473*a7-196*a3,9); u:=AVSar(473*a3+196*a7,9); v:=AVSar(181*(a1-a5),8);
+ b0:=t+a1+a5; b1:=t+v; b2:=u+v; b3:=u;
+ O[0]:=a0+a2+a6+b0; O[1]:=a4+a6+b1; O[2]:=a4-a6+b2; O[3]:=a0-a2-a6+b3;
+ O[4]:=a0-a2-a6-b3; O[5]:=a4-a6-b2; O[6]:=a4+a6-b1; O[7]:=a0+a2+a6-b0;
+ For K:=0 To 7 Do Begin
+  If Row Then Begin
+   v:=AVSar(O[K],4); If v<0 Then v:=0 Else If v>255 Then v:=255; D[K]:=v;
+  End Else D[K]:=EAVW16(O[K]);
+ End;
+End;
+Procedure EAVIdctPut(Dest: PEABuffer; Off,Stride: LongInt; Var Blk: TEAVBlk);
+Var Tmp: Array[0..63] Of LongInt; I,J: LongInt; S,D: TEAV8;
+Begin
+ Blk[0]:=EAVW16(Blk[0]+4);
+ For I:=0 To 7 Do Begin
+  For J:=0 To 7 Do S[J]:=Blk[J*8+I];
+  EAVTrans(S,D,False);
+  For J:=0 To 7 Do Tmp[J*8+I]:=D[J];
+ End;
+ For I:=0 To 7 Do Begin
+  For J:=0 To 7 Do S[J]:=Tmp[I*8+J];
+  EAVTrans(S,D,True);
+  For J:=0 To 7 Do Dest^[Off+I*Stride+J]:=D[J];
+ End;
+End;
+
+{ planes YUV 4:2:0 alignes sur 16 }
+Procedure EAVAllocYUV;
+Var K: LongInt;
+Begin
+ EAVAH:=(EAVH+15) And (Not 15); EAVLs:=(EAVW+15) And (Not 15); EAVCs:=EAVLs Div 2;
+ For K:=0 To 1 Do Begin
+  GetMem(EAVYs[K],EAVLs*EAVAH+64); GetMem(EAVUs[K],EAVCs*(EAVAH Div 2)+64); GetMem(EAVVs[K],EAVCs*(EAVAH Div 2)+64);
+  FillChar(EAVYs[K]^,EAVLs*EAVAH+64,0); FillChar(EAVUs[K]^,EAVCs*(EAVAH Div 2)+64,0); FillChar(EAVVs[K]^,EAVCs*(EAVAH Div 2)+64,0);
+ End;
+ EAVY:=EAVYs[0]; EAVU:=EAVUs[0]; EAVV:=EAVVs[0]; EAVPool:=0;
+End;
+
+{ eacmv }
+Function EAVCmv(Pk: PEABuffer; Len: LongInt): Boolean;
+Var Buf,Raw,I,X,Y,Size,PalStart,PalCount,K,Tag: LongInt; Inter: Boolean;
+Procedure MotComp(Dst,Src: PEABuffer; BX,BY,XO,YO: LongInt);
+Var II,JJ: LongInt;
+Begin
+ For JJ:=BY To BY+3 Do For II:=BX To BX+3 Do
+  If (II+XO>=0) And (II+XO<EAVW) And (JJ+YO>=0) And (JJ+YO<EAVH) Then Dst^[JJ*EAVW+II]:=Src^[(JJ+YO)*EAVW+II+XO]
+  Else Dst^[JJ*EAVW+II]:=0;
+End;
+Begin
+ EAVCmv:=False;
+ If Len<8 Then Exit;
+ Buf:=0;
+ Tag:=EAByte(Pk,Len,0) Or (EAByte(Pk,Len,1) Shl 8) Or (EAByte(Pk,Len,2) Shl 16) Or (EAByte(Pk,Len,3) Shl 24);
+ If (Tag=$6849564D) Or (Tag=$4D564968) Then Begin
+  Size:=LongInt(NVRL32(Pk,Len,4));
+  If Len-8<16 Then Exit;
+  X:=NVRL16(Pk,Len,8+4); Y:=NVRL16(Pk,Len,8+6);
+  If (X<1) Or (Y<1) Or (X*Y>16000000) Then Exit;
+  If Not EAVDims Then Begin
+   EAVW:=X; EAVH:=Y; EAVDims:=True;
+   GetMem(EAVCur,EAVW*EAVH+64); GetMem(EAVLast,EAVW*EAVH+64); GetMem(EAVLast2,EAVW*EAVH+64);
+   FillChar(EAVCur^,EAVW*EAVH+64,0); FillChar(EAVLast^,EAVW*EAVH+64,0); FillChar(EAVLast2^,EAVW*EAVH+64,0);
+  End Else If (X<>EAVW) Or (Y<>EAVH) Then Exit;
+  PalStart:=NVRL16(Pk,Len,8+12); PalCount:=NVRL16(Pk,Len,8+14);
+  K:=8+16; I:=PalStart;
+  While (I<PalStart+PalCount) And (I<256) And (Len-K>=3) Do Begin
+   EAVPal[I]:=(EAByte(Pk,Len,K) Shl 16) Or (EAByte(Pk,Len,K+1) Shl 8) Or EAByte(Pk,Len,K+2); Inc(K,3); Inc(I);
+  End;
+  If (Size<0) Or (Size>Len-8) Then Exit;
+  Inc(Buf,Size);
+ End;
+ If Not EAVDims Then Exit;
+ Inc(Buf,8);
+ Inter:=(EAByte(Pk,Len,Buf) And 1)<>0;
+ If Not Inter And (Len-Buf<EAVW*EAVH*5 Div 100) Then Exit;
+ Inc(Buf,2);
+ If Not Inter Then Begin
+  FillChar(EAVCur^,EAVW*EAVH,0);
+  I:=0; While (I<EAVH) And (Len-Buf>=EAVW) Do Begin
+   Move(Pk^[Buf],EAVCur^[I*EAVW],EAVW); Inc(Buf,EAVW); Inc(I);
+  End;
+ End Else Begin
+  Raw:=Buf+EAVW*EAVH Div 16; I:=0;
+  FillChar(EAVCur^,EAVW*EAVH,0);
+  For Y:=0 To EAVH Div 4-1 Do Begin
+   X:=0;
+   While (X<EAVW Div 4) And (Len-Buf>I) Do Begin
+    If Pk^[Buf+I]=$FF Then Begin
+     If (Raw+16<Len) And (Pk^[Raw]=$FF) Then Begin
+      Inc(Raw);
+      For K:=0 To 3 Do Move(Pk^[Raw+K*4],EAVCur^[(Y*4+K)*EAVW+X*4],4);
+      Inc(Raw,16);
+     End Else If Raw<Len Then Begin
+      If EAVHave2 Then MotComp(EAVCur,EAVLast2,X*4,Y*4,(Pk^[Raw] And 15)-7,(Pk^[Raw] Shr 4)-7);
+      Inc(Raw);
+     End;
+    End Else If EAVHave1 Then MotComp(EAVCur,EAVLast,X*4,Y*4,(Pk^[Buf+I] And 15)-7,(Pk^[Buf+I] Shr 4)-7);
+    Inc(I); Inc(X);
+   End;
+  End;
+ End;
+ Move(EAVLast^,EAVLast2^,EAVW*EAVH); Move(EAVCur^,EAVLast^,EAVW*EAVH); EAVHave2:=EAVHave1; EAVHave1:=True;
+ EAVCmv:=True;
+End;
+
+{ eatgv }
+Function EAVTgv(Pk: PEABuffer; Len: LongInt): Boolean;
+Var Buf,Tag,X,Y,PalCount,I: LongInt; Key: Boolean;
+Function Unpack(Src0: LongInt): Boolean;
+Var Src,Size,Size1,Size2,Offset,Dst,Run,Total,B0,I: LongInt;
+Begin
+ Unpack:=False; Src:=Src0; Dst:=0; Total:=EAVW*EAVH;
+ If (EAByte(Pk,Len,Src) And 1)<>0 Then Inc(Src,5) Else Inc(Src,2);
+ If Len-Src<3 Then Exit;
+ Size:=(EAByte(Pk,Len,Src) Shl 16) Or (EAByte(Pk,Len,Src+1) Shl 8) Or EAByte(Pk,Len,Src+2); Inc(Src,3);
+ Offset:=0;
+ While (Size>0) And (Src<Len) Do Begin
+  B0:=Pk^[Src]; Size1:=B0 And 3;
+  If (B0 And $80)<>0 Then Begin
+   If (B0 And $40)<>0 Then Begin
+    If (B0 And $20)<>0 Then Begin
+     If B0<$FC Then Size1:=(((B0 And 31)+1) Shl 2);
+     Inc(Src); Size2:=0;
+    End Else Begin
+     Offset:=((B0 And $10) Shl 12)+((EAByte(Pk,Len,Src+1) Shl 8) Or EAByte(Pk,Len,Src+2))+1;
+     Size2:=((B0 And $C) Shl 6)+EAByte(Pk,Len,Src+3)+5; Inc(Src,4);
+    End;
+   End Else Begin
+    Size1:=(EAByte(Pk,Len,Src+1) And $C0) Shr 6;
+    Offset:=(((EAByte(Pk,Len,Src+1) Shl 8) Or EAByte(Pk,Len,Src+2)) And $3FFF)+1;
+    Size2:=(B0 And $3F)+4; Inc(Src,3);
+   End;
+  End Else Begin
+   Offset:=((B0 And $60) Shl 3)+EAByte(Pk,Len,Src+1)+1;
+   Size2:=((B0 And $1C) Shr 2)+3; Inc(Src,2);
+  End;
+  If Size1>Len-Src Then Break;
+  If Size1>0 Then Begin
+   Dec(Size,Size1); Run:=Size1; If Run>Total-Dst Then Run:=Total-Dst;
+   Move(Pk^[Src],EAVTgvB^[Dst],Run); Inc(Dst,Run); Inc(Src,Run);
+  End;
+  If Size2>0 Then Begin
+   If Dst<Offset Then Begin Unpack:=True; Exit; End;
+   Dec(Size,Size2); Run:=Size2; If Run>Total-Dst Then Run:=Total-Dst;
+   For I:=0 To Run-1 Do Begin EAVTgvB^[Dst]:=EAVTgvB^[Dst-Offset]; Inc(Dst); End;
+  End;
+ End;
+ Unpack:=True;
+End;
+Function Inter(Src0: LongInt): Boolean;
+Var NumMvs,NumRaw,NumPacked,VBits,MvBits,I2,J2,X2,Y2,Vec,MX,MY,Off,Base,RawAt,Left: LongInt; T4: Array[0..3] Of LongInt; SrcP: PEABuffer; SStride: LongInt;
+Begin
+ Inter:=False;
+ If Len-Src0<12 Then Exit;
+ NumMvs:=NVRL16(Pk,Len,Src0); NumRaw:=NVRL16(Pk,Len,Src0+2); NumPacked:=NVRL16(Pk,Len,Src0+4); VBits:=NVRL16(Pk,Len,Src0+6);
+ Base:=Src0+12;
+ If (VBits>25) Or (VBits=0) Then Exit;
+ MvBits:=(NumMvs*2*10+31) And (Not 31);
+ If Len-Base<(MvBits Shr 3)+16*NumRaw+8*NumPacked Then Exit;
+ EAVBuf:=Pk; EAVLim:=Base+(MvBits Shr 3); EAVBP:=Base*8; EAVCap:=Base*8+MvBits+8;
+ For I2:=0 To NumMvs-1 Do Begin
+  EAVMvs[I2,0]:=EAVSbitsLE(10); EAVMvs[I2,1]:=EAVSbitsLE(10);
+ End;
+ Inc(Base,MvBits Shr 3);
+ RawAt:=Base; Inc(Base,NumRaw*16);
+ EAVLim:=Len+64; EAVBP:=Base*8; EAVCap:=Len*8+8;
+ For I2:=0 To NumPacked-1 Do Begin
+  For J2:=0 To 3 Do T4[J2]:=EAVGetLE(8);
+  For J2:=0 To 15 Do EAVCb[I2,15-J2]:=T4[EAVGetLE(2)];
+ End;
+ Left:=(Len*8)-EAVBP;
+ If Left<VBits*(EAVH Div 4)*(EAVW Div 4) Then Exit;
+ For Y2:=0 To EAVH Div 4-1 Do For X2:=0 To EAVW Div 4-1 Do Begin
+  Vec:=EAVGetLE(VBits);
+  If Vec<NumMvs Then Begin
+   MX:=X2*4+EAVMvs[Vec,0]; MY:=Y2*4+EAVMvs[Vec,1];
+   If (MX<0) Or (MX+4>EAVW) Or (MY<0) Or (MY+4>EAVH) Then Continue;
+   SrcP:=PEABuffer(@EAVLast^[MX+MY*EAVW]); SStride:=EAVW;
+  End Else Begin
+   Off:=Vec-NumMvs;
+   If Off<NumRaw Then Begin SrcP:=PEABuffer(@Pk^[RawAt+16*Off]); End
+   Else If Off-NumRaw<NumPacked Then SrcP:=PEABuffer(@EAVCb[Off-NumRaw,0])
+   Else Continue;
+   SStride:=4;
+  End;
+  For J2:=0 To 3 Do For I2:=0 To 3 Do EAVCur^[(Y2*4+J2)*EAVW+X2*4+I2]:=SrcP^[J2*SStride+I2];
+ End;
+ Inter:=True;
+End;
+Begin
+ EAVTgv:=False;
+ If Len<8 Then Exit;
+ Tag:=NVRL32(Pk,Len,0); Buf:=8; Key:=(Tag=$5447566B);
+ If Key Then Begin
+  If Len-Buf<12 Then Exit;
+  X:=NVRL16(Pk,Len,Buf); Y:=NVRL16(Pk,Len,Buf+2);
+  If (X<1) Or (Y<1) Or (X*Y>16000000) Then Exit;
+  If Not EAVDims Then Begin
+   EAVW:=X; EAVH:=Y; EAVDims:=True;
+   GetMem(EAVCur,EAVW*EAVH+64); GetMem(EAVLast,EAVW*EAVH+64); GetMem(EAVTgvB,EAVW*EAVH+64);
+   FillChar(EAVCur^,EAVW*EAVH+64,0); FillChar(EAVLast^,EAVW*EAVH+64,0); FillChar(EAVTgvB^,EAVW*EAVH+64,0);
+  End Else If (X<>EAVW) Or (Y<>EAVH) Then Exit;
+  PalCount:=NVRL16(Pk,Len,Buf+6); Inc(Buf,12); I:=0;
+  While (I<PalCount) And (I<256) And (Len-Buf>=3) Do Begin
+   EAVPal[I]:=(EAByte(Pk,Len,Buf) Shl 16) Or (EAByte(Pk,Len,Buf+1) Shl 8) Or EAByte(Pk,Len,Buf+2); Inc(Buf,3); Inc(I);
+  End;
+  If Len-Buf<5 Then Exit;
+ End;
+ If Not EAVDims Then Exit;
+ If Key Then Begin
+  If Not Unpack(Buf) Then Exit;
+  Move(EAVTgvB^,EAVCur^,EAVW*EAVH);
+ End Else Begin
+  If Not EAVHave1 Then Begin EAVTgv:=False; Exit; End;
+  FillChar(EAVCur^,EAVW*EAVH,0);
+  If Not Inter(Buf) Then Exit;
+ End;
+ Move(EAVCur^,EAVLast^,EAVW*EAVH); EAVHave1:=True;
+ EAVTgv:=True;
+End;
+
+{ eatgq }
+Function EAVTgq(Pk: PEABuffer; Len: LongInt): Boolean;
+Var Big: Boolean; BP,X,Y,Quant,A,B,I,J,W,H: LongInt;
+Function GB: LongInt;
+Begin If BP<Len Then GB:=Pk^[BP] Else GB:=0; Inc(BP); End;
+Function Block(Var Blk: TEAVBlk): Boolean;
+Var K,V,R,T: LongInt;
+Begin
+ Block:=False;
+ Blk[0]:=EAVW16(EAVSbitsLE(8)*EAVQ[0]); K:=1;
+ While K<64 Do Begin
+  Case EAVLE(3) Of
+   4: Begin
+    If K>=63 Then Exit;
+    Blk[AMVZig[K]]:=0; Inc(K);
+    Blk[AMVZig[K]]:=0; Inc(K); EAVSkip(3);
+   End;
+   0: Begin Blk[AMVZig[K]]:=0; Inc(K); EAVSkip(3); End;
+   5,1: Begin
+    EAVSkip(2); V:=EAVGetLE(6);
+    If V>64-K Then Exit;
+    For R:=1 To V Do Begin Blk[AMVZig[K]]:=0; Inc(K); End;
+   End;
+   6: Begin EAVSkip(3); Blk[AMVZig[K]]:=EAVW16(-EAVQ[AMVZig[K]]); Inc(K); End;
+   2: Begin EAVSkip(3); Blk[AMVZig[K]]:=EAVW16(EAVQ[AMVZig[K]]); Inc(K); End;
+   7,3: Begin
+    EAVSkip(2);
+    If EAVLE(6)=$3F Then Begin EAVSkip(6); T:=EAVSbitsLE(8); End Else T:=EAVSbitsLE(6);
+    Blk[AMVZig[K]]:=EAVW16(T*EAVQ[AMVZig[K]]); Inc(K);
+   End;
+  End;
+ End;
+ Blk[0]:=EAVW16(Blk[0]+2048);
+ Block:=True;
+End;
+Function DcLevel(Dc,Q0: LongInt): LongInt;
+Var L: LongInt;
+Begin L:=AVSar(Dc*Q0+2056,4); If L<0 Then L:=0 Else If L>255 Then L:=255; DcLevel:=L; End;
+Procedure DcOnly(Plane: PEABuffer; Off,Stride,Dc: LongInt);
+Var JJ: LongInt;
+Begin For JJ:=0 To 7 Do FillChar(Plane^[Off+JJ*Stride],8,DcLevel(Dc,EAVQ[0])); End;
+Function Mb(MbY,MbX: LongInt): Boolean;
+Var Mode,K,Left,Take: LongInt; Dc: Array[0..5] Of LongInt; OY,OC: LongInt;
+Function S8(V: LongInt): LongInt; Begin If V>=128 Then S8:=V-256 Else S8:=V; End;
+Begin
+ Mb:=False;
+ Mode:=GB;
+ OY:=MbY*16*EAVLs+MbX*16; OC:=MbY*8*EAVCs+MbX*8;
+ If Mode>12 Then Begin
+  Left:=Len-BP; If Left<0 Then Left:=0; If Mode<Left Then Take:=Mode Else Take:=Left;
+  EAVBuf:=Pk; EAVLim:=Len+64; EAVBP:=BP*8; EAVCap:=BP*8+Take*8+8;
+  For K:=0 To 5 Do If Not Block(EAVBlk[K]) Then Exit;
+  EAVIdctPut(EAVY,OY,EAVLs,EAVBlk[0]); EAVIdctPut(EAVY,OY+8,EAVLs,EAVBlk[1]);
+  EAVIdctPut(EAVY,OY+8*EAVLs,EAVLs,EAVBlk[2]); EAVIdctPut(EAVY,OY+8*EAVLs+8,EAVLs,EAVBlk[3]);
+  EAVIdctPut(EAVU,OC,EAVCs,EAVBlk[4]); EAVIdctPut(EAVV,OC,EAVCs,EAVBlk[5]);
+  Inc(BP,Take);
+ End Else Begin
+  If Mode=3 Then Begin
+   Dc[0]:=S8(GB); Dc[1]:=Dc[0]; Dc[2]:=Dc[0]; Dc[3]:=Dc[0]; Dc[4]:=S8(GB); Dc[5]:=S8(GB);
+  End Else If Mode=6 Then Begin
+   If Len-BP<6 Then Exit;
+   For K:=0 To 5 Do Dc[K]:=S8(GB);
+  End Else If Mode=12 Then Begin
+   For K:=0 To 5 Do Begin Dc[K]:=S8(GB); Inc(BP); End;
+  End Else Exit;
+  DcOnly(EAVY,OY,EAVLs,Dc[0]); DcOnly(EAVY,OY+8,EAVLs,Dc[1]);
+  DcOnly(EAVY,OY+8*EAVLs,EAVLs,Dc[2]); DcOnly(EAVY,OY+8*EAVLs+8,EAVLs,Dc[3]);
+  DcOnly(EAVU,OC,EAVCs,Dc[4]); DcOnly(EAVV,OC,EAVCs,Dc[5]);
+ End;
+ Mb:=True;
+End;
+Begin
+ EAVTgq:=False;
+ If Len<16 Then Exit;
+ Big:=Int64(Cardinal(NVRL32(Pk,Len,4)))>$000FFFFF;
+ If Big Then Begin W:=(EAByte(Pk,Len,8) Shl 8) Or EAByte(Pk,Len,9); H:=(EAByte(Pk,Len,10) Shl 8) Or EAByte(Pk,Len,11); End
+ Else Begin W:=NVRL16(Pk,Len,8); H:=NVRL16(Pk,Len,10); End;
+ If (W<1) Or (H<1) Or (W*H>16000000) Then Exit;
+ If Not EAVDims Then Begin EAVW:=W; EAVH:=H; EAVDims:=True; EAVAllocYUV; End
+ Else If (W<>EAVW) Or (H<>EAVH) Then Exit;
+ Quant:=Pk^[12];
+ A:=(14*(100-Quant)) Div 100+1; B:=(11*(100-Quant)) Div 100+4;
+ For J:=0 To 7 Do For I:=0 To 7 Do EAVQ[J*8+I]:=LongInt(AVSar(Int64((A*(J+I)) Div 14+B)*EAVAan[J*8+I],10));
+ BP:=16;
+ For Y:=0 To (EAVAH Shr 4)-1 Do For X:=0 To (EAVLs Shr 4)-1 Do If Not Mb(Y,X) Then Exit;
+ EAVTgq:=True;
+End;
+
+{ eatqi }
+Function EAVTqi(Pk: PEABuffer; Len: LongInt): Boolean;
+Var W,H,Quant,I,MbX,MbY,N,OY,OC,K: LongInt; QS: Int64; Bs: PEABuffer; Ok: Boolean;
+Function Block(Var Blk: TEAVBlk; Idx: LongInt): Boolean;
+Var Comp,Code,Diff,Dc,II,Nn,Level,Run,J,Sg,Pv: LongInt;
+Begin
+ Block:=False;
+ If Idx<=3 Then Comp:=0 Else Comp:=Idx-3;
+ Code:=-1;
+ For II:=1 To 10 Do Begin
+  Pv:=EAVBE(II);
+  For Nn:=0 To 11 Do
+   If Code<0 Then Begin
+    If Comp=0 Then Begin If (EAVDCLBits[Nn]=II) And (EAVDCLCode[Nn]=Pv) Then Code:=Nn; End
+    Else If (EAVDCCBits[Nn]=II) And (EAVDCCCode[Nn]=Pv) Then Code:=Nn;
+   End;
+  If Code>=0 Then Begin EAVSkip(II); Break; End;
+ End;
+ If Code<0 Then Exit;
+ If Code=0 Then Diff:=0 Else Begin
+  Diff:=EAVGetBE(Code);
+  If Diff<(LongInt(1) Shl (Code-1)) Then Diff:=Diff-((LongInt(1) Shl Code)-1);
+ End;
+ Dc:=EAVLastDC[Comp]+Diff; EAVLastDC[Comp]:=Dc;
+ Blk[0]:=EAVW16(Dc*EAVQ[0]);
+ II:=0;
+ If EAVBE(2)=2 Then Begin EAVSkip(2); Block:=True; Exit; End;
+ While True Do Begin
+  Nn:=EAVLut[EAVBE(16)];
+  If Nn<0 Then Exit;
+  EAVSkip(EAVMBits[Nn]);
+  If Nn=111 Then Begin
+   Run:=EAVGetBE(6)+1;
+   Level:=EAVGetBE(8); If Level>=128 Then Level:=Level-256;
+   If Level=-128 Then Level:=EAVGetBE(8)-256 Else If Level=0 Then Level:=EAVGetBE(8);
+   Inc(II,Run); If II>63 Then Exit;
+   J:=AMVZig[II];
+   If Level<0 Then Begin
+    Level:=-Level; Level:=(Level*EAVQ[J]) Shr 4; Level:=(Level-1) Or 1; Level:=-Level;
+   End Else Begin Level:=(Level*EAVQ[J]) Shr 4; Level:=(Level-1) Or 1; End;
+  End Else Begin
+   Inc(II,EAVMRun[Nn]+1); If II>63 Then Exit;
+   J:=AMVZig[II];
+   Level:=(EAVMLev[Nn]*EAVQ[J]) Shr 4; Level:=(Level-1) Or 1;
+   Sg:=EAVGetBE(1); If Sg<>0 Then Level:=-Level;
+  End;
+  Blk[J]:=EAVW16(Level);
+  If EAVBE(2)=2 Then Begin EAVSkip(2); Break; End;
+ End;
+ Block:=True;
+End;
+Begin
+ EAVTqi:=False;
+ If Len<12 Then Exit;
+ W:=NVRL16(Pk,Len,0); H:=NVRL16(Pk,Len,2); Quant:=Pk^[4];
+ If (W<1) Or (H<1) Or (W*H>16000000) Then Exit;
+ If Not EAVDims Then Begin EAVW:=W; EAVH:=H; EAVDims:=True; EAVAllocYUV; End
+ Else If (W<>EAVW) Or (H<>EAVH) Then Exit;
+ If Not EAVLutInit Then Begin
+  For I:=0 To 65535 Do EAVLut[I]:=-1;
+  For N:=0 To 112 Do Begin
+   K:=EAVMBits[N];
+   For I:=0 To (1 Shl (16-K))-1 Do EAVLut[(EAVMCode[N] Shl (16-K)) Or I]:=N;
+  End;
+  EAVLutInit:=True;
+ End;
+ QS:=(215-2*Quant)*5;
+ EAVQ[0]:=LongInt(AVSar(Int64(EAVAan[0])*EAVMat[0],11)) And $FFFF;
+ For I:=1 To 63 Do EAVQ[I]:=LongInt(AVSar(Int64(EAVAan[I])*EAVMat[I]*QS+32,14)) And $FFFF;
+ N:=Len-8; GetMem(Bs,N+128); FillChar(Bs^,N+128,0); Move(Pk^[8],Bs^,N);
+ I:=0; While I+4<=N Do Begin
+  K:=Bs^[I]; Bs^[I]:=Bs^[I+3]; Bs^[I+3]:=K; K:=Bs^[I+1]; Bs^[I+1]:=Bs^[I+2]; Bs^[I+2]:=K; Inc(I,4);
+ End;
+ EAVBuf:=Bs; EAVLim:=N+64; EAVBP:=0; EAVCap:=N*8+8;
+ EAVLastDC[0]:=0; EAVLastDC[1]:=0; EAVLastDC[2]:=0;
+ Ok:=True; MbY:=0;
+ While Ok And (MbY<(H+15) Div 16) Do Begin
+  MbX:=0;
+  While Ok And (MbX<(W+15) Div 16) Do Begin
+   FillChar(EAVBlk,SizeOf(EAVBlk),0);
+   For K:=0 To 5 Do If Ok Then If Not Block(EAVBlk[K],K) Then Ok:=False;
+   If Ok Then Begin
+    OY:=MbY*16*EAVLs+MbX*16; OC:=MbY*8*EAVCs+MbX*8;
+    EAVIdctPut(EAVY,OY,EAVLs,EAVBlk[0]); EAVIdctPut(EAVY,OY+8,EAVLs,EAVBlk[1]);
+    EAVIdctPut(EAVY,OY+8*EAVLs,EAVLs,EAVBlk[2]); EAVIdctPut(EAVY,OY+8*EAVLs+8,EAVLs,EAVBlk[3]);
+    EAVIdctPut(EAVU,OC,EAVCs,EAVBlk[4]); EAVIdctPut(EAVV,OC,EAVCs,EAVBlk[5]);
+   End;
+   Inc(MbX);
+  End;
+  Inc(MbY);
+ End;
+ FreeMem(Bs,N+128);
+ EAVTqi:=True;
+End;
+
+{ Quel codec video (1 cmv, 2 tgv, 3 tgq, 4 tqi) un fichier EA contient-il (0 si aucun) }
+Function EAVDetect(Const Source: String): LongInt;
+Var F: PEABuffer; Size,Pos2,I,Csz,Res,W4: LongInt; Big: Boolean; T: String[4];
+Begin
+ Res:=0; OpenRead(Source); Size:=InputSize;
+ If Size<8 Then Begin CloseRead; EAVDetect:=0; Exit; End;
+ W4:=1048576; GetMem(F,W4+64); If Size>W4 Then I:=Size-Size+W4 Else I:=Size; FillChar(F^,W4+64,0); ReadAt(0,F^,I);
+ Pos2:=0; I:=0;
+  Big:=False;
+ While (I<5) And (Pos2+8<=Size) And (Pos2+8<=W4) Do Begin
+  T:=Chr(F^[Pos2])+Chr(F^[Pos2+1])+Chr(F^[Pos2+2])+Chr(F^[Pos2+3]);
+  Csz:=NVRL32(F,W4,Pos2+4);
+  If I=0 Then Big:=Int64(Cardinal(Csz))>Int64(Cardinal(((Csz And $FF) Shl 24) Or ((Csz And $FF00) Shl 8) Or ((Csz Shr 8) And $FF00) Or ((Csz Shr 24) And $FF)));
+  If Big Then Csz:=((Csz And $FF) Shl 24) Or ((Csz And $FF00) Shl 8) Or ((Csz Shr 8) And $FF00) Or ((Csz Shr 24) And $FF);
+  If Csz<8 Then Break;
+  If T='MVIh' Then Res:=1 Else If T='kVGT' Then Res:=2 Else If (T='pQGT') Or (T='TGQs') Then Res:=3 Else If T='pIQT' Then Res:=4;
+  Inc(Pos2,Csz); Inc(I);
+ End;
+ FreeMem(F,W4+64); CloseRead; EAVDetect:=Res;
+End;
+
+Procedure DecodeEAVideo(Const Source,Target: String; Mode: LongInt);
+Var
+ F,Pk,Out: PEABuffer; Size,Pos2,I,Csz,Codec,Fps,PkLen,Take,N,CW,CH,Y,RN,RD,Hdr,Frames: LongInt; Big,Key,Partial,Begun,Ok,Hit,HaveAud: Boolean; T: String[4]; Csz0,Lead: LongInt; C64: Int64;
+Function Sw(V: LongInt): LongInt;
+Begin Sw:=((V And $FF) Shl 24) Or ((V And $FF00) Shl 8) Or ((V Shr 8) And $FF00) Or ((V Shr 24) And $FF); End;
+Function T4(At: LongInt): String;
+Var S4: String[4]; K: Integer;
+Begin S4:=''; For K:=0 To 3 Do S4:=S4+Chr(EAByte(F,Size,At+K)); T4:=S4; End;
+Function CSize(At: LongInt): LongInt;
+Var V: LongInt;
+Begin V:=NVRL32(F,Size,At); If Big Then V:=Sw(V); CSize:=V; End;
+Procedure Present;
+Var K: LongInt;
+Begin
+ If Codec<=2 Then Begin
+  For K:=0 To 255 Do Begin NVPalR[K]:=(EAVPal[K] Shr 16) And 255; NVPalG[K]:=(EAVPal[K] Shr 8) And 255; NVPalB[K]:=EAVPal[K] And 255; End;
+  NVEmit(EAVCur);
+ End Else Begin
+  For K:=0 To EAVH-1 Do Move(EAVY^[K*EAVLs],Out^[K*EAVW],EAVW);
+  For K:=0 To CH-1 Do Move(EAVU^[K*EAVCs],Out^[EAVW*EAVH+K*CW],CW);
+  For K:=0 To CH-1 Do Move(EAVV^[K*EAVCs],Out^[EAVW*EAVH+CW*CH+K*CW],CW);
+  NVEmit(Out);
+ End;
+End;
+Procedure Start;
+Begin
+ If Codec<=2 Then NVBegin(Mode,Target,EAVW,EAVH,0,RN,RD)
+ Else Begin
+  CW:=(EAVW+1) Div 2; CH:=(EAVH+1) Div 2;
+  NVBegin(Mode,Target,EAVW,EAVH,7,RN,RD); NVSubX:=1; NVSubY:=1; NVCW:=CW; NVCH:=CH; NVYTag:='C420jpeg'; NVIl:='p';
+  GetMem(Out,EAVW*EAVH+2*CW*CH+64);
+ End;
+ Begun:=True;
+End;
+Procedure Dispatch;
+Var Good: Boolean;
+Begin
+ FillChar(Pk^[PkLen],64,0);
+ If (Codec>=3) And EAVDims Then Begin EAVY:=EAVYs[EAVPool]; EAVU:=EAVUs[EAVPool]; EAVV:=EAVVs[EAVPool]; End;
+ Case Codec Of
+  1: Good:=EAVCmv(Pk,PkLen);
+  2: Good:=EAVTgv(Pk,PkLen);
+  3: Good:=EAVTgq(Pk,PkLen);
+  Else Good:=EAVTqi(Pk,PkLen);
+ End;
+ If Good And EAVDims Then Begin
+  If Not Begun Then Start;
+  Present;
+  If Codec>=3 Then EAVPool:=1-EAVPool;
+ End Else If Begun Then NVRepeat Else Inc(Lead);
+End;
+Begin
+ NVLoad(Source,F,Size);
+ Big:=Int64(Cardinal(NVRL32(F,Size,4)))>Int64(Cardinal(Sw(NVRL32(F,Size,4))));
+ Codec:=0; Fps:=0; Pos2:=0; I:=0;
+ HaveAud:=False;
+ While (I<5) And Not (HaveAud And (Codec<>0)) Do Begin
+  If Pos2>=Size Then Fail('ea: bloc trop petit.');
+  T:=T4(Pos2); C64:=Int64(Cardinal(CSize(Pos2+4)));
+  If C64<8 Then Fail('ea: bloc trop petit.');
+  If T='MVIh' Then Begin Codec:=1; Fps:=NVRL16(F,Size,Pos2+18); End
+  Else If T='kVGT' Then Codec:=2 Else If (T='pQGT') Or (T='TGQs') Then Codec:=3 Else If T='pIQT' Then Codec:=4
+  Else If (T='SCHl') Or (T='SHEN') Or (T='SEAD') Or (T='1SNh') Then HaveAud:=True;
+  { avio_seek echoue au-dela de la fin: la lecture reprend apres l'en-tete du bloc (comme libavformat) }
+  If Pos2+C64>Size Then Begin
+   If (Pos2+C64<=32768) And (Size<=32768) Then Begin If T='MVIh' Then Inc(Pos2,20) Else Inc(Pos2,8); End
+   Else Begin If I<4 Then Fail('ea: bloc trop petit.'); Pos2:=Size; End;
+  End Else Inc(Pos2,LongInt(C64));
+  Inc(I);
+ End;
+ If Codec=0 Then Fail('ea: aucun flux video (MVIh, kVGT, TGQs/pQGT ou pIQT).');
+ If (Codec=1) And (Fps>0) Then Begin RN:=Fps; RD:=1; End Else If Codec=1 Then Begin RN:=90000; RD:=1; End Else Begin RN:=15; RD:=1; End;
+ EAVDims:=False; EAVHave1:=False; EAVHave2:=False; EAVLutInit:=False; Begun:=False; Lead:=0;
+ FillChar(EAVPal,SizeOf(EAVPal),0);
+ GetMem(Pk,Size+256);
+ Pos2:=0; Partial:=False; PkLen:=0;
+ While True Do Begin
+  If Pos2+4>Size Then Break;
+  T:=T4(Pos2);
+  If Pos2+8>Size Then Break;
+  Csz:=CSize(Pos2+4);
+  If Csz<8 Then Break;
+  Dec(Csz,8); Inc(Pos2,8);
+  Key:=False;
+  If (T='MVIh') Or (T='kVGT') Or (T='pQGT') Or (T='TGQs') Or (T='MVIf') Or (T='fVGT') Or (T='pIQT') Then Begin
+   Hdr:=0;
+   If T<>'pIQT' Then Begin Dec(Pos2,8); Inc(Csz,8); End;
+   Take:=Csz; If Take>Size-Pos2 Then Take:=Size-Pos2;
+   If Take<=0 Then Begin If Partial Then Break; Break; End;
+   If Partial Then Begin Move(F^[Pos2],Pk^[PkLen],Take); Inc(PkLen,Take); End
+   Else Begin Move(F^[Pos2],Pk^[0],Take); PkLen:=Take; End;
+   Inc(Pos2,Csz);
+   Partial:=(T='MVIh');
+   If Not Partial Then Begin
+    Dispatch; PkLen:=0;
+    If NVDone Then Break;
+   End;
+  End Else If (T='SCEl') Or (T='SEND') Or (T='SEEN') Or (T='ISNe') Or (T=#0#0#0#0) Then Begin
+   While Pos2+4<=Size Do Begin
+    T:=T4(Pos2);
+    If (T='1SNh') Or (T='SCHl') Or (T='SEAD') Or (T='SHEN') Then Break;
+    Inc(Pos2,4);
+   End;
+  End Else Inc(Pos2,Csz);
+ End;
+ If Partial And (PkLen>0) Then Begin End;
+ FreeMem(Pk,Size+256); FreeMem(F,Size+64);
+ NVFinish('ea');
+End;
+
 Var AVSWantBMP: Boolean;
 
 Procedure DecodeAVS(Const Source,Target: String; PNGMode: Boolean);
@@ -29973,7 +30610,7 @@ Begin
  WriteLn(' D  4xm             4X Movie (video versions 0..4 vers Y4M; audio adpcm_4xm/PCM vers WAV)');
  WriteLn(' DE ac3             AC-3 brut, decodeur et encodeur natifs');
  WriteLn(' DE adx             CRI ADX (adpcm_adx, mono/stereo)');
- WriteLn(' D  ea              Electronic Arts Multimedia (audio adpcm_ea, r1, r2, r3, xas)');
+ WriteLn(' D  ea              Electronic Arts Multimedia (audio adpcm_ea, r1, r2, r3, xas; video eacmv, eatgv, eatgq, eatqi vers Y4M/PNG/BMP)');
  WriteLn(' D  xa              Maxis XA (adpcm_ea_maxis_xa)');
  WriteLn(' D  amv             AMV (audio adpcm_ima_amv; video amv vers Y4M)');
  WriteLn(' D  ape             Monkey''s Audio (versions 3.93-3.99, 8/16 bits) vers WAV/MP3/...');
@@ -30300,6 +30937,10 @@ BEGIN
    WriteLn('DES    dvdsub          DVD subtitles');
    WriteLn('D A    dsicinaudio     Delphine Software International CIN audio');
    WriteLn('D V    dxa             Feeble Files/ScummVM DXA');
+   WriteLn('D V D  eacmv           Electronic Arts CMV video');
+   WriteLn('D V D  eatgq           Electronic Arts TGQ video');
+   WriteLn('D V    eatgv           Electronic Arts TGV video');
+   WriteLn('D V D  eatqi           Electronic Arts TQI Video');
    WriteLn('D V    dsicinvideo     Delphine Software International CIN video');
    WriteLn('DEV    dvvideo         DV (Digital Video)');
    WriteLn('D V    cyuv            Creative YUV (CYUV)');
@@ -30544,7 +31185,7 @@ BEGIN
  End;
  NVKind:=0;
  If InputFormat='bethsoftvid' Then NVKind:=1 Else If InputFormat='bfi' Then NVKind:=2 Else If InputFormat='c93' Then NVKind:=3
- Else If InputFormat='bmp' Then NVKind:=4 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16
+ Else If InputFormat='bmp' Then NVKind:=4 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17
  Else If (InputFormat='avi') And Not IsHTTP(InputPath) Then Begin
   AsvTag:=AVIVideoFourCC(Intermediate);
   If AsvTag='CSCD' Then NVKind:=5 Else If (AsvTag='tscc') Or (AsvTag='TSCC') Then NVKind:=6
@@ -30553,7 +31194,7 @@ BEGIN
   Else If (AsvTag='dvsd') Or (AsvTag='DVSD') Or (AsvTag='dvcs') Or (AsvTag='DVCS') Or (AsvTag='dv25') Or (AsvTag='dvsl') Or (AsvTag='DVSL') Or (AsvTag='dv50') Or (AsvTag='dvc ') Or (AsvTag='cdvc') Or (AsvTag='CDVC') Or (AsvTag='dvcp') Or (AsvTag='dvpp') Then NVKind:=14;
  End;
  NVAudioOut:=(OutputFormat='wav') Or (OutputFormat='mp3') Or (OutputFormat='ac3') Or (OutputFormat='adx') Or (OutputFormat='aiff');
- If (NVKind<>0) And Not (((NVKind=1) Or (NVKind=2) Or (NVKind=15)) And NVAudioOut) Then Begin
+ If (NVKind<>0) And Not (((NVKind=1) Or (NVKind=2) Or (NVKind=15) Or (NVKind=17)) And NVAudioOut) Then Begin
   If NoVideo Or (VideoCodec='copy') Or (AudioCodec<>'') Or HasBitrate Or (RequestedRate<>0) Or
    (RequestedChannels<>0) Or (ImageWidth<>0) Or IsHTTP(InputPath) Then
    Fail('Decodage video local sans copie, sans -vn ni conversion audio requis.');
