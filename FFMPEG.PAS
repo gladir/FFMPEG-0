@@ -3959,6 +3959,7 @@ Begin
  If N>=12 Then If (B[0]=82) And (B[1]=73) And (B[2]=70) And (B[3]=70) And (B[8]=65) And (B[9]=77) And
   (B[10]=86) And (B[11]=32) Then Begin Probe:='amv'; Exit; End;
  If N>=22 Then If ((B[4]=$11) Or (B[4]=$12) Or (B[4]=$44)) And (B[5]=$AF) And ((B[8]+B[9]*256)<=4096) And ((B[10]+B[11]*256)<=4096) And (((B[16]=$FA) And (B[17]=$F1)) Or ((B[16]+B[17]*256+B[18]*65536+B[19]*16777216)<=2000)) Then Begin Probe:='flic'; Exit; End;
+ If N>=10 Then If (B[0]=71) And (B[1]=73) And (B[2]=70) And (B[3]=56) And ((B[4]=55) Or (B[4]=57)) And (B[5]=97) And ((B[6]+B[7]*256)<>0) And ((B[8]+B[9]*256)<>0) Then Begin Probe:='gif'; Exit; End;
  If N>=4 Then If (B[0]=102) And (B[1]=76) And (B[2]=97) And (B[3]=67) Then Begin Probe:='flac'; Exit; End;
  If N>=8 Then If (B[0]=65) And (B[1]=82) And (B[2]=77) And (B[3]=111) And (B[4]=118) And (B[5]=105) And (B[6]=101) And (B[7]=10) Then Begin Probe:='rpl'; Exit; End;
  If N>=7 Then If (B[0]=$0B) And (B[1]=$77) Then Begin
@@ -16976,6 +16977,7 @@ Procedure DecodeEAVideo(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeAVIX(Const Source,Target: String; Mode,Kind: LongInt); Forward;
 Procedure DecodeRPL(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeFLIC(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure DecodeGIF(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeFLVScreen(Const Source,Target: String; Mode: LongInt); Forward;
 Function FLVVideoCodec(Const Name: String): LongInt; Forward;
 Function EAVDetect(Const Source: String): LongInt; Forward;
@@ -16991,6 +16993,7 @@ Begin
  Else If Kind=19 Then DecodeRPL(Source,Target,Mode)
  Else If Kind=22 Then DecodeFLVScreen(Source,Target,Mode)
  Else If Kind=23 Then DecodeFLIC(Source,Target,Mode)
+ Else If Kind=25 Then DecodeGIF(Source,Target,Mode)
  Else If (Kind>=18) And (Kind<=24) Then DecodeAVIX(Source,Target,Mode,Kind)
  Else If Kind>=7 Then DecodeAVIVideo(Source,Target,Mode,Kind) Else DecodeNV(Kind,Source,Target,Mode);
 End;
@@ -30144,6 +30147,576 @@ Begin
  NVFinish('flic');
 End;
 
+{ ---- GIF (decodeur libavcodec/gifdec.c + lzw.c, parseur gif_parser.c, LGPL-2.1-or-later) ---- }
+Const
+ GFMask: Array[0..16] Of LongInt=(0,1,3,7,15,31,63,127,255,511,1023,2047,4095,8191,16383,32767,65535);
+Var
+ GFPk: PEABuffer; GFPkSize,GFPos: LongInt;
+ GFSW,GFSH,GFBits,GFBgIdx,GFTransIdx,GFDisp,GFPrevDisp,GFL,GFT,GFW,GFH,GFStoredSz: LongInt;
+ GFStoredBg,GFTransColor,GFBgColor: Int64;
+ GFHasGlobal,GFKeyOk,GFKey: Boolean;
+ GFGlobal,GFLocal: Array[0..255] Of Int64; GFAspect: LongInt;
+ GFCanvas,GFStored,GFIdx: PEABuffer; GFStoredSize: LongInt;
+  { LZW }
+ LZPos,LZBBits,LZBBuf,LZBs,LZCur,LZMask,LZCode,LZClear,LZEnd,LZNew,LZTop,LZExtra,LZSlot,LZFc,LZOc,LZSp: LongInt;
+ LZStack,LZSuffix: Array[0..4095] Of Byte; LZPrefix: Array[0..4095] Of Word;
+
+Function GF8: LongInt;
+Begin If GFPos<GFPkSize Then Begin GF8:=GFPk^[GFPos]; Inc(GFPos); End Else GF8:=0; End;
+Function GF16: LongInt;
+Begin
+ If GFPkSize-GFPos<2 Then Begin GFPos:=GFPkSize; GF16:=0; End
+ Else Begin GF16:=GFPk^[GFPos]+GFPk^[GFPos+1]*256; Inc(GFPos,2); End;
+End;
+Function GFLeft: LongInt;Begin GFLeft:=GFPkSize-GFPos; End;
+
+Function LZGet8: LongInt;
+Begin If LZPos<GFPkSize Then Begin LZGet8:=GFPk^[LZPos]; Inc(LZPos); End Else LZGet8:=0; End;
+
+Function LZGetCode: LongInt;
+Var C: LongInt;
+Begin
+ If (LZBBits<LZCur) And (GFPkSize-LZPos<=0) Then Begin LZGetCode:=LZEnd; Exit; End;
+ While LZBBits<LZCur Do Begin
+  If LZBs=0 Then LZBs:=LZGet8;
+  LZBBuf:=LZBBuf Or (LZGet8 Shl LZBBits);
+  Inc(LZBBits,8); Dec(LZBs);
+ End;
+ C:=LZBBuf; LZBBuf:=LZBBuf Shr LZCur; Dec(LZBBits,LZCur);
+ LZGetCode:=C And LZMask;
+End;
+
+Function LZInit(CSize: LongInt): Boolean;
+Begin
+ LZInit:=False;
+ If (CSize<1) Or (CSize>=12) Then Exit;
+ LZBBuf:=0; LZBBits:=0; LZBs:=0;
+ LZCode:=CSize; LZCur:=LZCode+1; LZMask:=GFMask[LZCur]; LZTop:=1 Shl LZCur;
+ LZClear:=1 Shl LZCode; LZEnd:=LZClear+1; LZSlot:=LZClear+2; LZNew:=LZSlot;
+ LZOc:=-1; LZFc:=-1; LZSp:=0; LZExtra:=0;
+ LZInit:=True;
+End;
+
+Function LZDecode(Buf: PEABuffer; Len: LongInt): LongInt;
+Var L,C,Code,Out: LongInt; Fin: Boolean;
+Begin
+ If LZEnd<0 Then Begin LZDecode:=0; Exit; End;
+ L:=Len; Out:=0; Fin:=False;
+ While True Do Begin
+  While LZSp>0 Do Begin
+   Dec(LZSp); Buf^[Out]:=LZStack[LZSp]; Inc(Out); Dec(L);
+   If L=0 Then Begin Fin:=True; Break; End;
+  End;
+  If Fin Then Break;
+  C:=LZGetCode;
+  If C=LZEnd Then Begin LZEnd:=-1; Break; End
+  Else If C=LZClear Then Begin
+   LZCur:=LZCode+1; LZMask:=GFMask[LZCur]; LZSlot:=LZNew; LZTop:=1 Shl LZCur; LZFc:=-1; LZOc:=-1;
+  End Else Begin
+   Code:=C;
+   If (Code=LZSlot) And (LZFc>=0) Then Begin
+    LZStack[LZSp]:=LZFc; Inc(LZSp); Code:=LZOc;
+   End Else If Code>=LZSlot Then Begin LZEnd:=-1; Break; End;
+   While Code>=LZNew Do Begin
+    LZStack[LZSp]:=LZSuffix[Code]; Inc(LZSp); Code:=LZPrefix[Code];
+   End;
+   LZStack[LZSp]:=Code And 255; Inc(LZSp);
+   If (LZSlot<LZTop) And (LZOc>=0) Then Begin
+    LZSuffix[LZSlot]:=Code And 255; LZPrefix[LZSlot]:=LZOc; Inc(LZSlot);
+   End;
+   LZFc:=Code; LZOc:=C;
+   If LZSlot>=LZTop-LZExtra Then
+    If LZCur<12 Then Begin LZTop:=LZTop Shl 1; Inc(LZCur); LZMask:=GFMask[LZCur]; End;
+  End;
+ End;
+ LZDecode:=Len-L;
+End;
+
+Procedure GFPut(P: LongInt; Color: Int64);
+Begin
+ GFCanvas^[P]:=Color And 255; GFCanvas^[P+1]:=(Color Shr 8) And 255; GFCanvas^[P+2]:=(Color Shr 16) And 255; GFCanvas^[P+3]:=(Color Shr 24) And 255;
+End;
+
+Procedure GFFillRect(Color: Int64; L,T,W,H: LongInt);
+Var X,Y: LongInt;
+Begin
+ For Y:=0 To H-1 Do For X:=0 To W-1 Do GFPut(((T+Y)*GFSW+L+X)*4,Color);
+End;
+
+Function GFReadImage: Boolean;
+Var
+ Left,Top,Width,Height,Flags,PW,Bits,CodeSize,PalSize,Y,Y1,Pass,Count,X,I,C,Ptr,Ptr1,Idx: LongInt;
+ Interl,HasLocal: Boolean; UseLocal: Boolean; ColorV: Int64;
+Function PalAt(Ix: LongInt): Int64;
+Begin If UseLocal Then PalAt:=GFLocal[Ix] Else PalAt:=GFGlobal[Ix]; End;
+Begin
+ GFReadImage:=False;
+ If GFLeft<9 Then Exit;
+ Left:=GF16; Top:=GF16; Width:=GF16; Height:=GF16; Flags:=GF8;
+ Interl:=(Flags And $40)<>0; HasLocal:=(Flags And $80)<>0; Bits:=(Flags And 7)+1;
+ If HasLocal Then Begin
+  PalSize:=1 Shl Bits;
+  If GFLeft<PalSize*3 Then Exit;
+  For I:=0 To PalSize-1 Do Begin
+   C:=GF8*65536; Inc(C,GF8*256); Inc(C,GF8); GFLocal[I]:=Int64(C) Or $FF000000;
+  End;
+  UseLocal:=True;
+ End Else Begin
+  If Not GFHasGlobal Then Exit;
+  UseLocal:=False;
+ End;
+ If GFKey Then Begin
+  If (GFTransIdx=-1) And GFHasGlobal Then ColorV:=GFBgColor Else ColorV:=GFTransColor;
+  GFFillRect(ColorV,0,0,GFSW,GFSH);
+ End;
+ If (Width=0) Or (Width>GFSW) Then Width:=GFSW;
+ If Left>=GFSW Then Exit;
+ If (Height=0) Or (Height>GFSH) Then Height:=GFSH;
+ If Top>=GFSH Then Exit;
+ If Left+Width>GFSW Then PW:=GFSW-Left Else PW:=Width;
+ If Top+Height>GFSH Then Height:=GFSH-Top;
+ If GFPrevDisp=2 Then GFFillRect(GFStoredBg,GFL,GFT,GFW,GFH)
+ Else If GFPrevDisp=3 Then Begin
+  For Y:=0 To GFH-1 Do Move(GFStored^[((GFT+Y)*GFSW+GFL)*4],GFCanvas^[((GFT+Y)*GFSW+GFL)*4],GFW*4);
+ End;
+ GFPrevDisp:=GFDisp;
+ If GFDisp<>0 Then Begin
+  GFL:=Left; GFT:=Top; GFW:=PW; GFH:=Height;
+  If GFDisp=2 Then Begin
+   If GFTransIdx>=0 Then GFStoredBg:=GFTransColor Else GFStoredBg:=GFBgColor;
+  End Else If GFDisp=3 Then Begin
+   For Y:=0 To Height-1 Do Move(GFCanvas^[((Top+Y)*GFSW+Left)*4],GFStored^[((Top+Y)*GFSW+Left)*4],PW*4);
+  End;
+ End;
+ If GFLeft<2 Then Exit;
+ CodeSize:=GF8;
+ LZPos:=GFPos;
+ If Not LZInit(CodeSize) Then Exit;
+ Ptr1:=Top*GFSW+Left; Ptr:=Ptr1; Pass:=0; Y1:=0;
+ For Y:=0 To Height-1 Do Begin
+  Count:=LZDecode(GFIdx,Width);
+  If Count<>Width Then Break;
+  For X:=0 To PW-1 Do Begin
+   Idx:=GFIdx^[X];
+   If Idx<>GFTransIdx Then GFPut((Ptr+X)*4,PalAt(Idx));
+  End;
+  If Interl Then Begin
+   Case Pass Of
+    2: Begin Inc(Y1,4); Inc(Ptr,GFSW*4); End;
+    3: Begin Inc(Y1,2); Inc(Ptr,GFSW*2); End;
+   Else Begin Inc(Y1,8); Inc(Ptr,GFSW*8); End;
+   End;
+   While Y1>=Height Do Begin
+    Y1:=4 Shr Pass; Ptr:=Ptr1+GFSW*Y1; Inc(Pass);
+   End;
+  End Else Inc(Ptr,GFSW);
+ End;
+ GFTransIdx:=-1; GFDisp:=0;
+ GFReadImage:=True;
+End;
+
+{ extension: faux = erreur }
+Function GFExtension: Boolean;
+Var Code,Len,Fl,TI: LongInt;
+Begin
+ GFExtension:=False;
+ If GFLeft<2 Then Exit;
+ Code:=GF8; Len:=GF8;
+ If (Code=$F9) And (Len=4) Then Begin
+  If GFLeft<5 Then Exit;
+  Fl:=GF8; GF16; TI:=GF8;
+  If (Fl And 1)<>0 Then GFTransIdx:=TI Else GFTransIdx:=-1;
+  GFDisp:=(Fl Shr 2) And 7;
+  If GFDisp>3 Then GFDisp:=0;
+  Len:=GF8;
+ End;
+ While Len<>0 Do Begin
+  If GFLeft<Len+1 Then Exit;
+  Inc(GFPos,Len); Len:=GF8;
+ End;
+ GFExtension:=True;
+End;
+
+{ en-tete d'un paquet cle }
+Function GFHeader: Boolean;
+Var V,N,I,C: LongInt;
+Begin
+ GFHeader:=False;
+ If GFLeft<13 Then Exit;
+ If (GFPk^[0]<>71) Or (GFPk^[1]<>73) Or (GFPk^[2]<>70) Or (GFPk^[3]<>56) Or ((GFPk^[4]<>55) And (GFPk^[4]<>57)) Or (GFPk^[5]<>97) Then Exit;
+ Inc(GFPos,6);
+ GFTransIdx:=-1;
+ GFSW:=GF16; GFSH:=GF16;
+ V:=GF8; GFHasGlobal:=(V And $80)<>0; GFBits:=(V And 7)+1;
+ I:=GF8; N:=GF8; GFAspect:=N;
+ If GFHasGlobal Then Begin
+  GFBgIdx:=I; N:=1 Shl GFBits;
+  If GFLeft<N*3 Then Exit;
+  For I:=0 To N-1 Do Begin
+   C:=GF8*65536; Inc(C,GF8*256); Inc(C,GF8); GFGlobal[I]:=Int64(C) Or $FF000000;
+  End;
+  GFBgColor:=GFGlobal[GFBgIdx];
+ End Else GFBgIdx:=-1;
+ GFHeader:=True;
+End;
+
+Type TGFArr=Array[0..100000000] Of LongInt; PGFArr=^TGFArr;
+Var GFPS,GFPE,GFPD: PGFArr; GFNP,GFCap: LongInt;
+
+Procedure GFAddPk(S,E,D: LongInt);
+Begin
+ If GFNP>=GFCap Then Begin
+  GFCap:=GFCap*2+16; ReAllocMem(GFPS,GFCap*4); ReAllocMem(GFPE,GFCap*4); ReAllocMem(GFPD,GFCap*4);
+ End;
+ GFPS^[GFNP]:=S; GFPE^[GFNP]:=E; GFPD^[GFNP]:=D; Inc(GFNP);
+End;
+
+{ decoupage en paquets: automate de gif_parser.c applique au fichier complet }
+Procedure GFSplit(F: PEABuffer; N,From: LongInt);
+Var
+ I,State,FoundSig,FoundStart,FoundEnd,Idx,GCT,GCTSize,BlockSize,EType,Delay,Start,B: LongInt; Cut,Cont: Boolean;
+Begin
+ GFNP:=0; I:=From; Start:=From; State:=0; FoundSig:=0; FoundStart:=0; FoundEnd:=0; Idx:=0; GCT:=0; GCTSize:=0;
+ BlockSize:=0; EType:=0; Delay:=0;
+ While I<N Do Begin
+  Cut:=False; Cont:=False; B:=F^[I];
+  If State=0 Then Begin
+   If (I+6<=N) And (F^[I]=71) And (F^[I+1]=73) And (F^[I+2]=70) And (F^[I+3]=56) And ((F^[I+4]=55) Or (F^[I+4]=57)) And (F^[I+5]=97) Then Begin
+    State:=1; Inc(FoundSig);
+   End Else If B=$21 Then Begin State:=2; FoundStart:=1; End
+   Else If B=$2C Then State:=4
+   Else If B=$3B Then Begin State:=0; FoundEnd:=1; FoundSig:=0; End
+   Else FoundSig:=0;
+  End;
+  If State=1 Then Begin
+   If Idx=10 Then Begin If (B And $80)<>0 Then GCT:=1 Else GCT:=0; GCTSize:=3*(1 Shl ((B And 7)+1)); End;
+   If Idx>=12+GCT*GCTSize Then Begin State:=0; Idx:=0; GCT:=0; GCTSize:=0; Cont:=True; End
+   Else Inc(Idx);
+  End Else If State=2 Then Begin
+   If (FoundStart<>0) And (FoundEnd<>0) And (FoundSig<>0) Then Begin
+    FoundStart:=0; FoundEnd:=0; Idx:=0; GCT:=0; GCTSize:=0; State:=0; Cut:=True;
+   End Else Begin
+    If Idx=1 Then EType:=B;
+    If Idx>=2 Then Begin BlockSize:=B; Idx:=0; State:=3; Cont:=True; End
+    Else Inc(Idx);
+   End;
+  End Else If State=5 Then Begin
+   If Idx=0 Then BlockSize:=B;
+   If Idx>=BlockSize Then Begin
+    Idx:=0;
+    If BlockSize=0 Then Begin State:=0; FoundEnd:=1; End;
+    Cont:=True;
+   End Else Inc(Idx);
+  End Else If State=3 Then Begin
+   If EType=$F9 Then Begin
+    If Idx=0 Then Delay:=0;
+    If (Idx>=1) And (Idx<=2) Then Delay:=Delay Or (B Shl (8*(Idx-1)));
+   End;
+   If Idx>=BlockSize Then Begin
+    BlockSize:=B; Idx:=0;
+    If BlockSize=0 Then State:=0;
+    Cont:=True;
+   End Else Inc(Idx);
+  End Else If State=4 Then Begin
+   If Idx=9 Then Begin If (B And $80)<>0 Then GCT:=1 Else GCT:=0; GCTSize:=3*(1 Shl ((B And 7)+1)); End;
+   If Idx>=10+GCT*GCTSize Then Begin State:=5; Idx:=0; GCT:=0; GCTSize:=0; Cont:=True; End
+   Else Inc(Idx);
+  End;
+  If Cut Then Begin
+   If Delay<>0 Then GFAddPk(Start,I,Delay) Else GFAddPk(Start,I,10);
+   Start:=I;
+  End Else Inc(I);
+ End;
+ If Start<N Then Begin If Delay<>0 Then GFAddPk(Start,N,Delay) Else GFAddPk(Start,N,10); End;
+End;
+
+{ nb_frames / duree du demuxeur gifdec.c (analyse de l'en-tete); Pos = octet apres la signature }
+Procedure GFScan(F: PEABuffer; N,Pos: LongInt; Var NbFrames: LongInt; Var Dur: Int64);
+Var P,Typ,Sub,Flags,Sz,Delay,Sb: LongInt; Stop: Boolean;
+Function R8: LongInt;Begin If P<N Then R8:=F^[P] Else R8:=0; Inc(P); End;
+Procedure SkipSub;
+Begin
+ While True Do Begin Sz:=R8; If Sz=0 Then Break; If P>N Then Break; Inc(P,Sz); End;
+End;
+Begin
+ NbFrames:=0; Dur:=0; P:=Pos;
+ Inc(P,4); Flags:=R8; Inc(P); R8;
+ If (Flags And $80)<>0 Then Inc(P,3*(1 Shl ((Flags And 7)+1)));
+ Stop:=False;
+ While Not Stop Do Begin
+  Typ:=R8;
+  If Typ=$3B Then Break;
+  If P>N Then Break;
+  If Typ=$21 Then Begin
+   Sub:=R8;
+   If Sub=$FE Then Begin
+    While True Do Begin Sz:=R8; If Sz=0 Then Break; If P>N Then Break; Inc(P,Sz); End;
+   End Else If Sub=$F9 Then Begin
+    Sz:=R8;
+    If Sz=4 Then Begin
+     Inc(P); Delay:=R8; Delay:=Delay+R8*256;
+     If Delay=0 Then Delay:=10;
+     Inc(Dur,Delay); Inc(P);
+    End Else Inc(P,Sz);
+    SkipSub;
+   End Else If Sub=$FF Then Begin
+    Sb:=R8; Inc(P,Sb);
+    If P>N Then Break;
+    If Sb=0 Then Break;
+    If Sb=11 Then Begin
+     Sb:=R8; Inc(P,Sb);
+     If P>N Then Break;
+     If Sb=0 Then Break;
+    End;
+    SkipSub;
+   End Else SkipSub;
+  End Else If Typ=$2C Then Begin
+   Inc(P,8); Flags:=R8;
+   If (Flags And $80)<>0 Then Inc(P,3*(1 Shl ((Flags And 7)+1)));
+   Inc(P); SkipSub; Inc(NbFrames);
+  End Else Break;
+ End;
+End;
+
+Function GFGcd(A,B: Int64): Int64;
+Var T: Int64;
+Begin While B<>0 Do Begin T:=A Mod B; A:=B; B:=T; End; GFGcd:=A; End;
+
+Function GFStdRate(I: LongInt): Int64;
+Const Opt: Array[0..2] Of LongInt=(80,120,240); Fix: Array[0..5] Of LongInt=(24,30,60,12,15,48);
+Begin
+ If I<360 Then GFStdRate:=Int64(I+1)*1001
+ Else Begin
+  Dec(I,360);
+  If I<30 Then GFStdRate:=Int64(I+31)*1001*12
+  Else Begin
+   Dec(I,30);
+   If I<3 Then GFStdRate:=Int64(Opt[I])*1001*12
+   Else GFStdRate:=Int64(Fix[I-3])*1000*12;
+  End;
+ End;
+End;
+
+{ r_frame_rate de libavformat/demux.c (ff_rfps_add_frame + ff_rfps_calculate) pour la base de temps 1/100 }
+Procedure GFRFrameRate(Pkt: PGFArr; NPk: LongInt; AvgN,AvgD: Int64; Var RN,RD: LongInt);
+Var
+ Err: Array[0..1,0..1,0..398] Of Double;
+ K,I,J,KK,DurCount,ReadSize: LongInt; RSum,G,CodecDur,Last,Dts,Ts,T,T2,Duration,Ticks: Int64; HaveLast: Boolean;
+ SDts,E,A,N,A0,A1,E0,E1,BestErr: Double; Num: Int64; Ref: Double; Fr: Int64;
+ RnN,RnD,GG: Int64; TbQ,K115,K96,Tmp: Double;
+Begin
+ Tmp:=100.0; TbQ:=1.0/Tmp; Tmp:=1001; K115:=Tmp*11.5; K96:=Tmp*12.0; Tmp:=0.8; K96:=K96*Tmp;
+ FillChar(Err,SizeOf(Err),0);
+ DurCount:=0; RSum:=0; G:=0; CodecDur:=0; HaveLast:=False; Last:=0; ReadSize:=0; Dts:=0;
+ For K:=0 To NPk-1 Do Begin
+  If DurCount>=40 Then Break;
+  If ReadSize>=5000000 Then Break;
+  Ts:=Dts;
+  Inc(ReadSize,GFPE^[K]-GFPS^[K]);
+  If K>=2 Then Begin
+   T:=CodecDur*10000;
+   If AvgN>0 Then Begin
+    T2:=(Int64(K)*AvgD*1000000*2+AvgN) Div (2*AvgN);
+    If T2>T Then T:=T2;
+   End;
+   If T>=5000000 Then Break;
+   If GFPD^[K]>0 Then Inc(CodecDur,GFPD^[K]);
+  End;
+  { ff_rfps_add_frame }
+  If HaveLast And (Ts>Last) Then Begin
+   Duration:=Ts-Last;
+   For I:=0 To 398 Do
+    If Err[0,1,I]<1e10 Then Begin
+     SDts:=(Ts*TbQ)*GFStdRate(I)/(1001*12);
+     For J:=0 To 1 Do Begin
+      Ticks:=Round(SDts+J*0.5);
+      E:=SDts-Ticks+J*0.5;
+      Err[J,0,I]:=Err[J,0,I]+E; Err[J,1,I]:=Err[J,1,I]+E*E;
+     End;
+    End;
+   Inc(DurCount); Inc(RSum,Duration);
+   If DurCount Mod 10=0 Then Begin
+    N:=DurCount;
+    For I:=0 To 398 Do
+     If Err[0,1,I]<1e10 Then Begin
+      A0:=Err[0,0,I]/N; E0:=Err[0,1,I]/N-A0*A0;
+      A1:=Err[1,0,I]/N; E1:=Err[1,1,I]/N-A1*A1;
+      If (E0>0.04) And (E1>0.04) Then Begin Err[0,1,I]:=2e10; Err[1,1,I]:=2e10; End;
+     End;
+   End;
+   If DurCount>3 Then G:=GFGcd(G,Duration);
+  End;
+  Last:=Ts; HaveLast:=True;
+  Dts:=Dts+GFPD^[K];
+ End;
+ RN:=0; RD:=1;
+ If (DurCount>15) And (G>1) Then Begin
+  GG:=GFGcd(100,G); RN:=100 Div GG; RD:=G Div GG;
+ End;
+ If (DurCount>1) And (RN=0) Then Begin
+  Num:=0; BestErr:=0.01;
+  If RN<>0 Then Ref:=RN/RD Else Ref:=100.0;
+  For J:=0 To 398 Do Begin
+   Fr:=GFStdRate(J);
+   If (CodecDur<>0) And (TbQ*CodecDur<K115/Fr) Then Continue;
+   If (CodecDur=0) And (Fr<1001*12) Then Continue;
+   If TbQ*RSum/DurCount<K96/Fr Then Continue;
+   For KK:=0 To 1 Do Begin
+    N:=DurCount;
+    A:=Err[KK,0,J]/N; E:=Err[KK,1,J]/N-A*A;
+    If (E<BestErr) And (BestErr>0.000000001) Then Begin BestErr:=E; Num:=Fr; End;
+   End;
+  End;
+  Tmp:=1.01;
+  If (Num<>0) And (Num/(12*1001)<Tmp*Ref) Then Begin
+   GG:=GFGcd(Num,12*1001); RN:=Num Div GG; RD:=(12*1001) Div GG;
+  End;
+ End;
+ If RN=0 Then Begin RN:=100; RD:=1; End;
+End;
+
+{ synchronisation CFR de fftools/ffmpeg_filter.c (video_sync_process) }
+Var
+ CFNext,CFFrameNo: Int64; CFHist: Array[0..2] Of LongInt; CFLastDropped: Boolean; CFFn,CFFd: LongInt; CFHavePrev: Boolean;
+
+Function CFRescale(A,Num,Den: Int64): Int64; { arrondi au plus proche, egalite loin de zero }
+Begin
+ If A>=0 Then CFRescale:=(A*Num+Den Div 2) Div Den Else CFRescale:=-((-A*Num+Den Div 2) Div Den);
+End;
+
+{ pts et duree en centiemes de seconde; renvoie nb_frames et nb_frames_prev }
+Procedure CFSync(Pts,Dur: Int64; Var NbFrames,NbPrev: Int64);
+Var
+ ExtraBits: LongInt; FPts,Delta0,Delta,Duration,Tbo: Double; Lg: LongInt; X: Int64;
+ SInt: Int64; C11,C06,C001,CHalf: Double;
+Begin
+ C11:=11; C11:=C11/10; C06:=6; C06:=C06/10; C001:=1; C001:=C001/100; CHalf:=0.5;
+ Lg:=0; X:=CFFn; While X>1 Do Begin X:=X Shr 1; Inc(Lg); End;
+ ExtraBits:=29-Lg; If ExtraBits<0 Then ExtraBits:=0; If ExtraBits>16 Then ExtraBits:=16;
+ Tbo:=CFFd/CFFn;
+ Duration:=Dur*C001/Tbo;
+ SInt:=CFRescale(Pts,Int64(CFFn) Shl ExtraBits,100*Int64(CFFd));
+ FPts:=SInt/(Int64(1) Shl ExtraBits);
+ If FPts<>Round(FPts) Then Begin If FPts>0 Then FPts:=FPts+1.0/(1 Shl 17) Else If FPts<0 Then FPts:=FPts-1.0/(1 Shl 17); End;
+ Delta0:=FPts-CFNext; Delta:=Delta0+Duration;
+ NbPrev:=0; NbFrames:=1;
+ If (Delta0<0) And (Delta>0) Then Begin
+  Duration:=Duration+Delta0; Delta0:=0; { sync_ipts = next_pts }
+ End;
+ If Delta<-C11 Then NbFrames:=0
+ Else If Delta>C11 Then Begin
+  NbFrames:=Round(Single(Delta));
+  If Delta0>C11 Then NbPrev:=Round(Single(Delta0-C06));
+ End;
+ CFHist[2]:=CFHist[1]; CFHist[1]:=CFHist[0]; CFHist[0]:=NbPrev;
+ If (NbFrames>(Ord(NbPrev<>0)*Ord(CFLastDropped)) + Ord(NbFrames>NbPrev)) Then Begin
+  If NbFrames>108000 Then Begin NbFrames:=0; Exit; End;
+ End;
+ CFLastDropped:=(NbFrames=NbPrev);
+End;
+
+{ N images au total: les N0 premieres sont la precedente (si elle existe), les autres la nouvelle }
+Procedure NVEmitN(P: PEABuffer; N0,N: LongInt);
+Var I: LongInt;
+Begin
+ If NVDone Then Exit;
+ If NVMode<>0 Then Begin If N>0 Then NVEmit(P); Exit; End;
+ If NVLast=Nil Then Begin GetMem(NVLast,NVFrameBytes); NVLastSize:=NVFrameBytes; End;
+ For I:=1 To N Do Begin
+  If (I<=N0) And NVHaveLast Then NVWriteY4M(NVLast) Else NVWriteY4M(P);
+  Inc(NVFrames);
+ End;
+ Move(P^,NVLast^,NVFrameBytes); NVHaveLast:=True;
+End;
+
+Procedure DecodeGIF(Const Source,Target: String; Mode: LongInt);
+Var
+ F: PEABuffer; Size,From,K,I,PktStart,PktEnd,CurW,CurH,Fmt,RN,RD: LongInt;
+ NbFrames: LongInt; Dur: Int64; AvgN,AvgD,Pts: Int64; NbF,NbP: Int64; Ok: Boolean; Begun: Boolean;
+ PtsTot: Int64; A,B,G: LongInt; SarN,SarD: LongInt;
+Begin
+ NVLoad(Source,F,Size);
+ From:=-1;
+ For I:=0 To Size-6 Do
+  If (F^[I]=71) And (F^[I+1]=73) And (F^[I+2]=70) And (F^[I+3]=56) And ((F^[I+4]=55) Or (F^[I+4]=57)) And (F^[I+5]=97) Then Begin From:=I; Break; End;
+ If From<0 Then Fail('gif: signature absente.');
+ If Size-From<13 Then Fail('gif: fichier tronque.');
+ CurW:=F^[From+6]+F^[From+7]*256; CurH:=F^[From+8]+F^[From+9]*256;
+ If (CurW=0) Or (CurH=0) Then Fail('gif: dimensions invalides.');
+ GFAspect:=F^[From+11];
+ GFNP:=0; GFCap:=0; GFPS:=Nil; GFPE:=Nil; GFPD:=Nil;
+ GFSplit(F,Size,From);
+ GFScan(F,Size,From+6,NbFrames,Dur);
+ If NbFrames>1 Then Begin
+  AvgN:=100; AvgD:=Dur Div NbFrames;
+  If AvgD>0 Then Begin G:=GFGcd(AvgN,AvgD); AvgN:=AvgN Div G; AvgD:=AvgD Div G; End Else Begin AvgN:=1; AvgD:=0; End;
+ End Else If Dur>0 Then Begin AvgN:=100; AvgD:=Dur; G:=GFGcd(AvgN,AvgD); AvgN:=AvgN Div G; AvgD:=AvgD Div G; End
+ Else Begin AvgN:=0; AvgD:=0; End;
+ GFRFrameRate(GFPD,GFNP,AvgN,AvgD,RN,RD);
+ { av_guess_frame_rate }
+ If (AvgN>0) And (AvgD>0) And (AvgN/AvgD<70) And (RN/RD>210) Then Begin RN:=AvgN; RD:=AvgD; End;
+ CFFn:=RN; CFFd:=RD; CFNext:=0; CFFrameNo:=0; CFHist[0]:=0; CFHist[1]:=0; CFHist[2]:=0; CFLastDropped:=False;
+ { etat du decodeur }
+ GFSW:=CurW; GFSH:=CurH;
+ FillChar(GFGlobal,SizeOf(GFGlobal),0); FillChar(GFLocal,SizeOf(GFLocal),0);
+ GFTransColor:=$00FFFFFF; GFKeyOk:=False; GFPrevDisp:=0; GFDisp:=0; GFTransIdx:=-1;
+ GFCanvas:=Nil; GFStored:=Nil; GFIdx:=Nil;
+ NVVN:=0; NVVD:=0;
+ Fmt:=3; Begun:=False; Pts:=0;
+ For K:=0 To GFNP-1 Do Begin
+  GFPk:=PEABuffer(@F^[GFPS^[K]]); GFPkSize:=GFPE^[K]-GFPS^[K]; GFPos:=0;
+  Ok:=False;
+  GFKey:=(GFPkSize>=6) And (GFPk^[0]=71) And (GFPk^[1]=73) And (GFPk^[2]=70) And (GFPk^[3]=56) And ((GFPk^[4]=55) Or (GFPk^[4]=57)) And (GFPk^[5]=97);
+  Repeat
+   If GFKey Then Begin
+    GFKeyOk:=False; GFPrevDisp:=0;
+    If Not GFHeader Then Break;
+    If (GFSW<>CurW) Or (GFSH<>CurH) Then Break;
+    If GFCanvas=Nil Then Begin
+     GetMem(GFCanvas,CurW*CurH*4+64); GetMem(GFStored,CurW*CurH*4+64); GetMem(GFIdx,CurW+64);
+    End;
+    FillChar(GFCanvas^,CurW*CurH*4,0);
+   End Else If Not GFKeyOk Then Break;
+   If GFCanvas=Nil Then Break;
+   { gif_parse_next_image }
+   While GFLeft>0 Do Begin
+    I:=GF8;
+    If I=$2C Then Begin Ok:=GFReadImage; Break; End
+    Else If I=$21 Then Begin If Not GFExtension Then Break; End
+    Else Break;
+   End;
+   If Ok And GFKey Then GFKeyOk:=True;
+  Until True;
+  If Ok Then Begin
+   If Not Begun Then Begin
+    NVBegin(Mode,Target,CurW,CurH,Fmt,RN,RD); Begun:=True; NVHasAlpha:=True;
+    If GFAspect<>0 Then Begin
+     A:=GFAspect+15; B:=64; G:=GFGcd(A,B); NVSarN:=A Div G; NVSarD:=B Div G;
+    End;
+   End;
+  End;
+  If Ok Then Begin
+   CFSync(Pts,GFPD^[K],NbF,NbP);
+   NVEmitN(GFCanvas,NbP,NbF);
+   Inc(CFNext,NbF); Inc(CFFrameNo,NbF);
+  End;
+  Inc(Pts,GFPD^[K]);
+  If NVDone Then Break;
+ End;
+ { vidage: copies de la derniere image (mid_pred des 3 derniers nb_frames_prev) }
+ If Begun And Not NVDone Then Begin
+  A:=CFHist[0]; B:=CFHist[1]; G:=CFHist[2];
+  If A>B Then Begin I:=A; A:=B; B:=I; End;
+  If B>G Then B:=G;
+  If A>B Then B:=A;
+  NbF:=B;
+  If NbF>0 Then NVEmitN(GFCanvas,NbF,NbF);
+ End;
+ If NVLast<>Nil Then Begin FreeMem(NVLast,NVLastSize); NVLast:=Nil; End;
+ If Not Begun Then Fail('gif: aucune image decodee.');
+ CloseRead; If NVOpened Then CloseWrite;
+End;
+
 { ---- Decodeurs video AVI/RPL supplementaires: flashsv (flashsv.c), escape124 (escape124.c + rpl.c), huffyuv/ffvhuff, ffv1 ---- }
 Var
  AXF: PEABuffer; AXSize,AXW,AXH,AXBits,AXRate,AXScale,AXMovie,AXExtra,AXExtraLen: LongInt; AXFcc: String[4];
@@ -36580,7 +37153,7 @@ BEGIN
  End;
  NVKind:=0;
  If InputFormat='bethsoftvid' Then NVKind:=1 Else If InputFormat='bfi' Then NVKind:=2 Else If InputFormat='c93' Then NVKind:=3
- Else If InputFormat='bmp' Then NVKind:=4 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22 Else If (InputFormat='flic') And Not IsHTTP(InputPath) Then NVKind:=23
+ Else If InputFormat='bmp' Then NVKind:=4 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22 Else If (InputFormat='flic') And Not IsHTTP(InputPath) Then NVKind:=23 Else If (InputFormat='gif') And Not IsHTTP(InputPath) Then NVKind:=25
  Else If (InputFormat='avi') And Not IsHTTP(InputPath) Then Begin
   AsvTag:=AVIVideoFourCC(Intermediate);
   If AsvTag='CSCD' Then NVKind:=5 Else If (AsvTag='tscc') Or (AsvTag='TSCC') Then NVKind:=6
