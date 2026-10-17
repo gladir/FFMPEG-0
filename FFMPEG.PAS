@@ -17140,7 +17140,7 @@ Begin
  Else If Kind=27 Then DecodeFLVH263(Source,Target,Mode)
  Else If Kind=28 Then DecodeH263Raw(Source,Target,Mode)
  Else If Kind=29 Then DecodeH261Raw(Source,Target,Mode)
- Else If ((Kind>=18) And (Kind<=24)) Or (Kind=26) Or (Kind=31) Or (Kind=32) Then DecodeAVIX(Source,Target,Mode,Kind)
+ Else If ((Kind>=18) And (Kind<=24)) Or (Kind=26) Or (Kind=31) Or (Kind=32) Or (Kind=37) Then DecodeAVIX(Source,Target,Mode,Kind)
  Else If Kind>=7 Then DecodeAVIVideo(Source,Target,Mode,Kind) Else DecodeNV(Kind,Source,Target,Mode);
 End;
 
@@ -30898,6 +30898,8 @@ End;
 Var
  AXF: PEABuffer; AXSize,AXW,AXH,AXBits,AXRate,AXScale,AXMovie,AXExtra,AXExtraLen: LongInt; AXFcc: String[4];
  AXFrames: LongInt;
+Type TKMPal=Array[0..255] Of LongWord;
+Var AXPal: TKMPal; AXHasPal,AXWatchPC: Boolean;
 
 Function AXT4(At: LongInt): String;
 Var S4: String[4]; Z: Integer;
@@ -30940,7 +30942,7 @@ End;
 
 { chunk video suivant: Pos avance; retourne False en fin de fichier }
 Function AXNext(Var Pos,PkPos,PkLen: LongInt): Boolean;
-Var Tag: String[4]; Sz: LongInt;
+Var Tag: String[4]; Sz,K,Cnt,Last,J: LongInt;
 Begin
  AXNext:=False;
  While Pos+8<=AXSize Do Begin
@@ -30949,6 +30951,15 @@ Begin
   If Tag='LIST' Then Begin Inc(Pos,12); Continue; End;
   If Pos+8+Sz>AXSize Then Sz:=AXSize-Pos-8;
   PkPos:=Pos+8; PkLen:=Sz; Inc(Pos,8+Sz+(Sz And 1));
+  If AXWatchPC And (Tag[3]='p') And (Tag[4]='c') And (Sz>=4) And (Sz<=4*256+4) Then Begin
+   { chunk de palette AVI (avidec.c) : debut, nombre, drapeaux, puis b,g,r,x }
+   K:=EAByte(AXF,AXSize,PkPos); Cnt:=EAByte(AXF,AXSize,PkPos+1); Last:=(K+Cnt-1) And 255; J:=PkPos+4;
+   While K<=Last Do Begin
+    AXPal[K]:=$FF000000 Or (LongWord(EAByte(AXF,AXSize,J))*65536+LongWord(EAByte(AXF,AXSize,J+1))*256+LongWord(EAByte(AXF,AXSize,J+2)));
+    Inc(K); Inc(J,4);
+   End;
+   AXHasPal:=True; Continue;
+  End;
   If (Tag[1]='0') And (Tag[2]='0') And ((Tag[3]='d') Or (Tag[3]='w')) And ((Tag[4]='c') Or (Tag[4]='b')) Then Begin AXNext:=True; Exit; End;
  End;
 End;
@@ -36091,6 +36102,236 @@ Begin
  End;
 End;
 
+{ ---- Karl Morton's Video Codec (libavcodec/kmvc.c), AVI KMVC, PAL8 <= 320x200 ---- }
+Var
+ KMCur,KMPrev: PEABuffer; KMPal: TKMPal; KMPalSize: LongInt; KMSetPal: Boolean;
+ KMBuf: PEABuffer; KMLen,KMPos: LongInt; KMBits,KMBitBuf: LongInt;
+
+Function KMByte: LongInt;
+Begin
+ If KMLen-KMPos<1 Then Begin KMPos:=KMLen; KMByte:=0; Exit; End;
+ KMByte:=KMBuf^[KMPos]; Inc(KMPos);
+End;
+
+Function KMBe24: LongInt;
+Begin
+ If KMLen-KMPos<3 Then Begin KMPos:=KMLen; KMBe24:=0; Exit; End;
+ KMBe24:=KMBuf^[KMPos]*65536+KMBuf^[KMPos+1]*256+KMBuf^[KMPos+2]; Inc(KMPos,3);
+End;
+
+Function KMGetBit: LongInt;
+Begin
+ If (KMBitBuf And (1 Shl KMBits))<>0 Then KMGetBit:=1 Else KMGetBit:=0;
+ Dec(KMBits);
+ If KMBits=-1 Then Begin KMBitBuf:=KMByte; KMBits:=7; End;
+End;
+
+Function KMIdx(X,Y: LongInt): LongInt;
+Var V: LongInt;
+Begin
+ V:=X+Y*320;
+ If V<0 Then V:=0 Else If V>63999 Then V:=63999;
+ KMIdx:=V;
+End;
+
+Procedure KMIntra(W,H: LongInt);
+Var Res,Val,I,J,BX,BY,L0X,L1X,L0Y,L1Y,MX,MY,V: LongInt;
+Begin
+ KMBits:=7; KMBitBuf:=KMByte;
+ BY:=0;
+ While BY<H Do Begin
+  BX:=0;
+  While BX<W Do Begin
+   If KMLen-KMPos=0 Then Exit;
+   Res:=KMGetBit;
+   If Res=0 Then Begin
+    Val:=KMByte;
+    For I:=0 To 63 Do KMCur^[KMIdx(BX+(I And 7),BY+(I Shr 3))]:=Val;
+   End Else Begin
+    For I:=0 To 3 Do Begin
+     L0X:=BX+(I And 1)*4; L0Y:=BY+(I And 2)*2;
+     Res:=KMGetBit;
+     If Res=0 Then Begin
+      Res:=KMGetBit;
+      If Res=0 Then Begin
+       Val:=KMByte;
+       For J:=0 To 15 Do KMCur^[KMIdx(L0X+(J And 3),L0Y+(J Shr 2))]:=Val;
+      End Else Begin
+       Val:=KMByte; MX:=Val And 15; MY:=Val Shr 4;
+       V:=(L0X-MX)+320*(L0Y-MY);
+       If (V<0) Or (V>320*197-4) Then Exit;
+       For J:=0 To 15 Do
+        KMCur^[KMIdx(L0X+(J And 3),L0Y+(J Shr 2))]:=KMCur^[KMIdx(L0X+(J And 3)-MX,L0Y+(J Shr 2)-MY)];
+      End;
+     End Else Begin
+      For J:=0 To 3 Do Begin
+       L1X:=L0X+(J And 1)*2; L1Y:=L0Y+(J And 2);
+       Res:=KMGetBit;
+       If Res=0 Then Begin
+        Res:=KMGetBit;
+        If Res=0 Then Begin
+         Val:=KMByte;
+         KMCur^[KMIdx(L1X,L1Y)]:=Val; KMCur^[KMIdx(L1X+1,L1Y)]:=Val;
+         KMCur^[KMIdx(L1X,L1Y+1)]:=Val; KMCur^[KMIdx(L1X+1,L1Y+1)]:=Val;
+        End Else Begin
+         Val:=KMByte; MX:=Val And 15; MY:=Val Shr 4;
+         V:=(L1X-MX)+320*(L1Y-MY);
+         If (V<0) Or (V>320*199-2) Then Exit;
+         KMCur^[KMIdx(L1X,L1Y)]:=KMCur^[KMIdx(L1X-MX,L1Y-MY)];
+         KMCur^[KMIdx(L1X+1,L1Y)]:=KMCur^[KMIdx(L1X+1-MX,L1Y-MY)];
+         KMCur^[KMIdx(L1X,L1Y+1)]:=KMCur^[KMIdx(L1X-MX,L1Y+1-MY)];
+         KMCur^[KMIdx(L1X+1,L1Y+1)]:=KMCur^[KMIdx(L1X+1-MX,L1Y+1-MY)];
+        End;
+       End Else Begin
+        KMCur^[KMIdx(L1X,L1Y)]:=KMByte; KMCur^[KMIdx(L1X+1,L1Y)]:=KMByte;
+        KMCur^[KMIdx(L1X,L1Y+1)]:=KMByte; KMCur^[KMIdx(L1X+1,L1Y+1)]:=KMByte;
+       End;
+      End;
+     End;
+    End;
+   End;
+   Inc(BX,8);
+  End;
+  Inc(BY,8);
+ End;
+End;
+
+Procedure KMInter(W,H: LongInt);
+Var Res,Val,I,J,BX,BY,L0X,L1X,L0Y,L1Y,MX,MY,V: LongInt;
+Begin
+ KMBits:=7; KMBitBuf:=KMByte;
+ BY:=0;
+ While BY<H Do Begin
+  BX:=0;
+  While BX<W Do Begin
+   Res:=KMGetBit;
+   If Res=0 Then Begin
+    Res:=KMGetBit;
+    If Res=0 Then Begin
+     If KMLen-KMPos=0 Then Exit;
+     Val:=KMByte;
+     For I:=0 To 63 Do KMCur^[KMIdx(BX+(I And 7),BY+(I Shr 3))]:=Val;
+    End Else
+     For I:=0 To 63 Do KMCur^[KMIdx(BX+(I And 7),BY+(I Shr 3))]:=KMPrev^[KMIdx(BX+(I And 7),BY+(I Shr 3))];
+   End Else Begin
+    If KMLen-KMPos=0 Then Exit;
+    For I:=0 To 3 Do Begin
+     L0X:=BX+(I And 1)*4; L0Y:=BY+(I And 2)*2;
+     Res:=KMGetBit;
+     If Res=0 Then Begin
+      Res:=KMGetBit;
+      If Res=0 Then Begin
+       Val:=KMByte;
+       For J:=0 To 15 Do KMCur^[KMIdx(L0X+(J And 3),L0Y+(J Shr 2))]:=Val;
+      End Else Begin
+       Val:=KMByte; MX:=(Val And 15)-8; MY:=(Val Shr 4)-8;
+       V:=(L0X+MX)+320*(L0Y+MY);
+       If (V<0) Or (V>320*197-4) Then Exit;
+       For J:=0 To 15 Do
+        KMCur^[KMIdx(L0X+(J And 3),L0Y+(J Shr 2))]:=KMPrev^[KMIdx(L0X+(J And 3)+MX,L0Y+(J Shr 2)+MY)];
+      End;
+     End Else Begin
+      For J:=0 To 3 Do Begin
+       L1X:=L0X+(J And 1)*2; L1Y:=L0Y+(J And 2);
+       Res:=KMGetBit;
+       If Res=0 Then Begin
+        Res:=KMGetBit;
+        If Res=0 Then Begin
+         Val:=KMByte;
+         KMCur^[KMIdx(L1X,L1Y)]:=Val; KMCur^[KMIdx(L1X+1,L1Y)]:=Val;
+         KMCur^[KMIdx(L1X,L1Y+1)]:=Val; KMCur^[KMIdx(L1X+1,L1Y+1)]:=Val;
+        End Else Begin
+         Val:=KMByte; MX:=(Val And 15)-8; MY:=(Val Shr 4)-8;
+         V:=(L1X+MX)+320*(L1Y+MY);
+         If (V<0) Or (V>320*199-2) Then Exit;
+         KMCur^[KMIdx(L1X,L1Y)]:=KMPrev^[KMIdx(L1X+MX,L1Y+MY)];
+         KMCur^[KMIdx(L1X+1,L1Y)]:=KMPrev^[KMIdx(L1X+1+MX,L1Y+MY)];
+         KMCur^[KMIdx(L1X,L1Y+1)]:=KMPrev^[KMIdx(L1X+MX,L1Y+1+MY)];
+         KMCur^[KMIdx(L1X+1,L1Y+1)]:=KMPrev^[KMIdx(L1X+1+MX,L1Y+1+MY)];
+        End;
+       End Else Begin
+        KMCur^[KMIdx(L1X,L1Y)]:=KMByte; KMCur^[KMIdx(L1X+1,L1Y)]:=KMByte;
+        KMCur^[KMIdx(L1X,L1Y+1)]:=KMByte; KMCur^[KMIdx(L1X+1,L1Y+1)]:=KMByte;
+       End;
+      End;
+     End;
+    End;
+   End;
+   Inc(BX,8);
+  End;
+  Inc(BY,8);
+ End;
+End;
+
+{ extradata AVI : palette (avidec.c), puis initialisation du decodeur (decode_init) ; retourne '' ou une erreur }
+Function KMInit(W,H: LongInt): String;
+Var I,PS,Src: LongInt; V: LongWord;
+Begin
+ KMInit:='';
+ If (W>320) Or (H>200) Then Begin KMInit:='kmvc: images <= 320x200 requises.'; Exit; End;
+ GetMem(KMCur,320*200+64); GetMem(KMPrev,320*200+64);
+ FillChar(KMCur^,320*200+64,0); FillChar(KMPrev^,320*200+64,0);
+ FillChar(AXPal,SizeOf(AXPal),0); AXHasPal:=False;
+ If (AXExtraLen>0) And (AXBits<=8) Then Begin
+  PS:=(1 Shl AXBits)*4; If PS>AXExtraLen Then PS:=AXExtraLen;
+  Src:=AXExtra+AXExtraLen-PS;
+  If (Src-AXExtra>=9) And (AXT4(AXExtra+AXExtraLen-9)='Bott') And (AXT4(AXExtra+AXExtraLen-5)='omUp') And (EAByte(AXF,AXSize,AXExtra+AXExtraLen-1)=0) Then Dec(Src,9);
+  For I:=0 To PS Div 4-1 Do Begin
+   V:=LongWord(EAByte(AXF,AXSize,Src+4*I))+LongWord(EAByte(AXF,AXSize,Src+4*I+1))*256+LongWord(EAByte(AXF,AXSize,Src+4*I+2))*65536+LongWord(EAByte(AXF,AXSize,Src+4*I+3))*16777216;
+   AXPal[I]:=$FF000000 Or (V And $FFFFFF);
+  End;
+  AXHasPal:=True;
+ End;
+ For I:=0 To 255 Do KMPal[I]:=$FF000000+LongWord(I)*$10101;
+ If AXExtraLen<12 Then KMPalSize:=127
+ Else Begin
+  KMPalSize:=EAByte(AXF,AXSize,AXExtra+10)+EAByte(AXF,AXSize,AXExtra+11)*256;
+  If KMPalSize>=256 Then Begin KMPalSize:=127; KMInit:='kmvc: palette trop grande.'; Exit; End;
+ End;
+ KMSetPal:=False;
+ If AXExtraLen=1036 Then Begin
+  For I:=0 To 255 Do Begin
+   Src:=AXExtra+12+4*I;
+   KMPal[I]:=LongWord(EAByte(AXF,AXSize,Src))+LongWord(EAByte(AXF,AXSize,Src+1))*256+LongWord(EAByte(AXF,AXSize,Src+2))*65536+LongWord(EAByte(AXF,AXSize,Src+3))*16777216;
+  End;
+  KMSetPal:=True;
+ End;
+End;
+
+{ decode_frame ; palette courante recopiee dans NVPal ; faux si le paquet est refuse }
+Function KMFrame(Pk: PEABuffer; Len,W,H: LongInt): Boolean;
+Var Header,I,BlockSize,Method: LongInt; T: PEABuffer;
+Begin
+ KMFrame:=False;
+ KMBuf:=Pk; KMLen:=Len; KMPos:=0;
+ If AXHasPal Then Begin KMPal:=AXPal; AXHasPal:=False; End;
+ Header:=KMByte;
+ If (KMPos<KMLen) And (KMBuf^[KMPos]=127) Then Begin
+  Inc(KMPos,3); If KMPos>KMLen Then KMPos:=KMLen;
+  For I:=0 To 126 Do Begin
+   KMPal[I+(Header And $81)]:=$FF000000 Or LongWord(KMBe24);
+   Inc(KMPos); If KMPos>KMLen Then KMPos:=KMLen;
+  End;
+  KMPos:=KMPos-127*4-3; If KMPos<0 Then KMPos:=0;
+ End;
+ If (Header And $40)<>0 Then
+  For I:=1 To KMPalSize Do KMPal[I]:=$FF000000 Or LongWord(KMBe24);
+ KMSetPal:=False;
+ For I:=0 To 255 Do Begin NVPalR[I]:=(KMPal[I] Shr 16) And 255; NVPalG[I]:=(KMPal[I] Shr 8) And 255; NVPalB[I]:=KMPal[I] And 255; End;
+ BlockSize:=KMByte;
+ If (BlockSize<>8) And (BlockSize<>127) Then Exit;
+ FillChar(KMCur^,320*200,0);
+ Method:=Header And 15;
+ Case Method Of
+  0,1: Move(KMPrev^,KMCur^,320*200);
+  3: KMIntra(W,H);
+  4: KMInter(W,H);
+ Else Exit;
+ End;
+ T:=KMCur; KMCur:=KMPrev; KMPrev:=T;
+ KMFrame:=True;
+End;
+
 Procedure DecodeAVIX(Const Source,Target: String; Mode,Kind: LongInt);
 Var Pos,PkPos,PkLen,RN,RD,I,Y,X,Cw,Ch,Bs,Msg2: LongInt; Ok,FFBegun: Boolean; Msg: String; PIdx: LongInt; NbF,NbP: Int64;
 Begin
@@ -36143,6 +36384,14 @@ Begin
    HYOutSize:=NVFrameBytes+64; GetMem(HYOut,HYOutSize);
    CFTbN:=AXScale; CFTbD:=AXRate; CFFn:=RN; CFFd:=RD; CFNext:=0; CFFrameNo:=0; CFHist[0]:=0; CFHist[1]:=0; CFHist[2]:=0; CFLastDropped:=False; CFVscfr:=True;
   End;
+  37: Begin
+   If AXFcc<>'KMVC' Then Fail('kmvc: flux AVI KMVC requis.');
+   Msg:=KMInit(AXW,AXH); If Msg<>'' Then Fail(Msg);
+   AXWatchPC:=True;
+   NVBegin(Mode,Target,AXW,AXH,0,RN,RD); NVAviSar(AXW,AXH); NVHdrOk:=True;
+   HYOutSize:=NVFrameBytes+64; GetMem(HYOut,HYOutSize);
+   CFTbN:=AXScale; CFTbD:=AXRate; CFFn:=RN; CFFd:=RD; CFNext:=0; CFFrameNo:=0; CFHist[0]:=0; CFHist[1]:=0; CFHist[2]:=0; CFLastDropped:=False; CFVscfr:=True;
+  End;
   31: Begin
    If AXFcc<>'RT21' Then Fail('indeo2: flux AVI RT21 requis.');
    IR2W:=AXW; IR2H:=AXH;
@@ -36169,6 +36418,10 @@ Begin
     I:=IV3Frame(PEABuffer(@AXF^[PkPos]),PkLen);
     Ok:=I=1;
     If Ok Then IV3Output(HYOut,NVCW,NVCH);
+   End;
+   37: Begin
+    Ok:=KMFrame(PEABuffer(@AXF^[PkPos]),PkLen,AXW,AXH);
+    If Ok Then For Y:=0 To AXH-1 Do Move(KMPrev^[Y*320],HYOut^[Y*AXW],AXW);
    End;
    31: Begin
     Ok:=IR2Frame(PEABuffer(@AXF^[PkPos]),PkLen);
@@ -36250,16 +36503,16 @@ Begin
     20,21: NVEmit(HYOut);
     24: NVEmit(FROut);
     26: NVEmit(H3OutBuf);
-    31,32: Begin
+    31,32,37: Begin
      CFSync(PIdx,1,NbF,NbP);
      NVEmitN(HYOut,NbP,NbF);
      Inc(CFNext,NbF); Inc(CFFrameNo,NbF); FFBegun:=True;
     End;
    End;
-  End Else If (Kind<>31) And (Kind<>32) And (((Kind<>21) And (Kind<>24) And (Kind<>26)) Or FFBegun) Then NVRepeat;
+  End Else If (Kind<>31) And (Kind<>32) And (Kind<>37) And (((Kind<>21) And (Kind<>24) And (Kind<>26)) Or FFBegun) Then NVRepeat;
   If NVDone Then Break;
  End;
- If ((Kind=31) Or (Kind=32)) And FFBegun And Not NVDone Then CFFlush(HYOut);
+ If ((Kind=31) Or (Kind=32) Or (Kind=37)) And FFBegun And Not NVDone Then CFFlush(HYOut);
  FreeMem(AXF,AXSize+64);
  NVFinish('video');
 End;
@@ -46329,6 +46582,7 @@ BEGIN
    WriteLn('D A    aac             Advanced Audio Coding (AAC-LC ADTS mono/stereo)');
    WriteLn('D V D  aasc            Autodesk RLE (AVI AASC/AAS4, 8/16/24 bits)');
    WriteLn('DEV    flv             Flash Video (FLV1/Sorenson Spark: decodeur complet I/P (FLV, AVI); encodeur images intra)');
+   WriteLn('D V    kmvc            Karl Morton''s video codec (AVI KMVC, PAL8 <= 320x200)');
    WriteLn('D V D  idcinvideo      id Quake II CIN video (conteneur .cin, tables Huffman)');
    WriteLn('D V    indeo3          Intel Indeo 3 (AVI IV31/IV32, yuv410p; -pix_fmt yuv420p)');
    WriteLn('D V D  indeo2          Intel Indeo 2 (AVI RT21, yuv410p; -pix_fmt yuv420p, -filter_threads)');
@@ -46569,7 +46823,8 @@ BEGIN
   Else If AsvTag='FPS1' Then NVKind:=24
   Else If (AsvTag='H263') Or (AsvTag='h263') Or (AsvTag='X263') Or (AsvTag='T263') Or (AsvTag='L263') Or (AsvTag='M263') Or (AsvTag='N263') Or (AsvTag='U263') Or (AsvTag='s263') Or (AsvTag='VX1K') Or (AsvTag='ZyGo') Or (AsvTag='FLV1') Or (AsvTag='H261') Or (AsvTag='h261') Or (AsvTag='I263') Or (AsvTag='i263') Then NVKind:=26
   Else If AsvTag='RT21' Then NVKind:=31
-  Else If (AsvTag='IV31') Or (AsvTag='IV32') Or (AsvTag='iv31') Or (AsvTag='iv32') Then NVKind:=32;
+  Else If (AsvTag='IV31') Or (AsvTag='IV32') Or (AsvTag='iv31') Or (AsvTag='iv32') Then NVKind:=32
+  Else If (AsvTag='KMVC') Or (AsvTag='kmvc') Then NVKind:=37;
  End;
  If (OptPixFmt<>'') And (OptPixFmt<>'yuv420p') Then Fail('-pix_fmt: seul yuv420p est pris en charge.');
  NVAudioOut:=(OutputFormat='wav') Or (OutputFormat='mp3') Or (OutputFormat='ac3') Or (OutputFormat='adx') Or (OutputFormat='aiff');
