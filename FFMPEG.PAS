@@ -3490,7 +3490,7 @@ Var
  HLSListOpen,AllStreams,NoVideo,NoAudio: Boolean;
  VideoCodec: String;
  AspectNum,AspectDen: LongInt;
- AsvTag: String[4]; NVKind,NVSelMode: LongInt; NVAudioOut: Boolean;
+ AsvTag: String[4]; NVKind,NVSelMode: LongInt; NVAudioOut: Boolean; SubCodec: String;
  DNxProfile: String; HasAlbum,FourMV,HasVideoBitrate,HasBFrames,HasVideoTolerance,HasBQuant,HasVideoBuffer,HasComment: Boolean;
  BFrames:Integer;
  VideoBitrate,VideoTolerance,VideoBuffer: LongInt;
@@ -3597,6 +3597,7 @@ Function FormatName(S: String): String;Begin
  If (S='wmv') Or (S='wma') Then S:='asf';
  If S='dnx' Then S:='dnxhd';
  If S='dif' Then S:='dv';
+ If S='idx' Then S:='vobsub';
  If S='rmvb' Then S:='rm';
  If S='cavs' Then S:='cavsvideo';
  FormatName:=S;
@@ -3818,6 +3819,8 @@ Begin
  Until False;
  CloseRead;
  Probe:='';
+ If N>=20 Then If (B[0]=35) And (B[1]=32) And (B[2]=86) And (B[3]=111) And (B[4]=98) And (B[5]=83) And (B[6]=117) And (B[7]=98) And (B[8]=32) And (B[9]=105) And (B[10]=110) And (B[11]=100) And (B[12]=101) And (B[13]=120) And (B[14]=32) And (B[15]=102) And (B[16]=105) And (B[17]=108) And (B[18]=101) And (B[19]=44) Then Begin Probe:='vobsub'; Exit; End;
+ If N>=8 Then If (B[0]=80) And (B[1]=78) And (B[2]=71) And (B[3]=83) And (B[4]=85) And (B[5]=66) And (B[6]=32) And (B[7]=49) Then Begin Probe:='psub'; Exit; End;
  If N>=10 Then If ((B[0]=101) And (B[1]=97) And (B[2]=51) And (B[3]>=2) And (B[3]<=4)) Or
   ((B[0]=69) And (B[1]=65) And (B[2]=51) And (B[4]=0) And (B[5]=96)) Then Begin Probe:='oma'; Exit; End;
  If N>=9 Then If (B[0]=89) And (B[1]=85) And (B[2]=86) And (B[3]=52) And
@@ -23862,6 +23865,1104 @@ Begin
  End;
 End;
 
+
+{ ---- Sous-titres bitmap: evenements, PNG, manifeste .psub ---- }
+Type
+ TXSRect=Record X,Y,W,H,NCol: LongInt; Pal: Array[0..255] Of LongInt; Bmp: PEABuffer; End;
+ PXSRect=^TXSRect;
+ TXSEv=Record
+  T0,T1: Int64; NR: LongInt; Forced: Boolean; Rc: Array[0..15] Of PXSRect;
+ End;
+ PXSEv=^TXSEv;
+Var
+ XSEvs: Array[0..19999] Of PXSEv; XSN: LongInt; XSW,XSH: LongInt;
+
+Function XSPos(Const Sub,S: String): LongInt;
+Begin XSPos:=Pos(Sub,S); End;
+
+Function XSTrim(S: String): String;
+Begin
+ While (S<>'') And ((S[1]=' ') Or (S[1]=#9)) Do Delete(S,1,1);
+ While (S<>'') And ((S[Length(S)]=' ') Or (S[Length(S)]=#9)) Do Delete(S,Length(S),1);
+ XSTrim:=S;
+End;
+
+Procedure XSFreeRect(R: PXSRect);
+Begin
+ If R=Nil Then Exit;
+ If R^.Bmp<>Nil Then FreeMem(R^.Bmp,R^.W*R^.H+64);
+ Dispose(R);
+End;
+
+Procedure XSFreeEvent(E: PXSEv);
+Var I: LongInt;
+Begin
+ If E=Nil Then Exit;
+ For I:=0 To E^.NR-1 Do XSFreeRect(E^.Rc[I]);
+ Dispose(E);
+End;
+
+Procedure XSReset;
+Var I: LongInt;
+Begin
+ For I:=0 To XSN-1 Do Begin XSFreeEvent(XSEvs[I]); XSEvs[I]:=Nil; End;
+ XSN:=0;
+End;
+
+Function XSNew: PXSEv;
+Var E: PXSEv;
+Begin
+ If XSN>=20000 Then Fail('sous-titres: trop d''evenements (20000 maximum).');
+ New(E); FillChar(E^,SizeOf(E^),0); XSEvs[XSN]:=E; Inc(XSN); XSNew:=E;
+End;
+
+{ retire le dernier evenement cree (rejet) }
+Procedure XSDropLast;
+Begin
+ If XSN>0 Then Begin XSFreeEvent(XSEvs[XSN-1]); XSEvs[XSN-1]:=Nil; Dec(XSN); End;
+End;
+
+Function XSAddRect(E: PXSEv; X,Y,W,H: LongInt): PXSRect;
+Var R: PXSRect;
+Begin
+ If E^.NR>=16 Then Fail('sous-titres: trop de rectangles.');
+ New(R); FillChar(R^,SizeOf(R^),0); R^.X:=X; R^.Y:=Y; R^.W:=W; R^.H:=H;
+ GetMem(R^.Bmp,W*H+64); FillChar(R^.Bmp^,W*H+64,0);
+ E^.Rc[E^.NR]:=R; Inc(E^.NR); XSAddRect:=R;
+End;
+
+Function XSTimeStr(T: Int64): String;
+Var H,M,S,Ms: LongInt; A,B,C,D: String;
+Begin
+ If T<0 Then T:=0;
+ Ms:=T Mod 1000; T:=T Div 1000; S:=T Mod 60; T:=T Div 60; M:=T Mod 60; H:=T Div 60;
+ Str(H:2,A); Str(M:2,B); Str(S:2,C); Str(Ms:3,D);
+ While Pos(' ',A)>0 Do A[Pos(' ',A)]:='0';
+ While Pos(' ',B)>0 Do B[Pos(' ',B)]:='0';
+ While Pos(' ',C)>0 Do C[Pos(' ',C)]:='0';
+ While Pos(' ',D)>0 Do D[Pos(' ',D)]:='0';
+ XSTimeStr:=A+':'+B+':'+C+'.'+D;
+End;
+
+{ lit hh:mm:ss.mmm }
+Function XSParseTime(Const S: String; Var T: Int64): Boolean;
+Var P: LongInt; V: Array[0..3] Of LongInt; I,K,Code: LongInt; Part: String;
+Begin
+ XSParseTime:=False; Part:=''; K:=0;
+ For I:=1 To Length(S)+1 Do Begin
+  If (I>Length(S)) Or (S[I]=':') Or (S[I]='.') Then Begin
+   If K>3 Then Exit;
+   Val(Part,V[K],Code); If (Code<>0) Or (V[K]<0) Then Exit;
+   Inc(K); Part:='';
+  End Else Part:=Part+S[I];
+ End;
+ If K<>4 Then Exit;
+ T:=((Int64(V[0])*60+V[1])*60+V[2])*1000+V[3]; P:=0;
+ XSParseTime:=True;
+End;
+
+{ ecrit une image PNG RGBA pleine toile pour l'evenement E (comme sub2video de ffmpeg 6.1: un rectangle qui deborde est ignore) }
+Procedure XSWriteEventPNG(E: PXSEv; Const Name: String);
+Var Cv: PEABuffer; X,Y,W,H,Sx,Sy,K: LongInt; P: LongInt; R: PXSRect;
+Begin
+ W:=XSW; H:=XSH;
+ GetMem(Cv,W*H*4+64); FillChar(Cv^,W*H*4+64,0);
+ For K:=0 To E^.NR-1 Do Begin
+  R:=E^.Rc[K];
+  If (R^.X<0) Or (R^.X+R^.W>W) Or (R^.Y<0) Or (R^.Y+R^.H>H) Then Continue;
+  For Sy:=0 To R^.H-1 Do For Sx:=0 To R^.W-1 Do Begin
+   P:=R^.Pal[R^.Bmp^[Sy*R^.W+Sx]];
+   X:=((R^.Y+Sy)*W+R^.X+Sx)*4;
+   Cv^[X]:=(P Shr 16) And 255; Cv^[X+1]:=(P Shr 8) And 255; Cv^[X+2]:=P And 255; Cv^[X+3]:=(P Shr 24) And 255;
+  End;
+ End;
+ NVW:=W; NVH:=H; NVTarget:=Name; NVFmt:=3;
+ NVWritePNG(Cv,4);
+ FreeMem(Cv,W*H*4+64);
+End;
+
+{ ---- lecture PNG: 8 bits gris/RGB/RGBA/palette, 1..8 bits palette; retourne RGBA W*H*4 ---- }
+Procedure XSReadPNG(Const Name: String; Var W,H: LongInt; Var Rgba: PEABuffer);
+Var
+ F,Idat,Raw: PEABuffer; Size,Pos,Len,Cl,IdLen,Bd,Ct,Il,Bpp,RowB,I,X,Y,Res,OutLen,Fl,A,B,C,Pa,Pb,Pc,Pp,Q: LongInt;
+ Pal: Array[0..255] Of LongInt; Tr: Array[0..255] Of Byte; Tag: String[4]; HasTr: Boolean; V: LongInt;
+ Cur,Prv: PEABuffer;
+Begin
+ NVLoad(Name,F,Size); CloseRead;
+ If (F^[0]<>137) Or (F^[1]<>80) Or (F^[2]<>78) Or (F^[3]<>71) Then Fail('PNG: signature requise: '+Name);
+ Pos:=8; IdLen:=0; W:=0; H:=0; Bd:=0; Ct:=0; Il:=0; FillChar(Pal,SizeOf(Pal),0); FillChar(Tr,SizeOf(Tr),255); HasTr:=False;
+ GetMem(Idat,Size+64);
+ While Pos+12<=Size Do Begin
+  Len:=NVRL32(F,Size,Pos); Len:=((Len And $FF) Shl 24) Or ((Len And $FF00) Shl 8) Or ((Len Shr 8) And $FF00) Or ((Len Shr 24) And $FF);
+  Tag:=Chr(F^[Pos+4])+Chr(F^[Pos+5])+Chr(F^[Pos+6])+Chr(F^[Pos+7]);
+  If (Len<0) Or (Pos+12+Len>Size) Then Break;
+  If Tag='IHDR' Then Begin
+   W:=F^[Pos+8]*16777216+F^[Pos+9]*65536+F^[Pos+10]*256+F^[Pos+11];
+   H:=F^[Pos+12]*16777216+F^[Pos+13]*65536+F^[Pos+14]*256+F^[Pos+15];
+   Bd:=F^[Pos+16]; Ct:=F^[Pos+17]; Il:=F^[Pos+20];
+  End Else If Tag='PLTE' Then Begin
+   For I:=0 To (Len Div 3)-1 Do If I<256 Then Pal[I]:=(F^[Pos+8+I*3] Shl 16) Or (F^[Pos+9+I*3] Shl 8) Or F^[Pos+10+I*3];
+  End Else If Tag='tRNS' Then Begin
+   HasTr:=True; For I:=0 To Len-1 Do If I<256 Then Tr[I]:=F^[Pos+8+I];
+  End Else If Tag='IDAT' Then Begin
+   Move(F^[Pos+8],Idat^[IdLen],Len); Inc(IdLen,Len);
+  End Else If Tag='IEND' Then Break;
+  Inc(Pos,12+Len);
+ End;
+ If (W<1) Or (H<1) Or (W>8192) Or (H>8192) Then Fail('PNG: dimensions incorrectes: '+Name);
+ If Il<>0 Then Fail('PNG entrelace non pris en charge: '+Name);
+ Case Ct Of
+  0: Begin Q:=1; If Bd<>8 Then Fail('PNG: gris 8 bits requis: '+Name); End;
+  2: Begin Q:=3; If Bd<>8 Then Fail('PNG: RGB 8 bits requis: '+Name); End;
+  3: Begin Q:=1; If (Bd<>1) And (Bd<>2) And (Bd<>4) And (Bd<>8) Then Fail('PNG: profondeur de palette incorrecte: '+Name); End;
+  4: Begin Q:=2; If Bd<>8 Then Fail('PNG: gris+alpha 8 bits requis: '+Name); End;
+  6: Begin Q:=4; If Bd<>8 Then Fail('PNG: RGBA 8 bits requis: '+Name); End;
+  Else Fail('PNG: type de couleur non pris en charge: '+Name);
+ End;
+ If Ct=3 Then RowB:=(W*Bd+7) Div 8 Else RowB:=W*Q;
+ Bpp:=Q; If Ct=3 Then Bpp:=1;
+ GetMem(Raw,H*(RowB+1)+64);
+ Res:=NVInflate(Idat,IdLen,Raw,H*(RowB+1),OutLen);
+ If (Res<>0) Or (OutLen<H*(RowB+1)) Then Fail('PNG: donnees compressees incorrectes: '+Name);
+ FreeMem(Idat,Size+64);
+ { defiltrage }
+ GetMem(Prv,RowB+64); FillChar(Prv^,RowB+64,0);
+ For Y:=0 To H-1 Do Begin
+  Cur:=PEABuffer(@Raw^[Y*(RowB+1)+1]); Fl:=Raw^[Y*(RowB+1)];
+  For X:=0 To RowB-1 Do Begin
+   If X>=Bpp Then A:=Cur^[X-Bpp] Else A:=0;
+   B:=Prv^[X]; If X>=Bpp Then C:=Prv^[X-Bpp] Else C:=0;
+   Case Fl Of
+    0: V:=Cur^[X];
+    1: V:=Cur^[X]+A;
+    2: V:=Cur^[X]+B;
+    3: V:=Cur^[X]+(A+B) Div 2;
+    4: Begin
+     Pp:=A+B-C; Pa:=Abs(Pp-A); Pb:=Abs(Pp-B); Pc:=Abs(Pp-C);
+     If (Pa<=Pb) And (Pa<=Pc) Then V:=Cur^[X]+A Else If Pb<=Pc Then V:=Cur^[X]+B Else V:=Cur^[X]+C;
+    End;
+    Else Fail('PNG: filtre incorrect: '+Name);
+   End;
+   Cur^[X]:=V And 255;
+  End;
+  Move(Cur^,Prv^,RowB);
+ End;
+ FreeMem(Prv,RowB+64);
+ GetMem(Rgba,W*H*4+64);
+ For Y:=0 To H-1 Do Begin
+  Cur:=PEABuffer(@Raw^[Y*(RowB+1)+1]);
+  For X:=0 To W-1 Do Begin
+   I:=(Y*W+X)*4;
+   Case Ct Of
+    0: Begin Rgba^[I]:=Cur^[X]; Rgba^[I+1]:=Cur^[X]; Rgba^[I+2]:=Cur^[X]; Rgba^[I+3]:=255; End;
+    2: Begin Rgba^[I]:=Cur^[X*3]; Rgba^[I+1]:=Cur^[X*3+1]; Rgba^[I+2]:=Cur^[X*3+2]; Rgba^[I+3]:=255; End;
+    3: Begin
+     Case Bd Of
+      8: V:=Cur^[X];
+      4: V:=(Cur^[X Shr 1] Shr (4-4*(X And 1))) And 15;
+      2: V:=(Cur^[X Shr 2] Shr (6-2*(X And 3))) And 3;
+      Else V:=(Cur^[X Shr 3] Shr (7-(X And 7))) And 1;
+     End;
+     Rgba^[I]:=(Pal[V] Shr 16) And 255; Rgba^[I+1]:=(Pal[V] Shr 8) And 255; Rgba^[I+2]:=Pal[V] And 255;
+     If HasTr Then Rgba^[I+3]:=Tr[V] Else Rgba^[I+3]:=255;
+    End;
+    4: Begin Rgba^[I]:=Cur^[X*2]; Rgba^[I+1]:=Cur^[X*2]; Rgba^[I+2]:=Cur^[X*2]; Rgba^[I+3]:=Cur^[X*2+1]; End;
+    Else Move(Cur^[X*4],Rgba^[I],4);
+   End;
+  End;
+ End;
+ FreeMem(Raw,H*(RowB+1)+64); FreeMem(F,Size+64);
+End;
+
+{ image RGBA -> evenement bitmap (rectangle englobant des pixels non transparents, palette <= 256 couleurs) }
+Function XSEventFromRGBA(Rgba: PEABuffer; W,H: LongInt; T0,T1: Int64): PXSEv;
+Var
+ X0,Y0,X1,Y1,X,Y,I,J,Sh,N: LongInt; E: PXSEv; R: PXSRect; Keys: Array[0..255] Of LongInt; Found: Boolean;
+ Px: LongInt;
+Begin
+ X0:=W; Y0:=H; X1:=-1; Y1:=-1;
+ For Y:=0 To H-1 Do For X:=0 To W-1 Do
+  If Rgba^[(Y*W+X)*4+3]<>0 Then Begin
+   If X<X0 Then X0:=X; If X>X1 Then X1:=X; If Y<Y0 Then Y0:=Y; If Y>Y1 Then Y1:=Y;
+  End;
+ If X1<0 Then Begin XSEventFromRGBA:=Nil; Exit; End;
+ E:=XSNew; E^.T0:=T0; E^.T1:=T1;
+ R:=XSAddRect(E,X0,Y0,X1-X0+1,Y1-Y0+1);
+ { quantification: premiere profondeur de bits qui donne <= 256 couleurs distinctes }
+ N:=0; Found:=False;
+ For Sh:=0 To 7 Do Begin
+  N:=0; Found:=True;
+  For Y:=0 To R^.H-1 Do Begin
+   For X:=0 To R^.W-1 Do Begin
+    I:=((Y0+Y)*W+X0+X)*4;
+    Px:=((Rgba^[I+3] Shr Sh) Shl 24) Or ((Rgba^[I] Shr Sh) Shl 16) Or ((Rgba^[I+1] Shr Sh) Shl 8) Or (Rgba^[I+2] Shr Sh);
+    If Rgba^[I+3]=0 Then Px:=0;
+    J:=0; While (J<N) And (Keys[J]<>Px) Do Inc(J);
+    If J=N Then Begin
+     If N>=256 Then Begin Found:=False; Break; End;
+     Keys[N]:=Px; Inc(N);
+    End;
+   End;
+   If Not Found Then Break;
+  End;
+  If Found Then Break;
+ End;
+ If Not Found Then Fail('sous-titre: image trop riche en couleurs.');
+ R^.NCol:=N;
+ For J:=0 To N-1 Do R^.Pal[J]:=0;
+ For Y:=0 To R^.H-1 Do For X:=0 To R^.W-1 Do Begin
+  I:=((Y0+Y)*W+X0+X)*4;
+  Px:=((Rgba^[I+3] Shr Sh) Shl 24) Or ((Rgba^[I] Shr Sh) Shl 16) Or ((Rgba^[I+1] Shr Sh) Shl 8) Or (Rgba^[I+2] Shr Sh);
+  If Rgba^[I+3]=0 Then Px:=0;
+  J:=0; While Keys[J]<>Px Do Inc(J);
+  R^.Bmp^[Y*R^.W+X]:=J;
+  If R^.Pal[J]=0 Then Begin
+   If Rgba^[I+3]=0 Then R^.Pal[J]:=0
+   Else R^.Pal[J]:=(Rgba^[I+3] Shl 24) Or (Rgba^[I] Shl 16) Or (Rgba^[I+1] Shl 8) Or Rgba^[I+2];
+  End;
+ End;
+ XSEventFromRGBA:=E;
+End;
+
+{ ---- DVD subtitles: decodeur (libavcodec/dvdsubdec.c) ---- }
+Var
+ DSUPal: Array[0..15] Of LongInt; DSUHasPal: Boolean; DSUColormap: Array[0..3] Of Byte; DSUAlpha: Array[0..255] Of Byte;
+ DSUUsed: Array[0..255] Of Byte; DSUBuf: Array[0..65535] Of Byte; DSUBufSize: LongInt;
+
+Function DSUClip(V: LongInt): LongInt;
+Begin If V<0 Then DSUClip:=0 Else If V>255 Then DSUClip:=255 Else DSUClip:=V; End;
+
+{ YUV (BT.601 limite) -> RGB comme libavcodec/colorspace.h }
+Function DSUYuvToRgb(Y1,Cb1,Cr1: LongInt): LongInt;
+Var Cb,Cr,Radd,Gadd,Badd,Y,R,G,B: LongInt;
+Begin
+ Cb:=Cb1-128; Cr:=Cr1-128;
+ Radd:=1634*Cr+512;
+ Gadd:=-401*Cb-832*Cr+512;
+ Badd:=2066*Cb+512;
+ Y:=(Y1-16)*1192;
+ R:=DSUClip(AVSar(Y+Radd,10)); G:=DSUClip(AVSar(Y+Gadd,10)); B:=DSUClip(AVSar(Y+Badd,10));
+ DSUYuvToRgb:=(R Shl 16) Or (G Shl 8) Or B;
+End;
+
+Procedure DSUParseExtra(Const Txt: String);
+Var P,K,Code,W,H: LongInt; Line,Tok: String; I: LongInt; V: Int64;
+Begin
+ P:=1;
+ While P<=Length(Txt) Do Begin
+  K:=P; While (K<=Length(Txt)) And (Txt[K]<>#10) And (Txt[K]<>#13) Do Inc(K);
+  Line:=Copy(Txt,P,K-P); P:=K+1;
+  If Copy(Line,1,8)='palette:' Then Begin
+   DSUHasPal:=True; Line:=Copy(Line,9,255);
+   For I:=0 To 15 Do Begin
+    While (Line<>'') And ((Line[1]=' ') Or (Line[1]=',') Or (Line[1]=#9)) Do Delete(Line,1,1);
+    Tok:=''; While (Line<>'') And (Line[1] In ['0'..'9','a'..'f','A'..'F']) Do Begin Tok:=Tok+Line[1]; Delete(Line,1,1); End;
+    If Tok='' Then V:=0 Else Val('$'+Tok,V,Code);
+    DSUPal[I]:=V And $FFFFFFFF;
+   End;
+  End Else If Copy(Line,1,5)='size:' Then Begin
+   Line:=Copy(Line,6,255); While (Line<>'') And (Line[1]=' ') Do Delete(Line,1,1);
+   K:=Pos('x',Line);
+   If K>0 Then Begin
+    Val(Copy(Line,1,K-1),W,Code);
+    If Code=0 Then Begin
+     Tok:=Copy(Line,K+1,20); I:=1; While (I<=Length(Tok)) And (Tok[I] In ['0'..'9']) Do Inc(I);
+     Val(Copy(Tok,1,I-1),H,Code);
+     If (Code=0) And (W>0) And (H>0) Then Begin XSW:=W; XSH:=H; End;
+    End;
+   End;
+  End;
+ End;
+End;
+
+Function DSURl16(B: PEABuffer; Size,At: LongInt): LongInt;
+Begin DSURl16:=EAByte(B,Size,At)*256+EAByte(B,Size,At+1); End;
+Function DSURl32(B: PEABuffer; Size,At: LongInt): Int64;
+Begin DSURl32:=Int64(DSURl16(B,Size,At))*65536+DSURl16(B,Size,At+2); End;
+
+Var DSUBitPos,DSUBitLen: LongInt; DSUBits: PEABuffer; DSUBitsSize: LongInt;
+Function DSUGetBits(N: LongInt): LongInt;
+Var V,I,P: LongInt;
+Begin
+ V:=0;
+ For I:=1 To N Do Begin
+  P:=DSUBitPos Shr 3;
+  V:=(V Shl 1) Or ((EAByte(DSUBits,DSUBitsSize,P) Shr (7-(DSUBitPos And 7))) And 1);
+  Inc(DSUBitPos);
+ End;
+ DSUGetBits:=V;
+End;
+
+Function DSUDecodeRle(Bitmap: PEABuffer; Linesize,W,H: LongInt; Buf: PEABuffer; BufSize,Start: LongInt; Is8: Boolean): Boolean;
+Var X,Y,Len,Color,V,T,HasRun: LongInt; D: LongInt;
+Begin
+ DSUDecodeRle:=False;
+ If Start>=BufSize Then Exit;
+ If (W<=0) Or (H<=0) Then Exit;
+ DSUBits:=PEABuffer(@Buf^[Start]); DSUBitsSize:=BufSize-Start; DSUBitLen:=(BufSize-Start)*8; DSUBitPos:=0;
+ X:=0; Y:=0; D:=0;
+ While True Do Begin
+  If DSUBitPos>DSUBitLen Then Exit;
+  If Is8 Then Begin
+   HasRun:=DSUGetBits(1);
+   If DSUGetBits(1)<>0 Then Color:=DSUGetBits(8) Else Color:=DSUGetBits(2);
+   If HasRun<>0 Then Begin
+    If DSUGetBits(1)<>0 Then Begin
+     Len:=DSUGetBits(7);
+     If Len=0 Then Len:=MaxLongInt Else Inc(Len,9);
+    End Else Len:=DSUGetBits(3)+2;
+   End Else Len:=1;
+  End Else Begin
+   V:=0; T:=1;
+   While (V<T) And (T<=$40) Do Begin V:=(V Shl 4) Or DSUGetBits(4); T:=T Shl 2; End;
+   Color:=V And 3;
+   If V<4 Then Len:=MaxLongInt Else Len:=V Shr 2;
+  End;
+  If (Len<>MaxLongInt) And (Len>W-X) Then Exit;
+  If Len>W-X Then Len:=W-X;
+  FillChar(Bitmap^[D+X],Len,Color);
+  DSUUsed[Color]:=1;
+  Inc(X,Len);
+  If X>=W Then Begin
+   Inc(Y);
+   If Y>=H Then Break;
+   Inc(D,Linesize); X:=0;
+   DSUBitPos:=(DSUBitPos+7) And Not 7;
+  End;
+ End;
+ DSUDecodeRle:=True;
+End;
+
+Procedure DSUGuessPalette(Var Rgba: Array Of LongInt);
+Const LevelMap: Array[0..3,0..3] Of Byte=((255,0,0,0),(0,255,0,0),(0,128,255,0),(0,85,170,255));
+Var ColorUsed: Array[0..15] Of Byte; Nb,I,J,Level,R,G,B: LongInt;
+Begin
+ If DSUHasPal Then Begin
+  For I:=0 To 3 Do Rgba[I]:=(DSUPal[DSUColormap[I]] And $FFFFFF) Or (DSUAlpha[I]*17 Shl 24);
+  Exit;
+ End;
+ For I:=0 To 3 Do Rgba[I]:=0;
+ FillChar(ColorUsed,SizeOf(ColorUsed),0); Nb:=0;
+ For I:=0 To 3 Do If (DSUAlpha[I]<>0) And (ColorUsed[DSUColormap[I]]=0) Then Begin ColorUsed[DSUColormap[I]]:=1; Inc(Nb); End;
+ If Nb=0 Then Exit;
+ J:=0; FillChar(ColorUsed,SizeOf(ColorUsed),0);
+ For I:=0 To 3 Do If DSUAlpha[I]<>0 Then Begin
+  If ColorUsed[DSUColormap[I]]=0 Then Begin
+   Level:=LevelMap[Nb-1,J];
+   R:=(255*Level) Shr 8; G:=R; B:=R;
+   Rgba[I]:=B Or (G Shl 8) Or (R Shl 16) Or (DSUAlpha[I]*17 Shl 24);
+   ColorUsed[DSUColormap[I]]:=I+1; Inc(J);
+  End Else Rgba[I]:=(Rgba[ColorUsed[DSUColormap[I]]-1] And $FFFFFF) Or (DSUAlpha[I]*17 Shl 24);
+ End;
+End;
+
+{ retourne: -1 invalide, -2 (EAGAIN), 0/1 = is_menu avec un evenement dans E }
+Function DSUDecodeCmds(Buf: PEABuffer; BufSize: LongInt; E: PXSEv): LongInt;
+Var
+ CmdPos,Pos,Cmd,X1,Y1,X2,Y2,NextCmd,OffSz,I,Date: LongInt; Big,Is8,Menu: Boolean; Offset1,Offset2,Size: Int64;
+ YuvPal: LongInt; W,H,Y: LongInt; Bm: PEABuffer; HaveRect: Boolean; Fail1: Boolean; R: PXSRect;
+ Pal4: Array[0..3] Of LongInt; Ok: Boolean;
+Begin
+ DSUDecodeCmds:=-1;
+ If BufSize<10 Then Exit;
+ Is8:=False; Menu:=False; YuvPal:=-1; HaveRect:=False; Fail1:=False;
+ If DSURl16(Buf,BufSize,0)=0 Then Begin Big:=True; OffSz:=4; CmdPos:=6; End Else Begin Big:=False; OffSz:=2; CmdPos:=2; End;
+ If Big Then Size:=DSURl32(Buf,BufSize,2) Else Size:=DSURl16(Buf,BufSize,0);
+ If Big Then CmdPos:=DSURl32(Buf,BufSize,6) Else CmdPos:=DSURl16(Buf,BufSize,2);
+ If (CmdPos<0) Or (CmdPos>BufSize-2-OffSz) Then Begin
+  If CmdPos>Size Then DSUDecodeCmds:=-3 Else DSUDecodeCmds:=-2;
+  Exit;
+ End;
+ E^.T0:=0; E^.T1:=0;
+ While (CmdPos>0) And (CmdPos<BufSize-2-OffSz) Do Begin
+  Date:=DSURl16(Buf,BufSize,CmdPos);
+  If Big Then NextCmd:=DSURl32(Buf,BufSize,CmdPos+2) Else NextCmd:=DSURl16(Buf,BufSize,CmdPos+2);
+  Pos:=CmdPos+2+OffSz; Offset1:=-1; Offset2:=-1; X1:=0; Y1:=0; X2:=0; Y2:=0;
+  While Pos<BufSize Do Begin
+   Cmd:=Buf^[Pos]; Inc(Pos);
+   Case Cmd Of
+    $00: Menu:=True;
+    $01: E^.T0:=(Int64(Date) Shl 10) Div 90;
+    $02: E^.T1:=(Int64(Date) Shl 10) Div 90;
+    $03: Begin
+     If BufSize-Pos<2 Then Begin Fail1:=True; Break; End;
+     DSUColormap[3]:=Buf^[Pos] Shr 4; DSUColormap[2]:=Buf^[Pos] And 15; DSUColormap[1]:=Buf^[Pos+1] Shr 4; DSUColormap[0]:=Buf^[Pos+1] And 15;
+     Inc(Pos,2);
+    End;
+    $04: Begin
+     If BufSize-Pos<2 Then Begin Fail1:=True; Break; End;
+     DSUAlpha[3]:=Buf^[Pos] Shr 4; DSUAlpha[2]:=Buf^[Pos] And 15; DSUAlpha[1]:=Buf^[Pos+1] Shr 4; DSUAlpha[0]:=Buf^[Pos+1] And 15;
+     Inc(Pos,2);
+    End;
+    $05,$85: Begin
+     If BufSize-Pos<6 Then Begin Fail1:=True; Break; End;
+     X1:=(Buf^[Pos] Shl 4) Or (Buf^[Pos+1] Shr 4); X2:=((Buf^[Pos+1] And 15) Shl 8) Or Buf^[Pos+2];
+     Y1:=(Buf^[Pos+3] Shl 4) Or (Buf^[Pos+4] Shr 4); Y2:=((Buf^[Pos+4] And 15) Shl 8) Or Buf^[Pos+5];
+     If (Cmd And $80)<>0 Then Is8:=True;
+     Inc(Pos,6);
+    End;
+    $06: Begin
+     If BufSize-Pos<4 Then Begin Fail1:=True; Break; End;
+     Offset1:=DSURl16(Buf,BufSize,Pos); Offset2:=DSURl16(Buf,BufSize,Pos+2); Inc(Pos,4);
+    End;
+    $86: Begin
+     If BufSize-Pos<8 Then Begin Fail1:=True; Break; End;
+     Offset1:=DSURl32(Buf,BufSize,Pos); Offset2:=DSURl32(Buf,BufSize,Pos+4); Inc(Pos,8);
+    End;
+    $83: Begin
+     If BufSize-Pos<768 Then Begin Fail1:=True; Break; End;
+     YuvPal:=Pos; Inc(Pos,768);
+    End;
+    $84: Begin
+     If BufSize-Pos<256 Then Begin Fail1:=True; Break; End;
+     For I:=0 To 255 Do DSUAlpha[I]:=255-Buf^[Pos+I];
+     Inc(Pos,256);
+    End;
+    $FF: Break;
+    Else Break;
+   End;
+  End;
+  If Fail1 Then Exit;
+  If (Offset1>=BufSize) Or (Offset2>=BufSize) Then Exit;
+  If (Offset1>=0) And (Offset2>=0) Then Begin
+   W:=X2-X1+1; If W<0 Then W:=0;
+   H:=Y2-Y1+1; If H<0 Then H:=0;
+   If (W>0) And (H>1) Then Begin
+    If E^.NR>0 Then Begin XSFreeRect(E^.Rc[0]); E^.Rc[0]:=Nil; E^.NR:=0; End;
+    FillChar(DSUUsed,SizeOf(DSUUsed),0);
+    R:=XSAddRect(E,X1,Y1,W,H); HaveRect:=True;
+    Bm:=R^.Bmp;
+    If Not DSUDecodeRle(Bm,W*2,W,(H+1) Div 2,Buf,BufSize,Offset1,Is8) Then Begin Exit; End;
+    If Not DSUDecodeRle(PEABuffer(@Bm^[W]),W*2,W,H Div 2,Buf,BufSize,Offset2,Is8) Then Begin Exit; End;
+    If Is8 Then Begin
+     If YuvPal<0 Then Exit;
+     R^.NCol:=256;
+     For I:=0 To 255 Do R^.Pal[I]:=DSUYuvToRgb(Buf^[YuvPal+I*3],Buf^[YuvPal+I*3+2],Buf^[YuvPal+I*3+1]) Or (DSUAlpha[I] Shl 24);
+    End Else Begin
+     R^.NCol:=4;
+     DSUGuessPalette(Pal4);
+     For I:=0 To 3 Do R^.Pal[I]:=Pal4[I];
+    End;
+    E^.Forced:=Menu;
+   End;
+  End;
+  If NextCmd<CmdPos Then Break;
+  If NextCmd=CmdPos Then Break;
+  CmdPos:=NextCmd;
+ End;
+ If HaveRect Then Begin If Menu Then DSUDecodeCmds:=1 Else DSUDecodeCmds:=0; End;
+End;
+
+Function DSUIsTransp(B: PEABuffer; Pitch,N: LongInt; Const Tr: Array Of Byte): Boolean;
+Var I: LongInt;
+Begin
+ DSUIsTransp:=False;
+ For I:=0 To N-1 Do If Tr[B^[I*Pitch]]=0 Then Exit;
+ DSUIsTransp:=True;
+End;
+
+{ recadre l'evenement sur le plus petit rectangle non transparent; False si vide }
+Function DSUShrink(E: PXSEv): Boolean;
+Var Tr: Array[0..255] Of Byte; Y1,Y2,X1,X2,Y,I,W,H: LongInt; Transparent: Boolean; Nb: PEABuffer; R: PXSRect;
+Begin
+ DSUShrink:=False;
+ If E^.NR=0 Then Exit;
+ R:=E^.Rc[0];
+ If (R^.Bmp=Nil) Or (R^.W<=0) Or (R^.H<=0) Then Exit;
+ FillChar(Tr,SizeOf(Tr),0); Transparent:=True;
+ For I:=0 To R^.NCol-1 Do Begin
+  If ((R^.Pal[I] Shr 24) And 255)=0 Then Tr[I]:=1 Else If DSUUsed[I]<>0 Then Transparent:=False;
+ End;
+ If Transparent Then Exit;
+ Y1:=0; While (Y1<R^.H) And DSUIsTransp(PEABuffer(@R^.Bmp^[Y1*R^.W]),1,R^.W,Tr) Do Inc(Y1);
+ If Y1=R^.H Then Exit;
+ Y2:=R^.H-1; While (Y2>0) And DSUIsTransp(PEABuffer(@R^.Bmp^[Y2*R^.W]),1,R^.W,Tr) Do Dec(Y2);
+ X1:=0; While (X1<R^.W-1) And DSUIsTransp(PEABuffer(@R^.Bmp^[X1]),R^.W,R^.H,Tr) Do Inc(X1);
+ X2:=R^.W-1; While (X2>0) And DSUIsTransp(PEABuffer(@R^.Bmp^[X2]),R^.W,R^.H,Tr) Do Dec(X2);
+ W:=X2-X1+1; H:=Y2-Y1+1;
+ GetMem(Nb,W*H+64);
+ For Y:=0 To H-1 Do Move(R^.Bmp^[X1+(Y1+Y)*R^.W],Nb^[W*Y],W);
+ FreeMem(R^.Bmp,R^.W*R^.H+64);
+ R^.Bmp:=Nb; R^.X:=R^.X+X1; R^.Y:=R^.Y+Y1; R^.W:=W; R^.H:=H;
+ DSUShrink:=True;
+End;
+
+{ un paquet SPU complet (ou a completer) -> evenement (retourne True si un evenement est ajoute) }
+Function DSUDecodePacket(Buf: PEABuffer; Size: LongInt; Pts: Int64): Boolean;
+Var E: PXSEv; R: LongInt; Appended: Boolean;
+Begin
+ DSUDecodePacket:=False; Appended:=False;
+ If DSUBufSize>0 Then Begin
+  If Size>=SizeOf(DSUBuf)-DSUBufSize Then Begin DSUBufSize:=0; Exit; End;
+  Move(Buf^,DSUBuf[DSUBufSize],Size); Inc(DSUBufSize,Size);
+  Buf:=PEABuffer(@DSUBuf); Size:=DSUBufSize; Appended:=True;
+ End;
+ E:=XSNew;
+ R:=DSUDecodeCmds(Buf,Size,E);
+ If R=-2 Then Begin
+  XSDropLast;
+  If Not Appended Then Begin
+   If Size>=SizeOf(DSUBuf) Then Begin DSUBufSize:=0; Exit; End;
+   Move(Buf^,DSUBuf,Size); DSUBufSize:=Size;
+  End;
+  Exit;
+ End;
+ If R=-3 Then Begin XSDropLast; Exit; End;
+ If R<0 Then Begin XSDropLast; DSUBufSize:=0; Exit; End;
+ If (R=0) And Not DSUShrink(E) Then Begin XSDropLast; DSUBufSize:=0; Exit; End;
+ DSUBufSize:=0;
+ E^.T1:=Pts+E^.T1; E^.T0:=Pts+E^.T0;
+ DSUDecodePacket:=True;
+End;
+
+{ ---- VobSub (.idx + .sub): lecture (libavformat/mpeg.c) et ecriture ---- }
+Const DSUDefPal: Array[0..15] Of LongInt=(
+  $000000,$0000FF,$00FF00,$FF0000,$FFFF00,$FF00FF,$00FFFF,$FFFFFF,$808000,$8080FF,$800080,$80FF80,$008080,$FF8080,$555555,$AAAAAA);
+
+{ prochain code de debut 00 00 01 xx a partir de P; retourne 0x100+xx ou -1 }
+Function VobFindStart(F: PEABuffer; Size: LongInt; Var P: LongInt): LongInt;
+Var Lim: LongInt;
+Begin
+ VobFindStart:=-1; Lim:=100000;
+ While (P+3<Size) And (Lim>0) Do Begin
+  If (F^[P]=0) And (F^[P+1]=0) And (F^[P+2]=1) Then Begin VobFindStart:=$100+F^[P+3]; Inc(P,4); Exit; End;
+  Inc(P); Dec(Lim);
+ End;
+End;
+
+{ mpegps_read_pes_header: Code recoit l'identifiant de sous-flux (0x20..) pour private_stream_1 }
+Function VobReadPes(F: PEABuffer; Size: LongInt; Var P: LongInt; Var Code,Len: LongInt): Boolean;
+Var LastSync,Sc,C,Flags,Hl,PesExt,Skip,Ext2,IdExt,K: LongInt; ErrRedo: Boolean;
+Function R8: LongInt;Begin R8:=EAByte(F,Size,P); Inc(P); End;
+Function R16: LongInt;Begin R16:=EAByte(F,Size,P)*256+EAByte(F,Size,P+1); Inc(P,2); End;
+Begin
+ VobReadPes:=False; LastSync:=P; ErrRedo:=False;
+ While True Do Begin
+  If ErrRedo Then P:=LastSync;
+  ErrRedo:=False;
+  Sc:=VobFindStart(F,Size,P);
+  LastSync:=P;
+  If Sc<0 Then Exit;
+  If (Sc=$1BA) Or (Sc=$1BB) Then Continue;
+  If (Sc=$1BE) Or (Sc=$1BF) Or (Sc=$1BC) Then Begin K:=R16; Inc(P,K); Continue; End;
+  If Not (((Sc>=$1C0) And (Sc<=$1DF)) Or ((Sc>=$1E0) And (Sc<=$1EF)) Or (Sc=$1BD) Or (Sc=$1FD)) Then Continue;
+  Len:=R16;
+  { bourrage MPEG-1 }
+  C:=0;
+  While True Do Begin
+   If Len<1 Then Begin ErrRedo:=True; Break; End;
+   C:=R8; Dec(Len);
+   If C<>$FF Then Break;
+  End;
+  If ErrRedo Then Continue;
+  If (C And $C0)=$40 Then Begin R8; C:=R8; Dec(Len,2); End;
+  If (C And $E0)=$20 Then Begin
+   Inc(P,4); Dec(Len,4);
+   If (C And $10)<>0 Then Begin Inc(P,5); Dec(Len,5); End;
+  End Else If (C And $C0)=$80 Then Begin
+   Flags:=R8; Hl:=R8; Dec(Len,2);
+   If Hl>Len Then Begin ErrRedo:=True; Continue; End;
+   Dec(Len,Hl);
+   If (Flags And $80)<>0 Then Begin Inc(P,5); Dec(Hl,5); If (Flags And $40)<>0 Then Begin Inc(P,5); Dec(Hl,5); End; End;
+   If ((Flags And $3F)<>0) And (Hl=0) Then Flags:=Flags And $C0;
+   If (Flags And 1)<>0 Then Begin
+    PesExt:=R8; Dec(Hl);
+    Skip:=(PesExt Shr 4) And $B; Skip:=Skip+(Skip And 9);
+    If ((PesExt And $40)<>0) Or (Skip>Hl) Then Begin PesExt:=0; Skip:=0; End;
+    Inc(P,Skip); Dec(Hl,Skip);
+    If (PesExt And 1)<>0 Then Begin
+     Ext2:=R8; Dec(Hl);
+     If (Ext2 And $7F)>0 Then Begin IdExt:=R8; If (IdExt And $80)=0 Then Sc:=((Sc And $FF) Shl 8) Or IdExt; Dec(Hl); End;
+    End;
+   End;
+   If Hl<0 Then Begin ErrRedo:=True; Continue; End;
+   Inc(P,Hl);
+  End Else If C<>$F Then Continue;
+  If Sc=$1BD Then Begin
+   Sc:=R8; Dec(Len);
+  End;
+  If Len<0 Then Begin ErrRedo:=True; Continue; End;
+  Code:=Sc; VobReadPes:=True; Exit;
+ End;
+End;
+
+{ assemble le paquet SPU commencant en Pos; PSize = octets alloues jusqu'au prochain paquet }
+Function VobReadPacket(F: PEABuffer; Size: LongInt; Pos,PSize,StreamId: LongInt; Buf: PEABuffer; Var Len: LongInt): Boolean;
+Var P,OldPos,NewPos,Total,Ret,Code,N,Pk: LongInt;
+Begin
+ P:=Pos; Total:=0; Len:=0; VobReadPacket:=False;
+ Repeat
+  OldPos:=P;
+  If Not VobReadPes(F,Size,P,Code,Ret) Then Begin
+   If Len>0 Then Break;
+   Exit;
+  End;
+  NewPos:=P; Pk:=Ret+(NewPos-OldPos);
+  If Total+Pk>PSize Then Break;
+  Inc(Total,Pk);
+  If (Code And $1F)<>StreamId Then Break;
+  N:=Ret And $FFFF;
+  If N>Size-P Then N:=Size-P;
+  If N>0 Then Begin Move(F^[P],Buf^[Len],N); Inc(Len,N); End;
+  Inc(P,Ret And $FFFF);
+ Until Total>=PSize;
+ VobReadPacket:=True;
+End;
+
+Type TVobEnt=Record Ts: Int64; Pos: LongInt; End;
+Var VobEnts: Array[0..19999] Of TVobEnt; VobN,VobSid: LongInt;
+
+Procedure VobParseIdx(F: PEABuffer; Size: LongInt);
+Var P,K,Stream,Cur,FirstStream,Hh,Mm,Ss,Ms,Code,I: LongInt; Line,Hdr,T: String; Delay,Ts: Int64; Pos: Int64; HeaderParsed: Boolean; Sign: LongInt;
+Begin
+ P:=0; Stream:=-1; Cur:=-1; FirstStream:=-1; Delay:=0; Hdr:=''; HeaderParsed:=False; VobN:=0;
+ While P<Size Do Begin
+  K:=P; While (K<Size) And (F^[K]<>10) And (F^[K]<>13) Do Inc(K);
+  Line:=''; For I:=P To K-1 Do If Length(Line)<250 Then Line:=Line+Chr(F^[I]);
+  While (K<Size) And ((F^[K]=10) Or (F^[K]=13)) Do Inc(K);
+  P:=K;
+  If Copy(Line,1,3)='id:' Then Begin
+   T:=Copy(Line,XSPos(', index:',Line)+8,20); Val(XSTrim(T),Stream,Code);
+   If (XSPos(', index:',Line)=0) Or (Code<>0) Then Stream:=0;
+   HeaderParsed:=True;
+  End Else If Copy(Line,1,10)='timestamp:' Then Begin
+   If Stream<0 Then Fail('vobsub: timestamp avant tout flux.');
+   T:=XSTrim(Copy(Line,11,200));
+   { hh:mm:ss:mmm, filepos: hhhhhhhhh }
+   Val(Copy(T,1,2),Hh,Code); If Code<>0 Then Fail('vobsub: ligne timestamp incorrecte.');
+   Val(Copy(T,4,2),Mm,Code); If Code<>0 Then Fail('vobsub: ligne timestamp incorrecte.');
+   Val(Copy(T,7,2),Ss,Code); If Code<>0 Then Fail('vobsub: ligne timestamp incorrecte.');
+   Val(Copy(T,10,3),Ms,Code); If Code<>0 Then Fail('vobsub: ligne timestamp incorrecte.');
+   I:=XSPos('filepos:',T); If I=0 Then Fail('vobsub: ligne timestamp incorrecte.');
+   T:=XSTrim(Copy(T,I+8,40)); Val('$'+T,Pos,Code); If Code<>0 Then Fail('vobsub: filepos incorrect.');
+   Ts:=(Int64(Hh)*3600+Mm*60+Ss)*1000+Ms+Delay;
+   If FirstStream<0 Then Begin FirstStream:=Stream; VobSid:=Stream; End;
+   If Stream=FirstStream Then Begin
+    If VobN>=20000 Then Fail('vobsub: trop de sous-titres.');
+    VobEnts[VobN].Ts:=Ts; VobEnts[VobN].Pos:=Pos; Inc(VobN);
+   End;
+  End Else If Copy(Line,1,4)='alt:' Then HeaderParsed:=True
+  Else If Copy(Line,1,6)='delay:' Then Begin
+   T:=XSTrim(Copy(Line,7,100)); Sign:=1;
+   If (T<>'') And ((T[1]='-') Or (T[1]='+')) Then Begin If T[1]='-' Then Sign:=-1; Delete(T,1,1); End;
+   Hh:=0; Mm:=0; Ss:=0; Ms:=0;
+   I:=XSPos(':',T); If I>0 Then Begin Val(Copy(T,1,I-1),Hh,Code); Delete(T,1,I); End Else Begin Val(T,Hh,Code); T:=''; End;
+   I:=XSPos(':',T); If I>0 Then Begin Val(Copy(T,1,I-1),Mm,Code); Delete(T,1,I); End Else If T<>'' Then Begin Val(T,Mm,Code); T:=''; End;
+   I:=XSPos(':',T); If I>0 Then Begin Val(Copy(T,1,I-1),Ss,Code); Delete(T,1,I); End Else If T<>'' Then Begin Val(T,Ss,Code); T:=''; End;
+   If T<>'' Then Val(T,Ms,Code);
+   Delay:=((Int64(Hh)*3600+Mm*60+Ss)*1000+Ms)*Sign;
+  End Else If Copy(Line,1,8)='langidx:' Then
+  Else If Not HeaderParsed Then Begin
+   If (Line<>'') And (Line[1]<>'#') Then DSUParseExtra(Line+#10);
+  End;
+ End;
+End;
+
+{ ---- DVD subtitles: encodeur (libavcodec/dvdsubenc.c) ---- }
+Function DSUColorDist(A,B: Int64): Int64;
+Var R,D,Aa,Ab: Int64; Sh: LongInt;
+Begin
+ R:=0; Aa:=8; Ab:=8;
+ For Sh:=3 DownTo 0 Do Begin
+  D:=Aa*((A Shr (Sh*8)) And $FF)-Ab*((B Shr (Sh*8)) And $FF);
+  R:=R+D*D; Aa:=A Shr 28; Ab:=B Shr 28;
+ End;
+ DSUColorDist:=R;
+End;
+
+Var DSUQ: LongInt; DSUNc: LongInt; DSUBb: LongInt; DSUOut: PEABuffer;
+
+Procedure DSUPutNibble(V: LongInt);
+Begin
+ If (DSUNc And 1)<>0 Then Begin DSUOut^[DSUQ]:=(DSUBb Or (V And 15)) And 255; Inc(DSUQ); End
+ Else DSUBb:=(V And 15) Shl 4;
+ Inc(DSUNc);
+End;
+
+Procedure DSUEncodeRle(Bitmap: PEABuffer; Linesize,W,H: LongInt; Const Cmap: Array Of LongInt);
+Var X,Y,Len,Color,Base: LongInt;
+Begin
+ For Y:=0 To H-1 Do Begin
+  DSUNc:=0; Base:=Y*Linesize; X:=0;
+  While X<W Do Begin
+   Color:=Bitmap^[Base+X]; Len:=1;
+   While (X+Len<W) And (Bitmap^[Base+X+Len]=Color) Do Inc(Len);
+   Color:=Cmap[Color];
+   If Len<4 Then DSUPutNibble((Len Shl 2) Or Color)
+   Else If Len<16 Then Begin DSUPutNibble(Len Shr 2); DSUPutNibble((Len Shl 2) Or Color); End
+   Else If Len<64 Then Begin DSUPutNibble(0); DSUPutNibble(Len Shr 2); DSUPutNibble((Len Shl 2) Or Color); End
+   Else If X+Len=W Then Begin DSUPutNibble(0); DSUPutNibble(0); DSUPutNibble(0); DSUPutNibble(Color); End
+   Else Begin
+    If Len>255 Then Len:=255;
+    DSUPutNibble(0); DSUPutNibble(Len Shr 6); DSUPutNibble(Len Shr 2); DSUPutNibble((Len Shl 2) Or Color);
+   End;
+   Inc(X,Len);
+  End;
+  If (DSUNc And 1)<>0 Then DSUPutNibble(0);
+ End;
+End;
+
+{ encode l'evenement E en paquet SPU; retourne la taille, ou 0 si impossible }
+Function DSUEncode(E: PXSEv; Out: PEABuffer; StartDisp,EndDisp: Int64): LongInt;
+Var
+ Hits: Array[0..32] Of Int64; Count: Array[0..255] Of Int64; Selected: Array[0..3] Of LongInt; Pseudo: Array[0..32] Of Int64;
+ OutPal,OutAlpha: Array[0..3] Of LongInt; Cmap: Array[0..255] Of LongInt; Pp4: Array[0..3] Of Int64;
+ I,J,K,Match,BestJ,Bright,Mult,X2,Y2,T,Vx,Vy,Vw,Vh,Xmin,Ymin,Xmax,Ymax,Px,Py: LongInt; Color,BestD,D: Int64;
+ Ref: Array[0..2] Of Int64; Off1,Off2: LongInt; R: PXSRect; Vdata: PEABuffer; Single: PEABuffer;
+Procedure P16(V: LongInt);Begin Out^[DSUQ]:=(V Shr 8) And 255; Out^[DSUQ+1]:=V And 255; Inc(DSUQ,2); End;
+Procedure P8(V: LongInt);Begin Out^[DSUQ]:=V And 255; Inc(DSUQ); End;
+Procedure BuildMap(Rc: PXSRect);
+Var A,B: LongInt;
+Begin
+ For A:=0 To 3 Do Pp4[A]:=(Int64(OutAlpha[A]) Shl 24) Or DSUDefPal[OutPal[A]];
+ For A:=0 To 255 Do Begin
+  BestD:=High(Int64); Cmap[A]:=0;
+  For B:=0 To 3 Do Begin
+   D:=DSUColorDist(Pp4[B],Rc^.Pal[A] And $FFFFFFFF);
+   If D<BestD Then Begin Cmap[A]:=B; BestD:=D; End;
+  End;
+ End;
+End;
+Begin
+ DSUEncode:=0;
+ If E^.NR=0 Then Exit;
+ FillChar(Hits,SizeOf(Hits),0);
+ R:=E^.Rc[0]; Vx:=R^.X; Vy:=R^.Y; Vw:=R^.W; Vh:=R^.H;
+ If E^.NR>1 Then Begin
+  Xmin:=R^.X; Xmax:=Xmin+R^.W; Ymin:=R^.Y; Ymax:=Ymin+R^.H;
+  For I:=1 To E^.NR-1 Do Begin
+   If E^.Rc[I]^.X<Xmin Then Xmin:=E^.Rc[I]^.X; If E^.Rc[I]^.Y<Ymin Then Ymin:=E^.Rc[I]^.Y;
+   If E^.Rc[I]^.X+E^.Rc[I]^.W>Xmax Then Xmax:=E^.Rc[I]^.X+E^.Rc[I]^.W;
+   If E^.Rc[I]^.Y+E^.Rc[I]^.H>Ymax Then Ymax:=E^.Rc[I]^.Y+E^.Rc[I]^.H;
+  End;
+  Vx:=Xmin; Vy:=Ymin; Vw:=Xmax-Xmin; Vh:=Ymax-Ymin;
+  Hits[0]:=Int64(Vw)*Vh;
+  For I:=0 To E^.NR-1 Do Hits[0]:=Hits[0]-Int64(E^.Rc[I]^.W)*E^.Rc[I]^.H;
+ End;
+ For K:=0 To E^.NR-1 Do Begin
+  R:=E^.Rc[K];
+  FillChar(Count,SizeOf(Count),0);
+  For I:=0 To R^.W*R^.H-1 Do Inc(Count[R^.Bmp^[I]]);
+  For I:=0 To 255 Do Begin
+   If Count[I]=0 Then Continue;
+   Color:=R^.Pal[I] And $FFFFFFFF;
+   If Color<$33000000 Then Match:=0 Else If Color<$CC000000 Then Match:=1 Else Match:=17;
+   If Match<>0 Then Begin
+    BestD:=High(Int64); BestJ:=0;
+    For J:=0 To 15 Do Begin
+     D:=DSUColorDist($FF000000 Or Color,$FF000000 Or DSUDefPal[J]);
+     If D<BestD Then Begin BestD:=D; BestJ:=J; End;
+    End;
+    Inc(Match,BestJ);
+   End;
+   Inc(Hits[Match],Count[I]);
+  End;
+ End;
+ { select_palette }
+ FillChar(Selected,SizeOf(Selected),0);
+ Hits[0]:=Hits[0]*16;
+ For I:=0 To 15 Do Begin
+  If (Hits[1+I]+Hits[17+I])=0 Then Continue;
+  Color:=DSUDefPal[I]; Bright:=0;
+  For J:=0 To 2 Do Begin
+   If ((Color And $FF)<$40) Or ((Color And $FF)>=$C0) Then Inc(Bright);
+   Color:=Color Shr 8;
+  End;
+  If Bright>2 Then Mult:=4 Else Mult:=2+Bright;
+  Hits[1+I]:=Hits[1+I]*Mult; Hits[17+I]:=Hits[17+I]*Mult;
+ End;
+ For I:=0 To 3 Do Begin
+  For J:=0 To 32 Do If Hits[J]>Hits[Selected[I]] Then Selected[I]:=J;
+  Hits[Selected[I]]:=0;
+ End;
+ FillChar(Pseudo,SizeOf(Pseudo),0);
+ For I:=0 To 15 Do Begin
+  Pseudo[1+I]:=$80000000 Or DSUDefPal[I]; Pseudo[17+I]:=Int64($FF000000) Or DSUDefPal[I];
+ End;
+ Ref[0]:=0; Ref[1]:=$FFFFFFFF; Ref[2]:=$FF000000;
+ For I:=0 To 2 Do Begin
+  BestD:=DSUColorDist(Ref[I],Pseudo[Selected[I]]);
+  For J:=I+1 To 3 Do Begin
+   D:=DSUColorDist(Ref[I],Pseudo[Selected[J]]);
+   If D<BestD Then Begin T:=Selected[I]; Selected[I]:=Selected[J]; Selected[J]:=T; BestD:=D; End;
+  End;
+ End;
+ For I:=0 To 3 Do Begin
+  If Selected[I]<>0 Then OutPal[I]:=(Selected[I]-1) And 15 Else OutPal[I]:=0;
+  If Selected[I]=0 Then OutAlpha[I]:=0 Else If Selected[I]<17 Then OutAlpha[I]:=$80 Else OutAlpha[I]:=$FF;
+ End;
+ Vdata:=Nil; Single:=Nil;
+ If E^.NR>1 Then Begin
+  If (Vw<1) Or (Vh<1) Or (Int64(Vw)*Vh>16000000) Then Exit;
+  GetMem(Vdata,Vw*Vh+64); FillChar(Vdata^,Vw*Vh+64,0);
+  For K:=0 To E^.NR-1 Do Begin
+   R:=E^.Rc[K]; BuildMap(R);
+   For Py:=0 To R^.H-1 Do For Px:=0 To R^.W-1 Do
+    Vdata^[(R^.X-Vx+Px)+(R^.Y-Vy+Py)*Vw]:=Cmap[R^.Bmp^[Py*R^.W+Px]];
+  End;
+  For I:=0 To 3 Do Cmap[I]:=I;
+  Single:=Vdata;
+ End Else Begin
+  BuildMap(E^.Rc[0]); Single:=E^.Rc[0]^.Bmp;
+ End;
+ DSUOut:=Out; DSUQ:=4; Off1:=DSUQ;
+ If Vw*Vh Div 2+17+21+4>65000 Then Begin If Vdata<>Nil Then FreeMem(Vdata,Vw*Vh+64); Exit; End;
+ DSUEncodeRle(Single,Vw*2,Vw,(Vh+1) Shr 1,Cmap);
+ Off2:=DSUQ;
+ DSUEncodeRle(PEABuffer(@Single^[Vw]),Vw*2,Vw,Vh Shr 1,Cmap);
+ If Vdata<>Nil Then FreeMem(Vdata,Vw*Vh+64);
+ Out^[2]:=(DSUQ Shr 8) And 255; Out^[3]:=DSUQ And 255;
+ P16((StartDisp*90) Shr 10);
+ P16(DSUQ+8+12+2);
+ P8($03); P8((OutPal[3] Shl 4) Or OutPal[2]); P8((OutPal[1] Shl 4) Or OutPal[0]);
+ P8($04); P8((OutAlpha[3] And $F0) Or (OutAlpha[2] Shr 4)); P8((OutAlpha[1] And $F0) Or (OutAlpha[0] Shr 4));
+ X2:=Vx+Vw-1; Y2:=Vy+Vh-1;
+ If ((XSW>0) And (X2>XSW)) Or ((XSH>0) And (Y2>XSH)) Then Exit;
+ P8($05);
+ P8(Vx Shr 4); P8((Vx Shl 4) Or ((X2 Shr 8) And $F)); P8(X2);
+ P8(Vy Shr 4); P8((Vy Shl 4) Or ((Y2 Shr 8) And $F)); P8(Y2);
+ P8($06); P16(Off1); P16(Off2);
+ If E^.Forced Then P8($00) Else P8($01);
+ P8($FF);
+ P16((EndDisp*90) Shr 10);
+ P16(DSUQ-2);
+ P8($02); P8($FF);
+ Out^[0]:=(DSUQ Shr 8) And 255; Out^[1]:=DSUQ And 255;
+ DSUEncode:=DSUQ;
+End;
+
+{ ---- ecriture VobSub ---- }
+Procedure XSPutPts(B: PEABuffer; At: LongInt; Pts: Int64; Marker: LongInt);
+Begin
+ B^[At]:=(Marker Shl 4) Or (((Pts Shr 30) And 7) Shl 1) Or 1;
+ B^[At+1]:=(Pts Shr 22) And $FF;
+ B^[At+2]:=(((Pts Shr 15) And $7F) Shl 1) Or 1;
+ B^[At+3]:=(Pts Shr 7) And $FF;
+ B^[At+4]:=((Pts And $7F) Shl 1) Or 1;
+End;
+
+Procedure XSHex(V: Int64; N: LongInt; Var S: String);
+Const Hx: String[16]='0123456789abcdef';
+Var I: LongInt;
+Begin
+ S:=''; For I:=N-1 DownTo 0 Do S:=S+Hx[((V Shr (I*4)) And 15)+1];
+End;
+
+Function XS2(V: LongInt): String;
+Var S: String;
+Begin Str(V,S); While Length(S)<2 Do S:='0'+S; XS2:=S; End;
+
+Procedure XSWriteStr(Const S: String);
+Var B: Array[0..255] Of Byte; I: LongInt;
+Begin
+ For I:=1 To Length(S) Do B[I-1]:=Ord(S[I]);
+ WriteBytes(B,Length(S));
+End;
+
+Procedure XSWriteVobSub(Const IdxName: String);
+Var
+ SubName,Hdr,Line,Ts: String; Spu: PEABuffer; Sec: PEABuffer; I,J,Len,N,Cap,Pos,Fill,Sp,Spare,Stuff,Hl,PesLen,K: LongInt; Pts: Int64; Filepos: Int64;
+ Fp: Array[0..19999] Of LongInt; T0: Int64; Ok: Boolean; Ext: String; Code: Integer; F: File;
+ Hh,Mm,Ss,Ms: LongInt; S1: String; Pack: Array[0..13] Of Byte;
+Const PackH: Array[0..13] Of Byte=(0,0,1,$BA,$44,0,4,0,4,1,1,$89,$C3,$F8);
+Begin
+ If Length(IdxName)<5 Then Fail('vobsub: nom de fichier .idx requis.');
+ Ext:=Copy(IdxName,Length(IdxName)-2,3);
+ If Ext='IDX' Then SubName:=Copy(IdxName,1,Length(IdxName)-3)+'SUB' Else SubName:=Copy(IdxName,1,Length(IdxName)-3)+'sub';
+ If Copy(IdxName,Length(IdxName)-3,1)<>'.' Then Fail('vobsub: le nom de sortie doit etre de la forme nom.idx.');
+ If Exists(SubName) And Not Overwrite Then Fail('Sortie existante (utiliser -y): '+SubName);
+ GetMem(Spu,70000); GetMem(Sec,2048+64);
+ OpenWrite(SubName);
+ Pos:=0;
+ For I:=0 To XSN-1 Do Begin
+  Len:=DSUEncode(XSEvs[I],Spu,0,XSEvs[I]^.T1-XSEvs[I]^.T0);
+  If Len=0 Then Fail('sous-titre DVD: evenement trop grand ou hors de la toile.');
+  Fp[I]:=Pos; Pts:=XSEvs[I]^.T0*90; Sp:=0;
+  While Sp<Len Do Begin
+   FillChar(Sec^,2048,0);
+   Move(PackH,Sec^,14);
+   If Sp=0 Then Cap:=2019 Else Cap:=2024;
+   N:=Len-Sp; If N>Cap Then N:=Cap;
+   Spare:=Cap-N; Stuff:=0;
+   If (Spare>=1) And (Spare<=5) Then Stuff:=Spare;
+   If Sp=0 Then Hl:=5+Stuff Else Hl:=Stuff;
+   PesLen:=3+Hl+1+N;
+   Sec^[14]:=0; Sec^[15]:=0; Sec^[16]:=1; Sec^[17]:=$BD;
+   Sec^[18]:=PesLen Shr 8; Sec^[19]:=PesLen And 255;
+   Sec^[20]:=$81; If Sp=0 Then Sec^[21]:=$80 Else Sec^[21]:=0;
+   Sec^[22]:=Hl;
+   K:=23;
+   If Sp=0 Then Begin XSPutPts(Sec,K,Pts,2); Inc(K,5); End;
+   For J:=1 To Stuff Do Begin Sec^[K]:=$FF; Inc(K); End;
+   Sec^[K]:=$20; Inc(K);
+   Move(Spu^[Sp],Sec^[K],N); Inc(K,N); Inc(Sp,N);
+   Fill:=2048-K;
+   If Fill>=6 Then Begin
+    Sec^[K]:=0; Sec^[K+1]:=0; Sec^[K+2]:=1; Sec^[K+3]:=$BE; Sec^[K+4]:=(Fill-6) Shr 8; Sec^[K+5]:=(Fill-6) And 255;
+    FillChar(Sec^[K+6],Fill-6,$FF);
+   End;
+   WriteBytes(Sec^,2048); Inc(Pos,2048);
+  End;
+ End;
+ FreeMem(Spu,70000); FreeMem(Sec,2048+64);
+ CloseWrite;
+ OpenWrite(IdxName);
+ XSWriteStr('# VobSub index file, v7 (do not modify this line!)'+#10+'#'+#10);
+ Str(XSW,S1); Line:='size: '+S1+'x'; Str(XSH,S1); Line:=Line+S1+#10;
+ XSWriteStr(Line);
+ XSWriteStr('org: 0, 0'+#10+'scale: 100%, 100%'+#10+'alpha: 100%'+#10+'smooth: OFF'+#10+'fadein/out: 0, 0'+#10+'align: OFF at LEFT TOP'+#10+'time offset: 0'+#10+'forced subs: OFF'+#10);
+ Line:='palette: ';
+ For I:=0 To 15 Do Begin XSHex(DSUDefPal[I],6,S1); Line:=Line+S1; If I<15 Then Line:=Line+', '; End;
+ XSWriteStr(Line+#10);
+ XSWriteStr('custom colors: OFF, tridx: 0000, colors: 000000, 000000, 000000, 000000'+#10+'langidx: 0'+#10+'id: en, index: 0'+#10);
+ XSWriteStr('# Decomment next line to activate alternative name in DirectVobSub / Windows Media Player 6.x'+#10+'# alt: English'+#10);
+ For I:=0 To XSN-1 Do Begin
+  T0:=XSEvs[I]^.T0; Ms:=T0 Mod 1000; T0:=T0 Div 1000; Ss:=T0 Mod 60; T0:=T0 Div 60; Mm:=T0 Mod 60; Hh:=T0 Div 60;
+  Line:='timestamp: '+XS2(Hh)+':'+XS2(Mm)+':'+XS2(Ss)+':';
+  Str(Ms,S1); While Length(S1)<3 Do S1:='0'+S1; Line:=Line+S1+', filepos: ';
+  XSHex(Fp[I],9,S1); Line:=Line+S1+#10;
+  XSWriteStr(Line);
+ End;
+ CloseWrite;
+End;
+
+{ ---- manifeste .psub et fonctions de haut niveau ---- }
+Function XSDirOf(Const Name: String): String;
+Var I: LongInt;
+Begin
+ I:=Length(Name); While (I>0) And (Name[I]<>'/') And (Name[I]<>'\') Do Dec(I);
+ XSDirOf:=Copy(Name,1,I);
+End;
+
+Function XSBaseNoExt(Const Name: String): String;
+Var I,J: LongInt;
+Begin
+ I:=Length(Name); J:=I;
+ While (J>0) And (Name[J]<>'.') And (Name[J]<>'/') And (Name[J]<>'\') Do Dec(J);
+ If (J>0) And (Name[J]='.') Then XSBaseNoExt:=Copy(Name,1,J-1) Else XSBaseNoExt:=Name;
+End;
+
+Function XSFileOf(Const Name: String): String;
+Var I: LongInt;
+Begin
+ I:=Length(Name); While (I>0) And (Name[I]<>'/') And (Name[I]<>'\') Do Dec(I);
+ XSFileOf:=Copy(Name,I+1,255);
+End;
+
+{ ecrit manifeste + PNG (nom_0001.png ...) }
+Procedure XSWritePsub(Const Target: String);
+Var I: LongInt; Base,Fn,Line,S1: String;
+Begin
+ If XSN=0 Then Fail('sous-titres: aucun evenement decode.');
+ Base:=XSBaseNoExt(Target);
+ For I:=0 To XSN-1 Do Begin
+  Str(I+1,S1); While Length(S1)<4 Do S1:='0'+S1;
+  Fn:=Base+'_'+S1+'.png';
+  If Exists(Fn) And Not Overwrite Then Fail('Sortie existante (utiliser -y): '+Fn);
+  XSWriteEventPNG(XSEvs[I],Fn);
+ End;
+ OpenWrite(Target);
+ Str(XSW,S1); Line:='PNGSUB 1'+#10+'size '+S1+' '; Str(XSH,S1); Line:=Line+S1+#10;
+ XSWriteStr(Line);
+ For I:=0 To XSN-1 Do Begin
+  Str(I+1,S1); While Length(S1)<4 Do S1:='0'+S1;
+  Fn:=XSFileOf(Base)+'_'+S1+'.png';
+  XSWriteStr('sub '+XSTimeStr(XSEvs[I]^.T0)+' '+XSTimeStr(XSEvs[I]^.T1)+' '+Fn+#10);
+ End;
+ CloseWrite;
+ For I:=0 To XSN-1 Do Begin
+  WriteLn('Sous-titre ',I+1,': ',XSTimeStr(XSEvs[I]^.T0),' -> ',XSTimeStr(XSEvs[I]^.T1),'  rectangles: ',XSEvs[I]^.NR);
+ End;
+End;
+
+Procedure XSLoadPsub(Const Source: String);
+Var F: PEABuffer; Size,P,K,I,W,H,Code,Q: LongInt; Line,Dir,Tok,Fn: String; T0,T1: Int64; Rgba: PEABuffer; E: PXSEv; Parts: Array[0..3] Of String;
+Begin
+ NVLoad(Source,F,Size); CloseRead; Dir:=XSDirOf(Source); P:=0; XSN:=0; XSW:=0; XSH:=0;
+ While P<Size Do Begin
+  K:=P; While (K<Size) And (F^[K]<>10) And (F^[K]<>13) Do Inc(K);
+  Line:=''; For I:=P To K-1 Do If Length(Line)<250 Then Line:=Line+Chr(F^[I]);
+  While (K<Size) And ((F^[K]=10) Or (F^[K]=13)) Do Inc(K);
+  P:=K;
+  Line:=XSTrim(Line);
+  If (Line='') Or (Line[1]='#') Then Continue;
+  If Copy(Line,1,6)='PNGSUB' Then Continue;
+  If Copy(Line,1,5)='size ' Then Begin
+   Q:=XSPos(' ',Copy(Line,6,100)); Tok:=XSTrim(Copy(Line,6,100));
+   Q:=XSPos(' ',Tok);
+   If Q=0 Then Fail('psub: ligne size incorrecte.');
+   Val(Copy(Tok,1,Q-1),XSW,Code); If Code<>0 Then Fail('psub: ligne size incorrecte.');
+   Val(XSTrim(Copy(Tok,Q+1,20)),XSH,Code); If Code<>0 Then Fail('psub: ligne size incorrecte.');
+   Continue;
+  End;
+  If Copy(Line,1,4)='sub ' Then Begin
+   Line:=XSTrim(Copy(Line,5,250));
+   For I:=0 To 2 Do Begin
+    Q:=XSPos(' ',Line);
+    If Q=0 Then Begin Parts[I]:=Line; Line:=''; End Else Begin Parts[I]:=Copy(Line,1,Q-1); Line:=XSTrim(Copy(Line,Q+1,250)); End;
+   End;
+   If Not XSParseTime(Parts[0],T0) Or Not XSParseTime(Parts[1],T1) Or (Parts[2]='') Then Fail('psub: ligne sub incorrecte (sub hh:mm:ss.mmm hh:mm:ss.mmm fichier.png).');
+   If T1<T0 Then Fail('psub: fin avant debut.');
+   Fn:=Parts[2];
+   XSReadPNG(Dir+Fn,W,H,Rgba);
+   If XSW=0 Then Begin XSW:=W; XSH:=H; End;
+   If (W<>XSW) Or (H<>XSH) Then Fail('psub: toutes les images doivent avoir la taille size ('+Fn+').');
+   E:=XSEventFromRGBA(Rgba,W,H,T0,T1);
+   FreeMem(Rgba,W*H*4+64);
+   If E=Nil Then WriteLn('Image entierement transparente ignoree: ',Fn);
+   Continue;
+  End;
+  Fail('psub: ligne inconnue: '+Line);
+ End;
+ FreeMem(F,Size+64);
+ If XSN=0 Then Fail('psub: aucun sous-titre.');
+End;
+
+Procedure XSLoadVobSub(Const Source: String);
+Var
+ Idx,Sb: PEABuffer; IdxSize,SubSize,I,J,Len,Ps,NameLen: LongInt; SubName,Ext: String; Pk: PEABuffer; Order: Array[0..19999] Of LongInt; T: LongInt;
+Begin
+ NameLen:=Length(Source);
+ If (NameLen<5) Or (Source[NameLen-3]<>'.') Then Fail('vobsub: nom .idx requis pour deviner le fichier .sub.');
+ Ext:=Copy(Source,NameLen-2,3);
+ If Ext='IDX' Then SubName:=Copy(Source,1,NameLen-3)+'SUB' Else SubName:=Copy(Source,1,NameLen-3)+'sub';
+ If Not Exists(SubName) Then Fail('vobsub: fichier .sub introuvable: '+SubName);
+ NVLoad(Source,Idx,IdxSize); CloseRead;
+ XSW:=720; XSH:=480; DSUHasPal:=False; FillChar(DSUPal,SizeOf(DSUPal),0); FillChar(DSUColormap,SizeOf(DSUColormap),0); FillChar(DSUAlpha,SizeOf(DSUAlpha),0); DSUBufSize:=0;
+ VobParseIdx(Idx,IdxSize);
+ FreeMem(Idx,IdxSize+64);
+ If VobN=0 Then Fail('vobsub: aucun horodatage dans le fichier .idx.');
+ NVLoad(SubName,Sb,SubSize); CloseRead;
+ { tri par position puis horodatage (SUB_SORT_POS_TS) }
+ For I:=0 To VobN-1 Do Order[I]:=I;
+ For I:=1 To VobN-1 Do Begin
+  T:=Order[I]; J:=I-1;
+  While (J>=0) And ((VobEnts[Order[J]].Pos>VobEnts[T].Pos) Or ((VobEnts[Order[J]].Pos=VobEnts[T].Pos) And (VobEnts[Order[J]].Ts>VobEnts[T].Ts))) Do Begin Order[J+1]:=Order[J]; Dec(J); End;
+  Order[J+1]:=T;
+ End;
+ GetMem(Pk,70000);
+ For I:=0 To VobN-1 Do Begin
+  If I<VobN-1 Then Ps:=VobEnts[Order[I+1]].Pos-VobEnts[Order[I]].Pos Else Ps:=SubSize-VobEnts[Order[I]].Pos;
+  If (VobEnts[Order[I]].Pos<0) Or (VobEnts[Order[I]].Pos>=SubSize) Then Continue;
+  Len:=0;
+  If VobReadPacket(Sb,SubSize,VobEnts[Order[I]].Pos,Ps,VobSid,Pk,Len) And (Len>0) Then DSUDecodePacket(Pk,Len,VobEnts[Order[I]].Ts);
+ End;
+ FreeMem(Pk,70000); FreeMem(Sb,SubSize+64);
+End;
+
+{ conversion de sous-titres bitmap: vobsub | psub | dvbsub -> psub | vobsub | dvbsub }
+Procedure XSConvert(Const Source,Target,InFmt,OutFmt: String);
+Begin
+ XSN:=0;
+ If InFmt='vobsub' Then XSLoadVobSub(Source)
+ Else If InFmt='psub' Then XSLoadPsub(Source)
+ Else Fail('sous-titres: format d''entree non pris en charge: '+InFmt);
+ If OutFmt='psub' Then XSWritePsub(Target)
+ Else If OutFmt='vobsub' Then XSWriteVobSub(Target)
+ Else Fail('sous-titres: format de sortie non pris en charge: '+OutFmt);
+ XSReset;
+End;
+
 Var AVSWantBMP: Boolean;
 
 Procedure DecodeAVS(Const Source,Target: String; PNGMode: Boolean);
@@ -27494,6 +28595,8 @@ Begin
  WriteLn(' D  oma             Sony OpenMG (ATRAC3 non chiffre); WAV 0x270 (ATRAC3) vers WAV/MP3/...');
  WriteLn(' DE avi (asv1/asv2) AVI ASUS V1/V2: decodage vers Y4M, encodage Y4M -c:v asv1|asv2');
  WriteLn(' D  dsicin          Delphine Software International CIN (video dsicinvideo PAL8 vers Y4M/PNG/BMP, audio dsicinaudio vers WAV/MP3/...)');
+ WriteLn(' DE vobsub          VobSub (.idx + .sub, sous-titres DVD dvdsub): decodage vers .psub (manifeste + PNG RGBA), encodage depuis .psub');
+ WriteLn(' DE psub            Liste de sous-titres PNG: ligne PNGSUB 1, size L H, puis sub hh:mm:ss.mmm hh:mm:ss.mmm image.png');
  WriteLn(' DE dv              DV (Digital Video) .dv ou AVI dvsd: SD 25 et 50 Mbit/s (NTSC 4:1:1, PAL 4:2:0/4:1:1, DV50 4:2:2), video seule; decodage vers Y4M/PNG/BMP, encodage Y4M -c:v dvvideo (sortie .dv ou AVI)');
  WriteLn(' DE dnxhd           VC3/DNxHD, DNxHR (.dnxhd ou AVI; encodage Y4M progressif: -profile:v dnxhr_lb|sq|hq|hqx|444, ou -b:v en Mbit/s pour DNxHD)');
  WriteLn(' D  avi (cljr, cyuv, cinepak)  AVI Cirrus Logic AccuPak, Creative YUV, Cinepak vers Y4M/PNG/BMP');
@@ -27793,6 +28896,7 @@ BEGIN
    WriteLn('D A    cook            COOK');
    WriteLn('D A    dca             DCA (DTS Coherent Acoustics)');
    WriteLn('DEV    dnxhd           VC3/DNxHD');
+   WriteLn('DES    dvdsub          DVD subtitles');
    WriteLn('D A    dsicinaudio     Delphine Software International CIN audio');
    WriteLn('D V    dsicinvideo     Delphine Software International CIN video');
    WriteLn('DEV    dvvideo         DV (Digital Video)');
@@ -27874,6 +28978,10 @@ BEGIN
   End Else
   If Argument='-4mv' Then Begin
    FourMV:=True;
+  End Else
+  If (Argument='-scodec') Or (Argument='-c:s') Or (Argument='-codec:s') Then Begin
+   If InputPath='' Then Fail('Codec sous-titres attendu apres -i.');
+   SubCodec:=Lower(NextArgument);
   End Else
   If (Argument='-vcodec') Or (Argument='-c:v') Or (Argument='-codec:v') Then Begin
    If InputPath='' Then Fail('Codec video de sortie attendu apres -i.');
@@ -28023,6 +29131,14 @@ BEGIN
    Fail('Decodeur impose: adpcm_ea, adpcm_ea_maxis_xa, adpcm_ea_r1, adpcm_ea_r2, adpcm_ea_r3, adpcm_ea_xas, adpcm_ima_ea_eacs ou adpcm_ima_ea_sead.');
   If (InputFormat='xa') And (InputCodec<>'adpcm_ea_maxis_xa') Then
    Fail('Le conteneur xa exige le decodeur adpcm_ea_maxis_xa.');
+ End;
+ If (InputFormat='vobsub') Or (InputFormat='psub') Or (InputFormat='dvbsub') Then Begin
+  If IsHTTP(InputPath) Or NoVideo Or (VideoCodec<>'') Or (AudioCodec<>'') Or HasBitrate Or HasVideoBitrate Or (RequestedRate<>0) Or
+   (RequestedChannels<>0) Or (VideoFrames<>0) Or (ImageWidth<>0) Or HasCrop Then
+   Fail('Sous-titres bitmap: entree locale, sans option audio/video.');
+  If (SubCodec<>'') And (SubCodec<>'dvdsub') And (SubCodec<>'dvbsub') And (SubCodec<>'copy') Then Fail('Codec sous-titres: dvdsub ou dvbsub.');
+  XSConvert(Intermediate,OutputPath,InputFormat,OutputFormat);
+  Halt(0);
  End;
  NVKind:=0;
  If InputFormat='bethsoftvid' Then NVKind:=1 Else If InputFormat='bfi' Then NVKind:=2 Else If InputFormat='c93' Then NVKind:=3
