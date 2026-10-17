@@ -17113,6 +17113,7 @@ Procedure DecodeH263Raw(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeFLVH263(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeH261Raw(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeH264Raw(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure DecodeH264Mp4(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeFLVScreen(Const Source,Target: String; Mode: LongInt); Forward;
 Function FLVVideoCodec(Const Name: String): LongInt; Forward;
 Function EAVDetect(Const Source: String): LongInt; Forward;
@@ -17130,6 +17131,7 @@ Begin
  Else If Kind=23 Then DecodeFLIC(Source,Target,Mode)
  Else If Kind=30 Then DecodeIdcin(Source,Target,Mode)
  Else If Kind=33 Then DecodeH264Raw(Source,Target,Mode)
+ Else If Kind=34 Then DecodeH264Mp4(Source,Target,Mode)
  Else If Kind=25 Then DecodeGIF(Source,Target,Mode)
  Else If Kind=27 Then DecodeFLVH263(Source,Target,Mode)
  Else If Kind=28 Then DecodeH263Raw(Source,Target,Mode)
@@ -40692,7 +40694,7 @@ Var
  H4NalBuf: PEABuffer; H4NalCap: LongInt;
  H4Mode: LongInt; H4Target: String; H4OutBuf: PEABuffer; H4OutW,H4OutH,H4OutSize: LongInt;
  H4Began: Boolean; H4FpsN,H4FpsD: LongInt;
- H4Timing,H4RateSet,H4PtsAuto: Boolean; H4Start,H4CurDur: Int64;
+ H4Timing,H4RateSet,H4PtsAuto: Boolean; H4Start,H4CurDur,H4Floor: Int64;
  H4FramesOut: LongInt;
  H4PicOpen: Boolean;            { une image est en cours de decodage }
  H4PicSeqW,H4PicSeqH: LongInt;
@@ -40774,7 +40776,7 @@ Begin
  If H4Timing Then Begin
   If H4PtsAuto Then CFSync(H4FramesOut,1,NbF,NbP)
   Else Begin
-   If P^.Pts<H4Start Then Exit;
+   If P^.Pts<H4Floor Then Exit;
    CFSync(P^.Pts-H4Start,P^.Dur,NbF,NbP);
   End;
   NVEmitN(H4OutBuf,NbP,NbF);
@@ -41594,7 +41596,7 @@ Begin
  For I:=0 To H4MaxPics-1 Do H4Pics[I].Used:=False;
  H4Started:=False; H4PicOpen:=False; H4Began:=False; H4Cur:=-1; H4OutCount:=0; H4FramesOut:=0; H4ErrCount:=0;
  H4PrevPocMsb:=0; H4PrevPocLsb:=0; H4PrevFrameNumOffset:=0; H4FrameNumOffset:=0; H4PrevFrameNum:=0; H4PrevRefFrameNum:=0;
- H4Timing:=False; H4RateSet:=False; H4PtsAuto:=False; H4Start:=0; H4CurDur:=0;
+ H4Floor:=-4000000000000; H4Timing:=False; H4RateSet:=False; H4PtsAuto:=False; H4Start:=0; H4CurDur:=0;
  H4PrevHadMmco5:=False; H4NextId:=1; H4Seq:=0; H4NalBuf:=Nil; H4NalCap:=0; H4SliceTab:=Nil; H4ActSps:=-1; H4MbW:=0; H4MbH:=0;
  H4InitTabs;
 End;
@@ -41740,6 +41742,262 @@ Begin
  CloseRead;
  H4ProbeFile:=H4Probe(B,Sz);
  FreeMem(B,Sz+64);
+End;
+
+{ ---- H.264 dans MP4 / MOV : lecture des tables d'echantillons (ISO 14496-12), pts = dts + ctts, liste d'edition simple ---- }
+Type
+ TH4Trk=Record
+  Kind: LongInt;                       { 1 video, 2 audio, 0 autre }
+  Ts: Int64; Fcc: String[4];
+  Stts,Ctts,Stsz,Stsc,Stco,Elst: LongInt;
+  SttsN,CttsN,SzN,ScN,CoN,ElN,FixedSz,ElVer: LongInt;
+  CttsVer: LongInt; Co64: Boolean;
+  Avcc,AvccLen: LongInt;
+ End;
+Var
+ M4F: PEABuffer; M4Size: LongInt;
+ M4Trk: Array[0..15] Of TH4Trk; M4NT: LongInt;
+ M4MovieTs: Int64;
+
+Function M4U32(At: LongInt): Int64;
+Begin
+ If (At<0) Or (At+4>M4Size) Then M4U32:=0
+ Else M4U32:=(Int64(M4F^[At]) Shl 24) Or (Int64(M4F^[At+1]) Shl 16) Or (Int64(M4F^[At+2]) Shl 8) Or M4F^[At+3];
+End;
+Function M4S32(At: LongInt): LongInt;
+Var V: Int64;
+Begin
+ V:=M4U32(At); If V>=2147483648 Then V:=V-4294967296; M4S32:=V;
+End;
+Function M4U64(At: LongInt): Int64;
+Begin M4U64:=(M4U32(At) Shl 32) Or M4U32(At+4); End;
+Function M4Tag(At: LongInt): String;
+Var I: LongInt; S: String;
+Begin
+ S:='';
+ For I:=0 To 3 Do If (At+I>=0) And (At+I<M4Size) Then S:=S+Chr(M4F^[At+I]);
+ M4Tag:=S;
+End;
+{ cherche la prochaine boite de type Name dans [Start,Fin) ; P0..P1 = contenu ; Next = position suivante }
+Function M4Find(Start,Fin: LongInt; Const Name: String; Var P0,P1,Next: LongInt): Boolean;
+Var At,Hdr: LongInt; Sz: Int64;
+Begin
+ M4Find:=False; At:=Start;
+ If Fin>M4Size Then Fin:=M4Size;
+ While At+8<=Fin Do Begin
+  Sz:=M4U32(At); Hdr:=8;
+  If Sz=1 Then Begin Sz:=M4U64(At+8); Hdr:=16; End
+  Else If Sz=0 Then Sz:=Fin-At;
+  If (Sz<Hdr) Or (At+Sz>Fin) Then Begin
+   If (Sz>=Hdr) And (At+Sz>Fin) Then Sz:=Fin-At Else Exit;
+  End;
+  If M4Tag(At+4)=Name Then Begin P0:=At+Hdr; P1:=At+Sz; Next:=At+Sz; M4Find:=True; Exit; End;
+  At:=At+Sz;
+ End;
+End;
+
+Procedure M4ParseTrak(P0,P1: LongInt);
+Var T: TH4Trk; A0,A1,Nx,B0,B1,C0,C1,D0,D1,E0,E1,Ver,Cnt: LongInt;
+Begin
+ FillChar(T,SizeOf(T),0); T.Stts:=-1; T.Ctts:=-1; T.Stsz:=-1; T.Stsc:=-1; T.Stco:=-1; T.Elst:=-1; T.Avcc:=-1;
+ If M4Find(P0,P1,'edts',A0,A1,Nx) Then
+  If M4Find(A0,A1,'elst',B0,B1,Nx) Then Begin
+   T.ElVer:=M4F^[B0]; T.ElN:=M4U32(B0+4); T.Elst:=B0+8;
+  End;
+ If Not M4Find(P0,P1,'mdia',A0,A1,Nx) Then Exit;
+ If M4Find(A0,A1,'mdhd',B0,B1,Nx) Then Begin
+  Ver:=M4F^[B0];
+  If Ver=1 Then T.Ts:=M4U32(B0+20) Else T.Ts:=M4U32(B0+12);
+ End;
+ If M4Find(A0,A1,'hdlr',B0,B1,Nx) Then Begin
+  If M4Tag(B0+8)='vide' Then T.Kind:=1 Else If M4Tag(B0+8)='soun' Then T.Kind:=2;
+ End;
+ If M4Find(A0,A1,'minf',B0,B1,Nx) Then
+  If M4Find(B0,B1,'stbl',C0,C1,Nx) Then Begin
+   If M4Find(C0,C1,'stsd',D0,D1,Nx) Then Begin
+    If M4U32(D0+4)>=1 Then Begin
+     T.Fcc:=Copy(M4Tag(D0+12),1,4);
+     If (T.Kind=1) And (D0+8+86<=D1) Then
+      If M4Find(D0+8+86,D1,'avcC',E0,E1,Nx) Then Begin T.Avcc:=E0; T.AvccLen:=E1-E0; End;
+    End;
+   End;
+   If M4Find(C0,C1,'stts',D0,D1,Nx) Then Begin T.SttsN:=M4U32(D0+4); T.Stts:=D0+8; End;
+   If M4Find(C0,C1,'ctts',D0,D1,Nx) Then Begin T.CttsVer:=M4F^[D0]; T.CttsN:=M4U32(D0+4); T.Ctts:=D0+8; End;
+   If M4Find(C0,C1,'stsz',D0,D1,Nx) Then Begin T.FixedSz:=M4U32(D0+4); T.SzN:=M4U32(D0+8); T.Stsz:=D0+12; End;
+   If M4Find(C0,C1,'stsc',D0,D1,Nx) Then Begin T.ScN:=M4U32(D0+4); T.Stsc:=D0+8; End;
+   If M4Find(C0,C1,'stco',D0,D1,Nx) Then Begin T.CoN:=M4U32(D0+4); T.Stco:=D0+8; End
+   Else If M4Find(C0,C1,'co64',D0,D1,Nx) Then Begin T.CoN:=M4U32(D0+4); T.Stco:=D0+8; T.Co64:=True; End;
+  End;
+ If M4NT<16 Then Begin M4Trk[M4NT]:=T; Inc(M4NT); End;
+End;
+
+Procedure DecodeH264Mp4(Const Source,Target: String; Mode: LongInt);
+Var
+ I,J,K,N,Nx,A0,A1,B0,B1,V,Cnt,Sel,Len,Pos,Chunk,Si,Spc,NextFirst,Nc,SscI,Pr,NalLen,NalSz,E: LongInt;
+ SOff,SSize: PGFArr; SDts,SPts,SDur: PTLArr; Cto: Int64;
+ Dts,Dur: PTLArr; Sz: PGFArr; T: ^TH4Trk; Delay,MediaTime,Shift,Floor_,First,AudioStart: Int64; HaveEdit: Boolean;
+ AvN,AvD,CN,CD: Int64; RN,RD: LongInt; ON,OD: LongInt; SumDur: Int64; MovTs: Int64; G: Int64;
+ Npk: LongInt; Mp: PEABuffer;
+Begin
+ NVLoad(Source,M4F,M4Size);
+ H4InitState;
+ H4Mode:=Mode; H4Target:=Target;
+ M4NT:=0; M4MovieTs:=1000;
+ If Not M4Find(0,M4Size,'moov',A0,A1,Nx) Then Fail('mp4: boite moov introuvable (fichier fragmente non pris en charge).');
+ If M4Find(A0,A1,'mvhd',B0,B1,Nx) Then Begin
+  If M4F^[B0]=1 Then M4MovieTs:=M4U32(B0+20) Else M4MovieTs:=M4U32(B0+12);
+ End;
+ Nx:=A0;
+ While M4Find(Nx,A1,'trak',B0,B1,Nx) Do M4ParseTrak(B0,B1);
+ Sel:=-1;
+ For I:=0 To M4NT-1 Do If (M4Trk[I].Kind=1) And (Sel<0) Then Sel:=I;
+ If Sel<0 Then Fail('mp4: aucune piste video.');
+ T:=@M4Trk[Sel];
+ If (T^.Fcc<>'avc1') And (T^.Fcc<>'avc3') Then Fail('mp4: la piste video n''est pas H.264 (avc1/avc3).');
+ If (T^.Avcc<0) Or (T^.Stts<0) Or (T^.Stsz<0) Or (T^.Stsc<0) Or (T^.Stco<0) Or (T^.Ts<=0) Then Fail('mp4: tables d''echantillons incompletes.');
+ Npk:=T^.SzN;
+ If (Npk<=0) Or (Npk>20000000) Then Fail('mp4: nombre d''echantillons incorrect.');
+ GetMem(SOff,Npk*4+16); GetMem(SSize,Npk*4+16); GetMem(SDts,Npk*8+16); GetMem(SPts,Npk*8+16); GetMem(SDur,Npk*8+16);
+ { tailles }
+ For I:=0 To Npk-1 Do
+  If T^.FixedSz<>0 Then SSize^[I]:=T^.FixedSz Else SSize^[I]:=M4U32(T^.Stsz+I*4);
+ { positions : chunks }
+ Si:=0; SscI:=0;
+ For Chunk:=1 To T^.CoN Do Begin
+  While (SscI+1<T^.ScN) And (M4U32(T^.Stsc+(SscI+1)*12)<=Chunk) Do Inc(SscI);
+  If T^.ScN>0 Then Spc:=M4U32(T^.Stsc+SscI*12+4) Else Spc:=1;
+  If T^.Co64 Then Pos:=M4U64(T^.Stco+(Chunk-1)*8) Else Pos:=M4U32(T^.Stco+(Chunk-1)*4);
+  For J:=1 To Spc Do Begin
+   If Si>=Npk Then Break;
+   SOff^[Si]:=Pos; Inc(Pos,SSize^[Si]); Inc(Si);
+  End;
+ End;
+ If Si<Npk Then Npk:=Si;
+ { temps }
+ I:=0; K:=0; Cto:=0;
+ For N:=0 To T^.SttsN-1 Do Begin
+  Cnt:=M4U32(T^.Stts+N*8); V:=M4U32(T^.Stts+N*8+4);
+  For J:=1 To Cnt Do Begin
+   If I>=Npk Then Break;
+   SDts^[I]:=K; SDur^[I]:=V; Inc(K,V); Inc(I);
+  End;
+ End;
+ If I<Npk Then Npk:=I;
+ If T^.Ctts>=0 Then Begin
+  I:=0;
+  For N:=0 To T^.CttsN-1 Do Begin
+   Cnt:=M4U32(T^.Ctts+N*8); V:=M4S32(T^.Ctts+N*8+4);
+   For J:=1 To Cnt Do Begin If I>=Npk Then Break; SPts^[I]:=V; Inc(I); End;
+  End;
+  For J:=I To Npk-1 Do SPts^[J]:=0;
+ End Else For I:=0 To Npk-1 Do SPts^[I]:=0;
+ { liste d'edition }
+ Delay:=0; MediaTime:=0; HaveEdit:=False;
+ If (T^.Elst>=0) And (T^.ElN>=1) Then Begin
+  K:=0; I:=0;
+  While I<T^.ElN Do Begin
+   If T^.ElVer=1 Then Begin Cnt:=M4U64(T^.Elst+I*20); V:=M4U64(T^.Elst+I*20+8); End
+   Else Begin Cnt:=M4U32(T^.Elst+I*12); V:=M4S32(T^.Elst+I*12+4); End;
+   If V<0 Then Delay:=Delay+(Int64(Cnt)*T^.Ts+M4MovieTs Div 2) Div M4MovieTs
+   Else Begin
+    If K=0 Then Begin MediaTime:=V; HaveEdit:=True; End
+    Else Fail('mp4: liste d''edition a plusieurs segments non prise en charge.');
+    Inc(K);
+   End;
+   Inc(I);
+  End;
+ End;
+ For I:=0 To Npk-1 Do SPts^[I]:=SDts^[I]+SPts^[I]-MediaTime+Delay;
+ Floor_:=-4000000000000;
+ If HaveEdit Then Floor_:=Delay;
+ { cadence }
+ SumDur:=0; For I:=0 To Npk-1 Do Inc(SumDur,SDur^[I]);
+ AvN:=0; AvD:=0;
+ If SumDur>0 Then Begin AvN:=T^.Ts*Npk; AvD:=SumDur; G:=H4Gcd(AvN,AvD); AvN:=AvN Div G; AvD:=AvD Div G; End;
+ If Npk>64 Then Cnt:=64 Else Cnt:=Npk;
+ GetMem(Dts,Cnt*8+16); GetMem(Dur,Cnt*8+16); GetMem(Sz,Cnt*4+16);
+ For I:=0 To Cnt-1 Do Begin Dts^[I]:=SDts^[I]; Dur^[I]:=SDur^[I]; Sz^[I]:=SSize^[I]; End;
+ { SPS/PPS de avcC pour le debit propose par le codec }
+ Mp:=PEABuffer(@M4F^[T^.Avcc]);
+ NalSz:=(Mp^[4] And 3)+1;
+ Pos:=6; N:=Mp^[5] And 31;
+ For I:=1 To N Do Begin
+  Len:=Mp^[Pos]*256+Mp^[Pos+1]; Inc(Pos,2);
+  If Pos+Len>T^.AvccLen Then Fail('mp4: avcC incorrect.');
+  H4HandleNal(PEABuffer(@Mp^[Pos]),Len,0); Inc(Pos,Len);
+ End;
+ If Pos<T^.AvccLen Then Begin
+  N:=Mp^[Pos]; Inc(Pos);
+  For I:=1 To N Do Begin
+   Len:=Mp^[Pos]*256+Mp^[Pos+1]; Inc(Pos,2);
+   If Pos+Len>T^.AvccLen Then Fail('mp4: avcC incorrect.');
+   H4HandleNal(PEABuffer(@Mp^[Pos]),Len,0); Inc(Pos,Len);
+  End;
+ End;
+ CN:=0; CD:=1;
+ For I:=0 To 31 Do If H4Sps[I].Valid Then Begin
+  If (H4Sps[I].TimingInfo<>0) And (H4Sps[I].NumUnitsInTick>0) And (H4Sps[I].TimeScale>0) Then Begin
+   CN:=H4Sps[I].TimeScale; CD:=2*H4Sps[I].NumUnitsInTick; G:=H4Gcd(CN,CD); CN:=CN Div G; CD:=CD Div G;
+  End;
+  Break;
+ End;
+ TLRFrameRate(Dts,Dur,Sz,Cnt,1,T^.Ts,True,AvN,AvD,CN,CD,RN,RD);
+ FreeMem(Dts); FreeMem(Dur); FreeMem(Sz);
+ H4GuessRate(RN,RD,AvN,AvD,CN,CD,ON,OD);
+ H4FpsN:=ON; H4FpsD:=OD; H4RateSet:=True;
+ { depart de la chronologie du fichier }
+ First:=SPts^[0];
+ For I:=1 To Npk-1 Do If (SPts^[I]<First) And (SPts^[I]>=Floor_) Then First:=SPts^[I];
+ If First<Floor_ Then First:=Floor_;
+ AudioStart:=First;
+ If M4NT>1 Then Begin
+  AudioStart:=0;
+  If First<0 Then AudioStart:=First;
+  H4Start:=AudioStart;
+ End Else H4Start:=First;
+ H4Timing:=True; H4PtsAuto:=False; H4Floor:=Floor_;
+ CFTbN:=1; CFTbD:=T^.Ts; CFFn:=ON; CFFd:=OD; CFNext:=0; CFFrameNo:=0; CFHist[0]:=0; CFHist[1]:=0; CFHist[2]:=0; CFLastDropped:=False;
+ CFVscfr:=M4NT=1;
+ { echantillons }
+ For I:=0 To Npk-1 Do Begin
+  If (SOff^[I]<0) Or (SOff^[I]+SSize^[I]>M4Size) Then Break;
+  Pos:=SOff^[I]; E:=Pos+SSize^[I]; H4CurDur:=(T^.Ts*RD+RN Div 2) Div RN;
+  While Pos+NalSz<=E Do Begin
+   NalLen:=0;
+   For J:=0 To NalSz-1 Do NalLen:=NalLen*256+M4F^[Pos+J];
+   Inc(Pos,NalSz);
+   If (NalLen<=0) Or (Pos+NalLen>E) Then Break;
+   H4HandleNal(PEABuffer(@M4F^[Pos]),NalLen,SPts^[I]);
+   Inc(Pos,NalLen);
+   If NVDone Then Break;
+  End;
+  If NVDone Then Break;
+ End;
+ H4FinishPicture; H4Bump(True);
+ If H4Began And Not NVDone Then CFFlush(H4OutBuf);
+ If NVLast<>Nil Then Begin FreeMem(NVLast,NVLastSize); NVLast:=Nil; End;
+ If Not H4Began Then Fail('h264: aucune image decodee.');
+ CloseRead; If NVOpened Then CloseWrite;
+End;
+
+{ la piste video du fichier MP4 est-elle H.264 ? }
+Function H4Mp4Detect(Const Name: String): Boolean;
+Var A0,A1,B0,B1,Nx,Cnt: LongInt; Found: Boolean;
+Begin
+ H4Mp4Detect:=False;
+ NVLoad(Name,M4F,M4Size);
+ M4NT:=0;
+ If M4Find(0,M4Size,'moov',A0,A1,Nx) Then Begin
+  Nx:=A0;
+  While M4Find(Nx,A1,'trak',B0,B1,Nx) Do M4ParseTrak(B0,B1);
+  For Cnt:=0 To M4NT-1 Do
+   If M4Trk[Cnt].Kind=1 Then Begin
+    H4Mp4Detect:=(M4Trk[Cnt].Fcc='avc1') Or (M4Trk[Cnt].Fcc='avc3');
+    Break;
+   End;
+ End;
+ FreeMem(M4F,M4Size+64);
+ CloseRead;
 End;
 { H264-END }
 
@@ -45281,6 +45539,10 @@ BEGIN
  End;
  If (OptPixFmt<>'') And (OptPixFmt<>'yuv420p') Then Fail('-pix_fmt: seul yuv420p est pris en charge.');
  NVAudioOut:=(OutputFormat='wav') Or (OutputFormat='mp3') Or (OutputFormat='ac3') Or (OutputFormat='adx') Or (OutputFormat='aiff');
+ If (InputFormat='mp4') And (NVKind=0) And Not IsHTTP(InputPath) And Not NVAudioOut And Not NoVideo And (VideoCodec<>'copy') And
+  ((OutputFormat='yuv4mpegpipe') Or (OutputFormat='png') Or (OutputFormat='bmp') Or (VideoCodec='png') Or (VideoCodec='bmp') Or (VideoCodec='mpeg4') Or
+  (VideoCodec='mpeg1video') Or (VideoCodec='mpeg2video') Or (VideoCodec='ffv1') Or (VideoCodec='flv') Or FourMV) Then
+  If H4Mp4Detect(Intermediate) Then NVKind:=34;
  If (NVKind<>0) And Not (((NVKind=1) Or (NVKind=2) Or (NVKind=15) Or (NVKind=17) Or (NVKind=22) Or (NVKind=30)) And NVAudioOut) Then Begin
   If NoVideo Or (VideoCodec='copy') Or (AudioCodec<>'') Or HasBitrate Or (RequestedRate<>0) Or
    (RequestedChannels<>0) Or (ImageWidth<>0) Or IsHTTP(InputPath) Then
