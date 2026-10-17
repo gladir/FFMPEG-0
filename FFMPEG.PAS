@@ -3490,7 +3490,7 @@ Var
  HLSListOpen,AllStreams,NoVideo,NoAudio: Boolean;
  VideoCodec: String;
  AspectNum,AspectDen: LongInt;
- AsvTag: String[4]; NVKind,NVSelMode: LongInt; NVAudioOut: Boolean; SubCodec: String;
+ AsvTag: String[4]; OptPixFmt: String[20]; NVKind,NVSelMode: LongInt; NVAudioOut: Boolean; SubCodec: String;
  DNxProfile: String; HasAlbum,FourMV,HasVideoBitrate,HasBFrames,HasVideoTolerance,HasBQuant,HasVideoBuffer,HasComment: Boolean;
  BFrames:Integer;
  VideoBitrate,VideoTolerance,VideoBuffer: LongInt;
@@ -3819,7 +3819,7 @@ Function Probe(Const Name: String): String;
 Var
  B: Array[0..1083] Of Byte;
  N,J,K0: Integer;
- Size,StartPos,TagSize,ADXOffset: LongInt;
+ Size,StartPos,TagSize,ADXOffset,IW,IH,IR: LongInt;
  EASize: Int64;
  Tag: String[4];
 Begin
@@ -3977,6 +3977,17 @@ Begin
  If N>=20 Then If (LongInt(B[0])+LongInt(B[1])*256>=8000) And (LongInt(B[0])+LongInt(B[1])*256<=48000) And
   ((B[10] And $FC)=0) And ((B[11]=99) Or (B[11]=1)) And (B[16]=$AF) And (B[17]=$DE) And (B[18]=0) And
   (B[19]=0) Then Begin Probe:='wsaud'; Exit; End;
+ If (Size>=20+65536+12) And (StartPos=0) And (N>=20) Then Begin
+  { id CIN: pas de signature, controles de plausibilite de libavformat/idcin.c }
+  IH:=B[4]+B[5]*256+B[6]*65536+B[7]*16777216;
+  IR:=LongInt(B[8])+LongInt(B[9])*256+LongInt(B[10])*65536+LongInt(B[11])*16777216;
+  IW:=B[0]+B[1]*256+B[2]*65536+LongInt(B[3])*16777216;
+  If (IW>=1) And (IW<=1024) And (IH>=1) And (IH<=1024) And
+   ((IR=0) Or ((IR>=8000) And (IR<=48000))) And (B[13]=0) And (B[14]=0) And (B[15]=0) And (B[12]<=2) And
+   (B[17]=0) And (B[18]=0) And (B[19]=0) And (B[16]<=2) And ((IR=0) Or ((B[12]<>0) And (B[16]<>0))) Then Begin
+   Probe:='idcin'; Exit;
+  End;
+ End;
  If N>=1084 Then Begin
   Tag:='';
   For J:=1080 To 1083 Do Tag:=Tag+Chr(B[J]);
@@ -13992,7 +14003,7 @@ Var
  NVMode,NVW,NVH,NVFmt,NVFrames,NVFpsN,NVFpsD,NVSarN,NVSarD: LongInt;
  NVHasAlpha,NVOpened,NVDone,NVYC,NVInitDup: Boolean; NVTarget: String;
  NVPalR,NVPalG,NVPalB: Array[0..255] Of Byte;
- NVVN,NVVD,NVSubX,NVSubY,NVCW,NVCH: LongInt; NVIl: Char; NVBT709: Boolean; NVYTag: String[40];
+ NVVN,NVVD,NVSubX,NVSubY,NVCW,NVCH: LongInt; NVTo420,NVHdrOk: Boolean; NVIl: Char; NVBT709: Boolean; NVYTag: String[80];
  NVLast: PEABuffer; NVLastSize,NVGap: LongInt; NVHaveLast: Boolean;
  NVLastPalR,NVLastPalG,NVLastPalB,NVSavePalR,NVSavePalG,NVSavePalB: Array[0..255] Of Byte;
  NVCur: PEABuffer;
@@ -14155,6 +14166,8 @@ Function NVY4(R,G,B: LongInt): LongInt;Begin NVY4:=(8414*R+16519*G+3208*B+(16 Sh
 Function NVU4(R,G,B: LongInt): LongInt;Begin NVU4:=ADPCMSar(-4865*R-9528*G+14392*B+(257 Shl 14),15); End;
 Function NVV4(R,G,B: LongInt): LongInt;Begin NVV4:=ADPCMSar(14392*R-12061*G-2332*B+(257 Shl 14),15); End;
 
+Procedure NVWriteConv420(P: PEABuffer); Forward;
+
 Procedure NVWriteY4MPlanar(P: PEABuffer);
 Var Hdr,S: String; At,Tot,Q,K: LongInt;
 Begin
@@ -14167,6 +14180,7 @@ Begin
   WriteBytes(Hdr[1],Length(Hdr));
  End;
  Hdr:='FRAME'+#10; WriteBytes(Hdr[1],Length(Hdr));
+ If NVTo420 Then Begin NVWriteConv420(P); Exit; End;
  Tot:=NVFrameBytes; At:=0;
  While At<Tot Do Begin
   If Tot-At>8192 Then Q:=8192 Else Q:=Tot-At;
@@ -14292,6 +14306,101 @@ Begin
  If Fl.Pos<>Nil Then FreeMem(Fl.Pos,(Int64(Fl.N)+4)*4);
  If Fl.Coef<>Nil Then FreeMem(Fl.Coef,Int64(Fl.N)*Fl.FS*4+64);
  Fl.Pos:=Nil; Fl.Coef:=Nil;
+End;
+
+{ nombre de tranches du filtre scale de ffmpeg: fils du graphe (-filter_threads, sinon nombre de CPU) + 1 }
+Var NVFilterThreads: LongInt;
+Function NVSliceJobs: LongInt;
+Var T: Text; L: String; N: LongInt;
+Begin
+ N:=NVFilterThreads;
+ If N<0 Then Begin
+  N:=0;
+  {$I-}Assign(T,'/proc/cpuinfo'); Reset(T);{$I+}
+  If IOResult=0 Then Begin
+   While Not Eof(T) Do Begin ReadLn(T,L); If Copy(L,1,9)='processor' Then Inc(N); End;
+   Close(T);
+  End;
+  If N<1 Then N:=1;
+ End;
+ If N<=1 Then NVSliceJobs:=1 Else NVSliceJobs:=N+1;
+End;
+
+{ yuv410p/411p -> yuv420p (libswscale: chroma filtree horizontalement hScale8To15 puis verticalement yuv2planeX_8) }
+Procedure NVWriteConv420(P: PEABuffer);
+Var CW2,CH2,I,X,Y,J,FS,HS,Bp: LongInt; HF,VF: TSwsF; H15: PSwsI32; Row: PEABuffer; Val: Int64; Pl: PEABuffer; SW,SH,DW,Sb,DbS,Jobs,Sl,Sy,Ey,SHs,Sb0: LongInt;
+Begin
+ CW2:=(NVW+1) Div 2; CH2:=(NVH+1) Div 2;
+ GetMem(Row,NVW+CW2+64);
+ For Y:=0 To NVH-1 Do WriteBytes(P^[Y*NVW],NVW);
+ If ((NVH And 3)=0) And (NVSubX=2) And (NVSubY=2) Then Begin
+  { yvu9ToYv12Wrapper: planar2x_c de rgb2rgb_template.c, appele par tranche (fils du filtre scale) }
+  SW:=NVCW; SH:=NVCH; DW:=2*SW;
+  GetMem(Pl,Int64(DW)*2*SH+64);
+  Jobs:=NVSliceJobs; Sl:=(NVH+Jobs-1) Div Jobs; If Sl<1 Then Sl:=1; Sl:=(Sl+3) And Not 3;
+  For I:=0 To 1 Do Begin
+   Sb0:=NVW*NVH+I*NVCW*NVCH;
+   Sy:=0;
+   While Sy<NVH Do Begin
+    Ey:=Sy+Sl; If Ey>NVH Then Ey:=NVH;
+    Sb:=Sb0+(Sy Shr 2)*SW; SHs:=(Ey-Sy) Shr 2; DbS:=(Sy Shr 1)*DW;
+    Pl^[DbS]:=P^[Sb];
+    For X:=0 To SW-2 Do Begin
+     Pl^[DbS+2*X+1]:=(3*P^[Sb+X]+P^[Sb+X+1]) Shr 2;
+     Pl^[DbS+2*X+2]:=(P^[Sb+X]+3*P^[Sb+X+1]) Shr 2;
+    End;
+    Pl^[DbS+2*SW-1]:=P^[Sb+SW-1];
+    Inc(DbS,DW);
+    For Y:=1 To SHs-1 Do Begin
+     Pl^[DbS]:=(P^[Sb+(Y-1)*SW]*3+P^[Sb+Y*SW]) Shr 2;
+     Pl^[DbS+DW]:=(P^[Sb+(Y-1)*SW]+3*P^[Sb+Y*SW]) Shr 2;
+     For X:=0 To SW-2 Do Begin
+      Pl^[DbS+2*X+1]:=(P^[Sb+(Y-1)*SW+X]*3+P^[Sb+Y*SW+X+1]) Shr 2;
+      Pl^[DbS+DW+2*X+2]:=(P^[Sb+(Y-1)*SW+X]+3*P^[Sb+Y*SW+X+1]) Shr 2;
+      Pl^[DbS+DW+2*X+1]:=(P^[Sb+(Y-1)*SW+X+1]+3*P^[Sb+Y*SW+X]) Shr 2;
+      Pl^[DbS+2*X+2]:=(P^[Sb+(Y-1)*SW+X+1]*3+P^[Sb+Y*SW+X]) Shr 2;
+     End;
+     Pl^[DbS+2*SW-1]:=(P^[Sb+(Y-1)*SW+SW-1]*3+P^[Sb+Y*SW+SW-1]) Shr 2;
+     Pl^[DbS+DW+2*SW-1]:=(P^[Sb+(Y-1)*SW+SW-1]+3*P^[Sb+Y*SW+SW-1]) Shr 2;
+     Inc(DbS,2*DW);
+    End;
+    Pl^[DbS]:=P^[Sb+(SHs-1)*SW];
+    For X:=0 To SW-2 Do Begin
+     Pl^[DbS+2*X+1]:=(P^[Sb+(SHs-1)*SW+X]*3+P^[Sb+(SHs-1)*SW+X+1]) Shr 2;
+     Pl^[DbS+2*X+2]:=(P^[Sb+(SHs-1)*SW+X]+3*P^[Sb+(SHs-1)*SW+X+1]) Shr 2;
+    End;
+    Pl^[DbS+2*SW-1]:=P^[Sb+(SHs-1)*SW+SW-1];
+    Sy:=Ey;
+   End;
+   For Y:=0 To CH2-1 Do WriteBytes(Pl^[Y*DW],CW2);
+  End;
+  FreeMem(Pl,Int64(DW)*2*SH+64); FreeMem(Row,NVW+CW2+64);
+  Exit;
+ End;
+ SwsInitF(HF,NVCW,CW2,128,128,16384); HS:=HF.FS;
+ SwsInitF(VF,NVCH,CH2,128,128,4096); FS:=VF.FS;
+ GetMem(H15,Int64(NVCH)*CW2*4+64);
+ For I:=0 To 1 Do Begin
+  For Y:=0 To NVCH-1 Do For X:=0 To CW2-1 Do Begin
+   Val:=0;
+   For J:=0 To HS-1 Do Val:=Val+Int64(P^[NVW*NVH+I*NVCW*NVCH+Y*NVCW+HF.Pos^[X]+J])*HF.Coef^[X*HS+J];
+   Val:=AVSar(Val,7); If Val>32767 Then Val:=32767;
+   H15^[Y*CW2+X]:=Val;
+  End;
+  For Y:=0 To CH2-1 Do Begin
+   For X:=0 To CW2-1 Do Begin
+    Val:=Int64(64) Shl 12;
+    For J:=0 To FS-1 Do Begin
+     Bp:=(VF.Pos^[Y]+J)*CW2+X;
+     Val:=Val+Int64(H15^[Bp])*VF.Coef^[Y*FS+J];
+    End;
+    Val:=AVSar(Val,19); If Val<0 Then Val:=0 Else If Val>255 Then Val:=255;
+    Row^[X]:=Val;
+   End;
+   WriteBytes(Row^,CW2);
+  End;
+ End;
+ FreeMem(H15,Int64(NVCH)*CW2*4+64); SwsFreeF(HF); SwsFreeF(VF); FreeMem(Row,NVW+CW2+64);
 End;
 
 { ecrit les 3 plans YUV420P d'une image RGB native (formats 1 BGR24, 2 RGB555, 3 BGRA, 5 RGB565, 6 RGB444, 9 RGB24) }
@@ -14466,7 +14575,7 @@ Begin
   OpenWrite(NVTarget); NVOpened:=True;
   Str(NVW,S); Hdr:='YUV4MPEG2 W'+S; Str(NVH,S); Hdr:=Hdr+' H'+S;
   Str(NVFpsN,S); Hdr:=Hdr+' F'+S; Str(NVFpsD,S); Hdr:=Hdr+':'+S+' Ip A';
-  Str(NVSarN,S); Hdr:=Hdr+S; Str(NVSarD,S); Hdr:=Hdr+':'+S+' C420jpeg'+#10;
+  Str(NVSarN,S); Hdr:=Hdr+S; Str(NVSarD,S); Hdr:=Hdr+':'+S+' C420jpeg XYSCSS=420JPEG XCOLORRANGE=LIMITED'+#10;
   WriteBytes(Hdr[1],Length(Hdr));
  End;
  Hdr:='FRAME'+#10; WriteBytes(Hdr[1],Length(Hdr));
@@ -14553,13 +14662,26 @@ End;
 Procedure NVBegin(Mode: LongInt; Const Target: String; W,H,Fmt,FpsN,FpsD: LongInt);
 Begin
  NVMode:=Mode; NVTarget:=Target; NVW:=W; NVH:=H; NVFmt:=Fmt; NVFrames:=0; NVFpsN:=FpsN; NVFpsD:=FpsD;
- NVSarN:=0; NVSarD:=0; NVYC:=False; NVInitDup:=False; NVIl:='p'; NVBT709:=False; NVOpened:=False; NVDone:=False; NVLast:=Nil; NVHaveLast:=False; NVGap:=0; NVHasAlpha:=False;
+ NVSarN:=0; NVSarD:=0; NVYC:=False; NVInitDup:=False; NVIl:='p'; NVBT709:=False; NVOpened:=False; NVDone:=False; NVLast:=Nil; NVHaveLast:=False; NVGap:=0; NVHasAlpha:=False; NVTo420:=False; NVHdrOk:=False;
+End;
+
+{ flux sans image decodee: ffmpeg ecrit l'en-tete Y4M seul quand le format est connu des parametres du conteneur }
+Procedure NVHeaderOnly;
+Var Hdr,S: String;
+Begin
+ OpenWrite(NVTarget); NVOpened:=True;
+ Str(NVW,S); Hdr:='YUV4MPEG2 W'+S; Str(NVH,S); Hdr:=Hdr+' H'+S;
+ Str(NVFpsN,S); Hdr:=Hdr+' F'+S; Str(NVFpsD,S); Hdr:=Hdr+':'+S+' Ip A';
+ Str(NVSarN,S); Hdr:=Hdr+S; Str(NVSarD,S); Hdr:=Hdr+':'+S;
+ If NVFmt=7 Then Hdr:=Hdr+' '+NVYTag+#10 Else Hdr:=Hdr+' C420jpeg XYSCSS=420JPEG XCOLORRANGE=LIMITED'+#10;
+ WriteBytes(Hdr[1],Length(Hdr));
 End;
 
 Procedure NVFinish(Const Who: String);
 Begin
  If NVLast<>Nil Then Begin FreeMem(NVLast,NVLastSize); NVLast:=Nil; End;
- If NVFrames=0 Then Fail(Who+': aucune image decodee.');
+ If (NVFrames=0) And NVHdrOk And (NVMode=0) Then NVHeaderOnly;
+ If NVFrames=0 Then If Not (NVHdrOk And (NVMode=0)) Then Fail(Who+': aucune image decodee.');
  CloseRead; If NVOpened Then CloseWrite;
 End;
 
@@ -16977,6 +17099,7 @@ Procedure DecodeEAVideo(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeAVIX(Const Source,Target: String; Mode,Kind: LongInt); Forward;
 Procedure DecodeRPL(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeFLIC(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure DecodeIdcin(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeGIF(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeH263Raw(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeFLVH263(Const Source,Target: String; Mode: LongInt); Forward;
@@ -16996,11 +17119,12 @@ Begin
  Else If Kind=19 Then DecodeRPL(Source,Target,Mode)
  Else If Kind=22 Then DecodeFLVScreen(Source,Target,Mode)
  Else If Kind=23 Then DecodeFLIC(Source,Target,Mode)
+ Else If Kind=30 Then DecodeIdcin(Source,Target,Mode)
  Else If Kind=25 Then DecodeGIF(Source,Target,Mode)
  Else If Kind=27 Then DecodeFLVH263(Source,Target,Mode)
  Else If Kind=28 Then DecodeH263Raw(Source,Target,Mode)
  Else If Kind=29 Then DecodeH261Raw(Source,Target,Mode)
- Else If ((Kind>=18) And (Kind<=24)) Or (Kind=26) Then DecodeAVIX(Source,Target,Mode,Kind)
+ Else If ((Kind>=18) And (Kind<=24)) Or (Kind=26) Or (Kind=31) Or (Kind=32) Then DecodeAVIX(Source,Target,Mode,Kind)
  Else If Kind>=7 Then DecodeAVIVideo(Source,Target,Mode,Kind) Else DecodeNV(Kind,Source,Target,Mode);
 End;
 
@@ -30605,7 +30729,7 @@ End;
 
 { synchronisation CFR de fftools/ffmpeg_filter.c (video_sync_process) }
 Var
- CFTbN,CFTbD,CFNext,CFFrameNo: Int64; CFHist: Array[0..2] Of LongInt; CFLastDropped: Boolean; CFFn,CFFd: LongInt; CFHavePrev: Boolean;
+ CFTbN,CFTbD,CFNext,CFFrameNo: Int64; CFHist: Array[0..2] Of LongInt; CFLastDropped: Boolean; CFFn,CFFd: LongInt; CFHavePrev,CFVscfr: Boolean;
 
 Function CFRescale(A,Num,Den: Int64): Int64; { arrondi au plus proche, egalite loin de zero }
 Begin
@@ -30627,6 +30751,9 @@ Begin
  FPts:=SInt/(Int64(1) Shl ExtraBits);
  If FPts<>Round(FPts) Then Begin If FPts>0 Then FPts:=FPts+1.0/(1 Shl 17) Else If FPts<0 Then FPts:=FPts-1.0/(1 Shl 17); End;
  Delta0:=FPts-CFNext; Delta:=Delta0+Duration;
+ If CFVscfr And (CFFrameNo=0) And (Delta0>=CHalf) Then Begin { VSYNC_VSCFR: images initiales non dupliquees }
+  Delta:=Duration; Delta0:=0; CFNext:=Round(FPts);
+ End;
  NbPrev:=0; NbFrames:=1;
  If (Delta0<0) And (Delta>0) Then Begin
   Duration:=Duration+Delta0; Delta0:=0; { sync_ipts = next_pts }
@@ -30651,10 +30778,16 @@ Begin
  If NVMode<>0 Then Begin If N>0 Then NVEmit(P); Exit; End;
  If NVLast=Nil Then Begin GetMem(NVLast,NVFrameBytes); NVLastSize:=NVFrameBytes; End;
  For I:=1 To N Do Begin
-  If (I<=N0) And NVHaveLast Then NVWriteY4M(NVLast) Else NVWriteY4M(P);
+  If (I<=N0) And NVHaveLast Then Begin
+   Move(NVPalR,NVSavePalR,256); Move(NVPalG,NVSavePalG,256); Move(NVPalB,NVSavePalB,256);
+   Move(NVLastPalR,NVPalR,256); Move(NVLastPalG,NVPalG,256); Move(NVLastPalB,NVPalB,256);
+   NVWriteY4M(NVLast);
+   Move(NVSavePalR,NVPalR,256); Move(NVSavePalG,NVPalG,256); Move(NVSavePalB,NVPalB,256);
+  End Else NVWriteY4M(P);
   Inc(NVFrames);
  End;
  Move(P^,NVLast^,NVFrameBytes); NVHaveLast:=True;
+ Move(NVPalR,NVLastPalR,256); Move(NVPalG,NVLastPalG,256); Move(NVPalB,NVLastPalB,256);
 End;
 
 Procedure DecodeGIF(Const Source,Target: String; Mode: LongInt);
@@ -34663,6 +34796,320 @@ Begin
  CloseRead; If NVOpened Then CloseWrite;
 End;
 
+{ ---- id Quake II CIN: demuxeur (libavformat/idcin.c) et video idcinvideo (libavcodec/idcinvideo.c) ---- }
+Type
+ TIdcNode=Record Count: LongInt; Used: Byte; Ch0,Ch1: LongInt; End;
+Var
+ IdcNodes: Array[0..255,0..511] Of TIdcNode;
+ IdcRoot: Array[0..255] Of LongInt;
+ IdcPal: Array[0..255] Of LongInt;
+
+Function IdcSmallest(Var Nodes: Array Of TIdcNode; Num: LongInt): LongInt;
+Var I,Best,BestNode: LongInt;
+Begin
+ Best:=99999999; BestNode:=-1;
+ For I:=0 To Num-1 Do Begin
+  If Nodes[I].Used<>0 Then Continue;
+  If Nodes[I].Count=0 Then Continue;
+  If Nodes[I].Count<Best Then Begin Best:=Nodes[I].Count; BestNode:=I; End;
+ End;
+ If BestNode<>-1 Then Nodes[BestNode].Used:=1;
+ IdcSmallest:=BestNode;
+End;
+
+Procedure IdcBuildTree(Prev: LongInt);
+Var Num,I: LongInt;
+Begin
+ Num:=256;
+ For I:=0 To 511 Do IdcNodes[Prev][I].Used:=0;
+ While True Do Begin
+  IdcNodes[Prev][Num].Ch0:=IdcSmallest(IdcNodes[Prev],Num);
+  If IdcNodes[Prev][Num].Ch0=-1 Then Break;
+  IdcNodes[Prev][Num].Ch1:=IdcSmallest(IdcNodes[Prev],Num);
+  If IdcNodes[Prev][Num].Ch1=-1 Then Break;
+  IdcNodes[Prev][Num].Count:=IdcNodes[Prev][IdcNodes[Prev][Num].Ch0].Count+IdcNodes[Prev][IdcNodes[Prev][Num].Ch1].Count;
+  Inc(Num);
+ End;
+ IdcRoot[Prev]:=Num-1;
+End;
+
+{ Decode une image de W*H indices; faux si les donnees manquent }
+Function IdcVlcs(Buf: PEABuffer; Size,W,H: LongInt; Out: PEABuffer): Boolean;
+Var X,Y,Prev,BitPos,NodeNum,DatPos: LongInt; V: Byte;
+Begin
+ IdcVlcs:=False; Prev:=0; BitPos:=0; DatPos:=0; V:=0;
+ For Y:=0 To H-1 Do For X:=0 To W-1 Do Begin
+  NodeNum:=IdcRoot[Prev];
+  While NodeNum>=256 Do Begin
+   If BitPos=0 Then Begin
+    If DatPos>=Size Then Exit;
+    BitPos:=8; V:=Buf^[DatPos]; Inc(DatPos);
+   End;
+   If (V And 1)=0 Then NodeNum:=IdcNodes[Prev][NodeNum].Ch0 Else NodeNum:=IdcNodes[Prev][NodeNum].Ch1;
+   V:=V Shr 1; Dec(BitPos);
+  End;
+  Out^[Y*W+X]:=NodeNum; Prev:=NodeNum;
+ End;
+ IdcVlcs:=True;
+End;
+
+{ Mode 3: audio PCM vers WAV; sinon video PAL8 vers Y4M/PNG/BMP }
+Procedure DecodeIdcin(Const Source,Target: String; Mode: LongInt);
+Var
+ F,Fr: PEABuffer; Size,W,H,Rate,Bps,Ch,Pos,I,J,Cmd,Chunk,Scale,ChunkA,ChunkB,CurA,N,S: LongInt;
+ AudioPresent,NextVideo,NewPal,Begun: Boolean; Pal: Array[0..767] Of Byte; Pk: PEABuffer; VPts,NbF,NbP: Int64;
+ R,G,B: LongInt;
+Begin
+ NVLoad(Source,F,Size);
+ If Size<20 Then Fail('idcin: en-tete incomplet.');
+ W:=NVRL32(F,Size,0); H:=NVRL32(F,Size,4); Rate:=NVRL32(F,Size,8); Bps:=NVRL32(F,Size,12); Ch:=NVRL32(F,Size,16);
+ If (W<1) Or (H<1) Or (W>32767) Or (H>32767) Then Fail('idcin: dimensions incorrectes.');
+ AudioPresent:=Rate>0;
+ If AudioPresent Then Begin
+  If (Rate<14) Or (Bps<1) Or (Bps>2) Or (Ch<1) Or (Ch>2) Then Fail('idcin: parametres audio incorrects.');
+ End;
+ If Mode=3 Then Begin
+  If Not AudioPresent Then Fail('idcin: aucun flux audio.');
+ End Else Begin
+  If W*H>320*240 Then Fail('idcin: image trop grande (max_pixels 320*240).');
+  If Size<20+65536 Then Fail('idcin: tables Huffman incompletes.');
+  For I:=0 To 255 Do Begin
+   For J:=0 To 511 Do Begin IdcNodes[I][J].Count:=0; IdcNodes[I][J].Used:=0; IdcNodes[I][J].Ch0:=0; IdcNodes[I][J].Ch1:=0; End;
+   For J:=0 To 255 Do IdcNodes[I][J].Count:=F^[20+I*256+J];
+   IdcBuildTree(I);
+  End;
+  FillChar(IdcPal,SizeOf(IdcPal),0);
+ End;
+ If Bps=0 Then Bps:=1;
+ If (Rate Mod 14)<>0 Then Begin ChunkA:=(Rate Div 14)*Bps*Ch; ChunkB:=(Rate Div 14+1)*Bps*Ch; End
+ Else Begin ChunkA:=(Rate Div 14)*Bps*Ch; ChunkB:=ChunkA; End;
+ CurA:=0; NextVideo:=True; Pos:=20+65536; NewPal:=False; Begun:=False; VPts:=0;
+ If Mode=3 Then Begin EAReset; OpenWrite(Target); ADPCMWaveHeader(Rate,Ch,0); End
+ Else Begin
+  GetMem(Fr,W*H+64); FillChar(Fr^,W*H+64,0);
+  NVBegin(Mode,Target,W,H,0,14,1);
+  CFTbN:=1; CFTbD:=14; CFFn:=14; CFFd:=1; CFNext:=0; CFFrameNo:=0; CFHist[0]:=0; CFHist[1]:=0; CFHist[2]:=0; CFLastDropped:=False;
+  CFVscfr:=Not AudioPresent;
+  For I:=0 To 255 Do Begin NVPalR[I]:=0; NVPalG[I]:=0; NVPalB[I]:=0; End;
+ End;
+ While Pos<Size Do Begin
+  If NextVideo Then Begin
+   If Pos+4>Size Then Break;
+   Cmd:=NVRL32(F,Size,Pos); Inc(Pos,4);
+   If Cmd=2 Then Break;
+   If Cmd=1 Then Begin
+    If Pos+768>Size Then Break;
+    Move(F^[Pos],Pal,768); Inc(Pos,768);
+    Scale:=2;
+    For I:=0 To 767 Do If Pal[I]>63 Then Begin Scale:=0; Break; End;
+    NewPal:=True;
+    For I:=0 To 255 Do Begin
+     R:=(Pal[I*3] Shl Scale) And 255; G:=(Pal[I*3+1] Shl Scale) And 255; B:=(Pal[I*3+2] Shl Scale) And 255;
+     If Scale=2 Then Begin R:=R Or (R Shr 6); G:=G Or (G Shr 6); B:=B Or (B Shr 6); End;
+     IdcPal[I]:=R*65536+G*256+B;
+    End;
+   End Else NewPal:=False;
+   If Pos+4>Size Then Break;
+   Chunk:=NVRL32(F,Size,Pos); Inc(Pos,4);
+   If (Chunk<4) Or (Chunk>$7FFFFFF0) Then Break;
+   Inc(Pos,4); Dec(Chunk,4);
+   If Pos+Chunk>Size Then Break;
+   If Mode<>3 Then Begin
+    Pk:=PEABuffer(@F^[Pos]);
+    If IdcVlcs(Pk,Chunk,W,H,Fr) Then Begin
+     If NewPal Then For I:=0 To 255 Do Begin NVPalR[I]:=IdcPal[I] Shr 16; NVPalG[I]:=(IdcPal[I] Shr 8) And 255; NVPalB[I]:=IdcPal[I] And 255; End;
+     CFSync(VPts,1,NbF,NbP);
+     NVEmitN(Fr,NbP,NbF);
+     Inc(CFNext,NbF); Inc(CFFrameNo,NbF); Begun:=True;
+    End;
+    Inc(VPts);
+    If NVDone Then Break;
+   End;
+   Inc(Pos,Chunk);
+  End Else Begin
+   If CurA<>0 Then N:=ChunkB Else N:=ChunkA;
+   If N>Size-Pos Then N:=Size-Pos;
+   If N<=0 Then Break;
+   If Mode=3 Then Begin
+    N:=N-(N Mod (Bps*Ch));
+    If Bps=1 Then Begin
+     For I:=0 To N-1 Do EAPut((F^[Pos+I]-128)*256);
+    End Else Begin
+     I:=0;
+     While I+1<N Do Begin S:=F^[Pos+I]+F^[Pos+I+1]*256; If S>=32768 Then Dec(S,65536); EAPut(S); Inc(I,2); End;
+    End;
+   End;
+   Inc(Pos,N); CurA:=CurA Xor 1;
+  End;
+  If AudioPresent Then NextVideo:=Not NextVideo;
+ End;
+ If Mode=3 Then Begin
+  EAFlush; FreeMem(F,Size+64);
+  If EAWritten=0 Then Fail('idcin: aucune donnee audio.');
+  ADPCMPatchHeader(Rate,Ch,EAWritten); CloseRead; CloseWrite;
+ End Else Begin
+  If Begun Then CFFlush(Fr);
+  FreeMem(F,Size+64);
+  If NVLast<>Nil Then Begin FreeMem(NVLast,NVLastSize); NVLast:=Nil; End;
+  If (Not Begun) And (Mode<>0) Then Fail('idcin: aucune image decodee.');
+  If (Not Begun) And (Mode=0) Then NVHeaderOnly;
+  CloseRead; If NVOpened Then CloseWrite;
+  FreeMem(Fr,W*H+64);
+ End;
+End;
+
+{ ---- Intel Indeo 2 (libavcodec/indeo2.c, indeo2data.h): yuv410p, AVI RT21 ---- }
+Const
+ IR2Codes=143;
+ IR2Tab: Array[0..142,0..1] Of Byte=(
+  (1,3),(2,3),(128,3),(3,3),(4,5),(129,5),(5,5),(6,5),
+  (130,5),(131,5),(7,5),(8,5),(132,6),(9,6),(10,6),(11,6),
+  (12,6),(13,6),(14,6),(133,6),(15,8),(16,8),(134,8),(135,8),
+  (17,8),(18,8),(19,8),(20,8),(136,8),(21,8),(22,8),(137,8),
+  (23,8),(24,8),(138,8),(25,8),(26,9),(139,9),(27,9),(28,9),
+  (140,9),(29,9),(30,9),(141,9),(31,9),(32,9),(142,9),(33,9),
+  (34,9),(143,9),(35,9),(36,9),(37,10),(38,10),(39,10),(40,10),
+  (41,10),(42,10),(43,10),(44,10),(45,10),(46,10),(47,10),(48,10),
+  (49,10),(50,10),(51,10),(52,10),(53,13),(54,13),(55,13),(56,13),
+  (57,13),(58,13),(59,13),(60,13),(61,13),(62,13),(63,13),(64,13),
+  (65,13),(66,13),(67,13),(68,13),(69,13),(70,13),(71,13),(72,13),
+  (73,13),(74,13),(75,13),(76,13),(77,13),(78,13),(79,13),(80,13),
+  (81,13),(82,13),(83,13),(84,13),(85,13),(86,13),(87,13),(88,13),
+  (89,13),(90,13),(91,13),(92,13),(93,13),(94,13),(95,13),(96,13),
+  (97,13),(98,13),(99,13),(100,13),(101,13),(102,13),(103,13),(104,13),
+  (105,13),(106,13),(107,13),(108,13),(109,13),(110,13),(111,13),(112,13),
+  (113,13),(114,13),(115,13),(116,13),(117,14),(118,14),(119,14),(120,14),
+  (121,14),(122,14),(123,14),(124,14),(125,14),(126,14),(127,14)
+ );
+ IR2Delta: Array[0..3,0..255] Of Byte=(
+  (128,128,132,132,124,124,127,133,129,123,133,127,123,129,140,140,116,116,131,141,125,115,141,131,115,125,119,137,137,119,137,119,119,137,140,149,116,107,149,140,107,116,124,144,132,112,144,124,112,132,150,150,106,106,130,152,126,104,152,130,104,126,151,162,105,94,162,151,94,105,162,162,94,94,139,163,117,93,163,139,93,117,113,149,143,107,149,113,107,143,120,157,136,99,157,120,99,136,127,167,129,89,167,127,89,129,164,177,92,79,177,164,79,92,150,177,106,79,177,150,79,106,178,178,78,78,101,155,155,101,155,101,101,155,137,180,119,76,180,137,76,119,106,163,150,93,163,106,93,150,115,172,141,84,172,115,84,141,180,195,76,61,195,180,61,76,164,195,92,61,195,164,61,92,196,196,60,60,150,198,106,58,198,150,58,106,124,186,132,70,186,124,70,132,91,171,165,85,171,91,85,165,99,180,157,76,180,99,76,157,134,202,122,54,202,134,54,122,182,215,74,41,215,182,41,74,200,215,56,41,215,200,41,56,164,216,92,40,216,164,40,92,108,193,148,63,193,108,63,148,217,217,39,39,128,128),
+  (128,128,133,133,123,123,126,135,130,121,135,126,121,130,143,143,113,113,132,143,124,113,143,132,113,124,117,139,139,117,139,117,117,139,142,154,114,102,154,142,102,114,123,147,133,109,147,123,109,133,155,155,101,101,130,157,126,99,157,130,99,126,155,168,101,88,168,155,88,101,169,169,87,87,141,170,115,86,170,141,86,115,110,153,146,103,153,110,103,146,118,162,138,94,162,118,94,138,127,175,129,81,175,127,81,129,171,186,85,70,186,171,70,85,154,187,102,69,187,154,69,102,187,187,69,69,96,160,160,96,160,96,96,160,139,190,117,66,190,139,66,117,102,170,154,86,170,102,86,154,112,181,144,75,181,112,75,144,190,207,66,49,207,190,49,66,171,208,85,48,208,171,48,85,209,209,47,47,154,211,102,45,211,154,45,102,123,197,133,59,197,123,59,133,84,180,172,76,180,84,76,172,94,190,162,66,190,94,66,162,135,216,121,40,216,135,40,121,192,232,64,24,232,192,24,64,213,232,43,24,232,213,24,43,171,233,85,23,233,171,23,85,104,205,152,51,205,104,51,152,234,234,22,22,128,128),
+  (128,128,134,134,122,122,126,136,130,120,136,126,120,130,146,146,110,110,133,146,123,110,146,133,110,123,115,141,141,115,141,115,115,141,145,158,111,98,158,145,98,111,121,151,135,105,151,121,105,135,160,160,96,96,131,162,125,94,162,131,94,125,160,176,96,80,176,160,80,96,177,177,79,79,143,178,113,78,178,143,78,113,107,158,149,98,158,107,98,149,116,169,140,87,169,116,87,140,127,184,129,72,184,127,72,129,180,197,76,59,197,180,59,76,159,198,97,58,198,159,58,97,198,198,58,58,89,167,167,89,167,89,89,167,141,202,115,54,202,141,54,115,97,178,159,78,178,97,78,159,109,191,147,65,191,109,65,147,202,223,54,33,223,202,33,54,179,223,77,33,223,179,33,77,225,225,31,31,159,227,97,29,227,159,29,97,122,211,134,45,211,122,45,134,76,190,180,66,190,76,66,180,87,202,169,54,202,87,54,169,136,233,120,23,233,136,23,120,204,251,52,5,251,204,5,52,230,251,26,5,251,230,5,26,180,253,76,3,253,180,3,76,99,220,157,36,220,99,36,157,254,254,2,2,128,128),
+  (128,128,135,135,121,121,126,137,130,119,137,126,119,130,149,149,107,107,134,150,122,106,150,134,106,122,112,144,144,112,144,112,112,144,148,164,108,92,164,148,92,108,120,155,136,101,155,120,101,136,166,166,90,90,131,169,125,87,169,131,87,125,166,185,90,71,185,166,71,90,186,186,70,70,146,188,110,68,188,146,68,110,103,163,153,93,163,103,93,153,114,176,142,80,176,114,80,142,127,195,129,61,195,127,61,129,190,210,66,46,210,190,46,66,165,212,91,44,212,165,44,91,212,212,44,44,82,174,174,82,174,82,82,174,143,216,113,40,216,143,40,113,91,187,165,69,187,91,69,165,105,203,151,53,203,105,53,151,216,240,40,16,240,216,16,40,189,241,67,15,241,189,15,67,243,243,13,13,165,246,91,10,246,165,10,91,120,226,136,30,226,120,30,136,66,201,190,55,201,66,55,190,79,216,177,40,216,79,40,177,138,253,118,3,253,138,3,118,219,255,37,1,255,219,1,37,249,255,7,1,255,249,1,7,190,255,66,1,255,190,1,66,94,237,162,19,237,94,19,162,255,255,1,1,128,128)
+ );
+Var
+ IR2Sym,IR2Len: Array[0..16383] Of Byte; IR2Ready: Boolean;
+ IR2Pl: Array[0..2] Of PEABuffer; IR2Str: Array[0..2] Of LongInt; IR2PlSize: Array[0..2] Of LongInt;
+ IR2Buf: PEABuffer; IR2Total,IR2Pos: LongInt; IR2W,IR2H: LongInt;
+
+Procedure IR2Init;
+Var I,J,L,R: LongInt; Code: Int64; C: LongInt;
+Begin
+ FillChar(IR2Sym,SizeOf(IR2Sym),0); FillChar(IR2Len,SizeOf(IR2Len),0);
+ Code:=0;
+ For I:=0 To IR2Codes-1 Do Begin
+  L:=IR2Tab[I,1]; C:=Code Shr (32-L);
+  R:=0; For J:=0 To L-1 Do If (C And (1 Shl J))<>0 Then R:=R Or (1 Shl (L-1-J));
+  J:=R; While J<16384 Do Begin IR2Sym[J]:=IR2Tab[I,0]; IR2Len[J]:=L; Inc(J,1 Shl L); End;
+  Code:=Code+(Int64(1) Shl (32-L));
+ End;
+ IR2Ready:=True;
+End;
+
+Function IR2Bit(P: LongInt): LongInt;
+Begin
+ If (P<0) Or (P>=IR2Total) Then IR2Bit:=0 Else IR2Bit:=(IR2Buf^[P Shr 3] Shr (P And 7)) And 1;
+End;
+
+{ code VLC; -1 si invalide }
+Function IR2Code: LongInt;
+Var V,I: LongInt;
+Begin
+ V:=0; For I:=0 To 13 Do V:=V Or (IR2Bit(IR2Pos+I) Shl I);
+ If IR2Len[V]=0 Then Begin IR2Code:=-1; Exit; End;
+ Inc(IR2Pos,IR2Len[V]); IR2Code:=IR2Sym[V];
+End;
+
+Function IR2Clip(V: LongInt): Byte;
+Begin If V<0 Then IR2Clip:=0 Else If V>255 Then IR2Clip:=255 Else IR2Clip:=V; End;
+
+Function IR2DecodePlane(Width,Height: LongInt; Dst: PEABuffer; Pitch,Tb: LongInt): Boolean;
+Var I,J,Out,C,T,Base: LongInt;
+Begin
+ IR2DecodePlane:=False;
+ If Odd(Width) Or (Int64(Width)*Height Div (2*(IR2Codes-$7F))>IR2Total-IR2Pos) Then Exit;
+ Out:=0; Base:=0;
+ While Out<Width Do Begin
+  C:=IR2Code;
+  If C>=$80 Then Begin
+   Dec(C,$7F);
+   If Out+C*2>Width Then Exit;
+   For I:=0 To C*2-1 Do Begin Dst^[Base+Out]:=$80; Inc(Out); End;
+  End Else Begin
+   If C<=0 Then Exit;
+   Dst^[Base+Out]:=IR2Delta[Tb,C*2]; Inc(Out);
+   Dst^[Base+Out]:=IR2Delta[Tb,C*2+1]; Inc(Out);
+  End;
+ End;
+ Inc(Base,Pitch);
+ For J:=1 To Height-1 Do Begin
+  Out:=0;
+  While Out<Width Do Begin
+   If IR2Total-IR2Pos<=0 Then Exit;
+   C:=IR2Code;
+   If C>=$80 Then Begin
+    Dec(C,$7F);
+    If Out+C*2>Width Then Exit;
+    For I:=0 To C*2-1 Do Begin Dst^[Base+Out]:=Dst^[Base+Out-Pitch]; Inc(Out); End;
+   End Else Begin
+    If C<=0 Then Exit;
+    T:=Dst^[Base+Out-Pitch]+(IR2Delta[Tb,C*2]-128); Dst^[Base+Out]:=IR2Clip(T); Inc(Out);
+    T:=Dst^[Base+Out-Pitch]+(IR2Delta[Tb,C*2+1]-128); Dst^[Base+Out]:=IR2Clip(T); Inc(Out);
+   End;
+  End;
+  Inc(Base,Pitch);
+ End;
+ IR2DecodePlane:=True;
+End;
+
+Function IR2DecodeInter(Width,Height: LongInt; Dst: PEABuffer; Pitch,Tb: LongInt): Boolean;
+Var J,Out,C,T,Base: LongInt;
+Begin
+ IR2DecodeInter:=False;
+ If Odd(Width) Then Exit;
+ Base:=0;
+ For J:=0 To Height-1 Do Begin
+  Out:=0;
+  While Out<Width Do Begin
+   If IR2Total-IR2Pos<=0 Then Exit;
+   C:=IR2Code;
+   If C>=$80 Then Begin
+    Dec(C,$7F); Inc(Out,C*2);
+   End Else Begin
+    If C<=0 Then Exit;
+    T:=Dst^[Base+Out]+AVSar((IR2Delta[Tb,C*2]-128)*3,2);
+    Dst^[Base+Out]:=IR2Clip(T); Inc(Out);
+    T:=Dst^[Base+Out]+AVSar((IR2Delta[Tb,C*2+1]-128)*3,2);
+    Dst^[Base+Out]:=IR2Clip(T); Inc(Out);
+   End;
+  End;
+  Inc(Base,Pitch);
+ End;
+ IR2DecodeInter:=True;
+End;
+
+Function IR2Frame(Pk: PEABuffer; Len: LongInt): Boolean;
+Var Lt,Ct: LongInt; Ok: Boolean; CW4: LongInt;
+Begin
+ IR2Frame:=False;
+ If Not IR2Ready Then IR2Init;
+ If 48>=Len Then Exit;
+ IR2Buf:=PEABuffer(@Pk^[48]); IR2Total:=(Len-48)*8; IR2Pos:=0;
+ Lt:=Pk^[$22] And 3; Ct:=Pk^[$22] Shr 2;
+ If Ct>3 Then Exit;
+ CW4:=IR2Str[1];
+ If Pk^[18]<>0 Then Begin
+  Ok:=IR2DecodePlane(IR2W,IR2H,IR2Pl[0],IR2Str[0],Lt);
+  If Ok Then Ok:=IR2DecodePlane(IR2W Shr 2,IR2H Shr 2,IR2Pl[2],IR2Str[2],Ct);
+  If Ok Then Ok:=IR2DecodePlane(IR2W Shr 2,IR2H Shr 2,IR2Pl[1],IR2Str[1],Ct);
+ End Else Begin
+  Ok:=IR2DecodeInter(IR2W,IR2H,IR2Pl[0],IR2Str[0],Lt);
+  If Ok Then Ok:=IR2DecodeInter(IR2W Shr 2,IR2H Shr 2,IR2Pl[2],IR2Str[2],Ct);
+  If Ok Then Ok:=IR2DecodeInter(IR2W Shr 2,IR2H Shr 2,IR2Pl[1],IR2Str[1],Ct);
+ End;
+ IR2Frame:=Ok;
+End;
+
 Procedure DecodeAVIX(Const Source,Target: String; Mode,Kind: LongInt);
 Var Pos,PkPos,PkLen,RN,RD,I,Y,X,Cw,Ch,Bs,Msg2: LongInt; Ok,FFBegun: Boolean; Msg: String;
 Begin
@@ -34707,6 +35154,16 @@ Begin
    If AXFcc<>'FPS1' Then Fail('fraps: flux AVI FPS1 requis.');
    FROut:=Nil; FRBegun:=-1;
   End;
+  31: Begin
+   If AXFcc<>'RT21' Then Fail('indeo2: flux AVI RT21 requis.');
+   IR2W:=AXW; IR2H:=AXH;
+   NVBegin(Mode,Target,AXW,AXH,7,RN,RD); NVAviSar(AXW,AXH); NVHdrOk:=True;
+   NVSubX:=2; NVSubY:=2; NVCW:=(AXW+3) Div 4; NVCH:=(AXH+3) Div 4; NVYTag:='C420jpeg XYSCSS=420JPEG XCOLORRANGE=LIMITED'; NVTo420:=True;
+   IR2Str[0]:=AXW; IR2Str[1]:=NVCW; IR2Str[2]:=NVCW;
+   IR2PlSize[0]:=AXW*AXH+64; IR2PlSize[1]:=NVCW*NVCH+64; IR2PlSize[2]:=IR2PlSize[1];
+   For I:=0 To 2 Do Begin GetMem(IR2Pl[I],IR2PlSize[I]); FillChar(IR2Pl[I]^,IR2PlSize[I],0); End;
+   HYOutSize:=NVFrameBytes+64; GetMem(HYOut,HYOutSize);
+  End;
   21: Begin
    If AXFcc<>'FFV1' Then Fail('ffv1: flux AVI FFV1 requis.');
    Msg:=F1InitDecoder(PEABuffer(@AXF^[AXExtra]),AXExtraLen,AXW,AXH);
@@ -34718,6 +35175,13 @@ Begin
   Ok:=False;
   Case Kind Of
    18: Ok:=FSVFrame(PEABuffer(@AXF^[PkPos]),PkLen);
+   31: Begin
+    Ok:=IR2Frame(PEABuffer(@AXF^[PkPos]),PkLen);
+    If Ok Then Begin
+     For Y:=0 To AXH-1 Do Move(IR2Pl[0]^[Y*IR2Str[0]],HYOut^[Y*AXW],AXW);
+     For I:=1 To 2 Do Move(IR2Pl[I]^,HYOut^[AXW*AXH+(I-1)*NVCW*NVCH],NVCW*NVCH);
+    End;
+   End;
    26: Begin
     Ok:=H3Decode(PEABuffer(@AXF^[PkPos]),PkLen)=1;
     If Ok Then Ok:=H3Pack;
@@ -34791,6 +35255,7 @@ Begin
     20,21: NVEmit(HYOut);
     24: NVEmit(FROut);
     26: NVEmit(H3OutBuf);
+    31: NVEmit(HYOut);
    End;
   End Else If ((Kind<>21) And (Kind<>24) And (Kind<>26)) Or FFBegun Then NVRepeat;
   If NVDone Then Break;
@@ -38746,6 +39211,7 @@ Begin
  WriteLn(' D  asf             ASF, audio WMA2 seulement (alias: wma, wmv)');
  WriteLn(' DE avi             AVI H264/MPEG4, AAC/MP3 (copie); decodeurs FFV1, FLASHSV, HUFFYUV/FFVHUFF, Autodesk RLE, FRAPS, H263/H261/FLV1');
  WriteLn(' DE flv             FLV: video Sorenson Spark (decodeur I/P complet) ou Screen Video vers Y4M/PNG/BMP; FLV1 intra natif en sortie; extraction image H264 CAVLC');
+ WriteLn(' D  idcin           id Cinematic (video idcinvideo PAL8 vers Y4M/PNG/BMP, audio PCM vers WAV)');
  WriteLn(' D  flic            FLI/FLC/FLX animation (video flic 8/15/16/24 bits; audio TFTD non extrait)');
  WriteLn(' D  g726            G.726 big-endian brut (-code_size 2..5, -sample_rate; decodage vers WAV/MP3/...)');
  WriteLn(' D  g726le          G.726 little-endian brut (-code_size 2..5, -sample_rate; decodage vers WAV/MP3/...)');
@@ -38996,7 +39462,7 @@ BEGIN
  InputActive:=False; OutputActive:=False;
  HLSListOpen:=False; AllStreams:=False; NoVideo:=False; HLSBase:='';
  AspectNum:=0; AspectDen:=1;
- DecodedVideo:=False; HasCrop:=False; CropTop:=0; CropBottom:=0; CropLeft:=0; CropRight:=0;
+ NVFilterThreads:=-1; DecodedVideo:=False; HasCrop:=False; CropTop:=0; CropBottom:=0; CropLeft:=0; CropRight:=0;
  NoAudio:=False; VideoCodec:=''; VideoFrames:=0; ImageWidth:=0; ImageHeight:=0;
  {$IFDEF MSWINDOWS}
   NetSession:=Nil; NetRequest:=Nil;
@@ -39095,6 +39561,8 @@ BEGIN
    WriteLn('D A    aac             Advanced Audio Coding (AAC-LC ADTS mono/stereo)');
    WriteLn('D V D  aasc            Autodesk RLE (AVI AASC/AAS4, 8/16/24 bits)');
    WriteLn('DEV    flv             Flash Video (FLV1/Sorenson Spark: decodeur complet I/P (FLV, AVI); encodeur images intra)');
+   WriteLn('D V D  idcinvideo      id Quake II CIN video (conteneur .cin, tables Huffman)');
+   WriteLn('D V D  indeo2          Intel Indeo 2 (AVI RT21, yuv410p; -pix_fmt yuv420p, -filter_threads)');
    WriteLn('D V D  flic            Autodesk Animator Flic video (FLI/FLC/FLX 8, 15, 16, 24 bits)');
    WriteLn('D V D  fraps           Fraps (FPS1 v0-v5, AVI)');
    WriteLn('D A    g726            G.726 ADPCM (16, 24, 32 et 40 kbit/s; g726le; WAV 0x45 ou brut)');
@@ -39118,6 +39586,8 @@ BEGIN
   Else If Argument='-y' Then Overwrite:=True Else
   If Argument='-n' Then NoOverwrite:=True Else
   If Argument='-hide_banner' Then HideBanner:=True Else
+  If Argument='-pix_fmt' Then OptPixFmt:=Lower(NextArgument) Else
+  If Argument='-filter_threads' Then Begin Value:=NextArgument; Val(Value,Number,Code); If (Code<>0) Or (Number<0) Then Fail('-filter_threads: entier >= 0 requis.'); If Number=0 Then NVFilterThreads:=-1 Else NVFilterThreads:=Number; End Else
   If Argument='-vn' Then NoVideo:=True Else
   If Argument='-comment' Then Begin
    CommentName:=NextArgument; HasComment:=True; PrepareComment;
@@ -39314,7 +39784,7 @@ BEGIN
  End;
  NVKind:=0;
  If InputFormat='bethsoftvid' Then NVKind:=1 Else If InputFormat='bfi' Then NVKind:=2 Else If InputFormat='c93' Then NVKind:=3
- Else If InputFormat='bmp' Then NVKind:=4 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22 Else If (InputFormat='flic') And Not IsHTTP(InputPath) Then NVKind:=23 Else If (InputFormat='gif') And Not IsHTTP(InputPath) Then NVKind:=25 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=2) Then NVKind:=27 Else If (InputFormat='h263') And Not IsHTTP(InputPath) Then NVKind:=28 Else If (InputFormat='h261') And Not IsHTTP(InputPath) Then NVKind:=29
+ Else If InputFormat='bmp' Then NVKind:=4 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22 Else If (InputFormat='flic') And Not IsHTTP(InputPath) Then NVKind:=23 Else If (InputFormat='gif') And Not IsHTTP(InputPath) Then NVKind:=25 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=2) Then NVKind:=27 Else If (InputFormat='h263') And Not IsHTTP(InputPath) Then NVKind:=28 Else If (InputFormat='h261') And Not IsHTTP(InputPath) Then NVKind:=29 Else If (InputFormat='idcin') And Not IsHTTP(InputPath) Then NVKind:=30
  Else If (InputFormat='avi') And Not IsHTTP(InputPath) Then Begin
   AsvTag:=AVIVideoFourCC(Intermediate);
   If AsvTag='CSCD' Then NVKind:=5 Else If (AsvTag='tscc') Or (AsvTag='TSCC') Then NVKind:=6
@@ -39325,10 +39795,12 @@ BEGIN
   Else If (AsvTag='HFYU') Or (AsvTag='FFVH') Or (AsvTag='hfyu') Then NVKind:=20
   Else If AsvTag='FFV1' Then NVKind:=21
   Else If AsvTag='FPS1' Then NVKind:=24
-  Else If (AsvTag='H263') Or (AsvTag='h263') Or (AsvTag='X263') Or (AsvTag='T263') Or (AsvTag='L263') Or (AsvTag='M263') Or (AsvTag='N263') Or (AsvTag='U263') Or (AsvTag='s263') Or (AsvTag='VX1K') Or (AsvTag='ZyGo') Or (AsvTag='FLV1') Or (AsvTag='H261') Or (AsvTag='h261') Then NVKind:=26;
+  Else If (AsvTag='H263') Or (AsvTag='h263') Or (AsvTag='X263') Or (AsvTag='T263') Or (AsvTag='L263') Or (AsvTag='M263') Or (AsvTag='N263') Or (AsvTag='U263') Or (AsvTag='s263') Or (AsvTag='VX1K') Or (AsvTag='ZyGo') Or (AsvTag='FLV1') Or (AsvTag='H261') Or (AsvTag='h261') Then NVKind:=26
+  Else If AsvTag='RT21' Then NVKind:=31;
  End;
+ If (OptPixFmt<>'') And (OptPixFmt<>'yuv420p') Then Fail('-pix_fmt: seul yuv420p est pris en charge.');
  NVAudioOut:=(OutputFormat='wav') Or (OutputFormat='mp3') Or (OutputFormat='ac3') Or (OutputFormat='adx') Or (OutputFormat='aiff');
- If (NVKind<>0) And Not (((NVKind=1) Or (NVKind=2) Or (NVKind=15) Or (NVKind=17) Or (NVKind=22)) And NVAudioOut) Then Begin
+ If (NVKind<>0) And Not (((NVKind=1) Or (NVKind=2) Or (NVKind=15) Or (NVKind=17) Or (NVKind=22) Or (NVKind=30)) And NVAudioOut) Then Begin
   If NoVideo Or (VideoCodec='copy') Or (AudioCodec<>'') Or HasBitrate Or (RequestedRate<>0) Or
    (RequestedChannels<>0) Or (ImageWidth<>0) Or IsHTTP(InputPath) Then
    Fail('Decodage video local sans copie, sans -vn ni conversion audio requis.');
@@ -39662,6 +40134,7 @@ BEGIN
    If InputFormat='bethsoftvid' Then DecodeBethsoft(InputPath,Temps[0],3) Else
    If InputFormat='bfi' Then DecodeBFI(InputPath,Temps[0],3) Else
    If InputFormat='dsicin' Then DecodeDSICin(InputPath,Temps[0],3) Else
+   If InputFormat='idcin' Then DecodeIdcin(InputPath,Temps[0],3) Else
    If (InputFormat='aiff') And IsAIFFIma4(InputPath) Then DecodeAIFFIma4(InputPath,Temps[0]) Else
    If InputFormat='aiff' Then DecodeAIFF(InputPath,Temps[0]) Else
    If InputFormat='voc' Then DecodeVOC(InputPath,Temps[0]) Else
