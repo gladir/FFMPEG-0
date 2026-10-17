@@ -3596,6 +3596,7 @@ Function FormatName(S: String): String;Begin
  If S='m2v' Then S:='mpeg2video';
  If (S='wmv') Or (S='wma') Then S:='asf';
  If S='dnx' Then S:='dnxhd';
+ If S='dif' Then S:='dv';
  If S='rmvb' Then S:='rm';
  If S='cavs' Then S:='cavsvideo';
  FormatName:=S;
@@ -3909,6 +3910,7 @@ Begin
  If N>=5 Then If (B[0]=86) And (B[1]=73) And (B[2]=68) And (B[3]=0) Then Begin Probe:='bethsoftvid'; Exit; End;
  If N>=44 Then If (B[0]=0) And (B[1]=0) And (((B[2]=2) And (B[3]=$80) And ((B[4]=1) Or (B[4]=2))) Or ((B[4]=3) And (B[2]*256+B[3]>=$280) And (B[2]*256+B[3]<=$2170) And ((B[3] And 3)=0))) And ((B[$18]<>0) Or (B[$19]<>0)) And ((B[$1A]<>0) Or (B[$1B]<>0)) And
   (B[$28]=0) And (B[$29]=0) And (B[$2A]*256+B[$2B]>=1235) And (B[$2A]*256+B[$2B]<=1274) Then Begin Probe:='dnxhd'; Exit; End;
+ If N>=80*6 Then If (B[0]=$1F) And (B[1]=$07) And (B[2]=0) And ((B[3]=$3F) Or (B[3]=$BF)) Then Begin Probe:='dv'; Exit; End;
  If N>=4 Then If (B[0]=66) And (B[1]=70) And (B[2]=38) And (B[3]=73) Then Begin Probe:='bfi'; Exit; End;
  If N>=16 Then Begin
   K0:=1;
@@ -13914,7 +13916,7 @@ Var
  NVMode,NVW,NVH,NVFmt,NVFrames,NVFpsN,NVFpsD,NVSarN,NVSarD: LongInt;
  NVHasAlpha,NVOpened,NVDone,NVYC,NVInitDup: Boolean; NVTarget: String;
  NVPalR,NVPalG,NVPalB: Array[0..255] Of Byte;
- NVVN,NVVD,NVSubX,NVSubY,NVCW,NVCH: LongInt; NVIl: Char; NVBT709: Boolean; NVYTag: String[16];
+ NVVN,NVVD,NVSubX,NVSubY,NVCW,NVCH: LongInt; NVIl: Char; NVBT709: Boolean; NVYTag: String[40];
  NVLast: PEABuffer; NVLastSize,NVGap: LongInt; NVHaveLast: Boolean;
  NVLastPalR,NVLastPalG,NVLastPalB,NVSavePalR,NVSavePalG,NVSavePalB: Array[0..255] Of Byte;
  NVCur: PEABuffer;
@@ -16600,9 +16602,12 @@ Begin
 End;
 
 Procedure DecodeCAVS(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure DecodeDV(Const Source,Target: String; Mode: LongInt; IsAvi: Boolean); Forward;
 Procedure DecodeNV2(Kind: LongInt; Const Source,Target: String; Mode: LongInt);
 Begin
  If Kind=12 Then DecodeCAVS(Source,Target,Mode)
+ Else If Kind=13 Then DecodeDV(Source,Target,Mode,False)
+ Else If Kind=14 Then DecodeDV(Source,Target,Mode,True)
  Else If Kind=10 Then DecodeDNxHD(Source,Target,Mode,False)
  Else If Kind=11 Then DecodeDNxHD(Source,Target,Mode,True)
  Else If Kind>=7 Then DecodeAVIVideo(Source,Target,Mode,Kind) Else DecodeNV(Kind,Source,Target,Mode);
@@ -22499,6 +22504,1143 @@ Begin
  NVFinish('cavs');
 End;
 
+
+{ ---- DV: decodeur (libavcodec/dvdec.c, dv.c, dv_profile.c), profils SD 25 et 50 Mbit/s ---- }
+Type
+ TDVMB=Record Pos,PCnt,Sc,Fo,Md: LongInt; PBuf: Int64; End;
+Var
+ DVTLen,DVTRun: Array[0..65535] Of Byte; DVTLev: Array[0..65535] Of SmallInt;
+ DVFact: Array[0..5631] Of LongInt; DVReady: Boolean;
+ DVProf,DVW,DVH,DVPix,DVStype,DVDsf,DVSegs,DVChans,DVFrameSize,DVNChunks,DVFpsN,DVFpsD: LongInt;
+ DVCOff: Array[0..647] Of LongInt; DVCX,DVCY: Array[0..647,0..4] Of SmallInt;
+ DVBuf: PEABuffer; DVBufLen: LongInt;
+ DVYP,DVUP,DVVP: PEABuffer; DVCW,DVCH: LongInt;
+ DVIl: Char; DVSarN,DVSarD: LongInt;
+Const
+ DVVLen: Array[0..408] Of Byte=(
+  2,3,4,4,4,4,5,5,5,5,6,6,
+  6,6,7,7,7,7,7,7,7,7,8,8,
+  8,8,8,8,8,8,8,8,8,8,8,8,
+  8,8,9,9,9,9,9,9,9,9,9,9,
+  9,9,9,9,9,9,10,10,10,10,10,10,
+  10,11,11,11,11,11,11,11,11,12,12,12,
+  12,12,12,12,12,12,12,12,12,12,12,12,
+  12,12,12,12,12,13,13,13,13,13,13,13,
+  13,13,13,13,13,13,13,13,13,13,13,13,
+  13,13,13,13,13,13,13,13,13,13,13,13,
+  13,13,13,13,13,13,13,13,13,13,13,13,
+  13,13,13,13,13,13,13,13,13,13,13,13,
+  13,13,13,13,13,13,13,13,13,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15);
+ DVVRun: Array[0..408] Of Byte=(
+  0,0,127,1,0,0,2,1,0,0,3,4,
+  0,0,5,6,2,1,1,0,0,0,7,8,
+  9,10,3,4,2,1,1,1,0,0,0,0,
+  0,0,11,12,13,14,5,6,3,4,2,2,
+  1,0,0,0,0,0,5,3,3,2,1,1,
+  1,0,1,6,4,3,1,1,1,2,3,4,
+  5,7,8,9,10,7,8,4,3,2,2,2,
+  2,2,1,1,1,0,1,2,3,4,5,6,
+  7,8,9,10,11,12,13,14,15,16,17,18,
+  19,20,21,22,23,24,25,26,27,28,29,30,
+  31,32,33,34,35,36,37,38,39,40,41,42,
+  43,44,45,46,47,48,49,50,51,52,53,54,
+  55,56,57,58,59,60,61,62,63,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0);
+ DVVLev: Array[0..408] Of Byte=(
+  1,2,0,1,3,4,1,2,5,6,1,1,
+  7,8,1,1,2,3,4,9,10,11,1,1,
+  1,1,2,2,3,5,6,7,12,13,14,15,
+  16,17,1,1,1,1,2,2,3,3,4,5,
+  8,18,19,20,21,22,3,4,5,6,9,10,
+  11,0,0,3,4,6,12,13,14,0,0,0,
+  0,2,2,2,2,3,3,5,7,7,8,9,
+  10,11,15,16,17,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,1,2,
+  3,4,5,6,7,8,9,10,11,12,13,14,
+  15,16,17,18,19,20,21,22,23,24,25,26,
+  27,28,29,30,31,32,33,34,35,36,37,38,
+  39,40,41,42,43,44,45,46,47,48,49,50,
+  51,52,53,54,55,56,57,58,59,60,61,62,
+  63,64,65,66,67,68,69,70,71,72,73,74,
+  75,76,77,78,79,80,81,82,83,84,85,86,
+  87,88,89,90,91,92,93,94,95,96,97,98,
+  99,100,101,102,103,104,105,106,107,108,109,110,
+  111,112,113,114,115,116,117,118,119,120,121,122,
+  123,124,125,126,127,128,129,130,131,132,133,134,
+  135,136,137,138,139,140,141,142,143,144,145,146,
+  147,148,149,150,151,152,153,154,155,156,157,158,
+  159,160,161,162,163,164,165,166,167,168,169,170,
+  171,172,173,174,175,176,177,178,179,180,181,182,
+  183,184,185,186,187,188,189,190,191,192,193,194,
+  195,196,197,198,199,200,201,202,203,204,205,206,
+  207,208,209,210,211,212,213,214,215,216,217,218,
+  219,220,221,222,223,224,225,226,227,228,229,230,
+  231,232,233,234,235,236,237,238,239,240,241,242,
+  243,244,245,246,247,248,249,250,251,252,253,254,
+  255);
+ DVQShift: Array[0..87] Of Byte=(
+  3,3,4,4,3,3,4,4,2,3,3,4,
+  2,3,3,4,2,2,3,3,2,2,3,3,
+  1,2,2,3,1,2,2,3,1,1,2,2,
+  1,1,2,2,0,1,1,2,0,1,1,2,
+  0,0,1,1,0,0,1,1,0,0,0,1,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0);
+ DVZig248: Array[0..63] Of Byte=(
+  0,8,1,9,16,24,2,10,17,25,32,40,
+  48,56,33,41,18,26,3,11,4,12,19,27,
+  34,42,49,57,50,58,35,43,20,28,5,13,
+  6,14,21,29,36,44,51,59,52,60,37,45,
+  22,30,7,15,23,31,38,46,53,61,54,62,
+  39,47,55,63);
+ DVIw88: Array[0..63] Of Word=(
+  32768,16705,16705,17734,17032,17734,18205,18081,18081,18205,18725,18562,
+  19195,18562,18725,19266,19091,19705,19705,19091,19266,21407,19643,20267,
+  20228,20267,19643,21407,22725,21826,20853,20806,20806,20853,21826,22725,
+  23170,23170,21407,21400,21407,23170,23170,24598,23786,22018,22018,23786,
+  24598,25251,24465,22654,24465,25251,25972,25172,25172,25972,26722,27969,
+  26722,29692,29692,31521);
+ DVIw248: Array[0..63] Of Word=(
+  32768,16384,16705,16705,17734,17734,17734,17734,18081,18081,18725,18725,
+  21407,21407,19091,19091,19195,19195,18205,18205,18725,18725,19705,19705,
+  20267,20267,21826,21826,23170,23170,20806,20806,20267,20267,19266,19266,
+  21407,21407,20853,20853,21400,21400,23786,23786,24465,24465,22018,22018,
+  23170,23170,22725,22725,24598,24598,24465,24465,25172,25172,27969,27969,
+  25972,25972,29692,29692);
+ DVW88: Array[0..63] Of LongInt=(
+  131072,257107,257107,242189,252167,242189,235923,237536,237536,235923,229376,231390,
+  223754,231390,229376,222935,224969,217965,217965,224969,222935,200636,218652,211916,
+  212325,211916,218652,200636,188995,196781,205965,206433,206433,205965,196781,188995,
+  185364,185364,200636,200704,200636,185364,185364,174609,180568,195068,195068,180568,
+  174609,170091,175557,189591,175557,170091,165371,170627,170627,165371,160727,153560,
+  160727,144651,144651,136258);
+ DVW248: Array[0..63] Of LongInt=(
+  131072,262144,257107,257107,242189,242189,242189,242189,237536,237536,229376,229376,
+  200636,200636,224973,224973,223754,223754,235923,235923,229376,229376,217965,217965,
+  211916,211916,196781,196781,185364,185364,206433,206433,211916,211916,222935,222935,
+  200636,200636,205964,205964,200704,200704,180568,180568,175557,175557,195068,195068,
+  185364,185364,188995,188995,174606,174606,175557,175557,170627,170627,153560,153560,
+  165371,165371,144651,144651);
+
+Function DVPeek32(B: PEABuffer; Len,Bit: LongInt): Int64;
+Var I,Q,S: LongInt; V: Int64;
+Begin
+ Q:=Bit Shr 3; S:=Bit And 7; V:=0;
+ For I:=0 To 4 Do V:=V*256+EAByte(B,Len,Q+I);
+ DVPeek32:=(V Shr (8-S)) And $FFFFFFFF;
+End;
+
+Procedure DVInitTables;
+Var I,L,N,Fill,K,J,Run,Lev: LongInt; Code,Cur: Int64; Used: LongInt;
+Procedure Put(C: Int64; Ln,Rn,Lv: LongInt);
+Var Base,Cnt,Z: LongInt;
+Begin
+ Base:=C Shl (16-Ln); Cnt:=1 Shl (16-Ln);
+ For Z:=0 To Cnt-1 Do Begin DVTLen[Base+Z]:=Ln; DVTRun[Base+Z]:=Rn; DVTLev[Base+Z]:=Lv; End;
+ Inc(Used,Cnt);
+End;
+Var S,C,Q: LongInt; Fa,Fb: LongInt; Wt: LongInt;
+Const Areas: Array[0..3] Of Byte=(6,21,43,64);
+Begin
+ If DVReady Then Exit;
+ Used:=0; Code:=0;
+ For I:=0 To 408 Do Begin
+  L:=DVVLen[I]; Cur:=Code Shr (32-L); Code:=Code+(Int64(1) Shl (32-L));
+  If DVVLev[I]<>0 Then Begin
+   Put(Cur Shl 1,L+1,DVVRun[I]+1,DVVLev[I]);
+   Put((Cur Shl 1) Or 1,L+1,DVVRun[I]+1,-DVVLev[I]);
+  End Else Put(Cur,L,DVVRun[I]+1,0);
+ End;
+ If Used<>65536 Then Fail('dvvideo: table VLC incoherente.');
+ { sous-tables de ffmpeg: la longueur consommee est celle de la plus longue entree du prefixe de 10 bits }
+ For K:=0 To 1023 Do Begin
+  N:=0;
+  For J:=0 To 63 Do If DVTLen[K*64+J]>N Then N:=DVTLen[K*64+J];
+  If N>10 Then For J:=0 To 63 Do DVTLen[K*64+J]:=N;
+ End;
+ { facteurs de dequantification: [classe3?][mode DCT][quant 0..21][coef] }
+ Fa:=0; Fb:=2816;
+ For J:=0 To 1 Do For S:=0 To 21 Do Begin
+  I:=0;
+  For C:=0 To 3 Do Begin
+   While I<Areas[C] Do Begin
+    If J=0 Then Wt:=DVIw88[I] Else Wt:=DVIw248[I];
+    DVFact[Fa]:=Wt Shl (DVQShift[S*4+C]+1);
+    DVFact[Fb]:=DVFact[Fa] Shl 1;
+    Inc(Fa); Inc(Fb); Inc(I);
+   End;
+  End;
+ End;
+ DVReady:=True;
+End;
+
+{ index de profil interne: 0 525/411, 1 625/420, 2 625/411, 3 525/422 (50M), 4 625/422 (50M), 5 625/420 (IEC 61883-5); -1 inconnu, -2 HD }
+Function DVFindProfile(B: PEABuffer; Size: LongInt): LongInt;
+Var Dsf,St,Pal,Z: LongInt;
+Begin
+ DVFindProfile:=-1;
+ If Size<480 Then Exit;
+ Dsf:=(B^[3] And $80) Shr 7; Z:=B^[80*5+48+3]; St:=Z And $1F; Pal:=(Z Shr 5) And 1;
+ If (St=$14) Or (St=$18) Then Begin DVFindProfile:=-2; Exit; End;
+ If (Dsf=1) And (St=0) And ((B^[4] And 7)<>0) Then Begin DVFindProfile:=2; Exit; End;
+ If (Dsf=0) And (Pal=1) And (St=0) And (Size=144000) Then Begin DVFindProfile:=1; Exit; End;
+ If (Dsf=0) And (St=0) Then Begin DVFindProfile:=0; Exit; End;
+ If (Dsf=1) And (St=0) Then Begin DVFindProfile:=1; Exit; End;
+ If (Dsf=0) And (St=4) Then Begin DVFindProfile:=3; Exit; End;
+ If (Dsf=1) And (St=4) Then Begin DVFindProfile:=4; Exit; End;
+ If (Dsf=1) And (St=1) Then Begin DVFindProfile:=5; Exit; End;
+ If ((B^[3] And $7F)=$3F) And (Z=$FF) Then Begin DVFindProfile:=Dsf; Exit; End;
+End;
+
+Procedure DVSetupProfile(P: LongInt);
+Const
+ Off: Array[0..4] Of Byte=(2,6,8,0,4);
+ Shuf3: Array[0..4] Of Byte=(18,9,27,0,36);
+ LStartShuffled: Array[0..4] Of Byte=(9,4,13,0,18);
+ Serpent1: Array[0..26] Of Byte=(0,1,2,2,1,0,0,1,2,2,1,0,0,1,2,2,1,0,0,1,2,2,1,0,0,1,2);
+ Serpent2: Array[0..29] Of Byte=(0,1,2,3,4,5,5,4,3,2,1,0,0,1,2,3,4,5,5,4,3,2,1,0,0,1,2,3,4,5);
+Var C,S,J,M,Pp,Cnt,X,Y,I,K: LongInt;
+Begin
+ DVProf:=P;
+ Case P Of
+  0: Begin DVDsf:=0; DVStype:=0; DVFrameSize:=120000; DVSegs:=10; DVChans:=1; DVH:=480; DVPix:=0; DVFpsN:=30000; DVFpsD:=1001; End;
+  1: Begin DVDsf:=1; DVStype:=0; DVFrameSize:=144000; DVSegs:=12; DVChans:=1; DVH:=576; DVPix:=1; DVFpsN:=25; DVFpsD:=1; End;
+  2: Begin DVDsf:=1; DVStype:=0; DVFrameSize:=144000; DVSegs:=12; DVChans:=1; DVH:=576; DVPix:=0; DVFpsN:=25; DVFpsD:=1; End;
+  3: Begin DVDsf:=0; DVStype:=4; DVFrameSize:=240000; DVSegs:=10; DVChans:=2; DVH:=480; DVPix:=2; DVFpsN:=30000; DVFpsD:=1001; End;
+  4: Begin DVDsf:=1; DVStype:=4; DVFrameSize:=288000; DVSegs:=12; DVChans:=2; DVH:=576; DVPix:=2; DVFpsN:=25; DVFpsD:=1; End;
+  Else Begin DVDsf:=1; DVStype:=1; DVFrameSize:=144000; DVSegs:=12; DVChans:=1; DVH:=576; DVPix:=1; DVFpsN:=25; DVFpsD:=1; End;
+ End;
+ DVW:=720;
+ Case DVPix Of 0: Begin DVCW:=DVW Div 4; DVCH:=DVH; End; 1: Begin DVCW:=DVW Div 2; DVCH:=DVH Div 2; End; Else Begin DVCW:=DVW Div 2; DVCH:=DVH; End; End;
+ Pp:=0; Cnt:=0;
+ For C:=0 To DVChans-1 Do For S:=0 To DVSegs-1 Do Begin
+  Inc(Pp,6);
+  For J:=0 To 26 Do Begin
+   If J Mod 3=0 Then Inc(Pp);
+   For M:=0 To 4 Do Begin
+    Case DVPix Of
+     2: Begin
+      X:=Shuf3[M]+J Div 3;
+      Y:=Serpent1[J]+((((S+Off[M]) Mod DVSegs) Shl 1)+C)*3;
+      DVCX[Cnt,M]:=X*2; DVCY[Cnt,M]:=Y;
+     End;
+     1: Begin
+      X:=Shuf3[M]+J Div 3;
+      Y:=Serpent1[J]+((S+Off[M]) Mod DVSegs)*3;
+      DVCX[Cnt,M]:=X*2; DVCY[Cnt,M]:=Y*2;
+     End;
+     Else Begin
+      I:=(S+Off[M]) Mod DVSegs;
+      K:=J; If (M=1) Or (M=2) Then Inc(K,3);
+      X:=LStartShuffled[M]+K Div 6;
+      Y:=Serpent2[K]+I*6;
+      If X>21 Then Y:=Y*2-I*6;
+      DVCX[Cnt,M]:=X*4; DVCY[Cnt,M]:=Y;
+     End;
+    End;
+   End;
+   DVCOff[Cnt]:=Pp; Inc(Cnt);
+   Inc(Pp,5);
+  End;
+ End;
+ DVNChunks:=Cnt;
+End;
+
+Function DVWrap(V: Int64): SmallInt;
+Begin
+ V:=V And $FFFF; If V>=32768 Then V:=V-65536; DVWrap:=V;
+End;
+
+Function DVW32(V: Int64): Int64;
+Begin
+ V:=V And $FFFFFFFF; If V>=2147483648 Then V:=V-4294967296; DVW32:=V;
+End;
+
+{ lecture des coefficients AC (dv_decode_ac): B = tampon, Len = taille en octets, Idx = index de bit, Size = taille en bits }
+Procedure DVDecodeAC(B: PEABuffer; Len: LongInt; Var Idx: LongInt; Size: LongInt; Var M: TDVMB; Var Blk: TAMVBlock);
+Var W: Int64; X,Re,Ln,Pos,Rn,Lv: LongInt;
+Begin
+ Re:=Idx; Pos:=M.Pos;
+ W:=DVPeek32(B,Len,Re);
+ If M.PCnt>0 Then Begin
+  W:=((W Shr M.PCnt) Or M.PBuf) And $FFFFFFFF; Dec(Re,M.PCnt); M.PCnt:=0;
+ End;
+ While True Do Begin
+  X:=W Shr 16; Ln:=DVTLen[X];
+  If Re+Ln>Size Then Begin
+   M.PCnt:=Size-Re; M.PBuf:=W And (Not ($FFFFFFFF Shr M.PCnt)) And $FFFFFFFF; Re:=Size; Break;
+  End;
+  Inc(Re,Ln);
+  Inc(Pos,DVTRun[X]);
+  If Pos>=64 Then Break;
+  Lv:=DVTLev[X];
+  Lv:=AVSar(Int64(Lv)*DVFact[M.Fo+Pos]+8192,14);
+  If M.Sc=0 Then Blk[AMVZig[Pos]]:=DVWrap(Lv) Else Blk[DVZig248[Pos]]:=DVWrap(Lv);
+  W:=DVPeek32(B,Len,Re);
+ End;
+ Idx:=Re; M.Pos:=Pos;
+End;
+
+{ passe de lignes de l'IDCT simple 8 bits (idctRowCondDC) }
+Procedure DVIdctRow(Var Blk: TAMVBlock; I: LongInt);
+Const W1=22725; W2=21407; W3=19266; W4=16383; W5=12873; W6=8867; W7=4520;
+Var K: Integer; A0,A1,A2,A3,B0,B1,B2,B3,V: Int64; R: Array[0..7] Of Int64;
+Begin
+ For K:=0 To 7 Do R[K]:=Blk[I*8+K];
+ If (R[1] Or R[2] Or R[3] Or R[4] Or R[5] Or R[6] Or R[7])=0 Then Begin
+  V:=SmallInt(R[0]*8); For K:=0 To 7 Do Blk[I*8+K]:=V;
+ End Else Begin
+  A0:=W4*R[0]+(1 Shl 10); A1:=A0; A2:=A0; A3:=A0;
+  Inc(A0,W2*R[2]); Inc(A1,W6*R[2]); Dec(A2,W6*R[2]); Dec(A3,W2*R[2]);
+  B0:=W1*R[1]+W3*R[3]; B1:=W3*R[1]-W7*R[3]; B2:=W5*R[1]-W1*R[3]; B3:=W7*R[1]-W5*R[3];
+  If (R[4] Or R[5] Or R[6] Or R[7])<>0 Then Begin
+   Inc(A0,W4*R[4]+W6*R[6]); Inc(A1,-W4*R[4]-W2*R[6]); Inc(A2,-W4*R[4]+W2*R[6]); Inc(A3,W4*R[4]-W6*R[6]);
+   Inc(B0,W5*R[5]+W7*R[7]); Inc(B1,-W1*R[5]-W5*R[7]); Inc(B2,W7*R[5]+W3*R[7]); Inc(B3,W3*R[5]-W1*R[7]);
+  End;
+  Blk[I*8+0]:=DVWrap(AVSar(DVW32(A0+B0),11)); Blk[I*8+7]:=DVWrap(AVSar(DVW32(A0-B0),11));
+  Blk[I*8+1]:=DVWrap(AVSar(DVW32(A1+B1),11)); Blk[I*8+6]:=DVWrap(AVSar(DVW32(A1-B1),11));
+  Blk[I*8+2]:=DVWrap(AVSar(DVW32(A2+B2),11)); Blk[I*8+5]:=DVWrap(AVSar(DVW32(A2-B2),11));
+  Blk[I*8+3]:=DVWrap(AVSar(DVW32(A3+B3),11)); Blk[I*8+4]:=DVWrap(AVSar(DVW32(A3-B3),11));
+ End;
+End;
+
+Function DVClip(V: Int64): LongInt;
+Begin If V<0 Then DVClip:=0 Else If V>255 Then DVClip:=255 Else DVClip:=V; End;
+
+Procedure DVIdct4Col(Dest: PEABuffer; Stride: LongInt; Var Blk: TAMVBlock; Base: LongInt);
+Const C1=2676; C2=1108;
+Var A0,A1,A2,A3,Z0,Z1,Z2,Z3: Int64;
+Begin
+ A0:=Blk[Base]; A1:=Blk[Base+16]; A2:=Blk[Base+32]; A3:=Blk[Base+48];
+ Z0:=(A0+A2)*2048+(1 Shl 16); Z2:=(A0-A2)*2048+(1 Shl 16);
+ Z1:=A1*C1+A3*C2; Z3:=A1*C2-A3*C1;
+ Dest^[0]:=DVClip(AVSar(Z0+Z1,17));
+ Dest^[Stride]:=DVClip(AVSar(Z2+Z3,17));
+ Dest^[2*Stride]:=DVClip(AVSar(Z2-Z3,17));
+ Dest^[3*Stride]:=DVClip(AVSar(Z0-Z1,17));
+End;
+
+Procedure DVIdct248Put(Dest: PEABuffer; Stride: LongInt; Var Blk: TAMVBlock);
+Var I,K,A0,A1: LongInt;
+Begin
+ For I:=0 To 3 Do For K:=0 To 7 Do Begin
+  A0:=Blk[I*16+K]; A1:=Blk[I*16+8+K];
+  Blk[I*16+K]:=DVWrap(A0+A1); Blk[I*16+8+K]:=DVWrap(A0-A1);
+ End;
+ For I:=0 To 7 Do DVIdctRow(Blk,I);
+ For I:=0 To 7 Do Begin
+  DVIdct4Col(PEABuffer(@Dest^[I]),2*Stride,Blk,I);
+  DVIdct4Col(PEABuffer(@Dest^[Stride+I]),2*Stride,Blk,8+I);
+ End;
+End;
+
+Procedure DVIdct88Put(Dest: PEABuffer; Stride: LongInt; Var Blk: TAMVBlock);
+Const W1=22725; W2=21407; W3=19266; W4=16383; W5=12873; W6=8867; W7=4520;
+Var I,K: Integer; A0,A1,A2,A3,B0,B1,B2,B3: Int64; R: Array[0..7] Of Int64;
+Procedure Put(Col,Row: Integer; X: Int64);
+Begin
+ Dest^[Row*Stride+Col]:=DVClip(AVSar(DVW32(X),20));
+End;
+Begin
+ For I:=0 To 7 Do DVIdctRow(Blk,I);
+ For I:=0 To 7 Do Begin
+  For K:=0 To 7 Do R[K]:=Blk[K*8+I];
+  A0:=W4*(R[0]+32); A1:=A0; A2:=A0; A3:=A0;
+  Inc(A0,W2*R[2]); Inc(A1,W6*R[2]); Dec(A2,W6*R[2]); Dec(A3,W2*R[2]);
+  B0:=W1*R[1]+W3*R[3]; B1:=W3*R[1]-W7*R[3]; B2:=W5*R[1]-W1*R[3]; B3:=W7*R[1]-W5*R[3];
+  If R[4]<>0 Then Begin Inc(A0,W4*R[4]); Dec(A1,W4*R[4]); Dec(A2,W4*R[4]); Inc(A3,W4*R[4]); End;
+  If R[5]<>0 Then Begin Inc(B0,W5*R[5]); Dec(B1,W1*R[5]); Inc(B2,W7*R[5]); Inc(B3,W3*R[5]); End;
+  If R[6]<>0 Then Begin Inc(A0,W6*R[6]); Dec(A1,W2*R[6]); Inc(A2,W2*R[6]); Dec(A3,W6*R[6]); End;
+  If R[7]<>0 Then Begin Inc(B0,W7*R[7]); Dec(B1,W5*R[7]); Inc(B2,W3*R[7]); Dec(B3,W1*R[7]); End;
+  Put(I,0,A0+B0); Put(I,1,A1+B1); Put(I,2,A2+B2); Put(I,3,A3+B3);
+  Put(I,4,A3-B3); Put(I,5,A2-B2); Put(I,6,A1-B1); Put(I,7,A0-B0);
+ End;
+End;
+
+Procedure DVIdctPut(Md: LongInt; Dest: PEABuffer; Stride: LongInt; Var Blk: TAMVBlock);
+Begin
+ If Md<>0 Then DVIdct248Put(Dest,Stride,Blk) Else DVIdct88Put(Dest,Stride,Blk);
+End;
+
+Procedure DVBitCopy(Dst: PEABuffer; Var Cnt: LongInt; Src: PEABuffer; SrcLen,From,Upto: LongInt);
+Var I,Bt: LongInt;
+Begin
+ For I:=From To Upto-1 Do Begin
+  Bt:=(EAByte(Src,SrcLen,I Shr 3) Shr (7-(I And 7))) And 1;
+  If Bt<>0 Then Dst^[Cnt Shr 3]:=Dst^[Cnt Shr 3] Or (128 Shr (Cnt And 7));
+  Inc(Cnt);
+ End;
+End;
+
+Const
+ DVBlockBits: Array[0..5] Of Word=(112,112,112,112,80,80);
+ DVQOff: Array[0..3] Of Byte=(6,3,0,1);
+
+Procedure DVDecodeSegment(C: LongInt);
+Var
+ SB: Array[0..29] Of TAMVBlock; MB: Array[0..29] Of TDVMB;
+ MbBuf: Array[0..127] Of Byte; VsBuf: Array[0..447] Of Byte;
+ MbCnt,VsCnt,Idx,Base,Cur,Quant,Dc,Mode,Cls,Sta,Ls,J,Mi,K,X,Y,Yst,Cof,Jp,Yy,Xx: LongInt;
+ MbDam: Array[0..4] Of Boolean; VsDam,Retried,Fin: Boolean;
+ Mx,My: LongInt; Yp,Cp: PEABuffer; Tmp: Array[0..63] Of Byte; Chs: LongInt; Ci: LongInt;
+Begin
+ VsDam:=False; Retried:=False; FillChar(MbDam,SizeOf(MbDam),0); Sta:=0;
+ While True Do Begin
+  FillChar(SB,SizeOf(SB),0);
+  Cur:=DVCOff[C]*80;
+  FillChar(VsBuf,SizeOf(VsBuf),0); VsCnt:=0;
+  For Mi:=0 To 4 Do Begin
+   Quant:=EAByte(DVBuf,DVBufLen,Cur+3) And 15;
+   If (EAByte(DVBuf,DVBufLen,Cur+3) Shr 4)=$E Then VsDam:=True;
+   If Mi=0 Then Sta:=EAByte(DVBuf,DVBufLen,Cur+3) Shr 4
+   Else If Sta<>(EAByte(DVBuf,DVBufLen,Cur+3) Shr 4) Then VsDam:=True;
+   Inc(Cur,4);
+   FillChar(MbBuf,SizeOf(MbBuf),0); MbCnt:=0;
+   For J:=0 To 5 Do Begin
+    Ls:=DVBlockBits[J]; Base:=Cur;
+    Dc:=(EAByte(DVBuf,DVBufLen,Base) Shl 1) Or (EAByte(DVBuf,DVBufLen,Base+1) Shr 7);
+    If Dc>=256 Then Dec(Dc,512);
+    Mode:=(EAByte(DVBuf,DVBufLen,Base+1) Shr 6) And 1;
+    Cls:=(EAByte(DVBuf,DVBufLen,Base+1) Shr 4) And 3;
+    With MB[Mi*6+J] Do Begin
+     Md:=Mode; Sc:=Mode;
+     If Cls=3 Then Fo:=2816 Else Fo:=0;
+     Fo:=Fo+Mode*1408+(Quant+DVQOff[Cls])*64;
+     Pos:=0; PCnt:=0; PBuf:=0;
+    End;
+    SB[Mi*6+J][0]:=DVWrap(Dc*4+1024);
+    Inc(Cur,Ls Shr 3);
+    Idx:=12;
+    DVDecodeAC(PEABuffer(@DVBuf^[Base]),DVBufLen-Base,Idx,Ls,MB[Mi*6+J],SB[Mi*6+J]);
+    If MB[Mi*6+J].Pos>=64 Then DVBitCopy(PEABuffer(@MbBuf),MbCnt,PEABuffer(@DVBuf^[Base]),DVBufLen-Base,Idx,Ls);
+    If (MB[Mi*6+J].Pos>=64) And (MB[Mi*6+J].Pos<127) Then Begin VsDam:=True; MbDam[Mi]:=True; End;
+   End;
+   If MbDam[Mi] Then Continue;
+   { passe 2 }
+   Idx:=0; Fin:=True;
+   For J:=0 To 5 Do Begin
+    If (MB[Mi*6+J].Pos<64) And (MbCnt-Idx>0) Then Begin
+     DVDecodeAC(PEABuffer(@MbBuf),SizeOf(MbBuf),Idx,MbCnt,MB[Mi*6+J],SB[Mi*6+J]);
+     If MB[Mi*6+J].Pos<64 Then Begin Fin:=False; Break; End;
+     If MB[Mi*6+J].Pos<127 Then Begin VsDam:=True; MbDam[Mi]:=True; End;
+    End;
+   End;
+   If Fin Then DVBitCopy(PEABuffer(@VsBuf),VsCnt,PEABuffer(@MbBuf),SizeOf(MbBuf),Idx,MbCnt);
+  End;
+  { passe 3 }
+  Idx:=0;
+  For Mi:=0 To 4 Do For J:=0 To 5 Do Begin
+   If (MB[Mi*6+J].Pos<64) And (VsCnt-Idx>0) And Not VsDam Then
+    DVDecodeAC(PEABuffer(@VsBuf),SizeOf(VsBuf),Idx,VsCnt,MB[Mi*6+J],SB[Mi*6+J]);
+   If (MB[Mi*6+J].Pos>=64) And (MB[Mi*6+J].Pos<127) Then VsDam:=True;
+  End;
+  If VsDam And Not Retried Then Begin Retried:=True; Continue; End;
+  Break;
+ End;
+ { IDCT et placement }
+ For Mi:=0 To 4 Do Begin
+  Mx:=DVCX[C,Mi]; My:=DVCY[C,Mi];
+  K:=Mi*6;
+  If (DVPix=1) Or ((DVPix=0) And (Mx>=88)) Then Yst:=DVW*8 Else Yst:=16;
+  Yp:=PEABuffer(@DVYP^[(My*DVW+Mx)*8]);
+  DVIdctPut(MB[K].Md,Yp,DVW,SB[K]);
+  If DVStype=4 Then DVIdctPut(MB[K+2].Md,PEABuffer(@Yp^[8]),DVW,SB[K+2])
+  Else Begin
+   DVIdctPut(MB[K+1].Md,PEABuffer(@Yp^[8]),DVW,SB[K+1]);
+   DVIdctPut(MB[K+2].Md,PEABuffer(@Yp^[Yst]),DVW,SB[K+2]);
+   DVIdctPut(MB[K+3].Md,PEABuffer(@Yp^[8+Yst]),DVW,SB[K+3]);
+  End;
+  Inc(K,4);
+  If DVPix=0 Then Cof:=(My*DVCW*8)+(Mx Shr 2)*8;
+  If DVPix=1 Then Cof:=((My Shr 1)*DVCW*8)+(Mx Shr 1)*8;
+  If DVPix=2 Then Cof:=(My*DVCW*8)+(Mx Shr 1)*8;
+  For Jp:=2 DownTo 1 Do Begin
+   If Jp=2 Then Cp:=PEABuffer(@DVVP^[Cof]) Else Cp:=PEABuffer(@DVUP^[Cof]);
+   If (DVPix=0) And (Mx>=88) Then Begin
+    DVIdctPut(MB[K].Md,PEABuffer(@Tmp),8,SB[K]);
+    For Yy:=0 To 7 Do Begin
+     For Xx:=0 To 3 Do Begin
+      Cp^[Yy*DVCW+Xx]:=Tmp[Yy*8+Xx];
+      Cp^[(Yy+8)*DVCW+Xx]:=Tmp[Yy*8+4+Xx];
+     End;
+    End;
+   End Else DVIdctPut(MB[K].Md,Cp,DVCW,SB[K]);
+   Inc(K);
+  End;
+ End;
+End;
+
+Var DVOut: PEABuffer; DVOutSize: LongInt;
+
+{ decode une image DV complete; Len = octets disponibles }
+Function DVDecodeFrame(B: PEABuffer; Len: LongInt): Boolean;
+Var P,Apt,Is169,Vsc,Q,I: LongInt;
+Begin
+ DVDecodeFrame:=False;
+ P:=DVFindProfile(B,Len);
+ If P=-2 Then Fail('dvvideo: profils DV100 / DVCPRO HD (1080i, 720p) non pris en charge (SD 25 et 50 Mbit/s seulement).');
+ If P<0 Then Exit;
+ DVInitTables;
+ If P<>DVProf Then Begin
+  DVSetupProfile(P);
+  If DVOut<>Nil Then FreeMem(DVOut,DVOutSize);
+  DVOutSize:=DVW*DVH+2*DVCW*DVCH; GetMem(DVOut,DVOutSize+64); FillChar(DVOut^,DVOutSize+64,0);
+  DVYP:=DVOut; DVUP:=PEABuffer(@DVOut^[DVW*DVH]); DVVP:=PEABuffer(@DVOut^[DVW*DVH+DVCW*DVCH]);
+ End;
+ If Len<DVFrameSize Then Exit;
+ DVBuf:=B; DVBufLen:=DVFrameSize;
+ Vsc:=80*5+48+5; DVIl:='p'; DVSarN:=0; DVSarD:=0;
+ If B^[Vsc]=$61 Then Begin
+  Apt:=B^[4] And 7; Q:=B^[Vsc+2] And 7;
+  Is169:=0; If (Q=2) Or ((Apt=0) And (Q=7)) Then Is169:=1;
+  If (P=0) Or (P=3) Then Begin If Is169=1 Then Begin DVSarN:=32; DVSarD:=27; End Else Begin DVSarN:=8; DVSarD:=9; End; End
+  Else Begin If Is169=1 Then Begin DVSarN:=64; DVSarD:=45; End Else Begin DVSarN:=16; DVSarD:=15; End; End;
+  If (B^[Vsc+3] And $10)<>0 Then Begin If (B^[Vsc+3] And $40)=0 Then DVIl:='t' Else DVIl:='b'; End;
+ End;
+ For I:=0 To DVNChunks-1 Do DVDecodeSegment(I);
+ DVDecodeFrame:=True;
+End;
+
+Procedure DecodeDV(Const Source,Target: String; Mode: LongInt; IsAvi: Boolean);
+Var
+ F: PEABuffer; Size,Pos,Sz,Cnt,MoviePos,Rate,Scale,RN,RD: LongInt; Started,Vids,HaveFmt,InMovie: Boolean; Tag: String[4]; Fcc: String[4];
+Function T4(At: LongInt): String;
+Var S4: String[4]; Z: Integer;
+Begin S4:=''; For Z:=0 To 3 Do S4:=S4+Chr(EAByte(F,Size,At+Z)); T4:=S4; End;
+Procedure Frame(P: PEABuffer; L: LongInt);
+Begin
+ If DVDecodeFrame(P,L) Then Begin
+  If Not Started Then Begin
+   If Not IsAvi Then Begin RN:=DVFpsN; RD:=DVFpsD; End;
+   NVBegin(Mode,Target,DVW,DVH,7,RN,RD);
+   NVSubY:=0; If DVPix=0 Then NVSubX:=2 Else NVSubX:=1; If DVPix=1 Then NVSubY:=1;
+   NVCW:=DVCW; NVCH:=DVCH;
+   If DVPix=0 Then NVYTag:='C411 XYSCSS=411' Else If DVPix=1 Then NVYTag:='C420paldv XYSCSS=420PALDV' Else NVYTag:='C422 XYSCSS=422';
+   NVIl:=DVIl; NVSarN:=DVSarN; NVSarD:=DVSarD; NVBT709:=False;
+   If IsAvi And (NVVN>0) And (NVVD>0) Then NVAviSar(DVW,DVH);
+   Started:=True;
+  End;
+  NVEmit(DVOut);
+ End Else If Started Then NVRepeat;
+End;
+Begin
+ NVLoad(Source,F,Size);
+ Started:=False; DVProf:=-1; DVOut:=Nil; NVNVid:=0; NVVN:=0; NVVD:=0; RN:=25; RD:=1;
+ If IsAvi Then Begin
+  If (T4(0)<>'RIFF') Or (T4(8)<>'AVI ') Then Fail('dvvideo: signature RIFF/AVI requise.');
+  Pos:=12; Vids:=False; HaveFmt:=False; InMovie:=False; Cnt:=0; Rate:=25; Scale:=1; MoviePos:=0;
+  While (Pos+8<=Size) And Not InMovie And (Cnt<500) Do Begin
+   Tag:=T4(Pos); Sz:=NVRL32(F,Size,Pos+4); Inc(Cnt);
+   If Sz<0 Then Break;
+   If Tag='LIST' Then Begin
+    If T4(Pos+8)='movi' Then Begin InMovie:=True; MoviePos:=Pos+12; End;
+    Inc(Pos,12);
+   End Else Begin
+    If (Tag='strh') And Not HaveFmt Then Begin
+     Vids:=T4(Pos+8)='vids';
+     If Vids Then Begin Scale:=NVRL32(F,Size,Pos+8+20); Rate:=NVRL32(F,Size,Pos+8+24); End;
+    End Else If (Tag='strf') And Vids And Not HaveFmt Then Begin
+     Fcc:=T4(Pos+8+16); HaveFmt:=True;
+    End;
+    If Tag='vprp' Then Begin NVVD:=NVRL16(F,Size,Pos+8+20); NVVN:=NVRL16(F,Size,Pos+8+22); End;
+    Inc(Pos,8+Sz+(Sz And 1));
+   End;
+  End;
+  If Not InMovie Or Not HaveFmt Then Fail('dvvideo: flux video AVI introuvable.');
+  If (Rate<=0) Or (Scale<=0) Then Begin Rate:=25; Scale:=1; End;
+  RN:=Rate; RD:=Scale; NVGcd(RN,RD);
+  Pos:=MoviePos;
+  While Pos+8<=Size Do Begin
+   Tag:=T4(Pos); Sz:=NVRL32(F,Size,Pos+4);
+   If Sz<0 Then Break;
+   If Tag='LIST' Then Begin Inc(Pos,12); Continue; End;
+   If Pos+8+Sz>Size Then Sz:=Size-Pos-8;
+   If (Tag[1]='0') And (Tag[2]='0') And ((Tag[3]='d') Or (Tag[3]='w')) And ((Tag[4]='c') Or (Tag[4]='b')) Then Begin
+    Frame(PEABuffer(@F^[Pos+8]),Sz);
+    If NVDone Then Break;
+   End;
+   Inc(Pos,8+Sz+(Sz And 1));
+  End;
+ End Else Begin
+  Pos:=0;
+  If DVFindProfile(F,Size)=-2 Then Fail('dvvideo: profils DV100 / DVCPRO HD (1080i, 720p) non pris en charge (SD 25 et 50 Mbit/s seulement).');
+  If DVFindProfile(F,Size)<0 Then Fail('dvvideo: profil DV introuvable.');
+  DVSetupProfile(DVFindProfile(F,Size)); Sz:=DVFrameSize; DVProf:=-1;
+  While Pos+Sz<=Size Do Begin
+   Frame(PEABuffer(@F^[Pos]),Sz);
+   If NVDone Then Break;
+   Inc(Pos,Sz);
+  End;
+ End;
+ If DVOut<>Nil Then FreeMem(DVOut,DVOutSize);
+ FreeMem(F,Size+64);
+ NVFinish('dvvideo');
+End;
+
+
+{ ---- DV: encodeur (libavcodec/dvenc.c, dv_tablegen.h, libavformat/dvenc.c), profils SD 25 et 50 Mbit/s ---- }
+Type
+ TDVEB=Record
+  AreaQ,BitSize: Array[0..3] Of LongInt; Prev: Array[0..4] Of LongInt; CurAc,Cno,DctMode: LongInt;
+  Mb: Array[0..63] Of LongInt; Next,Sign: Array[0..63] Of Byte; PCnt: LongInt; PBuf: Int64;
+ End;
+Var
+ DEnV: Array[0..63,0..511] Of LongInt; DEnS: Array[0..63,0..511] Of Byte; DEnReady: Boolean;
+ DEnOut: PEABuffer; DEnPB: Array[0..29] Of Record Base,Size,Bits: LongInt; End;
+ DEnQno: Array[0..4] Of LongInt;
+ DEnAspect: LongInt; DEnTff: Boolean;
+ DEnYP,DEnUP,DEnVP: PEABuffer;
+
+Procedure DEnInitMap;
+Var I,J,K: LongInt; Code,Cur: Int64; R,L,Sz: LongInt;
+Begin
+ If DEnReady Then Exit;
+ FillChar(DEnV,SizeOf(DEnV),0); FillChar(DEnS,SizeOf(DEnS),0);
+ Code:=0;
+ For I:=0 To 408 Do Begin
+  Cur:=Code Shr (32-DVVLen[I]); Code:=Code+(Int64(1) Shl (32-DVVLen[I]));
+  R:=DVVRun[I]; L:=DVVLev[I];
+  If R>=64 Then Continue;
+  If DEnS[R,L]<>0 Then Continue;
+  If L<>0 Then Begin DEnV[R,L]:=Cur Shl 1; DEnS[R,L]:=DVVLen[I]+1; End
+  Else Begin DEnV[R,L]:=Cur; DEnS[R,L]:=DVVLen[I]; End;
+ End;
+ For I:=0 To 63 Do For J:=1 To 255 Do
+  If DEnS[I,J]=0 Then Begin
+   DEnV[I,J]:=DEnV[0,J] Or (DEnV[I-1,0] Shl DEnS[0,J]);
+   DEnS[I,J]:=DEnS[I-1,0]+DEnS[0,J];
+  End;
+ DEnReady:=True;
+End;
+
+Function DEnRl2Vlc(Run,Lev,Sign: LongInt; Var Vlc: Int64): LongInt;
+Begin
+ Vlc:=DEnV[Run,Lev] Or Sign; DEnRl2Vlc:=DEnS[Run,Lev];
+End;
+
+Function DEnSize(Run,Lev: LongInt): LongInt;
+Begin DEnSize:=DEnS[Run,Lev]; End;
+
+Const
+ DEnAreaStart: Array[0..4] Of Byte=(1,6,21,43,64);
+
+Procedure DEnPut(J,N: LongInt; V: Int64);
+Var I,P: LongInt;
+Begin
+ With DEnPB[J] Do For I:=N-1 DownTo 0 Do Begin
+  P:=Base+(Bits Shr 3);
+  If (V Shr I) And 1<>0 Then DEnOut^[P]:=DEnOut^[P] Or (128 Shr (Bits And 7))
+  Else DEnOut^[P]:=DEnOut^[P] And Not (128 Shr (Bits And 7));
+  Inc(Bits);
+ End;
+End;
+
+Function DEnLeft(J: LongInt): LongInt;
+Begin DEnLeft:=DEnPB[J].Size*8-DEnPB[J].Bits; End;
+
+Function DEnEncodeAC(Var Bi: TDVEB; Pool,PEnd: LongInt): LongInt;
+Var Pb,Size,BitsLeft,Prev: LongInt; Vlc: Int64;
+Begin
+ Pb:=Pool; Size:=Bi.PCnt; Vlc:=Bi.PBuf; Bi.PCnt:=0; Bi.PBuf:=0;
+ While True Do Begin
+  While Size>DEnLeft(Pb) Do Begin
+   BitsLeft:=DEnLeft(Pb);
+   If BitsLeft<>0 Then Begin
+    Dec(Size,BitsLeft); DEnPut(Pb,BitsLeft,Vlc Shr Size); Vlc:=Vlc And ((Int64(1) Shl Size)-1);
+   End;
+   If Pb+1>=PEnd Then Begin Bi.PCnt:=Size; Bi.PBuf:=Vlc; DEnEncodeAC:=Pb; Exit; End;
+   Inc(Pb);
+  End;
+  DEnPut(Pb,Size,Vlc);
+  If Bi.CurAc>=64 Then Break;
+  Prev:=Bi.CurAc; Bi.CurAc:=Bi.Next[Prev];
+  If Bi.CurAc<64 Then Size:=DEnRl2Vlc(Bi.CurAc-Prev-1,Bi.Mb[Bi.CurAc],Bi.Sign[Bi.CurAc],Vlc)
+  Else Begin Size:=4; Vlc:=6; End;
+ End;
+ DEnEncodeAC:=Pb;
+End;
+
+{ bloc 8x8 -> DCT -> classe et tailles (dv_init_enc_block + dv_set_class_number_sd), Src = Nil pour un bloc factice }
+Function DEnInitBlock(Var Bi: TDVEB; Src: PEABuffer; Stride,Chroma: LongInt): LongInt;
+Const Dz=7; Thr=14;
+Var Blk: TDEBlk; I,R,C,Area,Prev,Max,Level,Q,A: LongInt;
+Begin
+ Bi.AreaQ[0]:=0; Bi.AreaQ[1]:=0; Bi.AreaQ[2]:=0; Bi.AreaQ[3]:=0;
+ Bi.PCnt:=0; Bi.PBuf:=0; Bi.CurAc:=0; Bi.DctMode:=0;
+ If Src<>Nil Then Begin
+  For R:=0 To 7 Do For C:=0 To 7 Do Blk[R*8+C]:=Src^[R*Stride+C];
+  DEFdct(Blk);
+ End Else FillChar(Blk,SizeOf(Blk),0);
+ Bi.Mb[0]:=Blk[0];
+ Max:=-1; Prev:=0;
+ For Area:=0 To 3 Do Begin
+  Bi.Prev[Area]:=Prev; Bi.BitSize[Area]:=1;
+  For I:=DEnAreaStart[Area] To DEnAreaStart[Area+1]-1 Do Begin
+   Level:=Blk[AMVZig[I]];
+   If (Level+Dz<0) Or (Level+Dz>Thr) Then Begin
+    If Level<0 Then Bi.Sign[I]:=1 Else Bi.Sign[I]:=0;
+    Level:=AVSar(DVW32(Int64(Abs(Level))*DVW88[I]+(Int64(1) Shl 21)),22);
+    If Level=0 Then Continue;
+    Bi.Mb[I]:=Level;
+    If Level>Max Then Max:=Level;
+    Inc(Bi.BitSize[Area],DEnSize(I-Prev-1,Level));
+    Bi.Next[Prev]:=I; Prev:=I;
+   End;
+  End;
+ End;
+ Bi.Next[Prev]:=64;
+ Bi.Cno:=0;
+ While True Do Begin
+  Case Bi.Cno Of 0,1: Q:=-1; 2: Q:=255; Else Q:=65535; End;
+  If Max>Q Then Inc(Bi.Cno) Else Break;
+ End;
+ Inc(Bi.Cno,Chroma);
+ If Bi.Cno>=3 Then Begin
+  Bi.Cno:=3; Prev:=0; I:=Bi.Next[Prev];
+  For Area:=0 To 3 Do Begin
+   Bi.Prev[Area]:=Prev; Bi.BitSize[Area]:=1;
+   While I<DEnAreaStart[Area+1] Do Begin
+    Bi.Mb[I]:=Bi.Mb[I] Shr 1;
+    If Bi.Mb[I]<>0 Then Begin
+     Inc(Bi.BitSize[Area],DEnSize(I-Prev-1,Bi.Mb[I]));
+     Bi.Next[Prev]:=I; Prev:=I;
+    End;
+    I:=Bi.Next[I];
+   End;
+  End;
+  Bi.Next[Prev]:=I;
+ End;
+ DEnInitBlock:=Bi.BitSize[0]+Bi.BitSize[1]+Bi.BitSize[2]+Bi.BitSize[3];
+End;
+
+Const DEnTotalAcBits=2680;
+Type PDVEB=^TDVEB;
+Var DEnBlks: Array[0..29] Of TDVEB;
+
+Procedure DEnGuessQnos;
+Var Size: Array[0..4] Of LongInt; I,J,K,A,Prev,A2,Bn,N: LongInt; B: PDVEB; Tot,Av: LongInt;
+Begin
+ For I:=0 To 4 Do Size[I]:=1 Shl 24;
+ Repeat
+  Bn:=0;
+  For I:=0 To 4 Do Begin
+   If DEnQno[I]=0 Then Continue;
+   Dec(DEnQno[I]);
+   Size[I]:=0;
+   For J:=0 To 5 Do Begin
+    B:=@DEnBlks[Bn];
+    For A:=0 To 3 Do Begin
+     If B^.AreaQ[A]<>DVQShift[(DEnQno[I]+DVQOff[B^.Cno])*4+A] Then Begin
+      B^.BitSize[A]:=1; Inc(B^.AreaQ[A]);
+      Prev:=B^.Prev[A];
+      K:=B^.Next[Prev];
+      While K<DEnAreaStart[A+1] Do Begin
+       B^.Mb[K]:=B^.Mb[K] Shr 1;
+       If B^.Mb[K]<>0 Then Begin
+        Inc(B^.BitSize[A],DEnSize(K-Prev-1,B^.Mb[K])); Prev:=K;
+       End Else Begin
+        If (B^.Next[K]>=DEnAreaStart[A+1]) And (B^.Next[K]<64) Then Begin
+         A2:=A+1;
+         While B^.Next[K]>=DEnAreaStart[A2+1] Do Begin B^.Prev[A2]:=Prev; Inc(A2); End;
+         Inc(B^.BitSize[A2],DEnSize(B^.Next[K]-Prev-1,B^.Mb[B^.Next[K]])-DEnSize(B^.Next[K]-K-1,B^.Mb[B^.Next[K]]));
+         B^.Prev[A2]:=Prev;
+        End;
+        B^.Next[Prev]:=B^.Next[K];
+       End;
+       K:=B^.Next[K];
+      End;
+      B^.Prev[A+1]:=Prev;
+     End;
+     Inc(Size[I],B^.BitSize[A]);
+    End;
+    Inc(Bn);
+   End;
+   If DEnTotalAcBits>=Size[0]+Size[1]+Size[2]+Size[3]+Size[4] Then Exit;
+  End;
+ Until (DEnQno[0] Or DEnQno[1] Or DEnQno[2] Or DEnQno[3] Or DEnQno[4])=0;
+ A:=2;
+ While (A=2) Or (DEnTotalAcBits<Size[0]) Do Begin
+  B:=@DEnBlks[0]; Size[0]:=5*6*4;
+  For J:=0 To 29 Do Begin
+   B:=@DEnBlks[J];
+   Prev:=B^.Prev[0];
+   K:=B^.Next[Prev];
+   While K<64 Do Begin
+    If (B^.Mb[K]<A) And (B^.Mb[K]>-A) Then B^.Next[Prev]:=B^.Next[K]
+    Else Begin Inc(Size[0],DEnSize(K-Prev-1,B^.Mb[K])); Prev:=K; End;
+    K:=B^.Next[K];
+   End;
+  End;
+  A:=A+A;
+ End;
+End;
+
+Procedure DEnWritePack(Id: LongInt; At: LongInt);
+Var Apt,Fs: LongInt;
+Begin
+ If DVPix=1 Then Apt:=0 Else Apt:=1;
+ If DEnTff Then Fs:=0 Else Fs:=$40;
+ DEnOut^[At]:=Id;
+ Case Id Of
+  $3F,$BF: Begin
+   DEnOut^[At+1]:=$F8 Or Apt; DEnOut^[At+2]:=$78 Or Apt; DEnOut^[At+3]:=$78 Or Apt; DEnOut^[At+4]:=$78 Or Apt;
+  End;
+  $60: Begin
+   DEnOut^[At+1]:=$FF; DEnOut^[At+2]:=$FF; DEnOut^[At+3]:=$C0 Or (DVDsf Shl 5) Or DVStype; DEnOut^[At+4]:=$FF;
+  End;
+  $61: Begin
+   DEnOut^[At+1]:=$3F; DEnOut^[At+2]:=$C8 Or DEnAspect; DEnOut^[At+3]:=$BC Or Fs; DEnOut^[At+4]:=$FF;
+  End;
+  Else Begin DEnOut^[At+1]:=$FF; DEnOut^[At+2]:=$FF; DEnOut^[At+3]:=$FF; DEnOut^[At+4]:=$FF; End;
+ End;
+End;
+
+Procedure DEnDifId(T,Chan,Seq,Num,At: LongInt);
+Begin
+ DEnOut^[At]:=T;
+ DEnOut^[At+1]:=(Seq Shl 4) Or ((Chan And 1) Shl 3) Or ((1-(Chan Shr 1)) Shl 2) Or 3;
+ DEnOut^[At+2]:=Num;
+End;
+
+Procedure DEnFormatFrame;
+Var Chan,I,J,K,At: LongInt; Fr: LongInt;
+Begin
+ At:=0;
+ For Chan:=0 To DVChans-1 Do For I:=0 To DVSegs-1 Do Begin
+  FillChar(DEnOut^[At],80*6,$FF);
+  DEnDifId($1F,Chan,I,0,At); Inc(At,3);
+  If DVDsf<>0 Then DEnWritePack($BF,At) Else DEnWritePack($3F,At);
+  Inc(At,5+72);
+  If I<DVSegs Div 2 Then Fr:=1 Else Fr:=0;
+  For J:=0 To 1 Do Begin
+   DEnDifId($3F,Chan,I,J,At); Inc(At,3);
+   For K:=0 To 5 Do Begin
+    If (K=0) Or (K=6) Then DEnOut^[At]:=(Fr Shl 7) Or $0F
+    Else If K=11 Then DEnOut^[At]:=(Fr Shl 7) Or $7F
+    Else DEnOut^[At]:=(Fr Shl 7) Or $0F;
+    DEnOut^[At+1]:=$F0 Or (K And $0F); DEnOut^[At+2]:=$FF;
+    Inc(At,3+5);
+   End;
+   Inc(At,29);
+  End;
+  For J:=0 To 2 Do Begin
+   DEnDifId($56,Chan,I,J,At); Inc(At,3);
+   DEnWritePack($60,At); Inc(At,5); DEnWritePack($61,At); Inc(At,5); Inc(At,7*5);
+   DEnWritePack($60,At); Inc(At,5); DEnWritePack($61,At); Inc(At,5); Inc(At,4*5+2);
+  End;
+  For J:=0 To 134 Do Begin
+   If J Mod 15=0 Then Begin
+    FillChar(DEnOut^[At],80,$FF);
+    DEnDifId($76,Chan,I,J Div 15,At); Inc(At,3+77);
+   End;
+   DEnDifId($96,Chan,I,J,At); Inc(At,3+77);
+  End;
+ End;
+End;
+
+Procedure DEnSegment(C: LongInt);
+Var
+ Dif,P,Mi,I,J,Mx,My,Yst,Cof,Start,Pb,Sz,Q: LongInt; Eb: LongInt; Vs: LongInt; Yp,Cp: PEABuffer; Scratch: Array[0..127] Of Byte; Jp: LongInt; Chm: LongInt;
+ Qp: LongInt;
+Begin
+ Dif:=DVCOff[C]*80; P:=Dif; Eb:=0; Vs:=0;
+ For Mi:=0 To 4 Do Begin
+  Mx:=DVCX[C,Mi]; My:=DVCY[C,Mi];
+  DEnQno[Mi]:=15;
+  If (DVPix=1) Or ((DVPix=0) And (Mx>=88)) Then Yst:=DVW*8 Else Yst:=16;
+  Yp:=PEABuffer(@DEnYP^[(My*DVW+Mx)*8]);
+  If DVStype=4 Then Begin
+   Inc(Vs,DEnInitBlock(DEnBlks[Eb+0],Yp,DVW,0));
+   Inc(Vs,DEnInitBlock(DEnBlks[Eb+1],Nil,DVW,0));
+   Inc(Vs,DEnInitBlock(DEnBlks[Eb+2],PEABuffer(@Yp^[8]),DVW,0));
+   Inc(Vs,DEnInitBlock(DEnBlks[Eb+3],Nil,DVW,0));
+  End Else Begin
+   Inc(Vs,DEnInitBlock(DEnBlks[Eb+0],Yp,DVW,0));
+   Inc(Vs,DEnInitBlock(DEnBlks[Eb+1],PEABuffer(@Yp^[8]),DVW,0));
+   Inc(Vs,DEnInitBlock(DEnBlks[Eb+2],PEABuffer(@Yp^[Yst]),DVW,0));
+   Inc(Vs,DEnInitBlock(DEnBlks[Eb+3],PEABuffer(@Yp^[8+Yst]),DVW,0));
+  End;
+  Inc(Eb,4);
+  If DVPix=1 Then Cof:=((My Shr 1)*DVCW+(Mx Shr 1))*8
+  Else If DVPix=0 Then Cof:=(My*DVCW+(Mx Shr 2))*8
+  Else Cof:=(My*DVCW+(Mx Shr 1))*8;
+  For Jp:=2 DownTo 1 Do Begin
+   If Jp=2 Then Cp:=PEABuffer(@DEnVP^[Cof]) Else Cp:=PEABuffer(@DEnUP^[Cof]);
+   If (DVPix=0) And (Mx>=88) Then Begin
+    For I:=0 To 7 Do For J:=0 To 3 Do Begin
+     Scratch[I*16+J]:=Cp^[I*DVCW+J];
+     Scratch[I*16+4+J]:=Cp^[(I+8)*DVCW+J];
+    End;
+    Inc(Vs,DEnInitBlock(DEnBlks[Eb],PEABuffer(@Scratch),16,1));
+   End Else Inc(Vs,DEnInitBlock(DEnBlks[Eb],Cp,DVCW,1));
+   Inc(Eb);
+  End;
+ End;
+ If DEnTotalAcBits<Vs Then DEnGuessQnos;
+ { codage DIF }
+ J:=0; Qp:=0;
+ While J<30 Do Begin
+  Start:=J;
+  DEnOut^[P+3]:=DEnQno[Qp]; Inc(Qp);
+  Inc(P,4);
+  For I:=0 To 5 Do Begin
+   Sz:=DVBlockBits[I] Shr 3;
+   DEnPB[J].Base:=P; DEnPB[J].Size:=Sz; DEnPB[J].Bits:=0;
+   FillChar(DEnOut^[P],Sz,0);
+   DEnPut(J,9,AVSar(AVSar(DEnBlks[J].Mb[0],3)-1024+2,2));
+   DEnPut(J,1,DEnBlks[J].DctMode);
+   DEnPut(J,2,DEnBlks[J].Cno);
+   DEnEncodeAC(DEnBlks[J],J,J+1);
+   Inc(P,Sz); Inc(J);
+  End;
+  Pb:=Start;
+  For I:=0 To 5 Do If DEnBlks[Start+I].PCnt<>0 Then Pb:=DEnEncodeAC(DEnBlks[Start+I],Pb,Start+6);
+ End;
+ Pb:=0;
+ For J:=0 To 29 Do Begin
+  If DEnBlks[J].PCnt<>0 Then Pb:=DEnEncodeAC(DEnBlks[J],Pb,30);
+  If DEnBlks[J].PCnt<>0 Then Fail('dvvideo: debordement du flux AC.');
+ End;
+ For J:=0 To 29 Do Begin
+  Q:=DEnPB[J].Bits;
+  { fin de l''octet courant remplie de zeros (flush), le reste a 0xFF }
+  Q:=(Q+7) Shr 3;
+  If Q<DEnPB[J].Size Then FillChar(DEnOut^[DEnPB[J].Base+Q],DEnPB[J].Size-Q,$FF);
+ End;
+End;
+
+{ injection de metadonnees du muxeur dv (libavformat/dvenc.c, dv_inject_metadata), sans audio }
+Procedure DEnInject(Frames: LongInt);
+Var Buf,J,K,Seq,Segn,Fps,Tc,Ff,Ss,Mm,Hh,Ct: LongInt;
+Procedure RecDate(At: LongInt);
+Begin
+ DEnOut^[At]:=$62; DEnOut^[At+1]:=$FF;
+ DEnOut^[At+2]:=$C1;
+ DEnOut^[At+3]:=1;
+ DEnOut^[At+4]:=$70;
+End;
+Procedure RecTime(At: LongInt);
+Var Sec,Mi,Ho: LongInt;
+Begin
+ Sec:=Ct Mod 60; Mi:=(Ct Div 60) Mod 60; Ho:=(Ct Div 3600) Mod 24;
+ DEnOut^[At]:=$63; DEnOut^[At+1]:=$FF;
+ DEnOut^[At+2]:=$80 Or ((Sec Div 10) Shl 4) Or (Sec Mod 10);
+ DEnOut^[At+3]:=$80 Or ((Mi Div 10) Shl 4) Or (Mi Mod 10);
+ DEnOut^[At+4]:=$C0 Or ((Ho Div 10) Shl 4) Or (Ho Mod 10);
+End;
+Procedure TimeCode(At: LongInt);
+Begin
+ DEnOut^[At]:=$13;
+ DEnOut^[At+1]:=((Tc Shr 24) And $FF); DEnOut^[At+2]:=((Tc Shr 16) And $FF); DEnOut^[At+3]:=((Tc Shr 8) And $FF); DEnOut^[At+4]:=Tc And $FF;
+End;
+Begin
+ If DVFpsN=25 Then Fps:=25 Else Fps:=30;
+ Ff:=Frames Mod Fps; Ss:=(Frames Div Fps) Mod 60; Mm:=(Frames Div (Fps*60)) Mod 60; Hh:=(Frames Div (Fps*3600)) Mod 24;
+ Tc:=((Ff Div 10) Shl 28) Or ((Ff Mod 10) Shl 24) Or ((Ss Div 10) Shl 20) Or ((Ss Mod 10) Shl 16) Or ((Mm Div 10) Shl 12) Or ((Mm Mod 10) Shl 8) Or ((Hh Div 10) Shl 4) Or (Hh Mod 10);
+ Tc:=Tc Or (1 Shl 23) Or (1 Shl 15) Or (1 Shl 7) Or (1 Shl 6);
+ Ct:=Frames*DVFpsD Div DVFpsN;
+ Buf:=0; Seq:=0;
+ While Buf<DVFrameSize Do Begin
+  J:=80;
+  While J<80*3 Do Begin
+   K:=6; While K<6*8 Do Begin TimeCode(Buf+J+K); Inc(K,8); End;
+   Segn:=(Buf Div (DVFrameSize Div (DVSegs*DVChans))) Mod DVSegs;
+   If Segn>5 Then Begin RecDate(Buf+J+14); RecTime(Buf+J+22); RecDate(Buf+J+38); RecTime(Buf+J+46); End;
+   Inc(J,80);
+  End;
+  J:=80*3+3;
+  While J<80*6 Do Begin
+   RecDate(Buf+J+5*2); RecTime(Buf+J+5*3); RecDate(Buf+J+5*11); RecTime(Buf+J+5*12);
+   Inc(J,80);
+  End;
+  Inc(Buf,150*80); Inc(Seq);
+ End;
+End;
+
+Procedure EncodeDV(Const Source,Target: String; IsAvi: Boolean; Const SarOverride: String);
+Var
+ H: Array[0..255] Of Byte; Limit,Cur,W,Hh,FN,FD,Frames,I,K,Q,Code,P,Z,Used,OutPos,Fix,SarN,SarD,Chm: LongInt;
+ Y,U,V: PEABuffer; Line,Token: String; OutB: Array[0..255] Of Byte; Sizes: PALLong; Il: Char; Fmt: String; Dar: Double; Nf,Vsz,Ar,Br: LongInt;
+Procedure PutB(X: LongInt);Begin OutB[Used]:=X And 255; Inc(Used); Inc(OutPos); If Used>=250 Then Begin WriteBytes(OutB,Used); Used:=0; End; End;
+Procedure PutL16(X: LongInt);Begin PutB(X); PutB(X Shr 8); End;
+Procedure PutL32(X: LongInt);Begin PutL16(X); PutL16(X Shr 16); End;
+Procedure PutTag(Const T: String);
+Var Z2: Integer;
+Begin For Z2:=1 To 4 Do PutB(Ord(T[Z2])); End;
+Procedure Flush;Begin If Used>0 Then Begin WriteBytes(OutB,Used); Used:=0; End; End;
+Procedure Patch32(At,Value: LongInt);
+Var Z2: Integer; Code2: Integer; B4: Array[0..3] Of Byte;
+Begin
+ Flush;
+ {$I-}Seek(ActiveOutput,At); Code2:=IOResult;{$I+}
+ If Code2<>0 Then Fail('dvvideo: positionnement AVI impossible.');
+ For Z2:=0 To 3 Do Begin B4[Z2]:=Value And 255; Value:=Value Shr 8; End;
+ WriteBytes(B4,4);
+End;
+Function ReadLine: String;
+Var R: String;
+Begin
+ R:='';
+ While Cur<Limit Do Begin ReadAt(Cur,H,1); Inc(Cur); If H[0]=10 Then Break; If Length(R)<250 Then R:=R+Chr(H[0]); End;
+ ReadLine:=R;
+End;
+Procedure ReadPlane(Plane: PEABuffer; At,Count: LongInt);
+Var Nn,Qn: LongInt;
+Begin
+ Nn:=0;
+ While Nn<Count Do Begin
+  If Count-Nn>4096 Then Qn:=4096 Else Qn:=Count-Nn;
+  ReadAt(At+Nn,Plane^[Nn],Qn); Inc(Nn,Qn);
+ End;
+End;
+Begin
+ DVInitTables; DEnInitMap;
+ OpenRead(Source); Limit:=InputSize; Cur:=0;
+ Line:=ReadLine;
+ If Copy(Line,1,9)<>'YUV4MPEG2' Then Fail('dvvideo: entree Y4M requise.');
+ W:=0; Hh:=0; FN:=25; FD:=1; Fmt:='420'; Il:='p'; SarN:=0; SarD:=0;
+ Line:=Copy(Line,11,255);
+ While Line<>'' Do Begin
+  K:=Pos(' ',Line); If K=0 Then K:=Length(Line)+1;
+  Token:=Copy(Line,1,K-1); Line:=Copy(Line,K+1,255);
+  If Token='' Then Continue;
+  Case Token[1] Of
+   'W': Val(Copy(Token,2,20),W,Code);
+   'H': Val(Copy(Token,2,20),Hh,Code);
+   'F': Begin K:=Pos(':',Token); If K>0 Then Begin Val(Copy(Token,2,K-2),FN,Code); Val(Copy(Token,K+1,20),FD,Code); End; End;
+   'A': Begin K:=Pos(':',Token); If K>0 Then Begin Val(Copy(Token,2,K-2),SarN,Code); Val(Copy(Token,K+1,20),SarD,Code); End; End;
+   'I': Il:=Token[2];
+   'C': Begin
+         If Token='C411' Then Fmt:='411'
+         Else If Token='C422' Then Fmt:='422'
+         Else If (Token='C420') Or (Token='C420jpeg') Or (Token='C420mpeg2') Or (Token='C420paldv') Then Fmt:='420'
+         Else Fail('dvvideo: Y4M 4:1:1 (NTSC 720x480), 4:2:0 (PAL 720x576) ou 4:2:2 (DV50) requis.');
+        End;
+  End;
+ End;
+ If W<>720 Then Fail('dvvideo: largeur 720 requise (profils DV SD).');
+ If (Hh=480) And (Fmt='411') Then P:=0
+ Else If (Hh=576) And (Fmt='420') Then P:=1
+ Else If (Hh=576) And (Fmt='411') Then P:=2
+ Else If (Hh=480) And (Fmt='422') Then P:=3
+ Else If (Hh=576) And (Fmt='422') Then P:=4
+ Else Fail('dvvideo: profil DV introuvable (NTSC 720x480 yuv411p / yuv422p, PAL 720x576 yuv420p / yuv411p / yuv422p).');
+ DVSetupProfile(P);
+ If (FN<>DVFpsN) Or (FD<>DVFpsD) Then Fail('dvvideo: cadence requise 30000/1001 (NTSC) ou 25 (PAL) pour ce profil.');
+ DEnTff:=(Il='t');
+ DEnAspect:=0;
+ If (SarN>0) And (SarD>0) Then Begin
+  Dar:=SarN/SarD*W/Hh*10;
+  If Trunc(Dar)>=17 Then DEnAspect:=2;
+ End;
+ GetMem(Y,W*Hh+64); GetMem(U,DVCW*DVCH+64); GetMem(V,DVCW*DVCH+64);
+ GetMem(DEnOut,DVFrameSize+64); GetMem(Sizes,1048576*4);
+ DEnYP:=Y; DEnUP:=U; DEnVP:=V;
+ Frames:=0; OutPos:=0; Used:=0;
+ OpenWrite(Target);
+ If IsAvi Then Begin
+  Nf:=1; If (Il='t') Or (Il='b') Then Nf:=2;
+  Vsz:=68; If Nf=2 Then Vsz:=100;
+  PutTag('RIFF'); PutL32(0); PutTag('AVI '); PutTag('LIST'); PutL32(192+8+Vsz); PutTag('hdrl');
+  PutTag('avih'); PutL32(56); PutL32(Round(1000000.0*FD/FN)); PutL32(0); PutL32(0); PutL32($10); PutL32(0); PutL32(0); PutL32(1);
+  PutL32(DVFrameSize); PutL32(W); PutL32(Hh); PutL32(0); PutL32(0); PutL32(0); PutL32(0);
+  PutTag('LIST'); PutL32(116+8+Vsz); PutTag('strl');
+  PutTag('strh'); PutL32(56); PutTag('vids'); PutTag('dvsd');
+  PutL32(0); PutL16(0); PutL16(0); PutL32(0); PutL32(FD); PutL32(FN); PutL32(0); PutL32(0); PutL32(DVFrameSize); PutL32(-1); PutL32(0);
+  PutL16(0); PutL16(0); PutL16(W); PutL16(Hh);
+  PutTag('strf'); PutL32(40); PutL32(40); PutL32(W); PutL32(Hh); PutL16(1); PutL16(24);
+  PutTag('dvsd');
+  PutL32(DVFrameSize); PutL32(0); PutL32(0); PutL32(0); PutL32(0);
+  PutTag('vprp'); PutL32(Vsz); PutL32(0); PutL32(0); PutL32((FN+FD Div 2) Div FD); PutL32(W); PutL32(Hh);
+  If (SarN>0) And (SarD>0) Then Begin Ar:=W*SarN; Br:=Hh*SarD; End Else Begin Ar:=W; Br:=Hh; End;
+  NVGcd(Ar,Br); PutL32((Ar Shl 16) Or Br); PutL32(W); PutL32(Hh); PutL32(Nf);
+  For K:=0 To Nf-1 Do Begin
+   PutL32(Hh Div Nf); PutL32(W); PutL32(Hh Div Nf); PutL32(W); PutL32(0); PutL32(0); PutL32(0); PutL32(K);
+  End;
+  PutTag('LIST'); PutL32(0); PutTag('movi'); Flush;
+ End;
+ While Cur<Limit Do Begin
+  Line:=ReadLine;
+  If Copy(Line,1,5)<>'FRAME' Then Fail('dvvideo: marqueur FRAME requis.');
+  If W*Hh+2*DVCW*DVCH>Limit-Cur Then Break;
+  ReadPlane(Y,Cur,W*Hh); ReadPlane(U,Cur+W*Hh,DVCW*DVCH); ReadPlane(V,Cur+W*Hh+DVCW*DVCH,DVCW*DVCH);
+  Inc(Cur,W*Hh+2*DVCW*DVCH);
+  FillChar(DEnOut^,DVFrameSize,0);
+  DEnFormatFrame;
+  For I:=0 To DVNChunks-1 Do DEnSegment(I);
+  If Not IsAvi Then DEnInject(Frames);
+  If IsAvi Then Begin PutTag('00dc'); PutL32(DVFrameSize); Flush; End;
+  K:=0;
+  While K<DVFrameSize Do Begin
+   If DVFrameSize-K>32768 Then Q:=32768 Else Q:=DVFrameSize-K;
+   WriteBytes(DEnOut^[K],Q); Inc(K,Q);
+  End;
+  Inc(OutPos,DVFrameSize);
+  Sizes^[Frames]:=DVFrameSize;
+  Inc(Frames);
+  If Frames>=1048576 Then Break;
+ End;
+ If Frames=0 Then Fail('dvvideo: aucune image Y4M.');
+ If IsAvi Then Begin
+  Fix:=OutPos;
+  PutTag('idx1'); PutL32(16*Frames); K:=4;
+  For I:=0 To Frames-1 Do Begin
+   PutTag('00dc'); PutL32($10); PutL32(K); PutL32(Sizes^[I]); Inc(K,8+Sizes^[I]);
+  End;
+  Flush;
+  Patch32(4,OutPos-8); Patch32(216+8+Vsz,Fix-220-8-Vsz); Patch32(48,Frames); Patch32(140,Frames);
+ End;
+ CloseRead; CloseWrite;
+End;
+
 Var AVSWantBMP: Boolean;
 
 Procedure DecodeAVS(Const Source,Target: String; PNGMode: Boolean);
@@ -26130,6 +27272,7 @@ Begin
  WriteLn(' D  dts             DTS Coherent Acoustics brut (core 16 bits BE/LE, 14 bits; sans extensions) vers WAV (jusqu''a 5.1)/MP3 stereo/...');
  WriteLn(' D  oma             Sony OpenMG (ATRAC3 non chiffre); WAV 0x270 (ATRAC3) vers WAV/MP3/...');
  WriteLn(' DE avi (asv1/asv2) AVI ASUS V1/V2: decodage vers Y4M, encodage Y4M -c:v asv1|asv2');
+ WriteLn(' DE dv              DV (Digital Video) .dv ou AVI dvsd: SD 25 et 50 Mbit/s (NTSC 4:1:1, PAL 4:2:0/4:1:1, DV50 4:2:2), video seule; decodage vers Y4M/PNG/BMP, encodage Y4M -c:v dvvideo (sortie .dv ou AVI)');
  WriteLn(' DE dnxhd           VC3/DNxHD, DNxHR (.dnxhd ou AVI; encodage Y4M progressif: -profile:v dnxhr_lb|sq|hq|hqx|444, ou -b:v en Mbit/s pour DNxHD)');
  WriteLn(' D  avi (cljr, cyuv, cinepak)  AVI Cirrus Logic AccuPak, Creative YUV, Cinepak vers Y4M/PNG/BMP');
  WriteLn(' D  avs             Argonaut Creature Shock AVS (video vers Y4M/PNG)');
@@ -26428,6 +27571,7 @@ BEGIN
    WriteLn('D A    cook            COOK');
    WriteLn('D A    dca             DCA (DTS Coherent Acoustics)');
    WriteLn('DEV    dnxhd           VC3/DNxHD');
+   WriteLn('DEV    dvvideo         DV (Digital Video)');
    WriteLn('D V    cyuv            Creative YUV (CYUV)');
    WriteLn('D A    atrac3          ATRAC3 (Adaptive TRansform Acoustic Coding 3)');
    WriteLn('DEV    asv1            ASUS V1');
@@ -26512,8 +27656,8 @@ BEGIN
    VideoCodec:=Lower(NextArgument);
    If (VideoCodec<>'png') And (VideoCodec<>'gif') And (VideoCodec<>'copy') And
     (VideoCodec<>'ffv1') And (VideoCodec<>'flv') And (VideoCodec<>'mpeg4') And (VideoCodec<>'mpeg1video') And (VideoCodec<>'mpeg2video') And (VideoCodec<>'rawvideo') And
-    (VideoCodec<>'asv1') And (VideoCodec<>'asv2') And (VideoCodec<>'bmp') And (VideoCodec<>'dnxhd') Then
-    Fail('Codec video: png/gif, bmp, copy, ffv1, flv, mpeg4, mpeg1video, mpeg2video, rawvideo, asv1, asv2, dnxhd.');
+    (VideoCodec<>'asv1') And (VideoCodec<>'asv2') And (VideoCodec<>'bmp') And (VideoCodec<>'dnxhd') And (VideoCodec<>'dvvideo') Then
+    Fail('Codec video: png/gif, bmp, copy, ffv1, flv, mpeg4, mpeg1video, mpeg2video, rawvideo, asv1, asv2, dnxhd, dvvideo.');
   End Else If (Argument='-vframes') Or (Argument='-frames:v') Then Begin
    If InputPath='' Then Fail('Nombre d''images attendu apres -i.');
    Value:=NextArgument; Val(Value,Number,Code);
@@ -26658,12 +27802,13 @@ BEGIN
  End;
  NVKind:=0;
  If InputFormat='bethsoftvid' Then NVKind:=1 Else If InputFormat='bfi' Then NVKind:=2 Else If InputFormat='c93' Then NVKind:=3
- Else If InputFormat='bmp' Then NVKind:=4 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12
+ Else If InputFormat='bmp' Then NVKind:=4 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13
  Else If (InputFormat='avi') And Not IsHTTP(InputPath) Then Begin
   AsvTag:=AVIVideoFourCC(Intermediate);
   If AsvTag='CSCD' Then NVKind:=5 Else If (AsvTag='tscc') Or (AsvTag='TSCC') Then NVKind:=6
   Else If (AsvTag='CLJR') Or (AsvTag='cljr') Then NVKind:=7 Else If (AsvTag='cyuv') Or (AsvTag='CYUV') Then NVKind:=8
-  Else If (AsvTag='cvid') Or (AsvTag='CVID') Then NVKind:=9 Else If (AsvTag='AVdn') Or (AsvTag='AVDN') Or (AsvTag='AVdh') Then NVKind:=11;
+  Else If (AsvTag='cvid') Or (AsvTag='CVID') Then NVKind:=9 Else If (AsvTag='AVdn') Or (AsvTag='AVDN') Or (AsvTag='AVdh') Then NVKind:=11
+  Else If (AsvTag='dvsd') Or (AsvTag='DVSD') Or (AsvTag='dvcs') Or (AsvTag='DVCS') Or (AsvTag='dv25') Or (AsvTag='dvsl') Or (AsvTag='DVSL') Or (AsvTag='dv50') Or (AsvTag='dvc ') Or (AsvTag='cdvc') Or (AsvTag='CDVC') Or (AsvTag='dvcp') Or (AsvTag='dvpp') Then NVKind:=14;
  End;
  NVAudioOut:=(OutputFormat='wav') Or (OutputFormat='mp3') Or (OutputFormat='ac3') Or (OutputFormat='adx') Or (OutputFormat='aiff');
  If (NVKind<>0) And Not (((NVKind=1) Or (NVKind=2)) And NVAudioOut) Then Begin
@@ -26709,6 +27854,14 @@ BEGIN
   If HasCrop Then Fail('dnxhd: -crop non supporte avec cet encodeur.');
   Temps[2]:=NewTemporary; EncodeDNxHD(Intermediate,Temps[2],OutputFormat='avi',DNxProfile,VideoBitrate Div 1000000);
   Commit(Temps[2]); Temps[2]:=''; WriteLn('Video DNxHD creee: ',OutputPath); Halt(0);
+ End;
+ If (InputFormat='yuv4mpegpipe') And (VideoCodec='dvvideo') Then Begin
+  If IsHTTP(InputPath) Or ((OutputFormat<>'avi') And (OutputFormat<>'dv')) Or NoVideo Or (AudioCodec<>'') Or HasBitrate Or
+   (RequestedRate<>0) Or (RequestedChannels<>0) Or (VideoFrames<>0) Or (ImageWidth<>0) Then
+   Fail('dvvideo: Y4M local vers sortie .dv ou AVI requis, sans autres options.');
+  If HasCrop Then Fail('dvvideo: -crop non supporte avec cet encodeur.');
+  Temps[2]:=NewTemporary; EncodeDV(Intermediate,Temps[2],OutputFormat='avi','');
+  Commit(Temps[2]); Temps[2]:=''; WriteLn('Video DV creee: ',OutputPath); Halt(0);
  End;
  If (InputFormat='yuv4mpegpipe') And ((VideoCodec='asv1') Or (VideoCodec='asv2')) Then Begin
   If IsHTTP(InputPath) Or (OutputFormat<>'avi') Or NoVideo Or (AudioCodec<>'') Or HasBitrate Or HasVideoBitrate Or
