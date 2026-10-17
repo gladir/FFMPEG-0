@@ -14173,6 +14173,8 @@ Procedure NVWriteY4MPlanar(P: PEABuffer);
 Var Hdr,S: String; At,Tot,Q,K: LongInt;
 Begin
  If Not NVOpened Then Begin
+  If (OptPixFmt='yuv420p') And Not NVTo420 And Not ((NVFmt=7) And (NVSubX=1) And (NVSubY=1)) Then
+   Fail('-pix_fmt yuv420p: conversion depuis ce format de pixels non prise en charge.');
   OpenWrite(NVTarget); NVOpened:=True;
   Str(NVW,S); Hdr:='YUV4MPEG2 W'+S; Str(NVH,S); Hdr:=Hdr+' H'+S;
   Str(NVFpsN,S); Hdr:=Hdr+' F'+S; Str(NVFpsD,S); Hdr:=Hdr+':'+S+' Ip A';
