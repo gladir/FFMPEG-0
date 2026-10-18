@@ -15493,6 +15493,176 @@ Begin
  FillChar(S^.SynthBuf,SizeOf(S^.SynthBuf),0); FillChar(S^.Mdct,SizeOf(S^.Mdct),0);
  S^.LastBufSize:=0;
 End;
+
+Function MPAFreqRate(I: LongInt): LongInt;
+Const T: Array[0..12] Of LongInt=(96000,88200,64000,48000,44100,32000,24000,22050,16000,12000,11025,8000,7350);
+Begin MPAFreqRate:=T[I]; End;
+
+{ ---- MP3onMP4 (mpegaudiodec_template.c, decode_frame_mp3on4) : MP4 'mp4a' dont l esds annonce un type d objet 29/32/33/34 ---- }
+Const
+ MPAOn4Frames: Array[0..7] Of Byte=(0,1,1,2,3,3,4,5);
+ MPAOn4Off: Array[0..7,0..4] Of Byte=((0,0,0,0,0),(0,0,0,0,0),(0,0,0,0,0),(2,0,0,0,0),(2,0,3,0,0),(2,0,3,0,0),(2,0,4,3,0),(2,0,6,4,3));
+ MPAOn4Ch: Array[0..7] Of Byte=(0,1,2,3,4,5,6,8);
+
+{ lecture d un descripteur MPEG-4 (tag + longueur variable) ; renvoie la position du contenu }
+Function MPADescr(At: LongInt; Var Tag,Len: LongInt): LongInt;
+Var Q: Array[0..0] Of Byte; N: LongInt;
+Begin
+ ReadAt(At,Q,1); Tag:=Q[0]; Inc(At); Len:=0;
+ For N:=1 To 4 Do Begin
+  ReadAt(At,Q,1); Inc(At); Len:=(Len Shl 7) Or (Q[0] And $7F);
+  If (Q[0] And $80)=0 Then Break;
+ End;
+ MPADescr:=At;
+End;
+
+{ cherche une piste mp4a dont l ASC est de type mp3on4 : renvoie le type d objet (0 si absent) }
+{ ecrit la partie PCM entre Skip.. dans la sortie WAV }
+Function MPAS16(X: Single): LongInt;
+Var V: Single; R: LongInt;
+Begin
+ V:=X*32768.0;
+ If V>=32767.0 Then Begin
+  If V>=32768.0 Then Begin MPAS16:=32767; Exit; End;
+ End;
+ R:=Round(V);
+ If R>32767 Then R:=32767 Else If R<-32768 Then R:=-32768;
+ MPAS16:=R;
+End;
+
+Function MPAFindOn4(Var StblPos,StblSize,EntryPos,EntrySize,Cfg,Sri,Rate: LongInt): LongInt;
+Var
+ MoovPos,MoovSize,P,TrakPos,TrakSize,MdiaPos,MdiaSize,MinfPos,MinfSize,StsdPos,StsdSize,EsPos,EsSize,Q,Tag,Len,Aot: LongInt; Asc: Array[0..15] Of Byte; Bp: LongInt;
+ Function Bits(N: LongInt): LongInt;
+ Var V,I: LongInt;
+ Begin
+  V:=0; For I:=1 To N Do Begin V:=V*2+((Asc[Bp Shr 3] Shr (7-(Bp And 7))) And 1); Inc(Bp); End; Bits:=V;
+ End;
+Begin
+ MPAFindOn4:=0;
+ If Not MP4Find(0,InputSize,'moov',MoovPos,MoovSize) Then Exit;
+ P:=MoovPos+8;
+ While MP4Find(P,MoovPos+MoovSize,'trak',TrakPos,TrakSize) Do Begin
+  If MP4Find(TrakPos+8,TrakPos+TrakSize,'mdia',MdiaPos,MdiaSize) Then
+   If MP4Find(MdiaPos+8,MdiaPos+MdiaSize,'minf',MinfPos,MinfSize) Then
+    If MP4Find(MinfPos+8,MinfPos+MinfSize,'stbl',StblPos,StblSize) Then
+     If MP4Find(StblPos+8,StblPos+StblSize,'stsd',StsdPos,StsdSize) Then
+      If StsdSize>=24 Then Begin
+       EntryPos:=StsdPos+16; EntrySize:=MP4BE32(EntryPos);
+       If (EntrySize>=44) And (MP4Tag(EntryPos+4)='mp4a') Then
+        If MP4Find(EntryPos+36,EntryPos+EntrySize,'esds',EsPos,EsSize) Then Begin
+         Q:=EsPos+12;
+         Q:=MPADescr(Q,Tag,Len);
+         If Tag=3 Then Begin
+          Inc(Q,3);
+          ReadAt(Q-1,Asc,1);
+          If (Asc[0] And $80)<>0 Then Inc(Q,2);
+          If (Asc[0] And $40)<>0 Then Begin ReadAt(Q,Asc,1); Inc(Q,1+Asc[0]); End;
+          If (Asc[0] And $20)<>0 Then Inc(Q,2);
+          Q:=MPADescr(Q,Tag,Len);
+          If Tag=4 Then Begin
+           Inc(Q,13);
+           Q:=MPADescr(Q,Tag,Len);
+           If (Tag=5) And (Len>=2) And (Len<=16) Then Begin
+            FillChar(Asc,SizeOf(Asc),0); ReadAt(Q,Asc,Len); Bp:=0;
+            Aot:=Bits(5); If Aot=31 Then Aot:=32+Bits(6);
+            Sri:=Bits(4);
+            If Sri=15 Then Rate:=Bits(24) Else If Sri<=12 Then Rate:=MPAFreqRate(Sri) Else Rate:=0;
+            Cfg:=Bits(4);
+            If (Aot=29) Or ((Aot>=32) And (Aot<=34)) Then Begin MPAFindOn4:=Aot; Exit; End;
+           End;
+          End;
+         End;
+        End;
+      End;
+  P:=TrakPos+TrakSize;
+ End;
+End;
+Function MPAHasOn4(Const Name: String): Boolean;
+Var A,B,C,D,E,F,G: LongInt;
+Begin OpenRead(Name); MPAHasOn4:=MPAFindOn4(A,B,C,D,E,F,G)<>0; CloseRead; End;
+
+
+Procedure DecodeMP3On4(Const Source,Target: String);
+Var
+ StblPos,StblSize,EntryPos,EntrySize,Cfg,Sri,Rate,Aot,SzPos,SzSize,ScPos,ScSize,CoPos,CoSize,FixedSize,Samples,Chunks,Entries: LongInt;
+ Sizes,Table: PALLong; Chunk,Sample,PerChunk,J,Pos,Take,K,I,Frames,Nch,Fr,Fsize,Len,Ch,Used,Pk: LongInt;
+ Buf: PEABuffer; Is64,Bad: Boolean; Q: Array[0..11] Of Byte; Ctx: Array[0..4] Of PMPA; Planes: Array[0..7] Of PMPASingles;
+ Sync,H: LongWord; Blocks,R,Nb: LongInt; Zero: Boolean; Pb: PEABuffer; Pp: LongInt; Cur: PEABuffer;
+Begin
+ MPAInit; EAReset; OpenRead(Source);
+ Aot:=MPAFindOn4(StblPos,StblSize,EntryPos,EntrySize,Cfg,Sri,Rate);
+ If Aot=0 Then Fail('mp3on4: aucune piste MP3onMP4 dans le fichier.');
+ If (Cfg<1) Or (Cfg>7) Then Fail('mp3on4: numero de configuration de canaux incorrect.');
+ Frames:=MPAOn4Frames[Cfg]; Nch:=MPAOn4Ch[Cfg];
+ If Rate<16000 Then Sync:=$FFE00000 Else Sync:=$FFF00000;
+ If Not MP4Find(StblPos+8,StblPos+StblSize,'stsz',SzPos,SzSize) Then Fail('mp3on4: stsz absent.');
+ If Not MP4Find(StblPos+8,StblPos+StblSize,'stsc',ScPos,ScSize) Then Fail('mp3on4: stsc absent.');
+ Is64:=False;
+ If Not MP4Find(StblPos+8,StblPos+StblSize,'stco',CoPos,CoSize) Then Begin
+  If Not MP4Find(StblPos+8,StblPos+StblSize,'co64',CoPos,CoSize) Then Fail('mp3on4: stco absent.');
+  Is64:=True;
+ End;
+ FixedSize:=MP4BE32(SzPos+12); Samples:=MP4BE32(SzPos+16);
+ If (Samples<=0) Or (Samples>16777216) Then Fail('mp3on4: nombre d''echantillons incorrect.');
+ GetMem(Sizes,Samples*4);
+ For I:=0 To Samples-1 Do If FixedSize<>0 Then Sizes^[I]:=FixedSize Else Sizes^[I]:=MP4BE32(SzPos+20+4*I);
+ Entries:=MP4BE32(ScPos+12); If (Entries<1) Or (Entries>1048576) Then Fail('mp3on4: stsc incorrect.');
+ GetMem(Table,Entries*8);
+ For I:=0 To Entries-1 Do Begin Table^[2*I]:=MP4BE32(ScPos+16+12*I); Table^[2*I+1]:=MP4BE32(ScPos+20+12*I); End;
+ Chunks:=MP4BE32(CoPos+12);
+ For I:=0 To Frames-1 Do Begin GetMem(Ctx[I],SizeOf(TMPA)); FillChar(Ctx[I]^,SizeOf(TMPA),0); Ctx[I]^.AduMode:=True; End;
+ For I:=0 To 7 Do Begin GetMem(Planes[I],1200*SizeOf(Single)); FillChar(Planes[I]^,1200*SizeOf(Single),0); End;
+ OpenWrite(Target); ADPCMWaveHeader(Rate,Nch,0);
+ Sample:=0; K:=0;
+ For Chunk:=1 To Chunks Do Begin
+  While (K+1<Entries) And (Table^[2*(K+1)]<=Chunk) Do Inc(K);
+  PerChunk:=Table^[2*K+1];
+  If Is64 Then Begin
+   ReadAt(CoPos+16+8*(Chunk-1),Q,8); Pos:=LongInt(Q[4])*16777216+LongInt(Q[5])*65536+LongInt(Q[6])*256+Q[7];
+  End Else Pos:=MP4BE32(CoPos+16+4*(Chunk-1));
+  For J:=1 To PerChunk Do Begin
+   If Sample>=Samples Then Break;
+   Take:=Sizes^[Sample]; Inc(Sample);
+   If (Take>=4) And (Pos+Take<=InputSize) Then Begin
+    GetMem(Pb,Take+64); FillChar(Pb^,Take+64,0);
+    I:=0; While I<Take Do Begin
+     If Take-I>16384 Then Len:=16384 Else Len:=Take-I;
+     ReadAt(Pos+I,Pb^[I],Len); Inc(I,Len);
+    End;
+    { decode_frame_mp3on4 }
+    Bad:=False; Pp:=0; Len:=Take; Ch:=0;
+    For I:=0 To 7 Do FillChar(Planes[I]^,1200*SizeOf(Single),0);
+    For Fr:=0 To Frames-1 Do Begin
+     Fsize:=(Pb^[Pp]*256+Pb^[Pp+1]) Shr 4;
+     If Fsize>Len Then Fsize:=Len; If Fsize>1792 Then Fsize:=1792;
+     If Fsize<4 Then Begin Bad:=True; Break; End;
+     H:=((LongWord(Pb^[Pp]) Shl 24) Or (LongWord(Pb^[Pp+1]) Shl 16) Or (LongWord(Pb^[Pp+2]) Shl 8) Or Pb^[Pp+3]) And $000FFFFF;
+     H:=H Or Sync;
+     If MPAHeader(Ctx[Fr],H)<>0 Then Begin Bad:=True; Break; End;
+     If (Ch+Ctx[Fr]^.NbCh>Nch) Or (MPAOn4Off[Cfg,Fr]+Ctx[Fr]^.NbCh>Nch) Then Begin Bad:=True; Break; End;
+     Inc(Ch,Ctx[Fr]^.NbCh);
+     Ctx[Fr]^.Fixed:=False;
+     R:=MPADecodeFrame(Ctx[Fr],Planes[MPAOn4Off[Cfg,Fr]],Planes[MPAOn4Off[Cfg,Fr]+1],PEABuffer(@Pb^[Pp]),Fsize);
+     If R<0 Then Begin
+      FillChar(Planes[MPAOn4Off[Cfg,Fr]]^,1152*SizeOf(Single),0);
+      If Ctx[Fr]^.NbCh>1 Then FillChar(Planes[MPAOn4Off[Cfg,Fr]+1]^,1152*SizeOf(Single),0);
+     End;
+     Inc(Pp,Fsize); Dec(Len,Fsize);
+    End;
+    If (Not Bad) And (Ch=Nch) Then
+     For I:=0 To 1151 Do For Used:=0 To Nch-1 Do EAPut(MPAS16(Planes[Used]^[I]));
+    FreeMem(Pb,Take+64);
+   End;
+   Inc(Pos,Take);
+  End;
+ End;
+ EAFlush;
+ If EAWritten=0 Then Fail('mp3on4: aucune donnee audio decodee.');
+ ADPCMPatchHeader(Rate,Nch,EAWritten);
+ CloseRead; CloseWrite;
+End;
+
 { ---- demultiplexeur mp3 (libavformat/mp3dec.c), analyseur (mpegaudio_parser.c), sauts de debut/fin (decode.c) ---- }
 Var MPAF: PEABuffer; MPASize: LongInt;
 Procedure MPALoad(Const Name: String);
@@ -15523,18 +15693,6 @@ Begin
  Hdr:=H; MPACheck:=S^.FrameSize;
 End;
 
-{ ecrit la partie PCM entre Skip.. dans la sortie WAV }
-Function MPAS16(X: Single): LongInt;
-Var V: Single; R: LongInt;
-Begin
- V:=X*32768.0;
- If V>=32767.0 Then Begin
-  If V>=32768.0 Then Begin MPAS16:=32767; Exit; End;
- End;
- R:=Round(V);
- If R>32767 Then R:=32767 Else If R<-32768 Then R:=-32768;
- MPAS16:=R;
-End;
 
 Procedure DecodeMPA(Const Source,Target: String);
 Var
@@ -57469,6 +57627,8 @@ BEGIN
   If Not IsHTTP(InputPath) Then If MP4HasALAC(InputPath) Then InputFormat:='alac';
  If (InputFormat='mp4') And Not IsHTTP(InputPath) And ((OutputFormat='wav') Or (OutputFormat='adx') Or (OutputFormat='aiff') Or (OutputFormat='flv') Or (OutputFormat='mp3') Or (OutputFormat='ac3') Or (OutputFormat='aac') Or (OutputFormat='ogg')) Then
   If MP4HasMace(InputPath)>0 Then InputFormat:='mace';
+ If (InputFormat='mp4') And Not IsHTTP(InputPath) And ((OutputFormat='wav') Or (OutputFormat='adx') Or (OutputFormat='aiff') Or (OutputFormat='flv') Or (OutputFormat='mp3') Or (OutputFormat='ac3') Or (OutputFormat='aac') Or (OutputFormat='ogg')) Then
+  If MPAHasOn4(InputPath) Then InputFormat:='mp3on4';
  If (InputCodec='libfaad') Or (InputCodec='interplay_dpcm') Or (InputCodec='libspeex') Or (InputCodec='speex') Then Begin
   { decodeurs imposes : ce sont les decodeurs natifs des entrees correspondantes }
   If ((InputCodec='libfaad') And (InputFormat<>'aac')) Or ((InputCodec='interplay_dpcm') And (InputFormat<>'ipmovie')) Or
@@ -57905,6 +58065,7 @@ BEGIN
     Temps[3]:=NewTemporary; DemuxASF(InputPath,Temps[3]);
     DecodeWMA2Spool(Temps[3],Temps[0]);
    End Else
+   If InputFormat='mp3on4' Then DecodeMP3On4(InputPath,Temps[0]) Else
    If (InputFormat='mp3') Or (InputFormat='mp1') Or (InputFormat='mp2') Then DecodeMPA(InputPath,Temps[0]) Else
    If InputFormat='ac3' Then ProcessAC3(InputPath,Temps[0],False,0) Else
    If InputFormat='eac3' Then DecodeEAC3(InputPath,Temps[0]) Else
