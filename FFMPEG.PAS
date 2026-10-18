@@ -49613,6 +49613,437 @@ Begin
  ADPCMPatchHeader(SXRate,SXChans,Written); CloseWrite;
 End;
 { SPXD-END }
+{ THEOE-BEGIN }
+{ ---- Theora I : encodeur intra (images cles seulement, 4:2:0, transformee 8x8, tables de Huffman entrainees sur le fichier) vers Ogg ; tables de quantification de vp3data.h de FFmpeg ---- }
+Const
+ THZig: Array[0..63] Of Byte=(0,1,8,16,9,2,3,10,17,24,32,25,18,11,4,5,12,19,26,33,40,48,41,34,27,20,13,6,7,14,21,28,35,42,49,56,57,50,43,36,29,22,15,23,30,37,44,51,58,59,52,45,38,31,39,46,53,60,61,54,47,55,62,63);
+ THHx: Array[0..15] Of Byte=(0,1,1,0,0,0,1,1,2,2,3,3,3,2,2,3);
+ THHy: Array[0..15] Of Byte=(0,0,1,1,2,3,3,2,2,3,3,2,1,1,0,0);
+ THPredW: Array[0..15,0..3] Of LongInt=((0,0,0,0),(0,0,0,128),(0,0,128,0),(0,0,53,75),(0,128,0,0),(0,64,0,64),(0,128,0,0),(0,0,53,75),(128,0,0,0),(0,0,0,128),(64,0,64,0),(0,0,53,75),(0,128,0,0),(-104,116,0,116),(24,80,24,0),(-104,116,0,116));
+ THBaseY: Array[0..63] Of Word=(
+ 16,11,10,16,24,40,51,61,12,12,14,19,26,58,60,55,
+ 14,13,16,24,40,57,69,56,14,17,22,29,51,87,80,62,
+ 18,22,37,58,68,109,103,77,24,35,55,64,81,104,113,92,
+ 49,64,78,87,103,121,120,101,72,92,95,98,112,100,103,99);
+ THBaseI: Array[0..63] Of Word=(
+ 16,16,16,20,24,28,32,40,16,16,20,24,28,32,40,48,
+ 16,20,24,28,32,40,48,64,20,24,28,32,40,48,64,64,
+ 24,28,32,40,48,64,64,64,28,32,40,48,64,64,64,96,
+ 32,40,48,64,64,64,96,128,40,48,64,64,64,96,128,128);
+ THDcScale: Array[0..63] Of Word=(
+ 220,200,190,180,170,170,160,160,150,150,140,140,130,130,120,120,
+ 110,110,100,100,90,90,90,80,80,80,70,70,70,60,60,60,
+ 60,50,50,50,50,40,40,40,40,40,30,30,30,30,30,30,
+ 30,20,20,20,20,20,20,20,20,10,10,10,10,10,10,10);
+ THAcScale: Array[0..63] Of Word=(
+ 500,450,400,370,340,310,285,265,245,225,210,195,185,180,170,160,
+ 150,145,135,130,125,115,110,107,100,96,93,89,85,82,75,74,
+ 70,68,64,60,57,56,52,50,49,45,44,43,40,38,37,35,
+ 33,32,30,29,28,25,24,22,21,19,18,17,15,13,12,10);
+ THFilt: Array[0..63] Of Word=(
+ 30,25,20,20,15,15,14,14,13,13,12,12,11,11,10,10,
+ 9,9,8,8,7,7,7,7,6,6,6,6,5,5,5,5,
+ 4,4,4,4,3,3,3,3,2,2,2,2,2,2,2,2,
+ 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0);
+Type
+ THHistT=Array[0..4,0..1,0..31] Of Int64;
+ THLv=Array[0..63] Of SmallInt;
+ THLvArr=Array[0..33554431] Of SmallInt; PTHLv=^THLvArr;
+ THIArr=Array[0..268435455] Of LongInt; PTHI=^THIArr;
+Var
+ THQuality: LongInt;
+ THBuf: PEABuffer; THBits: LongInt;
+ THPlane: Array[0..2] Of PEABuffer; THSrc: PEABuffer;
+ THFw,THFh,THPw,THPh: Array[0..2] Of LongInt;
+ THLevels: Array[0..2] Of PTHLv; THDc,THRes: Array[0..2] Of PTHI;
+ THOrder: Array[0..2] Of PTHI; THCnt: Array[0..2] Of LongInt;
+ THNxt,THLast: Array[0..2] Of PEABuffer; THEnded: Array[0..2] Of PEABuffer;
+ THTk: PTHI; THTkLen,THTkCap,THDcEnd: LongInt;
+ THQmat: Array[0..2,0..63] Of LongInt;
+ THCosT: Array[0..7,0..7] Of Double;
+ THHist: THHistT;
+ THCode: Array[0..79,0..31] Of LongWord; THLen: Array[0..79,0..31] Of Byte;
+ THEst: Double;
+
+Procedure THPut(V: Int64; N: LongInt);
+Var K: LongInt;
+Begin
+ For K:=N-1 Downto 0 Do Begin
+  If ((V Shr K) And 1)<>0 Then THBuf^[THBits Shr 3]:=THBuf^[THBits Shr 3] Or (1 Shl (7-(THBits And 7)));
+  Inc(THBits);
+ End;
+End;
+Procedure THEmit(Grp,Yc,Tok,N,X: LongInt);
+Begin
+ If THTkLen>=THTkCap Then Begin THTkCap:=THTkCap*2; ReallocMem(Pointer(THTk),THTkCap*4); End;
+ THTk^[THTkLen]:=(X And $FFF) Or (N Shl 12) Or (Tok Shl 16) Or (Grp Shl 21) Or (Yc Shl 24);
+ Inc(THTkLen);
+ Inc(THHist[Grp,Yc,Tok]);
+ THEst:=THEst+N+4.4;
+End;
+Procedure THEob(Grp,Yc,N: LongInt);
+Var M: LongInt;
+Begin
+ While N>0 Do Begin
+  M:=N; If M>4095 Then M:=4095;
+  If M<=3 Then THEmit(Grp,Yc,M-1,0,0)
+  Else If M<=7 Then THEmit(Grp,Yc,3,2,M-4)
+  Else If M<=15 Then THEmit(Grp,Yc,4,3,M-8)
+  Else If M<=31 Then THEmit(Grp,Yc,5,4,M-16)
+  Else THEmit(Grp,Yc,6,12,M);
+  Dec(N,M);
+ End;
+End;
+{ jeton de coefficient (sans suite de zeros) }
+Procedure THCoef(Grp,Yc,V: LongInt);
+Var A,S: LongInt;
+Begin
+ A:=Abs(V); If A>580 Then A:=580;
+ If V<0 Then S:=1 Else S:=0;
+ If A=1 Then THEmit(Grp,Yc,9+S,0,0)
+ Else If A=2 Then THEmit(Grp,Yc,11+S,0,0)
+ Else If A<=6 Then THEmit(Grp,Yc,10+A,1,S)
+ Else If A<=8 Then THEmit(Grp,Yc,17,2,(A-7)+2*S)
+ Else If A<=12 Then THEmit(Grp,Yc,18,3,(A-9)+4*S)
+ Else If A<=20 Then THEmit(Grp,Yc,19,4,(A-13)+8*S)
+ Else If A<=36 Then THEmit(Grp,Yc,20,5,(A-21)+16*S)
+ Else If A<=68 Then THEmit(Grp,Yc,21,6,(A-37)+32*S)
+ Else THEmit(Grp,Yc,22,10,(A-69)+512*S);
+End;
+Function THGroup(I: LongInt): LongInt;
+Begin If I=0 Then THGroup:=0 Else If I<=5 Then THGroup:=1 Else If I<=14 Then THGroup:=2 Else If I<=27 Then THGroup:=3 Else THGroup:=4; End;
+
+{ ---- DCT 8x8 orthonormale ---- }
+Procedure THInitDct;
+Var K,N: LongInt; A: Double;
+Begin
+ For K:=0 To 7 Do Begin
+  If K=0 Then A:=Sqrt(1/8) Else A:=0.5;
+  For N:=0 To 7 Do THCosT[K,N]:=A*Cos((2*N+1)*K*Pi/16);
+ End;
+End;
+Procedure THDct(Var B: Array Of Double);
+Var T: Array[0..63] Of Double; R,C,K: LongInt; S: Double;
+Begin
+ For R:=0 To 7 Do For K:=0 To 7 Do Begin S:=0; For C:=0 To 7 Do S:=S+THCosT[K,C]*B[R*8+C]; T[R*8+K]:=S; End;
+ For C:=0 To 7 Do For K:=0 To 7 Do Begin S:=0; For R:=0 To 7 Do S:=S+THCosT[K,R]*T[R*8+C]; B[K*8+C]:=S; End;
+End;
+{ matrice de quantification du decodeur (intra) pour l'indice Qi }
+Procedure THBuildQ(Qi: LongInt);
+Var P,I,Q,Coeff,Qmin: LongInt;
+Begin
+ For P:=0 To 2 Do
+  For I:=0 To 63 Do Begin
+   Coeff:=THBaseY[I];
+   If I=0 Then Q:=THDcScale[Qi] Else Q:=THAcScale[Qi];
+   Qmin:=8; If I=0 Then Qmin:=16;
+   Q:=(Q*Coeff) Div 100*4;
+   If Q<Qmin Then Q:=Qmin; If Q>4096 Then Q:=4096;
+   THQmat[P,I]:=Q;
+  End;
+End;
+
+{ ---- arbre de Huffman ---- }
+Type THTreeRec=Record Lc,Rc: Array[0..62] Of LongInt; End;
+Var THTr: THTreeRec; THRoot: LongInt;
+Procedure THBuildTree(Const Freq: Array Of Int64);
+Var W: Array[0..62] Of Int64; Alive: Array[0..62] Of Boolean; I,A,B,Cnt: LongInt;
+Begin
+ For I:=0 To 31 Do Begin W[I]:=Freq[I]+1; Alive[I]:=True; THTr.Lc[I]:=-1; THTr.Rc[I]:=-1; End;
+ Cnt:=32;
+ While Cnt<63 Do Begin
+  A:=-1; B:=-1;
+  For I:=0 To Cnt-1 Do If Alive[I] Then Begin
+   If (A<0) Or (W[I]<W[A]) Then Begin B:=A; A:=I; End Else If (B<0) Or (W[I]<W[B]) Then B:=I;
+  End;
+  W[Cnt]:=W[A]+W[B]; Alive[A]:=False; Alive[B]:=False; Alive[Cnt]:=True; THTr.Lc[Cnt]:=A; THTr.Rc[Cnt]:=B; Inc(Cnt);
+ End;
+ THRoot:=62;
+End;
+Procedure THWalk(Tab,Node: LongInt; Code: LongWord; Depth: LongInt);
+Begin
+ If Node<32 Then Begin
+  THPut(1,1); THPut(Node,5); THCode[Tab,Node]:=Code; THLen[Tab,Node]:=Depth;
+ End Else Begin
+  THPut(0,1);
+  THWalk(Tab,THTr.Lc[Node],Code Shl 1,Depth+1);
+  THWalk(Tab,THTr.Rc[Node],(Code Shl 1) Or 1,Depth+1);
+ End;
+End;
+
+{ analyse d'une image : coefficients quantifies de tous les fragments }
+Procedure THAnalyse(Qi: LongInt);
+Var P,Fx,Fy,F,Px,Py,R,C,I,K,Sx,Sy,Q: LongInt; Blk: Array[0..63] Of Double; V: Double; A: LongInt; Pl: PEABuffer; Lv: PTHLv; Dz: Double;
+Begin
+ THBuildQ(Qi);
+ For P:=0 To 2 Do Begin
+  Pl:=THPlane[P];
+  For Fy:=0 To THFh[P]-1 Do For Fx:=0 To THFw[P]-1 Do Begin
+   F:=Fy*THFw[P]+Fx;
+   For R:=0 To 7 Do For C:=0 To 7 Do Blk[R*8+C]:=Pl^[(Fy*8+R)*THPw[P]+Fx*8+C]-128;
+   THDct(Blk);
+   Lv:=PTHLv(@THLevels[P]^[F*64]);
+   For I:=0 To 63 Do Begin
+    K:=THZig[I]; V:=Blk[K]*4;
+    Q:=THQmat[P,K];
+    If I=0 Then Dz:=0.5 Else Dz:=0.42;
+    A:=Trunc(Abs(V)/Q+Dz);
+    If A>580 Then A:=580;
+    If V<0 Then A:=-A;
+    If I=0 Then THDc[P]^[F]:=A Else Lv^[I]:=A;
+   End;
+   K:=0; For I:=63 DownTo 1 Do If Lv^[I]<>0 Then Begin K:=I; Break; End;
+   THLast[P]^[F]:=K;
+  End;
+  { prediction du DC (identique au decodeur) }
+  For Fy:=0 To THFh[P]-1 Do For Fx:=0 To THFw[P]-1 Do Begin
+   F:=Fy*THFw[P]+Fx; Sx:=0;
+   Q:=0; { transform }
+   Px:=0; Py:=0; { reuse as vl.. below }
+   Begin
+    Q:=0;
+    If Fx>0 Then Q:=Q Or 1;
+    If Fy>0 Then Begin Q:=Q Or 4; If Fx>0 Then Q:=Q Or 8; If Fx+1<THFw[P] Then Q:=Q Or 2; End;
+    If Q=0 Then A:=0
+    Else Begin
+     A:=0;
+     If (Q And 8)<>0 Then A:=A+THPredW[Q,0]*THDc[P]^[F-THFw[P]-1];
+     If (Q And 4)<>0 Then A:=A+THPredW[Q,1]*THDc[P]^[F-THFw[P]];
+     If (Q And 2)<>0 Then A:=A+THPredW[Q,2]*THDc[P]^[F-THFw[P]+1];
+     If (Q And 1)<>0 Then A:=A+THPredW[Q,3]*THDc[P]^[F-1];
+     A:=A Div 128;
+     If (Q=15) Or (Q=13) Then Begin
+      If Abs(A-THDc[P]^[F-THFw[P]])>128 Then A:=THDc[P]^[F-THFw[P]]
+      Else If Abs(A-THDc[P]^[F-1])>128 Then A:=THDc[P]^[F-1]
+      Else If Abs(A-THDc[P]^[F-THFw[P]-1])>128 Then A:=THDc[P]^[F-THFw[P]-1];
+     End;
+    End;
+    THRes[P]^[F]:=THDc[P]^[F]-A;
+   End;
+  End;
+ End;
+End;
+
+{ jetons de l'image courante }
+Procedure THTokenize;
+Var P,F,I,J,K,Pass,Yc,R,V,Ab,S,Nrun,N,Fi: LongInt; Lv: PTHLv; Ends: LongInt;
+Begin
+ For P:=0 To 2 Do Begin
+  FillChar(THEnded[P]^,THFw[P]*THFh[P],0);
+  FillChar(THNxt[P]^,THFw[P]*THFh[P],0);
+ End;
+ { DC }
+ For P:=0 To 2 Do Begin
+  If P=0 Then Yc:=0 Else Yc:=1;
+  Nrun:=0;
+  For Fi:=0 To THCnt[P]-1 Do Begin
+   F:=THOrder[P]^[Fi];
+   If (THRes[P]^[F]=0) And (THLast[P]^[F]=0) Then Begin Inc(Nrun); THEnded[P]^[F]:=1; End
+   Else Begin
+    THEob(0,Yc,Nrun); Nrun:=0;
+    If THRes[P]^[F]=0 Then THEmit(0,Yc,7,3,0) Else THCoef(0,Yc,THRes[P]^[F]);
+    THNxt[P]^[F]:=1;
+   End;
+  End;
+  THEob(0,Yc,Nrun);
+ End;
+ THDcEnd:=THTkLen;
+ { AC }
+ For Pass:=1 To 63 Do For P:=0 To 2 Do Begin
+  If P=0 Then Yc:=0 Else Yc:=1;
+  Nrun:=0;
+  For Fi:=0 To THCnt[P]-1 Do Begin
+   F:=THOrder[P]^[Fi];
+   If (THEnded[P]^[F]<>0) Or (THNxt[P]^[F]<>Pass) Then Continue;
+   Lv:=PTHLv(@THLevels[P]^[F*64]);
+   If THLast[P]^[F]<Pass Then Begin Inc(Nrun); THEnded[P]^[F]:=1; Continue; End;
+   THEob(THGroup(Pass),Yc,Nrun); Nrun:=0;
+   J:=Pass; While Lv^[J]=0 Do Inc(J);
+   R:=J-Pass; V:=Lv^[J]; Ab:=Abs(V); If V<0 Then S:=1 Else S:=0;
+   If R=0 Then Begin THCoef(THGroup(Pass),Yc,V); THNxt[P]^[F]:=Pass+1; End
+   Else If (Ab=1) And (R<=5) Then Begin THEmit(THGroup(Pass),Yc,22+R,1,S); THNxt[P]^[F]:=J+1; End
+   Else If (Ab=1) And (R<=9) Then Begin THEmit(THGroup(Pass),Yc,28,3,S*4+(R-6)); THNxt[P]^[F]:=J+1; End
+   Else If (Ab=1) And (R<=17) Then Begin THEmit(THGroup(Pass),Yc,29,4,S*8+(R-10)); THNxt[P]^[F]:=J+1; End
+   Else If (Ab<=3) And (R=1) Then Begin THEmit(THGroup(Pass),Yc,30,2,(Ab-2)+2*S); THNxt[P]^[F]:=J+1; End
+   Else If (Ab<=3) And (R<=3) Then Begin THEmit(THGroup(Pass),Yc,31,3,((Ab-2)+2*S)*2+(R-2)); THNxt[P]^[F]:=J+1; End
+   Else Begin
+    If R<=8 Then THEmit(THGroup(Pass),Yc,7,3,R-1) Else THEmit(THGroup(Pass),Yc,8,6,R-1);
+    THNxt[P]^[F]:=Pass+R;
+   End;
+  End;
+  THEob(THGroup(Pass),Yc,Nrun);
+ End;
+End;
+
+Procedure EncodeTheora(Const Source,Target: String; QFix,Bitrate: LongInt);
+Var
+ Hd: Array[0..255] Of Byte; Limit,Cur,W,H,Frames,K,Code,CW,CH,FrameBytes,N,Q,I,J,X,Y,F,P,Fmbw,Fmbh,Qi,Iter,Fn,Fd,Sbw,Sbh,Sx,Sy,Cnt,T,G,Yc,Sel,Used: LongInt;
+ Line,Token: String; Raw,Pk: PEABuffer; FPos: PLongArr; Tgt,Ratio: Double; Qis: PEABuffer; FrameEnd,DcEnds: PLongArr; Save: THHistT; Freq: Array[0..31] Of Int64; Gran: Int64;
+ Vendor: String; E,Tk0,Tk1: LongInt; PlaneBytes: LongInt; Pad: PEABuffer;
+Function ReadLine: String;
+Var R: String;
+Begin
+ R:='';
+ While Cur<Limit Do Begin ReadAt(Cur,Hd,1); Inc(Cur); If Hd[0]=10 Then Break; If Length(R)<250 Then R:=R+Chr(Hd[0]); End;
+ ReadLine:=R;
+End;
+Begin
+ OpenRead(Source); Limit:=InputSize; Cur:=0;
+ Line:=ReadLine;
+ If Copy(Line,1,9)<>'YUV4MPEG2' Then Fail('libtheora: entree Y4M requise.');
+ W:=0; H:=0; Fn:=25; Fd:=1; Line:=Copy(Line,11,255);
+ While Line<>'' Do Begin
+  K:=Pos(' ',Line); If K=0 Then K:=Length(Line)+1;
+  Token:=Copy(Line,1,K-1); Line:=Copy(Line,K+1,255);
+  If Token='' Then Continue;
+  Case Token[1] Of
+   'W': Val(Copy(Token,2,20),W,Code);
+   'H': Val(Copy(Token,2,20),H,Code);
+   'F': Begin K:=Pos(':',Token); If K>2 Then Begin Val(Copy(Token,2,K-2),Fn,Code); Val(Copy(Token,K+1,20),Fd,Code); End; End;
+   'C': If (Token<>'C420') And (Token<>'C420jpeg') And (Token<>'C420mpeg2') And (Token<>'C420paldv') Then Fail('libtheora: Y4M 4:2:0 8 bits requis.');
+   'I': If (Token<>'Ip') And (Token<>'I?') Then Fail('libtheora: video progressive requise.');
+  End;
+ End;
+ If (W<18) Or (H<18) Or (W>4096) Or (H>4096) Or Odd(W) Or Odd(H) Then Fail('libtheora: dimensions paires (18 a 4096) requises.');
+ If (Fn<=0) Or (Fd<=0) Then Begin Fn:=25; Fd:=1; End;
+ CW:=W Div 2; CH:=H Div 2; FrameBytes:=W*H+2*CW*CH;
+ Fmbw:=(W+15) Div 16; Fmbh:=(H+15) Div 16;
+ THPw[0]:=Fmbw*16; THPh[0]:=Fmbh*16; THPw[1]:=Fmbw*8; THPh[1]:=Fmbh*8; THPw[2]:=THPw[1]; THPh[2]:=THPh[1];
+ For P:=0 To 2 Do Begin THFw[P]:=THPw[P] Div 8; THFh[P]:=THPh[P] Div 8; End;
+ Frames:=0; GetMem(FPos,SizeOf(LongInt)*(Limit Div FrameBytes+2));
+ While Cur<Limit Do Begin
+  Line:=ReadLine;
+  If Copy(Line,1,5)<>'FRAME' Then Break;
+  If Cur+FrameBytes>Limit Then Break;
+  FPos^[Frames]:=Cur; Inc(Frames); Inc(Cur,FrameBytes);
+ End;
+ If Frames=0 Then Fail('libtheora: aucune image Y4M.');
+ GetMem(Raw,FrameBytes+64);
+ THInitDct;
+ For P:=0 To 2 Do Begin
+  GetMem(THPlane[P],THPw[P]*THPh[P]+64);
+  GetMem(THLevels[P],Int64(THFw[P])*THFh[P]*64*2+64); GetMem(THDc[P],THFw[P]*THFh[P]*4+16); GetMem(THRes[P],THFw[P]*THFh[P]*4+16);
+  GetMem(THOrder[P],THFw[P]*THFh[P]*4+16); GetMem(THNxt[P],THFw[P]*THFh[P]+16); GetMem(THLast[P],THFw[P]*THFh[P]+16); GetMem(THEnded[P],THFw[P]*THFh[P]+16);
+  { ordre de codage : super-blocs 4x4 en courbe de Hilbert }
+  Sbw:=(THFw[P]+3) Div 4; Sbh:=(THFh[P]+3) Div 4; Cnt:=0;
+  For Sy:=0 To Sbh-1 Do For Sx:=0 To Sbw-1 Do For I:=0 To 15 Do Begin
+   X:=4*Sx+THHx[I]; Y:=4*Sy+THHy[I];
+   If (X<THFw[P]) And (Y<THFh[P]) Then Begin THOrder[P]^[Cnt]:=Y*THFw[P]+X; Inc(Cnt); End;
+  End;
+  THCnt[P]:=Cnt;
+ End;
+ FillChar(THHist,SizeOf(THHist),0);
+ THTkCap:=1 Shl 20; GetMem(THTk,THTkCap*4); THTkLen:=0;
+ GetMem(Qis,Frames+8); GetMem(FrameEnd,SizeOf(LongInt)*(Frames+2)); GetMem(DcEnds,SizeOf(LongInt)*(Frames+2));
+ GetMem(Pad,THPw[0]*THPh[0]+64);
+ If QFix>=0 Then Qi:=(QFix*63+5) Div 10 Else Qi:=43;
+ If Bitrate>0 Then Tgt:=Bitrate*Fd/Fn Else Tgt:=0;
+ If Bitrate>0 Then Qi:=40;
+ { pass 1 : analyse + jetons }
+ For F:=0 To Frames-1 Do Begin
+  N:=0; While N<FrameBytes Do Begin If FrameBytes-N>4096 Then Q:=4096 Else Q:=FrameBytes-N; ReadAt(FPos^[F]+N,Raw^[N],Q); Inc(N,Q); End;
+  { plans avec bords repliques, orientation Theora (bas vers haut) }
+  For P:=0 To 2 Do Begin
+   If P=0 Then Begin PlaneBytes:=0; Tk0:=W; Tk1:=H; End Else Begin PlaneBytes:=W*H+(P-1)*CW*CH; Tk0:=CW; Tk1:=CH; End;
+   For Y:=0 To THPh[P]-1 Do Begin
+    J:=THPh[P]-1-Y; If J>Tk1-1 Then J:=Tk1-1;
+    For X:=0 To THPw[P]-1 Do Begin
+     I:=X; If I>Tk0-1 Then I:=Tk0-1;
+     THPlane[P]^[Y*THPw[P]+X]:=Raw^[PlaneBytes+J*Tk0+I];
+    End;
+   End;
+  End;
+  { le plan est stocke de bas en haut : rangee 0 = bas du cadre rempli ; recalage : les rangees de remplissage sont en haut }
+  Tk0:=THTkLen; Save:=THHist;
+  For Iter:=1 To 4 Do Begin
+   THTkLen:=Tk0; THHist:=Save;
+   THAnalyse(Qi);
+   THEst:=0; THTokenize;
+   If (Tgt<=0) Or (Iter=4) Then Break;
+   Ratio:=THEst/Tgt;
+   If (Ratio>0.93) And (Ratio<1.07) Then Break;
+   J:=Round(7*Ln(Ratio)/Ln(2));
+   If J=0 Then Begin If Ratio>1 Then J:=1 Else J:=-1; End;
+   If J>10 Then J:=10; If J<-10 Then J:=-10;
+   I:=Qi-J; If I>63 Then I:=63; If I<0 Then I:=0;
+   If I=Qi Then Break;
+   Qi:=I;
+  End;
+  Qis^[F]:=Qi; FrameEnd^[F]:=THTkLen;
+  DcEnds^[F]:=THDcEnd;
+ End;
+ CloseRead;
+ { sortie Ogg }
+ VBCrcInit;
+ VBOCap:=1 Shl 20; GetMem(VBO,VBOCap); VBOLen:=0;
+ GetMem(VBPage,70000); VBPageLen:=0; VBSegs:=0; VBSeq:=0; VBSerial:=$2B3C4D5E; VBPageFlags:=2; VBPrevGran:=0;
+ Used:=THPw[0]*THPh[0]*2+300000; GetMem(THBuf,Used); FillChar(THBuf^,Used,0); THBits:=0;
+ { en-tete d'identification }
+ THPut($80,8); For I:=1 To 6 Do THPut(Ord('theora'[I]),8);
+ THPut(3,8); THPut(2,8); THPut(1,8);
+ THPut(Fmbw,16); THPut(Fmbh,16); THPut(W,24); THPut(H,24); THPut(0,8); THPut(THPh[0]-H,8);
+ THPut(Fn,32); THPut(Fd,32); THPut(1,24); THPut(1,24); THPut(0,8); If Bitrate>16777215 Then THPut(16777215,24) Else THPut(Bitrate,24);
+ THPut((Qi*10) Div 63,6); THPut(6,5); THPut(0,2); THPut(0,3);
+ VBAddPacket(THBuf,(THBits+7) Shr 3,0,False,True);
+ { commentaire }
+ FillChar(THBuf^,Used,0); THBits:=0;
+ Vendor:='FFMPEG.PAS Theora';
+ THPut($81,8); For I:=1 To 6 Do THPut(Ord('theora'[I]),8);
+ K:=Length(Vendor); For I:=0 To 3 Do THPut((K Shr (8*I)) And 255,8);
+ For I:=1 To K Do THPut(Ord(Vendor[I]),8);
+ THPut(0,32);
+ VBAddPacket(THBuf,(THBits+7) Shr 3,0,False,False);
+ { configuration }
+ FillChar(THBuf^,Used,0); THBits:=0;
+ THPut($82,8); For I:=1 To 6 Do THPut(Ord('theora'[I]),8);
+ THPut(6,3); For I:=0 To 63 Do THPut(THFilt[I],6);
+ THPut(9-1,4); For I:=0 To 63 Do THPut(THAcScale[I],9);
+ THPut(8-1,4); For I:=0 To 63 Do THPut(THDcScale[I],8);
+ THPut(2-1,9);
+ For I:=0 To 63 Do THPut(THBaseY[I],8);
+ For I:=0 To 63 Do THPut(THBaseI[I],8);
+ For J:=0 To 1 Do For P:=0 To 2 Do Begin
+  If (J=1) Or (P>0) Then THPut(1,1);
+  If J=0 Then THPut(0,1) Else THPut(1,1);   { indice de matrice sur 1 bit (2 matrices) }
+  THPut(62,6);
+  If J=0 Then THPut(0,1) Else THPut(1,1);
+ End;
+ { 80 tables de Huffman }
+ For T:=0 To 79 Do Begin
+  G:=T Div 16; Sel:=T Mod 16; If Sel>1 Then Sel:=0;
+  If G=0 Then Yc:=Sel Else Yc:=Sel;
+  For I:=0 To 31 Do Freq[I]:=THHist[G,Yc,I];
+  THBuildTree(Freq);
+  THWalk(T,THRoot,0,0);
+ End;
+ VBAddPacket(THBuf,(THBits+7) Shr 3,0,False,True);
+ { images }
+ Tk0:=0;
+ For F:=0 To Frames-1 Do Begin
+  FillChar(THBuf^,Used,0); THBits:=0;
+  THPut(0,1); THPut(0,1); THPut(Qis^[F],6); THPut(0,1); THPut(0,3);
+  THPut(0,4); THPut(1,4);
+  E:=DcEnds^[F];
+  For I:=Tk0 To FrameEnd^[F]-1 Do Begin
+   If I=E Then Begin THPut(0,4); THPut(1,4); End;
+   K:=THTk^[I]; G:=(K Shr 21) And 7; Yc:=(K Shr 24) And 1; T:=(K Shr 16) And 31;
+   If G=0 Then Sel:=Yc Else Sel:=G*16+Yc;
+   If G=0 Then Sel:=Yc;
+   THPut(THCode[Sel,T],THLen[Sel,T]);
+   If (K Shr 12) And 15>0 Then THPut(K And $FFF,(K Shr 12) And 15);
+   If THBits>(Used-100000)*8 Then Fail('libtheora: image trop volumineuse.');
+  End;
+  If E=FrameEnd^[F] Then Begin THPut(0,4); THPut(1,4); End;
+  Gran:=Int64(F) Shl 6;
+  VBAddPacket(THBuf,(THBits+7) Shr 3,Gran,F=Frames-1,True);
+  Tk0:=FrameEnd^[F];
+ End;
+ OpenWrite(Target);
+ I:=0; While I<VBOLen Do Begin If VBOLen-I>4096 Then K:=4096 Else K:=VBOLen-I; WriteBytes(VBO^[I],K); Inc(I,K); End;
+ CloseWrite;
+End;
+{ THEOE-END }
+
 
 
 Procedure MPEG1Video(Const Source,Target: String; Encoding: Boolean);
@@ -51374,7 +51805,7 @@ Begin
  WriteLn(' D  psxstr          Sony PlayStation STR / RIFF CDXA (audio adpcm_xa)');
  WriteLn(' D  wsaud           Westwood Studios audio (adpcm_ima_ws)');
  WriteLn(' DE aac             AAC ADTS (AAC-LC mono/stereo; alias: adts; encodage libfaac natif)');
- WriteLn(' DE ogg             Ogg (decodage Speex via libspeex natif, encodage audio Vorbis via libvorbis natif; extensions .ogg, .oga, .spx)');
+ WriteLn(' DE ogg             Ogg (decodage Speex via libspeex natif, encodage audio Vorbis via libvorbis natif, video Theora via libtheora natif; extensions .ogg, .oga, .ogv, .spx)');
  WriteLn(' D  iff             IFF 8SVX, Fibonacci/exponentiel (alias: 8svx, svx)');
  WriteLn(' DE aiff            AIFF/AIFF-C PCM; ima4 (adpcm_ima_qt) en decodage et encodage AIFF-C');
  WriteLn(' D  asf             ASF, audio WMA2 seulement (alias: wma, wmv)');
@@ -51467,6 +51898,7 @@ Procedure Help;Begin
  WriteLn(' libfaac: -i entree.wav -c:a libfaac -b:a 128k sortie.aac (AAC-LC ADTS natif); libfaad: -c:a libfaad -i entree.aac sortie.wav.');
  WriteLn(' libx264: -i entree.y4m -c:v libx264 -crf 23 -g 250 sortie.mp4 (ou .h264 Annex B; H.264 Baseline natif, non identique a x264).');
  WriteLn(' libspeex: -i entree.spx sortie.wav (decodeur Speex natif, Ogg).');
+ WriteLn(' libtheora: -i entree.y4m -c:v libtheora -q:v 7 sortie.ogv (encodeur Theora natif intra seulement, non identique a libtheora).');
  WriteLn(' libvorbis: -i entree.wav -c:a libvorbis -b:a 128k sortie.ogg (encodeur Vorbis natif, non identique a libvorbis).');
  WriteLn(' libmp3lame: -i entree.wav -c:a libmp3lame -b:a 128k sortie.mp3 (encodeur MP3 natif du projet).');
  WriteLn(' kmvc: -i entree.avi -an sortie.y4m (Karl Morton, PAL8, 320x200 max).');
@@ -51649,7 +52081,7 @@ BEGIN
  {$ENDIF}
  For J:=0 To 6 Do Temps[J]:='';
  InputPath:=''; OutputPath:=''; InputFormat:=''; OutputFormat:='';
- LJPredOpt:=-1; LJUnofficial:=False; X4Crf:=23; X4QpFix:=-1; X4Gop:=250; X4Preset:='';
+ LJPredOpt:=-1; LJUnofficial:=False; X4Crf:=23; X4QpFix:=-1; X4Gop:=250; X4Preset:=''; THQuality:=-1;
  AudioCodec:=''; InputCodec:=''; PendingFormat:=''; G726CodeSize:=4; G726Rate:=8000; RequestedRate:=0; RequestedChannels:=0; RequestedBitRateK:=320;
  Overwrite:=False; NoOverwrite:=False; HideBanner:=False; HasBitrate:=False;
  SavedExit:=ExitProc; ExitProc:=@ExitCleanup; Randomize;
@@ -51747,6 +52179,7 @@ BEGIN
    WriteLn(' EA    libvorbis       libvorbis Vorbis (encodeur natif: Ogg, blocs de 2048, plancher 1, residu 1, couplage M/A, mono/stereo, -b:a 16..500k)');
    WriteLn('D V D  aasc            Autodesk RLE (AVI AASC/AAS4, 8/16/24 bits)');
    WriteLn('DEV    flv             Flash Video (FLV1/Sorenson Spark: decodeur complet I/P (FLV, AVI); encodeur images intra)');
+   WriteLn(' EV    libtheora       libtheora Theora (encodeur natif: Y4M 4:2:0 vers Ogg, images cles uniquement, -q:v 0..10 ou -b:v)');
    WriteLn(' EV    libx264         libx264 H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 (encodeur natif Baseline CAVLC I/P 4:2:0, sans deblocage; Y4M vers .h264 ou .mp4; -crf, -qp, -g, -b:v)');
    WriteLn(' EV    libxvid         libxvidcore MPEG-4 part 2 (alias de l''encodeur MPEG-4 part 2 natif du projet, non identique a Xvid)');
    WriteLn(' EV    ljpeg           Lossless JPEG (encodeur: Y4M 4:2:0/4:2:2/4:4:4 vers .ljpg, -pred 1..3, pleine plage ou -strict unofficial)');
@@ -51811,6 +52244,11 @@ BEGIN
    If (Code<>0) Or (Number<0) Or (Number>3) Then Fail('-pred: jpegls 0..2 (left, plane, median), ljpeg 1..3.');
    LJPredOpt:=Number;
   End Else
+  If (Argument='-q:v') Or (Argument='-qscale:v') Then Begin
+   Value:=NextArgument; Val(Value,Number,Code);
+   If (Code<>0) Or (Number<0) Or (Number>10) Then Fail(Argument+': 0..10 attendu (libtheora).');
+   THQuality:=Number;
+  End Else
   If (Argument='-crf') Or (Argument='-qp') Or (Argument='-g') Or (Argument='-preset') Or (Argument='-tune') Then Begin
    Value:=NextArgument;
    If (Argument='-preset') Or (Argument='-tune') Then X4Preset:=Lower(Value) Else Begin
@@ -51833,8 +52271,8 @@ BEGIN
    If VideoCodec='libxvid' Then VideoCodec:='mpeg4';
    If (VideoCodec<>'png') And (VideoCodec<>'gif') And (VideoCodec<>'copy') And
     (VideoCodec<>'ffv1') And (VideoCodec<>'flv') And (VideoCodec<>'mpeg4') And (VideoCodec<>'mpeg1video') And (VideoCodec<>'mpeg2video') And (VideoCodec<>'rawvideo') And
-    (VideoCodec<>'asv1') And (VideoCodec<>'asv2') And (VideoCodec<>'huffyuv') And (VideoCodec<>'h263') And (VideoCodec<>'h263p') And (VideoCodec<>'bmp') And (VideoCodec<>'dnxhd') And (VideoCodec<>'dvvideo') And (VideoCodec<>'jpegls') And (VideoCodec<>'ljpeg') And (VideoCodec<>'libx264') Then
-    Fail('Codec video: png/gif, bmp, copy, ffv1, flv, mpeg4, mpeg1video, mpeg2video, rawvideo, asv1, asv2, huffyuv, h263, h263p, dnxhd, dvvideo, jpegls, ljpeg, libx264, libxvid.');
+    (VideoCodec<>'asv1') And (VideoCodec<>'asv2') And (VideoCodec<>'huffyuv') And (VideoCodec<>'h263') And (VideoCodec<>'h263p') And (VideoCodec<>'bmp') And (VideoCodec<>'dnxhd') And (VideoCodec<>'dvvideo') And (VideoCodec<>'jpegls') And (VideoCodec<>'ljpeg') And (VideoCodec<>'libx264') And (VideoCodec<>'libtheora') Then
+    Fail('Codec video: png/gif, bmp, copy, ffv1, flv, mpeg4, mpeg1video, mpeg2video, rawvideo, asv1, asv2, huffyuv, h263, h263p, dnxhd, dvvideo, jpegls, ljpeg, libx264, libxvid, libtheora.');
   End Else If (Argument='-vframes') Or (Argument='-frames:v') Then Begin
    If InputPath='' Then Fail('Nombre d''images attendu apres -i.');
    Value:=NextArgument; Val(Value,Number,Code);
@@ -52094,6 +52532,15 @@ BEGIN
   If HasCrop Then Fail('h263: -crop non supporte avec cet encodeur.');
   Temps[2]:=NewTemporary; EncodeH263(Intermediate,Temps[2],VideoCodec='h263p');
   Commit(Temps[2]); Temps[2]:=''; WriteLn('Video H.263 creee: ',OutputPath); Halt(0);
+ End;
+ If (InputFormat='yuv4mpegpipe') And (VideoCodec='libtheora') Then Begin
+  If IsHTTP(InputPath) Or (OutputFormat<>'ogg') Or NoVideo Or (AudioCodec<>'') Or HasBitrate Or
+   (RequestedRate<>0) Or (RequestedChannels<>0) Or (ImageWidth<>0) Or (VideoFrames<>0) Then
+   Fail('libtheora: Y4M local vers sortie .ogv/.ogg requis, sans options audio (-q:v 0..10 ou -b:v acceptes).');
+  If HasCrop Then Fail('libtheora: -crop non supporte avec cet encodeur.');
+  Temps[2]:=NewTemporary;
+  If HasVideoBitrate Then EncodeTheora(Intermediate,Temps[2],THQuality,VideoBitrate) Else EncodeTheora(Intermediate,Temps[2],THQuality,0);
+  Commit(Temps[2]); Temps[2]:=''; WriteLn('Video Theora creee: ',OutputPath); Halt(0);
  End;
  If (InputFormat='yuv4mpegpipe') And (VideoCodec='libx264') Then Begin
   If IsHTTP(InputPath) Or ((OutputFormat<>'h264') And (OutputFormat<>'mp4')) Or NoVideo Or (AudioCodec<>'') Or HasBitrate Or
