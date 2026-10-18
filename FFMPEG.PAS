@@ -3605,6 +3605,8 @@ Function FormatName(S: String): String;Begin
  If (S='oga') Or (S='ogv') Or (S='spx') Then S:='ogg';
  If S='ec3' Then S:='eac3';
  If S='thd' Then S:='truehd';
+ If S='sw' Then S:='s16le' Else If S='sb' Then S:='s8' Else If S='uw' Then S:='u16le' Else If S='ub' Then S:='u8'
+ Else If S='al' Then S:='alaw' Else If S='ul' Then S:='mulaw' Else If S='302' Then S:='daud';
  FormatName:=S;
 End;
 
@@ -60256,6 +60258,748 @@ Begin
  CloseRead; CloseWrite;
 End;
 
+{ PCM-BEGIN }
+{ ---- Famille PCM (libavcodec/pcm.c, pcm_tablegen.h, pcm-dvd.c ; libavformat/wav, aiff, pcmdec, daud ; libswresample/audioconvert.c) ---- }
+Type
+ TPcmSpec=Record Bytes,Sg,Law,Cls,Spc: LongInt; BE,Planar,Ok: Boolean; End;
+ TPcmBuf=Array[0..524287] Of Byte;
+Var
+ PcmA2L,PcmU2L: Array[0..255] Of LongInt;
+ PcmL2A,PcmL2U: Array[0..16383] Of Byte;
+ PcmRev: Array[0..255] Of Byte;
+ PcmReady: Boolean;
+ PcmInRate,PcmInCh: LongInt;
+ PcmMsg: String;
+
+Function PcmSar(V: Int64; N: LongInt): Int64;
+Begin
+ If V>=0 Then PcmSar:=V Shr N Else PcmSar:=-((-V+(Int64(1) Shl N)-1) Shr N);
+End;
+
+Function PcmAlaw2Lin(A: LongInt): LongInt;
+Var T,Seg: LongInt;
+Begin
+ A:=A Xor $55;
+ T:=A And 15; Seg:=(A And $70) Shr 4;
+ If Seg<>0 Then T:=(T+T+1+32) Shl (Seg+2) Else T:=(T+T+1) Shl 3;
+ If (A And $80)<>0 Then PcmAlaw2Lin:=T Else PcmAlaw2Lin:=-T;
+End;
+
+Function PcmUlaw2Lin(U: LongInt): LongInt;
+Var T: LongInt;
+Begin
+ U:=(Not U) And 255;
+ T:=((U And 15) Shl 3)+$84;
+ T:=T Shl ((U And $70) Shr 4);
+ If (U And $80)<>0 Then PcmUlaw2Lin:=$84-T Else PcmUlaw2Lin:=T-$84;
+End;
+
+Procedure PcmBuildX(Var L2X: Array Of Byte; IsA: Boolean; Mask: LongInt);
+Var I,J,V,V1,V2: LongInt;
+Begin
+ J:=1; L2X[8192]:=Mask;
+ For I:=0 To 126 Do Begin
+  If IsA Then Begin V1:=PcmAlaw2Lin(I Xor Mask); V2:=PcmAlaw2Lin((I+1) Xor Mask); End
+  Else Begin V1:=PcmUlaw2Lin(I Xor Mask); V2:=PcmUlaw2Lin((I+1) Xor Mask); End;
+  V:=(V1+V2+4) Div 8;
+  While J<V Do Begin
+   L2X[8192-J]:=I Xor (Mask Xor $80);
+   L2X[8192+J]:=I Xor Mask;
+   Inc(J);
+  End;
+ End;
+ While J<8192 Do Begin
+  L2X[8192-J]:=127 Xor (Mask Xor $80);
+  L2X[8192+J]:=127 Xor Mask;
+  Inc(J);
+ End;
+ L2X[0]:=L2X[1];
+End;
+
+Procedure PcmInitTables;
+Var I,J,R: LongInt;
+Begin
+ If PcmReady Then Exit;
+ PcmReady:=True;
+ For I:=0 To 255 Do Begin
+  PcmA2L[I]:=PcmAlaw2Lin(I); PcmU2L[I]:=PcmUlaw2Lin(I);
+  R:=0; For J:=0 To 7 Do If (I And (1 Shl J))<>0 Then R:=R Or (128 Shr J);
+  PcmRev[I]:=R;
+ End;
+ PcmBuildX(PcmL2A,True,$D5);
+ PcmBuildX(PcmL2U,False,$FF);
+End;
+
+{ Cls : 0 U8, 1 S16, 2 S32, 3 FLT, 4 DBL ; Spc : 1 s8, 2 zork, 3 s24daud, 4 dvd }
+Function PcmSpecOf(Name: String; Var S: TPcmSpec): Boolean;
+Begin
+ FillChar(S,SizeOf(S),0);
+ Name:=Lower(Name);
+ If Copy(Name,1,4)='pcm_' Then Name:=Copy(Name,5,40);
+ S.Ok:=True;
+ If Name='s16le_planar' Then Begin Name:='s16le'; S.Planar:=True; End
+ Else If Name='s16be_planar' Then Begin Name:='s16be'; S.Planar:=True; End
+ Else If Name='s24le_planar' Then Begin Name:='s24le'; S.Planar:=True; End
+ Else If Name='s32le_planar' Then Begin Name:='s32le'; S.Planar:=True; End
+ Else If Name='s8_planar' Then Begin Name:='s8'; S.Planar:=True; End;
+ If Name='u8' Then Begin S.Bytes:=1; S.Sg:=1; S.Cls:=0; End
+ Else If Name='s8' Then Begin S.Bytes:=1; S.Cls:=0; S.Spc:=1; End
+ Else If Name='zork' Then Begin S.Bytes:=1; S.Sg:=1; S.Cls:=0; S.Spc:=2; End
+ Else If Name='alaw' Then Begin S.Bytes:=1; S.Law:=1; S.Cls:=1; End
+ Else If Name='mulaw' Then Begin S.Bytes:=1; S.Law:=2; S.Cls:=1; End
+ Else If (Name='s16le') Or (Name='s16be') Or (Name='u16le') Or (Name='u16be') Then Begin S.Bytes:=2; S.Cls:=1; End
+ Else If (Name='s24le') Or (Name='s24be') Or (Name='u24le') Or (Name='u24be') Then Begin S.Bytes:=3; S.Cls:=2; End
+ Else If (Name='s32le') Or (Name='s32be') Or (Name='u32le') Or (Name='u32be') Then Begin S.Bytes:=4; S.Cls:=2; End
+ Else If (Name='f32le') Or (Name='f32be') Then Begin S.Bytes:=4; S.Cls:=3; S.Sg:=2; End
+ Else If (Name='f64le') Or (Name='f64be') Then Begin S.Bytes:=8; S.Cls:=4; S.Sg:=2; End
+ Else If Name='s24daud' Then Begin S.Bytes:=3; S.Cls:=1; S.Spc:=3; End
+ Else If Name='dvd' Then Begin S.Bytes:=2; S.Cls:=1; S.Spc:=4; End
+ Else S.Ok:=False;
+ If S.Ok And (S.Bytes>1) And (S.Spc=0) Then Begin
+  S.BE:=Copy(Name,4,2)='be';
+  If (Name[1]='u') Then S.Sg:=1;
+ End;
+ If S.Ok And (S.Spc=3) Then S.BE:=True;
+ PcmSpecOf:=S.Ok;
+End;
+
+Function PcmIsRawName(Const N: String): Boolean;
+Var S: TPcmSpec;
+Begin
+ PcmIsRawName:=False;
+ If (N='') Or (N='dvd') Or (N='zork') Or (N='s24daud') Or (Pos('planar',N)>0) Then Exit;
+ PcmIsRawName:=PcmSpecOf(N,S);
+End;
+
+Function PcmGetBE(Var B: TPcmBuf; At,N: LongInt): Int64;
+Var K: LongInt; R: Int64;
+Begin
+ R:=0; For K:=0 To N-1 Do R:=R*256+B[At+K];
+ PcmGetBE:=R;
+End;
+
+Function PcmGetLE(Var B: TPcmBuf; At,N: LongInt): Int64;
+Var K: LongInt; R: Int64;
+Begin
+ R:=0; For K:=N-1 DownTo 0 Do R:=R*256+B[At+K];
+ PcmGetLE:=R;
+End;
+
+{ lit un echantillon entier (classes 0..2) }
+Function PcmGetI(Var S: TPcmSpec; Var B: TPcmBuf; At: LongInt): Int64;
+Var V: Int64; T: LongInt;
+Begin
+ Case S.Bytes Of
+  1: Begin
+   T:=B[At];
+   If S.Law=1 Then PcmGetI:=PcmA2L[T]
+   Else If S.Law=2 Then PcmGetI:=PcmU2L[T]
+   Else If S.Spc=1 Then PcmGetI:=(T+128) And 255
+   Else If S.Spc=2 Then Begin If T<128 Then PcmGetI:=127-T Else PcmGetI:=T; End
+   Else PcmGetI:=T;
+  End;
+  2: Begin
+   If S.BE Then V:=PcmGetBE(B,At,2) Else V:=PcmGetLE(B,At,2);
+   If S.Sg=1 Then V:=V Xor $8000;
+   If V>=32768 Then Dec(V,65536);
+   PcmGetI:=V;
+  End;
+  3: Begin
+   If S.Spc=3 Then Begin
+    V:=PcmGetBE(B,At,3) Shr 4;
+    V:=PcmRev[(V Shr 8) And 255]+(PcmRev[V And 255] Shl 8);
+    If V>=32768 Then Dec(V,65536);
+   End Else Begin
+    If S.BE Then V:=PcmGetBE(B,At,3) Else V:=PcmGetLE(B,At,3);
+    If S.Sg=1 Then V:=V Xor $800000;
+    If V>=$800000 Then Dec(V,$1000000);
+    V:=V*256;
+   End;
+   PcmGetI:=V;
+  End;
+  Else Begin
+   If S.BE Then V:=PcmGetBE(B,At,4) Else V:=PcmGetLE(B,At,4);
+   If S.Sg=1 Then V:=V Xor $80000000;
+   If V>=$80000000 Then Dec(V,$100000000);
+   PcmGetI:=V;
+  End;
+ End;
+End;
+
+Function PcmGetF(Var S: TPcmSpec; Var B: TPcmBuf; At: LongInt): Double;
+Var K: LongInt; U: Record Case Byte Of 0: (A: Array[0..7] Of Byte); 1: (S4: Single); 2: (D8: Double); End;
+Begin
+ If S.Bytes=4 Then Begin
+  For K:=0 To 3 Do If S.BE Then U.A[3-K]:=B[At+K] Else U.A[K]:=B[At+K];
+  PcmGetF:=U.S4;
+ End Else Begin
+  For K:=0 To 7 Do If S.BE Then U.A[7-K]:=B[At+K] Else U.A[K]:=B[At+K];
+  PcmGetF:=U.D8;
+ End;
+End;
+
+Procedure PcmPutN(Var B: TPcmBuf; At,N: LongInt; V: Int64; BE: Boolean);
+Var K: LongInt;
+Begin
+ For K:=0 To N-1 Do Begin
+  If BE Then B[At+N-1-K]:=V And 255 Else B[At+K]:=V And 255;
+  V:=V Shr 8;
+ End;
+End;
+
+Procedure PcmPutI(Var S: TPcmSpec; Var B: TPcmBuf; At: LongInt; V: Int64);
+Var T: LongInt; X: Int64;
+Begin
+ Case S.Bytes Of
+  1: Begin
+   If S.Law=1 Then B[At]:=PcmL2A[(V+32768) Shr 2]
+   Else If S.Law=2 Then B[At]:=PcmL2U[(V+32768) Shr 2]
+   Else If S.Spc=1 Then B[At]:=(V-128) And 255
+   Else If S.Spc=2 Then Begin T:=V; If T<128 Then T:=127-T; B[At]:=T; End
+   Else B[At]:=V;
+  End;
+  2: Begin
+   If S.Sg=1 Then V:=V+$8000;
+   PcmPutN(B,At,2,V And $FFFF,S.BE);
+  End;
+  3: Begin
+   If S.Spc=3 Then Begin
+    X:=PcmRev[(V Shr 8) And 255]+(PcmRev[V And 255] Shl 8);
+    X:=X Shl 4;
+    PcmPutN(B,At,3,X,True);
+   End Else Begin
+    X:=PcmSar(V,8);
+    If S.Sg=1 Then X:=X+$800000;
+    PcmPutN(B,At,3,X And $FFFFFF,S.BE);
+   End;
+  End;
+  Else Begin
+   If S.Sg=1 Then V:=V+$80000000;
+   PcmPutN(B,At,4,V And $FFFFFFFF,S.BE);
+  End;
+ End;
+End;
+
+Procedure PcmPutF(Var S: TPcmSpec; Var B: TPcmBuf; At: LongInt; V: Double);
+Var K: LongInt; U: Record Case Byte Of 0: (A: Array[0..7] Of Byte); 1: (S4: Single); 2: (D8: Double); End;
+Begin
+ If S.Bytes=4 Then Begin
+  U.S4:=V;
+  For K:=0 To 3 Do If S.BE Then B[At+3-K]:=U.A[K] Else B[At+K]:=U.A[K];
+ End Else Begin
+  U.D8:=V;
+  For K:=0 To 7 Do If S.BE Then B[At+7-K]:=U.A[K] Else B[At+K]:=U.A[K];
+ End;
+End;
+
+Function PcmRint(D: Double): Int64;
+Var F: Double; R: Int64;
+Begin
+ If D>4.0E18 Then Begin PcmRint:=4000000000000000000; Exit; End;
+ If D<-4.0E18 Then Begin PcmRint:=-4000000000000000000; Exit; End;
+ F:=Int(D); If F>D Then F:=F-1;
+ R:=Trunc(F);
+ If D-F>0.5 Then Inc(R)
+ Else If D-F=0.5 Then If Odd(R) Then Inc(R);
+ PcmRint:=R;
+End;
+
+Function PcmClip(V,Lo,Hi: Int64): Int64;
+Begin If V<Lo Then V:=Lo; If V>Hi Then V:=Hi; PcmClip:=V; End;
+
+{ conversion d'echantillon entre classes (swresample) : I pour les classes entieres, D pour FLT/DBL }
+Procedure PcmConv(From,To_: LongInt; Var I: Int64; Var D: Double);
+Var Sg: Single;
+Begin
+ If From=To_ Then Exit;
+ If From<=2 Then Begin
+  If To_<=2 Then Begin
+   Case From Of
+    0: If To_=1 Then I:=(I-128)*256 Else I:=(I-128)*16777216;
+    1: If To_=0 Then I:=PcmSar(I,8)+128 Else I:=I*65536;
+    2: If To_=0 Then I:=PcmSar(I,24)+128
+       Else I:=PcmClip(PcmSar(PcmSar(I,15)+1,1),-32768,32767);
+   End;
+  End Else Begin
+   Case From Of
+    0: D:=(I-128)/128.0;
+    1: D:=I/32768.0;
+    Else Begin
+     If To_=3 Then Begin Sg:=I; D:=Sg/2147483648.0; End Else D:=I/2147483648.0;
+    End;
+   End;
+  End;
+ End Else Begin
+  If To_>=3 Then Begin
+   If To_=3 Then Begin Sg:=D; D:=Sg; End;
+  End Else Begin
+   Case To_ Of
+    0: I:=PcmClip(PcmRint(D*128.0)+128,0,255);
+    1: I:=PcmClip(PcmRint(D*32768.0),-32768,32767);
+    Else I:=PcmClip(PcmRint(D*2147483648.0),-2147483648,2147483647);
+   End;
+  End;
+ End;
+End;
+
+{ transforme N trames de Ch canaux de la specification Src vers Dst }
+Procedure PcmChunk(Var Src,Dst: TPcmSpec; Ch,N: LongInt; Var BI,BO: TPcmBuf);
+Var F,C,AI,AO: LongInt; I: Int64; D: Double;
+Begin
+ For F:=0 To N-1 Do For C:=0 To Ch-1 Do Begin
+  If Src.Planar Then AI:=(C*N+F)*Src.Bytes Else AI:=(F*Ch+C)*Src.Bytes;
+  If Dst.Planar Then AO:=(C*N+F)*Dst.Bytes Else AO:=(F*Ch+C)*Dst.Bytes;
+  I:=0; D:=0;
+  If Src.Cls>=3 Then D:=PcmGetF(Src,BI,AI) Else I:=PcmGetI(Src,BI,AI);
+  PcmConv(Src.Cls,Dst.Cls,I,D);
+  If Dst.Cls>=3 Then PcmPutF(Dst,BO,AO,D) Else PcmPutI(Dst,BO,AO,I);
+ End;
+End;
+
+Procedure PcmReadBig(Pos: LongInt; Var B: TPcmBuf; Count: LongInt);
+Var Done,Piece: LongInt;
+Begin
+ Done:=0;
+ While Done<Count Do Begin
+  Piece:=Count-Done; If Piece>32768 Then Piece:=32768;
+  ReadAt(Pos+Done,B[Done],Piece);
+  Inc(Done,Piece);
+ End;
+End;
+
+Procedure PcmWriteBig(Var B: TPcmBuf; Count: LongInt);
+Var Done,Piece: LongInt;
+Begin
+ Done:=0;
+ While Done<Count Do Begin
+  Piece:=Count-Done; If Piece>32768 Then Piece:=32768;
+  WriteBytes(B[Done],Piece);
+  Inc(Done,Piece);
+ End;
+End;
+
+Type TPcmHdr=Array[0..127] Of Byte;
+Var PcmH: TPcmHdr; PcmHN: LongInt;
+Procedure PcmH8(V: LongInt);Begin PcmH[PcmHN]:=V And 255; Inc(PcmHN); End;
+Procedure PcmHL16(V: LongInt);Begin PcmH8(V); PcmH8(V Shr 8); End;
+Procedure PcmHL32(V: LongInt);Begin PcmHL16(V); PcmHL16(V Shr 16); End;
+Procedure PcmHB16(V: LongInt);Begin PcmH8(V Shr 8); PcmH8(V); End;
+Procedure PcmHB32(V: LongInt);Begin PcmHB16(V Shr 16); PcmHB16(V); End;
+Procedure PcmHTag(Const T: String);
+Var K: LongInt;
+Begin For K:=1 To 4 Do PcmH8(Ord(T[K])); End;
+
+{ ouvre un WAV (PCM entier, flottant, A-law, mu-law, extensible) ou un AIFF/AIFC PCM }
+Function PcmOpenSource(Const Name: String; Var S: TPcmSpec; Var Ch,Rate,DataStart,DataSize: LongInt): Boolean;
+Var
+ B: TPcmBuf; Limit,Pos,Sz,Tag,Bits,K,Frames,Ex: LongInt; HasFmt,Aiff: Boolean; Id: String[4]; Mant: Double; Ct: String[4];
+ Cc,Rr,Bb: LongInt; HasData: Boolean;
+Function ChunkId: String;
+Begin ChunkId:=Chr(B[0])+Chr(B[1])+Chr(B[2])+Chr(B[3]); End;
+Begin
+ PcmOpenSource:=False; PcmInitTables;
+ OpenRead(Name); Limit:=InputSize;
+ If Limit<12 Then Begin CloseRead; Exit; End;
+ ReadAt(0,B,12);
+ If (ChunkId='RIFF') And (B[8]=87) And (B[9]=65) And (B[10]=86) And (B[11]=69) Then Aiff:=False
+ Else If (ChunkId='FORM') And (B[8]=65) And (B[9]=73) And (B[10]=70) And ((B[11]=70) Or (B[11]=67)) Then Aiff:=True
+ Else Begin CloseRead; Exit; End;
+ Pos:=12; HasFmt:=False; HasData:=False; Ct:='NONE'; Cc:=0; Rr:=0; Bb:=0; Frames:=0;
+ While Limit-Pos>=8 Do Begin
+  ReadAt(Pos,B,8); Inc(Pos,8);
+  Id:=ChunkId;
+  If Aiff Then Sz:=B[7]+B[6]*256+B[5]*65536+B[4]*16777216 Else Sz:=B[4]+B[5]*256+B[6]*65536+B[7]*16777216;
+  If Sz<0 Then Break;
+  If Not Aiff And (Id='fmt ') Then Begin
+   If (Sz<16) Or (Limit-Pos<16) Then Break;
+   ReadAt(Pos,B,16);
+   Tag:=B[0]+B[1]*256; Ch:=B[2]+B[3]*256; Rate:=B[4]+B[5]*256+B[6]*65536+B[7]*16777216; Bits:=B[14]+B[15]*256;
+   If (Tag=$FFFE) And (Sz>=40) And (Limit-Pos>=40) Then Begin
+    ReadAt(Pos,B,40); Tag:=B[24]+B[25]*256;
+   End;
+   HasFmt:=True;
+  End Else If Not Aiff And (Id='data') Then Begin
+   DataStart:=Pos; DataSize:=Sz; If DataSize>Limit-Pos Then DataSize:=Limit-Pos; HasData:=True; Break;
+  End Else If Aiff And (Id='COMM') Then Begin
+   If (Sz<18) Or (Limit-Pos<18) Then Break;
+   ReadAt(Pos,B,18);
+   Cc:=B[0]*256+B[1]; Frames:=B[5]+B[4]*256+B[3]*65536+B[2]*16777216; Bb:=B[6]*256+B[7];
+   Ex:=(B[8] And $7F)*256+B[9];
+   Mant:=0; For K:=0 To 7 Do Mant:=Mant*256+B[10+K];
+   Rr:=Round(Mant*Exp((Ex-16383-63)*Ln(2.0)));
+   If Sz>=22 Then Begin ReadAt(Pos+18,B,4); Ct:=Chr(B[0])+Chr(B[1])+Chr(B[2])+Chr(B[3]); Aiff:=True; End;
+   HasFmt:=True;
+  End Else If Aiff And (Id='SSND') Then Begin
+   If Limit-Pos<8 Then Break;
+   ReadAt(Pos,B,8); Ex:=B[7]+B[6]*256+B[5]*65536+B[4]*16777216;
+   DataStart:=Pos+8+Ex; DataSize:=Sz-8-Ex; If DataSize>Limit-DataStart Then DataSize:=Limit-DataStart; HasData:=True; Break;
+  End;
+  Inc(Pos,Sz); If Odd(Sz) Then Inc(Pos);
+ End;
+ If Not HasFmt Or Not HasData Then Begin CloseRead; Exit; End;
+ If Aiff Then Begin
+  Ch:=Cc; Rate:=Rr; Bits:=Bb;
+  If (Ct='NONE') Or (Ct='twos') Then Begin
+   Case Bits Of
+    8: PcmSpecOf('s8',S);
+    16: PcmSpecOf('s16be',S);
+    24: PcmSpecOf('s24be',S);
+    32: PcmSpecOf('s32be',S);
+   End;
+  End
+  Else If Ct='sowt' Then PcmSpecOf('s16le',S)
+  Else If Ct='raw ' Then PcmSpecOf('u8',S)
+  Else If Ct='fl32' Then PcmSpecOf('f32be',S)
+  Else If Ct='fl64' Then PcmSpecOf('f64be',S)
+  Else If Ct='alaw' Then PcmSpecOf('alaw',S)
+  Else If Ct='ulaw' Then PcmSpecOf('mulaw',S)
+  Else If Ct='in24' Then PcmSpecOf('s24be',S)
+  Else If Ct='in32' Then PcmSpecOf('s32be',S)
+  Else S.Ok:=False;
+ End Else Begin
+  Case Tag Of
+   1: Case Bits Of
+       8: PcmSpecOf('u8',S);
+       16: PcmSpecOf('s16le',S);
+       24: PcmSpecOf('s24le',S);
+       32: PcmSpecOf('s32le',S);
+       Else S.Ok:=False;
+      End;
+   3: If Bits=32 Then PcmSpecOf('f32le',S) Else If Bits=64 Then PcmSpecOf('f64le',S) Else S.Ok:=False;
+   6: PcmSpecOf('alaw',S);
+   7: PcmSpecOf('mulaw',S);
+   Else S.Ok:=False;
+  End;
+ End;
+ If Not S.Ok Or (Ch<1) Or (Ch>8) Or (Rate<1) Then Begin CloseRead; Exit; End;
+ DataSize:=(DataSize Div (Ch*S.Bytes))*(Ch*S.Bytes);
+ PcmOpenSource:=True;
+End;
+
+{ ecrit un fichier WAV natif (classe de l'echantillon conservee) a partir d'un flux brut de specification S }
+Procedure PcmWavHeader(Var D: TPcmSpec; Ch,Rate,Frames: LongInt; Ext,Fact: Boolean; BitsValid,Tag: LongInt);
+Var Data,FmtSize,Mask: LongInt;
+Begin
+ Data:=Frames*Ch*D.Bytes;
+ If Ext Then FmtSize:=40 Else If Fact Then FmtSize:=18 Else FmtSize:=16;
+ PcmHN:=0;
+ PcmHTag('RIFF'); PcmHL32(4+8+FmtSize+(8+4)*Ord(Fact)+8+Data+(Data And 1)); PcmHTag('WAVE');
+ PcmHTag('fmt '); PcmHL32(FmtSize);
+ If Ext Then PcmHL16($FFFE) Else PcmHL16(Tag);
+ PcmHL16(Ch); PcmHL32(Rate); PcmHL32(Rate*Ch*D.Bytes); PcmHL16(Ch*D.Bytes); PcmHL16(D.Bytes*8);
+ If Ext Then Begin
+  PcmHL16(22); PcmHL16(BitsValid);
+  Case Ch Of
+   1: Mask:=4; 2: Mask:=3; 3: Mask:=$7; 4: Mask:=$107; 5: Mask:=$37; 6: Mask:=$3F; 7: Mask:=$13F; 8: Mask:=$63F;
+   Else Mask:=0;
+  End;
+  PcmHL32(Mask);
+  PcmHL16(Tag); PcmHL16(0); PcmHL32($00100000); PcmHL32($AA000080); PcmHL32($719B3800);
+ End Else If Fact Then PcmHL16(0);
+ If Fact Then Begin PcmHTag('fact'); PcmHL32(4); PcmHL32(Frames); End;
+ PcmHTag('data'); PcmHL32(Data);
+End;
+
+Function PcmAiffCodec(Const N: String; Var Tag: String): Boolean;
+Begin
+ PcmAiffCodec:=True;
+ If (N='s16be') Or (N='s8') Or (N='s24be') Or (N='s32be') Then Tag:='NONE'
+ Else If N='u8' Then Tag:='raw '
+ Else If N='f32be' Then Tag:='fl32'
+ Else If N='f64be' Then Tag:='fl64'
+ Else If N='alaw' Then Tag:='alaw'
+ Else If N='mulaw' Then Tag:='ulaw'
+ Else If N='s16le' Then Tag:='sowt'
+ Else PcmAiffCodec:=False;
+End;
+
+{ transcodage PCM complet : Source WAV/AIFF -> Target (wav, aiff, raw, daud) dans le codec Codec }
+Procedure PcmEncodeFile(Const Source,Target,OutFmt,Codec: String);
+Var
+ S,D: TPcmSpec; Ch,Rate,DS,DSz,Frames,Done,N,Chunk,InB,OutB,K,Bits,Tag: LongInt; BI,BO: TPcmBuf; Name,AT: String;
+ Ext,Fact: Boolean; E: Double; M: Int64; Ex: LongInt; Dummy: LongInt;
+Begin
+ If Not PcmOpenSource(Source,S,Ch,Rate,DS,DSz) Then Fail('pcm: source WAV/AIFF PCM requise.');
+ CloseRead;
+ If Not PcmSpecOf(Codec,D) Or (D.Spc=4) Or D.Planar Then Fail('pcm: codec d''encodage non pris en charge: '+Codec);
+ Name:=Lower(Codec); If Copy(Name,1,4)='pcm_' Then Name:=Copy(Name,5,40);
+ Frames:=DSz Div (Ch*S.Bytes);
+ If Frames<1 Then Fail('pcm: aucune donnee audio.');
+ If Int64(Frames)*Ch*D.Bytes>2000000000 Then Fail('pcm: sortie superieure a 2 Go.');
+ PcmHN:=0; Dummy:=0;
+ If OutFmt='wav' Then Begin
+  Tag:=1; Fact:=False; Bits:=D.Bytes*8;
+  If (Name='alaw') Or (Name='mulaw') Then Begin
+   If Name='alaw' Then Tag:=6 Else Tag:=7; Fact:=True;
+  End Else If (Name='f32le') Or (Name='f64le') Then Begin Tag:=3; Fact:=True; End
+  Else If (Name<>'u8') And (Name<>'s16le') And (Name<>'s24le') And (Name<>'s32le') Then
+   Fail('pcm: le conteneur WAV ne prend pas en charge '+Codec+'.');
+  Ext:=(Ch>2) Or (Rate>48000) Or (Name='s24le') Or (Name='s32le') Or (Name='f32le') Or (Name='f64le');
+  If Ext Then Fact:=(Tag=3);
+  PcmWavHeader(D,Ch,Rate,Frames,Ext,Fact,Bits,Tag);
+ End Else If OutFmt='aiff' Then Begin
+  If Not PcmAiffCodec(Name,AT) Then Fail('pcm: le conteneur AIFF ne prend pas en charge '+Codec+'.');
+  Bits:=D.Bytes*8;
+  PcmHTag('FORM'); PcmHB32(4+12*Ord(AT<>'NONE')+8+18+6*Ord(AT<>'NONE')+16+Frames*Ch*D.Bytes+((Frames*Ch*D.Bytes) And 1));
+  If AT<>'NONE' Then Begin PcmHTag('AIFC'); PcmHTag('FVER'); PcmHB32(4); PcmHB32($A2805140); End Else PcmHTag('AIFF');
+  PcmHTag('COMM');
+  If AT<>'NONE' Then PcmHB32(24) Else PcmHB32(18);
+  PcmHB16(Ch); PcmHB32(Frames); PcmHB16(Bits);
+  { frequence en virgule flottante etendue 80 bits }
+  Ex:=0; M:=Rate; While M>1 Do Begin M:=M Shr 1; Inc(Ex); End;
+  M:=Int64(Rate) Shl (63-Ex);
+  PcmHB16(16383+Ex);
+  For K:=7 DownTo 0 Do PcmH8(M Shr (K*8));
+  If AT<>'NONE' Then Begin PcmHTag(AT); PcmHB16(0); End;
+  PcmHTag('SSND'); PcmHB32(8+Frames*Ch*D.Bytes); PcmHB32(0); PcmHB32(0);
+ End Else If OutFmt='daud' Then Begin
+  If (Name<>'s24daud') Or (Ch<>6) Or (Rate<>96000) Then Fail('daud: pcm_s24daud, 6 canaux, 96000 Hz requis.');
+ End Else If PcmIsRawName(OutFmt) Or (OutFmt=Name) Then Begin
+  If Name<>OutFmt Then Fail('pcm: le format brut '+OutFmt+' exige le codec pcm_'+OutFmt+'.');
+ End Else Fail('pcm: conteneur de sortie non pris en charge: '+OutFmt);
+ OpenWrite(Target);
+ OpenRead(Source);
+ If PcmHN>0 Then WriteBytes(PcmH,PcmHN);
+ Done:=0;
+ Chunk:=1024;
+ If OutFmt='daud' Then Begin Chunk:=4096 Div (Ch*S.Bytes); If Chunk<1 Then Chunk:=1; End;
+ While Done<Frames Do Begin
+  N:=Chunk; If Frames-Done<N Then N:=Frames-Done;
+  InB:=N*Ch*S.Bytes; OutB:=N*Ch*D.Bytes;
+  PcmReadBig(DS+Done*Ch*S.Bytes,BI,InB);
+  PcmChunk(S,D,Ch,N,BI,BO);
+  If OutFmt='daud' Then Begin
+   { paquets de 2000 trames : taille sur 2 octets + 0x8010 }
+   PcmHN:=0; PcmHB16(OutB); PcmHB16($8010); WriteBytes(PcmH,PcmHN);
+  End;
+  PcmWriteBig(BO,OutB);
+  Inc(Done,N);
+ End;
+ If (OutFmt='wav') Or (OutFmt='aiff') Then If Odd(Frames*Ch*D.Bytes) Then Begin BO[0]:=0; WriteBytes(BO,1); End;
+ CloseRead; CloseWrite;
+End;
+
+Function PcmNativeName(Cls: LongInt): String;
+Begin
+ Case Cls Of
+  0: PcmNativeName:='u8';
+  1: PcmNativeName:='s16le';
+  2: PcmNativeName:='s32le';
+  3: PcmNativeName:='f32le';
+  Else PcmNativeName:='f64le';
+ End;
+End;
+
+Procedure PcmNativeHeader(Var D: TPcmSpec; Ch,Rate,Frames: LongInt);
+Var Tag: LongInt; Ext,Fact: Boolean;
+Begin
+ If D.Cls>=3 Then Tag:=3 Else Tag:=1;
+ Ext:=(Ch>2) Or (Rate>48000) Or (D.Cls>=2);
+ Fact:=D.Cls>=3;
+ PcmWavHeader(D,Ch,Rate,Frames,Ext,Fact,D.Bytes*8,Tag);
+End;
+
+{ convertit Len octets de la specification S (Ch canaux) vers D et les ecrit }
+Procedure PcmWriteConverted(Var S,D: TPcmSpec; Ch: LongInt; P: PEABuffer; Len,Chunk: LongInt);
+Var Frames,Done,N: LongInt; BI,BO: TPcmBuf;
+Begin
+ Frames:=Len Div (Ch*S.Bytes); Done:=0;
+ While Done<Frames Do Begin
+  N:=Chunk; If Frames-Done<N Then N:=Frames-Done;
+  Move(P^[Done*Ch*S.Bytes],BI,N*Ch*S.Bytes);
+  PcmChunk(S,D,Ch,N,BI,BO);
+  PcmWriteBig(BO,N*Ch*D.Bytes);
+  Inc(Done,N);
+ End;
+End;
+
+{ flux brut (-f s16le, -c:a pcm_* ...) ou daud vers WAV de la classe native du decodeur }
+Procedure PcmRawToWav(Const Source,Target,Fmt,Codec: String);
+Var
+ S,D: TPcmSpec; F,G: PEABuffer; Size,Ch,Rate,Pos,Sz,Total,Out,Chk: LongInt; Name: String;
+Begin
+ PcmInitTables;
+ Name:=Fmt; If Codec<>'' Then Name:=Codec;
+ If Fmt='daud' Then Name:='s24daud';
+ If Not PcmSpecOf(Name,S) Or (S.Spc=4) Then Fail('pcm: decodeur non pris en charge: '+Name);
+ Ch:=PcmInCh; Rate:=PcmInRate;
+ If Ch<=0 Then Ch:=1;
+ If Rate<=0 Then Rate:=44100;
+ If Fmt='daud' Then Begin Ch:=6; Rate:=96000; End;
+ NVLoad(Source,F,Size);
+ CloseRead;
+ PcmSpecOf(PcmNativeName(S.Cls),D);
+ If Fmt='daud' Then Begin
+  GetMem(G,Size+64); Out:=0; Pos:=0;
+  While Pos+4<=Size Do Begin
+   Sz:=F^[Pos]*256+F^[Pos+1]; Inc(Pos,4);
+   If Sz>Size-Pos Then Sz:=Size-Pos;
+   Move(F^[Pos],G^[Out],Sz); Inc(Out,Sz); Inc(Pos,Sz);
+  End;
+  FreeMem(F,Size+64); F:=G; Size:=Out;
+ End;
+ Total:=Size Div (Ch*S.Bytes);
+ If Total<1 Then Fail('pcm: aucune donnee audio.');
+ If S.Planar Then Begin
+  { trames planaires par paquets de 1024 echantillons : traite par PcmWriteConverted }
+ End;
+ OpenWrite(Target);
+ PcmNativeHeader(D,Ch,Rate,Total);
+ WriteBytes(PcmH,PcmHN);
+ If S.Planar Then Chk:=Rate Div 25 Else Chk:=1024;
+ If Chk<1 Then Chk:=1;
+ PcmWriteConverted(S,D,Ch,F,Size,Chk);
+ If Odd(Total*Ch*D.Bytes) Then Begin PcmH[0]:=0; WriteBytes(PcmH,1); End;
+ CloseWrite;
+ FreeMem(F,Size+64);
+End;
+
+{ MPEG-2 PS (.vob) : LPCM DVD (sous-flux 0xA0..0xA7) vers WAV }
+Function PcmVobProbe(Const Source: String): Boolean;
+Var B: Array[0..4095] Of Byte; N,K: LongInt;
+Begin
+ PcmVobProbe:=False;
+ OpenRead(Source); N:=InputSize; If N>4096 Then N:=4096;
+ If N<16 Then Begin CloseRead; Exit; End;
+ ReadAt(0,B,N); CloseRead;
+ For K:=0 To N-14 Do
+  If (B[K]=0) And (B[K+1]=0) And (B[K+2]=1) And (B[K+3]=$BA) And ((B[K+4] And $C0)=$40) Then Begin PcmVobProbe:=True; Exit; End;
+End;
+
+Procedure PcmVobToWav(Const Source,Target: String);
+Var
+ F,Pay: PEABuffer; Size,Pos,Len,Start,Stop,Hd,Id,PayN,Bits,Ch,Rate,BlockSize,Blocks,I,J,Gr,Fr,Total,Sub,Spb: LongInt;
+ Have: Boolean; Freq: Array[0..3] Of LongInt; D: TPcmSpec; BO: TPcmBuf; OutN,T: LongInt; V: Int64;
+ Smp: Array[0..63] Of Int64;
+ NSmp: LongInt;
+Function PB(At: LongInt): LongInt;Begin PB:=Pay^[At]; End;
+Function B16(At: LongInt): LongInt;Begin B16:=Pay^[At]*256+Pay^[At+1]; End;
+Procedure Flush;
+Begin If OutN>0 Then Begin PcmWriteBig(BO,OutN); OutN:=0; End; End;
+Procedure Put(V: Int64);
+Begin
+ If D.Bytes=2 Then PcmPutN(BO,OutN,2,V And $FFFF,False) Else PcmPutN(BO,OutN,4,V And $FFFFFFFF,False);
+ Inc(OutN,D.Bytes);
+ If OutN>=60000 Then Flush;
+End;
+Begin
+ Freq[0]:=48000; Freq[1]:=96000; Freq[2]:=44100; Freq[3]:=32000;
+ NVLoad(Source,F,Size); CloseRead;
+ GetMem(Pay,Size+64); PayN:=0; Have:=False; Sub:=-1; Bits:=0; Ch:=0; Rate:=0;
+ Pos:=0;
+ While Pos+6<=Size Do Begin
+  If (F^[Pos]<>0) Or (F^[Pos+1]<>0) Or (F^[Pos+2]<>1) Then Begin Inc(Pos); Continue; End;
+  Id:=F^[Pos+3];
+  If Id=$BA Then Begin
+   If (F^[Pos+4] And $C0)=$40 Then Inc(Pos,14+(F^[Pos+13] And 7)) Else Inc(Pos,12);
+   Continue;
+  End;
+  If Id<$B9 Then Begin Inc(Pos,4); Continue; End;
+  Len:=F^[Pos+4]*256+F^[Pos+5];
+  If Id=$BD Then Begin
+   Hd:=F^[Pos+8]; Start:=Pos+9+Hd; Stop:=Pos+6+Len;
+   If Stop>Size Then Stop:=Size;
+   If (Start+4<Stop) And ((F^[Pos+6] And $C0)=$80) And ((F^[Start] And $F8)=$A0) And ((Sub<0) Or (Sub=F^[Start])) Then Begin
+    If Sub<0 Then Sub:=F^[Start];
+    Inc(Start,4);
+    If Stop-Start>3 Then Begin
+     If Not Have Then Begin
+      Have:=True;
+      Bits:=16+((F^[Start+1] Shr 6) And 3)*4;
+      Rate:=Freq[(F^[Start+1] Shr 4) And 3];
+      Ch:=1+(F^[Start+1] And 7);
+      If Bits=28 Then Fail('pcm_dvd: profondeur d''echantillon non prise en charge.');
+     End;
+     Move(F^[Start+3],Pay^[PayN],Stop-Start-3); Inc(PayN,Stop-Start-3);
+    End;
+   End;
+  End;
+  Inc(Pos,6+Len);
+ End;
+ FreeMem(F,Size+64);
+ If Not Have Then Fail('pcm_dvd: aucun flux LPCM DVD trouve.');
+ If Bits=16 Then PcmSpecOf('s16le',D) Else PcmSpecOf('s32le',D);
+ If Bits=16 Then Begin BlockSize:=Ch*2; Spb:=1; End
+ Else Begin
+  Case Ch Of
+   1,2,4: Begin BlockSize:=4*Bits Div 8; Spb:=4 Div Ch; Gr:=1; End;
+   8: Begin BlockSize:=8*Bits Div 8; Spb:=1; Gr:=2; End;
+   Else Begin BlockSize:=4*Ch*Bits Div 8; Spb:=4; Gr:=Ch; End;
+  End;
+ End;
+ Blocks:=PayN Div BlockSize;
+ Total:=Blocks*Spb;
+ If Total<1 Then Fail('pcm_dvd: aucune donnee audio.');
+ OpenWrite(Target);
+ PcmNativeHeader(D,Ch,Rate,Total);
+ WriteBytes(PcmH,PcmHN);
+ OutN:=0; Pos:=0;
+ For I:=1 To Blocks Do Begin
+  If Bits=16 Then Begin
+   For J:=0 To Ch-1 Do Begin
+    V:=B16(Pos+J*2); If V>=32768 Then Dec(V,65536); Put(V);
+   End;
+  End Else Begin
+   If Ch=1 Then Gr:=2;
+   For Fr:=1 To Gr Do Begin
+    If Ch=1 Then NSmp:=2 Else NSmp:=4;
+    For J:=0 To NSmp-1 Do Begin
+     V:=B16(Pos+J*2); V:=V Shl 16; If V>=$80000000 Then Dec(V,$100000000);
+     Smp[J]:=V;
+    End;
+    Inc(Pos,NSmp*2);
+    If Bits=20 Then Begin
+     T:=PB(Pos); Inc(Pos);
+     Smp[0]:=Smp[0]+((T And $F0) Shl 8); Smp[1]:=Smp[1]+((T And $0F) Shl 12);
+     If NSmp=4 Then Begin
+      T:=PB(Pos); Inc(Pos);
+      Smp[2]:=Smp[2]+((T And $F0) Shl 8); Smp[3]:=Smp[3]+((T And $0F) Shl 12);
+     End;
+    End Else Begin
+     For J:=0 To NSmp-1 Do Begin Smp[J]:=Smp[J]+(PB(Pos) Shl 8); Inc(Pos); End;
+    End;
+    For J:=0 To NSmp-1 Do Put(Smp[J]);
+   End;
+   If Ch=1 Then Gr:=2;
+   Dec(Pos,0);
+   Continue;
+  End;
+  Inc(Pos,Ch*2);
+ End;
+ Flush;
+ If Odd(Total*Ch*D.Bytes) Then Begin BO[0]:=0; WriteBytes(BO,1); End;
+ CloseWrite;
+ FreeMem(Pay,Size+64);
+End;
+
+Var PcmCodecOut: String;
+
+Function PcmWavNeedsConv(Const Name: String): Boolean;
+Var S: TPcmSpec; Ch,Rate,DS,DSz: LongInt;
+Begin
+ PcmWavNeedsConv:=False;
+ If PcmOpenSource(Name,S,Ch,Rate,DS,DSz) Then Begin
+  CloseRead;
+  PcmWavNeedsConv:=(S.Law<>0) Or (S.Cls>=3);
+ End;
+End;
+
+{ AIFF PCM vers WAV : natif (Native) ou PCM 16 bits }
+Function PcmAiffToWav(Const Source,Target: String; Native: Boolean): Boolean;
+Var S: TPcmSpec; Ch,Rate,DS,DSz: LongInt;
+Begin
+ PcmAiffToWav:=False;
+ If Not PcmOpenSource(Source,S,Ch,Rate,DS,DSz) Then Exit;
+ CloseRead;
+ If Native Then PcmEncodeFile(Source,Target,'wav','pcm_'+PcmNativeName(S.Cls))
+ Else Begin
+  If (S.Law=0) And (S.Cls<=1) And (S.Spc=0) And (S.Bytes=2) And S.BE Then Exit;
+  PcmEncodeFile(Source,Target,'wav','pcm_s16le');
+ End;
+ PcmAiffToWav:=True;
+End;
+{ PCM-END }
+
 Procedure NormalizeWave(Const Source,Target: String; ForMP3: Boolean);
 Type
  TBytes = Array[0..4095] Of Byte;
@@ -60308,7 +61052,7 @@ End;
 Function Sample(N: LongInt; Ch: Integer): Double;
 Var
  P,Bytes: Integer;
- V: LongInt;
+ V: LongInt; W: Int64;
 Begin
  If N>=Frames Then N:=Frames-1;
  If (CacheBase<0) Or (N<CacheBase) Or (N>=CacheBase+CacheFrames) Then Begin
@@ -60318,7 +61062,17 @@ Begin
  End;
  Bytes:=Bits Div 8; P:=(N-CacheBase)*Align+Ch*Bytes;
  If Bits=8 Then V:=(LongInt(Cache[P])-128)*256
-  Else
+  Else If Bits>16 Then Begin
+  { conversion S32 -> S16 de swresample : ((x>>15)+1)>>1 avec saturation }
+  W:=Int64(Cache[P+Bytes-1]);
+  If W>=128 Then W:=W-256;
+  W:=W*256+Cache[P+Bytes-2];
+  If Bytes=4 Then Begin W:=W*256+Cache[P+1]; W:=W*256+Cache[P]; W:=W Div 32768-Ord((W Mod 32768<0)); End
+  Else Begin W:=W*256+Cache[P]; W:=W Div 128-Ord((W Mod 128<0)); End;
+  W:=(W+1) Div 2-Ord((W+1<0) And (((W+1) Mod 2)<>0));
+  If W>32767 Then W:=32767; If W< -32768 Then W:=-32768;
+  V:=W;
+ End Else
  Begin
   V:=LongInt(Cache[P+Bytes-2])+LongInt(Cache[P+Bytes-1])*256;
   If V>=32768 Then Dec(V,65536);
@@ -64868,6 +65622,13 @@ Begin
  WriteLn('  E rawvideo        Alias de sortie PNG/GIF; pas de pixels bruts');
  WriteLn(' D  voc             Creative Voice PCM');
  WriteLn(' DE wav             RIFF/WAVE PCM; decodage et encodage adpcm_ima_wav, adpcm_ms; DK3, DK4, CT; IMC (0x401)');
+ WriteLn(' DE alaw            PCM A-law (brut; -ar/-ac avant -i)');
+ WriteLn(' DE daud            D-Cinema audio (pcm_s24daud, 6 canaux 96000 Hz)');
+ WriteLn(' DE f32be, f32le, f64be, f64le   PCM flottant brut');
+ WriteLn(' DE mulaw           PCM mu-law (brut)');
+ WriteLn(' DE s16be, s16le, s24be, s24le, s32be, s32le, s8   PCM entier signe brut');
+ WriteLn(' DE u16be, u16le, u24be, u24le, u32be, u32le, u8   PCM entier non signe brut');
+ WriteLn(' D  vob             MPEG-2 PS: LPCM DVD (pcm_dvd) vers WAV/AIFF/PCM brut');
  WriteLn(' D  webm            WebM VP9/Opus; copie vers MP4');
  WriteLn;
  WriteLn('D/E indique le conteneur; les codecs et conversions restent limites.');
@@ -65256,8 +66017,30 @@ BEGIN
    WriteLn('DEVSD  msmpeg4v1       MPEG-4 part 2 Microsoft variant version 1 (decodeur; encodeur Y4M->AVI images I seules, -q:v)');
    WriteLn('DEVSD  msmpeg4v2       MPEG-4 part 2 Microsoft variant version 2 (decodeur I/P; encodeur Y4M->AVI images I seules, -q:v)');
    WriteLn('D VSDT mpegvideo       MPEG-1 video (decodeur MPEG-1/MPEG-2)');   
-   WriteLn('DEA    pcm_s16le       PCM signe 16 bits little-endian');
-   WriteLn('D A    pcm_u8, pcm_s24le, pcm_s32le, pcm_s8, pcm_s16be, pcm_s24be, pcm_s32be');
+   WriteLn('DEA    pcm_alaw        PCM A-law');
+   WriteLn('D A    pcm_dvd         PCM signed 20|24-bit big-endian (LPCM DVD dans .vob)');
+   WriteLn('DEA    pcm_f32be       PCM 32-bit floating point big-endian');
+   WriteLn('DEA    pcm_f32le       PCM 32-bit floating point little-endian');
+   WriteLn('DEA    pcm_f64be       PCM 64-bit floating point big-endian');
+   WriteLn('DEA    pcm_f64le       PCM 64-bit floating point little-endian');
+   WriteLn('DEA    pcm_mulaw       PCM mu-law');
+   WriteLn('DEA    pcm_s16be       PCM signed 16-bit big-endian');
+   WriteLn('DEA    pcm_s16le       PCM signed 16-bit little-endian');
+   WriteLn('D A    pcm_s16le_planar PCM 16-bit little-endian planar');
+   WriteLn('DEA    pcm_s24be       PCM signed 24-bit big-endian');
+   WriteLn('DEA    pcm_s24daud     PCM D-Cinema audio signed 24-bit');
+   WriteLn('DEA    pcm_s24le       PCM signed 24-bit little-endian');
+   WriteLn('DEA    pcm_s32be       PCM signed 32-bit big-endian');
+   WriteLn('DEA    pcm_s32le       PCM signed 32-bit little-endian');
+   WriteLn('DEA    pcm_s8          PCM signed 8-bit');
+   WriteLn('DEA    pcm_u16be       PCM unsigned 16-bit big-endian');
+   WriteLn('DEA    pcm_u16le       PCM unsigned 16-bit little-endian');
+   WriteLn('DEA    pcm_u24be       PCM unsigned 24-bit big-endian');
+   WriteLn('DEA    pcm_u24le       PCM unsigned 24-bit little-endian');
+   WriteLn('DEA    pcm_u32be       PCM unsigned 32-bit big-endian');
+   WriteLn('DEA    pcm_u32le       PCM unsigned 32-bit little-endian');
+   WriteLn('DEA    pcm_u8          PCM unsigned 8-bit');
+   WriteLn('DEA    pcm_zork        PCM Zork');
    WriteLn(' EV    png             PNG (RGB24, sans compression)');
    WriteLn('D A    wmav2           WMA2 (44100/48000 Hz, VLC, blocs fixes, sans reservoir/bruit)');   
    WriteLn('Copie conteneurs seulement: h264, vp9, opus; AAC hors ADTS (voir limites).');
@@ -65370,9 +66153,11 @@ BEGIN
    End;
   End
   Else If (Argument='-ar') Or (Argument='-ac') Then Begin
-   If InputPath='' Then Fail('Option de sortie attendue apres -i: '+Argument);
    Value:=NextArgument; Val(Value,Number,Code);
    If Code<>0 Then Fail('Valeur numerique incorrecte: '+Value);
+   If InputPath='' Then Begin
+    If Argument='-ar' Then PcmInRate:=Number Else PcmInCh:=Number;
+   End Else
    If Argument='-ar' Then Begin
     If (Number<4000) Or (Number>192000) Then Fail('-ar attendu: 4000..192000.');
     RequestedRate:=Number;
@@ -65488,11 +66273,18 @@ BEGIN
  If (Detected='') And (Lower(Extension(Intermediate))='mvi') And Not IsHTTP(Intermediate) Then Detected:='mvi';
  If (Detected='') And (Lower(Extension(Intermediate))='jls') And Not IsHTTP(Intermediate) Then Detected:='jpegls_pipe';
  If (Detected='') And ((Lower(Extension(Intermediate))='jpg') Or (Lower(Extension(Intermediate))='jpeg')) And Not IsHTTP(Intermediate) Then Detected:='jpeg_pipe';
+ If (Detected='') And Not IsHTTP(Intermediate) Then Begin
+  If PcmIsRawName(InputFormat) Or (InputFormat='daud') Then Detected:=InputFormat
+  Else If (InputFormat='') And (PcmIsRawName(FormatName(Extension(Intermediate))) Or (FormatName(Extension(Intermediate))='daud')) Then Detected:=FormatName(Extension(Intermediate))
+  Else If ((InputFormat='') Or (InputFormat='vob') Or (InputFormat='mpeg')) And PcmVobProbe(Intermediate) Then Detected:='vob';
+ End;
  If InputFormat='' Then InputFormat:=Detected Else
  If (InputFormat<>Detected) And Not ((InputFormat='dvbsub') And (Detected='')) And Not (((InputFormat='g726') Or (InputFormat='g726le')) And (Detected='')) And Not (((InputFormat='h263') Or (InputFormat='h261') Or (InputFormat='h264')) And (Detected='')) And Not ((InputFormat='eac3') And (Detected='ac3')) Then Fail(
  'Format impose incompatible avec la signature du fichier.');
  If InputFormat='' Then Fail('Format entree non reconnu ou non pris en charge.');
  If OutputFormat='' Then OutputFormat:=FormatName(Extension(OutputPath));
+ If (InputFormat='mpeg') And ((OutputFormat='wav') Or (OutputFormat='aiff') Or (OutputFormat='daud') Or PcmIsRawName(OutputFormat)) And Not IsHTTP(InputPath) Then
+  If PcmVobProbe(InputPath) Then InputFormat:='vob';
  If (InputFormat='mp4') And ((OutputFormat='wav') Or (OutputFormat='adx') Or (OutputFormat='aiff') Or
   (OutputFormat='flv') Or (OutputFormat='mp3') Or (OutputFormat='ac3') Or ((OutputFormat='mp4') And (AudioCodec='alac'))) Then
   If Not IsHTTP(InputPath) Then If MP4HasALAC(InputPath) Then InputFormat:='alac';
@@ -65507,6 +66299,9 @@ BEGIN
    Fail('Decodeur impose '+InputCodec+': entree AAC ADTS (libfaad), Interplay MVE (interplay_dpcm) ou Ogg Speex (libspeex) requise.');
   InputCodec:='';
  End;
+ If (Copy(InputCodec,1,4)='pcm_') And (PcmIsRawName(InputFormat) Or (InputFormat='daud')) Then Begin
+  { decodeur PCM impose sur un flux brut : traite par PcmRawToWav }
+ End Else
  If InputCodec<>'' Then Begin
   If (InputFormat<>'ea') And (InputFormat<>'xa') Then
    Fail('Decodeur impose (-c:a avant -i): conteneurs ea et xa seulement.');
@@ -65936,14 +66731,24 @@ BEGIN
  If NoAudio Then Fail('-an: aucune piste a ecrire dans une sortie audio seule.');
  If VideoCodec<>'' Then Fail('Codec video incompatible avec une sortie audio seule.');
  If (OutputFormat<>'wav') And (OutputFormat<>'mp3') And (OutputFormat<>'mp2') And (OutputFormat<>'ac3') And (OutputFormat<>'aac') And
- (OutputFormat<>'adx') And (OutputFormat<>'aiff') And (OutputFormat<>'flv') And (OutputFormat<>'mp4') And (OutputFormat<>'ogg') Then Fail(
+ (OutputFormat<>'adx') And (OutputFormat<>'aiff') And (OutputFormat<>'flv') And (OutputFormat<>'mp4') And (OutputFormat<>'ogg') And
+ (OutputFormat<>'daud') And Not PcmIsRawName(OutputFormat) Then Fail(
  'Sorties audio WAV, MP3, MP2, AC3, AAC (ADTS), Ogg Vorbis, ADX et AIFF-C (adpcm_ima_qt) prises en charge.');
+ PcmCodecOut:='';
+ If (Copy(AudioCodec,1,4)='pcm_') And (AudioCodec<>'pcm_dvd') And Not ((OutputFormat='wav') And (AudioCodec='pcm_s16le')) Then PcmCodecOut:=AudioCodec
+ Else If (AudioCodec='') And PcmIsRawName(OutputFormat) Then PcmCodecOut:='pcm_'+OutputFormat
+ Else If (AudioCodec='') And (OutputFormat='daud') Then PcmCodecOut:='pcm_s24daud';
+ If PcmCodecOut<>'' Then Begin
+  If Not ((OutputFormat='wav') Or (OutputFormat='aiff') Or (OutputFormat='daud') Or PcmIsRawName(OutputFormat)) Then
+   Fail('Codecs pcm_*: sortie WAV, AIFF, DAUD ou format brut (s16le, u8, alaw...) requise.');
+  If HasBitrate Then Fail('pcm: -b:a non applicable.');
+ End;
  If AudioCodec='' Then If OutputFormat='wav' Then AudioCodec:=
  'pcm_s16le' Else If OutputFormat='adx' Then AudioCodec:='adpcm_adx'
  Else If OutputFormat='aiff' Then AudioCodec:='adpcm_ima_qt'
  Else If OutputFormat='flv' Then AudioCodec:='adpcm_swf'
  Else If OutputFormat='mp4' Then AudioCodec:='alac' Else If OutputFormat='ogg' Then AudioCodec:='libvorbis' Else AudioCodec:=OutputFormat;
- If (AudioCodec<>'copy') And Not (((OutputFormat='wav') And ((AudioCodec='pcm_s16le') Or (AudioCodec='adpcm_ima_wav') Or
+ If (PcmCodecOut='') And (AudioCodec<>'copy') And Not (((OutputFormat='wav') And ((AudioCodec='pcm_s16le') Or (AudioCodec='adpcm_ima_wav') Or
   (AudioCodec='adpcm_ms') Or (AudioCodec='adpcm_yamaha'))) Or ((OutputFormat='flv') And (AudioCodec='adpcm_swf')) Or
  ((OutputFormat='mp4') And (AudioCodec='alac')) Or
  ((OutputFormat='adx') And (AudioCodec='adpcm_adx')) Or ((OutputFormat='aiff') And (AudioCodec='adpcm_ima_qt')) Or
@@ -66007,11 +66812,16 @@ BEGIN
    If InputFormat='idcin' Then DecodeIdcin(InputPath,Temps[0],3) Else
    If InputFormat='ipmovie' Then DecodeMVE(InputPath,Temps[0],3) Else
    If (InputFormat='aiff') And IsAIFFIma4(InputPath) Then DecodeAIFFIma4(InputPath,Temps[0]) Else
+   If (InputFormat='aiff') And PcmAiffToWav(InputPath,Temps[0],PcmCodecOut<>'') Then Else
    If InputFormat='aiff' Then DecodeAIFF(InputPath,Temps[0]) Else
    If InputFormat='voc' Then DecodeVOC(InputPath,Temps[0]) Else
-   If InputFormat='libopenmpt' Then DecodeMOD(InputPath,Temps[0])
+   If InputFormat='libopenmpt' Then DecodeMOD(InputPath,Temps[0]) Else
+   If PcmIsRawName(InputFormat) Or (InputFormat='daud') Then PcmRawToWav(InputPath,Temps[0],InputFormat,Lower(InputCodec)) Else
+   If InputFormat='vob' Then PcmVobToWav(InputPath,Temps[0])
                                Else Fail('Decodeur non implemente.');
    Intermediate:=Temps[0];
+  End Else If (PcmCodecOut='') And PcmWavNeedsConv(InputPath) Then Begin
+   Temps[0]:=NewTemporary; PcmEncodeFile(InputPath,Temps[0],'wav','pcm_s16le'); Intermediate:=Temps[0];
   End Else If IsWaveCT(InputPath) Then Begin
    Temps[0]:=NewTemporary; DecodeWaveCT(InputPath,Temps[0]); Intermediate:=Temps[0];
   End Else If WaveFormatTag(InputPath)=$45 Then Begin
@@ -66024,6 +66834,13 @@ BEGIN
   (WaveFormatTag(InputPath)=$11) Or (WaveFormatTag(InputPath)=$02) Or (WaveFormatTag(InputPath)=$20) Then Begin
    Temps[0]:=NewTemporary; DecodeWaveBlocks(InputPath,Temps[0]); Intermediate:=Temps[0];
   End;
+  If PcmCodecOut<>'' Then Begin
+   If (RequestedRate<>0) Or (RequestedChannels<>0) Then Begin
+    Temps[3]:=NewTemporary; PcmEncodeFile(Intermediate,Temps[3],'wav','pcm_s16le');
+    Temps[1]:=NewTemporary; NormalizeWave(Temps[3],Temps[1],False); Intermediate:=Temps[1];
+   End;
+   PcmEncodeFile(Intermediate,Temps[2],OutputFormat,PcmCodecOut);
+  End Else
   If (OutputFormat='wav') And (AudioCodec='adpcm_ima_wav') Then Begin
    Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False);
    EncodeWaveBlocks(Temps[1],Temps[2],0);
