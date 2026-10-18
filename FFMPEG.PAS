@@ -3491,7 +3491,7 @@ Var
  HLSListOpen,AllStreams,NoVideo,NoAudio: Boolean;
  VideoCodec: String;
  AspectNum,AspectDen: LongInt;
- AsvTag: String[4]; OptPixFmt: String[20]; NVKind,NVSelMode: LongInt; NVAudioOut: Boolean; SubCodec: String;
+ AsvTag: String[4]; MpegK: LongInt; OptPixFmt: String[20]; NVKind,NVSelMode: LongInt; NVAudioOut: Boolean; SubCodec: String;
  DNxProfile: String; HasAlbum,FourMV,HasVideoBitrate,HasBFrames,HasVideoTolerance,HasBQuant,HasVideoBuffer,HasComment: Boolean;
  BFrames:Integer;
  VideoBitrate,VideoTolerance,VideoBuffer: LongInt;
@@ -6299,6 +6299,7 @@ End;
 { Remuxage procedural: aucun decodeur/encodeur video externe.
   Les restrictions de codec et de chronologie sont verifiees avant publication. }
 
+Var RemuxTag,RemuxCodec: String[4];
 Procedure RemuxVideo(Const Source,Target,InKind,OutKind: String);
 Const
  MaxTracks=4;
@@ -6527,7 +6528,9 @@ Begin
    If At>Finish Then Fail('ESDS ES invalide.'); Descriptors(T,At,Finish,Depth+1);
   End Else If Kind=4 Then Begin
    If Size<13 Then Fail('ESDS decodeur tronque.');
-   If (ByteAt(At)=$6B) Or (ByteAt(At)=$69) Then Tracks^[T].Codec:='.mp3';
+   If (ByteAt(At)=$6B) Or (ByteAt(At)=$69) Then Tracks^[T].Codec:='.mp3'
+   Else If Tracks^[T].Video And (Tracks^[T].Codec='mp4v') And (ByteAt(At)>=$60) And (ByteAt(At)<=$65) Then Tracks^[T].Codec:='mpg2'
+   Else If Tracks^[T].Video And (Tracks^[T].Codec='mp4v') And (ByteAt(At)=$6A) Then Tracks^[T].Codec:='mpg1';
    Descriptors(T,At+13,Finish,Depth+1);
   End Else If Kind=5 Then ConfigFrom(T,At,Size);
   At:=Finish;
@@ -6578,7 +6581,9 @@ Begin
   If Video Then Begin
    If E-At<86 Then Fail('Entree video MP4 tronquee.');
    Width:=U16(At+32,False); Height:=U16(At+34,False); C:=At+86;
-   If (Name<>'avc1') And (Name<>'mp4v') And (Name<>'vp09') And (Name<>'8BPS') Then Fail(
+   If (Name='mp1v') Or (Name='m1v1') Or (Name='m1v ') Then Codec:='mpg1'
+   Else If (Name='mp2v') Or (Name='m2v1') Or (Name='hdv1') Or (Name='hdv2') Or (Name='hdv3') Or (Name='hdv5') Or (Name='hdv6') Then Codec:='mpg2'
+   Else If (Name<>'avc1') And (Name<>'mp4v') And (Name<>'vp09') And (Name<>'8BPS') Then Fail(
    'Codec video MP4 non pris en charge: '+Name);
    If Name='8BPS' Then Begin
     Scale:=InputScale;
@@ -6897,8 +6902,15 @@ Begin
      If (Kind='H264') Or (Kind='h264') Or (Kind='avc1') Or (Kind='X264') Then Begin
       Codec:='avc1'; AnnexB:=True;
      End
-     Else If (Kind='XVID') Or (Kind='FMP4') Or (Kind='DIVX') Or (Kind='DX50') Then Codec:=
-     'mp4v'
+     Else If (Kind='XVID') Or (Kind='FMP4') Or (Kind='DIVX') Or (Kind='DX50') Or (Kind='MP4S') Or (Kind='M4S2') Or (Kind='xvid') Or (Kind='divx') Or
+      (Kind='MP4V') Or (Kind='mp4v') Or (Kind='UMP4') Or (Kind='WV1F') Or (Kind='SEDG') Or (Kind='RMP4') Or (Kind='3IV2') Or (Kind='WAWV') Or
+      (Kind='FFDS') Or (Kind='FVFW') Or (Kind='DCOD') Or (Kind='MVXM') Or (Kind='PM4V') Or (Kind='SMP4') Or (Kind='DXGM') Or (Kind='VIDM') Or
+      (Kind='M4T3') Or (Kind='GEOX') Or (Kind='HDX4') Or (Kind='DM4V') Or (Kind='DMK2') Or (Kind='DYM4') Or (Kind='DIGI') Or (Kind='EPHV') Or
+      (Kind='EM4A') Or (Kind='M4CC') Or (Kind='SN40') Or (Kind='VSPX') Or (Kind='ULDX') Or (Kind='GEOV') Or (Kind='SIPP') Or (Kind='SM4V') Or
+      (Kind='XVIX') Or (Kind='DVX1') Or (Kind='BLZ0') Or (Kind='ZMP4') Or (Kind='QMP4') Then Begin Codec:='mp4v'; RemuxTag:=Kind; End
+     Else If (Kind='MPG1') Or (Kind='mpg1') Or (Kind='MPEG') Or (Kind='PIM1') Or (Kind='VCR2') Or (Kind='M1V1') Or (Kind='mp1v') Then Codec:='mpg1'
+     Else If (Kind='MPG2') Or (Kind='mpg2') Or (Kind='MP2V') Or (Kind='mp2v') Or (Kind='PIM2') Or (Kind='LMP2') Or (Kind='FMP2') Or (Kind='EM2V') Or
+      (Kind='M2V1') Or (Kind='M701') Or (Kind='M702') Or (Kind='M703') Or (Kind='M704') Or (Kind='M705') Then Codec:='mpg2'
      Else If (Kind='AASC') Or (Kind='AAS4') Then Begin
       Codec:=Kind; BPDepth:=U16(B+14,True);
       If (BPDepth<>8) And (BPDepth<>16) And (BPDepth<>24) Then Fail('aasc: profondeur 8/16/24 requise.');
@@ -8992,9 +9004,11 @@ Begin
  End;
  If Selected=0 Then Fail('M4V: piste video absente.');
  With Tracks^[Selected] Do Begin
-  If Codec<>'mp4v' Then Fail('M4V exige une piste MPEG-4 Part 2, sans reencodage.');
-  If ConfigSize=0 Then Fail('M4V: configuration VOL absente.');
-  WriteBytes(Config,ConfigSize); V:=First;
+  If (Codec<>'mp4v') And (Codec<>'mpg1') And (Codec<>'mpg2') Then Fail('M4V exige une piste MPEG-4 Part 2, sans reencodage.');
+  RemuxCodec:=Codec;
+  If (Codec='mp4v') And (ConfigSize=0) Then Fail('M4V: configuration VOL absente.');
+  If (Codec='mp4v') Or (ConfigSize>0) Then WriteBytes(Config,ConfigSize);
+  V:=First;
   While V<>Nil Do Begin CopyBytes(V^.Pos,V^.Size); V:=V^.Next; End;
  End;
 End;
@@ -9108,7 +9122,7 @@ Begin
   Time:=V^.Time*1.0+V^.Duration; V:=V^.Next;
  End;
  Duration:=Ticks(Time);
- If (InKind='avi') And Video And (Codec<>'FFV1') And (Codec<>'AASC') And (Codec<>'AAS4') Then ReconstructAVI(T);
+ If (InKind='avi') And Video And (Codec<>'FFV1') And (Codec<>'AASC') And (Codec<>'AAS4') And (Codec<>'mpg1') And (Codec<>'mpg2') Then ReconstructAVI(T);
  If (Codec='FFV1') And (InKind<>'yuv4mpegpipe') And (OutKind<>'yuv4mpegpipe') Then
   Fail('FFV1: sortie Y4M requise pour le decodage.');
 End;
@@ -50633,6 +50647,66 @@ Begin
  CloseRead;
 End;
 
+{ type de flux video MPEG dans un conteneur : 4 MPEG-4 partie 2, 1 MPEG-1, 2 MPEG-2, 0 autre }
+Function M4TagKind(Const T: String): LongInt;
+Const
+ L4: String='|XVID|FMP4|DIVX|DX50|MP4S|M4S2|xvid|divx|MP4V|mp4v|UMP4|WV1F|SEDG|RMP4|3IV2|WAWV|FFDS|FVFW|DCOD|MVXM|PM4V|SMP4|DXGM|VIDM|M4T3|GEOX|HDX4|DM4V|DMK2|DYM4|DIGI|EPHV|EM4A|M4CC|SN40|VSPX|ULDX|GEOV|SIPP|SM4V|XVIX|DVX1|BLZ0|ZMP4|QMP4|';
+ L1: String='|MPG1|mpg1|MPEG|PIM1|VCR2|M1V1|mp1v|';
+ L2: String='|MPG2|mpg2|MP2V|mp2v|PIM2|LMP2|FMP2|EM2V|M2V1|M701|M702|M703|M704|M705|';
+Begin
+ M4TagKind:=0;
+ If Pos('|'+T+'|',L4)>0 Then M4TagKind:=4
+ Else If Pos('|'+T+'|',L1)>0 Then M4TagKind:=1
+ Else If Pos('|'+T+'|',L2)>0 Then M4TagKind:=2;
+End;
+
+Function M4Mp4VideoKind(Const Name: String): LongInt;
+Var
+ A0,A1,B0,B1,C0,C1,D0,D1,E0,E1,Nx,N2,Q,Tg,Ln,K,Oti: LongInt; Fcc: String[4]; Done: Boolean;
+Begin
+ M4Mp4VideoKind:=0; Done:=False;
+ NVLoad(Name,M4F,M4Size);
+ If M4Find(0,M4Size,'moov',A0,A1,Nx) Then Begin
+  Nx:=A0;
+  While (Not Done) And M4Find(Nx,A1,'trak',B0,B1,Nx) Do Begin
+   If M4Find(B0,B1,'mdia',C0,C1,N2) Then Begin
+    If M4Find(C0,C1,'hdlr',D0,D1,N2) Then
+     If M4Tag(D0+8)='vide' Then
+      If M4Find(C0,C1,'minf',D0,D1,N2) Then
+       If M4Find(D0,D1,'stbl',C0,C1,N2) Then
+        If M4Find(C0,C1,'stsd',D0,D1,N2) Then
+         If M4U32(D0+4)>=1 Then Begin
+          Fcc:=Copy(M4Tag(D0+12),1,4); Done:=True;
+          If (Fcc='mp1v') Or (Fcc='m1v1') Or (Fcc='m1v ') Then M4Mp4VideoKind:=1
+          Else If (Fcc='mp2v') Or (Fcc='m2v1') Or (Fcc='hdv1') Or (Fcc='hdv2') Or (Fcc='hdv3') Or (Fcc='hdv5') Or (Fcc='hdv6') Then M4Mp4VideoKind:=2
+          Else If Fcc='mp4v' Then Begin
+           M4Mp4VideoKind:=4;
+           If D0+8+86<=D1 Then
+            If M4Find(D0+8+86,D1,'esds',E0,E1,N2) Then Begin
+             Q:=E0+4;
+             { descripteur ES (tag 3) puis decodeur (tag 4) }
+             If M4F^[Q]=3 Then Begin
+              Inc(Q); Ln:=0; For K:=1 To 4 Do Begin Ln:=(Ln Shl 7) Or (M4F^[Q] And $7F); Inc(Q); If (M4F^[Q-1] And $80)=0 Then Break; End;
+              Tg:=M4F^[Q+2]; Inc(Q,3);
+              If (Tg And $80)<>0 Then Inc(Q,2);
+              If (Tg And $40)<>0 Then Inc(Q,M4F^[Q]+1);
+              If (Tg And $20)<>0 Then Inc(Q,2);
+              If M4F^[Q]=4 Then Begin
+               Inc(Q); For K:=1 To 4 Do Begin Inc(Q); If (M4F^[Q-1] And $80)=0 Then Break; End;
+               Oti:=M4F^[Q];
+               If (Oti>=$60) And (Oti<=$65) Then M4Mp4VideoKind:=2 Else If Oti=$6A Then M4Mp4VideoKind:=1;
+              End;
+             End;
+            End;
+          End;
+         End;
+   End;
+  End;
+ End;
+ FreeMem(M4F,M4Size+64);
+ CloseRead;
+End;
+
 { ---- H.264 dans AVI et FLV ---- }
 Procedure H4FeedNalPacket(P: PEABuffer; Len: LongInt; NalSz: LongInt; Pts: Int64);
 { NalSz=0 : flux Annex B (codes de debut) ; sinon unites precedees d'une longueur sur NalSz octets }
@@ -51915,7 +51989,7 @@ Var
  M4IntraTab,M4CbpTab,M4DirTab: PEABuffer; M4PField: PH3I16; M4TabN: LongInt;
  M4SkippedLast: Boolean; M4PicHave: Boolean;
  M4OutBuf: PEABuffer; M4OutBegun,M4OutCount: LongInt; M4Mode: LongInt; M4Target: String;
- M4Err,M4Dbg: Boolean; M4X: LongInt;
+ M4Err: Boolean;
 
 Function M4Sar(V,N: LongInt): LongInt;
 Begin If V>=0 Then M4Sar:=V Shr N Else M4Sar:=-1-((-1-V) Shr N); End;
@@ -52866,8 +52940,8 @@ Begin
   Xy:=MbIndex+M4Off;
   For I:=0 To 1 Do Begin
    FS:=M4P[M4NextI].Ref^[4*Xy+2*I];
-   M4FieldSel[0,I]:=FS; M4FieldSel[1,I]:=I; If M4X=2 Then M4FieldSel[1,I]:=1-I;
-   If (M4Tff<>0) Xor (M4X=1) Then Begin TimePP:=(M4PPField-FS+I) And $FFFF; TimePB:=(M4PBField-FS+I) And $FFFF; End
+   M4FieldSel[0,I]:=FS; M4FieldSel[1,I]:=I;
+   If M4Tff<>0 Then Begin TimePP:=(M4PPField-FS+I) And $FFFF; TimePB:=(M4PBField-FS+I) And $FFFF; End
    Else Begin TimePP:=(M4PPField+FS-I) And $FFFF; TimePB:=(M4PBField+FS-I) And $FFFF; End;
    M4Mv[0,I,0]:=M4PField^[(I*M4TabN+Xy)*2]*TimePB Div TimePP+Mx;
    M4Mv[0,I,1]:=M4PField^[(I*M4TabN+Xy)*2+1]*TimePB Div TimePP+My;
@@ -52876,7 +52950,6 @@ Begin
    If My<>0 Then M4Mv[1,I,1]:=M4Mv[0,I,1]-M4PField^[(I*M4TabN+Xy)*2+1]
    Else M4Mv[1,I,1]:=M4PField^[(I*M4TabN+Xy)*2+1]*(TimePB-TimePP) Div TimePP;
   End;
-  If M4Dbg Then WriteLn(StdErr,'DIRF ',M4MbX,',',M4MbY,' pp=',M4PPField,' pb=',M4PBField,' tff=',M4Tff,' pf0=',M4PField^[(0*M4TabN+Xy)*2],',',M4PField^[(0*M4TabN+Xy)*2+1],' pf1=',M4PField^[(1*M4TabN+Xy)*2],',',M4PField^[(1*M4TabN+Xy)*2+1],' ref=',M4P[M4NextI].Ref^[4*Xy],M4P[M4NextI].Ref^[4*Xy+2],' mx=',Mx,' my=',My);
   M4SetDirectMv:=M4_DIRECT Or M4_16X8 Or M4_L0 Or M4_L1 Or M4_INTERLACED;
  End Else Begin
   M4SetOneDirectMv(Mx,My,0);
@@ -53186,7 +53259,6 @@ Begin
   Cbp:=Cbp+Cbp;
  End;
 Fin:
- If M4Dbg Then WriteLn(StdErr,'MB t=',M4PType,' ',M4MbX,',',M4MbY,' ty=',Mt^[Xy],' dir=',M4MvDir,' mvt=',M4MvType,' q=',M4Qscale,' idct=',M4IDct,' mv0=',M4Mv[0,0,0],',',M4Mv[0,0,1],' mv1=',M4Mv[0,1,0],',',M4Mv[0,1,1],' b=',M4Mv[1,0,0],',',M4Mv[1,0,1],' fs=',M4FieldSel[0,0],M4FieldSel[0,1],M4FieldSel[1,0],M4FieldSel[1,1],' cbp=',Cbp);
  Next:=M4IsResync;
  If Next<>0 Then Begin
   If M4MbX+M4MbY*M4MbW+1>=Next Then Begin M4DecodeMb:=M4_SLICE_END; Exit; End;
@@ -54024,13 +54096,6 @@ Begin
    M4Motion(0,M4LastI,DY,DC,NoRnd,False);
    If (M4MvDir And 2)<>0 Then M4Motion(1,M4NextI,DY,DC,NoRnd,True);
   End Else If (M4MvDir And 2)<>0 Then M4Motion(1,M4NextI,DY,DC,NoRnd,False);
-  If M4Dbg And (M4MbX=7) And (M4MbY=7) And (M4PType=2) Then Begin
-   For I:=0 To 15 Do Begin
-    Write(StdErr,'PRED ',I,':');
-    For DctOff:=0 To 15 Do Write(StdErr,' ',Cur^.Y^[DY+I*M4LY+DctOff]);
-    WriteLn(StdErr);
-   End;
-  End;
   For I:=0 To 5 Do If M4BlkLast[I]>=0 Then Begin
    If M4MpegQuant<>0 Then M4DequantInterMpeg(I);
    Case I Of
@@ -54317,7 +54382,7 @@ Begin
 End;
 
 { decode un paquet (une image) }
-Var M4Scan: Boolean; M4Times: ^TM4I64; M4TimeN,M4TimeCap: LongInt;
+Var M4InTag: String[4]; M4Scan: Boolean; M4Times: ^TM4I64; M4TimeN,M4TimeCap: LongInt;
 Procedure M4Packet(Pk: PEABuffer; Len: LongInt);
 Var Ret,Slice,PrevX,PrevY: LongInt;
 Begin
@@ -54341,7 +54406,6 @@ Begin
  If Not M4FrameStart Then Exit;
  M4PicHave:=True; M4P[M4CurI].Time:=M4Time;
  M4MbX:=0; M4MbY:=0; M4Err:=False;
- If M4Dbg Then WriteLn(StdErr,'PIC type=',M4PType,' time=',M4Time,' q=',M4Qscale,' f=',M4FCode,' b=',M4BCode);
  Slice:=M4DecodeSlice;
  While M4MbY<M4MbH Do Begin
   PrevX:=M4MbX; PrevY:=M4MbY;
@@ -54359,7 +54423,7 @@ Begin
  M4Init:=False; M4InitTables;
  M4Have:=False; M4W:=0; M4H:=0; M4AllocW:=-1; M4AllocH:=-1;
  M4CurI:=-1; M4LastI:=-1; M4NextI:=-1;
- M4DivxVer:=-1; M4DivxBuild:=-1; M4XvidBuild:=-1; M4LavcBuild:=-1; M4Bugs:=1; M4PadScore:=0; M4DivxPacked:=False; M4CTag:='';
+ M4DivxVer:=-1; M4DivxBuild:=-1; M4XvidBuild:=-1; M4LavcBuild:=-1; M4Bugs:=1; M4PadScore:=0; M4DivxPacked:=False; M4CTag:=M4InTag;
  M4VoType:=0; M4Shape:=0; M4TIncBits:=4; M4Res:=25; M4FixedRate:=1; M4Prog:=1; M4SprUsage:=0; M4NumWarp:=0; M4WarpAcc:=0;
  M4BrightChg:=0; M4QuantPrec:=5; M4MpegQuant:=0; M4QuarterS:=0; M4DataPart:=0; M4Rvlc:=0; M4ResyncMarker:=1; M4NewPred:=0; M4Scal:=0;
  M4EnhType:=0; M4LowDelay:=0; M4VolCtl:=0; M4CplxI:=0; M4CplxP:=0; M4CplxB:=0; M4SarN:=0; M4SarD:=1; M4Range:=0;
@@ -54411,7 +54475,7 @@ Begin
  NVLoad(Source,F,Size);
  { passe 1 : lecture des en-tetes pour obtenir la cadence (estimation r_frame_rate) }
  M4Reset; M4Scan:=True; M4TimeN:=0; M4TimeCap:=0; M4Times:=Nil; NVVN:=0; NVVD:=0;
- M4Dbg:=GetEnv('M4DBG')<>'';
+
  Split;
  { tri des instants d affichage et pas le plus frequent }
  M4Delta:=0;
@@ -54439,7 +54503,7 @@ Begin
  { passe 2 : decodage }
  Tn:=M4Res; Td:=M4FixedRate;
  Tm:=M4Delta;
- M4Reset; M4Scan:=False; M4Mode:=Mode; M4Target:=Target; NVVN:=0; NVVD:=0; M4Dbg:=GetEnv('M4DBG')<>'';
+ M4Reset; M4Scan:=False; M4Mode:=Mode; M4Target:=Target; NVVN:=0; NVVD:=0;
  M4Delta:=Tm;
  If (M4Delta>0) And (Tn>0) Then Begin
   T:=M4Delta/Tn;
@@ -63078,7 +63142,7 @@ Begin
  WriteLn(' DE mp4             MP4: copie H264/MPEG4, AAC/MP3, VP9/Opus; MOV: decodeur 8BPS');
  WriteLn(' DE mpeg            MPEG-1 System format (copie PES / muxage MP3)');
  WriteLn(' DE mpeg1video      raw MPEG-1 video (encodage I/B; decodage I/P/B; alias: m1v)');
- WriteLn('  E mpeg2video      raw MPEG-2 video (encodage I/B; copie MPEG System; alias: m2v)');
+ WriteLn(' DE mpeg2video      raw MPEG-2 video (encodage I/B; decodage I/P/B; copie MPEG System; alias: m2v)');
  WriteLn(' DE mp2             MPEG Layer II; encodage natif (octet-identique a ffmpeg mp2) ou extraction de MPEG System');
  WriteLn('  E png             PNG RGB24, une image');
  WriteLn('  E rawvideo        Alias de sortie PNG/GIF; pas de pixels bruts');
@@ -63465,9 +63529,10 @@ BEGIN
    WriteLn('D A    mpc8            Musepack SV8');
    WriteLn('D A    truehd          TrueHD');
    WriteLn(' EA    libmp3lame      libmp3lame MP3 (MPEG audio layer 3) (encodeur MPEG-1 CBR natif du projet, non identique a LAME)');
-   WriteLn('DEV    mpeg1video      MPEG-1 video (encodeur I/B; decodeur I/P/B)');
-   WriteLn(' EV    mpeg2video      MPEG-2 video (encodeur progressif I/B)');
-   WriteLn(' EV    mpeg4           MPEG-4 Part 2 (Y4M, I/P/B, options -4mv/-bf)');   
+   WriteLn('DEVSDT mpeg1video      MPEG-1 video (decodeur I/P/B; encodeur I/B)');
+   WriteLn('DEVSDT mpeg2video      MPEG-2 video (decodeur I/P/B, trames et champs, 4:2:0/4:2:2/4:4:4; encodeur progressif I/B)');
+   WriteLn('DEVSDT mpeg4           MPEG-4 part 2 (decodeur I/P/B, qpel, 4MV, entrelace, partitions de donnees; encodeur Y4M I/P/B, options -4mv/-bf)');
+   WriteLn('D VSDT mpegvideo       MPEG-1 video (decodeur MPEG-1/MPEG-2)');   
    WriteLn('DEA    pcm_s16le       PCM signe 16 bits little-endian');
    WriteLn('D A    pcm_u8, pcm_s24le, pcm_s32le, pcm_s8, pcm_s16be, pcm_s24be, pcm_s32be');
    WriteLn(' EV    png             PNG (RGB24, sans compression)');
@@ -63903,6 +63968,21 @@ BEGIN
    Fail('mpeg4: decodage local vers Y4M sans filtre ni conversion requis.');
   Temps[2]:=NewTemporary; DecodeMPEG4(Intermediate,Temps[2],0);
   Commit(Temps[2]); Temps[2]:=''; WriteLn('Video creee: ',OutputPath); Halt(0);
+ End;
+ If ((InputFormat='avi') Or (InputFormat='mp4')) And Not IsHTTP(InputPath) And (HLSBase='') And (OutputFormat='yuv4mpegpipe') And
+  ((VideoCodec='') Or (VideoCodec='rawvideo')) And Not NoVideo And (Not DecodedVideo) Then Begin
+  MpegK:=0;
+  If InputFormat='avi' Then Begin AsvTag:=AVIVideoFourCC(Intermediate); MpegK:=M4TagKind(AsvTag); M4InTag:=AsvTag; End
+  Else Begin M4InTag:=''; MpegK:=M4Mp4VideoKind(Intermediate); End;
+  If MpegK<>0 Then Begin
+   If (AudioCodec<>'') Or HasBitrate Or (RequestedRate<>0) Or (RequestedChannels<>0) Or (ImageWidth<>0) Or (VideoFrames<>0) Or HasCrop Then
+    Fail('mpeg: decodage local vers Y4M sans filtre ni conversion requis.');
+   NoAudio:=True;
+   Temps[6]:=NewTemporary; RemuxVideo(Intermediate,Temps[6],InputFormat,'m4v');
+   Temps[2]:=NewTemporary;
+   If MpegK=4 Then DecodeMPEG4(Temps[6],Temps[2],0) Else DecodeMPEGVideo(Temps[6],Temps[2],0);
+   Commit(Temps[2]); Temps[2]:=''; WriteLn('Video creee: ',OutputPath); Halt(0);
+  End;
  End;
  If ((InputFormat='mp4') Or (InputFormat='avi')) And ((OutputFormat='yuv4mpegpipe') Or (VideoCodec='mpeg4') Or (VideoCodec='mpeg1video') Or
   (VideoCodec='mpeg2video') Or (VideoCodec='ffv1') Or (VideoCodec='flv') Or FourMV) Then Begin
