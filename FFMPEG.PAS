@@ -13061,6 +13061,338 @@ Begin
  ADPCMPatchHeader(Rate,ALChannels,EAWritten); CloseRead; CloseWrite;
 End;
 
+{ MACE-BEGIN }
+{ ---- MACE 3:1 / 6:1 (libavcodec/mace.c, LGPL-2.1-or-later) : AIFF-C 'MAC3'/'MAC6' et QuickTime ---- }
+Const
+ MCTab1: Array[0..7] Of SmallInt=(-13,8,76,222,222,76,8,-13);
+ MCTab3: Array[0..3] Of SmallInt=(-18,140,140,-18);
+ MCTab2: Array[0..511] Of SmallInt=(
+ 37,116,206,330,39,121,216,346,
+ 41,127,225,361,42,132,235,377,
+ 44,137,245,392,46,144,256,410,
+ 48,150,267,428,51,157,280,449,
+ 53,165,293,470,55,172,306,490,
+ 58,179,319,511,60,187,333,534,
+ 63,195,348,557,66,205,364,583,
+ 69,214,380,609,72,223,396,635,
+ 75,233,414,663,79,244,433,694,
+ 82,254,453,725,86,265,472,756,
+ 90,278,495,792,94,290,516,826,
+ 98,303,538,862,102,316,562,901,
+ 107,331,588,942,112,345,614,983,
+ 117,361,641,1027,122,377,670,1074,
+ 127,394,701,1123,133,411,732,1172,
+ 139,430,764,1224,145,449,799,1280,
+ 152,469,835,1337,159,490,872,1397,
+ 166,512,911,1459,173,535,951,1523,
+ 181,558,993,1590,189,584,1038,1663,
+ 197,610,1085,1738,206,637,1133,1815,
+ 215,665,1183,1895,225,695,1237,1980,
+ 235,726,1291,2068,246,759,1349,2161,
+ 257,792,1409,2257,268,828,1472,2357,
+ 280,865,1538,2463,293,903,1606,2572,
+ 306,944,1678,2688,319,986,1753,2807,
+ 334,1030,1832,2933,349,1076,1914,3065,
+ 364,1124,1999,3202,380,1174,2088,3344,
+ 398,1227,2182,3494,415,1281,2278,3649,
+ 434,1339,2380,3811,453,1398,2486,3982,
+ 473,1461,2598,4160,495,1526,2714,4346,
+ 517,1594,2835,4540,540,1665,2961,4741,
+ 564,1740,3093,4953,589,1818,3232,5175,
+ 615,1898,3375,5405,643,1984,3527,5647,
+ 671,2072,3683,5898,701,2164,3848,6161,
+ 733,2261,4020,6438,766,2362,4199,6724,
+ 800,2467,4386,7024,836,2578,4583,7339,
+ 873,2692,4786,7664,912,2813,5001,8008,
+ 952,2938,5223,8364,995,3070,5457,8739,
+ 1039,3207,5701,9129,1086,3350,5956,9537,
+ 1134,3499,6220,9960,1185,3655,6497,10404,
+ 1238,3818,6788,10869,1293,3989,7091,11355,
+ 1351,4166,7407,11861,1411,4352,7738,12390,
+ 1474,4547,8084,12946,1540,4750,8444,13522,
+ 1609,4962,8821,14126,1680,5183,9215,14756,
+ 1756,5415,9626,15415,1834,5657,10057,16104,
+ 1916,5909,10505,16822,2001,6173,10975,17574,
+ 2091,6448,11463,18356,2184,6736,11974,19175,
+ 2282,7037,12510,20032,2383,7351,13068,20926,
+ 2490,7679,13652,21861,2601,8021,14260,22834,
+ 2717,8380,14897,23854,2838,8753,15561,24918,
+ 2965,9144,16256,26031,3097,9553,16982,27193,
+ 3236,9979,17740,28407,3380,10424,18532,29675,
+ 3531,10890,19359,31000,3688,11375,20222,32382,
+ 3853,11883,21125,32767,4025,12414,22069,32767,
+ 4205,12967,23053,32767,4392,13546,24082,32767,
+ 4589,14151,25157,32767,4793,14783,26280,32767,
+ 5007,15442,27452,32767,5231,16132,28678,32767,
+ 5464,16851,29957,32767,5708,17603,31294,32767,
+ 5963,18389,32691,32767,6229,19210,32767,32767,
+ 6507,20067,32767,32767,6797,20963,32767,32767,
+ 7101,21899,32767,32767,7418,22876,32767,32767,
+ 7749,23897,32767,32767,8095,24964,32767,32767,
+ 8456,26078,32767,32767,8833,27242,32767,32767,
+ 9228,28457,32767,32767,9639,29727,32767,32767);
+ MCTab4: Array[0..255] Of SmallInt=(
+ 64,216,67,226,70,236,74,246,
+ 77,257,80,268,84,280,88,294,
+ 92,307,96,321,100,334,104,350,
+ 109,365,114,382,119,399,124,416,
+ 130,434,136,454,142,475,148,495,
+ 155,519,162,541,169,564,176,590,
+ 185,617,193,644,201,673,210,703,
+ 220,735,230,767,240,801,251,838,
+ 262,876,274,914,286,955,299,997,
+ 312,1041,326,1089,341,1138,356,1188,
+ 372,1241,388,1297,406,1354,424,1415,
+ 443,1478,462,1544,483,1613,505,1684,
+ 527,1760,551,1838,576,1921,601,2007,
+ 628,2097,656,2190,686,2288,716,2389,
+ 748,2496,781,2607,816,2724,853,2846,
+ 891,2973,930,3104,972,3243,1016,3389,
+ 1061,3539,1108,3698,1158,3862,1209,4035,
+ 1264,4216,1320,4403,1379,4599,1441,4806,
+ 1505,5019,1572,5244,1642,5477,1715,5722,
+ 1792,5978,1872,6245,1955,6522,2043,6813,
+ 2134,7118,2229,7436,2329,7767,2432,8114,
+ 2541,8477,2655,8854,2773,9250,2897,9663,
+ 3026,10094,3162,10546,3303,11016,3450,11508,
+ 3604,12020,3765,12556,3933,13118,4108,13703,
+ 4292,14315,4483,14953,4683,15621,4892,16318,
+ 5111,17046,5339,17807,5577,18602,5826,19433,
+ 6086,20300,6358,21205,6642,22152,6938,23141,
+ 7248,24173,7571,25252,7909,26380,8262,27557,
+ 8631,28786,9016,30072,9419,31413,9839,32767,
+ 10278,32767,10737,32767,11216,32767,11717,32767,
+ 12240,32767,12786,32767,13356,32767,13953,32767,
+ 14576,32767,15226,32767,15906,32767,16615,32767);
+Type
+ MCChan=Record Index,Factor,Prev2,Previous,Level: LongInt; End;
+Var
+ MCChd: Array[0..1] Of MCChan;
+
+Function MCSar(V,N: LongInt): LongInt;
+Begin If V>=0 Then MCSar:=V Shr N Else MCSar:=-((-V+(1 Shl N)-1) Shr N); End;
+Function MCWrap(V: LongInt): LongInt;
+Begin V:=V And 65535; If V>=32768 Then V:=V-65536; MCWrap:=V; End;
+Function MCClip(N: LongInt): LongInt;
+Begin If N>32767 Then MCClip:=32767 Else If N<-32768 Then MCClip:=-32767 Else MCClip:=N; End;
+Function MCQt(X: LongInt): LongInt;
+Begin MCQt:=MCWrap((X And $FF00) Or (MCSar(X,8) And $FF)); End;
+Function MCRead(C,Val,TabIdx: LongInt): LongInt;
+Var Stride,Row,Cur: LongInt;
+Begin
+ If TabIdx=1 Then Stride:=2 Else Stride:=4;
+ Row:=(MCChd[C].Index And $7F0) Shr 4;
+ If Val<Stride Then Begin
+  If TabIdx=1 Then Cur:=MCTab4[Row*2+Val] Else Cur:=MCTab2[Row*4+Val];
+ End Else Begin
+  If TabIdx=1 Then Cur:=-1-MCTab4[Row*2+2*Stride-Val-1] Else Cur:=-1-MCTab2[Row*4+2*Stride-Val-1];
+ End;
+ If TabIdx=1 Then MCChd[C].Index:=MCWrap(MCChd[C].Index+MCTab3[Val]-MCSar(MCChd[C].Index,5))
+ Else MCChd[C].Index:=MCWrap(MCChd[C].Index+MCTab1[Val]-MCSar(MCChd[C].Index,5));
+ If MCChd[C].Index<0 Then MCChd[C].Index:=0;
+ MCRead:=Cur;
+End;
+Procedure MCChomp3(C: LongInt; Out: PALLong; Val,TabIdx: LongInt);
+Var Cur: LongInt;
+Begin
+ Cur:=MCRead(C,Val,TabIdx);
+ Cur:=MCClip(Cur+MCChd[C].Level);
+ MCChd[C].Level:=MCWrap(Cur-MCSar(Cur,3));
+ Out^[0]:=MCQt(Cur);
+End;
+Procedure MCChomp6(C: LongInt; Out: PALLong; Val,TabIdx: LongInt);
+Var Cur: LongInt;
+Begin
+ Cur:=MCRead(C,Val,TabIdx);
+ If (MCChd[C].Previous Xor Cur)>=0 Then Begin
+  MCChd[C].Factor:=MCChd[C].Factor+506; If MCChd[C].Factor>32767 Then MCChd[C].Factor:=32767;
+ End Else Begin
+  If MCChd[C].Factor-314<-32768 Then MCChd[C].Factor:=-32767 Else MCChd[C].Factor:=MCChd[C].Factor-314;
+ End;
+ Cur:=MCClip(Cur+MCChd[C].Level);
+ MCChd[C].Level:=MCWrap(MCSar(Cur*MCChd[C].Factor,15));
+ Cur:=MCSar(Cur,1);
+ Out^[0]:=MCQt(MCChd[C].Previous+MCChd[C].Prev2-MCSar(MCChd[C].Prev2-Cur,2));
+ Out^[1]:=MCQt(MCChd[C].Previous+Cur+MCSar(MCChd[C].Prev2-Cur,2));
+ MCChd[C].Prev2:=MCChd[C].Previous; MCChd[C].Previous:=Cur;
+End;
+{ decode tout le flux (Len octets) ; ecrit les echantillons entrelaces via EAPut }
+Procedure MCDecode(Data: PEABuffer; Len,Ch,Is3: LongInt);
+Var Groups,I,J,K,L,Pkt,Per,N: LongInt; Pcm: Array[0..1] Of PALLong; V: Array[0..1,0..2] Of LongInt; Tmp: Array[0..1] Of LongInt; Gsz: LongInt;
+Begin
+ Gsz:=Ch Shl Is3; Len:=Len-Len Mod Gsz;
+ If Len=0 Then Exit;
+ Groups:=Len Div Gsz; Per:=3*(Len Shl (1-Is3)) Div Ch;
+ For I:=0 To Ch-1 Do Begin GetMem(Pcm[I],Per*4+16); MCChd[I].Index:=0; MCChd[I].Factor:=0; MCChd[I].Prev2:=0; MCChd[I].Previous:=0; MCChd[I].Level:=0; End;
+ For I:=0 To Ch-1 Do Begin
+  N:=0;
+  For J:=0 To Groups-1 Do For K:=0 To (1 Shl Is3)-1 Do Begin
+   Pkt:=Data^[(I Shl Is3)+((J*Ch) Shl Is3)+K];
+   V[0,0]:=Pkt Shr 5; V[0,1]:=(Pkt Shr 3) And 3; V[0,2]:=Pkt And 7;
+   V[1,0]:=Pkt And 7; V[1,1]:=(Pkt Shr 3) And 3; V[1,2]:=Pkt Shr 5;
+   For L:=0 To 2 Do Begin
+    If Is3<>0 Then Begin MCChomp3(I,PALLong(@Pcm[I]^[N]),V[1,L],L); Inc(N); End
+    Else Begin MCChomp6(I,PALLong(@Pcm[I]^[N]),V[0,L],L); Inc(N,2); End;
+   End;
+  End;
+ End;
+ For J:=0 To Per-1 Do For I:=0 To Ch-1 Do EAPut(Pcm[I]^[J]);
+ For I:=0 To Ch-1 Do FreeMem(Pcm[I],Per*4+16);
+End;
+
+{ AIFF-C : renvoie 3 ou 6 si la compression est MAC3 / MAC6 }
+Function IsAIFFMace(Const Name: String): LongInt;
+Var B: Array[0..23] Of Byte; Limit,Position,Size,Count: LongInt;
+Begin
+ IsAIFFMace:=0; OpenRead(Name); Limit:=InputSize;
+ If Limit>=12 Then Begin
+  ReadAt(0,B,12);
+  If (B[8]=65) And (B[9]=73) And (B[10]=70) And (B[11]=67) Then Begin
+   Position:=12; Count:=0;
+   While (Limit-Position>=8) And (Count<64) Do Begin
+    ReadAt(Position,B,8); Inc(Position,8); Inc(Count);
+    If B[4]>=128 Then Break;
+    Size:=LongInt(B[7])+LongInt(B[6])*256+LongInt(B[5])*65536+LongInt(B[4])*16777216;
+    If (B[0]=67) And (B[1]=79) And (B[2]=77) And (B[3]=77) Then Begin
+     If (Size>=22) And (Limit-Position>=22) Then Begin
+      ReadAt(Position,B,22);
+      If (B[18]=77) And (B[19]=65) And (B[20]=67) Then Begin
+       If B[21]=51 Then IsAIFFMace:=3 Else If B[21]=54 Then IsAIFFMace:=6;
+      End;
+     End;
+     Break;
+    End;
+    If Size>Limit-Position Then Break;
+    Inc(Position,Size); If Odd(Size) Then Inc(Position);
+   End;
+  End;
+ End;
+ CloseRead;
+End;
+
+Procedure DecodeAIFFMace(Const Source,Target: String; Version: LongInt);
+Var
+ B: Array[0..23] Of Byte; Limit,Position,Size,Rate,DataAt,DataSize,Exponent: LongInt; Channels,Count,J: Integer;
+ Value: Double; Buf: PEABuffer; HasFormat,HasData: Boolean;
+Begin
+ EAReset; OpenRead(Source); Limit:=InputSize; ReadAt(0,B,12);
+ Position:=12; Count:=0; HasFormat:=False; HasData:=False; Rate:=0; Channels:=0; DataAt:=0; DataSize:=0;
+ While (Limit-Position>=8) And (Count<64) And Not HasData Do Begin
+  ReadAt(Position,B,8); Inc(Position,8); Inc(Count);
+  If B[4]>=128 Then Fail('aifc: taille de bloc excessive.');
+  Size:=LongInt(B[7])+LongInt(B[6])*256+LongInt(B[5])*65536+LongInt(B[4])*16777216;
+  If (B[0]=67) And (B[1]=79) And (B[2]=77) And (B[3]=77) Then Begin
+   If (Size<22) Or (Limit-Position<22) Then Fail('aifc: bloc COMM tronque.');
+   ReadAt(Position,B,18);
+   Channels:=LongInt(B[0])*256+B[1];
+   Exponent:=LongInt(B[8])*256+B[9]-16383;
+   If ((B[8] And $80)<>0) Or (Exponent<0) Or (Exponent>30) Then Fail('aifc: frequence incorrecte.');
+   Value:=0; For J:=17 DownTo 10 Do Value:=(Value+B[J])/256;
+   Value:=Value*2; For J:=1 To Exponent Do Value:=Value*2;
+   Rate:=Round(Value); HasFormat:=True;
+  End Else If (B[0]=83) And (B[1]=83) And (B[2]=78) And (B[3]=68) Then Begin
+   If (Size<8) Or (Limit-Position<8) Then Fail('aifc: bloc SSND tronque.');
+   ReadAt(Position,B,8);
+   DataAt:=Position+8+LongInt(B[3])+LongInt(B[2])*256+LongInt(B[1])*65536+LongInt(B[0])*16777216;
+   DataSize:=Size-8-(DataAt-Position-8); If DataSize>Limit-DataAt Then DataSize:=Limit-DataAt;
+   HasData:=True;
+  End;
+  Inc(Position,Size); If Odd(Size) Then Inc(Position);
+ End;
+ If Not HasFormat Or Not HasData Or (DataSize<=0) Then Fail('mace: blocs COMM et SSND requis.');
+ If (Channels<1) Or (Channels>2) Then Fail('mace: mono ou stereo requis.');
+ If (Rate<1000) Or (Rate>192000) Then Fail('mace: frequence 1000..192000 Hz requise.');
+ GetMem(Buf,DataSize+16);
+ Position:=0; While Position<DataSize Do Begin
+  If DataSize-Position>16384 Then Size:=16384 Else Size:=DataSize-Position;
+  ReadAt(DataAt+Position,Buf^[Position],Size); Inc(Position,Size);
+ End;
+ OpenWrite(Target); ADPCMWaveHeader(Rate,Channels,0);
+ MCDecode(Buf,DataSize,Channels,Ord(Version=3)); FreeMem(Buf,DataSize+16); EAFlush;
+ If EAWritten=0 Then Fail('mace: aucune donnee audio decodee.');
+ ADPCMPatchHeader(Rate,Channels,EAWritten); CloseRead; CloseWrite;
+End;
+
+{ QuickTime / MP4 : piste MAC3 ou MAC6 ; renvoie 3, 6 ou 0 }
+Function MP4FindMace(Var StblPos,StblSize,EntryPos,EntrySize: LongInt): LongInt;
+Var
+ Limit,MoovPos,MoovSize,P,TrakPos,TrakSize,MdiaPos,MdiaSize,MinfPos,MinfSize,StsdPos,StsdSize: LongInt; T: String;
+Begin
+ MP4FindMace:=0; Limit:=InputSize;
+ If Not MP4Find(0,Limit,'moov',MoovPos,MoovSize) Then Exit;
+ P:=MoovPos+8;
+ While MP4Find(P,MoovPos+MoovSize,'trak',TrakPos,TrakSize) Do Begin
+  If MP4Find(TrakPos+8,TrakPos+TrakSize,'mdia',MdiaPos,MdiaSize) Then
+   If MP4Find(MdiaPos+8,MdiaPos+MdiaSize,'minf',MinfPos,MinfSize) Then
+    If MP4Find(MinfPos+8,MinfPos+MinfSize,'stbl',StblPos,StblSize) Then
+     If MP4Find(StblPos+8,StblPos+StblSize,'stsd',StsdPos,StsdSize) Then
+      If StsdSize>=24 Then Begin
+       EntryPos:=StsdPos+16; EntrySize:=MP4BE32(EntryPos); T:=MP4Tag(EntryPos+4);
+       If (EntrySize>=36) And (T='MAC3') Then Begin MP4FindMace:=3; Exit; End;
+       If (EntrySize>=36) And (T='MAC6') Then Begin MP4FindMace:=6; Exit; End;
+      End;
+  P:=TrakPos+TrakSize;
+ End;
+End;
+Function MP4HasMace(Const Name: String): LongInt;
+Var A,B,C,D: LongInt;
+Begin OpenRead(Name); MP4HasMace:=MP4FindMace(A,B,C,D); CloseRead; End;
+
+Procedure DecodeMP4Mace(Const Source,Target: String; Version: LongInt);
+Var
+ StblPos,StblSize,EntryPos,EntrySize,SzPos,SzSize,ScPos,ScSize,CoPos,CoSize,FixedSize,Samples,Chunks,Rate,Channels: LongInt;
+ Sizes: PALLong; Table: PALLong; Chunk,Sample,PerChunk,I,J,Pos,Take,Entries,K,Size: LongInt; Buf: PEABuffer; Tot,Cap: LongInt; Is64: Boolean; Q: Array[0..11] Of Byte;
+Begin
+ EAReset; OpenRead(Source);
+ If MP4FindMace(StblPos,StblSize,EntryPos,EntrySize)=0 Then Fail('mace: aucune piste MACE dans le fichier.');
+ ReadAt(EntryPos+24,Q,10);
+ Channels:=Q[0]*256+Q[1]; Rate:=Q[8]*256+Q[9];
+ If (Channels<1) Or (Channels>2) Then Fail('mace: mono ou stereo requis.');
+ If (Rate<1000) Or (Rate>192000) Then Fail('mace: frequence 1000..192000 Hz requise.');
+ If Not MP4Find(StblPos+8,StblPos+StblSize,'stsz',SzPos,SzSize) Then Fail('mace: stsz absent.');
+ If Not MP4Find(StblPos+8,StblPos+StblSize,'stsc',ScPos,ScSize) Then Fail('mace: stsc absent.');
+ Is64:=False;
+ If Not MP4Find(StblPos+8,StblPos+StblSize,'stco',CoPos,CoSize) Then Begin
+  If Not MP4Find(StblPos+8,StblPos+StblSize,'co64',CoPos,CoSize) Then Fail('mace: stco absent.');
+  Is64:=True;
+ End;
+ FixedSize:=MP4BE32(SzPos+12); Samples:=MP4BE32(SzPos+16);
+ If (Samples<=0) Or (Samples>16777216) Then Fail('mace: nombre d''echantillons incorrect.');
+ GetMem(Sizes,Samples*4);
+ For I:=0 To Samples-1 Do If FixedSize<>0 Then Sizes^[I]:=FixedSize Else Sizes^[I]:=MP4BE32(SzPos+20+4*I);
+ Entries:=MP4BE32(ScPos+12); If (Entries<1) Or (Entries>1048576) Then Fail('mace: stsc incorrect.');
+ GetMem(Table,Entries*8);
+ For I:=0 To Entries-1 Do Begin Table^[2*I]:=MP4BE32(ScPos+16+12*I); Table^[2*I+1]:=MP4BE32(ScPos+20+12*I); End;
+ Chunks:=MP4BE32(CoPos+12);
+ Cap:=1 Shl 20; GetMem(Buf,Cap); Tot:=0;
+ Sample:=0; K:=0;
+ For Chunk:=1 To Chunks Do Begin
+  While (K+1<Entries) And (Table^[2*(K+1)]<=Chunk) Do Inc(K);
+  PerChunk:=Table^[2*K+1];
+  If Is64 Then Begin
+   ReadAt(CoPos+16+8*(Chunk-1),Q,8); Pos:=LongInt(Q[4])*16777216+LongInt(Q[5])*65536+LongInt(Q[6])*256+Q[7];
+  End Else Pos:=MP4BE32(CoPos+16+4*(Chunk-1));
+  For J:=1 To PerChunk Do Begin
+   If Sample>=Samples Then Break;
+   Take:=Sizes^[Sample];
+   If (Take>0) And (Pos+Take<=InputSize) Then Begin
+    If Tot+Take>Cap Then Begin While Tot+Take>Cap Do Cap:=Cap*2; ReallocMem(Pointer(Buf),Cap); End;
+    I:=0; While I<Take Do Begin
+     If Take-I>16384 Then Size:=16384 Else Size:=Take-I;
+     ReadAt(Pos+I,Buf^[Tot+I],Size); Inc(I,Size);
+    End;
+    Inc(Tot,Take);
+   End;
+   Inc(Pos,Take); Inc(Sample);
+  End;
+ End;
+ OpenWrite(Target); ADPCMWaveHeader(Rate,Channels,0);
+ MCDecode(Buf,Tot,Channels,Ord(Version=3)); FreeMem(Buf,Cap); EAFlush;
+ If EAWritten=0 Then Fail('mace: aucune donnee audio decodee.');
+ ADPCMPatchHeader(Rate,Channels,EAWritten); CloseRead; CloseWrite;
+End;
+{ MACE-END }
+
 { ---- Encodeur ALAC (niveau de compression 2 de FFmpeg) ---- }
 Var
  ALPack: Array[0..131071] Of Byte; ALPackBits: LongInt;
@@ -17156,7 +17488,7 @@ Begin
  Else If Kind=27 Then DecodeFLVH263(Source,Target,Mode)
  Else If Kind=28 Then DecodeH263Raw(Source,Target,Mode)
  Else If Kind=29 Then DecodeH261Raw(Source,Target,Mode)
- Else If ((Kind>=18) And (Kind<=24)) Or (Kind=26) Or (Kind=31) Or (Kind=32) Or (Kind=37) Then DecodeAVIX(Source,Target,Mode,Kind)
+ Else If ((Kind>=18) And (Kind<=24)) Or (Kind=26) Or (Kind=31) Or (Kind=32) Or (Kind=37) Or ((Kind>=40) And (Kind<=43)) Then DecodeAVIX(Source,Target,Mode,Kind)
  Else If Kind>=7 Then DecodeAVIVideo(Source,Target,Mode,Kind) Else DecodeNV(Kind,Source,Target,Mode);
 End;
 
@@ -38412,6 +38744,221 @@ Begin
 End;
 { LJPEG-END }
 
+{ ---- lecteur de bits MSB (get_bits.h), avec le plafonnement size+8 de FFmpeg ---- }
+Var BRBuf: PEABuffer; BRLen,BRPos: LongInt;
+
+Procedure BRInit(P: PEABuffer; Bytes: LongInt);Begin BRBuf:=P; BRLen:=Bytes*8; BRPos:=0; End;
+Function BRLeft: LongInt;Begin BRLeft:=BRLen-BRPos; End;
+Function BRBits(N: LongInt): LongInt;
+Var V: Int64; I,B,Q: LongInt;
+Begin
+ V:=0; Q:=BRPos;
+ For I:=1 To N Do Begin
+  If Q<BRLen Then B:=(BRBuf^[Q Shr 3] Shr (7-(Q And 7))) And 1 Else B:=0;
+  V:=V*2+B; Inc(Q);
+ End;
+ BRPos:=BRPos+N; If BRPos>BRLen+8 Then BRPos:=BRLen+8;
+ BRBits:=LongInt(V And $FFFFFFFF);
+End;
+Function BRBit: LongInt;
+Var B: LongInt;
+Begin
+ If BRPos<BRLen Then B:=(BRBuf^[BRPos Shr 3] Shr (7-(BRPos And 7))) And 1 Else B:=0;
+ Inc(BRPos); If BRPos>BRLen+8 Then BRPos:=BRLen+8;
+ BRBit:=B;
+End;
+
+Function BRBitsLE(N: LongInt): LongInt;
+Var V: Int64; I,B,Q: LongInt;
+Begin
+ V:=0; Q:=BRPos;
+ For I:=0 To N-1 Do Begin
+  If Q<BRLen Then B:=(BRBuf^[Q Shr 3] Shr (Q And 7)) And 1 Else B:=0;
+  V:=V Or (Int64(B) Shl I); Inc(Q);
+ End;
+ BRPos:=BRPos+N; If BRPos>BRLen+8 Then BRPos:=BRLen+8;
+ BRBitsLE:=LongInt(V And $FFFFFFFF);
+End;
+Function BRBitLE: LongInt;
+Var B: LongInt;
+Begin
+ If BRPos<BRLen Then B:=(BRBuf^[BRPos Shr 3] Shr (BRPos And 7)) And 1 Else B:=0;
+ Inc(BRPos); If BRPos>BRLen+8 Then BRPos:=BRLen+8;
+ BRBitLE:=B;
+End;
+
+{ LOCO-BEGIN }
+{ ---- LOCO (libavcodec/loco.c, LGPL-2.1-or-later) : AVI LOCO, modes YUY2/UYVY/YV12/RGB/RGBA ---- }
+Var
+ LCLossy,LCMode: LongInt;
+ LCSave,LCRun,LCRun2,LCSum,LCCount: LongInt;
+ LCPl: Array[0..3] Of PEABuffer; LCStr: Array[0..3] Of LongInt;
+
+Function LCGolomb(K: LongInt): Int64;
+Var I: LongInt; V: Int64;
+Begin
+ I:=0;
+ While BRBit=0 Do Begin
+  Inc(I);
+  If BRPos>BRLen Then Begin LCGolomb:=-1; Exit; End;
+ End;
+ V:=0;
+ If K>0 Then V:=BRBits(K);
+ LCGolomb:=(Int64(I) Shl K)+V;
+End;
+Function LCRiceParam: LongInt;
+Var Cnt,Val: LongInt;
+Begin
+ Cnt:=0; Val:=LCCount;
+ While (LCSum>Val) And (Cnt<9) Do Begin Val:=Val Shl 1; Inc(Cnt); End;
+ LCRiceParam:=Cnt;
+End;
+Procedure LCUpdate(V: LongInt);
+Begin
+ Inc(LCSum,V); Inc(LCCount);
+ If LCCount=16 Then Begin LCSum:=LCSum Shr 1; LCCount:=LCCount Shr 1; End;
+End;
+Const LCErr=-2147483647-1;
+Function LCRice: LongInt;
+Var V: Int64; U: LongInt;
+Begin
+ If LCRun>0 Then Begin Dec(LCRun); LCUpdate(0); LCRice:=0; Exit; End;
+ If BRLeft<1 Then Begin LCRice:=LCErr; Exit; End;
+ V:=LCGolomb(LCRiceParam);
+ If V<0 Then Begin LCRice:=LCErr; Exit; End;
+ LCUpdate(LongInt((V+1) Shr 1));
+ If V=0 Then Begin
+  If LCSave>=0 Then Begin
+   V:=LCGolomb(2);
+   If V<0 Then Begin LCRice:=LCErr; Exit; End;
+   LCRun:=LongInt(V);
+   If LCRun>1 Then Inc(LCSave,LCRun+1) Else Dec(LCSave,3);
+  End Else Inc(LCRun2);
+  LCRice:=0;
+ End Else Begin
+  U:=LongInt(V);
+  If (U And 1)<>0 Then U:=-(((U Shr 1)+LCLossy)+1) Else U:=(U Shr 1)+LCLossy;
+  If LCRun2>0 Then Begin
+   If LCRun2>2 Then Inc(LCSave,LCRun2) Else Dec(LCSave,3);
+   LCRun2:=0;
+  End;
+  LCRice:=U;
+ End;
+End;
+Function LCMid(A,B,C: LongInt): LongInt;
+Begin
+ If A>B Then Begin If B>C Then LCMid:=B Else If A>C Then LCMid:=C Else LCMid:=A; End
+ Else Begin If A>C Then LCMid:=A Else If B>C Then LCMid:=C Else LCMid:=B; End;
+End;
+{ plan decode ; Base pointe la premiere ligne decodee, Stride peut etre negatif ; renvoie les octets consommes ou -1 }
+Function LCPlane(Base: PEABuffer; Width,Height,Stride: LongInt; Buf: PEABuffer; Size: LongInt): LongInt;
+Var Val,I,J: LongInt; Row: PEABuffer; A,B,C: LongInt;
+ Function At(Y,X: LongInt): LongInt; Begin At:=PEABuffer(Pointer(PtrInt(Base)+Int64(Y)*Stride))^[X]; End;
+ Procedure SetP(Y,X,V: LongInt); Begin PEABuffer(Pointer(PtrInt(Base)+Int64(Y)*Stride))^[X]:=V And 255; End;
+Begin
+ If Size<=0 Then Begin LCPlane:=-1; Exit; End;
+ BRInit(Buf,Size);
+ LCSave:=0; LCRun:=0; LCRun2:=0; LCSum:=8; LCCount:=1;
+ Val:=LCRice; SetP(0,0,128+Val);
+ For I:=1 To Width-1 Do Begin
+  Val:=LCRice; If Val=LCErr Then Begin LCPlane:=-1; Exit; End;
+  SetP(0,I,At(0,I-1)+Val);
+ End;
+ For J:=1 To Height-1 Do Begin
+  Val:=LCRice; If Val=LCErr Then Begin LCPlane:=-1; Exit; End;
+  SetP(J,0,At(J-1,0)+Val);
+  For I:=1 To Width-1 Do Begin
+   Val:=LCRice; If Val=LCErr Then Begin LCPlane:=-1; Exit; End;
+   A:=At(J-1,I); B:=At(J,I-1); C:=At(J-1,I-1);
+   SetP(J,I,LCMid(A,A+B-C,B)+Val);
+  End;
+ End;
+ LCPlane:=(BRPos+7) Shr 3;
+End;
+Function LCRow(Base: PEABuffer; Stride,Y: LongInt): PEABuffer;
+Begin LCRow:=PEABuffer(Pointer(PtrInt(Base)+Int64(Y)*Stride)); End;
+Procedure LCRotate(Base: PEABuffer; Width,Height,Stride: LongInt);
+Var Y: LongInt;
+Begin
+ For Y:=1 To Height-1 Do If Width>=Y Then Begin
+  Move(LCRow(Base,Stride,Y)^[Y],LCRow(Base,Stride,Y)^[0],Width-Y);
+  If Y+1<Height Then Move(LCRow(Base,Stride,Y+1)^[0],LCRow(Base,Stride,Y)^[Width-Y],Y);
+ End;
+End;
+{ en-tete : renvoie un message d'erreur ou '' ; Fmt: 7 = YUV planaire, 9 = RGB, 3 = RGBA }
+Function LCInit(Extra: PEABuffer; ExtraLen: LongInt; Var Fmt,ChH,ChV: LongInt): String;
+Var Version: LongInt;
+Begin
+ LCInit:='';
+ If ExtraLen<12 Then Begin LCInit:='loco: donnees supplementaires (12 octets) requises.'; Exit; End;
+ Version:=EA32(Extra,ExtraLen,0,False);
+ If Version=1 Then LCLossy:=0 Else LCLossy:=EA32(Extra,ExtraLen,8,False);
+ If (LCLossy<0) Or (LCLossy>65536) Then Begin LCInit:='loco: parametre lossy incorrect.'; Exit; End;
+ LCMode:=EA32(Extra,ExtraLen,4,False);
+ Case LCMode Of
+  -1,1,2: Begin Fmt:=7; ChH:=1; ChV:=0; End;
+  -4,5: Begin Fmt:=7; ChH:=1; ChV:=1; End;
+  -2,3: Fmt:=9;
+  -3,4: Fmt:=3;
+  Else LCInit:='loco: espace colorimetrique inconnu.';
+ End;
+End;
+{ decode une image dans Out (disposition NV) ; False en cas d'erreur }
+Function LCFrame(Buf: PEABuffer; Size,W,H,Fmt,ChH,ChV: LongInt; Out: PEABuffer): Boolean;
+Var Okr: Boolean; Cw,Ch,Dc,I,X,Y,NP: LongInt; P: Array[0..3] Of PEABuffer; Sz: Array[0..3] Of LongInt;
+Function Step(Idx,Pw,Ph: LongInt; Flip,Last: Boolean): Boolean;
+Begin
+ If Flip Then Dc:=LCPlane(LCRow(P[Idx],Pw,Ph-1),Pw,Ph,-Pw,Buf,Size)
+ Else Dc:=LCPlane(P[Idx],Pw,Ph,Pw,Buf,Size);
+ If (Dc<0) Or (Dc>Size) Or ((Dc=Size) And Not Last) Then Step:=False Else Begin Buf:=PEABuffer(Pointer(PtrInt(Buf)+Dc)); Size:=Size-Dc; Step:=True; End;
+End;
+Begin
+ Okr:=False;
+ Cw:=W Div 2; If Fmt=7 Then Ch:=H Shr ChV;
+ NP:=1; Sz[0]:=W*H; Sz[1]:=0; Sz[2]:=0; Sz[3]:=0;
+ If Fmt=7 Then Begin NP:=3; Sz[1]:=Cw*Ch; Sz[2]:=Sz[1]; End
+ Else If Fmt=9 Then Begin NP:=3; Sz[1]:=W*H; Sz[2]:=W*H; End
+ Else Begin NP:=4; Sz[1]:=W*H; Sz[2]:=W*H; Sz[3]:=W*H; End;
+ For I:=0 To NP-1 Do Begin GetMem(P[I],Sz[I]+64); FillChar(P[I]^,Sz[I]+64,0); End;
+ Dc:=0;
+ If Fmt=7 Then Begin
+  If ChV=0 Then Begin
+   If Step(0,W,H,False,False) Then If Step(1,Cw,H,False,False) Then Okr:=Step(2,Cw,H,False,True);
+  End Else Begin
+   If Step(0,W,H,False,False) Then If Step(2,Cw,Ch,False,False) Then Okr:=Step(1,Cw,Ch,False,True);
+  End;
+ End Else Begin
+  If Step(1,W,H,True,False) Then If Step(0,W,H,True,False) Then Begin
+   If Fmt=3 Then Begin If Step(2,W,H,True,False) Then Okr:=Step(3,W,H,True,True); End
+   Else Okr:=Step(2,W,H,True,True);
+  End;
+  If Okr And Odd(W) And (Fmt=9) Then
+   For I:=0 To NP-1 Do LCRotate(LCRow(P[I],W,H-1),W,H,-W);
+ End;
+ If Okr Then Begin
+  If Fmt=7 Then Begin
+   Move(P[0]^,Out^[0],W*H);
+   { chroma : largeur du plan = (W+1)/2 dans la sortie }
+   Cw:=(W+1) Shr 1;
+   For Y:=0 To (H+ChV) Shr ChV-1 Do For X:=0 To Cw-1 Do Begin
+    If X<W Div 2 Then Begin
+     Out^[W*H+Y*Cw+X]:=P[1]^[Y*(W Div 2)+X];
+     Out^[W*H+Cw*((H+ChV) Shr ChV)+Y*Cw+X]:=P[2]^[Y*(W Div 2)+X];
+    End Else Begin Out^[W*H+Y*Cw+X]:=0; Out^[W*H+Cw*((H+ChV) Shr ChV)+Y*Cw+X]:=0; End;
+   End;
+  End Else If Fmt=9 Then Begin
+   For I:=0 To W*H-1 Do Begin Out^[3*I]:=P[2]^[I]; Out^[3*I+1]:=P[0]^[I]; Out^[3*I+2]:=P[1]^[I]; End;
+  End Else Begin
+   For I:=0 To W*H-1 Do Begin Out^[4*I]:=P[1]^[I]; Out^[4*I+1]:=P[0]^[I]; Out^[4*I+2]:=P[2]^[I]; Out^[4*I+3]:=P[3]^[I]; End;
+  End;
+ End;
+ For I:=0 To NP-1 Do FreeMem(P[I],Sz[I]+64);
+ LCFrame:=Okr;
+End;
+{ LOCO-END }
+
+Var LCFmt,LCChH,LCChV: LongInt;
+
 Procedure DecodeAVIX(Const Source,Target: String; Mode,Kind: LongInt);
 Var Pos,PkPos,PkLen,RN,RD,I,Y,X,Cw,Ch,Bs,Msg2: LongInt; Ok,FFBegun: Boolean; Msg: String; PIdx: LongInt; NbF,NbP: Int64;
 Begin
@@ -38464,6 +39011,17 @@ Begin
    HYOutSize:=NVFrameBytes+64; GetMem(HYOut,HYOutSize);
    CFTbN:=AXScale; CFTbD:=AXRate; CFFn:=RN; CFFd:=RD; CFNext:=0; CFFrameNo:=0; CFHist[0]:=0; CFHist[1]:=0; CFHist[2]:=0; CFLastDropped:=False; CFVscfr:=True;
   End;
+  40: Begin
+   If AXFcc<>'LOCO' Then Fail('loco: flux AVI LOCO requis.');
+   Msg:=LCInit(PEABuffer(@AXF^[AXExtra]),AXExtraLen,LCFmt,LCChH,LCChV); If Msg<>'' Then Fail(Msg);
+   NVBegin(Mode,Target,AXW,AXH,LCFmt,RN,RD); NVAviSar(AXW,AXH);
+   If LCFmt=7 Then Begin
+    NVSubX:=LCChH; NVSubY:=LCChV; NVCW:=(AXW+1) Shr 1; NVCH:=(AXH+LCChV) Shr LCChV;
+    If LCChV=0 Then NVYTag:='C422' Else NVYTag:='C420jpeg';
+   End;
+   If LCFmt=3 Then NVHasAlpha:=True;
+   HYOutSize:=NVFrameBytes+64; GetMem(HYOut,HYOutSize);
+  End;
   37: Begin
    If AXFcc<>'KMVC' Then Fail('kmvc: flux AVI KMVC requis.');
    Msg:=KMInit(AXW,AXH); If Msg<>'' Then Fail(Msg);
@@ -38494,6 +39052,7 @@ Begin
   Ok:=False; Inc(PIdx);
   Case Kind Of
    18: Ok:=FSVFrame(PEABuffer(@AXF^[PkPos]),PkLen);
+   40: Ok:=LCFrame(PEABuffer(@AXF^[PkPos]),PkLen,AXW,AXH,LCFmt,LCChH,LCChV,HYOut);
    32: Begin
     I:=IV3Frame(PEABuffer(@AXF^[PkPos]),PkLen);
     Ok:=I=1;
@@ -38580,7 +39139,7 @@ Begin
   If Ok Then Begin
    Case Kind Of
     18: NVEmit(FSVPic);
-    20,21: NVEmit(HYOut);
+    20,21,40: NVEmit(HYOut);
     24: NVEmit(FROut);
     26: NVEmit(H3OutBuf);
     31,32,37: Begin
@@ -38595,49 +39154,6 @@ Begin
  If ((Kind=31) Or (Kind=32) Or (Kind=37)) And FFBegun And Not NVDone Then CFFlush(HYOut);
  FreeMem(AXF,AXSize+64);
  NVFinish('video');
-End;
-
-{ ---- lecteur de bits MSB (get_bits.h), avec le plafonnement size+8 de FFmpeg ---- }
-Var BRBuf: PEABuffer; BRLen,BRPos: LongInt;
-
-Procedure BRInit(P: PEABuffer; Bytes: LongInt);Begin BRBuf:=P; BRLen:=Bytes*8; BRPos:=0; End;
-Function BRLeft: LongInt;Begin BRLeft:=BRLen-BRPos; End;
-Function BRBits(N: LongInt): LongInt;
-Var V: Int64; I,B,Q: LongInt;
-Begin
- V:=0; Q:=BRPos;
- For I:=1 To N Do Begin
-  If Q<BRLen Then B:=(BRBuf^[Q Shr 3] Shr (7-(Q And 7))) And 1 Else B:=0;
-  V:=V*2+B; Inc(Q);
- End;
- BRPos:=BRPos+N; If BRPos>BRLen+8 Then BRPos:=BRLen+8;
- BRBits:=LongInt(V And $FFFFFFFF);
-End;
-Function BRBit: LongInt;
-Var B: LongInt;
-Begin
- If BRPos<BRLen Then B:=(BRBuf^[BRPos Shr 3] Shr (7-(BRPos And 7))) And 1 Else B:=0;
- Inc(BRPos); If BRPos>BRLen+8 Then BRPos:=BRLen+8;
- BRBit:=B;
-End;
-
-Function BRBitsLE(N: LongInt): LongInt;
-Var V: Int64; I,B,Q: LongInt;
-Begin
- V:=0; Q:=BRPos;
- For I:=0 To N-1 Do Begin
-  If Q<BRLen Then B:=(BRBuf^[Q Shr 3] Shr (Q And 7)) And 1 Else B:=0;
-  V:=V Or (Int64(B) Shl I); Inc(Q);
- End;
- BRPos:=BRPos+N; If BRPos>BRLen+8 Then BRPos:=BRLen+8;
- BRBitsLE:=LongInt(V And $FFFFFFFF);
-End;
-Function BRBitLE: LongInt;
-Var B: LongInt;
-Begin
- If BRPos<BRLen Then B:=(BRBuf^[BRPos Shr 3] Shr (BRPos And 7)) And 1 Else B:=0;
- Inc(BRPos); If BRPos>BRLen+8 Then BRPos:=BRLen+8;
- BRBitLE:=B;
 End;
 
 { ---- Escape 124 (libavcodec/escape124.c) ---- }
@@ -52183,6 +52699,9 @@ BEGIN
    WriteLn(' EV    libx264         libx264 H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 (encodeur natif Baseline CAVLC I/P 4:2:0, sans deblocage; Y4M vers .h264 ou .mp4; -crf, -qp, -g, -b:v)');
    WriteLn(' EV    libxvid         libxvidcore MPEG-4 part 2 (alias de l''encodeur MPEG-4 part 2 natif du projet, non identique a Xvid)');
    WriteLn(' EV    ljpeg           Lossless JPEG (encodeur: Y4M 4:2:0/4:2:2/4:4:4 vers .ljpg, -pred 1..3, pleine plage ou -strict unofficial)');
+   WriteLn('D V D  loco            LOCO (decodeur AVI LOCO: YUY2, UYVY, YV12, RGB, RGBA, mode avec pertes)');
+   WriteLn(' D A    mace3           MACE (Macintosh Audio Compression/Expansion) 3:1 (AIFF-C MAC3, QuickTime)');
+   WriteLn(' D A    mace6           MACE (Macintosh Audio Compression/Expansion) 6:1 (AIFF-C MAC6, QuickTime)');
    WriteLn('D V    kmvc            Karl Morton''s video codec (AVI KMVC, PAL8 <= 320x200)');
    WriteLn('D V D  interplayvideo  Interplay MVE video (conteneur .mve, formats 0x06/0x10/0x11, 8 et 16 bits)');
    WriteLn('D A    interplay_dpcm  DPCM Interplay (conteneur .mve, mono/stereo)');
@@ -52423,6 +52942,8 @@ BEGIN
  If (InputFormat='mp4') And ((OutputFormat='wav') Or (OutputFormat='adx') Or (OutputFormat='aiff') Or
   (OutputFormat='flv') Or (OutputFormat='mp3') Or (OutputFormat='ac3') Or ((OutputFormat='mp4') And (AudioCodec='alac'))) Then
   If Not IsHTTP(InputPath) Then If MP4HasALAC(InputPath) Then InputFormat:='alac';
+ If (InputFormat='mp4') And Not IsHTTP(InputPath) And ((OutputFormat='wav') Or (OutputFormat='adx') Or (OutputFormat='aiff') Or (OutputFormat='flv') Or (OutputFormat='mp3') Or (OutputFormat='ac3') Or (OutputFormat='aac') Or (OutputFormat='ogg')) Then
+  If MP4HasMace(InputPath)>0 Then InputFormat:='mace';
  If (InputCodec='libfaad') Or (InputCodec='interplay_dpcm') Or (InputCodec='libspeex') Or (InputCodec='speex') Then Begin
   { decodeurs imposes : ce sont les decodeurs natifs des entrees correspondantes }
   If ((InputCodec='libfaad') And (InputFormat<>'aac')) Or ((InputCodec='interplay_dpcm') And (InputFormat<>'ipmovie')) Or
@@ -52462,7 +52983,8 @@ BEGIN
   Else If (AsvTag='H263') Or (AsvTag='h263') Or (AsvTag='X263') Or (AsvTag='T263') Or (AsvTag='L263') Or (AsvTag='M263') Or (AsvTag='N263') Or (AsvTag='U263') Or (AsvTag='s263') Or (AsvTag='VX1K') Or (AsvTag='ZyGo') Or (AsvTag='FLV1') Or (AsvTag='H261') Or (AsvTag='h261') Or (AsvTag='I263') Or (AsvTag='i263') Then NVKind:=26
   Else If AsvTag='RT21' Then NVKind:=31
   Else If (AsvTag='IV31') Or (AsvTag='IV32') Or (AsvTag='iv31') Or (AsvTag='iv32') Then NVKind:=32
-  Else If (AsvTag='KMVC') Or (AsvTag='kmvc') Then NVKind:=37;
+  Else If (AsvTag='KMVC') Or (AsvTag='kmvc') Then NVKind:=37
+  Else If AsvTag='LOCO' Then NVKind:=40;
  End;
  If (OptPixFmt<>'') And (OptPixFmt<>'yuv420p') Then Fail('-pix_fmt: seul yuv420p est pris en charge.');
  NVAudioOut:=(OutputFormat='wav') Or (OutputFormat='mp3') Or (OutputFormat='ac3') Or (OutputFormat='aac') Or (OutputFormat='adx') Or (OutputFormat='aiff');
@@ -52854,6 +53376,8 @@ BEGIN
    If InputFormat='ea' Then DecodeEAContainer(InputPath,Temps[0],InputCodec) Else
    If InputFormat='xa' Then DecodeMaxisXA(InputPath,Temps[0]) Else
    If InputFormat='alac' Then DecodeALAC(InputPath,Temps[0]) Else
+   If InputFormat='mace' Then DecodeMP4Mace(InputPath,Temps[0],MP4HasMace(InputPath)) Else
+   If (InputFormat='aiff') And (IsAIFFMace(InputPath)>0) Then DecodeAIFFMace(InputPath,Temps[0],IsAIFFMace(InputPath)) Else
    If InputFormat='thp' Then DecodeTHP(InputPath,Temps[0]) Else
    If InputFormat='psxstr' Then DecodeXASectors(InputPath,Temps[0]) Else
    If InputFormat='flv' Then DecodeFLVAudio(InputPath,Temps[0]) Else
