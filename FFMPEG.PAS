@@ -3479,6 +3479,7 @@ Var
  Temps: Array[0..6] Of String;
  SavedExit: Pointer;
  InputPath,OutputPath,InputFormat,OutputFormat,AudioCodec,PendingFormat,InputCodec: String;
+ NonStdBitrate: Boolean;
  RequestedRate,G726CodeSize,G726Rate: LongInt;
  RequestedChannels,RequestedBitRateK: Integer;
  Overwrite,NoOverwrite,HideBanner,HasBitrate: Boolean;
@@ -46340,6 +46341,506 @@ Begin
  CloseRead; CloseWrite;
 End;
 
+{ ---- Encodeur AAC-LC (libfaac) : tables Huffman et bandes issues de aactab.c de FFmpeg (LGPL-2.1-or-later) ---- }
+Const
+ AERoots:Array[0..11] Of Integer=(
+ 0,120,200,280,360,440,520,600,663,726,894,1062);
+
+ AEHuffLeft:Array[0..1349] Of Integer=(
+ -61,92,90,87,83,79,74,72,67,62,56,52,44,14,18,16,17,-1,42,21,
+ -2,-20,29,24,27,26,-120,28,-11,110,113,32,-119,-8,-9,39,37,-12,-15,40,
+ -17,-21,-24,-91,49,48,-89,-26,-29,51,-27,-87,55,97,-31,-85,60,58,-86,-37,
+ -84,-38,66,65,-83,-82,-81,70,71,-43,-46,-45,73,-75,78,77,-74,-73,-50,82,
+ -52,-71,-53,86,-68,-54,-67,89,-56,-57,-63,-58,-60,-62,95,-77,-78,-88,99,100,
+ -98,-93,103,-95,-97,-99,107,-101,-103,-104,116,119,-111,114,-107,-109,117,-112,-114,-116,
+ -41,158,139,153,148,131,136,145,129,130,-1,132,133,-22,135,-19,143,138,-12,172,
+ 141,142,-5,144,-6,170,152,-73,167,162,151,-8,-81,154,194,-11,157,-13,159,160,
+ -68,-15,192,-26,165,-17,-18,168,169,-74,171,-61,173,174,-59,199,-24,-25,-63,-28,
+ 189,-44,-71,187,-34,186,-35,-48,-77,-42,-39,-40,-66,-65,-53,-62,-55,-60,-76,-70,
+ 238,220,209,216,229,206,207,-21,-57,246,257,261,-16,227,215,-55,235,218,226,-6,
+ 221,222,237,-65,256,-81,-8,245,-9,230,255,-10,242,234,-31,236,-12,-13,239,-41,
+ -68,-14,244,-29,-17,-63,273,275,-20,-74,-60,262,253,-50,-35,-54,-25,278,-72,260,
+ -28,-30,269,-32,268,-69,267,-58,-37,-38,272,-49,-47,-45,-64,-48,-77,-78,-62,-75,
+ -1,282,283,-28,291,286,332,335,-38,-55,-10,292,-37,294,295,296,-6,298,312,-67,
+ -49,-8,314,304,305,336,-9,308,-13,313,-19,-31,-46,-22,324,337,317,-35,328,326,
+ 330,322,-54,-21,347,-23,327,-25,329,-26,331,-27,-29,349,-30,-41,-65,-44,-47,340,
+ -36,342,-39,-68,-45,346,-48,-58,-71,-76,-73,357,354,-57,-72,-62,-75,-66,-70,-81,
+ 361,392,414,-37,365,376,391,-2,374,377,371,382,415,-3,375,-4,-5,394,416,390,
+ -22,-19,397,-30,408,398,405,388,389,-9,-56,-29,393,-41,395,-17,-15,-16,399,400,
+ -18,-21,403,-23,-24,435,439,-25,426,432,433,-70,413,-81,-32,-34,417,-35,419,-36,
+ -38,-47,423,425,-50,-68,434,-71,-58,-48,438,-49,-51,-52,-53,-66,-79,-75,-67,-72,
+ -41,508,506,493,478,474,459,456,453,468,471,470,-81,467,490,-64,472,458,-3,463,
+ 461,462,-4,464,-37,513,-6,-71,469,-8,-73,-74,473,-65,491,476,477,-12,482,480,
+ 481,-13,483,-14,485,-15,518,-16,-17,-18,-19,501,-21,497,495,496,-22,498,-23,500,
+ -24,-25,-26,-76,-69,-30,510,-31,509,-32,-49,-34,-47,-54,-38,-59,-42,-55,-70,-78,
+ 580,567,552,548,535,532,542,597,531,541,-1,-8,533,534,-7,545,537,576,-6,540,
+ -5,-81,594,-45,-10,560,547,-65,556,550,-70,-12,565,558,555,-13,557,-68,559,-15,
+ -16,-17,-63,596,-56,574,-21,568,-31,595,-24,572,573,-23,-57,-75,-28,-47,588,-30,
+ 589,582,-32,-33,-67,593,-36,-38,-52,591,-40,-41,-59,-54,-77,-58,-62,598,-64,-72,
+ -1,602,-9,604,-10,628,-17,608,629,610,-4,612,613,639,-5,616,640,-43,619,641,
+ 636,622,-31,643,625,650,-32,-57,-18,630,-26,632,-13,-14,654,-15,-51,-19,-20,-28,
+ -35,646,-44,648,645,-52,-30,-49,649,-58,-46,652,656,-61,-50,-59,-54,658,-48,-60,
+ 661,-63,-56,664,692,668,-19,-1,-11,670,671,672,-3,674,675,676,-4,698,714,-45,
+ 700,682,683,684,-53,703,687,720,-7,725,722,-8,-10,-18,-12,705,697,-13,707,-14,
+ 708,702,-50,704,-16,-20,-21,-42,718,-23,711,-59,-28,-29,-30,716,-31,-32,-38,-39,
+ -49,-46,-48,-54,-55,-63,-1,728,-14,730,-15,779,-27,734,735,800,-17,-40,780,782,
+ 816,-5,743,744,783,838,-56,-6,785,750,751,-93,753,754,789,756,757,-8,759,-47,
+ 761,762,809,764,765,-10,797,820,769,-148,812,772,773,836,775,-12,847,778,-13,-28,
+ 801,-18,-31,802,-20,786,787,-66,-45,790,-23,806,793,794,-24,832,-111,843,799,-38,
+ -41,-30,-67,804,-46,-107,807,808,-36,845,-110,-134,813,833,815,-39,-55,-48,831,-49,
+ 821,-50,823,853,-51,826,867,-162,829,-106,-58,-61,-158,881,-63,-125,837,-137,-68,-69,
+ 841,-79,-84,878,-73,-74,-101,848,-138,-82,-132,-122,-86,-144,-89,856,857,869,-164,876,
+ -104,-105,863,-95,-98,866,-149,-113,-102,-139,-121,-114,873,874,875,-115,-116,-117,-123,880,
+ -129,-131,883,884,-141,-142,893,888,-143,-159,-161,-165,-156,-167,900,896,897,898,953,-1,
+ 949,902,903,-2,980,906,-27,996,-4,954,983,1005,-80,914,957,916,917,1015,-93,920,
+ 921,1018,1029,999,-36,926,969,928,929,930,-8,1023,-149,934,1002,1037,937,-158,976,940,
+ 941,942,-11,1060,-12,1048,1053,948,-168,952,-28,-29,-15,-18,982,956,-19,958,959,-20,
+ 961,-106,988,964,-22,966,1009,968,-23,1011,1043,972,-137,993,1013,-25,977,995,-115,-128,
+ -30,-31,-32,1006,-81,1007,987,-47,989,-60,1021,992,-37,994,-148,-163,-44,-42,-69,-49,
+ -50,-136,1024,1058,-162,-82,-70,-59,-109,1045,-62,1035,-63,-138,-65,-95,-71,-72,1019,-73,
+ -74,1042,-75,-76,1051,-150,1027,1059,-103,1030,-120,-84,-85,-98,-87,-88,-102,1038,-90,1040,
+ -91,-108,-100,-146,-101,-111,-112,-116,1052,-157,-145,-126,-129,1057,-130,-139,-144,-166,-161,-152,
+ -153,-167,1063,1064,1065,-1,1133,-2,1134,1070,1071,-38,1178,1074,-52,1076,1077,1140,1143,1231,
+ 1081,-5,1083,1084,1085,1237,1264,-6,1089,1090,1253,1155,-174,1094,1095,1129,1097,1098,1099,-8,
+ 1101,1102,1103,1104,1163,-9,1226,1298,1283,-154,1172,1112,1113,1315,1314,-11,1117,1118,1331,-222,
+ 1333,1122,-254,-15,1322,1126,-14,1346,-16,1197,1307,1279,-17,-289,1135,-20,1137,-21,-55,-70,
+ 1141,1180,-23,1144,1212,-24,1147,1184,1274,1285,-34,1152,1153,1154,-221,-128,1157,1292,1159,-191,
+ 1266,1336,-29,-30,1165,1166,1167,1223,-31,1208,1171,-260,1271,1174,1284,1329,-33,-54,1179,-71,
+ -40,1211,1233,-41,1185,1348,-281,1234,1189,1190,-43,1192,1193,-127,1241,1196,-45,1198,-225,1200,
+ 1201,1202,-196,1335,-48,1258,1328,-49,1270,-50,-72,-57,-106,1214,-122,1289,-60,1252,-61,-62,
+ 1221,1222,-129,-189,1225,-131,1295,1228,-101,1230,-68,1261,-69,-74,1235,1236,-76,1332,-125,1305,
+ -78,1304,-159,1244,-80,1246,1247,-243,-165,-87,-91,-108,-94,1260,-95,-96,-273,-98,1310,-180,
+ -103,-107,1303,-109,-110,-224,1267,-147,1269,-116,-206,1311,1319,-215,1275,-119,-120,-123,-124,-130,
+ 1281,-132,-133,-257,-135,-282,1337,-211,-138,-140,-141,-143,1293,-175,-258,1297,-231,-246,1338,-263,
+ 1320,1302,-200,-153,-173,-157,-176,-193,-192,-163,-164,1312,-167,-168,-216,1340,-249,-179,-182,-184,
+ 1321,-185,1325,-186,-187,-188,-194,-195,-197,-199,-232,-203,-287,1345,-237,-226,-241,-210,-213,-214,
+ -218,1344,-269,-250,-236,-239,-270,-266,-280,-276);
+
+ AEHuffRight:Array[0..1349] Of Integer=(
+ 1,2,3,4,5,6,7,8,9,10,11,12,13,22,15,98,106,105,19,20,
+ -3,-4,23,35,25,33,-5,109,-6,30,31,34,-7,-16,-10,36,38,-13,-14,41,
+ -19,-18,43,-22,45,46,47,-23,-25,50,-28,-30,53,54,-32,-33,57,59,-34,-35,
+ 61,-36,63,64,-39,-40,-41,68,69,-42,-44,-80,94,-47,75,76,-48,-49,-72,80,
+ 81,-51,-70,84,85,-69,-55,88,-66,-65,91,-64,93,-59,96,-76,-79,-90,102,101,
+ -92,-94,104,-96,-105,-100,108,-102,-118,-121,111,112,-106,115,-108,-110,118,-113,-115,-117,
+ 121,122,123,124,125,126,127,128,134,178,-75,175,179,-2,196,-3,137,166,-4,140,
+ 164,193,-29,198,-10,146,147,-7,149,150,197,-30,-9,156,155,-69,161,-67,180,191,
+ -14,-31,163,-16,182,-45,-72,183,195,-20,177,-21,185,190,-23,176,-80,-57,-27,-54,
+ 181,-32,-33,184,-56,188,-43,-36,-37,-38,-47,-50,-46,-49,-51,-52,-79,-58,-64,-78,
+ 201,202,203,204,205,213,224,208,-1,210,211,212,-2,214,279,-3,217,259,219,-4,
+ 232,264,223,-5,225,-7,-18,228,-73,266,231,-52,233,276,-11,249,-56,-59,251,240,
+ 241,-42,243,-15,-51,-19,247,248,-34,250,-22,252,270,254,-23,-24,-27,258,-26,274,
+ -70,-80,263,-44,265,-33,277,-36,-71,-40,271,-39,-43,-67,-46,-66,-53,-61,-76,-79,
+ 281,284,290,-2,285,293,287,288,289,-3,-4,307,-5,302,297,300,-64,309,299,-7,
+ 301,-17,303,318,333,306,-18,311,-11,310,-12,-14,-15,-16,315,316,343,-20,319,320,
+ 321,345,323,-61,325,-43,339,-24,341,350,348,-80,-40,334,-56,-32,-33,338,-34,358,
+ -74,344,-59,-42,-77,351,355,-50,-51,-52,-53,352,353,356,-60,-69,-63,359,-79,-78,
+ 364,362,363,-1,368,366,367,-11,369,370,384,372,373,381,422,-10,-31,378,379,380,
+ -6,-7,383,-8,385,386,387,412,401,-61,-12,-13,420,-14,402,396,-43,-20,418,404,
+ -74,-57,421,-33,-62,406,407,-73,409,410,411,-26,436,-27,-28,-55,428,-64,429,-80,
+ -40,-39,430,424,-42,-44,427,-45,-46,-60,431,-59,-69,-76,-77,-54,437,-63,-65,-78,
+ 441,442,443,444,445,446,447,448,449,450,451,452,-1,454,455,-2,457,517,-79,460,
+ 465,503,-45,519,-5,466,-46,-7,489,-72,-9,-10,488,-11,475,486,502,-66,479,484,
+ 504,-53,514,-68,512,-67,487,-20,-27,-80,-75,492,-57,494,499,505,-60,515,-43,511,
+ -58,-61,-56,-28,-29,-52,507,-51,516,-50,-33,-48,-35,-36,-44,-39,-40,-63,-62,-77,
+ 521,522,523,524,525,526,527,528,529,530,-73,-2,539,562,-3,536,585,538,-4,575,
+ -79,-9,543,544,-18,546,561,-11,549,563,551,-26,553,554,577,-53,587,-14,584,-69,
+ -71,-46,-19,564,-20,566,-61,571,569,570,-22,578,592,-34,-25,-27,-78,-29,579,-43,
+ 581,583,-51,-49,-35,586,-37,-44,-39,590,-42,-50,-48,-76,-55,-60,-66,599,-74,-80,
+ 601,603,-2,607,605,606,-3,611,609,631,638,618,615,614,-33,634,617,-6,623,620,
+ 621,647,-7,624,651,626,627,-8,-11,637,-12,633,-34,-42,635,-36,-16,-25,-27,-21,
+ -22,642,-23,644,659,-24,-29,-37,655,-38,-39,657,653,-40,-41,-45,-47,660,-62,-53,
+ 662,-55,-64,669,665,666,667,-17,-2,673,695,694,-26,680,677,713,-36,678,679,-5,
+ 681,685,710,719,-6,686,689,688,-62,690,691,-64,693,-9,-27,696,706,-35,699,-44,
+ 701,715,-15,717,-47,712,-25,-22,709,-51,723,-24,-34,-43,-37,721,-52,724,-33,-58,
+ -40,-41,-57,-60,-61,-56,727,729,-2,733,731,732,-3,742,738,736,737,-4,739,740,
+ 741,-53,752,748,745,746,747,-33,749,803,805,-7,760,791,755,758,817,-120,850,-9,
+ 770,766,763,795,851,-146,767,768,864,-11,771,855,776,774,854,-163,777,871,-151,-16,
+ 781,-54,-19,784,-44,828,788,-21,-22,840,-94,792,818,842,-96,796,-25,798,889,-26,
+ -29,-42,-32,830,-34,-35,862,861,-71,810,811,-37,822,814,835,-124,-43,-59,819,-145,
+ 852,-75,825,824,-76,865,827,-52,839,-57,-119,-60,-62,834,-87,-64,846,-65,-80,-81,
+ 849,-70,-72,844,-97,-118,-77,868,-78,-108,-83,-85,-112,-88,-157,872,859,858,-90,860,
+ -91,-92,870,-133,-160,890,-99,-100,-126,-103,-109,-127,882,879,877,-140,-152,-128,-135,885,
+ -130,-136,886,891,-153,-166,887,892,-155,-147,-150,-154,-169,-168,895,913,909,907,899,-56,
+ 901,904,997,-17,905,981,-3,908,-57,910,911,912,-5,919,915,962,960,918,-6,925,
+ 965,922,923,924,-7,933,927,973,931,1001,-113,932,-9,938,935,936,1014,-10,939,945,
+ 943,1056,-104,944,-155,946,947,1061,-13,950,951,-14,-16,-54,955,998,-67,985,1016,-46,
+ 1041,-21,963,1008,-48,990,967,1046,-99,970,971,1050,-24,974,975,-159,1026,978,979,-26,
+ -43,-55,-68,984,-33,986,1017,-34,1032,-35,991,1000,-132,1036,-38,-39,-40,-41,-45,-119,
+ -124,-51,1003,1004,-52,-53,-58,1031,-61,1010,-133,1012,-92,-64,-127,-66,-83,-107,1020,-110,
+ 1033,1022,-135,-114,1025,-77,1039,1028,-78,1034,-79,-94,-97,-86,-121,-105,-89,1055,-118,1047,
+ -140,-96,-134,1044,-147,-122,-123,-165,1049,-117,-125,-160,-142,1054,-156,-131,-141,-143,-151,-164,
+ -154,-169,1075,1068,1066,-19,1067,-36,1069,1072,1138,-3,1073,1249,-4,1082,1146,1078,1079,1080,
+ 1250,-51,1093,1088,1151,1086,1087,1290,1156,1194,1091,1092,-7,1100,1164,1096,1160,1203,1326,-65,
+ 1110,1106,1169,1280,1105,-229,1107,1108,1109,-10,1111,1116,1124,1114,1115,-217,1120,1341,1119,-12,
+ 1121,1127,1123,-13,1125,1347,-251,1128,-271,1130,1131,1132,-82,-18,1136,-37,1177,-53,1139,-22,
+ 1181,1142,-89,1229,1145,-85,1187,1148,1149,1150,-25,1191,1217,1288,-26,-27,1220,1158,1276,-28,
+ 1161,1162,-81,-230,1199,1245,1224,1168,-207,1170,1248,-32,1173,1300,1175,1176,-183,-35,1210,-39,
+ -73,1182,1183,-104,1213,1186,-42,1188,1215,1324,-93,1239,1291,-44,1195,1219,-160,1256,-46,1205,
+ 1268,1309,-47,1204,-227,1206,1207,-115,1209,-261,-56,-90,-58,1251,-59,1216,-86,1218,-142,-112,
+ 1243,1255,-63,-64,1257,-66,1227,1318,-67,1349,-278,1232,-75,-105,1262,1278,-284,1238,-77,1240,
+ -111,1242,-79,1265,-190,1286,1327,-83,-84,-88,-102,-92,-238,1254,-144,-172,-97,-99,1259,-100,
+ -158,-279,1263,-170,-126,-113,1317,-114,1294,-181,-117,1272,1273,-118,1277,-283,-177,-121,-285,-146,
+ 1282,-212,-259,-134,1313,-136,1287,-137,-255,-139,-288,-156,1306,-145,-148,1296,-149,-150,1299,-151,
+ 1301,1343,-152,-274,-155,-272,-161,1308,-162,-244,-245,1339,-166,-264,-169,1316,-171,-178,-198,-248,
+ 1330,-233,1323,-235,-286,-219,-223,-242,-240,-202,-201,-252,-204,1334,-205,-208,-209,-228,-262,-247,
+ -265,1342,-220,-234,-268,-253,-256,-267,-275,-277);
+
+ AELongBands:Array[0..12] Of Integer=(
+ 41,41,47,49,49,51,47,47,43,43,43,40,40);
+
+ AELongOffsets:Array[0..12,0..51] Of Integer=(
+ (0,4,8,12,16,20,24,28,32,36,40,44,48,52,56,64,72,80,88,96,108,120,132,144,156,172,188,212,240,276,320,384,448,512,576,640,704,768,832,896,960,1024,1024,1024,1024,1024,1024,1024,1024,1024,1024,1024),
+ (0,4,8,12,16,20,24,28,32,36,40,44,48,52,56,64,72,80,88,96,108,120,132,144,156,172,188,212,240,276,320,384,448,512,576,640,704,768,832,896,960,1024,1024,1024,1024,1024,1024,1024,1024,1024,1024,1024),
+ (0,4,8,12,16,20,24,28,32,36,40,44,48,52,56,64,72,80,88,100,112,124,140,156,172,192,216,240,268,304,344,384,424,464,504,544,584,624,664,704,744,784,824,864,904,944,984,1024,1024,1024,1024,1024),
+ (0,4,8,12,16,20,24,28,32,36,40,48,56,64,72,80,88,96,108,120,132,144,160,176,196,216,240,264,292,320,352,384,416,448,480,512,544,576,608,640,672,704,736,768,800,832,864,896,928,1024,1024,1024),
+ (0,4,8,12,16,20,24,28,32,36,40,48,56,64,72,80,88,96,108,120,132,144,160,176,196,216,240,264,292,320,352,384,416,448,480,512,544,576,608,640,672,704,736,768,800,832,864,896,928,1024,1024,1024),
+ (0,4,8,12,16,20,24,28,32,36,40,48,56,64,72,80,88,96,108,120,132,144,160,176,196,216,240,264,292,320,352,384,416,448,480,512,544,576,608,640,672,704,736,768,800,832,864,896,928,960,992,1024),
+ (0,4,8,12,16,20,24,28,32,36,40,44,52,60,68,76,84,92,100,108,116,124,136,148,160,172,188,204,220,240,260,284,308,336,364,396,432,468,508,552,600,652,704,768,832,896,960,1024,1024,1024,1024,1024),
+ (0,4,8,12,16,20,24,28,32,36,40,44,52,60,68,76,84,92,100,108,116,124,136,148,160,172,188,204,220,240,260,284,308,336,364,396,432,468,508,552,600,652,704,768,832,896,960,1024,1024,1024,1024,1024),
+ (0,8,16,24,32,40,48,56,64,72,80,88,100,112,124,136,148,160,172,184,196,212,228,244,260,280,300,320,344,368,396,424,456,492,532,572,616,664,716,772,832,896,960,1024,1024,1024,1024,1024,1024,1024,1024,1024),
+ (0,8,16,24,32,40,48,56,64,72,80,88,100,112,124,136,148,160,172,184,196,212,228,244,260,280,300,320,344,368,396,424,456,492,532,572,616,664,716,772,832,896,960,1024,1024,1024,1024,1024,1024,1024,1024,1024),
+ (0,8,16,24,32,40,48,56,64,72,80,88,100,112,124,136,148,160,172,184,196,212,228,244,260,280,300,320,344,368,396,424,456,492,532,572,616,664,716,772,832,896,960,1024,1024,1024,1024,1024,1024,1024,1024,1024),
+ (0,12,24,36,48,60,72,84,96,108,120,132,144,156,172,188,204,220,236,252,268,288,308,328,348,372,396,420,448,476,508,544,580,620,664,712,764,820,880,944,1024,1024,1024,1024,1024,1024,1024,1024,1024,1024,1024,1024),
+ (0,12,24,36,48,60,72,84,96,108,120,132,144,156,172,188,204,220,236,252,268,288,308,328,348,372,396,420,448,476,508,544,580,620,664,712,764,820,880,944,1024,1024,1024,1024,1024,1024,1024,1024,1024,1024,1024,1024));
+
+
+Type
+ TAEDArr=Array[0..4095] Of Double;
+ TAEPcm=Array[0..200000000] Of SmallInt; PAEPcm=^TAEPcm;
+Var
+ AEWr,AEWi,AETwr,AETwi,AEPwr,AEPwi: Array[0..511] Of Double;
+ AEBitRev: Array[0..511] Of LongInt;
+ AEWin: Array[0..2047] Of Double;
+ AECode: Array[0..11,0..288] Of LongWord; AELen: Array[0..11,0..288] Of Byte;
+ AEInv: Array[0..255] Of Double;
+ AEQ: Array[0..1,0..1023] Of LongInt; AEBook,AESf: Array[0..1,0..63] Of LongInt; AEMs: Array[0..63] Of LongInt;
+ AEMaxSfb,AEChans,AERateIdx,AEBands: LongInt; AEGlobal: Array[0..1] Of LongInt; AEOff: Array[0..52] Of LongInt;
+ AEBuf: Array[0..16383] Of Byte; AEPos: LongInt; AECounting: Boolean;
+ AEX: Array[0..1,0..1023] Of Double;
+Const
+ AELimit: Array[0..11] Of LongInt=(0,1,1,2,2,4,4,7,7,12,12,8191);
+ AERates: Array[0..12] Of LongInt=(96000,88200,64000,48000,44100,32000,24000,22050,16000,12000,11025,8000,7350);
+
+Procedure AEMdctInit;
+Var I,J,B: LongInt; A: Double;
+Begin
+ For I:=0 To 511 Do Begin
+  A:=-2*Pi*I/512; AEWr[I]:=Cos(A); AEWi[I]:=Sin(A);
+  A:=-Pi*(4*I+1)/(4*1024); AETwr[I]:=Cos(A); AETwi[I]:=Sin(A);
+  A:=-Pi*I/1024; AEPwr[I]:=Cos(A); AEPwi[I]:=Sin(A);
+  J:=0; For B:=0 To 8 Do If (I And (1 Shl B))<>0 Then J:=J Or (1 Shl (8-B));
+  AEBitRev[I]:=J;
+ End;
+ For I:=0 To 2047 Do AEWin[I]:=Sin(Pi*(I+0.5)/2048);
+ For I:=0 To 255 Do AEInv[I]:=Exp(-(I-100)/4.0*0.69314718055994530942);
+End;
+
+{ MDCT AAC : X[k] = 2 * somme z[n] cos(pi/N (n+1/2+N/2)(k+1/2)), N=1024 }
+Procedure AEMdct(Const Z: TAEDArr; Var X: TAEDArr);
+Var U: Array[0..1023] Of Double; Tr,Ti: Array[0..511] Of Double; N,H,I,J,K,Len,Half,Step: LongInt; Ar,Ai,Br,Bi,Wr,Wi,Xr,Xi: Double;
+Begin
+ N:=1024; H:=512;
+ For I:=0 To H-1 Do U[I]:=-Z[3*H-1-I]-Z[3*H+I];
+ For I:=H To N-1 Do U[I]:=Z[I-H]-Z[3*H-1-I];
+ For I:=0 To H-1 Do Begin
+  Ar:=U[2*I]; Ai:=U[N-1-2*I];
+  J:=AEBitRev[I];
+  Tr[J]:=Ar*AETwr[I]-Ai*AETwi[I]; Ti[J]:=Ar*AETwi[I]+Ai*AETwr[I];
+ End;
+ Len:=2;
+ While Len<=H Do Begin
+  Half:=Len Div 2; Step:=H Div Len;
+  I:=0;
+  While I<H Do Begin
+   For K:=0 To Half-1 Do Begin
+    Wr:=AEWr[K*Step]; Wi:=AEWi[K*Step];
+    Br:=Tr[I+K+Half]*Wr-Ti[I+K+Half]*Wi; Bi:=Tr[I+K+Half]*Wi+Ti[I+K+Half]*Wr;
+    Tr[I+K+Half]:=Tr[I+K]-Br; Ti[I+K+Half]:=Ti[I+K]-Bi;
+    Tr[I+K]:=Tr[I+K]+Br; Ti[I+K]:=Ti[I+K]+Bi;
+   End;
+   Inc(I,Len);
+  End;
+  Len:=Len*2;
+ End;
+ For K:=0 To H-1 Do Begin
+  Xr:=Tr[K]*AEPwr[K]-Ti[K]*AEPwi[K]; Xi:=Tr[K]*AEPwi[K]+Ti[K]*AEPwr[K];
+  X[2*K]:=2*Xr; X[N-1-2*K]:=-2*Xi;
+ End;
+End;
+
+{ codes Huffman a partir des arbres du decodeur : AECode/AELen[livre,symbole] ; livre 0 = facteurs d'echelle }
+Procedure AEWalk(Book,Node: LongInt; Code: LongWord; Depth: LongInt);
+Var C: LongInt;
+Begin
+ C:=AEHuffLeft[Node];
+ If C<0 Then Begin AECode[Book,-C-1]:=Code Shl 1; AELen[Book,-C-1]:=Depth+1; End
+ Else If C>0 Then AEWalk(Book,C,Code Shl 1,Depth+1);
+ C:=AEHuffRight[Node];
+ If C<0 Then Begin AECode[Book,-C-1]:=(Code Shl 1) Or 1; AELen[Book,-C-1]:=Depth+1; End
+ Else If C>0 Then AEWalk(Book,C,(Code Shl 1) Or 1,Depth+1);
+End;
+
+Procedure AEPut(V: LongWord; N: LongInt);
+Var K: LongInt;
+Begin
+ If N<=0 Then Exit;
+ If AECounting Then Begin Inc(AEPos,N); Exit; End;
+ For K:=N-1 Downto 0 Do Begin
+  If ((V Shr K) And 1)<>0 Then AEBuf[AEPos Shr 3]:=AEBuf[AEPos Shr 3] Or (1 Shl (7-(AEPos And 7)));
+  Inc(AEPos);
+ End;
+End;
+
+{ ecrit (Emit) ou compte les bits des valeurs Q[C, Off..Off+W-1] avec le livre Cb }
+Function AEBand(Cb,C,Off,W: LongInt; Emit: Boolean): LongInt;
+Var Dim,Radix,K,D,Sym,Bits,A,E2: LongInt; V: Array[0..3] Of LongInt; Signed: Boolean;
+Begin
+ Bits:=0;
+ If Cb<=4 Then Begin Dim:=4; Radix:=3; End Else Begin Dim:=2; If Cb<=6 Then Radix:=9 Else If Cb<=8 Then Radix:=8 Else If Cb<=10 Then Radix:=13 Else Radix:=17; End;
+ Signed:=(Cb<=2) Or ((Cb>=5) And (Cb<=6));
+ K:=0;
+ While K<W Do Begin
+  Sym:=0;
+  For D:=0 To Dim-1 Do Begin
+   V[D]:=AEQ[C,Off+K+D];
+   If Signed Then Begin
+    If Cb<=2 Then A:=V[D]+1 Else A:=V[D]+4;
+   End Else Begin
+    A:=Abs(V[D]); If (Cb=11) And (A>16) Then A:=16;
+   End;
+   Sym:=Sym*Radix+A;
+  End;
+  Inc(Bits,AELen[Cb,Sym]);
+  If Emit Then AEPut(AECode[Cb,Sym],AELen[Cb,Sym]);
+  If Not Signed Then
+   For D:=0 To Dim-1 Do If V[D]<>0 Then Begin
+    Inc(Bits);
+    If Emit Then If V[D]<0 Then AEPut(1,1) Else AEPut(0,1);
+   End;
+  If Cb=11 Then
+   For D:=0 To Dim-1 Do If Abs(V[D])>=16 Then Begin
+    A:=Abs(V[D]);
+    { N = floor(log2(A)) ; (N-4) uns, un zero, puis N bits }
+    Sym:=0; While (A Shr (Sym+1))>0 Do Inc(Sym);
+    Inc(Bits,(Sym-4)+1+Sym);
+    If Emit Then Begin
+     For E2:=1 To Sym-4 Do AEPut(1,1);
+     AEPut(0,1);
+     AEPut(A-(1 Shl Sym),Sym);
+    End;
+   End;
+  Inc(K,Dim);
+ End;
+ AEBand:=Bits;
+End;
+
+{ choisit le livre de code d'une bande ; renvoie 0 si nulle }
+Function AEBestBook(C,Off,W: LongInt): LongInt;
+Var K,Mx,F,Cb,Best,BestBits,B: LongInt;
+Begin
+ Mx:=0; For K:=Off To Off+W-1 Do If Abs(AEQ[C,K])>Mx Then Mx:=Abs(AEQ[C,K]);
+ If Mx=0 Then Begin AEBestBook:=0; Exit; End;
+ F:=1; While AELimit[F]<Mx Do Inc(F);
+ Best:=F; BestBits:=AEBand(F,C,Off,W,False);
+ For Cb:=F+1 To 11 Do If (Cb<=F+3) And (AELimit[Cb]>=Mx) Then Begin
+  B:=AEBand(Cb,C,Off,W,False);
+  If B<BestBits Then Begin BestBits:=B; Best:=Cb; End;
+ End;
+ AEBestBook:=Best;
+End;
+
+Function AEQuant(X,Inv: Double): LongInt;
+Var A,Y: Double; Q: LongInt;
+Begin
+ A:=Abs(X)*Inv;
+ If A<=0 Then Begin AEQuant:=0; Exit; End;
+ Y:=Sqrt(A*Sqrt(A)); { A^0.75 }
+ If Y>8191 Then Y:=8191.9;
+ Q:=Trunc(Y+0.4054);
+ If Q>8191 Then Q:=8191;
+ If X<0 Then Q:=-Q;
+ AEQuant:=Q;
+End;
+
+{ quantifie toutes les bandes pour le gain G (MS = bandes M/S) ; renvoie False si une valeur depasse 8191 }
+Procedure AEPrepare(G: LongInt);
+Var B,C,K,Off,W,Cb,Cb2,BitsLR,BitsMS: LongInt; InvLR,InvMS,M,S: Double; QL,QR: Array[0..255] Of LongInt; Mx: LongInt;
+Begin
+ InvLR:=AEInv[G]; If G>=2 Then InvMS:=AEInv[G-2] Else InvMS:=InvLR;
+ For B:=0 To AEBands-1 Do Begin
+  Off:=AEOff[B]; W:=AEOff[B+1]-Off;
+  AEMs[B]:=0;
+  If B>=AEMaxSfb Then Begin
+   For K:=Off To Off+W-1 Do Begin AEQ[0,K]:=0; AEQ[1,K]:=0; End;
+   Continue;
+  End;
+  For C:=0 To AEChans-1 Do For K:=Off To Off+W-1 Do AEQ[C,K]:=AEQuant(AEX[C,K],InvLR);
+  AESf[0,B]:=G; AESf[1,B]:=G;
+  If AEChans=2 Then Begin
+   { variante M/S }
+   BitsLR:=0;
+   Cb:=AEBestBook(0,Off,W); If Cb<>0 Then Inc(BitsLR,AEBand(Cb,0,Off,W,False));
+   Cb:=AEBestBook(1,Off,W); If Cb<>0 Then Inc(BitsLR,AEBand(Cb,1,Off,W,False));
+   For K:=0 To W-1 Do Begin QL[K]:=AEQ[0,Off+K]; QR[K]:=AEQ[1,Off+K]; End;
+   For K:=Off To Off+W-1 Do Begin
+    M:=(AEX[0,K]+AEX[1,K])*0.5; S:=(AEX[0,K]-AEX[1,K])*0.5;
+    AEQ[0,K]:=AEQuant(M,InvMS); AEQ[1,K]:=AEQuant(S,InvMS);
+   End;
+   BitsMS:=0;
+   Cb:=AEBestBook(0,Off,W); If Cb<>0 Then Inc(BitsMS,AEBand(Cb,0,Off,W,False));
+   Cb:=AEBestBook(1,Off,W); If Cb<>0 Then Inc(BitsMS,AEBand(Cb,1,Off,W,False));
+   If BitsMS<BitsLR Then Begin
+    AEMs[B]:=1; AESf[0,B]:=G-2; AESf[1,B]:=G-2;
+   End Else Begin
+    For K:=0 To W-1 Do Begin AEQ[0,Off+K]:=QL[K]; AEQ[1,Off+K]:=QR[K]; End;
+   End;
+  End;
+ End;
+ For C:=0 To AEChans-1 Do
+  For B:=0 To AEMaxSfb-1 Do AEBook[C,B]:=AEBestBook(C,AEOff[B],AEOff[B+1]-AEOff[B]);
+End;
+
+{ ecrit (ou compte) une trame sans en-tete ADTS ; Gain = gain de reference }
+Procedure AEWriteFrame(G: LongInt);
+Var C,B,E,Cb,Len,Prev,D,Last,AnyMs,Gg: LongInt;
+Procedure Ics(Ch: LongInt; Info: Boolean);
+Var Bb,Ee,Cb2,L2,Pv,Dd: LongInt;
+Begin
+ Gg:=G; For Bb:=0 To AEMaxSfb-1 Do If AEBook[Ch,Bb]<>0 Then Begin Gg:=AESf[Ch,Bb]; Break; End;
+ AEGlobal[Ch]:=Gg;
+ AEPut(Gg,8);
+ If Info Then Begin AEPut(0,1); AEPut(0,2); AEPut(0,1); AEPut(AEMaxSfb,6); AEPut(0,1); End;
+ Bb:=0;
+ While Bb<AEMaxSfb Do Begin
+  Cb2:=AEBook[Ch,Bb]; Ee:=Bb; While (Ee<AEMaxSfb) And (AEBook[Ch,Ee]=Cb2) Do Inc(Ee);
+  AEPut(Cb2,4); L2:=Ee-Bb;
+  While L2>=31 Do Begin AEPut(31,5); Dec(L2,31); End;
+  AEPut(L2,5); Bb:=Ee;
+ End;
+ Pv:=Gg;
+ For Bb:=0 To AEMaxSfb-1 Do If AEBook[Ch,Bb]<>0 Then Begin
+  Dd:=AESf[Ch,Bb]-Pv;
+  AEPut(AECode[0,Dd+60],AELen[0,Dd+60]); Pv:=AESf[Ch,Bb];
+ End;
+ AEPut(0,1); AEPut(0,1); AEPut(0,1);
+ For Bb:=0 To AEMaxSfb-1 Do If AEBook[Ch,Bb]<>0 Then AEBand(AEBook[Ch,Bb],Ch,AEOff[Bb],AEOff[Bb+1]-AEOff[Bb],True);
+End;
+Begin
+ If AEChans=1 Then Begin
+  AEPut(0,3); AEPut(0,4); Ics(0,True);
+ End Else Begin
+  AEPut(1,3); AEPut(0,4); AEPut(1,1);
+  AEPut(0,1); AEPut(0,2); AEPut(0,1); AEPut(AEMaxSfb,6); AEPut(0,1);
+  AnyMs:=0; For B:=0 To AEMaxSfb-1 Do If AEMs[B]<>0 Then AnyMs:=1;
+  If AnyMs<>0 Then Begin AEPut(1,2); For B:=0 To AEMaxSfb-1 Do AEPut(AEMs[B],1); End Else AEPut(0,2);
+  Ics(0,False); Ics(1,False);
+ End;
+ AEPut(7,3);
+End;
+
+Procedure AEEncodeAAC(Const Source,Target: String; BitRateK: LongInt);
+Var
+ Hd: Array[0..63] Of Byte; Limit,At,N,Sz,DataStart,DataSize,Rate,Frames,F,I,K,C,B,G,Lo,Hi,Best,Fill,Bits,AvgBits,Target2,Reservoir,Cut,CutBin,Used,Total,FrameBytes: LongInt;
+ Fmt,Ch,BitsPer,Al: LongInt; Pcm: PAEPcm; Z,X: TAEDArr; Tag: String[4]; Out: Array[0..8191] Of Byte; Rd: Array[0..4095] Of Byte; BitsPerCh: LongInt;
+ Nz: LongInt;
+Function U32(P: LongInt): LongInt; Begin U32:=LongInt(Hd[P])+LongInt(Hd[P+1])*256+LongInt(Hd[P+2])*65536+LongInt(Hd[P+3])*16777216; End;
+Function Sample(S,Cn: LongInt): Double;
+Begin
+ If (S<0) Or (S>=N) Then Sample:=0 Else Sample:=Pcm^[S*AEChans+Cn];
+End;
+Begin
+ AEMdctInit;
+ FillChar(AECode,SizeOf(AECode),0); FillChar(AELen,SizeOf(AELen),0);
+ For I:=0 To 11 Do AEWalk(I,AERoots[I],0,0);
+ OpenRead(Source); Limit:=InputSize;
+ If Limit<12 Then Fail('aac: WAV tronque.');
+ ReadAt(0,Hd,12);
+ If (Hd[0]<>82) Or (Hd[1]<>73) Or (Hd[2]<>70) Or (Hd[3]<>70) Then Fail('aac: WAV RIFF requis.');
+ At:=12; Ch:=0; Rate:=0; DataStart:=0; DataSize:=-1; BitsPer:=0; Fmt:=0;
+ While At+8<=Limit Do Begin
+  ReadAt(At,Hd,8); Sz:=U32(4); Tag:=Chr(Hd[0])+Chr(Hd[1])+Chr(Hd[2])+Chr(Hd[3]); Inc(At,8);
+  If Sz>Limit-At Then Sz:=Limit-At;
+  If Tag='fmt ' Then Begin
+   ReadAt(At,Hd,16); Fmt:=Hd[0]+Hd[1]*256; Ch:=Hd[2]+Hd[3]*256; Rate:=U32(4); BitsPer:=Hd[14]+Hd[15]*256;
+  End Else If Tag='data' Then Begin DataStart:=At; DataSize:=Sz; Break; End;
+  Inc(At,Sz+(Sz And 1));
+ End;
+ If (Fmt<>1) Or (BitsPer<>16) Or (Ch<1) Or (Ch>2) Or (DataSize<=0) Then Fail('aac: PCM 16 bits mono ou stereo requis.');
+ AEChans:=Ch; AERateIdx:=-1;
+ If BitRateK<=0 Then BitRateK:=64*Ch;
+ If (BitRateK<8) Or (BitRateK>576) Then Fail('aac: debit 8..576 kb/s requis.');
+ For I:=0 To 12 Do If AERates[I]=Rate Then AERateIdx:=I;
+ If AERateIdx<0 Then Fail('aac: frequence non AAC (96000..7350 Hz); utiliser -ar.');
+ N:=DataSize Div (2*Ch);
+ If N<1 Then Fail('aac: aucun echantillon.');
+ GetMem(Pcm,Int64(N)*Ch*2+16);
+ At:=0;
+ While At<N*Ch*2 Do Begin
+  If N*Ch*2-At>4096 Then Sz:=4096 Else Sz:=N*Ch*2-At;
+  ReadAt(DataStart+At,Rd,Sz);
+  For I:=0 To Sz Div 2-1 Do Begin
+   K:=Rd[2*I]+Rd[2*I+1]*256; If K>=32768 Then Dec(K,65536);
+   Pcm^[(At Div 2)+I]:=K;
+  End;
+  Inc(At,Sz);
+ End;
+ CloseRead;
+ AEBands:=AELongBands[AERateIdx];
+ For I:=0 To AEBands Do AEOff[I]:=AELongOffsets[AERateIdx,I];
+ { bande passante (table de libfaac) }
+ BitsPerCh:=BitRateK*1000 Div Ch;
+ If BitsPerCh<=29500 Then Cut:=5000 Else If BitsPerCh<=36000 Then Cut:=9000 Else If BitsPerCh<=43000 Then Cut:=12000
+ Else If BitsPerCh<=50000 Then Cut:=14260 Else If BitsPerCh<=58000 Then Cut:=15500 Else If BitsPerCh<=68000 Then Cut:=16000
+ Else If BitsPerCh<=96000 Then Cut:=18000 Else Cut:=Rate Div 2;
+ If Cut>Rate Div 2 Then Cut:=Rate Div 2;
+ CutBin:=Round(Cut*2048.0/Rate); If CutBin>1024 Then CutBin:=1024;
+ Frames:=(N+1023) Div 1024+1;
+ AvgBits:=Round(BitRateK*1000.0*1024/Rate); Reservoir:=0;
+ OpenWrite(Target);
+ For F:=0 To Frames-1 Do Begin
+  For C:=0 To Ch-1 Do Begin
+   For I:=0 To 2047 Do Z[I]:=AEWin[I]*Sample((F-1)*1024+I,C);
+   AEMdct(Z,X);
+   For K:=0 To 1023 Do If K<CutBin Then AEX[C,K]:=X[K] Else AEX[C,K]:=0;
+  End;
+  { bandes utiles }
+  AEMaxSfb:=0; For B:=0 To AEBands-1 Do If AEOff[B]<CutBin Then AEMaxSfb:=B+1;
+  { derniere bande non nulle (energie) }
+  Nz:=0;
+  For B:=0 To AEMaxSfb-1 Do For C:=0 To Ch-1 Do For K:=AEOff[B] To AEOff[B+1]-1 Do If Abs(AEX[C,K])>=0.5 Then Nz:=B+1;
+  AEMaxSfb:=Nz;
+  Target2:=AvgBits+Reservoir Div 2; If Target2>6000*Ch Then Target2:=6000*Ch;
+  Target2:=Target2-56-8;
+  Lo:=2; Hi:=255; Best:=255;
+  While Lo<=Hi Do Begin
+   G:=(Lo+Hi) Div 2;
+   AEPrepare(G);
+   AECounting:=True; AEPos:=0; AEWriteFrame(G);
+   If AEPos<=Target2 Then Begin Best:=G; Hi:=G-1; End Else Lo:=G+1;
+  End;
+  G:=Best; AEPrepare(G);
+  { recalcul du nombre maximal de bandes apres quantification }
+  Nz:=0;
+  For C:=0 To Ch-1 Do For B:=0 To AEMaxSfb-1 Do If AEBook[C,B]<>0 Then If B+1>Nz Then Nz:=B+1;
+  AEMaxSfb:=Nz;
+  AECounting:=False; AEPos:=0; FillChar(AEBuf,SizeOf(AEBuf),0);
+  AEWriteFrame(G);
+  Used:=AEPos; FrameBytes:=(Used+7) Div 8+7;
+  If FrameBytes>8191 Then Fail('aac: trame trop grande.');
+  Out[0]:=$FF; Out[1]:=$F1; Out[2]:=(1 Shl 6) Or (AERateIdx Shl 2) Or (Ch Shr 2);
+  Out[3]:=((Ch And 3) Shl 6) Or (FrameBytes Shr 11);
+  Out[4]:=(FrameBytes Shr 3) And 255;
+  Out[5]:=((FrameBytes And 7) Shl 5) Or $1F;
+  Out[6]:=$FC;
+  Move(AEBuf,Out[7],(Used+7) Div 8);
+  WriteBytes(Out,FrameBytes);
+  Inc(Reservoir,AvgBits-(FrameBytes*8)); If Reservoir>3000*Ch Then Reservoir:=3000*Ch; If Reservoir<0 Then Reservoir:=0;
+ End;
+ CloseWrite;
+ FreeMem(Pcm,Int64(N)*Ch*2+16);
+End;
+
 { MPEG-1/2 video: I/B encoders and MPEG-1 I/P/B decoder. Tables and syntax adapted
   from FFmpeg mpeg12data.c/mpeg12.c/mpeg12dec.c (LGPL-2.1-or-later). }
 Procedure MPEG1Video(Const Source,Target: String; Encoding: Boolean);
@@ -48100,7 +48601,7 @@ Begin
  WriteLn(' DE m4a             MP4/M4A audio ALAC (decodage et encodage, -f mp4 ou extension .m4a)');
  WriteLn(' D  psxstr          Sony PlayStation STR / RIFF CDXA (audio adpcm_xa)');
  WriteLn(' D  wsaud           Westwood Studios audio (adpcm_ima_ws)');
- WriteLn(' D  aac             AAC ADTS (AAC-LC mono/stereo; alias: adts)');
+ WriteLn(' DE aac             AAC ADTS (AAC-LC mono/stereo; alias: adts; encodage libfaac natif)');
  WriteLn(' D  iff             IFF 8SVX, Fibonacci/exponentiel (alias: 8svx, svx)');
  WriteLn(' DE aiff            AIFF/AIFF-C PCM; ima4 (adpcm_ima_qt) en decodage et encodage AIFF-C');
  WriteLn(' D  asf             ASF, audio WMA2 seulement (alias: wma, wmv)');
@@ -48190,6 +48691,11 @@ Procedure Help;Begin
  WriteLn(' ac3: -i entree.ac3 sortie.wav; -i entree.wav -c:a ac3 -b:a 192k sortie.ac3');
  WriteLn('      Encodeur mono/stereo 32/44.1/48 kHz; multicanal decode vers stereo, LFE omis.');
  WriteLn(' aac: -i entree.aac sortie.wav (AAC-LC ADTS mono/stereo).');
+ WriteLn(' libfaac: -i entree.wav -c:a libfaac -b:a 128k sortie.aac (AAC-LC ADTS natif); libfaad: -c:a libfaad -i entree.aac sortie.wav.');
+ WriteLn(' libmp3lame: -i entree.wav -c:a libmp3lame -b:a 128k sortie.mp3 (encodeur MP3 natif du projet).');
+ WriteLn(' kmvc: -i entree.avi -an sortie.y4m (Karl Morton, PAL8, 320x200 max).');
+ WriteLn(' interplayvideo|interplay_dpcm: -i entree.mve sortie.y4m|sortie.png|sortie.wav (Interplay MVE).');
+ WriteLn(' jpegls: -i image.jls sortie.y4m (decodeur); -i entree.y4m -c:v jpegls [-pred 0|1|2] [-frames:v 1] sortie.jls (Y4M gris ou 4:2:0, hauteur paire).');
  WriteLn(' 8svx_fib/exp: -i entree.8svx sortie.wav (mono/stereo, compressions 1/2).');
  WriteLn(' aasc: -i entree.avi -an sortie.y4m (Autodesk RLE natif).');
  WriteLn(' 8bps: -i entree.mov -an sortie.y4m (alpha non conserve dans Y4M).');
@@ -48458,6 +48964,8 @@ BEGIN
    WriteLn('D A    adpcm_sbpro_4   ADPCM Sound Blaster Pro 4-bit');
    WriteLn('DEA    ac3             ATSC A/52A (AC-3)');
    WriteLn('D A    aac             Advanced Audio Coding (AAC-LC ADTS mono/stereo)');
+   WriteLn('D A    libfaad         libfaad AAC (Advanced Audio Codec) (decodeur AAC-LC ADTS natif; -c:a libfaad avant -i)');
+   WriteLn(' EA    libfaac         libfaac AAC (Advanced Audio Codec) (encodeur AAC-LC ADTS mono/stereo, 7350..96000 Hz, -b:a 8..576k, M/S par bande)');
    WriteLn('D V D  aasc            Autodesk RLE (AVI AASC/AAS4, 8/16/24 bits)');
    WriteLn('DEV    flv             Flash Video (FLV1/Sorenson Spark: decodeur complet I/P (FLV, AVI); encodeur images intra)');
    WriteLn('D V    kmvc            Karl Morton''s video codec (AVI KMVC, PAL8 <= 320x200)');
@@ -48479,6 +48987,7 @@ BEGIN
    WriteLn('D V D  h264            H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 (decodeur progressif 4:2:0 8 bits: CAVLC/CABAC, I/P/B, 8x8, ponderation; .h264, MP4, AVI, FLV)');
    WriteLn('D A    mp1             MP1 (MPEG audio layer 1)');
    WriteLn('DEA    mp3             MP3 (decodeur Layer III; encodeur MPEG-1 CBR 32..320k)');
+   WriteLn(' EA    libmp3lame      libmp3lame MP3 (MPEG audio layer 3) (encodeur MPEG-1 CBR natif du projet, non identique a LAME)');
    WriteLn('DEV    mpeg1video      MPEG-1 video (encodeur I/B; decodeur I/P/B)');
    WriteLn(' EV    mpeg2video      MPEG-2 video (encodeur progressif I/B)');
    WriteLn(' EV    mpeg4           MPEG-4 Part 2 (Y4M, I/P/B, options -4mv/-bf)');   
@@ -48625,7 +49134,9 @@ BEGIN
    If Code<>0 Then Fail('Debit audio invalide; exemple -b:a 64k.');
    Case Number Of
     32,40,48,56,64,80,96,112,128,160,192,224,256,320,384,448,512,576,640: RequestedBitRateK:=Number;
-    Else Fail('Debit audio normalise requis: MP3 32..320k ou AC3 32..640k.');
+    8..31,33..39,41..47,49..55,57..63,65..79,81..95,97..111,113..127,129..159,161..191,193..223,225..255,257..319,321..383,385..447,449..511,513..575:
+     Begin RequestedBitRateK:=Number; NonStdBitrate:=True; End;
+    Else Fail('Debit audio hors limites: AAC 8..576k, MP3 32..320k, AC3 32..640k.');
    End;
    HasBitrate:=True;
   End
@@ -48679,6 +49190,12 @@ BEGIN
  If (InputFormat='mp4') And ((OutputFormat='wav') Or (OutputFormat='adx') Or (OutputFormat='aiff') Or
   (OutputFormat='flv') Or (OutputFormat='mp3') Or (OutputFormat='ac3') Or ((OutputFormat='mp4') And (AudioCodec='alac'))) Then
   If Not IsHTTP(InputPath) Then If MP4HasALAC(InputPath) Then InputFormat:='alac';
+ If (InputCodec='libfaad') Or (InputCodec='interplay_dpcm') Then Begin
+  { decodeurs imposes : ce sont les decodeurs natifs des entrees correspondantes }
+  If ((InputCodec='libfaad') And (InputFormat<>'aac')) Or ((InputCodec='interplay_dpcm') And (InputFormat<>'ipmovie')) Then
+   Fail('Decodeur impose '+InputCodec+': entree AAC ADTS (libfaad) ou Interplay MVE (interplay_dpcm) requise.');
+  InputCodec:='';
+ End;
  If InputCodec<>'' Then Begin
   If (InputFormat<>'ea') And (InputFormat<>'xa') Then
    Fail('Decodeur impose (-c:a avant -i): conteneurs ea et xa seulement.');
@@ -48714,7 +49231,7 @@ BEGIN
   Else If (AsvTag='KMVC') Or (AsvTag='kmvc') Then NVKind:=37;
  End;
  If (OptPixFmt<>'') And (OptPixFmt<>'yuv420p') Then Fail('-pix_fmt: seul yuv420p est pris en charge.');
- NVAudioOut:=(OutputFormat='wav') Or (OutputFormat='mp3') Or (OutputFormat='ac3') Or (OutputFormat='adx') Or (OutputFormat='aiff');
+ NVAudioOut:=(OutputFormat='wav') Or (OutputFormat='mp3') Or (OutputFormat='ac3') Or (OutputFormat='aac') Or (OutputFormat='adx') Or (OutputFormat='aiff');
  If ((InputFormat='mp4') Or (InputFormat='avi') Or (InputFormat='flv')) And (NVKind=0) And Not IsHTTP(InputPath) And Not NVAudioOut And Not NoVideo And (VideoCodec<>'copy') And
   ((OutputFormat='yuv4mpegpipe') Or (OutputFormat='png') Or (OutputFormat='bmp') Or (VideoCodec='png') Or (VideoCodec='bmp') Or (VideoCodec='mpeg4') Or
   (VideoCodec='mpeg1video') Or (VideoCodec='mpeg2video') Or (VideoCodec='ffv1') Or (VideoCodec='flv') Or FourMV) Then Begin
@@ -49023,9 +49540,9 @@ BEGIN
  End;
  If NoAudio Then Fail('-an: aucune piste a ecrire dans une sortie audio seule.');
  If VideoCodec<>'' Then Fail('Codec video incompatible avec une sortie audio seule.');
- If (OutputFormat<>'wav') And (OutputFormat<>'mp3') And (OutputFormat<>'ac3') And
+ If (OutputFormat<>'wav') And (OutputFormat<>'mp3') And (OutputFormat<>'ac3') And (OutputFormat<>'aac') And
  (OutputFormat<>'adx') And (OutputFormat<>'aiff') And (OutputFormat<>'flv') And (OutputFormat<>'mp4') Then Fail(
- 'Sorties audio WAV, MP3, AC3, ADX et AIFF-C (adpcm_ima_qt) prises en charge.');
+ 'Sorties audio WAV, MP3, AC3, AAC (ADTS), ADX et AIFF-C (adpcm_ima_qt) prises en charge.');
  If AudioCodec='' Then If OutputFormat='wav' Then AudioCodec:=
  'pcm_s16le' Else If OutputFormat='adx' Then AudioCodec:='adpcm_adx'
  Else If OutputFormat='aiff' Then AudioCodec:='adpcm_ima_qt'
@@ -49035,11 +49552,13 @@ BEGIN
   (AudioCodec='adpcm_ms') Or (AudioCodec='adpcm_yamaha'))) Or ((OutputFormat='flv') And (AudioCodec='adpcm_swf')) Or
  ((OutputFormat='mp4') And (AudioCodec='alac')) Or
  ((OutputFormat='adx') And (AudioCodec='adpcm_adx')) Or ((OutputFormat='aiff') And (AudioCodec='adpcm_ima_qt')) Or
- ((OutputFormat='mp3') And (AudioCodec='mp3')) Or ((OutputFormat='ac3') And (AudioCodec='ac3'))) Then Fail(
+ ((OutputFormat='mp3') And ((AudioCodec='mp3') Or (AudioCodec='libmp3lame'))) Or ((OutputFormat='ac3') And (AudioCodec='ac3')) Or
+ ((OutputFormat='aac') And ((AudioCodec='aac') Or (AudioCodec='libfaac')))) Then Fail(
  'Codec de sortie non pris en charge pour ce conteneur.');
- If HasBitrate And (((OutputFormat<>'mp3') And (OutputFormat<>'ac3')) Or (AudioCodec='copy')) Then Fail(
- '-b:a exige un encodage MP3 ou AC3.');
+ If HasBitrate And (((OutputFormat<>'mp3') And (OutputFormat<>'ac3') And (OutputFormat<>'aac')) Or (AudioCodec='copy')) Then Fail(
+ '-b:a exige un encodage MP3, AAC ou AC3.');
  If (OutputFormat='mp3') And (RequestedBitRateK>320) Then Fail('MP3: debit maximal 320k.');
+ If NonStdBitrate And (OutputFormat<>'aac') Then Fail('Debit audio normalise requis: MP3 32..320k ou AC3 32..640k.');
  If (AudioCodec='copy') And ((RequestedRate<>0) Or (RequestedChannels<>0) Or (InputFormat
  <>OutputFormat)) Then  Fail(
  '-c:a copy exige le meme conteneur audio et aucune conversion audio.');
@@ -49128,6 +49647,10 @@ BEGIN
    Else If OutputFormat='ac3' Then Begin
     Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False);
     If Not HasBitrate Then RequestedBitRateK:=192; ProcessAC3(Temps[1],Temps[2],True,RequestedBitRateK);
+   End
+   Else If OutputFormat='aac' Then Begin
+    Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False);
+    If HasBitrate Then AEEncodeAAC(Temps[1],Temps[2],RequestedBitRateK) Else AEEncodeAAC(Temps[1],Temps[2],0);
    End Else
   Begin
    Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],True);
