@@ -3963,6 +3963,7 @@ Begin
   If K0>=0 Then Begin Probe:='c93'; Exit; End;
  End;
  If N>=18 Then If (B[0]=66) And (B[1]=77) And (B[6]=0) And (B[7]=0) And (B[8]=0) And (B[9]=0) And (B[14] In [12,40,56,64,108,124]) And (B[15]=0) Then Begin Probe:='bmp'; Exit; End;
+ If N>=12 Then If ((B[0]=78) And (B[1]=117) And (B[2]=112) And (B[3]=112) And (B[4]=101) And (B[5]=108) And (B[6]=86)) Or ((B[0]=77) And (B[1]=121) And (B[2]=116) And (B[3]=104) And (B[4]=84) And (B[5]=86)) Then Begin Probe:='nuv'; Exit; End;
  If N>=8 Then If (B[0]=80) And (B[1]>=49) And (B[1]<=55) And ((B[2]=10) Or (B[2]=32) Or (B[2]=13) Or (B[2]=9)) And ((B[3]=35) Or ((B[3]>=48) And (B[3]<=57)) Or ((B[1]=55) And (B[3]=87))) Then Begin
   Case B[1] Of 49,52: Probe:='pbm'; 50,53: Probe:='pgm'; 51,54: Probe:='ppm'; Else Probe:='pam'; End; Exit;
  End;
@@ -21695,8 +21696,287 @@ Begin
  NVFinish('pnm');
 End;
 
+{ ---- NuppelVideo / RTJPEG (libavformat/nuv.c, libavcodec/nuv.c, rtjpeg.c) : fichier .nuv vers image ---- }
+Var NuBuf: PEABuffer; NuBits: LongInt; NuBytes: LongInt;
+Function NuGet(N: LongInt): LongInt;
+Var K,V,B: LongInt;
+Begin
+ V:=0;
+ For K:=1 To N Do Begin
+  If NuBits Shr 3<NuBytes Then B:=(NuBuf^[NuBits Shr 3] Shr (7-(NuBits And 7))) And 1 Else B:=0;
+  V:=V*2+B; Inc(NuBits);
+ End;
+ NuGet:=V;
+End;
+Function NuSGet(N: LongInt): LongInt;
+Var V: LongInt;
+Begin V:=NuGet(N); If V>=(1 Shl (N-1)) Then V:=V-(1 Shl N); NuSGet:=V; End;
+
+Procedure NuReduce(Var DNum,DDen: Int64; Num,Den,Mx: Int64);
+Var A0n,A0d,A1n,A1d,X,NextDen,A2n,A2d,G,T1,T2: Int64;
+Begin
+ G:=Abs(Num); T1:=Abs(Den);
+ T2:=T1; T1:=G; While T2<>0 Do Begin G:=T1 Mod T2; T1:=T2; T2:=G; End;
+ G:=T1;
+ If G<>0 Then Begin Num:=Abs(Num) Div G; Den:=Abs(Den) Div G; End;
+ A0n:=0; A0d:=1; A1n:=1; A1d:=0;
+ If (Num<=Mx) And (Den<=Mx) Then Begin A1n:=Num; A1d:=Den; Den:=0; End;
+ While Den<>0 Do Begin
+  X:=Num Div Den; NextDen:=Num-Den*X;
+  A2n:=X*A1n+A0n; A2d:=X*A1d+A0d;
+  If (A2n>Mx) Or (A2d>Mx) Then Begin
+   If A1n<>0 Then X:=(Mx-A0n) Div A1n;
+   If A1d<>0 Then Begin T1:=(Mx-A0d) Div A1d; If T1<X Then X:=T1; End;
+   If Den*(2*X*A1d+A0d)>Num*A1d Then Begin A1n:=X*A1n+A0n; A1d:=X*A1d+A0d; End;
+   Break;
+  End;
+  A0n:=A1n; A0d:=A1d; A1n:=A2n; A1d:=A2d; Num:=Den; Den:=NextDen;
+ End;
+ DNum:=A1n; DDen:=A1d;
+End;
+
+Procedure NuD2Q(D: Double; Mx: Int64; Var N,Dn: LongInt);
+Var Ex: LongInt; Den,A,B: Int64; T: Double;
+Begin
+ If D<=0 Then Begin N:=0; Dn:=1; Exit; End;
+ Ex:=0; T:=D; While T>=2.0 Do Begin T:=T/2; Inc(Ex); End;
+ Den:=Int64(1) Shl (61-Ex);
+ NuReduce(A,B,Trunc(Int(D*Den+0.5)),Den,Mx);
+ N:=A; Dn:=B;
+ If (N=0) Or (Dn=0) Then Begin NuReduce(A,B,Trunc(Int(D*Den+0.5)),Den,2147483647); N:=A; Dn:=B; End;
+End;
+
+Function NuRdD(P: PEABuffer; At: LongInt): Double;
+Var U: Record Case Byte Of 0: (A: Array[0..7] Of Byte); 1: (D: Double); End; K: LongInt;
+Begin For K:=0 To 7 Do U.A[K]:=P^[At+K]; NuRdD:=U.D; End;
+
+Procedure DecodeNUV(Const Source,Target: String; Mode: LongInt);
+Const
+ LumQ: Array[0..63] Of Byte=(16,11,10,16,24,40,51,61,12,12,14,19,26,58,60,55,14,13,16,24,40,57,69,56,14,17,22,29,51,87,80,62,
+  18,22,37,56,68,109,103,77,24,35,55,64,81,104,113,92,49,64,78,87,103,121,120,101,72,92,95,98,112,100,103,99);
+ ChrQ: Array[0..63] Of Byte=(17,18,24,47,99,99,99,99,18,21,26,66,99,99,99,99,24,26,56,99,99,99,99,99,47,66,99,99,99,99,99,99,
+  99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99);
+ZZ: Array[0..63] Of Byte=(0,1,8,16,9,2,3,10,17,24,32,25,18,11,4,5,12,19,26,33,40,48,41,34,27,20,13,6,7,14,21,28,
+  35,42,49,56,57,50,43,36,29,22,15,23,30,37,44,51,58,59,52,45,38,31,39,46,53,60,61,54,47,55,62,63);
+Var
+ F,Pic,Lz,Hb: PEABuffer; Size,Pos,W,H,Vp,Ap,I,Sz,Ts,Cw,Ch,K,Cap,Produced,Gap,Emitted,Idx,Fh: LongInt; Typ: Byte;
+ IsMyth,HaveExtra,FrameHeader,Ok,FirstFrame,Key,InitFrame: Boolean; Aspect,Fps: Double;
+ Lq,Cq: Array[0..63] Of LongWord; Scan: Array[0..63] Of Byte; SarN,SarD,FrN,FrD,Tmp: LongInt; An,Ad: Int64;
+ Comp: Char; Buf: PEABuffer; BufSize,OutLen,Res,Hh,Q,X,Y,Hdr: LongInt; PicStride: LongInt; Fmt: LongInt;
+ Blk: TAMVBlock; Quality: LongInt;
+Function RL32(At: LongInt): LongInt;Begin RL32:=NVRL32(F,Size,At); End;
+Function RL16(At: LongInt): LongInt;Begin RL16:=NVRL16(F,Size,At); End;
+Procedure Quant(P: PEABuffer; Cnt: LongInt);
+Var J: LongInt;
+Begin
+ For J:=0 To 63 Do Lq[J]:=LongWord(LongInt(P^[J*4])+LongInt(P^[J*4+1])*256+LongInt(P^[J*4+2])*65536+LongInt(P^[J*4+3])*16777216);
+ For J:=0 To 63 Do Cq[J]:=LongWord(LongInt(P^[256+J*4])+LongInt(P^[256+J*4+1])*256+LongInt(P^[256+J*4+2])*65536+LongInt(P^[256+J*4+3])*16777216);
+End;
+Procedure PutC(Var Cf: LongInt; C: LongInt; Const Qt: Array Of LongWord);
+Var Ix: LongInt; V: Int64;
+Begin
+ Ix:=Scan[Cf]; Dec(Cf);
+ V:=Int64(C)*Int64(Qt[Ix]);
+ Blk[Ix]:=SmallInt(V And $FFFF);
+End;
+{ get_block : 0 = non code, 1 = ok, -1 = erreur }
+Function GetBlock(Const Qt: Array Of LongWord): LongInt;
+Var Dc,Cf,Ac,N,J: LongInt;
+Begin
+ GetBlock:=1;
+ Dc:=NuGet(8);
+ If Dc=255 Then Begin GetBlock:=0; Exit; End;
+ Cf:=NuGet(6);
+ If NuBytes*8-NuBits<(Cf Shl 1) Then Begin GetBlock:=-1; Exit; End;
+ For J:=0 To 63 Do Blk[J]:=0;
+ While Cf<>0 Do Begin
+  Ac:=NuSGet(2);
+  If Ac=-2 Then Break;
+  PutC(Cf,Ac,Qt);
+ End;
+ N:=(-NuBits) And 3; If N<>0 Then NuGet(N);
+ If NuBytes*8-NuBits<(Cf Shl 2) Then Begin GetBlock:=-1; Exit; End;
+ While Cf<>0 Do Begin
+  Ac:=NuSGet(4);
+  If Ac=-8 Then Break;
+  PutC(Cf,Ac,Qt);
+ End;
+ N:=(-NuBits) And 7; If N<>0 Then NuGet(N);
+ If NuBytes*8-NuBits<(Cf Shl 3) Then Begin GetBlock:=-1; Exit; End;
+ While Cf<>0 Do Begin
+  Ac:=NuSGet(8);
+  PutC(Cf,Ac,Qt);
+ End;
+ PutC(Cf,Dc,Qt);
+End;
+Function RtjDecode(Data: PEABuffer; Len: LongInt): LongInt;
+Var Bx,By,Wb,Hb2,R: LongInt; Y1,Y2,U,V: LongInt;
+Procedure DoBlk(Const Qt: Array Of LongWord; Plane: PEABuffer; Off,Stride: LongInt);
+Begin
+ R:=GetBlock(Qt);
+ If R<0 Then Begin RtjDecode:=-1; Exit; End;
+ If R>0 Then AVIdctPut(Blk,@Plane^[Off],Stride);
+End;
+Begin
+ NuBuf:=Data; NuBits:=0; NuBytes:=Len;
+ RtjDecode:=0;
+ Wb:=W Div 16; Hb2:=H Div 16;
+ For By:=0 To Hb2-1 Do For Bx:=0 To Wb-1 Do Begin
+  Y1:=By*16*W+Bx*16;
+  DoBlk(Lq,Pic,Y1,W); If R<0 Then Begin RtjDecode:=-1; Exit; End;
+  DoBlk(Lq,Pic,Y1+8,W); If R<0 Then Begin RtjDecode:=-1; Exit; End;
+  DoBlk(Lq,Pic,Y1+8*W,W); If R<0 Then Begin RtjDecode:=-1; Exit; End;
+  DoBlk(Lq,Pic,Y1+8*W+8,W); If R<0 Then Begin RtjDecode:=-1; Exit; End;
+  U:=W*H+By*8*Cw+Bx*8;
+  DoBlk(Cq,Pic,U,Cw); If R<0 Then Begin RtjDecode:=-1; Exit; End;
+  V:=W*H+Cw*Ch+By*8*Cw+Bx*8;
+  DoBlk(Cq,Pic,V,Cw); If R<0 Then Begin RtjDecode:=-1; Exit; End;
+ End;
+ RtjDecode:=NuBits Div 8;
+End;
+Begin
+ NVLoad(Source,F,Size);
+ If Size<72 Then Fail('nuv: fichier trop court.');
+ If Not (((F^[0]=78) And (F^[1]=117) And (F^[2]=112)) Or ((F^[0]=77) And (F^[1]=121) And (F^[2]=116))) Then Fail('nuv: signature NuppelVideo/MythTVVideo requise.');
+ IsMyth:=F^[0]=77;
+ W:=RL32(20); H:=RL32(24);
+ Aspect:=NuRdD(F,40); Fps:=NuRdD(F,48);
+ Vp:=RL32(56); Ap:=RL32(60);
+ If Vp=0 Then Fail('nuv: aucune piste video.');
+ If (W<1) Or (H<1) Or (W>16384) Or (H>16384) Then Fail('nuv: dimensions incorrectes.');
+ If (Aspect>0.9999) And (Aspect<1.0001) Then Aspect:=4.0/3.0;
+ If Fps<0 Then Fps:=0;
+ NuD2Q(Fps,60000,FrN,FrD);
+ NuD2Q(Aspect*H/W,10000,SarN,SarD);
+ { donnees de codec : tables de quantification (sous-type R) }
+ Pos:=72; HaveExtra:=False; FrameHeader:=False; Quality:=-1;
+ FillChar(Lq,SizeOf(Lq),0); FillChar(Cq,SizeOf(Cq),0);
+ While Pos+12<=Size Do Begin
+  Typ:=F^[Pos];
+  If Typ=Ord('D') Then Begin
+   Sz:=RL32(Pos+8) And $FFFFFF;
+   If F^[Pos+1]=Ord('R') Then Begin
+    If Sz>=512 Then Begin Quant(PEABuffer(@F^[Pos+12]),Sz); HaveExtra:=True; End;
+    Inc(Pos,12+Sz);
+    If Not IsMyth Then Break;
+    Continue;
+   End;
+   Inc(Pos,12+Sz);
+  End Else If Typ=Ord('X') Then Begin
+   Sz:=RL32(Pos+8) And $FFFFFF;
+   If Sz=512 Then Begin
+    I:=RL32(Pos+12+4);
+    If I=LongInt($47504A52) Then FrameHeader:=True
+    Else Fail('nuv: codec video MythTV non pris en charge (RJPG seulement).');
+    Inc(Pos,12+Sz);
+    Break;
+   End;
+   Inc(Pos,12+Sz);
+  End Else If Typ=Ord('R') Then Inc(Pos,12)
+  Else Begin Sz:=RL32(Pos+8) And $FFFFFF; Inc(Pos,12+Sz); End;
+ End;
+ If Not HaveExtra And Not FrameHeader Then Fail('nuv: tables de quantification RTJPEG introuvables.');
+ For I:=0 To 63 Do Begin
+  K:=ZZ[I]; K:=((K Shl 3) Or (K Shr 3)) And 63;
+  Scan[I]:=K;
+ End;
+ { dimensions paires comme codec_reinit }
+ W:=(W+1) And Not 1; H:=(H+1) And Not 1;
+ Cw:=W Div 2; Ch:=H Div 2;
+ Fmt:=7;
+ NVBegin(Mode,Target,W,H,7,FrN,FrD);
+ NVSubX:=1; NVSubY:=1; NVCW:=Cw; NVCH:=Ch; NVYTag:='C420jpeg'; NVIl:='p';
+ NVSarN:=SarN; NVSarD:=SarD;
+ If (SarN<=0) Or (SarD<=0) Then Begin NVSarN:=0; NVSarD:=1; End;
+ GetMem(Pic,W*H+2*Cw*Ch+64); FillChar(Pic^,W*H,0); FillChar(Pic^[W*H],2*Cw*Ch+64,128);
+ Cap:=W*H*3 Div 2+12;
+ GetMem(Lz,Cap+128);
+ FirstFrame:=True; Emitted:=0;
+ While Pos+12<=Size Do Begin
+  Typ:=F^[Pos]; Sz:=RL32(Pos+8) And $FFFFFF;
+  Ts:=RL32(Pos+4);
+  If Typ=Ord('R') Then Begin Inc(Pos,12); Continue; End;
+  If Pos+12+Sz>Size Then Sz:=Size-Pos-12;
+  Ok:=False;
+  If ((Typ=Ord('V')) Or ((Typ=Ord('D')) And (F^[Pos+1]=Ord('R')))) Then Begin
+   If Typ=Ord('D') Then Begin
+    If Sz>=512 Then Begin Quant(PEABuffer(@F^[Pos+12]),Sz); End;
+   End Else Begin
+    Comp:=Chr(F^[Pos+1]);
+    Key:=True; Ok:=True;
+    Case Comp Of
+     '1','2': Begin Key:=F^[Pos+2]=0; If (W<16) Or (H<16) Then Ok:=False; End;
+     'L': Key:=False;
+     '0','3','N': ;
+     Else Ok:=False;
+    End;
+    If Ok Then Begin
+     { taille minimale }
+     If Comp='0' Then Q:=W*H*3 Div 2 Else If Comp='1' Then Q:=(W Div 16)*(H Div 16)*6 Else Q:=0;
+     If Sz+12<Q Div 4 Then Ok:=False;
+    End;
+    If Ok Then Begin
+     Buf:=PEABuffer(@F^[Pos+12]); BufSize:=Sz;
+     If (Comp='2') Or (Comp='3') Then Begin
+      OutLen:=Cap;
+      FillChar(Lz^,Cap+128,0);
+      Res:=NVLzo(Buf,BufSize,Lz,OutLen);
+      If Res<>0 Then Ok:=False Else Begin Buf:=Lz; BufSize:=Cap-OutLen; End;
+     End;
+    End;
+    If Ok And FrameHeader Then Begin
+     If BufSize<12 Then Ok:=False
+     Else Begin
+      Hb:=Buf;
+      If (Hb^[0]<>Ord('V')) And ((Hb^[4]+Hb^[5]*256)<>$000C) Then Ok:=False
+      Else Begin
+       { changement de taille non pris en charge }
+       Hh:=Hb^[6]+Hb^[7]*256; Q:=Hb^[8]+Hb^[9]*256;
+       If (((Hh+1) And Not 1)<>W) Or (((Q+1) And Not 1)<>H) Then Fail('nuv: changement de dimensions dans le flux non pris en charge.');
+       Quality:=Hb^[10]; If Quality<1 Then Quality:=1;
+       For I:=0 To 63 Do Begin Lq[I]:=(LongWord(LumQ[I]) Shl 7) Div LongWord(Quality); Cq[I]:=(LongWord(ChrQ[I]) Shl 7) Div LongWord(Quality); End;
+       Buf:=PEABuffer(@Buf^[12]); Dec(BufSize,12);
+      End;
+     End;
+    End;
+    If Ok Then Begin
+     If Key Or FirstFrame Then Begin
+      FillChar(Pic^,W*H,0); FillChar(Pic^[W*H],2*Cw*Ch,128);
+     End;
+     Case Comp Of
+      '0','3': Begin
+       Hh:=H;
+       If BufSize<W*H*3 Div 2 Then Hh:=BufSize Div W Div 3*2;
+       If Hh>0 Then Begin
+        Move(Buf^[0],Pic^[0],W*Hh);
+        Q:=(Hh+1) Div 2;
+        Move(Buf^[W*Hh],Pic^[W*H],Cw*Q);
+        Move(Buf^[W*Hh+Cw*Q],Pic^[W*H+Cw*Ch],Cw*Q);
+       End;
+      End;
+      '1','2': Begin
+       Res:=RtjDecode(Buf,BufSize);
+       If Res<0 Then Ok:=False;
+      End;
+      'N': Begin FillChar(Pic^,W*H,0); FillChar(Pic^[W*H],2*Cw*Ch,128); End;
+      'L': ;
+     End;
+    End;
+    If Ok Then Begin
+     NVEmit(Pic); Inc(Emitted); FirstFrame:=False;
+     If NVDone Then Break;
+    End Else If Typ=Ord('V') Then NVRepeat;
+   End;
+  End;
+  Inc(Pos,12+Sz);
+ End;
+ FreeMem(Pic,W*H+2*Cw*Ch+64); FreeMem(F,Size+64);
+ NVFinish('nuv');
+End;
+
 Procedure DecodeNV2(Kind: LongInt; Const Source,Target: String; Mode: LongInt);
 Begin
+ If Kind=54 Then Begin DecodeNUV(Source,Target,Mode); Exit; End;
  If (Kind>=51) And (Kind<=53) Then Begin DecodeMsAVI(Source,Target,Mode,Kind-49); Exit; End;
  If Kind=50 Then Begin DecodePNM(Source,Target,Mode); Exit; End;
  If Kind=12 Then DecodeCAVS(Source,Target,Mode)
@@ -66801,6 +67081,7 @@ Begin
  WriteLn('  E png             PNG RGB24, une image');
  WriteLn('  E rawvideo        Alias de sortie PNG/GIF; pas de pixels bruts');
  WriteLn(' D  voc             Creative Voice PCM');
+ WriteLn(' D  nuv             NuppelVideo (video RTJPEG/LZO vers Y4M, PNG ou BMP; audio ignore)');
  WriteLn(' D  pam             PAM/PBM/PGM/PPM (images Portable AnyMap; decodage vers Y4M ou PNG/BMP)');
  WriteLn('  E pam, pbm       Image PAM/PBM depuis Y4M (-c:v pam|pbm -frames:v 1)');
  WriteLn(' DE wav             RIFF/WAVE PCM; decodage et encodage adpcm_ima_wav, adpcm_ms; DK3, DK4, CT; IMC (0x401)');
@@ -67223,6 +67504,7 @@ BEGIN
    WriteLn('DEA    pcm_u32le       PCM unsigned 32-bit little-endian');
    WriteLn('DEA    pcm_u8          PCM unsigned 8-bit');
    WriteLn('DEA    pcm_zork        PCM Zork');
+   WriteLn('D V D  nuv             NuppelVideo/RTJPEG (fichiers .nuv; types 0, 1, 2, 3, N, L; LZO et RTJPEG)');
    WriteLn('DEA    nellymoser      Nellymoser Asao (FLV audio mono; decodeur exact, encodeur glouton identique a ffmpeg)');
    WriteLn('D V D  msrle           Microsoft RLE (AVI; 1, 4, 8 et 24 bits)');
    WriteLn('D V D  msvideo1        Microsoft Video 1 (AVI; 8 bits palette et 16 bits RGB555)');
@@ -67512,7 +67794,7 @@ BEGIN
  Else If (InputFormat='mm') And Not IsHTTP(InputPath) Then NVKind:=48
  Else If (InputFormat='mvi') And Not IsHTTP(InputPath) Then NVKind:=49
  Else If InputFormat='bethsoftvid' Then NVKind:=1 Else If InputFormat='bfi' Then NVKind:=2 Else If InputFormat='c93' Then NVKind:=3
- Else If InputFormat='bmp' Then NVKind:=4 Else If (InputFormat='pam') Or (InputFormat='pbm') Or (InputFormat='pgm') Or (InputFormat='ppm') Then NVKind:=50 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22 Else If (InputFormat='flic') And Not IsHTTP(InputPath) Then NVKind:=23 Else If (InputFormat='gif') And Not IsHTTP(InputPath) Then NVKind:=25 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=2) Then NVKind:=27 Else If (InputFormat='h263') And Not IsHTTP(InputPath) Then NVKind:=28 Else If (InputFormat='h261') And Not IsHTTP(InputPath) Then NVKind:=29 Else If (InputFormat='idcin') And Not IsHTTP(InputPath) Then NVKind:=30 Else If (InputFormat='ipmovie') And Not IsHTTP(InputPath) Then NVKind:=38 Else If (InputFormat='jpegls_pipe') And Not IsHTTP(InputPath) Then NVKind:=39 Else If (InputFormat='jpeg_pipe') And Not IsHTTP(InputPath) Then NVKind:=46 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And MP4HasMjpb(InputPath) Then NVKind:=47 Else If (InputFormat='h264') And Not IsHTTP(InputPath) Then NVKind:=33
+ Else If InputFormat='bmp' Then NVKind:=4 Else If (InputFormat='pam') Or (InputFormat='pbm') Or (InputFormat='pgm') Or (InputFormat='ppm') Then NVKind:=50 Else If InputFormat='nuv' Then NVKind:=54 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22 Else If (InputFormat='flic') And Not IsHTTP(InputPath) Then NVKind:=23 Else If (InputFormat='gif') And Not IsHTTP(InputPath) Then NVKind:=25 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=2) Then NVKind:=27 Else If (InputFormat='h263') And Not IsHTTP(InputPath) Then NVKind:=28 Else If (InputFormat='h261') And Not IsHTTP(InputPath) Then NVKind:=29 Else If (InputFormat='idcin') And Not IsHTTP(InputPath) Then NVKind:=30 Else If (InputFormat='ipmovie') And Not IsHTTP(InputPath) Then NVKind:=38 Else If (InputFormat='jpegls_pipe') And Not IsHTTP(InputPath) Then NVKind:=39 Else If (InputFormat='jpeg_pipe') And Not IsHTTP(InputPath) Then NVKind:=46 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And MP4HasMjpb(InputPath) Then NVKind:=47 Else If (InputFormat='h264') And Not IsHTTP(InputPath) Then NVKind:=33
  Else If (InputFormat='avi') And Not IsHTTP(InputPath) Then Begin
   AsvTag:=AVIVideoFourCC(Intermediate);
   If AsvTag='CSCD' Then NVKind:=5 Else If (AsvTag='tscc') Or (AsvTag='TSCC') Then NVKind:=6
