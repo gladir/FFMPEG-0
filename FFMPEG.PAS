@@ -19537,6 +19537,405 @@ Begin
  FreeMem(Yp,W*Hh); FreeMem(Up,CW*CH); FreeMem(Vp,CW*CH);
 End;
 
+{ ---- msrle, msvideo1, mszh (libavcodec/msrle.c, msrledec.c, msvideo1.c, lcldec.c) : AVI vers image ---- }
+Function MszhDecomp(Src: PEABuffer; SrcLen: LongInt; Dst: PEABuffer; DstSize: LongInt): LongInt;
+Var SP,DP,Mask,MaskBit,Ofs,Cnt,I: LongInt;
+Function SB(At: LongInt): LongInt;Begin If At<SrcLen Then SB:=Src^[At] Else SB:=0; End;
+Begin
+ SP:=0; DP:=0; Mask:=SB(0); SP:=1; MaskBit:=$80;
+ While (SP<SrcLen) And (DP<DstSize) Do Begin
+  If (Mask And MaskBit)=0 Then Begin
+   For I:=0 To 3 Do Dst^[DP+I]:=SB(SP+I);
+   Inc(DP,4); Inc(SP,4);
+  End Else Begin
+   Ofs:=SB(SP)+SB(SP+1)*256; Inc(SP,2);
+   Cnt:=(Ofs Shr 11)+1; Ofs:=Ofs And $7FF;
+   If Ofs>DP Then Ofs:=DP;
+   Cnt:=Cnt*4;
+   If Cnt>DstSize-DP Then Cnt:=DstSize-DP;
+   If Ofs<>0 Then Begin For I:=0 To Cnt-1 Do Dst^[DP+I]:=Dst^[DP+I-Ofs]; End
+   Else FillChar(Dst^[DP],Cnt,0);
+   Inc(DP,Cnt);
+  End;
+  MaskBit:=MaskBit Shr 1;
+  If MaskBit=0 Then Begin
+   Mask:=SB(SP); Inc(SP);
+   While Mask=0 Do Begin
+    If (DstSize-DP<32) Or (SrcLen-SP<32) Then Break;
+    Move(Src^[SP],Dst^[DP],32); Inc(DP,32); Inc(SP,32);
+    Mask:=SB(SP); Inc(SP);
+   End;
+   MaskBit:=$80;
+  End;
+ End;
+ MszhDecomp:=DP;
+End;
+
+{ Kind : 2 msrle, 3 msvideo1, 4 mszh }
+Procedure DecodeMsAVI(Const Source,Target: String; Mode,Kind: LongInt);
+Var
+ F: PEABuffer; Size,Pos,W,H,Bits,Rate,Scale,I,J,K,Cnt,Sz,MoviePos,Fmt,N,RN,RD,Bpp,Stride,OutStride,Row,Q: LongInt;
+ Tag: String[4]; Vids,HaveFmt,InMovie,Ok,HavePic: Boolean; Pal: Array[0..255] Of LongWord; Fcc: String[4];
+ ExOff,ExLen,Comp: LongInt; Fr,Outp,Pk,DecB: PEABuffer; Istride: LongInt; PalSet: Boolean;
+ { mszh }
+ ImgType,Compression,Flags,DecompSize,CW,CH,Len,Enc,Ln,Col,Rw,YRow,CRow,Dl,MtIn,MtOut,PlaneY,PlaneU,PlaneV: LongInt; Planar: Boolean; Encoded: PEABuffer;
+ BlocksW,BlocksH,TotalBlocks,SkipBlocks,BlockY,BlockX,BlockPtr,PixelPtr,SP,PX,PY,A,B,Flg,RowDec: LongInt; Colors: Array[0..7] Of LongInt;
+Function T4(At: LongInt): String;
+Var S4: String[4]; Z: Integer;
+Begin S4:=''; For Z:=0 To 3 Do S4:=S4+Chr(EAByte(F,Size,At+Z)); T4:=S4; End;
+Function PkB(At: LongInt): LongInt;Begin If (At>=0) And (At<Sz) Then PkB:=Pk^[At] Else PkB:=0; End;
+{ msvideo1 : blocs 4x4 }
+Procedure Mv1Decode;
+Var Eight: Boolean; PX,PY,K,BlockY,BlockX: LongInt;
+Procedure Put(Ptr,V: LongInt);
+Begin
+ If Eight Then Fr^[Ptr]:=V Else Begin Fr^[Ptr*2]:=V And 255; Fr^[Ptr*2+1]:=V Shr 8; End;
+End;
+Begin
+ Eight:=Bits=8;
+ SP:=0; SkipBlocks:=0; BlocksW:=W Div 4; BlocksH:=H Div 4; TotalBlocks:=BlocksW*BlocksH;
+ RowDec:=W+4;
+ For BlockY:=BlocksH Downto 1 Do Begin
+  BlockPtr:=(BlockY*4-1)*W;
+  For BlockX:=BlocksW Downto 1 Do Begin
+   If SkipBlocks>0 Then Begin Inc(BlockPtr,4); Dec(SkipBlocks); Dec(TotalBlocks); Continue; End;
+   PixelPtr:=BlockPtr;
+   If SP+2>Sz Then Exit;
+   A:=Pk^[SP]; B:=Pk^[SP+1]; Inc(SP,2);
+   If (A=0) And (B=0) And (TotalBlocks=0) Then Exit
+   Else If (B And $FC)=$84 Then SkipBlocks:=((B-$84) Shl 8)+A-1
+   Else If B<$80 Then Begin
+    Flg:=(B Shl 8) Or A;
+    If Eight Then Begin
+     If SP+2>Sz Then Exit;
+     Colors[0]:=Pk^[SP]; Colors[1]:=Pk^[SP+1]; Inc(SP,2);
+     For PY:=0 To 3 Do Begin
+      For PX:=0 To 3 Do Begin Put(PixelPtr,Colors[(Flg And 1) Xor 1]); Inc(PixelPtr); Flg:=Flg Shr 1; End;
+      Dec(PixelPtr,RowDec);
+     End;
+    End Else Begin
+     If SP+4>Sz Then Exit;
+     Colors[0]:=Pk^[SP]+Pk^[SP+1]*256; Colors[1]:=Pk^[SP+2]+Pk^[SP+3]*256; Inc(SP,4);
+     If (Colors[0] And $8000)<>0 Then Begin
+      If SP+12>Sz Then Exit;
+      For K:=2 To 7 Do Begin Colors[K]:=Pk^[SP]+Pk^[SP+1]*256; Inc(SP,2); End;
+      For PY:=0 To 3 Do Begin
+       For PX:=0 To 3 Do Begin Put(PixelPtr,Colors[((PY And 2) Shl 1)+(PX And 2)+((Flg And 1) Xor 1)]); Inc(PixelPtr); Flg:=Flg Shr 1; End;
+       Dec(PixelPtr,RowDec);
+      End;
+     End Else Begin
+      For PY:=0 To 3 Do Begin
+       For PX:=0 To 3 Do Begin Put(PixelPtr,Colors[(Flg And 1) Xor 1]); Inc(PixelPtr); Flg:=Flg Shr 1; End;
+       Dec(PixelPtr,RowDec);
+      End;
+     End;
+    End;
+   End Else If Eight And (B>=$90) Then Begin
+    Flg:=(B Shl 8) Or A;
+    If SP+8>Sz Then Exit;
+    For K:=0 To 7 Do Colors[K]:=Pk^[SP+K];
+    Inc(SP,8);
+    For PY:=0 To 3 Do Begin
+     For PX:=0 To 3 Do Begin Put(PixelPtr,Colors[((PY And 2) Shl 1)+(PX And 2)+((Flg And 1) Xor 1)]); Inc(PixelPtr); Flg:=Flg Shr 1; End;
+     Dec(PixelPtr,RowDec);
+    End;
+   End Else Begin
+    If Eight Then Colors[0]:=A Else Colors[0]:=(B Shl 8) Or A;
+    For PY:=0 To 3 Do Begin
+     For PX:=0 To 3 Do Begin Put(PixelPtr,Colors[0]); Inc(PixelPtr); End;
+     Dec(PixelPtr,RowDec);
+    End;
+   End;
+   Inc(BlockPtr,4); Dec(TotalBlocks);
+  End;
+ End;
+End;
+Procedure PutY(Row2,Col2,V: LongInt);Begin Outp^[Row2*W+Col2]:=V And 255; End;
+Procedure PutU(Row2,Col2,V: LongInt);Begin Outp^[PlaneU+Row2*CW+Col2]:=V And 255; End;
+Procedure PutV(Row2,Col2,V: LongInt);Begin Outp^[PlaneV+Row2*CW+Col2]:=V And 255; End;
+Function EB(At: LongInt): LongInt;Begin If (At>=0) And (At<Len) Then EB:=Encoded^[At] Else EB:=0; End;
+Begin
+ NVLoad(Source,F,Size);
+ If (T4(0)<>'RIFF') Or (T4(8)<>'AVI ') Then Fail('avi: signature RIFF/AVI requise.');
+ NVVN:=0; NVVD:=0;
+ Pos:=12; Vids:=False; HaveFmt:=False; InMovie:=False; Cnt:=0; Rate:=25; Scale:=1; Fcc:=''; Bits:=0; W:=0; H:=0; ExLen:=0; ExOff:=0; Comp:=0;
+ FillChar(Pal,SizeOf(Pal),0);
+ While (Pos+8<=Size) And Not InMovie And (Cnt<500) Do Begin
+  Tag:=T4(Pos); Sz:=NVRL32(F,Size,Pos+4); Inc(Cnt);
+  If Sz<0 Then Break;
+  If Tag='LIST' Then Begin
+   If T4(Pos+8)='movi' Then Begin InMovie:=True; MoviePos:=Pos+12; End;
+   Inc(Pos,12);
+  End Else Begin
+   If (Tag='strh') And Not HaveFmt Then Begin
+    Vids:=T4(Pos+8)='vids';
+    If Vids Then Begin Scale:=NVRL32(F,Size,Pos+8+20); Rate:=NVRL32(F,Size,Pos+8+24); End;
+   End Else If (Tag='strf') And Vids And Not HaveFmt Then Begin
+    W:=NVRL32(F,Size,Pos+8+4); H:=NVRL32(F,Size,Pos+8+8); Bits:=NVRL16(F,Size,Pos+8+14); Fcc:=T4(Pos+8+16);
+    Comp:=NVRL32(F,Size,Pos+8+16);
+    ExOff:=Pos+8+40; ExLen:=Sz-40; If ExLen<0 Then ExLen:=0;
+    { palette : libavformat/avidec.c prend les dernieres entrees des donnees supplementaires }
+    If (Bits<=8) And (ExLen>0) Then Begin
+     N:=(4 Shl Bits); If N>ExLen Then N:=ExLen;
+     Q:=ExOff+ExLen-N;
+     If (Q-ExOff>=9) And (T4(ExOff+ExLen-9)='Bott') Then Dec(Q,9);
+     For I:=0 To (N Div 4)-1 Do If I<256 Then Pal[I]:=$FF000000 Or LongWord(NVRL32(F,Size,Q+4*I) And $FFFFFF);
+    End;
+    HaveFmt:=True;
+   End;
+   If Tag='vprp' Then Begin NVVD:=NVRL16(F,Size,Pos+8+20); NVVN:=NVRL16(F,Size,Pos+8+22); End;
+   Inc(Pos,8+Sz+(Sz And 1));
+  End;
+ End;
+ If Not InMovie Or Not HaveFmt Then Fail('avi: flux video introuvable.');
+ If H<0 Then H:=-H;
+ If (W<1) Or (H<1) Or (W>8192) Or (H>8192) Then Fail('avi: dimensions incorrectes.');
+ If (Rate<=0) Or (Scale<=0) Then Begin Rate:=25; Scale:=1; End;
+ RN:=Rate; RD:=Scale; NVGcd(RN,RD);
+ Planar:=False; CW:=0; CH:=0; ImgType:=0; Compression:=0; Flags:=0; DecompSize:=0;
+ If Kind=2 Then Begin
+  Case Bits Of 1: Fmt:=10; 4,8: Fmt:=0; 24: Fmt:=1; Else Begin Fail('msrle: profondeur non supportee.'); Exit; End; End;
+ End Else If Kind=3 Then Begin
+  If (W<4) Or (H<4) Then Fail('msvideo1: dimensions >= 4 requises.');
+  If Bits=8 Then Fmt:=0 Else Fmt:=2;
+ End Else Begin
+  If ExLen<8 Then Fail('mszh: donnees supplementaires (extradata) trop courtes.');
+  ImgType:=F^[ExOff+4]; Compression:=ShortInt(F^[ExOff+5]); Flags:=F^[ExOff+6];
+  If (Flags And $F8)<>0 Then Begin End;
+  Fmt:=1; Planar:=True;
+  Case ImgType Of
+   0: Begin DecompSize:=W*H*3; NVSubX:=0; NVSubY:=0; CW:=W; CH:=H; NVYTag:='C444'; End;
+   1: Begin DecompSize:=(W And Not 3)*H*2; NVSubX:=1; NVSubY:=0; CW:=(W+1) Div 2; CH:=H; NVYTag:='C422'; End;
+   2: Begin DecompSize:=((W*3+3) And Not 3)*H; Planar:=False; End;
+   3: Begin DecompSize:=(W And Not 3)*H Div 2*3; NVSubX:=2; NVSubY:=0; CW:=(W+3) Div 4; CH:=H; NVYTag:='C411'; End;
+   4: Begin DecompSize:=W*H*2; NVSubX:=1; NVSubY:=0; CW:=(W+1) Div 2; CH:=H; NVYTag:='C422'; End;
+   5: Begin DecompSize:=W*H Div 2*3; NVSubX:=1; NVSubY:=1; CW:=(W+1) Div 2; CH:=(H+1) Div 2; NVYTag:='C420jpeg'; End;
+   Else Begin Fail('mszh: type d''image non pris en charge.'); Exit; End;
+  End;
+  If Planar Then Begin
+   If ((ImgType=0) Or (ImgType=2) Or (ImgType=4) Or (ImgType=5)) And Odd(W) And (ImgType<>0) Then Fail('mszh: dimensions non supportees.');
+   If ((ImgType=4) Or (ImgType=5)) And Odd(W) Then Fail('mszh: dimensions non supportees.');
+   If (ImgType=5) And Odd(H) Then Fail('mszh: dimensions non supportees.');
+   Fmt:=7;
+  End;
+  If Compression=1 Then DecompSize:=0
+  Else If Compression<>0 Then Fail('mszh: methode de compression non prise en charge.');
+ End;
+ NVBegin(Mode,Target,W,H,Fmt,RN,RD); NVAviSar(W,H);
+ If Fmt=7 Then Begin NVCW:=CW; NVCH:=CH; End;
+ If Fmt=1 Then NVYC:=False;
+ Bpp:=NVBpp(Fmt); If Fmt=7 Then Bpp:=1;
+ OutStride:=W*Bpp;
+ If Kind=2 Then Begin
+  If Bits=1 Then Stride:=0 Else If Bits=24 Then Stride:=((W*3+31) Div 32)*32 Else Stride:=((W+31) Div 32)*32;
+  Istride:=((W*Bits+31) Div 32)*4;
+  GetMem(Fr,Stride*H+Istride*2+64); FillChar(Fr^,Stride*H+Istride*2+64,0);
+ End Else Begin Stride:=W*Bpp; Fr:=Nil; End;
+ If Kind=3 Then Begin GetMem(Fr,W*Bpp*H+64); FillChar(Fr^,W*Bpp*H+64,0); End;
+ If Fmt=7 Then Begin
+  PlaneU:=W*H; PlaneV:=W*H+CW*CH;
+  GetMem(Outp,W*H+2*CW*CH+64); FillChar(Outp^,W*H+2*CW*CH+64,0);
+  GetMem(DecB,DecompSize+256);
+ End Else Begin
+  GetMem(Outp,W*H*Bpp+64); FillChar(Outp^,W*H*Bpp+64,0);
+  If Kind=4 Then Begin GetMem(DecB,DecompSize+256); End Else DecB:=Nil;
+ End;
+ For I:=0 To 255 Do Begin NVPalR[I]:=(Pal[I] Shr 16) And 255; NVPalG[I]:=(Pal[I] Shr 8) And 255; NVPalB[I]:=Pal[I] And 255; End;
+ Pos:=MoviePos; HavePic:=False;
+ While Pos+8<=Size Do Begin
+  Tag:=T4(Pos); Sz:=NVRL32(F,Size,Pos+4);
+  If Sz<0 Then Break;
+  If Tag='LIST' Then Begin Inc(Pos,12); Continue; End;
+  If Pos+8+Sz>Size Then Sz:=Size-Pos-8;
+  If (Tag[1]='0') And (Tag[2]='0') And (Tag[3]='p') And (Tag[4]='c') And (Kind<>4) And (Bits<=8) Then Begin
+   K:=F^[Pos+8]; N:=F^[Pos+9]; If N=0 Then N:=256;
+   For I:=0 To N-1 Do If (K+I<256) And (4+4*I+3<Sz) Then Begin
+    NVPalR[K+I]:=F^[Pos+8+4+4*I]; NVPalG[K+I]:=F^[Pos+8+4+4*I+1]; NVPalB[K+I]:=F^[Pos+8+4+4*I+2];
+   End;
+  End Else If (Tag[1]='0') And (Tag[2]='0') And ((Tag[3]='d') Or (Tag[3]='w')) And ((Tag[4]='c') Or (Tag[4]='b')) Then Begin
+   Pk:=PEABuffer(@F^[Pos+8]); Ok:=False;
+   If Kind=2 Then Begin
+    If Sz>=2 Then Begin
+     If H*Istride=Sz Then Begin
+      { image non compressee, de bas en haut }
+      For Row:=0 To H-1 Do Begin
+       Q:=(H-1-Row)*Istride;
+       If Bits=4 Then Begin
+        For J:=0 To W-1 Do Begin
+         If Odd(J) Then Fr^[Row*Stride+J]:=Pk^[Q+(J Shr 1)] And 15 Else Fr^[Row*Stride+J]:=Pk^[Q+(J Shr 1)] Shr 4;
+        End;
+       End Else If Bits=1 Then Begin
+        For J:=0 To W-1 Do Outp^[Row*W+J]:=((Pk^[Q+(J Shr 3)] Shr (7-(J And 7))) And 1)*255;
+       End Else Move(Pk^[Q],Fr^[Row*Stride],W*Bpp);
+      End;
+      Ok:=True;
+     End Else If Bits<>1 Then Begin
+      Case Bits Of 4: NVRLE(Fr,Stride,W,H,4,Pk,Sz); 8: NVRLE(Fr,Stride,W,H,8,Pk,Sz); Else NVRLE(Fr,Stride,W,H,24,Pk,Sz); End;
+      Ok:=True;
+     End;
+     If Ok And (Bits<>1) Then For Row:=0 To H-1 Do Move(Fr^[Row*Stride],Outp^[Row*OutStride],OutStride);
+    End;
+   End Else If Kind=3 Then Begin
+    If Sz>=(W Div 4)*(H Div 4) Div 512 Then Begin
+     Mv1Decode; Ok:=True;
+     Move(Fr^,Outp^,W*H*Bpp);
+    End;
+   End Else Begin
+    { mszh }
+    Encoded:=Pk; Len:=Sz;
+    If Compression=0 Then Begin
+     If ((ImgType=2) And (Len=((W*3+3) And Not 3)*H)) Or ((ImgType=0) And (Len=W*H*3)) Then Ok:=True
+     Else If (Flags And 1)<>0 Then Begin
+      If Len>=8 Then Begin
+       MtIn:=NVRL32(F,Size,Pos+8); MtOut:=NVRL32(F,Size,Pos+12);
+       If (MtIn>=0) And (Len-8>=MtIn) Then Begin
+        If MtOut>DecompSize Then MtOut:=DecompSize;
+        Dl:=MszhDecomp(PEABuffer(@Pk^[8]),MtIn,DecB,DecompSize);
+        If Dl=MtOut Then Begin
+         Dl:=MszhDecomp(PEABuffer(@Pk^[8+MtIn]),Len-8-MtIn,PEABuffer(@DecB^[MtOut]),DecompSize-MtOut);
+         If Dl=MtOut Then Begin Encoded:=DecB; Len:=DecompSize; Ok:=True; End;
+        End;
+       End;
+      End;
+     End Else Begin
+      Dl:=MszhDecomp(Pk,Len,DecB,DecompSize);
+      If (Dl=DecompSize) Or (Dl=DecompSize-2) Then Begin Encoded:=DecB; Len:=Dl; Ok:=True; End;
+     End;
+    End Else Begin
+     Case ImgType Of 0,2: Q:=6; 1,4: Q:=4; Else Q:=3; End;
+     N:=W; If (ImgType=1) Or (ImgType=3) Then N:=W And Not 3;
+     Ok:=Len>=((N*H*Q) Shr 1);
+    End;
+    If Ok Then Begin
+     Case ImgType Of
+      0: Begin
+       Enc:=0;
+       For Rw:=0 To H-1 Do Begin
+        YRow:=H-1-Rw;
+        For Col:=0 To W-1 Do Begin PutY(YRow,Col,EB(Enc)); PutU(YRow,Col,EB(Enc+1)+128); PutV(YRow,Col,EB(Enc+2)+128); Inc(Enc,3); End;
+       End;
+      End;
+      1: Begin
+       Enc:=0;
+       For Rw:=0 To H-1 Do Begin
+        YRow:=H-1-Rw; Col:=0;
+        While Col<W-3 Do Begin
+         For K:=0 To 3 Do PutY(YRow,Col+K,EB(Enc+K));
+         Inc(Enc,4);
+         PutU(YRow,Col Shr 1,EB(Enc)+128); PutU(YRow,(Col Shr 1)+1,EB(Enc+1)+128);
+         PutV(YRow,Col Shr 1,EB(Enc+2)+128); PutV(YRow,(Col Shr 1)+1,EB(Enc+3)+128);
+         Inc(Enc,4); Inc(Col,4);
+        End;
+        If (Col<>0) And (Col<W) Then Begin
+         PutU(YRow,Col Shr 1,Outp^[PlaneU+YRow*CW+(Col Shr 1)-1]); PutV(YRow,Col Shr 1,Outp^[PlaneV+YRow*CW+(Col Shr 1)-1]);
+        End;
+       End;
+      End;
+      2: Begin
+       If Len<((W*3+3) And Not 3)*H Then Ln:=3*W Else Ln:=(3*W+3) And Not 3;
+       Enc:=0;
+       For Rw:=H-1 Downto 0 Do Begin
+        For K:=0 To 3*W-1 Do Outp^[Rw*3*W+K]:=EB(Enc+K);
+        Inc(Enc,Ln);
+       End;
+      End;
+      3: Begin
+       Enc:=0;
+       For Rw:=0 To H-1 Do Begin
+        YRow:=H-1-Rw; Col:=0;
+        While Col<W-3 Do Begin
+         For K:=0 To 3 Do PutY(YRow,Col+K,EB(Enc+K));
+         Inc(Enc,4);
+         PutU(YRow,Col Shr 2,EB(Enc)+128); PutV(YRow,Col Shr 2,EB(Enc+1)+128);
+         Inc(Enc,2); Inc(Col,4);
+        End;
+        If (Col<>0) And (Col<W) Then Begin
+         PutU(YRow,Col Shr 2,Outp^[PlaneU+YRow*CW+(Col Shr 2)-1]); PutV(YRow,Col Shr 2,Outp^[PlaneV+YRow*CW+(Col Shr 2)-1]);
+        End;
+       End;
+      End;
+      4: Begin
+       Enc:=0;
+       For Rw:=0 To H-1 Do Begin
+        YRow:=H-1-Rw; Col:=0;
+        While Col<W-1 Do Begin
+         PutY(YRow,Col,EB(Enc)); PutY(YRow,Col+1,EB(Enc+1)); Inc(Enc,2);
+         PutU(YRow,Col Shr 1,EB(Enc)+128); PutV(YRow,Col Shr 1,EB(Enc+1)+128); Inc(Enc,2);
+         Inc(Col,2);
+        End;
+       End;
+      End;
+      5: Begin
+       Enc:=0; YRow:=H-1; CRow:=(H Shr 1)-1; Rw:=0;
+       While Rw<H-1 Do Begin
+        Col:=0;
+        While Col<W-1 Do Begin
+         PutY(YRow,Col,EB(Enc)); PutY(YRow,Col+1,EB(Enc+1)); PutY(YRow-1,Col,EB(Enc+2)); PutY(YRow-1,Col+1,EB(Enc+3));
+         PutU(CRow,Col Shr 1,EB(Enc+4)+128); PutV(CRow,Col Shr 1,EB(Enc+5)+128);
+         Inc(Enc,6); Inc(Col,2);
+        End;
+        Dec(YRow,2); Dec(CRow); Inc(Rw,2);
+       End;
+      End;
+     End;
+    End;
+   End;
+   If Ok Then Begin
+    NVEmit(Outp); HavePic:=True;
+   End Else NVRepeat;
+   If NVDone Then Break;
+  End;
+  Inc(Pos,8+Sz+(Sz And 1));
+ End;
+ FreeMem(Outp,W*H*Bpp+64); FreeMem(F,Size+64);
+ If Kind=2 Then NVFinish('msrle') Else If Kind=3 Then NVFinish('msvideo1') Else NVFinish('mszh');
+End;
+
+{ classification AVI : 2 msrle, 3 msvideo1, 4 mszh, 0 autre (poignee strh ou compression strf) }
+Function MsAviKind(Const Name: String): LongInt;
+Var H: Array[0..63] Of Byte; Limit,Pos,Size,Count,K: LongInt; Handler,Compr: String[4]; Found: Boolean; Tag: String[4];
+Function T4: String;
+Var S4: String[4]; J: Integer;
+Begin S4:=''; For J:=0 To 3 Do S4:=S4+Chr(H[J]); T4:=S4; End;
+Function Cls(Const S: String): LongInt;
+Begin
+ Cls:=0;
+ If (S='mrle') Or (S='WRLE') Or (S=#1#0#0#0) Or (S=#2#0#0#0) Then Cls:=2
+ Else If (S='MSVC') Or (S='msvc') Or (S='CRAM') Or (S='cram') Or (S='WHAM') Or (S='wham') Then Cls:=3
+ Else If S='MSZH' Then Cls:=4;
+End;
+Begin
+ MsAviKind:=0; Handler:=''; Compr:=''; Found:=False;
+ OpenRead(Name); Limit:=InputSize;
+ If Limit>=12 Then Begin
+  ReadAt(0,H,12);
+  If (T4='RIFF') And (H[8]=65) And (H[9]=86) And (H[10]=73) And (H[11]=32) Then Begin
+   Pos:=12; Count:=0;
+   While (Limit-Pos>=8) And (Count<200) And Not Found Do Begin
+    ReadAt(Pos,H,8); Tag:=T4; Inc(Count);
+    Size:=LongInt(H[4])+LongInt(H[5])*256+LongInt(H[6])*65536+LongInt(H[7])*16777216;
+    If H[7]>=128 Then Break;
+    If Tag='LIST' Then Begin
+     ReadAt(Pos+8,H,4);
+     If (H[0]=109) And (H[1]=111) And (H[2]=118) And (H[3]=105) Then Break;
+     Inc(Pos,12);
+    End Else Begin
+     If (Tag='strh') And (Size>=8) And (Limit-Pos>=24) Then Begin
+      ReadAt(Pos+8,H,8);
+      If (H[0]=118) And (H[1]=105) And (H[2]=100) And (H[3]=115) Then Handler:=Chr(H[4])+Chr(H[5])+Chr(H[6])+Chr(H[7]);
+     End;
+     If (Tag='strf') And (Handler<>'') And (Size>=20) And (Limit-Pos>=28) Then Begin
+      ReadAt(Pos+8+16,H,4); Compr:=T4; Found:=True;
+     End;
+     Inc(Pos,8+Size+(Size And 1));
+    End;
+   End;
+  End;
+ End;
+ CloseRead;
+ If Found Then Begin K:=Cls(Compr); If K=0 Then K:=Cls(Handler); MsAviKind:=K; End;
+End;
+
 { Kind: 1 bethsoftvid, 2 bfi, 3 c93, 4 bmp, 5 camstudio (AVI CSCD), 6 camtasia (AVI tscc); Mode: 0 Y4M, 1 PNG, 2 BMP, 3 audio }
 Procedure DecodeNV(Kind: LongInt; Const Source,Target: String; Mode: LongInt);
 Begin
@@ -21296,6 +21695,7 @@ End;
 
 Procedure DecodeNV2(Kind: LongInt; Const Source,Target: String; Mode: LongInt);
 Begin
+ If (Kind>=51) And (Kind<=53) Then Begin DecodeMsAVI(Source,Target,Mode,Kind-49); Exit; End;
  If Kind=50 Then Begin DecodePNM(Source,Target,Mode); Exit; End;
  If Kind=12 Then DecodeCAVS(Source,Target,Mode)
  Else If Kind=13 Then DecodeDV(Source,Target,Mode,False)
@@ -66263,6 +66663,9 @@ BEGIN
    WriteLn('DEA    pcm_u32le       PCM unsigned 32-bit little-endian');
    WriteLn('DEA    pcm_u8          PCM unsigned 8-bit');
    WriteLn('DEA    pcm_zork        PCM Zork');
+   WriteLn('D V D  msrle           Microsoft RLE (AVI; 1, 4, 8 et 24 bits)');
+   WriteLn('D V D  msvideo1        Microsoft Video 1 (AVI; 8 bits palette et 16 bits RGB555)');
+   WriteLn('D V D  mszh            LCL (LossLess Codec Library) MSZH (AVI; tous les types d''image LCL)');
    WriteLn('DEV    pam             PAM (Portable AnyMap) image (decodeur P7 8/16 bits; encodeur RGB24 depuis Y4M, -frames:v 1)');
    WriteLn('DEV    pbm             PBM (Portable BitMap) image (decodeur P1/P4; encodeur monow depuis Y4M, largeur >= 8)');
    WriteLn(' EV    png             PNG (RGB24, sans compression)');
@@ -66555,6 +66958,7 @@ BEGIN
   Else If (AsvTag='CLJR') Or (AsvTag='cljr') Then NVKind:=7 Else If (AsvTag='cyuv') Or (AsvTag='CYUV') Then NVKind:=8
   Else If (AsvTag='cvid') Or (AsvTag='CVID') Then NVKind:=9 Else If (AsvTag='AVdn') Or (AsvTag='AVDN') Or (AsvTag='AVdh') Then NVKind:=11
   Else If (AsvTag='dvsd') Or (AsvTag='DVSD') Or (AsvTag='dvcs') Or (AsvTag='DVCS') Or (AsvTag='dv25') Or (AsvTag='dvsl') Or (AsvTag='DVSL') Or (AsvTag='dv50') Or (AsvTag='dvc ') Or (AsvTag='cdvc') Or (AsvTag='CDVC') Or (AsvTag='dvcp') Or (AsvTag='dvpp') Then NVKind:=14
+  Else If MsAviKind(Intermediate)>=2 Then NVKind:=MsAviKind(Intermediate)+49
   Else If AsvTag='FSV1' Then NVKind:=18
   Else If (AsvTag='HFYU') Or (AsvTag='FFVH') Or (AsvTag='hfyu') Then NVKind:=20
   Else If AsvTag='FFV1' Then NVKind:=21
