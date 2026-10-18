@@ -55871,6 +55871,293 @@ Begin
  CloseRead; If NVOpened Then CloseWrite;
 End;
 
+{ ---- Encodeur MS-MPEG4 v1/v2/v3 : images I seules, qscale fixe (-q:v), Y4M 4:2:0 vers AVI MP41/MP42/MP43 ---- }
+Var
+ MEOut: PEABuffer; MEBit: LongInt;
+
+Procedure MEPut(N: LongInt; V: Int64);
+Var K: LongInt;
+Begin
+ For K:=N-1 DownTo 0 Do Begin
+  If ((V Shr K) And 1)<>0 Then MEOut^[MEBit Shr 3]:=MEOut^[MEBit Shr 3] Or (128 Shr (MEBit And 7));
+  Inc(MEBit);
+ End;
+End;
+
+Procedure MEPutVlc(Var T: TH3Vlc; Sym: LongInt);
+Var I: LongInt;
+Begin
+ For I:=0 To (LongInt(1) Shl T.Bits)-1 Do
+  If (T.Sym[I]=Sym) And (T.Len[I]>0) Then Begin MEPut(T.Len[I],I Shr (T.Bits-T.Len[I])); Exit; End;
+ Fail('msmpeg4: symbole VLC absent de la table.');
+End;
+
+Procedure MEPutDc2(Level: LongInt; Chroma: Boolean);
+Var Size,V,L,UC,UL: LongInt;
+Begin
+ Size:=0; V:=Abs(Level);
+ While V<>0 Do Begin V:=V Shr 1; Inc(Size); End;
+ If Level<0 Then L:=(-Level) Xor ((1 Shl Size)-1) Else L:=Level;
+ If Chroma Then Begin UC:=M4DcChr[Size*2]; UL:=M4DcChr[Size*2+1]; End
+ Else Begin UC:=M4DcLum[Size*2]; UL:=M4DcLum[Size*2+1]; End;
+ UC:=UC Xor ((1 Shl UL)-1);
+ If Size>0 Then Begin
+  UC:=(UC Shl Size) Or L; Inc(UL,Size);
+  If Size>8 Then Begin UC:=(UC Shl 1) Or 1; Inc(UL); End;
+ End;
+ MEPut(UL,UC);
+End;
+
+Procedure MEPutCoef(Rl: PM4Rl; Last,Run,Lev: LongInt);
+Var K,Found: LongInt;
+Begin
+ Found:=-1;
+ For K:=0 To Rl^.N-1 Do
+  If (Rl^.Run[K]=Run) And (Rl^.Lev[K]=Abs(Lev)) And ((K>=Rl^.Last)=(Last<>0)) Then Begin Found:=K; Break; End;
+ If Found>=0 Then Begin
+  MEPutVlc(Rl^.Vlc,Found); MEPut(1,Ord(Lev<0));
+ End Else Begin
+  MEPutVlc(Rl^.Vlc,Rl^.N);
+  If M4Ms<>1 Then MEPut(2,0);
+  MEPut(1,Last); MEPut(6,Run); MEPut(8,Lev And 255);
+ End;
+End;
+
+Procedure MEDct(Var B: Array Of Double);
+Var T: Array[0..63] Of Double; R,C,K: LongInt; S,Sc: Double;
+Begin
+ For R:=0 To 7 Do For K:=0 To 7 Do Begin
+  S:=0;
+  For C:=0 To 7 Do S:=S+B[R*8+C]*Cos((2*C+1)*K*Pi/16);
+  If K=0 Then Sc:=Sqrt(0.125) Else Sc:=0.5;
+  T[R*8+K]:=S*Sc;
+ End;
+ For C:=0 To 7 Do For K:=0 To 7 Do Begin
+  S:=0;
+  For R:=0 To 7 Do S:=S+T[R*8+C]*Cos((2*R+1)*K*Pi/16);
+  If K=0 Then Sc:=Sqrt(0.125) Else Sc:=0.5;
+  B[K*8+C]:=S*Sc;
+ End;
+End;
+
+Procedure EncodeMSMPEG4(Const Source,Target: String; Ver,Qv: LongInt);
+Var
+ F: PEABuffer; Size,Cur,W,Hh,FN,FD,CW,CH,K,Code,Frames,FrameBytes,MbW,MbH,MX,MY,N,I,PW,PH,Fix,Q: LongInt;
+ Line,Token: String; Py,Pu,Pv,Pk: PEABuffer; PkSize: LongInt;
+ Sizes: PALLong; OutPos,Used: LongInt; Out: Array[0..255] Of Byte;
+ Blk: Array[0..5,0..63] Of Double; Lev: Array[0..5,0..63] Of LongInt; DcL: Array[0..5] Of LongInt; Coded: Array[0..5] Of LongInt;
+ Cbp,Sym,Pred,Ix,Dir,Diff,Last,Prev,Run,Pl,Scale,Qmul,Qadd,Cd: LongInt; Rl: PM4Rl; D: Double; Plane: PEABuffer; Stride,X0,Y0,A,C: LongInt;
+Procedure PutB(X: LongInt);Begin Out[Used]:=X And 255; Inc(Used); Inc(OutPos); If Used>=250 Then Begin WriteBytes(Out,Used); Used:=0; End; End;
+Procedure PutL16(X: LongInt);Begin PutB(X); PutB(X Shr 8); End;
+Procedure PutL32(X: LongInt);Begin PutL16(X); PutL16(X Shr 16); End;
+Procedure PutTag(Const T: String);
+Var Z: Integer;
+Begin For Z:=1 To 4 Do PutB(Ord(T[Z])); End;
+Procedure Flush;Begin If Used>0 Then Begin WriteBytes(Out,Used); Used:=0; End; End;
+Procedure Patch32(At,Value: LongInt);
+Var Z: Integer; Code2: Integer; B4: Array[0..3] Of Byte;
+Begin
+ Flush;
+ {$I-}Seek(ActiveOutput,At); Code2:=IOResult;{$I+}
+ If Code2<>0 Then Fail('msmpeg4: positionnement AVI impossible.');
+ For Z:=0 To 3 Do Begin B4[Z]:=Value And 255; Value:=Value Shr 8; End;
+ WriteBytes(B4,4);
+End;
+Function ReadLine: String;
+Var R: String;
+Begin
+ R:='';
+ While Cur<Size Do Begin
+  If F^[Cur]=10 Then Begin Inc(Cur); Break; End;
+  If Length(R)<250 Then R:=R+Chr(F^[Cur]);
+  Inc(Cur);
+ End;
+ ReadLine:=R;
+End;
+Function PlaneAt(P: PEABuffer; Stride2,AW,AH,PX,PY: LongInt): LongInt;
+Begin
+ If PX>=AW Then PX:=AW-1; If PY>=AH Then PY:=AH-1;
+ PlaneAt:=P^[PY*Stride2+PX];
+End;
+Begin
+ If (Ver<1) Or (Ver>3) Then Fail('msmpeg4: version 1..3 requise.');
+ NVLoad(Source,F,Size); Cur:=0;
+ Line:=ReadLine;
+ If Copy(Line,1,9)<>'YUV4MPEG2' Then Fail('msmpeg4: entree Y4M requise.');
+ W:=0; Hh:=0; FN:=25; FD:=1;
+ Line:=Copy(Line,11,255);
+ While Line<>'' Do Begin
+  K:=Pos(' ',Line); If K=0 Then K:=Length(Line)+1;
+  Token:=Copy(Line,1,K-1); Line:=Copy(Line,K+1,255);
+  If Token='' Then Continue;
+  Case Token[1] Of
+   'W': Val(Copy(Token,2,20),W,Code);
+   'H': Val(Copy(Token,2,20),Hh,Code);
+   'F': Begin K:=Pos(':',Token); If K>0 Then Begin Val(Copy(Token,2,K-2),FN,Code); Val(Copy(Token,K+1,20),FD,Code); End; End;
+   'C': If (Token<>'C420') And (Token<>'C420jpeg') And (Token<>'C420mpeg2') And (Token<>'C420paldv') Then Fail('msmpeg4: Y4M YUV420 8 bits requis.');
+   'I': If Token<>'Ip' Then Fail('msmpeg4: video progressive requise.');
+  End;
+ End;
+ If (W<2) Or (Hh<2) Or (W>4096) Or (Hh>4096) Then Fail('msmpeg4: dimensions Y4M incorrectes.');
+ If (FN<=0) Or (FD<=0) Then Begin FN:=25; FD:=1; End;
+ Q:=Qv; If Q<0 Then Q:=6; If Q<1 Then Q:=1; If Q>31 Then Q:=31;
+ CW:=(W+1) Div 2; CH:=(Hh+1) Div 2; FrameBytes:=W*Hh+2*CW*CH;
+ MbW:=(W+15) Div 16; MbH:=(Hh+15) Div 16;
+ If (Ver=1) And (MbH>31) Then Fail('msmpeg4v1: hauteur limitee a 496 lignes.');
+ PW:=MbW*16; PH:=MbH*16;
+ GetMem(Py,PW*PH); GetMem(Pu,PW*PH Div 4); GetMem(Pv,PW*PH Div 4);
+ PkSize:=MbW*MbH*2048+4096; GetMem(Pk,PkSize); GetMem(Sizes,1048576*4);
+ M4Reset; M4Ms:=Ver; M4W:=W; M4H:=Hh; M4MsInitTables; M4Alloc;
+ For K:=0 To 31 Do Begin
+  If Ver=3 Then Begin M4YDcT[K]:=MSYDcOld[K]; M4CDcT[K]:=MSCDcW[K]; End Else Begin M4YDcT[K]:=8; M4CDcT[K]:=8; End;
+ End;
+ M4SetQscale(Q);
+ GetMem(M4CodedBlk,M4DcN[0]+16);
+ Qmul:=2*Q; Qadd:=(Q-1) Or 1;
+ Frames:=0; OutPos:=0; Used:=0;
+ OpenWrite(Target);
+ PutTag('RIFF'); PutL32(0); PutTag('AVI '); PutTag('LIST'); PutL32(192); PutTag('hdrl');
+ PutTag('avih'); PutL32(56); PutL32(Round(1000000.0*FD/FN)); PutL32(0); PutL32(0); PutL32($10); PutL32(0); PutL32(0); PutL32(1);
+ PutL32(PkSize); PutL32(W); PutL32(Hh); PutL32(0); PutL32(0); PutL32(0); PutL32(0);
+ PutTag('LIST'); PutL32(116); PutTag('strl');
+ PutTag('strh'); PutL32(56); PutTag('vids');
+ PutTag('MP4'+Chr(48+Ver));
+ PutL32(0); PutL16(0); PutL16(0); PutL32(0); PutL32(FD); PutL32(FN); PutL32(0); PutL32(0); PutL32(PkSize); PutL32(-1); PutL32(0);
+ PutL16(0); PutL16(0); PutL16(W); PutL16(Hh);
+ PutTag('strf'); PutL32(40); PutL32(40); PutL32(W); PutL32(Hh); PutL16(1); PutL16(24);
+ PutTag('MP4'+Chr(48+Ver));
+ PutL32(W*Hh*3); PutL32(0); PutL32(0); PutL32(0); PutL32(0);
+ PutTag('LIST'); PutL32(0); PutTag('movi'); Flush;
+ While Cur<Size Do Begin
+  Line:=ReadLine;
+  If Copy(Line,1,5)<>'FRAME' Then Fail('msmpeg4: marqueur FRAME requis.');
+  If FrameBytes>Size-Cur Then Break;
+  { plans completes a taille de macrobloc (bords replies) }
+  For A:=0 To PH-1 Do For C:=0 To PW-1 Do Py^[A*PW+C]:=PlaneAt(@F^[Cur],W,W,Hh,C,A);
+  For A:=0 To PH Div 2-1 Do For C:=0 To PW Div 2-1 Do Begin
+   Pu^[A*(PW Div 2)+C]:=PlaneAt(@F^[Cur+W*Hh],CW,CW,CH,C,A);
+   Pv^[A*(PW Div 2)+C]:=PlaneAt(@F^[Cur+W*Hh+CW*CH],CW,CW,CH,C,A);
+  End;
+  Inc(Cur,FrameBytes);
+  MEOut:=Pk; MEBit:=0; FillChar(Pk^,PkSize,0);
+  If Ver=1 Then Begin MEPut(16,0); MEPut(16,$100); MEPut(5,Frames And 31); End;
+  MEPut(2,0); MEPut(5,Q);
+  If Ver=1 Then MEPut(5,MbH) Else MEPut(5,$17);
+  If Ver=3 Then Begin MEPut(2,3); MEPut(2,3); MEPut(1,0); End;
+  M4RlIdx:=2; M4RlChrIdx:=2; M4DcIdx:=0;
+  For K:=0 To M4DcN[0]+15 Do M4CodedBlk^[K]:=0;
+  For I:=0 To 2 Do For K:=0 To M4DcN[I]-1 Do M4Dc[I]^[K]:=1024;
+  M4FirstLine:=1;
+  For MY:=0 To MbH-1 Do Begin
+   M4MbY:=MY;
+   If Ver=1 Then Begin M4LastDc[0]:=128; M4LastDc[1]:=128; M4LastDc[2]:=128; End;
+   For MX:=0 To MbW-1 Do Begin
+    M4MbX:=MX;
+    If MY>=1 Then M4FirstLine:=0;
+    { blocs : pixels -> DCT -> quantification }
+    For N:=0 To 5 Do Begin
+     If N<4 Then Begin Plane:=Py; Stride:=PW; X0:=MX*16+(N And 1)*8; Y0:=MY*16+(N Shr 1)*8; Scale:=M4YDc; End
+     Else Begin
+      If N=4 Then Plane:=Pu Else Plane:=Pv;
+      Stride:=PW Div 2; X0:=MX*8; Y0:=MY*8; Scale:=M4CDc;
+     End;
+     For A:=0 To 7 Do For C:=0 To 7 Do Blk[N,A*8+C]:=Plane^[(Y0+A)*Stride+X0+C];
+     MEDct(Blk[N]);
+     DcL[N]:=Round(Blk[N,0]/Scale);
+     If DcL[N]<0 Then DcL[N]:=0; If DcL[N]>255 Then DcL[N]:=255;
+     Coded[N]:=0;
+     For I:=1 To 63 Do Begin
+      D:=Blk[N,H3Zigzag[I]];
+      Cd:=Trunc((Abs(D)-Qadd)/Qmul+0.5);
+      If Cd<0 Then Cd:=0; If Cd>127 Then Cd:=127;
+      If D<0 Then Cd:=-Cd;
+      Lev[N,I]:=Cd;
+      If Cd<>0 Then Coded[N]:=1;
+     End;
+    End;
+    Cbp:=0;
+    For N:=0 To 5 Do Cbp:=Cbp Or (Coded[N] Shl (5-N));
+    { en-tete de macrobloc }
+    If Ver=3 Then Begin
+     Sym:=0;
+     For N:=0 To 5 Do Begin
+      Cd:=Coded[N];
+      If N<4 Then Begin
+       Pred:=M4MsCodedPred(N,Ix);
+       M4CodedBlk^[Ix]:=Cd;
+       Cd:=Cd Xor Pred;
+      End;
+      Sym:=Sym Or (Cd Shl (5-N));
+     End;
+     MEPut(MSMbI[Sym*2+1],MSMbI[Sym*2]);
+     MEPut(1,0);
+    End Else If Ver=2 Then Begin
+     MEPut(MSV2IntraCbpc[(Cbp And 3)*2+1],MSV2IntraCbpc[(Cbp And 3)*2]);
+     MEPut(1,0);
+     MEPutVlc(H3VCbpy,(Cbp Shr 2) And 15);
+    End Else Begin
+     MEPutVlc(H3VIntra,Cbp And 3);
+     MEPutVlc(H3VCbpy,(Cbp Shr 2) And 15);
+    End;
+    { blocs }
+    For N:=0 To 5 Do Begin
+     If N<4 Then Begin Pl:=0; Scale:=M4YDc; End Else Begin Pl:=N-3; Scale:=M4CDc; End;
+     If Ver=1 Then Begin
+      Pred:=M4LastDc[Pl]; Diff:=DcL[N]-Pred; M4LastDc[Pl]:=DcL[N];
+     End Else Begin
+      Pred:=M4MsPredDc(N,Ix,Dir);
+      Diff:=DcL[N]-Pred;
+      M4Dc[Pl]^[Ix]:=SmallInt(DcL[N]*Scale);
+     End;
+     If Ver<=2 Then MEPutDc2(Diff,N>=4)
+     Else Begin
+      Sym:=Abs(Diff); If Sym>119 Then Sym:=119;
+      If N<4 Then MEPut(MSDc0Lum[Sym*2+1],MSDc0Lum[Sym*2]) Else MEPut(MSDc0Chr[Sym*2+1],MSDc0Chr[Sym*2]);
+      If Sym=119 Then Begin MEPut(8,Abs(Diff)); MEPut(1,Ord(Diff<0)); End
+      Else If Sym<>0 Then MEPut(1,Ord(Diff<0));
+     End;
+     If Coded[N]<>0 Then Begin
+      If N<4 Then Rl:=M4MsRl[2] Else Rl:=M4MsRl[5];
+      Last:=63; While Lev[N,Last]=0 Do Dec(Last);
+      Prev:=0;
+      For I:=1 To Last Do If Lev[N,I]<>0 Then Begin
+       Run:=I-Prev-1;
+       MEPutCoef(Rl,Ord(I=Last),Run,Lev[N,I]);
+       Prev:=I;
+      End;
+     End;
+    End;
+   End;
+  End;
+  { en-tete etendu : cadence, debit, arrondi }
+  MEPut(5,30); MEPut(11,0);
+  If Ver=3 Then MEPut(1,0);
+  K:=(MEBit+7) Div 8;
+  If K>=PkSize-4 Then Fail('msmpeg4: tampon de sortie insuffisant.');
+  Sizes^[Frames]:=K;
+  PutTag('00dc'); PutL32(K); Flush;
+  I:=0;
+  While I<K Do Begin
+   If K-I>32768 Then A:=32768 Else A:=K-I;
+   WriteBytes(Pk^[I],A); Inc(I,A);
+  End;
+  Inc(OutPos,K);
+  If Odd(K) Then Begin PutB(0); End;
+  Inc(Frames);
+  If Frames>=1048576 Then Break;
+ End;
+ If Frames=0 Then Fail('msmpeg4: aucune image Y4M.');
+ Fix:=OutPos;
+ PutTag('idx1'); PutL32(16*Frames); K:=4;
+ For I:=0 To Frames-1 Do Begin
+  PutTag('00dc'); PutL32($10); PutL32(K); PutL32(Sizes^[I]); Inc(K,8+Sizes^[I]+(Sizes^[I] And 1));
+ End;
+ Flush;
+ Patch32(4,OutPos-8); Patch32(216,Fix-220); Patch32(48,Frames); Patch32(140,Frames);
+ FreeMem(Py,PW*PH); FreeMem(Pu,PW*PH Div 4); FreeMem(Pv,PW*PH Div 4); FreeMem(Pk,PkSize); FreeMem(Sizes,1048576*4);
+ CloseRead; CloseWrite;
+End;
+
 { decodage d un flux elementaire MPEG-4 : decoupage en paquets (mpeg4video_parser.c) }
 Procedure DecodeMPEG4(Const Source,Target: String; Mode: LongInt);
 Var
@@ -64965,6 +65252,9 @@ BEGIN
    WriteLn('DEVSDT mpeg1video      MPEG-1 video (decodeur I/P/B; encodeur I/B)');
    WriteLn('DEVSDT mpeg2video      MPEG-2 video (decodeur I/P/B, trames et champs, 4:2:0/4:2:2/4:4:4; encodeur progressif I/B)');
    WriteLn('DEVSDT mpeg4           MPEG-4 part 2 (decodeur I/P/B, qpel, 4MV, entrelace, partitions de donnees; encodeur Y4M I/P/B, options -4mv/-bf)');
+   WriteLn('DEVSD  msmpeg4         MPEG-4 part 2 Microsoft variant version 3 (decodeur I/P; encodeur Y4M->AVI images I seules, -q:v)');
+   WriteLn('DEVSD  msmpeg4v1       MPEG-4 part 2 Microsoft variant version 1 (decodeur; encodeur Y4M->AVI images I seules, -q:v)');
+   WriteLn('DEVSD  msmpeg4v2       MPEG-4 part 2 Microsoft variant version 2 (decodeur I/P; encodeur Y4M->AVI images I seules, -q:v)');
    WriteLn('D VSDT mpegvideo       MPEG-1 video (decodeur MPEG-1/MPEG-2)');   
    WriteLn('DEA    pcm_s16le       PCM signe 16 bits little-endian');
    WriteLn('D A    pcm_u8, pcm_s24le, pcm_s32le, pcm_s8, pcm_s16be, pcm_s24be, pcm_s32be');
@@ -65036,8 +65326,8 @@ BEGIN
    If VideoCodec='libxvid' Then VideoCodec:='mpeg4';
    If (VideoCodec<>'png') And (VideoCodec<>'gif') And (VideoCodec<>'copy') And
     (VideoCodec<>'ffv1') And (VideoCodec<>'flv') And (VideoCodec<>'mpeg4') And (VideoCodec<>'mpeg1video') And (VideoCodec<>'mpeg2video') And (VideoCodec<>'rawvideo') And
-    (VideoCodec<>'asv1') And (VideoCodec<>'asv2') And (VideoCodec<>'huffyuv') And (VideoCodec<>'h263') And (VideoCodec<>'h263p') And (VideoCodec<>'bmp') And (VideoCodec<>'dnxhd') And (VideoCodec<>'dvvideo') And (VideoCodec<>'jpegls') And (VideoCodec<>'ljpeg') And (VideoCodec<>'mjpeg') And (VideoCodec<>'libx264') And (VideoCodec<>'libtheora') Then
-    Fail('Codec video: png/gif, bmp, copy, ffv1, flv, mpeg4, mpeg1video, mpeg2video, rawvideo, asv1, asv2, huffyuv, h263, h263p, dnxhd, dvvideo, jpegls, ljpeg, mjpeg, libx264, libxvid, libtheora.');
+    (VideoCodec<>'asv1') And (VideoCodec<>'asv2') And (VideoCodec<>'msmpeg4') And (VideoCodec<>'msmpeg4v1') And (VideoCodec<>'msmpeg4v2') And (VideoCodec<>'huffyuv') And (VideoCodec<>'h263') And (VideoCodec<>'h263p') And (VideoCodec<>'bmp') And (VideoCodec<>'dnxhd') And (VideoCodec<>'dvvideo') And (VideoCodec<>'jpegls') And (VideoCodec<>'ljpeg') And (VideoCodec<>'mjpeg') And (VideoCodec<>'libx264') And (VideoCodec<>'libtheora') Then
+    Fail('Codec video: png/gif, bmp, copy, ffv1, flv, msmpeg4, msmpeg4v1, msmpeg4v2, mpeg4, mpeg1video, mpeg2video, rawvideo, asv1, asv2, huffyuv, h263, h263p, dnxhd, dvvideo, jpegls, ljpeg, mjpeg, libx264, libxvid, libtheora.');
   End Else If (Argument='-vframes') Or (Argument='-frames:v') Then Begin
    If InputPath='' Then Fail('Nombre d''images attendu apres -i.');
    Value:=NextArgument; Val(Value,Number,Code);
@@ -65394,6 +65684,17 @@ BEGIN
   If HasCrop Then Fail('asv: -crop non supporte avec cet encodeur.');
   Temps[2]:=NewTemporary; EncodeASV(Intermediate,Temps[2],VideoCodec='asv2');
   Commit(Temps[2]); Temps[2]:=''; WriteLn('Video ASV creee: ',OutputPath); Halt(0);
+ End;
+ If (InputFormat='yuv4mpegpipe') And ((VideoCodec='msmpeg4') Or (VideoCodec='msmpeg4v1') Or (VideoCodec='msmpeg4v2')) Then Begin
+  If IsHTTP(InputPath) Or (OutputFormat<>'avi') Or NoVideo Or (AudioCodec<>'') Or HasBitrate Or HasVideoBitrate Or
+   (RequestedRate<>0) Or (RequestedChannels<>0) Or (VideoFrames<>0) Or (ImageWidth<>0) Then
+   Fail('msmpeg4: Y4M local vers sortie AVI requis, sans autres options (-q:v 1..31 accepte).');
+  If HasCrop Then Fail('msmpeg4: -crop non supporte avec cet encodeur.');
+  Temps[2]:=NewTemporary;
+  If VideoCodec='msmpeg4v1' Then EncodeMSMPEG4(Intermediate,Temps[2],1,THQuality)
+  Else If VideoCodec='msmpeg4v2' Then EncodeMSMPEG4(Intermediate,Temps[2],2,THQuality)
+  Else EncodeMSMPEG4(Intermediate,Temps[2],3,THQuality);
+  Commit(Temps[2]); Temps[2]:=''; WriteLn('Video MS-MPEG4 creee: ',OutputPath); Halt(0);
  End;
  If (InputFormat='m4v') And Not IsHTTP(InputPath) And (HLSBase='') And (OutputFormat='yuv4mpegpipe') And
   ((VideoCodec='') Or (VideoCodec='rawvideo')) And Not NoVideo Then Begin
