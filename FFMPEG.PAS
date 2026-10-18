@@ -12599,6 +12599,7 @@ Begin
 End;
 
 { FLV: audio ADPCM (format 1, ADPCM SWF). }
+Procedure DecodeNellyFLV(Const Source,Target: String); Forward;
 Procedure DecodeFLVAudio(Const Source,Target: String);
 Var
  H: Array[0..15] Of Byte;
@@ -12617,7 +12618,8 @@ Begin
   Size:=LongInt(H[1])*65536+LongInt(H[2])*256+H[3];
   If Pos+11+Size>Limit Then Break;
   If (H[0]=8) And (Size>1) Then Begin
-   If (H[11] Shr 4)<>1 Then Fail('flv: seul l''audio ADPCM (format 1) est pris en charge.');
+   If ((H[11] Shr 4)>=4) And ((H[11] Shr 4)<=6) And Not Found Then Begin CloseRead; DecodeNellyFLV(Source,Target); Exit; End;
+   If (H[11] Shr 4)<>1 Then Fail('flv: seul l''audio ADPCM (format 1) ou Nellymoser (formats 4 a 6) est pris en charge.');
    If Not Found Then Begin
     Rate:=44100 Shr (3-((H[11] Shr 2) And 3)); Channels:=(H[11] And 1)+1; Found:=True;
     OpenWrite(Target); ADPCMWaveHeader(Rate,Channels,0);
@@ -61620,6 +61622,564 @@ Begin
 End;
 { PCM-END }
 
+
+Const NELLY_BLK=64;
+Const
+ NyDequant: Array[0..126] Of Single=(
+  0.0000000000,-0.8472560048,0.7224709988,-1.5247479677,-0.4531480074,0.3753609955,
+  1.4717899561,-1.9822579622,-1.1929379702,-0.5829370022,-0.0693780035,0.3909569979,
+  0.9069200158,1.4862740040,2.2215409279,-2.3887870312,-1.8067539930,-1.4105420113,
+  -1.0773609877,-0.7995010018,-0.5558109879,-0.3334020078,-0.1324490011,0.0568020009,
+  0.2548770010,0.4773550034,0.7386850119,1.0443060398,1.3954459429,1.8098750114,
+  2.3918759823,-2.3893830776,-1.9884680510,-1.7514040470,-1.5643119812,-1.3922129869,
+  -1.2164649963,-1.0469499826,-0.8905100226,-0.7645580173,-0.6454579830,-0.5259280205,
+  -0.4059549868,-0.3029719889,-0.2096900046,-0.1239869967,-0.0479229987,0.0257730000,
+  0.1001340002,0.1737180054,0.2585540116,0.3522900045,0.4569880068,0.5767750144,
+  0.7003160119,0.8425520062,1.0093879700,1.1821349859,1.3534560204,1.5320819616,
+  1.7332619429,1.9722349644,2.3978140354,-2.5756309032,-2.0573320389,-1.8984919786,
+  -1.7727810144,-1.6662600040,-1.5742180347,-1.4993319511,-1.4316639900,-1.3652280569,
+  -1.3000990152,-1.2280930281,-1.1588579416,-1.0921250582,-1.0135740042,-0.9202849865,
+  -0.8287050128,-0.7374889851,-0.6447759867,-0.5590940118,-0.4857139885,-0.4110319912,
+  -0.3459700048,-0.2851159871,-0.2341620028,-0.1870580018,-0.1442500055,-0.1107169986,
+  -0.0739680007,-0.0365610011,-0.0073290002,0.0203610007,0.0479039997,0.0751969963,
+  0.0980999991,0.1220389977,0.1458999962,0.1694349945,0.1970459968,0.2252430022,
+  0.2556869984,0.2870100141,0.3197099864,0.3525829911,0.3889069855,0.4334920049,
+  0.4769459963,0.5204820037,0.5644530058,0.6122040153,0.6685929894,0.7341650128,
+  0.8032159805,0.8784040213,0.9566209912,1.0397069454,1.1293770075,1.2211159468,
+  1.3080279827,1.4024800062,1.5056819916,1.6227730513,1.7724959850,1.9430880547,
+  2.2903931141);
+ NyBand: Array[0..22] Of Byte=(
+  2,2,2,2,2,2,2,2,2,3,3,4,4,5,6,6,7,8,9,10,12,14,15);
+ NyInit: Array[0..63] Of Word=(
+  3134,5342,6870,7792,8569,9185,9744,10191,
+  10631,11061,11434,11770,12116,12513,12925,13300,
+  13674,14027,14352,14716,15117,15477,15824,16157,
+  16513,16804,17090,17401,17679,17948,18238,18520,
+  18764,19078,19381,19640,19921,20205,20500,20813,
+  21162,21465,21794,22137,22453,22756,23067,23350,
+  23636,23926,24227,24521,24819,25107,25414,25730,
+  26120,26497,26895,27344,27877,28463,29426,31355);
+ NyDelta: Array[0..31] Of SmallInt=(
+  -11725,-9420,-7910,-6801,-5948,-5233,-4599,-4039,
+  -3507,-3030,-2596,-2170,-1774,-1383,-1016,-660,
+  -329,-1,337,696,1085,1512,1962,2433,
+  2968,3569,4314,5279,6622,8154,10076,12975);
+ NySfLut: Array[0..95] Of Byte=(
+  0,1,1,1,1,1,1,2,2,2,2,3,3,3,4,4,
+  5,5,5,6,7,7,8,8,9,10,11,11,12,13,13,14,
+  15,15,16,17,17,18,19,19,20,21,22,22,23,24,25,26,
+  27,27,28,29,30,31,32,33,34,35,36,37,37,38,39,40,
+  41,41,42,43,44,45,45,46,47,48,49,50,51,52,52,53,
+  54,55,55,56,57,57,58,59,59,60,60,60,61,61,61,62);
+ NySfDelta: Array[0..77] Of Byte=(
+  0,1,1,1,1,1,1,2,2,2,2,3,3,3,4,4,
+  4,5,5,5,6,6,7,7,8,8,9,10,10,11,11,12,
+  13,13,14,15,16,17,17,18,19,19,20,21,21,22,22,23,
+  23,24,24,25,25,25,26,26,26,26,27,27,27,27,27,28,
+  28,28,28,28,28,29,29,29,29,29,29,29,29,30);
+ NyQuantLut: Array[0..229] Of Byte=(
+  0,0,1,2,0,1,2,3,4,5,6,0,1,1,2,2,
+  3,3,4,5,6,7,8,9,10,11,11,12,13,13,13,14,
+  0,1,1,2,2,2,3,3,4,4,5,5,6,6,7,8,
+  8,9,10,10,11,12,13,14,15,16,17,18,19,20,21,22,
+  22,23,23,24,24,25,25,26,26,27,27,28,28,29,29,29,
+  30,0,1,1,1,1,1,1,2,2,2,2,2,3,3,3,
+  3,4,4,4,5,5,5,6,6,7,7,7,8,8,9,9,
+  9,10,10,11,11,11,12,12,13,13,13,13,14,14,14,15,
+  15,15,15,16,16,16,17,17,17,18,18,18,19,19,20,20,
+  20,21,21,22,22,23,23,24,25,26,26,27,28,29,30,31,
+  32,33,34,35,36,37,38,39,40,41,42,42,43,44,44,45,
+  45,46,47,47,48,48,49,49,50,50,50,51,51,51,52,52,
+  52,53,53,53,54,54,54,55,55,55,56,56,56,57,57,57,
+  57,58,58,58,58,59,59,59,59,60,60,60,60,60,61,61,
+  61,61,61,61,61,62);
+ NyQMul: Array[0..6] Of Single=(
+  0.0,0.0,2.0,2.0,5.0,12.0,36.6);
+ NyQAdd: Array[0..6] Of Single=(
+  0.0,0.0,2.0,7.0,21.0,56.0,157.0);
+ NyQOff: Array[0..7] Of Byte=(
+  0,0,1,4,11,32,81,230);
+
+{ ---- Nellymoser (libavcodec/nellymoser.c, nellymoserdec.c, nellymoserenc.c, LGPL) ---- }
+Var
+ NyMap: Array[0..63] Of LongInt;
+ NyExpRe,NyExpIm: Array[0..127] Of Single;
+ NySine: Array[0..127] Of Single;
+ NyReady: Boolean;
+ NyPrev,NyOut: Array[0..127] Of Single;
+ NyPow: Array[0..2047] Of Single;
+ NyBuf: Array[0..383] Of Single;
+ NyMdct: Array[0..255] Of Single;
+ NyBufPos: LongInt;
+ NyBitSrc: PEABuffer; NyBitPos: LongInt;
+
+{ sinf de la glibc 2.31+ (sysdeps/ieee754/flt-32/s_sinf.c), pour 0 < x < PI/2 }
+Function NySinf(Y: Single): Single;
+Const HpiInv=10680707.430881744; Hpi=1.5707963267948966; C1=-0.49999999725108224; C2=0.041666623324344516;
+ C3=-0.001388676379437604; C4=2.4390450703564542e-05; S1=-0.16666654943701084; S2=0.008332178146138854; S3=-0.00019517298981385725;
+Var X,X2,X3,X4,X6,X7,Sv,Cc,Cc1,Cc2,Sa: Double; N: LongInt; R: Single;
+Begin
+ X:=Y;
+ If X<0.7853981852531433 Then Begin
+  X2:=X*X;
+  X3:=X*X2; Sa:=S2+X2*S3; X7:=X3*X2; Sv:=X+X3*S1;
+  R:=Sv+X7*Sa; NySinf:=R;
+ End Else Begin
+  X:=X*HpiInv; N:=(Trunc(X)+$800000) Shr 24;
+  X:=Y; X:=X-N*Hpi;
+  X2:=X*X; X4:=X2*X2; Cc2:=C3+X2*C4; Cc1:=1.0+X2*C1; X6:=X4*X2; Cc:=Cc1+X4*C2;
+  R:=Cc+X6*Cc2; NySinf:=R;
+ End;
+End;
+
+Procedure NyInitTables;
+Var I: LongInt; Alpha,Dv,Tm: Double; Sg: Single;
+Begin
+ If NyReady Then Exit;
+ IMCInit;
+ NyReady:=True;
+ For I:=0 To 63 Do NyMap[I]:=(-IMCSplitPerm(I,64,1)) And 63;
+ For I:=0 To 63 Do Begin
+  Alpha:=(IMCPi/2)*(I+0.125)/64;
+  Dv:=Cos(Alpha); NyExpRe[64+I]:=Dv; Dv:=Sin(Alpha); NyExpIm[64+I]:=Dv;
+ End;
+ For I:=0 To 63 Do Begin NyExpRe[I]:=NyExpRe[64+NyMap[I]]; NyExpIm[I]:=NyExpIm[64+NyMap[I]]; End;
+ For I:=0 To 63 Do NyMap[I]:=NyMap[I] Shl 1;
+ For I:=0 To 127 Do Begin Sg:=(I+0.5)*(IMCPi/(2.0*128)); NySine[I]:=NySinf(Sg); End;
+ { table de puissances de l'encodeur }
+ NyPow[0]:=1; NyPow[1024]:=Sqrt(0.5);
+ For I:=1 To 512 Do Begin
+  Tm:=Exp(-I/2048.0*Ln(2.0));
+  NyPow[I]:=Tm; NyPow[1024-I]:=0.70710678118654752440/Tm; NyPow[1024+I]:=Tm*0.70710678118654752440; NyPow[2048-I]:=0.5/Tm;
+ End;
+End;
+
+{ MDCT inverse a 128 coefficients -> 128 echantillons (tx_template.c ff_tx_mdct_inv, versions C) }
+Procedure NyImdct(Const Src: Array Of Single; Var Dst: Array Of Single);
+Var I,K,I0,I1: LongInt; Tr,Ti,S1r,S1i,S0r,S0i: Single;
+Begin
+ For I:=0 To 63 Do Begin
+  K:=NyMap[I];
+  Tr:=Src[127-K]; Ti:=Src[K];
+  IMCZr[I]:=Tr*NyExpRe[I]-Ti*NyExpIm[I];
+  IMCZi[I]:=Tr*NyExpIm[I]+Ti*NyExpRe[I];
+ End;
+ IMCFft(64,0,6);
+ For I:=0 To 31 Do Begin
+  I0:=32+I; I1:=31-I;
+  S1r:=IMCZi[I1]; S1i:=IMCZr[I1];
+  S0r:=IMCZi[I0]; S0i:=IMCZr[I0];
+  IMCZr[I1]:=S1r*NyExpIm[64+I1]-S1i*NyExpRe[64+I1];
+  IMCZi[I0]:=S1r*NyExpRe[64+I1]+S1i*NyExpIm[64+I1];
+  IMCZr[I0]:=S0r*NyExpIm[64+I0]-S0i*NyExpRe[64+I0];
+  IMCZi[I1]:=S0r*NyExpRe[64+I0]+S0i*NyExpIm[64+I0];
+ End;
+ For I:=0 To 63 Do Begin Dst[2*I]:=IMCZr[I]; Dst[2*I+1]:=IMCZi[I]; End;
+End;
+
+Function NySar(V,N: LongInt): LongInt;
+Begin
+ If V>=0 Then NySar:=V Shr N Else NySar:=-LongInt((-Int64(V)+(Int64(1) Shl N)-1) Shr N);
+End;
+
+Function NySShift(I,Sh: LongInt): LongInt;
+Begin
+ If Sh>0 Then NySShift:=LongInt(LongWord(I) Shl Sh) Else NySShift:=NySar(I,-Sh);
+End;
+
+Function NyLog2i(X: LongInt): LongInt;
+Var R: LongInt;
+Begin R:=0; While X>1 Do Begin X:=X Shr 1; Inc(R); End; NyLog2i:=R; End;
+
+Function NyHeadroom(Var La: LongInt): LongInt;
+Var L: LongInt;
+Begin
+ If La=0 Then Begin NyHeadroom:=31; Exit; End;
+ L:=30-NyLog2i(Abs(La));
+ La:=LongInt(LongWord(La) Shl L);
+ NyHeadroom:=L;
+End;
+
+Function NyClip(V,Lo,Hi: LongInt): LongInt;
+Begin If V<Lo Then V:=Lo; If V>Hi Then V:=Hi; NyClip:=V; End;
+
+Function NySumBits(Var Buf: Array Of SmallInt; Shift,Off: LongInt): LongInt;
+Var I,B,R: LongInt;
+Begin
+ R:=0;
+ For I:=0 To 123 Do Begin
+  B:=Buf[I]-Off;
+  B:=NySar(NySar(B,Shift-1)+1,1);
+  Inc(R,NyClip(B,0,6));
+ End;
+ NySumBits:=R;
+End;
+
+Procedure NyGetBits(Const Buf: Array Of Single; Var Bits: Array Of LongInt);
+Var
+ SBuf: Array[0..127] Of SmallInt; I,J,Max,Sum,Shift,ShiftSaved,SmallOff,BigOff,Off,Tmp,BitSum,LastBitSum,SmallBitSum,BigBitSum,LastOff: LongInt; T: Single;
+Begin
+ Max:=0;
+ For I:=0 To 123 Do If Buf[I]>Max Then Max:=Trunc(Buf[I]);
+ Shift:=-16;
+ Inc(Shift,NyHeadroom(Max));
+ Sum:=0;
+ For I:=0 To 123 Do Begin
+  SBuf[I]:=NySShift(Trunc(Buf[I]),Shift);
+  SBuf[I]:=NySar(3*SBuf[I],2);
+  Inc(Sum,SBuf[I]);
+ End;
+ Inc(Shift,11);
+ ShiftSaved:=Shift;
+ Dec(Sum,LongInt(LongWord(198) Shl Shift));
+ Inc(Shift,NyHeadroom(Sum));
+ SmallOff:=NySar(4228*NySar(Sum,16),15);
+ Shift:=ShiftSaved-(19+Shift-31);
+ SmallOff:=NySShift(SmallOff,Shift);
+ BitSum:=NySumBits(SBuf,ShiftSaved,SmallOff);
+ If BitSum<>198 Then Begin
+  Off:=BitSum-198;
+  Shift:=0;
+  While Abs(Off)<=16383 Do Begin Off:=Off*2; Inc(Shift); End;
+  Off:=NySar(Off*4228,15);
+  Shift:=ShiftSaved-(19+Shift-15);
+  Off:=NySShift(Off,Shift);
+  LastOff:=SmallOff; LastBitSum:=BitSum;
+  J:=1;
+  While J<20 Do Begin
+   LastOff:=SmallOff;
+   Inc(SmallOff,Off);
+   LastBitSum:=BitSum;
+   BitSum:=NySumBits(SBuf,ShiftSaved,SmallOff);
+   If (BitSum-198)*(LastBitSum-198)<=0 Then Break;
+   Inc(J);
+  End;
+  If BitSum>198 Then Begin
+   BigOff:=SmallOff; SmallOff:=LastOff; BigBitSum:=BitSum; SmallBitSum:=LastBitSum;
+  End Else Begin
+   BigOff:=LastOff; BigBitSum:=LastBitSum; SmallBitSum:=BitSum;
+  End;
+  While (BitSum<>198) And (J<=19) Do Begin
+   Off:=NySar(BigOff+SmallOff,1);
+   BitSum:=NySumBits(SBuf,ShiftSaved,Off);
+   If BitSum>198 Then Begin BigOff:=Off; BigBitSum:=BitSum; End
+   Else Begin SmallOff:=Off; SmallBitSum:=BitSum; End;
+   Inc(J);
+  End;
+  If Abs(BigBitSum-198)>=Abs(SmallBitSum-198) Then BitSum:=SmallBitSum
+  Else Begin SmallOff:=BigOff; BitSum:=BigBitSum; End;
+ End;
+ For I:=0 To 123 Do Begin
+  Tmp:=SBuf[I]-SmallOff;
+  Tmp:=NySar(NySar(Tmp,ShiftSaved-1)+1,1);
+  Bits[I]:=NyClip(Tmp,0,6);
+ End;
+ If BitSum>198 Then Begin
+  Tmp:=0; I:=0;
+  While Tmp<198 Do Begin Inc(Tmp,Bits[I]); Inc(I); End;
+  Dec(Bits[I-1],Tmp-198);
+  While I<124 Do Begin Bits[I]:=0; Inc(I); End;
+ End;
+End;
+
+Function NyGet(N: LongInt): LongInt;
+Var K,V: LongInt;
+Begin
+ V:=0;
+ For K:=0 To N-1 Do
+  If (NyBitSrc^[(NyBitPos+K) Shr 3] Shr ((NyBitPos+K) And 7)) And 1<>0 Then V:=V Or (1 Shl K);
+ Inc(NyBitPos,N);
+ NyGet:=V;
+End;
+
+{ decode un bloc de 64 octets (Blk) en 256 echantillons flottants }
+Procedure NyDecodeBlock(Blk: PEABuffer; Var Audio: Array Of Single);
+Var
+ I,J,Sub,V: LongInt; Buf,Pows: Array[0..123] Of Single; Bits: Array[0..127] Of LongInt; Val,Pval: Single; Dv: Double; Sg: Single;
+ S0,S1,Wi: Single; Tmp: Array[0..127] Of Single; Aptr: LongInt;
+Begin
+ NyBitSrc:=Blk; NyBitPos:=0;
+ J:=0;
+ Val:=NyInit[NyGet(6)];
+ For I:=0 To 22 Do Begin
+  If I>0 Then Val:=Val+NyDelta[NyGet(5)];
+  Dv:=Val*(1.0/2048); Dv:=Exp(Ln(2.0)*Dv);
+  Dv:=-Dv*(1.0/(32768*8));
+  Pval:=Dv;
+  For V:=1 To NyBand[I] Do Begin Buf[J]:=Val; Pows[J]:=Pval; Inc(J); End;
+ End;
+ NyGetBits(Buf,Bits);
+ For Sub:=0 To 1 Do Begin
+  Aptr:=Sub*128;
+  NyBitSrc:=Blk; NyBitPos:=116+Sub*198;
+  For J:=0 To 123 Do Begin
+   If Bits[J]<=0 Then Begin
+    Dv:=0.70710678118654752440*Pows[J]; Sg:=Dv; Audio[Aptr+J]:=Sg;
+    If (CKLfgGet And 1)<>0 Then Audio[Aptr+J]:=-Audio[Aptr+J];
+   End Else Begin
+    V:=NyGet(Bits[J]);
+    Audio[Aptr+J]:=NyDequant[(1 Shl Bits[J])-1+V]*Pows[J];
+   End;
+  End;
+  For J:=124 To 127 Do Audio[Aptr+J]:=0;
+  For J:=0 To 127 Do Tmp[J]:=Audio[Aptr+J];
+  NyImdct(Tmp,NyOut);
+  { vector_fmul_window(aptr, prev+64, out, sine, 64) }
+  For J:=0 To 63 Do Begin
+   S0:=NyPrev[64+J];
+   S1:=NyOut[63-J];
+   Audio[Aptr+J]:=S0*NySine[127-J]-S1*NySine[J];
+   Audio[Aptr+127-J]:=S0*NySine[J]+S1*NySine[127-J];
+  End;
+  { echange prev/out }
+  For J:=0 To 127 Do Begin Wi:=NyPrev[J]; NyPrev[J]:=NyOut[J]; NyOut[J]:=Wi; End;
+ End;
+End;
+
+Procedure NyReset;
+Var I: LongInt;
+Begin
+ NyInitTables;
+ FillChar(NyPrev,SizeOf(NyPrev),0); FillChar(NyOut,SizeOf(NyOut),0);
+ For I:=0 To 63 Do CKLfg[I]:=CKLfgInit[I];
+ CKLfgIdx:=0;
+End;
+
+{ FLV audio-seul Nellymoser vers WAV (flottant si une sortie PCM native est demandee, sinon PCM 16 bits) }
+Procedure DecodeNellyFLV(Const Source,Target: String);
+Var
+ H: Array[0..15] Of Byte; Limit,Pos,Size,Rate,Blocks,Total,K,Fmt,Take,J: LongInt; Found: Boolean; Buf: PEABuffer;
+ Audio: Array[0..255] Of Single; Sp: TPcmSpec; Out: TPcmBuf; N,V: LongInt; Fl: Single;
+Begin
+ NyReset;
+ OpenRead(Source); Limit:=InputSize; Found:=False; Rate:=0;
+ If Limit<13 Then Fail('flv: fichier tronque.');
+ ReadAt(0,H,9);
+ If (H[0]<>70) Or (H[1]<>76) Or (H[2]<>86) Then Fail('flv: signature FLV requise.');
+ Pos:=LongInt(H[5])*16777216+LongInt(H[6])*65536+LongInt(H[7])*256+H[8]+4;
+ Blocks:=0;
+ { passe 1 : nombre de blocs }
+ While Limit-Pos>=12 Do Begin
+  ReadAt(Pos,H,12);
+  Size:=LongInt(H[1])*65536+LongInt(H[2])*256+H[3];
+  If Pos+11+Size>Limit Then Break;
+  If (H[0]=8) And (Size>1) Then Begin
+   Fmt:=H[11] Shr 4;
+   If (Fmt<4) Or (Fmt>6) Then Fail('flv: codec audio non pris en charge (ADPCM ou Nellymoser).');
+   If Not Found Then Begin
+    Found:=True;
+    Case Fmt Of 4: Rate:=16000; 5: Rate:=8000; Else Rate:=44100 Shr (3-((H[11] Shr 2) And 3)); End;
+    If Fmt=6 Then Case (H[11] Shr 2) And 3 Of 0: Rate:=5512; 1: Rate:=11025; 2: Rate:=22050; Else Rate:=44100; End;
+   End;
+   Inc(Blocks,(Size-1) Div NELLY_BLK);
+  End;
+  Pos:=Pos+11+Size+4;
+ End;
+ If Not Found Or (Blocks=0) Then Fail('flv: aucune donnee audio Nellymoser.');
+ If PcmCodecOut<>'' Then PcmSpecOf('f32le',Sp) Else PcmSpecOf('s16le',Sp);
+ OpenWrite(Target);
+ PcmNativeHeader(Sp,1,Rate,Blocks*256);
+ WriteBytes(PcmH,PcmHN);
+ Pos:=LongInt(0);
+ ReadAt(0,H,9);
+ Pos:=LongInt(H[5])*16777216+LongInt(H[6])*65536+LongInt(H[7])*256+H[8]+4;
+ While Limit-Pos>=12 Do Begin
+  ReadAt(Pos,H,12);
+  Size:=LongInt(H[1])*65536+LongInt(H[2])*256+H[3];
+  If Pos+11+Size>Limit Then Break;
+  If (H[0]=8) And (Size>1) Then Begin
+   GetMem(Buf,Size+64); K:=0;
+   While K<Size-1 Do Begin
+    If Size-1-K>16384 Then Take:=16384 Else Take:=Size-1-K;
+    ReadAt(Pos+12+K,Buf^[K],Take); Inc(K,Take);
+   End;
+   For K:=0 To (Size-1) Div NELLY_BLK-1 Do Begin
+    NyDecodeBlock(PEABuffer(@Buf^[K*NELLY_BLK]),Audio);
+    N:=0;
+    For J:=0 To 255 Do Begin
+     If PcmCodecOut<>'' Then Begin PcmPutF(Sp,Out,N,Audio[J]); Inc(N,4); End
+     Else Begin
+      Fl:=Audio[J]*32768.0; V:=PcmRint(Fl);
+      If V>32767 Then V:=32767; If V<-32768 Then V:=-32768;
+      Out[N]:=V And 255; Out[N+1]:=(V Shr 8) And 255; Inc(N,2);
+     End;
+    End;
+    PcmWriteBig(Out,N);
+   End;
+   FreeMem(Buf,Size+64);
+  End;
+  Pos:=Pos+11+Size+4;
+ End;
+ CloseRead; CloseWrite;
+End;
+
+{ ---- encodeur ---- }
+Var NyWPos: LongInt; NyWBuf: Array[0..63] Of Byte;
+Procedure NyPut(N,V: LongInt);
+Var K: LongInt;
+Begin
+ For K:=0 To N-1 Do Begin
+  If ((V Shr K) And 1)<>0 Then NyWBuf[NyWPos Shr 3]:=NyWBuf[NyWPos Shr 3] Or (1 Shl (NyWPos And 7));
+  Inc(NyWPos);
+ End;
+End;
+
+Function NyLrint(X: Single): LongInt;
+Begin NyLrint:=PcmRint(X); End;
+
+Procedure NyApplyMdct;
+Var I,J,K: LongInt; Win: Array[0..255] Of Double; Sum: Double;
+Procedure One(A,B: LongInt; OutOff: LongInt);
+Var Q,R: LongInt; Inp: Array[0..255] Of Single; Sg: Single;
+Begin
+ For Q:=0 To 127 Do Inp[Q]:=NyBuf[A+Q]*NySine[Q];
+ For Q:=0 To 127 Do Inp[128+Q]:=NyBuf[B+Q]*NySine[127-Q];
+ For Q:=0 To 127 Do Begin
+  Sum:=0;
+  For R:=0 To 255 Do Sum:=Sum+Inp[R]*Cos(((2*R+1+128)*(2*Q+1))*(IMCPi/(4.0*128)));
+  Sum:=Sum*32768.0;
+  Sg:=Sum; NyMdct[OutOff+Q]:=Sg;
+ End;
+End;
+Begin
+ One(0,128,0);
+ One(128,256,128);
+End;
+
+Procedure NyEncodeBlock(Var Blk: Array Of Byte);
+Var
+ I,J,Band,BestIdx,PowerIdx,Block,Bi: LongInt; Cand: Array[0..22] Of Single; Pows: Array[0..123] Of Single; Bits: Array[0..127] Of LongInt;
+ IdxTable: Array[0..22] Of LongInt; CoeffSum,PowerVal,Coeff,PCand: Single; Dv: Double;
+Function FindBest(Val: Single; Const Tab: Array Of LongInt; Const Lut: Array Of Byte; LutAdd,LutSize: LongInt): LongInt;
+Var Bx: LongInt; T0,T1,D0,D1: Single;
+Begin
+ Bx:=Lut[NyClip(NySar(NyLrint(Val),8)+LutAdd,0,LutSize-1)];
+ T0:=Tab[Bx]; T1:=Tab[Bx+1]; D0:=Val-T0; D1:=Val-T1;
+ If Abs(D0)>Abs(D1) Then Inc(Bx);
+ FindBest:=Bx;
+End;
+Var InitT: Array[0..63] Of LongInt; DeltaT: Array[0..31] Of LongInt; Fv: Single;
+Begin
+ For I:=0 To 63 Do InitT[I]:=NyInit[I];
+ For I:=0 To 31 Do DeltaT[I]:=NyDelta[I];
+ NyApplyMdct;
+ FillChar(NyWBuf,SizeOf(NyWBuf),0); NyWPos:=0;
+ I:=0;
+ For Band:=0 To 22 Do Begin
+  CoeffSum:=0;
+  For J:=1 To NyBand[Band] Do Begin
+   CoeffSum:=CoeffSum+(NyMdct[I]*NyMdct[I]+NyMdct[I+128]*NyMdct[I+128]);
+   Inc(I);
+  End;
+  Fv:=NyBand[Band] Shl 7; Fv:=CoeffSum/Fv; Dv:=Fv;
+  If Dv<1.0 Then Dv:=1.0;
+  Cand[Band]:=Ln(Dv)/Ln(2.0)*1024.0;
+ End;
+ { exposants (algorithme glouton) }
+ IdxTable[0]:=FindBest(Cand[0],InitT,NySfLut,-20,96);
+ PowerIdx:=InitT[IdxTable[0]];
+ For Band:=1 To 22 Do Begin
+  Fv:=PowerIdx; PCand:=Cand[Band]-Fv;
+  IdxTable[Band]:=FindBest(PCand,DeltaT,NySfDelta,37,78);
+  Inc(PowerIdx,DeltaT[IdxTable[Band]]);
+ End;
+ I:=0; PowerIdx:=0;
+ For Band:=0 To 22 Do Begin
+  If Band>0 Then Begin
+   Inc(PowerIdx,DeltaT[IdxTable[Band]]); NyPut(5,IdxTable[Band]);
+  End Else Begin
+   PowerIdx:=InitT[IdxTable[0]]; NyPut(6,IdxTable[0]);
+  End;
+  PowerVal:=NyPow[PowerIdx And $7FF]/(1 Shl ((PowerIdx Shr 11)+3));
+  For J:=1 To NyBand[Band] Do Begin
+   NyMdct[I]:=NyMdct[I]*PowerVal; NyMdct[I+128]:=NyMdct[I+128]*PowerVal;
+   Pows[I]:=PowerIdx;
+   Inc(I);
+  End;
+ End;
+ NyGetBits(Pows,Bits);
+ For Block:=0 To 1 Do Begin
+  For I:=0 To 123 Do If Bits[I]>0 Then Begin
+   Coeff:=NyMdct[Block*128+I];
+   Fv:=Coeff*NyQMul[Bits[I]]+NyQAdd[Bits[I]];
+   Bi:=NyQuantLut[NyClip(Trunc(Fv),NyQOff[Bits[I]],NyQOff[Bits[I]+1]-1)];
+   Fv:=Coeff-NyDequant[(1 Shl Bits[I])-1+Bi]; PCand:=Coeff-NyDequant[(1 Shl Bits[I])-1+Bi+1];
+   If Abs(Fv)>Abs(PCand) Then Inc(Bi);
+   NyPut(Bits[I],Bi);
+  End;
+  If Block=0 Then NyPut(116+198-NyWPos,0);
+ End;
+ For I:=0 To 63 Do Blk[I]:=NyWBuf[I];
+End;
+
+{ WAV mono (ou stereo ramene a une voie) vers FLV Nellymoser }
+Procedure EncodeNellyFLV(Const Source,Target: String);
+Var
+ S,Fl: TPcmSpec; Ch,Rate,DS,DSz,Frames,Done,N,I,J,Used,Ts,Blk,Flag,RateCode: LongInt; BI,BO: TPcmBuf; Smp: PEABuffer; Mono: Array[0..1023] Of Single;
+ Pk: Array[0..63] Of Byte; Out: Array[0..255] Of Byte; Frame: Array[0..255] Of Single; Last,Flush: Boolean; Fv: Single; Total: LongInt;
+Procedure PutB(X: LongInt);Begin Out[Used]:=X And 255; Inc(Used); End;
+Procedure PutBE24(X: LongInt);Begin PutB(X Shr 16); PutB(X Shr 8); PutB(X); End;
+Procedure PutBE32(X: LongInt);Begin PutB(X Shr 24); PutBE24(X); End;
+Procedure FlushOut;Begin If Used>0 Then Begin WriteBytes(Out,Used); Used:=0; End; End;
+Procedure Emit;
+Begin
+ NyEncodeBlock(Pk);
+ Ts:=Round(Int64(Blk)*256000/Rate+0.4999);
+ Used:=0;
+ PutB(8); PutBE24(65); PutBE24(Ts And $FFFFFF); PutB(Ts Shr 24); PutBE24(0);
+ PutB(Flag);
+ FlushOut; WriteBytes(Pk,64);
+ PutBE32(76); FlushOut;
+ Inc(Blk);
+End;
+Begin
+ NyReset;
+ If Not PcmOpenSource(Source,S,Ch,Rate,DS,DSz) Then Fail('nellymoser: source WAV PCM requise.');
+ CloseRead;
+ If Ch>2 Then Fail('nellymoser: audio mono requis (-ac 1).');
+ Case Rate Of
+  8000: Flag:=$52; 16000: Flag:=$42; 11025: Flag:=$66; 22050: Flag:=$6A; 44100: Flag:=$6E;
+  Else Fail('nellymoser: frequence 8000, 11025, 16000, 22050 ou 44100 Hz (utiliser -ar).');
+ End;
+ PcmSpecOf('f32le',Fl);
+ Frames:=DSz Div (Ch*S.Bytes);
+ If Frames<1 Then Fail('nellymoser: aucune donnee audio.');
+ OpenWrite(Target); OpenRead(Source);
+ Used:=0;
+ PutB(70); PutB(76); PutB(86); PutB(1); PutB(4); PutBE32(9); PutBE32(0); FlushOut;
+ FillChar(NyBuf,SizeOf(NyBuf),0);
+ Done:=0; Blk:=0; Last:=False; Flush:=False;
+ { chaque appel : 256 nouveaux echantillons ; derniere trame eventuellement partielle }
+ Repeat
+  { decale le tampon }
+  For I:=0 To 127 Do NyBuf[I]:=NyBuf[256+I];
+  N:=256; If Frames-Done<N Then N:=Frames-Done;
+  If Flush Then N:=0;
+  FillChar(Frame,SizeOf(Frame),0);
+  I:=0;
+  While I<N Do Begin
+   J:=N-I; If J>1024 Then J:=1024;
+   PcmReadBig(DS+(Done+I)*Ch*S.Bytes,BI,J*Ch*S.Bytes);
+   PcmChunk(S,Fl,Ch,J,BI,BO);
+   For Total:=0 To J-1 Do Begin
+    Move(BO[Total*Ch*4],Mono[0],4);
+    If Ch=2 Then Begin Move(BO[Total*8+4],Mono[1],4); Mono[0]:=(Mono[0]+Mono[1])*0.5; End;
+    Frame[I+Total]:=Mono[0];
+   End;
+   Inc(I,J);
+  End;
+  For I:=0 To 255 Do NyBuf[128+I]:=Frame[I];
+  If N<256 Then Begin
+   If N>=128 Then Last:=True;
+  End;
+  Emit;
+  Inc(Done,N);
+  If Flush Then Last:=True;
+  If (Not Last) And (Done>=Frames) Then Flush:=True;
+ Until Last;
+ CloseRead; CloseWrite;
+End;
+
 Procedure NormalizeWave(Const Source,Target: String; ForMP3: Boolean);
 Type
  TBytes = Array[0..4095] Of Byte;
@@ -66663,6 +67223,7 @@ BEGIN
    WriteLn('DEA    pcm_u32le       PCM unsigned 32-bit little-endian');
    WriteLn('DEA    pcm_u8          PCM unsigned 8-bit');
    WriteLn('DEA    pcm_zork        PCM Zork');
+   WriteLn('DEA    nellymoser      Nellymoser Asao (FLV audio mono; decodeur exact, encodeur glouton identique a ffmpeg)');
    WriteLn('D V D  msrle           Microsoft RLE (AVI; 1, 4, 8 et 24 bits)');
    WriteLn('D V D  msvideo1        Microsoft Video 1 (AVI; 8 bits palette et 16 bits RGB555)');
    WriteLn('D V D  mszh            LCL (LossLess Codec Library) MSZH (AVI; tous les types d''image LCL)');
@@ -67384,7 +67945,7 @@ BEGIN
  Else If OutputFormat='flv' Then AudioCodec:='adpcm_swf'
  Else If OutputFormat='mp4' Then AudioCodec:='alac' Else If OutputFormat='ogg' Then AudioCodec:='libvorbis' Else AudioCodec:=OutputFormat;
  If (PcmCodecOut='') And (AudioCodec<>'copy') And Not (((OutputFormat='wav') And ((AudioCodec='pcm_s16le') Or (AudioCodec='adpcm_ima_wav') Or
-  (AudioCodec='adpcm_ms') Or (AudioCodec='adpcm_yamaha'))) Or ((OutputFormat='flv') And (AudioCodec='adpcm_swf')) Or
+  (AudioCodec='adpcm_ms') Or (AudioCodec='adpcm_yamaha'))) Or ((OutputFormat='flv') And ((AudioCodec='adpcm_swf') Or (AudioCodec='nellymoser'))) Or
  ((OutputFormat='mp4') And (AudioCodec='alac')) Or
  ((OutputFormat='adx') And (AudioCodec='adpcm_adx')) Or ((OutputFormat='aiff') And (AudioCodec='adpcm_ima_qt')) Or
  ((OutputFormat='mp3') And ((AudioCodec='mp3') Or (AudioCodec='libmp3lame'))) Or ((OutputFormat='mp2') And (AudioCodec='mp2')) Or ((OutputFormat='ac3') And (AudioCodec='ac3')) Or
@@ -67490,6 +68051,7 @@ BEGIN
    EncodeALACM4A(Temps[1],Temps[2]);
   End Else If OutputFormat='flv' Then Begin
    Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False);
+   If AudioCodec='nellymoser' Then EncodeNellyFLV(Temps[1],Temps[2]) Else
    EncodeFLVSWF(Temps[1],Temps[2]);
   End Else If OutputFormat='wav' Then NormalizeWave(Intermediate,Temps[2],False)
    Else If OutputFormat='adx' Then Begin
