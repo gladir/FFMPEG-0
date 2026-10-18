@@ -3604,6 +3604,7 @@ Function FormatName(S: String): String;Begin
  If S='cavs' Then S:='cavsvideo';
  If (S='oga') Or (S='ogv') Or (S='spx') Then S:='ogg';
  If S='ec3' Then S:='eac3';
+ If S='thd' Then S:='truehd';
  FormatName:=S;
 End;
 
@@ -16021,6 +16022,721 @@ Begin
   MP2EncodeFrame(S,BitAlloc,Padding);
   WriteBytes(S^.Out,(S^.OutBits+7) Shr 3);
  End;
+ CloseRead; CloseWrite;
+End;
+
+{ ---- MLP / TrueHD (libavcodec/mlpdec.c, mlp_parse.c, mlp.c, mlpdsp.c, mlp_parser.c) ---- }
+Const
+ MLHuff: Array[0..2,0..17,0..1] Of Byte=(
+  ((1,9),(1,8),(1,7),(1,6),(1,5),(1,4),(1,3),(4,3),(5,3),(6,3),(7,3),(3,3),(5,4),(9,5),(17,6),(33,7),(65,8),(129,9)),
+  ((1,9),(1,8),(1,7),(1,6),(1,5),(1,4),(1,3),(2,2),(3,2),(3,3),(5,4),(9,5),(17,6),(33,7),(65,8),(129,9),(0,0),(0,0)),
+  ((1,9),(1,8),(1,7),(1,6),(1,5),(1,4),(1,3),(1,1),(3,3),(5,4),(9,5),(17,6),(33,7),(65,8),(129,9),(0,0),(0,0),(0,0)));
+ MLHuffCount: Array[0..2] Of Byte=(18,16,15);
+ MLNoise: Array[0..255] Of ShortInt=(
+   30,  51,  22,  54,   3,   7,  -4,  38,  14,  55,  46,  81,  22,  58,  -3,   2,
+   52,  31,  -7,  51,  15,  44,  74,  30,  85, -17,  10,  33,  18,  80,  28,  62,
+   10,  32,  23,  69,  72,  26,  35,  17,  73,  60,   8,  56,   2,   6,  -2,  -5,
+   51,   4,  11,  50,  66,  76,  21,  44,  33,  47,   1,  26,  64,  48,  57,  40,
+   38,  16, -10, -28,  92,  22, -18,  29, -10,   5, -13,  49,  19,  24,  70,  34,
+   61,  48,  30,  14,  -6,  25,  58,  33,  42,  60,  67,  17,  54,  17,  22,  30,
+   67,  44,  -9,  50, -11,  43,  40,  32,  59,  82,  13,  49, -14,  55,  60,  36,
+   48,  49,  31,  47,  15,  12,   4,  65,   1,  23,  29,  39,  45,  -2,  84,  69,
+    0,  72,  37,  57,  27,  41, -15, -16,  35,  31,  14,  61,  24,   0,  27,  24,
+   16,  41,  55,  34,  53,   9,  56,  12,  25,  29,  53,   5,  20, -20,  -8,  20,
+   13,  28,  -3,  78,  38,  16,  11,  62,  46,  29,  21,  24,  46,  65,  43, -23,
+   89,  18,  74,  21,  38, -12,  19,  12, -19,   8,  15,  33,   4,  57,   9,  -8,
+   36,  35,  26,  28,   7,  83,  63,  79,  75,  11,   3,  87,  37,  47,  34,  40,
+   39,  19,  20,  42,  27,  34,  39,  77,  13,  42,  59,  64,  45,  -1,  32,  37,
+   45,  -5,  53,  -6,   7,  36,  50,  23,   6,  32,   9, -21,  18,  71,  27,  52,
+  -25,  31,  35,  42,  -1,  68,  63,  52,  26,  43,  66,  37,  41,  25,  40,  70);
+ MLThdOrder: Array[0..19] Of Byte=(0,1,2,3,9,10,12,14,6,7,4,5,8,11,33,34,31,32,13,35);
+ { chancount / numero de bit AV (canaux) des 13 groupes TrueHD, tables mlp_channels / mlp_layout }
+ MLThdCnt: Array[0..12] Of Byte=(2,1,1,2,2,2,2,1,1,2,2,1,1);
+Type
+ TMLCh=Record
+  FirOrder,FirShift,IirOrder,IirShift,HuffOffset,SignHuffOffset,Codebook,HuffLsbs: LongInt;
+  FirState,IirState: Array[0..7] Of LongInt; Coeff: Array[0..1,0..7] Of LongInt;
+ End;
+ TMLSub=Record
+  RestartSeen,EndOfStream,DataCheck: Boolean;
+  NoiseType,MinCh,MaxCh,MaxMatrixCh,NoiseShift,ParamPresence,NumPrim,Blocksize,Blockpos: LongInt;
+  CodedChannels: LongInt; NoiseSeed: LongWord; Mask: Int64;
+  ChAssign: Array[0..7] Of LongInt; Ch: Array[0..7] Of TMLCh;
+  MatrixOut,LsbBypass,MatrixNoiseShift: Array[0..7] Of LongInt; MatrixCoeff: Array[0..7,0..7] Of LongInt;
+  QuantStep,OutputShift: Array[0..7] Of LongInt;
+ End;
+ TMLP=Record
+  Thd,ParamsValid,Is32: Boolean; Rate: LongInt; NumSub,MaxDecoded,SubstreamInfo,AuSize,AuPow2,HeaderSize,NbChan,NeedsReorder,MatrixChanged: LongInt;
+  FilterChanged: Array[0..7,0..1] Of LongInt;
+  Sub: Array[0..3] Of TMLSub;
+  Noise: Array[0..255] Of ShortInt;
+  Bypass: Array[0..159,0..7] Of ShortInt; Smp: Array[0..159,0..7] Of LongInt;
+  Buf: PEABuffer; BitPos,BitLimit: LongInt; Bad: Boolean;
+ End;
+ PMLP=^TMLP; PMLSub=^TMLSub; PMLCh=^TMLCh;
+Var
+ MLM: PMLP;
+ MLVlc: Array[0..2,0..511] Of ShortInt;
+ MLCrc16: Array[0..255] Of Word; MLCrc8: Array[0..255] Of Byte;
+
+Procedure MLInitTables;
+Var I,J,K,C,L,V: LongInt;
+Begin
+ For I:=0 To 255 Do Begin
+  C:=I Shl 8;
+  For J:=1 To 8 Do If C And $8000<>0 Then C:=((C Shl 1) Xor $2D) And $FFFF Else C:=(C Shl 1) And $FFFF;
+  MLCrc16[I]:=C;
+  C:=I;
+  For J:=1 To 8 Do If C And $80<>0 Then C:=((C Shl 1) Xor $1D) And $FF Else C:=(C Shl 1) And $FF;
+  MLCrc8[I]:=C;
+ End;
+ For I:=0 To 2 Do Begin
+  For J:=0 To 511 Do MLVlc[I,J]:=-1;
+  For K:=0 To MLHuffCount[I]-1 Do Begin
+   C:=MLHuff[I,K,0]; L:=MLHuff[I,K,1];
+   For V:=0 To (1 Shl (9-L))-1 Do MLVlc[I,(C Shl (9-L))+V]:=K;
+  End;
+ End;
+End;
+
+{ lecteur de bits grand-boutiste }
+Function MLPeek(N: LongInt): Int64;
+Var V: Int64; I,P: LongInt;
+Begin
+ V:=0; P:=MLM^.BitPos;
+ For I:=1 To N Do Begin
+  V:=(V Shl 1) Or ((MLM^.Buf^[P Shr 3] Shr (7-(P And 7))) And 1);
+  Inc(P);
+ End;
+ MLPeek:=V;
+End;
+Function MLGet(N: LongInt): LongInt;
+Var V: Int64;
+Begin
+ If N=0 Then Begin MLGet:=0; Exit; End;
+ V:=MLPeek(N); Inc(MLM^.BitPos,N);
+ MLGet:=LongInt(V And $FFFFFFFF);
+End;
+Function MLGetS(N: LongInt): LongInt;
+Var V: LongInt;
+Begin
+ V:=MLGet(N);
+ If (N>0) And (N<32) And (V And (LongInt(1) Shl (N-1))<>0) Then V:=V-(LongInt(1) Shl N);
+ MLGetS:=V;
+End;
+Procedure MLSkip(N: LongInt);
+Begin Inc(MLM^.BitPos,N); End;
+
+Function MLRate(R: LongInt): LongInt;
+Begin
+ If R=15 Then MLRate:=0 Else If R And 8<>0 Then MLRate:=44100 Shl (R And 7) Else MLRate:=48000 Shl (R And 7);
+End;
+
+Function MLThdLayout(Map: LongInt): Int64;
+Const Lay: Array[0..12] Of Int64=(3,4,8,1536,20480,192,48,256,2048,0,0,8192,0);
+Var I: LongInt; L: Int64;
+Begin
+ L:=0;
+ For I:=0 To 12 Do If (Map Shr I) And 1<>0 Then Case I Of
+  9: L:=L Or (Int64(3) Shl 33);
+  10: L:=L Or (Int64(3) Shl 31);
+  12: L:=L Or (Int64(1) Shl 35);
+  Else L:=L Or Lay[I];
+ End;
+ MLThdLayout:=L;
+End;
+Function MLThdChannels(Map: LongInt): LongInt;
+Var I,C: LongInt;
+Begin C:=0; For I:=0 To 12 Do If (Map Shr I) And 1<>0 Then Inc(C,MLThdCnt[I]); MLThdChannels:=C; End;
+Function MLPop(M: Int64): LongInt;
+Var C: LongInt;
+Begin C:=0; While M<>0 Do Begin If M And 1<>0 Then Inc(C); M:=M Shr 1; End; MLPop:=C; End;
+
+Function MLMlpLayout(A: LongInt): Int64;
+Begin
+ Case A Of
+  0: MLMlpLayout:=4;
+  1: MLMlpLayout:=3;
+  2: MLMlpLayout:=3 Or 256;
+  3: MLMlpLayout:=3 Or 48;
+  4: MLMlpLayout:=3 Or 8;
+  5: MLMlpLayout:=3 Or 256 Or 8;
+  6: MLMlpLayout:=3 Or 48 Or 8;
+  7: MLMlpLayout:=7;
+  8: MLMlpLayout:=7 Or 256;
+  9: MLMlpLayout:=7 Or 48;
+  10: MLMlpLayout:=7 Or 8;
+  11: MLMlpLayout:=7 Or 256 Or 8;
+  12: MLMlpLayout:=7 Or 48 Or 8;
+  13: MLMlpLayout:=7 Or 256;
+  14: MLMlpLayout:=7 Or 48;
+  15: MLMlpLayout:=7 Or 8;
+  16: MLMlpLayout:=7 Or 256 Or 8;
+  17: MLMlpLayout:=7 Or 48 Or 8;
+  18: MLMlpLayout:=3 Or 48 Or 8;
+  19: MLMlpLayout:=7 Or 48;
+  20: MLMlpLayout:=7 Or 48 Or 8;
+  Else MLMlpLayout:=0;
+ End;
+End;
+
+Function MLIndexOf(Mask: Int64; Ch: LongInt): LongInt;
+Begin
+ If (Ch<0) Or (Ch>63) Or ((Mask Shr Ch) And 1=0) Then MLIndexOf:=-1
+ Else MLIndexOf:=MLPop(Mask And ((Int64(1) Shl Ch)-1));
+End;
+
+Function MLThdExtract(Mask: Int64; Index: LongInt): LongInt;
+Var I: LongInt;
+Begin
+ MLThdExtract:=-1;
+ If MLPop(Mask)<=Index Then Exit;
+ For I:=0 To 19 Do If (Mask Shr MLThdOrder[I]) And 1<>0 Then Begin
+  If Index=0 Then Begin MLThdExtract:=MLThdOrder[I]; Exit; End;
+  Dec(Index);
+ End;
+End;
+
+Function MLReadMajorSync(Var Info: LongInt): LongInt;
+{ lit l'en-tete de synchronisation majeure : renvoie 0 si valide ; remplit MLM^ (pas de mise a jour avant validation complete) }
+Var
+ M: PMLP; Size,I,Ext: LongInt; Crc,Want: LongInt; B: PEABuffer; Stream,G1Bits,G2Bits,Rate1,Rate2,RateBits,Arr,Sub0,Sub1,Sub2,Ch1,Ch2,Mod0,Mod1,Mod2,SubInfo,NSub,ExtInfo: LongInt;
+ Lay1,Lay2,LayMlp: Int64; Start: LongInt;
+Begin
+ M:=MLM; MLReadMajorSync:=-1; Start:=M^.BitPos Shr 3; B:=M^.Buf;
+ If (M^.BitLimit Shr 3)-Start<28 Then Exit;
+ Size:=28;
+ If (B^[Start]=$F8) And (B^[Start+1]=$72) And (B^[Start+2]=$6F) And (B^[Start+3]=$BA) Then Begin
+  If B^[Start+25] And 1<>0 Then Begin Ext:=B^[Start+26] Shr 4; Inc(Size,2+Ext*2); End;
+ End;
+ If Size*8>M^.BitLimit-M^.BitPos Then Exit;
+ Crc:=0;
+ For I:=0 To Size-5 Do Crc:=((Crc Shl 8) And $FFFF) Xor MLCrc16[((Crc Shr 8) Xor B^[Start+I]) And 255];
+ Crc:=((Crc And 255) Shl 8) Or (Crc Shr 8);
+ Crc:=Crc Xor (B^[Start+Size-4]+B^[Start+Size-3]*256);
+ Want:=B^[Start+Size-2]+B^[Start+Size-1]*256;
+ If Crc<>Want Then Exit;
+ If MLGet(24)<>$F8726F Then Exit;
+ Stream:=MLGet(8);
+ Ch1:=0; Ch2:=0; Lay1:=0; Lay2:=0; LayMlp:=0; Mod0:=0; Mod1:=0; Mod2:=0; Arr:=0; Rate2:=0;
+ If Stream=$BB Then Begin
+  G1Bits:=MLGet(4); If G1Bits=0 Then G1Bits:=16 Else If G1Bits=1 Then G1Bits:=20 Else If G1Bits=2 Then G1Bits:=24 Else G1Bits:=0;
+  G2Bits:=MLGet(4); If G2Bits=0 Then G2Bits:=16 Else If G2Bits=1 Then G2Bits:=20 Else If G2Bits=2 Then G2Bits:=24 Else G2Bits:=0;
+  RateBits:=MLGet(4); Rate1:=MLRate(RateBits); Rate2:=MLRate(MLGet(4));
+  MLSkip(11); Arr:=MLGet(5); LayMlp:=MLMlpLayout(Arr);
+ End Else If Stream=$BA Then Begin
+  G1Bits:=24; G2Bits:=0;
+  RateBits:=MLGet(4); Rate1:=MLRate(RateBits); Rate2:=0;
+  MLSkip(4); Mod0:=MLGet(2); Mod1:=MLGet(2);
+  Arr:=MLGet(5); Ch1:=MLThdChannels(Arr); Lay1:=MLThdLayout(Arr);
+  Mod2:=MLGet(2); I:=MLGet(13); Ch2:=MLThdChannels(I); Lay2:=MLThdLayout(I);
+ End Else Exit;
+ M^.AuSize:=40 Shl (RateBits And 7); M^.AuPow2:=64 Shl (RateBits And 7);
+ MLSkip(48); MLSkip(1); MLSkip(15); NSub:=MLGet(4); MLSkip(2); ExtInfo:=MLGet(2); SubInfo:=MLGet(8);
+ MLM^.BitPos:=Start*8+Size*8;
+ { controles de read_major_sync (mlpdec.c) }
+ If G1Bits=0 Then Exit;
+ If G2Bits>G1Bits Then Exit;
+ If (Rate2<>0) And (Rate2<>Rate1) Then Exit;
+ If Rate1=0 Then Exit;
+ If Rate1>192000 Then Exit;
+ If M^.AuSize>160 Then Exit;
+ If M^.AuPow2>256 Then Exit;
+ If NSub=0 Then Exit;
+ If (Not M^.Thd) And (NSub>2) Then Exit;
+ If NSub>4 Then Exit;
+ M^.HeaderSize:=Size; M^.NumSub:=NSub; M^.SubstreamInfo:=SubInfo;
+ M^.MaxDecoded:=NSub-1; If M^.MaxDecoded>2 Then M^.MaxDecoded:=2;
+ Info:=Rate1; M^.Rate:=Rate1; M^.Is32:=G1Bits>16;
+ For I:=0 To 3 Do M^.Sub[I].RestartSeen:=False;
+ If Not M^.Thd Then Begin
+  If Stream<>$BB Then Exit;
+  I:=0; If NSub>1 Then Begin I:=1; M^.Sub[0].Mask:=3; End;
+  M^.Sub[I].Mask:=LayMlp;
+ End Else Begin
+  If Stream<>$BA Then Exit;
+  M^.Sub[1].Mask:=Lay1;
+  If (Ch1=2) And (Ch2=2) And (M^.NbChan=2) Then M^.Sub[0].Mask:=3;
+  I:=0; If NSub>1 Then Begin I:=1; M^.Sub[0].Mask:=3; End;
+  If (NSub=1) And (Ch1=1) And (Ch2=1) And (M^.NbChan=1) Then M^.Sub[0].Mask:=4;
+  If NSub>2 Then Begin If Lay2<>0 Then M^.Sub[2].Mask:=Lay2 Else M^.Sub[2].Mask:=Lay1; End;
+  If M^.NbChan>2 Then Begin
+   If NSub>2 Then M^.Sub[1].Mask:=Lay1 Else M^.Sub[I].Mask:=Lay2;
+  End;
+ End;
+ M^.NeedsReorder:=0; If (Arr>=18) And (Arr<=20) Then M^.NeedsReorder:=1;
+ MLReadMajorSync:=0;
+End;
+
+Function MLReadRestart(Sub: LongInt): LongInt;
+Var
+ M: PMLP; S: PMLSub; Ch,Sync,MinC,MaxC,MaxM,Noise,Std,Assign,Chan,I,J: LongInt; Tmp: LongInt;
+Begin
+ M:=MLM; S:=@M^.Sub[Sub]; MLReadRestart:=-1;
+ If M^.Thd Then Std:=7 Else Std:=5;
+ Sync:=MLGet(13); If Sync<>$31EA Shr 1 Then Exit;
+ Noise:=MLGet(1);
+ If (Not M^.Thd) And (Noise<>0) Then Exit;
+ MLSkip(16);
+ MinC:=MLGet(4); MaxC:=MLGet(4); MaxM:=MLGet(4);
+ If MaxM>Std Then Exit;
+ If (MaxM>5) And (Noise=0) Then Exit;
+ If (MaxC+1>8) Or (MaxC+1<MinC) Then Exit;
+ S^.MinCh:=MinC; S^.MaxCh:=MaxC; S^.CodedChannels:=((LongInt(1) Shl (MaxC-MinC+1))-1) Shl MinC;
+ S^.MaxMatrixCh:=MaxM; S^.NoiseType:=Noise;
+ S^.NoiseShift:=MLGet(4); S^.NoiseSeed:=MLGet(23);
+ MLSkip(19);
+ S^.DataCheck:=MLGet(1)<>0;
+ MLSkip(8); MLSkip(16);
+ For I:=0 To 7 Do S^.ChAssign[I]:=0;
+ For Ch:=0 To S^.MaxMatrixCh Do Begin
+  Assign:=MLGet(6);
+  If M^.Thd Then Begin
+   Chan:=MLThdExtract(S^.Mask,Assign);
+   Assign:=MLIndexOf(S^.Mask,Chan);
+  End;
+  If (Assign<0) Or (Assign>S^.MaxMatrixCh) Then Exit;
+  S^.ChAssign[Assign]:=Ch;
+ End;
+ MLSkip(8);
+ S^.ParamPresence:=$FF; S^.NumPrim:=0; S^.Blocksize:=8;
+ For I:=0 To 7 Do Begin S^.OutputShift[I]:=0; S^.QuantStep[I]:=0; End;
+ For Ch:=S^.MinCh To S^.MaxCh Do Begin
+  With S^.Ch[Ch] Do Begin
+   FirOrder:=0; IirOrder:=0; FirShift:=0; IirShift:=0;
+   HuffOffset:=0; SignHuffOffset:=-(LongInt(1) Shl 23); Codebook:=0; HuffLsbs:=24;
+  End;
+ End;
+ If Sub=M^.MaxDecoded Then Begin
+  M^.NbChan:=MLPop(S^.Mask);
+  If (Not M^.Thd) And (M^.NeedsReorder<>0) Then Begin
+   If (S^.Mask=3+48+8) Or (S^.Mask=7+48) Then Begin
+    I:=S^.ChAssign[4]; S^.ChAssign[4]:=S^.ChAssign[3]; S^.ChAssign[3]:=S^.ChAssign[2]; S^.ChAssign[2]:=I;
+   End Else If S^.Mask=7+48+8 Then Begin
+    I:=S^.ChAssign[2]; S^.ChAssign[2]:=S^.ChAssign[4]; S^.ChAssign[4]:=I;
+    I:=S^.ChAssign[3]; S^.ChAssign[3]:=S^.ChAssign[5]; S^.ChAssign[5]:=I;
+   End;
+  End;
+ End;
+ MLReadRestart:=0;
+End;
+
+Function MLReadFilter(Sub,Chan,Filt: LongInt): LongInt;
+Var
+ M: PMLP; S: PMLSub; Order,MaxOrder,I,CoeffBits,CoeffShift,StateBits,StateShift: LongInt;
+Begin
+ M:=MLM; S:=@M^.Sub[Sub]; MLReadFilter:=-1;
+ If Filt<>0 Then MaxOrder:=4 Else MaxOrder:=8;
+ Inc(M^.FilterChanged[Chan,Filt]);
+ If M^.FilterChanged[Chan,Filt]-1>1 Then Exit;
+ Order:=MLGet(4);
+ If Order>MaxOrder Then Exit;
+ If Filt=0 Then S^.Ch[Chan].FirOrder:=Order Else S^.Ch[Chan].IirOrder:=Order;
+ If Order>0 Then Begin
+  If Filt=0 Then S^.Ch[Chan].FirShift:=MLGet(4) Else S^.Ch[Chan].IirShift:=MLGet(4);
+  CoeffBits:=MLGet(5); CoeffShift:=MLGet(3);
+  If (CoeffBits<1) Or (CoeffBits>16) Then Exit;
+  If CoeffBits+CoeffShift>16 Then Exit;
+  For I:=0 To Order-1 Do S^.Ch[Chan].Coeff[Filt,I]:=MLGetS(CoeffBits)*(LongInt(1) Shl CoeffShift);
+  If MLGet(1)<>0 Then Begin
+   If Filt=0 Then Exit;
+   StateBits:=MLGet(4); StateShift:=MLGet(4);
+   For I:=0 To Order-1 Do
+    If StateBits<>0 Then S^.Ch[Chan].IirState[I]:=MLGetS(StateBits)*(LongInt(1) Shl StateShift) Else S^.Ch[Chan].IirState[I]:=0;
+  End;
+ End;
+ MLReadFilter:=0;
+End;
+
+Function MLReadMatrix(Sub: LongInt): LongInt;
+Var
+ M: PMLP; S: PMLSub; Mat,Ch,FracBits,MaxChan,Coef,MaxPrim,I: LongInt;
+Begin
+ M:=MLM; S:=@M^.Sub[Sub]; MLReadMatrix:=-1;
+ If M^.Thd Then MaxPrim:=8 Else MaxPrim:=6;
+ Inc(M^.MatrixChanged);
+ If M^.MatrixChanged-1>1 Then Exit;
+ S^.NumPrim:=MLGet(4);
+ If S^.NumPrim>MaxPrim Then Begin
+  S^.NumPrim:=0; For I:=0 To 7 Do S^.MatrixOut[I]:=0; Exit;
+ End;
+ For Mat:=0 To S^.NumPrim-1 Do Begin
+  S^.MatrixOut[Mat]:=MLGet(4); FracBits:=MLGet(4); S^.LsbBypass[Mat]:=MLGet(1);
+  If (S^.MatrixOut[Mat]>S^.MaxMatrixCh) Or (FracBits>14) Then Begin
+   S^.NumPrim:=0; For I:=0 To 7 Do S^.MatrixOut[I]:=0; Exit;
+  End;
+  MaxChan:=S^.MaxMatrixCh; If S^.NoiseType=0 Then Inc(MaxChan,2);
+  For Ch:=0 To MaxChan Do Begin
+   Coef:=0;
+   If MLGet(1)<>0 Then Coef:=MLGetS(FracBits+2);
+   S^.MatrixCoeff[Mat,Ch]:=Coef*(LongInt(1) Shl (14-FracBits));
+  End;
+  If S^.NoiseType<>0 Then S^.MatrixNoiseShift[Mat]:=MLGet(4) Else S^.MatrixNoiseShift[Mat]:=0;
+ End;
+ MLReadMatrix:=0;
+End;
+
+Function MLReadChannelParams(Sub,Ch: LongInt): LongInt;
+Var M: PMLP; S: PMLSub; C: PMLCh;
+Begin
+ M:=MLM; S:=@M^.Sub[Sub]; C:=@S^.Ch[Ch]; MLReadChannelParams:=-1;
+ If S^.ParamPresence And 8<>0 Then If MLGet(1)<>0 Then If MLReadFilter(Sub,Ch,0)<0 Then Exit;
+ If S^.ParamPresence And 4<>0 Then If MLGet(1)<>0 Then If MLReadFilter(Sub,Ch,1)<0 Then Exit;
+ If C^.FirOrder+C^.IirOrder>8 Then Exit;
+ If (C^.FirOrder<>0) And (C^.IirOrder<>0) And (C^.FirShift<>C^.IirShift) Then Exit;
+ If (C^.FirOrder=0) And (C^.IirOrder<>0) Then C^.FirShift:=C^.IirShift;
+ If S^.ParamPresence And 2<>0 Then If MLGet(1)<>0 Then C^.HuffOffset:=MLGetS(15);
+ C^.Codebook:=MLGet(2); C^.HuffLsbs:=MLGet(5);
+ If (C^.Codebook>0) And (C^.HuffLsbs>24) Then Begin C^.HuffLsbs:=0; Exit; End;
+ MLReadChannelParams:=0;
+End;
+
+Function MLSignHuff(S: PMLSub; Ch: LongInt): LongInt;
+Var C: PMLCh; LsbBits,SignShift,Off: LongInt;
+Begin
+ C:=@S^.Ch[Ch];
+ LsbBits:=C^.HuffLsbs-S^.QuantStep[Ch];
+ If C^.Codebook<>0 Then SignShift:=LsbBits+2-C^.Codebook Else SignShift:=LsbBits-1;
+ Off:=C^.HuffOffset;
+ If C^.Codebook>0 Then Off:=Off-(LongInt(7) Shl LsbBits);
+ If SignShift>=0 Then Off:=Off-(LongInt(1) Shl SignShift);
+ MLSignHuff:=Off;
+End;
+
+Function MLReadDecoding(Sub: LongInt): LongInt;
+Var M: PMLP; S: PMLSub; Ch,Ret,Recompute,I: LongInt;
+Begin
+ M:=MLM; S:=@M^.Sub[Sub]; Ret:=0; Recompute:=0;
+ Repeat
+  If S^.ParamPresence And 1<>0 Then If MLGet(1)<>0 Then S^.ParamPresence:=MLGet(8);
+  If S^.ParamPresence And 128<>0 Then If MLGet(1)<>0 Then Begin
+   S^.Blocksize:=MLGet(9);
+   If (S^.Blocksize<8) Or (S^.Blocksize>M^.AuSize) Then Begin S^.Blocksize:=0; MLReadDecoding:=-1; Exit; End;
+  End;
+  If S^.ParamPresence And 64<>0 Then If MLGet(1)<>0 Then Begin Ret:=MLReadMatrix(Sub); If Ret<0 Then MLReadDecoding:=Ret; If Ret<0 Then Exit; End;
+  If S^.ParamPresence And 32<>0 Then If MLGet(1)<>0 Then
+   For Ch:=0 To S^.MaxMatrixCh Do Begin
+    S^.OutputShift[Ch]:=MLGetS(4);
+    If S^.OutputShift[Ch]<0 Then S^.OutputShift[Ch]:=0;
+   End;
+  If S^.ParamPresence And 16<>0 Then If MLGet(1)<>0 Then
+   For Ch:=0 To S^.MaxCh Do Begin S^.QuantStep[Ch]:=MLGet(4); Recompute:=Recompute Or (1 Shl Ch); End;
+  For Ch:=S^.MinCh To S^.MaxCh Do If MLGet(1)<>0 Then Begin
+   Recompute:=Recompute Or (1 Shl Ch);
+   Ret:=MLReadChannelParams(Sub,Ch);
+   If Ret<0 Then Break;
+  End;
+ Until True;
+ For Ch:=0 To S^.MaxCh Do If Recompute And (1 Shl Ch)<>0 Then Begin
+  If (S^.Ch[Ch].Codebook>0) And (S^.Ch[Ch].HuffLsbs<S^.QuantStep[Ch]) Then Begin
+   Ret:=-1; S^.QuantStep[Ch]:=0;
+  End;
+  S^.Ch[Ch].SignHuffOffset:=MLSignHuff(S,Ch);
+ End;
+ MLReadDecoding:=Ret;
+End;
+
+Function MLReadHuff(Sub,Pos: LongInt): LongInt;
+Var M: PMLP; S: PMLSub; Mat,Ch,Codebook,LsbBits,Res,Q,Idx,Len: LongInt; C: PMLCh; V: Int64;
+Begin
+ M:=MLM; S:=@M^.Sub[Sub]; MLReadHuff:=0;
+ For Mat:=0 To S^.NumPrim-1 Do If S^.LsbBypass[Mat]<>0 Then M^.Bypass[Pos+S^.Blockpos,Mat]:=MLGet(1);
+ For Ch:=S^.MinCh To S^.MaxCh Do Begin
+  C:=@S^.Ch[Ch]; Codebook:=C^.Codebook; Q:=S^.QuantStep[Ch];
+  LsbBits:=C^.HuffLsbs-Q; Res:=0;
+  If Codebook>0 Then Begin
+   Idx:=LongInt(MLPeek(9));
+   Res:=MLVlc[Codebook-1,Idx];
+   If Res<0 Then Begin MLReadHuff:=-1; Exit; End;
+   Len:=MLHuff[Codebook-1,Res,1]; Inc(M^.BitPos,Len);
+  End;
+  If LsbBits>0 Then Res:=LongInt(Int64(Res) Shl LsbBits)+MLGet(LsbBits);
+  Res:=Res+C^.SignHuffOffset;
+  V:=Int64(Res)*(Int64(1) Shl Q);
+  M^.Smp[Pos+S^.Blockpos,Ch]:=LongInt(V And $FFFFFFFF);
+ End;
+End;
+
+Procedure MLFilterChannel(Sub,Ch: LongInt);
+Var
+ M: PMLP; S: PMLSub; C: PMLCh; FB: Array[0..167] Of LongInt; IB: Array[0..163] Of LongInt;
+ Pf,Pi,I,K,Mask: LongInt; Accum,Res: Int64; Result: LongInt;
+Begin
+ M:=MLM; S:=@M^.Sub[Sub]; C:=@S^.Ch[Ch];
+ Mask:=-(LongInt(1) Shl S^.QuantStep[Ch]);
+ Pf:=160; Pi:=160;
+ For I:=0 To 7 Do FB[Pf+I]:=C^.FirState[I];
+ For I:=0 To 3 Do IB[Pi+I]:=C^.IirState[I];
+ For I:=0 To S^.Blocksize-1 Do Begin
+  Res:=M^.Smp[S^.Blockpos+I,Ch];
+  Accum:=0;
+  For K:=0 To C^.FirOrder-1 Do Accum:=Accum+Int64(FB[Pf+K])*C^.Coeff[0,K];
+  For K:=0 To C^.IirOrder-1 Do Accum:=Accum+Int64(IB[Pi+K])*C^.Coeff[1,K];
+  Accum:=MPASarL(Accum,C^.FirShift);
+  Result:=LongInt((Accum+Res) And Int64(Mask));
+  Dec(Pf); FB[Pf]:=Result;
+  Dec(Pi); IB[Pi]:=LongInt(Int64(Result)-Accum);
+  M^.Smp[S^.Blockpos+I,Ch]:=Result;
+ End;
+ For I:=0 To 7 Do C^.FirState[I]:=FB[Pf+I];
+ For I:=0 To 3 Do C^.IirState[I]:=IB[Pi+I];
+End;
+
+Function MLReadBlock(Sub: LongInt): LongInt;
+Var M: PMLP; S: PMLSub; I,Ch: LongInt;
+Begin
+ M:=MLM; S:=@M^.Sub[Sub]; MLReadBlock:=0;
+ If S^.DataCheck Then MLSkip(16);
+ If S^.Blockpos+S^.Blocksize>M^.AuSize Then Begin MLReadBlock:=-1; Exit; End;
+ FillChar(M^.Bypass[S^.Blockpos,0],S^.Blocksize*8,0);
+ For I:=0 To S^.Blocksize-1 Do If MLReadHuff(Sub,I)<0 Then Begin MLReadBlock:=-1; Exit; End;
+ For Ch:=S^.MinCh To S^.MaxCh Do MLFilterChannel(Sub,Ch);
+ Inc(S^.Blockpos,S^.Blocksize);
+ If S^.DataCheck Then MLSkip(8);
+End;
+
+Function MLOutput(Sub: LongInt): LongInt;
+Var
+ M: PMLP; S: PMLSub; Mat,MaxChan,I,Src,Dest,Idx,Idx2,OutCh,MatCh: LongInt; Seed: LongWord; Sh7: LongWord; Accum: Int64; Mask: LongInt; Smp: LongInt; T: Int64;
+Begin
+ M:=MLM; S:=@M^.Sub[Sub]; MLOutput:=-1;
+ If M^.NbChan<>S^.MaxMatrixCh+1 Then Exit;
+ If S^.Blockpos=0 Then Exit;
+ MaxChan:=S^.MaxMatrixCh;
+ Seed:=S^.NoiseSeed;
+ If S^.NoiseType=0 Then Begin
+  For I:=0 To S^.Blockpos-1 Do Begin
+   Sh7:=(Seed Shr 7) And $FFFF;
+   M^.Smp[I,MaxChan+1]:=ShortInt((Seed Shr 15) And 255)*(LongInt(1) Shl S^.NoiseShift);
+   M^.Smp[I,MaxChan+2]:=ShortInt(Sh7 And 255)*(LongInt(1) Shl S^.NoiseShift);
+   Seed:=((Seed And $FFFF) Shl 16) Xor Sh7 Xor (Sh7 Shl 5);
+  End;
+  S^.NoiseSeed:=Seed; Inc(MaxChan,2);
+ End Else Begin
+  For I:=0 To M^.AuPow2-1 Do Begin
+   Sh7:=(Seed Shr 15) And 255;
+   M^.Noise[I]:=MLNoise[Sh7];
+   Seed:=((Seed And $FFFFFF) Shl 8) Xor Sh7 Xor (Sh7 Shl 5);
+  End;
+  S^.NoiseSeed:=Seed;
+ End;
+ For Mat:=0 To S^.NumPrim-1 Do Begin
+  Dest:=S^.MatrixOut[Mat];
+  Mask:=-(LongInt(1) Shl S^.QuantStep[Dest]);
+  Idx:=S^.NumPrim-Mat; Idx2:=2*Idx+1;
+  For I:=0 To S^.Blockpos-1 Do Begin
+   Accum:=0;
+   For Src:=0 To MaxChan Do Accum:=Accum+Int64(M^.Smp[I,Src])*S^.MatrixCoeff[Mat,Src];
+   If S^.MatrixNoiseShift[Mat]<>0 Then Begin
+    Idx:=Idx And (M^.AuPow2-1);
+    Accum:=Accum+Int64(M^.Noise[Idx])*(LongInt(1) Shl (S^.MatrixNoiseShift[Mat]+7));
+    Inc(Idx,Idx2);
+   End;
+   M^.Smp[I,Dest]:=LongInt(((MPASarL(Accum,14)) And Int64(Mask))+M^.Bypass[I,Mat]);
+  End;
+ End;
+ MLOutput:=0;
+End;
+
+Procedure MLEmit(Sub: LongInt);
+Var M: PMLP; S: PMLSub; I,OutCh,MatCh: LongInt; Smp: LongInt; T: Int64;
+Begin
+ M:=MLM; S:=@M^.Sub[Sub];
+ For I:=0 To S^.Blockpos-1 Do
+  For OutCh:=0 To S^.MaxMatrixCh Do Begin
+   MatCh:=S^.ChAssign[OutCh];
+   T:=Int64(M^.Smp[I,MatCh])*(Int64(1) Shl S^.OutputShift[MatCh]);
+   Smp:=LongInt(T And $FFFFFFFF);
+   If M^.Is32 Then EAPut(MPASarL(Int64(LongInt((Int64(Smp)*256) And $FFFFFFFF)),16))
+   Else EAPut(SmallInt(MPASarL(Smp,8)));
+  End;
+End;
+
+{ renvoie 1 si une unite d acces a produit des echantillons, 0 sinon ; -1 erreur }
+Function MLAccessUnit(Length: LongInt): LongInt;
+Var
+ M: PMLP; HeaderSize,SubHeader,SubStart,Sub,Dummy,Ext,Nonrestart,CheckData,Endv,I,Off,Base,Rel,Shorten,Alloc: LongInt;
+ Major: Boolean; ParityPresent: Array[0..3] Of Boolean; DataLen: Array[0..3] Of LongInt; Par: LongInt;
+ S: PMLSub; Skip: Boolean; Rate: LongInt;
+Label NextSub, Mismatch;
+Begin
+ M:=MLM; MLAccessUnit:=-1;
+ M^.BitPos:=32; M^.BitLimit:=Length*8;
+ HeaderSize:=4; SubHeader:=0; Major:=False;
+ If MLPeek(31)=($F8726FBA Shr 1) Then Begin
+  If MLReadMajorSync(Rate)<0 Then Begin M^.ParamsValid:=False; Exit; End;
+  Major:=True; Inc(HeaderSize,M^.HeaderSize);
+  M^.ParamsValid:=True;
+ End;
+ If Not M^.ParamsValid Then Begin MLAccessUnit:=0; Exit; End;
+ SubStart:=0;
+ For Sub:=0 To M^.NumSub-1 Do Begin
+  Ext:=MLGet(1); Nonrestart:=MLGet(1); CheckData:=MLGet(1); MLSkip(1);
+  Endv:=MLGet(12)*2;
+  Inc(SubHeader,2);
+  If Ext<>0 Then Begin
+   If Not M^.Thd Then Begin M^.ParamsValid:=False; Exit; End;
+   MLSkip(16); Inc(SubHeader,2);
+  End;
+  If Length<HeaderSize+SubHeader Then Begin M^.ParamsValid:=False; Exit; End;
+  If (Nonrestart<>0)=Major Then Begin M^.ParamsValid:=False; Exit; End;
+  If Endv+HeaderSize+SubHeader>Length Then Endv:=Length-HeaderSize-SubHeader;
+  If Endv<SubStart Then Begin M^.ParamsValid:=False; Exit; End;
+  If Sub>M^.MaxDecoded Then Continue;
+  ParityPresent[Sub]:=CheckData<>0;
+  DataLen[Sub]:=Endv-SubStart; SubStart:=Endv;
+ End;
+ Par:=0;
+ For I:=0 To 3 Do Par:=Par Xor M^.Buf^[I];
+ For I:=0 To SubHeader-1 Do Par:=Par Xor M^.Buf^[HeaderSize+I];
+ If (((Par Shr 4) Xor Par) And 15)<>15 Then Begin M^.ParamsValid:=False; Exit; End;
+ Off:=HeaderSize+SubHeader;
+ For Sub:=0 To M^.MaxDecoded Do Begin
+  S:=@M^.Sub[Sub];
+  Base:=Off*8; M^.BitPos:=Base; M^.BitLimit:=(Off+DataLen[Sub])*8;
+  M^.MatrixChanged:=0; FillChar(M^.FilterChanged,SizeOf(M^.FilterChanged),0);
+  S^.Blockpos:=0;
+  Repeat
+   If MLGet(1)<>0 Then Begin
+    If MLGet(1)<>0 Then Begin
+     If MLReadRestart(Sub)<0 Then GoTo NextSub;
+     S^.RestartSeen:=True;
+    End;
+    If Not S^.RestartSeen Then GoTo NextSub;
+    If MLReadDecoding(Sub)<0 Then GoTo NextSub;
+   End;
+   If Not S^.RestartSeen Then GoTo NextSub;
+   If (((M^.NbChan=6) And (((M^.SubstreamInfo Shr 2) And 3)<>3)) Or
+       ((M^.NbChan=8) And (((M^.SubstreamInfo Shr 4) And 7)<>7) And (((M^.SubstreamInfo Shr 4) And 7)<>6) And (((M^.SubstreamInfo Shr 4) And 7)<>3)))
+      And (Sub>0) And (Sub<M^.MaxDecoded) And (S^.MinCh<=M^.Sub[Sub-1].MaxCh) Then GoTo NextSub;
+   If (Sub<>M^.MaxDecoded) And ((S^.CodedChannels And M^.Sub[M^.MaxDecoded].CodedChannels)<>0) Then GoTo NextSub;
+   If MLReadBlock(Sub)<0 Then Exit;
+   If M^.BitPos-Base>=DataLen[Sub]*8 Then GoTo Mismatch;
+  Until MLGet(1)<>0;
+  MLSkip((-(M^.BitPos-Base)) And 15);
+  If DataLen[Sub]*8-(M^.BitPos-Base)>=32 Then Begin
+   If MLGet(16)<>$D234 Then Exit;
+   Shorten:=MLGet(16);
+   If M^.Thd And (Shorten And $2000<>0) Then Begin
+    Shorten:=Shorten And $1FFF; If Shorten>S^.Blockpos Then Shorten:=S^.Blockpos;
+    Dec(S^.Blockpos,Shorten);
+   End Else If (Not M^.Thd) And (Shorten<>$D234) Then Exit;
+   S^.EndOfStream:=True;
+  End;
+  If ParityPresent[Sub] Then Begin
+   If DataLen[Sub]*8-(M^.BitPos-Base)<>16 Then GoTo Mismatch;
+   MLSkip(16);
+  End;
+  If DataLen[Sub]*8<>M^.BitPos-Base Then GoTo Mismatch;
+NextSub:
+  Inc(Off,DataLen[Sub]);
+ End;
+ If MLOutput(M^.MaxDecoded)<0 Then Exit;
+ MLAccessUnit:=1;
+ Exit;
+Mismatch:
+ MLAccessUnit:=-1;
+End;
+
+{ analyse la synchronisation majeure d un paquet brut (mlp_parser.c) : renvoie le nombre de sous-flux, -1 si invalide }
+Function MLParseSync(Var B: Array Of Byte; At,Avail: LongInt): LongInt;
+Var Size,I,Crc: LongInt;
+Begin
+ MLParseSync:=-1;
+ If Avail<8+28 Then Exit;
+ Size:=28;
+ If B[At+4+3]=$BA Then If B[At+4+25] And 1<>0 Then Inc(Size,2+(B[At+4+26] Shr 4)*2);
+ If Avail<4+Size Then Exit;
+ Crc:=0;
+ For I:=0 To Size-5 Do Crc:=((Crc Shl 8) And $FFFF) Xor MLCrc16[((Crc Shr 8) Xor B[At+4+I]) And 255];
+ Crc:=((Crc And 255) Shl 8) Or (Crc Shr 8);
+ Crc:=Crc Xor (B[At+4+Size-4]+B[At+4+Size-3]*256);
+ If Crc<>B[At+4+Size-2]+B[At+4+Size-1]*256 Then Exit;
+ If (B[At+4+3]<>$BA) And (B[At+4+3]<>$BB) Then Exit;
+ MLParseSync:=B[At+4+16] Shr 4;
+End;
+
+Function MLBitsAt(Var B: Array Of Byte; Bit0,N: LongInt): LongInt;
+Var V,I,P: LongInt;
+Begin
+ V:=0; P:=32+Bit0;
+ For I:=1 To N Do Begin V:=(V Shl 1) Or ((B[P Shr 3] Shr (7-(P And 7))) And 1); Inc(P); End;
+ MLBitsAt:=V;
+End;
+
+Procedure DecodeMLP(Const Source,Target: String; Thd: Boolean);
+Var
+ Head: Array[0..11] Of Byte; Pos,Len,Got,I,R,NumSub,Sync,Par,P,K,Rate,Started,Nch,Frames: LongInt; Window: Array[0..8191] Of Byte;
+ InSync,InitDone: Boolean; State: LongWord; Ok: Boolean;
+Begin
+ MLInitTables; EAReset;
+ GetMem(MLM,SizeOf(TMLP)); FillChar(MLM^,SizeOf(TMLP),0);
+ GetMem(MLM^.Buf,8192+256); MLM^.Thd:=Thd;
+ For I:=0 To 3 Do MLM^.Sub[I].Mask:=0;
+ OpenRead(Source);
+ Pos:=0; InSync:=False; InitDone:=False; NumSub:=0; Started:=0; Nch:=0; Rate:=0; Frames:=0;
+ { le decodeur recoit d abord la disposition du premier en-tete valide (analyseur) }
+ State:=0;
+ OpenWrite(Target);
+ While Pos+4<=InputSize Do Begin
+  If Not InSync Then Begin
+   { recherche d une synchronisation majeure a partir de Pos (debut du paquet >= 4 octets avant) }
+   Ok:=False; K:=Pos+4;
+   While K+4<=InputSize Do Begin
+    ReadAt(K,Head,4);
+    If (Head[0]=$F8) And (Head[1]=$72) And (Head[2]=$6F) And ((Head[3]=$BA) Or (Head[3]=$BB)) Then Begin Ok:=True; Break; End;
+    Inc(K);
+   End;
+   If Not Ok Then Break;
+   Pos:=K-4; InSync:=True;
+  End;
+  ReadAt(Pos,Head,4);
+  Len:=((Head[0]*256+Head[1]) And $FFF)*2;
+  If Len<=0 Then Begin InSync:=False; Inc(Pos); Continue; End;
+  If Pos+Len>InputSize Then Break;
+  If Len>8192 Then Begin InSync:=False; Inc(Pos); Continue; End;
+  FillChar(MLM^.Buf^,Len+256,0);
+  I:=0; While I<Len Do Begin
+   K:=Len-I; If K>4096 Then K:=4096;
+   ReadAt(Pos+I,MLM^.Buf^[I],K); Inc(I,K);
+  End;
+  Sync:=0;
+  If (Len>=8) And (MLM^.Buf^[4]=$F8) And (MLM^.Buf^[5]=$72) And (MLM^.Buf^[6]=$6F) And ((MLM^.Buf^[7] Or 1)=$BB) Then Sync:=1;
+  If Sync=0 Then Begin
+   Par:=0; P:=0;
+   For K:=-1 To NumSub-1 Do Begin
+    Par:=Par Xor MLM^.Buf^[P] Xor MLM^.Buf^[P+1]; Inc(P,2);
+    If (K<0) Or (MLM^.Buf^[P-2] And $80<>0) Then Begin Par:=Par Xor MLM^.Buf^[P] Xor MLM^.Buf^[P+1]; Inc(P,2); End;
+   End;
+   If (((Par Shr 4) Xor Par) And 15)<>15 Then Begin InSync:=False; Inc(Pos); Continue; End;
+  End Else Begin
+   K:=MLParseSync(MLM^.Buf^,0,Len);
+   If K<0 Then Begin InSync:=False; Inc(Pos); Continue; End;
+   NumSub:=K;
+   If Not InitDone Then Begin
+    InitDone:=True;
+    If MLM^.Buf^[7]=$BB Then MLM^.NbChan:=MLPop(MLMlpLayout(MLBitsAt(MLM^.Buf^,59,5)))
+    Else Begin
+     K:=MLThdChannels(MLBitsAt(MLM^.Buf^,51,13));
+     If K=0 Then K:=MLThdChannels(MLBitsAt(MLM^.Buf^,44,5));
+     MLM^.NbChan:=K;
+    End;
+   End;
+  End;
+  R:=MLAccessUnit(Len);
+  If R=1 Then Begin
+   If Started=0 Then Begin Started:=1; Rate:=MLM^.Rate; Nch:=MLM^.NbChan; ADPCMWaveHeader(Rate,Nch,0); End;
+   If (MLM^.Rate=Rate) And (MLM^.NbChan=Nch) Then MLEmit(MLM^.MaxDecoded);
+   Inc(Frames);
+   for I:=0 to MLM^.MaxDecoded do If MLM^.Sub[I].EndOfStream Then Begin
+    MLM^.Sub[I].EndOfStream:=False; MLM^.ParamsValid:=False;
+   End;
+  End;
+  Inc(Pos,Len);
+ End;
+ EAFlush;
+ If EAWritten=0 Then Fail('mlp: aucune donnee audio decodee.');
+ ADPCMPatchHeader(Rate,Nch,EAWritten);
  CloseRead; CloseWrite;
 End;
 
@@ -57375,12 +58091,15 @@ Begin
  WriteLn(' DE yuv4mpegpipe    Y4M YUV420 8 bits (FFV1 AVI, alias: y4m)');
  WriteLn(' DE m4v             raw MPEG-4 video format (MPEG-4 Part 2)');
  WriteLn(' D  mp1             MPEG audio Layer I');
+ WriteLn(' D  mlp             raw MLP (Meridian Lossless Packing)');
+ WriteLn(' D  truehd          raw TrueHD');
+ WriteLn(' D  mp3adu          ADU MP3 (conteneur propre au projet .adu : longueur 16 bits + trame)');
  WriteLn(' DE mp3             MPEG Layer III; encodage MPEG-1 CBR 32..320 kbit/s');
  WriteLn(' DE mp4             MP4: copie H264/MPEG4, AAC/MP3, VP9/Opus; MOV: decodeur 8BPS');
  WriteLn(' DE mpeg            MPEG-1 System format (copie PES / muxage MP3)');
  WriteLn(' DE mpeg1video      raw MPEG-1 video (encodage I/B; decodage I/P/B; alias: m1v)');
  WriteLn('  E mpeg2video      raw MPEG-2 video (encodage I/B; copie MPEG System; alias: m2v)');
- WriteLn('  E mp2             Flux Layer II extrait de MPEG System');
+ WriteLn(' DE mp2             MPEG Layer II; encodage natif (octet-identique a ffmpeg mp2) ou extraction de MPEG System');
  WriteLn('  E png             PNG RGB24, une image');
  WriteLn('  E rawvideo        Alias de sortie PNG/GIF; pas de pixels bruts');
  WriteLn(' D  voc             Creative Voice PCM');
@@ -57477,7 +58196,7 @@ End;
 
 Var
  I,J,Code: Integer;
- Argument,Value,Detected,Intermediate: String;
+ Argument,Value,Detected,Intermediate: String; ProbeBuf: Array[0..7] Of Byte;
  Number: LongInt;
 
 Function NextArgument: String;Begin
@@ -57756,8 +58475,13 @@ BEGIN
    WriteLn('DEVS D ffv1            FFmpeg video codec #1 (decodeur v0-v4; encodeur v1 YUV420 8 bits)');
    WriteLn('DEV    gif             GIF (decodeur anime complet; encodeur palette RGB 3/3/2, LZW, une image)');
    WriteLn('D V D  h264            H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 (decodeur progressif 4:2:0 8 bits: CAVLC/CABAC, I/P/B, 8x8, ponderation; .h264, MP4, AVI, FLV)');
+   WriteLn('D A    mlp             MLP (Meridian Lossless Packing)');
    WriteLn('D A    mp1             MP1 (MPEG audio layer 1)');
+   WriteLn('DEA    mp2             MP2 (MPEG audio layer 2)');
    WriteLn('DEA    mp3             MP3 (decodeur Layer III; encodeur MPEG-1 CBR 32..320k)');
+   WriteLn('D A    mp3adu          ADU (Application Data Unit) MP3 (MPEG audio layer 3)');
+   WriteLn('D A    mp3on4          MP3onMP4');
+   WriteLn('D A    truehd          TrueHD');
    WriteLn(' EA    libmp3lame      libmp3lame MP3 (MPEG audio layer 3) (encodeur MPEG-1 CBR natif du projet, non identique a LAME)');
    WriteLn('DEV    mpeg1video      MPEG-1 video (encodeur I/B; decodeur I/P/B)');
    WriteLn(' EV    mpeg2video      MPEG-2 video (encodeur progressif I/B)');
@@ -57975,6 +58699,17 @@ BEGIN
  If (Detected='') And Not IsHTTP(Intermediate) And (InputFormat<>'h261') And (InputFormat<>'h263') Then If H4ProbeFile(Intermediate) Then Detected:='h264';
  If (Detected='') And Not IsHTTP(Intermediate) And (InputFormat<>'h261') And (InputFormat<>'h264') Then If H3ProbeFile(Intermediate) Then Detected:='h263';
  If (Detected='') And Not IsHTTP(Intermediate) And (InputFormat<>'h263') And (InputFormat<>'h264') Then If H1ProbeFile(Intermediate) Then Detected:='h261';
+ If (Detected='') And Not IsHTTP(Intermediate) And ((InputFormat='mlp') Or (InputFormat='truehd') Or (Lower(Extension(Intermediate))='mlp') Or (Lower(Extension(Intermediate))='thd') Or (Lower(Extension(Intermediate))='truehd')) Then Begin
+  OpenRead(Intermediate); Detected:='';
+  If InputSize>=8 Then Begin
+   ReadAt(4,ProbeBuf,4);
+   If (ProbeBuf[0]=$F8) And (ProbeBuf[1]=$72) And (ProbeBuf[2]=$6F) Then Begin
+    If ProbeBuf[3]=$BB Then Detected:='mlp' Else If ProbeBuf[3]=$BA Then Detected:='truehd';
+   End;
+  End;
+  If Detected='' Then If (InputFormat='mlp') Or (InputFormat='truehd') Then Detected:=InputFormat Else If Lower(Extension(Intermediate))='mlp' Then Detected:='mlp' Else Detected:='truehd';
+  CloseRead;
+ End;
  If (Detected='') And (Lower(Extension(Intermediate))='adu') And Not IsHTTP(Intermediate) Then Detected:='mp3adu';
  If (Detected='') And (Lower(Extension(Intermediate))='mvi') And Not IsHTTP(Intermediate) Then Detected:='mvi';
  If (Detected='') And (Lower(Extension(Intermediate))='jls') And Not IsHTTP(Intermediate) Then Detected:='jpegls_pipe';
@@ -58429,6 +59164,8 @@ BEGIN
    End Else
    If InputFormat='mp3on4' Then DecodeMP3On4(InputPath,Temps[0]) Else
    If InputFormat='mp3adu' Then DecodeMP3ADU(InputPath,Temps[0]) Else
+   If InputFormat='mlp' Then DecodeMLP(InputPath,Temps[0],False) Else
+   If InputFormat='truehd' Then DecodeMLP(InputPath,Temps[0],True) Else
    If (InputFormat='mp3') Or (InputFormat='mp1') Or (InputFormat='mp2') Then DecodeMPA(InputPath,Temps[0]) Else
    If InputFormat='ac3' Then ProcessAC3(InputPath,Temps[0],False,0) Else
    If InputFormat='eac3' Then DecodeEAC3(InputPath,Temps[0]) Else
