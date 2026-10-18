@@ -15705,6 +15705,325 @@ Begin
  CloseRead; CloseWrite;
 End;
 
+{ ---- encodeur mp2 (mpegaudioenc_template.c, variante flottante "mp2") ---- }
+Const
+ MP2SFTable: Array[0..63] Of LongInt=(2097152,1664510,1321122,1048576,832255,660561,524288,416127,330280,262144,208063,165140,131072,104031,82570,65536,52015,41285,32768,26007,20642,16384,13003,10321,8192,6501,5160,4096,3250,2580,2048,1625,1290,1024,812,645,512,406,322,256,203,161,128,101,80,64,50,40,32,25,20,16,12,10,8,6,5,4,3,2,2,1,1,1);
+ MP2SFInv: Array[0..63] Of LongWord=($35000000,$35214518,$354B2FF5,$35800000,$35A14518,$35CB2FF5,$36000000,$36214518,$364B2FF5,$36800000,$36A14518,$36CB2FF5,$37000000,$37214518,$374B2FF5,$37800000,$37A14518,$37CB2FF5,$38000000,$38214518,$384B2FF5,$38800000,$38A14518,$38CB2FF5,$39000000,$39214518,$394B2FF5,$39800000,$39A14518,$39CB2FF5,$3A000000,$3A214518,$3A4B2FF5,$3A800000,$3AA14518,$3ACB2FF5,$3B000000,$3B214518,$3B4B2FF5,$3B800000,$3BA14518,$3BCB2FF5,$3C000000,$3C214518,$3C4B2FF5,$3C800000,$3CA14518,$3CCB2FF5,$3D000000,$3D214518,$3D4B2FF5,$3D800000,$3DA14518,$3DCB2FF5,$3E000000,$3E214518,$3E4B2FF5,$3E800000,$3EA14518,$3ECB2FF5,$3F000000,$3F214518,$3F4B2FF5,$3F800000);
+ MP2Cos32: Array[0..29] Of LongInt=(17733,42813,16704,83981,29490,19704,16463,167154,25826,21195,18577,34756,56441,17121,333906,22112,38320,17401,67429,19101,27503,16563,111660,20398,31869,16890,48633,18124,24396,16403);
+ MP2BitInv: Array[0..31] Of Byte=(0,16,8,24,4,20,12,28,2,18,10,26,6,22,14,30,1,17,9,25,5,21,13,29,3,19,11,27,7,23,15,31);
+ MP2QuantSnr: Array[0..16] Of Word=(70,110,160,208,253,316,378,439,499,559,620,680,740,800,861,920,980);
+ MP2Smr: Array[0..31] Of SmallInt=(300,170,160,100,30,120,80,25,50,50,60,60,50,60,100,60,-40,-100,-210,-300,-420,-550,-680,-750,-750,-750,-750,-750,-910,-1070,-1100,-1080);
+ MP2NbSf: Array[0..3] Of Byte=(3,2,1,2);
+Type
+ TMP2Tab=Array[0..31] Of LongInt;
+ TMP2Ctx=Record
+  Nch,Lsf,BitrateIndex,FreqIndex,FrameSize,FrameFrac,FrameFracIncr,DoPadding,SbLimit,AllocSet: LongInt;
+  SamplesBuf: Array[0..1,0..4095] Of SmallInt; SamplesOffset: Array[0..1] Of LongInt;
+  SbSamples: Array[0..1,0..2,0..11,0..31] Of LongInt;
+  ScaleFactors: Array[0..1,0..31,0..2] Of Byte; ScaleCode: Array[0..1,0..31] Of Byte;
+  FilterBank: Array[0..511] Of SmallInt;
+  TotalQuantBits: Array[0..16] Of Word;
+  Out: Array[0..2047] Of Byte; OutBits: LongInt;
+ End;
+ PMP2Ctx=^TMP2Ctx;
+
+Function MP2Alloc(S: PMP2Ctx; Idx: LongInt): LongInt;
+Begin
+ Case S^.AllocSet Of
+  0: MP2Alloc:=MPAalloctable1[Idx];
+  1: MP2Alloc:=MPAalloctable3[Idx];
+  Else MP2Alloc:=MPAalloctable4[Idx];
+ End;
+End;
+
+Function MP2Mul(A,B: LongInt): LongInt;
+Begin MP2Mul:=LongInt(MPASarL(Int64(A)*Int64(B),15)); End;
+
+Procedure MP2Put(S: PMP2Ctx; N: LongInt; V: LongWord);
+Var I,P: LongInt;
+Begin
+ For I:=N-1 DownTo 0 Do Begin
+  P:=S^.OutBits Shr 3;
+  If (V Shr I) And 1<>0 Then S^.Out[P]:=S^.Out[P] Or (128 Shr (S^.OutBits And 7));
+  Inc(S^.OutBits);
+ End;
+End;
+
+Procedure MP2Idct32(Var Out: TMP2Tab; Var Tab: TMP2Tab);
+Var I,J,T,T1,Xp,X1,X2,X3,X4,Xr: LongInt;
+Begin
+ J:=31; While J>=3 Do Begin Tab[J]:=Tab[J]+Tab[J-2]; Dec(J,2); End;
+ T:=30;
+ Repeat Tab[T]:=Tab[T]+Tab[T-4]; Tab[T+1]:=Tab[T+1]+Tab[T-3]; Dec(T,4); Until T=2;
+ T:=28;
+ Repeat
+  Tab[T]:=Tab[T]+Tab[T-8]; Tab[T+1]:=Tab[T+1]+Tab[T-7]; Tab[T+2]:=Tab[T+2]+Tab[T-6]; Tab[T+3]:=Tab[T+3]+Tab[T-5];
+  Dec(T,8);
+ Until T=4;
+ T:=0;
+ Repeat
+  Tab[T+3]:=-Tab[T+3]; Tab[T+6]:=-Tab[T+6];
+  Tab[T+11]:=-Tab[T+11]; Tab[T+12]:=-Tab[T+12]; Tab[T+13]:=-Tab[T+13]; Tab[T+15]:=-Tab[T+15];
+  Inc(T,16);
+ Until T=32;
+ Xp:=0; T:=0;
+ Repeat
+  X3:=MP2Mul(Tab[T+16],23170);
+  X4:=Tab[T]-X3; X3:=Tab[T]+X3;
+  X2:=MP2Mul(-(Tab[T+24]+Tab[T+8]),23170);
+  X1:=MP2Mul(Tab[T+8]-X2,MP2Cos32[Xp]);
+  X2:=MP2Mul(Tab[T+8]+X2,MP2Cos32[Xp+1]);
+  Tab[T]:=X3+X1; Tab[T+8]:=X4-X2; Tab[T+16]:=X4+X2; Tab[T+24]:=X3-X1;
+  Inc(T);
+ Until T=8;
+ Inc(Xp,2);
+ T:=0;
+ Repeat
+  Xr:=MP2Mul(Tab[T+28],MP2Cos32[Xp]);
+  Tab[T+28]:=Tab[T]-Xr; Tab[T]:=Tab[T]+Xr;
+  Xr:=MP2Mul(Tab[T+4],MP2Cos32[Xp+1]);
+  Tab[T+4]:=Tab[T+24]-Xr; Tab[T+24]:=Tab[T+24]+Xr;
+  Xr:=MP2Mul(Tab[T+20],MP2Cos32[Xp+2]);
+  Tab[T+20]:=Tab[T+8]-Xr; Tab[T+8]:=Tab[T+8]+Xr;
+  Xr:=MP2Mul(Tab[T+12],MP2Cos32[Xp+3]);
+  Tab[T+12]:=Tab[T+16]-Xr; Tab[T+16]:=Tab[T+16]+Xr;
+  Inc(T);
+ Until T=4;
+ Inc(Xp,4);
+ For I:=0 To 3 Do Begin
+  Xr:=MP2Mul(Tab[30-I*4],MP2Cos32[Xp]);
+  Tab[30-I*4]:=Tab[I*4]-Xr; Tab[I*4]:=Tab[I*4]+Xr;
+  Xr:=MP2Mul(Tab[2+I*4],MP2Cos32[Xp+1]);
+  Tab[2+I*4]:=Tab[28-I*4]-Xr; Tab[28-I*4]:=Tab[28-I*4]+Xr;
+  Xr:=MP2Mul(Tab[31-I*4],MP2Cos32[Xp]);
+  Tab[31-I*4]:=Tab[1+I*4]-Xr; Tab[1+I*4]:=Tab[1+I*4]+Xr;
+  Xr:=MP2Mul(Tab[3+I*4],MP2Cos32[Xp+1]);
+  Tab[3+I*4]:=Tab[29-I*4]-Xr; Tab[29-I*4]:=Tab[29-I*4]+Xr;
+  Inc(Xp,2);
+ End;
+ T:=30; T1:=1;
+ Repeat
+  Xr:=MP2Mul(Tab[T1],MP2Cos32[Xp]);
+  Tab[T1]:=Tab[T]-Xr; Tab[T]:=Tab[T]+Xr;
+  Dec(T,2); Inc(T1,2); Inc(Xp);
+ Until T<0;
+ For I:=0 To 31 Do Out[I]:=Tab[MP2BitInv[I]];
+End;
+
+Procedure MP2Filter(S: PMP2Ctx; Ch: LongInt; Const Smp: Array Of SmallInt; Start,Incr: LongInt);
+Var Offset,I,J,K,Sum,P,Q,Pos: LongInt; Tmp: Array[0..63] Of LongInt; Tmp1,Out: TMP2Tab;
+Begin
+ Offset:=S^.SamplesOffset[Ch]; Pos:=Start;
+ For J:=0 To 35 Do Begin
+  For I:=0 To 31 Do Begin S^.SamplesBuf[Ch,Offset+(31-I)]:=Smp[Pos]; Inc(Pos,Incr); End;
+  For I:=0 To 63 Do Begin
+   Sum:=0;
+   For K:=0 To 7 Do Sum:=Sum+LongInt(S^.SamplesBuf[Ch,Offset+I+K*64])*LongInt(S^.FilterBank[I+K*64]);
+   Tmp[I]:=Sum;
+  End;
+  Tmp1[0]:=LongInt(MPASarL(Tmp[16],14));
+  For I:=1 To 16 Do Tmp1[I]:=LongInt(MPASarL(Int64(Tmp[I+16])+Tmp[16-I],14));
+  For I:=17 To 31 Do Tmp1[I]:=LongInt(MPASarL(Int64(Tmp[I+16])-Tmp[80-I],14));
+  MP2Idct32(Out,Tmp1);
+  For I:=0 To 31 Do S^.SbSamples[Ch,J Div 12,J Mod 12,I]:=Out[I];
+  Dec(Offset,32);
+  If Offset<0 Then Begin
+   Move(S^.SamplesBuf[Ch,0],S^.SamplesBuf[Ch,4096-(512-32)],(512-32)*2);
+   Offset:=4096-512;
+  End;
+ End;
+ S^.SamplesOffset[Ch]:=Offset;
+End;
+
+Procedure MP2ScaleFactors(S: PMP2Ctx; Ch: LongInt);
+Var J,I,K,Vmax,V,N,Index,D1,D2,Code: LongInt; Sf: Array[0..2] Of Byte;
+Begin
+ For J:=0 To S^.SbLimit-1 Do Begin
+  For I:=0 To 2 Do Begin
+   Vmax:=Abs(S^.SbSamples[Ch,I,0,J]);
+   For K:=1 To 11 Do Begin V:=Abs(S^.SbSamples[Ch,I,K,J]); If V>Vmax Then Vmax:=V; End;
+   If Vmax>1 Then Begin
+    N:=0; V:=Vmax; While V>1 Do Begin V:=V Shr 1; Inc(N); End;
+    Index:=(21-N)*3-3;
+    If Index>=0 Then Begin
+     While Vmax<=MP2SFTable[Index+1] Do Inc(Index);
+    End Else Index:=0;
+   End Else Index:=62;
+   Sf[I]:=Index;
+  End;
+  D1:=LongInt(Sf[0])-LongInt(Sf[1])+64; D2:=LongInt(Sf[1])-LongInt(Sf[2])+64;
+  Case D1 Of 0..61: D1:=0; 62..63: D1:=1; 64: D1:=2; 65..66: D1:=3; Else D1:=4; End;
+  Case D2 Of 0..61: D2:=0; 62..63: D2:=1; 64: D2:=2; 65..66: D2:=3; Else D2:=4; End;
+  Code:=0;
+  Case D1*5+D2 Of
+   0*5+0,0*5+4,3*5+4,4*5+0,4*5+4: Code:=0;
+   0*5+1,0*5+2,4*5+1,4*5+2: Begin Code:=3; Sf[2]:=Sf[1]; End;
+   0*5+3,4*5+3: Begin Code:=3; Sf[1]:=Sf[2]; End;
+   1*5+0,1*5+4,2*5+4: Begin Code:=1; Sf[1]:=Sf[0]; End;
+   1*5+1,1*5+2,2*5+0,2*5+1,2*5+2: Begin Code:=2; Sf[1]:=Sf[0]; Sf[2]:=Sf[0]; End;
+   2*5+3,3*5+3: Begin Code:=2; Sf[0]:=Sf[2]; Sf[1]:=Sf[2]; End;
+   3*5+0,3*5+1,3*5+2: Begin Code:=2; Sf[0]:=Sf[1]; Sf[2]:=Sf[1]; End;
+   1*5+3: Begin Code:=2; If Sf[0]>Sf[2] Then Sf[0]:=Sf[2]; Sf[1]:=Sf[0]; Sf[2]:=Sf[0]; End;
+  End;
+  For I:=0 To 2 Do S^.ScaleFactors[Ch,J,I]:=Sf[I];
+  S^.ScaleCode[Ch,J]:=Code;
+ End;
+End;
+
+Procedure MP2Allocate(S: PMP2Ctx; Var BitAlloc: Array Of Byte; Var Padding: LongInt);
+{ BitAlloc : [ch*32+sb] }
+Var
+ I,Ch,B,MaxSmr,MaxCh,MaxSb,Cur,MaxFrame,Incr,J,A0: LongInt;
+ Smr: Array[0..1,0..31] Of LongInt; Status: Array[0..1,0..31] Of Byte;
+Begin
+ For Ch:=0 To S^.Nch-1 Do For I:=0 To 31 Do Begin Smr[Ch,I]:=MP2Smr[I]; Status[Ch,I]:=0; BitAlloc[Ch*32+I]:=0; End;
+ MaxFrame:=S^.FrameSize;
+ Inc(S^.FrameFrac,S^.FrameFracIncr);
+ If S^.FrameFrac>=65536 Then Begin Dec(S^.FrameFrac,65536); S^.DoPadding:=1; Inc(MaxFrame,8); End Else S^.DoPadding:=0;
+ Cur:=32; J:=0;
+ For I:=0 To S^.SbLimit-1 Do Begin
+  Incr:=MP2Alloc(S,J); Inc(Cur,Incr*S^.Nch); Inc(J,1 Shl Incr);
+ End;
+ While True Do Begin
+  MaxSb:=-1; MaxCh:=-1; MaxSmr:=-2147483647-1;
+  For Ch:=0 To S^.Nch-1 Do For I:=0 To S^.SbLimit-1 Do
+   If (Smr[Ch,I]>MaxSmr) And (Status[Ch,I]<>2) Then Begin MaxSmr:=Smr[Ch,I]; MaxSb:=I; MaxCh:=Ch; End;
+  If MaxSb<0 Then Break;
+  J:=0; For I:=0 To MaxSb-1 Do Inc(J,1 Shl MP2Alloc(S,J));
+  A0:=MP2Alloc(S,J);
+  If Status[MaxCh,MaxSb]=0 Then
+   Incr:=2+MP2NbSf[S^.ScaleCode[MaxCh,MaxSb]]*6+S^.TotalQuantBits[MP2Alloc(S,J+1)]
+  Else Begin
+   B:=BitAlloc[MaxCh*32+MaxSb];
+   Incr:=LongInt(S^.TotalQuantBits[MP2Alloc(S,J+B+1)])-LongInt(S^.TotalQuantBits[MP2Alloc(S,J+B)]);
+  End;
+  If Cur+Incr<=MaxFrame Then Begin
+   Inc(BitAlloc[MaxCh*32+MaxSb]); B:=BitAlloc[MaxCh*32+MaxSb];
+   Inc(Cur,Incr);
+   Smr[MaxCh,MaxSb]:=MP2Smr[MaxSb]-MP2QuantSnr[MP2Alloc(S,J+B)];
+   If B=(1 Shl A0)-1 Then Status[MaxCh,MaxSb]:=2 Else Status[MaxCh,MaxSb]:=1;
+  End Else Status[MaxCh,MaxSb]:=2;
+ End;
+ Padding:=MaxFrame-Cur;
+End;
+
+Procedure MP2EncodeFrame(S: PMP2Ctx; Var BitAlloc: Array Of Byte; Padding: LongInt);
+Var I,J,K,L,Bab,B,Ch,Qindex,Steps,M,Bits,E,Sample: LongInt; Q: Array[0..2] Of LongInt; A: Single; D: Double; Inv: Single;
+Begin
+ FillChar(S^.Out,SizeOf(S^.Out),0); S^.OutBits:=0;
+ MP2Put(S,12,$FFF); MP2Put(S,1,1-S^.Lsf); MP2Put(S,2,2); MP2Put(S,1,1);
+ MP2Put(S,4,S^.BitrateIndex); MP2Put(S,2,S^.FreqIndex); MP2Put(S,1,S^.DoPadding); MP2Put(S,1,0);
+ If S^.Nch=2 Then MP2Put(S,2,0) Else MP2Put(S,2,3);
+ MP2Put(S,2,0); MP2Put(S,1,0); MP2Put(S,1,1); MP2Put(S,2,0);
+ J:=0;
+ For I:=0 To S^.SbLimit-1 Do Begin
+  Bab:=MP2Alloc(S,J);
+  For Ch:=0 To S^.Nch-1 Do MP2Put(S,Bab,BitAlloc[Ch*32+I]);
+  Inc(J,1 Shl Bab);
+ End;
+ For I:=0 To S^.SbLimit-1 Do For Ch:=0 To S^.Nch-1 Do If BitAlloc[Ch*32+I]<>0 Then MP2Put(S,2,S^.ScaleCode[Ch,I]);
+ For I:=0 To S^.SbLimit-1 Do For Ch:=0 To S^.Nch-1 Do If BitAlloc[Ch*32+I]<>0 Then
+  Case S^.ScaleCode[Ch,I] Of
+   0: Begin MP2Put(S,6,S^.ScaleFactors[Ch,I,0]); MP2Put(S,6,S^.ScaleFactors[Ch,I,1]); MP2Put(S,6,S^.ScaleFactors[Ch,I,2]); End;
+   3,1: Begin MP2Put(S,6,S^.ScaleFactors[Ch,I,0]); MP2Put(S,6,S^.ScaleFactors[Ch,I,2]); End;
+   2: MP2Put(S,6,S^.ScaleFactors[Ch,I,0]);
+  End;
+ For K:=0 To 2 Do Begin
+  L:=0;
+  While L<12 Do Begin
+   J:=0;
+   For I:=0 To S^.SbLimit-1 Do Begin
+    Bab:=MP2Alloc(S,J);
+    For Ch:=0 To S^.Nch-1 Do Begin
+     B:=BitAlloc[Ch*32+I];
+     If B<>0 Then Begin
+      Qindex:=MP2Alloc(S,J+B); Steps:=MPAQuantSteps[Qindex];
+      For M:=0 To 2 Do Begin
+       Sample:=S^.SbSamples[Ch,K,L+M,I];
+       E:=S^.ScaleFactors[Ch,I,K];
+       Move(MP2SFInv[E],Inv,4);
+       A:=Sample; A:=A*Inv;
+       D:=A; D:=D+1.0; D:=D*Steps; D:=D*0.5;
+       Q[M]:=Trunc(D);
+       If Q[M]>=Steps Then Q[M]:=Steps-1;
+       If Q[M]<0 Then Q[M]:=0;
+      End;
+      Bits:=MPAQuantBits[Qindex];
+      If Bits<0 Then MP2Put(S,-Bits,Q[0]+Steps*(Q[1]+Steps*Q[2]))
+      Else Begin MP2Put(S,Bits,Q[0]); MP2Put(S,Bits,Q[1]); MP2Put(S,Bits,Q[2]); End;
+     End;
+    End;
+    Inc(J,1 Shl Bab);
+   End;
+   Inc(L,3);
+  End;
+ End;
+ Inc(S^.OutBits,Padding);
+End;
+
+Procedure EncodeMP2(Const Source,Target: String; BitRateK: LongInt);
+Var
+ S: PMP2Ctx; Head: Array[0..43] Of Byte; Raw: PEABuffer; Smp: Array[0..2303] Of SmallInt;
+ Channels,Rate,Freq,I,V,Table,Bitrate,Frames,Total,Done,Take,Padding,Ch,Bytes: LongInt; BitAlloc: Array[0..63] Of Byte;
+ A: Single; Da: Double;
+Begin
+ OpenRead(Source);
+ If InputSize<44 Then Fail('mp2: WAV intermediaire tronque.');
+ ReadAt(0,Head,44); Channels:=Head[22];
+ Rate:=LongInt(Head[24])+LongInt(Head[25])*256+LongInt(Head[26])*65536;
+ If (Channels<1) Or (Channels>2) Or (Head[34]<>16) Then Fail('mp2: WAV PCM16 mono/stereo requis.');
+ GetMem(S,SizeOf(TMP2Ctx)); FillChar(S^,SizeOf(TMP2Ctx),0);
+ S^.Nch:=Channels; Bitrate:=BitRateK;
+ S^.Lsf:=0; Freq:=-1;
+ For I:=0 To 2 Do Begin
+  If MPAFreqTab[I]=Rate Then Begin Freq:=I; Break; End;
+  If MPAFreqTab[I] Div 2=Rate Then Begin Freq:=I; S^.Lsf:=1; Break; End;
+ End;
+ If Freq<0 Then Fail('mp2: frequence d''echantillonnage non autorisee (44100, 48000, 32000, 22050, 24000 ou 16000).');
+ S^.FreqIndex:=Freq;
+ I:=1; While I<15 Do Begin If MPABitrate[(S^.Lsf*3+1)*15+I]=Bitrate Then Break; Inc(I); End;
+ If (I=15) And (Bitrate=0) Then Begin I:=14; Bitrate:=MPABitrate[(S^.Lsf*3+1)*15+I]; End;
+ If I=15 Then Fail('mp2: debit non autorise.');
+ S^.BitrateIndex:=I;
+ A:=(Bitrate*1000*1152); Da:=A; Da:=Da/(Rate*8.0); A:=Da; Da:=A;
+ S^.FrameSize:=Trunc(Da)*8;
+ S^.FrameFrac:=0; S^.FrameFracIncr:=Trunc((Da-Int(Da))*65536.0);
+ Table:=MPAL2Table(Bitrate,Channels,Rate,S^.Lsf);
+ S^.SbLimit:=MPASblimit[Table];
+ If Table<2 Then S^.AllocSet:=0 Else If Table<4 Then S^.AllocSet:=1 Else S^.AllocSet:=2;
+ For I:=0 To 256 Do Begin
+  V:=LongInt(MPASarL(MPAEnWindow[I]+2,2));
+  S^.FilterBank[I]:=V;
+  If I And 63<>0 Then V:=-V;
+  If I<>0 Then S^.FilterBank[512-I]:=V;
+ End;
+ For I:=0 To 16 Do Begin
+  V:=MPAQuantBits[I]; If V<0 Then V:=-V Else V:=V*3;
+  S^.TotalQuantBits[I]:=12*V;
+ End;
+ Total:=(InputSize-44) Div (Channels*2);
+ Frames:=(Total+1151) Div 1152;
+ If Frames=0 Then Fail('mp2: aucune donnee audio.');
+ GetMem(Raw,1152*4+16);
+ OpenWrite(Target);
+ For Done:=0 To Frames-1 Do Begin
+  Take:=Total-Done*1152; If Take>1152 Then Take:=1152;
+  FillChar(Smp,SizeOf(Smp),0);
+  I:=0;
+  While I<Take*Channels*2 Do Begin
+   Bytes:=Take*Channels*2-I; If Bytes>4096 Then Bytes:=4096;
+   ReadAt(44+Done*1152*Channels*2+I,PEABuffer(Raw)^[I],Bytes); Inc(I,Bytes);
+  End;
+  For I:=0 To Take*Channels-1 Do Smp[I]:=SmallInt(Raw^[2*I]+Raw^[2*I+1]*256);
+  For Ch:=0 To Channels-1 Do MP2Filter(S,Ch,Smp,Ch,Channels);
+  For Ch:=0 To Channels-1 Do MP2ScaleFactors(S,Ch);
+  MP2Allocate(S,BitAlloc,Padding);
+  MP2EncodeFrame(S,BitAlloc,Padding);
+  WriteBytes(S^.Out,(S^.OutBits+7) Shr 3);
+ End;
+ CloseRead; CloseWrite;
+End;
+
 { ---- demultiplexeur mp3 (libavformat/mp3dec.c), analyseur (mpegaudio_parser.c), sauts de debut/fin (decode.c) ---- }
 Var MPAF: PEABuffer; MPASize: LongInt;
 Procedure MPALoad(Const Name: String);
@@ -57721,7 +58040,7 @@ BEGIN
   Else If (AsvTag='MJPG') Or (AsvTag='mjpg') Or (AsvTag='AVRn') Or (AsvTag='AVDJ') Or (AsvTag='dmb1') Or (AsvTag='JPGL') Or (AsvTag='MJLS') Or (AsvTag='MMJP') Or (AsvTag='jpeg') Or (AsvTag='IJPG') Then NVKind:=43;
  End;
  If (OptPixFmt<>'') And (OptPixFmt<>'yuv420p') Then Fail('-pix_fmt: seul yuv420p est pris en charge.');
- NVAudioOut:=(OutputFormat='wav') Or (OutputFormat='mp3') Or (OutputFormat='ac3') Or (OutputFormat='aac') Or (OutputFormat='adx') Or (OutputFormat='aiff');
+ NVAudioOut:=(OutputFormat='wav') Or (OutputFormat='mp3') Or (OutputFormat='mp2') Or (OutputFormat='ac3') Or (OutputFormat='aac') Or (OutputFormat='adx') Or (OutputFormat='aiff');
  If ((InputFormat='mp4') Or (InputFormat='avi') Or (InputFormat='flv')) And (NVKind=0) And Not IsHTTP(InputPath) And Not NVAudioOut And Not NoVideo And (VideoCodec<>'copy') And
   ((OutputFormat='yuv4mpegpipe') Or (OutputFormat='png') Or (OutputFormat='bmp') Or (VideoCodec='png') Or (VideoCodec='bmp') Or (VideoCodec='mpeg4') Or
   (VideoCodec='mpeg1video') Or (VideoCodec='mpeg2video') Or (VideoCodec='ffv1') Or (VideoCodec='flv') Or FourMV) Then Begin
@@ -58073,9 +58392,9 @@ BEGIN
  End;
  If NoAudio Then Fail('-an: aucune piste a ecrire dans une sortie audio seule.');
  If VideoCodec<>'' Then Fail('Codec video incompatible avec une sortie audio seule.');
- If (OutputFormat<>'wav') And (OutputFormat<>'mp3') And (OutputFormat<>'ac3') And (OutputFormat<>'aac') And
+ If (OutputFormat<>'wav') And (OutputFormat<>'mp3') And (OutputFormat<>'mp2') And (OutputFormat<>'ac3') And (OutputFormat<>'aac') And
  (OutputFormat<>'adx') And (OutputFormat<>'aiff') And (OutputFormat<>'flv') And (OutputFormat<>'mp4') And (OutputFormat<>'ogg') Then Fail(
- 'Sorties audio WAV, MP3, AC3, AAC (ADTS), Ogg Vorbis, ADX et AIFF-C (adpcm_ima_qt) prises en charge.');
+ 'Sorties audio WAV, MP3, MP2, AC3, AAC (ADTS), Ogg Vorbis, ADX et AIFF-C (adpcm_ima_qt) prises en charge.');
  If AudioCodec='' Then If OutputFormat='wav' Then AudioCodec:=
  'pcm_s16le' Else If OutputFormat='adx' Then AudioCodec:='adpcm_adx'
  Else If OutputFormat='aiff' Then AudioCodec:='adpcm_ima_qt'
@@ -58085,11 +58404,11 @@ BEGIN
   (AudioCodec='adpcm_ms') Or (AudioCodec='adpcm_yamaha'))) Or ((OutputFormat='flv') And (AudioCodec='adpcm_swf')) Or
  ((OutputFormat='mp4') And (AudioCodec='alac')) Or
  ((OutputFormat='adx') And (AudioCodec='adpcm_adx')) Or ((OutputFormat='aiff') And (AudioCodec='adpcm_ima_qt')) Or
- ((OutputFormat='mp3') And ((AudioCodec='mp3') Or (AudioCodec='libmp3lame'))) Or ((OutputFormat='ac3') And (AudioCodec='ac3')) Or
+ ((OutputFormat='mp3') And ((AudioCodec='mp3') Or (AudioCodec='libmp3lame'))) Or ((OutputFormat='mp2') And (AudioCodec='mp2')) Or ((OutputFormat='ac3') And (AudioCodec='ac3')) Or
  ((OutputFormat='ogg') And (AudioCodec='libvorbis')) Or
  ((OutputFormat='aac') And ((AudioCodec='aac') Or (AudioCodec='libfaac')))) Then Fail(
  'Codec de sortie non pris en charge pour ce conteneur.');
- If HasBitrate And (((OutputFormat<>'mp3') And (OutputFormat<>'ac3') And (OutputFormat<>'aac') And (OutputFormat<>'ogg')) Or (AudioCodec='copy')) Then Fail(
+ If HasBitrate And (((OutputFormat<>'mp3') And (OutputFormat<>'mp2') And (OutputFormat<>'ac3') And (OutputFormat<>'aac') And (OutputFormat<>'ogg')) Or (AudioCodec='copy')) Then Fail(
  '-b:a exige un encodage MP3, AAC, Vorbis ou AC3.');
  If (OutputFormat='mp3') And (RequestedBitRateK>320) Then Fail('MP3: debit maximal 320k.');
  If NonStdBitrate And (OutputFormat<>'aac') And (OutputFormat<>'ogg') Then Fail('Debit audio normalise requis: MP3 32..320k ou AC3 32..640k.');
@@ -58194,6 +58513,9 @@ BEGIN
    Else If OutputFormat='aac' Then Begin
     Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False);
     If HasBitrate Then AEEncodeAAC(Temps[1],Temps[2],RequestedBitRateK) Else AEEncodeAAC(Temps[1],Temps[2],0);
+   End Else If OutputFormat='mp2' Then Begin
+    Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False);
+    If HasBitrate Then EncodeMP2(Temps[1],Temps[2],RequestedBitRateK) Else EncodeMP2(Temps[1],Temps[2],0);
    End Else
   Begin
    Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],True);
