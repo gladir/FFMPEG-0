@@ -15663,6 +15663,48 @@ Begin
  CloseRead; CloseWrite;
 End;
 
+{ ---- mp3adu (mpegaudiodec_template.c, decode_frame_adu) : ffmpeg n a aucun demuxeur ADU ; conteneur propre au projet (.adu) :
+  suite de paquets = longueur sur 16 bits gros-boutiste + trame ADU (en-tete MPEG audio Layer III, main_data_begin ignore) ---- }
+Procedure DecodeMP3ADU(Const Source,Target: String);
+Var
+ S: PMPA; Planes: Array[0..1] Of PMPASingles; Pb: PEABuffer; Pos,Take,I,Len,R,Nch,Rate: LongInt; Q: Array[0..1] Of Byte; H: LongWord; Started: Boolean;
+Begin
+ MPAInit; EAReset; OpenRead(Source);
+ GetMem(S,SizeOf(TMPA)); FillChar(S^,SizeOf(TMPA),0); S^.AduMode:=True; S^.Fixed:=False;
+ For I:=0 To 1 Do Begin GetMem(Planes[I],1200*SizeOf(Single)); FillChar(Planes[I]^,1200*SizeOf(Single),0); End;
+ OpenWrite(Target); Started:=False; Nch:=0; Rate:=0; Pos:=0;
+ While Pos+2<=InputSize Do Begin
+  ReadAt(Pos,Q,2); Take:=Q[0]*256+Q[1]; Inc(Pos,2);
+  If (Take<4) Or (Pos+Take>InputSize) Then Begin Inc(Pos,Take); Continue; End;
+  GetMem(Pb,Take+64); FillChar(Pb^,Take+64,0);
+  I:=0; While I<Take Do Begin
+   If Take-I>16384 Then Len:=16384 Else Len:=Take-I;
+   ReadAt(Pos+I,Pb^[I],Len); Inc(I,Len);
+  End;
+  Inc(Pos,Take);
+  Len:=Take; If Len>1792 Then Len:=1792;
+  H:=((LongWord(Pb^[0]) Shl 24) Or (LongWord(Pb^[1]) Shl 16) Or (LongWord(Pb^[2]) Shl 8) Or Pb^[3]) Or $FFE00000;
+  If (MPAHeader(S,H)=0) And (S^.Layer=3) Then Begin
+   If Not Started Then Begin
+    Started:=True; Nch:=S^.NbCh; Rate:=S^.SampleRate; ADPCMWaveHeader(Rate,Nch,0);
+   End;
+   If (S^.NbCh=Nch) And (S^.SampleRate=Rate) Then Begin
+    R:=MPADecodeFrame(S,Planes[0],Planes[1],Pb,Len);
+    If R<0 Then Begin FillChar(Planes[0]^,1152*SizeOf(Single),0); FillChar(Planes[1]^,1152*SizeOf(Single),0); End;
+    For I:=0 To (1152 Shr S^.Lsf)-1 Do Begin
+     EAPut(MPAS16(Planes[0]^[I]));
+     If Nch>1 Then EAPut(MPAS16(Planes[1]^[I]));
+    End;
+   End;
+  End;
+  FreeMem(Pb,Take+64);
+ End;
+ EAFlush;
+ If EAWritten=0 Then Fail('mp3adu: aucune donnee audio decodee.');
+ ADPCMPatchHeader(Rate,Nch,EAWritten);
+ CloseRead; CloseWrite;
+End;
+
 { ---- demultiplexeur mp3 (libavformat/mp3dec.c), analyseur (mpegaudio_parser.c), sauts de debut/fin (decode.c) ---- }
 Var MPAF: PEABuffer; MPASize: LongInt;
 Procedure MPALoad(Const Name: String);
@@ -57614,6 +57656,7 @@ BEGIN
  If (Detected='') And Not IsHTTP(Intermediate) And (InputFormat<>'h261') And (InputFormat<>'h263') Then If H4ProbeFile(Intermediate) Then Detected:='h264';
  If (Detected='') And Not IsHTTP(Intermediate) And (InputFormat<>'h261') And (InputFormat<>'h264') Then If H3ProbeFile(Intermediate) Then Detected:='h263';
  If (Detected='') And Not IsHTTP(Intermediate) And (InputFormat<>'h263') And (InputFormat<>'h264') Then If H1ProbeFile(Intermediate) Then Detected:='h261';
+ If (Detected='') And (Lower(Extension(Intermediate))='adu') And Not IsHTTP(Intermediate) Then Detected:='mp3adu';
  If (Detected='') And (Lower(Extension(Intermediate))='mvi') And Not IsHTTP(Intermediate) Then Detected:='mvi';
  If (Detected='') And (Lower(Extension(Intermediate))='jls') And Not IsHTTP(Intermediate) Then Detected:='jpegls_pipe';
  If (Detected='') And ((Lower(Extension(Intermediate))='jpg') Or (Lower(Extension(Intermediate))='jpeg')) And Not IsHTTP(Intermediate) Then Detected:='jpeg_pipe';
@@ -58066,6 +58109,7 @@ BEGIN
     DecodeWMA2Spool(Temps[3],Temps[0]);
    End Else
    If InputFormat='mp3on4' Then DecodeMP3On4(InputPath,Temps[0]) Else
+   If InputFormat='mp3adu' Then DecodeMP3ADU(InputPath,Temps[0]) Else
    If (InputFormat='mp3') Or (InputFormat='mp1') Or (InputFormat='mp2') Then DecodeMPA(InputPath,Temps[0]) Else
    If InputFormat='ac3' Then ProcessAC3(InputPath,Temps[0],False,0) Else
    If InputFormat='eac3' Then DecodeEAC3(InputPath,Temps[0]) Else
