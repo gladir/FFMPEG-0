@@ -3602,6 +3602,7 @@ Function FormatName(S: String): String;Begin
  If (S='ts') Or (S='m2ts') Then S:='mpegts';
  If S='rmvb' Then S:='rm';
  If S='cavs' Then S:='cavsvideo';
+ If (S='oga') Or (S='ogv') Or (S='spx') Then S:='ogg';
  If S='ec3' Then S:='eac3';
  FormatName:=S;
 End;
@@ -47888,6 +47889,495 @@ End;
 
 { MPEG-1/2 video: I/B encoders and MPEG-1 I/P/B decoder. Tables and syntax adapted
   from FFmpeg mpeg12data.c/mpeg12.c/mpeg12dec.c (LGPL-2.1-or-later). }
+{ VORBE-BEGIN }
+{ ---- Ogg + Vorbis I : encodeur natif (blocs fixes de 2048, plancher 1, residu 1, couplage M/A, livres de code entraines sur le fichier) ---- }
+Const
+ VBXs: Array[0..25] Of LongInt=(0,1024,4,8,12,16,22,30,40,52,66,82,100,120,145,175,210,250,300,360,430,510,610,730,860,960);
+ VBKs: Array[0..7] Of LongInt=(0,1,2,4,8,16,32,64);
+ VBDb: Array[0..255] Of Single=(
+ 1.0649863e-07,1.1341951e-07,1.2079015e-07,1.2863978e-07,1.3699951e-07,1.4590251e-07,1.5538408e-07,1.6548181e-07,
+ 1.7623575e-07,1.8768855e-07,1.9988561e-07,2.128753e-07,2.2670913e-07,2.4144197e-07,2.5713223e-07,2.7384213e-07,
+ 2.9163793e-07,3.1059021e-07,3.3077411e-07,3.5226968e-07,3.7516214e-07,3.9954229e-07,4.2550680e-07,4.5315863e-07,
+ 4.8260743e-07,5.1396998e-07,5.4737065e-07,5.8294187e-07,6.2082472e-07,6.6116941e-07,7.0413592e-07,7.4989464e-07,
+ 7.9862701e-07,8.5052630e-07,9.0579828e-07,9.6466216e-07,1.0273513e-06,1.0941144e-06,1.1652161e-06,1.2409384e-06,
+ 1.3215816e-06,1.4074654e-06,1.4989305e-06,1.5963394e-06,1.7000785e-06,1.8105592e-06,1.9282195e-06,2.0535261e-06,
+ 2.1869758e-06,2.3290978e-06,2.4804557e-06,2.6416497e-06,2.8133190e-06,2.9961443e-06,3.1908506e-06,3.3982101e-06,
+ 3.6190449e-06,3.8542308e-06,4.1047004e-06,4.3714470e-06,4.6555282e-06,4.9580707e-06,5.2802740e-06,5.6234160e-06,
+ 5.9888572e-06,6.3780469e-06,6.7925283e-06,7.2339451e-06,7.7040476e-06,8.2047000e-06,8.7378876e-06,9.3057248e-06,
+ 9.9104632e-06,1.0554501e-05,1.1240392e-05,1.1970856e-05,1.2748789e-05,1.3577278e-05,1.4459606e-05,1.5399272e-05,
+ 1.6400004e-05,1.7465768e-05,1.8600792e-05,1.9809576e-05,2.1096914e-05,2.2467911e-05,2.3928002e-05,2.5482978e-05,
+ 2.7139006e-05,2.8902651e-05,3.0780908e-05,3.2781225e-05,3.4911534e-05,3.7180282e-05,3.9596466e-05,4.2169667e-05,
+ 4.4910090e-05,4.7828601e-05,5.0936773e-05,5.4246931e-05,5.7772202e-05,6.1526565e-05,6.5524908e-05,6.9783085e-05,
+ 7.4317983e-05,7.9147585e-05,8.4291040e-05,8.9768747e-05,9.5602426e-05,0.00010181521,0.00010843174,0.00011547824,
+ 0.00012298267,0.00013097477,0.00013948625,0.00014855085,0.00015820453,0.00016848555,0.00017943469,0.00019109536,
+ 0.00020351382,0.00021673929,0.00023082423,0.00024582449,0.00026179955,0.00027881276,0.00029693158,0.00031622787,
+ 0.00033677814,0.00035866388,0.00038197188,0.00040679456,0.00043323036,0.00046138411,0.00049136745,0.00052329927,
+ 0.00055730621,0.00059352311,0.00063209358,0.00067317058,0.00071691700,0.00076350630,0.00081312324,0.00086596457,
+ 0.00092223983,0.00098217216,0.0010459992,0.0011139742,0.0011863665,0.0012634633,0.0013455702,0.0014330129,
+ 0.0015261382,0.0016253153,0.0017309374,0.0018434235,0.0019632195,0.0020908006,0.0022266726,0.0023713743,
+ 0.0025254795,0.0026895994,0.0028643847,0.0030505286,0.0032487691,0.0034598925,0.0036847358,0.0039241906,
+ 0.0041792066,0.0044507950,0.0047400328,0.0050480668,0.0053761186,0.0057254891,0.0060975636,0.0064938176,
+ 0.0069158225,0.0073652516,0.0078438871,0.0083536271,0.0088964928,0.009474637,0.010090352,0.010746080,
+ 0.011444421,0.012188144,0.012980198,0.013823725,0.014722068,0.015678791,0.016697687,0.017782797,
+ 0.018938423,0.020169149,0.021479854,0.022875735,0.024362330,0.025945531,0.027631618,0.029427276,
+ 0.031339626,0.033376252,0.035545228,0.037855157,0.040315199,0.042935108,0.045725273,0.048696758,
+ 0.051861348,0.055231591,0.058820850,0.062643361,0.066714279,0.071049749,0.075666962,0.080584227,
+ 0.085821044,0.091398179,0.097337747,0.10366330,0.11039993,0.11757434,0.12521498,0.13335215,
+ 0.14201813,0.15124727,0.16107617,0.17154380,0.18269168,0.19456402,0.20720788,0.22067342,
+ 0.23501402,0.25028656,0.26655159,0.28387361,0.30232132,0.32196786,0.34289114,0.36517414,
+ 0.38890521,0.41417847,0.44109412,0.46975890,0.50028648,0.53279791,0.56742212,0.60429640,
+ 0.64356699,0.68538959,0.72993007,0.77736504,0.82788260,0.88168307,0.9389798,1.0);
+Type
+ VBDArr=Array[0..1023] Of Double;
+ VBIArr=Array[0..1023] Of LongInt;
+ VBBook=Record N,Dim: LongInt; Len: Array[0..128] Of LongInt; Code: Array[0..128] Of Int64; Lookup: Boolean; K: LongInt; End;
+Var
+ VBBuf: PEABuffer; VBBits: LongInt;
+ VBBooks: Array[0..8] Of VBBook;
+ VBSort: Array[0..25] Of LongInt; VBLo,VBHi: Array[0..25] Of LongInt;
+ VBO: PEABuffer; VBOLen,VBOCap: LongInt;
+ VBCrcTab: Array[0..255] Of LongWord;
+ VBPage: PEABuffer; VBPageLen,VBSegs,VBSeq,VBSerial: LongInt; VBSegTab: Array[0..254] Of Byte; VBPageGran: Int64; VBPageFlags: LongInt;
+ VBHistF: Array[0..127] Of Int64; VBHistC: Array[0..7] Of Int64; VBHistV: Array[1..7,0..128] Of Int64;
+
+Procedure VBPut(V: Int64; N: LongInt);
+Var K: LongInt;
+Begin
+ For K:=0 To N-1 Do Begin
+  If ((V Shr K) And 1)<>0 Then VBBuf^[VBBits Shr 3]:=VBBuf^[VBBits Shr 3] Or (1 Shl (VBBits And 7));
+  Inc(VBBits);
+ End;
+End;
+Procedure VBPutCode(Code: Int64; Len: LongInt);
+Var K: LongInt;
+Begin For K:=Len-1 Downto 0 Do VBPut((Code Shr K) And 1,1); End;
+Procedure VBPutBook(B,E: LongInt); Begin VBPutCode(VBBooks[B].Code[E],VBBooks[B].Len[E]); End;
+Function VBIlog(V: LongInt): LongInt;
+Var N: LongInt;
+Begin N:=0; While V>0 Do Begin Inc(N); V:=V Shr 1; End; VBIlog:=N; End;
+Procedure VBPutFloat(F: Double);
+Var A: Double; E,M: LongInt; Sg: Int64;
+Begin
+ Sg:=0; If F<0 Then Begin Sg:=1; F:=-F; End;
+ E:=0; A:=F;
+ If A=0 Then Begin VBPut(0,32); Exit; End;
+ While A>=1 Do Begin A:=A/2; Inc(E); End;
+ While A<0.5 Do Begin A:=A*2; Dec(E); End;
+ M:=Trunc(A*1048576.0);
+ VBPut(M,21); VBPut(E+768,10); VBPut(Sg,1);
+End;
+
+{ longueurs de Huffman optimales (arbre complet) }
+Procedure VBHuff(Const Freq: Array Of Int64; N: LongInt; Var Len: Array Of LongInt);
+Var W: Array[0..300] Of Int64; Par: Array[0..300] Of LongInt; Alive: Array[0..300] Of Boolean; I,A,B,Cnt,D,P: LongInt;
+Begin
+ If N=1 Then Begin Len[0]:=1; Exit; End;
+ For I:=0 To N-1 Do Begin W[I]:=Freq[I]; If W[I]<1 Then W[I]:=1; Alive[I]:=True; Par[I]:=-1; End;
+ Cnt:=N;
+ While Cnt<2*N-1 Do Begin
+  A:=-1; B:=-1;
+  For I:=0 To Cnt-1 Do If Alive[I] Then Begin
+   If (A<0) Or (W[I]<W[A]) Then Begin B:=A; A:=I; End
+   Else If (B<0) Or (W[I]<W[B]) Then B:=I;
+  End;
+  W[Cnt]:=W[A]+W[B]; Alive[A]:=False; Alive[B]:=False; Alive[Cnt]:=True; Par[A]:=Cnt; Par[B]:=Cnt; Par[Cnt]:=-1; Inc(Cnt);
+ End;
+ For I:=0 To N-1 Do Begin D:=0; P:=I; While Par[P]>=0 Do Begin P:=Par[P]; Inc(D); End; Len[I]:=D; End;
+End;
+{ mots de code selon l'ordre de la specification Vorbis }
+Procedure VBAssign(Var Bk: VBBook);
+Var Avail: Array[0..32] Of Int64; I,Z,K: LongInt; Res: Int64;
+Begin
+ For I:=0 To 32 Do Avail[I]:=0;
+ For K:=0 To Bk.N-1 Do Begin
+  If K=0 Then Begin
+   Bk.Code[0]:=0;
+   For I:=1 To Bk.Len[0] Do Avail[I]:=Int64(1) Shl (32-I);
+   Continue;
+  End;
+  Z:=Bk.Len[K]; While (Z>0) And (Avail[Z]=0) Do Dec(Z);
+  Res:=Avail[Z]; Avail[Z]:=0;
+  Bk.Code[K]:=Res Shr (32-Bk.Len[K]);
+  For I:=Bk.Len[K] Downto Z+1 Do Avail[I]:=Res+(Int64(1) Shl (32-I));
+ End;
+End;
+Procedure VBMakeBook(B,N: LongInt; Const Freq: Array Of Int64);
+Begin
+ VBBooks[B].N:=N; VBBooks[B].Dim:=1;
+ If N=1 Then Begin VBBooks[B].Len[0]:=1; End Else VBHuff(Freq,N,VBBooks[B].Len);
+ VBAssign(VBBooks[B]);
+End;
+
+{ ---- plancher 1 ---- }
+Procedure VBInitFloor;
+Var I,J,T,Lo,Hi: LongInt;
+Begin
+ For I:=0 To 25 Do VBSort[I]:=I;
+ For I:=0 To 24 Do For J:=I+1 To 25 Do If VBXs[VBSort[J]]<VBXs[VBSort[I]] Then Begin T:=VBSort[I]; VBSort[I]:=VBSort[J]; VBSort[J]:=T; End;
+ For I:=2 To 25 Do Begin
+  Lo:=0; Hi:=1;
+  For J:=0 To I-1 Do Begin
+   If (VBXs[J]<VBXs[I]) And (VBXs[J]>VBXs[Lo]) Then Lo:=J;
+   If (VBXs[J]>VBXs[I]) And (VBXs[J]<VBXs[Hi]) Then Hi:=J;
+  End;
+  VBLo[I]:=Lo; VBHi[I]:=Hi;
+ End;
+End;
+Function VBPoint(X0,Y0,X1,Y1,X: LongInt): LongInt;
+Var Dy,Adx,Ady,Off: LongInt;
+Begin
+ Dy:=Y1-Y0; Adx:=X1-X0; Ady:=Abs(Dy); Off:=(Ady*(X-X0)) Div Adx;
+ If Dy<0 Then VBPoint:=Y0-Off Else VBPoint:=Y0+Off;
+End;
+Function VBFinal(Pred,Val: LongInt): LongInt;
+Var Hr,Lr,Room: LongInt;
+Begin
+ If Val=0 Then Begin VBFinal:=Pred; Exit; End;
+ Hr:=127-Pred; Lr:=Pred; If Hr<Lr Then Room:=Hr*2 Else Room:=Lr*2;
+ If Val>=Room Then Begin
+  If Hr>Lr Then VBFinal:=Val-Lr+Pred Else VBFinal:=Pred-Val+Hr-1;
+ End Else If Odd(Val) Then VBFinal:=Pred-(Val+1) Div 2 Else VBFinal:=Pred+Val Div 2;
+End;
+Procedure VBLine(X0,Y0,X1,Y1: LongInt; Var Fl: VBIArr);
+Var Dy,Adx,Ady,Base,Sy,Err,X,Y: LongInt;
+Begin
+ Dy:=Y1-Y0; Adx:=X1-X0; Ady:=Abs(Dy); Base:=Dy Div Adx; Err:=0; Y:=Y0;
+ If Dy<0 Then Sy:=Base-1 Else Sy:=Base+1;
+ Ady:=Ady-Abs(Base)*Adx;
+ If X0<1024 Then Fl[X0]:=Y;
+ X:=X0+1;
+ While (X<X1) And (X<1024) Do Begin
+  Inc(Err,Ady);
+  If Err>=Adx Then Begin Dec(Err,Adx); Inc(Y,Sy); End Else Inc(Y,Base);
+  Fl[X]:=Y; Inc(X);
+ End;
+End;
+{ Y finaux et indicateurs -> courbe (indices de la table dB) }
+Procedure VBRender(Const Yf: Array Of LongInt; Const Flag: Array Of Boolean; Var Fl: VBIArr);
+Var I,Lx,Ly,Hx,Hy,Idx: LongInt;
+Begin
+ Lx:=0; Ly:=Yf[VBSort[0]]*2; Hx:=0; Hy:=0;
+ For I:=1 To 25 Do Begin
+  Idx:=VBSort[I];
+  If Flag[Idx] Then Begin
+   Hy:=Yf[Idx]*2; Hx:=VBXs[Idx];
+   VBLine(Lx,Ly,Hx,Hy,Fl); Lx:=Hx; Ly:=Hy;
+  End;
+ End;
+ If Hx<1024 Then VBLine(Hx,Hy,1024,Hy,Fl);
+End;
+{ ajuste le plancher sur les amplitudes cibles Amp[0..25] ; renvoie les valeurs a coder Vals et la courbe }
+Procedure VBFitFloor(Const Amp: Array Of Double; Var Vals: Array Of LongInt; Var Fl: VBIArr);
+Var I,Y,Best,Tgt,Pred,Lo,Hi,V,F: LongInt; Yf: Array[0..25] Of LongInt; Flag: Array[0..25] Of Boolean; L,Bd,D: Double;
+Begin
+ For I:=0 To 25 Do Begin
+  Best:=0;
+  If Amp[I]>1e-7 Then Begin
+   L:=Ln(Amp[I]); Bd:=1e30;
+   For Y:=0 To 127 Do Begin D:=Abs(L-Ln(VBDb[Y*2])); If D<Bd Then Begin Bd:=D; Best:=Y; End; End;
+  End;
+  Yf[I]:=Best; Flag[I]:=False;
+ End;
+ Flag[0]:=True; Flag[1]:=True; Vals[0]:=Yf[0]; Vals[1]:=Yf[1];
+ For I:=2 To 25 Do Begin
+  Tgt:=Yf[I]; Lo:=VBLo[I]; Hi:=VBHi[I];
+  Pred:=VBPoint(VBXs[Lo],Yf[Lo],VBXs[Hi],Yf[Hi],VBXs[I]);
+  V:=0;
+  If Tgt<>Pred Then Begin
+   V:=-1;
+   For F:=1 To 127 Do If VBFinal(Pred,F)=Tgt Then Begin V:=F; Break; End;
+   If V<0 Then Begin V:=0; Tgt:=Pred; End;
+  End;
+  Yf[I]:=Tgt; Vals[I]:=V;
+  If V<>0 Then Begin Flag[I]:=True; Flag[Lo]:=True; Flag[Hi]:=True; End;
+ End;
+ VBRender(Yf,Flag,Fl);
+End;
+
+{ ---- quantification d'un bloc ---- }
+Type
+ VBSyms=Array[0..1073741822] Of SmallInt; PVBSyms=^VBSyms;
+Var
+ VBCf: Array[0..1] Of VBDArr; VBVals: Array[0..1,0..25] Of LongInt; VBQ: Array[0..1] Of VBIArr; VBCls: Array[0..1,0..63] Of LongInt;
+ VBGain: Double; VBCal: Double;
+
+Function VBQuantBlock(Ch,Cut: LongInt; Lf: Double): Double;
+Var C,I,J,K,P,Mx,Cl,B,E,L,R,M,A: LongInt; Amp: Array[0..25] Of Double; Fl: VBIArr; S,Pk,Fq,Tilt,Rr,Bits: Double; Sorted: LongInt; Qc: Array[0..1] Of VBIArr;
+Begin
+ Fq:=Exp(Lf*0.69314718055994530942); Bits:=0;
+ For C:=0 To Ch-1 Do Begin
+  For I:=0 To 25 Do Begin
+   Sorted:=0; While VBSort[Sorted]<>I Do Inc(Sorted);
+   B:=VBXs[VBSort[Sorted-Ord(Sorted>0)]]; If Sorted<25 Then E:=VBXs[VBSort[Sorted+1]] Else E:=1024;
+   If E<=B Then E:=B+1;
+   S:=0; Pk:=0; For J:=B To E-1 Do If J<1024 Then Begin S:=S+Abs(VBCf[C][J]); If Abs(VBCf[C][J])>Pk Then Pk:=Abs(VBCf[C][J]); End;
+   S:=S/(E-B);
+   Tilt:=Exp(0.69314718055994530942*1.2*VBXs[I]/1024.0);
+   Amp[I]:=S*Fq*Tilt; If Amp[I]<Pk/24 Then Amp[I]:=Pk/24;
+  End;
+  VBFitFloor(Amp,VBVals[C],Fl);
+  For K:=0 To 1023 Do Begin
+   Rr:=VBCf[C][K]/VBDb[Fl[K]];
+   If Rr<0 Then I:=-Trunc(-Rr+0.3) Else I:=Trunc(Rr+0.3);
+   If I>31 Then I:=31 Else If I<-31 Then I:=-31;
+   Qc[C][K]:=I;
+  End;
+  Bits:=Bits+26*4;
+ End;
+ If Ch=2 Then
+  For K:=0 To 1023 Do Begin
+   L:=Qc[0][K]; R:=Qc[1][K];
+   If L>R Then Begin If L>0 Then Begin M:=L; A:=L-R; End Else Begin M:=R; A:=R-L; End; End
+   Else If R>0 Then Begin M:=R; A:=L-R; End
+   Else If L<R Then Begin M:=L; A:=R-L; End
+   Else Begin M:=R; A:=0; End;
+   VBQ[0][K]:=M; VBQ[1][K]:=A;
+  End
+ Else For K:=0 To 1023 Do VBQ[0][K]:=Qc[0][K];
+ For C:=0 To Ch-1 Do
+  For P:=0 To 63 Do Begin
+   Mx:=0; For K:=0 To 15 Do If Abs(VBQ[C][P*16+K])>Mx Then Mx:=Abs(VBQ[C][P*16+K]);
+   Cl:=0; While (Cl<7) And (VBKs[Cl]<Mx) Do Inc(Cl);
+   VBCls[C][P]:=Cl;
+   If Cl=0 Then Bits:=Bits+1.5 Else Begin
+    Bits:=Bits+2.5;
+    For K:=0 To 15 Do Bits:=Bits+1+1.9*Ln(1+Abs(VBQ[C][P*16+K]))*1.4426950408889634;
+   End;
+  End;
+ VBQuantBlock:=Bits*VBCal;
+End;
+
+{ ---- Ogg ---- }
+Procedure VBOB(V: LongInt);
+Begin
+ If VBOLen>=VBOCap Then Begin VBOCap:=VBOCap*2; ReallocMem(Pointer(VBO),VBOCap); End;
+ VBO^[VBOLen]:=V And 255; Inc(VBOLen);
+End;
+Procedure VBCrcInit;
+Var I,K: LongInt; C: LongWord;
+Begin
+ For I:=0 To 255 Do Begin
+  C:=LongWord(I) Shl 24;
+  For K:=0 To 7 Do If (C And $80000000)<>0 Then C:=(C Shl 1) Xor $04C11DB7 Else C:=C Shl 1;
+  VBCrcTab[I]:=C;
+ End;
+End;
+Procedure VBFlushPage(Gran: Int64);
+Var Hd: Array[0..300] Of Byte; N,I: LongInt; C: LongWord; G: Int64;
+Begin
+ If VBSegs=0 Then Exit;
+ Hd[0]:=79; Hd[1]:=103; Hd[2]:=103; Hd[3]:=83; Hd[4]:=0; Hd[5]:=VBPageFlags;
+ G:=Gran; For I:=0 To 7 Do Begin Hd[6+I]:=G And 255; G:=G Shr 8; End;
+ For I:=0 To 3 Do Hd[14+I]:=(VBSerial Shr (8*I)) And 255;
+ For I:=0 To 3 Do Hd[18+I]:=(VBSeq Shr (8*I)) And 255;
+ Hd[22]:=0; Hd[23]:=0; Hd[24]:=0; Hd[25]:=0;
+ Hd[26]:=VBSegs; For I:=0 To VBSegs-1 Do Hd[27+I]:=VBSegTab[I];
+ N:=27+VBSegs; C:=0;
+ For I:=0 To N-1 Do C:=(C Shl 8) Xor VBCrcTab[((C Shr 24) Xor Hd[I]) And 255];
+ For I:=0 To VBPageLen-1 Do C:=(C Shl 8) Xor VBCrcTab[((C Shr 24) Xor VBPage^[I]) And 255];
+ For I:=0 To 3 Do Hd[22+I]:=(C Shr (8*I)) And 255;
+ For I:=0 To N-1 Do VBOB(Hd[I]);
+ For I:=0 To VBPageLen-1 Do VBOB(VBPage^[I]);
+ Inc(VBSeq); VBSegs:=0; VBPageLen:=0; VBPageFlags:=0;
+End;
+Var VBPrevGran: Int64;
+Procedure VBAddPacket(P: PEABuffer; Len: LongInt; Gran: Int64; Eos,Force: Boolean);
+Var Need,I,R: LongInt;
+Begin
+ Need:=Len Div 255+1;
+ If VBSegs+Need>255 Then VBFlushPage(VBPrevGran);
+ R:=Len;
+ While R>=255 Do Begin VBSegTab[VBSegs]:=255; Inc(VBSegs); Dec(R,255); End;
+ VBSegTab[VBSegs]:=R; Inc(VBSegs);
+ For I:=0 To Len-1 Do VBPage^[VBPageLen+I]:=P^[I];
+ Inc(VBPageLen,Len); VBPrevGran:=Gran;
+ If Eos Then Begin VBPageFlags:=VBPageFlags Or 4; VBFlushPage(Gran); End
+ Else If Force Or (VBSegs>=200) Or (VBPageLen>=8192) Then VBFlushPage(Gran);
+End;
+
+{ ---- en-tetes Vorbis ---- }
+Procedure VBPutBookHeader(B: LongInt);
+Var I,Vb: LongInt;
+Begin
+ VBPut($564342,24); VBPut(VBBooks[B].Dim,16); VBPut(VBBooks[B].N,24);
+ VBPut(0,1); VBPut(0,1);
+ For I:=0 To VBBooks[B].N-1 Do VBPut(VBBooks[B].Len[I]-1,5);
+ If VBBooks[B].Lookup Then Begin
+  VBPut(1,4); VBPutFloat(-VBBooks[B].K); VBPutFloat(1.0);
+  Vb:=VBIlog(VBBooks[B].N-1); VBPut(Vb-1,4); VBPut(0,1);
+  For I:=0 To VBBooks[B].N-1 Do VBPut(I,Vb);
+ End Else VBPut(0,4);
+End;
+
+Procedure EncodeVorbis(Const Source,Target: String; BitRateK: LongInt);
+Var
+ Hd: Array[0..63] Of Byte; Limit,At,N,Sz,DataStart,DataSize,Rate,I,J,K,C,B,Blocks,Fmt,Ch,BitsPer,Cut,CutHz,Bk,Cl,P: LongInt;
+ Pcm: PAEPcm; Z,X: TAEDArr; Tag: String[4]; Rd: Array[0..4095] Of Byte; Win: Array[0..2047] Of Double;
+ Syms: PVBSyms; SymPer,Base,Used: LongInt; Lo,Hi,Mid,Est,Tb,Tgt,Res: Double; Vendor: String; Pk: PEABuffer; Gran: Int64; Freq: Array[0..128] Of Int64;
+ Pass: LongInt; Actual: Int64; Ratio: Double;
+Function U32(P: LongInt): LongInt; Begin U32:=LongInt(Hd[P])+LongInt(Hd[P+1])*256+LongInt(Hd[P+2])*65536+LongInt(Hd[P+3])*16777216; End;
+Function Sample(S,Cn: LongInt): Double;
+Begin
+ If (S<0) Or (S>=N) Then Sample:=0 Else Sample:=Pcm^[S*Ch+Cn]/32768.0;
+End;
+Begin
+ AEMdctInit; VBInitFloor; VBCrcInit;
+ OpenRead(Source); Limit:=InputSize;
+ If Limit<12 Then Fail('vorbis: WAV tronque.');
+ ReadAt(0,Hd,12);
+ If (Hd[0]<>82) Or (Hd[1]<>73) Or (Hd[2]<>70) Or (Hd[3]<>70) Then Fail('vorbis: WAV RIFF requis.');
+ At:=12; Ch:=0; Rate:=0; DataStart:=0; DataSize:=-1; BitsPer:=0; Fmt:=0;
+ While At+8<=Limit Do Begin
+  ReadAt(At,Hd,8); Sz:=U32(4); Tag:=Chr(Hd[0])+Chr(Hd[1])+Chr(Hd[2])+Chr(Hd[3]); Inc(At,8);
+  If Sz>Limit-At Then Sz:=Limit-At;
+  If Tag='fmt ' Then Begin
+   ReadAt(At,Hd,16); Fmt:=Hd[0]+Hd[1]*256; Ch:=Hd[2]+Hd[3]*256; Rate:=U32(4); BitsPer:=Hd[14]+Hd[15]*256;
+  End Else If Tag='data' Then Begin DataStart:=At; DataSize:=Sz; Break; End;
+  Inc(At,Sz+(Sz And 1));
+ End;
+ If (Fmt<>1) Or (BitsPer<>16) Or (Ch<1) Or (Ch>2) Or (DataSize<=0) Then Fail('vorbis: PCM 16 bits mono ou stereo requis.');
+ If (Rate<8000) Or (Rate>192000) Then Fail('vorbis: frequence 8000..192000 Hz requise.');
+ If BitRateK<=0 Then BitRateK:=56*Ch;
+ If (BitRateK<16) Or (BitRateK>500) Then Fail('vorbis: debit 16..500 kb/s requis.');
+ N:=DataSize Div (2*Ch);
+ If N<1 Then Fail('vorbis: aucun echantillon.');
+ If N>Rate*7200 Then Fail('vorbis: duree maximale 2 heures.');
+ GetMem(Pcm,Int64(N)*Ch*2+16);
+ At:=0;
+ While At<N*Ch*2 Do Begin
+  If N*Ch*2-At>4096 Then Sz:=4096 Else Sz:=N*Ch*2-At;
+  ReadAt(DataStart+At,Rd,Sz);
+  For I:=0 To Sz Div 2-1 Do Begin
+   K:=Rd[2*I]+Rd[2*I+1]*256; If K>=32768 Then Dec(K,65536);
+   Pcm^[(At Div 2)+I]:=K;
+  End;
+  Inc(At,Sz);
+ End;
+ CloseRead;
+ For I:=0 To 2047 Do Begin Res:=Sin(Pi*(I+0.5)/2048); Win[I]:=Sin(Pi/2*Res*Res); End;
+ VBGain:=1/1024; VBCal:=0.75;
+ CutHz:=(BitRateK*1000 Div Ch);
+ If CutHz<24000 Then CutHz:=8000 Else If CutHz<32000 Then CutHz:=11000 Else If CutHz<44000 Then CutHz:=14000 Else If CutHz<56000 Then CutHz:=16000 Else If CutHz<80000 Then CutHz:=18500 Else CutHz:=Rate Div 2;
+ Cut:=Round(Int64(CutHz)*1024/(Rate Div 2)); If Cut>1024 Then Cut:=1024;
+ Blocks:=(N+1023) Div 1024+1;
+ SymPer:=Ch*(26+64+1024);
+ GetMem(Syms,Int64(Blocks)*SymPer*2+16);
+ For Pass:=1 To 3 Do Begin
+ FillChar(VBHistF,SizeOf(VBHistF),0); FillChar(VBHistC,SizeOf(VBHistC),0); FillChar(VBHistV,SizeOf(VBHistV),0);
+ Tb:=Int64(BitRateK)*1000*1024/Rate; Res:=0;
+ For B:=0 To Blocks-1 Do Begin
+  For C:=0 To Ch-1 Do Begin
+   For I:=0 To 2047 Do Z[I]:=Sample((B-1)*1024+I,C)*Win[I];
+   AEMdct(Z,X);
+   For K:=0 To 1023 Do If K<Cut Then VBCf[C][K]:=X[K]*VBGain Else VBCf[C][K]:=0;
+  End;
+  Tgt:=Tb+0.15*Res; If Tgt<Tb*0.5 Then Tgt:=Tb*0.5; If Tgt>Tb*1.6 Then Tgt:=Tb*1.6;
+  Lo:=-9; Hi:=6;
+  For I:=1 To 10 Do Begin
+   Mid:=(Lo+Hi)/2;
+   Est:=VBQuantBlock(Ch,Cut,Mid);
+   If Est>Tgt Then Lo:=Mid Else Hi:=Mid;
+  End;
+  Est:=VBQuantBlock(Ch,Cut,Hi);
+  Res:=Res+Tb-Est; If Res>Tb*8 Then Res:=Tb*8; If Res<-Tb*8 Then Res:=-Tb*8;
+  Base:=B*SymPer;
+  For C:=0 To Ch-1 Do Begin
+   For I:=0 To 25 Do Syms^[Base+C*26+I]:=VBVals[C][I];
+   For I:=2 To 25 Do Inc(VBHistF[VBVals[C][I]]);
+   For P:=0 To 63 Do Begin
+    Syms^[Base+Ch*26+C*64+P]:=VBCls[C][P]; Inc(VBHistC[VBCls[C][P]]);
+   End;
+   For K:=0 To 1023 Do Syms^[Base+Ch*(26+64)+C*1024+K]:=VBQ[C][K];
+   For P:=0 To 63 Do Begin
+    Cl:=VBCls[C][P];
+    If Cl>0 Then For K:=0 To 15 Do Inc(VBHistV[Cl,VBQ[C][P*16+K]+VBKs[Cl]]);
+   End;
+  End;
+ End;
+ { livres de code entraines }
+ For I:=0 To 128 Do Freq[I]:=1;
+ For I:=0 To 127 Do Freq[I]:=VBHistF[I]+1;
+ VBBooks[0].Lookup:=False; VBBooks[0].Dim:=1; VBMakeBook(0,128,Freq);
+ For I:=0 To 7 Do Freq[I]:=VBHistC[I]+1;
+ VBBooks[1].Lookup:=False; VBMakeBook(1,8,Freq);
+ For Cl:=1 To 7 Do Begin
+  For I:=0 To 2*VBKs[Cl] Do Freq[I]:=VBHistV[Cl,I]+1;
+  VBBooks[1+Cl].Lookup:=True; VBBooks[1+Cl].K:=VBKs[Cl]; VBMakeBook(1+Cl,2*VBKs[Cl]+1,Freq);
+ End;
+ Actual:=Int64(Blocks)*(1+14*Ch);
+ For I:=0 To 127 Do Actual:=Actual+VBHistF[I]*VBBooks[0].Len[I];
+ For I:=0 To 7 Do Actual:=Actual+VBHistC[I]*VBBooks[1].Len[I];
+ For Cl:=1 To 7 Do For I:=0 To 2*VBKs[Cl] Do Actual:=Actual+VBHistV[Cl,I]*VBBooks[1+Cl].Len[I];
+ Ratio:=Actual/(Tb*Blocks);
+ If (Pass=3) Or (Abs(Ratio-1)<0.03) Then Break;
+ VBCal:=VBCal*Ratio;
+ End;
+ { sortie }
+ VBOCap:=1 Shl 20; GetMem(VBO,VBOCap); VBOLen:=0;
+ GetMem(VBPage,70000); VBPageLen:=0; VBSegs:=0; VBSeq:=0; VBSerial:=$1A2B3C4D; VBPageFlags:=2; VBPrevGran:=0;
+ GetMem(VBBuf,200000);
+ { identification }
+ FillChar(VBBuf^,200000,0); VBBits:=0;
+ VBPut(1,8); For I:=1 To 6 Do VBPut(Ord('vorbis'[I]),8);
+ VBPut(0,32); VBPut(Ch,8); VBPut(Rate,32); VBPut(0,32); VBPut(BitRateK*1000,32); VBPut(0,32); VBPut(11,4); VBPut(11,4); VBPut(1,1);
+ VBAddPacket(VBBuf,(VBBits+7) Shr 3,0,False,True);
+ { commentaire }
+ FillChar(VBBuf^,200000,0); VBBits:=0;
+ Vendor:='FFMPEG.PAS Vorbis';
+ VBPut(3,8); For I:=1 To 6 Do VBPut(Ord('vorbis'[I]),8);
+ VBPut(Length(Vendor),32); For I:=1 To Length(Vendor) Do VBPut(Ord(Vendor[I]),8);
+ VBPut(0,32); VBPut(1,1);
+ VBAddPacket(VBBuf,(VBBits+7) Shr 3,0,False,False);
+ { configuration }
+ FillChar(VBBuf^,200000,0); VBBits:=0;
+ VBPut(5,8); For I:=1 To 6 Do VBPut(Ord('vorbis'[I]),8);
+ VBPut(8,8);
+ For Bk:=0 To 8 Do VBPutBookHeader(Bk);
+ VBPut(0,6); VBPut(0,16);
+ VBPut(0,6);                         { 1 plancher }
+ VBPut(1,16); VBPut(6,5); For I:=1 To 6 Do VBPut(0,4);
+ VBPut(3,3); VBPut(0,2); VBPut(1,8); { classe 0 : dim 4, livre 0 }
+ VBPut(1,2); VBPut(10,4);            { multiplicateur 2, 10 bits }
+ For I:=2 To 25 Do VBPut(VBXs[I],10);
+ VBPut(0,6);                         { 1 residu }
+ VBPut(1,16); VBPut(0,24); VBPut(1024,24); VBPut(15,24); VBPut(7,6); VBPut(1,8);
+ For Cl:=0 To 7 Do Begin
+  If Cl=0 Then Begin VBPut(0,3); VBPut(0,1); End Else Begin VBPut(1,3); VBPut(0,1); End;
+ End;
+ For Cl:=1 To 7 Do VBPut(1+Cl,8);
+ VBPut(0,6);                         { 1 mapping }
+ VBPut(0,16); VBPut(0,1);
+ If Ch=2 Then Begin VBPut(1,1); VBPut(0,8); VBPut(0,1); VBPut(1,1); End Else VBPut(0,1);
+ VBPut(0,2); VBPut(0,8); VBPut(0,8); VBPut(0,8);
+ VBPut(0,6);                         { 1 mode }
+ VBPut(0,1); VBPut(0,16); VBPut(0,16); VBPut(0,8);
+ VBPut(1,1);
+ VBAddPacket(VBBuf,(VBBits+7) Shr 3,0,False,True);
+ { paquets audio }
+ For B:=0 To Blocks-1 Do Begin
+  FillChar(VBBuf^,SymPer*2+64,0); VBBits:=0;
+  Base:=B*SymPer;
+  VBPut(0,1);
+  For C:=0 To Ch-1 Do Begin
+   VBPut(1,1); VBPut(Syms^[Base+C*26],7); VBPut(Syms^[Base+C*26+1],7);
+   For I:=2 To 25 Do VBPutBook(0,Syms^[Base+C*26+I]);
+  End;
+  For P:=0 To 63 Do Begin
+   For C:=0 To Ch-1 Do VBPutBook(1,Syms^[Base+Ch*26+C*64+P]);
+   For C:=0 To Ch-1 Do Begin
+    Cl:=Syms^[Base+Ch*26+C*64+P];
+    If Cl>0 Then For K:=0 To 15 Do VBPutBook(1+Cl,Syms^[Base+Ch*90+C*1024+P*16+K]+VBKs[Cl]);
+   End;
+  End;
+  If B=Blocks-1 Then Gran:=N Else Gran:=Int64(B)*1024;
+  VBAddPacket(VBBuf,(VBBits+7) Shr 3,Gran,B=Blocks-1,False);
+ End;
+ OpenWrite(Target);
+ I:=0; While I<VBOLen Do Begin If VBOLen-I>4096 Then K:=4096 Else K:=VBOLen-I; WriteBytes(VBO^[I],K); Inc(I,K); End;
+ CloseWrite;
+End;
+{ VORBE-END }
+
 Procedure MPEG1Video(Const Source,Target: String; Encoding: Boolean);
 Const
  DefaultMatrix: Array[0..63] Of Integer=(
@@ -49647,6 +50137,7 @@ Begin
  WriteLn(' D  psxstr          Sony PlayStation STR / RIFF CDXA (audio adpcm_xa)');
  WriteLn(' D  wsaud           Westwood Studios audio (adpcm_ima_ws)');
  WriteLn(' DE aac             AAC ADTS (AAC-LC mono/stereo; alias: adts; encodage libfaac natif)');
+ WriteLn(' E  ogg             Ogg (audio Vorbis: encodeur libvorbis natif; extensions .ogg, .oga)');
  WriteLn(' D  iff             IFF 8SVX, Fibonacci/exponentiel (alias: 8svx, svx)');
  WriteLn(' DE aiff            AIFF/AIFF-C PCM; ima4 (adpcm_ima_qt) en decodage et encodage AIFF-C');
  WriteLn(' D  asf             ASF, audio WMA2 seulement (alias: wma, wmv)');
@@ -49738,6 +50229,7 @@ Procedure Help;Begin
  WriteLn(' aac: -i entree.aac sortie.wav (AAC-LC ADTS mono/stereo).');
  WriteLn(' libfaac: -i entree.wav -c:a libfaac -b:a 128k sortie.aac (AAC-LC ADTS natif); libfaad: -c:a libfaad -i entree.aac sortie.wav.');
  WriteLn(' libx264: -i entree.y4m -c:v libx264 -crf 23 -g 250 sortie.mp4 (ou .h264 Annex B; H.264 Baseline natif, non identique a x264).');
+ WriteLn(' libvorbis: -i entree.wav -c:a libvorbis -b:a 128k sortie.ogg (encodeur Vorbis natif, non identique a libvorbis).');
  WriteLn(' libmp3lame: -i entree.wav -c:a libmp3lame -b:a 128k sortie.mp3 (encodeur MP3 natif du projet).');
  WriteLn(' kmvc: -i entree.avi -an sortie.y4m (Karl Morton, PAL8, 320x200 max).');
  WriteLn(' interplayvideo|interplay_dpcm: -i entree.mve sortie.y4m|sortie.png|sortie.wav (Interplay MVE).');
@@ -50013,6 +50505,7 @@ BEGIN
    WriteLn('D A    aac             Advanced Audio Coding (AAC-LC ADTS mono/stereo)');
    WriteLn('D A    libfaad         libfaad AAC (Advanced Audio Codec) (decodeur AAC-LC ADTS natif; -c:a libfaad avant -i)');
    WriteLn(' EA    libfaac         libfaac AAC (Advanced Audio Codec) (encodeur AAC-LC ADTS mono/stereo, 7350..96000 Hz, -b:a 8..576k, M/S par bande)');
+   WriteLn(' EA    libvorbis       libvorbis Vorbis (encodeur natif: Ogg, blocs de 2048, plancher 1, residu 1, couplage M/A, mono/stereo, -b:a 16..500k)');
    WriteLn('D V D  aasc            Autodesk RLE (AVI AASC/AAS4, 8/16/24 bits)');
    WriteLn('DEV    flv             Flash Video (FLV1/Sorenson Spark: decodeur complet I/P (FLV, AVI); encodeur images intra)');
    WriteLn(' EV    libx264         libx264 H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 (encodeur natif Baseline CAVLC I/P 4:2:0, sans deblocage; Y4M vers .h264 ou .mp4; -crf, -qp, -g, -b:v)');
@@ -50627,24 +51120,25 @@ BEGIN
  If NoAudio Then Fail('-an: aucune piste a ecrire dans une sortie audio seule.');
  If VideoCodec<>'' Then Fail('Codec video incompatible avec une sortie audio seule.');
  If (OutputFormat<>'wav') And (OutputFormat<>'mp3') And (OutputFormat<>'ac3') And (OutputFormat<>'aac') And
- (OutputFormat<>'adx') And (OutputFormat<>'aiff') And (OutputFormat<>'flv') And (OutputFormat<>'mp4') Then Fail(
- 'Sorties audio WAV, MP3, AC3, AAC (ADTS), ADX et AIFF-C (adpcm_ima_qt) prises en charge.');
+ (OutputFormat<>'adx') And (OutputFormat<>'aiff') And (OutputFormat<>'flv') And (OutputFormat<>'mp4') And (OutputFormat<>'ogg') Then Fail(
+ 'Sorties audio WAV, MP3, AC3, AAC (ADTS), Ogg Vorbis, ADX et AIFF-C (adpcm_ima_qt) prises en charge.');
  If AudioCodec='' Then If OutputFormat='wav' Then AudioCodec:=
  'pcm_s16le' Else If OutputFormat='adx' Then AudioCodec:='adpcm_adx'
  Else If OutputFormat='aiff' Then AudioCodec:='adpcm_ima_qt'
  Else If OutputFormat='flv' Then AudioCodec:='adpcm_swf'
- Else If OutputFormat='mp4' Then AudioCodec:='alac' Else AudioCodec:=OutputFormat;
+ Else If OutputFormat='mp4' Then AudioCodec:='alac' Else If OutputFormat='ogg' Then AudioCodec:='libvorbis' Else AudioCodec:=OutputFormat;
  If (AudioCodec<>'copy') And Not (((OutputFormat='wav') And ((AudioCodec='pcm_s16le') Or (AudioCodec='adpcm_ima_wav') Or
   (AudioCodec='adpcm_ms') Or (AudioCodec='adpcm_yamaha'))) Or ((OutputFormat='flv') And (AudioCodec='adpcm_swf')) Or
  ((OutputFormat='mp4') And (AudioCodec='alac')) Or
  ((OutputFormat='adx') And (AudioCodec='adpcm_adx')) Or ((OutputFormat='aiff') And (AudioCodec='adpcm_ima_qt')) Or
  ((OutputFormat='mp3') And ((AudioCodec='mp3') Or (AudioCodec='libmp3lame'))) Or ((OutputFormat='ac3') And (AudioCodec='ac3')) Or
+ ((OutputFormat='ogg') And (AudioCodec='libvorbis')) Or
  ((OutputFormat='aac') And ((AudioCodec='aac') Or (AudioCodec='libfaac')))) Then Fail(
  'Codec de sortie non pris en charge pour ce conteneur.');
- If HasBitrate And (((OutputFormat<>'mp3') And (OutputFormat<>'ac3') And (OutputFormat<>'aac')) Or (AudioCodec='copy')) Then Fail(
- '-b:a exige un encodage MP3, AAC ou AC3.');
+ If HasBitrate And (((OutputFormat<>'mp3') And (OutputFormat<>'ac3') And (OutputFormat<>'aac') And (OutputFormat<>'ogg')) Or (AudioCodec='copy')) Then Fail(
+ '-b:a exige un encodage MP3, AAC, Vorbis ou AC3.');
  If (OutputFormat='mp3') And (RequestedBitRateK>320) Then Fail('MP3: debit maximal 320k.');
- If NonStdBitrate And (OutputFormat<>'aac') Then Fail('Debit audio normalise requis: MP3 32..320k ou AC3 32..640k.');
+ If NonStdBitrate And (OutputFormat<>'aac') And (OutputFormat<>'ogg') Then Fail('Debit audio normalise requis: MP3 32..320k ou AC3 32..640k.');
  If (AudioCodec='copy') And ((RequestedRate<>0) Or (RequestedChannels<>0) Or (InputFormat
  <>OutputFormat)) Then  Fail(
  '-c:a copy exige le meme conteneur audio et aucune conversion audio.');
@@ -50733,6 +51227,10 @@ BEGIN
    Else If OutputFormat='ac3' Then Begin
     Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False);
     If Not HasBitrate Then RequestedBitRateK:=192; ProcessAC3(Temps[1],Temps[2],True,RequestedBitRateK);
+   End
+   Else If OutputFormat='ogg' Then Begin
+    Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False);
+    If HasBitrate Then EncodeVorbis(Temps[1],Temps[2],RequestedBitRateK) Else EncodeVorbis(Temps[1],Temps[2],0);
    End
    Else If OutputFormat='aac' Then Begin
     Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False);
