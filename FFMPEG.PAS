@@ -3942,6 +3942,7 @@ Begin
  If N>=4 Then If (B[0]=66) And (B[1]=70) And (B[2]=38) And (B[3]=73) Then Begin Probe:='bfi'; Exit; End;
  If N>=15 Then If (B[0]=68) And (B[1]=69) And (B[2]=88) And (B[3]=65) And ((B[11]*256+B[12])>0) And ((B[11]*256+B[12])<=2048) And ((B[13]*256+B[14])>0) And ((B[13]*256+B[14])<=2048) Then Begin Probe:='dxa'; Exit; End;
  If N>=4 Then If (B[0]=$FF) And (B[1]=$D8) And (B[2]=$FF) And (B[3]=$F7) Then Begin Probe:='jpegls_pipe'; Exit; End;
+ If N>=4 Then If (B[0]=$FF) And (B[1]=$D8) And (B[2]=$FF) And (B[3]<>$F7) Then Begin Probe:='jpeg_pipe'; Exit; End;
  If N>=26 Then Begin
   { Interplay MVE : signature "Interplay MVE File"#26#0#26#0, cherchee dans le tampon (ipmovie_probe) }
   For J:=0 To N-22 Do
@@ -14352,7 +14353,7 @@ Var
  NVMode,NVW,NVH,NVFmt,NVFrames,NVFpsN,NVFpsD,NVSarN,NVSarD: LongInt;
  NVHasAlpha,NVOpened,NVDone,NVYC,NVInitDup: Boolean; NVTarget: String;
  NVPalR,NVPalG,NVPalB: Array[0..255] Of Byte;
- NVVN,NVVD,NVSubX,NVSubY,NVCW,NVCH: LongInt; NVTo420,NVHdrOk: Boolean; NVIl: Char; NVBT709: Boolean; NVYTag: String[80];
+ NVVN,NVVD,NVSubX,NVSubY,NVCW,NVCH: LongInt; NVTo420,NVHdrOk: Boolean; NVIl: Char; NVBT709,NVFullRng: Boolean; NVYTag: String[80];
  NVLast: PEABuffer; NVLastSize,NVGap: LongInt; NVHaveLast: Boolean;
  NVLastPalR,NVLastPalG,NVLastPalB,NVSavePalR,NVSavePalG,NVSavePalB: Array[0..255] Of Byte;
  NVCur: PEABuffer;
@@ -14387,9 +14388,14 @@ Begin
     Yv:=(P^[Q*2]+P^[Q*2+1]*256) Shr 2; Uv:=(P^[CIdx*2]+P^[CIdx*2+1]*256) Shr 2;
     Vv:=(P^[(CIdx+NVCW*NVCH)*2]+P^[(CIdx+NVCW*NVCH)*2+1]*256) Shr 2;
    End;
-   Yv:=Yv-16; Uv:=Uv-128; Vv:=Vv-128;
+   Uv:=Uv-128; Vv:=Vv-128;
+   If NVFullRng Then Begin
+    R:=Yv+((91881*Vv+32768+16777216) Div 65536)-256; G:=Yv+((-22553*Uv-46801*Vv+32768+16777216) Div 65536)-256; B:=Yv+((116130*Uv+32768+16777216) Div 65536)-256;
+   End Else Begin
+   Yv:=Yv-16;
    If NVBT709 Then Begin R:=(298*Yv+459*Vv+128) Div 256; G:=(298*Yv-55*Uv-136*Vv+128) Div 256; B:=(298*Yv+541*Uv+128) Div 256; End
    Else Begin R:=(298*Yv+409*Vv+128) Div 256; G:=(298*Yv-100*Uv-208*Vv+128) Div 256; B:=(298*Yv+516*Uv+128) Div 256; End;
+   End;
    If R<0 Then R:=0 Else If R>255 Then R:=255;
    If G<0 Then G:=0 Else If G>255 Then G:=255;
    If B<0 Then B:=0 Else If B>255 Then B:=255;
@@ -15018,7 +15024,7 @@ End;
 Procedure NVBegin(Mode: LongInt; Const Target: String; W,H,Fmt,FpsN,FpsD: LongInt);
 Begin
  NVMode:=Mode; NVTarget:=Target; NVW:=W; NVH:=H; NVFmt:=Fmt; NVFrames:=0; NVFpsN:=FpsN; NVFpsD:=FpsD;
- NVSarN:=0; NVSarD:=0; NVYC:=False; NVInitDup:=False; NVIl:='p'; NVBT709:=False; NVOpened:=False; NVDone:=False; NVLast:=Nil; NVHaveLast:=False; NVGap:=0; NVHasAlpha:=False; NVTo420:=False; NVHdrOk:=False;
+ NVSarN:=0; NVSarD:=0; NVYC:=False; NVInitDup:=False; NVIl:='p'; NVBT709:=False; NVFullRng:=False; NVOpened:=False; NVDone:=False; NVLast:=Nil; NVHaveLast:=False; NVGap:=0; NVHasAlpha:=False; NVTo420:=False; NVHdrOk:=False;
 End;
 
 { flux sans image decodee: ffmpeg ecrit l'en-tete Y4M seul quand le format est connu des parametres du conteneur }
@@ -17461,6 +17467,8 @@ Procedure DecodeFLIC(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeIdcin(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeMVE(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeJLS(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure DecodeMJP(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure DecodeMJPB(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeGIF(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeH263Raw(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeFLVH263(Const Source,Target: String; Mode: LongInt); Forward;
@@ -17489,6 +17497,8 @@ Begin
  Else If Kind=39 Then DecodeJLS(Source,Target,Mode)
  Else If Kind=44 Then DecodeSTRVideo(Source,Target,Mode)
  Else If Kind=45 Then DecodeMSNWC(Source,Target,Mode)
+ Else If Kind=46 Then DecodeMJP(Source,Target,Mode)
+ Else If Kind=47 Then DecodeMJPB(Source,Target,Mode)
  Else If Kind=33 Then DecodeH264Raw(Source,Target,Mode)
  Else If Kind=34 Then DecodeH264Mp4(Source,Target,Mode)
  Else If Kind=35 Then DecodeH264Avi(Source,Target,Mode)
@@ -39354,6 +39364,824 @@ Begin
 End;
 { MSN-END }
 
+{ MJPEG-BEGIN }
+{ ---- MJPEG / JPEG (libavcodec/mjpegdec.c, mjpegbdec.c, mjpegdec_common.c, LGPL-2.1-or-later) : decodeur sequentiel et progressif 8 bits ---- }
+Type
+ MJSArr=Array[0..1073741822] Of SmallInt; PMJS=^MJSArr;
+Var
+ MJQuant: Array[0..3,0..63] Of LongInt;
+ MJSym: Array[0..2,0..3] Of PMJS; MJLen: Array[0..2,0..3] Of PEABuffer;
+ MJW,MJH,MJBitsPer,MJNc,MJHmax,MJVmax,MJFmt: LongInt;
+ MJId,MJHc,MJVc,MJQi: Array[0..3] Of LongInt;
+ MJPl: Array[0..3] Of PEABuffer; MJPStr,MJPRows,MJCw,MJCh: Array[0..3] Of LongInt; MJAlloc: Boolean;
+ MJProg,MJInterlaced,MJBottom,MJPolarity,MJFirst,MJGot,MJFull,MJItu601: Boolean;
+ MJCurScan,MJRestart,MJRestartCount,MJAdobe,MJOrigH,MJSarN,MJSarD,MJTag: LongInt; MJHaveJfif: Boolean;
+ MJBuf: PEABuffer; MJPos,MJEnd: LongInt;       { lecteur de bits (tampon sans echappements) }
+ MJScN,MJScOrder: LongInt; MJScC,MJScDc,MJScAc,MJScH,MJScV,MJScNb,MJScQ: Array[0..3] Of LongInt;
+ MJMbW,MJMbH: LongInt; MJLastDc: Array[0..3] Of LongInt;
+ MJBlk: Array[0..3] Of PMJS; MJBlkStr: Array[0..3] Of LongInt; MJNnz: Array[0..3] Of PEABuffer; MJBlkCnt: Array[0..3] Of LongInt;
+ MJSkipSod: LongInt; MJZig: Array[0..63] Of Byte;
+Const
+ MJZ: Array[0..63] Of Byte=(0,1,8,16,9,2,3,10,17,24,32,25,18,11,4,5,12,19,26,33,40,48,41,34,27,20,13,6,7,14,21,28,35,42,49,56,57,50,43,36,29,22,15,23,30,37,44,51,58,59,52,45,38,31,39,46,53,60,61,54,47,55,62,63);
+
+{ ---- lecteur de bits ---- }
+Function MJLeft: LongInt; Begin MJLeft:=MJEnd-MJPos; End;
+Function MJPeek(N: LongInt): LongInt;
+Var V,I,B,Q: LongInt;
+Begin
+ V:=0; Q:=MJPos;
+ For I:=1 To N Do Begin
+  If Q<MJEnd Then B:=(MJBuf^[Q Shr 3] Shr (7-(Q And 7))) And 1 Else B:=0;
+  V:=V*2+B; Inc(Q);
+ End;
+ MJPeek:=V;
+End;
+Function MJGet(N: LongInt): LongInt;
+Begin MJGet:=MJPeek(N); Inc(MJPos,N); End;
+Function MJXbits(N: LongInt): LongInt;
+Var V: LongInt;
+Begin
+ V:=MJGet(N);
+ If V<(1 Shl (N-1)) Then V:=V-(1 Shl N)+1;
+ MJXbits:=V;
+End;
+Function MJSym1(Cls,Idx: LongInt; Var Sym: LongInt): Boolean;
+Var P16: LongInt;
+Begin
+ P16:=MJPeek(16);
+ If (MJLen[Cls,Idx]=Nil) Or (MJLen[Cls,Idx]^[P16]=0) Then Begin MJSym1:=False; Exit; End;
+ Sym:=MJSym[Cls,Idx]^[P16]; Inc(MJPos,MJLen[Cls,Idx]^[P16]); MJSym1:=True;
+End;
+
+{ ---- tables de Huffman ---- }
+Procedure MJBuildVlc(Cls,Idx: LongInt; Const Bits: Array Of Byte; Const Vals: Array Of Byte; IsAc: Boolean);
+Var L,K,N,Code,Total,V,Base,Cnt,S: LongInt; Sym: Array[0..255] Of LongInt; Ln: Array[0..255] Of LongInt;
+Begin
+ If MJLen[Cls,Idx]=Nil Then Begin GetMem(MJLen[Cls,Idx],65536); GetMem(MJSym[Cls,Idx],131072); End;
+ FillChar(MJLen[Cls,Idx]^,65536,0);
+ Total:=0;
+ For L:=1 To 16 Do Begin
+  For K:=1 To Bits[L-1] Do Begin
+   If Total>255 Then Exit;
+   V:=Vals[Total]; S:=V;
+   If IsAc Then Begin S:=V+16; If V=0 Then S:=4096; End;
+   Sym[Total]:=S; Ln[Total]:=L; Inc(Total);
+  End;
+ End;
+ Code:=0; N:=0;
+ For L:=1 To 16 Do Begin
+  For K:=1 To Bits[L-1] Do Begin
+   If N>=Total Then Break;
+   Base:=Code Shl (16-L); Cnt:=1 Shl (16-L);
+   If Base+Cnt<=65536 Then
+    For V:=0 To Cnt-1 Do Begin MJLen[Cls,Idx]^[Base+V]:=L; MJSym[Cls,Idx]^[Base+V]:=Sym[N]; End;
+   Inc(Code); Inc(N);
+  End;
+  Code:=Code Shl 1;
+ End;
+End;
+Procedure MJDefaultTables;
+Var B: Array[0..15] Of Byte; I: LongInt;
+ Procedure Mk(Cls,Idx: LongInt; Const Bt: Array Of Byte; Const Vl: Array Of Byte; Ac: Boolean);
+ Begin MJBuildVlc(Cls,Idx,Bt,Vl,Ac); End;
+Const DcVals: Array[0..11] Of Byte=(0,1,2,3,4,5,6,7,8,9,10,11);
+Begin
+ For I:=0 To 15 Do B[I]:=LJBitsDcL[I+1]; Mk(0,0,B,DcVals,False);
+ For I:=0 To 15 Do B[I]:=LJBitsDcC[I+1]; Mk(0,1,B,DcVals,False);
+ For I:=0 To 15 Do B[I]:=LJBitsAcL[I+1]; Mk(1,0,B,LJValAcL,True); Mk(2,0,B,LJValAcL,False);
+ For I:=0 To 15 Do B[I]:=LJBitsAcC[I+1]; Mk(1,1,B,LJValAcC,True); Mk(2,1,B,LJValAcC,False);
+End;
+
+{ ---- decodage des blocs ---- }
+Function MJDecDc(DcIdx: LongInt; Var Val: LongInt): Boolean;
+Var Code: LongInt;
+Begin
+ MJDecDc:=False;
+ If Not MJSym1(0,DcIdx,Code) Then Exit;
+ If (Code<0) Or (Code>16) Then Exit;
+ If Code<>0 Then Val:=MJXbits(Code) Else Val:=0;
+ MJDecDc:=True;
+End;
+Function MJClip16(V: LongInt): LongInt;
+Begin If V>32767 Then MJClip16:=32767 Else If V<-32768 Then MJClip16:=-32768 Else MJClip16:=V; End;
+{ bloc sequentiel }
+Function MJBlock(Var Blk: TAMVBlock; Comp,DcIdx,AcIdx,Qi: LongInt): Boolean;
+Var Val,I,J,Code,Level,Sz: LongInt;
+Begin
+ MJBlock:=False;
+ If Not MJDecDc(DcIdx,Val) Then Exit;
+ Val:=MJClip16(Int64(Val)*MJQuant[Qi,0]+MJLastDc[Comp]);
+ MJLastDc[Comp]:=Val; Blk[0]:=Val;
+ I:=0;
+ Repeat
+  If Not MJSym1(1,AcIdx,Code) Then Exit;
+  Inc(I,Code Shr 4);
+  Code:=Code And 15;
+  If Code<>0 Then Begin
+   Level:=MJXbits(Code);
+   If I>63 Then Exit;
+   J:=MJZ[I];
+   Blk[J]:=Level*MJQuant[Qi,I];
+  End;
+ Until I>=63;
+ MJBlock:=True;
+End;
+Procedure MJClear(Var Blk: TAMVBlock); Begin FillChar(Blk,SizeOf(Blk),0); End;
+
+{ ---- reinitialisation de restart ---- }
+Function MJRstn: Boolean;
+Var I,Pos0: LongInt;
+Begin
+ MJRstn:=False;
+ If MJRestart<>0 Then Begin
+  Dec(MJRestartCount);
+  I:=8+((-MJPos) And 7);
+  If MJRestartCount=0 Then Begin
+   If (MJPeek(I)=(1 Shl I)-1) Or (MJPeek(I)=$FF) Then Begin
+    Pos0:=MJPos;
+    MJPos:=(MJPos+7) And Not 7;
+    While (MJLeft>=8) And (MJPeek(8)=$FF) Do Inc(MJPos,8);
+    If (MJLeft>=8) And ((MJGet(8) And $F8)=$D0) Then Begin
+     For I:=0 To MJScN-1 Do MJLastDc[I]:=4 Shl MJBitsPer;
+     MJRstn:=True;
+    End Else MJPos:=Pos0;
+   End;
+  End;
+ End;
+End;
+
+Function MJIdct(Comp,Bx,By: LongInt; Var Blk: TAMVBlock; Stride,Off: LongInt): Boolean;
+Begin
+ AVIdctPut(Blk,@MJPl[Comp]^[Off],Stride); MJIdct:=True;
+End;
+
+{ balayage entrelace/sequentiel (premiere passe progressive : DC) }
+Function MJScan(Ah,Al: LongInt): Boolean;
+Var Mx,My,I,J,N,C,H,V,X,Y,Off,Stride,Cwid,Chei,BIdx,Dcv: LongInt; Blk: TAMVBlock; P: PMJS; Q: LongInt;
+Begin
+ MJScan:=False;
+ MJRestartCount:=0;
+ For My:=0 To MJMbH-1 Do For Mx:=0 To MJMbW-1 Do Begin
+  If (MJRestart<>0) And (MJRestartCount=0) Then MJRestartCount:=MJRestart;
+  If MJLeft<0 Then Exit;
+  For I:=0 To MJScN-1 Do Begin
+   N:=MJScNb[I]; C:=MJScC[I]; H:=MJScH[I]; V:=MJScV[I]; X:=0; Y:=0; Q:=MJScQ[I];
+   For J:=0 To N-1 Do Begin
+    Stride:=MJPStr[C] Shl Ord(MJInterlaced);
+    Off:=Stride*(V*My+Y)*8+(H*Mx+X)*8;
+    If MJInterlaced And MJBottom Then Inc(Off,Stride Shr 1);
+    If C=0 Then Begin Cwid:=MJW; Chei:=MJH; End Else Begin Cwid:=MJCw[C]; Chei:=MJCh[C]; End;
+    If Not MJProg Then Begin
+     MJClear(Blk);
+     If Not MJBlock(Blk,I,MJScDc[I],MJScAc[I],Q) Then Exit;
+     If (8*(H*Mx+X)<Cwid) And (8*(V*My+Y)<Chei) Then AVIdctPut(Blk,@MJPl[C]^[Off],Stride);
+    End Else Begin
+     BIdx:=MJBlkStr[C]*(V*My+Y)+(H*Mx+X);
+     P:=PMJS(@MJBlk[C]^[BIdx*64]);
+     If Ah<>0 Then Begin
+      P^[0]:=P^[0]+(MJGet(1)*MJQuant[Q,0] Shl Al);
+     End Else Begin
+      MJClear(Blk);
+      If Not MJDecDc(MJScDc[I],Dcv) Then Exit;
+      Dcv:=Dcv*(MJQuant[Q,0] Shl Al)+MJLastDc[I];
+      MJLastDc[I]:=Dcv; P^[0]:=Dcv;
+      For Q:=1 To 63 Do P^[Q]:=0;
+      Q:=MJScQ[I];
+     End;
+    End;
+    Inc(X);
+    If X=H Then Begin X:=0; Inc(Y); End;
+   End;
+  End;
+  MJRstn;
+ End;
+ MJScan:=True;
+End;
+
+{ balayage AC progressif (une composante) }
+Function MJScanAc(Ss,Se,Ah,Al: LongInt): Boolean;
+Var Mx,My,C,Bidx,EobRun,Q,I,J,Code,Run,Val,Last,Sign,Lvl,Ac,Total: LongInt; P: PMJS; Nz: ^Byte; Level: LongInt;
+Label Done,ZeroRunDone;
+Function Refine(Idx: LongInt): Boolean;  { REFINE_BIT }
+Var Sg,Bit: LongInt;
+Begin
+ Sg:=P^[Idx] Shr 15; If P^[Idx]<0 Then Sg:=-1 Else Sg:=0;
+ Bit:=MJGet(1);
+ If Bit<>0 Then Begin
+  If Sg<>0 Then P^[Idx]:=P^[Idx]-((MJQuant[Q,I]) Shl Al) Else P^[Idx]:=P^[Idx]+((MJQuant[Q,I]) Shl Al);
+ End;
+ Refine:=True;
+End;
+Begin
+ MJScanAc:=False;
+ If (Se<Ss) Or (Se>63) Then Exit;
+ C:=MJScC[0]; Q:=MJScQ[0]; EobRun:=0; MJRestartCount:=0; Ac:=MJScAc[0];
+ For My:=0 To MJMbH-1 Do Begin
+  If MJLeft<=0 Then Exit;
+  For Mx:=0 To MJMbW-1 Do Begin
+   Bidx:=My*MJBlkStr[C]+Mx;
+   P:=PMJS(@MJBlk[C]^[Bidx*64]); Nz:=@MJNnz[C]^[Bidx];
+   If (MJRestart<>0) And (MJRestartCount=0) Then MJRestartCount:=MJRestart;
+   If Ah=0 Then Begin
+    { passe de premiere approximation }
+    If EobRun<>0 Then Dec(EobRun)
+    Else Begin
+     I:=Ss;
+     While True Do Begin
+      If Not MJSym1(2,Ac,Code) Then Exit;
+      Run:=Code Shr 4; Code:=Code And 15;
+      If Code<>0 Then Begin
+       Inc(I,Run);
+       Level:=MJXbits(Code);
+       If I>=Se Then Begin
+        If I=Se Then Begin P^[MJZ[Se]]:=Level*(MJQuant[Q,Se] Shl Al); Break; End;
+        Exit;
+       End;
+       P^[MJZ[I]]:=Level*(MJQuant[Q,I] Shl Al);
+      End Else Begin
+       If Run=15 Then Begin
+        Inc(I,15);
+        If I>=Se Then Exit;
+       End Else Begin
+        Val:=1 Shl Run;
+        If Run<>0 Then Val:=Val+MJGet(Run);
+        EobRun:=Val-1;
+        Break;
+       End;
+      End;
+      Inc(I);
+     End;
+     If I>Nz^ Then Nz^:=I;
+    End;
+   End Else Begin
+    { passe de raffinement }
+    Last:=Se; If Nz^<Last Then Last:=Nz^;
+    I:=Ss;
+    If EobRun<>0 Then Dec(EobRun)
+    Else Begin
+     While True Do Begin
+      If Not MJSym1(2,Ac,Code) Then Exit;
+      If (Code And 15)<>0 Then Begin
+       Run:=Code Shr 4;
+       Val:=MJGet(1);
+       { ZERO_RUN }
+       While True Do Begin
+        If I>Last Then Begin Inc(I,Run); If I>Se Then Exit; Break; End;
+        J:=MJZ[I];
+        If P^[J]<>0 Then Refine(J)
+        Else Begin If Run=0 Then Break; Dec(Run); End;
+        Inc(I);
+       End;
+       J:=MJZ[I];
+       Dec(Val);
+       If Val<>0 Then Val:=-1;
+       P^[J]:=((MJQuant[Q,I] Shl Al) Xor Val)-Val;
+       If I=Se Then Begin
+        If I>Nz^ Then Nz^:=I;
+        Goto Done;
+       End;
+      End Else Begin
+       Run:=Code Shr 4;
+       If Run=15 Then Begin
+        { ZERO_RUN avec Run=15 }
+        While True Do Begin
+         If I>Last Then Begin Inc(I,Run); If I>Se Then Exit; Break; End;
+         J:=MJZ[I];
+         If P^[J]<>0 Then Refine(J)
+         Else Begin If Run=0 Then Break; Dec(Run); End;
+         Inc(I);
+        End;
+       End Else Begin
+        Val:=Run; Run:=1 Shl Run;
+        If Val<>0 Then Run:=Run+MJGet(Val);
+        EobRun:=Run-1;
+        Break;
+       End;
+      End;
+      Inc(I);
+     End;
+     If I>Nz^ Then Nz^:=I;
+    End;
+    While I<=Last Do Begin
+     J:=MJZ[I];
+     If P^[J]<>0 Then Refine(J);
+     Inc(I);
+    End;
+   End;
+Done:
+   If (Ah<>0) And False Then ;
+   If MJRstn Then EobRun:=0;
+   If MJLeft<0 Then Exit;
+  End;
+ End;
+ MJScanAc:=True;
+End;
+
+{ ---- en-tetes ---- }
+Function MJDqt: Boolean;
+Var Len,Pr,Idx,I: LongInt;
+Begin
+ MJDqt:=False;
+ Len:=MJGet(16)-2;
+ If 8*Len>MJLeft Then Exit;
+ While Len>=65 Do Begin
+  Pr:=MJGet(4); If Pr>1 Then Exit;
+  Idx:=MJGet(4); If Idx>=4 Then Exit;
+  For I:=0 To 63 Do MJQuant[Idx,I]:=MJGet(8*(Pr+1));
+  Dec(Len,1+64*(1+Pr));
+ End;
+ MJDqt:=True;
+End;
+Function MJDht: Boolean;
+Var Len,Cls,Idx,I,N,V: LongInt; Bits: Array[0..15] Of Byte; Vals: Array[0..255] Of Byte;
+Begin
+ MJDht:=False;
+ Len:=MJGet(16)-2;
+ If 8*Len>MJLeft Then Exit;
+ While Len>0 Do Begin
+  If Len<17 Then Exit;
+  Cls:=MJGet(4); If Cls>=2 Then Exit;
+  Idx:=MJGet(4); If Idx>=4 Then Exit;
+  N:=0;
+  For I:=0 To 15 Do Begin Bits[I]:=MJGet(8); Inc(N,Bits[I]); End;
+  Dec(Len,17);
+  If (Len<N) Or (N>256) Then Exit;
+  For I:=0 To N-1 Do Vals[I]:=MJGet(8);
+  Dec(Len,N);
+  MJBuildVlc(Cls,Idx,Bits,Vals,Cls>0);
+  If Cls>0 Then MJBuildVlc(2,Idx,Bits,Vals,False);
+ End;
+ MJDht:=True;
+End;
+Procedure MJFreePlanes;
+Var C: LongInt;
+Begin
+ If Not MJAlloc Then Exit;
+ For C:=0 To 3 Do Begin
+  If MJPl[C]<>Nil Then Begin FreeMem(MJPl[C],MJPStr[C]*MJPRows[C]+64); MJPl[C]:=Nil; End;
+  If MJBlk[C]<>Nil Then Begin FreeMem(MJBlk[C],MJBlkCnt[C]*128+128); MJBlk[C]:=Nil; FreeMem(MJNnz[C],MJBlkCnt[C]+16); MJNnz[C]:=Nil; End;
+ End;
+ MJAlloc:=False;
+End;
+{ SOF : renvoie False en cas d'erreur ; Prog = SOF2 }
+Function MJSof(Prog: Boolean): Boolean;
+Var Len,Bits,H,W,Nc,I,Pid,Hs,Vs,Bw,Bh,C: LongInt; Hc,Vc: Array[0..3] Of LongInt; Changed: Boolean; Uh,Hf: LongInt; Id32: LongWord; Shift,Dummy: LongInt;
+Begin
+ MJSof:=False;
+ MJCurScan:=0;
+ Len:=MJGet(16); Bits:=MJGet(8);
+ If (Bits>16) Or (Bits<1) Then Exit;
+ If Bits<>8 Then Exit;
+ H:=MJGet(16); W:=MJGet(16);
+ If MJInterlaced And (MJW=W) And (MJH=H+1) Then H:=MJH;
+ If (W<1) Or (H<1) Or (W>32768) Or (H>32768) Then Exit;
+ Nc:=MJGet(8);
+ If (Nc<=0) Or (Nc>4) Then Exit;
+ If MJInterlaced And (MJBottom=Not MJPolarity) Then Begin If Nc<>MJNc Then Exit; End;
+ If Len<>8+3*Nc Then Exit;
+ MJNc:=Nc; MJHmax:=1; MJVmax:=1;
+ For I:=0 To 3 Do Begin Hc[I]:=0; Vc[I]:=0; End;
+ For I:=0 To Nc-1 Do Begin
+  MJId[I]:=MJGet(8); Hc[I]:=MJGet(4); Vc[I]:=MJGet(4);
+  If Hc[I]>MJHmax Then MJHmax:=Hc[I];
+  If Vc[I]>MJVmax Then MJVmax:=Vc[I];
+  MJQi[I]:=MJGet(8);
+  If MJQi[I]>=4 Then Exit;
+  If (Hc[I]=0) Or (Vc[I]=0) Then Exit;
+ End;
+ Changed:=(W<>MJW) Or (H<>MJH) Or (Bits<>MJBitsPer);
+ For I:=0 To 3 Do If (Hc[I]<>MJHc[I]) Or (Vc[I]<>MJVc[I]) Then Changed:=True;
+ If Changed Then Begin
+  MJW:=W; MJH:=H; MJBitsPer:=Bits;
+  For I:=0 To 3 Do Begin MJHc[I]:=Hc[I]; MJVc[I]:=Vc[I]; End;
+  MJInterlaced:=False; MJGot:=False;
+  If MJFirst And (MJOrigH<>0) And (MJH<(MJOrigH*3) Div 4) Then Begin
+   MJInterlaced:=True; MJBottom:=MJPolarity;
+  End;
+  MJFirst:=False;
+ End;
+ If MJGot And MJInterlaced And (MJBottom=Not MJPolarity) Then Begin
+  If Prog Then Exit;
+ End Else Begin
+  Id32:=(LongWord(MJHc[0]) Shl 28) Or (LongWord(MJVc[0]) Shl 24) Or (LongWord(MJHc[1]) Shl 20) Or (LongWord(MJVc[1]) Shl 16) Or
+        (LongWord(MJHc[2]) Shl 12) Or (LongWord(MJVc[2]) Shl 8) Or (LongWord(MJHc[3]) Shl 4) Or LongWord(MJVc[3]);
+  If (Id32 And $D0D0D0D0)=0 Then Id32:=Id32-((Id32 And $F0F0F0F0) Shr 1);
+  If (Id32 And $0D0D0D0D)=0 Then Id32:=Id32-((Id32 And $0F0F0F0F) Shr 1);
+  MJFull:=Not MJItu601;
+  Hf:=MJH; If MJInterlaced Then Hf:=MJH*2;
+  Case Id32 Of
+   $11111100: Begin
+    If (MJAdobe=0) Or ((MJId[0]=82) And (MJId[1]=71) And (MJId[2]=66)) Then MJFmt:=5 Else MJFmt:=3;
+   End;
+   $11000000,$13000000,$14000000,$31000000,$33000000,$34000000,$41000000,$43000000,$44000000: MJFmt:=0;
+   $22111100: MJFmt:=1;
+   $21111100: MJFmt:=2;
+   $41111100: MJFmt:=4;
+   Else Exit;
+  End;
+  If (Nc=1) And (MJFmt<>0) Then Exit;
+  If (Nc=3) And (MJFmt=0) Then Exit;
+  MJFreePlanes;
+  { dimensions des plans (hauteur de trame complete) }
+  Case MJFmt Of
+   0,3,5: Begin Shift:=0; Dummy:=0; End;
+   1: Begin Shift:=1; Dummy:=1; End;
+   2: Begin Shift:=1; Dummy:=0; End;
+   Else Begin Shift:=2; Dummy:=0; End;
+  End;
+  For C:=0 To 3 Do Begin MJPl[C]:=Nil; MJBlk[C]:=Nil; MJNnz[C]:=Nil; End;
+  For C:=0 To Nc-1 Do Begin
+   If (C=1) Or (C=2) Then Begin
+    MJCw[C]:=(MJW+(1 Shl Shift)-1) Shr Shift; MJCh[C]:=(Hf+(1 Shl Dummy)-1) Shr Dummy;
+   End Else Begin MJCw[C]:=MJW; MJCh[C]:=Hf; End;
+   MJPStr[C]:=((MJCw[C]+7) Div 8)*8+16;
+   MJPRows[C]:=((MJCh[C]+7) Div 8)*8+32;
+   GetMem(MJPl[C],MJPStr[C]*MJPRows[C]+64); FillChar(MJPl[C]^,MJPStr[C]*MJPRows[C]+64,0);
+  End;
+  MJGot:=True;
+ End;
+ MJProg:=Prog;
+ If Prog Then Begin
+  Bw:=(MJW+MJHmax*8-1) Div (MJHmax*8); Bh:=(MJH+MJVmax*8-1) Div (MJVmax*8);
+  For C:=0 To Nc-1 Do Begin
+   MJBlkCnt[C]:=Bw*Bh*MJHc[C]*MJVc[C];
+   GetMem(MJBlk[C],MJBlkCnt[C]*128+128); FillChar(MJBlk[C]^,MJBlkCnt[C]*128+128,0);
+   GetMem(MJNnz[C],MJBlkCnt[C]+16); FillChar(MJNnz[C]^,MJBlkCnt[C]+16,0);
+   MJBlkStr[C]:=Bw*MJHc[C];
+  End;
+ End;
+ MJSof:=True;
+End;
+
+Function MJSos: Boolean;
+Var Len,Nc,I,Idx,Id,Ss,Se,Ah,Al,H,V,Bs: LongInt;
+Begin
+ MJSos:=False;
+ If Not MJGot Then Exit;
+ Len:=MJGet(16); Nc:=MJGet(8);
+ If (Nc=0) Or (Nc>4) Then Exit;
+ If Len<>6+2*Nc Then Exit;
+ For I:=0 To Nc-1 Do Begin
+  Id:=MJGet(8);
+  Idx:=0; While (Idx<MJNc) And (Id<>MJId[Idx]) Do Inc(Idx);
+  If Idx=MJNc Then Exit;
+  If (MJTag=$4A53544D) And (Nc=3) And (MJNc=3) And (I<>0) Then Idx:=3-I;
+  MJScQ[I]:=MJQi[Idx]; MJScNb[I]:=MJHc[Idx]*MJVc[Idx]; MJScH[I]:=MJHc[Idx]; MJScV[I]:=MJVc[Idx]; MJScC[I]:=Idx;
+  MJScDc[I]:=MJGet(4); MJScAc[I]:=MJGet(4);
+  If (MJScDc[I]>=4) Or (MJScAc[I]>=4) Then Exit;
+  If MJLen[0,MJScDc[I]]=Nil Then Exit;
+  If MJProg Then Begin If MJLen[2,MJScAc[0]]=Nil Then Exit; End Else If MJLen[1,MJScAc[I]]=Nil Then Exit;
+ End;
+ Ss:=MJGet(8); Se:=MJGet(8); Ah:=MJGet(4); Al:=MJGet(4);
+ MJScN:=Nc;
+ If Nc>1 Then Begin
+  MJMbW:=(MJW+MJHmax*8-1) Div (MJHmax*8); MJMbH:=(MJH+MJVmax*8-1) Div (MJVmax*8);
+ End Else Begin
+  H:=MJHmax Div MJScH[0]; V:=MJVmax Div MJScV[0];
+  MJMbW:=(MJW+H*8-1) Div (H*8); MJMbH:=(MJH+V*8-1) Div (V*8);
+  MJScNb[0]:=1; MJScH[0]:=1; MJScV[0]:=1;
+ End;
+ For I:=MJSkipSod Downto 1 Do MJGet(8);
+ For I:=0 To Nc-1 Do MJLastDc[I]:=4 Shl MJBitsPer;
+ If MJProg And (Ss<>0) Then MJSos:=MJScanAc(Ss,Se,Ah,Al) Else MJSos:=MJScan(Ah,Al);
+End;
+
+{ IDCT differee des images progressives }
+Procedure MJIdctProg;
+Var C,H,V,Mw,Mh,My,Mx,I: LongInt; Blk: TAMVBlock; P: PMJS; Stride,Off: LongInt;
+Begin
+ For C:=0 To MJNc-1 Do Begin
+  H:=MJHmax Div MJHc[C]; V:=MJVmax Div MJVc[C];
+  Mw:=(MJW+H*8-1) Div (H*8); Mh:=(MJH+V*8-1) Div (V*8);
+  Stride:=MJPStr[C] Shl Ord(MJInterlaced);
+  For My:=0 To Mh-1 Do For Mx:=0 To Mw-1 Do Begin
+   P:=PMJS(@MJBlk[C]^[(My*MJBlkStr[C]+Mx)*64]);
+   For I:=0 To 63 Do Blk[I]:=P^[I];
+   Off:=My*Stride*8+Mx*8;
+   If MJInterlaced And MJBottom Then Inc(Off,Stride Shr 1);
+   AVIdctPut(Blk,@MJPl[C]^[Off],Stride);
+  End;
+ End;
+End;
+
+{ separation des marqueurs ; recopie les donnees d'un SOS sans echappements }
+Function MJUnescape(Src: PEABuffer; Len: LongInt; Var Dst: PEABuffer): LongInt;
+Var Ptr,SrcP,DstN,X,Skip,L: LongInt;
+ Procedure Copy(Sk: LongInt);
+ Begin
+  L:=(Ptr-SrcP)-Sk;
+  If L>0 Then Begin Move(Src^[SrcP],Dst^[DstN],L); Inc(DstN,L); SrcP:=Ptr; End;
+ End;
+Begin
+ GetMem(Dst,Len+64); DstN:=0; Ptr:=0; SrcP:=0;
+ While Ptr<Len Do Begin
+  X:=Src^[Ptr]; Inc(Ptr);
+  If X=$FF Then Begin
+   Skip:=0;
+   While (Ptr<Len) And (X=$FF) Do Begin X:=Src^[Ptr]; Inc(Ptr); Inc(Skip); End;
+   If Skip>1 Then Begin Copy(Skip); Dec(SrcP); End;
+   If (X<$D0) Or (X>$D7) Then Begin
+    Copy(1);
+    If X<>0 Then Break;
+   End;
+  End;
+ End;
+ If SrcP<Ptr Then Copy(0);
+ FillChar(Dst^[DstN],64,0);
+ MJUnescape:=DstN;
+End;
+
+{ decode un paquet ; 1 = image prete, 0 = rien, -1 = erreur }
+Function MJPacket(Buf: PEABuffer; Size: LongInt): LongInt;
+Var Ptr,Code,V,V2,Un,Used,N: LongInt; Tmp: PEABuffer; Ok: Boolean; Len,I,C: LongInt;
+Begin
+ MJPacket:=-1; Ptr:=0; MJAdobe:=-1; MJItu601:=False;
+ While Ptr<Size Do Begin
+  { find_marker }
+  Code:=-1;
+  While Size-Ptr>1 Do Begin
+   V:=Buf^[Ptr]; Inc(Ptr); V2:=Buf^[Ptr];
+   If (V=$FF) And (V2>=$C0) And (V2<=$FE) And (Ptr<Size) Then Begin Code:=Buf^[Ptr]; Inc(Ptr); Break; End;
+  End;
+  If Code<0 Then Begin Ptr:=Size; Break; End;
+  Tmp:=Nil;
+  If Code=$DA Then Begin
+   Un:=MJUnescape(PEABuffer(@Buf^[Ptr]),Size-Ptr,Tmp);
+   MJBuf:=Tmp; MJPos:=0; MJEnd:=Un*8;
+  End Else Begin
+   MJBuf:=PEABuffer(@Buf^[Ptr]); MJPos:=0; MJEnd:=(Size-Ptr)*8;
+  End;
+  Ok:=True;
+  Case Code Of
+   $E0..$EF: Begin
+    Len:=Buf^[Ptr]*256+Buf^[Ptr+1];
+    If (Len>=6) And (Ptr+Len<=Size) Then Begin
+     V:=(Buf^[Ptr+2] Shl 24) Or (Buf^[Ptr+3] Shl 16) Or (Buf^[Ptr+4] Shl 8) Or Buf^[Ptr+5];
+     If (V=$4A464946) And (Len-6>=8) Then Begin
+      MJSarN:=Buf^[Ptr+10]*256+Buf^[Ptr+11]; MJSarD:=Buf^[Ptr+12]*256+Buf^[Ptr+13];
+      If (MJSarN<=0) Or (MJSarD<=0) Then Begin MJSarN:=0; MJSarD:=1; End;
+      MJHaveJfif:=True;
+     End Else If (V=$41646F62) And (Len-6>=7) And (Buf^[Ptr+6]=101) And
+      Not ((Buf^[Ptr+6]=101) And (Buf^[Ptr+7]=95) And (Buf^[Ptr+8]=67) And (Buf^[Ptr+9]=77)) Then MJAdobe:=Buf^[Ptr+13];
+     Inc(Ptr,Len);
+    End Else Inc(Ptr,2);
+    MJPos:=0; Code:=-2;
+   End;
+   $FE: Begin
+    Len:=Buf^[Ptr]*256+Buf^[Ptr+1];
+    If (Len>=2) And (Ptr+Len<=Size) Then Begin
+     N:=Len-2;
+     If (N>0) And (Buf^[Ptr+1+N]=10) Then Dec(N);
+     V:=0; While (V<N) And (Buf^[Ptr+2+V]<>0) Do Inc(V);
+     N:=V;
+     If (N=9) And (Buf^[Ptr+2]=67) And (Buf^[Ptr+3]=83) And (Buf^[Ptr+4]=61) And (Buf^[Ptr+5]=73) And (Buf^[Ptr+6]=84) And
+      (Buf^[Ptr+7]=85) And (Buf^[Ptr+8]=54) And (Buf^[Ptr+9]=48) And (Buf^[Ptr+10]=49) Then MJItu601:=True
+     Else If (N>=4) And (Buf^[Ptr+2]=65) And (Buf^[Ptr+3]=86) And (Buf^[Ptr+4]=73) And (Buf^[Ptr+5]=68) Then Begin
+      If (Len>14) And (Buf^[Ptr+2+12]=1) Then MJPolarity:=True;
+      If (Len>14) And (Buf^[Ptr+2+12]=2) Then MJPolarity:=False;
+     End;
+     Inc(Ptr,Len);
+    End Else Inc(Ptr,2);
+    MJPos:=0; Code:=-2;
+   End;
+   $DB: Begin Ok:=MJDqt; If Not Ok Then Begin MJPacket:=-1; Exit; End; End;
+   $C4: Begin Ok:=MJDht; If Not Ok Then Begin MJGot:=False; MJPacket:=-1; Exit; End; End;
+   $C0,$C1,$C2: Begin
+    Ok:=MJSof(Code=$C2);
+    If Not Ok Then Begin MJGot:=False; MJPacket:=-1; Exit; End;
+   End;
+   $DD: Begin
+    If MJGet(16)<>4 Then Begin MJPacket:=-1; Exit; End;
+    MJRestart:=MJGet(16); MJRestartCount:=0;
+   End;
+   $D8: Begin MJRestart:=0; MJRestartCount:=0; End;
+   $DA: Begin
+    Inc(MJCurScan);
+    If Not MJSos Then Ok:=False;
+   End;
+   $D9: Begin
+    If MJProg And (MJCurScan>0) And MJGot Then MJIdctProg;
+    MJCurScan:=0;
+    If Not MJGot Then Begin End
+    Else Begin
+     If MJInterlaced Then Begin
+      MJBottom:=Not MJBottom;
+      If MJBottom=Not MJPolarity Then Begin Used:=(MJPos+7) Shr 3; Inc(Ptr,Used); Continue; End;
+     End;
+     MJGot:=False; MJPacket:=1; Exit;
+    End;
+   End;
+   $C3,$C5..$C7,$C9..$CB,$CD..$CF: ;
+  End;
+  If Code=$DA Then FreeMem(Tmp,Un+64);
+  If Code<>-2 Then Begin Used:=(MJPos+7) Shr 3; Inc(Ptr,Used); End;
+ End;
+ If MJGot And (MJCurScan>0) Then Begin
+  { EOI manquant : emulation }
+  If MJProg Then MJIdctProg;
+  MJCurScan:=0;
+  If MJInterlaced Then Begin
+   MJBottom:=Not MJBottom;
+   If MJBottom=Not MJPolarity Then Begin MJPacket:=0; Exit; End;
+  End;
+  MJGot:=False; MJPacket:=1; Exit;
+ End;
+ MJPacket:=-1;
+End;
+
+{ plans decodes -> disposition NV ; renvoie la taille de l'image }
+Procedure MJPack(Out: PEABuffer);
+Var Y,X,H,Cw,Ch,I,Off: LongInt;
+Begin
+ H:=MJH Shl Ord(MJInterlaced);
+ Case MJFmt Of
+  0: For Y:=0 To H-1 Do Move(MJPl[0]^[Y*MJPStr[0]],Out^[Y*MJW],MJW);
+  5: For Y:=0 To H-1 Do For X:=0 To MJW-1 Do Begin
+      I:=(Y*MJW+X)*3;
+      Out^[I]:=MJPl[0]^[Y*MJPStr[0]+X]; Out^[I+1]:=MJPl[1]^[Y*MJPStr[1]+X]; Out^[I+2]:=MJPl[2]^[Y*MJPStr[2]+X];
+     End;
+  Else Begin
+   For Y:=0 To H-1 Do Move(MJPl[0]^[Y*MJPStr[0]],Out^[Y*MJW],MJW);
+   Cw:=MJCw[1]; Ch:=MJCh[1]; Off:=MJW*H;
+   For Y:=0 To Ch-1 Do Move(MJPl[1]^[Y*MJPStr[1]],Out^[Off+Y*Cw],Cw);
+   Off:=Off+Cw*Ch;
+   For Y:=0 To Ch-1 Do Move(MJPl[2]^[Y*MJPStr[2]],Out^[Off+Y*Cw],Cw);
+  End;
+ End;
+End;
+Procedure MJSetNV(Mode: LongInt; Const Target: String; Rn,Rd: LongInt);
+Var W,H: LongInt; Rng: String;
+Begin
+ W:=MJW; H:=MJH Shl Ord(MJInterlaced);
+ If MJFull Then Rng:=' XCOLORRANGE=FULL' Else Rng:=' XCOLORRANGE=LIMITED';
+ Case MJFmt Of
+  5: NVBegin(Mode,Target,W,H,9,Rn,Rd);
+  Else NVBegin(Mode,Target,W,H,7,Rn,Rd);
+ End;
+ NVHdrOk:=True; NVFullRng:=MJFull;
+ Case MJFmt Of
+  0: Begin NVSubX:=0; NVSubY:=0; NVCW:=0; NVCH:=0; NVYTag:='Cmono'; End;
+  1: Begin NVSubX:=1; NVSubY:=1; NVCW:=(W+1) Shr 1; NVCH:=(H+1) Shr 1; NVYTag:='C420jpeg XYSCSS=420JPEG'+Rng; End;
+  2: Begin NVSubX:=1; NVSubY:=0; NVCW:=(W+1) Shr 1; NVCH:=H; NVYTag:='C422 XYSCSS=422'+Rng; End;
+  3: Begin NVSubX:=0; NVSubY:=0; NVCW:=W; NVCH:=H; NVYTag:='C444 XYSCSS=444'+Rng; End;
+  4: Begin NVSubX:=2; NVSubY:=0; NVCW:=(W+3) Shr 2; NVCH:=H; NVYTag:='C411 XYSCSS=411'+Rng; End;
+ End;
+ If (MJSarN>0) And (MJSarD>0) Then Begin NVSarN:=MJSarN; NVSarD:=MJSarD; End;
+ If MJFmt=5 Then If (MJSarN>0) And (MJSarD>0) Then NVGcd(NVSarN,NVSarD);
+End;
+Procedure MJInit(OrigH,Tag: LongInt);
+Var C,I: LongInt;
+Begin
+ For C:=0 To 2 Do Begin MJSym[C,0]:=Nil;MJSym[C,1]:=Nil;MJSym[C,2]:=Nil;MJSym[C,3]:=Nil;MJLen[C,0]:=Nil;MJLen[C,1]:=Nil;MJLen[C,2]:=Nil;MJLen[C,3]:=Nil; End;
+ FillChar(MJQuant,SizeOf(MJQuant),0);
+ MJDefaultTables;
+ MJW:=0; MJH:=0; MJBitsPer:=0; MJNc:=0; MJAlloc:=False; MJInterlaced:=False; MJBottom:=False; MJFirst:=True; MJGot:=False;
+ MJOrigH:=OrigH; MJTag:=Tag; MJPolarity:=Tag=$47504A4D; MJSarN:=0; MJSarD:=1; MJHaveJfif:=False; MJSkipSod:=0; MJRestart:=0; MJCurScan:=0;
+ For C:=0 To 3 Do Begin MJPl[C]:=Nil; MJBlk[C]:=Nil; MJNnz[C]:=Nil; MJHc[C]:=0; MJVc[C]:=0; End;
+End;
+Procedure DecodeMJP(Const Source,Target: String; Mode: LongInt);
+Var Buf,Out: PEABuffer; Size,R: LongInt;
+Begin
+ NVLoad(Source,Buf,Size);
+ MJInit(0,0);
+ R:=MJPacket(Buf,Size);
+ If R<>1 Then Fail('mjpeg: aucune image decodee.');
+ MJSetNV(Mode,Target,25,1);
+ GetMem(Out,NVFrameBytes+64); MJPack(Out);
+ NVEmit(Out);
+ FreeMem(Out,NVFrameBytes+64);
+ NVFinish('mjpeg');
+End;
+
+{ MJPEG-B : paquet Apple (en-tete de champs avec decalages, donnees sans bourrage FF00) }
+Function MJRdOff(Buf: PEABuffer; At,Avail: LongInt): LongInt;
+Var V: Int64;
+Begin
+ V:=(Int64(Buf^[At]) Shl 24) Or (Int64(Buf^[At+1]) Shl 16) Or (Int64(Buf^[At+2]) Shl 8) Or Buf^[At+3];
+ If V>=Avail Then MJRdOff:=0 Else MJRdOff:=V;
+End;
+Function MJPacketB(Buf: PEABuffer; Size: LongInt): LongInt;
+Var Base,Avail,Field,Second,Dqt,Dht,Sof,Sos,Sod,Lim: LongInt; Ok: Boolean;
+Begin
+ MJPacketB:=-1; Base:=0; MJAdobe:=-1; MJItu601:=False; MJGot:=False;
+ While True Do Begin
+  Avail:=Size-Base;
+  If Avail<40 Then Exit;
+  MJRestart:=0; MJRestartCount:=0; MJSkipSod:=0; MJCurScan:=0;
+  If (Buf^[Base+4]<>$6D) Or (Buf^[Base+5]<>$6A) Or (Buf^[Base+6]<>$70) Or (Buf^[Base+7]<>$67) Then Exit;
+  Field:=MJRdOff(Buf,Base+8,$7FFFFFFF);
+  Second:=MJRdOff(Buf,Base+16,Avail); Dqt:=MJRdOff(Buf,Base+20,Avail); Dht:=MJRdOff(Buf,Base+24,Avail);
+  Sof:=MJRdOff(Buf,Base+28,Avail); Sos:=MJRdOff(Buf,Base+32,Avail); Sod:=MJRdOff(Buf,Base+36,Avail);
+  If Dqt<>0 Then Begin MJBuf:=PEABuffer(@Buf^[Base+Dqt]); MJPos:=0; MJEnd:=(Avail-Dqt)*8; MJDqt; End;
+  If Dht<>0 Then Begin MJBuf:=PEABuffer(@Buf^[Base+Dht]); MJPos:=0; MJEnd:=(Avail-Dht)*8; MJDht; End;
+  If Sof<>0 Then Begin
+   MJBuf:=PEABuffer(@Buf^[Base+Sof]); MJPos:=0; MJEnd:=(Avail-Sof)*8;
+   If Not MJSof(False) Then Begin MJGot:=False; Exit; End;
+  End;
+  If Sos<>0 Then Begin
+   Lim:=Avail-Sos; If Field<Lim Then Lim:=Field;
+   If Lim<2 Then Exit;
+   MJBuf:=PEABuffer(@Buf^[Base+Sos]); MJPos:=0; MJEnd:=Lim*8;
+   MJSkipSod:=Sod-Sos-(Buf^[Base+Sos]*256+Buf^[Base+Sos+1]);
+   If MJSkipSod<0 Then MJSkipSod:=0;
+   Ok:=MJSos;
+  End;
+  If MJInterlaced Then Begin
+   MJBottom:=Not MJBottom;
+   If (MJBottom<>MJPolarity) And (Second<>0) Then Begin Inc(Base,Second); Continue; End;
+  End;
+  If Not MJGot Then Begin MJPacketB:=0; Exit; End;
+  MJGot:=False; MJPacketB:=1; Exit;
+ End;
+End;
+
+Function MP4FindMjpb(Var StblPos,StblSize,EntryPos,EntrySize,Timescale: LongInt): Boolean;
+Var
+ MoovPos,MoovSize,P,TrakPos,TrakSize,MdiaPos,MdiaSize,MinfPos,MinfSize,StsdPos,StsdSize,MdhdPos,MdhdSize: LongInt;
+Begin
+ MP4FindMjpb:=False;
+ If Not MP4Find(0,InputSize,'moov',MoovPos,MoovSize) Then Exit;
+ P:=MoovPos+8;
+ While MP4Find(P,MoovPos+MoovSize,'trak',TrakPos,TrakSize) Do Begin
+  If MP4Find(TrakPos+8,TrakPos+TrakSize,'mdia',MdiaPos,MdiaSize) Then
+   If MP4Find(MdiaPos+8,MdiaPos+MdiaSize,'minf',MinfPos,MinfSize) Then
+    If MP4Find(MinfPos+8,MinfPos+MinfSize,'stbl',StblPos,StblSize) Then
+     If MP4Find(StblPos+8,StblPos+StblSize,'stsd',StsdPos,StsdSize) Then
+      If StsdSize>=24 Then Begin
+       EntryPos:=StsdPos+16; EntrySize:=MP4BE32(EntryPos);
+       If (EntrySize>=86) And (MP4Tag(EntryPos+4)='mjpb') And MP4Find(MdiaPos+8,MdiaPos+MdiaSize,'mdhd',MdhdPos,MdhdSize) Then Begin
+        Timescale:=MP4BE32(MdhdPos+20); MP4FindMjpb:=True; Exit;
+       End;
+      End;
+  P:=TrakPos+TrakSize;
+ End;
+End;
+Function MP4HasMjpb(Const Name: String): Boolean;
+Var A,B,C,D,E: LongInt;
+Begin OpenRead(Name); MP4HasMjpb:=MP4FindMjpb(A,B,C,D,E); CloseRead; End;
+
+Procedure DecodeMJPB(Const Source,Target: String; Mode: LongInt);
+Var
+ StblPos,StblSize,EntryPos,EntrySize,Ts,SzPos,SzSize,ScPos,ScSize,CoPos,CoSize,SttsPos,SttsSize,FixedSize,Samples,Chunks,Entries: LongInt;
+ Sizes,Table: PALLong; Chunk,Sample,PerChunk,J,Pos,Take,K,Rn,Rd,Delta,R,I: LongInt; Buf,Out: PEABuffer; Is64,Begun: Boolean; Q: Array[0..7] Of Byte;
+Begin
+ OpenRead(Source);
+ If Not MP4FindMjpb(StblPos,StblSize,EntryPos,EntrySize,Ts) Then Fail('mjpegb: aucune piste MJPEG-B dans le fichier.');
+ If Not MP4Find(StblPos+8,StblPos+StblSize,'stsz',SzPos,SzSize) Then Fail('mjpegb: stsz absent.');
+ If Not MP4Find(StblPos+8,StblPos+StblSize,'stsc',ScPos,ScSize) Then Fail('mjpegb: stsc absent.');
+ If Not MP4Find(StblPos+8,StblPos+StblSize,'stts',SttsPos,SttsSize) Then Fail('mjpegb: stts absent.');
+ Is64:=False;
+ If Not MP4Find(StblPos+8,StblPos+StblSize,'stco',CoPos,CoSize) Then Begin
+  If Not MP4Find(StblPos+8,StblPos+StblSize,'co64',CoPos,CoSize) Then Fail('mjpegb: stco absent.');
+  Is64:=True;
+ End;
+ Delta:=MP4BE32(SttsPos+20); If (Delta<=0) Or (Ts<=0) Then Fail('mjpegb: cadence incorrecte.');
+ Rn:=Ts; Rd:=Delta; NVGcd(Rn,Rd);
+ FixedSize:=MP4BE32(SzPos+12); Samples:=MP4BE32(SzPos+16);
+ If (Samples<=0) Or (Samples>16777216) Then Fail('mjpegb: nombre d''echantillons incorrect.');
+ GetMem(Sizes,Samples*4);
+ For I:=0 To Samples-1 Do If FixedSize<>0 Then Sizes^[I]:=FixedSize Else Sizes^[I]:=MP4BE32(SzPos+20+4*I);
+ Entries:=MP4BE32(ScPos+12); If (Entries<1) Or (Entries>1048576) Then Fail('mjpegb: stsc incorrect.');
+ GetMem(Table,Entries*8);
+ For I:=0 To Entries-1 Do Begin Table^[2*I]:=MP4BE32(ScPos+16+12*I); Table^[2*I+1]:=MP4BE32(ScPos+20+12*I); End;
+ Chunks:=MP4BE32(CoPos+12);
+ MJInit(MP4BE32(EntryPos+32) And $FFFF,$62706A6D);
+ Q[0]:=0; ReadAt(EntryPos+32,Q,4); MJOrigH:=Q[2]*256+Q[3];
+ Begun:=False; Out:=Nil; Sample:=0; K:=0;
+ For Chunk:=1 To Chunks Do Begin
+  While (K+1<Entries) And (Table^[2*(K+1)]<=Chunk) Do Inc(K);
+  PerChunk:=Table^[2*K+1];
+  If Is64 Then Begin
+   ReadAt(CoPos+16+8*(Chunk-1),Q,8); Pos:=LongInt(Q[4])*16777216+LongInt(Q[5])*65536+LongInt(Q[6])*256+Q[7];
+  End Else Pos:=MP4BE32(CoPos+16+4*(Chunk-1));
+  For J:=1 To PerChunk Do Begin
+   If Sample>=Samples Then Break;
+   Take:=Sizes^[Sample]; Inc(Sample);
+   R:=-1;
+   If (Take>0) And (Pos+Take<=InputSize) Then Begin
+    GetMem(Buf,Take+64); FillChar(Buf^[Take],64,0);
+    I:=0; While I<Take Do Begin
+     If Take-I>16384 Then R:=16384 Else R:=Take-I;
+     ReadAt(Pos+I,Buf^[I],R); Inc(I,R);
+    End;
+    R:=MJPacketB(Buf,Take);
+    FreeMem(Buf,Take+64);
+   End;
+   Inc(Pos,Take);
+   If R=1 Then Begin
+    If Not Begun Then Begin MJSetNV(Mode,Target,Rn,Rd); GetMem(Out,NVFrameBytes+64); Begun:=True; End;
+    MJPack(Out); NVEmit(Out);
+   End Else If Begun Then NVRepeat;
+   If NVDone Then Break;
+  End;
+  If NVDone Then Break;
+ End;
+ If Not Begun Then Fail('mjpegb: aucune image decodee.');
+ NVFinish('video');
+End;
+{ MJPEG-END }
+
+
 
 { STR-BEGIN }
 { ---- Sony PlayStation STR (libavformat/psxstr.c, LGPL-2.1-or-later) : video MDEC ---- }
@@ -39488,6 +40316,10 @@ Begin
    If AXFcc<>'LM20' Then Fail('mimic: flux AVI LM20 requis.');
    HYOutSize:=AXW*AXH*2+64; GetMem(HYOut,HYOutSize); FFBegun:=False;
   End;
+  43: Begin
+   MJInit(AXH,Ord(AXFcc[1])+Ord(AXFcc[2]) Shl 8+Ord(AXFcc[3]) Shl 16+Ord(AXFcc[4]) Shl 24);
+   HYOutSize:=AXW*AXH*4+MJW*8+256; GetMem(HYOut,HYOutSize); FFBegun:=False;
+  End;
   37: Begin
    If AXFcc<>'KMVC' Then Fail('kmvc: flux AVI KMVC requis.');
    Msg:=KMInit(AXW,AXH); If Msg<>'' Then Fail(Msg);
@@ -39525,6 +40357,16 @@ Begin
     If Ok And Not FFBegun Then Begin
      NVBegin(Mode,Target,MMW,MMH,7,RN,RD); NVAviSar(MMW,MMH);
      NVSubX:=1; NVSubY:=1; NVCW:=(MMW+1) Shr 1; NVCH:=(MMH+1) Shr 1; NVYTag:='C420jpeg XYSCSS=420JPEG'; NVHdrOk:=True; FFBegun:=True;
+    End;
+   End;
+   43: Begin
+    I:=MJPacket(PEABuffer(@AXF^[PkPos]),PkLen); Ok:=I=1;
+    If Ok Then Begin
+     If Not FFBegun Then Begin
+      MJSetNV(Mode,Target,RN,RD); FFBegun:=True;
+      If HYOutSize<NVFrameBytes+64 Then Begin FreeMem(HYOut,HYOutSize); HYOutSize:=NVFrameBytes+64; GetMem(HYOut,HYOutSize); End;
+     End;
+     MJPack(HYOut);
     End;
    End;
    32: Begin
@@ -39613,7 +40455,7 @@ Begin
   If Ok Then Begin
    Case Kind Of
     18: NVEmit(FSVPic);
-    20,21,40,41,42: NVEmit(HYOut);
+    20,21,40,41,42,43: NVEmit(HYOut);
     24: NVEmit(FROut);
     26: NVEmit(H3OutBuf);
     31,32,37: Begin
@@ -39622,7 +40464,7 @@ Begin
      Inc(CFNext,NbF); Inc(CFFrameNo,NbF); FFBegun:=True;
     End;
    End;
-  End Else If (Kind<>31) And (Kind<>32) And (Kind<>37) And (((Kind<>21) And (Kind<>24) And (Kind<>26) And (Kind<>42)) Or FFBegun) Then NVRepeat;
+  End Else If (Kind<>31) And (Kind<>32) And (Kind<>37) And (((Kind<>21) And (Kind<>24) And (Kind<>26) And (Kind<>42) And (Kind<>43)) Or FFBegun) Then NVRepeat;
   If NVDone Then Break;
  End;
  If ((Kind=31) Or (Kind=32) Or (Kind=37)) And FFBegun And Not NVDone Then CFFlush(HYOut);
@@ -52805,6 +53647,7 @@ Begin
  WriteLn(' D  idcin           id Cinematic (video idcinvideo PAL8 vers Y4M/PNG/BMP, audio PCM vers WAV)');
  WriteLn(' D  ipmovie         Interplay MVE (video interplayvideo PAL8/RGB555 vers Y4M/PNG/BMP, audio PCM/interplay_dpcm vers WAV)');
  WriteLn(' D  jpegls_pipe     piped jpegls sequence (image JPEG-LS vers Y4M/PNG/BMP)');
+ WriteLn(' D  jpeg_pipe      piped jpeg sequence (image JPEG vers Y4M/PNG/BMP)');
  WriteLn(' D  flic            FLI/FLC/FLX animation (video flic 8/15/16/24 bits; audio TFTD non extrait)');
  WriteLn(' D  g726            G.726 big-endian brut (-code_size 2..5, -sample_rate; decodage vers WAV/MP3/...)');
  WriteLn(' D  g726le          G.726 little-endian brut (-code_size 2..5, -sample_rate; decodage vers WAV/MP3/...)');
@@ -53177,6 +54020,7 @@ BEGIN
    WriteLn('D V D  loco            LOCO (decodeur AVI LOCO: YUY2, UYVY, YV12, RGB, RGBA, mode avec pertes)');
    WriteLn('D V D  mdec            Sony PlayStation MDEC (Motion DECoder) (decodeur STR PlayStation)');
    WriteLn('D V D  mimic           Mimic (decodeur AVI LM20 et flux MSN TCP Webcam)');
+   WriteLn('D V D  mjpegb          Apple MJPEG-B (decodeur MOV mjpb)');
    WriteLn(' D A    mace3           MACE (Macintosh Audio Compression/Expansion) 3:1 (AIFF-C MAC3, QuickTime)');
    WriteLn(' D A    mace6           MACE (Macintosh Audio Compression/Expansion) 6:1 (AIFF-C MAC6, QuickTime)');
    WriteLn('D V    kmvc            Karl Morton''s video codec (AVI KMVC, PAL8 <= 320x200)');
@@ -53411,6 +54255,7 @@ BEGIN
  If (Detected='') And Not IsHTTP(Intermediate) And (InputFormat<>'h261') And (InputFormat<>'h264') Then If H3ProbeFile(Intermediate) Then Detected:='h263';
  If (Detected='') And Not IsHTTP(Intermediate) And (InputFormat<>'h263') And (InputFormat<>'h264') Then If H1ProbeFile(Intermediate) Then Detected:='h261';
  If (Detected='') And (Lower(Extension(Intermediate))='jls') And Not IsHTTP(Intermediate) Then Detected:='jpegls_pipe';
+ If (Detected='') And ((Lower(Extension(Intermediate))='jpg') Or (Lower(Extension(Intermediate))='jpeg')) And Not IsHTTP(Intermediate) Then Detected:='jpeg_pipe';
  If InputFormat='' Then InputFormat:=Detected Else
  If (InputFormat<>Detected) And Not ((InputFormat='dvbsub') And (Detected='')) And Not (((InputFormat='g726') Or (InputFormat='g726le')) And (Detected='')) And Not (((InputFormat='h263') Or (InputFormat='h261') Or (InputFormat='h264')) And (Detected='')) And Not ((InputFormat='eac3') And (Detected='ac3')) Then Fail(
  'Format impose incompatible avec la signature du fichier.');
@@ -53448,7 +54293,7 @@ BEGIN
  If (InputFormat='psxstr') And Not IsHTTP(InputPath) Then Begin If STRHasVideo(Intermediate) Then NVKind:=44; End
  Else If (InputFormat='msnwctcp') And Not IsHTTP(InputPath) Then NVKind:=45
  Else If InputFormat='bethsoftvid' Then NVKind:=1 Else If InputFormat='bfi' Then NVKind:=2 Else If InputFormat='c93' Then NVKind:=3
- Else If InputFormat='bmp' Then NVKind:=4 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22 Else If (InputFormat='flic') And Not IsHTTP(InputPath) Then NVKind:=23 Else If (InputFormat='gif') And Not IsHTTP(InputPath) Then NVKind:=25 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=2) Then NVKind:=27 Else If (InputFormat='h263') And Not IsHTTP(InputPath) Then NVKind:=28 Else If (InputFormat='h261') And Not IsHTTP(InputPath) Then NVKind:=29 Else If (InputFormat='idcin') And Not IsHTTP(InputPath) Then NVKind:=30 Else If (InputFormat='ipmovie') And Not IsHTTP(InputPath) Then NVKind:=38 Else If (InputFormat='jpegls_pipe') And Not IsHTTP(InputPath) Then NVKind:=39 Else If (InputFormat='h264') And Not IsHTTP(InputPath) Then NVKind:=33
+ Else If InputFormat='bmp' Then NVKind:=4 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22 Else If (InputFormat='flic') And Not IsHTTP(InputPath) Then NVKind:=23 Else If (InputFormat='gif') And Not IsHTTP(InputPath) Then NVKind:=25 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=2) Then NVKind:=27 Else If (InputFormat='h263') And Not IsHTTP(InputPath) Then NVKind:=28 Else If (InputFormat='h261') And Not IsHTTP(InputPath) Then NVKind:=29 Else If (InputFormat='idcin') And Not IsHTTP(InputPath) Then NVKind:=30 Else If (InputFormat='ipmovie') And Not IsHTTP(InputPath) Then NVKind:=38 Else If (InputFormat='jpegls_pipe') And Not IsHTTP(InputPath) Then NVKind:=39 Else If (InputFormat='jpeg_pipe') And Not IsHTTP(InputPath) Then NVKind:=46 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And MP4HasMjpb(InputPath) Then NVKind:=47 Else If (InputFormat='h264') And Not IsHTTP(InputPath) Then NVKind:=33
  Else If (InputFormat='avi') And Not IsHTTP(InputPath) Then Begin
   AsvTag:=AVIVideoFourCC(Intermediate);
   If AsvTag='CSCD' Then NVKind:=5 Else If (AsvTag='tscc') Or (AsvTag='TSCC') Then NVKind:=6
@@ -53464,7 +54309,8 @@ BEGIN
   Else If (AsvTag='IV31') Or (AsvTag='IV32') Or (AsvTag='iv31') Or (AsvTag='iv32') Then NVKind:=32
   Else If (AsvTag='KMVC') Or (AsvTag='kmvc') Then NVKind:=37
   Else If AsvTag='LOCO' Then NVKind:=40
-  Else If AsvTag='LM20' Then NVKind:=42;
+  Else If AsvTag='LM20' Then NVKind:=42
+  Else If (AsvTag='MJPG') Or (AsvTag='mjpg') Or (AsvTag='AVRn') Or (AsvTag='AVDJ') Or (AsvTag='dmb1') Or (AsvTag='JPGL') Or (AsvTag='MJLS') Or (AsvTag='MMJP') Or (AsvTag='jpeg') Or (AsvTag='IJPG') Then NVKind:=43;
  End;
  If (OptPixFmt<>'') And (OptPixFmt<>'yuv420p') Then Fail('-pix_fmt: seul yuv420p est pris en charge.');
  NVAudioOut:=(OutputFormat='wav') Or (OutputFormat='mp3') Or (OutputFormat='ac3') Or (OutputFormat='aac') Or (OutputFormat='adx') Or (OutputFormat='aiff');
