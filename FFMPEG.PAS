@@ -3939,6 +3939,7 @@ Begin
  If N>=80*6 Then If (B[0]=$1F) And (B[1]=$07) And (B[2]=0) And ((B[3]=$3F) Or (B[3]=$BF)) Then Begin Probe:='dv'; Exit; End;
  If N>=4 Then If (B[0]=66) And (B[1]=70) And (B[2]=38) And (B[3]=73) Then Begin Probe:='bfi'; Exit; End;
  If N>=15 Then If (B[0]=68) And (B[1]=69) And (B[2]=88) And (B[3]=65) And ((B[11]*256+B[12])>0) And ((B[11]*256+B[12])<=2048) And ((B[13]*256+B[14])>0) And ((B[13]*256+B[14])<=2048) Then Begin Probe:='dxa'; Exit; End;
+ If N>=4 Then If (B[0]=$FF) And (B[1]=$D8) And (B[2]=$FF) And (B[3]=$F7) Then Begin Probe:='jpegls_pipe'; Exit; End;
  If N>=26 Then Begin
   { Interplay MVE : signature "Interplay MVE File"#26#0#26#0, cherchee dans le tampon (ipmovie_probe) }
   For J:=0 To N-22 Do
@@ -14688,7 +14689,8 @@ Begin
  Str(NVW,S); Hdr:='YUV4MPEG2 W'+S; Str(NVH,S); Hdr:=Hdr+' H'+S;
  Str(NVFpsN,S); Hdr:=Hdr+' F'+S; Str(NVFpsD,S); Hdr:=Hdr+':'+S+' Ip A';
  Str(NVSarN,S); Hdr:=Hdr+S; Str(NVSarD,S); Hdr:=Hdr+':'+S;
- If NVFmt=7 Then Hdr:=Hdr+' '+NVYTag+#10 Else Hdr:=Hdr+' C420jpeg XYSCSS=420JPEG XCOLORRANGE=LIMITED'+#10;
+ { aucune image convertie : la plage de couleurs n'est pas encore fixee par le filtre de conversion }
+ If (NVFmt=7) Or (NVFmt=8) Then Hdr:=Hdr+' '+NVYTag+#10 Else Hdr:=Hdr+' C420jpeg XYSCSS=420JPEG'+#10;
  WriteBytes(Hdr[1],Length(Hdr));
 End;
 
@@ -17116,6 +17118,7 @@ Procedure DecodeRPL(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeFLIC(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeIdcin(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeMVE(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure DecodeJLS(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeGIF(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeH263Raw(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeFLVH263(Const Source,Target: String; Mode: LongInt); Forward;
@@ -17141,6 +17144,7 @@ Begin
  Else If Kind=23 Then DecodeFLIC(Source,Target,Mode)
  Else If Kind=30 Then DecodeIdcin(Source,Target,Mode)
  Else If Kind=38 Then DecodeMVE(Source,Target,Mode)
+ Else If Kind=39 Then DecodeJLS(Source,Target,Mode)
  Else If Kind=33 Then DecodeH264Raw(Source,Target,Mode)
  Else If Kind=34 Then DecodeH264Mp4(Source,Target,Mode)
  Else If Kind=35 Then DecodeH264Avi(Source,Target,Mode)
@@ -37283,6 +37287,927 @@ Begin
 End;
 
 
+{ ---- JPEG-LS : decodeur (libavcodec/jpeglsdec.c, jpegls.c, mjpegdec.c), image seule (jpegls_pipe / .jls) ---- }
+Type JWArr=Array[0..400000000] Of Word; JPW=^JWArr;
+Const
+ JLog2Run: Array[0..40] Of Byte=(0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,5,5,6,6,7,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24);
+Var
+ JF: PEABuffer; JFSize: LongInt;
+ JB: PEABuffer; JBBytes,JPos: LongInt;
+ { etat du decodeur MJPEG }
+ JGot: Boolean; JW,JH,JBits,JNC,JCurScan,JMaxval,JT1,JT2,JT3,JReset,JPalIndex,JForcePal,JPixFmt: LongInt; { 1 gray8, 2 gray16, 3 rgb24, 4 pal8 }
+ JCompId: Array[0..3] Of LongInt; JPic: ^Word; JPicSize: LongInt; JPal: Array[0..255] Of LongWord;
+ { etat JPEG-LS }
+ JWork: Pointer; JXfrm,JSarN,JSarD,JHintFmt,JHintW,JHintH: LongInt; JNear,JTwoNear,JRange,JQbpp,JBpp,JLimit,JMaxv,JTT1,JTT2,JTT3,JRst: LongInt;
+ JA,JBb,JN: Array[0..366] Of LongInt; JC: Array[0..364] Of LongInt; JRun: Array[0..3] Of LongInt;
+ JZero: Array[0..32767] Of Word;
+
+Function JSar(X: LongInt; N: LongInt): LongInt;
+Begin
+ If X>=0 Then JSar:=X Shr N Else JSar:=-((-Int64(X)+(Int64(1) Shl N)-1) Shr N);
+End;
+
+Function JBitAt(P: LongInt): LongInt;
+Begin
+ If (P<0) Or (P Shr 3>=JBBytes) Then JBitAt:=0 Else JBitAt:=(JB^[P Shr 3] Shr (7-(P And 7))) And 1;
+End;
+{ avance de N bits, plafonnee a size_in_bits+8 (lecteur de bits "safe" de FFmpeg) }
+Procedure JAdv(N: LongInt);
+Begin Inc(JPos,N); If JPos>JBBytes*8+8 Then JPos:=JBBytes*8+8; End;
+Function JGet(N: LongInt): Int64;
+Var V: Int64; I,P: LongInt;
+Begin
+ V:=0; P:=JPos; For I:=1 To N Do Begin V:=V*2+JBitAt(P); Inc(P); End; JAdv(N); JGet:=V;
+End;
+Function JGet1: LongInt; Begin JGet1:=JBitAt(JPos); JAdv(1); End;
+Function JLeft: LongInt; Begin JLeft:=JBBytes*8-JPos; End;
+
+{ get_ur_golomb_jpegls (lecteur non mis en cache) }
+Function JGolomb(K,Limit,EscLen: LongInt): LongInt;
+Var I,Z: LongInt; Buf: Int64;
+Begin
+ I:=0;
+ While (I+25<=Limit) Do Begin
+  Z:=0; While (Z<25) And (JBitAt(JPos+Z)=0) Do Inc(Z);
+  If Z<25 Then Break;
+  If JBBytes*8<=JPos Then Begin JGolomb:=-1; Exit; End;
+  JAdv(25); Inc(I,25);
+ End;
+ While (I<Limit) And (JBitAt(JPos)=0) Do Begin JAdv(1); Inc(I); End;
+ JAdv(1);
+ If I<Limit-1 Then Begin
+  If K>0 Then Buf:=JGet(K) Else Buf:=0;
+  Buf:=Buf+(Int64(I) Shl K);
+  JGolomb:=LongInt(Buf And $FFFFFFFF);
+ End Else If I=Limit-1 Then Begin
+  Buf:=JGet(EscLen);
+  JGolomb:=LongInt((Buf+1) And $FFFFFFFF);
+ End Else JGolomb:=-1;
+End;
+
+Function JIsoClip(V,Vmin,Vmax: LongInt): LongInt;
+Begin If (V>Vmax) Or (V<Vmin) Then JIsoClip:=Vmin Else JIsoClip:=V; End;
+Function JMin(A,B: LongInt): LongInt; Begin If A<B Then JMin:=A Else JMin:=B; End;
+Function JMax(A,B: LongInt): LongInt; Begin If A>B Then JMax:=A Else JMax:=B; End;
+Function JLog2(V: LongInt): LongInt; Var R: LongInt; Begin R:=0; While V>1 Do Begin V:=V Shr 1; Inc(R); End; JLog2:=R; End;
+
+Procedure JResetParams(All: Boolean);
+Var Factor: LongInt;
+Begin
+ If (JMaxv=0) Or All Then JMaxv:=(1 Shl JBpp)-1;
+ If JMaxv>=128 Then Begin
+  Factor:=(JMin(JMaxv,4095)+128) Shr 8;
+  If (JTT1=0) Or All Then JTT1:=JIsoClip(Factor*(3-2)+2+3*JNear,JNear+1,JMaxv);
+  If (JTT2=0) Or All Then JTT2:=JIsoClip(Factor*(7-3)+3+5*JNear,JTT1,JMaxv);
+  If (JTT3=0) Or All Then JTT3:=JIsoClip(Factor*(21-4)+4+7*JNear,JTT2,JMaxv);
+ End Else Begin
+  Factor:=256 Div (JMaxv+1);
+  If (JTT1=0) Or All Then JTT1:=JIsoClip(JMax(2,3 Div Factor+3*JNear),JNear+1,JMaxv);
+  If (JTT2=0) Or All Then JTT2:=JIsoClip(JMax(3,7 Div Factor+5*JNear),JTT1,JMaxv);
+  If (JTT3=0) Or All Then JTT3:=JIsoClip(JMax(4,21 Div Factor+7*JNear),JTT2,JMaxv);
+ End;
+ If (JRst=0) Or All Then JRst:=64;
+End;
+
+Procedure JInitState;
+Var I: LongInt;
+Begin
+ JTwoNear:=JNear*2+1;
+ JRange:=(JMaxv+JTwoNear-1) Div JTwoNear+1;
+ JQbpp:=0; While (1 Shl JQbpp)<JRange Do Inc(JQbpp);
+ JBpp:=JMax(JLog2(JMaxv)+1,2);
+ JLimit:=2*(JBpp+JMax(JBpp,8))-JQbpp;
+ For I:=0 To 366 Do Begin JA[I]:=JMax((JRange+32) Shr 6,2); JN[I]:=1; End;
+End;
+
+Function JQuant(V: LongInt): LongInt;
+Begin
+ If V=0 Then Begin JQuant:=0; Exit; End;
+ If V<0 Then Begin
+  If V<=-JTT3 Then JQuant:=-4 Else If V<=-JTT2 Then JQuant:=-3 Else If V<=-JTT1 Then JQuant:=-2
+  Else If V<-JNear Then JQuant:=-1 Else JQuant:=0;
+ End Else Begin
+  If V<=JNear Then JQuant:=0 Else If V<JTT1 Then JQuant:=1 Else If V<JTT2 Then JQuant:=2 Else If V<JTT3 Then JQuant:=3 Else JQuant:=4;
+ End;
+End;
+
+Procedure JDownscale(Q: LongInt);
+Begin
+ If JN[Q]=JRst Then Begin JA[Q]:=JA[Q] Shr 1; JBb[Q]:=JSar(JBb[Q],1); JN[Q]:=JN[Q] Shr 1; End;
+ Inc(JN[Q]);
+End;
+
+Function JUpdateRegular(Q,Err: LongInt): LongInt;
+Begin
+ If (Abs(Err)>$FFFF) Or (Abs(Err)>$7FFFFFFF-JA[Q]) Then Begin JUpdateRegular:=-$10000; Exit; End;
+ Inc(JA[Q],Abs(Err));
+ Err:=Err*JTwoNear;
+ Inc(JBb[Q],Err);
+ JDownscale(Q);
+ If JBb[Q]<=-JN[Q] Then Begin
+  JBb[Q]:=JMax(JBb[Q]+JN[Q],1-JN[Q]);
+  If JC[Q]>-128 Then Dec(JC[Q]);
+ End Else If JBb[Q]>0 Then Begin
+  JBb[Q]:=JMin(JBb[Q]-JN[Q],0);
+  If JC[Q]<127 Then Inc(JC[Q]);
+ End;
+ JUpdateRegular:=Err;
+End;
+
+Function JGetRegular(Q: LongInt): LongInt;
+Var K,Ret: LongInt;
+Begin
+ K:=0; While (K<31) And ((Int64(JN[Q]) Shl K)<JA[Q]) Do Inc(K);
+ Ret:=JGolomb(K,JLimit,JQbpp);
+ If (Ret And 1)<>0 Then Ret:=-JSar(Ret+1,1) Else Ret:=JSar(Ret,1);
+ If (JNear=0) And (K=0) And (2*JBb[Q]<=-JN[Q]) Then Ret:=-(Ret+1);
+ JGetRegular:=JUpdateRegular(Q,Ret);
+End;
+
+Function JGetRunterm(RIType,LimitAdd: LongInt): LongInt;
+Var K,Ret,Temp,Map,Q: LongInt;
+Begin
+ Q:=365+RIType;
+ Temp:=JA[Q]; If RIType<>0 Then Inc(Temp,JN[Q] Shr 1);
+ K:=0; While (K<31) And ((Int64(JN[Q]) Shl K)<Temp) Do Inc(K);
+ Ret:=JGolomb(K,JLimit-LimitAdd-1,JQbpp);
+ If Ret<0 Then Begin JGetRunterm:=-$10000; Exit; End;
+ Map:=0;
+ If (K=0) And ((RIType<>0) Or (Ret<>0)) And (2*JBb[Q]<JN[Q]) Then Map:=1;
+ Inc(Ret,RIType+Map);
+ If (Ret And 1)<>0 Then Begin Ret:=Map-JSar(Ret+1,1); Inc(JBb[Q]); End Else Ret:=Ret Shr 1;
+ If Abs(Ret)>$FFFF Then Begin JGetRunterm:=-$10000; Exit; End;
+ Inc(JA[Q],Abs(Ret)-RIType);
+ Ret:=Ret*JTwoNear;
+ JDownscale(Q);
+ JGetRunterm:=Ret;
+End;
+
+Function JMid(A,B,C: LongInt): LongInt;
+Begin
+ If A>B Then Begin If B>C Then JMid:=B Else If A>C Then JMid:=C Else JMid:=A; End
+ Else Begin If A>C Then JMid:=A Else If B>C Then JMid:=C Else JMid:=B; End;
+End;
+Function JClip(V,Lo,Hi: LongInt): LongInt; Begin If V<Lo Then JClip:=Lo Else If V>Hi Then JClip:=Hi Else JClip:=V; End;
+
+{ ls_decode_line : Last,Dst sont des indices de debut de ligne dans JPic (+ decalage de composante) ; Bits8 : echantillons 8 bits }
+Function JDecodeLine(Last,Dst,Last2,W,Stride,Comp: LongInt; Bits8: Boolean): LongInt;
+Var X,Ra,Rb,Rc,Rd,D0,D1,D2,Err,Pred,Ctx,Sign,R,RIType,I: LongInt;
+Function Rd_(Base,Idx: LongInt): LongInt;
+Begin Rd_:=JPW(JWork)^[Base+Idx]; End;
+Procedure Wr(Base,Idx,V: LongInt);
+Begin If Bits8 Then JPW(JWork)^[Base+Idx]:=V And $FF Else JPW(JWork)^[Base+Idx]:=V And $FFFF; End;
+Begin
+ JDecodeLine:=0; X:=0;
+ While X<W Do Begin
+  If JLeft<=0 Then Begin JDecodeLine:=-1; Exit; End;
+  If X<>0 Then Ra:=Rd_(Dst,X-Stride) Else Ra:=Rd_(Last,X);
+  Rb:=Rd_(Last,X);
+  If X<>0 Then Rc:=Rd_(Last,X-Stride) Else Rc:=Last2;
+  If X>=W-Stride Then Rd:=Rd_(Last,X) Else Rd:=Rd_(Last,X+Stride);
+  D0:=Rd-Rb; D1:=Rb-Rc; D2:=Rc-Ra;
+  If (Abs(D0)<=JNear) And (Abs(D1)<=JNear) And (Abs(D2)<=JNear) Then Begin
+   While JGet1<>0 Do Begin
+    R:=1 Shl JLog2Run[JRun[Comp]];
+    If X+R*Stride>W Then R:=(W-X) Div Stride;
+    For I:=0 To R-1 Do Begin Wr(Dst,X,Ra); Inc(X,Stride); End;
+    If R<>(1 Shl JLog2Run[JRun[Comp]]) Then Exit;
+    If JRun[Comp]<31 Then Inc(JRun[Comp]);
+    If X+Stride>W Then Exit;
+   End;
+   R:=JLog2Run[JRun[Comp]];
+   If R<>0 Then R:=LongInt(JGet(R));
+   If X+R*Stride>W Then R:=(W-X) Div Stride;
+   For I:=0 To R-1 Do Begin Wr(Dst,X,Ra); Inc(X,Stride); End;
+   If X>=W Then Begin JDecodeLine:=-1; Exit; End;
+   Rb:=Rd_(Last,X);
+   If Abs(Ra-Rb)<=JNear Then RIType:=1 Else RIType:=0;
+   Err:=JGetRunterm(RIType,JLog2Run[JRun[Comp]]);
+   If JRun[Comp]<>0 Then Dec(JRun[Comp]);
+   If (JNear<>0) And (RIType<>0) Then Pred:=Ra+Err
+   Else If Rb<Ra Then Pred:=Rb-Err Else Pred:=Rb+Err;
+  End Else Begin
+   Ctx:=JQuant(D0)*81+JQuant(D1)*9+JQuant(D2);
+   Pred:=JMid(Ra,Ra+Rb-Rc,Rb);
+   If Ctx<0 Then Begin Ctx:=-Ctx; Sign:=1; End Else Sign:=0;
+   If Sign<>0 Then Begin
+    Pred:=JClip(Pred-JC[Ctx],0,JMaxv);
+    Err:=-JGetRegular(Ctx);
+   End Else Begin
+    Pred:=JClip(Pred+JC[Ctx],0,JMaxv);
+    Err:=JGetRegular(Ctx);
+   End;
+   Inc(Pred,Err);
+  End;
+  If JNear<>0 Then Begin
+   If Pred<-JNear Then Inc(Pred,JRange*JTwoNear)
+   Else If Pred>JMaxv+JNear Then Dec(Pred,JRange*JTwoNear);
+   Pred:=JClip(Pred,0,JMaxv);
+  End;
+  Pred:=Pred And JMaxv;
+  Wr(Dst,X,Pred);
+  Inc(X,Stride);
+ End;
+End;
+
+{ ff_jpegls_decode_picture ; retourne 0 ou une erreur negative }
+Function JDecodePicture(Near,Pt,Ilv: LongInt): LongInt;
+Var
+ I,J,T,Off,Stride,Width,Shift,DecodedH,Wtot,Pitch,Last,Cur,X,W2,Stp: LongInt; Rc: Array[0..2] Of LongInt; Ret: LongInt; Bits8,Byteview: Boolean; Tmp: Pointer; P: JPW;
+ Xf: Boolean; G,Rr,Bb,Y0: LongInt;
+Begin
+ JDecodePicture:=0;
+ FillChar(JRun,SizeOf(JRun),0); FillChar(JBb,SizeOf(JBb),0); FillChar(JC,SizeOf(JC),0);
+ JNear:=Near; If JBits<2 Then JBpp:=2 Else JBpp:=JBits;
+ JMaxv:=JMaxval; JTT1:=JT1; JTT2:=JT2; JTT3:=JT3; JRst:=JReset;
+ JResetParams(False);
+ If (JMaxv>=(1 Shl JBpp)) Or (JTT1>JTT2) Or (JTT2>JTT3) Or (JTT3>JMaxv) Or (JRst>JMax(255,JMaxv)) Then Begin JDecodePicture:=-1; Exit; End;
+ JInitState;
+ If JBits<=8 Then Shift:=Pt+(8-JBits) Else Shift:=Pt+(16-JBits);
+ If Shift>=16 Then Begin JDecodePicture:=-1; Exit; End;
+ If JLeft<JH Then Begin JDecodePicture:=-1; Exit; End;
+ Bits8:=JBits<=8;
+ Wtot:=JW*JNC; Pitch:=Wtot; Byteview:=False; Tmp:=Nil; JWork:=JPic;
+ DecodedH:=0; Off:=0;
+ If Ilv=0 Then Begin
+  If JCurScan>JNC Then Begin JDecodePicture:=-1; Exit; End;
+  If JNC>1 Then Stride:=3 Else Stride:=1;
+  Off:=JCurScan-1; If Off<0 Then Off:=0; If Off>Stride-1 Then Off:=Stride-1;
+  Width:=JW*Stride;
+  T:=0; Last:=0; I:=0;
+  While I<JH Do Begin
+   Cur:=(I+1)*Wtot+Off;
+   Ret:=JDecodeLine(Last,Cur,T,Width,Stride,Off,Bits8);
+   T:=JPW(JWork)^[Last];
+   If Ret<0 Then Break;
+   Last:=Cur;
+   Inc(I);
+  End;
+  DecodedH:=I;
+ End Else If Ilv=1 Then Begin
+  Rc[0]:=0; Rc[1]:=0; Rc[2]:=0;
+  If Not Bits8 Then Begin
+   { echantillons 16 bits traites comme des octets : ls_decode_line(..., 8) de FFmpeg }
+   Byteview:=True; Pitch:=JW*2;
+   GetMem(Tmp,(JH+1)*Pitch*2+64); FillChar(Tmp^,(JH+1)*Pitch*2+64,0);
+   For I:=0 To JH Do For X:=0 To JW-1 Do Begin
+    JPW(Tmp)^[I*Pitch+2*X]:=JPW(JPic)^[I*JW+X] And $FF; JPW(Tmp)^[I*Pitch+2*X+1]:=JPW(JPic)^[I*JW+X] Shr 8;
+   End;
+   JWork:=Tmp;
+  End;
+  If JNC>1 Then Stride:=3 Else Stride:=1;
+  Width:=JW*Stride;
+  Last:=0; I:=0;
+  While I<JH Do Begin
+   Cur:=(I+1)*Pitch;
+   Ret:=0;
+   For J:=0 To Stride-1 Do Begin
+    Ret:=JDecodeLine(Last+J,Cur+J,Rc[J],Width,Stride,J,True);
+    If Ret<0 Then Break;
+    Rc[J]:=JPW(JWork)^[Last+J];
+   End;
+   If Ret<0 Then Break;
+   Last:=Cur;
+   Inc(I);
+  End;
+  DecodedH:=I;
+  If Byteview Then Begin
+   For I:=0 To JH Do For X:=0 To JW-1 Do
+    JPW(JPic)^[I*JW+X]:=JPW(Tmp)^[I*Pitch+2*X]+JPW(Tmp)^[I*Pitch+2*X+1]*256;
+   FreeMem(Tmp,(JH+1)*Pitch*2+64); JWork:=JPic;
+  End;
+ End Else Begin JDecodePicture:=-2; Exit; End;
+ P:=JPW(JPic);
+ W2:=JW*JNC;
+ If (JXfrm<>0) And (JNC=3) Then Begin
+  If Bits8 Then Begin
+   For I:=0 To JH-1 Do Begin
+    X:=Off;
+    While X+2<W2 Do Begin
+     Y0:=(I+1)*Wtot+X;
+     Case JXfrm Of
+      1: Begin
+       P^[Y0]:=(P^[Y0]+P^[Y0+1]+128) And $FF;
+       P^[Y0+2]:=(P^[Y0+2]+P^[Y0+1]+128) And $FF;
+      End;
+      2: Begin
+       P^[Y0]:=(P^[Y0]+P^[Y0+1]+128) And $FF;
+       P^[Y0+2]:=(P^[Y0+2]+((P^[Y0]+P^[Y0+1]) Shr 1)+128) And $FF;
+      End;
+      3: Begin
+       G:=P^[Y0]-((P^[Y0+2]+P^[Y0+1]) Shr 2)+64;
+       P^[Y0]:=(P^[Y0+2]+G+128) And $FF;
+       P^[Y0+2]:=(P^[Y0+1]+G+128) And $FF;
+       P^[Y0+1]:=G And $FF;
+      End;
+      4: Begin
+       Rr:=P^[Y0]-JSar(359*(P^[Y0+2]-128)+490,8);
+       G:=P^[Y0]-JSar(88*(P^[Y0+1]-128)-183*(P^[Y0+2]-128)+30,8);
+       Bb:=P^[Y0]+JSar(454*(P^[Y0+1]-128)+574,8);
+       P^[Y0]:=JClip(Rr,0,255); P^[Y0+1]:=JClip(G,0,255); P^[Y0+2]:=JClip(Bb,0,255);
+      End;
+     End;
+     Inc(X,3);
+    End;
+   End;
+  End;
+ End;
+ If Shift<>0 Then Begin
+  If Bits8 Then Begin
+   If JNC>1 Then Stp:=3 Else Stp:=1;
+   For I:=0 To DecodedH-1 Do Begin
+    If Ilv=0 Then X:=Off Else X:=0;
+    While X<W2 Do Begin P^[(I+1)*Wtot+X]:=(P^[(I+1)*Wtot+X] Shl Shift) And $FF; Inc(X,Stp); End;
+   End;
+  End Else
+   For I:=0 To DecodedH-1 Do
+    For X:=0 To W2-1 Do P^[(I+1)*Wtot+X]:=(P^[(I+1)*Wtot+X] Shl Shift) And $FFFF;
+ End;
+End;
+
+Function JGetAt(P: LongInt; N: LongInt): LongInt;
+Var Sv: LongInt;
+Begin Sv:=JPos; JPos:=P; JGetAt:=LongInt(JGet(N) And $FFFFFFFF); JPos:=Sv; End;
+
+Procedure JPutBits(Buf: PEABuffer; Var Bp: LongInt; Val,N: LongInt);
+Var K: LongInt;
+Begin
+ For K:=N-1 Downto 0 Do Begin
+  If ((Val Shr K) And 1)<>0 Then Buf^[Bp Shr 3]:=Buf^[Bp Shr 3] Or (1 Shl (7-(Bp And 7)));
+  Inc(Bp);
+ End;
+End;
+
+{ ff_mjpeg_decode_sof (cas JPEG-LS) ; 0 ou erreur ; JPos est avance comme get_bits }
+Function JSof(FileLen: LongInt): LongInt;
+Var Len,I,Nc,W,H,Bits,Hc,Vc,Qi,HMax,VMax,Id: LongInt;
+Begin
+ JSof:=-1;
+ JCurScan:=0;
+ Len:=JGet(16); Bits:=JGet(8);
+ If (Bits>16) Or (Bits<1) Then Exit;
+ H:=JGet(16); W:=JGet(16);
+ If (W<1) Or (H<1) Or (Int64(W+128)*(H+128)>=Int64(268435455)) Then Exit;
+ If (FileLen<>0) And (Int64((W+7) Div 8)*((H+7) Div 8)>Int64(FileLen)*4) Then Exit;
+ Nc:=JGet(8);
+ If (Nc<=0) Or (Nc>4) Then Exit;
+ If Not ((Bits<=8) Or (Nc=1)) Then Exit;
+ If Len<>8+3*Nc Then Exit;
+ HMax:=1; VMax:=1;
+ For I:=0 To Nc-1 Do Begin
+  Id:=JGet(8); JCompId[I]:=Id;
+  Hc:=JGet(4); Vc:=JGet(4);
+  If Hc>HMax Then HMax:=Hc;
+  If Vc>VMax Then VMax:=Vc;
+  Qi:=JGet(8);
+  If Qi>=4 Then Exit;
+  If (Hc=0) Or (Vc=0) Then Exit;
+ End;
+ If (HMax>1) Or (VMax>1) Then Exit;
+ JW:=W; JH:=H; JBits:=Bits; JNC:=Nc; JHintW:=W; JHintH:=H;
+ If Nc=3 Then Begin JPixFmt:=3; JHintFmt:=9; End
+ Else If Nc=4 Then Begin JHintFmt:=9; Exit; End
+ Else If Nc<>1 Then Exit
+ Else If ((JPalIndex<>0) Or (JForcePal<>0)) And (Bits<=8) Then Begin JPixFmt:=4; JHintFmt:=0; End
+ Else If Bits<=8 Then Begin JPixFmt:=1; JHintFmt:=7; End Else Begin JPixFmt:=2; JHintFmt:=8; End;
+ If JPic<>Nil Then FreeMem(JPic,JPicSize);
+ JPicSize:=((H+1)*W*Nc+64)*2;
+ GetMem(JPic,JPicSize); FillChar(JPic^,JPicSize,0);
+ If JPixFmt=4 Then FillChar(JPal,SizeOf(JPal),0);
+ JGot:=True;
+ JSof:=0;
+End;
+
+{ ff_jpegls_decode_lse ; 0 ok, 1 refaire avec palette, <0 erreur }
+Function JLse: LongInt;
+Var Len,Id,Tid,Wt,MaxTab,I,J,K,Shift: LongInt; V: LongWord;
+Begin
+ JLse:=-1;
+ Len:=JGet(16); Id:=JGet(8);
+ Case Id Of
+  1: Begin
+   If Len<13 Then Exit;
+   JMaxval:=JGet(16); JT1:=JGet(16); JT2:=JGet(16); JT3:=JGet(16); JReset:=JGet(16);
+  End;
+  2,3: Begin
+   If Id=2 Then JPalIndex:=0;
+   Tid:=JGet(8); Wt:=JGet(8);
+   If Len<5 Then Exit;
+   If (Wt<1) Or (Wt>4) Then Exit;
+   If JMaxval=0 Then MaxTab:=255
+   Else If (5+Wt*(JMaxval+1))<65535 Then MaxTab:=JMaxval
+   Else MaxTab:=65530 Div Wt-1;
+   If MaxTab>=256 Then Exit;
+   MaxTab:=JMin(MaxTab,(Len-5) Div Wt+JPalIndex);
+   If JPalIndex>MaxTab Then Exit;
+   If JGot And ((JPixFmt=1) Or (JPixFmt=4)) Then Begin
+    Shift:=0;
+    If (JBits>0) And (JBits<8) Then Begin MaxTab:=JMin(MaxTab,(1 Shl JBits)-1); Shift:=8-JBits; End;
+    Inc(JForcePal);
+    If JPixFmt<>4 Then Begin
+     If JForcePal>1 Then Exit;
+     JLse:=1; Exit;
+    End;
+    I:=JPalIndex;
+    While I<=MaxTab Do Begin
+     K:=(I Shl Shift) And $FF;
+     If Wt<4 Then V:=$FF000000 Else V:=0;
+     For J:=0 To Wt-1 Do V:=V Or (LongWord(JGet(8)) Shl (8*(Wt-J-1)));
+     JPal[K]:=V;
+     Inc(I);
+    End;
+    JPalIndex:=I;
+   End;
+  End;
+ Else Exit;
+ End;
+ JLse:=0;
+End;
+
+{ ff_mjpeg_decode_sos pour JPEG-LS ; <0 : erreur ignoree par l'appelant }
+Function JSos: LongInt;
+Var Len,Nc,I,J,Id,Index,Tm,Near,Ilv,Pt: LongInt;
+Begin
+ JSos:=-1;
+ If Not JGot Then Exit;
+ Len:=JGet(16); Nc:=JGet(8);
+ If (Nc=0) Or (Nc>4) Then Exit;
+ If Len<>6+2*Nc Then Exit;
+ For I:=0 To Nc-1 Do Begin
+  Id:=JGet(8);
+  Index:=-1;
+  For J:=0 To JNC-1 Do If Id=JCompId[J] Then Begin Index:=J; Break; End;
+  If Index<0 Then Exit;
+  Tm:=JGet(8);
+  If ((Tm Shr 4)>=2) Or ((Tm And 15)>=2) Then Exit;
+ End;
+ Near:=JGet(8); Ilv:=JGet(8);
+ JGet(4); Pt:=JGet(4);
+ JSos:=JDecodePicture(Near,Pt,Ilv);
+End;
+
+{ chaine de marqueurs de mjpeg_decode_frame_from_buf ; retourne True si une image est prete }
+Function JParse: Boolean;
+Var
+ Pos,Code,V,V2,T,B,Bc,I,Len,Consumed,Sk,Ret: LongInt; X: Byte; Tmp: PEABuffer; Redo: Boolean;
+Begin
+ JParse:=False;
+ JGot:=False; JPic:=Nil; JXfrm:=0; JSarN:=0; JSarD:=0; JHintFmt:=-1; JMaxval:=0; JT1:=0; JT2:=0; JT3:=0; JReset:=0; JPalIndex:=0; JForcePal:=0; JCurScan:=0; JPixFmt:=0;
+ Repeat
+  Redo:=False;
+  Pos:=0;
+  While Pos<JFSize Do Begin
+   Code:=-1;
+   While JFSize-Pos>1 Do Begin
+    V:=JF^[Pos]; Inc(Pos); V2:=JF^[Pos];
+    If (V=$FF) And (V2>=$C0) And (V2<=$FE) And (Pos<JFSize) Then Begin Code:=V2; Inc(Pos); Break; End;
+   End;
+   If Code<0 Then Begin Pos:=JFSize; Break; End;
+   Tmp:=Nil;
+   If Code=$DA Then Begin
+    { dechappement JPEG-LS : l'octet suivant un 0xFF n'a que 7 bits }
+    T:=0;
+    While Pos+T<JFSize Do Begin
+     X:=JF^[Pos+T]; Inc(T);
+     If X=$FF Then Begin
+      While (Pos+T<JFSize) And (X=$FF) Do Begin X:=JF^[Pos+T]; Inc(T); End;
+      If (X And $80)<>0 Then Begin If T>=2 Then Dec(T,2) Else T:=0; Break; End;
+     End;
+    End;
+    Bc:=T*8;
+    GetMem(Tmp,T+80); FillChar(Tmp^,T+80,0);
+    { put_bits sequentiel }
+    I:=0; B:=0; Sk:=0;
+    While B<T Do Begin
+     X:=JF^[Pos+B]; Inc(B);
+     JPutBits(Tmp,I,X,8);
+     If (X=$FF) And (B<T) Then Begin
+      X:=JF^[Pos+B]; Inc(B);
+      If (X And $80)<>0 Then X:=X And $7F;
+      JPutBits(Tmp,I,X,7); Dec(Bc);
+     End;
+    End;
+    JB:=Tmp; JBBytes:=(Bc+7) Shr 3;
+   End Else Begin
+    JB:=PEABuffer(@JF^[Pos]); JBBytes:=JFSize-Pos;
+   End;
+   JPos:=0;
+   Ret:=0;
+   Case Code Of
+    $E0..$EF: Begin
+     Len:=JGet(16);
+     If Len<6 Then Ret:=-1
+     Else If 8*Len>JLeft Then Ret:=-1
+     Else Begin
+      V:=LongInt(JGet(32)); Len:=Len-6;
+      If V=LongInt($4A464946) Then Begin
+       { JFIF : rapport d'aspect }
+       If Len>=8 Then Begin
+        JGet(8); JGet(8); JGet(8); JGet(8);
+        JSarN:=JGet(16); JSarD:=JGet(16);
+        If (JSarN<=0) Or (JSarD<=0) Then Begin JSarN:=0; JSarD:=1; End;
+        Dec(Len,8);
+        If Len>=2 Then Begin
+         I:=JGet(8); Sk:=JGet(8);
+         If (I<>0) And (Sk<>0) Then Begin If Len-10-(I*Sk*3)>0 Then Dec(Len,I*Sk*3); End;
+         Dec(Len,2);
+        End;
+       End;
+      End Else If (V=LongInt($41646F62)) And (Len>=7) And (JGetAt(JPos,8)=101) And (JGetAt(JPos,32)<>LongInt($655F434D)) Then Begin
+       JGet(8); JGet(16); JGet(16); JGet(16); JGet(8); Dec(Len,7);
+      End Else If (V=LongInt($4C4A4946)) Then Begin
+       JGet(16); JGet(16); JGet(16); JGet(16); JGet(8); Dec(Len,9);
+      End Else If (V=LongInt($6D726678)) And (Len>0) Then Begin
+       JXfrm:=LongInt(JGet(8)); Dec(Len);
+      End Else If (V=LongInt($726C6F63)) And (Len>0) Then Begin
+       JGet(8); Dec(Len);
+      End;
+      I:=Len-1; While I>0 Do Begin JGet(8); Dec(I); End;
+     End;
+    End;
+    $FE: Begin
+     Len:=JGet(16);
+     If (Len>=2) And (8*Len-16<=JLeft) Then For I:=1 To Len-2 Do JGet(8);
+    End;
+    $DB: Begin
+     Len:=JGet(16)-2;
+     If 8*Len>JLeft Then Begin If Tmp<>Nil Then FreeMem(Tmp,T+80); Exit; End;
+     While Len>=65 Do Begin
+      I:=JGet(4); If I>1 Then Begin If Tmp<>Nil Then FreeMem(Tmp,T+80); Exit; End;
+      V:=JGet(4); If V>=4 Then Begin If Tmp<>Nil Then FreeMem(Tmp,T+80); Exit; End;
+      For Sk:=0 To 63 Do JGet(8+8*I);
+      Dec(Len,1+64*(1+I));
+     End;
+    End;
+    $C4: Begin Len:=JGet(16); I:=Len-2; While (I>0) And (JLeft>0) Do Begin JGet(8); Dec(I); End; End;
+    $D8: ;
+    $C0..$C3: ;
+    $F7: Begin
+     Ret:=JSof(JFSize);
+     If Ret<0 Then Begin If Tmp<>Nil Then FreeMem(Tmp,T+80); Exit; End;
+    End;
+    $F8: Begin
+     Ret:=JLse;
+     If Ret<0 Then Begin If Tmp<>Nil Then FreeMem(Tmp,T+80); Exit; End;
+     If Ret=1 Then Begin Redo:=True; End;
+    End;
+    $D9: Begin
+     If JGot Then Begin If Tmp<>Nil Then FreeMem(Tmp,T+80); JCurScan:=0; JParse:=True; Exit; End;
+    End;
+    $DA: Begin
+     Inc(JCurScan);
+     JSos;
+    End;
+    $DD: Begin
+     If JGet(16)<>4 Then Begin If Tmp<>Nil Then FreeMem(Tmp,T+80); Exit; End;
+     JGet(16);
+    End;
+   End;
+   Consumed:=(JPos+7) Shr 3;
+   If Tmp<>Nil Then FreeMem(Tmp,T+80);
+   If Redo Then Break;
+   Inc(Pos,Consumed);
+  End;
+  If Redo Then Begin
+   If JPic<>Nil Then Begin FreeMem(JPic,JPicSize); JPic:=Nil; End;
+  End;
+ Until Not Redo;
+ If JGot And (JCurScan<>0) Then JParse:=True;
+End;
+
+{ jpegls : image JPEG-LS (SOI ... EOI) vers Y4M/PNG/BMP }
+Procedure DecodeJLS(Const Source,Target: String; Mode: LongInt);
+Var Out: PEABuffer; X,Y,I,C,Fmt,Bytes: LongInt; V: LongInt; P: JPW;
+Begin
+ NVLoad(Source,JF,JFSize);
+ If Not JParse Then Begin
+  If (JHintFmt<0) Or (Mode<>0) Then Fail('jpegls: aucune image decodee.');
+  NVBegin(Mode,Target,JHintW,JHintH,JHintFmt,25,1); NVHdrOk:=True;
+  If (JHintFmt=7) Or (JHintFmt=8) Then Begin
+   NVSubX:=0; NVSubY:=0; NVCW:=0; NVCH:=0;
+   If JHintFmt=7 Then NVYTag:='Cmono' Else NVYTag:='Cmono16';
+  End;
+  If (JSarN>0) And (JSarD>0) Then Begin NVSarN:=JSarN; NVSarD:=JSarD; End;
+  NVFinish('jpegls');
+  Exit;
+ End;
+ P:=JPW(JPic);
+ Case JPixFmt Of
+  1: Fmt:=7; 2: Fmt:=8; 3: Fmt:=9; Else Fmt:=0;
+ End;
+ If (Mode<>0) And ((Fmt=7) Or (Fmt=8)) Then Fail('jpegls: sortie PNG/BMP des images en niveaux de gris non prise en charge (Y4M requis).');
+ NVBegin(Mode,Target,JW,JH,Fmt,25,1);
+ If (Fmt=7) Or (Fmt=8) Then Begin
+  NVSubX:=0; NVSubY:=0; NVCW:=0; NVCH:=0;
+  If Fmt=7 Then NVYTag:='Cmono' Else NVYTag:='Cmono16';
+ End;
+ If (JSarN>0) And (JSarD>0) Then Begin
+  NVSarN:=JSarN; NVSarD:=JSarD;
+  If (JPixFmt=3) Or (JPixFmt=4) Then NVGcd(NVSarN,NVSarD); { filtre de conversion : rapport reduit }
+ End;
+ GetMem(Out,NVFrameBytes+64);
+ Case JPixFmt Of
+  1,4: For Y:=0 To JH-1 Do For X:=0 To JW-1 Do Out^[Y*JW+X]:=P^[(Y+1)*JW+X] And 255;
+  2: For Y:=0 To JH-1 Do For X:=0 To JW-1 Do Begin V:=P^[(Y+1)*JW+X]; Out^[2*(Y*JW+X)]:=V And 255; Out^[2*(Y*JW+X)+1]:=V Shr 8; End;
+  3: For Y:=0 To JH-1 Do For X:=0 To JW*3-1 Do Out^[Y*JW*3+X]:=P^[(Y+1)*JW*3+X] And 255;
+ End;
+ If JPixFmt=4 Then
+  For I:=0 To 255 Do Begin NVPalR[I]:=(JPal[I] Shr 16) And 255; NVPalG[I]:=(JPal[I] Shr 8) And 255; NVPalB[I]:=JPal[I] And 255; End;
+ NVEmit(Out);
+ FreeMem(Out,NVFrameBytes+64);
+ NVFinish('jpegls');
+End;
+
+
+{ ---- JPEG-LS : encodeur (libavcodec/jpeglsenc.c), Y4M gris 8/16 bits ou couleur vers .jls ---- }
+Type TJENArr=Array[0..100000000] Of LongInt;
+Var
+ JEBuf: PEABuffer; JEBits: Int64; JETmp: ^TJENArr; JEIn: ^TJENArr; JEPred: LongInt;
+
+Procedure JEPut(V: Int64; N: LongInt);
+Var K: LongInt;
+Begin
+ For K:=N-1 Downto 0 Do Begin
+  If ((V Shr K) And 1)<>0 Then JEBuf^[JEBits Shr 3]:=JEBuf^[JEBits Shr 3] Or (1 Shl (7-(JEBits And 7)));
+  Inc(JEBits);
+ End;
+End;
+
+{ set_ur_golomb_jpegls }
+Procedure JEGolomb(I,K,Limit,EscLen: LongInt);
+Var E: LongInt;
+Begin
+ E:=(I Shr K)+1;
+ If E<Limit Then Begin
+  While E>31 Do Begin JEPut(0,31); Dec(E,31); End;
+  JEPut(1,E);
+  If K>0 Then JEPut(I And ((1 Shl K)-1),K);
+ End Else Begin
+  While Limit>31 Do Begin JEPut(0,31); Dec(Limit,31); End;
+  JEPut(1,Limit);
+  JEPut(I-1,EscLen);
+ End;
+End;
+
+Procedure JEEncRegular(Q,Err: LongInt);
+Var K,Map,Val: LongInt;
+Begin
+ K:=0; While (K<31) And ((Int64(JN[Q]) Shl K)<JA[Q]) Do Inc(K);
+ If (JNear=0) And (K=0) And (2*JBb[Q]<=-JN[Q]) Then Map:=1 Else Map:=0;
+ If Err<0 Then Inc(Err,JRange);
+ If Err>=((JRange+1) Shr 1) Then Begin Dec(Err,JRange); Val:=2*Abs(Err)-1-Map; End
+ Else Val:=2*Err+Map;
+ JEGolomb(Val,K,JLimit,JQbpp);
+ JUpdateRegular(Q,Err);
+End;
+
+Procedure JEEncRunterm(RIType,Err,LimitAdd: LongInt);
+Var K,Val,Map,Q,Temp: LongInt;
+Begin
+ Q:=365+RIType;
+ Temp:=JA[Q]; If RIType<>0 Then Inc(Temp,JN[Q] Shr 1);
+ K:=0; While (K<31) And ((Int64(JN[Q]) Shl K)<Temp) Do Inc(K);
+ Map:=0;
+ If (K=0) And (Err<>0) And (2*JBb[Q]<JN[Q]) Then Map:=1;
+ If Err<0 Then Val:=-(2*Err)-1-RIType+Map Else Val:=2*Err-RIType-Map;
+ JEGolomb(Val,K,JLimit-LimitAdd-1,JQbpp);
+ If Err<0 Then Inc(JBb[Q]);
+ Inc(JA[Q],JSar(Val+1-RIType,1));
+ JDownscale(Q);
+End;
+
+Procedure JEEncRun(Run,Comp: LongInt; Trail: Boolean);
+Begin
+ While Run>=(1 Shl JLog2Run[JRun[Comp]]) Do Begin
+  JEPut(1,1);
+  Dec(Run,1 Shl JLog2Run[JRun[Comp]]);
+  If JRun[Comp]<31 Then Inc(JRun[Comp]);
+ End;
+ If (Not Trail) And (Run<>0) Then JEPut(1,1)
+ Else If Trail Then Begin
+  JEPut(0,1);
+  If JLog2Run[JRun[Comp]]<>0 Then JEPut(Run,JLog2Run[JRun[Comp]]);
+ End;
+End;
+
+{ ls_encode_line : TB/IB = debut de ligne dans JETmp/JEIn }
+Procedure JEEncLine(TB,IB,Last2,W,Stride,Comp: LongInt);
+Var X,Ra,Rb,Rc,Rd,D0,D1,D2,Err,Pred,Ctx,Sign,Run,RIType: LongInt;
+Begin
+ X:=0; Ra:=JETmp^[TB]; Rc:=Last2;
+ While X<W Do Begin
+  Rb:=JETmp^[TB+X];
+  If X>=W-Stride Then Rd:=JETmp^[TB+X] Else Rd:=JETmp^[TB+X+Stride];
+  D0:=Rd-Rb; D1:=Rb-Rc; D2:=Rc-Ra;
+  If (Abs(D0)<=JNear) And (Abs(D1)<=JNear) And (Abs(D2)<=JNear) Then Begin
+   Run:=0;
+   While (X<W) And (Abs(JEIn^[IB+X]-Ra)<=JNear) Do Begin
+    Inc(Run); JETmp^[TB+X]:=Ra; Inc(X,Stride);
+   End;
+   JEEncRun(Run,Comp,X<W);
+   If X>=W Then Exit;
+   Rb:=JETmp^[TB+X];
+   If Abs(Ra-Rb)<=JNear Then RIType:=1 Else RIType:=0;
+   If RIType<>0 Then Pred:=Ra Else Pred:=Rb;
+   Err:=JEIn^[IB+X]-Pred;
+   If (RIType=0) And (Ra>Rb) Then Err:=-Err;
+   If JNear<>0 Then Begin
+    If Err>0 Then Err:=(JNear+Err) Div JTwoNear Else Err:=-((JNear-Err) Div JTwoNear);
+    If (RIType<>0) Or (Rb>=Ra) Then Ra:=JClip(Pred+Err*JTwoNear,0,JMaxv)
+    Else Ra:=JClip(Pred-Err*JTwoNear,0,JMaxv);
+   End Else Ra:=JEIn^[IB+X];
+   JETmp^[TB+X]:=Ra;
+   If Err<0 Then Inc(Err,JRange);
+   If Err>=((JRange+1) Shr 1) Then Dec(Err,JRange);
+   JEEncRunterm(RIType,Err,JLog2Run[JRun[Comp]]);
+   If JRun[Comp]>0 Then Dec(JRun[Comp]);
+  End Else Begin
+   Ctx:=JQuant(D0)*81+JQuant(D1)*9+JQuant(D2);
+   Pred:=JMid(Ra,Ra+Rb-Rc,Rb);
+   If Ctx<0 Then Begin
+    Ctx:=-Ctx; Sign:=1;
+    Pred:=JClip(Pred-JC[Ctx],0,JMaxv);
+    Err:=Pred-JEIn^[IB+X];
+   End Else Begin
+    Sign:=0;
+    Pred:=JClip(Pred+JC[Ctx],0,JMaxv);
+    Err:=JEIn^[IB+X]-Pred;
+   End;
+   If JNear<>0 Then Begin
+    If Err>0 Then Err:=(JNear+Err) Div JTwoNear Else Err:=-((JNear-Err) Div JTwoNear);
+    If Sign=0 Then Ra:=JClip(Pred+Err*JTwoNear,0,JMaxv) Else Ra:=JClip(Pred-Err*JTwoNear,0,JMaxv);
+   End Else Ra:=JEIn^[IB+X];
+   JETmp^[TB+X]:=Ra;
+   JEEncRegular(Ctx,Err);
+  End;
+  Rc:=Rb;
+  Inc(X,Stride);
+ End;
+End;
+
+
+Function JMaxI64(A,B: Int64): Int64; Begin If A>B Then JMaxI64:=A Else JMaxI64:=B; End;
+
+Function JESar(X: Int64; N: LongInt): Int64;
+Begin
+ If X>=0 Then JESar:=X Shr N Else JESar:=-((-X+(Int64(1) Shl N)-1) Shr N);
+End;
+
+{ swscale yuv420p -> rgb24 sans mise a l'echelle (yuv2rgb.c : ff_yuv2rgb_c_init_tables, yuv2rgb_c_24_rgb), matrice ITU601 }
+Procedure JEConvert(Raw: PEABuffer; W,H: LongInt; Full: Boolean);
+Var
+ YTab: Array[0..2047] Of Byte; Crv,Cbu,Cgu,Cgv,Cy,Oy,Yb: Int64; I,X,Y,CW,U,V,Yv,YOffs,Ob,Og,Or_,Pu,Pv,P: LongInt;
+ TabR,TabB,TabGU,TabGV: Array[0..255] Of LongInt;
+ Function Cl(Z: Int64): LongInt; Begin If Z<0 Then Cl:=0 Else If Z>255 Then Cl:=255 Else Cl:=Z; End;
+Begin
+ If Odd(H) Then Fail('jpegls: hauteur paire requise pour la conversion couleur (swscale).');
+ Crv:=104597; Cbu:=132201; Cgu:=-25675; Cgv:=-53279; Cy:=65536; Oy:=0;
+ If Not Full Then Begin Cy:=(Cy*255) Div 219; Oy:=Int64(16) Shl 16; End
+ Else Begin Crv:=(Crv*224) Div 255; Cbu:=(Cbu*224) Div 255; Cgu:=(Cgu*224) Div 255; Cgv:=(Cgv*224) Div 255; End;
+ Crv:=((Crv*65536)+$8000) Div JMaxI64(Cy,1);
+ Cbu:=((Cbu*65536)+$8000) Div JMaxI64(Cy,1);
+ Cgu:=((Cgu*65536)+$8000) Div JMaxI64(Cy,1);
+ Cgv:=((Cgv*65536)+$8000) Div JMaxI64(Cy,1);
+ If Full Then YOffs:=384+512 Else YOffs:=326+512;
+ Yb:=-(Int64(384) Shl 16)-512*Cy-Oy;
+ For I:=0 To 2047 Do Begin YTab[I]:=Cl(JESar(Yb+$8000,16)); Inc(Yb,Cy); End;
+ For I:=0 To 255 Do Begin
+  TabR[I]:=YOffs-LongInt(JESar(Crv,9))+LongInt(JESar(I*Crv,16));
+  TabB[I]:=YOffs-LongInt(JESar(Cbu,9))+LongInt(JESar(I*Cbu,16));
+  TabGU[I]:=YOffs-LongInt(JESar(Cgu,9))+LongInt(JESar(I*Cgu,16));
+  TabGV[I]:=-LongInt(JESar(Cgv,9))+LongInt(JESar(I*Cgv,16));
+ End;
+ CW:=(W+1) Div 2;
+ For Y:=0 To H-1 Do
+  For X:=0 To W-1 Do Begin
+   Yv:=Raw^[Y*W+X]; U:=Raw^[W*H+(Y Shr 1)*CW+(X Shr 1)]; V:=Raw^[W*H+CW*((H+1) Div 2)+(Y Shr 1)*CW+(X Shr 1)];
+   JEIn^[(Y*W+X)*3]:=YTab[TabR[V]+Yv];
+   JEIn^[(Y*W+X)*3+1]:=YTab[TabGU[U]+TabGV[V]+Yv];
+   JEIn^[(Y*W+X)*3+2]:=YTab[TabB[U]+Yv];
+   { largeur impaire : swscale ne convertit pas la derniere colonne (tampon du filtre reste a zero) }
+   If Odd(W) And (X=W-1) Then Begin JEIn^[(Y*W+X)*3]:=0; JEIn^[(Y*W+X)*3+1]:=0; JEIn^[(Y*W+X)*3+2]:=0; End;
+  End;
+End;
+
+{ y4m -> JPEG-LS ; Frame : numero de l'image a coder (0 = derniere) ; couleur : voir JEConvert }
+Procedure EncodeJLS(Const Source,Target: String; FrameSel: LongInt);
+Var
+ Hd: Array[0..255] Of Byte; Limit,Cur,W,H,Frames,I,K,Q,Code,Comps,Bpp,FrameBytes,FrameAt,N,X,Y,J,Last0,T,Wd: LongInt;
+ Line,Token: String; Gray,G16,Rgb: Boolean; Rc: Array[0..2] Of LongInt; Raw,Outp: PEABuffer; OutPos,NB,Size: LongInt; V: LongInt;
+ C420,FullRange: Boolean; CW,CH: LongInt;
+Function ReadLine: String;
+Var R: String;
+Begin
+ R:='';
+ While Cur<Limit Do Begin ReadAt(Cur,Hd,1); Inc(Cur); If Hd[0]=10 Then Break; If Length(R)<250 Then R:=R+Chr(Hd[0]); End;
+ ReadLine:=R;
+End;
+Procedure PutB(B: LongInt); Begin Outp^[OutPos]:=B And 255; Inc(OutPos); End;
+Procedure PutW(B: LongInt); Begin PutB(B Shr 8); PutB(B); End;
+Procedure PutMarker(M: LongInt); Begin PutB($FF); PutB(M); End;
+Begin
+ OpenRead(Source); Limit:=InputSize; Cur:=0;
+ Line:=ReadLine;
+ If Copy(Line,1,9)<>'YUV4MPEG2' Then Fail('jpegls: entree Y4M requise.');
+ W:=0; H:=0; Gray:=False; G16:=False; C420:=False; FullRange:=False; Line:=Copy(Line,11,255);
+ While Line<>'' Do Begin
+  K:=Pos(' ',Line); If K=0 Then K:=Length(Line)+1;
+  Token:=Copy(Line,1,K-1); Line:=Copy(Line,K+1,255);
+  If Token='' Then Continue;
+  Case Token[1] Of
+   'W': Val(Copy(Token,2,20),W,Code);
+   'H': Val(Copy(Token,2,20),H,Code);
+   'X': If Token='XCOLORRANGE=FULL' Then FullRange:=True;
+   'C': Begin
+    If Token='Cmono' Then Gray:=True
+    Else If Token='Cmono16' Then Begin Gray:=True; G16:=True; End
+    Else If (Token='C420') Or (Token='C420jpeg') Or (Token='C420mpeg2') Or (Token='C420paldv') Then C420:=True
+    Else Fail('jpegls: Y4M Cmono, Cmono16 ou 4:2:0 8 bits requis.');
+   End;
+  End;
+ End;
+ If Not Gray Then C420:=True;
+ If (W<1) Or (H<1) Or (W>65535) Or (H>65535) Or (Int64(W)*H>50000000) Then Fail('jpegls: dimensions Y4M incorrectes.');
+ If Gray Then Begin
+  Comps:=1; If G16 Then FrameBytes:=W*H*2 Else FrameBytes:=W*H;
+ End Else Begin
+  Comps:=3; CW:=(W+1) Div 2; CH:=(H+1) Div 2; FrameBytes:=W*H+2*CW*CH;
+ End;
+ Rgb:=Not Gray;
+ { reperage des images }
+ Frames:=0; FrameAt:=0;
+ While Cur<Limit Do Begin
+  Line:=ReadLine;
+  If Copy(Line,1,5)<>'FRAME' Then Break;
+  If Cur+FrameBytes>Limit Then Break;
+  Inc(Frames);
+  If (FrameSel=0) Or (Frames=FrameSel) Then FrameAt:=Cur;
+  If (FrameSel<>0) And (Frames=FrameSel) Then Break;
+  Inc(Cur,FrameBytes);
+ End;
+ If Frames=0 Then Fail('jpegls: aucune image Y4M.');
+ GetMem(Raw,FrameBytes+64);
+ N:=0; While N<FrameBytes Do Begin If FrameBytes-N>4096 Then Q:=4096 Else Q:=FrameBytes-N; ReadAt(FrameAt+N,Raw^[N],Q); Inc(N,Q); End;
+ Wd:=W*Comps;
+ GetMem(JEIn,(Int64(W)*H*Comps+8)*4); GetMem(JETmp,(Int64(W)*Comps+8)*4);
+ FillChar(JETmp^,(W*Comps+8)*4,0);
+ If Gray Then Begin
+  If G16 Then For I:=0 To W*H-1 Do JEIn^[I]:=Raw^[2*I]+Raw^[2*I+1]*256
+  Else For I:=0 To W*H-1 Do JEIn^[I]:=Raw^[I];
+ End Else Begin
+  JEConvert(Raw,W,H,FullRange);
+ End;
+ { etat }
+ FillChar(JRun,SizeOf(JRun),0); FillChar(JBb,SizeOf(JBb),0); FillChar(JC,SizeOf(JC),0);
+ JNear:=JEPred; If G16 Then JBpp:=16 Else JBpp:=8;
+ JMaxv:=0; JTT1:=0; JTT2:=0; JTT3:=0; JRst:=0;
+ JResetParams(False); JInitState;
+ GetMem(JEBuf,Int64(W)*H*Comps*8+70000); FillChar(JEBuf^,Int64(W)*H*Comps*8+70000,0); JEBits:=0;
+ If Gray Then Begin
+  T:=0;
+  For Y:=0 To H-1 Do Begin
+   Last0:=JETmp^[0];
+   JEEncLine(0,Y*W,T,W,1,0);
+   T:=Last0;
+  End;
+ End Else Begin
+  Rc[0]:=0; Rc[1]:=0; Rc[2]:=0;
+  For Y:=0 To H-1 Do
+   For J:=0 To 2 Do Begin
+    Last0:=JETmp^[J];
+    JEEncLine(J,Y*Wd+J,Rc[J],Wd,3,J);
+    Rc[J]:=Last0;
+   End;
+ End;
+ JEPut(0,7);
+ NB:=JEBits;
+ Size:=LongInt(NB*2 Div 15)+80+Comps*8+16;
+ GetMem(Outp,Int64(NB Shr 2)+Size+1024); OutPos:=0;
+ PutMarker($D8); PutMarker($F7);
+ PutW(8+Comps*3);
+ If G16 Then PutB(16) Else PutB(8);
+ PutW(H); PutW(W); PutB(Comps);
+ For I:=1 To Comps Do Begin PutB(I); PutB($11); PutB(0); End;
+ PutMarker($DA);
+ PutW(6+Comps*2); PutB(Comps);
+ For I:=1 To Comps Do Begin PutB(I); PutB(0); End;
+ PutB(JEPred); If Comps>1 Then PutB(1) Else PutB(0); PutB(0);
+ { echappement : apres un 0xFF, 7 bits seulement }
+ I:=0; NB:=NB-7;
+ While I<NB Do Begin
+  V:=0; For K:=0 To 7 Do V:=V*2+((JEBuf^[(I+K) Shr 3] Shr (7-((I+K) And 7))) And 1);
+  Inc(I,8); PutB(V);
+  If V=$FF Then Begin
+   V:=0; For K:=0 To 6 Do V:=V*2+((JEBuf^[(I+K) Shr 3] Shr (7-((I+K) And 7))) And 1);
+   Inc(I,7); PutB(V);
+  End;
+ End;
+ PutMarker($D9);
+ OpenWrite(Target);
+ I:=0; While I<OutPos Do Begin If OutPos-I>4096 Then Q:=4096 Else Q:=OutPos-I; WriteBytes(Outp^[I],Q); Inc(I,Q); End;
+ CloseRead; CloseWrite;
+End;
+
 Procedure DecodeAVIX(Const Source,Target: String; Mode,Kind: LongInt);
 Var Pos,PkPos,PkLen,RN,RD,I,Y,X,Cw,Ch,Bs,Msg2: LongInt; Ok,FFBegun: Boolean; Msg: String; PIdx: LongInt; NbF,NbP: Int64;
 Begin
@@ -47183,6 +48108,7 @@ Begin
  WriteLn(' DE flv             FLV: video Sorenson Spark (decodeur I/P complet) ou Screen Video vers Y4M/PNG/BMP; FLV1 intra natif en sortie; extraction image H264 CAVLC');
  WriteLn(' D  idcin           id Cinematic (video idcinvideo PAL8 vers Y4M/PNG/BMP, audio PCM vers WAV)');
  WriteLn(' D  ipmovie         Interplay MVE (video interplayvideo PAL8/RGB555 vers Y4M/PNG/BMP, audio PCM/interplay_dpcm vers WAV)');
+ WriteLn(' D  jpegls_pipe     piped jpegls sequence (image JPEG-LS vers Y4M/PNG/BMP)');
  WriteLn(' D  flic            FLI/FLC/FLX animation (video flic 8/15/16/24 bits; audio TFTD non extrait)');
  WriteLn(' D  g726            G.726 big-endian brut (-code_size 2..5, -sample_rate; decodage vers WAV/MP3/...)');
  WriteLn(' D  g726le          G.726 little-endian brut (-code_size 2..5, -sample_rate; decodage vers WAV/MP3/...)');
@@ -47537,6 +48463,7 @@ BEGIN
    WriteLn('D V    kmvc            Karl Morton''s video codec (AVI KMVC, PAL8 <= 320x200)');
    WriteLn('D V D  interplayvideo  Interplay MVE video (conteneur .mve, formats 0x06/0x10/0x11, 8 et 16 bits)');
    WriteLn('D A    interplay_dpcm  DPCM Interplay (conteneur .mve, mono/stereo)');
+   WriteLn('DEV D  jpegls          JPEG-LS (decodeur: gris 8/16 bits, RGB 8 bits, ILV 0/1, near-lossless, palette LSE; encodeur: Y4M gris/4:2:0 vers .jls, -pred 0..2)');
    WriteLn('D V D  idcinvideo      id Quake II CIN video (conteneur .cin, tables Huffman)');
    WriteLn('D V    indeo3          Intel Indeo 3 (AVI IV31/IV32, yuv410p; -pix_fmt yuv420p)');
    WriteLn('D V D  indeo2          Intel Indeo 2 (AVI RT21, yuv410p; -pix_fmt yuv420p, -filter_threads)');
@@ -47588,6 +48515,11 @@ BEGIN
   If Argument='-4mv' Then Begin
    FourMV:=True;
   End Else
+  If Argument='-pred' Then Begin
+   Value:=NextArgument; Val(Value,Number,Code);
+   If (Code<>0) Or (Number<0) Or (Number>2) Then Fail('-pred: 0 (left), 1 (plane) ou 2 (median) requis.');
+   JEPred:=Number;
+  End Else
   If (Argument='-scodec') Or (Argument='-c:s') Or (Argument='-codec:s') Then Begin
    If InputPath='' Then Fail('Codec sous-titres attendu apres -i.');
    SubCodec:=Lower(NextArgument);
@@ -47597,8 +48529,8 @@ BEGIN
    VideoCodec:=Lower(NextArgument);
    If (VideoCodec<>'png') And (VideoCodec<>'gif') And (VideoCodec<>'copy') And
     (VideoCodec<>'ffv1') And (VideoCodec<>'flv') And (VideoCodec<>'mpeg4') And (VideoCodec<>'mpeg1video') And (VideoCodec<>'mpeg2video') And (VideoCodec<>'rawvideo') And
-    (VideoCodec<>'asv1') And (VideoCodec<>'asv2') And (VideoCodec<>'huffyuv') And (VideoCodec<>'h263') And (VideoCodec<>'h263p') And (VideoCodec<>'bmp') And (VideoCodec<>'dnxhd') And (VideoCodec<>'dvvideo') Then
-    Fail('Codec video: png/gif, bmp, copy, ffv1, flv, mpeg4, mpeg1video, mpeg2video, rawvideo, asv1, asv2, huffyuv, h263, h263p, dnxhd, dvvideo.');
+    (VideoCodec<>'asv1') And (VideoCodec<>'asv2') And (VideoCodec<>'huffyuv') And (VideoCodec<>'h263') And (VideoCodec<>'h263p') And (VideoCodec<>'bmp') And (VideoCodec<>'dnxhd') And (VideoCodec<>'dvvideo') And (VideoCodec<>'jpegls') Then
+    Fail('Codec video: png/gif, bmp, copy, ffv1, flv, mpeg4, mpeg1video, mpeg2video, rawvideo, asv1, asv2, huffyuv, h263, h263p, dnxhd, dvvideo, jpegls.');
   End Else If (Argument='-vframes') Or (Argument='-frames:v') Then Begin
    If InputPath='' Then Fail('Nombre d''images attendu apres -i.');
    Value:=NextArgument; Val(Value,Number,Code);
@@ -47738,6 +48670,7 @@ BEGIN
  If (Detected='') And Not IsHTTP(Intermediate) And (InputFormat<>'h261') And (InputFormat<>'h263') Then If H4ProbeFile(Intermediate) Then Detected:='h264';
  If (Detected='') And Not IsHTTP(Intermediate) And (InputFormat<>'h261') And (InputFormat<>'h264') Then If H3ProbeFile(Intermediate) Then Detected:='h263';
  If (Detected='') And Not IsHTTP(Intermediate) And (InputFormat<>'h263') And (InputFormat<>'h264') Then If H1ProbeFile(Intermediate) Then Detected:='h261';
+ If (Detected='') And (Lower(Extension(Intermediate))='jls') And Not IsHTTP(Intermediate) Then Detected:='jpegls_pipe';
  If InputFormat='' Then InputFormat:=Detected Else
  If (InputFormat<>Detected) And Not ((InputFormat='dvbsub') And (Detected='')) And Not (((InputFormat='g726') Or (InputFormat='g726le')) And (Detected='')) And Not (((InputFormat='h263') Or (InputFormat='h261') Or (InputFormat='h264')) And (Detected='')) And Not ((InputFormat='eac3') And (Detected='ac3')) Then Fail(
  'Format impose incompatible avec la signature du fichier.');
@@ -47764,7 +48697,7 @@ BEGIN
  End;
  NVKind:=0;
  If InputFormat='bethsoftvid' Then NVKind:=1 Else If InputFormat='bfi' Then NVKind:=2 Else If InputFormat='c93' Then NVKind:=3
- Else If InputFormat='bmp' Then NVKind:=4 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22 Else If (InputFormat='flic') And Not IsHTTP(InputPath) Then NVKind:=23 Else If (InputFormat='gif') And Not IsHTTP(InputPath) Then NVKind:=25 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=2) Then NVKind:=27 Else If (InputFormat='h263') And Not IsHTTP(InputPath) Then NVKind:=28 Else If (InputFormat='h261') And Not IsHTTP(InputPath) Then NVKind:=29 Else If (InputFormat='idcin') And Not IsHTTP(InputPath) Then NVKind:=30 Else If (InputFormat='ipmovie') And Not IsHTTP(InputPath) Then NVKind:=38 Else If (InputFormat='h264') And Not IsHTTP(InputPath) Then NVKind:=33
+ Else If InputFormat='bmp' Then NVKind:=4 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22 Else If (InputFormat='flic') And Not IsHTTP(InputPath) Then NVKind:=23 Else If (InputFormat='gif') And Not IsHTTP(InputPath) Then NVKind:=25 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=2) Then NVKind:=27 Else If (InputFormat='h263') And Not IsHTTP(InputPath) Then NVKind:=28 Else If (InputFormat='h261') And Not IsHTTP(InputPath) Then NVKind:=29 Else If (InputFormat='idcin') And Not IsHTTP(InputPath) Then NVKind:=30 Else If (InputFormat='ipmovie') And Not IsHTTP(InputPath) Then NVKind:=38 Else If (InputFormat='jpegls_pipe') And Not IsHTTP(InputPath) Then NVKind:=39 Else If (InputFormat='h264') And Not IsHTTP(InputPath) Then NVKind:=33
  Else If (InputFormat='avi') And Not IsHTTP(InputPath) Then Begin
   AsvTag:=AVIVideoFourCC(Intermediate);
   If AsvTag='CSCD' Then NVKind:=5 Else If (AsvTag='tscc') Or (AsvTag='TSCC') Then NVKind:=6
@@ -47848,6 +48781,15 @@ BEGIN
   If HasCrop Then Fail('h263: -crop non supporte avec cet encodeur.');
   Temps[2]:=NewTemporary; EncodeH263(Intermediate,Temps[2],VideoCodec='h263p');
   Commit(Temps[2]); Temps[2]:=''; WriteLn('Video H.263 creee: ',OutputPath); Halt(0);
+ End;
+ If (InputFormat='yuv4mpegpipe') And (VideoCodec='jpegls') Then Begin
+  If IsHTTP(InputPath) Or ((OutputFormat<>'jls') And (OutputFormat<>'image2')) Or NoVideo Or (AudioCodec<>'') Or HasBitrate Or HasVideoBitrate Or
+   (RequestedRate<>0) Or (RequestedChannels<>0) Or (ImageWidth<>0) Then
+   Fail('jpegls: Y4M local vers sortie .jls (image2) requis, sans autres options.');
+  If HasCrop Then Fail('jpegls: -crop non supporte avec cet encodeur.');
+  If Pos('%',OutputPath)>0 Then Fail('jpegls: les motifs de sequence d''images ne sont pas pris en charge.');
+  Temps[2]:=NewTemporary; EncodeJLS(Intermediate,Temps[2],VideoFrames);
+  Commit(Temps[2]); Temps[2]:=''; WriteLn('Image JPEG-LS creee: ',OutputPath); Halt(0);
  End;
  If (InputFormat='yuv4mpegpipe') And (VideoCodec='huffyuv') Then Begin
   If IsHTTP(InputPath) Or (OutputFormat<>'avi') Or NoVideo Or (AudioCodec<>'') Or HasBitrate Or HasVideoBitrate Or
