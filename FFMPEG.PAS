@@ -41433,6 +41433,474 @@ Begin
  CloseRead; CloseWrite;
 End;
 
+{ MJENC-BEGIN }
+{ ---- Encodeur MJPEG (libavcodec/mjpegenc.c, mjpegenc_common.c, mjpegenc_huffman.c, mpegvideo_enc.c) :
+  Y4M 4:2:0/4:2:2/4:4:4 vers .jpg ou AVI MJPG, qualite fixe (-q:v), tables de Huffman optimales ---- }
+Type
+ TMJEP2=Record A,B: LongInt; End;
+ TMJEArr=Array[0..1023] Of TMJEP2;
+ TMJEPkg=Record N: LongInt; Idx: Array[0..515] Of LongInt; Prob: Array[0..513] Of LongInt; Items: Array[0..4111] Of LongInt; End;
+ TMJEHuge=Array[0..800000000] Of SmallInt;
+Const
+ MJEIntra: Array[0..63] Of Byte=(
+  8,16,19,22,26,27,29,34,16,16,22,24,27,29,34,37,19,22,26,27,29,34,34,38,22,22,26,27,29,34,37,40,
+  22,26,27,29,32,35,40,48,26,27,29,32,35,40,48,58,26,27,29,34,38,46,56,69,27,29,35,38,46,56,69,83);
+Var
+ MJEA,MJED: TMJEArr;
+ MJEList: Array[0..1] Of TMJEPkg;
+ MJEBits: Array[0..3,0..16] Of Byte; MJEVal: Array[0..3,0..255] Of Byte; MJECnt: Array[0..3,0..255] Of LongInt;
+ MJESize: Array[0..3,0..255] Of Byte; MJECode: Array[0..3,0..255] Of Word;
+ MJEMat,MJEQmat: Array[0..63] Of LongInt;
+ MJEOut: PEABuffer; MJEPos: LongInt; MJEAcc: Int64; MJEAccN: LongInt;
+ MJEHT,MJEHC: PEABuffer; MJEHM: ^TMJEHuge; MJENc: LongInt; MJEOptimal: Boolean;
+
+Function MJECmp(X,Y: LongInt): LongInt;
+Begin MJECmp:=MJEA[X].B-MJEA[Y].B; End;
+Procedure MJESwap(X,Y: LongInt);
+Var T: TMJEP2;
+Begin T:=MJEA[X]; MJEA[X]:=MJEA[Y]; MJEA[Y]:=T; End;
+{ AV_QSORT de libavutil/qsort.h, cle = champ B }
+Procedure MJEQSort(Num: LongInt);
+Var
+ StkA,StkB: Array[0..63] Of LongInt; Sp,Start,Fin,Left,Right,Mid: LongInt; CheckSort: Boolean;
+Begin
+ If Num<2 Then Exit;
+ Sp:=1; StkA[0]:=0; StkB[0]:=Num-1;
+ While Sp>0 Do Begin
+  Dec(Sp); Start:=StkA[Sp]; Fin:=StkB[Sp];
+  While Start<Fin Do Begin
+   If Start<Fin-1 Then Begin
+    CheckSort:=False; Right:=Fin-2; Left:=Start+1; Mid:=Start+((Fin-Start) Shr 1);
+    If MJECmp(Start,Fin)>0 Then Begin
+     If MJECmp(Fin,Mid)>0 Then MJESwap(Start,Mid) Else MJESwap(Start,Fin);
+    End Else Begin
+     If MJECmp(Start,Mid)>0 Then MJESwap(Start,Mid) Else CheckSort:=True;
+    End;
+    If MJECmp(Mid,Fin)>0 Then Begin MJESwap(Mid,Fin); CheckSort:=False; End;
+    If Start=Fin-2 Then Break;
+    MJESwap(Fin-1,Mid);
+    While Left<=Right Do Begin
+     While (Left<=Right) And (MJECmp(Left,Fin-1)<0) Do Inc(Left);
+     While (Left<=Right) And (MJECmp(Right,Fin-1)>0) Do Dec(Right);
+     If Left<=Right Then Begin MJESwap(Left,Right); Inc(Left); Dec(Right); End;
+    End;
+    MJESwap(Fin-1,Left);
+    If CheckSort And ((Mid=Left-1) Or (Mid=Left)) Then Begin
+     Mid:=Start;
+     While (Mid<Fin) And (MJECmp(Mid,Mid+1)<=0) Do Inc(Mid);
+     If Mid=Fin Then Break;
+    End;
+    If Fin-Left<Left-Start Then Begin
+     StkA[Sp]:=Start; StkB[Sp]:=Right; Inc(Sp); Start:=Left+1;
+    End Else Begin
+     StkA[Sp]:=Left+1; StkB[Sp]:=Fin; Inc(Sp); Fin:=Right;
+    End;
+   End Else Begin
+    If MJECmp(Start,Fin)>0 Then MJESwap(Start,Fin);
+    Break;
+   End;
+  End;
+ End;
+End;
+
+{ ff_mjpegenc_huffman_compute_bits : MJEA[0..Size-1] (A=valeur, B=occurrences) -> MJED, renvoie le nombre de symboles }
+Function MJEComputeBits(Size,MaxLen: LongInt): LongInt;
+Var To_,From_,Times,I,J,K,Mn,N2: LongInt; NBits: Array[0..256] Of LongInt;
+Begin
+ FillChar(NBits,SizeOf(NBits),0);
+ MJEList[0].N:=0; MJEList[1].N:=0; MJEList[0].Idx[0]:=0; MJEList[1].Idx[0]:=0;
+ To_:=0; From_:=1; I:=0;
+ MJEQSort(Size);
+ For Times:=0 To MaxLen Do Begin
+  MJEList[To_].N:=0; MJEList[To_].Idx[0]:=0;
+  J:=0;
+  If Times<MaxLen Then I:=0;
+  While (I<Size) Or (J+1<MJEList[From_].N) Do Begin
+   Inc(MJEList[To_].N); N2:=MJEList[To_].N;
+   MJEList[To_].Idx[N2]:=MJEList[To_].Idx[N2-1];
+   If (I<Size) And ((J+1>=MJEList[From_].N) Or (MJEA[I].B<MJEList[From_].Prob[J]+MJEList[From_].Prob[J+1])) Then Begin
+    MJEList[To_].Items[MJEList[To_].Idx[N2]]:=MJEA[I].A; Inc(MJEList[To_].Idx[N2]);
+    MJEList[To_].Prob[N2-1]:=MJEA[I].B; Inc(I);
+   End Else Begin
+    For K:=MJEList[From_].Idx[J] To MJEList[From_].Idx[J+2]-1 Do Begin
+     MJEList[To_].Items[MJEList[To_].Idx[N2]]:=MJEList[From_].Items[K]; Inc(MJEList[To_].Idx[N2]);
+    End;
+    MJEList[To_].Prob[N2-1]:=MJEList[From_].Prob[J]+MJEList[From_].Prob[J+1];
+    Inc(J,2);
+   End;
+  End;
+  K:=To_; To_:=From_; From_:=K;
+ End;
+ If Size-1<MJEList[From_].N Then Mn:=Size-1 Else Mn:=MJEList[From_].N;
+ For I:=0 To MJEList[From_].Idx[Mn]-1 Do Inc(NBits[MJEList[From_].Items[I]]);
+ J:=0;
+ For I:=0 To 255 Do If NBits[I]>0 Then Begin MJED[J].A:=I; MJED[J].B:=NBits[I]; Inc(J); End;
+ MJEComputeBits:=J;
+End;
+
+{ ff_mjpeg_encode_huffman_close pour la table T }
+Procedure MJEClose(T: LongInt);
+Var I,J,Nval: LongInt;
+Begin
+ Nval:=0; For I:=0 To 255 Do If MJECnt[T,I]<>0 Then Inc(Nval);
+ J:=0;
+ For I:=0 To 255 Do If MJECnt[T,I]<>0 Then Begin MJEA[J].A:=I; MJEA[J].B:=MJECnt[T,I]; Inc(J); End;
+ MJEA[J].A:=256; MJEA[J].B:=0;
+ MJEComputeBits(Nval+1,16);
+ For I:=0 To Nval-1 Do MJEA[I]:=MJED[I];
+ MJEQSort(Nval);
+ FillChar(MJEBits[T],17,0);
+ For I:=0 To Nval-1 Do Begin MJEVal[T,I]:=MJEA[I].A; Inc(MJEBits[T,MJEA[I].B]); End;
+End;
+
+Procedure MJEBuildCodes(T: LongInt);
+Var K,Code,I,J,Nb: LongInt;
+Begin
+ K:=0; Code:=0;
+ FillChar(MJESize[T],SizeOf(MJESize[T]),0); FillChar(MJECode[T],SizeOf(MJECode[T]),0);
+ For I:=1 To 16 Do Begin
+  Nb:=MJEBits[T,I];
+  For J:=0 To Nb-1 Do Begin
+   MJESize[T,MJEVal[T,K]]:=I; MJECode[T,MJEVal[T,K]]:=Code; Inc(K); Inc(Code);
+  End;
+  Code:=Code Shl 1;
+ End;
+End;
+
+Procedure MJEByte(B: LongInt); Begin MJEOut^[MJEPos]:=B And 255; Inc(MJEPos); End;
+Procedure MJEWord(B: LongInt); Begin MJEByte(B Shr 8); MJEByte(B); End;
+Procedure MJEMarker(M: LongInt); Begin MJEByte($FF); MJEByte(M); End;
+Procedure MJEPut(V: LongInt; N: LongInt);
+Begin
+ If N=0 Then Exit;
+ MJEAcc:=(MJEAcc Shl N) Or (Int64(V) And ((Int64(1) Shl N)-1)); Inc(MJEAccN,N);
+ While MJEAccN>=8 Do Begin Dec(MJEAccN,8); MJEByte((MJEAcc Shr MJEAccN) And 255); End;
+ MJEAcc:=MJEAcc And ((Int64(1) Shl MJEAccN)-1);
+End;
+
+Procedure MJEAdd(T,Code,Mant: LongInt);
+Begin MJEHT^[MJENc]:=T; MJEHC^[MJENc]:=Code; MJEHM^[MJENc]:=Mant; Inc(MJENc); End;
+Procedure MJECoef(T,Val,Run: LongInt);
+Var Mant,A,N: LongInt;
+Begin
+ If Val=0 Then MJEAdd(T,0,0) Else Begin
+  Mant:=Val; A:=Val; If Val<0 Then Begin A:=-Val; Dec(Mant); End;
+  N:=0; While (A Shr (N+1))>0 Do Inc(N);
+  MJEAdd(T,(Run Shl 4) Or (N+1),Mant);
+ End;
+End;
+
+{ dct_quantize_c (bloc intra) apres la FDCT islow ; renvoie l'indice du dernier coefficient non nul }
+Function MJEQuant(Var B: TAMVBlock): LongInt;
+Const Bias=786432; T1=1310719; T2=2621438;
+Var I,J,Last,Level,Mx: LongInt; U,Prod: Int64;
+Begin
+ ASVFdct(B);
+ B[0]:=(B[0]+32) Div 64;
+ Last:=0; Mx:=0;
+ For I:=63 DownTo 1 Do Begin
+  J:=AMVZig[I];
+  Prod:=Int64(B[J])*MJEQmat[J]; Level:=LongInt(Prod And $FFFFFFFF);
+  U:=(Int64(Level)+T1) And $FFFFFFFF;
+  If U>T2 Then Begin Last:=I; Break; End Else B[J]:=0;
+ End;
+ For I:=1 To Last Do Begin
+  J:=AMVZig[I];
+  Prod:=Int64(B[J])*MJEQmat[J]; Level:=LongInt(Prod And $FFFFFFFF);
+  U:=(Int64(Level)+T1) And $FFFFFFFF;
+  If U>T2 Then Begin
+   If Level>0 Then Begin Level:=LongInt((Int64(Bias)+Level) Shr 21); B[J]:=Level; End
+   Else Begin Level:=LongInt((Int64(Bias)-Level) Shr 21); B[J]:=-Level; End;
+   Mx:=Mx Or Level;
+  End Else B[J]:=0;
+ End;
+ If Mx>1023 Then
+  For I:=1 To Last Do Begin
+   J:=AMVZig[I];
+   If B[J]>1023 Then B[J]:=1023 Else If B[J]<-1023 Then B[J]:=-1023;
+  End;
+ MJEQuant:=Last;
+End;
+
+Procedure MJEGetPixels(Var B: TAMVBlock; Pl: PEABuffer; PW,PH,X0,Y0: LongInt);
+Var R,C,X,Y: LongInt;
+Begin
+ For R:=0 To 7 Do Begin
+  Y:=Y0+R; If Y>PH-1 Then Y:=PH-1;
+  For C:=0 To 7 Do Begin
+   X:=X0+C; If X>PW-1 Then X:=PW-1;
+   B[R*8+C]:=Pl^[Y*PW+X];
+  End;
+ End;
+End;
+
+Procedure MJERecord(Var B: TAMVBlock; N,Last: LongInt; Var LastDc: Array Of LongInt);
+Var Comp,Tb,I,J,Val,Run,Dc: LongInt;
+Begin
+ If N<=3 Then Begin Comp:=0; Tb:=0; End Else Begin Comp:=(N And 1)+1; Tb:=1; End;
+ Dc:=B[0]; MJECoef(Tb,Dc-LastDc[Comp],0); LastDc[Comp]:=Dc;
+ Tb:=Tb Or 2; Run:=0;
+ For I:=1 To Last Do Begin
+  J:=AMVZig[I]; Val:=B[J];
+  If Val=0 Then Inc(Run) Else Begin
+   While Run>=16 Do Begin MJEAdd(Tb,$F0,0); Dec(Run,16); End;
+   MJECoef(Tb,Val,Run); Run:=0;
+  End;
+ End;
+ If (Last<63) Or (Run<>0) Then MJEAdd(Tb,0,0);
+End;
+
+{ encode une image (plans Y,U,V de la disposition Y4M) ; Fmt 0=420 1=422 2=444 ; renvoie les octets dans MJEOut }
+Procedure MJEFrame(Y,U,V: PEABuffer; W,H,Fmt,Qs,SarN,SarD: LongInt; Full: Boolean);
+Var
+ I,J,Mx,My,Mw,Mh,Cw,Ch,Nb,K,X0,Y0,Cx,Cy,Hs,Vs,Hdr,Lenp,Tb,Code,Nbits,Sz,Tot,Comps: LongInt;
+ Blk: Array[0..11] Of TAMVBlock; Last: Array[0..11] Of LongInt; LastDc: Array[0..2] Of LongInt;
+ Order: Array[0..11] Of LongInt; NOrd,Part2: LongInt; Ident: String;
+ Esc: PEABuffer; Lst: LongInt;
+Begin
+ Case Fmt Of
+  0: Begin Cw:=(W+1) Div 2; Ch:=(H+1) Div 2; Nb:=6; End;
+  1: Begin Cw:=(W+1) Div 2; Ch:=H; Nb:=8; End;
+  Else Begin Cw:=W; Ch:=H; Nb:=12; End;
+ End;
+ Mw:=(W+15) Div 16; Mh:=(H+15) Div 16;
+ { matrice de quantification : qscale integre }
+ MJEMat[0]:=8;
+ For I:=1 To 63 Do Begin
+  J:=(MJEIntra[I]*Qs) Shr 3; If J>255 Then J:=255;
+  MJEMat[I]:=J;
+ End;
+ For I:=0 To 63 Do MJEQmat[I]:=LongInt((Int64(2) Shl 21) Div (Int64(16)*MJEMat[I]));
+ { passe 1 : quantification et enregistrement des codes }
+ MJENc:=0; FillChar(MJECnt,SizeOf(MJECnt),0);
+ For I:=0 To 2 Do LastDc[I]:=128;
+ For My:=0 To Mh-1 Do For Mx:=0 To Mw-1 Do Begin
+  X0:=Mx*16; Y0:=My*16;
+  MJEGetPixels(Blk[0],Y,W,H,X0,Y0); MJEGetPixels(Blk[1],Y,W,H,X0+8,Y0);
+  MJEGetPixels(Blk[2],Y,W,H,X0,Y0+8); MJEGetPixels(Blk[3],Y,W,H,X0+8,Y0+8);
+  Case Fmt Of
+   0: Begin
+    Cx:=Mx*8; Cy:=My*8;
+    MJEGetPixels(Blk[4],U,Cw,Ch,Cx,Cy); MJEGetPixels(Blk[5],V,Cw,Ch,Cx,Cy);
+   End;
+   1: Begin
+    Cx:=Mx*8; Cy:=My*16;
+    MJEGetPixels(Blk[4],U,Cw,Ch,Cx,Cy); MJEGetPixels(Blk[5],V,Cw,Ch,Cx,Cy);
+    MJEGetPixels(Blk[6],U,Cw,Ch,Cx,Cy+8); MJEGetPixels(Blk[7],V,Cw,Ch,Cx,Cy+8);
+   End;
+   Else Begin
+    Cx:=Mx*16; Cy:=My*16;
+    MJEGetPixels(Blk[4],U,Cw,Ch,Cx,Cy); MJEGetPixels(Blk[5],V,Cw,Ch,Cx,Cy);
+    MJEGetPixels(Blk[6],U,Cw,Ch,Cx+8,Cy); MJEGetPixels(Blk[7],V,Cw,Ch,Cx+8,Cy);
+    MJEGetPixels(Blk[8],U,Cw,Ch,Cx,Cy+8); MJEGetPixels(Blk[9],V,Cw,Ch,Cx,Cy+8);
+    MJEGetPixels(Blk[10],U,Cw,Ch,Cx+8,Cy+8); MJEGetPixels(Blk[11],V,Cw,Ch,Cx+8,Cy+8);
+   End;
+  End;
+  For K:=0 To Nb-1 Do Last[K]:=MJEQuant(Blk[K]);
+  Case Fmt Of
+   0: Begin NOrd:=6; Order[0]:=0; Order[1]:=1; Order[2]:=2; Order[3]:=3; Order[4]:=4; Order[5]:=5; End;
+   1: Begin NOrd:=8; Order[0]:=0; Order[1]:=1; Order[2]:=2; Order[3]:=3; Order[4]:=4; Order[5]:=6; Order[6]:=5; Order[7]:=7; End;
+   Else Begin
+    Order[0]:=0; Order[1]:=2; Order[2]:=4; Order[3]:=8; Order[4]:=5; Order[5]:=9; NOrd:=6;
+    If X0+8<W Then Begin
+     Order[6]:=1; Order[7]:=3; Order[8]:=6; Order[9]:=10; Order[10]:=7; Order[11]:=11; NOrd:=12;
+    End;
+   End;
+  End;
+  For K:=0 To NOrd-1 Do MJERecord(Blk[Order[K]],Order[K],Last[Order[K]],LastDc);
+ End;
+ { tables de Huffman }
+ For I:=0 To MJENc-1 Do Inc(MJECnt[MJEHT^[I],MJEHC^[I]]);
+ If MJEOptimal Then Begin
+  For I:=0 To 3 Do MJEClose(I);
+ End Else Begin
+  FillChar(MJEBits,SizeOf(MJEBits),0);
+  For I:=1 To 16 Do Begin
+   MJEBits[0,I]:=LJBitsDcL[I]; MJEBits[1,I]:=LJBitsDcC[I]; MJEBits[2,I]:=LJBitsAcL[I]; MJEBits[3,I]:=LJBitsAcC[I];
+  End;
+  For I:=0 To 11 Do Begin MJEVal[0,I]:=I; MJEVal[1,I]:=I; End;
+  For I:=0 To 161 Do Begin MJEVal[2,I]:=LJValAcL[I]; MJEVal[3,I]:=LJValAcC[I]; End;
+ End;
+ For I:=0 To 3 Do MJEBuildCodes(I);
+ { en-tete }
+ MJEPos:=0; MJEAcc:=0; MJEAccN:=0;
+ MJEMarker($D8);
+ If (SarN>0) And (SarD>0) Then Begin
+  K:=SarN; J:=SarD; While J<>0 Do Begin I:=K Mod J; K:=J; J:=I; End;
+  If (SarN>65535) Or (SarD>65535) Then Begin SarN:=SarN Div K; SarD:=SarD Div K; End;
+  MJEMarker($E0); MJEWord(16); MJEByte(74); MJEByte(70); MJEByte(73); MJEByte(70); MJEByte(0);
+  MJEWord($0102); MJEByte(0); MJEWord(SarN); MJEWord(SarD); MJEByte(0); MJEByte(0);
+ End;
+ Ident:='Lavc60.31.102';
+ MJEMarker($FE); MJEWord(Length(Ident)+3); For I:=1 To Length(Ident) Do MJEByte(Ord(Ident[I])); MJEByte(0);
+ If Not Full Then Begin
+  Ident:='CS=ITU601';
+  MJEMarker($FE); MJEWord(Length(Ident)+3); For I:=1 To Length(Ident) Do MJEByte(Ord(Ident[I])); MJEByte(0);
+ End;
+ MJEMarker($DB); MJEWord(2+65); MJEByte(0);
+ For I:=0 To 63 Do MJEByte(MJEMat[AMVZig[I]]);
+ MJEMarker($C4); Lenp:=MJEPos; MJEWord(0); Sz:=2;
+ For I:=0 To 3 Do Begin
+  Tb:=0; For J:=1 To 16 Do Inc(Tb,MJEBits[I,J]);
+  Case I Of 0: MJEByte($00); 1: MJEByte($01); 2: MJEByte($10); Else MJEByte($11); End;
+  For J:=1 To 16 Do MJEByte(MJEBits[I,J]);
+  For J:=0 To Tb-1 Do MJEByte(MJEVal[I,J]);
+  Inc(Sz,17+Tb);
+ End;
+ MJEOut^[Lenp]:=Sz Shr 8; MJEOut^[Lenp+1]:=Sz And 255;
+ Case Fmt Of 0: Begin Hs:=1; Vs:=1; End; Else Begin Hs:=1; Vs:=2; End; End;
+ MJEMarker($C0); MJEWord(17); MJEByte(8); MJEWord(H); MJEWord(W); MJEByte(3);
+ MJEByte(1); MJEByte(((2 Shl 4) Or 2) * Ord(Fmt<2) + ((1 Shl 4) Or 2) * Ord(Fmt=2)); MJEByte(0);
+ MJEByte(2); MJEByte((Hs Shl 4) Or Vs); MJEByte(0);
+ MJEByte(3); MJEByte((Hs Shl 4) Or Vs); MJEByte(0);
+ MJEMarker($DA); MJEWord(12); MJEByte(3);
+ MJEByte(1); MJEByte($00); MJEByte(2); MJEByte($11); MJEByte(3); MJEByte($11);
+ MJEByte(0); MJEByte(63); MJEByte(0);
+ Hdr:=MJEPos;
+ { donnees }
+ For I:=0 To MJENc-1 Do Begin
+  Tb:=MJEHT^[I]; Code:=MJEHC^[I]; Nbits:=Code And 15;
+  MJEPut(MJECode[Tb,Code],MJESize[Tb,Code]);
+  If Nbits<>0 Then MJEPut(MJEHM^[I],Nbits);
+ End;
+ If MJEAccN<>0 Then MJEPut((1 Shl (8-MJEAccN))-1,8-MJEAccN);
+ { echappement des 0xFF }
+ Tot:=MJEPos-Hdr; Lst:=0;
+ For I:=Hdr To MJEPos-1 Do If MJEOut^[I]=$FF Then Inc(Lst);
+ If Lst>0 Then Begin
+  GetMem(Esc,Tot+Lst+16);
+  K:=0;
+  For I:=Hdr To MJEPos-1 Do Begin
+   Esc^[K]:=MJEOut^[I]; Inc(K);
+   If MJEOut^[I]=$FF Then Begin Esc^[K]:=0; Inc(K); End;
+  End;
+  Move(Esc^,MJEOut^[Hdr],K); MJEPos:=Hdr+K; FreeMem(Esc,Tot+Lst+16);
+ End;
+ MJEMarker($D9);
+End;
+
+Procedure EncodeMJPEG(Const Source,Target: String; AsAvi: Boolean; FrameSel,Qv: LongInt);
+Var
+ Hd: Array[0..255] Of Byte; Limit,Cur,W,H,FN,FD,Frames,K,Code,CW,CH,FrameBytes,FrameAt,N,Q,I,Fmt,Qs,Size,OutPos,Fix,SarN,SarD,Pad: LongInt;
+ Line,Token: String; Full: Boolean; Raw,Pk: PEABuffer; Sizes: PALLong; Out: Array[0..255] Of Byte; Used: Integer;
+Function ReadLine: String;
+Var R: String;
+Begin
+ R:='';
+ While Cur<Limit Do Begin ReadAt(Cur,Hd,1); Inc(Cur); If Hd[0]=10 Then Break; If Length(R)<250 Then R:=R+Chr(Hd[0]); End;
+ ReadLine:=R;
+End;
+Procedure PutB(X: LongInt);Begin Out[Used]:=X And 255; Inc(Used); Inc(OutPos); If Used>=250 Then Begin WriteBytes(Out,Used); Used:=0; End; End;
+Procedure PutL16(X: LongInt);Begin PutB(X); PutB(X Shr 8); End;
+Procedure PutL32(X: LongInt);Begin PutL16(X); PutL16(X Shr 16); End;
+Procedure PutTag(Const T: String);
+Var Z: Integer;
+Begin For Z:=1 To 4 Do PutB(Ord(T[Z])); End;
+Procedure Flush;Begin If Used>0 Then Begin WriteBytes(Out,Used); Used:=0; End; End;
+Procedure Patch32(At,Value: LongInt);
+Var Z: Integer; Code2: Integer; B4: Array[0..3] Of Byte;
+Begin
+ Flush;
+ {$I-}Seek(ActiveOutput,At); Code2:=IOResult;{$I+}
+ If Code2<>0 Then Fail('mjpeg: positionnement AVI impossible.');
+ For Z:=0 To 3 Do Begin B4[Z]:=Value And 255; Value:=Value Shr 8; End;
+ WriteBytes(B4,4);
+End;
+Begin
+ OpenRead(Source); Limit:=InputSize; Cur:=0;
+ Line:=ReadLine;
+ If Copy(Line,1,9)<>'YUV4MPEG2' Then Fail('mjpeg: entree Y4M requise.');
+ W:=0; H:=0; FN:=25; FD:=1; Fmt:=0; Full:=False; SarN:=0; SarD:=0; Line:=Copy(Line,11,255);
+ While Line<>'' Do Begin
+  K:=Pos(' ',Line); If K=0 Then K:=Length(Line)+1;
+  Token:=Copy(Line,1,K-1); Line:=Copy(Line,K+1,255);
+  If Token='' Then Continue;
+  Case Token[1] Of
+   'W': Val(Copy(Token,2,20),W,Code);
+   'H': Val(Copy(Token,2,20),H,Code);
+   'F': Begin K:=Pos(':',Token); If K>0 Then Begin Val(Copy(Token,2,K-2),FN,Code); Val(Copy(Token,K+1,20),FD,Code); End; End;
+   'A': Begin
+    K:=Pos(':',Token);
+    If K>2 Then Begin Val(Copy(Token,2,K-2),SarN,Code); Val(Copy(Token,K+1,20),SarD,Code); End;
+   End;
+   'I': If Token<>'Ip' Then Fail('mjpeg: video progressive requise.');
+   'X': If Token='XCOLORRANGE=FULL' Then Full:=True;
+   'C': Begin
+    If (Token='C420') Or (Token='C420jpeg') Or (Token='C420mpeg2') Or (Token='C420paldv') Then Fmt:=0
+    Else If Token='C422' Then Fmt:=1 Else If Token='C444' Then Fmt:=2
+    Else Fail('mjpeg: Y4M 4:2:0, 4:2:2 ou 4:4:4 8 bits requis.');
+   End;
+  End;
+ End;
+ If (W<1) Or (H<1) Or (W>65500) Or (H>65500) Or (Int64(W)*H>40000000) Then Fail('mjpeg: dimensions Y4M incorrectes.');
+ If (Not Full) And (Not LJUnofficial) Then Fail('mjpeg: YUV pleine plage requis (XCOLORRANGE=FULL), ou -strict unofficial.');
+ If (FN<=0) Or (FD<=0) Then Begin FN:=25; FD:=1; End;
+ Case Fmt Of
+  0: Begin CW:=(W+1) Div 2; CH:=(H+1) Div 2; End;
+  1: Begin CW:=(W+1) Div 2; CH:=H; End;
+  Else Begin CW:=W; CH:=H; End;
+ End;
+ FrameBytes:=W*H+2*CW*CH;
+ { qscale : lambda = Qv*118 puis update_qscale, borne a qmin=2..qmax=31 }
+ Qs:=(Qv*118*139+128*64) Shr 14; If Qs<2 Then Qs:=2; If Qs>31 Then Qs:=31;
+ GetMem(MJEOut,Int64(W+16)*(H+16)*8+70000);
+ GetMem(MJEHT,(Int64((W+15) Div 16)*((H+15) Div 16))*12*64+64); GetMem(MJEHC,(Int64((W+15) Div 16)*((H+15) Div 16))*12*64+64);
+ GetMem(MJEHM,(Int64((W+15) Div 16)*((H+15) Div 16))*12*64*2+64);
+ GetMem(Raw,FrameBytes+64);
+ Frames:=0; OutPos:=0; Used:=0; FrameAt:=0;
+ If AsAvi Then Begin
+  Size:=W*H*3+4096; GetMem(Sizes,1048576*4);
+  OpenWrite(Target);
+  PutTag('RIFF'); PutL32(0); PutTag('AVI '); PutTag('LIST'); PutL32(192); PutTag('hdrl');
+  PutTag('avih'); PutL32(56); PutL32(Round(1000000.0*FD/FN)); PutL32(0); PutL32(0); PutL32($10); PutL32(0); PutL32(0); PutL32(1);
+  PutL32(Size); PutL32(W); PutL32(H); PutL32(0); PutL32(0); PutL32(0); PutL32(0);
+  PutTag('LIST'); PutL32(116); PutTag('strl');
+  PutTag('strh'); PutL32(56); PutTag('vids'); PutTag('MJPG');
+  PutL32(0); PutL16(0); PutL16(0); PutL32(0); PutL32(FD); PutL32(FN); PutL32(0); PutL32(0); PutL32(Size); PutL32(-1); PutL32(0);
+  PutL16(0); PutL16(0); PutL16(W); PutL16(H);
+  PutTag('strf'); PutL32(40); PutL32(40); PutL32(W); PutL32(H); PutL16(1); PutL16(24);
+  PutTag('MJPG'); PutL32(Size); PutL32(0); PutL32(0); PutL32(0); PutL32(0);
+  PutTag('LIST'); PutL32(0); PutTag('movi'); Flush;
+ End;
+ While Cur<Limit Do Begin
+  Line:=ReadLine;
+  If Copy(Line,1,5)<>'FRAME' Then Break;
+  If FrameBytes>Limit-Cur Then Break;
+  N:=0; While N<FrameBytes Do Begin If FrameBytes-N>4096 Then Q:=4096 Else Q:=FrameBytes-N; ReadAt(Cur+N,Raw^[N],Q); Inc(N,Q); End;
+  Inc(Cur,FrameBytes); Inc(Frames);
+  If AsAvi Then Begin
+   MJEFrame(Raw,PEABuffer(@Raw^[W*H]),PEABuffer(@Raw^[W*H+CW*CH]),W,H,Fmt,Qs,SarN,SarD,Full);
+   Sizes^[Frames-1]:=MJEPos;
+   PutTag('00dc'); PutL32(MJEPos); Flush; WriteBytes(MJEOut^,MJEPos); Inc(OutPos,MJEPos);
+   If Odd(MJEPos) Then Begin PutB(0); Flush; End;
+   If Frames>=1048576 Then Break;
+  End Else Begin
+   If (FrameSel=0) Or (Frames=FrameSel) Then Begin
+    MJEFrame(Raw,PEABuffer(@Raw^[W*H]),PEABuffer(@Raw^[W*H+CW*CH]),W,H,Fmt,Qs,SarN,SarD,Full);
+    FrameAt:=MJEPos;
+   End;
+   If (FrameSel<>0) And (Frames=FrameSel) Then Break;
+  End;
+ End;
+ If Frames=0 Then Fail('mjpeg: aucune image Y4M.');
+ If AsAvi Then Begin
+  Fix:=OutPos;
+  PutTag('idx1'); PutL32(16*Frames); K:=4;
+  For I:=0 To Frames-1 Do Begin
+   PutTag('00dc'); PutL32($10); PutL32(K); PutL32(Sizes^[I]); Inc(K,8+Sizes^[I]+(Sizes^[I] And 1));
+  End;
+  Flush;
+  Patch32(4,OutPos-8); Patch32(216,Fix-220); Patch32(48,Frames); Patch32(140,Frames);
+  FreeMem(Sizes,1048576*4);
+ End Else Begin
+  OpenWrite(Target);
+  I:=0; While I<FrameAt Do Begin If FrameAt-I>4096 Then Q:=4096 Else Q:=FrameAt-I; WriteBytes(MJEOut^[I],Q); Inc(I,Q); End;
+ End;
+ CloseRead; CloseWrite;
+End;
+{ MJENC-END }
+
+
 
 { ---- Encodeur HuffYUV (libavcodec/huffyuvenc.c, huffman.c, huffyuv.c): yuv422p, prediction gauche, tables statiques, AVI ---- }
 Procedure HYGenLen(Var Dst: Array Of Byte; Const Stats: Array Of Int64; N: LongInt);
@@ -53915,7 +54383,7 @@ BEGIN
  {$ENDIF}
  For J:=0 To 6 Do Temps[J]:='';
  InputPath:=''; OutputPath:=''; InputFormat:=''; OutputFormat:='';
- LJPredOpt:=-1; LJUnofficial:=False; X4Crf:=23; X4QpFix:=-1; X4Gop:=250; X4Preset:=''; THQuality:=-1;
+ LJPredOpt:=-1; LJUnofficial:=False; MJEOptimal:=True; X4Crf:=23; X4QpFix:=-1; X4Gop:=250; X4Preset:=''; THQuality:=-1;
  AudioCodec:=''; InputCodec:=''; PendingFormat:=''; G726CodeSize:=4; G726Rate:=8000; RequestedRate:=0; RequestedChannels:=0; RequestedBitRateK:=320;
  Overwrite:=False; NoOverwrite:=False; HideBanner:=False; HasBitrate:=False;
  SavedExit:=ExitProc; ExitProc:=@ExitCleanup; Randomize;
@@ -54020,6 +54488,7 @@ BEGIN
    WriteLn('D V D  loco            LOCO (decodeur AVI LOCO: YUY2, UYVY, YV12, RGB, RGBA, mode avec pertes)');
    WriteLn('D V D  mdec            Sony PlayStation MDEC (Motion DECoder) (decodeur STR PlayStation)');
    WriteLn('D V D  mimic           Mimic (decodeur AVI LM20 et flux MSN TCP Webcam)');
+   WriteLn('DEV D  mjpeg           MJPEG (Motion JPEG) (decodeur AVI/JPEG; encodeur Y4M vers .jpg ou AVI, -q:v 1..31, Huffman optimal ou -huffman default)');
    WriteLn('D V D  mjpegb          Apple MJPEG-B (decodeur MOV mjpb)');
    WriteLn(' D A    mace3           MACE (Macintosh Audio Compression/Expansion) 3:1 (AIFF-C MAC3, QuickTime)');
    WriteLn(' D A    mace6           MACE (Macintosh Audio Compression/Expansion) 6:1 (AIFF-C MAC6, QuickTime)');
@@ -54079,6 +54548,11 @@ BEGIN
   If Argument='-4mv' Then Begin
    FourMV:=True;
   End Else
+  If Argument='-huffman' Then Begin
+   Value:=Lower(NextArgument);
+   If (Value='optimal') Or (Value='1') Then MJEOptimal:=True Else If (Value='default') Or (Value='0') Then MJEOptimal:=False
+   Else Fail('-huffman: default ou optimal.');
+  End Else
   If Argument='-pred' Then Begin
    Value:=NextArgument; Val(Value,Number,Code);
    If (Code<>0) Or (Number<0) Or (Number>3) Then Fail('-pred: jpegls 0..2 (left, plane, median), ljpeg 1..3.');
@@ -54086,7 +54560,7 @@ BEGIN
   End Else
   If (Argument='-q:v') Or (Argument='-qscale:v') Then Begin
    Value:=NextArgument; Val(Value,Number,Code);
-   If (Code<>0) Or (Number<0) Or (Number>10) Then Fail(Argument+': 0..10 attendu (libtheora).');
+   If (Code<>0) Or (Number<0) Or (Number>31) Then Fail(Argument+': 0..31 attendu (0..10 pour libtheora).');
    THQuality:=Number;
   End Else
   If (Argument='-crf') Or (Argument='-qp') Or (Argument='-g') Or (Argument='-preset') Or (Argument='-tune') Then Begin
@@ -54111,8 +54585,8 @@ BEGIN
    If VideoCodec='libxvid' Then VideoCodec:='mpeg4';
    If (VideoCodec<>'png') And (VideoCodec<>'gif') And (VideoCodec<>'copy') And
     (VideoCodec<>'ffv1') And (VideoCodec<>'flv') And (VideoCodec<>'mpeg4') And (VideoCodec<>'mpeg1video') And (VideoCodec<>'mpeg2video') And (VideoCodec<>'rawvideo') And
-    (VideoCodec<>'asv1') And (VideoCodec<>'asv2') And (VideoCodec<>'huffyuv') And (VideoCodec<>'h263') And (VideoCodec<>'h263p') And (VideoCodec<>'bmp') And (VideoCodec<>'dnxhd') And (VideoCodec<>'dvvideo') And (VideoCodec<>'jpegls') And (VideoCodec<>'ljpeg') And (VideoCodec<>'libx264') And (VideoCodec<>'libtheora') Then
-    Fail('Codec video: png/gif, bmp, copy, ffv1, flv, mpeg4, mpeg1video, mpeg2video, rawvideo, asv1, asv2, huffyuv, h263, h263p, dnxhd, dvvideo, jpegls, ljpeg, libx264, libxvid, libtheora.');
+    (VideoCodec<>'asv1') And (VideoCodec<>'asv2') And (VideoCodec<>'huffyuv') And (VideoCodec<>'h263') And (VideoCodec<>'h263p') And (VideoCodec<>'bmp') And (VideoCodec<>'dnxhd') And (VideoCodec<>'dvvideo') And (VideoCodec<>'jpegls') And (VideoCodec<>'ljpeg') And (VideoCodec<>'mjpeg') And (VideoCodec<>'libx264') And (VideoCodec<>'libtheora') Then
+    Fail('Codec video: png/gif, bmp, copy, ffv1, flv, mpeg4, mpeg1video, mpeg2video, rawvideo, asv1, asv2, huffyuv, h263, h263p, dnxhd, dvvideo, jpegls, ljpeg, mjpeg, libx264, libxvid, libtheora.');
   End Else If (Argument='-vframes') Or (Argument='-frames:v') Then Begin
    If InputPath='' Then Fail('Nombre d''images attendu apres -i.');
    Value:=NextArgument; Val(Value,Number,Code);
@@ -54387,6 +54861,7 @@ BEGIN
    Fail('libtheora: Y4M local vers sortie .ogv/.ogg requis, sans options audio (-q:v 0..10 ou -b:v acceptes).');
   If HasCrop Then Fail('libtheora: -crop non supporte avec cet encodeur.');
   Temps[2]:=NewTemporary;
+  If THQuality>10 Then Fail('libtheora: -q:v 0..10 attendu.');
   If HasVideoBitrate Then EncodeTheora(Intermediate,Temps[2],THQuality,VideoBitrate) Else EncodeTheora(Intermediate,Temps[2],THQuality,0);
   Commit(Temps[2]); Temps[2]:=''; WriteLn('Video Theora creee: ',OutputPath); Halt(0);
  End;
@@ -54399,6 +54874,16 @@ BEGIN
   If HasVideoBitrate Then EncodeX264(Intermediate,Temps[2],OutputFormat='mp4',X4Crf,X4QpFix,X4Gop,0,VideoBitrate)
   Else EncodeX264(Intermediate,Temps[2],OutputFormat='mp4',X4Crf,X4QpFix,X4Gop,0,0);
   Commit(Temps[2]); Temps[2]:=''; WriteLn('Video H.264 creee: ',OutputPath); Halt(0);
+ End;
+ If (InputFormat='yuv4mpegpipe') And (VideoCodec='mjpeg') Then Begin
+  If IsHTTP(InputPath) Or ((OutputFormat<>'jpg') And (OutputFormat<>'jpeg') And (OutputFormat<>'mjpeg') And (OutputFormat<>'image2') And (OutputFormat<>'avi')) Or NoVideo Or (AudioCodec<>'') Or HasBitrate Or HasVideoBitrate Or
+   (RequestedRate<>0) Or (RequestedChannels<>0) Or (ImageWidth<>0) Then
+   Fail('mjpeg: Y4M local vers sortie .jpg (image2) ou AVI requis, sans autres options.');
+  If HasCrop Then Fail('mjpeg: -crop non supporte avec cet encodeur.');
+  If Pos('%',OutputPath)>0 Then Fail('mjpeg: les motifs de sequence d''images ne sont pas pris en charge.');
+  If THQuality<0 Then Fail('mjpeg: -q:v (1..31) requis (la regulation de debit n''est pas prise en charge).');
+  Temps[2]:=NewTemporary; EncodeMJPEG(Intermediate,Temps[2],OutputFormat='avi',VideoFrames,THQuality);
+  Commit(Temps[2]); Temps[2]:=''; WriteLn('Video MJPEG creee: ',OutputPath); Halt(0);
  End;
  If (InputFormat='yuv4mpegpipe') And (VideoCodec='ljpeg') Then Begin
   If IsHTTP(InputPath) Or ((OutputFormat<>'ljpg') And (OutputFormat<>'image2')) Or NoVideo Or (AudioCodec<>'') Or HasBitrate Or HasVideoBitrate Or
