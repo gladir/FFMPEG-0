@@ -38209,6 +38209,207 @@ Begin
  CloseRead; CloseWrite;
 End;
 
+{ LJPEG-BEGIN }
+{ ---- Lossless JPEG : encodeur (libavcodec/ljpegenc.c, mjpegenc_common.c), Y4M 4:2:0/4:2:2/4:4:4 8 bits vers .ljpg ---- }
+Const
+ LJBitsDcL: Array[1..16] Of Byte=(0,1,5,1,1,1,1,1,1,0,0,0,0,0,0,0);
+ LJBitsDcC: Array[1..16] Of Byte=(0,3,1,1,1,1,1,1,1,1,1,0,0,0,0,0);
+ LJBitsAcL: Array[1..16] Of Byte=(0,2,1,3,3,2,4,3,5,5,4,4,0,0,1,125);
+ LJBitsAcC: Array[1..16] Of Byte=(0,2,1,2,4,4,3,4,7,5,4,4,0,1,2,119);
+ LJValAcL: Array[0..161] Of Byte=(
+  $01,$02,$03,$00,$04,$11,$05,$12,$21,$31,$41,$06,$13,$51,$61,$07,$22,$71,$14,$32,$81,$91,$a1,$08,
+  $23,$42,$b1,$c1,$15,$52,$d1,$f0,$24,$33,$62,$72,$82,$09,$0a,$16,$17,$18,$19,$1a,$25,$26,$27,$28,
+  $29,$2a,$34,$35,$36,$37,$38,$39,$3a,$43,$44,$45,$46,$47,$48,$49,$4a,$53,$54,$55,$56,$57,$58,$59,
+  $5a,$63,$64,$65,$66,$67,$68,$69,$6a,$73,$74,$75,$76,$77,$78,$79,$7a,$83,$84,$85,$86,$87,$88,$89,
+  $8a,$92,$93,$94,$95,$96,$97,$98,$99,$9a,$a2,$a3,$a4,$a5,$a6,$a7,$a8,$a9,$aa,$b2,$b3,$b4,$b5,$b6,
+  $b7,$b8,$b9,$ba,$c2,$c3,$c4,$c5,$c6,$c7,$c8,$c9,$ca,$d2,$d3,$d4,$d5,$d6,$d7,$d8,$d9,$da,$e1,$e2,
+  $e3,$e4,$e5,$e6,$e7,$e8,$e9,$ea,$f1,$f2,$f3,$f4,$f5,$f6,$f7,$f8,$f9,$fa);
+ LJValAcC: Array[0..161] Of Byte=(
+  $00,$01,$02,$03,$11,$04,$05,$21,$31,$06,$12,$41,$51,$07,$61,$71,$13,$22,$32,$81,$08,$14,$42,$91,
+  $a1,$b1,$c1,$09,$23,$33,$52,$f0,$15,$62,$72,$d1,$0a,$16,$24,$34,$e1,$25,$f1,$17,$18,$19,$1a,$26,
+  $27,$28,$29,$2a,$35,$36,$37,$38,$39,$3a,$43,$44,$45,$46,$47,$48,$49,$4a,$53,$54,$55,$56,$57,$58,
+  $59,$5a,$63,$64,$65,$66,$67,$68,$69,$6a,$73,$74,$75,$76,$77,$78,$79,$7a,$82,$83,$84,$85,$86,$87,
+  $88,$89,$8a,$92,$93,$94,$95,$96,$97,$98,$99,$9a,$a2,$a3,$a4,$a5,$a6,$a7,$a8,$a9,$aa,$b2,$b3,$b4,
+  $b5,$b6,$b7,$b8,$b9,$ba,$c2,$c3,$c4,$c5,$c6,$c7,$c8,$c9,$ca,$d2,$d3,$d4,$d5,$d6,$d7,$d8,$d9,$da,
+  $e2,$e3,$e4,$e5,$e6,$e7,$e8,$e9,$ea,$f2,$f3,$f4,$f5,$f6,$f7,$f8,$f9,$fa);
+Var
+ LJPredOpt: LongInt; LJUnofficial: Boolean;
+ LJOut: PEABuffer; LJPos: LongInt; LJAcc,LJAccN: LongInt;
+ LJSizeL,LJSizeC: Array[0..11] Of Byte; LJCodeL,LJCodeC: Array[0..11] Of LongWord;
+
+Procedure LJByte(B: LongInt); Begin LJOut^[LJPos]:=B And 255; Inc(LJPos); End;
+Procedure LJWord(B: LongInt); Begin LJByte(B Shr 8); LJByte(B); End;
+Procedure LJMarker(M: LongInt); Begin LJByte($FF); LJByte(M); End;
+{ ecriture de bits MSB d'abord, avec bourrage 0xFF 0x00 effectue plus tard : ici on ecrit tel quel }
+Procedure LJBits(V: LongWord; N: LongInt);
+Var K: LongInt;
+Begin
+ For K:=N-1 Downto 0 Do Begin
+  LJAcc:=(LJAcc Shl 1) Or LongInt((V Shr K) And 1); Inc(LJAccN);
+  If LJAccN=8 Then Begin LJByte(LJAcc); LJAcc:=0; LJAccN:=0; End;
+ End;
+End;
+Procedure LJBuild(Const Bits: Array Of Byte; Const Vals: Array Of Byte; Var Size: Array Of Byte; Var Code: Array Of LongWord);
+Var I,J,K: LongInt; C: LongWord;
+Begin
+ K:=0; C:=0;
+ For I:=1 To 16 Do Begin
+  For J:=1 To Bits[I-1] Do Begin Size[Vals[K]]:=I; Code[Vals[K]]:=C; Inc(K); Inc(C); End;
+  C:=C Shl 1;
+ End;
+End;
+Procedure LJDc(Val: LongInt; Chroma: Boolean);
+Var Mant,N,A: LongInt;
+Begin
+ If Val=0 Then Begin
+  If Chroma Then LJBits(LJCodeC[0],LJSizeC[0]) Else LJBits(LJCodeL[0],LJSizeL[0]);
+ End Else Begin
+  Mant:=Val; A:=Abs(Val); If Val<0 Then Dec(Mant);
+  N:=0; While (A Shr N)>0 Do Inc(N);
+  If Chroma Then LJBits(LJCodeC[N],LJSizeC[N]) Else LJBits(LJCodeL[N],LJSizeL[N]);
+  LJBits(LongWord(Mant) And ((LongWord(1) Shl N)-1),N);
+ End;
+End;
+Function LJPred(Pl: PEABuffer; Stride,X,Y,Pr: LongInt): LongInt;
+Var Tl,T,L: LongInt;
+Begin
+ T:=Pl^[(Y-1)*Stride+X]; L:=Pl^[Y*Stride+X-1]; Tl:=Pl^[(Y-1)*Stride+X-1];
+ Case Pr Of
+  0: LJPred:=0; 1: LJPred:=L; 2: LJPred:=T; 3: LJPred:=Tl; 4: LJPred:=L+T-Tl;
+  5: LJPred:=L+JSar(T-Tl,1); 6: LJPred:=T+JSar(L-Tl,1);
+  Else LJPred:=JSar(L+T,1);
+ End;
+End;
+
+Procedure EncodeLJpeg(Const Source,Target: String; FrameSel,Pred: LongInt);
+Var
+ Hd: Array[0..255] Of Byte; Limit,Cur,W,H,Frames,K,Code,CW,CH,FrameBytes,FrameAt,N,Q,I,X,Y,C,MbW,MbH,Mx,My,Px,Py,Pr,Hdr,P,Sx,Sy: LongInt;
+ Line,Token: String; Fmt: LongInt; Full,Seen: Boolean; SarN,SarD: LongInt; Raw: PEABuffer;
+ PlW,PlH: Array[0..2] Of LongInt; PlOff: Array[0..2] Of LongInt; HS,VS: Array[0..2] Of LongInt; Ident: String; Tbl: Array[0..1,0..15] Of Byte;
+ Size,Bytes,Wr: LongInt; Esc: PEABuffer; Tot: LongInt; B: Byte;
+Function ReadLine: String;
+Var R: String;
+Begin
+ R:='';
+ While Cur<Limit Do Begin ReadAt(Cur,Hd,1); Inc(Cur); If Hd[0]=10 Then Break; If Length(R)<250 Then R:=R+Chr(Hd[0]); End;
+ ReadLine:=R;
+End;
+Procedure PutHuff(Cls,Id: LongInt; Const Bits: Array Of Byte; Const Vals: Array Of Byte; Cnt: LongInt);
+Var Z: LongInt;
+Begin
+ LJByte((Cls Shl 4) Or Id);
+ For Z:=0 To 15 Do LJByte(Bits[Z]);
+ For Z:=0 To Cnt-1 Do LJByte(Vals[Z]);
+End;
+Const DcVals: Array[0..11] Of Byte=(0,1,2,3,4,5,6,7,8,9,10,11);
+Begin
+ OpenRead(Source); Limit:=InputSize; Cur:=0;
+ Line:=ReadLine;
+ If Copy(Line,1,9)<>'YUV4MPEG2' Then Fail('ljpeg: entree Y4M requise.');
+ W:=0; H:=0; Fmt:=0; Full:=False; SarN:=0; SarD:=0; Seen:=False; Line:=Copy(Line,11,255);
+ While Line<>'' Do Begin
+  K:=Pos(' ',Line); If K=0 Then K:=Length(Line)+1;
+  Token:=Copy(Line,1,K-1); Line:=Copy(Line,K+1,255);
+  If Token='' Then Continue;
+  Case Token[1] Of
+   'W': Val(Copy(Token,2,20),W,Code);
+   'H': Val(Copy(Token,2,20),H,Code);
+   'A': Begin
+    K:=Pos(':',Token);
+    If K>2 Then Begin Val(Copy(Token,2,K-2),SarN,Code); Val(Copy(Token,K+1,20),SarD,Code); End;
+   End;
+   'X': If Token='XCOLORRANGE=FULL' Then Full:=True;
+   'C': Begin
+    If (Token='C420') Or (Token='C420jpeg') Or (Token='C420mpeg2') Or (Token='C420paldv') Then Fmt:=0
+    Else If Token='C422' Then Fmt:=1 Else If Token='C444' Then Fmt:=2
+    Else Fail('ljpeg: Y4M 4:2:0, 4:2:2 ou 4:4:4 8 bits requis.');
+   End;
+  End;
+ End;
+ If (W<2) Or (H<2) Or (W>65535) Or (H>65535) Or Odd(W) Or Odd(H) Or (Int64(W)*H>40000000) Then Fail('ljpeg: dimensions paires requises.');
+ If (Not Full) And (Not LJUnofficial) Then Fail('ljpeg: YUV pleine plage requis (XCOLORRANGE=FULL), ou -strict unofficial.');
+ Case Fmt Of
+  0: Begin CW:=W Div 2; CH:=H Div 2; HS[0]:=2; VS[0]:=2; HS[1]:=1; VS[1]:=1; End;
+  1: Begin CW:=W Div 2; CH:=H; HS[0]:=2; VS[0]:=2; HS[1]:=1; VS[1]:=2; End;
+  Else Begin CW:=W; CH:=H; HS[0]:=1; VS[0]:=2; HS[1]:=1; VS[1]:=2; End;
+ End;
+ HS[2]:=HS[1]; VS[2]:=VS[1];
+ PlW[0]:=W; PlH[0]:=H; PlW[1]:=CW; PlH[1]:=CH; PlW[2]:=CW; PlH[2]:=CH;
+ PlOff[0]:=0; PlOff[1]:=W*H; PlOff[2]:=W*H+CW*CH;
+ FrameBytes:=W*H+2*CW*CH;
+ Frames:=0; FrameAt:=0;
+ While Cur<Limit Do Begin
+  Line:=ReadLine;
+  If Copy(Line,1,5)<>'FRAME' Then Break;
+  If Cur+FrameBytes>Limit Then Break;
+  Inc(Frames);
+  If (FrameSel=0) Or (Frames=FrameSel) Then FrameAt:=Cur;
+  If (FrameSel<>0) And (Frames=FrameSel) Then Break;
+  Inc(Cur,FrameBytes);
+ End;
+ If Frames=0 Then Fail('ljpeg: aucune image Y4M.');
+ GetMem(Raw,FrameBytes+64);
+ N:=0; While N<FrameBytes Do Begin If FrameBytes-N>4096 Then Q:=4096 Else Q:=FrameBytes-N; ReadAt(FrameAt+N,Raw^[N],Q); Inc(N,Q); End;
+ CloseRead;
+ FillChar(LJSizeL,SizeOf(LJSizeL),0); FillChar(LJSizeC,SizeOf(LJSizeC),0);
+ LJBuild(LJBitsDcL,DcVals,LJSizeL,LJCodeL);
+ LJBuild(LJBitsDcC,DcVals,LJSizeC,LJCodeC);
+ GetMem(LJOut,Int64(W)*H*8+70000); LJPos:=0; LJAcc:=0; LJAccN:=0;
+ { en-tete }
+ LJMarker($D8);
+ If (SarN>0) And (SarD>0) Then Begin
+  K:=SarN; Q:=SarD; While Q<>0 Do Begin I:=K Mod Q; K:=Q; Q:=I; End;
+  If (SarN>65535) Or (SarD>65535) Then Begin SarN:=SarN Div K; SarD:=SarD Div K; End;
+  LJMarker($E0); LJWord(16); LJByte(74); LJByte(70); LJByte(73); LJByte(70); LJByte(0);
+  LJWord($0102); LJByte(0); LJWord(SarN); LJWord(SarD); LJByte(0); LJByte(0);
+ End;
+ Ident:='Lavc60.31.102';
+ LJMarker($FE); LJWord(Length(Ident)+3); For I:=1 To Length(Ident) Do LJByte(Ord(Ident[I])); LJByte(0);
+ If Not Full Then Begin
+  LJMarker($FE); LJWord(Length('CS=ITU601')+3); Ident:='CS=ITU601'; For I:=1 To Length(Ident) Do LJByte(Ord(Ident[I])); LJByte(0);
+ End;
+ LJMarker($C4); LJWord(2+17+12+17+12+17+162+17+162);
+ PutHuff(0,0,LJBitsDcL,DcVals,12); PutHuff(0,1,LJBitsDcC,DcVals,12);
+ PutHuff(1,0,LJBitsAcL,LJValAcL,162); PutHuff(1,1,LJBitsAcC,LJValAcC,162);
+ LJMarker($C3); LJWord(17); LJByte(8); LJWord(H); LJWord(W); LJByte(3);
+ For C:=0 To 2 Do Begin LJByte(C+1); LJByte((HS[C] Shl 4) Or VS[C]); LJByte(0); End;
+ LJMarker($DA); LJWord(12); LJByte(3);
+ LJByte(1); LJByte($00); LJByte(2); LJByte($10); LJByte(3); LJByte($10);
+ LJByte(Pred); LJByte(0); LJByte(0);
+ Hdr:=LJPos;
+ { donnees }
+ MbW:=(W+HS[0]-1) Div HS[0]; MbH:=(H+VS[0]-1) Div VS[0];
+ For My:=0 To MbH-1 Do
+  For Mx:=0 To MbW-1 Do
+   For C:=0 To 2 Do
+    For Sy:=0 To VS[C]-1 Do
+     For Sx:=0 To HS[C]-1 Do Begin
+      Px:=HS[C]*Mx+Sx; Py:=VS[C]*My+Sy;
+      P:=PlOff[C]+Py*PlW[C]+Px;
+      If (Sy=0) And (My=0) Then Begin
+       If (Sx=0) And (Mx=0) Then Pr:=128 Else Pr:=Raw^[P-1];
+      End Else Begin
+       If (Sx=0) And (Mx=0) Then Pr:=Raw^[P-PlW[C]]
+       Else Pr:=LJPred(PEABuffer(@Raw^[PlOff[C]]),PlW[C],Px,Py,Pred);
+      End;
+      LJDc(Raw^[P]-Pr,C<>0);
+     End;
+ { fin des donnees : bourrage a 1 puis echappement des 0xFF }
+ If LJAccN<>0 Then Begin Q:=8-LJAccN; LJBits((1 Shl Q)-1,Q); End;
+ Tot:=0;
+ GetMem(Esc,(LJPos-Hdr)*2+16);
+ For I:=Hdr To LJPos-1 Do Begin
+  Esc^[Tot]:=LJOut^[I]; Inc(Tot);
+  If LJOut^[I]=$FF Then Begin Esc^[Tot]:=0; Inc(Tot); End;
+ End;
+ OpenWrite(Target);
+ I:=0; While I<Hdr Do Begin If Hdr-I>4096 Then Q:=4096 Else Q:=Hdr-I; WriteBytes(LJOut^[I],Q); Inc(I,Q); End;
+ I:=0; While I<Tot Do Begin If Tot-I>4096 Then Q:=4096 Else Q:=Tot-I; WriteBytes(Esc^[I],Q); Inc(I,Q); End;
+ Hd[0]:=$FF; Hd[1]:=$D9; WriteBytes(Hd,2);
+ CloseWrite;
+End;
+{ LJPEG-END }
+
 Procedure DecodeAVIX(Const Source,Target: String; Mode,Kind: LongInt);
 Var Pos,PkPos,PkLen,RN,RD,I,Y,X,Cw,Ch,Bs,Msg2: LongInt; Ok,FFBegun: Boolean; Msg: String; PIdx: LongInt; NbF,NbP: Int64;
 Begin
@@ -48873,6 +49074,7 @@ BEGIN
  {$ENDIF}
  For J:=0 To 6 Do Temps[J]:='';
  InputPath:=''; OutputPath:=''; InputFormat:=''; OutputFormat:='';
+ LJPredOpt:=-1; LJUnofficial:=False;
  AudioCodec:=''; InputCodec:=''; PendingFormat:=''; G726CodeSize:=4; G726Rate:=8000; RequestedRate:=0; RequestedChannels:=0; RequestedBitRateK:=320;
  Overwrite:=False; NoOverwrite:=False; HideBanner:=False; HasBitrate:=False;
  SavedExit:=ExitProc; ExitProc:=@ExitCleanup; Randomize;
@@ -48968,6 +49170,7 @@ BEGIN
    WriteLn(' EA    libfaac         libfaac AAC (Advanced Audio Codec) (encodeur AAC-LC ADTS mono/stereo, 7350..96000 Hz, -b:a 8..576k, M/S par bande)');
    WriteLn('D V D  aasc            Autodesk RLE (AVI AASC/AAS4, 8/16/24 bits)');
    WriteLn('DEV    flv             Flash Video (FLV1/Sorenson Spark: decodeur complet I/P (FLV, AVI); encodeur images intra)');
+   WriteLn(' EV    ljpeg           Lossless JPEG (encodeur: Y4M 4:2:0/4:2:2/4:4:4 vers .ljpg, -pred 1..3, pleine plage ou -strict unofficial)');
    WriteLn('D V    kmvc            Karl Morton''s video codec (AVI KMVC, PAL8 <= 320x200)');
    WriteLn('D V D  interplayvideo  Interplay MVE video (conteneur .mve, formats 0x06/0x10/0x11, 8 et 16 bits)');
    WriteLn('D A    interplay_dpcm  DPCM Interplay (conteneur .mve, mono/stereo)');
@@ -49026,8 +49229,12 @@ BEGIN
   End Else
   If Argument='-pred' Then Begin
    Value:=NextArgument; Val(Value,Number,Code);
-   If (Code<>0) Or (Number<0) Or (Number>2) Then Fail('-pred: 0 (left), 1 (plane) ou 2 (median) requis.');
-   JEPred:=Number;
+   If (Code<>0) Or (Number<0) Or (Number>3) Then Fail('-pred: jpegls 0..2 (left, plane, median), ljpeg 1..3.');
+   LJPredOpt:=Number;
+  End Else
+  If Argument='-strict' Then Begin
+   Value:=Lower(NextArgument);
+   If (Value='unofficial') Or (Value='-1') Or (Value='experimental') Or (Value='-2') Then LJUnofficial:=True;
   End Else
   If (Argument='-scodec') Or (Argument='-c:s') Or (Argument='-codec:s') Then Begin
    If InputPath='' Then Fail('Codec sous-titres attendu apres -i.');
@@ -49038,8 +49245,8 @@ BEGIN
    VideoCodec:=Lower(NextArgument);
    If (VideoCodec<>'png') And (VideoCodec<>'gif') And (VideoCodec<>'copy') And
     (VideoCodec<>'ffv1') And (VideoCodec<>'flv') And (VideoCodec<>'mpeg4') And (VideoCodec<>'mpeg1video') And (VideoCodec<>'mpeg2video') And (VideoCodec<>'rawvideo') And
-    (VideoCodec<>'asv1') And (VideoCodec<>'asv2') And (VideoCodec<>'huffyuv') And (VideoCodec<>'h263') And (VideoCodec<>'h263p') And (VideoCodec<>'bmp') And (VideoCodec<>'dnxhd') And (VideoCodec<>'dvvideo') And (VideoCodec<>'jpegls') Then
-    Fail('Codec video: png/gif, bmp, copy, ffv1, flv, mpeg4, mpeg1video, mpeg2video, rawvideo, asv1, asv2, huffyuv, h263, h263p, dnxhd, dvvideo, jpegls.');
+    (VideoCodec<>'asv1') And (VideoCodec<>'asv2') And (VideoCodec<>'huffyuv') And (VideoCodec<>'h263') And (VideoCodec<>'h263p') And (VideoCodec<>'bmp') And (VideoCodec<>'dnxhd') And (VideoCodec<>'dvvideo') And (VideoCodec<>'jpegls') And (VideoCodec<>'ljpeg') Then
+    Fail('Codec video: png/gif, bmp, copy, ffv1, flv, mpeg4, mpeg1video, mpeg2video, rawvideo, asv1, asv2, huffyuv, h263, h263p, dnxhd, dvvideo, jpegls, ljpeg.');
   End Else If (Argument='-vframes') Or (Argument='-frames:v') Then Begin
    If InputPath='' Then Fail('Nombre d''images attendu apres -i.');
    Value:=NextArgument; Val(Value,Number,Code);
@@ -49299,12 +49506,25 @@ BEGIN
   Temps[2]:=NewTemporary; EncodeH263(Intermediate,Temps[2],VideoCodec='h263p');
   Commit(Temps[2]); Temps[2]:=''; WriteLn('Video H.263 creee: ',OutputPath); Halt(0);
  End;
+ If (InputFormat='yuv4mpegpipe') And (VideoCodec='ljpeg') Then Begin
+  If IsHTTP(InputPath) Or ((OutputFormat<>'ljpg') And (OutputFormat<>'image2')) Or NoVideo Or (AudioCodec<>'') Or HasBitrate Or HasVideoBitrate Or
+   (RequestedRate<>0) Or (RequestedChannels<>0) Or (ImageWidth<>0) Then
+   Fail('ljpeg: Y4M local vers sortie .ljpg (image2) requis, sans autres options.');
+  If HasCrop Then Fail('ljpeg: -crop non supporte avec cet encodeur.');
+  If Pos('%',OutputPath)>0 Then Fail('ljpeg: les motifs de sequence d''images ne sont pas pris en charge.');
+  If LJPredOpt<0 Then LJPredOpt:=1;
+  If (LJPredOpt<1) Or (LJPredOpt>3) Then Fail('ljpeg: -pred 1 (left), 2 (plane) ou 3 (median) requis.');
+  Temps[2]:=NewTemporary; EncodeLJpeg(Intermediate,Temps[2],VideoFrames,LJPredOpt);
+  Commit(Temps[2]); Temps[2]:=''; WriteLn('Image JPEG sans perte creee: ',OutputPath); Halt(0);
+ End;
  If (InputFormat='yuv4mpegpipe') And (VideoCodec='jpegls') Then Begin
   If IsHTTP(InputPath) Or ((OutputFormat<>'jls') And (OutputFormat<>'image2')) Or NoVideo Or (AudioCodec<>'') Or HasBitrate Or HasVideoBitrate Or
    (RequestedRate<>0) Or (RequestedChannels<>0) Or (ImageWidth<>0) Then
    Fail('jpegls: Y4M local vers sortie .jls (image2) requis, sans autres options.');
   If HasCrop Then Fail('jpegls: -crop non supporte avec cet encodeur.');
   If Pos('%',OutputPath)>0 Then Fail('jpegls: les motifs de sequence d''images ne sont pas pris en charge.');
+  If LJPredOpt>2 Then Fail('jpegls: -pred 0..2 requis.');
+  If LJPredOpt<0 Then JEPred:=0 Else JEPred:=LJPredOpt;
   Temps[2]:=NewTemporary; EncodeJLS(Intermediate,Temps[2],VideoFrames);
   Commit(Temps[2]); Temps[2]:=''; WriteLn('Image JPEG-LS creee: ',OutputPath); Halt(0);
  End;
