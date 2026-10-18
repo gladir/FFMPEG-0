@@ -3981,6 +3981,7 @@ Begin
   If (((B[5] Shr 3) And 31)>10) And (((B[5] Shr 3) And 31)<=16) Then Probe:='eac3' Else Probe:='ac3';
   Exit;
  End;
+ If N>=24 Then If (B[0]=0) And (B[1]=0) And (B[3]=0) And (B[4]=0) And (B[5]=0) And ((B[2]=$16) Or (B[2]=$18)) And (B[8]>0) And (B[8]<=60) And (B[9]=0) And ((B[12]+B[13]*256)>0) And ((B[12]+B[13]*256)<=2048) And ((B[14]+B[15]*256)>0) And ((B[14]+B[15]*256)<=2048) And (B[B[2]]>0) And (B[B[2]]<=$31) Then Begin Probe:='mm'; Exit; End;
  If N>=7 Then If (B[0]=$FF) And ((B[1] And $F6)=$F0) Then Begin Probe:='aac'; Exit; End;
  If N>=4 Then If (B[0]=$FF) And ((B[1] And $E6)=$E6) Then Begin
   Probe:='mp1'; Exit;
@@ -17462,6 +17463,8 @@ Procedure DecodeEAVideo(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeAVIX(Const Source,Target: String; Mode,Kind: LongInt); Forward;
 Procedure DecodeSTRVideo(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeMSNWC(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure DecodeMM(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure DecodeMVI(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeRPL(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeFLIC(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeIdcin(Const Source,Target: String; Mode: LongInt); Forward;
@@ -17498,6 +17501,8 @@ Begin
  Else If Kind=44 Then DecodeSTRVideo(Source,Target,Mode)
  Else If Kind=45 Then DecodeMSNWC(Source,Target,Mode)
  Else If Kind=46 Then DecodeMJP(Source,Target,Mode)
+ Else If Kind=48 Then DecodeMM(Source,Target,Mode)
+ Else If Kind=49 Then DecodeMVI(Source,Target,Mode)
  Else If Kind=47 Then DecodeMJPB(Source,Target,Mode)
  Else If Kind=33 Then DecodeH264Raw(Source,Target,Mode)
  Else If Kind=34 Then DecodeH264Mp4(Source,Target,Mode)
@@ -39364,6 +39369,420 @@ Begin
 End;
 { MSN-END }
 
+{ MMVIDEO-BEGIN }
+{ ---- American Laser Games MM (libavformat/mm.c, libavcodec/mmvideo.c) et Motion Pixels (libavformat/mvi.c, libavcodec/motionpixels.c), LGPL-2.1-or-later ---- }
+Var
+ MMVPix: PEABuffer; MMVPal: Array[0..255] Of LongWord; MMVW,MMVH: LongInt;
+ MMVBuf: PEABuffer; MMVLen,MMVPos: LongInt;
+
+Function MMVByte: LongInt;
+Begin
+ If MMVPos<MMVLen Then MMVByte:=MMVBuf^[MMVPos] Else MMVByte:=0;
+ Inc(MMVPos);
+End;
+
+{ 0 = bon, -1 = flux invalide }
+Function MMVIntra(HH,HV: LongInt): LongInt;
+Var X,Y,Run,Color: LongInt;
+Begin
+ X:=0; Y:=0; MMVIntra:=0;
+ While MMVPos<MMVLen Do Begin
+  If Y>=MMVH Then Exit;
+  Color:=MMVByte;
+  If (Color And $80)<>0 Then Run:=1 Else Begin Run:=(Color And $7F)+2; Color:=MMVByte; End;
+  If HH<>0 Then Run:=Run*2;
+  If Run>MMVW-X Then Begin MMVIntra:=-1; Exit; End;
+  If Color<>0 Then Begin
+   FillChar(MMVPix^[Y*MMVW+X],Run,Color);
+   If (HV<>0) And (Y+HV<MMVH) Then FillChar(MMVPix^[(Y+1)*MMVW+X],Run,Color);
+  End;
+  Inc(X,Run);
+  If X>=MMVW Then Begin X:=0; Inc(Y,1+HV); End;
+ End;
+End;
+
+Function MMVInter(HH,HV: LongInt): LongInt;
+Var DataOff,Y,I,J,Len,X,Rep,Color,DP: LongInt;
+Begin
+ MMVInter:=0; DataOff:=MMVByte+MMVByte*256; Y:=0;
+ If MMVLen-MMVPos<DataOff Then Begin MMVInter:=-1; Exit; End;
+ DP:=MMVPos+DataOff;
+ While MMVPos<DP Do Begin
+  Len:=MMVByte; X:=MMVByte+((Len And $80) Shl 1); Len:=Len And $7F;
+  If Len=0 Then Begin Inc(Y,X); Continue; End;
+  If Y+HV>=MMVH Then Exit;
+  For I:=0 To Len-1 Do Begin
+   Rep:=MMVByte;
+   For J:=0 To 7 Do Begin
+    If X+HH>=MMVW Then Begin MMVInter:=-1; Exit; End;
+    If ((Rep Shr (7-J)) And 1)<>0 Then Begin
+     If DP<MMVLen Then Color:=MMVBuf^[DP] Else Color:=0;
+     Inc(DP);
+     MMVPix^[Y*MMVW+X]:=Color;
+     If HH<>0 Then MMVPix^[Y*MMVW+X+1]:=Color;
+     If HV<>0 Then Begin
+      MMVPix^[(Y+1)*MMVW+X]:=Color;
+      If HH<>0 Then MMVPix^[(Y+1)*MMVW+X+1]:=Color;
+     End;
+    End;
+    Inc(X,1+HH);
+   End;
+  End;
+  Inc(Y,1+HV);
+ End;
+End;
+
+Procedure DecodeMM(Const Source,Target: String; Mode: LongInt);
+Var
+ F: PEABuffer; Size,P,Typ,Len,Fps,I,Hl,R,Hdr: LongInt; Begun: Boolean; Out: PEABuffer; V: LongWord;
+Begin
+ NVLoad(Source,F,Size);
+ If (Size<6+$16) Or (F^[0]<>0) Or (F^[1]<>0) Then Fail('mm: en-tete American Laser Games MM incorrect.');
+ Hl:=F^[2]+F^[3]*256+F^[4]*65536+F^[5]*16777216;
+ If (Hl<10) Or (Hl+6>Size) Then Fail('mm: en-tete incorrect.');
+ Fps:=F^[8]+F^[9]*256; MMVW:=F^[12]+F^[13]*256; MMVH:=F^[14]+F^[15]*256;
+ If (Fps<=0) Or (MMVW<=0) Or (MMVH<=0) Or Odd(MMVW) Or Odd(MMVH) Then Fail('mm: dimensions ou cadence incorrectes.');
+ GetMem(MMVPix,MMVW*MMVH+64); FillChar(MMVPix^,MMVW*MMVH+64,0); FillChar(MMVPal,SizeOf(MMVPal),0);
+ NVBegin(Mode,Target,MMVW,MMVH,0,Fps,1); NVAviSar(MMVW,MMVH);
+ Begun:=True; P:=6+Hl;
+ While P+6<=Size Do Begin
+  Typ:=F^[P]+F^[P+1]*256; Len:=F^[P+2]+F^[P+3]*256;
+  If P+6+Len>Size Then Break;
+  MMVBuf:=PEABuffer(@F^[P+6]); MMVLen:=Len; MMVPos:=0;
+  Inc(P,6+Len);
+  R:=-1;
+  Case Typ Of
+   $31: Begin
+    MMVPos:=4;
+    For I:=0 To 127 Do Begin
+     V:=$FF000000 Or (LongWord(MMVByte) Shl 16); V:=V Or (LongWord(MMVByte) Shl 8); V:=V Or LongWord(MMVByte);
+     MMVPal[I]:=V; MMVPal[I+128]:=LongWord(V Shl 2);
+    End;
+    For I:=0 To 255 Do Begin
+     NVPalR[I]:=(MMVPal[I] Shr 16) And 255; NVPalG[I]:=(MMVPal[I] Shr 8) And 255; NVPalB[I]:=MMVPal[I] And 255;
+    End;
+    Continue;
+   End;
+   $08: R:=MMVIntra(0,0);
+   $0C: R:=MMVIntra(1,0);
+   $0E: R:=MMVIntra(1,1);
+   $05: R:=MMVInter(0,0);
+   $0D: R:=MMVInter(1,0);
+   $0F: R:=MMVInter(1,1);
+   Else Continue;
+  End;
+  If R=0 Then NVEmit(MMVPix) Else NVRepeat;
+  If NVDone Then Break;
+ End;
+ If NVFrames=0 Then Fail('mm: aucune image decodee.');
+ If NVLast<>Nil Then Begin FreeMem(NVLast,NVLastSize); NVLast:=Nil; End;
+ CloseRead; If NVOpened Then CloseWrite;
+End;
+
+{ ---- Motion Pixels ---- }
+Type
+ TMXPYuv=Record Y,V,U: ShortInt; End;
+ TMXPCode=Record Size,Delta: LongInt; End;
+ TMXPArr=Array[0..268435455] Of TMXPYuv; PMXPArr=^TMXPArr;
+Var
+ MXPTab: Array[0..32767] Of TMXPYuv; MXPInit: Boolean;
+ MXPChg: PEABuffer; MXPVpt,MXPHpt: PMXPArr;
+ MXPW,MXPH,MXPOffBits,MXPCodes,MXPCur,MXPMaxBits,MXPNeg: LongInt;
+ MXPCode: Array[0..15] Of TMXPCode; MXPScale: Array[0..2] Of LongInt;
+ MXPVlcN: LongInt; MXPVlcLen: Array[0..15] Of LongInt; MXPVlcCode: Array[0..15] Of LongWord; MXPVlcVal: Array[0..15] Of LongInt;
+ MXPFrame: PEABuffer;
+
+Function MXPToRgb(Y,V,U: LongInt; Clip: Boolean): LongInt;
+Var R,G,B: LongInt;
+ Function Cm(X: LongInt): LongInt; Begin If X<0 Then Cm:=0 Else If X>255 Then Cm:=255 Else Cm:=X; End;
+Begin
+ R:=(1000*Y+701*V) Div 1000; G:=(1000*Y-357*V-172*U) Div 1000; B:=(1000*Y+886*U) Div 1000;
+ If Clip Then Begin
+  MXPToRgb:=((Cm(R*8) And $F8) Shl 7) Or ((Cm(G*8) And $F8) Shl 2) Or (Cm(B*8) Shr 3); Exit;
+ End;
+ If (R>=0) And (R<32) And (G>=0) And (G<32) And (B>=0) And (B<32) Then MXPToRgb:=(R Shl 10) Or (G Shl 5) Or B
+ Else MXPToRgb:=1 Shl 15;
+End;
+
+Procedure MXPBuildTable;
+Var Y,V,U,I,J,K: LongInt; Z: Boolean;
+Begin
+ FillChar(MXPTab,SizeOf(MXPTab),0);
+ For Y:=0 To 31 Do For V:=-31 To 31 Do For U:=-31 To 31 Do Begin
+  I:=MXPToRgb(Y,V,U,False);
+  If I<32768 Then If (MXPTab[I].U=0) And (MXPTab[I].V=0) And (MXPTab[I].Y=0) Then Begin
+   MXPTab[I].Y:=Y; MXPTab[I].V:=V; MXPTab[I].U:=U;
+  End;
+ End;
+ For I:=0 To 1023 Do Begin
+  For K:=0 To 30 Do Begin
+   For J:=31 Downto K+1 Do
+    If (MXPTab[I*32+J].U=0) And (MXPTab[I*32+J].V=0) And (MXPTab[I*32+J].Y=0) Then MXPTab[I*32+J]:=MXPTab[I*32+J-1];
+   For J:=0 To 30-K Do
+    If (MXPTab[I*32+J].U=0) And (MXPTab[I*32+J].V=0) And (MXPTab[I*32+J].Y=0) Then MXPTab[I*32+J]:=MXPTab[I*32+J+1];
+  End;
+ End;
+End;
+
+Function MXPRd(N: LongInt): LongInt; Begin MXPRd:=BRBits(N); End;
+
+Procedure MXPReadChanges(Count,BitsLen: LongInt; ReadColor: Boolean);
+Var Offset,W,H,Color,X,Y,I,Pp: LongInt;
+Begin
+ Color:=0;
+ While Count>0 Do Begin
+  Dec(Count);
+  Offset:=BRBits(MXPOffBits); W:=BRBits(BitsLen)+1; H:=BRBits(BitsLen)+1;
+  If ReadColor Then Color:=BRBits(15);
+  X:=Offset Mod MXPW; Y:=Offset Div MXPW;
+  If Y>=MXPH Then Continue;
+  If W>MXPW-X Then W:=MXPW-X;
+  If H>MXPH-Y Then H:=MXPH-Y;
+  Pp:=(Y*MXPW+X)*2;
+  While H>0 Do Begin
+   Dec(H);
+   MXPChg^[Offset]:=W;
+   If ReadColor Then
+    For I:=0 To W-1 Do Begin MXPFrame^[Pp+I*2]:=Color And 255; MXPFrame^[Pp+I*2+1]:=Color Shr 8; End;
+   Inc(Offset,MXPW); Inc(Pp,MXPW*2);
+  End;
+ End;
+End;
+
+Function MXPGetCode(Size: LongInt): Boolean;
+Begin
+ MXPGetCode:=False;
+ While BRBit<>0 Do Begin
+  Inc(Size);
+  If Size>MXPMaxBits Then Exit;
+  If Not MXPGetCode(Size) Then Exit;
+ End;
+ If MXPCur>=MXPCodes Then Exit;
+ MXPCode[MXPCur].Size:=Size; Inc(MXPCur);
+ MXPGetCode:=True;
+End;
+
+Function MXPReadCodes: Boolean;
+Var I: LongInt;
+Begin
+ MXPReadCodes:=False;
+ If MXPCodes=1 Then Begin MXPCode[0].Delta:=BRBits(4); MXPReadCodes:=True; Exit; End;
+ MXPMaxBits:=BRBits(4);
+ For I:=0 To MXPCodes-1 Do MXPCode[I].Delta:=BRBits(4);
+ MXPCur:=0;
+ If Not MXPGetCode(0) Then Exit;
+ If MXPCur<MXPCodes Then Exit;
+ MXPReadCodes:=True;
+End;
+
+{ ff_vlc_init_from_lengths : codes canoniques, de la derniere entree a la premiere }
+Function MXPBuildVlc: Boolean;
+Var I,Len,LenMax: LongInt; Code: Int64;
+Begin
+ MXPBuildVlc:=False; Code:=0; MXPVlcN:=0;
+ LenMax:=3*MXPMaxBits; If LenMax>32 Then LenMax:=32;
+ For I:=MXPCodes-1 Downto 0 Do Begin
+  Len:=MXPCode[I].Size;
+  If Len>0 Then Begin
+   MXPVlcLen[MXPVlcN]:=Len; MXPVlcCode[MXPVlcN]:=LongWord(Code Shr (32-Len)); MXPVlcVal[MXPVlcN]:=MXPCode[I].Delta; Inc(MXPVlcN);
+  End Else Continue;
+  If (Len>LenMax) Or ((Code And ((Int64(1) Shl (32-Len))-1))<>0) Then Exit;
+  Inc(Code,Int64(1) Shl (32-Len));
+  If Code>Int64($100000000) Then Exit;
+ End;
+ MXPBuildVlc:=True;
+End;
+
+Function MXPGetVlc: LongInt;
+Var Acc: LongWord; L,I: LongInt;
+Begin
+ If MXPCodes=1 Then Begin MXPGetVlc:=MXPCode[0].Delta; Exit; End;
+ Acc:=0;
+ For L:=1 To 16 Do Begin
+  Acc:=(Acc Shl 1) Or LongWord(BRBit);
+  For I:=0 To MXPVlcN-1 Do If (MXPVlcLen[I]=L) And (MXPVlcCode[I]=Acc) Then Begin MXPGetVlc:=MXPVlcVal[I]; Exit; End;
+ End;
+ MXPGetVlc:=0;
+End;
+
+Function MXPGradient(Comp,V: LongInt): LongInt;
+Begin
+ MXPGradient:=(V-7)*MXPScale[Comp];
+ If (V=0) Or (V=14) Then MXPScale[Comp]:=2 Else MXPScale[Comp]:=1;
+End;
+
+Function MXPFromRgb(X,Y: LongInt): TMXPYuv;
+Var C: LongInt;
+Begin
+ C:=MXPFrame^[(Y*MXPW+X)*2]+MXPFrame^[(Y*MXPW+X)*2+1]*256;
+ MXPFromRgb:=MXPTab[C And $7FFF];
+End;
+
+Procedure MXPSetRgb(X,Y: LongInt; Const P: TMXPYuv);
+Var C: LongInt;
+Begin
+ C:=MXPToRgb(P.Y,P.V,P.U,True);
+ MXPFrame^[(Y*MXPW+X)*2]:=C And 255; MXPFrame^[(Y*MXPW+X)*2+1]:=C Shr 8;
+End;
+
+Function MXPClipU(V: LongInt): LongInt; Begin If V<0 Then MXPClipU:=0 Else If V>31 Then MXPClipU:=31 Else MXPClipU:=V; End;
+Function MXPClipS(V: LongInt): LongInt; Begin If V<-32 Then MXPClipS:=-32 Else If V>31 Then MXPClipS:=31 Else MXPClipS:=V; End;
+
+Procedure MXPLine(Y: LongInt);
+Var P: TMXPYuv; Y0,W,I,X: LongInt;
+Begin
+ Y0:=Y*MXPW; X:=0; P:=MXPVpt^[Y];
+ If MXPChg^[Y0+X]=0 Then Begin MXPScale[0]:=1; MXPScale[1]:=1; MXPScale[2]:=1; Inc(X); End;
+ While X<MXPW Do Begin
+  W:=MXPChg^[Y0+X];
+  If W<>0 Then Begin
+   If (Y And 3)=0 Then Begin
+    If (MXPChg^[Y0+X+MXPW]<W) Or (MXPChg^[Y0+X+MXPW*2]<W) Or (MXPChg^[Y0+X+MXPW*3]<W) Then Begin
+     I:=(X+3) And Not 3;
+     While I<X+W Do Begin MXPHpt^[((Y Div 4)*MXPW+I) Div 4]:=MXPFromRgb(I,Y); Inc(I,4); End;
+    End;
+   End;
+   Inc(X,W); MXPScale[0]:=1; MXPScale[1]:=1; MXPScale[2]:=1;
+   P:=MXPFromRgb(X-1,Y);
+  End Else Begin
+   P.Y:=MXPClipU(P.Y+MXPGradient(0,MXPGetVlc));
+   If (X And 3)=0 Then Begin
+    If (Y And 3)=0 Then Begin
+     P.V:=MXPClipS(P.V+MXPGradient(1,MXPGetVlc));
+     P.U:=MXPClipS(P.U+MXPGradient(2,MXPGetVlc));
+     MXPHpt^[((Y Div 4)*MXPW+X) Div 4]:=P;
+    End Else Begin
+     P.V:=MXPHpt^[((Y Div 4)*MXPW+X) Div 4].V; P.U:=MXPHpt^[((Y Div 4)*MXPW+X) Div 4].U;
+    End;
+   End;
+   MXPSetRgb(X,Y,P); Inc(X);
+  End;
+ End;
+End;
+
+Procedure MXPHelper;
+Var P: TMXPYuv; Y,Y0: LongInt;
+Begin
+ P.Y:=0; P.V:=0; P.U:=0;
+ For Y:=0 To MXPH-1 Do Begin
+  If MXPChg^[Y*MXPW]<>0 Then Begin
+   MXPScale[0]:=1; MXPScale[1]:=1; MXPScale[2]:=1;
+   P:=MXPFromRgb(0,Y);
+  End Else Begin
+   P.Y:=MXPClipU(P.Y+MXPGradient(0,MXPGetVlc));
+   If (Y And 3)=0 Then Begin
+    P.V:=MXPClipS(P.V+MXPGradient(1,MXPGetVlc));
+    P.U:=MXPClipS(P.U+MXPGradient(2,MXPGetVlc));
+   End;
+   MXPVpt^[Y]:=P;
+   MXPSetRgb(0,Y,P);
+  End;
+ End;
+ For Y0:=0 To 1 Do Begin
+  Y:=Y0;
+  While Y<MXPH Do Begin MXPLine(Y); Inc(Y,2); End;
+ End;
+End;
+
+Procedure MXPPacket(Buf: PEABuffer; Size: LongInt; Ext0,Ext1: LongInt);
+Var Sw: PEABuffer; I,Count1,Count2,Sz,H4: LongInt;
+Begin
+ GetMem(Sw,Size+64); FillChar(Sw^,Size+64,0);
+ I:=0;
+ While I+4<=Size Do Begin
+  Sw^[I]:=Buf^[I+3]; Sw^[I+1]:=Buf^[I+2]; Sw^[I+2]:=Buf^[I+1]; Sw^[I+3]:=Buf^[I]; Inc(I,4);
+ End;
+ While I<Size Do Begin Sw^[I]:=Buf^[I]; Inc(I); End;
+ BRInit(Sw,Size);
+ FillChar(MXPChg^,MXPW*MXPH,0);
+ I:=Ord((Ext1 And 2)=0);
+ While I<2 Do Begin
+  Count1:=BRBits(12); Count2:=BRBits(12);
+  MXPReadChanges(Count1,8,I<>0); MXPReadChanges(Count2,4,I<>0);
+  Inc(I);
+ End;
+ MXPCodes:=BRBits(4);
+ If MXPCodes<>0 Then Begin
+  If MXPChg^[0]=0 Then Begin
+   I:=BRBits(15); MXPFrame^[0]:=I And 255; MXPFrame^[1]:=I Shr 8; MXPChg^[0]:=1;
+  End;
+  If MXPReadCodes Then Begin
+   Sz:=BRBits(18);
+   If Ext0<>5 Then Inc(Sz,BRBits(18));
+   If Sz<>0 Then Begin
+    If MXPCodes>1 Then Begin
+     If MXPBuildVlc Then MXPHelper;
+    End Else MXPHelper;
+   End;
+  End;
+ End;
+ FreeMem(Sw,Size+64);
+End;
+
+Procedure MXPSetup(W,H: LongInt);
+Var H4,W4,I: LongInt;
+Begin
+ MXPW:=W; MXPH:=H; H4:=(H+3) And Not 3; W4:=(W+3) And Not 3;
+ If Not MXPInit Then Begin MXPBuildTable; MXPInit:=True; End;
+ GetMem(MXPChg,W*H4+64); FillChar(MXPChg^,W*H4+64,0);
+ GetMem(MXPVpt,H*3+64); FillChar(MXPVpt^,H*3+64,0);
+ GetMem(MXPHpt,(H4 Div 4)*(W4 Div 4)*3+64); FillChar(MXPHpt^,(H4 Div 4)*(W4 Div 4)*3+64,0);
+ GetMem(MXPFrame,W*H*2+64); FillChar(MXPFrame^,W*H*2+64,0);
+ I:=W*H; MXPOffBits:=0; While I>1 Do Begin I:=I Shr 1; Inc(MXPOffBits); End; Inc(MXPOffBits);
+ MXPScale[0]:=0; MXPScale[1]:=0; MXPScale[2]:=0;
+End;
+
+Procedure DecodeMVI(Const Source,Target: String; Mode: LongInt);
+Var
+ F: PEABuffer; Size,Ext0,Ext1,Frames,Msecs,W,H,Ver,Player,AudioSize,P,VSize,Left,Cnt,Rn,Rd: LongInt;
+ AFrame,ACounter: QWord; Big: Boolean;
+ Function U32(At: LongInt): LongInt; Begin U32:=F^[At]+F^[At+1]*256+F^[At+2]*65536+F^[At+3]*16777216; End;
+Begin
+ NVLoad(Source,F,Size);
+ If Size<30 Then Fail('mvi: fichier trop court.');
+ Ver:=F^[0]; Ext0:=F^[1]; Ext1:=F^[2]; Frames:=U32(3); Msecs:=U32(7);
+ W:=F^[11]+F^[12]*256; H:=F^[13]+F^[14]*256;
+ AudioSize:=U32(18); Player:=U32(23);
+ P:=30;
+ If (Frames<=0) Or (AudioSize<=0) Or (Ver<>7) Or (Player>213) Or (Msecs<=0) Or (W<=0) Or (H<=0) Then Fail('mvi: en-tete Motion Pixels incorrect.');
+ Big:=Int64(W)*H>=65536;
+ AFrame:=(QWord(AudioSize) Shl 10) Div QWord(Frames);
+ If AFrame<=512 Then Fail('mvi: audio_data_size ou nombre d''images incorrect.');
+ ACounter:=(QWord(F^[16]+F^[17]*256)*830 Div AFrame-1)*AFrame;
+ Left:=AudioSize;
+ Rn:=1000000; Rd:=Msecs; NVGcd(Rn,Rd);
+ MXPSetup(W,H);
+ NVBegin(Mode,Target,W,H,2,Rn,Rd); NVAviSar(W,H);
+ VSize:=0;
+ While P<Size Do Begin
+  If VSize=0 Then Begin
+   If Big Then Begin
+    If P+3>Size Then Break;
+    VSize:=F^[P]+F^[P+1]*256+F^[P+2]*65536; Inc(P,3);
+   End Else Begin
+    If P+2>Size Then Break;
+    VSize:=F^[P]+F^[P+1]*256; Inc(P,2);
+   End;
+   If Left=0 Then Break;
+   Cnt:=LongInt((ACounter+AFrame+512) Shr 10);
+   If Cnt>Left Then Cnt:=Left;
+   If P+Cnt>Size Then Break;
+   Inc(P,Cnt); Dec(Left,Cnt);
+   ACounter:=ACounter+AFrame-(QWord(Cnt) Shl 10);
+  End Else Begin
+   If P+VSize>Size Then VSize:=Size-P;
+   MXPPacket(PEABuffer(@F^[P]),VSize,Ext0,Ext1);
+   NVEmit(MXPFrame);
+   Inc(P,VSize); VSize:=0;
+   If NVDone Then Break;
+  End;
+ End;
+ If NVFrames=0 Then Fail('mvi: aucune image decodee.');
+ If NVLast<>Nil Then Begin FreeMem(NVLast,NVLastSize); NVLast:=Nil; End;
+ CloseRead; If NVOpened Then CloseWrite;
+End;
+{ MMVIDEO-END }
+
 { MJPEG-BEGIN }
 { ---- MJPEG / JPEG (libavcodec/mjpegdec.c, mjpegbdec.c, mjpegdec_common.c, LGPL-2.1-or-later) : decodeur sequentiel et progressif 8 bits ---- }
 Type
@@ -54116,6 +54535,8 @@ Begin
  WriteLn(' D  ipmovie         Interplay MVE (video interplayvideo PAL8/RGB555 vers Y4M/PNG/BMP, audio PCM/interplay_dpcm vers WAV)');
  WriteLn(' D  jpegls_pipe     piped jpegls sequence (image JPEG-LS vers Y4M/PNG/BMP)');
  WriteLn(' D  jpeg_pipe      piped jpeg sequence (image JPEG vers Y4M/PNG/BMP)');
+ WriteLn(' D  mm              American Laser Games MM (video mmvideo)');
+ WriteLn(' D  mvi             Motion Pixels MVI (video motionpixels)');
  WriteLn(' D  flic            FLI/FLC/FLX animation (video flic 8/15/16/24 bits; audio TFTD non extrait)');
  WriteLn(' D  g726            G.726 big-endian brut (-code_size 2..5, -sample_rate; decodage vers WAV/MP3/...)');
  WriteLn(' D  g726le          G.726 little-endian brut (-code_size 2..5, -sample_rate; decodage vers WAV/MP3/...)');
@@ -54490,6 +54911,8 @@ BEGIN
    WriteLn('D V D  mimic           Mimic (decodeur AVI LM20 et flux MSN TCP Webcam)');
    WriteLn('DEV D  mjpeg           MJPEG (Motion JPEG) (decodeur AVI/JPEG; encodeur Y4M vers .jpg ou AVI, -q:v 1..31, Huffman optimal ou -huffman default)');
    WriteLn('D V D  mjpegb          Apple MJPEG-B (decodeur MOV mjpb)');
+   WriteLn('D V D  mmvideo         American Laser Games MM Video (decodeur fichiers .mm)');
+   WriteLn('D V D  motionpixels    Motion Pixels video (decodeur fichiers .mvi)');
    WriteLn(' D A    mace3           MACE (Macintosh Audio Compression/Expansion) 3:1 (AIFF-C MAC3, QuickTime)');
    WriteLn(' D A    mace6           MACE (Macintosh Audio Compression/Expansion) 6:1 (AIFF-C MAC6, QuickTime)');
    WriteLn('D V    kmvc            Karl Morton''s video codec (AVI KMVC, PAL8 <= 320x200)');
@@ -54728,6 +55151,7 @@ BEGIN
  If (Detected='') And Not IsHTTP(Intermediate) And (InputFormat<>'h261') And (InputFormat<>'h263') Then If H4ProbeFile(Intermediate) Then Detected:='h264';
  If (Detected='') And Not IsHTTP(Intermediate) And (InputFormat<>'h261') And (InputFormat<>'h264') Then If H3ProbeFile(Intermediate) Then Detected:='h263';
  If (Detected='') And Not IsHTTP(Intermediate) And (InputFormat<>'h263') And (InputFormat<>'h264') Then If H1ProbeFile(Intermediate) Then Detected:='h261';
+ If (Detected='') And (Lower(Extension(Intermediate))='mvi') And Not IsHTTP(Intermediate) Then Detected:='mvi';
  If (Detected='') And (Lower(Extension(Intermediate))='jls') And Not IsHTTP(Intermediate) Then Detected:='jpegls_pipe';
  If (Detected='') And ((Lower(Extension(Intermediate))='jpg') Or (Lower(Extension(Intermediate))='jpeg')) And Not IsHTTP(Intermediate) Then Detected:='jpeg_pipe';
  If InputFormat='' Then InputFormat:=Detected Else
@@ -54766,6 +55190,8 @@ BEGIN
  NVKind:=0;
  If (InputFormat='psxstr') And Not IsHTTP(InputPath) Then Begin If STRHasVideo(Intermediate) Then NVKind:=44; End
  Else If (InputFormat='msnwctcp') And Not IsHTTP(InputPath) Then NVKind:=45
+ Else If (InputFormat='mm') And Not IsHTTP(InputPath) Then NVKind:=48
+ Else If (InputFormat='mvi') And Not IsHTTP(InputPath) Then NVKind:=49
  Else If InputFormat='bethsoftvid' Then NVKind:=1 Else If InputFormat='bfi' Then NVKind:=2 Else If InputFormat='c93' Then NVKind:=3
  Else If InputFormat='bmp' Then NVKind:=4 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22 Else If (InputFormat='flic') And Not IsHTTP(InputPath) Then NVKind:=23 Else If (InputFormat='gif') And Not IsHTTP(InputPath) Then NVKind:=25 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=2) Then NVKind:=27 Else If (InputFormat='h263') And Not IsHTTP(InputPath) Then NVKind:=28 Else If (InputFormat='h261') And Not IsHTTP(InputPath) Then NVKind:=29 Else If (InputFormat='idcin') And Not IsHTTP(InputPath) Then NVKind:=30 Else If (InputFormat='ipmovie') And Not IsHTTP(InputPath) Then NVKind:=38 Else If (InputFormat='jpegls_pipe') And Not IsHTTP(InputPath) Then NVKind:=39 Else If (InputFormat='jpeg_pipe') And Not IsHTTP(InputPath) Then NVKind:=46 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And MP4HasMjpb(InputPath) Then NVKind:=47 Else If (InputFormat='h264') And Not IsHTTP(InputPath) Then NVKind:=33
  Else If (InputFormat='avi') And Not IsHTTP(InputPath) Then Begin
