@@ -3939,6 +3939,13 @@ Begin
  If N>=80*6 Then If (B[0]=$1F) And (B[1]=$07) And (B[2]=0) And ((B[3]=$3F) Or (B[3]=$BF)) Then Begin Probe:='dv'; Exit; End;
  If N>=4 Then If (B[0]=66) And (B[1]=70) And (B[2]=38) And (B[3]=73) Then Begin Probe:='bfi'; Exit; End;
  If N>=15 Then If (B[0]=68) And (B[1]=69) And (B[2]=88) And (B[3]=65) And ((B[11]*256+B[12])>0) And ((B[11]*256+B[12])<=2048) And ((B[13]*256+B[14])>0) And ((B[13]*256+B[14])<=2048) Then Begin Probe:='dxa'; Exit; End;
+ If N>=26 Then Begin
+  { Interplay MVE : signature "Interplay MVE File"#26#0#26#0, cherchee dans le tampon (ipmovie_probe) }
+  For J:=0 To N-22 Do
+   If (B[J]=73) And (B[J+1]=110) And (B[J+2]=116) And (B[J+3]=101) And (B[J+4]=114) And (B[J+5]=112) And (B[J+6]=108) And (B[J+7]=97) And
+    (B[J+8]=121) And (B[J+9]=32) And (B[J+10]=77) And (B[J+11]=86) And (B[J+12]=69) And (B[J+13]=32) And (B[J+14]=70) And (B[J+15]=105) And
+    (B[J+16]=108) And (B[J+17]=101) And (B[J+18]=26) And (B[J+19]=0) And (B[J+20]=26) And (B[J+21]=0) Then Begin Probe:='ipmovie'; Exit; End;
+ End;
  If N>=18 Then If (B[0]=0) And (B[1]=0) And (B[2]=$AA) And (B[3]=$55) And (B[12]=$22) And (B[13]=$56) And (B[14]=0) And (B[15]=0) And (B[16]=16) And (B[17]=0) Then Begin Probe:='dsicin'; Exit; End;
  If N>=16 Then Begin
   K0:=1;
@@ -17108,6 +17115,7 @@ Procedure DecodeAVIX(Const Source,Target: String; Mode,Kind: LongInt); Forward;
 Procedure DecodeRPL(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeFLIC(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeIdcin(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure DecodeMVE(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeGIF(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeH263Raw(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeFLVH263(Const Source,Target: String; Mode: LongInt); Forward;
@@ -17132,6 +17140,7 @@ Begin
  Else If Kind=22 Then DecodeFLVScreen(Source,Target,Mode)
  Else If Kind=23 Then DecodeFLIC(Source,Target,Mode)
  Else If Kind=30 Then DecodeIdcin(Source,Target,Mode)
+ Else If Kind=38 Then DecodeMVE(Source,Target,Mode)
  Else If Kind=33 Then DecodeH264Raw(Source,Target,Mode)
  Else If Kind=34 Then DecodeH264Mp4(Source,Target,Mode)
  Else If Kind=35 Then DecodeH264Avi(Source,Target,Mode)
@@ -30781,7 +30790,7 @@ Begin
  End;
  CFHist[2]:=CFHist[1]; CFHist[1]:=CFHist[0]; CFHist[0]:=NbPrev;
  If (NbFrames>(Ord(NbPrev<>0)*Ord(CFLastDropped)) + Ord(NbFrames>NbPrev)) Then Begin
-  If NbFrames>108000 Then Begin NbFrames:=0; Exit; End;
+  If NbFrames>3240000 Then Begin NbFrames:=0; Exit; End;
  End;
  CFLastDropped:=(NbFrames=NbPrev);
 End;
@@ -36331,6 +36340,948 @@ Begin
  T:=KMCur; KMCur:=KMPrev; KMPrev:=T;
  KMFrame:=True;
 End;
+
+{ ---- Interplay MVE : demuxeur (libavformat/ipmovie.c), video interplayvideo (libavcodec/interplayvideo.c),
+  audio interplay_dpcm (libavcodec/dpcm.c) ---- }
+Const
+ MVDelta: Array[0..255] Of SmallInt=(
+  0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,
+  32,33,34,35,36,37,38,39,40,41,42,43,47,51,56,61,66,72,79,86,94,102,112,122,133,145,158,173,189,206,225,245,
+  267,292,318,348,379,414,452,493,538,587,640,699,763,832,908,991,1081,1180,1288,1405,1534,1673,1826,1993,
+  2175,2373,2590,2826,3084,3365,3672,4008,4373,4772,5208,5683,6202,6767,7385,8059,8794,9597,10472,11428,
+  12471,13609,14851,16206,17685,19298,21060,22981,25078,27367,29864,32589,
+  -29973,-26728,-23186,-19322,-15105,-10503,-5481,-1,1,1,5481,10503,15105,19322,23186,26728,29973,
+  -32589,-29864,-27367,-25078,-22981,-21060,-19298,-17685,-16206,-14851,-13609,-12471,-11428,-10472,-9597,
+  -8794,-8059,-7385,-6767,-6202,-5683,-5208,-4772,-4373,-4008,-3672,-3365,-3084,-2826,-2590,-2373,
+  -2175,-1993,-1826,-1673,-1534,-1405,-1288,-1180,-1081,-991,-908,-832,-763,-699,-640,-587,
+  -538,-493,-452,-414,-379,-348,-318,-292,-267,-245,-225,-206,-189,-173,-158,-145,
+  -133,-122,-112,-102,-94,-86,-79,-72,-66,-61,-56,-51,-47,-43,-42,-41,
+  -40,-39,-38,-37,-36,-35,-34,-33,-32,-31,-30,-29,-28,-27,-26,-25,
+  -24,-23,-22,-21,-20,-19,-18,-17,-16,-15,-14,-13,-12,-11,-10,-9,-8,-7,-6,-5,-4,-3,-2,-1);
+Const
+ MVCInitAudio=0; MVCAudioOnly=1; MVCInitVideo=2; MVCVideo=3; MVCShutdown=4; MVCEnd=5;
+ MVCHavePacket=$FFFB; MVCDone=$FFFC; MVCEof=$FFFE; MVCBad=$FFFF;
+Var
+ MVF: PEABuffer; MVSize,MVPos: LongInt; MVEof: Boolean;
+ MVAudOff,MVAudSize,MVVidOff,MVVidSize,MVSkipOff,MVSkipSize,MVDecOff,MVDecSize,MVNextChunk: LongInt;
+ MVFormat,MVSend,MVAudType,MVAudBits,MVAudChan,MVAudRate,MVVBpp,MVVW,MVVH,MVChanged: LongInt;
+ MVHasPal,MVPktPalOk: Boolean; MVPal,MVPktPal: Array[0..255] Of LongWord; MVPtsInc,MVVideoPts,MVAudCount,MVPktPts: Int64;
+ MVPk: PEABuffer; MVPkLen,MVPkKind: LongInt;
+
+Function MVRead(N: LongInt; Dst: PEABuffer): LongInt;
+Var K: LongInt;
+Begin
+ K:=MVSize-MVPos; If K<0 Then K:=0;
+ If N>K Then Begin MVEof:=True; N:=K; End;
+ If (Dst<>Nil) And (N>0) Then Move(MVF^[MVPos],Dst^,N);
+ Inc(MVPos,N); MVRead:=N;
+End;
+
+Procedure MVSeek(P: LongInt); Begin MVPos:=P; MVEof:=False; End;
+Function MVRL16(P: PEABuffer; At: LongInt): LongInt; Begin MVRL16:=P^[At]+P^[At+1]*256; End;
+
+Procedure MVFreePk;
+Begin If MVPk<>Nil Then Begin FreeMem(MVPk,MVPkLen+64); MVPk:=Nil; End; End;
+
+{ load_ipmovie_packet }
+Function MVLoadPacket: LongInt;
+Var Sz,Off: LongInt;
+Begin
+ If (MVAudOff<>0) And (MVAudChan<>0) And (MVAudBits<>0) Then Begin
+  If MVAudType=0 Then Begin MVLoadPacket:=MVCBad; Exit; End;
+  Off:=MVAudOff; Sz:=MVAudSize;
+  If MVAudType<>3 Then Begin Inc(Off,6); Dec(Sz,6); End;
+  MVSeek(Off); MVAudOff:=0;
+  If Sz<0 Then Begin MVLoadPacket:=MVCEof; Exit; End;
+  GetMem(MVPk,Sz+64); MVPkLen:=Sz;
+  If MVRead(Sz,MVPk)<>Sz Then Begin MVFreePk; MVLoadPacket:=MVCEof; Exit; End;
+  If MVAudType<>3 Then Inc(MVAudCount,Sz Div MVAudChan Div (MVAudBits Div 8))
+  Else Inc(MVAudCount,(MVAudSize-6-MVAudChan) Div MVAudChan);
+  MVPkKind:=1; MVLoadPacket:=MVCHavePacket;
+ End Else If MVFormat<>0 Then Begin
+  Sz:=8+MVDecSize+MVVidSize+MVSkipSize;
+  GetMem(MVPk,Sz+64); MVPkLen:=Sz;
+  MVPktPalOk:=MVHasPal;
+  If MVHasPal Then Begin MVPktPal:=MVPal; MVHasPal:=False; End;
+  MVPk^[0]:=MVFormat; MVPk^[1]:=MVSend; MVPk^[2]:=MVVidSize And 255; MVPk^[3]:=(MVVidSize Shr 8) And 255;
+  MVPk^[4]:=MVDecSize And 255; MVPk^[5]:=(MVDecSize Shr 8) And 255; MVPk^[6]:=MVSkipSize And 255; MVPk^[7]:=(MVSkipSize Shr 8) And 255;
+  MVFormat:=0; MVSend:=0;
+  MVSeek(MVVidOff); MVVidOff:=0;
+  If MVRead(MVVidSize,PEABuffer(@MVPk^[8]))<>MVVidSize Then Begin MVFreePk; MVLoadPacket:=MVCEof; Exit; End;
+  If MVDecSize<>0 Then Begin
+   MVSeek(MVDecOff); MVDecOff:=0;
+   If MVRead(MVDecSize,PEABuffer(@MVPk^[8+MVVidSize]))<>MVDecSize Then Begin MVFreePk; MVLoadPacket:=MVCEof; Exit; End;
+  End;
+  If MVSkipSize<>0 Then Begin
+   MVSeek(MVSkipOff); MVSkipOff:=0;
+   If MVRead(MVSkipSize,PEABuffer(@MVPk^[8+MVVidSize+MVDecSize]))<>MVSkipSize Then Begin MVFreePk; MVLoadPacket:=MVCEof; Exit; End;
+  End;
+  MVVidSize:=0; MVDecSize:=0; MVSkipSize:=0;
+  MVPktPts:=MVVideoPts; Inc(MVVideoPts,MVPtsInc);
+  MVPkKind:=2; MVLoadPacket:=MVCHavePacket;
+ End Else Begin
+  MVSeek(MVNextChunk); MVLoadPacket:=MVCDone;
+ End;
+End;
+
+{ process_ipmovie_chunk }
+Function MVProcess: LongInt;
+Var
+ Pre: Array[0..3] Of Byte; Sc: Array[0..1023] Of Byte; CType,CSize,OSize,OType,OVer,I,J,First,Last,Flags: LongInt;
+ R,G,B: Byte; W,H: LongInt; V: LongWord;
+Begin
+ CType:=MVLoadPacket;
+ If CType<>MVCDone Then Begin MVProcess:=CType; Exit; End;
+ If MVEof Then Begin MVProcess:=MVCEof; Exit; End;
+ If MVRead(4,@Pre)<>4 Then Begin MVProcess:=MVCBad; Exit; End;
+ CSize:=Pre[0]+Pre[1]*256; CType:=Pre[2]+Pre[3]*256;
+ Case CType Of
+  MVCInitAudio,MVCAudioOnly,MVCInitVideo,MVCVideo,MVCShutdown,MVCEnd: ;
+ Else CType:=MVCBad;
+ End;
+ While (CSize>0) And (CType<>MVCBad) Do Begin
+  If MVEof Then Begin CType:=MVCEof; Break; End;
+  If MVRead(4,@Pre)<>4 Then Begin CType:=MVCBad; Break; End;
+  OSize:=Pre[0]+Pre[1]*256; OType:=Pre[2]; OVer:=Pre[3];
+  Dec(CSize,4); Dec(CSize,OSize);
+  If CSize<0 Then Begin CType:=MVCBad; Break; End;
+  Case OType Of
+   0,1,4,9,10,11,13,$12,$13,$14,$15: MVSeek(MVPos+OSize);
+   2: Begin
+    If (OVer>0) Or (OSize<>6) Then Begin CType:=MVCBad; Break; End;
+    If MVRead(OSize,@Sc)<>OSize Then Begin CType:=MVCBad; Break; End;
+    MVPtsInc:=Int64(Sc[0]+Sc[1]*256+Sc[2]*65536+Int64(Sc[3])*16777216)*(Sc[4]+Sc[5]*256);
+   End;
+   3: Begin
+    If (OVer>1) Or (OSize>10) Or (OSize<6) Then Begin CType:=MVCBad; Break; End;
+    If MVRead(OSize,@Sc)<>OSize Then Begin CType:=MVCBad; Break; End;
+    MVAudRate:=Sc[4]+Sc[5]*256; Flags:=Sc[2]+Sc[3]*256;
+    MVAudChan:=(Flags And 1)+1; MVAudBits:=(((Flags Shr 1) And 1)+1)*8;
+    If (OVer=1) And ((Flags And 4)<>0) Then MVAudType:=3
+    Else If MVAudBits=16 Then MVAudType:=1 Else MVAudType:=2;
+   End;
+   5: Begin
+    If (OVer>2) Or (OSize>8) Or (OSize<4) Or ((OVer=2) And (OSize<8)) Then Begin CType:=MVCBad; Break; End;
+    If MVRead(OSize,@Sc)<>OSize Then Begin CType:=MVCBad; Break; End;
+    W:=(Sc[0]+Sc[1]*256)*8; H:=(Sc[2]+Sc[3]*256)*8;
+    If W<>MVVW Then Begin MVVW:=W; Inc(MVChanged); End;
+    If H<>MVVH Then Begin MVVH:=H; Inc(MVChanged); End;
+    If (OVer<2) Or ((Sc[6]+Sc[7]*256)=0) Then MVVBpp:=8 Else MVVBpp:=16;
+   End;
+   7: Begin MVSeek(MVPos+OSize); MVSend:=1; End;
+   8: Begin MVAudOff:=MVPos; MVAudSize:=OSize; MVSeek(MVPos+OSize); End;
+   12: Begin
+    If (OSize>$304) Or (OSize<4) Then Begin CType:=MVCBad; Break; End;
+    If MVRead(OSize,@Sc)<>OSize Then Begin CType:=MVCBad; Break; End;
+    First:=Sc[0]+Sc[1]*256; Last:=First+Sc[2]+Sc[3]*256-1;
+    If (First>255) Or (Last>255) Or ((Last-First+1)*3+4>OSize) Then Begin CType:=MVCBad; Break; End;
+    J:=4;
+    For I:=First To Last Do Begin
+     R:=Byte(Sc[J]*4); G:=Byte(Sc[J+1]*4); B:=Byte(Sc[J+2]*4); Inc(J,3);
+     V:=$FF000000 Or (LongWord(R) Shl 16) Or (LongWord(G) Shl 8) Or B;
+     V:=V Or ((V Shr 6) And $30303);
+     MVPal[I]:=V;
+    End;
+    MVHasPal:=True;
+   End;
+   14: Begin MVSkipOff:=MVPos; MVSkipSize:=OSize; MVSeek(MVPos+OSize); End;
+   15: Begin MVDecOff:=MVPos; MVDecSize:=OSize; MVSeek(MVPos+OSize); End;
+   6,16,17: Begin MVFormat:=OType; MVVidOff:=MVPos; MVVidSize:=OSize; MVSeek(MVPos+OSize); End;
+  Else CType:=MVCBad;
+  End;
+ End;
+ MVNextChunk:=MVPos;
+ MVProcess:=CType;
+End;
+
+{ ipmovie_read_header ; retourne '' ou une erreur }
+Function MVHeader: String;
+Var P,I: LongInt; Pre: Array[0..3] Of Byte; CT: LongInt;
+Begin
+ MVHeader:='';
+ MVPos:=0; MVEof:=False; MVAudOff:=0; MVVidOff:=0; MVSkipOff:=0; MVDecOff:=0; MVAudSize:=0; MVVidSize:=0; MVSkipSize:=0; MVDecSize:=0;
+ MVFormat:=0; MVSend:=0; MVAudType:=0; MVAudBits:=0; MVAudChan:=0; MVAudRate:=0; MVVBpp:=0; MVVW:=0; MVVH:=0; MVChanged:=0;
+ MVHasPal:=False; MVPtsInc:=0; MVVideoPts:=0; MVAudCount:=0; MVPk:=Nil;
+ P:=-1;
+ For I:=0 To MVSize-22 Do
+  If (MVF^[I]=73) And (MVF^[I+1]=110) And (MVF^[I+2]=116) And (MVF^[I+3]=101) And (MVF^[I+4]=114) And (MVF^[I+5]=112) And (MVF^[I+6]=108) And
+   (MVF^[I+7]=97) And (MVF^[I+8]=121) And (MVF^[I+9]=32) And (MVF^[I+10]=77) And (MVF^[I+11]=86) And (MVF^[I+12]=69) And (MVF^[I+13]=32) And
+   (MVF^[I+14]=70) And (MVF^[I+15]=105) And (MVF^[I+16]=108) And (MVF^[I+17]=101) And (MVF^[I+18]=26) And (MVF^[I+19]=0) And (MVF^[I+20]=26) And
+   (MVF^[I+21]=0) Then Begin P:=I; Break; End;
+ If P<0 Then Begin MVHeader:='ipmovie: signature Interplay MVE absente.'; Exit; End;
+ MVPos:=P+22; MVNextChunk:=MVPos+4;
+ For I:=0 To 255 Do MVPal[I]:=$FF000000;
+ If MVProcess<>MVCInitVideo Then Begin MVHeader:='ipmovie: premier bloc INIT_VIDEO requis.'; Exit; End;
+ If MVRead(4,@Pre)<>4 Then Begin MVHeader:='ipmovie: fichier tronque.'; Exit; End;
+ CT:=Pre[2]+Pre[3]*256;
+ MVSeek(MVPos-4);
+ If CT=MVCVideo Then MVAudType:=0
+ Else If MVProcess<>MVCInitAudio Then Begin MVHeader:='ipmovie: bloc INIT_AUDIO attendu.'; Exit; End;
+End;
+
+{ ipmovie_read_packet : 0 fin, 1 audio (MVPk), 2 video (MVPk) }
+Function MVReadPacket: LongInt;
+Var Ret: LongInt;
+Begin
+ MVReadPacket:=0;
+ While True Do Begin
+  Ret:=MVProcess;
+  If (Ret=MVCVideo) Or (Ret=MVCAudioOnly) Then Ret:=MVLoadPacket;
+  If Ret=MVCHavePacket Then Begin MVReadPacket:=MVPkKind; Exit; End;
+  If (Ret=MVCBad) Or (Ret=MVCEof) Or (Ret=MVCEnd) Or (Ret=MVCShutdown) Then Exit;
+ End;
+End;
+
+Var
+ IPW,IPH,IP16,IPLS,IPStr,IPLine,IPUpper,IPPP,IPFrameNum,IPFSize: LongInt;
+ IPPal: Array[0..255] Of LongWord;
+ IPFr,IPCur,IPLast,IPSec,IPDecCur,IPDecPrev: PEABuffer; IPLastOk,IPSecOk,IPInit: Boolean;
+ IPFree: Array[0..7] Of PEABuffer; IPNFree: LongInt;
+ IPBuf: PEABuffer; IPSP,IPMP,IPEnd: LongInt;
+ IPMap,IPMapLen,IPSkipMap,IPSkipLen: LongInt;
+
+Function IPNew: PEABuffer;
+Var P: PEABuffer;
+Begin
+ If IPNFree>0 Then Begin Dec(IPNFree); IPNew:=IPFree[IPNFree]; Exit; End;
+ GetMem(P,IPFSize+128); FillChar(P^,IPFSize+128,0); IPNew:=P;
+End;
+
+Procedure IPRelease(P: PEABuffer);
+Begin If P<>Nil Then Begin IPFree[IPNFree]:=P; Inc(IPNFree); End; End;
+
+{ GetByteContext : lectures bornees, zero au-dela de la fin }
+Function IPB: LongInt;
+Begin
+ If IPEnd-IPSP<1 Then Begin IPSP:=IPEnd; IPB:=0; Exit; End;
+ IPB:=IPBuf^[IPSP]; Inc(IPSP);
+End;
+Function IPW16: LongInt;
+Begin
+ If IPEnd-IPSP<2 Then Begin IPSP:=IPEnd; IPW16:=0; Exit; End;
+ IPW16:=IPBuf^[IPSP]+IPBuf^[IPSP+1]*256; Inc(IPSP,2);
+End;
+Function IPW32: LongWord;
+Begin
+ If IPEnd-IPSP<4 Then Begin IPSP:=IPEnd; IPW32:=0; Exit; End;
+ IPW32:=LongWord(IPBuf^[IPSP])+LongWord(IPBuf^[IPSP+1])*256+LongWord(IPBuf^[IPSP+2])*65536+LongWord(IPBuf^[IPSP+3])*16777216; Inc(IPSP,4);
+End;
+Function IPW64: QWord;
+Var Lo,Hi: QWord;
+Begin
+ If IPEnd-IPSP<8 Then Begin IPSP:=IPEnd; IPW64:=0; Exit; End;
+ Lo:=IPW32; Hi:=IPW32; IPW64:=Lo Or (Hi Shl 32);
+End;
+Function IPMB: LongInt;
+Begin
+ If IPEnd-IPMP<1 Then Begin IPMP:=IPEnd; IPMB:=0; Exit; End;
+ IPMB:=IPBuf^[IPMP]; Inc(IPMP);
+End;
+Function IPMW16: LongInt;
+Begin
+ If IPEnd-IPMP<2 Then Begin IPMP:=IPEnd; IPMW16:=0; Exit; End;
+ IPMW16:=IPBuf^[IPMP]+IPBuf^[IPMP+1]*256; Inc(IPMP,2);
+End;
+Procedure IPGetBuf(Dst: PEABuffer; N: LongInt);
+Var K: LongInt;
+Begin
+ K:=IPEnd-IPSP; If K>N Then K:=N; If K<0 Then K:=0;
+ If K>0 Then Move(IPBuf^[IPSP],Dst^,K);
+ Inc(IPSP,K);
+End;
+
+Procedure IPPut(Idx,V: LongInt);
+Begin
+ If IP16=0 Then IPFr^[Idx]:=V And 255 Else Begin IPFr^[2*Idx]:=V And 255; IPFr^[2*Idx+1]:=(V Shr 8) And 255; End;
+End;
+{ bloc 8x8 : copie du bloc deplace (DX,DY) de Src vers Dst a IPPP (copy_from) }
+Function IPCopyFrom(Src,Dst: PEABuffer; SrcOk: Boolean; DX,DY: LongInt): Boolean;
+Var X,Y,DXn,DYn,Moff,CurOff,Bw,R,A,B: LongInt;
+Begin
+ IPCopyFrom:=False;
+ CurOff:=IPPP;
+ X:=(CurOff Mod IPLS) Div (1+IP16); Y:=CurOff Div IPLS;
+ A:=Ord(DX+X>=IPW); B:=Ord(DX+X<0);
+ DXn:=DX+X-(A-B)*IPW; DYn:=DY+Y+A-B;
+ Moff:=DYn*IPLS+DXn*(1+IP16);
+ If Moff<0 Then Exit;
+ If Moff>IPUpper Then Exit;
+ If Not SrcOk Then Exit;
+ Bw:=8*(1+IP16);
+ For R:=0 To 7 Do Move(Src^[Moff+R*IPLS],Dst^[CurOff+R*IPLS],Bw);
+ IPCopyFrom:=True;
+End;
+
+Function IPOp(Op: LongInt): Boolean;
+Var B,BL,BH,X,Y,MX,MY,Flags,P,I,Vert: LongInt; Pv: Array[0..7] Of LongInt; Fl: LongWord; Fq: QWord; Z: LongInt;
+Begin
+ IPOp:=True;
+ P:=IPPP;
+ Case Op Of
+  0: IPOp:=IPCopyFrom(IPLast,IPFr,IPLastOk,0,0);
+  1: IPOp:=IPCopyFrom(IPSec,IPFr,IPSecOk,0,0);
+  2,3: Begin
+   If IP16=0 Then B:=IPB Else B:=IPMB;
+   If Op=2 Then Begin
+    If B<56 Then Begin X:=8+(B Mod 7); Y:=B Div 7; End Else Begin X:=-14+((B-56) Mod 29); Y:=8+((B-56) Div 29); End;
+    IPOp:=IPCopyFrom(IPSec,IPFr,IPSecOk,X,Y);
+   End Else Begin
+    If B<56 Then Begin X:=-(8+(B Mod 7)); Y:=-(B Div 7); End Else Begin X:=-(-14+((B-56) Mod 29)); Y:=-(8+((B-56) Div 29)); End;
+    IPOp:=IPCopyFrom(IPFr,IPFr,True,X,Y);
+   End;
+  End;
+  4: Begin
+   If IP16=0 Then B:=IPB Else B:=IPMB;
+   BL:=B And 15; BH:=(B Shr 4) And 15;
+   IPOp:=IPCopyFrom(IPLast,IPFr,IPLastOk,-8+BL,-8+BH);
+  End;
+  5: Begin
+   X:=IPB; Y:=IPB; If X>127 Then Dec(X,256); If Y>127 Then Dec(Y,256);
+   IPOp:=IPCopyFrom(IPLast,IPFr,IPLastOk,X,Y);
+  End;
+  6: If IP16=0 Then IPOp:=True Else Begin
+   X:=IPB; Y:=IPB; If X>127 Then Dec(X,256); If Y>127 Then Dec(Y,256);
+   IPOp:=IPCopyFrom(IPSec,IPFr,IPSecOk,X,Y);
+  End;
+  7: If IP16=0 Then Begin
+   If IPEnd-IPSP<4 Then Begin IPOp:=False; Exit; End;
+   Pv[0]:=IPB; Pv[1]:=IPB;
+   If Pv[0]<=Pv[1] Then Begin
+    For Y:=0 To 7 Do Begin
+     Flags:=IPB Or $100;
+     While Flags<>1 Do Begin IPFr^[P]:=Pv[Flags And 1]; Inc(P); Flags:=Flags Shr 1; End;
+     Inc(P,IPLine);
+    End;
+   End Else Begin
+    Flags:=IPW16;
+    Y:=0;
+    While Y<8 Do Begin
+     X:=0;
+     While X<8 Do Begin
+      IPFr^[P+X]:=Pv[Flags And 1]; IPFr^[P+X+1]:=Pv[Flags And 1]; IPFr^[P+X+IPStr]:=Pv[Flags And 1]; IPFr^[P+X+1+IPStr]:=Pv[Flags And 1];
+      Inc(X,2); Flags:=Flags Shr 1;
+     End;
+     Inc(P,IPStr*2); Inc(Y,2);
+    End;
+   End;
+  End Else Begin
+   P:=IPPP Div 2;
+   Pv[0]:=IPW16; Pv[1]:=IPW16;
+   If (Pv[0] And $8000)=0 Then Begin
+    For Y:=0 To 7 Do Begin
+     Flags:=IPB Or $100;
+     While Flags<>1 Do Begin IPPut(P,Pv[Flags And 1]); Inc(P); Flags:=Flags Shr 1; End;
+     Inc(P,IPLine);
+    End;
+   End Else Begin
+    Flags:=IPW16;
+    Y:=0;
+    While Y<8 Do Begin
+     X:=0;
+     While X<8 Do Begin
+      IPPut(P+X,Pv[Flags And 1]); IPPut(P+X+1,Pv[Flags And 1]); IPPut(P+X+IPStr,Pv[Flags And 1]); IPPut(P+X+1+IPStr,Pv[Flags And 1]);
+      Inc(X,2); Flags:=Flags Shr 1;
+     End;
+     Inc(P,IPStr*2); Inc(Y,2);
+    End;
+   End;
+  End;
+  8: If IP16=0 Then Begin
+   If IPEnd-IPSP<12 Then Begin IPOp:=False; Exit; End;
+   Fl:=0;
+   Pv[0]:=IPB; Pv[1]:=IPB;
+   If Pv[0]<=Pv[1] Then Begin
+    For Y:=0 To 15 Do Begin
+     If (Y And 3)=0 Then Begin
+      If Y<>0 Then Begin Pv[0]:=IPB; Pv[1]:=IPB; End;
+      Fl:=IPW16;
+     End;
+     For X:=0 To 3 Do Begin IPFr^[P]:=Pv[Fl And 1]; Inc(P); Fl:=Fl Shr 1; End;
+     Inc(P,IPStr-4);
+     If Y=7 Then Dec(P,8*IPStr-4);
+    End;
+   End Else Begin
+    Fl:=IPW32; Pv[2]:=IPB; Pv[3]:=IPB;
+    If Pv[2]<=Pv[3] Then Begin
+     For Y:=0 To 15 Do Begin
+      For X:=0 To 3 Do Begin IPFr^[P]:=Pv[Fl And 1]; Inc(P); Fl:=Fl Shr 1; End;
+      Inc(P,IPStr-4);
+      If Y=7 Then Begin Dec(P,8*IPStr-4); Pv[0]:=Pv[2]; Pv[1]:=Pv[3]; Fl:=IPW32; End;
+     End;
+    End Else Begin
+     For Y:=0 To 7 Do Begin
+      If Y=4 Then Begin Pv[0]:=Pv[2]; Pv[1]:=Pv[3]; Fl:=IPW32; End;
+      For X:=0 To 7 Do Begin IPFr^[P]:=Pv[Fl And 1]; Inc(P); Fl:=Fl Shr 1; End;
+      Inc(P,IPLine);
+     End;
+    End;
+   End;
+  End Else Begin
+   P:=IPPP Div 2; Fl:=0;
+   Pv[0]:=IPW16; Pv[1]:=IPW16;
+   If (Pv[0] And $8000)=0 Then Begin
+    For Y:=0 To 15 Do Begin
+     If (Y And 3)=0 Then Begin
+      If Y<>0 Then Begin Pv[0]:=IPW16; Pv[1]:=IPW16; End;
+      Fl:=IPW16;
+     End;
+     For X:=0 To 3 Do Begin IPPut(P,Pv[Fl And 1]); Inc(P); Fl:=Fl Shr 1; End;
+     Inc(P,IPStr-4);
+     If Y=7 Then Dec(P,8*IPStr-4);
+    End;
+   End Else Begin
+    Fl:=IPW32; Pv[2]:=IPW16; Pv[3]:=IPW16;
+    If (Pv[2] And $8000)=0 Then Begin
+     For Y:=0 To 15 Do Begin
+      For X:=0 To 3 Do Begin IPPut(P,Pv[Fl And 1]); Inc(P); Fl:=Fl Shr 1; End;
+      Inc(P,IPStr-4);
+      If Y=7 Then Begin Dec(P,8*IPStr-4); Pv[0]:=Pv[2]; Pv[1]:=Pv[3]; Fl:=IPW32; End;
+     End;
+    End Else Begin
+     For Y:=0 To 7 Do Begin
+      If Y=4 Then Begin Pv[0]:=Pv[2]; Pv[1]:=Pv[3]; Fl:=IPW32; End;
+      For X:=0 To 7 Do Begin IPPut(P,Pv[Fl And 1]); Inc(P); Fl:=Fl Shr 1; End;
+      Inc(P,IPLine);
+     End;
+    End;
+   End;
+  End;
+  9: If IP16=0 Then Begin
+   If IPEnd-IPSP<8 Then Begin IPOp:=False; Exit; End;
+   For I:=0 To 3 Do Pv[I]:=IPB;
+   If Pv[0]<=Pv[1] Then Begin
+    If Pv[2]<=Pv[3] Then Begin
+     For Y:=0 To 7 Do Begin
+      Flags:=IPW16;
+      For X:=0 To 7 Do Begin IPFr^[P]:=Pv[Flags And 3]; Inc(P); Flags:=Flags Shr 2; End;
+      Inc(P,IPLine);
+     End;
+    End Else Begin
+     Fl:=IPW32;
+     Y:=0;
+     While Y<8 Do Begin
+      X:=0;
+      While X<8 Do Begin
+       Z:=Pv[Fl And 3];
+       IPFr^[P+X]:=Z; IPFr^[P+X+1]:=Z; IPFr^[P+X+IPStr]:=Z; IPFr^[P+X+1+IPStr]:=Z;
+       Inc(X,2); Fl:=Fl Shr 2;
+      End;
+      Inc(P,IPStr*2); Inc(Y,2);
+     End;
+    End;
+   End Else Begin
+    Fq:=IPW64;
+    If Pv[2]<=Pv[3] Then Begin
+     For Y:=0 To 7 Do Begin
+      X:=0;
+      While X<8 Do Begin
+       Z:=Pv[Fq And 3]; IPFr^[P+X]:=Z; IPFr^[P+X+1]:=Z; Inc(X,2); Fq:=Fq Shr 2;
+      End;
+      Inc(P,IPStr);
+     End;
+    End Else Begin
+     Y:=0;
+     While Y<8 Do Begin
+      For X:=0 To 7 Do Begin
+       Z:=Pv[Fq And 3]; IPFr^[P+X]:=Z; IPFr^[P+X+IPStr]:=Z; Fq:=Fq Shr 2;
+      End;
+      Inc(P,IPStr*2); Inc(Y,2);
+     End;
+    End;
+   End;
+  End Else Begin
+   P:=IPPP Div 2;
+   For I:=0 To 3 Do Pv[I]:=IPW16;
+   If (Pv[0] And $8000)=0 Then Begin
+    If (Pv[2] And $8000)=0 Then Begin
+     For Y:=0 To 7 Do Begin
+      Flags:=IPW16;
+      For X:=0 To 7 Do Begin IPPut(P,Pv[Flags And 3]); Inc(P); Flags:=Flags Shr 2; End;
+      Inc(P,IPLine);
+     End;
+    End Else Begin
+     Fl:=IPW32;
+     Y:=0;
+     While Y<8 Do Begin
+      X:=0;
+      While X<8 Do Begin
+       Z:=Pv[Fl And 3];
+       IPPut(P+X,Z); IPPut(P+X+1,Z); IPPut(P+X+IPStr,Z); IPPut(P+X+1+IPStr,Z);
+       Inc(X,2); Fl:=Fl Shr 2;
+      End;
+      Inc(P,IPStr*2); Inc(Y,2);
+     End;
+    End;
+   End Else Begin
+    Fq:=IPW64;
+    If (Pv[2] And $8000)=0 Then Begin
+     For Y:=0 To 7 Do Begin
+      X:=0;
+      While X<8 Do Begin
+       Z:=Pv[Fq And 3]; IPPut(P+X,Z); IPPut(P+X+1,Z); Inc(X,2); Fq:=Fq Shr 2;
+      End;
+      Inc(P,IPStr);
+     End;
+    End Else Begin
+     Y:=0;
+     While Y<8 Do Begin
+      For X:=0 To 7 Do Begin
+       Z:=Pv[Fq And 3]; IPPut(P+X,Z); IPPut(P+X+IPStr,Z); Fq:=Fq Shr 2;
+      End;
+      Inc(P,IPStr*2); Inc(Y,2);
+     End;
+    End;
+   End;
+  End;
+  10: If IP16=0 Then Begin
+   If IPEnd-IPSP<16 Then Begin IPOp:=False; Exit; End;
+   For I:=0 To 3 Do Pv[I]:=IPB;
+   Fl:=0;
+   If Pv[0]<=Pv[1] Then Begin
+    For Y:=0 To 15 Do Begin
+     If (Y And 3)=0 Then Begin
+      If Y<>0 Then For I:=0 To 3 Do Pv[I]:=IPB;
+      Fl:=IPW32;
+     End;
+     For X:=0 To 3 Do Begin IPFr^[P]:=Pv[Fl And 3]; Inc(P); Fl:=Fl Shr 2; End;
+     Inc(P,IPStr-4);
+     If Y=7 Then Dec(P,8*IPStr-4);
+    End;
+   End Else Begin
+    Fq:=IPW64;
+    For I:=4 To 7 Do Pv[I]:=IPB; { get_buffer(P+4,4) ; lecture partielle ignoree }
+    If Pv[4]<=Pv[5] Then Vert:=1 Else Vert:=0;
+    For Y:=0 To 15 Do Begin
+     For X:=0 To 3 Do Begin IPFr^[P]:=Pv[Fq And 3]; Inc(P); Fq:=Fq Shr 2; End;
+     If Vert<>0 Then Begin
+      Inc(P,IPStr-4);
+      If Y=7 Then Dec(P,8*IPStr-4);
+     End Else If (Y And 1)<>0 Then Inc(P,IPLine);
+     If Y=7 Then Begin
+      For I:=0 To 3 Do Pv[I]:=Pv[I+4];
+      Fq:=IPW64;
+     End;
+    End;
+   End;
+  End Else Begin
+   P:=IPPP Div 2;
+   For I:=0 To 3 Do Pv[I]:=IPW16;
+   Fl:=0;
+   If (Pv[0] And $8000)=0 Then Begin
+    For Y:=0 To 15 Do Begin
+     If (Y And 3)=0 Then Begin
+      If Y<>0 Then For I:=0 To 3 Do Pv[I]:=IPW16;
+      Fl:=IPW32;
+     End;
+     For X:=0 To 3 Do Begin IPPut(P,Pv[Fl And 3]); Inc(P); Fl:=Fl Shr 2; End;
+     Inc(P,IPStr-4);
+     If Y=7 Then Dec(P,8*IPStr-4);
+    End;
+   End Else Begin
+    Fq:=IPW64;
+    For I:=4 To 7 Do Pv[I]:=IPW16;
+    If (Pv[4] And $8000)=0 Then Vert:=1 Else Vert:=0;
+    For Y:=0 To 15 Do Begin
+     For X:=0 To 3 Do Begin IPPut(P,Pv[Fq And 3]); Inc(P); Fq:=Fq Shr 2; End;
+     If Vert<>0 Then Begin
+      Inc(P,IPStr-4);
+      If Y=7 Then Dec(P,8*IPStr-4);
+     End Else If (Y And 1)<>0 Then Inc(P,IPLine);
+     If Y=7 Then Begin
+      For I:=0 To 3 Do Pv[I]:=Pv[I+4];
+      Fq:=IPW64;
+     End;
+    End;
+   End;
+  End;
+  11: If IP16=0 Then Begin
+   For Y:=0 To 7 Do Begin IPGetBuf(PEABuffer(@IPFr^[P]),8); Inc(P,IPStr); End;
+  End Else Begin
+   P:=IPPP Div 2;
+   For Y:=0 To 7 Do Begin
+    For X:=0 To 7 Do IPPut(P+X,IPW16);
+    Inc(P,IPStr);
+   End;
+  End;
+  12: If IP16=0 Then Begin
+   Y:=0;
+   While Y<8 Do Begin
+    X:=0;
+    While X<8 Do Begin
+     Z:=IPB;
+     IPFr^[P+X]:=Z; IPFr^[P+X+1]:=Z; IPFr^[P+X+IPStr]:=Z; IPFr^[P+X+1+IPStr]:=Z;
+     Inc(X,2);
+    End;
+    Inc(P,IPStr*2); Inc(Y,2);
+   End;
+  End Else Begin
+   P:=IPPP Div 2;
+   Y:=0;
+   While Y<8 Do Begin
+    X:=0;
+    While X<8 Do Begin
+     Z:=IPW16;
+     IPPut(P+X,Z); IPPut(P+X+1,Z); IPPut(P+X+IPStr,Z); IPPut(P+X+1+IPStr,Z);
+     Inc(X,2);
+    End;
+    Inc(P,IPStr*2); Inc(Y,2);
+   End;
+  End;
+  13: If IP16=0 Then Begin
+   If IPEnd-IPSP<4 Then Begin IPOp:=False; Exit; End;
+   For Y:=0 To 7 Do Begin
+    If (Y And 3)=0 Then Begin Pv[0]:=IPB; Pv[1]:=IPB; End;
+    FillChar(IPFr^[P],4,Pv[0]); FillChar(IPFr^[P+4],4,Pv[1]);
+    Inc(P,IPStr);
+   End;
+  End Else Begin
+   P:=IPPP Div 2;
+   For Y:=0 To 7 Do Begin
+    If (Y And 3)=0 Then Begin Pv[0]:=IPW16; Pv[1]:=IPW16; End;
+    For X:=0 To 7 Do IPPut(P+X,Pv[X Shr 2]);
+    Inc(P,IPStr);
+   End;
+  End;
+  14: If IP16=0 Then Begin
+   Z:=IPB;
+   For Y:=0 To 7 Do Begin FillChar(IPFr^[P],8,Z); Inc(P,IPStr); End;
+  End Else Begin
+   P:=IPPP Div 2;
+   Z:=IPW16;
+   For Y:=0 To 7 Do Begin
+    For X:=0 To 7 Do IPPut(P+X,Z);
+    Inc(P,IPStr);
+   End;
+  End;
+  15: If IP16=0 Then Begin
+   Pv[0]:=IPB; Pv[1]:=IPB;
+   For Y:=0 To 7 Do Begin
+    X:=0;
+    While X<8 Do Begin
+     IPFr^[P]:=Pv[Y And 1]; Inc(P); IPFr^[P]:=Pv[1-(Y And 1)]; Inc(P);
+     Inc(X,2);
+    End;
+    Inc(P,IPLine);
+   End;
+  End Else IPOp:=IPCopyFrom(IPSec,IPFr,IPSecOk,0,0);
+ End;
+End;
+{ format 0x06 }
+Procedure IPFormat06;
+Var Pass,X,Y,Line,Opc,MP,Offx,Offy,Rem: LongInt;
+Function MapW: LongInt;
+Begin
+ If IPMapLen-MP<2 Then Begin MP:=IPMapLen; MapW:=0; Exit; End;
+ MapW:=IPBuf^[IPMap+MP]+IPBuf^[IPMap+MP+1]*256; Inc(MP,2);
+End;
+Begin
+ IPLine:=IPStr-8;
+ IPUpper:=(IPH-8)*IPLS+(IPW-8)*(1+IP16);
+ For Pass:=0 To 1 Do Begin
+  MP:=0;
+  Y:=0;
+  While Y<IPH Do Begin
+   X:=0;
+   While X<IPW Do Begin
+    Opc:=MapW; If Opc>32767 Then Dec(Opc,65536);
+    IPPP:=X+Y*IPLS;
+    If Pass=0 Then Begin
+     If Opc=0 Then Begin
+      For Line:=0 To 7 Do Begin IPGetBuf(PEABuffer(@IPFr^[IPPP+Line*IPLS]),8); End;
+     End Else Begin
+      If IPFrameNum>2 Then IPCopyFrom(IPSec,IPFr,IPSecOk,0,0);
+     End;
+    End Else Begin
+     If Opc<0 Then Begin
+      Rem:=(Opc And $FFFF)-$C000;
+      Offx:=Rem Mod IPW; Offy:=Rem Div IPW;
+      IPCopyFrom(IPLast,IPFr,IPLastOk,Offx,Offy);
+     End Else If Opc>0 Then Begin
+      Rem:=(Opc And $FFFF)-$4000;
+      Offx:=Rem Mod IPW; Offy:=Rem Div IPW;
+      IPCopyFrom(IPFr,IPFr,True,Offx,Offy);
+     End;
+    End;
+    Inc(X,8);
+   End;
+   Inc(Y,8);
+  End;
+ End;
+End;
+
+{ format 0x10 }
+Procedure IPFormat10;
+Var Pass,X,Y,Line,Opc,Skip,Offx,Offy,Rem,MP,SP2: LongInt; Changed: Boolean; T: PEABuffer;
+Function MapW: LongInt;
+Begin
+ If IPMapLen-MP<2 Then Begin MP:=IPMapLen; MapW:=0; Exit; End;
+ MapW:=IPBuf^[IPMap+MP]+IPBuf^[IPMap+MP+1]*256; Inc(MP,2);
+End;
+Function SkipW: LongInt;
+Begin
+ If IPSkipLen-SP2<2 Then Begin SP2:=IPSkipLen; SkipW:=0; Exit; End;
+ SkipW:=IPBuf^[IPSkipMap+SP2]+IPBuf^[IPSkipMap+SP2+1]*256; Inc(SP2,2);
+End;
+Function S16(V: LongInt): LongInt; Begin V:=V And $FFFF; If V>32767 Then V:=V-65536; S16:=V; End;
+Begin
+ Inc(IPSP,14); If IPSP>IPEnd Then IPSP:=IPEnd;
+ IPLine:=IPStr-8;
+ IPUpper:=(IPH-8)*IPLS+(IPW-8)*(1+IP16);
+ For Pass:=0 To 1 Do Begin
+  MP:=0; SP2:=0;
+  Skip:=S16(SkipW);
+  Y:=0;
+  While Y<IPH Do Begin
+   X:=0;
+   While X<IPW Do Begin
+    IPPP:=X+Y*IPLS;
+    While Skip<=0 Do Begin
+     If (Skip<>-32768) And (Skip<>0) Then Begin
+      Opc:=S16(MapW);
+      If Pass=0 Then Begin
+       If Opc=0 Then For Line:=0 To 7 Do IPGetBuf(PEABuffer(@IPDecCur^[IPPP+Line*IPLS]),8);
+      End Else Begin
+       If Opc<0 Then Begin
+        Rem:=(Opc And $FFFF)-$C000; Offx:=Rem Mod IPW; Offy:=Rem Div IPW;
+        IPCopyFrom(IPDecPrev,IPDecCur,True,Offx,Offy);
+       End Else If Opc>0 Then Begin
+        Rem:=(Opc And $FFFF)-$4000; Offx:=Rem Mod IPW; Offy:=Rem Div IPW;
+        IPCopyFrom(IPDecCur,IPDecCur,True,Offx,Offy);
+       End;
+      End;
+      Break;
+     End;
+     If IPSkipLen-SP2<2 Then Exit;
+     Skip:=S16(SkipW);
+    End;
+    Skip:=S16(Skip*2);
+    Inc(X,8);
+   End;
+   Inc(Y,8);
+  End;
+ End;
+ SP2:=0; Skip:=S16(SkipW);
+ Y:=0;
+ While Y<IPH Do Begin
+  X:=0;
+  While X<IPW Do Begin
+   Changed:=False;
+   IPPP:=X+Y*IPLS;
+   While Skip<=0 Do Begin
+    If (Skip<>-32768) And (Skip<>0) Then Begin Changed:=True; Break; End;
+    If IPSkipLen-SP2<2 Then Exit;
+    Skip:=S16(SkipW);
+   End;
+   If Changed Then IPCopyFrom(IPDecCur,IPFr,True,0,0)
+   Else If IPFrameNum<>0 Then IPCopyFrom(IPLast,IPFr,IPLastOk,0,0);
+   Skip:=S16(Skip*2);
+   Inc(X,8);
+  End;
+  Inc(Y,8);
+ End;
+ T:=IPDecPrev; IPDecPrev:=IPDecCur; IPDecCur:=T;
+End;
+
+{ format 0x11 }
+Procedure IPFormat11;
+Var X,Y,Opc,BitPos,BitsLeft,I,Bit: LongInt;
+Begin
+ Inc(IPSP,14); If IPSP>IPEnd Then IPSP:=IPEnd;
+ If IP16<>0 Then Begin
+  IPMP:=IPSP;
+  I:=IPW16; { avance stream_ptr de 2 ; mv_ptr part de la position avant lecture }
+  Inc(IPMP,I); If IPMP>IPEnd Then IPMP:=IPEnd;
+  IPStr:=IPLS Div 2;
+ End;
+ IPLine:=IPStr-8;
+ IPUpper:=(IPH-8)*IPLS+(IPW-8)*(1+IP16);
+ BitPos:=0; BitsLeft:=IPMapLen*8;
+ Y:=0;
+ While Y<IPH Do Begin
+  X:=0;
+  While X<IPW Do Begin
+   If BitsLeft-BitPos<4 Then Exit;
+   Opc:=0;
+   For I:=0 To 3 Do Begin
+    Bit:=(IPBuf^[IPMap+((BitPos+I) Shr 3)] Shr ((BitPos+I) And 7)) And 1;
+    Opc:=Opc Or (Bit Shl I);
+   End;
+   Inc(BitPos,4);
+   IPPP:=X*(1+IP16)+Y*IPLS;
+   If Not IPOp(Opc) Then Exit;
+   Inc(X,8);
+  End;
+  Inc(Y,8);
+ End;
+End;
+
+{ ipvideo_decode_frame ; -1 erreur, 0 decode sans sortie, 1 image a sortir }
+Function IPDecode(Pk: PEABuffer; Len: LongInt; PalNew: Boolean): LongInt;
+Var Fmt,Send,VSize,DSize,SSize,Z: LongInt; T: PEABuffer;
+Begin
+ IPDecode:=-1;
+ If Not IPInit Then Begin
+  IPInit:=True;
+  IPDecCur:=IPNew; IPDecPrev:=IPNew;
+ End;
+ If Len<8 Then Exit;
+ IPBuf:=Pk;
+ Fmt:=Pk^[0]; Send:=Pk^[1]; VSize:=Pk^[2]+Pk^[3]*256; DSize:=Pk^[4]+Pk^[5]*256; SSize:=Pk^[6]+Pk^[7]*256;
+ IPMap:=0; IPMapLen:=0; IPSkipMap:=0; IPSkipLen:=0;
+ Case Fmt Of
+  6: Begin
+   If DSize<>0 Then Exit;
+   If SSize<>0 Then Exit;
+   If IP16<>0 Then Exit;
+   DSize:=(IPW Div 8)*(IPH Div 8)*2;
+   IPMap:=8+14; IPMapLen:=DSize;
+   Dec(VSize,DSize+14);
+   If (VSize<=0) Or (DSize=0) Then Exit;
+   If Len<8+DSize+14+VSize Then Exit;
+   IPSP:=8+DSize+14; IPEnd:=IPSP+VSize;
+  End;
+  16: Begin
+   If DSize=0 Then Exit;
+   If SSize=0 Then Exit;
+   If IP16<>0 Then Exit;
+   If Len<8+VSize+DSize+SSize Then Exit;
+   IPSP:=8; IPEnd:=8+VSize; IPMap:=8+VSize; IPMapLen:=DSize; IPSkipMap:=8+VSize+DSize; IPSkipLen:=SSize;
+  End;
+  17: Begin
+   If DSize=0 Then Exit;
+   If SSize<>0 Then Exit;
+   If Len<8+VSize+DSize Then Exit;
+   IPSP:=8; IPEnd:=8+VSize; IPMap:=8+VSize; IPMapLen:=DSize;
+  End;
+ Else IPSP:=0; IPEnd:=0;
+ End;
+ If Len<8+DSize+VSize+SSize Then Exit;
+ IPCur:=IPNew; IPFr:=IPCur;
+ Case Fmt Of
+  6: IPFormat06;
+  16: IPFormat10;
+  17: IPFormat11;
+ End;
+ If Send<>0 Then IPDecode:=1 Else IPDecode:=0;
+ { permutation des images }
+ T:=IPSec; If IPSecOk Then IPRelease(T);
+ IPSec:=IPLast; IPSecOk:=IPLastOk;
+ IPLast:=IPCur; IPLastOk:=True;
+ If Send<>0 Then Inc(IPFrameNum);
+End;
+
+{ Mode 3 : audio vers WAV ; sinon video (PAL8 ou RGB555) vers Y4M/PNG/BMP }
+Procedure DecodeMVE(Const Source,Target: String; Mode: LongInt);
+Var
+ Msg: String; Kind,I,Y,N,Fmt,RN,RD,NPk,PIdx,K,Ch,Sz,Pred0,Pred1,Cur,OutN,Take: LongInt; PP: Int64;
+ Dts,Dur: PTLArr; Szs: PGFArr; Out: PEABuffer; NbF,NbP,DurT: Int64; Begun,AudioPresent: Boolean; Pred: Array[0..1] Of LongInt;
+ Rate: LongInt; V: LongInt; Ok: LongInt;
+Begin
+ NVLoad(Source,MVF,MVSize);
+ Msg:=MVHeader; If Msg<>'' Then Fail(Msg);
+ AudioPresent:=MVAudType<>0;
+ If Mode=3 Then Begin
+  If Not AudioPresent Then Fail('ipmovie: aucun flux audio.');
+  EAReset; OpenWrite(Target); ADPCMWaveHeader(MVAudRate,MVAudChan,0);
+  Rate:=MVAudRate; Ch:=MVAudChan; Pred[0]:=0; Pred[1]:=0;
+  While True Do Begin
+   Kind:=MVReadPacket;
+   If Kind=0 Then Break;
+   If Kind=1 Then Begin
+    Case MVAudType Of
+     1: Begin
+      N:=MVPkLen; Take:=Ch*2;
+      If N>=Take Then Begin
+       N:=N-(N Mod Take); I:=0;
+       While I+1<N Do Begin V:=MVPk^[I]+MVPk^[I+1]*256; If V>=32768 Then Dec(V,65536); EAPut(V); Inc(I,2); End;
+      End;
+     End;
+     2: Begin
+      N:=MVPkLen; Take:=Ch;
+      If N>=Take Then Begin
+       N:=N-(N Mod Take);
+       For I:=0 To N-1 Do EAPut((MVPk^[I]-128)*256);
+      End;
+     End;
+     3: Begin
+      Sz:=MVPkLen;
+      If (Ch=2) And Odd(Sz) Then Dec(Sz);
+      OutN:=Sz-6-Ch;
+      If OutN>0 Then Begin
+       Cur:=6;
+       For K:=0 To Ch-1 Do Begin
+        V:=MVPk^[Cur]+MVPk^[Cur+1]*256; If V>=32768 Then Dec(V,65536);
+        Pred[K]:=V; Inc(Cur,2); EAPut(V);
+       End;
+       K:=0; I:=Ch;
+       While I<OutN Do Begin
+        Pred[K]:=Pred[K]+MVDelta[MVPk^[Cur]]; Inc(Cur);
+        If Pred[K]>32767 Then Pred[K]:=32767 Else If Pred[K]<-32768 Then Pred[K]:=-32768;
+        EAPut(Pred[K]);
+        If Ch=2 Then K:=K Xor 1;
+        Inc(I);
+       End;
+      End;
+     End;
+    End;
+   End;
+   MVFreePk;
+  End;
+  EAFlush; FreeMem(MVF,MVSize+64);
+  If EAWritten=0 Then Fail('ipmovie: aucune donnee audio.');
+  ADPCMPatchHeader(Rate,Ch,EAWritten); CloseRead; CloseWrite;
+  Exit;
+ End;
+ If (MVVW<=0) Or (MVVH<=0) Or (MVVW>4096) Or (MVVH>4096) Then Fail('interplayvideo: dimensions incorrectes.');
+ { premier passage : horodatage des paquets video pour r_frame_rate }
+ GetMem(Dts,2048*8); GetMem(Dur,2048*8); GetMem(Szs,2048*4); NPk:=0;
+ While NPk<2048 Do Begin
+  Kind:=MVReadPacket;
+  If Kind=0 Then Break;
+  If Kind=2 Then Begin Dts^[NPk]:=MVPktPts; Dur^[NPk]:=0; Szs^[NPk]:=MVPkLen; Inc(NPk); End;
+  MVFreePk;
+ End;
+ MVFreePk;
+ TLRFrameRate(Dts,Dur,Szs,NPk,1,1000000,True,0,0,0,0,RN,RD);
+ FreeMem(Dts,2048*8); FreeMem(Dur,2048*8); FreeMem(Szs,2048*4);
+ DurT:=(Int64(1000000)*RD) Div RN;
+ { second passage : decodage }
+ Msg:=MVHeader; If Msg<>'' Then Fail(Msg);
+ IP16:=Ord(MVVBpp=16); IPW:=MVVW; IPH:=MVVH;
+ IPLS:=(IPW*(1+IP16)+63) And Not 63; IPStr:=IPLS Div (1+IP16); IPFSize:=IPLS*IPH;
+ IPFrameNum:=0; IPInit:=False; IPNFree:=0; IPLastOk:=False; IPSecOk:=False; IPLast:=Nil; IPSec:=Nil;
+ FillChar(IPPal,SizeOf(IPPal),0);
+ If IP16=0 Then Fmt:=0 Else Fmt:=2;
+ NVBegin(Mode,Target,IPW,IPH,Fmt,RN,RD); NVHdrOk:=True;
+ GetMem(Out,NVFrameBytes+64);
+ CFTbN:=1; CFTbD:=1000000; CFFn:=RN; CFFd:=RD; CFNext:=0; CFFrameNo:=0; CFHist[0]:=0; CFHist[1]:=0; CFHist[2]:=0; CFLastDropped:=False;
+ CFVscfr:=Not AudioPresent; Begun:=False;
+ While True Do Begin
+  Kind:=MVReadPacket;
+  If Kind=0 Then Break;
+  If Kind=2 Then Begin
+   If (MVVW<>IPW) Or (MVVH<>IPH) Then Fail('interplayvideo: changement de resolution non pris en charge.');
+   If MVPktPalOk Then Move(MVPktPal,IPPal,SizeOf(IPPal));
+   Ok:=IPDecode(MVPk,MVPkLen,MVPktPalOk);
+   If Ok=1 Then Begin
+    If IP16=0 Then Begin
+     For Y:=0 To IPH-1 Do Move(IPCur^[Y*IPLS],Out^[Y*IPW],IPW);
+     For I:=0 To 255 Do Begin NVPalR[I]:=(IPPal[I] Shr 16) And 255; NVPalG[I]:=(IPPal[I] Shr 8) And 255; NVPalB[I]:=IPPal[I] And 255; End;
+    End Else
+     For Y:=0 To IPH-1 Do Move(IPCur^[Y*IPLS],Out^[Y*IPW*2],IPW*2);
+    CFSync(MVPktPts,DurT,NbF,NbP);
+    NVEmitN(Out,NbP,NbF);
+    Inc(CFNext,NbF); Inc(CFFrameNo,NbF); Begun:=True;
+    If NVDone Then Begin MVFreePk; Break; End;
+   End;
+  End;
+  MVFreePk;
+ End;
+ If Begun And Not NVDone Then CFFlush(Out);
+ FreeMem(MVF,MVSize+64);
+ NVFinish('interplayvideo');
+End;
+
 
 Procedure DecodeAVIX(Const Source,Target: String; Mode,Kind: LongInt);
 Var Pos,PkPos,PkLen,RN,RD,I,Y,X,Cw,Ch,Bs,Msg2: LongInt; Ok,FFBegun: Boolean; Msg: String; PIdx: LongInt; NbF,NbP: Int64;
@@ -46231,6 +47182,7 @@ Begin
  WriteLn(' DE avi             AVI H264/MPEG4, AAC/MP3 (copie); decodeurs FFV1, FLASHSV, HUFFYUV/FFVHUFF, Autodesk RLE, FRAPS, H263/H261/FLV1');
  WriteLn(' DE flv             FLV: video Sorenson Spark (decodeur I/P complet) ou Screen Video vers Y4M/PNG/BMP; FLV1 intra natif en sortie; extraction image H264 CAVLC');
  WriteLn(' D  idcin           id Cinematic (video idcinvideo PAL8 vers Y4M/PNG/BMP, audio PCM vers WAV)');
+ WriteLn(' D  ipmovie         Interplay MVE (video interplayvideo PAL8/RGB555 vers Y4M/PNG/BMP, audio PCM/interplay_dpcm vers WAV)');
  WriteLn(' D  flic            FLI/FLC/FLX animation (video flic 8/15/16/24 bits; audio TFTD non extrait)');
  WriteLn(' D  g726            G.726 big-endian brut (-code_size 2..5, -sample_rate; decodage vers WAV/MP3/...)');
  WriteLn(' D  g726le          G.726 little-endian brut (-code_size 2..5, -sample_rate; decodage vers WAV/MP3/...)');
@@ -46583,6 +47535,8 @@ BEGIN
    WriteLn('D V D  aasc            Autodesk RLE (AVI AASC/AAS4, 8/16/24 bits)');
    WriteLn('DEV    flv             Flash Video (FLV1/Sorenson Spark: decodeur complet I/P (FLV, AVI); encodeur images intra)');
    WriteLn('D V    kmvc            Karl Morton''s video codec (AVI KMVC, PAL8 <= 320x200)');
+   WriteLn('D V D  interplayvideo  Interplay MVE video (conteneur .mve, formats 0x06/0x10/0x11, 8 et 16 bits)');
+   WriteLn('D A    interplay_dpcm  DPCM Interplay (conteneur .mve, mono/stereo)');
    WriteLn('D V D  idcinvideo      id Quake II CIN video (conteneur .cin, tables Huffman)');
    WriteLn('D V    indeo3          Intel Indeo 3 (AVI IV31/IV32, yuv410p; -pix_fmt yuv420p)');
    WriteLn('D V D  indeo2          Intel Indeo 2 (AVI RT21, yuv410p; -pix_fmt yuv420p, -filter_threads)');
@@ -46810,7 +47764,7 @@ BEGIN
  End;
  NVKind:=0;
  If InputFormat='bethsoftvid' Then NVKind:=1 Else If InputFormat='bfi' Then NVKind:=2 Else If InputFormat='c93' Then NVKind:=3
- Else If InputFormat='bmp' Then NVKind:=4 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22 Else If (InputFormat='flic') And Not IsHTTP(InputPath) Then NVKind:=23 Else If (InputFormat='gif') And Not IsHTTP(InputPath) Then NVKind:=25 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=2) Then NVKind:=27 Else If (InputFormat='h263') And Not IsHTTP(InputPath) Then NVKind:=28 Else If (InputFormat='h261') And Not IsHTTP(InputPath) Then NVKind:=29 Else If (InputFormat='idcin') And Not IsHTTP(InputPath) Then NVKind:=30 Else If (InputFormat='h264') And Not IsHTTP(InputPath) Then NVKind:=33
+ Else If InputFormat='bmp' Then NVKind:=4 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22 Else If (InputFormat='flic') And Not IsHTTP(InputPath) Then NVKind:=23 Else If (InputFormat='gif') And Not IsHTTP(InputPath) Then NVKind:=25 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=2) Then NVKind:=27 Else If (InputFormat='h263') And Not IsHTTP(InputPath) Then NVKind:=28 Else If (InputFormat='h261') And Not IsHTTP(InputPath) Then NVKind:=29 Else If (InputFormat='idcin') And Not IsHTTP(InputPath) Then NVKind:=30 Else If (InputFormat='ipmovie') And Not IsHTTP(InputPath) Then NVKind:=38 Else If (InputFormat='h264') And Not IsHTTP(InputPath) Then NVKind:=33
  Else If (InputFormat='avi') And Not IsHTTP(InputPath) Then Begin
   AsvTag:=AVIVideoFourCC(Intermediate);
   If AsvTag='CSCD' Then NVKind:=5 Else If (AsvTag='tscc') Or (AsvTag='TSCC') Then NVKind:=6
@@ -46835,7 +47789,7 @@ BEGIN
   Else If InputFormat='avi' Then Begin If H4AviIsH264(AVIVideoFourCC(Intermediate)) Then NVKind:=35; End
   Else If FLVVideoCodec(Intermediate)=7 Then NVKind:=36;
  End;
- If (NVKind<>0) And Not (((NVKind=1) Or (NVKind=2) Or (NVKind=15) Or (NVKind=17) Or (NVKind=22) Or (NVKind=30)) And NVAudioOut) Then Begin
+ If (NVKind<>0) And Not (((NVKind=1) Or (NVKind=2) Or (NVKind=15) Or (NVKind=17) Or (NVKind=22) Or (NVKind=30) Or (NVKind=38)) And NVAudioOut) Then Begin
   If NoVideo Or (VideoCodec='copy') Or (AudioCodec<>'') Or HasBitrate Or (RequestedRate<>0) Or
    (RequestedChannels<>0) Or (ImageWidth<>0) Or IsHTTP(InputPath) Then
    Fail('Decodage video local sans copie, sans -vn ni conversion audio requis.');
@@ -47186,6 +48140,7 @@ BEGIN
    If InputFormat='bfi' Then DecodeBFI(InputPath,Temps[0],3) Else
    If InputFormat='dsicin' Then DecodeDSICin(InputPath,Temps[0],3) Else
    If InputFormat='idcin' Then DecodeIdcin(InputPath,Temps[0],3) Else
+   If InputFormat='ipmovie' Then DecodeMVE(InputPath,Temps[0],3) Else
    If (InputFormat='aiff') And IsAIFFIma4(InputPath) Then DecodeAIFFIma4(InputPath,Temps[0]) Else
    If InputFormat='aiff' Then DecodeAIFF(InputPath,Temps[0]) Else
    If InputFormat='voc' Then DecodeVOC(InputPath,Temps[0]) Else
