@@ -17962,6 +17962,7 @@ Var
  NVMode,NVW,NVH,NVFmt,NVFrames,NVFpsN,NVFpsD,NVSarN,NVSarD: LongInt;
  NVHasAlpha,NVOpened,NVDone,NVYC,NVInitDup: Boolean; NVTarget: String;
  NVPalR,NVPalG,NVPalB: Array[0..255] Of Byte;
+ NVPalN: LongInt;
  NVVN,NVVD,NVSubX,NVSubY,NVCW,NVCH: LongInt; NVTo420,NVHdrOk: Boolean; NVIl: Char; NVBT709,NVFullRng: Boolean; NVYTag: String[80];
  NVLast: PEABuffer; NVLastSize,NVGap: LongInt; NVHaveLast: Boolean;
  NVLastPalR,NVLastPalG,NVLastPalB,NVSavePalR,NVSavePalG,NVSavePalB: Array[0..255] Of Byte;
@@ -17987,7 +17988,7 @@ Begin
  Case NVFmt Of
   0: Begin V:=P^[At]; R:=NVPalR[V]; G:=NVPalG[V]; B:=NVPalB[V]; End;
   1,3: Begin B:=P^[At]; G:=P^[At+1]; R:=P^[At+2]; End;
-  4,10: Begin R:=P^[At]; G:=R; B:=R; End;
+  4,10,11: Begin R:=P^[At]; G:=R; B:=R; End;
   7,8: Begin
    Q:=At; If NVFmt=8 Then Q:=At Shr 1;
    PX:=Q Mod NVW; PY:=Q Div NVW;
@@ -18027,48 +18028,1085 @@ Begin
  End;
 End;
 
-Procedure NVWritePNG(Rgb: PEABuffer; Bpp: LongInt);
+{ ---- Port de zlib 1.3 (deflate.c + trees.c), fenetre 15 bits, memLevel 8, zlib wrap ---- }
+{ Sortie identique octet pour octet a deflateInit(level) + deflate(NO_FLUSH/FINISH). }
+
+Const
+ ZLWSize = 32768;
+ ZLWMask = 32767;
+ ZLHashMask = 32767;
+ ZLHashShift = 5;
+ ZLLitBuf = 16384;
+ ZLPendSize = 65536;
+ ZLSymEnd = 49149;
+ ZLWinSize = 65536;
+ ZLMaxDist = 32506;
+ ZLMinLook = 262;
+ ZLHeapSize = 573;
+ ZLCfg: Array[0..9,0..3] Of LongInt = (
+  (0,0,0,0),(4,4,8,4),(4,5,16,8),(4,6,32,32),(4,4,16,16),(8,16,32,32),
+  (8,16,128,128),(8,32,128,256),(32,128,258,1024),(32,258,258,4096));
+ ZLExtraL: Array[0..28] Of LongInt = (0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0);
+ ZLExtraD: Array[0..29] Of LongInt = (0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13);
+ ZLExtraBL: Array[0..18] Of LongInt = (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,3,7);
+ ZLBLOrder: Array[0..18] Of Byte = (16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15);
+
+Type
+ ZLCt = Record
+  Fc,Dl: Word;
+ End;
+ ZLTree = Array[0..572] Of ZLCt;
+ ZLWArr = Array[0..65535] Of Word;
+ PZLWArr = ^ZLWArr;
+
 Var
- Raw: PEABuffer; Total,Row,Blocks,B,Take,At,I,Size,A,Bv,W,H: LongInt;
- Out: Array[0..255] Of Byte; Used: Integer; Crc: Int64;
-Procedure PutB(V: LongInt);Begin Out[Used]:=V And 255; Inc(Used); If Used>=250 Then Begin WriteBytes(Out,Used); Used:=0; End; End;
-Procedure PutBE32(V: LongInt);Begin PutB(V Shr 24); PutB(V Shr 16); PutB(V Shr 8); PutB(V); End;
-Procedure CrcByte(V: LongInt);
+ ZLIn,ZLOut,ZLWin,ZLPend: PEABuffer;
+ ZLInPos,ZLAvailIn,ZLOutPos,ZLAvailOut: LongInt;
+ ZLTotalIn,ZLTotalOut,ZLAdler: Int64;
+ ZLPrev,ZLHead: PZLWArr;
+ ZLDynL,ZLDynD,ZLBlT,ZLStL,ZLStD: ZLTree;
+ ZLLMax,ZLDMax,ZLBMax: LongInt;
+ ZLHeap: Array[0..572] Of LongInt;
+ ZLDepth: Array[0..572] Of Byte;
+ ZLBlCount: Array[0..15] Of Word;
+ ZLLenCode: Array[0..255] Of Byte;
+ ZLDistCode: Array[0..511] Of Byte;
+ ZLBaseLen: Array[0..28] Of LongInt;
+ ZLBaseDist: Array[0..29] Of LongInt;
+ ZLStaticDone: Boolean;
+ ZLHeapLen,ZLHeapMax: LongInt;
+ ZLOptLen,ZLStaticLen: Int64;
+ ZLSymNext,ZLMatches,ZLPending,ZLPendOut: LongInt;
+ ZLBiBuf,ZLBiValid: LongInt;
+ ZLStatus,ZLLevel,ZLLastFlush,ZLWrap: LongInt;
+ ZLStrStart,ZLBlockStart,ZLLookahead,ZLInsert,ZLInsH: LongInt;
+ ZLMatchLen,ZLPrevLen,ZLMatchStart,ZLPrevMatch,ZLMatchAvail: LongInt;
+ ZLMaxLazy,ZLGood,ZLNice,ZLMaxChain: LongInt;
+ ZLHighWater: LongInt;
+
+Procedure ZLPutByte(C: LongInt);Begin
+ ZLPend^[ZLPending]:=C And 255; Inc(ZLPending);
+End;
+
+Procedure ZLPutShort(W: LongInt);Begin
+ ZLPutByte(W And 255); ZLPutByte((W Shr 8) And 255);
+End;
+
+Procedure ZLSendBits(Value,Len: LongInt);Begin
+ Value:=Value And $FFFF;
+ If ZLBiValid>16-Len Then Begin
+  ZLBiBuf:=(ZLBiBuf Or (Value Shl ZLBiValid)) And $FFFF;
+  ZLPutShort(ZLBiBuf);
+  ZLBiBuf:=Value Shr (16-ZLBiValid);
+  ZLBiValid:=ZLBiValid+Len-16;
+ End
+  Else
+ Begin
+  ZLBiBuf:=(ZLBiBuf Or (Value Shl ZLBiValid)) And $FFFF;
+  ZLBiValid:=ZLBiValid+Len;
+ End;
+End;
+
+Procedure ZLBiFlush;Begin
+ If ZLBiValid=16 Then Begin
+  ZLPutShort(ZLBiBuf); ZLBiBuf:=0; ZLBiValid:=0;
+ End
+  Else
+ If ZLBiValid>=8 Then Begin
+  ZLPutByte(ZLBiBuf); ZLBiBuf:=ZLBiBuf Shr 8; ZLBiValid:=ZLBiValid-8;
+ End;
+End;
+
+Procedure ZLBiWindup;Begin
+ If ZLBiValid>8 Then ZLPutShort(ZLBiBuf)
+  Else
+ If ZLBiValid>0 Then ZLPutByte(ZLBiBuf);
+ ZLBiBuf:=0; ZLBiValid:=0;
+End;
+
+Function ZLBiReverse(Code,Len: LongInt): LongInt;
+Var
+ Res: LongInt;
 Begin
+ Res:=0;
+ Repeat
+  Res:=Res Or (Code And 1); Code:=Code Shr 1; Res:=Res Shl 1; Dec(Len);
+ Until Len<=0;
+ ZLBiReverse:=Res Shr 1;
+End;
+
+Procedure ZLGenCodes(Var Tree: ZLTree; MaxCode: LongInt);
+Var
+ NextCode: Array[0..15] Of LongInt;
+ Code,Bits,N,Len: LongInt;
+Begin
+ Code:=0;
+ For Bits:=1 To 15 Do Begin
+  Code:=((Code+ZLBlCount[Bits-1]) Shl 1) And $FFFF; NextCode[Bits]:=Code;
+ End;
+ For N:=0 To MaxCode Do Begin
+  Len:=Tree[N].Dl;
+  If Len<>0 Then Begin
+   Tree[N].Fc:=ZLBiReverse(NextCode[Len],Len); NextCode[Len]:=(NextCode[Len]+1) And $FFFF;
+  End;
+ End;
+End;
+
+Procedure ZLStaticInit;
+Var
+ N,Bits,Length,Code,Dist: LongInt;
+Begin
+ If ZLStaticDone Then Exit;
+ Length:=0;
+ For Code:=0 To 27 Do Begin
+  ZLBaseLen[Code]:=Length;
+  For N:=0 To (1 Shl ZLExtraL[Code])-1 Do Begin
+   ZLLenCode[Length]:=Code; Inc(Length);
+  End;
+ End;
+ ZLLenCode[Length-1]:=28;
+ Dist:=0;
+ For Code:=0 To 15 Do Begin
+  ZLBaseDist[Code]:=Dist;
+  For N:=0 To (1 Shl ZLExtraD[Code])-1 Do Begin
+   ZLDistCode[Dist]:=Code; Inc(Dist);
+  End;
+ End;
+ Dist:=Dist Shr 7;
+ For Code:=16 To 29 Do Begin
+  ZLBaseDist[Code]:=Dist Shl 7;
+  For N:=0 To (1 Shl (ZLExtraD[Code]-7))-1 Do Begin
+   ZLDistCode[256+Dist]:=Code; Inc(Dist);
+  End;
+ End;
+ For Bits:=0 To 15 Do ZLBlCount[Bits]:=0;
+ N:=0;
+ While N<=143 Do Begin ZLStL[N].Dl:=8; Inc(ZLBlCount[8]); Inc(N); End;
+ While N<=255 Do Begin ZLStL[N].Dl:=9; Inc(ZLBlCount[9]); Inc(N); End;
+ While N<=279 Do Begin ZLStL[N].Dl:=7; Inc(ZLBlCount[7]); Inc(N); End;
+ While N<=287 Do Begin ZLStL[N].Dl:=8; Inc(ZLBlCount[8]); Inc(N); End;
+ ZLGenCodes(ZLStL,287);
+ For N:=0 To 29 Do Begin
+  ZLStD[N].Dl:=5; ZLStD[N].Fc:=ZLBiReverse(N,5);
+ End;
+ ZLStaticDone:=True;
+End;
+
+Function ZLDCode(Dist: LongInt): LongInt;Begin
+ If Dist<256 Then ZLDCode:=ZLDistCode[Dist] Else ZLDCode:=ZLDistCode[256+(Dist Shr 7)];
+End;
+
+Procedure ZLInitBlock;
+Var
+ N: LongInt;
+Begin
+ For N:=0 To 285 Do ZLDynL[N].Fc:=0;
+ For N:=0 To 29 Do ZLDynD[N].Fc:=0;
+ For N:=0 To 18 Do ZLBlT[N].Fc:=0;
+ ZLDynL[256].Fc:=1;
+ ZLOptLen:=0; ZLStaticLen:=0; ZLSymNext:=0; ZLMatches:=0;
+End;
+
+Function ZLSmaller(Var Tree: ZLTree; N,M: LongInt): Boolean;Begin
+ ZLSmaller:=(Tree[N].Fc<Tree[M].Fc) Or ((Tree[N].Fc=Tree[M].Fc) And (ZLDepth[N]<=ZLDepth[M]));
+End;
+
+Procedure ZLPqDownHeap(Var Tree: ZLTree; K: LongInt);
+Var
+ V,J: LongInt;
+Begin
+ V:=ZLHeap[K]; J:=K Shl 1;
+ While J<=ZLHeapLen Do Begin
+  If (J<ZLHeapLen) And ZLSmaller(Tree,ZLHeap[J+1],ZLHeap[J]) Then Inc(J);
+  If ZLSmaller(Tree,V,ZLHeap[J]) Then Break;
+  ZLHeap[K]:=ZLHeap[J]; K:=J; J:=J Shl 1;
+ End;
+ ZLHeap[K]:=V;
+End;
+
+{ Which: 0 = litteraux/longueurs, 1 = distances, 2 = longueurs de code }
+Procedure ZLGenBitLen(Var Tree: ZLTree; Which,MaxCode: LongInt);
+Var
+ Base,MaxLength,H,N,M,Bits,XBits,Overflow,F: LongInt;
+Begin
+ Overflow:=0;
+ Case Which Of
+  0: Begin Base:=257; MaxLength:=15; End;
+  1: Begin Base:=0; MaxLength:=15; End;
+  Else Begin Base:=0; MaxLength:=7; End;
+ End;
+ For Bits:=0 To 15 Do ZLBlCount[Bits]:=0;
+ Tree[ZLHeap[ZLHeapMax]].Dl:=0;
+ For H:=ZLHeapMax+1 To ZLHeapSize-1 Do Begin
+  N:=ZLHeap[H];
+  Bits:=Tree[Tree[N].Dl].Dl+1;
+  If Bits>MaxLength Then Begin Bits:=MaxLength; Inc(Overflow); End;
+  Tree[N].Dl:=Bits;
+  If N<=MaxCode Then Begin
+   Inc(ZLBlCount[Bits]);
+   XBits:=0;
+   If N>=Base Then Begin
+    Case Which Of
+     0: XBits:=ZLExtraL[N-Base];
+     1: XBits:=ZLExtraD[N-Base];
+     Else XBits:=ZLExtraBL[N-Base];
+    End;
+   End;
+   F:=Tree[N].Fc;
+   ZLOptLen:=ZLOptLen+Int64(F)*(Bits+XBits);
+   If Which=0 Then ZLStaticLen:=ZLStaticLen+Int64(F)*(ZLStL[N].Dl+XBits)
+    Else If Which=1 Then ZLStaticLen:=ZLStaticLen+Int64(F)*(ZLStD[N].Dl+XBits);
+  End;
+ End;
+ If Overflow=0 Then Exit;
+ H:=ZLHeapSize;
+ Repeat
+  Bits:=MaxLength-1;
+  While ZLBlCount[Bits]=0 Do Dec(Bits);
+  Dec(ZLBlCount[Bits]);
+  ZLBlCount[Bits+1]:=ZLBlCount[Bits+1]+2;
+  Dec(ZLBlCount[MaxLength]);
+  Overflow:=Overflow-2;
+ Until Overflow<=0;
+ Bits:=MaxLength;
+ While Bits<>0 Do Begin
+  N:=ZLBlCount[Bits];
+  While N<>0 Do Begin
+   Dec(H); M:=ZLHeap[H];
+   If M<=MaxCode Then Begin
+    If Tree[M].Dl<>Bits Then Begin
+     ZLOptLen:=ZLOptLen+(Int64(Bits)-Tree[M].Dl)*Tree[M].Fc;
+     Tree[M].Dl:=Bits;
+    End;
+    Dec(N);
+   End;
+  End;
+  Dec(Bits);
+ End;
+End;
+
+Procedure ZLBuildTree(Var Tree: ZLTree; Which: LongInt; Var MaxCodeOut: LongInt);
+Var
+ Elems,N,M,Node,MaxCode: LongInt;
+Begin
+ Case Which Of
+  0: Elems:=286;
+  1: Elems:=30;
+  Else Elems:=19;
+ End;
+ MaxCode:=-1; ZLHeapLen:=0; ZLHeapMax:=ZLHeapSize;
+ For N:=0 To Elems-1 Do Begin
+  If Tree[N].Fc<>0 Then Begin
+   Inc(ZLHeapLen); ZLHeap[ZLHeapLen]:=N; MaxCode:=N; ZLDepth[N]:=0;
+  End
+   Else
+  Tree[N].Dl:=0;
+ End;
+ While ZLHeapLen<2 Do Begin
+  Inc(ZLHeapLen);
+  If MaxCode<2 Then Begin Inc(MaxCode); Node:=MaxCode; End Else Node:=0;
+  ZLHeap[ZLHeapLen]:=Node;
+  Tree[Node].Fc:=1; ZLDepth[Node]:=0;
+  Dec(ZLOptLen);
+  If Which=0 Then ZLStaticLen:=ZLStaticLen-ZLStL[Node].Dl
+   Else If Which=1 Then ZLStaticLen:=ZLStaticLen-ZLStD[Node].Dl;
+ End;
+ MaxCodeOut:=MaxCode;
+ For N:=ZLHeapLen Div 2 DownTo 1 Do ZLPqDownHeap(Tree,N);
+ Node:=Elems;
+ Repeat
+  N:=ZLHeap[1];
+  ZLHeap[1]:=ZLHeap[ZLHeapLen]; Dec(ZLHeapLen);
+  ZLPqDownHeap(Tree,1);
+  M:=ZLHeap[1];
+  Dec(ZLHeapMax); ZLHeap[ZLHeapMax]:=N;
+  Dec(ZLHeapMax); ZLHeap[ZLHeapMax]:=M;
+  Tree[Node].Fc:=(Tree[N].Fc+Tree[M].Fc) And $FFFF;
+  If ZLDepth[N]>=ZLDepth[M] Then ZLDepth[Node]:=ZLDepth[N]+1 Else ZLDepth[Node]:=ZLDepth[M]+1;
+  Tree[N].Dl:=Node; Tree[M].Dl:=Node;
+  ZLHeap[1]:=Node; Inc(Node);
+  ZLPqDownHeap(Tree,1);
+ Until ZLHeapLen<2;
+ Dec(ZLHeapMax); ZLHeap[ZLHeapMax]:=ZLHeap[1];
+ ZLGenBitLen(Tree,Which,MaxCode);
+ ZLGenCodes(Tree,MaxCode);
+End;
+
+Procedure ZLScanTree(Var Tree: ZLTree; MaxCode: LongInt);
+Var
+ N,PrevLen,CurLen,NextLen,Count,MaxCount,MinCount: LongInt;
+Begin
+ PrevLen:=-1; NextLen:=Tree[0].Dl; Count:=0; MaxCount:=7; MinCount:=4;
+ If NextLen=0 Then Begin MaxCount:=138; MinCount:=3; End;
+ Tree[MaxCode+1].Dl:=$FFFF;
+ For N:=0 To MaxCode Do Begin
+  CurLen:=NextLen; NextLen:=Tree[N+1].Dl;
+  Inc(Count);
+  If (Count<MaxCount) And (CurLen=NextLen) Then Continue
+  Else If Count<MinCount Then ZLBlT[CurLen].Fc:=(ZLBlT[CurLen].Fc+Count) And $FFFF
+  Else If CurLen<>0 Then Begin
+   If CurLen<>PrevLen Then ZLBlT[CurLen].Fc:=(ZLBlT[CurLen].Fc+1) And $FFFF;
+   ZLBlT[16].Fc:=(ZLBlT[16].Fc+1) And $FFFF;
+  End
+  Else If Count<=10 Then ZLBlT[17].Fc:=(ZLBlT[17].Fc+1) And $FFFF
+  Else ZLBlT[18].Fc:=(ZLBlT[18].Fc+1) And $FFFF;
+  Count:=0; PrevLen:=CurLen;
+  If NextLen=0 Then Begin MaxCount:=138; MinCount:=3; End
+  Else If CurLen=NextLen Then Begin MaxCount:=6; MinCount:=3; End
+  Else Begin MaxCount:=7; MinCount:=4; End;
+ End;
+End;
+
+Procedure ZLSendCode(C: LongInt; Var Tree: ZLTree);Begin
+ ZLSendBits(Tree[C].Fc,Tree[C].Dl);
+End;
+
+Procedure ZLSendTree(Var Tree: ZLTree; MaxCode: LongInt);
+Var
+ N,PrevLen,CurLen,NextLen,Count,MaxCount,MinCount: LongInt;
+Begin
+ PrevLen:=-1; NextLen:=Tree[0].Dl; Count:=0; MaxCount:=7; MinCount:=4;
+ If NextLen=0 Then Begin MaxCount:=138; MinCount:=3; End;
+ For N:=0 To MaxCode Do Begin
+  CurLen:=NextLen; NextLen:=Tree[N+1].Dl;
+  Inc(Count);
+  If (Count<MaxCount) And (CurLen=NextLen) Then Continue
+  Else If Count<MinCount Then Begin
+   Repeat
+    ZLSendCode(CurLen,ZLBlT); Dec(Count);
+   Until Count=0;
+  End
+  Else If CurLen<>0 Then Begin
+   If CurLen<>PrevLen Then Begin
+    ZLSendCode(CurLen,ZLBlT); Dec(Count);
+   End;
+   ZLSendCode(16,ZLBlT); ZLSendBits(Count-3,2);
+  End
+  Else If Count<=10 Then Begin
+   ZLSendCode(17,ZLBlT); ZLSendBits(Count-3,3);
+  End
+  Else Begin
+   ZLSendCode(18,ZLBlT); ZLSendBits(Count-11,7);
+  End;
+  Count:=0; PrevLen:=CurLen;
+  If NextLen=0 Then Begin MaxCount:=138; MinCount:=3; End
+  Else If CurLen=NextLen Then Begin MaxCount:=6; MinCount:=3; End
+  Else Begin MaxCount:=7; MinCount:=4; End;
+ End;
+End;
+
+Function ZLBuildBlTree: LongInt;
+Var
+ MaxBlIndex: LongInt;
+Begin
+ ZLScanTree(ZLDynL,ZLLMax);
+ ZLScanTree(ZLDynD,ZLDMax);
+ ZLBuildTree(ZLBlT,2,ZLBMax);
+ MaxBlIndex:=18;
+ While MaxBlIndex>=3 Do Begin
+  If ZLBlT[ZLBLOrder[MaxBlIndex]].Dl<>0 Then Break;
+  Dec(MaxBlIndex);
+ End;
+ ZLOptLen:=ZLOptLen+3*(Int64(MaxBlIndex)+1)+5+5+4;
+ ZLBuildBlTree:=MaxBlIndex;
+End;
+
+Procedure ZLSendAllTrees(LCodes,DCodes,BlCodes: LongInt);
+Var
+ Rank: LongInt;
+Begin
+ ZLSendBits(LCodes-257,5);
+ ZLSendBits(DCodes-1,5);
+ ZLSendBits(BlCodes-4,4);
+ For Rank:=0 To BlCodes-1 Do ZLSendBits(ZLBlT[ZLBLOrder[Rank]].Dl,3);
+ ZLSendTree(ZLDynL,LCodes-1);
+ ZLSendTree(ZLDynD,DCodes-1);
+End;
+
+Procedure ZLStoredBlock(BufAt: LongInt; StoredLen: LongInt; Last: LongInt);Begin
+ ZLSendBits(Last,3);
+ ZLBiWindup;
+ ZLPutShort(StoredLen And $FFFF);
+ ZLPutShort((Not StoredLen) And $FFFF);
+ If StoredLen<>0 Then Move(ZLWin^[BufAt],ZLPend^[ZLPending],StoredLen);
+ Inc(ZLPending,StoredLen);
+End;
+
+Procedure ZLCompressBlock(Var LTree,DTree: ZLTree);
+Var
+ Dist,Lc,Sx,Code,Extra: LongInt;
+Begin
+ Sx:=0;
+ If ZLSymNext<>0 Then
+ Repeat
+  Dist:=ZLPend^[ZLLitBuf+Sx]; Inc(Sx);
+  Dist:=Dist+ZLPend^[ZLLitBuf+Sx]*256; Inc(Sx);
+  Lc:=ZLPend^[ZLLitBuf+Sx]; Inc(Sx);
+  If Dist=0 Then ZLSendCode(Lc,LTree)
+   Else
+  Begin
+   Code:=ZLLenCode[Lc];
+   ZLSendCode(Code+257,LTree);
+   Extra:=ZLExtraL[Code];
+   If Extra<>0 Then Begin
+    Lc:=Lc-ZLBaseLen[Code]; ZLSendBits(Lc,Extra);
+   End;
+   Dec(Dist);
+   Code:=ZLDCode(Dist);
+   ZLSendCode(Code,DTree);
+   Extra:=ZLExtraD[Code];
+   If Extra<>0 Then Begin
+    Dist:=Dist-ZLBaseDist[Code]; ZLSendBits(Dist,Extra);
+   End;
+  End;
+ Until Sx>=ZLSymNext;
+ ZLSendCode(256,LTree);
+End;
+
+{ BufAt < 0 : pas de tampon (equivalent de Z_NULL) }
+Procedure ZLFlushBlock(BufAt,StoredLen,Last: LongInt);
+Var
+ OptLenB,StaticLenB: Int64;
+ MaxBlIndex: LongInt;
+Begin
+ MaxBlIndex:=0;
+ If ZLLevel>0 Then Begin
+  ZLBuildTree(ZLDynL,0,ZLLMax);
+  ZLBuildTree(ZLDynD,1,ZLDMax);
+  MaxBlIndex:=ZLBuildBlTree;
+  OptLenB:=(ZLOptLen+3+7) Shr 3;
+  StaticLenB:=(ZLStaticLen+3+7) Shr 3;
+  If StaticLenB<=OptLenB Then OptLenB:=StaticLenB;
+ End
+  Else
+ Begin
+  OptLenB:=Int64(StoredLen)+5; StaticLenB:=OptLenB;
+ End;
+ If (StoredLen+4<=OptLenB) And (BufAt>=0) Then ZLStoredBlock(BufAt,StoredLen,Last)
+  Else
+ If StaticLenB=OptLenB Then Begin
+  ZLSendBits(2+Last,3);
+  ZLCompressBlock(ZLStL,ZLStD);
+ End
+  Else
+ Begin
+  ZLSendBits(4+Last,3);
+  ZLSendAllTrees(ZLLMax+1,ZLDMax+1,MaxBlIndex+1);
+  ZLCompressBlock(ZLDynL,ZLDynD);
+ End;
+ ZLInitBlock;
+ If Last<>0 Then ZLBiWindup;
+End;
+
+Function ZLTallyLit(C: LongInt): Boolean;Begin
+ ZLPend^[ZLLitBuf+ZLSymNext]:=0; Inc(ZLSymNext);
+ ZLPend^[ZLLitBuf+ZLSymNext]:=0; Inc(ZLSymNext);
+ ZLPend^[ZLLitBuf+ZLSymNext]:=C; Inc(ZLSymNext);
+ ZLDynL[C].Fc:=(ZLDynL[C].Fc+1) And $FFFF;
+ ZLTallyLit:=ZLSymNext=ZLSymEnd;
+End;
+
+Function ZLTallyDist(Dist,Len: LongInt): Boolean;
+Var
+ Code: LongInt;
+Begin
+ Dist:=Dist And $FFFF; Len:=Len And 255;
+ ZLPend^[ZLLitBuf+ZLSymNext]:=Dist And 255; Inc(ZLSymNext);
+ ZLPend^[ZLLitBuf+ZLSymNext]:=Dist Shr 8; Inc(ZLSymNext);
+ ZLPend^[ZLLitBuf+ZLSymNext]:=Len; Inc(ZLSymNext);
+ Dec(Dist);
+ Code:=ZLLenCode[Len]+257;
+ ZLDynL[Code].Fc:=(ZLDynL[Code].Fc+1) And $FFFF;
+ Code:=ZLDCode(Dist);
+ ZLDynD[Code].Fc:=(ZLDynD[Code].Fc+1) And $FFFF;
+ ZLTallyDist:=ZLSymNext=ZLSymEnd;
+End;
+
+{ ---- deflate.c ---- }
+
+Procedure ZLClearHash;Begin
+ FillChar(ZLHead^,ZLWSize*2,0);
+End;
+
+Procedure ZLSlideHash;
+Var
+ N,M: LongInt;
+Begin
+ For N:=0 To ZLWSize-1 Do Begin
+  M:=ZLHead^[N];
+  If M>=ZLWSize Then ZLHead^[N]:=M-ZLWSize Else ZLHead^[N]:=0;
+  M:=ZLPrev^[N];
+  If M>=ZLWSize Then ZLPrev^[N]:=M-ZLWSize Else ZLPrev^[N]:=0;
+ End;
+End;
+
+Procedure ZLAdlerUpd(Buf: PEABuffer; At,Len: LongInt);
+Var
+ A,B: Int64;
+ K,N: LongInt;
+Begin
+ A:=ZLAdler And $FFFF; B:=(ZLAdler Shr 16) And $FFFF;
+ While Len>0 Do Begin
+  N:=Len; If N>5552 Then N:=5552;
+  Dec(Len,N);
+  For K:=0 To N-1 Do Begin
+   A:=A+Buf^[At+K]; B:=B+A;
+  End;
+  Inc(At,N);
+  A:=A Mod 65521; B:=B Mod 65521;
+ End;
+ ZLAdler:=(B Shl 16) Or A;
+End;
+
+Function ZLReadBuf(Buf: PEABuffer; At,Size: LongInt): LongInt;
+Var
+ Len: LongInt;
+Begin
+ Len:=ZLAvailIn; If Len>Size Then Len:=Size;
+ If Len=0 Then Begin ZLReadBuf:=0; Exit; End;
+ Dec(ZLAvailIn,Len);
+ Move(ZLIn^[ZLInPos],Buf^[At],Len);
+ If ZLWrap=1 Then ZLAdlerUpd(Buf,At,Len);
+ Inc(ZLInPos,Len); Inc(ZLTotalIn,Len);
+ ZLReadBuf:=Len;
+End;
+
+Procedure ZLUpdHash(C: LongInt);Begin
+ ZLInsH:=((ZLInsH Shl ZLHashShift) Xor C) And ZLHashMask;
+End;
+
+Function ZLInsertString(Str: LongInt): LongInt;
+Var
+ H: LongInt;
+Begin
+ ZLUpdHash(ZLWin^[Str+2]);
+ H:=ZLHead^[ZLInsH];
+ ZLPrev^[Str And ZLWMask]:=H;
+ ZLHead^[ZLInsH]:=Str;
+ ZLInsertString:=H;
+End;
+
+Procedure ZLFillWindow;
+Var
+ N,More,Str,Curr,Init: LongInt;
+Begin
+ Repeat
+  More:=ZLWinSize-ZLLookahead-ZLStrStart;
+  If ZLStrStart>=ZLWSize+ZLMaxDist Then Begin
+   Move(ZLWin^[ZLWSize],ZLWin^[0],ZLWSize-More);
+   Dec(ZLMatchStart,ZLWSize);
+   Dec(ZLStrStart,ZLWSize);
+   Dec(ZLBlockStart,ZLWSize);
+   If ZLInsert>ZLStrStart Then ZLInsert:=ZLStrStart;
+   ZLSlideHash;
+   Inc(More,ZLWSize);
+  End;
+  If ZLAvailIn=0 Then Break;
+  N:=ZLReadBuf(ZLWin,ZLStrStart+ZLLookahead,More);
+  Inc(ZLLookahead,N);
+  If ZLLookahead+ZLInsert>=3 Then Begin
+   Str:=ZLStrStart-ZLInsert;
+   ZLInsH:=ZLWin^[Str];
+   ZLUpdHash(ZLWin^[Str+1]);
+   While ZLInsert<>0 Do Begin
+    ZLUpdHash(ZLWin^[Str+2]);
+    ZLPrev^[Str And ZLWMask]:=ZLHead^[ZLInsH];
+    ZLHead^[ZLInsH]:=Str;
+    Inc(Str); Dec(ZLInsert);
+    If ZLLookahead+ZLInsert<3 Then Break;
+   End;
+  End;
+ Until (ZLLookahead>=ZLMinLook) Or (ZLAvailIn=0);
+ If ZLHighWater<ZLWinSize Then Begin
+  Curr:=ZLStrStart+ZLLookahead;
+  If ZLHighWater<Curr Then Begin
+   Init:=ZLWinSize-Curr; If Init>258 Then Init:=258;
+   FillChar(ZLWin^[Curr],Init,0);
+   ZLHighWater:=Curr+Init;
+  End
+   Else
+  If ZLHighWater<Curr+258 Then Begin
+   Init:=Curr+258-ZLHighWater;
+   If Init>ZLWinSize-ZLHighWater Then Init:=ZLWinSize-ZLHighWater;
+   FillChar(ZLWin^[ZLHighWater],Init,0);
+   Inc(ZLHighWater,Init);
+  End;
+ End;
+End;
+
+Function ZLLongestMatch(CurMatch: LongInt): LongInt;
+Var
+ Chain,Scan,Match,S,M,Len,BestLen,NiceMatch,Limit,StrEnd: LongInt;
+ End1,End0: Byte;
+Begin
+ Chain:=ZLMaxChain; Scan:=ZLStrStart; BestLen:=ZLPrevLen; NiceMatch:=ZLNice;
+ If ZLStrStart>ZLMaxDist Then Limit:=ZLStrStart-ZLMaxDist Else Limit:=0;
+ StrEnd:=ZLStrStart+258;
+ End1:=ZLWin^[Scan+BestLen-1]; End0:=ZLWin^[Scan+BestLen];
+ If ZLPrevLen>=ZLGood Then Chain:=Chain Shr 2;
+ If NiceMatch>ZLLookahead Then NiceMatch:=ZLLookahead;
+ Repeat
+  Match:=CurMatch;
+  If (ZLWin^[Match+BestLen]=End0) And (ZLWin^[Match+BestLen-1]=End1)
+  And (ZLWin^[Match]=ZLWin^[Scan]) And (ZLWin^[Match+1]=ZLWin^[Scan+1]) Then Begin
+   S:=Scan+2; M:=Match+2;
+   Repeat
+    Inc(S); Inc(M);
+   Until (ZLWin^[S]<>ZLWin^[M]) Or (S>=StrEnd);
+   Len:=258-(StrEnd-S);
+   If Len>BestLen Then Begin
+    ZLMatchStart:=CurMatch; BestLen:=Len;
+    If Len>=NiceMatch Then Break;
+    End1:=ZLWin^[Scan+BestLen-1]; End0:=ZLWin^[Scan+BestLen];
+   End;
+  End;
+  CurMatch:=ZLPrev^[CurMatch And ZLWMask];
+  If CurMatch<=Limit Then Break;
+  Dec(Chain);
+ Until Chain=0;
+ If BestLen<=ZLLookahead Then ZLLongestMatch:=BestLen Else ZLLongestMatch:=ZLLookahead;
+End;
+
+Procedure ZLFlushPending;
+Var
+ Len: LongInt;
+Begin
+ ZLBiFlush;
+ Len:=ZLPending; If Len>ZLAvailOut Then Len:=ZLAvailOut;
+ If Len=0 Then Exit;
+ Move(ZLPend^[ZLPendOut],ZLOut^[ZLOutPos],Len);
+ Inc(ZLOutPos,Len); Inc(ZLPendOut,Len); Inc(ZLTotalOut,Len);
+ Dec(ZLAvailOut,Len); Dec(ZLPending,Len);
+ If ZLPending=0 Then ZLPendOut:=0;
+End;
+
+Procedure ZLFlushBlockOnly(Last: LongInt);Begin
+ If ZLBlockStart>=0 Then ZLFlushBlock(ZLBlockStart,ZLStrStart-ZLBlockStart,Last)
+  Else ZLFlushBlock(-1,ZLStrStart-ZLBlockStart,Last);
+ ZLBlockStart:=ZLStrStart;
+ ZLFlushPending;
+End;
+
+{ Etats de bloc : 0 need_more, 1 block_done, 2 finish_started, 3 finish_done }
+
+Function ZLDeflateStored(Flush: LongInt): LongInt;
+Var
+ MinBlock,Len,Left,Have,Last,Used: LongInt;
+Begin
+ MinBlock:=ZLPendSize-5; If MinBlock>ZLWSize Then MinBlock:=ZLWSize;
+ Last:=0; Used:=ZLAvailIn;
+ Repeat
+  Len:=65535;
+  Have:=(ZLBiValid+42) Shr 3;
+  If ZLAvailOut<Have Then Break;
+  Have:=ZLAvailOut-Have;
+  Left:=ZLStrStart-ZLBlockStart;
+  If Len>Left+ZLAvailIn Then Len:=Left+ZLAvailIn;
+  If Len>Have Then Len:=Have;
+  If (Len<MinBlock) And (((Len=0) And (Flush<>4)) Or (Flush=0) Or (Len<>Left+ZLAvailIn)) Then Break;
+  If (Flush=4) And (Len=Left+ZLAvailIn) Then Last:=1 Else Last:=0;
+  ZLStoredBlock(0,0,Last);
+  ZLPend^[ZLPending-4]:=Len And 255;
+  ZLPend^[ZLPending-3]:=(Len Shr 8) And 255;
+  ZLPend^[ZLPending-2]:=(Not Len) And 255;
+  ZLPend^[ZLPending-1]:=((Not Len) Shr 8) And 255;
+  ZLFlushPending;
+  If Left<>0 Then Begin
+   If Left>Len Then Left:=Len;
+   Move(ZLWin^[ZLBlockStart],ZLOut^[ZLOutPos],Left);
+   Inc(ZLOutPos,Left); Dec(ZLAvailOut,Left); Inc(ZLTotalOut,Left);
+   Inc(ZLBlockStart,Left);
+   Dec(Len,Left);
+  End;
+  If Len<>0 Then Begin
+   ZLReadBuf(ZLOut,ZLOutPos,Len);
+   Inc(ZLOutPos,Len); Dec(ZLAvailOut,Len); Inc(ZLTotalOut,Len);
+  End;
+ Until Last<>0;
+ Dec(Used,ZLAvailIn);
+ If Used<>0 Then Begin
+  If Used>=ZLWSize Then Begin
+   ZLMatches:=2;
+   Move(ZLIn^[ZLInPos-ZLWSize],ZLWin^[0],ZLWSize);
+   ZLStrStart:=ZLWSize;
+   ZLInsert:=ZLStrStart;
+  End
+   Else
+  Begin
+   If ZLWinSize-ZLStrStart<=Used Then Begin
+    Dec(ZLStrStart,ZLWSize);
+    Move(ZLWin^[ZLWSize],ZLWin^[0],ZLStrStart);
+    If ZLMatches<2 Then Inc(ZLMatches);
+    If ZLInsert>ZLStrStart Then ZLInsert:=ZLStrStart;
+   End;
+   Move(ZLIn^[ZLInPos-Used],ZLWin^[ZLStrStart],Used);
+   Inc(ZLStrStart,Used);
+   If Used<ZLWSize-ZLInsert Then Inc(ZLInsert,Used) Else Inc(ZLInsert,ZLWSize-ZLInsert);
+  End;
+  ZLBlockStart:=ZLStrStart;
+ End;
+ If ZLHighWater<ZLStrStart Then ZLHighWater:=ZLStrStart;
+ If Last<>0 Then Begin ZLDeflateStored:=3; Exit; End;
+ If (Flush<>0) And (Flush<>4) And (ZLAvailIn=0) And (ZLStrStart=ZLBlockStart) Then Begin
+  ZLDeflateStored:=1; Exit;
+ End;
+ Have:=ZLWinSize-ZLStrStart;
+ If (ZLAvailIn>Have) And (ZLBlockStart>=ZLWSize) Then Begin
+  Dec(ZLBlockStart,ZLWSize);
+  Dec(ZLStrStart,ZLWSize);
+  Move(ZLWin^[ZLWSize],ZLWin^[0],ZLStrStart);
+  If ZLMatches<2 Then Inc(ZLMatches);
+  Inc(Have,ZLWSize);
+  If ZLInsert>ZLStrStart Then ZLInsert:=ZLStrStart;
+ End;
+ If Have>ZLAvailIn Then Have:=ZLAvailIn;
+ If Have<>0 Then Begin
+  ZLReadBuf(ZLWin,ZLStrStart,Have);
+  Inc(ZLStrStart,Have);
+  If Have<ZLWSize-ZLInsert Then Inc(ZLInsert,Have) Else Inc(ZLInsert,ZLWSize-ZLInsert);
+ End;
+ If ZLHighWater<ZLStrStart Then ZLHighWater:=ZLStrStart;
+ Have:=(ZLBiValid+42) Shr 3;
+ Have:=ZLPendSize-Have; If Have>65535 Then Have:=65535;
+ MinBlock:=Have; If MinBlock>ZLWSize Then MinBlock:=ZLWSize;
+ Left:=ZLStrStart-ZLBlockStart;
+ If (Left>=MinBlock) Or (((Left<>0) Or (Flush=4)) And (Flush<>0) And (ZLAvailIn=0) And (Left<=Have)) Then Begin
+  Len:=Left; If Len>Have Then Len:=Have;
+  If (Flush=4) And (ZLAvailIn=0) And (Len=Left) Then Last:=1 Else Last:=0;
+  ZLStoredBlock(ZLBlockStart,Len,Last);
+  Inc(ZLBlockStart,Len);
+  ZLFlushPending;
+ End;
+ If Last<>0 Then ZLDeflateStored:=2 Else ZLDeflateStored:=0;
+End;
+
+Function ZLDeflateFast(Flush: LongInt): LongInt;
+Var
+ HashHead,BFlush: LongInt;
+ Fl: Boolean;
+Begin
+ Repeat
+  If ZLLookahead<ZLMinLook Then Begin
+   ZLFillWindow;
+   If (ZLLookahead<ZLMinLook) And (Flush=0) Then Begin ZLDeflateFast:=0; Exit; End;
+   If ZLLookahead=0 Then Break;
+  End;
+  HashHead:=0;
+  If ZLLookahead>=3 Then HashHead:=ZLInsertString(ZLStrStart);
+  If (HashHead<>0) And (ZLStrStart-HashHead<=ZLMaxDist) Then ZLMatchLen:=ZLLongestMatch(HashHead);
+  If ZLMatchLen>=3 Then Begin
+   Fl:=ZLTallyDist(ZLStrStart-ZLMatchStart,ZLMatchLen-3);
+   Dec(ZLLookahead,ZLMatchLen);
+   If (ZLMatchLen<=ZLMaxLazy) And (ZLLookahead>=3) Then Begin
+    Dec(ZLMatchLen);
+    Repeat
+     Inc(ZLStrStart);
+     HashHead:=ZLInsertString(ZLStrStart);
+     Dec(ZLMatchLen);
+    Until ZLMatchLen=0;
+    Inc(ZLStrStart);
+   End
+    Else
+   Begin
+    Inc(ZLStrStart,ZLMatchLen);
+    ZLMatchLen:=0;
+    ZLInsH:=ZLWin^[ZLStrStart];
+    ZLUpdHash(ZLWin^[ZLStrStart+1]);
+   End;
+  End
+   Else
+  Begin
+   Fl:=ZLTallyLit(ZLWin^[ZLStrStart]);
+   Dec(ZLLookahead); Inc(ZLStrStart);
+  End;
+  If Fl Then Begin
+   ZLFlushBlockOnly(0);
+   If ZLAvailOut=0 Then Begin ZLDeflateFast:=0; Exit; End;
+  End;
+ Until False;
+ If ZLStrStart<2 Then ZLInsert:=ZLStrStart Else ZLInsert:=2;
+ If Flush=4 Then Begin
+  ZLFlushBlockOnly(1);
+  If ZLAvailOut=0 Then ZLDeflateFast:=2 Else ZLDeflateFast:=3;
+  Exit;
+ End;
+ If ZLSymNext<>0 Then Begin
+  ZLFlushBlockOnly(0);
+  If ZLAvailOut=0 Then Begin ZLDeflateFast:=0; Exit; End;
+ End;
+ ZLDeflateFast:=1;
+End;
+
+Function ZLDeflateSlow(Flush: LongInt): LongInt;
+Var
+ HashHead,MaxInsert: LongInt;
+ Fl: Boolean;
+Begin
+ Fl:=False;
+ Repeat
+  If ZLLookahead<ZLMinLook Then Begin
+   ZLFillWindow;
+   If (ZLLookahead<ZLMinLook) And (Flush=0) Then Begin ZLDeflateSlow:=0; Exit; End;
+   If ZLLookahead=0 Then Break;
+  End;
+  HashHead:=0;
+  If ZLLookahead>=3 Then HashHead:=ZLInsertString(ZLStrStart);
+  ZLPrevLen:=ZLMatchLen; ZLPrevMatch:=ZLMatchStart;
+  ZLMatchLen:=2;
+  If (HashHead<>0) And (ZLPrevLen<ZLMaxLazy) And (ZLStrStart-HashHead<=ZLMaxDist) Then Begin
+   ZLMatchLen:=ZLLongestMatch(HashHead);
+   If (ZLMatchLen<=5) And (ZLMatchLen=3) And (ZLStrStart-ZLMatchStart>4096) Then ZLMatchLen:=2;
+  End;
+  If (ZLPrevLen>=3) And (ZLMatchLen<=ZLPrevLen) Then Begin
+   MaxInsert:=ZLStrStart+ZLLookahead-3;
+   Fl:=ZLTallyDist(ZLStrStart-1-ZLPrevMatch,ZLPrevLen-3);
+   Dec(ZLLookahead,ZLPrevLen-1);
+   Dec(ZLPrevLen,2);
+   Repeat
+    Inc(ZLStrStart);
+    If ZLStrStart<=MaxInsert Then HashHead:=ZLInsertString(ZLStrStart);
+    Dec(ZLPrevLen);
+   Until ZLPrevLen=0;
+   ZLMatchAvail:=0;
+   ZLMatchLen:=2;
+   Inc(ZLStrStart);
+   If Fl Then Begin
+    ZLFlushBlockOnly(0);
+    If ZLAvailOut=0 Then Begin ZLDeflateSlow:=0; Exit; End;
+   End;
+  End
+   Else
+  If ZLMatchAvail<>0 Then Begin
+   Fl:=ZLTallyLit(ZLWin^[ZLStrStart-1]);
+   If Fl Then ZLFlushBlockOnly(0);
+   Inc(ZLStrStart); Dec(ZLLookahead);
+   If ZLAvailOut=0 Then Begin ZLDeflateSlow:=0; Exit; End;
+  End
+   Else
+  Begin
+   ZLMatchAvail:=1; Inc(ZLStrStart); Dec(ZLLookahead);
+  End;
+ Until False;
+ If ZLMatchAvail<>0 Then Begin
+  Fl:=ZLTallyLit(ZLWin^[ZLStrStart-1]);
+  ZLMatchAvail:=0;
+ End;
+ If ZLStrStart<2 Then ZLInsert:=ZLStrStart Else ZLInsert:=2;
+ If Flush=4 Then Begin
+  ZLFlushBlockOnly(1);
+  If ZLAvailOut=0 Then ZLDeflateSlow:=2 Else ZLDeflateSlow:=3;
+  Exit;
+ End;
+ If ZLSymNext<>0 Then Begin
+  ZLFlushBlockOnly(0);
+  If ZLAvailOut=0 Then Begin ZLDeflateSlow:=0; Exit; End;
+ End;
+ ZLDeflateSlow:=1;
+End;
+
+Procedure ZLLmInit;Begin
+ ZLClearHash;
+ ZLMaxLazy:=ZLCfg[ZLLevel,1]; ZLGood:=ZLCfg[ZLLevel,0];
+ ZLNice:=ZLCfg[ZLLevel,2]; ZLMaxChain:=ZLCfg[ZLLevel,3];
+ ZLStrStart:=0; ZLBlockStart:=0; ZLLookahead:=0; ZLInsert:=0;
+ ZLMatchLen:=2; ZLPrevLen:=2; ZLMatchAvail:=0; ZLInsH:=0;
+End;
+
+{ Niveau 0..9 (-1 = 6). Les flux entree/sortie sont ZLIn/ZLInPos/ZLAvailIn et ZLOut/ZLOutPos/ZLAvailOut. }
+Procedure ZLDeflateInit(Level: LongInt);Begin
+ If Level<0 Then Level:=6;
+ If Level>9 Then Level:=9;
+ ZLStaticInit;
+ GetMem(ZLWin,ZLWinSize+512); FillChar(ZLWin^,ZLWinSize+512,0);
+ GetMem(ZLPend,ZLPendSize);
+ GetMem(ZLPrev,ZLWSize*2); GetMem(ZLHead,ZLWSize*2);
+ FillChar(ZLPrev^,ZLWSize*2,0);
+ ZLHighWater:=0; ZLLevel:=Level; ZLWrap:=1;
+ ZLTotalIn:=0; ZLTotalOut:=0; ZLPending:=0; ZLPendOut:=0;
+ ZLStatus:=42; ZLAdler:=1; ZLLastFlush:=-2;
+ ZLBiBuf:=0; ZLBiValid:=0;
+ ZLInitBlock;
+ ZLLmInit;
+ ZLInPos:=0; ZLAvailIn:=0; ZLOutPos:=0; ZLAvailOut:=0;
+End;
+
+Procedure ZLDeflateEnd;Begin
+ FreeMem(ZLWin,ZLWinSize+512); FreeMem(ZLPend,ZLPendSize);
+ FreeMem(ZLPrev,ZLWSize*2); FreeMem(ZLHead,ZLWSize*2);
+End;
+
+{ Flush : 0 = Z_NO_FLUSH, 4 = Z_FINISH. Retour : 0 Z_OK, 1 Z_STREAM_END, -5 Z_BUF_ERROR. }
+Function ZLDeflate(Flush: LongInt): LongInt;
+Var
+ OldFlush,Header,LevelFlags,BState: LongInt;
+Begin
+ If ZLAvailOut=0 Then Begin ZLDeflate:=-5; Exit; End;
+ If (ZLStatus=666) And (Flush<>4) Then Begin ZLDeflate:=-2; Exit; End;
+ OldFlush:=ZLLastFlush; ZLLastFlush:=Flush;
+ If ZLPending<>0 Then Begin
+  ZLFlushPending;
+  If ZLAvailOut=0 Then Begin ZLLastFlush:=-1; ZLDeflate:=0; Exit; End;
+ End
+  Else
+ If (ZLAvailIn=0) And (Flush<>4) And
+ (Flush*2-Ord(Flush>4)*9<=OldFlush*2-Ord(OldFlush>4)*9) Then Begin
+  ZLDeflate:=-5; Exit;
+ End;
+ If (ZLStatus=666) And (ZLAvailIn<>0) Then Begin ZLDeflate:=-5; Exit; End;
+ If ZLStatus=42 Then Begin
+  Header:=(8+((15-8) Shl 4)) Shl 8;
+  If ZLLevel<2 Then LevelFlags:=0
+   Else If ZLLevel<6 Then LevelFlags:=1
+   Else If ZLLevel=6 Then LevelFlags:=2
+   Else LevelFlags:=3;
+  Header:=Header Or (LevelFlags Shl 6);
+  Header:=Header+31-(Header Mod 31);
+  ZLPutByte(Header Shr 8); ZLPutByte(Header And 255);
+  ZLAdler:=1;
+  ZLStatus:=113;
+  ZLFlushPending;
+  If ZLPending<>0 Then Begin ZLLastFlush:=-1; ZLDeflate:=0; Exit; End;
+ End;
+ If (ZLAvailIn<>0) Or (ZLLookahead<>0) Or ((Flush<>0) And (ZLStatus<>666)) Then Begin
+  If ZLLevel=0 Then BState:=ZLDeflateStored(Flush)
+   Else If ZLLevel<=3 Then BState:=ZLDeflateFast(Flush)
+   Else BState:=ZLDeflateSlow(Flush);
+  If (BState=2) Or (BState=3) Then ZLStatus:=666;
+  If (BState=0) Or (BState=2) Then Begin
+   If ZLAvailOut=0 Then ZLLastFlush:=-1;
+   ZLDeflate:=0; Exit;
+  End;
+ End;
+ If Flush<>4 Then Begin ZLDeflate:=0; Exit; End;
+ If ZLWrap<=0 Then Begin ZLDeflate:=1; Exit; End;
+ ZLPutByte((ZLAdler Shr 24) And 255); ZLPutByte((ZLAdler Shr 16) And 255);
+ ZLPutByte((ZLAdler Shr 8) And 255); ZLPutByte(ZLAdler And 255);
+ ZLFlushPending;
+ If ZLWrap>0 Then ZLWrap:=-ZLWrap;
+ If ZLPending<>0 Then ZLDeflate:=0 Else ZLDeflate:=1;
+End;
+
+Var
+ PNGLevel: LongInt;
+ PNGLevelSet: Boolean;
+ PNGDepth: LongInt;
+
+{ Ecriture PNG identique a l'encodeur png de FFmpeg (pngenc.c, filtre "none", zlib niveau 6 par defaut).
+  CType: 0 gris, 2 RGB, 3 palette (NVPalR/G/B), 4 gris+alpha, 6 RGBA. Bpp: octets par pixel de Data. }
+Procedure NVWritePNGEx(Data: PEABuffer; Bpp,CType: LongInt);
+Var
+ RowBuf,OutBuf: PEABuffer;
+ RowSize,Y,W,H,Ret,Lvl,I: LongInt;
+ Out: Array[0..255] Of Byte;
+ Used: Integer;
+ Crc: Int64;
+
+Procedure PutB(V: LongInt);Begin
+ Out[Used]:=V And 255; Inc(Used); If Used>=250 Then Begin
+  WriteBytes(Out,Used); Used:=0;
+ End;
+End;
+
+Procedure PutBE32(V: LongInt);Begin
+ PutB(V Shr 24); PutB(V Shr 16); PutB(V Shr 8); PutB(V);
+End;
+
+Procedure PutC(V: LongInt);Begin
+ V:=V And 255;
  Crc:=(Crc Shr 8) Xor (CRC32Table[(Crc Xor V) And 255] And $FFFFFFFF);
+ PutB(V);
 End;
-Procedure PutC(V: LongInt);Begin CrcByte(V And 255); PutB(V); End;
-Procedure PutC32(V: LongInt);Begin PutC(V Shr 24); PutC(V Shr 16); PutC(V Shr 8); PutC(V); End;
+
+Procedure PutC32(V: LongInt);Begin
+ PutC(V Shr 24); PutC(V Shr 16); PutC(V Shr 8); PutC(V);
+End;
+
 Procedure Chunk(Const Tag: String; Len: LongInt);
-Var K: Integer;
+Var
+ K: Integer;
 Begin
- PutBE32(Len); Crc:=$FFFFFFFF; For K:=1 To 4 Do PutC(Ord(Tag[K]));
+ PutBE32(Len); Crc:=$FFFFFFFF;
+ For K:=1 To 4 Do PutC(Ord(Tag[K]));
 End;
-Procedure EndChunk;Begin PutBE32(ALWrap32(Crc Xor $FFFFFFFF)); End;
+
+Procedure EndChunk;Begin
+ PutBE32(ALWrap32(Crc Xor $FFFFFFFF));
+End;
+
+Procedure IDATChunk(Len: LongInt);
+Var
+ K: LongInt;
+Begin
+ Chunk('IDAT',Len);
+ For K:=0 To Len-1 Do PutC(OutBuf^[K]);
+ EndChunk;
+End;
+
 Begin
  W:=NVW; H:=NVH;
  If Not CRC32Ready Then AVSBuildCRC;
- Total:=H*(1+Bpp*W); GetMem(Raw,Total);
- For Row:=0 To H-1 Do Begin Raw^[Row*(1+Bpp*W)]:=0; Move(Rgb^[Row*Bpp*W],Raw^[Row*(1+Bpp*W)+1],Bpp*W); End;
- A:=1; Bv:=0;
- For I:=0 To Total-1 Do Begin A:=(A+Raw^[I]) Mod 65521; Bv:=(Bv+A) Mod 65521; End;
- Blocks:=(Total+65534) Div 65535; Used:=0;
+ If PNGLevelSet Then Lvl:=PNGLevel Else Lvl:=-1;
+ If Lvl>9 Then Lvl:=9;
+ RowSize:=W*Bpp;
+ If PNGDepth=1 Then RowSize:=(W+7) Shr 3;
+ GetMem(RowBuf,RowSize+16); GetMem(OutBuf,4096+16);
+ Used:=0;
  OpenWrite(NVTarget);
  PutB(137); PutB(80); PutB(78); PutB(71); PutB(13); PutB(10); PutB(26); PutB(10);
- Chunk('IHDR',13); PutC32(W); PutC32(H); PutC(8); If Bpp=4 Then PutC(6) Else PutC(2); PutC(0); PutC(0); PutC(0); EndChunk;
- Size:=2+Blocks*5+Total+4; Chunk('IDAT',Size); PutC($78); PutC($01);
- At:=0;
- For B:=1 To Blocks Do Begin
-  Take:=Total-At; If Take>65535 Then Take:=65535;
-  If B=Blocks Then PutC(1) Else PutC(0);
-  PutC(Take); PutC(Take Shr 8); PutC(Not Take); PutC((Not Take) Shr 8);
-  For I:=0 To Take-1 Do PutC(Raw^[At+I]);
-  Inc(At,Take);
+ Chunk('IHDR',13); PutC32(W); PutC32(H); If PNGDepth=1 Then PutC(1) Else PutC(8); PutC(CType);
+ PutC(0); PutC(0); PutC(0); EndChunk;
+ Chunk('pHYs',9);
+ If (NVSarN>0) And (NVSarD>0) Then Begin
+  PutC32(NVSarN); PutC32(NVSarD);
+ End
+  Else
+ Begin
+  PutC32(0); PutC32(1);
  End;
- PutC32((Bv Shl 16) Or A); EndChunk;
+ PutC(0); EndChunk;
+ If CType=3 Then Begin
+  Chunk('PLTE',768);
+  For I:=0 To 255 Do Begin
+   PutC(NVPalR[I]); PutC(NVPalG[I]); PutC(NVPalB[I]);
+  End;
+  EndChunk;
+  If NVPalN<256 Then Begin
+   { entrees de palette au-dela de NVPalN: alpha 0 (decodeur bmp de FFmpeg) }
+   Chunk('tRNS',256);
+   For I:=0 To 255 Do If I<NVPalN Then PutC(255) Else PutC(0);
+   EndChunk;
+  End;
+ End;
+ ZLDeflateInit(Lvl);
+ ZLOut:=OutBuf; ZLOutPos:=0; ZLAvailOut:=4096;
+ For Y:=0 To H-1 Do Begin
+  RowBuf^[0]:=0; Move(Data^[Y*RowSize],RowBuf^[1],RowSize);
+  ZLIn:=RowBuf; ZLInPos:=0; ZLAvailIn:=RowSize+1;
+  While ZLAvailIn>0 Do Begin
+   Ret:=ZLDeflate(0);
+   If Ret<>0 Then Fail('png: erreur de compression.');
+   If ZLAvailOut=0 Then Begin
+    IDATChunk(4096); ZLOutPos:=0; ZLAvailOut:=4096;
+   End;
+  End;
+ End;
+ Repeat
+  Ret:=ZLDeflate(4);
+  If (Ret<>0) And (Ret<>1) Then Fail('png: erreur de compression.');
+  I:=4096-ZLAvailOut;
+  If I>0 Then IDATChunk(I);
+  ZLOutPos:=0; ZLAvailOut:=4096;
+ Until Ret=1;
  Chunk('IEND',0); EndChunk;
  If Used>0 Then WriteBytes(Out,Used);
- CloseWrite; FreeMem(Raw,Total);
+ CloseWrite;
+ ZLDeflateEnd;
+ FreeMem(RowBuf,RowSize+16); FreeMem(OutBuf,4096+16);
+End;
+
+Procedure NVWritePNG(Rgb: PEABuffer; Bpp: LongInt);Begin
+ If Bpp=4 Then NVWritePNGEx(Rgb,4,6) Else If Bpp=1 Then NVWritePNGEx(Rgb,1,0)
+  Else NVWritePNGEx(Rgb,3,2);
 End;
 
 Procedure NVWriteBMP(P: PEABuffer);
@@ -18597,7 +19635,7 @@ End;
 
 { Recoit une image native (haut vers bas, NVW*bpp octets par ligne). }
 Procedure NVEmit(P: PEABuffer);
-Var Rgb: PEABuffer; I,R,G,B,Bpp,Size: LongInt;
+Var Rgb: PEABuffer; I,R,G,B,Bpp,Size,RowB: LongInt;
 Begin
  If NVDone Then Exit;
  Size:=NVFrameBytes;
@@ -18615,6 +19653,21 @@ Begin
    For I:=1 To NVGap Do Begin NVWriteY4M(P); Inc(NVFrames); End;
   NVHaveLast:=True; NVGap:=0;
   NVWriteY4M(P); Inc(NVFrames);
+ End Else If (NVMode=1) And ((NVFmt=0) Or (NVFmt=4)) Then Begin
+  { PAL8 (type 3 + PLTE) et GRAY8 (type 0) sont ecrits tels quels, comme l'encodeur png de FFmpeg }
+  If NVFmt=0 Then NVWritePNGEx(P,1,3) Else NVWritePNGEx(P,1,0);
+  NVDone:=True; Inc(NVFrames);
+ End Else If (NVMode=1) And (NVFmt=11) Then Begin
+  NVWritePNGEx(P,2,4); NVDone:=True; Inc(NVFrames);
+ End Else If (NVMode=1) And (NVFmt=10) Then Begin
+  { monob: gris 1 bit, 8 pixels par octet, bit de poids fort en premier }
+  RowB:=(NVW+7) Shr 3; GetMem(Rgb,RowB*NVH+16); FillChar(Rgb^,RowB*NVH+16,0);
+  For I:=0 To NVW*NVH-1 Do
+   If P^[I]>=128 Then Begin
+    R:=(I Div NVW)*RowB+((I Mod NVW) Shr 3); Rgb^[R]:=Rgb^[R] Or ($80 Shr ((I Mod NVW) And 7));
+   End;
+  PNGDepth:=1; NVWritePNGEx(Rgb,1,0); PNGDepth:=0;
+  FreeMem(Rgb,RowB*NVH+16); NVDone:=True; Inc(NVFrames);
  End Else If NVMode=1 Then Begin
   If NVHasAlpha And (NVFmt=3) Then Bpp:=4 Else Bpp:=3;
   GetMem(Rgb,NVW*NVH*Bpp);
@@ -18645,7 +19698,7 @@ End;
 Procedure NVBegin(Mode: LongInt; Const Target: String; W,H,Fmt,FpsN,FpsD: LongInt);
 Begin
  NVMode:=Mode; NVTarget:=Target; NVW:=W; NVH:=H; NVFmt:=Fmt; NVFrames:=0; NVFpsN:=FpsN; NVFpsD:=FpsD;
- NVSarN:=0; NVSarD:=0; NVYC:=False; NVInitDup:=False; NVIl:='p'; NVBT709:=False; NVFullRng:=False; NVOpened:=False; NVDone:=False; NVLast:=Nil; NVHaveLast:=False; NVGap:=0; NVHasAlpha:=False; NVTo420:=False; NVHdrOk:=False;
+ NVSarN:=0; NVSarD:=0; NVYC:=False; NVInitDup:=False; NVIl:='p'; NVBT709:=False; NVFullRng:=False; NVOpened:=False; NVDone:=False; NVLast:=Nil; NVHaveLast:=False; NVGap:=0; NVHasAlpha:=False; NVTo420:=False; NVHdrOk:=False; NVPalN:=256;
 End;
 
 { flux sans image decodee: ffmpeg ecrit l'en-tete Y4M seul quand le format est connu des parametres du conteneur }
@@ -18866,6 +19919,7 @@ Begin
    For I:=0 To Colors-1 Do Begin NVPalB[I]:=Buf^[Pal0+3*I]; NVPalG[I]:=Buf^[Pal0+3*I+1]; NVPalR[I]:=Buf^[Pal0+3*I+2]; End;
   End Else
    For I:=0 To Colors-1 Do Begin NVPalB[I]:=Buf^[Pal0+4*I]; NVPalG[I]:=Buf^[Pal0+4*I+1]; NVPalR[I]:=Buf^[Pal0+4*I+2]; End;
+ NVPalN:=Colors;
  End;
  If (Comp=1) Or (Comp=2) Then Begin
   If Depth<>4 Then Begin
@@ -21779,7 +22833,7 @@ Begin
  If Int64(RowBytes)*H>Size-Pos Then
   If (Typ>=4) Then Fail('pnm: donnees insuffisantes.');
  { pixel natif : gris (4), RGB24 (9), BGRA (3) }
- If Comp>=3 Then Begin If Comp=3 Then Fmt:=9 Else Fmt:=3; End Else If IsMono Then Fmt:=10 Else Fmt:=4;
+ If Comp>=3 Then Begin If Comp=3 Then Fmt:=9 Else Fmt:=3; End Else If IsMono Then Fmt:=10 Else If Comp=2 Then Fmt:=11 Else Fmt:=4;
  NVBegin(Mode,Target,W,H,Fmt,25,1); NVSarN:=0; NVSarD:=0; NVHasAlpha:=(Comp=4);
  Bpp:=NVBpp(Fmt);
  GetMem(Img,W*H*Bpp+16);
@@ -21824,7 +22878,7 @@ Begin
    If Comp>=3 Then Begin
     If Comp=3 Then Begin Img^[Q]:=Smp[0]; Img^[Q+1]:=Smp[1]; Img^[Q+2]:=Smp[2]; End
     Else Begin Img^[Q]:=Smp[2]; Img^[Q+1]:=Smp[1]; Img^[Q+2]:=Smp[0]; Img^[Q+3]:=Smp[3]; End;
-   End Else Img^[Q]:=Smp[0];
+   End Else Begin Img^[Q]:=Smp[0]; If Comp=2 Then Img^[Q+1]:=Smp[1]; End;
   End;
  End;
  NVEmit(Img);
@@ -22186,9 +23240,10 @@ Begin
     End;
    End;
   End;
-  If Bpp*Planes=1 Then Begin NVPalR[0]:=0; NVPalG[0]:=0; NVPalB[0]:=0; NVPalR[1]:=255; NVPalG[1]:=255; NVPalB[1]:=255; End
+  If Bpp*Planes=1 Then Begin NVPalR[0]:=0; NVPalG[0]:=0; NVPalB[0]:=0; NVPalR[1]:=255; NVPalG[1]:=255; NVPalB[1]:=255; NVPalN:=2; End
   Else If Bpp<8 Then Begin
    For I:=0 To 15 Do Begin NVPalR[I]:=F^[16+I*3]; NVPalG[I]:=F^[17+I*3]; NVPalB[I]:=F^[18+I*3]; End;
+   NVPalN:=16;
   End;
  End;
  NVEmit(Img);
@@ -22213,7 +23268,7 @@ Begin
  If (Dim<>2) And (Dim<>3) Then Fail('sgi: dimension invalide.');
  If (Nc<>1) And (Nc<>3) And (Nc<>4) Then Fail('sgi: format d''image invalide.');
  If (W<1) Or (H<1) Or (W>16000) Or (H>16000) Then Fail('sgi: dimensions invalides.');
- If Nc=1 Then Fmt:=4 Else Fmt:=9;
+ If Nc=1 Then Fmt:=4 Else If Nc=4 Then Fmt:=3 Else Fmt:=9;
  RowLen:=W*Bpc;
  GetMem(Row,RowLen*H*Nc+64); FillChar(Row^,RowLen*H*Nc,0);
  { Row: plans SGI, canal Z, ligne R (0 = haut de l'image) }
@@ -22253,14 +23308,19 @@ Begin
    End;
  End;
  If Bpc=2 Then Fail('sgi: canaux 16 bits non pris en charge.');
- NVBegin(Mode,Target,W,H,Fmt,25,1);
+ NVBegin(Mode,Target,W,H,Fmt,25,1); NVHasAlpha:=Nc=4;
  GetMem(Img,W*H*NVBpp(Fmt)+64);
  { la premiere rangee stockee est la ligne du bas : R est deja l'indice de ligne de l'image }
  For Y:=0 To H-1 Do
   For X:=0 To W-1 Do Begin
    R:=Y;
    If Nc=1 Then Img^[Y*W+X]:=Row^[R*RowLen+X]
-   Else Begin
+   Else If Nc=4 Then Begin
+    Img^[(Y*W+X)*4]:=Row^[(2*H+R)*RowLen+X];
+    Img^[(Y*W+X)*4+1]:=Row^[(1*H+R)*RowLen+X];
+    Img^[(Y*W+X)*4+2]:=Row^[(0*H+R)*RowLen+X];
+    Img^[(Y*W+X)*4+3]:=Row^[(3*H+R)*RowLen+X];
+   End Else Begin
     Img^[(Y*W+X)*3]:=Row^[(0*H+R)*RowLen+X];
     Img^[(Y*W+X)*3+1]:=Row^[(1*H+R)*RowLen+X];
     Img^[(Y*W+X)*3+2]:=Row^[(2*H+R)*RowLen+X];
@@ -73200,7 +74260,7 @@ BEGIN
    WriteLn('DEV    pgmyuv          PGMYUV (Portable GrayMap, YUV 4:2:0 planar)');
    WriteLn('DEV    ppm             PPM (Portable PixelMap) image (decodeur P3/P6; encodeur RGB24 depuis Y4M, -frames:v 1)');
    WriteLn('DEV    sgi             SGI image (decodeur 8 bits gris/RGB/RGBA, RLE ou non; encodeur RGB24 RLE depuis Y4M, pas de 16 bits)');
-   WriteLn('DEV    png             PNG (decodeur 1..8 bits gris/RGB/RGBA/palette, Adam7; encodeur RGB24 non compresse; pas de 16 bits)');
+   WriteLn('DEV    png             PNG (decodeur 1..8 bits gris/RGB/RGBA/palette, Adam7; encodeur zlib niveaux 0..9 identique a FFmpeg (-compression_level); pas de 16 bits)');
    WriteLn('DEV    qtrle           QuickTime Animation (RLE) (MOV; decodeur 1/2/4/8/16/24/32 bits; encodeur rgb24/argb/gray octet pour octet)');
    WriteLn('D V    rpza            QuickTime video RPZA (MOV; decodeur exact)');
    WriteLn('D V    smc             QuickTime Graphics SMC (MOV; decodeur, largeur multiple de 32 pour l''identite avec ffmpeg)');
@@ -73248,6 +74308,13 @@ BEGIN
   End Else
   If Argument='-4mv' Then Begin
    FourMV:=True;
+  End Else
+  If Argument='-compression_level' Then Begin
+   Value:=NextArgument; Val(Value,Number,Code);
+   If Code<>0 Then Fail('-compression_level: nombre entier requis.');
+   If Number>9 Then Number:=9;
+   PNGLevelSet:=Number>=0; If Number<0 Then Number:=-1;
+   PNGLevel:=Number;
   End Else
   If Argument='-huffman' Then Begin
    Value:=Lower(NextArgument);
