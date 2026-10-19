@@ -79685,7 +79685,8 @@ BEGIN
    WriteLn('DEV    qtrle           QuickTime Animation (RLE) (MOV; decodeur 1/2/4/8/16/24/32 bits; encodeur rgb24/argb/gray octet pour octet)');
    WriteLn('D V    rpza            QuickTime video RPZA (MOV; decodeur exact)');
    WriteLn('D V    smc             QuickTime Graphics SMC (MOV; decodeur, largeur multiple de 32 pour l''identite avec ffmpeg)');
-   WriteLn('D V    qdraw           Apple QuickDraw (MOV; PICT v2 PackBits/DirectBits)');
+   WriteLn('DEV    rawvideo        raw video (conteneurs AVI/MOV en lecture; Y4M vers .raw/.avi en ecriture: yuv420p, gray, rgb24, bgr24)');
+  WriteLn('D V    qdraw           Apple QuickDraw (MOV; PICT v2 PackBits/DirectBits)');
    WriteLn('D V    qpeg            Q-team QPEG (AVI; palette 8 bits)');
    WriteLn('DEV D  roqvideo        id RoQ video (fichiers .roq; decodeur exact; encodeur yuvj444p octet pour octet depuis Y4M yuv420p/yuv444p, dimensions multiples de 16)');
    WriteLn('DEA    roq_dpcm        id RoQ DPCM (fichiers .roq; decodeur et encodeur octet pour octet, 22050 Hz mono/stereo)');
