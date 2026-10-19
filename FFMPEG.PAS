@@ -3966,6 +3966,7 @@ Begin
  If N>=18 Then If (B[0]=66) And (B[1]=77) And (B[6]=0) And (B[7]=0) And (B[8]=0) And (B[9]=0) And (B[14] In [12,40,56,64,108,124]) And (B[15]=0) Then Begin Probe:='bmp'; Exit; End;
  If N>=12 Then If (B[0]=70) And (B[1]=79) And (B[2]=82) And (B[3]=77) And (B[8]=82) And (B[9]=76) And (B[10]=86) And ((B[11]=50) Or (B[11]=51)) Then Begin Probe:='rl2'; Exit; End;
  If N>=16 Then If (B[0]=82) And (B[1]=73) And (B[2]=70) And (B[3]=70) And (B[8]=$51) And (B[9]=$4C) And (B[10]=$43) And (B[11]=$4D) And (B[12]=$66) Then Begin Probe:='qcp'; Exit; End;
+ If N>=8 Then If (B[0]=83) And (B[1]=77) And (B[2]=75) And ((B[3]=50) Or (B[3]=52)) Then Begin Probe:='smk'; Exit; End;
  If N>=8 Then If (B[0]=$61) And (B[1]=$6A) And (B[2]=$6B) And (B[3]=$67) And (Lower(Extension(Name))='shn') Then Begin Probe:='shn'; Exit; End;
  If N>=8 Then If (B[0]=$84) And (B[1]=$10) And (B[2]=255) And (B[3]=255) And (B[4]=255) And (B[5]=255) Then Begin Probe:='roq'; Exit; End;
  If N>=33 Then If (B[0]=137) And (B[1]=80) And (B[2]=78) And (B[3]=71) And (B[4]=13) And (B[5]=10) And (B[6]=26) And (B[7]=10) Then Begin Probe:='png'; Exit; End;
@@ -21659,6 +21660,7 @@ Procedure DecodeQPEG(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeRawQX(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeRoQ(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeRL2(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure DecodeSMK(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeSTRVideo(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeMSNWC(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeMM(Const Source,Target: String; Mode: LongInt); Forward;
@@ -22412,6 +22414,7 @@ Procedure DecodeNV2(Kind: LongInt; Const Source,Target: String; Mode: LongInt);
 Begin
  If Kind=55 Then Begin DecodePCX(Source,Target,Mode); Exit; End;
  If Kind=66 Then Begin DecodeRL2(Source,Target,Mode); Exit; End;
+ If Kind=67 Then Begin DecodeSMK(Source,Target,Mode); Exit; End;
  If Kind=65 Then Begin DecodeRoQ(Source,Target,Mode); Exit; End;
  If Kind=64 Then Begin DecodeRawQX(Source,Target,Mode); Exit; End;
  If Kind=63 Then Begin DecodeQPEG(Source,Target,Mode); Exit; End;
@@ -49680,6 +49683,477 @@ Begin
  ADPCMPatchHeader(Rate,1,EAWritten); CloseWrite;
 End;
 
+{ ---- Smacker (libavformat/smacker.c + libavcodec/smacker.c) : smackvid / smackaud ---- }
+Type
+ TSmkTree=Record NN,Cur,Root,SingleV: LongInt; HasTree: Boolean; Kid: Array[0..1,0..511] Of LongInt; End;
+ TSmkBig=Record Vals: PALLong; Cur,Len: LongInt; Esc: Array[0..2] Of LongInt; Last: Array[0..2] Of LongInt; V: Array[0..1] Of LongInt; End;
+Var
+ SkB: PEABuffer; SkTot,SkPos: Int64;
+ SkTbl: Array[0..3] Of PALLong; SkLast: Array[0..3,0..2] Of LongInt;
+Const SKNODE=$40000000;
+ SkRuns: Array[0..63] Of Word=(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,128,256,512,1024,2048);
+ SkPal: Array[0..63] Of Byte=(0,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,65,69,73,77,81,85,89,93,97,101,105,109,113,117,121,125,130,134,138,142,146,150,154,158,162,166,170,174,178,182,186,190,195,199,203,207,211,215,219,223,227,231,235,239,243,247,251,255);
+
+Function SkBit: LongInt;
+Begin
+ If SkPos<SkTot Then SkBit:=(SkB^[SkPos Shr 3] Shr (SkPos And 7)) And 1 Else SkBit:=0;
+ Inc(SkPos);
+End;
+Function SkGet(N: LongInt): LongInt;
+Var K,R: LongInt;
+Begin R:=0; For K:=0 To N-1 Do R:=R Or (SkBit Shl K); SkGet:=R; End;
+
+Function SkDecTree(Var T: TSmkTree; Len: LongInt; Var Ref: LongInt): Boolean;
+Var Idx,R1,R2: LongInt;
+Begin
+ SkDecTree:=False;
+ If (Len>27) Or (Len>3*9) Then Exit;
+ If SkBit=0 Then Begin
+  If T.Cur>=256 Then Exit;
+  If SkTot-SkPos<8 Then Exit;
+  Ref:=-(SkGet(8)+1); Inc(T.Cur);
+  SkDecTree:=True;
+ End Else Begin
+  Idx:=T.NN; Inc(T.NN);
+  If Not SkDecTree(T,Len+1,R1) Then Exit;
+  If Not SkDecTree(T,Len+1,R2) Then Exit;
+  T.Kid[0,Idx]:=R1; T.Kid[1,Idx]:=R2; Ref:=Idx;
+  SkDecTree:=True;
+ End;
+End;
+{ arbre complet : lit le drapeau initial s'il y a lieu (Hdr), l'arbre puis le bit de fin }
+Function SkReadTree(Var T: TSmkTree): Boolean;
+Var R: LongInt;
+Begin
+ T.NN:=0; T.Cur:=0; T.HasTree:=False;
+ SkReadTree:=False;
+ If Not SkDecTree(T,0,R) Then Exit;
+ SkGet(1);
+ T.Root:=R;
+ If T.Cur>1 Then T.HasTree:=True Else T.SingleV:=-(R+1);
+ SkReadTree:=True;
+End;
+Function SkWalk(Var T: TSmkTree): LongInt;
+Var N: LongInt;
+Begin
+ N:=T.Root;
+ While N>=0 Do N:=T.Kid[SkBit,N];
+ SkWalk:=-(N+1);
+End;
+
+Var SkBG: TSmkBig; SkT2: Array[0..1] Of TSmkTree;
+Function SkBigTree(Len: LongInt): LongInt;   { retourne <0 en cas d'erreur }
+Var Val,I1,I2,T,R,Rn: LongInt;
+Begin
+ If Len>500 Then Begin SkBigTree:=-1; Exit; End;
+ If SkBG.Cur>=SkBG.Len Then Begin SkBigTree:=-1; Exit; End;
+ If SkTot-SkPos<=0 Then Begin SkBigTree:=-1; Exit; End;
+ If SkBit=0 Then Begin
+  If SkT2[0].HasTree Then I1:=SkWalk(SkT2[0]) Else I1:=SkBG.V[0];
+  If SkT2[1].HasTree Then I2:=SkWalk(SkT2[1]) Else I2:=SkBG.V[1];
+  Val:=I1 Or (I2 Shl 8);
+  If Val=SkBG.Esc[0] Then Begin SkBG.Last[0]:=SkBG.Cur; Val:=0; End
+  Else If Val=SkBG.Esc[1] Then Begin SkBG.Last[1]:=SkBG.Cur; Val:=0; End
+  Else If Val=SkBG.Esc[2] Then Begin SkBG.Last[2]:=SkBG.Cur; Val:=0; End;
+  SkBG.Vals^[SkBG.Cur]:=Val; Inc(SkBG.Cur);
+  SkBigTree:=1;
+ End Else Begin
+  T:=SkBG.Cur; Inc(SkBG.Cur);
+  R:=SkBigTree(Len+1);
+  If R<0 Then Begin SkBigTree:=R; Exit; End;
+  SkBG.Vals^[T]:=SKNODE Or R;
+  Inc(R);
+  Rn:=SkBigTree(Len+1);
+  If Rn<0 Then Begin SkBigTree:=Rn; Exit; End;
+  SkBigTree:=R+Rn;
+ End;
+End;
+{ smacker_decode_header_tree }
+Function SkHeaderTree(Which,Size: LongInt): Boolean;
+Var I: LongInt;
+Begin
+ SkHeaderTree:=False;
+ If Size<0 Then Exit;
+ For I:=0 To 1 Do Begin
+  SkT2[I].HasTree:=False; SkBG.V[I]:=0;
+  If SkBit=0 Then Continue;
+  If Not SkReadTree(SkT2[I]) Then Exit;
+  If Not SkT2[I].HasTree Then SkBG.V[I]:=SkT2[I].SingleV;
+ End;
+ SkBG.Esc[0]:=SkGet(16); SkBG.Esc[1]:=SkGet(16); SkBG.Esc[2]:=SkGet(16);
+ SkBG.Last[0]:=-1; SkBG.Last[1]:=-1; SkBG.Last[2]:=-1;
+ SkBG.Len:=(Size+3) Shr 2; SkBG.Cur:=0;
+ GetMem(SkBG.Vals,(SkBG.Len+3)*4); FillChar(SkBG.Vals^,(SkBG.Len+3)*4,0);
+ SkTbl[Which]:=SkBG.Vals;
+ If SkBigTree(0)<0 Then Exit;
+ SkGet(1);
+ For I:=0 To 2 Do If SkBG.Last[I]=-1 Then Begin SkBG.Last[I]:=SkBG.Cur; Inc(SkBG.Cur); End;
+ For I:=0 To 2 Do SkLast[Which,I]:=SkBG.Last[I];
+ SkHeaderTree:=True;
+End;
+
+Function SkGetCode(Which: LongInt; Var Err: Boolean): LongInt;
+Var Tb: PALLong; P,V,L0,L1,L2: LongInt;
+Begin
+ Tb:=SkTbl[Which]; P:=0;
+ While (Tb^[P] And SKNODE)<>0 Do Begin
+  If SkTot-SkPos<1 Then Begin Err:=True; SkGetCode:=0; Exit; End;
+  If SkBit<>0 Then P:=P+(Tb^[P] And (Not SKNODE));
+  Inc(P);
+ End;
+ V:=Tb^[P];
+ L0:=SkLast[Which,0]; L1:=SkLast[Which,1]; L2:=SkLast[Which,2];
+ If V<>Tb^[L0] Then Begin Tb^[L2]:=Tb^[L1]; Tb^[L1]:=Tb^[L0]; Tb^[L0]:=V; End;
+ SkGetCode:=V;
+End;
+
+{ ---- en-tete et trames ---- }
+Var
+ SkF: PEABuffer; SkSize: LongInt; SkW,SkH,SkFrames,SkPtsInc,SkHFlags,SkTreeSize,SkMagic: LongInt;
+ SkARate: Array[0..6] Of LongInt; SkAFlag: Array[0..6] Of LongInt;
+ SkFrmSize: PALLong; SkFrmFlags: PEABuffer; SkTreePos,SkDataPos: LongInt;
+
+Function SkRL32(At: LongInt): LongInt;
+Begin If (At<0) Or (At+4>SkSize) Then SkRL32:=0 Else SkRL32:=SkF^[At]+SkF^[At+1]*256+SkF^[At+2]*65536+SkF^[At+3]*16777216; End;
+
+Procedure SkOpen(Const Source: String);
+Var I,P: LongInt;
+Begin
+ NVLoad(Source,SkF,SkSize);
+ If SkSize<104 Then Fail('smacker: fichier trop court.');
+ SkMagic:=SkRL32(0);
+ If (SkMagic<>$324B4D53) And (SkMagic<>$344B4D53) Then Fail('smacker: signature SMK2/SMK4 requise.');
+ SkW:=SkRL32(4); SkH:=SkRL32(8); SkFrames:=SkRL32(12); SkPtsInc:=SkRL32(16); SkHFlags:=SkRL32(20);
+ If (SkPtsInc>2147483647 Div 100) Then Fail('smacker: pts_inc invalide.');
+ If (SkHFlags And 1)<>0 Then Inc(SkFrames);
+ If (SkFrames<0) Or (SkFrames>$FFFFFF) Then Fail('smacker: nombre de trames invalide.');
+ If (SkW<=0) Or (SkH<=0) Or (SkW>16384) Or (SkH>16384) Then Fail('smacker: dimensions invalides.');
+ SkTreeSize:=SkRL32(52);
+ If (SkTreeSize<0) Or (SkTreeSize>SkSize) Then Fail('smacker: taille des arbres invalide.');
+ P:=72;
+ For I:=0 To 6 Do Begin
+  SkARate[I]:=SkRL32(P) And $FFFFFF; SkAFlag[I]:=SkF^[P+3]; Inc(P,4);
+ End;
+ Inc(P,4);
+ GetMem(SkFrmSize,SkFrames*4+16); GetMem(SkFrmFlags,SkFrames+16);
+ For I:=0 To SkFrames-1 Do Begin SkFrmSize^[I]:=SkRL32(P); Inc(P,4); End;
+ If P+SkFrames+SkTreeSize>SkSize Then Fail('smacker: en-tete tronque.');
+ Move(SkF^[P],SkFrmFlags^[0],SkFrames); Inc(P,SkFrames);
+ SkTreePos:=P; Inc(P,SkTreeSize);
+ SkDataPos:=P;
+End;
+
+{ decode un paquet video (769 octets de prefixe deja formes dans Pk) ; Pic = W*H }
+Var SkPic: PEABuffer;
+Function SkVideoFrame(Pk: PEABuffer; PkLen: LongInt; Pal: PEABuffer): Boolean;
+Var
+ Blk,Blocks,Bw,Bh,Typ,Run,Mode,Clr,Map,Hi,Lo,I,Pix,Pix1,Pix2,Stride,Ox,Q: LongInt; Err: Boolean;
+ Col: LongInt;
+Procedure PutRow(Row,X0: LongInt; V: LongInt);   { ecrit 2 octets LE a (Ox+X0) de la ligne Row }
+Begin SkPic^[Ox+Row*Stride+X0]:=V And 255; SkPic^[Ox+Row*Stride+X0+1]:=(V Shr 8) And 255; End;
+Begin
+ SkVideoFrame:=False;
+ If PkLen<=769 Then Exit;
+ For I:=0 To 3 Do Begin SkTbl[I]^[SkLast[I,0]]:=0; SkTbl[I]^[SkLast[I,1]]:=0; SkTbl[I]^[SkLast[I,2]]:=0; End;
+ SkB:=PEABuffer(@Pk^[769]); SkTot:=Int64(PkLen-769)*8; SkPos:=0;
+ Stride:=SkW; Bw:=SkW Shr 2; Bh:=SkH Shr 2; Blocks:=Bw*Bh; Blk:=0; Err:=False;
+ While Blk<Blocks Do Begin
+  Typ:=SkGetCode(3,Err); If Err Then Exit;
+  Run:=SkRuns[(Typ Shr 2) And $3F];
+  Case Typ And 3 Of
+   0: While (Run>0) And (Blk<Blocks) Do Begin
+       Dec(Run);
+       Clr:=SkGetCode(1,Err); If Err Then Exit; Map:=SkGetCode(0,Err); If Err Then Exit;
+       Ox:=(Blk Div Bw)*Stride*4+(Blk Mod Bw)*4;
+       Hi:=Clr Shr 8; Lo:=Clr And $FF;
+       For I:=0 To 3 Do Begin
+        For Q:=0 To 3 Do If (Map And (1 Shl Q))<>0 Then SkPic^[Ox+I*Stride+Q]:=Hi Else SkPic^[Ox+I*Stride+Q]:=Lo;
+        Map:=Map Shr 4;
+       End;
+       Inc(Blk);
+      End;
+   1: Begin
+       Mode:=0;
+       If SkMagic=$344B4D53 Then Begin
+        If SkTot-SkPos<1 Then Exit;
+        If SkBit<>0 Then Mode:=1 Else If SkBit<>0 Then Mode:=2;
+       End;
+       While (Run>0) And (Blk<Blocks) Do Begin
+        Dec(Run);
+        Ox:=(Blk Div Bw)*Stride*4+(Blk Mod Bw)*4;
+        Case Mode Of
+         0: For I:=0 To 3 Do Begin
+             Pix:=SkGetCode(2,Err); If Err Then Exit; PutRow(I,2,Pix);
+             Pix:=SkGetCode(2,Err); If Err Then Exit; PutRow(I,0,Pix);
+            End;
+         1: Begin
+             Pix:=SkGetCode(2,Err); If Err Then Exit;
+             For I:=0 To 1 Do Begin
+              SkPic^[Ox+I*Stride]:=Pix And 255; SkPic^[Ox+I*Stride+1]:=Pix And 255;
+              SkPic^[Ox+I*Stride+2]:=(Pix Shr 8) And 255; SkPic^[Ox+I*Stride+3]:=(Pix Shr 8) And 255;
+             End;
+             Pix:=SkGetCode(2,Err); If Err Then Exit;
+             For I:=2 To 3 Do Begin
+              SkPic^[Ox+I*Stride]:=Pix And 255; SkPic^[Ox+I*Stride+1]:=Pix And 255;
+              SkPic^[Ox+I*Stride+2]:=(Pix Shr 8) And 255; SkPic^[Ox+I*Stride+3]:=(Pix Shr 8) And 255;
+             End;
+            End;
+         2: For Q:=0 To 1 Do Begin
+             Pix2:=SkGetCode(2,Err); If Err Then Exit; Pix1:=SkGetCode(2,Err); If Err Then Exit;
+             PutRow(Q*2,0,Pix1); PutRow(Q*2,2,Pix2);
+             PutRow(Q*2+1,0,Pix1); PutRow(Q*2+1,2,Pix2);
+            End;
+        End;
+        Inc(Blk);
+       End;
+      End;
+   2: While (Run>0) And (Blk<Blocks) Do Begin Dec(Run); Inc(Blk); End;
+   3: Begin
+       Mode:=(Typ Shr 8) And 255;
+       While (Run>0) And (Blk<Blocks) Do Begin
+        Dec(Run);
+        Ox:=(Blk Div Bw)*Stride*4+(Blk Mod Bw)*4;
+        For I:=0 To 3 Do FillChar(SkPic^[Ox+I*Stride],4,Mode);
+        Inc(Blk);
+       End;
+      End;
+  End;
+ End;
+ SkVideoFrame:=True;
+End;
+
+{ Parcourt les trames. VMode: True = video (decode et emet), False = audio (collecte la piste ATrack) }
+Var SkAudBuf: PEABuffer; SkAudLen,SkAudCap: LongInt;
+Procedure SkWalkFrames(VMode: Boolean; ATrack: LongInt; Mode: LongInt);
+Var
+ Cur,Pos,FSize,NextPos,Flags,AFl,I,J,Sz,Sz2,T,Off,K,PalPos,Cnt: LongInt;
+ Pal,OldPal: Array[0..767] Of Byte; Pk: PEABuffer; NewPal,Bad: Boolean; Pp,Sp: LongInt;
+ DurSize: Array[0..6] Of LongInt;
+Begin
+ FillChar(Pal,SizeOf(Pal),0); NewPal:=False;
+ For I:=0 To 6 Do Begin
+  DurSize[I]:=4;
+  If (SkAFlag[I] And $20<>0) And (SkAFlag[I] And $8C=0) Then DurSize[I]:=0;
+ End;
+ Pos:=SkDataPos;
+ For Cur:=0 To SkFrames-1 Do Begin
+  FSize:=SkFrmSize^[Cur] And (Not 3);
+  NextPos:=Pos+FSize;
+  Flags:=SkFrmFlags^[Cur]; AFl:=Flags Shr 1;
+  If (FSize<0) Or (NextPos>SkSize+0) Then If Pos>=SkSize Then Break;
+  Bad:=False;
+  If (Flags And 1)<>0 Then Begin
+   Move(Pal,OldPal,768);
+   Sz:=SkF^[Pos]*4; Inc(Pos);
+   If Sz>FSize Then Bad:=True
+   Else Begin
+    Dec(FSize,Sz); Dec(Sz);
+    Pp:=Pos+Sz; Cnt:=0; Sp:=0;
+    While (Cnt<256) And Not Bad Do Begin
+     T:=SkF^[Pos]; Inc(Pos);
+     If (T And $80)<>0 Then Begin Inc(Cnt,(T And $7F)+1); Inc(Sp,((T And $7F)+1)*3); End
+     Else If (T And $40)<>0 Then Begin
+      Off:=SkF^[Pos]; Inc(Pos);
+      J:=(T And $3F)+1;
+      If Off+J>$100 Then Bad:=True
+      Else Begin
+       Off:=Off*3;
+       While (J>0) And (Cnt<256) Do Begin
+        Dec(J);
+        If Sp+2<768 Then Begin Pal[Sp]:=OldPal[Off]; Pal[Sp+1]:=OldPal[Off+1]; Pal[Sp+2]:=OldPal[Off+2]; End;
+        Inc(Sp,3); Inc(Cnt); Inc(Off,3);
+       End;
+      End;
+     End Else Begin
+      If Sp+2<768 Then Begin
+       Pal[Sp]:=SkPal[T]; Pal[Sp+1]:=SkPal[SkF^[Pos] And $3F]; Pal[Sp+2]:=SkPal[SkF^[Pos+1] And $3F];
+      End;
+      Inc(Pos,2); Inc(Sp,3); Inc(Cnt);
+     End;
+    End;
+    If Not Bad Then Begin Pos:=Pp; NewPal:=True; End;
+   End;
+  End;
+  If Not Bad Then Begin
+   For I:=0 To 6 Do If (AFl And (1 Shl I))<>0 Then Begin
+    Sz:=SkRL32(Pos); Inc(Pos,4);
+    If (Sz<4+DurSize[I]) Or (Sz>FSize) Then Begin Bad:=True; Break; End;
+    Dec(FSize,Sz); Dec(Sz,4);
+    If (Not VMode) And (I=ATrack) Then Begin
+     If SkAudLen+Sz+16>SkAudCap Then Begin Inc(SkAudCap,SkAudCap Div 2+Sz+65536); ReAllocMem(SkAudBuf,SkAudCap); End;
+     { paquet audio : [taille 32 bits][donnees] }
+     SkAudBuf^[SkAudLen]:=Sz And 255; SkAudBuf^[SkAudLen+1]:=(Sz Shr 8) And 255; SkAudBuf^[SkAudLen+2]:=(Sz Shr 16) And 255; SkAudBuf^[SkAudLen+3]:=(Sz Shr 24) And 255;
+     Move(SkF^[Pos],SkAudBuf^[SkAudLen+4],Sz);
+     Inc(SkAudLen,Sz+4);
+    End;
+    Inc(Pos,Sz);
+   End;
+  End;
+  If (Not Bad) And VMode Then Begin
+   If FSize>=1073741823 Then Bad:=True
+   Else Begin
+    GetMem(Pk,FSize+769+64);
+    Pk^[0]:=Ord(NewPal) Or (Ord((SkFrmSize^[Cur] And 1<>0) Or (Cur=0)) Shl 1);
+    Move(Pal,Pk^[1],768);
+    If Pos+FSize>SkSize Then Bad:=True Else Move(SkF^[Pos],Pk^[769],FSize);
+    If Not Bad Then Begin
+     NewPal:=False;
+     For I:=0 To 255 Do Begin NVPalR[I]:=Pal[I*3]; NVPalG[I]:=Pal[I*3+1]; NVPalB[I]:=Pal[I*3+2]; End;
+     If SkVideoFrame(Pk,FSize+769,Pk) Then Begin NVEmit(SkPic); If NVDone Then Begin FreeMem(Pk,FSize+769+64); Break; End; End;
+    End;
+    FreeMem(Pk,FSize+769+64);
+   End;
+  End;
+  Pos:=NextPos;
+ End;
+End;
+
+{ ---- audio ---- }
+Function SkaPacket(P: PEABuffer; Len,Chans,Bits16: LongInt): Boolean;
+Var
+ Unp,I,Stereo,Bits,Idx,Val,Val2,Res,NS: LongInt; Tr: Array[0..3] Of TSmkTree; Vals: Array[0..3] Of LongInt; Pred: Array[0..1] Of LongInt;
+ Out: PEABuffer; OP: LongInt; Ok: Boolean;
+Procedure Put16(V: LongInt);
+Begin V:=V And $FFFF; Out^[OP]:=V And 255; Out^[OP+1]:=V Shr 8; Inc(OP,2); End;
+Function Cv(T: LongInt): LongInt;
+Begin If Tr[T].HasTree Then Cv:=SkWalk(Tr[T]) Else Cv:=Vals[T]; End;
+Begin
+ SkaPacket:=False;
+ If Len<=4 Then Exit;
+ Unp:=P^[0]+P^[1]*256+P^[2]*65536+P^[3]*16777216;
+ If (Unp<0) Or (Unp>(1 Shl 24)) Then Exit;
+ SkB:=PEABuffer(@P^[4]); SkTot:=Int64(Len-4)*8; SkPos:=0;
+ If SkBit=0 Then Exit;
+ Stereo:=SkBit; Bits:=SkBit;
+ If (Stereo<>0)<>(Chans<>1) Then Exit;
+ If (Bits<>0)<>(Bits16<>0) Then Exit;
+ If Unp Mod (Chans*(Bits+1))<>0 Then Exit;
+ NS:=Unp Div (Chans*(Bits+1));
+ { sortie : 16 bits (les flux 8 bits sont ensuite convertis) }
+ GetMem(Out,Unp*2+16); OP:=0;
+ For I:=0 To (1 Shl (Bits+Stereo))-1 Do Begin
+  SkGet(1);
+  If Not SkReadTree(Tr[I]) Then Begin FreeMem(Out,Unp*2+16); Exit; End;
+  If Not Tr[I].HasTree Then Vals[I]:=Tr[I].SingleV;
+ End;
+ Ok:=True;
+ If Bits<>0 Then Begin
+  For I:=Stereo DownTo 0 Do Begin Res:=SkGet(16); Pred[I]:=((Res And 255) Shl 8) Or (Res Shr 8); End;
+  For I:=0 To Stereo Do Put16(Pred[I]);
+  Unp:=Unp Div 2;
+  I:=Stereo+1;
+  If Tr[0].HasTree Or Tr[1].HasTree Or Tr[2*Stereo].HasTree Or Tr[2*Stereo+1].HasTree Then Begin
+   While I<Unp Do Begin
+    If SkTot-SkPos<0 Then Begin Ok:=False; Break; End;
+    Idx:=2*(I And Stereo);
+    Val:=Cv(Idx); Inc(Idx);
+    Val:=Val Or (Cv(Idx) Shl 8);
+    Pred[Idx Div 2]:=(Pred[Idx Div 2]+Val) And $FFFF;
+    Put16(Pred[Idx Div 2]);
+    Inc(I);
+   End;
+  End Else If Stereo<>0 Then Begin
+   Val:=256*Vals[1]+Vals[0]; Val2:=256*Vals[3]+Vals[2];
+   While I<Unp Do Begin
+    Pred[0]:=(Pred[0]+Val) And $FFFF; Pred[1]:=(Pred[1]+Val2) And $FFFF;
+    Put16(Pred[0]); Put16(Pred[1]); Inc(I,2);
+   End;
+  End Else Begin
+   Val:=256*Vals[1]+Vals[0];
+   While I<Unp Do Begin Pred[0]:=(Pred[0]+Val) And $FFFF; Put16(Pred[0]); Inc(I); End;
+  End;
+ End Else Begin
+  For I:=Stereo DownTo 0 Do Pred[I]:=SkGet(8);
+  For I:=0 To Stereo Do Put16((Pred[I]-128) Shl 8);
+  I:=Stereo+1;
+  While I<Unp Do Begin
+   If SkTot-SkPos<0 Then Begin Ok:=False; Break; End;
+   Idx:=I And Stereo;
+   Val:=Cv(Idx);
+   Pred[Idx]:=(Pred[Idx]+Val) And 255;
+   Put16((Pred[Idx]-128) Shl 8);
+   Inc(I);
+  End;
+ End;
+ If Ok Then Begin
+  { le decodeur ecrit nb_samples echantillons par canal }
+  For I:=0 To OP Div 2-1 Do Begin
+   Val:=Out^[2*I]+Out^[2*I+1]*256; If Val>=32768 Then Dec(Val,65536);
+   EAPut(Val);
+  End;
+ End;
+ FreeMem(Out,Unp*2+16);
+ SkaPacket:=Ok;
+End;
+
+Procedure SkHeaderTrees;
+Var K,Skip: LongInt; Sizes: Array[0..3] Of LongInt;
+Begin
+ If SkTreeSize<=0 Then Fail('smacker: arbres absents (extradata manquant).');
+ For K:=0 To 3 Do Sizes[K]:=SkRL32(56+4*K);
+ SkB:=PEABuffer(@SkF^[SkTreePos]); SkTot:=Int64(SkTreeSize)*8; SkPos:=0; Skip:=0;
+ For K:=0 To 3 Do Begin
+  If SkBit=0 Then Begin
+   Inc(Skip);
+   GetMem(SkTbl[K],8); SkTbl[K]^[0]:=0; SkTbl[K]^[1]:=0;
+   SkLast[K,0]:=1; SkLast[K,1]:=1; SkLast[K,2]:=1;
+  End Else If Not SkHeaderTree(K,Sizes[K]) Then Fail('smacker: arbres de l''en-tete invalides.');
+ End;
+ If (Skip=4) Or (SkTot-SkPos<0) Then Fail('smacker: arbres de l''en-tete invalides.');
+End;
+
+Procedure DecodeSMK(Const Source,Target: String; Mode: LongInt);
+Var N,D: LongInt;
+Begin
+ SkOpen(Source);
+ If SkPtsInc=0 Then Fail('smacker: pts_inc nul.');
+ If SkPtsInc<0 Then SkPtsInc:=-SkPtsInc Else SkPtsInc:=SkPtsInc*100;
+ N:=100000; D:=SkPtsInc; NVGcd(N,D);
+ FillChar(SkTbl,SizeOf(SkTbl),0);
+ SkHeaderTrees;
+ GetMem(SkPic,SkW*SkH+64); FillChar(SkPic^,SkW*SkH+64,0);
+ NVBegin(Mode,Target,SkW,SkH,0,N,D); NVSarN:=0; NVSarD:=0;
+ SkWalkFrames(True,-1,Mode);
+ FreeMem(SkPic,SkW*SkH+64);
+ NVFinish('smackvid');
+End;
+
+Procedure DecodeSMKAudio(Const Source,Target: String);
+Var
+ I,Best,BestCh,Ch,Rate,Bits16,P,Sz,Cnt,V,Fl: LongInt; Pk: PEABuffer; IsPk,Pcm: Boolean;
+Begin
+ SkOpen(Source);
+ Best:=-1; BestCh:=0;
+ For I:=0 To 6 Do If SkARate[I]<>0 Then Begin
+  Ch:=1+Ord((SkAFlag[I] And $10)<>0);
+  If Ch>BestCh Then Begin Best:=I; BestCh:=Ch; End;
+ End;
+ If Best<0 Then Fail('smacker: aucun flux audio.');
+ Fl:=SkAFlag[Best]; Rate:=SkARate[Best]; Ch:=BestCh; Bits16:=Ord((Fl And $20)<>0);
+ If (Fl And $0C)<>0 Then Fail('smackaud: flux Bink Audio non pris en charge.');
+ IsPk:=(Fl And $80)<>0;
+ SkAudCap:=65536; GetMem(SkAudBuf,SkAudCap); SkAudLen:=0;
+ SkWalkFrames(False,Best,0);
+ EAReset; OpenWrite(Target); ADPCMWaveHeader(Rate,Ch,0);
+ P:=0;
+ While P<SkAudLen Do Begin
+  Sz:=SkAudBuf^[P]+SkAudBuf^[P+1]*256+SkAudBuf^[P+2]*65536+SkAudBuf^[P+3]*16777216; Inc(P,4);
+  Pk:=PEABuffer(@SkAudBuf^[P]);
+  If IsPk Then SkaPacket(Pk,Sz,Ch,Bits16)
+  Else If Bits16<>0 Then Begin
+   For Cnt:=0 To Sz Div 2-1 Do Begin
+    V:=Pk^[2*Cnt]+Pk^[2*Cnt+1]*256; If V>=32768 Then Dec(V,65536); EAPut(V);
+   End;
+  End Else Begin
+   For Cnt:=0 To Sz-1 Do EAPut((Pk^[Cnt]-128) Shl 8);
+  End;
+  Inc(P,Sz);
+ End;
+ EAFlush;
+ If EAWritten=0 Then Fail('smackaud: aucune donnee audio decodee.');
+ ADPCMPatchHeader(Rate,Ch,EAWritten); CloseWrite;
+End;
+
 Procedure DecodeAVIX(Const Source,Target: String; Mode,Kind: LongInt);
 Var Pos,PkPos,PkLen,RN,RD,I,Y,X,Cw,Ch,Bs,Msg2: LongInt; Ok,FFBegun: Boolean; Msg: String; PIdx: LongInt; NbF,NbP: Int64;
 Begin
@@ -71576,6 +72050,7 @@ Begin
  WriteLn('D   rl2             RL2');
  WriteLn('D   shn             raw Shorten');
  WriteLn('D   qcp             QCP');
+ WriteLn('D   smk             Smacker');
  WriteLn('DE  roq             id RoQ (video roqvideo, audio roq_dpcm)');
  WriteLn(' D  ipmovie         Interplay MVE (video interplayvideo PAL8/RGB555 vers Y4M/PNG/BMP, audio PCM/interplay_dpcm vers WAV)');
  WriteLn(' D  jpegls_pipe     piped jpegls sequence (image JPEG-LS vers Y4M/PNG/BMP)');
@@ -72055,7 +72530,9 @@ BEGIN
    WriteLn('D V    rl2             RL2 video (fichiers .rl2 RLV2/RLV3, PAL8 320x200; audio PCM ignore)');
    WriteLn('D A    real_144        RealAudio 1.0 (14.4K) (RealMedia; decodeur exact)');
    WriteLn('D A    real_288        RealAudio 2.0 (28.8K) (RealMedia; decodeur exact en flottant)');
-   WriteLn('D A    qcelp           QCELP / PureVoice (fichiers .qcp, QCELP-13K)');
+   WriteLn('D A    smackaud        Smacker audio (SMKA; Bink Audio non pris en charge)');
+  WriteLn('D V    smackvid        Smacker video');
+  WriteLn('D A    qcelp           QCELP / PureVoice (fichiers .qcp, QCELP-13K)');
   WriteLn('D A    shorten         Shorten (fichiers .shn; versions 0-2, WAVE; AIFF non pris en charge)');
    WriteLn('D V    ptx             V.Flash PTX image (RGB15)');
    WriteLn('D V    pcx             PC Paintbrush PCX image (1/2/4/8 bits palette, 24 bits RGB)');
@@ -72342,7 +72819,7 @@ BEGIN
  Else If (InputFormat='mm') And Not IsHTTP(InputPath) Then NVKind:=48
  Else If (InputFormat='mvi') And Not IsHTTP(InputPath) Then NVKind:=49
  Else If InputFormat='bethsoftvid' Then NVKind:=1 Else If InputFormat='bfi' Then NVKind:=2 Else If InputFormat='c93' Then NVKind:=3
- Else If InputFormat='bmp' Then NVKind:=4 Else If (InputFormat='pam') Or (InputFormat='pbm') Or (InputFormat='pgm') Or (InputFormat='ppm') Or (InputFormat='pgmyuv') Then NVKind:=50 Else If InputFormat='nuv' Then NVKind:=54 Else If InputFormat='pcx' Then NVKind:=55 Else If InputFormat='png' Then NVKind:=58 Else If InputFormat='roq' Then NVKind:=65 Else If InputFormat='rl2' Then NVKind:=66 Else If InputFormat='sgi' Then NVKind:=56 Else If InputFormat='ptx' Then NVKind:=57 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22 Else If (InputFormat='flic') And Not IsHTTP(InputPath) Then NVKind:=23 Else If (InputFormat='gif') And Not IsHTTP(InputPath) Then NVKind:=25 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=2) Then NVKind:=27 Else If (InputFormat='h263') And Not IsHTTP(InputPath) Then NVKind:=28 Else If (InputFormat='h261') And Not IsHTTP(InputPath) Then NVKind:=29 Else If (InputFormat='idcin') And Not IsHTTP(InputPath) Then NVKind:=30 Else If (InputFormat='ipmovie') And Not IsHTTP(InputPath) Then NVKind:=38 Else If (InputFormat='jpegls_pipe') And Not IsHTTP(InputPath) Then NVKind:=39 Else If (InputFormat='jpeg_pipe') And Not IsHTTP(InputPath) Then NVKind:=46 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And MP4HasMjpb(InputPath) Then NVKind:=47 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And (QXMovKind(InputPath)<>0) Then NVKind:=QXMovKind(InputPath) Else If (InputFormat='h264') And Not IsHTTP(InputPath) Then NVKind:=33
+ Else If InputFormat='bmp' Then NVKind:=4 Else If (InputFormat='pam') Or (InputFormat='pbm') Or (InputFormat='pgm') Or (InputFormat='ppm') Or (InputFormat='pgmyuv') Then NVKind:=50 Else If InputFormat='nuv' Then NVKind:=54 Else If InputFormat='pcx' Then NVKind:=55 Else If InputFormat='png' Then NVKind:=58 Else If InputFormat='roq' Then NVKind:=65 Else If InputFormat='rl2' Then NVKind:=66 Else If InputFormat='smk' Then NVKind:=67 Else If InputFormat='sgi' Then NVKind:=56 Else If InputFormat='ptx' Then NVKind:=57 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22 Else If (InputFormat='flic') And Not IsHTTP(InputPath) Then NVKind:=23 Else If (InputFormat='gif') And Not IsHTTP(InputPath) Then NVKind:=25 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=2) Then NVKind:=27 Else If (InputFormat='h263') And Not IsHTTP(InputPath) Then NVKind:=28 Else If (InputFormat='h261') And Not IsHTTP(InputPath) Then NVKind:=29 Else If (InputFormat='idcin') And Not IsHTTP(InputPath) Then NVKind:=30 Else If (InputFormat='ipmovie') And Not IsHTTP(InputPath) Then NVKind:=38 Else If (InputFormat='jpegls_pipe') And Not IsHTTP(InputPath) Then NVKind:=39 Else If (InputFormat='jpeg_pipe') And Not IsHTTP(InputPath) Then NVKind:=46 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And MP4HasMjpb(InputPath) Then NVKind:=47 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And (QXMovKind(InputPath)<>0) Then NVKind:=QXMovKind(InputPath) Else If (InputFormat='h264') And Not IsHTTP(InputPath) Then NVKind:=33
  Else If (InputFormat='avi') And Not IsHTTP(InputPath) Then Begin
   AsvTag:=AVIVideoFourCC(Intermediate);
   If AsvTag='CSCD' Then NVKind:=5 Else If (AsvTag='tscc') Or (AsvTag='TSCC') Then NVKind:=6
@@ -72372,7 +72849,7 @@ BEGIN
   Else If InputFormat='avi' Then Begin If H4AviIsH264(AVIVideoFourCC(Intermediate)) Then NVKind:=35; End
   Else If FLVVideoCodec(Intermediate)=7 Then NVKind:=36;
  End;
- If (NVKind<>0) And Not (((NVKind=1) Or (NVKind=2) Or (NVKind=15) Or (NVKind=17) Or (NVKind=22) Or (NVKind=30) Or (NVKind=38) Or (NVKind=44) Or (NVKind=65)) And NVAudioOut) Then Begin
+ If (NVKind<>0) And Not (((NVKind=1) Or (NVKind=2) Or (NVKind=15) Or (NVKind=17) Or (NVKind=22) Or (NVKind=30) Or (NVKind=38) Or (NVKind=44) Or (NVKind=65) Or (NVKind=67)) And NVAudioOut) Then Begin
   If NoVideo Or (VideoCodec='copy') Or (AudioCodec<>'') Or HasBitrate Or (RequestedRate<>0) Or
    (RequestedChannels<>0) Or (ImageWidth<>0) Or IsHTTP(InputPath) Then
    Fail('Decodage video local sans copie, sans -vn ni conversion audio requis.');
@@ -72862,6 +73339,7 @@ BEGIN
    If InputFormat='roq' Then DecodeRoQAudio(InputPath,Temps[0]) Else
    If InputFormat='shn' Then DecodeShorten(InputPath,Temps[0]) Else
    If InputFormat='qcp' Then DecodeQCELP(InputPath,Temps[0]) Else
+   If InputFormat='smk' Then DecodeSMKAudio(InputPath,Temps[0]) Else
    If (InputFormat='aiff') And IsAIFFIma4(InputPath) Then DecodeAIFFIma4(InputPath,Temps[0]) Else
    If (InputFormat='aiff') And PcmAiffToWav(InputPath,Temps[0],PcmCodecOut<>'') Then Else
    If InputFormat='aiff' Then DecodeAIFF(InputPath,Temps[0]) Else
