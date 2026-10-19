@@ -38150,6 +38150,7 @@ Type
   Y,U,V: PEABuffer;
   Mt: PGFArr;       { mb_type, decale de 2*mb_stride+1 }
   Mv: PH3I16;       { vecteurs (x,y) par bloc 8x8, decale de 4 blocs }
+  Mv1: PH3I16;      { liste 1 (images B) }
   Qs: PEABuffer;    { qscale par macrobloc, decale de 2*mb_stride+1 }
  End;
 Const
@@ -38295,13 +38296,13 @@ Var
  H3DcBase: PH3I16; H3DcN,H3AcN: LongInt;
  H3Err: Boolean;
  { RealVideo 1.0/2.0 }
- H3RvMode,H3Rv10Ver,H3MbNumLeft: LongInt; H3RvLastDc,H3RvFirst: Array[0..2] Of LongInt;
+ H3RvMode,H3Rv10Ver,H3MbNumLeft: LongInt; H3MvList,H3MvDir,H3BwdI,H3Avg: LongInt; H3Mv1: Array[0..3,0..1] Of LongInt; H3DirScale: Array[0..1,0..63] Of LongInt; H3RvLastDc,H3RvFirst: Array[0..2] Of LongInt;
  H3RvLumSym,H3RvChrSym: Array[0..1023] Of Byte; H3RvLumCnt,H3RvChrCnt,H3RvLumFirst,H3RvChrFirst,H3RvLumOff,H3RvChrOff: Array[0..17] Of LongInt; H3RvInit: Boolean;
 
 Function H3Mt(Xy: LongInt): LongInt;Begin H3Mt:=H3P[H3CurI].Mt^[Xy+2*H3MbStride+1]; End;
 Procedure H3SetMt(Xy,V: LongInt);Begin H3P[H3CurI].Mt^[Xy+2*H3MbStride+1]:=V; End;
-Function H3MvAt(M,C: LongInt): LongInt;Begin H3MvAt:=H3P[H3CurI].Mv^[(M+4)*2+C]; End;
-Procedure H3SetMv(M,C,V: LongInt);Begin H3P[H3CurI].Mv^[(M+4)*2+C]:=V; End;
+Function H3MvAt(M,C: LongInt): LongInt;Begin If H3MvList=0 Then H3MvAt:=H3P[H3CurI].Mv^[(M+4)*2+C] Else H3MvAt:=H3P[H3CurI].Mv1^[(M+4)*2+C]; End;
+Procedure H3SetMv(M,C,V: LongInt);Begin If H3MvList=0 Then H3P[H3CurI].Mv^[(M+4)*2+C]:=V Else H3P[H3CurI].Mv1^[(M+4)*2+C]:=V; End;
 
 Procedure H3SetQscale(Q: LongInt);
 Begin
@@ -38744,13 +38745,98 @@ End;
 Const H3SliceOk=0; H3SliceErr=-1; H3SliceEnd=-2; H3SliceNoEnd=-3; H3InvalidData=-100;
 
 { ff_h263_decode_mb (images I et P ; les images B ne sont pas prises en charge) }
+{ set_direct_mv (images B H.263/RV20) }
+Procedure H3SetDirectMv;
+Var Xy,I,M,Pmx,Pmy,Tpp,Tpb: LongInt; Nx: ^TH3Pic; Col: LongInt;
+Procedure One(K: LongInt);
+Begin
+ M:=H3B8Stride*2*H3MbY+2*H3MbX+(K And 1)+(K Shr 1)*H3B8Stride;
+ Pmx:=Nx^.Mv^[(M+4)*2]; Pmy:=Nx^.Mv^[(M+4)*2+1];
+ If (Pmx+32>=0) And (Pmx+32<64) Then Begin H3Mv[K,0]:=H3DirScale[0,Pmx+32]; H3Mv1[K,0]:=H3DirScale[1,Pmx+32]; End
+ Else Begin H3Mv[K,0]:=Pmx*Tpb Div Tpp; H3Mv1[K,0]:=Pmx*(Tpb-Tpp) Div Tpp; End;
+ If (Pmy+32>=0) And (Pmy+32<64) Then Begin H3Mv[K,1]:=H3DirScale[0,Pmy+32]; H3Mv1[K,1]:=H3DirScale[1,Pmy+32]; End
+ Else Begin H3Mv[K,1]:=Pmy*Tpb Div Tpp; H3Mv1[K,1]:=Pmy*(Tpb-Tpp) Div Tpp; End;
+End;
+Begin
+ Xy:=H3MbX+H3MbY*H3MbStride;
+ Nx:=@H3P[H3BwdI];
+ Col:=Nx^.Mt^[Xy+2*H3MbStride+1];
+ Tpp:=Word(H3PpTime); Tpb:=Word(H3PbTime);
+ If (Col And H3_8X8)<>0 Then Begin
+  For I:=0 To 3 Do One(I);
+ End Else Begin
+  One(0);
+  For I:=1 To 3 Do Begin H3Mv[I,0]:=H3Mv[0,0]; H3Mv[I,1]:=H3Mv[0,1]; H3Mv1[I,0]:=H3Mv1[0,0]; H3Mv1[I,1]:=H3Mv1[0,1]; End;
+ End;
+ H3MvType:=1;
+End;
+
 Function H3DecodeMb: LongInt;
 Var
- Cbpc,Cbpy,I,Cbp,Px,Py,Mx,My,Dquant,Xy,PbMvCount,Cbpb,M,V,Left: LongInt;
+ Cbpc,Cbpy,I,Cbp,Px,Py,Mx,My,Dquant,Xy,PbMvCount,Cbpb,M,V,Left,Bt: LongInt;
 Label Done;
 Begin
  Xy:=H3MbX+H3MbY*H3MbStride;
  Cbpb:=0; PbMvCount:=0; Cbp:=0; Dquant:=0;
+ If H3PictType=2 Then Begin
+  M:=H3B8Stride*2*H3MbY+2*H3MbX;
+  For I:=0 To 1 Do Begin
+   H3MvList:=I;
+   H3FillMv(M,0,0);
+  End;
+  H3MvList:=0;
+  Repeat
+   Bt:=H3GetVlc(H3VMbB);
+   If Bt<0 Then Begin H3DecodeMb:=H3SliceErr; Exit; End;
+  Until Bt<>12;
+  FillChar(H3Blk,SizeOf(H3Blk),0);
+  H3MbSkipped:=0; H3MvDir:=0; H3MvType:=0;
+  If Bt>=13 Then Begin
+   H3MbIntra:=1;
+   Cbpc:=H3GetVlc(H3VCbpcB);
+   If Bt=14 Then Dquant:=4 Else Dquant:=0;
+  End Else Begin
+   H3MbIntra:=0;
+   If Bt In [1,2,4,5,7,8,10,11] Then Begin
+    Cbpc:=H3GetVlc(H3VCbpcB);
+    Cbpy:=H3GetVlc(H3VCbpy);
+    If Cbpy<0 Then Begin H3DecodeMb:=H3SliceErr; Exit; End;
+    If (H3AltInter=0) Or ((Cbpc And 3)<>3) Then Cbpy:=Cbpy Xor $F;
+    Cbp:=(Cbpc And 3) Or (Cbpy Shl 2);
+   End Else Cbp:=0;
+   If Bt In [2,5,8,11] Then H3Dquant;
+   H3SetMt(Xy,H3_16X16);
+   If Bt<=2 Then Begin
+    H3MvDir:=3; H3SetDirectMv;
+   End Else Begin
+    If Bt In [3,4,5,9,10,11] Then Begin
+     H3MvList:=0;
+     H3PredMotion(0,0,Px,Py);
+     Mx:=H3MotionComp(Px);
+     If Mx>=$FFFF Then Begin H3DecodeMb:=H3SliceErr; Exit; End;
+     My:=H3MotionComp(Py);
+     If My>=$FFFF Then Begin H3DecodeMb:=H3SliceErr; Exit; End;
+     If (H3Umvplus<>0) And (Mx-Px=1) And (My-Py=1) Then H3Skip(1);
+     H3Mv[0,0]:=Mx; H3Mv[0,1]:=My;
+     H3FillMv(M,Mx,My);
+     H3MvDir:=1;
+    End;
+    If Bt In [6,7,8,9,10,11] Then Begin
+     H3MvList:=1;
+     H3PredMotion(0,1,Px,Py);
+     Mx:=H3MotionComp(Px);
+     If Mx>=$FFFF Then Begin H3MvList:=0; H3DecodeMb:=H3SliceErr; Exit; End;
+     My:=H3MotionComp(Py);
+     If My>=$FFFF Then Begin H3MvList:=0; H3DecodeMb:=H3SliceErr; Exit; End;
+     If (H3Umvplus<>0) And (Mx-Px=1) And (My-Py=1) Then H3Skip(1);
+     H3Mv1[0,0]:=Mx; H3Mv1[0,1]:=My;
+     H3FillMv(M,Mx,My);
+     H3MvList:=0;
+     H3MvDir:=H3MvDir Or 2;
+    End;
+   End;
+  End;
+ End Else
  If H3PictType=1 Then Begin
   Repeat
    If H3Bit<>0 Then Begin
@@ -39108,21 +39194,23 @@ End;
 
 { interpolation demi-pel de H3Emu vers Dst (W x H) }
 Procedure H3Pel(Dst: PEABuffer; DOff,DStr,Dxy,W,H,NoRnd: LongInt);
-Var X,Y,A,B,C,D,R1,R2: LongInt;
+Var X,Y,A,B,C,D,R1,R2,V: LongInt;
 Begin
  R1:=1-NoRnd; R2:=2-NoRnd;
  For Y:=0 To H-1 Do
   For X:=0 To W-1 Do Begin
    A:=H3Emu[Y*24+X];
    Case Dxy Of
-    0: Dst^[DOff+Y*DStr+X]:=A;
-    1: Begin B:=H3Emu[Y*24+X+1]; Dst^[DOff+Y*DStr+X]:=(A+B+R1) Shr 1; End;
-    2: Begin C:=H3Emu[(Y+1)*24+X]; Dst^[DOff+Y*DStr+X]:=(A+C+R1) Shr 1; End;
+    0: V:=A;
+    1: Begin B:=H3Emu[Y*24+X+1]; V:=(A+B+R1) Shr 1; End;
+    2: Begin C:=H3Emu[(Y+1)*24+X]; V:=(A+C+R1) Shr 1; End;
    Else Begin
     B:=H3Emu[Y*24+X+1]; C:=H3Emu[(Y+1)*24+X]; D:=H3Emu[(Y+1)*24+X+1];
-    Dst^[DOff+Y*DStr+X]:=(A+B+C+D+R2) Shr 2;
+    V:=(A+B+C+D+R2) Shr 2;
    End;
    End;
+   If H3Avg<>0 Then V:=(Dst^[DOff+Y*DStr+X]+V+1) Shr 1;
+   Dst^[DOff+Y*DStr+X]:=V;
   End;
 End;
 
@@ -39341,6 +39429,26 @@ Begin
  H3Intra^[Xy]:=0;
 End;
 
+{ prediction des images B (mpv_motion, sens avant puis arriere en moyenne) }
+Procedure H3BPredict;
+Var Sv: Array[0..3,0..1] Of LongInt; I: LongInt;
+Begin
+ H3Avg:=0;
+ If (H3MvDir And 1)<>0 Then Begin
+  If H3MvType=0 Then H3MpegMotion(H3RefI,H3Mv[0,0],H3Mv[0,1],0) Else H3Apply8x8(H3RefI,0);
+  H3Avg:=1;
+ End;
+ If (H3MvDir And 2)<>0 Then Begin
+  If H3MvType=0 Then H3MpegMotion(H3BwdI,H3Mv1[0,0],H3Mv1[0,1],0)
+  Else Begin
+   Move(H3Mv,Sv,SizeOf(Sv)); Move(H3Mv1,H3Mv,SizeOf(H3Mv));
+   H3Apply8x8(H3BwdI,0);
+   Move(Sv,H3Mv,SizeOf(Sv));
+  End;
+ End;
+ H3Avg:=0;
+End;
+
 { ff_mpv_reconstruct_mb (H.263, images I/P) }
 Procedure H3Recon;
 Var
@@ -39357,7 +39465,8 @@ Begin
  If H3MbIntra=0 Then Begin
   If (H3NoRounding<>0) And (H3PictType<>2) Then NoRnd:=1 Else NoRnd:=0;
   P:=@H3P[H3RefI];
-  If (H3Obmc<>0) And (H3PictType<>2) Then H3ApplyObmc(H3RefI,NoRnd)
+  If H3PictType=2 Then H3BPredict
+  Else If (H3Obmc<>0) And (H3PictType<>2) Then H3ApplyObmc(H3RefI,NoRnd)
   Else If H3MvType=0 Then H3MpegMotion(H3RefI,H3Mv[0,0],H3Mv[0,1],NoRnd)
   Else H3Apply8x8(H3RefI,NoRnd);
   For I:=0 To 3 Do
@@ -39490,7 +39599,7 @@ Var I: LongInt;
 Begin
  If Not H3HaveCtx Then Exit;
  For I:=0 To 2 Do Begin
-  FreeMem(H3P[I].Y); FreeMem(H3P[I].U); FreeMem(H3P[I].V); FreeMem(H3P[I].Mt); FreeMem(H3P[I].Mv); FreeMem(H3P[I].Qs);
+  FreeMem(H3P[I].Y); FreeMem(H3P[I].U); FreeMem(H3P[I].V); FreeMem(H3P[I].Mt); FreeMem(H3P[I].Mv); FreeMem(H3P[I].Mv1); FreeMem(H3P[I].Qs);
  End;
  FreeMem(H3DcBase); FreeMem(H3Ac); FreeMem(H3Intra);
  H3HaveCtx:=False;
@@ -39512,6 +39621,7 @@ Begin
   GetMem(H3P[I].Qs,MtN); FillChar(H3P[I].Qs^,MtN,0);
   MvN:=2*(H3B8Stride*H3MbH*2+16);
   GetMem(H3P[I].Mv,MvN*2); FillChar(H3P[I].Mv^,MvN*2,0);
+  GetMem(H3P[I].Mv1,MvN*2); FillChar(H3P[I].Mv1^,MvN*2,0);
  End;
  YSize:=H3B8Stride*(2*H3MbH+1); CSize:=H3MbStride*(H3MbH+1); YcSize:=YSize+2*CSize;
  If (H3MbH And 1)<>0 Then Inc(YcSize,2*H3B8Stride+2*H3MbStride);
@@ -39531,7 +39641,7 @@ Begin
  MtN:=H3MbStride*(H3MbH+1)+1+H3MbStride+8;
  FillChar(H3P[I].Mt^,MtN*4,0); FillChar(H3P[I].Qs^,MtN,0);
  MvN:=2*(H3B8Stride*H3MbH*2+16);
- FillChar(H3P[I].Mv^,MvN*2,0);
+ FillChar(H3P[I].Mv^,MvN*2,0); FillChar(H3P[I].Mv1^,MvN*2,0);
 End;
 
 { ff_h263_update_motion_val (images non B) }
@@ -47822,7 +47932,7 @@ Begin
   If Len2>RMSize Then Exit;
   S.Slices:=((Hdr And $3F) Shl 1)+1;
   S.VBufSize:=Len2+8*S.Slices+1;
-  If S.VBuf<>Nil Then FreeMem(S.VBuf,1);
+  If S.VBuf<>Nil Then FreeMem(S.VBuf);
   GetMem(S.VBuf,S.VBufSize+64); FillChar(S.VBuf^,S.VBufSize+64,0);
   S.VBufPos:=8*S.Slices+1; S.CurSlice:=0; S.CurPic:=Pic;
  End;
@@ -47941,7 +48051,7 @@ Begin
    Tstamp:=Ts;
    R:=AssembleVideo(RMSt[K],Len,Pk,PkLen,Tstamp);
    If R=0 Then Begin
-    RMAddPacket(K,Tstamp,Flags,Pk,PkLen); FreeMem(Pk,1);
+    RMAddPacket(K,Tstamp,Flags,Pk,PkLen); FreeMem(Pk);
    End;
    If R<0 Then RemLen:=0;
   End Else If RMSt[K].Kind=1 Then Begin
@@ -47985,9 +48095,9 @@ End;
 
 Procedure RMFree;
 Begin
- If RMPkS<>Nil Then Begin FreeMem(RMPkS,1); FreeMem(RMPkF,1); FreeMem(RMPkOff,1); FreeMem(RMPkLen,1); FreeMem(RMTsArr,1); End;
- If RMArena<>Nil Then FreeMem(RMArena,1);
- FreeMem(RMF,1);
+ If RMPkS<>Nil Then Begin FreeMem(RMPkS); FreeMem(RMPkF); FreeMem(RMPkOff); FreeMem(RMPkLen); FreeMem(RMTsArr); End;
+ If RMArena<>Nil Then FreeMem(RMArena);
+ FreeMem(RMF);
 End;
 
 Const
@@ -49110,7 +49220,7 @@ End;
 
 { ---- RealVideo 1.0 / 2.0 (libavcodec/rv10.c) : decodeur sur le moteur H.263 (H3) ---- }
 Var
- RVSub,RVMajor,RVMinor,RVMicro,RVOrigW,RVOrigH,RVRprMax,RVCurType,RVLastI: LongInt;
+ RVSub,RVMajor,RVMinor,RVMicro,RVOrigW,RVOrigH,RVRprMax,RVCurType,RVLastI,RVNextI: LongInt;
  RVLow,RVPend: Boolean; RVExt: Array[0..255] Of Byte; RVExtLen: LongInt;
  RVFrameBuf: PEABuffer; RVFrameCap: LongInt;
 
@@ -49140,25 +49250,44 @@ Begin
  RVHeader10:=MbCount;
 End;
 
-{ rv20_decode_picture_header ; -2 = image B (non prise en charge), -3 = changement de resolution }
+{ rv20_decode_picture_header ; -2 = image B ignoree (ordre incoherent), -3 = changement de resolution }
 Function RVHeader20(Whole: LongInt): LongInt;
-Var Typ,F,Seq,MbPos: LongInt;
+Var Typ,F,Seq,MbPos,I: LongInt;
 Begin
  RVHeader20:=-1;
  Typ:=H3Bits(2);
  Case Typ Of 0,1: H3PictType:=0; 2: H3PictType:=1; Else H3PictType:=2; End;
- If H3PictType=2 Then Begin RVHeader20:=-2; Exit; End;
+ If RVLow And (H3PictType=2) Then Exit;
+ If (RVLastI<0) And (H3PictType=2) Then Exit;
  If H3Bit<>0 Then Exit;
  H3Qscale:=H3Bits(5);
  If H3Qscale=0 Then Exit;
  If RVMinor>=2 Then H3Loop:=H3Bit;
- If RVMinor<=1 Then Seq:=H3Bits(8) Else Seq:=H3Bits(13);
+ If RVMinor<=1 Then Seq:=H3Bits(8) Shl 7 Else Seq:=H3Bits(13) Shl 2;
  If RVRprMax<>0 Then Begin
   F:=H3Bits(RVLog2(RVRprMax)+1);
   If F<>0 Then Begin RVHeader20:=-3; Exit; End;
  End;
  MbPos:=H3DecodeMba;
+ Seq:=Seq Or (H3Time And Not $7FFF);
+ If Seq-H3Time>$4000 Then Dec(Seq,$8000);
+ If Seq-H3Time<-$4000 Then Inc(Seq,$8000);
+ If Seq<>H3Time Then Begin
+  If H3PictType<>2 Then Begin
+   H3Time:=Seq; H3PpTime:=H3Time-H3LastNonB; H3LastNonB:=H3Time;
+  End Else Begin
+   H3Time:=Seq; H3PbTime:=H3PpTime-(H3LastNonB-H3Time);
+  End;
+ End;
+ If H3PictType=2 Then Begin
+  If (H3PpTime<=H3PbTime) Or (H3PpTime<=H3PpTime-H3PbTime) Or (H3PpTime<=0) Then Begin RVHeader20:=-2; Exit; End;
+  For I:=0 To 63 Do Begin
+   H3DirScale[0,I]:=(I-32)*H3PbTime Div H3PpTime;
+   H3DirScale[1,I]:=(I-32)*(H3PbTime-H3PpTime) Div H3PpTime;
+  End;
+ End;
  H3NoRounding:=H3Bit;
+ If (RVMinor<=1) And (H3PictType=2) Then H3Skip(5);
  H3Aic:=Ord(H3PictType=0);
  H3ModQ:=1; H3Loop:=1; H3ChromaTab:=True;
  RVHeader20:=H3MbW*H3MbH-MbPos;
@@ -49167,12 +49296,19 @@ End;
 Procedure RVStartFrame;
 Var Slot: LongInt;
 Begin
- If H3PictType<>2 Then Begin RVLastI:=H3CurI; H3RefI:=RVLastI; End;
- Slot:=0;
- While (Slot=H3RefI) Or (Slot=RVLastI) Do Inc(Slot);
- H3CurI:=Slot;
+ If H3PictType<>2 Then Begin
+  RVLastI:=RVNextI; H3RefI:=RVLastI;
+  Slot:=0;
+  While Slot=RVLastI Do Inc(Slot);
+  H3CurI:=Slot; RVNextI:=Slot;
+ End Else Begin
+  H3RefI:=RVLastI; H3BwdI:=RVNextI;
+  Slot:=0;
+  While (Slot=RVLastI) Or (Slot=RVNextI) Do Inc(Slot);
+  H3CurI:=Slot;
+ End;
  H3ClearPic(H3CurI);
- If (H3PictType<>0) And (H3RefI<0) Then Begin
+ If (H3PictType=1) And (H3RefI<0) Then Begin
   Slot:=0; While Slot=H3CurI Do Inc(Slot);
   H3RefI:=Slot; RVLastI:=Slot;
   FillChar(H3P[H3RefI].Y^,H3LY*H3MbH*16,16);
@@ -49220,7 +49356,7 @@ Begin
    Active:=BufSize2*8; Ret:=H3SliceOk;
   End;
   If (Ret=H3SliceErr) Or (Active<H3Pos) Then Exit;
-  H3UpdateMotion;
+  If H3PictType<>2 Then H3UpdateMotion;
   H3Recon;
   If H3Loop<>0 Then H3LoopFilter;
   Inc(H3MbX);
@@ -49307,7 +49443,7 @@ Begin
  Else Fail('realvideo: version non prise en charge.');
  End;
  H3AllocCtx;
- H3CurI:=-1; H3RefI:=-1; RVLastI:=-1; RVPend:=False; H3MbX:=0; H3MbY:=0; H3FirstLine:=0; H3ResyncX:=0; H3ResyncY:=0;
+ H3CurI:=-1; H3RefI:=-1; RVLastI:=-1; RVNextI:=-1; H3BwdI:=-1; H3MvList:=0; H3MvDir:=0; RVPend:=False; H3MbX:=0; H3MbY:=0; H3FirstLine:=0; H3ResyncX:=0; H3ResyncY:=0;
  RVFrameBuf:=Nil; RVFrameCap:=0;
 End;
 
@@ -49434,7 +49570,7 @@ Begin
  End Else Fail('shorten: bit packing non pris en charge.');
  If (Bps<>8) And (Bps<>16) Then Fail('shorten: profondeur non prise en charge.');
  If (IType<>2) And (IType<>3) And (IType<>5) Then Fail('shorten: type audio inconnu.');
- FreeMem(Hdr,1);
+ FreeMem(Hdr);
  For Ch:=0 To Chans-1 Do Begin
   GetMem(Dc[Ch],(Blocksize+Nwrap+16)*4); FillChar(Dc[Ch]^,(Blocksize+Nwrap+16)*4,0);
   If Nmean>1 Then I:=Nmean Else I:=1;
@@ -73078,7 +73214,7 @@ BEGIN
    WriteLn('D A    smackaud        Smacker audio (SMKA; Bink Audio non pris en charge)');
   WriteLn('D V    smackvid        Smacker video');
   WriteLn('DEV    rv10            RealVideo 1.0 (decodeur I/P, tranches multiples; encodeur I/P 16x16 vers .rm)');
-  WriteLn('DEV    rv20            RealVideo 2.0 (decodeur I/P sans images B; encodeur I/P 16x16 vers .rm)');
+  WriteLn('DEV    rv20            RealVideo 2.0 (decodeur I/P/B; encodeur I/P 16x16 vers .rm)');
   WriteLn('D A    qcelp           QCELP / PureVoice (fichiers .qcp, QCELP-13K)');
   WriteLn('D A    shorten         Shorten (fichiers .shn; versions 0-2, WAVE; AIFF non pris en charge)');
    WriteLn('D V    ptx             V.Flash PTX image (RGB15)');
