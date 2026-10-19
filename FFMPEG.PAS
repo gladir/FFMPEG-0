@@ -3965,6 +3965,7 @@ Begin
  End;
  If N>=18 Then If (B[0]=66) And (B[1]=77) And (B[6]=0) And (B[7]=0) And (B[8]=0) And (B[9]=0) And (B[14] In [12,40,56,64,108,124]) And (B[15]=0) Then Begin Probe:='bmp'; Exit; End;
  If N>=12 Then If (B[0]=70) And (B[1]=79) And (B[2]=82) And (B[3]=77) And (B[8]=82) And (B[9]=76) And (B[10]=86) And ((B[11]=50) Or (B[11]=51)) Then Begin Probe:='rl2'; Exit; End;
+ If N>=8 Then If (B[0]=$61) And (B[1]=$6A) And (B[2]=$6B) And (B[3]=$67) And (Lower(Extension(Name))='shn') Then Begin Probe:='shn'; Exit; End;
  If N>=8 Then If (B[0]=$84) And (B[1]=$10) And (B[2]=255) And (B[3]=255) And (B[4]=255) And (B[5]=255) Then Begin Probe:='roq'; Exit; End;
  If N>=33 Then If (B[0]=137) And (B[1]=80) And (B[2]=78) And (B[3]=71) And (B[4]=13) And (B[5]=10) And (B[6]=26) And (B[7]=10) Then Begin Probe:='png'; Exit; End;
  If N>=12 Then If (B[0]=1) And (B[1]=$DA) And (B[3]<=2) And ((Lower(Extension(Name))='sgi') Or (Lower(Extension(Name))='rgb') Or (Lower(Extension(Name))='rgba') Or (Lower(Extension(Name))='bw')) Then Begin Probe:='sgi'; Exit; End;
@@ -48998,6 +48999,207 @@ Begin
  RMFree;
 End;
 
+{ ---- Shorten (libavcodec/shorten.c) : fichiers .shn ---- }
+Procedure DecodeShorten(Const Source,Target: String);
+Const FnDiff0=0; FnDiff1=1; FnDiff2=2; FnDiff3=3; FnQuit=4; FnBlocksize=5; FnBitshift=6; FnQlpc=7; FnZero=8; FnVerbatim=9;
+Var
+ F: PEABuffer; Size: LongInt; Bp,BitsTot: Int64; Version,IType,Chans,Blocksize,Nmean,Nwrap,LpcqOff,Bitshift,CurChan,Rate,Bps,HeaderSize,I,J,Ch,Cmd,Len,Skip: LongInt;
+ Swap,GotQuit: Boolean; Dc: Array[0..7] Of PALLong; Off: Array[0..7] Of PALLong; Coeffs: PALLong; Hdr: PEABuffer;
+ ResSize,Coffset,PredOrder,Qshift,InitSum,Z: LongInt; Sum: Int64; Used: Boolean; Fixed: Array[0..3,0..2] Of LongInt;
+ Bad: Boolean;
+Function W32(X: Int64): LongInt;
+Begin X:=X And $FFFFFFFF; If X>=$80000000 Then X:=X-$100000000; W32:=X; End;
+Function Sar(V: Int64; N: LongInt): Int64;
+Begin If V>=0 Then Sar:=V Shr N Else Sar:=-(((-V)+(Int64(1) Shl N)-1) Shr N); End;
+Function GBit: LongInt;
+Begin
+ If Bp>=BitsTot Then Begin GBit:=0; Inc(Bp); Exit; End;
+ GBit:=(F^[Bp Shr 3] Shr (7-(Bp And 7))) And 1; Inc(Bp);
+End;
+Function GBits(N: LongInt): Int64;
+Var R: Int64; K: LongInt;
+Begin R:=0; For K:=1 To N Do R:=R*2+GBit; GBits:=R; End;
+{ get_ur_golomb_jpegls(k, INT_MAX, 0) ; retourne -1 si flux epuise }
+Function UrGolomb(K: LongInt): Int64;
+Var Cnt: Int64;
+Begin
+ Cnt:=0;
+ While GBit=0 Do Begin
+  If Bp>BitsTot Then Begin UrGolomb:=$FFFFFFFF; Exit; End;
+  Inc(Cnt);
+ End;
+ UrGolomb:=(Cnt Shl K)+GBits(K);
+End;
+Function SrGolomb(K: LongInt): LongInt;
+Var U: Int64;
+Begin
+ U:=UrGolomb(K+1) And $FFFFFFFF;
+ If (U And 1)<>0 Then SrGolomb:=W32(Not (U Shr 1)) Else SrGolomb:=W32(U Shr 1);
+End;
+Function GetUint(K: LongInt): Int64;
+Begin
+ If Version<>0 Then Begin K:=UrGolomb(2) And $FFFFFFFF; If K>31 Then Begin GetUint:=-1; Exit; End; End;
+ GetUint:=UrGolomb(K);
+End;
+Function Log2I(V: LongInt): LongInt;
+Var R: LongInt;
+Begin R:=0; While V>1 Do Begin V:=V Shr 1; Inc(R); End; Log2I:=R; End;
+Begin
+ NVLoad(Source,F,Size); BitsTot:=Size*8; Bp:=0;
+ If (F^[0]<>$61) Or (F^[1]<>$6A) Or (F^[2]<>$6B) Or (F^[3]<>$67) Then Fail('shorten: signature ajkg requise.');
+ Bp:=32;
+ Version:=GBits(8);
+ LpcqOff:=0; Blocksize:=256; Nmean:=-1;
+ IType:=GetUint(4);
+ Chans:=GetUint(0);
+ If (Chans<1) Or (Chans>8) Then Fail('shorten: nombre de canaux invalide.');
+ I:=0;
+ If Version>0 Then Begin
+  Blocksize:=GetUint(Log2I(256));
+  If (Blocksize<1) Or (Blocksize>65535) Then Fail('shorten: taille de bloc invalide.');
+  I:=GetUint(2); If (I<0) Or (I>1024) Then Fail('shorten: maxnlpc invalide.');
+  Nmean:=GetUint(0); If (Nmean<0) Or (Nmean>32768) Then Fail('shorten: nmean invalide.');
+  Skip:=GetUint(1);
+  If (Skip<0) Or (Skip>(BitsTot-Bp) Div 8) Then Fail('shorten: skip_bytes invalide.');
+  For J:=1 To Skip Do GBits(8);
+ End;
+ If I>3 Then Nwrap:=I Else Nwrap:=3;
+ If Version>1 Then LpcqOff:=32;
+ If UrGolomb(2)<>FnVerbatim Then Fail('shorten: section verbatim initiale absente.');
+ HeaderSize:=UrGolomb(5);
+ If (HeaderSize>=16384) Or (HeaderSize<44) Then Fail('shorten: taille d''en-tete invalide.');
+ GetMem(Hdr,HeaderSize+16);
+ For J:=0 To HeaderSize-1 Do Hdr^[J]:=UrGolomb(8) And 255;
+ Swap:=False; Rate:=0; Bps:=0;
+ If (Hdr^[0]=$52) And (Hdr^[1]=$49) And (Hdr^[2]=$46) And (Hdr^[3]=$46) Then Begin
+  { RIFF/WAVE : recherche du bloc fmt }
+  J:=12; Rate:=0;
+  While J+8<=HeaderSize Do Begin
+   Len:=Hdr^[J+4]+Hdr^[J+5]*256+Hdr^[J+6]*65536+Hdr^[J+7]*16777216;
+   If (Hdr^[J]=$66) And (Hdr^[J+1]=$6D) And (Hdr^[J+2]=$74) And (Hdr^[J+3]=$20) Then Begin
+    If Hdr^[J+8]+Hdr^[J+9]*256<>1 Then Fail('shorten: format WAVE non PCM.');
+    Rate:=Hdr^[J+12]+Hdr^[J+13]*256+Hdr^[J+14]*65536+Hdr^[J+15]*16777216;
+    Bps:=Hdr^[J+22]+Hdr^[J+23]*256;
+    Break;
+   End;
+   Inc(J,8+Len);
+  End;
+  If Rate=0 Then Fail('shorten: bloc fmt absent.');
+ End Else If (Hdr^[0]=$46) And (Hdr^[1]=$4F) And (Hdr^[2]=$52) And (Hdr^[3]=$4D) Then Begin
+  Fail('shorten: en-tete AIFF non pris en charge.');
+ End Else Fail('shorten: bit packing non pris en charge.');
+ If (Bps<>8) And (Bps<>16) Then Fail('shorten: profondeur non prise en charge.');
+ If (IType<>2) And (IType<>3) And (IType<>5) Then Fail('shorten: type audio inconnu.');
+ FreeMem(Hdr,1);
+ For Ch:=0 To Chans-1 Do Begin
+  GetMem(Dc[Ch],(Blocksize+Nwrap+16)*4); FillChar(Dc[Ch]^,(Blocksize+Nwrap+16)*4,0);
+  If Nmean>1 Then I:=Nmean Else I:=1;
+  GetMem(Off[Ch],I*4);
+  For J:=0 To I-1 Do If IType=2 Then Off[Ch]^[J]:=128 Else Off[Ch]^[J]:=0;
+ End;
+ GetMem(Coeffs,(Nwrap+4)*4);
+ Fixed[0,0]:=0; Fixed[0,1]:=0; Fixed[0,2]:=0; Fixed[1,0]:=1; Fixed[1,1]:=0; Fixed[1,2]:=0;
+ Fixed[2,0]:=2; Fixed[2,1]:=-1; Fixed[2,2]:=0; Fixed[3,0]:=3; Fixed[3,1]:=-3; Fixed[3,2]:=1;
+ Bitshift:=0; CurChan:=0; GotQuit:=False;
+ EAReset; OpenWrite(Target); ADPCMWaveHeader(Rate,Chans,0);
+ Bad:=False;
+ While Not GotQuit And (Not Bad) Do Begin
+  If BitsTot-Bp<5 Then Break;
+  Cmd:=UrGolomb(2);
+  If Cmd>FnVerbatim Then Break;
+  If Cmd In [FnQuit,FnBlocksize,FnBitshift,FnVerbatim] Then Begin
+   Case Cmd Of
+    FnVerbatim: Begin
+     Len:=UrGolomb(5);
+     If (Len<0) Or (Len>BitsTot-Bp) Then Begin Bad:=True; Break; End;
+     For J:=1 To Len Do UrGolomb(8);
+    End;
+    FnBitshift: Begin
+     J:=UrGolomb(2); If J>32 Then Begin Bad:=True; Break; End; Bitshift:=J;
+    End;
+    FnBlocksize: Begin
+     J:=GetUint(Log2I(Blocksize));
+     If (J>Blocksize) Or (J<1) Or (J>65535) Then Begin Bad:=True; Break; End;
+     Blocksize:=J;
+    End;
+    FnQuit: GotQuit:=True;
+   End;
+   Continue;
+  End;
+  { commande audio }
+  ResSize:=0;
+  If Cmd<>FnZero Then Begin
+   ResSize:=UrGolomb(3);
+   If Version=0 Then Dec(ResSize);
+   If (ResSize<0) Or (ResSize>30) Then Begin Bad:=True; Break; End;
+  End;
+  Ch:=CurChan;
+  If Nmean=0 Then Coffset:=Off[Ch]^[0]
+  Else Begin
+   If Version<2 Then Sum:=0 Else Sum:=Nmean Div 2;
+   For J:=0 To Nmean-1 Do Sum:=Sum+Off[Ch]^[J];
+   Coffset:=W32(Sum);
+   Coffset:=Coffset Div Nmean;
+   If Version>=2 Then
+    If Bitshift<>0 Then Coffset:=Sar(Sar(Coffset,Bitshift-1),1);
+  End;
+  If Cmd=FnZero Then Begin
+   For I:=0 To Blocksize-1 Do Dc[Ch]^[Nwrap+I]:=0;
+  End Else Begin
+   If Cmd=FnQlpc Then Begin
+    PredOrder:=UrGolomb(2);
+    If (PredOrder<0) Or (PredOrder>Nwrap) Then Begin Bad:=True; Break; End;
+    For J:=0 To PredOrder-1 Do Coeffs^[J]:=SrGolomb(5);
+    Qshift:=5;
+   End Else Begin
+    PredOrder:=Cmd; Qshift:=0;
+    For J:=0 To 2 Do Coeffs^[J]:=Fixed[PredOrder,J];
+   End;
+   If (Cmd=FnQlpc) And (Coffset<>0) Then
+    For I:=-PredOrder To -1 Do Dc[Ch]^[Nwrap+I]:=W32(Int64(Dc[Ch]^[Nwrap+I])-(Int64(Coffset) And $FFFFFFFF));
+   If PredOrder<>0 Then Begin If Cmd=FnQlpc Then InitSum:=LpcqOff Else InitSum:=0; End Else InitSum:=Coffset;
+   For I:=0 To Blocksize-1 Do Begin
+    Sum:=InitSum;
+    For J:=0 To PredOrder-1 Do Sum:=W32(Sum+(Int64(Coeffs^[J])*(Int64(Dc[Ch]^[Nwrap+I-J-1]) And $FFFFFFFF)));
+    Dc[Ch]^[Nwrap+I]:=W32(Int64(SrGolomb(ResSize))+(Sar(W32(Sum),Qshift) And $FFFFFFFF));
+   End;
+   If (Cmd=FnQlpc) And (Coffset<>0) Then
+    For I:=0 To Blocksize-1 Do Dc[Ch]^[Nwrap+I]:=W32(Int64(Dc[Ch]^[Nwrap+I])+(Int64(Coffset) And $FFFFFFFF));
+  End;
+  { mise a jour des moyennes }
+  If Nmean>0 Then Begin
+   If Version<2 Then Sum:=0 Else Sum:=Blocksize Div 2;
+   For I:=0 To Blocksize-1 Do Sum:=Sum+Dc[Ch]^[Nwrap+I];
+   For I:=1 To Nmean-1 Do Off[Ch]^[I-1]:=Off[Ch]^[I];
+   If Version<2 Then Off[Ch]^[Nmean-1]:=W32(Sum Div Blocksize)
+   Else If Bitshift=32 Then Off[Ch]^[Nmean-1]:=0
+   Else Off[Ch]^[Nmean-1]:=W32((Sum Div Blocksize)*(Int64(1) Shl Bitshift));
+  End;
+  For I:=-Nwrap To -1 Do Dc[Ch]^[Nwrap+I]:=Dc[Ch]^[Nwrap+I+Blocksize];
+  { fix_bitshift }
+  If Bitshift=32 Then Begin For I:=0 To Blocksize-1 Do Dc[Ch]^[Nwrap+I]:=0; End
+  Else If Bitshift<>0 Then For I:=0 To Blocksize-1 Do Dc[Ch]^[Nwrap+I]:=W32(Int64(Dc[Ch]^[Nwrap+I])*(Int64(1) Shl Bitshift));
+  Inc(CurChan);
+  If CurChan=Chans Then Begin
+   CurChan:=0;
+   For I:=0 To Blocksize-1 Do
+    For Ch:=0 To Chans-1 Do Begin
+     Z:=Dc[Ch]^[Nwrap+I];
+     If IType=2 Then Begin
+      If Z<0 Then Z:=0 Else If Z>255 Then Z:=255;
+      EAPut((Z-128)*256);
+     End Else Begin
+      If Z<-32768 Then Z:=-32768 Else If Z>32767 Then Z:=32767;
+      EAPut(Z);
+     End;
+    End;
+  End;
+ End;
+ EAFlush;
+ If EAWritten=0 Then Fail('shorten: aucune donnee audio decodee.');
+ ADPCMPatchHeader(Rate,Chans,EAWritten); CloseRead; CloseWrite;
+End;
+
 Procedure DecodeAVIX(Const Source,Target: String; Mode,Kind: LongInt);
 Var Pos,PkPos,PkLen,RN,RD,I,Y,X,Cw,Ch,Bs,Msg2: LongInt; Ok,FFBegun: Boolean; Msg: String; PIdx: LongInt; NbF,NbP: Int64;
 Begin
@@ -70892,6 +71094,7 @@ Begin
  WriteLn(' DE flv             FLV: video Sorenson Spark (decodeur I/P complet) ou Screen Video vers Y4M/PNG/BMP; FLV1 intra natif en sortie; extraction image H264 CAVLC');
  WriteLn(' D  idcin           id Cinematic (video idcinvideo PAL8 vers Y4M/PNG/BMP, audio PCM vers WAV)');
  WriteLn('D   rl2             RL2');
+ WriteLn('D   shn             raw Shorten');
  WriteLn('DE  roq             id RoQ (video roqvideo, audio roq_dpcm)');
  WriteLn(' D  ipmovie         Interplay MVE (video interplayvideo PAL8/RGB555 vers Y4M/PNG/BMP, audio PCM/interplay_dpcm vers WAV)');
  WriteLn(' D  jpegls_pipe     piped jpegls sequence (image JPEG-LS vers Y4M/PNG/BMP)');
@@ -71371,6 +71574,7 @@ BEGIN
    WriteLn('D V    rl2             RL2 video (fichiers .rl2 RLV2/RLV3, PAL8 320x200; audio PCM ignore)');
    WriteLn('D A    real_144        RealAudio 1.0 (14.4K) (RealMedia; decodeur exact)');
    WriteLn('D A    real_288        RealAudio 2.0 (28.8K) (RealMedia; decodeur exact en flottant)');
+   WriteLn('D A    shorten         Shorten (fichiers .shn; versions 0-2, WAVE; AIFF non pris en charge)');
    WriteLn('D V    ptx             V.Flash PTX image (RGB15)');
    WriteLn('D V    pcx             PC Paintbrush PCX image (1/2/4/8 bits palette, 24 bits RGB)');
    WriteLn('D A    wmav2           WMA2 (44100/48000 Hz, VLC, blocs fixes, sans reservoir/bruit)');   
@@ -72174,6 +72378,7 @@ BEGIN
    If InputFormat='idcin' Then DecodeIdcin(InputPath,Temps[0],3) Else
    If InputFormat='ipmovie' Then DecodeMVE(InputPath,Temps[0],3) Else
    If InputFormat='roq' Then DecodeRoQAudio(InputPath,Temps[0]) Else
+   If InputFormat='shn' Then DecodeShorten(InputPath,Temps[0]) Else
    If (InputFormat='aiff') And IsAIFFIma4(InputPath) Then DecodeAIFFIma4(InputPath,Temps[0]) Else
    If (InputFormat='aiff') And PcmAiffToWav(InputPath,Temps[0],PcmCodecOut<>'') Then Else
    If InputFormat='aiff' Then DecodeAIFF(InputPath,Temps[0]) Else
