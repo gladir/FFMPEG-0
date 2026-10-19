@@ -22300,7 +22300,7 @@ Const
  PDX: Array[0..6] Of Integer=(8,8,4,4,2,2,1); PDY: Array[0..6] Of Integer=(8,8,8,4,4,2,2);
 Var
  F,Idat,Raw,Img,Prv,Cur: PEABuffer; Size,Pos,Len,IdLen,Bd,Ct,Il,W,H,Q,Bits,Bpp,RowB,I,X,Y,Res,OutLen,Fl,A,B,C,Pa,Pb,Pc,Pp,V,Fmt,Ps,Pw,Ph,Rp,Total,Ox,Oy,PNg,Np: LongInt;
- Tag: String[4]; HasPal: Boolean; Alpha: Boolean;
+ Tag: String[4]; HasPal: Boolean; Alpha: Boolean; PhN,PhD: LongInt;
 Function RB32(At: LongInt): LongInt;Begin RB32:=EAByte(F,Size,At)*16777216+EAByte(F,Size,At+1)*65536+EAByte(F,Size,At+2)*256+EAByte(F,Size,At+3); End;
 Function Smp(Row: PEABuffer; X: LongInt): LongInt;
 Begin
@@ -22314,7 +22314,7 @@ End;
 Begin
  NVLoad(Source,F,Size);
  If (Size<33) Or (F^[0]<>137) Or (F^[1]<>80) Or (F^[2]<>78) Or (F^[3]<>71) Or (F^[4]<>13) Or (F^[5]<>10) Or (F^[6]<>26) Or (F^[7]<>10) Then Fail('png: signature invalide.');
- Pos:=8; IdLen:=0; W:=0; H:=0; Bd:=0; Ct:=0; Il:=0; HasPal:=False;
+ Pos:=8; IdLen:=0; W:=0; H:=0; Bd:=0; Ct:=0; Il:=0; HasPal:=False; PhN:=0; PhD:=1;
  FillChar(NVPalR,256,0); FillChar(NVPalG,256,0); FillChar(NVPalB,256,0);
  GetMem(Idat,Size+64);
  While Pos+12<=Size Do Begin
@@ -22327,6 +22327,9 @@ Begin
   End Else If Tag='PLTE' Then Begin
    For I:=0 To (Len Div 3)-1 Do If I<256 Then Begin NVPalR[I]:=F^[Pos+8+I*3]; NVPalG[I]:=F^[Pos+9+I*3]; NVPalB[I]:=F^[Pos+10+I*3]; End;
    HasPal:=True;
+  End Else If (Tag='pHYs') And (Len>=9) And (IdLen=0) Then Begin
+   PhN:=RB32(Pos+8); PhD:=RB32(Pos+12);
+   If (PhN<0) Or (PhD<0) Then Begin PhN:=0; PhD:=1; End;
   End Else If Tag='IDAT' Then Begin
    Move(F^[Pos+8],Idat^[IdLen],Len); Inc(IdLen,Len);
   End Else If Tag='IEND' Then Break;
@@ -22358,7 +22361,7 @@ Begin
  Res:=NVInflate(Idat,IdLen,Raw,Total,OutLen);
  If (Res<>0) Or (OutLen<Total) Then Fail('png: donnees compressees invalides.');
  FreeMem(Idat,Size+64);
- NVBegin(Mode,Target,W,H,Fmt,25,1); NVSarN:=0; NVSarD:=0; NVHasAlpha:=Alpha; If Il=1 Then NVIl:='b';
+ NVBegin(Mode,Target,W,H,Fmt,25,1); NVSarN:=0; NVSarD:=0; If (PhN>0) And (PhD>0) Then Begin NVSarN:=PhN; NVSarD:=PhD; NVGcd(NVSarN,NVSarD); End; NVHasAlpha:=Alpha; If Il=1 Then NVIl:='b';
  GetMem(Img,W*H*NVBpp(Fmt)+64); FillChar(Img^,W*H*NVBpp(Fmt),0);
  GetMem(Prv,RowB+64);
  Rp:=0;
