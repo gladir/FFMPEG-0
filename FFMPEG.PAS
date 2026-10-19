@@ -21662,6 +21662,9 @@ Procedure DecodeRoQ(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeRL2(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeSMK(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeRV(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure AWBegin(Const Target,Fourcc: String; W,H,Rate,Scale,Bpp: LongInt; Extra: PEABuffer; ExtraLen: LongInt); Forward;
+Procedure AWFrame(P: PEABuffer; Len: LongInt); Forward;
+Procedure AWEnd; Forward;
 Procedure DecodeSTRVideo(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeMSNWC(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeMM(Const Source,Target: String; Mode: LongInt); Forward;
@@ -47082,9 +47085,10 @@ Begin
 End;
 
 { ---- rawvideo : Y4M -> pixels bruts (yuv420p, gray, rgb24, bgr24) ---- }
+Var RawAvi: Boolean; AWBpsOverride: LongInt;
 Procedure EncodeRawVideo(Const Source,Target: String);
 Var
- Limit,Cur,At,Q,W,Hh,CW,CH,K,Code,X,Y,Kind,N: LongInt; Line,Token: String; H: Array[0..255] Of Byte;
+ Limit,Cur,At,Q,W,Hh,CW,CH,K,Code,X,Y,Kind,N,FN,FD,G2,Pl: LongInt; PkB: PEABuffer; Line,Token: String; H: Array[0..255] Of Byte;
  Yp,Up,Vp,Row: PEABuffer; Tab: Array[0..2047] Of Byte; Crv,Cbu,Cgu,Cgv,Cy,Oy,Yb,Gv: Int64; Yoffs,Ix,Rg,Gg,Bg,Yv,Uv,Vv: LongInt;
 Function Clip(V: LongInt): LongInt;Begin If V<0 Then Clip:=0 Else If V>255 Then Clip:=255 Else Clip:=V; End;
 Function Sar(V: Int64; Nn: LongInt): Int64;
@@ -47102,7 +47106,7 @@ Begin
  OpenRead(Source); Limit:=InputSize; Cur:=0; Line:='';
  While Cur<Limit Do Begin ReadAt(Cur,H,1); Inc(Cur); If H[0]=10 Then Break; If Length(Line)<250 Then Line:=Line+Chr(H[0]); End;
  If Copy(Line,1,9)<>'YUV4MPEG2' Then Fail('rawvideo: entree Y4M requise.');
- W:=0; Hh:=0; Line:=Copy(Line,11,255);
+ W:=0; Hh:=0; FN:=25; FD:=1; Line:=Copy(Line,11,255);
  While Line<>'' Do Begin
   K:=Pos(' ',Line); If K=0 Then K:=Length(Line)+1;
   Token:=Copy(Line,1,K-1); Line:=Copy(Line,K+1,255);
@@ -47110,13 +47114,24 @@ Begin
   Case Token[1] Of
    'W': Val(Copy(Token,2,20),W,Code);
    'H': Val(Copy(Token,2,20),Hh,Code);
+   'F': Begin K:=Pos(':',Token); If K>0 Then Begin Val(Copy(Token,2,K-2),FN,Code); Val(Copy(Token,K+1,20),FD,Code); End; End;
    'C': If (Token<>'C420') And (Token<>'C420jpeg') And (Token<>'C420mpeg2') And (Token<>'C420paldv') Then Fail('rawvideo: Y4M YUV420 8 bits requis.');
   End;
  End;
  If (W<1) Or (Hh<1) Or (W>16000) Or (Hh>16000) Then Fail('rawvideo: dimensions Y4M incorrectes.');
  CW:=(W+1) Div 2; CH:=(Hh+1) Div 2;
  GetMem(Yp,W*Hh+16); GetMem(Up,CW*CH+16); GetMem(Vp,CW*CH+16); GetMem(Row,W*3+16);
- OpenWrite(Target); N:=0;
+ If RawAvi Then Begin
+  If (Kind<>0) And (Kind<>1) Then Fail('rawvideo: AVI seulement pour yuv420p et gray.');
+  If (FN<=0) Or (FD<=0) Then Begin FN:=25; FD:=1; End;
+  G2:=FN; K:=FD; While K<>0 Do Begin Code:=G2 Mod K; G2:=K; K:=Code; End;
+  If Kind=0 Then Pl:=W*Hh+2*CW*CH Else Pl:=W*Hh;
+  GetMem(PkB,Pl+16);
+  AWBpsOverride:=(Int64(Pl)*8*FN) Div (FD*8);
+  If Kind=0 Then AWBegin(Target,'I420',W,Hh,FN Div G2,FD Div G2,12,Nil,0) Else AWBegin(Target,'Y800',W,Hh,FN Div G2,FD Div G2,8,Nil,0);
+ End Else
+ OpenWrite(Target);
+ N:=0;
  While Cur+6+W*Hh+2*CW*CH<=Limit Do Begin
   ReadAt(Cur,H,5); If (H[0]<>70) Or (H[1]<>82) Then Break;
   Inc(Cur,5); While Cur<Limit Do Begin ReadAt(Cur,H,1); Inc(Cur); If H[0]=10 Then Break; End;
@@ -47127,6 +47142,18 @@ Begin
   At:=0; While At<CW*CH Do Begin If CW*CH-At>60000 Then Q:=60000 Else Q:=CW*CH-At; ReadAt(Cur+At,Vp^[At],Q); Inc(At,Q); End;
   Inc(Cur,CW*CH);
   Inc(N);
+  If RawAvi Then Begin
+   Move(Yp^,PkB^,W*Hh);
+   If Kind=0 Then Begin Move(Up^,PkB^[W*Hh],CW*CH); Move(Vp^,PkB^[W*Hh+CW*CH],CW*CH); End
+   Else Begin
+    For Y:=0 To Hh-1 Do For X:=0 To W-1 Do Begin
+     Gv:=Yp^[Y*W+X] Shl 7; If Gv>30189 Then Gv:=30189;
+     Gv:=Sar(Gv*19077-39057361,14); Gv:=Sar(Gv+64,7); If Gv<0 Then Gv:=0; If Gv>255 Then Gv:=255;
+     PkB^[Y*W+X]:=Gv;
+    End;
+   End;
+   AWFrame(PkB,Pl);
+  End Else
   If Kind=0 Then Begin
    At:=0; While At<W*Hh Do Begin If W*Hh-At>60000 Then Q:=60000 Else Q:=W*Hh-At; WriteBytes(Yp^[At],Q); Inc(At,Q); End;
    At:=0; While At<CW*CH Do Begin If CW*CH-At>60000 Then Q:=60000 Else Q:=CW*CH-At; WriteBytes(Up^[At],Q); Inc(At,Q); End;
@@ -47151,7 +47178,7 @@ Begin
     If Kind=1 Then WriteBytes(Row^,W) Else WriteBytes(Row^,W*3);
    End;
  End;
- CloseRead; CloseWrite;
+ If RawAvi Then AWEnd Else Begin CloseRead; CloseWrite; End;
  If N=0 Then Fail('rawvideo: aucune image Y4M.');
  FreeMem(Yp,W*Hh+16); FreeMem(Up,CW*CH+16); FreeMem(Vp,CW*CH+16); FreeMem(Row,W*3+16);
 End;
@@ -52418,7 +52445,7 @@ Begin
  Hdrl:=4+(8+56)+(8+Strl)+(8+260);
  AWTag('RIFF'); AWL32(0); AWTag('AVI ');
  AWTag('LIST'); AWL32(Hdrl); AWTag('hdrl');
- AWTag('avih'); AWL32(56); AWL32(Trunc(1000000.0*Scale/Rate)); AWL32(25000); AWL32(0); AWL32(2320); AWL32(0); AWL32(0); AWL32(1);
+ AWTag('avih'); AWL32(56); AWL32(Trunc(1000000.0*Scale/Rate)); If AWBpsOverride<>0 Then AWL32(AWBpsOverride) Else AWL32(25000); AWL32(0); AWL32(2320); AWL32(0); AWL32(0); AWL32(1);
  AWL32(1048576); AWL32(W); AWL32(H); AWL32(0); AWL32(0); AWL32(0); AWL32(0);
  AWTag('LIST'); AWL32(Strl); AWTag('strl');
  AWTag('strh'); AWL32(56); AWTag('vids'); AWTag(Fourcc);
@@ -73393,7 +73420,8 @@ BEGIN
   Temps[2]:=NewTemporary; EncodeBMPFromY4M(Intermediate,Temps[2]);
   Commit(Temps[2]); Temps[2]:=''; WriteLn('Image creee: ',OutputPath); Halt(0);
  End;
- If (InputFormat='yuv4mpegpipe') And (VideoCodec='rawvideo') And (OutputFormat='rawvideo') Then Begin
+ If (InputFormat='yuv4mpegpipe') And (VideoCodec='rawvideo') And ((OutputFormat='rawvideo') Or (OutputFormat='avi')) Then Begin
+  RawAvi:=OutputFormat='avi';
   If NoVideo Or (AudioCodec<>'') Or HasBitrate Or (RequestedRate<>0) Or (RequestedChannels<>0) Or (ImageWidth<>0) Or IsHTTP(InputPath) Or HasCrop Or (VideoFrames<>0) Then
    Fail('rawvideo: entree Y4M locale sans autre option requise.');
   Temps[2]:=NewTemporary; EncodeRawVideo(Intermediate,Temps[2]);
