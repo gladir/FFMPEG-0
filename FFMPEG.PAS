@@ -21661,6 +21661,7 @@ Procedure DecodeRawQX(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeRoQ(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeRL2(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeSMK(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure DecodeRV(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeSTRVideo(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeMSNWC(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeMM(Const Source,Target: String; Mode: LongInt); Forward;
@@ -22415,6 +22416,7 @@ Begin
  If Kind=55 Then Begin DecodePCX(Source,Target,Mode); Exit; End;
  If Kind=66 Then Begin DecodeRL2(Source,Target,Mode); Exit; End;
  If Kind=67 Then Begin DecodeSMK(Source,Target,Mode); Exit; End;
+ If Kind=68 Then Begin DecodeRV(Source,Target,Mode); Exit; End;
  If Kind=65 Then Begin DecodeRoQ(Source,Target,Mode); Exit; End;
  If Kind=64 Then Begin DecodeRawQX(Source,Target,Mode); Exit; End;
  If Kind=63 Then Begin DecodeQPEG(Source,Target,Mode); Exit; End;
@@ -38285,6 +38287,9 @@ Var
  H3Intra: PEABuffer;  { mbintra_table }
  H3DcBase: PH3I16; H3DcN,H3AcN: LongInt;
  H3Err: Boolean;
+ { RealVideo 1.0/2.0 }
+ H3RvMode,H3Rv10Ver,H3MbNumLeft: LongInt; H3RvLastDc,H3RvFirst: Array[0..2] Of LongInt;
+ H3RvLumSym,H3RvChrSym: Array[0..1023] Of Byte; H3RvLumCnt,H3RvChrCnt,H3RvLumFirst,H3RvChrFirst,H3RvLumOff,H3RvChrOff: Array[0..17] Of LongInt; H3RvInit: Boolean;
 
 Function H3Mt(Xy: LongInt): LongInt;Begin H3Mt:=H3P[H3CurI].Mt^[Xy+2*H3MbStride+1]; End;
 Procedure H3SetMt(Xy,V: LongInt);Begin H3P[H3CurI].Mt^[Xy+2*H3MbStride+1]:=V; End;
@@ -38504,9 +38509,58 @@ Begin
 End;
 
 { h263_decode_block ; 0 = ok, -1 = erreur }
+Procedure H3RvInitTab;
+Const
+ RunLen: Array[0..18,0..1] Of Integer=((0,0),(1,0),(255,0),(3,1),(254,1),(7,3),(252,3),(15,7),(248,7),(31,15),(240,15),(63,31),(224,31),(127,63),(192,63),(255,127),(128,127),(127,255),(128,255));
+ LumLen: Array[0..14] Of Integer=(1,0,2,4,8,16,32,0,64,0,128,0,256,0,512);
+ ChrLen: Array[0..14] Of Integer=(1,2,4,0,8,0,16,0,32,0,64,0,128,0,256);
+Var I,T,N,L,Idx: LongInt; Cur: LongInt; Code: Int64;
+Begin
+ If H3RvInit Then Exit; H3RvInit:=True;
+ N:=0;
+ For I:=0 To 18 Do Begin Cur:=RunLen[I,0]; For T:=0 To RunLen[I,1] Do Begin H3RvLumSym[N]:=Cur And 255; Dec(Cur); Inc(N); End; End;
+ N:=0;
+ For I:=0 To 16 Do Begin Cur:=RunLen[I,0]; For T:=0 To RunLen[I,1] Do Begin H3RvChrSym[N]:=Cur And 255; Dec(Cur); Inc(N); End; End;
+ Code:=0; Idx:=0;
+ For L:=2 To 16 Do Begin
+  H3RvLumCnt[L]:=LumLen[L-2]; H3RvLumFirst[L]:=Code Shr (32-L); H3RvLumOff[L]:=Idx;
+  Code:=Code+(Int64(LumLen[L-2]) Shl (32-L)); Inc(Idx,LumLen[L-2]);
+ End;
+ Code:=0; Idx:=0;
+ For L:=2 To 16 Do Begin
+  H3RvChrCnt[L]:=ChrLen[L-2]; H3RvChrFirst[L]:=Code Shr (32-L); H3RvChrOff[L]:=Idx;
+  Code:=Code+(Int64(ChrLen[L-2]) Shl (32-L)); Inc(Idx,ChrLen[L-2]);
+ End;
+End;
+{ ff_rv_decode_dc ; < 0 = erreur }
+Function H3RvDecodeDc(N: LongInt): LongInt;
+Var V,L,Start: LongInt;
+Begin
+ H3RvInitTab;
+ Start:=H3Pos; V:=0;
+ If N<4 Then Begin
+  If H3Show(7)=$7F Then Begin H3Skip(18); H3RvDecodeDc:=255; Exit; End;
+  For L:=1 To 16 Do Begin
+   V:=V*2+H3Bit;
+   If (L>=2) And (H3RvLumCnt[L]>0) And (V>=H3RvLumFirst[L]) And (V-H3RvLumFirst[L]<H3RvLumCnt[L]) Then Begin
+    H3RvDecodeDc:=H3RvLumSym[H3RvLumOff[L]+V-H3RvLumFirst[L]]; Exit;
+   End;
+  End;
+ End Else Begin
+  If H3Show(9)=$1FE Then Begin H3Skip(18); H3RvDecodeDc:=255; Exit; End;
+  For L:=1 To 16 Do Begin
+   V:=V*2+H3Bit;
+   If (L>=2) And (H3RvChrCnt[L]>0) And (V>=H3RvChrFirst[L]) And (V-H3RvChrFirst[L]<H3RvChrCnt[L]) Then Begin
+    H3RvDecodeDc:=H3RvChrSym[H3RvChrOff[L]+V-H3RvChrFirst[L]]; Exit;
+   End;
+  End;
+ End;
+ H3Pos:=Start; H3RvDecodeDc:=-1;
+End;
+
 Function H3Block(Var Block: TH3Blk; N,Coded: LongInt): LongInt;
 Var
- Level,I,J,Run,Sym,SavedPos,Rl,Is11: LongInt; Scan: PEABuffer; Acp: Boolean; Retry: Boolean;
+ Level,I,J,Run,Sym,SavedPos,Rl,Is11,Comp,Diff: LongInt; Scan: PEABuffer; Acp: Boolean; Retry: Boolean;
  Done: Boolean;
 Begin
  H3Block:=-1;
@@ -38516,8 +38570,24 @@ Begin
   Rl:=1; I:=0;
   If H3AcPred<>0 Then Begin If H3AicDir<>0 Then Scan:=@H3AltV Else Scan:=@H3AltH; End;
  End Else If H3MbIntra<>0 Then Begin
-  Level:=H3Bits(8);
-  If Level=255 Then Level:=128;
+  If H3RvMode=1 Then Begin
+   If (H3Rv10Ver=3) And (H3PictType=0) Then Begin
+    If N<=3 Then Comp:=0 Else Comp:=N-3;
+    Level:=H3RvLastDc[Comp];
+    If H3RvFirst[Comp]<>0 Then Begin
+     Diff:=H3RvDecodeDc(N);
+     If Diff<0 Then Exit;
+     Level:=(Level+Diff) And 255;
+     H3RvLastDc[Comp]:=Level;
+    End Else H3RvFirst[Comp]:=1;
+   End Else Begin
+    Level:=H3Bits(8);
+    If Level=255 Then Level:=128;
+   End;
+  End Else Begin
+   Level:=H3Bits(8);
+   If Level=255 Then Level:=128;
+  End;
   Block[0]:=Level; I:=1;
  End Else I:=0;
  If Coded=0 Then Begin
@@ -38542,9 +38612,13 @@ Begin
      Run:=H3Bits(7)+1;
      Level:=H3Bits(8); If Level>=128 Then Dec(Level,256);
      If Level=-128 Then Begin
-      Level:=H3Bits(5);
-      Level:=Level Or (H3SBits(6)*32);
-      H3Skip(6);
+      If H3RvMode=1 Then Begin
+       Level:=H3SBits(12); H3Skip(12);
+      End Else Begin
+       Level:=H3Bits(5);
+       Level:=Level Or (H3SBits(6)*32);
+       H3Skip(6);
+      End;
      End;
     End;
    End Else Begin
@@ -38755,7 +38829,7 @@ Begin
  End;
  If (H3PbFrame<>0) And (H3SkipBPart(Cbpb)<0) Then Begin H3DecodeMb:=-1; Exit; End;
  If (H3Obmc<>0) And (H3MbIntra=0) Then
-  If (H3PictType=1) And (H3MbX+1<H3MbW) Then H3PreviewObmc;
+  If (H3PictType=1) And (H3MbX+1<H3MbW) And (H3MbNumLeft<>1) Then H3PreviewObmc;
 Done:
  If H3Left<0 Then Begin H3DecodeMb:=H3InvalidData; Exit; End;
  V:=H3Show(16);
@@ -47801,8 +47875,8 @@ Begin
      If RMTag(RMCp+4)='VIDO' Then Begin
       RMSt[RMNS].Tag:=RMl32(RMCp+8);
       RMSt[RMNS].W:=RMb16(RMCp+12); RMSt[RMNS].H:=RMb16(RMCp+14);
-      RMSt[RMNS].Fps:=RMb32(RMCp+24);
-      RMSt[RMNS].ExtPos:=RMCp+28; RMSt[RMNS].ExtLen:=Sz-28;
+      RMSt[RMNS].Fps:=RMb32(RMCp+22);
+      RMSt[RMNS].ExtPos:=RMCp+26; RMSt[RMNS].ExtLen:=Sz-26;
       RMSt[RMNS].Kind:=2;
       Inc(RMNS);
      End;
@@ -49000,6 +49074,237 @@ Begin
   If RMSt[I].Tag=Ord('l')+Ord('p')*256+Ord('c')*65536+Ord('J')*16777216 Then Begin RMAudioKind:=1; Break; End;
   If RMSt[I].Tag=Ord('2')+Ord('8')*256+Ord('_')*65536+Ord('8')*16777216 Then Begin RMAudioKind:=2; Break; End;
  End;
+ RMFree;
+End;
+
+{ ---- RealVideo 1.0 / 2.0 (libavcodec/rv10.c) : decodeur sur le moteur H.263 (H3) ---- }
+Var
+ RVSub,RVMajor,RVMinor,RVMicro,RVOrigW,RVOrigH,RVRprMax,RVCurType,RVLastI: LongInt;
+ RVLow,RVPend: Boolean; RVExt: Array[0..255] Of Byte; RVExtLen: LongInt;
+ RVFrameBuf: PEABuffer; RVFrameCap: LongInt;
+
+Function RVLog2(V: LongInt): LongInt;
+Var R: LongInt;
+Begin R:=0; While V>1 Do Begin V:=V Shr 1; Inc(R); End; RVLog2:=R; End;
+
+{ rv10_decode_picture_header : retourne le nombre de macroblocs ou < 0 }
+Function RVHeader10: LongInt;
+Var PbFrame,MbXy,MbCount,I: LongInt;
+Begin
+ RVHeader10:=-1;
+ H3Bit;
+ If H3Bit<>0 Then H3PictType:=1 Else H3PictType:=0;
+ PbFrame:=H3Bit;
+ If PbFrame<>0 Then Exit;
+ H3Qscale:=H3Bits(5);
+ If H3Qscale=0 Then Exit;
+ If (H3PictType=0) And (H3Rv10Ver=3) Then For I:=0 To 2 Do H3RvLastDc[I]:=H3Bits(8);
+ MbXy:=H3MbX+H3MbY*H3MbW;
+ If (H3Show(12)=0) Or ((MbXy<>0) And (MbXy<H3MbNum)) Then Begin
+  H3MbX:=H3Bits(6); H3MbY:=H3Bits(6); MbCount:=H3Bits(12);
+ End Else Begin
+  H3MbX:=0; H3MbY:=0; MbCount:=H3MbW*H3MbH;
+ End;
+ H3Skip(3);
+ RVHeader10:=MbCount;
+End;
+
+{ rv20_decode_picture_header ; -2 = image B (non prise en charge), -3 = changement de resolution }
+Function RVHeader20(Whole: LongInt): LongInt;
+Var Typ,F,Seq,MbPos: LongInt;
+Begin
+ RVHeader20:=-1;
+ Typ:=H3Bits(2);
+ Case Typ Of 0,1: H3PictType:=0; 2: H3PictType:=1; Else H3PictType:=2; End;
+ If H3PictType=2 Then Begin RVHeader20:=-2; Exit; End;
+ If H3Bit<>0 Then Exit;
+ H3Qscale:=H3Bits(5);
+ If H3Qscale=0 Then Exit;
+ If RVMinor>=2 Then H3Loop:=H3Bit;
+ If RVMinor<=1 Then Seq:=H3Bits(8) Else Seq:=H3Bits(13);
+ If RVRprMax<>0 Then Begin
+  F:=H3Bits(RVLog2(RVRprMax)+1);
+  If F<>0 Then Begin RVHeader20:=-3; Exit; End;
+ End;
+ MbPos:=H3DecodeMba;
+ H3NoRounding:=H3Bit;
+ H3Aic:=Ord(H3PictType=0);
+ H3ModQ:=1; H3Loop:=1; H3ChromaTab:=True;
+ RVHeader20:=H3MbW*H3MbH-MbPos;
+End;
+
+Procedure RVStartFrame;
+Var Slot: LongInt;
+Begin
+ If H3PictType<>2 Then Begin RVLastI:=H3CurI; H3RefI:=RVLastI; End;
+ Slot:=0;
+ While (Slot=H3RefI) Or (Slot=RVLastI) Do Inc(Slot);
+ H3CurI:=Slot;
+ H3ClearPic(H3CurI);
+ If (H3PictType<>0) And (H3RefI<0) Then Begin
+  Slot:=0; While Slot=H3CurI Do Inc(Slot);
+  H3RefI:=Slot; RVLastI:=Slot;
+  FillChar(H3P[H3RefI].Y^,H3LY*H3MbH*16,16);
+  FillChar(H3P[H3RefI].U^,H3LC*H3MbH*8,128); FillChar(H3P[H3RefI].V^,H3LC*H3MbH*8,128);
+ End;
+ RVCurType:=H3PictType; RVPend:=True;
+End;
+
+{ rv10_decode_packet : retourne la taille active en bits, ou < 0 }
+Function RVPacket(Buf: PEABuffer; BufSize,BufSize2,Whole: LongInt): LongInt;
+Var MbCount,MbPos,Left,Active,StartX,Ret,V,I: LongInt;
+Begin
+ RVPacket:=-1;
+ Active:=BufSize*8;
+ H3Buf:=Buf; If BufSize>BufSize2 Then H3Size:=BufSize Else H3Size:=BufSize2; H3Pos:=0;
+ If H3RvMode=1 Then MbCount:=RVHeader10 Else MbCount:=RVHeader20(Whole);
+ If MbCount<0 Then Exit;
+ If (H3MbX>=H3MbW) Or (H3MbY>=H3MbH) Then Exit;
+ MbPos:=H3MbY*H3MbW+H3MbX; Left:=H3MbW*H3MbH-MbPos;
+ If MbCount>Left Then Exit;
+ If Whole<H3MbW*H3MbH Div 8 Then Exit;
+ If ((H3MbX=0) And (H3MbY=0)) Or Not RVPend Then Begin
+  If RVPend Then Begin H3MbX:=0; H3MbY:=0; H3ResyncX:=0; H3ResyncY:=0; End;
+  RVStartFrame;
+ End Else If RVCurType<>H3PictType Then Exit;
+ If H3RvMode=1 Then Begin
+  If H3MbY=0 Then H3FirstLine:=1;
+ End Else Begin
+  H3FirstLine:=1; H3ResyncX:=H3MbX;
+ End;
+ StartX:=H3MbX; H3ResyncY:=H3MbY;
+ H3SetQscale(H3Qscale);
+ For I:=0 To 2 Do H3RvFirst[I]:=0;
+ H3MbNumLeft:=MbCount;
+ While H3MbNumLeft>0 Do Begin
+  H3MvType:=0;
+  Ret:=H3DecodeMb;
+  If Ret<>H3SliceErr Then
+   If Active>=H3Pos Then Begin
+    V:=H3Show(16);
+    If H3Pos+16>Active Then V:=V Shr (H3Pos+16-Active);
+    If V=0 Then Ret:=H3SliceEnd;
+   End;
+  If (Ret<>H3SliceErr) And (Active<H3Pos) And (8*BufSize2>=H3Pos) Then Begin
+   Active:=BufSize2*8; Ret:=H3SliceOk;
+  End;
+  If (Ret=H3SliceErr) Or (Active<H3Pos) Then Exit;
+  H3UpdateMotion;
+  H3Recon;
+  If H3Loop<>0 Then H3LoopFilter;
+  Inc(H3MbX);
+  If H3MbX=H3MbW Then Begin H3MbX:=0; Inc(H3MbY); End;
+  If H3MbX=H3ResyncX Then H3FirstLine:=0;
+  If Ret=H3SliceEnd Then Break;
+  Dec(H3MbNumLeft);
+ End;
+ RVPacket:=Active;
+End;
+
+{ rv10_decode_frame ; 1 = image disponible dans H3P[H3Out], 0 = rien, < 0 = erreur }
+Function RVFrame(Pk: PEABuffer; Len: LongInt): LongInt;
+Var
+ SliceCount,I,Offset,Size,Size2,Ret,DSize,Off1,Off2: LongInt; Data: PEABuffer;
+Function SlOff(N: LongInt): Int64;
+Begin SlOff:=Int64(RVFrameBuf^[5+N*8])+Int64(RVFrameBuf^[6+N*8])*256+Int64(RVFrameBuf^[7+N*8])*65536+Int64(RVFrameBuf^[8+N*8])*16777216; End;
+Begin
+ RVFrame:=0;
+ If Len=0 Then Exit;
+ If RVFrameCap<Len+128 Then Begin
+  If RVFrameBuf<>Nil Then FreeMem(RVFrameBuf);
+  RVFrameCap:=Len+128; GetMem(RVFrameBuf,RVFrameCap);
+ End;
+ Move(Pk^,RVFrameBuf^,Len); FillChar(RVFrameBuf^[Len],128,0);
+ SliceCount:=RVFrameBuf^[0]+1;
+ DSize:=Len-1;
+ If DSize<=8*SliceCount Then Begin RVFrame:=-1; Exit; End;
+ Data:=PEABuffer(@RVFrameBuf^[1+8*SliceCount]); Dec(DSize,8*SliceCount);
+ I:=0;
+ While I<SliceCount Do Begin
+  If SlOff(I)>=DSize Then Begin RVFrame:=-1; Exit; End;
+  Offset:=SlOff(I);
+  If I+1=SliceCount Then Size:=DSize-Offset Else Size:=SlOff(I+1)-Offset;
+  If I+2>=SliceCount Then Size2:=DSize-Offset Else Size2:=SlOff(I+2)-Offset;
+  If (Size<=0) Or (Size2<=0) Then Begin RVFrame:=-1; Exit; End;
+  If Size>Size2 Then Off1:=Size Else Off1:=Size2;
+  If Offset+Off1>DSize Then Begin RVFrame:=-1; Exit; End;
+  Ret:=RVPacket(PEABuffer(@Data^[Offset]),Size,Size2,DSize);
+  If Ret<0 Then Begin RVFrame:=-1; Exit; End;
+  If Ret>8*Size Then Inc(I);
+  Inc(I);
+ End;
+ If RVPend And (H3MbY>=H3MbH) Then Begin
+  If RVLow Or (RVCurType=2) Then Begin H3Out:=H3CurI; RVFrame:=1; End
+  Else If RVLastI>=0 Then Begin H3Out:=RVLastI; RVFrame:=1; End;
+  RVPend:=False;
+ End;
+End;
+
+{ 1 rv10, 2 rv20, 0 sinon }
+Function RMVideoKind(Const Name: String): LongInt;
+Var I: LongInt;
+Begin
+ RMVideoKind:=0;
+ RMParse(Name);
+ For I:=0 To RMNS-1 Do If RMSt[I].Kind=2 Then Begin
+  If RMSt[I].Tag=$30315652 Then RMVideoKind:=1
+  Else If RMSt[I].Tag=$30325652 Then RMVideoKind:=2;
+  Break;
+ End;
+ RMFree;
+End;
+
+Procedure DecodeRV(Const Source,Target: String; Mode: LongInt);
+Var
+ I,K,Found,N,D,Fps: LongInt; Begun: Boolean; Kind: LongInt; Pk: PEABuffer;
+Begin
+ RMParse(Source);
+ Found:=-1;
+ For I:=0 To RMNS-1 Do If RMSt[I].Kind=2 Then Begin Found:=I; Break; End;
+ If Found<0 Then Fail('realvideo: aucun flux video.');
+ If RMSt[Found].Tag=$30315652 Then Kind:=1 Else If RMSt[Found].Tag=$30325652 Then Kind:=2
+ Else Fail('realvideo: seuls rv10 et rv20 sont pris en charge.');
+ RVExtLen:=RMSt[Found].ExtLen; If RVExtLen>256 Then RVExtLen:=256;
+ If RVExtLen<8 Then Fail('realvideo: extradata trop petit.');
+ For I:=0 To RVExtLen-1 Do RVExt[I]:=RMB(RMSt[Found].ExtPos+I);
+ H3Reset;
+ H3RvMode:=Kind; H3Codec:=3+Kind;
+ RVSub:=RVExt[4]*16777216+RVExt[5]*65536+RVExt[6]*256+RVExt[7];
+ RVMajor:=RVSub Shr 28; RVMinor:=(RVSub Shr 20) And $FF; RVMicro:=(RVSub Shr 12) And $FF;
+ RVRprMax:=RVExt[1] And 7;
+ H3Wd:=RMSt[Found].W; H3Ht:=RMSt[Found].H;
+ If (H3Wd<=0) Or (H3Ht<=0) Or (H3Wd>16384) Or (H3Ht>16384) Then Fail('realvideo: dimensions invalides.');
+ RVOrigW:=H3Wd; RVOrigH:=H3Ht;
+ H3MbW:=(H3Wd+15) Div 16; H3MbH:=(H3Ht+15) Div 16; H3MbNum:=H3MbW*H3MbH;
+ H3LongVec:=RVExt[3] And 1;
+ RVLow:=True; H3Rv10Ver:=0; H3Obmc:=0;
+ Case RVMajor Of
+  1: Begin
+      If RVMicro<>0 Then H3Rv10Ver:=3 Else H3Rv10Ver:=1;
+      If RVMicro=2 Then H3Obmc:=1;
+     End;
+  2: If RVMinor>=2 Then RVLow:=False;
+ Else Fail('realvideo: version non prise en charge.');
+ End;
+ If (Kind=1) And (RVMajor<>1) Then Fail('realvideo: version non prise en charge.');
+ H3AllocCtx;
+ H3CurI:=-1; H3RefI:=-1; RVLastI:=-1; RVPend:=False; H3MbX:=0; H3MbY:=0; H3FirstLine:=0; H3ResyncX:=0; H3ResyncY:=0;
+ RVFrameBuf:=Nil; RVFrameCap:=0;
+ Fps:=RMSt[Found].Fps;
+ N:=Fps; D:=65536; If N<=0 Then Begin N:=25; D:=1; End; NVGcd(N,D);
+ Begun:=False; NVVN:=0; NVVD:=0;
+ For K:=0 To RMNPk-1 Do If RMPkS^[K]=Found Then Begin
+  If RVFrame(PEABuffer(@RMArena^[RMPkOff^[K]]),RMPkLen^[K])=1 Then Begin
+   If H3Pack Then Begin
+    If Not Begun Then Begin H3BeginNV(Mode,Target,N,D); Begun:=True; End;
+    NVEmit(H3OutBuf);
+    If NVDone Then Break;
+   End;
+  End;
+ End;
+ If NVLast<>Nil Then Begin FreeMem(NVLast,NVLastSize); NVLast:=Nil; End;
+ If Not Begun Then Fail('realvideo: aucune image decodee.');
+ CloseRead; If NVOpened Then CloseWrite;
  RMFree;
 End;
 
@@ -72819,7 +73124,7 @@ BEGIN
  Else If (InputFormat='mm') And Not IsHTTP(InputPath) Then NVKind:=48
  Else If (InputFormat='mvi') And Not IsHTTP(InputPath) Then NVKind:=49
  Else If InputFormat='bethsoftvid' Then NVKind:=1 Else If InputFormat='bfi' Then NVKind:=2 Else If InputFormat='c93' Then NVKind:=3
- Else If InputFormat='bmp' Then NVKind:=4 Else If (InputFormat='pam') Or (InputFormat='pbm') Or (InputFormat='pgm') Or (InputFormat='ppm') Or (InputFormat='pgmyuv') Then NVKind:=50 Else If InputFormat='nuv' Then NVKind:=54 Else If InputFormat='pcx' Then NVKind:=55 Else If InputFormat='png' Then NVKind:=58 Else If InputFormat='roq' Then NVKind:=65 Else If InputFormat='rl2' Then NVKind:=66 Else If InputFormat='smk' Then NVKind:=67 Else If InputFormat='sgi' Then NVKind:=56 Else If InputFormat='ptx' Then NVKind:=57 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22 Else If (InputFormat='flic') And Not IsHTTP(InputPath) Then NVKind:=23 Else If (InputFormat='gif') And Not IsHTTP(InputPath) Then NVKind:=25 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=2) Then NVKind:=27 Else If (InputFormat='h263') And Not IsHTTP(InputPath) Then NVKind:=28 Else If (InputFormat='h261') And Not IsHTTP(InputPath) Then NVKind:=29 Else If (InputFormat='idcin') And Not IsHTTP(InputPath) Then NVKind:=30 Else If (InputFormat='ipmovie') And Not IsHTTP(InputPath) Then NVKind:=38 Else If (InputFormat='jpegls_pipe') And Not IsHTTP(InputPath) Then NVKind:=39 Else If (InputFormat='jpeg_pipe') And Not IsHTTP(InputPath) Then NVKind:=46 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And MP4HasMjpb(InputPath) Then NVKind:=47 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And (QXMovKind(InputPath)<>0) Then NVKind:=QXMovKind(InputPath) Else If (InputFormat='h264') And Not IsHTTP(InputPath) Then NVKind:=33
+ Else If InputFormat='bmp' Then NVKind:=4 Else If (InputFormat='pam') Or (InputFormat='pbm') Or (InputFormat='pgm') Or (InputFormat='ppm') Or (InputFormat='pgmyuv') Then NVKind:=50 Else If InputFormat='nuv' Then NVKind:=54 Else If InputFormat='pcx' Then NVKind:=55 Else If InputFormat='png' Then NVKind:=58 Else If InputFormat='roq' Then NVKind:=65 Else If InputFormat='rl2' Then NVKind:=66 Else If InputFormat='smk' Then NVKind:=67 Else If (InputFormat='rm') And Not IsHTTP(InputPath) And (RMVideoKind(InputPath)<>0) Then NVKind:=68 Else If InputFormat='sgi' Then NVKind:=56 Else If InputFormat='ptx' Then NVKind:=57 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22 Else If (InputFormat='flic') And Not IsHTTP(InputPath) Then NVKind:=23 Else If (InputFormat='gif') And Not IsHTTP(InputPath) Then NVKind:=25 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=2) Then NVKind:=27 Else If (InputFormat='h263') And Not IsHTTP(InputPath) Then NVKind:=28 Else If (InputFormat='h261') And Not IsHTTP(InputPath) Then NVKind:=29 Else If (InputFormat='idcin') And Not IsHTTP(InputPath) Then NVKind:=30 Else If (InputFormat='ipmovie') And Not IsHTTP(InputPath) Then NVKind:=38 Else If (InputFormat='jpegls_pipe') And Not IsHTTP(InputPath) Then NVKind:=39 Else If (InputFormat='jpeg_pipe') And Not IsHTTP(InputPath) Then NVKind:=46 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And MP4HasMjpb(InputPath) Then NVKind:=47 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And (QXMovKind(InputPath)<>0) Then NVKind:=QXMovKind(InputPath) Else If (InputFormat='h264') And Not IsHTTP(InputPath) Then NVKind:=33
  Else If (InputFormat='avi') And Not IsHTTP(InputPath) Then Begin
   AsvTag:=AVIVideoFourCC(Intermediate);
   If AsvTag='CSCD' Then NVKind:=5 Else If (AsvTag='tscc') Or (AsvTag='TSCC') Then NVKind:=6
@@ -72849,7 +73154,7 @@ BEGIN
   Else If InputFormat='avi' Then Begin If H4AviIsH264(AVIVideoFourCC(Intermediate)) Then NVKind:=35; End
   Else If FLVVideoCodec(Intermediate)=7 Then NVKind:=36;
  End;
- If (NVKind<>0) And Not (((NVKind=1) Or (NVKind=2) Or (NVKind=15) Or (NVKind=17) Or (NVKind=22) Or (NVKind=30) Or (NVKind=38) Or (NVKind=44) Or (NVKind=65) Or (NVKind=67)) And NVAudioOut) Then Begin
+ If (NVKind<>0) And Not (((NVKind=1) Or (NVKind=2) Or (NVKind=15) Or (NVKind=17) Or (NVKind=22) Or (NVKind=30) Or (NVKind=38) Or (NVKind=44) Or (NVKind=65) Or (NVKind=67) Or (NVKind=68)) And NVAudioOut) Then Begin
   If NoVideo Or (VideoCodec='copy') Or (AudioCodec<>'') Or HasBitrate Or (RequestedRate<>0) Or
    (RequestedChannels<>0) Or (ImageWidth<>0) Or IsHTTP(InputPath) Then
    Fail('Decodage video local sans copie, sans -vn ni conversion audio requis.');
