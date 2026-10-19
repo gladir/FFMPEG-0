@@ -3963,6 +3963,7 @@ Begin
   If K0>=0 Then Begin Probe:='c93'; Exit; End;
  End;
  If N>=18 Then If (B[0]=66) And (B[1]=77) And (B[6]=0) And (B[7]=0) And (B[8]=0) And (B[9]=0) And (B[14] In [12,40,56,64,108,124]) And (B[15]=0) Then Begin Probe:='bmp'; Exit; End;
+ If N>=8 Then If (B[0]=$84) And (B[1]=$10) And (B[2]=255) And (B[3]=255) And (B[4]=255) And (B[5]=255) Then Begin Probe:='roq'; Exit; End;
  If N>=33 Then If (B[0]=137) And (B[1]=80) And (B[2]=78) And (B[3]=71) And (B[4]=13) And (B[5]=10) And (B[6]=26) And (B[7]=10) Then Begin Probe:='png'; Exit; End;
  If N>=12 Then If (B[0]=1) And (B[1]=$DA) And (B[3]<=2) And ((Lower(Extension(Name))='sgi') Or (Lower(Extension(Name))='rgb') Or (Lower(Extension(Name))='rgba') Or (Lower(Extension(Name))='bw')) Then Begin Probe:='sgi'; Exit; End;
  If N>=14 Then If Lower(Extension(Name))='ptx' Then Begin Probe:='ptx'; Exit; End;
@@ -18297,6 +18298,16 @@ Var CW2,CH2,I,X,Y,J,FS,HS,Bp: LongInt; HF,VF: TSwsF; H15: PSwsI32; Row: PEABuffe
 Begin
  CW2:=(NVW+1) Div 2; CH2:=(NVH+1) Div 2;
  GetMem(Row,NVW+CW2+64);
+ If NVFullRng Then Begin
+  For Y:=0 To NVH-1 Do Begin
+   For X:=0 To NVW-1 Do Begin
+    Val:=(((Int64(P^[Y*NVW+X]) Shl 7)*14071+33561947) Shr 14)+64; Val:=Val Shr 7;
+    If Val>255 Then Val:=255;
+    Row^[X]:=Val;
+   End;
+   WriteBytes(Row^,NVW);
+  End;
+ End Else
  For Y:=0 To NVH-1 Do WriteBytes(P^[Y*NVW],NVW);
  If ((NVH And 3)=0) And (NVSubX=2) And (NVSubY=2) Then Begin
   { yvu9ToYv12Wrapper: planar2x_c de rgb2rgb_template.c, appele par tranche (fils du filtre scale) }
@@ -18350,6 +18361,7 @@ Begin
    Val:=0;
    For J:=0 To HS-1 Do Val:=Val+Int64(P^[NVW*NVH+I*NVCW*NVCH+Y*NVCW+HF.Pos^[X]+J])*HF.Coef^[X*HS+J];
    Val:=AVSar(Val,7); If Val>32767 Then Val:=32767;
+   If NVFullRng Then Val:=(Val*1799+4081085) Shr 11;
    H15^[Y*CW2+X]:=Val;
   End;
   For Y:=0 To CH2-1 Do Begin
@@ -21641,6 +21653,7 @@ Procedure DecodeSMC(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeQDRAW(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeQPEG(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeRawQX(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure DecodeRoQ(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeSTRVideo(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeMSNWC(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeMM(Const Source,Target: String; Mode: LongInt); Forward;
@@ -22393,6 +22406,7 @@ End;
 Procedure DecodeNV2(Kind: LongInt; Const Source,Target: String; Mode: LongInt);
 Begin
  If Kind=55 Then Begin DecodePCX(Source,Target,Mode); Exit; End;
+ If Kind=65 Then Begin DecodeRoQ(Source,Target,Mode); Exit; End;
  If Kind=64 Then Begin DecodeRawQX(Source,Target,Mode); Exit; End;
  If Kind=63 Then Begin DecodeQPEG(Source,Target,Mode); Exit; End;
  If Kind=62 Then Begin DecodeQDRAW(Source,Target,Mode); Exit; End;
@@ -47133,6 +47147,325 @@ Begin
  NVFinish('rawvideo');
 End;
 
+{ ---- id RoQ video (libavcodec/roqvideo*.c, libavformat/idroqdec.c) ---- }
+Procedure DecodeRoQ(Const Source,Target: String; Mode: LongInt);
+Type TCell=Record Y: Array[0..3] Of Byte; U,V: Byte; End;
+Var
+ F: PEABuffer; Size,Pos,Fps,W,H,CType,CSize,Ctr,CbPos,PkPos,PkLen,I,Plane: LongInt;
+ Cb2: Array[0..255] Of TCell; Cb4: Array[0..255,0..3] Of Byte;
+ BufA,BufB,Cur,Last: PEABuffer; AllocA,AllocB,Begun,Done: Boolean; FrameSize: LongInt;
+ Sp: LongInt; Pk: PEABuffer; PSz: LongInt;
+Function GB: LongInt;
+Begin If Sp<PSz Then GB:=Pk^[Sp] Else GB:=0; Inc(Sp); End;
+Function GL16: LongInt;
+Var A: LongInt;
+Begin A:=GB; GL16:=A+GB*256; End;
+Function GL32: LongInt;
+Var A: LongInt;
+Begin A:=GL16; GL32:=A+GL16*65536; End;
+Procedure Apply2(X,Y: LongInt; Const C: TCell);
+Var Q: LongInt;
+Begin
+ If (X<0) Or (Y<0) Or (X+2>W) Or (Y+2>H) Then Exit;
+ Q:=Y*W+X;
+ Cur^[Q]:=C.Y[0]; Cur^[Q+1]:=C.Y[1]; Cur^[Q+W]:=C.Y[2]; Cur^[Q+W+1]:=C.Y[3];
+ Cur^[W*H+Q]:=C.U; Cur^[W*H+Q+1]:=C.U; Cur^[W*H+Q+W]:=C.U; Cur^[W*H+Q+W+1]:=C.U;
+ Cur^[2*W*H+Q]:=C.V; Cur^[2*W*H+Q+1]:=C.V; Cur^[2*W*H+Q+W]:=C.V; Cur^[2*W*H+Q+W+1]:=C.V;
+End;
+Procedure Apply4(X,Y: LongInt; Const C: TCell);
+Var Q,Ry,Rx,Pl: LongInt;
+Begin
+ If (X<0) Or (Y<0) Or (X+4>W) Or (Y+4>H) Then Exit;
+ For Ry:=0 To 3 Do For Rx:=0 To 3 Do Begin
+  Q:=(Y+Ry)*W+X+Rx;
+  Cur^[Q]:=C.Y[(Ry Shr 1)*2+(Rx Shr 1)];
+  Cur^[W*H+Q]:=C.U; Cur^[2*W*H+Q]:=C.V;
+ End;
+End;
+Procedure Motion(X,Y,Dx,Dy,Sz: LongInt);
+Var Mx,My,R,Pl: LongInt;
+Begin
+ Mx:=X+Dx; My:=Y+Dy;
+ If (Mx<0) Or (Mx>W-Sz) Or (My<0) Or (My>H-Sz) Then Exit;
+ If Not ((Last=BufA) And AllocA) And Not ((Last=BufB) And AllocB) Then Exit;
+ For Pl:=0 To 2 Do For R:=0 To Sz-1 Do
+  Move(Last^[Pl*W*H+(My+R)*W+Mx],Cur^[Pl*W*H+(Y+R)*W+X],Sz);
+End;
+Procedure DecFrame;
+Var
+ ChId,ChArg,ChSize,Nv1,Nv2,J,K,VqFlg,VqPos,VqId,Xpos,Ypos,Xp,Yp,Xx,Yy,Mx,My,Byte1,ChStart: LongInt;
+Function Sgn(V: LongInt): LongInt;
+Begin V:=V And 255; If V>127 Then Sgn:=V-256 Else Sgn:=V; End;
+Function NextVq: LongInt;
+Begin
+ If VqPos<0 Then Begin VqFlg:=GL16; VqPos:=7; End;
+ NextVq:=(VqFlg Shr (VqPos*2)) And 3; Dec(VqPos);
+End;
+Begin
+ ChId:=0; ChArg:=0; ChSize:=0; VqFlg:=0; VqPos:=-1;
+ While PSz-Sp>=8 Do Begin
+  ChId:=GL16; ChSize:=GL32; ChArg:=GL16;
+  If ChId=$1011 Then Break;
+  If ChId=$1002 Then Begin
+   Nv1:=ChArg Shr 8; If Nv1=0 Then Nv1:=256;
+   Nv2:=ChArg And 255; If (Nv2=0) And (Nv1*6<ChSize) Then Nv2:=256;
+   For J:=0 To Nv1-1 Do Begin
+    Cb2[J].Y[0]:=GB; Cb2[J].Y[1]:=GB; Cb2[J].Y[2]:=GB; Cb2[J].Y[3]:=GB; Cb2[J].U:=GB; Cb2[J].V:=GB;
+   End;
+   For J:=0 To Nv2-1 Do For K:=0 To 3 Do Cb4[J,K]:=GB;
+  End;
+ End;
+ ChStart:=Sp; Xpos:=0; Ypos:=0;
+ If ChSize>PSz-Sp Then ChSize:=PSz-Sp;
+ While Sp<ChStart+ChSize Do Begin
+  Yp:=Ypos;
+  While Yp<Ypos+16 Do Begin
+   Xp:=Xpos;
+   While Xp<Xpos+16 Do Begin
+    If Sp>=ChStart+ChSize Then Exit;
+    VqId:=NextVq;
+    Case VqId Of
+     0: ;
+     1: Begin
+      Byte1:=GB; Mx:=8-(Byte1 Shr 4)-Sgn(ChArg Shr 8); My:=8-(Byte1 And 15)-Sgn(ChArg);
+      Motion(Xp,Yp,Mx,My,8);
+     End;
+     2: Begin
+      K:=GB;
+      Apply4(Xp,Yp,Cb2[Cb4[K,0]]); Apply4(Xp+4,Yp,Cb2[Cb4[K,1]]); Apply4(Xp,Yp+4,Cb2[Cb4[K,2]]); Apply4(Xp+4,Yp+4,Cb2[Cb4[K,3]]);
+     End;
+     3: For K:=0 To 3 Do Begin
+      Xx:=Xp; Yy:=Yp;
+      If (K And 1)<>0 Then Inc(Xx,4);
+      If (K And 2)<>0 Then Inc(Yy,4);
+      If Sp>=ChStart+ChSize Then Exit;
+      VqId:=NextVq;
+      Case VqId Of
+       0: ;
+       1: Begin
+        Byte1:=GB; Mx:=8-(Byte1 Shr 4)-Sgn(ChArg Shr 8); My:=8-(Byte1 And 15)-Sgn(ChArg);
+        Motion(Xx,Yy,Mx,My,4);
+       End;
+       2: Begin
+        J:=GB;
+        Apply2(Xx,Yy,Cb2[Cb4[J,0]]); Apply2(Xx+2,Yy,Cb2[Cb4[J,1]]); Apply2(Xx,Yy+2,Cb2[Cb4[J,2]]); Apply2(Xx+2,Yy+2,Cb2[Cb4[J,3]]);
+       End;
+       3: Begin
+        J:=GB; Apply2(Xx,Yy,Cb2[J]); J:=GB; Apply2(Xx+2,Yy,Cb2[J]); J:=GB; Apply2(Xx,Yy+2,Cb2[J]); J:=GB; Apply2(Xx+2,Yy+2,Cb2[J]);
+       End;
+      End;
+     End;
+    End;
+    Inc(Xp,8);
+   End;
+   Inc(Yp,8);
+  End;
+  Inc(Xpos,16);
+  If Xpos>=W Then Begin Dec(Xpos,W); Inc(Ypos,16); End;
+  If Ypos>=H Then Break;
+ End;
+End;
+Begin
+ NVLoad(Source,F,Size);
+ If (Size<16) Or (F^[0]<>$84) Or (F^[1]<>$10) Or (NVRL32(F,Size,2)<>-1) Then Fail('roq: signature invalide.');
+ Fps:=NVRL16(F,Size,6); If Fps<1 Then Fail('roq: cadence invalide.');
+ Pos:=8; W:=0; H:=0; Begun:=False; AllocA:=False; AllocB:=False;
+ BufA:=Nil; BufB:=Nil; FillChar(Cb2,SizeOf(Cb2),0); FillChar(Cb4,SizeOf(Cb4),0);
+ While Pos+8<=Size Do Begin
+  CType:=NVRL16(F,Size,Pos); CSize:=NVRL32(F,Size,Pos+2);
+  If (CSize<0) Or (CSize>Size) Then Break;
+  If CType=$1001 Then Begin
+   If Not Begun Then Begin
+    If Pos+16>Size Then Break;
+    W:=NVRL16(F,Size,Pos+8); H:=NVRL16(F,Size,Pos+10);
+    If (W<16) Or (H<16) Or (W Mod 16<>0) Or (H Mod 16<>0) Or (W>8192) Or (H>8192) Then Fail('roq: dimensions invalides (multiples de 16 requis).');
+    FrameSize:=W*H*3;
+    GetMem(BufA,FrameSize+64); GetMem(BufB,FrameSize+64); FillChar(BufA^,FrameSize+64,0); FillChar(BufB^,FrameSize+64,0);
+    Cur:=BufA; Last:=BufB;
+    NVBegin(Mode,Target,W,H,7,Fps,1);
+    NVSubX:=0; NVSubY:=0; NVCW:=W; NVCH:=H; NVIl:='p';
+    If OptPixFmt='yuv420p' Then Begin
+     NVTo420:=True; NVFullRng:=True; NVYTag:='C420jpeg XYSCSS=420JPEG XCOLORRANGE=LIMITED';
+    End Else NVYTag:='C444 XYSCSS=444 XCOLORRANGE=FULL';
+    NVHdrOk:=True;
+    Begun:=True;
+   End;
+   Inc(Pos,16); Continue;
+  End;
+  If (CType=$1002) Or (CType=$1011) Then Begin
+   If Not Begun Then Fail('roq: image sans en-tete.');
+   If CType=$1002 Then Begin
+    { paquet = codebook + chunk VQ suivant }
+    If Pos+8+CSize+8>Size Then Break;
+    PkPos:=Pos; PkLen:=8+CSize+8+NVRL32(F,Size,Pos+8+CSize+2);
+    If PkPos+PkLen>Size Then PkLen:=Size-PkPos;
+   End Else Begin
+    PkPos:=Pos; PkLen:=8+CSize;
+    If PkPos+PkLen>Size Then PkLen:=Size-PkPos;
+   End;
+   Pk:=PEABuffer(@F^[PkPos]); PSz:=PkLen; Sp:=0;
+   If Cur=BufA Then Begin
+    If Not AllocA And AllocB Then Move(BufB^,BufA^,FrameSize);
+    AllocA:=True;
+   End Else Begin
+    If Not AllocB And AllocA Then Move(BufA^,BufB^,FrameSize);
+    AllocB:=True;
+   End;
+   DecFrame;
+   NVEmit(Cur);
+   If Cur=BufA Then Begin Cur:=BufB; Last:=BufA; End Else Begin Cur:=BufA; Last:=BufB; End;
+   Inc(Pos,PkLen);
+   If NVDone Then Break;
+   Continue;
+  End;
+  { audio ou chunk inconnu : saute }
+  Inc(Pos,8+CSize);
+ End;
+ If Begun Then Begin FreeMem(BufA,FrameSize+64); FreeMem(BufB,FrameSize+64); End;
+ FreeMem(F,Size+64);
+ NVFinish('roq');
+End;
+
+{ ---- id RoQ DPCM : decodeur (libavcodec/dpcm.c) et encodeur (libavcodec/roqaudioenc.c) + muxeur roq ---- }
+Procedure DecodeRoQAudio(Const Source,Target: String);
+Var
+ F: PEABuffer; Size,Pos,CType,CSize,Chn,I,N,Pred0,Pred1,Ch,Stereo,Out: LongInt; Arr: Array[0..255] Of LongInt; Pred: Array[0..1] Of LongInt;
+ Began: Boolean; Pk: PEABuffer; PSz,Sp,Ss: LongInt;
+Function Clip16(V: LongInt): LongInt;Begin If V>32767 Then V:=32767 Else If V<-32768 Then V:=-32768; Clip16:=V; End;
+Function GB: LongInt;
+Begin If Sp<PSz Then GB:=Pk^[Sp] Else GB:=0; Inc(Sp); End;
+Function SE16(V: LongInt): LongInt;Begin V:=V And 65535; If V>32767 Then V:=V-65536; SE16:=V; End;
+Begin
+ NVLoad(Source,F,Size);
+ If (Size<16) Or (F^[0]<>$84) Or (F^[1]<>$10) Or (NVRL32(F,Size,2)<>-1) Then Fail('roq: signature invalide.');
+ For I:=0 To 127 Do Begin Arr[I]:=I*I; Arr[I+128]:=-(I*I); End;
+ Pos:=8; Chn:=0; Began:=False; Ch:=0;
+ Pred[0]:=0; Pred[1]:=0;
+ While Pos+8<=Size Do Begin
+  CType:=NVRL16(F,Size,Pos); CSize:=NVRL32(F,Size,Pos+2);
+  If (CSize<0) Or (CSize>Size) Then Break;
+  If CType=$1001 Then Begin Inc(Pos,16); Continue; End;
+  If (CType=$1020) Or (CType=$1021) Then Begin
+   If Not Began Then Begin
+    If CType=$1021 Then Chn:=2 Else Chn:=1;
+    EAReset; OpenWrite(Target); ADPCMWaveHeader(22050,Chn,0); Began:=True;
+   End;
+   Stereo:=Chn-1;
+   Pk:=PEABuffer(@F^[Pos]); PSz:=8+CSize; If Pos+PSz>Size Then PSz:=Size-Pos;
+   Ss:=PSz; If (Stereo<>0) And Odd(Ss) Then Dec(Ss);
+   Out:=Ss-8;
+   If Out>0 Then Begin
+    Sp:=6;
+    If Stereo<>0 Then Begin Pred[1]:=SE16(GB Shl 8); Pred[0]:=SE16(GB Shl 8); End
+    Else Begin N:=GB; Pred[0]:=SE16(N+GB*256); End;
+    Ch:=0;
+    For I:=1 To Out Do Begin
+     Pred[Ch]:=Clip16(Pred[Ch]+Arr[GB]);
+     EAPut(Pred[Ch]);
+     Ch:=Ch Xor Stereo;
+    End;
+   End;
+  End;
+  Inc(Pos,8+CSize);
+ End;
+ If Not Began Then Fail('roq: aucun flux audio.');
+ EAFlush;
+ ADPCMPatchHeader(22050,Chn,EAWritten); CloseRead; CloseWrite;
+ FreeMem(F,Size+64);
+End;
+
+Procedure EncodeRoQDpcm(Const Source,Target: String);
+Const FrameSize=735;
+Var
+ Head: Array[0..43] Of Byte; Limit,Channels,Samples,Frames,Fr,InputFrames,Buffered,I,K,DataSize,Ch,Stereo,Rate: LongInt;
+ Buf: PALLong; Last: Array[0..1] Of LongInt; Hdr: Array[0..7] Of Byte; Tmp: Array[0..1] Of Byte; Src: PALLong; Raw: PEABuffer;
+ InPtr: LongInt; Fb: PALLong; FirstFrameLen: LongInt;
+Function ISqrt(V: LongInt): LongInt;
+Var R: LongInt;
+Begin R:=Trunc(Sqrt(V)); While R*R>V Do Dec(R); While (R+1)*(R+1)<=V Do Inc(R); ISqrt:=R; End;
+Function Predict(Var Prev: LongInt; Cur: LongInt): LongInt;
+Var Diff,Neg,Res,Predicted: LongInt;
+Begin
+ Diff:=Cur-Prev; Neg:=Ord(Diff<0); Diff:=Abs(Diff);
+ If Diff>=127*127 Then Res:=127
+ Else Begin Res:=ISqrt(Diff); If Diff>Res*Res+Res Then Inc(Res); End;
+ Repeat
+  Diff:=Res*Res; If Neg<>0 Then Diff:=-Diff;
+  Predicted:=Prev+Diff;
+  If (Predicted>32767) Or (Predicted<-32768) Then Dec(Res) Else Break;
+ Until False;
+ Res:=Res Or (Neg Shl 7);
+ Prev:=Predicted;
+ Predict:=Res;
+End;
+Procedure EmitPacket(Src2: PALLong; FromAt: LongInt; Cnt: LongInt);
+Var Z,S1: LongInt; Pk: PEABuffer;
+Begin
+ If Stereo<>0 Then Begin Last[0]:=Last[0] And Not 255; Last[1]:=Last[1] And Not 255; End;
+ { mots 16 bits signes : forme "short" }
+ GetMem(Pk,Cnt+16);
+ If Stereo<>0 Then Begin
+  Hdr[0]:=$21; Hdr[1]:=$10;
+ End Else Begin Hdr[0]:=$20; Hdr[1]:=$10; End;
+ Hdr[2]:=Cnt And 255; Hdr[3]:=(Cnt Shr 8) And 255; Hdr[4]:=(Cnt Shr 16) And 255; Hdr[5]:=(Cnt Shr 24) And 255;
+ If Stereo<>0 Then Begin Hdr[6]:=(Last[1] Shr 8) And 255; Hdr[7]:=(Last[0] Shr 8) And 255; End
+ Else Begin Hdr[6]:=Last[0] And 255; Hdr[7]:=(Last[0] Shr 8) And 255; End;
+ WriteBytes(Hdr,8);
+ For Z:=0 To Cnt-1 Do Begin
+  If Stereo<>0 Then S1:=Z And 1 Else S1:=0;
+  Pk^[Z]:=Predict(Last[S1],Src2^[FromAt+Z]);
+ End;
+ WriteBytes(Pk^,Cnt);
+ FreeMem(Pk,Cnt+16);
+End;
+Begin
+ OpenRead(Source); Limit:=InputSize;
+ If Limit<44 Then Fail('roq_dpcm: WAV intermediaire tronque.');
+ ReadAt(0,Head,44); Channels:=Head[22];
+ Rate:=LongInt(Head[24])+LongInt(Head[25])*256+LongInt(Head[26])*65536;
+ If (Channels<1) Or (Channels>2) Or (Head[34]<>16) Then Fail('roq_dpcm: WAV PCM16 mono/stereo requis.');
+ If Rate<>22050 Then Fail('roq_dpcm: 22050 Hz requis (utilisez -ar 22050).');
+ Stereo:=Channels-1;
+ Samples:=(Limit-44) Div (Channels*2);
+ Frames:=(Samples+FrameSize-1) Div FrameSize;
+ If Frames=0 Then Fail('roq_dpcm: aucune donnee audio.');
+ GetMem(Raw,Limit-44+16);
+ I:=0; While I<Limit-44 Do Begin If Limit-44-I>60000 Then K:=60000 Else K:=Limit-44-I; ReadAt(44+I,Raw^[I],K); Inc(I,K); End;
+ CloseRead;
+ GetMem(Src,Frames*FrameSize*Channels*4+16); FillChar(Src^,Frames*FrameSize*Channels*4+16,0);
+ For I:=0 To Samples*Channels-1 Do Begin
+  K:=Raw^[2*I]+Raw^[2*I+1]*256; If K>32767 Then K:=K-65536; Src^[I]:=K;
+ End;
+ FreeMem(Raw,Limit-44+16);
+ Last[0]:=0; Last[1]:=0;
+ OpenWrite(Target);
+ Hdr[0]:=$84; Hdr[1]:=$10; Hdr[2]:=255; Hdr[3]:=255; Hdr[4]:=255; Hdr[5]:=255; Hdr[6]:=30; Hdr[7]:=0;
+ WriteBytes(Hdr,8);
+ InputFrames:=0; Buffered:=0;
+ For Fr:=0 To Frames-1 Do Begin
+  { appel avec une trame }
+  If InputFrames<8 Then Begin
+   Inc(Buffered,FrameSize);
+   If InputFrames<7 Then Begin Inc(InputFrames); Continue; End;
+   DataSize:=Channels*Buffered;
+   EmitPacket(Src,0,DataSize);
+   Inc(InputFrames);
+  End Else Begin
+   DataSize:=Channels*FrameSize;
+   EmitPacket(Src,Fr*FrameSize*Channels,DataSize);
+   Inc(InputFrames);
+  End;
+ End;
+ { vidage : tant que moins de 8 trames ont ete comptees, l'encodeur ressort la trame 0 }
+ While InputFrames<8 Do Begin
+  If InputFrames=7 Then DataSize:=Channels*Buffered Else DataSize:=Channels*FrameSize;
+  EmitPacket(Src,0,DataSize);
+  Inc(InputFrames);
+ End;
+ CloseWrite;
+ FreeMem(Src,Frames*FrameSize*Channels*4+16);
+End;
+
 Procedure DecodeAVIX(Const Source,Target: String; Mode,Kind: LongInt);
 Var Pos,PkPos,PkLen,RN,RD,I,Y,X,Cw,Ch,Bs,Msg2: LongInt; Ok,FFBegun: Boolean; Msg: String; PIdx: LongInt; NbF,NbP: Int64;
 Begin
@@ -69026,6 +69359,7 @@ Begin
  WriteLn(' DE avi             AVI H264/MPEG4, AAC/MP3 (copie); decodeurs FFV1, FLASHSV, HUFFYUV/FFVHUFF, Autodesk RLE, FRAPS, H263/H261/FLV1');
  WriteLn(' DE flv             FLV: video Sorenson Spark (decodeur I/P complet) ou Screen Video vers Y4M/PNG/BMP; FLV1 intra natif en sortie; extraction image H264 CAVLC');
  WriteLn(' D  idcin           id Cinematic (video idcinvideo PAL8 vers Y4M/PNG/BMP, audio PCM vers WAV)');
+ WriteLn('DE  roq             id RoQ (video roqvideo, audio roq_dpcm)');
  WriteLn(' D  ipmovie         Interplay MVE (video interplayvideo PAL8/RGB555 vers Y4M/PNG/BMP, audio PCM/interplay_dpcm vers WAV)');
  WriteLn(' D  jpegls_pipe     piped jpegls sequence (image JPEG-LS vers Y4M/PNG/BMP)');
  WriteLn(' D  jpeg_pipe      piped jpeg sequence (image JPEG vers Y4M/PNG/BMP)');
@@ -69499,6 +69833,8 @@ BEGIN
    WriteLn('D V    smc             QuickTime Graphics SMC (MOV; decodeur, largeur multiple de 32 pour l''identite avec ffmpeg)');
    WriteLn('D V    qdraw           Apple QuickDraw (MOV; PICT v2 PackBits/DirectBits)');
    WriteLn('D V    qpeg            Q-team QPEG (AVI; palette 8 bits)');
+   WriteLn('D V D  roqvideo        id RoQ video (fichiers .roq; decodeur exact; sortie yuvj444p ou yuv420p)');
+   WriteLn('DEA    roq_dpcm        id RoQ DPCM (fichiers .roq; decodeur et encodeur octet pour octet, 22050 Hz mono/stereo)');
    WriteLn('D V    ptx             V.Flash PTX image (RGB15)');
    WriteLn('D V    pcx             PC Paintbrush PCX image (1/2/4/8 bits palette, 24 bits RGB)');
    WriteLn('D A    wmav2           WMA2 (44100/48000 Hz, VLC, blocs fixes, sans reservoir/bruit)');   
@@ -69784,7 +70120,7 @@ BEGIN
  Else If (InputFormat='mm') And Not IsHTTP(InputPath) Then NVKind:=48
  Else If (InputFormat='mvi') And Not IsHTTP(InputPath) Then NVKind:=49
  Else If InputFormat='bethsoftvid' Then NVKind:=1 Else If InputFormat='bfi' Then NVKind:=2 Else If InputFormat='c93' Then NVKind:=3
- Else If InputFormat='bmp' Then NVKind:=4 Else If (InputFormat='pam') Or (InputFormat='pbm') Or (InputFormat='pgm') Or (InputFormat='ppm') Or (InputFormat='pgmyuv') Then NVKind:=50 Else If InputFormat='nuv' Then NVKind:=54 Else If InputFormat='pcx' Then NVKind:=55 Else If InputFormat='png' Then NVKind:=58 Else If InputFormat='sgi' Then NVKind:=56 Else If InputFormat='ptx' Then NVKind:=57 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22 Else If (InputFormat='flic') And Not IsHTTP(InputPath) Then NVKind:=23 Else If (InputFormat='gif') And Not IsHTTP(InputPath) Then NVKind:=25 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=2) Then NVKind:=27 Else If (InputFormat='h263') And Not IsHTTP(InputPath) Then NVKind:=28 Else If (InputFormat='h261') And Not IsHTTP(InputPath) Then NVKind:=29 Else If (InputFormat='idcin') And Not IsHTTP(InputPath) Then NVKind:=30 Else If (InputFormat='ipmovie') And Not IsHTTP(InputPath) Then NVKind:=38 Else If (InputFormat='jpegls_pipe') And Not IsHTTP(InputPath) Then NVKind:=39 Else If (InputFormat='jpeg_pipe') And Not IsHTTP(InputPath) Then NVKind:=46 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And MP4HasMjpb(InputPath) Then NVKind:=47 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And (QXMovKind(InputPath)<>0) Then NVKind:=QXMovKind(InputPath) Else If (InputFormat='h264') And Not IsHTTP(InputPath) Then NVKind:=33
+ Else If InputFormat='bmp' Then NVKind:=4 Else If (InputFormat='pam') Or (InputFormat='pbm') Or (InputFormat='pgm') Or (InputFormat='ppm') Or (InputFormat='pgmyuv') Then NVKind:=50 Else If InputFormat='nuv' Then NVKind:=54 Else If InputFormat='pcx' Then NVKind:=55 Else If InputFormat='png' Then NVKind:=58 Else If InputFormat='roq' Then NVKind:=65 Else If InputFormat='sgi' Then NVKind:=56 Else If InputFormat='ptx' Then NVKind:=57 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22 Else If (InputFormat='flic') And Not IsHTTP(InputPath) Then NVKind:=23 Else If (InputFormat='gif') And Not IsHTTP(InputPath) Then NVKind:=25 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=2) Then NVKind:=27 Else If (InputFormat='h263') And Not IsHTTP(InputPath) Then NVKind:=28 Else If (InputFormat='h261') And Not IsHTTP(InputPath) Then NVKind:=29 Else If (InputFormat='idcin') And Not IsHTTP(InputPath) Then NVKind:=30 Else If (InputFormat='ipmovie') And Not IsHTTP(InputPath) Then NVKind:=38 Else If (InputFormat='jpegls_pipe') And Not IsHTTP(InputPath) Then NVKind:=39 Else If (InputFormat='jpeg_pipe') And Not IsHTTP(InputPath) Then NVKind:=46 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And MP4HasMjpb(InputPath) Then NVKind:=47 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And (QXMovKind(InputPath)<>0) Then NVKind:=QXMovKind(InputPath) Else If (InputFormat='h264') And Not IsHTTP(InputPath) Then NVKind:=33
  Else If (InputFormat='avi') And Not IsHTTP(InputPath) Then Begin
   AsvTag:=AVIVideoFourCC(Intermediate);
   If AsvTag='CSCD' Then NVKind:=5 Else If (AsvTag='tscc') Or (AsvTag='TSCC') Then NVKind:=6
@@ -69806,7 +70142,7 @@ BEGIN
   Else If (AsvTag='MJPG') Or (AsvTag='mjpg') Or (AsvTag='AVRn') Or (AsvTag='AVDJ') Or (AsvTag='dmb1') Or (AsvTag='JPGL') Or (AsvTag='MJLS') Or (AsvTag='MMJP') Or (AsvTag='jpeg') Or (AsvTag='IJPG') Then NVKind:=43;
  End;
  If (OptPixFmt<>'') And (OptPixFmt<>'yuv420p') And (VideoCodec<>'qtrle') And (VideoCodec<>'rawvideo') Then Fail('-pix_fmt: seul yuv420p est pris en charge.');
- NVAudioOut:=(OutputFormat='wav') Or (OutputFormat='mp3') Or (OutputFormat='mp2') Or (OutputFormat='ac3') Or (OutputFormat='aac') Or (OutputFormat='adx') Or (OutputFormat='aiff');
+ NVAudioOut:=(OutputFormat='wav') Or (OutputFormat='roq') Or (OutputFormat='mp3') Or (OutputFormat='mp2') Or (OutputFormat='ac3') Or (OutputFormat='aac') Or (OutputFormat='adx') Or (OutputFormat='aiff');
  If ((InputFormat='mp4') Or (InputFormat='avi') Or (InputFormat='flv')) And (NVKind=0) And Not IsHTTP(InputPath) And Not NVAudioOut And Not NoVideo And (VideoCodec<>'copy') And
   ((OutputFormat='yuv4mpegpipe') Or (OutputFormat='png') Or (OutputFormat='bmp') Or (VideoCodec='png') Or (VideoCodec='bmp') Or (VideoCodec='mpeg4') Or
   (VideoCodec='mpeg1video') Or (VideoCodec='mpeg2video') Or (VideoCodec='ffv1') Or (VideoCodec='flv') Or FourMV) Then Begin
@@ -69814,7 +70150,7 @@ BEGIN
   Else If InputFormat='avi' Then Begin If H4AviIsH264(AVIVideoFourCC(Intermediate)) Then NVKind:=35; End
   Else If FLVVideoCodec(Intermediate)=7 Then NVKind:=36;
  End;
- If (NVKind<>0) And Not (((NVKind=1) Or (NVKind=2) Or (NVKind=15) Or (NVKind=17) Or (NVKind=22) Or (NVKind=30) Or (NVKind=38) Or (NVKind=44)) And NVAudioOut) Then Begin
+ If (NVKind<>0) And Not (((NVKind=1) Or (NVKind=2) Or (NVKind=15) Or (NVKind=17) Or (NVKind=22) Or (NVKind=30) Or (NVKind=38) Or (NVKind=44) Or (NVKind=65)) And NVAudioOut) Then Begin
   If NoVideo Or (VideoCodec='copy') Or (AudioCodec<>'') Or HasBitrate Or (RequestedRate<>0) Or
    (RequestedChannels<>0) Or (ImageWidth<>0) Or IsHTTP(InputPath) Then
    Fail('Decodage video local sans copie, sans -vn ni conversion audio requis.');
@@ -70220,7 +70556,7 @@ BEGIN
  If VideoCodec<>'' Then Fail('Codec video incompatible avec une sortie audio seule.');
  If (OutputFormat<>'wav') And (OutputFormat<>'mp3') And (OutputFormat<>'mp2') And (OutputFormat<>'ac3') And (OutputFormat<>'aac') And
  (OutputFormat<>'adx') And (OutputFormat<>'aiff') And (OutputFormat<>'flv') And (OutputFormat<>'mp4') And (OutputFormat<>'ogg') And
- (OutputFormat<>'daud') And Not PcmIsRawName(OutputFormat) Then Fail(
+ (OutputFormat<>'daud') And (OutputFormat<>'roq') And Not PcmIsRawName(OutputFormat) Then Fail(
  'Sorties audio WAV, MP3, MP2, AC3, AAC (ADTS), Ogg Vorbis, ADX et AIFF-C (adpcm_ima_qt) prises en charge.');
  PcmCodecOut:='';
  If (Copy(AudioCodec,1,4)='pcm_') And (AudioCodec<>'pcm_dvd') And Not ((OutputFormat='wav') And (AudioCodec='pcm_s16le')) Then PcmCodecOut:=AudioCodec
@@ -70235,10 +70571,10 @@ BEGIN
  'pcm_s16le' Else If OutputFormat='adx' Then AudioCodec:='adpcm_adx'
  Else If OutputFormat='aiff' Then AudioCodec:='adpcm_ima_qt'
  Else If OutputFormat='flv' Then AudioCodec:='adpcm_swf'
- Else If OutputFormat='mp4' Then AudioCodec:='alac' Else If OutputFormat='ogg' Then AudioCodec:='libvorbis' Else AudioCodec:=OutputFormat;
+ Else If OutputFormat='mp4' Then AudioCodec:='alac' Else If OutputFormat='ogg' Then AudioCodec:='libvorbis' Else If OutputFormat='roq' Then AudioCodec:='roq_dpcm' Else AudioCodec:=OutputFormat;
  If (PcmCodecOut='') And (AudioCodec<>'copy') And Not (((OutputFormat='wav') And ((AudioCodec='pcm_s16le') Or (AudioCodec='adpcm_ima_wav') Or
   (AudioCodec='adpcm_ms') Or (AudioCodec='adpcm_yamaha'))) Or ((OutputFormat='flv') And ((AudioCodec='adpcm_swf') Or (AudioCodec='nellymoser'))) Or
- ((OutputFormat='mp4') And (AudioCodec='alac')) Or
+ ((OutputFormat='mp4') And (AudioCodec='alac')) Or ((OutputFormat='roq') And (AudioCodec='roq_dpcm')) Or
  ((OutputFormat='adx') And (AudioCodec='adpcm_adx')) Or ((OutputFormat='aiff') And (AudioCodec='adpcm_ima_qt')) Or
  ((OutputFormat='mp3') And ((AudioCodec='mp3') Or (AudioCodec='libmp3lame'))) Or ((OutputFormat='mp2') And (AudioCodec='mp2')) Or ((OutputFormat='ac3') And (AudioCodec='ac3')) Or
  ((OutputFormat='ogg') And (AudioCodec='libvorbis')) Or
@@ -70299,6 +70635,7 @@ BEGIN
    If InputFormat='dsicin' Then DecodeDSICin(InputPath,Temps[0],3) Else
    If InputFormat='idcin' Then DecodeIdcin(InputPath,Temps[0],3) Else
    If InputFormat='ipmovie' Then DecodeMVE(InputPath,Temps[0],3) Else
+   If InputFormat='roq' Then DecodeRoQAudio(InputPath,Temps[0]) Else
    If (InputFormat='aiff') And IsAIFFIma4(InputPath) Then DecodeAIFFIma4(InputPath,Temps[0]) Else
    If (InputFormat='aiff') And PcmAiffToWav(InputPath,Temps[0],PcmCodecOut<>'') Then Else
    If InputFormat='aiff' Then DecodeAIFF(InputPath,Temps[0]) Else
@@ -70346,6 +70683,10 @@ BEGIN
    If AudioCodec='nellymoser' Then EncodeNellyFLV(Temps[1],Temps[2]) Else
    EncodeFLVSWF(Temps[1],Temps[2]);
   End Else If OutputFormat='wav' Then NormalizeWave(Intermediate,Temps[2],False)
+   Else If OutputFormat='roq' Then Begin
+    Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False);
+    EncodeRoQDpcm(Temps[1],Temps[2]);
+   End
    Else If OutputFormat='adx' Then Begin
     Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False);
     EncodeADX(Temps[1],Temps[2]);
