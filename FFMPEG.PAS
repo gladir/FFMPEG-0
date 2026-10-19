@@ -3965,6 +3965,7 @@ Begin
  End;
  If N>=18 Then If (B[0]=66) And (B[1]=77) And (B[6]=0) And (B[7]=0) And (B[8]=0) And (B[9]=0) And (B[14] In [12,40,56,64,108,124]) And (B[15]=0) Then Begin Probe:='bmp'; Exit; End;
  If N>=12 Then If (B[0]=70) And (B[1]=79) And (B[2]=82) And (B[3]=77) And (B[8]=82) And (B[9]=76) And (B[10]=86) And ((B[11]=50) Or (B[11]=51)) Then Begin Probe:='rl2'; Exit; End;
+ If N>=16 Then If (B[0]=82) And (B[1]=73) And (B[2]=70) And (B[3]=70) And (B[8]=$51) And (B[9]=$4C) And (B[10]=$43) And (B[11]=$4D) And (B[12]=$66) Then Begin Probe:='qcp'; Exit; End;
  If N>=8 Then If (B[0]=$61) And (B[1]=$6A) And (B[2]=$6B) And (B[3]=$67) And (Lower(Extension(Name))='shn') Then Begin Probe:='shn'; Exit; End;
  If N>=8 Then If (B[0]=$84) And (B[1]=$10) And (B[2]=255) And (B[3]=255) And (B[4]=255) And (B[5]=255) Then Begin Probe:='roq'; Exit; End;
  If N>=33 Then If (B[0]=137) And (B[1]=80) And (B[2]=78) And (B[3]=71) And (B[4]=13) And (B[5]=10) And (B[6]=26) And (B[7]=10) Then Begin Probe:='png'; Exit; End;
@@ -49200,6 +49201,485 @@ Begin
  ADPCMPatchHeader(Rate,Chans,EAWritten); CloseRead; CloseWrite;
 End;
 
+{ ---- QCELP ---- }
+Const
+ QCBmIdx: Array[0..138] Of Byte=(15,60,61,62,15,63,64,65,15,66,67,68,15,69,16,70,62,61,60,64,63,62,19,18,17,16,70,20,62,61,60,64,63,62,0,16,52,48,56,49,57,32,58,33,1,17,53,49,34,2,18,54,50,58,55,51,59,34,35,3,19,62,61,60,64,63,62,0,16,52,48,56,33,1,17,32,19,34,2,18,33,49,57,35,3,19,36,4,20,53,49,22,37,5,21,36,39,7,23,38,6,22,24,54,50,58,39,9,25,40,8,24,42,10,26,41,59,43,11,27,42,44,12,28,55,51,59,45,13,29,44,31,46,14,30,45,70,47,15);
+ QCBmPos: Array[0..138] Of Byte=(3,0,0,0,2,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,3,0,0,0,0,0,0,0,0,0,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,0,6,0,0,0,0,0,2,0,0,0,2,0,0,0,0,0,0,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,0,4,0,0,0,0,1,0,0,0,0,3,0,0,0,0,6,0,0,0,0,0,3,0,0,0,0,3,0,0,0,0,1,0,0,0,0,0,0,0,0,4,0,0,0,0,0,2,0,0,0,2,0,0,0,0,6,0,0,0);
+ QCBmLen: Array[0..138] Of Byte=(1,1,1,1,1,1,1,1,1,1,1,1,1,1,2,4,3,7,6,6,6,4,4,4,4,4,2,4,3,7,6,6,6,4,1,4,1,7,3,6,3,7,2,7,1,4,1,1,2,1,4,1,7,1,1,7,3,5,7,1,4,3,7,6,6,6,4,1,4,1,7,3,4,1,4,7,1,7,1,4,3,3,3,7,1,2,6,1,4,1,4,3,7,1,4,1,3,1,3,7,1,1,1,1,7,3,4,1,4,7,1,3,4,1,4,7,2,7,1,3,3,2,1,4,1,7,1,6,1,4,5,3,7,1,4,1,2,7,1);
+ QCBmOff: Array[1..4] Of Integer=(0,16,28,61);
+ QCBmCnt: Array[1..4] Of Integer=(16,12,33,78);
+ QCLsp: Array[0..895] Of Word=(327,118,919,111,427,440,1327,185,469,50,1272,91,892,59,1771,193,222,158,1100,127,827,55,978,791,665,47,700,1401,670,859,1913,1048,471,215,1046,125,645,298,1599,160,593,39,1187,462,749,341,1520,511,290,792,909,362,753,81,1111,1058,519,253,828,839,685,541,1421,1258,386,130,962,119,542,387,1431,185,526,51,1175,260,831,167,1728,510,273,437,1172,113,771,144,1122,751,619,119,492,1276,658,695,1882,615,415,200,1018,88,681,339,1436,325,555,122,1042,485,826,345,1374,743,383,1018,1005,358,704,86,1301,586,597,241,832,621,555,573,1504,839,255,293,904,219,151,1211,1447,498,470,253,1559,177,1547,994,2394,242,91,813,857,590,934,1326,1889,282,813,472,1057,1494,450,3315,2163,1895,538,532,1399,218,146,1552,1755,626,822,202,1299,663,706,1732,2656,401,418,745,762,1038,583,1748,1746,1285,527,1169,1314,830,556,2116,1073,2321,297,570,981,403,468,1103,1740,243,725,179,1255,474,1374,1362,1922,912,285,947,930,700,593,1372,1909,576,588,916,1110,1116,224,2719,1633,2220,402,520,1061,448,402,1352,1499,775,664,589,1081,727,801,2206,2165,1157,566,802,911,1116,306,1703,1792,836,655,999,1061,1038,298,2089,1110,1753,361,311,970,239,265,1231,1495,573,566,262,1569,293,1341,1144,2271,544,214,877,847,719,794,1384,2067,274,703,688,1099,1306,391,2947,2024,1670,471,525,1245,290,264,1557,1568,807,718,399,1193,685,883,1594,2729,764,500,754,809,1108,541,1648,1523,1385,614,1196,1209,847,345,2242,1442,1747,199,560,1092,194,349,1253,1653,507,625,354,1376,431,1187,1465,2164,872,360,974,1008,698,704,1346,2114,452,720,816,1240,1089,439,2475,1498,2040,336,718,1213,187,451,1450,1368,885,592,578,1131,531,861,1855,1764,1500,444,970,935,903,424,1687,1633,1102,793,897,1060,897,185,2011,1205,1855,225,283,1296,355,543,343,2073,274,204,1099,1562,523,1388,161,2784,274,112,849,1870,175,1189,160,1490,1088,969,1115,659,3322,1158,1073,3183,1363,517,223,1740,223,704,387,2637,234,692,1005,1287,1610,952,532,2393,646,490,552,1619,657,845,670,1784,2280,191,1775,272,2868,942,952,2628,1479,278,579,1565,218,814,180,2379,187,276,1444,1199,1223,1200,349,3009,307,312,844,1898,306,863,470,1685,1241,513,1727,711,2233,1085,864,3398,527,414,440,1356,612,964,147,2173,738,465,1292,877,1749,1104,689,2105,1311,580,864,1895,752,652,609,1485,1699,514,1400,386,2131,933,798,2473,986,334,360,1375,398,621,276,2183,280,311,1114,1382,807,1284,175,2605,636,230,816,1739,408,1074,176,1619,1120,784,1371,448,3050,1189,880,3039,1165,424,241,1672,186,815,333,2432,324,584,1029,1137,1546,1015,585,2198,995,574,581,1746,647,733,740,1938,1737,347,1710,373,2429,787,1061,2439,1438,185,536,1489,178,703,216,2178,487,154,1421,1414,994,1103,352,3072,473,408,819,2055,168,998,354,1917,1140,665,1799,993,2213,1234,631,3003,762,373,620,1518,425,913,300,1966,836,402,1185,948,1385,1121,555,1802,1509,474,886,1888,610,739,585,1231,2379,661,1335,205,2211,823,822,2480,1179,348,311,812,1145,552,461,1826,263,601,675,1730,172,1523,193,2449,277,334,668,805,1441,1319,207,1684,910,582,1318,1403,1098,979,832,2700,1359,624,228,1292,979,800,195,2226,285,730,862,1537,601,1115,509,2720,354,218,1167,1212,1538,1074,247,1674,1710,322,2142,1263,777,981,556,2119,1710,193,596,1035,957,694,397,1997,253,743,603,1584,321,1346,346,2221,708,451,732,1040,1415,1184,230,1853,919,310,1661,1625,706,856,843,2902,702,467,348,1108,1048,859,306,1964,463,560,1013,1425,533,1142,634,2391,879,397,1084,1345,1700,976,248,1887,1189,644,2087,1262,603,877,550,2203,1307,360,222,820,1097,601,319,1656,198,604,513,1552,141,1391,155,2474,261,269,785,1463,646,1123,191,2015,223,785,844,1202,1011,980,807,3014,793,570,180,1135,1382,778,256,1901,179,807,622,1461,458,1231,178,2028,821,387,927,1496,1004,888,392,2246,341,295,1462,1156,694,1022,473,2226,1364,210,478,1029,1020,722,181,1730,251,730,488,1465,293,1303,326,2595,387,458,584,1569,742,1029,173,1910,495,605,1159,1268,719,973,646,2872,428,443,334,835,1465,912,138,1716,442,620,778,1316,450,1186,335,1446,1665,486,1050,1675,1019,880,278,2214,202,539,1564,1142,533,984,391,2130,1089);
+ QCLspOff: Array[0..4] Of Integer=(0,64,192,320,384);
+ QCG12: Array[0..60] Of Double=(1.0,1.125,1.25,1.375,1.625,1.75,2.0,2.25,2.5,2.875,3.125,3.5,4.0,4.5,5.0,5.625,6.25,7.125,8.0,8.875,10.0,11.25,12.625,14.125,15.875,17.75,20.0,22.375,25.125,28.125,31.625,35.5,39.75,44.625,50.125,56.25,63.125,70.75,79.375,89.125,100.0,112.25,125.875,141.25,158.5,177.875,199.5,223.875,251.25,281.875,316.25,354.875,398.125,446.625,501.125,562.375,631.0,708.0,794.375,891.25,1000.0);
+ QCFull: Array[0..127] Of SmallInt=(10,-65,-59,12,110,34,-134,157,104,-84,-34,-115,23,-101,3,45,-101,-16,-59,28,-45,134,-67,22,61,-29,226,-26,-55,-179,157,-51,-220,-93,-37,60,118,74,-48,-95,-181,111,36,-52,-215,78,-112,39,-17,-47,-223,19,12,-98,-142,130,54,-127,21,-12,39,-48,12,128,6,-167,82,-102,-79,55,-44,48,-20,-53,8,-61,11,-70,-157,-168,20,-56,-74,78,33,-63,-173,-2,-75,-53,-146,77,66,-29,9,-75,65,119,-43,76,233,98,125,-156,-27,78,-9,170,176,143,-148,-7,27,-136,5,27,18,139,204,7,-184,-197,52,-3,78,-189,8,-65);
+ QCHalf: Array[0..127] Of ShortInt=(0,-4,0,-3,0,0,0,0,0,0,0,0,0,0,0,0,0,-3,-2,0,0,0,0,0,0,0,0,0,0,0,0,5,0,0,0,0,0,0,4,0,0,3,2,0,3,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3,0,0,-3,3,0,0,-2,0,3,0,0,0,0,0,0,0,-5,0,0,0,0,3,0,0,0,3,0,0,0,0,0,0,0,4,0,0,0,0,0,0,0,0,0,3,6,-3,-4,0,-3,-3,3,-3,0,0,0,0,0,0,0,0,0,0,0,0,0,0);
+ QCFirBits: Array[0..10] Of Int64=(-4629359876350326342,4580659125239300557,-4633731444127565203,4582673809451740838,-4632791182597362791,4584423425481056959,-4632041291466001061,4585207710422628932,-4631560384127423513,4585564445953432502,4606268311474290987);
+ QCHamm: Array[0..3] Of Single=(-0.00682199979,0.0412489995,-0.143459007,0.588863015);
+ QCPow775: Array[0..9] Of Single=(0.774999976,0.600624979,0.465483993,0.36074999,0.279581994,0.216675997,0.167924002,0.130141005,0.100859001,0.0781660005);
+ QCPow625: Array[0..9] Of Single=(0.625,0.390625,0.244140998,0.152587995,0.0953669995,0.0596049987,0.0372529998,0.0232829992,0.014552,0.0090950001);
+
+{ ---- QCELP (libavcodec/qcelpdec.c) + conteneur QCP (libavformat/qcp.c) ---- }
+Type
+ TQCFrame=Array[0..70] Of Byte;
+ TQC=Record
+  Bitrate,PrevBitrate,ErasureCount,OctaveCount: LongInt;   { -1 = IFQ, 0 silence, 1 octave, 2 quarter, 3 half, 4 full }
+  Fr: TQCFrame;
+  PrevLspf,PredictorLspf: Array[0..9] Of Single;
+  PitchSynMem,PitchPreMem: Array[0..302] Of Single;
+  RndFirMem: Array[0..179] Of Single;
+  FormantMem: Array[0..169] Of Single;
+  LastCbGain: Single; PrevG1: Array[0..1] Of LongInt;
+  PitchGain: Array[0..3] Of Single; PitchLag: Array[0..3] Of LongInt;
+  First16: LongInt;
+  PostSynth: Array[0..9] Of Single; PostAgc,PostTilt: Single;
+ End;
+Var QC: TQC; QCFirD: Array[0..10] Of Double; QCG12S: Array[0..60] Of Single; QCInit: Boolean;
+
+Function QCBits(Const B: Array Of Byte; Var Bp: LongInt; N: LongInt): LongInt;
+Var R,Z: LongInt;
+Begin R:=0; For Z:=1 To N Do Begin R:=R*2+((B[Bp Shr 3] Shr (7-(Bp And 7))) And 1); Inc(Bp); End; QCBits:=R; End;
+Procedure QCInitTab;
+Var I: LongInt; D: Double;
+Begin
+ If QCInit Then Exit; QCInit:=True;
+ For I:=0 To 10 Do Move(QCFirBits[I],QCFirD[I],8);
+ For I:=0 To 60 Do Begin D:=QCG12[I]; QCG12S[I]:=Single(D/8192.0); End;
+End;
+Function QCDecodeLspf(Var Lspf: Array Of Single): Boolean;   { True = paquet mal recu }
+Var I: LongInt; Smooth,Ec,Tmp: Single; Pred: ^Single; UseP: Boolean; Pf: Array[0..9] Of Single; D,Op,Sp: Double; Lv: LongInt;
+Function PredAt(K: LongInt): Single;
+Begin If UseP Then PredAt:=QC.PrevLspf[K] Else PredAt:=QC.PredictorLspf[K]; End;
+Begin
+ QCDecodeLspf:=False;
+ Op:=29.0; Op:=Op/32; Sp:=0.02;
+ If (QC.Bitrate=1) Or (QC.Bitrate=-1) Then Begin
+  UseP:=(QC.PrevBitrate<>1) And (QC.PrevBitrate<>-1);
+  If QC.Bitrate=1 Then Begin
+   Inc(QC.OctaveCount);
+   For I:=0 To 9 Do Begin
+    If QC.Fr[60+I]<>0 Then D:=Sp Else D:=-Sp;
+    D:=D+Double(PredAt(I))*29.0/32+(I+1)*((1-Op)/11);
+    Lspf[I]:=Single(D); QC.PredictorLspf[I]:=Lspf[I];
+   End;
+   If QC.OctaveCount<10 Then Smooth:=Single(0.875) Else Smooth:=Single(0.1);
+  End Else Begin
+   Ec:=Single(Op);
+   If QC.ErasureCount>1 Then Begin
+    If QC.ErasureCount<4 Then Ec:=Single(Double(Ec)*0.9) Else Ec:=Single(Double(Ec)*0.7);
+   End;
+   For I:=0 To 9 Do Begin
+    Lspf[I]:=((I+1)*(1-Ec)/11)+Ec*PredAt(I);
+    QC.PredictorLspf[I]:=Lspf[I];
+   End;
+   Smooth:=0.125;
+  End;
+  If Not (Double(Lspf[0])>Sp) Then Lspf[0]:=Single(Sp);
+  For I:=1 To 9 Do Begin
+   D:=Double(Lspf[I-1])+Sp;
+   If Not (Double(Lspf[I])>D) Then Lspf[I]:=Single(D);
+  End;
+  D:=1.0-Sp;
+  If Double(Lspf[9])>D Then Lspf[9]:=Single(D);
+  For I:=9 Downto 1 Do Begin
+   D:=Double(Lspf[I])-Sp;
+   If Double(Lspf[I-1])>D Then Lspf[I-1]:=Single(D);
+  End;
+  { ff_weighted_vector_sumf(lspf, lspf, prev_lspf, smooth, 1.0 - smooth, 10) }
+  Ec:=Single(1.0-Double(Smooth));
+  For I:=0 To 9 Do Lspf[I]:=Smooth*Lspf[I]+Ec*QC.PrevLspf[I];
+ End Else Begin
+  QC.OctaveCount:=0;
+  Tmp:=0.0;
+  For I:=0 To 4 Do Begin
+   Lv:=QCLsp[(QCLspOff[I]+QC.Fr[60+I])*2];
+   Tmp:=Single(Double(Tmp)+Lv*0.0001); Lspf[2*I]:=Tmp;
+   Lv:=QCLsp[(QCLspOff[I]+QC.Fr[60+I])*2+1];
+   Tmp:=Single(Double(Tmp)+Lv*0.0001); Lspf[2*I+1]:=Tmp;
+  End;
+  If QC.Bitrate=2 Then Begin
+   If (Double(Lspf[9])<=0.70) Or (Double(Lspf[9])>=0.97) Then Begin QCDecodeLspf:=True; Exit; End;
+   For I:=3 To 9 Do If Abs(Double(Single(Lspf[I]-Lspf[I-2])))<0.08 Then Begin QCDecodeLspf:=True; Exit; End;
+  End Else Begin
+   If (Double(Lspf[9])<=0.66) Or (Double(Lspf[9])>=0.985) Then Begin QCDecodeLspf:=True; Exit; End;
+   For I:=4 To 9 Do If Abs(Double(Single(Lspf[I]-Lspf[I-4])))<0.0931 Then Begin QCDecodeLspf:=True; Exit; End;
+  End;
+ End;
+End;
+Procedure QCGainIndex(Var Gain: Array Of Single);
+Var I,Sub: LongInt; G1: Array[0..15] Of LongInt; Slope: Single; K: LongInt;
+Function Clip(V,Lo,Hi: LongInt): LongInt;Begin If V<Lo Then V:=Lo Else If V>Hi Then V:=Hi; Clip:=V; End;
+Begin
+ If QC.Bitrate>=2 Then Begin
+  Case QC.Bitrate Of 4: Sub:=16; 3: Sub:=4; Else Sub:=5; End;
+  For I:=0 To Sub-1 Do Begin
+   G1[I]:=4*QC.Fr[16+I];
+   If (QC.Bitrate=4) And (((I+1) And 3)=0) Then
+    G1[I]:=G1[I]+Clip((G1[I-1]+G1[I-2]+G1[I-3]) Div 3-6,0,32);
+   Gain[I]:=QCG12S[G1[I]];
+   If QC.Fr[I]<>0 Then Begin
+    Gain[I]:=-Gain[I];
+    QC.Fr[32+I]:=(QC.Fr[32+I]-89) And 127;
+   End;
+  End;
+  QC.PrevG1[0]:=G1[Sub-2]; QC.PrevG1[1]:=G1[Sub-1];
+  QC.LastCbGain:=QCG12S[G1[Sub-1]];
+  If QC.Bitrate=2 Then Begin
+   Gain[7]:=Gain[4];
+   Gain[6]:=Single(0.4*Double(Gain[3])+0.6*Double(Gain[4]));
+   Gain[5]:=Gain[3];
+   Gain[4]:=Single(0.8*Double(Gain[2])+0.2*Double(Gain[3]));
+   Gain[3]:=Single(0.2*Double(Gain[1])+0.8*Double(Gain[2]));
+   Gain[2]:=Gain[1];
+   Gain[1]:=Single(0.6*Double(Gain[0])+0.4*Double(Gain[1]));
+  End;
+ End Else If QC.Bitrate<>0 Then Begin
+  If QC.Bitrate=1 Then Begin
+   G1[0]:=2*QC.Fr[16]+Clip((QC.PrevG1[0]+QC.PrevG1[1]) Div 2-5,0,54);
+   Sub:=8;
+  End Else Begin
+   G1[0]:=QC.PrevG1[1];
+   Case QC.ErasureCount Of 1: ; 2: Dec(G1[0],1); 3: Dec(G1[0],2); Else Dec(G1[0],6); End;
+   If G1[0]<0 Then G1[0]:=0;
+   Sub:=4;
+  End;
+  Slope:=Single(0.5*Double(QCG12S[G1[0]]-QC.LastCbGain)/Sub);
+  For I:=1 To Sub Do Gain[I-1]:=QC.LastCbGain+Slope*I;
+  QC.LastCbGain:=Gain[Sub-1];
+  QC.PrevG1[0]:=QC.PrevG1[1]; QC.PrevG1[1]:=G1[0];
+ End;
+End;
+Procedure QCSvector(Const Gain: Array Of Single; Var Cdn: Array Of Single);
+Var I,J,K,Ci,P: LongInt; Cbseed: Word; TmpGain,Fv: Single; R0: LongInt; Td: Double; Ca: Word;
+Begin
+ P:=0;
+ Case QC.Bitrate Of
+  4: For I:=0 To 15 Do Begin
+   TmpGain:=Single(Double(Gain[I])*0.01);
+   Ci:=Word(-QC.Fr[32+I]);
+   For J:=0 To 9 Do Begin Cdn[P]:=TmpGain*QCFull[Ci And 127]; Inc(P); Ci:=(Ci+1) And $FFFF; End;
+  End;
+  3: For I:=0 To 3 Do Begin
+   TmpGain:=Single(Double(Gain[I])*0.5);
+   Ci:=Word(-QC.Fr[32+I]);
+   For J:=0 To 39 Do Begin Cdn[P]:=TmpGain*QCHalf[Ci And 127]; Inc(P); Ci:=(Ci+1) And $FFFF; End;
+  End;
+  2: Begin
+   Cbseed:=Word(((3 And QC.Fr[64]) Shl 14) Or ((63 And QC.Fr[63]) Shl 8) Or ((96 And QC.Fr[62]) Shl 1) Or ((7 And QC.Fr[61]) Shl 3) Or ((56 And QC.Fr[60]) Shr 3));
+   R0:=20;
+   For I:=0 To 7 Do Begin
+    Td:=1.373681186; Td:=Td/32768.0;
+    TmpGain:=Single(Double(Gain[I])*Td);
+    For K:=0 To 19 Do Begin
+     Cbseed:=Word(521*Cbseed+259);
+     If Cbseed>=32768 Then QC.RndFirMem[R0]:=Cbseed-65536 Else QC.RndFirMem[R0]:=Cbseed;
+     Fv:=0.0;
+     For J:=0 To 9 Do Fv:=Single(Double(Fv)+QCFirD[J]*(QC.RndFirMem[R0-J]+QC.RndFirMem[R0-20+J]));
+     Fv:=Single(Double(Fv)+QCFirD[10]*QC.RndFirMem[R0-10]);
+     Cdn[P]:=TmpGain*Fv; Inc(P);
+     Inc(R0);
+    End;
+   End;
+   For J:=0 To 19 Do QC.RndFirMem[J]:=QC.RndFirMem[160+J];
+  End;
+  1: Begin
+   Cbseed:=Word(QC.First16);
+   For I:=0 To 7 Do Begin
+    Td:=1.373681186; Td:=Td/32768.0;
+    TmpGain:=Single(Double(Gain[I])*Td);
+    For J:=0 To 19 Do Begin
+     Cbseed:=Word(521*Cbseed+259);
+     If Cbseed>=32768 Then Cdn[P]:=TmpGain*(Cbseed-65536) Else Cdn[P]:=TmpGain*Cbseed;
+     Inc(P);
+    End;
+   End;
+  End;
+  -1: Begin
+   Cbseed:=Word(-44);
+   For I:=0 To 3 Do Begin
+    TmpGain:=Single(Double(Gain[I])*0.01);
+    For J:=0 To 39 Do Begin Cdn[P]:=TmpGain*QCFull[Cbseed And 127]; Cbseed:=Word(Cbseed+1); Inc(P); End;
+   End;
+  End;
+  0: For I:=0 To 159 Do Cdn[I]:=0;
+ End;
+End;
+Function QCDot(Const A: Array Of Single; Ao: LongInt; Const B: Array Of Single; Bo,N: LongInt): Single;
+Var P: Single; I: LongInt;
+Begin P:=0.0; For I:=0 To N-1 Do P:=P+A[Ao+I]*B[Bo+I]; QCDot:=P; End;
+Procedure QCGainCtrl(Var VOut: Array Of Single; Const VRef,VIn: Array Of Single);
+Var I,J: LongInt; Res,Sc: Single;
+Begin
+ I:=0;
+ While I<160 Do Begin
+  Res:=QCDot(VRef,I,VRef,I,40);
+  Sc:=QCDot(VIn,I,VIn,I,40);
+  If Sc<>0 Then Sc:=Single(Sqrt(Double(Res/Sc)));
+  For J:=0 To 39 Do VOut[I+J]:=VIn[I+J]*Sc;
+  Inc(I,40);
+ End;
+End;
+{ do_pitchfilter : Mem[0..302], entree Vin[VinOff..VinOff+159] ; sortie dans Mem[143..302] }
+Procedure QCPitchFilter(Var Mem: Array Of Single; Const Vin: Array Of Single; VinOff: LongInt);
+Var I,J,K1,Vi,Vo,Vl: LongInt;
+Begin
+ Vi:=VinOff; Vo:=143;
+ For I:=0 To 3 Do Begin
+  If QC.PitchGain[I]<>0 Then Begin
+   Vl:=143+40*I-QC.PitchLag[I];
+   For J:=1 To 40 Do Begin
+    If QC.Fr[52+I]<>0 Then Begin
+     Mem[Vo]:=0.0;
+     For K1:=0 To 3 Do Mem[Vo]:=Mem[Vo]+QCHamm[K1]*(Mem[Vl+K1-4]+Mem[Vl+3-K1]);
+    End Else Mem[Vo]:=Mem[Vl];
+    Mem[Vo]:=Vin[Vi]+QC.PitchGain[I]*Mem[Vo];
+    Inc(Vl); Inc(Vo); Inc(Vi);
+   End;
+  End Else Begin
+   For J:=0 To 39 Do Mem[Vo+J]:=Vin[Vi+J];
+   Inc(Vi,40); Inc(Vo,40);
+  End;
+ End;
+ For J:=0 To 142 Do Mem[J]:=Mem[J+160];
+End;
+Procedure QCApplyPitch(Var Cdn: Array Of Single);
+Var I: LongInt; MaxPg: Single; Tmp: Array[0..159] Of Single; Syn,Pre: Array[0..159] Of Single;
+Begin
+ If (QC.Bitrate>=3) Or (QC.Bitrate=0) Or ((QC.Bitrate=-1) And (QC.PrevBitrate>=3)) Then Begin
+  If QC.Bitrate>=3 Then Begin
+   For I:=0 To 3 Do Begin
+    If QC.Fr[48+I]<>0 Then QC.PitchGain[I]:=Single((QC.Fr[56+I]+1)*0.25) Else QC.PitchGain[I]:=0.0;
+    QC.PitchLag[I]:=QC.Fr[48+I]+16;
+   End;
+  End Else Begin
+   If QC.Bitrate=-1 Then Begin
+    If QC.ErasureCount<3 Then MaxPg:=Single(0.9-0.3*(QC.ErasureCount-1)) Else MaxPg:=0.0;
+   End Else MaxPg:=1.0;
+   For I:=0 To 3 Do If Not (QC.PitchGain[I]<=MaxPg) Then QC.PitchGain[I]:=MaxPg;
+   For I:=0 To 3 Do QC.Fr[52+I]:=0;
+  End;
+  QCPitchFilter(QC.PitchSynMem,Cdn,0);
+  For I:=0 To 159 Do Syn[I]:=QC.PitchSynMem[143+I];
+  For I:=0 To 3 Do Begin
+   If Double(QC.PitchGain[I])<1.0 Then QC.PitchGain[I]:=Single(0.5*Double(QC.PitchGain[I])) Else QC.PitchGain[I]:=Single(0.5*1.0);
+  End;
+  QCPitchFilter(QC.PitchPreMem,Syn,0);
+  For I:=0 To 159 Do Pre[I]:=QC.PitchPreMem[143+I];
+  QCGainCtrl(Cdn,Syn,Pre);
+ End Else Begin
+  For I:=0 To 142 Do Begin QC.PitchSynMem[I]:=Cdn[17+I]; QC.PitchPreMem[I]:=Cdn[17+I]; End;
+  For I:=0 To 3 Do Begin QC.PitchGain[I]:=0; QC.PitchLag[I]:=0; End;
+ End;
+End;
+{ ff_acelp_lspd2lpc }
+Procedure QCLspd2Lpc(Const Lsp: Array Of Double; Var Lpc: Array Of Single);
+Var Pa,Qa: Array[0..5] Of Double; H,I,J: LongInt; Val,Paf,Qaf: Double;
+Procedure Poly(Off: LongInt; Var F: Array Of Double);
+Var Ii,Jj: LongInt; V: Double;
+Begin
+ F[0]:=1.0; F[1]:=-2*Lsp[Off];
+ For Ii:=2 To 5 Do Begin
+  V:=-2*Lsp[Off+2*Ii-2];
+  F[Ii]:=V*F[Ii-1]+2*F[Ii-2];
+  Jj:=Ii-1;
+  While Jj>1 Do Begin F[Jj]:=F[Jj]+(F[Jj-1]*V+F[Jj-2]); Dec(Jj); End;
+  F[1]:=F[1]+V;
+ End;
+End;
+Begin
+ Poly(0,Pa); Poly(1,Qa);
+ H:=5;
+ While H>0 Do Begin
+  Dec(H);
+  Paf:=Pa[H+1]+Pa[H]; Qaf:=Qa[H+1]-Qa[H];
+  Lpc[H]:=Single(0.5*(Paf+Qaf));
+  Lpc[9-H]:=Single(0.5*(Paf-Qaf));
+ End;
+End;
+Procedure QCLspf2Lpc(Const Lspf: Array Of Single; Var Lpc: Array Of Single);
+Var Lsp: Array[0..9] Of Double; I: LongInt; Bw,Bc: Double;
+Begin
+ Bc:=0.9883; Bw:=Bc;
+ For I:=0 To 9 Do Lsp[I]:=Cos(3.14159265358979323846*Lspf[I]);
+ QCLspd2Lpc(Lsp,Lpc);
+ For I:=0 To 9 Do Begin
+  Lpc[I]:=Single(Double(Lpc[I])*Bw);
+  Bw:=Bw*Bc;
+ End;
+End;
+Procedure QCInterpLpc(Const Cur: Array Of Single; Var Lpc: Array Of Single; Sub: LongInt);
+Var Ip: Array[0..9] Of Single; W,Wb: Single; I: LongInt;
+Begin
+ If QC.Bitrate>=2 Then W:=Single(0.25*(Sub+1))
+ Else If (QC.Bitrate=1) And (Sub=0) Then W:=Single(0.625)
+ Else W:=1.0;
+ If Double(W)<>1.0 Then Begin
+  Wb:=Single(1.0-Double(W));
+  For I:=0 To 9 Do Ip[I]:=W*Cur[I]+Wb*QC.PrevLspf[I];
+  QCLspf2Lpc(Ip,Lpc);
+ End Else If (QC.Bitrate>=2) Or ((QC.Bitrate=-1) And (Sub=0)) Then QCLspf2Lpc(Cur,Lpc)
+ Else If (QC.Bitrate=0) And (Sub=0) Then QCLspf2Lpc(QC.PrevLspf,Lpc);
+End;
+Procedure QCPostfilter(Var Samples: Array Of Single; Const Lpc: Array Of Single);
+Var Ls,Lp: Array[0..9] Of Single; Pole: Array[0..169] Of Single; Zero: Array[0..159] Of Single; N,I: LongInt; Tilt: Single; Ag,Eng,Pe,Gs,Mem: Single; Alpha: Single; In2: Array[0..159] Of Single;
+Begin
+ For N:=0 To 9 Do Begin Ls[N]:=Lpc[N]*QCPow625[N]; Lp[N]:=Lpc[N]*QCPow775[N]; End;
+ For N:=0 To 159 Do Begin
+  Zero[N]:=QC.FormantMem[10+N];
+  For I:=1 To 10 Do Zero[N]:=Zero[N]+Ls[I-1]*QC.FormantMem[10+N-I];
+ End;
+ For I:=0 To 9 Do Pole[I]:=QC.PostSynth[I];
+ R2LpSynth(Pole,10,Lp,Zero,160,10);
+ For I:=0 To 9 Do QC.PostSynth[I]:=Pole[160+I];
+ { ff_tilt_compensation(&mem, 0.3, pole_out+10, 160) }
+ Tilt:=Single(0.3);
+ Eng:=QC.PostTilt;
+ Pe:=Pole[10+159];
+ For I:=159 Downto 1 Do Pole[10+I]:=Pole[10+I]-Tilt*Pole[10+I-1];
+ Pole[10]:=Pole[10]-Tilt*Eng;
+ QC.PostTilt:=Pe;
+ { ff_adaptive_gain_control }
+ For I:=0 To 159 Do In2[I]:=Pole[10+I];
+ Eng:=QCDot(QC.FormantMem,10,QC.FormantMem,10,160);
+ Alpha:=Single(0.9375);
+ Pe:=QCDot(In2,0,In2,0,160);
+ Gs:=1.0;
+ If Pe<>0 Then Gs:=Single(Sqrt(Double(Eng/Pe)));
+ Gs:=Single(Double(Gs)*(1.0-Double(Alpha)));
+ Mem:=QC.PostAgc;
+ For I:=0 To 159 Do Begin
+  Mem:=Alpha*Mem+Gs;
+  Samples[I]:=In2[I]*Mem;
+ End;
+ QC.PostAgc:=Mem;
+End;
+{ decode un paquet (Buf, Len) ; retourne les 160 echantillons dans Out }
+Procedure QCDecodeFrame(Buf: PEABuffer; Len: LongInt; Var Out: Array Of Single);
+Var
+ Bi,Bp,I,K,Rate,Idx: LongInt; Quant: Array[0..9] Of Single; Lpc: Array[0..9] Of Single; Gain: Array[0..15] Of Single;
+ Err: Boolean; Diff,PrevDiff: LongInt; Pk: Array[0..127] Of Byte; SubIn: Array[0..39] Of Single;
+Function BufRate(N: LongInt): LongInt;
+Begin Case N Of 35: BufRate:=4; 17: BufRate:=3; 8: BufRate:=2; 4: BufRate:=1; 1: BufRate:=0; Else BufRate:=-1; End; End;
+Begin
+ Err:=False;
+ FillChar(Pk,SizeOf(Pk),0); For I:=0 To Len-1 Do If I<128 Then Pk[I]:=Buf^[I];
+ Bi:=0;
+ Rate:=BufRate(Len);
+ If Rate>=0 Then Begin
+  If Rate>Pk[0] Then Rate:=Pk[0]
+  Else If Rate<Pk[0] Then Rate:=-1;
+  If Rate>=0 Then Bi:=1;
+ End Else Rate:=BufRate(Len+1);
+ QC.Bitrate:=Rate;
+ If QC.Bitrate=-1 Then Err:=True;
+ If (Not Err) And (QC.Bitrate=1) Then Begin
+  QC.First16:=Pk[Bi]*256+Pk[Bi+1];
+  If QC.First16=$FFFF Then Err:=True;
+ End;
+ If (Not Err) And (QC.Bitrate>0) Then Begin
+  FillChar(QC.Fr,SizeOf(QC.Fr),0);
+  Bp:=Bi*8;
+  For I:=0 To QCBmCnt[QC.Bitrate]-1 Do Begin
+   Idx:=QCBmOff[QC.Bitrate]+I;
+   K:=QCBits(Pk,Bp,QCBmLen[Idx]);
+   QC.Fr[QCBmIdx[Idx]]:=(QC.Fr[QCBmIdx[Idx]] Or (K Shl QCBmPos[Idx])) And 255;
+  End;
+  If QC.Fr[70]<>0 Then Err:=True;
+  If (Not Err) And (QC.Bitrate=2) Then Begin
+   PrevDiff:=0;
+   For I:=1 To 4 Do Begin
+    Diff:=QC.Fr[16+I]-QC.Fr[16+I-1];
+    If Abs(Diff)>10 Then Begin Err:=True; Break; End
+    Else If Abs(Diff-PrevDiff)>12 Then Begin Err:=True; Break; End;
+    PrevDiff:=Diff;
+   End;
+  End;
+  If (Not Err) And (QC.Bitrate>=3) Then
+   For I:=0 To 3 Do If (QC.Fr[52+I]<>0) And (QC.Fr[48+I]>=124) Then Err:=True;
+ End;
+ If Not Err Then Begin
+  QCGainIndex(Gain);
+  QCSvector(Gain,Out);
+  If QCDecodeLspf(Quant) Then Err:=True Else QCApplyPitch(Out);
+ End;
+ If Err Then Begin
+  QC.Bitrate:=-1;
+  Inc(QC.ErasureCount);
+  QCGainIndex(Gain);
+  QCSvector(Gain,Out);
+  QCDecodeLspf(Quant);
+  QCApplyPitch(Out);
+ End Else QC.ErasureCount:=0;
+ For I:=0 To 3 Do Begin
+  QCInterpLpc(Quant,Lpc,I);
+  For K:=0 To 39 Do SubIn[K]:=Out[I*40+K];
+  R2LpSynth(QC.FormantMem,10+I*40,Lpc,SubIn,40,10);
+ End;
+ QCPostfilter(Out,Lpc);
+ For I:=0 To 9 Do QC.FormantMem[I]:=QC.FormantMem[160+I];
+ For I:=0 To 9 Do QC.PrevLspf[I]:=Quant[I];
+ QC.PrevBitrate:=QC.Bitrate;
+End;
+
+Procedure DecodeQCELP(Const Source,Target: String);
+Var
+ F: PEABuffer; Size,Pos,I,Mode,PktSize,Packet,DataSize,Rate,Tag,Ch,V,J: LongInt;
+ Rates: Array[0..4] Of LongInt; NR: LongInt; Pcm: Array[0..159] Of Single; Ok: Boolean;
+Function RL32(P: LongInt): LongInt;
+Begin RL32:=F^[P]+F^[P+1]*256+F^[P+2]*65536+F^[P+3]*16777216; End;
+Begin
+ NVLoad(Source,F,Size);
+ If (Size<170) Or (RL32(0)<>$46464952) Or (RL32(8)<>$4D434C51) Or (RL32(12)<>$20746D66) Then Fail('qcelp: fichier QCP requis.');
+ If ((F^[22]<>$41) And (F^[22]<>$42)) Then Fail('qcelp: GUID de codec inconnu (seul QCELP-13K est pris en charge).');
+ Pos:=12+8+2+16+2+80;
+ Rate:=F^[Pos]+F^[Pos+1]*256; Inc(Pos,2);
+ PktSize:=F^[Pos]+F^[Pos+1]*256; Inc(Pos,2);
+ Inc(Pos,2);
+ Rate:=F^[Pos]+F^[Pos+1]*256; Inc(Pos,2);
+ Inc(Pos,2);
+ For I:=0 To 4 Do Rates[I]:=-1;
+ NR:=RL32(Pos); Inc(Pos,4); If NR>8 Then NR:=8;
+ For I:=0 To NR-1 Do Begin
+  V:=F^[Pos]; Mode:=F^[Pos+1]; Inc(Pos,2);
+  If Mode<=4 Then Rates[Mode]:=V;
+ End;
+ Pos:=Pos+(16-2*NR)+20;
+ FillChar(QC,SizeOf(QC),0);
+ QCInit:=False; QCInitTab;
+ For I:=0 To 9 Do QC.PrevLspf[I]:=Single((I+1)/11.0);
+ EAReset; OpenWrite(Target); ADPCMWaveHeader(Rate,1,0);
+ DataSize:=0;
+ While Pos<Size Do Begin
+  If DataSize<>0 Then Begin
+   Mode:=F^[Pos]; Inc(Pos);
+   If PktSize<>0 Then Packet:=PktSize-1
+   Else If (Mode>4) Or (Rates[Mode]<0) Then Begin Dec(DataSize); Continue; End
+   Else Packet:=Rates[Mode];
+   If DataSize<=Packet Then Packet:=DataSize-1;
+   If Pos+Packet>Size Then Packet:=Size-Pos;
+   If Packet<=0 Then Break;
+   QCDecodeFrame(PEABuffer(@F^[Pos]),Packet,Pcm);
+   Inc(Pos,Packet); Dec(DataSize,Packet+1);
+   For J:=0 To 159 Do Begin
+    V:=Round(Single(Pcm[J]*32768.0));
+    If V>32767 Then V:=32767 Else If V<-32768 Then V:=-32768;
+    EAPut(V);
+   End;
+   Continue;
+  End;
+  If (Pos And 1)<>0 Then Inc(Pos);
+  If Pos+8>Size Then Break;
+  Tag:=RL32(Pos); Ch:=RL32(Pos+4); Inc(Pos,8);
+  If Tag=$74617276 Then Begin   { 'vrat' }
+   If RL32(Pos)<>0 Then PktSize:=0;
+   Inc(Pos,8);
+  End Else If Tag=$61746164 Then DataSize:=Ch   { 'data' }
+  Else Inc(Pos,Ch);
+ End;
+ EAFlush;
+ If EAWritten=0 Then Fail('qcelp: aucune trame decodee.');
+ ADPCMPatchHeader(Rate,1,EAWritten); CloseWrite;
+End;
+
 Procedure DecodeAVIX(Const Source,Target: String; Mode,Kind: LongInt);
 Var Pos,PkPos,PkLen,RN,RD,I,Y,X,Cw,Ch,Bs,Msg2: LongInt; Ok,FFBegun: Boolean; Msg: String; PIdx: LongInt; NbF,NbP: Int64;
 Begin
@@ -71095,6 +71575,7 @@ Begin
  WriteLn(' D  idcin           id Cinematic (video idcinvideo PAL8 vers Y4M/PNG/BMP, audio PCM vers WAV)');
  WriteLn('D   rl2             RL2');
  WriteLn('D   shn             raw Shorten');
+ WriteLn('D   qcp             QCP');
  WriteLn('DE  roq             id RoQ (video roqvideo, audio roq_dpcm)');
  WriteLn(' D  ipmovie         Interplay MVE (video interplayvideo PAL8/RGB555 vers Y4M/PNG/BMP, audio PCM/interplay_dpcm vers WAV)');
  WriteLn(' D  jpegls_pipe     piped jpegls sequence (image JPEG-LS vers Y4M/PNG/BMP)');
@@ -71574,7 +72055,8 @@ BEGIN
    WriteLn('D V    rl2             RL2 video (fichiers .rl2 RLV2/RLV3, PAL8 320x200; audio PCM ignore)');
    WriteLn('D A    real_144        RealAudio 1.0 (14.4K) (RealMedia; decodeur exact)');
    WriteLn('D A    real_288        RealAudio 2.0 (28.8K) (RealMedia; decodeur exact en flottant)');
-   WriteLn('D A    shorten         Shorten (fichiers .shn; versions 0-2, WAVE; AIFF non pris en charge)');
+   WriteLn('D A    qcelp           QCELP / PureVoice (fichiers .qcp, QCELP-13K)');
+  WriteLn('D A    shorten         Shorten (fichiers .shn; versions 0-2, WAVE; AIFF non pris en charge)');
    WriteLn('D V    ptx             V.Flash PTX image (RGB15)');
    WriteLn('D V    pcx             PC Paintbrush PCX image (1/2/4/8 bits palette, 24 bits RGB)');
    WriteLn('D A    wmav2           WMA2 (44100/48000 Hz, VLC, blocs fixes, sans reservoir/bruit)');   
@@ -72379,6 +72861,7 @@ BEGIN
    If InputFormat='ipmovie' Then DecodeMVE(InputPath,Temps[0],3) Else
    If InputFormat='roq' Then DecodeRoQAudio(InputPath,Temps[0]) Else
    If InputFormat='shn' Then DecodeShorten(InputPath,Temps[0]) Else
+   If InputFormat='qcp' Then DecodeQCELP(InputPath,Temps[0]) Else
    If (InputFormat='aiff') And IsAIFFIma4(InputPath) Then DecodeAIFFIma4(InputPath,Temps[0]) Else
    If (InputFormat='aiff') And PcmAiffToWav(InputPath,Temps[0],PcmCodecOut<>'') Then Else
    If InputFormat='aiff' Then DecodeAIFF(InputPath,Temps[0]) Else
