@@ -22225,6 +22225,7 @@ Begin
    For R:=H-1 Downto 0 Do Begin
     Start:=RB32(TblPos); Inc(TblPos,4);
     Pos:=Start; X:=0;
+    If (Pos<0) Or (Pos>Size) Then Bad;
     While X<W Do Begin
      If Pos+Bpc>Size Then Bad;
      If Bpc=1 Then Begin Cnt:=F^[Pos] And $7F; Val:=F^[Pos]; Inc(Pos); End
@@ -46139,7 +46140,7 @@ Begin
  GetMem(Fr,Stride*QXH+64); FillChar(Fr^,Stride*QXH+64,0);
  GetMem(Out,QXW*QXH*Bpp+64);
  For PIdx:=0 To QXCount-1 Do Begin
-  Sz:=QXLen^[PIdx]; If QXPos^[PIdx]+Sz>QXSize Then Sz:=QXSize-QXPos^[PIdx];
+  Sz:=QXLen^[PIdx]; If QXPos^[PIdx]+Sz>QXSize Then Sz:=QXSize-QXPos^[PIdx]; If (QXPos^[PIdx]<0) Or (QXPos^[PIdx]>QXSize) Or (Sz<0) Then Sz:=0;
   Pk:=PEABuffer(@QXF^[QXPos^[PIdx]]); Sp:=0; Dup:=False; Bad:=False;
   If Sz<8 Then Dup:=True
   Else Begin
@@ -46470,7 +46471,7 @@ Begin
  If Not QXIsMov Then NVAviSar(W,H);
  GetMem(Fr,Stride*(((H+3) Div 4)*4)*2+64); FillChar(Fr^,Stride*(((H+3) Div 4)*4)*2+64,0);
  For PIdx:=0 To QXCount-1 Do Begin
-  Sz:=QXLen^[PIdx]; If QXPos^[PIdx]+Sz>QXSize Then Sz:=QXSize-QXPos^[PIdx];
+  Sz:=QXLen^[PIdx]; If QXPos^[PIdx]+Sz>QXSize Then Sz:=QXSize-QXPos^[PIdx]; If (QXPos^[PIdx]<0) Or (QXPos^[PIdx]>QXSize) Or (Sz<0) Then Sz:=0;
   Pk:=PEABuffer(@QXF^[QXPos^[PIdx]]); Sp:=0; Bad:=False;
   Sp:=1; Chunk:=GB; Chunk:=GB16; { taille ignoree }
   TotalBlocks:=((W+3) Div 4)*((H+3) Div 4);
@@ -46742,7 +46743,7 @@ Begin
  GetMem(Fr,Stride*(((H+3) Div 4)*4+4)+64); FillChar(Fr^,Stride*(((H+3) Div 4)*4+4)+64,0);
  FillChar(Pairs,SizeOf(Pairs),0); FillChar(Quads,SizeOf(Quads),0); FillChar(Octets,SizeOf(Octets),0);
  For PIdx:=0 To QXCount-1 Do Begin
-  Sz:=QXLen^[PIdx]; If QXPos^[PIdx]+Sz>QXSize Then Sz:=QXSize-QXPos^[PIdx];
+  Sz:=QXLen^[PIdx]; If QXPos^[PIdx]+Sz>QXSize Then Sz:=QXSize-QXPos^[PIdx]; If (QXPos^[PIdx]<0) Or (QXPos^[PIdx]>QXSize) Or (Sz<0) Then Sz:=0;
   Pk:=PEABuffer(@QXF^[QXPos^[PIdx]]); Sp:=0;
   TotalBlocks:=((W+3) Div 4)*((H+3) Div 4);
   If (TotalBlocks Div 1024)>Sz Then NVRepeat
@@ -46931,7 +46932,7 @@ Begin
  QXOpen(Source);
  Began:=False; Fmt:=0; FW:=0; FH:=0; Stride:=0;
  For PIdx:=0 To QXCount-1 Do Begin
-  Sz:=QXLen^[PIdx]; If QXPos^[PIdx]+Sz>QXSize Then Sz:=QXSize-QXPos^[PIdx];
+  Sz:=QXLen^[PIdx]; If QXPos^[PIdx]+Sz>QXSize Then Sz:=QXSize-QXPos^[PIdx]; If (QXPos^[PIdx]<0) Or (QXPos^[PIdx]>QXSize) Or (Sz<0) Then Sz:=0;
   Pk:=PEABuffer(@QXF^[QXPos^[PIdx]]);
   If DecodePkt Then Begin
    If Fmt=3 Then Begin
@@ -47067,7 +47068,7 @@ Begin
  Total:=W*H;
  GetMem(Cur,Total+64); GetMem(Ref,Total+64); HaveRef:=False;
  For PIdx:=0 To QXCount-1 Do Begin
-  Sz:=QXLen^[PIdx]; If QXPos^[PIdx]+Sz>QXSize Then Sz:=QXSize-QXPos^[PIdx];
+  Sz:=QXLen^[PIdx]; If QXPos^[PIdx]+Sz>QXSize Then Sz:=QXSize-QXPos^[PIdx]; If (QXPos^[PIdx]<0) Or (QXPos^[PIdx]>QXSize) Or (Sz<0) Then Sz:=0;
   Pk:=PEABuffer(@QXF^[QXPos^[PIdx]]);
   If Sz<$86 Then NVRepeat
   Else Begin
@@ -47231,7 +47232,7 @@ Begin
  End;
  NVHasAlpha:=Fmt=3;
  For PIdx:=0 To QXCount-1 Do Begin
-  Sz:=QXLen^[PIdx]; If QXPos^[PIdx]+Sz>QXSize Then Sz:=QXSize-QXPos^[PIdx];
+  Sz:=QXLen^[PIdx]; If QXPos^[PIdx]+Sz>QXSize Then Sz:=QXSize-QXPos^[PIdx]; If (QXPos^[PIdx]<0) Or (QXPos^[PIdx]>QXSize) Or (Sz<0) Then Sz:=0;
   Pk:=PEABuffer(@QXF^[QXPos^[PIdx]]);
   If Planar Then Begin
    If Sz<W*H+2*Cw*Ch Then NVRepeat
