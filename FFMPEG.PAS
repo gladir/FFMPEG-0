@@ -21638,6 +21638,8 @@ Procedure DecodeAVIX(Const Source,Target: String; Mode,Kind: LongInt); Forward;
 Procedure DecodeQTRLE(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeRPZA(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeSMC(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure DecodeQDRAW(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure DecodeQPEG(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeSTRVideo(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeMSNWC(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeMM(Const Source,Target: String; Mode: LongInt); Forward;
@@ -22390,6 +22392,8 @@ End;
 Procedure DecodeNV2(Kind: LongInt; Const Source,Target: String; Mode: LongInt);
 Begin
  If Kind=55 Then Begin DecodePCX(Source,Target,Mode); Exit; End;
+ If Kind=63 Then Begin DecodeQPEG(Source,Target,Mode); Exit; End;
+ If Kind=62 Then Begin DecodeQDRAW(Source,Target,Mode); Exit; End;
  If Kind=60 Then Begin DecodeRPZA(Source,Target,Mode); Exit; End;
  If Kind=61 Then Begin DecodeSMC(Source,Target,Mode); Exit; End;
  If Kind=59 Then Begin DecodeQTRLE(Source,Target,Mode); Exit; End;
@@ -45759,7 +45763,7 @@ Begin
   N:=(4 Shl QXDepth); If N>QXExtLen Then N:=QXExtLen;
   Q:=QXExtPos+QXExtLen-N;
   If (Q-QXExtPos>=9) And (QXT4(QXExtPos+QXExtLen-9)='Bott') Then Dec(Q,9);
-  For I:=0 To (N Div 4)-1 Do If I<256 Then QXPal[I]:=$FF000000 Or LongWord(QXB32(Q+4*I) And $FFFFFF);
+  For I:=0 To (N Div 4)-1 Do If I<256 Then QXPal[I]:=$FF000000 Or LongWord(NVRL32(QXF,QXSize,Q+4*I) And $FFFFFF);
   QXHasPal:=True;
  End;
  QXCount:=0;
@@ -46639,6 +46643,337 @@ Begin
  End;
  FreeMem(Fr,Stride*(((H+3) Div 4)*4+4)+64); QXClose;
  NVFinish('smc');
+End;
+
+{ ---- Apple QuickDraw (libavcodec/qdrw.c) : MOV / AVI ---- }
+Procedure DecodeQDRAW(Const Source,Target: String; Mode: LongInt);
+Var
+ Pk,Fr,Out: PEABuffer; Sz,Sp,PIdx,W,H,Fmt,Bpp,Ver,Op,BppCnt,BppSz,Colors,Flags,Rowbytes,PackType,I,J,Y,Stride,Idx,R,G,B,Begun,FW,FH: LongInt;
+ Got,Bad,Began: Boolean; Pal: Array[0..255] Of LongWord;
+Function GB: LongInt;
+Begin If Sp<Sz Then GB:=Pk^[Sp] Else GB:=0; Inc(Sp); End;
+Function GB16: LongInt;
+Var A: LongInt;
+Begin A:=GB; GB16:=A*256+GB; End;
+Function LeftB: LongInt;
+Var Q0: LongInt;
+Begin Q0:=Sz-Sp; If Q0<0 Then Q0:=0; LeftB:=Q0; End;
+Function Hdr(At: LongInt; Len: LongInt): LongInt;
+Var A,B2,V0,V1,Ww,Hh: LongInt;
+Begin
+ Hdr:=0; If Len<40 Then Exit;
+ Ww:=Pk^[At+6]*256+Pk^[At+7]; Hh:=Pk^[At+8]*256+Pk^[At+9]; V0:=Pk^[At+10]*256+Pk^[At+11]; V1:=Pk^[At+12]*256+Pk^[At+13];
+ If (Ww=0) Or (Hh=0) Then Exit;
+ If V0=$1101 Then Hdr:=1 Else If (V0=$0011) And (V1=$02FF) Then Hdr:=2;
+End;
+Procedure PutF(Row,Pos,V: LongInt);
+Begin If (Row*Stride+Pos>=0) And (Row*Stride+Pos<FH*Stride) Then Fr^[Row*Stride+Pos]:=V; End;
+Function Pal0: Boolean;
+Begin Pal0:=True; End;
+Function DecRle(Step: LongInt; Bits: LongInt; Is16: Boolean): Boolean;
+Var Y2,Size,Left,Code,Pix,J2,Pos,Offset,K: LongInt;
+Begin
+ DecRle:=False;
+ If Is16 Then Offset:=FW Else If Bits In [2,4] Then Offset:=FW Else Offset:=FW*Step;
+ For Y2:=0 To FH-1 Do Begin
+  Pos:=0;
+  If (Bits=2) And ((Offset Div 4)<=200) Then Size:=GB
+  Else If (Bits=2) Or (Bits=4) Or Is16 Or True Then Size:=GB16;
+  If LeftB<Size Then Exit;
+  Left:=Size;
+  While Left>0 Do Begin
+   Code:=GB;
+   If (Code And $80)<>0 Then Begin
+    If Is16 Then Pix:=GB16 Else Pix:=GB;
+    For J2:=1 To 257-Code Do Begin
+     If Is16 Then Begin If Pos<Offset Then Begin PutF(Y2,Pos*2,Pix And 255); PutF(Y2,Pos*2+1,Pix Shr 8); Inc(Pos); End; End
+     Else If Bits=2 Then Begin
+      For K:=0 To 3 Do If Pos<Offset Then Begin PutF(Y2,Pos,(Pix Shr (6-2*K)) And 3); Inc(Pos); End;
+     End Else If Bits=4 Then Begin
+      For K:=0 To 1 Do If Pos<Offset Then Begin PutF(Y2,Pos,(Pix Shr (4-4*K)) And 15); Inc(Pos); End;
+     End Else Begin
+      If Pos<Offset Then PutF(Y2,Pos,Pix);
+      Inc(Pos,Step);
+      If (Pos>=Offset) And (Step>1) Then Begin Dec(Pos,Offset); Inc(Pos); End;
+     End;
+    End;
+    If Is16 Then Dec(Left,3) Else Dec(Left,2);
+   End Else Begin
+    For J2:=1 To Code+1 Do Begin
+     If Is16 Then Begin
+      If Pos<Offset Then Begin Pix:=GB16; PutF(Y2,Pos*2,Pix And 255); PutF(Y2,Pos*2+1,Pix Shr 8); Inc(Pos); End Else Inc(Sp,2);
+     End Else Begin
+      Pix:=GB;
+      If Bits=2 Then Begin
+       For K:=0 To 3 Do If Pos<Offset Then Begin PutF(Y2,Pos,(Pix Shr (6-2*K)) And 3); Inc(Pos); End;
+      End Else If Bits=4 Then Begin
+       For K:=0 To 1 Do If Pos<Offset Then Begin PutF(Y2,Pos,(Pix Shr (4-4*K)) And 15); Inc(Pos); End;
+      End Else Begin
+       If Pos<Offset Then PutF(Y2,Pos,Pix);
+       Inc(Pos,Step);
+       If (Pos>=Offset) And (Step>1) Then Begin Dec(Pos,Offset); Inc(Pos); End;
+      End;
+     End;
+    End;
+    If Is16 Then Dec(Left,1+(Code+1)*2) Else If Bits In [2,4] Then Dec(Left,1+(Code+1)) Else Dec(Left,2+Code);
+   End;
+  End;
+ End;
+ DecRle:=True;
+End;
+Function DecodePkt: Boolean;
+Var Skip512,Eop,I: LongInt; Pm: Boolean;
+Begin
+ DecodePkt:=False; Got:=False; Sp:=0;
+ If (LeftB>=552) And (Hdr(512,Sz-512)<>0) Then Sp:=512;
+ Ver:=Hdr(Sp,Sz-Sp);
+ If Sz-Sp<40 Then Exit;
+ Inc(Sp,6); H:=GB16; W:=GB16;
+ If Ver<>2 Then Exit;
+ Inc(Sp,30);
+ While LeftB>=4 Do Begin
+  Op:=GB16;
+  Case Op Of
+   $0001: Inc(Sp,10);
+   $0098,$0099: Begin
+    Flags:=GB16 And $C000; Inc(Sp,28);
+    BppCnt:=GB16; BppSz:=GB16;
+    If (BppCnt=1) And (BppSz=8) Then Fmt:=0
+    Else If (BppCnt=1) And ((BppSz=4) Or (BppSz=2)) Then Fmt:=0
+    Else If (BppCnt=3) And (BppSz=5) Then Fmt:=2
+    Else Exit;
+    Inc(Sp,18);
+    Colors:=GB16;
+    If Colors>255 Then Exit;
+    If LeftB<(Colors+1)*8 Then Exit;
+    FW:=W; FH:=H;
+    If Not Began Then Begin
+     If (W<1) Or (H<1) Or (W>16000) Or (H>16000) Then Exit;
+     If Fmt=0 Then Stride:=W Else Stride:=W*2;
+     GetMem(Fr,Stride*H+64); FillChar(Fr^,Stride*H+64,0);
+     NVBegin(Mode,Target,W,H,Fmt,QXRn,QXRd);
+     If QXIsMov And (QXSarN>0) Then Begin NVSarN:=QXSarN; NVSarD:=QXSarD; End Else NVSarN:=0;
+     Began:=True;
+     GetMem(Out,W*H*4+64);
+    End;
+    FillChar(Fr^,Stride*H+64,0);
+    FillChar(Pal,SizeOf(Pal),0);
+    Pm:=(Flags And $8000)<>0;
+    For I:=0 To Colors Do Begin
+     Idx:=GB16;
+     If (Idx>255) And Not Pm Then Inc(Sp,6)
+     Else Begin
+      If Fmt<>0 Then Exit;
+      R:=GB; Inc(Sp); G:=GB; Inc(Sp); B:=GB; Inc(Sp);
+      If Pm Then Idx:=I;
+      Pal[Idx And 255]:=(R Shl 16) Or (G Shl 8) Or B;
+     End;
+    End;
+    For I:=0 To 255 Do Begin NVPalR[I]:=(Pal[I] Shr 16) And 255; NVPalG[I]:=(Pal[I] Shr 8) And 255; NVPalB[I]:=Pal[I] And 255; End;
+    Inc(Sp,18);
+    If Op=$0099 Then Inc(Sp,10);
+    If Fmt=2 Then Got:=DecRle(1,0,True)
+    Else If BppSz=2 Then Got:=DecRle(1,2,False)
+    Else If BppSz=4 Then Got:=DecRle(1,4,False)
+    Else Got:=DecRle(BppCnt,8,False);
+    If Not Got Then Exit;
+   End;
+   $009A,$009B: Begin
+    Inc(Sp,4);
+    Rowbytes:=GB16 And $3FFF;
+    If Rowbytes<=250 Then Exit;
+    Inc(Sp,4); H:=GB16; W:=GB16; Inc(Sp,2);
+    PackType:=GB16; Inc(Sp,16);
+    BppCnt:=GB16; BppSz:=GB16;
+    If (BppCnt=3) And (BppSz=8) Then Fmt:=9
+    Else If ((BppCnt=3) And (BppSz=5)) Or ((BppCnt=2) And (BppSz=8)) Then Fmt:=2
+    Else If (BppCnt=4) And (BppSz=8) Then Fmt:=3
+    Else Exit;
+    If PackType=0 Then PackType:=BppCnt;
+    If (PackType<>3) And (PackType<>4) Then Exit;
+    If LeftB<30 Then Exit;
+    FW:=W; FH:=H;
+    If Not Began Then Begin
+     If (W<1) Or (H<1) Or (W>16000) Or (H>16000) Then Exit;
+     Stride:=W*NVBpp(Fmt);
+     GetMem(Fr,Stride*H+64);
+     NVBegin(Mode,Target,W,H,Fmt,QXRn,QXRd);
+     If QXIsMov And (QXSarN>0) Then Begin NVSarN:=QXSarN; NVSarD:=QXSarD; End Else NVSarN:=0;
+     NVHasAlpha:=Fmt=3;
+     Began:=True;
+     GetMem(Out,W*H*4+64);
+    End;
+    FillChar(Fr^,Stride*H+64,0);
+    Inc(Sp,30);
+    If Op=$009B Then Inc(Sp,10);
+    If Fmt=2 Then Got:=DecRle(1,0,True) Else Got:=DecRle(BppCnt,8,False);
+    If Not Got Then Exit;
+   End;
+   $00A1: Begin GB16; Inc(Sp,GB16); End;
+  End;
+  If Got Then Begin
+   If (LeftB Mod 2)=1 Then Inc(Sp);
+   Eop:=GB16;
+   Break;
+  End;
+ End;
+ DecodePkt:=Got;
+End;
+Begin
+ QXOpen(Source);
+ Began:=False; Fmt:=0; FW:=0; FH:=0; Stride:=0;
+ For PIdx:=0 To QXCount-1 Do Begin
+  Sz:=QXLen^[PIdx]; If QXPos^[PIdx]+Sz>QXSize Then Sz:=QXSize-QXPos^[PIdx];
+  Pk:=PEABuffer(@QXF^[QXPos^[PIdx]]);
+  If DecodePkt Then Begin
+   If Fmt=3 Then Begin
+    For I:=0 To W*H-1 Do Begin Out^[I*4]:=Fr^[I*4+3]; Out^[I*4+1]:=Fr^[I*4+2]; Out^[I*4+2]:=Fr^[I*4+1]; Out^[I*4+3]:=Fr^[I*4]; End;
+    NVEmit(Out);
+   End Else NVEmit(Fr);
+  End Else If Began Then NVRepeat;
+  If NVDone Then Break;
+ End;
+ If Began Then Begin FreeMem(Out,W*H*4+64); End;
+ QXClose;
+ NVFinish('qdraw');
+End;
+
+{ ---- Q-team QPEG (libavcodec/qpeg.c) : AVI ---- }
+Procedure DecodeQPEG(Const Source,Target: String; Mode: LongInt);
+Const
+ TabH: Array[0..15] Of Byte=($00,$20,$20,$20,$18,$10,$10,$20,$10,$08,$18,$08,$08,$18,$10,$04);
+ TabW: Array[0..15] Of Byte=($00,$20,$18,$08,$18,$10,$20,$10,$08,$10,$20,$20,$08,$10,$18,$04);
+Var
+ Pk,Cur,Ref: PEABuffer; W,H,PIdx,Sz,Sp,I,Delta,Total: LongInt; CTab: Array[0..127] Of Byte; HaveRef: Boolean;
+Function GB: LongInt;
+Begin If Sp<Sz Then GB:=Pk^[Sp] Else GB:=0; Inc(Sp); End;
+Function LeftB: LongInt;
+Var Q0: LongInt;
+Begin Q0:=Sz-Sp; If Q0<0 Then Q0:=0; LeftB:=Q0; End;
+Procedure PutC(At,V: LongInt);
+Begin If (At>=0) And (At<Total) Then Cur^[At]:=V; End;
+Function GetR(At: LongInt): LongInt;
+Begin If (At>=0) And (At<Total) Then GetR:=Ref^[At] Else GetR:=0; End;
+Procedure Intra;
+Var Code,C0,C1,Run,Copy,Filled,RowsToGo,Dst,Step,P,Z,Ii: LongInt;
+Begin
+ Filled:=0; RowsToGo:=H; Dst:=(H-1)*W;
+ While (LeftB>0) And (RowsToGo>0) Do Begin
+  Code:=GB; Run:=0; Copy:=0;
+  If Code=$FC Then Break;
+  If Code>=$F8 Then Begin C0:=GB; C1:=GB; Run:=((Code And 7) Shl 16)+(C0 Shl 8)+C1+2; End
+  Else If Code>=$F0 Then Begin C0:=GB; Run:=((Code And $F) Shl 8)+C0+2; End
+  Else If Code>=$E0 Then Run:=(Code And $1F)+2
+  Else If Code>=$C0 Then Begin C0:=GB; C1:=GB; Copy:=((Code And $3F) Shl 16)+(C0 Shl 8)+C1+1; End
+  Else If Code>=$80 Then Begin C0:=GB; Copy:=((Code And $7F) Shl 8)+C0+1; End
+  Else Copy:=Code+1;
+  If Run>0 Then Begin
+   P:=GB; Ii:=0;
+   While Ii<Run Do Begin
+    Step:=Run-Ii; If W-Filled<Step Then Step:=W-Filled;
+    For Z:=0 To Step-1 Do PutC(Dst+Filled+Z,P);
+    Inc(Filled,Step); Inc(Ii,Step-1);
+    If Filled>=W Then Begin
+     Filled:=0; Dec(Dst,W); Dec(RowsToGo);
+     While (Run-Ii>W) And (RowsToGo>0) Do Begin
+      For Z:=0 To W-1 Do PutC(Dst+Z,P);
+      Dec(Dst,W); Dec(RowsToGo); Inc(Ii,W);
+     End;
+     If RowsToGo<=0 Then Break;
+    End;
+    Inc(Ii);
+   End;
+  End Else Begin
+   If LeftB<Copy Then Copy:=LeftB;
+   While Copy>0 Do Begin
+    Step:=Copy; If W-Filled<Step Then Step:=W-Filled;
+    For Z:=0 To Step-1 Do Begin PutC(Dst+Filled+Z,GB); End;
+    Inc(Filled,Step); Dec(Copy,Step);
+    If Filled>=W Then Begin
+     Filled:=0; Dec(Dst,W); Dec(RowsToGo);
+     If RowsToGo<=0 Then Break;
+    End;
+   End;
+  End;
+ End;
+End;
+Procedure Inter(Dl: LongInt);
+Var Code,Filled,Hh,Dst,OrigH,MeIdx,MeW,MeH,MeX,MeY,Corr,Val,J,Ii,P,Skip,MePl: LongInt; Break2: Boolean;
+Begin
+ If HaveRef Then Move(Ref^,Cur^,Total);
+ Filled:=0; OrigH:=H; Hh:=H-1; Dst:=Hh*W;
+ While (LeftB>0) And (Hh>=0) Do Begin
+  Code:=GB;
+  If Dl<>0 Then Begin
+   While (LeftB>0) And ((Code And $F0)=$F0) Do Begin
+    If Dl=1 Then Begin
+     MeIdx:=Code And $F; MeW:=TabW[MeIdx]; MeH:=TabH[MeIdx];
+     Corr:=GB;
+     Val:=Corr Shr 4; If Val>7 Then Dec(Val,16); MeX:=Val;
+     Val:=Corr And $F; If Val>7 Then Dec(Val,16); MeY:=Val;
+     If (MeX+Filled<0) Or (MeX+MeW+Filled>W) Or (Hh-MeY-MeH<0) Or (Hh-MeY>=OrigH) Or (Filled+MeW>W) Or (Hh-MeH<0) Then
+     Else Begin
+      MePl:=(Filled+MeX)+(Hh-MeY)*W;
+      For J:=0 To MeH-1 Do For Ii:=0 To MeW-1 Do
+       PutC(Dst+Filled+Ii-J*W,GetR(MePl+Ii-J*W));
+     End;
+    End;
+    Code:=GB;
+   End;
+  End;
+  If Code=$E0 Then Break;
+  If Code>$E0 Then Begin
+   Code:=Code And $1F; P:=GB;
+   For Ii:=0 To Code Do Begin
+    PutC(Dst+Filled,P); Inc(Filled);
+    If Filled>=W Then Begin Filled:=0; Dec(Dst,W); Dec(Hh); If Hh<0 Then Break; End;
+   End;
+  End Else If Code>=$C0 Then Begin
+   Code:=Code And $1F;
+   If Code+1>LeftB Then Break;
+   For Ii:=0 To Code Do Begin
+    PutC(Dst+Filled,GB); Inc(Filled);
+    If Filled>=W Then Begin Filled:=0; Dec(Dst,W); Dec(Hh); If Hh<0 Then Break; End;
+   End;
+  End Else If Code>=$80 Then Begin
+   Code:=Code And $3F;
+   If Code=0 Then Skip:=GB+64 Else If Code=1 Then Skip:=GB+320 Else Skip:=Code;
+   Inc(Filled,Skip);
+   While Filled>=W Do Begin
+    Dec(Filled,W); Dec(Dst,W); Dec(Hh);
+    If Hh<0 Then Break;
+   End;
+  End Else Begin
+   If Code<>0 Then Begin PutC(Dst+Filled,CTab[Code And $7F]); Inc(Filled); End Else Inc(Filled);
+   If Filled>=W Then Begin Filled:=0; Dec(Dst,W); Dec(Hh); End;
+  End;
+ End;
+End;
+Begin
+ QXOpen(Source);
+ W:=QXW; H:=QXH;
+ If (W<1) Or (H<1) Or (W>16000) Or (H>16000) Then Fail('qpeg: dimensions invalides.');
+ For I:=0 To 255 Do Begin NVPalR[I]:=(QXPal[I] Shr 16) And 255; NVPalG[I]:=(QXPal[I] Shr 8) And 255; NVPalB[I]:=QXPal[I] And 255; End;
+ NVBegin(Mode,Target,W,H,0,QXRn,QXRd);
+ If Not QXIsMov Then NVAviSar(W,H);
+ Total:=W*H;
+ GetMem(Cur,Total+64); GetMem(Ref,Total+64); HaveRef:=False;
+ For PIdx:=0 To QXCount-1 Do Begin
+  Sz:=QXLen^[PIdx]; If QXPos^[PIdx]+Sz>QXSize Then Sz:=QXSize-QXPos^[PIdx];
+  Pk:=PEABuffer(@QXF^[QXPos^[PIdx]]);
+  If Sz<$86 Then NVRepeat
+  Else Begin
+   Sp:=4; For I:=0 To 127 Do CTab[I]:=GB; Inc(Sp);
+   Delta:=GB;
+   FillChar(Cur^,Total+64,0);
+   If Delta=$10 Then Intra Else Inter(Delta);
+   Move(Cur^,Ref^,Total); HaveRef:=True;
+   NVEmit(Cur);
+  End;
+  If NVDone Then Break;
+ End;
+ FreeMem(Cur,Total+64); FreeMem(Ref,Total+64); QXClose;
+ NVFinish('qpeg');
 End;
 
 Procedure DecodeAVIX(Const Source,Target: String; Mode,Kind: LongInt);
@@ -69005,6 +69340,8 @@ BEGIN
    WriteLn('DEV    qtrle           QuickTime Animation (RLE) (MOV; decodeur 1/2/4/8/16/24/32 bits; encodeur rgb24/argb/gray octet pour octet)');
    WriteLn('D V    rpza            QuickTime video RPZA (MOV; decodeur exact)');
    WriteLn('D V    smc             QuickTime Graphics SMC (MOV; decodeur, largeur multiple de 32 pour l''identite avec ffmpeg)');
+   WriteLn('D V    qdraw           Apple QuickDraw (MOV; PICT v2 PackBits/DirectBits)');
+   WriteLn('D V    qpeg            Q-team QPEG (AVI; palette 8 bits)');
    WriteLn('D V    ptx             V.Flash PTX image (RGB15)');
    WriteLn('D V    pcx             PC Paintbrush PCX image (1/2/4/8 bits palette, 24 bits RGB)');
    WriteLn('D A    wmav2           WMA2 (44100/48000 Hz, VLC, blocs fixes, sans reservoir/bruit)');   
