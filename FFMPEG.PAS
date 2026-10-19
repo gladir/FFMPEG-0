@@ -3963,6 +3963,7 @@ Begin
   If K0>=0 Then Begin Probe:='c93'; Exit; End;
  End;
  If N>=18 Then If (B[0]=66) And (B[1]=77) And (B[6]=0) And (B[7]=0) And (B[8]=0) And (B[9]=0) And (B[14] In [12,40,56,64,108,124]) And (B[15]=0) Then Begin Probe:='bmp'; Exit; End;
+ If N>=70 Then If (B[0]=10) And (B[1]<=5) And ((B[2]=0) Or (B[2]=1)) And ((B[3]=1) Or (B[3]=2) Or (B[3]=4) Or (B[3]=8)) And (B[64]=0) And (B[65]>=1) And (B[65]<=4) And (Lower(Extension(Name))='pcx') Then Begin Probe:='pcx'; Exit; End;
  If N>=12 Then If ((B[0]=78) And (B[1]=117) And (B[2]=112) And (B[3]=112) And (B[4]=101) And (B[5]=108) And (B[6]=86)) Or ((B[0]=77) And (B[1]=121) And (B[2]=116) And (B[3]=104) And (B[4]=84) And (B[5]=86)) Then Begin Probe:='nuv'; Exit; End;
  If N>=8 Then If (B[0]=80) And (B[1]>=49) And (B[1]<=55) And ((B[2]=10) Or (B[2]=32) Or (B[2]=13) Or (B[2]=9)) And ((B[3]=35) Or ((B[3]>=48) And (B[3]<=57)) Or ((B[1]=55) And (B[3]=87))) Then Begin
   Case B[1] Of 49,52: Probe:='pbm'; 50,53: Probe:='pgm'; 51,54: Probe:='ppm'; Else Probe:='pam'; End; Exit;
@@ -19450,13 +19451,13 @@ Begin
 End;
 
 { ---- encodeurs PAM (rgb24) et PBM (monow) depuis un Y4M 4:2:0 (libavcodec/pnmenc.c ; libswscale yuv2rgb et yuv2mono) ---- }
-Procedure EncodePNM(Const Source,Target: String; IsPbm: Boolean);
+Procedure EncodePNM(Const Source,Target: String; PMode: LongInt);
 Const
  Dith: Array[0..7,0..7] Of Byte=(
   (117,62,158,103,113,58,155,100),(34,199,21,186,31,196,17,182),(144,89,131,76,141,86,127,72),(0,165,41,206,10,175,52,217),
   (110,55,151,96,120,65,162,107),(28,193,14,179,38,203,24,189),(138,83,124,69,148,93,134,79),(7,172,48,213,3,168,45,210));
 Var
- Limit,Cur,At: LongInt; H: Array[0..255] Of Byte; Line,Token,Hdr,Ws,Hs: String; W,Hh,K,Code,X,Y,CW,CH,C,D,E,R,G,B,Yv,Uv,Vv,Acc,Q,Bit,RowB: LongInt;
+ IsPbm: Boolean; GV: Int64; Limit,Cur,At: LongInt; H: Array[0..255] Of Byte; Line,Token,Hdr,Ws,Hs: String; W,Hh,K,Code,X,Y,CW,CH,C,D,E,R,G,B,Yv,Uv,Vv,Acc,Q,Bit,RowB: LongInt;
  Yp,Up,Vp,Img: PEABuffer;
 Function Clip(V: LongInt): LongInt;Begin If V<0 Then Clip:=0 Else If V>255 Then Clip:=255 Else Clip:=V; End;
 Function Sar(V: Int64; N: LongInt): Int64;
@@ -19498,8 +19499,33 @@ Begin
  At:=0; While At<CW*CH Do Begin If CW*CH-At>60000 Then Q:=60000 Else Q:=CW*CH-At; ReadAt(Cur+At,Vp^[At],Q); Inc(At,Q); End;
  CloseRead;
  Str(W,Ws); Str(Hh,Hs);
+ IsPbm:=PMode=1;
  OpenWrite(Target);
- If IsPbm Then Begin
+ If PMode=2 Then Begin
+  { pgm : yuv420p -> gray (plage limitee vers plage pleine, swscale lumRangeToJpeg) }
+  Hdr:='P5'+#10+Ws+' '+Hs+#10+'255'+#10;
+  WriteBytes(Hdr[1],Length(Hdr));
+  GetMem(Img,W+16);
+  For Y:=0 To Hh-1 Do Begin
+   For X:=0 To W-1 Do Begin
+    GV:=Yp^[Y*W+X] Shl 7; If GV>30189 Then GV:=30189;
+    GV:=Sar(GV*19077-39057361,14);
+    GV:=Sar(GV+64,7); If GV<0 Then GV:=0; If GV>255 Then GV:=255;
+    Img^[X]:=GV;
+   End;
+   WriteBytes(Img^,W);
+  End;
+  FreeMem(Img,W+16);
+ End Else If PMode=4 Then Begin
+  If Odd(W) Or Odd(Hh) Then Fail('pgmyuv: largeur et hauteur paires requises.');
+  Str(Hh*3 Div 2,Hs);
+  Hdr:='P5'+#10+Ws+' '+Hs+#10+'255'+#10;
+  WriteBytes(Hdr[1],Length(Hdr));
+  WriteBytes(Yp^,W*Hh);
+  For Y:=0 To CH-1 Do Begin
+   WriteBytes(Up^[Y*CW],CW); WriteBytes(Vp^[Y*CW],CW);
+  End;
+ End Else If IsPbm Then Begin
   Hdr:='P4'+#10+Ws+' '+Hs+#10;
   WriteBytes(Hdr[1],Length(Hdr));
   RowB:=(W+7) Div 8;
@@ -19521,7 +19547,8 @@ Begin
   End;
   FreeMem(Img,RowB+16);
  End Else Begin
-  Hdr:='P7'+#10+'WIDTH '+Ws+#10+'HEIGHT '+Hs+#10+'DEPTH 3'+#10+'MAXVAL 255'+#10+'TUPLTYPE RGB'+#10+'ENDHDR'+#10;
+  If PMode=3 Then Hdr:='P6'+#10+Ws+' '+Hs+#10+'255'+#10
+  Else Hdr:='P7'+#10+'WIDTH '+Ws+#10+'HEIGHT '+Hs+#10+'DEPTH 3'+#10+'MAXVAL 255'+#10+'TUPLTYPE RGB'+#10+'ENDHDR'+#10;
   WriteBytes(Hdr[1],Length(Hdr));
   GetMem(Img,W*3+16);
   For Y:=0 To Hh-1 Do Begin
@@ -21572,10 +21599,11 @@ Procedure DecodeFLVScreen(Const Source,Target: String; Mode: LongInt); Forward;
 Function FLVVideoCodec(Const Name: String): LongInt; Forward;
 Function EAVDetect(Const Source: String): LongInt; Forward;
 { ---- PNM / PAM / PBM (libavcodec/pnm.c, pnmdec.c) : images P1..P7 vers le circuit d'image commun ---- }
+Var PnmYuvFlag: Boolean;
 Procedure DecodePNM(Const Source,Target: String; Mode: LongInt);
 Var
  F,Img: PEABuffer; Size,Pos,W,H,Typ,Maxval,Depth,Comp,SampleLen,Fmt,I,J,K,N,V,Q,RowBytes,Bpp,Up,Fc: LongInt;
- Tok,Tup: String; IsMono,MonoWhite,Is16: Boolean; Smp: Array[0..7] Of LongInt; Bits: LongInt;
+ Tok,Tup: String; IsMono,MonoWhite,Is16: Boolean; Smp: Array[0..7] Of LongInt; Bits,Cw,Ch2: LongInt;
 Function IsSp(C: LongInt): Boolean;
 Begin IsSp:=(C=32) Or (C=10) Or (C=13) Or (C=9); End;
 Function GetTok: String;
@@ -21638,6 +21666,25 @@ Begin
   End Else Maxval:=1;
  End;
  If (W>16000) Or (H>16000) Then Fail('pnm: dimensions trop grandes.');
+ If PnmYuvFlag And (Typ=5) And (Maxval<256) Then Begin
+  { pgmyuv : YUV 4:2:0 stocke dans une image PGM de hauteur 3/2 }
+  If Odd(W) Or ((H*2) Mod 3<>0) Then Fail('pgmyuv: dimensions incorrectes.');
+  H:=H*2 Div 3;
+  If Odd(H) Then Fail('pgmyuv: hauteur paire requise.');
+  If Int64(W)*(H*3 Div 2)>Size-Pos Then Fail('pnm: donnees insuffisantes.');
+  Cw:=W Div 2; Ch2:=H Div 2;
+  NVBegin(Mode,Target,W,H,7,25,1); NVSarN:=0; NVSarD:=0;
+  NVSubX:=1; NVSubY:=1; NVCW:=Cw; NVCH:=Ch2; NVYTag:='C420jpeg'; NVIl:='p';
+  GetMem(Img,W*H+2*Cw*Ch2+16);
+  Move(F^[Pos],Img^[0],W*H);
+  For I:=0 To Ch2-1 Do Begin
+   Move(F^[Pos+W*H+I*W],Img^[W*H+I*Cw],Cw);
+   Move(F^[Pos+W*H+I*W+Cw],Img^[W*H+Cw*Ch2+I*Cw],Cw);
+  End;
+  NVEmit(Img);
+  FreeMem(Img,W*H+2*Cw*Ch2+16); FreeMem(F,Size+64);
+  NVFinish('pgmyuv'); Exit;
+ End;
  Is16:=SampleLen=16;
  If IsMono Then RowBytes:=(W+7) Div 8 Else If Is16 Then RowBytes:=W*Comp*2 Else RowBytes:=W*Comp;
  If Int64(RowBytes)*H>Size-Pos Then
@@ -21974,11 +22021,98 @@ Begin
  NVFinish('nuv');
 End;
 
+{ ---- PCX (libavcodec/pcx.c) ---- }
+Procedure DecodePCX(Const Source,Target: String; Mode: LongInt);
+Var
+ F,Img,Scan: PEABuffer; Size,Pos,Comp,Bpp,Xmin,Ymin,Xmax,Ymax,W,H,Planes,Bpl,Bps,Y,X,I,Fmt,V,M,Q,PalStart,Dx,Dy: LongInt;
+Function RL16(At: LongInt): LongInt;Begin RL16:=NVRL16(F,Size,At); End;
+Procedure RleLine;
+Var Run,Val,N: LongInt;
+Begin
+ If Pos>=Size Then Begin FillChar(Scan^,Bps,0); Exit; End;
+ If Comp<>0 Then Begin
+  N:=0;
+  While (N<Bps) And (Pos<Size) Do Begin
+   Run:=1; Val:=F^[Pos]; Inc(Pos);
+   If (Val>=$C0) And (Pos<Size) Then Begin Run:=Val And $3F; Val:=F^[Pos]; Inc(Pos); End;
+   While (N<Bps) And (Run>0) Do Begin Scan^[N]:=Val; Inc(N); Dec(Run); End;
+  End;
+ End Else Begin
+  N:=Size-Pos; If N>Bps Then N:=Bps;
+  Move(F^[Pos],Scan^,N); Inc(Pos,N);
+ End;
+End;
+Begin
+ NVLoad(Source,F,Size);
+ If Size<128 Then Fail('pcx: fichier trop court.');
+ If (F^[0]<>10) Or (F^[1]>5) Then Fail('pcx: signature invalide.');
+ Comp:=F^[2]; Bpp:=F^[3];
+ Xmin:=RL16(4); Ymin:=RL16(6); Xmax:=RL16(8); Ymax:=RL16(10);
+ Dx:=RL16(12); Dy:=RL16(14);
+ If (Xmax<Xmin) Or (Ymax<Ymin) Then Fail('pcx: dimensions invalides.');
+ W:=Xmax-Xmin+1; H:=Ymax-Ymin+1;
+ Planes:=F^[65]; Bpl:=RL16(66); Bps:=Planes*Bpl;
+ If (Bps<(W*Bpp*Planes+7) Div 8) Or ((Comp=0) And (Bps>(Size-128) Div H)) Then Fail('pcx: donnees corrompues.');
+ If (Planes=3) And (Bpp=8) Then Fmt:=9
+ Else If ((Planes=1) And ((Bpp=8) Or (Bpp=4) Or (Bpp=2) Or (Bpp=1))) Or ((Planes=4) And (Bpp=1)) Or ((Planes=3) And (Bpp=1)) Or ((Planes=2) And (Bpp=1)) Then Fmt:=0
+ Else Fail('pcx: format non pris en charge.');
+ If (W>16000) Or (H>16000) Then Fail('pcx: dimensions trop grandes.');
+ NVBegin(Mode,Target,W,H,Fmt,25,1);
+ If (Dx>0) And (Dy>0) Then Begin NVGcd(Dx,Dy); NVSarN:=Dx; NVSarD:=Dy; End Else Begin NVSarN:=0; NVSarD:=1; End;
+ FillChar(NVPalR,256,0); FillChar(NVPalG,256,0); FillChar(NVPalB,256,0);
+ Pos:=128;
+ GetMem(Scan,Bps+64); FillChar(Scan^,Bps+64,0);
+ GetMem(Img,W*H*NVBpp(Fmt)+64);
+ If Fmt=9 Then Begin
+  For Y:=0 To H-1 Do Begin
+   RleLine;
+   For X:=0 To W-1 Do Begin
+    Img^[(Y*W+X)*3]:=Scan^[X]; Img^[(Y*W+X)*3+1]:=Scan^[X+Bpl]; Img^[(Y*W+X)*3+2]:=Scan^[X+2*Bpl];
+   End;
+  End;
+ End Else Begin
+  If (Planes=1) And (Bpp=8) Then Begin
+   If Size<769 Then Fail('pcx: fichier trop court.');
+   For Y:=0 To H-1 Do Begin RleLine; Move(Scan^,Img^[Y*W],W); End;
+   PalStart:=Size-769;
+   If F^[PalStart]<>12 Then Fail('pcx: palette attendue apres les donnees.');
+   For I:=0 To 255 Do Begin NVPalR[I]:=F^[PalStart+1+I*3]; NVPalG[I]:=F^[PalStart+2+I*3]; NVPalB[I]:=F^[PalStart+3+I*3]; End;
+  End Else If Planes=1 Then Begin
+   For Y:=0 To H-1 Do Begin
+    RleLine;
+    For X:=0 To W-1 Do Begin
+     Q:=X*Bpp; V:=(Scan^[Q Shr 3] Shr (8-Bpp-(Q And 7))) And ((1 Shl Bpp)-1);
+     Img^[Y*W+X]:=V;
+    End;
+   End;
+  End Else Begin
+   For Y:=0 To H-1 Do Begin
+    RleLine;
+    For X:=0 To W-1 Do Begin
+     M:=$80 Shr (X And 7); V:=0;
+     For I:=Planes-1 Downto 0 Do Begin
+      V:=V*2; If (Scan^[I*Bpl+(X Shr 3)] And M)<>0 Then Inc(V);
+     End;
+     Img^[Y*W+X]:=V;
+    End;
+   End;
+  End;
+  If Bpp*Planes=1 Then Begin NVPalR[0]:=0; NVPalG[0]:=0; NVPalB[0]:=0; NVPalR[1]:=255; NVPalG[1]:=255; NVPalB[1]:=255; End
+  Else If Bpp<8 Then Begin
+   For I:=0 To 15 Do Begin NVPalR[I]:=F^[16+I*3]; NVPalG[I]:=F^[17+I*3]; NVPalB[I]:=F^[18+I*3]; End;
+  End;
+ End;
+ NVEmit(Img);
+ FreeMem(Img,W*H*NVBpp(Fmt)+64); FreeMem(Scan,Bps+64); FreeMem(F,Size+64);
+ NVFinish('pcx');
+End;
+
 Procedure DecodeNV2(Kind: LongInt; Const Source,Target: String; Mode: LongInt);
 Begin
+ If Kind=55 Then Begin DecodePCX(Source,Target,Mode); Exit; End;
  If Kind=54 Then Begin DecodeNUV(Source,Target,Mode); Exit; End;
  If (Kind>=51) And (Kind<=53) Then Begin DecodeMsAVI(Source,Target,Mode,Kind-49); Exit; End;
- If Kind=50 Then Begin DecodePNM(Source,Target,Mode); Exit; End;
+ If Kind=50 Then Begin PnmYuvFlag:=InputFormat='pgmyuv'; DecodePNM(Source,Target,Mode); Exit; End;
  If Kind=12 Then DecodeCAVS(Source,Target,Mode)
  Else If Kind=13 Then DecodeDV(Source,Target,Mode,False)
  Else If Kind=15 Then DecodeDSICin(Source,Target,Mode)
@@ -67511,6 +67645,10 @@ BEGIN
    WriteLn('D V D  mszh            LCL (LossLess Codec Library) MSZH (AVI; tous les types d''image LCL)');
    WriteLn('DEV    pam             PAM (Portable AnyMap) image (decodeur P7 8/16 bits; encodeur RGB24 depuis Y4M, -frames:v 1)');
    WriteLn('DEV    pbm             PBM (Portable BitMap) image (decodeur P1/P4; encodeur monow depuis Y4M, largeur >= 8)');
+   WriteLn('DEV    pgm             PGM (Portable GrayMap) image (decodeur P2/P5 8/16 bits; encodeur gray depuis Y4M, -frames:v 1)');
+   WriteLn('DEV    pgmyuv          PGMYUV (Portable GrayMap, YUV 4:2:0 planar)');
+   WriteLn('DEV    ppm             PPM (Portable PixelMap) image (decodeur P3/P6; encodeur RGB24 depuis Y4M, -frames:v 1)');
+   WriteLn('D V    pcx             PC Paintbrush PCX image (1/2/4/8 bits palette, 24 bits RGB)');
    WriteLn(' EV    png             PNG (RGB24, sans compression)');
    WriteLn('D A    wmav2           WMA2 (44100/48000 Hz, VLC, blocs fixes, sans reservoir/bruit)');   
    WriteLn('Copie conteneurs seulement: h264, vp9, opus; AAC hors ADTS (voir limites).');
@@ -67578,7 +67716,7 @@ BEGIN
    VideoCodec:=Lower(NextArgument);
    If VideoCodec='libxvid' Then VideoCodec:='mpeg4';
    If (VideoCodec<>'png') And (VideoCodec<>'gif') And (VideoCodec<>'copy') And
-    (VideoCodec<>'ffv1') And (VideoCodec<>'flv') And (VideoCodec<>'pam') And (VideoCodec<>'pbm') And (VideoCodec<>'mpeg4') And (VideoCodec<>'mpeg1video') And (VideoCodec<>'mpeg2video') And (VideoCodec<>'rawvideo') And
+    (VideoCodec<>'ffv1') And (VideoCodec<>'flv') And (VideoCodec<>'pam') And (VideoCodec<>'pbm') And (VideoCodec<>'pgm') And (VideoCodec<>'ppm') And (VideoCodec<>'pgmyuv') And (VideoCodec<>'mpeg4') And (VideoCodec<>'mpeg1video') And (VideoCodec<>'mpeg2video') And (VideoCodec<>'rawvideo') And
     (VideoCodec<>'asv1') And (VideoCodec<>'asv2') And (VideoCodec<>'msmpeg4') And (VideoCodec<>'msmpeg4v1') And (VideoCodec<>'msmpeg4v2') And (VideoCodec<>'huffyuv') And (VideoCodec<>'h263') And (VideoCodec<>'h263p') And (VideoCodec<>'bmp') And (VideoCodec<>'dnxhd') And (VideoCodec<>'dvvideo') And (VideoCodec<>'jpegls') And (VideoCodec<>'ljpeg') And (VideoCodec<>'mjpeg') And (VideoCodec<>'libx264') And (VideoCodec<>'libtheora') Then
     Fail('Codec video: png/gif, bmp, copy, ffv1, flv, msmpeg4, msmpeg4v1, msmpeg4v2, mpeg4, mpeg1video, mpeg2video, rawvideo, asv1, asv2, huffyuv, h263, h263p, dnxhd, dvvideo, jpegls, ljpeg, mjpeg, libx264, libxvid, libtheora.');
   End Else If (Argument='-vframes') Or (Argument='-frames:v') Then Begin
@@ -67748,6 +67886,7 @@ BEGIN
   Else If (InputFormat='') And (PcmIsRawName(FormatName(Extension(Intermediate))) Or (FormatName(Extension(Intermediate))='daud')) Then Detected:=FormatName(Extension(Intermediate))
   Else If ((InputFormat='') Or (InputFormat='vob') Or (InputFormat='mpeg')) And PcmVobProbe(Intermediate) Then Detected:='vob';
  End;
+ If (Detected='pgm') And ((Lower(Extension(Intermediate))='pgmyuv') Or (InputFormat='pgmyuv')) Then Detected:='pgmyuv';
  If InputFormat='' Then InputFormat:=Detected Else
  If (InputFormat<>Detected) And Not ((InputFormat='dvbsub') And (Detected='')) And Not (((InputFormat='g726') Or (InputFormat='g726le')) And (Detected='')) And Not (((InputFormat='h263') Or (InputFormat='h261') Or (InputFormat='h264')) And (Detected='')) And Not ((InputFormat='eac3') And (Detected='ac3')) Then Fail(
  'Format impose incompatible avec la signature du fichier.');
@@ -67794,7 +67933,7 @@ BEGIN
  Else If (InputFormat='mm') And Not IsHTTP(InputPath) Then NVKind:=48
  Else If (InputFormat='mvi') And Not IsHTTP(InputPath) Then NVKind:=49
  Else If InputFormat='bethsoftvid' Then NVKind:=1 Else If InputFormat='bfi' Then NVKind:=2 Else If InputFormat='c93' Then NVKind:=3
- Else If InputFormat='bmp' Then NVKind:=4 Else If (InputFormat='pam') Or (InputFormat='pbm') Or (InputFormat='pgm') Or (InputFormat='ppm') Then NVKind:=50 Else If InputFormat='nuv' Then NVKind:=54 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22 Else If (InputFormat='flic') And Not IsHTTP(InputPath) Then NVKind:=23 Else If (InputFormat='gif') And Not IsHTTP(InputPath) Then NVKind:=25 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=2) Then NVKind:=27 Else If (InputFormat='h263') And Not IsHTTP(InputPath) Then NVKind:=28 Else If (InputFormat='h261') And Not IsHTTP(InputPath) Then NVKind:=29 Else If (InputFormat='idcin') And Not IsHTTP(InputPath) Then NVKind:=30 Else If (InputFormat='ipmovie') And Not IsHTTP(InputPath) Then NVKind:=38 Else If (InputFormat='jpegls_pipe') And Not IsHTTP(InputPath) Then NVKind:=39 Else If (InputFormat='jpeg_pipe') And Not IsHTTP(InputPath) Then NVKind:=46 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And MP4HasMjpb(InputPath) Then NVKind:=47 Else If (InputFormat='h264') And Not IsHTTP(InputPath) Then NVKind:=33
+ Else If InputFormat='bmp' Then NVKind:=4 Else If (InputFormat='pam') Or (InputFormat='pbm') Or (InputFormat='pgm') Or (InputFormat='ppm') Or (InputFormat='pgmyuv') Then NVKind:=50 Else If InputFormat='nuv' Then NVKind:=54 Else If InputFormat='pcx' Then NVKind:=55 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22 Else If (InputFormat='flic') And Not IsHTTP(InputPath) Then NVKind:=23 Else If (InputFormat='gif') And Not IsHTTP(InputPath) Then NVKind:=25 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=2) Then NVKind:=27 Else If (InputFormat='h263') And Not IsHTTP(InputPath) Then NVKind:=28 Else If (InputFormat='h261') And Not IsHTTP(InputPath) Then NVKind:=29 Else If (InputFormat='idcin') And Not IsHTTP(InputPath) Then NVKind:=30 Else If (InputFormat='ipmovie') And Not IsHTTP(InputPath) Then NVKind:=38 Else If (InputFormat='jpegls_pipe') And Not IsHTTP(InputPath) Then NVKind:=39 Else If (InputFormat='jpeg_pipe') And Not IsHTTP(InputPath) Then NVKind:=46 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And MP4HasMjpb(InputPath) Then NVKind:=47 Else If (InputFormat='h264') And Not IsHTTP(InputPath) Then NVKind:=33
  Else If (InputFormat='avi') And Not IsHTTP(InputPath) Then Begin
   AsvTag:=AVIVideoFourCC(Intermediate);
   If AsvTag='CSCD' Then NVKind:=5 Else If (AsvTag='tscc') Or (AsvTag='TSCC') Then NVKind:=6
@@ -67848,11 +67987,16 @@ BEGIN
   Temps[2]:=NewTemporary; EncodeBMPFromY4M(Intermediate,Temps[2]);
   Commit(Temps[2]); Temps[2]:=''; WriteLn('Image creee: ',OutputPath); Halt(0);
  End;
- If (InputFormat='yuv4mpegpipe') And ((VideoCodec='pam') Or (VideoCodec='pbm') Or (OutputFormat='pam') Or (OutputFormat='pbm')) Then Begin
+ If (InputFormat='yuv4mpegpipe') And ((VideoCodec='pam') Or (VideoCodec='pbm') Or (VideoCodec='pgm') Or (VideoCodec='ppm') Or (VideoCodec='pgmyuv') Or (OutputFormat='pam') Or (OutputFormat='pbm') Or (OutputFormat='pgm') Or (OutputFormat='ppm') Or (OutputFormat='pgmyuv')) Then Begin
   If VideoFrames<>1 Then Fail('Sortie PAM/PBM: -frames:v 1 requis.');
   If NoVideo Or (AudioCodec<>'') Or HasBitrate Or (RequestedRate<>0) Or (RequestedChannels<>0) Or (ImageWidth<>0) Or IsHTTP(InputPath) Or HasCrop Then
    Fail('Sortie PAM/PBM: entree Y4M locale sans autre option requise.');
-  Temps[2]:=NewTemporary; EncodePNM(Intermediate,Temps[2],(VideoCodec='pbm') Or ((VideoCodec='') And (OutputFormat='pbm')));
+  Temps[2]:=NewTemporary;
+  If (VideoCodec='pbm') Or ((VideoCodec='') And (OutputFormat='pbm')) Then EncodePNM(Intermediate,Temps[2],1)
+  Else If (VideoCodec='pgm') Or ((VideoCodec='') And (OutputFormat='pgm')) Then EncodePNM(Intermediate,Temps[2],2)
+  Else If (VideoCodec='ppm') Or ((VideoCodec='') And (OutputFormat='ppm')) Then EncodePNM(Intermediate,Temps[2],3)
+  Else If (VideoCodec='pgmyuv') Or ((VideoCodec='') And (OutputFormat='pgmyuv')) Then EncodePNM(Intermediate,Temps[2],4)
+  Else EncodePNM(Intermediate,Temps[2],0);
   Commit(Temps[2]); Temps[2]:=''; WriteLn('Image creee: ',OutputPath); Halt(0);
  End;
  If (InputFormat='avi') And Not IsHTTP(InputPath) And ((OutputFormat='yuv4mpegpipe') Or (VideoCodec='mpeg4') Or (VideoCodec='mpeg1video') Or
