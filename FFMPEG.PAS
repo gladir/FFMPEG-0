@@ -3963,6 +3963,7 @@ Begin
   If K0>=0 Then Begin Probe:='c93'; Exit; End;
  End;
  If N>=18 Then If (B[0]=66) And (B[1]=77) And (B[6]=0) And (B[7]=0) And (B[8]=0) And (B[9]=0) And (B[14] In [12,40,56,64,108,124]) And (B[15]=0) Then Begin Probe:='bmp'; Exit; End;
+ If N>=12 Then If (B[0]=70) And (B[1]=79) And (B[2]=82) And (B[3]=77) And (B[8]=82) And (B[9]=76) And (B[10]=86) And ((B[11]=50) Or (B[11]=51)) Then Begin Probe:='rl2'; Exit; End;
  If N>=8 Then If (B[0]=$84) And (B[1]=$10) And (B[2]=255) And (B[3]=255) And (B[4]=255) And (B[5]=255) Then Begin Probe:='roq'; Exit; End;
  If N>=33 Then If (B[0]=137) And (B[1]=80) And (B[2]=78) And (B[3]=71) And (B[4]=13) And (B[5]=10) And (B[6]=26) And (B[7]=10) Then Begin Probe:='png'; Exit; End;
  If N>=12 Then If (B[0]=1) And (B[1]=$DA) And (B[3]<=2) And ((Lower(Extension(Name))='sgi') Or (Lower(Extension(Name))='rgb') Or (Lower(Extension(Name))='rgba') Or (Lower(Extension(Name))='bw')) Then Begin Probe:='sgi'; Exit; End;
@@ -21654,6 +21655,7 @@ Procedure DecodeQDRAW(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeQPEG(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeRawQX(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeRoQ(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure DecodeRL2(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeSTRVideo(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeMSNWC(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeMM(Const Source,Target: String; Mode: LongInt); Forward;
@@ -22406,6 +22408,7 @@ End;
 Procedure DecodeNV2(Kind: LongInt; Const Source,Target: String; Mode: LongInt);
 Begin
  If Kind=55 Then Begin DecodePCX(Source,Target,Mode); Exit; End;
+ If Kind=66 Then Begin DecodeRL2(Source,Target,Mode); Exit; End;
  If Kind=65 Then Begin DecodeRoQ(Source,Target,Mode); Exit; End;
  If Kind=64 Then Begin DecodeRawQX(Source,Target,Mode); Exit; End;
  If Kind=63 Then Begin DecodeQPEG(Source,Target,Mode); Exit; End;
@@ -47466,6 +47469,109 @@ Begin
  FreeMem(Src,Frames*FrameSize*Channels*4+16);
 End;
 
+{ ---- RL2 (libavformat/rl2.c, libavcodec/rl2.c) ---- }
+Procedure DecodeRL2(Const Source,Target: String; Mode: LongInt);
+Const W=320; H=200;
+Var
+ F,Fr,Back,Out: PEABuffer; Size,BackSize,FrameCount,SoundRate,Rate,Chans,DefSnd,VideoBase,Ex,ExLen,I,Pk,PkLen,Rn,Rd,TabPos: LongInt;
+ Sig: LongInt; HasBack: Boolean; Cs,Co,As_: LongInt;
+Procedure RleDecode(Inp: PEABuffer; InSize: LongInt; OutB: PEABuffer; VBase: LongInt; UseBack: Boolean);
+Var
+ BaseX,BaseY,Ip,Op,LineEnd,OutEnd,Bp,V,Len,Cp,Z: LongInt;
+Begin
+ BaseX:=VBase Mod W; BaseY:=VBase Div W;
+ OutEnd:=W*H; Op:=0; Bp:=0;
+ If UseBack Then Begin
+  For Z:=0 To BaseY Do Begin Move(Back^[Bp],OutB^[Op],W); Inc(Op,W); Inc(Bp,W); End;
+  Inc(Bp,BaseX-W);
+ End Else Inc(Op,W*(BaseY+1));
+ LineEnd:=Op; Inc(Op,BaseX-W);
+ Ip:=0;
+ While Ip<InSize Do Begin
+  V:=Inp^[Ip]; Inc(Ip); Len:=1;
+  If V>=$80 Then Begin
+   If Ip>=InSize Then Break;
+   Len:=Inp^[Ip]; Inc(Ip);
+   If Len=0 Then Break;
+   V:=V And $7F;
+  End;
+  If UseBack Then Begin
+   If V=0 Then Begin
+    Repeat
+     Cp:=LineEnd-Op; If Len<Cp Then Cp:=Len;
+     If (Op>=0) And (Bp>=0) Then Move(Back^[Bp],OutB^[Op],Cp);
+     Inc(Op,Cp); Inc(Bp,Cp); Dec(Len,Cp);
+     If Op=LineEnd Then Begin
+      If Op=OutEnd Then Exit;
+      LineEnd:=LineEnd+W;
+     End;
+    Until Len<=0;
+    Continue;
+   End;
+   Inc(Bp,Len);
+   V:=V Or $80;
+  End;
+  While Len>0 Do Begin
+   Dec(Len);
+   If (Op>=0) And (Op<OutEnd+W) Then OutB^[Op]:=V;
+   Inc(Op);
+   If Op=LineEnd Then Begin
+    If Op=OutEnd Then Exit;
+    LineEnd:=LineEnd+W;
+   End;
+  End;
+ End;
+ If UseBack Then Begin
+  While True Do Begin
+   If LineEnd-Op>0 Then Move(Back^[Bp],OutB^[Op],LineEnd-Op);
+   If LineEnd=OutEnd Then Break;
+   Inc(Bp,LineEnd-Op);
+   Op:=LineEnd; LineEnd:=LineEnd+W;
+  End;
+ End;
+End;
+Begin
+ NVLoad(Source,F,Size);
+ If (Size<30+774) Or (F^[0]<>70) Or (F^[1]<>79) Or (F^[2]<>82) Or (F^[3]<>77) Then Fail('rl2: signature invalide.');
+ BackSize:=NVRL32(F,Size,4);
+ Sig:=F^[8]*16777216+F^[9]*65536+F^[10]*256+F^[11];
+ FrameCount:=NVRL32(F,Size,16);
+ SoundRate:=NVRL16(F,Size,22); Rate:=NVRL16(F,Size,24); Chans:=NVRL16(F,Size,26); DefSnd:=NVRL16(F,Size,28);
+ If (Sig<>$524C5632) And (Sig<>$524C5633) Then Fail('rl2: signature RLV2/RLV3 requise.');
+ If (BackSize<0) Or (BackSize>1073741823) Or (FrameCount<0) Or (FrameCount>268435455) Then Fail('rl2: en-tete invalide.');
+ ExLen:=6+768; If (Sig=$524C5633) And (BackSize>0) Then Inc(ExLen,BackSize);
+ Ex:=30; If Ex+ExLen>Size Then Fail('rl2: en-tete tronque.');
+ VideoBase:=NVRL16(F,Size,Ex);
+ If VideoBase>=W*H Then Fail('rl2: video_base invalide.');
+ If SoundRate<>0 Then Begin
+  If (Chans=0) Or (Chans>42) Then Fail('rl2: nombre de canaux invalide.');
+  Rn:=Rate; Rd:=DefSnd;
+ End Else Begin Rn:=11025; Rd:=1103; End;
+ If (Rn<1) Or (Rd<1) Then Fail('rl2: cadence invalide.');
+ NVGcd(Rn,Rd);
+ For I:=0 To 255 Do Begin NVPalR[I]:=F^[Ex+6+I*3]; NVPalG[I]:=F^[Ex+7+I*3]; NVPalB[I]:=F^[Ex+8+I*3]; End;
+ GetMem(Fr,W*H+W+64); GetMem(Back,W*H+254+64); HasBack:=ExLen-(6+768)>0;
+ If HasBack Then Begin
+  FillChar(Back^,W*H+254,0);
+  RleDecode(PEABuffer(@F^[Ex+6+768]),ExLen-(6+768),Back,0,False);
+ End;
+ TabPos:=Ex+ExLen;
+ NVBegin(Mode,Target,W,H,0,Rn,Rd); NVSarN:=0; NVSarD:=0;
+ For I:=0 To FrameCount-1 Do Begin
+  Cs:=NVRL32(F,Size,TabPos+4*I); Co:=NVRL32(F,Size,TabPos+4*FrameCount+4*I); As_:=NVRL32(F,Size,TabPos+8*FrameCount+4*I) And $FFFF;
+  If TabPos+12*FrameCount>Size Then Break;
+  If (Cs<0) Or (As_>Cs) Then Break;
+  Pk:=Co+As_; PkLen:=Cs-As_;
+  If (Pk<0) Or (Pk+PkLen>Size) Then Break;
+  FillChar(Fr^,W*H+W+64,0);
+  RleDecode(PEABuffer(@F^[Pk]),PkLen,Fr,VideoBase,HasBack);
+  NVEmit(Fr);
+  If NVDone Then Break;
+ End;
+ FreeMem(Fr,W*H+W+64); FreeMem(Back,W*H+254+64); FreeMem(F,Size+64);
+ NVFinish('rl2');
+End;
+
 Procedure DecodeAVIX(Const Source,Target: String; Mode,Kind: LongInt);
 Var Pos,PkPos,PkLen,RN,RD,I,Y,X,Cw,Ch,Bs,Msg2: LongInt; Ok,FFBegun: Boolean; Msg: String; PIdx: LongInt; NbF,NbP: Int64;
 Begin
@@ -69359,6 +69465,7 @@ Begin
  WriteLn(' DE avi             AVI H264/MPEG4, AAC/MP3 (copie); decodeurs FFV1, FLASHSV, HUFFYUV/FFVHUFF, Autodesk RLE, FRAPS, H263/H261/FLV1');
  WriteLn(' DE flv             FLV: video Sorenson Spark (decodeur I/P complet) ou Screen Video vers Y4M/PNG/BMP; FLV1 intra natif en sortie; extraction image H264 CAVLC');
  WriteLn(' D  idcin           id Cinematic (video idcinvideo PAL8 vers Y4M/PNG/BMP, audio PCM vers WAV)');
+ WriteLn('D   rl2             RL2');
  WriteLn('DE  roq             id RoQ (video roqvideo, audio roq_dpcm)');
  WriteLn(' D  ipmovie         Interplay MVE (video interplayvideo PAL8/RGB555 vers Y4M/PNG/BMP, audio PCM/interplay_dpcm vers WAV)');
  WriteLn(' D  jpegls_pipe     piped jpegls sequence (image JPEG-LS vers Y4M/PNG/BMP)');
@@ -69835,6 +69942,7 @@ BEGIN
    WriteLn('D V    qpeg            Q-team QPEG (AVI; palette 8 bits)');
    WriteLn('D V D  roqvideo        id RoQ video (fichiers .roq; decodeur exact; sortie yuvj444p ou yuv420p)');
    WriteLn('DEA    roq_dpcm        id RoQ DPCM (fichiers .roq; decodeur et encodeur octet pour octet, 22050 Hz mono/stereo)');
+   WriteLn('D V    rl2             RL2 video (fichiers .rl2 RLV2/RLV3, PAL8 320x200; audio PCM ignore)');
    WriteLn('D V    ptx             V.Flash PTX image (RGB15)');
    WriteLn('D V    pcx             PC Paintbrush PCX image (1/2/4/8 bits palette, 24 bits RGB)');
    WriteLn('D A    wmav2           WMA2 (44100/48000 Hz, VLC, blocs fixes, sans reservoir/bruit)');   
@@ -70120,7 +70228,7 @@ BEGIN
  Else If (InputFormat='mm') And Not IsHTTP(InputPath) Then NVKind:=48
  Else If (InputFormat='mvi') And Not IsHTTP(InputPath) Then NVKind:=49
  Else If InputFormat='bethsoftvid' Then NVKind:=1 Else If InputFormat='bfi' Then NVKind:=2 Else If InputFormat='c93' Then NVKind:=3
- Else If InputFormat='bmp' Then NVKind:=4 Else If (InputFormat='pam') Or (InputFormat='pbm') Or (InputFormat='pgm') Or (InputFormat='ppm') Or (InputFormat='pgmyuv') Then NVKind:=50 Else If InputFormat='nuv' Then NVKind:=54 Else If InputFormat='pcx' Then NVKind:=55 Else If InputFormat='png' Then NVKind:=58 Else If InputFormat='roq' Then NVKind:=65 Else If InputFormat='sgi' Then NVKind:=56 Else If InputFormat='ptx' Then NVKind:=57 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22 Else If (InputFormat='flic') And Not IsHTTP(InputPath) Then NVKind:=23 Else If (InputFormat='gif') And Not IsHTTP(InputPath) Then NVKind:=25 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=2) Then NVKind:=27 Else If (InputFormat='h263') And Not IsHTTP(InputPath) Then NVKind:=28 Else If (InputFormat='h261') And Not IsHTTP(InputPath) Then NVKind:=29 Else If (InputFormat='idcin') And Not IsHTTP(InputPath) Then NVKind:=30 Else If (InputFormat='ipmovie') And Not IsHTTP(InputPath) Then NVKind:=38 Else If (InputFormat='jpegls_pipe') And Not IsHTTP(InputPath) Then NVKind:=39 Else If (InputFormat='jpeg_pipe') And Not IsHTTP(InputPath) Then NVKind:=46 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And MP4HasMjpb(InputPath) Then NVKind:=47 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And (QXMovKind(InputPath)<>0) Then NVKind:=QXMovKind(InputPath) Else If (InputFormat='h264') And Not IsHTTP(InputPath) Then NVKind:=33
+ Else If InputFormat='bmp' Then NVKind:=4 Else If (InputFormat='pam') Or (InputFormat='pbm') Or (InputFormat='pgm') Or (InputFormat='ppm') Or (InputFormat='pgmyuv') Then NVKind:=50 Else If InputFormat='nuv' Then NVKind:=54 Else If InputFormat='pcx' Then NVKind:=55 Else If InputFormat='png' Then NVKind:=58 Else If InputFormat='roq' Then NVKind:=65 Else If InputFormat='rl2' Then NVKind:=66 Else If InputFormat='sgi' Then NVKind:=56 Else If InputFormat='ptx' Then NVKind:=57 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22 Else If (InputFormat='flic') And Not IsHTTP(InputPath) Then NVKind:=23 Else If (InputFormat='gif') And Not IsHTTP(InputPath) Then NVKind:=25 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=2) Then NVKind:=27 Else If (InputFormat='h263') And Not IsHTTP(InputPath) Then NVKind:=28 Else If (InputFormat='h261') And Not IsHTTP(InputPath) Then NVKind:=29 Else If (InputFormat='idcin') And Not IsHTTP(InputPath) Then NVKind:=30 Else If (InputFormat='ipmovie') And Not IsHTTP(InputPath) Then NVKind:=38 Else If (InputFormat='jpegls_pipe') And Not IsHTTP(InputPath) Then NVKind:=39 Else If (InputFormat='jpeg_pipe') And Not IsHTTP(InputPath) Then NVKind:=46 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And MP4HasMjpb(InputPath) Then NVKind:=47 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And (QXMovKind(InputPath)<>0) Then NVKind:=QXMovKind(InputPath) Else If (InputFormat='h264') And Not IsHTTP(InputPath) Then NVKind:=33
  Else If (InputFormat='avi') And Not IsHTTP(InputPath) Then Begin
   AsvTag:=AVIVideoFourCC(Intermediate);
   If AsvTag='CSCD' Then NVKind:=5 Else If (AsvTag='tscc') Or (AsvTag='TSCC') Then NVKind:=6
