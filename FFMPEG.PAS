@@ -52632,6 +52632,1542 @@ Begin
  CloseRead; CloseWrite;
 End;
 
+{ QDM2-BEGIN }
+{ ---- Decodeur audio QDesign Music Codec 2 (libavcodec/qdm2.c, qdm2data.h, qdm2_tablegen.h ; atome QuickTime/MP4 QDM2) ;
+  adapte de FFmpeg, LGPL-2.1-or-later ---- }
+Const
+ QDVLevel: Array[0..47] Of Byte=(
+  12,4,17,4,1,6,8,6,9,5,20,7,3,7,5,6,6,6,2,7,22,9,23,10,0,10,21,8,11,4,19,5,7,6,4,6,16,3,10,4,18,4,15,3,13,3,
+  14,3);
+ QDVDiff: Array[0..65] Of Byte=(
+  2,3,1,3,5,3,14,8,20,9,26,10,25,12,32,12,19,11,16,8,24,9,17,9,12,7,13,7,9,5,7,4,3,2,4,3,8,6,11,6,18,8,15,8,
+  30,11,36,13,34,13,29,13,0,13,21,10,28,10,23,10,22,8,10,6,6,4);
+ QDVRun: Array[0..11] Of Byte=(
+  1,1,2,2,3,3,4,4,5,5,0,5);
+ QDVHi1: Array[0..39] Of Byte=(
+  4,3,5,5,9,10,11,11,13,12,14,12,10,10,12,11,17,14,16,14,18,15,0,15,19,14,15,12,8,8,7,7,6,6,1,4,2,2,3,1);
+ QDVMid: Array[0..25] Of Byte=(
+  18,2,19,4,20,6,14,7,21,8,13,9,22,10,12,11,23,12,0,12,15,5,16,3,17,1);
+ QDVHi2: Array[0..35] Of Byte=(
+  14,4,11,6,19,7,9,7,13,5,10,6,20,8,8,8,6,10,23,11,0,11,21,9,7,8,12,5,18,4,16,2,15,2,17,2);
+ QDVT30: Array[0..17] Of Byte=(
+  2,3,6,4,7,5,8,6,0,6,5,3,1,3,3,2,4,2);
+ QDVT34: Array[0..19] Of Byte=(
+  1,4,9,5,0,5,3,3,7,3,8,3,2,3,4,3,6,3,5,3);
+ QDVExpAlt: Array[0..55] Of Byte=(
+  18,3,16,3,22,7,8,10,4,10,3,9,2,8,23,8,10,8,11,7,21,5,20,4,1,7,7,10,5,10,9,9,6,10,25,11,26,12,27,13,0,13,24,
+  9,12,6,13,5,14,4,19,3,15,3,17,2);
+ QDVExp: Array[0..39] Of Byte=(
+  3,3,11,6,16,9,17,10,18,11,19,12,0,12,15,8,14,7,9,5,7,4,2,3,4,3,1,3,5,3,12,6,13,6,10,5,8,4,6,3);
+ QDVSExp: Array[0..13] Of Byte=(
+  2,2,3,3,4,4,5,5,6,6,0,6,1,1);
+ QDVSPhase: Array[0..17] Of Byte=(
+  2,2,1,2,3,4,7,4,6,5,5,6,0,6,4,4,8,2);
+ QDVTone: Array[0..305] Of Byte=(
+  2,2,7,7,15,8,21,8,3,6,6,6,13,7,14,8,18,8,4,4,5,5,11,7,10,7,20,6,12,8,16,9,22,10,0,10,17,7,19,6,8,6,9,6,1,1,
+  8,6,2,6,7,6,23,7,12,7,5,4,10,6,20,8,25,9,26,10,27,11,0,11,22,7,9,5,13,6,17,6,4,5,14,6,19,7,24,7,3,6,11,6,21,
+  6,18,6,16,6,15,6,6,3,1,1,14,7,17,7,15,7,23,9,28,10,29,11,30,13,0,13,31,12,25,8,10,5,8,4,9,4,4,4,22,8,3,8,21,
+  8,26,9,27,9,12,6,11,5,16,7,18,7,20,8,24,8,19,7,13,5,5,3,1,2,6,3,7,3,4,4,7,4,10,4,3,10,27,10,29,10,28,10,22,
+  8,21,7,15,6,14,5,8,4,16,6,19,7,23,8,26,9,30,10,33,13,34,14,0,14,32,12,31,11,12,5,5,3,9,3,1,4,20,7,25,8,24,8,
+  18,6,17,5,6,3,11,4,13,4,5,3,4,3,19,8,33,12,31,12,28,11,34,14,37,14,35,15,0,15,36,14,32,12,30,11,24,9,22,8,
+  23,9,29,10,27,10,17,6,14,5,7,4,12,5,1,6,26,9,3,9,25,8,20,7,8,4,10,4,13,4,15,6,16,6,18,6,21,6,11,4,9,3,6,3);
+ QDToneSizes: Array[0..4] Of Byte=(
+  23,28,31,34,37);
+ QDFftLevelIdx: Array[0..255] Of Byte=(
+  0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,
+  3,3,3,3,3,3,3,3,3,3,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,
+  4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5);
+ QDLastCoeff: Array[0..2] Of Byte=(
+  4,7,10);
+ QDCoeffAvg: Array[0..89] Of Byte=(
+  0,1,1,1,1,2,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,0,1,2,2,3,3,4,4,4,4,4,4,5,5,5,5,5,5,5,5,6,6,6,6,
+  6,6,6,6,6,6,0,1,2,3,4,4,5,5,6,6,6,6,7,7,7,7,8,8,8,8,8,8,9,9,9,9,9,9,9,9);
+ QDDequant: Array[0..899] Of Word=(
+  256,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,256,256,205,154,102,51,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,51,102,154,205,256,238,219,201,183,165,146,128,110,91,73,55,37,18,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,18,37,55,73,91,110,128,146,165,183,201,219,238,256,228,199,171,142,114,85,57,28,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,256,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,256,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,256,171,85,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,85,171,256,171,85,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,85,171,256,219,183,
+  146,110,73,37,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,37,73,110,146,183,219,256,228,199,171,142,114,
+  85,57,28,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,28,57,85,114,142,171,199,228,256,213,171,128,85,43,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,256,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,256,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,256,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,256,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  256,256,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,256,171,85,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,85,171,256,192,128,64,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,64,
+  128,192,256,205,154,102,51,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,51,102,154,205,256,213,171,
+  128,85,43,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,43,85,128,171,213,256,213,171,128,85,43);
+ QDCoeffDeq: Array[0..89] Of Byte=(
+  0,1,1,1,1,1,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,3,0,1,2,2,2,3,3,3,4,4,4,4,4,4,4,5,5,5,5,5,5,5,5,5,
+  6,6,6,6,6,6,0,1,2,3,4,4,5,5,5,6,6,6,6,7,7,7,7,7,8,8,8,8,8,8,9,9,9,9,9,9);
+ QDCodingMethod: Array[0..149] Of Byte=(
+  34,30,24,24,16,16,16,16,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,34,30,24,24,16,16,
+  16,16,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,34,30,30,30,24,24,16,16,16,16,16,16,
+  10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,34,34,30,30,24,24,24,24,16,16,16,16,16,16,16,16,16,16,
+  16,16,16,16,10,10,10,10,10,10,10,10,34,34,30,30,30,30,30,30,24,24,24,24,24,24,24,24,24,24,24,24,16,16,16,16,
+  16,16,16,16,16,16);
+ QDStage3: Array[0..59] Of LongInt=(
+  0,1,2,3,4,6,8,10,12,16,20,24,28,36,44,52,60,76,92,108,124,156,188,220,252,316,380,444,508,636,764,892,1020,
+  1276,1532,1788,2044,2556,3068,3580,4092,5116,6140,7164,8188,10236,12284,14332,16380,20476,24572,28668,32764,
+  40956,49148,57340,65532,81916,98300,114684);
+ QDFftSub: Array[0..31] Of Byte=(
+  0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,0,0);
+ QDSwitch: Array[0..22] Of Byte=(
+  0,5,1,5,5,5,5,5,2,5,5,5,5,5,5,5,3,5,5,5,5,5,4);
+ QDFtsB: Array[0..319] Of LongWord=(
+  $3C23D70A,$BB72B9D6,$BB03126F,$BBE38E39,$BAF16289,$3D2AAAAB,$00000000,$00000000,$BCAAAAAB,$BC4A4588,
+  $3E000000,$3D649249,$3D077322,$BC86BCA2,$BC1FB028,$3E200000,$3D800000,$3D17B426,$BBCCCCCD,$BB72B9D6,
+  $3E4C6426,$3DA00000,$3D3DA12F,$3B14F209,$3AB08727,$3E4CCCCD,$3D800000,$3D17B426,$3CAAAAAB,$3BF2B9D6,
+  $3E59DF52,$3D638E39,$3D06D905,$3CAAAAAB,$3C4A4588,$3E5E9BD4,$3D41F07C,$3CE5DAA6,$3D0E38E4,$3CA88F47,
+  $3E5E9BD4,$3D0E38E4,$3CA88F47,$3D41F07C,$3CE5DAA6,$3E59DF52,$3CAAAAAB,$3C4A4588,$3D638E39,$3D06D905,
+  $3E4CCCCD,$3CAAAAAB,$3BF2B9D6,$3D800000,$3D17B426,$3E4C6426,$3B14F209,$3AB08727,$3DA00000,$3D3DA12F,
+  $3E200000,$BBCCCCCD,$BB72B9D6,$3D800000,$3D17B426,$3E000000,$BC86BCA2,$BC1FB028,$3D649249,$3D077322,
+  $3D2AAAAB,$BCAAAAAB,$BC4A4588,$00000000,$00000000,$3C23D70A,$BBE38E39,$BAF16289,$BB72B9D6,$BB03126F,
+  $3BA3D70A,$BCA3D70A,$3C4CCCCD,$BE9B26CA,$3B03126F,$3DD55555,$3D23D70A,$BCCCCCCD,$3D088889,$BCA3D70A,
+  $3E000000,$3C23D70A,$3C6A0EA1,$BD4CCCCD,$BCA3D70A,$3E200000,$BA23D70A,$BA01742E,$BA23D70A,$BA01742E,
+  $3E200000,$BA23D70A,$BA01742E,$BA23D70A,$BA01742E,$3E000000,$BD4CCCCD,$BCA3D70A,$3C23D70A,$3C6A0EA1,
+  $3DD55555,$3D088889,$BCA3D70A,$3D23D70A,$BCCCCCCD,$3BA3D70A,$BE9B26CA,$3B03126F,$BCA3D70A,$3C4CCCCD,
+  $00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,
+  $00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,
+  $00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,
+  $00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,
+  $3E124925,$3E000000,$BCEA0EA1,$BD124925,$3CAAAAAB,$3E3A2E8C,$3D70F0F1,$3D088889,$3CAE4C41,$3C23D70A,
+  $3E3A2E8C,$3CAE4C41,$3C23D70A,$3D70F0F1,$3D088889,$3E124925,$BD124925,$3CAAAAAB,$3E000000,$BCEA0EA1,
+  $00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,
+  $00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,
+  $00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,
+  $00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,
+  $00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,
+  $00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,
+  $00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,
+  $00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,
+  $00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,
+  $00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,
+  $00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,
+  $00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,
+  $00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,
+  $00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000);
+ QDFtlB: Array[0..127] Of LongWord=(
+  $3E3504F3,$3EDA8273,$3F1A827B,$3F5A827B,$3F9A827A,$3FD78000,$40180000,$40578000,$40980000,$40D78000,
+  $41180000,$41578000,$41980000,$41D78000,$42180000,$42578000,$42980000,$42D78000,$43180000,$43578000,
+  $43980000,$43D78000,$44180000,$44578000,$44980000,$44D78000,$45180000,$45578000,$45980000,$45D78000,
+  $46180000,$46578000,$46980000,$46D78000,$47180000,$47578000,$47980000,$47D78000,$48180000,$48578000,
+  $48980000,$48D78000,$49180000,$49578000,$49980000,$49D78000,$4A180000,$00000000,$00000000,$00000000,
+  $00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,
+  $00000000,$00000000,$00000000,$00000000,$3F180000,$3F578000,$3F980000,$3FD78000,$40180000,$40578000,
+  $40980000,$40D78000,$41180000,$41578000,$41980000,$41D78000,$42180000,$42578000,$42980000,$42D78000,
+  $43180000,$43578000,$43980000,$43D78000,$44180000,$44578000,$44980000,$44D78000,$45180000,$45578000,
+  $45980000,$45D78000,$46180000,$46578000,$46980000,$46D78000,$47180000,$47578000,$47980000,$47D78000,
+  $48180000,$48578000,$48980000,$48D78000,$49180000,$49578000,$49980000,$49D78000,$4A180000,$4A578000,
+  $00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,
+  $00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000);
+ QDFteB: Array[0..123] Of LongWord=(
+  $3C1D6840,$3D1BE510,$3DAC933C,$3E15F61C,$3E638C4E,$3E9E0876,$3ECE0E91,$3F000001,$3F18F8B9,$3F30FBC6,
+  $3F471CEE,$3F5A827A,$3F6A6D99,$3F7641B0,$3F7D8A60,$3F800000,$3F7D8A5F,$3F7641AF,$3F6A6D98,$3F5A8278,
+  $3F471CEC,$3F30FBC4,$3F18F8B7,$3F000000,$3ECE0E90,$3E9E0875,$3E638C4C,$3E15F61A,$3DAC9338,$3D1BE508,
+  $3C1D6820,$3D1BE510,$3E15F61C,$3E9E0876,$3F000001,$3F30FBC6,$3F5A827A,$3F7641B0,$3F800000,$3F7641AF,
+  $3F5A8278,$3F30FBC4,$3F000000,$3E9E0875,$3E15F61A,$3D1BE508,$00000000,$00000000,$00000000,$00000000,
+  $00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,
+  $00000000,$00000000,$3E15F61C,$3F000001,$3F5A827A,$3F800000,$3F5A8278,$3F000000,$3E15F61A,$00000000,
+  $00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,
+  $00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,
+  $00000000,$00000000,$00000000,$3F000001,$3F800000,$3F000000,$00000000,$00000000,$00000000,$00000000,
+  $00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,
+  $00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,$00000000,
+  $00000000,$00000000,$00000000,$00000000);
+ QDSnaB: Array[0..31] Of LongWord=(
+  $00000000,$00000000,$3E99999A,$3ECCCCCD,$3F000000,$3F333333,$3F800000,$3F800000,$3F800000,$3F800000,
+  $3F800000,$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,
+  $3F800000,$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,
+  $3F800000,$3F800000);
+ QDD1bB: Array[0..5] Of LongWord=(
+  $BF6B851F,$00000000,$3F6B851F,$BF63D70A,$00000000,$3F63D70A);
+ QDT30B: Array[0..7] Of LongWord=(
+  $BF800000,$BF200000,$BE955555,$00000000,$3E800000,$3F000000,$3F400000,$3F800000);
+ QDT34B: Array[0..9] Of LongWord=(
+  $BF800000,$BF1C069A,$BEAAAAAB,$BE0D6289,$00000000,$3E0D6289,$3EAAAAAB,$3F1C069A,$3F800000,$00000000);
+ QDCutoffIdx: Array[0..7] Of ShortInt=(1,2,-1,0,-1,-2,0,0);
+Type
+ TQDCx=Record Re,Im: Single; End;
+ TQDCxA=Array[0..65535] Of TQDCx; PQDCxA=^TQDCxA;
+ TQDGB=Record Pos,Idx,Size: LongInt; End;
+ TQDSub=Record Typ,Size,Data: LongInt; End;
+ TQDTone=Record Level: Single; Ch,Off,Tab,Phase,PhaseShift,Duration: LongInt; TimeIndex,Cutoff: SmallInt; End;
+ TQDCoef=Record SubPacket: SmallInt; Chan: Byte; Offset,Exp: SmallInt; Phase: Byte; End;
+ TQDSymA=Array[0..32767] Of SmallInt; PQDSymA=^TQDSymA;
+ TQDLenA=Array[0..32767] Of Byte; PQDLenA=^TQDLenA;
+ TQDFlat=Array[0..3839] Of ShortInt; PQDFlat=^TQDFlat;
+Var
+ QDReady: Boolean;
+ QDPkt: PEABuffer; QDPktLen: LongInt;
+ QDVBits: Array[0..16] Of LongInt; QDVSym: Array[0..16] Of PQDSymA; QDVLen: Array[0..16] Of PQDLenA;
+ QDNbCh,QDCh,QDGroupSize,QDFftSize,QDCheckSize,QDGroupOrder,QDFftOrder,QDFrameSize,QDFreqRange,QDSubSampling,QDCoeffSel,QDCmSel: LongInt;
+ QDSubP: Array[0..15] Of TQDSub;
+ QDListB,QDListD: Array[0..15] Of LongInt; QDNB,QDND: LongInt;
+ QDTones: Array[0..999] Of TQDTone; QDToneStart,QDToneEnd: LongInt;
+ QDCoefs: Array[0..999] Of TQDCoef; QDCoefIdx: LongInt; QDCoefMin,QDCoefMax: Array[0..4] Of LongInt; QDLevelExp: Array[0..5] Of LongInt;
+ QDCplx: Array[0..1,0..263] Of TQDCx; QDTemp: Array[0..1,0..255] Of TQDCx;
+ QDOut: Array[0..4095] Of Single;
+ QDMpa: PMPA;
+ QDSbS: Array[0..1,0..127,0..31] Of Single; QDSmp: Array[0..2303] Of Single;
+ QDToneLevel: Array[0..1,0..29,0..63] Of Single;
+ QDCoding: Array[0..1,0..29,0..63] Of ShortInt;
+ QDQCoef: Array[0..1,0..9,0..7] Of ShortInt;
+ QDTLBase: Array[0..1,0..29,0..7] Of ShortInt;
+ QDHi1: Array[0..1,0..2,0..7,0..7] Of ShortInt;
+ QDMid: Array[0..1,0..25,0..7] Of ShortInt;
+ QDHi2: Array[0..1,0..25] Of ShortInt;
+ QDTLIdx: Array[0..1,0..29,0..63] Of ShortInt;
+ QDHasErr,QDSb23,QDDoSynth,QDSubPacket,QDNoiseIdx: LongInt;
+ QDNoise: Array[0..4115] Of Single; QDRndIdx: Array[0..255,0..4] Of Byte; QDRnd24: Array[0..127,0..2] Of Byte;
+ QDNoiseS: Array[0..127] Of Single; QDSoft: Array[0..8116] Of Word;
+ QDFts: Array[0..319] Of Single; QDFtl: Array[0..127] Of Single; QDFte: Array[0..123] Of Single; QDSna: Array[0..31] Of Single;
+ QDD1b: Array[0..5] Of Single; QDT30: Array[0..7] Of Single; QDT34: Array[0..9] Of Single;
+ { FFT (av_tx float, split-radix) }
+ QDTab: Array[0..5,0..64] Of Single; QDMap: Array[0..255] Of LongInt;
+ QDRCos,QDRSin: Array[0..127] Of Single;
+
+Function QDS8(V: LongInt): ShortInt;
+Begin
+ V:=V And 255; If V>=128 Then Dec(V,256); QDS8:=V;
+End;
+
+Function QDTrunc(X: Single): LongInt;
+Var D: Double;
+Begin
+ D:=X;
+ If (D>=2147483648.0) Or (D<-2147483648.0) Or (D<>D) Then QDTrunc:=LongInt($80000000) Else QDTrunc:=Trunc(D);
+End;
+
+Procedure QDBuildVlc(T: LongInt; Const Tab: Array Of Byte; Off,N: LongInt);
+Var I,Mx,Sz,R,K,B,L,C,J: LongInt; Code: Int64;
+Begin
+ Mx:=0;
+ For I:=0 To N-1 Do If Tab[Off+2*I+1]>Mx Then Mx:=Tab[Off+2*I+1];
+ Sz:=1 Shl Mx; QDVBits[T]:=Mx;
+ GetMem(QDVSym[T],Sz*2); GetMem(QDVLen[T],Sz);
+ For I:=0 To Sz-1 Do Begin QDVSym[T]^[I]:=-1; QDVLen[T]^[I]:=0; End;
+ Code:=0;
+ For I:=0 To N-1 Do Begin
+  L:=Tab[Off+2*I+1];
+  C:=LongInt(Code Shr (32-L));
+  R:=0;
+  For B:=0 To L-1 Do If (C And (1 Shl (L-1-B)))<>0 Then R:=R Or (1 Shl B);
+  For K:=0 To (1 Shl (Mx-L))-1 Do Begin
+   J:=R+(K Shl L);
+   QDVSym[T]^[J]:=Tab[Off+2*I]-1; QDVLen[T]^[J]:=L;
+  End;
+  Inc(Code,Int64(1) Shl (32-L));
+ End;
+End;
+
+Function QDSplit(I,Len,Inv: LongInt): LongInt;
+Var X: LongInt;
+Begin
+ Len:=Len Shr 1;
+ If Len<=1 Then Begin QDSplit:=I And 1; Exit; End;
+ If (I And Len)=0 Then Begin QDSplit:=QDSplit(I,Len,Inv)*2; Exit; End;
+ Len:=Len Shr 1;
+ If (I And Len)=0 Then X:=1 Else X:=0;
+ X:=X Xor Inv;
+ QDSplit:=QDSplit(I,Len,Inv)*4+1-2*X;
+End;
+
+Procedure QDInit;
+Var
+ I,J,V,Seed,K,L,N: LongInt; S64: Int64; Dv,Tm,C13,Dfl,Pi_,Fr: Double; Dl,Ar: Single; U: LongWord;
+ Bits: Array[0..319] Of LongWord;
+Begin
+ If QDReady Then Exit;
+ QDReady:=True;
+ QDBuildVlc(0,QDVLevel,0,24); QDBuildVlc(1,QDVDiff,0,33); QDBuildVlc(2,QDVRun,0,6);
+ QDBuildVlc(3,QDVHi1,0,20); QDBuildVlc(4,QDVMid,0,13); QDBuildVlc(5,QDVHi2,0,18);
+ QDBuildVlc(6,QDVT30,0,9); QDBuildVlc(7,QDVT34,0,10);
+ QDBuildVlc(8,QDVExpAlt,0,28); QDBuildVlc(9,QDVExp,0,20);
+ QDBuildVlc(10,QDVSExp,0,7); QDBuildVlc(11,QDVSPhase,0,9);
+ K:=0;
+ For I:=0 To 4 Do Begin QDBuildVlc(12+I,QDVTone,2*K,QDToneSizes[I]); Inc(K,QDToneSizes[I]); End;
+ { tables flottantes (motifs binaires exacts du compilateur C) }
+ For I:=0 To 319 Do Move(QDFtsB[I],QDFts[I],4);
+ For I:=0 To 127 Do Move(QDFtlB[I],QDFtl[I],4);
+ For I:=0 To 123 Do Move(QDFteB[I],QDFte[I],4);
+ For I:=0 To 31 Do Move(QDSnaB[I],QDSna[I],4);
+ For I:=0 To 5 Do Move(QDD1bB[I],QDD1b[I],4);
+ For I:=0 To 7 Do Move(QDT30B[I],QDT30[I],4);
+ For I:=0 To 9 Do Move(QDT34B[I],QDT34[I],4);
+ { C13 = 1.3 (double) }
+ U:=$CCCCCCCD; Move(U,Bits[0],4); U:=$3FF4CCCC; Move(U,Bits[1],4); Move(Bits[0],C13,8);
+ { rnd_table_init }
+ FillChar(QDNoise,SizeOf(QDNoise),0);
+ S64:=0;
+ For I:=0 To 4095 Do Begin
+  S64:=(S64*214013+2531011) And $FFFFFFFF;
+  V:=LongInt((S64 Shr 16) And $7FFF);
+  Dv:=V; Dv:=Dv/16384.0; Tm:=Dv-1.0; Tm:=Tm*C13; QDNoise[I]:=Single(Tm);
+ End;
+ For I:=0 To 255 Do Begin
+  Seed:=81; L:=I;
+  For J:=0 To 4 Do Begin QDRndIdx[I,J]:=L Div Seed; L:=L Mod Seed; Seed:=Seed Div 3; End;
+ End;
+ For I:=0 To 127 Do Begin
+  Seed:=25; L:=I;
+  For J:=0 To 2 Do Begin QDRnd24[I,J]:=L Div Seed; L:=L Mod Seed; Seed:=Seed Div 5; End;
+ End;
+ { init_noise_samples }
+ S64:=0;
+ For I:=0 To 127 Do Begin
+  S64:=(S64*214013+2531011) And $FFFFFFFF;
+  V:=LongInt((S64 Shr 16) And $7FFF);
+  Dv:=V; Dv:=Dv/16384.0; Tm:=Dv-1.0; QDNoiseS[I]:=Single(Tm);
+ End;
+ { softclip_table_init }
+ Dfl:=-5167.0; Tm:=5167.0; Tm:=1.0/Tm; Dl:=Single(Tm);
+ For I:=0 To 8116 Do Begin
+  Ar:=I; Ar:=Ar*Dl;
+  Dv:=Sin(Double(Ar)); Dv:=Dv*Dfl;
+  V:=Trunc(Dv);
+  QDSoft[I]:=(27600-(V And $FFFF)) And $FFFF;
+ End;
+ { tables cos du FFT split-radix : ff_tx_tab_N }
+ Pi_:=3.14159265358979323846;
+ FillChar(QDTab,SizeOf(QDTab),0);
+ N:=8; K:=0;
+ While N<=256 Do Begin
+  Fr:=2.0*Pi_/N;
+  For I:=0 To N Div 4-1 Do Begin Dv:=I; Dv:=Dv*Fr; QDTab[K,I]:=Single(Cos(Dv)); End;
+  QDTab[K,N Div 4]:=0.0;
+  N:=N*2; Inc(K);
+ End;
+End;
+
+{ ---- lecture de bits little-endian (GetBitContext, BITSTREAM_READER_LE) ---- }
+Function QDByte(P: LongInt): LongWord;
+Begin
+ If (P>=0) And (P<QDPktLen) Then QDByte:=QDPkt^[P] Else QDByte:=0;
+End;
+
+Function QDPeek(Var G: TQDGB; N: LongInt): LongInt;
+Var P: LongInt; V: LongWord;
+Begin
+ P:=G.Pos+(G.Idx Shr 3);
+ V:=QDByte(P) Or (QDByte(P+1) Shl 8) Or (QDByte(P+2) Shl 16) Or (QDByte(P+3) Shl 24);
+ V:=V Shr (G.Idx And 7);
+ QDPeek:=LongInt(V And ((LongWord(1) Shl N)-1));
+End;
+
+{ LAST_SKIP_BITS : l'index est borne a size_in_bits+8 }
+Procedure QDAdv(Var G: TQDGB; N: LongInt);
+Begin
+ If G.Idx+N>G.Size+8 Then G.Idx:=G.Size+8 Else Inc(G.Idx,N);
+End;
+
+Function QDGet(Var G: TQDGB; N: LongInt): LongInt;
+Begin
+ QDGet:=QDPeek(G,N); QDAdv(G,N);
+End;
+
+Procedure QDInitGB(Var G: TQDGB; Pos,Bits: LongInt);
+Begin G.Pos:=Pos; G.Idx:=0; G.Size:=Bits; End;
+
+Function QDLeft(Var G: TQDGB): LongInt;
+Begin QDLeft:=G.Size-G.Idx; End;
+
+Function QDGetVlc(Var G: TQDGB; T: LongInt; Flag: Boolean): LongInt;
+Var V,Tmp,Idx,N,Pre,Idx2,L,Rt,Mx: LongInt;
+Begin
+ Mx:=QDVBits[T];
+ Case T Of
+  2,7: Rt:=5;
+  6,10,11: Rt:=6;
+ Else Rt:=8;
+ End;
+ Idx:=QDPeek(G,Mx);
+ L:=QDVLen[T]^[Idx];
+ If L<=Rt Then Begin
+  V:=QDVSym[T]^[Idx]; QDAdv(G,L);
+ End Else Begin
+  { deux niveaux : l'index est borne apres le premier saut (LAST_SKIP_BITS) }
+  Pre:=Idx And ((1 Shl Rt)-1);
+  QDAdv(G,Rt);
+  Idx2:=Pre Or (QDPeek(G,Mx-Rt) Shl Rt);
+  L:=QDVLen[T]^[Idx2];
+  V:=QDVSym[T]^[Idx2]; QDAdv(G,L-Rt);
+ End;
+ If V<0 Then Begin N:=QDGet(G,3)+1; V:=QDGet(G,N); End;
+ If Flag Then Begin
+  If V>=60 Then Begin QDGetVlc:=0; Exit; End;
+  Tmp:=QDStage3[V];
+  If (V And Not 3)>0 Then Inc(Tmp,QDGet(G,V Shr 2));
+  V:=Tmp;
+ End;
+ QDGetVlc:=V;
+End;
+
+Function QDGetSeVlc(Var G: TQDGB; T: LongInt): LongInt;
+Var V: LongInt;
+Begin
+ V:=QDGetVlc(G,T,False);
+ If (V And 1)<>0 Then QDGetSeVlc:=(V+1) Shr 1 Else QDGetSeVlc:=-(V Shr 1);
+End;
+
+{ ---- FFT split-radix (libavutil/tx_template.c, codelets fftN_ns en place) ---- }
+Var QDZ: PQDCxA;
+
+Procedure QDButterflies(A0,A1,A2,A3: LongInt; Var T1,T2,T5,T6: Single);
+Var R0,I0,R1,I1,T3,T4: Single;
+Begin
+ R0:=QDZ^[A0].Re; I0:=QDZ^[A0].Im; R1:=QDZ^[A1].Re; I1:=QDZ^[A1].Im;
+ T3:=T5-T1; T5:=T5+T1;
+ QDZ^[A2].Re:=R0-T5; QDZ^[A0].Re:=R0+T5;
+ QDZ^[A3].Im:=I1-T3; QDZ^[A1].Im:=I1+T3;
+ T4:=T2-T6; T6:=T2+T6;
+ QDZ^[A3].Re:=R1-T4; QDZ^[A1].Re:=R1+T4;
+ QDZ^[A2].Im:=I0-T6; QDZ^[A0].Im:=I0+T6;
+End;
+
+Procedure QDTransform(A0,A1,A2,A3: LongInt; Wre,Wim: Single; Var T1,T2,T5,T6: Single);
+Var NWim: Single;
+Begin
+ NWim:=-Wim;
+ T1:=QDZ^[A2].Re*Wre-QDZ^[A2].Im*NWim;
+ T2:=QDZ^[A2].Re*NWim+QDZ^[A2].Im*Wre;
+ T5:=QDZ^[A3].Re*Wre-QDZ^[A3].Im*Wim;
+ T6:=QDZ^[A3].Re*Wim+QDZ^[A3].Im*Wre;
+ QDButterflies(A0,A1,A2,A3,T1,T2,T5,T6);
+End;
+
+Procedure QDFft2(B: LongInt);
+Var Tr,Ti: Single;
+Begin
+ Tr:=QDZ^[B].Re-QDZ^[B+1].Re; QDZ^[B].Re:=QDZ^[B].Re+QDZ^[B+1].Re;
+ Ti:=QDZ^[B].Im-QDZ^[B+1].Im; QDZ^[B].Im:=QDZ^[B].Im+QDZ^[B+1].Im;
+ QDZ^[B+1].Re:=Tr; QDZ^[B+1].Im:=Ti;
+End;
+
+Procedure QDFft4(B: LongInt);
+Var T1,T2,T3,T4,T5,T6,T7,T8: Single;
+Begin
+ T3:=QDZ^[B].Re-QDZ^[B+1].Re; T1:=QDZ^[B].Re+QDZ^[B+1].Re;
+ T8:=QDZ^[B+3].Re-QDZ^[B+2].Re; T6:=QDZ^[B+3].Re+QDZ^[B+2].Re;
+ QDZ^[B+2].Re:=T1-T6; QDZ^[B].Re:=T1+T6;
+ T4:=QDZ^[B].Im-QDZ^[B+1].Im; T2:=QDZ^[B].Im+QDZ^[B+1].Im;
+ T7:=QDZ^[B+2].Im-QDZ^[B+3].Im; T5:=QDZ^[B+2].Im+QDZ^[B+3].Im;
+ QDZ^[B+3].Im:=T4-T8; QDZ^[B+1].Im:=T4+T8;
+ QDZ^[B+3].Re:=T3-T7; QDZ^[B+1].Re:=T3+T7;
+ QDZ^[B+2].Im:=T2-T5; QDZ^[B].Im:=T2+T5;
+End;
+
+Procedure QDFft8(B: LongInt);
+Var T1,T2,T5,T6,C,Nb: Single;
+Begin
+ C:=QDTab[0,1];
+ QDFft4(B);
+ Nb:=-QDZ^[B+5].Re; T1:=QDZ^[B+4].Re-Nb; QDZ^[B+5].Re:=QDZ^[B+4].Re+Nb;
+ Nb:=-QDZ^[B+5].Im; T2:=QDZ^[B+4].Im-Nb; QDZ^[B+5].Im:=QDZ^[B+4].Im+Nb;
+ Nb:=-QDZ^[B+7].Re; T5:=QDZ^[B+6].Re-Nb; QDZ^[B+7].Re:=QDZ^[B+6].Re+Nb;
+ Nb:=-QDZ^[B+7].Im; T6:=QDZ^[B+6].Im-Nb; QDZ^[B+7].Im:=QDZ^[B+6].Im+Nb;
+ QDButterflies(B,B+2,B+4,B+6,T1,T2,T5,T6);
+ QDTransform(B+1,B+3,B+5,B+7,C,C,T1,T2,T5,T6);
+End;
+
+Procedure QDFft16(B: LongInt);
+Var T1,T2,T5,T6,C1,C2,C3: Single;
+Begin
+ C1:=QDTab[1,1]; C2:=QDTab[1,2]; C3:=QDTab[1,3];
+ QDFft8(B); QDFft4(B+8); QDFft4(B+12);
+ T1:=QDZ^[B+8].Re; T2:=QDZ^[B+8].Im; T5:=QDZ^[B+12].Re; T6:=QDZ^[B+12].Im;
+ QDButterflies(B,B+4,B+8,B+12,T1,T2,T5,T6);
+ QDTransform(B+2,B+6,B+10,B+14,C2,C2,T1,T2,T5,T6);
+ QDTransform(B+1,B+5,B+9,B+13,C1,C3,T1,T2,T5,T6);
+ QDTransform(B+3,B+7,B+11,B+15,C3,C1,T1,T2,T5,T6);
+End;
+
+{ ff_tx_fft_sr_combine : K = indice de la table cos, Len = n4 >> 1 }
+Procedure QDCombine(Z,K,Len: LongInt);
+Var O1,O2,O3,Cs,Wm,I: LongInt; T1,T2,T5,T6: Single;
+Begin
+ O1:=2*Len; O2:=4*Len; O3:=6*Len;
+ Cs:=0; Wm:=O1-7;
+ I:=0;
+ While I<Len Do Begin
+  QDTransform(Z+0,Z+O1+0,Z+O2+0,Z+O3+0,QDTab[K,Cs+0],QDTab[K,Wm+7],T1,T2,T5,T6);
+  QDTransform(Z+2,Z+O1+2,Z+O2+2,Z+O3+2,QDTab[K,Cs+2],QDTab[K,Wm+5],T1,T2,T5,T6);
+  QDTransform(Z+4,Z+O1+4,Z+O2+4,Z+O3+4,QDTab[K,Cs+4],QDTab[K,Wm+3],T1,T2,T5,T6);
+  QDTransform(Z+6,Z+O1+6,Z+O2+6,Z+O3+6,QDTab[K,Cs+6],QDTab[K,Wm+1],T1,T2,T5,T6);
+  QDTransform(Z+1,Z+O1+1,Z+O2+1,Z+O3+1,QDTab[K,Cs+1],QDTab[K,Wm+6],T1,T2,T5,T6);
+  QDTransform(Z+3,Z+O1+3,Z+O2+3,Z+O3+3,QDTab[K,Cs+3],QDTab[K,Wm+4],T1,T2,T5,T6);
+  QDTransform(Z+5,Z+O1+5,Z+O2+5,Z+O3+5,QDTab[K,Cs+5],QDTab[K,Wm+2],T1,T2,T5,T6);
+  QDTransform(Z+7,Z+O1+7,Z+O2+7,Z+O3+7,QDTab[K,Cs+7],QDTab[K,Wm+0],T1,T2,T5,T6);
+  Inc(Z,8); Inc(Cs,8); Dec(Wm,8);
+  Inc(I,4);
+ End;
+End;
+
+Procedure QDFftN(B,N,K: LongInt);
+Begin
+ Case N Of
+  2: QDFft2(B);
+  4: QDFft4(B);
+  8: QDFft8(B);
+  16: QDFft16(B);
+ Else Begin
+  QDFftN(B,N Shr 1,K-1);
+  QDFftN(B+(N Shr 1),N Shr 2,K-2);
+  QDFftN(B+(N Shr 1)+(N Shr 2),N Shr 2,K-2);
+  QDCombine(B,K,(N Shr 2) Shr 1);
+ End;
+ End;
+End;
+
+{ ---- qdm2.c ---- }
+Function QDSbUsed: LongInt;
+Begin
+ If QDSubSampling>=2 Then QDSbUsed:=30 Else QDSbUsed:=8 Shl QDSubSampling;
+End;
+
+Function QDNoiseVal(Sb: LongInt): Single;
+Var R: Single;
+Begin
+ R:=QDNoise[QDNoiseIdx]*QDSna[Sb]; Inc(QDNoiseIdx); QDNoiseVal:=R;
+End;
+
+Procedure QDFixNoise;
+Begin
+ If QDNoiseIdx>=3840 Then Dec(QDNoiseIdx,3840);
+End;
+
+Procedure QDDecodeSubHeader(Var G: TQDGB; Var P: TQDSub);
+Begin
+ P.Typ:=QDGet(G,8);
+ If P.Typ=0 Then Begin P.Size:=0; P.Data:=-1; End
+ Else Begin
+  P.Size:=QDGet(G,8);
+  If (P.Typ And $80)<>0 Then Begin
+   P.Size:=P.Size Shl 8; P.Size:=P.Size Or QDGet(G,8);
+   P.Typ:=P.Typ And $7F;
+  End;
+  If P.Typ=$7F Then P.Typ:=P.Typ Or (QDGet(G,8) Shl 8);
+  P.Data:=G.Pos+(G.Idx Div 8);
+ End;
+End;
+
+Function QDSearch(Typ: LongInt): LongInt;
+Var K: LongInt;
+Begin
+ QDSearch:=-1;
+ For K:=0 To QDND-1 Do If QDSubP[QDListD[K]].Typ=Typ Then Begin QDSearch:=K; Exit; End;
+End;
+
+Procedure QDAverageCoeffs;
+Var I,J,N,Ch,Sum: LongInt;
+Begin
+ N:=QDCoeffAvg[QDCoeffSel*30+QDSbUsed-1]+1;
+ For Ch:=0 To QDNbCh-1 Do
+  For I:=0 To N-1 Do Begin
+   Sum:=0;
+   For J:=0 To 7 Do Inc(Sum,QDQCoef[Ch,I,J]);
+   Sum:=Sum Div 8;
+   If Sum>0 Then Dec(Sum);
+   For J:=0 To 7 Do QDQCoef[Ch,I,J]:=QDS8(Sum);
+  End;
+End;
+
+Procedure QDBuildFromNoise(Sb: LongInt);
+Var Ch,J: LongInt; A,B: Single;
+Begin
+ QDFixNoise;
+ If QDNbCh=0 Then Exit;
+ For Ch:=0 To QDNbCh-1 Do
+  For J:=0 To 63 Do Begin
+   A:=QDNoiseVal(Sb); B:=A*QDToneLevel[Ch,Sb,J]; QDSbS[Ch,J*2,Sb]:=B;
+   A:=QDNoiseVal(Sb); B:=A*QDToneLevel[Ch,Sb,J]; QDSbS[Ch,J*2+1,Sb]:=B;
+  End;
+End;
+
+{ fix_coding_method_array ; QDCoding vu comme un tableau plat pour les memset }
+Function QDFixCoding(Sb,Channels: LongInt): LongInt;
+Var J,K,Ch,Run,CaseVal,Sbjk,Fl,Cm: LongInt; Flat: PQDFlat;
+Begin
+ Flat:=@QDCoding;
+ For Ch:=0 To Channels-1 Do Begin
+  J:=0;
+  While J<64 Do Begin
+   Cm:=QDCoding[Ch,Sb,J];
+   If Cm<8 Then Begin QDFixCoding:=-1; Exit; End;
+   If (Cm-8)>22 Then Begin Run:=1; CaseVal:=8; End
+   Else Begin
+    Case QDSwitch[Cm-8] Of
+     0: Begin Run:=10; CaseVal:=10; End;
+     1: Begin Run:=1; CaseVal:=16; End;
+     2: Begin Run:=5; CaseVal:=24; End;
+     3: Begin Run:=3; CaseVal:=30; End;
+     4: Begin Run:=1; CaseVal:=30; End;
+     5: Begin Run:=1; CaseVal:=8; End;
+    Else Begin Run:=1; CaseVal:=8; End;
+    End;
+   End;
+   For K:=0 To Run-1 Do Begin
+    If J+K<128 Then Begin
+     Sbjk:=Sb+(J+K) Div 64;
+     If Sbjk>29 Then Continue;
+     If QDCoding[Ch,Sbjk,(J+K) Mod 64]>QDCoding[Ch,Sb,J] Then Begin
+      If K>0 Then Begin
+       Fl:=Ch*1920+Sb*64+J+K;
+       { memset(&cm[ch][sb][j+k],case_val,k) puis memset(...,3) }
+       For Cm:=0 To K-1 Do If Fl+Cm<=3839 Then Flat^[Fl+Cm]:=CaseVal;
+       For Cm:=0 To 2 Do If Fl+Cm<=3839 Then Flat^[Fl+Cm]:=CaseVal;
+      End;
+     End;
+    End;
+   End;
+   Inc(J,Run);
+  End;
+ End;
+ QDFixCoding:=0;
+End;
+
+Procedure QDFillToneLevel(Flag: Boolean);
+Var I,Sb,Ch,SbUsed,Tmp,Tab,Sel: LongInt;
+Begin
+ Sel:=QDCoeffSel;
+ For Ch:=0 To QDNbCh-1 Do
+  For Sb:=0 To 29 Do
+   For I:=0 To 7 Do Begin
+    Tab:=QDCoeffDeq[Sel*30+Sb];
+    If Tab<(QDLastCoeff[Sel]-1) Then
+     Tmp:=QDQCoef[Ch,Tab+1,I]*QDDequant[Sel*300+(Tab+1)*30+Sb]+QDQCoef[Ch,Tab,I]*QDDequant[Sel*300+Tab*30+Sb]
+    Else
+     Tmp:=QDQCoef[Ch,Tab,I]*QDDequant[Sel*300+Tab*30+Sb];
+    If Tmp<0 Then Inc(Tmp,$FF);
+    QDTLBase[Ch,Sb,I]:=QDS8((Tmp Div 256) And $FF);
+   End;
+ SbUsed:=QDSbUsed;
+ If (QDSb23<>0) And Not Flag Then Begin
+  For Sb:=0 To SbUsed-1 Do
+   For Ch:=0 To QDNbCh-1 Do
+    For I:=0 To 63 Do Begin
+     QDTLIdx[Ch,Sb,I]:=QDTLBase[Ch,Sb,I Div 8];
+     If QDTLIdx[Ch,Sb,I]<0 Then QDToneLevel[Ch,Sb,I]:=0.0
+     Else QDToneLevel[Ch,Sb,I]:=QDFtl[QDTLIdx[Ch,Sb,I] And $3F];
+    End;
+ End Else Begin
+  If QDSb23<>0 Then Tab:=0 Else Tab:=1;
+  For Sb:=0 To SbUsed-1 Do Begin
+   If (Sb>=4) And (Sb<=23) Then Begin
+    For Ch:=0 To QDNbCh-1 Do
+     For I:=0 To 63 Do Begin
+      Tmp:=QDTLBase[Ch,Sb,I Div 8]-QDHi1[Ch,Sb Div 8,I Div 8,I Mod 8]-QDMid[Ch,Sb-4,I Div 8]-QDHi2[Ch,Sb-4];
+      QDTLIdx[Ch,Sb,I]:=QDS8(Tmp And $FF);
+      If (Tmp<0) Or ((QDSb23=0) And (Tmp=0)) Then QDToneLevel[Ch,Sb,I]:=0.0
+      Else QDToneLevel[Ch,Sb,I]:=QDFtl[Tab*64+(Tmp And $3F)];
+     End;
+   End Else Begin
+    If Sb>4 Then Begin
+     For Ch:=0 To QDNbCh-1 Do
+      For I:=0 To 63 Do Begin
+       Tmp:=QDTLBase[Ch,Sb,I Div 8]-QDHi1[Ch,2,I Div 8,I Mod 8]-QDHi2[Ch,Sb-4];
+       QDTLIdx[Ch,Sb,I]:=QDS8(Tmp And $FF);
+       If (Tmp<0) Or ((QDSb23=0) And (Tmp=0)) Then QDToneLevel[Ch,Sb,I]:=0.0
+       Else QDToneLevel[Ch,Sb,I]:=QDFtl[Tab*64+(Tmp And $3F)];
+      End;
+    End Else Begin
+     For Ch:=0 To QDNbCh-1 Do
+      For I:=0 To 63 Do Begin
+       QDTLIdx[Ch,Sb,I]:=QDTLBase[Ch,Sb,I Div 8]; Tmp:=QDTLIdx[Ch,Sb,I];
+       If (Tmp<0) Or ((QDSb23=0) And (Tmp=0)) Then QDToneLevel[Ch,Sb,I]:=0.0
+       Else QDToneLevel[Ch,Sb,I]:=QDFtl[Tab*64+(Tmp And $3F)];
+      End;
+    End;
+   End;
+  End;
+ End;
+End;
+
+Procedure QDFillCoding;
+Var Ch,Sb,J: LongInt;
+Begin
+ If QDSb23=0 Then Exit;
+ For Ch:=0 To QDNbCh-1 Do
+  For Sb:=0 To 29 Do
+   For J:=0 To 63 Do QDCoding[Ch,Sb,J]:=QDCodingMethod[QDCmSel*30+Sb];
+End;
+
+{ synthfilt_build_sb_samples ; renvoie 0 ou -1 (AVERROR_INVALIDDATA) }
+Function QDBuildSbSamples(Var G: TQDGB; Length,SbMin,SbMax: LongInt): LongInt;
+Var
+ Sb,J,K,N,Ch,Run,Channels,Joined,ZeroEnc,T34First,Index: LongInt;
+ T34Div,T34Pred,F,Nv: Single; Samples: Array[0..9] Of Single; SignBits: Array[0..15] Of LongInt;
+ Dd,C081,Dm: Double; Bits: Array[0..1] Of LongWord;
+Begin
+ QDBuildSbSamples:=0;
+ FillChar(SignBits,SizeOf(SignBits),0);
+ FillChar(Samples,SizeOf(Samples),0);
+ T34Div:=0.0;
+ If Length=0 Then Begin
+  For Sb:=SbMin To SbMax-1 Do QDBuildFromNoise(Sb);
+  Exit;
+ End;
+ { 0.81 (double) }
+ Bits[0]:=$1EB851EC; Bits[1]:=$3FE9EB85; Move(Bits[0],C081,8);
+ For Sb:=SbMin To SbMax-1 Do Begin
+  Channels:=QDNbCh;
+  If (QDNbCh<=1) Or (Sb<12) Then Joined:=0
+  Else If Sb>=24 Then Joined:=1
+  Else If QDLeft(G)>=1 Then Joined:=QDGet(G,1) Else Joined:=0;
+  If Joined<>0 Then Begin
+   If QDLeft(G)>=16 Then For J:=0 To 15 Do SignBits[J]:=QDGet(G,1);
+   For J:=0 To 63 Do If QDCoding[1,Sb,J]>QDCoding[0,Sb,J] Then QDCoding[0,Sb,J]:=QDCoding[1,Sb,J];
+   If QDFixCoding(Sb,QDNbCh)<>0 Then Begin
+    QDBuildFromNoise(Sb);
+    Continue;
+   End;
+   Channels:=1;
+  End;
+  For Ch:=0 To Channels-1 Do Begin
+   QDFixNoise;
+   If QDLeft(G)>=1 Then ZeroEnc:=QDGet(G,1) Else ZeroEnc:=0;
+   T34Pred:=0.0; T34First:=1;
+   J:=0;
+   While J<128 Do Begin
+    Case QDCoding[Ch,Sb,J Div 2] Of
+     8: Begin
+      If QDLeft(G)>=10 Then Begin
+       If ZeroEnc<>0 Then Begin
+        For K:=0 To 4 Do Begin
+         If (J+2*K)>=128 Then Break;
+         If QDGet(G,1)<>0 Then Samples[2*K]:=QDD1b[Joined*3+2*QDGet(G,1)] Else Samples[2*K]:=0.0;
+        End;
+       End Else Begin
+        N:=QDGet(G,8);
+        If N>=243 Then Begin QDBuildSbSamples:=-1; Exit; End;
+        For K:=0 To 4 Do Samples[2*K]:=QDD1b[Joined*3+QDRndIdx[N,K]];
+       End;
+       For K:=0 To 4 Do Samples[2*K+1]:=QDNoiseVal(Sb);
+      End Else Begin
+       For K:=0 To 9 Do Samples[K]:=QDNoiseVal(Sb);
+      End;
+      Run:=10;
+     End;
+     10: Begin
+      If QDLeft(G)>=1 Then Begin
+       F:=C081;
+       If QDGet(G,1)<>0 Then F:=-F;
+       Dd:=QDNoiseS[((Sb+1)*(J+5*Ch+1)) And 127]; Dd:=Dd*9.0; Dd:=Dd/40.0;
+       Dm:=F; Dm:=Dm-Dd; F:=Dm;
+       Samples[0]:=F;
+      End Else Samples[0]:=QDNoiseVal(Sb);
+      Run:=1;
+     End;
+     16: Begin
+      If QDLeft(G)>=10 Then Begin
+       If ZeroEnc<>0 Then Begin
+        For K:=0 To 4 Do Begin
+         If (J+K)>=128 Then Break;
+         If QDGet(G,1)=0 Then Samples[K]:=0.0 Else Samples[K]:=QDD1b[Joined*3+2*QDGet(G,1)];
+        End;
+       End Else Begin
+        N:=QDGet(G,8);
+        If N>=243 Then Begin QDBuildSbSamples:=-1; Exit; End;
+        For K:=0 To 4 Do Samples[K]:=QDD1b[Joined*3+QDRndIdx[N,K]];
+       End;
+      End Else Begin
+       For K:=0 To 4 Do Samples[K]:=QDNoiseVal(Sb);
+      End;
+      Run:=5;
+     End;
+     24: Begin
+      If QDLeft(G)>=7 Then Begin
+       N:=QDGet(G,7);
+       If N>=125 Then Begin QDBuildSbSamples:=-1; Exit; End;
+       For K:=0 To 2 Do Begin
+        Dd:=QDRnd24[N,K]; Dd:=Dd-2.0; Dd:=Dd*0.5; Samples[K]:=Single(Dd);
+       End;
+      End Else Begin
+       For K:=0 To 2 Do Samples[K]:=QDNoiseVal(Sb);
+      End;
+      Run:=3;
+     End;
+     30: Begin
+      If QDLeft(G)>=4 Then Begin
+       Index:=QDGetVlc(G,6,False);
+       If (Index<0) Or (Index>=8) Then Begin QDBuildSbSamples:=-1; Exit; End;
+       Samples[0]:=QDT30[Index];
+      End Else Samples[0]:=QDNoiseVal(Sb);
+      Run:=1;
+     End;
+     34: Begin
+      If QDLeft(G)>=7 Then Begin
+       If T34First<>0 Then Begin
+        T34Div:=1 Shl QDGet(G,2);
+        Dd:=QDGet(G,5); Dd:=Dd-16.0; Dd:=Dd/15.0; Samples[0]:=Single(Dd);
+        T34Pred:=Samples[0];
+        T34First:=0;
+       End Else Begin
+        Index:=QDGetVlc(G,7,False);
+        If (Index<0) Or (Index>=10) Then Begin QDBuildSbSamples:=-1; Exit; End;
+        Nv:=QDT34[Index]/T34Div;
+        Samples[0]:=Nv+T34Pred;
+        T34Pred:=Samples[0];
+       End;
+      End Else Samples[0]:=QDNoiseVal(Sb);
+      Run:=1;
+     End;
+    Else Begin
+     Samples[0]:=QDNoiseVal(Sb); Run:=1;
+    End;
+    End;
+    If Joined<>0 Then Begin
+     K:=0;
+     While (K<Run) And (J+K<128) Do Begin
+      QDSbS[0,J+K,Sb]:=QDToneLevel[0,Sb,(J+K) Div 2]*Samples[K];
+      If QDNbCh=2 Then Begin
+       If SignBits[(J+K) Div 8]<>0 Then Begin
+        Nv:=-Samples[K];
+        QDSbS[1,J+K,Sb]:=QDToneLevel[1,Sb,(J+K) Div 2]*Nv;
+       End Else QDSbS[1,J+K,Sb]:=QDToneLevel[1,Sb,(J+K) Div 2]*Samples[K];
+      End;
+      Inc(K);
+     End;
+    End Else Begin
+     For K:=0 To Run-1 Do
+      If (J+K)<128 Then QDSbS[Ch,J+K,Sb]:=QDToneLevel[Ch,Sb,(J+K) Div 2]*Samples[K];
+    End;
+    Inc(J,Run);
+   End;
+  End;
+ End;
+End;
+
+Function QDInitCoeffElem0(Ch: LongInt; Var G: TQDGB): LongInt;
+Var I,K,Run,Level,Diff: LongInt;
+Begin
+ QDInitCoeffElem0:=-1;
+ If QDLeft(G)<16 Then Exit;
+ Level:=QDGetVlc(G,0,False);
+ QDQCoef[Ch,0,0]:=QDS8(Level);
+ I:=0;
+ While I<7 Do Begin
+  If QDLeft(G)<16 Then Exit;
+  Run:=QDGetVlc(G,2,False)+1;
+  If I+Run>=8 Then Exit;
+  If QDLeft(G)<16 Then Exit;
+  Diff:=QDGetSeVlc(G,1);
+  For K:=1 To Run Do QDQCoef[Ch,0,I+K]:=QDS8(Level+((K*Diff) Div Run));
+  Inc(Level,Diff);
+  Inc(I,Run);
+ End;
+ QDInitCoeffElem0:=0;
+End;
+
+Procedure QDInitToneLevelDequant(Var G: TQDGB);
+Var Sb,J,K,N,Ch: LongInt;
+Begin
+ For Ch:=0 To QDNbCh-1 Do Begin
+  QDInitCoeffElem0(Ch,G);
+  If QDLeft(G)<16 Then Begin
+   For K:=0 To 7 Do QDQCoef[Ch,0,K]:=0;
+   Break;
+  End;
+ End;
+ N:=QDSubSampling+1;
+ For Sb:=0 To N-1 Do
+  For Ch:=0 To QDNbCh-1 Do
+   For J:=0 To 7 Do Begin
+    If QDLeft(G)<1 Then Break;
+    If QDGet(G,1)<>0 Then Begin
+     For K:=0 To 7 Do Begin
+      If QDLeft(G)<16 Then Break;
+      QDHi1[Ch,Sb,J,K]:=QDS8(QDGetVlc(G,3,False));
+     End;
+    End Else Begin
+     For K:=0 To 7 Do QDHi1[Ch,Sb,J,K]:=0;
+    End;
+   End;
+ N:=QDSbUsed-4;
+ For Sb:=0 To N-1 Do
+  For Ch:=0 To QDNbCh-1 Do Begin
+   If QDLeft(G)<16 Then Break;
+   QDHi2[Ch,Sb]:=QDS8(QDGetVlc(G,5,False));
+   If Sb>19 Then QDHi2[Ch,Sb]:=QDS8(QDHi2[Ch,Sb]-16)
+   Else For J:=0 To 7 Do QDMid[Ch,Sb,J]:=-16;
+  End;
+ N:=QDSbUsed-5;
+ For Sb:=0 To N-1 Do
+  For Ch:=0 To QDNbCh-1 Do
+   For J:=0 To 7 Do Begin
+    If QDLeft(G)<16 Then Break;
+    QDMid[Ch,Sb,J]:=QDS8(QDGetVlc(G,4,False)-32);
+   End;
+End;
+
+Procedure QDSubpacket9(Node: LongInt);
+Var G: TQDGB; I,J,K,N,Ch,Run,Level,Diff: LongInt;
+Begin
+ QDInitGB(G,QDSubP[QDListD[Node]].Data,QDSubP[QDListD[Node]].Size*8);
+ N:=QDCoeffAvg[QDCoeffSel*30+QDSbUsed-1]+1;
+ For I:=1 To N-1 Do
+  For Ch:=0 To QDNbCh-1 Do Begin
+   Level:=QDGetVlc(G,0,False);
+   QDQCoef[Ch,I,0]:=QDS8(Level);
+   J:=0;
+   While J<7 Do Begin
+    Run:=QDGetVlc(G,2,False)+1;
+    Diff:=QDGetSeVlc(G,1);
+    If J+Run>=8 Then Exit;
+    For K:=1 To Run Do QDQCoef[Ch,I,J+K]:=QDS8(Level+((K*Diff) Div Run));
+    Inc(Level,Diff);
+    Inc(J,Run);
+   End;
+  End;
+ For Ch:=0 To QDNbCh-1 Do For I:=0 To 7 Do QDQCoef[Ch,0,I]:=0;
+End;
+
+Procedure QDSubpacket10(Node: LongInt);
+Var G: TQDGB;
+Begin
+ If Node>=0 Then Begin
+  QDInitGB(G,QDSubP[QDListD[Node]].Data,QDSubP[QDListD[Node]].Size*8);
+  QDInitToneLevelDequant(G);
+  QDFillToneLevel(True);
+ End Else QDFillToneLevel(False);
+End;
+
+Procedure QDSubpacket11(Node: LongInt);
+Var G: TQDGB; Length,C: LongInt;
+Begin
+ Length:=0;
+ FillChar(G,SizeOf(G),0);
+ If Node>=0 Then Begin
+  Length:=QDSubP[QDListD[Node]].Size*8;
+  QDInitGB(G,QDSubP[QDListD[Node]].Data,Length);
+ End;
+ If Length>=32 Then Begin
+  C:=QDGet(G,13);
+  If C>3 Then QDFillCoding;
+ End;
+ QDBuildSbSamples(G,Length,0,8);
+End;
+
+Procedure QDSubpacket12(Node: LongInt);
+Var G: TQDGB; Length: LongInt;
+Begin
+ Length:=0;
+ FillChar(G,SizeOf(G),0);
+ If Node>=0 Then Begin
+  Length:=QDSubP[QDListD[Node]].Size*8;
+  QDInitGB(G,QDSubP[QDListD[Node]].Data,Length);
+ End;
+ QDBuildSbSamples(G,Length,8,QDSbUsed);
+End;
+
+Procedure QDSynthSubpackets;
+Var N0,N1,N2,N3: LongInt;
+Begin
+ N0:=QDSearch(9);
+ If N0>=0 Then QDSubpacket9(N0);
+ N1:=QDSearch(10);
+ If N1>=0 Then QDSubpacket10(N1) Else QDSubpacket10(-1);
+ N2:=QDSearch(11);
+ If (N0>=0) And (N1>=0) And (N2>=0) Then QDSubpacket11(N2) Else QDSubpacket11(-1);
+ N3:=QDSearch(12);
+ If (N0>=0) And (N1>=0) And (N3>=0) Then QDSubpacket12(N3) Else QDSubpacket12(-1);
+End;
+
+Function QDChecksum(Len,Value: LongInt): LongInt;
+Var I: LongInt;
+Begin
+ For I:=0 To Len-1 Do Dec(Value,QDByte(I));
+ QDChecksum:=Value And $FFFF;
+End;
+
+Procedure QDDecodeSuperBlock;
+Var
+ G: TQDGB; Hdr: TQDSub; I,J,PacketBytes,SubSize,Csum,NextIndex: LongInt; P: LongInt;
+Begin
+ FillChar(QDHi1,SizeOf(QDHi1),0); FillChar(QDMid,SizeOf(QDMid),0); FillChar(QDHi2,SizeOf(QDHi2),0);
+ QDNB:=0; QDND:=0;
+ QDAverageCoeffs;
+ QDInitGB(G,0,QDCheckSize*8);
+ QDDecodeSubHeader(G,Hdr);
+ If (Hdr.Typ<2) Or (Hdr.Typ>=8) Then Begin QDHasErr:=1; Exit; End;
+ If (Hdr.Typ=2) Or (Hdr.Typ=3) Then QDSb23:=1 Else QDSb23:=0;
+ PacketBytes:=QDCheckSize-(G.Idx Div 8);
+ QDInitGB(G,Hdr.Data,Hdr.Size*8);
+ If (Hdr.Typ=2) Or (Hdr.Typ=4) Or (Hdr.Typ=5) Then Begin
+  Csum:=257*QDGet(G,8);
+  Inc(Csum,2*QDGet(G,8));
+  Csum:=QDChecksum(QDCheckSize,Csum);
+  If Csum<>0 Then Begin QDHasErr:=1; Exit; End;
+ End;
+ QDND:=0;
+ For I:=0 To 5 Do Begin
+  Dec(QDLevelExp[I]);
+  If QDLevelExp[I]<0 Then QDLevelExp[I]:=0;
+ End;
+ NextIndex:=0;
+ I:=0;
+ QDListB[0]:=-1;
+ While PacketBytes>0 Do Begin
+  If I>=16 Then Exit;
+  If I>0 Then Begin
+   QDInitGB(G,Hdr.Data,Hdr.Size*8);
+   QDAdv(G,NextIndex*8);
+   If NextIndex>=Hdr.Size Then Break;
+  End;
+  P:=I;
+  QDDecodeSubHeader(G,QDSubP[P]);
+  NextIndex:=QDSubP[P].Size+(G.Idx Div 8);
+  SubSize:=Ord(QDSubP[P].Size>$FF)+QDSubP[P].Size+2;
+  If QDSubP[P].Typ=0 Then Break;
+  If SubSize>PacketBytes Then Begin
+   If (QDSubP[P].Typ<>10) And (QDSubP[P].Typ<>11) And (QDSubP[P].Typ<>12) Then Break;
+   Inc(QDSubP[P].Size,PacketBytes-SubSize);
+  End;
+  Dec(PacketBytes,SubSize);
+  If QDSubP[P].Typ=8 Then Exit
+  Else If (QDSubP[P].Typ>=9) And (QDSubP[P].Typ<=12) Then Begin
+   QDListD[QDND]:=P; Inc(QDND);
+  End Else If QDSubP[P].Typ=13 Then Begin
+   For J:=0 To 5 Do QDLevelExp[J]:=QDGet(G,6);
+  End Else If QDSubP[P].Typ=14 Then Begin
+   For J:=0 To 5 Do QDLevelExp[J]:=QDGetVlc(G,9,False);
+  End Else If QDSubP[P].Typ=15 Then Exit
+  Else If (QDSubP[P].Typ>=16) And (QDSubP[P].Typ<48) And (QDFftSub[QDSubP[P].Typ-16]=0) Then Begin
+   QDListB[QDNB]:=P; Inc(QDNB);
+  End;
+  Inc(I);
+ End;
+ If QDND>0 Then Begin
+  QDSynthSubpackets;
+  QDDoSynth:=1;
+ End Else If QDDoSynth<>0 Then Begin
+  QDSubpacket10(-1);
+  QDSubpacket11(-1);
+  QDSubpacket12(-1);
+ End;
+End;
+
+Procedure QDFftInitCoef(SubPkt,Offset,Duration,Channel,Exp,Phase: LongInt);
+Begin
+ If QDCoefMin[Duration]<0 Then QDCoefMin[Duration]:=QDCoefIdx;
+ If SubPkt>=16 Then QDCoefs[QDCoefIdx].SubPacket:=SubPkt-16 Else QDCoefs[QDCoefIdx].SubPacket:=SubPkt;
+ QDCoefs[QDCoefIdx].Chan:=Channel;
+ QDCoefs[QDCoefIdx].Offset:=Offset;
+ QDCoefs[QDCoefIdx].Exp:=Exp;
+ QDCoefs[QDCoefIdx].Phase:=Phase;
+ Inc(QDCoefIdx);
+End;
+
+Procedure QDFftDecodeTones(Duration: LongInt; Var G: TQDGB; B: Boolean);
+Var
+ Channel,Stereo,Phase,Exp,L4,L8,SPhase,L10,L14,SExp,L20,L28,N,Offset,SubPkt,Tb: LongInt;
+Begin
+ L4:=0; L28:=0; L20:=2; L8:=4-Duration;
+ L10:=1 Shl (QDGroupOrder-Duration-1);
+ Offset:=1;
+ Tb:=12+L8;
+ While QDLeft(G)>0 Do Begin
+  If QDSb23<>0 Then Begin
+   N:=QDGetVlc(G,Tb,True);
+   While N<2 Do Begin
+    If QDLeft(G)<0 Then Exit;
+    Offset:=1;
+    If N=0 Then Begin Inc(L4,L10); Inc(L28,1 Shl L8); End
+    Else Begin Inc(L4,8*L10); Inc(L28,8 Shl L8); End;
+    N:=QDGetVlc(G,Tb,True);
+   End;
+   Inc(Offset,N-2);
+  End Else Begin
+   If L10<=2 Then Exit;
+   Inc(Offset,QDGetVlc(G,Tb,True));
+   While Offset>=(L10-1) Do Begin
+    Inc(Offset,1-(L10-1)); Inc(L4,L10); Inc(L28,1 Shl L8);
+   End;
+  End;
+  If L4>=QDGroupSize Then Exit;
+  L14:=Offset Shr L8;
+  If L14>=256 Then Exit;
+  If QDNbCh>1 Then Begin Channel:=QDGet(G,1); Stereo:=QDGet(G,1); End
+  Else Begin Channel:=0; Stereo:=0; End;
+  If B Then Exp:=QDGetVlc(G,9,False) Else Exp:=QDGetVlc(G,8,False);
+  Inc(Exp,QDLevelExp[QDFftLevelIdx[L14]]);
+  If Exp<0 Then Exp:=0;
+  Phase:=QDGet(G,3);
+  SExp:=0; SPhase:=0;
+  If Stereo<>0 Then Begin
+   SExp:=Exp-QDGetVlc(G,10,False);
+   SPhase:=Phase-QDGetVlc(G,11,False);
+   If SPhase<0 Then Inc(SPhase,8);
+  End;
+  If QDFreqRange>(L14+1) Then Begin
+   SubPkt:=L20+L28;
+   If QDCoefIdx+Stereo>=1000 Then Exit;
+   QDFftInitCoef(SubPkt,Offset,Duration,Channel,Exp,Phase);
+   If Stereo<>0 Then QDFftInitCoef(SubPkt,Offset,Duration,1-Channel,SExp,SPhase);
+  End;
+  Inc(Offset);
+ End;
+End;
+
+Procedure QDDecodeFftPackets;
+Var I,J,Mn,Mx,Value,Typ,Duration,Pk: LongInt; G: TQDGB; Unknown: Boolean;
+Begin
+ If QDListB[0]<0 Then Exit;
+ QDCoefIdx:=0;
+ For I:=0 To 4 Do QDCoefMin[I]:=-1;
+ Mx:=256;
+ For I:=0 To QDNB-1 Do Begin
+  Pk:=-1; Mn:=0;
+  For J:=0 To QDNB-1 Do Begin
+   Value:=QDSubP[QDListB[J]].Typ;
+   If (Value>Mn) And (Value<Mx) Then Begin Mn:=Value; Pk:=QDListB[J]; End;
+  End;
+  Mx:=Mn;
+  If Pk<0 Then Exit;
+  Typ:=QDSubP[Pk].Typ;
+  If I=0 Then Begin
+   If (Typ<16) Or (Typ>=48) Then Exit;
+   If QDFftSub[Typ-16]<>0 Then Exit;
+  End;
+  QDInitGB(G,QDSubP[Pk].Data,QDSubP[Pk].Size*8);
+  Unknown:=False;
+  If (Typ>=32) And (Typ<48) Then If QDFftSub[Typ-16]=0 Then Unknown:=True;
+  If ((Typ>=17) And (Typ<24)) Or ((Typ>=33) And (Typ<40)) Then Begin
+   Duration:=QDSubSampling+5-(Typ And 15);
+   If (Duration>=0) And (Duration<4) Then QDFftDecodeTones(Duration,G,Unknown);
+  End Else If Typ=31 Then Begin
+   For J:=0 To 3 Do QDFftDecodeTones(J,G,Unknown);
+  End Else If Typ=46 Then Begin
+   For J:=0 To 5 Do QDLevelExp[J]:=QDGet(G,6);
+   For J:=0 To 3 Do QDFftDecodeTones(J,G,Unknown);
+  End;
+ End;
+ J:=-1;
+ For I:=0 To 4 Do
+  If QDCoefMin[I]>=0 Then Begin
+   If J>=0 Then QDCoefMax[J]:=QDCoefMin[I];
+   J:=I;
+  End;
+ If J>=0 Then QDCoefMax[J]:=QDCoefIdx;
+End;
+
+Procedure QDGenerateTone(Var T: TQDTone);
+Var
+ Level,Cre,Cim,Tt: Single; F: Array[0..5] Of Single; I,Ix: LongInt; Ph,Dv,Pi_,Iscale: Double; Fl: LongInt;
+Begin
+ Pi_:=3.14159265358979323846;
+ Iscale:=2.0*Pi_/512.0;
+ Inc(T.Phase,T.PhaseShift);
+ Level:=QDFte[T.Duration*31+T.TimeIndex]*T.Level;
+ Ph:=T.Phase; Ph:=Ph*Iscale;
+ Dv:=Level; Dv:=Dv*Sin(Ph); Cim:=Single(Dv);
+ Dv:=Level; Dv:=Dv*Cos(Ph); Cre:=Single(Dv);
+ If (T.Duration>=3) Or (T.Cutoff>=3) Then Begin
+  QDCplx[T.Ch,T.Off].Im:=QDCplx[T.Ch,T.Off].Im+Cim;
+  QDCplx[T.Ch,T.Off].Re:=QDCplx[T.Ch,T.Off].Re+Cre;
+  QDCplx[T.Ch,T.Off+1].Im:=QDCplx[T.Ch,T.Off+1].Im-Cim;
+  QDCplx[T.Ch,T.Off+1].Re:=QDCplx[T.Ch,T.Off+1].Re-Cre;
+ End Else Begin
+  Fl:=T.Tab;
+  F[1]:=-QDFts[Fl+4];
+  F[0]:=QDFts[Fl+3]-QDFts[Fl+0];
+  Dv:=1.0; Dv:=Dv-QDFts[Fl+2]; Dv:=Dv-QDFts[Fl+3]; F[2]:=Single(Dv);
+  Tt:=QDFts[Fl+1]+QDFts[Fl+4]; Dv:=Tt; Dv:=Dv-1.0; F[3]:=Single(Dv);
+  F[4]:=QDFts[Fl+0]-QDFts[Fl+1];
+  F[5]:=QDFts[Fl+2];
+  For I:=0 To 1 Do Begin
+   Ix:=T.Off+QDCutoffIdx[T.Cutoff*2+I];
+   QDCplx[T.Ch,Ix].Re:=QDCplx[T.Ch,Ix].Re+Cre*F[I];
+   If T.Cutoff<=I Then Tt:=-F[I] Else Tt:=F[I];
+   QDCplx[T.Ch,Ix].Im:=QDCplx[T.Ch,Ix].Im+Cim*Tt;
+  End;
+  For I:=0 To 3 Do Begin
+   QDCplx[T.Ch,T.Off+I].Re:=QDCplx[T.Ch,T.Off+I].Re+Cre*F[I+2];
+   QDCplx[T.Ch,T.Off+I].Im:=QDCplx[T.Ch,T.Off+I].Im+Cim*F[I+2];
+  End;
+ End;
+ Inc(T.TimeIndex);
+ If T.TimeIndex<((1 Shl (5-T.Duration))-1) Then Begin
+  QDTones[QDToneEnd]:=T;
+  QDToneEnd:=(QDToneEnd+1) Mod 1000;
+ End;
+End;
+
+Function QDLevelOf(Exp: LongInt): Single;
+Begin
+ If Exp<0 Then QDLevelOf:=0.0
+ Else If QDSb23<>0 Then QDLevelOf:=QDFtl[Exp And 63]
+ Else QDLevelOf:=QDFtl[64+(Exp And 63)];
+End;
+
+Procedure QDToneSynth(SubPkt: LongInt);
+Var
+ I,J,Ch,Off,FourI: LongInt; Level,Cre,Cim: Single; Dv,Pi_,Iscale: Double; T: TQDTone;
+Begin
+ Pi_:=3.14159265358979323846;
+ Iscale:=0.25*Pi_;
+ For Ch:=0 To QDCh-1 Do FillChar(QDCplx[Ch,0],QDFftSize*SizeOf(TQDCx),0);
+ If QDCoefMin[4]>=0 Then Begin
+  I:=QDCoefMin[4];
+  While I<QDCoefMax[4] Do Begin
+   If QDCoefs[I].SubPacket<>SubPkt Then Break;
+   If QDCh=1 Then Ch:=0 Else Ch:=QDCoefs[I].Chan;
+   Level:=QDLevelOf(QDCoefs[I].Exp);
+   Dv:=QDCoefs[I].Phase; Dv:=Dv*Iscale; Dv:=Cos(Dv);
+   Dv:=Level*Dv; Cre:=Single(Dv);
+   Dv:=QDCoefs[I].Phase; Dv:=Dv*Iscale; Dv:=Sin(Dv);
+   Dv:=Level*Dv; Cim:=Single(Dv);
+   Off:=QDCoefs[I].Offset;
+   QDCplx[Ch,Off].Re:=QDCplx[Ch,Off].Re+Cre;
+   QDCplx[Ch,Off].Im:=QDCplx[Ch,Off].Im+Cim;
+   QDCplx[Ch,Off+1].Re:=QDCplx[Ch,Off+1].Re-Cre;
+   QDCplx[Ch,Off+1].Im:=QDCplx[Ch,Off+1].Im-Cim;
+   Inc(I);
+  End;
+ End;
+ I:=QDToneEnd;
+ While I<>QDToneStart Do Begin
+  QDGenerateTone(QDTones[QDToneStart]);
+  QDToneStart:=(QDToneStart+1) Mod 1000;
+ End;
+ For I:=0 To 3 Do
+  If QDCoefMin[I]>=0 Then Begin
+   J:=QDCoefMin[I];
+   While J<QDCoefMax[I] Do Begin
+    If QDCoefs[J].SubPacket<>SubPkt Then Break;
+    FourI:=4-I;
+    Off:=QDCoefs[J].Offset Shr FourI;
+    If QDCh=1 Then Ch:=0 Else Ch:=QDCoefs[J].Chan;
+    If Off<QDFreqRange Then Begin
+     If Off<2 Then T.Cutoff:=Off
+     Else If Off>=60 Then T.Cutoff:=3 Else T.Cutoff:=2;
+     T.Level:=QDLevelOf(QDCoefs[J].Exp);
+     T.Ch:=Ch; T.Off:=Off;
+     T.Tab:=I*80+(QDCoefs[J].Offset-(Off Shl FourI))*5;
+     T.Phase:=64*QDCoefs[J].Phase-(Off Shl 8)-128;
+     T.PhaseShift:=(2*QDCoefs[J].Offset+1) Shl (7-FourI);
+     T.Duration:=I;
+     T.TimeIndex:=0;
+     QDGenerateTone(T);
+    End;
+    Inc(J);
+   End;
+   QDCoefMin[I]:=J;
+  End;
+End;
+
+{ ff_tx_rdft_c2r (inverse, float, echelle 0.5) puis FFT out-of-place }
+Procedure QDRdft(Chn: LongInt);
+Var
+ Len2,Len4,I,K: LongInt; T0r,T0i,T1r,T1i,T2r,T2i,F0,F1,F2,F3,F4,F5,F6,F7,Tmp: Single; P: PQDCxA;
+Begin
+ F0:=0.5; F1:=0.5; F2:=1.0; F3:=-1.0; F4:=0.5; F5:=-0.5; F6:=-0.5; F7:=0.5;
+ Len2:=QDFftSize; Len4:=QDFftSize Div 2;
+ P:=@QDCplx[Chn,0];
+ P^[0].Im:=P^[Len2].Re;
+ T0r:=P^[0].Re;
+ P^[0].Re:=T0r+P^[0].Im;
+ P^[0].Im:=T0r-P^[0].Im;
+ P^[0].Re:=F0*P^[0].Re;
+ P^[0].Im:=F1*P^[0].Im;
+ P^[Len4].Re:=F2*P^[Len4].Re;
+ P^[Len4].Im:=F3*P^[Len4].Im;
+ For I:=1 To Len4-1 Do Begin
+  Tmp:=P^[I].Re+P^[Len2-I].Re; T0r:=F4*Tmp;
+  Tmp:=P^[I].Im-P^[Len2-I].Im; T0i:=F5*Tmp;
+  Tmp:=P^[I].Im+P^[Len2-I].Im; T1r:=F6*Tmp;
+  Tmp:=P^[I].Re-P^[Len2-I].Re; T1i:=F7*Tmp;
+  T2r:=T1r*QDRCos[I]-T1i*QDRSin[I];
+  T2i:=T1r*QDRSin[I]+T1i*QDRCos[I];
+  P^[I].Re:=T0r+T2r;
+  P^[I].Im:=T2i-T0i;
+  P^[Len2-I].Re:=T0r-T2r;
+  P^[Len2-I].Im:=T2i+T0i;
+ End;
+ For I:=0 To Len2-1 Do QDTemp[Chn,I]:=P^[QDMap[I]];
+ K:=0; I:=Len2; While I>8 Do Begin I:=I Shr 1; Inc(K); End;
+ QDZ:=@QDTemp[Chn,0];
+ QDFftN(0,Len2,K);
+End;
+
+Procedure QDCalcFft(Chn: LongInt);
+Var I,Ix: LongInt; Gain,Two: Single;
+Begin
+ If (QDCh=1) And (QDNbCh=2) Then Gain:=0.5 Else Gain:=1.0;
+ Two:=2.0;
+ QDCplx[Chn,0].Re:=QDCplx[Chn,0].Re*Two;
+ QDCplx[Chn,0].Im:=0.0;
+ QDCplx[Chn,QDFftSize].Re:=0.0;
+ QDCplx[Chn,QDFftSize].Im:=0.0;
+ QDRdft(Chn);
+ For I:=0 To QDFftSize-1 Do Begin
+  Ix:=Chn+I*2*QDCh;
+  QDOut[Ix]:=QDOut[Ix]+QDTemp[Chn,I].Re*Gain;
+  QDOut[Ix+QDCh]:=QDOut[Ix+QDCh]+QDTemp[Chn,I].Im*Gain;
+ End;
+End;
+
+Procedure QDSynthFilter(Index: LongInt);
+Var I,K,Ch,SbUsed,SubS,Pos: LongInt; C23: Single;
+Begin
+ SbUsed:=QDSbUsed;
+ For Ch:=0 To QDCh-1 Do
+  For I:=0 To 7 Do
+   For K:=SbUsed To 31 Do QDSbS[Ch,8*Index+I,K]:=0.0;
+ For Ch:=0 To QDNbCh-1 Do Begin
+  Pos:=Ch;
+  For I:=0 To 7 Do Begin
+   MPASynthFilter(QDMpa,Ch,PMPASingles(@QDSmp[Pos]),QDNbCh,PMPASingles(@QDSbS[Ch,8*Index+I,0]),0);
+   Inc(Pos,32*QDNbCh);
+  End;
+ End;
+ SubS:=4 Shr QDSubSampling;
+ C23:=8388608.0;
+ For Ch:=0 To QDCh-1 Do
+  For I:=0 To QDFrameSize-1 Do
+   QDOut[QDCh*I+Ch]:=QDOut[QDCh*I+Ch]+C23*QDSmp[QDNbCh*SubS*I+Ch];
+End;
+
+{ qdm2_decode : un sous-paquet (frame_size*channels echantillons) }
+Procedure QDDecodeStep;
+Var Ch,I,FrameSize,Value: LongInt;
+Begin
+ FrameSize:=QDFrameSize*QDCh;
+ Move(QDOut[FrameSize],QDOut[0],FrameSize*4);
+ FillChar(QDOut[FrameSize],FrameSize*4,0);
+ If QDSubPacket=0 Then Begin
+  QDHasErr:=0;
+  QDDecodeSuperBlock;
+ End;
+ If QDHasErr=0 Then Begin
+  If QDSubPacket=2 Then QDDecodeFftPackets;
+  QDToneSynth(QDSubPacket);
+ End;
+ For Ch:=0 To QDCh-1 Do QDCalcFft(Ch);
+ If (QDHasErr=0) And (QDDoSynth<>0) Then QDSynthFilter(QDSubPacket);
+ QDSubPacket:=(QDSubPacket+1) Mod 16;
+ For I:=0 To FrameSize-1 Do Begin
+  Value:=QDTrunc(QDOut[I]);
+  If Value>27600 Then Begin
+   If Value>35716 Then Value:=32767 Else Value:=QDSoft[Value-27600];
+  End Else If Value<-27600 Then Begin
+   If Value<-35716 Then Value:=-32767 Else Value:=-QDSoft[-Value-27600];
+  End;
+  EAPut(Value);
+ End;
+End;
+
+Function QDBe32(Ex: PEABuffer; ExLen,P: LongInt): Int64;
+Var I: LongInt; V: Int64;
+Begin
+ V:=0;
+ For I:=0 To 3 Do V:=V*256+EAByte(Ex,ExLen,P+I);
+ QDBe32:=V;
+End;
+
+Function QDLog2(V: Int64): LongInt;
+Var N: LongInt;
+Begin
+ N:=0; If V<0 Then V:=V And $FFFFFFFF;
+ While V>1 Do Begin V:=V Shr 1; Inc(N); End;
+ QDLog2:=N;
+End;
+
+{ qdm2_decode_init : extradata = contenu de l'atome 'wave' ; renvoie False si l'initialisation echoue }
+Function QDSetup(Ex: PEABuffer; ExLen: LongInt; Var Rate,Chans: LongInt): Boolean;
+Var
+ Pos,Size,Tmp,TmpVal,I,N: LongInt; BitRate,Fs,Cs,Gs: Int64; Fr,Dv,Pi_: Double;
+Begin
+ QDSetup:=False;
+ If ExLen<48 Then Exit;
+ Pos:=0;
+ While ExLen-Pos>8 Do Begin
+  If (QDBe32(Ex,ExLen,Pos)=$66726D61) And (QDBe32(Ex,ExLen,Pos+4)=$51444D32) Then Break;
+  Inc(Pos);
+ End;
+ If ExLen-Pos<12 Then Exit;
+ Inc(Pos,8);
+ Size:=QDBe32(Ex,ExLen,Pos); Inc(Pos,4);
+ If Size>ExLen-Pos Then Exit;
+ If QDBe32(Ex,ExLen,Pos)<>$51444341 Then Exit;
+ Inc(Pos,4);
+ Inc(Pos,4);
+ FillChar(QDOut,SizeOf(QDOut),0);
+ N:=QDBe32(Ex,ExLen,Pos); Inc(Pos,4);
+ If (N<=0) Or (N>2) Then Exit;
+ QDNbCh:=N; QDCh:=N;
+ Rate:=LongInt(QDBe32(Ex,ExLen,Pos)); Inc(Pos,4);
+ BitRate:=QDBe32(Ex,ExLen,Pos); Inc(Pos,4);
+ Gs:=QDBe32(Ex,ExLen,Pos); Inc(Pos,4);
+ Fs:=QDBe32(Ex,ExLen,Pos); Inc(Pos,4);
+ Cs:=QDBe32(Ex,ExLen,Pos); Inc(Pos,4);
+ If (Cs>=(Int64(1) Shl 28)) Or (Cs<=1) Then Exit;
+ QDCheckSize:=Cs;
+ QDFftSize:=LongInt(Fs);
+ QDFftOrder:=QDLog2(Fs)+1;
+ If (QDFftOrder<7) Or (QDFftOrder>9) Then Exit;
+ QDGroupSize:=LongInt(Gs);
+ If Gs>=2147483648 Then Exit;
+ QDGroupOrder:=QDLog2(Gs)+1;
+ QDFrameSize:=QDGroupSize Div 16;
+ If QDFrameSize>512 Then Exit;
+ QDSubSampling:=QDFftOrder-7;
+ QDFreqRange:=255 Div (1 Shl (2-QDSubSampling));
+ If ((QDFrameSize*4) Shr QDSubSampling)>1152 Then Exit;
+ Case QDSubSampling*2+QDCh-1 Of
+  0: Tmp:=40; 1: Tmp:=48; 2: Tmp:=56; 3: Tmp:=72; 4: Tmp:=80; 5: Tmp:=100;
+ Else Tmp:=QDSubSampling;
+ End;
+ TmpVal:=0;
+ If Int64(Tmp)*1000<BitRate Then TmpVal:=1;
+ If Int64(Tmp)*1440<BitRate Then TmpVal:=2;
+ If Int64(Tmp)*1760<BitRate Then TmpVal:=3;
+ If Int64(Tmp)*2240<BitRate Then TmpVal:=4;
+ QDCmSel:=TmpVal;
+ If BitRate<=8000 Then QDCoeffSel:=0 Else If BitRate<16000 Then QDCoeffSel:=1 Else QDCoeffSel:=2;
+ If QDFftSize<>(1 Shl (QDFftOrder-1)) Then Exit;
+ If QDFrameSize<=0 Then Exit;
+ Chans:=QDCh;
+ { tables de la RDFT }
+ Pi_:=3.14159265358979323846;
+ Fr:=2.0*Pi_/(2*QDFftSize);
+ For I:=0 To QDFftSize Div 2-1 Do Begin
+  Dv:=I; Dv:=Dv*Fr; QDRCos[I]:=Single(Cos(Dv));
+  Dv:=(2*QDFftSize-I*4); Dv:=Dv/4.0; Dv:=Dv*Fr; QDRSin[I]:=Single(Cos(Dv));
+ End;
+ For I:=0 To QDFftSize-1 Do QDMap[I]:=(-QDSplit(I,QDFftSize,1)) And (QDFftSize-1);
+ QDSetup:=True;
+End;
+
+Procedure QDResetState;
+Begin
+ FillChar(QDSubP,SizeOf(QDSubP),0); FillChar(QDListB,SizeOf(QDListB),0); FillChar(QDListD,SizeOf(QDListD),0);
+ QDNB:=0; QDND:=0;
+ FillChar(QDTones,SizeOf(QDTones),0); QDToneStart:=0; QDToneEnd:=0;
+ FillChar(QDCoefs,SizeOf(QDCoefs),0); QDCoefIdx:=0;
+ FillChar(QDCoefMin,SizeOf(QDCoefMin),0); FillChar(QDCoefMax,SizeOf(QDCoefMax),0); FillChar(QDLevelExp,SizeOf(QDLevelExp),0);
+ FillChar(QDCplx,SizeOf(QDCplx),0); FillChar(QDTemp,SizeOf(QDTemp),0);
+ FillChar(QDOut,SizeOf(QDOut),0);
+ FillChar(QDSbS,SizeOf(QDSbS),0); FillChar(QDSmp,SizeOf(QDSmp),0);
+ FillChar(QDToneLevel,SizeOf(QDToneLevel),0); FillChar(QDCoding,SizeOf(QDCoding),0);
+ FillChar(QDQCoef,SizeOf(QDQCoef),0); FillChar(QDTLBase,SizeOf(QDTLBase),0);
+ FillChar(QDHi1,SizeOf(QDHi1),0); FillChar(QDMid,SizeOf(QDMid),0); FillChar(QDHi2,SizeOf(QDHi2),0);
+ FillChar(QDTLIdx,SizeOf(QDTLIdx),0);
+ QDHasErr:=0; QDSb23:=0; QDDoSynth:=0; QDSubPacket:=0; QDNoiseIdx:=0;
+ QDListB[0]:=-1;
+ If QDMpa=Nil Then New(QDMpa);
+ FillChar(QDMpa^,SizeOf(QDMpa^),0);
+End;
+
+{ qdm2_decode_frame : un paquet = k trames de checksum_size octets (le reste est ignore) }
+Procedure QDDecodePacket(Buf: PEABuffer; Len: LongInt);
+Var I,Off: LongInt;
+Begin
+ Off:=0;
+ While Len-Off>0 Do Begin
+  If Len-Off<QDCheckSize Then Exit;
+  QDPkt:=PEABuffer(@Buf^[Off]); QDPktLen:=Len-Off;
+  For I:=0 To 15 Do QDDecodeStep;
+  Inc(Off,QDCheckSize);
+ End;
+End;
+
+{ QuickTime / MP4 : piste QDM2 ; renvoie les positions de stbl et de l'entree stsd }
+Function MP4FindQDM2(Var StblPos,StblSize,EntryPos,EntrySize: LongInt): Boolean;
+Var
+ Limit,MoovPos,MoovSize,P,TrakPos,TrakSize,MdiaPos,MdiaSize,MinfPos,MinfSize,StsdPos,StsdSize: LongInt;
+Begin
+ MP4FindQDM2:=False; Limit:=InputSize;
+ If Not MP4Find(0,Limit,'moov',MoovPos,MoovSize) Then Exit;
+ P:=MoovPos+8;
+ While MP4Find(P,MoovPos+MoovSize,'trak',TrakPos,TrakSize) Do Begin
+  If MP4Find(TrakPos+8,TrakPos+TrakSize,'mdia',MdiaPos,MdiaSize) Then
+   If MP4Find(MdiaPos+8,MdiaPos+MdiaSize,'minf',MinfPos,MinfSize) Then
+    If MP4Find(MinfPos+8,MinfPos+MinfSize,'stbl',StblPos,StblSize) Then
+     If MP4Find(StblPos+8,StblPos+StblSize,'stsd',StsdPos,StsdSize) Then
+      If StsdSize>=24 Then Begin
+       EntryPos:=StsdPos+16; EntrySize:=MP4BE32(EntryPos);
+       If (EntrySize>=36) And (MP4Tag(EntryPos+4)='QDM2') Then Begin MP4FindQDM2:=True; Exit; End;
+      End;
+  P:=TrakPos+TrakSize;
+ End;
+End;
+
+Function MP4HasQDM2(Const Name: String): Boolean;
+Var A,B,C,D: LongInt;
+Begin OpenRead(Name); MP4HasQDM2:=MP4FindQDM2(A,B,C,D); CloseRead; End;
+
+Procedure DecodeQDM2(Const Source,Target: String);
+Var
+ StblPos,StblSize,EntryPos,EntrySize,SzPos,SzSize,ScPos,ScSize,CoPos,CoSize,FixedSize,Samples,Chunks,Rate,Chans: LongInt;
+ WavePos,WaveSize,ChildAt,Ver,ExLen: LongInt; Ex: PEABuffer;
+ Sizes: PALLong; Table: PALLong; Chunk,Sample,PerChunk,I,J,Pos,Take,Entries,K,Cnt: LongInt; Buf: PEABuffer; Is64: Boolean;
+ Q: Array[0..11] Of Byte;
+Begin
+ MPAInit; QDInit; EAReset; OpenRead(Source);
+ If Not MP4FindQDM2(StblPos,StblSize,EntryPos,EntrySize) Then Fail('qdm2: aucune piste QDM2 dans le fichier.');
+ ReadAt(EntryPos+16,Q,2); Ver:=Q[0]*256+Q[1];
+ ChildAt:=EntryPos+36; If Ver=1 Then Inc(ChildAt,16) Else If Ver=2 Then Inc(ChildAt,36);
+ If Not MP4Find(ChildAt,EntryPos+EntrySize,'wave',WavePos,WaveSize) Then Fail('qdm2: atome wave absent.');
+ ExLen:=WaveSize-8;
+ If ExLen<48 Then Fail('qdm2: donnees de configuration trop courtes.');
+ GetMem(Ex,ExLen+16);
+ I:=0; While I<ExLen Do Begin
+  If ExLen-I>16384 Then Cnt:=16384 Else Cnt:=ExLen-I;
+  ReadAt(WavePos+8+I,Ex^[I],Cnt); Inc(I,Cnt);
+ End;
+ QDResetState;
+ If Not QDSetup(Ex,ExLen,Rate,Chans) Then Fail('qdm2: parametres de configuration incorrects ou non pris en charge.');
+ If Not MP4Find(StblPos+8,StblPos+StblSize,'stsz',SzPos,SzSize) Then Fail('qdm2: stsz absent.');
+ If Not MP4Find(StblPos+8,StblPos+StblSize,'stsc',ScPos,ScSize) Then Fail('qdm2: stsc absent.');
+ Is64:=False;
+ If Not MP4Find(StblPos+8,StblPos+StblSize,'stco',CoPos,CoSize) Then Begin
+  If Not MP4Find(StblPos+8,StblPos+StblSize,'co64',CoPos,CoSize) Then Fail('qdm2: stco absent.');
+  Is64:=True;
+ End;
+ FixedSize:=MP4BE32(SzPos+12); Samples:=MP4BE32(SzPos+16);
+ If (Samples<=0) Or (Samples>16777216) Then Fail('qdm2: nombre d''echantillons incorrect.');
+ GetMem(Sizes,Samples*4);
+ For I:=0 To Samples-1 Do If FixedSize<>0 Then Sizes^[I]:=FixedSize Else Sizes^[I]:=MP4BE32(SzPos+20+4*I);
+ Entries:=MP4BE32(ScPos+12); If (Entries<1) Or (Entries>1048576) Then Fail('qdm2: stsc incorrect.');
+ GetMem(Table,Entries*8);
+ For I:=0 To Entries-1 Do Begin Table^[2*I]:=MP4BE32(ScPos+16+12*I); Table^[2*I+1]:=MP4BE32(ScPos+20+12*I); End;
+ Chunks:=MP4BE32(CoPos+12);
+ OpenWrite(Target); ADPCMWaveHeader(Rate,Chans,0);
+ Sample:=0; K:=0;
+ For Chunk:=1 To Chunks Do Begin
+  While (K+1<Entries) And (Table^[2*(K+1)]<=Chunk) Do Inc(K);
+  PerChunk:=Table^[2*K+1];
+  If Is64 Then Begin
+   ReadAt(CoPos+16+8*(Chunk-1),Q,8); Pos:=LongInt(Q[4])*16777216+LongInt(Q[5])*65536+LongInt(Q[6])*256+Q[7];
+  End Else Pos:=MP4BE32(CoPos+16+4*(Chunk-1));
+  For J:=1 To PerChunk Do Begin
+   If Sample>=Samples Then Break;
+   Take:=Sizes^[Sample];
+   If (Take>0) And (Pos+Take<=InputSize) Then Begin
+    GetMem(Buf,Take); I:=0;
+    While I<Take Do Begin
+     If Take-I>16384 Then Cnt:=16384 Else Cnt:=Take-I;
+     ReadAt(Pos+I,Buf^[I],Cnt); Inc(I,Cnt);
+    End;
+    QDDecodePacket(Buf,Take); FreeMem(Buf,Take);
+   End;
+   Inc(Pos,Take); Inc(Sample);
+  End;
+ End;
+ EAFlush;
+ If EAWritten=0 Then Fail('qdm2: aucune donnee audio decodee.');
+ ADPCMPatchHeader(Rate,Chans,EAWritten); CloseRead; CloseWrite;
+End;
+{ QDM2-END }
+
 Procedure DecodeAVIX(Const Source,Target: String; Mode,Kind: LongInt);
 Var Pos,PkPos,PkLen,RN,RD,I,Y,X,Cw,Ch,Bs,Msg2: LongInt; Ok,FFBegun: Boolean; Msg: String; PIdx: LongInt; NbF,NbP: Int64;
 Begin
@@ -75218,6 +76754,7 @@ BEGIN
   WriteLn('DEV    rv10            RealVideo 1.0 (decodeur I/P, tranches multiples; encodeur I/P 16x16 vers .rm)');
   WriteLn('DEV    rv20            RealVideo 2.0 (decodeur I/P/B; encodeur I/P 16x16 vers .rm)');
   WriteLn('D A    qcelp           QCELP / PureVoice (fichiers .qcp, QCELP-13K)');
+  WriteLn('D A    qdm2            QDesign Music Codec 2 (QuickTime/MP4 QDM2; decodeur exact en flottant)');
   WriteLn('D A    shorten         Shorten (fichiers .shn; versions 0-2, WAVE; AIFF non pris en charge)');
    WriteLn('D V    ptx             V.Flash PTX image (RGB15)');
    WriteLn('D V    pcx             PC Paintbrush PCX image (1/2/4/8 bits palette, 24 bits RGB)');
@@ -75479,6 +77016,8 @@ BEGIN
   If MP4HasMace(InputPath)>0 Then InputFormat:='mace';
  If (InputFormat='mp4') And Not IsHTTP(InputPath) And ((OutputFormat='wav') Or (OutputFormat='adx') Or (OutputFormat='aiff') Or (OutputFormat='flv') Or (OutputFormat='mp3') Or (OutputFormat='ac3') Or (OutputFormat='aac') Or (OutputFormat='ogg')) Then
   If MPAHasOn4(InputPath) Then InputFormat:='mp3on4';
+ If (InputFormat='mp4') And Not IsHTTP(InputPath) And ((OutputFormat='wav') Or (OutputFormat='adx') Or (OutputFormat='aiff') Or (OutputFormat='flv') Or (OutputFormat='mp3') Or (OutputFormat='ac3') Or (OutputFormat='aac') Or (OutputFormat='ogg')) Then
+  If MP4HasQDM2(InputPath) Then InputFormat:='qdm2';
  If (InputCodec='libfaad') Or (InputCodec='interplay_dpcm') Or (InputCodec='libspeex') Or (InputCodec='speex') Then Begin
   { decodeurs imposes : ce sont les decodeurs natifs des entrees correspondantes }
   If ((InputCodec='libfaad') And (InputFormat<>'aac')) Or ((InputCodec='interplay_dpcm') And (InputFormat<>'ipmovie')) Or
@@ -76052,6 +77591,7 @@ BEGIN
    If InputFormat='roq' Then DecodeRoQAudio(InputPath,Temps[0]) Else
    If InputFormat='shn' Then DecodeShorten(InputPath,Temps[0]) Else
    If InputFormat='qcp' Then DecodeQCELP(InputPath,Temps[0]) Else
+   If InputFormat='qdm2' Then DecodeQDM2(InputPath,Temps[0]) Else
    If InputFormat='smk' Then DecodeSMKAudio(InputPath,Temps[0]) Else
    If (InputFormat='aiff') And IsAIFFIma4(InputPath) Then DecodeAIFFIma4(InputPath,Temps[0]) Else
    If (InputFormat='aiff') And PcmAiffToWav(InputPath,Temps[0],PcmCodecOut<>'') Then Else
