@@ -21636,6 +21636,8 @@ Procedure DecodeDXA(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeEAVideo(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeAVIX(Const Source,Target: String; Mode,Kind: LongInt); Forward;
 Procedure DecodeQTRLE(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure DecodeRPZA(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure DecodeSMC(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeSTRVideo(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeMSNWC(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeMM(Const Source,Target: String; Mode: LongInt); Forward;
@@ -22388,6 +22390,8 @@ End;
 Procedure DecodeNV2(Kind: LongInt; Const Source,Target: String; Mode: LongInt);
 Begin
  If Kind=55 Then Begin DecodePCX(Source,Target,Mode); Exit; End;
+ If Kind=60 Then Begin DecodeRPZA(Source,Target,Mode); Exit; End;
+ If Kind=61 Then Begin DecodeSMC(Source,Target,Mode); Exit; End;
  If Kind=59 Then Begin DecodeQTRLE(Source,Target,Mode); Exit; End;
  If Kind=58 Then Begin DecodePNG(Source,Target,Mode); Exit; End;
  If Kind=56 Then Begin DecodeSGI(Source,Target,Mode); Exit; End;
@@ -46323,6 +46327,320 @@ Begin
  FreeMem(RleCode,(LogW+2)*4); FreeMem(LenTab,(LogW+2)*4); FreeMem(SkipTab,LogW+16);
 End;
 
+{ ---- QuickTime RPZA (libavcodec/rpza.c) et SMC (libavcodec/smc.c) : MOV / AVI ---- }
+Procedure DecodeRPZA(Const Source,Target: String; Mode: LongInt);
+Var
+ Fr,Pk: PEABuffer; W,H,Stride,PIdx,Sz,Sp,TotalBlocks,RowPtr,PixelPtr,BlockPtr,NB,Op,ColorA,ColorB,Ta,Tb,I,Px,Py,Idx,Ix,Left0: LongInt;
+ C4: Array[0..3] Of LongInt; Bad: Boolean; Chunk: LongInt;
+Function GB: LongInt;
+Begin If Sp<Sz Then GB:=Pk^[Sp] Else GB:=0; Inc(Sp); End;
+Function GB16: LongInt;
+Var A: LongInt;
+Begin A:=GB; GB16:=A*256+GB; End;
+Function LeftB: LongInt;
+Var Q0: LongInt;
+Begin Q0:=Sz-Sp; If Q0<0 Then Q0:=0; LeftB:=Q0; End;
+Procedure PutPx(Ptr,V: LongInt);
+Begin Fr^[Ptr*2]:=V And 255; Fr^[Ptr*2+1]:=V Shr 8; End;
+Procedure Adv;
+Begin
+ Inc(PixelPtr,4);
+ If PixelPtr>=W Then Begin PixelPtr:=0; Inc(RowPtr,Stride*4); End;
+ Dec(TotalBlocks);
+End;
+Begin
+ QXOpen(Source);
+ W:=QXW; H:=QXH;
+ If (W<1) Or (H<1) Or (W>16000) Or (H>16000) Then Fail('rpza: dimensions invalides.');
+ Stride:=((W+3) Div 4)*4;
+ NVBegin(Mode,Target,W,H,2,QXRn,QXRd);
+ If QXIsMov And (QXSarN>0) Then Begin NVSarN:=QXSarN; NVSarD:=QXSarD; End Else NVSarN:=0;
+ If Not QXIsMov Then NVAviSar(W,H);
+ GetMem(Fr,Stride*(((H+3) Div 4)*4)*2+64); FillChar(Fr^,Stride*(((H+3) Div 4)*4)*2+64,0);
+ For PIdx:=0 To QXCount-1 Do Begin
+  Sz:=QXLen^[PIdx]; If QXPos^[PIdx]+Sz>QXSize Then Sz:=QXSize-QXPos^[PIdx];
+  Pk:=PEABuffer(@QXF^[QXPos^[PIdx]]); Sp:=0; Bad:=False;
+  Sp:=1; Chunk:=GB; Chunk:=GB16; { taille ignoree }
+  TotalBlocks:=((W+3) Div 4)*((H+3) Div 4);
+  If (TotalBlocks Div 32)>LeftB Then Bad:=True;
+  RowPtr:=0; PixelPtr:=0; ColorA:=0;
+  While Not Bad And (LeftB>0) Do Begin
+   Op:=GB; NB:=(Op And $1F)+1;
+   If (Op And $80)=0 Then Begin
+    ColorA:=(Op Shl 8) Or GB;
+    Op:=0;
+    If Sp<Sz Then Left0:=Pk^[Sp] Else Left0:=0;
+    If (Left0 And $80)<>0 Then Begin Op:=$20; NB:=1; End;
+   End;
+   If NB>TotalBlocks Then NB:=TotalBlocks;
+   Case Op And $E0 Of
+    $80: While NB>0 Do Begin Dec(NB); If TotalBlocks<1 Then Begin Bad:=True; Break; End; Adv; End;
+    $A0: Begin
+     ColorA:=GB16;
+     While NB>0 Do Begin
+      Dec(NB); If TotalBlocks<1 Then Begin Bad:=True; Break; End;
+      BlockPtr:=RowPtr+PixelPtr;
+      For Py:=0 To 3 Do Begin
+       For Px:=0 To 3 Do Begin PutPx(BlockPtr,ColorA); Inc(BlockPtr); End;
+       Inc(BlockPtr,Stride-4);
+      End;
+      Adv;
+     End;
+    End;
+    $C0,$20: Begin
+     If (Op And $E0)=$C0 Then ColorA:=GB16;
+     ColorB:=GB16;
+     C4[0]:=ColorB; C4[1]:=0; C4[2]:=0; C4[3]:=ColorA;
+     Ta:=(ColorA Shr 10) And $1F; Tb:=(ColorB Shr 10) And $1F;
+     C4[1]:=C4[1] Or (((11*Ta+21*Tb) Shr 5) Shl 10); C4[2]:=C4[2] Or (((21*Ta+11*Tb) Shr 5) Shl 10);
+     Ta:=(ColorA Shr 5) And $1F; Tb:=(ColorB Shr 5) And $1F;
+     C4[1]:=C4[1] Or (((11*Ta+21*Tb) Shr 5) Shl 5); C4[2]:=C4[2] Or (((21*Ta+11*Tb) Shr 5) Shl 5);
+     Ta:=ColorA And $1F; Tb:=ColorB And $1F;
+     C4[1]:=C4[1] Or ((11*Ta+21*Tb) Shr 5); C4[2]:=C4[2] Or ((21*Ta+11*Tb) Shr 5);
+     If LeftB<NB*4 Then Bad:=True
+     Else
+      While NB>0 Do Begin
+       Dec(NB); If TotalBlocks<1 Then Begin Bad:=True; Break; End;
+       BlockPtr:=RowPtr+PixelPtr;
+       For Py:=0 To 3 Do Begin
+        Ix:=GB;
+        For Px:=0 To 3 Do Begin
+         Idx:=(Ix Shr (2*(3-Px))) And 3;
+         PutPx(BlockPtr,C4[Idx]); Inc(BlockPtr);
+        End;
+        Inc(BlockPtr,Stride-4);
+       End;
+       Adv;
+      End;
+    End;
+    $00: Begin
+     If LeftB<30 Then Bad:=True
+     Else If TotalBlocks<1 Then Bad:=True
+     Else Begin
+      BlockPtr:=RowPtr+PixelPtr;
+      For Py:=0 To 3 Do Begin
+       For Px:=0 To 3 Do Begin
+        If (Py<>0) Or (Px<>0) Then ColorA:=GB16;
+        PutPx(BlockPtr,ColorA); Inc(BlockPtr);
+       End;
+       Inc(BlockPtr,Stride-4);
+      End;
+      Adv;
+     End;
+    End;
+    Else Bad:=True;
+   End;
+  End;
+  If Bad Then NVRepeat
+  Else Begin
+   { recadrage de l'image decodee (pas = Stride) }
+   GetMem(Pk,W*H*2+64);
+   For I:=0 To H-1 Do Move(Fr^[I*Stride*2],Pk^[I*W*2],W*2);
+   NVEmit(Pk); FreeMem(Pk,W*H*2+64);
+  End;
+  If NVDone Then Break;
+ End;
+ FreeMem(Fr,Stride*(((H+3) Div 4)*4)*2+64); QXClose;
+ NVFinish('rpza');
+End;
+
+Procedure DecodeSMC(Const Source,Target: String; Mode: LongInt);
+Var
+ Fr,Pk: PEABuffer; W,H,Stride,PIdx,Sz,Sp,TotalBlocks,RowPtr,PixelPtr,BlockPtr,NB,Op,I,Px,Py,Pixel,CTI,CPI,CQI,COI,Prev1,Prev2,PrevPtr,PrevFlag,ImageSize,RowInc,ColorFlags,FlagMask,FlagsA,FlagsB,V1,V2,V3: LongInt;
+ Pairs: Array[0..511] Of Byte; Quads: Array[0..1023] Of Byte; Octets: Array[0..2047] Of Byte; Bad: Boolean;
+ Pal: Array[0..255] Of LongWord;
+Function GB: LongInt;
+Begin If Sp<Sz Then GB:=Pk^[Sp] Else GB:=0; Inc(Sp); End;
+Function GB16: LongInt;
+Var A: LongInt;
+Begin A:=GB; GB16:=A*256+GB; End;
+Function LeftB: LongInt;
+Var Q0: LongInt;
+Begin Q0:=Sz-Sp; If Q0<0 Then Q0:=0; LeftB:=Q0; End;
+Function Count: LongInt;
+Begin If (Op And $10)<>0 Then Count:=1+GB Else Count:=1+(Op And $0F); End;
+{ ADVANCE_BLOCK : retourne False en cas d'erreur }
+Function Adv: Boolean;
+Begin
+ Inc(PixelPtr,4);
+ If PixelPtr>=W Then Begin PixelPtr:=0; Inc(RowPtr,Stride*4); End;
+ Dec(TotalBlocks);
+ Adv:=True;
+ If NB>0 Then If TotalBlocks<1 Then Adv:=False;
+End;
+Function Px8(Ptr: LongInt): LongInt;
+Begin If (Ptr>=0) And (Ptr<ImageSize) Then Px8:=Fr^[Ptr] Else Px8:=0; End;
+Procedure Put8(Ptr,V: LongInt);
+Begin If (Ptr>=0) And (Ptr<ImageSize) Then Fr^[Ptr]:=V; End;
+Function Decode: Boolean;
+Var Py,Px,I: LongInt;
+Begin
+ Decode:=False;
+ TotalBlocks:=((W+3) Div 4)*((H+3) Div 4);
+ Sp:=4; RowPtr:=0; PixelPtr:=0; CPI:=0; CQI:=0; COI:=0;
+ While TotalBlocks>0 Do Begin
+  If RowPtr>=ImageSize Then Exit;
+  If LeftB<1 Then Exit;
+  Op:=GB;
+  Case Op And $F0 Of
+   $00,$10: Begin
+    NB:=Count;
+    While NB>0 Do Begin Dec(NB); If Not Adv Then Exit; End;
+   End;
+   $20,$30: Begin
+    NB:=Count;
+    If (RowPtr=0) And (PixelPtr=0) Then Exit;
+    If PixelPtr=0 Then Prev1:=(RowPtr-W*4)+W-4 Else Prev1:=RowPtr+PixelPtr-4;
+    While NB>0 Do Begin
+     Dec(NB);
+     BlockPtr:=RowPtr+PixelPtr; PrevPtr:=Prev1;
+     For Py:=0 To 3 Do Begin
+      For Px:=0 To 3 Do Begin Put8(BlockPtr,Px8(PrevPtr)); Inc(BlockPtr); Inc(PrevPtr); End;
+      Inc(BlockPtr,RowInc); Inc(PrevPtr,RowInc);
+     End;
+     If Not Adv Then Exit;
+    End;
+   End;
+   $40,$50: Begin
+    NB:=Count*2;
+    If (RowPtr=0) And (PixelPtr<8) Then Exit;
+    If PixelPtr=0 Then Prev1:=(RowPtr-W*4)+W-8
+    Else If PixelPtr=4 Then Prev1:=(RowPtr-W*4)+RowInc
+    Else Prev1:=RowPtr+PixelPtr-8;
+    If PixelPtr=0 Then Prev2:=(RowPtr-W*4)+RowInc Else Prev2:=RowPtr+PixelPtr-4;
+    PrevFlag:=0;
+    While NB>0 Do Begin
+     Dec(NB);
+     BlockPtr:=RowPtr+PixelPtr;
+     If PrevFlag<>0 Then PrevPtr:=Prev2 Else PrevPtr:=Prev1;
+     PrevFlag:=1-PrevFlag;
+     For Py:=0 To 3 Do Begin
+      For Px:=0 To 3 Do Begin Put8(BlockPtr,Px8(PrevPtr)); Inc(BlockPtr); Inc(PrevPtr); End;
+      Inc(BlockPtr,RowInc); Inc(PrevPtr,RowInc);
+     End;
+     If Not Adv Then Exit;
+    End;
+   End;
+   $60,$70: Begin
+    NB:=Count; Pixel:=GB;
+    While NB>0 Do Begin
+     Dec(NB);
+     BlockPtr:=RowPtr+PixelPtr;
+     For Py:=0 To 3 Do Begin
+      For Px:=0 To 3 Do Begin Put8(BlockPtr,Pixel); Inc(BlockPtr); End;
+      Inc(BlockPtr,RowInc);
+     End;
+     If Not Adv Then Exit;
+    End;
+   End;
+   $80,$90: Begin
+    NB:=(Op And $0F)+1;
+    If (Op And $F0)=$80 Then Begin
+     For I:=0 To 1 Do Pairs[2*CPI+I]:=GB;
+     CTI:=2*CPI; Inc(CPI); If CPI=256 Then CPI:=0;
+    End Else CTI:=2*GB;
+    While NB>0 Do Begin
+     Dec(NB);
+     ColorFlags:=GB16; FlagMask:=$8000;
+     BlockPtr:=RowPtr+PixelPtr;
+     For Py:=0 To 3 Do Begin
+      For Px:=0 To 3 Do Begin
+       If (ColorFlags And FlagMask)<>0 Then Pixel:=CTI+1 Else Pixel:=CTI;
+       FlagMask:=FlagMask Shr 1;
+       Put8(BlockPtr,Pairs[Pixel]); Inc(BlockPtr);
+      End;
+      Inc(BlockPtr,RowInc);
+     End;
+     If Not Adv Then Exit;
+    End;
+   End;
+   $A0,$B0: Begin
+    NB:=(Op And $0F)+1;
+    If (Op And $F0)=$A0 Then Begin
+     For I:=0 To 3 Do Quads[4*CQI+I]:=GB;
+     CTI:=4*CQI; Inc(CQI); If CQI=256 Then CQI:=0;
+    End Else CTI:=4*GB;
+    While NB>0 Do Begin
+     Dec(NB);
+     V1:=GB16; V2:=GB16; ColorFlags:=V1*65536+V2; FlagMask:=30;
+     BlockPtr:=RowPtr+PixelPtr;
+     For Py:=0 To 3 Do Begin
+      For Px:=0 To 3 Do Begin
+       Pixel:=CTI+((ColorFlags Shr FlagMask) And 3);
+       Dec(FlagMask,2);
+       Put8(BlockPtr,Quads[Pixel]); Inc(BlockPtr);
+      End;
+      Inc(BlockPtr,RowInc);
+     End;
+     If Not Adv Then Exit;
+    End;
+   End;
+   $C0,$D0: Begin
+    NB:=(Op And $0F)+1;
+    If (Op And $F0)=$C0 Then Begin
+     For I:=0 To 7 Do Octets[8*COI+I]:=GB;
+     CTI:=8*COI; Inc(COI); If COI=256 Then COI:=0;
+    End Else CTI:=8*GB;
+    While NB>0 Do Begin
+     Dec(NB);
+     V1:=GB16; V2:=GB16; V3:=GB16;
+     FlagsA:=((V1 And $FFF0) Shl 8) Or (V2 Shr 4);
+     FlagsB:=((V3 And $FFF0) Shl 8) Or ((V1 And $0F) Shl 8) Or ((V2 And $0F) Shl 4) Or (V3 And $0F);
+     ColorFlags:=FlagsA; FlagMask:=21;
+     BlockPtr:=RowPtr+PixelPtr;
+     For Py:=0 To 3 Do Begin
+      If Py=2 Then Begin ColorFlags:=FlagsB; FlagMask:=21; End;
+      For Px:=0 To 3 Do Begin
+       Pixel:=CTI+((ColorFlags Shr FlagMask) And 7);
+       Dec(FlagMask,3);
+       Put8(BlockPtr,Octets[Pixel]); Inc(BlockPtr);
+      End;
+      Inc(BlockPtr,RowInc);
+     End;
+     If Not Adv Then Exit;
+    End;
+   End;
+   Else Begin
+    NB:=(Op And $0F)+1;
+    While NB>0 Do Begin
+     Dec(NB);
+     BlockPtr:=RowPtr+PixelPtr;
+     For Py:=0 To 3 Do Begin
+      For Px:=0 To 3 Do Begin Put8(BlockPtr,GB); Inc(BlockPtr); End;
+      Inc(BlockPtr,RowInc);
+     End;
+     If Not Adv Then Exit;
+    End;
+   End;
+  End;
+ End;
+ Decode:=True;
+End;
+Begin
+ QXOpen(Source);
+ W:=QXW; H:=QXH;
+ If (W<1) Or (H<1) Or (W>16000) Or (H>16000) Then Fail('smc: dimensions invalides.');
+ Stride:=W; RowInc:=Stride-4;
+ For I:=0 To 255 Do Begin NVPalR[I]:=(QXPal[I] Shr 16) And 255; NVPalG[I]:=(QXPal[I] Shr 8) And 255; NVPalB[I]:=QXPal[I] And 255; End;
+ NVBegin(Mode,Target,W,H,0,QXRn,QXRd);
+ If QXIsMov And (QXSarN>0) Then Begin NVSarN:=QXSarN; NVSarD:=QXSarD; End Else NVSarN:=0;
+ If Not QXIsMov Then NVAviSar(W,H);
+ ImageSize:=H*Stride;
+ { l'image est decodee par blocs 4x4 : zone de travail arrondie a 4 lignes }
+ GetMem(Fr,Stride*(((H+3) Div 4)*4+4)+64); FillChar(Fr^,Stride*(((H+3) Div 4)*4+4)+64,0);
+ FillChar(Pairs,SizeOf(Pairs),0); FillChar(Quads,SizeOf(Quads),0); FillChar(Octets,SizeOf(Octets),0);
+ For PIdx:=0 To QXCount-1 Do Begin
+  Sz:=QXLen^[PIdx]; If QXPos^[PIdx]+Sz>QXSize Then Sz:=QXSize-QXPos^[PIdx];
+  Pk:=PEABuffer(@QXF^[QXPos^[PIdx]]); Sp:=0;
+  TotalBlocks:=((W+3) Div 4)*((H+3) Div 4);
+  If (TotalBlocks Div 1024)>Sz Then NVRepeat
+  Else If Decode Then NVEmit(Fr) Else NVRepeat;
+  If NVDone Then Break;
+ End;
+ FreeMem(Fr,Stride*(((H+3) Div 4)*4+4)+64); QXClose;
+ NVFinish('smc');
+End;
+
 Procedure DecodeAVIX(Const Source,Target: String; Mode,Kind: LongInt);
 Var Pos,PkPos,PkLen,RN,RD,I,Y,X,Cw,Ch,Bs,Msg2: LongInt; Ok,FFBegun: Boolean; Msg: String; PIdx: LongInt; NbF,NbP: Int64;
 Begin
@@ -68685,6 +69003,8 @@ BEGIN
    WriteLn('DEV    sgi             SGI image (decodeur 8 bits gris/RGB/RGBA, RLE ou non; encodeur RGB24 RLE depuis Y4M, pas de 16 bits)');
    WriteLn('DEV    png             PNG (decodeur 1..8 bits gris/RGB/RGBA/palette, Adam7; encodeur RGB24 non compresse; pas de 16 bits)');
    WriteLn('DEV    qtrle           QuickTime Animation (RLE) (MOV; decodeur 1/2/4/8/16/24/32 bits; encodeur rgb24/argb/gray octet pour octet)');
+   WriteLn('D V    rpza            QuickTime video RPZA (MOV; decodeur exact)');
+   WriteLn('D V    smc             QuickTime Graphics SMC (MOV; decodeur, largeur multiple de 32 pour l''identite avec ffmpeg)');
    WriteLn('D V    ptx             V.Flash PTX image (RGB15)');
    WriteLn('D V    pcx             PC Paintbrush PCX image (1/2/4/8 bits palette, 24 bits RGB)');
    WriteLn('D A    wmav2           WMA2 (44100/48000 Hz, VLC, blocs fixes, sans reservoir/bruit)');   
