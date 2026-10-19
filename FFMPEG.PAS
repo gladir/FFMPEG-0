@@ -79696,6 +79696,8 @@ BEGIN
   WriteLn('D V    smackvid        Smacker video');
   WriteLn('DEV    rv10            RealVideo 1.0 (decodeur I/P, tranches multiples; encodeur I/P 16x16 vers .rm)');
   WriteLn('DEV    rv20            RealVideo 2.0 (decodeur I/P/B; encodeur I/P 16x16 vers .rm)');
+  WriteLn('D V    rv30            RealVideo 3.0 (decodeur I/P/B, fichiers .rm)');
+  WriteLn('D V    rv40            RealVideo 4.0 (decodeur I/P/B, fichiers .rm)');
   WriteLn('D A    qcelp           QCELP / PureVoice (fichiers .qcp, QCELP-13K)');
   WriteLn('D A    qdm2            QDesign Music Codec 2 (QuickTime/MP4 QDM2; decodeur exact en flottant)');
   WriteLn('D A    shorten         Shorten (fichiers .shn; versions 0-2, WAVE; AIFF non pris en charge)');
