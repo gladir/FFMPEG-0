@@ -51690,6 +51690,948 @@ Begin
  ADPCMPatchHeader(Rate,Ch,EAWritten); CloseWrite;
 End;
 
+{ ---- encodeur id RoQ video (libavcodec/roqvideoenc.c, elbg.c, libavutil/lfg.c, libavformat/idroqenc.c) ---- }
+Const
+ RqIntMax=2147483647;
+ RqLfgTab: Array[0..55] Of Int64 = (
+  2605893516,1989613478,1913716376,820529564,1079779690,2741086289,1219052978,2591565750,4258618370,2028417949,
+  270626358,1209746512,2585111643,1287900222,564558944,3027639020,425979172,657492702,2388667493,2719040944,
+  3254006016,3184530314,2663094672,1338784533,1993765136,282062163,3211536188,2544661146,241728314,2143559558,
+  1706114542,2691819438,2672601452,2150767357,1702317291,2462286053,3000138819,559781696,2560557982,368965067,
+  3348218240,2216362482,2835161583,2716117227,1688942937,2677858073,3902427716,1116448398,1075148598,2853228542,
+  3522036079,1952143131,1498388328,3348175376,4213437647,771375340);
+Type
+ TRqCell=Record Y: Array[0..3] Of Byte; U,V: Byte; End;
+ TRqSub=Record
+  ED: Array[0..3] Of LongInt; BestBit,BestCoding: LongInt; Sc: Array[0..3] Of LongInt; Mx,My,CbEntry: LongInt;
+ End;
+ TRqCel=Record
+  ED: Array[0..3] Of LongInt; BestCoding: LongInt; Sub: Array[0..3] Of TRqSub; Mx,My,CbEntry,SrcX,SrcY: LongInt;
+ End;
+ TRqCelArr=Array[0..1000000] Of TRqCel; PRqCelArr=^TRqCelArr;
+ TRqTmp=Record
+  F2I4,I2F4,F2I2,I2F2: Array[0..255] Of LongInt;
+  MainChunk,NumCB4,NumCB2: LongInt;
+  UsedCB2,UsedCB4: Array[0..255] Of LongInt;
+  Used: Array[0..3] Of LongInt;
+ End;
+Var
+ RqW,RqH,RqFSK,RqGopSz,RqCbN4,RqCbN2: LongInt; RqLambda: Int64; RqGop: LongInt;
+ RqFrameEnc,RqCur,RqLast,RqOut: PEABuffer; RqOutPos: LongInt;
+ RqThis4,RqLast4,RqThis8,RqLast8,RqClosest,RqPoints,RqCodebook: PALLong;
+ RqCels: PRqCelArr; RqNCels: LongInt;
+ RqRes4: Array[0..1023] Of TRqCell; RqCb2: Array[0..255] Of TRqCell; RqCb4: Array[0..255,0..3] Of LongInt;
+ RqUnp2: Array[0..3071] Of Byte; RqUnp4: Array[0..12287] Of Byte; RqUnp4E: Array[0..49151] Of Byte;
+ RqTmp: TRqTmp;
+ RqLfgSt: Array[0..63] Of Int64; RqLfgIdx: LongInt;
+ RqElNum,RqElDim,RqElError: LongInt; RqElCb,RqElNear,RqElPts,RqElHead,RqElUtil,RqElUInc,RqElSize,RqElNext,RqElScr,RqElTmp: PALLong;
+ RqSpType,RqSpLen,RqSpN: LongInt; RqSpArg: Array[0..127] Of Byte;
+ RqMb4: Array[0..47] Of Byte; RqMb2: Array[0..11] Of Byte; RqMb8: Array[0..191] Of Byte;
+
+Procedure RqLfgInit;
+Var I: LongInt;
+Begin
+ For I:=0 To 7 Do RqLfgSt[I]:=0;
+ For I:=8 To 63 Do RqLfgSt[I]:=RqLfgTab[I-8];
+ RqLfgIdx:=0;
+End;
+
+Function RqLfgGet: Int64;
+Var A: Int64;
+Begin
+ A:=(RqLfgSt[(RqLfgIdx-24) And 63]+RqLfgSt[(RqLfgIdx-55) And 63]) And $FFFFFFFF;
+ RqLfgSt[RqLfgIdx And 63]:=A; Inc(RqLfgIdx);
+ RqLfgGet:=A;
+End;
+
+{ ---- ELBG (libavcodec/elbg.c) ; les cellules sont chainees par indices (cellule i = point i), -1 = NULL ---- }
+Function RqDist(A,B: PALLong; Dim,Limit: LongInt): LongInt;
+Var I: LongInt; D,Dist: Int64;
+Begin
+ Dist:=0;
+ For I:=0 To Dim-1 Do Begin
+  D:=A^[I]-B^[I]; D:=D*D;
+  If Dist>=Int64(Limit)-D Then Begin RqDist:=Limit; Exit; End;
+  Dist:=Dist+D;
+ End;
+ RqDist:=Dist;
+End;
+
+Function RqRDiv(A,B: LongInt): LongInt;
+Begin
+ If A>=0 Then RqRDiv:=(A+(B Shr 1)) Div B Else RqRDiv:=(A-(B Shr 1)) Div B;
+End;
+
+Procedure RqVectDiv(Res,Vect: PALLong; Dv,Dim: LongInt);
+Var I: LongInt;
+Begin
+ If Dv>1 Then Begin
+  For I:=0 To Dim-1 Do Res^[I]:=RqRDiv(Vect^[I],Dv);
+ End Else If Res<>Vect Then Move(Vect^,Res^,Dim*4);
+End;
+
+Function RqEvalErrorCell(Centroid: PALLong; Cell: LongInt): LongInt;
+Var Err,Dst: LongInt;
+Begin
+ Err:=0;
+ While Cell>=0 Do Begin
+  Dst:=RqDist(Centroid,PALLong(@RqElPts^[Cell*RqElDim]),RqElDim,RqIntMax);
+  If Err>=RqIntMax-Dst Then Begin RqEvalErrorCell:=RqIntMax; Exit; End;
+  Err:=Err+Dst;
+  Cell:=RqElNext^[Cell];
+ End;
+ RqEvalErrorCell:=Err;
+End;
+
+Function RqGetClosestCodebook(Index: LongInt): LongInt;
+Var Pick,I,DiffMin,Diff: LongInt;
+Begin
+ Pick:=0; DiffMin:=RqIntMax;
+ For I:=0 To RqElNum-1 Do
+  If I<>Index Then Begin
+   Diff:=RqDist(PALLong(@RqElCb^[I*RqElDim]),PALLong(@RqElCb^[Index*RqElDim]),RqElDim,DiffMin);
+   If Diff<DiffMin Then Begin Pick:=I; DiffMin:=Diff; End;
+  End;
+ RqGetClosestCodebook:=Pick;
+End;
+
+Function RqGetHighUtilityCell: LongInt;
+Var I: LongInt; R: QWord; Last: LongInt; R1: QWord;
+Begin
+ I:=0; Last:=RqElUInc^[RqElNum-1];
+ If Last<RqIntMax Then Begin
+  R:=QWord(RqLfgGet) Mod QWord(Last)+1;
+ End Else Begin
+  R1:=QWord(RqLfgGet);
+  R:=(QWord(RqLfgGet)+(R1 Shl 32)) Mod QWord(Last)+1;
+ End;
+ While QWord(RqElUInc^[I])<R Do Inc(I);
+ RqGetHighUtilityCell:=I;
+End;
+
+Function RqSimpleLbg(Dim: LongInt; C0,C1: PALLong; Var NewUtil: Array Of LongInt; Cell0: LongInt): LongInt;
+Var
+ I,Idx,Cell: LongInt; NumPts: Array[0..1] Of LongInt; NC0,NC1,Cp: PALLong; Cen: Array[0..1] Of PALLong; D0,D1: LongInt;
+Begin
+ NC0:=PALLong(@RqElScr^[3*Dim]); NC1:=PALLong(@RqElScr^[4*Dim]);
+ Cen[0]:=C0; Cen[1]:=C1;
+ FillChar(NC0^,2*Dim*4,0);
+ NumPts[0]:=0; NumPts[1]:=0;
+ NewUtil[0]:=0; NewUtil[1]:=0;
+ Cell:=Cell0;
+ While Cell>=0 Do Begin
+  D0:=RqDist(C0,PALLong(@RqElPts^[Cell*Dim]),Dim,RqIntMax);
+  D1:=RqDist(C1,PALLong(@RqElPts^[Cell*Dim]),Dim,RqIntMax);
+  If D0>=D1 Then Idx:=1 Else Idx:=0;
+  Inc(NumPts[Idx]);
+  If Idx=0 Then Cp:=NC0 Else Cp:=NC1;
+  For I:=0 To Dim-1 Do Cp^[I]:=Cp^[I]+RqElPts^[Cell*Dim+I];
+  Cell:=RqElNext^[Cell];
+ End;
+ RqVectDiv(C0,NC0,NumPts[0],Dim);
+ RqVectDiv(C1,NC1,NumPts[1],Dim);
+ Cell:=Cell0;
+ While Cell>=0 Do Begin
+  D0:=RqDist(C0,PALLong(@RqElPts^[Cell*Dim]),Dim,RqIntMax);
+  D1:=RqDist(C1,PALLong(@RqElPts^[Cell*Dim]),Dim,RqIntMax);
+  If D0>D1 Then Idx:=1 Else Idx:=0;
+  If Idx=0 Then Begin
+   If NewUtil[0]>=RqIntMax-D0 Then NewUtil[0]:=RqIntMax Else NewUtil[0]:=NewUtil[0]+D0;
+  End Else Begin
+   If NewUtil[1]>=RqIntMax-D1 Then NewUtil[1]:=RqIntMax Else NewUtil[1]:=NewUtil[1]+D1;
+  End;
+  Cell:=RqElNext^[Cell];
+ End;
+ If NewUtil[0]>=RqIntMax-NewUtil[1] Then RqSimpleLbg:=RqIntMax Else RqSimpleLbg:=NewUtil[0]+NewUtil[1];
+End;
+
+Procedure RqGetNewCentroids(Huc: LongInt; Mn,Mx: PALLong);
+Var I,Cell,Ni,Np: LongInt;
+Begin
+ For I:=0 To RqElDim-1 Do Begin Mn^[I]:=RqIntMax; Mx^[I]:=0; End;
+ Cell:=RqElHead^[Huc];
+ While Cell>=0 Do Begin
+  For I:=0 To RqElDim-1 Do Begin
+   If RqElPts^[Cell*RqElDim+I]<Mn^[I] Then Mn^[I]:=RqElPts^[Cell*RqElDim+I];
+   If RqElPts^[Cell*RqElDim+I]>Mx^[I] Then Mx^[I]:=RqElPts^[Cell*RqElDim+I];
+  End;
+  Cell:=RqElNext^[Cell];
+ End;
+ For I:=0 To RqElDim-1 Do Begin
+  Ni:=Mn^[I]+(Mx^[I]-Mn^[I]) Div 3;
+  Np:=Mn^[I]+(2*(Mx^[I]-Mn^[I])) Div 3;
+  Mn^[I]:=Ni; Mx^[I]:=Np;
+ End;
+End;
+
+Procedure RqShiftCodebook(Const Idx: Array Of LongInt; C0,C1: PALLong);
+Var Tail,Td,Nx,Sel: LongInt;
+Begin
+ If RqElHead^[Idx[2]]<0 Then RqElHead^[Idx[2]]:=RqElHead^[Idx[0]]
+ Else Begin
+  Tail:=RqElHead^[Idx[2]];
+  While RqElNext^[Tail]>=0 Do Tail:=RqElNext^[Tail];
+  RqElNext^[Tail]:=RqElHead^[Idx[0]];
+ End;
+ RqElHead^[Idx[0]]:=-1;
+ Td:=RqElHead^[Idx[1]]; RqElHead^[Idx[1]]:=-1;
+ While Td>=0 Do Begin
+  Nx:=RqElNext^[Td];
+  If RqDist(PALLong(@RqElPts^[Td*RqElDim]),C0,RqElDim,RqIntMax)>RqDist(PALLong(@RqElPts^[Td*RqElDim]),C1,RqElDim,RqIntMax) Then Sel:=1 Else Sel:=0;
+  RqElNext^[Td]:=RqElHead^[Idx[Sel]];
+  RqElHead^[Idx[Sel]]:=Td;
+  Td:=Nx;
+ End;
+End;
+
+Procedure RqEvaluateUtilityInc;
+Var I: LongInt; Inc2: Int64;
+Begin
+ Inc2:=0;
+ For I:=0 To RqElNum-1 Do Begin
+  If Int64(RqElNum)*RqElUtil^[I]>RqElError Then Inc2:=Inc2+RqElUtil^[I];
+  If Inc2>RqIntMax Then RqElUInc^[I]:=RqIntMax Else RqElUInc^[I]:=Inc2;
+ End;
+End;
+
+Procedure RqTryShiftCandidate(Const Idx: Array Of LongInt);
+Var
+ J,K,Cont,Tmp,Cell: LongInt; OldErr,NewErr: Int64; NewUtil: Array[0..2] Of LongInt;
+ NC0,NC1,NC2: PALLong; V: Int64;
+Begin
+ NC0:=PALLong(@RqElScr^[0]); NC1:=PALLong(@RqElScr^[RqElDim]); NC2:=PALLong(@RqElScr^[2*RqElDim]);
+ OldErr:=0;
+ For J:=0 To 2 Do OldErr:=OldErr+RqElUtil^[Idx[J]];
+ FillChar(NC2^,RqElDim*4,0);
+ Cont:=0;
+ For K:=0 To 1 Do Begin
+  Cell:=RqElHead^[Idx[2*K]];
+  While Cell>=0 Do Begin
+   Inc(Cont);
+   For J:=0 To RqElDim-1 Do NC2^[J]:=NC2^[J]+RqElPts^[Cell*RqElDim+J];
+   Cell:=RqElNext^[Cell];
+  End;
+ End;
+ RqVectDiv(NC2,NC2,Cont,RqElDim);
+ RqGetNewCentroids(Idx[1],NC0,NC1);
+ NewUtil[2]:=RqEvalErrorCell(NC2,RqElHead^[Idx[0]]);
+ Tmp:=RqEvalErrorCell(NC2,RqElHead^[Idx[2]]);
+ If Tmp>=RqIntMax-NewUtil[2] Then NewUtil[2]:=RqIntMax Else NewUtil[2]:=NewUtil[2]+Tmp;
+ NewErr:=NewUtil[2];
+ Tmp:=RqSimpleLbg(RqElDim,NC0,NC1,NewUtil,RqElHead^[Idx[1]]);
+ If Tmp>=RqIntMax-NewErr Then NewErr:=RqIntMax Else NewErr:=NewErr+Tmp;
+ If OldErr>NewErr Then Begin
+  RqShiftCodebook(Idx,NC0,NC1);
+  V:=Int64(RqElError)+NewErr-OldErr;
+  RqElError:=LongInt(V And $FFFFFFFF);
+  For J:=0 To 2 Do Begin
+   RqElUtil^[Idx[J]]:=NewUtil[J];
+   Cell:=RqElHead^[Idx[J]];
+   While Cell>=0 Do Begin RqElNear^[Cell]:=Idx[J]; Cell:=RqElNext^[Cell]; End;
+  End;
+  RqEvaluateUtilityInc;
+ End;
+End;
+
+Procedure RqDoShiftings;
+Var Idx: Array[0..2] Of LongInt;
+Begin
+ RqEvaluateUtilityInc;
+ Idx[0]:=0;
+ While Idx[0]<RqElNum Do Begin
+  If Int64(RqElNum)*RqElUtil^[Idx[0]]<RqElError Then Begin
+   If RqElUInc^[RqElNum-1]=0 Then Exit;
+   Idx[1]:=RqGetHighUtilityCell;
+   Idx[2]:=RqGetClosestCodebook(Idx[0]);
+   If (Idx[1]<>Idx[0]) And (Idx[1]<>Idx[2]) Then RqTryShiftCandidate(Idx);
+  End;
+  Inc(Idx[0]);
+ End;
+End;
+
+Procedure RqDoElbg(Points: PALLong; NumPoints,MaxSteps: LongInt);
+Var
+ I,J,K,Steps,BestIdx,LastErr,BestDist,Dst,Nr: LongInt; Dl: Double;
+Begin
+ RqElError:=RqIntMax; RqElPts:=Points; Steps:=0; BestIdx:=0;
+ Repeat
+  LastErr:=RqElError; Inc(Steps);
+  FillChar(RqElUtil^,RqElNum*4,0);
+  For I:=0 To RqElNum-1 Do RqElHead^[I]:=-1;
+  RqElError:=0;
+  For I:=0 To NumPoints-1 Do Begin
+   BestDist:=RqDist(PALLong(@RqElPts^[I*RqElDim]),PALLong(@RqElCb^[BestIdx*RqElDim]),RqElDim,RqIntMax);
+   For K:=0 To RqElNum-1 Do Begin
+    Dst:=RqDist(PALLong(@RqElPts^[I*RqElDim]),PALLong(@RqElCb^[K*RqElDim]),RqElDim,BestDist);
+    If Dst<BestDist Then Begin BestDist:=Dst; BestIdx:=K; End;
+   End;
+   RqElNear^[I]:=BestIdx;
+   Nr:=BestIdx;
+   If RqElError>=RqIntMax-BestDist Then RqElError:=RqIntMax Else RqElError:=RqElError+BestDist;
+   If RqElUtil^[Nr]>=RqIntMax-BestDist Then RqElUtil^[Nr]:=RqIntMax Else RqElUtil^[Nr]:=RqElUtil^[Nr]+BestDist;
+   RqElNext^[I]:=RqElHead^[Nr];
+   RqElHead^[Nr]:=I;
+  End;
+  RqDoShiftings;
+  FillChar(RqElSize^,RqElNum*4,0);
+  FillChar(RqElCb^,RqElNum*RqElDim*4,0);
+  For I:=0 To NumPoints-1 Do Begin
+   Inc(RqElSize^[RqElNear^[I]]);
+   For J:=0 To RqElDim-1 Do
+    RqElCb^[RqElNear^[I]*RqElDim+J]:=RqElCb^[RqElNear^[I]*RqElDim+J]+RqElPts^[I*RqElDim+J];
+  End;
+  For I:=0 To RqElNum-1 Do
+   RqVectDiv(PALLong(@RqElCb^[I*RqElDim]),PALLong(@RqElCb^[I*RqElDim]),RqElSize^[I],RqElDim);
+  Dl:=LastErr; Dl:=Dl-RqElError;
+ Until Not (Dl>0.1*RqElError) Or (Steps>=MaxSteps);
+End;
+
+Procedure RqInitElbg(Points,TempPoints: PALLong; NumPoints,MaxSteps: LongInt);
+Var Dim,I,K: LongInt;
+Begin
+ Dim:=RqElDim;
+ If Int64(NumPoints)>24*Int64(RqElNum) Then Begin
+  For I:=0 To NumPoints Div 8-1 Do Begin
+   K:=LongInt((Int64(I)*433494437) Mod NumPoints);
+   Move(Points^[K*Dim],TempPoints^[I*Dim],Dim*4);
+  End;
+  RqInitElbg(TempPoints,PALLong(@TempPoints^[NumPoints Div 8*Dim]),NumPoints Div 8,2*MaxSteps);
+  RqDoElbg(TempPoints,NumPoints Div 8,2*MaxSteps);
+ End Else
+  For I:=0 To RqElNum-1 Do
+   Move(Points^[LongInt((Int64(I)*433494437) Mod NumPoints)*Dim],RqElCb^[I*Dim],Dim*4);
+End;
+
+Procedure RqElbgDo(Points: PALLong; Dim,NumPoints: LongInt; Codebook: PALLong; NumCb,MaxSteps: LongInt; Closest: PALLong);
+Begin
+ RqElNear:=Closest; RqElCb:=Codebook; RqElNum:=NumCb; RqElDim:=Dim;
+ RqInitElbg(Points,RqElTmp,NumPoints,MaxSteps);
+ RqDoElbg(Points,NumPoints,MaxSteps);
+End;
+
+{ ---- encodeur RoQ ---- }
+Function RqTrunc32(V: Int64): LongInt;
+Begin
+ V:=V And $FFFFFFFF;
+ If V>$7FFFFFFF Then V:=V-$100000000;
+ RqTrunc32:=V;
+End;
+
+{ v < best_dist (best_dist int converti en uint64) }
+Function RqLess(V: Int64; Best: LongInt): Boolean;
+Begin
+ If Best<0 Then RqLess:=True Else RqLess:=V<Best;
+End;
+
+Function RqBlockSse(A,B: PEABuffer; X1,Y1,X2,Y2,Size: LongInt): LongInt;
+Var K,I,J,Bias,Pl,Sse,D,S2: LongInt; PA,PB: LongInt;
+Begin
+ Sse:=0; Pl:=RqW*RqH;
+ For K:=0 To 2 Do Begin
+  If K<>0 Then Bias:=1 Else Bias:=4;
+  S2:=0;
+  For I:=0 To Size-1 Do Begin
+   PA:=K*Pl+(Y1+I)*RqW+X1; PB:=K*Pl+(Y2+I)*RqW+X2;
+   For J:=0 To Size-1 Do Begin D:=B^[PB+J]-A^[PA+J]; S2:=S2+D*D; End;
+  End;
+  Sse:=Sse+Bias*S2;
+ End;
+ RqBlockSse:=Sse;
+End;
+
+Function RqEvalMotionDist(X,Y,Mx,My,Size: LongInt): LongInt;
+Begin
+ If (Mx<-7) Or (Mx>7) Or (My<-7) Or (My>7) Then Begin RqEvalMotionDist:=RqIntMax; Exit; End;
+ Mx:=Mx+X; My:=My+Y;
+ If (Mx<0) Or (Mx>RqW-Size) Or (My<0) Or (My>RqH-Size) Then Begin RqEvalMotionDist:=RqIntMax; Exit; End;
+ RqEvalMotionDist:=RqBlockSse(RqFrameEnc,RqLast,X,Y,Mx,My,Size);
+End;
+
+Function RqSqDiffMb(A,B: PEABuffer; AOff,BOff,Size: LongInt): LongInt;
+Var Cp,Bias,I,D,S: LongInt; Sd: LongInt;
+Begin
+ Sd:=0;
+ For Cp:=0 To 2 Do Begin
+  If Cp<>0 Then Bias:=1 Else Bias:=4;
+  S:=0;
+  For I:=0 To Size*Size-1 Do Begin D:=B^[BOff+I]-A^[AOff+I]; S:=S+D*D; End;
+  Sd:=Sd+Bias*S;
+  Inc(AOff,Size*Size); Inc(BOff,Size*Size);
+ End;
+ RqSqDiffMb:=Sd;
+End;
+
+Function RqIndexMb(Cluster: PEABuffer; Cb: PEABuffer; NumCB: LongInt; Var OutIndex: LongInt; Dim: LongInt): LongInt;
+Var I,LDiff,Pick,Diff: LongInt;
+Begin
+ LDiff:=RqIntMax; Pick:=0;
+ For I:=0 To NumCB-1 Do Begin
+  Diff:=RqSqDiffMb(Cluster,Cb,0,I*Dim*Dim*3,Dim);
+  If Diff<LDiff Then Begin LDiff:=Diff; Pick:=I; End;
+ End;
+ OutIndex:=Pick;
+ RqIndexMb:=LDiff;
+End;
+
+Procedure RqGetFrameMb(X,Y: LongInt; Mb: PEABuffer; Dim: LongInt);
+Var Cp,I,J,N: LongInt;
+Begin
+ N:=0;
+ For Cp:=0 To 2 Do
+  For I:=0 To Dim-1 Do
+   For J:=0 To Dim-1 Do Begin Mb^[N]:=RqFrameEnc^[Cp*RqW*RqH+(Y+I)*RqW+X+J]; Inc(N); End;
+End;
+
+Function RqMid(A,B,C: LongInt): LongInt;
+Begin
+ If A>B Then Begin
+  If B>C Then RqMid:=B Else If A>C Then RqMid:=C Else RqMid:=A;
+ End Else Begin
+  If A>C Then RqMid:=A Else If B>C Then RqMid:=C Else RqMid:=B;
+ End;
+End;
+
+Procedure RqMotionSearch(Bs: LongInt);
+Const OfX: Array[0..7] Of LongInt = (0,0,-1,1,-1,1,-1,1); OfY: Array[0..7] Of LongInt = (-1,1,0,0,1,-1,-1,1);
+Var
+ I,J,K,Offset,Mx,Max,LowestDiff,OldBest,Diff,BestX,BestY,VX,VY,V2X,V2Y: LongInt; Off: Array[0..2] Of LongInt; ThisM,LastM: PALLong;
+Procedure Ev(Ax,Ay: LongInt);
+Begin
+ Diff:=RqEvalMotionDist(J,I,Ax,Ay,Bs);
+ If Diff<LowestDiff Then Begin LowestDiff:=Diff; BestX:=Ax; BestY:=Ay; End;
+End;
+Begin
+ Max:=(RqW Div Bs)*RqH Div Bs;
+ If Bs=4 Then Begin LastM:=RqLast4; ThisM:=RqThis4; End Else Begin LastM:=RqLast8; ThisM:=RqThis8; End;
+ I:=0;
+ While I<RqH Do Begin
+  J:=0;
+  While J<RqW Do Begin
+   LowestDiff:=RqEvalMotionDist(J,I,0,0,Bs);
+   BestX:=0; BestY:=0;
+   If Bs=4 Then Ev(RqThis8^[2*((I Div 8)*(RqW Div 8)+J Div 8)],RqThis8^[2*((I Div 8)*(RqW Div 8)+J Div 8)+1]);
+   Offset:=(I Div Bs)*RqW Div Bs+J Div Bs;
+   If (Offset<Max) And (Offset>=0) Then Ev(LastM^[2*Offset],LastM^[2*Offset+1]);
+   Inc(Offset);
+   If (Offset<Max) And (Offset>=0) Then Ev(LastM^[2*Offset],LastM^[2*Offset+1]);
+   Offset:=(I Div Bs+1)*RqW Div Bs+J Div Bs;
+   If (Offset<Max) And (Offset>=0) Then Ev(LastM^[2*Offset],LastM^[2*Offset+1]);
+   Off[0]:=(I Div Bs)*RqW Div Bs+J Div Bs-1;
+   Off[1]:=Off[0]-RqW Div Bs+1;
+   Off[2]:=Off[1]+1;
+   If I<>0 Then Begin
+    VX:=RqMid(ThisM^[2*Off[0]],ThisM^[2*Off[1]],ThisM^[2*Off[2]]);
+    VY:=RqMid(ThisM^[2*Off[0]+1],ThisM^[2*Off[1]+1],ThisM^[2*Off[2]+1]);
+    Ev(VX,VY);
+    For K:=0 To 2 Do Ev(ThisM^[2*Off[K]],ThisM^[2*Off[K]+1]);
+   End Else If J<>0 Then Ev(ThisM^[2*Off[0]],ThisM^[2*Off[0]+1]);
+   VX:=BestX; VY:=BestY;
+   OldBest:=-1;
+   While OldBest<>LowestDiff Do Begin
+    OldBest:=LowestDiff;
+    For K:=0 To 7 Do Begin
+     V2X:=VX+OfX[K]; V2Y:=VY+OfY[K];
+     Ev(V2X,V2Y);
+    End;
+    VX:=BestX; VY:=BestY;
+   End;
+   Offset:=(I Div Bs)*RqW Div Bs+J Div Bs;
+   ThisM^[2*Offset]:=BestX; ThisM^[2*Offset+1]:=BestY;
+   Inc(J,Bs);
+  End;
+  Inc(I,Bs);
+ End;
+End;
+
+Procedure RqGatherSubcel(Var Sc: TRqSub; X,Y: LongInt);
+Const BitsUsed: Array[0..3] Of LongInt = (2,10,10,34);
+Var ClusterIndex,I,BestDist: LongInt; Mi: LongInt; V: Int64;
+Begin
+ If RqFSK>=1 Then Begin
+  Mi:=Y*RqW Div 16+X Div 4;
+  Sc.Mx:=RqThis4^[2*Mi]; Sc.My:=RqThis4^[2*Mi+1];
+  Sc.ED[1]:=RqEvalMotionDist(X,Y,RqThis4^[2*Mi],RqThis4^[2*Mi+1],4);
+ End Else Sc.ED[1]:=RqIntMax;
+ If RqFSK>=2 Then Sc.ED[0]:=RqBlockSse(RqFrameEnc,RqCur,X,Y,X,Y,4) Else Sc.ED[0]:=RqIntMax;
+ ClusterIndex:=Y*RqW Div 16+X Div 4;
+ RqGetFrameMb(X,Y,@RqMb4,4);
+ Sc.ED[2]:=RqIndexMb(@RqMb4,@RqUnp4,RqCbN4,Sc.CbEntry,4);
+ Sc.ED[3]:=0;
+ For I:=0 To 3 Do Begin
+  Sc.Sc[I]:=RqClosest^[ClusterIndex*4+I];
+  RqGetFrameMb(X+2*(I And 1),Y+(I And 2),@RqMb2,2);
+  Sc.ED[3]:=Sc.ED[3]+RqSqDiffMb(@RqMb2,@RqUnp2,0,Sc.Sc[I]*12,2);
+ End;
+ BestDist:=RqIntMax;
+ For I:=0 To 3 Do Begin
+  V:=128*Int64(Sc.ED[I])+RqLambda*BitsUsed[I];
+  If RqLess(V,BestDist) Then Begin
+   Sc.BestCoding:=I; Sc.BestBit:=BitsUsed[I];
+   BestDist:=RqTrunc32(V);
+  End;
+ End;
+End;
+
+Procedure RqGatherCel(Var Cel: TRqCel);
+Var
+ Index,I,J,BestDist,DivideBit: LongInt; BitsUsed: Array[0..3] Of LongInt; V: Int64;
+Begin
+ BitsUsed[0]:=2; BitsUsed[1]:=10; BitsUsed[2]:=10; BitsUsed[3]:=0;
+ Index:=Cel.SrcY*RqW Div 64+Cel.SrcX Div 8;
+ If RqFSK>=1 Then Begin
+  Cel.Mx:=RqThis8^[2*Index]; Cel.My:=RqThis8^[2*Index+1];
+  Cel.ED[1]:=RqEvalMotionDist(Cel.SrcX,Cel.SrcY,RqThis8^[2*Index],RqThis8^[2*Index+1],8);
+ End Else Cel.ED[1]:=RqIntMax;
+ If RqFSK>=2 Then Cel.ED[0]:=RqBlockSse(RqFrameEnc,RqCur,Cel.SrcX,Cel.SrcY,Cel.SrcX,Cel.SrcY,8) Else Cel.ED[0]:=RqIntMax;
+ RqGetFrameMb(Cel.SrcX,Cel.SrcY,@RqMb8,8);
+ Cel.ED[2]:=RqIndexMb(@RqMb8,@RqUnp4E,RqCbN4,Cel.CbEntry,8);
+ RqGatherSubcel(Cel.Sub[0],Cel.SrcX+0,Cel.SrcY+0);
+ RqGatherSubcel(Cel.Sub[1],Cel.SrcX+4,Cel.SrcY+0);
+ RqGatherSubcel(Cel.Sub[2],Cel.SrcX+0,Cel.SrcY+4);
+ RqGatherSubcel(Cel.Sub[3],Cel.SrcX+4,Cel.SrcY+4);
+ Cel.ED[3]:=0; DivideBit:=0;
+ For I:=0 To 3 Do Begin
+  Cel.ED[3]:=Cel.ED[3]+Cel.Sub[I].ED[Cel.Sub[I].BestCoding];
+  DivideBit:=DivideBit+Cel.Sub[I].BestBit;
+ End;
+ BestDist:=RqIntMax;
+ BitsUsed[3]:=2+DivideBit;
+ For I:=0 To 3 Do Begin
+  V:=128*Int64(Cel.ED[I])+RqLambda*BitsUsed[I];
+  If RqLess(V,BestDist) Then Begin
+   Cel.BestCoding:=I;
+   BestDist:=RqTrunc32(V);
+  End;
+ End;
+ Inc(RqTmp.Used[Cel.BestCoding]);
+ RqTmp.MainChunk:=RqTmp.MainChunk+BitsUsed[Cel.BestCoding];
+ If Cel.BestCoding=2 Then Inc(RqTmp.UsedCB4[Cel.CbEntry]);
+ If Cel.BestCoding=3 Then
+  For I:=0 To 3 Do Begin
+   If Cel.Sub[I].BestCoding=2 Then Inc(RqTmp.UsedCB4[Cel.Sub[I].CbEntry])
+   Else If Cel.Sub[I].BestCoding=3 Then
+    For J:=0 To 3 Do Inc(RqTmp.UsedCB2[Cel.Sub[I].Sc[J]]);
+  End;
+End;
+
+Procedure RqRemapCodebooks;
+Var I,J,Idx: LongInt;
+Begin
+ Idx:=0;
+ For I:=0 To 254 Do
+  If RqTmp.UsedCB4[I]<>0 Then Begin
+   RqTmp.I2F4[I]:=Idx; RqTmp.F2I4[Idx]:=I;
+   For J:=0 To 3 Do Inc(RqTmp.UsedCB2[RqCb4[I,J]]);
+   Inc(Idx);
+  End;
+ RqTmp.NumCB4:=Idx;
+ Idx:=0;
+ For I:=0 To 255 Do
+  If RqTmp.UsedCB2[I]<>0 Then Begin
+   RqTmp.I2F2[I]:=Idx; RqTmp.F2I2[Idx]:=I;
+   Inc(Idx);
+  End;
+ RqTmp.NumCB2:=Idx;
+End;
+
+Procedure RqPB(V: LongInt);
+Begin RqOut^[RqOutPos]:=V And 255; Inc(RqOutPos); End;
+Procedure RqPL16(V: LongInt);
+Begin RqPB(V); RqPB(V Shr 8); End;
+Procedure RqPL32(V: LongInt);
+Begin RqPL16(V And $FFFF); RqPL16((V Shr 16) And $FFFF); End;
+
+Procedure RqWriteCodebooks;
+Var I,J: LongInt;
+Begin
+ If RqTmp.NumCB2<>0 Then Begin
+  RqPL16($1002);
+  RqPL32(RqTmp.NumCB2*6+RqTmp.NumCB4*4);
+  RqPB(RqTmp.NumCB4);
+  RqPB(RqTmp.NumCB2);
+  For I:=0 To RqTmp.NumCB2-1 Do Begin
+   For J:=0 To 3 Do RqPB(RqCb2[RqTmp.F2I2[I]].Y[J]);
+   RqPB(RqCb2[RqTmp.F2I2[I]].U);
+   RqPB(RqCb2[RqTmp.F2I2[I]].V);
+  End;
+  For I:=0 To RqTmp.NumCB4-1 Do
+   For J:=0 To 3 Do RqPB(RqTmp.I2F2[RqCb4[RqTmp.F2I4[I],J]]);
+ End;
+End;
+
+Procedure RqSpArgB(V: LongInt);
+Begin RqSpArg[RqSpN]:=V And 255; Inc(RqSpN); End;
+
+Procedure RqWriteTypecode(T: LongInt);
+Var I: LongInt;
+Begin
+ RqSpType:=RqSpType Or ((T And 3) Shl (14-RqSpLen));
+ Inc(RqSpLen,2);
+ If RqSpLen=16 Then Begin
+  RqPL16(RqSpType);
+  For I:=0 To RqSpN-1 Do RqPB(RqSpArg[I]);
+  RqSpLen:=0; RqSpType:=0; RqSpN:=0;
+ End;
+End;
+
+Function RqMotionArg(Dx,Dy: LongInt): LongInt;
+Begin
+ RqMotionArg:=(((8-Dx) And 15) Shl 4) Or ((8-Dy) And 15);
+End;
+
+Procedure RqApplyVec(X,Y,Sz: LongInt; Const C: TRqCell);
+Var Pl,I,J,Q: LongInt; Cy: LongInt;
+Begin
+ Pl:=RqW*RqH;
+ For I:=0 To Sz-1 Do
+  For J:=0 To Sz-1 Do Begin
+   Q:=(Y+I)*RqW+X+J;
+   Cy:=(I*2 Div Sz)*2+(J*2 Div Sz);
+   RqCur^[Q]:=C.Y[Cy];
+   RqCur^[Pl+Q]:=C.U;
+   RqCur^[2*Pl+Q]:=C.V;
+  End;
+End;
+
+Procedure RqApplyMotion(X,Y,Dx,Dy,Sz: LongInt);
+Var Mx,My,Cp,I,Pl: LongInt;
+Begin
+ Mx:=X+Dx; My:=Y+Dy;
+ If (Mx<0) Or (Mx>RqW-Sz) Or (My<0) Or (My>RqH-Sz) Then Exit;
+ Pl:=RqW*RqH;
+ For Cp:=0 To 2 Do
+  For I:=0 To Sz-1 Do
+   Move(RqLast^[Cp*Pl+(My+I)*RqW+Mx],RqCur^[Cp*Pl+(Y+I)*RqW+X],Sz);
+End;
+
+Procedure RqReconstructAndEncode;
+Var I,J,K,X,Y,SubX,SubY,CbIdx,Q: LongInt;
+Begin
+ RqSpType:=0; RqSpLen:=0; RqSpN:=0;
+ If (RqTmp.Used[3] Mod 2)<>0 Then Inc(RqTmp.MainChunk,8);
+ RqPL16($1011);
+ RqPL32(RqTmp.MainChunk Div 8);
+ RqPB(0); RqPB(0);
+ For I:=0 To RqNCels-1 Do Begin
+  X:=RqCels^[I].SrcX; Y:=RqCels^[I].SrcY;
+  Case RqCels^[I].BestCoding Of
+   0: RqWriteTypecode(0);
+   1: Begin
+       RqSpArgB(RqMotionArg(RqCels^[I].Mx,RqCels^[I].My));
+       RqWriteTypecode(1);
+       RqApplyMotion(X,Y,RqCels^[I].Mx,RqCels^[I].My,8);
+      End;
+   2: Begin
+       RqSpArgB(RqTmp.I2F4[RqCels^[I].CbEntry]);
+       RqWriteTypecode(2);
+       Q:=RqCels^[I].CbEntry;
+       RqApplyVec(X,Y,4,RqCb2[RqCb4[Q,0]]);
+       RqApplyVec(X+4,Y,4,RqCb2[RqCb4[Q,1]]);
+       RqApplyVec(X,Y+4,4,RqCb2[RqCb4[Q,2]]);
+       RqApplyVec(X+4,Y+4,4,RqCb2[RqCb4[Q,3]]);
+      End;
+   3: Begin
+       RqWriteTypecode(3);
+       For J:=0 To 3 Do Begin
+        SubX:=X+4*(J And 1); SubY:=Y+2*(J And 2);
+        Case RqCels^[I].Sub[J].BestCoding Of
+         0: ;
+         1: Begin
+             RqSpArgB(RqMotionArg(RqCels^[I].Sub[J].Mx,RqCels^[I].Sub[J].My));
+             RqApplyMotion(SubX,SubY,RqCels^[I].Sub[J].Mx,RqCels^[I].Sub[J].My,4);
+            End;
+         2: Begin
+             RqSpArgB(RqTmp.I2F4[RqCels^[I].Sub[J].CbEntry]);
+             Q:=RqCels^[I].Sub[J].CbEntry;
+             RqApplyVec(SubX,SubY,2,RqCb2[RqCb4[Q,0]]);
+             RqApplyVec(SubX+2,SubY,2,RqCb2[RqCb4[Q,1]]);
+             RqApplyVec(SubX,SubY+2,2,RqCb2[RqCb4[Q,2]]);
+             RqApplyVec(SubX+2,SubY+2,2,RqCb2[RqCb4[Q,3]]);
+            End;
+         3: For K:=0 To 3 Do Begin
+             CbIdx:=RqCels^[I].Sub[J].Sc[K];
+             RqSpArgB(RqTmp.I2F2[CbIdx]);
+             RqApplyVec(SubX+2*(K And 1),SubY+(K And 2),2,RqCb2[CbIdx]);
+            End;
+        End;
+        RqWriteTypecode(RqCels^[I].Sub[J].BestCoding);
+       End;
+      End;
+  End;
+ End;
+ While RqSpLen<>0 Do RqWriteTypecode(0);
+End;
+
+Procedure RqGenerateCodebook(InputCount,Size,CbSize: LongInt; IsFour: Boolean);
+Var I,J,K,CSize,Pos: LongInt;
+Begin
+ CSize:=Size*Size Div 4;
+ RqElbgDo(RqPoints,6*CSize,InputCount,RqCodebook,CbSize,1,RqClosest);
+ Pos:=0;
+ For I:=0 To CbSize-1 Do
+  For K:=0 To CSize-1 Do Begin
+   If IsFour Then Begin
+    For J:=0 To 3 Do Begin RqRes4[4*I+K].Y[J]:=RqCodebook^[Pos]; Inc(Pos); End;
+    RqRes4[4*I+K].U:=RqCodebook^[Pos]; Inc(Pos);
+    RqRes4[4*I+K].V:=RqCodebook^[Pos]; Inc(Pos);
+   End Else Begin
+    For J:=0 To 3 Do Begin RqCb2[I].Y[J]:=RqCodebook^[Pos]; Inc(Pos); End;
+    RqCb2[I].U:=RqCodebook^[Pos]; Inc(Pos);
+    RqCb2[I].V:=RqCodebook^[Pos]; Inc(Pos);
+   End;
+  End;
+End;
+
+Procedure RqUnpackCell(Const C: TRqCell; U: PEABuffer);
+Var I: LongInt;
+Begin
+ For I:=0 To 3 Do Begin U^[I]:=C.Y[I]; U^[4+I]:=C.U; U^[8+I]:=C.V; End;
+End;
+
+Procedure RqGenerateNewCodebooks;
+Const Offsets: Array[0..3] Of LongInt = (0,2,8,10);
+Var
+ I,J,K,L,Cp,X,Pl,Mx,P,Top,Left,U,V,Pt,Q: LongInt; Mb2: Array[0..11] Of Byte; Src,Idx: LongInt;
+Begin
+ { create_clusters }
+ Pl:=RqW*RqH; Pt:=0;
+ I:=0;
+ While I<RqH Do Begin
+  J:=0;
+  While J<RqW Do Begin
+   For K:=0 To 1 Do
+    For L:=0 To 1 Do Begin
+     Q:=Pt+(L+2*K)*6;
+     Top:=I+2*K; Left:=J+2*L; U:=0; V:=0;
+     For P:=0 To 1 Do
+      For X:=0 To 1 Do Begin
+       RqPoints^[Q]:=RqFrameEnc^[(Top+P)*RqW+Left+X]; Inc(Q);
+       U:=U+RqFrameEnc^[Pl+(Top+P)*RqW+Left+X];
+       V:=V+RqFrameEnc^[2*Pl+(Top+P)*RqW+Left+X];
+      End;
+     RqPoints^[Q]:=(U+2) Div 4; RqPoints^[Q+1]:=(V+2) Div 4;
+    End;
+   Pt:=Pt+24;
+   Inc(J,4);
+  End;
+  Inc(I,4);
+ End;
+ Mx:=RqW*RqH Div 16;
+ RqCbN4:=255;
+ RqGenerateCodebook(Mx,4,RqCbN4,True);
+ RqGenerateCodebook(Mx*4,2,256,False);
+ RqCbN2:=256;
+ For I:=0 To RqCbN2-1 Do RqUnpackCell(RqCb2[I],@RqUnp2[I*12]);
+ For I:=0 To RqCbN4-1 Do Begin
+  For J:=0 To 3 Do Begin
+   RqUnpackCell(RqRes4[4*I+J],@Mb2);
+   RqCb4[I,J]:=0;
+   RqIndexMb(@Mb2,@RqUnp2,RqCbN2,RqCb4[I,J],2);
+  End;
+  { unpack_roq_qcell }
+  For Cp:=0 To 2 Do
+   For J:=0 To 3 Do Begin
+    Idx:=RqCb4[I,J];
+    RqUnp4[I*48+16*Cp+Offsets[J]]:=RqUnp2[Idx*12+4*Cp];
+    RqUnp4[I*48+16*Cp+Offsets[J]+1]:=RqUnp2[Idx*12+4*Cp+1];
+    RqUnp4[I*48+16*Cp+Offsets[J]+4]:=RqUnp2[Idx*12+4*Cp+2];
+    RqUnp4[I*48+16*Cp+Offsets[J]+5]:=RqUnp2[Idx*12+4*Cp+3];
+   End;
+  { enlarge_roq_mb4 }
+  Src:=I*48;
+  For Cp:=0 To 2 Do
+   For J:=0 To 7 Do
+    For K:=0 To 7 Do
+     RqUnp4E[I*192+Cp*64+J*8+K]:=RqUnp4[Src+(J Div 2)*4+(K Div 2)+16*Cp];
+ End;
+End;
+
+Procedure RqEncodeVideoFrame;
+Var I: LongInt;
+Begin
+ FillChar(RqTmp,SizeOf(RqTmp),0);
+ RqGenerateNewCodebooks;
+ If RqFSK>=1 Then Begin RqMotionSearch(8); RqMotionSearch(4); End;
+ Repeat
+  For I:=0 To RqNCels-1 Do RqGatherCel(RqCels^[I]);
+  If RqTmp.MainChunk Div 8>65535 Then Begin
+   If RqLambda>100000 Then Fail('roqvideo: Cannot encode video in Quake compatible form');
+   RqLambda:=(RqLambda*3) Div 2;
+   RqTmp.MainChunk:=0;
+   FillChar(RqTmp.Used,SizeOf(RqTmp.Used),0);
+   FillChar(RqTmp.UsedCB4,SizeOf(RqTmp.UsedCB4),0);
+   FillChar(RqTmp.UsedCB2,SizeOf(RqTmp.UsedCB2),0);
+  End Else Break;
+ Until False;
+ RqRemapCodebooks;
+ RqWriteCodebooks;
+ RqReconstructAndEncode;
+End;
+
+Function RqPlaneBuf(Sz: LongInt): PEABuffer;
+Var P: PEABuffer;
+Begin
+ GetMem(P,Sz+64); FillChar(P^,Sz+64,0); RqPlaneBuf:=P;
+End;
+
+Var RqHF,RqVF: TSwsF; RqLut: Array[0..255] Of Byte; RqH15: PALLong; RqCW,RqCH: LongInt;
+
+{ yuv420p/yuv444p (plage limitee) -> yuvj444p : swscale, filtres bicubiques de chroma puis conversion de plage }
+Procedure RqConvFrame(Sy,Su,Sv: PEABuffer);
+Var X,Y,J,K,HS,FS,Pl: LongInt; Val: Int64; Sc: PEABuffer;
+Begin
+ Pl:=RqW*RqH;
+ For Y:=0 To Pl-1 Do RqFrameEnc^[Y]:=RqLut[Sy^[Y]];
+ HS:=RqHF.FS; FS:=RqVF.FS;
+ For K:=0 To 1 Do Begin
+  If K=0 Then Sc:=Su Else Sc:=Sv;
+  For Y:=0 To RqCH-1 Do
+   For X:=0 To RqW-1 Do Begin
+    Val:=0;
+    For J:=0 To HS-1 Do Val:=Val+Int64(Sc^[Y*RqCW+RqHF.Pos^[X]+J])*RqHF.Coef^[X*HS+J];
+    Val:=AVSar(Val,7); If Val>32767 Then Val:=32767;
+    If Val>30775 Then Val:=30775;
+    RqH15^[Y*RqW+X]:=AVSar(Val*4663-9289992,12);
+   End;
+  For Y:=0 To RqH-1 Do
+   For X:=0 To RqW-1 Do Begin
+    Val:=Int64(64) Shl 12;
+    For J:=0 To FS-1 Do Val:=Val+Int64(RqH15^[(RqVF.Pos^[Y]+J)*RqW+X])*RqVF.Coef^[Y*FS+J];
+    Val:=AVSar(Val,19); If Val<0 Then Val:=0 Else If Val>255 Then Val:=255;
+    RqFrameEnc^[(K+1)*Pl+Y*RqW+X]:=Val;
+   End;
+ End;
+End;
+
+{ GopOpt: valeur de -g plus un (0 = non fourni) ; QualOpt: valeur de -q:v (<=0 = non fourni) }
+Procedure EncodeRoQVideo(Const Source,Target: String; GopOpt,QualOpt: LongInt);
+Var
+ Hd: Array[0..255] Of Byte; Limit,Cur,W,H,FN,FD,I,K,FrameBytes,Frames,N,G2,X,Pl: LongInt;
+ Line,Token: String; Code: Integer; C420,C444,First: Boolean; Sy,Su,Sv,Tp: PEABuffer; Tm: PALLong; Lq: Int64;
+Function ReadLine: String;
+Var R: String;
+Begin
+ R:='';
+ While Cur<Limit Do Begin ReadAt(Cur,Hd,1); Inc(Cur); If Hd[0]=10 Then Break; If Length(R)<250 Then R:=R+Chr(Hd[0]); End;
+ ReadLine:=R;
+End;
+Procedure ReadPlane(Plane: PEABuffer; At,Count: LongInt);
+Var Nn,Qq: LongInt;
+Begin
+ Nn:=0;
+ While Nn<Count Do Begin
+  If Count-Nn>4096 Then Qq:=4096 Else Qq:=Count-Nn;
+  ReadAt(At+Nn,Plane^[Nn],Qq); Inc(Nn,Qq);
+ End;
+End;
+Procedure Flush2;
+Var Nn,Qq: LongInt;
+Begin
+ Nn:=0;
+ While Nn<RqOutPos Do Begin
+  If RqOutPos-Nn>32768 Then Qq:=32768 Else Qq:=RqOutPos-Nn;
+  WriteBytes(RqOut^[Nn],Qq); Inc(Nn,Qq);
+ End;
+End;
+Begin
+ OpenRead(Source); Limit:=InputSize; Cur:=0;
+ Line:=ReadLine;
+ If Copy(Line,1,9)<>'YUV4MPEG2' Then Fail('roqvideo: entree Y4M requise.');
+ W:=0; H:=0; FN:=25; FD:=1; C420:=True; C444:=False;
+ Line:=Copy(Line,11,255);
+ While Line<>'' Do Begin
+  K:=Pos(' ',Line); If K=0 Then K:=Length(Line)+1;
+  Token:=Copy(Line,1,K-1); Line:=Copy(Line,K+1,255);
+  If Token='' Then Continue;
+  Case Token[1] Of
+   'W': Val(Copy(Token,2,20),W,Code);
+   'H': Val(Copy(Token,2,20),H,Code);
+   'F': Begin K:=Pos(':',Token); If K>0 Then Begin Val(Copy(Token,2,K-2),FN,Code); Val(Copy(Token,K+1,20),FD,Code); End; End;
+   'C': If (Token='C420') Or (Token='C420jpeg') Or (Token='C420mpeg2') Or (Token='C420paldv') Then Begin C420:=True; C444:=False; End
+        Else If Token='C444' Then Begin C444:=True; C420:=False; End
+        Else Fail('roqvideo: Y4M yuv420p ou yuv444p 8 bits requis.');
+   'X': If Pos('XCOLORRANGE=FULL',Token)=1 Then Fail('roqvideo: Y4M pleine plage (XCOLORRANGE=FULL) non pris en charge.');
+  End;
+ End;
+ If (W<1) Or (H<1) Or (W>65535) Or (H>65535) Then Fail('roqvideo: dimensions Y4M incorrectes.');
+ If ((W And 15)<>0) Or ((H And 15)<>0) Then Fail('roqvideo: Dimensions must be divisible by 16');
+ If (FN<=0) Or (FD<=0) Then Begin FN:=25; FD:=1; End;
+ G2:=FN; K:=FD; While K<>0 Do Begin I:=G2 Mod K; G2:=K; K:=I; End;
+ FN:=FN Div G2; FD:=FD Div G2;
+ If FD<>1 Then Fail('roqvideo: Frame rate must be integer');
+ If FN>255 Then Fail('roqvideo: Frame rate may not exceed 255fps');
+ RqW:=W; RqH:=H; Pl:=W*H;
+ If C420 Then Begin RqCW:=(W+1) Div 2; RqCH:=(H+1) Div 2; End Else Begin RqCW:=W; RqCH:=H; End;
+ FrameBytes:=Pl+2*RqCW*RqCH;
+ If GopOpt>0 Then RqGopSz:=GopOpt-1 Else RqGopSz:=12;
+ { initialisation de l'encodeur }
+ RqLfgInit;
+ RqNCels:=Pl Div 64;
+ GetMem(RqCels,Int64(RqNCels)*SizeOf(TRqCel)+64); FillChar(RqCels^,Int64(RqNCels)*SizeOf(TRqCel),0);
+ N:=0;
+ I:=0;
+ While I<H Do Begin
+  X:=0;
+  While X<W Do Begin
+   For K:=0 To 3 Do Begin
+    RqCels^[N].SrcX:=X+(K And 1)*8; RqCels^[N].SrcY:=I+(K And 2)*4; Inc(N);
+   End;
+   Inc(X,16);
+  End;
+  Inc(I,16);
+ End;
+ RqFrameEnc:=RqPlaneBuf(3*Pl); RqCur:=RqPlaneBuf(3*Pl); RqLast:=RqPlaneBuf(3*Pl);
+ GetMem(RqThis4,Int64(Pl) Div 16*8+64); FillChar(RqThis4^,Int64(Pl) Div 16*8+64,0);
+ GetMem(RqLast4,Int64(Pl) Div 16*8+64); FillChar(RqLast4^,Int64(Pl) Div 16*8+64,0);
+ GetMem(RqThis8,Int64(Pl) Div 64*8+64); FillChar(RqThis8^,Int64(Pl) Div 64*8+64,0);
+ GetMem(RqLast8,Int64(Pl) Div 64*8+64); FillChar(RqLast8^,Int64(Pl) Div 64*8+64,0);
+ GetMem(RqClosest,(Int64(Pl) Div 4+64)*4); GetMem(RqPoints,(Int64(Pl)*3 Div 2+64)*4);
+ GetMem(RqCodebook,6144*4+64);
+ GetMem(RqElHead,512*4); GetMem(RqElUtil,512*4); GetMem(RqElUInc,512*4); GetMem(RqElSize,512*4);
+ GetMem(RqElNext,(Int64(Pl) Div 4+64)*4); GetMem(RqElScr,5*24*4+64); GetMem(RqElTmp,(Int64(Pl)*2+4096)*4);
+ GetMem(RqH15,Int64(RqCH)*W*4+64);
+ GetMem(RqOut,Int64(RqNCels)*138 Div 8*2+65536);
+ { filtres swscale et table de luminance (plage limitee -> pleine) }
+ SwsInitF(RqHF,RqCW,W,128,128,16384);
+ SwsInitF(RqVF,RqCH,H,128,128,4096);
+ For I:=0 To 255 Do Begin
+  Lq:=Int64(I) Shl 7; If Lq>30189 Then Lq:=30189;
+  Lq:=AVSar(AVSar(Lq*19077-39057361,14)+64,7);
+  If Lq<0 Then Lq:=0 Else If Lq>255 Then Lq:=255;
+  RqLut[I]:=Lq;
+ End;
+ GetMem(Sy,Pl+64); GetMem(Su,RqCW*RqCH+64); GetMem(Sv,RqCW*RqCH+64);
+ OpenWrite(Target);
+ Hd[0]:=$84; Hd[1]:=$10; Hd[2]:=255; Hd[3]:=255; Hd[4]:=255; Hd[5]:=255; Hd[6]:=FN; Hd[7]:=0;
+ WriteBytes(Hd,8);
+ Frames:=0; First:=True; RqFSK:=0;
+ While Cur<Limit Do Begin
+  Line:=ReadLine;
+  If Copy(Line,1,5)<>'FRAME' Then Fail('roqvideo: marqueur FRAME requis.');
+  If FrameBytes>Limit-Cur Then Break;
+  ReadPlane(Sy,Cur,Pl); ReadPlane(Su,Cur+Pl,RqCW*RqCH); ReadPlane(Sv,Cur+Pl+RqCW*RqCH,RqCW*RqCH);
+  Inc(Cur,FrameBytes);
+  RqConvFrame(Sy,Su,Sv);
+  If QualOpt>0 Then RqLambda:=Int64(QualOpt)*118-1 Else RqLambda:=256;
+  If RqFSK=RqGopSz Then RqFSK:=0;
+  RqOutPos:=0;
+  If First Then Begin
+   RqPL16($1001); RqPL32(8); RqPB(0); RqPB(0); RqPL16(W); RqPL16(H);
+   RqPB(8); RqPB(0); RqPB(4); RqPB(0);
+   First:=False;
+  End;
+  RqEncodeVideoFrame;
+  Tp:=RqCur; RqCur:=RqLast; RqLast:=Tp;
+  Tm:=RqThis4; RqThis4:=RqLast4; RqLast4:=Tm;
+  Tm:=RqThis8; RqThis8:=RqLast8; RqLast8:=Tm;
+  Inc(RqFSK);
+  Flush2;
+  Inc(Frames);
+ End;
+ If Frames=0 Then Fail('roqvideo: aucune image Y4M.');
+ CloseRead; CloseWrite;
+End;
+
 Procedure DecodeAVIX(Const Source,Target: String; Mode,Kind: LongInt);
 Var Pos,PkPos,PkLen,RN,RD,I,Y,X,Cw,Ch,Bs,Msg2: LongInt; Ok,FFBegun: Boolean; Msg: String; PIdx: LongInt; NbF,NbP: Int64;
 Begin
@@ -74266,7 +75208,7 @@ BEGIN
    WriteLn('D V    smc             QuickTime Graphics SMC (MOV; decodeur, largeur multiple de 32 pour l''identite avec ffmpeg)');
    WriteLn('D V    qdraw           Apple QuickDraw (MOV; PICT v2 PackBits/DirectBits)');
    WriteLn('D V    qpeg            Q-team QPEG (AVI; palette 8 bits)');
-   WriteLn('D V D  roqvideo        id RoQ video (fichiers .roq; decodeur exact; sortie yuvj444p ou yuv420p)');
+   WriteLn('DEV D  roqvideo        id RoQ video (fichiers .roq; decodeur exact; encodeur yuvj444p octet pour octet depuis Y4M yuv420p/yuv444p, dimensions multiples de 16)');
    WriteLn('DEA    roq_dpcm        id RoQ DPCM (fichiers .roq; decodeur et encodeur octet pour octet, 22050 Hz mono/stereo)');
    WriteLn('D V    rl2             RL2 video (fichiers .rl2 RLV2/RLV3, PAL8 320x200; audio PCM ignore)');
    WriteLn('D A    real_144        RealAudio 1.0 (14.4K) (RealMedia; decodeur exact)');
@@ -74336,7 +75278,7 @@ BEGIN
    If (Argument='-preset') Or (Argument='-tune') Then X4Preset:=Lower(Value) Else Begin
     Val(Value,Number,Code);
     If (Code<>0) Or (Number<0) Or ((Argument<>'-g') And (Number>51)) Then Fail(Argument+': valeur invalide.');
-    If Argument='-crf' Then X4Crf:=Number Else If Argument='-qp' Then X4QpFix:=Number Else X4Gop:=Number;
+    If Argument='-crf' Then X4Crf:=Number Else If Argument='-qp' Then X4QpFix:=Number Else Begin X4Gop:=Number; RqGop:=Number+1; End;
    End;
   End Else
   If Argument='-strict' Then Begin
@@ -74353,8 +75295,8 @@ BEGIN
    If VideoCodec='libxvid' Then VideoCodec:='mpeg4';
    If (VideoCodec<>'png') And (VideoCodec<>'gif') And (VideoCodec<>'copy') And
     (VideoCodec<>'ffv1') And (VideoCodec<>'flv') And (VideoCodec<>'pam') And (VideoCodec<>'pbm') And (VideoCodec<>'pgm') And (VideoCodec<>'ppm') And (VideoCodec<>'pgmyuv') And (VideoCodec<>'sgi') And (VideoCodec<>'qtrle') And (VideoCodec<>'mpeg4') And (VideoCodec<>'mpeg1video') And (VideoCodec<>'mpeg2video') And (VideoCodec<>'rawvideo') And
-    (VideoCodec<>'asv1') And (VideoCodec<>'asv2') And (VideoCodec<>'msmpeg4') And (VideoCodec<>'msmpeg4v1') And (VideoCodec<>'msmpeg4v2') And (VideoCodec<>'huffyuv') And (VideoCodec<>'h263') And (VideoCodec<>'h263p') And (VideoCodec<>'rv10') And (VideoCodec<>'rv20') And (VideoCodec<>'bmp') And (VideoCodec<>'dnxhd') And (VideoCodec<>'dvvideo') And (VideoCodec<>'jpegls') And (VideoCodec<>'ljpeg') And (VideoCodec<>'mjpeg') And (VideoCodec<>'libx264') And (VideoCodec<>'libtheora') Then
-    Fail('Codec video: png/gif, bmp, copy, ffv1, flv, msmpeg4, msmpeg4v1, msmpeg4v2, mpeg4, mpeg1video, mpeg2video, rawvideo, asv1, asv2, huffyuv, h263, h263p, rv10, rv20, dnxhd, dvvideo, jpegls, ljpeg, mjpeg, libx264, libxvid, libtheora.');
+    (VideoCodec<>'asv1') And (VideoCodec<>'asv2') And (VideoCodec<>'msmpeg4') And (VideoCodec<>'msmpeg4v1') And (VideoCodec<>'msmpeg4v2') And (VideoCodec<>'huffyuv') And (VideoCodec<>'roqvideo') And (VideoCodec<>'h263') And (VideoCodec<>'h263p') And (VideoCodec<>'rv10') And (VideoCodec<>'rv20') And (VideoCodec<>'bmp') And (VideoCodec<>'dnxhd') And (VideoCodec<>'dvvideo') And (VideoCodec<>'jpegls') And (VideoCodec<>'ljpeg') And (VideoCodec<>'mjpeg') And (VideoCodec<>'libx264') And (VideoCodec<>'libtheora') Then
+    Fail('Codec video: png/gif, bmp, copy, ffv1, flv, msmpeg4, msmpeg4v1, msmpeg4v2, mpeg4, mpeg1video, mpeg2video, rawvideo, asv1, asv2, huffyuv, roqvideo, h263, h263p, rv10, rv20, dnxhd, dvvideo, jpegls, ljpeg, mjpeg, libx264, libxvid, libtheora.');
   End Else If (Argument='-vframes') Or (Argument='-frames:v') Then Begin
    If InputPath='' Then Fail('Nombre d''images attendu apres -i.');
    Value:=NextArgument; Val(Value,Number,Code);
@@ -74756,6 +75698,15 @@ BEGIN
   If HasCrop Then Fail('huffyuv: -crop non supporte avec cet encodeur.');
   Temps[2]:=NewTemporary; EncodeHuffyuv(Intermediate,Temps[2]);
   Commit(Temps[2]); Temps[2]:=''; WriteLn('Video HuffYUV creee: ',OutputPath); Halt(0);
+ End;
+ If (InputFormat='yuv4mpegpipe') And (VideoCodec='roqvideo') Then Begin
+  If IsHTTP(InputPath) Or (OutputFormat<>'roq') Or NoVideo Or (AudioCodec<>'') Or HasBitrate Or
+   (RequestedRate<>0) Or (RequestedChannels<>0) Or (VideoFrames<>0) Or (ImageWidth<>0) Then
+   Fail('roqvideo: Y4M local vers sortie .roq requis, sans autres options (-g et -q:v acceptes).');
+  If HasCrop Then Fail('roqvideo: -crop non supporte avec cet encodeur.');
+  If THQuality>31 Then Fail('roqvideo: -q:v 0..31 attendu.');
+  Temps[2]:=NewTemporary; EncodeRoQVideo(Intermediate,Temps[2],RqGop,THQuality);
+  Commit(Temps[2]); Temps[2]:=''; WriteLn('Video RoQ creee: ',OutputPath); Halt(0);
  End;
  If (InputFormat='yuv4mpegpipe') And ((VideoCodec='asv1') Or (VideoCodec='asv2')) Then Begin
   If IsHTTP(InputPath) Or (OutputFormat<>'avi') Or NoVideo Or (AudioCodec<>'') Or HasBitrate Or HasVideoBitrate Or
