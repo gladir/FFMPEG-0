@@ -57111,6 +57111,28 @@ Begin
 End;
 { QDM2-END }
 
+{ ==== BLOCK-ANCHOR-G1 : inserer le code du groupe G1 juste au-dessus de cette ligne ==== }
+
+{ ==== BLOCK-ANCHOR-G2A : inserer le code du groupe G2A juste au-dessus de cette ligne ==== }
+
+{ ==== BLOCK-ANCHOR-G2B : inserer le code du groupe G2B juste au-dessus de cette ligne ==== }
+
+{ ==== BLOCK-ANCHOR-G3A : inserer le code du groupe G3A juste au-dessus de cette ligne ==== }
+
+{ ==== BLOCK-ANCHOR-G3B : inserer le code du groupe G3B juste au-dessus de cette ligne ==== }
+
+{ ==== BLOCK-ANCHOR-G3C : inserer le code du groupe G3C juste au-dessus de cette ligne ==== }
+
+{ ==== BLOCK-ANCHOR-G4A : inserer le code du groupe G4A juste au-dessus de cette ligne ==== }
+
+{ ==== BLOCK-ANCHOR-G4B : inserer le code du groupe G4B juste au-dessus de cette ligne ==== }
+
+{ ==== BLOCK-ANCHOR-G5 : inserer le code du groupe G5 juste au-dessus de cette ligne ==== }
+
+{ ==== BLOCK-ANCHOR-G6A : inserer le code du groupe G6A juste au-dessus de cette ligne ==== }
+
+{ ==== BLOCK-ANCHOR-G6B : inserer le code du groupe G6B juste au-dessus de cette ligne ==== }
+
 Procedure DecodeAVIX(Const Source,Target: String; Mode,Kind: LongInt);
 Var Pos,PkPos,PkLen,RN,RD,I,Y,X,Cw,Ch,Bs,Msg2: LongInt; Ok,FFBegun: Boolean; Msg: String; PIdx: LongInt; NbF,NbP: Int64;
 Begin
@@ -79699,6 +79721,18 @@ BEGIN
   WriteLn('DEV    rv20            RealVideo 2.0 (decodeur I/P/B; encodeur I/P 16x16 vers .rm)');
   WriteLn('D V    rv30            RealVideo 3.0 (decodeur I/P/B, fichiers .rm)');
   WriteLn('D V    rv40            RealVideo 4.0 (decodeur I/P/B, fichiers .rm)');
+  { LIST-ANCHOR-G1 }
+  { LIST-ANCHOR-G2A }
+  { LIST-ANCHOR-G2B }
+  { LIST-ANCHOR-G3A }
+  { LIST-ANCHOR-G3B }
+  { LIST-ANCHOR-G3C }
+  { LIST-ANCHOR-G4A }
+  { LIST-ANCHOR-G4B }
+  { LIST-ANCHOR-G5 }
+  { LIST-ANCHOR-G6A }
+  { LIST-ANCHOR-G6B }
+
   WriteLn('D A    qcelp           QCELP / PureVoice (fichiers .qcp, QCELP-13K)');
   WriteLn('D A    qdm2            QDesign Music Codec 2 (QuickTime/MP4 QDM2; decodeur exact en flottant)');
   WriteLn('D A    shorten         Shorten (fichiers .shn; versions 0-2, WAVE; AIFF non pris en charge)');
