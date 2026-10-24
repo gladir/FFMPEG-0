@@ -22329,6 +22329,9 @@ Procedure DecodeSVQ3(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeVC1(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeVC1Raw(Const Source,Target: String; Mode: LongInt); Forward;
 Function V1ProbeFile(Const Name: String): Boolean; Forward;
+Procedure DecodeVC1Asf(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure H4GuessRate(RN,RD,AvN,AvD,CN,CD: Int64; Var ON,OD: LongInt); Forward;
+Function V1AsfKind(Const Name: String): LongInt; Forward;
 Procedure AWBegin(Const Target,Fourcc: String; W,H,Rate,Scale,Bpp: LongInt; Extra: PEABuffer; ExtraLen: LongInt); Forward;
 Procedure AWFrame(P: PEABuffer; Len: LongInt); Forward;
 Procedure AWEnd; Forward;
@@ -23116,6 +23119,7 @@ Begin
  If Kind=161 Then Begin DecodeSVQ3(Source,Target,Mode); Exit; End;
  If Kind=151 Then Begin DecodeVC1(Source,Target,Mode); Exit; End;
  If Kind=152 Then Begin DecodeVC1Raw(Source,Target,Mode); Exit; End;
+ If Kind=153 Then Begin DecodeVC1Asf(Source,Target,Mode); Exit; End;
  If Kind=65 Then Begin DecodeRoQ(Source,Target,Mode); Exit; End;
  If Kind=64 Then Begin DecodeRawQX(Source,Target,Mode); Exit; End;
  If Kind=63 Then Begin DecodeQPEG(Source,Target,Mode); Exit; End;
@@ -57828,7 +57832,7 @@ Type
   Mv: Array[0..1] Of PV1S;     { motion_val[2] (paires x,y) }
   Mt: PV1L;                    { mb_type par macrobloc (0=aucun, 1=intra, ...) }
   FieldPic,Interlaced,Tff: Boolean;
-  Used,IsRef: Boolean; PType: LongInt;
+  Used,IsRef: Boolean; PType: LongInt; Buf: LongInt;
   BufMv0,BufMv1,BufMt: Pointer;
  End;
 
@@ -57913,6 +57917,11 @@ Var
  V1Mode: LongInt; V1Target: String; V1OutBuf: PEABuffer; V1OutBegun: Boolean; V1RateN,V1RateD: LongInt;
  V1Err,V1LowDelay: Boolean;
  V1FrameErrors,V1Bad: LongInt;
+ V1AsfSarN,V1AsfSarD: LongInt;
+ V1Image: Boolean; V1SprW,V1SprH,V1NewSprite,V1TwoSprites: LongInt;
+ V1CopyCur,V1CopyLast,V1CopyNext,V1TabNY,V1TabPad: LongInt;
+ V1PoolY,V1PoolU,V1PoolV: Array[0..15] Of PEABuffer; V1PoolRef,V1PoolStack: Array[0..15] Of LongInt;
+ V1PoolN,V1PoolSP,V1HeldBuf,V1YSz,V1CSz: LongInt;
  V1IsWmv3: Boolean;
  { arbres VLC }
  V1TImode,V1TNorm2,V1TNorm6: PV1Tree;
@@ -58336,8 +58345,14 @@ Begin
  V1MaxBFrames:=H3Bits(3);
  V1QuantizerMode:=H3Bits(2);
  V1FinterpFlag:=H3Bit;
- If V1ResSprite<>0 Then Exit;   { sprites WMV9 image : non pris en charge }
- V1ResRtmFlag:=H3Bit;
+ If V1ResSprite<>0 Then Begin
+  V1SprW:=H3Bits(11); V1SprH:=H3Bits(11);
+  H3Skip(5);
+  V1ResX8:=H3Bit;
+  If H3Bit<>0 Then Exit;         { fonction sprite non prise en charge }
+  H3Skip(3);
+  V1ResRtmFlag:=0;
+ End Else V1ResRtmFlag:=H3Bit;
  If V1ResFastTx=0 Then H3Skip(16);
  V1SeqHeader:=0;
 End;
@@ -58790,9 +58805,123 @@ ParseCommon:
 End;
 
 { ---- DSP VC-1 (vc1dsp.c) ---- }
+{ ---- IDCT simples (simple_idct.c, 8 bits) utilisees quand res_fasttx=0 (profils simple/main) ---- }
+Var V1Simple: Boolean;
+
+Procedure V1SiRow(B: PV1S; O: LongInt);
+Var A0,A1,A2,A3,B0,B1,B2,B3,T: LongInt;
+Begin
+ If (B^[O+1]=0) And (B^[O+2]=0) And (B^[O+3]=0) And (B^[O+4]=0) And (B^[O+5]=0) And (B^[O+6]=0) And (B^[O+7]=0) Then Begin
+  T:=SmallInt(B^[O]*8);
+  B^[O]:=T; B^[O+1]:=T; B^[O+2]:=T; B^[O+3]:=T; B^[O+4]:=T; B^[O+5]:=T; B^[O+6]:=T; B^[O+7]:=T;
+  Exit;
+ End;
+ A0:=16383*B^[O]+1024; A1:=A0; A2:=A0; A3:=A0;
+ A0:=A0+21407*B^[O+2]; A1:=A1+8867*B^[O+2]; A2:=A2-8867*B^[O+2]; A3:=A3-21407*B^[O+2];
+ B0:=22725*B^[O+1]+19266*B^[O+3];
+ B1:=19266*B^[O+1]-4520*B^[O+3];
+ B2:=12873*B^[O+1]-22725*B^[O+3];
+ B3:=4520*B^[O+1]-12873*B^[O+3];
+ A0:=A0+16383*B^[O+4]+8867*B^[O+6];
+ A1:=A1-16383*B^[O+4]-21407*B^[O+6];
+ A2:=A2-16383*B^[O+4]+21407*B^[O+6];
+ A3:=A3+16383*B^[O+4]-8867*B^[O+6];
+ B0:=B0+12873*B^[O+5]+4520*B^[O+7];
+ B1:=B1-22725*B^[O+5]-12873*B^[O+7];
+ B2:=B2+4520*B^[O+5]+19266*B^[O+7];
+ B3:=B3+19266*B^[O+5]-22725*B^[O+7];
+ B^[O]:=SmallInt(V1Sar(A0+B0,11));
+ B^[O+7]:=SmallInt(V1Sar(A0-B0,11));
+ B^[O+1]:=SmallInt(V1Sar(A1+B1,11));
+ B^[O+6]:=SmallInt(V1Sar(A1-B1,11));
+ B^[O+2]:=SmallInt(V1Sar(A2+B2,11));
+ B^[O+5]:=SmallInt(V1Sar(A2-B2,11));
+ B^[O+3]:=SmallInt(V1Sar(A3+B3,11));
+ B^[O+4]:=SmallInt(V1Sar(A3-B3,11));
+End;
+
+{ colonne : Mode 0 = ecriture dans le bloc, 1 = addition aux pixels }
+Procedure V1SiCol(B: PV1S; O: LongInt; Mode: LongInt; Pl: PEABuffer; D,Stride: LongInt);
+Var A0,A1,A2,A3,B0,B1,B2,B3,K: LongInt; R: Array[0..7] Of LongInt;
+Begin
+ A0:=16383*(B^[O]+32); A1:=A0; A2:=A0; A3:=A0;
+ A0:=A0+21407*B^[O+16]; A1:=A1+8867*B^[O+16]; A2:=A2-8867*B^[O+16]; A3:=A3-21407*B^[O+16];
+ B0:=22725*B^[O+8]+19266*B^[O+24];
+ B1:=19266*B^[O+8]-4520*B^[O+24];
+ B2:=12873*B^[O+8]-22725*B^[O+24];
+ B3:=4520*B^[O+8]-12873*B^[O+24];
+ A0:=A0+16383*B^[O+32]; A1:=A1-16383*B^[O+32]; A2:=A2-16383*B^[O+32]; A3:=A3+16383*B^[O+32];
+ B0:=B0+12873*B^[O+40]; B1:=B1-22725*B^[O+40]; B2:=B2+4520*B^[O+40]; B3:=B3+19266*B^[O+40];
+ A0:=A0+8867*B^[O+48]; A1:=A1-21407*B^[O+48]; A2:=A2+21407*B^[O+48]; A3:=A3-8867*B^[O+48];
+ B0:=B0+4520*B^[O+56]; B1:=B1-12873*B^[O+56]; B2:=B2+19266*B^[O+56]; B3:=B3-22725*B^[O+56];
+ R[0]:=V1Sar(A0+B0,20); R[1]:=V1Sar(A1+B1,20); R[2]:=V1Sar(A2+B2,20); R[3]:=V1Sar(A3+B3,20);
+ R[4]:=V1Sar(A3-B3,20); R[5]:=V1Sar(A2-B2,20); R[6]:=V1Sar(A1-B1,20); R[7]:=V1Sar(A0-B0,20);
+ For K:=0 To 7 Do
+  If Mode=0 Then B^[O+8*K]:=SmallInt(R[K])
+  Else Pl^[D+K*Stride]:=V1Clip8(Pl^[D+K*Stride]+R[K]);
+End;
+
+Procedure V1Si8x8(B: PV1S; O: LongInt);
+Var I: LongInt;
+Begin
+ For I:=0 To 7 Do V1SiRow(B,O+I*8);
+ For I:=0 To 7 Do V1SiCol(B,O+I,0,Nil,0,0);
+End;
+
+Procedure V1Si8x8Add(Pl: PEABuffer; Off,Stride: LongInt; B: PV1S; O: LongInt);
+Var I: LongInt;
+Begin
+ For I:=0 To 7 Do V1SiRow(B,O+I*8);
+ For I:=0 To 7 Do V1SiCol(B,O+I,1,Pl,Off+I,Stride);
+End;
+
+Procedure V1Si4Row(B: PV1S; O: LongInt);
+Var A0,A1,A2,A3,C0,C1,C2,C3: LongInt;
+Begin
+ A0:=B^[O]; A1:=B^[O+1]; A2:=B^[O+2]; A3:=B^[O+3];
+ C0:=(A0+A2)*23170+1024; C2:=(A0-A2)*23170+1024;
+ C1:=A1*30274+A3*12540; C3:=A1*12540-A3*30274;
+ B^[O]:=SmallInt(V1Sar(C0+C1,11)); B^[O+1]:=SmallInt(V1Sar(C2+C3,11));
+ B^[O+2]:=SmallInt(V1Sar(C2-C3,11)); B^[O+3]:=SmallInt(V1Sar(C0-C1,11));
+End;
+
+Procedure V1Si4ColAdd(Pl: PEABuffer; D,Stride: LongInt; B: PV1S; O: LongInt);
+Var A0,A1,A2,A3,C0,C1,C2,C3: LongInt;
+Begin
+ A0:=B^[O]; A1:=B^[O+8]; A2:=B^[O+16]; A3:=B^[O+24];
+ C0:=(A0+A2)*2896+65536; C2:=(A0-A2)*2896+65536;
+ C1:=A1*3784+A3*1567; C3:=A1*1567-A3*3784;
+ Pl^[D]:=V1Clip8(Pl^[D]+V1Sar(C0+C1,17));
+ Pl^[D+Stride]:=V1Clip8(Pl^[D+Stride]+V1Sar(C2+C3,17));
+ Pl^[D+2*Stride]:=V1Clip8(Pl^[D+2*Stride]+V1Sar(C2-C3,17));
+ Pl^[D+3*Stride]:=V1Clip8(Pl^[D+3*Stride]+V1Sar(C0-C1,17));
+End;
+
+Procedure V1Si84Add(Pl: PEABuffer; Off,Stride: LongInt; B: PV1S; O: LongInt);
+Var I: LongInt;
+Begin
+ For I:=0 To 3 Do V1SiRow(B,O+I*8);
+ For I:=0 To 7 Do V1Si4ColAdd(Pl,Off+I,Stride,B,O+I);
+End;
+
+Procedure V1Si48Add(Pl: PEABuffer; Off,Stride: LongInt; B: PV1S; O: LongInt);
+Var I: LongInt;
+Begin
+ For I:=0 To 7 Do V1Si4Row(B,O+I*8);
+ For I:=0 To 3 Do V1SiCol(B,O+I,1,Pl,Off+I,Stride);
+End;
+
+Procedure V1Si44Add(Pl: PEABuffer; Off,Stride: LongInt; B: PV1S; O: LongInt);
+Var I: LongInt;
+Begin
+ For I:=0 To 3 Do V1Si4Row(B,O+I*8);
+ For I:=0 To 3 Do V1Si4ColAdd(Pl,Off+I,Stride,B,O+I);
+End;
+
 Procedure V1Trans8x8(B: PV1S; O: LongInt);
 Var I,T1,T2,T3,T4,T5,T6,T7,T8: LongInt; Tmp: Array[0..63] Of SmallInt; S,D: LongInt;
 Begin
+ If V1Simple Then Begin V1Si8x8(B,O); Exit; End;
  S:=O; D:=0;
  For I:=0 To 7 Do Begin
   T1:=12*(B^[S]+B^[S+32])+4;
@@ -58849,6 +58978,7 @@ End;
 Procedure V1Trans8x8Dc(Pl: PEABuffer; Off,Stride: LongInt; B: PV1S; O: LongInt);
 Var Dc: LongInt;
 Begin
+ If V1Simple Then Begin V1Si8x8Add(Pl,Off,Stride,B,O); Exit; End;
  Dc:=B^[O];
  Dc:=V1Sar(3*Dc+1,1);
  Dc:=V1Sar(3*Dc+16,5);
@@ -58858,6 +58988,7 @@ End;
 Procedure V1Trans8x4(Pl: PEABuffer; Off,Stride: LongInt; B: PV1S; O: LongInt);
 Var I,T1,T2,T3,T4,T5,T6,T7,T8,S,D: LongInt;
 Begin
+ If V1Simple Then Begin V1Si84Add(Pl,Off,Stride,B,O); Exit; End;
  S:=O;
  For I:=0 To 3 Do Begin
   T1:=12*(B^[S]+B^[S+4])+4;
@@ -58896,6 +59027,7 @@ End;
 Procedure V1Trans8x4Dc(Pl: PEABuffer; Off,Stride: LongInt; B: PV1S; O: LongInt);
 Var Dc: LongInt;
 Begin
+ If V1Simple Then Begin V1Si84Add(Pl,Off,Stride,B,O); Exit; End;
  Dc:=B^[O];
  Dc:=V1Sar(3*Dc+1,1);
  Dc:=V1Sar(17*Dc+64,7);
@@ -58905,6 +59037,7 @@ End;
 Procedure V1Trans4x8(Pl: PEABuffer; Off,Stride: LongInt; B: PV1S; O: LongInt);
 Var I,T1,T2,T3,T4,T5,T6,T7,T8,S,D: LongInt;
 Begin
+ If V1Simple Then Begin V1Si48Add(Pl,Off,Stride,B,O); Exit; End;
  S:=O;
  For I:=0 To 7 Do Begin
   T1:=17*(B^[S]+B^[S+2])+4;
@@ -58943,6 +59076,7 @@ End;
 Procedure V1Trans4x8Dc(Pl: PEABuffer; Off,Stride: LongInt; B: PV1S; O: LongInt);
 Var Dc: LongInt;
 Begin
+ If V1Simple Then Begin V1Si48Add(Pl,Off,Stride,B,O); Exit; End;
  Dc:=B^[O];
  Dc:=V1Sar(17*Dc+4,3);
  Dc:=V1Sar(12*Dc+64,7);
@@ -58952,6 +59086,7 @@ End;
 Procedure V1Trans4x4(Pl: PEABuffer; Off,Stride: LongInt; B: PV1S; O: LongInt);
 Var I,T1,T2,T3,T4,S,D: LongInt;
 Begin
+ If V1Simple Then Begin V1Si44Add(Pl,Off,Stride,B,O); Exit; End;
  S:=O;
  For I:=0 To 3 Do Begin
   T1:=17*(B^[S]+B^[S+2])+4;
@@ -58981,6 +59116,7 @@ End;
 Procedure V1Trans4x4Dc(Pl: PEABuffer; Off,Stride: LongInt; B: PV1S; O: LongInt);
 Var Dc: LongInt;
 Begin
+ If V1Simple Then Begin V1Si44Add(Pl,Off,Stride,B,O); Exit; End;
  Dc:=B^[O];
  Dc:=V1Sar(17*Dc+4,3);
  Dc:=V1Sar(17*Dc+64,7);
@@ -60029,6 +60165,11 @@ Begin
  Else V1ScaleMv:=V1Sar(Value*N+128,8);
 End;
 
+Function V1IlOf(Idx: LongInt): LongInt;
+Begin
+ If Idx<0 Then V1IlOf:=0 Else V1IlOf:=Ord(V1Pic[Idx].Interlaced);
+End;
+
 Function V1Plane(Idx,P: LongInt): PEABuffer;
 Begin
  If P=0 Then V1Plane:=V1Pic[Idx].Y Else If P=1 Then V1Plane:=V1Pic[Idx].U Else V1Plane:=V1Pic[Idx].V;
@@ -60260,10 +60401,10 @@ Begin
   If (V1FieldMode<>0) And (V1CurFieldType<>V1RefFieldType[Dir]) And (V1SecondField<>0) Then Begin
    SelPic:=V1CurI; Sel:=V1CurSel; UseIc:=V1UseIc[V1CurSel]; Interlace:=1;
   End Else Begin
-   SelPic:=V1LastI; Sel:=0; UseIc:=V1UseIc[0]; Interlace:=Ord(V1Pic[V1LastI].Interlaced);
+   SelPic:=V1LastI; Sel:=0; UseIc:=V1UseIc[0]; Interlace:=V1IlOf(V1LastI);
   End;
  End Else Begin
-  SelPic:=V1NextI; Sel:=1; UseIc:=V1UseIc[1]; Interlace:=Ord(V1Pic[V1NextI].Interlaced);
+  SelPic:=V1NextI; Sel:=1; UseIc:=V1UseIc[1]; Interlace:=V1IlOf(V1NextI);
  End;
  If SelPic<0 Then Exit;
  {$IFDEF V1DBG}WriteLn(StdErr,'   mc1mv dir=',Dir,' mx=',Mx,' my=',My,' selpic=',SelPic,' cur=',V1CurI,' last=',V1LastI,' sel=',Sel,' useic=',UseIc,' interlace=',Interlace,' reffield=',V1RefFieldType[Dir],' curfield=',V1CurFieldType,' rangered=',V1Rangeredfrm,' mspel=',V1Mspel);{$ENDIF}
@@ -60389,10 +60530,10 @@ Begin
   If (V1FieldMode<>0) And (V1CurFieldType<>V1RefFieldType[Dir]) And (V1SecondField<>0) Then Begin
    SelPic:=V1CurI; Sel:=V1CurSel; UseIc:=V1UseIc[V1CurSel]; Interlace:=1;
   End Else Begin
-   SelPic:=V1LastI; Sel:=0; UseIc:=V1UseIc[0]; Interlace:=Ord(V1Pic[V1LastI].Interlaced);
+   SelPic:=V1LastI; Sel:=0; UseIc:=V1UseIc[0]; Interlace:=V1IlOf(V1LastI);
   End;
  End Else Begin
-  SelPic:=V1NextI; Sel:=1; UseIc:=V1UseIc[1]; Interlace:=Ord(V1Pic[V1NextI].Interlaced);
+  SelPic:=V1NextI; Sel:=1; UseIc:=V1UseIc[1]; Interlace:=V1IlOf(V1NextI);
  End;
  If SelPic<0 Then Exit;
  If V1FieldMode<>0 Then Begin
@@ -60513,10 +60654,10 @@ Begin
   If (V1FieldMode<>0) And (V1CurFieldType<>ChromaRef) And (V1SecondField<>0) Then Begin
    SelPic:=V1CurI; Sel:=V1CurSel; UseIc:=V1UseIc[V1CurSel]; Interlace:=1;
   End Else Begin
-   SelPic:=V1LastI; Sel:=0; UseIc:=V1UseIc[0]; Interlace:=Ord(V1Pic[V1LastI].Interlaced);
+   SelPic:=V1LastI; Sel:=0; UseIc:=V1UseIc[0]; Interlace:=V1IlOf(V1LastI);
   End;
  End Else Begin
-  SelPic:=V1NextI; Sel:=1; UseIc:=V1UseIc[1]; Interlace:=Ord(V1Pic[V1NextI].Interlaced);
+  SelPic:=V1NextI; Sel:=1; UseIc:=V1UseIc[1]; Interlace:=V1IlOf(V1NextI);
  End;
  If SelPic<0 Then Exit;
  PlU:=V1Plane(SelPic,1); PlV:=V1Plane(SelPic,2);
@@ -60577,7 +60718,7 @@ Begin
   If Uvmx<0 Then Uvmx:=Uvmx-(Uvmx And 1) Else Uvmx:=Uvmx+(Uvmx And 1);
   If Uvmy<0 Then Uvmy:=Uvmy-(Uvmy And 1) Else Uvmy:=Uvmy+(Uvmy And 1);
  End;
- Interlace:=Ord(V1Pic[V1NextI].Interlaced);
+ Interlace:=V1IlOf(V1NextI);
  SrcX:=V1MbX*16+V1Sar(Mx,2);
  SrcY:=V1MbY*16+V1Sar(My,2);
  UvX:=V1MbX*8+V1Sar(Uvmx,2);
@@ -61543,6 +61684,725 @@ Begin
  FillChar(V1Cbp^[-2*V1MbStride],3*V1MbStride*4,0);
 End;
 
+{ ---- dissimulation d'erreurs (libavcodec/error_resilience.c, mpeg_er.c) pour les images I/P progressives ---- }
+Const
+ V1ER_VP=1; V1ER_AC_ERR=2; V1ER_DC_ERR=4; V1ER_MV_ERR=8; V1ER_AC_END=16; V1ER_DC_END=32; V1ER_MV_END=64;
+ V1ER_MB_ERR=14; V1ER_MB_END=112;
+ V1ER_FROZEN=8; V1ER_CHANGED=4; V1ER_UNCHANGED=2; V1ER_LISTED=1;
+Type
+ TV1Q=Array[0..24*24-1] Of LongInt;
+ TV1EL=Array[0..16777215] Of LongInt; PV1EL=^TV1EL;
+ TV1EB=Array[0..67108863] Of Byte; PV1EB=^TV1EB;
+Var
+ V1ErTab: PV1EB; V1ErTabSize: LongInt;
+ V1ErCnt: Int64; V1ErOcc: Boolean;
+ V1ErMx,V1ErMy: LongInt;
+ V1QW: Array[0..24*24-1] Of Byte;
+ V1QF,V1QH,V1QV,V1QHV: TV1Q;
+
+Function V1ErXy(I: LongInt): LongInt;
+Begin
+ V1ErXy:=(I Mod V1Mbw)+(I Div V1Mbw)*V1MbStride;
+End;
+
+Procedure V1ErFrameStart;
+Var N: LongInt;
+Begin
+ N:=V1MbStride*V1Mbh+V1MbStride+8;
+ If (V1ErTab=Nil) Or (V1ErTabSize<N) Then Begin
+  If V1ErTab<>Nil Then FreeMem(V1ErTab);
+  GetMem(V1ErTab,N); V1ErTabSize:=N;
+ End;
+ FillChar(V1ErTab^,N,V1ER_MB_ERR Or V1ER_VP Or V1ER_MB_END);
+ {$IFDEF V1PTS}Write(StdErr,'INIT:'); For N:=0 To 15 Do Write(StdErr,' ',V1ErTab^[N]); WriteLn(StdErr);{$ENDIF}
+ V1ErCnt:=3*Int64(V1MbNum);
+ V1ErOcc:=False;
+End;
+
+Procedure V1ErAddSlice(StartX,StartY,EndX,EndY,Status: LongInt);
+Var StartI,EndI,StartXy,EndXy,Mask,I,PrevXy,Prev: LongInt;
+Begin
+ StartI:=StartX+StartY*V1Mbw; If StartI<0 Then StartI:=0; If StartI>V1MbNum-1 Then StartI:=V1MbNum-1;
+ EndI:=EndX+EndY*V1Mbw; If EndI<0 Then EndI:=0; If EndI>V1MbNum Then EndI:=V1MbNum;
+ StartXy:=V1ErXy(StartI);
+ If EndI=V1MbNum Then EndXy:=V1Mbh*V1MbStride Else EndXy:=V1ErXy(EndI);
+ If (StartI>EndI) Or (StartXy>EndXy) Then Exit;
+ Mask:=Not V1ER_VP;
+ If (Status And (V1ER_AC_ERR Or V1ER_AC_END))<>0 Then Begin
+  Mask:=Mask And Not (V1ER_AC_ERR Or V1ER_AC_END);
+  V1ErCnt:=V1ErCnt+StartI-EndI-1;
+ End;
+ If (Status And (V1ER_DC_ERR Or V1ER_DC_END))<>0 Then Begin
+  Mask:=Mask And Not (V1ER_DC_ERR Or V1ER_DC_END);
+  V1ErCnt:=V1ErCnt+StartI-EndI-1;
+ End;
+ If (Status And (V1ER_MV_ERR Or V1ER_MV_END))<>0 Then Begin
+  Mask:=Mask And Not (V1ER_MV_ERR Or V1ER_MV_END);
+  V1ErCnt:=V1ErCnt+StartI-EndI-1;
+ End;
+ If (Status And V1ER_MB_ERR)<>0 Then Begin V1ErOcc:=True; V1ErCnt:=$7FFFFFFF; End;
+ For I:=StartXy To EndXy-1 Do V1ErTab^[I]:=V1ErTab^[I] And Mask And 255;
+ If EndI=V1MbNum Then V1ErCnt:=$7FFFFFFF
+ Else Begin
+  V1ErTab^[EndXy]:=(V1ErTab^[EndXy] And Mask And 255) Or Status;
+ End;
+ V1ErTab^[StartXy]:=V1ErTab^[StartXy] Or V1ER_VP;
+ {$IFDEF V1PTS}Write(StdErr,'TAB:'); For I:=0 To 15 Do Write(StdErr,' ',V1ErTab^[I]); WriteLn(StdErr);{$ENDIF}
+ {$IFDEF V1PTS}WriteLn(StdErr,'ADDSLICE ',StartX,',',StartY,' ',EndX,',',EndY,' st=',Status,' mask=',Mask,' sxy=',StartXy,' exy=',EndXy,' tab0=',V1ErTab^[0],' tab1=',V1ErTab^[1]);{$ENDIF}
+ If (StartXy>0) And (V1FieldMode=0) And (StartI>0) Then Begin
+  PrevXy:=V1ErXy(StartI-1);
+  Prev:=V1ErTab^[PrevXy] And Not V1ER_VP And 255;
+  If Prev<>(V1ER_MV_END Or V1ER_DC_END Or V1ER_AC_END) Then Begin V1ErOcc:=True; V1ErCnt:=$7FFFFFFF; End;
+ End;
+End;
+
+{ ---- compensation de mouvement 16x16 (mpegvideo_motion.c : mpeg_motion / qpel_motion, put) ---- }
+Procedure V1QFetch(Pl: PEABuffer; PStr,X0,Y0,NW,NH,EW,EH: LongInt);
+Var I,J,X,Y: LongInt;
+Begin
+ For J:=0 To NH-1 Do Begin
+  Y:=Y0+J; If Y<0 Then Y:=0 Else If Y>=EH Then Y:=EH-1;
+  For I:=0 To NW-1 Do Begin
+   X:=X0+I; If X<0 Then X:=0 Else If X>=EW Then X:=EW-1;
+   V1QW[J*24+I]:=Pl^[Y*PStr+X];
+  End;
+ End;
+End;
+
+Procedure V1QHpel(Dst: PEABuffer; DOff,DStr,Dxy,W,H: LongInt);
+Var X,Y,A,B,C,D,V,P: LongInt;
+Begin
+ For Y:=0 To H-1 Do For X:=0 To W-1 Do Begin
+  P:=Y*24+X;
+  A:=V1QW[P];
+  Case Dxy Of
+   0: V:=A;
+   1: Begin B:=V1QW[P+1]; V:=(A+B+1) Shr 1; End;
+   2: Begin C:=V1QW[P+24]; V:=(A+C+1) Shr 1; End;
+   Else Begin B:=V1QW[P+1]; C:=V1QW[P+24]; D:=V1QW[P+25]; V:=(A+B+C+D+2) Shr 2; End;
+  End;
+  Dst^[DOff+Y*DStr+X]:=V;
+ End;
+End;
+
+Function V1QCm(B,Rc: LongInt): LongInt;
+Var V: LongInt;
+Begin
+ V:=V1Sar(B+Rc,5);
+ If V<0 Then V:=0 Else If V>255 Then V:=255;
+ V1QCm:=V;
+End;
+
+Function V1QMir(J,W: LongInt): LongInt;
+Begin
+ If J<0 Then V1QMir:=-1-J Else If J>W Then V1QMir:=2*W+1-J Else V1QMir:=J;
+End;
+
+Procedure V1QHLow(Var Src,Dst: TV1Q; Rows,W,Rc: LongInt);
+Var I,J,K: LongInt; S: Array[0..16] Of LongInt;
+Begin
+ For J:=0 To Rows-1 Do Begin
+  For K:=0 To W Do S[K]:=Src[J*24+K];
+  For I:=0 To W-1 Do
+   Dst[J*24+I]:=V1QCm((S[I]+S[I+1])*20-(S[V1QMir(I-1,W)]+S[V1QMir(I+2,W)])*6+(S[V1QMir(I-2,W)]+S[V1QMir(I+3,W)])*3-(S[V1QMir(I-3,W)]+S[V1QMir(I+4,W)]),Rc);
+ End;
+End;
+
+Procedure V1QVLow(Var Src,Dst: TV1Q; W,Rc: LongInt);
+Var I,J,K: LongInt; S: Array[0..16] Of LongInt;
+Begin
+ For I:=0 To W-1 Do Begin
+  For K:=0 To W Do S[K]:=Src[K*24+I];
+  For J:=0 To W-1 Do
+   Dst[J*24+I]:=V1QCm((S[J]+S[J+1])*20-(S[V1QMir(J-1,W)]+S[V1QMir(J+2,W)])*6+(S[V1QMir(J-2,W)]+S[V1QMir(J+3,W)])*3-(S[V1QMir(J-3,W)]+S[V1QMir(J+4,W)]),Rc);
+ End;
+End;
+
+{ put_qpel16 (mode avec arrondi) ; fenetre V1QW de 17x17 pixels }
+Procedure V1QQpel(Dst: PEABuffer; DOff,DStr,Dxy,W: LongInt);
+Var X,Y,I,J,Rc,Mx,My: LongInt;
+Function L2(A,B: LongInt): LongInt;
+Begin L2:=(A+B+1) Shr 1; End;
+Procedure Outp(PX,PY,Vv: LongInt);
+Begin Dst^[DOff+PY*DStr+PX]:=Vv; End;
+Begin
+ Rc:=16;
+ Mx:=Dxy And 3; My:=Dxy Shr 2;
+ For J:=0 To W Do For I:=0 To W Do V1QF[J*24+I]:=V1QW[J*24+I];
+ Case My*4+Mx Of
+  0: For Y:=0 To W-1 Do For X:=0 To W-1 Do Outp(X,Y,V1QF[Y*24+X]);
+  1,3: Begin
+   V1QHLow(V1QF,V1QH,W,W,Rc);
+   For Y:=0 To W-1 Do For X:=0 To W-1 Do Outp(X,Y,L2(V1QF[Y*24+X+(Mx Shr 1)],V1QH[Y*24+X]));
+  End;
+  2: Begin
+   V1QHLow(V1QF,V1QH,W,W,Rc);
+   For Y:=0 To W-1 Do For X:=0 To W-1 Do Outp(X,Y,V1QH[Y*24+X]);
+  End;
+  4,12: Begin
+   V1QVLow(V1QF,V1QV,W,Rc);
+   For Y:=0 To W-1 Do For X:=0 To W-1 Do Outp(X,Y,L2(V1QF[(Y+(My Shr 1))*24+X],V1QV[Y*24+X]));
+  End;
+  8: Begin
+   V1QVLow(V1QF,V1QV,W,Rc);
+   For Y:=0 To W-1 Do For X:=0 To W-1 Do Outp(X,Y,V1QV[Y*24+X]);
+  End;
+  5,7,13,15: Begin
+   V1QHLow(V1QF,V1QH,W+1,W,Rc);
+   For J:=0 To W Do For I:=0 To W-1 Do V1QH[J*24+I]:=L2(V1QH[J*24+I],V1QF[J*24+I+(Mx Shr 1)]);
+   V1QVLow(V1QH,V1QHV,W,Rc);
+   For Y:=0 To W-1 Do For X:=0 To W-1 Do Outp(X,Y,L2(V1QH[(Y+(My Shr 1))*24+X],V1QHV[Y*24+X]));
+  End;
+  6,14: Begin
+   V1QHLow(V1QF,V1QH,W+1,W,Rc);
+   V1QVLow(V1QH,V1QHV,W,Rc);
+   For Y:=0 To W-1 Do For X:=0 To W-1 Do Outp(X,Y,L2(V1QH[(Y+(My Shr 1))*24+X],V1QHV[Y*24+X]));
+  End;
+  9,11: Begin
+   V1QHLow(V1QF,V1QH,W+1,W,Rc);
+   For J:=0 To W Do For I:=0 To W-1 Do V1QH[J*24+I]:=L2(V1QH[J*24+I],V1QF[J*24+I+(Mx Shr 1)]);
+   V1QVLow(V1QH,V1QHV,W,Rc);
+   For Y:=0 To W-1 Do For X:=0 To W-1 Do Outp(X,Y,V1QHV[Y*24+X]);
+  End;
+  10: Begin
+   V1QHLow(V1QF,V1QH,W+1,W,Rc);
+   V1QVLow(V1QH,V1QHV,W,Rc);
+   For Y:=0 To W-1 Do For X:=0 To W-1 Do Outp(X,Y,V1QHV[Y*24+X]);
+  End;
+ End;
+End;
+
+{ decode_mb de mpeg_er.c : compensation de mouvement 16x16 depuis l'image Ref vers l'image courante }
+Procedure V1ErMc(Ref,MbX,MbY,Mx,My: LongInt);
+Var
+ Dxy,UvDxy,SrcX,SrcY,UvX,UvY,Cx,Cy,DOffY,DOffC: LongInt; Pc,Cur: ^TV1Pic;
+Begin
+ Pc:=@V1Pic[Ref]; Cur:=@V1Pic[V1CurI];
+ DOffY:=MbY*16*V1FLinesize+MbX*16; DOffC:=MbY*8*V1FUvlinesize+MbX*8;
+ If V1QuarterSample<>0 Then Begin
+  Dxy:=((My And 3) Shl 2) Or (Mx And 3);
+  SrcX:=MbX*16+V1Sar(Mx,2); SrcY:=MbY*16+V1Sar(My,2);
+  Cx:=Mx Div 2; Cy:=My Div 2;
+  Cx:=V1Sar(Cx,1) Or (Cx And 1); Cy:=V1Sar(Cy,1) Or (Cy And 1);
+  UvDxy:=(Cx And 1) Or ((Cy And 1) Shl 1);
+  Cx:=V1Sar(Cx,1); Cy:=V1Sar(Cy,1);
+  UvX:=MbX*8+Cx; UvY:=MbY*8+Cy;
+  V1QFetch(Pc^.Y,V1FLinesize,SrcX,SrcY,17,17,V1HEdge,V1VEdge);
+  V1QQpel(Cur^.Y,DOffY,V1FLinesize,Dxy,16);
+ End Else Begin
+  Dxy:=((My And 1) Shl 1) Or (Mx And 1);
+  SrcX:=MbX*16+V1Sar(Mx,1); SrcY:=MbY*16+V1Sar(My,1);
+  UvDxy:=Dxy Or (My And 2) Or ((Mx And 2) Shr 1);
+  UvX:=V1Sar(SrcX,1); UvY:=V1Sar(SrcY,1);
+  V1QFetch(Pc^.Y,V1FLinesize,SrcX,SrcY,17,17,V1HEdge,V1VEdge);
+  V1QHpel(Cur^.Y,DOffY,V1FLinesize,Dxy,16,16);
+ End;
+ V1QFetch(Pc^.U,V1FUvlinesize,UvX,UvY,9,9,V1HEdge Shr 1,V1VEdge Shr 1);
+ V1QHpel(Cur^.U,DOffC,V1FUvlinesize,UvDxy,8,8);
+ V1QFetch(Pc^.V,V1FUvlinesize,UvX,UvY,9,9,V1HEdge Shr 1,V1VEdge Shr 1);
+ V1QHpel(Cur^.V,DOffC,V1FUvlinesize,UvDxy,8,8);
+ V1MbSkipTab^[MbX+MbY*V1MbStride]:=0;
+End;
+
+{ ---- acces aux tables de l'image courante ---- }
+Function V1ErMt(Xy: LongInt): LongInt;
+Begin
+ V1ErMt:=V1Pic[V1CurI].Mt^[Xy];
+End;
+Function V1ErIsIntra(Xy: LongInt): Boolean;
+Begin V1ErIsIntra:=(V1Pic[V1CurI].Mt^[Xy] And 1)<>0; End;
+Function V1ErIsInter(Xy: LongInt): Boolean;
+Begin V1ErIsInter:=(V1Pic[V1CurI].Mt^[Xy] And 2)<>0; End;
+
+Function V1ErHaveLast: Boolean;
+Begin V1ErHaveLast:=V1LastI>=0; End;
+
+Procedure V1ErPutDc(MbX,MbY: LongInt);
+Var I,Y,X,Dc,Dcu,Dcv,Ix: LongInt; Cur: ^TV1Pic;
+Begin
+ Cur:=@V1Pic[V1CurI];
+ For I:=0 To 3 Do Begin
+  Ix:=V1B8Stride*(MbY*2+(I Shr 1))+MbX*2+(I And 1);
+  Dc:=V1DcVal^[Ix];
+  If Dc<0 Then Dc:=0 Else If Dc>2040 Then Dc:=2040;
+  For Y:=0 To 7 Do For X:=0 To 7 Do
+   Cur^.Y^[MbX*16+(I And 1)*8+X+(MbY*16+(I Shr 1)*8+Y)*V1FLinesize]:=Dc Div 8;
+ End;
+ Dcu:=V1DcVal^[V1MbStride*(MbY+1)+V1B8Stride*V1Mbh*2+MbX];
+ Dcv:=V1DcVal^[V1MbStride*(MbY+V1Mbh+2)+V1B8Stride*V1Mbh*2+MbX];
+ If Dcu<0 Then Dcu:=0 Else If Dcu>2040 Then Dcu:=2040;
+ If Dcv<0 Then Dcv:=0 Else If Dcv>2040 Then Dcv:=2040;
+ For Y:=0 To 7 Do For X:=0 To 7 Do Begin
+  Cur^.U^[MbX*8+X+(MbY*8+Y)*V1FUvlinesize]:=Dcu Div 8;
+  Cur^.V^[MbX*8+X+(MbY*8+Y)*V1FUvlinesize]:=Dcv Div 8;
+ End;
+End;
+
+Procedure V1ErFilter181(Base,W,H,Stride: LongInt);
+Var X,Y,PrevDc,Dc: LongInt;
+Begin
+ For Y:=1 To H-2 Do Begin
+  PrevDc:=V1DcVal^[Base+Y*Stride];
+  For X:=1 To W-2 Do Begin
+   Dc:=-PrevDc+V1DcVal^[Base+X+Y*Stride]*8-V1DcVal^[Base+X+1+Y*Stride];
+   If Dc<-196602 Then Dc:=-196602 Else If Dc>163834 Then Dc:=163834;
+   Dc:=V1Sar(LongInt(Int64(Dc)*10923+32768),16);
+   PrevDc:=V1DcVal^[Base+X+Y*Stride];
+   V1DcVal^[Base+X+Y*Stride]:=Dc;
+  End;
+ End;
+ For X:=1 To W-2 Do Begin
+  PrevDc:=V1DcVal^[Base+X];
+  For Y:=1 To H-2 Do Begin
+   Dc:=-PrevDc+V1DcVal^[Base+X+Y*Stride]*8-V1DcVal^[Base+X+(Y+1)*Stride];
+   If Dc<-196602 Then Dc:=-196602 Else If Dc>163834 Then Dc:=163834;
+   Dc:=V1Sar(LongInt(Int64(Dc)*10923+32768),16);
+   PrevDc:=V1DcVal^[Base+X+Y*Stride];
+   V1DcVal^[Base+X+Y*Stride]:=Dc;
+  End;
+ End;
+End;
+
+Procedure V1ErGuessDc(Base,W,H,Stride,IsLuma: LongInt);
+Var
+ BX,BY,J,MbIdx,Err,Color,Distance: LongInt; Col,Dist: PV1EL; Guess,WeightSum,Weight: Int64; Intra: Boolean;
+Begin
+ GetMem(Col,Stride*H*4*4+64); GetMem(Dist,Stride*H*4*4+64);
+ For BY:=0 To H-1 Do Begin
+  Color:=1024; Distance:=-1;
+  For BX:=0 To W-1 Do Begin
+   MbIdx:=(BX Shr IsLuma)+(BY Shr IsLuma)*V1MbStride;
+   Err:=V1ErTab^[MbIdx]; Intra:=V1ErIsIntra(MbIdx);
+   If (Not Intra) Or ((Err And V1ER_DC_ERR)=0) Then Begin Color:=V1DcVal^[Base+BX+BY*Stride]; Distance:=BX; End;
+   Col^[(BX+BY*Stride)*4+1]:=Color;
+   If Distance>=0 Then Dist^[(BX+BY*Stride)*4+1]:=BX-Distance Else Dist^[(BX+BY*Stride)*4+1]:=9999;
+  End;
+  Color:=1024; Distance:=-1;
+  For BX:=W-1 Downto 0 Do Begin
+   MbIdx:=(BX Shr IsLuma)+(BY Shr IsLuma)*V1MbStride;
+   Err:=V1ErTab^[MbIdx]; Intra:=V1ErIsIntra(MbIdx);
+   If (Not Intra) Or ((Err And V1ER_DC_ERR)=0) Then Begin Color:=V1DcVal^[Base+BX+BY*Stride]; Distance:=BX; End;
+   Col^[(BX+BY*Stride)*4+0]:=Color;
+   If Distance>=0 Then Dist^[(BX+BY*Stride)*4+0]:=Distance-BX Else Dist^[(BX+BY*Stride)*4+0]:=9999;
+  End;
+ End;
+ For BX:=0 To W-1 Do Begin
+  Color:=1024; Distance:=-1;
+  For BY:=0 To H-1 Do Begin
+   MbIdx:=(BX Shr IsLuma)+(BY Shr IsLuma)*V1MbStride;
+   Err:=V1ErTab^[MbIdx]; Intra:=V1ErIsIntra(MbIdx);
+   If (Not Intra) Or ((Err And V1ER_DC_ERR)=0) Then Begin Color:=V1DcVal^[Base+BX+BY*Stride]; Distance:=BY; End;
+   Col^[(BX+BY*Stride)*4+3]:=Color;
+   If Distance>=0 Then Dist^[(BX+BY*Stride)*4+3]:=BY-Distance Else Dist^[(BX+BY*Stride)*4+3]:=9999;
+  End;
+  Color:=1024; Distance:=-1;
+  For BY:=H-1 Downto 0 Do Begin
+   MbIdx:=(BX Shr IsLuma)+(BY Shr IsLuma)*V1MbStride;
+   Err:=V1ErTab^[MbIdx]; Intra:=V1ErIsIntra(MbIdx);
+   If (Not Intra) Or ((Err And V1ER_DC_ERR)=0) Then Begin Color:=V1DcVal^[Base+BX+BY*Stride]; Distance:=BY; End;
+   Col^[(BX+BY*Stride)*4+2]:=Color;
+   If Distance>=0 Then Dist^[(BX+BY*Stride)*4+2]:=Distance-BY Else Dist^[(BX+BY*Stride)*4+2]:=9999;
+  End;
+ End;
+ For BY:=0 To H-1 Do For BX:=0 To W-1 Do Begin
+  MbIdx:=(BX Shr IsLuma)+(BY Shr IsLuma)*V1MbStride;
+  Err:=V1ErTab^[MbIdx];
+  If V1ErIsInter(MbIdx) Then Continue;
+  If (Err And V1ER_DC_ERR)=0 Then Continue;
+  WeightSum:=0; Guess:=0;
+  For J:=0 To 3 Do Begin
+   Distance:=Dist^[(BX+BY*Stride)*4+J]; If Distance<1 Then Distance:=1;
+   Weight:=Int64(256)*256*256*16 Div Distance;
+   Guess:=Guess+Weight*Int64(Col^[(BX+BY*Stride)*4+J]);
+   WeightSum:=WeightSum+Weight;
+  End;
+  Guess:=(Guess+WeightSum Div 2) Div WeightSum;
+  V1DcVal^[Base+BX+BY*Stride]:=SmallInt(Guess);
+ End;
+ FreeMem(Col); FreeMem(Dist);
+End;
+
+{ filtres de deblocage ; Pl/PStr : plan et pas ; W,H en blocs de 8 ; IsLuma 1/0 }
+Procedure V1ErHFilter(Pl: PEABuffer; W,H,Stride,IsLuma: LongInt);
+Var BX,BY,Y,A,B,C,D,Off,MvxStride,MvyStride,LS,RS,LeftMv,RightMv: LongInt; LDam,RDam,LIntra,RIntra: Boolean;
+ LMx,LMy,RMx,RMy: LongInt;
+Begin
+ MvxStride:=2 Shr IsLuma; MvyStride:=V1B8Stride*MvxStride;
+ For BY:=0 To H-1 Do For BX:=0 To W-2 Do Begin
+  LS:=V1ErTab^[(BX Shr IsLuma)+(BY Shr IsLuma)*V1MbStride];
+  RS:=V1ErTab^[((BX+1) Shr IsLuma)+(BY Shr IsLuma)*V1MbStride];
+  LIntra:=V1ErIsIntra((BX Shr IsLuma)+(BY Shr IsLuma)*V1MbStride);
+  RIntra:=V1ErIsIntra(((BX+1) Shr IsLuma)+(BY Shr IsLuma)*V1MbStride);
+  LDam:=(LS And V1ER_MB_ERR)<>0; RDam:=(RS And V1ER_MB_ERR)<>0;
+  Off:=BX*8+BY*Stride*8;
+  LMx:=V1MvC(V1CurI,0,MvyStride*BY+MvxStride*BX,0); LMy:=V1MvC(V1CurI,0,MvyStride*BY+MvxStride*BX,1);
+  RMx:=V1MvC(V1CurI,0,MvyStride*BY+MvxStride*(BX+1),0); RMy:=V1MvC(V1CurI,0,MvyStride*BY+MvxStride*(BX+1),1);
+  If Not (LDam Or RDam) Then Continue;
+  {$IFNDEF V1ALLF}If (Not LIntra) And (Not RIntra) And (Abs(LMx-RMx)+Abs(LMy+RMy)<2) Then Continue;{$ENDIF}
+  For Y:=0 To 7 Do Begin
+   A:=Pl^[Off+7+Y*Stride]-Pl^[Off+6+Y*Stride];
+   B:=Pl^[Off+8+Y*Stride]-Pl^[Off+7+Y*Stride];
+   C:=Pl^[Off+9+Y*Stride]-Pl^[Off+8+Y*Stride];
+   D:=Abs(B)-((Abs(A)+Abs(C)+1) Shr 1);
+   If D<0 Then D:=0;
+   If B<0 Then D:=-D;
+   If D=0 Then Continue;
+   If Not (LDam And RDam) Then D:=(D*16) Div 9;
+   If LDam Then Begin
+    Pl^[Off+7+Y*Stride]:=V1Clip8(Pl^[Off+7+Y*Stride]+V1Sar(D*7,4));
+    Pl^[Off+6+Y*Stride]:=V1Clip8(Pl^[Off+6+Y*Stride]+V1Sar(D*5,4));
+    Pl^[Off+5+Y*Stride]:=V1Clip8(Pl^[Off+5+Y*Stride]+V1Sar(D*3,4));
+    Pl^[Off+4+Y*Stride]:=V1Clip8(Pl^[Off+4+Y*Stride]+V1Sar(D*1,4));
+   End;
+   If RDam Then Begin
+    Pl^[Off+8+Y*Stride]:=V1Clip8(Pl^[Off+8+Y*Stride]-V1Sar(D*7,4));
+    Pl^[Off+9+Y*Stride]:=V1Clip8(Pl^[Off+9+Y*Stride]-V1Sar(D*5,4));
+    Pl^[Off+10+Y*Stride]:=V1Clip8(Pl^[Off+10+Y*Stride]-V1Sar(D*3,4));
+    Pl^[Off+11+Y*Stride]:=V1Clip8(Pl^[Off+11+Y*Stride]-V1Sar(D*1,4));
+   End;
+  End;
+ End;
+End;
+
+Procedure V1ErVFilter(Pl: PEABuffer; W,H,Stride,IsLuma: LongInt);
+Var BX,BY,X,A,B,C,D,Off,MvxStride,MvyStride,TS,BS: LongInt; TDam,BDam,TIntra,BIntra: Boolean;
+ TMx,TMy,BMx,BMy: LongInt;
+Begin
+ MvxStride:=2 Shr IsLuma; MvyStride:=V1B8Stride*MvxStride;
+ For BY:=0 To H-2 Do For BX:=0 To W-1 Do Begin
+  TS:=V1ErTab^[(BX Shr IsLuma)+(BY Shr IsLuma)*V1MbStride];
+  BS:=V1ErTab^[(BX Shr IsLuma)+((BY+1) Shr IsLuma)*V1MbStride];
+  TIntra:=V1ErIsIntra((BX Shr IsLuma)+(BY Shr IsLuma)*V1MbStride);
+  BIntra:=V1ErIsIntra((BX Shr IsLuma)+((BY+1) Shr IsLuma)*V1MbStride);
+  TDam:=(TS And V1ER_MB_ERR)<>0; BDam:=(BS And V1ER_MB_ERR)<>0;
+  Off:=BX*8+BY*Stride*8;
+  TMx:=V1MvC(V1CurI,0,MvyStride*BY+MvxStride*BX,0); TMy:=V1MvC(V1CurI,0,MvyStride*BY+MvxStride*BX,1);
+  BMx:=V1MvC(V1CurI,0,MvyStride*(BY+1)+MvxStride*BX,0); BMy:=V1MvC(V1CurI,0,MvyStride*(BY+1)+MvxStride*BX,1);
+  If Not (TDam Or BDam) Then Continue;
+  {$IFNDEF V1ALLF}If (Not TIntra) And (Not BIntra) And (Abs(TMx-BMx)+Abs(TMy+BMy)<2) Then Continue;{$ENDIF}
+  For X:=0 To 7 Do Begin
+   A:=Pl^[Off+X+7*Stride]-Pl^[Off+X+6*Stride];
+   B:=Pl^[Off+X+8*Stride]-Pl^[Off+X+7*Stride];
+   C:=Pl^[Off+X+9*Stride]-Pl^[Off+X+8*Stride];
+   D:=Abs(B)-((Abs(A)+Abs(C)+1) Shr 1);
+   If D<0 Then D:=0;
+   If B<0 Then D:=-D;
+   If D=0 Then Continue;
+   If Not (TDam And BDam) Then D:=(D*16) Div 9;
+   If TDam Then Begin
+    Pl^[Off+X+7*Stride]:=V1Clip8(Pl^[Off+X+7*Stride]+V1Sar(D*7,4));
+    Pl^[Off+X+6*Stride]:=V1Clip8(Pl^[Off+X+6*Stride]+V1Sar(D*5,4));
+    Pl^[Off+X+5*Stride]:=V1Clip8(Pl^[Off+X+5*Stride]+V1Sar(D*3,4));
+    Pl^[Off+X+4*Stride]:=V1Clip8(Pl^[Off+X+4*Stride]+V1Sar(D*1,4));
+   End;
+   If BDam Then Begin
+    Pl^[Off+X+8*Stride]:=V1Clip8(Pl^[Off+X+8*Stride]-V1Sar(D*7,4));
+    Pl^[Off+X+9*Stride]:=V1Clip8(Pl^[Off+X+9*Stride]-V1Sar(D*5,4));
+    Pl^[Off+X+10*Stride]:=V1Clip8(Pl^[Off+X+10*Stride]-V1Sar(D*3,4));
+    Pl^[Off+X+11*Stride]:=V1Clip8(Pl^[Off+X+11*Stride]-V1Sar(D*1,4));
+   End;
+  End;
+ End;
+End;
+
+{ guess_mv }
+Procedure V1ErGuessMv;
+Var
+ Blocklist,NextBlocklist: PV1EL; Fixed: PV1EB; BlLen,NextLen,I,J,MbX,MbY,MbXy,NumAvail,F,Err,MbHeight,MotIdx,Pass,Changed,NoneLeft,BIdx,PredCount,BestPred,PrevX,PrevY,PrevRef,Score,K,BestScore,SumX,SumY,SumR,MaxX,MaxY,MinX,MinY,MaxR,MinR,Ii,Jj: LongInt;
+ Pred: Array[0..9,0..1] Of LongInt; Ref: Array[0..9] Of LongInt; Skip: Boolean; Tmp: PV1EL; Src: LongInt;
+ N: LongInt;
+Procedure AddBl(Lst: PV1EL; Var Len: LongInt; X,Y,Xy: LongInt);
+Begin
+ If Fixed^[Xy]<>0 Then Exit;
+ Fixed^[Xy]:=V1ER_LISTED;
+ Lst^[Len*2]:=X; Lst^[Len*2+1]:=Y; Inc(Len);
+End;
+Begin
+ N:=V1MbStride*V1Mbh+V1MbStride;
+ GetMem(Blocklist,N*8+64); GetMem(NextBlocklist,N*8+64); GetMem(Fixed,N+64);
+ FillChar(Fixed^,N+64,0);
+ MbHeight:=V1Mbh;
+ NumAvail:=0;
+ For I:=0 To V1MbNum-1 Do Begin
+  MbXy:=V1ErXy(I); F:=0; Err:=V1ErTab^[MbXy];
+  If V1ErIsIntra(MbXy) Then F:=V1ER_FROZEN;
+  If (Err And V1ER_MV_ERR)=0 Then F:=V1ER_FROZEN;
+  Fixed^[MbXy]:=F;
+  If F=V1ER_FROZEN Then Inc(NumAvail)
+  Else If V1ErHaveLast Then Begin
+   MbY:=MbXy Div V1MbStride; MbX:=MbXy Mod V1MbStride;
+   MotIdx:=MbX*2+MbY*V1B8Stride*2;
+   V1MvSet(V1CurI,0,MotIdx,0,V1MvC(V1LastI,0,MotIdx,0));
+   V1MvSet(V1CurI,0,MotIdx,1,V1MvC(V1LastI,0,MotIdx,1));
+  End;
+ End;
+ V1ErMx:=0; V1ErMy:=0;
+ If NumAvail<=V1Max(V1Mbw,MbHeight) Div 2 Then Begin
+  For MbY:=0 To MbHeight-1 Do For MbX:=0 To V1Mbw-1 Do Begin
+   MbXy:=MbX+MbY*V1MbStride;
+   If V1ErIsIntra(MbXy) Then Continue;
+   If (V1ErTab^[MbXy] And V1ER_MV_ERR)=0 Then Continue;
+   V1ErMx:=0; V1ErMy:=0;
+   If V1ErHaveLast Then V1ErMc(V1LastI,MbX,MbY,0,0);
+  End;
+  FreeMem(Blocklist); FreeMem(NextBlocklist); FreeMem(Fixed);
+  Exit;
+ End;
+ BlLen:=0;
+ For MbY:=0 To MbHeight-1 Do For MbX:=0 To V1Mbw-1 Do Begin
+  MbXy:=MbX+MbY*V1MbStride;
+  If Fixed^[MbXy]=V1ER_FROZEN Then Begin
+   If MbX>0 Then AddBl(Blocklist,BlLen,MbX-1,MbY,MbXy-1);
+   If MbY>0 Then AddBl(Blocklist,BlLen,MbX,MbY-1,MbXy-V1MbStride);
+   If MbX+1<V1Mbw Then AddBl(Blocklist,BlLen,MbX+1,MbY,MbXy+1);
+   If MbY+1<MbHeight Then AddBl(Blocklist,BlLen,MbX,MbY+1,MbXy+V1MbStride);
+  End;
+ End;
+ While True Do Begin
+  NoneLeft:=1; Changed:=1; Pass:=0;
+  While ((Changed<>0) Or (Pass<2)) And (Pass<10) Do Begin
+   Changed:=0;
+   For BIdx:=0 To BlLen-1 Do Begin
+    MbX:=Blocklist^[BIdx*2]; MbY:=Blocklist^[BIdx*2+1]; MbXy:=MbX+MbY*V1MbStride;
+    If ((MbX Xor MbY Xor Pass) And 1)<>0 Then Continue;
+    J:=0;
+    If MbX>0 Then J:=J Or Fixed^[MbXy-1];
+    If MbX+1<V1Mbw Then J:=J Or Fixed^[MbXy+1];
+    If MbY>0 Then J:=J Or Fixed^[MbXy-V1MbStride];
+    If MbY+1<MbHeight Then J:=J Or Fixed^[MbXy+V1MbStride];
+    If ((J And V1ER_CHANGED)=0) And (Pass>1) Then Continue;
+    NoneLeft:=0;
+    PredCount:=0;
+    MotIdx:=MbX*2+MbY*V1B8Stride*2;
+    If (MbX>0) And (Fixed^[MbXy-1]>1) Then Begin
+     Pred[PredCount,0]:=V1MvC(V1CurI,0,MotIdx-2,0); Pred[PredCount,1]:=V1MvC(V1CurI,0,MotIdx-2,1); Ref[PredCount]:=0; Inc(PredCount);
+    End;
+    If (MbX+1<V1Mbw) And (Fixed^[MbXy+1]>1) Then Begin
+     Pred[PredCount,0]:=V1MvC(V1CurI,0,MotIdx+2,0); Pred[PredCount,1]:=V1MvC(V1CurI,0,MotIdx+2,1); Ref[PredCount]:=0; Inc(PredCount);
+    End;
+    If (MbY>0) And (Fixed^[MbXy-V1MbStride]>1) Then Begin
+     Pred[PredCount,0]:=V1MvC(V1CurI,0,MotIdx-V1B8Stride*2,0); Pred[PredCount,1]:=V1MvC(V1CurI,0,MotIdx-V1B8Stride*2,1); Ref[PredCount]:=0; Inc(PredCount);
+    End;
+    If (MbY+1<MbHeight) And (Fixed^[MbXy+V1MbStride]>1) Then Begin
+     Pred[PredCount,0]:=V1MvC(V1CurI,0,MotIdx+V1B8Stride*2,0); Pred[PredCount,1]:=V1MvC(V1CurI,0,MotIdx+V1B8Stride*2,1); Ref[PredCount]:=0; Inc(PredCount);
+    End;
+    If PredCount=0 Then Continue;
+    Skip:=False;
+    If PredCount>1 Then Begin
+     SumX:=0; SumY:=0; SumR:=0;
+     For J:=0 To PredCount-1 Do Begin
+      SumX:=SumX+Pred[J,0]; SumY:=SumY+Pred[J,1]; SumR:=SumR+Ref[J];
+      If (J>0) And (Ref[J]<>Ref[J-1]) Then Begin Skip:=True; Break; End;
+     End;
+     If Not Skip Then Begin
+      Pred[PredCount,0]:=SumX Div PredCount; Pred[PredCount,1]:=SumY Div PredCount; Ref[PredCount]:=SumR Div PredCount;
+      If PredCount>=3 Then Begin MinY:=99999; MinX:=99999; MinR:=99999; MaxY:=-99999; MaxX:=-99999; MaxR:=-99999; End
+      Else Begin MinX:=0; MinY:=0; MaxX:=0; MaxY:=0; MinR:=0; MaxR:=0; End;
+      For J:=0 To PredCount-1 Do Begin
+       MaxX:=V1Max(MaxX,Pred[J,0]); MaxY:=V1Max(MaxY,Pred[J,1]); MaxR:=V1Max(MaxR,Ref[J]);
+       MinX:=V1Min(MinX,Pred[J,0]); MinY:=V1Min(MinY,Pred[J,1]); MinR:=V1Min(MinR,Ref[J]);
+      End;
+      Pred[PredCount+1,0]:=SumX-MaxX-MinX; Pred[PredCount+1,1]:=SumY-MaxY-MinY; Ref[PredCount+1]:=SumR-MaxR-MinR;
+      If PredCount=4 Then Begin
+       Pred[PredCount+1,0]:=Pred[PredCount+1,0] Div 2; Pred[PredCount+1,1]:=Pred[PredCount+1,1] Div 2; Ref[PredCount+1]:=Ref[PredCount+1] Div 2;
+      End;
+      Inc(PredCount,2);
+     End;
+    End;
+    { vecteur nul }
+    Pred[PredCount,0]:=0; Pred[PredCount,1]:=0; Ref[PredCount]:=0; Inc(PredCount);
+    PrevX:=V1MvC(V1CurI,0,MotIdx,0); PrevY:=V1MvC(V1CurI,0,MotIdx,1); PrevRef:=0;
+    Pred[PredCount,0]:=PrevX; Pred[PredCount,1]:=PrevY; Ref[PredCount]:=PrevRef; Inc(PredCount);
+    BestPred:=0; BestScore:=256*256*256*64;
+    For J:=0 To PredCount-1 Do Begin
+     Score:=0;
+     Src:=MbX*16+MbY*16*V1FLinesize;
+     V1MvSet(V1CurI,0,MotIdx,0,Pred[J,0]); V1MvSet(V1CurI,0,MotIdx,1,Pred[J,1]);
+     V1ErMx:=Pred[J,0]; V1ErMy:=Pred[J,1];
+     If Ref[J]<0 Then Continue;
+     V1ErMc(V1LastI,MbX,MbY,V1ErMx,V1ErMy);
+     If (MbX>0) And (Fixed^[MbXy-1]>1) Then For K:=0 To 15 Do Score:=Score+Abs(V1Pic[V1CurI].Y^[Src+K*V1FLinesize-1]-V1Pic[V1CurI].Y^[Src+K*V1FLinesize]);
+     If (MbX+1<V1Mbw) And (Fixed^[MbXy+1]>1) Then For K:=0 To 15 Do Score:=Score+Abs(V1Pic[V1CurI].Y^[Src+K*V1FLinesize+15]-V1Pic[V1CurI].Y^[Src+K*V1FLinesize+16]);
+     If (MbY>0) And (Fixed^[MbXy-V1MbStride]>1) Then For K:=0 To 15 Do Score:=Score+Abs(V1Pic[V1CurI].Y^[Src+K-V1FLinesize]-V1Pic[V1CurI].Y^[Src+K]);
+     If (MbY+1<MbHeight) And (Fixed^[MbXy+V1MbStride]>1) Then For K:=0 To 15 Do Score:=Score+Abs(V1Pic[V1CurI].Y^[Src+K+V1FLinesize*15]-V1Pic[V1CurI].Y^[Src+K+V1FLinesize*16]);
+     If Score<=BestScore Then Begin BestScore:=Score; BestPred:=J; End;
+    End;
+    V1ErMx:=Pred[BestPred,0]; V1ErMy:=Pred[BestPred,1];
+    For Ii:=0 To 1 Do For Jj:=0 To 1 Do Begin
+     V1MvSet(V1CurI,0,MotIdx+Ii+Jj*V1B8Stride,0,V1ErMx); V1MvSet(V1CurI,0,MotIdx+Ii+Jj*V1B8Stride,1,V1ErMy);
+    End;
+    V1ErMc(V1LastI,MbX,MbY,V1ErMx,V1ErMy);
+    If (V1ErMx<>PrevX) Or (V1ErMy<>PrevY) Then Begin Fixed^[MbXy]:=V1ER_CHANGED; Inc(Changed); End
+    Else Fixed^[MbXy]:=V1ER_UNCHANGED;
+   End;
+   Inc(Pass);
+  End;
+  If NoneLeft<>0 Then Break;
+  NextLen:=0;
+  For BIdx:=0 To BlLen-1 Do Begin
+   MbX:=Blocklist^[BIdx*2]; MbY:=Blocklist^[BIdx*2+1]; MbXy:=MbX+MbY*V1MbStride;
+   If (Fixed^[MbXy] And (V1ER_CHANGED Or V1ER_UNCHANGED Or V1ER_FROZEN))<>0 Then Begin
+    Fixed^[MbXy]:=V1ER_FROZEN;
+    If MbX>0 Then AddBl(NextBlocklist,NextLen,MbX-1,MbY,MbXy-1);
+    If MbY>0 Then AddBl(NextBlocklist,NextLen,MbX,MbY-1,MbXy-V1MbStride);
+    If MbX+1<V1Mbw Then AddBl(NextBlocklist,NextLen,MbX+1,MbY,MbXy+1);
+    If MbY+1<MbHeight Then AddBl(NextBlocklist,NextLen,MbX,MbY+1,MbXy+V1MbStride);
+   End;
+  End;
+  I:=BlLen; BlLen:=NextLen; NextLen:=I;
+  Tmp:=Blocklist; Blocklist:=NextBlocklist; NextBlocklist:=Tmp;
+ End;
+ FreeMem(Blocklist); FreeMem(NextBlocklist); FreeMem(Fixed);
+End;
+
+Function V1ErIntraMoreLikely: Boolean;
+Var I,J,Undamaged,SkipAmount,MbX,MbY,Err,Likely,K,L,Sad,O1,O2: LongInt; Cur,Lst: ^TV1Pic; Xy: LongInt;
+Begin
+ V1ErIntraMoreLikely:=True;
+ If Not V1ErHaveLast Then Exit;
+ Undamaged:=0;
+ For I:=0 To V1MbNum-1 Do Begin
+  Err:=V1ErTab^[V1ErXy(I)];
+  If Not (((Err And V1ER_DC_ERR)<>0) And ((Err And V1ER_MV_ERR)<>0)) Then Inc(Undamaged);
+ End;
+ If Undamaged<5 Then Begin V1ErIntraMoreLikely:=False; Exit; End;
+ SkipAmount:=V1Max(Undamaged Div 50,1);
+ Likely:=0; J:=0;
+ Cur:=@V1Pic[V1CurI]; Lst:=@V1Pic[V1LastI];
+ For MbY:=0 To V1Mbh-2 Do For MbX:=0 To V1Mbw-1 Do Begin
+  Xy:=MbX+MbY*V1MbStride;
+  Err:=V1ErTab^[Xy];
+  If ((Err And V1ER_DC_ERR)<>0) And ((Err And V1ER_MV_ERR)<>0) Then Continue;
+  Inc(J);
+  If (J Mod SkipAmount)<>0 Then Continue;
+  If V1PictType=0 Then Begin
+   O1:=MbX*16+MbY*16*V1FLinesize;
+   Sad:=0;
+   For K:=0 To 15 Do For L:=0 To 15 Do Sad:=Sad+Abs(Lst^.Y^[O1+K*V1FLinesize+L]-Cur^.Y^[O1+K*V1FLinesize+L]);
+   Likely:=Likely+Sad;
+   Sad:=0;
+   For K:=0 To 15 Do For L:=0 To 15 Do Sad:=Sad+Abs(Lst^.Y^[O1+K*V1FLinesize+L]-Lst^.Y^[O1+(K+16)*V1FLinesize+L]);
+   Likely:=Likely-Sad;
+  End Else Begin
+   If V1ErIsIntra(Xy) Then Inc(Likely) Else Dec(Likely);
+  End;
+ End;
+ V1ErIntraMoreLikely:=Likely>0;
+End;
+
+Procedure V1ErFrameEnd;
+Var
+ I,MbX,MbY,Err,ErrType,Distance,End_,DcErr,AcErr,MvErr,Xy,N,Dir,Dc,Dcu,Dcv,Y,X,Ix,Ref: LongInt; IntraLikely: Boolean; Cur: ^TV1Pic;
+ Old: LongInt;
+Begin
+ If (V1ErCnt=0) Or (V1FieldMode<>0) Then Exit;
+ Cur:=@V1Pic[V1CurI];
+ {$IFDEF V1PTS}For MbY:=0 To V1Mbh-1 Do For MbX:=0 To V1Mbw-1 Do WriteLn(StdErr,'ERMB ',MbX,',',MbY,' st=',V1ErTab^[MbX+MbY*V1MbStride],' mt=',Cur^.Mt^[MbX+MbY*V1MbStride],' mv=',V1MvC(V1CurI,0,MbX*2+MbY*2*V1B8Stride,0),',',V1MvC(V1CurI,0,MbX*2+MbY*2*V1B8Stride,1),' skip=',V1MbSkipTab^[MbX+MbY*V1MbStride],' cur=',V1CurI,' last=',V1LastI);{$ENDIF}
+ { chevauchement des tranches }
+ For ErrType:=1 To 3 Do Begin
+  End_:=0;
+  For I:=V1MbNum-1 Downto 0 Do Begin
+   Xy:=V1ErXy(I); Err:=V1ErTab^[Xy];
+   If (Err And (1 Shl ErrType))<>0 Then End_:=1;
+   If (Err And (8 Shl ErrType))<>0 Then End_:=1;
+   If End_=0 Then V1ErTab^[Xy]:=V1ErTab^[Xy] Or (1 Shl ErrType);
+   If (Err And V1ER_VP)<>0 Then End_:=0;
+  End;
+ End;
+ { marquage arriere des erreurs }
+ Distance:=9999999;
+ For ErrType:=1 To 3 Do Begin
+  For I:=V1MbNum-1 Downto 0 Do Begin
+   Xy:=V1ErXy(I); Err:=V1ErTab^[Xy];
+   If V1MbSkipTab^[Xy]=0 Then Inc(Distance);
+   If (Err And (1 Shl ErrType))<>0 Then Distance:=0;
+   If Distance<50 Then V1ErTab^[Xy]:=V1ErTab^[Xy] Or (1 Shl ErrType);
+   If (Err And V1ER_VP)<>0 Then Distance:=9999999;
+  End;
+ End;
+ { marquage avant }
+ Err:=0;
+ For I:=0 To V1MbNum-1 Do Begin
+  Xy:=V1ErXy(I); Old:=V1ErTab^[Xy];
+  If (Old And V1ER_VP)<>0 Then Err:=Old And V1ER_MB_ERR
+  Else Begin
+   Err:=Err Or (Old And V1ER_MB_ERR);
+   V1ErTab^[Xy]:=V1ErTab^[Xy] Or Err;
+  End;
+ End;
+ For I:=0 To V1MbNum-1 Do Begin
+  Xy:=V1ErXy(I);
+  If (V1ErTab^[Xy] And V1ER_MB_ERR)<>0 Then V1ErTab^[Xy]:=V1ErTab^[Xy] Or V1ER_MB_ERR;
+ End;
+ {$IFDEF V1PTS}For I:=0 To V1MbNum-1 Do Begin Xy:=V1ErXy(I); WriteLn(StdErr,'ERPOST ',I,' st=',V1ErTab^[Xy],' mt=',Cur^.Mt^[Xy]); End;{$ENDIF}
+ IntraLikely:=V1ErIntraMoreLikely;
+ For I:=0 To V1MbNum-1 Do Begin
+  Xy:=V1ErXy(I); Err:=V1ErTab^[Xy];
+  If Not (((Err And V1ER_DC_ERR)<>0) And ((Err And V1ER_MV_ERR)<>0)) Then Continue;
+  If IntraLikely Then Cur^.Mt^[Xy]:=V1_MB_INTRA Else Cur^.Mt^[Xy]:=V1_MB_16X16;
+ End;
+ If Not V1ErHaveLast Then
+  For I:=0 To V1MbNum-1 Do Begin
+   Xy:=V1ErXy(I);
+   If Not V1ErIsIntra(Xy) Then Cur^.Mt^[Xy]:=V1_MB_INTRA;
+  End;
+ { blocs inter dont les AC sont abimes }
+ If V1ErHaveLast Then
+  For MbY:=0 To V1Mbh-1 Do For MbX:=0 To V1Mbw-1 Do Begin
+   Xy:=MbX+MbY*V1MbStride; Err:=V1ErTab^[Xy];
+   If V1ErIsIntra(Xy) Then Continue;
+   If (Err And V1ER_MV_ERR)<>0 Then Continue;
+   If (Err And V1ER_AC_ERR)=0 Then Continue;
+   V1ErMx:=V1MvC(V1CurI,0,MbX*2+MbY*2*V1B8Stride,0); V1ErMy:=V1MvC(V1CurI,0,MbX*2+MbY*2*V1B8Stride,1);
+   V1ErMc(V1LastI,MbX,MbY,V1ErMx,V1ErMy);
+  End;
+ { vecteurs }
+ V1ErGuessMv;
+ { DC des blocs inter }
+ For MbY:=0 To V1Mbh-1 Do For MbX:=0 To V1Mbw-1 Do Begin
+  For N:=0 To 3 Do Begin
+   Dc:=0;
+   For Y:=0 To 7 Do For X:=0 To 7 Do
+    Dc:=Dc+Cur^.Y^[MbX*16+(N And 1)*8+X+(MbY*16+(N Shr 1)*8+Y)*V1FLinesize];
+   V1DcVal^[V1B8Stride*(MbY*2+(N Shr 1))+MbX*2+(N And 1)]:=SmallInt((Dc+4) Shr 3);
+  End;
+  Dcu:=0; Dcv:=0;
+  For Y:=0 To 7 Do For X:=0 To 7 Do Begin
+   Dcu:=Dcu+Cur^.U^[MbX*8+X+(MbY*8+Y)*V1FUvlinesize];
+   Dcv:=Dcv+Cur^.V^[MbX*8+X+(MbY*8+Y)*V1FUvlinesize];
+  End;
+  V1DcVal^[V1MbStride*(MbY+1)+V1B8Stride*V1Mbh*2+MbX]:=SmallInt((Dcu+4) Shr 3);
+  V1DcVal^[V1MbStride*(MbY+V1Mbh+2)+V1B8Stride*V1Mbh*2+MbX]:=SmallInt((Dcv+4) Shr 3);
+ End;
+ { estimation du DC des blocs abimes }
+ V1ErGuessDc(0,V1Mbw*2,V1Mbh*2,V1B8Stride,1);
+ V1ErGuessDc(V1B8Stride*V1Mbh*2+V1MbStride,V1Mbw,V1Mbh,V1MbStride,0);
+ V1ErGuessDc(V1B8Stride*V1Mbh*2+V1MbStride*(V1Mbh+1)+V1MbStride,V1Mbw,V1Mbh,V1MbStride,0);
+ V1ErFilter181(0,V1Mbw*2,V1Mbh*2,V1B8Stride);
+ { rendu des macroblocs intra a DC seul }
+ For MbY:=0 To V1Mbh-1 Do For MbX:=0 To V1Mbw-1 Do Begin
+  Xy:=MbX+MbY*V1MbStride; Err:=V1ErTab^[Xy];
+  If V1ErIsInter(Xy) Then Continue;
+  If (Err And V1ER_AC_ERR)=0 Then Continue;
+  V1ErPutDc(MbX,MbY);
+ End;
+ {$IFDEF V1PTS}For MbY:=0 To V1Mbh*2-1 Do Begin Write(StdErr,'MVROW ',MbY,':'); For MbX:=0 To V1Mbw*2-1 Do Write(StdErr,' (',V1MvC(V1CurI,0,V1B8Stride*MbY+MbX,0),',',V1MvC(V1CurI,0,V1B8Stride*MbY+MbX,1),')'); WriteLn(StdErr); End;{$ENDIF}
+ { deblocage }
+ {$IFNDEF V1NODB}
+ V1ErHFilter(Cur^.Y,V1Mbw*2,V1Mbh*2,V1FLinesize,1);
+ V1ErVFilter(Cur^.Y,V1Mbw*2,V1Mbh*2,V1FLinesize,1);
+ V1ErHFilter(Cur^.U,V1Mbw,V1Mbh,V1FUvlinesize,0);
+ V1ErHFilter(Cur^.V,V1Mbw,V1Mbh,V1FUvlinesize,0);
+ V1ErVFilter(Cur^.U,V1Mbw,V1Mbh,V1FUvlinesize,0);
+ V1ErVFilter(Cur^.V,V1Mbw,V1Mbh,V1FUvlinesize,0);
+ {$ENDIF}
+ { nettoyage }
+ For I:=0 To V1MbNum-1 Do Begin
+  Xy:=V1ErXy(I); Err:=V1ErTab^[Xy];
+  If (V1PictType<>2) And ((Err And (V1ER_DC_ERR Or V1ER_MV_ERR Or V1ER_AC_ERR))<>0) Then V1MbSkipTab^[Xy]:=0;
+ End;
+End;
+
 Procedure V1DecodeIBlocks;
 Var K,J,Cbp,Val,Pred,CIx,MbPos: LongInt;
 Begin
@@ -61594,13 +62454,14 @@ Begin
    End;
    {$IFDEF V1DBG}Write(StdErr,' Yrow8:'); For J:=0 To 15 Do Write(StdErr,' ',V1Pic[V1CurI].Y^[128+J]); WriteLn(StdErr,' lf=',V1LoopFilter,' ov=',V1Overlap,' dest0=',V1Dest[0],' ls=',V1Linesize);{$ENDIF}
    If V1LoopFilter<>0 Then V1ILoopFilter;
-   If H3Left<0 Then Begin V1Err:=True; Exit; End;
+   If H3Left<0 Then Begin V1Err:=True; V1ErAddSlice(0,0,V1MbX,V1MbY,V1ER_MB_ERR); Exit; End;
    V1IncBlkIdx(V1TopleftBlkIdx); V1IncBlkIdx(V1TopBlkIdx); V1IncBlkIdx(V1LeftBlkIdx); V1IncBlkIdx(V1CurBlkIdx);
    Inc(V1MbX);
   End;
   V1FirstSliceLine:=0;
   Inc(V1MbY);
  End;
+ V1ErAddSlice(0,0,V1Mbw-1,V1Mbh-1,V1ER_MB_END);
 End;
 
 Procedure V1DecodeIBlocksAdv;
@@ -61625,7 +62486,7 @@ Begin
    V1Pic[V1CurI].Mt^[MbPos+V1MbOff]:=V1_MB_INTRA;
    For I:=0 To 3 Do Begin V1MvSet(V1CurI,1,V1BlockIndex[I]+V1BlocksOff,0,0); V1MvSet(V1CurI,1,V1BlockIndex[I]+V1BlocksOff,1,0); End;
    If V1FieldtxIsRaw<>0 Then V1FieldtxPlane^[MbPos]:=H3Bit;
-   If H3Left<=1 Then Exit;
+   If H3Left<=1 Then Begin V1ErAddSlice(0,V1StartMbY,V1MbX,V1MbY,V1ER_MB_ERR); Exit; End;
    Cbp:=V1TreeGet(V1TMbI);
    If V1AcpredIsRaw<>0 Then V1ACPred:=H3Bit Else V1ACPred:=V1AcpredPlane^[MbPos];
    If (V1Condover=2) And (V1OverflgIsRaw<>0) Then V1OverFlagsPlane^[MbPos]:=H3Bit;
@@ -61652,13 +62513,14 @@ Begin
    If (V1Overlap<>0) And ((V1Pq>=9) Or (V1Condover<>0)) Then V1IOverlapFilter;
    V1PutBlocksClamped(True);
    If V1LoopFilter<>0 Then V1ILoopFilter;
-   If H3Left<0 Then Begin V1Err:=True; Exit; End;
+   If H3Left<0 Then Begin V1Err:=True; V1ErAddSlice(0,V1StartMbY,V1MbX,V1MbY,V1ER_MB_ERR); Exit; End;
    V1IncBlkIdx(V1TopleftBlkIdx); V1IncBlkIdx(V1TopBlkIdx); V1IncBlkIdx(V1LeftBlkIdx); V1IncBlkIdx(V1CurBlkIdx);
    Inc(V1MbX);
   End;
   V1FirstSliceLine:=0;
   Inc(V1MbY);
  End;
+ V1ErAddSlice(0,V1StartMbY Shl V1FieldMode,V1Mbw-1,(V1EndMbY Shl V1FieldMode)-1,V1ER_MB_END);
 End;
 
 Procedure V1DecodePBlocks;
@@ -61681,7 +62543,7 @@ Begin
   While V1MbX<V1Mbw Do Begin
    V1UpdateBlockIndex;
    If (V1Fcm=2) Or ((V1Fcm=0) And (V1MvTypeIsRaw<>0)) Or (V1SkipIsRaw<>0) Then
-    If H3Left<=1 Then Exit;
+    If H3Left<=1 Then Begin V1ErAddSlice(0,V1StartMbY,V1MbX,V1MbY,V1ER_MB_ERR); Exit; End;
    If V1Fcm=2 Then Begin
     V1DecodePMbIntfi;
     If ApplyLf Then V1PLoopFilter;
@@ -61692,7 +62554,7 @@ Begin
     V1DecodePMb;
     If ApplyLf Then V1PLoopFilter;
    End;
-   If H3Left<0 Then Begin V1Err:=True; Exit; End;
+   If H3Left<0 Then Begin V1Err:=True; V1ErAddSlice(0,V1StartMbY,V1MbX,V1MbY,V1ER_MB_ERR); Exit; End;
    V1IncBlkIdx(V1TopleftBlkIdx); V1IncBlkIdx(V1TopBlkIdx); V1IncBlkIdx(V1LeftBlkIdx); V1IncBlkIdx(V1CurBlkIdx);
    Inc(V1MbX);
   End;
@@ -61700,6 +62562,7 @@ Begin
   V1FirstSliceLine:=0;
   Inc(V1MbY);
  End;
+ V1ErAddSlice(0,V1StartMbY Shl V1FieldMode,V1Mbw-1,(V1EndMbY Shl V1FieldMode)-1,V1ER_MB_END);
 End;
 
 Procedure V1DecodeBBlocks;
@@ -61722,7 +62585,7 @@ Begin
   While V1MbX<V1Mbw Do Begin
    V1UpdateBlockIndex;
    If (V1Fcm=2) Or (V1SkipIsRaw<>0) Or (V1DmbIsRaw<>0) Then
-    If H3Left<=1 Then Exit;
+    If H3Left<=1 Then Begin V1ErAddSlice(0,V1StartMbY,V1MbX,V1MbY,V1ER_MB_ERR); Exit; End;
    If V1Fcm=2 Then Begin
     V1DecodeBMbIntfi;
     If V1LoopFilter<>0 Then V1BIntfiLoopFilter;
@@ -61733,19 +62596,21 @@ Begin
     V1DecodeBMb;
     If V1LoopFilter<>0 Then V1ILoopFilter;
    End;
-   If H3Left<0 Then Begin V1Err:=True; Exit; End;
+   If H3Left<0 Then Begin V1Err:=True; V1ErAddSlice(0,V1StartMbY,V1MbX,V1MbY,V1ER_MB_ERR); Exit; End;
    Inc(V1MbX);
   End;
   V1RowEnd(False);
   V1FirstSliceLine:=0;
   Inc(V1MbY);
  End;
+ V1ErAddSlice(0,V1StartMbY Shl V1FieldMode,V1Mbw-1,(V1EndMbY Shl V1FieldMode)-1,V1ER_MB_END);
 End;
 
 Procedure V1DecodeSkipBlocks;
 Var Y,P,H: LongInt; Src,Dst: PEABuffer;
 Begin
  If V1LastI<0 Then Exit;
+ V1ErAddSlice(0,V1StartMbY,V1Mbw-1,V1EndMbY-1,V1ER_MB_END);
  For P:=0 To 2 Do Begin
   If P=0 Then Begin Src:=V1Pic[V1LastI].Y; Dst:=V1Pic[V1CurI].Y; H:=V1Mbh*16; End
   Else Begin
@@ -62008,9 +62873,9 @@ Begin
   Else UvY:=V1Clip(UvY,-8,V1CodedH Shr 1);
   If I<2 Then D:=Dir Else D:=Dir2;
   If D<>0 Then Begin
-   SelPic:=V1NextI; Sel:=1; UseIc:=V1UseIc[1]; Interlace:=Ord(V1Pic[V1NextI].Interlaced);
+   SelPic:=V1NextI; Sel:=1; UseIc:=V1UseIc[1]; Interlace:=V1IlOf(V1NextI);
   End Else Begin
-   SelPic:=V1LastI; Sel:=0; UseIc:=V1UseIc[0]; Interlace:=Ord(V1Pic[V1LastI].Interlaced);
+   SelPic:=V1LastI; Sel:=0; UseIc:=V1UseIc[0]; Interlace:=V1IlOf(V1LastI);
   End;
   If SelPic<0 Then Exit;
   PlU:=V1Plane(SelPic,1); PlV:=V1Plane(SelPic,2);
@@ -62893,13 +63758,15 @@ Var
 Procedure V1SetupScans;
 Var I,K: LongInt;
 Begin
+ V1Simple:=(V1Profile<3) And (V1ResFastTx=0);
  For I:=0 To 63 Do Begin
   For K:=0 To 3 Do Begin
-   V1Zz8x8[K,I]:=(V1Wmv1Scantable[K*64+I] Shr 3) Or ((V1Wmv1Scantable[K*64+I] And 7) Shl 3);
+   If V1Simple Then V1Zz8x8[K,I]:=V1Wmv1Scantable[K*64+I]
+   Else V1Zz8x8[K,I]:=(V1Wmv1Scantable[K*64+I] Shr 3) Or ((V1Wmv1Scantable[K*64+I] And 7) Shl 3);
   End;
   V1Zzi8x8[I]:=(V1AdvInterlaced8x8Zz[I] Shr 3) Or ((V1AdvInterlaced8x8Zz[I] And 7) Shl 3);
  End;
- V1LeftBlkSh:=0; V1TopBlkSh:=3;
+ If V1Simple Then Begin V1LeftBlkSh:=3; V1TopBlkSh:=0; End Else Begin V1LeftBlkSh:=0; V1TopBlkSh:=3; End;
  For I:=0 To 31 Do Begin
   If V1Profile=3 Then Begin V1Zz8x4[I]:=V1AdvProgressive8x4Zz[I]; V1Zz4x8[I]:=V1AdvProgressive4x8Zz[I]; End
   Else Begin V1Zz8x4[I]:=V1Wmv2Scantablea[I]; V1Zz4x8[I]:=V1Wmv2Scantableb[I]; End;
@@ -62919,6 +63786,7 @@ Begin
  Else Begin V1HEdge:=V1Mbw*16; V1VEdge:=V1Mbh*16; End;
  NY:=V1B8Stride*(Mbh2*2+1)+V1MbStride*(Mbh2+1)*2+128;
  Pad:=4*V1B8Stride+8*V1MbStride+256;
+ V1TabNY:=NY; V1TabPad:=Pad; V1CopyCur:=-1; V1CopyLast:=-1; V1CopyNext:=-1;
  V1DcVal:=PV1S(V1AllocZ(V1BufDc,NY*2,Pad*2,2));
  For I:=-Pad To NY-1 Do V1DcVal^[I]:=1024;
  V1AcVal:=PV1S(V1AllocZ(V1BufAc,NY*32,Pad*32,2));
@@ -62948,9 +63816,9 @@ Begin
  GetMem(V1BufEmu,160*V1FLinesize+8192); FillChar(V1BufEmu^,160*V1FLinesize+8192,0);
  V1EmuBuf:=PEABuffer(V1BufEmu);
  YSz:=V1FLinesize*Mbh2*16; CSz:=V1FUvlinesize*Mbh2*8;
+ V1YSz:=YSz; V1CSz:=CSz; V1PoolN:=0; V1PoolSP:=0; V1HeldBuf:=-1;
  For I:=0 To V1PicN-1 Do Begin
-  GetMem(V1Pic[I].Y,YSz+64); GetMem(V1Pic[I].U,CSz+64); GetMem(V1Pic[I].V,CSz+64);
-  FillChar(V1Pic[I].Y^,YSz+64,0); FillChar(V1Pic[I].U^,CSz+64,0); FillChar(V1Pic[I].V^,CSz+64,0);
+  V1Pic[I].Y:=Nil; V1Pic[I].U:=Nil; V1Pic[I].V:=Nil; V1Pic[I].Buf:=-1;
   V1Pic[I].Mv[0]:=PV1S(V1AllocZ(V1Pic[I].BufMv0,NY*4,Pad*4,2));
   V1Pic[I].Mv[1]:=PV1S(V1AllocZ(V1Pic[I].BufMv1,NY*4,Pad*4,2));
   V1Pic[I].Mt:=PV1L(V1AllocZ(V1Pic[I].BufMt,NY*4,Pad*4,4));
@@ -62960,6 +63828,53 @@ Begin
  {$IFDEF V1DBG}WriteLn(StdErr,'alloc cb[-1]=',V1CodedBlock^[-1],' pad=',Pad,' ny=',NY,' ptr=',PtrUInt(V1CodedBlock),' base=',PtrUInt(V1BufCoded));{$ENDIF}
  V1Alloced:=True; V1AllocCW:=V1CodedW; V1AllocCH:=V1CodedH;
  K:=0;
+End;
+
+{ pool de tampons image (AVBufferPool de get_buffer : LIFO, tampons recycles sans remise a zero) }
+Function V1PoolGet: LongInt;
+Var B: LongInt;
+Begin
+ If V1PoolSP>0 Then Begin
+  Dec(V1PoolSP); B:=V1PoolStack[V1PoolSP];
+ End Else Begin
+  B:=V1PoolN; Inc(V1PoolN);
+  GetMem(V1PoolY[B],V1YSz+64); GetMem(V1PoolU[B],V1CSz+64); GetMem(V1PoolV[B],V1CSz+64);
+  FillChar(V1PoolY[B]^,V1YSz+64,0); FillChar(V1PoolU[B]^,V1CSz+64,0); FillChar(V1PoolV[B]^,V1CSz+64,0);
+ End;
+ V1PoolRef[B]:=1;
+ V1PoolGet:=B;
+End;
+
+Procedure V1PoolRel(B: LongInt);
+Begin
+ If B<0 Then Exit;
+ Dec(V1PoolRef[B]);
+ If V1PoolRef[B]=0 Then Begin V1PoolStack[V1PoolSP]:=B; Inc(V1PoolSP); End;
+End;
+
+Procedure V1RelSlot(I: LongInt);
+Begin
+ If I<0 Then Exit;
+ If V1Pic[I].Buf>=0 Then Begin V1PoolRel(V1Pic[I].Buf); V1Pic[I].Buf:=-1; End;
+End;
+
+Procedure V1SlotBuf(I: LongInt);
+Var B: LongInt;
+Begin
+ B:=V1PoolGet;
+ V1Pic[I].Buf:=B; V1Pic[I].Y:=V1PoolY[B]; V1Pic[I].U:=V1PoolU[B]; V1Pic[I].V:=V1PoolV[B];
+End;
+
+{ alloc_picture : les tables d'une image (mb_type, motion_val) sont reutilisees telles quelles (non remises a zero)
+  sauf si un autre contexte (copies current/last/next du MpegEncContext) les reference encore : elles sont alors realloues a zero }
+Procedure V1TabsFor(I: LongInt);
+Begin
+ {$IFDEF V1NOZERO}Exit;{$ENDIF}
+ If (I=V1CopyCur) Or (I=V1CopyLast) Or (I=V1CopyNext) Then Begin
+  FillChar(V1Pic[I].BufMv0^,V1TabNY*4+2*V1TabPad*4+64,0);
+  FillChar(V1Pic[I].BufMv1^,V1TabNY*4+2*V1TabPad*4+64,0);
+  FillChar(V1Pic[I].BufMt^,V1TabNY*4+2*V1TabPad*4+64,0);
+ End;
 End;
 
 Function V1NewPic(Ex1,Ex2: LongInt): LongInt;
@@ -62993,6 +63908,7 @@ Begin
   If Ok And (Sn>0) Then Begin NVSarN:=Sn; NVSarD:=Sd; End;
  End;
  If NVSarN<=0 Then NVAviSar(V1OutW,V1OutH);
+ If V1AsfSarN>0 Then Begin NVSarN:=V1AsfSarN; NVSarD:=V1AsfSarD; End;
  V1OutBegun:=True;
 End;
 
@@ -63000,6 +63916,8 @@ Var
  V1PktNo: Int64; V1EmitDts: Int64; V1NPkts: Int64;
  V1PicPts: Array[0..V1PicN-1] Of Int64;
  V1FaultyPts,V1FaultyDts: LongInt; V1LastPts,V1LastDts: Int64;
+ V1PtsKnown: Boolean; V1LastFramePts: Int64; V1AsfMode,V1AsfAvi: Boolean; V1AsfDur,V1AsfEst,V1AsfCodecDur: Int64;
+ V1PpState,V1PpIdx,V1PpPrev,V1PpSkip,V1PpType,V1PpMaxB: LongInt; V1PpBuf: Array[0..191] Of Byte;
  V1SyncOpts: Int64; V1FrameNo: LongInt; V1LastNb0: Array[0..2] Of LongInt; V1HaveLastBuf: Boolean; V1LastBuf: PEABuffer; V1OutSize: LongInt;
 Const V1NoPts=-$7FFFFFFFFFFFFFFF;
 
@@ -63054,6 +63972,119 @@ Begin
  V1HaveLastBuf:=True;
 End;
 
+{ ---- simulation de vc1_parser.c (PARSER_FLAG_COMPLETE_FRAMES, libavformat/avidec) : seul pict_type est utilise ---- }
+Procedure V1PpExtract;
+Var Pos: LongInt;
+Function Bit: LongInt;
+Begin
+ If (Pos Shr 3)<V1PpIdx Then Bit:=(V1PpBuf[Pos Shr 3] Shr (7-(Pos And 7))) And 1 Else Bit:=0;
+ Inc(Pos);
+End;
+Function Bits(N: LongInt): LongInt;
+Var K,R: LongInt;
+Begin
+ R:=0;
+ For K:=1 To N Do R:=(R Shl 1) Or Bit;
+ Bits:=R;
+End;
+Var T,Bf: LongInt;
+Begin
+ { le contexte VC1 du parseur n'a jamais vu d'en-tete de sequence : profil 0 (simple/main), finterpflag=0, rangered=0 }
+ If V1PpPrev<>$0D Then Exit;
+ Pos:=0;
+ T:=Bits(2);
+ If Bit<>0 Then T:=1
+ Else Begin
+  If (V1PpMaxB<>0) And (Bit=0) Then Begin
+   T:=2;
+   Bf:=Bits(3);
+   If Bf=7 Then Bf:=7+Bits(4);
+   If Bf=21 Then Exit;
+  End Else T:=0;
+ End;
+ V1PpType:=T;
+End;
+
+Procedure V1PpFeed(Buf: PEABuffer; Size: LongInt);
+Var I,B: LongInt; Start: Boolean;
+Begin
+ I:=V1PpSkip; B:=0;
+ While I<Size Do Begin
+  Start:=False;
+  While (I<Size) And (V1PpIdx<37) Do Begin
+   B:=Buf^[I]; Inc(I);
+   V1PpBuf[V1PpIdx]:=B; Inc(V1PpIdx);
+   If V1PpState<=1 Then Begin
+    If B<>0 Then V1PpState:=0 Else Inc(V1PpState);
+   End Else If V1PpState=2 Then Begin
+    If B=1 Then V1PpState:=3
+    Else If B>1 Then Begin
+     If B=3 Then Dec(V1PpIdx);
+     V1PpState:=0;
+    End;
+   End Else Begin
+    V1PpState:=0; Start:=True; Break;
+   End;
+  End;
+  If (V1PpIdx>=37) And (V1PpPrev=$0D) Then Begin V1PpExtract; Break; End;
+  If (V1PpIdx>=37) And Not Start Then Begin
+   While I<Size Do Begin
+    If V1PpState=0 Then Begin
+     While (I<Size) And (Buf^[I]<>0) Do Inc(I);
+     If I<Size Then V1PpState:=1;
+     Inc(I);
+    End Else Begin
+     B:=Buf^[I]; Inc(I);
+     If V1PpState=1 Then Begin
+      If B<>0 Then V1PpState:=0 Else V1PpState:=2;
+     End Else If V1PpState=2 Then Begin
+      If B>=1 Then Begin If B=1 Then V1PpState:=3 Else V1PpState:=0; End;
+     End Else Begin
+      V1PpState:=0; Start:=True; Break;
+     End;
+    End;
+   End;
+  End;
+  If Start Then Begin
+   V1PpExtract;
+   V1PpPrev:=B; V1PpIdx:=0;
+  End;
+ End;
+ V1PpSkip:=4;
+End;
+
+{ fin de V1Output : pts (guess_correct_pts) puis synchronisation CFR et ecriture de V1OutBuf }
+Procedure V1OutTail(RPts: Int64);
+Var Pt,NbF,NbP: Int64;
+Begin
+ { pts du paquet qui a produit l'image + guess_correct_pts avec le dts du paquet courant (NOPTS au vidage) }
+ Pt:=V1GuessPts(RPts,V1EmitDts);
+
+ { ffmpeg_dec : pas de pts -> extrapolation depuis la derniere image (duree estimee = 1) }
+ If Pt=V1NoPts Then Begin
+  If V1LastFramePts=V1NoPts Then Pt:=0 Else Begin
+   If V1AsfMode Then Pt:=V1LastFramePts+V1AsfEst Else Pt:=V1LastFramePts+1;
+  End;
+ End;
+ { video_duration_estimate (ASF : base de temps 1/1000) }
+ If V1AsfMode Then Begin
+  If V1AsfAvi Then V1AsfEst:=1
+  Else If (V1LastFramePts<>V1NoPts) And (Pt>V1LastFramePts) Then V1AsfEst:=Pt-V1LastFramePts
+  Else If V1AsfCodecDur>0 Then V1AsfEst:=V1AsfCodecDur
+  Else If V1AsfEst<1 Then V1AsfEst:=1;
+ End;
+ V1LastFramePts:=Pt;
+ {$IFDEF V1PTS}WriteLn(StdErr,'OUT pts=',Pt,' rpts=',RPts,' dts=',V1EmitDts);{$ENDIF}
+ If V1AsfMode Then Begin
+  CFSync(Pt,V1AsfDur,NbF,NbP);
+  NVEmitN(V1OutBuf,NbP,NbF);
+  Inc(CFNext,NbF); Inc(CFFrameNo,NbF);
+  If V1LastBuf=Nil Then GetMem(V1LastBuf,V1OutSize+64);
+  Move(V1OutBuf^,V1LastBuf^,V1OutSize); V1HaveLastBuf:=True;
+ End Else V1Cfr(V1OutBuf,Pt);
+End;
+
+
 Procedure V1Output(P: LongInt);
 Var Y,CW,CH,Size: LongInt;
 Begin
@@ -63069,10 +64100,14 @@ Begin
  For Y:=0 To V1OutH-1 Do Move(V1Pic[P].Y^[Y*V1FLinesize],V1OutBuf^[Y*V1OutW],V1OutW);
  For Y:=0 To CH-1 Do Move(V1Pic[P].U^[Y*V1FUvlinesize],V1OutBuf^[V1OutW*V1OutH+Y*CW],CW);
  For Y:=0 To CH-1 Do Move(V1Pic[P].V^[Y*V1FUvlinesize],V1OutBuf^[V1OutW*V1OutH+CW*CH+Y*CW],CW);
- { AVI : les paquets n'ont que des dts (pas de pts) : pts de l'image = dts du paquet qui la produit, nombre de paquets au vidage }
- If V1EmitDts=V1NoPts Then V1Cfr(V1OutBuf,V1NPkts) Else V1Cfr(V1OutBuf,V1EmitDts);
+ V1OutTail(V1PicPts[P]);
+ { l'image de sortie reste referencee (ost->last_frame) jusqu'a la sortie suivante }
+ If V1Pic[P].Buf>=0 Then Begin
+  Inc(V1PoolRef[V1Pic[P].Buf]);
+  If V1HeldBuf>=0 Then V1PoolRel(V1HeldBuf);
+  V1HeldBuf:=V1Pic[P].Buf;
+ End;
 End;
-
 Function V1Unescape(Src: PEABuffer; Off,Size: LongInt; Dst: PEABuffer): LongInt;
 Var I,D: LongInt;
 Begin
@@ -63137,8 +64172,198 @@ Begin
  V1NSeg:=0;
 End;
 
+{ ---- sprites WMV9 / VC-1 Image (vc1dec.c : vc1_parse_sprites, vc1_draw_sprites) ---- }
+Var
+ V1SprC: Array[0..1,0..6] Of LongInt;
+ V1SrRows: Array[0..3] Of PEABuffer;
+ V1SprOut: PEABuffer;
+
+Function V1FpVal: LongInt;
+Begin
+ V1FpVal:=LongInt((Int64(H3Bits(30))-(Int64(1) Shl 29))*2);
+End;
+
+Procedure V1SprTransform(Var C: Array Of LongInt; O: LongInt);
+Begin
+ C[O+1]:=0; C[O+3]:=0;
+ Case H3Bits(2) Of
+  0: Begin C[O]:=65536; C[O+2]:=V1FpVal; C[O+4]:=65536; End;
+  1: Begin C[O]:=V1FpVal; C[O+4]:=C[O]; C[O+2]:=V1FpVal; End;
+  2: Begin C[O]:=V1FpVal; C[O+2]:=V1FpVal; C[O+4]:=V1FpVal; End;
+  3: Begin C[O]:=V1FpVal; C[O+1]:=V1FpVal; C[O+2]:=V1FpVal; C[O+3]:=V1FpVal; C[O+4]:=V1FpVal; End;
+ End;
+ C[O+5]:=V1FpVal;
+ If H3Bit<>0 Then C[O+6]:=V1FpVal Else C[O+6]:=65536;
+End;
+
+{ faux en cas d'erreur (image perdue) }
+Function V1SprParse: Boolean;
+Var Sp,I,EffType,P1,P2,Dm: LongInt; E1: Array[0..14] Of LongInt; E2: Array[0..9] Of LongInt;
+Begin
+ V1SprParse:=False;
+ FillChar(V1SprC,SizeOf(V1SprC),0);
+ FillChar(E1,SizeOf(E1),0);
+ For Sp:=0 To V1TwoSprites Do V1SprTransform(V1SprC[Sp],0);
+ H3Skip(2);
+ EffType:=H3Bits(30);
+ If EffType<>0 Then Begin
+  P1:=H3Bits(4);
+  Case P1 Of
+   7: V1SprTransform(E1,0);
+   14: Begin V1SprTransform(E1,0); V1SprTransform(E1,7); End;
+   Else For I:=0 To P1-1 Do E1[I]:=V1FpVal;
+  End;
+  P2:=H3Bits(16);
+  If P2>10 Then Exit;
+  For I:=0 To P2-1 Do E2[I]:=V1FpVal;
+ End;
+ Dm:=H3Bit;
+ If V1IsWmv3 Then Begin
+  If H3Pos>=H3Size*8+64 Then Exit;
+ End Else If H3Pos>=H3Size*8 Then Exit;
+ V1SprParse:=True;
+End;
+
+Function V1Clip3(V,Lo,Hi: LongInt): LongInt;
+Begin
+ If V<Lo Then V1Clip3:=Lo Else If V>Hi Then V1Clip3:=Hi Else V1Clip3:=V;
+End;
+
+Procedure V1SprRowH(Dst: PEABuffer; Src: PEABuffer; SOff,Offset,Advance,Count,PW: LongInt);
+Var A,B,D,Ix: LongInt;
+Begin
+ D:=0;
+ While Count>0 Do Begin
+  Ix:=Offset Shr 16;
+  { au-dela de la largeur de l'image : octets de remplissage de la ligne (nuls dans ffmpeg) }
+  If Ix<PW Then A:=Src^[SOff+Ix] Else A:=0;
+  If Ix+1<PW Then B:=Src^[SOff+Ix+1] Else B:=0;
+  Dst^[D]:=Byte(A+V1Sar((B-A)*(Offset And $FFFF),16));
+  Inc(D); Offset:=Offset+Advance; Dec(Count);
+ End;
+End;
+
+Procedure V1SprV(Dst: PEABuffer; DO_: LongInt; S1a: PEABuffer; O1a: LongInt; S1b: PEABuffer; O1b,Offset1: LongInt;
+ Two: Boolean; S2a: PEABuffer; O2a: LongInt; S2b: PEABuffer; O2b,Offset2,Alpha,Scaled,Width: LongInt);
+Var A1,B1,A2,B2,X: LongInt;
+Begin
+ For X:=0 To Width-1 Do Begin
+  A1:=S1a^[O1a+X];
+  If Scaled<>0 Then Begin
+   B1:=S1b^[O1b+X];
+   A1:=A1+V1Sar((B1-A1)*Offset1,16);
+  End;
+  If Two Then Begin
+   A2:=S2a^[O2a+X];
+   If Scaled>1 Then Begin
+    B2:=S2b^[O2b+X];
+    A2:=A2+V1Sar((B2-A2)*Offset2,16);
+   End;
+   A1:=A1+V1Sar((A2-A1)*Alpha,16);
+  End;
+  Dst^[DO_+X]:=Byte(A1);
+ End;
+End;
+
+Procedure V1SprDraw;
+Var
+ I,Plane,Row,Sp,Width,Rows,Yline,NextLine,Iline,Ycoord,Alpha,Sw,Sh,Ow,Oh,Pic,Dst,Pl1,T,CW,CH: LongInt;
+ Xoff,Xadv,Yoff,Yadv,Ysub: Array[0..1] Of LongInt;
+ SrCache,SrIdx,SO: Array[0..1,0..1] Of LongInt;
+ SB: Array[0..1,0..1] Of PEABuffer;
+ IPl: PEABuffer;
+Begin
+ Sw:=V1SprW; Sh:=V1SprH; Ow:=V1OutW; Oh:=V1OutH;
+ CW:=(Ow+1) Div 2; CH:=(Oh+1) Div 2;
+ FillChar(SB,SizeOf(SB),0); FillChar(SO,SizeOf(SO),0);
+ For I:=0 To V1TwoSprites Do Begin
+  Xoff[I]:=V1Clip3(V1SprC[I,2],0,(Sw-1) Shl 16);
+  Xadv[I]:=V1SprC[I,0];
+  If (Xadv[I]<>65536) Or ((Sw Shl 16)-(Ow Shl 16)-Xoff[I]<>0) Then Xadv[I]:=V1Clip3(Xadv[I],0,((Sw Shl 16)-Xoff[I]-1) Div Ow);
+  Yoff[I]:=V1Clip3(V1SprC[I,5],0,(Sh-1) Shl 16);
+  Yadv[I]:=V1Clip3(V1SprC[I,4],0,((Sh Shl 16)-Yoff[I]) Div Oh);
+ End;
+ Alpha:=V1Clip3(V1SprC[1,6],0,65535);
+ SrCache[0,0]:=-1; SrCache[0,1]:=-1; SrCache[1,0]:=-1; SrCache[1,1]:=-1;
+ For I:=0 To 1 Do Begin SrIdx[I,0]:=I*2; SrIdx[I,1]:=I*2+1; Ysub[I]:=0; End;
+ For Plane:=0 To 2 Do Begin
+  If Plane>0 Then Pl1:=1 Else Pl1:=0;
+  Width:=Ow Shr Pl1; Rows:=Oh Shr Pl1;
+  For Row:=0 To Rows-1 Do Begin
+   If Plane=0 Then Dst:=Row*Ow Else If Plane=1 Then Dst:=Ow*Oh+Row*CW Else Dst:=Ow*Oh+CW*CH+Row*CW;
+   For Sp:=0 To V1TwoSprites Do Begin
+    If Sp=0 Then Pic:=V1CopyCur Else Pic:=V1CopyLast;
+    If Plane=0 Then Begin IPl:=V1Pic[Pic].Y; Iline:=V1FLinesize; End
+    Else If Plane=1 Then Begin IPl:=V1Pic[Pic].U; Iline:=V1FUvlinesize; End
+    Else Begin IPl:=V1Pic[Pic].V; Iline:=V1FUvlinesize; End;
+    Ycoord:=Yoff[Sp]+Yadv[Sp]*Row;
+    Yline:=Ycoord Shr 16;
+    Ysub[Sp]:=Ycoord And $FFFF;
+    T:=Yline+1; If T>(Sh Shr Pl1)-1 Then T:=(Sh Shr Pl1)-1;
+    NextLine:=T*Iline;
+    If ((Xoff[Sp] And $FFFF)=0) And (Xadv[Sp]=65536) Then Begin
+     SB[Sp,0]:=IPl; SO[Sp,0]:=(Xoff[Sp] Shr 16)+Yline*Iline;
+     If Ysub[Sp]<>0 Then Begin SB[Sp,1]:=IPl; SO[Sp,1]:=(Xoff[Sp] Shr 16)+NextLine; End;
+    End Else Begin
+     If SrCache[Sp,0]<>Yline Then Begin
+      If SrCache[Sp,1]=Yline Then Begin
+       T:=SrIdx[Sp,0]; SrIdx[Sp,0]:=SrIdx[Sp,1]; SrIdx[Sp,1]:=T;
+       T:=SrCache[Sp,0]; SrCache[Sp,0]:=SrCache[Sp,1]; SrCache[Sp,1]:=T;
+      End Else Begin
+       V1SprRowH(V1SrRows[SrIdx[Sp,0]],IPl,Yline*Iline,Xoff[Sp],Xadv[Sp],Width,Sw Shr Pl1);
+       SrCache[Sp,0]:=Yline;
+      End;
+     End;
+     If (Ysub[Sp]<>0) And (SrCache[Sp,1]<>Yline+1) Then Begin
+      V1SprRowH(V1SrRows[SrIdx[Sp,1]],IPl,NextLine,Xoff[Sp],Xadv[Sp],Width,Sw Shr Pl1);
+      SrCache[Sp,1]:=Yline+1;
+     End;
+     SB[Sp,0]:=V1SrRows[SrIdx[Sp,0]]; SO[Sp,0]:=0;
+     SB[Sp,1]:=V1SrRows[SrIdx[Sp,1]]; SO[Sp,1]:=0;
+    End;
+   End;
+   If V1TwoSprites=0 Then Begin
+    If Ysub[0]<>0 Then V1SprV(V1SprOut,Dst,SB[0,0],SO[0,0],SB[0,1],SO[0,1],Ysub[0],False,Nil,0,Nil,0,0,0,1,Width)
+    Else Move(SB[0,0]^[SO[0,0]],V1SprOut^[Dst],Width);
+   End Else Begin
+    If (Ysub[0]<>0) And (Ysub[1]<>0) Then
+     V1SprV(V1SprOut,Dst,SB[0,0],SO[0,0],SB[0,1],SO[0,1],Ysub[0],True,SB[1,0],SO[1,0],SB[1,1],SO[1,1],Ysub[1],Alpha,2,Width)
+    Else If Ysub[0]<>0 Then
+     V1SprV(V1SprOut,Dst,SB[0,0],SO[0,0],SB[0,1],SO[0,1],Ysub[0],True,SB[1,0],SO[1,0],Nil,0,0,Alpha,1,Width)
+    Else If Ysub[1]<>0 Then
+     V1SprV(V1SprOut,Dst,SB[1,0],SO[1,0],SB[1,1],SO[1,1],Ysub[1],True,SB[0,0],SO[0,0],Nil,0,0,65535-Alpha,1,Width)
+    Else
+     V1SprV(V1SprOut,Dst,SB[0,0],SO[0,0],Nil,0,0,True,SB[1,0],SO[1,0],Nil,0,0,Alpha,0,Width);
+   End;
+  End;
+  If Plane=0 Then For I:=0 To V1TwoSprites Do Begin Xoff[I]:=Xoff[I] Shr 1; Yoff[I]:=Yoff[I] Shr 1; End;
+ End;
+End;
+
+{ image : analyse des parametres puis composition ; sortie directe de l'image de sprite }
+Procedure V1SpriteImage;
+Var CW,CH,Size,I: LongInt;
+Begin
+ {$IFDEF V1PTS}WriteLn(StdErr,'SPRPOS ',V1PktNo,' ',H3Pos);{$ENDIF}
+ If Not V1SprParse Then Begin Inc(V1FrameErrors); Exit; End;
+ {$IFDEF V1PTS}WriteLn(StdErr,'SPR two=',V1TwoSprites,' c0=',V1SprC[0,0],',',V1SprC[0,2],',',V1SprC[0,4],',',V1SprC[0,5],',',V1SprC[0,6],' c1=',V1SprC[1,0],',',V1SprC[1,2],',',V1SprC[1,4],',',V1SprC[1,5],',',V1SprC[1,6],' sprW=',V1SprW,' sprH=',V1SprH,' out=',V1OutW,'x',V1OutH);{$ENDIF}
+ If V1CopyCur<0 Then Begin Inc(V1FrameErrors); Exit; End;
+ If (V1TwoSprites<>0) And (V1CopyLast<0) Then V1TwoSprites:=0;
+ CW:=(V1OutW+1) Div 2; CH:=(V1OutH+1) Div 2;
+ Size:=V1OutW*V1OutH+2*CW*CH;
+ If V1SrRows[0]=Nil Then For I:=0 To 3 Do Begin GetMem(V1SrRows[I],V1OutW+64); FillChar(V1SrRows[I]^,V1OutW+64,0); End;
+ If V1OutBuf=Nil Then GetMem(V1OutBuf,Size+64);
+ V1OutSize:=Size;
+ FillChar(V1OutBuf^,Size,0);
+ V1SprOut:=V1OutBuf;
+ V1SprDraw;
+ If Not V1OutBegun Then V1BeginOut;
+ If V1PtsKnown Then V1OutTail(V1PktNo) Else V1OutTail(V1NoPts);
+End;
+
 { une image (paquet) }
 Procedure V1DecodePacket(Pk: PEABuffer; Len: LongInt);
+Label Done;
 Var
  I,Ret,MbHeight,Start,Nxt,Size,Sz2,N1,HeaderRet,Mby,Bm: LongInt; Code: Int64;
  Cp: PEABuffer; Tmp: PEABuffer; Skip,Dummy: Boolean; PB: PV1B;
@@ -63201,7 +64426,12 @@ Begin
   V1SetBits(V1Buf2,V1Buf2Len,0);
  End Else V1SetBits(Cp,Len,0);
  If V1ResSprite<>0 Then Begin
-  Fail('vc1: sprites WMV9 non pris en charge.');
+  If H3Bit=0 Then V1NewSprite:=1 Else V1NewSprite:=0;
+  V1TwoSprites:=H3Bit;
+  If V1Image And (V1NewSprite=0) Then Begin
+   V1SpriteImage;
+   Goto Done;
+  End;
  End;
  V1PicHeaderFlag:=0; V1FirstPicHeaderFlag:=1;
  If V1Profile<3 Then Ret:=V1FrameHeader Else Ret:=V1FrameHeaderAdv;
@@ -63212,29 +64442,38 @@ Begin
  If Not Skip Then Begin
   If (V1Mbh Shr V1FieldMode)=0 Then Skip:=True;
   If (V1LastI<0) And (V1PictType=2) Then Skip:=True;
+  If V1Image And ((V1PictType<>0) Or (V1FieldMode<>0)) Then Begin Skip:=True; Inc(V1FrameErrors); End;
  End;
  If Not Skip Then Begin
   { debut d'image }
-  V1CurI:=V1NewPic(V1LastI,V1NextI);
+  { ff_mpv_frame_start : pour I/P l'ancienne image 'last' est liberee avant le choix de la premiere place libre }
+  { liberation des anciennes images (ff_mpv_frame_start) puis nouveau tampon du pool }
+  If (V1PictType<>2) And (V1LastI>=0) And (V1LastI<>V1NextI) Then V1RelSlot(V1LastI);
+  For I:=0 To V1PicN-1 Do If (I<>V1LastI) And (I<>V1NextI) Then V1RelSlot(I);
+  If V1PictType<>2 Then V1CurI:=V1NewPic(-1,V1NextI) Else V1CurI:=V1NewPic(V1LastI,V1NextI);
+  V1RelSlot(V1CurI);
+  V1SlotBuf(V1CurI);
+  V1TabsFor(V1CurI);
   If V1PictType<>2 Then Begin
    V1LastI:=V1NextI; V1NextI:=V1CurI;
   End;
-  V1PicPts[V1CurI]:=V1PktNo;
+  If V1PtsKnown Then V1PicPts[V1CurI]:=V1PktNo Else V1PicPts[V1CurI]:=V1NoPts;
   V1Pic[V1CurI].Interlaced:=V1Fcm<>0; V1Pic[V1CurI].FieldPic:=V1FieldMode<>0; V1Pic[V1CurI].Tff:=V1Tff<>0;
   V1Pic[V1CurI].PType:=V1PictType;
   If (V1LastI<0) And (V1PictType<>0) Then Begin
    Dummy:=True;
    V1LastI:=V1NewPic(V1CurI,V1NextI);
-   V1PicPts[V1LastI]:=V1PktNo;
-   FillChar(V1Pic[V1LastI].Y^,V1FLinesize*((V1Mbh+1) And Not 1)*16,0);
-   FillChar(V1Pic[V1LastI].U^,V1FUvlinesize*((V1Mbh+1) And Not 1)*8,0);
-   FillChar(V1Pic[V1LastI].V^,V1FUvlinesize*((V1Mbh+1) And Not 1)*8,0);
+   V1TabsFor(V1LastI);
+   V1RelSlot(V1LastI); V1SlotBuf(V1LastI);
+   If V1PtsKnown Then V1PicPts[V1LastI]:=V1PktNo Else V1PicPts[V1LastI]:=V1NoPts;
    For I:=0 To V1OutH-1 Do FillChar(V1Pic[V1LastI].Y^[I*V1FLinesize],V1OutW,$80);
    For I:=0 To (V1OutH+1) Div 2-1 Do Begin
     FillChar(V1Pic[V1LastI].U^[I*V1FUvlinesize],(V1OutW+1) Div 2,$80);
     FillChar(V1Pic[V1LastI].V^[I*V1FUvlinesize],(V1OutW+1) Div 2,$80);
    End;
   End;
+  V1CopyCur:=V1CurI; V1CopyLast:=V1LastI; V1CopyNext:=V1NextI;
+  V1ErFrameStart;
   V1EndMbX:=V1Mbw;
   V1Linesize:=V1FLinesize; V1Uvlinesize:=V1FUvlinesize;
   If V1FieldMode<>0 Then Begin V1Linesize:=V1FLinesize*2; V1Uvlinesize:=V1FUvlinesize*2; End;
@@ -63296,10 +64535,18 @@ Begin
     PB:=V1MvF[1]; V1MvF[1]:=V1MvFNext[1]; V1MvFNext[1]:=PB;
    End;
   End;
+  { dissimulation d'erreurs : une image B abimee est abandonnee, les autres sont reconstruites }
+  If V1ErOcc And (V1PictType=2) Then Begin
+   Inc(V1FrameErrors);
+  End Else Begin
+  If (V1PictType<>2) And (V1FieldMode=0) Then V1ErFrameEnd;
   { sortie }
-  If (V1PictType=2) Or V1LowDelay Then V1Output(V1CurI)
+  If V1Image Then V1SpriteImage
+  Else If (V1PictType=2) Or V1LowDelay Then V1Output(V1CurI)
   Else If V1LastI>=0 Then V1Output(V1LastI);
+  End;
  End;
+Done:
  If V1Buf2<>Nil Then FreeMem(V1Buf2);
  V1FreeSegs;
  FreeMem(Cp);
@@ -63313,6 +64560,7 @@ Begin
  V1QuarterSample:=0; V1Mspel:=0; V1HasFpsExt:=0; V1ExtendedMv:=0; V1ExtendedDmv:=0;
  FillChar(V1LutY,SizeOf(V1LutY),0); FillChar(V1LutUV,SizeOf(V1LutUV),0);
  FillChar(V1UseIc,SizeOf(V1UseIc),0);
+ V1Image:=False; V1SprW:=0; V1SprH:=0; V1NewSprite:=0; V1TwoSprites:=0; V1AsfMode:=False; V1AsfAvi:=False; V1AsfDur:=1; V1AsfEst:=0; V1AsfCodecDur:=0; V1AsfSarN:=0; V1AsfSarD:=0; V1PtsKnown:=False; V1LastFramePts:=V1NoPts; V1PpState:=0; V1PpIdx:=0; V1PpPrev:=0; V1PpSkip:=0; V1PpType:=0; V1PpMaxB:=0; FillChar(V1PpBuf,SizeOf(V1PpBuf),0);
  V1FaultyPts:=0; V1FaultyDts:=0; V1LastPts:=V1NoPts; V1LastDts:=V1NoPts; V1SyncOpts:=0; V1FrameNo:=0;
  FillChar(V1LastNb0,SizeOf(V1LastNb0),0); V1HaveLastBuf:=False; V1LastBuf:=Nil; V1PktNo:=0; V1EmitDts:=0;
 End;
@@ -63347,8 +64595,38 @@ Begin
   If (Seq=0) Or (Ent=0) Then Fail('vc1: donnees supplementaires incompletes.');
 End;
 
+{ initialisation commune d'un flux WMV3/WVC1/WMVP/WVP2 : Fcc = fourcc (little endian), Ex = donnees supplementaires,
+  ContW/ContH = dimensions du conteneur }
+Procedure V1StreamInit(Fcc: LongInt; Ex: PEABuffer; ExLen,ContW,ContH: LongInt);
+Begin
+ V1IsWmv3:=(Fcc=$33564D57) Or (Fcc=$50564D57);
+ V1Image:=(Fcc=$50564D57) Or (Fcc=$32505657);
+ V1CodedW:=ContW; V1CodedH:=ContH; V1Width:=ContW; V1Height:=ContH;
+ V1MaxBFrames:=0;
+ If V1IsWmv3 Then Begin
+  H3Buf:=Ex; H3Size:=ExLen; H3Pos:=0;
+  If V1SeqHeader<0 Then Fail('vc1: en-tete de sequence invalide.');
+  If V1Profile=3 Then Fail('vc1: profil avance dans un flux WMV3.');
+  If V1Image And (V1ResSprite=0) Then Fail('vc1: WMV3IMAGE sans sprite non pris en charge.');
+  If V1ResSprite<>0 Then Begin
+   If (V1SprW<1) Or (V1SprH<1) Then Fail('vc1: dimensions de sprite invalides.');
+   V1CodedW:=V1SprW; V1CodedH:=V1SprH; V1Width:=V1SprW; V1Height:=V1SprH;
+  End;
+ End Else Begin
+  V1InitAdvExtra(Ex,ExLen);
+  If V1Profile<>3 Then Fail('vc1: profil avance attendu.');
+  V1MaxBFrames:=7;
+  If V1Image Then V1ResSprite:=1;
+ End;
+ If V1Image Then Begin
+  V1SprW:=V1CodedW; V1SprH:=V1CodedH;
+  If Odd(V1SprW) Or Odd(V1SprH) Then Fail('vc1: sprites de taille impaire non pris en charge.');
+  If (ContW>16384) Or (ContH>16384) Or (V1SprW>16384) Or (V1SprH>16384) Then Fail('vc1: dimensions de sprite excessives.');
+ End;
+End;
+
 Procedure DecodeVC1(Const Source,Target: String; Mode: LongInt);
-Var I,Sz: LongInt; Pk,Ex: PEABuffer; Fc: String[4];
+Var I,Sz,R1N,R1D,R2N,R2D,FccV: LongInt; Pk,Ex: PEABuffer; Fc: String[4]; AD,AU: PTLArr; AS: PGFArr; CN,CD: Int64; Unrel: Boolean;
 Begin
  QXOpen(Source);
  Fc:=QXFcc; For I:=1 To Length(Fc) Do Fc[I]:=UpCase(Fc[I]);
@@ -63356,32 +64634,40 @@ Begin
  V1InitTables;
  V1ResetState;
  V1Mode:=Mode; V1Target:=Target; V1RateN:=QXRn; V1RateD:=QXRd;
- V1IsWmv3:=(Fc='WMV3');
  If QXExtLen<=0 Then Fail('vc1: donnees supplementaires (en-tete de sequence) absentes.');
  GetMem(Ex,QXExtLen+4096); FillChar(Ex^,QXExtLen+4096,0);
  Move(QXF^[QXExtPos],Ex^,QXExtLen);
- V1CodedW:=QXW; V1CodedH:=QXH; V1Width:=QXW; V1Height:=QXH;
- V1MaxBFrames:=0;
- If V1IsWmv3 Then Begin
-  H3Buf:=Ex; H3Size:=QXExtLen; H3Pos:=0;
-  If V1SeqHeader<0 Then Fail('vc1: en-tete de sequence invalide.');
-  If V1Profile=3 Then Fail('vc1: profil avance dans un flux WMV3.');
-  If V1ResSprite<>0 Then Fail('vc1: sprites WMV9 non pris en charge.');
-  If V1ResFastTx=0 Then Fail('vc1: res_fasttx=0 non pris en charge.');
- End Else Begin
-  V1InitAdvExtra(Ex,QXExtLen);
-  If V1Profile<>3 Then Fail('vc1: profil avance attendu.');
-  V1MaxBFrames:=7;
- End;
+ If Fc='WMV3' Then FccV:=$33564D57 Else If Fc='WMVP' Then FccV:=$50564D57 Else If Fc='WVP2' Then FccV:=$32505657 Else FccV:=$31435657;
+ V1StreamInit(FccV,Ex,QXExtLen,QXW,QXH);
  FreeMem(Ex);
- V1LowDelay:=(V1MaxBFrames=0);
+ V1LowDelay:=(V1MaxBFrames=0) Or (V1ResSprite<>0);
  V1SetupScans;
  V1OutW:=V1CodedW; V1OutH:=V1CodedH;
+ If V1Image Then Begin V1OutW:=QXW; V1OutH:=QXH; End;
+ { cadence de sortie (av_guess_frame_rate) : la cadence de l'en-tete de sequence VC-1 peut l'emporter sur celle de l'AVI }
+ If (Not V1IsWmv3) And (V1HasFpsExt<>0) And (V1FpsN>0) And (V1FpsD>0) And (QXRn>0) And (QXRd>0) Then Begin
+  GetMem(AD,(QXCount+1)*8); GetMem(AU,(QXCount+1)*8); GetMem(AS,(QXCount+1)*4);
+  For I:=0 To QXCount-1 Do Begin AD^[I]:=I; AU^[I]:=1; AS^[I]:=QXLen^[I]; End;
+  CN:=2*Int64(V1FpsN); CD:=V1FpsD;
+  Unrel:=(CN>=101*CD) Or (CN<5*CD);
+  TLRFrameRate(AD,AU,AS,QXCount,QXRd,QXRn,Unrel,QXRn,QXRd,CN,CD,R1N,R1D);
+  H4GuessRate(R1N,R1D,QXRn,QXRd,V1FpsN,V1FpsD,R2N,R2D);
+  FreeMem(AD); FreeMem(AU); FreeMem(AS);
+  If Int64(R2N)*QXRd<>Int64(R2D)*QXRn Then Begin
+   V1AsfMode:=True; V1AsfAvi:=True; V1AsfDur:=1; V1AsfEst:=1; V1AsfCodecDur:=0;
+   V1RateN:=R2N; V1RateD:=R2D;
+   CFTbN:=QXRd; CFTbD:=QXRn; CFFn:=R2N; CFFd:=R2D; CFNext:=0; CFFrameNo:=0; CFHist[0]:=0; CFHist[1]:=0; CFHist[2]:=0; CFLastDropped:=False; CFVscfr:=True;
+  End;
+ End;
  For I:=0 To QXCount-1 Do Begin
   Sz:=QXLen^[I];
   If Sz>0 Then Begin
    GetMem(Pk,Sz+64); Move(QXF^[QXPos^[I]],Pk^,Sz);
    V1PktNo:=I; V1EmitDts:=I;
+   { horodatage des paquets comme libavformat (compute_pkt_fields) : pas de pts si le decodeur a un retard
+     (has_b_frames) et que le paquet n'est pas vu comme image B par le parseur (WMV3 : pas de parseur) }
+   If V1IsWmv3 Or V1Image Then V1PtsKnown:=(V1MaxBFrames=0)
+   Else Begin V1PpMaxB:=7; V1PpFeed(Pk,Sz); V1PtsKnown:=(V1PpType=2); End;
    V1DecodePacket(Pk,Sz);
    FreeMem(Pk);
   End;
@@ -63389,8 +64675,202 @@ Begin
  End;
  V1EmitDts:=V1NoPts; V1NPkts:=QXCount;
  V1DecodePacket(Nil,0);
- V1Cfr(Nil,0);
+ If V1AsfMode Then Begin If V1OutBegun And Not NVDone And V1HaveLastBuf Then CFFlush(V1LastBuf); End Else V1Cfr(Nil,0);
  QXClose;
+ If Not V1OutBegun Then Fail('vc1: aucune image decodee.');
+ If V1Bad>0 Then WriteLn(StdErr,'vc1: ',V1Bad,' macroblocs non decodables.');
+ If V1FrameErrors>0 Then WriteLn(StdErr,'vc1: ',V1FrameErrors,' erreurs de decodage.');
+ NVFinish('vc1');
+End;
+
+
+{ ---- WMV3 / VC-1 dans un conteneur ASF (via le spool de DemuxASF) ---- }
+Var V1AsfF: PEABuffer; V1AsfSize: LongInt;
+Function V1AsfRd(P: LongInt): LongInt;
+Begin
+ If (P<0) Or (P+4>V1AsfSize) Then Begin V1AsfRd:=0; Exit; End;
+ V1AsfRd:=V1AsfF^[P]+V1AsfF^[P+1]*256+V1AsfF^[P+2]*65536+V1AsfF^[P+3]*16777216;
+End;
+
+{ analyse du spool : renvoie la position de l'en-tete du premier flux video WMV3/WVC1 (-1 sinon) }
+Function V1AsfFind(Var Id,Fcc,W,H,ExPos,ExLen,ObjPos: LongInt): Boolean;
+Var N,I,P,K,Ex: LongInt; Found: Boolean;
+Begin
+ V1AsfFind:=False; Found:=False;
+ If V1AsfSize<12 Then Exit;
+ If (V1AsfF^[0]<>65) Or (V1AsfF^[1]<>83) Or (V1AsfF^[2]<>70) Or (V1AsfF^[3]<>80) Then Exit;
+ N:=V1AsfRd(8); P:=12;
+ For I:=1 To N Do Begin
+  If P+40>V1AsfSize Then Exit;
+  K:=V1AsfRd(P+4); Ex:=V1AsfRd(P+36);
+  If (K=1) And Not Found And ((V1AsfRd(P+8)=$33564D57) Or (V1AsfRd(P+8)=$31435657) Or (V1AsfRd(P+8)=$50564D57) Or (V1AsfRd(P+8)=$32505657)) Then Begin
+   Found:=True; Id:=V1AsfRd(P); Fcc:=V1AsfRd(P+8); W:=V1AsfRd(P+12); H:=V1AsfRd(P+16); ExPos:=P+40; ExLen:=Ex;
+  End;
+  Inc(P,40+Ex);
+ End;
+ ObjPos:=P;
+ V1AsfFind:=Found;
+End;
+
+Function V1AsfKind(Const Name: String): LongInt;
+Var Tmp: String; Id,Fcc,W,H,ExPos,ExLen,ObjPos: LongInt;
+Begin
+ V1AsfKind:=0;
+ Tmp:=NewTemporary; DemuxASF(Name,Tmp);
+ NVLoad(Tmp,V1AsfF,V1AsfSize);
+ If V1AsfFind(Id,Fcc,W,H,ExPos,ExLen,ObjPos) Then V1AsfKind:=153;
+ FreeMem(V1AsfF); V1AsfF:=Nil;
+End;
+
+{ AspectRatioX/Y des en-tetes ASF (objets Extended Content Description, Metadata, Metadata Library) }
+Procedure V1AsfSarScan(Const Name: String; StreamId: LongInt; Var SN,SD: LongInt);
+Var F: PEABuffer; Size,P,Sz,N,I,Cnt,Strm,NameLen,VType,VLen,K,Q,Typ: LongInt; Kind: Integer;
+ Dn,Dd: Array[0..127] Of Int64; Nm: String[16]; V: Int64; Ok: Boolean;
+ Function Rd(Pos,Cn: LongInt): Int64;
+ Var J: LongInt; R: Int64;
+ Begin
+  R:=0;
+  For J:=Cn-1 Downto 0 Do If (Pos+J>=0) And (Pos+J<Size) Then R:=R*256+F^[Pos+J] Else R:=R*256;
+  Rd:=R;
+ End;
+ Function Val(Pos,T,B2: LongInt): Int64;
+ Begin
+  Case T Of
+   2: If B2=32 Then Val:=Rd(Pos,4) Else Val:=Rd(Pos,2);
+   3: Val:=Rd(Pos,4);
+   4: Val:=Rd(Pos,8);
+   5: Val:=Rd(Pos,2);
+   Else Val:=-2147483648;
+  End;
+ End;
+ Function NameAt(Pos,Len: LongInt): String;
+ Var J: LongInt; T: String;
+ Begin
+  T:='';
+  For J:=0 To (Len Div 2)-1 Do If (J<16) Then Begin
+   If Rd(Pos+2*J,2)=0 Then Break;
+   T:=T+Chr(Rd(Pos+2*J,1));
+  End;
+  NameAt:=T;
+ End;
+Begin
+ SN:=0; SD:=0;
+ NVLoad(Name,F,Size);
+ FillChar(Dn,SizeOf(Dn),0); FillChar(Dd,SizeOf(Dd),0);
+ P:=30;
+ While P+24<=Size Do Begin
+  Sz:=Rd(P+16,4); If (Rd(P+20,4)<>0) Or (Sz<24) Then Break;
+  Kind:=0;
+  If (F^[P]=$B5) And (F^[P+1]=$03) And (F^[P+2]=$BF) And (F^[P+3]=$5F) Then Begin Inc(P,24+22); Continue; End;
+  If (F^[P]=$40) And (F^[P+1]=$A4) And (F^[P+2]=$D0) And (F^[P+3]=$D2) Then Kind:=1
+  Else If ((F^[P]=$EA) And (F^[P+1]=$CB) And (F^[P+2]=$F8) And (F^[P+3]=$C5)) Or ((F^[P]=$94) And (F^[P+1]=$1C) And (F^[P+2]=$23) And (F^[P+3]=$44)) Then Kind:=2;
+  If Kind=1 Then Begin
+   Cnt:=Rd(P+24,2); Q:=P+26;
+   For I:=1 To Cnt Do Begin
+    If Q+2>Size Then Break;
+    NameLen:=Rd(Q,2); If Odd(NameLen) Then Inc(NameLen);
+    Nm:=NameAt(Q+2,NameLen); Inc(Q,2+NameLen);
+    VType:=Rd(Q,2); VLen:=Rd(Q+2,2); Inc(Q,4);
+    If Nm='AspectRatioX' Then Dn[0]:=Val(Q,VType,32) Else If Nm='AspectRatioY' Then Dd[0]:=Val(Q,VType,32);
+    Inc(Q,VLen);
+   End;
+  End Else If Kind=2 Then Begin
+   Cnt:=Rd(P+24,2); Q:=P+26;
+   For I:=1 To Cnt Do Begin
+    If Q+12>Size Then Break;
+    Strm:=Rd(Q+2,2); NameLen:=Rd(Q+4,2); VType:=Rd(Q+6,2); VLen:=Rd(Q+8,4); Inc(Q,12);
+    Nm:=NameAt(Q,NameLen); Inc(Q,NameLen);
+    If Strm<128 Then Begin
+     If Nm='AspectRatioX' Then Dn[Strm]:=Val(Q,VType,16) Else If Nm='AspectRatioY' Then Dd[Strm]:=Val(Q,VType,16);
+    End;
+    Inc(Q,VLen);
+   End;
+  End;
+  Inc(P,Sz);
+ End;
+ FreeMem(F);
+ If (StreamId>=0) And (StreamId<128) And (Dn[StreamId]>0) And (Dd[StreamId]>0) Then Begin SN:=Dn[StreamId]; SD:=Dd[StreamId]; End
+ Else If (Dn[0]>0) And (Dd[0]>0) Then Begin SN:=Dn[0]; SD:=Dd[0]; End;
+ If (SN>0) And (SD>0) Then Begin
+  K:=SN; Q:=SD; While Q<>0 Do Begin I:=K Mod Q; K:=Q; Q:=I; End;
+  SN:=SN Div K; SD:=SD Div K;
+ End;
+End;
+
+Procedure DecodeVC1Asf(Const Source,Target: String; Mode: LongInt);
+Var
+ Tmp: String; Id,Fcc,W,H,ExPos,ExLen,ObjPos,P,Sz,SId,Cnt,I,K,RN,RD: LongInt; Ex,Pk: PEABuffer;
+ Dts,Dur: PTLArr; Szs: PGFArr; Pos0,Lens: PALLong; Dts0,CN,CD: Int64; Wmv3,Unrel: Boolean;
+Begin
+ Tmp:=NewTemporary; DemuxASF(Source,Tmp);
+ NVLoad(Tmp,V1AsfF,V1AsfSize);
+ If Not V1AsfFind(Id,Fcc,W,H,ExPos,ExLen,ObjPos) Then Fail('vc1: pas de flux WMV3/WVC1 dans le fichier ASF.');
+ If (W<1) Or (H<1) Or (W>4096) Or (H>4096) Then Fail('vc1: dimensions invalides.');
+ If ExLen<=0 Then Fail('vc1: donnees supplementaires (en-tete de sequence) absentes.');
+ { liste des objets du flux }
+ Cnt:=0; P:=ObjPos;
+ While P+16<=V1AsfSize Do Begin
+  SId:=V1AsfRd(P); If SId=0 Then Break;
+  Sz:=V1AsfRd(P+12);
+  If (Sz<0) Or (P+16+Sz>V1AsfSize) Then Break;
+  If SId=Id Then Inc(Cnt);
+  Inc(P,16+Sz);
+ End;
+ If Cnt=0 Then Fail('vc1: aucune image dans le fichier ASF.');
+ GetMem(Pos0,Cnt*4+8); GetMem(Lens,Cnt*4+8); GetMem(Dts,Cnt*8+8); GetMem(Dur,Cnt*8+8); GetMem(Szs,Cnt*4+8);
+ K:=0; P:=ObjPos;
+ While (P+16<=V1AsfSize) And (K<Cnt) Do Begin
+  SId:=V1AsfRd(P); If SId=0 Then Break;
+  Sz:=V1AsfRd(P+12);
+  If SId=Id Then Begin
+   Pos0^[K]:=P+16; Lens^[K]:=Sz; Dts^[K]:=V1AsfRd(P+8); Dur^[K]:=0; Szs^[K]:=Sz; Inc(K);
+  End;
+  Inc(P,16+Sz);
+ End;
+ Dts0:=Dts^[0];
+ V1InitTables;
+ V1ResetState;
+ V1Mode:=Mode; V1Target:=Target;
+ Wmv3:=(Fcc=$33564D57) Or (Fcc=$50564D57);
+ GetMem(Ex,ExLen+4096); FillChar(Ex^,ExLen+4096,0);
+ Move(V1AsfF^[ExPos],Ex^,ExLen);
+ V1StreamInit(Fcc,Ex,ExLen,W,H);
+ FreeMem(Ex);
+ { cadence : r_frame_rate estime sur les dts (base 1/1000) ; le cadre du codec (VC-1 : champs, x2) sert de repli }
+ CN:=0; CD:=0;
+ If (Not Wmv3) And (V1HasFpsExt<>0) And (V1FpsN>0) And (V1FpsD>0) Then Begin CN:=2*Int64(V1FpsN); CD:=V1FpsD; End;
+ Unrel:=True;
+ If CN>0 Then Unrel:=(CN>=101*CD) Or (CN<5*CD); { tb_unreliable }
+ TLRFrameRate(Dts,Dur,Szs,Cnt,1,1000,Unrel,0,0,CN,CD,RN,RD);
+ NVGcd(RN,RD);
+ {$IFDEF V1PTS}WriteLn(StdErr,'rate ',RN,'/',RD,' codec ',CN,'/',CD);{$ENDIF}
+ V1RateN:=RN; V1RateD:=RD;
+ V1LowDelay:=(V1MaxBFrames=0) Or (V1ResSprite<>0);
+ V1SetupScans;
+ V1OutW:=V1CodedW; V1OutH:=V1CodedH;
+ If V1Image Then Begin V1OutW:=W; V1OutH:=H; End;
+ V1AsfMode:=True;
+ V1AsfSarScan(Source,Id,V1AsfSarN,V1AsfSarD);
+ V1AsfDur:=(1000*Int64(RD)+RN Div 2) Div RN; If V1AsfDur<1 Then V1AsfDur:=1;
+ V1AsfCodecDur:=0;
+ If CN>0 Then V1AsfCodecDur:=(1000*CD+CN Div 2) Div CN;
+ CFTbN:=1; CFTbD:=1000; CFFn:=RN; CFFd:=RD; CFNext:=0; CFFrameNo:=0; CFHist[0]:=0; CFHist[1]:=0; CFHist[2]:=0; CFLastDropped:=False; CFVscfr:=(V1AsfRd(8)=1);
+ For I:=0 To Cnt-1 Do Begin
+  Sz:=Lens^[I];
+  If Sz>0 Then Begin
+   GetMem(Pk,Sz+64); Move(V1AsfF^[Pos0^[I]],Pk^,Sz);
+   V1PktNo:=Dts^[I]-Dts0; V1EmitDts:=V1PktNo;
+   { pas de parseur pour ASF : horodatage pts=dts sans retard du decodeur, sinon pas de pts }
+   V1PtsKnown:=(V1MaxBFrames=0);
+   V1DecodePacket(Pk,Sz);
+   FreeMem(Pk);
+  End;
+  If NVDone Then Break;
+ End;
+ V1EmitDts:=V1NoPts;
+ V1DecodePacket(Nil,0);
+ If V1OutBegun And Not NVDone And V1HaveLastBuf Then CFFlush(V1LastBuf);
+ FreeMem(V1AsfF); V1AsfF:=Nil;
  If Not V1OutBegun Then Fail('vc1: aucune image decodee.');
  If V1Bad>0 Then WriteLn(StdErr,'vc1: ',V1Bad,' macroblocs non decodables.');
  If V1FrameErrors>0 Then WriteLn(StdErr,'vc1: ',V1FrameErrors,' erreurs de decodage.');
@@ -120632,7 +122112,7 @@ BEGIN
   { LIST-ANCHOR-G4B }
   WriteLn('DEV    wmv1            Windows Media Video 7 (decodeur AVI exact; encodeur Y4M->AVI octet par octet: debit, -b:v, -g, -q:v)');
   WriteLn('DEV    wmv2            Windows Media Video 8 (decodeur AVI exact, images J IntraX8 comprises; encodeur Y4M->AVI octet par octet: debit, -b:v, -g, -q:v)');
-  WriteLn('D V    wmv3            Windows Media Video 9 / VC-1 profils simple et main (decodeur AVI, IntraX8 res_x8 compris; pas d''encodeur)');
+  WriteLn('D V    wmv3            Windows Media Video 9 / VC-1 profils simple et main (decodeur AVI/ASF, IntraX8 res_x8 compris; pas d''encodeur)');
   WriteLn('D V    vc1             SMPTE VC-1 profil avance (decodeur AVI; pas d''encodeur)');
   { LIST-ANCHOR-G5 }
   WriteLn('DEV    snow            Snow (AVI SNOW; decodeur exact, encodeur I/P)');
@@ -120640,6 +122120,8 @@ BEGIN
   WriteLn('DEV D  svq1            Sorenson Vector Quantizer 1 / Sorenson Video 1 / SVQ1 (encodeur Y4M -> MOV/AVI, yuv410p, EPZS)');
   WriteLn('D VSD  svq3            Sorenson Vector Quantizer 3 / Sorenson Video 3 / SVQ3');
   { LIST-ANCHOR-H1 }
+  WriteLn('D V    wmv3image       Windows Media Video 9 Image (sprites, decodeur AVI/ASF)');
+  WriteLn('D V    vc1image        Windows Media Video 9 Image v2 (sprites, decodeur AVI/ASF)');
   { LIST-ANCHOR-H2 }
   { LIST-ANCHOR-H3 }
   { LIST-ANCHOR-H4 }
@@ -121000,6 +122482,7 @@ BEGIN
  Else If InputFormat='bethsoftvid' Then NVKind:=1 Else If InputFormat='bfi' Then NVKind:=2 Else If InputFormat='c93' Then NVKind:=3
  Else If InputFormat='bmp' Then NVKind:=4 Else If (InputFormat='pam') Or (InputFormat='pbm') Or (InputFormat='pgm') Or (InputFormat='ppm') Or (InputFormat='pgmyuv') Then NVKind:=50 Else If InputFormat='nuv' Then NVKind:=54 Else If InputFormat='pcx' Then NVKind:=55 Else If InputFormat='sunrast' Then NVKind:=1100 Else If InputFormat='targa' Then NVKind:=1101 Else If InputFormat='tiff' Then NVKind:=1102 Else If InputFormat='txd' Then NVKind:=1103 Else If InputFormat='png' Then NVKind:=58 Else If InputFormat='roq' Then NVKind:=65 Else If InputFormat='rl2' Then NVKind:=66 Else If (InputFormat='ogg') And Not IsHTTP(InputPath) And VP3OggIsTheora(Intermediate) Then NVKind:=170 Else If InputFormat='smk' Then NVKind:=67 Else If (InputFormat='rm') And Not IsHTTP(InputPath) And (RMVideoKind(InputPath)<>0) Then NVKind:=68 Else If InputFormat='sgi' Then NVKind:=56 Else If InputFormat='ptx' Then NVKind:=57 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22 Else If (InputFormat='flic') And Not IsHTTP(InputPath) Then NVKind:=23 Else If (InputFormat='gif') And Not IsHTTP(InputPath) Then NVKind:=25 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=2) Then NVKind:=27 Else If (InputFormat='h263') And Not IsHTTP(InputPath) Then NVKind:=28 Else If (InputFormat='h261') And Not IsHTTP(InputPath) Then NVKind:=29 Else If (InputFormat='idcin') And Not IsHTTP(InputPath) Then NVKind:=30 Else If (InputFormat='ipmovie') And Not IsHTTP(InputPath) Then NVKind:=38 Else If (InputFormat='jpegls_pipe') And Not IsHTTP(InputPath) Then NVKind:=39 Else If (InputFormat='jpeg_pipe') And Not IsHTTP(InputPath) Then NVKind:=46 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And MP4HasMjpb(InputPath) Then NVKind:=47 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And (QXMovKind(InputPath)<>0) Then NVKind:=QXMovKind(InputPath) Else If (InputFormat='h264') And Not IsHTTP(InputPath) Then NVKind:=33
  Else If (InputFormat='vc1') And Not IsHTTP(InputPath) Then NVKind:=152
+ Else If (InputFormat='asf') And Not IsHTTP(InputPath) And (OutputFormat<>'wav') And (OutputFormat<>'mp3') And (OutputFormat<>'mp2') And (OutputFormat<>'ac3') And (OutputFormat<>'aac') And (OutputFormat<>'asf') And (OutputFormat<>'aiff') And (OutputFormat<>'adx') And (OutputFormat<>'roq') Then NVKind:=V1AsfKind(Intermediate)
  Else If (InputFormat='avi') And Not IsHTTP(InputPath) Then Begin
   AsvTag:=AVIVideoFourCC(Intermediate);
   If AsvTag='CSCD' Then NVKind:=5 Else If (AsvTag='tscc') Or (AsvTag='TSCC') Then NVKind:=6
@@ -121010,7 +122493,7 @@ BEGIN
   Else If QXFccKind(AsvTag)<>0 Then NVKind:=QXFccKind(AsvTag)
   Else If (AsvTag='WMV1') Or (AsvTag='wmv1') Or (AsvTag='WMV2') Or (AsvTag='wmv2') Then NVKind:=150
   Else If (VPDAviKind(AsvTag)<>0) And Not VPDAudioOut Then NVKind:=VPDAviKind(AsvTag)
-  Else If (AsvTag='WMV3') Or (AsvTag='wmv3') Or (AsvTag='WVC1') Or (AsvTag='wvc1') Or (AsvTag='WMVA') Or (AsvTag='wmva') Or (AsvTag='VC-1') Then NVKind:=151
+  Else If (AsvTag='WMV3') Or (AsvTag='wmv3') Or (AsvTag='WVC1') Or (AsvTag='wvc1') Or (AsvTag='WMVP') Or (AsvTag='WVP2') Or (AsvTag='WMVA') Or (AsvTag='wmva') Or (AsvTag='VC-1') Then NVKind:=151
   Else If AsvTag='FSV1' Then NVKind:=18
   Else If (AsvTag='VP31') Or (AsvTag='VP30') Then NVKind:=171
   Else If (AsvTag='HFYU') Or (AsvTag='FFVH') Or (AsvTag='hfyu') Then NVKind:=20
