@@ -98141,6 +98141,4769 @@ End;
 { F1-BLOCK-END }
 { ==== BLOCK-ANCHOR-F1 : inserer le code du groupe F1 juste au-dessus de cette ligne ==== }
 
+{ ==== F2-BLOCK-BEGIN ==== }
+{ ==== F2 : conteneurs MOV/MP4/3GP/3G2/iPod/PSP, SWF/AVM2, ASF, FLV, AVI (muxers generiques) ==== }
+{ Muxers portes de FFmpeg 6.1.1 (libavformat/movenc.c, asfenc.c, flvenc.c, swfenc.c, avienc.c, mux.c). }
+Const
+ FMXMaxS = 8;
+ FMXNoPts = -9223372036854775807-1;
+ FMXKind_V = 0; FMXKind_A = 1; FMXKind_S = 2;
+ { identifiants de codec internes }
+ FC_NONE = 0;
+ FC_RAWVIDEO = 1; FC_QTRLE = 2; FC_SVQ1 = 3; FC_H264 = 4; FC_MPEG4 = 5; FC_MJPEG = 6; FC_FLV1 = 7;
+ FC_PNG = 8; FC_MSMPEG4V3 = 9; FC_WMV1 = 10; FC_WMV2 = 11; FC_H263 = 12; FC_MSMPEG4V2 = 13; FC_MSMPEG4V1 = 14;
+ FC_HUFFYUV = 15; FC_FFV1 = 16; FC_MPEG1VIDEO = 17; FC_MPEG2VIDEO = 18; FC_ZLIB = 19; FC_ZMBV = 20; FC_ASV1 = 21; FC_ASV2 = 22;
+ FC_SNOW = 23; FC_OTHERV = 99;
+ FC_PCM_S16LE = 101; FC_PCM_S16BE = 102; FC_PCM_U8 = 103; FC_PCM_S8 = 104; FC_PCM_S24LE = 105; FC_PCM_S24BE = 106;
+ FC_PCM_S32LE = 107; FC_PCM_S32BE = 108; FC_PCM_F32LE = 109; FC_PCM_F32BE = 110; FC_PCM_F64LE = 111; FC_PCM_F64BE = 112;
+ FC_PCM_ALAW = 113; FC_PCM_MULAW = 114; FC_PCM_U16LE = 115; FC_PCM_U16BE = 116;
+ FC_ALAC = 120; FC_AAC = 121; FC_MP3 = 122; FC_MP2 = 123; FC_AC3 = 124; FC_ADPCM_IMA_QT = 125; FC_ADPCM_MS = 126;
+ FC_ADPCM_IMA_WAV = 127; FC_ADPCM_SWF = 128; FC_NELLYMOSER = 129; FC_WMAV1 = 130; FC_WMAV2 = 131; FC_ADPCM_YAMAHA = 132;
+ FC_AMR_NB = 133; FC_OTHERA = 199;
+ FMX_PKT_KEY = 1; FMX_PKT_DISP = 2;
+
+Type
+ TFMXBytes = Array[0..0] Of Byte;
+ PFMXBytes = ^TFMXBytes;
+ PFMXB = ^TFMXB;
+ TFMXB = Record
+  D: PFMXBytes; Cap, Len, Pos: LongInt;
+ End;
+ PFMXPkt = ^TFMXPkt;
+ TFMXPkt = Record
+  SI: Integer; Flags: LongInt; Size: LongInt;
+  Pts, Dts, Dur: Int64;
+  Data: PFMXBytes;
+  Next: PFMXPkt;
+ End;
+ TFMXStream = Record
+  Kind, Codec: Integer;
+  CTag: LongWord;           { codec_tag impose (0 = aucun) }
+  TbN, TbD: LongInt;        { base de temps du flux }
+  Width, Height: LongInt;
+  SarN, SarD: LongInt;
+  FpsN, FpsD: LongInt;      { avg_frame_rate }
+  PixFmt: Integer;          { 0 inconnu, 1 yuv420p, 2 rgb24, 3 bgr24, 4 gray8, 5 pal8, 6 argb, 7 rgb555le ... }
+  Bps: LongInt;             { bits_per_coded_sample }
+  BpRaw: LongInt;           { bits_per_raw_sample }
+  SampleRate, Channels, BlockAlign, FrameSize, BitRate: LongInt;
+  Extra: PFMXBytes; ExtraLen: LongInt;
+  VideoDelay: LongInt;
+  NbFrames: LongInt;
+  { etat du muxer generique }
+  CurDts: Int64;
+  PrivPtsVal, PrivPtsNum, PrivPtsDen: Int64;
+  MuxTsOffset: Int64;
+  LowestTs: Int64;
+  LastInBuf: PFMXPkt;
+  PtsBuf: Array[0..16] Of Int64;
+  Lang: String[3];
+  Encoder: String[64];      { metadata de flux "encoder" }
+  HandlerName: String[64];
+  StTitle: String[128];
+  Disposition: LongInt;     { bit 0 : DEFAULT }
+  FieldOrder: Integer;      { 0 inconnu, 1 progressif }
+  IsIntra: Boolean;
+ End;
+
+Var
+ FMXQuiet: Boolean;
+ FMXS: Array[0..FMXMaxS-1] Of TFMXStream;
+ FMXN: Integer;
+ FMXHead, FMXTail: PFMXPkt;
+ FMXOut: PFMXB;
+ FMXFmt: String;               { 'mov','mp4','3gp','3g2','ipod','psp','asf','asf_stream','flv','swf','avm2','avi' }
+ FMXOutName: String;
+ FMXMeta: Array[0..15] Of String[63];
+ FMXMetaV: Array[0..15] Of String[255];
+ FMXMetaN: Integer;
+ FMXBitExact: Boolean;
+ FMXMaxIlvDelta: Int64;       { 10 s en microsecondes }
+ FMXAvoidNeg: Integer;         { 0 disabled, 1 make_non_negative, 2 make_zero }
+ FMXAvoidStatus: Integer;      { 0 unknown, 1 known, 2 disabled }
+ FMXAvoidUsePts: Boolean;
+ FMXFmtTsNeg, FMXFmtNonStrict, FMXFmtNoTs, FMXFmtVarFps: Boolean;
+
+{ ------------------------------------------------------------------ }
+{ Arithmetique 64 bits identique a libavutil/mathematics.c             }
+{ ------------------------------------------------------------------ }
+Function FMXRescaleRnd(A,B,C: Int64; Rnd: Integer): Int64;
+Var
+ R: Int64; Neg: Boolean;
+ UA, UB, UC, A0, A1, B0, B1, T1, T1A, R2: QWord; I: Integer; Ad, A2: Int64;
+Begin
+ { Rnd: 0 zero, 1 inf, 2 down, 3 up, 5 near_inf (PASS_MINMAX toujours actif pour ffmpeg: ignore ici) }
+ If (C<=0) Or (B<0) Then Begin FMXRescaleRnd:=(-9223372036854775807-1); Exit; End;
+ If (A=(-9223372036854775807-1)) Or (A=9223372036854775807) Then Begin FMXRescaleRnd:=A; Exit; End;
+ If A<0 Then Begin
+  If A<-9223372036854775807 Then A:=-9223372036854775807;
+  FMXRescaleRnd:=-FMXRescaleRnd(-A,B,C,Rnd Xor ((Rnd Shr 1) And 1));
+  Exit;
+ End;
+ R:=0;
+ If Rnd=5 Then R:=C Div 2 Else If (Rnd And 1)<>0 Then R:=C-1;
+ If (B<=2147483647) And (C<=2147483647) Then Begin
+  If A<=2147483647 Then FMXRescaleRnd:=(A*B+R) Div C
+  Else Begin
+   Ad:=A Div C; A2:=((A Mod C)*B+R) Div C;
+   FMXRescaleRnd:=Ad*B+A2;
+  End;
+ End Else Begin
+  UA:=QWord(A); UB:=QWord(B); UC:=QWord(C);
+  A0:=UA And $FFFFFFFF; A1:=UA Shr 32; B0:=UB And $FFFFFFFF; B1:=UB Shr 32;
+  T1:=A0*B1+A1*B0; T1A:=T1 Shl 32;
+  A0:=A0*B0+T1A; A1:=A1*B1+(T1 Shr 32);
+  If A0<T1A Then Inc(A1);
+  R2:=QWord(R);
+  A0:=A0+R2; If A0<R2 Then Inc(A1);
+  T1:=0;
+  For I:=63 Downto 0 Do Begin
+   A1:=A1+A1+((A0 Shr I) And 1); T1:=T1+T1;
+   If UC<=A1 Then Begin A1:=A1-UC; Inc(T1); End;
+  End;
+  FMXRescaleRnd:=Int64(T1);
+ End;
+End;
+
+Function FMXRescaleQ(A: Int64; BN,BD,CN,CD: Int64): Int64;
+Begin
+ FMXRescaleQ:=FMXRescaleRnd(A,BN*CD,CN*BD,5);
+End;
+
+Function FMXRescaleQRnd(A: Int64; BN,BD,CN,CD: Int64; Rnd: Integer): Int64;
+Begin
+ FMXRescaleQRnd:=FMXRescaleRnd(A,BN*CD,CN*BD,Rnd);
+End;
+
+Function FMXRescale(A,B,C: Int64): Int64;
+Begin
+ FMXRescale:=FMXRescaleRnd(A,B,C,5);
+End;
+
+Function FMXCompareTs(TsA,TbAN,TbAD,TsB,TbBN,TbBD: Int64): Integer;
+Var A,B: Int64;
+Begin
+ A:=TbAN*TbBD; B:=TbBN*TbAD;
+ If (Abs(TsA)<=2147483647) And (Abs(TsB)<=2147483647) And (A<=2147483647) And (B<=2147483647) Then Begin
+  If TsA*A>TsB*B Then FMXCompareTs:=1 Else If TsA*A<TsB*B Then FMXCompareTs:=-1 Else FMXCompareTs:=0;
+  Exit;
+ End;
+ If FMXRescaleRnd(TsA,A,B,2)<TsB Then Begin FMXCompareTs:=-1; Exit; End;
+ If FMXRescaleRnd(TsB,B,A,2)<TsA Then Begin FMXCompareTs:=1; Exit; End;
+ FMXCompareTs:=0;
+End;
+
+Procedure FMXReduce(Var N,D: LongInt; MaxV: LongInt);
+Var A,B,T: Int64; G: Int64;
+Begin
+ A:=N; B:=D;
+ If (A=0) Or (B=0) Then Begin Exit; End;
+ G:=A; T:=B; If G<0 Then G:=-G; If T<0 Then T:=-T;
+ While T<>0 Do Begin A:=G Mod T; G:=T; T:=A; End;
+ If G>1 Then Begin N:=N Div G; D:=D Div G; End;
+End;
+
+{ ------------------------------------------------------------------ }
+{ Tampon de sortie (equivalent AVIOContext en memoire, avec seek)     }
+{ ------------------------------------------------------------------ }
+Function FMXNew: PFMXB;
+Var B: PFMXB;
+Begin
+ New(B); B^.Cap:=65536; GetMem(B^.D,B^.Cap); B^.Len:=0; B^.Pos:=0; FMXNew:=B;
+End;
+
+Procedure FMXFree(B: PFMXB);
+Begin
+ If B=Nil Then Exit;
+ If B^.D<>Nil Then FreeMem(B^.D);
+ Dispose(B);
+End;
+
+Procedure FMXGrow(B: PFMXB; Need: LongInt);
+Var NC: LongInt; ND: PFMXBytes;
+Begin
+ If Need<=B^.Cap Then Exit;
+ NC:=B^.Cap;
+ While NC<Need Do Begin
+  If NC>1000000000 Then Fail('Sortie trop volumineuse (plus de 2 Go non pris en charge).');
+  NC:=NC*2;
+ End;
+ GetMem(ND,NC); Move(B^.D^,ND^,B^.Len); FreeMem(B^.D); B^.D:=ND; B^.Cap:=NC;
+End;
+
+Procedure FMXSeek(B: PFMXB; P: LongInt);
+Begin
+ If P>B^.Len Then Begin FMXGrow(B,P); FillChar(B^.D^[B^.Len],P-B^.Len,0); B^.Len:=P; End;
+ B^.Pos:=P;
+End;
+
+Function FMXTell(B: PFMXB): LongInt;Begin FMXTell:=B^.Pos; End;
+
+Procedure FMXW8(B: PFMXB; V: LongInt);
+Begin
+ FMXGrow(B,B^.Pos+1); B^.D^[B^.Pos]:=Byte(V And $FF); Inc(B^.Pos); If B^.Pos>B^.Len Then B^.Len:=B^.Pos;
+End;
+
+Procedure FMXWB16(B: PFMXB; V: LongInt);Begin FMXW8(B,V Shr 8); FMXW8(B,V); End;
+Procedure FMXWB24(B: PFMXB; V: LongInt);Begin FMXW8(B,V Shr 16); FMXW8(B,V Shr 8); FMXW8(B,V); End;
+Procedure FMXWB32(B: PFMXB; V: LongInt);Begin FMXW8(B,V Shr 24); FMXW8(B,V Shr 16); FMXW8(B,V Shr 8); FMXW8(B,V); End;
+Procedure FMXWB32U(B: PFMXB; V: Int64);Begin FMXWB32(B,LongInt(V And $FFFFFFFF)); End;
+Procedure FMXWB64(B: PFMXB; V: Int64);Begin FMXWB32(B,LongInt((V Shr 32) And $FFFFFFFF)); FMXWB32(B,LongInt(V And $FFFFFFFF)); End;
+Procedure FMXWL16(B: PFMXB; V: LongInt);Begin FMXW8(B,V); FMXW8(B,V Shr 8); End;
+Procedure FMXWL24(B: PFMXB; V: LongInt);Begin FMXW8(B,V); FMXW8(B,V Shr 8); FMXW8(B,V Shr 16); End;
+Procedure FMXWL32(B: PFMXB; V: LongInt);Begin FMXW8(B,V); FMXW8(B,V Shr 8); FMXW8(B,V Shr 16); FMXW8(B,V Shr 24); End;
+Procedure FMXWL64(B: PFMXB; V: Int64);Begin FMXWL32(B,LongInt(V And $FFFFFFFF)); FMXWL32(B,LongInt((V Shr 32) And $FFFFFFFF)); End;
+
+Procedure FMXWrite(B: PFMXB; P: Pointer; N: LongInt);
+Begin
+ If N<=0 Then Exit;
+ FMXGrow(B,B^.Pos+N); Move(P^,B^.D^[B^.Pos],N); Inc(B^.Pos,N); If B^.Pos>B^.Len Then B^.Len:=B^.Pos;
+End;
+
+Procedure FMXFill(B: PFMXB; V: Byte; N: LongInt);
+Begin
+ If N<=0 Then Exit;
+ FMXGrow(B,B^.Pos+N); FillChar(B^.D^[B^.Pos],N,V); Inc(B^.Pos,N); If B^.Pos>B^.Len Then B^.Len:=B^.Pos;
+End;
+
+{ ecrit les caracteres de S tels quels (fourcc) }
+Procedure FMXTag(B: PFMXB; Const S: String);
+Var I: Integer;
+Begin
+ For I:=1 To Length(S) Do FMXW8(B,Ord(S[I]));
+End;
+
+{ avio_put_str : chaine + octet nul }
+Procedure FMXPutStr(B: PFMXB; Const S: String);
+Begin
+ FMXTag(B,S); FMXW8(B,0);
+End;
+
+{ avio_put_str16le / avio_put_str16be / ff_asf_put_str16 : conversion utf-8 -> utf-16 (ASCII/Latin1 simple) }
+Procedure FMXPutStr16LE(B: PFMXB; Const S: String);
+Var I: Integer;
+Begin
+ For I:=1 To Length(S) Do FMXWL16(B,Ord(S[I]));
+ FMXWL16(B,0);
+End;
+
+Procedure FMXWriteBytes(B: PFMXB; P: PFMXBytes; N: LongInt);
+Begin
+ If (P<>Nil) And (N>0) Then FMXWrite(B,P,N);
+End;
+
+{ update_size de movenc.c : reecrit la taille de l'atome commencant a Pos }
+Function FMXUpdateSize(B: PFMXB; P: LongInt): LongInt;
+Var Cur: LongInt;
+Begin
+ Cur:=B^.Pos; FMXSeek(B,P); FMXWB32(B,Cur-P); FMXSeek(B,Cur); FMXUpdateSize:=Cur-P;
+End;
+
+Function FMXMKTag(Const S: String): LongWord;
+Begin
+ FMXMKTag:=LongWord(Ord(S[1]))+(LongWord(Ord(S[2])) Shl 8)+(LongWord(Ord(S[3])) Shl 16)+(LongWord(Ord(S[4])) Shl 24);
+End;
+
+Function FMXTagStr(T: LongWord): String;
+Var S: String;
+Begin
+ S:=''; S:=Chr(T And $FF)+Chr((T Shr 8) And $FF)+Chr((T Shr 16) And $FF)+Chr((T Shr 24) And $FF); FMXTagStr:=S;
+End;
+
+Function FMXBe32(P: PFMXBytes; O: LongInt): LongInt;
+Begin
+ FMXBe32:=LongInt((LongWord(P^[O]) Shl 24) Or (LongWord(P^[O+1]) Shl 16) Or (LongWord(P^[O+2]) Shl 8) Or LongWord(P^[O+3]));
+End;
+
+Function FMXBe16(P: PFMXBytes; O: LongInt): LongInt;
+Begin
+ FMXBe16:=(LongInt(P^[O]) Shl 8) Or LongInt(P^[O+1]);
+End;
+
+Function FMXLe32(P: PFMXBytes; O: LongInt): LongInt;
+Begin
+ FMXLe32:=LongInt((LongWord(P^[O+3]) Shl 24) Or (LongWord(P^[O+2]) Shl 16) Or (LongWord(P^[O+1]) Shl 8) Or LongWord(P^[O]));
+End;
+
+Function FMXLe16(P: PFMXBytes; O: LongInt): LongInt;
+Begin
+ FMXLe16:=(LongInt(P^[O+1]) Shl 8) Or LongInt(P^[O]);
+End;
+
+Function FMXMetaGet(Const K: String): String;
+Var I: Integer;
+Begin
+ FMXMetaGet:='';
+ For I:=0 To FMXMetaN-1 Do If FMXMeta[I]=K Then Begin FMXMetaGet:=FMXMetaV[I]; Exit; End;
+End;
+
+Function FMXMetaHas(Const K: String): Boolean;
+Var I: Integer;
+Begin
+ FMXMetaHas:=False;
+ For I:=0 To FMXMetaN-1 Do If FMXMeta[I]=K Then Begin FMXMetaHas:=True; Exit; End;
+End;
+
+Procedure FMXMetaSet(Const K,V: String);
+Var I: Integer;
+Begin
+ For I:=0 To FMXMetaN-1 Do If FMXMeta[I]=K Then Begin FMXMetaV[I]:=V; Exit; End;
+ If FMXMetaN<16 Then Begin FMXMeta[FMXMetaN]:=K; FMXMetaV[FMXMetaN]:=V; Inc(FMXMetaN); End;
+End;
+
+Procedure FMXMetaSetNew(Const K,V: String);
+Begin
+ If Not FMXMetaHas(K) Then FMXMetaSet(K,V);
+End;
+
+Function FMXAtoi(Const S: String): LongInt;
+Var I: Integer; V: LongInt; Neg: Boolean;
+Begin
+ V:=0; I:=1; Neg:=False;
+ While (I<=Length(S)) And (S[I]=' ') Do Inc(I);
+ If (I<=Length(S)) And (S[I]='-') Then Begin Neg:=True; Inc(I); End
+ Else If (I<=Length(S)) And (S[I]='+') Then Inc(I);
+ While (I<=Length(S)) And (S[I] In ['0'..'9']) Do Begin V:=V*10+(Ord(S[I])-48); Inc(I); End;
+ If Neg Then V:=-V;
+ FMXAtoi:=V;
+End;
+
+Function FMXIStr(V: Int64): String;
+Var S: String;
+Begin
+ Str(V,S); FMXIStr:=S;
+End;
+
+Function FMXD64(V: Int64): Double;
+Var D: Double;
+Begin
+ Move(V,D,8); FMXD64:=D;
+End;
+
+Function FMXLower(Const S: String): String;
+Var I: Integer; R: String;
+Begin
+ R:=S;
+ For I:=1 To Length(R) Do If R[I] In ['A'..'Z'] Then R[I]:=Chr(Ord(R[I])+32);
+ FMXLower:=R;
+End;
+
+{ ------------------------------------------------------------------ }
+{ Muxer MOV / MP4 / 3GP / 3G2 / iPod / PSP  (movenc.c, FFmpeg 6.1.1)   }
+{ ------------------------------------------------------------------ }
+Const
+ MOW_MP4 = $01; MOW_MOV = $02; MOW_3GP = $04; MOW_PSP = $08; MOW_3G2 = $10; MOW_IPOD = $20;
+ MOW_SYNC = 1; MOW_PSYNC = 2; MOW_DISP = 4;
+ MOW_T_CTTS = 1; MOW_T_STPS = 2; MOW_T_ENABLED = 4;
+Type
+ TMOWEnt = Record
+  Pos, Dts: Int64;
+  Size, SamplesInChunk, ChunkNum, Entries, Cts: LongInt;
+  Flags: LongInt;
+ End;
+ TMOWEnts = Array[0..0] Of TMOWEnt;
+ PMOWEnts = ^TMOWEnts;
+ TMOWTrack = Record
+  Mode: Integer;
+  Entry: LongInt;
+  Cap: LongInt;
+  Ents: PMOWEnts;
+  Timescale: LongInt;
+  Time: Int64;
+  TrackDuration: Int64;
+  SampleCount: Int64;
+  SampleSize: LongInt;
+  ChunkCount: LongInt;
+  HasKey, HasDisp: LongInt;
+  Flags: LongInt;
+  StartDts, StartCts, EndPts: Int64;
+  TrackId: LongInt;
+  Tag: LongWord;
+  Height: LongInt;
+  Language: LongInt;
+  AudioVbr: Boolean;
+  Vos: PFMXBytes; VosLen: LongInt;
+  PixFmtMov: Integer;
+  Bps: LongInt;
+ End;
+
+Var
+ MOWMode: Integer;
+ MOWT: Array[0..FMXMaxS-1] Of TMOWTrack;
+ MOWMdatPos: LongInt;
+ MOWMdatSize: Int64;
+ MOWMovTime: Int64;
+ MOWMovieTimescale: LongInt;
+ MOWUseEditlist: Boolean;
+ MOWWriteBtrt: Boolean;
+ MOWPerStreamGrouping: Boolean;
+
+Function MOWLangCode(Const L: String): LongInt;
+Begin
+ MOWLangCode:=(((Ord(L[1])-$60) And $1F) Shl 10)+(((Ord(L[2])-$60) And $1F) Shl 5)+((Ord(L[3])-$60) And $1F);
+End;
+
+Function MOWIsPCM(C: Integer): Boolean;
+Begin
+ MOWIsPCM:=(C>=FC_PCM_S16LE) And (C<=FC_PCM_U16BE);
+End;
+
+{ av_get_bits_per_sample }
+Function MOWBitsPerSample(C: Integer): Integer;
+Begin
+ Case C Of
+  FC_PCM_S16LE,FC_PCM_S16BE,FC_PCM_U16LE,FC_PCM_U16BE: MOWBitsPerSample:=16;
+  FC_PCM_U8,FC_PCM_S8,FC_PCM_ALAW,FC_PCM_MULAW: MOWBitsPerSample:=8;
+  FC_PCM_S24LE,FC_PCM_S24BE: MOWBitsPerSample:=24;
+  FC_PCM_S32LE,FC_PCM_S32BE,FC_PCM_F32LE,FC_PCM_F32BE: MOWBitsPerSample:=32;
+  FC_PCM_F64LE,FC_PCM_F64BE: MOWBitsPerSample:=64;
+  FC_ADPCM_SWF: MOWBitsPerSample:=0;
+  FC_ADPCM_YAMAHA: MOWBitsPerSample:=4;
+  Else MOWBitsPerSample:=0;
+ End;
+End;
+
+Function MOWPcmLeGt16(C: Integer): Boolean;
+Begin MOWPcmLeGt16:=(C=FC_PCM_S24LE) Or (C=FC_PCM_S32LE) Or (C=FC_PCM_F32LE) Or (C=FC_PCM_F64LE); End;
+Function MOWPcmBeGt16(C: Integer): Boolean;
+Begin MOWPcmBeGt16:=(C=FC_PCM_S24BE) Or (C=FC_PCM_S32BE) Or (C=FC_PCM_F32BE) Or (C=FC_PCM_F64BE); End;
+
+Function MOWLpcmFlags(C: Integer): LongInt;
+Begin
+ Case C Of
+  FC_PCM_F32BE,FC_PCM_F64BE: MOWLpcmFlags:=11;
+  FC_PCM_F32LE,FC_PCM_F64LE: MOWLpcmFlags:=9;
+  FC_PCM_U8: MOWLpcmFlags:=10;
+  FC_PCM_S16BE,FC_PCM_S24BE,FC_PCM_S32BE: MOWLpcmFlags:=14;
+  FC_PCM_S8,FC_PCM_S16LE,FC_PCM_S24LE,FC_PCM_S32LE: MOWLpcmFlags:=12;
+  Else MOWLpcmFlags:=0;
+ End;
+End;
+
+{ ff_codec_movaudio_tags (premier tag du codec) }
+Function MOWMovAudioTag(C: Integer): LongWord;
+Begin
+ MOWMovAudioTag:=0;
+ Case C Of
+  FC_AAC: MOWMovAudioTag:=FMXMKTag('mp4a');
+  FC_AC3: MOWMovAudioTag:=FMXMKTag('ac-3');
+  FC_ADPCM_IMA_QT: MOWMovAudioTag:=FMXMKTag('ima4');
+  FC_ALAC: MOWMovAudioTag:=FMXMKTag('alac');
+  FC_AMR_NB: MOWMovAudioTag:=FMXMKTag('samr');
+  FC_MP2: MOWMovAudioTag:=FMXMKTag('.mp2');
+  FC_MP3: MOWMovAudioTag:=FMXMKTag('.mp3');
+  FC_NELLYMOSER: MOWMovAudioTag:=FMXMKTag('nmos');
+  FC_PCM_ALAW: MOWMovAudioTag:=FMXMKTag('alaw');
+  FC_PCM_F32BE,FC_PCM_F32LE: MOWMovAudioTag:=FMXMKTag('fl32');
+  FC_PCM_F64BE,FC_PCM_F64LE: MOWMovAudioTag:=FMXMKTag('fl64');
+  FC_PCM_MULAW: MOWMovAudioTag:=FMXMKTag('ulaw');
+  FC_PCM_S16BE: MOWMovAudioTag:=FMXMKTag('twos');
+  FC_PCM_S16LE: MOWMovAudioTag:=FMXMKTag('sowt');
+  FC_PCM_S24BE,FC_PCM_S24LE: MOWMovAudioTag:=FMXMKTag('in24');
+  FC_PCM_S32BE,FC_PCM_S32LE: MOWMovAudioTag:=FMXMKTag('in32');
+  FC_PCM_S8: MOWMovAudioTag:=FMXMKTag('sowt');
+  FC_PCM_U8: MOWMovAudioTag:=FMXMKTag('raw ');
+ End;
+End;
+
+{ ff_codec_wav_tags (id wave) pour les codecs audio sans tag Apple }
+Function MOWWavTag(C: Integer): LongInt;
+Begin
+ MOWWavTag:=0;
+ Case C Of
+  FC_ADPCM_MS: MOWWavTag:=$0002;
+  FC_ADPCM_IMA_WAV: MOWWavTag:=$0011;
+  FC_ADPCM_SWF: MOWWavTag:=$5346;
+  FC_ADPCM_YAMAHA: MOWWavTag:=$0020;
+  FC_WMAV1: MOWWavTag:=$0160;
+  FC_WMAV2: MOWWavTag:=$0161;
+  FC_PCM_U16LE: MOWWavTag:=$0001;
+  FC_NELLYMOSER: MOWWavTag:=$0000;
+ End;
+End;
+
+Function MOWMovVideoTag(C: Integer): LongWord;
+Begin
+ MOWMovVideoTag:=0;
+ Case C Of
+  FC_QTRLE: MOWMovVideoTag:=FMXMKTag('rle ');
+  FC_SVQ1: MOWMovVideoTag:=FMXMKTag('SVQ1');
+  FC_MJPEG: MOWMovVideoTag:=FMXMKTag('jpeg');
+  FC_MPEG4: MOWMovVideoTag:=FMXMKTag('mp4v');
+  FC_H263: MOWMovVideoTag:=FMXMKTag('h263');
+  FC_H264: MOWMovVideoTag:=FMXMKTag('avc1');
+  FC_MPEG1VIDEO: MOWMovVideoTag:=FMXMKTag('m1v ');
+  FC_PNG: MOWMovVideoTag:=FMXMKTag('png ');
+  FC_MSMPEG4V3: MOWMovVideoTag:=FMXMKTag('3IVD');
+ End;
+End;
+
+{ ff_codec_bmp_tags : repli "MS style" }
+Function MOWBmpTag(C: Integer): LongWord;
+Begin
+ MOWBmpTag:=0;
+ Case C Of
+  FC_FLV1: MOWBmpTag:=FMXMKTag('FLV1');
+  FC_WMV1: MOWBmpTag:=FMXMKTag('WMV1');
+  FC_WMV2: MOWBmpTag:=FMXMKTag('WMV2');
+  FC_MSMPEG4V3: MOWBmpTag:=FMXMKTag('MP43');
+  FC_MSMPEG4V2: MOWBmpTag:=FMXMKTag('MP42');
+  FC_MSMPEG4V1: MOWBmpTag:=FMXMKTag('DIV1');
+  FC_HUFFYUV: MOWBmpTag:=FMXMKTag('HFYU');
+  FC_FFV1: MOWBmpTag:=FMXMKTag('FFV1');
+  FC_ASV1: MOWBmpTag:=FMXMKTag('ASV1');
+  FC_ASV2: MOWBmpTag:=FMXMKTag('ASV2');
+  FC_ZLIB: MOWBmpTag:=FMXMKTag('ZLIB');
+  FC_ZMBV: MOWBmpTag:=FMXMKTag('ZMBV');
+  FC_SNOW: MOWBmpTag:=FMXMKTag('SNOW');
+ End;
+End;
+
+{ Format de pixel pour rawvideo : 1 yuv420p ... voir FMXS.PixFmt.  Codes : 10 yuyv422, 11 uyvy422, 12 rgb555be, 13 rgb555le,
+  14 rgb565le, 15 rgb565be, 16 gray16be, 2 rgb24, 3 bgr24, 17 argb, 18 bgra, 19 rgba, 20 abgr, 4 gray8, 5 pal8 }
+Procedure MOWRawVideoTag(Var T: TMOWTrack; Const St: TFMXStream);
+Begin
+ T.Tag:=St.CTag; T.Bps:=St.Bps;
+ Case St.PixFmt Of
+  10: Begin T.Tag:=FMXMKTag('yuv2'); T.Bps:=0; End;
+  11: Begin T.Tag:=FMXMKTag('2vuy'); T.Bps:=0; End;
+  12: Begin T.Tag:=FMXMKTag('raw '); T.Bps:=16; End;
+  13: Begin T.Tag:=FMXMKTag('L555'); T.Bps:=16; End;
+  14: Begin T.Tag:=FMXMKTag('L565'); T.Bps:=16; End;
+  15: Begin T.Tag:=FMXMKTag('B565'); T.Bps:=16; End;
+  16: Begin T.Tag:=FMXMKTag('b16g'); T.Bps:=16; End;
+  2: Begin T.Tag:=FMXMKTag('raw '); T.Bps:=24; End;
+  3: Begin T.Tag:=FMXMKTag('24BG'); T.Bps:=24; End;
+  17: Begin T.Tag:=FMXMKTag('raw '); T.Bps:=32; End;
+  18: Begin T.Tag:=FMXMKTag('BGRA'); T.Bps:=32; End;
+  19: Begin T.Tag:=FMXMKTag('RGBA'); T.Bps:=32; End;
+  20: Begin T.Tag:=FMXMKTag('ABGR'); T.Bps:=32; End;
+ End;
+ If T.Tag=0 Then T.Tag:=FMXMKTag('raw ');
+End;
+
+{ choix de l'etiquette de piste : mov_find_codec_tag }
+Function MOWFindTag(I: Integer): LongWord;
+Var Tag: LongWord; W: LongInt; St: ^TFMXStream; C: Integer;
+Begin
+ St:=@FMXS[I]; C:=St^.Codec; Tag:=0;
+ If MOWMode=MOW_MOV Then Begin
+  If St^.Kind=FMXKind_V Then Begin
+   If C=FC_RAWVIDEO Then Begin MOWRawVideoTag(MOWT[I],St^); Tag:=MOWT[I].Tag; End
+   Else Begin
+    Tag:=MOWMovVideoTag(C);
+    If Tag=0 Then Tag:=MOWBmpTag(C);
+    If (Tag=0) And (St^.CTag<>0) Then Tag:=St^.CTag;
+   End;
+  End Else If St^.Kind=FMXKind_A Then Begin
+   Tag:=MOWMovAudioTag(C);
+   If Tag=0 Then Begin
+    W:=MOWWavTag(C);
+    If W<>0 Then Tag:=LongWord(Ord('m'))+(LongWord(Ord('s')) Shl 8)+(LongWord((W Shr 8) And $FF) Shl 16)+(LongWord(W And $FF) Shl 24);
+   End;
+  End;
+ End Else Begin
+  { MP4 / 3GP / PSP / iPod : tables du muxer }
+  If St^.Kind=FMXKind_V Then Begin
+   Case MOWMode Of
+    MOW_MP4,MOW_PSP:
+     Case C Of
+      FC_MPEG4,FC_MPEG1VIDEO,FC_MPEG2VIDEO,FC_MJPEG,FC_PNG: Tag:=FMXMKTag('mp4v');
+      FC_H264: Tag:=FMXMKTag('avc1');
+     End;
+    MOW_3GP,MOW_3GP Or MOW_3G2:
+     Case C Of
+      FC_H263: Tag:=FMXMKTag('s263');
+      FC_H264: Tag:=FMXMKTag('avc1');
+      FC_MPEG4: Tag:=FMXMKTag('mp4v');
+     End;
+    MOW_IPOD:
+     Case C Of
+      FC_H264: Tag:=FMXMKTag('avc1');
+      FC_MPEG4: Tag:=FMXMKTag('mp4v');
+     End;
+   End;
+  End Else If St^.Kind=FMXKind_A Then Begin
+   Case MOWMode Of
+    MOW_MP4,MOW_PSP:
+     Case C Of
+      FC_AAC,FC_MP3,FC_MP2: Tag:=FMXMKTag('mp4a');
+      FC_ALAC: Tag:=FMXMKTag('alac');
+      FC_AC3: Tag:=FMXMKTag('ac-3');
+      FC_PCM_S16BE,FC_PCM_S16LE,FC_PCM_S24BE,FC_PCM_S24LE,FC_PCM_S32BE,FC_PCM_S32LE: Tag:=FMXMKTag('ipcm');
+      FC_PCM_F32BE,FC_PCM_F32LE,FC_PCM_F64BE,FC_PCM_F64LE: Tag:=FMXMKTag('fpcm');
+     End;
+    MOW_3GP,MOW_3GP Or MOW_3G2:
+     Case C Of
+      FC_AAC: Tag:=FMXMKTag('mp4a');
+      FC_AMR_NB: Tag:=FMXMKTag('samr');
+     End;
+    MOW_IPOD:
+     Case C Of
+      FC_AAC: Tag:=FMXMKTag('mp4a');
+      FC_ALAC: Tag:=FMXMKTag('alac');
+      FC_AC3: Tag:=FMXMKTag('ac-3');
+     End;
+   End;
+  End;
+ End;
+ MOWFindTag:=Tag;
+End;
+
+Function MOWObjType(C: Integer): LongInt;
+Begin
+ Case C Of
+  FC_MPEG4: MOWObjType:=$20;
+  FC_H264: MOWObjType:=$21;
+  FC_AAC: MOWObjType:=$40;
+  FC_MPEG2VIDEO: MOWObjType:=$61;
+  FC_MP3: MOWObjType:=$69;
+  FC_MP2: MOWObjType:=$69;
+  FC_MPEG1VIDEO: MOWObjType:=$6A;
+  FC_MJPEG: MOWObjType:=$6C;
+  FC_PNG: MOWObjType:=$6D;
+  FC_AC3: MOWObjType:=$A5;
+  Else MOWObjType:=0;
+ End;
+End;
+
+Function MOWDur(Var T: TMOWTrack; Idx: LongInt): LongInt;
+Var Nd: Int64;
+Begin
+ If Idx>=T.Entry Then Begin MOWDur:=0; Exit; End;
+ If Idx+1=T.Entry Then Nd:=T.TrackDuration+T.StartDts Else Nd:=T.Ents^[Idx+1].Dts;
+ Nd:=Nd-T.Ents^[Idx].Dts;
+ MOWDur:=LongInt(Nd);
+End;
+
+Function MOWSamplesPerPacket(Var T: TMOWTrack): LongInt;
+Var I,First: LongInt;
+Begin
+ If Not T.AudioVbr Then Begin MOWSamplesPerPacket:=1; Exit; End;
+ If T.Entry=0 Then Begin MOWSamplesPerPacket:=0; Exit; End;
+ First:=MOWDur(T,0);
+ For I:=1 To T.Entry-1 Do If MOWDur(T,I)<>First Then Begin MOWSamplesPerPacket:=0; Exit; End;
+ MOWSamplesPerPacket:=First;
+End;
+
+Function MOWAvgBitrate(Var T: TMOWTrack): LongWord;
+Var Sz: QWord; I: LongInt;
+Begin
+ If T.TrackDuration=0 Then Begin MOWAvgBitrate:=0; Exit; End;
+ Sz:=0;
+ For I:=0 To T.Entry-1 Do Sz:=Sz+QWord(T.Ents^[I].Size);
+ MOWAvgBitrate:=LongWord((Sz*8*QWord(T.Timescale)) Div QWord(T.TrackDuration));
+End;
+
+{ ---- ecriture des atomes ------------------------------------------------ }
+Procedure MOWPutDescr(B: PFMXB; Tag: LongInt; Size: LongWord);
+Var I: Integer;
+Begin
+ FMXW8(B,Tag);
+ For I:=3 Downto 1 Do FMXW8(B,LongInt((Size Shr (7*I)) Or $80));
+ FMXW8(B,LongInt(Size And $7F));
+End;
+
+Function MOWEsds(B: PFMXB; I: Integer): LongInt;
+Var Pos: LongInt; T: ^TMOWTrack; St: ^TFMXStream; DsiLen: LongInt;
+    Avg, Mx: LongWord; Obj: LongInt;
+Begin
+ T:=@MOWT[I]; St:=@FMXS[I];
+ Avg:=MOWAvgBitrate(T^);
+ If Avg=0 Then Begin
+  If St^.BitRate<>0 Then Avg:=St^.BitRate;
+ End;
+ If LongWord(St^.BitRate)>Avg Then Mx:=LongWord(St^.BitRate) Else Mx:=Avg;
+ Pos:=FMXTell(B);
+ If T^.VosLen<>0 Then DsiLen:=5+T^.VosLen Else DsiLen:=0;
+ FMXWB32(B,0); FMXTag(B,'esds'); FMXWB32(B,0);
+ MOWPutDescr(B,$03,3+5+13+DsiLen+5+1);
+ FMXWB16(B,T^.TrackId); FMXW8(B,0);
+ MOWPutDescr(B,$04,13+DsiLen);
+ If ((St^.Codec=FC_MP2) Or (St^.Codec=FC_MP3)) And (St^.SampleRate>24000) Then FMXW8(B,$6B)
+ Else FMXW8(B,MOWObjType(St^.Codec));
+ If St^.Kind=FMXKind_A Then FMXW8(B,$15) Else FMXW8(B,$11);
+ FMXWB24(B,0);
+ FMXWB32U(B,Mx); FMXWB32U(B,Avg);
+ If T^.VosLen<>0 Then Begin
+  MOWPutDescr(B,$05,T^.VosLen);
+  FMXWriteBytes(B,T^.Vos,T^.VosLen);
+ End;
+ MOWPutDescr(B,$06,1); FMXW8(B,$02);
+ MOWEsds:=FMXUpdateSize(B,Pos);
+End;
+
+Procedure MOWBtrt(B: PFMXB; I: Integer);
+Var Pos: LongInt; Avg, Mx: LongWord; T: ^TMOWTrack; St: ^TFMXStream;
+Begin
+ T:=@MOWT[I]; St:=@FMXS[I];
+ Avg:=MOWAvgBitrate(T^);
+ If Avg=0 Then Begin If St^.BitRate<>0 Then Avg:=St^.BitRate; End;
+ If LongWord(St^.BitRate)>Avg Then Mx:=LongWord(St^.BitRate) Else Mx:=Avg;
+ If (Mx=0) And (Avg=0) Then Exit;
+ Pos:=FMXTell(B);
+ FMXWB32(B,0); FMXTag(B,'btrt');
+ FMXWB32(B,0); FMXWB32U(B,Mx); FMXWB32U(B,Avg);
+ FMXUpdateSize(B,Pos);
+End;
+
+Procedure MOWWaveFormatEx(B: PFMXB; Const St: TFMXStream; Tag: LongInt);
+Begin
+ { ff_put_wav_header pour ADPCM MS / IMA WAV (WAVEFORMATEX + extradata) }
+ FMXWL16(B,Tag);
+ FMXWL16(B,St.Channels);
+ FMXWL32(B,St.SampleRate);
+ FMXWL32(B,St.BitRate Div 8);
+ FMXWL16(B,St.BlockAlign);
+ FMXWL16(B,St.Bps);
+ FMXWL16(B,St.ExtraLen);
+ FMXWriteBytes(B,St.Extra,St.ExtraLen);
+End;
+
+Procedure MOWWaveTag(B: PFMXB; I: Integer);
+Var Pos: LongInt; T: ^TMOWTrack; St: ^TFMXStream; W: LongInt;
+Begin
+ T:=@MOWT[I]; St:=@FMXS[I];
+ Pos:=FMXTell(B);
+ FMXWB32(B,0); FMXTag(B,'wave');
+ FMXWB32(B,12); FMXTag(B,'frma'); FMXWL32(B,LongInt(T^.Tag));
+ If St^.Codec=FC_AAC Then Begin
+  FMXWB32(B,12); FMXTag(B,'mp4a'); FMXWB32(B,0); MOWEsds(B,I);
+ End Else If MOWPcmLeGt16(St^.Codec) Then Begin
+  FMXWB32(B,10); FMXTag(B,'enda'); FMXWB16(B,1);
+ End Else If MOWPcmBeGt16(St^.Codec) Then Begin
+  FMXWB32(B,10); FMXTag(B,'enda'); FMXWB16(B,0);
+ End Else If St^.Codec=FC_ALAC Then Begin
+  FMXWriteBytes(B,St^.Extra,St^.ExtraLen);
+ End Else If (St^.Codec=FC_ADPCM_MS) Or (St^.Codec=FC_ADPCM_IMA_WAV) Then Begin
+  { mov_write_ms_tag }
+  Pos:=Pos; W:=FMXTell(B);
+  FMXWB32(B,0); FMXWL32(B,LongInt(T^.Tag));
+  MOWWaveFormatEx(B,St^,MOWWavTag(St^.Codec));
+  FMXUpdateSize(B,W);
+ End;
+ FMXWB32(B,8); FMXWB32(B,0);
+ FMXUpdateSize(B,Pos);
+End;
+
+{ 'chan' (mov_write_chan_tag) pour 1 ou 2 canaux }
+Procedure MOWChan(B: PFMXB; I: Integer);
+Var St: ^TFMXStream; Lay, Bm: LongWord; Pos: LongInt; HasList: Boolean;
+Begin
+ St:=@FMXS[I];
+ HasList:=MOWIsPCM(St^.Codec) And (St^.Codec<>FC_PCM_ALAW) And (St^.Codec<>FC_PCM_MULAW) And (St^.Codec<>FC_PCM_U16LE) And (St^.Codec<>FC_PCM_U16BE);
+ If (St^.Codec=FC_AAC) Or (St^.Codec=FC_AC3) Or (St^.Codec=FC_ALAC) Then HasList:=True;
+ Lay:=0; Bm:=0;
+ If St^.Channels=1 Then Begin
+  If HasList Then Lay:=$640001 Else Begin Lay:=$10000; Bm:=4; End;
+ End Else If St^.Channels=2 Then Begin
+  If HasList Then Lay:=$650002 Else Begin Lay:=$10000; Bm:=3; End;
+ End Else Fail('MOV: disposition de canaux au-dela de 2 canaux non prise en charge.');
+ Pos:=FMXTell(B);
+ FMXWB32(B,0); FMXTag(B,'chan'); FMXW8(B,0); FMXWB24(B,0);
+ FMXWB32U(B,Lay); FMXWB32U(B,Bm); FMXWB32(B,0);
+ FMXUpdateSize(B,Pos);
+End;
+
+Procedure MOWPcmC(B: PFMXB; I: Integer);
+Var St: ^TFMXStream; Pos, Fl, Ss: LongInt;
+Begin
+ St:=@FMXS[I]; Pos:=FMXTell(B);
+ FMXWB32(B,0); FMXTag(B,'pcmC'); FMXWB32(B,0);
+ Fl:=0;
+ If (St^.Codec=FC_PCM_F32LE) Or (St^.Codec=FC_PCM_F64LE) Or (St^.Codec=FC_PCM_S16LE) Or (St^.Codec=FC_PCM_S24LE) Or (St^.Codec=FC_PCM_S32LE) Then Fl:=1;
+ FMXW8(B,Fl);
+ Ss:=St^.BpRaw; If Ss=0 Then Ss:=MOWBitsPerSample(St^.Codec);
+ FMXW8(B,Ss);
+ FMXUpdateSize(B,Pos);
+End;
+
+Procedure MOWChnl(B: PFMXB; I: Integer);
+Var St: ^TFMXStream; Pos: LongInt;
+Begin
+ St:=@FMXS[I]; Pos:=FMXTell(B);
+ FMXWB32(B,0); FMXTag(B,'chnl'); FMXWB32(B,0);
+ FMXW8(B,1);
+ If St^.Channels=2 Then Begin FMXW8(B,2); FMXWB64(B,0); End
+ Else If St^.Channels=1 Then Begin FMXW8(B,1); FMXWB64(B,0); End
+ Else Fail('MP4 pcm: disposition de canaux non prise en charge.');
+ FMXUpdateSize(B,Pos);
+End;
+
+Procedure MOWAudioTag(B: PFMXB; I: Integer);
+Var Pos: LongInt; Version: Integer; Tag: LongWord; T: ^TMOWTrack; St: ^TFMXStream; D: Double; Q: Int64;
+Begin
+ T:=@MOWT[I]; St:=@FMXS[I]; Pos:=FMXTell(B); Version:=0; Tag:=T^.Tag;
+ If T^.Mode=MOW_MOV Then Begin
+  If (T^.Timescale>65535) Or (St^.Channels=0) Then Begin
+   If MOWLpcmFlags(St^.Codec)<>0 Then Tag:=FMXMKTag('lpcm');
+   Version:=2;
+  End Else If T^.AudioVbr Or MOWPcmLeGt16(St^.Codec) Or MOWPcmBeGt16(St^.Codec) Or (St^.Codec=FC_ADPCM_MS) Or (St^.Codec=FC_ADPCM_IMA_WAV) Then Version:=1;
+ End;
+ FMXWB32(B,0);
+ FMXWL32(B,LongInt(Tag));
+ FMXWB32(B,0); FMXWB16(B,0); FMXWB16(B,1);
+ FMXWB16(B,Version); FMXWB16(B,0); FMXWB32(B,0);
+ If Version=2 Then Begin
+  FMXWB16(B,3); FMXWB16(B,16); FMXWB16(B,$FFFE); FMXWB16(B,0); FMXWB32(B,$00010000); FMXWB32(B,72);
+  D:=St^.SampleRate; Move(D,Q,8); FMXWB64(B,Q);
+  FMXWB32(B,St^.Channels); FMXWB32(B,$7F000000); FMXWB32(B,MOWBitsPerSample(St^.Codec));
+  FMXWB32(B,MOWLpcmFlags(St^.Codec)); FMXWB32(B,T^.SampleSize); FMXWB32(B,MOWSamplesPerPacket(T^));
+ End Else Begin
+  If T^.Mode=MOW_MOV Then Begin
+   FMXWB16(B,St^.Channels);
+   If (St^.Codec=FC_PCM_U8) Or (St^.Codec=FC_PCM_S8) Then FMXWB16(B,8) Else FMXWB16(B,16);
+   If T^.AudioVbr Then FMXWB16(B,$FFFE) Else FMXWB16(B,0);
+  End Else Begin
+   FMXWB16(B,St^.Channels);
+   If St^.Codec=FC_ALAC Then FMXWB16(B,St^.BpRaw) Else FMXWB16(B,16);
+   FMXWB16(B,0);
+  End;
+  FMXWB16(B,0);
+  If St^.SampleRate<=65535 Then FMXWB16(B,St^.SampleRate) Else FMXWB16(B,0);
+  FMXWB16(B,0);
+ End;
+ If Version=1 Then Begin
+  If MOWPcmLeGt16(St^.Codec) Or MOWPcmBeGt16(St^.Codec) Then FMXWB32(B,1) Else FMXWB32(B,St^.FrameSize);
+  FMXWB32(B,T^.SampleSize Div St^.Channels);
+  FMXWB32(B,T^.SampleSize);
+  FMXWB32(B,2);
+ End;
+ If (T^.Mode=MOW_MOV) And ((St^.Codec=FC_AAC) Or (St^.Codec=FC_AC3) Or (St^.Codec=FC_AMR_NB) Or (St^.Codec=FC_ALAC) Or
+   (St^.Codec=FC_ADPCM_MS) Or (St^.Codec=FC_ADPCM_IMA_WAV) Or ((MOWPcmLeGt16(St^.Codec) Or MOWPcmBeGt16(St^.Codec)) And (Version=1))) Then
+  MOWWaveTag(B,I)
+ Else If T^.Tag=FMXMKTag('mp4a') Then MOWEsds(B,I)
+ Else If St^.Codec=FC_ALAC Then FMXWriteBytes(B,St^.Extra,St^.ExtraLen)
+ Else If (Tag=FMXMKTag('ipcm')) Or (Tag=FMXMKTag('fpcm')) Then Begin
+  If St^.Channels>1 Then MOWChnl(B,I);
+  MOWPcmC(B,I);
+ End Else If T^.VosLen>0 Then Begin
+  FMXWB32(B,T^.VosLen+8); FMXTag(B,'glbl'); FMXWriteBytes(B,T^.Vos,T^.VosLen);
+ End;
+ If (T^.Mode=MOW_MOV) And (St^.Kind=FMXKind_A) Then MOWChan(B,I);
+ If MOWWriteBtrt Then MOWBtrt(B,I);
+ FMXUpdateSize(B,Pos);
+End;
+
+Procedure MOWCompressorName(Var Name: String; I: Integer);
+Begin
+ Name:='';
+ If (MOWT[I].Mode=MOW_MOV) Or (MOWT[I].Mode=MOW_MP4) Then Name:=FMXS[I].Encoder;
+ If Length(Name)>31 Then Name:=Copy(Name,1,31);
+End;
+
+Procedure MOWVideoTag(B: PFMXB; I: Integer);
+Var Pos: LongInt; T: ^TMOWTrack; St: ^TFMXStream; Name: String; J: Integer; Ycc: Boolean;
+    Sar: Boolean; SN,SD: LongInt; K: Integer;
+Begin
+ T:=@MOWT[I]; St:=@FMXS[I]; Pos:=FMXTell(B);
+ Ycc:=(St^.Codec=FC_RAWVIDEO) And ((St^.PixFmt=10) Or (St^.PixFmt=11));
+ FMXWB32(B,0);
+ FMXWL32(B,LongInt(T^.Tag));
+ FMXWB32(B,0); FMXWB16(B,0); FMXWB16(B,1);
+ If Ycc Then FMXWB16(B,2) Else FMXWB16(B,0);
+ FMXWB16(B,0);
+ If T^.Mode=MOW_MOV Then Begin
+  FMXTag(B,'FFMP');
+  If (St^.Codec=FC_RAWVIDEO) Or Ycc Then Begin FMXWB32(B,0); FMXWB32(B,$400); End
+  Else Begin FMXWB32(B,$200); FMXWB32(B,$200); End;
+ End Else FMXFill(B,0,12);
+ FMXWB16(B,St^.Width); FMXWB16(B,T^.Height);
+ FMXWB32(B,$00480000); FMXWB32(B,$00480000); FMXWB32(B,0); FMXWB16(B,1);
+ MOWCompressorName(Name,I);
+ FMXW8(B,Length(Name));
+ For J:=1 To 31 Do If J<=Length(Name) Then FMXW8(B,Ord(Name[J])) Else FMXW8(B,0);
+ If (T^.Mode=MOW_MOV) And (T^.Bps<>0) Then Begin
+  If St^.PixFmt=4 Then FMXWB16(B,T^.Bps Or $20) Else FMXWB16(B,T^.Bps);
+ End Else FMXWB16(B,$18);
+ If (T^.Mode=MOW_MOV) And (St^.PixFmt=5) Then Begin
+  FMXWB16(B,0); FMXWB32(B,0); FMXWB16(B,$8000);
+  FMXWB16(B,(1 Shl T^.Bps)-1);
+  For K:=0 To (1 Shl T^.Bps)-1 Do Begin
+   FMXWB16(B,0);
+   FMXWB16(B,(St^.Extra^[K*4+2] Shl 8) Or St^.Extra^[K*4+2]);
+   FMXWB16(B,(St^.Extra^[K*4+1] Shl 8) Or St^.Extra^[K*4+1]);
+   FMXWB16(B,(St^.Extra^[K*4] Shl 8) Or St^.Extra^[K*4]);
+  End;
+ End Else FMXWB16(B,$FFFF);
+ If T^.Tag=FMXMKTag('mp4v') Then MOWEsds(B,I)
+ Else If St^.Codec=FC_H263 Then Begin
+  FMXWB32(B,$F); FMXTag(B,'d263'); FMXTag(B,'FFMP'); FMXW8(B,0); FMXW8(B,$A); FMXW8(B,0);
+ End Else If St^.Codec=FC_H264 Then Begin
+  { avcC depuis l'extradata deja au format AVCC (copie) }
+  FMXWB32(B,T^.VosLen+8); FMXTag(B,'avcC'); FMXWriteBytes(B,T^.Vos,T^.VosLen);
+  If T^.Mode=MOW_IPOD Then Begin
+   FMXWB32(B,28); FMXTag(B,'uuid'); FMXWB32(B,$6b6840f2); FMXWB32(B,$5f244fc5); FMXWB32(B,$ba39a51b); FMXWB32(B,$cf0323f3); FMXWB32(B,0);
+  End;
+ End Else If T^.VosLen>0 Then Begin
+  FMXWB32(B,T^.VosLen+8); FMXTag(B,'glbl'); FMXWriteBytes(B,T^.Vos,T^.VosLen);
+ End;
+ { fiel : field_order inconnu par defaut pour les flux produits ici -> rien (AV_FIELD_UNKNOWN=0 ; progressif=1 ecrit 'fiel') }
+ If (St^.Codec<>FC_H264) And (St^.Codec<>FC_MPEG4) Then Begin
+  If St^.FieldOrder=1 Then Begin FMXWB32(B,10); FMXTag(B,'fiel'); FMXWB16(B,$0100); End;
+ End;
+ If St^.SarN<>0 Then If St^.SarD<>0 Then Begin
+  SN:=St^.SarN; SD:=St^.SarD; FMXReduce(SN,SD,2147483647);
+  FMXWB32(B,16); FMXTag(B,'pasp'); FMXWB32(B,SN); FMXWB32(B,SD);
+ End;
+ If Ycc Then Begin
+  FMXWB32(B,40); FMXTag(B,'clap'); FMXWB32(B,St^.Width); FMXWB32(B,1); FMXWB32(B,T^.Height); FMXWB32(B,1);
+  FMXWB32(B,0); FMXWB32(B,1); FMXWB32(B,0); FMXWB32(B,1);
+ End;
+ If MOWWriteBtrt Then MOWBtrt(B,I);
+ FMXUpdateSize(B,Pos);
+End;
+
+Procedure MOWStsd(B: PFMXB; I: Integer);
+Var Pos: LongInt;
+Begin
+ Pos:=FMXTell(B);
+ FMXWB32(B,0); FMXTag(B,'stsd'); FMXWB32(B,0); FMXWB32(B,1);
+ If FMXS[I].Kind=FMXKind_V Then MOWVideoTag(B,I) Else If FMXS[I].Kind=FMXKind_A Then MOWAudioTag(B,I);
+ FMXUpdateSize(B,Pos);
+End;
+
+Procedure MOWStts(B: PFMXB; I: Integer);
+Var T: ^TMOWTrack; Entries, K, D, Run, Pos: LongInt;
+Begin
+ T:=@MOWT[I];
+ If (FMXS[I].Kind=FMXKind_A) And Not T^.AudioVbr Then Begin
+  FMXWB32(B,24); FMXTag(B,'stts'); FMXWB32(B,0); FMXWB32(B,1);
+  FMXWB32(B,T^.SampleCount); FMXWB32(B,1);
+  Exit;
+ End;
+ Pos:=FMXTell(B);
+ FMXWB32(B,0); FMXTag(B,'stts'); FMXWB32(B,0); FMXWB32(B,0);
+ Entries:=0; K:=0;
+ While K<T^.Entry Do Begin
+  D:=MOWDur(T^,K); Run:=1;
+  While (K+Run<T^.Entry) And (MOWDur(T^,K+Run)=D) Do Inc(Run);
+  FMXWB32(B,Run); FMXWB32(B,D); Inc(Entries); Inc(K,Run);
+ End;
+ FMXUpdateSize(B,Pos);
+ K:=FMXTell(B); FMXSeek(B,Pos+12); FMXWB32(B,Entries); FMXSeek(B,K);
+End;
+
+Procedure MOWStss(B: PFMXB; I: Integer; Flag: LongInt);
+Var T: ^TMOWTrack; Pos, EntryPos, Cur, K, Idx: LongInt;
+Begin
+ T:=@MOWT[I]; Pos:=FMXTell(B);
+ FMXWB32(B,0); If Flag=MOW_SYNC Then FMXTag(B,'stss') Else FMXTag(B,'stps');
+ FMXWB32(B,0); EntryPos:=FMXTell(B); FMXWB32(B,T^.Entry);
+ Idx:=0;
+ For K:=0 To T^.Entry-1 Do If (T^.Ents^[K].Flags And Flag)<>0 Then Begin FMXWB32(B,K+1); Inc(Idx); End;
+ Cur:=FMXTell(B); FMXSeek(B,EntryPos); FMXWB32(B,Idx); FMXSeek(B,Cur);
+ FMXUpdateSize(B,Pos);
+End;
+
+Procedure MOWSdtp(B: PFMXB; I: Integer);
+Var T: ^TMOWTrack; Pos, K, Dep, Ref: LongInt;
+Begin
+ T:=@MOWT[I]; Pos:=FMXTell(B);
+ FMXWB32(B,0); FMXTag(B,'sdtp'); FMXWB32(B,0);
+ For K:=0 To T^.Entry-1 Do Begin
+  Dep:=1; Ref:=0;
+  If (T^.Ents^[K].Flags And MOW_DISP)<>0 Then Ref:=2;
+  If (T^.Ents^[K].Flags And MOW_SYNC)<>0 Then Dep:=2;
+  FMXW8(B,(0 Shl 6) Or (Dep Shl 4) Or (Ref Shl 2) Or 0);
+ End;
+ FMXUpdateSize(B,Pos);
+End;
+
+Procedure MOWCtts(B: PFMXB; I: Integer; NegCts: Boolean);
+Var T: ^TMOWTrack; Cnt, K, Ent, Start: LongInt; Cur: LongInt; Pos, P2: LongInt;
+Begin
+ T:=@MOWT[I]; Pos:=FMXTell(B);
+ FMXWB32(B,0); FMXTag(B,'ctts');
+ If NegCts Then FMXW8(B,1) Else FMXW8(B,0);
+ FMXWB24(B,0); FMXWB32(B,0);
+ Ent:=0; K:=0;
+ While K<T^.Entry Do Begin
+  Cur:=T^.Ents^[K].Cts; Cnt:=1;
+  While (K+Cnt<T^.Entry) And (T^.Ents^[K+Cnt].Cts=Cur) Do Inc(Cnt);
+  FMXWB32(B,Cnt); FMXWB32(B,Cur); Inc(Ent); Inc(K,Cnt);
+ End;
+ FMXUpdateSize(B,Pos);
+ P2:=FMXTell(B); FMXSeek(B,Pos+12); FMXWB32(B,Ent); FMXSeek(B,P2);
+End;
+
+Procedure MOWStsc(B: PFMXB; I: Integer);
+Var T: ^TMOWTrack; Idx, OldV, K: LongInt; EntryPos, Cur, Pos: LongInt;
+Begin
+ T:=@MOWT[I]; Pos:=FMXTell(B);
+ FMXWB32(B,0); FMXTag(B,'stsc'); FMXWB32(B,0);
+ EntryPos:=FMXTell(B); FMXWB32(B,T^.ChunkCount);
+ Idx:=0; OldV:=-1;
+ For K:=0 To T^.Entry-1 Do
+  If (OldV<>T^.Ents^[K].SamplesInChunk) And (T^.Ents^[K].ChunkNum<>0) Then Begin
+   FMXWB32(B,T^.Ents^[K].ChunkNum); FMXWB32(B,T^.Ents^[K].SamplesInChunk); FMXWB32(B,1);
+   OldV:=T^.Ents^[K].SamplesInChunk; Inc(Idx);
+  End;
+ Cur:=FMXTell(B); FMXSeek(B,EntryPos); FMXWB32(B,Idx); FMXSeek(B,Cur);
+ FMXUpdateSize(B,Pos);
+End;
+
+Procedure MOWStsz(B: PFMXB; I: Integer);
+Var T: ^TMOWTrack; Eq: Boolean; K, J, Tst, OldTst, Entries, SSize, Pos: LongInt;
+Begin
+ T:=@MOWT[I]; Pos:=FMXTell(B);
+ FMXWB32(B,0); FMXTag(B,'stsz'); FMXWB32(B,0);
+ Eq:=True; OldTst:=-1; Entries:=0;
+ For K:=0 To T^.Entry-1 Do Begin
+  Tst:=T^.Ents^[K].Size Div T^.Ents^[K].Entries;
+  If (OldTst<>-1) And (Tst<>OldTst) Then Eq:=False;
+  OldTst:=Tst; Inc(Entries,T^.Ents^[K].Entries);
+ End;
+ If Eq And (T^.Entry<>0) Then Begin
+  SSize:=T^.Ents^[0].Size Div T^.Ents^[0].Entries;
+  If SSize<1 Then SSize:=1;
+  FMXWB32(B,SSize); FMXWB32(B,Entries);
+ End Else Begin
+  FMXWB32(B,0); FMXWB32(B,Entries);
+  For K:=0 To T^.Entry-1 Do
+   For J:=0 To T^.Ents^[K].Entries-1 Do FMXWB32(B,T^.Ents^[K].Size Div T^.Ents^[K].Entries);
+ End;
+ FMXUpdateSize(B,Pos);
+End;
+
+Procedure MOWStco(B: PFMXB; I: Integer);
+Var T: ^TMOWTrack; K: LongInt; Pos: LongInt; M64: Boolean;
+Begin
+ T:=@MOWT[I]; Pos:=FMXTell(B);
+ M64:=(T^.Entry>0) And (T^.Ents^[T^.Entry-1].Pos>4294967295);
+ FMXWB32(B,0); If M64 Then FMXTag(B,'co64') Else FMXTag(B,'stco');
+ FMXWB32(B,0); FMXWB32(B,T^.ChunkCount);
+ For K:=0 To T^.Entry-1 Do If T^.Ents^[K].ChunkNum<>0 Then Begin
+  If M64 Then FMXWB64(B,T^.Ents^[K].Pos) Else FMXWB32(B,LongInt(T^.Ents^[K].Pos And $FFFFFFFF));
+ End;
+ FMXUpdateSize(B,Pos);
+End;
+
+{ preroll (sgpd/sbgp) pour AAC }
+Procedure MOWPreroll(B: PFMXB; I: Integer);
+Var T: ^TMOWTrack;
+Begin
+ T:=@MOWT[I];
+ If T^.Entry=0 Then Exit;
+ { AAC : une seule entree, roll_distance = 1, groupe 1 }
+ FMXWB32(B,24+2); FMXTag(B,'sgpd'); FMXWB32(B,1 Shl 24); FMXTag(B,'roll'); FMXWB32(B,2); FMXWB32(B,1);
+ FMXWB16(B,$FFFF);
+ FMXWB32(B,20+8); FMXTag(B,'sbgp'); FMXWB32(B,0); FMXTag(B,'roll'); FMXWB32(B,1);
+ FMXWB32(B,T^.SampleCount); FMXWB32(B,1);
+End;
+
+Procedure MOWStbl(B: PFMXB; I: Integer; NegCts: Boolean);
+Var Pos: LongInt; T: ^TMOWTrack;
+Begin
+ T:=@MOWT[I]; Pos:=FMXTell(B);
+ FMXWB32(B,0); FMXTag(B,'stbl');
+ MOWStsd(B,I);
+ MOWStts(B,I);
+ If (FMXS[I].Kind=FMXKind_V) And (T^.HasKey<>0) And (T^.HasKey<T^.Entry) Then MOWStss(B,I,MOW_SYNC);
+ If (FMXS[I].Kind=FMXKind_V) And (T^.HasDisp<>0) Then MOWSdtp(B,I);
+ If (T^.Mode=MOW_MOV) And ((T^.Flags And MOW_T_STPS)<>0) Then MOWStss(B,I,MOW_PSYNC);
+ If (FMXS[I].Kind=FMXKind_V) And ((T^.Flags And MOW_T_CTTS)<>0) And (T^.Entry<>0) Then MOWCtts(B,I,NegCts);
+ MOWStsc(B,I); MOWStsz(B,I); MOWStco(B,I);
+ If FMXS[I].Codec=FC_AAC Then MOWPreroll(B,I);
+ FMXUpdateSize(B,Pos);
+End;
+
+Procedure MOWHdlr(B: PFMXB; I: Integer; HasTrack: Boolean);
+Var Pos: LongInt; Hd, Ty, Descr: String; K: Integer;
+Begin
+ Hd:='dhlr'; Ty:='url '; Descr:='DataHandler';
+ If HasTrack Then Begin
+  If MOWT[I].Mode=MOW_MOV Then Hd:='mhlr' Else Hd:=#0#0#0#0;
+  If FMXS[I].Kind=FMXKind_V Then Begin Ty:='vide'; Descr:='VideoHandler'; End
+  Else If FMXS[I].Kind=FMXKind_A Then Begin Ty:='soun'; Descr:='SoundHandler'; End
+  Else Begin Ty:='text'; Descr:='SubtitleHandler'; End;
+  If FMXS[I].HandlerName<>'' Then Descr:=FMXS[I].HandlerName;
+ End;
+ Pos:=FMXTell(B);
+ FMXWB32(B,0); FMXTag(B,'hdlr'); FMXWB32(B,0);
+ FMXTag(B,Hd); FMXTag(B,Ty); FMXWB32(B,0); FMXWB32(B,0); FMXWB32(B,0);
+ If (Not HasTrack) Or (MOWT[I].Mode=MOW_MOV) Then FMXW8(B,Length(Descr));
+ FMXTag(B,Descr);
+ If HasTrack And (MOWT[I].Mode<>MOW_MOV) Then FMXW8(B,0);
+ FMXUpdateSize(B,Pos);
+End;
+
+Procedure MOWMinf(B: PFMXB; I: Integer; NegCts: Boolean);
+Var Pos: LongInt;
+Begin
+ Pos:=FMXTell(B);
+ FMXWB32(B,0); FMXTag(B,'minf');
+ If FMXS[I].Kind=FMXKind_V Then Begin
+  FMXWB32(B,$14); FMXTag(B,'vmhd'); FMXWB32(B,1); FMXWB64(B,0);
+ End Else If FMXS[I].Kind=FMXKind_A Then Begin
+  FMXWB32(B,16); FMXTag(B,'smhd'); FMXWB32(B,0); FMXWB16(B,0); FMXWB16(B,0);
+ End;
+ If MOWT[I].Mode=MOW_MOV Then MOWHdlr(B,I,False);
+ { dinf }
+ FMXWB32(B,36); FMXTag(B,'dinf'); FMXWB32(B,28); FMXTag(B,'dref'); FMXWB32(B,0); FMXWB32(B,1);
+ FMXWB32(B,12); FMXTag(B,'url '); FMXWB32(B,1);
+ MOWStbl(B,I,NegCts);
+ FMXUpdateSize(B,Pos);
+End;
+
+Procedure MOWPtsRange(I: Integer; Var Start, Fin: Int64);
+Begin
+ If (MOWT[I].EndPts<>FMXNoPts) And (MOWT[I].StartDts<>FMXNoPts) And (MOWT[I].StartCts<>FMXNoPts) Then Begin
+  Start:=MOWT[I].StartDts+MOWT[I].StartCts; Fin:=MOWT[I].EndPts; Exit;
+ End;
+ Start:=0; Fin:=MOWT[I].TrackDuration;
+End;
+
+Function MOWSamplesPtsDuration(I: Integer): Int64;
+Var S,E: Int64;
+Begin MOWPtsRange(I,S,E); MOWSamplesPtsDuration:=E-S; End;
+
+Function MOWPtsDuration(I: Integer): Int64;
+Var S,E: Int64;
+Begin
+ MOWPtsRange(I,S,E);
+ If MOWUseEditlist Then S:=0;
+ MOWPtsDuration:=E-S;
+End;
+
+Procedure MOWMdhd(B: PFMXB; I: Integer);
+Var Dur: Int64; Ver: Integer; T: ^TMOWTrack;
+Begin
+ T:=@MOWT[I]; Dur:=MOWSamplesPtsDuration(I);
+ If Dur<2147483647 Then Ver:=0 Else Ver:=1;
+ If Ver=1 Then FMXWB32(B,44) Else FMXWB32(B,32);
+ FMXTag(B,'mdhd'); FMXW8(B,Ver); FMXWB24(B,0);
+ If Ver=1 Then Begin FMXWB64(B,T^.Time); FMXWB64(B,T^.Time); End
+ Else Begin FMXWB32U(B,T^.Time); FMXWB32U(B,T^.Time); End;
+ FMXWB32(B,T^.Timescale);
+ If T^.Entry=0 Then Begin If Ver=1 Then FMXWB64(B,0) Else FMXWB32(B,0); End
+ Else If Ver=1 Then FMXWB64(B,Dur) Else FMXWB32U(B,Dur);
+ FMXWB16(B,T^.Language); FMXWB16(B,0);
+End;
+
+Procedure MOWMdia(B: PFMXB; I: Integer; NegCts: Boolean);
+Var Pos: LongInt;
+Begin
+ Pos:=FMXTell(B);
+ FMXWB32(B,0); FMXTag(B,'mdia');
+ MOWMdhd(B,I); MOWHdlr(B,I,True); MOWMinf(B,I,NegCts);
+ FMXUpdateSize(B,Pos);
+End;
+
+Procedure MOWMatrix(B: PFMXB);
+Begin
+ FMXWB32(B,1 Shl 16); FMXWB32(B,0); FMXWB32(B,0);
+ FMXWB32(B,0); FMXWB32(B,1 Shl 16); FMXWB32(B,0);
+ FMXWB32(B,0); FMXWB32(B,0); FMXWB32(B,1 Shl 30);
+End;
+
+Procedure MOWTkhd(B: PFMXB; I: Integer);
+Var Dur: Int64; Ver: Integer; Fl, Grp: LongInt; T: ^TMOWTrack; St: ^TFMXStream; W1616: Int64;
+Begin
+ T:=@MOWT[I]; St:=@FMXS[I];
+ Dur:=FMXRescaleRnd(MOWPtsDuration(I),MOWMovieTimescale,T^.Timescale,3);
+ Fl:=2; { IN_MOVIE }
+ If MOWPerStreamGrouping Then Grp:=I Else Begin
+  If St^.Kind=FMXKind_V Then Grp:=0 Else If St^.Kind=FMXKind_A Then Grp:=1 Else Grp:=2;
+ End;
+ If (T^.Flags And MOW_T_ENABLED)<>0 Then Fl:=Fl Or 1;
+ If Dur<2147483647 Then Ver:=0 Else Ver:=1;
+ If Ver=1 Then FMXWB32(B,104) Else FMXWB32(B,92);
+ FMXTag(B,'tkhd'); FMXW8(B,Ver); FMXWB24(B,Fl);
+ If Ver=1 Then Begin FMXWB64(B,T^.Time); FMXWB64(B,T^.Time); End Else Begin FMXWB32U(B,T^.Time); FMXWB32U(B,T^.Time); End;
+ FMXWB32(B,T^.TrackId); FMXWB32(B,0);
+ If T^.Entry=0 Then Begin If Ver=1 Then FMXWB64(B,0) Else FMXWB32(B,0); End
+ Else If Ver=1 Then FMXWB64(B,Dur) Else FMXWB32U(B,Dur);
+ FMXWB32(B,0); FMXWB32(B,0); FMXWB16(B,0); FMXWB16(B,Grp);
+ If St^.Kind=FMXKind_A Then FMXWB16(B,$100) Else FMXWB16(B,0);
+ FMXWB16(B,0);
+ MOWMatrix(B);
+ If St^.Kind=FMXKind_V Then Begin
+  If T^.Mode=MOW_MOV Then W1616:=Int64(St^.Width)*$10000
+  Else Begin
+   If (St^.SarN>0) And (St^.SarD>0) Then W1616:=FMXRescale(St^.SarN,Int64(St^.Width)*$10000,St^.SarD) Else W1616:=0;
+   If (W1616=0) Or (T^.Height<>St^.Height) Or (W1616>4294967295) Then W1616:=Int64(St^.Width)*$10000;
+  End;
+  FMXWB32U(B,W1616);
+  FMXWB32U(B,Int64(T^.Height)*$10000);
+ End Else Begin FMXWB32(B,0); FMXWB32(B,0); End;
+End;
+
+Procedure MOWEdts(B: PFMXB; I: Integer);
+Var Dur, Delay, StartCt, StartDts: Int64; Ver, EntrySize, EntryCount, Size: Integer; T: ^TMOWTrack;
+Begin
+ T:=@MOWT[I];
+ Dur:=FMXRescaleRnd(MOWSamplesPtsDuration(I),MOWMovieTimescale,T^.Timescale,3);
+ If Dur<2147483647 Then Ver:=0 Else Ver:=1;
+ StartCt:=T^.StartCts; StartDts:=T^.StartDts;
+ If T^.Entry<>0 Then
+  If (StartDts<>T^.Ents^[0].Dts) Or (StartCt<>T^.Ents^[0].Cts) Then Begin
+   StartDts:=T^.Ents^[0].Dts; StartCt:=T^.Ents^[0].Cts;
+  End;
+ Delay:=FMXRescaleRnd(StartDts+StartCt,MOWMovieTimescale,T^.Timescale,2);
+ If Delay>=2147483647 Then Ver:=1;
+ If Ver=1 Then EntrySize:=20 Else EntrySize:=12;
+ If Delay>0 Then EntryCount:=2 Else EntryCount:=1;
+ Size:=24+EntryCount*EntrySize;
+ FMXWB32(B,Size); FMXTag(B,'edts'); FMXWB32(B,Size-8); FMXTag(B,'elst');
+ FMXW8(B,Ver); FMXWB24(B,0);
+ FMXWB32(B,EntryCount);
+ If Delay>0 Then Begin
+  If Ver=1 Then Begin FMXWB64(B,Delay); FMXWB64(B,-1); End Else Begin FMXWB32U(B,Delay); FMXWB32(B,-1); End;
+  FMXWB32(B,$00010000);
+ End Else Begin
+  If StartDts<0 Then StartCt:=-StartDts Else StartCt:=0;
+  Dur:=Dur+Delay;
+ End;
+ If Ver=1 Then Begin FMXWB64(B,Dur); FMXWB64(B,StartCt); End Else Begin FMXWB32U(B,Dur); FMXWB32U(B,StartCt); End;
+ FMXWB32(B,$00010000);
+End;
+
+Procedure MOWTrakUdta(B: PFMXB; I: Integer);
+Var T: String;
+Begin
+ T:=FMXS[I].StTitle;
+ If T='' Then Exit;
+ If (MOWMode<>MOW_MP4) And (MOWMode<>MOW_MOV) Then Exit;
+ FMXWB32(B,8+8+Length(T)); FMXTag(B,'udta'); FMXWB32(B,8+Length(T)); FMXTag(B,'name'); FMXTag(B,T);
+End;
+
+Procedure MOWTrak(B: PFMXB; I: Integer; NegCts: Boolean);
+Var Pos, P2: LongInt; W: Int64;
+Begin
+ Pos:=FMXTell(B);
+ FMXWB32(B,0); FMXTag(B,'trak');
+ MOWTkhd(B,I);
+ If MOWT[I].StartDts<>FMXNoPts Then Begin
+  If MOWUseEditlist Then MOWEdts(B,I);
+ End;
+ MOWMdia(B,I,NegCts);
+ If MOWT[I].Mode=MOW_PSP Then Begin
+  FMXWB32(B,$34); FMXTag(B,'uuid'); FMXTag(B,'USMT'); FMXWB32(B,$21d24fce); FMXWB32(B,$bb88695c); FMXWB32(B,$fac9c740);
+  FMXWB32(B,$1c); FMXTag(B,'MTDT'); FMXWB32(B,$00010012); FMXWB32(B,$0a); FMXWB32(B,$55c40000); FMXWB32(B,1); FMXWB32(B,0);
+ End;
+ If (MOWT[I].Mode=MOW_MOV) And (FMXS[I].Kind=FMXKind_V) And (FMXS[I].SarN<>0) And (FMXS[I].SarD<>0) And (FMXS[I].SarN<>FMXS[I].SarD) Then Begin
+  P2:=FMXTell(B); W:=FMXRescale(FMXS[I].SarN,FMXS[I].Width,FMXS[I].SarD);
+  FMXWB32(B,0); FMXTag(B,'tapt');
+  FMXWB32(B,20); FMXTag(B,'clef'); FMXWB32(B,0); FMXWB32(B,W Shl 16); FMXWB32(B,FMXS[I].Height Shl 16);
+  FMXWB32(B,20); FMXTag(B,'prof'); FMXWB32(B,0); FMXWB32(B,W Shl 16); FMXWB32(B,FMXS[I].Height Shl 16);
+  FMXWB32(B,20); FMXTag(B,'enof'); FMXWB32(B,0); FMXWB32(B,FMXS[I].Width Shl 16); FMXWB32(B,FMXS[I].Height Shl 16);
+  FMXUpdateSize(B,P2);
+ End;
+ MOWTrakUdta(B,I);
+ FMXUpdateSize(B,Pos);
+End;
+
+Procedure MOWMvhd(B: PFMXB);
+Var MaxId, I: LongInt; MaxLen, L: Int64; Ver: Integer;
+Begin
+ MaxId:=1; MaxLen:=0;
+ For I:=0 To FMXN-1 Do
+  If (MOWT[I].Entry>0) And (MOWT[I].Timescale<>0) Then Begin
+   L:=FMXRescaleRnd(MOWPtsDuration(I),MOWMovieTimescale,MOWT[I].Timescale,3);
+   If MaxLen<L Then MaxLen:=L;
+   If MaxId<MOWT[I].TrackId Then MaxId:=MOWT[I].TrackId;
+  End;
+ If MaxLen<2147483647 Then Ver:=0 Else Ver:=1;
+ If Ver=1 Then FMXWB32(B,120) Else FMXWB32(B,108);
+ FMXTag(B,'mvhd'); FMXW8(B,Ver); FMXWB24(B,0);
+ If Ver=1 Then Begin FMXWB64(B,MOWMovTime); FMXWB64(B,MOWMovTime); End Else Begin FMXWB32U(B,MOWMovTime); FMXWB32U(B,MOWMovTime); End;
+ FMXWB32(B,MOWMovieTimescale);
+ If Ver=1 Then FMXWB64(B,MaxLen) Else FMXWB32U(B,MaxLen);
+ FMXWB32(B,$00010000); FMXWB16(B,$0100); FMXFill(B,0,2+2*4);
+ MOWMatrix(B);
+ FMXWB32(B,0); FMXWB32(B,0); FMXWB32(B,0); FMXWB32(B,0); FMXWB32(B,0); FMXWB32(B,0);
+ FMXWB32(B,MaxId+1);
+End;
+
+Procedure MOWIods(B: PFMXB);
+Var I: Integer; HasA, HasV: Integer; Pos: LongInt;
+Begin
+ HasA:=0; HasV:=0;
+ For I:=0 To FMXN-1 Do If MOWT[I].Entry>0 Then Begin
+  If FMXS[I].Kind=FMXKind_A Then HasA:=1;
+  If FMXS[I].Kind=FMXKind_V Then HasV:=1;
+ End;
+ Pos:=FMXTell(B);
+ FMXWB32(B,0); FMXTag(B,'iods'); FMXWB32(B,0);
+ MOWPutDescr(B,$10,7);
+ FMXWB16(B,$004F); FMXW8(B,$FF); FMXW8(B,$FF); FMXW8(B,$FF-HasA); FMXW8(B,$FF-HasV); FMXW8(B,$FF);
+ FMXUpdateSize(B,Pos);
+End;
+
+Procedure MOWStrTag(B: PFMXB; Const Name,Value: String; LongStyle: Boolean);
+Var Pos: LongInt;
+Begin
+ If Value='' Then Exit;
+ Pos:=FMXTell(B);
+ FMXWB32(B,0); FMXTag(B,Name);
+ If LongStyle Then Begin
+  FMXWB32(B,16+Length(Value)); FMXTag(B,'data'); FMXWB32(B,1); FMXWB32(B,0); FMXTag(B,Value);
+ End Else Begin
+  FMXWB16(B,Length(Value)); FMXWB16(B,$55C4); FMXTag(B,Value);
+ End;
+ FMXUpdateSize(B,Pos);
+End;
+
+Procedure MOWStrMeta(B: PFMXB; Const Name,Key: String; LongStyle: Boolean);
+Begin
+ MOWStrTag(B,Name,FMXMetaGet(Key),LongStyle);
+End;
+
+Procedure MOWIlst(B: PFMXB);
+Var Pos: LongInt; V: String;
+Begin
+ Pos:=FMXTell(B);
+ FMXWB32(B,0); FMXTag(B,'ilst');
+ MOWStrMeta(B,#169'nam','title',True);
+ MOWStrMeta(B,#169'ART','artist',True);
+ MOWStrMeta(B,'aART','album_artist',True);
+ MOWStrMeta(B,#169'wrt','composer',True);
+ MOWStrMeta(B,#169'alb','album',True);
+ MOWStrMeta(B,#169'day','date',True);
+ V:=FMXMetaGet('encoding_tool');
+ If V<>'' Then MOWStrTag(B,#169'too',V,True)
+ Else If Not FMXBitExact Then MOWStrTag(B,#169'too','Lavf60.16.100',True);
+ MOWStrMeta(B,#169'cmt','comment',True);
+ MOWStrMeta(B,#169'gen','genre',True);
+ MOWStrMeta(B,'cprt','copyright',True);
+ MOWStrMeta(B,#169'grp','grouping',True);
+ MOWStrMeta(B,#169'lyr','lyrics',True);
+ MOWStrMeta(B,'desc','description',True);
+ MOWStrMeta(B,'ldes','synopsis',True);
+ MOWStrMeta(B,'tvsh','show',True);
+ MOWStrMeta(B,'tven','episode_id',True);
+ MOWStrMeta(B,'tvnn','network',True);
+ MOWStrMeta(B,'keyw','keywords',True);
+ FMXUpdateSize(B,Pos);
+End;
+
+Procedure MOWMeta(B: PFMXB);
+Var Pos: LongInt;
+Begin
+ Pos:=FMXTell(B);
+ FMXWB32(B,0); FMXTag(B,'meta'); FMXWB32(B,0);
+ FMXWB32(B,33); FMXTag(B,'hdlr'); FMXWB32(B,0); FMXWB32(B,0); FMXTag(B,'mdir'); FMXTag(B,'appl');
+ FMXWB32(B,0); FMXWB32(B,0); FMXW8(B,0);
+ MOWIlst(B);
+ FMXUpdateSize(B,Pos);
+End;
+
+Function MOW3gpUdta(B: PFMXB; Const Tag,Key: String): Boolean;
+Var Pos: LongInt; V: String;
+Begin
+ MOW3gpUdta:=False; V:=FMXMetaGet(Key);
+ If V='' Then Exit;
+ Pos:=FMXTell(B);
+ FMXWB32(B,0); FMXTag(B,Tag); FMXWB32(B,0);
+ If Tag='yrrc' Then FMXWB16(B,FMXAtoi(V))
+ Else Begin
+  FMXWB16(B,MOWLangCode('eng')); FMXPutStr(B,V);
+  If Tag='albm' Then If FMXMetaHas('track') Then FMXW8(B,FMXAtoi(FMXMetaGet('track')));
+ End;
+ FMXUpdateSize(B,Pos);
+End;
+
+Procedure MOWUdta(B: PFMXB);
+Var Tmp: PFMXB; Sz: LongInt;
+Begin
+ Tmp:=FMXNew;
+ If (MOWMode And MOW_3GP)<>0 Then Begin
+  MOW3gpUdta(Tmp,'perf','artist'); MOW3gpUdta(Tmp,'titl','title'); MOW3gpUdta(Tmp,'auth','author');
+  MOW3gpUdta(Tmp,'gnre','genre'); MOW3gpUdta(Tmp,'dscp','comment'); MOW3gpUdta(Tmp,'albm','album');
+  MOW3gpUdta(Tmp,'cprt','copyright'); MOW3gpUdta(Tmp,'yrrc','date');
+ End Else If MOWMode=MOW_MOV Then Begin
+  MOWStrMeta(Tmp,#169'ART','artist',False); MOWStrMeta(Tmp,#169'nam','title',False);
+  MOWStrMeta(Tmp,#169'aut','author',False); MOWStrMeta(Tmp,#169'alb','album',False);
+  MOWStrMeta(Tmp,#169'day','date',False); MOWStrMeta(Tmp,#169'swr','encoder',False);
+  MOWStrMeta(Tmp,#169'des','comment',False); MOWStrMeta(Tmp,#169'cmt','comment',False);
+  MOWStrMeta(Tmp,#169'gen','genre',False); MOWStrMeta(Tmp,#169'cpy','copyright',False);
+  MOWStrMeta(Tmp,#169'mak','make',False); MOWStrMeta(Tmp,#169'mod','model',False);
+  MOWStrMeta(Tmp,#169'xyz','location',False); MOWStrMeta(Tmp,#169'key','keywords',False);
+ End Else If MOWMode<>MOW_PSP Then MOWMeta(Tmp);
+ Sz:=Tmp^.Len;
+ If Sz>0 Then Begin
+  FMXWB32(B,Sz+8); FMXTag(B,'udta'); FMXWrite(B,Tmp^.D,Sz);
+ End;
+ FMXFree(Tmp);
+End;
+
+Procedure MOWBuildChunks(Var T: TMOWTrack);
+Var I, CIdx: LongInt; ChunkSize: QWord;
+Begin
+ CIdx:=0; ChunkSize:=T.Ents^[0].Size;
+ T.Ents^[0].ChunkNum:=1;
+ If T.ChunkCount<>0 Then Exit;
+ T.ChunkCount:=1;
+ For I:=1 To T.Entry-1 Do Begin
+  If (QWord(T.Ents^[CIdx].Pos)+ChunkSize=QWord(T.Ents^[I].Pos)) And (ChunkSize+QWord(T.Ents^[I].Size)<QWord(1 Shl 20)) Then Begin
+   ChunkSize:=ChunkSize+QWord(T.Ents^[I].Size);
+   Inc(T.Ents^[CIdx].SamplesInChunk,T.Ents^[I].Entries);
+  End Else Begin
+   T.Ents^[I].ChunkNum:=T.Ents^[CIdx].ChunkNum+1;
+   CIdx:=I; ChunkSize:=T.Ents^[I].Size; Inc(T.ChunkCount);
+  End;
+ End;
+End;
+
+Procedure MOWMoov(B: PFMXB);
+Var Pos: LongInt; I: Integer; NegCts: Boolean;
+Begin
+ Pos:=FMXTell(B); NegCts:=False;
+ FMXWB32(B,0); FMXTag(B,'moov');
+ For I:=0 To FMXN-1 Do Begin
+  If MOWT[I].Entry<=0 Then Continue;
+  MOWT[I].TrackId:=I+1;
+ End;
+ For I:=0 To FMXN-1 Do Begin
+  If MOWT[I].Entry<=0 Then Continue;
+  MOWT[I].Time:=MOWMovTime;
+  MOWBuildChunks(MOWT[I]);
+ End;
+ MOWMvhd(B);
+ { iods : option skip_iods=1 par defaut -> non ecrit }
+ For I:=0 To FMXN-1 Do If MOWT[I].Entry>0 Then MOWTrak(B,I,NegCts);
+ MOWUdta(B);
+ FMXUpdateSize(B,Pos);
+End;
+{ ------------------------------------------------------------------ }
+{ Couche de multiplexage generique (libavformat/mux.c)                 }
+{ ------------------------------------------------------------------ }
+Procedure FMXFmtInit; Forward;
+Procedure FMXFmtHeader; Forward;
+Procedure FMXFmtPacket(P: PFMXPkt); Forward;
+Procedure FMXFmtTrailer; Forward;
+
+Procedure FMXReset;
+Var I: Integer;
+Begin
+ FMXN:=0; FMXHead:=Nil; FMXTail:=Nil; FMXBitExact:=False;
+ FMXMaxIlvDelta:=10000000; FMXAvoidStatus:=0; FMXAvoidUsePts:=False;
+ FMXFmtTsNeg:=False; FMXFmtNonStrict:=False; FMXFmtNoTs:=False; FMXFmtVarFps:=False;
+ FillChar(FMXS,SizeOf(FMXS),0);
+ For I:=0 To FMXMaxS-1 Do Begin
+  FMXS[I].CurDts:=FMXNoPts; FMXS[I].LastInBuf:=Nil;
+ End;
+End;
+
+Function FMXAddStream(Kind: Integer): Integer;
+Var I,K: Integer;
+Begin
+ If FMXN>=FMXMaxS Then Fail('Trop de flux pour le multiplexeur.');
+ I:=FMXN; Inc(FMXN);
+ FillChar(FMXS[I],SizeOf(FMXS[I]),0);
+ FMXS[I].Kind:=Kind; FMXS[I].CurDts:=FMXNoPts; FMXS[I].LastInBuf:=Nil;
+ FMXS[I].Lang:='und';
+ For K:=0 To 16 Do FMXS[I].PtsBuf[K]:=FMXNoPts;
+ FMXS[I].TbN:=1; FMXS[I].TbD:=90000;
+ FMXS[I].SarN:=0; FMXS[I].SarD:=1;
+ FMXAddStream:=I;
+End;
+
+Function FMXNewPkt(SI: Integer; Size: LongInt): PFMXPkt;
+Var P: PFMXPkt;
+Begin
+ New(P); FillChar(P^,SizeOf(P^),0);
+ P^.SI:=SI; P^.Size:=Size; P^.Pts:=FMXNoPts; P^.Dts:=FMXNoPts;
+ If Size>0 Then GetMem(P^.Data,Size) Else P^.Data:=Nil;
+ P^.Next:=Nil;
+ FMXNewPkt:=P;
+End;
+
+Procedure FMXFreePkt(P: PFMXPkt);
+Begin
+ If P=Nil Then Exit;
+ If P^.Data<>Nil Then FreeMem(P^.Data);
+ Dispose(P);
+End;
+
+{ av_packet_rescale_ts }
+Procedure FMXRescalePkt(P: PFMXPkt; SN,SD,DN,DD: Int64);
+Begin
+ If SN*DD=SD*DN Then Exit;
+ If P^.Pts<>FMXNoPts Then P^.Pts:=FMXRescaleQRnd(P^.Pts,SN,SD,DN,DD,5);
+ If P^.Dts<>FMXNoPts Then P^.Dts:=FMXRescaleQRnd(P^.Dts,SN,SD,DN,DD,5);
+ If P^.Dur>0 Then P^.Dur:=FMXRescaleQ(P^.Dur,SN,SD,DN,DD);
+End;
+
+{ compare de l'entrelaceur : vrai si pkt doit etre place avant next }
+Function FMXIlvCompare(Nx,P: PFMXPkt): Boolean;
+Var C: Integer;
+Begin
+ C:=FMXCompareTs(Nx^.Dts,FMXS[Nx^.SI].TbN,FMXS[Nx^.SI].TbD,P^.Dts,FMXS[P^.SI].TbN,FMXS[P^.SI].TbD);
+ If C=0 Then FMXIlvCompare:=P^.SI<Nx^.SI Else FMXIlvCompare:=C>0;
+End;
+
+Procedure FMXIlvAdd(P: PFMXPkt);
+Var NP: ^PFMXPkt; S: ^TFMXStream;
+Begin
+ S:=@FMXS[P^.SI];
+ If S^.LastInBuf<>Nil Then NP:=@(S^.LastInBuf^.Next) Else NP:=@FMXHead;
+ If NP^<>Nil Then Begin
+  If FMXIlvCompare(FMXTail,P) Then Begin
+   While (NP^<>Nil) And Not FMXIlvCompare(NP^,P) Do NP:=@(NP^^.Next);
+   If NP^<>Nil Then Begin
+    P^.Next:=NP^; S^.LastInBuf:=P; NP^:=P; Exit;
+   End;
+  End Else NP:=@(FMXTail^.Next);
+ End;
+ FMXTail:=P;
+ P^.Next:=NP^; S^.LastInBuf:=P; NP^:=P;
+End;
+
+{ handle_avoid_negative_ts (dts) }
+Procedure FMXAvoidNegative(P: PFMXPkt);
+Var Ts: Int64; Tb: Integer; Q: PFMXPkt; Cmp: Int64; I: Integer; Off: Int64;
+    TsN,TsD: Int64;
+Begin
+ If FMXAvoidStatus=2 Then Exit;
+ If FMXAvoidStatus=0 Then Begin
+  Ts:=P^.Dts;
+  If Ts=FMXNoPts Then Exit;
+  TsN:=FMXS[P^.SI].TbN; TsD:=FMXS[P^.SI].TbD;
+  Q:=FMXHead;
+  While Q<>Nil Do Begin
+   Cmp:=Q^.Dts;
+   If Cmp<>FMXNoPts Then
+    If FMXCompareTs(Cmp,FMXS[Q^.SI].TbN,FMXS[Q^.SI].TbD,Ts,TsN,TsD)<0 Then Begin
+     Ts:=Cmp; TsN:=FMXS[Q^.SI].TbN; TsD:=FMXS[Q^.SI].TbD;
+    End;
+   Q:=Q^.Next;
+  End;
+  If (Ts<0) Or ((Ts>0) And (FMXAvoidNeg=2)) Then
+   For I:=0 To FMXN-1 Do
+    FMXS[I].MuxTsOffset:=FMXRescaleQRnd(-Ts,TsN,TsD,FMXS[I].TbN,FMXS[I].TbD,3);
+  FMXAvoidStatus:=1;
+ End;
+ Off:=FMXS[P^.SI].MuxTsOffset;
+ If P^.Dts<>FMXNoPts Then P^.Dts:=P^.Dts+Off;
+ If P^.Pts<>FMXNoPts Then P^.Pts:=P^.Pts+Off;
+End;
+
+Procedure FMXWriteOne(P: PFMXPkt);
+Begin
+ FMXAvoidNegative(P);
+ FMXFmtPacket(P);
+ Inc(FMXS[P^.SI].NbFrames);
+End;
+
+{ ff_interleave_packet_per_dts ; renvoie le paquet a ecrire ou Nil }
+Function FMXIlvGet(Flush: Boolean; Pkt: PFMXPkt): PFMXPkt;
+Var StreamCount, NonIlv, NbIlv, I: Integer; Top, Last: PFMXPkt; TopDts, LastDts, Delta: Int64; Q: PFMXPkt;
+Begin
+ If Pkt<>Nil Then FMXIlvAdd(Pkt);
+ StreamCount:=0; NonIlv:=0; NbIlv:=FMXN;
+ For I:=0 To FMXN-1 Do
+  If FMXS[I].LastInBuf<>Nil Then Inc(StreamCount) Else Inc(NonIlv);
+ If NbIlv=StreamCount Then Flush:=True;
+ If (FMXMaxIlvDelta>0) And (FMXHead<>Nil) And (FMXHead^.Dts<>FMXNoPts) And Not Flush And (NbIlv=StreamCount+NonIlv) Then Begin
+  Top:=FMXHead;
+  TopDts:=FMXRescaleQ(Top^.Dts,FMXS[Top^.SI].TbN,FMXS[Top^.SI].TbD,1,1000000);
+  Delta:=-9223372036854775807-1;
+  For I:=0 To FMXN-1 Do Begin
+   Last:=FMXS[I].LastInBuf;
+   If Last=Nil Then Continue;
+   LastDts:=FMXRescaleQ(Last^.Dts,FMXS[I].TbN,FMXS[I].TbD,1,1000000);
+   If LastDts-TopDts>Delta Then Delta:=LastDts-TopDts;
+  End;
+  If Delta>FMXMaxIlvDelta Then Flush:=True;
+ End;
+ If (StreamCount>0) And Flush Then Begin
+  Q:=FMXHead;
+  If FMXS[Q^.SI].LastInBuf=Q Then FMXS[Q^.SI].LastInBuf:=Nil;
+  FMXHead:=Q^.Next; If FMXHead=Nil Then FMXTail:=Nil;
+  Q^.Next:=Nil;
+  FMXIlvGet:=Q;
+ End Else FMXIlvGet:=Nil;
+End;
+
+{ av_get_audio_frame_duration2 pour les codecs PCM }
+Function FMXAudioFrameDur(Var S: TFMXStream; Size: LongInt): LongInt;
+Var Bits: LongInt;
+Begin
+ FMXAudioFrameDur:=0;
+ Bits:=MOWBitsPerSample(S.Codec);
+ If (Bits>0) And (S.Channels>0) Then FMXAudioFrameDur:=(Size*8) Div (Bits*S.Channels)
+ Else If S.FrameSize>0 Then FMXAudioFrameDur:=S.FrameSize;
+End;
+
+{ write_packets_common + write_packet_common pour un paquet deja a la base de temps du flux }
+Procedure FMXMuxPacket(P: PFMXPkt);
+Var S: ^TFMXStream; Delay: LongInt; I: Integer; Fs: LongInt;
+    Ret: PFMXPkt; Sw: Int64;
+Begin
+ S:=@FMXS[P^.SI];
+ If S^.IsIntra Then P^.Flags:=P^.Flags Or FMX_PKT_KEY;
+ { guess_pkt_duration }
+ If P^.Dur<0 Then P^.Dur:=0;
+ If P^.Dur=0 Then Begin
+  If S^.Kind=FMXKind_V Then Begin
+   If (S^.FpsN>0) And (S^.FpsD>0) Then P^.Dur:=FMXRescaleQ(1,S^.FpsD,S^.FpsN,S^.TbN,S^.TbD)
+   Else If S^.TbN*1000>S^.TbD Then P^.Dur:=1;
+  End Else If S^.Kind=FMXKind_A Then Begin
+   Fs:=FMXAudioFrameDur(S^,P^.Size);
+   If (Fs<>0) And (S^.SampleRate<>0) Then P^.Dur:=FMXRescaleQ(Fs,1,S^.SampleRate,S^.TbN,S^.TbD);
+  End;
+ End;
+ { compute_muxer_pkt_fields }
+ Delay:=S^.VideoDelay;
+ If (P^.Pts=FMXNoPts) And (P^.Dts<>FMXNoPts) And (Delay=0) Then P^.Pts:=P^.Dts;
+ If ((P^.Pts=0) Or (P^.Pts=FMXNoPts)) And (P^.Dts=FMXNoPts) And (Delay=0) Then Begin
+  P^.Pts:=S^.PrivPtsVal; P^.Dts:=P^.Pts;
+ End;
+ If (P^.Pts<>FMXNoPts) And (P^.Dts=FMXNoPts) And (Delay<=16) Then Begin
+  S^.PtsBuf[0]:=P^.Pts;
+  I:=1;
+  While (I<Delay+1) And (S^.PtsBuf[I]=FMXNoPts) Do Begin S^.PtsBuf[I]:=P^.Pts+(I-Delay-1)*P^.Dur; Inc(I); End;
+  I:=0;
+  While (I<Delay) And (S^.PtsBuf[I]>S^.PtsBuf[I+1]) Do Begin
+   Sw:=S^.PtsBuf[I]; S^.PtsBuf[I]:=S^.PtsBuf[I+1]; S^.PtsBuf[I+1]:=Sw; Inc(I);
+  End;
+  P^.Dts:=S^.PtsBuf[0];
+ End;
+ If (S^.CurDts<>0) And (S^.CurDts<>FMXNoPts) And
+    ((Not FMXFmtNonStrict And (S^.Kind<>FMXKind_S) And (S^.CurDts>=P^.Dts)) Or (S^.CurDts>P^.Dts)) Then
+  Fail('Application provided invalid, non monotonically increasing dts to muxer in stream '+FMXIStr(P^.SI)+': '+FMXIStr(S^.CurDts)+' >= '+FMXIStr(P^.Dts));
+ If (P^.Dts<>FMXNoPts) And (P^.Pts<>FMXNoPts) And (P^.Pts<P^.Dts) Then
+  Fail('pts ('+FMXIStr(P^.Pts)+') < dts ('+FMXIStr(P^.Dts)+') in stream '+FMXIStr(P^.SI));
+ S^.CurDts:=P^.Dts; S^.PrivPtsVal:=P^.Dts;
+ { interleaved_write_packet }
+ If FMXN>1 Then Begin
+  Ret:=FMXIlvGet(False,P);
+  While Ret<>Nil Do Begin
+   FMXWriteOne(Ret); FMXFreePkt(Ret);
+   Ret:=FMXIlvGet(False,Nil);
+  End;
+ End Else Begin
+  FMXWriteOne(P); FMXFreePkt(P);
+ End;
+End;
+
+Procedure FMXFlush;
+Var Ret: PFMXPkt;
+Begin
+ If FMXN>1 Then Begin
+  Ret:=FMXIlvGet(True,Nil);
+  While Ret<>Nil Do Begin
+   FMXWriteOne(Ret); FMXFreePkt(Ret);
+   Ret:=FMXIlvGet(True,Nil);
+  End;
+ End;
+End;
+{ ---- MOV : init / en-tete / paquets / fin ---------------------------------- }
+Function MOWCodecName(C: Integer): String;
+Begin
+ Case C Of
+  FC_QTRLE: MOWCodecName:='qtrle'; FC_SVQ1: MOWCodecName:='svq1'; FC_H264: MOWCodecName:='h264'; FC_MPEG4: MOWCodecName:='mpeg4';
+  FC_MJPEG: MOWCodecName:='mjpeg'; FC_FLV1: MOWCodecName:='flv1'; FC_PNG: MOWCodecName:='png'; FC_MSMPEG4V3: MOWCodecName:='msmpeg4v3';
+  FC_WMV1: MOWCodecName:='wmv1'; FC_WMV2: MOWCodecName:='wmv2'; FC_H263: MOWCodecName:='h263'; FC_RAWVIDEO: MOWCodecName:='rawvideo';
+  FC_HUFFYUV: MOWCodecName:='huffyuv'; FC_FFV1: MOWCodecName:='ffv1'; FC_AAC: MOWCodecName:='aac'; FC_ALAC: MOWCodecName:='alac';
+  FC_MP3: MOWCodecName:='mp3'; FC_MP2: MOWCodecName:='mp2'; FC_AC3: MOWCodecName:='ac3'; FC_ADPCM_IMA_QT: MOWCodecName:='adpcm_ima_qt';
+  FC_ADPCM_MS: MOWCodecName:='adpcm_ms'; FC_ADPCM_IMA_WAV: MOWCodecName:='adpcm_ima_wav'; FC_ADPCM_SWF: MOWCodecName:='adpcm_swf';
+  FC_NELLYMOSER: MOWCodecName:='nellymoser'; FC_WMAV1: MOWCodecName:='wmav1'; FC_WMAV2: MOWCodecName:='wmav2';
+  FC_PCM_S16LE: MOWCodecName:='pcm_s16le'; FC_PCM_S16BE: MOWCodecName:='pcm_s16be'; FC_PCM_U8: MOWCodecName:='pcm_u8';
+  FC_PCM_S8: MOWCodecName:='pcm_s8'; FC_PCM_S24LE: MOWCodecName:='pcm_s24le'; FC_PCM_S24BE: MOWCodecName:='pcm_s24be';
+  FC_PCM_S32LE: MOWCodecName:='pcm_s32le'; FC_PCM_S32BE: MOWCodecName:='pcm_s32be'; FC_PCM_F32LE: MOWCodecName:='pcm_f32le';
+  FC_PCM_F32BE: MOWCodecName:='pcm_f32be'; FC_PCM_F64LE: MOWCodecName:='pcm_f64le'; FC_PCM_F64BE: MOWCodecName:='pcm_f64be';
+  FC_PCM_ALAW: MOWCodecName:='pcm_alaw'; FC_PCM_MULAW: MOWCodecName:='pcm_mulaw'; FC_AMR_NB: MOWCodecName:='amr_nb';
+  FC_MSMPEG4V2: MOWCodecName:='msmpeg4v2'; FC_MSMPEG4V1: MOWCodecName:='msmpeg4v1'; FC_ZLIB: MOWCodecName:='zlib'; FC_ZMBV: MOWCodecName:='zmbv';
+  FC_ASV1: MOWCodecName:='asv1'; FC_ASV2: MOWCodecName:='asv2'; FC_SNOW: MOWCodecName:='snow';
+  FC_MPEG1VIDEO: MOWCodecName:='mpeg1video'; FC_MPEG2VIDEO: MOWCodecName:='mpeg2video';
+  FC_ADPCM_YAMAHA: MOWCodecName:='adpcm_yamaha'; FC_PCM_U16LE: MOWCodecName:='pcm_u16le'; FC_PCM_U16BE: MOWCodecName:='pcm_u16be';
+  Else MOWCodecName:='unknown';
+ End;
+End;
+
+Function MOWLang(Const L: String; Mp4: Boolean): LongInt;
+Var I, Code, C: Integer; M: Array[0..0] Of Byte;
+Begin
+ If Not Mp4 Then Begin
+  If L='eng' Then Begin MOWLang:=0; Exit; End;
+  MOWLang:=-1; Exit;
+ End;
+ If Length(L)<3 Then Begin MOWLang:=MOWLangCode('und'); Exit; End;
+ Code:=0;
+ For I:=1 To 3 Do Begin
+  C:=Ord(L[I])-$60;
+  If (C<0) Or (C>$1F) Then Begin MOWLang:=-1; Exit; End;
+  Code:=(Code Shl 5) Or C;
+ End;
+ MOWLang:=Code;
+End;
+
+Procedure MOWInit;
+Var I: Integer; T: ^TMOWTrack; S: ^TFMXStream; Enabled: Array[0..3] Of Integer; First: Array[0..3] Of Integer; K: Integer;
+Begin
+ MOWMode:=MOW_MP4;
+ If FMXFmt='3gp' Then MOWMode:=MOW_3GP
+ Else If FMXFmt='3g2' Then MOWMode:=MOW_3GP Or MOW_3G2
+ Else If FMXFmt='mov' Then MOWMode:=MOW_MOV
+ Else If FMXFmt='psp' Then MOWMode:=MOW_PSP
+ Else If FMXFmt='ipod' Then MOWMode:=MOW_IPOD;
+ MOWUseEditlist:=True; MOWMovieTimescale:=1000; MOWMovTime:=0; MOWPerStreamGrouping:=False;
+ MOWWriteBtrt:=MOWMode=MOW_MP4;
+ FMXFmtTsNeg:=True; FMXAvoidStatus:=2;
+ FillChar(MOWT,SizeOf(MOWT),0);
+ For I:=0 To FMXN-1 Do Begin
+  T:=@MOWT[I]; S:=@FMXS[I];
+  T^.Mode:=MOWMode;
+  T^.Language:=MOWLang(S^.Lang,MOWMode<>MOW_MOV);
+  If T^.Language<0 Then T^.Language:=32767;
+  T^.Tag:=MOWFindTag(I);
+  If T^.Tag=0 Then Begin
+   Fail('Could not find tag for codec '+MOWCodecName(S^.Codec)+' in stream #'+FMXIStr(I)+', codec not currently supported in container');
+  End;
+  T^.StartDts:=FMXNoPts; T^.StartCts:=FMXNoPts; T^.EndPts:=FMXNoPts;
+  T^.Height:=S^.Height;
+  If S^.Kind=FMXKind_V Then Begin
+   T^.Timescale:=S^.TbD;
+   While T^.Timescale<10000 Do T^.Timescale:=T^.Timescale*2;
+   If S^.Codec=FC_RAWVIDEO Then Begin
+    If MOWMode<>MOW_MOV Then Fail('rawvideo n''est pas pris en charge dans ce conteneur.');
+    MOWRawVideoTag(T^,S^);
+    T^.Tag:=MOWFindTag(I);
+   End Else T^.Bps:=S^.Bps;
+   If (S^.Codec=FC_H264) And (S^.ExtraLen<=0) Then Fail('H.264: extradata (avcC) requis.');
+  End Else If S^.Kind=FMXKind_A Then Begin
+   T^.Timescale:=S^.SampleRate;
+   If (S^.FrameSize=0) And (MOWBitsPerSample(S^.Codec)=0) Then T^.AudioVbr:=True
+   Else If (S^.Codec=FC_ADPCM_MS) Or (S^.Codec=FC_ADPCM_IMA_WAV) Then Begin
+    If S^.BlockAlign=0 Then Fail('track '+FMXIStr(I)+': codec block align is not set for adpcm');
+    T^.SampleSize:=S^.BlockAlign;
+   End Else If S^.FrameSize>1 Then T^.AudioVbr:=True
+   Else T^.SampleSize:=(MOWBitsPerSample(S^.Codec) Shr 3)*S^.Channels;
+   If S^.Codec=FC_ADPCM_IMA_QT Then T^.AudioVbr:=True;
+   If (MOWMode<>MOW_MOV) And (S^.Codec=FC_MP3) And (T^.Timescale<16000) Then
+    Fail('track '+FMXIStr(I)+': muxing mp3 at '+FMXIStr(S^.SampleRate)+'hz is not standard, to mux anyway set strict to -1');
+  End Else T^.Timescale:=MOWMovieTimescale;
+  S^.TbN:=1; S^.TbD:=T^.Timescale;
+  S^.CurDts:=FMXNoPts;
+ End;
+ { enable_tracks }
+ For K:=0 To 3 Do Begin Enabled[K]:=0; First[K]:=-1; End;
+ For I:=0 To FMXN-1 Do Begin
+  K:=FMXS[I].Kind;
+  If First[K]<0 Then First[K]:=I;
+  If (FMXS[I].Disposition And 1)<>0 Then Begin MOWT[I].Flags:=MOWT[I].Flags Or MOW_T_ENABLED; Inc(Enabled[K]); End;
+ End;
+ For K:=0 To 2 Do Begin
+  If Enabled[K]>1 Then MOWPerStreamGrouping:=True;
+  If (Enabled[K]=0) And (First[K]>=0) Then MOWT[First[K]].Flags:=MOWT[First[K]].Flags Or MOW_T_ENABLED;
+ End;
+End;
+
+Procedure MOWFtypInternal(B: PFMXB; HasH264, HasVideo, WriteMinor: Boolean);
+Var Minor: LongInt;
+Begin
+ Minor:=$200;
+ If (MOWMode And MOW_3GP)<>0 Then Begin
+  If (MOWMode And MOW_3G2)<>0 Then Begin
+   If HasH264 Then FMXTag(B,'3g2b') Else FMXTag(B,'3g2a');
+   If HasH264 Then Minor:=$20000 Else Minor:=$10000;
+  End Else Begin
+   If HasH264 Then FMXTag(B,'3gp6') Else FMXTag(B,'3gp4');
+   If HasH264 Then Minor:=$100 Else Minor:=$200;
+  End;
+ End Else If MOWMode=MOW_PSP Then FMXTag(B,'MSNV')
+ Else If MOWMode=MOW_MP4 Then FMXTag(B,'isom')
+ Else If MOWMode=MOW_IPOD Then Begin If HasVideo Then FMXTag(B,'M4V ') Else FMXTag(B,'M4A '); End
+ Else FMXTag(B,'qt  ');
+ If WriteMinor Then FMXWB32(B,Minor);
+End;
+
+Procedure MOWFtyp(B: PFMXB);
+Var Pos: LongInt; HasH264, HasVideo: Boolean; I: Integer;
+Begin
+ HasH264:=False; HasVideo:=False;
+ For I:=0 To FMXN-1 Do Begin
+  If FMXS[I].Kind=FMXKind_V Then HasVideo:=True;
+  If FMXS[I].Codec=FC_H264 Then HasH264:=True;
+ End;
+ Pos:=FMXTell(B);
+ FMXWB32(B,0); FMXTag(B,'ftyp');
+ MOWFtypInternal(B,HasH264,HasVideo,True);
+ MOWFtypInternal(B,HasH264,HasVideo,False);
+ If MOWMode<>MOW_MOV Then Begin
+  If MOWMode<>MOW_MP4 Then FMXTag(B,'isom');
+  FMXTag(B,'iso2');
+  If HasH264 Then FMXTag(B,'avc1');
+ End;
+ If MOWMode=MOW_MP4 Then FMXTag(B,'mp41');
+ FMXUpdateSize(B,Pos);
+End;
+
+Procedure MOWUuidProf(B: PFMXB);
+Var Vs, As_: ^TFMXStream; Fr: Int64; Ak, Vk: LongInt;
+Begin
+ Vs:=@FMXS[0]; As_:=@FMXS[1];
+ If Vs^.FpsD<>0 Then Fr:=(Int64(Vs^.FpsN)*$10000) Div Vs^.FpsD Else Fr:=0;
+ Ak:=As_^.BitRate Div 1000;
+ Vk:=Vs^.BitRate Div 1000; If Vk>800-Ak Then Vk:=800-Ak;
+ FMXWB32(B,$94); FMXTag(B,'uuid'); FMXTag(B,'PROF');
+ FMXWB32(B,$21d24fce); FMXWB32(B,$bb88695c); FMXWB32(B,$fac9c740);
+ FMXWB32(B,0); FMXWB32(B,3);
+ FMXWB32(B,$14); FMXTag(B,'FPRF'); FMXWB32(B,0); FMXWB32(B,0); FMXWB32(B,0);
+ FMXWB32(B,$2c); FMXTag(B,'APRF'); FMXWB32(B,0); FMXWB32(B,2); FMXTag(B,'mp4a'); FMXWB32(B,$20f); FMXWB32(B,0);
+ FMXWB32(B,Ak); FMXWB32(B,Ak); FMXWB32(B,As_^.SampleRate); FMXWB32(B,As_^.Channels);
+ FMXWB32(B,$34); FMXTag(B,'VPRF'); FMXWB32(B,0); FMXWB32(B,1);
+ If Vs^.Codec=FC_H264 Then Begin FMXTag(B,'avc1'); FMXWB16(B,$014D); FMXWB16(B,$0015); End
+ Else Begin FMXTag(B,'mp4v'); FMXWB16(B,0); FMXWB16(B,$0103); End;
+ FMXWB32(B,0); FMXWB32(B,Vk); FMXWB32(B,Vk); FMXWB32U(B,Fr); FMXWB32U(B,Fr);
+ FMXWB16(B,Vs^.Width); FMXWB16(B,Vs^.Height); FMXWB32(B,$010001);
+End;
+
+Procedure MOWHeader;
+Var B: PFMXB; I: Integer; Vn, An: Integer;
+Begin
+ B:=FMXOut;
+ For I:=0 To FMXN-1 Do Begin
+  If FMXS[I].ExtraLen>0 Then Begin
+   MOWT[I].VosLen:=FMXS[I].ExtraLen;
+   GetMem(MOWT[I].Vos,MOWT[I].VosLen+16); Move(FMXS[I].Extra^,MOWT[I].Vos^,MOWT[I].VosLen); FillChar(MOWT[I].Vos^[MOWT[I].VosLen],16,0);
+  End;
+ End;
+ MOWFtyp(B);
+ If MOWMode=MOW_PSP Then Begin
+  Vn:=0; An:=0;
+  For I:=0 To FMXN-1 Do Begin
+   If FMXS[I].Kind=FMXKind_V Then Inc(Vn) Else If FMXS[I].Kind=FMXKind_A Then Inc(An);
+  End;
+  If (Vn<>1) Or (An<>1) Or (FMXN<>2) Then Fail('PSP mode need one video and one audio stream');
+  MOWUuidProf(B);
+ End;
+ { mov_write_mdat_tag }
+ FMXWB32(B,8);
+ If MOWMode=MOW_MOV Then FMXTag(B,'wide') Else FMXTag(B,'free');
+ MOWMdatPos:=FMXTell(B);
+ FMXWB32(B,0); FMXTag(B,'mdat');
+ MOWMdatSize:=0;
+End;
+
+Procedure MOWPacket(P: PFMXPkt);
+Var T: ^TMOWTrack; S: ^TFMXStream; Sic: LongInt; Cl: ^TMOWEnt; NC: LongInt; NE: PMOWEnts; Refd: Int64; Dur32: Int64;
+    Pos: LongInt;
+Begin
+ T:=@MOWT[P^.SI]; S:=@FMXS[P^.SI];
+ { check_pkt }
+ If T^.Entry>0 Then Refd:=T^.Ents^[T^.Entry-1].Dts
+ Else If T^.StartDts<>FMXNoPts Then Refd:=T^.StartDts+T^.TrackDuration
+ Else Refd:=P^.Dts;
+ If (P^.Dts<Refd) Or (P^.Dts-Refd>=2147483647) Then Begin
+  P^.Dts:=Refd+1; P^.Pts:=FMXNoPts;
+ End;
+ If (P^.Dur<0) Or (P^.Dur>2147483647) Then Fail('Application provided duration: '+FMXIStr(P^.Dur)+' is invalid');
+ If P^.Size=0 Then Exit;
+ { samples_in_chunk }
+ If (S^.Codec=FC_ADPCM_MS) Or (S^.Codec=FC_ADPCM_IMA_WAV) Then Sic:=S^.FrameSize
+ Else If T^.SampleSize<>0 Then Sic:=P^.Size Div T^.SampleSize
+ Else Sic:=1;
+ If Sic<1 Then Fail('fatal error, input packet contains no samples');
+ If (S^.Codec=FC_AAC) And (P^.Size>2) And ((FMXBe16(P^.Data,0) And $FFF0)=$FFF0) Then
+  Fail('Malformed AAC bitstream detected: use the audio bitstream filter ''aac_adtstoasc'' to fix it');
+ Pos:=FMXTell(FMXOut);
+ FMXWrite(FMXOut,P^.Data,P^.Size);
+ If T^.Entry>=T^.Cap Then Begin
+  NC:=T^.Entry+1024;
+  GetMem(NE,NC*SizeOf(TMOWEnt));
+  If T^.Ents<>Nil Then Begin Move(T^.Ents^,NE^,T^.Entry*SizeOf(TMOWEnt)); FreeMem(T^.Ents); End;
+  T^.Ents:=NE; T^.Cap:=NC;
+ End;
+ Cl:=@T^.Ents^[T^.Entry];
+ Cl^.Pos:=Pos; Cl^.SamplesInChunk:=Sic; Cl^.ChunkNum:=0; Cl^.Size:=P^.Size; Cl^.Entries:=Sic;
+ Cl^.Dts:=P^.Dts;
+ Cl^.Flags:=0;
+ If T^.StartDts=FMXNoPts Then T^.StartDts:=P^.Dts;
+ T^.TrackDuration:=P^.Dts-T^.StartDts+P^.Dur;
+ If P^.Pts=FMXNoPts Then P^.Pts:=P^.Dts;
+ If P^.Dts<>P^.Pts Then T^.Flags:=T^.Flags Or MOW_T_CTTS;
+ Cl^.Cts:=LongInt(P^.Pts-P^.Dts);
+ If T^.StartCts=FMXNoPts Then T^.StartCts:=P^.Pts-P^.Dts;
+ If T^.EndPts=FMXNoPts Then T^.EndPts:=Cl^.Dts+Cl^.Cts+P^.Dur
+ Else If Cl^.Dts+Cl^.Cts+P^.Dur>T^.EndPts Then T^.EndPts:=Cl^.Dts+Cl^.Cts+P^.Dur;
+ If (P^.Flags And FMX_PKT_KEY)<>0 Then Begin
+  Cl^.Flags:=MOW_SYNC; Inc(T^.HasKey);
+ End;
+ If (P^.Flags And FMX_PKT_DISP)<>0 Then Begin Cl^.Flags:=Cl^.Flags Or MOW_DISP; Inc(T^.HasDisp); End;
+ Inc(T^.Entry);
+ Inc(T^.SampleCount,Sic);
+ Inc(MOWMdatSize,P^.Size);
+End;
+
+Procedure MOWTrailer;
+Var B: PFMXB; MoovPos: LongInt;
+Begin
+ B:=FMXOut;
+ MoovPos:=FMXTell(B);
+ If MOWMdatSize+8<=4294967295 Then Begin
+  FMXSeek(B,MOWMdatPos); FMXWB32(B,LongInt((MOWMdatSize+8) And $FFFFFFFF));
+ End Else Begin
+  FMXSeek(B,MOWMdatPos-8); FMXWB32(B,1); FMXTag(B,'mdat'); FMXWB64(B,MOWMdatSize+16);
+ End;
+ FMXSeek(B,MoovPos);
+ MOWMoov(B);
+End;
+{ ------------------------------------------------------------------ }
+{ Lecture des fichiers temporaires / d'entree -> flux + paquets        }
+{ ------------------------------------------------------------------ }
+Type
+ TFMXFile = Record
+  D: PFMXBytes; Len: LongInt;
+ End;
+ PFMXList = ^TFMXList;
+ TFMXList = Record
+  Head, Tail: PFMXPkt; Count: LongInt;
+ End;
+
+Procedure FMXLoad(Const Name: String; Var F: TFMXFile);
+Var Fi: File; N: LongInt;
+Begin
+ F.D:=Nil; F.Len:=0;
+ Assign(Fi,Name);
+ {$I-} Reset(Fi,1); {$I+}
+ If IOResult<>0 Then Fail('Impossible d''ouvrir '+Name);
+ N:=FileSize(Fi);
+ If N>0 Then Begin
+  GetMem(F.D,N+16);
+  If N<=1000000000 Then BlockRead(Fi,F.D^,N) Else Fail('Fichier trop volumineux.');
+  FillChar(F.D^[N],16,0);
+ End;
+ F.Len:=N;
+ Close(Fi);
+End;
+
+Procedure FMXUnload(Var F: TFMXFile);
+Begin
+ If F.D<>Nil Then FreeMem(F.D);
+ F.D:=Nil; F.Len:=0;
+End;
+
+Procedure FMXListInit(Var L: TFMXList);
+Begin
+ L.Head:=Nil; L.Tail:=Nil; L.Count:=0;
+End;
+
+Procedure FMXListAdd(Var L: TFMXList; P: PFMXPkt);
+Begin
+ P^.Next:=Nil;
+ If L.Tail=Nil Then L.Head:=P Else L.Tail^.Next:=P;
+ L.Tail:=P; Inc(L.Count);
+End;
+
+Procedure FMXListFree(Var L: TFMXList);
+Var P,Q: PFMXPkt;
+Begin
+ P:=L.Head;
+ While P<>Nil Do Begin Q:=P^.Next; FMXFreePkt(P); P:=Q; End;
+ L.Head:=Nil; L.Tail:=Nil; L.Count:=0;
+End;
+
+Function FMXPkFromMem(SI: Integer; D: PFMXBytes; Size: LongInt): PFMXPkt;
+Var P: PFMXPkt;
+Begin
+ P:=FMXNewPkt(SI,Size);
+ If Size>0 Then Move(D^,P^.Data^,Size);
+ FMXPkFromMem:=P;
+End;
+
+{ ---- WAV ----------------------------------------------------------------- }
+Type
+ TFMXWav = Record
+  Tag, Ch, Rate, BAlign, Bits: LongInt;
+  DataOff, DataLen: LongInt;
+  ExtraOff, ExtraLen: LongInt;
+ End;
+
+Function FMXWavParse(Var F: TFMXFile; Var W: TFMXWav): Boolean;
+Var O, Sz, Nx: LongInt; Id: String;
+Begin
+ FMXWavParse:=False; FillChar(W,SizeOf(W),0);
+ If F.Len<12 Then Exit;
+ If (FMXTagStr(LongWord(FMXLe32(F.D,0)))<>'RIFF') Or (FMXTagStr(LongWord(FMXLe32(F.D,8)))<>'WAVE') Then Exit;
+ O:=12;
+ While O+8<=F.Len Do Begin
+  Id:=FMXTagStr(LongWord(FMXLe32(F.D,O))); Sz:=FMXLe32(F.D,O+4);
+  If Id='fmt ' Then Begin
+   W.Tag:=FMXLe16(F.D,O+8); W.Ch:=FMXLe16(F.D,O+10); W.Rate:=FMXLe32(F.D,O+12);
+   W.BAlign:=FMXLe16(F.D,O+20); W.Bits:=FMXLe16(F.D,O+22);
+   If Sz>=18 Then Begin W.ExtraLen:=FMXLe16(F.D,O+24); W.ExtraOff:=O+26; End;
+  End Else If Id='data' Then Begin
+   W.DataOff:=O+8; W.DataLen:=Sz;
+   If W.DataOff+W.DataLen>F.Len Then W.DataLen:=F.Len-W.DataOff;
+  End;
+  Nx:=O+8+Sz+(Sz And 1);
+  If Nx<=O Then Break;
+  O:=Nx;
+ End;
+ FMXWavParse:=(W.Ch>0) And (W.DataOff>0);
+End;
+
+{ ---- AVI ----------------------------------------------------------------- }
+Type
+ TFMXAviStr = Record
+  Typ: String[4]; Handler: LongWord; Flags, Scale, Rate, Start, Length, SampleSz: LongInt;
+  FmtOff, FmtLen: LongInt;
+  Count: LongInt; CumSamples: Int64;
+ End;
+Var
+ FMXAviS: Array[0..FMXMaxS-1] Of TFMXAviStr;
+ FMXAviN: Integer;
+ FMXAviIdxOff: LongInt;
+
+Function FMXAviParse(Var F: TFMXFile; Var L: Array Of TFMXList): Boolean;
+Var O, Sz, Nx, E, I, Si: LongInt; Id, Ty, Ck: String; Cur: Integer; Idx1: LongInt; MoviOff, MoviEnd: LongInt;
+    Key: Boolean; P: PFMXPkt; Fl: LongInt; Flg: Array[0..0] Of Byte;
+    IdxO, IdxN, J: LongInt; KeyAt: PFMXBytes;
+Begin
+ FMXAviParse:=False; FMXAviN:=0; Idx1:=0; MoviOff:=0; MoviEnd:=0;
+ If F.Len<12 Then Exit;
+ If (FMXTagStr(LongWord(FMXLe32(F.D,0)))<>'RIFF') Or (FMXTagStr(LongWord(FMXLe32(F.D,8)))<>'AVI ') Then Exit;
+ FillChar(FMXAviS,SizeOf(FMXAviS),0);
+ O:=12; Cur:=-1;
+ While O+8<=F.Len Do Begin
+  Id:=FMXTagStr(LongWord(FMXLe32(F.D,O))); Sz:=FMXLe32(F.D,O+4);
+  If Id='LIST' Then Begin
+   Ty:=FMXTagStr(LongWord(FMXLe32(F.D,O+8)));
+   If Ty='movi' Then Begin MoviOff:=O+12; MoviEnd:=O+8+Sz; If MoviEnd>F.Len Then MoviEnd:=F.Len; End;
+   If (Ty='hdrl') Or (Ty='strl') Then Begin O:=O+12; Continue; End;
+   Nx:=O+8+Sz+(Sz And 1); If Nx<=O Then Break; O:=Nx; Continue;
+  End;
+  If Id='strh' Then Begin
+   If FMXAviN>=FMXMaxS Then Exit;
+   Cur:=FMXAviN; Inc(FMXAviN);
+   FMXAviS[Cur].Typ:=FMXTagStr(LongWord(FMXLe32(F.D,O+8)));
+   FMXAviS[Cur].Handler:=LongWord(FMXLe32(F.D,O+12));
+   FMXAviS[Cur].Flags:=FMXLe32(F.D,O+16);
+   FMXAviS[Cur].Scale:=FMXLe32(F.D,O+28); FMXAviS[Cur].Rate:=FMXLe32(F.D,O+32);
+   FMXAviS[Cur].Start:=FMXLe32(F.D,O+36); FMXAviS[Cur].Length:=FMXLe32(F.D,O+40);
+   FMXAviS[Cur].SampleSz:=FMXLe32(F.D,O+52);
+  End Else If (Id='strf') And (Cur>=0) Then Begin
+   FMXAviS[Cur].FmtOff:=O+8; FMXAviS[Cur].FmtLen:=Sz;
+  End Else If Id='idx1' Then Begin Idx1:=O+8; FMXAviIdxOff:=Sz; End;
+  Nx:=O+8+Sz+(Sz And 1);
+  If Nx<=O Then Break;
+  O:=Nx;
+ End;
+ If (FMXAviN=0) Or (MoviOff=0) Then Exit;
+ { drapeaux d'images cles via idx1 : offsets relatifs a "movi" (ou absolus) }
+ IdxN:=0;
+ If Idx1<>0 Then IdxN:=FMXAviIdxOff Div 16;
+ { parcours de movi }
+ O:=MoviOff;
+ While O+8<=MoviEnd Do Begin
+  Id:=FMXTagStr(LongWord(FMXLe32(F.D,O))); Sz:=FMXLe32(F.D,O+4);
+  If Id='LIST' Then Begin O:=O+12; Continue; End;
+  If (Sz<0) Or (O+8+Sz>F.Len) Then Break;
+  If (Id[1] In ['0'..'9']) And (Id[2] In ['0'..'9']) Then Begin
+   Si:=(Ord(Id[1])-48)*10+(Ord(Id[2])-48);
+   If (Si<FMXAviN) And (Id[3]<>'p') Then Begin
+    P:=FMXPkFromMem(Si,@F.D^[O+8],Sz);
+    { cle ? : cherche dans idx1 }
+    Key:=True;
+    If IdxN>0 Then Begin
+     For J:=0 To IdxN-1 Do Begin
+      E:=Idx1+J*16;
+      If (FMXLe32(F.D,E)=FMXLe32(F.D,O)) And ((FMXLe32(F.D,E+8)=O-(MoviOff-4)) Or (FMXLe32(F.D,E+8)=O)) Then Begin
+       Key:=(FMXLe32(F.D,E+4) And $10)<>0; Break;
+      End;
+     End;
+    End;
+    If Key Then P^.Flags:=FMX_PKT_KEY;
+    FMXListAdd(L[Si],P);
+   End;
+  End;
+  O:=O+8+Sz+(Sz And 1);
+ End;
+ FMXAviParse:=True;
+End;
+
+{ ---- FLV ----------------------------------------------------------------- }
+{ Lecture d'un FLV simple : renvoie les listes video (0) et audio (1) ; Info audio dans FMXFlvA* }
+Var
+ FMXFlvAFmt, FMXFlvARate, FMXFlvABits, FMXFlvACh, FMXFlvVCodec: LongInt;
+ FMXFlvTs: Array[0..1] Of Array[0..0] Of Int64;
+
+Function FMXFlvParse(Var F: TFMXFile; Var L: Array Of TFMXList): Boolean;
+Var O, Sz, Ty, Ts: LongInt; P: PFMXPkt; B: Byte;
+Begin
+ FMXFlvParse:=False; FMXFlvAFmt:=-1; FMXFlvVCodec:=-1;
+ If (F.Len<13) Or (F.D^[0]<>$46) Or (F.D^[1]<>$4C) Or (F.D^[2]<>$56) Then Exit;
+ O:=FMXBe32(F.D,5)+4;
+ While O+11<=F.Len Do Begin
+  Ty:=F.D^[O]; Sz:=(LongInt(F.D^[O+1]) Shl 16) Or (LongInt(F.D^[O+2]) Shl 8) Or F.D^[O+3];
+  Ts:=(LongInt(F.D^[O+4]) Shl 16) Or (LongInt(F.D^[O+5]) Shl 8) Or F.D^[O+6] Or (LongInt(F.D^[O+7]) Shl 24);
+  If O+11+Sz>F.Len Then Break;
+  If Ty=9 Then Begin
+   B:=F.D^[O+11];
+   FMXFlvVCodec:=B And 15;
+   P:=FMXPkFromMem(0,@F.D^[O+12],Sz-1);
+   P^.Pts:=Ts; P^.Dts:=Ts;
+   If (B Shr 4)=1 Then P^.Flags:=FMX_PKT_KEY;
+   FMXListAdd(L[0],P);
+  End Else If Ty=8 Then Begin
+   B:=F.D^[O+11];
+   FMXFlvAFmt:=B Shr 4;
+   Case (B Shr 2) And 3 Of 0: FMXFlvARate:=5512; 1: FMXFlvARate:=11025; 2: FMXFlvARate:=22050; 3: FMXFlvARate:=44100; End;
+   If (B And 2)<>0 Then FMXFlvABits:=16 Else FMXFlvABits:=8;
+   FMXFlvACh:=(B And 1)+1;
+   P:=FMXPkFromMem(1,@F.D^[O+12],Sz-1);
+   P^.Pts:=Ts; P^.Dts:=Ts; P^.Flags:=FMX_PKT_KEY;
+   FMXListAdd(L[1],P);
+  End;
+  O:=O+11+Sz+4;
+ End;
+ FMXFlvParse:=True;
+End;
+{ ------------------------------------------------------------------ }
+{ Demuxer MOV / MP4 simplifie (tables d'echantillons)                  }
+{ ------------------------------------------------------------------ }
+Type
+ TMDSamp = Record
+  Pos, Dts: Int64; Size, Cts: LongInt; Key: Boolean;
+ End;
+ TMDSamps = Array[0..0] Of TMDSamp;
+ PMDSamps = ^TMDSamps;
+ TMDLong = Array[0..0] Of LongInt;
+ PMDLong = ^TMDLong;
+ TMDI64 = Array[0..0] Of Int64;
+ PMDI64 = ^TMDI64;
+ TMDTrk = Record
+  Kind: Integer;              { 0 video, 1 audio, -1 autre }
+  HdlrType: LongWord;
+  Timescale: LongInt;
+  MdhdDur: Int64;
+  TrackId: LongInt;
+  Lang: LongInt;
+  Tag: LongWord;              { fourcc de l'entree stsd }
+  Width, Height, Depth: LongInt;
+  Channels, SampleBits, Rate: LongInt;
+  AudVer: LongInt; AudCid: LongInt;
+  SampPerFrame, BytesPerFrame: LongInt;
+  Compressor: String[31];
+  Extra: PFMXBytes; ExtraLen: LongInt;
+  EsdsObj: LongInt; EsdsAvg, EsdsMax: LongInt;
+  HasPasp: Boolean; PaspN, PaspD: LongInt;
+  FieldOrder: Integer;
+  { tables brutes }
+  NStts: LongInt; Stts: PMDLong;       { paires (count,duration) }
+  NCtts: LongInt; Ctts: PMDLong; CttsVer: Integer;
+  NStss: LongInt; Stss: PMDLong; HasStss: Boolean;
+  NStsc: LongInt; Stsc: PMDLong;       { triplets (first,spc,desc) }
+  NStsz: LongInt; Stsz: PMDLong; FixedSz: LongInt;
+  NStco: LongInt; Stco: PMDI64;
+  NElst: LongInt; Elst: PMDI64;        { triplets (duration, media_time, rate) en echelle film/media }
+  NS: LongInt; S: PMDSamps;
+ End;
+ PMDTrk = ^TMDTrk;
+Var
+ MDT: Array[0..15] Of TMDTrk;
+ MDNum: Integer;
+ MDFile: TFMXFile;
+ MDMovieTs: LongInt;
+ MDBrand: LongWord;
+ MDMovTime: Int64;
+
+Function MDRd32(O: LongInt): LongInt;Begin MDRd32:=FMXBe32(MDFile.D,O); End;
+Function MDRd16(O: LongInt): LongInt;Begin MDRd16:=FMXBe16(MDFile.D,O); End;
+Function MDRd64(O: LongInt): Int64;
+Begin MDRd64:=(Int64(MDRd32(O)) And $FFFFFFFF) Shl 32 Or (Int64(MDRd32(O+4)) And $FFFFFFFF); End;
+Function MDTag(O: LongInt): String;
+Begin MDTag:=Chr(MDFile.D^[O])+Chr(MDFile.D^[O+1])+Chr(MDFile.D^[O+2])+Chr(MDFile.D^[O+3]); End;
+Function MDTag32(O: LongInt): LongWord;
+Begin MDTag32:=LongWord(FMXLe32(MDFile.D,O)); End;
+
+Procedure MDAllocLong(Var P: PMDLong; N: LongInt);
+Begin
+ If N<=0 Then N:=1;
+ GetMem(P,N*4);
+End;
+
+Procedure MDParseEsds(T: PMDTrk; O, E: LongInt);
+Var P, Tg, L, I, B: LongInt;
+ Function Descr(Var Q: LongInt; Var Len: LongInt): LongInt;
+ Var K: Integer; Bt: LongInt;
+ Begin
+  Descr:=MDFile.D^[Q]; Inc(Q); Len:=0;
+  For K:=1 To 4 Do Begin
+   Bt:=MDFile.D^[Q]; Inc(Q); Len:=(Len Shl 7) Or (Bt And $7F);
+   If (Bt And $80)=0 Then Break;
+  End;
+ End;
+Begin
+ P:=O+4;
+ Tg:=Descr(P,L);
+ If Tg=3 Then Begin
+  P:=P+2; B:=MDFile.D^[P]; Inc(P);
+  If (B And $80)<>0 Then P:=P+2;
+  If (B And $40)<>0 Then Begin I:=MDFile.D^[P]; P:=P+1+I; End;
+  If (B And $20)<>0 Then P:=P+2;
+ End;
+ Tg:=Descr(P,L);
+ If Tg=4 Then Begin
+  T^.EsdsObj:=MDFile.D^[P]; T^.EsdsMax:=MDRd32(P+5); T^.EsdsAvg:=MDRd32(P+9);
+  P:=P+13;
+  Tg:=Descr(P,L);
+  If (Tg=5) And (L>0) And (P+L<=E) Then Begin
+   T^.ExtraLen:=L; GetMem(T^.Extra,L+16); Move(MDFile.D^[P],T^.Extra^,L);
+  End;
+ End;
+End;
+
+Procedure MDSampleEntry(T: PMDTrk; O, E: LongInt);
+{ O = debut de l'entree (taille+tag) }
+Var Sz, Tag, P, Q, Cs, Bsz: LongInt; Id: String; Ver: LongInt; Len: LongInt;
+Begin
+ Sz:=MDRd32(O); T^.Tag:=MDTag32(O+4);
+ If (Sz<16) Or (O+Sz>E) Then Sz:=E-O;
+ If T^.Kind=0 Then Begin
+  T^.Width:=MDRd16(O+32); T^.Height:=MDRd16(O+34);
+  Len:=MDFile.D^[O+50]; If Len>31 Then Len:=31;
+  T^.Compressor:=''; For P:=1 To Len Do T^.Compressor:=T^.Compressor+Chr(MDFile.D^[O+50+P]);
+  T^.Depth:=MDRd16(O+82);
+  P:=O+86;
+ End Else If T^.Kind=1 Then Begin
+  Ver:=MDRd16(O+16);
+  T^.AudVer:=Ver;
+  T^.Channels:=MDRd16(O+24); T^.SampleBits:=MDRd16(O+26); T^.AudCid:=MDRd16(O+28);
+  T^.Rate:=(MDRd32(O+32) Shr 16) And $FFFF;
+  P:=O+36;
+  If Ver=1 Then Begin
+   T^.SampPerFrame:=MDRd32(P); T^.BytesPerFrame:=MDRd32(P+8); P:=P+16;
+  End Else If Ver=2 Then Begin
+   P:=O+36+4;
+   T^.Rate:=Round(FMXD64(MDRd64(P)));
+   T^.Channels:=MDRd32(P+8);
+   T^.SampleBits:=MDRd32(P+16);
+   T^.BytesPerFrame:=MDRd32(P+24); T^.SampPerFrame:=MDRd32(P+28);
+   P:=O+36+36;
+  End;
+ End Else P:=O+Sz;
+ { sous-atomes }
+ While P+8<=O+Sz Do Begin
+  Bsz:=MDRd32(P); Id:=MDTag(P+4);
+  If (Bsz<8) Or (P+Bsz>O+Sz) Then Break;
+  If Id='wave' Then Begin
+   Q:=P+8;
+   While Q+8<=P+Bsz Do Begin
+    Cs:=MDRd32(Q);
+    If (Cs<8) Or (Q+Cs>P+Bsz) Then Break;
+    If (MDTag(Q+4)='alac') And (T^.Extra=Nil) Then Begin
+     T^.ExtraLen:=Cs; GetMem(T^.Extra,Cs+16); Move(MDFile.D^[Q],T^.Extra^,Cs);
+    End Else If (MDTag(Q+4)='esds') And (T^.Extra=Nil) Then Begin
+     { traite plus bas }
+    End;
+    Q:=Q+Cs;
+   End;
+  End Else If (Id='alac') And (T^.Extra=Nil) Then Begin
+   T^.ExtraLen:=Bsz; GetMem(T^.Extra,Bsz+16); Move(MDFile.D^[P],T^.Extra^,Bsz);
+   If Bsz=36 Then Begin End;
+  End Else If (Id='avcC') Or (Id='glbl') Then Begin
+   T^.ExtraLen:=Bsz-8; GetMem(T^.Extra,Bsz+16); Move(MDFile.D^[P+8],T^.Extra^,Bsz-8);
+  End Else If Id='pasp' Then Begin
+   T^.HasPasp:=True; T^.PaspN:=MDRd32(P+8); T^.PaspD:=MDRd32(P+12);
+  End Else If Id='fiel' Then Begin
+   Case MDRd16(P+8) Of
+    $0100: T^.FieldOrder:=1; $0201: T^.FieldOrder:=2; $0206: T^.FieldOrder:=3; $0209: T^.FieldOrder:=4; $020e: T^.FieldOrder:=5;
+   End;
+  End Else If Id='esds' Then Begin
+   MDParseEsds(T,P+8,P+Bsz);
+  End;
+  P:=P+Bsz;
+ End;
+End;
+
+Procedure MDWalk(O, E, Depth: LongInt; T: PMDTrk);
+Var Sz, Hdr, N, I, J, Ver, Nn: LongInt; Id: String; Q: PMDTrk;
+Begin
+ While O+8<=E Do Begin
+  Sz:=MDRd32(O); Id:=MDTag(O+4); Hdr:=8;
+  If Sz=1 Then Begin Sz:=LongInt(MDRd64(O+8)); Hdr:=16; End
+  Else If Sz=0 Then Sz:=E-O;
+  If (Sz<Hdr) Or (O+Sz>E) Then Break;
+  If Id='moov' Then MDWalk(O+Hdr,O+Sz,Depth+1,Nil)
+  Else If Id='mvhd' Then Begin
+   Ver:=MDFile.D^[O+Hdr];
+   If Ver=1 Then Begin MDMovTime:=MDRd64(O+Hdr+4); MDMovieTs:=MDRd32(O+Hdr+20); End
+   Else Begin MDMovTime:=MDRd32(O+Hdr+4) And $FFFFFFFF; MDMovieTs:=MDRd32(O+Hdr+12); End;
+  End Else If Id='trak' Then Begin
+   If MDNum<16 Then Begin
+    Q:=@MDT[MDNum]; Inc(MDNum);
+    FillChar(Q^,SizeOf(Q^),0); Q^.Kind:=-1;
+    MDWalk(O+Hdr,O+Sz,Depth+1,Q);
+   End;
+  End Else If (T<>Nil) And ((Id='mdia') Or (Id='minf') Or (Id='stbl') Or (Id='edts')) Then MDWalk(O+Hdr,O+Sz,Depth+1,T)
+  Else If (T<>Nil) And (Id='tkhd') Then Begin
+   Ver:=MDFile.D^[O+Hdr];
+   If Ver=1 Then T^.TrackId:=MDRd32(O+Hdr+20) Else T^.TrackId:=MDRd32(O+Hdr+12);
+  End Else If (T<>Nil) And (Id='mdhd') Then Begin
+   Ver:=MDFile.D^[O+Hdr];
+   If Ver=1 Then Begin T^.Timescale:=MDRd32(O+Hdr+20); T^.MdhdDur:=MDRd64(O+Hdr+24); T^.Lang:=MDRd16(O+Hdr+32); End
+   Else Begin T^.Timescale:=MDRd32(O+Hdr+12); T^.MdhdDur:=MDRd32(O+Hdr+16) And $FFFFFFFF; T^.Lang:=MDRd16(O+Hdr+20); End;
+  End Else If (T<>Nil) And (Id='hdlr') Then Begin
+   T^.HdlrType:=MDTag32(O+Hdr+8);
+   If MDTag(O+Hdr+8)='vide' Then T^.Kind:=0 Else If MDTag(O+Hdr+8)='soun' Then T^.Kind:=1;
+  End Else If (T<>Nil) And (Id='stsd') Then Begin
+   N:=MDRd32(O+Hdr+4);
+   If N>=1 Then MDSampleEntry(T,O+Hdr+8,O+Sz);
+  End Else If (T<>Nil) And (Id='stts') Then Begin
+   N:=MDRd32(O+Hdr+4); T^.NStts:=N; MDAllocLong(T^.Stts,N*2);
+   For I:=0 To N*2-1 Do T^.Stts^[I]:=MDRd32(O+Hdr+8+I*4);
+  End Else If (T<>Nil) And (Id='ctts') Then Begin
+   N:=MDRd32(O+Hdr+4); T^.NCtts:=N; T^.CttsVer:=MDFile.D^[O+Hdr]; MDAllocLong(T^.Ctts,N*2);
+   For I:=0 To N*2-1 Do T^.Ctts^[I]:=MDRd32(O+Hdr+8+I*4);
+  End Else If (T<>Nil) And (Id='stss') Then Begin
+   N:=MDRd32(O+Hdr+4); T^.NStss:=N; T^.HasStss:=True; MDAllocLong(T^.Stss,N);
+   For I:=0 To N-1 Do T^.Stss^[I]:=MDRd32(O+Hdr+8+I*4);
+  End Else If (T<>Nil) And (Id='stsc') Then Begin
+   N:=MDRd32(O+Hdr+4); T^.NStsc:=N; MDAllocLong(T^.Stsc,N*3);
+   For I:=0 To N*3-1 Do T^.Stsc^[I]:=MDRd32(O+Hdr+8+I*4);
+  End Else If (T<>Nil) And (Id='stsz') Then Begin
+   T^.FixedSz:=MDRd32(O+Hdr+4); N:=MDRd32(O+Hdr+8); T^.NStsz:=N;
+   If T^.FixedSz=0 Then Begin
+    MDAllocLong(T^.Stsz,N);
+    For I:=0 To N-1 Do T^.Stsz^[I]:=MDRd32(O+Hdr+12+I*4);
+   End;
+  End Else If (T<>Nil) And ((Id='stco') Or (Id='co64')) Then Begin
+   N:=MDRd32(O+Hdr+4); T^.NStco:=N; GetMem(T^.Stco,(N+1)*8);
+   For I:=0 To N-1 Do
+    If Id='stco' Then T^.Stco^[I]:=Int64(MDRd32(O+Hdr+8+I*4)) And $FFFFFFFF Else T^.Stco^[I]:=MDRd64(O+Hdr+8+I*8);
+  End Else If (T<>Nil) And (Id='elst') Then Begin
+   Ver:=MDFile.D^[O+Hdr]; N:=MDRd32(O+Hdr+4); T^.NElst:=N; GetMem(T^.Elst,(N+1)*24);
+   For I:=0 To N-1 Do
+    If Ver=1 Then Begin
+     T^.Elst^[I*3]:=MDRd64(O+Hdr+8+I*20); T^.Elst^[I*3+1]:=MDRd64(O+Hdr+8+I*20+8); T^.Elst^[I*3+2]:=MDRd32(O+Hdr+8+I*20+16);
+    End Else Begin
+     T^.Elst^[I*3]:=Int64(MDRd32(O+Hdr+8+I*12)) And $FFFFFFFF; T^.Elst^[I*3+1]:=MDRd32(O+Hdr+8+I*12+4); T^.Elst^[I*3+2]:=MDRd32(O+Hdr+8+I*12+8);
+    End;
+  End;
+  O:=O+Sz;
+ End;
+End;
+
+{ construit la table d'echantillons d'une piste }
+Procedure MDBuildSamples(T: PMDTrk);
+Var N, I, J, K, Chunk, Spc, Idx, Si, Ci, NextFirst, Run: LongInt; Pos: Int64; Dts: Int64; Cn: LongInt; KeyIdx: LongInt;
+    SC, CC, CRem, SDur: LongInt;
+Begin
+ N:=T^.NStsz;
+ If N<=0 Then Begin T^.NS:=0; Exit; End;
+ GetMem(T^.S,N*SizeOf(TMDSamp)+16);
+ T^.NS:=N;
+ { tailles }
+ For I:=0 To N-1 Do Begin
+  If T^.FixedSz<>0 Then T^.S^[I].Size:=T^.FixedSz Else T^.S^[I].Size:=T^.Stsz^[I];
+  T^.S^[I].Key:=Not T^.HasStss; T^.S^[I].Cts:=0;
+ End;
+ { positions via stsc/stco }
+ Si:=0; Idx:=0;
+ For Ci:=0 To T^.NStco-1 Do Begin
+  Chunk:=Ci+1; Spc:=0;
+  For J:=0 To T^.NStsc-1 Do If T^.Stsc^[J*3]<=Chunk Then Spc:=T^.Stsc^[J*3+1];
+  Pos:=T^.Stco^[Ci];
+  For K:=1 To Spc Do Begin
+   If Si>=N Then Break;
+   T^.S^[Si].Pos:=Pos; Pos:=Pos+T^.S^[Si].Size; Inc(Si);
+  End;
+ End;
+ If Si<N Then T^.NS:=Si;
+ { temps }
+ Dts:=0; Si:=0;
+ For J:=0 To T^.NStts-1 Do Begin
+  For K:=1 To T^.Stts^[J*2] Do Begin
+   If Si>=T^.NS Then Break;
+   T^.S^[Si].Dts:=Dts; Dts:=Dts+T^.Stts^[J*2+1]; Inc(Si);
+  End;
+ End;
+ Si:=0;
+ For J:=0 To T^.NCtts-1 Do
+  For K:=1 To T^.Ctts^[J*2] Do Begin
+   If Si>=T^.NS Then Break;
+   T^.S^[Si].Cts:=T^.Ctts^[J*2+1]; Inc(Si);
+  End;
+ If T^.HasStss Then
+  For J:=0 To T^.NStss-1 Do
+   If (T^.Stss^[J]>=1) And (T^.Stss^[J]<=T^.NS) Then T^.S^[T^.Stss^[J]-1].Key:=True;
+End;
+
+Function MDOpen(Const Name: String): Boolean;
+Var O, Sz: LongInt; Id: String;
+Begin
+ MDNum:=0; MDMovieTs:=1000; MDMovTime:=0; MDBrand:=0;
+ FMXLoad(Name,MDFile);
+ MDOpen:=False;
+ If MDFile.Len<16 Then Exit;
+ O:=0;
+ While O+8<=MDFile.Len Do Begin
+  Sz:=MDRd32(O); Id:=MDTag(O+4);
+  If Id='ftyp' Then MDBrand:=MDTag32(O+8);
+  If Sz=1 Then Sz:=LongInt(MDRd64(O+8)) Else If Sz=0 Then Sz:=MDFile.Len-O;
+  If (Sz<8) Or (O+Sz>MDFile.Len) Then Break;
+  If Id='moov' Then MDWalk(O,O+Sz,0,Nil);
+  O:=O+Sz;
+ End;
+ MDOpen:=MDNum>0;
+End;
+
+Procedure MDClose;
+Var I: Integer;
+Begin
+ For I:=0 To MDNum-1 Do Begin
+  If MDT[I].S<>Nil Then FreeMem(MDT[I].S);
+  If MDT[I].Extra<>Nil Then FreeMem(MDT[I].Extra);
+  If MDT[I].Stts<>Nil Then FreeMem(MDT[I].Stts);
+  If MDT[I].Ctts<>Nil Then FreeMem(MDT[I].Ctts);
+  If MDT[I].Stss<>Nil Then FreeMem(MDT[I].Stss);
+  If MDT[I].Stsc<>Nil Then FreeMem(MDT[I].Stsc);
+  If MDT[I].Stsz<>Nil Then FreeMem(MDT[I].Stsz);
+  If MDT[I].Stco<>Nil Then FreeMem(MDT[I].Stco);
+  If MDT[I].Elst<>Nil Then FreeMem(MDT[I].Elst);
+ End;
+ FMXUnload(MDFile); MDNum:=0;
+End;
+{ ---- simulation de AudioFrameQueue (audio_frame_queue.c) ----------------- }
+Type
+ TFMXAfqE = Record Pts, Dur: Int64; End;
+Var
+ AfqFr: Array[0..7] Of TFMXAfqE;
+ AfqCount: LongInt;
+ AfqRemDelay, AfqRemSamples: Int64;
+ AfqOutPts, AfqOutDur: Int64;
+
+Procedure AfqInit(Pad: LongInt);
+Begin
+ FillChar(AfqFr,SizeOf(AfqFr),0); AfqCount:=0; AfqRemDelay:=Pad; AfqRemSamples:=Pad;
+End;
+
+Procedure AfqAdd(Pts: Int64; Nb: LongInt);
+Begin
+ AfqFr[AfqCount].Dur:=Nb+AfqRemDelay;
+ AfqFr[AfqCount].Pts:=Pts-AfqRemDelay;
+ AfqRemDelay:=0;
+ AfqRemSamples:=AfqRemSamples+Nb;
+ Inc(AfqCount);
+End;
+
+Procedure AfqRemove(Nb: LongInt);
+Var I, N, Removed, K: LongInt;
+Begin
+ Removed:=0;
+ AfqOutPts:=AfqFr[0].Pts;
+ I:=0;
+ While (Nb>0) And (I<AfqCount) Do Begin
+  N:=Nb; If AfqFr[I].Dur<N Then N:=AfqFr[I].Dur;
+  Dec(AfqFr[I].Dur,N); Dec(Nb,N); Inc(Removed,N); Inc(AfqFr[I].Pts,N);
+  Inc(I);
+ End;
+ Dec(AfqRemSamples,Removed);
+ If (I>0) And (AfqFr[I-1].Dur<>0) Then Dec(I);
+ For K:=0 To AfqCount-I-1 Do AfqFr[K]:=AfqFr[I+K];
+ Dec(AfqCount,I);
+ If Nb>0 Then Inc(AfqFr[0].Pts,Nb);
+ AfqOutDur:=Removed;
+End;
+{ ------------------------------------------------------------------ }
+{ Muxer ASF / ASF_STREAM (asfenc.c, FFmpeg 6.1.1)                      }
+{ ------------------------------------------------------------------ }
+Const
+ ASW_PREROLL = 3100;
+ ASW_DATAHDR = 50;
+ ASW_PPI_MIN = 2+1+1+1+4+2;   { err corr flags + 2 data + length type + property + send time + duration = 11 }
+ ASW_HDR_SINGLE_PAYLOAD = 1+1+4+1+8;
+ ASW_HDR_MULTI_PAYLOAD = 1+1+4+1+8+2;
+Type
+ TASWIdx = Record PktNum: LongInt; PktCount: LongInt; SendTime: Int64; Offset: Int64; End;
+ PASWIdx = ^TASWIdxArr;
+ TASWIdxArr = Array[0..0] Of TASWIdx;
+Var
+ ASWStreamed: Boolean;
+ ASWSeqNo: LongInt;
+ ASWSeq: Array[0..FMXMaxS-1] Of Byte;
+ ASWNbPackets: Int64;
+ ASWDuration: Int64;
+ ASWDataOffset: LongInt;
+ ASWPacketSize: LongInt;
+ ASWPacketSizeLeft: LongInt;
+ ASWPktTsStart, ASWPktTsEnd: Int64;
+ ASWPktPayloads: LongInt;
+ ASWMultiPayloads: Boolean;
+ ASWPkt: PFMXB;          { tampon de charge utile }
+ ASWIdx: PASWIdx; ASWIdxAlloc: LongInt;
+ ASWMaxPacket: LongInt;
+ ASWNextPktNum: LongInt; ASWNextPktCount: LongInt; ASWNextPktOff: Int64;
+ ASWNextStartSec: LongInt; ASWEndSec: LongInt;
+ ASWCreation: Int64;
+
+Const
+ ASW_G_HEADER: Array[0..15] Of Byte=($30,$26,$B2,$75,$8E,$66,$CF,$11,$A6,$D9,$00,$AA,$00,$62,$CE,$6C);
+ ASW_G_FILE: Array[0..15] Of Byte=($A1,$DC,$AB,$8C,$47,$A9,$CF,$11,$8E,$E4,$00,$C0,$0C,$20,$53,$65);
+ ASW_G_STREAM: Array[0..15] Of Byte=($91,$07,$DC,$B7,$B7,$A9,$CF,$11,$8E,$E6,$00,$C0,$0C,$20,$53,$65);
+ ASW_G_AUDIO: Array[0..15] Of Byte=($40,$9E,$69,$F8,$4D,$5B,$CF,$11,$A8,$FD,$00,$80,$5F,$5C,$44,$2B);
+ ASW_G_ACONC: Array[0..15] Of Byte=($50,$CD,$C3,$BF,$8F,$61,$CF,$11,$8B,$B2,$00,$AA,$00,$B4,$E2,$20);
+ ASW_G_VIDEO: Array[0..15] Of Byte=($C0,$EF,$19,$BC,$4D,$5B,$CF,$11,$A8,$FD,$00,$80,$5F,$5C,$44,$2B);
+ ASW_G_VCONC: Array[0..15] Of Byte=($00,$57,$FB,$20,$55,$5B,$CF,$11,$A8,$FD,$00,$80,$5F,$5C,$44,$2B);
+ ASW_G_COMMENT: Array[0..15] Of Byte=($33,$26,$b2,$75,$8E,$66,$CF,$11,$a6,$d9,$00,$aa,$00,$62,$ce,$6c);
+ ASW_G_CODECCOM: Array[0..15] Of Byte=($40,$52,$D1,$86,$1D,$31,$D0,$11,$A3,$A4,$00,$A0,$C9,$03,$48,$F6);
+ ASW_G_CODECCOM1: Array[0..15] Of Byte=($41,$52,$d1,$86,$1D,$31,$D0,$11,$a3,$a4,$00,$a0,$c9,$03,$48,$f6);
+ ASW_G_DATA: Array[0..15] Of Byte=($36,$26,$b2,$75,$8E,$66,$CF,$11,$a6,$d9,$00,$aa,$00,$62,$ce,$6c);
+ ASW_G_HEAD1: Array[0..15] Of Byte=($b5,$03,$bf,$5f,$2E,$A9,$CF,$11,$8e,$e3,$00,$c0,$0c,$20,$53,$65);
+ ASW_G_HEAD2: Array[0..15] Of Byte=($11,$d2,$d3,$ab,$BA,$A9,$CF,$11,$8e,$e6,$00,$c0,$0c,$20,$53,$65);
+ ASW_G_EXTCONT: Array[0..15] Of Byte=($40,$A4,$D0,$D2,$07,$E3,$D2,$11,$97,$F0,$00,$A0,$C9,$5E,$A8,$50);
+ ASW_G_INDEX: Array[0..15] Of Byte=($90,$08,$00,$33,$B1,$E5,$CF,$11,$89,$F4,$00,$A0,$C9,$03,$49,$CB);
+ ASW_G_METADATA: Array[0..15] Of Byte=($ea,$cb,$f8,$c5,$af,$5b,$77,$48,$84,$67,$aa,$8c,$44,$fa,$4c,$ca);
+ ASW_G_ZERO: Array[0..15] Of Byte=(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0);
+
+Procedure ASWGuid(B: PFMXB; Const G: Array Of Byte);
+Begin
+ FMXWrite(B,@G[0],16);
+End;
+
+Function ASWPutHeader(B: PFMXB; Const G: Array Of Byte): LongInt;
+Begin
+ ASWPutHeader:=FMXTell(B);
+ ASWGuid(B,G); FMXWL64(B,24);
+End;
+
+Procedure ASWEndHeader(B: PFMXB; Pos: LongInt);
+Var P1: LongInt;
+Begin
+ P1:=FMXTell(B); FMXSeek(B,Pos+16); FMXWL64(B,P1-Pos); FMXSeek(B,P1);
+End;
+
+Procedure ASWPutChunk(B: PFMXB; Typ, PayloadLen, Flags: LongInt);
+Var Len: LongInt;
+Begin
+ Len:=PayloadLen+8;
+ FMXWL16(B,Typ); FMXWL16(B,Len); FMXWL32(B,ASWSeqNo); FMXWL16(B,Flags); FMXWL16(B,Len);
+ Inc(ASWSeqNo);
+End;
+
+Function ASWAscii16(Const S: String): String;
+Begin
+ ASWAscii16:=S;
+End;
+
+{ ecrit une chaine UTF-16LE terminee par un caractere nul dans B ; renvoie la longueur en octets }
+Function ASWPutStr16(B: PFMXB; Const S: String): LongInt;
+Var I: Integer;
+Begin
+ For I:=1 To Length(S) Do FMXWL16(B,Ord(S[I]));
+ FMXWL16(B,0);
+ ASWPutStr16:=(Length(S)+1)*2;
+End;
+
+{ conversion de cles ff_asf_metadata_conv (generique -> natif) }
+Function ASWConvKey(Const K: String): String;
+Begin
+ ASWConvKey:=K;
+ If K='album_artist' Then ASWConvKey:='WM/AlbumArtist'
+ Else If K='album' Then ASWConvKey:='WM/AlbumTitle'
+ Else If K='artist' Then ASWConvKey:='Author'
+ Else If K='comment' Then ASWConvKey:='Description'
+ Else If K='composer' Then ASWConvKey:='WM/Composer'
+ Else If K='encoded_by' Then ASWConvKey:='WM/EncodedBy'
+ Else If K='encoder' Then ASWConvKey:='WM/EncodingSettings'
+ Else If K='genre' Then ASWConvKey:='WM/Genre'
+ Else If K='language' Then ASWConvKey:='WM/Language'
+ Else If K='filename' Then ASWConvKey:='WM/OriginalFilename'
+ Else If K='disc' Then ASWConvKey:='WM/PartOfSet'
+ Else If K='publisher' Then ASWConvKey:='WM/Publisher'
+ Else If K='track' Then ASWConvKey:='WM/TrackNumber'
+ Else If K='service_provider' Then ASWConvKey:='WM/MediaStationCallSign'
+ Else If K='service_name' Then ASWConvKey:='WM/MediaStationName';
+End;
+
+{ etiquettes de codec ASF }
+Function ASWTag(I: Integer): LongWord;
+Var C: Integer;
+Begin
+ C:=FMXS[I].Codec; ASWTag:=0;
+ If FMXS[I].Kind=FMXKind_V Then Begin
+  Case C Of
+   FC_MPEG4: ASWTag:=FMXMKTag('M4S2');
+   FC_MSMPEG4V3: ASWTag:=FMXMKTag('MP43');
+   FC_MSMPEG4V2: ASWTag:=FMXMKTag('MP42');
+   FC_MSMPEG4V1: ASWTag:=FMXMKTag('MPG4');
+   FC_WMV1: ASWTag:=FMXMKTag('WMV1');
+   FC_WMV2: ASWTag:=FMXMKTag('WMV2');
+   FC_FLV1: ASWTag:=FMXMKTag('FLV1');
+   FC_H263: ASWTag:=FMXMKTag('H263');
+   FC_MJPEG: ASWTag:=FMXMKTag('MJPG');
+   FC_HUFFYUV: ASWTag:=FMXMKTag('HFYU');
+   FC_FFV1: ASWTag:=FMXMKTag('FFV1');
+   FC_RAWVIDEO: ASWTag:=0;
+  End;
+ End Else If FMXS[I].Kind=FMXKind_A Then Begin
+  Case C Of
+   FC_PCM_S16LE,FC_PCM_U8: ASWTag:=1;
+   FC_ADPCM_MS: ASWTag:=2;
+   FC_PCM_ALAW: ASWTag:=6;
+   FC_PCM_MULAW: ASWTag:=7;
+   FC_ADPCM_IMA_WAV: ASWTag:=$11;
+   FC_ADPCM_YAMAHA: ASWTag:=$20;
+   FC_MP2: ASWTag:=$50;
+   FC_MP3: ASWTag:=$55;
+   FC_AAC: ASWTag:=$FF;
+   FC_WMAV1: ASWTag:=$160;
+   FC_WMAV2: ASWTag:=$161;
+   FC_AC3: ASWTag:=$2000;
+   FC_ADPCM_SWF: ASWTag:=$5346;
+  End;
+ End;
+End;
+
+Function ASWAudioWavHeader(B: PFMXB; I: Integer): LongInt;
+Var S: ^TFMXStream; Bps, Blk, BytesSec, Start, Hs: LongInt; Wx: Boolean; Extra: LongInt;
+Begin
+ S:=@FMXS[I]; Start:=FMXTell(B);
+ Wx:=(S^.Channels>2) Or (S^.SampleRate>48000) Or (MOWBitsPerSample(S^.Codec)>16);
+ If Wx Then Fail('ASF: WAVEFORMATEXTENSIBLE non pris en charge.');
+ FMXWL16(B,ASWTag(I)); FMXWL16(B,S^.Channels); FMXWL32(B,S^.SampleRate);
+ If (S^.Codec=FC_MP2) Or (S^.Codec=FC_MP3) Then Bps:=0
+ Else Begin
+  Bps:=MOWBitsPerSample(S^.Codec);
+  If Bps=0 Then Begin If S^.Bps<>0 Then Bps:=S^.Bps Else Bps:=16; End;
+ End;
+ If S^.BlockAlign<>0 Then Blk:=S^.BlockAlign Else Blk:=Bps*S^.Channels Div 8;
+ If (S^.Codec=FC_PCM_U8) Or (S^.Codec=FC_PCM_S16LE) Or (S^.Codec=FC_PCM_S24LE) Or (S^.Codec=FC_PCM_S32LE) Or (S^.Codec=FC_PCM_F32LE) Or (S^.Codec=FC_PCM_F64LE)
+ Then BytesSec:=S^.SampleRate*Blk Else BytesSec:=S^.BitRate Div 8;
+ FMXWL32(B,BytesSec); FMXWL16(B,Blk); FMXWL16(B,Bps);
+ Extra:=S^.ExtraLen;
+ FMXWL16(B,Extra);
+ If Extra>0 Then FMXWriteBytes(B,S^.Extra,Extra);
+ Hs:=FMXTell(B)-Start;
+ If (Hs And 1)<>0 Then Begin Inc(Hs); FMXW8(B,0); End;
+ ASWAudioWavHeader:=Hs;
+End;
+
+Procedure ASWBmpHeader(B: PFMXB; I: Integer);
+Var S: ^TFMXStream; Depth: LongInt;
+Begin
+ S:=@FMXS[I];
+ If S^.Bps<>0 Then Depth:=S^.Bps Else Depth:=24;
+ FMXWL32(B,40+S^.ExtraLen);
+ FMXWL32(B,S^.Width);
+ FMXWL32(B,S^.Height);
+ FMXWL16(B,1);
+ FMXWL16(B,Depth);
+ FMXWL32(B,LongInt(ASWTag(I)));
+ FMXWL32(B,(S^.Width*S^.Height*Depth+7) Div 8);
+ FMXWL32(B,0); FMXWL32(B,0); FMXWL32(B,0); FMXWL32(B,0);
+ If S^.ExtraLen>0 Then FMXWriteBytes(B,S^.Extra,S^.ExtraLen);
+End;
+
+Procedure ASWHeader1(B: PFMXB; FileSize, DataChunkSize: Int64);
+Var Tags: Array[0..4] OF String; HasTitle: Boolean; Cnt, HeaderSize, N: LongInt; HeaderOffset, Cur, Hpos, Hpos2, EsPos, Pos1: LongInt;
+    BitRate: Int64; HasAspect: LongInt; K: Integer; Dur: Int64; Dyn: PFMXB; Len, ExtraSize, ExtraSize2, WavSize, Chunks: LongInt;
+    Kk: Integer; Desc: String; Mk: Array[0..15] Of String[63]; Mv: Array[0..15] Of String[255]; Mn: Integer; Tm: String;
+    Streams: Integer;
+Begin
+ { conversion des cles de metadonnees }
+ Mn:=0;
+ For K:=0 To FMXMetaN-1 Do Begin
+  Mk[Mn]:=ASWConvKey(FMXMeta[K]); Mv[Mn]:=FMXMetaV[K]; Inc(Mn);
+ End;
+ Tags[0]:=''; Tags[1]:=''; Tags[2]:=''; Tags[3]:=''; Tags[4]:='';
+ For K:=0 To Mn-1 Do Begin
+  Tm:=FMXLower(Mk[K]);
+  If (Tm='title') And (Tags[0]='') Then Tags[0]:=Mv[K]
+  Else If (Tm='author') And (Tags[1]='') Then Tags[1]:=Mv[K]
+  Else If (Tm='copyright') And (Tags[2]='') Then Tags[2]:=Mv[K]
+  Else If (Tm='comment') And (Tags[3]='') Then Tags[3]:=Mv[K]
+  Else If (Tm='rating') And (Tags[4]='') Then Tags[4]:=Mv[K];
+ End;
+ HasTitle:=(Tags[0]<>'') Or (Tags[1]<>'') Or (Tags[2]<>'') Or (Tags[3]<>'') Or (Tags[4]<>'');
+ Dur:=ASWDuration+Int64(ASW_PREROLL)*10000;
+ BitRate:=0; HasAspect:=0;
+ For K:=0 To FMXN-1 Do Begin
+  FMXS[K].TbN:=1; FMXS[K].TbD:=1000;
+  BitRate:=BitRate+FMXS[K].BitRate;
+  If (FMXS[K].Kind=FMXKind_V) And (FMXS[K].SarN>0) And (FMXS[K].SarD>0) Then Inc(HasAspect);
+ End;
+ If ASWStreamed Then ASWPutChunk(B,$4824,0,$c00);
+ ASWGuid(B,ASW_G_HEADER);
+ FMXWL64(B,-1);
+ Chunks:=3; If HasTitle Then Inc(Chunks); If Mn>0 Then Inc(Chunks);
+ FMXWL32(B,Chunks+FMXN);
+ FMXW8(B,1); FMXW8(B,2);
+ HeaderOffset:=FMXTell(B);
+ Hpos:=ASWPutHeader(B,ASW_G_FILE);
+ ASWGuid(B,ASW_G_ZERO);
+ FMXWL64(B,FileSize);
+ FMXWL64(B,ASWCreation*10+116444736000000000);
+ FMXWL64(B,ASWNbPackets);
+ FMXWL64(B,Dur);
+ FMXWL64(B,ASWDuration);
+ FMXWL64(B,ASW_PREROLL);
+ If ASWStreamed Then FMXWL32(B,3) Else FMXWL32(B,2);
+ FMXWL32(B,ASWPacketSize); FMXWL32(B,ASWPacketSize);
+ If BitRate<>0 Then FMXWL32(B,LongInt(BitRate)) Else FMXWL32(B,-1);
+ ASWEndHeader(B,Hpos);
+ { extension d'en-tete }
+ Hpos:=ASWPutHeader(B,ASW_G_HEAD1);
+ ASWGuid(B,ASW_G_HEAD2);
+ FMXWL16(B,6); FMXWL32(B,0);
+ If HasAspect>0 Then Begin
+  Hpos2:=ASWPutHeader(B,ASW_G_METADATA);
+  FMXWL16(B,2*HasAspect);
+  For K:=0 To FMXN-1 Do
+   If (FMXS[K].Kind=FMXKind_V) And (FMXS[K].SarN>0) And (FMXS[K].SarD>0) Then Begin
+    FMXWL16(B,0); FMXWL16(B,K+1); FMXWL16(B,26); FMXWL16(B,3); FMXWL32(B,4);
+    ASWPutStr16(B,'AspectRatioX'); FMXWL32(B,FMXS[K].SarN);
+    FMXWL16(B,0); FMXWL16(B,K+1); FMXWL16(B,26); FMXWL16(B,3); FMXWL32(B,4);
+    ASWPutStr16(B,'AspectRatioY'); FMXWL32(B,FMXS[K].SarD);
+   End;
+  ASWEndHeader(B,Hpos2);
+ End;
+ Pos1:=FMXTell(B);
+ FMXSeek(B,Hpos+42); FMXWL32(B,Pos1-Hpos-46); FMXSeek(B,Pos1);
+ ASWEndHeader(B,Hpos);
+ Dyn:=FMXNew;
+ If HasTitle Then Begin
+  Hpos:=ASWPutHeader(B,ASW_G_COMMENT);
+  For K:=0 To 4 Do Begin
+   If Tags[K]<>'' Then Len:=ASWPutStr16(Dyn,Tags[K]) Else Len:=0;
+   FMXWL16(B,Len);
+  End;
+  FMXWrite(B,Dyn^.D,Dyn^.Len);
+  Dyn^.Len:=0; Dyn^.Pos:=0;
+  ASWEndHeader(B,Hpos);
+ End;
+ If Mn>0 Then Begin
+  Hpos:=ASWPutHeader(B,ASW_G_EXTCONT);
+  FMXWL16(B,Mn);
+  For K:=0 To Mn-1 Do Begin
+   Dyn^.Len:=0; Dyn^.Pos:=0; Len:=ASWPutStr16(Dyn,Mk[K]); FMXWL16(B,Len); FMXWrite(B,Dyn^.D,Len);
+   FMXWL16(B,0);
+   Dyn^.Len:=0; Dyn^.Pos:=0; Len:=ASWPutStr16(Dyn,Mv[K]); FMXWL16(B,Len); FMXWrite(B,Dyn^.D,Len);
+  End;
+  Dyn^.Len:=0; Dyn^.Pos:=0;
+  ASWEndHeader(B,Hpos);
+ End;
+ { en-tetes de flux }
+ For K:=0 To FMXN-1 Do Begin
+  ASWSeq[K]:=1;
+  If FMXS[K].Kind=FMXKind_A Then Begin ExtraSize:=18; ExtraSize2:=8; End
+  Else Begin ExtraSize:=$33+FMXS[K].ExtraLen; ExtraSize2:=0; End;
+  Hpos:=ASWPutHeader(B,ASW_G_STREAM);
+  If FMXS[K].Kind=FMXKind_A Then Begin ASWGuid(B,ASW_G_AUDIO); ASWGuid(B,ASW_G_ACONC); End
+  Else Begin ASWGuid(B,ASW_G_VIDEO); ASWGuid(B,ASW_G_VCONC); End;
+  FMXWL64(B,0);
+  EsPos:=FMXTell(B);
+  FMXWL32(B,ExtraSize); FMXWL32(B,ExtraSize2); FMXWL16(B,K+1); FMXWL32(B,0);
+  If FMXS[K].Kind=FMXKind_A Then Begin
+   WavSize:=ASWAudioWavHeader(B,K);
+   If WavSize<>ExtraSize Then Begin Cur:=FMXTell(B); FMXSeek(B,EsPos); FMXWL32(B,WavSize); FMXSeek(B,Cur); End;
+   FMXW8(B,1);
+   If FMXS[K].BlockAlign=0 Then Begin FMXWL16(B,$190); FMXWL16(B,$190); End
+   Else Begin FMXWL16(B,FMXS[K].BlockAlign); FMXWL16(B,FMXS[K].BlockAlign); End;
+   FMXWL16(B,1); FMXW8(B,0);
+  End Else Begin
+   FMXWL32(B,FMXS[K].Width); FMXWL32(B,FMXS[K].Height); FMXW8(B,2);
+   FMXWL16(B,40+FMXS[K].ExtraLen);
+   ASWBmpHeader(B,K);
+  End;
+  ASWEndHeader(B,Hpos);
+ End;
+ { commentaires de codec }
+ Hpos:=ASWPutHeader(B,ASW_G_CODECCOM);
+ ASWGuid(B,ASW_G_CODECCOM1);
+ FMXWL32(B,FMXN);
+ For K:=0 To FMXN-1 Do Begin
+  If FMXS[K].Kind=FMXKind_A Then FMXWL16(B,2) Else If FMXS[K].Kind=FMXKind_V Then FMXWL16(B,1) Else FMXWL16(B,-1);
+  If FMXS[K].Codec=FC_WMAV2 Then Desc:='Windows Media Audio V8' Else Desc:=MOWCodecName(FMXS[K].Codec);
+  If Desc='unknown' Then Desc:='';
+  If Desc<>'' Then Begin
+   Dyn^.Len:=0; Dyn^.Pos:=0; Len:=ASWPutStr16(Dyn,Desc);
+   FMXWL16(B,Len Div 2); FMXWrite(B,Dyn^.D,Len);
+  End Else FMXWL16(B,0);
+  FMXWL16(B,0);
+  If FMXS[K].Kind=FMXKind_A Then Begin FMXWL16(B,2); FMXWL16(B,ASWTag(K)); End
+  Else Begin FMXWL16(B,4); FMXWL32(B,LongInt(ASWTag(K))); End;
+  If ASWTag(K)=0 Then Fail('ASF: etiquette de codec introuvable pour le flux '+FMXIStr(K));
+ End;
+ ASWEndHeader(B,Hpos);
+ FMXFree(Dyn);
+ Cur:=FMXTell(B); HeaderSize:=Cur-HeaderOffset;
+ If ASWStreamed Then Begin
+  Inc(HeaderSize,8+30+ASW_DATAHDR);
+  FMXSeek(B,HeaderOffset-10-30); FMXWL16(B,HeaderSize);
+  FMXSeek(B,HeaderOffset-2-30); FMXWL16(B,HeaderSize);
+  Dec(HeaderSize,8+30+ASW_DATAHDR);
+ End;
+ Inc(HeaderSize,24+6);
+ FMXSeek(B,HeaderOffset-14); FMXWL64(B,HeaderSize);
+ FMXSeek(B,Cur);
+ ASWDataOffset:=Cur;
+ ASWGuid(B,ASW_G_DATA);
+ FMXWL64(B,DataChunkSize);
+ ASWGuid(B,ASW_G_ZERO);
+ FMXWL64(B,ASWNbPackets);
+ FMXW8(B,1); FMXW8(B,1);
+End;
+
+Procedure ASWInit;
+Begin
+ ASWStreamed:=FMXFmt='asf_stream';
+ FMXFmtTsNeg:=False; FMXAvoidStatus:=0; FMXAvoidNeg:=1;
+ FMXMaxIlvDelta:=0;
+End;
+
+Procedure ASWHeader;
+Var I: Integer;
+Begin
+ ASWPacketSize:=3200;
+ ASWNbPackets:=0; ASWDuration:=0; ASWSeqNo:=0; ASWCreation:=0;
+ ASWIdxAlloc:=512; GetMem(ASWIdx,ASWIdxAlloc*SizeOf(TASWIdx));
+ ASWMaxPacket:=0; ASWNextPktNum:=0; ASWNextPktCount:=0; ASWNextPktOff:=0; ASWNextStartSec:=0; ASWEndSec:=0;
+ For I:=0 To FMXN-1 Do Begin FMXS[I].TbN:=1; FMXS[I].TbD:=1000; End;
+ ASWHeader1(FMXOut,0,ASW_DATAHDR);
+ ASWPktPayloads:=0; ASWPktTsStart:=-1; ASWPktTsEnd:=-1;
+ ASWPkt:=FMXNew;
+End;
+
+Function ASWPutPPI(Pad0: LongInt; SendTime, Duration: LongInt; NbPayloads: LongInt): LongInt;
+Var B: PFMXB; Start: LongInt; Pad: LongInt; Lt: LongInt;
+Begin
+ B:=FMXOut; Start:=FMXTell(B);
+ Pad:=Pad0-ASW_PPI_MIN;
+ If ASWMultiPayloads Then Dec(Pad);
+ FMXW8(B,$82);
+ FMXFill(B,0,2);
+ Lt:=0;
+ If ASWMultiPayloads Then Lt:=Lt Or 1;
+ If Pad>0 Then Begin
+  If Pad<256 Then Lt:=Lt Or $08 Else Lt:=Lt Or $10;
+ End;
+ FMXW8(B,Lt);
+ FMXW8(B,$01 Or $08 Or $10 Or $40 Or $04 );
+ If (Lt And $10)<>0 Then FMXWL16(B,Pad-2);
+ If (Lt And $08)<>0 Then FMXW8(B,Pad-1);
+ FMXWL32(B,SendTime);
+ FMXWL16(B,Duration);
+ If ASWMultiPayloads Then FMXW8(B,NbPayloads Or $80);
+ ASWPutPPI:=FMXTell(B)-Start;
+End;
+
+Procedure ASWFlushPacket;
+Var HdrSize, Filled: LongInt;
+Begin
+ If ASWStreamed Then ASWPutChunk(FMXOut,$4424,ASWPacketSize,0);
+ HdrSize:=ASWPutPPI(ASWPacketSizeLeft,LongInt(ASWPktTsStart),LongInt(ASWPktTsEnd-ASWPktTsStart),ASWPktPayloads);
+ Filled:=ASWPacketSize-ASWPacketSizeLeft;
+ FMXSeek(ASWPkt,Filled);
+ FMXFill(ASWPkt,0,ASWPacketSizeLeft);
+ FMXWrite(FMXOut,ASWPkt^.D,ASWPacketSize-HdrSize);
+ Inc(ASWNbPackets);
+ ASWPktPayloads:=0; ASWPktTsStart:=-1; ASWPktTsEnd:=-1;
+ ASWPkt^.Len:=0; ASWPkt^.Pos:=0;
+End;
+
+Procedure ASWPutPayloadHeader(SI: Integer; PresTime: Int64; ObjSize, ObjOffset, PayloadLen, Flags: LongInt);
+Var Val: LongInt; B: PFMXB;
+Begin
+ B:=ASWPkt;
+ Val:=SI+1;
+ If (Flags And FMX_PKT_KEY)<>0 Then Val:=Val Or $80;
+ FMXW8(B,Val);
+ FMXW8(B,ASWSeq[SI]);
+ FMXWL32(B,ObjOffset);
+ FMXW8(B,8);
+ FMXWL32(B,ObjSize);
+ FMXWL32(B,LongInt(PresTime And $FFFFFFFF));
+ If ASWMultiPayloads Then FMXWL16(B,PayloadLen);
+End;
+
+Procedure ASWPutFrame(SI: Integer; Ts: Int64; Buf: PFMXBytes; ObjSize, Flags: LongInt);
+Var ObjOffset, PayloadLen, Frag1, MpConst: LongInt;
+Begin
+ ObjOffset:=0;
+ While ObjOffset<ObjSize Do Begin
+  PayloadLen:=ObjSize-ObjOffset;
+  If ASWPktTsStart=-1 Then Begin
+   MpConst:=ASWPacketSize-(ASW_PPI_MIN+1+2*ASW_HDR_MULTI_PAYLOAD);
+   ASWMultiPayloads:=PayloadLen<MpConst;
+   ASWPacketSizeLeft:=ASWPacketSize;
+   If ASWMultiPayloads Then Frag1:=MpConst-1 Else Frag1:=ASWPacketSize-(ASW_PPI_MIN+ASW_HDR_SINGLE_PAYLOAD);
+   ASWPktTsStart:=Ts;
+  End Else Begin
+   Frag1:=ASWPacketSizeLeft-ASW_HDR_MULTI_PAYLOAD-ASW_PPI_MIN-1;
+   If (Frag1<PayloadLen) And (FMXS[SI].Kind=FMXKind_A) Then Begin ASWFlushPacket; Continue; End;
+   If (ASWPktTsStart>9223372036854775807-65535) Or (Ts>ASWPktTsStart+65535) Then Begin ASWFlushPacket; Continue; End;
+  End;
+  If Frag1>0 Then Begin
+   If PayloadLen>Frag1 Then PayloadLen:=Frag1
+   Else If PayloadLen=Frag1-1 Then PayloadLen:=Frag1-2;
+   ASWPutPayloadHeader(SI,Ts+ASW_PREROLL,ObjSize,ObjOffset,PayloadLen,Flags);
+   FMXWrite(ASWPkt,@Buf^[ObjOffset],PayloadLen);
+   If ASWMultiPayloads Then Dec(ASWPacketSizeLeft,PayloadLen+ASW_HDR_MULTI_PAYLOAD)
+   Else Dec(ASWPacketSizeLeft,PayloadLen+ASW_HDR_SINGLE_PAYLOAD);
+   ASWPktTsEnd:=Ts;
+   Inc(ASWPktPayloads);
+  End Else PayloadLen:=0;
+  Inc(ObjOffset,PayloadLen);
+  If Not ASWMultiPayloads Then ASWFlushPacket
+  Else If ASWPacketSizeLeft<=(ASW_HDR_MULTI_PAYLOAD+ASW_PPI_MIN+1) Then ASWFlushPacket
+  Else If ASWPktPayloads=63 Then ASWFlushPacket;
+ End;
+ Inc(ASWSeq[SI]);
+End;
+
+Procedure ASWUpdateIndex(StartSec, PktNum, PktCount: LongInt; PktOff: Int64);
+Var I, NewAlloc: LongInt; NI: PASWIdx;
+Begin
+ If StartSec>ASWNextStartSec Then Begin
+  If ASWNextStartSec=0 Then Begin ASWNextPktNum:=PktNum; ASWNextPktCount:=PktCount; ASWNextPktOff:=PktOff; End;
+  If StartSec>ASWIdxAlloc Then Begin
+   NewAlloc:=(StartSec+512) And (Not 511);
+   GetMem(NI,NewAlloc*SizeOf(TASWIdx)); Move(ASWIdx^,NI^,ASWIdxAlloc*SizeOf(TASWIdx)); FreeMem(ASWIdx); ASWIdx:=NI; ASWIdxAlloc:=NewAlloc;
+  End;
+  For I:=ASWNextStartSec To StartSec-1 Do Begin
+   ASWIdx^[I].PktNum:=ASWNextPktNum; ASWIdx^[I].PktCount:=ASWNextPktCount;
+   ASWIdx^[I].SendTime:=Int64(ASWNextStartSec)*10000000; ASWIdx^[I].Offset:=ASWNextPktOff;
+  End;
+ End;
+ If PktCount>ASWMaxPacket Then ASWMaxPacket:=PktCount;
+ ASWNextPktNum:=PktNum; ASWNextPktCount:=PktCount; ASWNextPktOff:=PktOff; ASWNextStartSec:=StartSec;
+End;
+
+Procedure ASWPacket(P: PFMXPkt);
+Var Fl: LongInt; Pts: Int64; PktNum: LongInt; StartSec: LongInt; Off: LongInt; Cnt: LongInt;
+Begin
+ Off:=FMXTell(FMXOut);
+ Fl:=P^.Flags;
+ If FMXS[P^.SI].Kind=FMXKind_A Then Fl:=Fl And (Not FMX_PKT_KEY);
+ If P^.Pts<>FMXNoPts Then Pts:=P^.Pts Else Pts:=P^.Dts;
+ If (Pts< -ASW_PREROLL) Then Fail('input pts '+FMXIStr(Pts)+' is invalid');
+ Pts:=Pts*10000;
+ If Pts+P^.Dur*10000>ASWDuration Then ASWDuration:=Pts+P^.Dur*10000;
+ PktNum:=ASWNbPackets;
+ ASWPutFrame(P^.SI,P^.Dts,P^.Data,P^.Size,Fl);
+ StartSec:=LongInt((Int64(ASW_PREROLL)*10000+Pts+10000000-1) Div 10000000);
+ If (Not ASWStreamed) And ((Fl And FMX_PKT_KEY)<>0) Then Begin
+  Cnt:=LongInt(ASWNbPackets)-PktNum;
+  ASWUpdateIndex(StartSec,PktNum,Cnt,Off);
+ End;
+ ASWEndSec:=StartSec;
+End;
+
+Procedure ASWTrailer;
+Var B: PFMXB; DataSize, FileSize, I: LongInt;
+Begin
+ B:=FMXOut;
+ If ASWPkt^.Len>0 Then ASWFlushPacket;
+ DataSize:=FMXTell(B);
+ If (Not ASWStreamed) And (ASWNextStartSec<>0) Then Begin
+  ASWUpdateIndex(ASWEndSec+1,0,0,0);
+  ASWGuid(B,ASW_G_INDEX);
+  FMXWL64(B,24+16+8+4+4+(4+2)*Int64(ASWNextStartSec));
+  ASWGuid(B,ASW_G_ZERO);
+  FMXWL64(B,10000000);
+  FMXWL32(B,ASWMaxPacket);
+  FMXWL32(B,ASWNextStartSec);
+  For I:=0 To ASWNextStartSec-1 Do Begin
+   FMXWL32(B,ASWIdx^[I].PktNum); FMXWL16(B,ASWIdx^[I].PktCount);
+  End;
+ End;
+ If ASWStreamed Then ASWPutChunk(B,$4524,0,0)
+ Else Begin
+  FileSize:=FMXTell(B);
+  FMXSeek(B,0);
+  ASWHeader1(B,FileSize,DataSize-ASWDataOffset);
+ End;
+End;
+{ ------------------------------------------------------------------ }
+{ Muxer AVI (avienc.c + riffenc.c, FFmpeg 6.1.1) ; fichiers < 1 Go     }
+{ ------------------------------------------------------------------ }
+Const
+ AVW_MAX_RIFF = $40000000;
+Type
+ TAVWEnt = Record Flags: LongInt; Pos: LongInt; Len: LongInt; End;
+ PAVWEnts = ^TAVWEntArr;
+ TAVWEntArr = Array[0..0] Of TAVWEnt;
+Var
+ AVWMoviList, AVWRiffStart, AVWFramesHdrAll, AVWOdmlList: LongInt;
+ AVWFramesHdrStrm, AVWStrhFlagsOff: Array[0..FMXMaxS-1] Of LongInt;
+ AVWAudioLen: Array[0..FMXMaxS-1] Of Int64;
+ AVWPktCount: Array[0..FMXMaxS-1] Of LongInt;
+ AVWMaxSize: Array[0..FMXMaxS-1] Of LongInt;
+ AVWEnts: Array[0..FMXMaxS-1] Of PAVWEnts;
+ AVWEntN, AVWEntCap: Array[0..FMXMaxS-1] Of LongInt;
+ AVWLastDts: Array[0..FMXMaxS-1] Of Int64;
+ AVWMasterMax: LongInt;
+ AVWAuRate, AVWAuSsize, AVWAuScale: LongInt;
+
+Function AVWStartTag(B: PFMXB; Const Tag: String): LongInt;
+Begin
+ FMXTag(B,Tag); FMXWL32(B,-1); AVWStartTag:=FMXTell(B);
+End;
+
+Procedure AVWEndTag(B: PFMXB; Start: LongInt);
+Var Pos: LongInt;
+Begin
+ Pos:=FMXTell(B);
+ If (Pos And 1)<>0 Then FMXW8(B,0);
+ FMXSeek(B,Start-4); FMXWL32(B,Pos-Start);
+ FMXSeek(B,(Pos+1) And (Not 1));
+End;
+
+Function AVWStreamFcc(I: Integer): String;
+Var S: String;
+Begin
+ S:=Chr(48+I Div 10)+Chr(48+I Mod 10);
+ If FMXS[I].Kind=FMXKind_V Then S:=S+'dc' Else S:=S+'wb';
+ AVWStreamFcc:=S;
+End;
+
+Function AVWGcd(A,B: Int64): Int64;
+Var T: Int64;
+Begin
+ While B<>0 Do Begin T:=A Mod B; A:=B; B:=T; End;
+ AVWGcd:=A;
+End;
+
+{ av_get_audio_frame_duration2(par,0) }
+Function AVWFrameDur0(Var S: TFMXStream): LongInt;
+Begin
+ AVWFrameDur0:=0;
+ Case S.Codec Of
+  FC_ADPCM_IMA_QT: AVWFrameDur0:=64;
+  FC_MP2: AVWFrameDur0:=1152;
+  FC_AC3: AVWFrameDur0:=1536;
+  FC_MP3: If S.SampleRate<=24000 Then AVWFrameDur0:=576 Else AVWFrameDur0:=1152;
+ End;
+End;
+
+Procedure AVWSpecificParams(I: Integer);
+Var S: ^TFMXStream; Fs: LongInt; G: Int64;
+Begin
+ S:=@FMXS[I];
+ Fs:=AVWFrameDur0(S^);
+ If Fs=0 Then Fs:=S^.FrameSize;
+ AVWAuSsize:=S^.BlockAlign;
+ If (Fs<>0) And (S^.SampleRate<>0) And (S^.Kind=FMXKind_A) Then Begin AVWAuScale:=Fs; AVWAuRate:=S^.SampleRate; End
+ Else If S^.Kind<>FMXKind_A Then Begin AVWAuScale:=S^.TbN; AVWAuRate:=S^.TbD; End
+ Else Begin
+  If S^.BlockAlign<>0 Then AVWAuScale:=S^.BlockAlign*8 Else AVWAuScale:=8;
+  If S^.BitRate<>0 Then AVWAuRate:=S^.BitRate Else AVWAuRate:=8*S^.SampleRate;
+ End;
+ G:=AVWGcd(AVWAuScale,AVWAuRate);
+ If G>1 Then Begin AVWAuScale:=AVWAuScale Div G; AVWAuRate:=AVWAuRate Div G; End;
+End;
+
+Function AVWWavTag(I: Integer): LongInt;
+Begin
+ Case FMXS[I].Codec Of
+  FC_PCM_S16LE,FC_PCM_U8,FC_PCM_S24LE,FC_PCM_S32LE: AVWWavTag:=1;
+  FC_PCM_F32LE,FC_PCM_F64LE: AVWWavTag:=3;
+  FC_PCM_ALAW: AVWWavTag:=6;
+  FC_PCM_MULAW: AVWWavTag:=7;
+  FC_ADPCM_MS: AVWWavTag:=2;
+  FC_ADPCM_IMA_WAV: AVWWavTag:=$11;
+  FC_ADPCM_YAMAHA: AVWWavTag:=$20;
+  FC_MP2: AVWWavTag:=$50;
+  FC_MP3: AVWWavTag:=$55;
+  FC_AAC: AVWWavTag:=$FF;
+  FC_WMAV1: AVWWavTag:=$160;
+  FC_WMAV2: AVWWavTag:=$161;
+  FC_AC3: AVWWavTag:=$2000;
+  Else AVWWavTag:=0;
+ End;
+End;
+
+Function AVWVideoTag(I: Integer): LongWord;
+Begin
+ If FMXS[I].CTag<>0 Then Begin AVWVideoTag:=FMXS[I].CTag; Exit; End;
+ Case FMXS[I].Codec Of
+  FC_SVQ1: AVWVideoTag:=FMXMKTag('svq1');
+  FC_WMV1: AVWVideoTag:=FMXMKTag('WMV1');
+  FC_WMV2: AVWVideoTag:=FMXMKTag('WMV2');
+  FC_MSMPEG4V3: AVWVideoTag:=FMXMKTag('MP43');
+  FC_MSMPEG4V2: AVWVideoTag:=FMXMKTag('MP42');
+  FC_MSMPEG4V1: AVWVideoTag:=FMXMKTag('MPG4');
+  FC_HUFFYUV: AVWVideoTag:=FMXMKTag('HFYU');
+  FC_FFV1: AVWVideoTag:=FMXMKTag('FFV1');
+  FC_MJPEG: AVWVideoTag:=FMXMKTag('MJPG');
+  FC_FLV1: AVWVideoTag:=FMXMKTag('FLV1');
+  FC_H263: AVWVideoTag:=FMXMKTag('H263');
+  FC_MPEG4: AVWVideoTag:=FMXMKTag('FMP4');
+  FC_H264: AVWVideoTag:=FMXMKTag('H264');
+  FC_QTRLE: AVWVideoTag:=FMXMKTag('rle ');
+  Else AVWVideoTag:=0;
+ End;
+End;
+
+{ ff_put_wav_header (flags : ForceEx pas utilise ici) ; renvoie la taille ou -1 }
+Function AVWPutWavHeader(B: PFMXB; I: Integer): LongInt;
+Var S: ^TFMXStream; Bps, Blk, BytesSec, Start, Hs, Tg: LongInt; Wx: Boolean; Ex: Array[0..31] Of Byte; ExN: Integer; ExP: PFMXBytes;
+    Fd: LongInt; Mask: LongInt;
+Begin
+ S:=@FMXS[I]; Start:=FMXTell(B);
+ Tg:=AVWWavTag(I);
+ If (Tg=0) Or (Tg>$FFFF) Then Begin AVWPutWavHeader:=-1; Exit; End;
+ Wx:=(S^.Channels>2) Or (S^.SampleRate>48000) Or (MOWBitsPerSample(S^.Codec)>16);
+ If Wx Then FMXWL16(B,$FFFE) Else FMXWL16(B,Tg);
+ FMXWL16(B,S^.Channels); FMXWL32(B,S^.SampleRate);
+ If (S^.Codec=FC_MP2) Or (S^.Codec=FC_MP3) Then Bps:=0
+ Else Begin
+  Bps:=MOWBitsPerSample(S^.Codec);
+  If Bps=0 Then Begin If S^.Bps<>0 Then Bps:=S^.Bps Else Bps:=16; End;
+ End;
+ If S^.Codec=FC_MP2 Then Blk:=(144*Int64(S^.BitRate)-1) Div S^.SampleRate+1
+ Else If S^.Codec=FC_MP3 Then Begin If S^.SampleRate<=28000 Then Blk:=576 Else Blk:=1152; End
+ Else If S^.Codec=FC_AC3 Then Blk:=3840
+ Else If S^.Codec=FC_AAC Then Blk:=768*S^.Channels
+ Else If S^.BlockAlign<>0 Then Blk:=S^.BlockAlign
+ Else Blk:=Bps*S^.Channels Div AVWGcd(8,Bps);
+ If (S^.Codec=FC_PCM_U8) Or (S^.Codec=FC_PCM_S24LE) Or (S^.Codec=FC_PCM_S32LE) Or (S^.Codec=FC_PCM_F32LE) Or (S^.Codec=FC_PCM_F64LE) Or (S^.Codec=FC_PCM_S16LE)
+ Then BytesSec:=S^.SampleRate*Blk Else BytesSec:=S^.BitRate Div 8;
+ FMXWL32(B,BytesSec); FMXWL16(B,Blk); FMXWL16(B,Bps);
+ ExN:=0; ExP:=Nil;
+ If S^.Codec=FC_MP3 Then Begin
+  Ex[0]:=1; Ex[1]:=0; Ex[2]:=2; Ex[3]:=0; Ex[4]:=0; Ex[5]:=0; Ex[6]:=$80; Ex[7]:=$04; Ex[8]:=1; Ex[9]:=0; Ex[10]:=$71; Ex[11]:=$05; ExN:=12; ExP:=@Ex[0];
+ End Else If S^.Codec=FC_ADPCM_IMA_WAV Then Begin
+  Fd:=S^.FrameSize; Ex[0]:=Fd And $FF; Ex[1]:=(Fd Shr 8) And $FF; ExN:=2; ExP:=@Ex[0];
+ End Else If S^.ExtraLen>0 Then Begin ExN:=S^.ExtraLen; ExP:=S^.Extra; End;
+ If Wx Then Begin
+  FMXWL16(B,ExN+22);
+  FMXWL16(B,Bps);
+  If S^.Channels=1 Then Mask:=4 Else If S^.Channels=2 Then Mask:=3 Else Mask:=0;
+  FMXWL32(B,Mask);
+  FMXWL32(B,Tg); FMXWL32(B,$00100000); FMXWL32(B,LongInt($AA000080)); FMXWL32(B,$719B3800);
+ End Else If (Tg<>1) Or (ExN>0) Then FMXWL16(B,ExN);
+ If ExN>0 Then FMXWriteBytes(B,ExP,ExN);
+ Hs:=FMXTell(B)-Start;
+ If (Hs And 1)<>0 Then Begin Inc(Hs); FMXW8(B,0); End;
+ AVWPutWavHeader:=Hs;
+End;
+
+Procedure AVWBmpHeader(B: PFMXB; I: Integer);
+Var S: ^TFMXStream; Depth: LongInt; Tg: LongWord; Ex: LongInt;
+Begin
+ S:=@FMXS[I]; Tg:=AVWVideoTag(I);
+ If S^.Bps<>0 Then Depth:=S^.Bps Else Depth:=24;
+ Ex:=S^.ExtraLen;
+ FMXWL32(B,40+Ex);
+ FMXWL32(B,S^.Width);
+ If Tg<>0 Then FMXWL32(B,S^.Height) Else FMXWL32(B,-S^.Height);
+ FMXWL16(B,1); FMXWL16(B,Depth);
+ FMXWL32(B,LongInt(Tg));
+ FMXWL32(B,(Int64(S^.Width)*S^.Height*Depth+7) Div 8);
+ FMXWL32(B,0); FMXWL32(B,0); FMXWL32(B,0); FMXWL32(B,0);
+ If Ex>0 Then Begin
+  FMXWriteBytes(B,S^.Extra,Ex);
+  If (Ex And 1)<>0 Then FMXW8(B,0);
+ End;
+End;
+
+Procedure AVWOdmlMaster(B: PFMXB; I: Integer);
+Var Pos: LongInt;
+Begin
+ Pos:=AVWStartTag(B,'JUNK');
+ FMXWL16(B,4); FMXW8(B,0); FMXW8(B,0); FMXWL32(B,0);
+ FMXTag(B,AVWStreamFcc(I));
+ FMXFill(B,0,12+16*AVWMasterMax);
+ AVWEndTag(B,Pos);
+End;
+
+Procedure AVWInfo(B: PFMXB);
+Const Tags: Array[0..35] Of String[4]=('IARL','IART','IAS1','IAS2','IAS3','IAS4','IAS5','IAS6','IAS7','IAS8','IAS9','ICMS','ICMT','ICOP','ICRD','ICRP','IDIM','IDPI','IENG','IGNR','IKEY','ILGT','ILNG','IMED','INAM','IPLT','IPRD','IPRT','ITRK','ISBJ','ISFT','ISHP','ISMP','ISRC','ISRF','ITCH');
+Var K, J: Integer; Any: Boolean; Pos: LongInt; Val: Array[0..35] Of String; Has: Array[0..35] Of Boolean; Key: String;
+Begin
+ Any:=False;
+ For J:=0 To 35 Do Has[J]:=False;
+ For K:=0 To FMXMetaN-1 Do Begin
+  Key:=FMXMeta[K];
+  If Key='artist' Then Key:='IART' Else If Key='comment' Then Key:='ICMT' Else If Key='copyright' Then Key:='ICOP'
+  Else If Key='date' Then Key:='ICRD' Else If Key='genre' Then Key:='IGNR' Else If Key='language' Then Key:='ILNG'
+  Else If Key='title' Then Key:='INAM' Else If Key='album' Then Key:='IPRD' Else If Key='track' Then Key:='IPRT'
+  Else If Key='encoder' Then Key:='ISFT' Else If Key='timecode' Then Key:='ISMP' Else If Key='encoded_by' Then Key:='ITCH';
+  For J:=0 To 35 Do If Tags[J]=Key Then Begin Has[J]:=True; Val[J]:=FMXMetaV[K]; Any:=True; End;
+ End;
+ If Not Any Then Exit;
+ Pos:=AVWStartTag(B,'LIST');
+ FMXTag(B,'INFO');
+ For J:=0 To 35 Do If Has[J] And (Val[J]<>'') Then Begin
+  FMXTag(B,Tags[J]); FMXWL32(B,Length(Val[J])+1); FMXPutStr(B,Val[J]);
+  If ((Length(Val[J])+1) And 1)<>0 Then FMXW8(B,0);
+ End;
+ AVWEndTag(B,Pos);
+End;
+
+Procedure AVWInit;
+Begin
+ FMXFmtVarFps:=True; FMXFmtTsNeg:=False; FMXFmtNonStrict:=False; FMXAvoidStatus:=0; FMXAvoidNeg:=1;
+End;
+
+Procedure AVWHeader;
+Var B: PFMXB; I, N: Integer; List1, List2, Strh, Strf, Pad: LongInt; Bitrate: Int64; VideoSt: Integer; Est, Fe: Double;
+    Ws, Num, Den, Fields, K, StartLine: LongInt; Vp: LongInt; Tg: LongInt; Mx: Int64; D1, D2: Double; Nn: LongInt;
+Begin
+ B:=FMXOut;
+ For I:=0 To FMXN-1 Do Begin
+  AVWFramesHdrStrm[I]:=0; AVWAudioLen[I]:=0; AVWPktCount[I]:=0; AVWMaxSize[I]:=0; AVWEntN[I]:=0; AVWEntCap[I]:=0; AVWEnts[I]:=Nil; AVWLastDts[I]:=FMXNoPts;
+ End;
+ AVWMasterMax:=256;
+ { liste d'en-tete }
+ AVWRiffStart:=AVWStartTag(B,'RIFF');
+ FMXTag(B,'AVI ');
+ List1:=AVWStartTag(B,'LIST'); FMXTag(B,'hdrl');
+ FMXTag(B,'avih'); FMXWL32(B,14*4);
+ Bitrate:=0; VideoSt:=-1;
+ For I:=0 To FMXN-1 Do Begin
+  Bitrate:=Bitrate+FMXS[I].BitRate; If Bitrate>2147483647 Then Bitrate:=2147483647;
+  If FMXS[I].Kind=FMXKind_V Then VideoSt:=I;
+ End;
+ D1:=36000; D2:=Bitrate Div 8; Est:=D1*D2*1.10;
+ Fe:=Est/AVW_MAX_RIFF;
+ Nn:=Trunc(Fe); If Fe>Nn Then Inc(Nn);
+ Inc(Nn);
+ If Nn>AVWMasterMax Then AVWMasterMax:=Nn;
+ If VideoSt>=0 Then FMXWL32(B,LongInt((Int64(1000000)*FMXS[VideoSt].TbN) Div FMXS[VideoSt].TbD)) Else FMXWL32(B,0);
+ FMXWL32(B,LongInt(Bitrate Div 8));
+ FMXWL32(B,0);
+ FMXWL32(B,$800 Or $10 Or $100);
+ AVWFramesHdrAll:=FMXTell(B);
+ FMXWL32(B,0); FMXWL32(B,0); FMXWL32(B,FMXN); FMXWL32(B,1024*1024);
+ If VideoSt>=0 Then Begin FMXWL32(B,FMXS[VideoSt].Width); FMXWL32(B,FMXS[VideoSt].Height); End Else Begin FMXWL32(B,0); FMXWL32(B,0); End;
+ FMXFill(B,0,16);
+ For I:=0 To FMXN-1 Do Begin
+  List2:=AVWStartTag(B,'LIST'); FMXTag(B,'strl');
+  Strh:=AVWStartTag(B,'strh');
+  If FMXS[I].Kind=FMXKind_V Then FMXTag(B,'vids') Else If FMXS[I].Kind=FMXKind_A Then FMXTag(B,'auds') Else FMXTag(B,'dats');
+  If FMXS[I].Kind=FMXKind_V Then FMXWL32(B,LongInt(AVWVideoTag(I))) Else FMXWL32(B,1);
+  AVWStrhFlagsOff[I]:=FMXTell(B);
+  FMXWL32(B,0); FMXWL16(B,0); FMXWL16(B,0); FMXWL32(B,0);
+  AVWSpecificParams(I);
+  If (FMXS[I].Kind=FMXKind_V) And (AVWAuRate>Int64(1000)*AVWAuScale) Then Begin AVWAuRate:=600; AVWAuScale:=1; End;
+  FMXS[I].TbN:=AVWAuScale; FMXS[I].TbD:=AVWAuRate;
+  FMXWL32(B,AVWAuScale); FMXWL32(B,AVWAuRate);
+  FMXWL32(B,0);
+  AVWFramesHdrStrm[I]:=FMXTell(B);
+  FMXWL32(B,0);
+  If FMXS[I].Kind=FMXKind_V Then FMXWL32(B,1024*1024) Else If FMXS[I].Kind=FMXKind_A Then FMXWL32(B,12*1024) Else FMXWL32(B,0);
+  FMXWL32(B,-1);
+  FMXWL32(B,AVWAuSsize);
+  FMXWL32(B,0);
+  FMXWL16(B,FMXS[I].Width); FMXWL16(B,FMXS[I].Height);
+  AVWEndTag(B,Strh);
+  Strf:=AVWStartTag(B,'strf');
+  If FMXS[I].Kind=FMXKind_V Then AVWBmpHeader(B,I)
+  Else Begin
+   If AVWPutWavHeader(B,I)<0 Then Fail('Could not find tag for codec '+MOWCodecName(FMXS[I].Codec)+' in stream #'+FMXIStr(I)+', codec not currently supported in container');
+  End;
+  AVWEndTag(B,Strf);
+  If FMXS[I].StTitle<>'' Then Begin
+   FMXTag(B,'strn'); FMXWL32(B,Length(FMXS[I].StTitle)+1); FMXPutStr(B,FMXS[I].StTitle);
+   If ((Length(FMXS[I].StTitle)+1) And 1)<>0 Then FMXW8(B,0);
+  End;
+  AVWOdmlMaster(B,I);
+  If (FMXS[I].Kind=FMXKind_V) And (FMXS[I].SarN>0) And (FMXS[I].SarD>0) Then Begin
+   Vp:=AVWStartTag(B,'vprp');
+   Num:=Int64(FMXS[I].SarN)*FMXS[I].Width; Den:=Int64(FMXS[I].SarD)*FMXS[I].Height;
+   FMXReduce(Num,Den,65535);
+   If (FMXS[I].FieldOrder>=2) Then Fields:=2 Else Fields:=1;
+   FMXWL32(B,0); FMXWL32(B,0);
+   FMXWL32(B,LongInt((2*Int64(FMXS[I].TbD)+FMXS[I].TbN-1) Div (2*Int64(FMXS[I].TbN))));
+   FMXWL32(B,FMXS[I].Width); FMXWL32(B,FMXS[I].Height);
+   FMXWL16(B,Den); FMXWL16(B,Num);
+   FMXWL32(B,FMXS[I].Width); FMXWL32(B,FMXS[I].Height);
+   FMXWL32(B,Fields);
+   For K:=0 To Fields-1 Do Begin
+    StartLine:=0;
+    If (FMXS[I].FieldOrder=2) Or (FMXS[I].FieldOrder=4) Then Begin If K=0 Then StartLine:=0 Else StartLine:=1; End
+    Else If (FMXS[I].FieldOrder=3) Or (FMXS[I].FieldOrder=5) Then Begin If K=0 Then StartLine:=1 Else StartLine:=0; End;
+    FMXWL32(B,FMXS[I].Height Div Fields); FMXWL32(B,FMXS[I].Width);
+    FMXWL32(B,FMXS[I].Height Div Fields); FMXWL32(B,FMXS[I].Width);
+    FMXWL32(B,0); FMXWL32(B,0); FMXWL32(B,0); FMXWL32(B,StartLine);
+   End;
+   AVWEndTag(B,Vp);
+  End;
+  AVWEndTag(B,List2);
+ End;
+ AVWOdmlList:=AVWStartTag(B,'JUNK');
+ FMXTag(B,'odml'); FMXTag(B,'dmlh'); FMXWL32(B,248); FMXFill(B,0,248);
+ AVWEndTag(B,AVWOdmlList);
+ AVWEndTag(B,List1);
+ AVWInfo(B);
+ Pad:=AVWStartTag(B,'JUNK');
+ FMXFill(B,0,1016);
+ AVWEndTag(B,Pad);
+ AVWMoviList:=AVWStartTag(B,'LIST'); FMXTag(B,'movi');
+End;
+
+Procedure AVWAddEntry(SI: Integer; Flags, Size: LongInt);
+Var NE: PAVWEnts; NC: LongInt;
+Begin
+ If AVWEntN[SI]>=AVWEntCap[SI] Then Begin
+  NC:=AVWEntCap[SI]+4096;
+  GetMem(NE,NC*SizeOf(TAVWEnt));
+  If AVWEnts[SI]<>Nil Then Begin Move(AVWEnts[SI]^,NE^,AVWEntN[SI]*SizeOf(TAVWEnt)); FreeMem(AVWEnts[SI]); End;
+  AVWEnts[SI]:=NE; AVWEntCap[SI]:=NC;
+ End;
+ AVWEnts[SI]^[AVWEntN[SI]].Flags:=Flags;
+ AVWEnts[SI]^[AVWEntN[SI]].Pos:=FMXTell(FMXOut)-AVWMoviList;
+ AVWEnts[SI]^[AVWEntN[SI]].Len:=Size;
+ If Size>AVWMaxSize[SI] Then AVWMaxSize[SI]:=Size;
+ Inc(AVWEntN[SI]);
+End;
+
+Procedure AVWWriteInternal(SI: Integer; Data: PFMXBytes; Size: LongInt; Flags: LongInt; Dts, Dur: Int64);
+Var B: PFMXB; F: LongInt;
+Begin
+ B:=FMXOut;
+ If Dts<>FMXNoPts Then AVWLastDts[SI]:=Dts+Dur;
+ Inc(AVWPktCount[SI]);
+ If FMXTell(B)-AVWRiffStart>AVW_MAX_RIFF Then Fail('AVI: fichier > 1 Go (OpenDML etendu) non pris en charge.');
+ F:=0; If (Flags And FMX_PKT_KEY)<>0 Then F:=$10;
+ If FMXS[SI].Kind=FMXKind_A Then Inc(AVWAudioLen[SI],Size);
+ AVWAddEntry(SI,F,Size);
+ FMXTag(B,AVWStreamFcc(SI)); FMXWL32(B,Size);
+ If Size>0 Then FMXWrite(B,Data,Size);
+ If (Size And 1)<>0 Then FMXW8(B,0);
+End;
+
+Procedure AVWSkipFrames(SI: Integer; Dts: Int64);
+Begin
+ While (FMXS[SI].BlockAlign=0) And (Dts<>FMXNoPts) And (Dts>AVWPktCount[SI]) And (AVWPktCount[SI]>0) Do Begin
+  If Dts-AVWPktCount[SI]>60000 Then Fail('Too large number of skipped frames');
+  AVWWriteInternal(SI,Nil,0,0,FMXNoPts,0);
+ End;
+End;
+
+Procedure AVWPacket(P: PFMXPkt);
+Begin
+ AVWSkipFrames(P^.SI,P^.Dts);
+ AVWWriteInternal(P^.SI,P^.Data,P^.Size,P^.Flags,P^.Dts,P^.Dur);
+End;
+
+Procedure AVWCounters;
+Var B: PFMXB; FileSize: LongInt; N, NbFrames: LongInt; I: Integer;
+Begin
+ B:=FMXOut; FileSize:=FMXTell(B); NbFrames:=0;
+ For I:=0 To FMXN-1 Do Begin
+  FMXSeek(B,AVWFramesHdrStrm[I]);
+  AVWSpecificParams(I);
+  If AVWAuSsize=0 Then FMXWL32(B,AVWPktCount[I]) Else FMXWL32(B,LongInt(AVWAudioLen[I] Div AVWAuSsize));
+  If FMXS[I].Kind=FMXKind_V Then Begin If AVWPktCount[I]>NbFrames Then NbFrames:=AVWPktCount[I]; End;
+ End;
+ FMXSeek(B,AVWFramesHdrAll); FMXWL32(B,NbFrames);
+ FMXSeek(B,FileSize);
+End;
+
+Procedure AVWTrailer;
+Var B: PFMXB; I, Best, J: Integer; IdxChunk: LongInt; Pos: Array[0..FMXMaxS-1] Of LongInt; Empty: Boolean; Bp: LongInt; E: ^TAVWEnt;
+Begin
+ B:=FMXOut;
+ For I:=0 To FMXN-1 Do AVWSkipFrames(I,AVWLastDts[I]);
+ AVWEndTag(B,AVWMoviList);
+ IdxChunk:=AVWStartTag(B,'idx1');
+ For I:=0 To FMXN-1 Do Pos[I]:=0;
+ Repeat
+  Empty:=True; Best:=-1; Bp:=0;
+  For I:=0 To FMXN-1 Do Begin
+   If AVWEntN[I]<=Pos[I] Then Continue;
+   If Empty Or (AVWEnts[I]^[Pos[I]].Pos<Bp) Then Begin Best:=I; Bp:=AVWEnts[I]^[Pos[I]].Pos; End;
+   Empty:=False;
+  End;
+  If Not Empty Then Begin
+   E:=@AVWEnts[Best]^[Pos[Best]];
+   FMXTag(B,AVWStreamFcc(Best)); FMXWL32(B,E^.Flags); FMXWL32(B,E^.Pos); FMXWL32(B,E^.Len);
+   Inc(Pos[Best]);
+  End;
+ Until Empty;
+ AVWEndTag(B,IdxChunk);
+ AVWCounters;
+ AVWEndTag(B,AVWRiffStart);
+ For I:=0 To FMXN-1 Do Begin
+  FMXSeek(B,AVWFramesHdrStrm[I]+4); FMXWL32(B,AVWMaxSize[I]);
+ End;
+ FMXSeek(B,B^.Len);
+End;
+{ ------------------------------------------------------------------ }
+{ Muxer FLV (flvenc.c, FFmpeg 6.1.1)                                    }
+{ ------------------------------------------------------------------ }
+Var
+ FLWVid, FLWAud: Integer;
+ FLWDurOff, FLWSizeOff: LongInt;
+ FLWDuration: Int64;
+ FLWDelay: Int64;
+ FLWLastTs: Array[0..FMXMaxS-1] Of Int64;
+ FLWFramerate: Double;
+ FLWReserved: LongInt;
+
+Function FLWVideoTag(C: Integer): LongInt;
+Begin
+ Case C Of
+  FC_FLV1: FLWVideoTag:=2;
+  FC_H263: FLWVideoTag:=8;
+  FC_MPEG4: FLWVideoTag:=9;
+  FC_H264: FLWVideoTag:=7;
+  Else FLWVideoTag:=0;
+ End;
+End;
+
+Function FLWAudioCodecTag(C: Integer): LongInt;
+Begin
+ Case C Of
+  FC_MP3: FLWAudioCodecTag:=2;
+  FC_PCM_U8,FC_PCM_S16BE: FLWAudioCodecTag:=0;
+  FC_PCM_S16LE: FLWAudioCodecTag:=3;
+  FC_ADPCM_SWF: FLWAudioCodecTag:=1;
+  FC_AAC: FLWAudioCodecTag:=10;
+  FC_NELLYMOSER: FLWAudioCodecTag:=6;
+  FC_PCM_MULAW: FLWAudioCodecTag:=8;
+  FC_PCM_ALAW: FLWAudioCodecTag:=7;
+  Else FLWAudioCodecTag:=-1;
+ End;
+End;
+
+{ get_audio_flags : renvoie -1 si incompatible }
+Function FLWAudioFlags(Var S: TFMXStream): LongInt;
+Var F: LongInt;
+Begin
+ If S.Bps=16 Then F:=2 Else F:=0;
+ FLWAudioFlags:=-1;
+ If S.Codec=FC_AAC Then Begin FLWAudioFlags:=(10 Shl 4) Or (3 Shl 2) Or 2 Or 1; Exit; End;
+ Case S.SampleRate Of
+  48000: If S.Codec=FC_MP3 Then F:=F Or (3 Shl 2) Else Exit;
+  44100: F:=F Or (3 Shl 2);
+  22050: F:=F Or (2 Shl 2);
+  11025: F:=F Or (1 Shl 2);
+  16000,8000,5512: If S.Codec<>FC_MP3 Then F:=F Or 0 Else Exit;
+  Else Exit;
+ End;
+ If S.Channels>1 Then F:=F Or 1;
+ Case S.Codec Of
+  FC_MP3: F:=F Or (2 Shl 4) Or 2;
+  FC_PCM_U8: F:=F Or 0;
+  FC_PCM_S16BE: F:=F Or 2;
+  FC_PCM_S16LE: F:=F Or (3 Shl 4) Or 2;
+  FC_ADPCM_SWF: F:=F Or (1 Shl 4) Or 2;
+  FC_NELLYMOSER: Begin
+   If S.SampleRate=8000 Then F:=F Or (5 Shl 4) Or 2
+   Else If S.SampleRate=16000 Then F:=F Or (4 Shl 4) Or 2
+   Else F:=F Or (6 Shl 4) Or 2;
+  End;
+  FC_PCM_MULAW: F:=(8 Shl 4) Or 0 Or 2;
+  FC_PCM_ALAW: F:=(7 Shl 4) Or 0 Or 2;
+  Else Exit;
+ End;
+ FLWAudioFlags:=F;
+End;
+
+Procedure FLWAmfStr(B: PFMXB; Const S: String);
+Begin
+ FMXWB16(B,Length(S)); FMXTag(B,S);
+End;
+Procedure FLWTimestamp(B: PFMXB; Ts: Int64);
+Begin
+ FMXWB24(B,LongInt(Ts And $FFFFFF)); FMXW8(B,LongInt((Ts Shr 24) And $7F));
+End;
+Procedure FLWAmfDouble(B: PFMXB; D: Double);
+Var Q: Int64;
+Begin
+ FMXW8(B,0); Move(D,Q,8); FMXWB64(B,Q);
+End;
+Procedure FLWAmfBool(B: PFMXB; V: Boolean);
+Begin
+ FMXW8(B,1); If V Then FMXW8(B,1) Else FMXW8(B,0);
+End;
+
+Procedure FLWMetadata(Ts: Int64);
+Var B: PFMXB; Cnt, CntPos, SizePos, Total, I: LongInt; K: String; Skip: Boolean; D1, D2: Double;
+Begin
+ B:=FMXOut;
+ FMXW8(B,$12);
+ SizePos:=FMXTell(B);
+ FMXWB24(B,0); FLWTimestamp(B,Ts); FMXWB24(B,0);
+ FMXW8(B,2); FLWAmfStr(B,'onMetaData');
+ FMXW8(B,8);
+ CntPos:=FMXTell(B);
+ Cnt:=0;
+ If FLWVid>=0 Then Cnt:=Cnt+4;
+ If FLWAud>=0 Then Cnt:=Cnt+5;
+ Cnt:=Cnt+2;
+ FMXWB32(B,Cnt);
+ FLWAmfStr(B,'duration');
+ FLWDurOff:=FMXTell(B);
+ FLWAmfDouble(B,0);
+ If FLWVid>=0 Then Begin
+  FLWAmfStr(B,'width'); FLWAmfDouble(B,FMXS[FLWVid].Width);
+  FLWAmfStr(B,'height'); FLWAmfDouble(B,FMXS[FLWVid].Height);
+  FLWAmfStr(B,'videodatarate'); D1:=FMXS[FLWVid].BitRate; D2:=1024; FLWAmfDouble(B,D1/D2);
+  If FLWFramerate<>0.0 Then Begin
+   FLWAmfStr(B,'framerate'); FLWAmfDouble(B,FLWFramerate); Inc(Cnt);
+  End;
+  FLWAmfStr(B,'videocodecid'); FLWAmfDouble(B,FLWVideoTag(FMXS[FLWVid].Codec));
+ End;
+ If FLWAud>=0 Then Begin
+  FLWAmfStr(B,'audiodatarate'); D1:=FMXS[FLWAud].BitRate; D2:=1024; FLWAmfDouble(B,D1/D2);
+  FLWAmfStr(B,'audiosamplerate'); FLWAmfDouble(B,FMXS[FLWAud].SampleRate);
+  FLWAmfStr(B,'audiosamplesize'); If FMXS[FLWAud].Codec=FC_PCM_U8 Then FLWAmfDouble(B,8) Else FLWAmfDouble(B,16);
+  FLWAmfStr(B,'stereo'); FLWAmfBool(B,FMXS[FLWAud].Channels=2);
+  FLWAmfStr(B,'audiocodecid'); FLWAmfDouble(B,FLWAudioCodecTag(FMXS[FLWAud].Codec));
+ End;
+ For I:=0 To FMXMetaN-1 Do Begin
+  K:=FMXMeta[I];
+  Skip:=(K='width') Or (K='height') Or (K='videodatarate') Or (K='framerate') Or (K='videocodecid') Or (K='audiodatarate') Or
+   (K='audiosamplerate') Or (K='audiosamplesize') Or (K='stereo') Or (K='audiocodecid') Or (K='duration') Or (K='onMetaData') Or
+   (K='datasize') Or (K='lasttimestamp') Or (K='totalframes') Or (K='hasAudio') Or (K='hasVideo') Or (K='hasCuePoints') Or
+   (K='hasMetadata') Or (K='hasKeyframes');
+  If Skip Then Continue;
+  FLWAmfStr(B,K); FMXW8(B,2); FLWAmfStr(B,FMXMetaV[I]); Inc(Cnt);
+ End;
+ FLWAmfStr(B,'filesize');
+ FLWSizeOff:=FMXTell(B);
+ FLWAmfDouble(B,0);
+ FLWAmfStr(B,''); FMXW8(B,9);
+ Total:=FMXTell(B)-SizePos-10;
+ FMXSeek(B,CntPos); FMXWB32(B,Cnt);
+ FMXSeek(B,SizePos); FMXWB24(B,Total);
+ FMXSeek(B,SizePos+3+Total+10-3+0);
+ FMXWB32(B,Total+11);
+End;
+
+Procedure FLWCodecHeader(I: Integer; Ts: Int64);
+Var B: PFMXB; Pos, DataSize: LongInt; S: ^TFMXStream; F: LongInt;
+Begin
+ B:=FMXOut; S:=@FMXS[I];
+ If (S^.Codec=FC_AAC) Or (S^.Codec=FC_H264) Or (S^.Codec=FC_MPEG4) Then Begin
+  If S^.Kind=FMXKind_V Then FMXW8(B,9) Else FMXW8(B,8);
+  FMXWB24(B,0); FLWTimestamp(B,Ts); FMXWB24(B,0);
+  Pos:=FMXTell(B);
+  If S^.Codec=FC_AAC Then Begin
+   FMXW8(B,FLWAudioFlags(S^)); FMXW8(B,0);
+   FMXWriteBytes(B,S^.Extra,S^.ExtraLen);
+  End Else Begin
+   FMXW8(B,FLWVideoTag(S^.Codec) Or $10); FMXW8(B,0); FMXWB24(B,0);
+   FMXWriteBytes(B,S^.Extra,S^.ExtraLen);
+  End;
+  DataSize:=FMXTell(B)-Pos;
+  F:=FMXTell(B);
+  FMXSeek(B,F-DataSize-10); FMXWB24(B,DataSize);
+  FMXSeek(B,F); FMXWB32(B,DataSize+11);
+ End;
+End;
+
+Procedure FLWInit;
+Var I: Integer; D1, D2: Double;
+Begin
+ FLWVid:=-1; FLWAud:=-1; FLWFramerate:=0.0; FLWReserved:=0;
+ FMXFmtNonStrict:=True; FMXFmtVarFps:=True; FMXFmtTsNeg:=False; FMXAvoidStatus:=0; FMXAvoidNeg:=1;
+ For I:=0 To FMXN-1 Do Begin
+  If FMXS[I].Kind=FMXKind_V Then Begin
+   If (FMXS[I].FpsN>0) And (FMXS[I].FpsD>0) Then Begin D1:=FMXS[I].FpsN; D2:=FMXS[I].FpsD; FLWFramerate:=D1/D2; End;
+   If FLWVid>=0 Then Fail('at most one video stream is supported in flv');
+   FLWVid:=I;
+   If FLWVideoTag(FMXS[I].Codec)=0 Then Fail('Video codec '+MOWCodecName(FMXS[I].Codec)+' not compatible with flv');
+   If (FMXS[I].Codec=FC_MPEG4) Or (FMXS[I].Codec=FC_H263) Then
+    Fail('Codec '+MOWCodecName(FMXS[I].Codec)+' is not supported in the official FLV specification, use vstrict=-1 / -strict -1 to use it anyway.');
+  End Else If FMXS[I].Kind=FMXKind_A Then Begin
+   If FLWAud>=0 Then Fail('at most one audio stream is supported in flv');
+   FLWAud:=I;
+   If FLWAudioFlags(FMXS[I])<0 Then Fail('Audio codec '+MOWCodecName(FMXS[I].Codec)+' not compatible with flv');
+  End Else Fail('Codec type for stream '+FMXIStr(I)+' is not compatible with FLV');
+  FMXS[I].CTag:=0;
+  FMXS[I].TbN:=1; FMXS[I].TbD:=1000;
+  FLWLastTs[I]:=-1;
+ End;
+ FLWDelay:=FMXNoPts; FLWDuration:=0;
+End;
+
+Procedure FLWHeader;
+Var B: PFMXB; I: Integer; Fl: LongInt;
+Begin
+ B:=FMXOut;
+ FMXTag(B,'FLV'); FMXW8(B,1);
+ Fl:=0; If FLWAud>=0 Then Fl:=Fl+4; If FLWVid>=0 Then Fl:=Fl+1;
+ FMXW8(B,Fl); FMXWB32(B,9); FMXWB32(B,0);
+ For I:=0 To FMXN-1 Do
+  If (FMXS[I].Kind=FMXKind_V) And (FLWVideoTag(FMXS[I].Codec)=5) Then Begin
+   FMXW8(B,8); FMXWB24(B,0); FMXWB24(B,0); FMXWB32(B,0); FMXWB32(B,11); FLWReserved:=5;
+  End;
+ FLWMetadata(0);
+ For I:=0 To FMXN-1 Do FLWCodecHeader(I,0);
+End;
+
+Procedure FLWPacket(P: PFMXPkt);
+Var B: PFMXB; S: ^TFMXStream; FlagsSize: LongInt; Ts: Int64; Fl: LongInt; FrameType: LongInt; Sz: LongInt;
+Begin
+ B:=FMXOut; S:=@FMXS[P^.SI]; Sz:=P^.Size;
+ If (S^.Kind=FMXKind_A) And (P^.Size=0) Then Fail('Empty audio Packet');
+ If (S^.Codec=FC_AAC) Then FlagsSize:=2
+ Else If (S^.Codec=FC_H264) Or (S^.Codec=FC_MPEG4) Then FlagsSize:=5
+ Else FlagsSize:=1;
+ If FLWDelay=FMXNoPts Then FLWDelay:=-P^.Dts;
+ If P^.Dts< -FLWDelay Then Fail('Packets are not in the proper order with respect to DTS');
+ If ((S^.Codec=FC_H264) Or (S^.Codec=FC_MPEG4)) And (P^.Pts=FMXNoPts) Then Fail('Packet is missing PTS');
+ Ts:=P^.Dts;
+ If (P^.Flags And FMX_PKT_KEY)<>0 Then FrameType:=$10 Else FrameType:=$20;
+ If S^.Kind=FMXKind_V Then Begin
+  FMXW8(B,9);
+  Fl:=FLWVideoTag(S^.Codec) Or FrameType;
+ End Else Begin
+  Fl:=FLWAudioFlags(S^);
+  FMXW8(B,8);
+ End;
+ If FLWLastTs[P^.SI]<Ts Then FLWLastTs[P^.SI]:=Ts;
+ FMXWB24(B,Sz+FlagsSize);
+ FLWTimestamp(B,Ts);
+ FMXWB24(B,FLWReserved);
+ FMXW8(B,Fl);
+ If S^.Codec=FC_AAC Then FMXW8(B,1)
+ Else If (S^.Codec=FC_H264) Or (S^.Codec=FC_MPEG4) Then Begin FMXW8(B,1); FMXWB24(B,LongInt(P^.Pts-P^.Dts)); End;
+ FMXWrite(B,P^.Data,Sz);
+ FMXWB32(B,Sz+FlagsSize+11);
+ If P^.Pts+FLWDelay+P^.Dur>FLWDuration Then FLWDuration:=P^.Pts+FLWDelay+P^.Dur;
+End;
+
+Procedure FLWTrailer;
+Var B: PFMXB; I: Integer; FileSize: LongInt; D1, D2: Double;
+Begin
+ B:=FMXOut;
+ For I:=0 To FMXN-1 Do
+  If (FMXS[I].Kind=FMXKind_V) And ((FMXS[I].Codec=FC_H264) Or (FMXS[I].Codec=FC_MPEG4)) Then Begin
+   FMXW8(B,9); FMXWB24(B,5); FLWTimestamp(B,FLWLastTs[I]); FMXWB24(B,0);
+   FMXW8(B,FLWVideoTag(FMXS[I].Codec) Or $10); FMXW8(B,2); FMXWB24(B,0); FMXWB32(B,16);
+  End;
+ FileSize:=FMXTell(B);
+ FMXSeek(B,FLWDurOff); D1:=FLWDuration; D2:=1000; FLWAmfDouble(B,D1/D2);
+ FMXSeek(B,FLWSizeOff); FLWAmfDouble(B,FileSize);
+ FMXSeek(B,FileSize);
+End;
+{ ------------------------------------------------------------------ }
+{ Muxer SWF / AVM2 (swfenc.c, FFmpeg 6.1.1)                            }
+{ ------------------------------------------------------------------ }
+Const
+ SWT_END = 0; SWT_SHOWFRAME = 1; SWT_DEFINESHAPE = 2; SWT_FREECHARACTER = 3; SWT_PLACEOBJECT = 4; SWT_REMOVEOBJECT = 5;
+ SWT_JPEG2 = 21; SWT_PLACEOBJECT2 = 26; SWT_STREAMHEAD2 = 45; SWT_STREAMBLOCK = 19; SWT_VIDEOSTREAM = 60; SWT_VIDEOFRAME = 61;
+ SWT_FILEATTRIBUTES = 69; SWT_LONG = $100;
+Var
+ SWTagPos, SWTag, SWDurPos, SWVframesPos: LongInt;
+ SWSoundSamples, SWFrameNum, SWVideoFrameNum, SWSamplesPerFrame: LongInt;
+ SWAud, SWVid: Integer;
+ SWFifo: PFMXB;
+ SWBits: Array[0..255] Of Byte;
+ SWBitN: LongInt;
+
+Procedure SWBitsInit; Begin SWBitN:=0; FillChar(SWBits,SizeOf(SWBits),0); End;
+Procedure SWPutBits(N: Integer; V: LongInt);
+Var I: Integer; Bt: LongInt;
+Begin
+ For I:=N-1 Downto 0 Do Begin
+  Bt:=(V Shr I) And 1;
+  If Bt<>0 Then SWBits[SWBitN Shr 3]:=SWBits[SWBitN Shr 3] Or (128 Shr (SWBitN And 7));
+  Inc(SWBitN);
+ End;
+End;
+Function SWBitsBytes: LongInt; Begin SWBitsBytes:=(SWBitN+7) Shr 3; End;
+
+Procedure SWPutTag(Tag: LongInt);
+Var B: PFMXB;
+Begin
+ B:=FMXOut;
+ SWTagPos:=FMXTell(B); SWTag:=Tag;
+ If (Tag And SWT_LONG)<>0 Then Begin FMXWL16(B,0); FMXWL32(B,0); End Else FMXWL16(B,0);
+End;
+
+Procedure SWEndTag;
+Var B: PFMXB; Pos, Len, Tag: LongInt;
+Begin
+ B:=FMXOut; Pos:=FMXTell(B); Len:=Pos-SWTagPos-2; Tag:=SWTag;
+ FMXSeek(B,SWTagPos);
+ If (Tag And SWT_LONG)<>0 Then Begin
+  Tag:=Tag And (Not SWT_LONG);
+  FMXWL16(B,(Tag Shl 6) Or $3f); FMXWL32(B,Len-4);
+ End Else FMXWL16(B,(Tag Shl 6) Or Len);
+ FMXSeek(B,Pos);
+End;
+
+Procedure SWMaxNbits(Var N: LongInt; V: LongInt);
+Var K: LongInt;
+Begin
+ If V=0 Then Exit;
+ If V<0 Then V:=-V;
+ K:=1;
+ While V<>0 Do Begin Inc(K); V:=V Shr 1; End;
+ If K>N Then N:=K;
+End;
+
+Procedure SWPutRect(Xmin, Xmax, Ymin, Ymax: LongInt);
+Var Nb, Mask: LongInt;
+Begin
+ SWBitsInit; Nb:=0;
+ SWMaxNbits(Nb,Xmin); SWMaxNbits(Nb,Xmax); SWMaxNbits(Nb,Ymin); SWMaxNbits(Nb,Ymax);
+ Mask:=(LongInt(1) Shl Nb)-1;
+ SWPutBits(5,Nb); SWPutBits(Nb,Xmin And Mask); SWPutBits(Nb,Xmax And Mask); SWPutBits(Nb,Ymin And Mask); SWPutBits(Nb,Ymax And Mask);
+ FMXWrite(FMXOut,@SWBits[0],SWBitsBytes);
+End;
+
+Procedure SWPutMatrix(A, Bq, C, D, Tx, Ty: LongInt);
+Var Nb: LongInt;
+Begin
+ SWBitsInit;
+ SWPutBits(1,1); Nb:=1; SWMaxNbits(Nb,A); SWMaxNbits(Nb,D);
+ SWPutBits(5,Nb); SWPutBits(Nb,A); SWPutBits(Nb,D);
+ SWPutBits(1,1); Nb:=1; SWMaxNbits(Nb,C); SWMaxNbits(Nb,Bq);
+ SWPutBits(5,Nb); SWPutBits(Nb,C); SWPutBits(Nb,Bq);
+ Nb:=1; SWMaxNbits(Nb,Tx); SWMaxNbits(Nb,Ty);
+ SWPutBits(5,Nb); SWPutBits(Nb,Tx); SWPutBits(Nb,Ty);
+ FMXWrite(FMXOut,@SWBits[0],SWBitsBytes);
+End;
+
+Procedure SWLineEdge(Dx, Dy: LongInt);
+Var Nb, Mask: LongInt;
+Begin
+ SWPutBits(1,1); SWPutBits(1,1);
+ Nb:=2; SWMaxNbits(Nb,Dx); SWMaxNbits(Nb,Dy);
+ Mask:=(LongInt(1) Shl Nb)-1;
+ SWPutBits(4,Nb-2);
+ If Dx=0 Then Begin SWPutBits(1,0); SWPutBits(1,1); SWPutBits(Nb,Dy And Mask); End
+ Else If Dy=0 Then Begin SWPutBits(1,0); SWPutBits(1,0); SWPutBits(Nb,Dx And Mask); End
+ Else Begin SWPutBits(1,1); SWPutBits(Nb,Dx And Mask); SWPutBits(Nb,Dy And Mask); End;
+End;
+
+Procedure SWInit;
+Begin
+ FMXFmtNonStrict:=True; FMXFmtTsNeg:=False; FMXAvoidStatus:=0; FMXAvoidNeg:=1;
+End;
+
+Function SWVideoTag(C: Integer): LongInt;
+Begin
+ If C=FC_FLV1 Then SWVideoTag:=2 Else SWVideoTag:=0;
+End;
+
+Procedure SWHeader;
+Var B: PFMXB; I: Integer; W, H, Rate, RateBase, Version, V: LongInt;
+Begin
+ B:=FMXOut;
+ SWSoundSamples:=0; SWFrameNum:=0; SWVideoFrameNum:=0; SWAud:=-1; SWVid:=-1; SWVframesPos:=0;
+ For I:=0 To FMXN-1 Do Begin
+  If FMXS[I].Kind=FMXKind_A Then Begin
+   If SWAud>=0 Then Fail('SWF muxer only supports 1 audio stream');
+   If FMXS[I].Codec=FC_MP3 Then SWAud:=I Else Fail('SWF muxer only supports MP3');
+  End Else Begin
+   If SWVid>=0 Then Fail('SWF muxer only supports 1 video stream');
+   If (SWVideoTag(FMXS[I].Codec)<>0) Or (FMXS[I].Codec=FC_PNG) Or (FMXS[I].Codec=FC_MJPEG) Then SWVid:=I
+   Else Fail('SWF muxer only supports VP6, FLV, Flash Screen Video, PNG and MJPEG');
+  End;
+ End;
+ If SWVid<0 Then Begin W:=320; H:=200; Rate:=10; RateBase:=1; End
+ Else Begin W:=FMXS[SWVid].Width; H:=FMXS[SWVid].Height; Rate:=FMXS[SWVid].TbD; RateBase:=FMXS[SWVid].TbN; End;
+ If SWAud<0 Then SWSamplesPerFrame:=(Int64(44100)*RateBase) Div Rate
+ Else SWSamplesPerFrame:=(Int64(FMXS[SWAud].SampleRate)*RateBase) Div Rate;
+ FMXTag(B,'FWS');
+ If FMXFmt='avm2' Then Version:=9
+ Else If (SWVid>=0) And (FMXS[SWVid].Codec=FC_PNG) Then Version:=8
+ Else If (SWVid>=0) And (FMXS[SWVid].Codec=FC_FLV1) Then Version:=6
+ Else Version:=4;
+ FMXW8(B,Version);
+ FMXWL32(B,100*1024*1024);
+ SWPutRect(0,W*20,0,H*20);
+ If (Int64(Rate)*256) Div RateBase>=65536 Then Fail('Invalid (too large) frame rate');
+ FMXWL16(B,LongInt((Int64(Rate)*256) Div RateBase));
+ SWDurPos:=FMXTell(B);
+ FMXWL16(B,LongInt((Int64(600)*Rate Div RateBase) And $FFFF));
+ If Version>=8 Then Begin
+  SWPutTag(SWT_FILEATTRIBUTES);
+  If Version>=9 Then FMXWL32(B,8) Else FMXWL32(B,0);
+  SWEndTag;
+ End;
+ If (SWVid>=0) And ((FMXS[SWVid].Codec=FC_MJPEG) Or (FMXS[SWVid].Codec=FC_PNG)) Then Begin
+  SWPutTag(SWT_DEFINESHAPE);
+  FMXWL16(B,1);
+  SWPutRect(0,W,0,H);
+  FMXW8(B,1); FMXW8(B,$41); FMXWL16(B,0);
+  SWPutMatrix(1 Shl 16,0,0,1 Shl 16,0,0);
+  FMXW8(B,0);
+  SWBitsInit;
+  SWPutBits(4,1); SWPutBits(4,0);
+  SWPutBits(1,0); SWPutBits(5,3); SWPutBits(5,1); SWPutBits(1,0); SWPutBits(1,0); SWPutBits(1,1);
+  SWLineEdge(W,0); SWLineEdge(0,H); SWLineEdge(-W,0); SWLineEdge(0,-H);
+  SWPutBits(1,0); SWPutBits(5,0);
+  FMXWrite(B,@SWBits[0],SWBitsBytes);
+  SWEndTag;
+ End;
+ If SWAud>=0 Then Begin
+  V:=0;
+  SWPutTag(SWT_STREAMHEAD2);
+  Case FMXS[SWAud].SampleRate Of
+   11025: V:=V Or (1 Shl 2);
+   22050: V:=V Or (2 Shl 2);
+   44100: V:=V Or (3 Shl 2);
+   Else Fail('swf does not support that sample rate, choose from (44100, 22050, 11025).');
+  End;
+  V:=V Or 2;
+  If FMXS[SWAud].Channels=2 Then V:=V Or 1;
+  FMXW8(B,V);
+  V:=V Or $20;
+  FMXW8(B,V);
+  FMXWL16(B,SWSamplesPerFrame);
+  FMXWL16(B,0);
+  SWEndTag;
+  SWFifo:=FMXNew;
+ End;
+End;
+
+Procedure SWWriteVideo(Si: Integer; Buf: PFMXBytes; Size: LongInt; Flags: LongInt);
+Var B: PFMXB; Tag: LongInt; C: Integer;
+Begin
+ B:=FMXOut;
+ If Si>=0 Then C:=FMXS[Si].Codec Else C:=0;
+ Tag:=SWVideoTag(C);
+ If Tag<>0 Then Begin
+  If SWVideoFrameNum=0 Then Begin
+   SWPutTag(SWT_VIDEOSTREAM);
+   FMXWL16(B,0);
+   SWVframesPos:=FMXTell(B);
+   FMXWL16(B,15000); FMXWL16(B,FMXS[Si].Width); FMXWL16(B,FMXS[Si].Height);
+   FMXW8(B,0); FMXW8(B,Tag);
+   SWEndTag;
+   SWPutTag(SWT_PLACEOBJECT2);
+   FMXW8(B,$36); FMXWL16(B,1); FMXWL16(B,0);
+   SWPutMatrix(1 Shl 16,0,0,1 Shl 16,0,0);
+   FMXWL16(B,SWVideoFrameNum);
+   FMXTag(B,'video'); FMXW8(B,0);
+   SWEndTag;
+  End Else Begin
+   SWPutTag(SWT_PLACEOBJECT2);
+   FMXW8(B,$11); FMXWL16(B,1); FMXWL16(B,SWVideoFrameNum);
+   SWEndTag;
+  End;
+  SWPutTag(SWT_VIDEOFRAME Or SWT_LONG);
+  FMXWL16(B,0); FMXWL16(B,SWVideoFrameNum); Inc(SWVideoFrameNum);
+  FMXWrite(B,Buf,Size);
+  SWEndTag;
+ End Else If (C=FC_MJPEG) Or (C=FC_PNG) Then Begin
+  If SWFrameNum>0 Then Begin
+   SWPutTag(SWT_REMOVEOBJECT); FMXWL16(B,1); FMXWL16(B,1); SWEndTag;
+   SWPutTag(SWT_FREECHARACTER); FMXWL16(B,0); SWEndTag;
+  End;
+  SWPutTag(SWT_JPEG2 Or SWT_LONG);
+  FMXWL16(B,0);
+  If C=FC_MJPEG Then FMXWB32(B,LongInt($ffd8ffd9));
+  FMXWrite(B,Buf,Size);
+  SWEndTag;
+  SWPutTag(SWT_PLACEOBJECT);
+  FMXWL16(B,1); FMXWL16(B,1);
+  SWPutMatrix(20 Shl 16,0,0,20 Shl 16,0,0);
+  SWEndTag;
+ End;
+ Inc(SWFrameNum);
+ If (SWAud>=0) And (SWFifo^.Len>0) Then Begin
+  SWPutTag(SWT_STREAMBLOCK Or SWT_LONG);
+  FMXWL16(B,SWSoundSamples); FMXWL16(B,0);
+  FMXWrite(B,SWFifo^.D,SWFifo^.Len);
+  SWEndTag;
+  SWFifo^.Len:=0; SWFifo^.Pos:=0;
+  SWSoundSamples:=0;
+ End;
+ SWPutTag(SWT_SHOWFRAME); SWEndTag;
+End;
+
+Procedure SWPacket(P: PFMXPkt);
+Begin
+ If FMXS[P^.SI].Kind=FMXKind_A Then Begin
+  FMXWrite(SWFifo,P^.Data,P^.Size);
+  Inc(SWSoundSamples,1152);
+  If SWVid<0 Then SWWriteVideo(-1,Nil,0,0);
+ End Else SWWriteVideo(P^.SI,P^.Data,P^.Size,P^.Flags);
+End;
+
+Procedure SWTrailer;
+Var B: PFMXB; Size: LongInt;
+Begin
+ B:=FMXOut;
+ SWPutTag(SWT_END); SWEndTag;
+ If SWVid>=0 Then Begin
+  Size:=FMXTell(B);
+  FMXSeek(B,4); FMXWL32(B,Size);
+  FMXSeek(B,SWDurPos); FMXWL16(B,SWVideoFrameNum);
+  If SWVframesPos<>0 Then Begin FMXSeek(B,SWVframesPos); FMXWL16(B,SWVideoFrameNum); End;
+  FMXSeek(B,Size);
+ End;
+End;
+{ ------------------------------------------------------------------ }
+{ Aiguillage des formats, sources et route principale                  }
+{ ------------------------------------------------------------------ }
+Function FMXIsMovFam(Const F: String): Boolean;
+Begin
+ FMXIsMovFam:=(F='mov') Or (F='mp4') Or (F='3gp') Or (F='3g2') Or (F='ipod') Or (F='psp');
+End;
+
+Function FMXIsAsf(Const F: String): Boolean;
+Begin
+ FMXIsAsf:=(F='asf') Or (F='asf_stream');
+End;
+
+Function FMXIsMine(Const F: String): Boolean;
+Begin
+ FMXIsMine:=FMXIsMovFam(F) Or FMXIsAsf(F) Or (F='flv') Or (F='swf') Or (F='avm2') Or (F='avi');
+End;
+
+Procedure FMXFmtInit;
+Begin
+ If FMXIsMovFam(FMXFmt) Then MOWInit Else If FMXIsAsf(FMXFmt) Then ASWInit Else If FMXFmt='flv' Then FLWInit Else If FMXFmt='avi' Then AVWInit Else If (FMXFmt='swf') Or (FMXFmt='avm2') Then SWInit Else Fail('Muxer non pris en charge: '+FMXFmt);
+End;
+Procedure FMXFmtHeader;
+Begin
+ If FMXIsMovFam(FMXFmt) Then MOWHeader Else If FMXIsAsf(FMXFmt) Then ASWHeader Else If FMXFmt='flv' Then FLWHeader Else If FMXFmt='avi' Then AVWHeader Else If (FMXFmt='swf') Or (FMXFmt='avm2') Then SWHeader;
+End;
+Procedure FMXFmtPacket(P: PFMXPkt);
+Begin
+ If FMXIsMovFam(FMXFmt) Then MOWPacket(P) Else If FMXIsAsf(FMXFmt) Then ASWPacket(P) Else If FMXFmt='flv' Then FLWPacket(P) Else If FMXFmt='avi' Then AVWPacket(P) Else If (FMXFmt='swf') Or (FMXFmt='avm2') Then SWPacket(P);
+End;
+Procedure FMXFmtTrailer;
+Begin
+ If FMXIsMovFam(FMXFmt) Then MOWTrailer Else If FMXIsAsf(FMXFmt) Then ASWTrailer Else If FMXFmt='flv' Then FLWTrailer Else If FMXFmt='avi' Then AVWTrailer Else If (FMXFmt='swf') Or (FMXFmt='avm2') Then SWTrailer;
+End;
+
+Var
+ FMXL: Array[0..FMXMaxS-1] Of TFMXList;
+ FMXArgs: Array[0..63] Of String;
+ FMXArgN: Integer;
+ FMXInputs: Array[0..3] Of String;
+ FMXInN: Integer;
+ FMXVCodec, FMXACodec, FMXOutPath, FMXFmtOpt: String;
+ FMXVOpts, FMXAOpts: String;
+ FMXOverwrite, FMXNoV, FMXNoA, FMXCopyV, FMXCopyA: Boolean;
+ FMXTmpN: Integer;
+ FMXAChannels, FMXARate: LongInt;
+ FMXVBitRate: LongInt;
+
+Procedure Erase_F(Const N: String);
+Var F: File;
+Begin
+ Assign(F,N);
+ {$I-} Erase(F); {$I+}
+ If IOResult<>0 Then ;
+End;
+
+Function FMXTmp(Const Ext: String): String;
+Begin
+ Inc(FMXTmpN);
+ FMXTmp:=FMXOutPath+'.fmxtmp'+FMXIStr(FMXTmpN)+'.'+Ext;
+End;
+
+Function FMXRunChild(Const Args: String): Boolean;
+Begin
+ SwapVectors;
+ Exec(ParamStr(0),'-fmxq '+Args);
+ SwapVectors;
+ FMXRunChild:=(DosError=0) And (DosExitCode=0);
+End;
+
+Function FMXExt(Const N: String): String;
+Var I: Integer;
+Begin
+ I:=Length(N);
+ While (I>0) And (N[I]<>'.') And (N[I]<>'/') And (N[I]<>'\') Do Dec(I);
+ If (I>0) And (N[I]='.') Then FMXExt:=FMXLower(Copy(N,I+1,255)) Else FMXExt:='';
+End;
+
+{ nom de muxer selon l'extension (av_guess_format) }
+Function FMXGuessMuxer(Const Ext: String): String;
+Begin
+ FMXGuessMuxer:='';
+ If Ext='mov' Then FMXGuessMuxer:='mov'
+ Else If Ext='mp4' Then FMXGuessMuxer:='mp4'
+ Else If (Ext='m4a') Or (Ext='m4v') Or (Ext='m4b') Then FMXGuessMuxer:='ipod'
+ Else If Ext='3gp' Then FMXGuessMuxer:='3gp'
+ Else If Ext='3g2' Then FMXGuessMuxer:='3g2'
+ Else If Ext='psp' Then FMXGuessMuxer:='psp'
+ Else If (Ext='asf') Or (Ext='wmv') Or (Ext='wma') Then FMXGuessMuxer:='asf'
+ Else If Ext='flv' Then FMXGuessMuxer:='flv'
+ Else If Ext='swf' Then FMXGuessMuxer:='swf'
+ Else If Ext='avi' Then FMXGuessMuxer:='avi';
+End;
+
+{ ---- Y4M ----------------------------------------------------------------- }
+Var
+ Y4W, Y4H, Y4FN, Y4FD, Y4SN, Y4SD, Y4Il: LongInt;
+
+Function FMXY4mParse(Const Name: String): Boolean;
+Var F: File; B: Array[0..511] Of Byte; N, I, J: LongInt; S, Tok: String;
+Begin
+ FMXY4mParse:=False;
+ Assign(F,Name);
+ {$I-} Reset(F,1); {$I+}
+ If IOResult<>0 Then Exit;
+ BlockRead(F,B,512,N); Close(F);
+ S:='';
+ For I:=0 To N-1 Do Begin If B[I]=10 Then Break; S:=S+Chr(B[I]); End;
+ If Copy(S,1,9)<>'YUV4MPEG2' Then Exit;
+ Y4W:=0; Y4H:=0; Y4FN:=25; Y4FD:=1; Y4SN:=0; Y4SD:=0; Y4Il:=0;
+ S:=Copy(S,10,255)+' ';
+ While Length(S)>0 Do Begin
+  J:=Pos(' ',S); Tok:=Copy(S,1,J-1); Delete(S,1,J);
+  If Tok='' Then Continue;
+  Case Tok[1] Of
+   'W': Y4W:=FMXAtoi(Copy(Tok,2,20));
+   'H': Y4H:=FMXAtoi(Copy(Tok,2,20));
+   'F': Begin J:=Pos(':',Tok); Y4FN:=FMXAtoi(Copy(Tok,2,J-2)); Y4FD:=FMXAtoi(Copy(Tok,J+1,20)); End;
+   'A': Begin J:=Pos(':',Tok); Y4SN:=FMXAtoi(Copy(Tok,2,J-2)); Y4SD:=FMXAtoi(Copy(Tok,J+1,20)); End;
+   'I': Begin
+         If Length(Tok)>1 Then Case Tok[2] Of
+          'p': Y4Il:=1; 't': Y4Il:=2; 'b': Y4Il:=3; 'm': Y4Il:=0;
+         End;
+        End;
+  End;
+ End;
+ FMXY4mParse:=(Y4W>0) And (Y4H>0);
+End;
+
+{ ---- sources ------------------------------------------------------------- }
+Function FMXVideoCodecId(Const Fcc0: String): Integer;
+Var Fcc: String;
+Begin
+ Fcc:=Fcc0; If Fcc='svq1' Then Fcc:='SVQ1';
+ FMXVideoCodecId:=FC_OTHERV;
+ If Fcc='SVQ1' Then FMXVideoCodecId:=FC_SVQ1
+ Else If Fcc='WMV1' Then FMXVideoCodecId:=FC_WMV1
+ Else If Fcc='WMV2' Then FMXVideoCodecId:=FC_WMV2
+ Else If Fcc='MP43' Then FMXVideoCodecId:=FC_MSMPEG4V3
+ Else If Fcc='MP42' Then FMXVideoCodecId:=FC_MSMPEG4V2
+ Else If Fcc='DIV1' Then FMXVideoCodecId:=FC_MSMPEG4V1
+ Else If Fcc='HFYU' Then FMXVideoCodecId:=FC_HUFFYUV
+ Else If Fcc='FFV1' Then FMXVideoCodecId:=FC_FFV1
+ Else If Fcc='MJPG' Then FMXVideoCodecId:=FC_MJPEG
+ Else If Fcc='FLV1' Then FMXVideoCodecId:=FC_FLV1
+ Else If Fcc='FMP4' Then FMXVideoCodecId:=FC_MPEG4;
+End;
+
+Procedure FMXVideoFromChild(Const In1: String; Idx: Integer);
+Var Ext, Tmp, Cmd: String; F: TFMXFile; Lists: Array[0..FMXMaxS-1] Of TFMXList; I, Q: Integer; P, Nx: PFMXPkt; N: LongInt;
+    S: ^TFMXStream; Fcc: String; Ok: Boolean;
+Begin
+ If Not FMXY4mParse(In1) Then Fail('Entree video: Y4M local requis.');
+ If (FMXVCodec='qtrle') Or (FMXVCodec='svq1') Then Ext:='mov' Else If FMXVCodec='flv' Then Ext:='flv' Else Ext:='avi';
+ Tmp:=FMXTmp(Ext);
+ Cmd:='-y -i '+In1+' '+FMXVOpts+' -c:v '+FMXVCodec+' '+Tmp;
+ If Not FMXRunChild(Cmd) Then Begin
+  Erase_F(Tmp);
+  Fail('Encodeur video '+FMXVCodec+' indisponible ou echec (voir -codecs).');
+ End;
+ S:=@FMXS[Idx];
+ S^.Kind:=FMXKind_V; S^.Width:=Y4W; S^.Height:=Y4H;
+ S^.FpsN:=Y4FN; S^.FpsD:=Y4FD; S^.TbN:=Y4FD; S^.TbD:=Y4FN;
+ FMXReduce(S^.TbN,S^.TbD,0);
+ S^.SarN:=Y4SN; S^.SarD:=Y4SD; If (Y4SN<=0) Or (Y4SD<=0) Then Begin S^.SarN:=0; S^.SarD:=1; End;
+ S^.FieldOrder:=Y4Il;
+ S^.Encoder:='Lavc60.31.102 '+FMXVCodec;
+ S^.BitRate:=FMXVBitRate;
+ FMXListInit(FMXL[Idx]);
+ If Ext='mov' Then Begin
+  If Not MDOpen(Tmp) Then Fail('Sortie temporaire illisible.');
+  MDBuildSamples(@MDT[0]);
+  If FMXVCodec='svq1' Then S^.Codec:=FC_SVQ1 Else S^.Codec:=FC_QTRLE;
+  S^.Bps:=MDT[0].Depth;
+  If MDT[0].ExtraLen>0 Then Begin S^.ExtraLen:=MDT[0].ExtraLen; GetMem(S^.Extra,S^.ExtraLen+16); Move(MDT[0].Extra^,S^.Extra^,S^.ExtraLen); End;
+  S^.IsIntra:=False;
+  For I:=0 To MDT[0].NS-1 Do Begin
+   P:=FMXPkFromMem(Idx,@MDFile.D^[MDT[0].S^[I].Pos],MDT[0].S^[I].Size);
+   P^.Pts:=I; P^.Dts:=I; P^.Dur:=1;
+   If MDT[0].S^[I].Key Then P^.Flags:=FMX_PKT_KEY;
+   FMXListAdd(FMXL[Idx],P);
+  End;
+  MDClose;
+ End Else If Ext='flv' Then Begin
+  FMXLoad(Tmp,F);
+  For I:=0 To FMXMaxS-1 Do FMXListInit(Lists[I]);
+  If Not FMXFlvParse(F,Lists) Then Fail('Sortie FLV temporaire illisible.');
+  S^.Codec:=FC_FLV1; S^.Bps:=0;
+  P:=Lists[0].Head; I:=0;
+  While P<>Nil Do Begin
+   Nx:=P^.Next; P^.Next:=Nil; P^.SI:=Idx;
+   P^.Pts:=I; P^.Dts:=I; P^.Dur:=1; Inc(I);
+   FMXListAdd(FMXL[Idx],P);
+   P:=Nx;
+  End;
+  FMXUnload(F);
+ End Else Begin
+  FMXLoad(Tmp,F);
+  For I:=0 To FMXMaxS-1 Do FMXListInit(Lists[I]);
+  If Not FMXAviParse(F,Lists) Then Fail('Sortie AVI temporaire illisible.');
+  Fcc:=FMXTagStr(LongWord(FMXLe32(F.D,FMXAviS[0].FmtOff+16)));
+  S^.Codec:=FMXVideoCodecId(Fcc);
+  If S^.Codec=FC_OTHERV Then Fail('Codec video '+FMXVCodec+' non pris en charge par ce muxer.');
+  S^.CTag:=0;
+  S^.Bps:=FMXLe16(F.D,FMXAviS[0].FmtOff+14);
+  N:=FMXAviS[0].FmtLen-40;
+  If N>0 Then Begin
+   S^.ExtraLen:=N; GetMem(S^.Extra,N+16); Move(F.D^[FMXAviS[0].FmtOff+40],S^.Extra^,N);
+  End;
+  P:=Lists[0].Head; I:=0;
+  While P<>Nil Do Begin
+   Nx:=P^.Next; P^.Next:=Nil;
+   P^.Pts:=I; P^.Dts:=I; P^.Dur:=1; Inc(I);
+   FMXListAdd(FMXL[Idx],P);
+   P:=Nx;
+  End;
+  FMXUnload(F);
+ End;
+ S^.IsIntra:=(S^.Codec=FC_MJPEG) Or (S^.Codec=FC_RAWVIDEO) Or (S^.Codec=FC_HUFFYUV) Or (S^.Codec=FC_ASV1) Or (S^.Codec=FC_ASV2);
+ Erase_F(Tmp);
+End;
+
+Procedure FMXAudioFromChild(Const In1: String; Idx: Integer);
+Var Tmp, Cmd, Fm: String; K, J: LongInt; F, W: TFMXFile; Wc: TFMXWav; LA: Array[0..FMXMaxS-1] Of TFMXList; Nx: PFMXPkt; Wv: TFMXWav; S: ^TFMXStream; I: LongInt; P: PFMXPkt; Pos, Tot, Rem: Int64;
+    Bal, Chunk, Off, Sz: LongInt; Cn: Integer;
+Begin
+ FMXLoad(In1,F);
+ If Not FMXWavParse(F,Wv) Then Fail('Entree audio: WAV local requis.');
+ S:=@FMXS[Idx];
+ S^.Kind:=FMXKind_A; S^.SampleRate:=Wv.Rate; S^.Channels:=Wv.Ch;
+ If FMXAChannels>0 Then S^.Channels:=FMXAChannels;
+ If FMXARate>0 Then S^.SampleRate:=FMXARate;
+ S^.TbN:=1; S^.TbD:=S^.SampleRate;
+ S^.IsIntra:=True;
+ S^.BitRate:=128000;
+ FMXListInit(FMXL[Idx]);
+ If Copy(FMXACodec,1,4)='pcm_' Then Begin
+  Fm:=Copy(FMXACodec,5,20);
+  Tmp:=FMXTmp('raw');
+  Cmd:='-y -i '+In1+' '+FMXAOpts+' -c:a '+FMXACodec+' -f '+Fm+' '+Tmp;
+  If Not FMXRunChild(Cmd) Then Begin Erase_F(Tmp); Fail('Codec audio '+FMXACodec+' indisponible.'); End;
+  FMXLoad(Tmp,W);
+  Case FMXACodec[5] Of
+   's': ;
+  End;
+  If FMXACodec='pcm_s16le' Then S^.Codec:=FC_PCM_S16LE
+  Else If FMXACodec='pcm_s16be' Then S^.Codec:=FC_PCM_S16BE
+  Else If FMXACodec='pcm_u8' Then S^.Codec:=FC_PCM_U8
+  Else If FMXACodec='pcm_s8' Then S^.Codec:=FC_PCM_S8
+  Else If FMXACodec='pcm_s24le' Then S^.Codec:=FC_PCM_S24LE
+  Else If FMXACodec='pcm_s24be' Then S^.Codec:=FC_PCM_S24BE
+  Else If FMXACodec='pcm_s32le' Then S^.Codec:=FC_PCM_S32LE
+  Else If FMXACodec='pcm_s32be' Then S^.Codec:=FC_PCM_S32BE
+  Else If FMXACodec='pcm_f32le' Then S^.Codec:=FC_PCM_F32LE
+  Else If FMXACodec='pcm_f32be' Then S^.Codec:=FC_PCM_F32BE
+  Else If FMXACodec='pcm_f64le' Then S^.Codec:=FC_PCM_F64LE
+  Else If FMXACodec='pcm_f64be' Then S^.Codec:=FC_PCM_F64BE
+  Else If FMXACodec='pcm_alaw' Then S^.Codec:=FC_PCM_ALAW
+  Else If FMXACodec='pcm_mulaw' Then S^.Codec:=FC_PCM_MULAW
+  Else Fail('Codec audio '+FMXACodec+' non pris en charge.');
+  S^.Bps:=MOWBitsPerSample(S^.Codec); S^.BlockAlign:=S^.Channels*S^.Bps Div 8;
+  S^.BitRate:=S^.SampleRate*S^.Channels*S^.Bps;
+  Bal:=S^.BlockAlign; Chunk:=(4096 Div Wv.BAlign)*Bal; If Chunk<Bal Then Chunk:=Bal;
+  Off:=0; Pos:=0;
+  While Off<W.Len Do Begin
+   Sz:=Chunk; If Off+Sz>W.Len Then Sz:=W.Len-Off;
+   P:=FMXPkFromMem(Idx,@W.D^[Off],Sz);
+   P^.Pts:=Pos; P^.Dts:=Pos; P^.Dur:=Sz Div Bal; P^.Flags:=FMX_PKT_KEY;
+   Pos:=Pos+P^.Dur; Off:=Off+Sz;
+   FMXListAdd(FMXL[Idx],P);
+  End;
+  FMXUnload(W);
+ End Else If FMXACodec='alac' Then Begin
+  If Wv.Bits<>16 Then Fail('alac: seule l''entree WAV 16 bits est prise en charge.');
+  Tmp:=FMXTmp('m4a');
+  Cmd:='-y -i '+In1+' '+FMXAOpts+' -c:a alac '+Tmp;
+  If Not FMXRunChild(Cmd) Then Begin Erase_F(Tmp); Fail('Codec audio alac indisponible.'); End;
+  If Not MDOpen(Tmp) Then Fail('Sortie temporaire illisible.');
+  MDBuildSamples(@MDT[0]);
+  S^.Codec:=FC_ALAC; S^.FrameSize:=4096; S^.BpRaw:=16;
+  S^.Channels:=MDT[0].Channels; S^.SampleRate:=MDT[0].Rate; S^.TbD:=S^.SampleRate;
+  If MDT[0].ExtraLen>0 Then Begin
+   S^.ExtraLen:=MDT[0].ExtraLen; GetMem(S^.Extra,S^.ExtraLen+16); Move(MDT[0].Extra^,S^.Extra^,S^.ExtraLen);
+   S^.BpRaw:=S^.Extra^[17];
+  End;
+  Tot:=0; For I:=0 To MDT[0].NS-1 Do Tot:=Tot+1;
+  Pos:=0;
+  Rem:=(Int64(Wv.DataLen) Div Wv.BAlign);
+  For I:=0 To MDT[0].NS-1 Do Begin
+   P:=FMXPkFromMem(Idx,@MDFile.D^[MDT[0].S^[I].Pos],MDT[0].S^[I].Size);
+   P^.Pts:=Pos; P^.Dts:=Pos; P^.Flags:=FMX_PKT_KEY;
+   If Rem>4096 Then P^.Dur:=4096 Else P^.Dur:=Rem;
+   Pos:=Pos+P^.Dur; Rem:=Rem-P^.Dur;
+   FMXListAdd(FMXL[Idx],P);
+  End;
+  MDClose;
+ End Else If (FMXACodec='wmav1') Or (FMXACodec='wmav2') Then Begin
+  Tmp:=FMXTmp('avi');
+  Cmd:='-y -i '+In1+' '+FMXAOpts+' -c:a '+FMXACodec+' '+Tmp;
+  If Not FMXRunChild(Cmd) Then Begin Erase_F(Tmp); Fail('Codec audio '+FMXACodec+' indisponible.'); End;
+  FMXLoad(Tmp,W);
+  For I:=0 To FMXMaxS-1 Do FMXListInit(LA[I]);
+  If Not FMXAviParse(W,LA) Then Fail('Sortie AVI temporaire illisible.');
+  If FMXACodec='wmav1' Then S^.Codec:=FC_WMAV1 Else S^.Codec:=FC_WMAV2;
+  S^.Channels:=FMXLe16(W.D,FMXAviS[0].FmtOff+2); S^.SampleRate:=FMXLe32(W.D,FMXAviS[0].FmtOff+4);
+  S^.BitRate:=FMXLe32(W.D,FMXAviS[0].FmtOff+8)*8; S^.BlockAlign:=FMXLe16(W.D,FMXAviS[0].FmtOff+12);
+  S^.Bps:=FMXLe16(W.D,FMXAviS[0].FmtOff+14);
+  Chunk:=FMXLe16(W.D,FMXAviS[0].FmtOff+16);
+  If Chunk>0 Then Begin S^.ExtraLen:=Chunk; GetMem(S^.Extra,Chunk+16); Move(W.D^[FMXAviS[0].FmtOff+18],S^.Extra^,Chunk); End;
+  S^.TbD:=S^.SampleRate;
+  Rem:=Int64(Wv.DataLen) Div Wv.BAlign;
+  { longueur de trame WMA }
+  If S^.SampleRate<=16000 Then S^.FrameSize:=512
+  Else If (S^.SampleRate<=22050) Or ((S^.SampleRate<=32000) And (S^.Codec=FC_WMAV1)) Then S^.FrameSize:=1024
+  Else If S^.SampleRate<=48000 Then S^.FrameSize:=2048
+  Else If S^.SampleRate<=96000 Then S^.FrameSize:=4096
+  Else S^.FrameSize:=8192;
+  Pos:=-S^.FrameSize;
+  P:=LA[0].Head;
+  While P<>Nil Do Begin
+   Nx:=P^.Next; P^.Next:=Nil; P^.SI:=Idx;
+   P^.Pts:=Pos; P^.Dts:=Pos; P^.Flags:=FMX_PKT_KEY;
+   If Rem>S^.FrameSize Then P^.Dur:=S^.FrameSize Else P^.Dur:=Rem;
+   Rem:=Rem-P^.Dur;
+   Pos:=Pos+S^.FrameSize;
+   FMXListAdd(FMXL[Idx],P);
+   P:=Nx;
+  End;
+  FMXUnload(W);
+ End Else If (FMXACodec='adpcm_ms') Or (FMXACodec='adpcm_ima_wav') Then Begin
+  Tmp:=FMXTmp('wav');
+  Cmd:='-y -i '+In1+' '+FMXAOpts+' -c:a '+FMXACodec+' '+Tmp;
+  If Not FMXRunChild(Cmd) Then Begin Erase_F(Tmp); Fail('Codec audio '+FMXACodec+' indisponible.'); End;
+  FMXLoad(Tmp,W);
+  If Not FMXWavParse(W,Wc) Then Fail('Sortie WAV temporaire illisible.');
+  If FMXACodec='adpcm_ms' Then S^.Codec:=FC_ADPCM_MS Else S^.Codec:=FC_ADPCM_IMA_WAV;
+  S^.Channels:=Wc.Ch; S^.SampleRate:=Wc.Rate; S^.BlockAlign:=Wc.BAlign; S^.Bps:=Wc.Bits; S^.TbD:=S^.SampleRate;
+  S^.BitRate:=Int64(Wc.Rate)*Wc.BAlign*8 Div 1;
+  If S^.Codec=FC_ADPCM_MS Then S^.FrameSize:=(Wc.BAlign-7*Wc.Ch)*2 Div Wc.Ch+2
+  Else S^.FrameSize:=1+(Wc.BAlign-4*Wc.Ch)*8 Div (4*Wc.Ch);
+  S^.BitRate:=128000;
+  If Wc.ExtraLen>0 Then Begin
+   If S^.Codec=FC_ADPCM_MS Then Begin S^.ExtraLen:=Wc.ExtraLen; GetMem(S^.Extra,S^.ExtraLen+16); Move(W.D^[Wc.ExtraOff],S^.Extra^,S^.ExtraLen); End;
+  End;
+  Rem:=Int64(Wv.DataLen) Div Wv.BAlign; Pos:=0; Off:=Wc.DataOff;
+  While Off+Wc.BAlign<=Wc.DataOff+Wc.DataLen Do Begin
+   P:=FMXPkFromMem(Idx,@W.D^[Off],Wc.BAlign);
+   P^.Pts:=Pos; P^.Dts:=Pos; P^.Flags:=FMX_PKT_KEY;
+   If Rem>S^.FrameSize Then P^.Dur:=S^.FrameSize Else P^.Dur:=Rem;
+   Pos:=Pos+P^.Dur; Rem:=Rem-P^.Dur; Off:=Off+Wc.BAlign;
+   FMXListAdd(FMXL[Idx],P);
+  End;
+  FMXUnload(W);
+ End Else If (FMXACodec='adpcm_swf') Or (FMXACodec='nellymoser') Then Begin
+  Tmp:=FMXTmp('flv');
+  Cmd:='-y -i '+In1+' '+FMXAOpts+' -c:a '+FMXACodec+' '+Tmp;
+  If Not FMXRunChild(Cmd) Then Begin Erase_F(Tmp); Fail('Codec audio '+FMXACodec+' indisponible.'); End;
+  FMXLoad(Tmp,W);
+  For I:=0 To FMXMaxS-1 Do FMXListInit(LA[I]);
+  If Not FMXFlvParse(W,LA) Then Fail('Sortie FLV temporaire illisible.');
+  If FMXACodec='adpcm_swf' Then Begin S^.Codec:=FC_ADPCM_SWF; S^.FrameSize:=4096; End
+  Else Begin S^.Codec:=FC_NELLYMOSER; S^.FrameSize:=256; End;
+  S^.Channels:=FMXFlvACh; S^.SampleRate:=Wv.Rate; If FMXARate>0 Then S^.SampleRate:=FMXARate;
+  S^.TbD:=S^.SampleRate;
+  Rem:=Int64(Wv.DataLen) Div Wv.BAlign; Pos:=0;
+  If S^.Codec=FC_NELLYMOSER Then Begin
+   { chronologie des paquets Nellymoser : delai initial 128 (AudioFrameQueue) }
+   Cn:=0; K:=Rem Div 256; J:=Rem Mod 256;
+   P:=LA[1].Head; I:=0;
+   While P<>Nil Do Begin
+    Nx:=P^.Next; P^.Next:=Nil; P^.SI:=Idx;
+    If (J>=128) And (Nx=Nil) Then Begin FMXFreePkt(P); P:=Nx; Continue; End;
+    P^.Pts:=-128+256*Int64(I);
+    If I<K Then P^.Dur:=256
+    Else If I=K Then Begin If J>=128 Then P^.Dur:=256 Else P^.Dur:=J+128; End
+    Else Begin P^.Pts:=-128+256*Int64(K)+384-(J+128); P^.Dur:=256; End;
+    If (J>=128) And (I=K) Then Begin P^.Pts:=-128+256*Int64(K); P^.Dur:=256; End;
+    P^.Dts:=P^.Pts; Inc(I);
+    FMXListAdd(FMXL[Idx],P);
+    P:=Nx;
+   End;
+  End Else Begin
+  P:=LA[1].Head;
+  While P<>Nil Do Begin
+   Nx:=P^.Next; P^.Next:=Nil; P^.SI:=Idx;
+   P^.Pts:=Pos; P^.Dts:=Pos;
+   If Rem>S^.FrameSize Then P^.Dur:=S^.FrameSize Else P^.Dur:=Rem;
+   Pos:=Pos+P^.Dur; Rem:=Rem-P^.Dur;
+   FMXListAdd(FMXL[Idx],P);
+   P:=Nx;
+  End;
+  End;
+  FMXUnload(W);
+ End Else Fail('Codec audio '+FMXACodec+' non pris en charge par cette route.');
+ FMXUnload(F);
+ Erase_F(Tmp);
+End;
+{ ------------------------------------------------------------------ }
+{ Source "copie de flux" depuis MOV/MP4 (mov.c : mov_build_index,      }
+{ mov_fix_index, mov_read_packet) -> flux + paquets pour les muxers   }
+{ ------------------------------------------------------------------ }
+Type
+ TMCEnt = Record Pos, Ts: Int64; Size: LongInt; Fl: LongInt; Src: LongInt; End;
+ TMCEnts = Array[0..0] Of TMCEnt;
+ PMCEnts = ^TMCEnts;
+Const
+ MC_KEY = 1; MC_DISCARD = 2;
+Var
+ MCSkipSamples: Int64;
+ MCStartTime: Int64;           { st->start_time (NOPTS = FMXNoPts) }
+ MCDuration: Int64;
+ MCMinCorr: Int64;
+
+{ av_index_search_timestamp sur e_old (aucun drapeau DISCARD) }
+Function MCSearch(E: PMCEnts; N: LongInt; Wanted: Int64; Flags: LongInt): LongInt;
+Var A, B, M: LongInt; Ts: Int64;
+Begin
+ A:=-1; B:=N;
+ While B-A>1 Do Begin
+  M:=(A+B) Shr 1;
+  Ts:=E^[M].Ts;
+  If Ts>=Wanted Then B:=M;
+  If Ts<=Wanted Then A:=M;
+ End;
+ M:=A; { BACKWARD }
+ If (Flags And 1)=0 Then
+  While (M>=0) And (M<N) And ((E^[M].Fl And MC_KEY)=0) Do Dec(M);
+ If M=N Then MCSearch:=-1 Else MCSearch:=M;
+End;
+
+{ mov_fix_index : E = entrees d'origine (ts = dts sans decalage), Ct = ctts par echantillon (ou Nil) ;
+  produit NE/NN et NCt (cts par entree) ; renvoie les nouveaux echantillons }
+Procedure MCFixIndex(T: PMDTrk; E: PMCEnts; N: LongInt; Ct: PMDLong; DtsShift: LongInt; Audio: Boolean;
+                     Var NE: PMCEnts; Var NN: LongInt; Var NCt: PMDLong);
+Var EI, Index, CtsIdx, J, K: LongInt; MediaTime, EditDur, DtsCounter, DtsEntryEnd, EmptySum, StartDts: Int64;
+    NumDiscBegin: LongInt; FoundNonEmpty, Started, FoundKeyAfter: Boolean; FDBuf: Array[0..255] Of Int64;
+    CurCts, CurCtts, FrameDur: Int64; Fl: LongInt; FirstNonZeroAudio: LongInt; PktSkip, SearchTs: Int64;
+    Cap: LongInt; CtOld: Boolean; Fi, Lim: LongInt; EndTs: Int64; Mc: Int64; MovTs: Int64; Done: Boolean; StartCt: LongInt;
+    Idx0: LongInt;
+Begin
+ GetMem(NE,(N*4+16)*SizeOf(TMCEnt)); Cap:=N*4+16; NN:=0;
+ If Ct<>Nil Then GetMem(NCt,Cap*4) Else NCt:=Nil;
+ MCMinCorr:=-1; MCSkipSamples:=0;
+ DtsEntryEnd:=0;
+ If DtsShift>0 Then DtsEntryEnd:=-DtsShift;
+ StartDts:=DtsEntryEnd; EmptySum:=0; FoundNonEmpty:=False; NumDiscBegin:=0; FirstNonZeroAudio:=-1;
+ MovTs:=MDMovieTs;
+ EI:=0;
+ While EI<T^.NElst Do Begin
+  EditDur:=FMXRescale(T^.Elst^[EI*3],T^.Timescale,MovTs);
+  MediaTime:=T^.Elst^[EI*3+1];
+  Inc(EI);
+  DtsCounter:=DtsEntryEnd; DtsEntryEnd:=DtsEntryEnd+EditDur;
+  NumDiscBegin:=0;
+  If (Not FoundNonEmpty) And (MediaTime=-1) Then Begin EmptySum:=EmptySum+EditDur; Continue; End;
+  FoundNonEmpty:=True;
+  If Audio Then Begin
+   If FirstNonZeroAudio<0 Then FirstNonZeroAudio:=1 Else FirstNonZeroAudio:=0;
+   If FirstNonZeroAudio>0 Then MCSkipSamples:=0;
+  End;
+  SearchTs:=MediaTime;
+  If Audio Then Begin
+   SearchTs:=SearchTs-T^.Timescale; If E^[0].Ts>SearchTs Then SearchTs:=E^[0].Ts;
+  End;
+  { find_prev_closest_index }
+  Mc:=SearchTs; If DtsShift>0 Then Mc:=Mc-DtsShift;
+  Index:=MCSearch(E,N,Mc,0);
+  If Index>=0 Then Begin
+   J:=Index;
+   While (J>0) And (E^[J].Ts=E^[J-1].Ts) Do Begin
+    If (E^[J-1].Fl And MC_KEY)<>0 Then Index:=J-1;
+    Dec(J);
+   End;
+  End;
+  If Ct<>Nil Then Begin
+   While (Index>=0) Do Begin
+    If (E^[Index].Ts+Ct^[Index]<=Mc) And ((E^[Index].Fl And MC_KEY)<>0) Then Break;
+    Dec(Index);
+   End;
+  End;
+  If Index<0 Then Begin
+   Index:=MCSearch(E,N,Mc,1);
+   If Index<0 Then Index:=0;
+  End;
+  Started:=False; FoundKeyAfter:=False;
+  Done:=False;
+  While (Index<N) And Not Done Do Begin
+   If Index+1<N Then FrameDur:=E^[Index+1].Ts-E^[Index].Ts Else FrameDur:=EditDur;
+   Fl:=E^[Index].Fl;
+   CurCts:=E^[Index].Ts+DtsShift; CurCtts:=0;
+   If Ct<>Nil Then Begin CurCtts:=Ct^[Index]; CurCts:=CurCts+CurCtts; End;
+   If (CurCts<MediaTime) Or (CurCts>=EditDur+MediaTime) Then Begin
+    If Audio And (CurCts<MediaTime) And (CurCts+FrameDur>MediaTime) And (FirstNonZeroAudio>0) Then Begin
+     PktSkip:=MediaTime-CurCts;
+     MCSkipSamples:=MCSkipSamples+PktSkip;
+     DtsCounter:=DtsCounter-PktSkip;
+     If Not Started Then Begin
+      Started:=True;
+      If NumDiscBegin>0 Then Begin
+       EndTs:=DtsCounter;
+       For K:=0 To NumDiscBegin-1 Do Begin
+        EndTs:=EndTs-FDBuf[NumDiscBegin-1-K];
+        NE^[NN-1-K].Ts:=EndTs;
+       End;
+       NumDiscBegin:=0;
+      End;
+     End;
+    End Else Begin
+     Fl:=Fl Or MC_DISCARD;
+     If Not Started Then Begin
+      If NumDiscBegin<256 Then FDBuf[NumDiscBegin]:=FrameDur;
+      Inc(NumDiscBegin);
+      If Audio And (FirstNonZeroAudio>0) Then MCSkipSamples:=MCSkipSamples+FrameDur;
+     End;
+    End;
+   End Else Begin
+    If MCMinCorr<0 Then MCMinCorr:=DtsCounter+CurCtts+DtsShift
+    Else If DtsCounter+CurCtts+DtsShift<MCMinCorr Then MCMinCorr:=DtsCounter+CurCtts+DtsShift;
+    If Not Started Then Begin
+     Started:=True;
+     If NumDiscBegin>0 Then Begin
+      EndTs:=DtsCounter;
+      For K:=0 To NumDiscBegin-1 Do Begin
+       EndTs:=EndTs-FDBuf[NumDiscBegin-1-K];
+       NE^[NN-1-K].Ts:=EndTs;
+      End;
+      NumDiscBegin:=0;
+     End;
+    End;
+   End;
+   If NN>=Cap Then Fail('MOV: index trop grand.');
+   NE^[NN].Pos:=E^[Index].Pos; NE^[NN].Ts:=DtsCounter; NE^[NN].Size:=E^[Index].Size; NE^[NN].Fl:=Fl; NE^[NN].Src:=Index;
+   If Ct<>Nil Then NCt^[NN]:=Ct^[Index];
+   Inc(NN);
+   If Started Then DtsCounter:=DtsCounter+FrameDur;
+   If (CurCts+FrameDur>=EditDur+MediaTime) And (((Fl And MC_KEY)<>0) Or Audio) Then Begin
+    If Ct<>Nil Then Begin
+     If (Not Audio) And (Not FoundKeyAfter) Then Begin FoundKeyAfter:=True; Inc(Index); Continue; End;
+    End;
+    Done:=True;
+   End;
+   Inc(Index);
+  End;
+ End;
+ MCMinCorr:=MCMinCorr-EmptySum;
+ If (Not Audio) Then
+  If MCMinCorr>0 Then
+   For J:=0 To NN-1 Do NE^[J].Ts:=NE^[J].Ts-MCMinCorr;
+ MCStartTime:=EmptySum;
+ MCDuration:=DtsEntryEnd-StartDts;
+End;
+
+Function MCMapVideo(Var T: TMDTrk; Var Codec: Integer): Boolean;
+Var Tg: String;
+Begin
+ Tg:=''; Codec:=FC_OTHERV; MCMapVideo:=True;
+ Tg:=Chr(T.Tag And $FF)+Chr((T.Tag Shr 8) And $FF)+Chr((T.Tag Shr 16) And $FF)+Chr((T.Tag Shr 24) And $FF);
+ If (Tg='avc1') Or (Tg='avc3') Then Codec:=FC_H264
+ Else If Tg='mp4v' Then Begin
+  Case T.EsdsObj Of $20: Codec:=FC_MPEG4; $6C: Codec:=FC_MJPEG; $6D: Codec:=FC_PNG; $61,$60,$62,$63,$64,$65: Codec:=FC_MPEG2VIDEO; $6A: Codec:=FC_MPEG1VIDEO; Else Codec:=FC_MPEG4; End;
+ End
+ Else If Tg='rle ' Then Codec:=FC_QTRLE
+ Else If (Tg='SVQ1') Or (Tg='svq1') Then Codec:=FC_SVQ1
+ Else If (Tg='jpeg') Or (Tg='mjpa') Then Codec:=FC_MJPEG
+ Else If (Tg='h263') Or (Tg='s263') Or (Tg='H263') Then Codec:=FC_H263
+ Else If Tg='png ' Then Codec:=FC_PNG
+ Else If Tg='FLV1' Then Codec:=FC_FLV1
+ Else If Tg='WMV1' Then Codec:=FC_WMV1
+ Else If Tg='WMV2' Then Codec:=FC_WMV2
+ Else If Tg='MP43' Then Codec:=FC_MSMPEG4V3
+ Else If Tg='3IVD' Then Codec:=FC_MSMPEG4V3
+ Else MCMapVideo:=False;
+End;
+
+Function MCMapAudio(Var T: TMDTrk; Var Codec: Integer): Boolean;
+Var Tg: String;
+Begin
+ Codec:=FC_OTHERA; MCMapAudio:=True;
+ Tg:=Chr(T.Tag And $FF)+Chr((T.Tag Shr 8) And $FF)+Chr((T.Tag Shr 16) And $FF)+Chr((T.Tag Shr 24) And $FF);
+ If Tg='mp4a' Then Begin
+  Case T.EsdsObj Of
+   $40,$66,$67,$68: Codec:=FC_AAC;
+   $69,$6B: Codec:=FC_MP3;
+   $A5: Codec:=FC_AC3;
+   Else Codec:=FC_AAC;
+  End;
+ End
+ Else If (Tg='.mp3') Or (Tg='mp3 ') Then Codec:=FC_MP3
+ Else If Tg='.mp2' Then Codec:=FC_MP2
+ Else If Tg='alac' Then Codec:=FC_ALAC
+ Else If Tg='ima4' Then Codec:=FC_ADPCM_IMA_QT
+ Else If Tg='ac-3' Then Codec:=FC_AC3
+ Else If Tg='samr' Then Codec:=FC_AMR_NB
+ Else If Tg='sowt' Then Begin
+  Case T.SampleBits Of 8: Codec:=FC_PCM_S8; 24: Codec:=FC_PCM_S24LE; 32: Codec:=FC_PCM_S32LE; Else Codec:=FC_PCM_S16LE; End;
+ End
+ Else If Tg='twos' Then Begin
+  Case T.SampleBits Of 8: Codec:=FC_PCM_S8; 24: Codec:=FC_PCM_S24BE; 32: Codec:=FC_PCM_S32BE; Else Codec:=FC_PCM_S16BE; End;
+ End
+ Else If Tg='in24' Then Codec:=FC_PCM_S24BE
+ Else If Tg='in32' Then Codec:=FC_PCM_S32BE
+ Else If Tg='fl32' Then Codec:=FC_PCM_F32BE
+ Else If Tg='fl64' Then Codec:=FC_PCM_F64BE
+ Else If Tg='raw ' Then Codec:=FC_PCM_U8
+ Else If Tg='alaw' Then Codec:=FC_PCM_ALAW
+ Else If Tg='ulaw' Then Codec:=FC_PCM_MULAW
+ Else MCMapAudio:=False;
+End;
+
+{ lit un MOV/MP4 et ajoute les flux video/audio a FMXS / FMXL ; renvoie le nombre de flux ajoutes }
+Function FMXMovSource(Const Path: String; WantV, WantA: Boolean): Integer;
+Var T: PMDTrk; I, Si, J, K, N, Added: LongInt; Codec: Integer; E: PMCEnts; Ct: PMDLong; Dts: Int64; DtsShift: LongInt;
+    NE: PMCEnts; NN: LongInt; NCt: PMDLong; HasCtts: Boolean; P: PFMXPkt; S: ^TFMXStream; Audio: Boolean; Cur, Nx: Int64;
+    StreamBytes: Int64; Run, Idx, Sidx: LongInt; Sc: LongInt; Pts: Int64; HaveV, HaveA: Boolean; Dur0: Int64;
+Begin
+ Added:=0; HaveV:=False; HaveA:=False;
+ If Not MDOpen(Path) Then Fail('Impossible de lire le conteneur MOV/MP4 '+Path);
+ For I:=0 To MDNum-1 Do Begin
+  T:=@MDT[I];
+  Audio:=T^.Kind=1;
+  If (T^.Kind<>0) And (T^.Kind<>1) Then Continue;
+  If (T^.Kind=0) And (Not WantV) Then Continue;
+  If (T^.Kind=0) And HaveV Then Continue;
+  If (T^.Kind=1) And ((Not WantA) Or HaveA) Then Continue;
+  If T^.Kind=0 Then Begin If Not MCMapVideo(T^,Codec) Then Fail('Codec video MOV non pris en charge pour la copie.'); End
+  Else If Not MCMapAudio(T^,Codec) Then Fail('Codec audio MOV non pris en charge pour la copie.');
+  MDBuildSamples(T);
+  N:=T^.NS;
+  If N<=0 Then Continue;
+  { dts_shift : ctts negatifs }
+  DtsShift:=0; HasCtts:=T^.NCtts>0;
+  For J:=0 To T^.NCtts-1 Do
+   If (J+2<T^.NCtts) Or (T^.NCtts<=2) Then Begin
+    If T^.Ctts^[J*2+1]<0 Then If -T^.Ctts^[J*2+1]>DtsShift Then DtsShift:=-T^.Ctts^[J*2+1];
+   End;
+  { entrees d'origine }
+  GetMem(E,N*SizeOf(TMCEnt));
+  GetMem(Ct,N*4+8);
+  Dts:=-DtsShift; StreamBytes:=0;
+  For J:=0 To N-1 Do Begin
+   E^[J].Pos:=T^.S^[J].Pos; E^[J].Size:=T^.S^[J].Size; E^[J].Fl:=0; If T^.S^[J].Key Then E^[J].Fl:=MC_KEY;
+   E^[J].Ts:=T^.S^[J].Dts-DtsShift; E^[J].Src:=J;
+   Ct^[J]:=T^.S^[J].Cts;
+   StreamBytes:=StreamBytes+T^.S^[J].Size;
+  End;
+  Dts:=0;
+  If T^.NElst>0 Then Begin
+   MCFixIndex(T,E,N,PMDLong(Ct),DtsShift,Audio,NE,NN,NCt);
+   If Not HasCtts Then NCt:=Nil;
+  End Else Begin
+   NE:=E; NN:=N; If HasCtts Then NCt:=Ct Else NCt:=Nil;
+   MCStartTime:=FMXNoPts; MCDuration:=T^.MdhdDur; MCSkipSamples:=0;
+   If (Not Audio) And (NN>0) Then Begin
+    MCStartTime:=NE^[0].Ts+DtsShift;
+    If HasCtts Then MCStartTime:=MCStartTime+NCt^[0];
+   End;
+  End;
+  { flux }
+  Si:=FMXAddStream(T^.Kind);
+  S:=@FMXS[Si];
+  S^.Codec:=Codec;
+  S^.TbN:=1; S^.TbD:=T^.Timescale;
+  S^.Lang:='und';
+  S^.StTitle:=''; S^.Encoder:=T^.Compressor;
+  If Audio Then Begin
+   S^.Channels:=T^.Channels; S^.SampleRate:=T^.Rate;
+   S^.Bps:=T^.SampleBits;
+   If MOWBitsPerSample(Codec)<>0 Then Begin S^.Bps:=MOWBitsPerSample(Codec); End;
+   If (T^.AudVer<>0) Or (Codec=FC_AAC) Then ;
+   If T^.ExtraLen>0 Then Begin S^.ExtraLen:=T^.ExtraLen; GetMem(S^.Extra,S^.ExtraLen+16); Move(T^.Extra^,S^.Extra^,S^.ExtraLen); End;
+   Case Codec Of
+    FC_AAC: S^.FrameSize:=1024;
+    FC_MP3: If T^.Rate<=24000 Then S^.FrameSize:=576 Else S^.FrameSize:=1152;
+    FC_MP2: S^.FrameSize:=1152;
+    FC_AC3: S^.FrameSize:=1536;
+    FC_ALAC: Begin S^.FrameSize:=4096; If S^.ExtraLen>=36 Then Begin S^.FrameSize:=FMXBe32(S^.Extra,12+0); S^.BpRaw:=S^.Extra^[17]; End; End;
+    FC_ADPCM_IMA_QT: S^.FrameSize:=64;
+   End;
+   S^.IsIntra:=True;
+   If (Codec=FC_AAC) And (S^.ExtraLen>=2) Then Begin
+    { AudioSpecificConfig : canaux et frequence }
+    S^.Channels:=(S^.Extra^[1] Shr 3) And 15;
+   End;
+   S^.BitRate:=0;
+   S^.BlockAlign:=0;
+   If MOWBitsPerSample(Codec)>0 Then S^.BlockAlign:=S^.Channels*(MOWBitsPerSample(Codec) Div 8);
+   HaveA:=True;
+  End Else Begin
+   S^.Width:=T^.Width; S^.Height:=T^.Height; S^.Bps:=T^.Depth;
+   If T^.HasPasp Then Begin S^.SarN:=T^.PaspN; S^.SarD:=T^.PaspD; End;
+   S^.FieldOrder:=T^.FieldOrder;
+   If T^.ExtraLen>0 Then Begin S^.ExtraLen:=T^.ExtraLen; GetMem(S^.Extra,S^.ExtraLen+16); Move(T^.Extra^,S^.Extra^,S^.ExtraLen); End;
+   S^.IsIntra:=(Codec=FC_MJPEG) Or (Codec=FC_RAWVIDEO);
+   HaveV:=True;
+   { avg_frame_rate : nb_frames_for_fps / duration_for_fps }
+   Dur0:=0; Sc:=0;
+   For J:=0 To T^.NStts-1 Do Begin Dur0:=Dur0+Int64(T^.Stts^[J*2])*T^.Stts^[J*2+1]; Sc:=Sc+T^.Stts^[J*2]; End;
+   If (Dur0>0) And (Sc>0) Then Begin
+    S^.FpsN:=T^.Timescale; S^.FpsD:=0;
+    { reduce (timescale*Sc, Dur0) }
+    Cur:=Int64(T^.Timescale)*Sc; Nx:=Dur0;
+    S^.FpsN:=LongInt(Cur Div AVWGcd(Cur,Nx)); S^.FpsD:=LongInt(Nx Div AVWGcd(Cur,Nx));
+   End;
+   If (T^.NStts=1) Or ((T^.NStts=2) And (T^.Stts^[2]=1)) Then Begin End;
+   If (StreamBytes>0) And (MCDuration>0) Then S^.BitRate:=LongInt((StreamBytes*8*T^.Timescale) Div MCDuration);
+   { video_delay (H.264) }
+   S^.VideoDelay:=0;
+  End;
+  If Audio And (MCDuration>0) And (StreamBytes>0) Then S^.BitRate:=LongInt((StreamBytes*8*T^.Timescale) Div MCDuration);
+  If Audio And (T^.EsdsAvg>0) Then S^.BitRate:=T^.EsdsAvg;
+  FMXListInit(FMXL[Si]);
+  { paquets }
+  For J:=0 To NN-1 Do Begin
+   P:=FMXPkFromMem(Si,@MDFile.D^[NE^[J].Pos],NE^[J].Size);
+   P^.Dts:=NE^[J].Ts;
+   If NCt<>Nil Then P^.Pts:=NE^[J].Ts+DtsShift+NCt^[J] Else P^.Pts:=NE^[J].Ts;
+   If J+1<NN Then Nx:=NE^[J+1].Ts Else Nx:=MCDuration;
+   If (NCt=Nil) And (Nx>=NE^[J].Ts) Then P^.Dur:=Nx-NE^[J].Ts
+   Else If NCt<>Nil Then Begin
+    { duree issue de la cadence (r_frame_rate) }
+    If (T^.NStts>0) Then P^.Dur:=T^.Stts^[1] Else P^.Dur:=0;
+    If (S^.FpsN>0) And (Not Audio) Then P^.Dur:=FMXRescaleRnd(1,Int64(S^.FpsD)*T^.Timescale,S^.FpsN,2);
+   End;
+   If (NE^[J].Fl And MC_KEY)<>0 Then P^.Flags:=FMX_PKT_KEY;
+   FMXListAdd(FMXL[Si],P);
+  End;
+  FMXS[Si].CTag:=0;
+  { debut du flux }
+  S^.LowestTs:=MCStartTime;
+  Inc(Added);
+ End;
+ FMXMovSource:=Added;
+End;
+Function FMXTimeLess(A,B: PFMXPkt): Boolean;
+Var C: Integer;
+Begin
+ C:=FMXCompareTs(A^.Dts,FMXS[A^.SI].TbN,FMXS[A^.SI].TbD,B^.Dts,FMXS[B^.SI].TbN,FMXS[B^.SI].TbD);
+ If C=0 Then FMXTimeLess:=A^.SI<B^.SI Else FMXTimeLess:=C<0;
+End;
+
+Function FMXParseRate(Const S: String): LongInt;
+Var V: LongInt; L: String;
+Begin
+ L:=FMXLower(S); V:=0;
+ If (L<>'') And (L[Length(L)]='k') Then V:=FMXAtoi(Copy(L,1,Length(L)-1))*1000
+ Else If (L<>'') And (L[Length(L)]='m') Then V:=FMXAtoi(Copy(L,1,Length(L)-1))*1000000
+ Else V:=FMXAtoi(L);
+ FMXParseRate:=V;
+End;
+
+Function FMXRoute: Boolean;
+Var I: Integer; K: LongInt; A, Ext, Fm: String; V, Au: Integer; Fo: File;
+    Best: Integer; P: PFMXPkt; EncN, EncD: Array[0..FMXMaxS-1] Of Int64; N: LongInt;
+Begin
+ FMXRoute:=False;
+ If (ParamCount>=1) And (ParamStr(1)='-fmxq') Then Begin
+  Assign(Output,'/dev/null');
+  {$I-} Rewrite(Output); {$I+}
+  If IOResult<>0 Then ;
+  Exit;
+ End;
+ FMXInN:=0; FMXVCodec:=''; FMXACodec:=''; FMXOutPath:=''; FMXFmtOpt:=''; FMXVOpts:=''; FMXAOpts:='';
+ FMXOverwrite:=False; FMXNoV:=False; FMXNoA:=False; FMXCopyV:=False; FMXCopyA:=False;
+ FMXAChannels:=0; FMXARate:=0; FMXMetaN:=0; FMXVBitRate:=200000;
+ I:=1;
+ While I<=ParamCount Do Begin
+  A:=ParamStr(I);
+  If A='-i' Then Begin Inc(I); If FMXInN<4 Then Begin FMXInputs[FMXInN]:=ParamStr(I); Inc(FMXInN); End; End
+  Else If A='-y' Then FMXOverwrite:=True
+  Else If A='-hide_banner' Then FMXOverwrite:=FMXOverwrite
+  Else If (A='-c:v') Or (A='-vcodec') Or (A='-codec:v') Then Begin Inc(I); FMXVCodec:=FMXLower(ParamStr(I)); End
+  Else If (A='-c:a') Or (A='-acodec') Or (A='-codec:a') Then Begin Inc(I); FMXACodec:=FMXLower(ParamStr(I)); End
+  Else If (A='-c') Or (A='-codec') Then Begin Inc(I); FMXVCodec:=FMXLower(ParamStr(I)); FMXACodec:=FMXVCodec; End
+  Else If A='-f' Then Begin Inc(I); FMXFmtOpt:=FMXLower(ParamStr(I)); End
+  Else If A='-vn' Then FMXNoV:=True
+  Else If A='-an' Then FMXNoA:=True
+  Else If A='-metadata' Then Begin
+   Inc(I); Fm:=ParamStr(I); K:=Pos('=',Fm);
+   If K>1 Then FMXMetaSet(Copy(Fm,1,K-1),Copy(Fm,K+1,255));
+  End
+  Else If A='-b:v' Then Begin Inc(I); FMXVOpts:=FMXVOpts+'-b:v '+ParamStr(I)+' '; FMXVBitRate:=FMXParseRate(ParamStr(I)); End
+  Else If (A='-q:v') Or (A='-g') Or (A='-pix_fmt') Or (A='-r') Or (A='-s') Or (A='-compression_level') Then Begin
+   FMXVOpts:=FMXVOpts+A+' '+ParamStr(I+1)+' '; Inc(I);
+  End
+  Else If (A='-b:a') Or (A='-strict') Then Begin
+   FMXAOpts:=FMXAOpts+A+' '+ParamStr(I+1)+' '; Inc(I);
+  End
+  Else If A='-ar' Then Begin Inc(I); FMXARate:=FMXAtoi(ParamStr(I)); FMXAOpts:=FMXAOpts+'-ar '+ParamStr(I)+' '; End
+  Else If A='-ac' Then Begin Inc(I); FMXAChannels:=FMXAtoi(ParamStr(I)); FMXAOpts:=FMXAOpts+'-ac '+ParamStr(I)+' '; End
+  Else If Copy(A,1,1)='-' Then Exit
+  Else Begin
+   If FMXOutPath<>'' Then Exit;
+   FMXOutPath:=A;
+  End;
+  Inc(I);
+ End;
+ If (FMXOutPath='') Or (FMXInN=0) Then Exit;
+ Ext:=FMXExt(FMXOutPath);
+ If FMXFmtOpt<>'' Then FMXFmt:=FMXFmtOpt Else FMXFmt:=FMXGuessMuxer(Ext);
+ If Not FMXIsMine(FMXFmt) Then Exit;
+ If (FMXVCodec<>'copy') And (FMXACodec<>'copy') Then Begin
+  { hors des combinaisons verifiees : laisser le code historique }
+  For I:=0 To FMXInN-1 Do Begin
+   Ext:=FMXExt(FMXInputs[I]);
+   If Ext='y4m' Then Begin
+    If FMXNoV Then Continue;
+    If Pos(' '+FMXVCodec+' ',' wmv1 wmv2 msmpeg4 msmpeg4v1 msmpeg4v2 svq1 qtrle huffyuv flv ')=0 Then Exit;
+    If FMXVCodec='' Then Exit;
+   End Else If Ext='wav' Then Begin
+    If FMXNoA Then Continue;
+    If FMXACodec='' Then Exit;
+    If (Copy(FMXACodec,1,4)<>'pcm_') And (Pos(' '+FMXACodec+' ',' alac wmav1 wmav2 adpcm_ms adpcm_ima_wav adpcm_swf nellymoser ')=0) Then Exit;
+   End Else Exit;
+  End;
+ End;
+ Assign(Fo,FMXOutPath);
+ {$I-} Reset(Fo,1); {$I+}
+ If IOResult=0 Then Begin
+  Close(Fo);
+  If Not FMXOverwrite Then Fail('Sortie existante (utiliser -y): '+FMXOutPath);
+ End;
+ FMXReset;
+ FMXTmpN:=0;
+ FMXMetaSet('encoder','Lavf60.16.100');
+ If (FMXVCodec='copy') Or (FMXACodec='copy') Then Begin
+  Ext:=FMXExt(FMXInputs[0]);
+  If (FMXInN<>1) Or ((Ext<>'mp4') And (Ext<>'mov') And (Ext<>'m4a') And (Ext<>'3gp')) Then Fail('-c copy: seule une entree MOV/MP4 est prise en charge.');
+  FMXMovSource(FMXInputs[0],(Not FMXNoV) And (FMXVCodec='copy'),(Not FMXNoA) And (FMXACodec='copy'));
+  FMXInN:=0;
+ End;
+ For I:=0 To FMXInN-1 Do Begin
+  Ext:=FMXExt(FMXInputs[I]);
+  If (Ext='y4m') And Not FMXNoV Then Begin
+   If FMXVCodec='' Then Fail('Encodeur video par defaut (libx264) indisponible: utiliser -c:v.');
+   V:=FMXAddStream(FMXKind_V);
+   FMXVideoFromChild(FMXInputs[I],V);
+  End;
+ End;
+ For I:=0 To FMXInN-1 Do Begin
+  Ext:=FMXExt(FMXInputs[I]);
+  If (Ext='wav') And Not FMXNoA Then Begin
+   If FMXACodec='' Then Fail('Encodeur audio par defaut (aac) indisponible: utiliser -c:a.');
+   Au:=FMXAddStream(FMXKind_A);
+   FMXAudioFromChild(FMXInputs[I],Au);
+  End;
+ End;
+ If FMXN=0 Then Fail('Aucun flux a ecrire (entrees .y4m/.wav attendues).');
+ For I:=0 To FMXN-1 Do Begin
+  EncN[I]:=FMXS[I].TbN; EncD[I]:=FMXS[I].TbD;
+ End;
+ FMXOut:=FMXNew;
+ FMXFmtInit;
+ FMXFmtHeader;
+ For I:=0 To FMXN-1 Do Begin
+  P:=FMXL[I].Head;
+  While P<>Nil Do Begin
+   FMXRescalePkt(P,EncN[I],EncD[I],FMXS[I].TbN,FMXS[I].TbD);
+   P:=P^.Next;
+  End;
+ End;
+ Repeat
+  Best:=-1;
+  For I:=0 To FMXN-1 Do
+   If FMXL[I].Head<>Nil Then
+    If (Best<0) Or FMXTimeLess(FMXL[I].Head,FMXL[Best].Head) Then Best:=I;
+  If Best<0 Then Break;
+  P:=FMXL[Best].Head; FMXL[Best].Head:=P^.Next; P^.Next:=Nil;
+  FMXMuxPacket(P);
+ Until False;
+ FMXFlush;
+ FMXFmtTrailer;
+ Assign(Fo,FMXOutPath); Rewrite(Fo,1);
+ K:=0;
+ While K<FMXOut^.Len Do Begin
+  N:=FMXOut^.Len-K; If N>32768 Then N:=32768;
+  BlockWrite(Fo,FMXOut^.D^[K],N); Inc(K,N);
+ End;
+ Close(Fo);
+ Halt(0);
+End;
+
+{ ==== F2-BLOCK-END ==== }
 { ==== BLOCK-ANCHOR-F2 : inserer le code du groupe F2 juste au-dessus de cette ligne ==== }
 
 { ==== BLOCK-ANCHOR-F3 : inserer le code du groupe F3 juste au-dessus de cette ligne ==== }
@@ -129623,6 +134386,21 @@ Begin
  WriteLn(' D  webm            WebM VP9/Opus; copie vers MP4; Matroska/WebM: decodage Vorbis, Theora, VP3 (lacing, durees, cadence variable)');
  WriteLn;
  WriteLn('D/E indique le conteneur; les codecs et conversions restent limites.');
+{ F2-FMT-BEGIN }
+ WriteLn('  E 3g2             3GP2 (3GPP2 file format)');
+ WriteLn('  E 3gp             3GP (3GPP file format)');
+ WriteLn(' DE asf             ASF (Advanced / Active Streaming Format)');
+ WriteLn('  E asf_stream      ASF (Advanced / Active Streaming Format)');
+ WriteLn(' DE avi             AVI (Audio Video Interleaved)');
+ WriteLn('  E avm2            SWF (ShockWave Flash) (AVM2)');
+ WriteLn(' DE flv             FLV (Flash Video)');
+ WriteLn('  E ipod            iPod H.264 MP4 (MPEG-4 Part 14)');
+ WriteLn('  E mov             QuickTime / MOV');
+ WriteLn(' D  mov,mp4,m4a,3gp,3g2,mj2 QuickTime / MOV');
+ WriteLn('  E mp4             MP4 (MPEG-4 Part 14)');
+ WriteLn('  E psp             PSP MP4 (MPEG-4 Part 14)');
+ WriteLn('  E swf             SWF (ShockWave Flash)');
+{ F2-FMT-END }
  WriteLn('Voir -codecs et FFMPEG.md. WMV2 sans encodage ASF; FLV1 limite aux images intra.');
 End;
 
@@ -129867,6 +134645,7 @@ BEGIN
  AudioCodec:=''; InputCodec:=''; PendingFormat:=''; G726CodeSize:=4; G726Rate:=8000; RequestedRate:=0; RequestedChannels:=0; RequestedBitRateK:=320;
  Overwrite:=False; NoOverwrite:=False; HideBanner:=False; HasBitrate:=False;
  SavedExit:=ExitProc; ExitProc:=@ExitCleanup; Randomize;
+ If FMXRoute Then Halt(0);
  I:=1;
  While I<=ParamCount Do Begin
   Argument:=ParamStr(I);
@@ -130146,6 +134925,7 @@ BEGIN
    WriteLn('Copie conteneurs seulement: h264, vp9, opus; AAC hors ADTS (voir limites).');
    Halt(0);
   End
+  Else If Argument='-fmxq' Then FMXQuiet:=True
   Else If Argument='-y' Then Overwrite:=True Else
   If Argument='-n' Then NoOverwrite:=True Else
   If Argument='-hide_banner' Then HideBanner:=True Else
