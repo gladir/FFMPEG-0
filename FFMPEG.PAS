@@ -17523,6 +17523,7 @@ Var
  NVLast: PEABuffer; NVLastSize,NVGap: LongInt; NVHaveLast: Boolean;
  NVLastPalR,NVLastPalG,NVLastPalB,NVSavePalR,NVSavePalG,NVSavePalB: Array[0..255] Of Byte;
  NVCur: PEABuffer;
+ H5Bits: LongInt; H5Dst16: Boolean;
 { Formats natifs: 0 PAL8, 1 BGR24, 2 RGB555LE, 3 BGRA/BGR0 (octets B,G,R,A), 4 GRAY8, 5 RGB565LE, 6 RGB444LE }
 
 Function NVBpp(F: LongInt): LongInt;
@@ -18739,6 +18740,8 @@ Function NVU4(R,G,B: LongInt): LongInt;Begin NVU4:=ADPCMSar(-4865*R-9528*G+14392
 Function NVV4(R,G,B: LongInt): LongInt;Begin NVV4:=ADPCMSar(14392*R-12061*G-2332*B+(257 Shl 14),15); End;
 
 Procedure NVWriteConv420(P: PEABuffer); Forward;
+Procedure H5YuvRgb(P: PEABuffer; Dst: PEABuffer; Bpp: LongInt; Alp: PEABuffer); Forward;
+Procedure H5GrayConv(P: PEABuffer; Dst: PEABuffer; To16: Boolean); Forward;
 
 Procedure NVWriteY4MPlanar(P: PEABuffer);
 Var Hdr,S: String; At,Tot,Q,K: LongInt;
@@ -19212,6 +19215,7 @@ Procedure NVEmit(P: PEABuffer);
 Var Rgb: PEABuffer; I,R,G,B,Bpp,Size,RowB: LongInt;
 Begin
  If NVDone Then Exit;
+ If (NVMode<>0) And (NVFmt=7) And (NVCW=0) Then NVFmt:=4; { H5: planaire sans chroma (Cmono) -> gray, ecrit tel quel en PNG ; palette grise en BMP }
  Size:=NVFrameBytes;
  If NVMode=0 Then Begin
   If NVLast=Nil Then Begin GetMem(NVLast,Size); NVLastSize:=Size; End;
@@ -19242,20 +19246,34 @@ Begin
    End;
   PNGDepth:=1; NVWritePNGEx(Rgb,1,0); PNGDepth:=0;
   FreeMem(Rgb,RowB*NVH+16); NVDone:=True; Inc(NVFrames);
+ End Else If (NVMode=1) And (NVFmt=8) And (NVCW=0) Then Begin
+  { H5: gris > 8 bits -> gray16be }
+  GetMem(Rgb,NVW*NVH*2+16); H5GrayConv(P,Rgb,True);
+  PNGDepth:=16; NVWritePNGEx(Rgb,2,0); PNGDepth:=0;
+  FreeMem(Rgb,NVW*NVH*2+16); NVDone:=True; Inc(NVFrames);
+ End Else If (NVMode=1) And (NVFmt=8) Then Begin
+  { H5: YUV > 8 bits -> rgb48be }
+  GetMem(Rgb,NVW*NVH*6+16); H5Dst16:=True; H5YuvRgb(P,Rgb,6,Nil); H5Dst16:=False;
+  PNGDepth:=16; NVWritePNGEx(Rgb,6,2); PNGDepth:=0;
+  FreeMem(Rgb,NVW*NVH*6+16); NVDone:=True; Inc(NVFrames);
  End Else If NVMode=1 Then Begin
   If NVHasAlpha And (NVFmt=3) Then Bpp:=4 Else Bpp:=3;
   GetMem(Rgb,NVW*NVH*Bpp);
+  If NVFmt=7 Then H5YuvRgb(P,Rgb,3,Nil) Else
   For I:=0 To NVW*NVH-1 Do Begin
    NVPixel(P,I*NVBpp(NVFmt),R,G,B); Rgb^[I*Bpp]:=R; Rgb^[I*Bpp+1]:=G; Rgb^[I*Bpp+2]:=B;
    If Bpp=4 Then Rgb^[I*4+3]:=P^[I*4+3];
   End;
   NVWritePNG(Rgb,Bpp); FreeMem(Rgb,NVW*NVH*Bpp); NVDone:=True; Inc(NVFrames);
  End Else Begin
+  If (NVFmt=8) And (NVCW=0) Then Begin
+   { H5: gris > 8 bits -> gray 8 bits (palette grise) }
+   GetMem(Rgb,NVW*NVH+16); H5GrayConv(P,Rgb,False);
+   NVFmt:=4; NVWriteBMP(Rgb); NVFmt:=8; FreeMem(Rgb,NVW*NVH+16);
+  End Else
   If (NVFmt=7) Or (NVFmt=8) Then Begin
    GetMem(Rgb,NVW*NVH*3);
-   For I:=0 To NVW*NVH-1 Do Begin
-    NVPixel(P,I*NVBpp(NVFmt),R,G,B); Rgb^[I*3]:=R; Rgb^[I*3+1]:=G; Rgb^[I*3+2]:=B;
-   End;
+   H5YuvRgb(P,Rgb,3,Nil);
    Bpp:=NVFmt; NVFmt:=9; NVWriteBMP(Rgb); NVFmt:=Bpp;
    FreeMem(Rgb,NVW*NVH*3);
   End Else NVWriteBMP(P);
@@ -19272,7 +19290,7 @@ End;
 Procedure NVBegin(Mode: LongInt; Const Target: String; W,H,Fmt,FpsN,FpsD: LongInt);
 Begin
  NVMode:=Mode; NVTarget:=Target; NVW:=W; NVH:=H; NVFmt:=Fmt; NVFrames:=0; NVFpsN:=FpsN; NVFpsD:=FpsD;
- NVSarN:=0; NVSarD:=0; NVYC:=False; NVInitDup:=False; NVIl:='p'; NVBT709:=False; NVFullRng:=False; NVOpened:=False; NVDone:=False; NVLast:=Nil; NVHaveLast:=False; NVGap:=0; NVHasAlpha:=False; NVTo420:=False; NVHdrOk:=False; NVPalN:=256; NVPalAOn:=False; NVPadOn:=False; NVGamma22:=False;
+ NVSarN:=0; NVSarD:=0; NVYC:=False; NVInitDup:=False; NVIl:='p'; NVBT709:=False; NVFullRng:=False; NVOpened:=False; NVDone:=False; NVLast:=Nil; NVHaveLast:=False; NVGap:=0; NVHasAlpha:=False; NVTo420:=False; NVHdrOk:=False; NVPalN:=256; NVPalAOn:=False; NVPadOn:=False; NVGamma22:=False; H5Bits:=0;
 End;
 
 { flux sans image decodee: ffmpeg ecrit l'en-tete Y4M seul quand le format est connu des parametres du conteneur }
@@ -89843,6 +89861,235 @@ End;
 { ==== BLOCK-ANCHOR-H3 : inserer le code du groupe H3 juste au-dessus de cette ligne ==== }
 
 { ==== BLOCK-ANCHOR-H4 : inserer le code du groupe H4 juste au-dessus de cette ligne ==== }
+
+{ ==== H5 : conversion YUV planaire -> RGB comme libswscale 6.1.1 (scale automatique de ffmpeg vers PNG/BMP) ==== }
+{ Sources : planaire 8 bits (NVFmt 7) ou 9 a 16 bits petit-boutiste (NVFmt 8, profondeur H5Bits, sinon deduite de NVYTag).
+  Destinations : RGB24 / RGBA 8 bits (H5Dst16=False, BMP : bgr24 / PNG : rgb24) ou RGB48BE (H5Dst16=True, PNG des sources > 8 bits).
+  Chemins : (1) convertisseur "unscaled" yuv2rgb_c_24_rgb / yuv2rgb_c_32 / yuva2rgba_c (yuv420p, yuv422p, yuva420p 8 bits, hauteur paire),
+  (2) chemin general : filtre horizontal bicubique des chromas (hScale8To15 / hScale16To15 / hScale8To19 / hScale16To19), filtre vertical
+  bicubique (initFilter 1<<12), puis yuv2rgb24_1/_X (chroma partagee par 2 pixels), yuv2rgb24_full_1/_X (largeur impaire ou chroma non
+  sous-echantillonnee) ou yuv2rgb48be_*_c / yuv2rgb48be_full_*_c. }
+Function H5DetectBits: LongInt;
+Var T: String; K,V: LongInt;
+Begin
+ If NVFmt<>8 Then Begin H5DetectBits:=8; Exit; End;
+ If H5Bits>8 Then Begin H5DetectBits:=H5Bits; Exit; End;
+ T:=NVYTag; V:=0;
+ If Copy(T,1,5)='Cmono' Then K:=6 Else Begin
+  K:=5; While (K<=Length(T)) And Not ((T[K]='p') And (K<Length(T)) And (T[K+1] In ['0'..'9'])) Do Inc(K);
+  Inc(K);
+ End;
+ While (K<=Length(T)) And (T[K] In ['0'..'9']) Do Begin V:=V*10+Ord(T[K])-48; Inc(K); End;
+ If (V<9) Or (V>16) Then V:=10;
+ H5DetectBits:=V;
+End;
+
+Procedure H5YuvRgb(P: PEABuffer; Dst: PEABuffer; Bpp: LongInt; Alp: PEABuffer);
+Var
+ W,Hh,CW,CH,SX,SY,X,Y,I,J,Pos,Fs,ChN,Ix,Cx,Bits,Bs,Hsh: LongInt;
+ Fr,FullChr,Unsc,Hi,One,D16: Boolean;
+ Tab: Array[0..2047] Of Byte;
+ Crv,Cbu,Cgu,Cgv,Cy,Oy,Yb,Su,Sv,HClip: Int64;
+ Crv0,Cbu0,Cgu0,Cgv0: Int64;
+ Yoffs,Cyy,Cyo,Cv2r,Cv2g,Cu2g,Cu2b: LongInt;
+ HF,VF: TSwsF; HU,HV: PSwsI32; YP,UP,VP: PEABuffer;
+ Ui,Vi,Yv,Av,Rr,Gg,Bb,Y15: Int64;
+Function Cl8(V: Int64): LongInt;Begin If V<0 Then Cl8:=0 Else If V>255 Then Cl8:=255 Else Cl8:=V; End;
+Function RI16(F: Int64): LongInt;
+Var R: Int64;
+Begin
+ R:=AVSar(F+32768,16); If R<-32767 Then R:=-32768 Else If R>32767 Then R:=32767; RI16:=R;
+End;
+Function Smp(Pl: PEABuffer; Off: LongInt): LongInt;
+Begin
+ If Bs=1 Then Smp:=Pl^[Off] Else Smp:=Pl^[2*Off]+Pl^[2*Off+1]*256;
+End;
+Procedure PutPx(Xp,Yp: LongInt; R,G,B,A: LongInt);
+Var O: LongInt;
+Begin
+ O:=(Yp*W+Xp)*Bpp; Dst^[O]:=R; Dst^[O+1]:=G; Dst^[O+2]:=B; If Bpp=4 Then Dst^[O+3]:=A;
+End;
+Procedure PutPx16(Xp,Yp: LongInt; R,G,B: Int64);
+Var O: LongInt;
+Begin
+ If R<0 Then R:=0 Else If R>65535 Then R:=65535;
+ If G<0 Then G:=0 Else If G>65535 Then G:=65535;
+ If B<0 Then B:=0 Else If B>65535 Then B:=65535;
+ O:=(Yp*W+Xp)*6;
+ Dst^[O]:=R Shr 8; Dst^[O+1]:=R And 255; Dst^[O+2]:=G Shr 8; Dst^[O+3]:=G And 255; Dst^[O+4]:=B Shr 8; Dst^[O+5]:=B And 255;
+End;
+Begin
+ W:=NVW; Hh:=NVH; CW:=NVCW; CH:=NVCH; SX:=NVSubX; SY:=NVSubY; Fr:=NVFullRng;
+ Bits:=H5DetectBits; If Bits>8 Then Bs:=2 Else Bs:=1;
+ D16:=H5Dst16;
+ YP:=P; UP:=@P^[Bs*W*Hh]; VP:=@P^[Bs*(W*Hh+CW*CH)];
+ { coefficients ff_yuv2rgb_coeffs : ITU601 par defaut, ITU709 si demande }
+ If NVBT709 Then Begin Crv:=117489; Cbu:=138438; Cgu:=-13975; Cgv:=-34925; End
+ Else Begin Crv:=104597; Cbu:=132201; Cgu:=-25675; Cgv:=-53279; End;
+ Cy:=65536; Oy:=0;
+ If Not Fr Then Begin Cy:=(Cy*255) Div 219; Oy:=Int64(16) Shl 16; End
+ Else Begin Crv:=(Crv*224) Div 255; Cbu:=(Cbu*224) Div 255; Cgu:=(Cgu*224) Div 255; Cgv:=(Cgv*224) Div 255; End;
+ Cyy:=RI16(Cy*8192); Cyo:=RI16(Oy*512); Cv2r:=RI16(Crv*8192); Cv2g:=RI16(Cgv*8192); Cu2g:=RI16(Cgu*8192); Cu2b:=RI16(Cbu*8192);
+ Crv0:=((Crv Shl 16)+$8000) Div Cy; Cbu0:=((Cbu Shl 16)+$8000) Div Cy;
+ Cgu0:=((Cgu*65536)+$8000) Div Cy; Cgv0:=((Cgv*65536)+$8000) Div Cy;
+ If Fr Then Yoffs:=384+512 Else Yoffs:=326+512;
+ Yb:=-(Int64(384) Shl 16)-512*Cy-Oy;
+ For I:=0 To 2047 Do Begin Tab[I]:=Cl8(AVSar(Yb+$8000,16)); Yb:=Yb+Cy; End;
+ Unsc:=(Bits=8) And Not D16 And (SX=1) And (SY<=1) And Not Odd(Hh);
+ If Unsc Then Begin
+  { yuv2rgb_c_24_rgb / yuv2rgb_c_32 / yuva2rgba_c : le dernier pixel d'une largeur impaire n'est pas ecrit }
+  FillChar(Dst^,W*Hh*Bpp,0);
+  If Bpp=4 Then For I:=0 To W*Hh-1 Do Dst^[I*4+3]:=255;
+  Y:=0;
+  While Y<Hh Do Begin
+   If SY=1 Then Ix:=Y Shr 1 Else Ix:=Y;
+   For X:=0 To (W Shr 1)*2-1 Do Begin
+    Ui:=UP^[Ix*CW+(X Shr 1)]; Vi:=VP^[Ix*CW+(X Shr 1)];
+    For J:=0 To 1 Do Begin
+     Yv:=YP^[(Y+J)*W+X];
+     Rr:=Tab[Yoffs-AVSar(Crv0,9)+AVSar(Vi*Crv0,16)+Yv];
+     Gg:=Tab[Yoffs-AVSar(Cgu0,9)+AVSar(Ui*Cgu0,16)-AVSar(Cgv0,9)+AVSar(Vi*Cgv0,16)+Yv];
+     Bb:=Tab[Yoffs-AVSar(Cbu0,9)+AVSar(Ui*Cbu0,16)+Yv];
+     If Alp<>Nil Then Av:=Alp^[(Y+J)*W+X] Else Av:=255;
+     PutPx(X,Y+J,Rr,Gg,Bb,Av);
+    End;
+   End;
+   Inc(Y,2);
+  End;
+  Exit;
+ End;
+ { chemin general : decalage et saturation du filtre horizontal }
+ If D16 Then Begin
+  If Bits=8 Then Hsh:=3 Else Hsh:=Bits-5;
+  HClip:=524287;
+ End Else Begin
+  If Bits=8 Then Hsh:=7 Else Hsh:=Bits-1;
+  HClip:=32767;
+ End;
+ FullChr:=Odd(W) Or ((SX=0) And (SY=0));
+ If FullChr Then ChN:=W Else ChN:=(W+1) Shr 1;
+ SwsInitF(HF,CW,ChN,128,128,16384);
+ SwsInitF(VF,CH,Hh,128,128,4096);
+ GetMem(HU,Int64(CH)*ChN*4+64); GetMem(HV,Int64(CH)*ChN*4+64);
+ For Y:=0 To CH-1 Do For X:=0 To ChN-1 Do Begin
+  Su:=0; Sv:=0;
+  For J:=0 To HF.FS-1 Do Begin
+   Su:=Su+Int64(Smp(UP,Y*CW+HF.Pos^[X]+J))*HF.Coef^[X*HF.FS+J];
+   Sv:=Sv+Int64(Smp(VP,Y*CW+HF.Pos^[X]+J))*HF.Coef^[X*HF.FS+J];
+  End;
+  Su:=AVSar(Su,Hsh); If Su>HClip Then Su:=HClip; Sv:=AVSar(Sv,Hsh); If Sv>HClip Then Sv:=HClip;
+  HU^[Y*ChN+X]:=Su; HV^[Y*ChN+X]:=Sv;
+ End;
+ Fs:=VF.FS;
+ For Y:=0 To Hh-1 Do Begin
+  Pos:=VF.Pos^[Y];
+  One:=False; Hi:=False;
+  If Fs=1 Then One:=True
+  Else If (Fs=2) And (VF.Coef^[Y*Fs]+VF.Coef^[Y*Fs+1]=4096) And (VF.Coef^[Y*Fs+1]>=0) And (VF.Coef^[Y*Fs+1]<=4096) Then Begin
+   One:=True; Hi:=VF.Coef^[Y*Fs+1]>=2048;
+  End;
+  For X:=0 To W-1 Do Begin
+   If FullChr Then Cx:=X Else Cx:=X Shr 1;
+   Y15:=(Int64(Smp(YP,Y*W+X))*16384) Shr Hsh; If Y15>HClip Then Y15:=HClip;
+   If Alp<>Nil Then Av:=Alp^[Y*W+X] Else Av:=255;
+   If D16 Then Begin
+    { yuv2rgba64 : tampons 19 bits }
+    If One Then Begin
+     If Not Hi Then Begin
+      Ui:=AVSar(Int64(HU^[Pos*ChN+Cx])-(128 Shl 11),2); Vi:=AVSar(Int64(HV^[Pos*ChN+Cx])-(128 Shl 11),2);
+     End Else Begin
+      Ui:=AVSar(Int64(HU^[Pos*ChN+Cx])+HU^[(Pos+1)*ChN+Cx]-(128 Shl 12),3); Vi:=AVSar(Int64(HV^[Pos*ChN+Cx])+HV^[(Pos+1)*ChN+Cx]-(128 Shl 12),3);
+     End;
+     Yv:=AVSar(Y15,2);
+    End Else Begin
+     Su:=-(Int64(128) Shl 23); Sv:=Su;
+     For J:=0 To Fs-1 Do Begin
+      Su:=Su+Int64(HU^[(Pos+J)*ChN+Cx])*VF.Coef^[Y*Fs+J]; Sv:=Sv+Int64(HV^[(Pos+J)*ChN+Cx])*VF.Coef^[Y*Fs+J];
+     End;
+     Ui:=AVSar(ALWrap32(Su),14); Vi:=AVSar(ALWrap32(Sv),14);
+     Yv:=AVSar(ALWrap32(-$40000000+Y15*4096),14)+$10000;
+    End;
+    Su:=ALWrap32((Yv-Cyo)*Cyy); Su:=ALWrap32(Su+(1 Shl 13)-(1 Shl 29));
+    Rr:=ALWrap32(Vi*Cv2r); Gg:=ALWrap32(Vi*Cv2g+Ui*Cu2g); Bb:=ALWrap32(Ui*Cu2b);
+    PutPx16(X,Y,AVSar(ALWrap32(Rr+Su),14)+32768,AVSar(ALWrap32(Gg+Su),14)+32768,AVSar(ALWrap32(Bb+Su),14)+32768);
+    Continue;
+   End;
+   If FullChr Then Begin
+    If One Then Begin
+     If Not Hi Then Begin
+      Ui:=(Int64(HU^[Pos*ChN+Cx])-(128 Shl 7))*4; Vi:=(Int64(HV^[Pos*ChN+Cx])-(128 Shl 7))*4;
+     End Else Begin
+      Ui:=(Int64(HU^[Pos*ChN+Cx])+HU^[(Pos+1)*ChN+Cx]-(128 Shl 8))*2; Vi:=(Int64(HV^[Pos*ChN+Cx])+HV^[(Pos+1)*ChN+Cx]-(128 Shl 8))*2;
+     End;
+    End Else Begin
+     Su:=(Int64(1) Shl 9)-(Int64(128) Shl 19); Sv:=Su;
+     For J:=0 To Fs-1 Do Begin
+      Su:=Su+Int64(HU^[(Pos+J)*ChN+Cx])*VF.Coef^[Y*Fs+J]; Sv:=Sv+Int64(HV^[(Pos+J)*ChN+Cx])*VF.Coef^[Y*Fs+J];
+     End;
+     Ui:=AVSar(Su,10); Vi:=AVSar(Sv,10);
+    End;
+    Su:=(Y15*4)-Cyo; Su:=Su*Cyy+(Int64(1) Shl 21);
+    Rr:=ALWrap32(Su+Vi*Cv2r); Gg:=ALWrap32(Su+Vi*Cv2g+Ui*Cu2g); Bb:=ALWrap32(Su+Ui*Cu2b); { arithmetique 32 bits de libswscale }
+    If Rr<0 Then Rr:=0 Else If Rr>1073741823 Then Rr:=1073741823;
+    If Gg<0 Then Gg:=0 Else If Gg>1073741823 Then Gg:=1073741823;
+    If Bb<0 Then Bb:=0 Else If Bb>1073741823 Then Bb:=1073741823;
+    Rr:=Rr Shr 22; Gg:=Gg Shr 22; Bb:=Bb Shr 22;
+   End Else Begin
+    Yv:=AVSar(Y15+64,7);
+    If One Then Begin
+     If Not Hi Then Begin
+      Ui:=AVSar(Int64(HU^[Pos*ChN+Cx])+64,7); Vi:=AVSar(Int64(HV^[Pos*ChN+Cx])+64,7);
+      If Alp<>Nil Then Av:=Cl8(AVSar(Int64(Alp^[Y*W+X])*128*255+16384,15));
+     End Else Begin
+      Ui:=AVSar(Int64(HU^[Pos*ChN+Cx])+HU^[(Pos+1)*ChN+Cx]+128,8); Vi:=AVSar(Int64(HV^[Pos*ChN+Cx])+HV^[(Pos+1)*ChN+Cx]+128,8);
+     End;
+    End Else Begin
+     Su:=Int64(1) Shl 18; Sv:=Su;
+     For J:=0 To Fs-1 Do Begin
+      Su:=Su+Int64(HU^[(Pos+J)*ChN+Cx])*VF.Coef^[Y*Fs+J]; Sv:=Sv+Int64(HV^[(Pos+J)*ChN+Cx])*VF.Coef^[Y*Fs+J];
+     End;
+     Ui:=AVSar(Su,19); Vi:=AVSar(Sv,19);
+    End;
+    Ui:=Cl8(Ui); Vi:=Cl8(Vi);
+    Rr:=Tab[Yoffs-AVSar(Crv0,9)+AVSar(Vi*Crv0,16)+Yv];
+    Gg:=Tab[Yoffs-AVSar(Cgu0,9)+AVSar(Ui*Cgu0,16)-AVSar(Cgv0,9)+AVSar(Vi*Cgv0,16)+Yv];
+    Bb:=Tab[Yoffs-AVSar(Cbu0,9)+AVSar(Ui*Cbu0,16)+Yv];
+   End;
+   PutPx(X,Y,Rr,Gg,Bb,Av);
+  End;
+ End;
+ FreeMem(HU); FreeMem(HV); SwsFreeF(HF); SwsFreeF(VF);
+End;
+
+{ gris 9..16 bits (little-endian) -> gray16be (PNG : planarCopyWrapper, replication des bits) ou gray 8 bits (BMP : DITHER_COPY, matrice dithers[shift-1]) }
+Procedure H5GrayConv(P: PEABuffer; Dst: PEABuffer; To16: Boolean);
+Const
+ Dith: Array[0..7,0..7,0..7] Of Byte=(
+ ((0,1,0,1,0,1,0,1),(1,0,1,0,1,0,1,0),(0,1,0,1,0,1,0,1),(1,0,1,0,1,0,1,0),(0,1,0,1,0,1,0,1),(1,0,1,0,1,0,1,0),(0,1,0,1,0,1,0,1),(1,0,1,0,1,0,1,0)),
+ ((1,2,1,2,1,2,1,2),(3,0,3,0,3,0,3,0),(1,2,1,2,1,2,1,2),(3,0,3,0,3,0,3,0),(1,2,1,2,1,2,1,2),(3,0,3,0,3,0,3,0),(1,2,1,2,1,2,1,2),(3,0,3,0,3,0,3,0)),
+ ((2,4,3,5,2,4,3,5),(6,0,7,1,6,0,7,1),(3,5,2,4,3,5,2,4),(7,1,6,0,7,1,6,0),(2,4,3,5,2,4,3,5),(6,0,7,1,6,0,7,1),(3,5,2,4,3,5,2,4),(7,1,6,0,7,1,6,0)),
+ ((4,8,7,11,4,8,7,11),(12,0,15,3,12,0,15,3),(6,10,5,9,6,10,5,9),(14,2,13,1,14,2,13,1),(4,8,7,11,4,8,7,11),(12,0,15,3,12,0,15,3),(6,10,5,9,6,10,5,9),(14,2,13,1,14,2,13,1)),
+ ((9,17,15,23,8,16,14,22),(25,1,31,7,24,0,30,6),(13,21,11,19,12,20,10,18),(29,5,27,3,28,4,26,2),(8,16,14,22,9,17,15,23),(24,0,30,6,25,1,31,7),(12,20,10,18,13,21,11,19),(28,4,26,2,29,5,27,3)),
+ ((18,34,30,46,17,33,29,45),(50,2,62,14,49,1,61,13),(26,42,22,38,25,41,21,37),(58,10,54,6,57,9,53,5),(16,32,28,44,19,35,31,47),(48,0,60,12,51,3,63,15),(24,40,20,36,27,43,23,39),(56,8,52,4,59,11,55,7)),
+ ((18,34,30,46,17,33,29,45),(50,2,62,14,49,1,61,13),(26,42,22,38,25,41,21,37),(58,10,54,6,57,9,53,5),(16,32,28,44,19,35,31,47),(48,0,60,12,51,3,63,15),(24,40,20,36,27,43,23,39),(56,8,52,4,59,11,55,7)),
+ ((36,68,60,92,34,66,58,90),(100,4,124,28,98,2,122,26),(52,84,44,76,50,82,42,74),(116,20,108,12,114,18,106,10),(32,64,56,88,38,70,62,94),(96,0,120,24,102,6,126,30),(48,80,40,72,54,86,46,78),(112,16,104,8,118,22,110,14)));
+Var X,Y,D,V,Sh,O,Jobs,Sl: LongInt;
+Begin
+ D:=H5DetectBits;
+ { le filtre scale de ffmpeg traite l'image par tranches (fils) : la ligne de la matrice de dithering repart a 0 a chaque tranche }
+ Jobs:=NVSliceJobs; Sl:=(NVH+Jobs-1) Div Jobs; If Sl<1 Then Sl:=1;
+ For Y:=0 To NVH-1 Do For X:=0 To NVW-1 Do Begin
+  V:=P^[2*(Y*NVW+X)]+P^[2*(Y*NVW+X)+1]*256;
+  If To16 Then Begin
+   If D<16 Then V:=(V Shl (16-D)) Or (V Shr (2*D-16));
+   O:=2*(Y*NVW+X); Dst^[O]:=(V Shr 8) And 255; Dst^[O+1]:=V And 255;
+  End Else Begin
+   Sh:=D-8;
+   V:=(V-(V Shr 8)+Dith[Sh-1,(Y Mod Sl) And 7,X And 7]) Shr Sh;
+   Dst^[Y*NVW+X]:=V;
+  End;
+ End;
+End;
 
 { ==== BLOCK-ANCHOR-H5 : inserer le code du groupe H5 juste au-dessus de cette ligne ==== }
 
