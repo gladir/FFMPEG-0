@@ -82254,6 +82254,843 @@ End;
 
 { ==== BLOCK-ANCHOR-G5 : inserer le code du groupe G5 juste au-dessus de cette ligne ==== }
 
+{ ---- Encodeur SVQ1 (libavcodec/svq1enc.c + motion_est.c EPZS / sad_hpel_motion_search) depuis Y4M, conversion swscale yuv420p -> yuv410p, sortie MOV / AVI ---- }
+Const
+ SQ1EBase: Array[0..3] Of LongInt=(0,768,2304,5376);
+Type
+ SQ1EBits=Record B: Array[0..511] Of Byte; N: LongInt; End;
+ SQ1ELI=Array[0..16000000] Of LongInt; PSQ1ELI=^SQ1ELI;
+Var
+ SQ1EPb: Array[0..1,0..5] Of SQ1EBits; SQ1ESet: LongInt;
+ SQ1EBl: Array[0..5,0..6,0..255] Of SmallInt;
+ SQ1ESumI,SQ1ESumP: Array[0..3,0..95] Of LongInt; SQ1EInit: Boolean;
+ SQ1EMap,SQ1EScr: Array[0..63] Of Int64; SQ1EGen: Int64;
+ SQ1EXmin,SQ1EXmax,SQ1EYmin,SQ1EYmax,SQ1EPredX,SQ1EPredY,SQ1EPenF,SQ1ESO,SQ1EStr,SQ1EDmin,SQ1EBx,SQ1EBy,SQ1ELam: LongInt;
+ SQ1ESkip: Boolean;
+ SQ1ESrcB,SQ1ERefB: PEABuffer;
+ SQ1EOut: PEABuffer; SQ1EON: LongInt;
+ SQ1ETmp: PEABuffer;
+ SQ1EV8,SQ1EV16,SQ1EMbT: Array[0..2] Of PSQ1ELI;
+ SQ1EBw,SQ1EBh,SQ1EMs,SQ1EB8: Array[0..2] Of LongInt;
+ SQ1EEndMbY: LongInt;
+
+Function SQ1ESar(V: Int64; N: LongInt): Int64;
+Begin If V>=0 Then SQ1ESar:=V Shr N Else SQ1ESar:=-((-V+(Int64(1) Shl N)-1) Shr N); End;
+
+Procedure SQ1EPut(Var P: SQ1EBits; Len,V: LongInt);
+Var I,At: LongInt;
+Begin
+ For I:=Len-1 Downto 0 Do Begin
+  At:=P.N Shr 3;
+  If ((V Shr I) And 1)<>0 Then P.B[At]:=P.B[At] Or (128 Shr (P.N And 7)) Else P.B[At]:=P.B[At] And Not (128 Shr (P.N And 7));
+  Inc(P.N);
+ End;
+End;
+
+Procedure SQ1EOutPut(Len,V: LongInt);
+Var I,At: LongInt;
+Begin
+ For I:=Len-1 Downto 0 Do Begin
+  At:=SQ1EON Shr 3;
+  If ((V Shr I) And 1)<>0 Then SQ1EOut^[At]:=SQ1EOut^[At] Or (128 Shr (SQ1EON And 7)) Else SQ1EOut^[At]:=SQ1EOut^[At] And Not (128 Shr (SQ1EON And 7));
+  Inc(SQ1EON);
+ End;
+End;
+
+Procedure SQ1EInitTabs;
+Var L,S,I,J,Sz,Sm: LongInt;
+Begin
+ If SQ1EInit Then Exit;
+ SQ1EInit:=True;
+ For L:=0 To 3 Do Begin
+  Sz:=8 Shl L;
+  For S:=0 To 5 Do For I:=0 To 15 Do Begin
+   Sm:=0; For J:=0 To Sz-1 Do Sm:=Sm+SQCbIntra[SQ1EBase[L]+(S*16+I)*Sz+J];
+   SQ1ESumI[L,S*16+I]:=Sm;
+   Sm:=0; For J:=0 To Sz-1 Do Sm:=Sm+SQCbInter[SQ1EBase[L]+(S*16+I)*Sz+J];
+   SQ1ESumP[L,S*16+I]:=Sm;
+  End;
+ End;
+End;
+
+{ encode_block ; ensemble de flux SQ1ESet ; Intra=True : RefP ignore }
+Function SQ1EEncBlock(SrcP: PEABuffer; SO: LongInt; RefP: PEABuffer; RO: LongInt; DecP: PEABuffer; DOf: LongInt; Str,Level,Thr,Lam: LongInt; Intra: Boolean): LongInt;
+Var
+ Count,Y,X,I,J,Split,BestMean,BestScore,BestCount,W,H,Size,Stage,V,Sqr,Diff,Score,Mean,Off,CbO,Sum: LongInt;
+ BestVector: Array[0..5] Of LongInt; BlockSum: Array[0..6] Of LongInt; Backup: Array[0..5] Of LongInt;
+ BestVScore,BestVSum,BestVMean: LongInt; S64: Int64;
+ McL,McC,MnL,MnC: LongInt;
+Begin
+ W:=2 Shl ((Level+2) Shr 1); H:=2 Shl ((Level+1) Shr 1); Size:=W*H;
+ For I:=0 To 5 Do BlockSum[I]:=0;
+ BlockSum[6]:=0;
+ BestScore:=0;
+ For Y:=0 To H-1 Do For X:=0 To W-1 Do Begin
+  If Intra Then V:=SrcP^[SO+X+Y*Str] Else V:=Integer(SrcP^[SO+X+Y*Str])-Integer(RefP^[RO+X+Y*Str]);
+  SQ1EBl[Level,0,X+W*Y]:=V;
+  BestScore:=BestScore+V*V;
+  BlockSum[0]:=BlockSum[0]+V;
+ End;
+ BestCount:=0;
+ S64:=Int64(BlockSum[0])*BlockSum[0];
+ BestScore:=BestScore-LongInt((S64 And $FFFFFFFF) Shr (Level+3));
+ BestMean:=LongInt(SQ1ESar(Int64(BlockSum[0])+(Size Shr 1),Level+3));
+ If Level<4 Then Begin
+  For Count:=1 To 6 Do Begin
+   BestVScore:=MaxLongInt; BestVSum:=-999; BestVMean:=-999;
+   Stage:=Count-1;
+   For I:=0 To 15 Do Begin
+    If Intra Then Sum:=SQ1ESumI[Level,Stage*16+I] Else Sum:=SQ1ESumP[Level,Stage*16+I];
+    CbO:=SQ1EBase[Level]+Stage*Size*16+I*Size;
+    Sqr:=0;
+    If Intra Then
+     For J:=0 To Size-1 Do Begin V:=SQCbIntra[CbO+J]-SQ1EBl[Level,Stage,J]; Sqr:=Sqr+V*V; End
+    Else
+     For J:=0 To Size-1 Do Begin V:=SQCbInter[CbO+J]-SQ1EBl[Level,Stage,J]; Sqr:=Sqr+V*V; End;
+    Diff:=BlockSum[Stage]-Sum;
+    Score:=Sqr-LongInt((Int64(Diff)*Diff) Shr (Level+3));
+    If Score<BestVScore Then Begin
+     Mean:=LongInt(SQ1ESar(Int64(Diff)+(Size Shr 1),Level+3));
+     If Intra Then Begin If Mean<0 Then Mean:=0; End Else Begin If Mean<-256 Then Mean:=-256; End;
+     If Mean>255 Then Mean:=255;
+     BestVScore:=Score; BestVector[Stage]:=I; BestVSum:=Sum; BestVMean:=Mean;
+    End;
+   End;
+   CbO:=SQ1EBase[Level]+Stage*Size*16+BestVector[Stage]*Size;
+   If Intra Then
+    For J:=0 To Size-1 Do SQ1EBl[Level,Stage+1,J]:=SQ1EBl[Level,Stage,J]-SQCbIntra[CbO+J]
+   Else
+    For J:=0 To Size-1 Do SQ1EBl[Level,Stage+1,J]:=SQ1EBl[Level,Stage,J]-SQCbInter[CbO+J];
+   BlockSum[Stage+1]:=BlockSum[Stage]-BestVSum;
+   If Intra Then Begin McL:=SQIMsL[Level*8+1+Count]; MnL:=SQIMnL[BestVMean]; End
+   Else Begin McL:=SQPMsL[Level*8+1+Count]; MnL:=SQPMnL[BestVMean+256]; End;
+   BestVScore:=BestVScore+Lam*(1+4*Count+McL+MnL);
+   If BestVScore<BestScore Then Begin BestScore:=BestVScore; BestCount:=Count; BestMean:=BestVMean; End;
+  End;
+ End;
+ If BestMean=-128 Then BestMean:=-127 Else If BestMean=128 Then BestMean:=127;
+ Split:=0;
+ If (BestScore>Thr) And (Level>0) Then Begin
+  Score:=0;
+  If (Level And 1)<>0 Then Off:=Str*H Div 2 Else Off:=W Div 2;
+  For I:=Level-1 Downto 0 Do Backup[I]:=SQ1EPb[SQ1ESet,I].N;
+  Score:=Score+SQ1EEncBlock(SrcP,SO,RefP,RO,DecP,DOf,Str,Level-1,Thr Shr 1,Lam,Intra);
+  Score:=Score+SQ1EEncBlock(SrcP,SO+Off,RefP,RO+Off,DecP,DOf+Off,Str,Level-1,Thr Shr 1,Lam,Intra);
+  Score:=Score+Lam;
+  If Score<BestScore Then Begin BestScore:=Score; Split:=1; End
+  Else For I:=Level-1 Downto 0 Do SQ1EPb[SQ1ESet,I].N:=Backup[I];
+ End;
+ If Level>0 Then SQ1EPut(SQ1EPb[SQ1ESet,Level],1,Split);
+ If Split=0 Then Begin
+  If Intra Then Begin McC:=SQIMsC[Level*8+1+BestCount]; McL:=SQIMsL[Level*8+1+BestCount]; MnC:=SQIMnC[BestMean]; MnL:=SQIMnL[BestMean]; End
+  Else Begin McC:=SQPMsC[Level*8+1+BestCount]; McL:=SQPMsL[Level*8+1+BestCount]; MnC:=SQPMnC[BestMean+256]; MnL:=SQPMnL[BestMean+256]; End;
+  SQ1EPut(SQ1EPb[SQ1ESet,Level],McL,McC);
+  SQ1EPut(SQ1EPb[SQ1ESet,Level],MnL,MnC);
+  For I:=0 To BestCount-1 Do SQ1EPut(SQ1EPb[SQ1ESet,Level],4,BestVector[I]);
+  For Y:=0 To H-1 Do For X:=0 To W-1 Do
+   DecP^[DOf+X+Y*Str]:=(Integer(SrcP^[SO+X+Y*Str])-SQ1EBl[Level,BestCount,X+W*Y]+BestMean) And 255;
+ End;
+ SQ1EEncBlock:=BestScore;
+End;
+
+{ ---- estimation de mouvement ---- }
+Function SQ1EPen(V: LongInt): LongInt;
+Var A,C,L2: LongInt;
+Begin
+ A:=Abs(V);
+ If A=0 Then SQ1EPen:=1
+ Else If A<33 Then SQ1EPen:=SQMvTab[A*2+1]+1
+ Else Begin
+  C:=A Shr 5; L2:=0; While C>1 Do Begin C:=C Shr 1; Inc(L2); End;
+  SQ1EPen:=SQMvTab[65]+L2+2;
+ End;
+End;
+
+{ pix_abs16 (Mode 0 plein, 1 x2, 2 y2, 3 xy2) ; Src en SQ1ESrcB[SQ1ESO..], Ref en SQ1ERefB[RO..] }
+Function SQ1ESad(RO,Mode: LongInt): LongInt;
+Var X,Y,S,A,B,P,St: LongInt;
+Begin
+ S:=0; St:=SQ1EStr;
+ For Y:=0 To 15 Do
+  For X:=0 To 15 Do Begin
+   A:=SQ1ESrcB^[SQ1ESO+Y*St+X];
+   P:=RO+Y*St+X;
+   Case Mode Of
+    0: B:=SQ1ERefB^[P];
+    1: B:=(SQ1ERefB^[P]+SQ1ERefB^[P+1]+1) Shr 1;
+    2: B:=(SQ1ERefB^[P]+SQ1ERefB^[P+St]+1) Shr 1;
+    Else B:=(SQ1ERefB^[P]+SQ1ERefB^[P+1]+SQ1ERefB^[P+St]+SQ1ERefB^[P+St+1]+2) Shr 2;
+   End;
+   S:=S+Abs(A-B);
+  End;
+ SQ1ESad:=S;
+End;
+
+Procedure SQ1EUpdGen;
+Begin
+ SQ1EGen:=(SQ1EGen+(Int64(1) Shl 22)) And $FFFFFFFF;
+ If SQ1EGen=0 Then Begin SQ1EGen:=Int64(1) Shl 22; FillChar(SQ1EMap,SizeOf(SQ1EMap),0); End;
+End;
+
+Procedure SQ1ECheckMV(X,Y: LongInt);
+Var Key: Int64; Idx,D: LongInt;
+Begin
+ Key:=(Int64(Y)*2048+X+SQ1EGen) And $FFFFFFFF;
+ Idx:=(Y*8+X) And 63;
+ If SQ1EMap[Idx]<>Key Then Begin
+  D:=SQ1ESad(SQ1ESO+Y*SQ1EStr+X,0);
+  SQ1EMap[Idx]:=Key; SQ1EScr[Idx]:=D;
+  D:=D+(SQ1EPen(X*2-SQ1EPredX)+SQ1EPen(Y*2-SQ1EPredY))*SQ1EPenF;
+  If D<SQ1EDmin Then Begin SQ1EDmin:=D; SQ1EBx:=X; SQ1EBy:=Y; End;
+ End;
+End;
+
+Procedure SQ1ECheckClipped(X,Y: LongInt);
+Begin
+ If X>SQ1EXmax Then X:=SQ1EXmax; If X<SQ1EXmin Then X:=SQ1EXmin;
+ If Y>SQ1EYmax Then Y:=SQ1EYmax; If Y<SQ1EYmin Then Y:=SQ1EYmin;
+ SQ1ECheckMV(X,Y);
+End;
+
+{ small_diamond_search }
+Procedure SQ1ESmallDia;
+Var NextDir,Dir,X,Y,Key2,Idx,D: LongInt; Key: Int64;
+Procedure ChkDir(Cx,Cy,ND: LongInt);
+Var K2: Int64; I2,D2: LongInt;
+Begin
+ K2:=(Int64(Cy)*2048+Cx+SQ1EGen) And $FFFFFFFF;
+ I2:=(Cy*8+Cx) And 63;
+ If SQ1EMap[I2]<>K2 Then Begin
+  D2:=SQ1ESad(SQ1ESO+Cy*SQ1EStr+Cx,0);
+  SQ1EMap[I2]:=K2; SQ1EScr[I2]:=D2;
+  D2:=D2+(SQ1EPen(Cx*2-SQ1EPredX)+SQ1EPen(Cy*2-SQ1EPredY))*SQ1EPenF;
+  If D2<SQ1EDmin Then Begin SQ1EBx:=Cx; SQ1EBy:=Cy; SQ1EDmin:=D2; NextDir:=ND; End;
+ End;
+End;
+Begin
+ Key:=(Int64(SQ1EBy)*2048+SQ1EBx+SQ1EGen) And $FFFFFFFF;
+ Idx:=(SQ1EBy*8+SQ1EBx) And 63;
+ If SQ1EMap[Idx]<>Key Then Begin
+  SQ1EScr[Idx]:=SQ1ESad(SQ1ESO+SQ1EBy*SQ1EStr+SQ1EBx,0);
+  SQ1EMap[Idx]:=Key;
+ End;
+ NextDir:=-1;
+ While True Do Begin
+  Dir:=NextDir; X:=SQ1EBx; Y:=SQ1EBy; NextDir:=-1;
+  If (Dir<>2) And (X>SQ1EXmin) Then ChkDir(X-1,Y,0);
+  If (Dir<>3) And (Y>SQ1EYmin) Then ChkDir(X,Y-1,1);
+  If (Dir<>0) And (X<SQ1EXmax) Then ChkDir(X+1,Y,2);
+  If (Dir<>1) And (Y<SQ1EYmax) Then ChkDir(X,Y+1,3);
+  If NextDir=-1 Then Exit;
+ End;
+End;
+
+{ sad_hpel_motion_search (taille 16x16) ; Mx,My : plein pixel en entree, demi-pixel en sortie }
+Function SQ1EHpel(Var Mx,My: LongInt; Dmin: LongInt): LongInt;
+Var Ptr,Dminh,Dx,Dy,PenX,PenY,Index,T,L,R,B: LongInt;
+Procedure Chk(Cx,Cy: LongInt);
+Var D,Md,Sh: LongInt;
+Begin
+ Md:=0; If Cx<>0 Then Md:=1; If Cy<>0 Then Md:=Md+2;
+ If Cx<0 Then Sh:=-1 Else Sh:=0;
+ D:=SQ1ESad(Ptr+Sh,Md);
+ D:=D+(SQ1EPen(PenX+Cx)+SQ1EPen(PenY+Cy))*SQ1EPenF;
+ If D<Dminh Then Begin Dminh:=D; Dx:=Cx; Dy:=Cy; End;
+End;
+Begin
+ If SQ1ESkip Then Begin Mx:=0; My:=0; SQ1EHpel:=Dmin; Exit; End;
+ Ptr:=SQ1ESO+My*SQ1EStr+Mx;
+ Dminh:=Dmin;
+ If (Mx>SQ1EXmin) And (Mx<SQ1EXmax) And (My>SQ1EYmin) And (My<SQ1EYmax) Then Begin
+  Dx:=0; Dy:=0;
+  Index:=My*8+Mx;
+  T:=SQ1EScr[(Index-8) And 63]; L:=SQ1EScr[(Index-1) And 63]; R:=SQ1EScr[(Index+1) And 63]; B:=SQ1EScr[(Index+8) And 63];
+  Mx:=Mx+Mx; My:=My+My;
+  PenX:=SQ1EPredX+Mx; PenY:=SQ1EPredY+My;
+  Dec(Ptr,SQ1EStr);
+  If T<=B Then Begin
+   Chk(0,-1);
+   If L<=R Then Begin
+    Chk(-1,-1);
+    If T+R<=B+L Then Begin Chk(1,-1); Inc(Ptr,SQ1EStr); End
+    Else Begin Inc(Ptr,SQ1EStr); Chk(-1,1); End;
+    Chk(-1,0);
+   End Else Begin
+    Chk(1,-1);
+    If T+L<=B+R Then Begin Chk(-1,-1); Inc(Ptr,SQ1EStr); End
+    Else Begin Inc(Ptr,SQ1EStr); Chk(1,1); End;
+    Chk(1,0);
+   End;
+  End Else Begin
+   If L<=R Then Begin
+    If T+L<=B+R Then Begin Chk(-1,-1); Inc(Ptr,SQ1EStr); End
+    Else Begin Inc(Ptr,SQ1EStr); Chk(1,1); End;
+    Chk(-1,0); Chk(-1,1);
+   End Else Begin
+    If T+R<=B+L Then Begin Chk(1,-1); Inc(Ptr,SQ1EStr); End
+    Else Begin Inc(Ptr,SQ1EStr); Chk(-1,1); End;
+    Chk(1,0); Chk(1,1);
+   End;
+   Chk(0,1);
+  End;
+  Mx:=Mx+Dx; My:=My+Dy;
+ End Else Begin
+  Mx:=Mx+Mx; My:=My+My;
+ End;
+ SQ1EHpel:=Dminh;
+End;
+
+Function SQ1EMid(A,B,C: LongInt): LongInt;
+Begin
+ If A>B Then Begin
+  If C>B Then Begin If C>A Then B:=A Else B:=C; End;
+ End Else Begin
+  If B>C Then Begin If C>A Then B:=C Else B:=A; End;
+ End;
+ SQ1EMid:=B;
+End;
+
+{ ff_estimate_p_frame_motion (mb_decision simple, EPZS, pas de 4MV) }
+Procedure SQ1EEstimate(Pl,MbX,MbY: LongInt; FirstLine: Boolean);
+Var
+ P: Array[0..4,0..1] Of LongInt; Mx,My,X16,Y16,MotXy,Ms,B8,Xy,X,Y,Sum,Mean,IntraScore,MbType,Rng,Stride,Dm: LongInt;
+ V8,V16: PSQ1ELI; Skipped: Boolean;
+Function M8(Idx,C: LongInt): LongInt;
+Begin M8:=V8^[(Idx+2)*2+C]; End;
+Function LastMv(Idx,C: LongInt): LongInt;
+Begin LastMv:=LongInt(SQ1ESar(Int64(V16^[(Idx+Ms+1)*2+C])*32768+32768,16)); End;
+Function Sh1(V: LongInt): LongInt;
+Begin Sh1:=LongInt(SQ1ESar(V,1)); End;
+Begin
+ V8:=SQ1EV8[Pl]; V16:=SQ1EV16[Pl]; Ms:=SQ1EMs[Pl]; B8:=SQ1EB8[Pl]; Stride:=SQ1EStr;
+ X16:=16*MbX; Y16:=16*MbY;
+ SQ1ESO:=Y16*Stride+X16;
+ SQ1EPenF:=SQ1ELam Shr 7;
+ SQ1EXmin:=-X16; SQ1EYmin:=-Y16; SQ1EXmax:=-X16+SQ1EBw[Pl]*16-16; SQ1EYmax:=-Y16+SQ1EBh[Pl]*16-16;
+ Rng:=2048;
+ If SQ1EXmin<-Rng Then SQ1EXmin:=-Rng; If SQ1EXmax>Rng Then SQ1EXmax:=Rng;
+ If SQ1EYmin<-Rng Then SQ1EYmin:=-Rng; If SQ1EYmax>Rng Then SQ1EYmax:=Rng;
+ SQ1ESkip:=False;
+ Sum:=0;
+ For Y:=0 To 15 Do For X:=0 To 15 Do Sum:=Sum+SQ1ESrcB^[SQ1ESO+Y*Stride+X];
+ MotXy:=2*MbY*B8+2*MbX;
+ Xy:=MbX+MbY*Ms;
+ P[1,0]:=M8(MotXy-1,0); P[1,1]:=M8(MotXy-1,1);
+ If P[1,0]>(SQ1EXmax*2) Then P[1,0]:=SQ1EXmax*2;
+ P[2,0]:=0; P[2,1]:=0; P[3,0]:=0; P[3,1]:=0; P[4,0]:=0; P[4,1]:=0;
+ If Not FirstLine Then Begin
+  P[2,0]:=M8(MotXy-B8,0); P[2,1]:=M8(MotXy-B8,1);
+  P[3,0]:=M8(MotXy-B8+2,0); P[3,1]:=M8(MotXy-B8+2,1);
+  If P[2,1]>(SQ1EYmax*2) Then P[2,1]:=SQ1EYmax*2;
+  If P[3,0]<(SQ1EXmin*2) Then P[3,0]:=SQ1EXmin*2;
+  If P[3,1]>(SQ1EYmax*2) Then P[3,1]:=SQ1EYmax*2;
+  P[4,0]:=SQ1EMid(P[1,0],P[2,0],P[3,0]); P[4,1]:=SQ1EMid(P[1,1],P[2,1],P[3,1]);
+ End;
+ SQ1EPredX:=P[1,0]; SQ1EPredY:=P[1,1];
+ { ff_epzs_motion_search }
+ SQ1EBx:=0; SQ1EBy:=0; Skipped:=False;
+ SQ1EUpdGen;
+ SQ1EDmin:=SQ1ESad(SQ1ESO,0);
+ SQ1EMap[0]:=SQ1EGen; SQ1EScr[0]:=SQ1EDmin;
+ Mx:=0; My:=0;
+ If FirstLine Then Begin
+  SQ1ECheckMV(Sh1(P[1,0]),Sh1(P[1,1]));
+  SQ1ECheckClipped(LastMv(Xy,0),LastMv(Xy,1));
+ End Else Begin
+  If (SQ1EDmin<256) And ((P[1,0] Or P[1,1] Or P[2,0] Or P[2,1] Or P[3,0] Or P[3,1])=0) Then Begin
+   SQ1ESkip:=True; Skipped:=True;
+  End Else Begin
+   SQ1ECheckMV(Sh1(P[4,0]),Sh1(P[4,1]));
+   SQ1ECheckClipped(Sh1(P[4,0]),Sh1(P[4,1])-1);
+   SQ1ECheckClipped(Sh1(P[4,0]),Sh1(P[4,1])+1);
+   SQ1ECheckClipped(Sh1(P[4,0])-1,Sh1(P[4,1]));
+   SQ1ECheckClipped(Sh1(P[4,0])+1,Sh1(P[4,1]));
+   SQ1ECheckClipped(LastMv(Xy,0),LastMv(Xy,1));
+   SQ1ECheckMV(Sh1(P[1,0]),Sh1(P[1,1]));
+   SQ1ECheckMV(Sh1(P[2,0]),Sh1(P[2,1]));
+   SQ1ECheckMV(Sh1(P[3,0]),Sh1(P[3,1]));
+  End;
+ End;
+ If Not Skipped Then Begin
+  If SQ1EDmin>1024 Then Begin
+   SQ1ECheckClipped(LastMv(Xy+1,0),LastMv(Xy+1,1));
+   If MbY+1<SQ1EEndMbY Then SQ1ECheckClipped(LastMv(Xy+Ms,0),LastMv(Xy+Ms,1));
+  End;
+  SQ1ESmallDia;
+  Mx:=SQ1EBx; My:=SQ1EBy;
+ End;
+ Dm:=SQ1EHpel(Mx,My,SQ1EDmin);
+ V16^[(Xy+Ms+1)*2]:=Mx; V16^[(Xy+Ms+1)*2+1]:=My;
+ For Y:=0 To 1 Do For X:=0 To 1 Do Begin
+  V8^[(MotXy+Y*B8+X+2)*2]:=Mx; V8^[(MotXy+Y*B8+X+2)*2+1]:=My;
+ End;
+ Mean:=(Sum+128) Shr 8;
+ IntraScore:=0;
+ For Y:=0 To 15 Do For X:=0 To 15 Do IntraScore:=IntraScore+Abs(Mean-SQ1ESrcB^[SQ1ESO+Y*Stride+X]);
+ IntraScore:=IntraScore+SQ1EPenF*16;
+ If IntraScore<Dm Then MbType:=1 Else MbType:=2;
+ SQ1EMbT[Pl]^[MbY*Ms+MbX]:=MbType;
+End;
+
+Var SQ1EQual: LongInt;
+
+
+{ svq1_encode_plane ; Cur/Ref/SrcB : plans decode, reference, source (bords replique), pas Str }
+Procedure SQ1EPlane(Pl: LongInt; IsP: Boolean; Cur,Ref,SrcB: PEABuffer; Str: LongInt);
+Var
+ X,Y,I,J,Off,Best,Mx,My,PredX,PredY,Dxy,MotXy,Ms,B8,Bw,Bh,Lam,V,Mt,Sse: LongInt;
+ Score: Array[0..3] Of Int64; Cnt: Array[0..1,0..5] Of LongInt;
+ V8,V16: PSQ1ELI; MbTa: PSQ1ELI; FirstLine: Boolean;
+ Ax,Ay,Bxx,Byy,Cx,Cy: LongInt;
+Begin
+ Bw:=SQ1EBw[Pl]; Bh:=SQ1EBh[Pl]; Ms:=SQ1EMs[Pl]; B8:=SQ1EB8[Pl];
+ V8:=SQ1EV8[Pl]; V16:=SQ1EV16[Pl]; MbTa:=SQ1EMbT[Pl];
+ SQ1EStr:=Str; SQ1ESrcB:=SrcB; SQ1ERefB:=Ref;
+ Lam:=(SQ1EQual*SQ1EQual) Shr 14;
+ If IsP Then Begin
+  SQ1ELam:=SQ1EQual;
+  For Y:=0 To Bh-1 Do
+   For X:=0 To Bw-1 Do Begin SQ1EEstimate(Pl,X,Y,Y=0);
+   End;
+  { ff_fix_long_mvs : f_code 1, out_format MPEG1 : plage 16 }
+  For Y:=0 To Bh-1 Do
+   For X:=0 To Bw-1 Do Begin
+    Mt:=MbTa^[Y*Ms+X];
+    If (Mt And 2)<>0 Then Begin
+     Mx:=V16^[(Y*Ms+X+Ms+1)*2]; My:=V16^[(Y*Ms+X+Ms+1)*2+1];
+     If (Mx>=16) Or (Mx<-16) Or (My>=16) Or (My<-16) Then Begin
+      MbTa^[Y*Ms+X]:=(Mt And Not 2) Or 1;
+      V16^[(Y*Ms+X+Ms+1)*2]:=0; V16^[(Y*Ms+X+Ms+1)*2+1]:=0;
+     End;
+    End;
+   End;
+ End;
+ For Y:=0 To Bh-1 Do Begin
+  FirstLine:=Y=0;
+  For X:=0 To Bw-1 Do Begin
+   Off:=Y*16*Str+X*16;
+   Score[0]:=0; Score[1]:=0; Score[2]:=0; Score[3]:=0;
+   MotXy:=2*Y*B8+2*X;
+   If (Not IsP) Or ((MbTa^[Y*Ms+X] And 1)<>0) Then Begin
+    SQ1ESet:=0;
+    For I:=0 To 5 Do SQ1EPb[0,I].N:=0;
+    If IsP Then Begin SQ1EPut(SQ1EPb[0,5],SQBlkL[3],SQBlkC[3]); Score[0]:=SQBlkL[3]*Lam; End;
+    Score[0]:=Score[0]+SQ1EEncBlock(SrcB,Off,Nil,0,SQ1ETmp,0,Str,5,64,Lam,True);
+    For I:=0 To 5 Do Cnt[0,I]:=SQ1EPb[0,I].N;
+   End Else Score[0]:=MaxLongInt;
+   Best:=0;
+   If IsP Then Begin
+    Mx:=V8^[(MotXy+2)*2]; My:=V8^[(MotXy+2)*2+1];
+    Ax:=V8^[(MotXy-1+2)*2]; Ay:=V8^[(MotXy-1+2)*2+1];
+    If FirstLine Then Begin
+     If X=0 Then Begin PredX:=0; PredY:=0; End Else Begin PredX:=Ax; PredY:=Ay; End;
+    End Else Begin
+     Bxx:=V8^[(MotXy-B8+2)*2]; Byy:=V8^[(MotXy-B8+2)*2+1];
+     Cx:=V8^[(MotXy-B8+2+2)*2]; Cy:=V8^[(MotXy-B8+2+2)*2+1];
+     PredX:=SQ1EMid(Ax,Bxx,Cx); PredY:=SQ1EMid(Ay,Byy,Cy);
+    End;
+    If (MbTa^[Y*Ms+X] And 2)<>0 Then Begin
+     SQ1ESet:=1;
+     For I:=0 To 5 Do SQ1EPb[1,I].N:=0;
+     SQ1EPut(SQ1EPb[1,5],SQBlkL[1],SQBlkC[1]);
+     { ff_h263_encode_motion f_code=1 }
+     For J:=0 To 1 Do Begin
+      If J=0 Then V:=Mx-PredX Else V:=My-PredY;
+      V:=((V+32) And 63)-32;
+      If V=0 Then SQ1EPut(SQ1EPb[1,5],SQMvTab[1],SQMvTab[0])
+      Else Begin
+       I:=0; If V<0 Then Begin I:=1; V:=-V; End;
+       SQ1EPut(SQ1EPb[1,5],SQMvTab[V*2+1]+1,(SQMvTab[V*2] Shl 1) Or I);
+      End;
+     End;
+     Score[1]:=Int64(Lam)*SQ1EPb[1,5].N;
+     Dxy:=(Mx And 1)+2*(My And 1);
+     SQPut(SQ1ETmp,Ref,16*Str,Off+LongInt(SQ1ESar(Mx,1))+Str*LongInt(SQ1ESar(My,1)),Str,16,Dxy);
+     Score[1]:=Score[1]+SQ1EEncBlock(SrcB,Off,SQ1ETmp,16*Str,Cur,Off,Str,5,64,Lam,False);
+     If Score[1]<=Score[0] Then Best:=1 Else Best:=0;
+     Sse:=0;
+     For J:=0 To 15 Do For I:=0 To 15 Do Begin
+      V:=Integer(SrcB^[Off+J*Str+I])-Integer(Ref^[Off+J*Str+I]); Sse:=Sse+V*V;
+     End;
+     Score[2]:=Sse+Int64(SQBlkL[0])*Lam;
+     If (Score[2]<Score[Best]) And (Mx=0) And (My=0) Then Begin
+      Best:=2;
+      For J:=0 To 15 Do Move(Ref^[Off+J*Str],Cur^[Off+J*Str],16);
+      SQ1EOutPut(SQBlkL[0],SQBlkC[0]);
+     End;
+    End;
+    If Best=1 Then Begin
+     For I:=0 To 5 Do Cnt[1,I]:=SQ1EPb[1,I].N;
+    End Else Begin
+     For J:=0 To 1 Do For I:=0 To 1 Do Begin
+      V8^[(MotXy+J*B8+I+2)*2]:=0; V8^[(MotXy+J*B8+I+2)*2+1]:=0;
+     End;
+    End;
+   End;
+   If Best<>2 Then
+    For I:=5 Downto 0 Do
+     For J:=0 To Cnt[Best,I]-1 Do SQ1EOutPut(1,(SQ1EPb[Best,I].B[J Shr 3] Shr (7-(J And 7))) And 1);
+   If Best=0 Then
+    For J:=0 To 15 Do Move(SQ1ETmp^[J*Str],Cur^[Off+J*Str],16);
+  End;
+ End;
+End;
+
+{ ---- conversion swscale yuv420p -> yuv410p (plan de chroma : filtres bicubiques horizontal puis vertical) ---- }
+Procedure SQ1EConv(Pu,Pv: PEABuffer; W,H: LongInt; Du,Dv: PEABuffer);
+Var CW,CH,CW4,CH4,I,X,Y,J,HS,FS,Bp: LongInt; HF,VF: TSwsF; H15: PSwsI32; Val: Int64; Src,Dst: PEABuffer;
+Begin
+ CW:=(W+1) Div 2; CH:=(H+1) Div 2; CW4:=(W+3) Div 4; CH4:=(H+3) Div 4;
+ SwsInitF(HF,CW,CW4,128,128,16384); HS:=HF.FS;
+ SwsInitF(VF,CH,CH4,128,128,4096); FS:=VF.FS;
+ GetMem(H15,Int64(CH)*CW4*4+64);
+ For I:=0 To 1 Do Begin
+  If I=0 Then Begin Src:=Pu; Dst:=Du; End Else Begin Src:=Pv; Dst:=Dv; End;
+  For Y:=0 To CH-1 Do For X:=0 To CW4-1 Do Begin
+   Val:=0;
+   For J:=0 To HS-1 Do Val:=Val+Int64(Src^[Y*CW+HF.Pos^[X]+J])*HF.Coef^[X*HS+J];
+   Val:=AVSar(Val,7); If Val>32767 Then Val:=32767;
+   H15^[Y*CW4+X]:=Val;
+  End;
+  For Y:=0 To CH4-1 Do
+   For X:=0 To CW4-1 Do Begin
+    Val:=Int64(64) Shl 12;
+    For J:=0 To FS-1 Do Begin
+     Bp:=(VF.Pos^[Y]+J)*CW4+X;
+     Val:=Val+Int64(H15^[Bp])*VF.Coef^[Y*FS+J];
+    End;
+    Val:=AVSar(Val,19); If Val<0 Then Val:=0 Else If Val>255 Then Val:=255;
+    Dst^[Y*CW4+X]:=Val;
+   End;
+ End;
+ FreeMem(H15,Int64(CH)*CW4*4+64); SwsFreeF(HF); SwsFreeF(VF);
+End;
+
+{ ecriture AVI au format du muxer ffmpeg (copie de AWBegin/AWFrame/AWEnd avec indicateur d'image cle dans idx1) }
+Var
+ SQ1EAbuf: Array[0..255] Of Byte; SQ1EAU: Integer; SQ1EAP,SQ1EAMovi,SQ1EAMax,SQ1EAN: LongInt; SQ1EAS: PALLong;
+
+Procedure SQ1EAb(X: LongInt);Begin SQ1EAbuf[SQ1EAU]:=X And 255; Inc(SQ1EAU); Inc(SQ1EAP); If SQ1EAU>=250 Then Begin WriteBytes(SQ1EAbuf,SQ1EAU); SQ1EAU:=0; End; End;
+Procedure SQ1EAl16(X: LongInt);Begin SQ1EAb(X); SQ1EAb(X Shr 8); End;
+Procedure SQ1EAl32(X: LongInt);Begin SQ1EAl16(X); SQ1EAl16(X Shr 16); End;
+Procedure SQ1EAtag(Const T: String);
+Var Z: Integer;
+Begin For Z:=1 To 4 Do SQ1EAb(Ord(T[Z])); End;
+Procedure SQ1EAz(Cnt: LongInt);
+Var Z: LongInt;
+Begin For Z:=1 To Cnt Do SQ1EAb(0); End;
+Procedure SQ1EAflush;Begin If SQ1EAU>0 Then Begin WriteBytes(SQ1EAbuf,SQ1EAU); SQ1EAU:=0; End; End;
+Procedure SQ1EApatch(At,Value: LongInt);
+Var Z: Integer; Code2: Integer; B4: Array[0..3] Of Byte;
+Begin
+ SQ1EAflush;
+ {$I-}Seek(ActiveOutput,At); Code2:=IOResult;{$I+}
+ If Code2<>0 Then Fail('avi: positionnement impossible.');
+ For Z:=0 To 3 Do Begin B4[Z]:=Value And 255; Value:=Value Shr 8; End;
+ WriteBytes(B4,4);
+ {$I-}Seek(ActiveOutput,SQ1EAP); Code2:=IOResult;{$I+}
+End;
+
+Procedure SQ1EAviBegin(Const Target,Fourcc: String; W,H,Rate,Scale,Bpp: LongInt; Extra: PEABuffer; ExtraLen,SarN,SarD: LongInt);
+Var I,Strf,Strl,Hdrl,Vp: LongInt; Aw,Ah,G,K,T64: Int64; Hv: Boolean;
+Begin
+ OpenWrite(Target); SQ1EAU:=0; SQ1EAP:=0; SQ1EAN:=0; SQ1EAMax:=0; GetMem(SQ1EAS,1048576*4);
+ Strf:=40+ExtraLen+(ExtraLen And 1);
+ Hv:=(SarN>0) And (SarD>0); Vp:=0; If Hv Then Vp:=8+68;
+ Strl:=4+(8+56)+(8+Strf)+(8+4120)+Vp;
+ Hdrl:=4+(8+56)+(8+Strl)+(8+260);
+ SQ1EAtag('RIFF'); SQ1EAl32(0); SQ1EAtag('AVI ');
+ SQ1EAtag('LIST'); SQ1EAl32(Hdrl); SQ1EAtag('hdrl');
+ SQ1EAtag('avih'); SQ1EAl32(56); SQ1EAl32(Trunc(1000000.0*Scale/Rate)); SQ1EAl32(25000); SQ1EAl32(0); SQ1EAl32(2320); SQ1EAl32(0); SQ1EAl32(0); SQ1EAl32(1);
+ SQ1EAl32(1048576); SQ1EAl32(W); SQ1EAl32(H); SQ1EAl32(0); SQ1EAl32(0); SQ1EAl32(0); SQ1EAl32(0);
+ SQ1EAtag('LIST'); SQ1EAl32(Strl); SQ1EAtag('strl');
+ SQ1EAtag('strh'); SQ1EAl32(56); SQ1EAtag('vids'); SQ1EAtag(Fourcc);
+ SQ1EAl32(0); SQ1EAl16(0); SQ1EAl16(0); SQ1EAl32(0); SQ1EAl32(Scale); SQ1EAl32(Rate); SQ1EAl32(0); SQ1EAl32(0); SQ1EAl32(0); SQ1EAl32(-1); SQ1EAl32(0);
+ SQ1EAl16(0); SQ1EAl16(0); SQ1EAl16(W); SQ1EAl16(H);
+ SQ1EAtag('strf'); SQ1EAl32(Strf); SQ1EAl32(40+ExtraLen); SQ1EAl32(W); SQ1EAl32(H); SQ1EAl16(1); SQ1EAl16(Bpp);
+ SQ1EAtag(Fourcc); SQ1EAl32(W*H*Bpp Div 8); SQ1EAl32(0); SQ1EAl32(0); SQ1EAl32(0); SQ1EAl32(0);
+ For I:=0 To ExtraLen-1 Do SQ1EAb(Extra^[I]);
+ If Odd(ExtraLen) Then SQ1EAb(0);
+ SQ1EAtag('JUNK'); SQ1EAl32(4120); SQ1EAl16(4); SQ1EAl16(0); SQ1EAl32(0); SQ1EAtag('00dc'); SQ1EAz(4120-12);
+ If Hv Then Begin
+ SQ1EAtag('vprp'); SQ1EAl32(68); SQ1EAl32(0); SQ1EAl32(0); SQ1EAl32((2*Rate+Scale-1) Div (2*Scale));
+ SQ1EAl32(W); SQ1EAl32(H);
+ Aw:=Int64(SarN)*W; Ah:=Int64(SarD)*H; G:=Aw; K:=Ah; While K<>0 Do Begin T64:=G Mod K; G:=K; K:=T64; End; Aw:=Aw Div G; Ah:=Ah Div G;
+ While (Aw>65535) Or (Ah>65535) Do Begin Aw:=(Aw+1) Shr 1; Ah:=(Ah+1) Shr 1; End; { approximation grossiere de av_reduce(..,0xFFFF) }
+ SQ1EAl32(LongInt((Aw Shl 16) Or Ah)); SQ1EAl32(W); SQ1EAl32(H); SQ1EAl32(1);
+ SQ1EAl32(H); SQ1EAl32(W); SQ1EAl32(H); SQ1EAl32(W); SQ1EAl32(0); SQ1EAl32(0); SQ1EAl32(0); SQ1EAl32(0);
+ End;
+ SQ1EAtag('JUNK'); SQ1EAl32(260); SQ1EAtag('odml'); SQ1EAtag('dmlh'); SQ1EAl32(248); SQ1EAz(248);
+ SQ1EAtag('LIST'); SQ1EAl32(26); SQ1EAtag('INFO'); SQ1EAtag('ISFT'); SQ1EAl32(14);
+ SQ1EAtag('Lavf'); SQ1EAtag('60.1'); SQ1EAtag('6.10'); SQ1EAb(48); SQ1EAb(0);
+ SQ1EAtag('JUNK'); SQ1EAl32(1016); SQ1EAz(1016);
+ SQ1EAtag('LIST'); SQ1EAl32(0); SQ1EAMovi:=SQ1EAP-8; SQ1EAtag('movi'); SQ1EAflush;
+End;
+
+Procedure SQ1EAviFrame(P: PEABuffer; Len: LongInt);
+Var K,Q: LongInt;
+Begin
+ SQ1EAtag('00dc'); SQ1EAl32(Len); SQ1EAflush;
+ K:=0;
+ While K<Len Do Begin
+  If Len-K>32768 Then Q:=32768 Else Q:=Len-K;
+  WriteBytes(P^[K],Q); Inc(K,Q); Inc(SQ1EAP,Q);
+ End;
+ If Odd(Len) Then SQ1EAb(0);
+ If SQ1EAN<1048576 Then SQ1EAS^[SQ1EAN]:=Len;
+ Inc(SQ1EAN);
+ If Len>SQ1EAMax Then SQ1EAMax:=Len;
+End;
+
+Procedure SQ1EAviEnd(Keys: PEABuffer);
+Var I,K,Fix: LongInt;
+Begin
+ Fix:=SQ1EAP-(SQ1EAMovi+8+4);
+ SQ1EAtag('idx1'); SQ1EAl32(16*SQ1EAN); K:=4;
+ For I:=0 To SQ1EAN-1 Do Begin
+  SQ1EAtag('00dc'); If Keys^[I]<>0 Then SQ1EAl32($10) Else SQ1EAl32(0); SQ1EAl32(K); SQ1EAl32(SQ1EAS^[I]); Inc(K,8+SQ1EAS^[I]+(SQ1EAS^[I] And 1));
+ End;
+ SQ1EAflush;
+ SQ1EApatch(4,SQ1EAP-8); SQ1EApatch(48,SQ1EAN); SQ1EApatch(140,SQ1EAN); SQ1EApatch(144,SQ1EAMax); SQ1EApatch(SQ1EAMovi+4,4+Fix);
+ FreeMem(SQ1EAS,1048576*4);
+ CloseWrite;
+End;
+
+Procedure EncodeSVQ1(Const Source,Target: String; IsAvi: Boolean; GopOpt,QualOpt: LongInt);
+Const Ident='Lavc60.31.102';
+Var
+ Limit,Cur,At,Q,W,Hh,CW,CH,CW4,CH4,K,Code,X,Y,I,J,P,NFrames,Gop,TS,Delta,MDur,MvDur,SarN,SarD,FpsN,FpsD,Keys,SzUni,G2,Rate,Scale,Pl,Pw,Ph,Str,Sz: LongInt;
+ Line,Token: String; H: Array[0..255] Of Byte;
+ Yp,Up,Vp,U4,V4,Enc,Mv,Tmp: PEABuffer; EncCap,EncLen,MvLen: LongInt;
+ FSizes: PALLong; FKeys: PEABuffer; IsP: Boolean;
+ Cu,Rf,Sb: Array[0..2] Of PEABuffer; Pic: Array[0..2] Of PEABuffer; PicW: Array[0..2] Of LongInt;
+ Extra: Array[0..31] Of Byte; Stack: Array[0..15] Of LongInt; Sp: LongInt;
+ PadSz: Array[0..2] Of LongInt; TW: Int64; ParOk: Boolean; ChOff,ChCnt: PALLong; NCh,CSz,CPos,OldV,NSt: LongInt;
+Procedure EPut(V: LongInt);
+Begin
+ If EncLen>=EncCap Then Begin Inc(EncCap,EncCap Div 2+65536); ReAllocMem(Enc,EncCap); End;
+ Enc^[EncLen]:=V And 255; Inc(EncLen);
+End;
+Procedure MPut(V: LongInt);Begin Mv^[MvLen]:=V And 255; Inc(MvLen); End;
+Procedure M16(V: LongInt);Begin MPut(V Shr 8); MPut(V); End;
+Procedure M32(V: LongInt);Begin MPut(V Shr 24); MPut(V Shr 16); MPut(V Shr 8); MPut(V); End;
+Procedure MTag(Const S: String);Var Z: Integer;Begin For Z:=1 To Length(S) Do MPut(Ord(S[Z])); End;
+Procedure MZero(N: LongInt);Var Z: Integer;Begin For Z:=1 To N Do MPut(0); End;
+Procedure BoxBegin(Const Tg: String);Begin Stack[Sp]:=MvLen; Inc(Sp); M32(0); MTag(Tg); End;
+Procedure BoxEnd;
+Var P0,Sz2: LongInt;
+Begin
+ Dec(Sp); P0:=Stack[Sp]; Sz2:=MvLen-P0;
+ Mv^[P0]:=Sz2 Shr 24; Mv^[P0+1]:=Sz2 Shr 16; Mv^[P0+2]:=Sz2 Shr 8; Mv^[P0+3]:=Sz2;
+End;
+Procedure Matrix;Begin M32($10000); M32(0); M32(0); M32(0); M32($10000); M32(0); M32(0); M32(0); M32($40000000); End;
+Function RescaleUp(A,B,C: Int64): Int64;
+Begin RescaleUp:=(A*B+C-1) Div C; End;
+Begin
+ SQ1EInitTabs;
+ OpenRead(Source); Limit:=InputSize; Cur:=0; Line:='';
+ While Cur<Limit Do Begin ReadAt(Cur,H,1); Inc(Cur); If H[0]=10 Then Break; If Length(Line)<250 Then Line:=Line+Chr(H[0]); End;
+ If Copy(Line,1,9)<>'YUV4MPEG2' Then Fail('svq1: entree Y4M requise.');
+ W:=0; Hh:=0; FpsN:=25; FpsD:=1; SarN:=0; SarD:=1; Line:=Copy(Line,11,255);
+ While Line<>'' Do Begin
+  K:=Pos(' ',Line); If K=0 Then K:=Length(Line)+1;
+  Token:=Copy(Line,1,K-1); Line:=Copy(Line,K+1,255);
+  If Token='' Then Continue;
+  Case Token[1] Of
+   'W': Val(Copy(Token,2,20),W,Code);
+   'H': Val(Copy(Token,2,20),Hh,Code);
+   'F': Begin K:=Pos(':',Token); Val(Copy(Token,2,K-2),FpsN,Code); Val(Copy(Token,K+1,20),FpsD,Code); End;
+   'A': Begin K:=Pos(':',Token); Val(Copy(Token,2,K-2),SarN,Code); Val(Copy(Token,K+1,20),SarD,Code); End;
+   'C': If (Token<>'C420') And (Token<>'C420jpeg') And (Token<>'C420mpeg2') And (Token<>'C420paldv') Then Fail('svq1: Y4M YUV420 8 bits requis.');
+   'I': If Token<>'Ip' Then Fail('svq1: video progressive requise.');
+  End;
+ End;
+ If (W<1) Or (Hh<1) Or (W>4095) Or (Hh>4095) Then Fail('svq1: dimensions Y4M incorrectes (1..4095).');
+ If (FpsN<1) Or (FpsD<1) Then Fail('svq1: cadence invalide.');
+ If (OptPixFmt<>'') And (OptPixFmt<>'yuv420p') And (OptPixFmt<>'yuv410p') Then Fail('svq1: -pix_fmt yuv410p requis.');
+ If GopOpt>0 Then Gop:=GopOpt-1 Else Gop:=12;
+ If QualOpt>=0 Then SQ1EQual:=QualOpt*118 Else SQ1EQual:=0;
+ { av_image_check_sar : SAR invalide => 0:1 dans les parametres du codec (pasp absent, largeur tapt nulle) }
+ ParOk:=True;
+ If (SarD<=0) Or (SarN<0) Then ParOk:=False
+ Else If (SarN<>0) And (SarN<>SarD) Then Begin
+  If SarN<SarD Then TW:=(Int64(W)*SarN) Div SarD Else TW:=(Int64(Hh)*SarD) Div SarN;
+  If TW<=0 Then ParOk:=False;
+ End;
+ CW:=(W+1) Div 2; CH:=(Hh+1) Div 2; CW4:=(W+3) Div 4; CH4:=(Hh+3) Div 4;
+ GetMem(Yp,W*Hh+16); GetMem(Up,CW*CH+16); GetMem(Vp,CW*CH+16); GetMem(U4,CW4*CH4+16); GetMem(V4,CW4*CH4+16);
+ { geometrie des plans }
+ SQ1EEndMbY:=0; { end_mb_y du contexte m reste a 0 : mb_height nul a l initialisation }
+ For Pl:=0 To 2 Do Begin
+  If Pl=0 Then Begin Pw:=W; Ph:=Hh; End Else Begin Pw:=W Div 4; Ph:=Hh Div 4; End;
+  SQ1EBw[Pl]:=(Pw+15) Div 16; SQ1EBh[Pl]:=(Ph+15) Div 16;
+  SQ1EMs[Pl]:=SQ1EBw[Pl]+1; SQ1EB8[Pl]:=2*SQ1EBw[Pl]+1;
+  PicW[Pl]:=Pw; PadSz[Pl]:=Ph;
+  Str:=16*SQ1EBw[Pl]+48;
+  GetMem(SQ1EV8[Pl],(Int64(SQ1EB8[Pl])*SQ1EBh[Pl]*2+64)*8); FillChar(SQ1EV8[Pl]^,(Int64(SQ1EB8[Pl])*SQ1EBh[Pl]*2+64)*8,0);
+  GetMem(SQ1EV16[Pl],(Int64(SQ1EMs[Pl])*(SQ1EBh[Pl]+2)+64)*8); FillChar(SQ1EV16[Pl]^,(Int64(SQ1EMs[Pl])*(SQ1EBh[Pl]+2)+64)*8,0);
+  GetMem(SQ1EMbT[Pl],(Int64(SQ1EMs[Pl])*(SQ1EBh[Pl]+2)+64)*4); FillChar(SQ1EMbT[Pl]^,(Int64(SQ1EMs[Pl])*(SQ1EBh[Pl]+2)+64)*4,0);
+  { plans : marge de 48 lignes avant et apres }
+  GetMem(Cu[Pl],Int64(Str)*(16*SQ1EBh[Pl]+96)+64); FillChar(Cu[Pl]^,Int64(Str)*(16*SQ1EBh[Pl]+96)+64,0);
+  GetMem(Rf[Pl],Int64(Str)*(16*SQ1EBh[Pl]+96)+64); FillChar(Rf[Pl]^,Int64(Str)*(16*SQ1EBh[Pl]+96)+64,0);
+  GetMem(Sb[Pl],Int64(Str)*(16*SQ1EBh[Pl]+96)+64); FillChar(Sb[Pl]^,Int64(Str)*(16*SQ1EBh[Pl]+96)+64,0);
+ End;
+ GetMem(SQ1ETmp,(16*SQ1EBw[0]+48)*40+64);
+ EncCap:=65536; EncLen:=0; GetMem(Enc,EncCap);
+ GetMem(FSizes,4*100000); GetMem(FKeys,100000);
+ GetMem(SQ1EOut,Int64(W)*Hh*4+65536);
+ NFrames:=0;
+ While Cur+6+W*Hh+2*CW*CH<=Limit Do Begin
+  ReadAt(Cur,H,5); If (H[0]<>70) Or (H[1]<>82) Then Break;
+  Inc(Cur,5); While Cur<Limit Do Begin ReadAt(Cur,H,1); Inc(Cur); If H[0]=10 Then Break; End;
+  At:=0; While At<W*Hh Do Begin If W*Hh-At>60000 Then Q:=60000 Else Q:=W*Hh-At; ReadAt(Cur+At,Yp^[At],Q); Inc(At,Q); End;
+  Inc(Cur,W*Hh);
+  At:=0; While At<CW*CH Do Begin If CW*CH-At>60000 Then Q:=60000 Else Q:=CW*CH-At; ReadAt(Cur+At,Up^[At],Q); Inc(At,Q); End;
+  Inc(Cur,CW*CH);
+  At:=0; While At<CW*CH Do Begin If CW*CH-At>60000 Then Q:=60000 Else Q:=CW*CH-At; ReadAt(Cur+At,Vp^[At],Q); Inc(At,Q); End;
+  Inc(Cur,CW*CH);
+  If NFrames>=100000 Then Fail('svq1: trop d''images.');
+  SQ1EConv(Up,Vp,W,Hh,U4,V4);
+  Pic[0]:=Yp; Pic[1]:=U4; Pic[2]:=V4;
+  { plans source avec bords repliques }
+  For Pl:=0 To 2 Do Begin
+   Str:=16*SQ1EBw[Pl]+48;
+   If Pl=0 Then I:=W Else I:=CW4;
+   For Y:=0 To 16*SQ1EBh[Pl]-1 Do Begin
+    J:=Y; If J>=PadSz[Pl] Then J:=PadSz[Pl]-1;
+    If J<0 Then J:=0;
+    For X:=0 To 16*SQ1EBw[Pl]-1 Do Begin
+     P:=X; If P>=PicW[Pl] Then P:=PicW[Pl]-1;
+     If P<0 Then P:=0;
+     Sb[Pl]^[(Y+48)*Str+X]:=Pic[Pl]^[J*I+P];
+    End;
+   End;
+  End;
+  { echange courant/precedent }
+  For Pl:=0 To 2 Do Begin Tmp:=Cu[Pl]; Cu[Pl]:=Rf[Pl]; Rf[Pl]:=Tmp; End;
+  IsP:=(Gop<>0) And ((NFrames Mod Gop)<>0);
+  FillChar(SQ1EOut^,Int64(W)*Hh*4+65536,0); SQ1EON:=0;
+  { svq1_write_header }
+  SQ1EOutPut(22,$20); SQ1EOutPut(8,0);
+  If IsP Then SQ1EOutPut(2,1) Else SQ1EOutPut(2,0);
+  If Not IsP Then Begin
+   SQ1EOutPut(5,2);
+   K:=7; For I:=0 To 6 Do If (SQFrameSizes[I*2]=W) And (SQFrameSizes[I*2+1]=Hh) Then Begin K:=I; Break; End;
+   SQ1EOutPut(3,K);
+   If K=7 Then Begin SQ1EOutPut(12,W); SQ1EOutPut(12,Hh); End;
+  End;
+  SQ1EOutPut(2,0);
+  For Pl:=0 To 2 Do Begin
+   Str:=16*SQ1EBw[Pl]+48;
+   SQ1EPlane(Pl,IsP,PEABuffer(@Cu[Pl]^[48*Str]),PEABuffer(@Rf[Pl]^[48*Str]),PEABuffer(@Sb[Pl]^[48*Str]),Str);
+  End;
+  While (SQ1EON And 31)<>0 Do SQ1EOutPut(1,0);
+  Sz:=SQ1EON Shr 3;
+  For I:=0 To Sz-1 Do EPut(SQ1EOut^[I]);
+  FSizes^[NFrames]:=Sz; If IsP Then FKeys^[NFrames]:=0 Else FKeys^[NFrames]:=1;
+  Inc(NFrames);
+ End;
+ CloseRead;
+ If NFrames=0 Then Fail('svq1: aucune image Y4M.');
+ Extra[0]:=0; Extra[1]:=0; Extra[2]:=0; Extra[3]:=8+Length(Ident);
+ Extra[4]:=Ord('S'); Extra[5]:=Ord('V'); Extra[6]:=Ord('Q'); Extra[7]:=Ord('1');
+ For I:=1 To Length(Ident) Do Extra[7+I]:=Ord(Ident[I]);
+ If IsAvi Then Begin
+  Rate:=FpsN; Scale:=FpsD; G2:=Rate; K:=Scale; While K<>0 Do Begin I:=G2 Mod K; G2:=K; K:=I; End;
+  Rate:=Rate Div G2; Scale:=Scale Div G2;
+  SQ1EAviBegin(Target,'svq1',W,Hh,Rate,Scale,24,PEABuffer(@Extra),8+Length(Ident),SarN,SarD);
+  At:=0;
+  For I:=0 To NFrames-1 Do Begin SQ1EAviFrame(PEABuffer(@Enc^[At]),FSizes^[I]); Inc(At,FSizes^[I]); End;
+  SQ1EAviEnd(FKeys);
+ End Else Begin
+  TS:=FpsN; While TS<10000 Do TS:=TS*2;
+  Delta:=Int64(FpsD)*TS Div FpsN;
+  MDur:=NFrames*Delta;
+  MvDur:=RescaleUp(MDur,1000,TS);
+  GetMem(Mv,65536+NFrames*16); MvLen:=0; Sp:=0;
+  OpenWrite(Target);
+  BoxBegin('ftyp'); MTag('qt  '); M32($200); MTag('qt  '); BoxEnd;
+  BoxBegin('wide'); BoxEnd;
+  M32(EncLen+8); MTag('mdat');
+  WriteBytes(Mv^,MvLen);
+  At:=0; While At<EncLen Do Begin If EncLen-At>60000 Then Q:=60000 Else Q:=EncLen-At; WriteBytes(Enc^[At],Q); Inc(At,Q); End;
+  MvLen:=0;
+  BoxBegin('moov');
+  BoxBegin('mvhd'); M32(0); M32(0); M32(0); M32(1000); M32(MvDur); M32($10000); M16(256); MZero(10); Matrix; MZero(24); M32(2); BoxEnd;
+  BoxBegin('trak');
+  BoxBegin('tkhd'); M32(3); M32(0); M32(0); M32(1); M32(0); M32(MvDur); MZero(8); M16(0); M16(0); M16(0); M16(0); Matrix;
+  M32(W Shl 16);
+  M32(Hh Shl 16); BoxEnd;
+  BoxBegin('edts'); BoxBegin('elst'); M32(0); M32(1); M32(MvDur); M32(0); M32($10000); BoxEnd; BoxEnd;
+  BoxBegin('mdia');
+  BoxBegin('mdhd'); M32(0); M32(0); M32(0); M32(TS); M32(MDur); M16($7FFF); M16(0); BoxEnd;
+  BoxBegin('hdlr'); M32(0); MTag('mhlr'); MTag('vide'); M32(0); M32(0); M32(0); MPut(12); MTag('VideoHandler'); BoxEnd;
+  BoxBegin('minf');
+  BoxBegin('vmhd'); M32(1); MZero(8); BoxEnd;
+  BoxBegin('hdlr'); M32(0); MTag('dhlr'); MTag('url '); M32(0); M32(0); M32(0); MPut(11); MTag('DataHandler'); BoxEnd;
+  BoxBegin('dinf'); BoxBegin('dref'); M32(0); M32(1); BoxBegin('url '); M32(1); BoxEnd; BoxEnd; BoxEnd;
+  BoxBegin('stbl');
+  BoxBegin('stsd'); M32(0); M32(1);
+  BoxBegin('SVQ1'); MZero(6); M16(1);
+  M16(0); M16(0); MTag('FFMP'); M32($200); M32($200); M16(W); M16(Hh); M32($480000); M32($480000); M32(0); M16(1);
+  MPut(18); MTag('Lavc60.31.102 svq1'); MZero(31-18);
+  M16(24); M16($FFFF);
+  BoxBegin('glbl'); For I:=0 To 8+Length(Ident)-1 Do MPut(Extra[I]); BoxEnd;
+  BoxBegin('fiel'); MPut(1); MPut(0); BoxEnd;
+  If ParOk And (SarN>0) Then Begin
+   G2:=SarN; K:=SarD; While K<>0 Do Begin I:=G2 Mod K; G2:=K; K:=I; End;
+   BoxBegin('pasp'); M32(SarN Div G2); M32(SarD Div G2); BoxEnd;
+  End;
+  BoxEnd; BoxEnd;
+  BoxBegin('stts'); M32(0); M32(1); M32(NFrames); M32(Delta); BoxEnd;
+  Keys:=0; For I:=0 To NFrames-1 Do If FKeys^[I]<>0 Then Inc(Keys);
+  If Keys<>NFrames Then Begin
+   BoxBegin('stss'); M32(0); M32(Keys);
+   For I:=0 To NFrames-1 Do If FKeys^[I]<>0 Then M32(I+1);
+   BoxEnd;
+  End;
+  { decoupage en blocs (movenc.c build_chunks : bloc ferme a 1 Mo) }
+  GetMem(ChOff,4*(NFrames+1)); GetMem(ChCnt,4*(NFrames+1));
+  NCh:=1; ChOff^[0]:=36; ChCnt^[0]:=1; CSz:=FSizes^[0]; CPos:=36+FSizes^[0];
+  For I:=1 To NFrames-1 Do Begin
+   If CSz+FSizes^[I]<1048576 Then Begin Inc(CSz,FSizes^[I]); Inc(ChCnt^[NCh-1]); End
+   Else Begin ChOff^[NCh]:=CPos; ChCnt^[NCh]:=1; Inc(NCh); CSz:=FSizes^[I]; End;
+   Inc(CPos,FSizes^[I]);
+  End;
+  OldV:=-1; NSt:=0;
+  For I:=0 To NCh-1 Do If ChCnt^[I]<>OldV Then Begin Inc(NSt); OldV:=ChCnt^[I]; End;
+  BoxBegin('stsc'); M32(0); M32(NSt);
+  OldV:=-1;
+  For I:=0 To NCh-1 Do If ChCnt^[I]<>OldV Then Begin M32(I+1); M32(ChCnt^[I]); M32(1); OldV:=ChCnt^[I]; End;
+  BoxEnd;
+  SzUni:=FSizes^[0]; For I:=1 To NFrames-1 Do If FSizes^[I]<>SzUni Then SzUni:=-1;
+  BoxBegin('stsz'); M32(0);
+  If SzUni>=0 Then Begin M32(SzUni); M32(NFrames); End
+  Else Begin M32(0); M32(NFrames); For I:=0 To NFrames-1 Do M32(FSizes^[I]); End;
+  BoxEnd;
+  BoxBegin('stco'); M32(0); M32(NCh); For I:=0 To NCh-1 Do M32(ChOff^[I]); BoxEnd;
+  FreeMem(ChOff); FreeMem(ChCnt);
+  BoxEnd; BoxEnd; BoxEnd;
+  If (SarN>0) And ((SarD<=0) Or (SarN<>SarD)) Then Begin
+   { mov_write_tapt_tag : largeur = av_rescale(sar.num, largeur, sar.den) }
+   TW:=0; If ParOk Then TW:=(Int64(SarN)*W+SarD Div 2) Div SarD;
+   BoxBegin('tapt');
+   M32(20); MTag('clef'); M32(0); M32(TW Shl 16); M32(Hh Shl 16);
+   M32(20); MTag('prof'); M32(0); M32(TW Shl 16); M32(Hh Shl 16);
+   M32(20); MTag('enof'); M32(0); M32(W Shl 16); M32(Hh Shl 16);
+   BoxEnd;
+  End;
+  BoxEnd;
+  BoxBegin('udta'); BoxBegin(#169+'swr'); M16(13); M16($55C4); MTag('Lavf60.16.100'); BoxEnd; BoxEnd;
+  BoxEnd;
+  WriteBytes(Mv^,MvLen);
+  CloseWrite;
+  FreeMem(Mv,65536+NFrames*16);
+ End;
+ FreeMem(Enc); FreeMem(FSizes,4*100000); FreeMem(FKeys,100000); FreeMem(SQ1EOut,Int64(W)*Hh*4+65536);
+ FreeMem(Yp,W*Hh+16); FreeMem(Up,CW*CH+16); FreeMem(Vp,CW*CH+16); FreeMem(U4,CW4*CH4+16); FreeMem(V4,CW4*CH4+16);
+End;
+
 { ==== BLOCK-ANCHOR-G6A : inserer le code du groupe G6A juste au-dessus de cette ligne ==== }
 
 { ==== BLOCK-ANCHOR-G6B : inserer le code du groupe G6B juste au-dessus de cette ligne ==== }
@@ -105720,7 +106557,7 @@ BEGIN
   { LIST-ANCHOR-G5 }
   WriteLn('DEV    snow            Snow (AVI SNOW; decodeur exact, encodeur I/P)');
   { LIST-ANCHOR-G6A }
-  WriteLn('D V    svq1            Sorenson Vector Quantizer 1 / Sorenson Video 1 / SVQ1');
+  WriteLn('DEV D  svq1            Sorenson Vector Quantizer 1 / Sorenson Video 1 / SVQ1 (encodeur Y4M -> MOV/AVI, yuv410p, EPZS)');
   WriteLn('D VSD  svq3            Sorenson Vector Quantizer 3 / Sorenson Video 3 / SVQ3');
   { LIST-ANCHOR-G6B }
 
@@ -105810,10 +106647,10 @@ BEGIN
    If InputPath='' Then Fail('Codec video de sortie attendu apres -i.');
    VideoCodec:=Lower(NextArgument);
    If VideoCodec='libxvid' Then VideoCodec:='mpeg4';
-   If (VideoCodec<>'snow') And (VideoCodec<>'png') And (VideoCodec<>'gif') And (VideoCodec<>'copy') And (VideoCodec<>'zlib') And (VideoCodec<>'zmbv') And
+   If (VideoCodec<>'snow') And (VideoCodec<>'svq1') And (VideoCodec<>'png') And (VideoCodec<>'gif') And (VideoCodec<>'copy') And (VideoCodec<>'zlib') And (VideoCodec<>'zmbv') And
     (VideoCodec<>'ffv1') And (VideoCodec<>'flv') And (VideoCodec<>'pam') And (VideoCodec<>'pbm') And (VideoCodec<>'pgm') And (VideoCodec<>'ppm') And (VideoCodec<>'pgmyuv') And (VideoCodec<>'sgi') And (VideoCodec<>'targa') And (VideoCodec<>'tiff') And (VideoCodec<>'qtrle') And (VideoCodec<>'mpeg4') And (VideoCodec<>'mpeg1video') And (VideoCodec<>'mpeg2video') And (VideoCodec<>'rawvideo') And
     (VideoCodec<>'asv1') And (VideoCodec<>'asv2') And (VideoCodec<>'msmpeg4') And (VideoCodec<>'msmpeg4v1') And (VideoCodec<>'msmpeg4v2') And (VideoCodec<>'huffyuv') And (VideoCodec<>'roqvideo') And (VideoCodec<>'h263') And (VideoCodec<>'h263p') And (VideoCodec<>'rv10') And (VideoCodec<>'rv20') And (VideoCodec<>'bmp') And (VideoCodec<>'dnxhd') And (VideoCodec<>'dvvideo') And (VideoCodec<>'jpegls') And (VideoCodec<>'ljpeg') And (VideoCodec<>'mjpeg') And (VideoCodec<>'libx264') And (VideoCodec<>'libtheora') Then
-    Fail('Codec video: png/gif, bmp, copy, ffv1, flv, msmpeg4, msmpeg4v1, msmpeg4v2, mpeg4, mpeg1video, mpeg2video, rawvideo, asv1, asv2, huffyuv, roqvideo, h263, h263p, rv10, rv20, dnxhd, dvvideo, jpegls, ljpeg, mjpeg, libx264, libxvid, libtheora.');
+    Fail('Codec video: png/gif, bmp, copy, ffv1, flv, msmpeg4, msmpeg4v1, msmpeg4v2, mpeg4, mpeg1video, mpeg2video, rawvideo, asv1, asv2, huffyuv, roqvideo, h263, h263p, rv10, rv20, svq1, dnxhd, dvvideo, jpegls, ljpeg, mjpeg, libx264, libxvid, libtheora.');
   End Else If (Argument='-vframes') Or (Argument='-frames:v') Then Begin
    If InputPath='' Then Fail('Nombre d''images attendu apres -i.');
    Value:=NextArgument; Val(Value,Number,Code);
@@ -106066,7 +106903,7 @@ BEGIN
   Else If (AsvTag='SP5X') Or (AsvTag='SP54') Then NVKind:=1104
   Else If (AsvTag='MJPG') Or (AsvTag='mjpg') Or (AsvTag='AVRn') Or (AsvTag='AVDJ') Or (AsvTag='dmb1') Or (AsvTag='JPGL') Or (AsvTag='MJLS') Or (AsvTag='MMJP') Or (AsvTag='jpeg') Or (AsvTag='IJPG') Then NVKind:=43;
  End;
- If (OptPixFmt<>'') And (OptPixFmt<>'yuv420p') And (VideoCodec<>'snow') And (VideoCodec<>'qtrle') And (VideoCodec<>'rawvideo') And (VideoCodec<>'zlib') And (VideoCodec<>'zmbv') And (VideoCodec<>'targa') And (VideoCodec<>'tiff') Then Fail('-pix_fmt: seul yuv420p est pris en charge.');
+ If (OptPixFmt<>'') And (OptPixFmt<>'yuv420p') And (OptPixFmt<>'yuv410p') And (VideoCodec<>'svq1') And (VideoCodec<>'snow') And (VideoCodec<>'qtrle') And (VideoCodec<>'rawvideo') And (VideoCodec<>'zlib') And (VideoCodec<>'zmbv') And (VideoCodec<>'targa') And (VideoCodec<>'tiff') Then Fail('-pix_fmt: seul yuv420p est pris en charge.');
  NVAudioOut:=(OutputFormat='wav') Or (OutputFormat='roq') Or (OutputFormat='mp3') Or (OutputFormat='mp2') Or (OutputFormat='ac3') Or (OutputFormat='aac') Or (OutputFormat='adx') Or (OutputFormat='aiff');
  If ((InputFormat='mp4') Or (InputFormat='avi') Or (InputFormat='flv')) And (NVKind=0) And Not IsHTTP(InputPath) And Not NVAudioOut And Not NoVideo And (VideoCodec<>'copy') And
   ((OutputFormat='yuv4mpegpipe') Or (OutputFormat='png') Or (OutputFormat='bmp') Or (VideoCodec='png') Or (VideoCodec='bmp') Or (VideoCodec='mpeg4') Or
@@ -106111,6 +106948,14 @@ BEGIN
   If NoVideo Or (AudioCodec<>'') Or HasBitrate Or (RequestedRate<>0) Or (RequestedChannels<>0) Or (ImageWidth<>0) Or IsHTTP(InputPath) Or HasCrop Or (VideoFrames<>0) Then
    Fail('rawvideo: entree Y4M locale sans autre option requise.');
   Temps[2]:=NewTemporary; EncodeRawVideo(Intermediate,Temps[2]);
+  Commit(Temps[2]); Temps[2]:=''; WriteLn('Video creee: ',OutputPath); Halt(0);
+ End;
+ If (InputFormat='yuv4mpegpipe') And (VideoCodec='svq1') Then Begin
+  If NoVideo Or (AudioCodec<>'') Or HasBitrate Or (RequestedRate<>0) Or (RequestedChannels<>0) Or (ImageWidth<>0) Or IsHTTP(InputPath) Or HasCrop Or (VideoFrames<>0) Then
+   Fail('svq1: entree Y4M locale sans autre option requise.');
+  If (OutputFormat<>'mp4') And (OutputFormat<>'avi') And (OutputFormat<>'') Then Fail('svq1: sortie MOV ou AVI requise.');
+  If (OutputFormat='mp4') And ((Lower(Extension(OutputPath))='mp4') Or (Lower(Extension(OutputPath))='m4a') Or (Lower(Extension(OutputPath))='m4v')) Then Fail('svq1: sortie MOV (.mov) requise; le tag SVQ1 n''est pas pris en charge en MP4.');
+  Temps[2]:=NewTemporary; EncodeSVQ1(Intermediate,Temps[2],OutputFormat='avi',RqGop,THQuality);
   Commit(Temps[2]); Temps[2]:=''; WriteLn('Video creee: ',OutputPath); Halt(0);
  End;
  If (InputFormat='yuv4mpegpipe') And (VideoCodec='qtrle') Then Begin
