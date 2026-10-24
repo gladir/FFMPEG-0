@@ -22306,6 +22306,8 @@ Procedure DecodeQTRLE(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeRPZA(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeTheoraOgg(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeVP3Avi(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure DecodeMKVVideo(Const Source,Target: String; Mode: LongInt); Forward; { H7 }
+Procedure H7TheoraMov(Mode: LongInt; Const Target: String; SarN,SarD: LongInt); Forward; { H7 }
 Procedure DecodeTheoraQX(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeSnow(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeSMC(Const Source,Target: String; Mode: LongInt); Forward;
@@ -23093,6 +23095,7 @@ End;
 Procedure DecodeVPD(Const Source,Target: String; Mode,Kind: LongInt); Forward;
 Procedure DecodeNV2(Kind: LongInt; Const Source,Target: String; Mode: LongInt);
 Begin
+ If Kind=1800 Then Begin DecodeMKVVideo(Source,Target,Mode); Exit; End; { H7 }
  If (Kind>=1100) And (Kind<=1109) Then Begin DecodeG1(Source,Target,Mode,Kind); Exit; End;
  If Kind=1601 Then Begin DecodeSnow(Source,Target,Mode); Exit; End;
  If Kind=1700 Then Begin DecodeVMD(Source,Target,Mode); Exit; End; { G2B }
@@ -46643,7 +46646,8 @@ Begin
   If Not QXFind(StblPos+8,StblPos+StblSize,'co64',CoPos,CoSize) Then Fail('mov: stco absent.');
   Is64:=True;
  End;
- Delta:=QXB32(SttsPos+20); If (Delta<=0) Or (Ts<=0) Then Fail('mov: cadence incorrecte.');
+ Delta:=QXB32(SttsPos+20); If Ts<=0 Then Fail('mov: cadence incorrecte.');
+ If Delta<=0 Then Delta:=1;
  QXRn:=Ts; QXRd:=Delta; NVGcd(QXRn,QXRd);
  FixedSize:=QXB32(SzPos+12); Samples:=QXB32(SzPos+16);
  If (Samples<=0) Or (Samples>16777216) Then Fail('mov: nombre d''echantillons incorrect.');
@@ -75820,6 +75824,7 @@ End;
 Type
  TVGDBook=Record Dim,Lookup,N: LongInt; Vec: PVGS; Trie: PVGI; NNodes: LongInt; End;
  TVGDFloor=Record
+  Typ,F0Order,F0Rate,F0Bark,F0AmpBits,F0AmpOff,F0NBooks: LongInt; F0Books: Array[0..15] Of Byte; F0Map: Array[0..1] Of PVGI; F0MapSize: Array[0..1] Of LongInt; F0Lsp: PVGS;
   Partitions,Mult,XDim: LongInt;
   PCls: Array[0..31] Of Byte; CDim,CSub,CMaster: Array[0..15] Of Byte; SBooks: Array[0..15,0..7] Of SmallInt;
   List: TVGFlA;
@@ -75837,7 +75842,7 @@ Var
  VGDMaps: Array[0..63] Of TVGDMap; VGDNMaps: LongInt;
  VGDModeFlag,VGDModeMap: Array[0..63] Of LongInt; VGDNModes: LongInt;
  VGDCh,VGDRate,VGDBs0,VGDBs1: LongInt;
- VGDPkt: PEABuffer; VGDPLen,VGDPos: LongInt;
+ VGDPkt: PEABuffer; VGDPLen,VGDPos,VGDExtra: LongInt;
  VGDChanRes,VGDSaved: PVGS; VGDFloorBuf: Array[0..254] Of PVGS;
  VGDPrevWin: LongInt; VGDFirst: Boolean; VGDLg: Array[0..1] Of LongInt;
  VGDTmpBits: Array[0..65535] Of Byte;
@@ -75848,14 +75853,17 @@ Const
  VGDChOff: Array[0..7,0..7] Of Byte=((0,0,0,0,0,0,0,0),(0,1,0,0,0,0,0,0),(0,2,1,0,0,0,0,0),(0,1,2,3,0,0,0,0),
   (0,2,1,3,4,0,0,0),(0,2,1,5,3,4,0,0),(0,2,1,6,5,3,4,0),(0,2,1,7,5,6,3,4));
 
+Var VGDSoft,VGDErr: Boolean;
+
 Procedure VGDBad(Const S: String);
 Begin
+ If VGDSoft Then Begin VGDErr:=True; Exit; End;
  Fail('vorbis: '+S);
 End;
 
 Function VGDByte(P: LongInt): LongWord;
 Begin
- If (P>=0) And (P<VGDPLen) Then VGDByte:=VGDPkt^[P] Else VGDByte:=0;
+ If (P>=0) And (P<VGDPLen+VGDExtra) Then VGDByte:=VGDPkt^[P] Else VGDByte:=0;
 End;
 
 Function VGDPeek32: LongWord;
@@ -75911,6 +75919,13 @@ End;
 Procedure VGDFreeSetup;
 Var I: LongInt;
 Begin
+ For I:=0 To VGDNFloors-1 Do If VGDFloors[I].Typ=0 Then Begin
+  If VGDFloors[I].F0Map[0]<>Nil Then FreeMem(VGDFloors[I].F0Map[0]);
+  If VGDFloors[I].F0Map[1]<>Nil Then FreeMem(VGDFloors[I].F0Map[1]);
+  If VGDFloors[I].F0Lsp<>Nil Then FreeMem(VGDFloors[I].F0Lsp);
+  VGDFloors[I].F0Map[0]:=Nil; VGDFloors[I].F0Map[1]:=Nil; VGDFloors[I].F0Lsp:=Nil;
+ End;
+ VGDNFloors:=0;
  For I:=0 To VGDNBooks-1 Do Begin
   If VGDBooks[I].Vec<>Nil Then FreeMem(VGDBooks[I].Vec);
   If VGDBooks[I].Trie<>Nil Then FreeMem(VGDBooks[I].Trie);
@@ -75924,24 +75939,150 @@ Procedure VGDParseId(P: PEABuffer; Len: LongInt);
 Var Bl0,Bl1: LongInt; I: LongInt;
 Begin
  VGDPkt:=P; VGDPLen:=Len; VGDPos:=0;
- If VGDBits(8)<>1 Then VGDBad('premier en-tete non identification.');
- For I:=1 To 6 Do If VGDBits(8)<>LongWord(Ord('vorbis'[I])) Then VGDBad('signature de l''en-tete d''identification absente.');
+ If VGDBits(8)<>1 Then Begin VGDBad('premier en-tete non identification.'); Exit; End;
+ For I:=1 To 6 Do If VGDBits(8)<>LongWord(Ord('vorbis'[I])) Then Begin VGDBad('signature de l''en-tete d''identification absente.'); Exit; End;
  VGDSkip(32);
  VGDCh:=VGDBits(8);
- If VGDCh<=0 Then VGDBad('nombre de canaux invalide.');
+ If VGDCh<=0 Then Begin VGDBad('nombre de canaux invalide.'); Exit; End;
  VGDRate:=VGDBits(32);
- If VGDRate<=0 Then VGDBad('frequence invalide.');
+ If VGDRate<=0 Then Begin VGDBad('frequence invalide.'); Exit; End;
  VGDSkip(96);
  Bl0:=VGDBits(4); Bl1:=VGDBits(4);
- If (Bl0>13) Or (Bl0<6) Or (Bl1>13) Or (Bl1<6) Or (Bl1<Bl0) Then VGDBad('taille de bloc illegale.');
+ If (Bl0>13) Or (Bl0<6) Or (Bl1>13) Or (Bl1<6) Or (Bl1<Bl0) Then Begin VGDBad('taille de bloc illegale.'); Exit; End;
  VGDBs0:=1 Shl Bl0; VGDBs1:=1 Shl Bl1;
- If VGDBits(1)=0 Then VGDBad('bit de cadrage de l''en-tete d''identification absent.');
+ If VGDBits(1)=0 Then Begin VGDBad('bit de cadrage de l''en-tete d''identification absent.'); Exit; End;
  GetMem(VGDChanRes,Int64(VGDBs1 Div 2)*VGDCh*4+16);
  GetMem(VGDSaved,Int64(VGDBs1 Div 4)*VGDCh*4+16);
  FillChar(VGDSaved^,Int64(VGDBs1 Div 4)*VGDCh*4,0);
  For I:=0 To VGDCh-1 Do Begin GetMem(VGDFloorBuf[I],(VGDBs1 Div 2)*4+16); End;
  VGDPrevWin:=-1;
  VGDLg[0]:=VGMdctFor(1,VGDBs0 Shr 1); VGDLg[1]:=VGMdctFor(1,VGDBs1 Shr 1);
+End;
+
+{ ---- plancher 0 (vorbisdec.c : create_map, vorbis_floor0_decode) ---- }
+Function VGDBark(X: Single): Double;
+Var K1,K2,K3,K4,K5,A,B,C: Single; T1,T2: Double;
+Begin
+ K1:=0.00074; K2:=13.1; K3:=1.85e-8; K4:=2.24; K5:=1e-4;
+ A:=K1*X; T1:=Double(K2)*ArcTan(Double(A));
+ B:=K3*X; B:=B*X; T2:=Double(K4)*ArcTan(Double(B));
+ C:=K5*X;
+ T1:=T1+T2; T1:=T1+Double(C);
+ VGDBark:=T1;
+End;
+
+Function VGDBits64(N: LongInt): QWord;
+Var Lo,Hi: QWord;
+Begin
+ If N<=32 Then VGDBits64:=VGDBits(N)
+ Else Begin Lo:=VGDBits(32); Hi:=VGDBits(N-32); VGDBits64:=Lo Or (Hi Shl 32); End;
+End;
+
+Function VGDQToD(V: QWord): Double;
+Var I: Int64; D: Double;
+Begin
+ If V>=QWord($8000000000000000) Then I:=Int64((V Shr 1) Or (V And 1)) Else I:=Int64(V);
+ D:=I;
+ If V>=QWord($8000000000000000) Then D:=D*2.0;
+ VGDQToD:=D;
+End;
+
+Procedure VGDParseFloor0(Var F: TVGDFloor);
+Var I,Bi,Bd,MaxDim,Bl,N,Idx: LongInt; Fa,Fb,Fh: Single; D,E: Double;
+Begin
+ F.F0Order:=VGDBits(8);
+ If F.F0Order=0 Then Begin VGDBad('Floor 0 order is 0.'); Exit; End;
+ F.F0Rate:=VGDBits(16);
+ If F.F0Rate=0 Then Begin VGDBad('Floor 0 rate is 0.'); Exit; End;
+ F.F0Bark:=VGDBits(16);
+ If F.F0Bark=0 Then Begin VGDBad('Floor 0 bark map size is 0.'); Exit; End;
+ F.F0AmpBits:=VGDBits(6); F.F0AmpOff:=VGDBits(8); F.F0NBooks:=VGDBits(4)+1;
+ MaxDim:=0;
+ For I:=0 To F.F0NBooks-1 Do Begin
+  Bi:=VGDBits(8);
+  If Bi>=VGDNBooks Then Begin VGDBad('indice de livre hors limites.'); Exit; End;
+  F.F0Books[I]:=Bi;
+  Bd:=VGDBooks[Bi].Dim; If Bd>MaxDim Then MaxDim:=Bd;
+ End;
+ For Bl:=0 To 1 Do Begin
+  If Bl=0 Then N:=VGDBs0 Div 2 Else N:=VGDBs1 Div 2;
+  GetMem(F.F0Map[Bl],(Int64(N)+1)*4+16);
+  Fh:=F.F0Rate; Fh:=Fh/2.0;
+  D:=F.F0Bark; D:=D/VGDBark(Fh);
+  For Idx:=0 To N-1 Do Begin
+   Fa:=F.F0Rate*Idx; Fb:=2.0; Fb:=Fb*N; Fa:=Fa/Fb;
+   E:=VGDBark(Fa)*D;
+   If E<-2147483648.0 Then E:=-2147483648.0;
+   If E>2147483647.0 Then E:=2147483647.0;
+   F.F0Map[Bl]^[Idx]:=Trunc(Int(E));
+   If F.F0Bark-1<F.F0Map[Bl]^[Idx] Then F.F0Map[Bl]^[Idx]:=F.F0Bark-1;
+  End;
+  F.F0Map[Bl]^[N]:=-1;
+  F.F0MapSize[Bl]:=N;
+ End;
+ GetMem(F.F0Lsp,(Int64(F.F0Order)+1+MaxDim)*4+16);
+End;
+
+{ retourne 0 si utilise, 1 si silence, <0 si erreur }
+Function VGDFloor0(Var F: TVGDFloor; Vec: PVGS; BlockFlag: LongInt): LongInt;
+Var
+ Amp,Lim,Prod: QWord; Last,P,Q,Wstep,TwoCos,Cv,Tc,Two,Four,Half,K9: Single;
+ BookIdx,LspLen,Idx,VecOff,Order,I,J,IterCond,Dim: LongInt; CB: ^TVGDBook; Lsp: PVGS; Dd,Num,Den,Sq,Ex: Double;
+Begin
+ VGDFloor0:=1;
+ If F.F0AmpBits=0 Then Exit;
+ Amp:=VGDBits64(F.F0AmpBits);
+ If Amp=0 Then Exit;
+ Lsp:=F.F0Lsp; Last:=0;
+ BookIdx:=VGDBits(VGIlog(F.F0NBooks));
+ If BookIdx>=F.F0NBooks Then BookIdx:=0;
+ CB:=@VGDBooks[F.F0Books[BookIdx]];
+ If CB^.Vec=Nil Then Begin VGDFloor0:=-1; Exit; End;
+ Dim:=CB^.Dim; LspLen:=0; Order:=F.F0Order;
+ While LspLen<Order Do Begin
+  VecOff:=VGDVlc(CB^);
+  If VecOff<0 Then Begin VGDFloor0:=-1; Exit; End;
+  VecOff:=VecOff*Dim;
+  For Idx:=0 To Dim-1 Do Begin Cv:=CB^.Vec^[VecOff+Idx]; Cv:=Cv+Last; Lsp^[LspLen+Idx]:=Cv; End;
+  Last:=Lsp^[LspLen+Dim-1];
+  Inc(LspLen,Dim);
+ End;
+ Dd:=Pi; Dd:=Dd/F.F0Bark; Wstep:=Dd;
+ Two:=2.0; Four:=4.0; Half:=0.5; K9:=0.11512925;
+ For I:=0 To Order-1 Do Begin Dd:=Lsp^[I]; Dd:=Cos(Dd); Dd:=Double(Two)*Dd; Lsp^[I]:=Dd; End;
+ I:=0;
+ While I<F.F0MapSize[BlockFlag] Do Begin
+  IterCond:=F.F0Map[BlockFlag]^[I];
+  P:=Half; Q:=Half;
+  Tc:=IterCond; Tc:=Wstep*Tc; Dd:=Tc; Dd:=Cos(Dd); Dd:=Double(Two)*Dd; TwoCos:=Dd;
+  J:=0;
+  While J+1<Order Do Begin
+   Cv:=Lsp^[J]-TwoCos; Q:=Q*Cv;
+   Cv:=Lsp^[J+1]-TwoCos; P:=P*Cv;
+   Inc(J,2);
+  End;
+  If J=Order Then Begin
+   Cv:=Two-TwoCos; Cv:=P*Cv; P:=P*Cv;
+   Cv:=Two+TwoCos; Cv:=Q*Cv; Q:=Q*Cv;
+  End Else Begin
+   Cv:=TwoCos-Lsp^[J]; Q:=Q*Cv;
+   Cv:=TwoCos*TwoCos; Cv:=Four-Cv; Cv:=P*Cv; P:=P*Cv;
+   Q:=Q*Q;
+  End;
+  Cv:=P+Q;
+  If Cv=0.0 Then Begin VGDFloor0:=-1; Exit; End;
+  Sq:=Cv; Sq:=Sqrt(Sq);
+  Prod:=Amp*QWord(F.F0AmpOff);
+  Num:=VGDQToD(Prod);
+  Lim:=(QWord(1) Shl F.F0AmpBits)-1;
+  Den:=VGDQToD(Lim); Den:=Den*Sq;
+  Ex:=Num/Den; Ex:=Ex-F.F0AmpOff; Ex:=Ex*Double(K9);
+  Q:=Exp(Ex);
+  Repeat
+   Vec^[I]:=Q; Inc(I);
+  Until F.F0Map[BlockFlag]^[I]<>IterCond;
+ End;
+ VGDFloor0:=0;
 End;
 
 Procedure VGDParseSetup(P: PEABuffer; Len: LongInt);
@@ -75951,19 +76092,19 @@ Var
  B: ^TVGDBook; F: ^TVGDFloor; R: ^TVGDRes; Mp: ^TVGDMap; Cascade: Array[0..63] Of Byte; Hi,Lo: LongInt;
 Begin
  VGDPkt:=P; VGDPLen:=Len; VGDPos:=0;
- If VGDBits(8)<>5 Then VGDBad('troisieme en-tete non setup.');
- For I:=1 To 6 Do If VGDBits(8)<>LongWord(Ord('vorbis'[I])) Then VGDBad('signature de l''en-tete setup absente.');
+ If VGDBits(8)<>5 Then Begin VGDBad('troisieme en-tete non setup.'); Exit; End;
+ For I:=1 To 6 Do If VGDBits(8)<>LongWord(Ord('vorbis'[I])) Then Begin VGDBad('signature de l''en-tete setup absente.'); Exit; End;
  VGDNBooks:=VGDBits(8)+1;
  For I:=0 To VGDNBooks-1 Do Begin VGDBooks[I].Vec:=Nil; VGDBooks[I].Trie:=Nil; End;
  GetMem(Codes,65536*4+8); GetMem(Mult,65536*4+8);
  FillChar(VGDTmpBits,SizeOf(VGDTmpBits),0);
  For Cb:=0 To VGDNBooks-1 Do Begin
   B:=@VGDBooks[Cb];
-  If VGDBits(24)<>$564342 Then VGDBad('livre de code corrompu.');
+  If VGDBits(24)<>$564342 Then Begin VGDBad('livre de code corrompu.'); Exit; End;
   B^.Dim:=VGDBits(16);
-  If (B^.Dim>16) Or (B^.Dim=0) Then VGDBad('dimension de livre invalide.');
+  If (B^.Dim>16) Or (B^.Dim=0) Then Begin VGDBad('dimension de livre invalide.'); Exit; End;
   Entries:=VGDBits(24);
-  If Entries>65536 Then VGDBad('trop d''entrees dans un livre.');
+  If Entries>65536 Then Begin VGDBad('trop d''entrees dans un livre.'); Exit; End;
   Ordered:=VGDBits(1); Used:=0;
   If Ordered=0 Then Begin
    Sparse:=VGDBits(1);
@@ -75982,7 +76123,7 @@ Begin
     For I:=CurE To Num+CurE-1 Do If I<Used Then VGDTmpBits[I]:=CurL;
     Inc(CurE,Num); Inc(CurL);
    End;
-   If CurE>Used Then VGDBad('plus de longueurs que de codes.');
+   If CurE>Used Then Begin VGDBad('plus de longueurs que de codes.'); Exit; End;
   End;
   B^.Lookup:=VGDBits(4);
   B^.N:=Entries;
@@ -75991,7 +76132,7 @@ Begin
    Mn:=VGDFloat(VGDBits(32)); Dl:=VGDFloat(VGDBits(32));
    ValBits:=VGDBits(4)+1; SeqP:=VGDBits(1);
    Move(Mn,Tmp,4); Move(Dl,Bits8,4);
-   If (((Tmp Shr 23) And 255)=255) Or (((Bits8 Shr 23) And 255)=255) Then VGDBad('valeurs de livre non finies.');
+   If (((Tmp Shr 23) And 255)=255) Or (((Bits8 Shr 23) And 255)=255) Then Begin VGDBad('valeurs de livre non finies.'); Exit; End;
    For I:=0 To LookV-1 Do Mult^[I]:=VGDBits(ValBits);
    If Used<>0 Then Begin
     GetMem(B^.Vec,Int64(Used)*B^.Dim*4+8);
@@ -76012,10 +76153,10 @@ Begin
      Inc(J);
     End;
    End;
-   If J<>Used Then VGDBad('erreur de construction des vecteurs.');
+   If J<>Used Then Begin VGDBad('erreur de construction des vecteurs.'); Exit; End;
    Entries:=Used;
-  End Else If B^.Lookup>=2 Then VGDBad('type de lookup non pris en charge.');
-  If Not VGLen2Vlc(PEABuffer(@VGDTmpBits),Codes,Entries) Then VGDBad('longueurs de code invalides.');
+  End Else If B^.Lookup>=2 Then Begin VGDBad('type de lookup non pris en charge.'); Exit; End;
+  If Not VGLen2Vlc(PEABuffer(@VGDTmpBits),Codes,Entries) Then Begin VGDBad('longueurs de code invalides.'); Exit; End;
   { arbre de decodage }
   Total:=1;
   For I:=0 To Entries-1 Do Inc(Total,VGDTmpBits[I]);
@@ -76038,14 +76179,15 @@ Begin
  FreeMem(Codes); FreeMem(Mult);
  { transformations temporelles }
  N:=VGDBits(6)+1;
- For I:=0 To N-1 Do If VGDBits(16)<>0 Then VGDBad('transformation temporelle non nulle.');
+ For I:=0 To N-1 Do If VGDBits(16)<>0 Then Begin VGDBad('transformation temporelle non nulle.'); Exit; End;
  { planchers }
  VGDNFloors:=VGDBits(6)+1;
  For I:=0 To VGDNFloors-1 Do Begin
   F:=@VGDFloors[I];
   K:=VGDBits(16);
-  If K=0 Then VGDBad('plancher de type 0 non pris en charge.');
-  If K<>1 Then VGDBad('type de plancher invalide.');
+  F^.Typ:=K; F^.F0Map[0]:=Nil; F^.F0Map[1]:=Nil; F^.F0Lsp:=Nil;
+  If K=0 Then Begin VGDParseFloor0(F^); If VGDErr Then Exit; Continue; End;
+  If K<>1 Then Begin VGDBad('type de plancher invalide.'); Exit; End;
   Maxc:=-1;
   F^.Partitions:=VGDBits(5);
   For J:=0 To F^.Partitions-1 Do Begin
@@ -76055,24 +76197,24 @@ Begin
    F^.CDim[J]:=VGDBits(3)+1; F^.CSub[J]:=VGDBits(2);
    If F^.CSub[J]<>0 Then Begin
     F^.CMaster[J]:=VGDBits(8);
-    If F^.CMaster[J]>=VGDNBooks Then VGDBad('indice de livre hors limites.');
+    If F^.CMaster[J]>=VGDNBooks Then Begin VGDBad('indice de livre hors limites.'); Exit; End;
    End;
    For K:=0 To (1 Shl F^.CSub[J])-1 Do Begin
     Rb:=LongInt(VGDBits(8))-1;
-    If Rb<>-1 Then If Rb>=VGDNBooks Then VGDBad('indice de livre hors limites.');
+    If Rb<>-1 Then If Rb>=VGDNBooks Then Begin VGDBad('indice de livre hors limites.'); Exit; End;
     F^.SBooks[J,K]:=Rb;
    End;
   End;
   F^.Mult:=VGDBits(2)+1; F^.XDim:=2;
   For J:=0 To F^.Partitions-1 Do Inc(F^.XDim,F^.CDim[F^.PCls[J]]);
   Rb:=VGDBits(4);
-  If (Rb=0) And (F^.Partitions<>0) Then VGDBad('rangebits nul non conforme.');
+  If (Rb=0) And (F^.Partitions<>0) Then Begin VGDBad('rangebits nul non conforme.'); Exit; End;
   RMax:=1 Shl Rb;
-  If RMax>VGDBs1 Div 2 Then VGDBad('valeur de plancher trop grande pour la taille de bloc.');
+  If RMax>VGDBs1 Div 2 Then Begin VGDBad('valeur de plancher trop grande pour la taille de bloc.'); Exit; End;
   F^.List[0].X:=0; F^.List[1].X:=RMax; K:=2;
   For J:=0 To F^.Partitions-1 Do
    For Lu:=0 To F^.CDim[F^.PCls[J]]-1 Do Begin F^.List[K].X:=VGDBits(Rb); Inc(K); End;
-  If Not VGReadyFloor(F^.List,F^.XDim) Then VGDBad('X dupliques dans le plancher.');
+  If Not VGReadyFloor(F^.List,F^.XDim) Then Begin VGDBad('X dupliques dans le plancher.'); Exit; End;
  End;
  { residus }
  VGDNRes:=VGDBits(6)+1;
@@ -76080,10 +76222,10 @@ Begin
  For I:=0 To VGDNRes-1 Do Begin
   R:=@VGDRes[I];
   R^.Typ:=VGDBits(16); R^.Begin_:=VGDBits(24); R^.End_:=VGDBits(24); R^.PSize:=VGDBits(24)+1;
-  If (R^.Begin_>R^.End_) Or ((R^.End_-R^.Begin_) Div R^.PSize>65535) Then VGDBad('partition hors limites.');
+  If (R^.Begin_>R^.End_) Or ((R^.End_-R^.Begin_) Div R^.PSize>65535) Then Begin VGDBad('partition hors limites.'); Exit; End;
   R^.NCls:=VGDBits(6)+1;
   R^.ClassBook:=VGDBits(8);
-  If R^.ClassBook>=VGDNBooks Then VGDBad('indice de livre hors limites.');
+  If R^.ClassBook>=VGDNBooks Then Begin VGDBad('indice de livre hors limites.'); Exit; End;
   R^.Ptns:=(R^.End_-R^.Begin_) Div R^.PSize;
   GetMem(R^.Classifs,Int64(R^.Ptns+1)*VGDCh+8);
   For J:=0 To R^.NCls-1 Do Begin
@@ -76096,7 +76238,7 @@ Begin
    For K:=0 To 7 Do Begin
     If (Cascade[J] And (1 Shl K))<>0 Then Begin
      Rb:=VGDBits(8);
-     If Rb>=VGDNBooks Then VGDBad('indice de livre hors limites.');
+     If Rb>=VGDNBooks Then Begin VGDBad('indice de livre hors limites.'); Exit; End;
      R^.Books[J,K]:=Rb;
      If K>R^.MaxPass Then R^.MaxPass:=K;
     End Else R^.Books[J,K]:=-1;
@@ -76106,24 +76248,24 @@ Begin
  VGDNMaps:=VGDBits(6)+1;
  For I:=0 To VGDNMaps-1 Do Begin
   Mp:=@VGDMaps[I];
-  If VGDBits(16)<>0 Then VGDBad('type de mapping non conforme.');
+  If VGDBits(16)<>0 Then Begin VGDBad('type de mapping non conforme.'); Exit; End;
   If VGDBits(1)<>0 Then Mp^.Submaps:=VGDBits(4)+1 Else Mp^.Submaps:=1;
   If VGDBits(1)<>0 Then Begin
    Mp^.Coupling:=VGDBits(8)+1;
-   If VGDCh<2 Then VGDBad('couplage avec moins de deux canaux.');
+   If VGDCh<2 Then Begin VGDBad('couplage avec moins de deux canaux.'); Exit; End;
    For J:=0 To Mp^.Coupling-1 Do Begin
-    Mp^.Mag[J]:=VGDBits(VGIlog(VGDCh-1)); If Mp^.Mag[J]>=VGDCh Then VGDBad('indice de canal hors limites.');
-    Mp^.Ang[J]:=VGDBits(VGIlog(VGDCh-1)); If Mp^.Ang[J]>=VGDCh Then VGDBad('indice de canal hors limites.');
+    Mp^.Mag[J]:=VGDBits(VGIlog(VGDCh-1)); If Mp^.Mag[J]>=VGDCh Then Begin VGDBad('indice de canal hors limites.'); Exit; End;
+    Mp^.Ang[J]:=VGDBits(VGIlog(VGDCh-1)); If Mp^.Ang[J]>=VGDCh Then Begin VGDBad('indice de canal hors limites.'); Exit; End;
    End;
   End Else Mp^.Coupling:=0;
-  If VGDBits(2)<>0 Then VGDBad('mapping invalide.');
+  If VGDBits(2)<>0 Then Begin VGDBad('mapping invalide.'); Exit; End;
   FillChar(Mp^.Mux,SizeOf(Mp^.Mux),0);
   If Mp^.Submaps>1 Then
    For J:=0 To VGDCh-1 Do Mp^.Mux[J]:=VGDBits(4);
   For J:=0 To Mp^.Submaps-1 Do Begin
    VGDSkip(8);
-   Mp^.SubFloor[J]:=VGDBits(8); If Mp^.SubFloor[J]>=VGDNFloors Then VGDBad('indice de plancher hors limites.');
-   Mp^.SubRes[J]:=VGDBits(8); If Mp^.SubRes[J]>=VGDNRes Then VGDBad('indice de residu hors limites.');
+   Mp^.SubFloor[J]:=VGDBits(8); If Mp^.SubFloor[J]>=VGDNFloors Then Begin VGDBad('indice de plancher hors limites.'); Exit; End;
+   Mp^.SubRes[J]:=VGDBits(8); If Mp^.SubRes[J]>=VGDNRes Then Begin VGDBad('indice de residu hors limites.'); Exit; End;
   End;
  End;
  { modes }
@@ -76131,9 +76273,9 @@ Begin
  For I:=0 To VGDNModes-1 Do Begin
   VGDModeFlag[I]:=VGDBits(1); VGDSkip(32);
   VGDModeMap[I]:=VGDBits(8);
-  If VGDModeMap[I]>=VGDNMaps Then VGDBad('indice de mapping hors limites.');
+  If VGDModeMap[I]>=VGDNMaps Then Begin VGDBad('indice de mapping hors limites.'); Exit; End;
  End;
- If VGDBits(1)=0 Then VGDBad('bit de cadrage de l''en-tete setup absent.');
+ If VGDBits(1)=0 Then Begin VGDBad('bit de cadrage de l''en-tete setup absent.'); Exit; End;
 End;
 
 { ---- plancher 1 : retourne 0 si utilise, 1 si silence, <0 si erreur ---- }
@@ -76380,7 +76522,7 @@ Begin
  For I:=0 To Ch-1 Do FillChar(VGDFloorBuf[I]^,VLen*4,0);
  For I:=0 To Ch-1 Do Begin
   If Mp^.Submaps>1 Then Fl:=@VGDFloors[Mp^.SubFloor[Mp^.Mux[I]]] Else Fl:=@VGDFloors[Mp^.SubFloor[0]];
-  Ret:=VGDFloor1(Fl^,VGDFloorBuf[I]);
+  If Fl^.Typ=0 Then Ret:=VGDFloor0(Fl^,VGDFloorBuf[I],BlockFlag) Else Ret:=VGDFloor1(Fl^,VGDFloorBuf[I]);
   If Ret<0 Then Begin If VGDebug Then WriteLn('floor fail ',I); Exit; End;
   NoRes[I]:=Ret;
  End;
@@ -76447,7 +76589,7 @@ End;
 
 { ---- analyseur de paquets (vorbis_parser.c) : modes deduits de l'en-tete setup par la meme heuristique ---- }
 Var
- VGDPrevBlock,VGDModeMask,VGDPrevMask,VGDPMode: LongInt; VGDPBs: Array[0..63] Of LongInt;
+ VGDPrevBlock,VGDModeMask,VGDPrevMask,VGDPMode,VGDPB0,VGDPB1: LongInt; VGDPBs: Array[0..63] Of LongInt;
 
 Function VGDParserInit(P: PEABuffer; Len: LongInt): Boolean;
 Var Rev: PEABuffer; I,Pos,Total,Framing,MC,LastMC,Pos0,A,B,C,V: LongInt; Got: Boolean;
@@ -76493,8 +76635,9 @@ Begin
   Inc(Pos,40); VGDPBs[I]:=RB(1);
  End;
  FreeMem(Rev);
- VGDPrevBlock:=VGDBs0;
- If VGDPBs[0]<>0 Then VGDPrevBlock:=VGDBs1;
+ VGDPB0:=VGDBs0; VGDPB1:=VGDBs1;
+ VGDPrevBlock:=VGDPB0;
+ If VGDPBs[0]<>0 Then VGDPrevBlock:=VGDPB1;
  VGDParserInit:=True;
 End;
 
@@ -76509,11 +76652,40 @@ Begin
  If Mode>=VGDPMode Then Begin VGDParseDur:=-1; Exit; End;
  If VGDPBs[Mode]<>0 Then Begin
   If (P^[0] And VGDPrevMask)<>0 Then Flag:=1 Else Flag:=0;
-  If Flag<>0 Then PrevB:=VGDBs1 Else PrevB:=VGDBs0;
+  If Flag<>0 Then PrevB:=VGDPB1 Else PrevB:=VGDPB0;
  End;
- If VGDPBs[Mode]<>0 Then CurB:=VGDBs1 Else CurB:=VGDBs0;
+ If VGDPBs[Mode]<>0 Then CurB:=VGDPB1 Else CurB:=VGDPB0;
  VGDParseDur:=(PrevB+CurB) Shr 2;
  VGDPrevBlock:=CurB;
+End;
+
+{ ---- en-tete WAV (muxer wav de FFmpeg : WAVE_FORMAT_EXTENSIBLE au-dela de 2 canaux) ---- }
+Procedure VGWavHdr(Rate,Ch,Bytes: LongInt);
+Var Wr: Array[0..67] Of Byte; Mask: LongInt;
+Procedure P32(At: Integer; Vv: LongInt);
+Var Q: Integer;
+Begin For Q:=0 To 3 Do Begin Wr[At+Q]:=Vv And 255; Vv:=Vv Shr 8; End; End;
+Procedure P16(At: Integer; Vv: LongInt);
+Begin Wr[At]:=Vv And 255; Wr[At+1]:=(Vv Shr 8) And 255; End;
+Begin
+ If Ch<=2 Then Begin ADPCMWaveHeader(Rate,Ch,Bytes); Exit; End;
+ If Ch>8 Then Begin ADPCMWaveHeader(Rate,Ch,Bytes); Exit; End;
+ Case Ch Of 3: Mask:=$7; 4: Mask:=$33; 5: Mask:=$37; 6: Mask:=$3F; 7: Mask:=$70F; 8: Mask:=$63F; Else Mask:=0; End;
+ FillChar(Wr,SizeOf(Wr),0);
+ Wr[0]:=82; Wr[1]:=73; Wr[2]:=70; Wr[3]:=70; Wr[8]:=87; Wr[9]:=65; Wr[10]:=86; Wr[11]:=69;
+ Wr[12]:=102; Wr[13]:=109; Wr[14]:=116; Wr[15]:=32;
+ P32(4,60+Bytes); P32(16,40); P16(20,$FFFE); P16(22,Ch); P32(24,Rate); P32(28,Rate*Ch*2); P16(32,Ch*2); P16(34,16);
+ P16(36,22); P16(38,16); P32(40,Mask);
+ Wr[44]:=1; Wr[47]:=0; Wr[48]:=0; Wr[49]:=0; Wr[50]:=16; Wr[52]:=128; Wr[55]:=170; Wr[57]:=56; Wr[58]:=155; Wr[59]:=113;
+ Wr[60]:=100; Wr[61]:=97; Wr[62]:=116; Wr[63]:=97; P32(64,Bytes); WriteBytes(Wr,68);
+End;
+
+Procedure VGWavPatch(Rate,Ch,Bytes: LongInt);
+Var Code: Integer;
+Begin
+ {$I-}Seek(ActiveOutput,0); Code:=IOResult;{$I+}
+ If Code<>0 Then Fail('Positionnement entete WAV impossible.');
+ VGWavHdr(Rate,Ch,Bytes);
 End;
 
 { ---- lecture Ogg + decodage ---- }
@@ -76624,6 +76796,22 @@ Begin
   End;
 End;
 
+{ ---- liberation / reinitialisation du decodeur (vorbis_free) ---- }
+Var VGDHaveId,VGDHaveModes: Boolean;
+
+Procedure VGDFreeAll;
+Var I: LongInt;
+Begin
+ VGDFreeSetup;
+ If VGDHaveId Then Begin
+  If VGDChanRes<>Nil Then FreeMem(VGDChanRes);
+  If VGDSaved<>Nil Then FreeMem(VGDSaved);
+  For I:=0 To VGDCh-1 Do If VGDFloorBuf[I]<>Nil Then Begin FreeMem(VGDFloorBuf[I]); VGDFloorBuf[I]:=Nil; End;
+  VGDChanRes:=Nil; VGDSaved:=Nil;
+ End;
+ VGDHaveId:=False; VGDHaveModes:=False;
+End;
+
 { decode un paquet audio : le premier cadre decode est ecarte (skip_samples), EndTrim echantillons sont retires en fin }
 Procedure VGDDoAudio(P: PEABuffer; Len,EndTrim: LongInt);
 Var Nm: LongInt;
@@ -76631,7 +76819,6 @@ Begin
  VGDPkt:=P; VGDPLen:=Len; VGDPos:=0;
  If Len<=0 Then Exit;
  Nm:=VGDAudio;
- If VGDebug Then WriteLn('pkt len=',Len,' ret=',Nm,' trim=',EndTrim,' first=',VGDFirstFrame);
  If Nm<=0 Then Exit;
  { le champ skip_samples des donnees laterales du paquet ecrase le saut du decodeur }
  If VGDFirstFrame Then Begin
@@ -76642,135 +76829,352 @@ Begin
  If Nm>0 Then VGDEmitFrame(Nm);
 End;
 
-{ ogg_get_length : une page du flux dans les derniers 65307 octets porte-t-elle une position de granule non nulle ? }
-Function VGDTailGranule(Limit,Serial: LongInt): Boolean;
-Var At: LongInt; Pg: TVGDPage;
+Var VGDRate0,VGDCh0: LongInt;
+
+{ vorbis_decode_frame : en-tetes transmis dans le flux de paquets (flux Ogg chaines) puis paquets audio }
+Procedure VGDPacketIn(P: PEABuffer; Len,EndTrim: LongInt);
 Begin
- VGDTailGranule:=False;
- At:=Limit-65307; If At<0 Then At:=0;
- While VGDGetPage(At,Limit,Pg) Do Begin
-  If (Pg.Sn=Serial) And (Pg.Gran<>0) And (Pg.Gran<>-1) Then Begin VGDTailGranule:=True; Exit; End;
-  Inc(At,27+Pg.NSeg+Pg.Body);
+ If Len<=0 Then Exit;
+ If (P^[0]=1) And (Len>7) Then Begin
+  VGDFreeAll;
+  VGDSoft:=True; VGDErr:=False;
+  VGDParseId(P,Len);
+  VGDSoft:=False;
+  If VGDErr Then Begin VGDFreeAll; VGDErr:=False; Exit; End;
+  VGDHaveId:=True;
+  If (VGDCh<>VGDCh0) Or (VGDRate<>VGDRate0) Then
+   Fail('ogg: flux Vorbis chaine avec une frequence ou un nombre de canaux different (reechantillonnage non pris en charge).');
+  Exit;
+ End;
+ If (P^[0]=3) And (Len>7) Then Exit;
+ If (P^[0]=5) And (Len>7) And VGDHaveId And Not VGDHaveModes Then Begin
+  VGDSoft:=True; VGDErr:=False;
+  VGDParseSetup(P,Len);
+  VGDSoft:=False;
+  If VGDErr Then Begin VGDFreeAll; VGDErr:=False; Exit; End;
+  VGDHaveModes:=True;
+  Exit;
+ End;
+ If Not (VGDHaveId And VGDHaveModes) Then Exit;
+ VGDDoAudio(P,Len,EndTrim);
+End;
+
+{ ---- demultiplexeur Ogg (oggdec.c, oggparsevorbis.c) : etat d'un flux logique ---- }
+Type
+ TVGOS=Record
+  Buf: PEABuffer; Cap,BufPos,PStart,PSize,Segp,NSegs,Flags,Serial,Header,NKnown,At: LongInt;
+  SyncPos,PagePos: Int64;
+  Segs: Array[0..254] Of Byte;
+  Granule,LastPts,EndTrim,PDur: Int64;
+  Incomplete,PageEnd,GotData,PCorrupt,NoMore: Boolean;
+  Known: Array[0..31] Of LongInt; KnownGot: Array[0..31] Of Boolean;
+  Pk: Array[0..2] Of PEABuffer; PkLen: Array[0..2] Of LongInt;
+  OutStart,OutSize: LongInt;
+ End;
+Var
+ VGONo,VGOFinalPts,VGOFinalDur,VGOStartTime,VGODataOffset: Int64;
+ VGOLimit: LongInt; VGOHeadersDone,VGOHaveVp: Boolean;
+
+Function VGOW32(X: Int64): LongInt;
+Begin
+ X:=X And $FFFFFFFF;
+ If X>=$80000000 Then X:=X-$100000000;
+ VGOW32:=X;
+End;
+
+Procedure VGOInit(Var S: TVGOS; Serial: LongInt);
+Begin
+ FillChar(S,SizeOf(S),0);
+ S.Cap:=262144; GetMem(S.Buf,S.Cap+64); FillChar(S.Buf^,64,0);
+ S.Serial:=Serial; S.Header:=-1; S.NKnown:=1; S.Known[0]:=Serial;
+ S.LastPts:=0; S.Granule:=-1;
+End;
+
+{ ogg_read_page : 1 = page du flux, 0 = autre flux ou page ignoree, -1 = fin ou erreur }
+Function VGOReadPage(Var S: TVGOS; Probing: Boolean): LongInt;
+Var Pg: TVGDPage; I,K,PageStart: LongInt; AnyData,Mine: Boolean; Mg: Array[0..6] Of Byte;
+Begin
+ VGOReadPage:=-1;
+ PageStart:=S.At;
+ If Not VGDGetPage(PageStart,VGOLimit,Pg) Then Begin S.NoMore:=True; Exit; End;
+ S.At:=PageStart+27+Pg.NSeg+Pg.Body;
+ Mine:=Pg.Sn=S.Serial;
+ If Not Mine Then Begin
+  K:=-1;
+  For I:=0 To S.NKnown-1 Do If S.Known[I]=Pg.Sn Then K:=I;
+  If K>=0 Then Begin
+   S.KnownGot[K]:=(Pg.Flags And 2)=0;
+   VGOReadPage:=0; Exit;
+  End;
+  AnyData:=S.GotData;
+  For I:=0 To S.NKnown-1 Do If S.KnownGot[I] Then AnyData:=True;
+  If Not AnyData Then Begin
+   If S.NKnown<32 Then Begin
+    S.Known[S.NKnown]:=Pg.Sn; S.KnownGot[S.NKnown]:=(Pg.Flags And 2)=0; Inc(S.NKnown);
+   End;
+   VGOReadPage:=0; Exit;
+  End;
+  { ogg_replace_stream : un seul flux, meme codec (vorbis) }
+  If S.NKnown<>1 Then Begin S.NoMore:=True; Exit; End;
+  FillChar(Mg,SizeOf(Mg),0);
+  If Pg.Body>=7 Then Move(VGDRaw^[0],Mg,7);
+  If (Pg.Body<7) Or (Mg[0]<>1) Or (Mg[1]<>118) Or (Mg[2]<>111) Or (Mg[3]<>114) Or (Mg[4]<>98) Or (Mg[5]<>105) Or (Mg[6]<>115) Then Begin
+   S.NoMore:=True; Exit;
+  End;
+  S.Serial:=Pg.Sn; S.Known[0]:=Pg.Sn; S.KnownGot[0]:=False;
+  S.LastPts:=0; S.EndTrim:=0;
+ End;
+ { la page appartient au flux }
+ S.PagePos:=PageStart;
+ S.NSegs:=Pg.NSeg; S.Segp:=0; S.Granule:=Pg.Gran; S.Flags:=Pg.Flags;
+ S.GotData:=(Pg.Flags And 2)=0;
+ If S.NKnown>=1 Then S.KnownGot[0]:=S.GotData;
+ If Pg.NSeg>0 Then Move(Pg.Lacing,S.Segs,Pg.NSeg);
+ If S.BufPos+Pg.Body+64>S.Cap Then Begin
+  While S.BufPos+Pg.Body+64>S.Cap Do S.Cap:=S.Cap*2;
+  ReallocMem(Pointer(S.Buf),S.Cap+64);
+ End;
+ If Pg.Body>0 Then Move(VGDRaw^[0],S.Buf^[S.BufPos],Pg.Body);
+ Inc(S.BufPos,Pg.Body);
+ FillChar(S.Buf^[S.BufPos],8,0);
+ If ((Pg.Flags And 1)<>0) Or S.Incomplete Then Begin
+  If S.PSize=0 Then Begin
+   While S.Segp<S.NSegs Do Begin
+    K:=S.Segs[S.Segp]; Inc(S.Segp); Inc(S.PStart,K);
+    If K<255 Then Break;
+   End;
+   S.SyncPos:=S.PagePos;
+  End;
+ End Else Begin
+  S.PSize:=0; S.SyncPos:=S.PagePos;
+ End;
+ VGOReadPage:=1;
+End;
+
+{ av_vorbis_parse_frame_flags sur le premier octet du paquet }
+Function VGOParse(B: Byte): LongInt;
+Var Pk: Array[0..0] Of Byte;
+Begin
+ Pk[0]:=B;
+ VGOParse:=VGDParseDur(PEABuffer(@Pk),1);
+End;
+
+{ vorbis_packet }
+Procedure VGOVorbisPacket(Var S: TVGOS);
+Var Seg,D,Dur: LongInt; LastPk,NextPk: LongInt; Skip: Int64;
+Begin
+ If ((S.LastPts=0) Or (S.LastPts=VGONo)) And ((S.Flags And 4)=0) And (S.Granule>=0) Then Begin
+  VGDPrevBlock:=VGDPB0;
+  Dur:=0; Seg:=S.Segp;
+  LastPk:=S.PStart;
+  D:=VGOParse(S.Buf^[LastPk]);
+  If D<0 Then Begin S.PCorrupt:=True; Exit; End;
+  Dur:=Dur+D;
+  LastPk:=S.PStart+S.PSize; NextPk:=LastPk;
+  While Seg<S.NSegs Do Begin
+   If S.Segs[Seg]<255 Then Begin
+    D:=VGOParse(S.Buf^[LastPk]);
+    If D<0 Then Begin Dur:=VGOW32(S.Granule); Break; End;
+    Dur:=Dur+D;
+    LastPk:=NextPk+S.Segs[Seg];
+   End;
+   Inc(NextPk,S.Segs[Seg]); Inc(Seg);
+  End;
+  S.LastPts:=S.Granule-Dur;
+  If (S.Granule=0) And (Dur<>0) Then S.LastPts:=VGONo;
+  If VGOStartTime=VGONo Then Begin
+   If S.LastPts>0 Then VGOStartTime:=S.LastPts Else VGOStartTime:=0;
+  End;
+  VGOFinalPts:=VGONo;
+  VGDPrevBlock:=VGDPB0;
+ End;
+ If S.PSize>0 Then Begin
+  D:=VGOParse(S.Buf^[S.PStart]);
+  If D<0 Then Begin S.PCorrupt:=True; Exit; End;
+  S.PDur:=D;
+ End;
+ If (S.Flags And 4)<>0 Then Begin
+  If S.LastPts<>VGONo Then Begin VGOFinalPts:=S.LastPts; VGOFinalDur:=0; End;
+  If S.Segp=S.NSegs Then Begin
+   Skip:=VGOFinalPts+VGOFinalDur+S.PDur-S.Granule;
+   If Skip>0 Then S.EndTrim:=VGOW32(Skip);
+   S.PDur:=(S.Granule-VGOFinalPts-VGOFinalDur) And $FFFFFFFF;
+  End;
+  VGOFinalDur:=VGOW32(VGOFinalDur+S.PDur);
  End;
 End;
 
-Procedure VGDecodeOgg(Const Source,Target: String);
-Const MaxPk=300;
-Var
- Pg: TVGDPage;
- Limit,At,I,K,Seg,Serial,HdrCnt,PN,Sk,Ch,SumDur,Trim,Off,Dm: LongInt;
- PrevGran,FinalPts: Int64; FinalOk: Boolean; Cur,PgBuf,IdBuf,SetBuf: PEABuffer; CurLen,CurCap,PgLen,PgCap,IdLen,SetLen: LongInt;
- Have,Skipping,PrevGranOk,Done,EndsClean,PrePass,Eos,FirstH: Boolean;
- POff,PLen,PDur: Array[0..MaxPk] Of LongInt;
-Procedure EnsurePg(N: LongInt);
+{ ogg_calc_pts }
+Function VGOCalcPts(Var S: TVGOS): Int64;
+Var Pts: Int64;
 Begin
- If PgLen+N>PgCap Then Begin While PgLen+N>PgCap Do PgCap:=PgCap*2; ReallocMem(Pointer(PgBuf),PgCap); End;
-End;
-Procedure EnsureCur(N: LongInt);
-Begin
- If CurLen+N>CurCap Then Begin While CurLen+N>CurCap Do CurCap:=CurCap*2; ReallocMem(Pointer(Cur),CurCap); End;
-End;
-Begin
- VGInit;
- If Not VGIsVorbisOgg(Source) Then Fail('ogg: aucun flux Vorbis.');
- Serial:=VGDSerial;
- OpenRead(Source); Limit:=InputSize;
- GetMem(VGDRaw,70000);
- CurCap:=65536; GetMem(Cur,CurCap); CurLen:=0; Have:=False; PgCap:=262144; GetMem(PgBuf,PgCap);
- HdrCnt:=0; PrevGranOk:=False; PrevGran:=0; Done:=False; VGDFirstFrame:=True; FirstH:=False;
- IdBuf:=Nil; SetBuf:=Nil; Ch:=0; PrePass:=VGDTailGranule(Limit,Serial);
- EAReset; OpenWrite(Target);
- At:=0;
- While (Not Done) And VGDGetPage(At,Limit,Pg) Do Begin
-  Off:=At+27+Pg.NSeg+Pg.Body;
-  If Pg.Sn<>Serial Then Begin At:=Off; Continue; End;
-  Eos:=(Pg.Flags And 4)<>0;
-  { assemble les paquets termines dans cette page (ogg_read_page / ogg_packet) }
-  PgLen:=0; PN:=0; EndsClean:=False; Dm:=0;
-  Skipping:=False;
-  If ((Pg.Flags And 1)<>0) And (Not Have) Then Skipping:=True;
-  For Seg:=0 To Pg.NSeg-1 Do Begin
-   Sk:=Pg.Lacing[Seg];
-   If Not Skipping Then Begin
-    EnsureCur(Sk);
-    If Sk>0 Then Move(VGDRaw^[Dm],Cur^[CurLen],Sk);
-    Inc(CurLen,Sk); If CurLen>0 Then Have:=True;
-   End;
-   Inc(Dm,Sk);
-   If Pg.Lacing[Seg]<255 Then Begin
-    If Skipping Then Skipping:=False
-    Else If PN<MaxPk Then Begin
-     EnsurePg(CurLen+1);
-     POff[PN]:=PgLen; PLen[PN]:=CurLen;
-     If CurLen>0 Then Move(Cur^,PgBuf^[PgLen],CurLen);
-     Inc(PgLen,CurLen); Inc(PN);
-    End;
-    CurLen:=0; Have:=False;
-    If Seg=Pg.NSeg-1 Then EndsClean:=True;
-   End;
+ Pts:=VGONo;
+ If S.LastPts<>VGONo Then Begin Pts:=S.LastPts; S.LastPts:=VGONo; End;
+ If S.PageEnd Then Begin
+  If S.Granule<>-1 Then Begin
+   If (S.Granule<0) And (S.Granule<>VGONo) Then S.LastPts:=VGONo Else S.LastPts:=S.Granule;
+   S.Granule:=-1;
   End;
-  At:=Off;
-  { en-tetes }
-  I:=0;
-  While (I<PN) And (HdrCnt<3) Do Begin
-   If HdrCnt=0 Then Begin
-    If (PLen[I]<>30) Or (PgBuf^[POff[I]]<>1) Then Fail('ogg: flux Vorbis: en-tete d''identification invalide.');
-    GetMem(IdBuf,PLen[I]+8); Move(PgBuf^[POff[I]],IdBuf^,PLen[I]); IdLen:=PLen[I];
-   End Else If HdrCnt=1 Then Begin
-    If (PLen[I]<7) Or (PgBuf^[POff[I]]<>3) Then Fail('ogg: flux Vorbis: en-tete de commentaire invalide.');
-   End Else Begin
-    If (PLen[I]<7) Or (PgBuf^[POff[I]]<>5) Then Fail('ogg: flux Vorbis: en-tete setup invalide.');
-    GetMem(SetBuf,PLen[I]+8); Move(PgBuf^[POff[I]],SetBuf^,PLen[I]); SetLen:=PLen[I];
-   End;
-   Inc(HdrCnt); Inc(I);
-   If HdrCnt=3 Then Begin
-    VGDParseId(IdBuf,IdLen);
-    VGDParseSetup(SetBuf,SetLen);
-    Ch:=VGDCh; VGDOutCh:=Ch;
-    If Not VGDParserInit(SetBuf,SetLen) Then Fail('ogg: flux Vorbis: en-tete setup non analysable (modes).');
-    PrevGran:=0; PrevGranOk:=True;
-    ADPCMWaveHeader(VGDRate,Ch,0);
-    FirstH:=True;
-   End;
-  End;
-  If (HdrCnt>=3) And (I<PN) Then Begin
-   { vorbis_packet : pour chaque paquet, si lastpts est nul ou inconnu (et page non finale, granule >= 0), }
-   { le traitement du "premier paquet" remet l'analyseur a zero avant l'analyse du paquet }
-   FinalOk:=PrevGranOk; FinalPts:=PrevGran;
-   For K:=I To PN-1 Do Begin
-    If ((Not PrevGranOk) Or (PrevGran=0)) And (Not Eos) And (Pg.Gran>=0) Then VGDPrevBlock:=VGDBs0
-    Else If FirstH And PrePass Then Begin
-     { la passe preliminaire de ogg_get_length a deja analyse le premier paquet }
-     Sk:=VGDParseDur(PEABuffer(@PgBuf^[POff[K]]),PLen[K]);
-    End;
-    FirstH:=False;
-    PDur[K]:=VGDParseDur(PEABuffer(@PgBuf^[POff[K]]),PLen[K]);
-    If PDur[K]<0 Then PDur[K]:=0;
-    PrevGranOk:=False;
-    If (K=PN-1) And (Pg.Gran<>-1) Then Begin PrevGran:=Pg.Gran; PrevGranOk:=True; End;
-   End;
-   If VGDebug Then Begin
-    Write('parser modes=',VGDPMode,' bs0=',VGDBs0,' bs1=',VGDBs1,' flags:'); For K:=0 To VGDPMode-1 Do Write(' ',VGDPBs[K]);
-    Write(' true modes=',VGDNModes,':'); For K:=0 To VGDNModes-1 Do Write(' ',VGDModeFlag[K]); WriteLn;
-    Write('durs:'); For K:=I To PN-1 Do Write(' ',PDur[K]); WriteLn(' gran=',Pg.Gran,' prev=',FinalPts);
-   End;
-   Trim:=0;
-   If Eos And EndsClean And FinalOk Then Begin
-    SumDur:=0;
-    For K:=I To PN-1 Do Inc(SumDur,PDur[K]);
-    If FinalPts+SumDur>Pg.Gran Then Trim:=LongInt(FinalPts+SumDur-Pg.Gran);
-   End;
-   For K:=I To PN-1 Do Begin
-    If (K=PN-1) And Eos Then VGDDoAudio(PEABuffer(@PgBuf^[POff[K]]),PLen[K],Trim)
-    Else VGDDoAudio(PEABuffer(@PgBuf^[POff[K]]),PLen[K],0);
-   End;
-  End;
-  If Eos Then Done:=True;
  End;
- If HdrCnt<3 Then Fail('ogg: en-tetes Vorbis incomplets.');
+ VGOCalcPts:=Pts;
+End;
+
+{ vorbis_header : 1 = en-tete valide, 0 = paquet de donnees, Fail sinon }
+Function VGOHeader(Var S: TVGOS): LongInt;
+Var PT,I: LongInt; B: PEABuffer;
+Procedure Bad;
+Begin
+ Case PT Of
+  1: Fail('ogg: flux Vorbis: en-tete d''identification invalide.');
+  3: Fail('ogg: flux Vorbis: en-tete de commentaire invalide.');
+ Else Fail('ogg: flux Vorbis: en-tete setup invalide.');
+ End;
+End;
+Begin
+ B:=PEABuffer(@S.Buf^[S.PStart]);
+ PT:=B^[0];
+ If (PT And 1)=0 Then Begin
+  If VGOHaveVp Then VGOHeader:=0 Else Fail('ogg: flux Vorbis: en-tete invalide.');
+  Exit;
+ End;
+ If PT>5 Then Begin VGOHeader:=1; Exit; End;
+ If S.PSize<1 Then Bad;
+ If S.Pk[PT Shr 1]<>Nil Then Bad;
+ If ((PT>1) And (S.Pk[0]=Nil)) Or ((PT>3) And (S.Pk[1]=Nil)) Then Begin
+  If VGOHaveVp Then VGOHeader:=0 Else Bad;
+  Exit;
+ End;
+ GetMem(S.Pk[PT Shr 1],S.PSize+8); Move(B^,S.Pk[PT Shr 1]^,S.PSize); S.PkLen[PT Shr 1]:=S.PSize;
+ If PT=1 Then Begin
+  If (S.PSize<>30) Or (B^[7]<>0) Or (B^[8]<>0) Or (B^[9]<>0) Or (B^[10]<>0) Then Bad;
+ End Else If PT=5 Then Begin
+  VGDParseId(S.Pk[0],S.PkLen[0]);
+  VGDParseSetup(S.Pk[2],S.PkLen[2]);
+  If Not VGDParserInit(S.Pk[2],S.PkLen[2]) Then Fail('ogg: flux Vorbis: en-tete setup non analysable (modes).');
+  VGOHaveVp:=True;
+ End;
+ VGOHeader:=1;
+End;
+
+{ ogg_packet : 1 = paquet de donnees pret (S.OutStart,S.OutSize), 0 = en-tete traite, -1 = fin ou erreur }
+Function VGOPacket(Var S: TVGOS): LongInt;
+Var Segp0,PSize0,R,SS,I: LongInt; Complete: Boolean;
+Begin
+ VGOPacket:=-1;
+ Repeat
+  While S.Segp>=S.NSegs Do Begin
+   If S.NoMore Then Exit;
+   R:=VGOReadPage(S,False);
+   If R<0 Then Exit;
+  End;
+  Segp0:=S.Segp; PSize0:=S.PSize; Complete:=False;
+  While S.Segp<S.NSegs Do Begin
+   SS:=S.Segs[S.Segp]; Inc(S.Segp); Inc(S.PSize,SS);
+   If SS<255 Then Begin Complete:=True; Break; End;
+  End;
+  If (Not Complete) And (S.Segp=S.NSegs) Then S.Incomplete:=S.PSize<>0;
+ Until Complete;
+ S.Incomplete:=False;
+ VGOPacket:=0;
+ If S.Header<>0 Then Begin
+  R:=VGOHeader(S);
+  S.Header:=R;
+  If R=0 Then Begin
+   S.Segp:=Segp0; S.PSize:=PSize0;
+   VGOHeadersDone:=True;
+   If VGODataOffset=0 Then VGODataOffset:=S.SyncPos;
+  End Else Begin
+   Inc(S.PStart,S.PSize); S.PSize:=0;
+  End;
+ End Else Begin
+  S.PCorrupt:=False; S.PDur:=0;
+  VGOVorbisPacket(S);
+  S.OutStart:=S.PStart; S.OutSize:=S.PSize;
+  VGOPacket:=1;
+  Inc(S.PStart,S.PSize); S.PSize:=0;
+  If S.PStart=S.BufPos Then Begin S.BufPos:=0; S.PStart:=0; End;
+  S.SyncPos:=S.PagePos;
+ End;
+ S.PageEnd:=True;
+ For I:=S.Segp To S.NSegs-1 Do If S.Segs[I]<255 Then Begin S.PageEnd:=False; Break; End;
+End;
+
+{ ogg_get_length : retourne True si la passe preliminaire (analyse des premiers paquets) a lieu }
+Function VGOPrePass(Var S0: TVGOS): Boolean;
+Var
+ P: TVGOS; At,Left,R,I: LongInt; Pg: TVGDPage; Cur: LongInt; Found,GotStart,Ended: Boolean; Pts: Int64; Mg: Array[0..6] Of Byte;
+Begin
+ VGOPrePass:=False;
+ { phase 1 : pages des 65307 derniers octets }
+ At:=VGOLimit-65307; If At<0 Then At:=0;
+ Cur:=S0.Serial; Found:=False;
+ While VGDGetPage(At,VGOLimit,Pg) Do Begin
+  Inc(At,27+Pg.NSeg+Pg.Body);
+  If Pg.Sn<>Cur Then Begin
+   { page d'un autre flux : remplacement possible seulement avec un seul flux de meme codec }
+   I:=0;
+   If (S0.NKnown<>1) Then Break;
+   If Pg.Body>=7 Then Begin Move(VGDRaw^[0],Mg,7); I:=1; End;
+   If (I=0) Or (Mg[0]<>1) Or (Mg[1]<>118) Or (Mg[2]<>111) Or (Mg[3]<>114) Or (Mg[4]<>98) Or (Mg[5]<>105) Or (Mg[6]<>115) Then Break;
+   Cur:=Pg.Sn;
+  End;
+  If (Pg.Gran<>-1) And (Pg.Gran<>0) Then Found:=True;
+ End;
+ If Not Found Then Exit;
+ VGOPrePass:=True;
+ { phase 2 : lecture des premiers paquets depuis data_offset avec un etat de flux remis a zero }
+ If VGODataOffset<=0 Then Exit;
+ VGOInit(P,S0.Serial);
+ P.Header:=0; P.NKnown:=S0.NKnown; Move(S0.Known,P.Known,SizeOf(P.Known));
+ P.At:=VGODataOffset; P.LastPts:=0; P.Granule:=-1;
+ Left:=1; GotStart:=False; Ended:=False;
+ While (Left>0) And Not Ended Do Begin
+  R:=VGOPacket(P);
+  If R<0 Then Break;
+  If R=0 Then Continue;
+  Pts:=VGOCalcPts(P);
+  P.EndTrim:=0;
+  If (Pts<>VGONo) And (VGOStartTime=VGONo) And Not GotStart Then Begin GotStart:=True; Dec(Left); End
+  Else If (VGOStartTime<>VGONo) And Not GotStart Then Begin GotStart:=True; Dec(Left); End;
+ End;
+ FreeMem(P.Buf);
+End;
+
+Procedure VGDecodeOgg(Const Source,Target: String);
+Var
+ S: TVGOS; Cw87: Word; R,Ch,Et: LongInt; Pts: Int64; PrePass: Boolean;
+Begin
+ VGInit; Cw87:=Get8087CW; Set8087CW($137F);
+ If Not VGIsVorbisOgg(Source) Then Fail('ogg: aucun flux Vorbis.');
+ VGONo:=Int64(1) Shl 63; VGOFinalPts:=VGONo; VGOFinalDur:=0; VGOStartTime:=VGONo; VGODataOffset:=0;
+ VGOHeadersDone:=False; VGOHaveVp:=False; VGDHaveId:=False; VGDHaveModes:=False; VGDSoft:=False; VGDErr:=False;
+ OpenRead(Source); VGOLimit:=InputSize;
+ GetMem(VGDRaw,70000);
+ VGOInit(S,VGDSerial);
+ VGDFirstFrame:=True;
+ EAReset; OpenWrite(Target);
+ { en-tetes (ogg_read_header) }
+ While Not VGOHeadersDone Do Begin
+  R:=VGOPacket(S);
+  If R<0 Then Fail('ogg: en-tetes Vorbis incomplets.');
+ End;
+ If Not VGOHaveVp Then Fail('ogg: en-tetes Vorbis incomplets.');
+ Ch:=VGDCh; VGDOutCh:=Ch; VGDCh0:=VGDCh; VGDRate0:=VGDRate;
+ VGDHaveId:=True; VGDHaveModes:=True;
+ VGWavHdr(VGDRate,Ch,0);
+ PrePass:=VGOPrePass(S);
+ { paquets de donnees }
+ While True Do Begin
+  R:=VGOPacket(S);
+  If R<0 Then Break;
+  If R=0 Then Continue;
+  Pts:=VGOCalcPts(S);
+  Et:=S.EndTrim; S.EndTrim:=0;
+  VGDPacketIn(PEABuffer(@S.Buf^[S.OutStart]),S.OutSize,Et);
+ End;
  EAFlush;
- ADPCMPatchHeader(VGDRate,Ch,EAWritten);
- CloseWrite; CloseRead;
+ VGWavPatch(VGDRate0,Ch,EAWritten);
+ CloseWrite; CloseRead; Set8087CW(Cw87);
 End;
 
 { ---- options de la ligne de commande ---- }
@@ -81170,6 +81574,7 @@ Begin
   Fn:=VP3SarN; Fd:=VP3SarD; I:=Fn; Q:=Fd; While Q<>0 Do Begin At:=I Mod Q; I:=Q; Q:=At; End;
   VP3SarN:=Fn Div I; VP3SarD:=Fd Div I;
  End Else Begin VP3SarN:=0; VP3SarD:=0; End;
+ If QXIsMov Then H7TheoraMov(Mode,Target,VP3SarN,VP3SarD) Else
  VP3RunTheora(Mode,Target,True,0,QXRn,QXRd,VP3SarN,VP3SarD);
 End;
 { ==== G4A-END ==== }
@@ -92290,6 +92695,864 @@ End;
 
 { ==== BLOCK-ANCHOR-H6 : inserer le code du groupe H6 juste au-dessus de cette ligne ==== }
 
+{ ==== H7 : Matroska (Vorbis, Theora, VP3) et synchronisation video a cadence variable ==== }
+Type
+ TMKI64A=Array[0..100000000] Of Int64; PMKI64=^TMKI64A;
+ TMKTrack=Record
+  Num,Typ,PrivPos,PrivLen,W,H,Ch,NPk: LongInt;
+  Codec: String[48]; DefDur: Int64; Rate: Double; Enc: Boolean; FirstPts: Int64; HaveFirst: Boolean;
+ End;
+Var
+ MKF: PEABuffer; MKSize,MKNTr,MKNPk,MKCap: LongInt; MKScale: Int64;
+ MKTr: Array[0..31] Of TMKTrack;
+ MKPkTr,MKPkPos,MKPkLen,MKPkEnd: PVP3Int; MKPkPts,MKPkDur,MKPkDisc: PMKI64;
+
+Function MKB(At: LongInt): LongInt;
+Begin If (At>=0) And (At<MKSize) Then MKB:=MKF^[At] Else MKB:=0; End;
+
+{ identifiant EBML : retourne la valeur avec marqueur ; Len = nombre d'octets (0 si invalide) }
+Function MKId(At: LongInt; Var Len: LongInt): Int64;
+Var V,M,N,I: LongInt; R: Int64;
+Begin
+ V:=MKB(At); M:=128; N:=1;
+ While (M>0) And ((V And M)=0) Do Begin M:=M Shr 1; Inc(N); End;
+ If (M=0) Or (N>4) Then Begin Len:=0; MKId:=0; Exit; End;
+ R:=V;
+ For I:=1 To N-1 Do R:=R*256+MKB(At+I);
+ Len:=N; MKId:=R;
+End;
+
+{ taille / entier EBML (marqueur retire) ; -1 si taille inconnue ; Len = 0 si invalide }
+Function MKVint(At: LongInt; Var Len: LongInt): Int64;
+Var V,M,N,I: LongInt; R: Int64; AllOnes: Boolean;
+Begin
+ V:=MKB(At); M:=128; N:=1;
+ While (M>0) And ((V And M)=0) Do Begin M:=M Shr 1; Inc(N); End;
+ If M=0 Then Begin Len:=0; MKVint:=0; Exit; End;
+ R:=V And (M-1); AllOnes:=(V And (M-1))=(M-1);
+ For I:=1 To N-1 Do Begin
+  V:=MKB(At+I); R:=R*256+V; If V<>255 Then AllOnes:=False;
+ End;
+ Len:=N;
+ If AllOnes Then MKVint:=-1 Else MKVint:=R;
+End;
+
+Function MKUInt(At,Size: LongInt): Int64;
+Var I: LongInt; R: Int64;
+Begin
+ R:=0; If Size>8 Then Size:=8;
+ For I:=0 To Size-1 Do R:=R*256+MKB(At+I);
+ MKUInt:=R;
+End;
+
+Function MKSInt(At,Size: LongInt): Int64;
+Var R: Int64;
+Begin
+ R:=MKUInt(At,Size);
+ If (Size>0) And (Size<8) And ((MKB(At) And 128)<>0) Then R:=R-(Int64(1) Shl (8*Size));
+ MKSInt:=R;
+End;
+
+Function MKFloat(At,Size: LongInt): Double;
+Var S: Single; D: Double; Q: Int64; L: LongWord;
+Begin
+ MKFloat:=0;
+ If Size=4 Then Begin L:=LongWord(MKUInt(At,4)); Move(L,S,4); MKFloat:=S; End
+ Else If Size=8 Then Begin Q:=MKUInt(At,8); Move(Q,D,8); MKFloat:=D; End;
+End;
+
+Procedure MKAddPacket(Tr: LongInt; Pts,Dur,Disc: Int64; Pos,Len,PEnd: LongInt);
+Begin
+ If MKNPk>=MKCap Then Begin
+  MKCap:=MKCap*2;
+  ReallocMem(Pointer(MKPkTr),MKCap*4); ReallocMem(Pointer(MKPkEnd),MKCap*4); ReallocMem(Pointer(MKPkPos),MKCap*4); ReallocMem(Pointer(MKPkLen),MKCap*4);
+  ReallocMem(Pointer(MKPkPts),MKCap*8); ReallocMem(Pointer(MKPkDur),MKCap*8); ReallocMem(Pointer(MKPkDisc),MKCap*8);
+ End;
+ MKPkTr^[MKNPk]:=Tr; MKPkEnd^[MKNPk]:=PEnd; MKPkPos^[MKNPk]:=Pos; MKPkLen^[MKNPk]:=Len;
+ MKPkPts^[MKNPk]:=Pts; MKPkDur^[MKNPk]:=Dur; MKPkDisc^[MKNPk]:=Disc;
+ Inc(MKNPk);
+ Inc(MKTr[Tr].NPk);
+ If Not MKTr[Tr].HaveFirst Then Begin MKTr[Tr].HaveFirst:=True; MKTr[Tr].FirstPts:=Pts; End;
+End;
+
+Function MKFindTrack(Num: LongInt): LongInt;
+Var I: LongInt;
+Begin
+ MKFindTrack:=-1;
+ For I:=0 To MKNTr-1 Do If MKTr[I].Num=Num Then Begin MKFindTrack:=I; Exit; End;
+End;
+
+{ bloc Matroska (matroska_parse_block) ; ClTime < 0 : aucun timecode de cluster }
+Procedure MKBlock(At,Size: LongInt; ClTime,BlkDur,Disc: Int64);
+Var
+ Len,Tr,Flags,Lacing,Laces,N,I,J,Pos0,Cnt,Sum,Fin: LongInt; Num,BTime,TC,LaceDur,Dur: Int64;
+ Sizes: Array[0..255] Of LongInt; V: Int64; Sg: Int64;
+Begin
+ Num:=MKVint(At,Len); If Len=0 Then Exit;
+ Tr:=MKFindTrack(Num);
+ Inc(At,Len); Dec(Size,Len);
+ If (Tr<0) Or (Size<3) Then Exit;
+ BTime:=MKB(At)*256+MKB(At+1); If BTime>=32768 Then Dec(BTime,65536);
+ Flags:=MKB(At+2); Inc(At,3); Dec(Size,3);
+ Lacing:=(Flags And 6) Shr 1; Laces:=1;
+ Fin:=At+Size;
+ If Lacing<>0 Then Begin
+  If Size<1 Then Exit;
+  Laces:=MKB(At)+1; Inc(At); Dec(Size);
+  Case Lacing Of
+   1: Begin
+    Sum:=0;
+    For I:=0 To Laces-2 Do Begin
+     N:=0;
+     Repeat
+      If At>=Fin Then Exit;
+      J:=MKB(At); Inc(At); Inc(N,J);
+     Until J<>255;
+     Sizes[I]:=N; Inc(Sum,N);
+    End;
+    If Sum>Fin-At Then Exit;
+    Sizes[Laces-1]:=Fin-At-Sum;
+   End;
+   2: Begin
+    If Size Mod Laces<>0 Then Exit;
+    For I:=0 To Laces-1 Do Sizes[I]:=Size Div Laces;
+   End;
+   3: Begin
+    V:=MKVint(At,Len); If Len=0 Then Exit;
+    Inc(At,Len); Sizes[0]:=V; Sum:=Sizes[0];
+    For I:=1 To Laces-2 Do Begin
+     V:=MKVint(At,Len); If Len=0 Then Exit;
+     Inc(At,Len);
+     Sg:=V-((Int64(1) Shl (7*Len-1))-1);
+     Sizes[I]:=Sizes[I-1]+Sg; If Sizes[I]<0 Then Exit;
+     Inc(Sum,Sizes[I]);
+    End;
+    If Sum>Fin-At Then Exit;
+    Sizes[Laces-1]:=Fin-At-Sum;
+   End;
+  End;
+ End Else Sizes[0]:=Size;
+ If ClTime>=0 Then TC:=ClTime+BTime Else TC:=Int64(1) Shl 63;
+ Dur:=BlkDur;
+ If (Dur=0) And (MKTr[Tr].DefDur<>0) Then Dur:=(MKTr[Tr].DefDur*Laces) Div MKScale;
+ For N:=0 To Laces-1 Do Begin
+  LaceDur:=(Dur*(N+1)) Div Laces-(Dur*N) Div Laces;
+  If Sizes[N]>0 Then MKAddPacket(Tr,TC,LaceDur,Disc,At,Sizes[N],Fin);
+  If TC<>(Int64(1) Shl 63) Then Begin If LaceDur<>0 Then Inc(TC,LaceDur) Else TC:=Int64(1) Shl 63; End;
+  Inc(At,Sizes[N]);
+ End;
+End;
+
+Procedure MKTrackEntry(At,Fin: LongInt);
+Var Id: Int64; L1,L2,Sz,A2,F2,Id2,L3: LongInt; T: ^TMKTrack; S: String;
+Begin
+ If MKNTr>=32 Then Exit;
+ T:=@MKTr[MKNTr]; FillChar(T^,SizeOf(T^),0); T^.Rate:=8000; T^.Ch:=1;
+ While At<Fin Do Begin
+  Id:=MKId(At,L1); If L1=0 Then Break;
+  Inc(At,L1);
+  Sz:=MKVint(At,L2); If (L2=0) Or (Sz<0) Or (At+L2+Sz>Fin) Then Break;
+  Inc(At,L2);
+  Case Id Of
+   $D7: T^.Num:=MKUInt(At,Sz);
+   $83: T^.Typ:=MKUInt(At,Sz);
+   $86: Begin S:=''; For F2:=0 To Sz-1 Do If (F2<48) And (MKB(At+F2)<>0) Then S:=S+Chr(MKB(At+F2)); T^.Codec:=S; End;
+   $63A2: Begin T^.PrivPos:=At; T^.PrivLen:=Sz; End;
+   $23E383: T^.DefDur:=MKUInt(At,Sz);
+   $6D80: T^.Enc:=True;
+   $E0: Begin
+    A2:=At; F2:=At+Sz;
+    While A2<F2 Do Begin
+     Id2:=MKId(A2,L1); If L1=0 Then Break; Inc(A2,L1);
+     L3:=MKVint(A2,L2); If (L2=0) Or (L3<0) Or (A2+L2+L3>F2) Then Break; Inc(A2,L2);
+     If Id2=$B0 Then T^.W:=MKUInt(A2,L3) Else If Id2=$BA Then T^.H:=MKUInt(A2,L3);
+     Inc(A2,L3);
+    End;
+   End;
+   $E1: Begin
+    A2:=At; F2:=At+Sz;
+    While A2<F2 Do Begin
+     Id2:=MKId(A2,L1); If L1=0 Then Break; Inc(A2,L1);
+     L3:=MKVint(A2,L2); If (L2=0) Or (L3<0) Or (A2+L2+L3>F2) Then Break; Inc(A2,L2);
+     If Id2=$B5 Then T^.Rate:=MKFloat(A2,L3) Else If Id2=$9F Then T^.Ch:=MKUInt(A2,L3);
+     Inc(A2,L3);
+    End;
+   End;
+  End;
+  Inc(At,Sz);
+ End;
+ Inc(MKNTr);
+End;
+
+Function MKIsTop(Id: Int64): Boolean;
+Begin
+ MKIsTop:=(Id=$1F43B675) Or (Id=$1C53BB6B) Or (Id=$1254C367) Or (Id=$1043A770) Or (Id=$1941A469) Or (Id=$1549A966) Or (Id=$1654AE6B) Or (Id=$114D9B74);
+End;
+
+Procedure MKCluster(At,Fin: LongInt; Unknown: Boolean);
+Var
+ Id,Idg: Int64; L1,L2,Sz,A2,F2,Ls,Lg,Sg,BAt,BSz: LongInt; ClTime,BDur,Disc: Int64; HaveBlk: Boolean;
+Begin
+ ClTime:=-1;
+ While At<Fin Do Begin
+  Id:=MKId(At,L1); If L1=0 Then Break;
+  If Unknown And MKIsTop(Id) Then Break;
+  Inc(At,L1);
+  Sz:=MKVint(At,L2); If L2=0 Then Break;
+  Inc(At,L2);
+  If (Sz<0) Or (At+Sz>Fin) Then Begin If Sz<0 Then Break; Sz:=Fin-At; End;
+  Case Id Of
+   $E7: ClTime:=MKUInt(At,Sz);
+   $A3: MKBlock(At,Sz,ClTime,0,0);
+   $A0: Begin
+    A2:=At; F2:=At+Sz; BDur:=0; Disc:=0; HaveBlk:=False; BAt:=0; BSz:=0;
+    While A2<F2 Do Begin
+     Idg:=MKId(A2,Ls); If Ls=0 Then Break; Inc(A2,Ls);
+     Sg:=MKVint(A2,Lg); If (Lg=0) Or (Sg<0) Or (A2+Lg+Sg>F2) Then Break; Inc(A2,Lg);
+     Case Idg Of
+      $A1: Begin HaveBlk:=True; BAt:=A2; BSz:=Sg; End;
+      $9B: BDur:=MKUInt(A2,Sg);
+      $75A2: Disc:=MKSInt(A2,Sg);
+     End;
+     Inc(A2,Sg);
+    End;
+    If HaveBlk Then MKBlock(BAt,BSz,ClTime,BDur,Disc);
+   End;
+  End;
+  Inc(At,Sz);
+ End;
+End;
+
+{ analyse complete d'un fichier Matroska/WebM : pistes et paquets }
+Procedure MKParse(Const Source: String);
+Var At,Fin,SegEnd,L1,L2,Sz,A2,F2,Id2,L3: LongInt; Id: Int64; Unknown: Boolean;
+Begin
+ NVLoad(Source,MKF,MKSize);
+ MKNTr:=0; MKNPk:=0; MKScale:=1000000; MKCap:=4096;
+ GetMem(MKPkTr,MKCap*4); GetMem(MKPkEnd,MKCap*4); GetMem(MKPkPos,MKCap*4); GetMem(MKPkLen,MKCap*4);
+ GetMem(MKPkPts,MKCap*8); GetMem(MKPkDur,MKCap*8); GetMem(MKPkDisc,MKCap*8);
+ At:=0;
+ Id:=MKId(At,L1);
+ If Id<>$1A45DFA3 Then Fail('matroska: en-tete EBML absent.');
+ Inc(At,L1); Sz:=MKVint(At,L2); If (L2=0) Or (Sz<0) Then Fail('matroska: en-tete EBML invalide.');
+ Inc(At,L2+Sz);
+ Id:=MKId(At,L1);
+ If Id<>$18538067 Then Fail('matroska: segment absent.');
+ Inc(At,L1); Sz:=MKVint(At,L2); If L2=0 Then Fail('matroska: segment invalide.');
+ Inc(At,L2);
+ If (Sz<0) Or (At+Sz>MKSize) Then SegEnd:=MKSize Else SegEnd:=At+Sz;
+ While At<SegEnd Do Begin
+  Id:=MKId(At,L1); If L1=0 Then Break;
+  Inc(At,L1);
+  Sz:=MKVint(At,L2); If L2=0 Then Break;
+  Inc(At,L2);
+  Unknown:=Sz<0;
+  If Unknown Then Fin:=SegEnd Else Begin
+   Fin:=At+Sz; If Fin>SegEnd Then Fin:=SegEnd;
+  End;
+  Case Id Of
+   $1549A966: Begin
+    A2:=At;
+    While A2<Fin Do Begin
+     Id2:=MKId(A2,L1); If L1=0 Then Break; Inc(A2,L1);
+     L3:=MKVint(A2,L2); If (L2=0) Or (L3<0) Or (A2+L2+L3>Fin) Then Break; Inc(A2,L2);
+     If Id2=$2AD7B1 Then Begin MKScale:=MKUInt(A2,L3); If MKScale=0 Then MKScale:=1000000; End;
+     Inc(A2,L3);
+    End;
+   End;
+   $1654AE6B: Begin
+    A2:=At;
+    While A2<Fin Do Begin
+     Id2:=MKId(A2,L1); If L1=0 Then Break; Inc(A2,L1);
+     L3:=MKVint(A2,L2); If (L2=0) Or (L3<0) Or (A2+L2+L3>Fin) Then Break; Inc(A2,L2);
+     If Id2=$AE Then MKTrackEntry(A2,A2+L3);
+     Inc(A2,L3);
+    End;
+   End;
+   $1F43B675: Begin
+    MKCluster(At,Fin,Unknown);
+    If Unknown Then Begin
+     { recherche de la fin du cluster : prochain element de premier niveau }
+     F2:=At;
+     While F2<SegEnd Do Begin
+      Id2:=MKId(F2,L1);
+      If (L1=0) Then Begin Inc(F2); Continue; End;
+      If MKIsTop(Id2) And (F2>At) Then Break;
+      L3:=MKVint(F2+L1,L2);
+      If (L2=0) Or (L3<0) Then Begin Inc(F2); Continue; End;
+      Inc(F2,L1+L2+L3);
+     End;
+     Fin:=F2;
+    End;
+   End;
+  End;
+  At:=Fin;
+ End;
+End;
+
+Procedure MKFree;
+Begin
+ If MKF<>Nil Then Begin FreeMem(MKF); MKF:=Nil; End;
+End;
+
+{ ---- Vorbis dans Matroska ---- }
+Function MKFindVorbis: LongInt;
+Var I,Best: LongInt;
+Begin
+ Best:=-1;
+ For I:=0 To MKNTr-1 Do
+  If (MKTr[I].Typ=2) And (MKTr[I].Codec='A_VORBIS') Then
+   If (Best<0) Or (MKTr[I].Ch>MKTr[Best].Ch) Then Best:=I;
+ MKFindVorbis:=Best;
+End;
+
+Function MKHasVorbis(Const Source: String): Boolean;
+Var Hd: Array[0..3] Of Byte;
+Begin
+ MKHasVorbis:=False;
+ OpenRead(Source);
+ If InputSize<64 Then Begin CloseRead; Exit; End;
+ ReadAt(0,Hd,4); CloseRead;
+ If (Hd[0]<>$1A) Or (Hd[1]<>$45) Or (Hd[2]<>$DF) Or (Hd[3]<>$A3) Then Exit;
+ MKParse(Source);
+ MKHasVorbis:=MKFindVorbis>=0;
+ MKFree;
+End;
+
+Procedure DecodeMKVVorbis(Const Source,Target: String);
+Var
+ Cw87: Word; T,I,At,L1,L2,E,N,Ch: LongInt; Hd: Array[0..2] Of PEABuffer; HL: Array[0..2] Of LongInt; Et: Int64; Rate: LongInt;
+Begin
+ VGInit; Cw87:=Get8087CW; Set8087CW($137F);
+ MKParse(Source);
+ T:=MKFindVorbis;
+ If T<0 Then Fail('matroska: aucune piste Vorbis.');
+ If MKTr[T].Enc Then Fail('matroska: ContentEncodings (compression/chiffrement) non pris en charge.');
+ E:=MKTr[T].PrivPos;
+ If (MKTr[T].PrivLen<3) Or (MKB(E)<>2) Then Fail('matroska: extradata Vorbis invalide.');
+ At:=E+1; L1:=0; L2:=0;
+ While MKB(At)=255 Do Begin Inc(L1,255); Inc(At); End;
+ Inc(L1,MKB(At)); Inc(At);
+ While MKB(At)=255 Do Begin Inc(L2,255); Inc(At); End;
+ Inc(L2,MKB(At)); Inc(At);
+ N:=E+MKTr[T].PrivLen;
+ If (L1<=0) Or (L2<=0) Or (At+L1+L2>=N) Then Fail('matroska: extradata Vorbis invalide.');
+ Hd[0]:=PEABuffer(@MKF^[At]); HL[0]:=L1;
+ Hd[1]:=PEABuffer(@MKF^[At+L1]); HL[1]:=L2;
+ Hd[2]:=PEABuffer(@MKF^[At+L1+L2]); HL[2]:=N-(At+L1+L2);
+ GetMem(VGDRaw,70000);
+ VGDFirstFrame:=True; VGDHaveId:=False; VGDHaveModes:=False; VGDSoft:=False; VGDErr:=False;
+ VGDParseId(Hd[0],HL[0]);
+ VGDParseSetup(Hd[2],HL[2]);
+ Ch:=VGDCh; VGDOutCh:=Ch; VGDCh0:=VGDCh; VGDRate0:=VGDRate; Rate:=VGDRate;
+ VGDHaveId:=True; VGDHaveModes:=True;
+ EAReset; OpenWrite(Target);
+ VGWavHdr(VGDRate,Ch,0);
+ For I:=0 To MKNPk-1 Do If MKPkTr^[I]=T Then Begin
+  Et:=0;
+  If MKPkDisc^[I]<>0 Then Begin
+   { av_rescale_q(discard_padding, 1/1e9, 1/rate) ; valeur positive : fin, negative : debut }
+   Et:=MKPkDisc^[I];
+   If Et>0 Then Et:=(Et*Rate+500000000) Div 1000000000 Else Et:=0;
+  End;
+  VGDPacketIn(PEABuffer(@MKF^[MKPkPos^[I]]),MKPkLen^[I],LongInt(Et));
+  VGDExtra:=0;
+ End;
+ EAFlush;
+ VGWavPatch(Rate,Ch,EAWritten);
+ CloseWrite; CloseRead; Set8087CW(Cw87);
+ MKFree;
+End;
+
+{ ---- synchronisation video de ffmpeg (ffmpeg_filter.c : video_sync_process) en temps rationnel ---- }
+{ a*b/c arrondi au plus proche (demi-valeurs eloignees de zero), produit sur 128 bits }
+Function MKMulDiv(A,B,C: Int64): Int64;
+Var
+ Neg: Boolean; X,Y,Z,Q,R,Hi,Lo,A0,A1,B0,B1,P00,P01,P10,P11,Mid,Carry: QWord; I: LongInt; Bit: QWord;
+Begin
+ Neg:=False;
+ If A<0 Then Begin A:=-A; Neg:=Not Neg; End;
+ If B<0 Then Begin B:=-B; Neg:=Not Neg; End;
+ If C<0 Then Begin C:=-C; Neg:=Not Neg; End;
+ If C=0 Then Begin MKMulDiv:=0; Exit; End;
+ X:=QWord(A); Y:=QWord(B); Z:=QWord(C);
+ A0:=X And $FFFFFFFF; A1:=X Shr 32; B0:=Y And $FFFFFFFF; B1:=Y Shr 32;
+ P00:=A0*B0; P01:=A0*B1; P10:=A1*B0; P11:=A1*B1;
+ Mid:=(P00 Shr 32)+(P01 And $FFFFFFFF)+(P10 And $FFFFFFFF);
+ Lo:=(P00 And $FFFFFFFF) Or ((Mid And $FFFFFFFF) Shl 32);
+ Hi:=P11+(P01 Shr 32)+(P10 Shr 32)+(Mid Shr 32);
+ { + C/2 }
+ Carry:=Z Div 2;
+ If Lo+Carry<Lo Then Inc(Hi);
+ Lo:=Lo+Carry;
+ Q:=0; R:=0;
+ For I:=127 Downto 0 Do Begin
+  If I>=64 Then Bit:=(Hi Shr (I-64)) And 1 Else Bit:=(Lo Shr I) And 1;
+  If R>=QWord($8000000000000000) Then Begin R:=(R Shl 1) Or Bit; R:=R-Z; Q:=(Q Shl 1) Or 1; End
+  Else Begin
+   R:=(R Shl 1) Or Bit;
+   If R>=Z Then Begin R:=R-Z; Q:=(Q Shl 1) Or 1; End Else Q:=Q Shl 1;
+  End;
+ End;
+ If Neg Then MKMulDiv:=-Int64(Q) Else MKMulDiv:=Int64(Q);
+End;
+
+{ av_rescale_q(A, Bn/Bd, Cn/Cd) }
+Function MKRescQ(A,Bn,Bd,Cn,Cd: Int64): Int64;
+Begin
+ MKRescQ:=MKMulDiv(A,Bn*Cd,Bd*Cn);
+End;
+
+Function MKLlrint(X: Double): Int64;
+Begin
+ If (X<>X) Or (X>=9.2e18) Or (X<=-9.2e18) Then MKLlrint:=Int64(1) Shl 63 Else MKLlrint:=Round(X);
+End;
+
+Function MKLlrintf(X: Double): Int64;
+Var S: Single;
+Begin
+ S:=X;
+ MKLlrintf:=MKLlrint(S);
+End;
+
+Function MKLog2(V: Int64): LongInt;
+Var N: LongInt;
+Begin
+ N:=0; While V>1 Do Begin V:=V Shr 1; Inc(N); End;
+ MKLog2:=N;
+End;
+
+{ boucle de decodage + sync CFR/VSCFR avec horodatages et durees arbitraires ;
+  Pts/Dur : en ticks de la base de temps TbN/TbD (decalage de debut de fichier deja applique) }
+Procedure MKVideoRun(Mode: LongInt; Const Target: String; Vscfr: Boolean; N: LongInt; Pts,Dur: PMKI64;
+ TbN,TbD: Int64; FpsN,FpsD,SarN,SarD,CropLeft,CropTop,OutW,OutH: LongInt);
+Var
+ I,Cw,Ch,Sz,R,Nb,NbPrev,J,H0,H1,H2,Med,Extra,FrameNumber: LongInt; Fr,Prev: PEABuffer; Begun: Boolean;
+ NextPts,Fp: Int64; FloatPts,Delta0,Delta,Duration,SyncIpts,Tmp: Double; A,B: Double;
+Begin
+ Begun:=False; Prev:=Nil; H0:=0; H1:=0; H2:=0; NextPts:=0; FrameNumber:=0;
+ Extra:=29-MKLog2(FpsN); If Extra<0 Then Extra:=0; If Extra>16 Then Extra:=16;
+ For I:=0 To N-1 Do Begin
+  If VP3PkSz^[I]<=0 Then Continue;
+  R:=VP3DecodeFrame(PEABuffer(@VP3Arena^[VP3PkOff^[I]]),VP3PkSz^[I]);
+  If R<0 Then Begin Inc(VP3BadFrames); Continue; End;
+  If Not Begun Then Begin
+   Cw:=(OutW+(1 Shl VP3CX)-1) Shr VP3CX; Ch:=(OutH+(1 Shl VP3CY)-1) Shr VP3CY;
+   NVBegin(Mode,Target,OutW,OutH,7,FpsN,FpsD);
+   NVSubX:=VP3CX; NVSubY:=VP3CY; NVCW:=Cw; NVCH:=Ch; NVIl:='p'; NVInitDup:=False;
+   Case VP3PixFmt Of 0: NVYTag:='C420jpeg'; 2: NVYTag:='C422'; Else NVYTag:='C444'; End;
+   NVSarN:=SarN; NVSarD:=SarD;
+   Begun:=True;
+  End;
+  Sz:=OutW*OutH+2*NVCW*NVCH;
+  GetMem(Fr,Sz+64);
+  VP3Output(Fr,CropLeft,CropTop,OutW,OutH);
+  { adjust_frame_pts_to_encoder_tb }
+  Fp:=MKMulDiv(Pts^[I],TbN*(Int64(FpsN) Shl Extra),TbD*FpsD);
+  FloatPts:=Fp; FloatPts:=FloatPts/(Int64(1) Shl Extra);
+  If FloatPts<>MKLlrint(FloatPts) Then Begin
+   If FloatPts>0 Then FloatPts:=FloatPts+1.0/131072.0 Else FloatPts:=FloatPts-1.0/131072.0;
+  End;
+  A:=TbN; A:=A/TbD; B:=FpsD; B:=B/FpsN;
+  Duration:=Dur^[I]; Duration:=Duration*A; Duration:=Duration/B;
+  SyncIpts:=FloatPts;
+  Delta0:=SyncIpts-NextPts; Delta:=Delta0+Duration;
+  NbPrev:=0; Nb:=1;
+  If (Delta0<0) And (Delta>0) Then Begin
+   SyncIpts:=NextPts; Duration:=Duration+Delta0; Delta0:=0;
+  End;
+  If Vscfr And (FrameNumber=0) And (Delta0>=0.5) Then Begin
+   Delta:=Duration; Delta0:=0; NextPts:=MKLlrint(SyncIpts);
+  End;
+  If Delta<-1.1 Then Nb:=0
+  Else If Delta>1.1 Then Begin
+   Nb:=MKLlrintf(Delta);
+   If Delta0>1.1 Then NbPrev:=MKLlrintf(Delta0-0.6);
+  End;
+  H2:=H1; H1:=H0; H0:=NbPrev;
+  If Nb>108000 Then Nb:=0;
+  For J:=0 To Nb-1 Do Begin
+   If (J<NbPrev) And (Prev<>Nil) Then NVEmit(Prev) Else NVEmit(Fr);
+   Inc(FrameNumber); Inc(NextPts);
+  End;
+  If Prev<>Nil Then FreeMem(Prev);
+  Prev:=Fr;
+  If NVDone Then Break;
+ End;
+ If Not Begun Then Fail('theora: aucune image decodee.');
+ If (Prev<>Nil) And Not NVDone Then Begin
+  { fin de flux : mediane des trois derniers nb_frames_prev }
+  Med:=H0; If H1<Med Then Med:=H1; Sz:=H0; If H1>Sz Then Sz:=H1; If H2<Sz Then Sz:=H2;
+  If Sz>Med Then Med:=Sz;
+  For J:=1 To Med Do NVEmit(Prev);
+ End;
+ If Prev<>Nil Then FreeMem(Prev);
+ NVFinish('theora');
+End;
+
+{ ---- estimation de la cadence comme avformat_find_stream_info (demux.c : ff_rfps_add_frame, ff_rfps_calculate) ---- }
+Type TH7Err=Array[0..1,0..1,0..398] Of Double;
+Function H7Std(I: LongInt): Int64;
+Begin
+ If I<360 Then Begin H7Std:=Int64(I+1)*1001; Exit; End;
+ Dec(I,360);
+ If I<30 Then Begin H7Std:=Int64(I+31)*1001*12; Exit; End;
+ Dec(I,30);
+ If I<3 Then Begin
+  Case I Of 0: H7Std:=Int64(80)*1001*12; 1: H7Std:=Int64(120)*1001*12; Else H7Std:=Int64(240)*1001*12; End;
+  Exit;
+ End;
+ Dec(I,3);
+ Case I Of 0: H7Std:=24000*12; 1: H7Std:=30000*12; 2: H7Std:=60000*12; 3: H7Std:=12000*12; 4: H7Std:=15000*12; Else H7Std:=48000*12; End;
+End;
+
+{ av_reduce(num, den, max) de libavutil }
+Procedure H7AvReduce(Var N,D: Int64; Max: Int64);
+Var
+ A0n,A0d,A1n,A1d,A2n,A2d,X,NextDen,Num,Den,G1,G2,T: Int64; Sign: Boolean;
+Begin
+ Sign:=(N<0) Xor (D<0);
+ Num:=N; Den:=D; If Num<0 Then Num:=-Num; If Den<0 Then Den:=-Den;
+ G1:=Num; G2:=Den; While G2<>0 Do Begin T:=G1 Mod G2; G1:=G2; G2:=T; End;
+ If G1<>0 Then Begin Num:=Num Div G1; Den:=Den Div G1; End;
+ A0n:=0; A0d:=1; A1n:=1; A1d:=0;
+ If (Num<=Max) And (Den<=Max) Then Begin A1n:=Num; A1d:=Den; Den:=0; End;
+ While Den<>0 Do Begin
+  X:=Num Div Den; NextDen:=Num-Den*X;
+  A2n:=X*A1n+A0n; A2d:=X*A1d+A0d;
+  If (A2n>Max) Or (A2d>Max) Then Begin
+   If A1n<>0 Then X:=(Max-A0n) Div A1n;
+   If A1d<>0 Then Begin T:=(Max-A0d) Div A1d; If T<X Then X:=T; End;
+   If Den*(2*X*A1d+A0d)>Num*A1d Then Begin A1n:=X*A1n+A0n; A1d:=X*A1d+A0d; End;
+   Break;
+  End;
+  A0n:=A1n; A0d:=A1d; A1n:=A2n; A1d:=A2d; Num:=Den; Den:=NextDen;
+ End;
+ If Sign Then N:=-A1n Else N:=A1n;
+ D:=A1d;
+End;
+
+Procedure H7Reduce(Var N,D: Int64);
+Begin
+ H7AvReduce(N,D,2147483647);
+End;
+
+{ Dem* : r_frame_rate et avg_frame_rate poses par le demuxeur (0/0 si absents) ; Hdr* : cadence du codec ;
+  RawDur : durees fournies par le demuxeur (0 si absentes) ; OutDur : durees des paquets vues par ffmpeg
+  (durees d'avant analyse = compute_frame_duration sans r_frame_rate, apres analyse = r_frame_rate) ;
+  retourne la cadence de sortie (av_guess_frame_rate) dans GN/GD et r_frame_rate dans RN/RD }
+Procedure H7FrameRate(N: LongInt; Pts,RawDur,OutDur: PMKI64; TbN,TbD,DemRN,DemRD,DemAN,DemAD: Int64; HdrN,HdrD: LongInt; AvgForT,CodecFps,ProbeRaw: Boolean; Var GN,GD,RN,RD: Int64);
+Var
+ Err: ^TH7Err; I,J,K,F,Cnt,Nb,KRead,FirstIdx,LastIdx: LongInt; Unrel: Boolean; AvgN,AvgD: Int64;
+ InfoDur,InfoFields,Last,RSum,Gcd,Duration,T,Ticks,Num,NoPts,BestFps,FirstDts,LastDts,PD,ProbeD: Int64;
+ Dts,Sdts,Error,A0,E0,A1,E1,BestErr,Tq,Q,Std,Dq: Double; Stop: Boolean;
+Function Gc(A,B: Int64): Int64;
+Var T2: Int64;
+Begin
+ If A<0 Then A:=-A; If B<0 Then B:=-B;
+ While B<>0 Do Begin T2:=A Mod B; A:=B; B:=T2; End;
+ Gc:=A;
+End;
+Begin
+ NoPts:=Int64(1) Shl 63;
+ GetMem(Err,SizeOf(TH7Err)); FillChar(Err^,SizeOf(TH7Err),0);
+ RN:=DemRN; RD:=DemRD; AvgN:=DemAN; AvgD:=DemAD;
+ Unrel:=(TbD>=101*TbN) Or (TbD<5*TbN);
+ If CodecFps And (HdrN>0) And (HdrD>0) Then Unrel:=(HdrN>=101*HdrD) Or (HdrN<5*HdrD);
+ Tq:=TbN; Tq:=Tq/TbD;
+ F:=20; If Tq>0.0005 Then F:=40;
+ If Not Unrel Then F:=0;
+ { duree d'un paquet sans duree du demuxeur, avant que r_frame_rate soit connu (compute_frame_duration) }
+ ProbeD:=0;
+ If RN>0 Then ProbeD:=(RD*TbD) Div (RN*TbN)
+ Else If CodecFps And (TbN*1000>TbD) Then ProbeD:=1
+ Else If CodecFps And (HdrN>0) And (Int64(HdrD)*1000>HdrN) Then ProbeD:=(Int64(HdrD)*TbD) Div (Int64(HdrN)*TbN);
+ Cnt:=0; Nb:=0; InfoDur:=0; InfoFields:=0; Last:=NoPts; RSum:=0; Gcd:=0; KRead:=0;
+ FirstDts:=NoPts; LastDts:=NoPts; FirstIdx:=0; LastIdx:=0;
+ For I:=0 To N-1 Do Begin
+  If I>=1 Then Begin
+   Stop:=True;
+   If Not ((RN>0) And (AvgN>0)) Then If Cnt<F Then Stop:=False;
+   If Stop Then Break;
+  End;
+  KRead:=I+1;
+  If ProbeRaw And (RawDur^[I]>0) Then PD:=RawDur^[I] Else PD:=ProbeD;
+  If RawDur^[I]>0 Then OutDur^[I]:=RawDur^[I] Else OutDur^[I]:=PD;
+  If Nb>1 Then Begin
+   { controles de discontinuite des dts }
+   If (FirstDts<>NoPts) Or (LastDts<>NoPts) Then Begin
+    If (LastDts<>NoPts) And (LastDts>=Pts^[I]) Then Begin FirstDts:=NoPts; LastDts:=NoPts; End;
+    If (LastDts<>NoPts) And (LastIdx>FirstIdx) And ((Pts^[I]-LastDts) Div 1000>(LastDts-FirstDts) Div (LastIdx-FirstIdx)) Then Begin FirstDts:=NoPts; LastDts:=NoPts; End;
+   End;
+   If FirstDts=NoPts Then Begin FirstDts:=Pts^[I]; FirstIdx:=Nb; End;
+   LastDts:=Pts^[I]; LastIdx:=Nb;
+   T:=MKRescQ(InfoDur,TbN,TbD,1,1000000);
+   If AvgForT And (DemAN>0) Then Begin
+    Ticks:=MKRescQ(Nb,DemAD,DemAN,1,1000000);
+    If Ticks>T Then T:=Ticks;
+   End;
+   If (T=0) And (Nb>30) And (FirstDts<>NoPts) And (LastDts<>NoPts) Then Begin
+    Ticks:=MKRescQ(LastDts-FirstDts,TbN,TbD,1,1000000);
+    If Ticks>T Then T:=Ticks;
+   End;
+   If T>=5000000 Then Break;
+   If PD>0 Then Begin Inc(InfoDur,PD); Inc(InfoFields,2); End;
+  End;
+  { ff_rfps_add_frame }
+  If (Last<>NoPts) And (Pts^[I]>Last) Then Begin
+   Dts:=Pts^[I]; Dts:=Dts*Tq;
+   Duration:=Pts^[I]-Last;
+   For J:=0 To 398 Do If Err^[0][1][J]<1e10 Then Begin
+    Std:=H7Std(J); Sdts:=Dts*Std/(1001*12);
+    For K:=0 To 1 Do Begin
+     Ticks:=MKLlrint(Sdts+K*0.5);
+     Error:=Sdts-Ticks+K*0.5;
+     Err^[K][0][J]:=Err^[K][0][J]+Error; Err^[K][1][J]:=Err^[K][1][J]+Error*Error;
+    End;
+   End;
+   Inc(RSum,Duration); Inc(Cnt);
+   If Cnt Mod 10=0 Then Begin
+    For J:=0 To 398 Do If Err^[0][1][J]<1e10 Then Begin
+     A0:=Err^[0][0][J]/Cnt; E0:=Err^[0][1][J]/Cnt-A0*A0;
+     A1:=Err^[1][0][J]/Cnt; E1:=Err^[1][1][J]/Cnt-A1*A1;
+     If (E0>0.04) And (E1>0.04) Then Begin Err^[0][1][J]:=2e10; Err^[1][1][J]:=2e10; End;
+    End;
+   End;
+   If Cnt>3 Then Gcd:=Gc(Gcd,Duration);
+  End;
+  If Pts^[I]<>NoPts Then Last:=Pts^[I];
+  Inc(Nb);
+ End;
+ { ff_rfps_calculate }
+ If Unrel And (Cnt>15) And (Gcd>1) And (Gcd>(TbD Div (500*TbN))) And (RN=0) Then Begin
+  RN:=TbD; RD:=TbN*Gcd; H7Reduce(RN,RD);
+ End;
+ If (Cnt>1) And (RN=0) And Unrel Then Begin
+  Num:=0; BestErr:=0.01;
+  For J:=0 To 398 Do Begin
+   If InfoDur<>0 Then Begin
+    Q:=InfoDur; If Q*Tq<(1001*11.5)/H7Std(J) Then Continue;
+   End;
+   If (InfoDur=0) And (H7Std(J)<1001*12) Then Continue;
+   Q:=RSum; Q:=Q*Tq/Cnt;
+   If Q<(1001*12.0*0.8)/H7Std(J) Then Continue;
+   For K:=0 To 1 Do Begin
+    A0:=Err^[K][0][J]/Cnt; Error:=Err^[K][1][J]/Cnt-A0*A0;
+    If (Error<BestErr) And (BestErr>0.000000001) Then Begin BestErr:=Error; Num:=H7Std(J); End;
+   End;
+  End;
+  { pas plus de 1 % au-dessus de la cadence de reference }
+  If Num<>0 Then Begin
+   Dq:=TbD; Dq:=Dq/TbN;
+   Q:=Num; Q:=Q/(12*1001);
+   If Q<1.01*Dq Then Begin RN:=Num; RD:=12*1001; H7Reduce(RN,RD); End;
+  End;
+ End;
+ If (AvgN=0) And (RN>0) And (RSum<>0) And (InfoDur<=0) And (Cnt>2) Then Begin
+  Q:=RN; Q:=Q/RD; Dq:=RSum; Dq:=Dq/Cnt;
+  If Abs(1.0/(Q*Tq)-Dq)<=1.0 Then Begin AvgN:=RN; AvgD:=RD; End;
+ End;
+ { cadence moyenne estimee si le demuxeur n'en donne pas }
+ If (InfoFields>0) And (AvgN=0) And (InfoDur>0) Then Begin
+  AvgN:=InfoFields*TbD; AvgD:=InfoDur*2*TbN; H7AvReduce(AvgN,AvgD,60000);
+  Q:=AvgN; Q:=Q/AvgD; BestErr:=0.01; BestFps:=0;
+  For J:=0 To 398 Do Begin
+   Std:=H7Std(J); Std:=Std/(12*1001);
+   Error:=Abs(Q/Std-1);
+   If Error<BestErr Then Begin BestErr:=Error; BestFps:=H7Std(J); End;
+  End;
+  If BestFps<>0 Then Begin AvgN:=BestFps; AvgD:=12*1001; H7Reduce(AvgN,AvgD); End;
+ End;
+ If RN=0 Then Begin
+  If (HdrN>0) And (HdrD>0) And (Int64(HdrN)*TbN<=Int64(HdrD)*TbD) Then Begin RN:=HdrN; RD:=HdrD; End
+  Else Begin RN:=TbD; RD:=TbN; End;
+ End;
+ H7Reduce(RN,RD);
+ GN:=RN; GD:=RD;
+ If (AvgN>0) And (AvgD>0) And (GN>0) And (GD>0) Then Begin
+  Q:=AvgN; Q:=Q/AvgD; Dq:=GN; Dq:=Dq/GD;
+  If (Q<70) And (Dq>210) Then Begin GN:=AvgN; GD:=AvgD; End;
+ End;
+ { durees des paquets lus apres l'analyse : r_frame_rate definitif }
+ For I:=KRead To N-1 Do Begin
+  If RawDur^[I]>0 Then OutDur^[I]:=RawDur^[I] Else OutDur^[I]:=(RD*TbD) Div (RN*TbN);
+ End;
+ FreeMem(Err);
+End;
+
+{ ---- video Matroska : Theora (V_THEORA) et VP3 (V_MS/VFW/FOURCC VP30/VP31) ---- }
+Function MKFindVideo: LongInt;
+Var I: LongInt; F: String;
+Begin
+ MKFindVideo:=-1;
+ For I:=0 To MKNTr-1 Do If MKTr[I].Typ=1 Then Begin
+  If MKTr[I].Codec='V_THEORA' Then Begin MKFindVideo:=I; Exit; End;
+  If MKTr[I].Codec='V_MS/VFW/FOURCC' Then Begin
+   F:=Chr(MKB(MKTr[I].PrivPos+16))+Chr(MKB(MKTr[I].PrivPos+17))+Chr(MKB(MKTr[I].PrivPos+18))+Chr(MKB(MKTr[I].PrivPos+19));
+   If (F='VP30') Or (F='VP31') Then Begin MKFindVideo:=I; Exit; End;
+  End;
+ End;
+End;
+
+Function MKVideoKind(Const Source: String): LongInt;
+Var Hd: Array[0..3] Of Byte;
+Begin
+ MKVideoKind:=0;
+ OpenRead(Source);
+ If InputSize<64 Then Begin CloseRead; Exit; End;
+ ReadAt(0,Hd,4); CloseRead;
+ If (Hd[0]<>$1A) Or (Hd[1]<>$45) Or (Hd[2]<>$DF) Or (Hd[3]<>$A3) Then Exit;
+ MKParse(Source);
+ If MKFindVideo>=0 Then MKVideoKind:=1800;
+ MKFree;
+End;
+
+Procedure DecodeMKVVideo(Const Source,Target: String; Mode: LongInt);
+Var
+ T,I,K,At,L1,L2,E,N,Q,Cl,Ct,OutW,OutH,FpsN,FpsD,TbG,SarN,SarD,Fn: LongInt; TbN,TbD,G,StartUs,OffTicks,Gcd1,Gcd2: Int64;
+ PtsA,DurA,OutA: PMKI64; Cnt: LongInt; F: String; HdrN,HdrD: LongInt; GN,GD,RN,RD,DemRN,DemRD,DemAN,DemAD: Int64;
+Begin
+ VP3Reset;
+ MKParse(Source);
+ T:=MKFindVideo;
+ If T<0 Then Fail('matroska: aucune piste Theora/VP3.');
+ If MKTr[T].Enc Then Fail('matroska: ContentEncodings (compression/chiffrement) non pris en charge.');
+ { base de temps du flux : TimecodeScale / 1e9 reduit }
+ TbN:=MKScale; TbD:=1000000000; Gcd1:=TbN; Gcd2:=TbD;
+ While Gcd2<>0 Do Begin G:=Gcd1 Mod Gcd2; Gcd1:=Gcd2; Gcd2:=G; End;
+ TbN:=TbN Div Gcd1; TbD:=TbD Div Gcd1;
+ { paquets de la piste }
+ Cnt:=MKTr[T].NPk;
+ If Cnt<1 Then Fail('matroska: aucun paquet video.');
+ GetMem(VP3PkOff,Cnt*4+16); GetMem(VP3PkSz,Cnt*4+16); GetMem(PtsA,Int64(Cnt)*8+16); GetMem(DurA,Int64(Cnt)*8+16);
+ K:=0;
+ For I:=0 To MKNPk-1 Do If MKPkTr^[I]=T Then Begin
+  VP3PkOff^[K]:=MKPkPos^[I]; VP3PkSz^[K]:=MKPkLen^[I]; PtsA^[K]:=MKPkPts^[I]; DurA^[K]:=MKPkDur^[I]; Inc(K);
+ End;
+ VP3Arena:=MKF; VP3NPk:=K; VP3IsOgg:=False; VP3NHdr:=0;
+ E:=MKTr[T].PrivPos;
+ SarN:=0; SarD:=0;
+ If MKTr[T].Codec='V_THEORA' Then Begin
+  If MKTr[T].PrivLen<6 Then Fail('theora: extradata incorrect.');
+  If MKB(E)<>2 Then Fail('theora: extradata incorrect.');
+  At:=E+1; L1:=0; L2:=0;
+  While MKB(At)=255 Do Begin Inc(L1,255); Inc(At); End;
+  Inc(L1,MKB(At)); Inc(At);
+  While MKB(At)=255 Do Begin Inc(L2,255); Inc(At); End;
+  Inc(L2,MKB(At)); Inc(At);
+  N:=E+MKTr[T].PrivLen;
+  If (At+L1+L2>N) Then Fail('theora: extradata incorrect.');
+  VP3HP[0]:=PEABuffer(@MKF^[At]); VP3HL[0]:=L1;
+  VP3HP[1]:=PEABuffer(@MKF^[At+L1]); VP3HL[1]:=L2;
+  VP3HP[2]:=PEABuffer(@MKF^[At+L1+L2]); VP3HL[2]:=N-(At+L1+L2);
+  VP3InitHeaders;
+  If (VP3SarN>0) And (VP3SarD>0) Then Begin
+   Fn:=VP3SarN; Q:=VP3SarD; I:=Fn; K:=Q; While K<>0 Do Begin At:=I Mod K; I:=K; K:=At; End;
+   SarN:=Fn Div I; SarD:=Q Div I;
+  End;
+  Cl:=0; Ct:=VP3H-VP3VisH-VP3OffYB;
+  If VP3Theora>=$030200 Then Cl:=VP3EffCropLeft(VP3OffX);
+  OutW:=VP3VisW+VP3OffX-Cl; OutH:=VP3VisH;
+  If VP3Theora<$030200 Then Begin OutW:=VP3VisW; Ct:=0; End;
+  HdrN:=VP3FpsN; HdrD:=VP3FpsD;
+ End Else Begin
+  F:=Chr(MKB(E+16))+Chr(MKB(E+17))+Chr(MKB(E+18))+Chr(MKB(E+19));
+  VP3Theora:=0; If F='VP30' Then VP3Ver:=0 Else VP3Ver:=1;
+  VP3W:=(MKTr[T].W+15) And Not 15; VP3H:=(MKTr[T].H+15) And Not 15;
+  If VP3W<18 Then Fail('vp3: largeur insuffisante.');
+  VP3VisW:=MKTr[T].W; VP3VisH:=MKTr[T].H; VP3PixFmt:=0; VP3Flip:=False;
+  VP3InitBuiltin; VP3Setup; VP3Ready:=True;
+  Cl:=0; Ct:=0; OutW:=VP3VisW; OutH:=VP3VisH;
+  HdrN:=0; HdrD:=0;
+ End;
+ { cadence : matroskadec.c (DefaultDuration -> avg_frame_rate, et r_frame_rate si 5 < cadence < 1000), puis demux.c }
+ DemRN:=0; DemRD:=0; DemAN:=0; DemAD:=0;
+ If MKTr[T].DefDur>0 Then Begin
+  DemAN:=1000000000; DemAD:=MKTr[T].DefDur; H7AvReduce(DemAN,DemAD,30000);
+  If (DemAN<DemAD*1000) And (DemAN>DemAD*5) Then Begin DemRN:=DemAN; DemRD:=DemAD; End;
+ End;
+ GetMem(OutA,Int64(VP3NPk)*8+16);
+ H7FrameRate(VP3NPk,PtsA,DurA,OutA,TbN,TbD,DemRN,DemRD,DemAN,DemAD,HdrN,HdrD,True,True,True,GN,GD,RN,RD);
+ Move(OutA^,DurA^,Int64(VP3NPk)*8);
+ FpsN:=GN; FpsD:=GD;
+ { decalage de debut de fichier : plus petit premier horodatage de toutes les pistes }
+ StartUs:=0; Fn:=0;
+ For I:=0 To MKNTr-1 Do If MKTr[I].HaveFirst Then Begin
+  G:=MKRescQ(MKTr[I].FirstPts,MKScale,1000000000,1,1000000);
+  If (Fn=0) Or (G<StartUs) Then StartUs:=G;
+  Fn:=1;
+ End;
+ OffTicks:=MKRescQ(-StartUs,1,1000000,TbN,TbD);
+ { durees : celles du conteneur, sinon synthetisees a partir de la cadence (compute_frame_duration, arrondi vers le bas) }
+ For I:=0 To VP3NPk-1 Do Begin
+  PtsA^[I]:=PtsA^[I]+OffTicks;
+ End;
+ { image de reference de la taille : MKVideoRun cree la sortie }
+ MKVideoRun(Mode,Target,MKNTr=1,VP3NPk,PtsA,DurA,TbN,TbD,FpsN,FpsD,SarN,SarD,Cl,Ct,OutW,OutH);
+ MKFree;
+End;
+
+{ ---- Theora dans MOV : horodatages et durees de la table stts (cadence variable) ---- }
+Procedure H7TheoraMov(Mode: LongInt; Const Target: String; SarN,SarD: LongInt);
+Var
+ MoovPos,MoovSize,P,TrakPos,TrakSize,MdiaPos,MdiaSize,HdlrPos,HdlrSize,MdhdPos,MdhdSize,SttsPos,SttsSize,MinfPos,MinfSize,StblPos,StblSize: LongInt;
+ Found: Boolean; Ts,TsOff,NEnt,I,J,K,Cnt,Tracks,Cl,Ct,OutW,OutH,FpsN,FpsD,SN,SD: LongInt; Dts,Delta,G1,G2,G: Int64; PtsA,DurA: PMKI64; Cc: LongInt;
+ Vscfr: Boolean; TotCnt,Dur0: LongInt; TotDur: Int64; GN,GD,RN,RD,DemRN,DemRD,DemAN,DemAD: Int64; OutA: PMKI64;
+Begin
+ If Not QXFind(0,QXSize,'moov',MoovPos,MoovSize) Then Fail('mov: atome moov absent.');
+ P:=MoovPos+8; Found:=False; Tracks:=0;
+ While QXFind(P,MoovPos+MoovSize,'trak',TrakPos,TrakSize) Do Begin
+  Inc(Tracks);
+  If Not Found Then
+   If QXFind(TrakPos+8,TrakPos+TrakSize,'mdia',MdiaPos,MdiaSize) Then
+    If QXFind(MdiaPos+8,MdiaPos+MdiaSize,'hdlr',HdlrPos,HdlrSize) And (QXT4(HdlrPos+16)='vide') Then
+     If QXFind(MdiaPos+8,MdiaPos+MdiaSize,'minf',MinfPos,MinfSize) Then
+      If QXFind(MinfPos+8,MinfPos+MinfSize,'stbl',StblPos,StblSize) Then
+       If QXFind(StblPos+8,StblPos+StblSize,'stts',SttsPos,SttsSize) Then Found:=True;
+  P:=TrakPos+TrakSize;
+ End;
+ If Not Found Then Fail('mov: stts absent.');
+ If Not QXFind(MdiaPos+8,MdiaPos+MdiaSize,'mdhd',MdhdPos,MdhdSize) Then Fail('mov: mdhd absent.');
+ If EAByte(QXF,QXSize,MdhdPos+8)=1 Then TsOff:=28 Else TsOff:=20;
+ Ts:=QXB32(MdhdPos+TsOff);
+ If Ts<=0 Then Fail('mov: echelle de temps incorrecte.');
+ NEnt:=QXB32(SttsPos+12);
+ Cnt:=QXCount;
+ GetMem(PtsA,Int64(Cnt)*8+16); GetMem(DurA,Int64(Cnt)*8+16);
+ Dts:=0; K:=0;
+ For I:=0 To NEnt-1 Do Begin
+  If K>=Cnt Then Break;
+  Cc:=QXB32(SttsPos+16+8*I); Delta:=QXB32(SttsPos+20+8*I);
+  For J:=1 To Cc Do Begin
+   If K>=Cnt Then Break;
+   PtsA^[K]:=Dts; DurA^[K]:=Delta; Inc(Dts,Delta); Inc(K);
+  End;
+ End;
+ { echantillons sans entree stts : duree de la derniere entree }
+ While K<Cnt Do Begin PtsA^[K]:=Dts; DurA^[K]:=0; Inc(K); End;
+ { geometrie et cadence }
+ Cl:=0; Ct:=VP3H-VP3VisH-VP3OffYB;
+ If VP3Theora>=$030200 Then Cl:=VP3EffCropLeft(VP3OffX);
+ OutW:=VP3VisW+VP3OffX-Cl; OutH:=VP3VisH;
+ If VP3Theora<$030200 Then Begin OutW:=VP3VisW; Ct:=0; End;
+{ cadence : mov.c (r_frame_rate si une ou deux entrees stts ; avg_frame_rate = echantillons / duree), puis demux.c }
+ TotCnt:=0; TotDur:=0;
+ For I:=0 To NEnt-1 Do Begin
+  Inc(TotCnt,QXB32(SttsPos+16+8*I)); Inc(TotDur,Int64(QXB32(SttsPos+16+8*I))*QXB32(SttsPos+20+8*I));
+ End;
+ Dur0:=QXB32(SttsPos+20);
+ DemRN:=0; DemRD:=0; DemAN:=0; DemAD:=0;
+ If (NEnt>=1) And ((NEnt=1) Or ((NEnt=2) And (QXB32(SttsPos+24)=1))) And (Dur0>0) Then Begin DemRN:=Ts; DemRD:=Dur0; End;
+ If (TotCnt>0) And (TotDur>0) Then Begin DemAN:=Int64(Ts)*TotCnt; DemAD:=TotDur; H7Reduce(DemAN,DemAD); End;
+ GetMem(OutA,Int64(Cnt)*8+16);
+ H7FrameRate(Cnt,PtsA,DurA,OutA,1,Ts,DemRN,DemRD,DemAN,DemAD,VP3FpsN,VP3FpsD,False,False,False,GN,GD,RN,RD);
+ Move(OutA^,DurA^,Int64(Cnt)*8);
+ FpsN:=GN; FpsD:=GD;
+ Vscfr:=Tracks=1;
+ SN:=SarN; SD:=SarD;
+ MKVideoRun(Mode,Target,Vscfr,Cnt,PtsA,DurA,1,Ts,FpsN,FpsD,SN,SD,Cl,Ct,OutW,OutH);
+End;
+{ ==== H7-END ==== }
 { ==== BLOCK-ANCHOR-H7 : inserer le code du groupe H7 juste au-dessus de cette ligne ==== }
 
 { ---- H8 : zmbv, conversion yuv420p -> pal8 (BGR8) / rgb555le / rgb565le (libswscale/yuv2rgb.c, chemin non mis a l'echelle) ---- }
@@ -112981,7 +114244,7 @@ Begin
    If HasFormat Or (Size<16) Then Fail('Bloc fmt incorrect.');
    ReadAt(Position,B,16); If (U16(0)<>1) And Not ((U16(0)=$FFFE) And (Size>=40)) Then Fail('WAV PCM entier requis.');
    Channels:=U16(2); Rate:=U32(4); Bits:=U16(14); Align:=U16(12);
-   If Not (Channels In [1..8]) Or Not (Bits In [8,16,24,32]) Or (Rate<4000) Or (Rate>
+   If Not (Channels In [1..255]) Or Not (Bits In [8,16,24,32]) Or (Rate<4000) Or (Rate>
    192000) Then Fail('Format PCM non pris en charge.');
    If (Align<>Channels*(Bits Div 8)) Or (U32(8)<>Rate*Align) Then Fail(
    'Alignement PCM incorrect.');
@@ -117536,7 +118799,7 @@ Begin
  WriteLn(' DE s16be, s16le, s24be, s24le, s32be, s32le, s8   PCM entier signe brut');
  WriteLn(' DE u16be, u16le, u24be, u24le, u32be, u32le, u8   PCM entier non signe brut');
  WriteLn(' D  vob             MPEG-2 PS: LPCM DVD (pcm_dvd) vers WAV/AIFF/PCM brut');
- WriteLn(' D  webm            WebM VP9/Opus; copie vers MP4');
+ WriteLn(' D  webm            WebM VP9/Opus; copie vers MP4; Matroska/WebM: decodage Vorbis, Theora, VP3 (lacing, durees, cadence variable)');
  WriteLn;
  WriteLn('D/E indique le conteneur; les codecs et conversions restent limites.');
  WriteLn('Voir -codecs et FFMPEG.md. WMV2 sans encodage ASF; FLV1 limite aux images intra.');
@@ -118014,10 +119277,10 @@ BEGIN
   WriteLn('DEA    wmav1           Windows Media Audio 1');
   WriteLn('DEA    wmav2           Windows Media Audio 2');
   { LIST-ANCHOR-G3B }
-  WriteLn('DEA    vorbis          Vorbis (decodeur natif vorbisdec: Ogg Vorbis I, plancher 1, residus 0/1/2, 1..255 canaux; encodeur experimental natif, stereo, blocs de 2048, -strict -2)');
+  WriteLn('DEA    vorbis          Vorbis (decodeur natif vorbisdec: Ogg Vorbis I (flux chaines de memes parametres) et Matroska/WebM, planchers 0 et 1, residus 0/1/2, 1..255 canaux; encodeur experimental natif, stereo, blocs de 2048, -strict -2)');
   { LIST-ANCHOR-G3C }
   WriteLn('D V    theora          Theora (decodeur natif complet I/P: Ogg Theora 4:2:0/4:2:2/4:4:4, recadrage)');
-  WriteLn('D V    vp3             On2 VP3 (decodeur natif: AVI VP31/VP30)');
+  WriteLn('D V    vp3             On2 VP3 (decodeur natif: AVI et Matroska VP31/VP30)');
   { LIST-ANCHOR-G4A }
   WriteLn('D V    vp5             On2 VP5 (AVI VP50; decodeur exact)');
   WriteLn('D V    vp6             On2 VP6 (AVI VP60/VP61/VP62; decodeur exact)');
@@ -118363,6 +119626,7 @@ BEGIN
   Halt(0);
  End;
  NVKind:=0;
+ If (InputFormat='webm') And Not IsHTTP(InputPath) And ((OutputFormat='yuv4mpegpipe') Or (OutputFormat='png') Or (OutputFormat='bmp')) Then NVKind:=MKVideoKind(Intermediate); { H7 }
  If (InputFormat='wc3movie') And Not IsHTTP(InputPath) Then NVKind:=1702;
  If (InputFormat='thp') And Not IsHTTP(InputPath) Then NVKind:=1703;
  If (InputFormat='wsvqa') And Not IsHTTP(InputPath) Then NVKind:=1701;
@@ -118862,7 +120126,7 @@ BEGIN
  End;
  If IsHTTP(InputPath) Then Fail('Entree reseau reservee aux listes HLS.');
  If HLSBase<>'' Then Fail('-hls_base_url exige une entree HLS.');
- If ((InputFormat='mp4') Or (InputFormat='avi') Or (InputFormat='webm')) And Not ((InputFormat='avi') And WMDAviHasWMA(InputPath) And ((OutputFormat='wav') Or (OutputFormat='mp3') Or (OutputFormat='asf'))) And Not ((InputFormat='avi') And (OutputFormat='wav') And H8XanAvi(InputPath,'',0)) Then Begin
+ If ((InputFormat='mp4') Or (InputFormat='avi') Or (InputFormat='webm')) And Not ((InputFormat='webm') And NVAudioOut And MKHasVorbis(InputPath)) And Not ((InputFormat='avi') And WMDAviHasWMA(InputPath) And ((OutputFormat='wav') Or (OutputFormat='mp3') Or (OutputFormat='asf'))) And Not ((InputFormat='avi') And (OutputFormat='wav') And H8XanAvi(InputPath,'',0)) Then Begin
   If Not (((InputFormat='mp4') And (OutputFormat='avi')) Or
   ((InputFormat='avi') And (OutputFormat='mp4')) Or
   ((InputFormat='webm') And (OutputFormat='mp4')) Or
@@ -118935,6 +120199,7 @@ BEGIN
    If InputFormat='ac3' Then ProcessAC3(InputPath,Temps[0],False,0) Else
    If InputFormat='eac3' Then DecodeEAC3(InputPath,Temps[0]) Else
    If InputFormat='flac' Then DecodeFLAC(InputPath,Temps[0]) Else
+   If (InputFormat='webm') And MKHasVorbis(InputPath) Then DecodeMKVVorbis(InputPath,Temps[0]) Else { H7 }
    If InputFormat='ogg' Then Begin If VGIsVorbisOgg(InputPath) Then VGDecodeOgg(InputPath,Temps[0]) Else DecodeSpeexOgg(InputPath,Temps[0]); End Else
    If (InputFormat='g726') Or (InputFormat='g726le') Then DecodeG726(InputPath,Temps[0],InputFormat='g726le',G726CodeSize,G726Rate) Else
    If InputFormat='aac' Then DecodeAAC(InputPath,Temps[0]) Else
