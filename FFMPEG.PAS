@@ -3505,7 +3505,7 @@ Type
  TMdV = Array[0..39] Of String[255];
 Var
  MdN,MdAN,MdCN: LongInt; MdK,MdAK,MdCK: TMdK; MdV,MdAV,MdCV: TMdV; MdCreation: Int64;
- Temps: Array[0..6] Of String;
+ Temps: Array[0..6] Of String; F1MaskOver: LongInt; { F1 : masque de canaux impose pour la sortie WAV }
  SavedExit: Pointer;
  InputPath,OutputPath,InputFormat,OutputFormat,AudioCodec,PendingFormat,InputCodec: String;
  NonStdBitrate: Boolean;
@@ -3636,7 +3636,7 @@ Function FormatName(S: String): String;Begin
  If S='rmvb' Then S:='rm';
  If S='cavs' Then S:='cavsvideo';
  If (S='oga') Or (S='ogv') Or (S='spx') Then S:='ogg';
- If S='ec3' Then S:='eac3';
+ If S='ec3' Then S:='eac3'; If S='ssa' Then S:='ass'; If S='aud' Then S:='wsaud';
  If S='thd' Then S:='truehd';
  If S='sw' Then S:='s16le' Else If S='sb' Then S:='s8' Else If S='uw' Then S:='u16le' Else If S='ub' Then S:='u8'
  Else If S='al' Then S:='alaw' Else If S='ul' Then S:='mulaw' Else If S='302' Then S:='daud';
@@ -3956,6 +3956,8 @@ Begin
   Probe:='voc'; Exit;
  End;
  If N>=24 Then If (B[0]=46) And (B[1]=115) And (B[2]=110) And (B[3]=100) And ((B[4] Or B[5] Or B[6] Or B[7])<>0) And ((B[8] Or B[9] Or B[10] Or B[11])<>0) And ((B[12] Or B[13] Or B[14] Or B[15])<>0) And ((B[16] Or B[17] Or B[18] Or B[19])<>0) And ((B[20] Or B[21] Or B[22] Or B[23])<>0) Then Begin Probe:='au'; Exit; End; { F1 }
+ If N>=8 Then If (B[0]=67) And (B[1]=82) And (B[2]=89) And (B[3]=79) And (B[4]=95) And (B[5]=65) And (B[6]=80) And (B[7]=67) Then Begin Probe:='apc'; Exit; End; { F1 }
+ If N>=12 Then If (B[0]=77) And (B[1]=77) And (B[2]=77) And (B[3]=68) And (B[8]=67) And (B[9]=78) And (B[10]=84) And (B[11]=73) Then Begin Probe:='mmf'; Exit; End; { F1 }
  If N>=8 Then If (B[0]=$80) And (B[1]=0) Then Begin
   ADXOffset:=LongInt(B[2])*256+B[3];
   If (ADXOffset>=8) And (ADXOffset<=N-4) Then
@@ -10646,7 +10648,7 @@ Var
  C,N,M,I: Integer;
  Co: Array[0..1,0..3] Of LongInt;
  Sh: Array[0..3] Of LongInt;
- S: Array[0..1,0..127] Of LongInt;
+ S: Array[0..7,0..127] Of LongInt;
 Begin
  EADecodeXAS:=False; Base:=0;
  While Size-Base>=76*Ch Do Begin
@@ -35109,7 +35111,9 @@ Begin
  End;
 End;
 { transformee inverse "demi" de l'AC-3: Y = DCT-IV de X renversee, via une FFT complexe de N/2 points }
-Procedure EC3Half(Var X: Array of Single; N: LongInt; Var Y: Array of Single);
+Procedure F1Ac3Half(Var X: Array of Single; N: LongInt; Var Y: Array of Single); Forward;
+Procedure F1Ac3HalfDbg(Var X: Array of Single; N: LongInt; Var Y: Array of Single); Forward;
+Procedure EC3HalfOld(Var X: Array of Single; N: LongInt; Var Y: Array of Single);
 Var T: ^TEC3Fft; Re,Im: Array[0..127] Of Double; I,J,Len,Half,Step,M: LongInt; A,B,Tr,Ti,Ur,Ui,Wr,Wi,Vr,Vi: Double;
 Begin
  If Not EC3FtInit Then Begin EC3FftInit(EC3Ft[0],256); EC3FftInit(EC3Ft[1],128); EC3FtInit:=True; End;
@@ -35138,6 +35142,10 @@ Begin
   Ur:=Re[I]*T^.PostC[I]-Im[I]*T^.PostS[I]; Ui:=Re[I]*T^.PostS[I]+Im[I]*T^.PostC[I];
   Y[N-1-2*I]:=Ur; Y[2*I]:=-Ui;
  End;
+End;
+Procedure EC3Half(Var X: Array of Single; N: LongInt; Var Y: Array of Single);
+Begin
+ F1Ac3HalfDbg(X,N,Y);
 End;
 Procedure EC3Imdct(Ch,Pos,Blk: LongInt);
 Var I,Base: LongInt; S0,S1,P1,P2: Single; Ev,Od: Array[0..127] Of Single; T2: Array[0..127] Of Single;
@@ -35492,7 +35500,8 @@ Begin
   If Not Drop Then Begin
    If NDep=0 Then Begin
     OutCh:=EC3NCh;
-    If Not Started Then Begin Rate:=EC3Rate; OpenWrite(Target); ADPCMWaveHeader(Rate,OutCh,0); Started:=True; End;
+    If Not Started Then Begin Rate:=EC3Rate; OpenWrite(Target); ADPCMWaveHeader(Rate,OutCh,0); Started:=True;
+     If OutCh>2 Then Begin F1MaskOver:=EC3LayoutTab[EC3OutMode And 7]; If (EC3OutMode And 8)<>0 Then F1MaskOver:=F1MaskOver Or 8; End; End;
     If (EC3Rate=Rate) And (EC3NCh=OutCh) Then Begin
      For K:=0 To 15 Do Ext[K]:=K;
      Output(EC3NCh,EC3NBlk);
@@ -35528,7 +35537,7 @@ Begin
        If Err<>0 Then Break;
       End;
      If Err=0 Then Begin
-      If Not Started Then Begin Rate:=EC3Rate; OutCh:=NLay; OpenWrite(Target); ADPCMWaveHeader(Rate,OutCh,0); Started:=True; End;
+      If Not Started Then Begin Rate:=EC3Rate; OutCh:=NLay; OpenWrite(Target); ADPCMWaveHeader(Rate,OutCh,0); Started:=True; If (OutCh>2) And (Lay<2147483648) Then F1MaskOver:=Lay; End;
       If (EC3Rate=Rate) And (NLay=OutCh) Then Output(NLay,EC3NBlk);
      End;
     End;
@@ -96557,6 +96566,15 @@ End;
 
 { F1-BLOCK-BEGIN }
 Var F1CompLevel: LongInt; F1CompSet: Boolean;
+{ F1 : dictionnaire du muxeur : l'etiquette encoder des entrees est retiree puis ajoutee en dernier (sauf -bitexact), comme ffmpeg }
+Procedure F1MdEncoder(Var N: LongInt; Var K: TMdK; Var V: TMdV);
+Var I: LongInt; Opt: Boolean;
+Begin
+ Opt:=False; For I:=0 To MdCN-1 Do If MdLow(MdCK[I])='encoder' Then Opt:=True;
+ If Not Opt Then MdSet(N,K,V,'encoder','',False,True);
+ If Not (VGBitExact Or Opt) Then MdSet(N,K,V,'encoder','Lavf60.16.100',False,False);
+End;
+
 { ======== F1 : MD5, CRC, encodeur FQAC natif (libavcodec/flacenc.c, lpc.c, lls) et muxeur flac (libavformat/flacenc.c) ======== }
 Type
  FQPI=^FQTI; FQTI=Array[0..16777215] Of LongInt;
@@ -97323,11 +97341,8 @@ Begin
  WriteBytes(Stm,34);
  { bloc VORBIS_COMMENT : dictionnaire global + encoder + masque de canaux }
  CmN:=MdN; For I:=0 To MdN-1 Do Begin CmK[I]:=MdK[I]; CmV[I]:=MdV[I]; End;
- If VGBitExact Then Vendor:='ffmpeg' Else Begin
-  Vendor:='Lavf60.16.100';
-  Q:=-1; For I:=0 To CmN-1 Do If MdLow(CmK[I])='encoder' Then Q:=I;
-  If Q<0 Then MdSet(CmN,CmK,CmV,'encoder','Lavf60.16.100',False,False);
- End;
+ If VGBitExact Then Vendor:='ffmpeg' Else Vendor:='Lavf60.16.100';
+ F1MdEncoder(CmN,CmK,CmV);
  If ChMask<>0 Then Begin
   Native:=False; For I:=0 To 7 Do If ChMask=NatMasks[I] Then Native:=True;
   If (ChMask And Not $3FFFF)=0 Then If Not Native Then Begin
@@ -97417,6 +97432,709 @@ Begin
  CloseWrite;
  For I:=0 To Ch-1 Do Begin FreeMem(FQSub[I].Samples); FreeMem(FQSub[I].Residual); FreeMem(FQSub[I].RcUdata); End;
  FreeMem(FQBuf); FreeMem(FQWinBuf); FreeMem(Md5Buf);
+End;
+{ ======== F1 : GSM 06.10 brut (libavformat/gsmdec.c, libavcodec/gsmdec_template.c) ======== }
+Const
+ GSDeq: Array[0..511] Of SmallInt=(
+-28,-20,-12,-4,4,12,20,28,
+-56,-40,-24,-8,8,24,40,56,
+-84,-60,-36,-12,12,36,60,84,
+-112,-80,-48,-16,16,48,80,112,
+-140,-100,-60,-20,20,60,100,140,
+-168,-120,-72,-24,24,72,120,168,
+-196,-140,-84,-28,28,84,140,196,
+-224,-160,-96,-32,32,96,160,224,
+-252,-180,-108,-36,36,108,180,252,
+-280,-200,-120,-40,40,120,200,280,
+-308,-220,-132,-44,44,132,220,308,
+-336,-240,-144,-48,48,144,240,336,
+-364,-260,-156,-52,52,156,260,364,
+-392,-280,-168,-56,56,168,280,392,
+-420,-300,-180,-60,60,180,300,420,
+-448,-320,-192,-64,64,192,320,448,
+-504,-360,-216,-72,72,216,360,504,
+-560,-400,-240,-80,80,240,400,560,
+-616,-440,-264,-88,88,264,440,616,
+-672,-480,-288,-96,96,288,480,672,
+-728,-520,-312,-104,104,312,520,728,
+-784,-560,-336,-112,112,336,560,784,
+-840,-600,-360,-120,120,360,600,840,
+-896,-640,-384,-128,128,384,640,896,
+-1008,-720,-432,-144,144,432,720,1008,
+-1120,-800,-480,-160,160,480,800,1120,
+-1232,-880,-528,-176,176,528,880,1232,
+-1344,-960,-576,-192,192,576,960,1344,
+-1456,-1040,-624,-208,208,624,1040,1456,
+-1568,-1120,-672,-224,224,672,1120,1568,
+-1680,-1200,-720,-240,240,720,1200,1680,
+-1792,-1280,-768,-256,256,768,1280,1792,
+-2016,-1440,-864,-288,288,864,1440,2016,
+-2240,-1600,-960,-320,320,960,1600,2240,
+-2464,-1760,-1056,-352,352,1056,1760,2464,
+-2688,-1920,-1152,-384,384,1152,1920,2688,
+-2912,-2080,-1248,-416,416,1248,2080,2912,
+-3136,-2240,-1344,-448,448,1344,2240,3136,
+-3360,-2400,-1440,-480,480,1440,2400,3360,
+-3584,-2560,-1536,-512,512,1536,2560,3584,
+-4032,-2880,-1728,-576,576,1728,2880,4032,
+-4480,-3200,-1920,-640,640,1920,3200,4480,
+-4928,-3520,-2112,-704,704,2112,3520,4928,
+-5376,-3840,-2304,-768,768,2304,3840,5376,
+-5824,-4160,-2496,-832,832,2496,4160,5824,
+-6272,-4480,-2688,-896,896,2688,4480,6272,
+-6720,-4800,-2880,-960,960,2880,4800,6720,
+-7168,-5120,-3072,-1024,1024,3072,5120,7168,
+-8063,-5759,-3456,-1152,1152,3456,5760,8064,
+-8959,-6399,-3840,-1280,1280,3840,6400,8960,
+-9855,-7039,-4224,-1408,1408,4224,7040,9856,
+-10751,-7679,-4608,-1536,1536,4608,7680,10752,
+-11647,-8319,-4992,-1664,1664,4992,8320,11648,
+-12543,-8959,-5376,-1792,1792,5376,8960,12544,
+-13439,-9599,-5760,-1920,1920,5760,9600,13440,
+-14335,-10239,-6144,-2048,2048,6144,10240,14336,
+-16127,-11519,-6912,-2304,2304,6912,11519,16127,
+-17919,-12799,-7680,-2560,2560,7680,12799,17919,
+-19711,-14079,-8448,-2816,2816,8448,14079,19711,
+-21503,-15359,-9216,-3072,3072,9216,15359,21503,
+-23295,-16639,-9984,-3328,3328,9984,16639,23295,
+-25087,-17919,-10752,-3584,3584,10752,17919,25087,
+-26879,-19199,-11520,-3840,3840,11520,19199,26879,
+-28671,-20479,-12288,-4096,4096,12288,20479,28671);
+
+
+Var
+ GSRef: Array[0..279] Of LongInt; GSV: Array[0..8] Of LongInt; GSLar: Array[0..1,0..7] Of LongInt; GSLarIdx,GSMsr: LongInt;
+ GSBuf: PEABuffer; GSBit: LongInt;
+
+Function GSBits(N: LongInt): LongInt;
+Var R,I: LongInt;
+Begin
+ R:=0;
+ For I:=1 To N Do Begin
+  R:=R*2+((GSBuf^[GSBit Shr 3] Shr (7-(GSBit And 7))) And 1); Inc(GSBit);
+ End;
+ GSBits:=R;
+End;
+
+Function GSW16(V: LongInt): LongInt;
+Begin V:=V And $FFFF; If V>=32768 Then V:=V-65536; GSW16:=V; End;
+
+Function GSMult(A,B: LongInt): LongInt;
+Var V: Int64;
+Begin
+ V:=Int64(A)*B+16384;
+ V:=V And $FFFFFFFF; If V>=2147483648 Then V:=V-4294967296;
+ If V>=0 Then GSMult:=V Shr 15 Else GSMult:=-1-((-1-V) Shr 15);
+End;
+
+Function GSClip16(V: LongInt): LongInt;
+Begin If V>32767 Then V:=32767; If V<-32768 Then V:=-32768; GSClip16:=V; End;
+
+Function GSSar(V: LongInt; N: LongInt): LongInt;
+Begin If V>=0 Then GSSar:=V Shr N Else GSSar:=-1-((-1-V) Shr N); End;
+
+Function GSDecLogArea(Coded,Factor,Offset: LongInt): LongInt;
+Begin Coded:=Coded Shl 10; Coded:=Coded-Offset; GSDecLogArea:=GSMult(Coded,Factor)*2; End;
+
+Function GSGetRrp(F: LongInt): LongInt;
+Var A: LongInt;
+Begin
+ A:=Abs(F);
+ If A<11059 Then A:=A Shl 1 Else If A<20070 Then A:=A+11059 Else A:=GSSar(A,2)+26112;
+ If F<0 Then GSGetRrp:=-A Else GSGetRrp:=A;
+End;
+
+Function GSFilter(In_: LongInt; Var Rrp: Array Of LongInt): LongInt;
+Var I: LongInt;
+Begin
+ For I:=7 DownTo 0 Do Begin
+  In_:=In_-GSMult(Rrp[I],GSV[I]);
+  GSV[I+1]:=GSV[I]+GSMult(Rrp[I],In_);
+ End;
+ GSV[0]:=In_; GSFilter:=In_;
+End;
+
+Procedure GSDecodeBlock;
+Const Gain: Array[0..3] Of LongInt=(3277,11469,21299,32767);
+Var I,K,Lag,GainIdx,Offs,MaxIdx,Val,Ref,Cur,Prv,Src,Msr: LongInt; Rrp: Array[0..7] Of LongInt; Dst: Array[0..159] Of LongInt;
+Begin
+ GSBits(4);
+ Cur:=GSLarIdx;
+ GSLar[Cur,0]:=GSDecLogArea(GSBits(6),13107,1 Shl 15);
+ GSLar[Cur,1]:=GSDecLogArea(GSBits(6),13107,1 Shl 15);
+ GSLar[Cur,2]:=GSDecLogArea(GSBits(5),13107,(1 Shl 14)+2048*2);
+ GSLar[Cur,3]:=GSDecLogArea(GSBits(5),13107,(1 Shl 14)-2560*2);
+ GSLar[Cur,4]:=GSDecLogArea(GSBits(4),19223,(1 Shl 13)+94*2);
+ GSLar[Cur,5]:=GSDecLogArea(GSBits(4),17476,(1 Shl 13)-1792*2);
+ GSLar[Cur,6]:=GSDecLogArea(GSBits(3),31454,(1 Shl 12)-341*2);
+ GSLar[Cur,7]:=GSDecLogArea(GSBits(3),29708,(1 Shl 12)-1144*2);
+ Ref:=120;
+ For I:=0 To 3 Do Begin
+  Lag:=GSBits(7); GainIdx:=GSBits(2); Offs:=GSBits(2);
+  If Lag<40 Then Lag:=40; If Lag>120 Then Lag:=120;
+  For K:=0 To 39 Do GSRef[Ref+K]:=GSW16(GSMult(Gain[GainIdx],GSRef[Ref+K-Lag]));
+  MaxIdx:=GSBits(6);
+  For K:=0 To 12 Do Begin
+   Val:=GSBits(3);
+   GSRef[Ref+Offs+3*K]:=GSW16(GSRef[Ref+Offs+3*K]+GSDeq[MaxIdx*8+Val]);
+  End;
+  Inc(Ref,40);
+ End;
+ { sauvegarde 120 derniers echantillons pour la trame suivante : fait apres la synthese car Src les lit }
+ Prv:=Cur Xor 1;
+ Src:=120;
+ For I:=0 To 7 Do Rrp[I]:=GSGetRrp(GSSar(GSLar[Prv,I],2)+GSSar(GSLar[Prv,I],1)+GSSar(GSLar[Cur,I],2));
+ For I:=0 To 12 Do Dst[I]:=GSW16(GSFilter(GSRef[Src+I],Rrp));
+ For I:=0 To 7 Do Rrp[I]:=GSGetRrp(GSSar(GSLar[Prv,I],1)+GSSar(GSLar[Cur,I],1));
+ For I:=13 To 26 Do Dst[I]:=GSW16(GSFilter(GSRef[Src+I],Rrp));
+ For I:=0 To 7 Do Rrp[I]:=GSGetRrp(GSSar(GSLar[Prv,I],2)+GSSar(GSLar[Cur,I],1)+GSSar(GSLar[Cur,I],2));
+ For I:=27 To 39 Do Dst[I]:=GSW16(GSFilter(GSRef[Src+I],Rrp));
+ For I:=0 To 7 Do Rrp[I]:=GSGetRrp(GSLar[Cur,I]);
+ For I:=40 To 159 Do Dst[I]:=GSW16(GSFilter(GSRef[Src+I],Rrp));
+ GSLarIdx:=GSLarIdx Xor 1;
+ Msr:=GSMsr;
+ For I:=0 To 159 Do Begin
+  Msr:=GSClip16(Dst[I]+GSMult(Msr,28180));
+  K:=GSClip16(Msr*2) And Not 7;
+  EAPut(K);
+ End;
+ GSMsr:=Msr;
+End;
+
+Procedure F1DecodeGSM(Const Source,Target: String; Rate: LongInt);
+Var Size,N,I,K: LongInt;
+Begin
+ NVLoad(Source,GSBuf,Size); CloseRead;
+ N:=Size Div 33;
+ If N<1 Then Fail('gsm: aucune trame complete.');
+ FillChar(GSRef,SizeOf(GSRef),0); FillChar(GSV,SizeOf(GSV),0); FillChar(GSLar,SizeOf(GSLar),0); GSLarIdx:=0; GSMsr:=0;
+ EAReset; OpenWrite(Target); ADPCMWaveHeader(Rate,1,0);
+ For I:=0 To N-1 Do Begin
+  GSBit:=I*33*8; GSDecodeBlock;
+  For K:=0 To 119 Do GSRef[K]:=GSRef[K+160];
+ End;
+ EAFlush; ADPCMPatchHeader(Rate,1,EAWritten); CloseWrite; FreeMem(GSBuf);
+End;
+{ ======== F1 : SSA/ASS (libavformat/assdec.c, assenc.c, subtitles.c ; decodeur/encodeur ass = recopie) ======== }
+Type
+ TASEv=Record
+  Pos: LongInt; Start,Dur: Int64; Layer: LongInt; TOff,TLen: LongInt;
+ End;
+ PASEv=^TASEvA; TASEvA=Array[0..16777215] Of TASEv;
+ PASIdx=^TASIdxA; TASIdxA=Array[0..16777215] Of LongInt;
+
+Procedure ASLoad(Const Name: String; Var P: PEABuffer; Var Size: LongInt);
+Var I,J: LongInt;
+Begin
+ OpenRead(Name); Size:=InputSize;
+ If Size>400000000 Then Fail('ass: fichier trop volumineux.');
+ GetMem(P,Size+64); FillChar(P^,Size+64,0);
+ I:=0; While I<Size Do Begin If Size-I>60000 Then J:=60000 Else J:=Size-I; ReadAt(I,P^[I],J); Inc(I,J); End;
+ CloseRead;
+End;
+
+{ conversion du texte comme FFTextReader : BOM UTF-8 ignore, UTF-16 converti en UTF-8 }
+Procedure ASText(Var P: PEABuffer; Var Size: LongInt);
+Var Q: PEABuffer; I,N,V,V2,K: LongInt; Le: Boolean; Cap: LongInt;
+ Procedure Put(U: LongInt);
+ Begin
+  If U<128 Then Begin Q^[N]:=U; Inc(N); End
+  Else If U<2048 Then Begin Q^[N]:=$C0 Or (U Shr 6); Q^[N+1]:=$80 Or (U And 63); Inc(N,2); End
+  Else If U<65536 Then Begin Q^[N]:=$E0 Or (U Shr 12); Q^[N+1]:=$80 Or ((U Shr 6) And 63); Q^[N+2]:=$80 Or (U And 63); Inc(N,3); End
+  Else Begin Q^[N]:=$F0 Or (U Shr 18); Q^[N+1]:=$80 Or ((U Shr 12) And 63); Q^[N+2]:=$80 Or ((U Shr 6) And 63); Q^[N+3]:=$80 Or (U And 63); Inc(N,4); End;
+ End;
+ Function R16(At: LongInt): LongInt;
+ Begin If Le Then R16:=P^[At]+P^[At+1]*256 Else R16:=P^[At]*256+P^[At+1]; End;
+Begin
+ If (Size>=2) And (((P^[0]=$FF) And (P^[1]=$FE)) Or ((P^[0]=$FE) And (P^[1]=$FF))) Then Begin
+  Le:=P^[0]=$FF;
+  Cap:=Size*2+64; GetMem(Q,Cap); FillChar(Q^,Cap,0); N:=0; I:=2;
+  While I+1<Size Do Begin
+   V:=R16(I); Inc(I,2);
+   If (V>=$D800) And (V<$DC00) Then Begin
+    If I+1<Size Then Begin
+     V2:=R16(I);
+     If (V2>=$DC00) And (V2<$E000) Then Begin Inc(I,2); V:=$10000+((V-$D800) Shl 10)+(V2-$DC00); End Else V:=0;
+    End Else V:=0;
+   End;
+   If V=0 Then Break;
+   Put(V);
+  End;
+  FreeMem(P); P:=Q; Size:=N;
+ End Else If (Size>=3) And (P^[0]=$EF) And (P^[1]=$BB) And (P^[2]=$BF) Then Begin
+  Move(P^[3],P^[0],Size-3); Dec(Size,3); P^[Size]:=0;
+ End;
+End;
+
+Function ASProbe(Const Name: String): Boolean;
+Var P: PEABuffer; Size,I,N,K: LongInt; Sig: String;
+Begin
+ ASProbe:=False;
+ OpenRead(Name); N:=InputSize; If N>200 Then N:=200;
+ If N<14 Then Begin CloseRead; Exit; End;
+ GetMem(P,N+8); FillChar(P^,N+8,0); ReadAt(0,P^,N); CloseRead; Size:=N;
+ ASText(P,Size);
+ I:=0; While (I<Size) And ((P^[I]=13) Or (P^[I]=10)) Do Inc(I);
+ Sig:='[Script Info]';
+ If I+13<=Size Then Begin
+  ASProbe:=True;
+  For K:=1 To 13 Do If P^[I+K-1]<>Ord(Sig[K]) Then ASProbe:=False;
+ End;
+ FreeMem(P);
+End;
+
+Function ASFmt2(V: LongInt): String;
+Var S: String;
+Begin
+ If (V>=0) And (V<10) Then ASFmt2:='0'+Chr(48+V) Else Begin Str(V,S); ASFmt2:=S; End;
+End;
+
+Function ASNum(V: Int64): String;
+Var S: String;
+Begin Str(V,S); ASNum:=S; End;
+
+Procedure ASWrite(Var B; Len: LongInt);
+Var Done,Piece: LongInt; Q: PEABuffer;
+Begin
+ Q:=@B; Done:=0;
+ While Done<Len Do Begin Piece:=Len-Done; If Piece>30000 Then Piece:=30000; WriteBytes(Q^[Done],Piece); Inc(Done,Piece); End;
+End;
+
+Procedure ASWriteS(S: String);
+Begin If Length(S)>0 Then WriteBytes(S[1],Length(S)); End;
+
+{ SSA/ASS -> SSA/ASS comme "ffmpeg -i in.ass out.ass" }
+Procedure F1AssConvert(Const Source,Target: String);
+Var P: PEABuffer; Size,At,LineStart,LineLen,N,NEv,I,J,K,Cnt,HdrN,Pos_,Q: LongInt;
+ Hdr: PEABuffer; Ev: PASEv; Idx,Tmp: PASIdx;
+ H1,M1,S1,Ms1,H2,M2,S2,Ms2,Layer: Int64; Ok: Boolean; ReadOrder: LongInt;
+ Ssa: Boolean; TrS,TrN,HdrSize,Lay: LongInt; Start_,End_: Int64; HasEvents: Boolean;
+ Hh1,Mm1,Ss1,Cs1,Hh2,Mm2,Ss2,Cs2: LongInt; L: String; C: Byte;
+ Ln: PEABuffer;
+ { mini-sscanf }
+ SP: LongInt;
+ Function Cur: LongInt; Begin If LineStart+SP<Size Then Cur:=P^[LineStart+SP] Else Cur:=0; End;
+ Function EndOfLine: Boolean; Begin EndOfLine:=SP>=LineLen; End;
+ Function GetInt(Var V: Int64): Boolean;
+ Var Neg: Boolean; D: LongInt;
+ Begin
+  GetInt:=False;
+  While (SP<LineLen) And (P^[LineStart+SP] In [9,10,11,12,13,32]) Do Inc(SP);
+  Neg:=False;
+  If (SP<LineLen) And ((P^[LineStart+SP]=43) Or (P^[LineStart+SP]=45)) Then Begin Neg:=P^[LineStart+SP]=45; Inc(SP); End;
+  D:=0; V:=0;
+  While (SP<LineLen) And (P^[LineStart+SP] In [48..57]) Do Begin
+   If V<100000000000 Then V:=V*10+(P^[LineStart+SP]-48); Inc(SP); Inc(D);
+  End;
+  If D=0 Then Exit;
+  If Neg Then V:=-V;
+  GetInt:=True;
+ End;
+ Function Lit(Ch: Byte): Boolean;
+ Begin
+  If (SP<LineLen) And (P^[LineStart+SP]=Ch) Then Begin Inc(SP); Lit:=True; End Else Lit:=False;
+ End;
+ Function TimeField(Var Hh,Mm,Ss,Ms: Int64): Boolean;
+ Begin
+  TimeField:=False;
+  If Not GetInt(Hh) Then Exit; If Not Lit(58) Then Exit;
+  If Not GetInt(Mm) Then Exit; If Not Lit(58) Then Exit;
+  If Not GetInt(Ss) Then Exit;
+  If SP>=LineLen Then Exit; Inc(SP);
+  If Not GetInt(Ms) Then Exit;
+  TimeField:=True;
+ End;
+ Function ReadDialogue: Boolean;
+ Const Sig: String[9]='Dialogue:';
+ Var K2,A: LongInt;
+ Begin
+  ReadDialogue:=False; SP:=0;
+  For K2:=1 To 9 Do If Not Lit(Ord(Sig[K2])) Then Exit;
+  While (SP<LineLen) And (P^[LineStart+SP] In [9,10,11,12,13,32]) Do Inc(SP);
+  A:=0; While (SP<LineLen) And (P^[LineStart+SP]<>44) Do Begin Inc(SP); Inc(A); End;
+  If A=0 Then Exit;
+  If Not Lit(44) Then Exit;
+  If Not TimeField(H1,M1,S1,Ms1) Then Exit;
+  If Not Lit(44) Then Exit;
+  If Not TimeField(H2,M2,S2,Ms2) Then Exit;
+  If Not Lit(44) Then Exit;
+  Pos_:=SP;
+  ReadDialogue:=True;
+ End;
+ Function Atoi10: Int64;
+ Var S0: LongInt; V: Int64; Neg: Boolean;
+ Begin
+  S0:=10; V:=0; Neg:=False;
+  While (LineStart+S0<Size) And (S0<LineLen) And (P^[LineStart+S0] In [9,10,11,12,13,32]) Do Inc(S0);
+  If (S0<LineLen) And ((P^[LineStart+S0]=43) Or (P^[LineStart+S0]=45)) Then Begin Neg:=P^[LineStart+S0]=45; Inc(S0); End;
+  While (S0<LineLen) And (P^[LineStart+S0] In [48..57]) Do Begin If V<100000000000 Then V:=V*10+(P^[LineStart+S0]-48); Inc(S0); End;
+  If Neg Then V:=-V;
+  Atoi10:=V;
+ End;
+ Function Strstr(Buf: PEABuffer; Len: LongInt; Const S: String; From: LongInt): LongInt;
+ Var A,B: LongInt; Ok2: Boolean;
+ Begin
+  Strstr:=-1;
+  For A:=From To Len-Length(S) Do Begin
+   Ok2:=True;
+   For B:=1 To Length(S) Do If Buf^[A+B-1]<>Ord(S[B]) Then Begin Ok2:=False; Break; End;
+   If Ok2 Then Begin Strstr:=A; Exit; End;
+  End;
+ End;
+ Procedure SortIdx(Lo,Hi: LongInt); { tri fusion de Idx[Lo..Hi) par (pts, pos) }
+ Var Mid,A,B,C2: LongInt;
+  Function Less(X,Y: LongInt): Boolean;
+  Begin
+   If Ev^[X].Start=Ev^[Y].Start Then Less:=Ev^[X].Pos<Ev^[Y].Pos Else Less:=Ev^[X].Start<Ev^[Y].Start;
+  End;
+ Begin
+  If Hi-Lo<2 Then Exit;
+  Mid:=(Lo+Hi) Div 2; SortIdx(Lo,Mid); SortIdx(Mid,Hi);
+  A:=Lo; B:=Mid; C2:=Lo;
+  While (A<Mid) And (B<Hi) Do Begin
+   If Less(Idx^[B],Idx^[A]) Then Begin Tmp^[C2]:=Idx^[B]; Inc(B); End Else Begin Tmp^[C2]:=Idx^[A]; Inc(A); End;
+   Inc(C2);
+  End;
+  While A<Mid Do Begin Tmp^[C2]:=Idx^[A]; Inc(A); Inc(C2); End;
+  While B<Hi Do Begin Tmp^[C2]:=Idx^[B]; Inc(B); Inc(C2); End;
+  For A:=Lo To Hi-1 Do Idx^[A]:=Tmp^[A];
+ End;
+Begin
+ ASLoad(Source,P,Size); ASText(P,Size);
+ N:=0; For I:=0 To Size-1 Do If P^[I]=10 Then Inc(N);
+ GetMem(Ev,(N+2)*SizeOf(TASEv)); GetMem(Hdr,Size+64); HdrN:=0; NEv:=0; ReadOrder:=0;
+ At:=0;
+ While True Do Begin
+  { get_line : jusqu'a \n inclus ou NUL (consomme) }
+  LineStart:=At; LineLen:=0;
+  While True Do Begin
+   If (At>=Size) Or (P^[At]=0) Then Begin If At<Size Then Inc(At); Break; End;
+   Inc(At); Inc(LineLen);
+   If P^[At-1]=10 Then Break;
+  End;
+  If LineLen=0 Then Break;
+  If ReadDialogue Then Begin
+   Ev^[NEv].Pos:=LineStart;
+   Ev^[NEv].Start:=(H1*3600+M1*60+S1)*100+Ms1;
+   Ev^[NEv].Dur:=((H2*3600+M2*60+S2)*100+Ms2)-Ev^[NEv].Start;
+   Ev^[NEv].Layer:=Atoi10;
+   Ev^[NEv].TOff:=LineStart+Pos_;
+   Q:=LineStart+LineLen;
+   While (Q>Ev^[NEv].TOff) And ((P^[Q-1]=13) Or (P^[Q-1]=10)) Do Dec(Q);
+   Ev^[NEv].TLen:=Q-Ev^[NEv].TOff;
+   Inc(NEv);
+  End Else Begin
+   Move(P^[LineStart],Hdr^[HdrN],LineLen); Inc(HdrN,LineLen);
+  End;
+ End;
+ { duree des evenements a duree negative }
+ If NEv>0 Then Begin
+  K:=0; For I:=0 To NEv-1 Do If Ev^[I].Dur<0 Then K:=1;
+  If K=1 Then Begin
+   GetMem(Idx,NEv*4); GetMem(Tmp,NEv*4);
+   For I:=0 To NEv-1 Do Idx^[I]:=I;
+   SortIdx(0,NEv);
+   For I:=0 To NEv-2 Do If Ev^[Idx^[I]].Dur<0 Then Ev^[Idx^[I]].Dur:=Ev^[Idx^[I+1]].Start-Ev^[Idx^[I]].Start;
+   FreeMem(Idx); FreeMem(Tmp);
+  End;
+ End;
+ OpenWrite(Target);
+ { en-tete }
+ Hdr^[HdrN]:=0;
+ TrS:=-1; TrN:=0; HdrSize:=HdrN;
+ Ssa:=True; HasEvents:=False;
+ If HdrN>0 Then Begin
+  I:=Strstr(Hdr,HdrN,#10'[Events]',0);
+  HasEvents:=I>=0;
+  If I>=0 Then Begin
+   J:=Strstr(Hdr,HdrN,'Format:',I);
+   If J>=0 Then Begin
+    K:=J; While (K<HdrN) And (Hdr^[K]<>10) Do Inc(K);
+    If K<HdrN Then Begin TrS:=K+1; HdrSize:=TrS; TrN:=HdrN-TrS; End;
+   End;
+  End;
+  J:=0; While (J<HdrSize) And (Hdr^[J]<>0) Do Inc(J);
+  HdrSize:=J;
+  ASWrite(Hdr^,HdrSize);
+  If (HdrSize>0) And (Hdr^[HdrSize-1]<>10) Then ASWriteS(#13#10);
+  Ssa:=Strstr(Hdr,HdrN,#10'[V4+ Styles]',0)<0;
+  If Not HasEvents Then Begin
+   If Ssa Then L:='Marked' Else L:='Layer';
+   ASWriteS('[Events]'#13#10'Format: '+L+', Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text'#13#10);
+  End;
+ End;
+ For I:=0 To NEv-1 Do Begin
+  Start_:=Ev^[I].Start; End_:=Start_+Ev^[I].Dur;
+  Hh1:=Start_ Div 360000; Mm1:=(Start_ Div 6000) Mod 60; Ss1:=(Start_ Div 100) Mod 60; Cs1:=Start_ Mod 100;
+  Hh2:=End_ Div 360000; Mm2:=(End_ Div 6000) Mod 60; Ss2:=(End_ Div 100) Mod 60; Cs2:=End_ Mod 100;
+  If Hh1>9 Then Begin Hh1:=9; Mm1:=59; Ss1:=59; Cs1:=99; End;
+  If (Hh2>9) Or (Ev^[I].Dur<0) Then Begin Hh2:=9; Mm2:=59; Ss2:=59; Cs2:=99; End;
+  L:='Dialogue: ';
+  If Ssa Then L:=L+'Marked=';
+  L:=L+ASNum(Ev^[I].Layer)+','+ASNum(Hh1)+':'+ASFmt2(Mm1)+':'+ASFmt2(Ss1)+'.'+ASFmt2(Cs1)+','+ASNum(Hh2)+':'+ASFmt2(Mm2)+':'+ASFmt2(Ss2)+'.'+ASFmt2(Cs2)+',';
+  ASWriteS(L);
+  If Ev^[I].TLen>0 Then ASWrite(P^[Ev^[I].TOff],Ev^[I].TLen);
+  ASWriteS(#13#10);
+ End;
+ If TrS>=0 Then If TrN>0 Then ASWrite(Hdr^[TrS],TrN);
+ CloseWrite;
+ FreeMem(P); FreeMem(Hdr); FreeMem(Ev);
+End;
+{ ======== F1 : encodeur TTA (libavcodec/ttaenc.c, ttaencdsp.c, ttadata.c) + muxeur tta (libavformat/ttaenc.c, apetag.c) ======== }
+Type
+ TTFilt=Record Shift,Round,Error: LongInt; Qm,Dx,Dl: Array[0..15] Of LongInt; End;
+ TTChan=Record Pred: LongInt; F: TTFilt; K0,K1: LongWord; Sum0,Sum1: LongWord; End;
+Var
+ TTCrcT: Array[0..255] Of LongWord; TTCrcOk: Boolean;
+ TTBuf: PEABuffer; TTCap,TTLen: LongInt; TTAcc: QWord; TTCnt: LongInt;
+
+Const
+ TTShift1: Array[0..40] Of LongWord=(
+  $1,$2,$4,$8,$10,$20,$40,$80,$100,$200,$400,$800,$1000,$2000,$4000,$8000,
+  $10000,$20000,$40000,$80000,$100000,$200000,$400000,$800000,$1000000,$2000000,$4000000,$8000000,
+  $10000000,$20000000,$40000000,$80000000,$80000000,$80000000,$80000000,$80000000,
+  $80000000,$80000000,$80000000,$80000000,$FFFFFFFF);
+
+Procedure TTCrcInit;
+Var I,J: LongInt; C: LongWord;
+Begin
+ If TTCrcOk Then Exit; TTCrcOk:=True;
+ For I:=0 To 255 Do Begin
+  C:=I; For J:=0 To 7 Do If (C And 1)<>0 Then C:=(C Shr 1) Xor $EDB88320 Else C:=C Shr 1;
+  TTCrcT[I]:=C;
+ End;
+End;
+
+Function TTCrc(Var B; Len: LongInt; Init: LongWord): LongWord;
+Var P: PEABuffer; I: LongInt; C: LongWord;
+Begin
+ TTCrcInit; P:=@B; C:=Init;
+ For I:=0 To Len-1 Do C:=TTCrcT[(C Xor P^[I]) And 255] Xor (C Shr 8);
+ TTCrc:=C;
+End;
+
+Procedure TTPutByte(V: LongInt);
+Begin
+ If TTLen>=TTCap Then Begin TTCap:=TTCap*2; ReAllocMem(TTBuf,TTCap); End;
+ TTBuf^[TTLen]:=V And 255; Inc(TTLen);
+End;
+
+Procedure TTPutBits(N: LongInt; V: QWord);
+Begin
+ If N<=0 Then Exit;
+ V:=V And ((QWord(1) Shl N)-1);
+ TTAcc:=TTAcc Or (V Shl TTCnt); Inc(TTCnt,N);
+ While TTCnt>=8 Do Begin TTPutByte(TTAcc And 255); TTAcc:=TTAcc Shr 8; Dec(TTCnt,8); End;
+End;
+
+Procedure TTFlush;
+Begin
+ If TTCnt>0 Then Begin TTPutByte(TTAcc And 255); TTAcc:=0; TTCnt:=0; End;
+End;
+
+Function TTW32(V: Int64): LongInt;
+Begin V:=V And $FFFFFFFF; If V>=2147483648 Then V:=V-4294967296; TTW32:=V; End;
+
+{ Smp : echantillons entrelaces deja signes (u8 : valeur-128). Bytes : 1, 2 ou 3. }
+Procedure F1TtaEncode(Const Target: String; Smp: FQPI; NFr,Ch,Rate,Bytes: LongInt);
+Var Chs: Array[0..7] Of TTChan; FrameSize,Pos,Nb,I,C,CurChan,FStart,OutBytes,NFrames,Cap: LongInt;
+ Res,Value,Temp,Sample: LongInt; K,Unary,OutVal: LongWord; Q: QWord; Rc: LongWord;
+ Sizes: PEABuffer; SzN: LongInt; Frames: PEABuffer; Crc: LongWord; Hdr: Array[0..31] Of Byte;
+ Sg: LongInt; Sh: LongInt; Er: LongInt; S64: Int64; Lm,J: LongInt;
+ CmN: LongInt; CmK: TMdK; CmV: TMdV; Tot,Cnt,Tmp32: LongInt; Out: Array[0..3] Of Byte; Sample1: LongInt;
+ Cfg: Array[0..3] Of Byte;
+ Function GetS(Idx: LongInt): LongInt;
+ Begin GetS:=Smp^[Pos*Ch+Idx]; End;
+ Procedure W32(V: LongWord); Begin Out[0]:=V And 255; Out[1]:=(V Shr 8) And 255; Out[2]:=(V Shr 16) And 255; Out[3]:=V Shr 24; WriteBytes(Out,4); End;
+ Procedure W16(V: LongInt); Begin Out[0]:=V And 255; Out[1]:=(V Shr 8) And 255; WriteBytes(Out,2); End;
+Begin
+ TTCrcInit;
+ Cfg[0]:=10; Cfg[1]:=9; Cfg[2]:=10; Cfg[3]:=12;
+ FrameSize:=Int64(256)*Rate Div 245;
+ TTCap:=65536; GetMem(TTBuf,TTCap); TTLen:=0; TTAcc:=0; TTCnt:=0;
+ GetMem(Sizes,(NFr Div FrameSize+2)*4); SzN:=0;
+ Pos:=0;
+ While Pos<NFr Do Begin
+  Nb:=FrameSize; If NFr-Pos<Nb Then Nb:=NFr-Pos;
+  FStart:=TTLen; TTAcc:=0; TTCnt:=0;
+  For C:=0 To Ch-1 Do Begin
+   FillChar(Chs[C],SizeOf(TTChan),0);
+   Chs[C].F.Shift:=Cfg[Bytes-1]; Chs[C].F.Round:=TTShift1[Chs[C].F.Shift-1];
+   Chs[C].K0:=10; Chs[C].K1:=10; Chs[C].Sum0:=TTShift1[4+10]; Chs[C].Sum1:=TTShift1[4+10];
+  End;
+  Res:=0; CurChan:=0;
+  For I:=0 To Nb*Ch-1 Do Begin
+   Value:=Smp^[Pos*Ch+I];
+   If Ch>1 Then Begin
+    If CurChan<Ch-1 Then Begin
+     Sample1:=Smp^[Pos*Ch+I+1];
+     Res:=TTW32(Int64(Sample1)-Value); Value:=Res;
+    End Else Value:=Value-(Res Div 2);
+   End;
+   Temp:=Value;
+   Case Bytes Of
+    1: Sh:=4; Else Sh:=5;
+   End;
+   Q:=QWord(Int64(Chs[CurChan].Pred)); Q:=(Q Shl Sh)-QWord(Int64(Chs[CurChan].Pred)); Q:=Q Shr Sh;
+   Value:=TTW32(Int64(Value)-TTW32(Int64(Q And $FFFFFFFF)));
+   Chs[CurChan].Pred:=Temp;
+   { filtre }
+   With Chs[CurChan].F Do Begin
+    If Error<0 Then Begin For J:=0 To 7 Do Qm[J]:=TTW32(Int64(Qm[J])-Dx[J]); End
+    Else If Error>0 Then Begin For J:=0 To 7 Do Qm[J]:=TTW32(Int64(Qm[J])+Dx[J]); End;
+    S64:=Round;
+    For J:=0 To 7 Do S64:=S64+Int64(Dl[J])*Qm[J];
+    Er:=TTW32(S64);
+    Dx[0]:=Dx[1]; Dx[1]:=Dx[2]; Dx[2]:=Dx[3]; Dx[3]:=Dx[4];
+    Dl[0]:=Dl[1]; Dl[1]:=Dl[2]; Dl[2]:=Dl[3]; Dl[3]:=Dl[4];
+    Dx[4]:=(FQSar(Dl[4],30) Or 1);
+    Dx[5]:=(FQSar(Dl[5],30) Or 2) And Not 1;
+    Dx[6]:=(FQSar(Dl[6],30) Or 2) And Not 1;
+    Dx[7]:=(FQSar(Dl[7],30) Or 4) And Not 3;
+    Dl[4]:=-Dl[5]; Dl[5]:=-Dl[6];
+    Dl[6]:=TTW32(Int64(Value)-Dl[7]); Dl[7]:=Value;
+    Dl[5]:=TTW32(Int64(Dl[5])+Dl[6]); Dl[4]:=TTW32(Int64(Dl[4])+Dl[5]);
+    Value:=TTW32(Int64(Value)-FQSar(Er,Shift));
+    Error:=Value;
+   End;
+   If Value>0 Then OutVal:=LongWord(TTW32(Int64(Value) Shl 1)-1) Else OutVal:=LongWord(TTW32(Int64(-Value) Shl 1));
+   With Chs[CurChan] Do Begin
+    K:=K0;
+    Sum0:=Sum0+OutVal-(Sum0 Shr 4);
+    If (K0>0) And (Sum0<TTShift1[4+K0]) Then Dec(K0)
+    Else If Sum0>TTShift1[4+K0+1] Then Inc(K0);
+    If OutVal>=TTShift1[K] Then Begin
+     OutVal:=OutVal-TTShift1[K];
+     K:=K1;
+     Sum1:=Sum1+OutVal-(Sum1 Shr 4);
+     If (K1>0) And (Sum1<TTShift1[4+K1]) Then Dec(K1)
+     Else If Sum1>TTShift1[4+K1+1] Then Inc(K1);
+     Unary:=1+(OutVal Shr K);
+     Repeat
+      If Unary>31 Then Begin TTPutBits(31,$7FFFFFFF); Dec(Unary,31); End
+      Else Begin TTPutBits(Unary,(QWord(1) Shl Unary)-1); Unary:=0; End;
+     Until Unary=0;
+    End;
+    TTPutBits(1,0);
+    If K<>0 Then TTPutBits(K,OutVal And (TTShift1[K]-1));
+   End;
+   If CurChan<Ch-1 Then Inc(CurChan) Else CurChan:=0;
+  End;
+  TTFlush;
+  OutBytes:=TTLen-FStart;
+  Crc:=TTCrc(TTBuf^[FStart],OutBytes,$FFFFFFFF) Xor $FFFFFFFF;
+  TTPutByte(Crc); TTPutByte(Crc Shr 8); TTPutByte(Crc Shr 16); TTPutByte(Crc Shr 24);
+  Sizes^[SzN*4]:=(OutBytes+4) And 255; Sizes^[SzN*4+1]:=((OutBytes+4) Shr 8) And 255; Sizes^[SzN*4+2]:=((OutBytes+4) Shr 16) And 255; Sizes^[SzN*4+3]:=((OutBytes+4) Shr 24) And 255;
+  Inc(SzN);
+  Inc(Pos,Nb);
+ End;
+ { fichier }
+ OpenWrite(Target);
+ Hdr[0]:=84; Hdr[1]:=84; Hdr[2]:=65; Hdr[3]:=49; Hdr[4]:=1; Hdr[5]:=0; Hdr[6]:=Ch; Hdr[7]:=0; Hdr[8]:=Bytes*8; Hdr[9]:=0;
+ Hdr[10]:=Rate And 255; Hdr[11]:=(Rate Shr 8) And 255; Hdr[12]:=(Rate Shr 16) And 255; Hdr[13]:=(Rate Shr 24) And 255;
+ WriteBytes(Hdr,14);
+ Crc:=TTCrc(Hdr,14,$FFFFFFFF);
+ { le C ecrit 18 octets : TTA1 + 2 + 2 + 2 + 4 = 14 : l'entete fait 14 octets }
+ Hdr[14]:=NFr And 255; Hdr[15]:=(NFr Shr 8) And 255; Hdr[16]:=(NFr Shr 16) And 255; Hdr[17]:=(NFr Shr 24) And 255;
+ WriteBytes(Hdr[14],4);
+ Crc:=TTCrc(Hdr,18,$FFFFFFFF) Xor $FFFFFFFF;
+ { crc sur les octets ecrits avant le champ crc : entete (14) + nb_samples (4) }
+ W32(Crc);
+ Crc:=TTCrc(Sizes^,SzN*4,$FFFFFFFF) Xor $FFFFFFFF;
+ ASWrite(Sizes^,SzN*4); W32(Crc);
+ ASWrite(TTBuf^,TTLen);
+ { etiquette APE }
+ CmN:=MdN; For I:=0 To MdN-1 Do Begin CmK[I]:=MdK[I]; CmV[I]:=MdV[I]; End;
+ F1MdEncoder(CmN,CmK,CmV);
+ If CmN>0 Then Begin
+  Tot:=0; For I:=0 To CmN-1 Do Tot:=Tot+8+Length(CmK[I])+1+Length(CmV[I]);
+  Tot:=Tot+32;
+  Hdr[0]:=65; Hdr[1]:=80; Hdr[2]:=69; Hdr[3]:=84; Hdr[4]:=65; Hdr[5]:=71; Hdr[6]:=69; Hdr[7]:=88; WriteBytes(Hdr,8);
+  W32(2000); W32(Tot); W32(CmN); W32($A0000000); W32(0); W32(0);
+  For I:=0 To CmN-1 Do Begin
+   W32(Length(CmV[I])); W32(0);
+   WriteBytes(CmK[I][1],Length(CmK[I])); Hdr[0]:=0; WriteBytes(Hdr,1);
+   If Length(CmV[I])>0 Then WriteBytes(CmV[I][1],Length(CmV[I]));
+  End;
+  Hdr[0]:=65; Hdr[1]:=80; Hdr[2]:=69; Hdr[3]:=84; Hdr[4]:=65; Hdr[5]:=71; Hdr[6]:=69; Hdr[7]:=88; WriteBytes(Hdr,8);
+  W32(2000); W32(Tot); W32(CmN); W32($80000000); W32(0); W32(0);
+ End;
+ CloseWrite;
+ FreeMem(TTBuf); FreeMem(Sizes);
+End;
+{ ======== F1 : Westwood AUD (libavformat/westwood_audenc.c + adpcm_ima_ws de libavcodec/adpcmenc.c) ======== }
+Procedure F1MuxWsaud(Const Wav16,Target: String);
+Const
+ Diff: Array[0..15] Of LongInt=(1,3,5,7,9,11,13,15,-1,-3,-5,-7,-9,-11,-13,-15);
+Var H: Array[0..43] Of Byte; Lim,Rate,Ch,Frames,Pos,Nb,N,I,K,Size,Total,Uncomp,PktSize: LongInt;
+ Prev,Idx: Array[0..1] Of LongInt; Buf: PEABuffer; Pkt: Array[0..4095] Of Byte; Hd: Array[0..11] Of Byte; Ph: Array[0..7] Of Byte;
+ Smp: Array[0..4095] Of LongInt; Code: Integer; FrameSz: LongInt; Used: LongInt;
+ Function Comp(C: LongInt; S: LongInt): LongInt;
+ Var D,St,Nib,A: LongInt;
+ Begin
+  D:=S-Prev[C]; St:=ADPCMStepTable[Idx[C]];
+  A:=Abs(D)*4 Div St; If A>7 Then A:=7; Nib:=A; If D<0 Then Inc(Nib,8);
+  Prev[C]:=Prev[C]+(St*Diff[Nib]) Div 8;
+  If Prev[C]>32767 Then Prev[C]:=32767; If Prev[C]<-32768 Then Prev[C]:=-32768;
+  Idx[C]:=Idx[C]+ADPCMIndexTable[Nib];
+  If Idx[C]<0 Then Idx[C]:=0; If Idx[C]>88 Then Idx[C]:=88;
+  Comp:=Nib;
+ End;
+Begin
+ OpenRead(Wav16); Lim:=InputSize; ReadAt(0,H,44);
+ Ch:=H[22]; Rate:=H[24]+H[25]*256+H[26]*65536+H[27]*16777216;
+ If (Ch<1) Or (Ch>2) Then Fail('adpcm_ima_ws: mono ou stereo requis.');
+ If Rate>65535 Then Fail('wsaud: frequence trop elevee.');
+ Frames:=(Lim-44) Div (2*Ch);
+ If Frames<1 Then Fail('wsaud: aucune donnee audio.');
+ FrameSz:=2048 Div Ch;
+ Prev[0]:=0; Prev[1]:=0; Idx[0]:=0; Idx[1]:=0;
+ OpenWrite(Target);
+ FillChar(Hd,SizeOf(Hd),0); Hd[0]:=Rate And 255; Hd[1]:=Rate Shr 8; Hd[10]:=2 Or Ord(Ch=2); Hd[11]:=99;
+ WriteBytes(Hd,12);
+ Total:=0; Uncomp:=0; Pos:=0;
+ While Pos<Frames Do Begin
+  Nb:=FrameSz; If Frames-Pos<Nb Then Nb:=Frames-Pos;
+  For I:=0 To Nb*Ch-1 Do Begin
+   ReadAt(44+(Pos*Ch+I)*2,Hd,2); Smp[I]:=Hd[0]+Hd[1]*256; If Smp[I]>=32768 Then Dec(Smp[I],65536);
+  End;
+  PktSize:=(Nb*Ch+1) Div 2; Used:=0;
+  K:=0;
+  For N:=1 To Nb Div 2 Do Begin
+   For I:=0 To Ch-1 Do Begin
+    Pkt[Used]:=0;
+    Pkt[Used]:=Comp(I,Smp[K]);
+    Pkt[Used]:=Pkt[Used] Or (Comp(I,Smp[K+Ch]) Shl 4);
+    Inc(Used); Inc(K);
+   End;
+   Inc(K,Ch);
+  End;
+  If Used<PktSize Then Begin While Used<PktSize Do Begin Pkt[Used]:=0; Inc(Used); End; End;
+  Ph[0]:=PktSize And 255; Ph[1]:=PktSize Shr 8; Ph[2]:=(PktSize*4) And 255; Ph[3]:=((PktSize*4) Shr 8) And 255;
+  Ph[4]:=$AF; Ph[5]:=$DE; Ph[6]:=0; Ph[7]:=0;
+  WriteBytes(Ph,8); WriteBytes(Pkt,PktSize);
+  Inc(Total,PktSize+8); Inc(Uncomp,PktSize*4);
+  Inc(Pos,Nb);
+ End;
+ CloseRead;
+ {$I-}Seek(ActiveOutput,2); Code:=IOResult;{$I+}
+ Hd[0]:=Total And 255; Hd[1]:=(Total Shr 8) And 255; Hd[2]:=(Total Shr 16) And 255; Hd[3]:=(Total Shr 24) And 255;
+ Hd[4]:=Uncomp And 255; Hd[5]:=(Uncomp Shr 8) And 255; Hd[6]:=(Uncomp Shr 16) And 255; Hd[7]:=(Uncomp Shr 24) And 255;
+ WriteBytes(Hd,8);
+ CloseWrite;
+End;
+{ ======== F1 : AC-3 / E-AC-3, IMDCT av_tx (ff_tx_mdct_inv, flottant, echelle 1.0) ======== }
+Procedure F1Ac3Half(Var X: Array of Single; N: LongInt; Var Y: Array of Single);
+Var Lg,I: LongInt;
+Begin
+ Lg:=VGMdctFor(1,N);
+ VGMdctInv(Lg,PVGS(@X[0]),PVGS(@Y[0]));
+ For I:=0 To N-1 Do Y[I]:=-Y[I];
+End;
+
+Procedure F1Ac3HalfDbg(Var X: Array of Single; N: LongInt; Var Y: Array of Single);
+Begin
+ F1Ac3Half(X,N,Y);
 End;
 { F1-BLOCK-END }
 { ==== BLOCK-ANCHOR-F1 : inserer le code du groupe F1 juste au-dessus de cette ligne ==== }
@@ -120973,6 +121691,7 @@ Begin
     ReadAt(Pos,B,40); Tag:=B[24]+B[25]*256;
     PcmSrcMask:=B[20]+B[21]*256+B[22]*65536+(B[23] And 127)*16777216;
    End;
+   If F1MaskOver<>0 Then PcmSrcMask:=F1MaskOver;
    HasFmt:=True;
   End Else If Not Aiff And (Id='data') Then Begin
    DataStart:=Pos; DataSize:=Sz; If DataSize>Limit-Pos Then DataSize:=Limit-Pos; HasData:=True; Break;
@@ -121440,7 +122159,7 @@ End;
 
 Function F1ForcedFmt(Const N: String): Boolean;
 Begin
- F1ForcedFmt:=PcmIsRawName(N) Or (N='daud');
+ F1ForcedFmt:=PcmIsRawName(N) Or (N='daud') Or (N='apc') Or (N='ea_cdata') Or (N='gsm') Or (N='ass');
 End;
 { WAV natif en double precision : converti en s16 comme le fait ffmpeg pour une sortie WAV pcm_s16le }
 Function F1WavIsF64(Const Name: String): Boolean;
@@ -121491,9 +122210,156 @@ Begin
  FreeMem(Smp);
 End;
 
+Procedure F1TtaFromWav(Const Source,Target: String);
+Var S: TPcmSpec; Ch,Rate,DS,DSz,Frames,I,J,Bytes,Got: LongInt; Smp: FQPI; B: TPcmBuf; V: Int64; Dd: Double;
+Begin
+ If Not PcmOpenSource(Source,S,Ch,Rate,DS,DSz) Then Fail('tta: source WAV/AIFF PCM requise.');
+ If (Ch<1) Or (Ch>8) Then Fail('tta: canaux 1..8.');
+ Frames:=DSz Div (Ch*S.Bytes);
+ If Frames<1 Then Fail('tta: aucune donnee audio.');
+ If (S.Cls=0) And (S.Law=0) Then Bytes:=1 Else If S.Cls<=1 Then Bytes:=2 Else Bytes:=3;
+ GetMem(Smp,Int64(Frames)*Ch*4+16);
+ I:=0;
+ While I<Frames Do Begin
+  Got:=Frames-I; If Got>1024 Then Got:=1024;
+  PcmReadBig(DS+I*Ch*S.Bytes,B,Got*Ch*S.Bytes);
+  For J:=0 To Got*Ch-1 Do Begin
+   V:=0; Dd:=0;
+   If S.Cls>=3 Then Dd:=PcmGetF(S,B,J*S.Bytes) Else V:=PcmGetI(S,B,J*S.Bytes);
+   If S.Cls>=3 Then Begin PcmConv(S.Cls,2,V,Dd); V:=PcmSar(V,8); End
+   Else If (S.Cls=0) And (S.Law=0) Then V:=V-128
+   Else If S.Cls=2 Then V:=PcmSar(V,8);
+   Smp^[I*Ch+J]:=V;
+  End;
+  Inc(I,Got);
+ End;
+ CloseRead;
+ F1TtaEncode(Target,Smp,Frames,Ch,Rate,Bytes);
+ FreeMem(Smp);
+End;
+
 Function F1OutFmt(Const N: String): Boolean;
 Begin
- F1OutFmt:=(N='au') Or (N='voc') Or (N='flac');
+ F1OutFmt:=(N='au') Or (N='voc') Or (N='flac') Or (N='mmf') Or (N='tta') Or (N='wsaud') Or (N='eac3') Or (N='gsm') Or (N='wv') Or (N='dts') Or (N='mlp') Or (N='amr');
+End;
+{ CRYO APC (libavformat/apc.c) + adpcm_ima_apc }
+Procedure F1DecodeAPC(Const Source,Target: String);
+Var F: PEABuffer; Size,Rate,Ch,I,V,P0,P1: LongInt; B: Byte;
+ Function L32(At: LongInt): Int64; Begin L32:=Int64(F^[At])+Int64(F^[At+1])*256+Int64(F^[At+2])*65536+Int64(F^[At+3])*16777216; End;
+ Function C18(X: Int64): LongInt; Begin If X>=2147483648 Then X:=X-4294967296; If X>262143 Then X:=262143; If X<-262144 Then X:=-262144; C18:=X; End;
+Begin
+ NVLoad(Source,F,Size); CloseRead;
+ If Size<32 Then Fail('apc: en-tete tronque.');
+ Rate:=L32(16); If L32(28)<>0 Then Ch:=2 Else Ch:=1;
+ If (Rate<1) Or (Rate>2147483647) Then Fail('apc: frequence incorrecte.');
+ IMAReset; IMAPred[0]:=C18(L32(20)); IMAPred[1]:=C18(L32(24));
+ EAReset; OpenWrite(Target); ADPCMWaveHeader(Rate,Ch,0);
+ For I:=32 To Size-1 Do Begin
+  B:=F^[I];
+  EAPut(IMAExpand(0,B Shr 4,3));
+  EAPut(IMAExpand(Ch-1,B And 15,3));
+ End;
+ EAFlush;
+ If EAWritten=0 Then Fail('apc: aucune donnee audio.');
+ ADPCMPatchHeader(Rate,Ch,EAWritten); CloseWrite; FreeMem(F);
+End;
+
+{ EA cdata (libavformat/eacdata.c) + adpcm_ea_xas }
+Procedure F1DecodeCData(Const Source,Target: String);
+Var F: PEABuffer; Size,Rate,Ch,H,Off: LongInt;
+Begin
+ NVLoad(Source,F,Size); CloseRead;
+ H:=F^[0]*256+F^[1];
+ Case H Of $400: Ch:=1; $404: Ch:=2; $40C: Begin Ch:=4; F1MaskOver:=$33; End; $414: Begin Ch:=6; F1MaskOver:=$3F; End;
+  Else Fail('ea_cdata: en-tete inconnu.'); End;
+ Rate:=F^[2]*256+F^[3];
+ If (F^[4] And $20)<>0 Then Off:=5+15 Else Off:=5+11;
+ If Off>Size Then Fail('ea_cdata: fichier tronque.');
+ Move(F^[Off],F^[0],Size-Off); Size:=Size-Off;
+ EAReset; OpenWrite(Target); ADPCMWaveHeader(Rate,Ch,0);
+ EADecodeXAS(F,Size,Ch); EAFlush;
+ If EAWritten=0 Then Fail('ea_cdata: aucune donnee audio.');
+ ADPCMPatchHeader(Rate,Ch,EAWritten); CloseWrite; FreeMem(F);
+End;
+{ Yamaha SMAF (libavformat/mmf.c) }
+Procedure F1MuxMMF(Const WavTmp,Target: String);
+Var H: Array[0..63] Of Byte; Lim,Rate,Ch,DSz,Code,I,Gate,Pos: LongInt; Ver: String; Out: Array[0..255] Of Byte; N: LongInt; Buf: PEABuffer;
+ Cnt: LongInt;
+ Procedure P8(V: LongInt); Begin Out[N]:=V And 255; Inc(N); End;
+ Procedure PB32(V: LongInt); Begin P8(V Shr 24); P8(V Shr 16); P8(V Shr 8); P8(V); End;
+ Procedure PTag(Const T: String); Var K: LongInt; Begin For K:=1 To 4 Do P8(Ord(T[K])); End;
+ Procedure VarLen(V: LongInt); Begin If V<128 Then P8(V) Else Begin Dec(V,128); P8($80 Or (V Shr 7)); P8($7F And V); End; End;
+Begin
+ OpenRead(WavTmp); Lim:=InputSize; ReadAt(0,H,58);
+ Ch:=H[22]; Rate:=H[24]+H[25]*256+H[26]*65536;
+ DSz:=H[54]+H[55]*256+H[56]*65536+H[57]*16777216;
+ Code:=-1; If Rate=4000 Then Code:=0 Else If Rate=8000 Then Code:=1 Else If Rate=11025 Then Code:=2 Else If Rate=22050 Then Code:=3 Else If Rate=44100 Then Code:=4;
+ If Code<0 Then Fail('Unsupported sample rate '+'for mmf, supported are 4000, 8000, 11025, 22050 and 44100');
+ If (Ch>1) And Not LJUnofficial Then Fail('Yamaha SMAF stereo is experimental, add ''-strict -2'' if you want to use it.');
+ If VGBitExact Then Ver:='VN:Lavf,' Else Ver:='VN:Lavf60.16.100,';
+ OpenWrite(Target); N:=0;
+ PTag('MMMD'); PB32(0);
+ PTag('CNTI'); PB32(5); P8(0); P8(1); P8(1); P8(0); P8(0);
+ PTag('OPDA'); PB32(Length(Ver)); For I:=1 To Length(Ver) Do P8(Ord(Ver[I]));
+ Pos:=N; { debut ATR }
+ P8(65); P8(84); P8(82); P8(0);
+ PB32(6+8+16+8+DSz);
+ P8(0); P8(0); P8(((Ch-1) Shl 7) Or (1 Shl 4) Or Code); P8(0); P8(2); P8(2);
+ PTag('Atsq'); PB32(16);
+ Gate:=(Int64(DSz)*500) Div Rate;
+ Cnt:=N; P8(0); P8(((Ch-1) Shl 6) Or 1); VarLen(Gate); VarLen(Gate); P8($FF); P8(0); P8(0); P8(0); P8(0); P8(0);
+ While N-Cnt<16 Do P8(0);
+ P8(65); P8(119); P8(97); P8(1);
+ PB32(DSz);
+ { taille MMMD : fichier - 8 }
+ I:=N+DSz-8; Out[4]:=I Shr 24; Out[5]:=I Shr 16; Out[6]:=I Shr 8; Out[7]:=I;
+ WriteBytes(Out,N);
+ GetMem(Buf,DSz+16);
+ I:=0; While I<DSz Do Begin Cnt:=DSz-I; If Cnt>30000 Then Cnt:=30000; ReadAt(58+I,Buf^[I],Cnt); Inc(I,Cnt); End;
+ CloseRead;
+ I:=0; While I<DSz Do Begin Cnt:=DSz-I; If Cnt>30000 Then Cnt:=30000; WriteBytes(Buf^[I],Cnt); Inc(I,Cnt); End;
+ CloseWrite; FreeMem(Buf);
+End;
+
+Procedure F1DecodeMMF(Const Source,Target: String);
+Var F: PEABuffer; Size,At,Tag,Sz,Params,Rate,Ch,DEnd,DLen,I,Tmp: LongInt; Name: String; Fv: File;
+ Function T4(P: LongInt): LongInt; Begin T4:=F^[P]+F^[P+1]*256+F^[P+2]*65536+F^[P+3]*16777216; End;
+ Function B4(P: LongInt): LongInt; Begin B4:=F^[P+3]+F^[P+2]*256+F^[P+1]*65536+F^[P]*16777216; End;
+ Procedure W8(V: LongInt); Var B: Byte; Begin B:=V And 255; WriteBytes(B,1); End;
+ Procedure W16(V: LongInt); Begin W8(V); W8(V Shr 8); End;
+ Procedure W32(V: LongInt); Begin W16(V); W16(V Shr 16); End;
+ Procedure WT(Const T: String); Var K: LongInt; Begin For K:=1 To 4 Do W8(Ord(T[K])); End;
+Begin
+ NVLoad(Source,F,Size); CloseRead;
+ If T4(0)<>$444D4D4D Then Fail('mmf: signature incorrecte.');
+ At:=8;
+ Repeat
+  If At+8>Size Then Fail('mmf: fichier tronque.');
+  Tag:=T4(At); Sz:=B4(At+4); Inc(At,8);
+  If (Tag=$49544E43) Or (Tag=$4144504F) Then Inc(At,Sz) Else Break;
+ Until False;
+ If (Tag And $FFFFFF)=$52544D Then Fail('MIDI like format found, unsupported');
+ If (Tag And $FFFFFF)<>$525441 Then Fail('Unsupported SMAF chunk');
+ If At+6>Size Then Fail('mmf: fichier tronque.');
+ Params:=F^[At+2]; Inc(At,6);
+ Case Params And 15 Of 0: Rate:=4000; 1: Rate:=8000; 2: Rate:=11025; 3: Rate:=22050; 4: Rate:=44100; Else Fail('Invalid sample rate'); End;
+ Ch:=(Params Shr 7)+1;
+ Repeat
+  If At+8>Size Then Fail('mmf: fichier tronque.');
+  Tag:=T4(At); Sz:=B4(At+4); Inc(At,8);
+  If (Tag=$71737441) Or (Tag=$49707341) Then Inc(At,Sz) Else Break;
+ Until False;
+ If (Tag And $FFFFFF)<>$617741 Then Fail('Unexpected SMAF chunk');
+ DEnd:=At+Sz; DLen:=Sz; If At+DLen>Size Then DLen:=Size-At;
+ If DLen<=0 Then Fail('mmf: aucune donnee audio.');
+ Name:=Target+'.yam'; If Exists(Name) Then Fail('Sortie intermediaire deja existante.');
+ OpenWrite(Name);
+ WT('RIFF'); W32(4+8+18+8+DLen); WT('WAVE'); WT('fmt '); W32(18); W16($20); W16(Ch); W32(Rate); W32(Rate*Ch*4 Div 8); W16(1024); W16(4); W16(0);
+ WT('data'); W32(DLen);
+ I:=0; While I<DLen Do Begin Tmp:=DLen-I; If Tmp>30000 Then Tmp:=30000; WriteBytes(F^[At+I],Tmp); Inc(I,Tmp); End;
+ CloseWrite; FreeMem(F);
+ DecodeWaveBlocks(Name,Target);
+ Assign(Fv,Name); Erase(Fv);
 End;
 { F1-PCM2-END }
 { PCM-END }
@@ -126646,7 +127512,12 @@ Begin
  WriteLn(' DE m4a             MP4/M4A audio ALAC (decodage et encodage, -f mp4 ou extension .m4a)');
  WriteLn(' D  psxstr          Sony PlayStation STR / RIFF CDXA (audio adpcm_xa, video mdec)');
  WriteLn(' D  msnwctcp        MSN TCP Webcam stream (video mimic, cadence reguliere)');
- WriteLn(' D  wsaud           Westwood Studios audio (adpcm_ima_ws)');
+ WriteLn(' DE wsaud           Westwood Studios audio (adpcm_ima_ws)');
+ WriteLn(' D  apc             CRYO APC');
+ WriteLn(' D  ea_cdata        Electronic Arts cdata');
+ WriteLn(' DE gsm             raw GSM (decodeur natif, pas d''encodeur)');
+ WriteLn(' DE mmf             Yamaha SMAF');
+ WriteLn(' DE ass             SSA (SubStation Alpha) subtitle');
  WriteLn(' DE aac             AAC ADTS (AAC-LC mono/stereo; alias: adts; encodage libfaac natif)');
  WriteLn(' DE ogg             Ogg (decodage Speex via libspeex natif, encodage audio Vorbis via libvorbis natif, video Theora via libtheora natif; extensions .ogg, .oga, .ogv, .spx)');
  WriteLn(' D  iff             IFF 8SVX, Fibonacci/exponentiel (alias: 8svx, svx)');
@@ -126659,7 +127530,7 @@ Begin
  WriteLn('D   shn             raw Shorten');
  WriteLn('D   qcp             QCP');
  WriteLn('D   smk             Smacker');
- WriteLn('D   tta             TTA (True Audio)');
+ WriteLn('DE  tta             TTA (True Audio)');
  WriteLn('D   wv              WavPack');
  WriteLn('D   siff            Beam Software SIFF (video vb, audio PCM U8)');
  WriteLn('D   tiertexseq      Tiertex Limited SEQ (video tiertexseqvideo, audio PCM S16BE)');
@@ -127499,6 +128370,9 @@ BEGIN
  {$ENDIF}
  Detected:=Probe(Intermediate);
  If (InputFormat<>'') And Not IsHTTP(Intermediate) And F1ForcedFmt(InputFormat) Then Detected:=InputFormat; { F1 : -f impose, pas de sondage }
+ If (Detected='') And (Lower(Extension(Intermediate))='cdata') And Not IsHTTP(Intermediate) Then Detected:='ea_cdata'; { F1 }
+ If (Detected='') And (Lower(Extension(Intermediate))='gsm') And Not IsHTTP(Intermediate) Then Detected:='gsm'; { F1 }
+ If ((Detected='') Or (Detected='mp1') Or (Detected='mp2') Or (Detected='mp3') Or (Detected='aac')) And Not IsHTTP(Intermediate) And ((InputFormat='') Or (InputFormat='ass')) Then If ASProbe(Intermediate) Then Detected:='ass'; { F1 }
  If (Detected='') And Not IsHTTP(Intermediate) And (InputFormat<>'h261') And (InputFormat<>'h263') Then If H4ProbeFile(Intermediate) Then Detected:='h264';
  If (Detected='') And Not IsHTTP(Intermediate) And (InputFormat<>'h261') And (InputFormat<>'h264') Then If H3ProbeFile(Intermediate) Then Detected:='h263';
  If (Detected='') And Not IsHTTP(Intermediate) And (InputFormat<>'h263') And (InputFormat<>'h264') Then If H1ProbeFile(Intermediate) Then Detected:='h261';
@@ -127532,6 +128406,11 @@ BEGIN
  If (InputFormat<>Detected) And Not ((InputFormat='dvbsub') And (Detected='')) And Not (((InputFormat='g726') Or (InputFormat='g726le')) And (Detected='')) And Not (((InputFormat='h263') Or (InputFormat='h261') Or (InputFormat='h264')) And (Detected='')) And Not ((InputFormat='eac3') And (Detected='ac3')) Then Fail(
  'Format impose incompatible avec la signature du fichier.');
  If InputFormat='' Then Fail('Format entree non reconnu ou non pris en charge.');
+ If OutputFormat='' Then OutputFormat:=FormatName(Extension(OutputPath)); { F1 }
+ If (InputFormat='ass') Then Begin { F1 : SSA/ASS }
+  If OutputFormat<>'ass' Then Fail('Sous-titres ASS: sortie ass/ssa requise.');
+  Temps[2]:=NewTemporary; F1AssConvert(Intermediate,Temps[2]); Commit(Temps[2]); Temps[2]:=''; WriteLn('Sortie creee: ',OutputPath); Halt(0);
+ End;
  If OutputFormat='' Then OutputFormat:=FormatName(Extension(OutputPath));
  If (OutputFormat='matroska') Or (OutputFormat='webm') Then F4MainMkv; { F4 }
  F5Sink:=''; If Not IsHTTP(InputPath) Then F5Sink:=F5Take; If F5Sink<>'' Then F5Run(F5Sink,Intermediate);
@@ -128113,7 +128992,10 @@ BEGIN
  Else If (AudioCodec='') And (OutputFormat='daud') Then PcmCodecOut:='pcm_s24daud'
  Else If (AudioCodec='') And ((OutputFormat='au') Or (OutputFormat='aiff')) Then PcmCodecOut:='pcm_s16be'
  Else If (AudioCodec='') And (OutputFormat='voc') Then PcmCodecOut:='pcm_s16le'
- Else If (AudioCodec='') And (OutputFormat='flac') Then AudioCodec:='flac';
+ Else If (AudioCodec='') And (OutputFormat='flac') Then AudioCodec:='flac'
+ Else If (AudioCodec='') And (OutputFormat='mmf') Then AudioCodec:='adpcm_yamaha'
+ Else If (AudioCodec='') And (OutputFormat='tta') Then AudioCodec:='tta'
+ Else If (AudioCodec='') And (OutputFormat='wsaud') Then AudioCodec:='adpcm_ima_ws';
  If PcmCodecOut<>'' Then Begin
   If Not ((OutputFormat='wav') Or (OutputFormat='aiff') Or (OutputFormat='daud') Or (OutputFormat='au') Or (OutputFormat='voc') Or PcmIsRawName(OutputFormat)) Then
    Fail('Codecs pcm_*: sortie WAV, AIFF, DAUD ou format brut (s16le, u8, alaw...) requise.');
@@ -128128,7 +129010,7 @@ BEGIN
   (AudioCodec='adpcm_ms') Or (AudioCodec='adpcm_yamaha') Or (AudioCodec='sonic') Or (AudioCodec='sonicls'))) Or ((OutputFormat='avi') And ((AudioCodec='sonic') Or (AudioCodec='sonicls'))) Or ((OutputFormat='flv') And ((AudioCodec='adpcm_swf') Or (AudioCodec='nellymoser'))) Or
  ((OutputFormat='mp4') And (AudioCodec='alac')) Or ((OutputFormat='roq') And (AudioCodec='roq_dpcm')) Or
  ((OutputFormat='adx') And (AudioCodec='adpcm_adx')) Or ((OutputFormat='aiff') And (AudioCodec='adpcm_ima_qt')) Or
- ((OutputFormat='flac') And (AudioCodec='flac')) Or ((OutputFormat='mp3') And ((AudioCodec='mp3') Or (AudioCodec='libmp3lame'))) Or ((OutputFormat='mp2') And (AudioCodec='mp2')) Or ((OutputFormat='ac3') And (AudioCodec='ac3')) Or
+ ((OutputFormat='flac') And (AudioCodec='flac')) Or ((OutputFormat='tta') And (AudioCodec='tta')) Or ((OutputFormat='wsaud') And (AudioCodec='adpcm_ima_ws')) Or ((OutputFormat='mmf') And (AudioCodec='adpcm_yamaha')) Or ((OutputFormat='mp3') And ((AudioCodec='mp3') Or (AudioCodec='libmp3lame'))) Or ((OutputFormat='mp2') And (AudioCodec='mp2')) Or ((OutputFormat='ac3') And (AudioCodec='ac3')) Or
  ((OutputFormat='ogg') And ((AudioCodec='libvorbis') Or (AudioCodec='vorbis'))) Or (((OutputFormat='asf') Or (OutputFormat='avi')) And ((AudioCodec='wmav1') Or (AudioCodec='wmav2'))) Or
  ((OutputFormat='aac') And ((AudioCodec='aac') Or (AudioCodec='libfaac')))) Then Fail(
  'Codec de sortie non pris en charge pour ce conteneur.');
@@ -128160,7 +129042,7 @@ BEGIN
    If (InputFormat='mpc') Or (InputFormat='mpc8') Then DecodeMPC(InputPath,Temps[0]) Else
    If InputFormat='truehd' Then DecodeMLP(InputPath,Temps[0],True) Else
    If (InputFormat='mp3') Or (InputFormat='mp1') Or (InputFormat='mp2') Then DecodeMPA(InputPath,Temps[0]) Else
-   If InputFormat='ac3' Then ProcessAC3(InputPath,Temps[0],False,0) Else
+   If InputFormat='ac3' Then DecodeEAC3(InputPath,Temps[0]) Else { F1 : decodeur ac3dec exact }
    If InputFormat='eac3' Then DecodeEAC3(InputPath,Temps[0]) Else
    If InputFormat='flac' Then DecodeFLAC(InputPath,Temps[0]) Else
    If (InputFormat='webm') And MKHasVorbis(InputPath) Then DecodeMKVVorbis(InputPath,Temps[0]) Else { H7 }
@@ -128169,6 +129051,10 @@ BEGIN
    If InputFormat='aac' Then DecodeAAC(InputPath,Temps[0]) Else
    If InputFormat='iff' Then Decode8SVX(InputPath,Temps[0]) Else
    If InputFormat='au' Then F1AuToWav(InputPath,Temps[0]) Else { F1 }
+   If InputFormat='gsm' Then F1DecodeGSM(InputPath,Temps[0],G726Rate) Else
+   If InputFormat='mmf' Then F1DecodeMMF(InputPath,Temps[0]) Else
+   If InputFormat='apc' Then F1DecodeAPC(InputPath,Temps[0]) Else
+   If InputFormat='ea_cdata' Then F1DecodeCData(InputPath,Temps[0]) Else
    If InputFormat='adx' Then DecodeADX(InputPath,Temps[0]) Else
    If InputFormat='4xm' Then Decode4XMAudio(InputPath,Temps[0]) Else
    If InputFormat='ea' Then DecodeEAContainer(InputPath,Temps[0],InputCodec) Else
@@ -128223,7 +129109,7 @@ BEGIN
    If (PcmCodecOut='') And F1WavIsF64(Temps[0]) Then Begin Temps[3]:=NewTemporary; PcmEncodeFile(Temps[0],Temps[3],'wav','pcm_s16le'); Intermediate:=Temps[3]; End; { F1 }
   End Else If (WaveFormatTag(InputPath)=$160) Or (WaveFormatTag(InputPath)=$161) Then Begin
    Temps[0]:=NewTemporary; DecodeWMAWav(InputPath,Temps[0]); Intermediate:=Temps[0];
-  End Else If (PcmCodecOut='') And (OutputFormat<>'flac') And PcmWavNeedsConv(InputPath) And Not (((RequestedRate<>0) Or (RequestedChannels<>0) Or (AudioCodec='wmav1') Or (AudioCodec='wmav2')) And SwrIsF32Wav(InputPath)) Then Begin
+  End Else If (PcmCodecOut='') And (OutputFormat<>'flac') And (OutputFormat<>'tta') And PcmWavNeedsConv(InputPath) And Not (((RequestedRate<>0) Or (RequestedChannels<>0) Or (AudioCodec='wmav1') Or (AudioCodec='wmav2')) And SwrIsF32Wav(InputPath)) Then Begin
    Temps[0]:=NewTemporary; PcmEncodeFile(InputPath,Temps[0],'wav','pcm_s16le'); Intermediate:=Temps[0];
   End Else If IsWaveCT(InputPath) Then Begin
    Temps[0]:=NewTemporary; DecodeWaveCT(InputPath,Temps[0]); Intermediate:=Temps[0];
@@ -128276,6 +129162,14 @@ BEGIN
    If AudioCodec='nellymoser' Then EncodeNellyFLV(Temps[1],Temps[2]) Else
    EncodeFLVSWF(Temps[1],Temps[2]);
   End Else If (OutputFormat='flac') Then F1FlacFromWav(Intermediate,Temps[2]) { F1 }
+   Else If OutputFormat='tta' Then F1TtaFromWav(Intermediate,Temps[2])
+   Else If OutputFormat='wsaud' Then Begin
+    Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False); F1MuxWsaud(Temps[1],Temps[2]);
+   End
+   Else If OutputFormat='mmf' Then Begin
+    Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False); Temps[3]:=NewTemporary;
+    EncodeWaveYamaha(Temps[1],Temps[3]); F1MuxMMF(Temps[3],Temps[2]);
+   End
    Else If (OutputFormat='wav') And F1WavMulti(Intermediate) Then PcmEncodeFile(Intermediate,Temps[2],'wav','pcm_s16le')
    Else If OutputFormat='wav' Then NormalizeWave(Intermediate,Temps[2],False)
    Else If OutputFormat='roq' Then Begin
