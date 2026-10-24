@@ -3593,6 +3593,9 @@ Function FormatName(S: String): String;Begin
  If S='m3u8' Then S:='hls';
  If (S='mpg') Or (S='mpe') Then S:='mpeg';
  If S='y4m' Then S:='yuv4mpegpipe';
+ If (S='tga') Or (S='icb') Or (S='vda') Or (S='vst') Then S:='targa';
+ If S='tif' Then S:='tiff';
+ If S='ras' Then S:='sunrast';
  If S='m1v' Then S:='mpeg1video';
  If S='m2v' Then S:='mpeg2video';
  If (S='wmv') Or (S='wma') Then S:='asf';
@@ -3976,6 +3979,10 @@ Begin
  If N>=33 Then If (B[0]=137) And (B[1]=80) And (B[2]=78) And (B[3]=71) And (B[4]=13) And (B[5]=10) And (B[6]=26) And (B[7]=10) Then Begin Probe:='png'; Exit; End;
  If N>=12 Then If (B[0]=1) And (B[1]=$DA) And (B[3]<=2) And ((Lower(Extension(Name))='sgi') Or (Lower(Extension(Name))='rgb') Or (Lower(Extension(Name))='rgba') Or (Lower(Extension(Name))='bw')) Then Begin Probe:='sgi'; Exit; End;
  If N>=14 Then If Lower(Extension(Name))='ptx' Then Begin Probe:='ptx'; Exit; End;
+ If N>=32 Then If (B[0]=$59) And (B[1]=$A6) And (B[2]=$6A) And (B[3]=$95) Then Begin Probe:='sunrast'; Exit; End;
+ If N>=16 Then If ((B[0]=73) And (B[1]=73) And (B[2]=42) And (B[3]=0)) Or ((B[0]=77) And (B[1]=77) And (B[2]=0) And (B[3]=42)) Then Begin Probe:='tiff'; Exit; End;
+ If N>=18 Then If ((Lower(Extension(Name))='tga') Or (Lower(Extension(Name))='icb') Or (Lower(Extension(Name))='vda') Or (Lower(Extension(Name))='vst')) Then Begin Probe:='targa'; Exit; End;
+ If N>=88 Then If (B[0]=$16) And (B[1]=0) And (B[2]=0) And (B[3]=0) And (B[8]=$FF) And (B[9]=$FF) And (B[10]=3) And ((B[11]=$18) Or (B[11]=$10)) Then Begin Probe:='txd'; Exit; End;
  If N>=70 Then If (B[0]=10) And (B[1]<=5) And ((B[2]=0) Or (B[2]=1)) And ((B[3]=1) Or (B[3]=2) Or (B[3]=4) Or (B[3]=8)) And (B[64]=0) And (B[65]>=1) And (B[65]<=4) And (Lower(Extension(Name))='pcx') Then Begin Probe:='pcx'; Exit; End;
  If N>=12 Then If ((B[0]=78) And (B[1]=117) And (B[2]=112) And (B[3]=112) And (B[4]=101) And (B[5]=108) And (B[6]=86)) Or ((B[0]=77) And (B[1]=121) And (B[2]=116) And (B[3]=104) And (B[4]=84) And (B[5]=86)) Then Begin Probe:='nuv'; Exit; End;
  If N>=8 Then If (B[0]=80) And (B[1]>=49) And (B[1]<=55) And ((B[2]=10) Or (B[2]=32) Or (B[2]=13) Or (B[2]=9)) And ((B[3]=35) Or ((B[3]>=48) And (B[3]<=57)) Or ((B[1]=55) And (B[3]=87))) Then Begin
@@ -17501,7 +17508,7 @@ Var
  NVMode,NVW,NVH,NVFmt,NVFrames,NVFpsN,NVFpsD,NVSarN,NVSarD: LongInt;
  NVHasAlpha,NVOpened,NVDone,NVYC,NVInitDup: Boolean; NVTarget: String;
  NVPalR,NVPalG,NVPalB: Array[0..255] Of Byte;
- NVPalN: LongInt;
+ NVPalN: LongInt; NVPalAOn: Boolean; NVPalA: Array[0..255] Of Byte; NVPadOn: Boolean; NVPad: PEABuffer; NVGamma22: Boolean;
  NVVN,NVVD,NVSubX,NVSubY,NVCW,NVCH: LongInt; NVTo420,NVHdrOk: Boolean; NVIl: Char; NVBT709,NVFullRng: Boolean; NVYTag: String[80];
  NVLast: PEABuffer; NVLastSize,NVGap: LongInt; NVHaveLast: Boolean;
  NVLastPalR,NVLastPalG,NVLastPalB,NVSavePalR,NVSavePalG,NVSavePalB: Array[0..255] Of Byte;
@@ -18597,7 +18604,7 @@ Begin
  Used:=0;
  OpenWrite(NVTarget);
  PutB(137); PutB(80); PutB(78); PutB(71); PutB(13); PutB(10); PutB(26); PutB(10);
- Chunk('IHDR',13); PutC32(W); PutC32(H); If PNGDepth=1 Then PutC(1) Else PutC(8); PutC(CType);
+ Chunk('IHDR',13); PutC32(W); PutC32(H); If PNGDepth=1 Then PutC(1) Else If PNGDepth=16 Then PutC(16) Else PutC(8); PutC(CType);
  PutC(0); PutC(0); PutC(0); EndChunk;
  Chunk('pHYs',9);
  If (NVSarN>0) And (NVSarD>0) Then Begin
@@ -18608,12 +18615,21 @@ Begin
   PutC32(0); PutC32(1);
  End;
  PutC(0); EndChunk;
+ If NVGamma22 Then Begin { G1: trc GAMMA22 (tiff BlackIsZero) }
+  Chunk('cICP',4); PutC(2); PutC(4); PutC(0); PutC(1); EndChunk;
+  Chunk('gAMA',4); PutC32(45455); EndChunk;
+ End;
  If CType=3 Then Begin
   Chunk('PLTE',768);
   For I:=0 To 255 Do Begin
    PutC(NVPalR[I]); PutC(NVPalG[I]); PutC(NVPalB[I]);
   End;
   EndChunk;
+  If NVPalAOn Then Begin
+   { alpha par entree (G1: targa, tiff, txd) }
+   Ret:=0; For I:=0 To 255 Do If NVPalA[I]<>255 Then Ret:=1;
+   If Ret<>0 Then Begin Chunk('tRNS',256); For I:=0 To 255 Do PutC(NVPalA[I]); EndChunk; End;
+  End Else
   If NVPalN<256 Then Begin
    { entrees de palette au-dela de NVPalN: alpha 0 (decodeur bmp de FFmpeg) }
    Chunk('tRNS',256);
@@ -18980,7 +18996,11 @@ End;
 Procedure Rgb8(Rw,Col: LongInt; Var R,G,B: Int64);
 Var At: LongInt;
 Begin
- If Col>=NVW Then Begin R:=0; G:=0; B:=0; Exit; End;
+ If Col>=NVW Then Begin
+  R:=0; G:=0; B:=0;
+  If NVPadOn And (NVFmt=3) Then Begin At:=Rw*4; B:=NVPad^[At]; G:=NVPad^[At+1]; R:=NVPad^[At+2]; End; { G1: colonne de bourrage lue par swscale (txd/dxt) }
+  Exit;
+ End;
  If NVFmt=1 Then Begin At:=(Rw*NVW+Col)*3; B:=P^[At]; G:=P^[At+1]; R:=P^[At+2]; End
  Else If NVFmt=9 Then Begin At:=(Rw*NVW+Col)*3; R:=P^[At]; G:=P^[At+1]; B:=P^[At+2]; End
  Else Begin At:=(Rw*NVW+Col)*4; B:=P^[At]; G:=P^[At+1]; R:=P^[At+2]; End;
@@ -19242,7 +19262,7 @@ End;
 Procedure NVBegin(Mode: LongInt; Const Target: String; W,H,Fmt,FpsN,FpsD: LongInt);
 Begin
  NVMode:=Mode; NVTarget:=Target; NVW:=W; NVH:=H; NVFmt:=Fmt; NVFrames:=0; NVFpsN:=FpsN; NVFpsD:=FpsD;
- NVSarN:=0; NVSarD:=0; NVYC:=False; NVInitDup:=False; NVIl:='p'; NVBT709:=False; NVFullRng:=False; NVOpened:=False; NVDone:=False; NVLast:=Nil; NVHaveLast:=False; NVGap:=0; NVHasAlpha:=False; NVTo420:=False; NVHdrOk:=False; NVPalN:=256;
+ NVSarN:=0; NVSarD:=0; NVYC:=False; NVInitDup:=False; NVIl:='p'; NVBT709:=False; NVFullRng:=False; NVOpened:=False; NVDone:=False; NVLast:=Nil; NVHaveLast:=False; NVGap:=0; NVHasAlpha:=False; NVTo420:=False; NVHdrOk:=False; NVPalN:=256; NVPalAOn:=False; NVPadOn:=False; NVGamma22:=False;
 End;
 
 { flux sans image decodee: ffmpeg ecrit l'en-tete Y4M seul quand le format est connu des parametres du conteneur }
@@ -22285,6 +22305,7 @@ Procedure DecodeIdcin(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeMVE(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeJLS(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeMJP(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure DecodeG1(Const Source,Target: String; Mode,Kind: LongInt); Forward;
 Procedure DecodeMJPB(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeGIF(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeH263Raw(Const Source,Target: String; Mode: LongInt); Forward;
@@ -23037,6 +23058,7 @@ End;
 Procedure DecodeVPD(Const Source,Target: String; Mode,Kind: LongInt); Forward;
 Procedure DecodeNV2(Kind: LongInt; Const Source,Target: String; Mode: LongInt);
 Begin
+ If (Kind>=1100) And (Kind<=1109) Then Begin DecodeG1(Source,Target,Mode,Kind); Exit; End;
  If Kind=1601 Then Begin DecodeSnow(Source,Target,Mode); Exit; End;
  If Kind=1700 Then Begin DecodeVMD(Source,Target,Mode); Exit; End; { G2B }
  If Kind=1702 Then Begin DecodeWC3(Source,Target,Mode); Exit; End; { G2B }
@@ -32575,9 +32597,11 @@ Begin
 End;
 
 { conversion de sous-titres bitmap: vobsub | psub | dvbsub -> psub | vobsub | dvbsub }
+Procedure XSLoadXsubAvi(Const Source: String); Forward;
 Procedure XSConvert(Const Source,Target,InFmt,OutFmt: String);
 Begin
  XSN:=0;
+ If InFmt='avi' Then XSLoadXsubAvi(Source) Else
  If InFmt='vobsub' Then XSLoadVobSub(Source)
  Else If InFmt='psub' Then XSLoadPsub(Source)
  Else If InFmt='mpegts' Then XSLoadTS(Source)
@@ -56693,6 +56717,2134 @@ Begin
  ADPCMPatchHeader(Rate,Chans,EAWritten); CloseRead; CloseWrite;
 End;
 { QDM2-END }
+
+{ G1-BEGIN }
+{ ---- Sun Rasterfile (libavcodec/sunrast.c) : profondeurs 1/4/8/24/32, RLE, palette ---- }
+Procedure DecodeSunRast(Const Source,Target: String; Mode: LongInt);
+Var
+ F,Raw,Img,Mono: PEABuffer; Size,W,H,Depth,Typ,MapType,MapLen,Len,ALen,Stride,Pos,X,Y,Run,Value,Fmt,Q,I,LenP,Pix: LongInt;
+ Bits,RowOut: LongInt; Tmp: Boolean; Dst,EndP: Int64; Cap: Int64;
+Function RB32(At: LongInt): Int64;
+Begin RB32:=Int64(EAByte(F,Size,At))*16777216+EAByte(F,Size,At+1)*65536+EAByte(F,Size,At+2)*256+EAByte(F,Size,At+3); End;
+Function GB(At: LongInt): LongInt;
+Begin GB:=EAByte(F,Size,At); End;
+Begin
+ NVLoad(Source,F,Size);
+ If Size<32 Then Fail('sunrast: fichier trop court.');
+ If RB32(0)<>$59A66A95 Then Fail('sunrast: signature invalide.');
+ Cap:=RB32(4); If Cap>2147483647 Then Cap:=2147483647; W:=Cap;
+ Cap:=RB32(8); If Cap>2147483647 Then Cap:=2147483647; H:=Cap;
+ Depth:=RB32(12); Typ:=RB32(20); MapType:=RB32(24); MapLen:=RB32(28);
+ Pos:=32;
+ If Typ=$FFFF Then Fail('sunrast: type experimental non pris en charge.');
+ If Typ>5 Then Fail('sunrast: type de compression invalide.');
+ If MapType=2 Then Fail('sunrast: type de palette inconnu.');
+ If MapType>2 Then Fail('sunrast: type de palette invalide.');
+ If (Typ=4) Or (Typ=5) Then Fail('sunrast: type de compression non pris en charge.');
+ If (MapLen<0) Or (MapLen>768) Then Fail('sunrast: longueur de palette invalide.');
+ Case Depth Of
+  1: If MapLen<>0 Then Fmt:=0 Else Fmt:=10;
+  4: If MapLen<>0 Then Fmt:=0 Else Fail('sunrast: format de pixel invalide.');
+  8: If MapLen<>0 Then Fmt:=0 Else Fmt:=4;
+  24: If Typ=3 Then Fmt:=9 Else Fmt:=1;
+  32: Fmt:=3;
+  Else Fail('sunrast: profondeur invalide.');
+ End;
+ If (W<1) Or (H<1) Or (W>16000) Or (H>16000) Then Fail('sunrast: dimensions invalides.');
+ Len:=(Depth*W+7) Shr 3; ALen:=Len+(Len And 1);
+ If Int64(Size-Pos)<Int64(MapLen)+(Int64(Len)*H*3) Div 256 Then Fail('sunrast: donnees insuffisantes.');
+ NVBegin(Mode,Target,W,H,Fmt,25,1);
+ FillChar(NVPalR,256,0); FillChar(NVPalG,256,0); FillChar(NVPalB,256,0);
+ If (Depth>8) And (MapLen<>0) Then Begin { palette inutile, ignoree }
+ End Else If MapLen<>0 Then Begin
+  If MapLen Mod 3<>0 Then Fail('sunrast: longueur de palette invalide.');
+  LenP:=MapLen Div 3;
+  For X:=0 To LenP-1 Do Begin
+   NVPalR[X]:=GB(Pos+X); NVPalG[X]:=GB(Pos+LenP+X); NVPalB[X]:=GB(Pos+LenP+LenP+X);
+  End;
+  NVPalAOn:=True; FillChar(NVPalA,256,0); FillChar(NVPalA,LenP,255);
+ End;
+ Inc(Pos,MapLen);
+ Stride:=Len;
+ GetMem(Raw,Int64(Stride)*H+64); FillChar(Raw^,Int64(Stride)*H+64,0);
+ If Typ=2 Then Begin
+  Dst:=0; EndP:=Int64(H)*Stride; X:=0; Y:=0;
+  While (Dst<>EndP) And (Pos<Size) Do Begin
+   Run:=1; Value:=GB(Pos); Inc(Pos);
+   If Value=$80 Then Begin
+    Run:=GB(Pos)+1; Inc(Pos);
+    If Run<>1 Then Begin Value:=GB(Pos); Inc(Pos); End;
+   End;
+   While Run>0 Do Begin
+    Dec(Run);
+    If X<Len Then Raw^[Dst+X]:=Value;
+    Inc(X);
+    If X>=ALen Then Begin
+     X:=0; Inc(Dst,Stride);
+     If Dst=EndP Then Break;
+    End;
+   End;
+  End;
+ End Else Begin
+  For Y:=0 To H-1 Do Begin
+   If Size-Pos<ALen Then Break;
+   Move(F^[Pos],Raw^[Y*Stride],Len); Inc(Pos,ALen);
+  End;
+ End;
+ If Fmt=3 Then GetMem(Img,Int64(W)*H*4+64) Else If Fmt=10 Then GetMem(Img,Int64(W)*H+64) Else GetMem(Img,Int64(W)*H*NVBpp(Fmt)+64);
+ Case Depth Of
+  1: For Y:=0 To H-1 Do For X:=0 To W-1 Do Begin
+      Q:=(Raw^[Y*Stride+(X Shr 3)] Shr (7-(X And 7))) And 1;
+      If Fmt=0 Then Img^[Y*W+X]:=Q Else If Q<>0 Then Img^[Y*W+X]:=0 Else Img^[Y*W+X]:=255;
+     End;
+  4: For Y:=0 To H-1 Do For X:=0 To W-1 Do Begin
+      Q:=Raw^[Y*Stride+(X Shr 1)];
+      If (X And 1)=0 Then Img^[Y*W+X]:=Q Shr 4 Else Img^[Y*W+X]:=Q And 15;
+     End;
+  8: For Y:=0 To H-1 Do Move(Raw^[Y*Stride],Img^[Y*W],W);
+  24: For Y:=0 To H-1 Do Move(Raw^[Y*Stride],Img^[Y*W*3],W*3);
+  32: For Y:=0 To H-1 Do For X:=0 To W-1 Do Begin
+      I:=Y*Stride+X*4; Q:=(Y*W+X)*4;
+      If Typ=3 Then Begin Img^[Q]:=Raw^[I+3]; Img^[Q+1]:=Raw^[I+2]; Img^[Q+2]:=Raw^[I+1]; End
+      Else Begin Img^[Q]:=Raw^[I+1]; Img^[Q+1]:=Raw^[I+2]; Img^[Q+2]:=Raw^[I+3]; End;
+      Img^[Q+3]:=255;
+     End;
+ End;
+ If (Fmt=10) And (Mode=1) Then Begin
+  { monob PNG : bits de bourrage a 1 en fin de ligne (swscale monow vers monob) }
+  RowOut:=(W+7) Shr 3; GetMem(Mono,RowOut*H+16); FillChar(Mono^,RowOut*H+16,0);
+  For Y:=0 To H-1 Do For X:=0 To RowOut*8-1 Do
+   If (X>=W) Or (Img^[Y*W+X]>=128) Then Mono^[Y*RowOut+(X Shr 3)]:=Mono^[Y*RowOut+(X Shr 3)] Or ($80 Shr (X And 7));
+  PNGDepth:=1; NVWritePNGEx(Mono,1,0); PNGDepth:=0; NVDone:=True; Inc(NVFrames); FreeMem(Mono);
+ End Else
+ NVEmit(Img);
+ FreeMem(Img); FreeMem(Raw); FreeMem(F);
+ NVFinish('sunrast');
+End;
+
+{ ---- Targa (libavcodec/targa.c) : decodeur ---- }
+Procedure DecodeTarga(Const Source,Target: String; Mode: LongInt);
+Var
+ F,Img: PEABuffer; Size,Gp,IdLen,Pal,Compr,FirstClr,Colors,CSize,W,H,Bpp,Flags,Fmt,Depth,ImgSize,Interleave: LongInt;
+ PalSz,PalSample,T,V,Y,X,Q,Stride,I: LongInt; TopDown: Boolean;
+ { etat de balayage }
+ CurL,CurY,CurX: LongInt; Null: Boolean;
+Function GB(At: LongInt): LongInt;
+Begin GB:=EAByte(F,Size,At); End;
+Function Left: LongInt;
+Begin Left:=Size-Gp; End;
+{ adresse de debut de la ligne L (ordre de stockage) }
+Function RowOfs(L: LongInt): LongInt;
+Begin
+ If TopDown Then RowOfs:=L*Stride Else RowOfs:=(H-1-L)*Stride;
+End;
+Procedure AdvanceLine;
+Begin
+ Inc(CurY,Interleave);
+ If CurY<H Then Begin Inc(CurL,Interleave); End
+ Else Begin
+  CurY:=(CurY+1) And (Interleave-1);
+  If (CurY<>0) And (CurY<H) Then CurL:=CurY Else Null:=True;
+ End;
+End;
+Procedure PutB(Ofs,Val: LongInt);
+Begin Img^[Ofs]:=Val; End;
+Procedure DecodeRle;
+Var Typ,Count,N,Cn,D: LongInt; Tmp: Array[0..3] Of Byte; Dst: LongInt;
+Begin
+ CurL:=0; CurY:=0; CurX:=0; Count:=0; Null:=False;
+ While Not Null Do Begin
+  If Left<=0 Then Fail('targa: fin des donnees avant la fin de l''image.');
+  Typ:=GB(Gp); Inc(Gp);
+  Count:=(Typ And $7F)+1; Typ:=Typ And $80;
+  If Typ=0 Then Begin
+   Repeat
+    N:=W-CurX; If Count<N Then N:=Count;
+    Dst:=RowOfs(CurL)+CurX*Depth;
+    Cn:=N*Depth; If Cn>Left Then Cn:=Left; If Cn<0 Then Cn:=0;
+    If Cn>0 Then Move(F^[Gp],Img^[Dst],Cn);
+    Inc(Gp,Cn);
+    Dec(Count,N); Inc(CurX,N);
+    If CurX=W Then Begin CurX:=0; AdvanceLine; End;
+   Until Null Or (Count<=0);
+  End Else Begin
+   FillChar(Tmp,4,0);
+   For D:=0 To Depth-1 Do Begin If Gp<Size Then Tmp[D]:=F^[Gp]; Inc(Gp); End;
+   Repeat
+    N:=W-CurX; If Count<N Then N:=Count;
+    Dec(Count,N);
+    Dst:=RowOfs(CurL)+CurX*Depth;
+    Inc(CurX,N);
+    Repeat
+     Move(Tmp,Img^[Dst],Depth); Inc(Dst,Depth); Dec(N);
+    Until N=0;
+    If CurX=W Then Begin CurX:=0; AdvanceLine; End;
+   Until Null Or (Count<=0);
+  End;
+ End;
+ If Count<>0 Then Fail('targa: paquet hors limites.');
+End;
+Begin
+ NVLoad(Source,F,Size);
+ If Size<18 Then Fail('targa: fichier trop court.');
+ Gp:=0;
+ IdLen:=GB(0); Pal:=GB(1); Compr:=GB(2);
+ FirstClr:=GB(3)+GB(4)*256; Colors:=GB(5)+GB(6)*256; CSize:=GB(7);
+ W:=GB(12)+GB(13)*256; H:=GB(14)+GB(15)*256; Bpp:=GB(16); Flags:=GB(17);
+ Gp:=18;
+ If (Pal=0) And ((FirstClr<>0) Or (Colors<>0) Or (CSize<>0)) Then Begin FirstClr:=0; Colors:=0; CSize:=0; End;
+ If Left<IdLen+2*Colors Then Fail('targa: en-tete incomplet.');
+ Inc(Gp,IdLen);
+ Case Bpp Of
+  8: If (Compr And Not 8)=3 Then Fmt:=4 Else Fmt:=0;
+  15,16: Fmt:=2;
+  24: Fmt:=1;
+  32: Fmt:=3;
+  Else Begin Fail('targa: profondeur non prise en charge.'); Fmt:=0; End;
+ End;
+ If (Colors<>0) And (Colors+FirstClr>256) Then Fail('targa: palette incorrecte.');
+ If (W<1) Or (H<1) Or (W>16000) Or (H>16000) Then Fail('targa: dimensions invalides.');
+ If (Compr And Not 8)=0 Then Fail('targa: image sans donnees.');
+ Depth:=(Bpp+1) Shr 3;
+ ImgSize:=W*Depth;
+ If (Compr And 8)=0 Then
+  If Int64(Left)<Int64(ImgSize)*H Then Fail('targa: donnees d''image insuffisantes.');
+ TopDown:=(Flags And $20)<>0;
+ Stride:=W*Depth;
+ If (Flags And $40)<>0 Then Interleave:=2 Else If (Flags And $80)<>0 Then Interleave:=4 Else Interleave:=1;
+ { l'ordre d'entrelacement de FFmpeg teste TGA_INTERLEAVE2 = 0x40 puis INTERLEAVE4 = 0x80 }
+ NVBegin(Mode,Target,W,H,Fmt,25,1);
+ FillChar(NVPalR,256,0); FillChar(NVPalG,256,0); FillChar(NVPalB,256,0);
+ If Fmt=3 Then NVHasAlpha:=True;
+ If Fmt=0 Then Begin NVPalAOn:=True; FillChar(NVPalA,256,0); End;
+ If Colors<>0 Then Begin
+  Case CSize Of
+   32: PalSample:=4;
+   24: PalSample:=3;
+   16,15: PalSample:=2;
+   Else Begin Fail('targa: taille d''entree de palette non prise en charge.'); PalSample:=0; End;
+  End;
+  PalSz:=Colors*PalSample;
+  If Fmt<>0 Then Inc(Gp,PalSz)
+  Else Begin
+   If Left<PalSz Then Fail('targa: palette incomplete.');
+   For T:=0 To Colors-1 Do Begin
+    Q:=FirstClr+T;
+    Case PalSample Of
+     4: Begin NVPalB[Q]:=GB(Gp); NVPalG[Q]:=GB(Gp+1); NVPalR[Q]:=GB(Gp+2); NVPalA[Q]:=GB(Gp+3); End;
+     3: Begin NVPalB[Q]:=GB(Gp); NVPalG[Q]:=GB(Gp+1); NVPalR[Q]:=GB(Gp+2); NVPalA[Q]:=255; End;
+     2: Begin
+      V:=GB(Gp)+GB(Gp+1)*256;
+      NVPalR[Q]:=((V And $7C00) Shr 7) Or ((V And $7C00) Shr 12);
+      NVPalG[Q]:=((V And $3E0) Shr 2) Or ((V And $3E0) Shr 7);
+      NVPalB[Q]:=((V And $1F) Shl 3) Or ((V And $1F) Shr 2); NVPalA[Q]:=255;
+     End;
+    End;
+    Inc(Gp,PalSample);
+   End;
+  End;
+ End;
+ GetMem(Img,Int64(Stride)*H+64); FillChar(Img^,Int64(Stride)*H+64,0);
+ If (Compr And 8)<>0 Then DecodeRle
+ Else Begin
+  If Int64(Left)<Int64(ImgSize)*H Then Fail('targa: donnees d''image insuffisantes.');
+  CurL:=0; CurY:=0; Null:=False;
+  Repeat
+   Move(F^[Gp],Img^[RowOfs(CurL)],ImgSize); Inc(Gp,ImgSize);
+   AdvanceLine;
+  Until Null;
+ End;
+ If (Flags And $10)<>0 Then
+  For Y:=0 To H-1 Do
+   For X:=0 To (W Shr 1)-1 Do
+    Case Bpp Of
+     32,24,16,8: For I:=0 To Depth-1 Do Begin
+       V:=Img^[Y*Stride+X*Depth+I]; Img^[Y*Stride+X*Depth+I]:=Img^[Y*Stride+(W-1-X)*Depth+I]; Img^[Y*Stride+(W-1-X)*Depth+I]:=V;
+      End;
+    End;
+ NVEmit(Img);
+ FreeMem(Img); FreeMem(F);
+ NVFinish('targa');
+End;
+
+{ ---- Renderware TXD (libavformat/txd.c, libavcodec/txd.c, texturedsp.c) ---- }
+Procedure DecodeTXD(Const Source,Target: String; Mode: LongInt);
+Var
+ F,Img,PadBuf: PEABuffer; Size,Pos,Id,CSz,Marker,PkLen,Version,W,H,Depth,Flags,Gp,I,J,X,Y,Fmt,Cur,Need,Bw,Bh,PkEnd: LongInt;
+ D3d: Int64; Began,Ok,Eof: Boolean; BegW,BegH,BegFmt: LongInt;
+ Cols: Array[0..3] Of LongInt; ColA: Array[0..3] Of LongInt;
+Function L32(At: LongInt): Int64;
+Begin L32:=Int64(EAByte(F,Size,At))+EAByte(F,Size,At+1)*256+EAByte(F,Size,At+2)*65536+Int64(EAByte(F,Size,At+3))*16777216; End;
+Function GB(At: LongInt): LongInt;
+Begin If (At>=0) And (At<PkEnd) Then GB:=F^[At] Else GB:=0; End;
+Function G16(At: LongInt): LongInt;
+Begin G16:=GB(At)+GB(At+1)*256; End;
+{ extract_color de texturedsp.c ; Cols[k] = R + G*256 + B*65536 (alpha a part) }
+Procedure ExtractColor(C0,C1: LongInt; Dxtn: Boolean; Alpha: LongInt);
+Var Tmp,R0,G0,B0,R1,G1,B1,A: LongInt;
+Begin
+ If Dxtn Then A:=0 Else A:=255;
+ Tmp:=(C0 Shr 11)*255+16; R0:=((Tmp Div 32+Tmp) Div 32) And 255;
+ Tmp:=((C0 And $7E0) Shr 5)*255+32; G0:=((Tmp Div 64+Tmp) Div 64) And 255;
+ Tmp:=(C0 And $1F)*255+16; B0:=((Tmp Div 32+Tmp) Div 32) And 255;
+ Tmp:=(C1 Shr 11)*255+16; R1:=((Tmp Div 32+Tmp) Div 32) And 255;
+ Tmp:=((C1 And $7E0) Shr 5)*255+32; G1:=((Tmp Div 64+Tmp) Div 64) And 255;
+ Tmp:=(C1 And $1F)*255+16; B1:=((Tmp Div 32+Tmp) Div 32) And 255;
+ If Dxtn Or (C0>C1) Then Begin
+  Cols[0]:=R0+G0*256+B0*65536; ColA[0]:=A;
+  Cols[1]:=R1+G1*256+B1*65536; ColA[1]:=A;
+  Cols[2]:=((2*R0+R1) Div 3)+((2*G0+G1) Div 3)*256+((2*B0+B1) Div 3)*65536; ColA[2]:=A;
+  Cols[3]:=((2*R1+R0) Div 3)+((2*G1+G0) Div 3)*256+((2*B1+B0) Div 3)*65536; ColA[3]:=A;
+ End Else Begin
+  Cols[0]:=R0+G0*256+B0*65536; ColA[0]:=A;
+  Cols[1]:=R1+G1*256+B1*65536; ColA[1]:=A;
+  Cols[2]:=((R0+R1) Div 2)+((G0+G1) Div 2)*256+((B0+B1) Div 2)*65536; ColA[2]:=A;
+  Cols[3]:=0; ColA[3]:=Alpha;
+ End;
+End;
+{ ecrit un pixel RGBA (couleur c, alpha a) en BGRA natif }
+Procedure PutPx(PxX,PxY,C,A: LongInt);
+Var Q: LongInt;
+Begin
+ If PxY>=H Then Exit;
+ If PxX=W Then Begin
+  Q:=PxY*4; PadBuf^[Q]:=C And 255; PadBuf^[Q+1]:=(C Shr 8) And 255; PadBuf^[Q+2]:=(C Shr 16) And 255; PadBuf^[Q+3]:=A;
+  PadBuf^[Q]:=(C Shr 16) And 255; PadBuf^[Q+2]:=C And 255; Exit;
+ End;
+ If PxX>W Then Exit;
+ Q:=(PxY*W+PxX)*4;
+ Img^[Q]:=(C Shr 16) And 255; Img^[Q+1]:=(C Shr 8) And 255; Img^[Q+2]:=C And 255; Img^[Q+3]:=A;
+End;
+Procedure Dxt1Block(Bx,By,At: LongInt);
+Var C0,C1,Code,Xx,Yy: LongInt; CodeL: Int64;
+Begin
+ C0:=G16(At); C1:=G16(At+2); CodeL:=G16(At+4)+Int64(G16(At+6))*65536;
+ ExtractColor(C0,C1,False,255);
+ For Yy:=0 To 3 Do For Xx:=0 To 3 Do Begin
+  Code:=CodeL And 3; CodeL:=CodeL Shr 2;
+  PutPx(Bx+Xx,By+Yy,Cols[Code],ColA[Code]);
+ End;
+End;
+Procedure Dxt3Block(Bx,By,At: LongInt);
+Var C0,C1,Code,Xx,Yy,Ac,Av: LongInt; CodeL: Int64;
+Begin
+ C0:=G16(At+8); C1:=G16(At+10); CodeL:=G16(At+12)+Int64(G16(At+14))*65536;
+ ExtractColor(C0,C1,True,0);
+ For Yy:=0 To 3 Do Begin
+  Ac:=G16(At+2*Yy);
+  For Xx:=0 To 3 Do Begin
+   Av:=((Ac Shr (4*Xx)) And 15)*17;
+   Code:=CodeL And 3; CodeL:=CodeL Shr 2;
+   PutPx(Bx+Xx,By+Yy,Cols[Code],Av);
+  End;
+ End;
+End;
+Begin
+ NVLoad(Source,F,Size);
+ Pos:=0; Began:=False; Img:=Nil; Eof:=False; BegW:=0; BegH:=0; BegFmt:=0;
+ While Not Eof Do Begin
+  { txd_read_packet }
+  PkLen:=-1;
+  While PkLen<0 Do Begin
+   If Size-Pos<12 Then Begin Eof:=True; Break; End;
+   Id:=L32(Pos); CSz:=L32(Pos+4); Marker:=L32(Pos+8); Inc(Pos,12);
+   If (Marker<>$1803FFFF) And (Marker<>$1003FFFF) Then Begin Eof:=True; Break; End;
+   Case Id Of
+    1: If CSz>100 Then PkLen:=CSz Else Begin If CSz>Size-Pos Then Pos:=Size Else Inc(Pos,CSz); End;
+    3: Begin If CSz>Size-Pos Then Pos:=Size Else Inc(Pos,CSz); End;
+    $16,$15: ;
+    Else Begin Eof:=True; Break; End;
+   End;
+  End;
+  If Eof Then Break;
+  If Pos>=Size Then Break;
+  If PkLen>Size-Pos Then PkLen:=Size-Pos;
+  { txd_decode_frame sur [Pos, Pos+PkLen) }
+  PkEnd:=Pos+PkLen; Gp:=Pos; Ok:=False;
+  Repeat
+   If PkLen<88 Then Break;
+   Version:=L32(Pos) And $7FFFFFFF;
+   D3d:=L32(Pos+76);
+   W:=G16(Pos+80); H:=G16(Pos+82); Depth:=GB(Pos+84); Flags:=GB(Pos+87);
+   Gp:=Pos+88;
+   If (Version<8) Or (Version>9) Then Break;
+   If Depth=8 Then Begin
+    Fmt:=0;
+    If PkEnd-Gp<W*H+1024 Then Break;
+   End Else If Depth=16 Then Begin
+    Fmt:=3;
+    Case D3d Of
+     0: Begin
+      If (Flags And 1)=0 Then Break;
+      If Int64(PkEnd-Gp)<Int64((W+3) Shr 2)*((H+3) Shr 2)*8+4 Then Break;
+     End;
+     $31545844: If Int64(PkEnd-Gp)<Int64((W+3) Shr 2)*((H+3) Shr 2)*8+4 Then Break;
+     $33545844: If Int64(PkEnd-Gp)<Int64((W+3) Shr 2)*((H+3) Shr 2)*16+4 Then Break;
+    End;
+   End Else If Depth=32 Then Begin
+    Fmt:=3;
+    If Int64(PkEnd-Gp)<Int64(H)*W*4 Then Break;
+   End Else Break;
+   If (W<1) Or (H<1) Or (W>16000) Or (H>16000) Then Break;
+   { formats pris en charge }
+   If Depth=16 Then If (D3d<>0) And (D3d<>$31545844) And (D3d<>$33545844) Then Break;
+   If Depth=32 Then If (D3d<>$15) And (D3d<>$16) Then Break;
+   If Not Began Then Begin
+    NVBegin(Mode,Target,W,H,Fmt,5,1); Began:=True; BegW:=W; BegH:=H; BegFmt:=Fmt;
+    If Fmt=3 Then NVHasAlpha:=True;
+    NVPalAOn:=(Fmt=0);
+   End Else If (W<>BegW) Or (H<>BegH) Or (Fmt<>BegFmt) Then Fail('txd: changement de format ou de taille entre textures non pris en charge.');
+   GetMem(Img,Int64(W)*H*NVBpp(Fmt)+64); FillChar(Img^,Int64(W)*H*NVBpp(Fmt),0);
+   GetMem(PadBuf,Int64(H)*4+64); FillChar(PadBuf^,Int64(H)*4+64,0);
+   If Depth=8 Then Begin
+    For I:=0 To 255 Do Begin
+     NVPalR[I]:=GB(Gp+I*4); NVPalG[I]:=GB(Gp+I*4+1); NVPalB[I]:=GB(Gp+I*4+2); NVPalA[I]:=GB(Gp+I*4+3);
+    End;
+    Inc(Gp,1024+4);
+    For Y:=0 To H-1 Do For X:=0 To W-1 Do Img^[Y*W+X]:=GB(Gp+Y*W+X);
+   End Else If Depth=16 Then Begin
+    Inc(Gp,4);
+    J:=0;
+    While J<H Do Begin
+     I:=0;
+     While I<W Do Begin
+      If D3d=$33545844 Then Begin Dxt3Block(I,J,Gp); Inc(Gp,16); End
+      Else Begin Dxt1Block(I,J,Gp); Inc(Gp,8); End;
+      Inc(I,4);
+     End;
+     Inc(J,4);
+    End;
+   End Else Begin
+    For Y:=0 To H-1 Do For X:=0 To W-1 Do Begin
+     I:=Gp+(Y*W+X)*4;
+     Img^[(Y*W+X)*4]:=GB(I+2); Img^[(Y*W+X)*4+1]:=GB(I+1); Img^[(Y*W+X)*4+2]:=GB(I); Img^[(Y*W+X)*4+3]:=GB(I+3);
+    End;
+   End;
+   Ok:=True;
+  Until True;
+  If Ok Then Begin
+   NVPad:=PadBuf; NVPadOn:=Odd(W) And (Depth=16);
+   NVEmit(Img); FreeMem(Img); Img:=Nil; FreeMem(PadBuf); NVPadOn:=False;
+  End
+  Else Begin If Began Then NVRepeat; End;
+  If NVDone Then Break;
+  Inc(Pos,PkLen);
+ End;
+ FreeMem(F);
+ If Not Began Then Fail('txd: aucune texture decodee.');
+ NVFinish('txd');
+End;
+
+{ ---- TIFF (libavcodec/tiff.c, tiff_common.c, lzw.c) : decodeur ---- }
+Const
+ TFRev: Array[0..15] Of Byte=(0,8,4,12,2,10,6,14,1,9,5,13,3,11,7,15);
+Var
+ TFF: PEABuffer; TFSize,TFGp: LongInt;
+ TFLe: Boolean;
+ { etat persistant de l'image (tiff_init) }
+ TFW,TFH,TFRps,TFStrips,TFSot,TFSstype,TFStripsizesoff,TFStripsize,TFStripoff,TFStrippos,TFPlanarF,TFPred,TFSub0,TFSub1: LongInt;
+ TFBpp,TFBppCount,TFCompr,TFPhoto,TFFill: LongInt;
+ TFSubIfd: Int64; TFIsThumb,TFIsTiled,TFDng,TFPalSet,TFTileBits: Boolean;
+ TFLastTag: Int64; TFSarN,TFSarD: LongInt; TFRes: Array[0..3] Of Int64;
+ TFPalR,TFPalG,TFPalB: Array[0..255] Of Byte;
+ TFErr: String;
+ { LZW }
+ TFLzBuf: PEABuffer; TFLzSize,TFLzPos: LongInt;
+ TFLzBits,TFLzMode,TFLzCur,TFLzMask,TFLzCode,TFLzClear,TFLzEnd,TFLzNew,TFLzTop,TFLzSlot,TFLzFc,TFLzOc,TFLzSp: LongInt;
+ TFLzBbuf: LongWord;
+ TFLzStack,TFLzSuffix: Array[0..4095] Of Byte; TFLzPrefix: Array[0..4095] Of Word;
+
+Function TFGet8: LongInt;
+Begin
+ If TFGp<TFSize Then Begin TFGet8:=TFF^[TFGp]; Inc(TFGp); End Else Begin TFGp:=TFSize; TFGet8:=0; End;
+End;
+Function TFGet16: Int64;
+Var A,B: LongInt;
+Begin
+ If TFSize-TFGp<2 Then Begin TFGp:=TFSize; TFGet16:=0; Exit; End;
+ A:=TFF^[TFGp]; B:=TFF^[TFGp+1]; Inc(TFGp,2);
+ If TFLe Then TFGet16:=A+B*256 Else TFGet16:=A*256+B;
+End;
+Function TFGet32: Int64;
+Var A,B,C,D: Int64;
+Begin
+ If TFSize-TFGp<4 Then Begin TFGp:=TFSize; TFGet32:=0; Exit; End;
+ A:=TFF^[TFGp]; B:=TFF^[TFGp+1]; C:=TFF^[TFGp+2]; D:=TFF^[TFGp+3]; Inc(TFGp,4);
+ If TFLe Then TFGet32:=A+B*256+C*65536+D*16777216 Else TFGet32:=A*16777216+B*65536+C*256+D;
+End;
+Procedure TFSeek(Ofs: Int64);
+Begin
+ If Ofs<0 Then Ofs:=0;
+ If Ofs>TFSize Then Ofs:=TFSize;
+ TFGp:=Ofs;
+End;
+{ ff_tget : type BYTE=1 SHORT=3 LONG=4, autre = UINT_MAX }
+Function TFGetT(Typ: LongInt): Int64;
+Begin
+ Case Typ Of
+  1: TFGetT:=TFGet8;
+  3: TFGetT:=TFGet16;
+  4: TFGetT:=TFGet32;
+  Else TFGetT:=4294967295;
+ End;
+End;
+Function TFTypeSize(Typ: LongInt): LongInt;
+Begin
+ Case Typ Of
+  1,6,7: TFTypeSize:=1;
+  2: TFTypeSize:=100;
+  3,8: TFTypeSize:=2;
+  4,9,11,13: TFTypeSize:=4;
+  5,10,12: TFTypeSize:=8;
+  Else TFTypeSize:=0;
+ End;
+End;
+{ lecture a position independante (flux de decalages / tailles de bandes) }
+Function TFGetAt(Var Cur: LongInt; Typ: LongInt): Int64;
+Var Sv: LongInt;
+Begin
+ Sv:=TFGp; TFGp:=Cur; TFGetAt:=TFGetT(Typ); Cur:=TFGp; TFGp:=Sv;
+End;
+
+{ ---- decodeur LZW TIFF (lzw.c) ---- }
+Function TFLzMk(N: LongInt): LongInt;
+Begin TFLzMk:=(1 Shl N)-1; End;
+Procedure TFLzInit(Buf: PEABuffer; Sz: LongInt);
+Begin
+ TFLzBuf:=Buf; TFLzSize:=Sz; TFLzPos:=0; TFLzBbuf:=0; TFLzBits:=0;
+ TFLzCode:=8; TFLzCur:=9; TFLzMask:=TFLzMk(9); TFLzTop:=1 Shl 9; TFLzClear:=1 Shl 8; TFLzEnd:=TFLzClear+1;
+ TFLzSlot:=TFLzClear+2; TFLzNew:=TFLzSlot; TFLzOc:=-1; TFLzFc:=-1; TFLzSp:=0;
+End;
+Function TFLzGetCode: LongInt;
+Var C: Int64;
+Begin
+ If (TFLzBits<TFLzCur) And (TFLzPos>=TFLzSize) Then Begin TFLzGetCode:=TFLzEnd; Exit; End;
+ While TFLzBits<TFLzCur Do Begin
+  If TFLzPos<TFLzSize Then TFLzBbuf:=((TFLzBbuf Shl 8) Or TFLzBuf^[TFLzPos]) And $FFFFFFFF
+  Else TFLzBbuf:=(TFLzBbuf Shl 8) And $FFFFFFFF;
+  Inc(TFLzPos); Inc(TFLzBits,8);
+ End;
+ C:=TFLzBbuf Shr (TFLzBits-TFLzCur);
+ Dec(TFLzBits,TFLzCur);
+ TFLzGetCode:=C And TFLzMask;
+End;
+{ ff_lzw_decode : retourne le nombre d'octets decodes }
+Function TFLzDecode(Buf: PEABuffer; Len: LongInt): LongInt;
+Var L,C,Code,Oc,Fc,Sp,Bp: LongInt;
+Label TheEnd;
+Begin
+ If TFLzEnd<0 Then Begin TFLzDecode:=0; Exit; End;
+ L:=Len; Sp:=TFLzSp; Oc:=TFLzOc; Fc:=TFLzFc; Bp:=0;
+ While True Do Begin
+  While Sp>0 Do Begin
+   Dec(Sp); Buf^[Bp]:=TFLzStack[Sp]; Inc(Bp);
+   Dec(L);
+   If L=0 Then Goto TheEnd;
+  End;
+  C:=TFLzGetCode;
+  If C=TFLzEnd Then Break
+  Else If C=TFLzClear Then Begin
+   TFLzCur:=TFLzCode+1; TFLzMask:=TFLzMk(TFLzCur); TFLzSlot:=TFLzNew; TFLzTop:=1 Shl TFLzCur; Fc:=-1; Oc:=-1;
+  End Else Begin
+   Code:=C;
+   If (Code=TFLzSlot) And (Fc>=0) Then Begin
+    TFLzStack[Sp]:=Fc; Inc(Sp); Code:=Oc;
+   End Else If Code>=TFLzSlot Then Break;
+   While Code>=TFLzNew Do Begin
+    TFLzStack[Sp]:=TFLzSuffix[Code]; Inc(Sp); Code:=TFLzPrefix[Code];
+   End;
+   TFLzStack[Sp]:=Code; Inc(Sp);
+   If (TFLzSlot<TFLzTop) And (Oc>=0) Then Begin
+    TFLzSuffix[TFLzSlot]:=Code; TFLzPrefix[TFLzSlot]:=Oc; Inc(TFLzSlot);
+   End;
+   Fc:=Code; Oc:=C;
+   If TFLzSlot>=TFLzTop-1 Then Begin
+    If TFLzCur<12 Then Begin TFLzTop:=TFLzTop Shl 1; Inc(TFLzCur); TFLzMask:=TFLzMk(TFLzCur); End;
+   End;
+  End;
+ End;
+ TFLzEnd:=-1;
+TheEnd:
+ TFLzSp:=Sp; TFLzOc:=Oc; TFLzFc:=Fc;
+ TFLzDecode:=Len-L;
+End;
+
+{ ---- horizontal_fill ---- }
+Procedure TFHFill(BppA: LongInt; Dst: PEABuffer; UsePtr: Boolean; Src: PEABuffer; C: LongInt; Width,Offset: LongInt);
+Var V,W: LongInt;
+Begin
+ Case BppA Of
+  1: Begin
+   W:=Width-1;
+   While W>=0 Do Begin
+    If UsePtr Then V:=Src^[W] Else V:=C;
+    Dst^[(W+Offset)*8+7]:=V And 1; Dst^[(W+Offset)*8+6]:=(V Shr 1) And 1; Dst^[(W+Offset)*8+5]:=(V Shr 2) And 1; Dst^[(W+Offset)*8+4]:=(V Shr 3) And 1;
+    Dst^[(W+Offset)*8+3]:=(V Shr 4) And 1; Dst^[(W+Offset)*8+2]:=(V Shr 5) And 1; Dst^[(W+Offset)*8+1]:=(V Shr 6) And 1; Dst^[(W+Offset)*8]:=(V Shr 7) And 1;
+    Dec(W);
+   End;
+  End;
+  2: Begin
+   W:=Width-1;
+   While W>=0 Do Begin
+    If UsePtr Then V:=Src^[W] Else V:=C;
+    Dst^[(W+Offset)*4+3]:=V And 3; Dst^[(W+Offset)*4+2]:=(V Shr 2) And 3; Dst^[(W+Offset)*4+1]:=(V Shr 4) And 3; Dst^[(W+Offset)*4]:=(V Shr 6) And 3;
+    Dec(W);
+   End;
+  End;
+  4: Begin
+   W:=Width-1;
+   While W>=0 Do Begin
+    If UsePtr Then V:=Src^[W] Else V:=C;
+    Dst^[(W+Offset)*2+1]:=V And 15; Dst^[(W+Offset)*2]:=(V Shr 4) And 15;
+    Dec(W);
+   End;
+  End;
+  Else Begin
+   If UsePtr Then Move(Src^[0],Dst^[Offset],Width) Else FillChar(Dst^[Offset],Width,C);
+  End;
+ End;
+End;
+
+Function TFI32(V: Int64): LongInt;
+Begin
+ If V>2147483647 Then TFI32:=LongInt(V-4294967296) Else TFI32:=V;
+End;
+
+{ av_reduce avec max = INT32_MAX }
+Procedure TFReduce(Num,Den: QWord; Var Rn,Rd: LongInt);
+Var
+ A0n,A0d,A1n,A1d,X,A2n,A2d,T2,Mx,NextDen: Int64; N,D,G1,G2,Tmp: QWord;
+Begin
+ Mx:=2147483647; A0n:=0; A0d:=1; A1n:=1; A1d:=0;
+ N:=Num; D:=Den;
+ G1:=N; G2:=D;
+ While G2<>0 Do Begin Tmp:=G1 Mod G2; G1:=G2; G2:=Tmp; End;
+ If G1<>0 Then Begin N:=N Div G1; D:=D Div G1; End;
+ If (N<=QWord(Mx)) And (D<=QWord(Mx)) Then Begin A1n:=N; A1d:=D; D:=0; End;
+ While D<>0 Do Begin
+  X:=Int64(N Div D); NextDen:=Int64(N-D*QWord(X));
+  A2n:=X*A1n+A0n; A2d:=X*A1d+A0d;
+  If (A2n>Mx) Or (A2d>Mx) Then Begin
+   If A1n<>0 Then X:=(Mx-A0n) Div A1n;
+   If A1d<>0 Then Begin T2:=(Mx-A0d) Div A1d; If T2<X Then X:=T2; End;
+   If Int64(D)*(2*X*A1d+A0d)>Int64(N)*A1d Then Begin A1n:=X*A1n+A0n; A1d:=X*A1d+A0d; End;
+   Break;
+  End;
+  A0n:=A1n; A0d:=A1d; A1n:=A2n; A1d:=A2d;
+  N:=D; D:=QWord(NextDen);
+ End;
+ Rn:=A1n; Rd:=A1d;
+End;
+
+Procedure TFSetSar(Tag,Num,Den: Int64);
+Var Off: LongInt; N,D: QWord;
+Begin
+ If Tag=$11B Then Off:=2 Else Off:=0;
+ TFRes[Off]:=Num; TFRes[Off+1]:=Den;
+ If (TFRes[0]<>0) And (TFRes[1]<>0) And (TFRes[2]<>0) And (TFRes[3]<>0) Then Begin
+  N:=QWord(TFRes[2])*QWord(TFRes[1]); D:=QWord(TFRes[0])*QWord(TFRes[3]);
+  If (N>QWord(9223372036854775807)) Or (D>QWord(9223372036854775807)) Then Begin N:=N Shr 1; D:=D Shr 1; End;
+  TFReduce(N,D,TFSarN,TFSarD);
+  If TFSarD=0 Then Begin TFSarN:=0; TFSarD:=1; End;
+ End;
+End;
+
+{ ---- analyse d'une entree d'IFD (tiff_decode_tag) ---- }
+Var TFPalA: Array[0..255] Of Byte; TFBayer: Boolean; TFGeoCount: LongInt;
+
+Procedure TFDecodeTag;
+Var
+ Tag,Typ,Cnt,Start,Off,Value,Value2,V,Rr,Gg,Bb,P: Int64; I,N,Sz,Sh,P0,P1,P2,Gc: LongInt;
+Begin
+ Tag:=TFGet16; Typ:=TFGet16; Cnt:=TFGet32;
+ Start:=TFGp+4;
+ If (Typ=0) Or (Typ>=14) Then Begin TFSeek(Start); Exit; End;
+ If (Tag=$8769) Or (Tag=$8825) Or (Tag=$A005) Or (Cnt>4) Or Not ((Int64(TFTypeSize(Typ))*Cnt<=4) Or (Typ=2)) Then TFSeek(TFGet32);
+ If Tag<=TFLastTag Then Begin TFErr:='tiff: etiquettes d''IFD dans le desordre.'; Exit; End;
+ If Tag<>$117 Then TFLastTag:=Tag;
+ Off:=TFGp; Value:=0; Value2:=1;
+ If Cnt=1 Then Begin
+  Case Typ Of
+   1,3,4: Value:=TFGetT(Typ);
+   5: Begin
+    Value:=TFGet32; Value2:=TFGet32;
+    If Value2=0 Then Value2:=1;
+   End;
+   2: ;
+   Else Value:=4294967295;
+  End;
+ End;
+ Case Tag Of
+  $FE: TFIsThumb:=Value<>0;
+  $100: TFW:=TFI32(Value);
+  $101: TFH:=TFI32(Value);
+  $102: Begin
+   If (Cnt>5) Or (Cnt=0) Then Begin TFErr:='tiff: format de pixels non pris en charge.'; Exit; End;
+   TFBppCount:=Cnt;
+   If Cnt=1 Then TFBpp:=TFI32(Value)
+   Else Begin
+    Case Typ Of
+     1,3,4: Begin
+      TFBpp:=0;
+      If Int64(TFSize-TFGp)<Int64(TFTypeSize(Typ))*Cnt Then Begin TFErr:='tiff: donnees invalides.'; Exit; End;
+      For I:=1 To Cnt Do TFBpp:=TFBpp+TFI32(TFGetT(Typ));
+     End;
+     Else TFBpp:=-1;
+    End;
+   End;
+  End;
+  $115: Begin
+   If Cnt<>1 Then Begin TFErr:='tiff: echantillons par pixel invalides.'; Exit; End;
+   If (Value>5) Or (Value=0) Then Begin TFErr:='tiff: echantillons par pixel invalides.'; Exit; End;
+   If TFBppCount=1 Then TFBpp:=TFBpp*Value;
+   TFBppCount:=Value;
+  End;
+  $103: Begin
+   TFCompr:=TFI32(Value); TFPred:=0;
+   Case TFCompr Of
+    1,2,3,4,5,6,7,8,$8005,$80B2,$886D: ;
+    Else Begin TFErr:='tiff: methode de compression inconnue.'; Exit; End;
+   End;
+  End;
+  $116: Begin
+   If (Value=0) Or ((Typ=4) And (Value=4294967295)) Then Value:=TFH;
+   If Value<TFH Then TFRps:=TFI32(Value) Else TFRps:=TFH;
+  End;
+  $111: Begin
+   If Cnt=1 Then Begin
+    If Value>2147483647 Then Begin TFErr:='tiff: position de bande trop grande.'; Exit; End;
+    TFStrippos:=0; TFStripoff:=Value;
+   End Else TFStrippos:=Off;
+   TFStrips:=TFI32(Cnt);
+   If TFStrips=TFBppCount Then TFRps:=TFH;
+   TFSot:=Typ;
+  End;
+  $117: Begin
+   If Cnt=1 Then Begin
+    If Value>2147483647 Then Begin TFErr:='tiff: taille de bande trop grande.'; Exit; End;
+    TFStripsizesoff:=0; TFStripsize:=Value; TFStrips:=1;
+   End Else TFStripsizesoff:=Off;
+   TFStrips:=TFI32(Cnt); TFSstype:=Typ;
+  End;
+  $11A,$11B: TFSetSar(Tag,Value,Value2);
+  $144: Begin TFIsTiled:=True; TFTileBits:=True; End;
+  $142,$143,$145: TFTileBits:=True;
+  $13D: TFPred:=TFI32(Value);
+  $14A: Begin
+   If Cnt=1 Then TFSubIfd:=Value Else If Cnt>1 Then TFSubIfd:=TFGetT(4);
+  End;
+  $123: If (Cnt<1) Or (Cnt>65536) Then Begin TFErr:='tiff: courbe de reponse invalide.'; Exit; End;
+  $828D: Begin
+   If Cnt<>2 Then Begin TFErr:='tiff: dimensions CFA non 2x2.'; Exit; End;
+   If (TFGetT(Typ)<>2) And (TFGetT(Typ)<>2) Then Begin TFErr:='tiff: dimensions CFA non 2x2.'; Exit; End;
+  End;
+  $828E: TFBayer:=True;
+  $C612,$C613,$C618,$C61A,$C61D,$C621,$C622,$C623,$C624,$C627,$C628,$C629: TFDng:=True;
+  $106: Begin
+   Case Value Of
+    0,1,2,3,5,6,32803,34892: TFPhoto:=Value;
+    4,8,9,10,32844,32845: Begin TFErr:='tiff: PhotometricInterpretation non pris en charge.'; Exit; End;
+    Else Begin TFErr:='tiff: PhotometricInterpretation inconnue.'; Exit; End;
+   End;
+  End;
+  $10A: Begin
+   If (Value<1) Or (Value>2) Then Value:=1;
+   TFFill:=Value-1;
+  End;
+  $140: Begin
+   Sz:=TFTypeSize(Typ); N:=Cnt Div 3;
+   If (N>256) Or (Int64(TFSize-TFGp)<N*Sz*3) Then Begin TFErr:='tiff: palette invalide.'; Exit; End;
+   Sh:=(Sz-1)*8;
+   If Sh>31 Then Begin TFErr:='tiff: decalage de palette hors limites.'; Exit; End;
+   P0:=TFGp; P1:=P0+N*Sz; P2:=P0+2*N*Sz;
+   For I:=0 To N-1 Do Begin
+    Rr:=TFGetAt(P0,Typ) Shr Sh; Gg:=TFGetAt(P1,Typ) Shr Sh; Bb:=TFGetAt(P2,Typ) Shr Sh;
+    P:=(Rr Shl 16) Or (Gg Shl 8) Or Bb;
+    TFPalR[I]:=(P Shr 16) And 255; TFPalG[I]:=(P Shr 8) And 255; TFPalB[I]:=P And 255; TFPalA[I]:=255;
+   End;
+   TFPalSet:=True;
+  End;
+  $11C: TFPlanarF:=Ord(Value=2);
+  $212: Begin
+   If Cnt<>2 Then Begin TFErr:='tiff: sous-echantillonnage invalide.'; Exit; End;
+   For I:=0 To 1 Do Begin
+    V:=TFGetT(Typ);
+    If I=0 Then TFSub0:=TFI32(V) Else TFSub1:=TFI32(V);
+    If TFI32(V)<=0 Then Begin
+     If I=0 Then TFSub0:=1 Else TFSub1:=1;
+     TFErr:='tiff: sous-echantillonnage invalide.'; Exit;
+    End;
+   End;
+  End;
+  $8773: If Int64(TFSize)-Off<Cnt Then Begin TFErr:='tiff: profil ICC invalide.'; Exit; End;
+  $87AF: Begin
+   If Typ=3 Then Begin
+    { GeoTIFF_Version (1 court), GeoTIFF_Key_Revision (2 courts) }
+    If TFSize-TFGp>=2 Then Begin TFGet16; End;
+    If TFSize-TFGp>=4 Then Begin TFGet16; TFGet16; End;
+    Gc:=TFGet16;
+    If Gc>(Cnt Div 4)-1 Then Gc:=(Cnt Div 4)-1;
+    If (Int64(TFSize-TFGp)<Int64(Gc)*8) Or (Gc=0) Then Begin TFErr:='tiff: repertoire GeoTIFF invalide.'; Exit; End;
+    TFGeoCount:=Gc;
+   End;
+  End;
+  $87B0: Begin
+   If (Cnt>=268435455) Or (Int64(TFSize-TFGp)<Cnt*8) Then Begin TFErr:='tiff: parametres GeoTIFF invalides.'; Exit; End;
+  End;
+ End;
+ If (TFBpp>128) Or (TFBpp<0) Then Begin
+  TFBpp:=0; TFErr:='tiff: format de pixels non pris en charge.'; Exit;
+ End;
+ TFSeek(Start);
+End;
+
+Const
+ TFPixMono=0; TFPixPal=1; TFPixGray8=2; TFPixRgb24=3; TFPixYuv=4; TFPixGray16=5; TFPixYa8=6; TFPixYa16=7; TFPixRgba=8; TFPixRgb0=9;
+ TFPixRgb48=10; TFPixRgba64=11; TFPixGbrp=12; TFPixGbrap=13; TFPixGbrp16=14; TFPixGbrap16=15; TFPixOther=16;
+Var
+ TFPix,TFWidth,TFStride: LongInt;
+ TFPl: Array[0..3] Of PEABuffer; TFPlStr: Array[0..3] Of LongInt; TFPlSize: Array[0..3] Of LongInt;
+ TFYuvLine: PEABuffer; TFYuvLen: LongInt; TFUrev: Boolean;
+
+Function TFRevB(B: LongInt): LongInt;
+Begin TFRevB:=(TFRev[B And 15] Shl 4) Or TFRev[B Shr 4]; End;
+
+{ unpack_yuv : une ligne MCU du tampon yuv_line vers les plans }
+Procedure TFUnpackYuv(Src: PEABuffer; Lnum: LongInt);
+Var I,J,K,W2,Pu,Pv,Sp,Yy,Xx: LongInt;
+Begin
+ W2:=(TFW-1) Div TFSub0+1;
+ Pu:=(Lnum Div TFSub1)*TFPlStr[1]; Pv:=(Lnum Div TFSub1)*TFPlStr[2]; Sp:=0;
+ If ((TFW Mod TFSub0)<>0) Or ((TFH Mod TFSub1)<>0) Then Begin
+  For I:=0 To W2-1 Do Begin
+   For J:=0 To TFSub1-1 Do For K:=0 To TFSub0-1 Do Begin
+    Yy:=Lnum+J; If Yy>TFH-1 Then Yy:=TFH-1;
+    Xx:=I*TFSub0+K; If Xx>TFW-1 Then Xx:=TFW-1;
+    TFPl[0]^[Yy*TFPlStr[0]+Xx]:=Src^[Sp]; Inc(Sp);
+   End;
+   TFPl[1]^[Pu]:=Src^[Sp]; Inc(Sp); Inc(Pu);
+   TFPl[2]^[Pv]:=Src^[Sp]; Inc(Sp); Inc(Pv);
+  End;
+ End Else Begin
+  For I:=0 To W2-1 Do Begin
+   For J:=0 To TFSub1-1 Do For K:=0 To TFSub0-1 Do Begin
+    TFPl[0]^[(Lnum+J)*TFPlStr[0]+I*TFSub0+K]:=Src^[Sp]; Inc(Sp);
+   End;
+   TFPl[1]^[Pu]:=Src^[Sp]; Inc(Sp); Inc(Pu);
+   TFPl[2]^[Pv]:=Src^[Sp]; Inc(Sp); Inc(Pv);
+  End;
+ End;
+End;
+
+{ tiff_unpack_strip : retourne 0 ou une valeur negative }
+Function TFUnpackStrip(Plane,DstOfs,Stride,SrcOfs,Size,StripStart,Lines: LongInt): LongInt;
+Var
+ Src,Dst,Base,Dsave: PEABuffer; Sp: LongInt; Tmp: PEABuffer; Line,Pixels,Code,C,I,Res,GotLen,Cap: LongInt; IsYuv,IsPal: Boolean; Yst: LongInt;
+ DstO: LongInt;
+Begin
+ TFUnpackStrip:=0;
+ IsYuv:=TFPix=TFPixYuv; IsPal:=TFPix=TFPixPal;
+ If Size<=0 Then Begin TFUnpackStrip:=-1; Exit; End;
+ Src:=PEABuffer(@TFF^[SrcOfs]);
+ Base:=TFPl[Plane]; DstO:=DstOfs; Yst:=Stride;
+ If IsYuv Then Begin Base:=TFYuvLine; DstO:=0; Yst:=0; End;
+ If (TFCompr=8) Or (TFCompr=$80B2) Then Begin
+  Cap:=TFWidth*Lines;
+  GetMem(Tmp,Cap+64); FillChar(Tmp^,Cap+64,0);
+  If TFFill<>0 Then Begin
+   GetMem(Dsave,Size+64); For I:=0 To Size-1 Do Dsave^[I]:=TFRevB(Src^[I]); Src:=Dsave;
+  End Else Dsave:=Nil;
+  Res:=NVInflate(Src,Size,Tmp,Cap,GotLen);
+  If Dsave<>Nil Then FreeMem(Dsave);
+  If Res<>0 Then Begin FreeMem(Tmp); TFUnpackStrip:=-1; Exit; End;
+  Line:=0; Src:=Tmp;
+  While Line<Lines Do Begin
+   Dst:=PEABuffer(@Base^[DstO]);
+   If (TFBpp<8) And IsPal Then TFHFill(TFBpp,Dst,True,Src,0,TFWidth,0) Else Move(Src^[0],Dst^[0],TFWidth);
+   If IsYuv Then Begin TFUnpackYuv(TFYuvLine,StripStart+Line); Inc(Line,TFSub1-1); End;
+   Inc(DstO,Yst); Src:=PEABuffer(@Src^[TFWidth]); Inc(Line);
+  End;
+  FreeMem(Tmp);
+  Exit;
+ End;
+ If TFCompr=5 Then Begin
+  If TFFill<>0 Then Begin
+   GetMem(Dsave,Size+64); For I:=0 To Size-1 Do Dsave^[I]:=TFRevB(Src^[I]); Src:=Dsave;
+  End Else Dsave:=Nil;
+  TFLzInit(Src,Size);
+  Line:=0; Res:=0;
+  While Line<Lines Do Begin
+   Dst:=PEABuffer(@Base^[DstO]);
+   Pixels:=TFLzDecode(Dst,TFWidth);
+   If Pixels<TFWidth Then Begin Res:=-1; Break; End;
+   If (TFBpp<8) And IsPal Then TFHFill(TFBpp,Dst,True,Dst,0,TFWidth,0);
+   If IsYuv Then Begin TFUnpackYuv(TFYuvLine,StripStart+Line); Inc(Line,TFSub1-1); End;
+   Inc(DstO,Yst); Inc(Line);
+  End;
+  If Dsave<>Nil Then FreeMem(Dsave);
+  TFUnpackStrip:=Res;
+  Exit;
+ End;
+ { brut et PackBits }
+ Line:=0; Res:=0; Dsave:=Nil; Sp:=0;
+ While Line<Lines Do Begin
+  Dst:=PEABuffer(@Base^[DstO]);
+  If TFCompr=1 Then Begin
+   If Size-Sp<TFWidth Then Begin Res:=-1; Break; End;
+   If TFFill=0 Then Begin
+    If IsPal Then TFHFill(TFBpp,Dst,True,PEABuffer(@Src^[Sp]),0,TFWidth,0) Else Move(Src^[Sp],Dst^[0],TFWidth);
+   End Else For I:=0 To TFWidth-1 Do Dst^[I]:=TFRevB(Src^[Sp+I]);
+   Inc(Sp,TFWidth);
+  End Else If TFCompr=$8005 Then Begin
+   Pixels:=0;
+   While Pixels<TFWidth Do Begin
+    If Size-Sp<2 Then Begin Res:=-1; Break; End;
+    If TFFill<>0 Then Code:=TFRevB(Src^[Sp]) Else Code:=Src^[Sp];
+    If Code>=128 Then Code:=Code-256;
+    Inc(Sp);
+    If Code>=0 Then Begin
+     Inc(Code);
+     If (Pixels+Code>TFWidth) Or (Size-Sp<Code) Then Begin Res:=-1; Break; End;
+     If IsPal Then TFHFill(TFBpp,Dst,True,PEABuffer(@Src^[Sp]),0,Code,Pixels) Else Move(Src^[Sp],Dst^[Pixels],Code);
+     Inc(Sp,Code); Inc(Pixels,Code);
+    End Else If Code<>-128 Then Begin
+     Code:=(-Code)+1;
+     If Pixels+Code>TFWidth Then Begin Res:=-1; Break; End;
+     C:=Src^[Sp]; Inc(Sp);
+     If IsPal Then TFHFill(TFBpp,Dst,False,Nil,C,Code,Pixels) Else FillChar(Dst^[Pixels],Code,C);
+     Inc(Pixels,Code);
+    End;
+   End;
+   If Res<>0 Then Break;
+   If TFFill<>0 Then For I:=0 To TFWidth-1 Do Dst^[I]:=TFRevB(Dst^[I]);
+  End;
+  If IsYuv Then Begin TFUnpackYuv(TFYuvLine,StripStart+Line); Inc(Line,TFSub1-1); End;
+  Inc(DstO,Yst); Inc(Line);
+ End;
+ TFUnpackStrip:=Res;
+End;
+
+{ TIFF 16 bits vers YUV420P 8 bits (swscale : input.c rgb48ToY / rgb48ToUV_half / gray16ToY, hScale16To15, yuv2plane1/X) }
+{ Retourne un tampon Fmt 7 (Y, U, V). Pix : 5 gray16, 7 ya16, 10 rgb48, 11 rgba64 }
+Function TFWide420(Pix: LongInt): PEABuffer;
+Const
+ TFDith: Array[0..7,0..7] Of Byte=((36,68,60,92,34,66,58,90),(100,4,124,28,98,2,122,26),(52,84,44,76,50,82,42,74),(116,20,108,12,114,18,106,10),(32,64,56,88,38,70,62,94),(96,0,120,24,102,6,126,30),(48,80,40,72,54,86,46,78),(112,16,104,8,118,22,110,14));
+ RY=8414; GY=16519; BY=3208; RU=-4865; GU=-9528; BU=14392; RV=14392; GV=-12061; BV=-2332;
+Var
+ Res: PEABuffer; CW,CH,X,Y,I,J,FS,Bp,Nc,Ix: LongInt; U15,V15: PSwsI32; VF: TSwsF; Rr,Gg,Bb,R2,G2,B2,V16: Int64; Val: Int64; Row: PEABuffer;
+Function Smp(Yy,Xx,C: LongInt): Int64;
+Var At: LongInt;
+Begin
+ If Xx>=TFW Then Begin Smp:=0; Exit; End;
+ At:=Yy*TFPlStr[0]+(Xx*Nc+C)*2;
+ If TFLe Then Smp:=TFPl[0]^[At]+TFPl[0]^[At+1]*256 Else Smp:=TFPl[0]^[At]*256+TFPl[0]^[At+1];
+End;
+Function Sar(V: Int64; N: LongInt): Int64;
+Begin If V>=0 Then Sar:=V Shr N Else Sar:=-((-V+(Int64(1) Shl N)-1) Shr N); End;
+Begin
+ CW:=(TFW+1) Div 2; CH:=(TFH+1) Div 2;
+ Case Pix Of 5: Nc:=1; 7: Nc:=2; 10: Nc:=3; Else Nc:=4; End;
+ GetMem(Res,TFW*TFH+2*CW*CH+64);
+ If Pix<=7 Then Begin
+  { gris : Y15 = V16/2 puis conversion de plage pleine vers limitee (lumRangeFromJpeg) }
+  For Y:=0 To TFH-1 Do For X:=0 To TFW-1 Do Begin
+   V16:=Smp(Y,X,0); Val:=V16 Shr 1; If Val>32767 Then Val:=32767;
+   Val:=(Val*14071+33561947) Shr 14;
+   Val:=(Val+TFDith[Y And 7,X And 7]) Shr 7; If Val>255 Then Val:=255;
+   Res^[Y*TFW+X]:=Val;
+  End;
+  FillChar(Res^[TFW*TFH],2*CW*CH,128);
+  TFWide420:=Res; Exit;
+ End;
+ For Y:=0 To TFH-1 Do For X:=0 To TFW-1 Do Begin
+  Rr:=Smp(Y,X,0); Gg:=Smp(Y,X,1); Bb:=Smp(Y,X,2);
+  Val:=(RY*Rr+GY*Gg+BY*Bb+(Int64($2001) Shl 14)) Shr 15;
+  Val:=Val Shr 1; If Val>32767 Then Val:=32767;
+  Val:=(Val+TFDith[Y And 7,X And 7]) Shr 7; If Val>255 Then Val:=255;
+  Res^[Y*TFW+X]:=Val;
+ End;
+ GetMem(U15,Int64(TFH)*CW*4+64); GetMem(V15,Int64(TFH)*CW*4+64);
+ For Y:=0 To TFH-1 Do For X:=0 To CW-1 Do Begin
+  Rr:=(Smp(Y,2*X,0)+Smp(Y,2*X+1,0)+1) Shr 1; Gg:=(Smp(Y,2*X,1)+Smp(Y,2*X+1,1)+1) Shr 1; Bb:=(Smp(Y,2*X,2)+Smp(Y,2*X+1,2)+1) Shr 1;
+  Val:=Sar(RU*Rr+GU*Gg+BU*Bb+(Int64($10001) Shl 14),15); Val:=Val Shr 1; If Val>32767 Then Val:=32767; U15^[Y*CW+X]:=Val;
+  Val:=Sar(RV*Rr+GV*Gg+BV*Bb+(Int64($10001) Shl 14),15); Val:=Val Shr 1; If Val>32767 Then Val:=32767; V15^[Y*CW+X]:=Val;
+ End;
+ SwsInitF(VF,TFH,CH,128,128,4096); FS:=VF.FS;
+ For I:=0 To 1 Do
+  For Y:=0 To CH-1 Do For X:=0 To CW-1 Do Begin
+   Val:=Int64(TFDith[Y And 7,(X+3*I) And 7]) Shl 12;
+   For J:=0 To FS-1 Do Begin
+    Bp:=(VF.Pos^[Y]+J)*CW+X;
+    If I=0 Then Val:=Val+Int64(U15^[Bp])*VF.Coef^[Y*FS+J] Else Val:=Val+Int64(V15^[Bp])*VF.Coef^[Y*FS+J];
+   End;
+   Val:=Sar(Val,19); If Val<0 Then Val:=0 Else If Val>255 Then Val:=255;
+   Res^[TFW*TFH+I*CW*CH+Y*CW+X]:=Val;
+  End;
+ SwsFreeF(VF); FreeMem(U15); FreeMem(V15);
+ TFWide420:=Res;
+End;
+
+Procedure TFFail(Const Msg: String);
+Begin Fail('tiff: '+Msg); End;
+
+Procedure DecodeTIFF(Const Source,Target: String; Mode: LongInt);
+Var
+ Off,LastOff,Soff,Ssize: Int64; Entries,I,J,K,Plane,Planes,Remaining,DecodedH,SizeCur,OffCur,Soffc,Fmt,Q,RowB,Sofs,SSz,Cn: LongInt;
+ Again,RetrySub,CreateGray,YuvOk,FiveP: Boolean; Img,Five: PEABuffer; CW,CH,Bps,WH: LongInt; Dst: PEABuffer; DstO,FiveStr: LongInt;
+ R,G,B,Kk: LongInt; PlaneRows: LongInt;
+Begin
+ NVLoad(Source,TFF,TFSize); TFGp:=0;
+ { tiff_init : etat persistant }
+ TFW:=0; TFH:=0; TFSub0:=1; TFSub1:=1; TFRps:=0; TFStrips:=0; TFSot:=0; TFSstype:=0; TFStripsizesoff:=0; TFStripsize:=0; TFStripoff:=0; TFStrippos:=0;
+ TFPlanarF:=0; TFPred:=0; TFPalSet:=False; FillChar(TFPalR,256,0); FillChar(TFPalG,256,0); FillChar(TFPalB,256,0); FillChar(TFPalA,256,0);
+ FillChar(TFRes,SizeOf(TFRes),0); TFSarN:=0; TFSarD:=1; TFSubIfd:=0; TFTileBits:=False; TFGeoCount:=0;
+ TFDng:=False; TFBayer:=False; TFErr:=''; TFYuvLine:=Nil; TFYuvLen:=0;
+ For I:=0 To 3 Do Begin TFPl[I]:=Nil; TFPlSize[I]:=0; End;
+ { en-tete }
+ If TFSize<8 Then TFFail('en-tete invalide.');
+ If (TFF^[0]=73) And (TFF^[1]=73) Then TFLe:=True Else If (TFF^[0]=77) And (TFF^[1]=77) Then TFLe:=False Else TFFail('en-tete invalide.');
+ TFGp:=2;
+ If TFGet16<>42 Then TFFail('en-tete invalide.');
+ Off:=TFGet32;
+ If (Off>=4294967295-14) Or (TFSize<Off+14) Then TFFail('le decalage de l''IFD depasse la taille de l''image.');
+ LastOff:=0;
+ Repeat
+  Again:=False;
+  TFIsThumb:=False; TFBppCount:=1; TFBpp:=1; TFPhoto:=-1; TFCompr:=1; TFFill:=0; TFBayer:=False; TFIsTiled:=False; TFLastTag:=0;
+  TFStripsizesoff:=0; TFStrippos:=0;
+  TFSeek(Off);
+  Entries:=TFGet16;
+  If TFSize-TFGp<Entries*12 Then TFFail('IFD tronque.');
+  For I:=1 To Entries Do Begin
+   TFDecodeTag;
+   If TFErr<>'' Then TFFail(Copy(TFErr,7,200));
+  End;
+  RetrySub:=(TFSubIfd<>0) And TFIsThumb;
+  If RetrySub Then Begin
+   Off:=TFSubIfd;
+   If Off=0 Then TFFail('entree demandee introuvable.');
+   If Off<=LastOff Then TFFail('decalage d''IFD non croissant.');
+   LastOff:=Off;
+   If (Off>=4294967295-14) Or (TFSize<Off+14) Then TFFail('le decalage de l''IFD depasse la taille de l''image.');
+   TFSubIfd:=0; Again:=True;
+  End;
+ Until Not Again;
+ If TFDng Or TFBayer Or (TFPhoto=32803) Or (TFPhoto=34892) Then TFFail('DNG non pris en charge.');
+ If (Not TFIsTiled) And (TFStrippos=0) And (TFStripoff=0) Then TFFail('donnees d''image absentes.');
+ If (TFIsTiled Or TFTileBits) And ((TFStrippos<>0) Or (TFStrips<>0) Or (TFStripoff<>0) Or (TFRps<>0) Or (TFSot<>0) Or (TFSstype<>0) Or (TFStripsize<>0) Or (TFStripsizesoff<>0)) Then
+  TFFail('TIFF a tuiles avec bandes non autorise.');
+ If TFIsTiled Or TFTileBits Then TFFail('TIFF a tuiles non pris en charge.');
+ { init_image }
+ If (TFBpp>128) Or (TFBppCount>=10) Then TFFail('parametres d''image non pris en charge.');
+ CreateGray:=False; TFPix:=TFPixOther;
+ Case TFPlanarF*10000+TFBpp*10+TFBppCount Of
+  11: If TFPalSet Then TFPix:=TFPixPal Else TFPix:=TFPixMono;
+  21,41: Begin TFPix:=TFPixPal; CreateGray:=Not TFPalSet; End;
+  81: If TFPalSet Then TFPix:=TFPixPal Else TFPix:=TFPixGray8;
+  243: Begin
+   If TFPhoto=6 Then Begin
+    If (TFSub0=1) And (TFSub1=1) Then TFPix:=TFPixYuv
+    Else If (TFSub0=2) And (TFSub1=1) Then TFPix:=TFPixYuv
+    Else If (TFSub0=4) And (TFSub1=1) Then TFPix:=TFPixYuv
+    Else If (TFSub0=1) And (TFSub1=2) Then TFPix:=TFPixYuv
+    Else If (TFSub0=2) And (TFSub1=2) Then TFPix:=TFPixYuv
+    Else If (TFSub0=4) And (TFSub1=4) Then TFPix:=TFPixYuv
+    Else TFFail('sous-echantillonnage YCbCr non pris en charge.');
+   End Else TFPix:=TFPixRgb24;
+  End;
+  161: TFPix:=TFPixGray16;
+  162: TFPix:=TFPixYa8;
+  322: TFPix:=TFPixYa16;
+  324: If TFPhoto=5 Then TFPix:=TFPixRgb0 Else TFPix:=TFPixRgba;
+  405: If TFPhoto=5 Then TFPix:=TFPixRgba Else TFFail('bpp=40 sans PHOTOMETRIC_SEPARATED non pris en charge.');
+  483: TFPix:=TFPixRgb48;
+  644: TFPix:=TFPixRgba64;
+  10243: TFPix:=TFPixGbrp;
+  10324: TFPix:=TFPixGbrap;
+  10483: TFPix:=TFPixGbrp16;
+  10644: TFPix:=TFPixGbrap16;
+  121,963,1284,10963,11284: TFFail('format de pixels non pris en charge par cette version (gray12 / virgule flottante).');
+  Else TFFail('format de pixels non pris en charge.');
+ End;
+ If (TFPhoto=6) And (TFPix<>TFPixYuv) Then TFFail('variante YCbCr non prise en charge.');
+ If (TFW<=0) Or (TFH<=0) Or (TFW>16000) Or (TFH>16000) Then TFFail('dimensions invalides.');
+ If (TFCompr=2) Or (TFCompr=3) Or (TFCompr=4) Then TFFail('compression CCITT non prise en charge.');
+ If (TFCompr=6) Or (TFCompr=7) Or (TFCompr=$886D) Then TFFail('compression JPEG / LZMA non prise en charge.');
+ If (TFPix=TFPixGray16) Or (TFPix=TFPixYa16) Or (TFPix=TFPixRgb48) Or (TFPix=TFPixRgba64) Or (TFPix=TFPixGbrp16) Or (TFPix=TFPixGbrap16) Then
+  If (Mode<>1) And ((TFPix=TFPixGbrp16) Or (TFPix=TFPixGbrap16)) Then TFFail('ce format de pixels 16 bits planaire n''est pris en charge que vers PNG.');
+ { mise en place des bandes }
+ If (TFStrips=1) And (TFStripsize=0) Then TFStripsize:=TFSize-TFStripoff;
+ If TFStripsizesoff<>0 Then If TFStripsizesoff>=TFSize Then TFFail('decalage des tailles de bandes invalide.');
+ If TFStrippos<>0 Then If TFStrippos>=TFSize Then TFFail('decalage des bandes invalide.');
+ If (TFRps<=0) Or ((TFRps Mod TFSub1)<>0) Then TFFail('rps invalide.');
+ { tampons }
+ Planes:=1; If TFPlanarF<>0 Then Planes:=TFBppCount;
+ FiveP:=(TFPhoto=5) And (TFPix=TFPixRgba);
+ If TFPix=TFPixYuv Then Begin
+  CW:=(TFW+TFSub0-1) Div TFSub0; CH:=(TFH+TFSub1-1) Div TFSub1;
+  TFPlStr[0]:=TFW; TFPlStr[1]:=CW; TFPlStr[2]:=CW;
+  TFPlSize[0]:=TFW*TFH+64; TFPlSize[1]:=CW*CH+64; TFPlSize[2]:=CW*CH+64;
+  For I:=0 To 2 Do Begin GetMem(TFPl[I],TFPlSize[I]); FillChar(TFPl[I]^,TFPlSize[I],0); End;
+  TFYuvLen:=(((TFW-1) Div TFSub0+1)*TFBpp*TFSub0*TFSub1+7) Shr 3;
+  GetMem(TFYuvLine,TFYuvLen+64); FillChar(TFYuvLine^,TFYuvLen+64,0);
+  TFWidth:=(TFW-1) Div TFSub0+1; TFWidth:=TFWidth*TFSub0*TFSub1+2*TFWidth;
+ End Else Begin
+  TFWidth:=(TFW*TFBpp+7) Shr 3;
+  If TFPlanarF<>0 Then TFWidth:=TFWidth Div TFBppCount;
+  TFStride:=TFWidth;
+  If (TFPix=TFPixPal) And (TFBpp<8) Then TFStride:=TFWidth*(8 Div TFBpp)+16;
+  TFStride:=TFStride+64;
+  For I:=0 To Planes-1 Do Begin
+   TFPlStr[I]:=TFStride; TFPlSize[I]:=TFStride*TFH+64;
+   GetMem(TFPl[I],TFPlSize[I]); FillChar(TFPl[I]^,TFPlSize[I],0);
+  End;
+ End;
+ { lecture des bandes }
+ SizeCur:=TFStripsizesoff; OffCur:=TFStrippos; DecodedH:=0;
+ For Plane:=0 To Planes-1 Do Begin
+  Remaining:=TFSize; DstO:=0; I:=0;
+  While I<TFH Do Begin
+   If I<>0 Then Inc(DstO,TFRps*TFPlStr[Plane]);
+   If TFStripsizesoff<>0 Then Ssize:=TFGetAt(SizeCur,TFSstype) Else Ssize:=TFStripsize;
+   If TFStrippos<>0 Then Soff:=TFGetAt(OffCur,TFSot) Else Soff:=TFStripoff;
+   If (Soff>TFSize) Or (Ssize>TFSize-Soff) Or (Ssize>Remaining) Then TFFail('taille ou decalage de bande invalide.');
+   Dec(Remaining,Ssize);
+   Q:=TFRps; If TFH-I<Q Then Q:=TFH-I;
+   If TFUnpackStrip(Plane,DstO,TFPlStr[Plane],Soff,Ssize,I,Q)<0 Then Break;
+   Inc(I,TFRps);
+  End;
+  DecodedH:=I; If DecodedH>TFH Then DecodedH:=TFH;
+  { predicteur horizontal }
+  If TFPred=2 Then Begin
+   If TFPhoto=6 Then TFFail('predicteur 2 avec YUV non pris en charge.');
+   Sofs:=TFBpp Shr 3;
+   If TFPlanarF<>0 Then Begin Sofs:=Sofs Div TFBppCount; If Sofs<1 Then Sofs:=1; End;
+   SSz:=TFW*Sofs;
+   For K:=0 To DecodedH-1 Do Begin
+    Dst:=PEABuffer(@TFPl[Plane]^[K*TFPlStr[Plane]]);
+    If (TFPix=TFPixGray16) Or (TFPix=TFPixYa16) Or (TFPix=TFPixRgb48) Or (TFPix=TFPixRgba64) Or (TFPix=TFPixGbrp16) Or (TFPix=TFPixGbrap16) Then Begin
+     J:=Sofs;
+     While J<SSz Do Begin
+      If TFLe Then Q:=(Dst^[J]+Dst^[J+1]*256+Dst^[J-Sofs]+Dst^[J-Sofs+1]*256) And $FFFF
+      Else Q:=(Dst^[J]*256+Dst^[J+1]+Dst^[J-Sofs]*256+Dst^[J-Sofs+1]) And $FFFF;
+      If TFLe Then Begin Dst^[J]:=Q And 255; Dst^[J+1]:=Q Shr 8; End Else Begin Dst^[J]:=Q Shr 8; Dst^[J+1]:=Q And 255; End;
+      Inc(J,2);
+     End;
+    End Else
+    For J:=Sofs To SSz-1 Do Dst^[J]:=(Dst^[J]+Dst^[J-Sofs]) And 255;
+   End;
+  End Else If TFPred=3 Then TFFail('predicteur virgule flottante non pris en charge.')
+  Else If TFPred>3 Then Begin End;
+  If TFPhoto=0 Then Begin
+   If TFPix=TFPixPal Then Cn:=(1 Shl TFBpp)-1 Else Cn:=255;
+   For K:=0 To TFH-1 Do Begin
+    Dst:=PEABuffer(@TFPl[Plane]^[K*TFPlStr[Plane]]);
+    For J:=0 To TFPlStr[Plane]-1 Do Dst^[J]:=(Cn-Dst^[J]) And 255;
+   End;
+  End;
+ End;
+ { sortie }
+ NVBegin(Mode,Target,TFW,TFH,0,25,1);
+ If (TFSarN>0) And (TFSarD>0) Then Begin NVSarN:=TFSarN; NVSarD:=TFSarD; End;
+ NVGamma22:=TFPhoto=1;
+ Case TFPix Of
+  TFPixMono: Begin
+   NVFmt:=10; GetMem(Img,TFW*TFH+64);
+   For K:=0 To TFH-1 Do For J:=0 To TFW-1 Do
+    If (TFPl[0]^[K*TFPlStr[0]+(J Shr 3)] And ($80 Shr (J And 7)))<>0 Then Img^[K*TFW+J]:=255 Else Img^[K*TFW+J]:=0;
+  End;
+  TFPixPal: Begin
+   NVFmt:=0; GetMem(Img,TFW*TFH+64);
+   For K:=0 To TFH-1 Do Move(TFPl[0]^[K*TFPlStr[0]],Img^[K*TFW],TFW);
+   FillChar(NVPalR,256,0); FillChar(NVPalG,256,0); FillChar(NVPalB,256,0);
+   NVPalAOn:=True; FillChar(NVPalA,256,0);
+   If CreateGray Then Begin
+    For I:=0 To (1 Shl TFBpp)-1 Do Begin
+     Q:=I*255 Div ((1 Shl TFBpp)-1);
+     NVPalR[I]:=Q; NVPalG[I]:=Q; NVPalB[I]:=Q; NVPalA[I]:=255;
+    End;
+   End Else Begin
+    Move(TFPalR,NVPalR,256); Move(TFPalG,NVPalG,256); Move(TFPalB,NVPalB,256); Move(TFPalA,NVPalA,256);
+   End;
+  End;
+  TFPixGray8: Begin
+   NVFmt:=4; GetMem(Img,TFW*TFH+64);
+   For K:=0 To TFH-1 Do Move(TFPl[0]^[K*TFPlStr[0]],Img^[K*TFW],TFW);
+  End;
+  TFPixRgb24: Begin
+   NVFmt:=9; GetMem(Img,TFW*TFH*3+64);
+   For K:=0 To TFH-1 Do Move(TFPl[0]^[K*TFPlStr[0]],Img^[K*TFW*3],TFW*3);
+  End;
+  TFPixYuv: Begin
+   NVFmt:=7; NVSubX:=0; NVSubY:=0;
+   Case TFSub0 Of 2: NVSubX:=1; 4: NVSubX:=2; End;
+   Case TFSub1 Of 2: NVSubY:=1; 4: NVSubY:=2; End;
+   NVCW:=CW; NVCH:=CH;
+   If (TFSub0=2) And (TFSub1=2) Then NVYTag:='C420jpeg XYSCSS=420JPEG'
+   Else If (TFSub0=2) And (TFSub1=1) Then NVYTag:='C422 XYSCSS=422'
+   Else If (TFSub0=1) And (TFSub1=1) Then NVYTag:='C444 XYSCSS=444'
+   Else If (TFSub0=4) And (TFSub1=1) Then NVYTag:='C411 XYSCSS=411'
+   Else If (TFSub0=1) And (TFSub1=2) Then NVYTag:='C440 XYSCSS=440'
+   Else NVYTag:='C410';
+   If Not ((TFSub0=2) And (TFSub1=2)) Then
+    If (OptPixFmt='yuv420p') Or ((TFSub0=1) And (TFSub1=2)) Or ((TFSub0=4) And (TFSub1=4)) Then Begin
+     NVTo420:=True; NVYTag:='C420jpeg XYSCSS=420JPEG XCOLORRANGE=LIMITED';
+    End;
+   NVHdrOk:=True;
+   GetMem(Img,TFW*TFH+2*CW*CH+64);
+   For K:=0 To TFH-1 Do Move(TFPl[0]^[K*TFPlStr[0]],Img^[K*TFW],TFW);
+   For I:=1 To 2 Do For K:=0 To CH-1 Do Move(TFPl[I]^[K*TFPlStr[I]],Img^[TFW*TFH+(I-1)*CW*CH+K*CW],CW);
+  End;
+  TFPixRgba,TFPixRgb0: Begin
+   NVFmt:=3; GetMem(Img,TFW*TFH*4+64);
+   If TFPix=TFPixRgba Then NVHasAlpha:=True;
+   If FiveP Then Begin
+    { SEPARATED + alpha : 5 echantillons par pixel }
+    For K:=0 To TFH-1 Do For J:=0 To TFW-1 Do Begin
+     Dst:=PEABuffer(@TFPl[0]^[K*TFPlStr[0]+5*J]);
+     Kk:=255-Dst^[3];
+     R:=((255-Dst^[0])*Kk)*257 Shr 16; G:=((255-Dst^[1])*Kk)*257 Shr 16; B:=((255-Dst^[2])*Kk)*257 Shr 16;
+     Img^[(K*TFW+J)*4]:=B; Img^[(K*TFW+J)*4+1]:=G; Img^[(K*TFW+J)*4+2]:=R; Img^[(K*TFW+J)*4+3]:=Dst^[4];
+    End;
+   End Else If TFPhoto=5 Then Begin
+    For K:=0 To TFH-1 Do For J:=0 To TFW-1 Do Begin
+     Dst:=PEABuffer(@TFPl[0]^[K*TFPlStr[0]+4*J]);
+     Kk:=255-Dst^[3];
+     R:=((255-Dst^[0])*Kk)*257 Shr 16; G:=((255-Dst^[1])*Kk)*257 Shr 16; B:=((255-Dst^[2])*Kk)*257 Shr 16;
+     Img^[(K*TFW+J)*4]:=B; Img^[(K*TFW+J)*4+1]:=G; Img^[(K*TFW+J)*4+2]:=R; Img^[(K*TFW+J)*4+3]:=255;
+    End;
+   End Else
+    For K:=0 To TFH-1 Do For J:=0 To TFW-1 Do Begin
+     Dst:=PEABuffer(@TFPl[0]^[K*TFPlStr[0]+4*J]);
+     Img^[(K*TFW+J)*4]:=Dst^[2]; Img^[(K*TFW+J)*4+1]:=Dst^[1]; Img^[(K*TFW+J)*4+2]:=Dst^[0]; Img^[(K*TFW+J)*4+3]:=Dst^[3];
+    End;
+  End;
+  TFPixGbrp: Begin
+   NVFmt:=9; GetMem(Img,TFW*TFH*3+64);
+   For K:=0 To TFH-1 Do For J:=0 To TFW-1 Do For I:=0 To 2 Do Img^[(K*TFW+J)*3+I]:=TFPl[I]^[K*TFPlStr[I]+J];
+  End;
+  TFPixGbrap: Begin
+   NVFmt:=3; NVHasAlpha:=True; GetMem(Img,TFW*TFH*4+64);
+   For K:=0 To TFH-1 Do For J:=0 To TFW-1 Do Begin
+    Img^[(K*TFW+J)*4]:=TFPl[2]^[K*TFPlStr[2]+J]; Img^[(K*TFW+J)*4+1]:=TFPl[1]^[K*TFPlStr[1]+J]; Img^[(K*TFW+J)*4+2]:=TFPl[0]^[K*TFPlStr[0]+J];
+    Img^[(K*TFW+J)*4+3]:=TFPl[3]^[K*TFPlStr[3]+J];
+   End;
+  End;
+  TFPixYa8: Begin
+   NVFmt:=11; GetMem(Img,TFW*TFH*2+64);
+   For K:=0 To TFH-1 Do Move(TFPl[0]^[K*TFPlStr[0]],Img^[K*TFW*2],TFW*2);
+   If Mode<>1 Then Begin
+    { vers Y4M : l'alpha est ignore, conversion comme gray8 }
+    NVFmt:=4;
+    For K:=0 To TFW*TFH-1 Do Img^[K]:=Img^[K*2];
+   End;
+  End;
+  TFPixGray16,TFPixYa16,TFPixRgb48,TFPixRgba64: Begin
+   If Mode<>1 Then Begin
+    NVFmt:=7; NVSubX:=1; NVSubY:=1; NVCW:=(TFW+1) Div 2; NVCH:=(TFH+1) Div 2; NVHdrOk:=True;
+    NVYTag:='C420jpeg XYSCSS=420JPEG XCOLORRANGE=LIMITED';
+    Img:=TFWide420(TFPix);
+   End Else Img:=Nil;
+  End;
+  Else Img:=Nil;
+ End;
+ If ((TFPix=TFPixGray16) Or (TFPix=TFPixYa16) Or (TFPix=TFPixRgb48) Or (TFPix=TFPixRgba64) Or (TFPix=TFPixGbrp16) Or (TFPix=TFPixGbrap16)) And (Mode=1) Then Begin
+  { 16 bits : PNG grand-boutiste }
+  Case TFPix Of
+   TFPixGray16: Begin Fmt:=2; Cn:=0; End;
+   TFPixYa16: Begin Fmt:=4; Cn:=4; End;
+   TFPixRgb48,TFPixGbrp16: Begin Fmt:=6; Cn:=2; End;
+   Else Begin Fmt:=8; Cn:=6; End;
+  End;
+  GetMem(Five,TFW*TFH*Fmt+64);
+  For K:=0 To TFH-1 Do For J:=0 To TFW-1 Do
+   For I:=0 To Fmt Div 2-1 Do Begin
+    If (TFPix=TFPixGbrp16) Or (TFPix=TFPixGbrap16) Then Begin
+     R:=TFPl[I]^[K*TFPlStr[I]+J*2]; G:=TFPl[I]^[K*TFPlStr[I]+J*2+1];
+    End Else Begin
+     R:=TFPl[0]^[K*TFPlStr[0]+(J*(Fmt Div 2)+I)*2]; G:=TFPl[0]^[K*TFPlStr[0]+(J*(Fmt Div 2)+I)*2+1];
+    End;
+    If TFLe Then Begin Q:=R; R:=G; G:=Q; End;
+    Five^[(K*TFW+J)*Fmt+I*2]:=R; Five^[(K*TFW+J)*Fmt+I*2+1]:=G;
+   End;
+  PNGDepth:=16; NVWritePNGEx(Five,Fmt,Cn); PNGDepth:=0; NVDone:=True; Inc(NVFrames); FreeMem(Five);
+ End Else
+ If (TFPix=TFPixMono) And (Mode=1) Then Begin
+  { monoblack : lignes PNG = donnees du plan, bits de bourrage compris }
+  RowB:=(TFW+7) Shr 3; GetMem(Five,RowB*TFH+16);
+  For K:=0 To TFH-1 Do Move(TFPl[0]^[K*TFPlStr[0]],Five^[K*RowB],RowB);
+  PNGDepth:=1; NVWritePNGEx(Five,1,0); PNGDepth:=0; NVDone:=True; Inc(NVFrames); FreeMem(Five);
+ End Else NVEmit(Img);
+ If Img<>Nil Then FreeMem(Img);
+ For I:=0 To 3 Do If TFPl[I]<>Nil Then FreeMem(TFPl[I]);
+ If TFYuvLine<>Nil Then FreeMem(TFYuvLine);
+ FreeMem(TFF);
+ NVFinish('tiff');
+End;
+
+{ ---- options des encodeurs G1 ---- }
+Var G1TifCompr,G1TifDpi,G1TgaRle: LongInt; { 0 = defauts : packbits, 72 dpi, RLE actif ; G1TgaRle=1 : -rle 0 }
+
+Procedure G1SetOpt(Const Name,Value: String);
+Var V,Code: LongInt; L: String;
+Begin
+ L:=Lower(Value);
+ If Name='-compression_algo' Then Begin
+  If L='packbits' Then G1TifCompr:=$8005 Else If L='raw' Then G1TifCompr:=1 Else If L='lzw' Then G1TifCompr:=5
+  Else If L='deflate' Then G1TifCompr:=$80B2
+  Else Begin
+   Val(L,V,Code);
+   If (Code<>0) Or ((V<>1) And (V<>5) And (V<>$8005) And (V<>$80B2)) Then Fail('-compression_algo: packbits, raw, lzw ou deflate.');
+   G1TifCompr:=V;
+  End;
+ End Else If Name='-dpi' Then Begin
+  Val(L,V,Code);
+  If (Code<>0) Or (V<1) Or (V>65536) Then Fail('-dpi: entier 1..65536 requis.');
+  G1TifDpi:=V;
+ End Else If Name='-rle' Then Begin
+  Val(L,V,Code);
+  If (Code<>0) Or (V<0) Or (V>1) Then Fail('-rle: 0 ou 1 requis.');
+  G1TgaRle:=1-V;
+ End;
+End;
+
+
+{ ---- encodeurs Targa et TIFF : lecture de la premiere image Y4M ---- }
+Var
+ G1YW,G1YH,G1YCw,G1YCh,G1YKind,G1YSarN,G1YSarD,G1YLoc: LongInt; G1BlackCol: Boolean;
+ G1YY,G1YU,G1YV: PEABuffer;
+ { G1YKind : 0 mono, 1 4:2:0, 2 4:2:2, 3 4:4:4, 4 4:1:1, 5 4:4:0 ; G1YLoc : 0 inconnu, 1 centre, 2 gauche, 3 haut-gauche }
+
+Procedure G1LoadY4M(Const Source: String; Const Who: String);
+Var
+ Cur,Limit,At,Q,K,Code,Sz: LongInt; H: Array[0..255] Of Byte; Line,Token,Ctag: String;
+Begin
+ OpenRead(Source); Limit:=InputSize; Cur:=0; Line:='';
+ While Cur<Limit Do Begin ReadAt(Cur,H,1); Inc(Cur); If H[0]=10 Then Break; If Length(Line)<250 Then Line:=Line+Chr(H[0]); End;
+ If Copy(Line,1,9)<>'YUV4MPEG2' Then Fail(Who+': entree Y4M requise.');
+ G1YW:=0; G1YH:=0; G1YKind:=1; G1YSarN:=0; G1YSarD:=0; G1YLoc:=1; Line:=Copy(Line,11,255);
+ While Line<>'' Do Begin
+  K:=Pos(' ',Line); If K=0 Then K:=Length(Line)+1;
+  Token:=Copy(Line,1,K-1); Line:=Copy(Line,K+1,255);
+  If Token='' Then Continue;
+  Case Token[1] Of
+   'W': Val(Copy(Token,2,20),G1YW,Code);
+   'H': Val(Copy(Token,2,20),G1YH,Code);
+   'A': Begin
+    K:=Pos(':',Token);
+    If K>0 Then Begin Val(Copy(Token,2,K-2),G1YSarN,Code); Val(Copy(Token,K+1,20),G1YSarD,Code); End;
+   End;
+   'C': Begin
+    Ctag:=Token;
+    If (Ctag='C420') Then Begin G1YKind:=1; G1YLoc:=0; End
+    Else If (Ctag='C420jpeg') Then Begin G1YKind:=1; G1YLoc:=1; End
+    Else If (Ctag='C420mpeg2') Then Begin G1YKind:=1; G1YLoc:=2; End
+    Else If (Ctag='C420paldv') Then Begin G1YKind:=1; G1YLoc:=3; End
+    Else If Ctag='C422' Then G1YKind:=2
+    Else If Ctag='C444' Then G1YKind:=3
+    Else If Ctag='C411' Then G1YKind:=4
+    Else If Ctag='Cmono' Then G1YKind:=0
+    Else Fail(Who+': format de pixels Y4M non pris en charge ('+Ctag+').');
+   End;
+  End;
+ End;
+ If (G1YW<1) Or (G1YH<1) Or (G1YW>16000) Or (G1YH>16000) Then Fail(Who+': dimensions Y4M incorrectes.');
+ Case G1YKind Of
+  0: Begin G1YCw:=0; G1YCh:=0; End;
+  1: Begin G1YCw:=(G1YW+1) Div 2; G1YCh:=(G1YH+1) Div 2; End;
+  2: Begin G1YCw:=(G1YW+1) Div 2; G1YCh:=G1YH; End;
+  3: Begin G1YCw:=G1YW; G1YCh:=G1YH; End;
+  Else Begin G1YCw:=(G1YW+3) Div 4; G1YCh:=G1YH; End;
+ End;
+ If Cur+6+G1YW*G1YH+2*G1YCw*G1YCh>Limit Then Fail(Who+': aucune image Y4M.');
+ ReadAt(Cur,H,5); If (H[0]<>70) Or (H[1]<>82) Then Fail(Who+': marqueur FRAME requis.');
+ Cur:=Cur+5; While Cur<Limit Do Begin ReadAt(Cur,H,1); Inc(Cur); If H[0]=10 Then Break; End;
+ GetMem(G1YY,G1YW*G1YH+64); GetMem(G1YU,G1YCw*G1YCh+64); GetMem(G1YV,G1YCw*G1YCh+64);
+ Sz:=G1YW*G1YH; At:=0;
+ While At<Sz Do Begin If Sz-At>60000 Then Q:=60000 Else Q:=Sz-At; ReadAt(Cur+At,G1YY^[At],Q); Inc(At,Q); End;
+ Inc(Cur,Sz);
+ Sz:=G1YCw*G1YCh; At:=0;
+ While At<Sz Do Begin If Sz-At>60000 Then Q:=60000 Else Q:=Sz-At; ReadAt(Cur+At,G1YU^[At],Q); Inc(At,Q); End;
+ Inc(Cur,Sz); At:=0;
+ While At<Sz Do Begin If Sz-At>60000 Then Q:=60000 Else Q:=Sz-At; ReadAt(Cur+At,G1YV^[At],Q); Inc(At,Q); End;
+ CloseRead;
+End;
+
+{ YUV420P -> RGB (swscale yuv2rgb_c, memes tables que EncodePNM) : Out = W*H*3 octets R,G,B.
+  Dimensions paires : chemin non mis a l'echelle (chroma repliquee) ; sinon chemin general de swscale :
+  chroma filtree verticalement (bicubique CH vers H), puis yuv2rgb_X_c. }
+Procedure G1Yuv420ToRgb(Out: PEABuffer);
+Var
+ Tab: Array[0..2047] Of Byte; Crv,Cbu,Cgu,Cgv,Cy,Oy,Yb: Int64; Yoffs,Ix,X,Y,Yv,Uv,Vv,J,FS,Bp: LongInt;
+ VF,HF: TSwsF; Su,Sv,Yf,Rr,Gg,Bb: Int64; HS,Cyy,Cyo,Cv2r,Cv2g,Cu2g,Cu2b: LongInt; HU,HV: PSwsI32; One: Boolean;
+Function Clip(V: LongInt): LongInt;Begin If V<0 Then Clip:=0 Else If V>255 Then Clip:=255 Else Clip:=V; End;
+Function Sar(V: Int64; N: LongInt): Int64;
+Begin If V>=0 Then Sar:=V Shr N Else Sar:=-((-V+(Int64(1) Shl N)-1) Shr N); End;
+Function RI16(F: Int64): LongInt;
+Var R: Int64;
+Begin
+ R:=Sar(F+32768,16); If R<-32767 Then R:=-32768 Else If R>32767 Then R:=32767; RI16:=R;
+End;
+Begin
+ Cy:=(Int64(65536)*255) Div 219; Oy:=Int64(16) Shl 16;
+ Crv:=104597; Cbu:=132201;
+ Crv:=((Crv Shl 16)+$8000) Div Cy; Cbu:=((Cbu Shl 16)+$8000) Div Cy;
+ Cgu:=(Int64(-25675)*65536+$8000) Div Cy; Cgv:=(Int64(-53279)*65536+$8000) Div Cy;
+ Yoffs:=326+512;
+ Yb:=-(Int64(384) Shl 16)-512*Cy-Oy;
+ For Ix:=0 To 2047 Do Begin Tab[Ix]:=Clip(Sar(Yb+$8000,16)); Yb:=Yb+Cy; End;
+ G1BlackCol:=False;
+ If Odd(G1YH) And Odd(G1YW) Then Begin
+  { largeur impaire : swscale force l'interpolation pleine de la chroma (yuv2rgb_full_X_c) }
+  SwsInitF(HF,G1YCw,G1YW,128,128,16384); HS:=HF.FS;
+  GetMem(HU,Int64(G1YCh)*G1YW*4+64); GetMem(HV,Int64(G1YCh)*G1YW*4+64);
+  For Y:=0 To G1YCh-1 Do For X:=0 To G1YW-1 Do Begin
+   Su:=0; Sv:=0;
+   For J:=0 To HS-1 Do Begin
+    Su:=Su+Int64(G1YU^[Y*G1YCw+HF.Pos^[X]+J])*HF.Coef^[X*HS+J]; Sv:=Sv+Int64(G1YV^[Y*G1YCw+HF.Pos^[X]+J])*HF.Coef^[X*HS+J];
+   End;
+   Su:=AVSar(Su,7); If Su>32767 Then Su:=32767; Sv:=AVSar(Sv,7); If Sv>32767 Then Sv:=32767;
+   HU^[Y*G1YW+X]:=Su; HV^[Y*G1YW+X]:=Sv;
+  End;
+  SwsInitF(VF,G1YCh,G1YH,128,128,4096); FS:=VF.FS;
+  Cyy:=RI16(Int64(76309)*8192); Cyo:=RI16(Int64(16 Shl 16)*512); Cv2r:=RI16(Int64(104597)*8192); Cv2g:=RI16(Int64(-53279)*8192);
+  Cu2g:=RI16(Int64(-25675)*8192); Cu2b:=RI16(Int64(132201)*8192);
+  For Y:=0 To G1YH-1 Do Begin
+   One:=(FS=2) And (VF.Coef^[Y*FS]+VF.Coef^[Y*FS+1]=4096) And (VF.Coef^[Y*FS+1]>=0) And (VF.Coef^[Y*FS+1]<=4096);
+   For X:=0 To G1YW-1 Do Begin
+    If One Then Begin
+     { yuv2rgb_full_1_c : une ligne, ou moyenne de deux lignes de chroma }
+     Bp:=VF.Pos^[Y]*G1YW+X;
+     If VF.Coef^[Y*FS+1]<2048 Then Begin
+      Uv:=(Int64(HU^[Bp])-(128 Shl 7))*4; Vv:=(Int64(HV^[Bp])-(128 Shl 7))*4;
+     End Else Begin
+      Uv:=(Int64(HU^[Bp])+HU^[Bp+G1YW]-(128 Shl 8))*2; Vv:=(Int64(HV^[Bp])+HV^[Bp+G1YW]-(128 Shl 8))*2;
+     End;
+    End Else Begin
+    Su:=(Int64(1) Shl 9)-(Int64(128) Shl 19); Sv:=Su;
+    For J:=0 To FS-1 Do Begin
+     Bp:=(VF.Pos^[Y]+J)*G1YW+X;
+     Su:=Su+Int64(HU^[Bp])*VF.Coef^[Y*FS+J]; Sv:=Sv+Int64(HV^[Bp])*VF.Coef^[Y*FS+J];
+    End;
+    Uv:=Sar(Su,10); Vv:=Sar(Sv,10);
+    End;
+    Yf:=(Int64(G1YY^[Y*G1YW+X]) Shl 9)-Cyo;
+    Yf:=Yf*Cyy+(Int64(1) Shl 21);
+    Rr:=Yf+Int64(Vv)*Cv2r; Gg:=Yf+Int64(Vv)*Cv2g+Int64(Uv)*Cu2g; Bb:=Yf+Int64(Uv)*Cu2b;
+    If Rr<0 Then Rr:=0 Else If Rr>1073741823 Then Rr:=1073741823;
+    If Gg<0 Then Gg:=0 Else If Gg>1073741823 Then Gg:=1073741823;
+    If Bb<0 Then Bb:=0 Else If Bb>1073741823 Then Bb:=1073741823;
+    Out^[(Y*G1YW+X)*3]:=Rr Shr 22; Out^[(Y*G1YW+X)*3+1]:=Gg Shr 22; Out^[(Y*G1YW+X)*3+2]:=Bb Shr 22;
+   End;
+  End;
+  SwsFreeF(VF); SwsFreeF(HF); FreeMem(HU); FreeMem(HV);
+  Exit;
+ End;
+ If Odd(G1YH) Then Begin
+  SwsInitF(VF,G1YCh,G1YH,128,128,4096); FS:=VF.FS;
+  For Y:=0 To G1YH-1 Do Begin
+   One:=(FS=2) And (VF.Coef^[Y*FS]+VF.Coef^[Y*FS+1]=4096) And (VF.Coef^[Y*FS+1]>=0) And (VF.Coef^[Y*FS+1]<=4096);
+   For X:=0 To G1YW-1 Do Begin
+    If One Then Begin
+     { yuv2rgb_1_c : une ligne, ou moyenne de deux lignes de chroma }
+     Bp:=VF.Pos^[Y]*G1YCw+(X Shr 1);
+     If VF.Coef^[Y*FS+1]<2048 Then Begin Uv:=G1YU^[Bp]; Vv:=G1YV^[Bp]; End
+     Else Begin Uv:=(G1YU^[Bp]+G1YU^[Bp+G1YCw]+1) Shr 1; Vv:=(G1YV^[Bp]+G1YV^[Bp+G1YCw]+1) Shr 1; End;
+    End Else Begin
+    Su:=Int64(1) Shl 18; Sv:=Int64(1) Shl 18;
+    For J:=0 To FS-1 Do Begin
+     Bp:=(VF.Pos^[Y]+J)*G1YCw+(X Shr 1);
+     Su:=Su+Int64(G1YU^[Bp] Shl 7)*VF.Coef^[Y*FS+J]; Sv:=Sv+Int64(G1YV^[Bp] Shl 7)*VF.Coef^[Y*FS+J];
+    End;
+    Uv:=Clip(AVSar(Su,19)); Vv:=Clip(AVSar(Sv,19));
+    End;
+    Yv:=G1YY^[Y*G1YW+X];
+    Out^[(Y*G1YW+X)*3]:=Tab[Yoffs-Sar(Crv,9)+Sar(Vv*Crv,16)+Yv];
+    Out^[(Y*G1YW+X)*3+1]:=Tab[Yoffs-Sar(Cgu,9)+Sar(Uv*Cgu,16)-Sar(Cgv,9)+Sar(Vv*Cgv,16)+Yv];
+    Out^[(Y*G1YW+X)*3+2]:=Tab[Yoffs-Sar(Cbu,9)+Sar(Uv*Cbu,16)+Yv];
+   End;
+  End;
+  SwsFreeF(VF);
+  Exit;
+ End;
+ G1BlackCol:=Odd(G1YW);
+ For Y:=0 To G1YH-1 Do For X:=0 To G1YW-1 Do Begin
+  If Odd(G1YW) And (X=G1YW-1) Then Begin
+   { le chemin non mis a l'echelle de swscale ne convertit pas le dernier pixel d'une largeur impaire }
+   Out^[(Y*G1YW+X)*3]:=0; Out^[(Y*G1YW+X)*3+1]:=0; Out^[(Y*G1YW+X)*3+2]:=0; Continue;
+  End;
+  Yv:=G1YY^[Y*G1YW+X]; Uv:=G1YU^[(Y Shr 1)*G1YCw+(X Shr 1)]; Vv:=G1YV^[(Y Shr 1)*G1YCw+(X Shr 1)];
+  Out^[(Y*G1YW+X)*3]:=Tab[Yoffs-Sar(Crv,9)+Sar(Vv*Crv,16)+Yv];
+  Out^[(Y*G1YW+X)*3+1]:=Tab[Yoffs-Sar(Cgu,9)+Sar(Uv*Cgu,16)-Sar(Cgv,9)+Sar(Vv*Cgv,16)+Yv];
+  Out^[(Y*G1YW+X)*3+2]:=Tab[Yoffs-Sar(Cbu,9)+Sar(Uv*Cbu,16)+Yv];
+ End;
+End;
+
+{ yuv420p (plage limitee) -> gray (plage pleine), comme pgm }
+Procedure G1YuvToGray(Out: PEABuffer);
+Var X,Y: LongInt; GV: Int64;
+Function Sar(V: Int64; N: LongInt): Int64;
+Begin If V>=0 Then Sar:=V Shr N Else Sar:=-((-V+(Int64(1) Shl N)-1) Shr N); End;
+Begin
+ For Y:=0 To G1YH-1 Do For X:=0 To G1YW-1 Do Begin
+  GV:=G1YY^[Y*G1YW+X] Shl 7; If GV>30189 Then GV:=30189;
+  GV:=Sar(GV*19077-39057361,14);
+  GV:=Sar(GV+64,7); If GV<0 Then GV:=0; If GV>255 Then GV:=255;
+  Out^[Y*G1YW+X]:=GV;
+ End;
+End;
+
+{ ff_rle_count_pixels / ff_rle_encode (libavcodec/rle.c) }
+Function G1RleCount(S: PEABuffer; At,Len,Bpp: LongInt; Same: Boolean): LongInt;
+Var Pos,Count,Lim: LongInt; Eq: Boolean;
+Begin
+ Count:=1; Pos:=At+Bpp; If Len<127 Then Lim:=Len Else Lim:=127;
+ While Count<Lim Do Begin
+  Eq:=CompareByte(S^[Pos-Bpp],S^[Pos],Bpp)=0;
+  If Same<>Eq Then Begin
+   If Not Same Then Begin
+    If (Bpp=1) And (Count+1<Lim) And (S^[Pos]<>S^[Pos+1]) Then Begin Inc(Pos,Bpp); Inc(Count); Continue; End;
+    Dec(Count);
+   End;
+   Break;
+  End;
+  Inc(Pos,Bpp); Inc(Count);
+ End;
+ G1RleCount:=Count;
+End;
+{ retourne le nombre d'octets ecrits ou -1 ; AddRep/XorRep/AddRaw/XorRaw comme ff_rle_encode }
+Function G1RleEnc(Out: PEABuffer; OutSize: LongInt; Src: PEABuffer; SrcOfs,Bpp,W,AddRep,XorRep,AddRaw,XorRaw: LongInt): LongInt;
+Var Count,X,O,P: LongInt;
+Begin
+ O:=0; X:=0; P:=SrcOfs;
+ While X<W Do Begin
+  Count:=G1RleCount(Src,P,W-X,Bpp,True);
+  If Count>1 Then Begin
+   If O+Bpp+1>OutSize Then Begin G1RleEnc:=-1; Exit; End;
+   Out^[O]:=((Count Xor XorRep)+AddRep) And 255; Inc(O);
+   Move(Src^[P],Out^[O],Bpp); Inc(O,Bpp);
+  End Else Begin
+   Count:=G1RleCount(Src,P,W-X,Bpp,False);
+   If O+Bpp*Count>=OutSize Then Begin G1RleEnc:=-1; Exit; End;
+   Out^[O]:=((Count Xor XorRaw)+AddRaw) And 255; Inc(O);
+   Move(Src^[P],Out^[O],Bpp*Count); Inc(O,Bpp*Count);
+  End;
+  Inc(P,Count*Bpp); Inc(X,Count);
+ End;
+ G1RleEnc:=O;
+End;
+
+{ ---- encodeur Targa (libavcodec/targaenc.c) ---- }
+Procedure EncodeTarga(Const Source,Target: String);
+Var
+ Px: PEABuffer; Rgb,Pk,Rl: PEABuffer; Kind,Bpp,Pic,Y,X,N,O,Row,Ds: LongInt; Fmt: String; Hdr: Array[0..17] Of Byte;
+Begin
+ G1LoadY4M(Source,'targa');
+ Fmt:=OptPixFmt;
+ If Fmt='' Then Begin If G1YKind=0 Then Fmt:='gray' Else Fmt:='bgr24'; End;
+ If (Fmt<>'bgr24') And (Fmt<>'bgra') And (Fmt<>'gray') Then Fail('targa: -pix_fmt bgr24, bgra ou gray seulement.');
+ If G1YKind<>1 Then
+  If Not ((G1YKind=0) And (Fmt='gray')) Then Fail('targa: entree Y4M YUV420 8 bits requise.');
+ If Fmt='gray' Then Bpp:=1 Else If Fmt='bgra' Then Bpp:=4 Else Bpp:=3;
+ Pic:=G1YW*G1YH*Bpp;
+ GetMem(Px,Pic+64);
+ If Fmt='gray' Then Begin
+  If G1YKind=0 Then Move(G1YY^,Px^,Pic) Else G1YuvToGray(Px);
+ End Else Begin
+  GetMem(Rgb,G1YW*G1YH*3+64); G1Yuv420ToRgb(Rgb);
+  For Y:=0 To G1YW*G1YH-1 Do Begin
+   Px^[Y*Bpp]:=Rgb^[Y*3+2]; Px^[Y*Bpp+1]:=Rgb^[Y*3+1]; Px^[Y*Bpp+2]:=Rgb^[Y*3];
+   If Bpp=4 Then Begin Px^[Y*4+3]:=255; If G1BlackCol And ((Y Mod G1YW)=G1YW-1) Then Px^[Y*4+3]:=0; End;
+  End;
+  FreeMem(Rgb);
+ End;
+ FillChar(Hdr,SizeOf(Hdr),0);
+ Hdr[12]:=G1YW And 255; Hdr[13]:=G1YW Shr 8; Hdr[14]:=G1YH And 255; Hdr[15]:=G1YH Shr 8;
+ Hdr[17]:=$20; If Fmt='bgra' Then Hdr[17]:=$28;
+ If Fmt='gray' Then Begin Hdr[2]:=3; Hdr[16]:=8; End Else Begin Hdr[2]:=2; Hdr[16]:=Bpp*8; End;
+ { RLE par defaut ; -rle 0 non pris en charge ici }
+ GetMem(Rl,Pic+Pic Div 2+4096);
+ Ds:=0; O:=0; Row:=Pic;
+ If G1TgaRle<>0 Then Ds:=-1 Else
+ For Y:=0 To G1YH-1 Do Begin
+  N:=G1RleEnc(PEABuffer(@Rl^[O]),Row,Px,Y*G1YW*Bpp,Bpp,G1YW,$7F,0,-1,0);
+  If N<0 Then Begin Ds:=-1; Break; End;
+  Inc(O,N); Dec(Row,N);
+ End;
+ If Ds>=0 Then Begin Ds:=O; Hdr[2]:=Hdr[2] Or 8; End;
+ OpenWrite(Target);
+ WriteBytes(Hdr,18);
+ If Ds>=0 Then Begin
+  X:=0; While X<Ds Do Begin If Ds-X>32768 Then N:=32768 Else N:=Ds-X; WriteBytes(Rl^[X],N); Inc(X,N); End;
+ End Else Begin
+  X:=0; While X<Pic Do Begin If Pic-X>32768 Then N:=32768 Else N:=Pic-X; WriteBytes(Px^[X],N); Inc(X,N); End;
+ End;
+ Fmt:=#0#0#0#0#0#0#0#0+'TRUEVISION-XFILE.'+#0;
+ WriteBytes(Fmt[1],26);
+ CloseWrite;
+ FreeMem(Rl); FreeMem(Px); FreeMem(G1YY); FreeMem(G1YU); FreeMem(G1YV);
+End;
+
+{ ---- encodeur LZW TIFF (libavcodec/lzwenc.c) ---- }
+Var
+ TEPre,TECode: Array[0..16410] Of LongInt; TESuf: Array[0..16410] Of Byte;
+ TETabSize,TEBits,TELast: LongInt;
+ TEOut: PEABuffer; TEOutPos: LongInt; TEBitBuf: Int64; TEBitN: LongInt;
+
+Procedure TEPut(N,V: LongInt);
+Begin
+ TEBitBuf:=((TEBitBuf Shl N) Or V) And $FFFFFFFFFF; Inc(TEBitN,N);
+ While TEBitN>=8 Do Begin
+  TEOut^[TEOutPos]:=(TEBitBuf Shr (TEBitN-8)) And 255; Inc(TEOutPos); Dec(TEBitN,8);
+ End;
+End;
+Function TEHash(Head,Add: LongInt): LongInt;
+Begin
+ Head:=Head Xor (Add Shl 6);
+ If Head>=16411 Then Dec(Head,16411);
+ TEHash:=Head;
+End;
+Procedure TEClear;
+Var I,H: LongInt;
+Begin
+ TEPut(TEBits,256);
+ TEBits:=9;
+ For I:=0 To 16410 Do TEPre[I]:=-2;
+ For I:=0 To 255 Do Begin
+  H:=TEHash(0,I); TECode[H]:=I; TESuf[H]:=I; TEPre[H]:=-1;
+ End;
+ TETabSize:=258;
+End;
+Procedure TELzInit(Out: PEABuffer; Pos: LongInt);
+Begin
+ TEOut:=Out; TEOutPos:=Pos; TEBitBuf:=0; TEBitN:=0; TELast:=-1; TEBits:=9;
+End;
+Procedure TELzEncode(Src: PEABuffer; SrcOfs,N: LongInt);
+Var I,C,Code,H,Off: LongInt;
+Begin
+ If TELast=-1 Then TEClear;
+ For I:=0 To N-1 Do Begin
+  C:=Src^[SrcOfs+I];
+  If TELast<0 Then H:=TEHash(0,C) Else H:=TEHash(TELast,C);
+  Off:=H; If Off<>0 Then Off:=16411-Off Else Off:=1;
+  While TEPre[H]<>-2 Do Begin
+   If (TESuf[H]=C) And (TEPre[H]=TELast) Then Break;
+   H:=H-Off; If H<0 Then Inc(H,16411);
+  End;
+  Code:=H;
+  If TEPre[Code]=-2 Then Begin
+   TEPut(TEBits,TELast);
+   TECode[Code]:=TETabSize; TESuf[Code]:=C; TEPre[Code]:=TELast;
+   Inc(TETabSize);
+   If TETabSize>=(1 Shl TEBits) Then Inc(TEBits);
+   Code:=TEHash(0,C);
+  End;
+  TELast:=TECode[Code];
+  If TETabSize>=4096-1 Then TEClear;
+ End;
+End;
+Procedure TELzFlush;
+Begin
+ If TELast<>-1 Then TEPut(TEBits,TELast);
+ TEPut(TEBits,257);
+ If TEBitN>0 Then Begin
+  TEOut^[TEOutPos]:=(TEBitBuf Shl (8-TEBitN)) And 255; Inc(TEOutPos); TEBitN:=0;
+ End;
+ TELast:=-1;
+End;
+
+{ ---- encodeur TIFF (libavcodec/tiffenc.c) ---- }
+Var
+ TEBuf: PEABuffer; TEPos: LongInt;           { tampon de sortie et position d'ecriture }
+ TEEnt: Array[0..32*12-1] Of Byte; TENum: LongInt;
+
+Procedure TEPutLe16(P: LongInt; V: LongInt);
+Begin TEBuf^[P]:=V And 255; TEBuf^[P+1]:=(V Shr 8) And 255; End;
+Procedure TEPutLe32(P: LongInt; V: Int64);
+Begin TEBuf^[P]:=V And 255; TEBuf^[P+1]:=(V Shr 8) And 255; TEBuf^[P+2]:=(V Shr 16) And 255; TEBuf^[P+3]:=(V Shr 24) And 255; End;
+Function TESz2(Typ: LongInt): LongInt;
+Begin
+ Case Typ Of 1,2,6,7: TESz2:=1; 3,8: TESz2:=2; 4,9,11,13: TESz2:=4; 5,10,12: TESz2:=8; Else TESz2:=0; End;
+End;
+Function TESz1(Typ: LongInt): LongInt;
+Begin
+ If Typ=2 Then TESz1:=100 Else TESz1:=TESz2(Typ);
+End;
+{ Vals : octets deja en ordre little-endian ; Cnt valeurs de type Typ }
+Procedure TEAddEntry(Tag,Typ,Cnt: LongInt; Vals: PEABuffer);
+Var P,N,I: LongInt;
+Begin
+ P:=TENum*12;
+ TEEnt[P]:=Tag And 255; TEEnt[P+1]:=Tag Shr 8; TEEnt[P+2]:=Typ And 255; TEEnt[P+3]:=Typ Shr 8;
+ TEEnt[P+4]:=Cnt And 255; TEEnt[P+5]:=(Cnt Shr 8) And 255; TEEnt[P+6]:=(Cnt Shr 16) And 255; TEEnt[P+7]:=(Cnt Shr 24) And 255;
+ N:=Cnt*TESz2(Typ);
+ If Int64(TESz1(Typ))*Cnt<=4 Then Begin
+  For I:=0 To N-1 Do TEEnt[P+8+I]:=Vals^[I];
+ End Else Begin
+  TEEnt[P+8]:=TEPos And 255; TEEnt[P+9]:=(TEPos Shr 8) And 255; TEEnt[P+10]:=(TEPos Shr 16) And 255; TEEnt[P+11]:=(TEPos Shr 24) And 255;
+  For I:=0 To N-1 Do TEBuf^[TEPos+I]:=Vals^[I];
+  Inc(TEPos,N);
+ End;
+ Inc(TENum);
+End;
+Procedure TEAddEntry1(Tag,Typ,Val: LongInt);
+Var B: Array[0..3] Of Byte;
+Begin
+ B[0]:=Val And 255; B[1]:=(Val Shr 8) And 255; B[2]:=(Val Shr 16) And 255; B[3]:=(Val Shr 24) And 255;
+ TEAddEntry(Tag,Typ,1,@B);
+End;
+
+Procedure EncodeTiff(Const Source,Target: String);
+Var
+ Kind,Bits,Nc,Photo,Sub0,Sub1,Rps,Strips,Bpr,I,J,K,Y,Row,W,H,N,Zn,Lnum,Q: LongInt; Pf: String;
+ Planes: Array[0..2] Of PEABuffer; Str: Array[0..2] Of LongInt; Gray,Rgb: PEABuffer; Alpha,IsYuv: Boolean;
+ StripOffs,StripSizes: Array[0..16383] Of LongInt; Line,Zbuf,Cbuf: PEABuffer; Dpi: LongInt;
+ Res: Array[0..11] Of LongInt; ResB: Array[0..95] Of Byte; Bp: Array[0..3] Of Word; Ver: String; Total: Int64;
+ Sw,Hw: LongInt; Pal: Array[0..767] Of Word; Ret,Wr: LongInt; Zout: PEABuffer; SarN,SarD,G: LongInt; Tmp: Array[0..255] Of Byte;
+ Refbw: Array[0..11] Of LongInt;
+Procedure PackYuv(Dst: PEABuffer; Lnum: LongInt);
+Var Ii,Jj,Kk,Ww,Pu,Pv,Dp: LongInt;
+Begin
+ Ww:=(W-1) Div Sub0+1;
+ Pu:=(Lnum Div Sub1)*Str[1]; Pv:=(Lnum Div Sub1)*Str[2]; Dp:=0;
+ For Ii:=0 To Ww-1 Do Begin
+  For Jj:=0 To Sub1-1 Do For Kk:=0 To Sub0-1 Do Begin
+   Y:=Lnum+Jj; If Y>H-1 Then Y:=H-1;
+   Q:=Ii*Sub0+Kk; If Q>W-1 Then Q:=W-1;
+   Dst^[Dp]:=Planes[0]^[Y*Str[0]+Q]; Inc(Dp);
+  End;
+  Dst^[Dp]:=Planes[1]^[Pu]; Inc(Dp); Inc(Pu);
+  Dst^[Dp]:=Planes[2]^[Pv]; Inc(Dp); Inc(Pv);
+ End;
+End;
+Procedure Fin;
+Begin End;
+Begin
+ G1LoadY4M(Source,'tiff');
+ W:=G1YW; H:=G1YH;
+ Pf:=OptPixFmt;
+ If Pf='' Then Case G1YKind Of 0: Pf:='gray'; 1: Pf:='yuv420p'; 2: Pf:='yuv422p'; 3: Pf:='yuv444p'; Else Pf:='yuv411p'; End;
+ IsYuv:=Copy(Pf,1,3)='yuv'; Alpha:=False;
+ If IsYuv Then Begin
+  Case G1YKind Of
+   1: If Pf<>'yuv420p' Then Fail('tiff: conversion de ce format de pixels non prise en charge.');
+   2: If Pf<>'yuv422p' Then Fail('tiff: conversion de ce format de pixels non prise en charge.');
+   3: If Pf<>'yuv444p' Then Fail('tiff: conversion de ce format de pixels non prise en charge.');
+   4: If Pf<>'yuv411p' Then Fail('tiff: conversion de ce format de pixels non prise en charge.');
+   Else Fail('tiff: conversion de ce format de pixels non prise en charge.');
+  End;
+  Photo:=6; Bits:=12; Nc:=3;
+  Case G1YKind Of 1: Begin Sub0:=2; Sub1:=2; End; 2: Begin Sub0:=2; Sub1:=1; End; 3: Begin Sub0:=1; Sub1:=1; End; Else Begin Sub0:=4; Sub1:=1; End; End;
+  If G1YKind=2 Then Bits:=16 Else If G1YKind=3 Then Bits:=24 Else If G1YKind=4 Then Bits:=12;
+  If G1YKind=1 Then Bits:=12;
+  Planes[0]:=G1YY; Planes[1]:=G1YU; Planes[2]:=G1YV; Str[0]:=W; Str[1]:=G1YCw; Str[2]:=G1YCw;
+ End Else Begin
+  Sub0:=1; Sub1:=1;
+  If (Pf<>'gray') And (Pf<>'rgb24') And (Pf<>'rgba') Then Fail('tiff: -pix_fmt gray, rgb24, rgba ou format YUV natif.');
+  If (G1YKind<>1) And Not ((G1YKind=0) And (Pf='gray')) Then Fail('tiff: entree Y4M YUV420 8 bits requise pour cette conversion.');
+  If Pf='gray' Then Begin
+   Photo:=1; Bits:=8; Nc:=1;
+   GetMem(Gray,W*H+64);
+   If G1YKind=0 Then Move(G1YY^,Gray^,W*H) Else G1YuvToGray(Gray);
+   Planes[0]:=Gray; Str[0]:=W;
+  End Else Begin
+   Photo:=2; Alpha:=Pf='rgba';
+   If Alpha Then Begin Bits:=32; Nc:=4; End Else Begin Bits:=24; Nc:=3; End;
+   GetMem(Rgb,W*H*3+64); G1Yuv420ToRgb(Rgb);
+   If Alpha Then Begin
+    GetMem(Gray,W*H*4+64);
+    For I:=0 To W*H-1 Do Begin Gray^[I*4]:=Rgb^[I*3]; Gray^[I*4+1]:=Rgb^[I*3+1]; Gray^[I*4+2]:=Rgb^[I*3+2]; Gray^[I*4+3]:=255; If G1BlackCol And ((I Mod W)=W-1) Then Gray^[I*4+3]:=0; End;
+    FreeMem(Rgb); Planes[0]:=Gray; Str[0]:=W*4;
+   End Else Begin Planes[0]:=Rgb; Str[0]:=W*3; End;
+  End;
+ End;
+ Dpi:=G1TifDpi; If Dpi=0 Then Dpi:=72;
+ If G1TifCompr=0 Then G1TifCompr:=$8005;
+ { rps, strips }
+ If (G1TifCompr=$80B2) Or (G1TifCompr=5) Then Rps:=H
+ Else Begin
+  Rps:=8192 Div (((W*Bits) Shr 3)+1); If Rps<1 Then Rps:=1;
+ End;
+ Rps:=((Rps-1) Div Sub1+1)*Sub1;
+ Strips:=(H-1) Div Rps+1;
+ If Strips>16383 Then Fail('tiff: image trop haute.');
+ Bpr:=(((W-1) Div Sub0+1)*Bits*Sub0*Sub1+7) Shr 3;
+ Total:=Int64(H)*Bpr*2+Int64(H)*4+16384+W*64;
+ GetMem(TEBuf,Total+W*H*4); FillChar(TEBuf^,Total+W*H*4,0);
+ GetMem(Line,Bpr+64);
+ TEPos:=0;
+ TEBuf^[0]:=$49; TEBuf^[1]:=$49; TEBuf^[2]:=42; TEBuf^[3]:=0;
+ TEPos:=8;
+ FillChar(StripOffs,SizeOf(StripOffs),0); FillChar(StripSizes,SizeOf(StripSizes),0);
+ If (G1TifCompr=$80B2) Then Begin
+  GetMem(Zbuf,Int64(Bpr)*Rps+64); Zn:=0; J:=0;
+  While J<Rps Do Begin
+   If IsYuv Then Begin
+    PackYuv(Line,J); Move(Line^,Zbuf^[Zn],Bpr); Inc(J,Sub1-1);
+   End Else Move(Planes[0]^[J*Str[0]],Zbuf^[J*Bpr],Bpr);
+   Inc(Zn,Bpr); Inc(J);
+  End;
+  StripOffs[0]:=TEPos;
+  { compress() : zlib niveau par defaut, un seul appel }
+  GetMem(Zout,Zn+Zn Div 8+4096);
+  ZLDeflateInit(-1);
+  ZLIn:=Zbuf; ZLInPos:=0; ZLAvailIn:=Zn; ZLOut:=Zout; ZLOutPos:=0; ZLAvailOut:=Zn+Zn Div 8+4096;
+  Ret:=ZLDeflate(4);
+  If Ret<>1 Then Fail('tiff: erreur de compression.');
+  Wr:=Zn+Zn Div 8+4096-ZLAvailOut;
+  ZLDeflateEnd;
+  Move(Zout^,TEBuf^[TEPos],Wr); Inc(TEPos,Wr); StripSizes[0]:=Wr;
+  FreeMem(Zout); FreeMem(Zbuf);
+ End Else Begin
+  I:=0;
+  While I<H Do Begin
+   If StripSizes[I Div Rps]=0 Then Begin
+    If G1TifCompr=5 Then TELzInit(TEBuf,TEPos);
+    StripOffs[I Div Rps]:=TEPos;
+   End;
+   If IsYuv Then Begin PackYuv(Line,I); Cbuf:=Line; End Else Cbuf:=Nil;
+   If G1TifCompr=1 Then Begin
+    If IsYuv Then Move(Line^,TEBuf^[TEPos],Bpr) Else Move(Planes[0]^[I*Str[0]],TEBuf^[TEPos],Bpr);
+    N:=Bpr;
+   End Else If G1TifCompr=$8005 Then Begin
+    If IsYuv Then N:=G1RleEnc(PEABuffer(@TEBuf^[TEPos]),Total-TEPos,Line,0,1,Bpr,2,$FF,-1,0)
+    Else N:=G1RleEnc(PEABuffer(@TEBuf^[TEPos]),Total-TEPos,Planes[0],I*Str[0],1,Bpr,2,$FF,-1,0);
+    If N<0 Then Fail('tiff: erreur de compression.');
+   End Else Begin
+    K:=TEOutPos;
+    If IsYuv Then TELzEncode(Line,0,Bpr) Else TELzEncode(Planes[0],I*Str[0],Bpr);
+    N:=TEOutPos-K;
+   End;
+   If IsYuv Then Inc(I,Sub1-1);
+   If G1TifCompr<>5 Then Begin Inc(StripSizes[I Div Rps],N); Inc(TEPos,N); End
+   Else Begin Inc(StripSizes[I Div Rps],N); TEPos:=TEOutPos; End;
+   If (G1TifCompr=5) And ((I=H-1) Or (I Mod Rps=Rps-1)) Then Begin
+    K:=TEOutPos; TELzFlush; N:=TEOutPos-K;
+    Inc(StripSizes[I Div Rps],N); TEPos:=TEOutPos;
+   End;
+   Inc(I);
+  End;
+ End;
+ { entrees }
+ TENum:=0;
+ FillChar(TEEnt,SizeOf(TEEnt),0);
+ TEAddEntry1($FE,4,0);
+ TEAddEntry1($100,4,W);
+ TEAddEntry1($101,4,H);
+ For I:=0 To Nc-1 Do Begin
+  If IsYuv Then Bp[I]:=8 Else Bp[I]:=Bits Div Nc;
+ End;
+ If Nc<>0 Then Begin
+  For I:=0 To Nc-1 Do Begin ResB[I*2]:=Bp[I] And 255; ResB[I*2+1]:=Bp[I] Shr 8; End;
+  TEAddEntry($102,3,Nc,@ResB);
+ End;
+ TEAddEntry1($103,3,G1TifCompr);
+ TEAddEntry1($106,3,Photo);
+ For I:=0 To Strips-1 Do Begin
+  ResB[0]:=0;
+ End;
+ GetMem(Zbuf,Strips*4+16);
+ For I:=0 To Strips-1 Do Begin
+  Zbuf^[I*4]:=StripOffs[I] And 255; Zbuf^[I*4+1]:=(StripOffs[I] Shr 8) And 255; Zbuf^[I*4+2]:=(StripOffs[I] Shr 16) And 255; Zbuf^[I*4+3]:=(StripOffs[I] Shr 24) And 255;
+ End;
+ TEAddEntry($111,4,Strips,Zbuf);
+ If Nc<>0 Then TEAddEntry1($115,3,Nc);
+ TEAddEntry1($116,4,Rps);
+ For I:=0 To Strips-1 Do Begin
+  Zbuf^[I*4]:=StripSizes[I] And 255; Zbuf^[I*4+1]:=(StripSizes[I] Shr 8) And 255; Zbuf^[I*4+2]:=(StripSizes[I] Shr 16) And 255; Zbuf^[I*4+3]:=(StripSizes[I] Shr 24) And 255;
+ End;
+ TEAddEntry($117,4,Strips,Zbuf);
+ FreeMem(Zbuf);
+ Res[0]:=Dpi; Res[1]:=1;
+ FillChar(ResB,SizeOf(ResB),0);
+ ResB[0]:=Res[0] And 255; ResB[1]:=(Res[0] Shr 8) And 255; ResB[2]:=(Res[0] Shr 16) And 255; ResB[3]:=(Res[0] Shr 24) And 255; ResB[4]:=1;
+ TEAddEntry($11A,5,1,@ResB);
+ If (G1YSarN>0) And (G1YSarD>0) Then Begin
+  { y = dpi * sar, reduit }
+  SarN:=Dpi*G1YSarN; SarD:=G1YSarD;
+  I:=SarN; J:=SarD; While J<>0 Do Begin K:=I Mod J; I:=J; J:=K; End;
+  If I>1 Then Begin SarN:=SarN Div I; SarD:=SarD Div I; End;
+  ResB[0]:=SarN And 255; ResB[1]:=(SarN Shr 8) And 255; ResB[2]:=(SarN Shr 16) And 255; ResB[3]:=(SarN Shr 24) And 255;
+  ResB[4]:=SarD And 255; ResB[5]:=(SarD Shr 8) And 255; ResB[6]:=(SarD Shr 16) And 255; ResB[7]:=(SarD Shr 24) And 255;
+ End;
+ TEAddEntry($11B,5,1,@ResB);
+ TEAddEntry1($128,3,2);
+ Ver:='Lavc60.31.102'#0;
+ TEAddEntry($131,2,Length(Ver),@Ver[1]);
+ If Alpha Then TEAddEntry1($152,3,2);
+ If IsYuv Then Begin
+  ResB[0]:=Sub0; ResB[1]:=0; ResB[2]:=Sub1; ResB[3]:=0;
+  TEAddEntry($212,3,2,@ResB);
+  If G1YLoc=3 Then TEAddEntry1($213,3,2);
+  Refbw[0]:=15; Refbw[1]:=1; Refbw[2]:=235; Refbw[3]:=1; Refbw[4]:=128; Refbw[5]:=1; Refbw[6]:=240; Refbw[7]:=1; Refbw[8]:=128; Refbw[9]:=1; Refbw[10]:=240; Refbw[11]:=1;
+  For I:=0 To 11 Do Begin ResB[I*4]:=Refbw[I]; ResB[I*4+1]:=0; ResB[I*4+2]:=0; ResB[I*4+3]:=0; End;
+  TEAddEntry($214,5,6,@ResB);
+ End;
+ { en-tete : decalage de l'IFD, puis IFD }
+ TEPutLe32(4,TEPos);
+ TEPutLe16(TEPos,TENum); Inc(TEPos,2);
+ Move(TEEnt,TEBuf^[TEPos],TENum*12); Inc(TEPos,TENum*12);
+ TEPutLe32(TEPos,0); Inc(TEPos,4);
+ OpenWrite(Target);
+ I:=0; While I<TEPos Do Begin If TEPos-I>32768 Then N:=32768 Else N:=TEPos-I; WriteBytes(TEBuf^[I],N); Inc(I,N); End;
+ CloseWrite;
+ FreeMem(TEBuf); FreeMem(Line); FreeMem(G1YY); FreeMem(G1YU); FreeMem(G1YV);
+ If (Not IsYuv) Then FreeMem(Planes[0]);
+End;
+
+{ ---- SP5X (libavcodec/sp5xdec.c, sp5x.h) : MJPEG Sunplus dans AVI ---- }
+Const
+ SPSof: Array[0..18] Of Byte=(
+  255,192,0,17,8,0,240,1,64,3,1,34,0,2,17,1,
+  3,17,1);
+ SPSos: Array[0..13] Of Byte=(
+  255,218,0,12,3,1,0,2,17,3,17,0,63,0);
+ SPDqt: Array[0..133] Of Byte=(
+  255,219,0,132,0,5,3,4,4,4,3,5,4,4,4,6,
+  5,5,6,8,13,8,8,7,7,8,16,12,12,10,13,20,
+  17,21,20,19,17,19,19,22,24,31,26,22,23,30,23,19,
+  19,27,37,28,30,32,33,35,35,35,21,26,39,41,38,34,
+  41,31,34,35,34,1,5,6,6,8,7,8,16,8,8,16,
+  34,22,19,22,34,34,34,34,34,34,34,34,34,34,34,34,
+  34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,
+  34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,
+  34,34,34,34,34,34);
+ SPDht: Array[0..419] Of Byte=(
+  255,196,1,162,0,0,1,5,1,1,1,1,1,1,0,0,
+  0,0,0,0,0,0,1,2,3,4,5,6,7,8,9,10,
+  11,1,0,3,1,1,1,1,1,1,1,1,1,0,0,0,
+  0,0,0,1,2,3,4,5,6,7,8,9,10,11,16,0,
+  2,1,3,3,2,4,3,5,5,4,4,0,0,1,125,1,
+  2,3,0,4,17,5,18,33,49,65,6,19,81,97,7,34,
+  113,20,50,129,145,161,8,35,66,177,193,21,82,209,240,36,
+  51,98,114,130,9,10,22,23,24,25,26,37,38,39,40,41,
+  42,52,53,54,55,56,57,58,67,68,69,70,71,72,73,74,
+  83,84,85,86,87,88,89,90,99,100,101,102,103,104,105,106,
+  115,116,117,118,119,120,121,122,131,132,133,134,135,136,137,138,
+  146,147,148,149,150,151,152,153,154,162,163,164,165,166,167,168,
+  169,170,178,179,180,181,182,183,184,185,186,194,195,196,197,198,
+  199,200,201,202,210,211,212,213,214,215,216,217,218,225,226,227,
+  228,229,230,231,232,233,234,241,242,243,244,245,246,247,248,249,
+  250,17,0,2,1,2,4,4,3,4,7,5,4,4,0,1,
+  2,119,0,1,2,3,17,4,5,33,49,6,18,65,81,7,
+  97,113,19,34,50,129,8,20,66,145,161,177,193,9,35,51,
+  82,240,21,98,114,209,10,22,36,52,225,37,241,23,24,25,
+  26,38,39,40,41,42,53,54,55,56,57,58,67,68,69,70,
+  71,72,73,74,83,84,85,86,87,88,89,90,99,100,101,102,
+  103,104,105,106,115,116,117,118,119,120,121,122,130,131,132,133,
+  134,135,136,137,138,146,147,148,149,150,151,152,153,154,162,163,
+  164,165,166,167,168,169,170,178,179,180,181,182,183,184,185,186,
+  194,195,196,197,198,199,200,201,202,210,211,212,213,214,215,216,
+  217,218,226,227,228,229,230,231,232,233,234,242,243,244,245,246,
+  247,248,249,250);
+ SPQ: Array[0..127] Of Byte=(
+  13,9,10,11,10,8,13,11,10,11,14,14,13,15,19,32,
+  21,19,18,18,19,39,28,30,23,32,46,41,49,48,46,41,
+  45,44,51,58,74,62,51,54,70,55,44,45,64,87,65,70,
+  76,78,82,83,82,50,62,90,97,90,80,96,74,81,82,79,
+  14,14,14,19,17,19,38,21,21,38,79,53,45,53,79,79,
+  79,79,79,79,79,79,79,79,79,79,79,79,79,79,79,79,
+  79,79,79,79,79,79,79,79,79,79,79,79,79,79,79,79,
+  79,79,79,79,79,79,79,79,79,79,79,79,79,79,79,79);
+
+Procedure DecodeSP5X(Const Source,Target: String; Mode: LongInt);
+Var
+ Pos,PkPos,PkLen,RN,RD,I,J,Cap: LongInt; Rec,Out: PEABuffer; Ok,FFBegun: Boolean; OutSize: LongInt;
+Begin
+ AXScan(Source); FFBegun:=False;
+ RN:=AXRate; RD:=AXScale; NVGcd(RN,RD);
+ MJInit(AXH,Ord(AXFcc[1])+Ord(AXFcc[2]) Shl 8+Ord(AXFcc[3]) Shl 16+Ord(AXFcc[4]) Shl 24);
+ OutSize:=AXW*AXH*4+256; GetMem(Out,OutSize);
+ Pos:=AXMovie;
+ While AXNext(Pos,PkPos,PkLen) Do Begin
+  Ok:=False;
+  Cap:=PkLen+1024;
+  GetMem(Rec,Cap+64); FillChar(Rec^,Cap+64,0);
+  J:=0;
+  Rec^[J]:=$FF; Inc(J); Rec^[J]:=$D8; Inc(J);
+  Move(SPDqt,Rec^[J],SizeOf(SPDqt)); Move(SPQ[0],Rec^[J+5],64); Move(SPQ[64],Rec^[J+70],64); Inc(J,SizeOf(SPDqt));
+  Move(SPDht,Rec^[J],SizeOf(SPDht)); Inc(J,SizeOf(SPDht));
+  Move(SPSof,Rec^[J],SizeOf(SPSof));
+  Rec^[J+5]:=AXH Shr 8; Rec^[J+6]:=AXH And 255; Rec^[J+7]:=AXW Shr 8; Rec^[J+8]:=AXW And 255;
+  Inc(J,SizeOf(SPSof));
+  Move(SPSos,Rec^[J],SizeOf(SPSos)); Inc(J,SizeOf(SPSos));
+  I:=14;
+  While (I<PkLen) And (J<Cap-3) Do Begin
+   Rec^[J]:=AXF^[PkPos+I]; Inc(J);
+   If AXF^[PkPos+I]=$FF Then Begin Rec^[J]:=0; Inc(J); End;
+   Inc(I);
+  End;
+  Rec^[J]:=$FF; Inc(J); Rec^[J]:=$D9; Inc(J);
+  If (AXW>0) And (AXH>0) Then Ok:=MJPacket(Rec,J)=1;
+  FreeMem(Rec);
+  If Ok Then Begin
+   If Not FFBegun Then Begin
+    MJSetNV(Mode,Target,RN,RD); FFBegun:=True;
+    If MJFull And (OptPixFmt='yuv420p') And (MJFmt=1) Then Begin NVTo420:=True; NVYTag:='C420jpeg XYSCSS=420JPEG XCOLORRANGE=LIMITED'; End;
+    If OutSize<NVFrameBytes+64 Then Begin FreeMem(Out); OutSize:=NVFrameBytes+64; GetMem(Out,OutSize); End;
+   End;
+   MJPack(Out);
+   NVEmit(Out);
+  End Else If FFBegun Then NVRepeat;
+  If NVDone Then Break;
+ End;
+ FreeMem(Out); FreeMem(AXF);
+ NVFinish('sp5x');
+End;
+
+{ ---- XSUB (libavcodec/xsubdec.c) : sous-titres DivX dans un flux AVI (DXSB / DXSA) vers les evenements bitmap ---- }
+Procedure XSLoadXsubAvi(Const Source: String);
+Var
+ F: PEABuffer; Size,Pos,ListEnd,Id,Len,Sub,NStr,CurStr,K,Bw,Bh,Px: LongInt; Typ,Hdl,Comp: String[4];
+ Cnt: Array[0..63] Of LongInt; Scl,Rte: Array[0..63] Of LongInt; Pk0: Int64;
+ IsX: Array[0..63] Of Boolean; HasAlpha: Array[0..63] Of Boolean; SW,SH: Array[0..63] Of LongInt;
+ Tag: String[4];
+Function G32(At: LongInt): LongInt;
+Begin G32:=EAByte(F,Size,At)+EAByte(F,Size,At+1)*256+EAByte(F,Size,At+2)*65536+EAByte(F,Size,At+3)*16777216; End;
+Function T4(At: LongInt): String;
+Var S: String[4]; Z: LongInt;
+Begin S:=''; For Z:=0 To 3 Do S:=S+Chr(EAByte(F,Size,At+Z)); T4:=S; End;
+Function G16(P: PEABuffer; At,Sz: LongInt): LongInt;
+Begin G16:=EAByte(P,Sz,At)+EAByte(P,Sz,At+1)*256; End;
+{ decodage d'un paquet }
+Procedure Packet(P: PEABuffer; Sz: LongInt; Alpha: Boolean; CW,CH: LongInt; PtsMs: Int64);
+Var
+ W,H,X,Y,I,Need,Pb,BitPos,Row,Col,Run,Col2,Top,Lg,Q,Hy,Gy: LongInt; T0,T1: Int64; E: PXSEv; R: PXSRect; Bm: PEABuffer; Ok: Boolean;
+Const
+ Off: Array[0..8] Of Byte=(0,1,3,4,6,7,9,10,11); Mul: Array[0..8] Of Byte=(10,6,10,6,10,10,10,10,1);
+Function TC(At: LongInt; Var Ms: Int64): Boolean;
+Var Z,C: LongInt;
+Begin
+ TC:=False; Ms:=0;
+ If (EAByte(P,Sz,At+2)<>58) Or (EAByte(P,Sz,At+5)<>58) Or (EAByte(P,Sz,At+8)<>46) Then Exit;
+ For Z:=0 To 8 Do Begin
+  C:=EAByte(P,Sz,At+Off[Z])-48;
+  If (C<0) Or (C>9) Then Exit;
+  Ms:=(Ms+C)*Mul[Z];
+ End;
+ TC:=True;
+End;
+Function Bits(N: LongInt): LongInt;
+Var V: LongInt;
+Begin
+ V:=0;
+ While N>0 Do Begin
+  V:=V*2+((EAByte(P,Sz,BitPos Shr 3) Shr (7-(BitPos And 7))) And 1); Inc(BitPos); Dec(N);
+ End;
+ Bits:=V;
+End;
+Function Show8: LongInt;
+Var Sv,V: LongInt;
+Begin Sv:=BitPos; V:=Bits(8); BitPos:=Sv; Show8:=V; End;
+Begin
+ Need:=27+14+4*(3+Ord(Alpha));
+ If Sz<Need Then Exit;
+ If (EAByte(P,Sz,0)<>91) Or (EAByte(P,Sz,13)<>45) Or (EAByte(P,Sz,26)<>93) Then Exit;
+ If Not TC(1,T0) Then Exit;
+ If Not TC(14,T1) Then Exit;
+ W:=G16(P,27,Sz); H:=G16(P,29,Sz); X:=G16(P,31,Sz); Y:=G16(P,33,Sz);
+ If (W<1) Or (H<1) Or (W>16000) Or (H>16000) Then Exit;
+ Pb:=27+14;
+ If Sz-Pb<H+12 Then Exit;
+ If T1<T0 Then T1:=T0;
+ T1:=PtsMs+(T1-T0); T0:=PtsMs;
+ E:=XSNew; R:=XSAddRect(E,X,Y,W,H); R^.NCol:=4;
+ For I:=0 To 3 Do Begin
+  R^.Pal[I]:=(EAByte(P,Sz,Pb+I*3) Shl 16) Or (EAByte(P,Sz,Pb+I*3+1) Shl 8) Or EAByte(P,Sz,Pb+I*3+2);
+  If Not Alpha Then Begin If I>0 Then R^.Pal[I]:=R^.Pal[I] Or LongInt($FF000000); End;
+ End;
+ Inc(Pb,12);
+ If Alpha Then Begin
+  For I:=0 To 3 Do R^.Pal[I]:=R^.Pal[I] Or LongInt(EAByte(P,Sz,Pb+I) Shl 24);
+  Inc(Pb,4);
+ End;
+ E^.T0:=T0; E^.T1:=T1;
+ Bm:=R^.Bmp; BitPos:=Pb*8; Gy:=0;
+ For Row:=0 To H-1 Do Begin
+  If Row<(H+1) Div 2 Then Hy:=Row*2 Else Hy:=(Row-(H+1) Div 2)*2+1;
+  Col:=0;
+  While Col<W Do Begin
+   Top:=Show8; Lg:=0; Q:=Top; While Q>1 Do Begin Q:=Q Shr 1; Inc(Lg); End;
+   Run:=Bits(14-4*(Lg Shr 1)); Col2:=Bits(2);
+   If Run>W-Col Then Run:=W-Col;
+   If Run=0 Then Run:=W-Col;
+   If Hy<H Then FillChar(Bm^[Hy*W+Col],Run,Col2);
+   Inc(Col,Run);
+  End;
+  BitPos:=(BitPos+7) And Not 7;
+ End;
+End;
+Begin
+ NVLoad(Source,F,Size); CloseRead;
+ XSN:=0; XSW:=0; XSH:=0; XSFromPng:=False;
+ If (T4(0)<>'RIFF') Or (T4(8)<>'AVI ') Then Fail('xsub: conteneur AVI requis.');
+ NStr:=0; FillChar(IsX,SizeOf(IsX),False); FillChar(HasAlpha,SizeOf(HasAlpha),False);
+ Pos:=12;
+ While Pos+8<=Size Do Begin
+  Tag:=T4(Pos); Len:=G32(Pos+4);
+  If Len<0 Then Break;
+  If (Tag='LIST') Then Begin
+   If T4(Pos+8)='hdrl' Then Begin
+    { parcours des strl }
+    K:=Pos+12; ListEnd:=Pos+8+Len; If ListEnd>Size Then ListEnd:=Size;
+    While K+8<=ListEnd Do Begin
+     Id:=G32(K+4);
+     If (T4(K)='LIST') And (T4(K+8)='strl') Then Begin
+      If T4(K+12)='strh' Then Begin Typ:=T4(K+20); Hdl:=T4(K+24); End Else Begin Typ:=''; Hdl:=''; End;
+      Comp:=''; Bw:=0; Bh:=0;
+      { strf apres strh }
+      Px:=K+12; Px:=Px+8+G32(Px+4); If Px And 1=1 Then Inc(Px);
+      If T4(Px)='strf' Then Begin
+       Bw:=G32(Px+8+4); Bh:=G32(Px+8+8); Comp:=T4(Px+8+16);
+      End;
+      If NStr<64 Then Begin
+       IsX[NStr]:=(Typ='vids') And ((Comp='DXSB') Or (Comp='DXSA'));
+       HasAlpha[NStr]:=Comp='DXSA'; SW[NStr]:=Bw; SH[NStr]:=Bh; Scl[NStr]:=G32(K+20+20); Rte[NStr]:=G32(K+20+24); Cnt[NStr]:=0;
+      End;
+      Inc(NStr);
+     End;
+     K:=K+8+Id; If Id And 1=1 Then Inc(K);
+    End;
+   End Else If T4(Pos+8)='movi' Then Begin
+    K:=Pos+12; ListEnd:=Pos+8+Len; If ListEnd>Size Then ListEnd:=Size;
+    While K+8<=ListEnd Do Begin
+     Tag:=T4(K); Id:=G32(K+4);
+     If Id<0 Then Break;
+     If (EAByte(F,Size,K)>=48) And (EAByte(F,Size,K)<=57) And (EAByte(F,Size,K+1)>=48) And (EAByte(F,Size,K+1)<=57) Then Begin
+      CurStr:=(EAByte(F,Size,K)-48)*10+EAByte(F,Size,K+1)-48;
+      If (CurStr<64) And IsX[CurStr] Then Begin
+       If XSW=0 Then Begin XSW:=SW[CurStr]; XSH:=SH[CurStr]; End;
+       If K+8+Id>Size Then Id:=Size-K-8;
+       If Rte[CurStr]>0 Then Pk0:=(Int64(Cnt[CurStr])*Scl[CurStr]*2000+Rte[CurStr]) Div (2*Int64(Rte[CurStr])) Else Pk0:=0;
+       Inc(Cnt[CurStr]);
+       Packet(PEABuffer(@F^[K+8]),Id,HasAlpha[CurStr],SW[CurStr],SH[CurStr],Pk0);
+      End;
+     End;
+     K:=K+8+Id; If Id And 1=1 Then Inc(K);
+    End;
+   End;
+  End;
+  Pos:=Pos+8+Len; If Len And 1=1 Then Inc(Pos);
+ End;
+ FreeMem(F,Size+64);
+ If XSN=0 Then Fail('xsub: aucun flux de sous-titres XSUB decode.');
+ If XSW<=0 Then Begin XSW:=720; XSH:=480; End;
+End;
+
+{ ---- distribution du groupe G1 : 1100 sunrast, 1101 targa, 1102 tiff, 1103 txd, 1104 sp5x (AVI) ---- }
+Procedure DecodeG1(Const Source,Target: String; Mode,Kind: LongInt);
+Begin
+ Case Kind Of
+  1100: DecodeSunRast(Source,Target,Mode);
+  1101: DecodeTarga(Source,Target,Mode);
+  1102: DecodeTIFF(Source,Target,Mode);
+  1103: DecodeTXD(Source,Target,Mode);
+  1104: DecodeSP5X(Source,Target,Mode);
+  Else Fail('G1: type inconnu.');
+ End;
+End;
+
+{ G1-END }
 
 { ==== BLOCK-ANCHOR-G1 : inserer le code du groupe G1 juste au-dessus de cette ligne ==== }
 
@@ -102995,6 +105147,10 @@ Begin
  WriteLn(' DE mpegts          MPEG-TS: flux de sous-titres DVB (dvbsub, PID type 0x06 + descripteur 0x59) vers .psub; ecriture depuis .psub (PAT/PMT/PES)');
  WriteLn(' DE dvbsub          flux brut de segments DVB (entree: -f dvbsub si non detecte; sans horodatage, debuts successifs); sortie .dvbsub');
  WriteLn(' DE psub            Liste de sous-titres PNG: ligne PNGSUB 1, size L H, puis sub hh:mm:ss.mmm hh:mm:ss.mmm image.png');
+ WriteLn(' D  sunrast         Sun Rasterfile (.ras)');
+ WriteLn(' DE targa          Truevision Targa (.tga)');
+ WriteLn(' DE tiff           TIFF (.tif, .tiff)');
+ WriteLn(' D  txd            Renderware TeXture Dictionary');
  WriteLn(' DE dv              DV (Digital Video) .dv ou AVI dvsd: SD 25 et 50 Mbit/s (NTSC 4:1:1, PAL 4:2:0/4:1:1, DV50 4:2:2), video seule; decodage vers Y4M/PNG/BMP, encodage Y4M -c:v dvvideo (sortie .dv ou AVI)');
  WriteLn(' DE dnxhd           VC3/DNxHD, DNxHR (.dnxhd ou AVI; encodage Y4M progressif: -profile:v dnxhr_lb|sq|hq|hqx|444, ou -b:v en Mbit/s pour DNxHD)');
  WriteLn(' D  avi (cljr, cyuv, cinepak)  AVI Cirrus Logic AccuPak, Creative YUV, Cinepak vers Y4M/PNG/BMP');
@@ -103512,6 +105668,12 @@ BEGIN
   WriteLn('DEV    rv20            RealVideo 2.0 (decodeur I/P/B; encodeur I/P 16x16 vers .rm)');
   WriteLn('D V    rv30            RealVideo 3.0 (decodeur I/P/B, fichiers .rm)');
   WriteLn('D V    rv40            RealVideo 4.0 (decodeur I/P/B, fichiers .rm)');
+  WriteLn('D V    sunrast         Sun Rasterfile image (1/4/8/24/32 bits, RLE, palette; fichiers .ras)');
+  WriteLn('DEV    targa           Truevision Targa image (decodage complet; encodage RLE/brut bgr24, bgra, gray)');
+  WriteLn('DEV    tiff            TIFF image (brut, PackBits, LZW, deflate; predicteur; palette, gris, RGB(A), YCbCr, planaire; encodage packbits/raw/lzw/deflate)');
+  WriteLn('D V    txd             Renderware TXD (TeXture Dictionary) image (palette, DXT1, DXT3, RGBA)');
+  WriteLn('D S    xsub            DivX subtitles (XSUB, flux AVI DXSB/DXSA) vers .psub / .idx / .ts');
+  WriteLn('D V    sp5x            Sunplus JPEG (SP5X, AVI SP54) via le decodeur MJPEG');
   { LIST-ANCHOR-G1 }
   WriteLn('D V    tiertexseqvideo Tiertex Limited SEQ video (conteneur .seq; audio PCM S16BE vers WAV)');
   WriteLn('D V    truemotion1     Duck TrueMotion 1.0 (AVI DUCK/PVEZ, RGB555 et 0RGB32)');
@@ -103596,6 +105758,7 @@ BEGIN
   If Argument='-4mv' Then Begin
    FourMV:=True;
   End Else
+  If (Argument='-compression_algo') Or (Argument='-dpi') Or (Argument='-rle') Then G1SetOpt(Argument,NextArgument) Else
   If Argument='-compression_level' Then Begin
    Value:=NextArgument; Val(Value,Number,Code);
    If Code<>0 Then Fail('-compression_level: nombre entier requis.');
@@ -103648,7 +105811,7 @@ BEGIN
    VideoCodec:=Lower(NextArgument);
    If VideoCodec='libxvid' Then VideoCodec:='mpeg4';
    If (VideoCodec<>'snow') And (VideoCodec<>'png') And (VideoCodec<>'gif') And (VideoCodec<>'copy') And (VideoCodec<>'zlib') And (VideoCodec<>'zmbv') And
-    (VideoCodec<>'ffv1') And (VideoCodec<>'flv') And (VideoCodec<>'pam') And (VideoCodec<>'pbm') And (VideoCodec<>'pgm') And (VideoCodec<>'ppm') And (VideoCodec<>'pgmyuv') And (VideoCodec<>'sgi') And (VideoCodec<>'qtrle') And (VideoCodec<>'mpeg4') And (VideoCodec<>'mpeg1video') And (VideoCodec<>'mpeg2video') And (VideoCodec<>'rawvideo') And
+    (VideoCodec<>'ffv1') And (VideoCodec<>'flv') And (VideoCodec<>'pam') And (VideoCodec<>'pbm') And (VideoCodec<>'pgm') And (VideoCodec<>'ppm') And (VideoCodec<>'pgmyuv') And (VideoCodec<>'sgi') And (VideoCodec<>'targa') And (VideoCodec<>'tiff') And (VideoCodec<>'qtrle') And (VideoCodec<>'mpeg4') And (VideoCodec<>'mpeg1video') And (VideoCodec<>'mpeg2video') And (VideoCodec<>'rawvideo') And
     (VideoCodec<>'asv1') And (VideoCodec<>'asv2') And (VideoCodec<>'msmpeg4') And (VideoCodec<>'msmpeg4v1') And (VideoCodec<>'msmpeg4v2') And (VideoCodec<>'huffyuv') And (VideoCodec<>'roqvideo') And (VideoCodec<>'h263') And (VideoCodec<>'h263p') And (VideoCodec<>'rv10') And (VideoCodec<>'rv20') And (VideoCodec<>'bmp') And (VideoCodec<>'dnxhd') And (VideoCodec<>'dvvideo') And (VideoCodec<>'jpegls') And (VideoCodec<>'ljpeg') And (VideoCodec<>'mjpeg') And (VideoCodec<>'libx264') And (VideoCodec<>'libtheora') Then
     Fail('Codec video: png/gif, bmp, copy, ffv1, flv, msmpeg4, msmpeg4v1, msmpeg4v2, mpeg4, mpeg1video, mpeg2video, rawvideo, asv1, asv2, huffyuv, roqvideo, h263, h263p, rv10, rv20, dnxhd, dvvideo, jpegls, ljpeg, mjpeg, libx264, libxvid, libtheora.');
   End Else If (Argument='-vframes') Or (Argument='-frames:v') Then Begin
@@ -103855,7 +106018,8 @@ BEGIN
   If (InputFormat='xa') And (InputCodec<>'adpcm_ea_maxis_xa') Then
    Fail('Le conteneur xa exige le decodeur adpcm_ea_maxis_xa.');
  End;
- If (InputFormat='vobsub') Or (InputFormat='psub') Or (InputFormat='dvbsub') Or (InputFormat='mpegts') Then Begin
+ If (InputFormat='avi') And Not IsHTTP(InputPath) And ((OutputFormat='psub') Or (OutputFormat='vobsub') Or (OutputFormat='mpegts') Or (OutputFormat='dvbsub')) And (SubCodec<>'') Then InputFormat:='avi';
+ If ((InputFormat='avi') And (SubCodec<>'') And ((OutputFormat='psub') Or (OutputFormat='vobsub') Or (OutputFormat='mpegts') Or (OutputFormat='dvbsub'))) Or (InputFormat='vobsub') Or (InputFormat='psub') Or (InputFormat='dvbsub') Or (InputFormat='mpegts') Then Begin
   If IsHTTP(InputPath) Or NoVideo Or (VideoCodec<>'') Or (AudioCodec<>'') Or HasBitrate Or HasVideoBitrate Or (RequestedRate<>0) Or
    (RequestedChannels<>0) Or (VideoFrames<>0) Or (ImageWidth<>0) Or HasCrop Then
    Fail('Sous-titres bitmap: entree locale, sans option audio/video.');
@@ -103876,7 +106040,7 @@ BEGIN
  Else If (InputFormat='siff') And Not IsHTTP(InputPath) And G2ASiffVideo(Intermediate) Then NVKind:=230
  Else If (InputFormat='flv') And Not IsHTTP(InputPath) And Not VPDAudioOut And ((FLVVideoCodec(Intermediate)=4) Or (FLVVideoCodec(Intermediate)=5)) Then NVKind:=484
  Else If InputFormat='bethsoftvid' Then NVKind:=1 Else If InputFormat='bfi' Then NVKind:=2 Else If InputFormat='c93' Then NVKind:=3
- Else If InputFormat='bmp' Then NVKind:=4 Else If (InputFormat='pam') Or (InputFormat='pbm') Or (InputFormat='pgm') Or (InputFormat='ppm') Or (InputFormat='pgmyuv') Then NVKind:=50 Else If InputFormat='nuv' Then NVKind:=54 Else If InputFormat='pcx' Then NVKind:=55 Else If InputFormat='png' Then NVKind:=58 Else If InputFormat='roq' Then NVKind:=65 Else If InputFormat='rl2' Then NVKind:=66 Else If (InputFormat='ogg') And Not IsHTTP(InputPath) And VP3OggIsTheora(Intermediate) Then NVKind:=170 Else If InputFormat='smk' Then NVKind:=67 Else If (InputFormat='rm') And Not IsHTTP(InputPath) And (RMVideoKind(InputPath)<>0) Then NVKind:=68 Else If InputFormat='sgi' Then NVKind:=56 Else If InputFormat='ptx' Then NVKind:=57 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22 Else If (InputFormat='flic') And Not IsHTTP(InputPath) Then NVKind:=23 Else If (InputFormat='gif') And Not IsHTTP(InputPath) Then NVKind:=25 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=2) Then NVKind:=27 Else If (InputFormat='h263') And Not IsHTTP(InputPath) Then NVKind:=28 Else If (InputFormat='h261') And Not IsHTTP(InputPath) Then NVKind:=29 Else If (InputFormat='idcin') And Not IsHTTP(InputPath) Then NVKind:=30 Else If (InputFormat='ipmovie') And Not IsHTTP(InputPath) Then NVKind:=38 Else If (InputFormat='jpegls_pipe') And Not IsHTTP(InputPath) Then NVKind:=39 Else If (InputFormat='jpeg_pipe') And Not IsHTTP(InputPath) Then NVKind:=46 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And MP4HasMjpb(InputPath) Then NVKind:=47 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And (QXMovKind(InputPath)<>0) Then NVKind:=QXMovKind(InputPath) Else If (InputFormat='h264') And Not IsHTTP(InputPath) Then NVKind:=33
+ Else If InputFormat='bmp' Then NVKind:=4 Else If (InputFormat='pam') Or (InputFormat='pbm') Or (InputFormat='pgm') Or (InputFormat='ppm') Or (InputFormat='pgmyuv') Then NVKind:=50 Else If InputFormat='nuv' Then NVKind:=54 Else If InputFormat='pcx' Then NVKind:=55 Else If InputFormat='sunrast' Then NVKind:=1100 Else If InputFormat='targa' Then NVKind:=1101 Else If InputFormat='tiff' Then NVKind:=1102 Else If InputFormat='txd' Then NVKind:=1103 Else If InputFormat='png' Then NVKind:=58 Else If InputFormat='roq' Then NVKind:=65 Else If InputFormat='rl2' Then NVKind:=66 Else If (InputFormat='ogg') And Not IsHTTP(InputPath) And VP3OggIsTheora(Intermediate) Then NVKind:=170 Else If InputFormat='smk' Then NVKind:=67 Else If (InputFormat='rm') And Not IsHTTP(InputPath) And (RMVideoKind(InputPath)<>0) Then NVKind:=68 Else If InputFormat='sgi' Then NVKind:=56 Else If InputFormat='ptx' Then NVKind:=57 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22 Else If (InputFormat='flic') And Not IsHTTP(InputPath) Then NVKind:=23 Else If (InputFormat='gif') And Not IsHTTP(InputPath) Then NVKind:=25 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=2) Then NVKind:=27 Else If (InputFormat='h263') And Not IsHTTP(InputPath) Then NVKind:=28 Else If (InputFormat='h261') And Not IsHTTP(InputPath) Then NVKind:=29 Else If (InputFormat='idcin') And Not IsHTTP(InputPath) Then NVKind:=30 Else If (InputFormat='ipmovie') And Not IsHTTP(InputPath) Then NVKind:=38 Else If (InputFormat='jpegls_pipe') And Not IsHTTP(InputPath) Then NVKind:=39 Else If (InputFormat='jpeg_pipe') And Not IsHTTP(InputPath) Then NVKind:=46 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And MP4HasMjpb(InputPath) Then NVKind:=47 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And (QXMovKind(InputPath)<>0) Then NVKind:=QXMovKind(InputPath) Else If (InputFormat='h264') And Not IsHTTP(InputPath) Then NVKind:=33
  Else If (InputFormat='avi') And Not IsHTTP(InputPath) Then Begin
   AsvTag:=AVIVideoFourCC(Intermediate);
   If AsvTag='CSCD' Then NVKind:=5 Else If (AsvTag='tscc') Or (AsvTag='TSCC') Then NVKind:=6
@@ -103899,9 +106063,10 @@ BEGIN
   Else If AsvTag='LOCO' Then NVKind:=40
   Else If AsvTag='LM20' Then NVKind:=42
   Else If G2AFccKind(AsvTag)<>0 Then NVKind:=G2AFccKind(AsvTag)
+  Else If (AsvTag='SP5X') Or (AsvTag='SP54') Then NVKind:=1104
   Else If (AsvTag='MJPG') Or (AsvTag='mjpg') Or (AsvTag='AVRn') Or (AsvTag='AVDJ') Or (AsvTag='dmb1') Or (AsvTag='JPGL') Or (AsvTag='MJLS') Or (AsvTag='MMJP') Or (AsvTag='jpeg') Or (AsvTag='IJPG') Then NVKind:=43;
  End;
- If (OptPixFmt<>'') And (OptPixFmt<>'yuv420p') And (VideoCodec<>'snow') And (VideoCodec<>'qtrle') And (VideoCodec<>'rawvideo') And (VideoCodec<>'zlib') And (VideoCodec<>'zmbv') Then Fail('-pix_fmt: seul yuv420p est pris en charge.');
+ If (OptPixFmt<>'') And (OptPixFmt<>'yuv420p') And (VideoCodec<>'snow') And (VideoCodec<>'qtrle') And (VideoCodec<>'rawvideo') And (VideoCodec<>'zlib') And (VideoCodec<>'zmbv') And (VideoCodec<>'targa') And (VideoCodec<>'tiff') Then Fail('-pix_fmt: seul yuv420p est pris en charge.');
  NVAudioOut:=(OutputFormat='wav') Or (OutputFormat='roq') Or (OutputFormat='mp3') Or (OutputFormat='mp2') Or (OutputFormat='ac3') Or (OutputFormat='aac') Or (OutputFormat='adx') Or (OutputFormat='aiff');
  If ((InputFormat='mp4') Or (InputFormat='avi') Or (InputFormat='flv')) And (NVKind=0) And Not IsHTTP(InputPath) And Not NVAudioOut And Not NoVideo And (VideoCodec<>'copy') And
   ((OutputFormat='yuv4mpegpipe') Or (OutputFormat='png') Or (OutputFormat='bmp') Or (VideoCodec='png') Or (VideoCodec='bmp') Or (VideoCodec='mpeg4') Or
@@ -103954,6 +106119,14 @@ BEGIN
   If (OutputFormat<>'mp4') And (OutputFormat<>'') Then Fail('qtrle: sortie MOV requise.');
   Temps[2]:=NewTemporary; EncodeQTRLE(Intermediate,Temps[2]);
   Commit(Temps[2]); Temps[2]:=''; WriteLn('Video creee: ',OutputPath); Halt(0);
+ End;
+ If (InputFormat='yuv4mpegpipe') And ((VideoCodec='targa') Or (VideoCodec='tiff') Or ((VideoCodec='') And ((OutputFormat='targa') Or (OutputFormat='tiff')))) Then Begin
+  If VideoFrames<>1 Then Fail('Sortie TARGA/TIFF: -frames:v 1 requis.');
+  If NoVideo Or (AudioCodec<>'') Or HasBitrate Or (RequestedRate<>0) Or (RequestedChannels<>0) Or (ImageWidth<>0) Or IsHTTP(InputPath) Or HasCrop Then
+   Fail('Sortie TARGA/TIFF: entree Y4M locale sans autre option requise.');
+  Temps[2]:=NewTemporary;
+  If (VideoCodec='targa') Or ((VideoCodec='') And (OutputFormat='targa')) Then EncodeTarga(Intermediate,Temps[2]) Else EncodeTiff(Intermediate,Temps[2]);
+  Commit(Temps[2]); Temps[2]:=''; WriteLn('Image creee: ',OutputPath); Halt(0);
  End;
  If (InputFormat='yuv4mpegpipe') And ((VideoCodec='pam') Or (VideoCodec='pbm') Or (VideoCodec='pgm') Or (VideoCodec='ppm') Or (VideoCodec='pgmyuv') Or (VideoCodec='sgi') Or (OutputFormat='sgi') Or (OutputFormat='pam') Or (OutputFormat='pbm') Or (OutputFormat='pgm') Or (OutputFormat='ppm') Or (OutputFormat='pgmyuv')) Then Begin
   If VideoFrames<>1 Then Fail('Sortie PAM/PBM: -frames:v 1 requis.');
