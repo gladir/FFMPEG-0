@@ -3967,6 +3967,8 @@ Begin
  If N>=12 Then If (B[0]=70) And (B[1]=79) And (B[2]=82) And (B[3]=77) And (B[8]=82) And (B[9]=76) And (B[10]=86) And ((B[11]=50) Or (B[11]=51)) Then Begin Probe:='rl2'; Exit; End;
  If N>=16 Then If (B[0]=82) And (B[1]=73) And (B[2]=70) And (B[3]=70) And (B[8]=$51) And (B[9]=$4C) And (B[10]=$43) And (B[11]=$4D) And (B[12]=$66) Then Begin Probe:='qcp'; Exit; End;
  If N>=8 Then If (B[0]=83) And (B[1]=77) And (B[2]=75) And ((B[3]=50) Or (B[3]=52)) Then Begin Probe:='smk'; Exit; End;
+ If N>=12 Then If (B[0]=84) And (B[1]=84) And (B[2]=65) And (B[3]=49) And ((B[4]=1) Or (B[4]=2)) And (B[5]=0) And ((B[6]<>0) Or (B[7]<>0)) And ((B[8]<>0) Or (B[9]<>0)) Then Begin Probe:='tta'; Exit; End;
+ If N>=33 Then If (B[0]=119) And (B[1]=118) And (B[2]=112) And (B[3]=107) And (Int64(B[4])+Int64(B[5])*256+Int64(B[6])*65536+Int64(B[7])*16777216>=24) And (Int64(B[4])+Int64(B[5])*256+Int64(B[6])*65536+Int64(B[7])*16777216<=1048576) And (LongInt(B[8])+LongInt(B[9])*256>=$402) And (LongInt(B[8])+LongInt(B[9])*256<=$410) Then Begin Probe:='wv'; Exit; End;
  If N>=8 Then If (B[0]=$61) And (B[1]=$6A) And (B[2]=$6B) And (B[3]=$67) And (Lower(Extension(Name))='shn') Then Begin Probe:='shn'; Exit; End;
  If N>=8 Then If (B[0]=$84) And (B[1]=$10) And (B[2]=255) And (B[3]=255) And (B[4]=255) And (B[5]=255) Then Begin Probe:='roq'; Exit; End;
  If N>=33 Then If (B[0]=137) And (B[1]=80) And (B[2]=78) And (B[3]=71) And (B[4]=13) And (B[5]=10) And (B[6]=26) And (B[7]=10) Then Begin Probe:='png'; Exit; End;
@@ -57119,6 +57121,2298 @@ End;
 
 { ==== BLOCK-ANCHOR-G2B : inserer le code du groupe G2B juste au-dessus de cette ligne ==== }
 
+{ ==== G3A : TrueSpeech, TTA, WavPack, Sonic/SonicLS.
+  Adapte de FFmpeg 6.1.1 libavcodec/truespeech.c, tta.c, ttadsp.c, wavpack.c, sonic.c et
+  libavformat/tta.c, wv.c, wvdec.c, LGPL-2.1-or-later; voir THIRD_PARTY_NOTICES.md. ==== }
+Type
+ TGAWav=Record
+  Tag,Chn,Rate,Align,Bits,DataPos,DataSize,ExtraPos,ExtraLen: LongInt;
+ End;
+ TGAI32=Array[0..268435000] Of LongInt; PGAI32=^TGAI32;
+
+Function GAS32(V: Int64): LongInt;
+Begin
+ V:=V And $FFFFFFFF; If V>=$80000000 Then V:=V-Int64($100000000); GAS32:=V;
+End;
+
+Function GAW16(V: LongInt): LongInt;
+Begin
+ V:=V And 65535; If V>=32768 Then V:=V-65536; GAW16:=V;
+End;
+
+Function GASar(V: Int64; N: LongInt): Int64;
+Begin
+ If V>=0 Then GASar:=V Shr N Else GASar:=-((-V-1) Shr N)-1;
+End;
+
+Function GAClip16(V: Int64): LongInt;
+Begin
+ If V>32767 Then V:=32767 Else If V<-32768 Then V:=-32768; GAClip16:=V;
+End;
+
+{ Lit un morceau du fichier ouvert dans un tampon (ReadAt est limite a 65535 octets). }
+Function GALoad(Pos,Len: LongInt): PEABuffer;
+Var P: PEABuffer; Done,Take: LongInt;
+Begin
+ GetMem(P,Len+64); FillChar(P^,Len+64,0); Done:=0;
+ While Done<Len Do Begin
+  Take:=Len-Done; If Take>32768 Then Take:=32768;
+  ReadAt(Pos+Done,P^[Done],Take); Inc(Done,Take);
+ End;
+ GALoad:=P;
+End;
+
+{ Analyse RIFF/WAVE du fichier ouvert (OpenRead deja fait). }
+Procedure GAWavParse(Var W: TGAWav; Const Who: String);
+Var
+ H: Array[0..39] Of Byte; Limit,Pos,Size: Int64; Count: LongInt; Fmt: Boolean;
+Begin
+ Limit:=InputSize; FillChar(W,SizeOf(W),0); W.DataPos:=-1; Fmt:=False;
+ If Limit<12 Then Fail(Who+': fichier trop court.');
+ ReadAt(0,H,12);
+ If Not ((H[0]=82) And (H[1]=73) And (H[2]=70) And (H[3]=70) And (H[8]=87) And (H[9]=65)) Then Fail(Who+': signature RIFF/WAVE requise.');
+ Pos:=12; Count:=0;
+ While (Limit-Pos>=8) And (Count<256) Do Begin
+  ReadAt(Pos,H,8); Inc(Pos,8); Inc(Count);
+  Size:=Int64(H[4])+Int64(H[5])*256+Int64(H[6])*65536+Int64(H[7])*16777216;
+  If (H[0]=102) And (H[1]=109) And (H[2]=116) And (H[3]=32) Then Begin
+   If (Size<16) Or (Limit-Pos<16) Then Fail(Who+': bloc fmt incorrect.');
+   ReadAt(Pos,H,16);
+   W.Tag:=H[0]+H[1]*256; W.Chn:=H[2]+H[3]*256; W.Rate:=H[4]+H[5]*256+H[6]*65536+H[7]*16777216;
+   W.Align:=H[12]+H[13]*256; W.Bits:=H[14]+H[15]*256; W.ExtraLen:=0; W.ExtraPos:=0;
+   If (Size>=18) And (Limit-Pos>=18) Then Begin
+    ReadAt(Pos+16,H,2); W.ExtraLen:=H[0]+H[1]*256;
+    If W.ExtraLen>Size-18 Then W.ExtraLen:=Size-18;
+    If W.ExtraLen>Limit-Pos-18 Then W.ExtraLen:=Limit-Pos-18;
+    W.ExtraPos:=Pos+18;
+   End;
+   If (W.Tag=$FFFE) And (W.ExtraLen>=22) Then Begin
+    ReadAt(W.ExtraPos+6,H,2); W.Tag:=H[0]+H[1]*256;
+    Inc(W.ExtraPos,22); Dec(W.ExtraLen,22);
+   End;
+   Fmt:=True;
+  End Else If (H[0]=100) And (H[1]=97) And (H[2]=116) And (H[3]=97) Then Begin
+   W.DataPos:=Pos; W.DataSize:=Size; If W.DataPos+W.DataSize>Limit Then W.DataSize:=Limit-W.DataPos;
+   Break;
+  End;
+  If Size>Limit-Pos Then Break;
+  Inc(Pos,Size); If Odd(Size) Then Inc(Pos);
+ End;
+ If Not Fmt Or (W.DataPos<0) Then Fail(Who+': blocs fmt/data requis.');
+End;
+
+Const
+ TSCodebook: Array[0..135] Of SmallInt=(
+ -32192,-31900,-31538,-31139,-30715,-30242,-29737,-29196,-28591,-27934,-27170,-26353,
+ -25471,-24455,-23220,-21806,-20086,-18166,-16092,-13876,-11463,-8749,-5674,-1901,
+ 2415,6858,10732,14367,17913,21610,25539,29621,-24731,-19093,-14973,-11407,
+ -8168,-5196,-2532,-167,2139,4358,6482,8522,10441,12280,14054,15762,
+ 17375,18875,20294,21607,22832,23971,25068,26105,27092,27994,28830,29613,
+ 30315,30960,31578,32165,-26888,-23628,-20667,-17837,-15183,-12596,-10129,-7650,
+ -5133,-2496,247,3104,6273,9882,14187,19808,-14764,-8462,-4182,-620,
+ 2410,5183,7803,10284,12662,14985,17311,19618,21887,24144,26392,28557,
+ -21529,-17496,-14308,-11482,-8946,-6700,-4574,-2536,-472,1615,3767,6072,
+ 8618,11659,15266,19961,-10981,-3794,1070,5063,8800,12571,16606,21381,
+ -19120,-14299,-9856,-5737,-1917,1874,6161,11800,-12560,-6919,-2373,1606,
+ 5365,9215,13679,19085);
+
+Const
+ TSPulseValues: Array[0..119] Of SmallInt=(
+ 3654,3276,2925,2600,2300,2024,1771,1540,1330,1140,969,816,
+ 680,560,455,364,286,220,165,120,84,56,35,20,
+ 10,4,1,0,0,0,406,378,351,325,300,276,
+ 253,231,210,190,171,153,136,120,105,91,78,66,
+ 55,45,36,28,21,15,10,6,3,1,0,0,
+ 29,28,27,26,25,24,23,22,21,20,19,18,
+ 17,16,15,14,13,12,11,10,9,8,7,6,
+ 5,4,3,2,1,0,1,1,1,1,1,1,
+ 1,1,1,1,1,1,1,1,1,1,1,1,
+ 1,1,1,1,1,1,1,1,1,1,1,1);
+
+Const
+ TSDecay994: Array[0..7] Of SmallInt=(
+ 32571,32376,32182,31989,31797,31606,31416,31228);
+
+Const
+ TSOrder2: Array[0..49] Of SmallInt=(
+ -4817,21049,21745,-6999,9760,-4546,2518,11328,-4171,11232,16353,13113,
+ 17455,-6402,17496,-1569,-3535,17371,15792,-2299,20347,-261,9901,3292,
+ 13250,1849,4798,17314,7135,7998,529,1942,10987,5695,1293,14904,
+ 3358,3448,5391,13126,14500,2941,11613,8159,6583,10274,3481,7954,
+ 6476,3302);
+
+Const
+ TSPulseScales: Array[0..63] Of SmallInt=(
+ 2,6,-2,-6,4,12,-4,-12,6,18,-6,-18,
+ 10,30,-10,-30,16,48,-16,-48,25,75,-25,-75,
+ 40,120,-40,-120,64,192,-64,-192,101,303,-101,-303,
+ 161,483,-161,-483,256,768,-256,-768,406,1218,-406,-1218,
+ 645,1935,-645,-1935,1024,3072,-1024,-3072,1625,4875,-1625,-4875,
+ 2580,7740,-2580,-7740);
+
+Const
+ TSDecay3564: Array[0..7] Of SmallInt=(
+ 18022,9912,5452,2998,1649,907,499,274);
+
+Const
+ TSDecay34: Array[0..7] Of SmallInt=(
+ 24576,18432,13824,10368,7776,5832,4374,3281);
+
+{ ---- DSP Group TrueSpeech ---- }
+Type
+ TTSState=Record
+  Vector: Array[0..7] Of LongInt;
+  Offset1: Array[0..1] Of LongInt;
+  Offset2,PulseOff,PulsePos,PulseVal: Array[0..3] Of LongInt;
+  Flag: LongInt;
+  FiltBuf: Array[0..145] Of LongInt;
+  PrevFilt: Array[0..7] Of LongInt;
+  Tmp1,Tmp2,Tmp3,CVector: Array[0..7] Of LongInt;
+  FiltVal: LongInt;
+  NewVec: Array[0..59] Of LongInt;
+  Filters: Array[0..31] Of LongInt;
+  Buf: Array[0..31] Of Byte; BitPos: LongInt;
+ End;
+ PTSState=^TTSState;
+
+Function TSBits(S: PTSState; N: LongInt): LongInt;
+Var V,I: LongInt;
+Begin
+ V:=0;
+ For I:=1 To N Do Begin
+  V:=V*2+((S^.Buf[S^.BitPos Shr 3] Shr (7-(S^.BitPos And 7))) And 1); Inc(S^.BitPos);
+ End;
+ TSBits:=V;
+End;
+
+Procedure TSReadFrame(S: PTSState; P: PEABuffer);
+Var I: LongInt;
+Begin
+ For I:=0 To 7 Do Begin
+  S^.Buf[I*4]:=P^[I*4+3]; S^.Buf[I*4+1]:=P^[I*4+2]; S^.Buf[I*4+2]:=P^[I*4+1]; S^.Buf[I*4+3]:=P^[I*4];
+ End;
+ S^.BitPos:=0;
+ S^.Vector[7]:=TSCodebook[128+TSBits(S,3)];
+ S^.Vector[6]:=TSCodebook[120+TSBits(S,3)];
+ S^.Vector[5]:=TSCodebook[112+TSBits(S,3)];
+ S^.Vector[4]:=TSCodebook[96+TSBits(S,4)];
+ S^.Vector[3]:=TSCodebook[80+TSBits(S,4)];
+ S^.Vector[2]:=TSCodebook[64+TSBits(S,4)];
+ S^.Vector[1]:=TSCodebook[32+TSBits(S,5)];
+ S^.Vector[0]:=TSCodebook[TSBits(S,5)];
+ S^.Flag:=TSBits(S,1);
+ S^.Offset1[0]:=TSBits(S,4) Shl 4;
+ S^.Offset2[3]:=TSBits(S,7); S^.Offset2[2]:=TSBits(S,7); S^.Offset2[1]:=TSBits(S,7); S^.Offset2[0]:=TSBits(S,7);
+ S^.Offset1[1]:=TSBits(S,4);
+ S^.PulseVal[1]:=TSBits(S,14); S^.PulseVal[0]:=TSBits(S,14);
+ S^.Offset1[1]:=S^.Offset1[1] Or (TSBits(S,4) Shl 4);
+ S^.PulseVal[3]:=TSBits(S,14); S^.PulseVal[2]:=TSBits(S,14);
+ S^.Offset1[0]:=S^.Offset1[0] Or TSBits(S,1);
+ S^.PulsePos[0]:=TSBits(S,27); S^.PulseOff[0]:=TSBits(S,4);
+ S^.Offset1[0]:=S^.Offset1[0] Or (TSBits(S,1) Shl 1);
+ S^.PulsePos[1]:=TSBits(S,27); S^.PulseOff[1]:=TSBits(S,4);
+ S^.Offset1[0]:=S^.Offset1[0] Or (TSBits(S,1) Shl 2);
+ S^.PulsePos[2]:=TSBits(S,27); S^.PulseOff[2]:=TSBits(S,4);
+ S^.Offset1[0]:=S^.Offset1[0] Or (TSBits(S,1) Shl 3);
+ S^.PulsePos[3]:=TSBits(S,27); S^.PulseOff[3]:=TSBits(S,4);
+End;
+
+Procedure TSCorrelate(S: PTSState);
+Var Tmp: Array[0..7] Of LongInt; I,J: LongInt;
+Begin
+ For I:=0 To 7 Do Begin
+  If I>0 Then Begin
+   For J:=0 To I-1 Do Tmp[J]:=S^.CVector[J];
+   For J:=0 To I-1 Do
+    S^.CVector[J]:=GAW16(S^.CVector[J]+GASar(Tmp[I-J-1]*S^.Vector[I]+$4000,15));
+  End;
+  S^.CVector[I]:=GASar(8-S^.Vector[I],3);
+ End;
+ For I:=0 To 7 Do S^.CVector[I]:=GASar(S^.CVector[I]*TSDecay994[I],15);
+ S^.FiltVal:=S^.Vector[0];
+End;
+
+Procedure TSMerge(S: PTSState);
+Var I: LongInt;
+Begin
+ If S^.Flag=0 Then Begin
+  For I:=0 To 7 Do Begin S^.Filters[I]:=S^.PrevFilt[I]; S^.Filters[I+8]:=S^.PrevFilt[I]; End;
+ End Else Begin
+  For I:=0 To 7 Do Begin
+   S^.Filters[I]:=GAW16(GASar(Int64(S^.CVector[I])*21846+Int64(S^.PrevFilt[I])*10923+16384,15));
+   S^.Filters[I+8]:=GAW16(GASar(Int64(S^.CVector[I])*10923+Int64(S^.PrevFilt[I])*21846+16384,15));
+  End;
+ End;
+ For I:=0 To 7 Do Begin S^.Filters[I+16]:=S^.CVector[I]; S^.Filters[I+24]:=S^.CVector[I]; End;
+End;
+
+Procedure TSTwoPoint(S: PTSState; Quart: LongInt);
+Var Tmp: Array[0..205] Of LongInt; I,T,Off,P0,F: LongInt;
+Begin
+ T:=S^.Offset2[Quart];
+ If T=127 Then Begin FillChar(S^.NewVec,SizeOf(S^.NewVec),0); Exit; End;
+ For I:=0 To 145 Do Tmp[I]:=GAW16(S^.FiltBuf[I]);
+ For I:=146 To 205 Do Tmp[I]:=0;
+ Off:=(T Div 25)+S^.Offset1[Quart Shr 1]+18;
+ If Off<0 Then Off:=0 Else If Off>145 Then Off:=145;
+ P0:=145-Off; F:=(T Mod 25)*2;
+ For I:=0 To 59 Do Begin
+  T:=GASar(GAS32(Int64(Tmp[P0])*TSOrder2[F]+Int64(Tmp[P0+1])*TSOrder2[F+1]+$2000),14);
+  Inc(P0);
+  S^.NewVec[I]:=GAW16(T);
+  Tmp[146+I]:=GAW16(T);
+ End;
+End;
+
+Procedure TSPlacePulses(S: PTSState; Out_: PGAI32; Base,Quart: LongInt);
+Var Tmp: Array[0..6] Of LongInt; I,J,T,Coef,P1,P2: LongInt;
+Begin
+ For I:=0 To 59 Do Out_^[Base+I]:=0;
+ For I:=0 To 6 Do Begin
+  T:=S^.PulseVal[Quart] And 3; S^.PulseVal[Quart]:=S^.PulseVal[Quart] Shr 2;
+  Tmp[6-I]:=TSPulseScales[S^.PulseOff[Quart]*4+T];
+ End;
+ Coef:=S^.PulsePos[Quart] Shr 15; P1:=30; P2:=0; I:=0; J:=3;
+ While (I<30) And (J>0) Do Begin
+  T:=TSPulseValues[P1]; Inc(P1);
+  If Coef>=T Then Dec(Coef,T) Else Begin
+   Out_^[Base+I]:=Tmp[P2]; Inc(P2); Inc(P1,30); Dec(J);
+  End;
+  Inc(I);
+ End;
+ Coef:=S^.PulsePos[Quart] And $7FFF; P1:=0; I:=30; J:=4;
+ While (I<60) And (J>0) Do Begin
+  T:=TSPulseValues[P1]; Inc(P1);
+  If Coef>=T Then Dec(Coef,T) Else Begin
+   Out_^[Base+I]:=Tmp[P2]; Inc(P2); Inc(P1,30); Dec(J);
+  End;
+  Inc(I);
+ End;
+End;
+
+Procedure TSUpdate(S: PTSState; Out_: PGAI32; Base: LongInt);
+Var I: LongInt;
+Begin
+ Move(S^.FiltBuf[60],S^.FiltBuf[0],86*4);
+ For I:=0 To 59 Do Begin
+  S^.FiltBuf[I+86]:=Out_^[Base+I]+S^.NewVec[I]-GASar(S^.NewVec[I],3);
+  Out_^[Base+I]:=GAW16(Out_^[Base+I]+S^.NewVec[I]);
+ End;
+End;
+
+Procedure TSSynth(S: PTSState; Out_: PGAI32; Base,Quart: LongInt);
+Var I,K,Q,Sm: LongInt; T: Array[0..7] Of LongInt; Sum: Int64;
+Begin
+ Q:=Quart*8;
+ For I:=0 To 59 Do Begin
+  Sum:=0;
+  For K:=0 To 7 Do Sum:=Sum+Int64(S^.Tmp1[K])*S^.Filters[Q+K];
+  Sm:=Out_^[Base+I]+GASar(GAS32(Sum+$800),12);
+  If Sm>$7FFE Then Sm:=$7FFE Else If Sm<-$7FFE Then Sm:=-$7FFE;
+  Out_^[Base+I]:=Sm;
+  For K:=7 DownTo 1 Do S^.Tmp1[K]:=S^.Tmp1[K-1];
+  S^.Tmp1[0]:=Sm;
+ End;
+ For I:=0 To 7 Do T[I]:=GASar(TSDecay3564[I]*S^.Filters[Q+I],15);
+ For I:=0 To 59 Do Begin
+  Sum:=0;
+  For K:=0 To 7 Do Sum:=Sum+Int64(S^.Tmp2[K])*T[K];
+  Sm:=GAS32(Sum);
+  For K:=7 DownTo 1 Do S^.Tmp2[K]:=S^.Tmp2[K-1];
+  S^.Tmp2[0]:=Out_^[Base+I];
+  Out_^[Base+I]:=GAW16(Out_^[Base+I]+GASar(-Int64(Sm),12));
+ End;
+ For I:=0 To 7 Do T[I]:=GASar(TSDecay34[I]*S^.Filters[Q+I],15);
+ For I:=0 To 59 Do Begin
+  Sum:=Int64(Out_^[Base+I])*4096;
+  For K:=0 To 7 Do Sum:=Sum+Int64(S^.Tmp3[K])*T[K];
+  Sm:=GAS32(Sum);
+  For K:=7 DownTo 1 Do S^.Tmp3[K]:=S^.Tmp3[K-1];
+  K:=GASar(GAS32(Int64(Sm)+$800),12);
+  If K>$7FFE Then K:=$7FFE Else If K<-$7FFE Then K:=-$7FFE;
+  S^.Tmp3[0]:=K;
+  Sm:=GAS32(GASar(Int64(S^.Tmp3[1])*(S^.FiltVal-GASar(S^.FiltVal,2)),4)+Sm);
+  Sm:=GAS32(Int64(Sm)-GASar(Sm,3));
+  Sm:=GASar(GAS32(Int64(Sm)+$800),12);
+  If Sm>$7FFE Then Sm:=$7FFE Else If Sm<-$7FFE Then Sm:=-$7FFE;
+  Out_^[Base+I]:=Sm;
+ End;
+End;
+
+{ Une trame de 32 octets -> 240 echantillons dans Out_ (puis EAPut par l'appelant). }
+Procedure TSDecodeOne(S: PTSState; Pk: PEABuffer; Out_: PGAI32);
+Var Q,I: LongInt;
+Begin
+ TSReadFrame(S,Pk);
+ TSCorrelate(S); TSMerge(S);
+ For Q:=0 To 3 Do Begin
+  TSTwoPoint(S,Q); TSPlacePulses(S,Out_,Q*60,Q); TSUpdate(S,Out_,Q*60); TSSynth(S,Out_,Q*60,Q);
+ End;
+ For I:=0 To 7 Do S^.PrevFilt[I]:=S^.CVector[I];
+End;
+
+Procedure DecodeTrueSpeech(Const Source,Target: String);
+Var
+ W: TGAWav; S: PTSState; Pk: PEABuffer; Out_: PGAI32; Frames,F,I: LongInt;
+Begin
+ OpenRead(Source); GAWavParse(W,'truespeech');
+ If W.Tag<>$22 Then Fail('truespeech: WAV de type 0x22 requis.');
+ If W.Chn<>1 Then Fail('truespeech: un seul canal pris en charge.');
+ If (W.Rate<1) Or (W.Rate>4000000) Then Fail('truespeech: frequence incorrecte.');
+ Frames:=W.DataSize Div 32;
+ New(S); FillChar(S^,SizeOf(S^),0);
+ GetMem(Out_,240*4+64);
+ EAReset; OpenWrite(Target); ADPCMWaveHeader(W.Rate,1,0);
+ GetMem(Pk,32+16);
+ For F:=0 To Frames-1 Do Begin
+  ReadAt(W.DataPos+F*32,Pk^,32);
+  TSDecodeOne(S,Pk,Out_);
+  For I:=0 To 239 Do EAPut(Out_^[I]);
+ End;
+ FreeMem(Pk); FreeMem(Out_); Dispose(S); EAFlush;
+ ADPCMPatchHeader(W.Rate,1,EAWritten);
+ CloseRead; CloseWrite;
+End;
+
+{ ---- TTA (True Audio) : conteneur .tta + decodeur ---- }
+Type
+ TTTAChan=Record
+  Predictor,Shift,Round_,Error: LongInt;
+  Qm,Dx,Dl: Array[0..7] Of LongInt;
+  K0,K1: LongInt; Sum0,Sum1: Int64;
+ End;
+ TTTAChanArr=Array[0..15] Of TTTAChan; PTTAChanArr=^TTTAChanArr;
+Const
+ TTAFilterCfg: Array[0..3] Of LongInt=(10,9,10,12);
+
+Function TTAShift1(I: LongInt): Int64;
+Begin
+ If I<=31 Then TTAShift1:=Int64(1) Shl I
+ Else If I<=39 Then TTAShift1:=Int64($80000000)
+ Else TTAShift1:=Int64($FFFFFFFF);
+End;
+
+Procedure TTAInitChan(Var C: TTTAChan; Bps: LongInt);
+Begin
+ FillChar(C,SizeOf(C),0);
+ C.Shift:=TTAFilterCfg[Bps-1]; C.Round_:=1 Shl (C.Shift-1);
+ C.K0:=10; C.K1:=10; C.Sum0:=TTAShift1(14); C.Sum1:=TTAShift1(14);
+End;
+
+{ Un paquet TTA. Retourne False en cas d'erreur (trame ignoree comme FFmpeg). Out_ recoit NSamples*Chn echantillons. }
+Function TTADecodeFrame(Pk: PEABuffer; PkSize,Chn,Bps,FrameLen,LastLen: LongInt; Ch: PTTAChanArr;
+ Out_: PGAI32; Var NSamples: LongInt): Boolean;
+Var
+ BitPos,NBits: Int64; P,Total,Cur,I,Unary,Depth,K,Value,Cnt,R,Fl: LongInt;
+ Pr: ^TTTAChan; X,Rd,Q: Int64;
+Function Left: Int64; Begin Left:=NBits-BitPos; End;
+Function Bit1: LongInt;
+Begin
+ Bit1:=(Pk^[BitPos Shr 3] Shr (BitPos And 7)) And 1; Inc(BitPos);
+End;
+Function Bits(N: LongInt): Int64;
+Var V: Int64; J: LongInt;
+Begin
+ V:=0; For J:=0 To N-1 Do V:=V Or (Int64(Bit1) Shl J); Bits:=V;
+End;
+Function P32(V: Int64): Int64;
+Begin P32:=V And $FFFFFFFF; End;
+Begin
+ TTADecodeFrame:=False; BitPos:=0; NBits:=Int64(PkSize)*8; NSamples:=FrameLen;
+ For I:=0 To Chn-1 Do TTAInitChan(Ch^[I],Bps);
+ Total:=FrameLen*Chn; Cur:=0; P:=0; Cnt:=0;
+ While P<Total Do Begin
+  Pr:=@Ch^[Cur];
+  Unary:=0; I:=Left; Fl:=1;
+  While Fl<>0 Do Begin
+   If Unary>=I Then Break;
+   Fl:=Bit1; If Fl<>0 Then Inc(Unary);
+  End;
+  If Unary=0 Then Begin Depth:=0; K:=Pr^.K0; End Else Begin Depth:=1; K:=Pr^.K1; Dec(Unary); End;
+  If Left<K Then Exit;
+  If K<>0 Then Begin
+   If (K>25) Or (Unary>(Int64($7FFFFFFF) Shr K)) Then Exit;
+   Value:=GAS32((Int64(Unary) Shl K)+Bits(K));
+  End Else Value:=Unary;
+  If Depth=1 Then Begin
+   Pr^.Sum1:=P32(Pr^.Sum1+Value-(Pr^.Sum1 Shr 4));
+   If (Pr^.K1>0) And (Pr^.Sum1<TTAShift1(Pr^.K1+4)) Then Dec(Pr^.K1)
+   Else If Pr^.Sum1>TTAShift1(Pr^.K1+5) Then Inc(Pr^.K1);
+   Value:=GAS32(Int64(Value)+TTAShift1(Pr^.K0));
+  End;
+  Pr^.Sum0:=P32(Pr^.Sum0+Value-(Pr^.Sum0 Shr 4));
+  If (Pr^.K0>0) And (Pr^.Sum0<TTAShift1(Pr^.K0+4)) Then Dec(Pr^.K0)
+  Else If Pr^.Sum0>TTAShift1(Pr^.K0+5) Then Inc(Pr^.K0);
+  { valeur codee }
+  If Odd(Value) Then Fl:=0 Else Fl:=-1;
+  X:=P32(1+(GASar(Value,1) Xor Fl));
+  { filtre hybride }
+  Fl:=Pr^.Error;
+  If Fl<0 Then Begin
+   For I:=0 To 7 Do Pr^.Qm[I]:=GAS32(Int64(Pr^.Qm[I])-Pr^.Dx[I]);
+  End Else If Fl>0 Then Begin
+   For I:=0 To 7 Do Pr^.Qm[I]:=GAS32(Int64(Pr^.Qm[I])+Pr^.Dx[I]);
+  End;
+  Rd:=Pr^.Round_;
+  For I:=0 To 7 Do Rd:=Rd+Int64(Pr^.Dl[I])*Pr^.Qm[I];
+  Q:=GAS32(Rd);
+  For I:=0 To 2 Do Begin Pr^.Dx[I]:=Pr^.Dx[I+1]; Pr^.Dl[I]:=Pr^.Dl[I+1]; End;
+  Pr^.Dx[3]:=Pr^.Dx[4]; Pr^.Dl[3]:=Pr^.Dl[4];
+  Pr^.Dx[4]:=GASar(Pr^.Dl[4],30) Or 1;
+  Pr^.Dx[5]:=(GASar(Pr^.Dl[5],30) Or 2) And Not 1;
+  Pr^.Dx[6]:=(GASar(Pr^.Dl[6],30) Or 2) And Not 1;
+  Pr^.Dx[7]:=(GASar(Pr^.Dl[7],30) Or 4) And Not 3;
+  Pr^.Error:=GAS32(X);
+  X:=P32(X+GASar(Q,Pr^.Shift));
+  Pr^.Dl[4]:=GAS32(-Int64(Pr^.Dl[5])); Pr^.Dl[5]:=GAS32(-Int64(Pr^.Dl[6]));
+  Pr^.Dl[6]:=GAS32(X-Pr^.Dl[7]); Pr^.Dl[7]:=GAS32(X);
+  Pr^.Dl[5]:=GAS32(Int64(Pr^.Dl[5])+Pr^.Dl[6]); Pr^.Dl[4]:=GAS32(Int64(Pr^.Dl[4])+Pr^.Dl[5]);
+  { prediction d'ordre fixe : (int32)((((uint64)x<<k)-x)>>k) = (x*(2^k-1))>>k arithmetique }
+  If Bps=1 Then K:=4 Else K:=5;
+  Rd:=GASar(Int64(Pr^.Predictor)*((1 Shl K)-1),K);
+  X:=P32(X+Rd);
+  Pr^.Predictor:=GAS32(X);
+  Out_^[P]:=GAS32(X);
+  If Cur<Chn-1 Then Inc(Cur) Else Begin
+   If Chn>1 Then Begin
+    R:=P-1;
+    Out_^[P]:=GAS32(Int64(Out_^[P])+(Out_^[R] Div 2));
+    While R>P-Chn Do Begin
+     Out_^[R]:=GAS32(Int64(Out_^[R+1])-Out_^[R]); Dec(R);
+    End;
+   End;
+   Cur:=0; Inc(Cnt);
+   If (Cnt=LastLen) And (Left Div 8=4) Then Begin NSamples:=LastLen; Break; End;
+  End;
+  Inc(P);
+ End;
+ BitPos:=(BitPos+7) And Not Int64(7);
+ If Left<32 Then Exit;
+ TTADecodeFrame:=True;
+End;
+
+Function GALE32(P: PEABuffer; At: LongInt): Int64;
+Begin
+ GALE32:=Int64(P^[At])+Int64(P^[At+1])*256+Int64(P^[At+2])*65536+Int64(P^[At+3])*16777216;
+End;
+
+Procedure DecodeTTA(Const Source,Target: String);
+Var
+ H: Array[0..31] Of Byte; Hd,Pk: PEABuffer; Sizes: PGAI32; Limit,FramePos,Size,NS,DataLen: Int64;
+ Fmt,Chn,Bits,Bps,Rate,FrameSize,FrameLen,LastLen,Total,LastSize,F,I,N,Take: LongInt;
+ Ch: PTTAChanArr; Buf: PGAI32; Ok: Boolean; V: LongInt;
+Begin
+ OpenRead(Source); Limit:=InputSize;
+ If Limit<22 Then Fail('tta: fichier trop court.');
+ Hd:=GALoad(0,22);
+ If GALE32(Hd,0)<>$31415454 Then Fail('tta: signature TTA1 requise.');
+ Fmt:=Hd^[4]+Hd^[5]*256; Chn:=Hd^[6]+Hd^[7]*256; Bits:=Hd^[8]+Hd^[9]*256;
+ Rate:=GALE32(Hd,10); NS:=GALE32(Hd,14); DataLen:=NS;
+ If (Rate<=0) Or (Rate>1000000) Then Fail('tta: frequence incorrecte.');
+ If NS=0 Then Fail('tta: nombre d''echantillons incorrect.');
+ FrameSize:=Rate*256 Div 245; LastSize:=NS Mod FrameSize; If LastSize=0 Then LastSize:=FrameSize;
+ Total:=NS Div FrameSize; If LastSize<FrameSize Then Inc(Total);
+ If Total<=0 Then Fail('tta: nombre de trames incorrect.');
+ { decodeur }
+ If Fmt>2 Then Fail('tta: format incorrect.');
+ If Fmt=2 Then Fail('tta: mot de passe requis pour un flux chiffre.');
+ If (Chn=0) Or (Chn>16) Then Fail('tta: nombre de canaux incorrect.');
+ Bps:=(Bits+7) Div 8;
+ If (Bps<1) Or (Bps>3) Then Fail('tta: format d''echantillon non pris en charge.');
+ FrameLen:=FrameSize; LastLen:=NS Mod FrameLen;
+ If 22+Int64(Total)*4+4>Limit Then Fail('tta: table de positions tronquee.');
+ Sizes:=PGAI32(GALoad(22,Total*4));
+ FramePos:=22+Int64(Total)*4+4;
+ New(Ch); GetMem(Buf,Int64(FrameLen)*Chn*4+64);
+ EAReset; OpenWrite(Target); ADPCMWaveHeader(Rate,Chn,0);
+ For F:=0 To Total-1 Do Begin
+  Size:=Int64(Sizes^[F]) And $FFFFFFFF;
+  If FramePos>=Limit Then Break;
+  If Size>Limit-FramePos Then Size:=Limit-FramePos;
+  Pk:=GALoad(FramePos,Size); Inc(FramePos,Size);
+  Ok:=TTADecodeFrame(Pk,Size,Chn,Bps,FrameLen,LastLen,Ch,Buf,N);
+  FreeMem(Pk);
+  If Ok Then
+   For I:=0 To N*Chn-1 Do Begin
+    V:=Buf^[I];
+    Case Bps Of
+     1: V:=(((V+128) And 255)-128)*256;
+     2: V:=GAW16(V);
+    Else V:=GASar(GAS32(Int64(V)*256),16);
+    End;
+    EAPut(V);
+   End;
+ End;
+ FreeMem(Buf); Dispose(Ch); FreeMem(Sizes); FreeMem(Hd); EAFlush;
+ ADPCMPatchHeader(Rate,Chn,EAWritten);
+ CloseRead; CloseWrite;
+End;
+
+Const
+ WVExp2Tab: Array[0..255] Of Byte=(
+ 0,1,1,2,3,3,4,5,6,6,7,8,8,9,10,11,
+ 11,12,13,14,14,15,16,16,17,18,19,19,20,21,22,22,
+ 23,24,25,25,26,27,28,29,29,30,31,32,32,33,34,35,
+ 36,36,37,38,39,40,40,41,42,43,44,44,45,46,47,48,
+ 48,49,50,51,52,53,53,54,55,56,57,58,58,59,60,61,
+ 62,63,64,65,65,66,67,68,69,70,71,72,72,73,74,75,
+ 76,77,78,79,80,81,81,82,83,84,85,86,87,88,89,90,
+ 91,92,93,94,94,95,96,97,98,99,100,101,102,103,104,105,
+ 106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,
+ 122,123,124,125,126,127,128,129,130,131,132,133,135,136,137,138,
+ 139,140,141,142,143,144,145,146,147,149,150,151,152,153,154,155,
+ 156,157,159,160,161,162,163,164,165,166,168,169,170,171,172,173,
+ 175,176,177,178,179,180,182,183,184,185,186,188,189,190,191,192,
+ 194,195,196,197,198,200,201,202,203,205,206,207,208,210,211,212,
+ 214,215,216,217,219,220,221,222,224,225,226,228,229,230,232,233,
+ 234,236,237,238,240,241,242,244,245,246,248,249,250,252,253,255);
+
+Const
+ WVLog2Tab: Array[0..255] Of Byte=(
+ 0,1,3,4,6,7,9,10,11,13,14,16,17,18,20,21,
+ 22,24,25,26,28,29,30,32,33,34,36,37,38,40,41,42,
+ 44,45,46,47,49,50,51,52,54,55,56,57,59,60,61,62,
+ 63,65,66,67,68,69,71,72,73,74,75,77,78,79,80,81,
+ 82,84,85,86,87,88,89,90,92,93,94,95,96,97,98,99,
+ 100,102,103,104,105,106,107,108,109,110,111,112,113,114,116,117,
+ 118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,
+ 134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,
+ 150,151,152,153,154,155,155,156,157,158,159,160,161,162,163,164,
+ 165,166,167,168,169,169,170,171,172,173,174,175,176,177,178,178,
+ 179,180,181,182,183,184,185,185,186,187,188,189,190,191,192,192,
+ 193,194,195,196,197,198,198,199,200,201,202,203,203,204,205,206,
+ 207,208,208,209,210,211,212,212,213,214,215,216,216,217,218,219,
+ 220,220,221,222,223,224,224,225,226,227,228,228,229,230,231,231,
+ 232,233,234,234,235,236,237,238,238,239,240,241,241,242,243,244,
+ 244,245,246,247,247,248,249,249,250,251,252,252,253,254,255,255);
+
+{ ---- WavPack : demuxeur .wv + decodeur (PCM entier, flottant, hybride; DSD non pris en charge) ---- }
+Const
+ WVRates: Array[0..15] Of LongInt=(6000,8000,9600,11025,12000,16000,22050,24000,32000,44100,48000,64000,88200,96000,192000,0);
+Type
+ TWVDecorr=Record
+  Delta,Value,WeightA,WeightB: LongInt;
+  SamplesA,SamplesB: Array[0..7] Of LongInt;
+ End;
+ TWVChan=Record
+  Median: Array[0..2] Of LongInt;
+  SlowLevel,ErrorLimit: LongInt;
+  BitrateAcc,BitrateDelta: Int64;
+ End;
+ PWVChan=^TWVChan;
+ TWVBits=Record
+  Buf: PEABuffer; BufLen,Base: LongInt; SizeBits,Idx: Int64;
+ End;
+ PWVBits=^TWVBits;
+ TWVBlk=Record
+  FrameFlags: Int64;
+  Stereo,StereoIn,Joint,Hybrid,HybridBitrate: LongInt;
+  Samples,Terms,Zero,One,Zeroes,ExtraBits,And_,Or_,Shift,PostShift: LongInt;
+  HybridMaxClip,HybridMinClip,FloatFlag,FloatShift,FloatMaxExp: LongInt;
+  GotExtraBits: Boolean;
+  Gb,GbExtra: TWVBits;
+  Decorr: Array[0..15] Of TWVDecorr;
+  Ch: Array[0..1] Of TWVChan;
+ End;
+ PWVBlk=^TWVBlk;
+ TWVPlanes=Array[0..4095] Of PGAI32;
+ PWVPlanes=^TWVPlanes;
+Var
+ WVLast: Boolean;
+
+Function WVRaw(G: PWVBits; At: Int64): LongInt;
+Var P: Int64;
+Begin
+ P:=G^.Base+(At Shr 3);
+ If (P>=0) And (P<G^.BufLen) Then WVRaw:=(G^.Buf^[P] Shr (At And 7)) And 1 Else WVRaw:=0;
+End;
+
+{ Comme le lecteur de bits de FFmpeg : les bits lus au-dela de la fin viennent des octets suivants,
+  mais l'index est plafonne a size_in_bits+8 (LAST_SKIP_BITS). }
+Procedure WVAdv(G: PWVBits; N: LongInt);
+Begin
+ G^.Idx:=G^.Idx+N;
+ If G^.Idx>G^.SizeBits+8 Then G^.Idx:=G^.SizeBits+8;
+End;
+
+Function WVBit(G: PWVBits): LongInt;
+Begin
+ WVBit:=WVRaw(G,G^.Idx); WVAdv(G,1);
+End;
+
+Function WVBitsN(G: PWVBits; N: LongInt): Int64;
+Var V,Lo: Int64; J: LongInt;
+Begin
+ If N<=0 Then Begin WVBitsN:=0; Exit; End;
+ If N<=25 Then Begin
+  V:=0; For J:=0 To N-1 Do V:=V Or (Int64(WVRaw(G,G^.Idx+J)) Shl J);
+  WVAdv(G,N); WVBitsN:=V;
+ End Else Begin
+  Lo:=WVBitsN(G,16); V:=WVBitsN(G,N-16);
+  WVBitsN:=Lo Or (V Shl 16);
+ End;
+End;
+
+Function WVLeft(G: PWVBits): Int64;
+Begin WVLeft:=G^.SizeBits-G^.Idx; End;
+
+Function WVUnary033(G: PWVBits): LongInt;
+Var I: LongInt; Stop: Boolean;
+Begin
+ I:=0; Stop:=False;
+ While (I<33) And Not Stop Do Begin
+  If WVBit(G)<>0 Then Inc(I) Else Stop:=True;
+ End;
+ WVUnary033:=I;
+End;
+
+Function WVU32(V: Int64): Int64;
+Begin WVU32:=V And $FFFFFFFF; End;
+
+Function WVLog2(V: Int64): LongInt;
+Var R: LongInt;
+Begin
+ R:=0; While V>1 Do Begin V:=V Shr 1; Inc(R); End; WVLog2:=R;
+End;
+
+Function WVExp2(Val: LongInt): LongInt;
+Var Res,Neg: LongInt;
+Begin
+ Val:=GAW16(Val); Neg:=0;
+ If Val<0 Then Begin Val:=GAW16(-Val); Neg:=1; End;
+ Res:=WVExp2Tab[Val And $FF] Or $100;
+ Val:=GASar(Val,8);
+ If (Val<0) Or (Val>31) Then Begin WVExp2:=-2147483647-1; Exit; End;
+ If Val>9 Then Res:=Res Shl (Val-9) Else Res:=Res Shr (9-Val);
+ If Neg<>0 Then WVExp2:=-Res Else WVExp2:=Res;
+End;
+
+Function WVLogTab(V: Int64): LongInt;
+Var Bits: LongInt;
+Begin
+ V:=WVU32(V);
+ If V=0 Then Begin WVLogTab:=0; Exit; End;
+ If V=1 Then Begin WVLogTab:=256; Exit; End;
+ V:=WVU32(V+(V Shr 9));
+ Bits:=WVLog2(V)+1;
+ If Bits<9 Then WVLogTab:=(Bits Shl 8)+WVLog2Tab[(V Shl (9-Bits)) And $FF]
+ Else WVLogTab:=(Bits Shl 8)+WVLog2Tab[(V Shr (Bits-9)) And $FF];
+End;
+
+Function WVLevelDecay(A: LongInt): LongInt;
+Begin WVLevelDecay:=GASar(GAS32(Int64(A)+$80),8); End;
+
+Function WVGetTail(G: PWVBits; K: Int64): Int64;
+Var P: LongInt; E,Res: Int64;
+Begin
+ If K<1 Then Begin WVGetTail:=0; Exit; End;
+ P:=WVLog2(K);
+ E:=GAS32((Int64(1) Shl (P+1))-K-1);
+ Res:=GAS32(WVBitsN(G,P));
+ If Res>=E Then Res:=WVU32(Res*2-E+WVBit(G));
+ WVGetTail:=Res;
+End;
+
+Function WVUpdateErrorLimit(B: PWVBlk): Boolean;
+Var I: LongInt; Br,Sl: Array[0..1] Of LongInt; Balance: LongInt;
+Begin
+ WVUpdateErrorLimit:=False;
+ For I:=0 To B^.StereoIn Do Begin
+  If B^.Ch[I].BitrateAcc>$FFFFFFFF-B^.Ch[I].BitrateDelta Then Exit;
+  B^.Ch[I].BitrateAcc:=B^.Ch[I].BitrateAcc+B^.Ch[I].BitrateDelta;
+  Br[I]:=B^.Ch[I].BitrateAcc Shr 16;
+  Sl[I]:=WVLevelDecay(B^.Ch[I].SlowLevel);
+ End;
+ If (B^.StereoIn<>0) And (B^.HybridBitrate<>0) Then Begin
+  Balance:=GASar(Sl[1]-Sl[0]+Br[1]+1,1);
+  If Balance>Br[0] Then Begin Br[1]:=Br[0]*2; Br[0]:=0; End
+  Else If -Balance>Br[0] Then Begin Br[0]:=Br[0]*2; Br[1]:=0; End
+  Else Begin Br[1]:=Br[0]+Balance; Br[0]:=Br[0]-Balance; End;
+ End;
+ For I:=0 To B^.StereoIn Do Begin
+  If B^.HybridBitrate<>0 Then Begin
+   If Sl[I]-Br[I]>-$100 Then B^.Ch[I].ErrorLimit:=WVExp2(Sl[I]-Br[I]+$100) Else B^.Ch[I].ErrorLimit:=0;
+  End Else B^.Ch[I].ErrorLimit:=WVExp2(Br[I]);
+ End;
+ WVUpdateErrorLimit:=True;
+End;
+
+Procedure WVDecMed(Q: PWVChan; N: LongInt);
+Var V: Int64;
+Begin
+ V:=GAS32(Int64(Q^.Median[N])+(128 Shr N)-2);
+ V:=V Div (128 Shr N);
+ Q^.Median[N]:=GAS32(Int64(Q^.Median[N])-V*2);
+End;
+
+Procedure WVIncMed(Q: PWVChan; N: LongInt);
+Var V: Int64;
+Begin
+ V:=GAS32(Int64(Q^.Median[N])+(128 Shr N));
+ V:=V Div (128 Shr N);
+ Q^.Median[N]:=GAS32(Int64(Q^.Median[N])+V*5);
+End;
+
+Function WVGetValue(B: PWVBlk; Channel: LongInt): LongInt;
+Var
+ T,T2,Sign,Base,Add,Ret,Mid: LongInt; C: PWVChan; G: PWVBits; Bad: Boolean;
+Function UL2(V: LongInt): Boolean; Begin UL2:=(V>=0) And (V<2); End;
+Function GM(N: LongInt): LongInt; Begin GM:=GASar(C^.Median[N],4)+1; End;
+Begin
+ WVLast:=False; C:=@B^.Ch[Channel]; G:=@B^.Gb; Bad:=False; WVGetValue:=0;
+ Repeat
+  If UL2(B^.Ch[0].Median[0]) And UL2(B^.Ch[1].Median[0]) And (B^.Zero=0) And (B^.One=0) Then Begin
+   If B^.Zeroes<>0 Then Begin
+    Dec(B^.Zeroes);
+    If B^.Zeroes<>0 Then Begin
+     C^.SlowLevel:=GAS32(Int64(C^.SlowLevel)-WVLevelDecay(C^.SlowLevel)); Exit;
+    End;
+   End Else Begin
+    T:=WVUnary033(G);
+    If T>=2 Then Begin
+     If (T>=32) Or (WVLeft(G)<T-1) Then Begin Bad:=True; Break; End;
+     T:=GAS32(WVBitsN(G,T-1) Or (Int64(1) Shl (T-1)));
+    End Else Begin
+     If WVLeft(G)<0 Then Begin Bad:=True; Break; End;
+    End;
+    B^.Zeroes:=T;
+    If B^.Zeroes<>0 Then Begin
+     FillChar(B^.Ch[0].Median,SizeOf(B^.Ch[0].Median),0);
+     FillChar(B^.Ch[1].Median,SizeOf(B^.Ch[1].Median),0);
+     C^.SlowLevel:=GAS32(Int64(C^.SlowLevel)-WVLevelDecay(C^.SlowLevel)); Exit;
+    End;
+   End;
+  End;
+  If B^.Zero<>0 Then Begin
+   T:=0; B^.Zero:=0;
+  End Else Begin
+   T:=WVUnary033(G);
+   If WVLeft(G)<0 Then Begin Bad:=True; Break; End;
+   If T=16 Then Begin
+    T2:=WVUnary033(G);
+    If T2<2 Then Begin
+     If WVLeft(G)<0 Then Begin Bad:=True; Break; End;
+     Inc(T,T2);
+    End Else Begin
+     If (T2>=32) Or (WVLeft(G)<T2-1) Then Begin Bad:=True; Break; End;
+     T:=GAS32(Int64(T)+(WVBitsN(G,T2-1) Or (Int64(1) Shl (T2-1))));
+    End;
+   End;
+   If B^.One<>0 Then Begin
+    B^.One:=T And 1; T:=GASar(T,1)+1;
+   End Else Begin
+    B^.One:=T And 1; T:=GASar(T,1);
+   End;
+   If B^.One<>0 Then B^.Zero:=0 Else B^.Zero:=1;
+  End;
+  If (B^.Hybrid<>0) And (Channel=0) Then Begin
+   If Not WVUpdateErrorLimit(B) Then Begin Bad:=True; Break; End;
+  End;
+  If T=0 Then Begin
+   Base:=0; Add:=GM(0)-1; WVDecMed(C,0);
+  End Else If T=1 Then Begin
+   Base:=GM(0); Add:=GM(1)-1; WVIncMed(C,0); WVDecMed(C,1);
+  End Else If T=2 Then Begin
+   Base:=GM(0)+GM(1); Add:=GM(2)-1; WVIncMed(C,0); WVIncMed(C,1); WVDecMed(C,2);
+  End Else Begin
+   Base:=GAS32(Int64(GM(0))+GM(1)+WVU32(Int64(GM(2))*WVU32(Int64(T)-2)));
+   Add:=GM(2)-1; WVIncMed(C,0); WVIncMed(C,1); WVIncMed(C,2);
+  End;
+  If C^.ErrorLimit=0 Then Begin
+   Ret:=GAS32(Int64(Base)+WVGetTail(G,WVU32(Add)));
+   If WVLeft(G)<=0 Then Begin Bad:=True; Break; End;
+  End Else Begin
+   Mid:=GAS32(WVU32(WVU32(Base)*2+WVU32(Add)+1) Shr 1);
+   While (Add>C^.ErrorLimit) And Not Bad Do Begin
+    If WVLeft(G)<=0 Then Bad:=True Else Begin
+     If WVBit(G)<>0 Then Begin
+      Add:=GAS32(Int64(Add)-WVU32(Int64(Mid)-Base)); Base:=Mid;
+     End Else Add:=GAS32(Int64(Mid)-Base-1);
+     Mid:=GAS32(WVU32(WVU32(Base)*2+WVU32(Add)+1) Shr 1);
+    End;
+   End;
+   If Bad Then Break;
+   Ret:=Mid;
+  End;
+  Sign:=WVBit(G);
+  If B^.HybridBitrate<>0 Then C^.SlowLevel:=GAS32(Int64(C^.SlowLevel)+WVLogTab(WVU32(Ret))-WVLevelDecay(C^.SlowLevel));
+  If Sign<>0 Then WVGetValue:=Not Ret Else WVGetValue:=Ret;
+  Exit;
+ Until True;
+ WVLast:=True; WVGetValue:=0;
+End;
+
+Function WVIntVal(B: PWVBlk; S: Int64): LongInt;
+Var Bit: Int64; Bs: LongInt;
+Begin
+ S:=WVU32(S);
+ If B^.ExtraBits<>0 Then Begin
+  S:=WVU32(S Shl B^.ExtraBits);
+  If B^.GotExtraBits And (WVLeft(@B^.GbExtra)>=B^.ExtraBits) Then S:=S Or WVBitsN(@B^.GbExtra,B^.ExtraBits);
+ End;
+ Bit:=(S And B^.And_) Or B^.Or_;
+ Bit:=WVU32(WVU32(S+Bit) Shl B^.Shift)-Bit; Bit:=WVU32(Bit);
+ If B^.Hybrid<>0 Then Begin
+  Bs:=GAS32(Bit);
+  If Bs<B^.HybridMinClip Then Bs:=B^.HybridMinClip Else If Bs>B^.HybridMaxClip Then Bs:=B^.HybridMaxClip;
+  Bit:=WVU32(Bs);
+ End;
+ WVIntVal:=GAS32(WVU32(Bit Shl B^.PostShift));
+End;
+
+Function WVFloatVal(B: PWVBlk; S: LongInt): LongInt;
+Var
+ Sign,Exp,Shift: LongInt; US,V: Int64; GE: PWVBits;
+Begin
+ Exp:=B^.FloatMaxExp; Sign:=0; GE:=@B^.GbExtra;
+ If B^.GotExtraBits Then
+  If WVLeft(GE)+512<33 Then Begin WVFloatVal:=0; Exit; End;
+ If S<>0 Then Begin
+  US:=WVU32(Int64(S)*(Int64(1) Shl B^.FloatShift));
+  S:=GAS32(US);
+  If S<0 Then Sign:=1 Else Sign:=0;
+  If Sign<>0 Then US:=WVU32(-Int64(S)) Else US:=WVU32(S);
+  If US>=$1000000 Then Begin
+   If B^.GotExtraBits And (WVBit(GE)<>0) Then US:=WVBitsN(GE,23) Else US:=0;
+   Exp:=255;
+  End Else If Exp<>0 Then Begin
+   Shift:=23-WVLog2(US);
+   Exp:=B^.FloatMaxExp;
+   If Exp<=Shift Then Begin Dec(Exp); Shift:=Exp; End;
+   Exp:=Exp-Shift;
+   If Shift<>0 Then Begin
+    US:=WVU32(US Shl Shift);
+    If ((B^.FloatFlag And 1)<>0) Then
+     US:=US Or ((Int64(1) Shl Shift)-1)
+    Else If B^.GotExtraBits And ((B^.FloatFlag And 2)<>0) And (WVBit(GE)<>0) Then
+     US:=US Or ((Int64(1) Shl Shift)-1)
+    Else If B^.GotExtraBits And ((B^.FloatFlag And 4)<>0) Then
+     US:=US Or WVBitsN(GE,Shift);
+   End;
+  End Else Exp:=B^.FloatMaxExp;
+  US:=US And $7FFFFF;
+ End Else Begin
+  Sign:=0; Exp:=0; US:=0;
+  If B^.GotExtraBits And ((B^.FloatFlag And 8)<>0) Then Begin
+   If WVBit(GE)<>0 Then Begin
+    US:=WVBitsN(GE,23);
+    If B^.FloatMaxExp>=25 Then Exp:=WVBitsN(GE,8);
+    Sign:=WVBit(GE);
+   End Else Begin
+    If (B^.FloatFlag And $10)<>0 Then Sign:=WVBit(GE);
+   End;
+  End;
+ End;
+ V:=(Int64(Sign) Shl 31) Or (Int64(Exp) Shl 23) Or US;
+ WVFloatVal:=GAS32(V);
+End;
+
+Function WVMulW(W,A: LongInt; Is16: Boolean): Int64;
+Begin
+ If Is16 Then WVMulW:=GASar(GAS32(Int64(W)*A+512),10) Else WVMulW:=GASar(Int64(W)*A+512,10);
+End;
+
+Function WVWDelta(X: LongInt; Delta: LongInt): LongInt;
+Begin
+ If X<0 Then WVWDelta:=Delta Else WVWDelta:=-Delta;
+End;
+
+Procedure WVClipW(Var W: LongInt; Delta,Smp,Inp: LongInt);
+Begin
+ If (Smp<>0) And (Inp<>0) Then Begin
+  If (Smp Xor Inp)<0 Then Begin
+   Dec(W,Delta); If W<-1024 Then W:=-1024;
+  End Else Begin
+   Inc(W,Delta); If W>1024 Then W:=1024;
+  End;
+ End;
+End;
+
+{ Fmt : 1 = S16P, 2 = S32P, 3 = FLTP. Retourne False si le bloc est invalide. }
+Function WVUnpackStereo(B: PWVBlk; DL,DR: PGAI32; Fmt: LongInt): Boolean;
+Var
+ Count,I,J,T,A,Bq,L,L2,R,R2,Pos: LongInt; D: ^TWVDecorr; Is16: Boolean;
+Begin
+ WVUnpackStereo:=False; Is16:=Fmt=1; Count:=0; Pos:=0;
+ B^.One:=0; B^.Zero:=0; B^.Zeroes:=0;
+ Repeat
+  L:=WVGetValue(B,0);
+  If WVLast Then Break;
+  R:=WVGetValue(B,1);
+  If WVLast Then Break;
+  For I:=0 To B^.Terms-1 Do Begin
+   D:=@B^.Decorr[I]; T:=D^.Value;
+   If T>0 Then Begin
+    If T>8 Then Begin
+     If (T And 1)<>0 Then Begin
+      A:=GAS32(2*Int64(D^.SamplesA[0])-D^.SamplesA[1]);
+      Bq:=GAS32(2*Int64(D^.SamplesB[0])-D^.SamplesB[1]);
+     End Else Begin
+      A:=GASar(GAS32(3*Int64(D^.SamplesA[0])-D^.SamplesA[1]),1);
+      Bq:=GASar(GAS32(3*Int64(D^.SamplesB[0])-D^.SamplesB[1]),1);
+     End;
+     D^.SamplesA[1]:=D^.SamplesA[0]; D^.SamplesB[1]:=D^.SamplesB[0]; J:=0;
+    End Else Begin
+     A:=D^.SamplesA[Pos]; Bq:=D^.SamplesB[Pos]; J:=(Pos+T) And 7;
+    End;
+    L2:=GAS32(Int64(L)+WVMulW(D^.WeightA,A,Is16));
+    R2:=GAS32(Int64(R)+WVMulW(D^.WeightB,Bq,Is16));
+    If (A<>0) And (L<>0) Then D^.WeightA:=D^.WeightA-WVWDelta(L Xor A,D^.Delta);
+    If (Bq<>0) And (R<>0) Then D^.WeightB:=D^.WeightB-WVWDelta(R Xor Bq,D^.Delta);
+    L:=L2; R:=R2; D^.SamplesA[J]:=L; D^.SamplesB[J]:=R;
+   End Else If T=-1 Then Begin
+    L2:=GAS32(Int64(L)+WVMulW(D^.WeightA,D^.SamplesA[0],Is16));
+    WVClipW(D^.WeightA,D^.Delta,D^.SamplesA[0],L);
+    L:=L2;
+    R2:=GAS32(Int64(R)+WVMulW(D^.WeightB,L2,Is16));
+    WVClipW(D^.WeightB,D^.Delta,L2,R);
+    R:=R2; D^.SamplesA[0]:=R;
+   End Else Begin
+    R2:=GAS32(Int64(R)+WVMulW(D^.WeightB,D^.SamplesB[0],Is16));
+    WVClipW(D^.WeightB,D^.Delta,D^.SamplesB[0],R);
+    R:=R2;
+    If T=-3 Then Begin R2:=D^.SamplesA[0]; D^.SamplesA[0]:=R; End;
+    L2:=GAS32(Int64(L)+WVMulW(D^.WeightA,R2,Is16));
+    WVClipW(D^.WeightA,D^.Delta,R2,L);
+    L:=L2; D^.SamplesB[0]:=L;
+   End;
+  End;
+  If Is16 Then
+   If Abs(Int64(L))+Abs(Int64(R))>(1 Shl 19) Then Exit;
+  Pos:=(Pos+1) And 7;
+  If B^.Joint<>0 Then Begin
+   R:=GAS32(Int64(R)-GASar(L,1));
+   L:=GAS32(Int64(L)+R);
+  End;
+  If Fmt=3 Then Begin
+   DL^[Count]:=WVFloatVal(B,L); DR^[Count]:=WVFloatVal(B,R);
+  End Else If Fmt=2 Then Begin
+   DL^[Count]:=WVIntVal(B,L); DR^[Count]:=WVIntVal(B,R);
+  End Else Begin
+   DL^[Count]:=GAW16(WVIntVal(B,L)); DR^[Count]:=GAW16(WVIntVal(B,R));
+  End;
+  Inc(Count);
+ Until WVLast Or (Count>=B^.Samples);
+ If WVLast And (Count<B^.Samples) Then
+  For I:=Count To B^.Samples-1 Do Begin DL^[I]:=0; DR^[I]:=0; End;
+ WVUnpackStereo:=True;
+End;
+
+Procedure WVUnpackMono(B: PWVBlk; Dst: PGAI32; Fmt: LongInt);
+Var
+ Count,I,J,T,A,S,TT,Pos: LongInt; D: ^TWVDecorr; Is16: Boolean;
+Begin
+ Is16:=Fmt=1; Count:=0; Pos:=0;
+ B^.One:=0; B^.Zero:=0; B^.Zeroes:=0;
+ Repeat
+  TT:=WVGetValue(B,0);
+  S:=0;
+  If WVLast Then Break;
+  For I:=0 To B^.Terms-1 Do Begin
+   D:=@B^.Decorr[I]; T:=D^.Value;
+   If T>8 Then Begin
+    If (T And 1)<>0 Then A:=GAS32(2*Int64(D^.SamplesA[0])-D^.SamplesA[1])
+    Else A:=GASar(GAS32(3*Int64(D^.SamplesA[0])-D^.SamplesA[1]),1);
+    D^.SamplesA[1]:=D^.SamplesA[0]; J:=0;
+   End Else Begin
+    A:=D^.SamplesA[Pos And 7]; J:=(Pos+T) And 7;
+   End;
+   S:=GAS32(Int64(TT)+WVMulW(D^.WeightA,A,Is16));
+   If (A<>0) And (TT<>0) Then D^.WeightA:=D^.WeightA-WVWDelta(TT Xor A,D^.Delta);
+   TT:=S; D^.SamplesA[J]:=S;
+  End;
+  Pos:=(Pos+1) And 7;
+  If Fmt=3 Then Dst^[Count]:=WVFloatVal(B,S)
+  Else If Fmt=2 Then Dst^[Count]:=WVIntVal(B,S)
+  Else Dst^[Count]:=GAW16(WVIntVal(B,S));
+  Inc(Count);
+ Until WVLast Or (Count>=B^.Samples);
+ If WVLast And (Count<B^.Samples) Then
+  For I:=Count To B^.Samples-1 Do Dst^[I]:=0;
+End;
+
+Type
+ TWVCtx=Record
+  Samples,ChOffset,Nch,Rate,Fmt,Bits: LongInt;
+  Planes: PWVPlanes; HavePlanes: Boolean;
+  Blk: PWVBlk;
+ End;
+ TWVDmx=Record
+  Rate,Chan,Bpp: Int64; ChMask: Int64;
+  Multichannel,BlockParsed: Boolean;
+  Hdr: Array[0..31] Of Byte;
+  BlockSize,Version,TotalSamples,BlockIdx,Samples,Flags: Int64;
+  Initial,Final: Boolean; Pos,Limit: Int64;
+ End;
+
+Function WVLE32At(P: PEABuffer; At: LongInt): Int64;
+Begin
+ WVLE32At:=Int64(P^[At])+Int64(P^[At+1])*256+Int64(P^[At+2])*65536+Int64(P^[At+3])*16777216;
+End;
+
+Procedure WVFreePlanes(Var W: TWVCtx);
+Var I: LongInt;
+Begin
+ If W.HavePlanes Then Begin
+  For I:=0 To W.Nch-1 Do If W.Planes^[I]<>Nil Then Begin FreeMem(W.Planes^[I]); W.Planes^[I]:=Nil; End;
+  W.HavePlanes:=False;
+ End;
+End;
+
+{ Un bloc WavPack. Retourne True si le bloc est correctement decode. Pk est le paquet complet,
+  Off le debut des donnees du bloc et Len leur taille (comme wavpack_decode_block). }
+Function WVDecodeBlock(Var W: TWVCtx; Pk: PEABuffer; PkLen,Off,Len: LongInt): Boolean;
+Var
+ B: PWVBlk; P: LongInt;
+ GotTerms,GotWeights,GotSamples,GotEntropy,GotPcm,GotFloat,GotHybrid,GotDsd,Cont,Stop: Boolean;
+ Id,Size,SSize,I,J,T,Weights,Bpp,OrigBpp,Chan,SampleRate,Fmt,Nch,Sr,NewRate: LongInt;
+ Multiblock: Boolean; ChMask,V: Int64; Val: Array[0..3] Of LongInt;
+ PlL,PlR: PGAI32; Code: LongInt;
+Function GetB: LongInt;
+Begin
+ If P+1>Len Then Begin P:=Len; GetB:=0; End Else Begin GetB:=Pk^[Off+P]; Inc(P); End;
+End;
+Function GetLE16: LongInt;
+Var X: LongInt;
+Begin
+ If P+2>Len Then Begin P:=Len; GetLE16:=0; End Else Begin
+  X:=Pk^[Off+P]+Pk^[Off+P+1]*256; Inc(P,2); GetLE16:=X;
+ End;
+End;
+Function GetLE24: LongInt;
+Var X: LongInt;
+Begin
+ If P+3>Len Then Begin P:=Len; GetLE24:=0; End Else Begin
+  X:=Pk^[Off+P]+Pk^[Off+P+1]*256+Pk^[Off+P+2]*65536; Inc(P,3); GetLE24:=X;
+ End;
+End;
+Function GetLE32: Int64;
+Var X: Int64;
+Begin
+ If P+4>Len Then Begin P:=Len; GetLE32:=0; End Else Begin
+  X:=WVLE32At(Pk,Off+P); Inc(P,4); GetLE32:=X;
+ End;
+End;
+Procedure Skip(N: LongInt);
+Begin
+ If Len-P<N Then N:=Len-P;
+ P:=P+N; If P<0 Then P:=0;
+End;
+Procedure InitBits(Var G: TWVBits; Sz: LongInt);
+Begin
+ G.Buf:=Pk; G.BufLen:=PkLen; G.Base:=Off+P; G.SizeBits:=Int64(Sz)*8; G.Idx:=0;
+End;
+Begin
+ WVDecodeBlock:=False; B:=W.Blk; P:=0;
+ FillChar(B^,SizeOf(B^),0);
+ GotTerms:=False; GotWeights:=False; GotSamples:=False; GotEntropy:=False; GotPcm:=False;
+ GotFloat:=False; GotHybrid:=False; GotDsd:=False; Chan:=0; SampleRate:=0; ChMask:=0;
+ B^.Samples:=GAS32(GetLE32);
+ If B^.Samples<>W.Samples Then Exit;
+ B^.FrameFlags:=GetLE32;
+ If (B^.FrameFlags And $80) <> 0 Then Fmt:=3
+ Else If (B^.FrameFlags And $80000000)<>0 Then Fmt:=3
+ Else If (B^.FrameFlags And 3)<=1 Then Fmt:=1 Else Fmt:=2;
+ If (W.ChOffset<>0) And (W.Fmt<>Fmt) Then Exit;
+ If Fmt=1 Then Bpp:=2 Else Bpp:=4;
+ OrigBpp:=((B^.FrameFlags And 3)+1)*8;
+ Multiblock:=(B^.FrameFlags And $1800)<>$1800;
+ If (B^.FrameFlags And 4)=0 Then B^.Stereo:=1 Else B^.Stereo:=0;
+ If (B^.FrameFlags And $40000000)<>0 Then B^.StereoIn:=0 Else B^.StereoIn:=B^.Stereo;
+ If (B^.FrameFlags And $10)<>0 Then B^.Joint:=1;
+ If (B^.FrameFlags And 8)<>0 Then B^.Hybrid:=1;
+ If (B^.FrameFlags And $200)<>0 Then B^.HybridBitrate:=1;
+ B^.PostShift:=Bpp*8-OrigBpp+LongInt((B^.FrameFlags Shr 13) And $1F);
+ If (B^.PostShift<0) Or (B^.PostShift>31) Then Exit;
+ B^.HybridMaxClip:=GAS32((Int64(1) Shl (OrigBpp-1))-1);
+ B^.HybridMinClip:=GAS32(-(Int64(1) Shl (OrigBpp-1)));
+ GetLE32;
+ Stop:=False;
+ While (Len-P>0) And Not Stop Do Begin
+  Id:=GetB; Size:=GetB;
+  If (Id And $80)<>0 Then Size:=Size Or (GetLE16 Shl 8);
+  Size:=Size*2; SSize:=Size;
+  If (Id And $40)<>0 Then Dec(Size);
+  Cont:=False;
+  If Size<0 Then Break;
+  If Len-P<SSize Then Break;
+  Case Id And $3F Of
+   2: Begin
+    If Size>16 Then Begin B^.Terms:=0; Skip(SSize); Cont:=True; End Else Begin
+     B^.Terms:=Size;
+     For I:=0 To B^.Terms-1 Do Begin
+      T:=GetB;
+      B^.Decorr[B^.Terms-I-1].Value:=(T And $1F)-5;
+      B^.Decorr[B^.Terms-I-1].Delta:=T Shr 5;
+     End;
+     GotTerms:=True;
+    End;
+   End;
+   3: Begin
+    If Not GotTerms Then Cont:=True Else Begin
+     Weights:=Size Shr B^.StereoIn;
+     If (Weights>16) Or (Weights>B^.Terms) Then Begin Skip(SSize); Cont:=True; End Else Begin
+      For I:=0 To Weights-1 Do Begin
+       T:=GetB; If T>=128 Then T:=T-256;
+       B^.Decorr[B^.Terms-I-1].WeightA:=T*8;
+       If B^.Decorr[B^.Terms-I-1].WeightA>0 Then
+        Inc(B^.Decorr[B^.Terms-I-1].WeightA,(B^.Decorr[B^.Terms-I-1].WeightA+64) Shr 7);
+       If B^.StereoIn<>0 Then Begin
+        T:=GetB; If T>=128 Then T:=T-256;
+        B^.Decorr[B^.Terms-I-1].WeightB:=T*8;
+        If B^.Decorr[B^.Terms-I-1].WeightB>0 Then
+         Inc(B^.Decorr[B^.Terms-I-1].WeightB,(B^.Decorr[B^.Terms-I-1].WeightB+64) Shr 7);
+       End;
+      End;
+      GotWeights:=True;
+     End;
+    End;
+   End;
+   4: Begin
+    If Not GotTerms Then Cont:=True Else Begin
+     T:=0; I:=B^.Terms-1;
+     While (I>=0) And (T<Size) Do Begin
+      If B^.Decorr[I].Value>8 Then Begin
+       B^.Decorr[I].SamplesA[0]:=WVExp2(GetLE16);
+       B^.Decorr[I].SamplesA[1]:=WVExp2(GetLE16);
+       If B^.StereoIn<>0 Then Begin
+        B^.Decorr[I].SamplesB[0]:=WVExp2(GetLE16);
+        B^.Decorr[I].SamplesB[1]:=WVExp2(GetLE16);
+        Inc(T,4);
+       End;
+       Inc(T,4);
+      End Else If B^.Decorr[I].Value<0 Then Begin
+       B^.Decorr[I].SamplesA[0]:=WVExp2(GetLE16);
+       B^.Decorr[I].SamplesB[0]:=WVExp2(GetLE16);
+       Inc(T,4);
+      End Else Begin
+       For J:=0 To B^.Decorr[I].Value-1 Do Begin
+        B^.Decorr[I].SamplesA[J]:=WVExp2(GetLE16);
+        If B^.StereoIn<>0 Then B^.Decorr[I].SamplesB[J]:=WVExp2(GetLE16);
+       End;
+       Inc(T,B^.Decorr[I].Value*2*(B^.StereoIn+1));
+      End;
+      Dec(I);
+     End;
+     GotSamples:=True;
+    End;
+   End;
+   5: Begin
+    If Size<>6*(B^.StereoIn+1) Then Begin Skip(SSize); Cont:=True; End Else Begin
+     For J:=0 To B^.StereoIn Do For I:=0 To 2 Do B^.Ch[J].Median[I]:=WVExp2(GetLE16);
+     GotEntropy:=True;
+    End;
+   End;
+   6: Begin
+    If B^.HybridBitrate<>0 Then
+     For I:=0 To B^.StereoIn Do Begin
+      B^.Ch[I].SlowLevel:=WVExp2(GetLE16); Dec(Size,2);
+     End;
+    For I:=0 To B^.StereoIn Do Begin
+     B^.Ch[I].BitrateAcc:=Int64(GetLE16) Shl 16; Dec(Size,2);
+    End;
+    If Size>0 Then Begin
+     For I:=0 To B^.StereoIn Do B^.Ch[I].BitrateDelta:=WVU32(WVExp2(GetLE16));
+    End Else
+     For I:=0 To B^.StereoIn Do B^.Ch[I].BitrateDelta:=0;
+    GotHybrid:=True;
+   End;
+   9: Begin
+    If Size<>4 Then Begin Skip(SSize-4); Cont:=True; End Else Begin
+     For I:=0 To 3 Do Val[I]:=GetB;
+     If Val[0]>30 Then Cont:=True Else Begin
+      B^.ExtraBits:=Val[0];
+      If Val[1]<>0 Then B^.Shift:=Val[1];
+      If Val[2]<>0 Then Begin B^.And_:=1; B^.Or_:=1; B^.Shift:=Val[2]; End;
+      If Val[3]<>0 Then Begin B^.And_:=1; B^.Shift:=Val[3]; End;
+      If B^.Shift>31 Then Begin
+       B^.And_:=0; B^.Or_:=0; B^.Shift:=0; Cont:=True;
+      End Else If (B^.Hybrid<>0) And (Bpp=4) And (B^.PostShift<8) And (B^.Shift>8) Then Begin
+       Inc(B^.PostShift,8); Dec(B^.Shift,8);
+       B^.HybridMaxClip:=GASar(B^.HybridMaxClip,8); B^.HybridMinClip:=GASar(B^.HybridMinClip,8);
+      End;
+     End;
+    End;
+   End;
+   8: Begin
+    If Size<>4 Then Begin Skip(SSize); Cont:=True; End Else Begin
+     B^.FloatFlag:=GetB; B^.FloatShift:=GetB; B^.FloatMaxExp:=GetB;
+     If B^.FloatShift>31 Then Begin B^.FloatShift:=0; Cont:=True; End Else Begin
+      GotFloat:=True; Skip(1);
+     End;
+    End;
+   End;
+   10: Begin
+    InitBits(B^.Gb,Size); Skip(Size); GotPcm:=True;
+   End;
+   14: Begin
+    If Size<2 Then Begin Skip(SSize); Cont:=True; End Else Begin
+     Skip(Size); GotDsd:=True;
+    End;
+   End;
+   12: Begin
+    If Size<=4 Then Begin Skip(Size); Cont:=True; End Else Begin
+     InitBits(B^.GbExtra,Size);
+     WVBitsN(@B^.GbExtra,32);
+     Skip(Size); B^.GotExtraBits:=True;
+    End;
+   End;
+   13: Begin
+    If Size<=1 Then Exit;
+    Chan:=GetB;
+    Case Size-2 Of
+     0: ChMask:=GetB;
+     1: ChMask:=GetLE16;
+     2: ChMask:=GetLE24;
+     3: ChMask:=GetLE32;
+     4: Begin
+      Size:=GetB; Chan:=Chan Or ((GetB And $F) Shl 8); Inc(Chan); ChMask:=GetLE24;
+     End;
+     5: Begin
+      Size:=GetB; Chan:=Chan Or ((GetB And $F) Shl 8); Inc(Chan); ChMask:=GetLE32;
+     End;
+    End;
+   End;
+   39: Begin
+    If Size<>3 Then Exit;
+    SampleRate:=GetLE24;
+   End;
+  Else Skip(Size);
+  End;
+  If Not Cont Then If (Id And $40)<>0 Then Skip(1);
+ End;
+ If GotDsd Then Fail('wavpack: DSD non pris en charge.');
+ If GotPcm Then Begin
+  If Not GotTerms Then Exit;
+  If Not GotWeights Then Exit;
+  If Not GotSamples Then Exit;
+  If Not GotEntropy Then Exit;
+  If (B^.Hybrid<>0) And Not GotHybrid Then Exit;
+  If Not GotFloat And (Fmt=3) Then Exit;
+  If B^.GotExtraBits And (Fmt<>3) Then Begin
+   If WVLeft(@B^.GbExtra)<(Int64(B^.Samples)*B^.ExtraBits Shl B^.StereoIn) Then B^.GotExtraBits:=False;
+  End;
+ End;
+ If Not GotPcm Then Exit;
+ If W.ChOffset=0 Then Begin
+  Sr:=LongInt((B^.FrameFlags Shr 23) And $F);
+  If Sr=15 Then Begin
+   If SampleRate=0 Then Exit;
+   NewRate:=SampleRate;
+  End Else NewRate:=WVRates[Sr];
+  If Multiblock Then Begin
+   If ChMask<>0 Then Begin
+    Nch:=0; V:=ChMask;
+    While V<>0 Do Begin If Odd(V) Then Inc(Nch); V:=V Shr 1; End;
+    If (Chan<>0) And (Nch<>Chan) Then Exit;
+   End Else Nch:=Chan;
+  End Else Nch:=B^.Stereo+1;
+  WVFreePlanes(W);
+  W.Nch:=Nch; W.Rate:=NewRate; W.Fmt:=Fmt; W.Bits:=OrigBpp;
+  If (Nch<=0) Or (Nch>4096) Or (Int64(Nch)*W.Samples>200000000) Then Begin
+   If Nch<=0 Then Begin W.Nch:=0; Exit; End;
+   Exit;
+  End;
+  For I:=0 To Nch-1 Do Begin
+   GetMem(W.Planes^[I],Int64(W.Samples)*4+8); FillChar(W.Planes^[I]^,Int64(W.Samples)*4+8,0);
+  End;
+  W.HavePlanes:=True;
+ End;
+ If Not W.HavePlanes Then Exit;
+ If W.ChOffset+B^.Stereo>=W.Nch Then Begin
+  WVDecodeBlock:=W.ChOffset<>0;
+  Exit;
+ End;
+ PlL:=W.Planes^[W.ChOffset]; PlR:=Nil;
+ If B^.Stereo<>0 Then PlR:=W.Planes^[W.ChOffset+1];
+ Inc(W.ChOffset,1+B^.Stereo);
+ If B^.StereoIn<>0 Then Begin
+  If Not WVUnpackStereo(B,PlL,PlR,W.Fmt) Then Exit;
+ End Else Begin
+  WVUnpackMono(B,PlL,W.Fmt);
+  If B^.Stereo<>0 Then Move(PlL^,PlR^,Int64(B^.Samples)*4);
+ End;
+ WVDecodeBlock:=True;
+End;
+
+{ Paquet complet (plusieurs blocs jusqu'au bloc final). Retourne True si la trame est produite. }
+Function WVDecodePacket(Var W: TWVCtx; Pk: PEABuffer; Size: LongInt): Boolean;
+Var
+ Buf,Left,FrameSize: LongInt; S: Int64; Fl: Int64;
+Begin
+ WVDecodePacket:=False;
+ If Size<=32 Then Exit;
+ W.ChOffset:=0;
+ S:=WVLE32At(Pk,20); Fl:=WVLE32At(Pk,24);
+ If (S<=0) Or (S>150000) Then Exit;
+ W.Samples:=S;
+ Buf:=0; Left:=Size;
+ While Left>32 Do Begin
+  FrameSize:=GAS32(WVLE32At(Pk,Buf+4)-12);
+  Inc(Buf,20); Dec(Left,20);
+  If (FrameSize<=0) Or (FrameSize>Left) Then Exit;
+  If Not WVDecodeBlock(W,Pk,Size,Buf,FrameSize) Then Exit;
+  Inc(Buf,FrameSize); Dec(Left,FrameSize);
+ End;
+ If W.ChOffset<>W.Nch Then Exit;
+ WVDecodePacket:=True;
+End;
+
+Function WVToS16(Fmt,V: LongInt): LongInt;
+Var Sg: Single; P: Double; R: Int64;
+Begin
+ If Fmt=1 Then WVToS16:=V
+ Else If Fmt=2 Then WVToS16:=GASar(V,16)
+ Else Begin
+  { lrintf(x*32768) : hors plage (|x*32768| >= 2^63), Inf et NaN donnent INT64_MIN, soit 0 sur 32 bits }
+  If ((V Shr 23) And $FF)>=175 Then Begin WVToS16:=0; Exit; End;
+  Move(V,Sg,4);
+  P:=Sg; P:=P*32768.0;
+  R:=Round(P);
+  WVToS16:=GAClip16(GAS32(R));
+ End;
+End;
+
+{ ---- demuxeur .wv (libavformat/wvdec.c) ---- }
+Function WVReadHdr(Var D: TWVDmx; Pos: Int64): LongInt;
+Var
+ Hp,Pl: PEABuffer; Rate,Chan,Bpp,RateX,ChMask,Fl: Int64; Sz,I,Id,Size,Z: LongInt; Eof: Boolean;
+Function R8: LongInt;
+Begin
+ If I>=Sz Then Begin Eof:=True; R8:=0; End Else Begin R8:=Pl^[I]; Inc(I); End;
+End;
+Function RL16: LongInt; Var A: LongInt; Begin A:=R8; RL16:=A+R8*256; End;
+Function RL24: LongInt; Var A,B: LongInt; Begin A:=R8; B:=R8; RL24:=A+B*256+R8*65536; End;
+Function RL32: Int64; Var A,B,C: Int64; Begin A:=R8; B:=R8; C:=R8; RL32:=A+B*256+C*65536+Int64(R8)*16777216; End;
+Begin
+ D.Pos:=Pos; WVReadHdr:=-1;
+ If D.Pos+32>D.Limit Then Exit;
+ Hp:=GALoad(D.Pos,32);
+ For I:=0 To 31 Do D.Hdr[I]:=Hp^[I];
+ If WVLE32At(Hp,0)<>$6B707677 Then Begin FreeMem(Hp); WVReadHdr:=-2; Exit; End;
+ D.BlockSize:=WVLE32At(Hp,4);
+ If (D.BlockSize<24) Or (D.BlockSize>1048576) Then Begin FreeMem(Hp); WVReadHdr:=-2; Exit; End;
+ Dec(D.BlockSize,24);
+ D.Version:=Hp^[8]+Hp^[9]*256; D.TotalSamples:=WVLE32At(Hp,12); D.BlockIdx:=WVLE32At(Hp,16);
+ D.Samples:=WVLE32At(Hp,20); D.Flags:=WVLE32At(Hp,24); FreeMem(Hp);
+ D.Initial:=(D.Flags And $800)<>0; D.Final:=(D.Flags And $1000)<>0;
+ If (D.Version<$402) Or (D.Version>$410) Then Begin WVReadHdr:=-3; Exit; End;
+ WVReadHdr:=0;
+ If D.Samples=0 Then Exit;
+ Fl:=D.Flags;
+ If (Fl And $80000000)<>0 Then RateX:=4 Else RateX:=1;
+ If (Fl And $80000000)<>0 Then Bpp:=0 Else Bpp:=((Fl And 3)+1)*8;
+ If (Fl And 4)<>0 Then Chan:=1 Else Chan:=2;
+ If (Fl And 4)<>0 Then ChMask:=4 Else ChMask:=3;
+ If ((Fl Shr 23) And $F)=15 Then Rate:=-1 Else Rate:=WVRates[(Fl Shr 23) And $F];
+ D.Multichannel:=Not (D.Initial And D.Final);
+ If D.Multichannel Then Begin Chan:=D.Chan; ChMask:=D.ChMask; End;
+ If ((Rate=-1) Or (Chan=0) Or ((Fl And $80000000)<>0)) And Not D.BlockParsed Then Begin
+  Sz:=D.BlockSize;
+  If D.Pos+32+Sz>D.Limit Then Sz:=D.Limit-D.Pos-32;
+  Pl:=GALoad(D.Pos+32,Sz); I:=0; Eof:=False;
+  While (I<D.BlockSize) And Not Eof Do Begin
+   Id:=R8;
+   If (Id And $80)<>0 Then Size:=RL24 Else Size:=R8;
+   Size:=Size*2;
+   If (Id And $40)<>0 Then Dec(Size);
+   Case Id And $3F Of
+    13: Begin
+     If Size<=1 Then Begin FreeMem(Pl); WVReadHdr:=-4; Exit; End;
+     Chan:=R8;
+     Case Size-2 Of
+      0: ChMask:=R8;
+      1: ChMask:=RL16;
+      2: ChMask:=RL24;
+      3: ChMask:=RL32;
+      4: Begin R8; Chan:=Chan Or ((R8 And $F) Shl 8); Inc(Chan); ChMask:=RL24; End;
+      5: Begin R8; Chan:=Chan Or ((R8 And $F) Shl 8); Inc(Chan); ChMask:=RL32; End;
+     Else Begin FreeMem(Pl); WVReadHdr:=-4; Exit; End;
+     End;
+    End;
+    14: Begin
+     If Size<=1 Then Begin FreeMem(Pl); WVReadHdr:=-4; Exit; End;
+     Z:=R8 And $1F; RateX:=Int64(1) Shl Z;
+     If Size<>0 Then Inc(I,Size-1);
+    End;
+    39: Rate:=RL24;
+   Else Inc(I,Size);
+   End;
+   If (Id And $40)<>0 Then Inc(I);
+  End;
+  FreeMem(Pl);
+  If (Rate=-1) Or (Rate*RateX>=2147483647) Then Begin WVReadHdr:=-4; Exit; End;
+ End;
+ If D.Bpp=0 Then D.Bpp:=Bpp;
+ If D.Chan=0 Then D.Chan:=Chan;
+ If D.ChMask=0 Then D.ChMask:=ChMask;
+ If D.Rate=0 Then D.Rate:=Rate*RateX;
+ If (Fl<>0) And (Bpp<>D.Bpp) Then Begin WVReadHdr:=-5; Exit; End;
+ If (Fl<>0) And Not D.Multichannel And (Chan<>D.Chan) Then Begin WVReadHdr:=-5; Exit; End;
+ If (Fl<>0) And (Rate<>-1) And ((Fl And $80000000)=0) And (Rate*RateX<>D.Rate) Then Begin WVReadHdr:=-5; Exit; End;
+End;
+
+Procedure WVReadInto(Dest: PEABuffer; Pos,Len: Int64);
+Var Done,Take: LongInt;
+Begin
+ Done:=0;
+ While Done<Len Do Begin
+  Take:=Len-Done; If Take>32768 Then Take:=32768;
+  ReadAt(Pos+Done,Dest^[Done],Take); Inc(Done,Take);
+ End;
+End;
+
+Procedure DecodeWavPack(Const Source,Target: String);
+Var
+ D: TWVDmx; W: TWVCtx; Pk: PEABuffer; PkSize,I,J,R,OutCh,OutRate: LongInt; Pos: Int64; Stop,Opened: Boolean;
+Begin
+ OpenRead(Source); FillChar(D,SizeOf(D),0); D.Limit:=InputSize;
+ FillChar(W,SizeOf(W),0); New(W.Blk); New(W.Planes); FillChar(W.Planes^,SizeOf(W.Planes^),0);
+ Pos:=0; Opened:=False; OutCh:=0; OutRate:=0;
+ Repeat
+  R:=WVReadHdr(D,Pos);
+  If R<0 Then Fail('wavpack: en-tete de bloc incorrect ou format non reconnu.');
+  Pos:=D.Pos+32;
+  If D.Samples=0 Then Inc(Pos,D.BlockSize) Else Break;
+ Until False;
+ Stop:=False; EAReset;
+ While Not Stop Do Begin
+  If D.BlockParsed Then Begin
+   R:=WVReadHdr(D,Pos);
+   If R<0 Then Break;
+   Pos:=D.Pos+32;
+  End;
+  If Pos+D.BlockSize>D.Limit Then Break;
+  PkSize:=32+D.BlockSize;
+  GetMem(Pk,PkSize+64); FillChar(Pk^,PkSize+64,0);
+  For I:=0 To 31 Do Pk^[I]:=D.Hdr[I];
+  WVReadInto(@Pk^[32],Pos,D.BlockSize); Inc(Pos,D.BlockSize);
+  While Not D.Final Do Begin
+   R:=WVReadHdr(D,Pos);
+   If R<0 Then Begin Stop:=True; Break; End;
+   Pos:=D.Pos+32;
+   If Pos+D.BlockSize>D.Limit Then Begin Stop:=True; Break; End;
+   Pk:=ReAllocMem(Pk,PkSize+32+D.BlockSize+64);
+   FillChar(Pk^[PkSize],32+D.BlockSize+64,0);
+   For I:=0 To 31 Do Pk^[PkSize+I]:=D.Hdr[I];
+   WVReadInto(@Pk^[PkSize+32],Pos,D.BlockSize); Inc(Pos,D.BlockSize);
+   Inc(PkSize,32+D.BlockSize);
+  End;
+  If Not Stop Then Begin
+   D.BlockParsed:=True;
+   If WVDecodePacket(W,Pk,PkSize) Then Begin
+    If Not Opened Then Begin
+     OutCh:=W.Nch; OutRate:=W.Rate;
+     If (OutRate<1) Or (OutRate>40000000) Then Fail('wavpack: frequence incorrecte.');
+     OpenWrite(Target); ADPCMWaveHeader(OutRate,OutCh,0); Opened:=True;
+    End;
+    If W.Nch=OutCh Then
+     For I:=0 To W.Samples-1 Do
+      For J:=0 To OutCh-1 Do EAPut(WVToS16(W.Fmt,W.Planes^[J]^[I]));
+   End;
+   WVFreePlanes(W);
+  End;
+  FreeMem(Pk);
+ End;
+ If Not Opened Then Fail('wavpack: aucune donnee audio decodee.');
+ EAFlush; ADPCMPatchHeader(OutRate,OutCh,EAWritten);
+ Dispose(W.Blk); Dispose(W.Planes);
+ CloseRead; CloseWrite;
+End;
+
+{ ---- Sonic / Sonic lossless (libavcodec/sonic.c, experimental : -strict -2) ---- }
+Type
+ TSNRac=Record
+  Low,Range,OutCount,OutByte: LongInt;
+  ZeroState,OneState: Array[0..255] Of Byte;
+  Buf: PEABuffer; Pos,EndPos,OverRead: LongInt;
+ End;
+ PSNRac=^TSNRac;
+ TSNState=Array[0..31] Of Byte;
+ TSNDec=Record
+  Lossless,Decor,Taps,Down,Chans,Rate,BlockAlign,FrameSize: LongInt;
+  TapQuant,PredK: PGAI32; PredState,Coded: Array[0..1] Of PGAI32; IntS: PGAI32;
+ End;
+ PSNDec=^TSNDec;
+Const
+ SNSampleRates: Array[0..8] Of LongInt=(44100,22050,11025,96000,48000,32000,24000,16000,8000);
+ SNInvalid=-1094995529;
+
+Function SNMin9(E: LongInt): LongInt;
+Begin If E<9 Then SNMin9:=E Else SNMin9:=9; End;
+
+Function SNShift(A,B: LongInt): LongInt;
+Begin SNShift:=GASar(GAS32(Int64(A)+(Int64(1) Shl (B-1))),B); End;
+
+Function SNShiftDown(A,B: LongInt): LongInt;
+Begin
+ If A<0 Then SNShiftDown:=GAS32(GASar(A,B)+1) Else SNShiftDown:=GASar(A,B);
+End;
+
+Function SNISqrt(N: LongInt): LongInt;
+Var R: LongInt;
+Begin
+ R:=Trunc(Sqrt(N));
+ While Int64(R)*R>N Do Dec(R);
+ While Int64(R+1)*(R+1)<=N Do Inc(R);
+ SNISqrt:=R;
+End;
+
+Procedure SNBuildStates(C: PSNRac; Factor,MaxP: LongInt);
+Var One,P: Int64; LastP8,P8,I: LongInt;
+Begin
+ One:=Int64(1) Shl 32;
+ FillChar(C^.ZeroState,SizeOf(C^.ZeroState),0); FillChar(C^.OneState,SizeOf(C^.OneState),0);
+ LastP8:=0; P:=One Div 2;
+ For I:=0 To 127 Do Begin
+  P8:=(256*P+One Div 2) Shr 32;
+  If P8<=LastP8 Then P8:=LastP8+1;
+  If (LastP8<>0) And (LastP8<256) And (P8<=MaxP) Then C^.OneState[LastP8]:=P8;
+  P:=P+(((One-P)*Factor+One Div 2) Shr 32);
+  LastP8:=P8;
+ End;
+ For I:=256-MaxP To MaxP Do Begin
+  If C^.OneState[I]=0 Then Begin
+   P:=(Int64(I)*One+128) Shr 8;
+   P:=P+(((One-P)*Factor+One Div 2) Shr 32);
+   P8:=(256*P+One Div 2) Shr 32;
+   If P8<=I Then P8:=I+1;
+   If P8>MaxP Then P8:=MaxP;
+   C^.OneState[I]:=P8;
+  End;
+ End;
+ For I:=1 To 254 Do C^.ZeroState[I]:=256-C^.OneState[256-I];
+End;
+
+Procedure SNInitDecoder(C: PSNRac; Buf: PEABuffer; Size: LongInt);
+Begin
+ C^.Buf:=Buf; C^.Pos:=0; C^.EndPos:=Size; C^.Low:=0; C^.Range:=$FF00; C^.OutCount:=0; C^.OutByte:=-1;
+ C^.Low:=Buf^[0]*256+Buf^[1]; C^.Pos:=2; C^.OverRead:=0;
+ If C^.Low>=$FF00 Then Begin C^.Low:=$FF00; C^.EndPos:=C^.Pos; End;
+End;
+
+Function SNGetRac(C: PSNRac; Var St: TSNState; Ix: LongInt): LongInt;
+Var Range1: LongInt;
+ Procedure Refill;
+ Begin
+  If C^.Range<$100 Then Begin
+   C^.Range:=C^.Range Shl 8; C^.Low:=C^.Low Shl 8;
+   If C^.Pos<C^.EndPos Then Begin C^.Low:=C^.Low+C^.Buf^[C^.Pos]; Inc(C^.Pos); End
+   Else Inc(C^.OverRead);
+  End;
+ End;
+Begin
+ Range1:=(C^.Range*St[Ix]) Shr 8;
+ C^.Range:=C^.Range-Range1;
+ If C^.Low<C^.Range Then Begin
+  St[Ix]:=C^.ZeroState[St[Ix]]; Refill; SNGetRac:=0;
+ End Else Begin
+  C^.Low:=C^.Low-C^.Range; St[Ix]:=C^.OneState[St[Ix]]; C^.Range:=Range1; Refill; SNGetRac:=1;
+ End;
+End;
+
+Function SNGetSymbol(C: PSNRac; Var St: TSNState; Signed: Boolean): LongInt;
+Var E,I,Ex: LongInt; A,Va,Vx: Int64;
+Begin
+ If SNGetRac(C,St,0)<>0 Then Begin SNGetSymbol:=0; Exit; End;
+ E:=0;
+ While SNGetRac(C,St,1+SNMin9(E))<>0 Do Begin
+  Inc(E);
+  If E>31 Then Begin SNGetSymbol:=SNInvalid; Exit; End;
+ End;
+ A:=1;
+ For I:=E-1 DownTo 0 Do Begin
+  If I<9 Then A:=A+A+SNGetRac(C,St,22+I) Else A:=A+A+SNGetRac(C,St,22+9);
+  A:=A And $FFFFFFFF;
+ End;
+ Ex:=0;
+ If Signed Then Begin
+  If E<10 Then I:=E Else I:=10;
+  If SNGetRac(C,St,11+I)<>0 Then Ex:=-1;
+ End;
+ Va:=A And $FFFFFFFF; Vx:=Int64(Ex) And $FFFFFFFF;
+ SNGetSymbol:=GAS32((Va Xor Vx)-Vx);
+End;
+
+Procedure SNPredInit(K,State: PGAI32; Order: LongInt);
+Var I,J,P,X,Tmp: LongInt;
+Begin
+ For I:=Order-2 DownTo 0 Do Begin
+  X:=State^[I]; J:=0; P:=I+1;
+  While P<Order Do Begin
+   Tmp:=GAS32(Int64(X)+SNShiftDown(GAS32(Int64(K^[J])*State^[P]),10));
+   State^[P]:=GAS32(Int64(State^[P])+SNShiftDown(GAS32(Int64(K^[J])*X),10));
+   X:=Tmp; Inc(J); Inc(P);
+  End;
+ End;
+End;
+
+Function SNPredCalcError(K,State: PGAI32; Order,Error: LongInt): LongInt;
+Var I,X,Kv,Sv: LongInt;
+Begin
+ X:=GAS32(Int64(Error)-SNShiftDown(GAS32(Int64(K^[Order-1])*State^[Order-1]),10));
+ For I:=Order-2 DownTo 0 Do Begin
+  Kv:=K^[I]; Sv:=State^[I];
+  X:=GAS32(Int64(X)-SNShiftDown(GAS32(Int64(Kv)*Sv),10));
+  State^[I+1]:=GAS32(Int64(Sv)+SNShiftDown(GAS32(Int64(Kv)*X),10));
+ End;
+ If X>(16 Shl 16) Then X:=16 Shl 16;
+ If X<-(16 Shl 16) Then X:=-(16 Shl 16);
+ State^[0]:=X;
+ SNPredCalcError:=X;
+End;
+
+{ Extradata -> contexte du decodeur ; retourne False si invalide (les messages sont ceux de FFmpeg). }
+Function SNDecInit(D: PSNDec; Ex: PEABuffer; ExLen: LongInt; Var Msg: String): Boolean;
+Var BitPos: LongInt; Ver,Minor,SrIdx,I: LongInt;
+Function Bits(N: LongInt): LongInt;
+Var V,J,B: LongInt;
+Begin
+ V:=0;
+ For J:=1 To N Do Begin
+  If BitPos Shr 3<ExLen Then B:=(Ex^[BitPos Shr 3] Shr (7-(BitPos And 7))) And 1 Else B:=0;
+  V:=V*2+B; Inc(BitPos);
+ End;
+ Bits:=V;
+End;
+Begin
+ SNDecInit:=False; BitPos:=0; Msg:='';
+ If ExLen<=0 Then Begin Msg:='No mandatory headers present'; Exit; End;
+ Ver:=Bits(2);
+ If Ver>=2 Then Begin Ver:=Bits(8); Minor:=Bits(8); End;
+ If Ver<>2 Then Begin Msg:='Unsupported Sonic version, please report'; Exit; End;
+ D^.Chans:=Bits(2); SrIdx:=Bits(4);
+ If SrIdx>=9 Then Begin Msg:='Invalid sample_rate_index'; Exit; End;
+ D^.Rate:=SNSampleRates[SrIdx];
+ If (D^.Chans>2) Or (D^.Chans<1) Then Begin Msg:='Only mono and stereo streams are supported by now'; Exit; End;
+ D^.Lossless:=Bits(1);
+ If D^.Lossless=0 Then Bits(3);
+ D^.Decor:=Bits(2);
+ If (D^.Decor<>3) And (D^.Chans<>2) Then Begin Msg:='invalid decorrelation'; Exit; End;
+ D^.Down:=Bits(2);
+ If D^.Down=0 Then Begin Msg:='invalid downsampling value'; Exit; End;
+ D^.Taps:=(Bits(5)+1) Shl 5;
+ Bits(1);
+ D^.BlockAlign:=(Int64(2048)*D^.Rate) Div (44100*Int64(D^.Down));
+ D^.FrameSize:=D^.Chans*D^.BlockAlign*D^.Down;
+ If D^.Taps*D^.Chans>D^.FrameSize Then Begin Msg:='number of taps times channels larger than frame size'; Exit; End;
+ GetMem(D^.TapQuant,D^.Taps*4+16); GetMem(D^.PredK,D^.Taps*4+16);
+ For I:=0 To D^.Taps-1 Do D^.TapQuant^[I]:=SNISqrt(I+1);
+ FillChar(D^.PredK^,D^.Taps*4,0);
+ For I:=0 To D^.Chans-1 Do Begin
+  GetMem(D^.PredState[I],D^.Taps*4+16); FillChar(D^.PredState[I]^,D^.Taps*4,0);
+  GetMem(D^.Coded[I],D^.BlockAlign*4+16); FillChar(D^.Coded[I]^,D^.BlockAlign*4,0);
+ End;
+ GetMem(D^.IntS,D^.FrameSize*4+16); FillChar(D^.IntS^,D^.FrameSize*4,0);
+ SNDecInit:=True;
+End;
+
+{ Decode un paquet. Out_ recoit FrameSize echantillons s16 entrelaces. Retourne False si le paquet est invalide. }
+Function SNDecFrame(D: PSNDec; Buf: PEABuffer; Size: LongInt; Out_: PGAI32): Boolean;
+Var
+ C: TSNRac; St: TSNState; I,J,Ch,X,Quant: LongInt;
+Begin
+ SNDecFrame:=False;
+ FillChar(St,SizeOf(St),128);
+ SNInitDecoder(@C,Buf,Size);
+ SNBuildStates(@C,214748364,248);
+ For I:=0 To D^.Taps-1 Do D^.PredK^[I]:=SNGetSymbol(@C,St,True);
+ For I:=0 To D^.Taps-1 Do D^.PredK^[I]:=GAS32(Int64(D^.PredK^[I])*D^.TapQuant^[I]);
+ If D^.Lossless<>0 Then Quant:=1 Else Quant:=GAS32(Int64(SNGetSymbol(@C,St,False))*16);
+ For Ch:=0 To D^.Chans-1 Do Begin
+  X:=Ch;
+  If C.OverRead>2 Then Exit;
+  SNPredInit(D^.PredK,D^.PredState[Ch],D^.Taps);
+  For I:=0 To D^.BlockAlign-1 Do D^.Coded[Ch]^[I]:=SNGetSymbol(@C,St,True);
+  For I:=0 To D^.BlockAlign-1 Do Begin
+   For J:=0 To D^.Down-2 Do Begin
+    D^.IntS^[X]:=SNPredCalcError(D^.PredK,D^.PredState[Ch],D^.Taps,0);
+    Inc(X,D^.Chans);
+   End;
+   D^.IntS^[X]:=SNPredCalcError(D^.PredK,D^.PredState[Ch],D^.Taps,GAS32(Int64(D^.Coded[Ch]^[I])*Quant));
+   Inc(X,D^.Chans);
+  End;
+  For I:=0 To D^.Taps-1 Do D^.PredState[Ch]^[I]:=D^.IntS^[D^.FrameSize-D^.Chans+Ch-I*D^.Chans];
+ End;
+ Case D^.Decor Of
+  0: Begin
+   I:=0;
+   While I<D^.FrameSize Do Begin
+    D^.IntS^[I+1]:=GAS32(Int64(D^.IntS^[I+1])+SNShift(D^.IntS^[I],1));
+    D^.IntS^[I]:=GAS32(Int64(D^.IntS^[I])-D^.IntS^[I+1]);
+    Inc(I,D^.Chans);
+   End;
+  End;
+  1: Begin
+   I:=0;
+   While I<D^.FrameSize Do Begin D^.IntS^[I+1]:=GAS32(Int64(D^.IntS^[I+1])+D^.IntS^[I]); Inc(I,D^.Chans); End;
+  End;
+  2: Begin
+   I:=0;
+   While I<D^.FrameSize Do Begin D^.IntS^[I]:=GAS32(Int64(D^.IntS^[I])+D^.IntS^[I+1]); Inc(I,D^.Chans); End;
+  End;
+ End;
+ If D^.Lossless=0 Then
+  For I:=0 To D^.FrameSize-1 Do D^.IntS^[I]:=SNShift(D^.IntS^[I],4);
+ For I:=0 To D^.FrameSize-1 Do Out_^[I]:=GAClip16(D^.IntS^[I]);
+ SNDecFrame:=True;
+End;
+
+Procedure SNDecFree(D: PSNDec);
+Var I: LongInt;
+Begin
+ FreeMem(D^.TapQuant); FreeMem(D^.PredK); FreeMem(D^.IntS);
+ For I:=0 To D^.Chans-1 Do Begin FreeMem(D^.PredState[I]); FreeMem(D^.Coded[I]); End;
+End;
+
+{ ---- Sonic : codeur ---- }
+Procedure SNRenorm(C: PSNRac);
+Begin
+ While C^.Range<$100 Do Begin
+  If C^.OutByte<0 Then C^.OutByte:=C^.Low Shr 8
+  Else If C^.Low<=$FF00 Then Begin
+   C^.Buf^[C^.Pos]:=C^.OutByte; Inc(C^.Pos);
+   While C^.OutCount>0 Do Begin C^.Buf^[C^.Pos]:=$FF; Inc(C^.Pos); Dec(C^.OutCount); End;
+   C^.OutByte:=C^.Low Shr 8;
+  End Else If C^.Low>=$10000 Then Begin
+   C^.Buf^[C^.Pos]:=(C^.OutByte+1) And 255; Inc(C^.Pos);
+   While C^.OutCount>0 Do Begin C^.Buf^[C^.Pos]:=0; Inc(C^.Pos); Dec(C^.OutCount); End;
+   C^.OutByte:=(C^.Low Shr 8) And $FF;
+  End Else Inc(C^.OutCount);
+  C^.Low:=(C^.Low And $FF) Shl 8;
+  C^.Range:=C^.Range Shl 8;
+ End;
+End;
+
+Procedure SNPutRac(C: PSNRac; Var St: TSNState; Ix,Bit: LongInt);
+Var Range1: LongInt;
+Begin
+ Range1:=(C^.Range*St[Ix]) Shr 8;
+ If Bit=0 Then Begin
+  C^.Range:=C^.Range-Range1; St[Ix]:=C^.ZeroState[St[Ix]];
+ End Else Begin
+  C^.Low:=C^.Low+C^.Range-Range1; C^.Range:=Range1; St[Ix]:=C^.OneState[St[Ix]];
+ End;
+ SNRenorm(C);
+End;
+
+Procedure SNInitEncoder(C: PSNRac; Buf: PEABuffer);
+Begin
+ C^.Buf:=Buf; C^.Pos:=0; C^.Low:=0; C^.Range:=$FF00; C^.OutCount:=0; C^.OutByte:=-1;
+End;
+
+Function SNTerminate(C: PSNRac): LongInt;
+Begin
+ C^.Range:=$FF; C^.Low:=C^.Low+$FF; SNRenorm(C);
+ C^.Range:=$FF; SNRenorm(C);
+ SNTerminate:=C^.Pos;
+End;
+
+Procedure SNPutSymbol(C: PSNRac; Var St: TSNState; V: LongInt; Signed: Boolean);
+Var I,A,E: LongInt;
+Begin
+ If V<>0 Then Begin
+  A:=Abs(V); E:=0; While (A Shr (E+1))<>0 Do Inc(E);
+  SNPutRac(C,St,0,0);
+  If E<=9 Then Begin
+   For I:=0 To E-1 Do SNPutRac(C,St,1+I,1);
+   SNPutRac(C,St,1+E,0);
+   For I:=E-1 DownTo 0 Do SNPutRac(C,St,22+I,(A Shr I) And 1);
+   If Signed Then SNPutRac(C,St,11+E,Ord(V<0));
+  End Else Begin
+   For I:=0 To E-1 Do SNPutRac(C,St,1+SNMin9(I),1);
+   SNPutRac(C,St,1+9,0);
+   For I:=E-1 DownTo 0 Do SNPutRac(C,St,22+SNMin9(I),(A Shr I) And 1);
+   If Signed Then SNPutRac(C,St,11+10,Ord(V<0));
+  End;
+ End Else SNPutRac(C,St,0,1);
+End;
+
+Procedure SNLevinson(Window: PGAI32; WinEntries: LongInt; Out_: PGAI32; OutEntries,Channels: LongInt; TapQuant: PGAI32);
+Var
+ I,J,Step,K,Lim,Xv,Sv: LongInt; Xx,Xy,Dx,Ds,D: Double; Fl: Int64; State: PGAI32;
+Begin
+ State:=@Window^[WinEntries];
+ Move(Window^,State^,Int64(WinEntries)*4);
+ For I:=0 To OutEntries-1 Do Begin
+  Step:=(I+1)*Channels;
+  Xx:=0.0; Xy:=0.0;
+  For J:=0 To WinEntries-Step-1 Do Begin
+   Dx:=Window^[Step+J]; Ds:=State^[J];
+   Xx:=Xx+Ds*Ds; Xy:=Xy+Dx*Ds;
+  End;
+  If Xx=0.0 Then K:=0 Else Begin
+   D:=-Xy; D:=D/Xx; D:=D*1024.0; Ds:=TapQuant^[I]; D:=D/Ds; D:=D+0.5;
+   If (D>=2147483648.0) Or (D<-2147483649.0) Then K:=-2147483647-1
+   Else Begin
+    Fl:=Trunc(D); If Fl>D Then Dec(Fl);
+    If (Fl>2147483647) Or (Fl<-2147483648) Then K:=-2147483647-1 Else K:=Fl;
+   End;
+  End;
+  Lim:=1024 Div TapQuant^[I];
+  If K>Lim Then K:=Lim;
+  If -Int64(K)>Lim Then K:=-Lim;
+  Out_^[I]:=K;
+  K:=GAS32(Int64(K)*TapQuant^[I]);
+  For J:=0 To WinEntries-Step-1 Do Begin
+   Xv:=Window^[Step+J]; Sv:=State^[J];
+   Window^[Step+J]:=GAS32(Int64(Xv)+SNShiftDown(GAS32(Int64(K)*Sv),10));
+   State^[J]:=GAS32(Int64(Sv)+SNShiftDown(GAS32(Int64(K)*Xv),10));
+  End;
+ End;
+End;
+
+Function SNRoundedDiv(A,B: LongInt): LongInt;
+Begin
+ If A>=0 Then SNRoundedDiv:=(A+(B Shr 1)) Div B Else SNRoundedDiv:=(A-(B Shr 1)) Div B;
+End;
+
+{ Encodeur sonic / sonicls : WAV PCM16 (Source) -> WAV (tag 0x2048) comme le muxer WAV de FFmpeg. }
+Procedure EncodeSonic(Const Source,Target: String; Lossless: Boolean; BitRate: LongInt; Avi: Boolean);
+Var
+ W: TGAWav; Chn,Rate,Taps,Down,Decor,BlockAlign,FrameSize,FramePc,TailSize,WinSize,SrIdx,I,J,Ch,X,Quant,F,NFrames,Sum,Take: LongInt;
+ N,Total,DataSz,OutCap: Int64; Quantization,E1,E2,Smp,Cnt,T: Double;
+ TapQuant,PredK,IntS,Window,Tail: PGAI32; Coded: Array[0..1] Of PGAI32; Raw: PEABuffer;
+ Pk,Outp: PEABuffer; C: TSNRac; St: TSNState; PkLen: LongInt; Ex: Array[0..15] Of Byte; ExLen,BitPos: LongInt;
+ Hd: Array[0..8191] Of Byte; Hl: LongInt; Fact: Int64; Ext: Boolean; Sizes: PGAI32; MaxPk,StrlSz,FmtSz,Off,Ga,Gb,Gc,Gx: LongInt; Idx: PEABuffer;
+Procedure PBits(Cnt,V: LongInt);
+Var K: LongInt;
+Begin
+ For K:=Cnt-1 DownTo 0 Do Begin
+  If ((V Shr K) And 1)<>0 Then Ex[BitPos Shr 3]:=Ex[BitPos Shr 3] Or (128 Shr (BitPos And 7));
+  Inc(BitPos);
+ End;
+End;
+Procedure H8(V: LongInt); Begin Hd[Hl]:=V And 255; Inc(Hl); End;
+Procedure H16(V: LongInt); Begin H8(V); H8(V Shr 8); End;
+Procedure H32(V: Int64); Begin H16(V And 65535); H16((V Shr 16) And 65535); End;
+Procedure HT(Const S: String); Var K: LongInt; Begin For K:=1 To Length(S) Do H8(Ord(S[K])); End;
+Begin
+ OpenRead(Source); GAWavParse(W,'sonic');
+ If (W.Tag<>1) Or (W.Bits<>16) Then Fail('sonic: WAV PCM 16 bits requis.');
+ Chn:=W.Chn; Rate:=W.Rate;
+ If Chn>2 Then Fail('Only mono and stereo streams are supported by now');
+ If Chn<1 Then Fail('sonic: canaux incorrects.');
+ SrIdx:=-1;
+ For I:=0 To 8 Do If SNSampleRates[I]=Rate Then SrIdx:=I;
+ If SrIdx<0 Then Fail('sonic: frequence d''echantillonnage non prise en charge (44100, 22050, 11025, 96000, 48000, 32000, 24000, 16000, 8000).');
+ If Lossless Then Begin Taps:=32; Down:=1; Quantization:=0.0; End Else Begin Taps:=128; Down:=2; Quantization:=1.0; End;
+ If Chn=2 Then Decor:=0 Else Decor:=3;
+ BlockAlign:=(Int64(2048)*Rate) Div (44100*Int64(Down));
+ FrameSize:=Chn*BlockAlign*Down; FramePc:=BlockAlign*Down;
+ TailSize:=Taps*Chn; WinSize:=2*TailSize+FrameSize;
+ If BlockAlign<1 Then Fail('sonic: bloc vide.');
+ GetMem(TapQuant,Taps*4+16); GetMem(PredK,Taps*4+16);
+ For I:=0 To Taps-1 Do TapQuant^[I]:=SNISqrt(I+1);
+ GetMem(IntS,FrameSize*4+16); GetMem(Window,Int64(WinSize)*8+16); GetMem(Tail,TailSize*4+16);
+ FillChar(Tail^,TailSize*4,0);
+ For Ch:=0 To Chn-1 Do GetMem(Coded[Ch],BlockAlign*4+16);
+ GetMem(Raw,FrameSize*2+16);
+ N:=W.DataSize Div (2*Chn);
+ NFrames:=(N+FramePc-1) Div FramePc;
+ OutCap:=Int64(NFrames)*(FrameSize*5+1000)+16;
+ GetMem(Outp,OutCap); GetMem(Pk,FrameSize*5+1000+16);
+ Total:=0; MaxPk:=0; GetMem(Sizes,NFrames*4+16);
+ For F:=0 To NFrames-1 Do Begin
+  { echantillons : la derniere trame est completee par du silence }
+  Take:=FramePc; If N-Int64(F)*FramePc<Take Then Take:=N-Int64(F)*FramePc;
+  FillChar(Raw^,FrameSize*2,0);
+  J:=0;
+  While J<Take*Chn*2 Do Begin
+   I:=Take*Chn*2-J; If I>32768 Then I:=32768;
+   ReadAt(W.DataPos+Int64(F)*FramePc*Chn*2+J,Raw^[J],I); Inc(J,I);
+  End;
+  For I:=0 To FrameSize-1 Do Begin
+   X:=Raw^[I*2]+Raw^[I*2+1]*256; If X>=32768 Then Dec(X,65536);
+   IntS^[I]:=X;
+  End;
+  If Not Lossless Then For I:=0 To FrameSize-1 Do IntS^[I]:=GAS32(Int64(IntS^[I])*16);
+  Case Decor Of
+   0: Begin
+    I:=0;
+    While I<FrameSize Do Begin
+     IntS^[I]:=GAS32(Int64(IntS^[I])+IntS^[I+1]);
+     IntS^[I+1]:=GAS32(Int64(IntS^[I+1])-SNShift(IntS^[I],1));
+     Inc(I,Chn);
+    End;
+   End;
+  End;
+  FillChar(Window^,Int64(WinSize)*4,0);
+  X:=0;
+  For I:=0 To TailSize-1 Do Begin Window^[X]:=Tail^[I]; Inc(X); End;
+  For I:=0 To FrameSize-1 Do Begin Window^[X]:=IntS^[I]; Inc(X); End;
+  For I:=0 To TailSize-1 Do Begin Window^[X]:=0; Inc(X); End;
+  For I:=0 To TailSize-1 Do Tail^[I]:=IntS^[FrameSize-TailSize+I];
+  SNLevinson(Window,WinSize,PredK,Taps,Chn,TapQuant);
+  FillChar(Pk^,FrameSize*5+1000,0);
+  SNInitEncoder(@C,Pk);
+  SNBuildStates(@C,214748364,248);
+  FillChar(St,SizeOf(St),128);
+  For I:=0 To Taps-1 Do SNPutSymbol(@C,St,PredK^[I],True);
+  For Ch:=0 To Chn-1 Do Begin
+   X:=TailSize+Ch;
+   For I:=0 To BlockAlign-1 Do Begin
+    Sum:=0;
+    For J:=0 To Down-1 Do Begin Sum:=GAS32(Int64(Sum)+Window^[X]); Inc(X,Chn); End;
+    Coded[Ch]^[I]:=Sum;
+   End;
+  End;
+  Quant:=0;
+  If Not Lossless Then Begin
+   E1:=0.0; E2:=0.0;
+   For Ch:=0 To Chn-1 Do
+    For I:=0 To BlockAlign-1 Do Begin
+     Smp:=Coded[Ch]^[I];
+     T:=Smp*Smp; E2:=E2+T;
+     E1:=E1+Abs(Smp);
+    End;
+   Cnt:=Chn*BlockAlign;
+   T:=E2/Cnt; E2:=Sqrt(T);
+   T:=1.41421356237309504880*E1; E1:=T/Cnt;
+   If E2>E1 Then Begin T:=E2-E1; T:=T*3.0; E2:=E2+T; End;
+   T:=0.6*Quantization; T:=T*E2; T:=T/16.0;
+   If (T>=2147483648.0) Or (T<=-2147483649.0) Then Quant:=-2147483647-1 Else Quant:=Trunc(T);
+   If Quant<1 Then Quant:=1 Else If Quant>65534 Then Quant:=65534;
+   SNPutSymbol(@C,St,Quant,False);
+   Quant:=Quant*16;
+  End;
+  For Ch:=0 To Chn-1 Do Begin
+   If Not Lossless Then For I:=0 To BlockAlign-1 Do Coded[Ch]^[I]:=SNRoundedDiv(Coded[Ch]^[I],Quant);
+   For I:=0 To BlockAlign-1 Do SNPutSymbol(@C,St,Coded[Ch]^[I],True);
+  End;
+  PkLen:=SNTerminate(@C); Sizes^[F]:=PkLen; If PkLen>MaxPk Then MaxPk:=PkLen;
+  Move(Pk^,Outp^[Total],PkLen); Inc(Total,PkLen);
+ End;
+ CloseRead;
+ { extradata }
+ FillChar(Ex,SizeOf(Ex),0); BitPos:=0;
+ PBits(2,2); PBits(8,2); PBits(8,0); PBits(2,Chn); PBits(4,SrIdx);
+ If Lossless Then PBits(1,1) Else Begin PBits(1,0); PBits(3,4); End;
+ PBits(2,Decor); PBits(2,Down); PBits(5,(Taps Shr 5)-1); PBits(1,0);
+ ExLen:=(BitPos+7) Shr 3;
+ Ext:=Rate>48000;
+ FmtSz:=18+ExLen+(ExLen And 1); If Ext Then Inc(FmtSz,22);
+ Hl:=0; Fact:=N; DataSz:=Total;
+ If Not Avi Then Begin
+  HT('RIFF'); H32(0); HT('WAVE'); HT('fmt '); H32(FmtSz);
+ End Else Begin
+  StrlSz:=4+8+56+8+FmtSz+8+4120;
+  HT('RIFF'); H32(0); HT('AVI '); HT('LIST'); H32(4+8+56+8+StrlSz+8+260); HT('hdrl');
+  HT('avih'); H32(56); H32(0); If BitRate>0 Then H32(BitRate Div 8) Else H32(16000);
+  H32(0); H32($910); H32(0); H32(0); H32(1); H32($100000); For I:=1 To 6 Do H32(0);
+  HT('LIST'); H32(StrlSz); HT('strl');
+  HT('strh'); H32(56); HT('auds'); H32(1); H32(0); H32(0); H32(0);
+  { echelle / cadence : frame_size / sample_rate reduits }
+  Ga:=FramePc; Gb:=Rate;
+  While Gb<>0 Do Begin Gc:=Ga Mod Gb; Ga:=Gb; Gb:=Gc; End;
+  H32(FramePc Div Ga); H32(Rate Div Ga); H32(0); H32(NFrames); H32(MaxPk); H32($FFFFFFFF); H32(0); H32(0); H32(0);
+  HT('strf'); H32(FmtSz);
+ End;
+ If Ext Then H16($FFFE) Else H16($2048);
+ H16(Chn); H32(Rate);
+ If BitRate>0 Then H32(BitRate Div 8) Else H32(16000);
+ H16(Chn*2); H16(16);
+ If Ext Then Begin
+  H16(22+ExLen); H16(16); If Chn=1 Then H32(4) Else H32(3);
+  H32($2048); H16(0); H16($10); H8($80); H8(0); H8(0); H8($AA); H8(0); H8($38); H8($9B); H8($71);
+ End Else H16(ExLen);
+ For I:=0 To ExLen-1 Do H8(Ex[I]);
+ If Odd(ExLen) Then H8(0);
+ If Not Avi Then Begin
+  HT('fact'); H32(4); H32(Fact);
+  HT('LIST'); H32(26); HT('INFO'); HT('ISFT'); H32(14); HT('Lavf60.16.100'); H8(0);
+  HT('data'); H32(DataSz);
+  I:=Hl+DataSz+(DataSz And 1)-8;
+  Hd[4]:=I And 255; Hd[5]:=(I Shr 8) And 255; Hd[6]:=(I Shr 16) And 255; Hd[7]:=(I Shr 24) And 255;
+  OpenWrite(Target);
+  WriteBytes(Hd,Hl);
+  J:=0;
+  While J<Total Do Begin
+   I:=Total-J; If I>32768 Then I:=32768;
+   WriteBytes(Outp^[J],I); Inc(J,I);
+  End;
+  If Odd(Total) Then Begin Hd[0]:=0; WriteBytes(Hd,1); End;
+  CloseWrite;
+ End Else Begin
+  { indx (JUNK 4120), odml (JUNK 260), INFO, JUNK 1016, movi }
+  HT('JUNK'); H32(4120); H16(4); H8(0); H8(0); H32(0); HT('00wb'); For I:=1 To 3 Do H32(0);
+  For I:=1 To 1024 Do H32(0);
+  HT('JUNK'); H32(260); HT('odml'); HT('dmlh'); H32(248); For I:=1 To 62 Do H32(0);
+  HT('LIST'); H32(26); HT('INFO'); HT('ISFT'); H32(14); HT('Lavf60.16.100'); H8(0);
+  HT('JUNK'); H32(1016); For I:=1 To 254 Do H32(0);
+  { taille movi : 4 + chunks }
+  X:=4; For F:=0 To NFrames-1 Do Inc(X,8+Sizes^[F]+(Sizes^[F] And 1));
+  HT('LIST'); H32(X); HT('movi');
+  GetMem(Idx,16*NFrames+8+16);
+  I:=Hl+X-4+16*NFrames;
+  Hd[4]:=I And 255; Hd[5]:=(I Shr 8) And 255; Hd[6]:=(I Shr 16) And 255; Hd[7]:=(I Shr 24) And 255;
+  OpenWrite(Target);
+  WriteBytes(Hd,Hl);
+  J:=0; Off:=4;
+  For F:=0 To NFrames-1 Do Begin
+   Hd[0]:=48; Hd[1]:=48; Hd[2]:=119; Hd[3]:=98;
+   Hd[4]:=Sizes^[F] And 255; Hd[5]:=(Sizes^[F] Shr 8) And 255; Hd[6]:=(Sizes^[F] Shr 16) And 255; Hd[7]:=(Sizes^[F] Shr 24) And 255;
+   WriteBytes(Hd,8);
+   Idx^[16*F]:=48; Idx^[16*F+1]:=48; Idx^[16*F+2]:=119; Idx^[16*F+3]:=98;
+   Idx^[16*F+4]:=16; Idx^[16*F+5]:=0; Idx^[16*F+6]:=0; Idx^[16*F+7]:=0;
+   Idx^[16*F+8]:=Off And 255; Idx^[16*F+9]:=(Off Shr 8) And 255; Idx^[16*F+10]:=(Off Shr 16) And 255; Idx^[16*F+11]:=(Off Shr 24) And 255;
+   Idx^[16*F+12]:=Sizes^[F] And 255; Idx^[16*F+13]:=(Sizes^[F] Shr 8) And 255; Idx^[16*F+14]:=(Sizes^[F] Shr 16) And 255; Idx^[16*F+15]:=(Sizes^[F] Shr 24) And 255;
+   I:=Sizes^[F];
+   If I>0 Then Begin
+    X:=0;
+    While X<I Do Begin
+     Gx:=I-X; If Gx>32768 Then Gx:=32768;
+     WriteBytes(Outp^[J+X],Gx); Inc(X,Gx);
+    End;
+   End;
+   Inc(J,I);
+   If Odd(I) Then Begin Hd[0]:=0; WriteBytes(Hd,1); End;
+   Inc(Off,8+I+(I And 1));
+  End;
+  Hd[0]:=105; Hd[1]:=100; Hd[2]:=120; Hd[3]:=49;
+  Hd[4]:=(16*NFrames) And 255; Hd[5]:=((16*NFrames) Shr 8) And 255; Hd[6]:=((16*NFrames) Shr 16) And 255; Hd[7]:=((16*NFrames) Shr 24) And 255;
+  WriteBytes(Hd,8);
+  J:=0;
+  While J<16*NFrames Do Begin
+   I:=16*NFrames-J; If I>32768 Then I:=32768;
+   WriteBytes(Idx^[J],I); Inc(J,I);
+  End;
+  CloseWrite;
+  FreeMem(Idx);
+ End;
+ FreeMem(Sizes);
+ FreeMem(Outp); FreeMem(Pk); FreeMem(Raw); FreeMem(TapQuant); FreeMem(PredK); FreeMem(IntS); FreeMem(Window); FreeMem(Tail);
+ For Ch:=0 To Chn-1 Do FreeMem(Coded[Ch]);
+End;
+
+{ ---- Sonic : decodage depuis WAV (tag 0x2048) ou AVI ---- }
+Function SNAviOpen(Var AudioIdx,SampleSize,Tag,Chn,Rate,ExPos,ExLen,MoviPos,MoviEnd: LongInt): Boolean;
+Var
+ Limit,Pos,Sz,P2,E2,P3,E3,SPos,Outer: Int64; H: Array[0..63] Of Byte; Stream: LongInt; Kind: Array[0..3] Of Byte; IsAud: Boolean; Found: Boolean;
+Begin
+ SNAviOpen:=False; Limit:=InputSize; AudioIdx:=-1; MoviPos:=-1; MoviEnd:=-1; Stream:=0; Found:=False;
+ If Limit<12 Then Exit;
+ ReadAt(0,H,12);
+ If Not ((H[0]=82) And (H[1]=73) And (H[2]=70) And (H[3]=70) And (H[8]=65) And (H[9]=86) And (H[10]=73) And (H[11]=32)) Then Exit;
+ Pos:=12;
+ While Pos+8<=Limit Do Begin
+  ReadAt(Pos,H,8); Sz:=Int64(H[4])+Int64(H[5])*256+Int64(H[6])*65536+Int64(H[7])*16777216; Outer:=Sz;
+  If (H[0]=76) And (H[1]=73) And (H[2]=83) And (H[3]=84) And (Sz>=4) And (Pos+12<=Limit) Then Begin
+   ReadAt(Pos+8,H,4);
+   If (H[0]=104) And (H[1]=100) And (H[2]=114) And (H[3]=108) Then Begin
+    { hdrl : chercher les LIST strl }
+    P2:=Pos+12; E2:=Pos+8+Outer; If E2>Limit Then E2:=Limit;
+    While P2+8<=E2 Do Begin
+     ReadAt(P2,H,8); E3:=Int64(H[4])+Int64(H[5])*256+Int64(H[6])*65536+Int64(H[7])*16777216;
+     If (H[0]=76) And (H[1]=73) And (H[2]=83) And (H[3]=84) And (P2+12<=E2) Then Begin
+      ReadAt(P2+8,H,4);
+      If (H[0]=115) And (H[1]=116) And (H[2]=114) And (H[3]=108) Then Begin
+       { strl : strh, strf }
+       P3:=P2+12; SPos:=P2+8+E3; If SPos>E2 Then SPos:=E2;
+       IsAud:=False;
+       While P3+8<=SPos Do Begin
+        ReadAt(P3,H,8); Sz:=Int64(H[4])+Int64(H[5])*256+Int64(H[6])*65536+Int64(H[7])*16777216;
+        If (H[0]=115) And (H[1]=116) And (H[2]=114) And (H[3]=104) And (Sz>=48) And (P3+8+48<=SPos) Then Begin
+         ReadAt(P3+8,H,48);
+         IsAud:=(H[0]=97) And (H[1]=117) And (H[2]=100) And (H[3]=115);
+         If IsAud And Not Found Then SampleSize:=H[44]+H[45]*256+H[46]*65536+H[47]*16777216;
+        End Else If (H[0]=115) And (H[1]=116) And (H[2]=114) And (H[3]=102) And IsAud And Not Found And (Sz>=16) And (P3+8+16<=SPos) Then Begin
+         ReadAt(P3+8,H,16);
+         Tag:=H[0]+H[1]*256; Chn:=H[2]+H[3]*256; Rate:=H[4]+H[5]*256+H[6]*65536+H[7]*16777216;
+         ExLen:=0; ExPos:=0;
+         If (Sz>=18) And (P3+8+18<=SPos) Then Begin
+          ReadAt(P3+8+16,H,2); ExLen:=H[0]+H[1]*256;
+          If ExLen>Sz-18 Then ExLen:=Sz-18;
+          ExPos:=P3+8+18;
+          If (Tag=$FFFE) And (ExLen>=22) Then Begin
+           ReadAt(ExPos+6,H,2); Tag:=H[0]+H[1]*256; Inc(ExPos,22); Dec(ExLen,22);
+          End;
+         End;
+         AudioIdx:=Stream; Found:=True;
+        End;
+        Inc(P3,8+Sz+(Sz And 1));
+       End;
+       Inc(Stream);
+      End;
+     End;
+     Inc(P2,8+E3+(E3 And 1));
+    End;
+   End Else If (H[0]=109) And (H[1]=111) And (H[2]=118) And (H[3]=105) Then Begin
+    MoviPos:=Pos+12; MoviEnd:=Pos+8+Outer; If MoviEnd>Limit Then MoviEnd:=Limit;
+   End;
+  End;
+  Inc(Pos,8+Outer+(Outer And 1));
+ End;
+ SNAviOpen:=Found And (MoviPos>=0);
+End;
+
+Function SNIsAviSonic(Const Name: String): Boolean;
+Var A,S,T,C,R,EP,EL,MP,ME: LongInt;
+Begin
+ OpenRead(Name);
+ SNIsAviSonic:=SNAviOpen(A,S,T,C,R,EP,EL,MP,ME) And (T=$2048);
+ CloseRead;
+End;
+
+Procedure DecodeSonic(Const Source,Target: String);
+Var
+ W: TGAWav; D: TSNDec; Ex,Pk: PEABuffer; Out_: PGAI32; ExLen,I,Size,Chn,Rate,AIdx,SS,Tag,ExPos,MP,ME: LongInt; Msg: String;
+ Limit,Pos,Sz,Piece,Rem: Int64; H: Array[0..7] Of Byte; Opened,IsAvi: Boolean; Id: LongInt;
+Procedure Packet(P: Int64; N: LongInt);
+Var K: LongInt;
+Begin
+ If N<=0 Then Exit;
+ Pk:=GALoad(P,N);
+ If SNDecFrame(@D,Pk,N,Out_) Then Begin
+  For K:=0 To D.FrameSize-1 Do EAPut(Out_^[K]);
+ End;
+ FreeMem(Pk);
+End;
+Begin
+ If Not LJUnofficial Then Fail('The decoder ''sonic'' is experimental but experimental codecs are not enabled, add ''-strict -2'' if you want to use it.');
+ OpenRead(Source); Limit:=InputSize;
+ IsAvi:=SNAviOpen(AIdx,SS,Tag,Chn,Rate,ExPos,ExLen,MP,ME);
+ If IsAvi Then Begin
+  If Tag<>$2048 Then Fail('sonic: piste audio de type 0x2048 requise.');
+ End Else Begin
+  GAWavParse(W,'sonic');
+  If W.Tag<>$2048 Then Fail('sonic: WAV de type 0x2048 requis.');
+  Chn:=W.Chn; Rate:=W.Rate; ExPos:=W.ExtraPos; ExLen:=W.ExtraLen; SS:=W.Align;
+ End;
+ If ExLen>0 Then Ex:=GALoad(ExPos,ExLen) Else Ex:=Nil;
+ FillChar(D,SizeOf(D),0);
+ If Not SNDecInit(@D,Ex,ExLen,Msg) Then Fail('sonic: '+Msg);
+ If (Rate<1) Or (Rate>40000000) Then Fail('sonic: frequence incorrecte.');
+ GetMem(Out_,D.FrameSize*4+16);
+ EAReset; OpenWrite(Target); ADPCMWaveHeader(Rate,D.Chans,0);
+ If IsAvi Then Begin
+  Pos:=MP;
+  While Pos+8<=ME Do Begin
+   ReadAt(Pos,H,8); Sz:=Int64(H[4])+Int64(H[5])*256+Int64(H[6])*65536+Int64(H[7])*16777216;
+   If (H[0]=76) And (H[1]=73) And (H[2]=83) And (H[3]=84) Then Begin
+    Inc(Pos,12);
+   End Else Begin
+    If (H[0]>=48) And (H[0]<=57) And (H[1]>=48) And (H[1]<=57) And (H[2]=119) And (H[3]=98) Then Begin
+     Id:=(H[0]-48)*10+(H[1]-48);
+     If (Id=AIdx) And (Pos+8+Sz<=ME+0) Then Begin
+      Rem:=Sz; Piece:=Sz; If Piece<1 Then Piece:=1;
+      If SS>1 Then Begin If SS<32 Then Piece:=1024*SS Else Piece:=SS; End;
+      I:=0;
+      While Rem>0 Do Begin
+       Size:=Rem; If Size>Piece Then Size:=Piece;
+       Packet(Pos+8+I,Size); Dec(Rem,Size); Inc(I,Size);
+      End;
+     End;
+    End;
+    Inc(Pos,8+Sz+(Sz And 1));
+   End;
+  End;
+ End Else Begin
+  Pos:=W.DataPos; Rem:=W.DataSize;
+  Piece:=4096;
+  If W.Align>1 Then Piece:=(4096 Div W.Align)*W.Align;
+  If Piece<1 Then Piece:=4096;
+  While Rem>0 Do Begin
+   Size:=Rem; If Size>Piece Then Size:=Piece;
+   Packet(Pos,Size); Inc(Pos,Size); Dec(Rem,Size);
+  End;
+ End;
+ FreeMem(Out_); SNDecFree(@D); If Ex<>Nil Then FreeMem(Ex);
+ EAFlush;
+ ADPCMPatchHeader(Rate,D.Chans,EAWritten);
+ CloseRead; CloseWrite;
+End;
+
+
+{ Etiquette WAV effective (sous-format de WAVE_FORMAT_EXTENSIBLE compris), -1 si absente. }
+Function SNWavTag(Const Name: String): LongInt;
+Var
+ B: Array[0..39] Of Byte; Limit,Position,Size: Int64; Count: LongInt;
+Begin
+ SNWavTag:=-1; OpenRead(Name); Limit:=InputSize;
+ If Limit>=12 Then Begin
+  ReadAt(0,B,12);
+  If (B[0]=82) And (B[1]=73) And (B[2]=70) And (B[3]=70) And (B[8]=87) And (B[9]=65) Then Begin
+   Position:=12; Count:=0;
+   While (Limit-Position>=8) And (Count<64) Do Begin
+    ReadAt(Position,B,8); Inc(Position,8); Inc(Count);
+    Size:=Int64(B[4])+Int64(B[5])*256+Int64(B[6])*65536+Int64(B[7])*16777216;
+    If (B[0]=102) And (B[1]=109) And (B[2]=116) And (B[3]=32) Then Begin
+     If (Size>=2) And (Limit-Position>=2) Then Begin
+      ReadAt(Position,B,2); Count:=B[0]+B[1]*256;
+      If (Count=$FFFE) And (Size>=40) And (Limit-Position>=40) Then Begin
+       ReadAt(Position+24,B,2); Count:=B[0]+B[1]*256;
+      End;
+      SNWavTag:=Count;
+     End;
+     Break;
+    End;
+    If Size>Limit-Position Then Break;
+    Inc(Position,Size); If Odd(Size) Then Inc(Position);
+   End;
+  End;
+ End;
+ CloseRead;
+End;
+
+{ Etiquette de la premiere piste audio d'un AVI (-1 si absente). }
+Function SNAviAudioTag(Const Name: String): LongInt;
+Var A,S,T,C,R,EP,EL,MP,ME: LongInt;
+Begin
+ OpenRead(Name);
+ If SNAviOpen(A,S,T,C,R,EP,EL,MP,ME) Then SNAviAudioTag:=T Else SNAviAudioTag:=-1;
+ CloseRead;
+End;
+
+{ TrueSpeech dans un AVI (wFormatTag 0x22) : paquets = morceaux des blocs NNwb selon dwSampleSize. }
+Procedure DecodeTrueSpeechAvi(Const Source,Target: String);
+Var
+ S: PTSState; Out_: PGAI32; Pk: PEABuffer; AIdx,SS,Tag,Chn,Rate,ExPos,ExLen,MP,ME,K,Size,Id: LongInt;
+ Pos,Sz,Piece,Rem: Int64; H: Array[0..7] Of Byte;
+Procedure Packet(P: Int64; N: LongInt);
+Var Fr,F2,J: LongInt;
+Begin
+ Fr:=N Div 32;
+ If Fr<=0 Then Exit;
+ Pk:=GALoad(P,N);
+ For F2:=0 To Fr-1 Do Begin
+  TSDecodeOne(S,PEABuffer(@Pk^[F2*32]),Out_);
+  For J:=0 To 239 Do EAPut(Out_^[J]);
+ End;
+ FreeMem(Pk);
+End;
+Begin
+ OpenRead(Source);
+ If Not SNAviOpen(AIdx,SS,Tag,Chn,Rate,ExPos,ExLen,MP,ME) Then Fail('truespeech: AVI avec piste audio requis.');
+ If Tag<>$22 Then Fail('truespeech: piste audio de type 0x22 requise.');
+ If Chn<>1 Then Fail('truespeech: un seul canal pris en charge.');
+ If (Rate<1) Or (Rate>4000000) Then Fail('truespeech: frequence incorrecte.');
+ New(S); FillChar(S^,SizeOf(S^),0); GetMem(Out_,240*4+64);
+ EAReset; OpenWrite(Target); ADPCMWaveHeader(Rate,1,0);
+ Pos:=MP;
+ While Pos+8<=ME Do Begin
+  ReadAt(Pos,H,8); Sz:=Int64(H[4])+Int64(H[5])*256+Int64(H[6])*65536+Int64(H[7])*16777216;
+  If (H[0]=76) And (H[1]=73) And (H[2]=83) And (H[3]=84) Then Inc(Pos,12) Else Begin
+   If (H[0]>=48) And (H[0]<=57) And (H[1]>=48) And (H[1]<=57) And (H[2]=119) And (H[3]=98) Then Begin
+    Id:=(H[0]-48)*10+(H[1]-48);
+    If (Id=AIdx) And (Pos+8+Sz<=ME) Then Begin
+     Rem:=Sz; Piece:=Sz; If Piece<1 Then Piece:=1;
+     If SS>1 Then Begin If SS<32 Then Piece:=1024*SS Else Piece:=(SS Div 32)*32; End;
+     K:=0;
+     While Rem>0 Do Begin
+      Size:=Rem; If Size>Piece Then Size:=Piece;
+      Packet(Pos+8+K,Size); Dec(Rem,Size); Inc(K,Size);
+     End;
+    End;
+   End;
+   Inc(Pos,8+Sz+(Sz And 1));
+  End;
+ End;
+ FreeMem(Out_); Dispose(S); EAFlush;
+ ADPCMPatchHeader(Rate,1,EAWritten);
+ CloseRead; CloseWrite;
+End;
+
 { ==== BLOCK-ANCHOR-G3A : inserer le code du groupe G3A juste au-dessus de cette ligne ==== }
 
 { ==== BLOCK-ANCHOR-G3B : inserer le code du groupe G3B juste au-dessus de cette ligne ==== }
@@ -80047,6 +82341,8 @@ Begin
  WriteLn('D   shn             raw Shorten');
  WriteLn('D   qcp             QCP');
  WriteLn('D   smk             Smacker');
+ WriteLn('D   tta             TTA (True Audio)');
+ WriteLn('D   wv              WavPack');
  WriteLn('DE  roq             id RoQ (video roqvideo, audio roq_dpcm)');
  WriteLn(' D  ipmovie         Interplay MVE (video interplayvideo PAL8/RGB555 vers Y4M/PNG/BMP, audio PCM/interplay_dpcm vers WAV)');
  WriteLn(' D  jpegls_pipe     piped jpegls sequence (image JPEG-LS vers Y4M/PNG/BMP)');
@@ -80536,6 +82832,11 @@ BEGIN
   { LIST-ANCHOR-G1 }
   { LIST-ANCHOR-G2A }
   { LIST-ANCHOR-G2B }
+  WriteLn('DEA    sonic           Sonic (experimental, -strict -2; WAV 0x2048 en sortie octet pour octet, AVI/WAV en entree)');
+  WriteLn(' EA    sonicls         Sonic lossless (experimental, -strict -2; encodeur WAV octet pour octet)');
+  WriteLn('D A    truespeech      DSP Group TrueSpeech (WAV 0x22; decodeur exact)');
+  WriteLn('D A    tta             TTA (True Audio) (fichiers .tta; decodeur exact 8/16/24 bits, multicanal; pas de mot de passe)');
+  WriteLn('D A    wavpack         WavPack (fichiers .wv; decodeur)');
   { LIST-ANCHOR-G3A }
   { LIST-ANCHOR-G3B }
   { LIST-ANCHOR-G3C }
@@ -80812,6 +83113,8 @@ BEGIN
   If MPAHasOn4(InputPath) Then InputFormat:='mp3on4';
  If (InputFormat='mp4') And Not IsHTTP(InputPath) And ((OutputFormat='wav') Or (OutputFormat='adx') Or (OutputFormat='aiff') Or (OutputFormat='flv') Or (OutputFormat='mp3') Or (OutputFormat='ac3') Or (OutputFormat='aac') Or (OutputFormat='ogg')) Then
   If MP4HasQDM2(InputPath) Then InputFormat:='qdm2';
+ If (InputFormat='avi') And Not IsHTTP(InputPath) And ((OutputFormat='wav') Or PcmIsRawName(OutputFormat)) Then
+  If SNIsAviSonic(InputPath) Then InputFormat:='sonicavi' Else If SNAviAudioTag(InputPath)=$22 Then InputFormat:='tsavi';
  If (InputCodec='libfaad') Or (InputCodec='interplay_dpcm') Or (InputCodec='libspeex') Or (InputCodec='speex') Then Begin
   { decodeurs imposes : ce sont les decodeurs natifs des entrees correspondantes }
   If ((InputCodec='libfaad') And (InputFormat<>'aac')) Or ((InputCodec='interplay_dpcm') And (InputFormat<>'ipmovie')) Or
@@ -81302,7 +83605,7 @@ BEGIN
  If VideoCodec<>'' Then Fail('Codec video incompatible avec une sortie audio seule.');
  If (OutputFormat<>'wav') And (OutputFormat<>'mp3') And (OutputFormat<>'mp2') And (OutputFormat<>'ac3') And (OutputFormat<>'aac') And
  (OutputFormat<>'adx') And (OutputFormat<>'aiff') And (OutputFormat<>'flv') And (OutputFormat<>'mp4') And (OutputFormat<>'ogg') And
- (OutputFormat<>'daud') And (OutputFormat<>'roq') And Not PcmIsRawName(OutputFormat) Then Fail(
+ (OutputFormat<>'daud') And (OutputFormat<>'roq') And Not PcmIsRawName(OutputFormat) And Not ((OutputFormat='avi') And ((AudioCodec='sonic') Or (AudioCodec='sonicls'))) Then Fail(
  'Sorties audio WAV, MP3, MP2, AC3, AAC (ADTS), Ogg Vorbis, ADX et AIFF-C (adpcm_ima_qt) prises en charge.');
  PcmCodecOut:='';
  If (Copy(AudioCodec,1,4)='pcm_') And (AudioCodec<>'pcm_dvd') And Not ((OutputFormat='wav') And (AudioCodec='pcm_s16le')) Then PcmCodecOut:=AudioCodec
@@ -81319,7 +83622,7 @@ BEGIN
  Else If OutputFormat='flv' Then AudioCodec:='adpcm_swf'
  Else If OutputFormat='mp4' Then AudioCodec:='alac' Else If OutputFormat='ogg' Then AudioCodec:='libvorbis' Else If OutputFormat='roq' Then AudioCodec:='roq_dpcm' Else AudioCodec:=OutputFormat;
  If (PcmCodecOut='') And (AudioCodec<>'copy') And Not (((OutputFormat='wav') And ((AudioCodec='pcm_s16le') Or (AudioCodec='adpcm_ima_wav') Or
-  (AudioCodec='adpcm_ms') Or (AudioCodec='adpcm_yamaha'))) Or ((OutputFormat='flv') And ((AudioCodec='adpcm_swf') Or (AudioCodec='nellymoser'))) Or
+  (AudioCodec='adpcm_ms') Or (AudioCodec='adpcm_yamaha') Or (AudioCodec='sonic') Or (AudioCodec='sonicls'))) Or ((OutputFormat='avi') And ((AudioCodec='sonic') Or (AudioCodec='sonicls'))) Or ((OutputFormat='flv') And ((AudioCodec='adpcm_swf') Or (AudioCodec='nellymoser'))) Or
  ((OutputFormat='mp4') And (AudioCodec='alac')) Or ((OutputFormat='roq') And (AudioCodec='roq_dpcm')) Or
  ((OutputFormat='adx') And (AudioCodec='adpcm_adx')) Or ((OutputFormat='aiff') And (AudioCodec='adpcm_ima_qt')) Or
  ((OutputFormat='mp3') And ((AudioCodec='mp3') Or (AudioCodec='libmp3lame'))) Or ((OutputFormat='mp2') And (AudioCodec='mp2')) Or ((OutputFormat='ac3') And (AudioCodec='ac3')) Or
@@ -81388,6 +83691,10 @@ BEGIN
    If InputFormat='qcp' Then DecodeQCELP(InputPath,Temps[0]) Else
    If InputFormat='qdm2' Then DecodeQDM2(InputPath,Temps[0]) Else
    If InputFormat='smk' Then DecodeSMKAudio(InputPath,Temps[0]) Else
+   If InputFormat='sonicavi' Then DecodeSonic(InputPath,Temps[0]) Else
+   If InputFormat='tsavi' Then DecodeTrueSpeechAvi(InputPath,Temps[0]) Else
+   If InputFormat='tta' Then DecodeTTA(InputPath,Temps[0]) Else
+   If InputFormat='wv' Then DecodeWavPack(InputPath,Temps[0]) Else
    If (InputFormat='aiff') And IsAIFFIma4(InputPath) Then DecodeAIFFIma4(InputPath,Temps[0]) Else
    If (InputFormat='aiff') And PcmAiffToWav(InputPath,Temps[0],PcmCodecOut<>'') Then Else
    If InputFormat='aiff' Then DecodeAIFF(InputPath,Temps[0]) Else
@@ -81401,6 +83708,10 @@ BEGIN
    Temps[0]:=NewTemporary; PcmEncodeFile(InputPath,Temps[0],'wav','pcm_s16le'); Intermediate:=Temps[0];
   End Else If IsWaveCT(InputPath) Then Begin
    Temps[0]:=NewTemporary; DecodeWaveCT(InputPath,Temps[0]); Intermediate:=Temps[0];
+  End Else If SNWavTag(InputPath)=$2048 Then Begin
+   Temps[0]:=NewTemporary; DecodeSonic(InputPath,Temps[0]); Intermediate:=Temps[0];
+  End Else If WaveFormatTag(InputPath)=$22 Then Begin
+   Temps[0]:=NewTemporary; DecodeTrueSpeech(InputPath,Temps[0]); Intermediate:=Temps[0];
   End Else If WaveFormatTag(InputPath)=$45 Then Begin
    Temps[0]:=NewTemporary; DecodeG726(InputPath,Temps[0],False,4,8000); Intermediate:=Temps[0];
   End Else If WaveFormatTag(InputPath)=$401 Then Begin
@@ -81424,6 +83735,10 @@ BEGIN
   End Else If (OutputFormat='wav') And (AudioCodec='adpcm_ms') Then Begin
    Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False);
    EncodeWaveBlocks(Temps[1],Temps[2],1);
+  End Else If ((OutputFormat='wav') Or (OutputFormat='avi')) And ((AudioCodec='sonic') Or (AudioCodec='sonicls')) Then Begin
+   If Not LJUnofficial Then Fail('Codec '+AudioCodec+' is experimental but experimental codecs are not enabled, add -strict -2 if you want to use it.');
+   Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False);
+   EncodeSonic(Temps[1],Temps[2],AudioCodec='sonicls',0,OutputFormat='avi');
   End Else If (OutputFormat='wav') And (AudioCodec='adpcm_yamaha') Then Begin
    Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False);
    EncodeWaveYamaha(Temps[1],Temps[2]);
