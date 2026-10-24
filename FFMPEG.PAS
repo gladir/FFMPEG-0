@@ -22716,6 +22716,7 @@ Procedure DecodeRoQ(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeRL2(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeSMK(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeRV(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure DecodeWMV(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure AWBegin(Const Target,Fourcc: String; W,H,Rate,Scale,Bpp: LongInt; Extra: PEABuffer; ExtraLen: LongInt); Forward;
 Procedure AWFrame(P: PEABuffer; Len: LongInt); Forward;
 Procedure AWEnd; Forward;
@@ -23484,6 +23485,7 @@ Begin
  If Kind=66 Then Begin DecodeRL2(Source,Target,Mode); Exit; End;
  If Kind=67 Then Begin DecodeSMK(Source,Target,Mode); Exit; End;
  If Kind=68 Then Begin DecodeRV(Source,Target,Mode); Exit; End;
+ If Kind=150 Then Begin DecodeWMV(Source,Target,Mode); Exit; End;
  If Kind=65 Then Begin DecodeRoQ(Source,Target,Mode); Exit; End;
  If Kind=64 Then Begin DecodeRawQX(Source,Target,Mode); Exit; End;
  If Kind=63 Then Begin DecodeQPEG(Source,Target,Mode); Exit; End;
@@ -67491,7 +67493,8 @@ Begin
  If M4Ms>0 Then Tag:='C420jpeg XYSCSS=420JPEG';
  If M4Range=1 Then Tag:=Tag+' XCOLORRANGE=LIMITED' Else If M4Range=2 Then Tag:=Tag+' XCOLORRANGE=FULL';
  NVYTag:=Tag;
- If (M4SarN>0) And (M4SarD>0) Then Begin NVSarN:=M4SarN; NVSarD:=M4SarD; End;
+ If (M4SarN>0) And (M4SarD>0) Then Begin NVSarN:=M4SarN; NVSarD:=M4SarD; End
+ Else If M4Ms>=4 Then NVAviSar(M4W,M4H);
 End;
 
 Procedure M4Output(P: LongInt);
@@ -68343,6 +68346,87 @@ Const
  MSCDcW: Array[0..31] Of Byte=(
   0,8,8,8,8,9,9,10,10,11,11,12,12,13,13,14,
   14,15,15,16,16,17,17,18,18,19,19,20,20,21,21,22);
+ W1Scan: Array[0..255] Of Byte=(
+  0,8,1,2,9,16,24,17,10,3,4,11,18,25,32,40,
+  48,56,41,33,26,19,12,5,6,13,20,27,34,49,57,58,
+  50,42,35,28,21,14,7,15,22,29,36,43,51,59,60,52,
+  44,37,30,23,31,38,45,53,61,62,54,46,39,47,55,63,
+  0,8,1,2,9,16,24,17,10,3,4,11,18,25,32,40,
+  33,48,26,19,12,5,6,13,20,27,34,41,56,49,57,42,
+  35,28,21,14,7,15,22,29,36,43,50,58,51,59,44,37,
+  30,23,31,38,45,52,60,53,61,46,39,47,54,62,55,63,
+  0,1,8,2,3,9,16,24,17,10,4,5,11,18,25,32,
+  40,48,33,26,19,12,6,7,13,20,27,34,41,56,49,57,
+  42,35,28,21,14,15,22,29,36,43,50,58,51,44,37,30,
+  23,31,38,45,52,59,60,53,46,39,47,54,61,62,55,63,
+  0,8,16,1,24,32,40,9,2,3,10,17,25,48,56,41,
+  33,26,18,11,4,5,12,19,27,34,49,57,50,42,35,28,
+  20,13,6,7,14,21,29,36,43,51,58,59,52,44,37,30,
+  22,15,23,31,38,45,60,53,46,39,47,54,61,62,55,63);
+ W1YDc: Array[0..31] Of Byte=(
+  0,8,8,8,8,8,9,9,10,10,11,11,12,12,13,13,
+  14,14,15,15,16,16,17,17,18,18,19,19,20,20,21,21);
+ W2Cbp0: Array[0..255] Of LongInt=(
+  167,14,111288,18,111246,18,222581,19,27820,16,2665,18,10548,20,21099,21,
+  27809,16,111289,18,10669,20,168787,24,27815,16,27819,16,111291,18,667,16,
+  55620,17,2666,18,84392,23,222495,19,27823,16,2636,18,222494,19,2632,18,
+  10652,20,10655,20,168786,24,10668,20,662,16,55622,17,2664,18,664,16,
+  1319,17,55629,17,5335,19,222580,19,2652,18,111257,18,10653,20,10654,20,
+  1317,17,2662,18,42197,22,5275,19,661,16,27821,16,2633,18,1313,17,
+  27818,16,55621,17,111256,18,1327,17,13908,15,27808,16,1330,17,657,16,
+  13906,15,1312,17,2653,18,660,16,155,11,1762,12,40,12,432,10,
+  1,3,16,8,47,6,76,10,13,4,0,10,6,9,308,12,
+  12,4,7,10,7,9,1761,12,14,5,218,9,34,9,868,11,
+  15,4,6,10,15,9,309,12,20,5,221,9,4,9,21,11,
+  26,6,435,10,5,10,1763,12,12,5,185,8,4,8,219,9,
+  14,4,11,10,35,9,1739,12,5,6,433,10,1,10,1760,12,
+  17,5,223,9,14,9,883,11,3,5,184,8,6,8,373,9,
+  21,5,372,9,39,9,882,11,16,5,187,8,5,8,222,9,
+  15,5,1,9,18,8,4,10,2,3,22,5,9,4,1,5);
+ W2Cbp1: Array[0..255] Of LongInt=(
+  673,10,22336,15,106687,18,89369,17,5396,13,17950,15,86390,17,86391,17,
+  4525,13,26670,16,426745,20,213373,19,6710,14,10797,14,53342,17,26660,16,
+  5397,13,21596,15,143593,18,72442,17,5591,13,22343,15,36217,16,26661,16,
+  11170,14,43194,16,144886,18,89368,17,4526,13,13423,15,35899,16,13422,15,
+  3354,13,17951,15,426744,20,71797,17,11169,14,36193,16,144887,18,143592,18,
+  5395,13,36219,16,72436,17,72437,17,4485,13,18111,15,36192,16,36220,16,
+  5394,13,17948,15,44685,16,36216,16,3342,13,13331,15,18097,15,13334,15,
+  2794,12,10796,14,22337,15,10799,14,344,9,2258,12,1356,11,1670,12,
+  0,2,105,8,107,8,1676,12,7,3,350,9,675,10,2793,12,
+  6,3,561,10,696,10,6664,14,16,5,425,10,834,11,2696,12,
+  4,4,418,10,676,10,4484,13,18,5,562,10,690,10,1664,12,
+  27,6,1130,11,1678,12,9049,14,22,5,351,9,672,10,1357,11,
+  5,4,563,10,697,10,5590,13,34,6,1128,11,1667,12,6666,14,
+  19,5,566,10,699,10,4486,13,23,5,427,10,679,10,2259,12,
+  20,5,567,10,1120,11,3343,13,25,6,426,10,691,10,1665,12,
+  24,6,424,10,677,10,1679,12,7,4,85,7,71,7,173,8);
+ W2Cbp2: Array[0..255] Of LongInt=(
+  212,8,8645,14,61834,16,54716,16,2169,12,13645,14,69183,17,69460,17,
+  2150,12,13678,14,69461,17,69182,17,4302,13,15492,14,54717,16,61835,16,
+  2152,12,17292,15,34731,16,30987,15,3856,12,17213,15,27347,15,30986,15,
+  6823,13,17364,15,34590,16,27359,15,3452,12,15508,14,17293,15,27346,15,
+  1724,11,8681,14,27354,15,27289,15,4343,13,17289,15,27355,15,30916,15,
+  3414,12,13815,14,17294,15,27288,15,3410,12,15509,14,17288,15,17212,15,
+  3412,12,7755,13,15459,14,15491,14,2145,12,8683,14,13676,14,13814,14,
+  2147,12,8607,14,13672,14,15490,14,430,9,4288,13,3857,12,6906,13,
+  0,1,240,8,429,9,4289,13,10,4,965,10,1929,11,6837,13,
+  9,4,1077,11,1939,11,7744,13,29,5,971,10,2168,12,6831,13,
+  11,4,967,10,1937,11,6827,13,31,5,1078,11,1727,11,3865,12,
+  61,6,3409,12,4292,13,8680,14,54,6,1079,11,1711,11,4293,13,
+  12,4,1074,11,1940,11,7728,13,66,7,2160,12,3876,12,7747,13,
+  32,6,1086,11,1941,11,6826,13,55,6,1708,11,1710,11,4342,13,
+  52,6,1082,11,3408,12,6830,13,57,6,1087,11,1933,11,4306,13,
+  56,6,1083,11,1725,11,4307,13,17,5,428,9,243,8,1081,11);
+ W2ScanA: Array[0..63] Of Byte=(
+  0,1,2,8,3,9,10,16,4,11,17,24,18,12,5,19,
+  25,13,20,26,27,6,21,28,14,22,29,7,30,15,23,31,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0);
+ W2ScanB: Array[0..63] Of Byte=(
+  0,8,1,16,9,24,17,2,32,10,25,40,18,48,33,26,
+  56,41,34,3,49,57,11,42,19,50,27,58,35,43,51,59,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0);
  MSMbI: Array[0..127] Of Word=(
   1,1,23,6,9,5,5,5,6,5,71,9,32,7,16,7,
   2,5,124,9,58,7,29,7,2,6,236,9,119,8,0,8,
@@ -68430,6 +68514,9 @@ Var
  MSTMv: Array[0..1] Of PM4Tree; MSTNonIntra,MSTV2Mb,MSTV2Intra,MSTMbI,MSTV2DcL,MSTV2DcC: PM4Tree;
  MSTDcL,MSTDcC: Array[0..1] Of PM4Tree;
  M4MsInit: Boolean;
+ M4MsBR,M4PerMbRl,M4InterIntra,M4AicDir,M4EscLL,M4EscRL: LongInt;
+ W1ScanT: Array[0..3,0..63] Of Byte;
+ W2ExtScan: PEABuffer; W2BlkOv: ^TH3Blk; M4MsFail: LongInt;
 
 Function M4TreeNew(MaxNodes: LongInt): PM4Tree;
 Var T: PM4Tree; I: LongInt;
@@ -68547,15 +68634,49 @@ Begin
  Else M4MsDiv:=-((-V+Scale-1) Div Scale);
 End;
 
+Function M4MsGetDc(Pl: PEABuffer; Off,Stride,Scale: LongInt): LongInt;
+Var X,Y,Sum: LongInt;
+Begin
+ Sum:=0;
+ For Y:=0 To 7 Do For X:=0 To 7 Do Sum:=Sum+Pl^[Off+Y*Stride+X];
+ M4MsGetDc:=(Sum+((Scale*8) Shr 1)) Div (Scale*8);
+End;
+
 Function M4MsPredDc(N: LongInt; Var Ix: LongInt; Var Dir: LongInt): LongInt;
-Var A,B,C,Wrap,Scale,Pl: LongInt; D: PH3I16;
+Var A,B,C,Wrap,Scale,Pl,Off,Stride: LongInt; D: PH3I16; Pix: PEABuffer;
 Begin
  If N<4 Then Begin Scale:=M4YDc; Pl:=0; Wrap:=M4B8S; End Else Begin Scale:=M4CDc; Pl:=N-3; Wrap:=M4MbS; End;
  Ix:=M4AcIx(N); D:=M4Dc[Pl];
  A:=D^[Ix-1]; B:=D^[Ix-1-Wrap]; C:=D^[Ix-Wrap];
  If (M4FirstLine<>0) And ((N And 2)=0) And (M4Ms<4) Then Begin B:=1024; C:=1024; End;
  A:=M4MsDiv(A,Scale); B:=M4MsDiv(B,Scale); C:=M4MsDiv(C,Scale);
- If Abs(A-B)<=Abs(B-C) Then Begin Dir:=1; M4MsPredDc:=C; End Else Begin Dir:=0; M4MsPredDc:=A; End;
+ If M4Ms>3 Then Begin
+  If M4InterIntra<>0 Then Begin
+   If N=1 Then Begin Dir:=0; M4MsPredDc:=A; End
+   Else If N=2 Then Begin Dir:=1; M4MsPredDc:=C; End
+   Else If N=3 Then Begin
+    If Abs(A-B)<Abs(B-C) Then Begin Dir:=1; M4MsPredDc:=C; End Else Begin Dir:=0; M4MsPredDc:=A; End;
+   End Else Begin
+    If N<4 Then Begin Pix:=M4P[M4CurI].Y; Stride:=M4LY; Off:=(2*M4MbY)*8*Stride+(2*M4MbX)*8; End
+    Else Begin
+     If N=4 Then Pix:=M4P[M4CurI].U Else Pix:=M4P[M4CurI].V;
+     Stride:=M4LC; Off:=M4MbY*8*Stride+M4MbX*8;
+    End;
+    If M4MbX=0 Then A:=(1024+(Scale Shr 1)) Div Scale Else A:=M4MsGetDc(Pix,Off-8,Stride,Scale);
+    If M4MbY=0 Then C:=(1024+(Scale Shr 1)) Div Scale Else C:=M4MsGetDc(Pix,Off-8*Stride,Stride,Scale);
+    Case M4AicDir Of
+     0: Begin Dir:=0; M4MsPredDc:=A; End;
+     1: If N=0 Then Begin Dir:=1; M4MsPredDc:=C; End Else Begin Dir:=0; M4MsPredDc:=A; End;
+     2: If N=0 Then Begin Dir:=0; M4MsPredDc:=A; End Else Begin Dir:=1; M4MsPredDc:=C; End;
+     Else Begin Dir:=1; M4MsPredDc:=C; End;
+    End;
+   End;
+  End Else Begin
+   If Abs(A-B)<Abs(B-C) Then Begin Dir:=1; M4MsPredDc:=C; End Else Begin Dir:=0; M4MsPredDc:=A; End;
+  End;
+ End Else Begin
+  If Abs(A-B)<=Abs(B-C) Then Begin Dir:=1; M4MsPredDc:=C; End Else Begin Dir:=0; M4MsPredDc:=A; End;
+ End;
 End;
 
 Function M4MsDecodeDc(N: LongInt; Var Dir: LongInt): LongInt;
@@ -68594,7 +68715,7 @@ Var
 Label NotCoded;
 Begin
  M4MsBlock:=-1;
- Blk:=@M4Blk[N];
+ If W2BlkOv<>Nil Then Blk:=W2BlkOv Else Blk:=@M4Blk[N];
  Dir:=0; Scan:=@H3Zigzag;
  If N<4 Then Q:=M4Qscale Else Q:=M4ChromaQ;
  If M4MbIntra<>0 Then Begin
@@ -68604,16 +68725,20 @@ Begin
   If M4MsErr<>0 Then Exit;
   If N<4 Then Begin
    Rl:=M4MsRl[M4RlIdx];
-   If Level>256*M4YDc Then Exit;
+   If (Level>256*M4YDc) And (M4InterIntra=0) Then Exit;
   End Else Begin
    Rl:=M4MsRl[3+M4RlChrIdx];
-   If Level>256*M4CDc Then Exit;
+   If (Level>256*M4CDc) And (M4InterIntra=0) Then Exit;
   End;
   Blk^[0]:=SmallInt(Level);
-  RunDiff:=0;
+  If M4Ms>=4 Then RunDiff:=1 Else RunDiff:=0;
   I:=0;
   If Coded=0 Then Goto NotCoded;
-  If M4AcPred<>0 Then Begin
+  If M4Ms>=4 Then Begin
+   If M4AcPred<>0 Then Begin
+    If Dir=0 Then Scan:=@W1ScanT[3] Else Scan:=@W1ScanT[2];
+   End Else Scan:=@W1ScanT[1];
+  End Else If M4AcPred<>0 Then Begin
    If Dir=0 Then Scan:=@H3AltV Else Scan:=@H3AltH;
   End;
  End Else Begin
@@ -68622,6 +68747,8 @@ Begin
   Rl:=M4MsRl[3+M4RlIdx];
   If M4Ms=2 Then RunDiff:=0 Else RunDiff:=1;
   If Coded=0 Then Begin M4BlkLast[N]:=I; M4MsBlock:=0; Exit; End;
+  If M4Ms>=4 Then Scan:=@W1ScanT[0];
+  If W2ExtScan<>Nil Then Scan:=W2ExtScan;
  End;
  Repeat
   Sym:=H3GetVlc(Rl^.Vlc);
@@ -68631,7 +68758,26 @@ Begin
     If (M4Ms=1) Or (H3Show(2)=0) Then Begin
      { troisieme echappement }
      If M4Ms<>1 Then H3Skip(2);
-     Last:=H3Bit; Run:=H3Bits(6); Level:=H3SBits(8); H3Skip(8);
+     If M4Ms>=4 Then Begin
+      Last:=H3Bit;
+      If M4EscLL=0 Then Begin
+       If M4Qscale<8 Then Begin
+        Run:=H3Bits(3);
+        If Run=0 Then Run:=8+H3Bit;
+       End Else Begin
+        Run:=2;
+        While (Run<8) And (H3Show(1)=0) Do Begin Inc(Run); H3Skip(1); End;
+        If Run<8 Then H3Skip(1);
+       End;
+       M4EscLL:=Run; M4EscRL:=H3Bits(2)+3;
+      End;
+      Run:=H3Bits(M4EscRL);
+      Sym:=H3Bit;
+      Level:=H3Bits(M4EscLL);
+      If Sym<>0 Then Level:=-Level;
+     End Else Begin
+      Last:=H3Bit; Run:=H3Bits(6); Level:=H3SBits(8); H3Skip(8);
+     End;
      If Level>0 Then Level:=Level*Qmul+Qadd Else Level:=Level*Qmul-Qadd;
      Inc(I,Run+1);
      If Last<>0 Then Inc(I,192);
@@ -68680,6 +68826,7 @@ NotCoded:
   M4PredAc(N,Dir);
   If M4AcPred<>0 Then I:=63;
  End;
+ If (M4Ms>=4) And (I>0) Then I:=63;
  M4BlkLast[N]:=I;
  M4MsBlock:=0;
 End;
@@ -68798,6 +68945,7 @@ Begin
   End;
  End;
  If M4MbIntra=0 Then Begin
+  If (M4PerMbRl<>0) And (Cbp<>0) And (M4Ms>=4) Then Begin M4RlIdx:=M4Decode012; M4RlChrIdx:=M4RlIdx; End;
   M4PredMotion(0,Px,Py);
   Mx:=Px; My:=Py;
   M4MsMotion(Mx,My);
@@ -68806,9 +68954,600 @@ Begin
  End Else Begin
   M4AcPred:=H3Bit;
   Mt^[Xy]:=M4_INTRA;
+  If M4InterIntra<>0 Then Begin
+   If H3Bit=0 Then M4AicDir:=0 Else If H3Bit=0 Then M4AicDir:=1 Else If H3Bit=0 Then M4AicDir:=2 Else M4AicDir:=3;
+  End;
+  If (M4PerMbRl<>0) And (Cbp<>0) And (M4Ms>=4) Then Begin M4RlIdx:=M4Decode012; M4RlChrIdx:=M4RlIdx; End;
  End;
  For I:=0 To 5 Do If M4MsBlock(I,(Cbp Shr (5-I)) And 1)<0 Then Exit;
  M4MsMb34:=0;
+End;
+
+Procedure M4MsExtHeader(BufSize: LongInt);
+Var Left,Len: LongInt;
+Begin
+ Left:=BufSize*8-H3Pos;
+ If M4Ms>=3 Then Len:=17 Else Len:=16;
+ If (Left>=Len) And (Left<Len+8) Then Begin
+  H3Skip(5); M4MsBR:=H3Bits(11)*1024;
+  If M4Ms>=3 Then M4Flip:=H3Bit Else M4Flip:=0;
+ End Else If Left<Len+8 Then M4Flip:=0;
+End;
+
+{ ---- WMV2 (libavcodec/wmv2.c, wmv2dec.c, wmv2dsp.c, h263.c loop filter, simple_idct 8x4/4x8 ; LGPL-2.1-or-later) ---- }
+Var
+ W2Mspel,W2Loop,W2Abt,W2JBit,W2TopLeft,W2PerMbRlBit,W2Code: LongInt;
+ W2JType,W2PerMbAbt,W2PerBlockAbt,W2AbtType,W2MspelPic,W2CbpIdx,W2Hshift,W2SkipType: LongInt;
+ W2AbtTab: Array[0..5] Of LongInt;
+ W2Blk2: Array[0..5] Of TH3Blk;
+ W2Skip: PEABuffer; W2SkipN: LongInt;
+ W2CbpTree: Array[0..3] Of PM4Tree;
+ W2Extra: Array[0..3] Of Byte; W2ExtraLen: LongInt;
+ W2ScanAT,W2ScanBT: Array[0..63] Of Byte;
+ W2Pend,W2Frames: LongInt;
+
+Function W2Wrap32(X: Int64): LongInt;
+Begin
+ X:=X And $FFFFFFFF;
+ If X>=$80000000 Then X:=X-$100000000;
+ W2Wrap32:=X;
+End;
+
+{ idct WMV2 8x8 (entree/sortie sur place, entiers 16 bits) }
+Procedure W2IdctBlk(Var B: TH3Blk);
+Const W0=2048; W1=2841; W2=2676; W3=2408; W4=2048; W5=1609; W6=1108; W7=565;
+Var I,A0,A1,A2,A3,A4,A5,A6,A7,S1,S2: LongInt;
+Begin
+ For I:=0 To 7 Do Begin
+  A1:=W1*B[I*8+1]+W7*B[I*8+7];
+  A7:=W7*B[I*8+1]-W1*B[I*8+7];
+  A5:=W5*B[I*8+5]+W3*B[I*8+3];
+  A3:=W3*B[I*8+5]-W5*B[I*8+3];
+  A2:=W2*B[I*8+2]+W6*B[I*8+6];
+  A6:=W6*B[I*8+2]-W2*B[I*8+6];
+  A0:=W0*B[I*8+0]+W0*B[I*8+4];
+  A4:=W0*B[I*8+0]-W0*B[I*8+4];
+  S1:=M4Sar(W2Wrap32(Int64(181)*(A1-A5+A7-A3)+128),8);
+  S2:=M4Sar(W2Wrap32(Int64(181)*(A1-A5-A7+A3)+128),8);
+  B[I*8+0]:=SmallInt(M4Sar(A0+A2+A1+A5+128,8));
+  B[I*8+1]:=SmallInt(M4Sar(A4+A6+S1+128,8));
+  B[I*8+2]:=SmallInt(M4Sar(A4-A6+S2+128,8));
+  B[I*8+3]:=SmallInt(M4Sar(A0-A2+A7+A3+128,8));
+  B[I*8+4]:=SmallInt(M4Sar(A0-A2-A7-A3+128,8));
+  B[I*8+5]:=SmallInt(M4Sar(A4-A6-S2+128,8));
+  B[I*8+6]:=SmallInt(M4Sar(A4+A6-S1+128,8));
+  B[I*8+7]:=SmallInt(M4Sar(A0+A2-A1-A5+128,8));
+ End;
+ For I:=0 To 7 Do Begin
+  A1:=M4Sar(W1*B[8+I]+W7*B[56+I]+4,3);
+  A7:=M4Sar(W7*B[8+I]-W1*B[56+I]+4,3);
+  A5:=M4Sar(W5*B[40+I]+W3*B[24+I]+4,3);
+  A3:=M4Sar(W3*B[40+I]-W5*B[24+I]+4,3);
+  A2:=M4Sar(W2*B[16+I]+W6*B[48+I]+4,3);
+  A6:=M4Sar(W6*B[16+I]-W2*B[48+I]+4,3);
+  A0:=M4Sar(W0*B[I]+W0*B[32+I],3);
+  A4:=M4Sar(W0*B[I]-W0*B[32+I],3);
+  S1:=M4Sar(W2Wrap32(Int64(181)*(A1-A5+A7-A3)+128),8);
+  S2:=M4Sar(W2Wrap32(Int64(181)*(A1-A5-A7+A3)+128),8);
+  B[I]:=SmallInt(M4Sar(A0+A2+A1+A5+8192,14));
+  B[8+I]:=SmallInt(M4Sar(A4+A6+S1+8192,14));
+  B[16+I]:=SmallInt(M4Sar(A4-A6+S2+8192,14));
+  B[24+I]:=SmallInt(M4Sar(A0-A2+A7+A3+8192,14));
+  B[32+I]:=SmallInt(M4Sar(A0-A2-A7-A3+8192,14));
+  B[40+I]:=SmallInt(M4Sar(A4-A6-S2+8192,14));
+  B[48+I]:=SmallInt(M4Sar(A4+A6-S1+8192,14));
+  B[56+I]:=SmallInt(M4Sar(A0+A2-A1-A5+8192,14));
+ End;
+End;
+
+Procedure W2IdctPutAdd(Var B: TH3Blk; Dest: PEABuffer; Off,Stride: LongInt; Add: Boolean);
+Var X,Y,V: LongInt;
+Begin
+ W2IdctBlk(B);
+ For Y:=0 To 7 Do For X:=0 To 7 Do Begin
+  V:=B[Y*8+X];
+  If Add Then V:=V+Dest^[Off+Y*Stride+X];
+  If V<0 Then V:=0 Else If V>255 Then V:=255;
+  Dest^[Off+Y*Stride+X]:=V;
+ End;
+End;
+
+{ ligne IDCT 8 points de simple_idct (idctRowCondDC, 8 bits) sur place }
+Procedure W2Row8(Var B: TH3Blk; Base: LongInt);
+Const W1=22725; W2=21407; W3=19266; W4=16383; W5=12873; W6=8867; W7=4520;
+Var K: LongInt; A0,A1,A2,A3,B0,B1,B2,B3: Int64; R: Array[0..7] Of Int64; V: Int64;
+Begin
+ For K:=0 To 7 Do R[K]:=B[Base+K];
+ If (R[1] Or R[2] Or R[3] Or R[4] Or R[5] Or R[6] Or R[7])=0 Then Begin
+  V:=SmallInt(R[0]*8); For K:=0 To 7 Do B[Base+K]:=V;
+ End Else Begin
+  A0:=W4*R[0]+(1 Shl 10); A1:=A0; A2:=A0; A3:=A0;
+  Inc(A0,W2*R[2]); Inc(A1,W6*R[2]); Dec(A2,W6*R[2]); Dec(A3,W2*R[2]);
+  B0:=W1*R[1]+W3*R[3]; B1:=W3*R[1]-W7*R[3]; B2:=W5*R[1]-W1*R[3]; B3:=W7*R[1]-W5*R[3];
+  Inc(A0,W4*R[4]+W6*R[6]); Inc(A1,-W4*R[4]-W2*R[6]); Inc(A2,-W4*R[4]+W2*R[6]); Inc(A3,W4*R[4]-W6*R[6]);
+  Inc(B0,W5*R[5]+W7*R[7]); Inc(B1,-W1*R[5]-W5*R[7]); Inc(B2,W7*R[5]+W3*R[7]); Inc(B3,W3*R[5]-W1*R[7]);
+  B[Base+0]:=SmallInt(AVSar(W2Wrap32(A0+B0),11)); B[Base+7]:=SmallInt(AVSar(W2Wrap32(A0-B0),11));
+  B[Base+1]:=SmallInt(AVSar(W2Wrap32(A1+B1),11)); B[Base+6]:=SmallInt(AVSar(W2Wrap32(A1-B1),11));
+  B[Base+2]:=SmallInt(AVSar(W2Wrap32(A2+B2),11)); B[Base+5]:=SmallInt(AVSar(W2Wrap32(A2-B2),11));
+  B[Base+3]:=SmallInt(AVSar(W2Wrap32(A3+B3),11)); B[Base+4]:=SmallInt(AVSar(W2Wrap32(A3-B3),11));
+ End;
+End;
+
+{ colonne IDCT 8 points avec addition (idctSparseColAdd, 8 bits) ; colonne C du bloc, 8 lignes vers Dest }
+Procedure W2Col8Add(Var B: TH3Blk; C: LongInt; Dest: PEABuffer; Off,Stride: LongInt);
+Const W1=22725; W2=21407; W3=19266; W4=16383; W5=12873; W6=8867; W7=4520;
+Var K: LongInt; A0,A1,A2,A3,B0,B1,B2,B3: Int64; R: Array[0..7] Of Int64;
+Procedure Put(Row: LongInt; X: Int64);
+Var V: Int64;
+Begin
+ V:=AVSar(W2Wrap32(X),20)+Dest^[Off+Row*Stride];
+ If V<0 Then V:=0; If V>255 Then V:=255;
+ Dest^[Off+Row*Stride]:=V;
+End;
+Begin
+ For K:=0 To 7 Do R[K]:=B[K*8+C];
+ A0:=W4*(R[0]+32); A1:=A0; A2:=A0; A3:=A0;
+ Inc(A0,W2*R[2]); Inc(A1,W6*R[2]); Dec(A2,W6*R[2]); Dec(A3,W2*R[2]);
+ B0:=W1*R[1]+W3*R[3]; B1:=W3*R[1]-W7*R[3]; B2:=W5*R[1]-W1*R[3]; B3:=W7*R[1]-W5*R[3];
+ Inc(A0,W4*R[4]); Dec(A1,W4*R[4]); Dec(A2,W4*R[4]); Inc(A3,W4*R[4]);
+ Inc(B0,W5*R[5]); Dec(B1,W1*R[5]); Inc(B2,W7*R[5]); Inc(B3,W3*R[5]);
+ Inc(A0,W6*R[6]); Dec(A1,W2*R[6]); Inc(A2,W2*R[6]); Dec(A3,W6*R[6]);
+ Inc(B0,W7*R[7]); Dec(B1,W5*R[7]); Inc(B2,W3*R[7]); Dec(B3,W1*R[7]);
+ Put(0,A0+B0); Put(1,A1+B1); Put(2,A2+B2); Put(3,A3+B3);
+ Put(4,A3-B3); Put(5,A2-B2); Put(6,A1-B1); Put(7,A0-B0);
+End;
+
+{ ff_simple_idct84_add : bloc 8 colonnes x 4 lignes }
+Procedure W2Idct84Add(Var B: TH3Blk; Dest: PEABuffer; Off,Stride: LongInt);
+Const C1=3784; C2=1567; C3=2896;
+Var I,A0,A1,A2,A3,C0c,C1c,C2c,C3c: LongInt;
+Procedure Put(Row,X: LongInt);
+Var V: LongInt;
+Begin
+ V:=Dest^[Off+Row*Stride+I]+M4Sar(X,17);
+ If V<0 Then V:=0 Else If V>255 Then V:=255;
+ Dest^[Off+Row*Stride+I]:=V;
+End;
+Begin
+ For I:=0 To 3 Do W2Row8(B,I*8);
+ For I:=0 To 7 Do Begin
+  A0:=B[I]; A1:=B[8+I]; A2:=B[16+I]; A3:=B[24+I];
+  C0c:=(A0+A2)*C3+(1 Shl 16);
+  C2c:=(A0-A2)*C3+(1 Shl 16);
+  C1c:=A1*C1+A3*C2;
+  C3c:=A1*C2-A3*C1;
+  Put(0,C0c+C1c); Put(1,C2c+C3c); Put(2,C2c-C3c); Put(3,C0c-C1c);
+ End;
+End;
+
+{ ff_simple_idct48_add : bloc 4 colonnes x 8 lignes }
+Procedure W2Idct48Add(Var B: TH3Blk; Dest: PEABuffer; Off,Stride: LongInt);
+Const R1=30274; R2=12540; R3=23170;
+Var I,A0,A1,A2,A3: LongInt; C0c,C1c,C2c,C3c: Int64;
+Function Lo(X: Int64): SmallInt;
+Begin Lo:=SmallInt(((X And $FFFFFFFF) Shr 11) And $FFFF); End;
+Begin
+ For I:=0 To 7 Do Begin
+  A0:=B[I*8]; A1:=B[I*8+1]; A2:=B[I*8+2]; A3:=B[I*8+3];
+  C0c:=Int64(A0+A2)*R3+(1 Shl 10);
+  C2c:=Int64(A0-A2)*R3+(1 Shl 10);
+  C1c:=Int64(A1)*R1+Int64(A3)*R2;
+  C3c:=Int64(A1)*R2-Int64(A3)*R1;
+  B[I*8]:=Lo(C0c+C1c); B[I*8+1]:=Lo(C2c+C3c); B[I*8+2]:=Lo(C2c-C3c); B[I*8+3]:=Lo(C0c-C1c);
+ End;
+ For I:=0 To 3 Do W2Col8Add(B,I,Dest,Off+I,Stride);
+End;
+
+{ filtres de boucle H.263 }
+Const W2LfStr: Array[0..31] Of Byte=(0,1,1,2,2,3,3,4,4,4,5,5,6,6,7,7,7,8,8,8,9,9,9,10,10,10,11,11,11,12,12,12);
+Procedure W2LfEdge(Pl: PEABuffer; Off,Step,Across,Qs: LongInt);
+{ Across : pas perpendiculaire au bord ; Step : pas le long du bord }
+Var K,P0,P1,P2,P3,D,D1,D2,Ad1,St,T: LongInt;
+Begin
+ St:=W2LfStr[Qs];
+ For K:=0 To 7 Do Begin
+  P0:=Pl^[Off+K*Step-2*Across]; P1:=Pl^[Off+K*Step-Across]; P2:=Pl^[Off+K*Step]; P3:=Pl^[Off+K*Step+Across];
+  D:=(P0-P3+4*(P2-P1)) Div 8;
+  If D<-2*St Then D1:=0
+  Else If D<-St Then D1:=-2*St-D
+  Else If D<St Then D1:=D
+  Else If D<2*St Then D1:=2*St-D
+  Else D1:=0;
+  Inc(P1,D1); Dec(P2,D1);
+  If (P1 And 256)<>0 Then Begin If P1<0 Then P1:=0 Else P1:=255; End;
+  If (P2 And 256)<>0 Then Begin If P2<0 Then P2:=0 Else P2:=255; End;
+  Pl^[Off+K*Step-Across]:=P1; Pl^[Off+K*Step]:=P2;
+  Ad1:=Abs(D1) Shr 1;
+  T:=(P0-P3) Div 4;
+  If T<-Ad1 Then T:=-Ad1 Else If T>Ad1 Then T:=Ad1;
+  D2:=T;
+  Pl^[Off+K*Step-2*Across]:=P0-D2; Pl^[Off+K*Step+Across]:=P3+D2;
+ End;
+End;
+
+{ ext header (donnees additionnelles de la structure BITMAPINFOHEADER) }
+Procedure W2ExtHeader;
+Var Save: PEABuffer; SaveSize,SavePos,Fps,Br: LongInt;
+Begin
+ W2Mspel:=0; W2Loop:=0; W2Abt:=0; W2JBit:=0; W2TopLeft:=0; W2PerMbRlBit:=0; W2Code:=0;
+ If W2ExtraLen<4 Then Exit;
+ Save:=H3Buf; SaveSize:=H3Size; SavePos:=H3Pos;
+ H3Buf:=@W2Extra; H3Size:=4; H3Pos:=0;
+ Fps:=H3Bits(5); Br:=H3Bits(11)*1024; M4MsBR:=Br;
+ W2Mspel:=H3Bit; W2Loop:=H3Bit; W2Abt:=H3Bit; W2JBit:=H3Bit; W2TopLeft:=H3Bit; W2PerMbRlBit:=H3Bit;
+ W2Code:=H3Bits(3);
+ H3Buf:=Save; H3Size:=SaveSize; H3Pos:=SavePos;
+ If W2Code<>0 Then M4SliceH:=M4MbH Div W2Code;
+End;
+
+{ ff_wmv2_decode_picture_header : -1 erreur, 1 image sautee, 0 ok }
+Function W2Header: LongInt;
+Var Sk,Run,Blk,SavePos: LongInt;
+Begin
+ W2Header:=-1;
+ M4PType:=H3Bit;
+ If M4PType=0 Then H3Skip(7);
+ M4Qscale:=H3Bits(5); M4ChromaQ:=M4Qscale;
+ If M4Qscale<=0 Then Exit;
+ If (M4PType<>0) And (H3Show(1)<>0) Then Begin
+  SavePos:=H3Pos;
+  Sk:=H3Bits(2);
+  If Sk=3 Then Run:=M4MbW Else Run:=M4MbH;
+  While Run>0 Do Begin
+   If Run<25 Then Blk:=Run Else Blk:=25;
+   If H3Bits(Blk)+1<>(LongInt(1) Shl Blk) Then Break;
+   Dec(Run,Blk);
+  End;
+  H3Pos:=SavePos;
+  If Run=0 Then Begin W2Header:=1; Exit; End;
+ End;
+ W2Header:=0;
+End;
+
+Function W2ParseSkip: LongInt;
+Var X,Y,Cnt: LongInt;
+Begin
+ W2ParseSkip:=-1;
+ FillChar(W2Skip^,M4MbW*M4MbH,0);
+ W2SkipType:=H3Bits(2);
+ Case W2SkipType Of
+  0: ;
+  1: Begin
+   If H3Left<M4MbH*M4MbW Then Exit;
+   For Y:=0 To M4MbH-1 Do For X:=0 To M4MbW-1 Do W2Skip^[Y*M4MbW+X]:=H3Bit;
+  End;
+  2: For Y:=0 To M4MbH-1 Do Begin
+   If H3Left<1 Then Exit;
+   If H3Bit<>0 Then Begin
+    For X:=0 To M4MbW-1 Do W2Skip^[Y*M4MbW+X]:=1;
+   End Else For X:=0 To M4MbW-1 Do W2Skip^[Y*M4MbW+X]:=H3Bit;
+  End;
+  3: For X:=0 To M4MbW-1 Do Begin
+   If H3Left<1 Then Exit;
+   If H3Bit<>0 Then Begin
+    For Y:=0 To M4MbH-1 Do W2Skip^[Y*M4MbW+X]:=1;
+   End Else For Y:=0 To M4MbH-1 Do W2Skip^[Y*M4MbW+X]:=H3Bit;
+  End;
+ End;
+ Cnt:=0;
+ For Y:=0 To M4MbH*M4MbW-1 Do If W2Skip^[Y]=0 Then Inc(Cnt);
+ If Cnt>H3Left Then Exit;
+ W2ParseSkip:=0;
+End;
+
+{ ff_wmv2_decode_secondary_picture_header : -1 erreur, 1 image J (intrax8), 0 ok }
+Function W2Header2: LongInt;
+Const CbpMap: Array[0..2,0..2] Of Byte=((0,2,1),(1,0,2),(2,1,0));
+Var CbpIndex: LongInt;
+Begin
+ W2Header2:=-1;
+ If M4PType=0 Then Begin
+  FillChar(W2Skip^,M4MbW*M4MbH,0);
+  If W2JBit<>0 Then W2JType:=H3Bit Else W2JType:=0;
+  If W2JType=0 Then Begin
+   If W2PerMbRlBit<>0 Then M4PerMbRl:=H3Bit Else M4PerMbRl:=0;
+   If M4PerMbRl=0 Then Begin M4RlChrIdx:=M4Decode012; M4RlIdx:=M4Decode012; End;
+   M4DcIdx:=H3Bit;
+   If Int64(H3Left)*8<Int64(M4W+15) Div 16*((M4H+15) Div 16) Then Exit;
+  End;
+  M4InterIntra:=0; M4NoRnd:=1;
+ End Else Begin
+  W2JType:=0;
+  If W2ParseSkip<0 Then Exit;
+  CbpIndex:=M4Decode012;
+  W2CbpIdx:=CbpMap[Ord(M4Qscale>10)+Ord(M4Qscale>20),CbpIndex];
+  If W2Mspel<>0 Then W2MspelPic:=H3Bit Else W2MspelPic:=0;
+  If W2Abt<>0 Then Begin
+   W2PerMbAbt:=H3Bit Xor 1;
+   If W2PerMbAbt=0 Then W2AbtType:=M4Decode012;
+  End;
+  If W2PerMbRlBit<>0 Then M4PerMbRl:=H3Bit Else M4PerMbRl:=0;
+  If M4PerMbRl=0 Then Begin M4RlIdx:=M4Decode012; M4RlChrIdx:=M4RlIdx; End;
+  If H3Left<2 Then Exit;
+  M4DcIdx:=H3Bit; M4MvIdx:=H3Bit;
+  M4InterIntra:=0;
+  M4NoRnd:=M4NoRnd Xor 1;
+ End;
+ M4EscLL:=0; M4EscRL:=0;
+ If W2JType<>0 Then Begin W2Header2:=1; Exit; End;
+ W2Header2:=0;
+End;
+
+{ prediction de mouvement WMV2 }
+Procedure W2PredMotion(Var Px,Py: LongInt);
+Var M,A0,A1,B0,B1,C0,C1,Diff,Typ: LongInt;
+Begin
+ M:=M4B8S*2*M4MbY+2*M4MbX;
+ A0:=M4MvGet(M4CurI,M-1,0); A1:=M4MvGet(M4CurI,M-1,1);
+ B0:=M4MvGet(M4CurI,M-M4B8S,0); B1:=M4MvGet(M4CurI,M-M4B8S,1);
+ C0:=M4MvGet(M4CurI,M+2-M4B8S,0); C1:=M4MvGet(M4CurI,M+2-M4B8S,1);
+ If (M4MbX<>0) And (M4FirstLine=0) And (W2MspelPic=0) And (W2TopLeft<>0) Then Begin
+  Diff:=Abs(A0-B0); If Abs(A1-B1)>Diff Then Diff:=Abs(A1-B1);
+ End Else Diff:=0;
+ If Diff>=8 Then Typ:=H3Bit Else Typ:=2;
+ If Typ=0 Then Begin Px:=A0; Py:=A1; End
+ Else If Typ=1 Then Begin Px:=B0; Py:=B1; End
+ Else If M4FirstLine<>0 Then Begin Px:=A0; Py:=A1; End
+ Else Begin Px:=H3Mid(A0,B0,C0); Py:=H3Mid(A1,B1,C1); End;
+End;
+
+Function W2InterBlock(N,Coded: LongInt): LongInt;
+Const SubCbp: Array[0..2] Of Byte=(2,3,1);
+Var Sub,R: LongInt;
+Begin
+ W2InterBlock:=0;
+ If Coded=0 Then Begin M4BlkLast[N]:=-1; Exit; End;
+ If W2PerBlockAbt<>0 Then W2AbtType:=M4Decode012;
+ W2AbtTab[N]:=W2AbtType;
+ If W2AbtType<>0 Then Begin
+  If W2AbtType=1 Then W2ExtScan:=@W2ScanAT Else W2ExtScan:=@W2ScanBT;
+  Sub:=SubCbp[M4Decode012];
+  If (Sub And 1)<>0 Then Begin
+   R:=M4MsBlock(N,1);
+   If R<0 Then Begin W2ExtScan:=Nil; W2InterBlock:=R; Exit; End;
+  End;
+  If (Sub And 2)<>0 Then Begin
+   W2BlkOv:=@W2Blk2[N];
+   R:=M4MsBlock(N,1);
+   W2BlkOv:=Nil;
+   If R<0 Then Begin W2ExtScan:=Nil; W2InterBlock:=R; Exit; End;
+  End;
+  W2ExtScan:=Nil;
+  M4BlkLast[N]:=63;
+ End Else Begin
+  W2ExtScan:=Nil;
+  W2InterBlock:=M4MsBlock(N,1);
+ End;
+End;
+
+Function W2DecodeMb: LongInt;
+Var Cbp,Code,I,Px,Py,Mx,My,Xy,Val,Pred,Ix: LongInt; Mt: PM4L32;
+Begin
+ W2DecodeMb:=-1;
+ Mt:=M4P[M4CurI].Mt; Xy:=M4TypeIndex;
+ M4ClearBlocks;
+ FillChar(W2Blk2,SizeOf(W2Blk2),0);
+ If M4PType=1 Then Begin
+  If W2Skip^[M4MbY*M4MbW+M4MbX]<>0 Then Begin
+   M4MbIntra:=0; M4MvDir:=1; M4MvType:=0; M4Mv[0,0,0]:=0; M4Mv[0,0,1]:=0; M4Skip:=1;
+   W2Hshift:=0;
+   Mt^[Xy]:=M4_SKIP Or M4_L0 Or M4_16X16;
+   W2DecodeMb:=0; Exit;
+  End;
+  If H3Left<=0 Then Exit;
+  Code:=M4TreeGet(W2CbpTree[W2CbpIdx]);
+  If Code<0 Then Exit;
+  M4MbIntra:=((Not Code) And $40) Shr 6;
+  Cbp:=Code And $3F;
+ End Else Begin
+  M4MbIntra:=1;
+  If H3Left<=0 Then Exit;
+  Code:=M4TreeGet(MSTMbI);
+  If Code<0 Then Exit;
+  Cbp:=0;
+  For I:=0 To 5 Do Begin
+   Val:=(Code Shr (5-I)) And 1;
+   If I<4 Then Begin
+    Pred:=M4MsCodedPred(I,Ix);
+    Val:=Val Xor Pred;
+    M4CodedBlk^[Ix]:=Val;
+   End;
+   Cbp:=Cbp Or (Val Shl (5-I));
+  End;
+ End;
+ If M4MbIntra=0 Then Begin
+  W2PredMotion(Px,Py);
+  If Cbp<>0 Then Begin
+   If M4PerMbRl<>0 Then Begin M4RlIdx:=M4Decode012; M4RlChrIdx:=M4RlIdx; End;
+   If (W2Abt<>0) And (W2PerMbAbt<>0) Then Begin
+    W2PerBlockAbt:=H3Bit;
+    If W2PerBlockAbt=0 Then W2AbtType:=M4Decode012;
+   End Else W2PerBlockAbt:=0;
+  End;
+  Mx:=Px; My:=Py;
+  M4MsMotion(Mx,My);
+  If (((Mx Or My) And 1)<>0) And (W2MspelPic<>0) Then W2Hshift:=H3Bit Else W2Hshift:=0;
+  M4MvDir:=1; M4MvType:=0; M4Mv[0,0,0]:=Mx; M4Mv[0,0,1]:=My;
+  Mt^[Xy]:=M4_L0 Or M4_16X16;
+  For I:=0 To 5 Do If W2InterBlock(I,(Cbp Shr (5-I)) And 1)<0 Then Exit;
+ End Else Begin
+  M4AcPred:=H3Bit;
+  Mt^[Xy]:=M4_INTRA;
+  If (M4PerMbRl<>0) And (Cbp<>0) Then Begin M4RlIdx:=M4Decode012; M4RlChrIdx:=M4RlIdx; End;
+  For I:=0 To 5 Do If M4MsBlock(I,(Cbp Shr (5-I)) And 1)<0 Then Exit;
+ End;
+ W2DecodeMb:=0;
+End;
+
+{ ---- compensation de mouvement mspel (ff_mspel_motion) ---- }
+Procedure W2Mspel8(Dst: PEABuffer; DOff,DStr,Ox,Oy,Dxy: LongInt);
+Var X,Y,K: LongInt; HH: Array[0..10,0..7] Of LongInt; Hv: Array[0..63] Of LongInt;
+Function S(Xx,Yy: LongInt): LongInt;
+Begin S:=M4Win[(Oy+Yy+1)*24+Ox+Xx+1]; End;
+Function Cm(V: LongInt): LongInt;
+Begin V:=M4Sar(V,4); If V<0 Then V:=0 Else If V>255 Then V:=255; Cm:=V; End;
+Function Hl(Xx,Yy: LongInt): LongInt;
+Begin Hl:=Cm(9*(S(Xx,Yy)+S(Xx+1,Yy))-(S(Xx-1,Yy)+S(Xx+2,Yy))+8); End;
+Function Vl(Xx,Yy: LongInt): LongInt;
+Begin Vl:=Cm(9*(S(Xx,Yy)+S(Xx,Yy+1))-(S(Xx,Yy-1)+S(Xx,Yy+2))+8); End;
+Procedure Out(Xx,Yy,V: LongInt);
+Begin Dst^[DOff+Yy*DStr+Xx]:=V; End;
+Begin
+ Case Dxy Of
+  0: For Y:=0 To 7 Do For X:=0 To 7 Do Out(X,Y,S(X,Y));
+  1: For Y:=0 To 7 Do For X:=0 To 7 Do Out(X,Y,(S(X,Y)+Hl(X,Y)+1) Shr 1);
+  2: For Y:=0 To 7 Do For X:=0 To 7 Do Out(X,Y,Hl(X,Y));
+  3: For Y:=0 To 7 Do For X:=0 To 7 Do Out(X,Y,(S(X+1,Y)+Hl(X,Y)+1) Shr 1);
+  4: For Y:=0 To 7 Do For X:=0 To 7 Do Out(X,Y,Vl(X,Y));
+  5,7,6: Begin
+   For K:=-1 To 9 Do For X:=0 To 7 Do HH[K+1,X]:=Hl(X,K);
+   For Y:=0 To 7 Do For X:=0 To 7 Do
+    Hv[Y*8+X]:=Cm(9*(HH[Y+1,X]+HH[Y+2,X])-(HH[Y,X]+HH[Y+3,X])+8);
+   If Dxy=6 Then Begin
+    For Y:=0 To 7 Do For X:=0 To 7 Do Out(X,Y,Hv[Y*8+X]);
+   End Else Begin
+    If Dxy=5 Then K:=0 Else K:=1;
+    For Y:=0 To 7 Do For X:=0 To 7 Do Out(X,Y,(Vl(X+K,Y)+Hv[Y*8+X]+1) Shr 1);
+   End;
+  End;
+ End;
+End;
+
+Procedure W2MspelMotion(Ref,DY,DC: LongInt);
+Var
+ Dxy,SrcX,SrcY,Mx,My,CDxy: LongInt; Pc,Cur: ^TM4Pic;
+Begin
+ Pc:=@M4P[Ref]; Cur:=@M4P[M4CurI];
+ Mx:=M4Mv[0,0,0]; My:=M4Mv[0,0,1];
+ Dxy:=((My And 1) Shl 1) Or (Mx And 1);
+ Dxy:=2*Dxy+W2Hshift;
+ SrcX:=M4MbX*16+M4Sar(Mx,1);
+ SrcY:=M4MbY*16+M4Sar(My,1);
+ If SrcX<-16 Then SrcX:=-16 Else If SrcX>M4W Then SrcX:=M4W;
+ If SrcY<-16 Then SrcY:=-16 Else If SrcY>M4H Then SrcY:=M4H;
+ If (SrcX<=-16) Or (SrcX>=M4W) Then Dxy:=Dxy And Not 3;
+ If (SrcY<=-16) Or (SrcY>=M4H) Then Dxy:=Dxy And Not 4;
+ M4Fetch(Pc^.Y,M4LY,SrcX-1,SrcY-1,1,19,19,M4HEdge,M4VEdge);
+ W2Mspel8(Cur^.Y,DY,M4LY,0,0,Dxy);
+ W2Mspel8(Cur^.Y,DY+8,M4LY,8,0,Dxy);
+ W2Mspel8(Cur^.Y,DY+8*M4LY,M4LY,0,8,Dxy);
+ W2Mspel8(Cur^.Y,DY+8+8*M4LY,M4LY,8,8,Dxy);
+ CDxy:=0;
+ If (Mx And 3)<>0 Then CDxy:=CDxy Or 1;
+ If (My And 3)<>0 Then CDxy:=CDxy Or 2;
+ SrcX:=M4MbX*8+M4Sar(Mx,2);
+ SrcY:=M4MbY*8+M4Sar(My,2);
+ If SrcX<-8 Then SrcX:=-8 Else If SrcX>(M4W Shr 1) Then SrcX:=M4W Shr 1;
+ If SrcX=(M4W Shr 1) Then CDxy:=CDxy And Not 1;
+ If SrcY<-8 Then SrcY:=-8 Else If SrcY>(M4H Shr 1) Then SrcY:=M4H Shr 1;
+ If SrcY=(M4H Shr 1) Then CDxy:=CDxy And Not 2;
+ M4Fetch(Pc^.U,M4LC,SrcX,SrcY,1,9,9,M4HEdge Shr 1,M4VEdge Shr 1);
+ M4Hpel(Cur^.U,DC,M4LC,CDxy,8,8,(M4NoRnd<>0) And (M4PType<>2),False);
+ M4Fetch(Pc^.V,M4LC,SrcX,SrcY,1,9,9,M4HEdge Shr 1,M4VEdge Shr 1);
+ M4Hpel(Cur^.V,DC,M4LC,CDxy,8,8,(M4NoRnd<>0) And (M4PType<>2),False);
+End;
+
+{ ---- reconstruction d'un macrobloc WMV2 ---- }
+Procedure W2AddBlock(N: LongInt; Dest: PEABuffer; Off,Stride: LongInt);
+Begin
+ If M4BlkLast[N]<0 Then Exit;
+ Case W2AbtTab[N] Of
+  0: W2IdctPutAdd(M4Blk[N],Dest,Off,Stride,True);
+  1: Begin
+   W2Idct84Add(M4Blk[N],Dest,Off,Stride);
+   W2Idct84Add(W2Blk2[N],Dest,Off+4*Stride,Stride);
+  End;
+  2: Begin
+   W2Idct48Add(M4Blk[N],Dest,Off,Stride);
+   W2Idct48Add(W2Blk2[N],Dest,Off+4,Stride);
+  End;
+ End;
+End;
+
+Procedure W2Recon;
+Var
+ Xy,I,DY,DC: LongInt; Cur: ^TM4Pic;
+Begin
+ Cur:=@M4P[M4CurI];
+ Xy:=M4MbY*M4MbS+M4MbX+M4Off;
+ Cur^.Qs^[Xy]:=M4Qscale;
+ If M4MbIntra=0 Then Begin
+  If M4IntraTab^[Xy]<>0 Then M4CleanIntraEntries;
+ End Else M4IntraTab^[Xy]:=1;
+ If M4Skip<>0 Then Begin M4Skip:=0; Cur^.Sk^[Xy]:=1; End
+ Else If Not Cur^.IsRef Then Cur^.Sk^[Xy]:=1 Else Cur^.Sk^[Xy]:=0;
+ DY:=M4MbY*16*M4LY+M4MbX*16;
+ DC:=M4MbY*8*M4LC+M4MbX*8;
+ If M4MbIntra=0 Then Begin
+  If W2MspelPic<>0 Then W2MspelMotion(M4LastI,DY,DC)
+  Else M4Motion(0,M4LastI,DY,DC,(M4NoRnd<>0) And (M4PType<>2),False);
+  W2AddBlock(0,Cur^.Y,DY,M4LY);
+  W2AddBlock(1,Cur^.Y,DY+8,M4LY);
+  W2AddBlock(2,Cur^.Y,DY+8*M4LY,M4LY);
+  W2AddBlock(3,Cur^.Y,DY+8*M4LY+8,M4LY);
+  W2AddBlock(4,Cur^.U,DC,M4LC);
+  W2AddBlock(5,Cur^.V,DC,M4LC);
+ End Else Begin
+  For I:=0 To 5 Do M4DequantIntra(I);
+  W2IdctPutAdd(M4Blk[0],Cur^.Y,DY,M4LY,False);
+  W2IdctPutAdd(M4Blk[1],Cur^.Y,DY+8,M4LY,False);
+  W2IdctPutAdd(M4Blk[2],Cur^.Y,DY+8*M4LY,M4LY,False);
+  W2IdctPutAdd(M4Blk[3],Cur^.Y,DY+8*M4LY+8,M4LY,False);
+  W2IdctPutAdd(M4Blk[4],Cur^.U,DC,M4LC,False);
+  W2IdctPutAdd(M4Blk[5],Cur^.V,DC,M4LC,False);
+ End;
+End;
+
+{ ff_h263_loop_filter appele apres chaque macrobloc }
+Procedure W2LoopFilter;
+Var
+ Qc,Qdt,Qtt,Qtc,Qlc,Xy,DY,DC,Ly,Lc: LongInt; Cur: ^TM4Pic; Y,U,V: PEABuffer;
+Function Sk(Ix: LongInt): Boolean;
+Begin Sk:=W2Skip^[Ix]<>0; End;
+Begin
+ Cur:=@M4P[M4CurI]; Y:=Cur^.Y; U:=Cur^.U; V:=Cur^.V;
+ Ly:=M4LY; Lc:=M4LC;
+ Xy:=M4MbY*M4MbW+M4MbX;
+ DY:=M4MbY*16*Ly+M4MbX*16; DC:=M4MbY*8*Lc+M4MbX*8;
+ If Not Sk(Xy) Then Begin
+  Qc:=M4Qscale;
+  W2LfEdge(Y,DY+8*Ly,1,Ly,Qc);
+  W2LfEdge(Y,DY+8*Ly+8,1,Ly,Qc);
+ End Else Qc:=0;
+ If M4MbY<>0 Then Begin
+  If Sk(Xy-M4MbW) Then Qtt:=0 Else Qtt:=Cur^.Qs^[(M4MbY-1)*M4MbS+M4MbX+M4Off];
+  If Qc<>0 Then Qtc:=Qc Else Qtc:=Qtt;
+  If Qtc<>0 Then Begin
+   W2LfEdge(Y,DY,1,Ly,Qtc);
+   W2LfEdge(Y,DY+8,1,Ly,Qtc);
+   W2LfEdge(U,DC,1,Lc,Qtc);
+   W2LfEdge(V,DC,1,Lc,Qtc);
+  End;
+  If Qtt<>0 Then W2LfEdge(Y,DY-8*Ly+8,Ly,1,Qtt);
+  If M4MbX<>0 Then Begin
+   If (Qtt<>0) Or Sk(Xy-1-M4MbW) Then Qdt:=Qtt Else Qdt:=Cur^.Qs^[(M4MbY-1)*M4MbS+M4MbX-1+M4Off];
+   If Qdt<>0 Then Begin
+    W2LfEdge(Y,DY-8*Ly,Ly,1,Qdt);
+    W2LfEdge(U,DC-8*Lc,Lc,1,Qdt);
+    W2LfEdge(V,DC-8*Lc,Lc,1,Qdt);
+   End;
+  End;
+ End;
+ If Qc<>0 Then Begin
+  W2LfEdge(Y,DY+8,Ly,1,Qc);
+  If M4MbY+1=M4MbH Then W2LfEdge(Y,DY+8*Ly+8,Ly,1,Qc);
+ End;
+ If M4MbX<>0 Then Begin
+  If (Qc<>0) Or Sk(Xy-1) Then Qlc:=Qc Else Qlc:=Cur^.Qs^[M4MbY*M4MbS+M4MbX-1+M4Off];
+  If Qlc<>0 Then Begin
+   W2LfEdge(Y,DY,Ly,1,Qlc);
+   If M4MbY+1=M4MbH Then Begin
+    W2LfEdge(Y,DY+8*Ly,Ly,1,Qlc);
+    W2LfEdge(U,DC,Lc,1,Qlc);
+    W2LfEdge(V,DC,Lc,1,Qlc);
+   End;
+  End;
+ End;
 End;
 
 { ---- en-tete d'image ---- }
@@ -68837,7 +69576,13 @@ Begin
   End;
   Case M4Ms Of
    1,2: Begin M4RlChrIdx:=2; M4RlIdx:=2; M4DcIdx:=0; End;
-   Else Begin M4RlChrIdx:=M4Decode012; M4RlIdx:=M4Decode012; M4DcIdx:=H3Bit; End;
+   3: Begin M4RlChrIdx:=M4Decode012; M4RlIdx:=M4Decode012; M4DcIdx:=H3Bit; End;
+   Else Begin
+    M4MsExtHeader(4);
+    If M4MsBR>51200 Then M4PerMbRl:=H3Bit Else M4PerMbRl:=0;
+    If M4PerMbRl=0 Then Begin M4RlChrIdx:=M4Decode012; M4RlIdx:=M4Decode012; End;
+    M4DcIdx:=H3Bit; M4InterIntra:=0;
+   End;
   End;
   M4NoRnd:=1;
  End Else Begin
@@ -68846,26 +69591,23 @@ Begin
     If M4Ms=1 Then M4UseSkip:=1 Else M4UseSkip:=H3Bit;
     M4RlIdx:=2; M4RlChrIdx:=2; M4DcIdx:=0; M4MvIdx:=0;
    End;
-   Else Begin
+   3: Begin
     M4UseSkip:=H3Bit;
     M4RlIdx:=M4Decode012; M4RlChrIdx:=M4RlIdx;
     M4DcIdx:=H3Bit; M4MvIdx:=H3Bit;
    End;
+   Else Begin
+    M4UseSkip:=H3Bit;
+    If M4MsBR>51200 Then M4PerMbRl:=H3Bit Else M4PerMbRl:=0;
+    If M4PerMbRl=0 Then Begin M4RlIdx:=M4Decode012; M4RlChrIdx:=M4RlIdx; End;
+    M4DcIdx:=H3Bit; M4MvIdx:=H3Bit;
+    If (M4W*M4H<76800) And (M4MsBR<=131072) Then M4InterIntra:=1 Else M4InterIntra:=0;
+   End;
   End;
   If M4Flip<>0 Then M4NoRnd:=M4NoRnd Xor 1 Else M4NoRnd:=0;
  End;
+ M4EscLL:=0; M4EscRL:=0;
  M4MsHeader:=0;
-End;
-
-Procedure M4MsExtHeader(BufSize: LongInt);
-Var Left,Len: LongInt;
-Begin
- Left:=BufSize*8-H3Pos;
- If M4Ms>=3 Then Len:=17 Else Len:=16;
- If (Left>=Len) And (Left<Len+8) Then Begin
-  H3Skip(5); H3Skip(11);
-  If M4Ms>=3 Then M4Flip:=H3Bit Else M4Flip:=0;
- End Else If Left<Len+8 Then M4Flip:=0;
 End;
 
 { ---- tranche ---- }
@@ -68883,10 +69625,13 @@ Begin
   While M4MbX<M4MbW Do Begin
    If (M4ResyncX=M4MbX) And (M4ResyncY+1=M4MbY) Then M4FirstLine:=0;
    M4MvDir:=1; M4MvType:=0; M4Skip:=0;
-   If M4Ms<=2 Then Ret:=M4MsMb12 Else Ret:=M4MsMb34;
+   If M4Ms<=2 Then Ret:=M4MsMb12 Else If M4Ms=5 Then Ret:=W2DecodeMb Else Ret:=M4MsMb34;
    M4UpdateMotion;
-   If Ret<0 Then Begin M4Err:=True; Exit; End;
-   M4Recon;
+   If Ret<0 Then Begin M4Err:=True; Inc(M4MsFail); Exit; End;
+   If M4Ms=5 Then Begin
+    W2Recon;
+    If W2Loop<>0 Then W2LoopFilter;
+   End Else M4Recon;
    Inc(M4MbX);
   End;
   M4MbX:=0;
@@ -68896,25 +69641,70 @@ Begin
 End;
 
 Procedure M4MsPacket(Pk: PEABuffer; Len: LongInt);
-Var Slice: LongInt;
+Var Slice,R2: LongInt;
 Begin
  H3Buf:=Pk; H3Size:=Len; H3Pos:=0;
  FillChar(Pk^[Len],32,0);
- If M4MsHeader<0 Then Exit;
+ If M4Ms=5 Then Begin
+  R2:=W2Header;
+  If R2<0 Then Exit;
+  If R2=1 Then Begin NVRepeat; Exit; End;
+ End Else If M4MsHeader<0 Then Exit;
  If (M4LastI<0) And (M4PType<>0) Then Begin
   { image P sans reference : fond gris }
  End;
  If Not M4FrameStart Then Exit;
  M4PicHave:=True;
+ If M4Ms=5 Then Begin
+  R2:=W2Header2;
+  If R2<0 Then Exit;
+  If R2=1 Then Fail('wmv2: images J (IntraX8) non prises en charge.');
+ End;
  M4MbX:=0; M4MbY:=0; M4Err:=False;
  Slice:=M4MsSlice;
  While M4MbY<M4MbH Do Begin
   If (M4SliceH=0) Or (M4MbX<>0) Or (Slice<0) Or ((M4MbY Mod M4SliceH)<>0) Or (H3Left<0) Then Break;
-  M4CleanBuffers;
+  If M4Ms<4 Then M4CleanBuffers;
   If M4MsSlice<0 Then Slice:=-1;
  End;
- If M4PType=0 Then M4MsExtHeader(Len);
+ If (M4PType=0) And (M4Ms<4) Then M4MsExtHeader(Len);
  M4Emit(M4CurI);
+End;
+
+{ initialisation commune du moteur MS-MPEG4/WMV (versions 1..5) }
+Procedure M4MsStart(Ver,W,H,RateN,RateD,Mode: LongInt; Const Target: String);
+Var K: LongInt;
+Begin
+ M4Reset;
+ M4Ms:=Ver; M4W:=W; M4H:=H;
+ M4Mode:=Mode; M4Target:=Target; NVVN:=0; NVVD:=0; M4Scan:=False;
+ M4RateN:=RateN; M4RateD:=RateD; M4Delta:=0;
+ M4MsInitTables;
+ M4Alloc; M4SarN:=1; M4SarD:=1;
+ M4Have:=True; M4LowDelay:=1; M4Prog:=1; M4QuantPrec:=5; M4Res:=RateN;
+ M4MsBR:=0; M4PerMbRl:=0; M4InterIntra:=0; M4AicDir:=0; M4EscLL:=0; M4EscRL:=0;
+ For K:=0 To 255 Do W1ScanT[K Shr 6,K And 63]:=W1Scan[K];
+ If M4Ms>=4 Then Begin
+  For K:=0 To 31 Do Begin M4YDcT[K]:=W1YDc[K]; M4CDcT[K]:=MSCDcW[K]; End;
+ End Else If M4Ms=3 Then Begin
+  For K:=0 To 31 Do Begin M4YDcT[K]:=MSYDcOld[K]; M4CDcT[K]:=MSCDcW[K]; End;
+ End Else Begin
+  For K:=0 To 31 Do Begin M4YDcT[K]:=8; M4CDcT[K]:=8; End;
+ End;
+ M4SliceH:=M4MbH; M4Flip:=0;
+ GetMem(M4CodedBlk,M4DcN[0]+16); FillChar(M4CodedBlk^,M4DcN[0]+16,0);
+ M4MsFail:=0; W2ExtraLen:=0; W2Pend:=0; W2BlkOv:=Nil; W2ExtScan:=Nil; W2Mspel:=0; W2Loop:=0; W2Abt:=0; W2JBit:=0; W2TopLeft:=0; W2PerMbRlBit:=0; W2Code:=0;
+ W2MspelPic:=0; W2PerMbAbt:=0; W2PerBlockAbt:=0; W2AbtType:=0; W2CbpIdx:=0; W2Hshift:=0; W2JType:=0;
+ FillChar(W2AbtTab,SizeOf(W2AbtTab),0);
+ For K:=0 To 63 Do Begin W2ScanAT[K]:=W2ScanA[K]; W2ScanBT[K]:=W2ScanB[K]; End;
+ For K:=0 To 2 Do W2CbpTree[K]:=M4TreeNew(128*26+8);
+ For K:=0 To 127 Do Begin
+  M4TreeAdd(W2CbpTree[0],W2Cbp0[K*2],W2Cbp0[K*2+1],K);
+  M4TreeAdd(W2CbpTree[1],W2Cbp1[K*2],W2Cbp1[K*2+1],K);
+  M4TreeAdd(W2CbpTree[2],W2Cbp2[K*2],W2Cbp2[K*2+1],K);
+ End;
+ W2CbpTree[3]:=MSTNonIntra;
+ GetMem(W2Skip,M4MbW*M4MbH+16); FillChar(W2Skip^,M4MbW*M4MbH+16,0);
 End;
 
 { lecture d'un fichier d'images (conteneur AVI -> 'MSF1') et decodage }
@@ -68926,20 +69716,8 @@ Begin U32:=LongInt(F^[At])+LongInt(F^[At+1])*256+LongInt(F^[At+2])*65536+LongInt
 Begin
  NVLoad(Source,F,Size);
  If (Size<28) Or (F^[0]<>Ord('M')) Or (F^[1]<>Ord('S')) Or (F^[2]<>Ord('F')) Then Fail('msmpeg4: fichier d''images invalide.');
- M4Reset;
- M4Ms:=F^[4]; M4W:=U32(5); M4H:=U32(9); RateN:=U32(13); RateD:=U32(17); Cnt:=U32(21);
- M4Mode:=Mode; M4Target:=Target; NVVN:=0; NVVD:=0; M4Scan:=False;
- M4RateN:=RateN; M4RateD:=RateD; M4Delta:=0;
- M4MsInitTables;
- M4Alloc; M4SarN:=1; M4SarD:=1;
- M4Have:=True; M4LowDelay:=1; M4Prog:=1; M4QuantPrec:=5; M4Res:=RateN;
- If M4Ms=3 Then Begin
-  For K:=0 To 31 Do Begin M4YDcT[K]:=MSYDcOld[K]; M4CDcT[K]:=MSCDcW[K]; End;
- End Else Begin
-  For K:=0 To 31 Do Begin M4YDcT[K]:=8; M4CDcT[K]:=8; End;
- End;
- M4SliceH:=M4MbH; M4Flip:=0;
- GetMem(M4CodedBlk,M4DcN[0]+16); FillChar(M4CodedBlk^,M4DcN[0]+16,0);
+ RateN:=U32(13); RateD:=U32(17); Cnt:=U32(21);
+ M4MsStart(F^[4],U32(5),U32(9),RateN,RateD,Mode,Target);
  Pos:=25;
  For K:=1 To Cnt Do Begin
   If Pos+4>Size Then Break;
@@ -68956,6 +69734,40 @@ Begin
  If NVLast<>Nil Then Begin FreeMem(NVLast,NVLastSize); NVLast:=Nil; End;
  If M4OutBegun=0 Then Fail('msmpeg4: aucune image decodee.');
  CloseRead; If NVOpened Then CloseWrite;
+End;
+
+{ WMV1 / WMV2 : paquets AVI lus par la couche QX, donnees d'extension (extradata) de 4 octets pour WMV2 }
+Procedure DecodeWMV(Const Source,Target: String; Mode: LongInt);
+Var I,Sz,Ver,E,Vn,Vd: LongInt; Pk: PEABuffer; Fc: String[4];
+Begin
+ QXOpen(Source);
+ Fc:=QXFcc; For I:=1 To Length(Fc) Do Fc[I]:=UpCase(Fc[I]);
+ If Fc='WMV1' Then Ver:=4 Else Ver:=5;
+ If (QXW<1) Or (QXH<1) Or (QXW>16000) Or (QXH>16000) Then Fail('wmv: dimensions invalides.');
+ Vn:=NVVN; Vd:=NVVD;
+ M4MsStart(Ver,QXW,QXH,QXRn,QXRd,Mode,Target);
+ NVVN:=Vn; NVVD:=Vd; M4SarN:=0; M4SarD:=1;
+ W2ExtraLen:=0;
+ If QXExtLen>0 Then Begin
+  E:=QXExtLen; If E>4 Then E:=4;
+  FillChar(W2Extra,4,0);
+  For I:=0 To E-1 Do W2Extra[I]:=QXF^[QXExtPos+I];
+  W2ExtraLen:=QXExtLen;
+ End;
+ If Ver=5 Then W2ExtHeader;
+ For I:=0 To QXCount-1 Do Begin
+  Sz:=QXLen^[I];
+  If Sz>0 Then Begin
+   GetMem(Pk,Sz+64); Move(QXF^[QXPos^[I]],Pk^,Sz);
+   M4MsPacket(Pk,Sz);
+   FreeMem(Pk);
+  End Else NVRepeat;
+  If NVDone Then Break;
+ End;
+ QXClose;
+ If M4OutBegun=0 Then Fail('wmv: aucune image decodee.');
+ If M4MsFail>0 Then WriteLn(StdErr,'wmv: ',M4MsFail,' macroblocs non decodables.');
+ NVFinish('wmv');
 End;
 
 { ---- Encodeur MS-MPEG4 v1/v2/v3 : images I seules, qscale fixe (-q:v), Y4M 4:2:0 vers AVI MP41/MP42/MP43 ---- }
@@ -79729,6 +80541,8 @@ BEGIN
   { LIST-ANCHOR-G3C }
   { LIST-ANCHOR-G4A }
   { LIST-ANCHOR-G4B }
+  WriteLn('D V    wmv1            Windows Media Video 7 (decodeur AVI exact; pas d''encodeur)');
+  WriteLn('D V    wmv2            Windows Media Video 8 (decodeur AVI exact, sans IntraX8; pas d''encodeur)');
   { LIST-ANCHOR-G5 }
   { LIST-ANCHOR-G6A }
   { LIST-ANCHOR-G6B }
@@ -80039,6 +80853,7 @@ BEGIN
   Else If (AsvTag='dvsd') Or (AsvTag='DVSD') Or (AsvTag='dvcs') Or (AsvTag='DVCS') Or (AsvTag='dv25') Or (AsvTag='dvsl') Or (AsvTag='DVSL') Or (AsvTag='dv50') Or (AsvTag='dvc ') Or (AsvTag='cdvc') Or (AsvTag='CDVC') Or (AsvTag='dvcp') Or (AsvTag='dvpp') Then NVKind:=14
   Else If MsAviKind(Intermediate)>=2 Then NVKind:=MsAviKind(Intermediate)+49
   Else If QXFccKind(AsvTag)<>0 Then NVKind:=QXFccKind(AsvTag)
+  Else If (AsvTag='WMV1') Or (AsvTag='wmv1') Or (AsvTag='WMV2') Or (AsvTag='wmv2') Then NVKind:=150
   Else If AsvTag='FSV1' Then NVKind:=18
   Else If (AsvTag='HFYU') Or (AsvTag='FFVH') Or (AsvTag='hfyu') Then NVKind:=20
   Else If AsvTag='FFV1' Then NVKind:=21
