@@ -89830,6 +89830,20 @@ End;
 
 { ==== BLOCK-ANCHOR-G6B : inserer le code du groupe G6B juste au-dessus de cette ligne ==== }
 
+{ ==== BLOCK-ANCHOR-H1 : inserer le code du groupe H1 juste au-dessus de cette ligne ==== }
+
+{ ==== BLOCK-ANCHOR-H2 : inserer le code du groupe H2 juste au-dessus de cette ligne ==== }
+
+{ ==== BLOCK-ANCHOR-H3 : inserer le code du groupe H3 juste au-dessus de cette ligne ==== }
+
+{ ==== BLOCK-ANCHOR-H4 : inserer le code du groupe H4 juste au-dessus de cette ligne ==== }
+
+{ ==== BLOCK-ANCHOR-H5 : inserer le code du groupe H5 juste au-dessus de cette ligne ==== }
+
+{ ==== BLOCK-ANCHOR-H6 : inserer le code du groupe H6 juste au-dessus de cette ligne ==== }
+
+{ ==== BLOCK-ANCHOR-H7 : inserer le code du groupe H7 juste au-dessus de cette ligne ==== }
+
 Procedure DecodeAVIX(Const Source,Target: String; Mode,Kind: LongInt);
 Var Pos,PkPos,PkLen,RN,RD,I,Y,X,Cw,Ch,Bs,Msg2: LongInt; Ok,FFBegun: Boolean; Msg: String; PIdx: LongInt; NbF,NbP: Int64;
 Begin
@@ -113296,6 +113310,13 @@ BEGIN
   { LIST-ANCHOR-G6A }
   WriteLn('DEV D  svq1            Sorenson Vector Quantizer 1 / Sorenson Video 1 / SVQ1 (encodeur Y4M -> MOV/AVI, yuv410p, EPZS)');
   WriteLn('D VSD  svq3            Sorenson Vector Quantizer 3 / Sorenson Video 3 / SVQ3');
+  { LIST-ANCHOR-H1 }
+  { LIST-ANCHOR-H2 }
+  { LIST-ANCHOR-H3 }
+  { LIST-ANCHOR-H4 }
+  { LIST-ANCHOR-H5 }
+  { LIST-ANCHOR-H6 }
+  { LIST-ANCHOR-H7 }
   { LIST-ANCHOR-G6B }
 
   WriteLn('D A    qcelp           QCELP / PureVoice (fichiers .qcp, QCELP-13K)');
