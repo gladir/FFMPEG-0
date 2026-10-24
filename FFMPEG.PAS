@@ -3820,6 +3820,8 @@ Begin
  ProbeDvbSub:=MaxScore>5;
 End;
 
+Var G2AProbeName: String;
+Function G2AProbe(Var B: Array Of Byte; N,Size: LongInt): Boolean; Forward;
 Function Probe(Const Name: String): String;
 Var
  B: Array[0..1083] Of Byte;
@@ -4024,6 +4026,7 @@ Begin
    Probe:='idcin'; Exit;
   End;
  End;
+ If G2AProbe(B,N,Size) Then Begin Probe:=G2AProbeName; Exit; End;
  If N>=1084 Then Begin
   Tag:='';
   For J:=1080 To 1083 Do Tag:=Tag+Chr(B[J]);
@@ -18978,6 +18981,11 @@ Begin
    If ZLAvailOut=0 Then ZLLastFlush:=-1;
    ZLDeflate:=0; Exit;
   End;
+  If (BState=1) And (Flush=2) Then Begin
+   ZLStoredBlock(0,0,0);
+   ZLFlushPending;
+   If ZLAvailOut=0 Then Begin ZLLastFlush:=-1; ZLDeflate:=0; Exit; End;
+  End;
  End;
  If Flush<>4 Then Begin ZLDeflate:=0; Exit; End;
  If ZLWrap<=0 Then Begin ZLDeflate:=1; Exit; End;
@@ -22719,6 +22727,7 @@ Procedure DecodeRL2(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeSMK(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeRV(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeWMV(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure DecodeG2A(Kind: LongInt; Const Source,Target: String; Mode: LongInt); Forward;
 Procedure AWBegin(Const Target,Fourcc: String; W,H,Rate,Scale,Bpp: LongInt; Extra: PEABuffer; ExtraLen: LongInt); Forward;
 Procedure AWFrame(P: PEABuffer; Len: LongInt); Forward;
 Procedure AWEnd; Forward;
@@ -23483,6 +23492,7 @@ End;
 
 Procedure DecodeNV2(Kind: LongInt; Const Source,Target: String; Mode: LongInt);
 Begin
+ If Kind>=220 Then Begin DecodeG2A(Kind,Source,Target,Mode); Exit; End;
  If Kind=55 Then Begin DecodePCX(Source,Target,Mode); Exit; End;
  If Kind=66 Then Begin DecodeRL2(Source,Target,Mode); Exit; End;
  If Kind=67 Then Begin DecodeSMK(Source,Target,Mode); Exit; End;
@@ -57117,6 +57127,3445 @@ End;
 
 { ==== BLOCK-ANCHOR-G1 : inserer le code du groupe G1 juste au-dessus de cette ligne ==== }
 
+{ ==== G2A: wnv1, vcr1, xl, tiertexseqvideo, vb, ulti, vmnc, zlib, zmbv, truemotion1/2 ==== }
+Type TG2AFn=Function(Pk: PEABuffer; Sz: LongInt): Boolean;
+Var
+ G2AFr: PEABuffer; G2AFrSize: LongInt;
+ G2APk: PEABuffer; G2ASz,G2ABp: LongInt;
+
+{ lecture bornee: au-dela du paquet, 0 }
+Function G2AB(At: LongInt): LongInt;
+Begin If (At<0) Or (At>=G2ASz) Then G2AB:=0 Else G2AB:=G2APk^[At]; End;
+
+{ lecteur de bits little-endian (BITSTREAM_READER_LE) }
+Function G2ABits(N: LongInt): LongInt;
+Var V,Z: LongInt;
+Begin
+ V:=0;
+ For Z:=0 To N-1 Do Begin
+  If ((G2AB(G2ABp Shr 3) Shr (G2ABp And 7)) And 1)<>0 Then V:=V Or (LongInt(1) Shl Z);
+  Inc(G2ABp);
+ End;
+ G2ABits:=V;
+End;
+
+Var G2CFOn: Boolean;
+
+Procedure G2CFBegin(TbN,TbD,Fn,Fd: LongInt; Vscfr: Boolean);
+Begin
+ CFTbN:=TbN; CFTbD:=TbD; CFFn:=Fn; CFFd:=Fd; CFNext:=0; CFFrameNo:=0;
+ CFHist[0]:=0; CFHist[1]:=0; CFHist[2]:=0; CFLastDropped:=False; CFVscfr:=Vscfr; G2CFOn:=False;
+End;
+
+{ image decodee dans G2AFr : synchronisation CFR de ffmpeg (images dupliquees / initiales) }
+Procedure G2CFOut(Pts,Dur: Int64);
+Var NbF,NbP: Int64;
+Begin
+ CFSync(Pts,Dur,NbF,NbP);
+ NVEmitN(G2AFr,NbP,NbF); Inc(CFNext,NbF); Inc(CFFrameNo,NbF); G2CFOn:=True;
+End;
+
+Procedure G2CFEnd;
+Begin If G2CFOn And Not NVDone Then CFFlush(G2AFr); End;
+
+Procedure G2ADrive(Fn: TG2AFn);
+Var PIdx,Sz: LongInt; Pk: PEABuffer;
+Begin
+ G2CFBegin(AXScale,AXRate,QXRn,QXRd,True);
+ For PIdx:=0 To QXCount-1 Do Begin
+  Sz:=QXLen^[PIdx];
+  If (QXPos^[PIdx]<0) Or (QXPos^[PIdx]>QXSize) Or (Sz<0) Then Sz:=0
+  Else If QXPos^[PIdx]+Sz>QXSize Then Sz:=QXSize-QXPos^[PIdx];
+  Pk:=PEABuffer(@QXF^[QXPos^[PIdx]]);
+  G2APk:=Pk; G2ASz:=Sz; G2ABp:=0;
+  If (Sz>0) And Fn(Pk,Sz) Then G2CFOut(PIdx,1);
+  If NVDone Then Break;
+ End;
+ G2CFEnd;
+End;
+
+Procedure G2AYUVBegin(Mode: LongInt; Const Target: String; W,H,SubX,SubY: LongInt; Const Tag: String);
+Begin
+ NVBegin(Mode,Target,W,H,7,QXRn,QXRd);
+ NVSubX:=SubX; NVSubY:=SubY; NVCW:=(W+(1 Shl SubX)-1) Shr SubX; NVCH:=(H+(1 Shl SubY)-1) Shr SubY;
+ NVYTag:=Tag; NVIl:='p'; NVAviSar(W,H);
+ If ((OptPixFmt='yuv420p') And ((SubX<>1) Or (SubY<>1))) Or ((SubX=2) And (SubY=2)) Then Begin
+  NVTo420:=True; NVYTag:='C420jpeg XYSCSS=420JPEG XCOLORRANGE=LIMITED';
+ End;
+ G2AFrSize:=W*H+2*NVCW*NVCH;
+ GetMem(G2AFr,G2AFrSize+64); FillChar(G2AFr^,G2AFrSize+64,0);
+End;
+
+{ ---- Winnov WNV1 (libavcodec/wnv1.c) ---- }
+Const
+ G2WNLen: Array[0..15] Of Byte=(1,3,3,4,4,5,5,6,6,7,7,8,8,9,9,8);
+ G2WNSym: Array[0..15] Of Byte=(7,8,6,9,5,10,4,11,3,12,2,13,1,14,0,15);
+
+Function G2WNCode(Shift,Base: LongInt): LongInt;
+Var Code,Len,I,V,Cl: LongInt; B: Int64; Found: Boolean;
+Begin
+ { codes canoniques lus bit a bit dans l'ordre du flux }
+ Code:=0; Len:=0; V:=0; Found:=False;
+ While (Len<9) And Not Found Do Begin
+  Code:=Code*2+G2ABits(1); Inc(Len);
+  B:=0;
+  For I:=0 To 15 Do Begin
+   Cl:=G2WNLen[I];
+   If (Cl=Len) And (Int64(Code)=(B Shr (32-Len))) Then Begin Found:=True; V:=G2WNSym[I]-7; Break; End;
+   B:=B+(Int64(1) Shl (32-Cl));
+  End;
+ End;
+ If Not Found Then V:=0;
+ If V=8 Then G2WNCode:=G2ABits(8-Shift) Shl Shift
+ Else G2WNCode:=Base+V*(1 Shl Shift);
+End;
+
+Function G2WNFrame(Pk: PEABuffer; Sz: LongInt): Boolean;
+Var I,J,Shift,PrevY,PrevU,PrevV,CW,Yp,Up,Vp,W,H: LongInt;
+Begin
+ G2WNFrame:=False; W:=QXW; H:=QXH;
+ If Sz<8+((H*(W Div 2)) Div 8) Then Exit;
+ G2ABp:=64;
+ If (G2AB(2) Shr 4)=6 Then Shift:=2 Else Begin
+  Shift:=8-(G2AB(2) Shr 4);
+  If Shift>4 Then Shift:=4;
+  If Shift<1 Then Shift:=1;
+ End;
+ CW:=NVCW; PrevY:=0; PrevU:=0; PrevV:=0;
+ For J:=0 To H-1 Do Begin
+  Yp:=J*W; Up:=W*H+J*CW; Vp:=W*H+CW*H+J*CW;
+  For I:=0 To (W Div 2)-1 Do Begin
+   G2AFr^[Yp+I*2]:=G2WNCode(Shift,PrevY) And 255;
+   PrevU:=G2WNCode(Shift,PrevU) And 255; G2AFr^[Up+I]:=PrevU;
+   PrevY:=G2WNCode(Shift,G2AFr^[Yp+I*2]) And 255; G2AFr^[Yp+I*2+1]:=PrevY;
+   PrevV:=G2WNCode(Shift,PrevV) And 255; G2AFr^[Vp+I]:=PrevV;
+  End;
+ End;
+ G2WNFrame:=True;
+End;
+
+Procedure DecodeG2WN(Const Source,Target: String; Mode: LongInt);
+Begin
+ QXOpen(Source);
+ If QXW<=1 Then Fail('wnv1: largeur invalide.');
+ G2AYUVBegin(Mode,Target,QXW,QXH,1,0,'C422');
+ G2ADrive(G2WNFrame);
+ QXClose; NVFinish('wnv1');
+End;
+
+{ ---- ATI VCR1 (libavcodec/vcr1.c) ---- }
+Function G2VCFrame(Pk: PEABuffer; Sz: LongInt): Boolean;
+Var
+ Delta: Array[0..15] Of LongInt; Offs: Array[0..3] Of LongInt;
+ I,X,Y,W,H,Bs,Offset,L,Cb,Cr: LongInt;
+Begin
+ G2VCFrame:=False; W:=QXW; H:=QXH;
+ If Sz<32+H+((W*H*5) Div 8) Then Exit;
+ Bs:=0;
+ For I:=0 To 15 Do Begin Delta[I]:=G2AB(Bs); Inc(Bs,2); End;
+ For Y:=0 To H-1 Do Begin
+  L:=Y*W;
+  If (Y And 3)=0 Then Begin
+   Cb:=W*H+(Y Shr 2)*NVCW; Cr:=W*H+NVCW*NVCH+(Y Shr 2)*NVCW;
+   For I:=0 To 3 Do Begin Offs[I]:=G2AB(Bs); Inc(Bs); End;
+   Offset:=Offs[0]-Delta[G2AB(Bs+2) And 15];
+   X:=0;
+   While X<W Do Begin
+    Inc(Offset,Delta[G2AB(Bs+2) And 15]); G2AFr^[L]:=Offset And 255;
+    Inc(Offset,Delta[G2AB(Bs+2) Shr 4]); G2AFr^[L+1]:=Offset And 255;
+    Inc(Offset,Delta[G2AB(Bs) And 15]); G2AFr^[L+2]:=Offset And 255;
+    Inc(Offset,Delta[G2AB(Bs) Shr 4]); G2AFr^[L+3]:=Offset And 255;
+    Inc(L,4);
+    G2AFr^[Cb]:=G2AB(Bs+3); G2AFr^[Cr]:=G2AB(Bs+1); Inc(Cb); Inc(Cr);
+    Inc(Bs,4); Inc(X,4);
+   End;
+  End Else Begin
+   Offset:=Offs[Y And 3]-Delta[G2AB(Bs+2) And 15];
+   X:=0;
+   While X<W Do Begin
+    Inc(Offset,Delta[G2AB(Bs+2) And 15]); G2AFr^[L]:=Offset And 255;
+    Inc(Offset,Delta[G2AB(Bs+2) Shr 4]); G2AFr^[L+1]:=Offset And 255;
+    Inc(Offset,Delta[G2AB(Bs+3) And 15]); G2AFr^[L+2]:=Offset And 255;
+    Inc(Offset,Delta[G2AB(Bs+3) Shr 4]); G2AFr^[L+3]:=Offset And 255;
+    Inc(Offset,Delta[G2AB(Bs) And 15]); G2AFr^[L+4]:=Offset And 255;
+    Inc(Offset,Delta[G2AB(Bs) Shr 4]); G2AFr^[L+5]:=Offset And 255;
+    Inc(Offset,Delta[G2AB(Bs+1) And 15]); G2AFr^[L+6]:=Offset And 255;
+    Inc(Offset,Delta[G2AB(Bs+1) Shr 4]); G2AFr^[L+7]:=Offset And 255;
+    Inc(L,8); Inc(Bs,4); Inc(X,8);
+   End;
+  End;
+ End;
+ G2VCFrame:=True;
+End;
+
+Procedure DecodeG2VC(Const Source,Target: String; Mode: LongInt);
+Begin
+ QXOpen(Source);
+ If ((QXW Mod 8)<>0) Or ((QXH Mod 4)<>0) Then Fail('vcr1: dimensions multiples de 8x4 requises.');
+ G2AYUVBegin(Mode,Target,QXW,QXH,2,2,'C410');
+ G2ADrive(G2VCFrame);
+ QXClose; NVFinish('vcr1');
+End;
+
+{ ---- Miro VideoXL (libavcodec/xl.c) ---- }
+Const G2XLTab: Array[0..31] Of LongInt=(0,1,2,3,4,5,6,7,8,9,12,15,20,25,34,46,64,82,94,103,108,113,116,119,120,121,122,123,124,125,126,127);
+
+Function G2XLFrame(Pk: PEABuffer; Sz: LongInt): Boolean;
+Var
+ I,J,W,H,Bp,Y0,Y1,Y2,Y3,C0,C1,Yp,Up,Vp: LongInt; Val: LongWord;
+Begin
+ G2XLFrame:=False; W:=QXW; H:=QXH;
+ If (W And 3)<>0 Then Exit;
+ If Sz<W*H Then Exit;
+ Y3:=0; C0:=0; C1:=0;
+ For I:=0 To H-1 Do Begin
+  Bp:=I*W+W-4; Yp:=I*W; Up:=W*H+I*NVCW; Vp:=W*H+NVCW*H+I*NVCW;
+  J:=0;
+  While J<W Do Begin
+   Val:=LongWord(G2AB(Bp))+(LongWord(G2AB(Bp+1)) Shl 8)+(LongWord(G2AB(Bp+2)) Shl 16)+(LongWord(G2AB(Bp+3)) Shl 24);
+   Dec(Bp,4);
+   Val:=((Val Shr 16) And $FFFF) Or ((Val And $FFFF) Shl 16);
+   If J=0 Then Y0:=(Val And $1F) Shl 2 Else Y0:=Y3+G2XLTab[Val And $1F];
+   Val:=Val Shr 5;
+   Y1:=Y0+G2XLTab[Val And $1F]; Val:=Val Shr 5;
+   Y2:=Y1+G2XLTab[Val And $1F]; Val:=Val Shr 6;
+   Y3:=Y2+G2XLTab[Val And $1F]; Val:=Val Shr 5;
+   If J=0 Then C0:=(Val And $1F) Shl 2 Else C0:=C0+G2XLTab[Val And $1F];
+   Val:=Val Shr 5;
+   If J=0 Then C1:=(Val And $1F) Shl 2 Else C1:=C1+G2XLTab[Val And $1F];
+   G2AFr^[Yp+J]:=(Y0 Shl 1) And 255; G2AFr^[Yp+J+1]:=(Y1 Shl 1) And 255;
+   G2AFr^[Yp+J+2]:=(Y2 Shl 1) And 255; G2AFr^[Yp+J+3]:=(Y3 Shl 1) And 255;
+   G2AFr^[Up+(J Shr 2)]:=(C0 Shl 1) And 255; G2AFr^[Vp+(J Shr 2)]:=(C1 Shl 1) And 255;
+   Inc(J,4);
+  End;
+ End;
+ G2XLFrame:=True;
+End;
+
+Procedure DecodeG2XL(Const Source,Target: String; Mode: LongInt);
+Begin
+ QXOpen(Source);
+ G2AYUVBegin(Mode,Target,QXW,QXH,2,0,'C411');
+ G2ADrive(G2XLFrame);
+ QXClose; NVFinish('xl');
+End;
+
+Const
+ G2T1P2: Array[0..807] Of Byte=(
+  8,0,0,0,0,8,0,0,0,0,8,16,0,0,0,8,1,0,0,0,8,0,16,0,0,8,0,1,0,0,8,0,
+  0,16,0,8,0,0,1,0,8,0,0,0,16,8,0,0,0,1,6,0,0,0,6,16,0,0,6,1,0,0,6,0,
+  16,0,6,0,1,0,6,0,0,1,6,0,0,16,6,0,0,2,6,0,0,32,6,32,16,0,6,0,2,1,6,0,
+  32,16,6,2,1,0,6,17,0,0,6,0,32,0,6,0,2,0,6,32,0,0,6,1,16,0,6,2,0,0,6,1,
+  0,2,6,16,0,32,6,0,1,2,6,16,1,0,6,0,16,32,6,16,16,0,6,16,0,1,6,32,0,16,6,2,
+  0,1,6,1,1,0,6,1,0,16,6,0,17,0,6,16,0,2,6,0,1,16,6,0,0,17,6,16,0,16,6,1,
+  0,1,6,0,0,34,6,2,1,1,6,16,32,16,6,1,2,1,6,32,16,16,6,1,0,32,6,0,16,1,6,33,
+  16,0,6,16,2,1,6,18,1,0,6,1,32,16,6,1,2,0,6,16,32,0,6,0,16,2,6,0,1,32,6,0,
+  2,33,6,0,2,32,6,0,0,18,6,0,0,33,6,32,17,0,6,0,1,1,6,17,16,0,6,0,32,18,6,0,
+  32,17,6,32,16,2,6,2,1,32,6,0,34,17,6,0,16,16,6,2,17,0,6,0,33,16,6,0,2,3,6,32,
+  16,1,6,0,18,1,4,17,0,4,0,34,4,32,0,4,1,16,4,2,32,4,0,32,4,2,0,4,16,1,4,0,
+  17,4,2,1,4,2,33,4,0,2,4,32,2,4,1,1,4,16,16,4,16,2,4,34,0,4,16,0,4,1,0,4,
+  33,0,4,18,0,4,0,16,4,32,18,4,1,17,4,0,1,4,1,2,4,17,2,4,17,1,4,16,32,4,32,1,
+  4,34,17,4,0,18,4,32,16,4,34,1,4,1,32,4,0,33,4,16,17,4,33,16,4,16,34,4,2,3,4,18,
+  1,4,32,17,4,17,16,4,32,48,4,17,32,4,2,16,4,34,16,4,17,17,4,48,32,4,48,0,4,1,34,4,
+  1,18,4,2,17,4,3,2,4,3,0,4,16,33,4,18,32,4,0,0,4,18,33,4,33,17,4,2,34,4,16,18,
+  4,49,0,4,32,32,4,0,3,4,2,2,4,34,32,4,1,33,4,33,2,4,33,18,4,17,34,4,0,48,4,18,
+  17,4,32,34,4,49,32,4,33,48,4,34,2,4,34,34,4,32,49,4,19,2,4,3,16,4,17,18,4,0,19,4,
+  33,1,4,18,3,4,19,0,4,19,16,4,2,19,4,48,1,4,18,16,4,34,19,4,3,18,4,49,1,4,48,34,
+  4,0,49,4,1,49,4,2,35,4,1,48,4,17,33,4,34,33,4,1,19,4,16,3,4,34,3,4,48,33,4,33,
+  49,4,51,0,4,19,18,4,17,49,4,48,2,4,18,2,4,17,19,4,18,34,4,32,50,4,16,19,4,34,49,4,
+  33,32,4,1,51,4,51,16,4,32,19,4,49,34,4,19,48,4,1,3,4,17,51,4,32,33,4,19,49,4,3,34,
+  4,49,2,4,0,36,2,0,2,16,2,32,2,48,2,64,2,80,2,96,2,1,2,17,2,33,2,49,2,65,2,81,
+  2,97,2,2,2,18,2,34,2,50,2,66,2,82,2,98,2,3,2,19,2,35,2,51,2,67,2,83,2,99,2,4,
+  2,20,2,36,2,52,2,68,2,84,2,100,2,5,2,21,2,37,2,53,2,69,2,85,2,101,2,6,2,22,2,38,
+  2,54,2,70,2,86,2,102);
+
+Const
+ G2T1P3: Array[0..767] Of Byte=(
+  6,0,0,0,6,0,0,0,6,0,0,1,6,0,0,16,6,0,0,17,6,0,1,0,6,0,1,1,6,0,1,16,
+  6,0,1,17,6,0,16,0,6,0,16,1,6,0,16,16,6,0,16,17,6,0,17,0,6,0,17,1,6,0,17,16,
+  6,0,17,17,6,1,0,0,6,1,0,1,6,1,0,16,6,1,0,17,6,1,1,0,6,1,1,1,6,1,1,16,
+  6,1,1,17,6,1,16,0,6,1,16,1,6,1,16,16,6,1,16,17,6,1,17,0,6,1,17,1,6,1,17,16,
+  6,1,17,17,6,16,0,0,6,16,0,1,6,16,0,16,6,16,0,17,6,16,1,0,6,16,1,1,6,16,1,16,
+  6,16,1,17,6,16,16,0,6,16,16,1,6,16,16,16,6,16,16,17,6,16,17,0,6,16,17,1,6,16,17,16,
+  6,16,17,17,6,17,0,0,6,17,0,1,6,17,0,16,6,17,0,17,6,17,1,0,6,17,1,1,6,17,1,16,
+  6,17,1,17,6,17,16,0,6,17,16,1,6,17,16,16,6,17,16,17,6,17,17,0,6,17,17,1,6,17,17,16,
+  4,0,0,4,0,1,4,0,2,4,0,3,4,0,16,4,0,17,4,0,18,4,0,19,4,0,32,4,0,33,4,0,
+  34,4,0,35,4,0,48,4,0,49,4,0,50,4,0,51,4,1,0,4,1,1,4,1,2,4,1,3,4,1,16,4,
+  1,17,4,1,18,4,1,19,4,1,32,4,1,33,4,1,34,4,1,35,4,1,48,4,1,49,4,1,50,4,1,51,
+  4,2,0,4,2,1,4,2,2,4,2,3,4,2,16,4,2,17,4,2,18,4,2,19,4,2,32,4,2,33,4,2,
+  34,4,2,35,4,2,48,4,2,49,4,2,50,4,2,51,4,3,0,4,3,1,4,3,2,4,3,3,4,3,16,4,
+  3,17,4,3,18,4,3,19,4,3,32,4,3,33,4,3,34,4,3,35,4,3,48,4,3,49,4,3,50,4,3,51,
+  4,16,0,4,16,1,4,16,2,4,16,3,4,16,16,4,16,17,4,16,18,4,16,19,4,16,32,4,16,33,4,16,
+  34,4,16,35,4,16,48,4,16,49,4,16,50,4,16,51,4,17,0,4,17,1,4,17,2,4,17,3,4,17,16,4,
+  17,17,4,17,18,4,17,19,4,17,32,4,17,33,4,17,34,4,17,35,4,17,48,4,17,49,4,17,50,4,17,51,
+  4,18,0,4,18,1,4,18,2,4,18,3,4,18,16,4,18,17,4,18,18,4,18,19,4,18,32,4,18,33,4,18,
+  34,4,18,35,4,18,48,4,18,49,4,18,50,4,18,51,4,19,0,4,19,1,4,19,2,4,19,3,4,19,16,4,
+  19,17,4,19,18,4,19,19,4,19,32,4,19,33,4,19,34,4,19,35,4,19,48,4,19,49,4,19,50,4,19,51,
+  2,0,2,16,2,32,2,48,2,64,2,80,2,96,2,112,2,1,2,17,2,33,2,49,2,65,2,81,2,97,2,113,
+  2,2,2,18,2,34,2,50,2,66,2,82,2,98,2,114,2,3,2,19,2,35,2,51,2,67,2,83,2,99,2,115,
+  2,4,2,20,2,36,2,52,2,68,2,84,2,100,2,116,2,5,2,21,2,37,2,53,2,69,2,85,2,101,2,117,
+  2,6,2,22,2,38,2,54,2,70,2,86,2,102,2,118,2,7,2,23,2,39,2,55,2,71,2,87,2,103,2,119);
+
+Const
+ G2T1P4: Array[0..784] Of Byte=(
+  8,0,0,0,0,8,0,0,0,0,8,32,0,0,0,8,0,0,0,1,8,16,0,0,0,8,0,0,0,2,8,1,
+  0,0,0,8,0,0,0,16,8,2,0,0,0,6,0,0,0,6,32,0,0,6,0,0,1,6,16,0,0,6,0,0,
+  2,6,0,16,0,6,0,32,0,6,0,2,0,6,0,1,0,6,1,0,0,6,0,0,32,6,2,0,0,6,0,0,
+  16,6,16,0,32,6,1,0,2,6,32,0,16,6,2,0,1,6,32,16,0,6,0,18,0,6,0,2,1,6,2,1,
+  0,6,0,33,0,6,0,1,2,6,0,32,16,6,0,0,33,6,0,0,18,6,0,1,32,6,18,0,0,6,0,16,
+  32,6,1,32,0,6,2,16,0,6,16,32,0,6,1,2,0,6,33,0,0,6,0,2,16,6,32,1,0,6,0,34,
+  0,6,16,2,0,6,0,16,2,6,17,0,0,6,0,17,0,6,34,0,0,6,32,0,2,6,16,0,1,6,0,32,
+  1,6,2,32,0,6,1,16,0,6,1,0,32,6,0,32,2,6,1,32,2,6,16,1,0,6,2,0,16,6,0,16,
+  1,6,16,1,32,6,32,2,16,6,0,0,34,6,16,0,2,6,0,2,32,6,32,2,0,6,0,0,17,6,2,16,
+  1,6,0,1,16,6,0,2,17,4,1,2,4,2,1,4,1,0,4,16,32,4,32,16,4,32,0,4,17,0,4,2,
+  0,4,18,0,4,0,33,4,34,0,4,0,18,4,33,0,4,2,17,4,0,1,4,16,2,4,2,32,4,32,17,4,
+  1,16,4,33,16,4,16,0,4,16,34,4,32,32,4,0,34,4,1,34,4,32,1,4,2,2,4,0,32,4,0,16,
+  4,0,17,4,34,1,4,17,32,4,18,1,4,18,32,4,17,2,4,16,16,4,1,1,4,2,33,4,32,18,4,1,
+  18,4,34,17,4,33,18,4,34,16,4,33,2,4,32,2,4,16,1,4,0,2,4,16,33,4,1,32,4,17,34,4,
+  18,33,4,34,32,4,2,16,4,2,34,4,17,16,4,34,2,4,32,33,4,1,17,4,17,1,4,16,18,4,2,18,
+  4,32,34,4,33,32,4,1,33,4,18,2,4,33,17,4,18,34,4,18,16,4,34,33,4,16,17,4,33,1,4,17,
+  18,4,18,17,4,102,102,4,34,34,4,17,33,4,17,17,4,33,34,4,0,0,4,34,18,4,18,18,4,33,33,4,
+  66,0,4,0,4,4,64,0,4,48,0,4,49,0,4,0,3,4,0,20,4,0,19,4,1,36,4,32,19,4,1,66,
+  4,20,32,4,66,2,4,19,0,4,0,36,4,49,32,4,34,19,4,17,36,4,18,102,4,48,1,4,2,19,4,18,
+  66,4,64,16,4,64,2,4,1,4,4,36,0,4,66,16,4,33,19,4,19,18,4,49,33,4,33,36,4,0,64,4,
+  16,36,4,16,66,4,50,1,4,17,66,4,32,49,4,18,64,2,0,2,16,2,32,2,48,2,64,2,80,2,96,2,
+  112,2,1,2,17,2,33,2,49,2,65,2,81,2,97,2,113,2,2,2,18,2,34,2,50,2,66,2,82,2,98,2,
+  114,2,3,2,19,2,35,2,51,2,67,2,83,2,99,2,115,2,4,2,20,2,36,2,52,2,68,2,84,2,100,2,
+  116,2,5,2,21,2,37,2,53,2,69,2,85,2,101,2,117,2,6,2,22,2,38,2,54,2,70,2,86,2,102,2,
+  118,2,7,2,23,2,39,2,55,2,71,2,87,2,103,2,119);
+
+{ ---- Duck TrueMotion 1 (libavcodec/truemotion1.c) ---- }
+Const
+ G2T1TabY: Array[0..3,0..7] Of LongInt=((0,-2,2,-6,6,-12,12,-12),(0,-2,4,-6,8,-12,12,-12),(4,-6,20,-20,46,-46,94,-94),(0,-4,4,-16,16,-36,36,-80));
+ G2T1TabFY: Array[0..3,0..7] Of LongInt=((0,-15,50,-50,115,-115,235,-235),(0,-15,50,-50,115,-115,235,-235),(0,-15,50,-50,115,-115,235,-235),(0,40,80,-76,160,-154,236,-236));
+ G2T1TabC: Array[0..3,0..7] Of LongInt=((0,-1,1,-2,3,-4,5,-4),(0,-1,1,-2,3,-4,5,-4),(0,-4,3,-16,20,-32,36,-32),(0,-2,2,-8,8,-18,18,-40));
+ G2T1TabFC: Array[0..3,0..7] Of LongInt=((0,-20,15,-80,100,-160,180,-160),(0,-20,15,-80,100,-160,180,-160),(0,-20,15,-80,100,-160,180,-160),(0,40,80,-76,160,-154,236,-236));
+ { algorithme, largeur de bloc, hauteur de bloc, type de bloc pour les 17 compressions }
+ G2T1Alg: Array[0..16] Of Byte=(0,1,2,1,2,1,2,1,2,0,3,0,3,0,3,0,3);
+ G2T1BW: Array[0..16] Of Byte=(0,4,4,4,4,2,2,2,2,4,4,4,4,2,2,2,2);
+ G2T1BH: Array[0..16] Of Byte=(0,4,4,2,2,4,4,2,2,4,4,2,2,4,4,2,2);
+ G2T1BT: Array[0..16] Of Byte=(0,3,3,2,2,1,1,0,0,3,3,2,2,1,1,0,0);
+Var
+ G2T1YP,G2T1CP,G2T1FYP,G2T1FCP: Array[0..1023] Of LongWord;
+ G2T1Ydt,G2T1Cdt,G2T1FYdt,G2T1FCdt: Array[0..7] Of LongInt;
+ G2T1LastD,G2T1LastV,G2T1Flags,G2T1Comp,G2T1BWi,G2T1BTy,G2T1W,G2T1H,G2T1Fmt,G2T1RowSize,G2T1Stride: LongInt;
+ G2T1Fr: PEABuffer; G2T1Vert: Array[0..8191] Of LongWord;
+ G2T1MbPos,G2T1IdxPos,G2T1IdxSize,G2T1HdrSize,G2T1Mode: LongInt; G2T1Begun: Boolean; G2T1Target: String;
+ G2T1AviW,G2T1AviH,G2T1BFmt: LongInt;
+
+Procedure G2T1SelDelta(Idx: LongInt);
+Var I: LongInt;
+Begin
+ If Idx>3 Then Exit;
+ For I:=0 To 7 Do Begin
+  G2T1Ydt[I]:=G2T1TabY[Idx,I]; G2T1Cdt[I]:=G2T1TabC[Idx,I];
+  G2T1FYdt[I]:=G2T1TabFY[Idx,I]; G2T1FCdt[I]:=G2T1TabFC[Idx,I];
+ End;
+ For I:=0 To 7 Do Begin
+  G2T1Ydt[I]:=G2T1Ydt[I] And Not 1;
+  G2T1Ydt[I]:=G2T1Ydt[I] Div 2;
+ End;
+End;
+
+Function G2T1PcByte(Which,At: LongInt): LongInt;
+Begin
+ Case Which Of
+  0: G2T1PcByte:=G2T1P2[At];
+  1: G2T1PcByte:=G2T1P3[At];
+  Else G2T1PcByte:=G2T1P4[At];
+ End;
+End;
+
+Function G2T1M(V: Int64): LongWord;
+Begin G2T1M:=LongWord(V And $FFFFFFFF); End;
+
+{ Kind 15, 16 ou 24 ; Which = table de vecteurs }
+Procedure G2T1GenTables(Which,Kind: LongInt);
+Var I,J,Len,At,Dp,P1,P2: LongInt; Lo,Hi,B,R,L2: Int64; Yv,Cv,FYv,FCv: Int64;
+Begin
+ At:=0; I:=0;
+ While I<1024 Do Begin
+  Len:=G2T1PcByte(Which,At) Div 2; Inc(At);
+  J:=0;
+  While J<Len Do Begin
+   Dp:=G2T1PcByte(Which,At); Inc(At);
+   P1:=Dp Shr 4; P2:=Dp And 15;
+   Case Kind Of
+    15: Begin
+      Lo:=G2T1Ydt[P1]; Lo:=Lo+Lo*32+Lo*1024; Hi:=G2T1Ydt[P2]; Hi:=Hi+Hi*32+Hi*1024;
+      Yv:=(Lo+Hi*65536)*2;
+      B:=G2T1Cdt[P2]; R:=Int64(G2T1Cdt[P1])*1024; L2:=B+R;
+      Cv:=(L2+L2*65536)*2; FYv:=0; FCv:=0;
+     End;
+    16: Begin
+      Lo:=G2T1Ydt[P1]; Lo:=Lo+Lo*64+Lo*2048; Hi:=G2T1Ydt[P2]; Hi:=Hi+Hi*64+Hi*2048;
+      Yv:=(Lo+Hi*65536)*2;
+      B:=G2T1Cdt[P2]; R:=Int64(G2T1Cdt[P1])*2048; L2:=B+R;
+      Cv:=(L2+L2*65536)*2; FYv:=0; FCv:=0;
+     End;
+    Else Begin
+      Lo:=G2T1Ydt[P1]; Hi:=G2T1Ydt[P2]; Yv:=(Lo+Hi*256+Hi*65536)*2;
+      B:=G2T1Cdt[P2]; R:=Int64(G2T1Cdt[P1])*65536; Cv:=(B+R)*2;
+      Lo:=G2T1FYdt[P1]; Hi:=G2T1FYdt[P2]; FYv:=(Lo+Hi*256+Hi*65536)*2;
+      B:=G2T1FCdt[P2]; R:=Int64(G2T1FCdt[P1])*65536; FCv:=(B+R)*2;
+     End;
+   End;
+   G2T1YP[I+J]:=G2T1M(Yv) And $FFFFFFFE; G2T1CP[I+J]:=G2T1M(Cv) And $FFFFFFFE;
+   G2T1FYP[I+J]:=G2T1M(FYv) And $FFFFFFFE; G2T1FCP[I+J]:=G2T1M(FCv) And $FFFFFFFE;
+   Inc(J);
+  End;
+  If J>0 Then Begin
+   G2T1YP[I+J-1]:=G2T1YP[I+J-1] Or 1; G2T1CP[I+J-1]:=G2T1CP[I+J-1] Or 1;
+   G2T1FYP[I+J-1]:=G2T1FYP[I+J-1] Or 1; G2T1FCP[I+J-1]:=G2T1FCP[I+J-1] Or 1;
+  End;
+  Inc(I,4);
+ End;
+End;
+
+{ en-tete : retourne False en cas d'erreur }
+Function G2T1Header: Boolean;
+Var
+ HB: Array[0..127] Of Byte; I,HS,Compression,Deltaset,Vectable,Ysz,Xsz,Version,HType,Hflags,WShift,NewFmt,Which,W,H: LongInt;
+ Changed: Boolean;
+Begin
+ G2T1Header:=False;
+ FillChar(HB,SizeOf(HB),0);
+ HS:=((G2AB(0) Shr 5) Or (G2AB(0) Shl 3)) And $7F;
+ If G2AB(0)<$10 Then Exit;
+ If HS+1>G2ASz Then Exit;
+ For I:=1 To HS-1 Do HB[I-1]:=G2AB(I) Xor G2AB(I+1);
+ Compression:=HB[0]; Deltaset:=HB[1]; Vectable:=HB[2];
+ Ysz:=HB[3]+HB[4]*256; Xsz:=HB[5]+HB[6]*256;
+ Version:=HB[9]; HType:=HB[10]; Hflags:=HB[11];
+ If Version>=2 Then Begin
+  If HType>3 Then Exit
+  Else If (HType=2) Or (HType=3) Then Begin
+   G2T1Flags:=Hflags;
+   If (G2T1Flags And 8)=0 Then G2T1Flags:=G2T1Flags Or 16;
+  End Else G2T1Flags:=16;
+ End Else G2T1Flags:=16;
+ If (G2T1Flags And 32)<>0 Then Exit;
+ W:=Xsz; H:=Ysz;
+ If HType<2 Then
+  If (W<213) And (H>=176) Then G2T1Flags:=G2T1Flags Or 4;
+ If Compression>=17 Then Exit;
+ Changed:=(Deltaset<>G2T1LastD) Or (Vectable<>G2T1LastV);
+ If Changed Then G2T1SelDelta(Deltaset);
+ If ((Compression And 1)<>0) And (HType<>0) Then Which:=0
+ Else Begin
+  If (Vectable>0) And (Vectable<4) Then Which:=Vectable-1 Else Exit;
+ End;
+ If G2T1Alg[Compression]=3 Then Begin NewFmt:=24; WShift:=1; End Else Begin NewFmt:=15; WShift:=0; End;
+ W:=W Shr WShift;
+ If (W And 1)<>0 Then Exit;
+ If (W<>G2T1W) Or (H<>G2T1H) Or (NewFmt<>G2T1Fmt) Then Begin
+  { nouvelle image (tampon remis a zero) }
+  If (W<1) Or (H<1) Or (W>4000) Or (H>4000) Then Exit;
+  If G2T1Fr<>Nil Then FreeMem(G2T1Fr);
+  G2T1Stride:=W*4+64;
+  GetMem(G2T1Fr,G2T1Stride*(H+4)); FillChar(G2T1Fr^,G2T1Stride*(H+4),0);
+  G2T1W:=W; G2T1H:=H; G2T1Fmt:=NewFmt;
+ End;
+ G2T1RowSize:=((G2T1W Shr (2-WShift))+7) Shr 3;
+ If Changed Then Begin
+  If G2T1Alg[Compression]=3 Then G2T1GenTables(Which,24)
+  Else If G2T1Fmt=15 Then G2T1GenTables(Which,15)
+  Else G2T1GenTables(Which,16);
+ End;
+ G2T1MbPos:=HS;
+ If (G2T1Flags And 16)<>0 Then Begin
+  G2T1IdxPos:=G2T1MbPos;
+  If G2T1W*G2T1H Div 2048+HS>G2ASz Then Exit;
+ End Else G2T1IdxPos:=G2T1MbPos+G2T1RowSize*(G2T1H Shr 2);
+ G2T1IdxSize:=G2ASz-G2T1IdxPos;
+ G2T1LastD:=Deltaset; G2T1LastV:=Vectable; G2T1Comp:=Compression;
+ G2T1BWi:=G2T1BW[Compression]; G2T1BTy:=G2T1BT[Compression];
+ G2T1Header:=True;
+End;
+
+Procedure G2T1Decode(Is24: Boolean);
+Var
+ Y,PixelsLeft,Index,IdxIdx,MbIndex,MbPos: LongInt; Pair,Horiz: LongWord; VP,CP: LongInt; Keyframe,Stop: Boolean;
+ MbByte,MbMask: LongInt; Line: LongInt;
+Function GetW(At: LongInt): LongWord;
+Begin GetW:=LongWord(G2T1Fr^[At])+(LongWord(G2T1Fr^[At+1]) Shl 8)+(LongWord(G2T1Fr^[At+2]) Shl 16)+(LongWord(G2T1Fr^[At+3]) Shl 24); End;
+Procedure PutW(At: LongInt; V: LongWord);
+Begin G2T1Fr^[At]:=V And 255; G2T1Fr^[At+1]:=(V Shr 8) And 255; G2T1Fr^[At+2]:=(V Shr 16) And 255; G2T1Fr^[At+3]:=(V Shr 24) And 255; End;
+Procedure GetNext;
+Begin
+ If IdxIdx>=G2T1IdxSize Then Begin Stop:=True; Exit; End;
+ Index:=G2AB(G2T1IdxPos+IdxIdx)*4; Inc(IdxIdx);
+End;
+Procedure IncIndex;
+Begin
+ If Index>=1023 Then Begin Stop:=True; Exit; End;
+ Inc(Index);
+End;
+{ Which: 0 = prediction chroma, 1 = luminance }
+Procedure Apply(WhichC: Boolean);
+Begin
+ If WhichC Then Pair:=G2T1CP[Index] Else Pair:=G2T1YP[Index];
+ Horiz:=LongWord(Horiz+(Pair Shr 1));
+ If (Pair And 1)<>0 Then Begin
+  GetNext; If Stop Then Exit;
+  If Index=0 Then Begin
+   GetNext; If Stop Then Exit;
+   If Is24 Then Begin
+    If WhichC Then Pair:=G2T1FCP[Index] Else Pair:=G2T1FYP[Index];
+    Horiz:=LongWord(Horiz+(Pair Shr 1));
+   End Else Begin
+    If WhichC Then Pair:=G2T1CP[Index] Else Pair:=G2T1YP[Index];
+    Horiz:=LongWord(Int64(Horiz)+Int64(Pair Shr 1)*5);
+   End;
+   If (Pair And 1)<>0 Then GetNext Else IncIndex;
+  End;
+ End Else IncIndex;
+End;
+Procedure Output;
+Var V: LongWord;
+Begin
+ V:=LongWord(Int64(G2T1Vert[VP])+Int64(Horiz));
+ PutW(CP,V); G2T1Vert[VP]:=V; Inc(VP); Inc(CP,4);
+End;
+Begin
+ Keyframe:=(G2T1Flags And 16)<>0; Stop:=False;
+ FillChar(G2T1Vert,SizeOf(G2T1Vert),0);
+ IdxIdx:=0; MbPos:=G2T1MbPos;
+ GetNext; If Stop Then Exit;
+ Line:=0;
+ For Y:=0 To G2T1H-1 Do Begin
+  Horiz:=0; CP:=Line; VP:=0; MbIndex:=0;
+  MbByte:=0;
+  If (Not Keyframe) Or Is24 Then Begin MbByte:=G2AB(MbPos+MbIndex); Inc(MbIndex); End;
+  MbMask:=1; PixelsLeft:=G2T1W;
+  While PixelsLeft>0 Do Begin
+   If Keyframe Or ((MbByte And MbMask)=0) Then Begin
+    Case Y And 3 Of
+     0: If G2T1BWi=2 Then Begin
+        Apply(True); If Stop Then Exit; Apply(False); If Stop Then Exit; Output;
+        Apply(True); If Stop Then Exit; Apply(False); If Stop Then Exit; Output;
+       End Else Begin
+        Apply(True); If Stop Then Exit; Apply(False); If Stop Then Exit; Output;
+        Apply(False); If Stop Then Exit; Output;
+       End;
+     1,3: Begin
+        Apply(False); If Stop Then Exit; Output;
+        Apply(False); If Stop Then Exit; Output;
+       End;
+     2: If G2T1BTy=0 Then Begin
+        Apply(True); If Stop Then Exit; Apply(False); If Stop Then Exit; Output;
+        Apply(True); If Stop Then Exit; Apply(False); If Stop Then Exit; Output;
+       End Else If G2T1BTy=2 Then Begin
+        Apply(True); If Stop Then Exit; Apply(False); If Stop Then Exit; Output;
+        Apply(False); If Stop Then Exit; Output;
+       End Else Begin
+        Apply(False); If Stop Then Exit; Output;
+        Apply(False); If Stop Then Exit; Output;
+       End;
+    End;
+   End Else Begin
+    { copie de quatre pixels, la prediction horizontale est reassignee }
+    G2T1Vert[VP]:=GetW(CP); Inc(VP); Inc(CP,4);
+    Horiz:=LongWord(Int64(GetW(CP))-Int64(G2T1Vert[VP]));
+    G2T1Vert[VP]:=GetW(CP); Inc(VP); Inc(CP,4);
+   End;
+   If Not Keyframe Then Begin
+    MbMask:=MbMask Shl 1;
+    If MbMask>255 Then Begin
+     MbByte:=G2AB(MbPos+MbIndex); Inc(MbIndex);
+     MbMask:=1;
+    End;
+   End;
+   If Is24 Then Dec(PixelsLeft,2) Else Dec(PixelsLeft,4);
+  End;
+  If ((Y+1) And 3)=0 Then Inc(MbPos,G2T1RowSize);
+  Inc(Line,G2T1Stride);
+ End;
+End;
+
+Function G2T1Frame(Pk: PEABuffer; Sz: LongInt): Boolean;
+Var R,NF: LongInt;
+Begin
+ G2T1Frame:=False;
+ If Not G2T1Header Then Exit;
+ If G2T1Begun And ((G2T1W<>G2T1AviW) Or (G2T1H<>G2T1AviH) Or (G2T1Fmt<>G2T1BFmt)) Then Exit;
+ If Not G2T1Begun Then Begin
+  G2T1AviW:=G2T1W; G2T1AviH:=G2T1H; G2T1BFmt:=G2T1Fmt;
+  If G2T1Fmt=24 Then NF:=3 Else NF:=2;
+  NVBegin(G2T1Mode,G2T1Target,G2T1W,G2T1H,NF,QXRn,QXRd); NVHasAlpha:=False;
+  If G2T1Fmt=24 Then Begin NVSarN:=2; NVSarD:=1; End Else Begin NVSarN:=1; NVSarD:=1; End;
+  G2AFrSize:=G2T1W*G2T1H*(G2T1Fmt Div 15+1)*2; { assez grand }
+  GetMem(G2AFr,G2T1W*G2T1H*4+64); FillChar(G2AFr^,G2T1W*G2T1H*4+64,0);
+  G2T1Begun:=True;
+ End;
+ If G2T1Alg[G2T1Comp]=3 Then G2T1Decode(True)
+ Else If G2T1Alg[G2T1Comp]<>0 Then G2T1Decode(False);
+ If G2T1Fmt=24 Then
+  For R:=0 To G2T1H-1 Do Move(G2T1Fr^[R*G2T1Stride],G2AFr^[R*G2T1W*4],G2T1W*4)
+ Else
+  For R:=0 To G2T1H-1 Do Move(G2T1Fr^[R*G2T1Stride],G2AFr^[R*G2T1W*2],G2T1W*2);
+ G2T1Frame:=True;
+End;
+
+Procedure DecodeG2T1(Const Source,Target: String; Mode: LongInt);
+Begin
+ QXOpen(Source);
+ G2T1Mode:=Mode; G2T1Target:=Target;
+ If QXFcc='' Then Begin End;
+ G2T1LastD:=0; G2T1LastV:=0; G2T1W:=0; G2T1H:=0; G2T1Fmt:=0; G2T1Fr:=Nil; G2T1Begun:=False;
+ FillChar(G2T1YP,SizeOf(G2T1YP),0); FillChar(G2T1CP,SizeOf(G2T1CP),0); FillChar(G2T1FYP,SizeOf(G2T1FYP),0); FillChar(G2T1FCP,SizeOf(G2T1FCP),0);
+ FillChar(G2T1Ydt,SizeOf(G2T1Ydt),0); FillChar(G2T1Cdt,SizeOf(G2T1Cdt),0); FillChar(G2T1FYdt,SizeOf(G2T1FYdt),0); FillChar(G2T1FCdt,SizeOf(G2T1FCdt),0);
+ G2T1Flags:=0; G2T1Comp:=0; G2T1BWi:=0; G2T1BTy:=0;
+ G2ADrive(G2T1Frame);
+ QXClose; NVFinish('truemotion1');
+End;
+
+{ ---- Duck TrueMotion 2.0 (libavcodec/truemotion2.c) ---- }
+Type
+ TG2IA=Array[0..200000000] Of LongInt; PG2IA=^TG2IA;
+Var
+ G2T2SW: PEABuffer; G2T2SWCap,G2T2SWSize: LongInt;
+ G2T2Bp,G2T2BEnd: Int64;
+ G2T2Tok: Array[0..6] Of PG2IA; G2T2TokLen,G2T2TokCap,G2T2TokPtr: Array[0..6] Of LongInt;
+ G2T2Delta: Array[0..6,0..63] Of LongInt;
+ G2T2D,G2T2CD: Array[0..3] Of LongInt;
+ G2T2Last,G2T2CLast: PG2IA;
+ G2T2YB,G2T2UVB: PG2IA; G2T2Y1,G2T2Y2,G2T2U1,G2T2U2,G2T2V1,G2T2V2: LongInt;
+ G2T2YS,G2T2UVS,G2T2Cur,G2T2W,G2T2H,G2T2Err: LongInt;
+ G2T2TL,G2T2TR,G2T2TV: Array[0..65535] Of LongInt; G2T2TCnt: LongInt;
+ G2T2VBits,G2T2MaxBits,G2T2Num,G2T2MaxNum: LongInt;
+ G2T2GPos,G2T2GB,G2T2GSize: LongInt;
+
+Function G2T2W32(X: Int64): LongInt;
+Begin
+ X:=X And $FFFFFFFF;
+ If X>=$80000000 Then X:=X-$100000000;
+ G2T2W32:=LongInt(X);
+End;
+
+Function G2T2Sar(X: LongInt; N: LongInt): LongInt;
+Begin
+ If X>=0 Then G2T2Sar:=X Shr N Else G2T2Sar:=-LongInt(((-Int64(X))+(Int64(1) Shl N)-1) Shr N);
+End;
+
+Function G2T2Clip(A: LongInt): LongInt;
+Begin If A<0 Then G2T2Clip:=0 Else If A>255 Then G2T2Clip:=255 Else G2T2Clip:=A; End;
+
+Function G2T2Bits(N: LongInt): Int64;
+Var V: Int64; Z: LongInt; B: Int64;
+Begin
+ V:=0;
+ For Z:=1 To N Do Begin
+  If (G2T2Bp Shr 3)<G2T2SWCap Then B:=(G2T2SW^[G2T2Bp Shr 3] Shr (7-(G2T2Bp And 7))) And 1 Else B:=0;
+  V:=V*2+B; Inc(G2T2Bp);
+ End;
+ G2T2Bits:=V;
+End;
+
+{ bytestream2_get_be32 sur le flux courant ; valeur non signee }
+Function G2T2Rd32: Int64;
+Begin
+ If G2T2GSize-G2T2GB<4 Then Begin G2T2GB:=G2T2GSize; G2T2Rd32:=0; Exit; End;
+ G2T2Rd32:=Int64(G2T2SW^[G2T2GPos+G2T2GB])*16777216+G2T2SW^[G2T2GPos+G2T2GB+1]*65536+G2T2SW^[G2T2GPos+G2T2GB+2]*256+G2T2SW^[G2T2GPos+G2T2GB+3];
+ Inc(G2T2GB,4);
+End;
+Procedure G2T2Skip(N: LongInt);
+Begin
+ If N>G2T2GSize-G2T2GB Then N:=G2T2GSize-G2T2GB;
+ Inc(G2T2GB,N);
+End;
+Function G2T2Signed(V: Int64): Int64;
+Begin If V>=2147483648 Then G2T2Signed:=V-4294967296 Else G2T2Signed:=V; End;
+
+{ lecture de l'arbre ; retourne la longueur du plus long code ou -1 }
+Function G2T2ReadTree(Length: LongInt; Node: LongInt): LongInt;
+Var Ret,Ret2,L: LongInt;
+Begin
+ If Length>G2T2MaxBits Then Begin G2T2ReadTree:=-1; Exit; End;
+ If G2T2Bits(1)=0 Then Begin
+  L:=Length; If L=0 Then L:=1;
+  If G2T2Num>=G2T2MaxNum Then Begin G2T2ReadTree:=-1; Exit; End;
+  G2T2TV[Node]:=G2T2W32(G2T2Bits(G2T2VBits));
+  G2T2TL[Node]:=-1; G2T2TR[Node]:=-1;
+  Inc(G2T2Num);
+  G2T2ReadTree:=L; Exit;
+ End;
+ If G2T2TCnt+2>65535 Then Begin G2T2ReadTree:=-1; Exit; End;
+ Inc(G2T2TCnt); G2T2TL[Node]:=G2T2TCnt; Ret2:=G2T2ReadTree(Length+1,G2T2TCnt);
+ If Ret2<0 Then Begin G2T2ReadTree:=Ret2; Exit; End;
+ Inc(G2T2TCnt); G2T2TR[Node]:=G2T2TCnt; Ret:=G2T2ReadTree(Length+1,G2T2TCnt);
+ If Ret<0 Then Begin G2T2ReadTree:=Ret; Exit; End;
+ If Ret>Ret2 Then G2T2ReadTree:=Ret Else G2T2ReadTree:=Ret2;
+End;
+
+{ lecture d'un jeton : -1 si code invalide }
+Function G2T2Token: LongInt;
+Var Node: LongInt;
+Begin
+ Node:=0;
+ While G2T2TL[Node]>=0 Do Begin
+  If G2T2Bits(1)=0 Then Node:=G2T2TL[Node] Else Node:=G2T2TR[Node];
+  If Node<0 Then Begin G2T2Token:=-1; Exit; End;
+ End;
+ G2T2Token:=G2T2TV[Node];
+End;
+
+Function G2T2BuildHuff: Boolean;
+Var Nodes,Res,Mn: LongInt;
+Begin
+ G2T2BuildHuff:=False;
+ G2T2VBits:=G2T2Bits(5); G2T2MaxBits:=G2T2Bits(5); Mn:=G2T2Bits(5); Nodes:=G2T2Bits(17);
+ G2T2Num:=0;
+ If (G2T2VBits<1) Or (G2T2VBits>32) Or (G2T2MaxBits<0) Or (G2T2MaxBits>25) Then Exit;
+ If (Nodes<=0) Or (Nodes>$10000) Then Exit;
+ If G2T2MaxBits=0 Then G2T2MaxBits:=1;
+ G2T2MaxNum:=(Nodes+1) Shr 1;
+ G2T2TCnt:=0; G2T2TL[0]:=-1; G2T2TR[0]:=-1;
+ Res:=G2T2ReadTree(0,0);
+ If Res<0 Then Exit;
+ If Res<>G2T2MaxBits Then Exit;
+ If G2T2Num<>G2T2MaxNum Then Exit;
+ If G2T2TL[0]<0 Then Begin
+  { arbre a un seul noeud : le code 0 vaut la valeur, le code 1 est invalide }
+  G2T2TL[1]:=-1; G2T2TR[1]:=-1; G2T2TV[1]:=G2T2TV[0]; G2T2TL[0]:=1; G2T2TR[0]:=-2;
+ End;
+ G2T2BuildHuff:=True;
+End;
+
+Function G2T2ReadDeltas(StreamId: LongInt): Boolean;
+Var D,Mb,I: LongInt; V: Int64;
+Begin
+ G2T2ReadDeltas:=False;
+ D:=G2T2Bits(9); Mb:=G2T2Bits(5);
+ If (D<1) Or (D>64) Or (Mb<1) Then Exit;
+ For I:=0 To D-1 Do Begin
+  V:=G2T2Bits(Mb);
+  If (V And (Int64(1) Shl (Mb-1)))<>0 Then G2T2Delta[StreamId,I]:=G2T2W32(V-(Int64(1) Shl Mb)) Else G2T2Delta[StreamId,I]:=G2T2W32(V);
+ End;
+ For I:=D To 63 Do G2T2Delta[StreamId,I]:=0;
+ G2T2ReadDeltas:=True;
+End;
+
+{ retourne skip (>0) ou une valeur negative en cas d'erreur }
+Function G2T2ReadStream(Pos,StreamId,BufSize: LongInt): LongInt;
+Var
+ Skip,P,I,Tk,Leaf: LongInt; Len,Toks,Used: Int64;
+Begin
+ G2T2ReadStream:=-1;
+ If BufSize<4 Then Exit;
+ G2T2GPos:=Pos; G2T2GB:=0; G2T2GSize:=BufSize;
+ Len:=G2T2Rd32;
+ If Len=0 Then Begin G2T2ReadStream:=4; Exit; End;
+ If (Len>=(2147483647 Div 4)-1) Or (Len*4+4>BufSize) Then Exit;
+ Skip:=LongInt(Len*4+4);
+ Toks:=G2T2Signed(G2T2Rd32);
+ If (Toks And 1)<>0 Then Begin
+  Len:=G2T2Rd32;
+  If Len=$80000000 Then Len:=G2T2Rd32;
+  Len:=G2T2Signed(Len);
+  If Len>0 Then Begin
+   P:=G2T2GB;
+   If Skip<=P Then Exit;
+   G2T2Bp:=Int64(Pos+P)*8; G2T2BEnd:=G2T2Bp+Int64(Skip-P)*8;
+   If Not G2T2ReadDeltas(StreamId) Then Exit;
+   Used:=G2T2Bp-Int64(Pos+P)*8;
+   G2T2Skip(LongInt(((Used+31) Shr 5) Shl 2));
+  End;
+ End;
+ Len:=G2T2Rd32;
+ If Len=$80000000 Then G2T2Skip(8) Else G2T2Skip(4);
+ P:=G2T2GB;
+ If Skip<=P Then Exit;
+ G2T2Bp:=Int64(Pos+P)*8; G2T2BEnd:=G2T2Bp+Int64(Skip-P)*8;
+ If Not G2T2BuildHuff Then Exit;
+ Used:=G2T2Bp-Int64(Pos+P)*8;
+ G2T2Skip(LongInt(((Used+31) Shr 5) Shl 2));
+ If Toks<0 Then Exit; { toks >>= 1 sur un entier signe }
+ Toks:=Toks Shr 1;
+ If Toks>$FFFFFF Then Exit;
+ Tk:=LongInt(Toks);
+ If Tk>G2T2TokCap[StreamId] Then Begin
+  If G2T2Tok[StreamId]<>Nil Then FreeMem(G2T2Tok[StreamId]);
+  GetMem(G2T2Tok[StreamId],Int64(Tk)*4+16); FillChar(G2T2Tok[StreamId]^,Int64(Tk)*4+16,0); G2T2TokCap[StreamId]:=Tk;
+ End;
+ G2T2TokLen[StreamId]:=Tk;
+ Len:=G2T2Signed(G2T2Rd32);
+ If Len>0 Then Begin
+  P:=G2T2GB;
+  If Skip<=P Then Exit;
+  G2T2Bp:=Int64(Pos+P)*8; G2T2BEnd:=G2T2Bp+Int64(Skip-P)*8;
+  For I:=0 To Tk-1 Do Begin
+   If G2T2BEnd-G2T2Bp<=0 Then Exit;
+   G2T2Tok[StreamId]^[I]:=G2T2Token;
+   If ((StreamId<=5) And (G2T2Tok[StreamId]^[I]>=64)) Or (G2T2Tok[StreamId]^[I]<0) Then Exit;
+  End;
+ End Else Begin
+  If Len<0 Then Exit;
+  Leaf:=0;
+  While G2T2TL[Leaf]>=0 Do Leaf:=G2T2TL[Leaf];
+  For I:=0 To Tk-1 Do Begin
+   G2T2Tok[StreamId]^[I]:=G2T2TV[Leaf];
+   If (StreamId<=5) And (G2T2TV[Leaf]>=64) Then Exit;
+  End;
+ End;
+ G2T2ReadStream:=Skip;
+End;
+
+Function G2T2GetTok(Typ: LongInt): LongInt;
+Begin
+ G2T2GetTok:=0;
+ If G2T2TokPtr[Typ]>=G2T2TokLen[Typ] Then Begin G2T2Err:=1; Exit; End;
+ If Typ<=5 Then Begin
+  If G2T2Tok[Typ]^[G2T2TokPtr[Typ]]>=64 Then Exit;
+  G2T2GetTok:=G2T2Delta[Typ,G2T2Tok[Typ]^[G2T2TokPtr[Typ]]];
+  Inc(G2T2TokPtr[Typ]);
+  Exit;
+ End;
+ G2T2GetTok:=G2T2Tok[Typ]^[G2T2TokPtr[Typ]]; Inc(G2T2TokPtr[Typ]);
+End;
+
+{ ---- blocs ---- }
+Var G2T2Dl: Array[0..15] Of LongInt;
+
+Procedure G2T2HighChroma(Data,Stride: LongInt; UV: PG2IA; Last,CD,Dl: LongInt);
+Var I,J: LongInt;
+Begin
+ For J:=0 To 1 Do Begin
+  For I:=0 To 1 Do Begin
+   G2T2CD[CD+J]:=G2T2W32(Int64(G2T2CD[CD+J])+G2T2Dl[Dl+I+J*2]);
+   G2T2CLast^[Last+I]:=G2T2W32(Int64(G2T2CLast^[Last+I])+G2T2CD[CD+J]);
+   UV^[Data+I]:=G2T2CLast^[Last+I];
+  End;
+  Inc(Data,Stride);
+ End;
+End;
+
+Procedure G2T2LowChroma(Data,Stride: LongInt; UV: PG2IA; Last,CD,Bx: LongInt);
+Var T,L,Prev: LongInt;
+Begin
+ If Bx>0 Then Prev:=G2T2CLast^[Last-3] Else Prev:=0;
+ T:=G2T2Sar(G2T2W32(Int64(G2T2CD[CD])+G2T2CD[CD+1]),1);
+ L:=G2T2Sar(G2T2W32(Int64(Prev)-G2T2CD[CD]-G2T2CD[CD+1]+G2T2CLast^[Last+1]),1);
+ G2T2CD[CD+1]:=G2T2W32(Int64(G2T2CD[CD])+G2T2CD[CD+1]-T);
+ G2T2CD[CD]:=T;
+ G2T2CLast^[Last]:=L;
+ G2T2HighChroma(Data,Stride,UV,Last,CD,0);
+End;
+
+Procedure G2T2ApplyDeltas(Y,Stride,Last: LongInt);
+Var Ct,I,J: LongInt;
+Begin
+ For J:=0 To 3 Do Begin
+  Ct:=G2T2D[J];
+  For I:=0 To 3 Do Begin
+   Ct:=G2T2W32(Int64(Ct)+G2T2Dl[I+J*4]);
+   G2T2Last^[Last+I]:=G2T2W32(Int64(G2T2Last^[Last+I])+Ct);
+   G2T2YB^[Y+I]:=G2T2Clip(G2T2Last^[Last+I]);
+  End;
+  Inc(Y,Stride);
+  G2T2D[J]:=Ct;
+ End;
+End;
+
+Procedure G2T2Block(Typ,Bx,By: LongInt);
+Var
+ Y,U,V,YS,US,VS,Last,CLast,Yo,Uo,Vo,I,J,Mx,My,T1,T2,Ct,Left,Right,Diff,Tp,D0: LongInt;
+ Cu,Cv,Co: LongInt; Dd: LongInt;
+Procedure Recalc(Chr,Stride,Cl,Cd: LongInt; UV: PG2IA);
+Begin
+ G2T2CD[Cd]:=G2T2W32(Int64(UV^[Chr+1])-G2T2CLast^[Cl+1]);
+ G2T2CD[Cd+1]:=G2T2W32(Int64(UV^[Chr+Stride+1])-UV^[Chr+1]);
+ G2T2CLast^[Cl]:=UV^[Chr+Stride];
+ G2T2CLast^[Cl+1]:=UV^[Chr+Stride+1];
+End;
+Begin
+ YS:=G2T2YS; VS:=G2T2UVS; US:=G2T2UVS;
+ If G2T2Cur<>0 Then Begin Y:=G2T2Y2+By*4*YS+Bx*4; V:=G2T2V2+By*2*VS+Bx*2; U:=G2T2U2+By*2*US+Bx*2; End
+ Else Begin Y:=G2T2Y1+By*4*YS+Bx*4; V:=G2T2V1+By*2*VS+Bx*2; U:=G2T2U1+By*2*US+Bx*2; End;
+ If G2T2Cur<>0 Then Begin Yo:=G2T2Y1+By*4*YS+Bx*4; Vo:=G2T2V1+By*2*VS+Bx*2; Uo:=G2T2U1+By*2*US+Bx*2; End
+ Else Begin Yo:=G2T2Y2+By*4*YS+Bx*4; Vo:=G2T2V2+By*2*VS+Bx*2; Uo:=G2T2U2+By*2*US+Bx*2; End;
+ Last:=Bx*4; CLast:=Bx*4;
+ Case Typ Of
+  0: Begin { haute resolution }
+    For I:=0 To 3 Do Begin
+     G2T2Dl[I]:=G2T2GetTok(0); G2T2Dl[I+4]:=G2T2GetTok(0);
+    End;
+    G2T2HighChroma(U,US,G2T2UVB,CLast,0,0);
+    G2T2HighChroma(V,VS,G2T2UVB,CLast+2,2,4);
+    For I:=0 To 15 Do G2T2Dl[I]:=G2T2GetTok(2);
+    G2T2ApplyDeltas(Y,YS,Last);
+   End;
+  1: Begin
+    G2T2Dl[0]:=G2T2GetTok(1); G2T2Dl[1]:=0; G2T2Dl[2]:=0; G2T2Dl[3]:=0;
+    G2T2LowChroma(U,US,G2T2UVB,CLast,0,Bx);
+    G2T2Dl[0]:=G2T2GetTok(1); G2T2Dl[1]:=0; G2T2Dl[2]:=0; G2T2Dl[3]:=0;
+    G2T2LowChroma(V,VS,G2T2UVB,CLast+2,2,Bx);
+    For I:=0 To 15 Do G2T2Dl[I]:=G2T2GetTok(2);
+    G2T2ApplyDeltas(Y,YS,Last);
+   End;
+  2: Begin
+    G2T2Dl[0]:=G2T2GetTok(1); G2T2Dl[1]:=0; G2T2Dl[2]:=0; G2T2Dl[3]:=0;
+    G2T2LowChroma(U,US,G2T2UVB,CLast,0,Bx);
+    G2T2Dl[0]:=G2T2GetTok(1); G2T2Dl[1]:=0; G2T2Dl[2]:=0; G2T2Dl[3]:=0;
+    G2T2LowChroma(V,VS,G2T2UVB,CLast+2,2,Bx);
+    For I:=0 To 15 Do G2T2Dl[I]:=0;
+    G2T2Dl[0]:=G2T2GetTok(3); G2T2Dl[2]:=G2T2GetTok(3); G2T2Dl[8]:=G2T2GetTok(3); G2T2Dl[10]:=G2T2GetTok(3);
+    If Bx>0 Then
+     G2T2Last^[Last]:=G2T2Sar(G2T2W32(Int64(G2T2Last^[Last-1])-G2T2D[0]-G2T2D[1]-G2T2D[2]-G2T2D[3]+G2T2Last^[Last+1]),1)
+    Else
+     G2T2Last^[Last]:=G2T2Sar(G2T2W32(Int64(G2T2Last^[Last+1])-G2T2D[0]-G2T2D[1]-G2T2D[2]-G2T2D[3]),1);
+    G2T2Last^[Last+2]:=G2T2Sar(G2T2W32(Int64(G2T2Last^[Last+1])+G2T2Last^[Last+3]),1);
+    T1:=G2T2W32(Int64(G2T2D[0])+G2T2D[1]);
+    G2T2D[0]:=G2T2Sar(T1,1);
+    G2T2D[1]:=G2T2W32(Int64(T1)-G2T2Sar(T1,1));
+    T2:=G2T2W32(Int64(G2T2D[2])+G2T2D[3]);
+    G2T2D[2]:=G2T2Sar(T2,1);
+    G2T2D[3]:=G2T2W32(Int64(T2)-G2T2Sar(T2,1));
+    G2T2ApplyDeltas(Y,YS,Last);
+   End;
+  3: Begin
+    G2T2Dl[0]:=0; G2T2Dl[1]:=0; G2T2Dl[2]:=0; G2T2Dl[3]:=0;
+    G2T2LowChroma(U,US,G2T2UVB,CLast,0,Bx);
+    G2T2Dl[0]:=0; G2T2Dl[1]:=0; G2T2Dl[2]:=0; G2T2Dl[3]:=0;
+    G2T2LowChroma(V,VS,G2T2UVB,CLast+2,2,Bx);
+    For I:=0 To 15 Do G2T2Dl[I]:=0;
+    Ct:=G2T2W32(Int64(G2T2D[0])+G2T2D[1]+G2T2D[2]+G2T2D[3]);
+    If Bx>0 Then Left:=G2T2W32(Int64(G2T2Last^[Last-1])-Ct) Else Left:=0;
+    Right:=G2T2Last^[Last+3];
+    Diff:=G2T2W32(Int64(Right)-Left);
+    G2T2Last^[Last]:=G2T2W32(Int64(Left)+G2T2Sar(Diff,2));
+    G2T2Last^[Last+1]:=G2T2W32(Int64(Left)+G2T2Sar(Diff,1));
+    G2T2Last^[Last+2]:=G2T2W32(Int64(Right)-G2T2Sar(Diff,2));
+    G2T2Last^[Last+3]:=Right;
+    Tp:=Left;
+    G2T2D[0]:=G2T2W32((Int64(Tp)+G2T2Sar(Ct,2))-Left);
+    Left:=G2T2W32(Int64(Left)+G2T2D[0]);
+    G2T2D[1]:=G2T2W32((Int64(Tp)+G2T2Sar(Ct,1))-Left);
+    Left:=G2T2W32(Int64(Left)+G2T2D[1]);
+    G2T2D[2]:=G2T2W32(((Int64(Tp)+Ct)-G2T2Sar(Ct,2))-Left);
+    Left:=G2T2W32(Int64(Left)+G2T2D[2]);
+    G2T2D[3]:=G2T2W32((Int64(Tp)+Ct)-Left);
+    G2T2ApplyDeltas(Y,YS,Last);
+   End;
+  4: Begin { mise a jour }
+    For J:=0 To 1 Do Begin
+     For I:=0 To 1 Do Begin
+      G2T2UVB^[U+I]:=G2T2W32(Int64(G2T2UVB^[Uo+I])+G2T2GetTok(4));
+      G2T2UVB^[V+I]:=G2T2W32(Int64(G2T2UVB^[Vo+I])+G2T2GetTok(4));
+     End;
+     Inc(U,US); Inc(V,VS); Inc(Uo,US); Inc(Vo,VS);
+    End;
+    Dec(U,US*2); Dec(V,VS*2);
+    Recalc(U,US,CLast,0,G2T2UVB);
+    Recalc(V,VS,CLast+2,2,G2T2UVB);
+    G2T2D[0]:=G2T2W32(Int64(G2T2YB^[Yo+3])-G2T2Last^[Last+3]);
+    G2T2D[1]:=G2T2W32(Int64(G2T2YB^[Yo+3+YS])-G2T2YB^[Yo+3]);
+    G2T2D[2]:=G2T2W32(Int64(G2T2YB^[Yo+3+YS*2])-G2T2YB^[Yo+3+YS]);
+    G2T2D[3]:=G2T2W32(Int64(G2T2YB^[Yo+3+YS*3])-G2T2YB^[Yo+3+YS*2]);
+    For J:=0 To 3 Do Begin
+     Dd:=G2T2Last^[Last+3];
+     For I:=0 To 3 Do Begin
+      G2T2YB^[Y+I]:=G2T2W32(Int64(G2T2YB^[Yo+I])+G2T2GetTok(4));
+      G2T2Last^[Last+I]:=G2T2YB^[Y+I];
+     End;
+     G2T2D[J]:=G2T2W32(Int64(G2T2Last^[Last+3])-Dd);
+     Inc(Y,YS); Inc(Yo,YS);
+    End;
+   End;
+  5: Begin { immobile }
+    For J:=0 To 1 Do Begin
+     For I:=0 To 1 Do Begin
+      G2T2UVB^[U+I]:=G2T2UVB^[Uo+I];
+      G2T2UVB^[V+I]:=G2T2UVB^[Vo+I];
+     End;
+     Inc(U,US); Inc(V,VS); Inc(Uo,US); Inc(Vo,VS);
+    End;
+    Dec(U,US*2); Dec(V,VS*2);
+    Recalc(U,US,CLast,0,G2T2UVB);
+    Recalc(V,VS,CLast+2,2,G2T2UVB);
+    G2T2D[0]:=G2T2W32(Int64(G2T2YB^[Yo+3])-G2T2Last^[Last+3]);
+    G2T2D[1]:=G2T2W32(Int64(G2T2YB^[Yo+3+YS])-G2T2YB^[Yo+3]);
+    G2T2D[2]:=G2T2W32(Int64(G2T2YB^[Yo+3+YS*2])-G2T2YB^[Yo+3+YS]);
+    G2T2D[3]:=G2T2W32(Int64(G2T2YB^[Yo+3+YS*3])-G2T2YB^[Yo+3+YS*2]);
+    For J:=0 To 3 Do Begin
+     For I:=0 To 3 Do Begin
+      G2T2YB^[Y+I]:=G2T2YB^[Yo+I];
+      G2T2Last^[Last+I]:=G2T2YB^[Yo+I];
+     End;
+     Inc(Y,YS); Inc(Yo,YS);
+    End;
+   End;
+  6: Begin { mouvement }
+    Mx:=G2T2GetTok(5); My:=G2T2GetTok(5);
+    I:=-(Bx*4+4); J:=G2T2W-Bx*4; If Mx<I Then Mx:=I; If Mx>J Then Mx:=J;
+    I:=-(By*4+4); J:=G2T2H-By*4; If My<I Then My:=I; If My>J Then My:=J;
+    If (4*Bx+Mx<0) Or (4*By+My<0) Or (4*Bx+Mx+4>G2T2W) Or (4*By+My+4>G2T2H) Then Exit;
+    Inc(Yo,My*YS+Mx);
+    Inc(Uo,G2T2Sar(My,1)*US+G2T2Sar(Mx,1));
+    Inc(Vo,G2T2Sar(My,1)*VS+G2T2Sar(Mx,1));
+    For J:=0 To 1 Do Begin
+     For I:=0 To 1 Do Begin
+      G2T2UVB^[U+I]:=G2T2UVB^[Uo+I];
+      G2T2UVB^[V+I]:=G2T2UVB^[Vo+I];
+     End;
+     Inc(U,US); Inc(V,VS); Inc(Uo,US); Inc(Vo,VS);
+    End;
+    Dec(U,US*2); Dec(V,VS*2);
+    Recalc(U,US,CLast,0,G2T2UVB);
+    Recalc(V,VS,CLast+2,2,G2T2UVB);
+    For J:=0 To 3 Do Begin
+     For I:=0 To 3 Do G2T2YB^[Y+I]:=G2T2YB^[Yo+I];
+     Inc(Y,YS); Inc(Yo,YS);
+    End;
+    Dec(Y,YS*4);
+    G2T2D[0]:=G2T2W32(Int64(G2T2YB^[Y+3])-G2T2Last^[Last+3]);
+    G2T2D[1]:=G2T2W32(Int64(G2T2YB^[Y+3+YS])-G2T2YB^[Y+3]);
+    G2T2D[2]:=G2T2W32(Int64(G2T2YB^[Y+3+YS*2])-G2T2YB^[Y+3+YS]);
+    G2T2D[3]:=G2T2W32(Int64(G2T2YB^[Y+3+YS*3])-G2T2YB^[Y+3+YS*2]);
+    For I:=0 To 3 Do G2T2Last^[Last+I]:=G2T2YB^[Y+I+YS*3];
+   End;
+ End;
+End;
+
+Function G2T2Frame(Pk: PEABuffer; Sz: LongInt): Boolean;
+Var
+ BufSize,Off,I,T,Magic,W,H,Bw,Bh,Cw,J,BX,BY,Typ,Yb,Ub,Vb,R,C,Yv,Uv,Vv,Yp,Up,Vp: LongInt; Ok: Boolean;
+Begin
+ G2T2Frame:=False;
+ BufSize:=Sz And Not 3;
+ G2T2Err:=0;
+ If BufSize<=0 Then Exit;
+ If BufSize>G2T2SWCap Then Begin
+  If G2T2SW<>Nil Then FreeMem(G2T2SW);
+  GetMem(G2T2SW,BufSize+64); G2T2SWCap:=BufSize;
+ End;
+ FillChar(G2T2SW^[BufSize],64,0);
+ I:=0;
+ While I<BufSize Do Begin
+  G2T2SW^[I]:=Pk^[I+3]; G2T2SW^[I+1]:=Pk^[I+2]; G2T2SW^[I+2]:=Pk^[I+1]; G2T2SW^[I+3]:=Pk^[I];
+  Inc(I,4);
+ End;
+ { en-tete }
+ If BufSize<4 Then Exit;
+ Magic:=G2T2SW^[0]+G2T2SW^[1]*256+G2T2SW^[2]*65536+G2T2SW^[3]*16777216;
+ If (Magic<>$100) And (Magic<>$101) Then Exit;
+ Off:=40;
+ For I:=0 To 6 Do Begin
+  Case I Of 0: T:=0; 1: T:=1; 2: T:=2; 3: T:=3; 4: T:=4; 5: T:=5; Else T:=6; End;
+  If Off>=BufSize Then Exit;
+  Typ:=G2T2ReadStream(Off,T,BufSize-Off);
+  If Typ<0 Then Begin
+   If G2T2TokLen[T]<>0 Then FillChar(G2T2Tok[T]^,Int64(G2T2TokLen[T])*4,0);
+   Exit;
+  End;
+  Inc(Off,Typ);
+ End;
+ { decodage des blocs }
+ W:=G2T2W; H:=G2T2H; Bw:=W Shr 2; Bh:=H Shr 2; Cw:=W Shr 1;
+ For I:=0 To 6 Do G2T2TokPtr[I]:=0;
+ Ok:=True;
+ If G2T2TokLen[6]<Bw*Bh Then Ok:=False;
+ If Ok Then Begin
+  FillChar(G2T2Last^,4*Bw*4,0); FillChar(G2T2CLast^,4*Bw*4,0);
+  For J:=0 To Bh-1 Do Begin
+   For I:=0 To 3 Do Begin G2T2D[I]:=0; G2T2CD[I]:=0; End;
+   For BX:=0 To Bw-1 Do Begin
+    Typ:=G2T2GetTok(6);
+    If (Typ>=0) And (Typ<=6) Then G2T2Block(Typ,BX,J);
+    If G2T2Err<>0 Then Begin Ok:=False; Break; End;
+   End;
+   If Not Ok Then Break;
+  End;
+ End;
+ If Ok Then Begin
+  If G2T2Cur<>0 Then Begin Yb:=G2T2Y2; Ub:=G2T2U2; Vb:=G2T2V2; End Else Begin Yb:=G2T2Y1; Ub:=G2T2U1; Vb:=G2T2V1; End;
+  Yp:=Yb; Up:=Ub; Vp:=Vb;
+  For R:=0 To H-1 Do Begin
+   For C:=0 To W-1 Do Begin
+    Yv:=G2T2YB^[Yp+C]; Uv:=G2T2UVB^[Up+(C Shr 1)]; Vv:=G2T2UVB^[Vp+(C Shr 1)];
+    G2AFr^[(R*W+C)*3]:=G2T2Clip(G2T2W32(Int64(Yv)+Vv));
+    G2AFr^[(R*W+C)*3+1]:=G2T2Clip(Yv);
+    G2AFr^[(R*W+C)*3+2]:=G2T2Clip(G2T2W32(Int64(Yv)+Uv));
+   End;
+   { prolongement des bords }
+   G2T2YB^[Yp-4]:=G2T2YB^[Yp]; G2T2YB^[Yp-3]:=G2T2YB^[Yp]; G2T2YB^[Yp-2]:=G2T2YB^[Yp]; G2T2YB^[Yp-1]:=G2T2YB^[Yp];
+   G2T2YB^[Yp+W+3]:=G2T2YB^[Yp+W-1]; G2T2YB^[Yp+W+2]:=G2T2YB^[Yp+W-1]; G2T2YB^[Yp+W+1]:=G2T2YB^[Yp+W-1]; G2T2YB^[Yp+W]:=G2T2YB^[Yp+W-1];
+   If R=0 Then Begin
+    For I:=1 To 4 Do Move(G2T2YB^[Yp-4],G2T2YB^[Yp-4-I*G2T2YS],G2T2YS);
+   End Else If R=H-1 Then Begin
+    For I:=1 To 4 Do Move(G2T2YB^[Yp-4],G2T2YB^[Yp-4+I*G2T2YS],G2T2YS);
+   End;
+   Inc(Yp,G2T2YS);
+   If (R And 1)<>0 Then Begin
+    G2T2UVB^[Up-2]:=G2T2UVB^[Up]; G2T2UVB^[Up-1]:=G2T2UVB^[Up];
+    G2T2UVB^[Vp-2]:=G2T2UVB^[Vp]; G2T2UVB^[Vp-1]:=G2T2UVB^[Vp];
+    G2T2UVB^[Up+Cw+1]:=G2T2UVB^[Up+Cw-1]; G2T2UVB^[Up+Cw]:=G2T2UVB^[Up+Cw-1];
+    G2T2UVB^[Vp+Cw+1]:=G2T2UVB^[Vp+Cw-1]; G2T2UVB^[Vp+Cw]:=G2T2UVB^[Vp+Cw-1];
+    If R=1 Then Begin
+     For I:=1 To 2 Do Begin
+      Move(G2T2UVB^[Up-2],G2T2UVB^[Up-2-I*G2T2UVS],G2T2UVS);
+      Move(G2T2UVB^[Vp-2],G2T2UVB^[Vp-2-I*G2T2UVS],G2T2UVS);
+     End;
+    End Else If R=H-1 Then Begin
+     For I:=1 To 2 Do Begin
+      Move(G2T2UVB^[Up-2],G2T2UVB^[Up-2+I*G2T2UVS],G2T2UVS);
+      Move(G2T2UVB^[Vp-2],G2T2UVB^[Vp-2+I*G2T2UVS],G2T2UVS);
+     End;
+    End;
+    Inc(Up,G2T2UVS); Inc(Vp,G2T2UVS);
+   End;
+  End;
+ End;
+ G2T2Cur:=1-G2T2Cur;
+ G2T2Frame:=True;
+End;
+
+Procedure DecodeG2T2(Const Source,Target: String; Mode: LongInt);
+Var W,H,I,UW,UH: LongInt;
+Begin
+ QXOpen(Source);
+ W:=QXW; H:=QXH;
+ If ((W And 3)<>0) Or ((H And 3)<>0) Or (W<4) Or (H<4) Or (W>4000) Or (H>4000) Then Fail('truemotion2: largeur et hauteur multiples de 4 requises.');
+ G2T2W:=W; G2T2H:=H;
+ G2T2SW:=Nil; G2T2SWCap:=0;
+ For I:=0 To 6 Do Begin G2T2Tok[I]:=Nil; G2T2TokLen[I]:=0; G2T2TokCap[I]:=0; G2T2TokPtr[I]:=0; End;
+ FillChar(G2T2Delta,SizeOf(G2T2Delta),0);
+ GetMem(G2T2Last,W*2*4+64); FillChar(G2T2Last^,W*2*4+64,0);
+ G2T2CLast:=PG2IA(@G2T2Last^[W]);
+ G2T2YS:=W+8; H:=H+8;
+ GetMem(G2T2YB,Int64(G2T2YS)*H*2*4+64); FillChar(G2T2YB^,Int64(G2T2YS)*H*2*4+64,0);
+ G2T2Y1:=G2T2YS*4+4; G2T2Y2:=G2T2Y1+G2T2YS*H;
+ UW:=(G2T2YS+1) Shr 1; UH:=(H+1) Shr 1;
+ GetMem(G2T2UVB,Int64(UW)*UH*4*4+64); FillChar(G2T2UVB^,Int64(UW)*UH*4*4+64,0);
+ G2T2UVS:=UW;
+ G2T2U1:=UW*2+2; G2T2U2:=G2T2U1+UW*UH; G2T2V1:=G2T2U2+UW*UH; G2T2V2:=G2T2V1+UW*UH;
+ G2T2Cur:=0;
+ NVBegin(Mode,Target,G2T2W,G2T2H,1,QXRn,QXRd); NVAviSar(G2T2W,G2T2H);
+ G2AFrSize:=G2T2W*G2T2H*3; GetMem(G2AFr,G2AFrSize+64); FillChar(G2AFr^,G2AFrSize+64,0);
+ G2ADrive(G2T2Frame);
+ QXClose; NVFinish('truemotion2');
+End;
+
+{ ---- Tiertex Limited SEQ (libavformat/tiertexseq.c + libavcodec/tiertexseqv.c) ---- }
+Type TG2TSBuf=Record DSize,Fill: LongInt; Data: PEABuffer; End;
+Var
+ G2TF: PEABuffer; G2TFS: LongInt;
+ G2TSB: Array[0..29] Of TG2TSBuf; G2TSCnt: LongInt;
+ G2TSCur,G2TSAOffs,G2TSPOffs,G2TSVSize: LongInt; G2TSVPtr: PEABuffer;
+ G2TSPkt: PEABuffer;
+
+Function G2TFB(At: LongInt): LongInt;
+Begin If (At<0) Or (At>=G2TFS) Then G2TFB:=0 Else G2TFB:=G2TF^[At]; End;
+Function G2TFL16(At: LongInt): LongInt;
+Begin G2TFL16:=G2TFB(At)+G2TFB(At+1)*256; End;
+
+Function G2TSFill(BufNum,DataOffs,DataSize: LongInt): Boolean;
+Begin
+ G2TSFill:=False;
+ If BufNum>=30 Then Exit;
+ If (G2TSB[BufNum].Fill+DataSize>G2TSB[BufNum].DSize) Or (DataSize<=0) Then Exit;
+ If (G2TSCur+DataOffs<0) Or (G2TSCur+DataOffs+DataSize>G2TFS) Then Exit;
+ Move(G2TF^[G2TSCur+DataOffs],G2TSB[BufNum].Data^[G2TSB[BufNum].Fill],DataSize);
+ Inc(G2TSB[BufNum].Fill,DataSize);
+ G2TSFill:=True;
+End;
+
+Function G2TSParse: Boolean;
+Var Offs,BN: Array[0..3] Of LongInt; I,E,P: LongInt;
+Begin
+ G2TSParse:=False;
+ Inc(G2TSCur,6144); P:=G2TSCur;
+ G2TSAOffs:=G2TFL16(P); G2TSPOffs:=G2TFL16(P+2);
+ For I:=0 To 3 Do BN[I]:=G2TFB(P+4+I);
+ For I:=0 To 3 Do Offs[I]:=G2TFL16(P+8+2*I);
+ For I:=0 To 2 Do
+  If Offs[I]<>0 Then Begin
+   E:=I+1; While (E<3) And (Offs[E]=0) Do Inc(E);
+   If Not G2TSFill(BN[1+I],Offs[I],Offs[E]-Offs[I]) Then Exit;
+  End;
+ If BN[0]<>255 Then Begin
+  If BN[0]>=30 Then Exit;
+  G2TSVSize:=G2TSB[BN[0]].Fill; G2TSVPtr:=G2TSB[BN[0]].Data; G2TSB[BN[0]].Fill:=0;
+ End Else Begin G2TSVSize:=0; G2TSVPtr:=Nil; End;
+ G2TSParse:=True;
+End;
+
+{ seq_unpack_rle_block : S = position dans le paquet ; retourne la nouvelle position, ou -1 }
+Function G2TSRle(S: LongInt; Var Blk: Array Of Byte): LongInt;
+Var I,Len,Sz,Cnt,Z,E2,DstSize: LongInt; Code: Array[0..63] Of LongInt;
+Begin
+ DstSize:=64;
+ G2ABp:=S*8; Sz:=0; I:=0;
+ FillChar(Code,SizeOf(Code),0);
+ While (I<64) And (Sz<DstSize) Do Begin
+  If G2ASz*8-G2ABp<4 Then Begin G2TSRle:=-1; Exit; End;
+  Z:=G2ABits(4); If Z>=8 Then Z:=Z-16;
+  Code[I]:=Z; Inc(Sz,Abs(Z)); Inc(I);
+ End;
+ S:=S+((G2ABp-S*8+7) Shr 3);
+ I:=0; Cnt:=0;
+ While (I<64) And (DstSize>0) Do Begin
+  Len:=Code[I];
+  If Len<0 Then Begin
+   Len:=-Len;
+   If G2ASz-S<1 Then Begin G2TSRle:=-1; Exit; End;
+   Z:=Len; If Z>DstSize Then Z:=DstSize;
+   If Z>0 Then FillChar(Blk[Cnt],Z,G2AB(S));
+   Inc(S);
+  End Else Begin
+   If G2ASz-S<Len Then Begin G2TSRle:=-1; Exit; End;
+   Z:=Len; If Z>DstSize Then Z:=DstSize;
+   For E2:=0 To Z-1 Do Blk[Cnt+E2]:=G2AB(S+E2);
+   Inc(S,Len);
+  End;
+  Inc(Cnt,Len); Dec(DstSize,Len); Inc(I);
+ End;
+ G2TSRle:=S;
+End;
+
+{ seqvideo_decode : le paquet est G2APk/G2ASz }
+Function G2TSDecode: Boolean;
+Var
+ S,Flags,I,J,X,Y,Op,Dst: LongInt; Blk: Array[0..63] Of Byte; GB0,Bits,Len,B,Z,Pos: LongInt; Ok: Boolean;
+ Pos0: LongInt;
+Function Op1: LongInt;
+Var Ln,Bt,Bq,Ix,Bs0,R,C: LongInt;
+Begin
+ Op1:=-1;
+ If G2ASz-S<1 Then Exit;
+ Ln:=G2AB(S); Inc(S);
+ If (Ln And $80)<>0 Then Begin
+  Case Ln And 3 Of
+   1: Begin
+    FillChar(Blk,64,0);
+    S:=G2TSRle(S,Blk);
+    For R:=0 To 7 Do Move(Blk[R*8],G2AFr^[Dst+R*256],8);
+    If S<0 Then Exit;
+   End;
+   2: Begin
+    FillChar(Blk,64,0);
+    S:=G2TSRle(S,Blk);
+    For R:=0 To 7 Do For C:=0 To 7 Do G2AFr^[Dst+C*256+R]:=Blk[R*8+C];
+    If S<0 Then Exit;
+   End;
+  End;
+ End Else Begin
+  If Ln<=0 Then Exit;
+  If Ln=1 Then Bt:=1 Else Begin
+   Bt:=0; Bq:=Ln-1; While Bq>1 Do Begin Bq:=Bq Shr 1; Inc(Bt); End; Inc(Bt);
+  End;
+  If G2ASz-S<Ln+8*Bt Then Exit;
+  Bs0:=S; Inc(S,Ln);
+  G2ABp:=S*8; Inc(S,Bt*8);
+  For R:=0 To 7 Do For C:=0 To 7 Do Begin
+   Ix:=G2ABits(Bt);
+   G2AFr^[Dst+R*256+C]:=G2AB(Bs0+Ix);
+  End;
+ End;
+ Op1:=S;
+End;
+Begin
+ G2TSDecode:=False;
+ S:=0; Flags:=G2AB(0); S:=1;
+ If (Flags And 1)<>0 Then Begin
+  If G2ASz-S<768 Then Exit;
+  For I:=0 To 255 Do Begin
+   NVPalR[I]:=((G2AB(S) Shl 2) Or (G2AB(S) Shr 4)) And 255;
+   NVPalG[I]:=((G2AB(S+1) Shl 2) Or (G2AB(S+1) Shr 4)) And 255;
+   NVPalB[I]:=((G2AB(S+2) Shl 2) Or (G2AB(S+2) Shr 4)) And 255;
+   Inc(S,3);
+  End;
+ End;
+ If (Flags And 2)<>0 Then Begin
+  If G2ASz-S<128 Then Exit;
+  Pos0:=S*8; Inc(S,128);
+  Y:=0;
+  While Y<128 Do Begin
+   X:=0;
+   While X<256 Do Begin
+    G2ABp:=Pos0; Op:=G2ABits(2); Pos0:=G2ABp;
+    Dst:=Y*256+X;
+    Case Op Of
+     1: Begin S:=Op1; If S<0 Then Exit; End;
+     2: Begin
+      If G2ASz-S<64 Then Exit;
+      For I:=0 To 7 Do Begin
+       For J:=0 To 7 Do G2AFr^[Dst+I*256+J]:=G2AB(S+J);
+       Inc(S,8);
+      End;
+     End;
+     3: Begin
+      Repeat
+       If G2ASz-S<2 Then Exit;
+       B:=G2AB(S); Inc(S);
+       G2AFr^[Dst+((B Shr 3) And 7)*256+(B And 7)]:=G2AB(S); Inc(S);
+      Until (B And $80)<>0;
+     End;
+    End;
+    Inc(X,8);
+   End;
+   Inc(Y,8);
+  End;
+ End;
+ G2TSDecode:=True;
+End;
+
+Procedure G2TSRun(Const Source,Target: String; Mode: LongInt; Audio: Boolean);
+Var
+ I,Sz,K,Ap,Al,PalSz,N,Fk: LongInt; Begun: Boolean; V: LongInt;
+Begin
+ NVLoad(Source,G2TF,G2TFS);
+ G2TSCnt:=0;
+ For I:=0 To 29 Do Begin G2TSB[I].DSize:=0; G2TSB[I].Fill:=0; G2TSB[I].Data:=Nil; End;
+ For I:=0 To 29 Do Begin
+  Sz:=G2TFL16(256+2*I);
+  If Sz=0 Then Break;
+  G2TSB[I].DSize:=Sz; GetMem(G2TSB[I].Data,Sz+16); Inc(G2TSCnt);
+ End;
+ G2TSCur:=0;
+ For I:=1 To 100 Do If Not G2TSParse Then Fail('tiertexseq: en-tete incorrect.');
+ GetMem(G2TSPkt,1+768+65536+64);
+ G2AFrSize:=256*128; GetMem(G2AFr,G2AFrSize+64); FillChar(G2AFr^,G2AFrSize+64,0);
+ FillChar(NVPalR,256,0); FillChar(NVPalG,256,0); FillChar(NVPalB,256,0);
+ If Audio Then Begin
+  EAReset; OpenWrite(Target); ADPCMWaveHeader(22050,1,0);
+ End Else Begin
+  NVBegin(Mode,Target,256,128,0,25,1); NVVN:=0; NVVD:=0;
+  G2CFBegin(1,25,25,1,False);
+ End;
+ Fk:=-1;
+ While True Do Begin
+  Inc(Fk);
+  If Not G2TSParse Then Break;
+  If Not Audio Then Begin
+   PalSz:=0; If G2TSPOffs<>0 Then PalSz:=768;
+   If PalSz+G2TSVSize<>0 Then Begin
+    G2TSPkt^[0]:=0;
+    If PalSz<>0 Then Begin
+     G2TSPkt^[0]:=G2TSPkt^[0] Or 1;
+     If G2TSCur+G2TSPOffs+768>G2TFS Then Break;
+     Move(G2TF^[G2TSCur+G2TSPOffs],G2TSPkt^[1],768);
+    End;
+    If G2TSVSize<>0 Then Begin
+     G2TSPkt^[0]:=G2TSPkt^[0] Or 2;
+     Move(G2TSVPtr^[0],G2TSPkt^[1+PalSz],G2TSVSize);
+    End;
+    G2APk:=G2TSPkt; G2ASz:=1+PalSz+G2TSVSize; G2ABp:=0;
+    If G2TSDecode Then G2CFOut(Fk,1);
+    If NVDone Then Break;
+   End;
+  End;
+  If G2TSAOffs=0 Then Break;
+  Ap:=G2TSCur+G2TSAOffs; Al:=1764;
+  If Ap>=G2TFS Then Break;
+  If Ap+Al>G2TFS Then Al:=G2TFS-Ap;
+  If Audio Then
+   For K:=0 To (Al Div 2)-1 Do Begin
+    V:=G2TF^[Ap+2*K]*256+G2TF^[Ap+2*K+1]; If V>=32768 Then Dec(V,65536);
+    EAPut(V);
+   End;
+ End;
+ If Audio Then Begin
+  EAFlush;
+  If EAWritten=0 Then Fail('tiertexseq: aucune donnee audio.');
+  ADPCMPatchHeader(22050,1,EAWritten); CloseRead; CloseWrite;
+ End Else Begin G2CFEnd; NVFinish('tiertexseq'); End;
+End;
+
+Procedure DecodeG2TSAudio(Const Source,Target: String);
+Begin G2TSRun(Source,Target,0,True); End;
+
+Function G2TSProbe(Var B: Array Of Byte; N: LongInt): Boolean;
+Var I: LongInt;
+Begin
+ G2TSProbe:=False;
+ If N<258 Then Exit;
+ For I:=0 To 255 Do If B[I]<>0 Then Exit;
+ If (B[256]=0) And (B[257]=0) Then Exit;
+ G2TSProbe:=True;
+End;
+
+{ ---- Beam Software SIFF (libavformat/siff.c) + VB video (libavcodec/vb.c) ---- }
+Const
+ G2VBPat: Array[0..63] Of Word=(
+  $0660,$FF00,$CCCC,$F000,$8888,$000F,$1111,$FEC8,
+  $8CEF,$137F,$F731,$C800,$008C,$0013,$3100,$CC00,
+  $00CC,$0033,$3300,$0FF0,$6666,$00F0,$0F00,$2222,
+  $4444,$F600,$8CC8,$006F,$1331,$318C,$C813,$33CC,
+  $6600,$0CC0,$0066,$0330,$F900,$C88C,$009F,$3113,
+  $6000,$0880,$0006,$0110,$CC88,$FC00,$00CF,$88CC,
+  $003F,$1133,$3311,$F300,$6FF6,$0603,$08C6,$8C63,
+  $C631,$6310,$C060,$0136,$136C,$36C8,$6C80,$324C);
+Var
+ G2VBF: PEABuffer; G2VBFS: LongInt;
+ G2VBW,G2VBH,G2VBFr,G2VBRate,G2VBBits,G2VBAudio,G2VBPos,G2VBVideo: LongInt;
+ G2VBCur,G2VBPrev: PEABuffer;
+ G2VBPal: Array[0..255] Of LongWord;
+
+Function G2VFB(At: LongInt): LongInt;
+Begin If (At<0) Or (At>=G2VBFS) Then G2VFB:=0 Else G2VFB:=G2VBF^[At]; End;
+Function G2VFL16(At: LongInt): LongInt;
+Begin G2VFL16:=G2VFB(At)+G2VFB(At+1)*256; End;
+Function G2VFL32(At: LongInt): Int64;
+Begin G2VFL32:=Int64(G2VFL16(At))+Int64(G2VFL16(At+2))*65536; End;
+
+{ en-tete SIFF ; retourne False si ce n'est pas un SIFF correct }
+Function G2VBHeader: Boolean;
+Begin
+ G2VBHeader:=False;
+ G2VBVideo:=0; G2VBAudio:=0; G2VBRate:=0; G2VBBits:=0;
+ If G2VFL32(0)<>$46464953 Then Exit;
+ If G2VFL32(8)=$31564256 Then Begin
+  { VBV1 }
+  If G2VFL32(12)<>$44484256 Then Exit;
+  If (G2VFB(16)<>0) Or (G2VFB(17)<>0) Or (G2VFB(18)<>0) Or (G2VFB(19)<>32) Then Exit;
+  If G2VFL16(20)<>1 Then Exit;
+  G2VBW:=G2VFL16(22); G2VBH:=G2VFL16(24);
+  G2VBFr:=G2VFL16(30);
+  If G2VBFr=0 Then Exit;
+  G2VBBits:=G2VFL16(32); G2VBRate:=G2VFL16(34);
+  G2VBVideo:=1; If G2VBRate<>0 Then G2VBAudio:=1;
+  { apres 'VBHD' (4) + taille (4) + 32 octets de donnees : en realite le lecteur avance de 2+2+2+4+2+2+2+16 = 32 }
+  G2VBPos:=12+8+32;
+ End Else If G2VFL32(8)=$4E554F53 Then Begin
+  { SOUN }
+  If G2VFL32(12)<>$52444853 Then Exit;
+  If (G2VFB(16)<>0) Or (G2VFB(17)<>0) Or (G2VFB(18)<>0) Or (G2VFB(19)<>8) Then Exit;
+  G2VBRate:=G2VFL16(24); G2VBBits:=G2VFL16(26); G2VBAudio:=1;
+  G2VBPos:=12+8+8;
+ End Else Exit;
+ If G2VFL32(G2VBPos)<>$59444F42 Then Exit;
+ Inc(G2VBPos,8);
+ G2VBHeader:=True;
+End;
+
+Function G2ASiffVideo(Const Name: String): Boolean;
+Var B: Array[0..15] Of Byte;
+Begin
+ G2ASiffVideo:=False;
+ OpenRead(Name);
+ If InputSize>=16 Then Begin
+  ReadAt(0,B,16);
+  G2ASiffVideo:=(B[8]=$56) And (B[9]=$42) And (B[10]=$56) And (B[11]=$31);
+ End;
+ CloseRead;
+End;
+
+Function G2VBSiffProbe(Var B: Array Of Byte; N: LongInt): Boolean;
+Begin
+ G2VBSiffProbe:=False;
+ If N<12 Then Exit;
+ If (B[0]=$53) And (B[1]=$49) And (B[2]=$46) And (B[3]=$46) And (((B[8]=$56) And (B[9]=$42) And (B[10]=$56) And (B[11]=$31)) Or ((B[8]=$53) And (B[9]=$4F) And (B[10]=$55) And (B[11]=$4E))) Then G2VBSiffProbe:=True;
+End;
+
+{ ---- decodeur VB ---- }
+Function G2VBDecode: Boolean;
+Var
+ S,Flags,I,J,Offset,Size: LongInt; Tmp: PEABuffer;
+ Start,Cnt,Bq: LongInt; Sz64: Int64;
+Function GB: LongInt;
+Begin GB:=G2AB(S); If S<G2ASz Then Inc(S); End;
+Function GL16: LongInt;
+Var A: LongInt;
+Begin A:=GB; GL16:=A+GB*256; End;
+Function GL32: Int64;
+Var A: Int64;
+Begin A:=GL16; GL32:=A+Int64(GL16)*65536; End;
+Function LeftB: LongInt;
+Begin LeftB:=G2ASz-S; End;
+Function ChkLine(Q: LongInt): Boolean;
+Begin ChkLine:=(Q>=0) And (Q+4<=G2VBW*G2VBH); End;
+Function ChkPix(Q: LongInt): Boolean;
+Begin ChkPix:=(Q>=0) And (Q<G2VBW*G2VBH); End;
+Procedure FrameData(Offs: LongInt);
+Var
+ Blk,Blocks,BT,Blk2,Cur,Prev,T,X,Y,A,B,PatT,Pat,W: LongInt;
+Begin
+ W:=G2VBW; BT:=0; Blk2:=0; Cur:=0; Prev:=Offs;
+ Blocks:=(W Shr 2)*(G2VBH Shr 2);
+ For Blk:=0 To Blocks-1 Do Begin
+  If (Blk And 3)=0 Then Begin
+   If LeftB<1 Then Exit;
+   BT:=GB;
+  End;
+  Case BT And $C0 Of
+   $00: For Y:=0 To 3 Do
+         If ChkLine(Prev+Y*W) Then Move(G2VBPrev^[Prev+Y*W],G2VBCur^[Cur+Y*W],4)
+         Else FillChar(G2VBCur^[Cur+Y*W],4,0);
+   $40: Begin
+         T:=GB;
+         If T=0 Then Begin
+          If LeftB<16 Then Exit;
+          For Y:=0 To 3 Do For X:=0 To 3 Do G2VBCur^[Cur+Y*W+X]:=GB;
+         End Else Begin
+          X:=((T And $F) Xor 8)-8; Y:=((T Shr 4) Xor 8)-8;
+          T:=X+Y*W;
+          For Y:=0 To 3 Do
+           If ChkLine(Prev+T+Y*W) Then Move(G2VBPrev^[Prev+T+Y*W],G2VBCur^[Cur+Y*W],4)
+           Else FillChar(G2VBCur^[Cur+Y*W],4,0);
+         End;
+        End;
+   $80: Begin
+         T:=GB;
+         For Y:=0 To 3 Do FillChar(G2VBCur^[Cur+Y*W],4,T);
+        End;
+   $C0: Begin
+         T:=GB; PatT:=T Shr 6; Pat:=G2VBPat[T And $3F];
+         Case PatT Of
+          0: Begin
+              A:=GB; B:=GB;
+              For Y:=0 To 3 Do For X:=0 To 3 Do Begin
+               If (Pat And 1)<>0 Then G2VBCur^[Cur+X+Y*W]:=B Else G2VBCur^[Cur+X+Y*W]:=A;
+               Pat:=Pat Shr 1;
+              End;
+             End;
+          1,2: Begin
+              If PatT=1 Then Pat:=Not Pat;
+              A:=GB;
+              For Y:=0 To 3 Do For X:=0 To 3 Do Begin
+               If ((Pat And 1)<>0) And ChkPix(Prev+X+Y*W) Then G2VBCur^[Cur+X+Y*W]:=G2VBPrev^[Prev+X+Y*W]
+               Else G2VBCur^[Cur+X+Y*W]:=A;
+               Pat:=Pat Shr 1;
+              End;
+             End;
+          3: Exit;
+         End;
+        End;
+  End;
+  BT:=(BT Shl 2) And $FF;
+  Inc(Cur,4); Inc(Prev,4); Inc(Blk2);
+  If Blk2=(W Shr 2) Then Begin Blk2:=0; Inc(Cur,W*3); Inc(Prev,W*3); End;
+ End;
+End;
+Begin
+ G2VBDecode:=False;
+ If G2ASz<2 Then Exit;
+ S:=0; Flags:=GL16;
+ Offset:=0;
+ If (Flags And 1)<>0 Then Begin
+  I:=GL16; If I>=32768 Then Dec(I,65536);
+  J:=GL16; If J>=32768 Then Dec(J,65536);
+  If Abs(J)>G2VBH Then Exit;
+  Offset:=I+J*G2VBW;
+ End;
+ If (Flags And 8)<>0 Then Begin
+  Sz64:=GL32;
+  If (Sz64>LeftB+4) Or (Sz64<4) Then Exit;
+  I:=S;
+  FrameData(Offset);
+  S:=I+LongInt(Sz64)-4; If S>G2ASz Then S:=G2ASz;
+ End;
+ If (Flags And $10)<>0 Then Begin
+  Sz64:=GL32;
+  Start:=GB; Cnt:=(GB-1) And 255;
+  If Start+Cnt>255 Then Begin
+  End Else If Cnt*3+2>Sz64 Then Begin
+  End Else
+   For I:=Start To Start+Cnt Do Begin
+    J:=GB; J:=J*256+GB; J:=J*256+GB;
+    G2VBPal[I]:=$FF000000 Or LongWord(J);
+   End;
+ End;
+ For I:=0 To 255 Do Begin
+  NVPalR[I]:=(G2VBPal[I] Shr 16) And 255; NVPalG[I]:=(G2VBPal[I] Shr 8) And 255; NVPalB[I]:=G2VBPal[I] And 255;
+ End;
+ Move(G2VBCur^[0],G2AFr^[0],G2VBW*G2VBH);
+ Tmp:=G2VBCur; G2VBCur:=G2VBPrev; G2VBPrev:=Tmp;
+ G2VBDecode:=True;
+End;
+
+Procedure G2VBRun(Const Source,Target: String; Mode: LongInt; Audio: Boolean);
+Var
+ Flags,GmcSize,CurStrm,Size,Frame,Sz2,Ap,Al,K: LongInt; Pos: LongInt; PktSize,SndSize: Int64;
+ Gmc: Array[0..3] Of Byte; Pk: PEABuffer; HasAudio: Boolean; Fr,Pk2: LongInt;
+Begin
+ NVLoad(Source,G2VBF,G2VBFS);
+ If Not G2VBHeader Then Fail('siff: en-tete SIFF incorrect.');
+ If Audio And (G2VBAudio=0) Then Fail('siff: aucun flux audio.');
+ HasAudio:=G2VBAudio<>0;
+ If Audio Then Begin
+  EAReset; OpenWrite(Target); ADPCMWaveHeader(G2VBRate,1,0);
+ End Else Begin
+  If (G2VBW<1) Or (G2VBH<1) Then Fail('siff: dimensions incorrectes.');
+  NVBegin(Mode,Target,G2VBW,G2VBH,0,12,1); NVVN:=0; NVVD:=0;
+  G2CFBegin(1,12,12,1,G2VBAudio=0);
+  G2AFrSize:=G2VBW*G2VBH; GetMem(G2AFr,G2AFrSize+64); FillChar(G2AFr^,G2AFrSize+64,0);
+  GetMem(G2VBCur,G2AFrSize+64); GetMem(G2VBPrev,G2AFrSize+64);
+  FillChar(G2VBCur^,G2AFrSize+64,0); FillChar(G2VBPrev^,G2AFrSize+64,0);
+  FillChar(G2VBPal,SizeOf(G2VBPal),0);
+  FillChar(NVPalR,256,0); FillChar(NVPalG,256,0); FillChar(NVPalB,256,0);
+ End;
+ GetMem(Pk,65536*2+64);
+ Pos:=G2VBPos; Frame:=0; CurStrm:=-1;
+ If G2VBVideo=0 Then Begin
+  { fichier SOUN : blocs de rate*(bits/8) octets }
+  Al:=G2VBRate*(G2VBBits Shr 3);
+  If Al<=0 Then Fail('siff: bloc audio nul.');
+  While Pos<G2VBFS Do Begin
+   Sz2:=Al; If Pos+Sz2>G2VBFS Then Sz2:=G2VBFS-Pos;
+   For K:=0 To Sz2-1 Do EAPut((G2VBF^[Pos+K]-128) Shl 8);
+   Inc(Pos,Sz2);
+  End;
+ End Else
+ While Frame<G2VBFr Do Begin
+  If CurStrm=-1 Then Begin
+   PktSize:=(G2VFL32(Pos)-4) And $FFFFFFFF; Inc(Pos,4);
+   { PktSize non signe : on le maintient en Int64 via comparaisons ci-dessous }
+   Flags:=G2VFL16(Pos); Inc(Pos,2);
+   If ((Flags And 4)<>0) And Not HasAudio Then Break;
+   If (Flags And 1)<>0 Then GmcSize:=4 Else GmcSize:=0;
+   For K:=0 To 3 Do Gmc[K]:=0;
+   If GmcSize<>0 Then Begin
+    For K:=0 To 3 Do Gmc[K]:=G2VFB(Pos+K);
+    Inc(Pos,4);
+   End;
+   If (Flags And 4)<>0 Then Begin SndSize:=G2VFL32(Pos); Inc(Pos,4); End Else SndSize:=0;
+   If (Flags And 4)<>0 Then CurStrm:=1 Else CurStrm:=0;
+  End;
+  If CurStrm=0 Then Begin
+   If PktSize<2+SndSize+GmcSize Then Break;
+   If PktSize-SndSize-GmcSize-2>=2147483648 Then Break;
+   If PktSize-SndSize-GmcSize-2>100000000 Then Size:=100000000 Else Size:=LongInt(PktSize-SndSize-GmcSize-2);
+   If Pos+Size>G2VBFS Then Begin Size:=G2VBFS-Pos; If Size<0 Then Size:=0; End;
+   If Size>65536 Then Size:=65536;
+   Pk^[0]:=Flags And 255; Pk^[1]:=Flags Shr 8;
+   For K:=0 To GmcSize-1 Do Pk^[2+K]:=Gmc[K];
+   For K:=0 To Size-1 Do Pk^[2+GmcSize+K]:=G2VBF^[Pos+K];
+   Inc(Pos,Size);
+   CurStrm:=-1;
+   If Not Audio Then Begin
+    G2APk:=Pk; G2ASz:=Size+GmcSize+2; G2ABp:=0;
+    If G2VBDecode Then G2CFOut(Frame,1);
+    If NVDone Then Break;
+   End;
+   Inc(Frame);
+  End Else Begin
+   If SndSize<4 Then Break;
+   If SndSize-4>=2147483648 Then Break;
+   If SndSize-4>100000000 Then Al:=100000000 Else Al:=LongInt(SndSize-4);
+   If (Al>0) And (Pos>=G2VBFS) Then Break;
+   If Pos+Al>G2VBFS Then Al:=G2VBFS-Pos;
+   If Audio Then
+    For K:=0 To Al-1 Do EAPut((G2VBF^[Pos+K]-128) Shl 8);
+   Inc(Pos,Al);
+   CurStrm:=0;
+  End;
+ End;
+ If Audio Then Begin
+  EAFlush;
+  If EAWritten=0 Then Fail('siff: aucune donnee audio.');
+  ADPCMPatchHeader(G2VBRate,1,EAWritten); CloseRead; CloseWrite;
+ End Else Begin G2CFEnd; NVFinish('vb'); End;
+End;
+
+Procedure DecodeG2VB(Const Source,Target: String; Mode: LongInt);
+Begin G2VBRun(Source,Target,Mode,False); End;
+Procedure DecodeG2SIFFAudio(Const Source,Target: String);
+Begin G2VBRun(Source,Target,0,True); End;
+
+Const
+ G2ULCB: Array[0..16383] Of Byte=(
+  0,1,1,2,0,1,2,3,0,2,3,4,0,1,3,4,0,1,2,4,0,2,3,5,0,2,4,5,0,1,4,5,
+  0,1,3,5,0,2,4,6,0,3,5,6,0,1,5,6,0,1,3,6,0,6,6,6,0,0,6,6,0,0,0,6,
+  0,3,4,7,0,3,6,7,0,1,6,7,0,1,4,7,0,3,5,8,0,4,6,8,0,2,6,8,0,2,4,8,
+  0,8,8,8,0,0,8,8,0,0,0,8,0,4,7,11,0,5,9,11,0,2,9,11,0,2,6,11,0,11,11,11,
+  0,0,11,11,0,0,0,11,0,5,9,14,0,7,11,14,0,3,11,14,0,3,7,14,0,14,14,14,0,0,14,14,
+  0,0,0,14,0,6,11,17,0,8,13,17,0,4,13,17,0,4,9,17,0,17,17,17,0,0,17,17,0,0,0,17,
+  0,7,13,20,0,10,15,20,0,5,15,20,0,5,10,20,0,20,20,20,0,0,20,20,0,0,0,20,0,11,18,23,
+  0,5,18,23,0,5,12,23,0,23,23,23,0,0,23,23,0,0,0,23,0,13,20,26,0,6,20,26,0,6,13,26,
+  0,26,26,26,0,0,26,26,0,0,0,26,0,14,22,29,0,7,22,29,0,7,15,29,0,29,29,29,0,0,29,29,
+  0,0,0,29,0,16,24,32,0,8,24,32,0,8,16,32,0,32,32,32,0,0,32,32,0,0,0,32,0,35,35,35,
+  0,0,35,35,0,0,0,35,0,18,27,36,0,9,27,36,0,9,18,36,0,40,40,40,0,0,40,40,0,0,0,40,
+  0,46,46,46,0,0,46,46,0,0,0,46,1,2,2,3,1,2,3,4,1,3,4,5,1,2,4,5,1,2,3,5,
+  1,3,4,6,1,3,5,6,1,2,5,6,1,2,4,6,1,3,5,7,1,4,6,7,1,2,6,7,1,2,4,7,
+  1,7,7,7,1,1,7,7,1,1,1,7,1,4,5,8,1,4,7,8,1,2,7,8,1,2,5,8,1,4,6,9,
+  1,5,7,9,1,3,7,9,1,3,5,9,1,9,9,9,1,1,9,9,1,1,1,9,1,5,8,12,1,6,10,12,
+  1,3,10,12,1,3,7,12,1,12,12,12,1,1,12,12,1,1,1,12,1,6,10,15,1,8,12,15,1,4,12,15,
+  1,4,8,15,1,15,15,15,1,1,15,15,1,1,1,15,1,7,12,18,1,9,14,18,1,5,14,18,1,5,10,18,
+  1,18,18,18,1,1,18,18,1,1,1,18,1,8,14,21,1,11,16,21,1,6,16,21,1,6,11,21,1,21,21,21,
+  1,1,21,21,1,1,1,21,1,12,19,24,1,6,19,24,1,6,13,24,1,24,24,24,1,1,24,24,1,1,1,24,
+  1,14,21,27,1,7,21,27,1,7,14,27,1,27,27,27,1,1,27,27,1,1,1,27,1,15,23,30,1,8,23,30,
+  1,8,16,30,1,30,30,30,1,1,30,30,1,1,1,30,1,17,25,33,1,9,25,33,1,9,17,33,1,33,33,33,
+  1,1,33,33,1,1,1,33,1,36,36,36,1,1,36,36,1,1,1,36,1,19,28,37,1,10,28,37,1,10,19,37,
+  1,41,41,41,1,1,41,41,1,1,1,41,1,47,47,47,1,1,47,47,1,1,1,47,2,3,3,4,2,3,4,5,
+  2,4,5,6,2,3,5,6,2,3,4,6,2,4,5,7,2,4,6,7,2,3,6,7,2,3,5,7,2,4,6,8,
+  2,5,7,8,2,3,7,8,2,3,5,8,2,8,8,8,2,2,8,8,2,2,2,8,2,5,6,9,2,5,8,9,
+  2,3,8,9,2,3,6,9,2,5,7,10,2,6,8,10,2,4,8,10,2,4,6,10,2,10,10,10,2,2,10,10,
+  2,2,2,10,2,6,9,13,2,7,11,13,2,4,11,13,2,4,8,13,2,13,13,13,2,2,13,13,2,2,2,13,
+  2,7,11,16,2,9,13,16,2,5,13,16,2,5,9,16,2,16,16,16,2,2,16,16,2,2,2,16,2,8,13,19,
+  2,10,15,19,2,6,15,19,2,6,11,19,2,19,19,19,2,2,19,19,2,2,2,19,2,9,15,22,2,12,17,22,
+  2,7,17,22,2,7,12,22,2,22,22,22,2,2,22,22,2,2,2,22,2,13,20,25,2,7,20,25,2,7,14,25,
+  2,25,25,25,2,2,25,25,2,2,2,25,2,15,22,28,2,8,22,28,2,8,15,28,2,28,28,28,2,2,28,28,
+  2,2,2,28,2,16,24,31,2,9,24,31,2,9,17,31,2,31,31,31,2,2,31,31,2,2,2,31,2,18,26,34,
+  2,10,26,34,2,10,18,34,2,34,34,34,2,2,34,34,2,2,2,34,2,37,37,37,2,2,37,37,2,2,2,37,
+  2,20,29,38,2,11,29,38,2,11,20,38,2,42,42,42,2,2,42,42,2,2,2,42,2,48,48,48,2,2,48,48,
+  2,2,2,48,3,4,4,5,3,4,5,6,3,5,6,7,3,4,6,7,3,4,5,7,3,5,6,8,3,5,7,8,
+  3,4,7,8,3,4,6,8,3,5,7,9,3,6,8,9,3,4,8,9,3,4,6,9,3,9,9,9,3,3,9,9,
+  3,3,3,9,3,6,7,10,3,6,9,10,3,4,9,10,3,4,7,10,3,6,8,11,3,7,9,11,3,5,9,11,
+  3,5,7,11,3,11,11,11,3,3,11,11,3,3,3,11,3,7,10,14,3,8,12,14,3,5,12,14,3,5,9,14,
+  3,14,14,14,3,3,14,14,3,3,3,14,3,8,12,17,3,10,14,17,3,6,14,17,3,6,10,17,3,17,17,17,
+  3,3,17,17,3,3,3,17,3,9,14,20,3,11,16,20,3,7,16,20,3,7,12,20,3,20,20,20,3,3,20,20,
+  3,3,3,20,3,10,16,23,3,13,18,23,3,8,18,23,3,8,13,23,3,23,23,23,3,3,23,23,3,3,3,23,
+  3,14,21,26,3,8,21,26,3,8,15,26,3,26,26,26,3,3,26,26,3,3,3,26,3,16,23,29,3,9,23,29,
+  3,9,16,29,3,29,29,29,3,3,29,29,3,3,3,29,3,17,25,32,3,10,25,32,3,10,18,32,3,32,32,32,
+  3,3,32,32,3,3,3,32,3,19,27,35,3,11,27,35,3,11,19,35,3,35,35,35,3,3,35,35,3,3,3,35,
+  3,38,38,38,3,3,38,38,3,3,3,38,3,21,30,39,3,12,30,39,3,12,21,39,3,43,43,43,3,3,43,43,
+  3,3,3,43,3,49,49,49,3,3,49,49,3,3,3,49,4,5,5,6,4,5,6,7,4,6,7,8,4,5,7,8,
+  4,5,6,8,4,6,7,9,4,6,8,9,4,5,8,9,4,5,7,9,4,6,8,10,4,7,9,10,4,5,9,10,
+  4,5,7,10,4,10,10,10,4,4,10,10,4,4,4,10,4,7,8,11,4,7,10,11,4,5,10,11,4,5,8,11,
+  4,7,9,12,4,8,10,12,4,6,10,12,4,6,8,12,4,12,12,12,4,4,12,12,4,4,4,12,4,8,11,15,
+  4,9,13,15,4,6,13,15,4,6,10,15,4,15,15,15,4,4,15,15,4,4,4,15,4,9,13,18,4,11,15,18,
+  4,7,15,18,4,7,11,18,4,18,18,18,4,4,18,18,4,4,4,18,4,10,15,21,4,12,17,21,4,8,17,21,
+  4,8,13,21,4,21,21,21,4,4,21,21,4,4,4,21,4,11,17,24,4,14,19,24,4,9,19,24,4,9,14,24,
+  4,24,24,24,4,4,24,24,4,4,4,24,4,15,22,27,4,9,22,27,4,9,16,27,4,27,27,27,4,4,27,27,
+  4,4,4,27,4,17,24,30,4,10,24,30,4,10,17,30,4,30,30,30,4,4,30,30,4,4,4,30,4,18,26,33,
+  4,11,26,33,4,11,19,33,4,33,33,33,4,4,33,33,4,4,4,33,4,20,28,36,4,12,28,36,4,12,20,36,
+  4,36,36,36,4,4,36,36,4,4,4,36,4,39,39,39,4,4,39,39,4,4,4,39,4,22,31,40,4,13,31,40,
+  4,13,22,40,4,44,44,44,4,4,44,44,4,4,4,44,4,50,50,50,4,4,50,50,4,4,4,50,5,6,6,7,
+  5,6,7,8,5,7,8,9,5,6,8,9,5,6,7,9,5,7,8,10,5,7,9,10,5,6,9,10,5,6,8,10,
+  5,7,9,11,5,8,10,11,5,6,10,11,5,6,8,11,5,11,11,11,5,5,11,11,5,5,5,11,5,8,9,12,
+  5,8,11,12,5,6,11,12,5,6,9,12,5,8,10,13,5,9,11,13,5,7,11,13,5,7,9,13,5,13,13,13,
+  5,5,13,13,5,5,5,13,5,9,12,16,5,10,14,16,5,7,14,16,5,7,11,16,5,16,16,16,5,5,16,16,
+  5,5,5,16,5,10,14,19,5,12,16,19,5,8,16,19,5,8,12,19,5,19,19,19,5,5,19,19,5,5,5,19,
+  5,11,16,22,5,13,18,22,5,9,18,22,5,9,14,22,5,22,22,22,5,5,22,22,5,5,5,22,5,12,18,25,
+  5,15,20,25,5,10,20,25,5,10,15,25,5,25,25,25,5,5,25,25,5,5,5,25,5,16,23,28,5,10,23,28,
+  5,10,17,28,5,28,28,28,5,5,28,28,5,5,5,28,5,18,25,31,5,11,25,31,5,11,18,31,5,31,31,31,
+  5,5,31,31,5,5,5,31,5,19,27,34,5,12,27,34,5,12,20,34,5,34,34,34,5,5,34,34,5,5,5,34,
+  5,21,29,37,5,13,29,37,5,13,21,37,5,37,37,37,5,5,37,37,5,5,5,37,5,40,40,40,5,5,40,40,
+  5,5,5,40,5,23,32,41,5,14,32,41,5,14,23,41,5,45,45,45,5,5,45,45,5,5,5,45,5,51,51,51,
+  5,5,51,51,5,5,5,51,6,7,7,8,6,7,8,9,6,8,9,10,6,7,9,10,6,7,8,10,6,8,9,11,
+  6,8,10,11,6,7,10,11,6,7,9,11,6,8,10,12,6,9,11,12,6,7,11,12,6,7,9,12,6,12,12,12,
+  6,6,12,12,6,6,6,12,6,9,10,13,6,9,12,13,6,7,12,13,6,7,10,13,6,9,11,14,6,10,12,14,
+  6,8,12,14,6,8,10,14,6,14,14,14,6,6,14,14,6,6,6,14,6,10,13,17,6,11,15,17,6,8,15,17,
+  6,8,12,17,6,17,17,17,6,6,17,17,6,6,6,17,6,11,15,20,6,13,17,20,6,9,17,20,6,9,13,20,
+  6,20,20,20,6,6,20,20,6,6,6,20,6,12,17,23,6,14,19,23,6,10,19,23,6,10,15,23,6,23,23,23,
+  6,6,23,23,6,6,6,23,6,13,19,26,6,16,21,26,6,11,21,26,6,11,16,26,6,26,26,26,6,6,26,26,
+  6,6,6,26,6,17,24,29,6,11,24,29,6,11,18,29,6,29,29,29,6,6,29,29,6,6,6,29,6,19,26,32,
+  6,12,26,32,6,12,19,32,6,32,32,32,6,6,32,32,6,6,6,32,6,20,28,35,6,13,28,35,6,13,21,35,
+  6,35,35,35,6,6,35,35,6,6,6,35,6,22,30,38,6,14,30,38,6,14,22,38,6,38,38,38,6,6,38,38,
+  6,6,6,38,6,41,41,41,6,6,41,41,6,6,6,41,6,24,33,42,6,15,33,42,6,15,24,42,6,46,46,46,
+  6,6,46,46,6,6,6,46,6,52,52,52,6,6,52,52,6,6,6,52,7,8,8,9,7,8,9,10,7,9,10,11,
+  7,8,10,11,7,8,9,11,7,9,10,12,7,9,11,12,7,8,11,12,7,8,10,12,7,9,11,13,7,10,12,13,
+  7,8,12,13,7,8,10,13,7,13,13,13,7,7,13,13,7,7,7,13,7,10,11,14,7,10,13,14,7,8,13,14,
+  7,8,11,14,7,10,12,15,7,11,13,15,7,9,13,15,7,9,11,15,7,15,15,15,7,7,15,15,7,7,7,15,
+  7,11,14,18,7,12,16,18,7,9,16,18,7,9,13,18,7,18,18,18,7,7,18,18,7,7,7,18,7,12,16,21,
+  7,14,18,21,7,10,18,21,7,10,14,21,7,21,21,21,7,7,21,21,7,7,7,21,7,13,18,24,7,15,20,24,
+  7,11,20,24,7,11,16,24,7,24,24,24,7,7,24,24,7,7,7,24,7,14,20,27,7,17,22,27,7,12,22,27,
+  7,12,17,27,7,27,27,27,7,7,27,27,7,7,7,27,7,18,25,30,7,12,25,30,7,12,19,30,7,30,30,30,
+  7,7,30,30,7,7,7,30,7,20,27,33,7,13,27,33,7,13,20,33,7,33,33,33,7,7,33,33,7,7,7,33,
+  7,21,29,36,7,14,29,36,7,14,22,36,7,36,36,36,7,7,36,36,7,7,7,36,7,23,31,39,7,15,31,39,
+  7,15,23,39,7,39,39,39,7,7,39,39,7,7,7,39,7,42,42,42,7,7,42,42,7,7,7,42,7,25,34,43,
+  7,16,34,43,7,16,25,43,7,47,47,47,7,7,47,47,7,7,7,47,7,53,53,53,7,7,53,53,7,7,7,53,
+  8,9,9,10,8,9,10,11,8,10,11,12,8,9,11,12,8,9,10,12,8,10,11,13,8,10,12,13,8,9,12,13,
+  8,9,11,13,8,10,12,14,8,11,13,14,8,9,13,14,8,9,11,14,8,14,14,14,8,8,14,14,8,8,8,14,
+  8,11,12,15,8,11,14,15,8,9,14,15,8,9,12,15,8,11,13,16,8,12,14,16,8,10,14,16,8,10,12,16,
+  8,16,16,16,8,8,16,16,8,8,8,16,8,12,15,19,8,13,17,19,8,10,17,19,8,10,14,19,8,19,19,19,
+  8,8,19,19,8,8,8,19,8,13,17,22,8,15,19,22,8,11,19,22,8,11,15,22,8,22,22,22,8,8,22,22,
+  8,8,8,22,8,14,19,25,8,16,21,25,8,12,21,25,8,12,17,25,8,25,25,25,8,8,25,25,8,8,8,25,
+  8,15,21,28,8,18,23,28,8,13,23,28,8,13,18,28,8,28,28,28,8,8,28,28,8,8,8,28,8,19,26,31,
+  8,13,26,31,8,13,20,31,8,31,31,31,8,8,31,31,8,8,8,31,8,21,28,34,8,14,28,34,8,14,21,34,
+  8,34,34,34,8,8,34,34,8,8,8,34,8,22,30,37,8,15,30,37,8,15,23,37,8,37,37,37,8,8,37,37,
+  8,8,8,37,8,24,32,40,8,16,32,40,8,16,24,40,8,40,40,40,8,8,40,40,8,8,8,40,8,43,43,43,
+  8,8,43,43,8,8,8,43,8,26,35,44,8,17,35,44,8,17,26,44,8,48,48,48,8,8,48,48,8,8,8,48,
+  8,54,54,54,8,8,54,54,8,8,8,54,9,10,10,11,9,10,11,12,9,11,12,13,9,10,12,13,9,10,11,13,
+  9,11,12,14,9,11,13,14,9,10,13,14,9,10,12,14,9,11,13,15,9,12,14,15,9,10,14,15,9,10,12,15,
+  9,15,15,15,9,9,15,15,9,9,9,15,9,12,13,16,9,12,15,16,9,10,15,16,9,10,13,16,9,12,14,17,
+  9,13,15,17,9,11,15,17,9,11,13,17,9,17,17,17,9,9,17,17,9,9,9,17,9,13,16,20,9,14,18,20,
+  9,11,18,20,9,11,15,20,9,20,20,20,9,9,20,20,9,9,9,20,9,14,18,23,9,16,20,23,9,12,20,23,
+  9,12,16,23,9,23,23,23,9,9,23,23,9,9,9,23,9,15,20,26,9,17,22,26,9,13,22,26,9,13,18,26,
+  9,26,26,26,9,9,26,26,9,9,9,26,9,16,22,29,9,19,24,29,9,14,24,29,9,14,19,29,9,29,29,29,
+  9,9,29,29,9,9,9,29,9,20,27,32,9,14,27,32,9,14,21,32,9,32,32,32,9,9,32,32,9,9,9,32,
+  9,22,29,35,9,15,29,35,9,15,22,35,9,35,35,35,9,9,35,35,9,9,9,35,9,23,31,38,9,16,31,38,
+  9,16,24,38,9,38,38,38,9,9,38,38,9,9,9,38,9,25,33,41,9,17,33,41,9,17,25,41,9,41,41,41,
+  9,9,41,41,9,9,9,41,9,44,44,44,9,9,44,44,9,9,9,44,9,27,36,45,9,18,36,45,9,18,27,45,
+  9,49,49,49,9,9,49,49,9,9,9,49,9,55,55,55,9,9,55,55,9,9,9,55,10,11,11,12,10,11,12,13,
+  10,12,13,14,10,11,13,14,10,11,12,14,10,12,13,15,10,12,14,15,10,11,14,15,10,11,13,15,10,12,14,16,
+  10,13,15,16,10,11,15,16,10,11,13,16,10,16,16,16,10,10,16,16,10,10,10,16,10,13,14,17,10,13,16,17,
+  10,11,16,17,10,11,14,17,10,13,15,18,10,14,16,18,10,12,16,18,10,12,14,18,10,18,18,18,10,10,18,18,
+  10,10,10,18,10,14,17,21,10,15,19,21,10,12,19,21,10,12,16,21,10,21,21,21,10,10,21,21,10,10,10,21,
+  10,15,19,24,10,17,21,24,10,13,21,24,10,13,17,24,10,24,24,24,10,10,24,24,10,10,10,24,10,16,21,27,
+  10,18,23,27,10,14,23,27,10,14,19,27,10,27,27,27,10,10,27,27,10,10,10,27,10,17,23,30,10,20,25,30,
+  10,15,25,30,10,15,20,30,10,30,30,30,10,10,30,30,10,10,10,30,10,21,28,33,10,15,28,33,10,15,22,33,
+  10,33,33,33,10,10,33,33,10,10,10,33,10,23,30,36,10,16,30,36,10,16,23,36,10,36,36,36,10,10,36,36,
+  10,10,10,36,10,24,32,39,10,17,32,39,10,17,25,39,10,39,39,39,10,10,39,39,10,10,10,39,10,26,34,42,
+  10,18,34,42,10,18,26,42,10,42,42,42,10,10,42,42,10,10,10,42,10,45,45,45,10,10,45,45,10,10,10,45,
+  10,28,37,46,10,19,37,46,10,19,28,46,10,50,50,50,10,10,50,50,10,10,10,50,10,56,56,56,10,10,56,56,
+  10,10,10,56,11,12,12,13,11,12,13,14,11,13,14,15,11,12,14,15,11,12,13,15,11,13,14,16,11,13,15,16,
+  11,12,15,16,11,12,14,16,11,13,15,17,11,14,16,17,11,12,16,17,11,12,14,17,11,17,17,17,11,11,17,17,
+  11,11,11,17,11,14,15,18,11,14,17,18,11,12,17,18,11,12,15,18,11,14,16,19,11,15,17,19,11,13,17,19,
+  11,13,15,19,11,19,19,19,11,11,19,19,11,11,11,19,11,15,18,22,11,16,20,22,11,13,20,22,11,13,17,22,
+  11,22,22,22,11,11,22,22,11,11,11,22,11,16,20,25,11,18,22,25,11,14,22,25,11,14,18,25,11,25,25,25,
+  11,11,25,25,11,11,11,25,11,17,22,28,11,19,24,28,11,15,24,28,11,15,20,28,11,28,28,28,11,11,28,28,
+  11,11,11,28,11,18,24,31,11,21,26,31,11,16,26,31,11,16,21,31,11,31,31,31,11,11,31,31,11,11,11,31,
+  11,22,29,34,11,16,29,34,11,16,23,34,11,34,34,34,11,11,34,34,11,11,11,34,11,24,31,37,11,17,31,37,
+  11,17,24,37,11,37,37,37,11,11,37,37,11,11,11,37,11,25,33,40,11,18,33,40,11,18,26,40,11,40,40,40,
+  11,11,40,40,11,11,11,40,11,27,35,43,11,19,35,43,11,19,27,43,11,43,43,43,11,11,43,43,11,11,11,43,
+  11,46,46,46,11,11,46,46,11,11,11,46,11,29,38,47,11,20,38,47,11,20,29,47,11,51,51,51,11,11,51,51,
+  11,11,11,51,11,57,57,57,11,11,57,57,11,11,11,57,12,13,13,14,12,13,14,15,12,14,15,16,12,13,15,16,
+  12,13,14,16,12,14,15,17,12,14,16,17,12,13,16,17,12,13,15,17,12,14,16,18,12,15,17,18,12,13,17,18,
+  12,13,15,18,12,18,18,18,12,12,18,18,12,12,12,18,12,15,16,19,12,15,18,19,12,13,18,19,12,13,16,19,
+  12,15,17,20,12,16,18,20,12,14,18,20,12,14,16,20,12,20,20,20,12,12,20,20,12,12,12,20,12,16,19,23,
+  12,17,21,23,12,14,21,23,12,14,18,23,12,23,23,23,12,12,23,23,12,12,12,23,12,17,21,26,12,19,23,26,
+  12,15,23,26,12,15,19,26,12,26,26,26,12,12,26,26,12,12,12,26,12,18,23,29,12,20,25,29,12,16,25,29,
+  12,16,21,29,12,29,29,29,12,12,29,29,12,12,12,29,12,19,25,32,12,22,27,32,12,17,27,32,12,17,22,32,
+  12,32,32,32,12,12,32,32,12,12,12,32,12,23,30,35,12,17,30,35,12,17,24,35,12,35,35,35,12,12,35,35,
+  12,12,12,35,12,25,32,38,12,18,32,38,12,18,25,38,12,38,38,38,12,12,38,38,12,12,12,38,12,26,34,41,
+  12,19,34,41,12,19,27,41,12,41,41,41,12,12,41,41,12,12,12,41,12,28,36,44,12,20,36,44,12,20,28,44,
+  12,44,44,44,12,12,44,44,12,12,12,44,12,47,47,47,12,12,47,47,12,12,12,47,12,30,39,48,12,21,39,48,
+  12,21,30,48,12,52,52,52,12,12,52,52,12,12,12,52,12,58,58,58,12,12,58,58,12,12,12,58,13,14,14,15,
+  13,14,15,16,13,15,16,17,13,14,16,17,13,14,15,17,13,15,16,18,13,15,17,18,13,14,17,18,13,14,16,18,
+  13,15,17,19,13,16,18,19,13,14,18,19,13,14,16,19,13,19,19,19,13,13,19,19,13,13,13,19,13,16,17,20,
+  13,16,19,20,13,14,19,20,13,14,17,20,13,16,18,21,13,17,19,21,13,15,19,21,13,15,17,21,13,21,21,21,
+  13,13,21,21,13,13,13,21,13,17,20,24,13,18,22,24,13,15,22,24,13,15,19,24,13,24,24,24,13,13,24,24,
+  13,13,13,24,13,18,22,27,13,20,24,27,13,16,24,27,13,16,20,27,13,27,27,27,13,13,27,27,13,13,13,27,
+  13,19,24,30,13,21,26,30,13,17,26,30,13,17,22,30,13,30,30,30,13,13,30,30,13,13,13,30,13,20,26,33,
+  13,23,28,33,13,18,28,33,13,18,23,33,13,33,33,33,13,13,33,33,13,13,13,33,13,24,31,36,13,18,31,36,
+  13,18,25,36,13,36,36,36,13,13,36,36,13,13,13,36,13,26,33,39,13,19,33,39,13,19,26,39,13,39,39,39,
+  13,13,39,39,13,13,13,39,13,27,35,42,13,20,35,42,13,20,28,42,13,42,42,42,13,13,42,42,13,13,13,42,
+  13,29,37,45,13,21,37,45,13,21,29,45,13,45,45,45,13,13,45,45,13,13,13,45,13,48,48,48,13,13,48,48,
+  13,13,13,48,13,31,40,49,13,22,40,49,13,22,31,49,13,53,53,53,13,13,53,53,13,13,13,53,13,59,59,59,
+  13,13,59,59,13,13,13,59,14,15,15,16,14,15,16,17,14,16,17,18,14,15,17,18,14,15,16,18,14,16,17,19,
+  14,16,18,19,14,15,18,19,14,15,17,19,14,16,18,20,14,17,19,20,14,15,19,20,14,15,17,20,14,20,20,20,
+  14,14,20,20,14,14,14,20,14,17,18,21,14,17,20,21,14,15,20,21,14,15,18,21,14,17,19,22,14,18,20,22,
+  14,16,20,22,14,16,18,22,14,22,22,22,14,14,22,22,14,14,14,22,14,18,21,25,14,19,23,25,14,16,23,25,
+  14,16,20,25,14,25,25,25,14,14,25,25,14,14,14,25,14,19,23,28,14,21,25,28,14,17,25,28,14,17,21,28,
+  14,28,28,28,14,14,28,28,14,14,14,28,14,20,25,31,14,22,27,31,14,18,27,31,14,18,23,31,14,31,31,31,
+  14,14,31,31,14,14,14,31,14,21,27,34,14,24,29,34,14,19,29,34,14,19,24,34,14,34,34,34,14,14,34,34,
+  14,14,14,34,14,25,32,37,14,19,32,37,14,19,26,37,14,37,37,37,14,14,37,37,14,14,14,37,14,27,34,40,
+  14,20,34,40,14,20,27,40,14,40,40,40,14,14,40,40,14,14,14,40,14,28,36,43,14,21,36,43,14,21,29,43,
+  14,43,43,43,14,14,43,43,14,14,14,43,14,30,38,46,14,22,38,46,14,22,30,46,14,46,46,46,14,14,46,46,
+  14,14,14,46,14,49,49,49,14,14,49,49,14,14,14,49,14,32,41,50,14,23,41,50,14,23,32,50,14,54,54,54,
+  14,14,54,54,14,14,14,54,14,60,60,60,14,14,60,60,14,14,14,60,15,16,16,17,15,16,17,18,15,17,18,19,
+  15,16,18,19,15,16,17,19,15,17,18,20,15,17,19,20,15,16,19,20,15,16,18,20,15,17,19,21,15,18,20,21,
+  15,16,20,21,15,16,18,21,15,21,21,21,15,15,21,21,15,15,15,21,15,18,19,22,15,18,21,22,15,16,21,22,
+  15,16,19,22,15,18,20,23,15,19,21,23,15,17,21,23,15,17,19,23,15,23,23,23,15,15,23,23,15,15,15,23,
+  15,19,22,26,15,20,24,26,15,17,24,26,15,17,21,26,15,26,26,26,15,15,26,26,15,15,15,26,15,20,24,29,
+  15,22,26,29,15,18,26,29,15,18,22,29,15,29,29,29,15,15,29,29,15,15,15,29,15,21,26,32,15,23,28,32,
+  15,19,28,32,15,19,24,32,15,32,32,32,15,15,32,32,15,15,15,32,15,22,28,35,15,25,30,35,15,20,30,35,
+  15,20,25,35,15,35,35,35,15,15,35,35,15,15,15,35,15,26,33,38,15,20,33,38,15,20,27,38,15,38,38,38,
+  15,15,38,38,15,15,15,38,15,28,35,41,15,21,35,41,15,21,28,41,15,41,41,41,15,15,41,41,15,15,15,41,
+  15,29,37,44,15,22,37,44,15,22,30,44,15,44,44,44,15,15,44,44,15,15,15,44,15,31,39,47,15,23,39,47,
+  15,23,31,47,15,47,47,47,15,15,47,47,15,15,15,47,15,50,50,50,15,15,50,50,15,15,15,50,15,33,42,51,
+  15,24,42,51,15,24,33,51,15,55,55,55,15,15,55,55,15,15,15,55,15,61,61,61,15,15,61,61,15,15,15,61,
+  16,17,17,18,16,17,18,19,16,18,19,20,16,17,19,20,16,17,18,20,16,18,19,21,16,18,20,21,16,17,20,21,
+  16,17,19,21,16,18,20,22,16,19,21,22,16,17,21,22,16,17,19,22,16,22,22,22,16,16,22,22,16,16,16,22,
+  16,19,20,23,16,19,22,23,16,17,22,23,16,17,20,23,16,19,21,24,16,20,22,24,16,18,22,24,16,18,20,24,
+  16,24,24,24,16,16,24,24,16,16,16,24,16,20,23,27,16,21,25,27,16,18,25,27,16,18,22,27,16,27,27,27,
+  16,16,27,27,16,16,16,27,16,21,25,30,16,23,27,30,16,19,27,30,16,19,23,30,16,30,30,30,16,16,30,30,
+  16,16,16,30,16,22,27,33,16,24,29,33,16,20,29,33,16,20,25,33,16,33,33,33,16,16,33,33,16,16,16,33,
+  16,23,29,36,16,26,31,36,16,21,31,36,16,21,26,36,16,36,36,36,16,16,36,36,16,16,16,36,16,27,34,39,
+  16,21,34,39,16,21,28,39,16,39,39,39,16,16,39,39,16,16,16,39,16,29,36,42,16,22,36,42,16,22,29,42,
+  16,42,42,42,16,16,42,42,16,16,16,42,16,30,38,45,16,23,38,45,16,23,31,45,16,45,45,45,16,16,45,45,
+  16,16,16,45,16,32,40,48,16,24,40,48,16,24,32,48,16,48,48,48,16,16,48,48,16,16,16,48,16,51,51,51,
+  16,16,51,51,16,16,16,51,16,34,43,52,16,25,43,52,16,25,34,52,16,56,56,56,16,16,56,56,16,16,16,56,
+  16,62,62,62,16,16,62,62,16,16,16,62,17,18,18,19,17,18,19,20,17,19,20,21,17,18,20,21,17,18,19,21,
+  17,19,20,22,17,19,21,22,17,18,21,22,17,18,20,22,17,19,21,23,17,20,22,23,17,18,22,23,17,18,20,23,
+  17,23,23,23,17,17,23,23,17,17,17,23,17,20,21,24,17,20,23,24,17,18,23,24,17,18,21,24,17,20,22,25,
+  17,21,23,25,17,19,23,25,17,19,21,25,17,25,25,25,17,17,25,25,17,17,17,25,17,21,24,28,17,22,26,28,
+  17,19,26,28,17,19,23,28,17,28,28,28,17,17,28,28,17,17,17,28,17,22,26,31,17,24,28,31,17,20,28,31,
+  17,20,24,31,17,31,31,31,17,17,31,31,17,17,17,31,17,23,28,34,17,25,30,34,17,21,30,34,17,21,26,34,
+  17,34,34,34,17,17,34,34,17,17,17,34,17,24,30,37,17,27,32,37,17,22,32,37,17,22,27,37,17,37,37,37,
+  17,17,37,37,17,17,17,37,17,28,35,40,17,22,35,40,17,22,29,40,17,40,40,40,17,17,40,40,17,17,17,40,
+  17,30,37,43,17,23,37,43,17,23,30,43,17,43,43,43,17,17,43,43,17,17,17,43,17,31,39,46,17,24,39,46,
+  17,24,32,46,17,46,46,46,17,17,46,46,17,17,17,46,17,33,41,49,17,25,41,49,17,25,33,49,17,49,49,49,
+  17,17,49,49,17,17,17,49,17,52,52,52,17,17,52,52,17,17,17,52,17,35,44,53,17,26,44,53,17,26,35,53,
+  17,57,57,57,17,17,57,57,17,17,17,57,17,63,63,63,17,17,63,63,17,17,17,63,18,19,19,20,18,19,20,21,
+  18,20,21,22,18,19,21,22,18,19,20,22,18,20,21,23,18,20,22,23,18,19,22,23,18,19,21,23,18,20,22,24,
+  18,21,23,24,18,19,23,24,18,19,21,24,18,24,24,24,18,18,24,24,18,18,18,24,18,21,22,25,18,21,24,25,
+  18,19,24,25,18,19,22,25,18,21,23,26,18,22,24,26,18,20,24,26,18,20,22,26,18,26,26,26,18,18,26,26,
+  18,18,18,26,18,22,25,29,18,23,27,29,18,20,27,29,18,20,24,29,18,29,29,29,18,18,29,29,18,18,18,29,
+  18,23,27,32,18,25,29,32,18,21,29,32,18,21,25,32,18,32,32,32,18,18,32,32,18,18,18,32,18,24,29,35,
+  18,26,31,35,18,22,31,35,18,22,27,35,18,35,35,35,18,18,35,35,18,18,18,35,18,25,31,38,18,28,33,38,
+  18,23,33,38,18,23,28,38,18,38,38,38,18,18,38,38,18,18,18,38,18,29,36,41,18,23,36,41,18,23,30,41,
+  18,41,41,41,18,18,41,41,18,18,18,41,18,31,38,44,18,24,38,44,18,24,31,44,18,44,44,44,18,18,44,44,
+  18,18,18,44,18,32,40,47,18,25,40,47,18,25,33,47,18,47,47,47,18,18,47,47,18,18,18,47,18,34,42,50,
+  18,26,42,50,18,26,34,50,18,50,50,50,18,18,50,50,18,18,18,50,18,53,53,53,18,18,53,53,18,18,18,53,
+  18,36,45,54,18,27,45,54,18,27,36,54,18,58,58,58,18,18,58,58,18,18,18,58,19,20,20,21,19,20,21,22,
+  19,21,22,23,19,20,22,23,19,20,21,23,19,21,22,24,19,21,23,24,19,20,23,24,19,20,22,24,19,21,23,25,
+  19,22,24,25,19,20,24,25,19,20,22,25,19,25,25,25,19,19,25,25,19,19,19,25,19,22,23,26,19,22,25,26,
+  19,20,25,26,19,20,23,26,19,22,24,27,19,23,25,27,19,21,25,27,19,21,23,27,19,27,27,27,19,19,27,27,
+  19,19,19,27,19,23,26,30,19,24,28,30,19,21,28,30,19,21,25,30,19,30,30,30,19,19,30,30,19,19,19,30,
+  19,24,28,33,19,26,30,33,19,22,30,33,19,22,26,33,19,33,33,33,19,19,33,33,19,19,19,33,19,25,30,36,
+  19,27,32,36,19,23,32,36,19,23,28,36,19,36,36,36,19,19,36,36,19,19,19,36,19,26,32,39,19,29,34,39,
+  19,24,34,39,19,24,29,39,19,39,39,39,19,19,39,39,19,19,19,39,19,30,37,42,19,24,37,42,19,24,31,42,
+  19,42,42,42,19,19,42,42,19,19,19,42,19,32,39,45,19,25,39,45,19,25,32,45,19,45,45,45,19,19,45,45,
+  19,19,19,45,19,33,41,48,19,26,41,48,19,26,34,48,19,48,48,48,19,19,48,48,19,19,19,48,19,35,43,51,
+  19,27,43,51,19,27,35,51,19,51,51,51,19,19,51,51,19,19,19,51,19,54,54,54,19,19,54,54,19,19,19,54,
+  19,37,46,55,19,28,46,55,19,28,37,55,19,59,59,59,19,19,59,59,19,19,19,59,20,21,21,22,20,21,22,23,
+  20,22,23,24,20,21,23,24,20,21,22,24,20,22,23,25,20,22,24,25,20,21,24,25,20,21,23,25,20,22,24,26,
+  20,23,25,26,20,21,25,26,20,21,23,26,20,26,26,26,20,20,26,26,20,20,20,26,20,23,24,27,20,23,26,27,
+  20,21,26,27,20,21,24,27,20,23,25,28,20,24,26,28,20,22,26,28,20,22,24,28,20,28,28,28,20,20,28,28,
+  20,20,20,28,20,24,27,31,20,25,29,31,20,22,29,31,20,22,26,31,20,31,31,31,20,20,31,31,20,20,20,31,
+  20,25,29,34,20,27,31,34,20,23,31,34,20,23,27,34,20,34,34,34,20,20,34,34,20,20,20,34,20,26,31,37,
+  20,28,33,37,20,24,33,37,20,24,29,37,20,37,37,37,20,20,37,37,20,20,20,37,20,27,33,40,20,30,35,40,
+  20,25,35,40,20,25,30,40,20,40,40,40,20,20,40,40,20,20,20,40,20,31,38,43,20,25,38,43,20,25,32,43,
+  20,43,43,43,20,20,43,43,20,20,20,43,20,33,40,46,20,26,40,46,20,26,33,46,20,46,46,46,20,20,46,46,
+  20,20,20,46,20,34,42,49,20,27,42,49,20,27,35,49,20,49,49,49,20,20,49,49,20,20,20,49,20,36,44,52,
+  20,28,44,52,20,28,36,52,20,52,52,52,20,20,52,52,20,20,20,52,20,55,55,55,20,20,55,55,20,20,20,55,
+  20,38,47,56,20,29,47,56,20,29,38,56,20,60,60,60,20,20,60,60,20,20,20,60,21,22,22,23,21,22,23,24,
+  21,23,24,25,21,22,24,25,21,22,23,25,21,23,24,26,21,23,25,26,21,22,25,26,21,22,24,26,21,23,25,27,
+  21,24,26,27,21,22,26,27,21,22,24,27,21,27,27,27,21,21,27,27,21,21,21,27,21,24,25,28,21,24,27,28,
+  21,22,27,28,21,22,25,28,21,24,26,29,21,25,27,29,21,23,27,29,21,23,25,29,21,29,29,29,21,21,29,29,
+  21,21,21,29,21,25,28,32,21,26,30,32,21,23,30,32,21,23,27,32,21,32,32,32,21,21,32,32,21,21,21,32,
+  21,26,30,35,21,28,32,35,21,24,32,35,21,24,28,35,21,35,35,35,21,21,35,35,21,21,21,35,21,27,32,38,
+  21,29,34,38,21,25,34,38,21,25,30,38,21,38,38,38,21,21,38,38,21,21,21,38,21,28,34,41,21,31,36,41,
+  21,26,36,41,21,26,31,41,21,41,41,41,21,21,41,41,21,21,21,41,21,32,39,44,21,26,39,44,21,26,33,44,
+  21,44,44,44,21,21,44,44,21,21,21,44,21,34,41,47,21,27,41,47,21,27,34,47,21,47,47,47,21,21,47,47,
+  21,21,21,47,21,35,43,50,21,28,43,50,21,28,36,50,21,50,50,50,21,21,50,50,21,21,21,50,21,37,45,53,
+  21,29,45,53,21,29,37,53,21,53,53,53,21,21,53,53,21,21,21,53,21,56,56,56,21,21,56,56,21,21,21,56,
+  21,39,48,57,21,30,48,57,21,30,39,57,21,61,61,61,21,21,61,61,21,21,21,61,22,23,23,24,22,23,24,25,
+  22,24,25,26,22,23,25,26,22,23,24,26,22,24,25,27,22,24,26,27,22,23,26,27,22,23,25,27,22,24,26,28,
+  22,25,27,28,22,23,27,28,22,23,25,28,22,28,28,28,22,22,28,28,22,22,22,28,22,25,26,29,22,25,28,29,
+  22,23,28,29,22,23,26,29,22,25,27,30,22,26,28,30,22,24,28,30,22,24,26,30,22,30,30,30,22,22,30,30,
+  22,22,22,30,22,26,29,33,22,27,31,33,22,24,31,33,22,24,28,33,22,33,33,33,22,22,33,33,22,22,22,33,
+  22,27,31,36,22,29,33,36,22,25,33,36,22,25,29,36,22,36,36,36,22,22,36,36,22,22,22,36,22,28,33,39,
+  22,30,35,39,22,26,35,39,22,26,31,39,22,39,39,39,22,22,39,39,22,22,22,39,22,29,35,42,22,32,37,42,
+  22,27,37,42,22,27,32,42,22,42,42,42,22,22,42,42,22,22,22,42,22,33,40,45,22,27,40,45,22,27,34,45,
+  22,45,45,45,22,22,45,45,22,22,22,45,22,35,42,48,22,28,42,48,22,28,35,48,22,48,48,48,22,22,48,48,
+  22,22,22,48,22,36,44,51,22,29,44,51,22,29,37,51,22,51,51,51,22,22,51,51,22,22,22,51,22,38,46,54,
+  22,30,46,54,22,30,38,54,22,54,54,54,22,22,54,54,22,22,22,54,22,57,57,57,22,22,57,57,22,22,22,57,
+  22,40,49,58,22,31,49,58,22,31,40,58,22,62,62,62,22,22,62,62,22,22,22,62,23,24,24,25,23,24,25,26,
+  23,25,26,27,23,24,26,27,23,24,25,27,23,25,26,28,23,25,27,28,23,24,27,28,23,24,26,28,23,25,27,29,
+  23,26,28,29,23,24,28,29,23,24,26,29,23,29,29,29,23,23,29,29,23,23,23,29,23,26,27,30,23,26,29,30,
+  23,24,29,30,23,24,27,30,23,26,28,31,23,27,29,31,23,25,29,31,23,25,27,31,23,31,31,31,23,23,31,31,
+  23,23,23,31,23,27,30,34,23,28,32,34,23,25,32,34,23,25,29,34,23,34,34,34,23,23,34,34,23,23,23,34,
+  23,28,32,37,23,30,34,37,23,26,34,37,23,26,30,37,23,37,37,37,23,23,37,37,23,23,23,37,23,29,34,40,
+  23,31,36,40,23,27,36,40,23,27,32,40,23,40,40,40,23,23,40,40,23,23,23,40,23,30,36,43,23,33,38,43,
+  23,28,38,43,23,28,33,43,23,43,43,43,23,23,43,43,23,23,23,43,23,34,41,46,23,28,41,46,23,28,35,46,
+  23,46,46,46,23,23,46,46,23,23,23,46,23,36,43,49,23,29,43,49,23,29,36,49,23,49,49,49,23,23,49,49,
+  23,23,23,49,23,37,45,52,23,30,45,52,23,30,38,52,23,52,52,52,23,23,52,52,23,23,23,52,23,39,47,55,
+  23,31,47,55,23,31,39,55,23,55,55,55,23,23,55,55,23,23,23,55,23,58,58,58,23,23,58,58,23,23,23,58,
+  23,41,50,59,23,32,50,59,23,32,41,59,23,63,63,63,23,23,63,63,23,23,23,63,24,25,25,26,24,25,26,27,
+  24,26,27,28,24,25,27,28,24,25,26,28,24,26,27,29,24,26,28,29,24,25,28,29,24,25,27,29,24,26,28,30,
+  24,27,29,30,24,25,29,30,24,25,27,30,24,30,30,30,24,24,30,30,24,24,24,30,24,27,28,31,24,27,30,31,
+  24,25,30,31,24,25,28,31,24,27,29,32,24,28,30,32,24,26,30,32,24,26,28,32,24,32,32,32,24,24,32,32,
+  24,24,24,32,24,28,31,35,24,29,33,35,24,26,33,35,24,26,30,35,24,35,35,35,24,24,35,35,24,24,24,35,
+  24,29,33,38,24,31,35,38,24,27,35,38,24,27,31,38,24,38,38,38,24,24,38,38,24,24,24,38,24,30,35,41,
+  24,32,37,41,24,28,37,41,24,28,33,41,24,41,41,41,24,24,41,41,24,24,24,41,24,31,37,44,24,34,39,44,
+  24,29,39,44,24,29,34,44,24,44,44,44,24,24,44,44,24,24,24,44,24,35,42,47,24,29,42,47,24,29,36,47,
+  24,47,47,47,24,24,47,47,24,24,24,47,24,37,44,50,24,30,44,50,24,30,37,50,24,50,50,50,24,24,50,50,
+  24,24,24,50,24,38,46,53,24,31,46,53,24,31,39,53,24,53,53,53,24,24,53,53,24,24,24,53,24,40,48,56,
+  24,32,48,56,24,32,40,56,24,56,56,56,24,24,56,56,24,24,24,56,24,59,59,59,24,24,59,59,24,24,24,59,
+  24,42,51,60,24,33,51,60,24,33,42,60,25,26,26,27,25,26,27,28,25,27,28,29,25,26,28,29,25,26,27,29,
+  25,27,28,30,25,27,29,30,25,26,29,30,25,26,28,30,25,27,29,31,25,28,30,31,25,26,30,31,25,26,28,31,
+  25,31,31,31,25,25,31,31,25,25,25,31,25,28,29,32,25,28,31,32,25,26,31,32,25,26,29,32,25,28,30,33,
+  25,29,31,33,25,27,31,33,25,27,29,33,25,33,33,33,25,25,33,33,25,25,25,33,25,29,32,36,25,30,34,36,
+  25,27,34,36,25,27,31,36,25,36,36,36,25,25,36,36,25,25,25,36,25,30,34,39,25,32,36,39,25,28,36,39,
+  25,28,32,39,25,39,39,39,25,25,39,39,25,25,25,39,25,31,36,42,25,33,38,42,25,29,38,42,25,29,34,42,
+  25,42,42,42,25,25,42,42,25,25,25,42,25,32,38,45,25,35,40,45,25,30,40,45,25,30,35,45,25,45,45,45,
+  25,25,45,45,25,25,25,45,25,36,43,48,25,30,43,48,25,30,37,48,25,48,48,48,25,25,48,48,25,25,25,48,
+  25,38,45,51,25,31,45,51,25,31,38,51,25,51,51,51,25,25,51,51,25,25,25,51,25,39,47,54,25,32,47,54,
+  25,32,40,54,25,54,54,54,25,25,54,54,25,25,25,54,25,41,49,57,25,33,49,57,25,33,41,57,25,57,57,57,
+  25,25,57,57,25,25,25,57,25,60,60,60,25,25,60,60,25,25,25,60,25,43,52,61,25,34,52,61,25,34,43,61,
+  26,27,27,28,26,27,28,29,26,28,29,30,26,27,29,30,26,27,28,30,26,28,29,31,26,28,30,31,26,27,30,31,
+  26,27,29,31,26,28,30,32,26,29,31,32,26,27,31,32,26,27,29,32,26,32,32,32,26,26,32,32,26,26,26,32,
+  26,29,30,33,26,29,32,33,26,27,32,33,26,27,30,33,26,29,31,34,26,30,32,34,26,28,32,34,26,28,30,34,
+  26,34,34,34,26,26,34,34,26,26,26,34,26,30,33,37,26,31,35,37,26,28,35,37,26,28,32,37,26,37,37,37,
+  26,26,37,37,26,26,26,37,26,31,35,40,26,33,37,40,26,29,37,40,26,29,33,40,26,40,40,40,26,26,40,40,
+  26,26,26,40,26,32,37,43,26,34,39,43,26,30,39,43,26,30,35,43,26,43,43,43,26,26,43,43,26,26,26,43,
+  26,33,39,46,26,36,41,46,26,31,41,46,26,31,36,46,26,46,46,46,26,26,46,46,26,26,26,46,26,37,44,49,
+  26,31,44,49,26,31,38,49,26,49,49,49,26,26,49,49,26,26,26,49,26,39,46,52,26,32,46,52,26,32,39,52,
+  26,52,52,52,26,26,52,52,26,26,26,52,26,40,48,55,26,33,48,55,26,33,41,55,26,55,55,55,26,26,55,55,
+  26,26,26,55,26,42,50,58,26,34,50,58,26,34,42,58,26,58,58,58,26,26,58,58,26,26,26,58,26,61,61,61,
+  26,26,61,61,26,26,26,61,26,44,53,62,26,35,53,62,26,35,44,62,27,28,28,29,27,28,29,30,27,29,30,31,
+  27,28,30,31,27,28,29,31,27,29,30,32,27,29,31,32,27,28,31,32,27,28,30,32,27,29,31,33,27,30,32,33,
+  27,28,32,33,27,28,30,33,27,33,33,33,27,27,33,33,27,27,27,33,27,30,31,34,27,30,33,34,27,28,33,34,
+  27,28,31,34,27,30,32,35,27,31,33,35,27,29,33,35,27,29,31,35,27,35,35,35,27,27,35,35,27,27,27,35,
+  27,31,34,38,27,32,36,38,27,29,36,38,27,29,33,38,27,38,38,38,27,27,38,38,27,27,27,38,27,32,36,41,
+  27,34,38,41,27,30,38,41,27,30,34,41,27,41,41,41,27,27,41,41,27,27,27,41,27,33,38,44,27,35,40,44,
+  27,31,40,44,27,31,36,44,27,44,44,44,27,27,44,44,27,27,27,44,27,34,40,47,27,37,42,47,27,32,42,47,
+  27,32,37,47,27,47,47,47,27,27,47,47,27,27,27,47,27,38,45,50,27,32,45,50,27,32,39,50,27,50,50,50,
+  27,27,50,50,27,27,27,50,27,40,47,53,27,33,47,53,27,33,40,53,27,53,53,53,27,27,53,53,27,27,27,53,
+  27,41,49,56,27,34,49,56,27,34,42,56,27,56,56,56,27,27,56,56,27,27,27,56,27,43,51,59,27,35,51,59,
+  27,35,43,59,27,59,59,59,27,27,59,59,27,27,27,59,27,62,62,62,27,27,62,62,27,27,27,62,27,45,54,63,
+  27,36,54,63,27,36,45,63,28,29,29,30,28,29,30,31,28,30,31,32,28,29,31,32,28,29,30,32,28,30,31,33,
+  28,30,32,33,28,29,32,33,28,29,31,33,28,30,32,34,28,31,33,34,28,29,33,34,28,29,31,34,28,34,34,34,
+  28,28,34,34,28,28,28,34,28,31,32,35,28,31,34,35,28,29,34,35,28,29,32,35,28,31,33,36,28,32,34,36,
+  28,30,34,36,28,30,32,36,28,36,36,36,28,28,36,36,28,28,28,36,28,32,35,39,28,33,37,39,28,30,37,39,
+  28,30,34,39,28,39,39,39,28,28,39,39,28,28,28,39,28,33,37,42,28,35,39,42,28,31,39,42,28,31,35,42,
+  28,42,42,42,28,28,42,42,28,28,28,42,28,34,39,45,28,36,41,45,28,32,41,45,28,32,37,45,28,45,45,45,
+  28,28,45,45,28,28,28,45,28,35,41,48,28,38,43,48,28,33,43,48,28,33,38,48,28,48,48,48,28,28,48,48,
+  28,28,28,48,28,39,46,51,28,33,46,51,28,33,40,51,28,51,51,51,28,28,51,51,28,28,28,51,28,41,48,54,
+  28,34,48,54,28,34,41,54,28,54,54,54,28,28,54,54,28,28,28,54,28,42,50,57,28,35,50,57,28,35,43,57,
+  28,57,57,57,28,28,57,57,28,28,28,57,28,44,52,60,28,36,52,60,28,36,44,60,28,60,60,60,28,28,60,60,
+  28,28,28,60,28,63,63,63,28,28,63,63,28,28,28,63,29,30,30,31,29,30,31,32,29,31,32,33,29,30,32,33,
+  29,30,31,33,29,31,32,34,29,31,33,34,29,30,33,34,29,30,32,34,29,31,33,35,29,32,34,35,29,30,34,35,
+  29,30,32,35,29,35,35,35,29,29,35,35,29,29,29,35,29,32,33,36,29,32,35,36,29,30,35,36,29,30,33,36,
+  29,32,34,37,29,33,35,37,29,31,35,37,29,31,33,37,29,37,37,37,29,29,37,37,29,29,29,37,29,33,36,40,
+  29,34,38,40,29,31,38,40,29,31,35,40,29,40,40,40,29,29,40,40,29,29,29,40,29,34,38,43,29,36,40,43,
+  29,32,40,43,29,32,36,43,29,43,43,43,29,29,43,43,29,29,29,43,29,35,40,46,29,37,42,46,29,33,42,46,
+  29,33,38,46,29,46,46,46,29,29,46,46,29,29,29,46,29,36,42,49,29,39,44,49,29,34,44,49,29,34,39,49,
+  29,49,49,49,29,29,49,49,29,29,29,49,29,40,47,52,29,34,47,52,29,34,41,52,29,52,52,52,29,29,52,52,
+  29,29,29,52,29,42,49,55,29,35,49,55,29,35,42,55,29,55,55,55,29,29,55,55,29,29,29,55,29,43,51,58,
+  29,36,51,58,29,36,44,58,29,58,58,58,29,29,58,58,29,29,29,58,29,45,53,61,29,37,53,61,29,37,45,61,
+  29,61,61,61,29,29,61,61,29,29,29,61,30,31,31,32,30,31,32,33,30,32,33,34,30,31,33,34,30,31,32,34,
+  30,32,33,35,30,32,34,35,30,31,34,35,30,31,33,35,30,32,34,36,30,33,35,36,30,31,35,36,30,31,33,36,
+  30,36,36,36,30,30,36,36,30,30,30,36,30,33,34,37,30,33,36,37,30,31,36,37,30,31,34,37,30,33,35,38,
+  30,34,36,38,30,32,36,38,30,32,34,38,30,38,38,38,30,30,38,38,30,30,30,38,30,34,37,41,30,35,39,41,
+  30,32,39,41,30,32,36,41,30,41,41,41,30,30,41,41,30,30,30,41,30,35,39,44,30,37,41,44,30,33,41,44,
+  30,33,37,44,30,44,44,44,30,30,44,44,30,30,30,44,30,36,41,47,30,38,43,47,30,34,43,47,30,34,39,47,
+  30,47,47,47,30,30,47,47,30,30,30,47,30,37,43,50,30,40,45,50,30,35,45,50,30,35,40,50,30,50,50,50,
+  30,30,50,50,30,30,30,50,30,41,48,53,30,35,48,53,30,35,42,53,30,53,53,53,30,30,53,53,30,30,30,53,
+  30,43,50,56,30,36,50,56,30,36,43,56,30,56,56,56,30,30,56,56,30,30,30,56,30,44,52,59,30,37,52,59,
+  30,37,45,59,30,59,59,59,30,30,59,59,30,30,30,59,30,46,54,62,30,38,54,62,30,38,46,62,30,62,62,62,
+  30,30,62,62,30,30,30,62,31,32,32,33,31,32,33,34,31,33,34,35,31,32,34,35,31,32,33,35,31,33,34,36,
+  31,33,35,36,31,32,35,36,31,32,34,36,31,33,35,37,31,34,36,37,31,32,36,37,31,32,34,37,31,37,37,37,
+  31,31,37,37,31,31,31,37,31,34,35,38,31,34,37,38,31,32,37,38,31,32,35,38,31,34,36,39,31,35,37,39,
+  31,33,37,39,31,33,35,39,31,39,39,39,31,31,39,39,31,31,31,39,31,35,38,42,31,36,40,42,31,33,40,42,
+  31,33,37,42,31,42,42,42,31,31,42,42,31,31,31,42,31,36,40,45,31,38,42,45,31,34,42,45,31,34,38,45,
+  31,45,45,45,31,31,45,45,31,31,31,45,31,37,42,48,31,39,44,48,31,35,44,48,31,35,40,48,31,48,48,48,
+  31,31,48,48,31,31,31,48,31,38,44,51,31,41,46,51,31,36,46,51,31,36,41,51,31,51,51,51,31,31,51,51,
+  31,31,31,51,31,42,49,54,31,36,49,54,31,36,43,54,31,54,54,54,31,31,54,54,31,31,31,54,31,44,51,57,
+  31,37,51,57,31,37,44,57,31,57,57,57,31,31,57,57,31,31,31,57,31,45,53,60,31,38,53,60,31,38,46,60,
+  31,60,60,60,31,31,60,60,31,31,31,60,31,47,55,63,31,39,55,63,31,39,47,63,31,63,63,63,31,31,63,63,
+  31,31,31,63,32,33,33,34,32,33,34,35,32,34,35,36,32,33,35,36,32,33,34,36,32,34,35,37,32,34,36,37,
+  32,33,36,37,32,33,35,37,32,34,36,38,32,35,37,38,32,33,37,38,32,33,35,38,32,38,38,38,32,32,38,38,
+  32,32,32,38,32,35,36,39,32,35,38,39,32,33,38,39,32,33,36,39,32,35,37,40,32,36,38,40,32,34,38,40,
+  32,34,36,40,32,40,40,40,32,32,40,40,32,32,32,40,32,36,39,43,32,37,41,43,32,34,41,43,32,34,38,43,
+  32,43,43,43,32,32,43,43,32,32,32,43,32,37,41,46,32,39,43,46,32,35,43,46,32,35,39,46,32,46,46,46,
+  32,32,46,46,32,32,32,46,32,38,43,49,32,40,45,49,32,36,45,49,32,36,41,49,32,49,49,49,32,32,49,49,
+  32,32,32,49,32,39,45,52,32,42,47,52,32,37,47,52,32,37,42,52,32,52,52,52,32,32,52,52,32,32,32,52,
+  32,43,50,55,32,37,50,55,32,37,44,55,32,55,55,55,32,32,55,55,32,32,32,55,32,45,52,58,32,38,52,58,
+  32,38,45,58,32,58,58,58,32,32,58,58,32,32,32,58,32,46,54,61,32,39,54,61,32,39,47,61,32,61,61,61,
+  32,32,61,61,32,32,32,61,33,34,34,35,33,34,35,36,33,35,36,37,33,34,36,37,33,34,35,37,33,35,36,38,
+  33,35,37,38,33,34,37,38,33,34,36,38,33,35,37,39,33,36,38,39,33,34,38,39,33,34,36,39,33,39,39,39,
+  33,33,39,39,33,33,33,39,33,36,37,40,33,36,39,40,33,34,39,40,33,34,37,40,33,36,38,41,33,37,39,41,
+  33,35,39,41,33,35,37,41,33,41,41,41,33,33,41,41,33,33,33,41,33,37,40,44,33,38,42,44,33,35,42,44,
+  33,35,39,44,33,44,44,44,33,33,44,44,33,33,33,44,33,38,42,47,33,40,44,47,33,36,44,47,33,36,40,47,
+  33,47,47,47,33,33,47,47,33,33,33,47,33,39,44,50,33,41,46,50,33,37,46,50,33,37,42,50,33,50,50,50,
+  33,33,50,50,33,33,33,50,33,40,46,53,33,43,48,53,33,38,48,53,33,38,43,53,33,53,53,53,33,33,53,53,
+  33,33,33,53,33,44,51,56,33,38,51,56,33,38,45,56,33,56,56,56,33,33,56,56,33,33,33,56,33,46,53,59,
+  33,39,53,59,33,39,46,59,33,59,59,59,33,33,59,59,33,33,33,59,33,47,55,62,33,40,55,62,33,40,48,62,
+  33,62,62,62,33,33,62,62,33,33,33,62,34,35,35,36,34,35,36,37,34,36,37,38,34,35,37,38,34,35,36,38,
+  34,36,37,39,34,36,38,39,34,35,38,39,34,35,37,39,34,36,38,40,34,37,39,40,34,35,39,40,34,35,37,40,
+  34,40,40,40,34,34,40,40,34,34,34,40,34,37,38,41,34,37,40,41,34,35,40,41,34,35,38,41,34,37,39,42,
+  34,38,40,42,34,36,40,42,34,36,38,42,34,42,42,42,34,34,42,42,34,34,34,42,34,38,41,45,34,39,43,45,
+  34,36,43,45,34,36,40,45,34,45,45,45,34,34,45,45,34,34,34,45,34,39,43,48,34,41,45,48,34,37,45,48,
+  34,37,41,48,34,48,48,48,34,34,48,48,34,34,34,48,34,40,45,51,34,42,47,51,34,38,47,51,34,38,43,51,
+  34,51,51,51,34,34,51,51,34,34,34,51,34,41,47,54,34,44,49,54,34,39,49,54,34,39,44,54,34,54,54,54,
+  34,34,54,54,34,34,34,54,34,45,52,57,34,39,52,57,34,39,46,57,34,57,57,57,34,34,57,57,34,34,34,57,
+  34,47,54,60,34,40,54,60,34,40,47,60,34,60,60,60,34,34,60,60,34,34,34,60,34,48,56,63,34,41,56,63,
+  34,41,49,63,34,63,63,63,34,34,63,63,34,34,34,63,35,36,36,37,35,36,37,38,35,37,38,39,35,36,38,39,
+  35,36,37,39,35,37,38,40,35,37,39,40,35,36,39,40,35,36,38,40,35,37,39,41,35,38,40,41,35,36,40,41,
+  35,36,38,41,35,41,41,41,35,35,41,41,35,35,35,41,35,38,39,42,35,38,41,42,35,36,41,42,35,36,39,42,
+  35,38,40,43,35,39,41,43,35,37,41,43,35,37,39,43,35,43,43,43,35,35,43,43,35,35,35,43,35,39,42,46,
+  35,40,44,46,35,37,44,46,35,37,41,46,35,46,46,46,35,35,46,46,35,35,35,46,35,40,44,49,35,42,46,49,
+  35,38,46,49,35,38,42,49,35,49,49,49,35,35,49,49,35,35,35,49,35,41,46,52,35,43,48,52,35,39,48,52,
+  35,39,44,52,35,52,52,52,35,35,52,52,35,35,35,52,35,42,48,55,35,45,50,55,35,40,50,55,35,40,45,55,
+  35,55,55,55,35,35,55,55,35,35,35,55,35,46,53,58,35,40,53,58,35,40,47,58,35,58,58,58,35,35,58,58,
+  35,35,35,58,35,48,55,61,35,41,55,61,35,41,48,61,35,61,61,61,35,35,61,61,35,35,35,61,36,37,37,38,
+  36,37,38,39,36,38,39,40,36,37,39,40,36,37,38,40,36,38,39,41,36,38,40,41,36,37,40,41,36,37,39,41,
+  36,38,40,42,36,39,41,42,36,37,41,42,36,37,39,42,36,42,42,42,36,36,42,42,36,36,36,42,36,39,40,43,
+  36,39,42,43,36,37,42,43,36,37,40,43,36,39,41,44,36,40,42,44,36,38,42,44,36,38,40,44,36,44,44,44,
+  36,36,44,44,36,36,36,44,36,40,43,47,36,41,45,47,36,38,45,47,36,38,42,47,36,47,47,47,36,36,47,47,
+  36,36,36,47,36,41,45,50,36,43,47,50,36,39,47,50,36,39,43,50,36,50,50,50,36,36,50,50,36,36,36,50,
+  36,42,47,53,36,44,49,53,36,40,49,53,36,40,45,53,36,53,53,53,36,36,53,53,36,36,36,53,36,43,49,56,
+  36,46,51,56,36,41,51,56,36,41,46,56,36,56,56,56,36,36,56,56,36,36,36,56,36,47,54,59,36,41,54,59,
+  36,41,48,59,36,59,59,59,36,36,59,59,36,36,36,59,36,49,56,62,36,42,56,62,36,42,49,62,36,62,62,62,
+  36,36,62,62,36,36,36,62,37,38,38,39,37,38,39,40,37,39,40,41,37,38,40,41,37,38,39,41,37,39,40,42,
+  37,39,41,42,37,38,41,42,37,38,40,42,37,39,41,43,37,40,42,43,37,38,42,43,37,38,40,43,37,43,43,43,
+  37,37,43,43,37,37,37,43,37,40,41,44,37,40,43,44,37,38,43,44,37,38,41,44,37,40,42,45,37,41,43,45,
+  37,39,43,45,37,39,41,45,37,45,45,45,37,37,45,45,37,37,37,45,37,41,44,48,37,42,46,48,37,39,46,48,
+  37,39,43,48,37,48,48,48,37,37,48,48,37,37,37,48,37,42,46,51,37,44,48,51,37,40,48,51,37,40,44,51,
+  37,51,51,51,37,37,51,51,37,37,37,51,37,43,48,54,37,45,50,54,37,41,50,54,37,41,46,54,37,54,54,54,
+  37,37,54,54,37,37,37,54,37,44,50,57,37,47,52,57,37,42,52,57,37,42,47,57,37,57,57,57,37,37,57,57,
+  37,37,37,57,37,48,55,60,37,42,55,60,37,42,49,60,37,60,60,60,37,37,60,60,37,37,37,60,37,50,57,63,
+  37,43,57,63,37,43,50,63,37,63,63,63,37,37,63,63,37,37,37,63,38,39,39,40,38,39,40,41,38,40,41,42,
+  38,39,41,42,38,39,40,42,38,40,41,43,38,40,42,43,38,39,42,43,38,39,41,43,38,40,42,44,38,41,43,44,
+  38,39,43,44,38,39,41,44,38,44,44,44,38,38,44,44,38,38,38,44,38,41,42,45,38,41,44,45,38,39,44,45,
+  38,39,42,45,38,41,43,46,38,42,44,46,38,40,44,46,38,40,42,46,38,46,46,46,38,38,46,46,38,38,38,46,
+  38,42,45,49,38,43,47,49,38,40,47,49,38,40,44,49,38,49,49,49,38,38,49,49,38,38,38,49,38,43,47,52,
+  38,45,49,52,38,41,49,52,38,41,45,52,38,52,52,52,38,38,52,52,38,38,38,52,38,44,49,55,38,46,51,55,
+  38,42,51,55,38,42,47,55,38,55,55,55,38,38,55,55,38,38,38,55,38,45,51,58,38,48,53,58,38,43,53,58,
+  38,43,48,58,38,58,58,58,38,38,58,58,38,38,38,58,38,49,56,61,38,43,56,61,38,43,50,61,38,61,61,61,
+  38,38,61,61,38,38,38,61,39,40,40,41,39,40,41,42,39,41,42,43,39,40,42,43,39,40,41,43,39,41,42,44,
+  39,41,43,44,39,40,43,44,39,40,42,44,39,41,43,45,39,42,44,45,39,40,44,45,39,40,42,45,39,45,45,45,
+  39,39,45,45,39,39,39,45,39,42,43,46,39,42,45,46,39,40,45,46,39,40,43,46,39,42,44,47,39,43,45,47,
+  39,41,45,47,39,41,43,47,39,47,47,47,39,39,47,47,39,39,39,47,39,43,46,50,39,44,48,50,39,41,48,50,
+  39,41,45,50,39,50,50,50,39,39,50,50,39,39,39,50,39,44,48,53,39,46,50,53,39,42,50,53,39,42,46,53,
+  39,53,53,53,39,39,53,53,39,39,39,53,39,45,50,56,39,47,52,56,39,43,52,56,39,43,48,56,39,56,56,56,
+  39,39,56,56,39,39,39,56,39,46,52,59,39,49,54,59,39,44,54,59,39,44,49,59,39,59,59,59,39,39,59,59,
+  39,39,39,59,39,50,57,62,39,44,57,62,39,44,51,62,39,62,62,62,39,39,62,62,39,39,39,62,40,41,41,42,
+  40,41,42,43,40,42,43,44,40,41,43,44,40,41,42,44,40,42,43,45,40,42,44,45,40,41,44,45,40,41,43,45,
+  40,42,44,46,40,43,45,46,40,41,45,46,40,41,43,46,40,46,46,46,40,40,46,46,40,40,40,46,40,43,44,47,
+  40,43,46,47,40,41,46,47,40,41,44,47,40,43,45,48,40,44,46,48,40,42,46,48,40,42,44,48,40,48,48,48,
+  40,40,48,48,40,40,40,48,40,44,47,51,40,45,49,51,40,42,49,51,40,42,46,51,40,51,51,51,40,40,51,51,
+  40,40,40,51,40,45,49,54,40,47,51,54,40,43,51,54,40,43,47,54,40,54,54,54,40,40,54,54,40,40,40,54,
+  40,46,51,57,40,48,53,57,40,44,53,57,40,44,49,57,40,57,57,57,40,40,57,57,40,40,40,57,40,47,53,60,
+  40,50,55,60,40,45,55,60,40,45,50,60,40,60,60,60,40,40,60,60,40,40,40,60,40,51,58,63,40,45,58,63,
+  40,45,52,63,40,63,63,63,40,40,63,63,40,40,40,63,41,42,42,43,41,42,43,44,41,43,44,45,41,42,44,45,
+  41,42,43,45,41,43,44,46,41,43,45,46,41,42,45,46,41,42,44,46,41,43,45,47,41,44,46,47,41,42,46,47,
+  41,42,44,47,41,47,47,47,41,41,47,47,41,41,41,47,41,44,45,48,41,44,47,48,41,42,47,48,41,42,45,48,
+  41,44,46,49,41,45,47,49,41,43,47,49,41,43,45,49,41,49,49,49,41,41,49,49,41,41,41,49,41,45,48,52,
+  41,46,50,52,41,43,50,52,41,43,47,52,41,52,52,52,41,41,52,52,41,41,41,52,41,46,50,55,41,48,52,55,
+  41,44,52,55,41,44,48,55,41,55,55,55,41,41,55,55,41,41,41,55,41,47,52,58,41,49,54,58,41,45,54,58,
+  41,45,50,58,41,58,58,58,41,41,58,58,41,41,41,58,41,48,54,61,41,51,56,61,41,46,56,61,41,46,51,61,
+  41,61,61,61,41,41,61,61,41,41,41,61,42,43,43,44,42,43,44,45,42,44,45,46,42,43,45,46,42,43,44,46,
+  42,44,45,47,42,44,46,47,42,43,46,47,42,43,45,47,42,44,46,48,42,45,47,48,42,43,47,48,42,43,45,48,
+  42,48,48,48,42,42,48,48,42,42,42,48,42,45,46,49,42,45,48,49,42,43,48,49,42,43,46,49,42,45,47,50,
+  42,46,48,50,42,44,48,50,42,44,46,50,42,50,50,50,42,42,50,50,42,42,42,50,42,46,49,53,42,47,51,53,
+  42,44,51,53,42,44,48,53,42,53,53,53,42,42,53,53,42,42,42,53,42,47,51,56,42,49,53,56,42,45,53,56,
+  42,45,49,56,42,56,56,56,42,42,56,56,42,42,42,56,42,48,53,59,42,50,55,59,42,46,55,59,42,46,51,59,
+  42,59,59,59,42,42,59,59,42,42,42,59,42,49,55,62,42,52,57,62,42,47,57,62,42,47,52,62,42,62,62,62,
+  42,42,62,62,42,42,42,62,43,44,44,45,43,44,45,46,43,45,46,47,43,44,46,47,43,44,45,47,43,45,46,48,
+  43,45,47,48,43,44,47,48,43,44,46,48,43,45,47,49,43,46,48,49,43,44,48,49,43,44,46,49,43,49,49,49,
+  43,43,49,49,43,43,43,49,43,46,47,50,43,46,49,50,43,44,49,50,43,44,47,50,43,46,48,51,43,47,49,51,
+  43,45,49,51,43,45,47,51,43,51,51,51,43,43,51,51,43,43,43,51,43,47,50,54,43,48,52,54,43,45,52,54,
+  43,45,49,54,43,54,54,54,43,43,54,54,43,43,43,54,43,48,52,57,43,50,54,57,43,46,54,57,43,46,50,57,
+  43,57,57,57,43,43,57,57,43,43,43,57,43,49,54,60,43,51,56,60,43,47,56,60,43,47,52,60,43,60,60,60,
+  43,43,60,60,43,43,43,60,43,50,56,63,43,53,58,63,43,48,58,63,43,48,53,63,43,63,63,63,43,43,63,63,
+  43,43,43,63,44,45,45,46,44,45,46,47,44,46,47,48,44,45,47,48,44,45,46,48,44,46,47,49,44,46,48,49,
+  44,45,48,49,44,45,47,49,44,46,48,50,44,47,49,50,44,45,49,50,44,45,47,50,44,50,50,50,44,44,50,50,
+  44,44,44,50,44,47,48,51,44,47,50,51,44,45,50,51,44,45,48,51,44,47,49,52,44,48,50,52,44,46,50,52,
+  44,46,48,52,44,52,52,52,44,44,52,52,44,44,44,52,44,48,51,55,44,49,53,55,44,46,53,55,44,46,50,55,
+  44,55,55,55,44,44,55,55,44,44,44,55,44,49,53,58,44,51,55,58,44,47,55,58,44,47,51,58,44,58,58,58,
+  44,44,58,58,44,44,44,58,44,50,55,61,44,52,57,61,44,48,57,61,44,48,53,61,44,61,61,61,44,44,61,61,
+  44,44,44,61,45,46,46,47,45,46,47,48,45,47,48,49,45,46,48,49,45,46,47,49,45,47,48,50,45,47,49,50,
+  45,46,49,50,45,46,48,50,45,47,49,51,45,48,50,51,45,46,50,51,45,46,48,51,45,51,51,51,45,45,51,51,
+  45,45,45,51,45,48,49,52,45,48,51,52,45,46,51,52,45,46,49,52,45,48,50,53,45,49,51,53,45,47,51,53,
+  45,47,49,53,45,53,53,53,45,45,53,53,45,45,45,53,45,49,52,56,45,50,54,56,45,47,54,56,45,47,51,56,
+  45,56,56,56,45,45,56,56,45,45,45,56,45,50,54,59,45,52,56,59,45,48,56,59,45,48,52,59,45,59,59,59,
+  45,45,59,59,45,45,45,59,45,51,56,62,45,53,58,62,45,49,58,62,45,49,54,62,45,62,62,62,45,45,62,62,
+  45,45,45,62,46,47,47,48,46,47,48,49,46,48,49,50,46,47,49,50,46,47,48,50,46,48,49,51,46,48,50,51,
+  46,47,50,51,46,47,49,51,46,48,50,52,46,49,51,52,46,47,51,52,46,47,49,52,46,52,52,52,46,46,52,52,
+  46,46,46,52,46,49,50,53,46,49,52,53,46,47,52,53,46,47,50,53,46,49,51,54,46,50,52,54,46,48,52,54,
+  46,48,50,54,46,54,54,54,46,46,54,54,46,46,46,54,46,50,53,57,46,51,55,57,46,48,55,57,46,48,52,57,
+  46,57,57,57,46,46,57,57,46,46,46,57,46,51,55,60,46,53,57,60,46,49,57,60,46,49,53,60,46,60,60,60,
+  46,46,60,60,46,46,46,60,46,52,57,63,46,54,59,63,46,50,59,63,46,50,55,63,46,63,63,63,46,46,63,63,
+  46,46,46,63,47,48,48,49,47,48,49,50,47,49,50,51,47,48,50,51,47,48,49,51,47,49,50,52,47,49,51,52,
+  47,48,51,52,47,48,50,52,47,49,51,53,47,50,52,53,47,48,52,53,47,48,50,53,47,53,53,53,47,47,53,53,
+  47,47,47,53,47,50,51,54,47,50,53,54,47,48,53,54,47,48,51,54,47,50,52,55,47,51,53,55,47,49,53,55,
+  47,49,51,55,47,55,55,55,47,47,55,55,47,47,47,55,47,51,54,58,47,52,56,58,47,49,56,58,47,49,53,58,
+  47,58,58,58,47,47,58,58,47,47,47,58,47,52,56,61,47,54,58,61,47,50,58,61,47,50,54,61,47,61,61,61,
+  47,47,61,61,47,47,47,61,48,49,49,50,48,49,50,51,48,50,51,52,48,49,51,52,48,49,50,52,48,50,51,53,
+  48,50,52,53,48,49,52,53,48,49,51,53,48,50,52,54,48,51,53,54,48,49,53,54,48,49,51,54,48,54,54,54,
+  48,48,54,54,48,48,48,54,48,51,52,55,48,51,54,55,48,49,54,55,48,49,52,55,48,51,53,56,48,52,54,56,
+  48,50,54,56,48,50,52,56,48,56,56,56,48,48,56,56,48,48,48,56,48,52,55,59,48,53,57,59,48,50,57,59,
+  48,50,54,59,48,59,59,59,48,48,59,59,48,48,48,59,48,53,57,62,48,55,59,62,48,51,59,62,48,51,55,62,
+  48,62,62,62,48,48,62,62,48,48,48,62,49,50,50,51,49,50,51,52,49,51,52,53,49,50,52,53,49,50,51,53,
+  49,51,52,54,49,51,53,54,49,50,53,54,49,50,52,54,49,51,53,55,49,52,54,55,49,50,54,55,49,50,52,55,
+  49,55,55,55,49,49,55,55,49,49,49,55,49,52,53,56,49,52,55,56,49,50,55,56,49,50,53,56,49,52,54,57,
+  49,53,55,57,49,51,55,57,49,51,53,57,49,57,57,57,49,49,57,57,49,49,49,57,49,53,56,60,49,54,58,60,
+  49,51,58,60,49,51,55,60,49,60,60,60,49,49,60,60,49,49,49,60,49,54,58,63,49,56,60,63,49,52,60,63,
+  49,52,56,63,49,63,63,63,49,49,63,63,49,49,49,63,50,51,51,52,50,51,52,53,50,52,53,54,50,51,53,54,
+  50,51,52,54,50,52,53,55,50,52,54,55,50,51,54,55,50,51,53,55,50,52,54,56,50,53,55,56,50,51,55,56,
+  50,51,53,56,50,56,56,56,50,50,56,56,50,50,50,56,50,53,54,57,50,53,56,57,50,51,56,57,50,51,54,57,
+  50,53,55,58,50,54,56,58,50,52,56,58,50,52,54,58,50,58,58,58,50,50,58,58,50,50,50,58,50,54,57,61,
+  50,55,59,61,50,52,59,61,50,52,56,61,50,61,61,61,50,50,61,61,50,50,50,61,51,52,52,53,51,52,53,54,
+  51,53,54,55,51,52,54,55,51,52,53,55,51,53,54,56,51,53,55,56,51,52,55,56,51,52,54,56,51,53,55,57,
+  51,54,56,57,51,52,56,57,51,52,54,57,51,57,57,57,51,51,57,57,51,51,51,57,51,54,55,58,51,54,57,58,
+  51,52,57,58,51,52,55,58,51,54,56,59,51,55,57,59,51,53,57,59,51,53,55,59,51,59,59,59,51,51,59,59,
+  51,51,51,59,51,55,58,62,51,56,60,62,51,53,60,62,51,53,57,62,51,62,62,62,51,51,62,62,51,51,51,62,
+  52,53,53,54,52,53,54,55,52,54,55,56,52,53,55,56,52,53,54,56,52,54,55,57,52,54,56,57,52,53,56,57,
+  52,53,55,57,52,54,56,58,52,55,57,58,52,53,57,58,52,53,55,58,52,58,58,58,52,52,58,58,52,52,52,58,
+  52,55,56,59,52,55,58,59,52,53,58,59,52,53,56,59,52,55,57,60,52,56,58,60,52,54,58,60,52,54,56,60,
+  52,60,60,60,52,52,60,60,52,52,52,60,52,56,59,63,52,57,61,63,52,54,61,63,52,54,58,63,52,63,63,63,
+  52,52,63,63,52,52,52,63,53,54,54,55,53,54,55,56,53,55,56,57,53,54,56,57,53,54,55,57,53,55,56,58,
+  53,55,57,58,53,54,57,58,53,54,56,58,53,55,57,59,53,56,58,59,53,54,58,59,53,54,56,59,53,59,59,59,
+  53,53,59,59,53,53,53,59,53,56,57,60,53,56,59,60,53,54,59,60,53,54,57,60,53,56,58,61,53,57,59,61,
+  53,55,59,61,53,55,57,61,53,61,61,61,53,53,61,61,53,53,53,61,54,55,55,56,54,55,56,57,54,56,57,58,
+  54,55,57,58,54,55,56,58,54,56,57,59,54,56,58,59,54,55,58,59,54,55,57,59,54,56,58,60,54,57,59,60,
+  54,55,59,60,54,55,57,60,54,60,60,60,54,54,60,60,54,54,54,60,54,57,58,61,54,57,60,61,54,55,60,61,
+  54,55,58,61,54,57,59,62,54,58,60,62,54,56,60,62,54,56,58,62,54,62,62,62,54,54,62,62,54,54,54,62,
+  55,56,56,57,55,56,57,58,55,57,58,59,55,56,58,59,55,56,57,59,55,57,58,60,55,57,59,60,55,56,59,60,
+  55,56,58,60,55,57,59,61,55,58,60,61,55,56,60,61,55,56,58,61,55,61,61,61,55,55,61,61,55,55,55,61,
+  55,58,59,62,55,58,61,62,55,56,61,62,55,56,59,62,55,58,60,63,55,59,61,63,55,57,61,63,55,57,59,63,
+  55,63,63,63,55,55,63,63,55,55,55,63,56,57,57,58,56,57,58,59,56,58,59,60,56,57,59,60,56,57,58,60,
+  56,58,59,61,56,58,60,61,56,57,60,61,56,57,59,61,56,58,60,62,56,59,61,62,56,57,61,62,56,57,59,62,
+  56,62,62,62,56,56,62,62,56,56,56,62,56,59,60,63,56,59,62,63,56,57,62,63,56,57,60,63,57,58,58,59,
+  57,58,59,60,57,59,60,61,57,58,60,61,57,58,59,61,57,59,60,62,57,59,61,62,57,58,61,62,57,58,60,62,
+  57,59,61,63,57,60,62,63,57,58,62,63,57,58,60,63,57,63,63,63,57,57,63,63,57,57,57,63,58,59,59,60,
+  58,59,60,61,58,60,61,62,58,59,61,62,58,59,60,62,58,60,61,63,58,60,62,63,58,59,62,63,58,59,61,63,
+  59,60,60,61,59,60,61,62,59,61,62,63,59,60,62,63,59,60,61,63,60,61,61,62,60,61,62,63,61,62,62,63);
+
+{ ---- IBM UltiMotion (libavcodec/ulti.c) ---- }
+Const
+ G2ULLum: Array[0..63] Of Byte=(
+  $10,$13,$17,$1A,$1E,$21,$25,$28,$2C,$2F,$33,$36,$3A,$3D,$41,$44,
+  $48,$4B,$4F,$52,$56,$59,$5C,$60,$63,$67,$6A,$6E,$71,$75,$78,$7C,
+  $7F,$83,$86,$8A,$8D,$91,$94,$98,$9B,$9F,$A2,$A5,$A9,$AC,$B0,$B3,
+  $B7,$BA,$BE,$C1,$C5,$C8,$CC,$CF,$D3,$D6,$DA,$DD,$E1,$E4,$E8,$EB);
+ G2ULChr: Array[0..15] Of Byte=($60,$67,$6D,$73,$7A,$80,$86,$8D,$93,$99,$A0,$A6,$AC,$B3,$B9,$C0);
+ G2ULBC: Array[0..7] Of Byte=(0,0,0,4,4,4,4,0);
+ G2ULAng: Array[0..3] Of Byte=(0,2,6,12);
+ G2ULGrad: Array[0..8,0..15] Of Byte=(
+  (0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3),
+  (1,2,3,3,0,1,2,3,0,1,2,3,0,0,1,2),
+  (1,2,3,3,1,2,2,3,0,1,1,2,0,0,1,2),
+  (2,3,3,3,1,2,2,3,0,1,1,2,0,0,0,1),
+  (3,3,3,3,2,2,2,2,1,1,1,1,0,0,0,0),
+  (3,3,3,2,3,2,2,1,2,1,1,0,1,0,0,0),
+  (3,3,2,2,3,2,1,1,2,2,1,0,1,1,0,0),
+  (3,3,2,1,3,2,1,0,3,2,1,0,2,1,0,0),
+  (0,0,1,1,0,0,1,1,2,2,3,3,2,2,3,3));
+Var
+ G2ULY,G2ULU,G2ULV: PEABuffer; G2ULYS,G2ULCS,G2ULBlocks,G2ULW,G2ULH: LongInt;
+
+Procedure G2ULConv(X,Y: LongInt; Const Luma: Array Of Byte; Chroma: LongInt);
+Var I,Yp,Cp: LongInt;
+Begin
+ Yp:=X+Y*G2ULYS; Cp:=(X Div 4)+(Y Div 4)*G2ULCS;
+ G2ULU^[Cp]:=G2ULChr[Chroma Shr 4];
+ G2ULV^[Cp]:=G2ULChr[Chroma And 15];
+ For I:=0 To 15 Do Begin
+  G2ULY^[Yp+(I And 3)]:=G2ULLum[Luma[I] And 63];
+  If (I And 3)=3 Then Inc(Yp,G2ULYS);
+ End;
+End;
+
+Procedure G2ULGradBlk(X,Y: LongInt; Var Yv: Array Of Byte; Chroma,Angle: LongInt);
+Var Luma: Array[0..15] Of Byte; T,I,Ai: LongInt;
+Begin
+ If (Angle And 8)<>0 Then Begin
+  Angle:=Angle And 7;
+  T:=Yv[0]; Yv[0]:=Yv[3]; Yv[3]:=T;
+  T:=Yv[1]; Yv[1]:=Yv[2]; Yv[2]:=T;
+ End;
+ If Angle<=7 Then Ai:=Angle Else Ai:=8;
+ For I:=0 To 15 Do Luma[I]:=Yv[G2ULGrad[Ai,I]];
+ G2ULConv(X,Y,Luma,Chroma);
+End;
+
+Function G2ULFrame(Pk: PEABuffer; Sz: LongInt): Boolean;
+Var
+ Modifier,Uniq,Mode,Blocks,X,Y,I,Idx,Code,Cf,Angle,Tx,Ty,Chroma,Tmp,Skip,S,Z,Z2: LongInt;
+ Done: Boolean; Yv: Array[0..3] Of Byte; Luma: Array[0..15] Of Byte;
+Function GB: LongInt;
+Begin GB:=G2AB(S); If S<G2ASz Then Inc(S); End;
+Function Left: LongInt;
+Begin Left:=G2ASz-S; End;
+Function BE16: LongInt;
+Var A: LongInt;
+Begin A:=GB; BE16:=A*256+GB; End;
+Function BE24: LongInt;
+Var A: LongInt;
+Begin A:=BE16; BE24:=A*256+GB; End;
+Begin
+ G2ULFrame:=False;
+ Modifier:=0; Uniq:=0; Mode:=0; Blocks:=0; Done:=False; X:=0; Y:=0; S:=0;
+ While Not Done Do Begin
+  If (Blocks>=G2ULBlocks) Or (Y>=G2ULH) Then Break;
+  If Left<1 Then Exit;
+  Idx:=GB;
+  If (Idx And $F8)=$70 Then Begin
+   Case Idx Of
+    $70: Modifier:=GB;
+    $71: Uniq:=1;
+    $72: Mode:=1-Mode;
+    $73: Done:=True;
+    $74: Begin
+      Skip:=GB;
+      If Blocks+Skip<G2ULBlocks Then Begin
+       Inc(Blocks,Skip); Inc(X,Skip*8);
+       While X>=G2ULW Do Begin Dec(X,G2ULW); Inc(Y,8); End;
+      End;
+     End;
+   End;
+  End Else Begin
+   Angle:=0; Chroma:=0;
+   If (Mode<>0) Or (Uniq<>0) Then Begin Uniq:=0; Cf:=1; Chroma:=0; End
+   Else Begin
+    Cf:=0;
+    If Idx<>0 Then Chroma:=GB;
+   End;
+   For I:=0 To 3 Do Begin
+    Code:=(Idx Shr (6-I*2)) And 3;
+    If Code=0 Then Continue;
+    If Cf<>0 Then Chroma:=GB;
+    Tx:=X+G2ULBC[I*2]; Ty:=Y+G2ULBC[I*2+1];
+    Case Code Of
+     1: Begin
+       Tmp:=GB;
+       Angle:=G2ULAng[(Tmp Shr 6) And 3];
+       Yv[0]:=Tmp And $3F; Yv[1]:=Yv[0];
+       If Angle<>0 Then Begin
+        Yv[2]:=Yv[0]+1; If Yv[2]>$3F Then Yv[2]:=$3F;
+        Yv[3]:=Yv[2];
+       End Else Begin Yv[2]:=Yv[0]; Yv[3]:=Yv[0]; End;
+      End;
+     2: If Modifier<>0 Then Begin
+       Tmp:=BE24;
+       Yv[0]:=(Tmp Shr 18) And $3F; Yv[1]:=(Tmp Shr 12) And $3F; Yv[2]:=(Tmp Shr 6) And $3F; Yv[3]:=Tmp And $3F;
+       Angle:=16;
+      End Else Begin
+       Tmp:=BE16;
+       Angle:=(Tmp Shr 12) And 15;
+       Tmp:=(Tmp And $FFF) Shl 2;
+       Yv[0]:=G2ULCB[Tmp]; Yv[1]:=G2ULCB[Tmp+1]; Yv[2]:=G2ULCB[Tmp+2]; Yv[3]:=G2ULCB[Tmp+3];
+      End;
+     3: If Modifier<>0 Then Begin
+       If Left<12 Then Exit;
+       For Z:=0 To 3 Do Begin
+        Tmp:=BE24;
+        Luma[Z*4]:=(Tmp Shr 18) And $3F; Luma[Z*4+1]:=(Tmp Shr 12) And $3F; Luma[Z*4+2]:=(Tmp Shr 6) And $3F; Luma[Z*4+3]:=Tmp And $3F;
+       End;
+       G2ULConv(Tx,Ty,Luma,Chroma);
+      End Else Begin
+       If Left<4 Then Exit;
+       Tmp:=GB;
+       If (Tmp And $80)<>0 Then Begin
+        Angle:=(Tmp Shr 4) And 7;
+        Tmp:=(Tmp Shl 8)+GB;
+        Yv[0]:=(Tmp Shr 6) And $3F; Yv[1]:=Tmp And $3F;
+        Yv[2]:=GB And $3F; Yv[3]:=GB And $3F;
+        G2ULGradBlk(Tx,Ty,Yv,Chroma,Angle);
+       End Else Begin
+        Z:=GB;
+        Yv[0]:=GB And $3F; Yv[1]:=GB And $3F;
+        Tmp:=Tmp And 255;
+        For Z2:=0 To 7 Do Begin
+         If (Tmp And ($80 Shr Z2))<>0 Then Luma[Z2]:=Yv[1] Else Luma[Z2]:=Yv[0];
+        End;
+        For Z2:=0 To 7 Do Begin
+         If (Z And ($80 Shr Z2))<>0 Then Luma[8+Z2]:=Yv[1] Else Luma[8+Z2]:=Yv[0];
+        End;
+        G2ULConv(Tx,Ty,Luma,Chroma);
+       End;
+      End;
+    End;
+    If Code<>3 Then G2ULGradBlk(Tx,Ty,Yv,Chroma,Angle);
+   End;
+   Inc(Blocks); Inc(X,8);
+   If X>=G2ULW Then Begin X:=0; Inc(Y,8); End;
+  End;
+ End;
+ G2ULFrame:=True;
+End;
+
+Function G2ULWrap(Pk: PEABuffer; Sz: LongInt): Boolean;
+Var R: LongInt;
+Begin
+ G2ULWrap:=False;
+ If Not G2ULFrame(Pk,Sz) Then Exit;
+ For R:=0 To G2ULH-1 Do Move(G2ULY^[R*G2ULYS],G2AFr^[R*G2ULW],G2ULW);
+ For R:=0 To NVCH-1 Do Begin
+  Move(G2ULU^[R*G2ULCS],G2AFr^[G2ULW*G2ULH+R*NVCW],NVCW);
+  Move(G2ULV^[R*G2ULCS],G2AFr^[G2ULW*G2ULH+NVCW*NVCH+R*NVCW],NVCW);
+ End;
+ G2ULWrap:=True;
+End;
+
+Procedure DecodeG2UL(Const Source,Target: String; Mode: LongInt);
+Begin
+ QXOpen(Source);
+ G2ULW:=QXW; G2ULH:=QXH; G2ULBlocks:=(G2ULW Div 8)*(G2ULH Div 8);
+ If G2ULBlocks=0 Then Fail('ultimotion: dimensions invalides.');
+ G2ULYS:=G2ULW+64; G2ULCS:=(G2ULW Div 4)+32;
+ GetMem(G2ULY,G2ULYS*(G2ULH+32)); FillChar(G2ULY^,G2ULYS*(G2ULH+32),0);
+ GetMem(G2ULU,G2ULCS*(G2ULH Div 4+16)); FillChar(G2ULU^,G2ULCS*(G2ULH Div 4+16),0);
+ GetMem(G2ULV,G2ULCS*(G2ULH Div 4+16)); FillChar(G2ULV^,G2ULCS*(G2ULH Div 4+16),0);
+ G2AYUVBegin(Mode,Target,QXW,QXH,2,2,'C410');
+ G2ADrive(G2ULWrap);
+ QXClose; NVFinish('ultimotion');
+End;
+
+{ ---- Y4M (yuv420p) -> BGR24/BGR0 pour les encodeurs zlib et zmbv ; AVI en memoire ---- }
+Var
+ G2YW,G2YH,G2YFN,G2YFD,G2YCur,G2YLimit,G2YCW,G2YCH: LongInt; G2YYp,G2YUp,G2YVp: PEABuffer;
+ G2YTab: Array[0..2047] Of Byte; G2YCrv,G2YCbu,G2YCgu,G2YCgv: Int64; G2YYoffs: LongInt;
+
+Function G2YSar(V: Int64; Nn: LongInt): Int64;
+Begin If V>=0 Then G2YSar:=V Shr Nn Else G2YSar:=-((-V+(Int64(1) Shl Nn)-1) Shr Nn); End;
+
+Procedure G2YOpen(Const Source: String);
+Var
+ Cy,Oy,Yb: Int64; Ix,K,Code: LongInt; Line,Token: String; H: Array[0..3] Of Byte; V: LongInt;
+Begin
+ Cy:=(Int64(65536)*255) Div 219; Oy:=Int64(16) Shl 16;
+ G2YCrv:=104597; G2YCbu:=132201;
+ G2YCrv:=((G2YCrv Shl 16)+$8000) Div Cy; G2YCbu:=((G2YCbu Shl 16)+$8000) Div Cy;
+ G2YCgu:=(Int64(-25675)*65536+$8000) Div Cy; G2YCgv:=(Int64(-53279)*65536+$8000) Div Cy;
+ G2YYoffs:=326+512; Yb:=-(Int64(384) Shl 16)-512*Cy-Oy;
+ For Ix:=0 To 2047 Do Begin
+  V:=LongInt(G2YSar(Yb+$8000,16)); If V<0 Then V:=0 Else If V>255 Then V:=255;
+  G2YTab[Ix]:=V; Yb:=Yb+Cy;
+ End;
+ OpenRead(Source); G2YLimit:=InputSize; G2YCur:=0; Line:='';
+ While G2YCur<G2YLimit Do Begin ReadAt(G2YCur,H,1); Inc(G2YCur); If H[0]=10 Then Break; If Length(Line)<250 Then Line:=Line+Chr(H[0]); End;
+ If Copy(Line,1,9)<>'YUV4MPEG2' Then Fail('encodeur: entree Y4M requise.');
+ G2YW:=0; G2YH:=0; G2YFN:=25; G2YFD:=1; Line:=Copy(Line,11,255);
+ While Line<>'' Do Begin
+  K:=Pos(' ',Line); If K=0 Then K:=Length(Line)+1;
+  Token:=Copy(Line,1,K-1); Line:=Copy(Line,K+1,255);
+  If Token='' Then Continue;
+  Case Token[1] Of
+   'W': Val(Copy(Token,2,20),G2YW,Code);
+   'H': Val(Copy(Token,2,20),G2YH,Code);
+   'F': Begin K:=Pos(':',Token); If K>0 Then Begin Val(Copy(Token,2,K-2),G2YFN,Code); Val(Copy(Token,K+1,20),G2YFD,Code); End; End;
+   'C': If (Token<>'C420') And (Token<>'C420jpeg') And (Token<>'C420mpeg2') And (Token<>'C420paldv') Then Fail('encodeur: Y4M YUV420 8 bits requis.');
+  End;
+ End;
+ If (G2YW<1) Or (G2YH<1) Or (G2YW>16000) Or (G2YH>16000) Then Fail('encodeur: dimensions Y4M incorrectes.');
+ If (G2YFN<=0) Or (G2YFD<=0) Then Begin G2YFN:=25; G2YFD:=1; End;
+ G2YCW:=(G2YW+1) Div 2; G2YCH:=(G2YH+1) Div 2;
+ GetMem(G2YYp,G2YW*G2YH+16); GetMem(G2YUp,G2YCW*G2YCH+16); GetMem(G2YVp,G2YCW*G2YCH+16);
+End;
+
+Procedure G2YReadPlane(P: PEABuffer; N: LongInt);
+Var At,Q: LongInt;
+Begin
+ At:=0;
+ While At<N Do Begin
+  If N-At>60000 Then Q:=60000 Else Q:=N-At;
+  ReadAt(G2YCur+At,P^[At],Q); Inc(At,Q);
+ End;
+ Inc(G2YCur,N);
+End;
+
+{ image suivante convertie en BGR24 (Bpp=3) ou BGR0 (Bpp=4), de haut en bas ; False en fin de fichier }
+Function G2YNext(Out: PEABuffer; Bpp: LongInt): Boolean;
+Var H: Array[0..4] Of Byte; X,Y,Yv,Uv,Vv,Rg,Gg,Bg,O: LongInt;
+Begin
+ G2YNext:=False;
+ If G2YCur+6+G2YW*G2YH+2*G2YCW*G2YCH>G2YLimit Then Exit;
+ ReadAt(G2YCur,H,5); If (H[0]<>70) Or (H[1]<>82) Then Exit;
+ Inc(G2YCur,5);
+ While G2YCur<G2YLimit Do Begin ReadAt(G2YCur,H,1); Inc(G2YCur); If H[0]=10 Then Break; End;
+ If G2YCur+G2YW*G2YH+2*G2YCW*G2YCH>G2YLimit Then Exit;
+ G2YReadPlane(G2YYp,G2YW*G2YH); G2YReadPlane(G2YUp,G2YCW*G2YCH); G2YReadPlane(G2YVp,G2YCW*G2YCH);
+ For Y:=0 To G2YH-1 Do For X:=0 To G2YW-1 Do Begin
+  Yv:=G2YYp^[Y*G2YW+X]; Uv:=G2YUp^[(Y Shr 1)*G2YCW+(X Shr 1)]; Vv:=G2YVp^[(Y Shr 1)*G2YCW+(X Shr 1)];
+  Rg:=G2YTab[G2YYoffs-G2YSar(G2YCrv,9)+G2YSar(Vv*G2YCrv,16)+Yv];
+  Gg:=G2YTab[G2YYoffs-G2YSar(G2YCgu,9)+G2YSar(Uv*G2YCgu,16)-G2YSar(G2YCgv,9)+G2YSar(Vv*G2YCgv,16)+Yv];
+  Bg:=G2YTab[G2YYoffs-G2YSar(G2YCbu,9)+G2YSar(Uv*G2YCbu,16)+Yv];
+  O:=(Y*G2YW+X)*Bpp;
+  Out^[O]:=Bg; Out^[O+1]:=Gg; Out^[O+2]:=Rg;
+  If Bpp=4 Then Out^[O+3]:=255;
+ End;
+ G2YNext:=True;
+End;
+
+{ ecriture AVI en memoire (meme en-tete que AWBegin) }
+Var
+ G2OB: PEABuffer; G2OBLen,G2OBCap: LongInt; G2OSizes: PALLong; G2OKeys: PEABuffer; G2OFrames,G2OMaxPk,G2OMovi,G2OCapF: LongInt;
+
+Procedure G2OEnsure(N: LongInt);
+Var NB: PEABuffer; NC: LongInt;
+Begin
+ If G2OBLen+N<=G2OBCap Then Exit;
+ NC:=G2OBCap*2; If NC<G2OBLen+N+65536 Then NC:=G2OBLen+N+65536;
+ GetMem(NB,NC); If G2OBLen>0 Then Move(G2OB^,NB^,G2OBLen);
+ If G2OB<>Nil Then FreeMem(G2OB,G2OBCap);
+ G2OB:=NB; G2OBCap:=NC;
+End;
+Procedure G2O8(V: LongInt);Begin G2OEnsure(1); G2OB^[G2OBLen]:=V And 255; Inc(G2OBLen); End;
+Procedure G2O16(V: LongInt);Begin G2O8(V); G2O8(V Shr 8); End;
+Procedure G2O32(V: LongInt);Begin G2O16(V And $FFFF); G2O16((V Shr 16) And $FFFF); End;
+Procedure G2OTag(Const S: String);
+Var I: Integer;
+Begin For I:=1 To Length(S) Do G2O8(Ord(S[I])); End;
+Procedure G2OZ(N: LongInt);Begin While N>0 Do Begin G2O8(0); Dec(N); End; End;
+Procedure G2OPatch(At,V: LongInt);
+Begin G2OB^[At]:=V And 255; G2OB^[At+1]:=(V Shr 8) And 255; G2OB^[At+2]:=(V Shr 16) And 255; G2OB^[At+3]:=(V Shr 24) And 255; End;
+
+Procedure G2AviBegin(Const Fourcc: String; W,H,Rate,Scale,Bpp: LongInt; Extra: PEABuffer; ExtraLen: LongInt);
+Var I,Aw,Ah,G,K,Strf,Strl,Hdrl: LongInt;
+Begin
+ G2OB:=Nil; G2OBLen:=0; G2OBCap:=0; G2OFrames:=0; G2OMaxPk:=0; G2OCapF:=1024;
+ GetMem(G2OSizes,G2OCapF*4); GetMem(G2OKeys,G2OCapF);
+ Strf:=40+ExtraLen+(ExtraLen And 1);
+ Strl:=4+(8+56)+(8+Strf)+(8+4120)+(8+68);
+ Hdrl:=4+(8+56)+(8+Strl)+(8+260);
+ G2OTag('RIFF'); G2O32(0); G2OTag('AVI ');
+ G2OTag('LIST'); G2O32(Hdrl); G2OTag('hdrl');
+ G2OTag('avih'); G2O32(56); G2O32(Trunc(1000000.0*Scale/Rate)); G2O32(25000); G2O32(0); G2O32(2320); G2O32(0); G2O32(0); G2O32(1);
+ G2O32(1048576); G2O32(W); G2O32(H); G2O32(0); G2O32(0); G2O32(0); G2O32(0);
+ G2OTag('LIST'); G2O32(Strl); G2OTag('strl');
+ G2OTag('strh'); G2O32(56); G2OTag('vids'); G2OTag(Fourcc);
+ G2O32(0); G2O16(0); G2O16(0); G2O32(0); G2O32(Scale); G2O32(Rate); G2O32(0); G2O32(0); G2O32(0); G2O32(-1); G2O32(0);
+ G2O16(0); G2O16(0); G2O16(W); G2O16(H);
+ G2OTag('strf'); G2O32(40+ExtraLen); G2O32(40+ExtraLen); G2O32(W); G2O32(H); G2O16(1); G2O16(Bpp);
+ G2OTag(Fourcc); G2O32(W*H*Bpp Div 8); G2O32(0); G2O32(0); G2O32(0); G2O32(0);
+ For I:=0 To ExtraLen-1 Do G2O8(Extra^[I]);
+ If Odd(ExtraLen) Then G2O8(0);
+ G2OTag('JUNK'); G2O32(4120); G2O16(4); G2O16(0); G2O32(0); G2OTag('00dc'); G2OZ(4120-12);
+ G2OTag('vprp'); G2O32(68); G2O32(0); G2O32(0); G2O32((2*Rate+Scale-1) Div (2*Scale));
+ G2O32(W); G2O32(H);
+ Aw:=W; Ah:=H; G:=Aw; K:=Ah; While K<>0 Do Begin I:=G Mod K; G:=K; K:=I; End; Aw:=Aw Div G; Ah:=Ah Div G;
+ G2O32((Aw Shl 16) Or Ah); G2O32(W); G2O32(H); G2O32(1);
+ G2O32(H); G2O32(W); G2O32(H); G2O32(W); G2O32(0); G2O32(0); G2O32(0); G2O32(0);
+ G2OTag('JUNK'); G2O32(260); G2OTag('odml'); G2OTag('dmlh'); G2O32(248); G2OZ(248);
+ G2OTag('LIST'); G2O32(26); G2OTag('INFO'); G2OTag('ISFT'); G2O32(14);
+ G2OTag('Lavf'); G2OTag('60.1'); G2OTag('6.10'); G2O8(48); G2O8(0);
+ G2OTag('JUNK'); G2O32(1016); G2OZ(1016);
+ G2OTag('LIST'); G2O32(0); G2OMovi:=G2OBLen-8; G2OTag('movi');
+End;
+
+Procedure G2AviFrame(P: PEABuffer; Len: LongInt; Key: Boolean);
+Var NS: PALLong; NK: PEABuffer;
+Begin
+ G2OTag('00dc'); G2O32(Len);
+ G2OEnsure(Len+1);
+ If Len>0 Then Move(P^,G2OB^[G2OBLen],Len);
+ Inc(G2OBLen,Len);
+ If Odd(Len) Then G2O8(0);
+ If G2OFrames>=G2OCapF Then Begin
+  GetMem(NS,G2OCapF*8); Move(G2OSizes^,NS^,G2OCapF*4); FreeMem(G2OSizes,G2OCapF*4); G2OSizes:=NS;
+  GetMem(NK,G2OCapF*2); Move(G2OKeys^,NK^,G2OCapF); FreeMem(G2OKeys,G2OCapF); G2OKeys:=NK;
+  G2OCapF:=G2OCapF*2;
+ End;
+ G2OSizes^[G2OFrames]:=Len; If Key Then G2OKeys^[G2OFrames]:=1 Else G2OKeys^[G2OFrames]:=0;
+ Inc(G2OFrames);
+ If Len>G2OMaxPk Then G2OMaxPk:=Len;
+End;
+
+Procedure G2AviEnd(Const Target: String);
+Var I,K,Fix,At,Q: LongInt;
+Begin
+ Fix:=G2OBLen-(G2OMovi+8+4);
+ G2OTag('idx1'); G2O32(16*G2OFrames); K:=4;
+ For I:=0 To G2OFrames-1 Do Begin
+  G2OTag('00dc'); If G2OKeys^[I]<>0 Then G2O32($10) Else G2O32(0); G2O32(K); G2O32(G2OSizes^[I]); Inc(K,8+G2OSizes^[I]+(G2OSizes^[I] And 1));
+ End;
+ G2OPatch(4,G2OBLen-8); G2OPatch(48,G2OFrames); G2OPatch(140,G2OFrames); G2OPatch(144,G2OMaxPk); G2OPatch(G2OMovi+4,4+Fix);
+ OpenWrite(Target);
+ At:=0;
+ While At<G2OBLen Do Begin
+  If G2OBLen-At>32768 Then Q:=32768 Else Q:=G2OBLen-At;
+  WriteBytes(G2OB^[At],Q); Inc(At,Q);
+ End;
+ CloseWrite;
+ FreeMem(G2OB,G2OBCap); G2OB:=Nil;
+End;
+
+{ ---- LCL ZLIB (libavcodec/lcldec.c, lclenc.c) ---- }
+Var
+ G2LCImg,G2LCComp,G2LCFlags,G2LCDSize,G2LCMaxDSize: LongInt; G2LCBuf: PEABuffer;
+ G2LCW,G2LCH,G2LCSubX,G2LCSubY,G2LCCW,G2LCCH: LongInt;
+ G2LCEnc: PEABuffer; G2LCEncLen: LongInt;
+
+Function G2LCRd(At: LongInt): LongInt;
+Begin
+ If (At<0) Or (At>=G2LCEncLen) Then G2LCRd:=0 Else G2LCRd:=G2LCEnc^[At];
+End;
+Procedure G2LCWr(At,V: LongInt);
+Begin
+ If (At>=0) And (At<G2LCEncLen) Then G2LCEnc^[At]:=V And 255;
+End;
+
+{ retourne -1 en erreur, sinon la longueur produite }
+Function G2LCZDecomp(Src: PEABuffer; SrcLen,Offset,Expected: LongInt): LongInt;
+Var Res,OutLen: LongInt;
+Begin
+ G2LCZDecomp:=-1;
+ If (SrcLen<0) Or (Offset<0) Or (Offset>G2LCDSize) Then Exit;
+ OutLen:=0;
+ Res:=NVInflate(Src,SrcLen,PEABuffer(@G2LCBuf^[Offset]),G2LCDSize-Offset,OutLen);
+ If Res<>0 Then Exit;
+ If Expected<>OutLen Then Begin
+  If Expected>OutLen Then G2LCZDecomp:=OutLen;
+  Exit;
+ End;
+ G2LCZDecomp:=OutLen;
+End;
+
+Function G2LCFrame(Pk: PEABuffer; Sz: LongInt): Boolean;
+Var
+ Len,Row,Col,PP,Yq,Y1q,Uq,Vq,Uqvq,Ret,MIn,MOut,Lines,E,Linesz,Yo,Uo,Vo,Cw: LongInt;
+ Raw: Boolean; W,H: LongInt;
+Function R16(At: LongInt): LongInt;
+Begin R16:=G2LCRd(At)+G2LCRd(At+1)*256; End;
+Begin
+ G2LCFrame:=False; W:=G2LCW; H:=G2LCH; Len:=Sz; E:=0; Raw:=False;
+ G2LCEnc:=Pk; G2LCEncLen:=Sz;
+ If (G2LCComp=-1) And (G2LCImg=2) And (Len=W*H*3) Then Begin
+  If (G2LCFlags And 4)<>0 Then Begin
+   Move(Pk^[0],G2LCBuf^[0],Len);
+   G2LCEnc:=G2LCBuf; G2LCEncLen:=G2LCMaxDSize;
+  End Else Raw:=True;
+ End Else Begin
+  If (G2LCFlags And 1)<>0 Then Begin
+   If Sz<8 Then Exit;
+   MIn:=Pk^[0]+Pk^[1]*256+Pk^[2]*65536+Pk^[3]*16777216;
+   If (MIn<0) Or (MIn>Sz-8) Then MIn:=Sz-8;
+   MOut:=Pk^[4]+Pk^[5]*256+Pk^[6]*65536+Pk^[7]*16777216;
+   If (MOut<0) Or (MOut>G2LCDSize) Then MOut:=G2LCDSize;
+   Ret:=G2LCZDecomp(PEABuffer(@Pk^[8]),MIn,0,MOut);
+   If Ret<0 Then Exit;
+   Ret:=G2LCZDecomp(PEABuffer(@Pk^[8+MIn]),Sz-8-MIn,MOut,MOut);
+   If Ret<0 Then Exit;
+   Len:=G2LCDSize;
+  End Else Begin
+   Ret:=G2LCZDecomp(Pk,Len,0,G2LCDSize);
+   If Ret<0 Then Exit;
+   Len:=Ret;
+  End;
+  G2LCEnc:=G2LCBuf; G2LCEncLen:=G2LCMaxDSize;
+ End;
+ { filtre PNG }
+ If (G2LCFlags And 4)<>0 Then Begin
+  Case G2LCImg Of
+   0,2: For Row:=0 To H-1 Do Begin
+     PP:=Row*W*3; Yq:=G2LCRd(PP); Inc(PP);
+     Uqvq:=R16(PP); Inc(PP,2);
+     For Col:=1 To W-1 Do Begin
+      Yq:=(Yq-G2LCRd(PP)) And 255; G2LCWr(PP,Yq);
+      Uqvq:=Uqvq-R16(PP+1);
+      G2LCWr(PP+1,Uqvq And 255); G2LCWr(PP+2,(Uqvq Shr 8) And 255);
+      Inc(PP,3);
+     End;
+    End;
+   1: Begin
+     PP:=0;
+     For Row:=0 To H-1 Do Begin
+      Yq:=0; Uq:=0; Vq:=0;
+      For Col:=0 To (W Div 4)-1 Do Begin
+       Yq:=(Yq-G2LCRd(PP)) And 255; G2LCWr(PP,Yq);
+       Yq:=(Yq-G2LCRd(PP+1)) And 255; G2LCWr(PP+1,Yq);
+       Yq:=(Yq-G2LCRd(PP+2)) And 255; G2LCWr(PP+2,Yq);
+       Yq:=(Yq-G2LCRd(PP+3)) And 255; G2LCWr(PP+3,Yq);
+       Uq:=(Uq-G2LCRd(PP+4)) And 255; G2LCWr(PP+4,Uq);
+       Uq:=(Uq-G2LCRd(PP+5)) And 255; G2LCWr(PP+5,Uq);
+       Vq:=(Vq-G2LCRd(PP+6)) And 255; G2LCWr(PP+6,Vq);
+       Vq:=(Vq-G2LCRd(PP+7)) And 255; G2LCWr(PP+7,Vq);
+       Inc(PP,8);
+      End;
+     End;
+    End;
+   3: Begin
+     PP:=0;
+     For Row:=0 To H-1 Do Begin
+      Yq:=0; Uq:=0; Vq:=0;
+      For Col:=0 To (W Div 4)-1 Do Begin
+       Yq:=(Yq-G2LCRd(PP)) And 255; G2LCWr(PP,Yq);
+       Yq:=(Yq-G2LCRd(PP+1)) And 255; G2LCWr(PP+1,Yq);
+       Yq:=(Yq-G2LCRd(PP+2)) And 255; G2LCWr(PP+2,Yq);
+       Yq:=(Yq-G2LCRd(PP+3)) And 255; G2LCWr(PP+3,Yq);
+       Uq:=(Uq-G2LCRd(PP+4)) And 255; G2LCWr(PP+4,Uq);
+       Vq:=(Vq-G2LCRd(PP+5)) And 255; G2LCWr(PP+5,Vq);
+       Inc(PP,6);
+      End;
+     End;
+    End;
+   4: For Row:=0 To H-1 Do Begin
+     PP:=Row*W*2; Yq:=0; Uq:=0; Vq:=0;
+     For Col:=0 To (W Div 2)-1 Do Begin
+      Yq:=(Yq-G2LCRd(PP)) And 255; G2LCWr(PP,Yq);
+      Yq:=(Yq-G2LCRd(PP+1)) And 255; G2LCWr(PP+1,Yq);
+      Uq:=(Uq-G2LCRd(PP+2)) And 255; G2LCWr(PP+2,Uq);
+      Vq:=(Vq-G2LCRd(PP+3)) And 255; G2LCWr(PP+3,Vq);
+      Inc(PP,4);
+     End;
+    End;
+   5: For Row:=0 To (H Div 2)-1 Do Begin
+     PP:=Row*W*3; Yq:=0; Y1q:=0; Uq:=0; Vq:=0;
+     For Col:=0 To (W Div 2)-1 Do Begin
+      Yq:=(Yq-G2LCRd(PP)) And 255; G2LCWr(PP,Yq);
+      Yq:=(Yq-G2LCRd(PP+1)) And 255; G2LCWr(PP+1,Yq);
+      Y1q:=(Y1q-G2LCRd(PP+2)) And 255; G2LCWr(PP+2,Y1q);
+      Y1q:=(Y1q-G2LCRd(PP+3)) And 255; G2LCWr(PP+3,Y1q);
+      Uq:=(Uq-G2LCRd(PP+4)) And 255; G2LCWr(PP+4,Uq);
+      Vq:=(Vq-G2LCRd(PP+5)) And 255; G2LCWr(PP+5,Vq);
+      Inc(PP,6);
+     End;
+    End;
+  End;
+ End;
+ { conversion }
+ Cw:=G2LCCW;
+ Yo:=0; Uo:=W*H; Vo:=W*H+G2LCCW*G2LCCH;
+ If Raw Then Begin G2LCEnc:=Pk; G2LCEncLen:=Sz; End;
+ PP:=0;
+ Case G2LCImg Of
+  0: For Row:=0 To H-1 Do Begin
+    For Col:=0 To W-1 Do Begin
+     G2AFr^[Yo+(H-1-Row)*W+Col]:=G2LCRd(PP);
+     G2AFr^[Uo+(H-1-Row)*Cw+Col]:=(G2LCRd(PP+1)+128) And 255;
+     G2AFr^[Vo+(H-1-Row)*Cw+Col]:=(G2LCRd(PP+2)+128) And 255;
+     Inc(PP,3);
+    End;
+   End;
+  1: For Row:=0 To H-1 Do Begin
+    Col:=0;
+    While Col<=W-4 Do Begin
+     Move(G2LCEnc^[PP],G2AFr^[Yo+(H-1-Row)*W+Col],4); Inc(PP,4);
+     G2AFr^[Uo+(H-1-Row)*Cw+(Col Shr 1)]:=(G2LCRd(PP)+128) And 255;
+     G2AFr^[Uo+(H-1-Row)*Cw+(Col Shr 1)+1]:=(G2LCRd(PP+1)+128) And 255;
+     G2AFr^[Vo+(H-1-Row)*Cw+(Col Shr 1)]:=(G2LCRd(PP+2)+128) And 255;
+     G2AFr^[Vo+(H-1-Row)*Cw+(Col Shr 1)+1]:=(G2LCRd(PP+3)+128) And 255;
+     Inc(PP,4); Inc(Col,4);
+    End;
+    If (Col<>0) And (Col<W) Then Begin
+     G2AFr^[Uo+(H-1-Row)*Cw+(Col Shr 1)]:=G2AFr^[Uo+(H-1-Row)*Cw+(Col Shr 1)-1];
+     G2AFr^[Vo+(H-1-Row)*Cw+(Col Shr 1)]:=G2AFr^[Vo+(H-1-Row)*Cw+(Col Shr 1)-1];
+    End;
+   End;
+  2: Begin
+    If Len<((3*W+3) And Not 3)*H Then Linesz:=3*W Else Linesz:=(3*W+3) And Not 3;
+    For Row:=H-1 Downto 0 Do Begin
+     For Col:=0 To 3*W-1 Do G2AFr^[Row*W*3+Col]:=G2LCRd(PP+Col);
+     Inc(PP,Linesz);
+    End;
+   End;
+  3: For Row:=0 To H-1 Do Begin
+    Col:=0;
+    While Col<=W-4 Do Begin
+     Move(G2LCEnc^[PP],G2AFr^[Yo+(H-1-Row)*W+Col],4); Inc(PP,4);
+     G2AFr^[Uo+(H-1-Row)*Cw+(Col Shr 2)]:=(G2LCRd(PP)+128) And 255;
+     G2AFr^[Vo+(H-1-Row)*Cw+(Col Shr 2)]:=(G2LCRd(PP+1)+128) And 255;
+     Inc(PP,2); Inc(Col,4);
+    End;
+    If (Col<>0) And (Col<W) Then Begin
+     G2AFr^[Uo+(H-1-Row)*Cw+(Col Shr 2)]:=G2AFr^[Uo+(H-1-Row)*Cw+(Col Shr 2)-1];
+     G2AFr^[Vo+(H-1-Row)*Cw+(Col Shr 2)]:=G2AFr^[Vo+(H-1-Row)*Cw+(Col Shr 2)-1];
+    End;
+   End;
+  4: For Row:=0 To H-1 Do Begin
+    Col:=0;
+    While Col<=W-2 Do Begin
+     Move(G2LCEnc^[PP],G2AFr^[Yo+(H-1-Row)*W+Col],2); Inc(PP,2);
+     G2AFr^[Uo+(H-1-Row)*Cw+(Col Shr 1)]:=(G2LCRd(PP)+128) And 255;
+     G2AFr^[Vo+(H-1-Row)*Cw+(Col Shr 1)]:=(G2LCRd(PP+1)+128) And 255;
+     Inc(PP,2); Inc(Col,2);
+    End;
+   End;
+  5: Begin
+    Row:=0;
+    While Row<=H-2 Do Begin
+     Col:=0;
+     While Col<=W-2 Do Begin
+      Move(G2LCEnc^[PP],G2AFr^[Yo+(H-1-Row)*W+Col],2); Inc(PP,2);
+      Move(G2LCEnc^[PP],G2AFr^[Yo+(H-2-Row)*W+Col],2); Inc(PP,2);
+      G2AFr^[Uo+((H Shr 1)-1-(Row Shr 1))*Cw+(Col Shr 1)]:=(G2LCRd(PP)+128) And 255;
+      G2AFr^[Vo+((H Shr 1)-1-(Row Shr 1))*Cw+(Col Shr 1)]:=(G2LCRd(PP+1)+128) And 255;
+      Inc(PP,2); Inc(Col,2);
+     End;
+     Inc(Row,2);
+    End;
+   End;
+ End;
+ G2LCFrame:=True;
+End;
+
+Procedure DecodeG2LC(Const Source,Target: String; Mode: LongInt);
+Var Ex: PEABuffer; Bw,Bh,MaxBase: LongInt; SX,SY: LongInt; Tag: String;
+Begin
+ QXOpen(Source);
+ If QXExtLen<8 Then Fail('zlib: donnees supplementaires trop courtes (8 octets requis).');
+ Ex:=PEABuffer(@QXF^[QXExtPos]);
+ G2LCW:=QXW; G2LCH:=QXH; Bw:=G2LCW; Bh:=G2LCH;
+ MaxBase:=((Bw+3) And Not 3)*((Bh+3) And Not 3);
+ G2LCImg:=Ex^[4];
+ SX:=0; SY:=0; Tag:='C444';
+ Case G2LCImg Of
+  0: Begin G2LCDSize:=Bw*Bh*3; G2LCMaxDSize:=MaxBase*3; SX:=0; SY:=0; Tag:='C444'; End;
+  1: Begin G2LCDSize:=(Bw And Not 3)*Bh*2; G2LCMaxDSize:=MaxBase*2; SX:=1; SY:=0; Tag:='C422'; End;
+  2: Begin G2LCDSize:=((Bw*3+3) And Not 3)*Bh; G2LCMaxDSize:=MaxBase*3; End;
+  3: Begin G2LCDSize:=(Bw And Not 3)*Bh Div 2*3; G2LCMaxDSize:=MaxBase Div 2*3; SX:=2; SY:=0; Tag:='C411'; End;
+  4: Begin G2LCDSize:=Bw*Bh*2; G2LCMaxDSize:=MaxBase*2; SX:=1; SY:=0; Tag:='C422'; End;
+  5: Begin G2LCDSize:=Bw*Bh Div 2*3; G2LCMaxDSize:=MaxBase Div 2*3; SX:=1; SY:=1; Tag:='C420jpeg'; End;
+  Else Fail('zlib: type d''image non pris en charge.');
+ End;
+ If G2LCImg<>2 Then
+  If (((Bw Mod (1 Shl SX))<>0) And Not ((G2LCImg=1) Or (G2LCImg=3))) Or ((Bh Mod (1 Shl SY))<>0) Then Fail('zlib: dimensions non prises en charge.');
+ G2LCComp:=Ex^[5]; If G2LCComp>=128 Then G2LCComp:=G2LCComp-256;
+ If (G2LCComp<-1) Or (G2LCComp>9) Then Fail('zlib: niveau de compression non pris en charge.');
+ G2LCFlags:=Ex^[6];
+ GetMem(G2LCBuf,G2LCMaxDSize+64); FillChar(G2LCBuf^,G2LCMaxDSize+64,0);
+ If G2LCDSize>G2LCMaxDSize Then Fail('zlib: dimensions incorrectes.');
+ If G2LCImg=2 Then Begin
+  NVBegin(Mode,Target,Bw,Bh,1,QXRn,QXRd); NVAviSar(Bw,Bh);
+  G2AFrSize:=Bw*Bh*3; GetMem(G2AFr,G2AFrSize+64); FillChar(G2AFr^,G2AFrSize+64,0);
+  G2LCCW:=0; G2LCCH:=0;
+ End Else Begin
+  G2AYUVBegin(Mode,Target,Bw,Bh,SX,SY,Tag);
+  G2LCCW:=NVCW; G2LCCH:=NVCH;
+ End;
+ G2ADrive(G2LCFrame);
+ QXClose; NVFinish('zlib');
+End;
+
+Procedure EncodeG2Zlib(Const Source,Target: String);
+Var
+ Buf,Out: PEABuffer; Ex: Array[0..7] Of Byte; Lvl,Comp,I,Ret,G,Rate,Scale,OutCap: LongInt; Frames: LongInt;
+Begin
+ G2YOpen(Source);
+ If PNGLevelSet Then Begin Comp:=PNGLevel; If Comp<0 Then Comp:=-1; If Comp>9 Then Comp:=9; End Else Comp:=-1;
+ Ex[0]:=4; Ex[1]:=0; Ex[2]:=0; Ex[3]:=0; Ex[4]:=2; Ex[5]:=Comp And 255; Ex[6]:=0; Ex[7]:=3;
+ Lvl:=Comp;
+ G:=G2YFN; I:=G2YFD; While I<>0 Do Begin Ret:=G Mod I; G:=I; I:=Ret; End;
+ Rate:=G2YFN Div G; Scale:=G2YFD Div G;
+ G2AviBegin('ZLIB',G2YW,G2YH,Rate,Scale,24,PEABuffer(@Ex),8);
+ OutCap:=G2YW*G2YH*3*2+65536;
+ GetMem(Buf,G2YW*G2YH*3+64); GetMem(Out,OutCap); Frames:=0;
+ While G2YNext(Buf,3) Do Begin
+  ZLDeflateInit(Lvl);
+  ZLOut:=Out; ZLOutPos:=0; ZLAvailOut:=OutCap;
+  For I:=G2YH-1 Downto 0 Do Begin
+   ZLIn:=PEABuffer(@Buf^[I*G2YW*3]); ZLInPos:=0; ZLAvailIn:=G2YW*3;
+   Ret:=ZLDeflate(0);
+   If Ret<>0 Then Fail('zlib: erreur de compression.');
+  End;
+  Ret:=ZLDeflate(4);
+  If Ret<>1 Then Fail('zlib: erreur de compression.');
+  G2AviFrame(Out,ZLOutPos,True);
+  ZLDeflateEnd; Inc(Frames);
+ End;
+ CloseRead;
+ If Frames=0 Then Fail('zlib: aucune image Y4M.');
+ G2AviEnd(Target);
+End;
+
+{ ---- DosBox ZMBV (libavcodec/zmbv.c, zmbvenc.c) ---- }
+Const
+ G2ZKeyInt: LongInt = -1;
+ G2ZMeRange: LongInt = 0;
+Var
+ G2ZH: PEABuffer; G2ZHLen,G2ZHCap,G2ZDecSize: LongInt; G2ZHdrDone,G2ZBad: Boolean;
+ G2ZDec,G2ZCur,G2ZPrev: PEABuffer; G2ZPal: Array[0..767] Of Byte;
+ G2ZW,G2ZH2,G2ZFmt,G2ZBpp,G2ZComp,G2ZFlags,G2ZBw,G2ZBh,G2ZBx,G2ZBy,G2ZDecLen,G2ZOutLen: LongInt; G2ZGot: Boolean;
+
+{ inflate zlib en flux : l'historique est conserve entre les appels ; retourne 0, ou 1 en cas d'erreur de donnees }
+Function G2ZInflate(Src: PEABuffer; SrcLen: LongInt): LongInt;
+Var
+ Last,Typ,I,Sym,Len,Dist,NLen,NDist,NCode,Idx,Rep,Prev,Stored,Start: LongInt; Lens: Array[0..319] Of Integer; Fin: Boolean;
+Begin
+ G2ZInflate:=1; G2ZOutLen:=0;
+ If G2ZBad Then Exit;
+ If SrcLen<1 Then Exit;
+ If G2ZHLen>32768 Then Begin Move(G2ZH^[G2ZHLen-32768],G2ZH^[0],32768); G2ZHLen:=32768; End;
+ INSrc:=Src; INLen:=SrcLen; INPos:=0; INBitBuf:=0; INBitCnt:=0; INErr:=0;
+ INDst:=G2ZH; INOut:=G2ZHLen; INCap:=G2ZHLen+G2ZDecSize; INWin:=0; Start:=G2ZHLen;
+ If Not G2ZHdrDone Then Begin
+  If SrcLen<2 Then Begin G2ZInflate:=0; Exit; End;
+  If ((Src^[0]*256+Src^[1]) Mod 31<>0) Or ((Src^[0] And 15)<>8) Or ((Src^[0] Shr 4)>7) Or ((Src^[1] And 32)<>0) Then Begin G2ZBad:=True; Exit; End;
+  G2ZHdrDone:=True; INPos:=2;
+ End;
+ Fin:=False;
+ While Not Fin Do Begin
+  If (INPos>=INLen) And (INBitCnt<3) Then Break;
+  Last:=INBits(1); Typ:=INBits(2);
+  If INErr<>0 Then Break;
+  If Typ=0 Then Begin
+   INBitBuf:=0; INBitCnt:=0;
+   If INPos+4>INLen Then Begin INErr:=2; Break; End;
+   Stored:=Src^[INPos]+Src^[INPos+1]*256; Len:=Src^[INPos+2]+Src^[INPos+3]*256; Inc(INPos,4);
+   If (Stored Xor $FFFF)<>Len Then Begin INErr:=1; Break; End;
+   Len:=Stored;
+   If INPos+Len>INLen Then Begin Len:=INLen-INPos; INErr:=2; End;
+   If INOut+Len>INCap Then Begin Len:=INCap-INOut; INErr:=2; End;
+   Move(Src^[INPos],G2ZH^[INOut],Len); Inc(INPos,Len); Inc(INOut,Len);
+   If INErr<>0 Then Break;
+  End Else If Typ=3 Then Begin INErr:=1; Break; End
+  Else Begin
+   If Typ=1 Then Begin
+    For I:=0 To 143 Do Lens[I]:=8; For I:=144 To 255 Do Lens[I]:=9; For I:=256 To 279 Do Lens[I]:=7; For I:=280 To 287 Do Lens[I]:=8;
+    INBuild(INLCount,INLSym,Lens,288,1);
+    For I:=0 To 31 Do Lens[I]:=5;
+    INBuild(INDCount,INDSym,Lens,32,2);
+   End Else Begin
+    NLen:=INBits(5)+257; NDist:=INBits(5)+1; NCode:=INBits(4)+4;
+    If INErr<>0 Then Break;
+    If (NLen>286) Or (NDist>30) Then Begin INErr:=1; Break; End;
+    For I:=0 To 18 Do Lens[I]:=0;
+    For I:=0 To NCode-1 Do Lens[INOrder[I]]:=INBits(3);
+    If INErr<>0 Then Break;
+    INBuild(INCount,INSym,Lens,19,0);
+    If INErr<>0 Then Break;
+    Idx:=0;
+    While Idx<NLen+NDist Do Begin
+     Sym:=INDecode(INCount,INSym);
+     If INErr<>0 Then Break;
+     If Sym<16 Then Begin Lens[Idx]:=Sym; Inc(Idx); End
+     Else Begin
+      Prev:=0;
+      If Sym=16 Then Begin
+       If Idx=0 Then Begin INErr:=1; Break; End;
+       Prev:=Lens[Idx-1]; Rep:=3+INBits(2);
+      End Else If Sym=17 Then Rep:=3+INBits(3) Else Rep:=11+INBits(7);
+      If INErr<>0 Then Break;
+      If Idx+Rep>NLen+NDist Then Begin INErr:=1; Break; End;
+      While Rep>0 Do Begin Lens[Idx]:=Prev; Inc(Idx); Dec(Rep); End;
+     End;
+    End;
+    If INErr<>0 Then Break;
+    If Lens[256]=0 Then Begin INErr:=1; Break; End;
+    INBuild(INLCount,INLSym,Lens,NLen,1);
+    If INErr<>0 Then Break;
+    For I:=0 To NDist-1 Do Lens[I]:=Lens[NLen+I];
+    INBuild(INDCount,INDSym,Lens,NDist,2);
+    If INErr<>0 Then Break;
+   End;
+   Repeat
+    Sym:=INDecode(INLCount,INLSym);
+    If INErr<>0 Then Break;
+    If Sym<256 Then Begin
+     If INOut>=INCap Then Begin INErr:=2; Break; End;
+     G2ZH^[INOut]:=Sym; Inc(INOut);
+    End Else If Sym=256 Then Break
+    Else Begin
+     Dec(Sym,257);
+     If Sym>=29 Then Begin INErr:=1; Break; End;
+     Len:=INLBase[Sym]+INBits(INLExt[Sym]);
+     Sym:=INDecode(INDCount,INDSym);
+     If INErr<>0 Then Break;
+     If Sym>=30 Then Begin INErr:=1; Break; End;
+     Dist:=INDBase[Sym]+INBits(INDExt[Sym]);
+     If INErr<>0 Then Break;
+     If Dist>INOut Then Begin INErr:=1; Break; End;
+     If INOut+Len>INCap Then Begin Len:=INCap-INOut; INErr:=2; End;
+     While Len>0 Do Begin G2ZH^[INOut]:=G2ZH^[INOut-Dist]; Inc(INOut); Dec(Len); End;
+     If INErr<>0 Then Break;
+    End;
+   Until False;
+   If INErr<>0 Then Break;
+  End;
+  If Last<>0 Then Fin:=True;
+ End;
+ If INErr=1 Then Begin G2ZBad:=True; Exit; End;
+ G2ZOutLen:=INOut-Start;
+ If G2ZOutLen>0 Then Move(G2ZH^[Start],G2ZDec^[0],G2ZOutLen);
+ G2ZHLen:=INOut;
+ G2ZInflate:=0;
+End;
+
+Procedure G2ZMXor;
+Var
+ Src,Mv,Blk,X,Y,J,I,D,Dx,Dy,Bw2,Bh2,Mx,My,ES,Wb,OutR,PrevR,Q,B1: LongInt;
+Begin
+ Src:=0;
+ If (G2ZFmt=4) And ((G2ZFlags And 2)<>0) Then Begin
+  For I:=0 To 767 Do G2ZPal[I]:=G2ZPal[I] Xor G2ZDec^[Src+I];
+  Inc(Src,768);
+ End;
+ ES:=G2ZBpp Div 8; Wb:=G2ZW*ES;
+ Mv:=Src; Inc(Src,(G2ZBx*G2ZBy*2+3) And Not 3);
+ Blk:=0; Y:=0;
+ While Y<G2ZH2 Do Begin
+  If G2ZH2-Y>G2ZBh Then Bh2:=G2ZBh Else Bh2:=G2ZH2-Y;
+  X:=0;
+  While X<G2ZW Do Begin
+   B1:=G2ZDec^[Mv+Blk]; D:=B1 And 1; If B1>=128 Then B1:=B1-256; Dx:=B1 Div 2; If (B1<0) And (B1 Mod 2<>0) Then Dec(Dx);
+   B1:=G2ZDec^[Mv+Blk+1]; If B1>=128 Then B1:=B1-256; Dy:=B1 Div 2; If (B1<0) And (B1 Mod 2<>0) Then Dec(Dy);
+   Inc(Blk,2);
+   If G2ZW-X>G2ZBw Then Bw2:=G2ZBw Else Bw2:=G2ZW-X;
+   Mx:=X+Dx; My:=Y+Dy;
+   For J:=0 To Bh2-1 Do Begin
+    OutR:=(Y+J)*Wb+X*ES;
+    If (My+J<0) Or (My+J>=G2ZH2) Then FillChar(G2ZCur^[OutR],Bw2*ES,0)
+    Else Begin
+     PrevR:=(My+J)*Wb;
+     For I:=0 To Bw2-1 Do
+      If (Mx+I<0) Or (Mx+I>=G2ZW) Then FillChar(G2ZCur^[OutR+I*ES],ES,0)
+      Else Move(G2ZPrev^[PrevR+(Mx+I)*ES],G2ZCur^[OutR+I*ES],ES);
+    End;
+   End;
+   If D<>0 Then
+    For J:=0 To Bh2-1 Do Begin
+     OutR:=(Y+J)*Wb+X*ES;
+     For I:=0 To Bw2*ES-1 Do Begin
+      G2ZCur^[OutR+I]:=G2ZCur^[OutR+I] Xor G2ZDec^[Src]; Inc(Src);
+     End;
+    End;
+   Inc(X,G2ZBw);
+  End;
+  Inc(Y,G2ZBh);
+ End;
+End;
+
+Function G2ZMFrame(Pk: PEABuffer; Sz: LongInt): Boolean;
+Var
+ Len,Hv,Lv,Expected,I,T,Bp: LongInt; Tmp: PEABuffer;
+Begin
+ G2ZMFrame:=False;
+ If Sz<1 Then Exit;
+ G2ZFlags:=Pk^[0]; Bp:=1; Len:=Sz-1;
+ If (G2ZFlags And 1)<>0 Then Begin
+  G2ZGot:=False;
+  If Len<6 Then Exit;
+  Hv:=Pk^[1]; Lv:=Pk^[2]; G2ZComp:=Pk^[3]; G2ZFmt:=Pk^[4]; G2ZBw:=Pk^[5]; G2ZBh:=Pk^[6];
+  Inc(Bp,6); Dec(Len,6);
+  If (Hv<>0) Or (Lv<>1) Then Exit;
+  If (G2ZBw=0) Or (G2ZBh=0) Then Exit;
+  If (G2ZComp<>0) And (G2ZComp<>1) Then Exit;
+  Case G2ZFmt Of
+   4: G2ZBpp:=8;
+   5,6: G2ZBpp:=16;
+   8: G2ZBpp:=32;
+   Else Exit;
+  End;
+  G2ZHLen:=0; G2ZHdrDone:=False; G2ZBad:=False;
+  G2ZBx:=(G2ZW+G2ZBw-1) Div G2ZBw; G2ZBy:=(G2ZH2+G2ZBh-1) Div G2ZBh;
+  FillChar(G2ZCur^,G2ZW*G2ZH2*4,0); FillChar(G2ZPrev^,G2ZW*G2ZH2*4,0);
+  G2ZGot:=True;
+ End;
+ If (G2ZFlags And 1)<>0 Then Expected:=G2ZW*G2ZH2*(G2ZBpp Div 8) Else Expected:=(G2ZBx*G2ZBy*2+3) And Not 3;
+ If (G2ZFmt=4) And ((G2ZFlags And 3)<>0) Then Inc(Expected,768);
+ If Not G2ZGot Then Exit;
+ If G2ZComp=0 Then Begin
+  If G2ZDecSize<Len Then Exit;
+  Move(Pk^[Bp],G2ZDec^[0],Len); G2ZDecLen:=Len;
+ End Else Begin
+  If G2ZInflate(PEABuffer(@Pk^[Bp]),Len)<>0 Then Exit;
+  G2ZDecLen:=G2ZOutLen;
+ End;
+ If (Expected>G2ZDecLen) Or (((G2ZFlags And 1)<>0) And (Expected<G2ZDecLen)) Then Exit;
+ If (G2ZFlags And 1)<>0 Then Begin
+  Bp:=0;
+  If G2ZFmt=4 Then Begin Move(G2ZDec^[0],G2ZPal,768); Bp:=768; End;
+  Move(G2ZDec^[Bp],G2ZCur^[0],G2ZW*G2ZH2*(G2ZBpp Div 8));
+ End Else Begin
+  If G2ZDecLen<2*G2ZBx*G2ZBy Then Exit;
+  If G2ZDecLen<>0 Then G2ZMXor;
+ End;
+ Move(G2ZCur^[0],G2AFr^[0],G2ZW*G2ZH2*(G2ZBpp Div 8));
+ If G2ZFmt=4 Then
+  For I:=0 To 255 Do Begin NVPalR[I]:=G2ZPal[I*3]; NVPalG[I]:=G2ZPal[I*3+1]; NVPalB[I]:=G2ZPal[I*3+2]; End;
+ Tmp:=G2ZCur; G2ZCur:=G2ZPrev; G2ZPrev:=Tmp;
+ G2ZMFrame:=True;
+End;
+
+Procedure DecodeG2ZM(Const Source,Target: String; Mode: LongInt);
+Var PIdx,Sz,Fmt,NF: LongInt; Pk: PEABuffer; Found: Boolean;
+Begin
+ QXOpen(Source);
+ G2ZW:=QXW; G2ZH2:=QXH;
+ If (Int64(G2ZW)+255)*(Int64(G2ZH2)+64)>(2147483647 Div 4) Then Fail('zmbv: dimensions trop grandes.');
+ G2ZDecSize:=(G2ZW+255)*4*(G2ZH2+64);
+ GetMem(G2ZDec,G2ZDecSize+64); FillChar(G2ZDec^,G2ZDecSize+64,0);
+ G2ZHCap:=32768+G2ZDecSize+64; GetMem(G2ZH,G2ZHCap);
+ GetMem(G2ZCur,G2ZW*G2ZH2*4+64); GetMem(G2ZPrev,G2ZW*G2ZH2*4+64);
+ FillChar(G2ZCur^,G2ZW*G2ZH2*4,0); FillChar(G2ZPrev^,G2ZW*G2ZH2*4,0);
+ FillChar(G2ZPal,SizeOf(G2ZPal),0);
+ G2ZHLen:=0; G2ZHdrDone:=False; G2ZBad:=False; G2ZGot:=False; G2ZFlags:=0; G2ZFmt:=0; G2ZBpp:=8; G2ZComp:=1; G2ZBw:=16; G2ZBh:=16; G2ZBx:=1; G2ZBy:=1;
+ { format de sortie : premier paquet image cle valide }
+ Found:=False; Fmt:=0;
+ For PIdx:=0 To QXCount-1 Do Begin
+  Sz:=QXLen^[PIdx];
+  If (QXPos^[PIdx]<0) Or (QXPos^[PIdx]+Sz>QXSize) Or (Sz<7) Then Continue;
+  Pk:=PEABuffer(@QXF^[QXPos^[PIdx]]);
+  If ((Pk^[0] And 1)<>0) And (Pk^[1]=0) And (Pk^[2]=1) And (Pk^[5]<>0) And (Pk^[6]<>0) And ((Pk^[3]=0) Or (Pk^[3]=1)) And ((Pk^[4]=4) Or (Pk^[4]=5) Or (Pk^[4]=6) Or (Pk^[4]=8)) Then Begin
+   Found:=True; Fmt:=Pk^[4]; Break;
+  End;
+ End;
+ If Not Found Then Fail('zmbv: aucune image cle valide.');
+ Case Fmt Of
+  4: NF:=0;
+  5: NF:=2;
+  6: NF:=5;
+  Else NF:=3;
+ End;
+ NVBegin(Mode,Target,G2ZW,G2ZH2,NF,QXRn,QXRd); NVAviSar(G2ZW,G2ZH2); NVHasAlpha:=False;
+ G2AFrSize:=G2ZW*G2ZH2*4; GetMem(G2AFr,G2AFrSize+64); FillChar(G2AFr^,G2AFrSize+64,0);
+ G2ADrive(G2ZMFrame);
+ QXClose; NVFinish('zmbv');
+End;
+
+{ ---- encodeur zmbv (BGR0) ---- }
+Function G2ZLog2(X: Double): Double;
+Var E: LongInt; M: Double; L: Extended;
+Begin
+ E:=0; M:=X;
+ While M>=2 Do Begin M:=M/2; Inc(E); End;
+ While M<1 Do Begin M:=M*2; Dec(E); End;
+ If M=1 Then L:=0 Else L:=Ln(M)/Ln(2.0);
+ G2ZLog2:=E+L;
+End;
+
+Procedure EncodeG2Zmbv(Const Source,Target: String);
+Const BLK=16;
+Var
+ Src,Prev,PrevPad,Work,Comp,Pkt: PEABuffer; Score: Array[0..1024] Of LongInt;
+ Bypp,Lr,Ur,Lvl,KeyInt,CurFrm,I,J,X,Y,Ret,G,Rate,Scale,Wb,PS,PR,WorkSize,CompSize,Bw,Bh,Frames,PktLen,Mx,My,Xored,Fl,Pad,PadR: LongInt;
+ Keyframe: Boolean; D: Double; Tmp: Double; W0,H0: LongInt;
+Function BlockCmp(SOff,POff,Bw2,Bh2: LongInt; Var Xo: LongInt): LongInt;
+Var Hist: Array[0..255] Of Word; Jj,Ii,T,Sum,Bwb: LongInt;
+Begin
+ FillChar(Hist,SizeOf(Hist),0);
+ Bwb:=Bw2*Bypp;
+ For Jj:=0 To Bh2-1 Do
+  For Ii:=0 To Bwb-1 Do Begin
+   T:=Src^[SOff+Jj*Wb+Ii] Xor PrevPad^[POff+Jj*PS+Ii];
+   Inc(Hist[T]);
+  End;
+ If Hist[0]<Bwb*Bh2 Then Xo:=1 Else Xo:=0;
+ If Xo=0 Then Begin BlockCmp:=0; Exit; End;
+ Sum:=0;
+ For Ii:=0 To 255 Do Inc(Sum,Score[Hist[Ii]]);
+ BlockCmp:=Sum;
+End;
+Function Me(X0,Y0: LongInt; Var Mx2,My2,Xo: LongInt): LongInt;
+Var Dx,Dy,Txo,Tv,Bv,Bw2,Bh2,Mx0,My0,SOff,POff: LongInt;
+Begin
+ Mx0:=Mx2; My0:=My2;
+ If W0-X0<BLK Then Bw2:=W0-X0 Else Bw2:=BLK;
+ If H0-Y0<BLK Then Bh2:=H0-Y0 Else Bh2:=BLK;
+ SOff:=Y0*Wb+X0*Bypp;
+ POff:=(Y0+PadR)*PS+Pad+X0*Bypp;
+ Bv:=BlockCmp(SOff,POff,Bw2,Bh2,Xo);
+ Mx2:=0; My2:=0;
+ If Bv=0 Then Begin Me:=0; Exit; End;
+ If (Mx0<>0) Or (My0<>0) Then Begin
+  Tv:=BlockCmp(SOff,POff+Mx0*Bypp+My0*PS,Bw2,Bh2,Txo);
+  If Tv<Bv Then Begin
+   Bv:=Tv; Mx2:=Mx0; My2:=My0; Xo:=Txo;
+   If Bv=0 Then Begin Me:=0; Exit; End;
+  End;
+ End;
+ For Dy:=-Lr To Ur Do
+  For Dx:=-Lr To Ur Do Begin
+   If (Dx=0) And (Dy=0) Then Continue;
+   If (Dx=Mx0) And (Dy=My0) Then Continue;
+   Tv:=BlockCmp(SOff,POff+Dx*Bypp+Dy*PS,Bw2,Bh2,Txo);
+   If Tv<Bv Then Begin
+    Bv:=Tv; Mx2:=Dx; My2:=Dy; Xo:=Txo;
+    If Bv=0 Then Begin Me:=0; Exit; End;
+   End;
+  End;
+ Me:=Bv;
+End;
+Begin
+ G2YOpen(Source);
+ If (OptPixFmt<>'') And (OptPixFmt<>'bgr0') Then Fail('zmbv: seul le format de pixels bgr0 est pris en charge.');
+ Bypp:=4; W0:=G2YW; H0:=G2YH; Wb:=W0*Bypp;
+ For I:=1 To BLK*BLK*Bypp Do Begin
+  D:=I; D:=D/(BLK*BLK*Bypp);
+  Tmp:=-I; Tmp:=Tmp*G2ZLog2(D); Tmp:=Tmp*256;
+  Score[I]:=Trunc(Tmp);
+ End;
+ Score[0]:=0;
+ If G2ZKeyInt<0 Then KeyInt:=25 Else KeyInt:=G2ZKeyInt;
+ Lr:=8; Ur:=8;
+ If G2ZMeRange>0 Then Begin
+  Lr:=G2ZMeRange; If Lr>64 Then Lr:=64;
+  Ur:=G2ZMeRange; If Ur>63 Then Ur:=63;
+ End;
+ If PNGLevelSet Then Lvl:=PNGLevel Else Lvl:=9;
+ If (Lvl<0) Or (Lvl>9) Then Fail('zmbv: niveau de compression 0..9.');
+ CompSize:=W0*Bypp*H0+1024+((W0+BLK-1) Div BLK)*((H0+BLK-1) Div BLK)*2+4;
+ GetMem(Work,CompSize+64);
+ CompSize:=CompSize+((CompSize+7) Shr 3)+((CompSize+63) Shr 6)+11;
+ GetMem(Comp,CompSize+64); GetMem(Pkt,CompSize+64);
+ { image precedente avec marge de zeros : 65 lignes / 65*Bypp octets de chaque cote }
+ Pad:=65*Bypp; PadR:=65; PS:=Wb+2*Pad;
+ GetMem(PrevPad,PS*(H0+2*PadR)+64); FillChar(PrevPad^,PS*(H0+2*PadR)+64,0);
+ GetMem(Src,Wb*H0+64);
+ G:=G2YFN; I:=G2YFD; While I<>0 Do Begin Ret:=G Mod I; G:=I; I:=Ret; End;
+ Rate:=G2YFN Div G; Scale:=G2YFD Div G;
+ G2AviBegin('ZMBV',W0,H0,Rate,Scale,24,Nil,0);
+ CurFrm:=0; Frames:=0;
+ While G2YNext(Src,Bypp) Do Begin
+  Keyframe:=CurFrm=0;
+  Inc(CurFrm); If CurFrm=KeyInt Then CurFrm:=0;
+  WorkSize:=0;
+  If Keyframe Then Begin
+   Move(Src^[0],Work^[0],Wb*H0); WorkSize:=Wb*H0;
+  End Else Begin
+   Bw:=(W0+BLK-1) Div BLK; Bh:=(H0+BLK-1) Div BLK;
+   Mx:=0; My:=0;
+   FillChar(Work^[0],(Bw*Bh*2+3) And Not 3,0);
+   PktLen:=0; { index du vecteur courant }
+   WorkSize:=(Bw*Bh*2+3) And Not 3;
+   Y:=0;
+   While Y<H0 Do Begin
+    X:=0;
+    While X<W0 Do Begin
+     Me(X,Y,Mx,My,Xored);
+     Work^[PktLen]:=((Mx*2) Or Xored) And 255;
+     Work^[PktLen+1]:=(My*2) And 255;
+     Inc(PktLen,2);
+     If Xored<>0 Then Begin
+      Fl:=BLK; If H0-Y<Fl Then Fl:=H0-Y;
+      Ret:=BLK; If W0-X<Ret Then Ret:=W0-X;
+      For J:=0 To Fl-1 Do
+       For I:=0 To Ret*Bypp-1 Do Begin
+        Work^[WorkSize]:=Src^[(Y+J)*Wb+X*Bypp+I] Xor PrevPad^[(Y+J+My+PadR)*PS+Pad+X*Bypp+Mx*Bypp+I];
+        Inc(WorkSize);
+       End;
+     End;
+     Inc(X,BLK);
+    End;
+    Inc(Y,BLK);
+   End;
+  End;
+  { sauvegarde de l'image precedente }
+  For J:=0 To H0-1 Do Move(Src^[J*Wb],PrevPad^[(J+PadR)*PS+Pad],Wb);
+  If Keyframe Then Begin
+   If Frames>0 Then ZLDeflateEnd;
+   ZLDeflateInit(Lvl);
+  End Else If Frames=0 Then ZLDeflateInit(Lvl);
+  ZLIn:=Work; ZLInPos:=0; ZLAvailIn:=WorkSize;
+  ZLOut:=Comp; ZLOutPos:=0; ZLAvailOut:=CompSize;
+  Ret:=ZLDeflate(2);
+  If Ret<>0 Then Fail('zmbv: erreur de compression.');
+  PktLen:=0;
+  If Keyframe Then Begin
+   Pkt^[0]:=1; Pkt^[1]:=0; Pkt^[2]:=1; Pkt^[3]:=1; Pkt^[4]:=8; Pkt^[5]:=BLK; Pkt^[6]:=BLK; PktLen:=7;
+  End Else Begin Pkt^[0]:=0; PktLen:=1; End;
+  Move(Comp^[0],Pkt^[PktLen],ZLOutPos); Inc(PktLen,ZLOutPos);
+  G2AviFrame(Pkt,PktLen,Keyframe);
+  Inc(Frames);
+ End;
+ CloseRead;
+ If Frames=0 Then Fail('zmbv: aucune image Y4M.');
+ ZLDeflateEnd;
+ G2AviEnd(Target);
+End;
+
+Procedure G2EncodeMain(Const Source,Target: String);
+Begin
+ If VideoCodec='zlib' Then Begin
+  If (OptPixFmt<>'') And (OptPixFmt<>'bgr24') Then Fail('zlib: seul le format de pixels bgr24 est pris en charge.');
+  EncodeG2Zlib(Source,Target);
+ End Else EncodeG2Zmbv(Source,Target);
+End;
+
+{ ---- VMware Screen Codec (libavcodec/vmnc.c) ---- }
+Var
+ G2VMBpp,G2VMBpp2,G2VMBig,G2VMW,G2VMH,G2VMCurW,G2VMCurH,G2VMCurX,G2VMCurY,G2VMCurHx,G2VMCurHy,G2VMStride: LongInt;
+ G2VMCurBits,G2VMCurMask,G2VMScreen: PEABuffer; G2VMCurSize: LongInt; G2VMHaveScr: Boolean;
+ G2VMS: LongInt;
+
+Function G2VMB: LongInt;
+Begin G2VMB:=G2AB(G2VMS); If G2VMS<G2ASz Then Inc(G2VMS); End;
+Function G2VMLeft: LongInt;
+Begin G2VMLeft:=G2ASz-G2VMS; End;
+Function G2VMPixel(Bpp,Be: LongInt): LongInt;
+Var A,B,C,D: LongInt;
+Begin
+ G2VMPixel:=0;
+ Case Bpp*2+Be Of
+  2,3: G2VMPixel:=G2VMB;
+  4: Begin A:=G2VMB; G2VMPixel:=A+G2VMB*256; End;
+  5: Begin A:=G2VMB; G2VMPixel:=A*256+G2VMB; End;
+  8: Begin A:=G2VMB; B:=G2VMB; C:=G2VMB; D:=G2VMB; G2VMPixel:=A+B*256+C*65536+D*16777216; End;
+  9: Begin A:=G2VMB; B:=G2VMB; C:=G2VMB; D:=G2VMB; G2VMPixel:=D+C*256+B*65536+A*16777216; End;
+ End;
+End;
+
+Procedure G2VMPutPx(At,Bpp,V: LongInt);
+Var K: LongInt;
+Begin
+ For K:=0 To Bpp-1 Do Begin G2AFr^[At+K]:=V And 255; V:=V Shr 8; End;
+End;
+
+Procedure G2VMPaintRect(Dx,Dy,W,H,Color,Bpp: LongInt);
+Var I,J,P: LongInt;
+Begin
+ For J:=0 To H-1 Do Begin
+  P:=(Dy+J)*G2VMStride+Dx*Bpp;
+  For I:=0 To W-1 Do Begin G2VMPutPx(P,Bpp,Color); Inc(P,Bpp); End;
+ End;
+End;
+
+Procedure G2VMPaintRaw(Dx,Dy,W,H,Bpp,Be: LongInt);
+Var I,J,P,V: LongInt;
+Begin
+ For J:=0 To H-1 Do Begin
+  P:=(Dy+J)*G2VMStride+Dx*Bpp;
+  For I:=0 To W-1 Do Begin
+   V:=G2VMPixel(Bpp,Be);
+   G2VMPutPx(P,Bpp,V); Inc(P,Bpp);
+  End;
+ End;
+End;
+
+Function G2VMHextile(Dx,Dy,W,H: LongInt): Boolean;
+Var
+ I,J,K,Bg,Fg,Rects,Color,Flags,Xy,Wh,Bw,Bh,Bpp,Rx,Ry,Rw,Rh: LongInt;
+Begin
+ G2VMHextile:=False;
+ Bg:=0; Fg:=0; Bw:=16; Bh:=16; Bpp:=G2VMBpp2;
+ J:=0;
+ While J<H Do Begin
+  Bw:=16;
+  If J+16>H Then Bh:=H-J;
+  I:=0;
+  While I<W Do Begin
+   If G2VMLeft<=0 Then Exit;
+   If I+16>W Then Bw:=W-I;
+   Flags:=G2VMB;
+   If (Flags And 1)<>0 Then Begin
+    If G2VMLeft<Bw*Bh*Bpp Then Exit;
+    G2VMPaintRaw(Dx+I,Dy+J,Bw,Bh,Bpp,G2VMBig);
+   End Else Begin
+    If (Flags And 2)<>0 Then Bg:=G2VMPixel(Bpp,G2VMBig);
+    If (Flags And 4)<>0 Then Fg:=G2VMPixel(Bpp,G2VMBig);
+    Rects:=0;
+    If (Flags And 8)<>0 Then Rects:=G2VMB;
+    If (Flags And 16)<>0 Then Color:=1 Else Color:=0;
+    G2VMPaintRect(Dx+I,Dy+J,Bw,Bh,Bg,Bpp);
+    If G2VMLeft<Rects*(Color*Bpp+2) Then Exit;
+    For K:=0 To Rects-1 Do Begin
+     If Color<>0 Then Fg:=G2VMPixel(Bpp,G2VMBig);
+     Xy:=G2VMB; Wh:=G2VMB;
+     Rx:=Xy Shr 4; Ry:=Xy And 15; Rw:=(Wh Shr 4)+1; Rh:=(Wh And 15)+1;
+     If (Rx+Rw>W-I) Or (Ry+Rh>H-J) Then Exit;
+     G2VMPaintRect(Dx+I+Rx,Dy+J+Ry,Rw,Rh,Fg,Bpp);
+    End;
+   End;
+   Inc(I,16);
+  End;
+  Inc(J,16);
+ End;
+ G2VMHextile:=True;
+End;
+
+{ zone du curseur dans l'image : retourne w,h,dx,dy }
+Procedure G2VMCurRect(Var W,H,Dx,Dy: LongInt);
+Begin
+ W:=G2VMCurW; If G2VMW<G2VMCurX+W Then W:=G2VMW-G2VMCurX;
+ H:=G2VMCurH; If G2VMH<G2VMCurY+H Then H:=G2VMH-G2VMCurY;
+ Dx:=G2VMCurX; If Dx<0 Then Begin W:=W+Dx; Dx:=0; End;
+ Dy:=G2VMCurY; If Dy<0 Then Begin H:=H+Dy; Dy:=0; End;
+End;
+
+Function G2VMFrame(Pk: PEABuffer; Sz: LongInt): Boolean;
+Var
+ Chunks,Dx,Dy,W,H,Enc,SizeLeft,I,J,Depth,P,K,Bpp,ScrSize: LongInt; Cx,Cy: LongInt;
+ Cd,Mk,Ds: Int64;
+Begin
+ G2VMFrame:=False;
+ G2VMS:=2;
+ Chunks:=G2VMB*256; Chunks:=Chunks+G2VMB;
+ If Int64(12)*Chunks>G2VMLeft Then Exit;
+ Bpp:=G2VMBpp2;
+ { restauration de l'ecran sous le curseur }
+ If G2VMHaveScr Then Begin
+  G2VMCurRect(W,H,Dx,Dy);
+  If (W>0) And (H>0) Then
+   For I:=0 To H-1 Do
+    Move(G2VMScreen^[I*G2VMCurW*Bpp],G2AFr^[(Dy+I)*G2VMStride+Dx*Bpp],W*Bpp);
+ End;
+ While Chunks>0 Do Begin
+  Dec(Chunks);
+  If G2VMLeft<12 Then Exit;
+  Dx:=G2VMB*256; Dx:=Dx+G2VMB; Dy:=G2VMB*256; Dy:=Dy+G2VMB;
+  W:=G2VMB*256; W:=W+G2VMB; H:=G2VMB*256; H:=H+G2VMB;
+  Enc:=G2VMB; Enc:=Enc*256+G2VMB; Enc:=Enc*256+G2VMB; Enc:=Enc*256+G2VMB;
+  If (Dx+W>G2VMW) Or (Dy+H>G2VMH) Then Exit;
+  SizeLeft:=G2VMLeft;
+  Case Enc Of
+   $574D5664: Begin { cursor }
+     If Int64(W)*H*Bpp>2147483647 Div 2-2 Then Exit;
+     If SizeLeft<2+W*H*Bpp*2 Then Exit;
+     Inc(G2VMS,2);
+     G2VMCurW:=W; G2VMCurH:=H; G2VMCurHx:=Dx; G2VMCurHy:=Dy;
+     If (G2VMCurHx>G2VMCurW) Or (G2VMCurHy>G2VMCurH) Then Begin G2VMCurHx:=0; G2VMCurHy:=0; End;
+     ScrSize:=G2VMCurW*G2VMCurH*Bpp;
+     If G2VMCurBits<>Nil Then FreeMem(G2VMCurBits);
+     If G2VMCurMask<>Nil Then FreeMem(G2VMCurMask);
+     If G2VMScreen<>Nil Then FreeMem(G2VMScreen);
+     G2VMCurBits:=Nil; G2VMCurMask:=Nil; G2VMScreen:=Nil; G2VMHaveScr:=False;
+     If ScrSize>0 Then Begin
+      GetMem(G2VMCurBits,ScrSize+16); GetMem(G2VMCurMask,ScrSize+16); GetMem(G2VMScreen,ScrSize+16);
+      FillChar(G2VMScreen^,ScrSize+16,0); G2VMHaveScr:=True;
+      { load_cursor }
+      For J:=0 To G2VMCurH*G2VMCurW-1 Do Begin
+       P:=G2VMPixel(Bpp,G2VMBig);
+       For K:=0 To Bpp-1 Do Begin G2VMCurBits^[J*Bpp+K]:=P And 255; P:=P Shr 8; End;
+      End;
+      For J:=0 To G2VMCurH*G2VMCurW-1 Do Begin
+       P:=G2VMPixel(Bpp,G2VMBig);
+       For K:=0 To Bpp-1 Do Begin G2VMCurMask^[J*Bpp+K]:=P And 255; P:=P Shr 8; End;
+      End;
+     End Else Inc(G2VMS,0);
+    End;
+   $574D5665: Inc(G2VMS,2);
+   $574D5666: Begin G2VMCurX:=Dx-G2VMCurHx; G2VMCurY:=Dy-G2VMCurHy; End;
+   $574D5667: Inc(G2VMS,10);
+   $574D5668: Inc(G2VMS,4);
+   $574D5669: Begin
+     Depth:=G2VMB; Inc(G2VMS,1);
+     G2VMBig:=G2VMB;
+     If (G2VMBig And Not 1)<>0 Then Exit;
+     Inc(G2VMS,13);
+    End;
+   $574D566A: Inc(G2VMS,2);
+   0: Begin
+     If SizeLeft<W*H*Bpp Then Exit;
+     G2VMPaintRaw(Dx,Dy,W,H,Bpp,G2VMBig);
+    End;
+   5: If Not G2VMHextile(Dx,Dy,W,H) Then Exit;
+   Else Chunks:=0;
+  End;
+  If G2VMS>G2ASz Then G2VMS:=G2ASz;
+ End;
+ If G2VMHaveScr Then Begin
+  G2VMCurRect(W,H,Dx,Dy);
+  If (W>0) And (H>0) Then Begin
+   For I:=0 To H-1 Do
+    Move(G2AFr^[(Dy+I)*G2VMStride+Dx*Bpp],G2VMScreen^[I*G2VMCurW*Bpp],W*Bpp);
+   { put_cursor }
+   Cx:=G2VMCurX; Cy:=G2VMCurY;
+   W:=G2VMCurW; If G2VMW<Cx+W Then W:=G2VMW-Cx;
+   H:=G2VMCurH; If G2VMH<Cy+H Then H:=G2VMH-Cy;
+   Dx:=0; Dy:=0;
+   If Cx<0 Then Begin W:=W+Cx; Cx:=0; End;
+   If Cy<0 Then Begin H:=H+Cy; Cy:=0; End;
+   If (W>=1) And (H>=1) Then
+    For J:=0 To H-1 Do
+     For I:=0 To W-1 Do
+      For K:=0 To Bpp-1 Do
+       G2AFr^[(Cy+J)*G2VMStride+(Cx+I)*Bpp+K]:=(G2AFr^[(Cy+J)*G2VMStride+(Cx+I)*Bpp+K] And G2VMCurBits^[(J*G2VMCurW+I)*Bpp+K]) Xor G2VMCurMask^[(J*G2VMCurW+I)*Bpp+K];
+  End;
+ End;
+ G2VMFrame:=True;
+End;
+
+Procedure DecodeG2VM(Const Source,Target: String; Mode: LongInt);
+Var NF: LongInt;
+Begin
+ QXOpen(Source);
+ G2VMW:=QXW; G2VMH:=QXH; G2VMBpp:=QXDepth;
+ Case G2VMBpp Of
+  8: NF:=0;
+  16: NF:=2;
+  24,32: Begin G2VMBpp:=32; NF:=3; End;
+  Else Begin NF:=0; Fail('vmnc: profondeur de bits non prise en charge.'); End;
+ End;
+ G2VMBpp2:=G2VMBpp Div 8; G2VMBig:=0; G2VMStride:=G2VMW*G2VMBpp2;
+ G2VMCurW:=0; G2VMCurH:=0; G2VMCurX:=0; G2VMCurY:=0; G2VMCurHx:=0; G2VMCurHy:=0;
+ G2VMCurBits:=Nil; G2VMCurMask:=Nil; G2VMScreen:=Nil; G2VMHaveScr:=False;
+ NVBegin(Mode,Target,G2VMW,G2VMH,NF,QXRn,QXRd); NVAviSar(G2VMW,G2VMH); NVHasAlpha:=False;
+ FillChar(NVPalR,256,0); FillChar(NVPalG,256,0); FillChar(NVPalB,256,0);
+ G2AFrSize:=G2VMW*G2VMH*G2VMBpp2; GetMem(G2AFr,G2AFrSize+64); FillChar(G2AFr^,G2AFrSize+64,0);
+ G2ADrive(G2VMFrame);
+ QXClose; NVFinish('vmnc');
+End;
+
+{ ---- dispatch G2A ---- }
+
+Function G2AFccKind(Const F: String): LongInt;
+Var U: String[4]; I: Integer;
+Begin
+ G2AFccKind:=0; U:=F; For I:=1 To Length(U) Do U[I]:=UpCase(U[I]);
+ If (U='WNV1') Or (U='YUV8') Then G2AFccKind:=220
+ Else If U='VCR1' Then G2AFccKind:=221
+ Else If U='VIXL' Then G2AFccKind:=222
+ Else If U='ULTI' Then G2AFccKind:=226
+ Else If (U='DUCK') Or (U='PVEZ') Then G2AFccKind:=227
+ Else If U='TM20' Then G2AFccKind:=228
+ Else If U='VMNC' Then G2AFccKind:=223
+ Else If U='ZLIB' Then G2AFccKind:=224
+ Else If U='ZMBV' Then G2AFccKind:=225;
+End;
+
+Function G2AProbe(Var B: Array Of Byte; N,Size: LongInt): Boolean;
+Begin
+ G2AProbe:=False; G2AProbeName:='';
+ If G2VBSiffProbe(B,N) Then Begin G2AProbe:=True; G2AProbeName:='siff'; Exit; End;
+ If G2TSProbe(B,N) Then Begin G2AProbe:=True; G2AProbeName:='tiertexseq'; Exit; End;
+End;
+
+Procedure DecodeG2A(Kind: LongInt; Const Source,Target: String; Mode: LongInt);
+Begin
+ Case Kind Of
+  220: DecodeG2WN(Source,Target,Mode);
+  221: DecodeG2VC(Source,Target,Mode);
+  222: DecodeG2XL(Source,Target,Mode);
+  226: DecodeG2UL(Source,Target,Mode);
+  223: DecodeG2VM(Source,Target,Mode);
+  227: DecodeG2T1(Source,Target,Mode);
+  228: DecodeG2T2(Source,Target,Mode);
+  224: DecodeG2LC(Source,Target,Mode);
+  225: DecodeG2ZM(Source,Target,Mode);
+  229: G2TSRun(Source,Target,Mode,False);
+  230: DecodeG2VB(Source,Target,Mode);
+  Else Fail('G2A: type de decodeur inconnu.');
+ End;
+End;
+
 { ==== BLOCK-ANCHOR-G2A : inserer le code du groupe G2A juste au-dessus de cette ligne ==== }
 
 { ==== BLOCK-ANCHOR-G2B : inserer le code du groupe G2B juste au-dessus de cette ligne ==== }
@@ -82343,6 +85792,8 @@ Begin
  WriteLn('D   smk             Smacker');
  WriteLn('D   tta             TTA (True Audio)');
  WriteLn('D   wv              WavPack');
+ WriteLn('D   siff            Beam Software SIFF (video vb, audio PCM U8)');
+ WriteLn('D   tiertexseq      Tiertex Limited SEQ (video tiertexseqvideo, audio PCM S16BE)');
  WriteLn('DE  roq             id RoQ (video roqvideo, audio roq_dpcm)');
  WriteLn(' D  ipmovie         Interplay MVE (video interplayvideo PAL8/RGB555 vers Y4M/PNG/BMP, audio PCM/interplay_dpcm vers WAV)');
  WriteLn(' D  jpegls_pipe     piped jpegls sequence (image JPEG-LS vers Y4M/PNG/BMP)');
@@ -82830,6 +86281,17 @@ BEGIN
   WriteLn('D V    rv30            RealVideo 3.0 (decodeur I/P/B, fichiers .rm)');
   WriteLn('D V    rv40            RealVideo 4.0 (decodeur I/P/B, fichiers .rm)');
   { LIST-ANCHOR-G1 }
+  WriteLn('D V    tiertexseqvideo Tiertex Limited SEQ video (conteneur .seq; audio PCM S16BE vers WAV)');
+  WriteLn('D V    truemotion1     Duck TrueMotion 1.0 (AVI DUCK/PVEZ, RGB555 et 0RGB32)');
+  WriteLn('D V    truemotion2     Duck TrueMotion 2.0 (AVI TM20)');
+  WriteLn('D V    ultimotion      IBM UltiMotion (AVI ULTI)');
+  WriteLn('D V    vb              Beam Software VB (conteneur SIFF .vb; audio PCM U8 vers WAV)');
+  WriteLn('D V    vcr1            ATI VCR1 (AVI VCR1)');
+  WriteLn('D V    vmnc            VMware Screen Codec (AVI VMnc)');
+  WriteLn('D V    wnv1            Winnov WNV1 (AVI WNV1)');
+  WriteLn('D V    xl              Miro VideoXL (AVI VIXL)');
+  WriteLn('DEV    zlib            LCL ZLIB (decodeur AVI ZLIB; encodeur bgr24 vers AVI identique a FFmpeg depuis Y4M yuv420p, -compression_level)');
+  WriteLn('DEV    zmbv            Zip Motion Blocks Video (decodeur AVI; encodeur bgr0 vers AVI identique a FFmpeg depuis Y4M yuv420p, -keyint_min -me_range -compression_level)');
   { LIST-ANCHOR-G2A }
   { LIST-ANCHOR-G2B }
   WriteLn('DEA    sonic           Sonic (experimental, -strict -2; WAV 0x2048 en sortie octet pour octet, AVI/WAV en entree)');
@@ -82890,6 +86352,11 @@ BEGIN
    PNGLevelSet:=Number>=0; If Number<0 Then Number:=-1;
    PNGLevel:=Number;
   End Else
+  If (Argument='-keyint_min') Or (Argument='-me_range') Then Begin
+   Value:=NextArgument; Val(Value,Number,Code);
+   If Code<>0 Then Fail(Argument+': nombre entier requis.');
+   If Argument='-keyint_min' Then G2ZKeyInt:=Number Else G2ZMeRange:=Number;
+  End Else
   If Argument='-huffman' Then Begin
    Value:=Lower(NextArgument);
    If (Value='optimal') Or (Value='1') Then MJEOptimal:=True Else If (Value='default') Or (Value='0') Then MJEOptimal:=False
@@ -82925,7 +86392,7 @@ BEGIN
    If InputPath='' Then Fail('Codec video de sortie attendu apres -i.');
    VideoCodec:=Lower(NextArgument);
    If VideoCodec='libxvid' Then VideoCodec:='mpeg4';
-   If (VideoCodec<>'png') And (VideoCodec<>'gif') And (VideoCodec<>'copy') And
+   If (VideoCodec<>'png') And (VideoCodec<>'gif') And (VideoCodec<>'copy') And (VideoCodec<>'zlib') And (VideoCodec<>'zmbv') And
     (VideoCodec<>'ffv1') And (VideoCodec<>'flv') And (VideoCodec<>'pam') And (VideoCodec<>'pbm') And (VideoCodec<>'pgm') And (VideoCodec<>'ppm') And (VideoCodec<>'pgmyuv') And (VideoCodec<>'sgi') And (VideoCodec<>'qtrle') And (VideoCodec<>'mpeg4') And (VideoCodec<>'mpeg1video') And (VideoCodec<>'mpeg2video') And (VideoCodec<>'rawvideo') And
     (VideoCodec<>'asv1') And (VideoCodec<>'asv2') And (VideoCodec<>'msmpeg4') And (VideoCodec<>'msmpeg4v1') And (VideoCodec<>'msmpeg4v2') And (VideoCodec<>'huffyuv') And (VideoCodec<>'roqvideo') And (VideoCodec<>'h263') And (VideoCodec<>'h263p') And (VideoCodec<>'rv10') And (VideoCodec<>'rv20') And (VideoCodec<>'bmp') And (VideoCodec<>'dnxhd') And (VideoCodec<>'dvvideo') And (VideoCodec<>'jpegls') And (VideoCodec<>'ljpeg') And (VideoCodec<>'mjpeg') And (VideoCodec<>'libx264') And (VideoCodec<>'libtheora') Then
     Fail('Codec video: png/gif, bmp, copy, ffv1, flv, msmpeg4, msmpeg4v1, msmpeg4v2, mpeg4, mpeg1video, mpeg2video, rawvideo, asv1, asv2, huffyuv, roqvideo, h263, h263p, rv10, rv20, dnxhd, dvvideo, jpegls, ljpeg, mjpeg, libx264, libxvid, libtheora.');
@@ -83146,6 +86613,8 @@ BEGIN
  Else If (InputFormat='msnwctcp') And Not IsHTTP(InputPath) Then NVKind:=45
  Else If (InputFormat='mm') And Not IsHTTP(InputPath) Then NVKind:=48
  Else If (InputFormat='mvi') And Not IsHTTP(InputPath) Then NVKind:=49
+ Else If (InputFormat='tiertexseq') And Not IsHTTP(InputPath) Then NVKind:=229
+ Else If (InputFormat='siff') And Not IsHTTP(InputPath) And G2ASiffVideo(Intermediate) Then NVKind:=230
  Else If InputFormat='bethsoftvid' Then NVKind:=1 Else If InputFormat='bfi' Then NVKind:=2 Else If InputFormat='c93' Then NVKind:=3
  Else If InputFormat='bmp' Then NVKind:=4 Else If (InputFormat='pam') Or (InputFormat='pbm') Or (InputFormat='pgm') Or (InputFormat='ppm') Or (InputFormat='pgmyuv') Then NVKind:=50 Else If InputFormat='nuv' Then NVKind:=54 Else If InputFormat='pcx' Then NVKind:=55 Else If InputFormat='png' Then NVKind:=58 Else If InputFormat='roq' Then NVKind:=65 Else If InputFormat='rl2' Then NVKind:=66 Else If InputFormat='smk' Then NVKind:=67 Else If (InputFormat='rm') And Not IsHTTP(InputPath) And (RMVideoKind(InputPath)<>0) Then NVKind:=68 Else If InputFormat='sgi' Then NVKind:=56 Else If InputFormat='ptx' Then NVKind:=57 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22 Else If (InputFormat='flic') And Not IsHTTP(InputPath) Then NVKind:=23 Else If (InputFormat='gif') And Not IsHTTP(InputPath) Then NVKind:=25 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=2) Then NVKind:=27 Else If (InputFormat='h263') And Not IsHTTP(InputPath) Then NVKind:=28 Else If (InputFormat='h261') And Not IsHTTP(InputPath) Then NVKind:=29 Else If (InputFormat='idcin') And Not IsHTTP(InputPath) Then NVKind:=30 Else If (InputFormat='ipmovie') And Not IsHTTP(InputPath) Then NVKind:=38 Else If (InputFormat='jpegls_pipe') And Not IsHTTP(InputPath) Then NVKind:=39 Else If (InputFormat='jpeg_pipe') And Not IsHTTP(InputPath) Then NVKind:=46 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And MP4HasMjpb(InputPath) Then NVKind:=47 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And (QXMovKind(InputPath)<>0) Then NVKind:=QXMovKind(InputPath) Else If (InputFormat='h264') And Not IsHTTP(InputPath) Then NVKind:=33
  Else If (InputFormat='avi') And Not IsHTTP(InputPath) Then Begin
@@ -83167,9 +86636,10 @@ BEGIN
   Else If (AsvTag='KMVC') Or (AsvTag='kmvc') Then NVKind:=37
   Else If AsvTag='LOCO' Then NVKind:=40
   Else If AsvTag='LM20' Then NVKind:=42
+  Else If G2AFccKind(AsvTag)<>0 Then NVKind:=G2AFccKind(AsvTag)
   Else If (AsvTag='MJPG') Or (AsvTag='mjpg') Or (AsvTag='AVRn') Or (AsvTag='AVDJ') Or (AsvTag='dmb1') Or (AsvTag='JPGL') Or (AsvTag='MJLS') Or (AsvTag='MMJP') Or (AsvTag='jpeg') Or (AsvTag='IJPG') Then NVKind:=43;
  End;
- If (OptPixFmt<>'') And (OptPixFmt<>'yuv420p') And (VideoCodec<>'qtrle') And (VideoCodec<>'rawvideo') Then Fail('-pix_fmt: seul yuv420p est pris en charge.');
+ If (OptPixFmt<>'') And (OptPixFmt<>'yuv420p') And (VideoCodec<>'qtrle') And (VideoCodec<>'rawvideo') And (VideoCodec<>'zlib') And (VideoCodec<>'zmbv') Then Fail('-pix_fmt: seul yuv420p est pris en charge.');
  NVAudioOut:=(OutputFormat='wav') Or (OutputFormat='roq') Or (OutputFormat='mp3') Or (OutputFormat='mp2') Or (OutputFormat='ac3') Or (OutputFormat='aac') Or (OutputFormat='adx') Or (OutputFormat='aiff');
  If ((InputFormat='mp4') Or (InputFormat='avi') Or (InputFormat='flv')) And (NVKind=0) And Not IsHTTP(InputPath) And Not NVAudioOut And Not NoVideo And (VideoCodec<>'copy') And
   ((OutputFormat='yuv4mpegpipe') Or (OutputFormat='png') Or (OutputFormat='bmp') Or (VideoCodec='png') Or (VideoCodec='bmp') Or (VideoCodec='mpeg4') Or
@@ -83178,7 +86648,7 @@ BEGIN
   Else If InputFormat='avi' Then Begin If H4AviIsH264(AVIVideoFourCC(Intermediate)) Then NVKind:=35; End
   Else If FLVVideoCodec(Intermediate)=7 Then NVKind:=36;
  End;
- If (NVKind<>0) And Not (((NVKind=1) Or (NVKind=2) Or (NVKind=15) Or (NVKind=17) Or (NVKind=22) Or (NVKind=30) Or (NVKind=38) Or (NVKind=44) Or (NVKind=65) Or (NVKind=67) Or (NVKind=68)) And NVAudioOut) Then Begin
+ If (NVKind<>0) And Not (((NVKind=1) Or (NVKind=2) Or (NVKind=15) Or (NVKind=17) Or (NVKind=22) Or (NVKind=30) Or (NVKind=38) Or (NVKind=44) Or (NVKind=65) Or (NVKind=67) Or (NVKind=68) Or (NVKind=229) Or (NVKind=230)) And NVAudioOut) Then Begin
   If NoVideo Or (VideoCodec='copy') Or (AudioCodec<>'') Or HasBitrate Or (RequestedRate<>0) Or
    (RequestedChannels<>0) Or (ImageWidth<>0) Or IsHTTP(InputPath) Then
    Fail('Decodage video local sans copie, sans -vn ni conversion audio requis.');
@@ -83202,6 +86672,12 @@ BEGIN
    Fail('Sortie BMP: entree Y4M locale sans autre option requise.');
   Temps[2]:=NewTemporary; EncodeBMPFromY4M(Intermediate,Temps[2]);
   Commit(Temps[2]); Temps[2]:=''; WriteLn('Image creee: ',OutputPath); Halt(0);
+ End;
+ If (InputFormat='yuv4mpegpipe') And ((VideoCodec='zlib') Or (VideoCodec='zmbv')) Then Begin
+  If IsHTTP(InputPath) Or ((OutputFormat<>'avi') And (OutputFormat<>'')) Or NoVideo Or (AudioCodec<>'') Or HasBitrate Or (RequestedRate<>0) Or (RequestedChannels<>0) Or (ImageWidth<>0) Or HasCrop Or (VideoFrames<>0) Then
+   Fail('zlib/zmbv: entree Y4M locale vers sortie AVI, sans autres options.');
+  Temps[2]:=NewTemporary; G2EncodeMain(Intermediate,Temps[2]);
+  Commit(Temps[2]); Temps[2]:=''; WriteLn('Video creee: ',OutputPath); Halt(0);
  End;
  If (InputFormat='yuv4mpegpipe') And (VideoCodec='rawvideo') And ((OutputFormat='rawvideo') Or (OutputFormat='avi')) Then Begin
   RawAvi:=OutputFormat='avi';
@@ -83695,6 +87171,8 @@ BEGIN
    If InputFormat='tsavi' Then DecodeTrueSpeechAvi(InputPath,Temps[0]) Else
    If InputFormat='tta' Then DecodeTTA(InputPath,Temps[0]) Else
    If InputFormat='wv' Then DecodeWavPack(InputPath,Temps[0]) Else
+   If InputFormat='tiertexseq' Then DecodeG2TSAudio(InputPath,Temps[0]) Else
+   If InputFormat='siff' Then DecodeG2SIFFAudio(InputPath,Temps[0]) Else
    If (InputFormat='aiff') And IsAIFFIma4(InputPath) Then DecodeAIFFIma4(InputPath,Temps[0]) Else
    If (InputFormat='aiff') And PcmAiffToWav(InputPath,Temps[0],PcmCodecOut<>'') Then Else
    If InputFormat='aiff' Then DecodeAIFF(InputPath,Temps[0]) Else
