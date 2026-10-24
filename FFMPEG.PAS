@@ -89844,6 +89844,8 @@ End;
 
 { ==== BLOCK-ANCHOR-H7 : inserer le code du groupe H7 juste au-dessus de cette ligne ==== }
 
+{ ==== BLOCK-ANCHOR-H8 : inserer le code du groupe H8 juste au-dessus de cette ligne ==== }
+
 Procedure DecodeAVIX(Const Source,Target: String; Mode,Kind: LongInt);
 Var Pos,PkPos,PkLen,RN,RD,I,Y,X,Cw,Ch,Bs,Msg2: LongInt; Ok,FFBegun: Boolean; Msg: String; PIdx: LongInt; NbF,NbP: Int64;
 Begin
@@ -113317,6 +113319,7 @@ BEGIN
   { LIST-ANCHOR-H5 }
   { LIST-ANCHOR-H6 }
   { LIST-ANCHOR-H7 }
+  { LIST-ANCHOR-H8 }
   { LIST-ANCHOR-G6B }
 
   WriteLn('D A    qcelp           QCELP / PureVoice (fichiers .qcp, QCELP-13K)');
