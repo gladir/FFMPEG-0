@@ -57810,6 +57810,7 @@ Const
   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0);
 
+Procedure X8DecodePicture(PY,PU,PV: PEABuffer; LsY,LsC,MbW,MbH,Dquant,Qsum,LoopF: LongInt); Forward;
 { ==== VC-1 / WMV3 (libavcodec/vc1.c, vc1dec.c, vc1_block.c, vc1_pred.c, vc1_mc.c, vc1_loopfilter.c, vc1dsp.c ; LGPL-2.1-or-later) ==== }
 Type
  TV1B=Array[-16384..80000000] Of Byte;     PV1B=^TV1B;
@@ -63208,7 +63209,6 @@ Begin
   If (V1Mbh Shr V1FieldMode)=0 Then Skip:=True;
   If (V1LastI<0) And (V1PictType=2) Then Skip:=True;
  End;
- If (Not Skip) And (V1X8Type<>0) Then Fail('vc1: IntraX8 non pris en charge.');
  If Not Skip Then Begin
   { debut d'image }
   V1CurI:=V1NewPic(V1LastI,V1NextI);
@@ -63272,6 +63272,8 @@ Begin
    V1Esc3LevelLength:=0;
    V1CurBlkIdx:=0; V1LeftBlkIdx:=-1; V1TopleftBlkIdx:=1; V1TopBlkIdx:=2;
    V1Err:=False;
+   If V1X8Type<>0 Then X8DecodePicture(V1Pic[V1CurI].Y,V1Pic[V1CurI].U,V1Pic[V1CurI].V,V1FLinesize,V1FUvlinesize,V1Mbw,V1Mbh,2*V1Pq+V1Halfpq,V1Pq*Ord(V1Pquantizer=0),V1LoopFilter)
+   Else
    Case V1PictType Of
     0: If V1Profile=3 Then V1DecodeIBlocksAdv Else V1DecodeIBlocks;
     1: If V1PFrameSkipped<>0 Then V1DecodeSkipBlocks Else V1DecodePBlocks;
@@ -104560,7 +104562,11 @@ Begin
  If M4Ms=5 Then Begin
   R2:=W2Header2;
   If R2<0 Then Exit;
-  If R2=1 Then Fail('wmv2: images J (IntraX8) non prises en charge.');
+  If R2=1 Then Begin
+   X8DecodePicture(M4P[M4CurI].Y,M4P[M4CurI].U,M4P[M4CurI].V,M4LY,M4LC,M4MbW,M4MbH,2*M4Qscale,(M4Qscale-1) Or 1,W2Loop);
+   M4Emit(M4CurI);
+   Exit;
+  End;
  End;
  M4MbX:=0; M4MbY:=0; M4Err:=False;
  Slice:=M4MsSlice;
@@ -104957,6 +104963,2128 @@ Begin
  Patch32(4,OutPos-8); Patch32(216,Fix-220); Patch32(48,Frames); Patch32(140,Frames);
  FreeMem(Py,PW*PH); FreeMem(Pu,PW*PH Div 4); FreeMem(Pv,PW*PH Div 4); FreeMem(Pk,PkSize); FreeMem(Sizes,1048576*4);
  CloseRead; CloseWrite;
+End;
+
+{ ==== Encodeur WMV1 / WMV2 (et MS-MPEG4 v3) complet : libavcodec mpegvideo_enc.c, motion_est.c (EPZS), ratecontrol.c, msmpeg4enc.c, wmv2enc.c, msmpeg4.c (LGPL-2.1-or-later) ==== }
+Const
+ WEBd=48;
+ WE_I=1; WE_P=2;
+Type
+ TWERl=Record
+  N,Last: LongInt;
+  Code,Len,Run,Lev: Array[0..199] Of LongInt;
+  MaxLev: Array[0..1,0..63] Of LongInt;
+  MaxRun: Array[0..1,0..64] Of LongInt;
+  IdxRun: Array[0..1,0..63] Of LongInt;
+ End;
+ TWEI32=Array[0..100000000] Of LongInt; PWEI32=^TWEI32;
+Var
+ WEInit: Boolean;
+ WERl: Array[0..5] Of TWERl;
+ WERlLen: Array[0..5,0..64,0..63,0..1] Of Byte;
+ WEStat: Array[0..1,0..1,0..64,0..63,0..1] Of LongInt;
+ WEMvIdx: Array[0..1,0..4095] Of Word;
+ { sortie binaire }
+ WEOut: PEABuffer; WEBits: LongInt;
+ { parametres }
+ WEVer,WEW,WEH,WEMbW,WEMbH,WEPW,WEPH,WEMbStr,WEB8Str,WEGop,WEFpsN,WEFpsD: LongInt;
+ WEBitRate: Int64; WEFixedQ: Boolean; WEGlobalQ: LongInt;
+ { image courante }
+ WEPict,WEQscale,WELambda,WELambda2,WENoRnd,WEFCode: LongInt;
+ WERlTab,WERlChrTab,WEDcTab,WEMvTab,WEInterIntra,WEUseSkip,WEEsc3L,WEEsc3R,WECbpTab: LongInt;
+ WELastPict,WELastNonB,WEPicInGop,WEPicNum: LongInt;
+ WELastLambdaFor: Array[0..4] Of LongInt;
+ WEMbVarSum,WEMcMbVarSum: Int64; WESceneScore: Int64;
+ WEFrameBits,WEMvBits,WEMiscBits,WEITexBits,WEPTexBits,WEICount,WESkipCount: LongInt;
+ WETotalBits: Int64;
+ { macrobloc }
+ WEMbIntra: LongInt;
+ WEBl: Array[0..5,0..63] Of LongInt; WELastIdx: Array[0..5] Of LongInt;
+ WEMaxQ: LongInt;
+ { plans }
+ WENewY,WENewU,WENewV: PEABuffer;       { image source completee a la taille MB (draw_edges) }
+ WERefY,WERefU,WERefV: PEABuffer;       { image de reference avec bordure }
+ WERS,WERCS: LongInt;                   { pas des plans de reference }
+ WEMbType,WEMbVar,WEMcVar,WEMbMean: PWEI32;
+ WEPmv: PWEI32;                         { p_mv_table : [(xy)*2+c], xy = mbx+mby*MbStr+MbStr+1 }
+ { estimation de mouvement }
+ WEMap: Array[0..63] Of Int64; WEScore: Array[0..63] Of LongInt; WEGen: Int64;
+ WEXmin,WEXmax,WEYmin,WEYmax,WEPredX,WEPredY,WEPenF,WESubPenF,WESkipMe,WEMeSrc,WEMeRef: LongInt;
+ WEDmin,WEBx,WEBy: LongInt;
+ WEFirstLine: Boolean; WEEndMbY: LongInt;
+ { controle de debit }
+ WERcPredCoeff,WERcPredCount,WERcPredDecay: Array[0..4] Of Double;
+ WERcShortQs,WERcShortQc,WERcPass1Sum,WERcPass1Want,WERcLastQ: Double;
+ WERcLastQFor: Array[0..4] Of Double;
+ WERcLastMc,WERcLastMb: Int64;
+ WERcICplx,WERcPCplx,WERcMvBits,WERcQSum: Array[0..4] Of Int64; WERcFrameCnt: Array[0..4] Of LongInt;
+ WERcLastNonB: LongInt;
+ WETrace,WETrace2: Boolean;
+
+Function WESar(V: Int64; N: LongInt): Int64;
+Begin If V>=0 Then WESar:=V Shr N Else WESar:=-1-((-1-V) Shr N); End;
+
+Function WEMid(A,B,C: LongInt): LongInt;
+Begin
+ If A>B Then Begin
+  If C>B Then Begin If C>A Then B:=A Else B:=C; End;
+ End Else Begin
+  If B>C Then Begin If C>A Then B:=C Else B:=A; End;
+ End;
+ WEMid:=B;
+End;
+
+Function WEIsqrt(A: Int64): LongInt;
+Var R: Int64;
+Begin
+ If A<=0 Then Begin WEIsqrt:=0; Exit; End;
+ R:=Trunc(Sqrt(Double(A)));
+ While R*R>A Do Dec(R);
+ While (R+1)*(R+1)<=A Do Inc(R);
+ WEIsqrt:=R;
+End;
+
+Procedure WEPut(N: LongInt; V: Int64);
+Var K: LongInt;
+Begin
+ For K:=N-1 DownTo 0 Do Begin
+  If ((V Shr K) And 1)<>0 Then WEOut^[WEBits Shr 3]:=WEOut^[WEBits Shr 3] Or (128 Shr (WEBits And 7));
+  Inc(WEBits);
+ End;
+End;
+
+Procedure WECode012(N: LongInt);
+Begin
+ If N=0 Then WEPut(1,0) Else Begin WEPut(1,1); WEPut(1,Ord(N>=2)); End;
+End;
+
+Function WERlIndex(T,Last,Run,Level: LongInt): LongInt;
+Var Idx: LongInt;
+Begin
+ Idx:=WERl[T].IdxRun[Last,Run];
+ If Idx>=WERl[T].N Then Begin WERlIndex:=WERl[T].N; Exit; End;
+ If Level>WERl[T].MaxLev[Last,Run] Then Begin WERlIndex:=WERl[T].N; Exit; End;
+ WERlIndex:=Idx+Level-1;
+End;
+
+Function WESizeOfCode(T,Last,Run,Level: LongInt): LongInt;
+Var Size,Code,Level1,Run1: LongInt; E2,E3: Boolean;
+Begin
+ Size:=0;
+ Code:=WERlIndex(T,Last,Run,Level);
+ Size:=Size+WERl[T].Len[Code];
+ If Code=WERl[T].N Then Begin
+  Level1:=Level-WERl[T].MaxLev[Last,Run];
+  E2:=False;
+  If Level1<1 Then E2:=True Else Begin
+   Code:=WERlIndex(T,Last,Run,Level1);
+   If Code=WERl[T].N Then E2:=True Else Size:=Size+1+1+WERl[T].Len[Code];
+  End;
+  If E2 Then Begin
+   Inc(Size);
+   E3:=False;
+   If Level>64 Then E3:=True Else Begin
+    Run1:=Run-WERl[T].MaxRun[Last,Level]-1;
+    If Run1<0 Then E3:=True Else Begin
+     Code:=WERlIndex(T,Last,Run1,Level);
+     If Code=WERl[T].N Then E3:=True Else Size:=Size+1+1+WERl[T].Len[Code];
+    End;
+   End;
+   If E3 Then Size:=Size+1+1+6+8;
+  End;
+ End Else Inc(Size);
+ WESizeOfCode:=Size;
+End;
+
+Procedure WEInitTables;
+Var T,K,I,L,St,En,X,Y,Last,Run,Lev,Sz: LongInt; R: PM4Rl;
+Begin
+ If WEInit Then Exit;
+ WEInit:=True;
+ M4MsInitTables;
+ For T:=0 To 5 Do Begin
+  R:=M4MsRl[T];
+  WERl[T].N:=R^.N; WERl[T].Last:=R^.Last;
+  For K:=0 To R^.N Do Begin WERl[T].Code[K]:=0; WERl[T].Len[K]:=0; End;
+  For I:=0 To (LongInt(1) Shl R^.Vlc.Bits)-1 Do
+   If R^.Vlc.Sym[I]>=0 Then Begin
+    WERl[T].Code[R^.Vlc.Sym[I]]:=I Shr (R^.Vlc.Bits-R^.Vlc.Len[I]);
+    WERl[T].Len[R^.Vlc.Sym[I]]:=R^.Vlc.Len[I];
+   End;
+  For K:=0 To R^.N-1 Do Begin WERl[T].Run[K]:=R^.Run[K]; WERl[T].Lev[K]:=R^.Lev[K]; End;
+  For L:=0 To 1 Do Begin
+   If L=0 Then Begin St:=0; En:=R^.Last; End Else Begin St:=R^.Last; En:=R^.N; End;
+   For K:=0 To 63 Do Begin WERl[T].MaxLev[L,K]:=0; WERl[T].IdxRun[L,K]:=R^.N; End;
+   For K:=0 To 64 Do WERl[T].MaxRun[L,K]:=0;
+   For K:=St To En-1 Do Begin
+    Run:=R^.Run[K]; Lev:=R^.Lev[K];
+    If WERl[T].IdxRun[L,Run]=R^.N Then WERl[T].IdxRun[L,Run]:=K;
+    If Lev>WERl[T].MaxLev[L,Run] Then WERl[T].MaxLev[L,Run]:=Lev;
+    If Run>WERl[T].MaxRun[L,Lev] Then WERl[T].MaxRun[L,Lev]:=Run;
+   End;
+  End;
+ End;
+ FillChar(WERlLen,SizeOf(WERlLen),0);
+ For T:=0 To 5 Do
+  For Lev:=1 To 64 Do For Run:=0 To 63 Do For Last:=0 To 1 Do
+   WERlLen[T,Lev,Run,Last]:=WESizeOfCode(T,Last,Run,Lev);
+ For K:=0 To 4095 Do Begin WEMvIdx[0,K]:=1099; WEMvIdx[1,K]:=1099; End;
+ For K:=0 To 1098 Do Begin
+  WEMvIdx[0,(MSMv0X[K] Shl 6) Or MSMv0Y[K]]:=K;
+  WEMvIdx[1,(MSMv1X[K] Shl 6) Or MSMv1Y[K]]:=K;
+ End;
+ FillChar(WEStat,SizeOf(WEStat),0);
+End;
+
+{ ---- codage des blocs (msmpeg4enc.c) ---- }
+Procedure WEEncDc(Level,N: LongInt);
+Var Ix,Dir,Pred,Sign,Code,Pl,Scale: LongInt;
+Begin
+ Pred:=M4MsPredDc(N,Ix,Dir);
+ If N<4 Then Begin Pl:=0; Scale:=M4YDc; End Else Begin Pl:=N-3; Scale:=M4CDc; End;
+ M4Dc[Pl]^[Ix]:=SmallInt(Level*Scale);
+ Level:=Level-Pred;
+ Sign:=0;
+ If Level<0 Then Begin Level:=-Level; Sign:=1; End;
+ Code:=Level; If Code>119 Then Code:=119;
+ If WEDcTab=0 Then Begin
+  If N<4 Then WEPut(MSDc0Lum[Code*2+1],MSDc0Lum[Code*2]) Else WEPut(MSDc0Chr[Code*2+1],MSDc0Chr[Code*2]);
+ End Else Begin
+  If N<4 Then WEPut(MSDc1Lum[Code*2+1],MSDc1Lum[Code*2]) Else WEPut(MSDc1Chr[Code*2+1],MSDc1Chr[Code*2]);
+ End;
+ If Code=119 Then WEPut(8,Level And 255);
+ If Level<>0 Then WEPut(1,Sign);
+End;
+
+Procedure WEEncBlock(N: LongInt);
+Var
+ Level,Run,Last,I,J,LastIndex,LastNonZero,Sign,SLevel,Code,RunDiff,T,Level1,Run1: LongInt; Scan: PEABuffer; Esc2,Esc3: Boolean;
+Begin
+ If WETrace2 Then WriteLn(StdErr,'BLK ',N,' bits=',WEBits);
+ If WEMbIntra<>0 Then Begin
+  WEEncDc(WEBl[N,0],N);
+  I:=1;
+  If N<4 Then T:=WERlTab Else T:=3+WERlChrTab;
+  If WEVer>=4 Then RunDiff:=1 Else RunDiff:=0;
+  If WEVer>=4 Then Scan:=@W1ScanT[1] Else Scan:=@H3Zigzag;
+ End Else Begin
+  I:=0; T:=3+WERlTab; RunDiff:=1;
+  If WEVer>=4 Then Scan:=@W1ScanT[0] Else Scan:=@H3Zigzag;
+ End;
+ If (WEVer>=4) And (WELastIdx[N]>0) Then Begin
+  LastIndex:=63;
+  While LastIndex>=0 Do Begin
+   If WEBl[N,Scan^[LastIndex]]<>0 Then Break;
+   Dec(LastIndex);
+  End;
+  WELastIdx[N]:=LastIndex;
+ End Else LastIndex:=WELastIdx[N];
+ LastNonZero:=I-1;
+ While I<=LastIndex Do Begin
+  J:=Scan^[I];
+  Level:=WEBl[N,J];
+  If Level<>0 Then Begin
+   Run:=I-LastNonZero-1;
+   If I=LastIndex Then Last:=1 Else Last:=0;
+   Sign:=0; SLevel:=Level;
+   If Level<0 Then Begin Sign:=1; Level:=-Level; End;
+   If (Level<=64) And (Run<=63) Then Inc(WEStat[WEMbIntra,Ord(N>3),Level,Run,Last]);
+   Inc(WEStat[WEMbIntra,Ord(N>3),40,63,0]);
+   Code:=WERlIndex(T,Last,Run,Level);
+   If WETrace2 Then WriteLn(StdErr,'  T=',T,' last=',Last,' run=',Run,' lev=',Level,' code=',Code,' len=',WERl[T].Len[Code],' n=',WERl[T].N);
+   WEPut(WERl[T].Len[Code],WERl[T].Code[Code]);
+   If Code=WERl[T].N Then Begin
+    Level1:=Level-WERl[T].MaxLev[Last,Run];
+    Esc2:=Level1<1;
+    If Not Esc2 Then Begin
+     Code:=WERlIndex(T,Last,Run,Level1);
+     If Code=WERl[T].N Then Esc2:=True Else Begin
+      WEPut(1,1); WEPut(WERl[T].Len[Code],WERl[T].Code[Code]); WEPut(1,Sign);
+     End;
+    End;
+    If Esc2 Then Begin
+     WEPut(1,0);
+     Esc3:=False;
+     If Level>64 Then Esc3:=True Else Begin
+      Run1:=Run-WERl[T].MaxRun[Last,Level]-RunDiff;
+      If Run1<0 Then Esc3:=True Else Begin
+       Code:=WERlIndex(T,Last,Run1+1,Level);
+       If (WEVer=4) And (Code=WERl[T].N) Then Esc3:=True Else Begin
+        Code:=WERlIndex(T,Last,Run1,Level);
+        If Code=WERl[T].N Then Esc3:=True Else Begin
+         WEPut(1,1); WEPut(WERl[T].Len[Code],WERl[T].Code[Code]); WEPut(1,Sign);
+        End;
+       End;
+      End;
+     End;
+     If Esc3 Then Begin
+      WEPut(1,0);
+      WEPut(1,Last);
+      If WEVer>=4 Then Begin
+       If WEEsc3L=0 Then Begin
+        WEEsc3L:=8; WEEsc3R:=6;
+        If WEQscale<8 Then WEPut(6,3) Else WEPut(8,3);
+       End;
+       WEPut(WEEsc3R,Run);
+       WEPut(1,Sign);
+       WEPut(WEEsc3L,Level);
+      End Else Begin
+       WEPut(6,Run);
+       WEPut(8,SLevel And 255);
+      End;
+     End;
+    End;
+   End Else WEPut(1,Sign);
+   LastNonZero:=I;
+  End;
+  Inc(I);
+ End;
+End;
+
+Procedure WEEncMotion(Mx,My: LongInt);
+Var Code: LongInt;
+Begin
+ If Mx<=-64 Then Inc(Mx,64) Else If Mx>=64 Then Dec(Mx,64);
+ If My<=-64 Then Inc(My,64) Else If My>=64 Then Dec(My,64);
+ Inc(Mx,32); Inc(My,32);
+ If (Mx<0) Or (Mx>63) Or (My<0) Or (My>63) Then Code:=1099
+ Else Code:=WEMvIdx[WEMvTab,(Mx Shl 6) Or My];
+ If WEMvTab=0 Then WEPut(MSMv0Bits[Code],MSMv0Code[Code]) Else WEPut(MSMv1Bits[Code],MSMv1Code[Code]);
+ If Code=1099 Then Begin WEPut(6,Mx And 63); WEPut(6,My And 63); End;
+End;
+
+Procedure WEEncMbBits(Mx,My: LongInt);
+Var Cbp,CodedCbp,I,Val,Pred,Ix,Px,Py: LongInt;
+Begin
+ If WEMbIntra=0 Then Begin
+  Cbp:=0;
+  For I:=0 To 5 Do If WELastIdx[I]>=0 Then Cbp:=Cbp Or (1 Shl (5-I));
+  If WEVer<>5 Then Begin
+   If (WEUseSkip<>0) And ((Cbp Or Mx Or My)=0) Then Begin
+    WEPut(1,1); Inc(WESkipCount); Exit;
+   End;
+   If WEUseSkip<>0 Then WEPut(1,0);
+   WEPut(MSNonIntra[(Cbp+64)*2+1],MSNonIntra[(Cbp+64)*2]);
+  End Else Begin
+   Case WECbpTab Of
+    0: WEPut(W2Cbp0[(Cbp+64)*2+1],W2Cbp0[(Cbp+64)*2]);
+    1: WEPut(W2Cbp1[(Cbp+64)*2+1],W2Cbp1[(Cbp+64)*2]);
+    Else WEPut(W2Cbp2[(Cbp+64)*2+1],W2Cbp2[(Cbp+64)*2]);
+   End;
+  End;
+  M4PredMotion(0,Px,Py);
+  WEEncMotion(Mx-Px,My-Py);
+  For I:=0 To 5 Do WEEncBlock(I);
+ End Else Begin
+  Cbp:=0; CodedCbp:=0;
+  For I:=0 To 5 Do Begin
+   Val:=Ord(WELastIdx[I]>=1);
+   Cbp:=Cbp Or (Val Shl (5-I));
+   If I<4 Then Begin
+    Pred:=M4MsCodedPred(I,Ix);
+    M4CodedBlk^[Ix]:=Val;
+    Val:=Val Xor Pred;
+   End;
+   CodedCbp:=CodedCbp Or (Val Shl (5-I));
+  End;
+  If WEVer<>5 Then Begin
+   If WEPict=WE_I Then WEPut(MSMbI[CodedCbp*2+1],MSMbI[CodedCbp*2])
+   Else Begin
+    If WEUseSkip<>0 Then WEPut(1,0);
+    WEPut(MSNonIntra[Cbp*2+1],MSNonIntra[Cbp*2]);
+   End;
+   WEPut(1,0);
+   If WEInterIntra<>0 Then WEPut(1,0);
+  End Else Begin
+   If WEPict=WE_I Then WEPut(MSMbI[CodedCbp*2+1],MSMbI[CodedCbp*2])
+   Else Begin
+    Case WECbpTab Of
+     0: WEPut(W2Cbp0[Cbp*2+1],W2Cbp0[Cbp*2]);
+     1: WEPut(W2Cbp1[Cbp*2+1],W2Cbp1[Cbp*2]);
+     Else WEPut(W2Cbp2[Cbp*2+1],W2Cbp2[Cbp*2]);
+    End;
+   End;
+   WEPut(1,0);
+  End;
+  For I:=0 To 5 Do WEEncBlock(I);
+  Inc(WEICount);
+ End;
+End;
+
+{ ---- choix des tables RL (find_best_tables) ---- }
+Procedure WEFindBestTables;
+Var
+ I,Level,Run,Last,Best,BestChroma: LongInt; Size,ChromaSize,LastSize,BestSize,BestChromaSize: Int64;
+ InterCount,IntraLuma,IntraChroma: Int64;
+Begin
+ Best:=0; BestSize:=High(LongInt); BestChroma:=0; BestChromaSize:=High(LongInt);
+ For I:=0 To 2 Do Begin
+  ChromaSize:=0; Size:=0;
+  If I>0 Then Begin Inc(Size); Inc(ChromaSize); End;
+  For Level:=0 To 64 Do Begin
+   For Run:=0 To 63 Do Begin
+    LastSize:=Size+ChromaSize;
+    For Last:=0 To 1 Do Begin
+     InterCount:=WEStat[0,0,Level,Run,Last]+WEStat[0,1,Level,Run,Last];
+     IntraLuma:=WEStat[1,0,Level,Run,Last];
+     IntraChroma:=WEStat[1,1,Level,Run,Last];
+     If WEPict=WE_I Then Begin
+      Size:=Size+IntraLuma*WERlLen[I,Level,Run,Last];
+      ChromaSize:=ChromaSize+IntraChroma*WERlLen[I+3,Level,Run,Last];
+     End Else Begin
+      Size:=Size+IntraLuma*WERlLen[I,Level,Run,Last]+IntraChroma*WERlLen[I+3,Level,Run,Last]+InterCount*WERlLen[I+3,Level,Run,Last];
+     End;
+    End;
+    If LastSize=Size+ChromaSize Then Break;
+   End;
+  End;
+  If Size<BestSize Then Begin BestSize:=Size; Best:=I; End;
+  If ChromaSize<BestChromaSize Then Begin BestChromaSize:=ChromaSize; BestChroma:=I; End;
+ End;
+ If WEPict=WE_P Then BestChroma:=Best;
+ FillChar(WEStat,SizeOf(WEStat),0);
+ WERlTab:=Best; WERlChrTab:=BestChroma;
+ If WEPict<>WELastNonB Then Begin
+  WERlTab:=2;
+  If WEPict=WE_I Then WERlChrTab:=1 Else WERlChrTab:=2;
+ End;
+End;
+
+Procedure WEExtHeader;
+Var Fps: LongInt; Br: Int64;
+Begin
+ Fps:=WEFpsN Div WEFpsD;
+ If Fps>31 Then Fps:=31;
+ WEPut(5,Fps);
+ Br:=WEBitRate Div 1024; If Br>2047 Then Br:=2047;
+ WEPut(11,Br);
+ If WEVer>=3 Then WEPut(1,1);
+End;
+
+Procedure WEHeaderMs;
+Begin
+ WEFindBestTables;
+ WEPut(2,WEPict-1);
+ WEPut(5,WEQscale);
+ WEDcTab:=1; WEMvTab:=1; WEUseSkip:=1;
+ If WEVer=4 Then WEInterIntra:=Ord((WEW*WEH<320*240) And (WEBitRate<=128*1024) And (WEPict=WE_P));
+ If WEPict=WE_I Then Begin
+  WEPut(5,$16+1);
+  If WEVer=4 Then Begin
+   WEExtHeader;
+   If WEBitRate>50*1024 Then WEPut(1,0);
+  End;
+  If WEVer>2 Then Begin
+   WECode012(WERlChrTab); WECode012(WERlTab);
+   WEPut(1,WEDcTab);
+  End;
+ End Else Begin
+  WEPut(1,WEUseSkip);
+  If (WEVer=4) And (WEBitRate>50*1024) Then WEPut(1,0);
+  If WEVer>2 Then Begin
+   WECode012(WERlTab);
+   WEPut(1,WEDcTab);
+   WEPut(1,WEMvTab);
+  End;
+ End;
+ WEEsc3L:=0; WEEsc3R:=0;
+End;
+
+Procedure WEHeaderWmv2;
+Const Map: Array[0..2,0..2] Of Byte=((0,2,1),(1,0,2),(2,1,0));
+Begin
+ WEPut(1,WEPict-1);
+ If WEPict=WE_I Then WEPut(7,0);
+ WEPut(5,WEQscale);
+ WEDcTab:=1; WEMvTab:=1;
+ If WEPict=WE_I Then Begin
+  WEPut(1,0);   { j_type }
+  WEPut(1,0);   { per_mb_rl_table }
+  WECode012(WERlChrTab); WECode012(WERlTab);
+  WEPut(1,WEDcTab);
+  WEInterIntra:=0;
+ End Else Begin
+  WEPut(2,0);   { SKIP_TYPE_NONE }
+  WECode012(0);
+  WECbpTab:=Map[Ord(WEQscale>10)+Ord(WEQscale>20),0];
+  WEPut(1,0);   { mspel }
+  WEPut(1,1);   { per_mb_abt ^ 1 }
+  WECode012(0); { abt_type }
+  WEPut(1,0);   { per_mb_rl_table }
+  WECode012(WERlTab);
+  WERlChrTab:=WERlTab;
+  WEPut(1,WEDcTab);
+  WEPut(1,WEMvTab);
+  WEInterIntra:=0;
+ End;
+ WEEsc3L:=0; WEEsc3R:=0;
+End;
+
+{ ---- DCT + quantification (fdct islow + dct_quantize_c) ---- }
+Function WEQuant(Var Pix: TAMVBlock; N: LongInt; Intra: Boolean; Var Ov: Boolean; Var Blk: Array Of LongInt): LongInt;
+Var
+ I,J,Last,Q,Qs,Start,Max,Level: LongInt; Qmat,Bias,T1,T2,Prod,U,Lv: Int64; Scan: PEABuffer;
+Begin
+ If WETrace2 Then Begin For I:=0 To 63 Do Write(StdErr,Pix[I],' '); WriteLn(StdErr); End;
+ ASVFdct(Pix);
+ If WETrace2 Then Begin For I:=0 To 63 Do Write(StdErr,Pix[I],' '); WriteLn(StdErr); End;
+ For I:=0 To 63 Do Blk[I]:=Pix[I];
+ If WEVer>=4 Then Begin
+  If Intra Then Scan:=@W1ScanT[1] Else Scan:=@W1ScanT[0];
+ End Else Scan:=@H3Zigzag;
+ Qs:=WEQscale;
+ Qmat:=(Int64(2) Shl 21) Div (Int64(Qs)*2*16);
+ If Intra Then Begin
+  If N<4 Then Q:=M4YDc Else Q:=M4CDc;
+  Q:=Q Shl 3;
+  Blk[0]:=(Blk[0]+(Q Shr 1)) Div Q;
+  Start:=1; Last:=0; Bias:=0;
+ End Else Begin
+  Start:=0; Last:=-1; Bias:=-(Int64(1) Shl 6)*(Int64(1) Shl 13);
+ End;
+ T1:=(Int64(1) Shl 21)-Bias-1; T2:=T1 Shl 1;
+ For I:=63 DownTo Start Do Begin
+  J:=Scan^[I];
+  Prod:=Int64(Blk[J])*Qmat;
+  Lv:=LongInt(Prod And $FFFFFFFF);
+  U:=(Int64(Lv)+T1) And $FFFFFFFF;
+  If U>T2 Then Begin Last:=I; Break; End Else Blk[J]:=0;
+ End;
+ Max:=0;
+ For I:=Start To Last Do Begin
+  J:=Scan^[I];
+  Prod:=Int64(Blk[J])*Qmat;
+  Lv:=LongInt(Prod And $FFFFFFFF);
+  U:=(Int64(Lv)+T1) And $FFFFFFFF;
+  If U>T2 Then Begin
+   If Lv>0 Then Begin Level:=LongInt((Bias+Lv) Shr 21); Blk[J]:=Level; End
+   Else Begin Level:=LongInt((Bias-Lv) Shr 21); Blk[J]:=-Level; End;
+   Max:=Max Or Level;
+  End Else Blk[J]:=0;
+ End;
+ If WETrace2 Then Begin For I:=0 To 63 Do Write(StdErr,Blk[I],' '); WriteLn(StdErr,' last=',Last); End;
+ Ov:=WEMaxQ<Max;
+ WEQuant:=Last;
+End;
+
+{ ---- estimation de mouvement (motion_est.c, motion_est_template.c : EPZS, sad_hpel_motion_search) ---- }
+Function WEMvPen(V: LongInt): LongInt;
+Var A,C,L2: LongInt;
+Begin
+ A:=Abs(V);
+ If A=0 Then WEMvPen:=1
+ Else If A<33 Then WEMvPen:=SQMvTab[A*2+1]+1
+ Else Begin
+  C:=A Shr 5; L2:=0; While C>1 Do Begin C:=C Shr 1; Inc(L2); End;
+  WEMvPen:=SQMvTab[65]+L2+2;
+ End;
+End;
+
+Function WESad16(RefIdx: LongInt): LongInt;
+Var X,Y,S,A,SI,RI: LongInt;
+Begin
+ S:=0; SI:=WEMeSrc; RI:=RefIdx;
+ For Y:=0 To 15 Do Begin
+  For X:=0 To 15 Do Begin
+   A:=LongInt(WENewY^[SI+X])-LongInt(WERefY^[RI+X]); If A<0 Then A:=-A; S:=S+A;
+  End;
+  Inc(SI,WEPW); Inc(RI,WERS);
+ End;
+ WESad16:=S;
+End;
+
+{ pix_abs16 x2 / y2 / xy2 }
+Function WESadH(RefIdx,Mode: LongInt): LongInt;
+Var X,Y,S,A,B,SI,RI: LongInt;
+Begin
+ S:=0; SI:=WEMeSrc; RI:=RefIdx;
+ For Y:=0 To 15 Do Begin
+  For X:=0 To 15 Do Begin
+   A:=WENewY^[SI+X];
+   Case Mode Of
+    1: B:=(WERefY^[RI+X]+WERefY^[RI+X+1]+1) Shr 1;
+    2: B:=(WERefY^[RI+X]+WERefY^[RI+X+WERS]+1) Shr 1;
+    Else B:=(WERefY^[RI+X]+WERefY^[RI+X+1]+WERefY^[RI+X+WERS]+WERefY^[RI+X+WERS+1]+2) Shr 2;
+   End;
+   A:=A-B; If A<0 Then A:=-A; S:=S+A;
+  End;
+  Inc(SI,WEPW); Inc(RI,WERS);
+ End;
+ WESadH:=S;
+End;
+
+Procedure WENextGen;
+Begin
+ WEGen:=(WEGen+(Int64(1) Shl 22)) And $FFFFFFFF;
+ If WEGen=0 Then Begin WEGen:=Int64(1) Shl 22; FillChar(WEMap,SizeOf(WEMap),0); End;
+End;
+
+Procedure WECheckMV(X,Y: LongInt);
+Var Key: Int64; Idx,D: LongInt;
+Begin
+ Key:=((Int64(Y) Shl 11)+X+WEGen) And $FFFFFFFF;
+ Idx:=((Y Shl 3)+X) And 63;
+ If WEMap[Idx]<>Key Then Begin
+  D:=WESad16(WEMeRef+Y*WERS+X);
+  WEMap[Idx]:=Key; WEScore[Idx]:=D;
+  D:=D+(WEMvPen(X*2-WEPredX)+WEMvPen(Y*2-WEPredY))*WEPenF;
+  If D<WEDmin Then Begin WEDmin:=D; WEBx:=X; WEBy:=Y; End;
+ End;
+End;
+
+Procedure WECheckClipped(X,Y: LongInt);
+Begin
+ If X>WEXmax Then X:=WEXmax; If X<WEXmin Then X:=WEXmin;
+ If Y>WEYmax Then Y:=WEYmax; If Y<WEYmin Then Y:=WEYmin;
+ WECheckMV(X,Y);
+End;
+
+Var WENextDir: LongInt;
+Procedure WEChkDir(X,Y,ND: LongInt);
+Var Key: Int64; Idx,D: LongInt;
+Begin
+ Key:=((Int64(Y) Shl 11)+X+WEGen) And $FFFFFFFF;
+ Idx:=((Y Shl 3)+X) And 63;
+ If WEMap[Idx]<>Key Then Begin
+  D:=WESad16(WEMeRef+Y*WERS+X);
+  WEMap[Idx]:=Key; WEScore[Idx]:=D;
+  D:=D+(WEMvPen(X*2-WEPredX)+WEMvPen(Y*2-WEPredY))*WEPenF;
+  If D<WEDmin Then Begin WEDmin:=D; WEBx:=X; WEBy:=Y; WENextDir:=ND; End;
+ End;
+End;
+
+Procedure WESmallDia;
+Var Dir,X,Y,Idx: LongInt; Key: Int64;
+Begin
+ Key:=((Int64(WEBy) Shl 11)+WEBx+WEGen) And $FFFFFFFF;
+ Idx:=((WEBy Shl 3)+WEBx) And 63;
+ If WEMap[Idx]<>Key Then Begin
+  WEScore[Idx]:=WESad16(WEMeRef+WEBy*WERS+WEBx);
+  WEMap[Idx]:=Key;
+ End;
+ WENextDir:=-1;
+ While True Do Begin
+  Dir:=WENextDir; X:=WEBx; Y:=WEBy; WENextDir:=-1;
+  If (Dir<>2) And (X>WEXmin) Then WEChkDir(X-1,Y,0);
+  If (Dir<>3) And (Y>WEYmin) Then WEChkDir(X,Y-1,1);
+  If (Dir<>0) And (X<WEXmax) Then WEChkDir(X+1,Y,2);
+  If (Dir<>1) And (Y<WEYmax) Then WEChkDir(X,Y+1,3);
+  If WENextDir=-1 Then Exit;
+ End;
+End;
+
+{ sad_hpel_motion_search : Mx,My plein pixel en entree, demi-pixel en sortie }
+Var WEHPtr,WEHDminh,WEHDx,WEHDy,WEHPenX,WEHPenY: LongInt;
+Procedure WEHChk(Cx,Cy: LongInt);
+Var D,Md,Sh: LongInt;
+Begin
+ Md:=0; If Cx<>0 Then Md:=1; If Cy<>0 Then Md:=Md+2;
+ If Cx<0 Then Sh:=-1 Else Sh:=0;
+ D:=WESadH(WEHPtr+Sh,Md);
+ D:=D+(WEMvPen(WEHPenX+Cx)+WEMvPen(WEHPenY+Cy))*WESubPenF;
+ If D<WEHDminh Then Begin WEHDminh:=D; WEHDx:=Cx; WEHDy:=Cy; End;
+End;
+
+Function WEHpel(Var Mx,My: LongInt; Dmin: LongInt): LongInt;
+Var Index,T,L,R,B: LongInt;
+Begin
+ If WESkipMe<>0 Then Begin Mx:=0; My:=0; WEHpel:=Dmin; Exit; End;
+ WEHPtr:=WEMeRef+My*WERS+Mx;
+ WEHDminh:=Dmin;
+ If (Mx>WEXmin) And (Mx<WEXmax) And (My>WEYmin) And (My<WEYmax) Then Begin
+  WEHDx:=0; WEHDy:=0;
+  Index:=My*8+Mx;
+  T:=WEScore[(Index-8) And 63]; L:=WEScore[(Index-1) And 63]; R:=WEScore[(Index+1) And 63]; B:=WEScore[(Index+8) And 63];
+  Mx:=Mx+Mx; My:=My+My;
+  WEHPenX:=WEPredX+Mx; WEHPenY:=WEPredY+My;
+  Dec(WEHPtr,WERS);
+  If T<=B Then Begin
+   WEHChk(0,-1);
+   If L<=R Then Begin
+    WEHChk(-1,-1);
+    If T+R<=B+L Then Begin WEHChk(1,-1); Inc(WEHPtr,WERS); End
+    Else Begin Inc(WEHPtr,WERS); WEHChk(-1,1); End;
+    WEHChk(-1,0);
+   End Else Begin
+    WEHChk(1,-1);
+    If T+L<=B+R Then Begin WEHChk(-1,-1); Inc(WEHPtr,WERS); End
+    Else Begin Inc(WEHPtr,WERS); WEHChk(1,1); End;
+    WEHChk(1,0);
+   End;
+  End Else Begin
+   If L<=R Then Begin
+    If T+L<=B+R Then Begin WEHChk(-1,-1); Inc(WEHPtr,WERS); End
+    Else Begin Inc(WEHPtr,WERS); WEHChk(1,1); End;
+    WEHChk(-1,0); WEHChk(-1,1);
+   End Else Begin
+    If T+R<=B+L Then Begin WEHChk(1,-1); Inc(WEHPtr,WERS); End
+    Else Begin Inc(WEHPtr,WERS); WEHChk(-1,1); End;
+    WEHChk(1,0); WEHChk(1,1);
+   End;
+   WEHChk(0,1);
+  End;
+  Mx:=Mx+WEHDx; My:=My+WEHDy;
+ End Else Begin
+  Mx:=Mx+Mx; My:=My+My;
+ End;
+ WEHpel:=WEHDminh;
+End;
+
+Function WEPmvAt(Xy,C: LongInt): LongInt;
+Begin WEPmvAt:=WEPmv^[(Xy+WEMbStr+1)*2+C]; End;
+
+Function WELastMv(Xy,C: LongInt): LongInt;
+Begin WELastMv:=LongInt(WESar(Int64(WEPmvAt(Xy,C))*32768+32768,16)); End;
+
+Function WESh1(V: LongInt): LongInt;
+Begin WESh1:=LongInt(WESar(V,1)); End;
+
+{ ff_estimate_p_frame_motion (mb_decision simple, EPZS, sans 4MV) }
+Procedure WEEstimateP(MbX,MbY: LongInt);
+Var
+ P: Array[0..4,0..1] Of LongInt;
+ Mx,My,X16,Y16,M,Xy,I,J,Sum,Sq,Varc,Vard,Dm,Mean,IntraScore,PS,IS_,Rng,PixA: LongInt; Skipped: Boolean;
+ Px,Py: LongInt;
+Begin
+ X16:=16*MbX; Y16:=16*MbY;
+ Xy:=MbX+MbY*WEMbStr;
+ WEMeSrc:=Y16*WEPW+X16;
+ WEMeRef:=(Y16+WEBd)*WERS+X16+WEBd;
+ WEPenF:=WELambda Shr 7; WESubPenF:=WEPenF;
+ WEXmin:=-X16-16; WEYmin:=-Y16-16; WEXmax:=-X16+WEW; WEYmax:=-Y16+WEH;
+ Rng:=2048;
+ If WEXmin<-Rng Then WEXmin:=-Rng; If WEXmax>Rng Then WEXmax:=Rng;
+ If WEYmin<-Rng Then WEYmin:=-Rng; If WEYmax>Rng Then WEYmax:=Rng;
+ WESkipMe:=0;
+ Sum:=0; Sq:=0;
+ For J:=0 To 15 Do For I:=0 To 15 Do Begin
+  PixA:=WENewY^[WEMeSrc+J*WEPW+I]; Sum:=Sum+PixA; Sq:=Sq+PixA*PixA;
+ End;
+ Varc:=LongInt(Int64(Sq)-((Int64(Sum)*Sum) Shr 8)+500);
+ WEMbMean^[Xy]:=(Sum+128) Shr 8;
+ WEMbVar^[Xy]:=(Varc+128) Shr 8;
+ WEMbVarSum:=WEMbVarSum+((Varc+128) Shr 8);
+ M:=M4B8S*2*MbY+2*MbX;
+ P[1,0]:=M4MvGet(M4CurI,M-1,0); P[1,1]:=M4MvGet(M4CurI,M-1,1);
+ If P[1,0]>(WEXmax*2) Then P[1,0]:=WEXmax*2;
+ P[2,0]:=0; P[2,1]:=0; P[3,0]:=0; P[3,1]:=0; P[4,0]:=0; P[4,1]:=0;
+ If Not WEFirstLine Then Begin
+  P[2,0]:=M4MvGet(M4CurI,M-M4B8S,0); P[2,1]:=M4MvGet(M4CurI,M-M4B8S,1);
+  P[3,0]:=M4MvGet(M4CurI,M-M4B8S+2,0); P[3,1]:=M4MvGet(M4CurI,M-M4B8S+2,1);
+  If P[2,1]>(WEYmax*2) Then P[2,1]:=WEYmax*2;
+  If P[3,0]<(WEXmin*2) Then P[3,0]:=WEXmin*2;
+  If P[3,1]>(WEYmax*2) Then P[3,1]:=WEYmax*2;
+  P[4,0]:=WEMid(P[1,0],P[2,0],P[3,0]); P[4,1]:=WEMid(P[1,1],P[2,1],P[3,1]);
+  WEPredX:=P[4,0]; WEPredY:=P[4,1];
+ End Else Begin
+  WEPredX:=P[1,0]; WEPredY:=P[1,1];
+ End;
+ { ff_epzs_motion_search }
+ WEBx:=0; WEBy:=0; Skipped:=False;
+ WENextGen;
+ WEDmin:=WESad16(WEMeRef);
+ WEMap[0]:=WEGen; WEScore[0]:=WEDmin;
+ Mx:=0; My:=0;
+ If WEFirstLine Then Begin
+  WECheckMV(WESh1(P[1,0]),WESh1(P[1,1]));
+  WECheckClipped(WELastMv(Xy,0),WELastMv(Xy,1));
+ End Else Begin
+  If (WEDmin<256) And ((P[1,0] Or P[1,1] Or P[2,0] Or P[2,1] Or P[3,0] Or P[3,1])=0) Then Begin
+   WESkipMe:=1; Skipped:=True;
+  End Else Begin
+   WECheckMV(WESh1(P[4,0]),WESh1(P[4,1]));
+   WECheckClipped(WESh1(P[4,0]),WESh1(P[4,1])-1);
+   WECheckClipped(WESh1(P[4,0]),WESh1(P[4,1])+1);
+   WECheckClipped(WESh1(P[4,0])-1,WESh1(P[4,1]));
+   WECheckClipped(WESh1(P[4,0])+1,WESh1(P[4,1]));
+   WECheckClipped(WELastMv(Xy,0),WELastMv(Xy,1));
+   WECheckMV(WESh1(P[1,0]),WESh1(P[1,1]));
+   WECheckMV(WESh1(P[2,0]),WESh1(P[2,1]));
+   WECheckMV(WESh1(P[3,0]),WESh1(P[3,1]));
+  End;
+ End;
+ If Not Skipped Then Begin
+  If WEDmin>1024 Then Begin
+   WECheckClipped(WELastMv(Xy+1,0),WELastMv(Xy+1,1));
+   If MbY+1<WEEndMbY Then WECheckClipped(WELastMv(Xy+WEMbStr,0),WELastMv(Xy+WEMbStr,1));
+  End;
+  WESmallDia;
+  Mx:=WEBx; My:=WEBy;
+ End;
+ { vard : somme des carres des differences au vecteur plein pixel }
+ Vard:=0;
+ For J:=0 To 15 Do For I:=0 To 15 Do Begin
+  PixA:=LongInt(WENewY^[WEMeSrc+J*WEPW+I])-LongInt(WERefY^[WEMeRef+(My+J)*WERS+Mx+I]);
+  Vard:=Vard+PixA*PixA;
+ End;
+ WEMcVar^[Xy]:=(Vard+128) Shr 8;
+ WEMcMbVarSum:=WEMcMbVarSum+((Vard+128) Shr 8);
+ Dm:=WEHpel(Mx,My,WEDmin);
+ { set_p_mv_tables }
+ WEPmv^[(Xy+WEMbStr+1)*2]:=Mx; WEPmv^[(Xy+WEMbStr+1)*2+1]:=My;
+ For J:=0 To 1 Do For I:=0 To 1 Do Begin
+  M4MvSet(M4CurI,M+J*M4B8S+I,0,Mx); M4MvSet(M4CurI,M+J*M4B8S+I,1,My);
+ End;
+ { score intra }
+ Mean:=(Sum+128) Shr 8;
+ IntraScore:=0;
+ For J:=0 To 15 Do For I:=0 To 15 Do Begin
+  PixA:=Mean-LongInt(WENewY^[WEMeSrc+J*WEPW+I]); If PixA<0 Then PixA:=-PixA; IntraScore:=IntraScore+PixA;
+ End;
+ IntraScore:=IntraScore+WEPenF*16;
+ If IntraScore<Dm Then WEMbType^[Xy]:=1 Else WEMbType^[Xy]:=2;
+ PS:=Vard; If Varc-500+(WELambda2 Shr 7)*100<PS Then PS:=Varc-500+(WELambda2 Shr 7)*100;
+ IS_:=Varc-500+(WELambda2 Shr 7)*20;
+ WESceneScore:=WESceneScore+WEIsqrt(PS)-WEIsqrt(IS_);
+End;
+
+{ ---- controle de debit 1 passe (ratecontrol.c) ---- }
+Var
+ WEIQF,WEIQO: Single;   { i_quant_factor, i_quant_offset (float) }
+
+Procedure WERcInit;
+Var I: LongInt;
+Begin
+ For I:=0 To 4 Do Begin
+  WERcPredCoeff[I]:=118*7.0; WERcPredCount[I]:=1.0; WERcPredDecay[I]:=0.4;
+  WERcICplx[I]:=1; WERcPCplx[I]:=1; WERcMvBits[I]:=1; WERcQSum[I]:=1; WERcFrameCnt[I]:=1;
+  WERcLastQFor[I]:=118*5;
+ End;
+ WERcShortQs:=0.001; WERcShortQc:=0.001; WERcPass1Sum:=0.001; WERcPass1Want:=0.001;
+ WERcLastQ:=0; WERcLastMc:=0; WERcLastMb:=0; WERcLastNonB:=0;
+ WEIQF:=-0.8; WEIQO:=0.0;
+End;
+
+Procedure WEQMinMax(Pict: LongInt; Var QMin,QMax: LongInt);
+Var T: Single; D: Double;
+Begin
+ QMin:=2*118; QMax:=31*118;
+ If Pict=WE_I Then Begin
+  T:=QMin; T:=T*Abs(WEIQF); T:=T+WEIQO; D:=Double(T)+0.5; QMin:=Trunc(D);
+  T:=QMax; T:=T*Abs(WEIQF); T:=T+WEIQO; D:=Double(T)+0.5; QMax:=Trunc(D);
+ End;
+ If QMin<1 Then QMin:=1; If QMin>256*128-1 Then QMin:=256*128-1;
+ If QMax<1 Then QMax:=1; If QMax>256*128-1 Then QMax:=256*128-1;
+ If QMax<QMin Then QMax:=QMin;
+End;
+
+Function WERcDiffLimitedQ(Pict: LongInt; Q: Double): Double;
+Var LastPQ,LastQ: Double; MaxDiff: LongInt;
+Begin
+ LastPQ:=WERcLastQFor[WE_P];
+ If (Pict=WE_I) And ((WEIQF>0.0) Or (WERcLastNonB=WE_P)) Then Q:=LastPQ*Double(Abs(WEIQF))+Double(WEIQO);
+ If Q<1 Then Q:=1;
+ If (WERcLastNonB=Pict) Or (Pict<>WE_I) Then Begin
+  LastQ:=WERcLastQFor[Pict]; MaxDiff:=118*3;
+  If Q>LastQ+MaxDiff Then Q:=LastQ+MaxDiff
+  Else If Q<LastQ-MaxDiff Then Q:=LastQ-MaxDiff;
+ End;
+ WERcLastQFor[Pict]:=Q;
+ If Pict<>3 Then WERcLastNonB:=Pict;
+ WERcDiffLimitedQ:=Q;
+End;
+
+Function WERcGetQscale(Pict,ITex,PTex: LongInt; RateFactor: Double): Double;
+Var Tex,Bits,Q,Qs: Double;
+Begin
+ Qs:=236.0;
+ Tex:=(ITex+PTex)*Qs;
+ If Tex<=0 Then Bits:=0 Else Bits:=Sqrt(Tex);
+ WERcPass1Sum:=WERcPass1Sum+Bits;
+ Bits:=Bits*RateFactor;
+ If Bits<0.0 Then Bits:=0.0;
+ Bits:=Bits+1.0;
+ Q:=Qs*(ITex+PTex+1)/Bits;
+ If (Pict=WE_I) And (WEIQF<0.0) Then Q:=-Q*Double(WEIQF)+Double(WEIQO);
+ If Q<1 Then Q:=1;
+ WERcGetQscale:=Q;
+End;
+
+{ ff_rate_estimate_qscale : retourne la qualite (lambda) entiere }
+Function WERcEstimate: LongInt;
+Var
+ Q: Single; QMin,QMax,ITex,PTex: LongInt; Fps,Diff,Bits,RateFactor,ShortQ,NewCoeff,LastVar,Sz,PQ: Double; Br: Single;
+ Wanted: Int64; Var2: Int64; QD,Pn: Double;
+Begin
+ WEQMinMax(WEPict,QMin,QMax);
+ Fps:=WEFpsN/WEFpsD;
+ If WEPicNum>2 Then Begin
+  If WELastPict=WE_I Then LastVar:=WERcLastMb Else LastVar:=WERcLastMc;
+  LastVar:=Sqrt(LastVar);
+  Sz:=WEFrameBits;
+  NewCoeff:=Sz*WERcLastQ/(LastVar+1);
+  If Not (LastVar<10) Then Begin
+   WERcPredCount[WELastPict]:=WERcPredCount[WELastPict]*WERcPredDecay[WELastPict];
+   WERcPredCoeff[WELastPict]:=WERcPredCoeff[WELastPict]*WERcPredDecay[WELastPict];
+   WERcPredCount[WELastPict]:=WERcPredCount[WELastPict]+1;
+   WERcPredCoeff[WELastPict]:=WERcPredCoeff[WELastPict]+NewCoeff;
+  End;
+ End;
+ Pn:=WEPicNum; Wanted:=Trunc(WEBitRate*Pn/Fps);
+ Diff:=WETotalBits-Wanted;
+ Br:=(4000000.0-Diff)/4000000.0;
+ If Br<=0.0 Then Br:=0.001;
+ If WEPict=WE_I Then Var2:=WEMbVarSum Else Var2:=WEMcMbVarSum;
+ Bits:=WERcPredCoeff[WEPict]*Sqrt(Var2)/(236.0*WERcPredCount[WEPict]);
+ If WEPict=WE_I Then Begin ITex:=Trunc(Bits); PTex:=0; End
+ Else Begin ITex:=0; PTex:=Trunc(Bits*0.9); End;
+ RateFactor:=WERcPass1Want/WERcPass1Sum*Double(Br);
+ Q:=WERcGetQscale(WEPict,ITex,PTex,RateFactor);
+ QD:=Q;
+ Q:=WERcDiffLimitedQ(WEPict,QD);
+ If (WEPict=WE_P) Or (WEGop<=1) Then Begin
+  WERcShortQs:=WERcShortQs*0.5; WERcShortQc:=WERcShortQc*0.5;
+  WERcShortQs:=WERcShortQs+Double(Q);
+  WERcShortQc:=WERcShortQc+1;
+  ShortQ:=WERcShortQs/WERcShortQc;
+  Q:=ShortQ;
+ End;
+ { modify_qscale sans tampon : ecretage }
+ QD:=Q;
+ If QD<QMin Then QD:=QMin Else If QD>QMax Then QD:=QMax;
+ Q:=QD;
+ WERcPass1Want:=WERcPass1Want+WEBitRate/Fps;
+ If Q<QMin Then Q:=QMin Else If Q>QMax Then Q:=QMax;
+ QD:=Double(Q)+0.5;
+ Q:=Trunc(QD);
+ WERcLastQ:=Q;
+ WERcLastMc:=WEMcMbVarSum; WERcLastMb:=WEMbVarSum;
+ WERcEstimate:=Trunc(Q);
+End;
+
+Procedure WEUpdateQscale;
+Begin
+ WEQscale:=(WELambda*139+128*64) Shr 14;
+ If WEQscale<2 Then WEQscale:=2;
+ If WEQscale>31 Then WEQscale:=31;
+ WELambda2:=(WELambda*WELambda+64) Shr 7;
+End;
+
+{ ---- ecriture AVI (format du muxer ffmpeg), debit declare parametrable ---- }
+Var
+ WEAbuf: Array[0..255] Of Byte; WEAU: Integer; WEAP,WEAMovi,WEAMax,WEAN: LongInt; WEAS: PALLong; WEAKey: PEABuffer;
+
+Procedure WEAb(X: LongInt);Begin WEAbuf[WEAU]:=X And 255; Inc(WEAU); Inc(WEAP); If WEAU>=250 Then Begin WriteBytes(WEAbuf,WEAU); WEAU:=0; End; End;
+Procedure WEAl16(X: LongInt);Begin WEAb(X); WEAb(X Shr 8); End;
+Procedure WEAl32(X: LongInt);Begin WEAl16(X); WEAl16(X Shr 16); End;
+Procedure WEAtag(Const T: String);
+Var Z: Integer;
+Begin For Z:=1 To 4 Do WEAb(Ord(T[Z])); End;
+Procedure WEAz(Cnt: LongInt);
+Var Z: LongInt;
+Begin For Z:=1 To Cnt Do WEAb(0); End;
+Procedure WEAflush;Begin If WEAU>0 Then Begin WriteBytes(WEAbuf,WEAU); WEAU:=0; End; End;
+Procedure WEApatch(At,Value: LongInt);
+Var Z: Integer; Code2: Integer; B4: Array[0..3] Of Byte;
+Begin
+ WEAflush;
+ {$I-}Seek(ActiveOutput,At); Code2:=IOResult;{$I+}
+ If Code2<>0 Then Fail('avi: positionnement impossible.');
+ For Z:=0 To 3 Do Begin B4[Z]:=Value And 255; Value:=Value Shr 8; End;
+ WriteBytes(B4,4);
+ {$I-}Seek(ActiveOutput,WEAP); Code2:=IOResult;{$I+}
+End;
+
+Procedure WEAviBegin(Const Target,Fourcc: String; W,H,Rate,Scale,Bpp: LongInt; Extra: PEABuffer; ExtraLen,SarN,SarD: LongInt; BitRate: Int64);
+Var I,Strf,Strl,Hdrl,Vp: LongInt; Aw,Ah,G,K,T64: Int64; Hv: Boolean;
+Begin
+ OpenWrite(Target); WEAU:=0; WEAP:=0; WEAN:=0; WEAMax:=0; GetMem(WEAS,1048576*4); GetMem(WEAKey,1048576);
+ Strf:=40+ExtraLen+(ExtraLen And 1);
+ Hv:=(SarN>0) And (SarD>0); Vp:=0; If Hv Then Vp:=8+68;
+ Strl:=4+(8+56)+(8+Strf)+(8+4120)+Vp;
+ Hdrl:=4+(8+56)+(8+Strl)+(8+260);
+ WEAtag('RIFF'); WEAl32(0); WEAtag('AVI ');
+ WEAtag('LIST'); WEAl32(Hdrl); WEAtag('hdrl');
+ WEAtag('avih'); WEAl32(56); WEAl32(Trunc(1000000.0*Scale/Rate)); WEAl32(LongInt(BitRate Div 8)); WEAl32(0); WEAl32(2320); WEAl32(0); WEAl32(0); WEAl32(1);
+ WEAl32(1048576); WEAl32(W); WEAl32(H); WEAl32(0); WEAl32(0); WEAl32(0); WEAl32(0);
+ WEAtag('LIST'); WEAl32(Strl); WEAtag('strl');
+ WEAtag('strh'); WEAl32(56); WEAtag('vids'); WEAtag(Fourcc);
+ WEAl32(0); WEAl16(0); WEAl16(0); WEAl32(0); WEAl32(Scale); WEAl32(Rate); WEAl32(0); WEAl32(0); WEAl32(0); WEAl32(-1); WEAl32(0);
+ WEAl16(0); WEAl16(0); WEAl16(W); WEAl16(H);
+ WEAtag('strf'); WEAl32(Strf); WEAl32(40+ExtraLen); WEAl32(W); WEAl32(H); WEAl16(1); WEAl16(Bpp);
+ WEAtag(Fourcc); WEAl32(W*H*Bpp Div 8); WEAl32(0); WEAl32(0); WEAl32(0); WEAl32(0);
+ For I:=0 To ExtraLen-1 Do WEAb(Extra^[I]);
+ If Odd(ExtraLen) Then WEAb(0);
+ WEAtag('JUNK'); WEAl32(4120); WEAl16(4); WEAl16(0); WEAl32(0); WEAtag('00dc'); WEAz(4120-12);
+ If Hv Then Begin
+ WEAtag('vprp'); WEAl32(68); WEAl32(0); WEAl32(0); WEAl32((2*Rate+Scale-1) Div (2*Scale));
+ WEAl32(W); WEAl32(H);
+ Aw:=Int64(SarN)*W; Ah:=Int64(SarD)*H; G:=Aw; K:=Ah; While K<>0 Do Begin T64:=G Mod K; G:=K; K:=T64; End; Aw:=Aw Div G; Ah:=Ah Div G;
+ While (Aw>65535) Or (Ah>65535) Do Begin Aw:=(Aw+1) Shr 1; Ah:=(Ah+1) Shr 1; End;
+ WEAl32(LongInt((Aw Shl 16) Or Ah)); WEAl32(W); WEAl32(H); WEAl32(1);
+ WEAl32(H); WEAl32(W); WEAl32(H); WEAl32(W); WEAl32(0); WEAl32(0); WEAl32(0); WEAl32(0);
+ End;
+ WEAtag('JUNK'); WEAl32(260); WEAtag('odml'); WEAtag('dmlh'); WEAl32(248); WEAz(248);
+ WEAtag('LIST'); WEAl32(26); WEAtag('INFO'); WEAtag('ISFT'); WEAl32(14);
+ WEAtag('Lavf'); WEAtag('60.1'); WEAtag('6.10'); WEAb(48); WEAb(0);
+ WEAtag('JUNK'); WEAl32(1016); WEAz(1016);
+ WEAtag('LIST'); WEAl32(0); WEAMovi:=WEAP-8; WEAtag('movi'); WEAflush;
+End;
+
+Procedure WEAviFrame(P: PEABuffer; Len,Key: LongInt);
+Var K,Q: LongInt;
+Begin
+ WEAtag('00dc'); WEAl32(Len); WEAflush;
+ K:=0;
+ While K<Len Do Begin
+  If Len-K>32768 Then Q:=32768 Else Q:=Len-K;
+  WriteBytes(P^[K],Q); Inc(K,Q); Inc(WEAP,Q);
+ End;
+ If Odd(Len) Then WEAb(0);
+ If WEAN<1048576 Then Begin WEAS^[WEAN]:=Len; WEAKey^[WEAN]:=Key; End;
+ Inc(WEAN);
+ If Len>WEAMax Then WEAMax:=Len;
+End;
+
+Procedure WEAviEnd;
+Var I,K,Fix: LongInt;
+Begin
+ Fix:=WEAP-(WEAMovi+8+4);
+ WEAtag('idx1'); WEAl32(16*WEAN); K:=4;
+ For I:=0 To WEAN-1 Do Begin
+  WEAtag('00dc'); If WEAKey^[I]<>0 Then WEAl32($10) Else WEAl32(0); WEAl32(K); WEAl32(WEAS^[I]); Inc(K,8+WEAS^[I]+(WEAS^[I] And 1));
+ End;
+ WEAflush;
+ WEApatch(4,WEAP-8); WEApatch(48,WEAN); WEApatch(140,WEAN); WEApatch(144,WEAMax); WEApatch(WEAMovi+4,4+Fix);
+ FreeMem(WEAS,1048576*4); FreeMem(WEAKey,1048576);
+ CloseWrite;
+End;
+
+{ ---- macrobloc : analyse, quantification, ecriture et reconstruction ---- }
+Function WEGetSrc(Pl,X,Y: LongInt): LongInt;
+Var Cw,Ch: LongInt;
+Begin
+ If Pl=0 Then Begin
+  If X>=WEW Then X:=WEW-1; If Y>=WEH Then Y:=WEH-1;
+  WEGetSrc:=WENewY^[Y*WEPW+X];
+ End Else Begin
+  Cw:=(WEW+1) Shr 1; Ch:=(WEH+1) Shr 1;
+  If X>=Cw Then X:=Cw-1; If Y>=Ch Then Y:=Ch-1;
+  If Pl=1 Then WEGetSrc:=WENewU^[Y*(WEPW Shr 1)+X] Else WEGetSrc:=WENewV^[Y*(WEPW Shr 1)+X];
+ End;
+End;
+
+Procedure WEEncodeMb(MbX,MbY,Intra,Mx,My: LongInt);
+Var
+ N,I,J,K,X0,Y0,DY,DC,Pl,Stride,POff,Sad,Q,Qadd,Qmul,Lv: LongInt; Pix: TAMVBlock; Pred: Array[0..63] Of LongInt; Ov,Sk: Boolean; Cur: ^TM4Pic; PP: PEABuffer;
+ Scan: PEABuffer; Xy: LongInt;
+Begin
+ Cur:=@M4P[M4CurI];
+ Xy:=MbX+MbY*WEMbStr;
+ DY:=MbY*16*M4LY+MbX*16; DC:=MbY*8*M4LC+MbX*8;
+ M4MbIntra:=Intra; WEMbIntra:=Intra;
+ If Intra=0 Then Begin
+  M4MvDir:=1; M4MvType:=0; M4Mv[0,0,0]:=Mx; M4Mv[0,0,1]:=My;
+  M4NoRnd:=WENoRnd;
+  M4Motion(0,M4LastI,DY,DC,M4NoRnd<>0,False);
+ End;
+ If WEVer>=4 Then Begin
+  If Intra<>0 Then Scan:=@W1ScanT[1] Else Scan:=@W1ScanT[0];
+ End Else Scan:=@H3Zigzag;
+ For N:=0 To 5 Do Begin
+  If N<4 Then Begin Pl:=0; X0:=MbX*16+(N And 1)*8; Y0:=MbY*16+(N Shr 1)*8; PP:=Cur^.Y; Stride:=M4LY; POff:=DY+(N And 1)*8+(N Shr 1)*8*M4LY; End
+  Else Begin
+   Pl:=N-3; X0:=MbX*8; Y0:=MbY*8; Stride:=M4LC; POff:=DC;
+   If N=4 Then PP:=Cur^.U Else PP:=Cur^.V;
+  End;
+  For J:=0 To 7 Do For I:=0 To 7 Do Pix[J*8+I]:=WEGetSrc(Pl,X0+I,Y0+J);
+  Sk:=False;
+  If Intra=0 Then Begin
+   For J:=0 To 7 Do For I:=0 To 7 Do Pred[J*8+I]:=PP^[POff+J*Stride+I];
+   If WEMcVar^[Xy]<2*WEQscale*WEQscale Then Begin
+    Sad:=0;
+    For K:=0 To 63 Do Begin J:=Pix[K]-Pred[K]; If J<0 Then J:=-J; Sad:=Sad+J; End;
+    If Sad<20*WEQscale Then Sk:=True;
+   End;
+   For K:=0 To 63 Do Pix[K]:=Pix[K]-Pred[K];
+  End;
+  If Sk Then Begin
+   WELastIdx[N]:=-1;
+   For K:=0 To 63 Do WEBl[N,K]:=0;
+  End Else Begin
+   WELastIdx[N]:=WEQuant(Pix,N,Intra<>0,Ov,WEBl[N]);
+   If Ov Then Begin
+    If Intra<>0 Then I:=1 Else I:=0;
+    For K:=I To WELastIdx[N] Do Begin
+     J:=Scan^[K];
+     If WEBl[N,J]>WEMaxQ Then WEBl[N,J]:=WEMaxQ Else If WEBl[N,J]<-WEMaxQ Then WEBl[N,J]:=-WEMaxQ;
+    End;
+   End;
+  End;
+ End;
+ { ecriture }
+ If WETrace2 Then Begin WriteLn(StdErr,'MB ',MbX,' ',MbY,' intra=',Intra,' mv=',Mx,',',My); End;
+ WEEncMbBits(Mx,My);
+ If WETrace2 Then WriteLn(StdErr,'  last=',WELastIdx[0],' ',WELastIdx[1],' ',WELastIdx[2],' ',WELastIdx[3],' ',WELastIdx[4],' ',WELastIdx[5],' bits=',WEBits);
+ { donnees pour la reconstruction du moteur }
+ Q:=WEQscale; Qmul:=Q Shl 1; Qadd:=(Q-1) Or 1;
+ For N:=0 To 5 Do Begin
+  For K:=0 To 63 Do M4Blk[N][K]:=0;
+  If Intra<>0 Then Begin
+   For K:=0 To 63 Do M4Blk[N][K]:=SmallInt(WEBl[N,K]);
+   If WELastIdx[N]>=1 Then M4BlkLast[N]:=63 Else M4BlkLast[N]:=0;
+  End Else If WELastIdx[N]>=0 Then Begin
+   For K:=0 To 63 Do Begin
+    Lv:=WEBl[N,K];
+    If Lv<0 Then Lv:=Lv*Qmul-Qadd Else If Lv>0 Then Lv:=Lv*Qmul+Qadd;
+    M4Blk[N][K]:=SmallInt(Lv);
+   End;
+   M4BlkLast[N]:=63;
+  End Else M4BlkLast[N]:=-1;
+ End;
+ M4Skip:=0;
+ M4UpdateMotion;
+ If WEVer=5 Then W2Recon Else M4Recon;
+ If Intra<>0 Then Begin WEPmv^[(Xy+WEMbStr+1)*2]:=0; WEPmv^[(Xy+WEMbStr+1)*2+1]:=0; End;
+End;
+
+{ copie de l'image reconstruite avec bordure (reference pour la prochaine estimation) }
+Procedure WEMakeRef;
+Var Y,X,SX,SY: LongInt; Src: ^TM4Pic;
+Begin
+ Src:=@M4P[M4CurI];
+ For Y:=-WEBd To WEPH+WEBd-1 Do Begin
+  SY:=Y; If SY<0 Then SY:=0; If SY>=WEPH Then SY:=WEPH-1;
+  For X:=-WEBd To WEPW+WEBd-1 Do Begin
+   SX:=X; If SX<0 Then SX:=0; If SX>=WEPW Then SX:=WEPW-1;
+   WERefY^[(Y+WEBd)*WERS+X+WEBd]:=Src^.Y^[SY*WEPW+SX];
+  End;
+ End;
+End;
+
+Procedure WEPrepSrc(Y,U,V: PEABuffer);
+Var X,Yy,SX,SY,Fw,Fh,Cw,Pcw,Pch: LongInt;
+Begin
+ For Yy:=0 To WEPH-1 Do Begin
+  SY:=Yy; If SY>=WEH Then SY:=WEH-1;
+  For X:=0 To WEPW-1 Do Begin
+   SX:=X; If SX>=WEW Then SX:=WEW-1;
+   WENewY^[Yy*WEPW+X]:=Y^[SY*WEW+SX];
+  End;
+ End;
+ Fw:=WEW Shr 1; Fh:=WEH Shr 1; Cw:=(WEW+1) Shr 1; Pcw:=WEPW Shr 1; Pch:=WEPH Shr 1;
+ For Yy:=0 To Pch-1 Do Begin
+  SY:=Yy; If SY>=Fh Then SY:=Fh-1;
+  For X:=0 To Pcw-1 Do Begin
+   SX:=X; If SX>=Fw Then SX:=Fw-1;
+   WENewU^[Yy*Pcw+X]:=U^[SY*Cw+SX];
+   WENewV^[Yy*Pcw+X]:=V^[SY*Cw+SX];
+  End;
+ End;
+End;
+
+{ ---- encodeur WMV1 / WMV2 / MS-MPEG4 v3 : Y4M -> AVI ---- }
+Procedure EncodeWMV(Const Source,Target: String; Ver,QOpt,GopOpt: LongInt; BrOpt: Int64);
+Var
+ F,Pk,Fy,Fu,Fv: PEABuffer; Size,Cur,W,Hh,FN,FD,CW,CH,K,Code,FrameBytes,N,MbX,MbY,Xy,SarN,SarD,Rate,Scale,G2,I,J,Bytes,Intra,Mx,My,PkSize,NewPict,MbSz,Fbr: LongInt;
+ Line,Token: String; Extra: Array[0..3] Of Byte; Br11: LongInt; ParOk: Boolean; TW: Int64; Quality: LongInt;
+ EvTr: String; ExtLen: LongInt; Pict0: LongInt; Fps5: LongInt;
+Function ReadLine: String;
+Var R: String;
+Begin
+ R:='';
+ While Cur<Size Do Begin
+  If F^[Cur]=10 Then Begin Inc(Cur); Break; End;
+  If Length(R)<250 Then R:=R+Chr(F^[Cur]);
+  Inc(Cur);
+ End;
+ ReadLine:=R;
+End;
+Begin
+ NVLoad(Source,F,Size); Cur:=0;
+ Line:=ReadLine;
+ If Copy(Line,1,9)<>'YUV4MPEG2' Then Fail('wmv: entree Y4M requise.');
+ W:=0; Hh:=0; FN:=25; FD:=1; SarN:=0; SarD:=1;
+ Line:=Copy(Line,11,255);
+ While Line<>'' Do Begin
+  K:=Pos(' ',Line); If K=0 Then K:=Length(Line)+1;
+  Token:=Copy(Line,1,K-1); Line:=Copy(Line,K+1,255);
+  If Token='' Then Continue;
+  Case Token[1] Of
+   'W': Val(Copy(Token,2,20),W,Code);
+   'H': Val(Copy(Token,2,20),Hh,Code);
+   'F': Begin K:=Pos(':',Token); If K>0 Then Begin Val(Copy(Token,2,K-2),FN,Code); Val(Copy(Token,K+1,20),FD,Code); End; End;
+   'A': Begin K:=Pos(':',Token); If K>0 Then Begin Val(Copy(Token,2,K-2),SarN,Code); Val(Copy(Token,K+1,20),SarD,Code); End; End;
+   'C': If (Token<>'C420') And (Token<>'C420jpeg') And (Token<>'C420mpeg2') And (Token<>'C420paldv') Then Fail('wmv: Y4M YUV420 8 bits requis.');
+   'I': If Token<>'Ip' Then Fail('wmv: video progressive requise.');
+  End;
+ End;
+ If (W<2) Or (Hh<2) Or (W>4096) Or (Hh>4096) Then Fail('wmv: dimensions Y4M incorrectes.');
+ If Odd(W) Then Fail('wmv: la largeur doit etre paire.');
+ If (FN<=0) Or (FD<=0) Then Begin FN:=25; FD:=1; End;
+ ParOk:=True;
+ If (SarD<=0) Or (SarN<0) Then ParOk:=False
+ Else If (SarN<>0) And (SarN<>SarD) Then Begin
+  If SarN<SarD Then TW:=(Int64(W)*SarN) Div SarD Else TW:=(Int64(Hh)*SarD) Div SarN;
+  If TW<=0 Then ParOk:=False;
+ End;
+ If Not ParOk Then Begin SarN:=0; SarD:=1; End;
+ CW:=(W+1) Div 2; CH:=(Hh+1) Div 2; FrameBytes:=W*Hh+2*CW*CH;
+ { parametres du codec }
+ WEVer:=Ver; WEW:=W; WEH:=Hh;
+ WEFpsN:=FN; WEFpsD:=FD;
+ { le debit de l'encodeur est reduit avec le rythme (framerate) : fps entier = num/den }
+ If BrOpt>0 Then WEBitRate:=BrOpt Else WEBitRate:=200000;
+ WEFixedQ:=QOpt>=0; WEGlobalQ:=QOpt*118;
+ If GopOpt>=0 Then WEGop:=GopOpt Else WEGop:=12;
+ If Ver>=4 Then WEMaxQ:=255 Else WEMaxQ:=127;
+ M4MsStart(Ver,W,Hh,1,1,0,'');
+ WEInitTables;
+ WEMbW:=M4MbW; WEMbH:=M4MbH; WEPW:=WEMbW*16; WEPH:=WEMbH*16; WEMbStr:=M4MbS; WEB8Str:=M4B8S; WEEndMbY:=WEMbH;
+ WERS:=WEPW+2*WEBd; WERCS:=WEPW Div 2+2*WEBd;
+ GetMem(WENewY,WEPW*WEPH+64); GetMem(WENewU,WEPW*WEPH Div 4+64); GetMem(WENewV,WEPW*WEPH Div 4+64);
+ GetMem(WERefY,Int64(WERS)*(WEPH+2*WEBd)+64); FillChar(WERefY^,Int64(WERS)*(WEPH+2*WEBd)+64,0);
+ MbSz:=(WEMbH+3)*WEMbStr+64;
+ GetMem(WEMbType,MbSz*4); GetMem(WEMbVar,MbSz*4); GetMem(WEMcVar,MbSz*4); GetMem(WEMbMean,MbSz*4); GetMem(WEPmv,MbSz*8);
+ FillChar(WEMbType^,MbSz*4,0); FillChar(WEMbVar^,MbSz*4,0); FillChar(WEMcVar^,MbSz*4,0); FillChar(WEMbMean^,MbSz*4,0); FillChar(WEPmv^,MbSz*8,0);
+ PkSize:=WEMbW*WEMbH*2048+4096; GetMem(Pk,PkSize);
+ WEOut:=Pk;
+ FillChar(WEMap,SizeOf(WEMap),0); FillChar(WEScore,SizeOf(WEScore),0); WEGen:=0;
+ WERcInit;
+ WEPicInGop:=0; WELastPict:=0; WELastNonB:=0; WETotalBits:=0; WEFrameBits:=0; WENoRnd:=0; WEFCode:=1;
+ For I:=0 To 4 Do WELastLambdaFor[I]:=0;
+ WELambda:=0; WELambda2:=0; WERlTab:=0; WERlChrTab:=0; WEInterIntra:=0; WECbpTab:=0;
+ FillChar(WEStat,SizeOf(WEStat),0);
+ EvTr:=GetEnv('WETRACE'); WETrace:=EvTr<>''; WETrace2:=GetEnv('WETRACE2')<>'';
+ M4ResyncX:=0; M4ResyncY:=0;
+ M4AcPred:=0; M4MpegQuant:=0; M4AltScan:=0; M4McSel:=0; M4QuarterS:=0; M4IDct:=0;
+ { donnees additionnelles WMV2 }
+ ExtLen:=0;
+ If Ver=5 Then Begin
+  ExtLen:=4;
+  Fps5:=FN Div FD;
+  Br11:=WEBitRate Div 1024; If Br11>2047 Then Br11:=2047;
+  Extra[0]:=0; Extra[1]:=0; Extra[2]:=0; Extra[3]:=0;
+  WEOut:=@Extra; WEBits:=0;
+  WEPut(5,Fps5); WEPut(11,Br11); WEPut(1,1); WEPut(1,0); WEPut(1,1); WEPut(1,1); WEPut(1,0); WEPut(1,1); WEPut(3,1);
+  WEOut:=Pk;
+ End;
+ Rate:=FN; Scale:=FD; G2:=Rate; K:=Scale; While K<>0 Do Begin I:=G2 Mod K; G2:=K; K:=I; End;
+ Rate:=Rate Div G2; Scale:=Scale Div G2;
+ If Ver=5 Then WEAviBegin(Target,'WMV2',W,Hh,Rate,Scale,24,PEABuffer(@Extra),ExtLen,SarN,SarD,WEBitRate)
+ Else If Ver=4 Then WEAviBegin(Target,'WMV1',W,Hh,Rate,Scale,24,Nil,0,SarN,SarD,WEBitRate)
+ Else WEAviBegin(Target,'MP43',W,Hh,Rate,Scale,24,Nil,0,SarN,SarD,WEBitRate);
+ N:=0;
+ While Cur<Size Do Begin
+  Line:=ReadLine;
+  If Copy(Line,1,5)<>'FRAME' Then Fail('wmv: marqueur FRAME requis.');
+  If FrameBytes>Size-Cur Then Break;
+  Fy:=@F^[Cur]; Fu:=@F^[Cur+W*Hh]; Fv:=@F^[Cur+W*Hh+CW*CH];
+  Inc(Cur,FrameBytes);
+  WEPicNum:=N;
+  { choix du type d'image (select_input_picture) }
+  Inc(WEPicInGop);
+  If (N=0) Or (WEGop<=1) Then WEPict:=WE_I
+  Else If WEPicInGop>=WEGop Then WEPict:=WE_I
+  Else WEPict:=WE_P;
+  WEPrepSrc(Fy,Fu,Fv);
+  If WEPict=WE_I Then M4PType:=0 Else M4PType:=1;
+  If Not M4FrameStart Then Fail('wmv: allocation d''image impossible.');
+  { ---- encode_picture ---- }
+  WEMbVarSum:=0; WEMcMbVarSum:=0; WESceneScore:=0;
+  If WEPict=WE_I Then WENoRnd:=1 Else WENoRnd:=WENoRnd Xor 1;
+  If Not WEFixedQ Then Begin
+   WELambda:=WELastLambdaFor[WELastNonB];
+   WEUpdateQscale;
+  End;
+  If WEPict<>WE_I Then Begin
+   WELambda:=(WELambda*256+128) Shr 8;
+   WELambda2:=LongInt((Int64(WELambda2)*256+128) Shr 8);
+   For MbY:=0 To WEMbH-1 Do Begin
+    WEFirstLine:=MbY=0;
+    For MbX:=0 To WEMbW-1 Do WEEstimateP(MbX,MbY);
+   End;
+  End Else Begin
+   For Xy:=0 To MbSz-1 Do WEMbType^[Xy]:=1;
+   If Not WEFixedQ Then
+    For MbY:=0 To WEMbH-1 Do For MbX:=0 To WEMbW-1 Do Begin
+     I:=0; K:=0;
+     For J:=0 To 255 Do Begin
+      Code:=WENewY^[(MbY*16+(J Shr 4))*WEPW+MbX*16+(J And 15)]; I:=I+Code; K:=K+Code*Code;
+     End;
+     WEMbVarSum:=WEMbVarSum+((K-LongInt((Int64(I)*I) Shr 8)+500+128) Shr 8);
+    End;
+  End;
+  If (WESceneScore>0) And (WEPict=WE_P) Then Begin
+   WEPict:=WE_I;
+   For Xy:=0 To MbSz-1 Do WEMbType^[Xy]:=1;
+   WENoRnd:=1;
+  End;
+  If WEPict=WE_P Then Begin
+   { ff_fix_long_mvs : vecteurs trop longs => intra }
+   For MbY:=0 To WEMbH-1 Do For MbX:=0 To WEMbW-1 Do Begin
+    Xy:=MbX+MbY*WEMbStr;
+    If WEMbType^[Xy]=2 Then Begin
+     Mx:=WEPmv^[(Xy+WEMbStr+1)*2]; My:=WEPmv^[(Xy+WEMbStr+1)*2+1];
+     If (Mx>=16) Or (Mx<-16) Or (My>=16) Or (My<-16) Then Begin
+      WEMbType^[Xy]:=1; WEPmv^[(Xy+WEMbStr+1)*2]:=0; WEPmv^[(Xy+WEMbStr+1)*2+1]:=0;
+     End;
+    End;
+   End;
+  End;
+  { estimate_qp }
+  If Not WEFixedQ Then Quality:=WERcEstimate Else Quality:=WEGlobalQ;
+  WELambda:=Quality;
+  WEUpdateQscale;
+  If (WEQscale<3) And (WEMaxQ<=128) And (WEPict=WE_I) And Not WEFixedQ Then WEQscale:=3;
+  If WEPict=WE_I Then WEPicInGop:=0;
+  If WETrace Then WriteLn(StdErr,'PIC n=',WEPicNum,' type=',WEPict,' lambda=',WELambda,' qscale=',WEQscale,' mbvar=',WEMbVarSum,' mcvar=',WEMcMbVarSum,' scene=',WESceneScore,' fcode=1 nornd=',WENoRnd);
+  FillChar(Pk^,PkSize,0); WEBits:=0;
+  If Ver=5 Then WEHeaderWmv2 Else WEHeaderMs;
+  WEMvBits:=0; WEICount:=0; WESkipCount:=0;
+  M4NoRnd:=WENoRnd;
+  M4PType:=0; If WEPict=WE_P Then M4PType:=1;
+  M4RlIdx:=WERlTab; M4RlChrIdx:=WERlChrTab; M4DcIdx:=WEDcTab; M4MvIdx:=WEMvTab; M4InterIntra:=WEInterIntra;
+  W2CbpIdx:=WECbpTab;
+  For MbY:=0 To WEMbH-1 Do Begin
+   M4MbY:=MbY;
+   M4SetQscale(WEQscale);
+   For MbX:=0 To WEMbW-1 Do Begin
+    M4MbX:=MbX;
+    If MbY=0 Then M4FirstLine:=1 Else M4FirstLine:=0;
+    Xy:=MbX+MbY*WEMbStr;
+    If (WEPict=WE_I) Or (WEMbType^[Xy]=1) Then Begin Intra:=1; Mx:=0; My:=0; End
+    Else Begin Intra:=0; Mx:=WEPmv^[(Xy+WEMbStr+1)*2]; My:=WEPmv^[(Xy+WEMbStr+1)*2+1]; End;
+    WEEncodeMb(MbX,MbY,Intra,Mx,My);
+   End;
+  End;
+  If (Ver=3) And (WEPict=WE_I) Then WEExtHeader;
+  Bytes:=(WEBits+7) Div 8;
+  If Bytes>=PkSize-4 Then Fail('wmv: tampon de sortie insuffisant.');
+  WEFrameBits:=Bytes*8;
+  WETotalBits:=WETotalBits+WEFrameBits;
+  If WETrace Then WriteLn(StdErr,'FRAME bits=',WEFrameBits,' total=',WETotalBits-WEFrameBits);
+  { frame_end }
+  WELastPict:=WEPict; WELastLambdaFor[WEPict]:=Quality; WELastNonB:=WEPict;
+  WEMakeRef;
+  If WEPict=WE_I Then K:=1 Else K:=0;
+  WEAviFrame(Pk,Bytes,K);
+  Inc(N);
+ End;
+ If N=0 Then Fail('wmv: aucune image Y4M.');
+ WEAviEnd;
+ FreeMem(Pk,PkSize);
+ CloseRead;
+End;
+
+
+Const
+ X8OrL: Array[0..95] Of Byte=(
+  0,1,1,3,2,3,3,4,4,4,5,6,7,6,6,5,8,6,9,6,10,6,11,6,
+  0,5,1,5,2,5,6,5,5,4,8,4,3,2,4,2,7,3,9,4,10,5,11,5,
+  0,2,1,2,2,3,3,3,4,3,5,6,6,6,7,5,8,6,9,6,10,6,11,6,
+  0,3,1,4,2,4,3,2,4,2,5,5,6,5,7,4,8,5,9,5,10,5,11,5);
+ X8OrH: Array[0..47] Of Byte=(
+  0,2,1,2,2,3,3,3,4,3,5,6,7,6,6,5,8,6,9,6,10,6,11,6,
+  0,1,1,2,2,3,3,5,4,5,5,7,7,7,6,6,8,7,9,7,10,7,11,7);
+ X8Dc: Array[0..1087] Of Byte=(
+  0,5,3,5,1,4,2,4,4,5,6,5,5,4,7,5,8,7,9,7,10,12,11,12,
+  12,12,13,12,14,12,15,12,16,12,25,12,26,12,27,12,28,12,29,12,30,12,31,12,
+  32,12,33,12,24,8,23,7,17,3,18,2,19,3,20,4,21,5,22,5,0,3,1,3,
+  2,3,3,4,4,4,5,3,6,4,7,4,8,6,9,7,10,7,11,11,12,11,13,11,
+  14,11,15,11,16,11,25,11,27,11,28,11,29,11,30,11,31,11,32,10,33,10,23,7,
+  17,6,18,4,19,5,20,5,21,6,24,7,26,7,22,5,0,7,1,7,2,6,3,7,
+  5,7,4,6,6,8,7,8,8,13,9,13,10,13,11,13,12,13,13,13,14,13,15,13,
+  16,12,23,12,24,12,25,12,26,12,27,12,28,12,29,12,30,12,31,12,32,12,33,12,
+  22,8,21,6,20,5,19,3,18,2,17,1,0,4,3,4,1,3,2,3,4,4,8,5,
+  9,5,5,3,6,3,7,3,10,7,11,11,12,11,13,11,14,11,15,11,16,11,25,11,
+  26,11,27,11,29,11,30,11,31,11,32,10,33,10,18,7,21,7,17,5,19,6,20,6,
+  22,7,23,7,24,7,28,7,0,8,4,9,6,9,1,7,2,7,3,7,5,8,7,14,
+  8,14,9,14,10,14,11,14,12,14,13,14,14,14,15,13,16,13,24,13,25,13,26,13,
+  27,13,28,13,29,13,30,13,31,13,32,13,33,13,23,9,22,7,21,6,20,4,19,3,
+  17,2,18,1,0,7,1,7,2,6,3,6,4,6,5,6,6,6,7,6,8,6,9,6,
+  10,6,11,6,12,6,13,6,14,6,15,6,16,6,17,6,18,6,19,6,20,6,21,6,
+  22,6,23,6,24,6,25,6,26,6,28,6,29,6,30,6,31,6,32,6,33,6,27,1,
+  0,5,2,5,1,4,3,5,4,6,6,6,5,5,7,6,8,8,9,8,10,13,11,13,
+  12,13,13,13,14,13,15,13,16,13,25,13,26,13,27,13,28,13,29,13,30,13,31,13,
+  32,13,33,13,24,9,23,8,17,2,18,2,19,3,20,4,21,5,22,5,0,7,1,7,
+  2,7,3,7,4,7,5,7,6,7,7,7,8,7,9,7,10,7,11,7,12,7,13,7,
+  14,7,15,7,16,7,19,7,20,7,21,7,22,7,23,7,24,7,25,7,26,7,27,7,
+  28,7,29,7,30,7,31,7,32,7,33,7,18,2,17,1,0,5,2,5,1,4,3,5,
+  4,5,5,5,6,6,7,6,8,8,9,8,10,13,11,13,12,13,13,13,14,13,15,13,
+  16,13,25,13,26,13,27,13,28,13,29,13,30,13,31,13,32,13,33,13,24,9,23,8,
+  22,6,21,5,20,4,19,3,17,2,18,2,0,4,3,4,1,3,2,3,4,4,6,4,
+  5,3,7,3,8,4,9,4,10,5,11,6,12,9,13,9,14,13,15,13,16,13,25,13,
+  26,13,27,13,28,12,29,12,31,12,32,12,33,12,21,9,20,7,17,6,18,6,19,6,
+  22,7,23,8,24,9,30,9,0,4,3,4,1,3,2,3,4,4,5,4,6,4,7,4,
+  8,6,9,6,10,7,11,7,12,12,13,12,14,12,15,12,16,12,25,12,26,12,27,12,
+  28,12,29,12,30,12,31,12,32,11,33,11,24,8,23,7,17,4,18,3,19,4,20,5,
+  21,6,22,6,0,4,6,4,2,3,1,2,3,3,4,3,5,3,7,4,8,6,9,6,
+  10,7,11,8,12,14,13,14,14,14,15,14,16,13,21,13,22,13,23,13,24,13,25,13,
+  26,13,27,13,28,13,29,13,30,13,31,13,32,13,33,13,17,9,18,7,19,8,20,8,
+  0,7,1,7,2,7,3,7,4,7,5,7,6,7,7,7,8,7,9,7,10,7,11,7,
+  12,7,13,7,14,7,15,7,16,7,19,7,20,7,21,7,22,7,23,7,24,7,25,7,
+  26,7,27,7,28,7,29,7,30,7,31,7,32,7,33,7,18,2,17,1,0,5,2,5,
+  1,4,3,6,4,6,5,6,6,7,8,7,7,6,9,6,10,8,12,8,11,7,13,13,
+  14,13,15,13,16,13,23,13,24,13,25,13,26,13,27,13,28,13,29,13,30,13,31,13,
+  32,13,33,12,22,9,21,8,20,7,17,3,19,3,18,1,0,4,4,4,2,3,1,2,
+  3,3,5,4,6,5,7,6,8,7,9,7,10,8,11,14,12,14,15,14,16,14,23,14,
+  24,14,25,14,26,14,27,14,28,14,29,14,30,14,31,14,32,14,33,13,13,10,14,9,
+  21,8,22,8,20,6,19,5,17,4,18,3,0,6,1,6,2,6,3,7,4,7,5,6,
+  6,6,7,6,8,7,9,8,10,8,11,9,12,10,13,14,14,14,15,14,16,14,24,14,
+  25,14,26,14,27,14,28,14,29,14,30,14,31,14,32,13,33,13,23,8,22,7,21,6,
+  20,5,19,4,18,2,17,1);
+ X8Ac: Array[0..4927] Of Byte=(
+  0,3,1,4,2,6,3,6,4,7,6,15,8,15,10,15,12,15,13,15,14,15,15,14,
+  34,14,45,14,46,14,47,14,49,14,50,14,51,14,52,14,53,14,54,14,55,14,56,14,
+  57,14,58,14,60,14,61,14,62,14,63,14,64,14,65,14,67,14,69,14,70,14,71,14,
+  72,14,74,14,75,14,76,14,9,9,7,8,5,6,11,9,18,9,19,9,22,9,20,7,
+  17,6,16,5,21,7,29,8,33,8,28,6,27,5,24,3,23,2,25,4,26,4,30,7,
+  32,7,31,6,35,7,36,7,37,7,38,9,41,9,42,8,39,5,40,6,43,9,44,9,
+  48,8,59,9,66,9,68,9,73,9,0,3,1,4,2,4,3,5,4,6,5,6,6,6,
+  7,6,8,7,9,8,10,8,11,8,12,8,13,14,44,14,47,14,50,14,51,14,54,14,
+  55,14,56,14,63,14,64,14,67,14,68,14,69,14,70,14,72,14,76,14,14,10,15,10,
+  45,10,32,8,16,4,17,5,18,6,19,7,31,7,20,5,21,6,26,6,22,5,24,5,
+  23,4,25,5,27,6,28,6,29,6,30,6,33,8,38,8,34,7,35,7,36,7,37,7,
+  39,7,40,7,41,8,42,8,43,8,46,9,49,9,53,8,58,8,57,6,48,5,52,5,
+  59,7,60,8,61,9,66,9,62,8,65,8,71,9,75,9,74,8,73,5,0,4,1,5,
+  2,12,3,12,4,12,5,12,6,12,7,12,8,12,9,12,10,12,11,12,12,11,13,11,
+  14,11,15,11,16,11,17,11,18,11,19,11,20,11,21,11,22,11,28,11,29,11,30,11,
+  31,11,32,11,33,11,34,11,35,11,36,11,37,11,38,11,40,11,41,11,42,11,43,11,
+  44,11,45,11,46,11,47,11,48,11,49,11,50,11,51,11,52,11,53,11,54,11,55,11,
+  56,11,57,11,58,11,59,11,60,11,61,11,62,11,63,11,64,11,65,11,66,11,67,11,
+  68,11,69,11,70,11,71,11,72,11,73,11,74,11,75,11,76,11,25,5,26,5,27,5,
+  39,5,24,2,23,1,0,8,1,8,2,8,3,8,4,8,5,8,6,8,7,8,8,8,
+  9,8,10,8,11,8,12,8,13,8,14,8,15,8,16,8,17,8,18,8,19,8,20,8,
+  21,8,22,8,24,8,25,7,26,7,27,7,28,7,29,7,30,7,31,7,32,7,33,7,
+  34,7,35,7,36,7,37,7,38,7,39,7,40,7,41,7,42,7,43,7,44,7,45,7,
+  46,7,47,7,48,7,49,7,50,7,51,7,52,7,53,7,54,7,55,7,56,7,57,7,
+  58,7,59,7,60,7,61,7,62,7,63,7,64,7,65,7,66,7,67,7,68,7,69,7,
+  70,7,71,7,72,7,73,7,74,7,75,7,76,7,23,1,0,9,1,9,2,9,3,9,
+  4,9,5,9,6,9,7,9,8,9,9,9,10,9,11,9,12,9,13,9,14,9,15,9,
+  16,9,17,9,18,9,19,9,20,9,21,9,22,8,25,8,26,8,27,8,28,8,29,8,
+  30,8,31,8,32,8,33,8,34,8,35,8,36,8,37,8,38,8,39,8,40,8,41,8,
+  42,8,43,8,44,8,45,8,46,8,47,8,48,8,49,8,50,8,51,8,52,8,53,8,
+  54,8,55,8,56,8,57,8,58,8,59,8,60,8,61,8,62,8,63,8,64,8,65,8,
+  66,8,67,8,68,8,69,8,70,8,71,8,72,8,73,8,74,8,75,8,76,8,23,2,
+  24,1,0,10,1,10,2,10,3,10,4,10,5,10,6,10,7,10,8,10,9,10,10,10,
+  11,10,12,10,13,10,14,10,15,10,16,10,17,10,18,10,19,10,20,9,21,9,22,9,
+  25,9,26,9,28,9,29,9,30,9,31,9,32,9,33,9,34,9,35,9,36,9,37,9,
+  38,9,39,9,40,9,41,9,42,9,43,9,44,9,45,9,46,9,47,9,48,9,49,9,
+  50,9,51,9,52,9,53,9,54,9,55,9,56,9,57,9,58,9,59,9,60,9,61,9,
+  62,9,63,9,64,9,65,9,66,9,67,9,68,9,69,9,70,9,71,9,72,9,73,9,
+  74,9,75,9,76,9,24,3,27,2,23,1,0,2,1,4,2,5,3,5,4,6,5,6,
+  6,7,7,8,8,8,9,8,10,9,11,9,12,10,14,10,13,9,15,15,42,15,46,15,
+  50,15,51,15,55,15,56,14,59,14,61,14,62,14,63,14,64,14,68,14,69,14,70,14,
+  71,14,72,14,75,14,76,14,43,10,37,9,17,5,18,6,19,6,16,3,20,4,21,7,
+  24,7,25,7,26,7,22,5,23,5,27,8,30,8,28,7,29,7,31,8,32,8,33,8,
+  34,8,35,8,36,8,38,8,39,8,40,8,41,9,44,10,45,10,47,10,54,10,49,9,
+  58,8,60,10,66,10,67,10,74,10,65,8,48,6,52,4,53,6,57,6,73,5,0,3,
+  1,4,2,5,3,5,4,6,5,8,9,13,12,13,13,13,14,13,42,13,45,13,46,13,
+  47,13,50,13,51,13,53,13,54,13,55,13,56,13,58,13,61,13,62,13,63,13,64,13,
+  66,13,67,13,68,13,69,13,70,13,72,12,74,12,75,12,76,12,6,7,7,6,8,7,
+  10,8,11,8,15,8,31,8,18,7,19,6,17,5,16,4,20,6,21,7,36,8,37,8,
+  22,6,27,6,23,3,24,5,25,5,26,4,28,6,29,6,30,5,32,6,33,6,34,6,
+  35,6,38,7,40,7,41,7,43,7,39,5,44,8,52,8,48,7,49,7,57,8,60,8,
+  59,7,65,8,71,8,73,6,0,3,1,4,2,5,3,5,4,5,5,5,6,6,7,7,
+  9,7,8,6,10,8,13,8,11,7,12,7,14,8,15,9,41,9,17,6,18,6,19,7,
+  21,8,42,9,43,9,16,4,20,5,22,6,26,6,23,4,24,4,25,5,27,6,28,6,
+  29,6,30,7,31,7,32,7,33,7,34,7,35,7,36,7,37,7,38,7,39,7,40,7,
+  44,11,54,14,55,14,56,14,64,14,69,14,70,14,72,14,76,14,53,10,45,9,47,8,
+  46,6,48,5,49,7,50,9,51,9,58,10,67,10,61,9,52,7,57,7,59,7,60,8,
+  62,8,63,7,65,7,66,7,68,10,71,10,74,9,75,8,73,6,0,2,1,4,2,5,
+  3,5,4,6,5,7,6,7,7,7,8,8,9,9,10,9,11,9,12,9,13,15,42,15,
+  44,15,45,15,46,15,47,15,50,15,51,15,56,15,61,15,62,15,63,15,64,15,66,15,
+  67,14,15,11,14,10,30,9,19,7,17,5,18,6,23,6,16,3,20,4,21,5,24,7,
+  25,7,26,8,27,8,28,7,22,4,29,8,31,8,32,9,33,9,34,9,35,9,36,10,
+  37,11,38,11,39,9,40,9,41,11,55,11,43,10,49,8,54,8,48,6,53,7,58,8,
+  59,11,68,14,69,14,70,14,71,14,72,14,74,14,75,14,76,14,60,10,65,9,52,4,
+  57,5,73,5,0,3,1,4,2,4,3,5,4,6,5,7,7,7,6,6,8,9,9,9,
+  10,8,11,15,13,15,14,15,15,15,46,15,47,15,50,15,51,15,54,14,55,14,56,14,
+  62,14,63,14,64,14,66,14,67,14,69,14,70,14,72,14,76,14,34,10,12,9,31,8,
+  17,5,16,3,18,7,19,7,21,6,22,5,20,4,23,4,24,4,25,5,26,6,27,6,
+  28,6,29,6,30,7,32,7,33,8,35,8,36,9,37,10,38,10,41,9,42,9,39,6,
+  40,7,43,8,44,10,60,10,45,9,48,7,49,9,58,9,53,8,57,6,52,5,59,9,
+  61,10,68,10,65,8,71,9,75,9,74,8,73,6,0,3,1,4,2,5,3,5,4,6,
+  5,6,6,7,7,7,8,6,9,6,10,7,11,7,12,9,13,9,15,8,14,7,17,6,
+  16,5,18,9,42,9,32,8,19,7,20,6,21,7,22,7,27,6,25,5,23,3,24,3,
+  26,5,28,6,29,6,30,7,31,7,33,8,34,8,35,8,41,8,36,7,38,7,37,6,
+  39,7,43,14,44,14,45,14,50,14,51,14,53,14,54,13,55,13,56,13,58,13,64,13,
+  67,13,68,13,69,13,70,13,71,13,72,13,74,13,76,13,47,9,49,8,40,6,46,7,
+  48,7,52,8,57,8,60,7,59,6,61,9,75,9,73,8,63,7,62,6,65,7,66,7,
+  0,2,1,4,2,5,3,5,4,6,5,6,6,7,7,7,8,7,9,8,10,9,11,9,
+  12,10,13,10,14,10,15,15,50,15,51,15,54,15,55,15,56,15,61,15,64,15,45,12,
+  47,12,58,12,32,8,19,7,18,6,17,5,16,3,20,4,21,6,22,6,24,5,23,4,
+  25,6,26,6,27,6,28,7,29,7,30,7,31,7,33,8,34,8,35,8,36,8,37,8,
+  38,10,43,10,41,9,39,7,40,8,42,9,44,10,46,10,49,8,53,9,59,10,60,10,
+  48,6,52,6,57,7,62,12,67,15,69,15,70,15,71,15,72,14,76,14,63,11,68,12,
+  74,12,75,11,66,9,65,8,73,6,0,3,1,4,2,4,3,5,4,5,5,6,6,7,
+  7,8,8,11,10,11,11,10,9,9,12,11,13,15,14,15,15,15,47,15,49,15,50,15,
+  51,15,54,15,55,14,56,14,58,14,63,14,38,11,53,11,37,9,32,8,19,7,18,6,
+  16,4,17,5,20,5,21,7,31,7,22,6,25,5,24,4,23,3,26,5,27,5,28,5,
+  29,6,30,6,33,8,34,8,35,7,36,8,41,8,40,7,39,5,42,8,44,10,60,10,
+  45,9,43,7,46,9,59,9,61,10,64,14,67,14,68,14,69,14,70,14,72,14,75,14,
+  76,14,66,11,62,9,48,7,52,7,57,7,65,8,71,9,74,9,73,7,0,3,1,4,
+  2,4,3,5,4,5,5,5,6,5,7,6,8,7,10,7,9,5,11,13,13,13,15,13,
+  29,13,32,13,33,13,34,12,37,12,38,12,40,12,41,12,42,12,43,12,44,12,45,12,
+  50,12,53,12,54,12,55,12,56,12,58,12,60,12,61,12,62,12,63,12,64,12,66,12,
+  67,12,68,12,69,12,70,12,71,12,72,12,74,12,76,12,12,7,14,7,18,7,17,6,
+  19,7,21,7,16,4,20,5,22,5,23,6,24,6,25,7,27,7,26,6,28,7,30,7,
+  31,7,35,7,36,7,39,7,47,6,46,5,49,5,48,4,51,7,75,7,57,6,52,5,
+  59,6,65,6,73,5,0,3,1,4,2,5,3,6,4,6,5,8,6,8,7,8,8,11,
+  9,15,10,15,11,15,12,15,13,15,14,15,15,15,38,15,46,15,47,15,50,15,51,15,
+  53,15,54,15,55,15,56,15,37,11,58,15,61,15,62,15,63,15,64,15,66,15,67,15,
+  68,15,69,15,70,15,72,14,75,14,76,14,19,9,17,6,18,7,21,8,22,8,28,6,
+  16,4,20,5,25,5,26,5,27,5,23,2,24,3,29,6,30,8,31,8,32,9,36,9,
+  33,8,34,7,35,8,41,8,40,7,42,9,44,9,43,8,39,5,45,9,49,10,71,10,
+  48,8,52,8,57,9,60,9,59,8,65,9,74,9,73,7,0,2,1,3,2,4,3,5,
+  4,6,5,7,6,7,7,7,8,9,12,10,13,10,9,8,10,8,11,8,14,10,15,10,
+  18,9,19,10,41,10,40,9,17,7,21,7,20,6,16,4,22,7,32,7,28,6,25,5,
+  23,4,24,4,26,5,27,5,29,6,30,6,31,6,33,7,34,7,35,7,36,7,37,7,
+  38,7,39,8,42,14,43,14,44,14,45,14,47,14,49,14,50,14,51,14,53,14,54,14,
+  55,14,56,14,58,14,63,14,64,14,65,14,46,10,48,9,52,8,57,10,66,14,67,14,
+  68,14,69,14,70,14,71,14,72,13,73,13,74,13,75,13,76,13,62,9,59,7,60,8,
+  61,8,0,3,1,5,2,7,5,8,6,8,3,6,4,6,7,8,8,14,9,14,11,14,
+  12,14,13,14,14,14,15,14,18,14,20,14,21,14,22,14,41,14,45,14,46,14,47,14,
+  49,14,50,14,51,14,52,13,53,13,54,13,55,13,56,13,57,13,58,13,60,13,61,13,
+  62,13,63,13,64,13,66,13,67,13,68,13,69,13,70,13,71,13,72,13,73,13,74,13,
+  75,13,76,13,10,7,16,6,17,8,19,8,30,7,23,2,24,3,25,5,29,6,31,7,
+  32,7,26,4,27,4,28,4,33,7,34,8,40,8,35,7,42,8,43,8,36,6,37,6,
+  38,6,39,6,44,8,48,8,65,7,59,6,0,2,1,3,2,3,3,4,4,5,5,5,
+  6,6,7,6,8,7,9,7,10,7,11,8,12,8,13,8,14,9,15,10,39,16,40,16,
+  41,15,43,15,44,15,45,15,50,15,51,15,53,15,42,12,49,12,54,15,55,15,56,15,
+  58,15,64,15,65,15,66,15,67,15,18,8,19,9,21,9,17,6,20,6,22,8,38,8,
+  27,7,16,4,23,5,24,6,25,6,26,6,28,7,29,7,30,7,31,7,32,7,33,7,
+  34,7,35,7,36,7,37,7,46,8,47,10,62,11,63,12,68,15,69,15,70,15,71,15,
+  72,15,74,15,75,15,76,15,48,9,52,8,57,9,73,9,59,7,60,8,61,8,0,2,
+  1,3,2,4,3,5,4,5,5,6,6,6,7,7,8,7,9,8,10,8,11,9,12,9,
+  13,9,14,10,15,10,17,5,18,7,19,7,21,7,24,7,16,3,20,4,22,5,23,6,
+  25,7,26,7,27,8,28,8,29,8,30,8,31,8,32,8,33,9,37,9,34,8,35,8,
+  36,8,38,11,40,11,39,10,41,15,43,15,44,15,45,15,50,15,51,15,64,15,66,15,
+  49,12,47,11,42,10,46,9,55,10,56,11,63,12,67,15,68,15,69,15,70,15,71,15,
+  72,15,74,14,48,7,53,7,52,5,54,8,58,10,61,10,62,10,65,11,75,12,76,12,
+  57,7,59,8,60,8,73,7,0,3,1,4,2,4,3,5,4,6,5,6,6,6,7,7,
+  9,7,8,6,10,8,11,8,12,8,13,9,14,9,15,8,37,8,31,7,18,6,17,5,
+  16,4,19,6,21,6,22,5,20,4,23,5,24,6,25,6,26,6,27,6,28,6,29,6,
+  30,6,32,7,33,7,34,7,35,7,36,7,38,11,50,15,51,15,55,15,56,15,64,15,
+  69,15,70,14,71,14,72,14,75,14,76,14,45,10,42,9,41,8,39,7,40,7,43,9,
+  44,9,46,9,47,10,58,10,49,8,54,9,62,10,66,10,48,6,53,7,59,7,52,4,
+  57,6,60,8,61,8,63,9,65,9,67,10,68,10,74,9,73,5,0,2,1,4,2,5,
+  3,5,4,6,5,6,6,7,7,8,8,8,9,8,10,9,11,11,14,11,13,10,12,8,
+  15,15,42,15,50,15,51,15,62,15,64,15,67,15,68,15,69,14,70,14,71,14,72,14,
+  38,11,40,10,33,9,17,5,18,6,19,7,24,7,16,3,20,4,21,6,23,6,22,5,
+  25,8,27,8,26,7,28,7,29,8,31,8,30,7,32,8,34,9,35,9,36,9,37,9,
+  39,9,41,11,44,11,43,10,45,11,47,11,46,10,56,9,49,8,48,6,54,7,55,7,
+  53,5,52,4,57,6,58,8,59,8,60,10,61,11,75,11,63,10,65,10,66,10,74,10,
+  76,9,73,5,0,2,1,4,2,5,3,6,4,6,5,8,6,9,7,10,8,10,9,9,
+  10,15,11,15,13,15,15,15,37,15,46,15,47,15,49,15,50,15,51,15,53,15,54,15,
+  55,15,56,15,58,15,60,15,61,15,62,15,63,15,64,15,67,15,68,15,69,15,70,15,
+  71,15,72,15,74,14,75,14,76,14,12,10,14,10,36,10,21,9,18,8,19,8,22,8,
+  32,8,17,5,16,4,20,5,26,5,25,4,23,3,24,3,27,6,28,6,29,7,30,7,
+  31,7,33,8,34,9,38,9,35,8,41,9,42,10,45,10,43,8,44,8,39,6,40,6,
+  48,9,57,9,52,8,59,9,65,10,66,10,73,8,0,4,1,11,2,11,3,11,4,11,
+  5,11,6,11,7,11,8,11,9,11,10,11,11,11,12,11,13,11,14,11,15,11,16,11,
+  17,10,18,10,19,10,20,10,21,10,22,10,25,10,28,10,29,10,30,10,31,10,32,10,
+  33,10,34,10,35,10,36,10,37,10,38,10,39,10,40,10,41,10,42,10,43,10,44,10,
+  45,10,46,10,47,10,48,10,49,10,50,10,51,10,52,10,53,10,54,10,55,10,56,10,
+  57,10,58,10,59,10,60,10,61,10,62,10,63,10,64,10,65,10,66,10,67,10,68,10,
+  69,10,70,10,71,10,72,10,73,10,74,10,75,10,76,10,26,4,27,4,24,2,23,1,
+  0,3,1,4,2,4,3,5,4,6,5,7,7,8,8,8,6,6,9,9,10,10,14,15,
+  47,15,49,14,50,14,51,14,54,14,55,14,56,14,58,14,15,11,11,9,12,9,13,9,
+  37,9,32,8,17,5,16,4,18,6,19,7,21,7,20,5,22,5,25,5,24,4,23,3,
+  26,5,27,5,28,5,29,6,30,6,31,7,33,8,34,8,35,8,36,8,38,10,44,11,
+  46,11,45,10,53,10,41,8,39,6,40,7,42,8,43,8,48,7,57,7,52,6,59,8,
+  60,9,61,11,63,11,62,10,64,14,67,14,68,14,69,14,70,14,71,14,72,14,76,14,
+  75,11,66,10,74,9,65,8,73,6,0,2,1,3,2,4,3,5,4,6,5,6,6,7,
+  7,8,8,8,9,8,10,9,11,9,12,11,13,11,14,11,15,11,24,9,23,8,17,5,
+  18,6,19,7,25,10,27,10,26,9,28,10,29,12,35,12,34,11,30,10,31,10,21,6,
+  32,10,33,10,36,10,37,12,38,12,39,15,40,15,41,15,42,15,43,14,44,14,45,14,
+  51,14,61,14,64,14,46,11,47,11,49,10,50,12,63,12,59,11,56,10,48,8,55,8,
+  16,3,20,4,22,4,52,4,53,6,54,7,58,8,60,10,62,11,65,14,66,14,67,14,
+  68,14,69,14,70,14,71,14,72,14,74,11,75,11,76,10,57,6,73,6,0,3,1,4,
+  2,5,3,6,4,7,5,8,6,8,7,8,8,10,10,10,9,9,11,10,12,16,15,16,
+  38,16,44,16,46,15,47,15,50,15,51,15,59,15,60,15,61,15,62,15,64,15,68,15,
+  69,15,70,15,71,15,72,15,37,11,13,10,14,10,19,8,18,6,17,5,21,5,23,7,
+  24,9,25,9,26,9,27,9,28,9,29,10,30,10,31,10,32,10,33,10,34,10,35,9,
+  36,10,39,10,40,11,42,11,41,10,43,10,45,11,63,11,16,3,20,3,22,4,48,7,
+  49,9,65,11,66,11,67,11,74,11,56,8,54,6,55,6,58,7,75,8,76,8,52,3,
+  53,4,57,5,73,5,0,2,1,3,2,4,3,4,4,5,5,5,6,6,7,6,8,6,
+  9,6,10,7,11,7,12,8,13,8,14,8,15,9,19,9,17,6,18,7,21,8,36,8,
+  16,4,20,6,22,7,28,7,23,6,24,6,25,6,26,6,27,6,29,7,30,7,31,7,
+  32,7,33,7,34,7,35,7,37,8,38,9,39,11,41,15,42,15,43,15,44,15,45,15,
+  51,15,54,15,55,15,49,12,40,10,46,7,47,8,48,8,50,9,53,9,56,15,67,15,
+  68,15,69,15,70,14,71,14,72,14,74,14,75,14,76,14,58,11,65,11,66,11,64,9,
+  52,7,57,8,61,8,60,7,59,6,62,8,73,8,63,7,0,2,1,4,2,5,3,6,
+  4,6,5,7,6,7,7,8,8,8,9,8,10,9,11,9,12,10,13,10,14,14,69,14,
+  70,14,72,14,15,12,44,11,37,10,29,8,19,7,18,6,17,5,21,6,24,6,16,3,
+  20,4,22,5,23,5,25,6,26,6,27,7,28,7,30,7,31,8,32,8,33,8,34,8,
+  35,8,36,9,38,10,43,10,39,7,40,8,41,9,42,9,45,9,46,9,47,10,50,12,
+  51,12,62,11,56,9,48,7,49,8,54,8,55,8,58,8,52,4,53,6,57,6,59,9,
+  60,10,61,10,63,10,64,11,67,11,65,9,66,9,68,11,71,11,76,10,74,9,75,9,
+  73,6,0,2,1,3,2,4,3,5,4,5,5,6,6,6,7,7,8,7,9,7,10,8,
+  11,8,12,8,13,9,14,10,39,11,40,12,41,12,15,9,37,9,19,8,18,7,21,7,
+  17,5,16,3,20,5,22,6,24,6,23,5,25,7,26,7,27,7,28,8,29,8,30,7,
+  31,8,32,8,33,8,34,8,35,8,36,8,38,9,42,15,44,15,45,15,56,15,43,13,
+  51,13,66,13,58,11,49,10,46,8,47,9,50,9,48,8,53,7,54,9,55,9,59,8,
+  52,5,57,7,60,8,61,8,62,9,64,11,65,12,67,15,68,15,69,15,70,15,71,15,
+  72,15,74,14,75,11,76,11,63,8,73,7,0,3,1,4,2,4,3,5,4,5,5,6,
+  6,6,7,7,8,8,9,8,10,8,11,9,12,9,13,9,14,11,15,12,45,12,38,10,
+  33,8,16,3,17,5,18,6,19,7,27,7,20,4,21,6,25,6,22,5,23,4,24,5,
+  26,6,28,7,29,7,30,7,31,7,32,7,34,8,35,8,36,9,41,9,37,8,39,7,
+  40,8,42,11,47,15,50,15,51,15,56,15,64,15,67,15,68,15,69,15,70,14,71,14,
+  72,14,76,14,44,10,43,9,46,9,54,9,55,11,63,11,61,10,58,9,48,6,49,7,
+  53,7,52,5,57,6,59,8,60,9,62,10,74,10,65,8,66,9,75,9,73,5,0,2,
+  1,4,2,5,3,6,4,7,5,7,6,8,7,8,8,9,9,9,10,9,11,10,12,15,
+  13,15,14,15,15,15,32,15,36,15,38,15,41,15,42,15,45,15,47,15,50,15,51,15,
+  61,15,62,14,34,11,18,6,17,5,19,7,23,8,24,8,21,6,25,9,26,10,28,10,
+  27,9,29,9,30,10,31,10,33,10,35,11,40,11,37,10,43,11,44,11,39,9,46,11,
+  60,11,49,10,56,9,59,9,63,14,64,14,67,14,68,14,69,14,70,14,71,14,72,14,
+  74,11,76,10,48,7,16,3,20,4,22,4,52,3,53,5,54,7,55,7,58,7,65,9,
+  66,9,75,8,57,5,73,5);
+
+{ ==== IntraX8 (libavcodec/intrax8.c, intrax8dsp.c, intrax8huf.h ; LGPL-2.1-or-later), utilise par WMV2 (images J) et VC-1 (res_x8) ==== }
+Var
+ X8Init: Boolean;
+ X8AcT: Array[0..1,0..1,0..7] Of PM4Tree; X8DcT: Array[0..1,0..7] Of PM4Tree; X8OrT: Array[0..1,0..3] Of PM4Tree;
+ X8AcSel: Array[0..3] Of PM4Tree; X8DcSel: Array[0..2] Of PM4Tree; X8OrSel: PM4Tree;
+ X8MbW,X8MbH,X8Quant,X8Dquant,X8Qsum,X8LoopF,X8UseQm,X8Orient,X8RawOrient,X8EstRun,X8FlatDc,X8PredDc,X8Edges,X8ChromaOrient,
+ X8QuantDcChroma,X8DivLuma,X8DivChroma,X8MbX,X8MbY,X8Err: LongInt;
+ X8Pred: Array[0..16383] Of LongInt;
+ X8Scr: Array[0..63] Of Byte;
+ X8Blk: TH3Blk;
+ X8Dest: Array[0..2] Of LongInt; X8P: Array[0..2] Of PEABuffer; X8Ls: Array[0..1] Of LongInt;
+ X8NoFlat: LongInt; X8Dbg: Boolean;
+
+Procedure X8BuildTree(Var T: PM4Tree; Const Tab: Array Of Byte; Base,Count: LongInt);
+Var I,Len,Sym: LongInt; Code: Int64;
+Begin
+ T:=M4TreeNew(Count*18+8);
+ Code:=0;
+ For I:=0 To Count-1 Do Begin
+  Sym:=Tab[Base+I*2]; Len:=Tab[Base+I*2+1];
+  If Len>0 Then Begin
+   M4TreeAdd(T,LongInt(Code Shr (32-Len)),Len,Sym);
+   Code:=Code+(Int64(1) Shl (32-Len));
+  End;
+ End;
+End;
+
+Procedure X8InitTables;
+Var I,J,K: LongInt;
+Begin
+ If X8Init Then Exit;
+ X8Init:=True;
+ For K:=0 To 255 Do W1ScanT[K Shr 6,K And 63]:=W1Scan[K];
+ M4MsInitTables;
+ For I:=0 To 1 Do For J:=0 To 1 Do For K:=0 To 7 Do X8BuildTree(X8AcT[I,J,K],X8Ac,((I*2+J)*8+K)*154,77);
+ For I:=0 To 1 Do For J:=0 To 7 Do X8BuildTree(X8DcT[I,J],X8Dc,(I*8+J)*68,34);
+ For I:=0 To 1 Do X8BuildTree(X8OrT[0,I],X8OrH,I*24,12);
+ For I:=0 To 3 Do X8BuildTree(X8OrT[1,I],X8OrL,I*24,12);
+End;
+
+Function X8QLow: LongInt;
+Begin If X8Quant<13 Then X8QLow:=1 Else X8QLow:=0; End;
+
+Procedure X8SelectAc(Mode: LongInt);
+Var Idx: LongInt;
+Begin
+ If X8AcSel[Mode]<>Nil Then Exit;
+ Idx:=H3Bits(3);
+ X8AcSel[Mode]:=X8AcT[X8QLow,Mode Shr 1,Idx];
+End;
+
+Function X8GetOrient: LongInt;
+Var Idx: LongInt;
+Begin
+ If X8OrSel=Nil Then Begin
+  Idx:=H3Bits(1+X8QLow);
+  X8OrSel:=X8OrT[X8QLow,Idx];
+ End;
+ X8GetOrient:=M4TreeGet(X8OrSel);
+End;
+
+Procedure X8GetAcRlf(Mode: LongInt; Var Run,Level,Final: LongInt);
+Const
+ { extra_bits | extra_run(0xFF00)/extra_level(0) | run_offset<<16 | level_offset<<24 }
+ Tb: Array[0..26] Of LongInt=(
+  3 Or $FF00 Or (16 Shl 16) Or (0 Shl 24), 3 Or $FF00 Or (24 Shl 16) Or (0 Shl 24),
+  2 Or $FF00 Or (4 Shl 16) Or (1 Shl 24),  3 Or $FF00 Or (8 Shl 16) Or (1 Shl 24),
+  5 Or $FF00 Or (32 Shl 16) Or (0 Shl 24), 4 Or $FF00 Or (16 Shl 16) Or (1 Shl 24),
+  2 Or (0 Shl 16) Or (4 Shl 24), 2 Or (0 Shl 16) Or (8 Shl 24), 2 Or (0 Shl 16) Or (12 Shl 24),
+  3 Or (0 Shl 16) Or (16 Shl 24), 3 Or (0 Shl 16) Or (24 Shl 24),
+  2 Or (1 Shl 16) Or (3 Shl 24), 3 Or (1 Shl 16) Or (7 Shl 24),
+  2 Or $FF00 Or (16 Shl 16), 2 Or $FF00 Or (20 Shl 16), 2 Or $FF00 Or (24 Shl 16), 2 Or $FF00 Or (28 Shl 16),
+  4 Or $FF00 Or (32 Shl 16), 4 Or $FF00 Or (48 Shl 16),
+  2 Or $FF00 Or (4 Shl 16) Or (1 Shl 24), 3 Or $FF00 Or (8 Shl 16) Or (1 Shl 24), 4 Or $FF00 Or (16 Shl 16) Or (1 Shl 24),
+  2 Or (0 Shl 16) Or (4 Shl 24), 3 Or (0 Shl 16) Or (8 Shl 24), 4 Or (0 Shl 16) Or (16 Shl 24),
+  2 Or (1 Shl 16) Or (3 Shl 24), 3 Or (1 Shl 16) Or (7 Shl 24));
+ Crazy: Array[0..31] Of Byte=(
+  $22,$32,$33,$53,$23,$42,$43,$63, $24,$52,$34,$73,$25,$62,$44,$83,
+  $26,$72,$35,$54,$27,$82,$45,$64, $28,$92,$36,$74,$29,$A2,$46,$84);
+Var I,E,T,L,Sm,Mask: LongInt;
+Begin
+ I:=M4TreeGet(X8AcSel[Mode]);
+ If I<46 Then Begin
+  If I<0 Then Begin Level:=64; Final:=64; Run:=64; Exit; End;
+  If I>22 Then T:=1 Else T:=0;
+  Final:=T;
+  I:=I-23*T;
+  L:=(LongInt($E50000) Shr (I And $1E)) And 3;
+  T:=LongInt($01030F) Shr (L Shl 3);
+  Run:=I And T;
+  Level:=L;
+ End Else If I<73 Then Begin
+  I:=I-46;
+  Sm:=Tb[I];
+  E:=H3Bits(Sm And $F);
+  Sm:=Sm Shr 8;
+  Mask:=Sm And $FF;
+  Sm:=Sm Shr 8;
+  Run:=(Sm And $FF)+(E And Mask);
+  Level:=(Sm Shr 8)+(E And Not Mask);
+  Final:=Ord(I>(58-46));
+ End Else If I<75 Then Begin
+  Final:=Ord((I And 1)=0);
+  E:=H3Bits(5);
+  Run:=Crazy[E] Shr 4;
+  Level:=Crazy[E] And $F;
+ End Else Begin
+  Level:=H3Bits(7-3*(I And 1));
+  Run:=H3Bits(6);
+  Final:=H3Bit;
+ End;
+End;
+
+Function X8GetDcRlf(Mode: LongInt; Var Level,Final: LongInt): LongInt;
+Const Off: Array[0..16] Of Byte=(0,1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193);
+Var I,E,C,Idx: LongInt;
+Begin
+ If X8DcSel[Mode]=Nil Then Begin
+  Idx:=H3Bits(3);
+  X8DcSel[Mode]:=X8DcT[X8QLow,Idx];
+ End;
+ I:=M4TreeGet(X8DcSel[Mode]);
+ If I>16 Then C:=1 Else C:=0;
+ Final:=C;
+ I:=I-17*C;
+ If I<=0 Then Begin Level:=0; X8GetDcRlf:=-I; Exit; End;
+ C:=(I+1) Shr 1;
+ If C>1 Then Dec(C);
+ E:=H3Bits(C);
+ I:=Off[I]+(E Shr 1);
+ E:=-(E And 1);
+ Level:=(I Xor E)-E;
+ X8GetDcRlf:=0;
+End;
+
+{ ---- dsp : preparation des pixels de bord ---- }
+Procedure X8SetupSpatial(P: PEABuffer; Src,Stride: LongInt; Var Range,Psum: LongInt; Edges: LongInt);
+Var Ptr,Sum,I,MinP,MaxP,C,Avg: LongInt;
+Begin
+ If (Edges And 3)=3 Then Begin
+  Psum:=$80*(8+1+8+2); Range:=0;
+  FillChar(X8Scr,16+1+16+8,$80);
+  Exit;
+ End;
+ MinP:=256; MaxP:=-1; Sum:=0; C:=0;
+ If (Edges And 1)=0 Then Begin
+  Ptr:=Src-1;
+  For I:=7 DownTo 0 Do Begin
+   C:=P^[Ptr-1]; X8Scr[I]:=C;
+   C:=P^[Ptr];
+   Sum:=Sum+C; If C<MinP Then MinP:=C; If C>MaxP Then MaxP:=C;
+   X8Scr[8+I]:=C;
+   Inc(Ptr,Stride);
+  End;
+ End;
+ If (Edges And 2)=0 Then Begin
+  Ptr:=Src-Stride;
+  For I:=0 To 7 Do Begin
+   C:=P^[Ptr+I];
+   Sum:=Sum+C; If C<MinP Then MinP:=C; If C>MaxP Then MaxP:=C;
+  End;
+  If (Edges And 4)<>0 Then Begin
+   FillChar(X8Scr[8+8+1+8],8,C);
+   For I:=0 To 7 Do X8Scr[8+8+1+I]:=P^[Ptr+I];
+  End Else Begin
+   For I:=0 To 15 Do X8Scr[8+8+1+I]:=P^[Ptr+I];
+  End;
+  For I:=0 To 7 Do X8Scr[8+8+1+16+I]:=P^[Ptr-Stride+I];
+ End;
+ If (Edges And 3)<>0 Then Begin
+  Avg:=(Sum+4) Shr 3;
+  If (Edges And 1)<>0 Then FillChar(X8Scr[0],8+8+1,Avg)
+  Else FillChar(X8Scr[8+8],1+16+8,Avg);
+  Sum:=Sum+Avg*9;
+ End Else Begin
+  C:=P^[Src-1-Stride];
+  X8Scr[8+8]:=C;
+  Sum:=Sum+C;
+ End;
+ Range:=MaxP-MinP;
+ Sum:=Sum+X8Scr[8+8+1+8]+X8Scr[8+8+1+8+1];
+ Psum:=Sum;
+End;
+
+Const
+ X8ZeroW: Array[0..127] Of Word=(
+  640,640,669,480,708,354,748,257, 792,198,760,143,808,101,772,72,
+  480,669,537,537,598,416,661,316, 719,250,707,185,768,134,745,97,
+  354,708,416,598,488,488,564,388, 634,317,642,241,716,179,706,132,
+  257,748,316,661,388,564,469,469, 543,395,571,311,655,238,660,180,
+  198,792,250,719,317,634,395,543, 469,469,507,380,597,299,616,231,
+  161,855,206,788,266,710,340,623, 411,548,455,455,548,366,576,288,
+  122,972,159,914,211,842,276,758, 341,682,389,584,483,483,520,390,
+  110,1172,144,1107,193,1028,254,932, 317,846,366,731,458,611,499,499);
+
+Procedure X8Spatial(Orient: LongInt; Dst: PEABuffer; Off,Stride: LongInt);
+Var I,J,X,Y,P,A: LongInt; Left,Top: Array[0..1,0..7] Of Word; V: Int64;
+Function Mn(A1,B1: LongInt): LongInt;
+Begin If A1<B1 Then Mn:=A1 Else Mn:=B1; End;
+Begin
+ Case Orient Of
+  0: Begin
+   FillChar(Left,SizeOf(Left),0); FillChar(Top,SizeOf(Top),0);
+   For I:=0 To 7 Do Begin
+    A:=X8Scr[8+7-I] Shl 4;
+    For J:=0 To 7 Do Begin
+     P:=Abs(I-J);
+     Left[P And 1,J]:=Word(Left[P And 1,J]+(A Shr (P Shr 1)));
+    End;
+   End;
+   For I:=0 To 7 Do Begin
+    A:=X8Scr[17+I] Shl 4;
+    For J:=0 To 7 Do Begin
+     P:=Abs(I-J);
+     Top[P And 1,J]:=Word(Top[P And 1,J]+(A Shr (P Shr 1)));
+    End;
+   End;
+   For I:=8 To 9 Do Begin
+    A:=X8Scr[17+I] Shl 4;
+    For J:=5 To 7 Do Begin
+     P:=Abs(I-J);
+     Top[P And 1,J]:=Word(Top[P And 1,J]+(A Shr (P Shr 1)));
+    End;
+   End;
+   For I:=10 To 11 Do Begin
+    A:=X8Scr[17+I] Shl 4;
+    For J:=7 To 7 Do Begin
+     P:=Abs(I-J);
+     Top[P And 1,J]:=Word(Top[P And 1,J]+(A Shr (P Shr 1)));
+    End;
+   End;
+   For I:=0 To 7 Do Begin
+    Top[0,I]:=Word(Top[0,I]+((Top[1,I]*181+128) Shr 8));
+    Left[0,I]:=Word(Left[0,I]+((Left[1,I]*181+128) Shr 8));
+   End;
+   For Y:=0 To 7 Do Begin
+    For X:=0 To 7 Do Begin
+     V:=(Int64(Top[0,X])*X8ZeroW[Y*16+X*2]+Int64(Left[0,Y])*X8ZeroW[Y*16+X*2+1]+$8000) Shr 16;
+     Dst^[Off+X]:=V And 255;
+    End;
+    Inc(Off,Stride);
+   End;
+  End;
+  1: For Y:=0 To 7 Do Begin For X:=0 To 7 Do Dst^[Off+X]:=X8Scr[17+Mn(2*Y+X+2,15)]; Inc(Off,Stride); End;
+  2: For Y:=0 To 7 Do Begin For X:=0 To 7 Do Dst^[Off+X]:=X8Scr[17+1+Y+X]; Inc(Off,Stride); End;
+  3: For Y:=0 To 7 Do Begin For X:=0 To 7 Do Dst^[Off+X]:=X8Scr[17+((Y+1) Shr 1)+X]; Inc(Off,Stride); End;
+  4: For Y:=0 To 7 Do Begin For X:=0 To 7 Do Dst^[Off+X]:=(X8Scr[17+X]+X8Scr[33+X]+1) Shr 1; Inc(Off,Stride); End;
+  5: For Y:=0 To 7 Do Begin
+   For X:=0 To 7 Do
+    If 2*X-Y<0 Then Dst^[Off+X]:=X8Scr[8+9+2*X-Y] Else Dst^[Off+X]:=X8Scr[17+X-((Y+1) Shr 1)];
+   Inc(Off,Stride);
+  End;
+  6: For Y:=0 To 7 Do Begin For X:=0 To 7 Do Dst^[Off+X]:=X8Scr[16+X-Y]; Inc(Off,Stride); End;
+  7: For Y:=0 To 7 Do Begin
+   For X:=0 To 7 Do
+    If X-2*Y>0 Then Dst^[Off+X]:=(X8Scr[16-1+X-2*Y]+X8Scr[16+X-2*Y]+1) Shr 1
+    Else Dst^[Off+X]:=X8Scr[8+8-Y+(X Shr 1)];
+   Inc(Off,Stride);
+  End;
+  8: For Y:=0 To 7 Do Begin For X:=0 To 7 Do Dst^[Off+X]:=(X8Scr[7-Y]+X8Scr[8+7-Y]+1) Shr 1; Inc(Off,Stride); End;
+  9: For Y:=0 To 7 Do Begin For X:=0 To 7 Do Dst^[Off+X]:=X8Scr[8+6-Mn(X+Y,6)]; Inc(Off,Stride); End;
+  10: For Y:=0 To 7 Do Begin For X:=0 To 7 Do Dst^[Off+X]:=(X8Scr[8+7-Y]*(8-X)+X8Scr[17+X]*X+4) Shr 3; Inc(Off,Stride); End;
+  11: For Y:=0 To 7 Do Begin For X:=0 To 7 Do Dst^[Off+X]:=(X8Scr[8+7-Y]*Y+X8Scr[17+X]*(8-Y)+4) Shr 3; Inc(Off,Stride); End;
+ End;
+End;
+
+Procedure X8LoopFilter(P: PEABuffer; Ptr,AS,BS,Quant: LongInt);
+Var
+ I,T,P0,P1,P2,P3,P4,P5,P6,P7,P8,P9,Ql,Mn,Mx,X,X0,X1,X2,M,Sg: LongInt; Done: Boolean;
+Begin
+ Ql:=(Quant+10) Shr 3;
+ For I:=0 To 7 Do Begin
+  P0:=P^[Ptr-5*AS]; P1:=P^[Ptr-4*AS]; P2:=P^[Ptr-3*AS]; P3:=P^[Ptr-2*AS]; P4:=P^[Ptr-AS];
+  P5:=P^[Ptr]; P6:=P^[Ptr+AS]; P7:=P^[Ptr+2*AS]; P8:=P^[Ptr+3*AS]; P9:=P^[Ptr+4*AS];
+  T:=Ord(Abs(P1-P2)<=Ql)+Ord(Abs(P2-P3)<=Ql)+Ord(Abs(P3-P4)<=Ql)+Ord(Abs(P4-P5)<=Ql);
+  Done:=False;
+  If T>0 Then Begin
+   T:=T+Ord(Abs(P5-P6)<=Ql)+Ord(Abs(P6-P7)<=Ql)+Ord(Abs(P7-P8)<=Ql)+Ord(Abs(P8-P9)<=Ql)+Ord(Abs(P0-P1)<=Ql);
+   If T>=6 Then Begin
+    Mn:=P1; Mx:=P1;
+    If P3<Mn Then Mn:=P3; If P3>Mx Then Mx:=P3;
+    If P5<Mn Then Mn:=P5; If P5>Mx Then Mx:=P5;
+    If P8<Mn Then Mn:=P8; If P8>Mx Then Mx:=P8;
+    If Mx-Mn<2*Quant Then Begin
+     If P2<Mn Then Mn:=P2; If P2>Mx Then Mx:=P2;
+     If P4<Mn Then Mn:=P4; If P4>Mx Then Mx:=P4;
+     If P6<Mn Then Mn:=P6; If P6>Mx Then Mx:=P6;
+     If P7<Mn Then Mn:=P7; If P7>Mx Then Mx:=P7;
+     If Mx-Mn<2*Quant Then Begin
+      P^[Ptr-2*AS]:=(4*P2+3*P3+1*P7+4) Shr 3;
+      P^[Ptr-AS]:=(3*P2+3*P4+2*P7+4) Shr 3;
+      P^[Ptr]:=(2*P2+3*P5+3*P7+4) Shr 3;
+      P^[Ptr+AS]:=(1*P2+3*P6+4*P7+4) Shr 3;
+      Done:=True;
+     End;
+    End;
+   End;
+  End;
+  If Not Done Then Begin
+   X0:=M4Sar(2*P3-5*P4+5*P5-2*P6+4,3);
+   If Abs(X0)<Quant Then Begin
+    X1:=M4Sar(2*P1-5*P2+5*P3-2*P4+4,3);
+    X2:=M4Sar(2*P5-5*P6+5*P7-2*P8+4,3);
+    X:=Abs(X0); If Abs(X1)<Abs(X2) Then X:=X-Abs(X1) Else X:=X-Abs(X2);
+    M:=P4-P5;
+    If (X>0) And ((M Xor X0)<0) Then Begin
+     If M<0 Then Sg:=-1 Else Sg:=0;
+     M:=(M Xor Sg)-Sg;
+     M:=M Shr 1;
+     X:=M4Sar(5*X,3);
+     If X>M Then X:=M;
+     X:=(X Xor Sg)-Sg;
+     P^[Ptr-AS]:=P^[Ptr-AS]-X;
+     P^[Ptr]:=P^[Ptr]+X;
+    End;
+   End;
+  End;
+  Inc(Ptr,BS);
+ End;
+End;
+
+{ ---- decodage ---- }
+Function X8Clip8(V: LongInt): LongInt;
+Begin If V<0 Then X8Clip8:=0 Else If V>255 Then X8Clip8:=255 Else X8Clip8:=V; End;
+
+Function X8SetupPredictor(Chroma: LongInt): LongInt;
+Const Pt: Array[0..2,0..11] Of Byte=((0,8,4,10,11,2,6,9,1,3,5,7),(4,0,8,11,10,3,5,2,6,9,1,7),(8,0,4,10,11,1,7,2,6,9,3,5));
+Var Range,Sum,Q: LongInt;
+Begin
+ X8SetupPredictor:=0;
+ X8SetupSpatial(X8P[Chroma],X8Dest[Chroma],X8Ls[Ord(Chroma>0)],Range,Sum,X8Edges);
+ If Chroma<>0 Then Begin X8Orient:=X8ChromaOrient; Q:=X8QuantDcChroma; End Else Q:=X8Quant;
+ X8FlatDc:=0;
+ If (Range<Q) Or (Range<3) Then Begin
+  X8Orient:=0;
+  If Range<3 Then Begin
+   X8FlatDc:=1;
+   Sum:=Sum+9;
+   X8PredDc:=M4Sar(Sum*6899,17);
+  End;
+ End;
+ If Chroma<>0 Then Exit;
+ If Range<2*X8Quant Then Begin
+  If (X8Edges And 3)=0 Then Begin
+   If X8Orient=1 Then X8Orient:=11;
+   If X8Orient=2 Then X8Orient:=10;
+  End Else X8Orient:=0;
+  X8RawOrient:=0;
+ End Else Begin
+  X8RawOrient:=X8GetOrient;
+  If X8RawOrient<0 Then Begin X8SetupPredictor:=-1; Exit; End;
+  If X8RawOrient>11 Then Begin X8SetupPredictor:=-1; Exit; End;
+  X8Orient:=Pt[X8Orient,X8RawOrient];
+ End;
+End;
+
+Procedure X8UpdatePred(Orient,EstRun: LongInt);
+Begin
+ X8Pred[X8MbX*2+(X8MbY And 1)]:=(EstRun Shl 2)+1*Ord(Orient=4)+2*Ord(Orient=8);
+End;
+
+Procedure X8GetPredChroma;
+Begin
+ X8Edges:=1*Ord((X8MbX Shr 1)=0);
+ X8Edges:=X8Edges Or (2*Ord((X8MbY Shr 1)=0));
+ X8Edges:=X8Edges Or (4*Ord(X8MbX>=(2*X8MbW-1)));
+ X8RawOrient:=0;
+ If (X8Edges And 3)<>0 Then Begin
+  X8ChromaOrient:=4 Shl ((($CC Shr X8Edges)) And 1);
+  Exit;
+ End;
+ X8ChromaOrient:=(X8Pred[2*X8MbX-2] And 3) Shl 2;
+End;
+
+Procedure X8GetPred;
+Var A,B,C,I: LongInt;
+Begin
+ X8Edges:=1*Ord(X8MbX=0);
+ X8Edges:=X8Edges Or (2*Ord(X8MbY=0));
+ X8Edges:=X8Edges Or (4*Ord(X8MbX>=(2*X8MbW-1)));
+ Case X8Edges And 3 Of
+  1: Begin X8EstRun:=X8Pred[Ord((X8MbY And 1)=0)] Shr 2; X8Orient:=1; Exit; End;
+  2: Begin X8EstRun:=X8Pred[2*X8MbX-2] Shr 2; X8Orient:=2; Exit; End;
+  3: Begin X8EstRun:=16; X8Orient:=0; Exit; End;
+ End;
+ B:=X8Pred[2*X8MbX+Ord((X8MbY And 1)=0)];
+ A:=X8Pred[2*X8MbX-2+(X8MbY And 1)];
+ C:=X8Pred[2*X8MbX-2+Ord((X8MbY And 1)=0)];
+ If B<A Then X8EstRun:=B Else X8EstRun:=A;
+ If (X8MbX And X8MbY)<>0 Then If C<X8EstRun Then X8EstRun:=C;
+ X8EstRun:=X8EstRun Shr 2;
+ A:=A And 3; B:=B And 3; C:=C And 3;
+ I:=(Int64($FFEAF4C4) Shr (2*B+8*A)) And 3;
+ If I<>3 Then X8Orient:=I
+ Else X8Orient:=(LongInt($FFEAD8) Shr (2*C+8*Ord(X8Quant>12))) And 3;
+End;
+
+Procedure X8AcComp(Dir,Dc: LongInt);
+Function T(X: LongInt): LongInt;
+Begin T:=M4Sar(X*Dc+$8000,16); End;
+Procedure Bm(X,Y,V: LongInt);
+Begin X8Blk[X+Y*8]:=SmallInt(X8Blk[X+Y*8]+V); End;
+Var Tt: LongInt;
+Begin
+ Case Dir Of
+  0: Begin
+   Tt:=T(3811); Bm(1,0,-Tt); Bm(0,1,-Tt);
+   Tt:=T(487); Bm(2,0,-Tt); Bm(0,2,-Tt);
+   Tt:=T(506); Bm(3,0,-Tt); Bm(0,3,-Tt);
+   Tt:=T(135); Bm(4,0,-Tt); Bm(0,4,-Tt); Bm(2,1,Tt); Bm(1,2,Tt); Bm(3,1,Tt); Bm(1,3,Tt);
+   Tt:=T(173); Bm(5,0,-Tt); Bm(0,5,-Tt);
+   Tt:=T(61); Bm(6,0,-Tt); Bm(0,6,-Tt); Bm(5,1,Tt); Bm(1,5,Tt);
+   Tt:=T(42); Bm(7,0,-Tt); Bm(0,7,-Tt); Bm(4,1,Tt); Bm(1,4,Tt); Bm(4,4,Tt);
+   Tt:=T(1084); Bm(1,1,Tt);
+  End;
+  1: Begin Bm(0,1,-T(6269)); Bm(0,3,-T(708)); Bm(0,5,-T(172)); Bm(0,7,-T(73)); End;
+  2: Begin Bm(1,0,-T(6269)); Bm(3,0,-T(708)); Bm(5,0,-T(172)); Bm(7,0,-T(73)); End;
+ End;
+End;
+
+Procedure X8SolidColor(P: PEABuffer; Off,Stride,Pix: LongInt);
+Var K: LongInt;
+Begin
+ For K:=0 To 7 Do Begin FillChar(P^[Off],8,Pix); Inc(Off,Stride); End;
+End;
+
+Const
+ X8QuantTab: Array[0..63] Of Word=(
+  256,256,256,256,256,256,259,262, 265,269,272,275,278,282,285,288,
+  292,295,299,303,306,310,314,317, 321,325,329,333,337,341,345,349,
+  353,358,362,366,371,375,379,384, 389,393,398,403,408,413,417,422,
+  428,433,438,443,448,454,459,465, 470,476,482,488,493,499,505,511);
+
+Function X8DecodeIntraMb(Chroma: LongInt): LongInt;
+Var
+ Scan: PEABuffer; Final,Run,Level,AcMode,DcMode,EstRun,DcLevel,Pos,N,ZerosOnly,UseQm,Sign,Dir,DivQ,DcQ,Pl,Ls: LongInt; Placed: Boolean; Fn: LongInt;
+ I: LongInt;
+Begin
+ X8DecodeIntraMb:=-1;
+ FillChar(X8Blk,SizeOf(X8Blk),0);
+ If Chroma<>0 Then DcMode:=2 Else DcMode:=Ord(X8EstRun<>0);
+ Pl:=Chroma; Ls:=X8Ls[Ord(Chroma>0)];
+ If X8GetDcRlf(DcMode,DcLevel,Final)<>0 Then Exit;
+ If X8Dbg Then WriteLn(StdErr,'BLK mbx=',X8MbX,' mby=',X8MbY,' chroma=',Chroma,' dc=',DcLevel,' final=',Final,' orient=',X8Orient,' est=',X8EstRun,' flat=',X8FlatDc,' edges=',X8Edges);
+ N:=0; ZerosOnly:=0; Placed:=False;
+ If Final=0 Then Begin
+  UseQm:=X8UseQm;
+  If Chroma<>0 Then Begin AcMode:=1; EstRun:=64; End
+  Else Begin
+   If X8RawOrient<3 Then UseQm:=0;
+   If X8RawOrient>4 Then Begin AcMode:=0; EstRun:=64; End
+   Else Begin
+    If X8EstRun>1 Then Begin AcMode:=2; EstRun:=X8EstRun; End
+    Else Begin AcMode:=3; EstRun:=64; End;
+   End;
+  End;
+  X8SelectAc(AcMode);
+  Case (LongInt($928548) Shr (2*X8Orient)) And 3 Of
+   0: Scan:=@W1ScanT[0];
+   1: Scan:=@W1ScanT[2];
+   Else Scan:=@W1ScanT[3];
+  End;
+  Pos:=0;
+  Repeat
+   Inc(N);
+   If N>=EstRun Then Begin AcMode:=3; X8SelectAc(3); End;
+   X8GetAcRlf(AcMode,Run,Level,Final);
+   If X8Dbg Then WriteLn(StdErr,'AC mode=',AcMode,' run=',Run,' level=',Level,' final=',Final,' bitpos=',H3Pos,' est=',EstRun,' n=',N);
+   Pos:=Pos+Run+1;
+   If Pos>63 Then Exit;
+   Level:=(Level+1)*X8Dquant;
+   Level:=Level+X8Qsum;
+   If H3Bit<>0 Then Sign:=-1 Else Sign:=0;
+   Level:=(Level Xor Sign)-Sign;
+   If UseQm<>0 Then Level:=M4Sar(Level*X8QuantTab[Pos],8);
+   X8Blk[Scan^[Pos]]:=SmallInt(Level);
+  Until Final<>0;
+ End Else Begin
+  If (X8FlatDc<>0) And (LongWord(DcLevel+1)<3) Then Begin
+   If Chroma=0 Then Begin DivQ:=X8DivLuma; DcQ:=X8Quant; End Else Begin DivQ:=X8DivChroma; DcQ:=X8QuantDcChroma; End;
+   DcLevel:=DcLevel+M4Sar(X8PredDc*DivQ+(1 Shl 12),13);
+   X8SolidColor(X8P[Pl],X8Dest[Pl],Ls,X8Clip8(M4Sar(DcLevel*DcQ+4,3)));
+   Placed:=True;
+  End Else ZerosOnly:=Ord(DcLevel=0);
+ End;
+ If Not Placed Then Begin
+  If Chroma=0 Then X8Blk[0]:=SmallInt(DcLevel*X8Quant) Else X8Blk[0]:=SmallInt(DcLevel*X8QuantDcChroma);
+  If (LongWord(DcLevel+1)>=3) And ((X8Edges And 3)<>3) Then Begin
+   Dir:=(LongInt($6A017C) Shr (X8Orient*2)) And 3;
+   If Dir<>3 Then X8AcComp(Dir,X8Blk[0]);
+  End;
+  If X8Dbg Then Begin Write(StdErr,'BLOCK:'); For I:=0 To 63 Do Write(StdErr,' ',X8Blk[I]); WriteLn(StdErr,' pdc=',X8PredDc); End;
+  If X8FlatDc<>0 Then X8SolidColor(X8P[Pl],X8Dest[Pl],Ls,X8PredDc)
+  Else X8Spatial(X8Orient,X8P[Pl],X8Dest[Pl],Ls);
+  If ZerosOnly=0 Then W2IdctPutAdd(X8Blk,X8P[Pl],X8Dest[Pl],Ls,True);
+ End;
+ If Chroma=0 Then X8UpdatePred(X8Orient,N);
+ If X8LoopF<>0 Then Begin
+  If Not (((X8Edges And 2)<>0) Or ((ZerosOnly<>0) And ((X8Orient Or 4)=4))) Then
+   X8LoopFilter(X8P[Pl],X8Dest[Pl],Ls,1,X8Quant);
+  If Not (((X8Edges And 1)<>0) Or ((ZerosOnly<>0) And ((X8Orient Or 8)=8))) Then
+   X8LoopFilter(X8P[Pl],X8Dest[Pl],1,Ls,X8Quant);
+ End;
+ X8DecodeIntraMb:=0;
+End;
+
+{ ff_intrax8_decode_picture : PY,PU,PV plans de l'image, LsY/LsC pas, Dquant, Qsum, LoopF ; lecture dans le lecteur H3 }
+Procedure X8DecodePicture(PY,PU,PV: PEABuffer; LsY,LsC,MbW,MbH,Dquant,Qsum,LoopF: LongInt);
+Var K: LongInt;
+Begin
+ X8InitTables;
+ X8MbW:=MbW; X8MbH:=MbH; X8Dquant:=Dquant; X8Quant:=Dquant Shr 1; X8Qsum:=Qsum; X8LoopF:=LoopF;
+ X8P[0]:=PY; X8P[1]:=PU; X8P[2]:=PV; X8Ls[0]:=LsY; X8Ls[1]:=LsC;
+ X8UseQm:=H3Bit;
+ If GetEnv('X8DBG')<>'' Then WriteLn(StdErr,'X8 pos=',H3Pos-1,' dq=',Dquant,' qs=',Qsum,' lf=',LoopF,' mb=',MbW,'x',MbH,' qm=',X8UseQm);
+ If X8Quant<1 Then X8Quant:=1;
+ X8DivLuma:=((1 Shl 16)+(X8Quant Shr 1)) Div X8Quant;
+ If X8Quant<5 Then Begin X8QuantDcChroma:=X8Quant; X8DivChroma:=X8DivLuma; End
+ Else Begin
+  X8QuantDcChroma:=X8Quant+((X8Quant+3) Shr 3);
+  X8DivChroma:=((1 Shl 16)+(X8QuantDcChroma Shr 1)) Div X8QuantDcChroma;
+ End;
+ FillChar(X8Pred,SizeOf(X8Pred),0);
+ For K:=0 To 3 Do X8AcSel[K]:=Nil;
+ For K:=0 To 2 Do X8DcSel[K]:=Nil;
+ X8OrSel:=Nil;
+ X8Err:=0;
+ If MbW*4>16384 Then Exit;
+ X8Dbg:=GetEnv('X8DBG')<>'';
+ X8MbY:=0;
+ While X8MbY<MbH*2 Do Begin
+  X8Dest[0]:=X8MbY*LsY*8;
+  X8Dest[1]:=(X8MbY And Not 1)*LsC*4;
+  X8Dest[2]:=X8Dest[1];
+  If H3Left<1 Then Begin X8Err:=1; If X8Dbg Then WriteLn(StdErr,'X8ERR eof'); Exit; End;
+  X8MbX:=0;
+  While X8MbX<MbW*2 Do Begin
+   X8GetPred;
+   If X8SetupPredictor(0)<>0 Then Begin X8Err:=1; If X8Dbg Then WriteLn(StdErr,'X8ERR orient'); Exit; End;
+   If X8DecodeIntraMb(0)<>0 Then Begin X8Err:=1; If X8Dbg Then WriteLn(StdErr,'X8ERR block ',X8MbX,' ',X8MbY); Exit; End;
+   If (X8MbX And X8MbY And 1)<>0 Then Begin
+    X8GetPredChroma;
+    X8SetupPredictor(1);
+    If X8DecodeIntraMb(1)<>0 Then Begin X8Err:=1; If X8Dbg Then WriteLn(StdErr,'X8ERR chroma'); Exit; End;
+    X8SetupPredictor(2);
+    If X8DecodeIntraMb(2)<>0 Then Begin X8Err:=1; If X8Dbg Then WriteLn(StdErr,'X8ERR chroma'); Exit; End;
+    Inc(X8Dest[1],8); Inc(X8Dest[2],8);
+   End;
+   Inc(X8Dest[0],8);
+   Inc(X8MbX);
+  End;
+  Inc(X8MbY);
+ End;
 End;
 
 { decodage d un flux elementaire MPEG-4 : decoupage en paquets (mpeg4video_parser.c) }
@@ -115012,7 +117140,7 @@ Begin
  WriteLn(' D  webm            WebM VP9/Opus; copie vers MP4');
  WriteLn;
  WriteLn('D/E indique le conteneur; les codecs et conversions restent limites.');
- WriteLn('Voir -codecs et FFMPEG.md. WMV2 non implemente; FLV1 limite aux images intra.');
+ WriteLn('Voir -codecs et FFMPEG.md. WMV2 sans encodage ASF; FLV1 limite aux images intra.');
 End;
 
 Procedure Help;Begin
@@ -115023,7 +117151,7 @@ Procedure Help;Begin
  WriteLn;
  WriteLn('Entr'+#130+'es: WAV PCM, MP1/MP3, AIFF PCM, VOC PCM, MOD 4 canaux, ASF/WMA, AVI et WAV (WMA1/WMA2).');
  WriteLn('         WMA1/WMA2: tous debits, r'+#130+'servoir binaire, codage du bruit, blocs variables.');
- WriteLn('         WMV2 non impl'+#130+'ment'+#130+'e. FLV1: profil intra YUV420 seulement.');
+ WriteLn('         FLV1: profil intra YUV420 seulement.');
  WriteLn('Sorties: WAV PCM16, MP3 MPEG-1 32..320k ou AC3 32..640k (CBR).');
  WriteLn('         HLS fMP4 VOD: -i liste.m3u8 -c copy video.mp4');
  WriteLn('MPEG-1 System: -i entree.mpg -c copy sortie.mpg|video.m1v|video.m2v|audio.mp2|audio.mp3');
@@ -115497,9 +117625,9 @@ BEGIN
   WriteLn('D V    vp6a            On2 VP6 (Flash version, with alpha channel) (FLV, AVI VP6A)');
   WriteLn('D V    vp6f            On2 VP6 (Flash version) (FLV, AVI VP6F)');
   { LIST-ANCHOR-G4B }
-  WriteLn('D V    wmv1            Windows Media Video 7 (decodeur AVI exact; pas d''encodeur)');
-  WriteLn('D V    wmv2            Windows Media Video 8 (decodeur AVI exact, sans IntraX8; pas d''encodeur)');
-  WriteLn('D V    wmv3            Windows Media Video 9 / VC-1 profils simple et main (decodeur AVI; pas d''encodeur)');
+  WriteLn('DEV    wmv1            Windows Media Video 7 (decodeur AVI exact; encodeur Y4M->AVI octet par octet: debit, -b:v, -g, -q:v)');
+  WriteLn('DEV    wmv2            Windows Media Video 8 (decodeur AVI exact, images J IntraX8 comprises; encodeur Y4M->AVI octet par octet: debit, -b:v, -g, -q:v)');
+  WriteLn('D V    wmv3            Windows Media Video 9 / VC-1 profils simple et main (decodeur AVI, IntraX8 res_x8 compris; pas d''encodeur)');
   WriteLn('D V    vc1             SMPTE VC-1 profil avance (decodeur AVI; pas d''encodeur)');
   { LIST-ANCHOR-G5 }
   WriteLn('DEV    snow            Snow (AVI SNOW; decodeur exact, encodeur I/P)');
@@ -115604,7 +117732,7 @@ BEGIN
    If VideoCodec='libxvid' Then VideoCodec:='mpeg4';
    If (VideoCodec<>'snow') And (VideoCodec<>'svq1') And (VideoCodec<>'png') And (VideoCodec<>'gif') And (VideoCodec<>'copy') And (VideoCodec<>'zlib') And (VideoCodec<>'zmbv') And
     (VideoCodec<>'ffv1') And (VideoCodec<>'flv') And (VideoCodec<>'pam') And (VideoCodec<>'pbm') And (VideoCodec<>'pgm') And (VideoCodec<>'ppm') And (VideoCodec<>'pgmyuv') And (VideoCodec<>'sgi') And (VideoCodec<>'targa') And (VideoCodec<>'tiff') And (VideoCodec<>'qtrle') And (VideoCodec<>'mpeg4') And (VideoCodec<>'mpeg1video') And (VideoCodec<>'mpeg2video') And (VideoCodec<>'rawvideo') And
-    (VideoCodec<>'asv1') And (VideoCodec<>'asv2') And (VideoCodec<>'msmpeg4') And (VideoCodec<>'msmpeg4v1') And (VideoCodec<>'msmpeg4v2') And (VideoCodec<>'huffyuv') And (VideoCodec<>'roqvideo') And (VideoCodec<>'h263') And (VideoCodec<>'h263p') And (VideoCodec<>'rv10') And (VideoCodec<>'rv20') And (VideoCodec<>'bmp') And (VideoCodec<>'dnxhd') And (VideoCodec<>'dvvideo') And (VideoCodec<>'jpegls') And (VideoCodec<>'ljpeg') And (VideoCodec<>'mjpeg') And (VideoCodec<>'libx264') And (VideoCodec<>'libtheora') Then
+    (VideoCodec<>'asv1') And (VideoCodec<>'asv2') And (VideoCodec<>'msmpeg4') And (VideoCodec<>'msmpeg4v1') And (VideoCodec<>'msmpeg4v2') And (VideoCodec<>'wmv1') And (VideoCodec<>'wmv2') And (VideoCodec<>'huffyuv') And (VideoCodec<>'roqvideo') And (VideoCodec<>'h263') And (VideoCodec<>'h263p') And (VideoCodec<>'rv10') And (VideoCodec<>'rv20') And (VideoCodec<>'bmp') And (VideoCodec<>'dnxhd') And (VideoCodec<>'dvvideo') And (VideoCodec<>'jpegls') And (VideoCodec<>'ljpeg') And (VideoCodec<>'mjpeg') And (VideoCodec<>'libx264') And (VideoCodec<>'libtheora') Then
     Fail('Codec video: png/gif, bmp, copy, ffv1, flv, msmpeg4, msmpeg4v1, msmpeg4v2, mpeg4, mpeg1video, mpeg2video, rawvideo, asv1, asv2, huffyuv, roqvideo, h263, h263p, rv10, rv20, svq1, dnxhd, dvvideo, jpegls, ljpeg, mjpeg, libx264, libxvid, libtheora.');
   End Else If (Argument='-vframes') Or (Argument='-frames:v') Then Begin
    If InputPath='' Then Fail('Nombre d''images attendu apres -i.');
@@ -116084,6 +118212,15 @@ BEGIN
   If HasCrop Then Fail('asv: -crop non supporte avec cet encodeur.');
   Temps[2]:=NewTemporary; EncodeASV(Intermediate,Temps[2],VideoCodec='asv2');
   Commit(Temps[2]); Temps[2]:=''; WriteLn('Video ASV creee: ',OutputPath); Halt(0);
+ End;
+ If (InputFormat='yuv4mpegpipe') And ((VideoCodec='wmv1') Or (VideoCodec='wmv2')) Then Begin
+  If IsHTTP(InputPath) Or (OutputFormat<>'avi') Or NoVideo Or (AudioCodec<>'') Or HasBitrate Or
+   (RequestedRate<>0) Or (RequestedChannels<>0) Or (VideoFrames<>0) Or (ImageWidth<>0) Then
+   Fail('wmv: Y4M local vers sortie AVI requis (options -g, -q:v, -b:v acceptees).');
+  If HasCrop Then Fail('wmv: -crop non supporte avec cet encodeur.');
+  Temps[2]:=NewTemporary;
+  If VideoCodec='wmv1' Then EncodeWMV(Intermediate,Temps[2],4,THQuality,RqGop-1,VideoBitrate*Ord(HasVideoBitrate)) Else EncodeWMV(Intermediate,Temps[2],5,THQuality,RqGop-1,VideoBitrate*Ord(HasVideoBitrate));
+  Commit(Temps[2]); Temps[2]:=''; WriteLn('Video WMV creee: ',OutputPath); Halt(0);
  End;
  If (InputFormat='yuv4mpegpipe') And ((VideoCodec='msmpeg4') Or (VideoCodec='msmpeg4v1') Or (VideoCodec='msmpeg4v2')) Then Begin
   If IsHTTP(InputPath) Or (OutputFormat<>'avi') Or NoVideo Or (AudioCodec<>'') Or HasBitrate Or HasVideoBitrate Or
