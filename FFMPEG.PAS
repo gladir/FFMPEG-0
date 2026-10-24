@@ -23099,6 +23099,7 @@ Begin
  If Kind=1702 Then Begin DecodeWC3(Source,Target,Mode); Exit; End; { G2B }
  If Kind=1703 Then Begin DecodeTHPV(Source,Target,Mode); Exit; End; { G2B }
  If Kind=1701 Then Begin DecodeVQA(Source,Target,Mode); Exit; End; { G2B }
+ If (Kind>=480) And (Kind<=484) Then Begin DecodeVPD(Source,Target,Mode,Kind); Exit; End; { H8: avant le fourre-tout G2A }
  If Kind>=220 Then Begin DecodeG2A(Kind,Source,Target,Mode); Exit; End;
  If Kind=170 Then Begin DecodeTheoraOgg(Source,Target,Mode); Exit; End;
  If Kind=171 Then Begin DecodeVP3Avi(Source,Target,Mode); Exit; End;
@@ -66013,7 +66014,7 @@ Begin
 End;
 
 Var VMTK,VMTSz,VMTOff,VMTRec: PALLong; VMTPts: PI64A; VMNT: LongInt;
- VMVid,VMAud: Boolean; VMRate,VMBA,VMBps,VMChn,VMSoundBuf,VMFrameCount,VMFpb,VMNum,VMDen: LongInt;
+ VMVid,VMAud,VMIv3: Boolean; VMRate,VMBA,VMBps,VMChn,VMSoundBuf,VMFrameCount,VMFpb,VMNum,VMDen: LongInt;
 
 { lecture de l'en-tete et de la table des trames de libavformat/sierravmd.c }
 Procedure VMDParse(F: PEABuffer; Size: LongInt);
@@ -66023,7 +66024,7 @@ Begin
  If Size<$330 Then Fail('vmd: entete tronque.');
  If NVRL16(F,Size,0)<>$32E Then Fail('vmd: entete VMD invalide.');
  VMW:=NVRL16(F,Size,12); VMH:=NVRL16(F,Size,14); VMVid:=(VMW<>0) And (VMH<>0);
- If VMVid And (F^[24]=105) And (F^[25]=118) And (F^[26]=51) Then Fail('vmd: video Indeo 3 non pris en charge.');
+ VMIv3:=VMVid And (F^[24]=105) And (F^[25]=118) And (F^[26]=51); { H8 : charge utile Indeo 3 }
  VMRate:=NVRL16(F,Size,804); VMAud:=VMRate<>0;
  VMBA:=0; VMBps:=8; VMChn:=1;
  If VMAud Then Begin
@@ -66074,6 +66075,43 @@ Begin
  VMPacket:=Pk;
 End;
 
+Procedure DecodeVMDIndeo3(F: PEABuffer; Size: LongInt; Mode: LongInt; Const Target: String);
+Var
+ I,FN,FD,Idx,OutIdx,W,H,R: LongInt; Ts0: Int64; Tick: Double; HaveA: Boolean; Pk,Out: PEABuffer;
+Begin
+ { sierravmd.c : Indeo 3 ; largeur > 320 : dimensions divisees par 2 ; le paquet est la charge utile seule (+16 octets) }
+ W:=VMW; H:=VMH;
+ If W>320 Then Begin W:=W Shr 1; H:=H Shr 1; End;
+ If Not IV3Alloc(W,H) Then Fail('vmd: indeo3: dimensions incorrectes (16x16 a 640x480, paires).');
+ Tick:=VMNum/VMDen;
+ FN:=VMDen; FD:=VMNum; NVGcd(FN,FD);
+ HaveA:=False; Ts0:=0;
+ For I:=0 To VMNT-1 Do If VMTK^[I]=1 Then Begin HaveA:=True; Break; End;
+ For I:=0 To VMNT-1 Do If VMTK^[I]=2 Then Begin Ts0:=VMTPts^[I]; Break; End;
+ If HaveA And (Ts0>0) Then Ts0:=0;
+ NVBegin(Mode,Target,W,H,7,FN,FD); NVSarN:=0; NVSarD:=0; NVInitDup:=False;
+ NVSubX:=2; NVSubY:=2; NVCW:=(W+3) Div 4; NVCH:=(H+3) Div 4; NVYTag:='C420jpeg XYSCSS=420JPEG XCOLORRANGE=LIMITED'; NVTo420:=True;
+ GetMem(Out,NVFrameBytes+64);
+ OutIdx:=0;
+ For I:=0 To VMNT-1 Do Begin
+  If VMTK^[I]=2 Then Begin
+   If (VMTOff^[I]<0) Or (Int64(VMTOff^[I])+VMTSz^[I]>Size) Then Break;
+   Idx:=Round((VMTPts^[I]-Ts0)*Tick*FN/FD);
+   If Idx>=OutIdx-2 Then Begin
+    While OutIdx<Idx Do Begin NVRepeat; Inc(OutIdx); End;
+    GetMem(Pk,VMTSz^[I]+16+64); FillChar(Pk^,VMTSz^[I]+16+64,0);
+    Move(F^[VMTOff^[I]],Pk^[0],VMTSz^[I]);
+    R:=IV3Frame(Pk,VMTSz^[I]+16);
+    FreeMem(Pk);
+    If R=1 Then Begin IV3Output(Out,NVCW,NVCH); NVEmit(Out); End Else NVRepeat;
+    Inc(OutIdx);
+   End;
+  End;
+  If NVDone Then Break;
+ End;
+ NVFinish('vmd');
+End;
+
 Procedure DecodeVMD(Const Source,Target: String; Mode: LongInt);
 Var
  F: PEABuffer; Size,I,FN,FD,Idx,OutIdx,J: LongInt; Ts0: Int64; Tick: Double; HaveA: Boolean; Pkt: PEABuffer;
@@ -66081,6 +66119,7 @@ Begin
  NVLoad(Source,F,Size);
  VMDParse(F,Size);
  If Not VMVid Then Fail('vmd: aucun flux video.');
+ If VMIv3 Then Begin DecodeVMDIndeo3(F,Size,Mode,Target); Exit; End;
  VMUnpackSize:=NVRL32(F,Size,800);
  If (VMUnpackSize<0) Or (VMUnpackSize>400000000) Then Fail('vmd: tampon de decompression invalide.');
  Tick:=VMNum/VMDen;
@@ -78022,11 +78061,11 @@ Type
  TS3Gb=Record Buf: PEABuffer; Size,Pos: LongInt; End;
  TS3Pic=Record
   Pl: Array[0..2] Of PEABuffer; Raw: Array[0..2] Of PEABuffer; RawSz: Array[0..2] Of LongInt;
-  MvX,MvY: Array[0..1] Of PALLong; MbT: PALLong; MbTOrg: LongInt; MvLen,MbLen: LongInt; Have: Boolean;
+  MvX,MvY: Array[0..1] Of PALLong; MbT: PALLong; MbTOrg: LongInt; MvLen,MbLen: LongInt; Have: Boolean; Idx: LongInt;
  End;
 Var
  S3Gb,S3Gs: TS3Gb; S3SliceBuf: PEABuffer; S3SliceCap: LongInt;
- S3Pic: Array[0..2] Of TS3Pic; S3Cur,S3Next,S3Last: LongInt;
+ S3Pic: Array[0..2] Of TS3Pic; S3Cur,S3Next,S3Last,S3PktIdx: LongInt;
  S3W,S3H,S3MbW,S3MbH,S3MbStride,S3MbNum,S3BStride,S3HEdge,S3VEdge,S3Ls,S3Cs: LongInt;
  S3Half,S3Third,S3Wm,S3LowDelay,S3Ready: Boolean; S3WmKey: Int64;
  S3Mb: Array[0..1535] Of SmallInt; S3LumaDc: Array[0..31] Of SmallInt;
@@ -78067,41 +78106,143 @@ Begin
  End;
  V:=V Shr (40-(G.Pos And 7)-N);
  S3Bits:=V And ((Int64(1) Shl N)-1);
- Inc(G.Pos,N);
+ Inc(G.Pos,N); If G.Pos>G.Size+8 Then G.Pos:=G.Size+8; { SKIP_COUNTER : index borne a size_in_bits_plus8 }
 End;
 Function S3Show(Var G: TS3Gb; N: LongInt): LongInt;
 Var P: LongInt;
 Begin P:=G.Pos; S3Show:=S3Bits(G,N); G.Pos:=P; End;
 Function S3Left(Var G: TS3Gb): LongInt;
 Begin S3Left:=G.Size-G.Pos; End;
-{ get_interleaved_ue_golomb }
-Function S3Ue(Var G: TS3Gb): Int64;
-Var Ret: Int64; F,D,Cnt: LongInt;
+{ cache de 32 bits comme UPDATE_CACHE (AV_RB32(buf+(index>>3)) << (index&7)) }
+Function S3Cache(Var G: TS3Gb): Int64;
+Var At,I: LongInt; V: Int64;
 Begin
- Ret:=1; Cnt:=0;
- While True Do Begin
-  F:=S3Bits(G,1);
-  If F<>0 Then Break;
-  D:=S3Bits(G,1); Ret:=Ret*2+D; Inc(Cnt);
-  If (Cnt And 3)=0 Then Begin
-   If (Ret>=$8000000) Or (G.Pos>=G.Size) Then Break;
-  End;
+ At:=G.Pos Shr 3; V:=0;
+ For I:=0 To 3 Do Begin
+  V:=V Shl 8;
+  If (At+I>=0) And (At+I<(G.Size+7) Shr 3+8) Then V:=V Or G.Buf^[At+I];
  End;
- S3Ue:=Ret-1;
+ S3Cache:=(V Shl (G.Pos And 7)) And $FFFFFFFF;
 End;
-{ get_interleaved_se_golomb ; $80000000 = INVALID_VLC }
-Function S3Se(Var G: TS3Gb): Int64;
-Var Ret,K: Int64; F,D,Cnt: LongInt;
+Procedure S3SkipC(Var G: TS3Gb; N: LongInt);
+Begin Inc(G.Pos,N); If G.Pos>G.Size+8 Then G.Pos:=G.Size+8; End;
+Const
+ S3GVLen: Array[0..255] Of Byte=(
+  9,9,7,7,9,9,7,7,5,5,5,5,5,5,5,5,
+  9,9,7,7,9,9,7,7,5,5,5,5,5,5,5,5,
+  3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,
+  3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,
+  9,9,7,7,9,9,7,7,5,5,5,5,5,5,5,5,
+  9,9,7,7,9,9,7,7,5,5,5,5,5,5,5,5,
+  3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,
+  3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,
+  1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1);
+ S3GUe: Array[0..255] Of Byte=(
+  15,16,7,7,17,18,8,8,3,3,3,3,3,3,3,3,
+  19,20,9,9,21,22,10,10,4,4,4,4,4,4,4,4,
+  1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+  23,24,11,11,25,26,12,12,5,5,5,5,5,5,5,5,
+  27,28,13,13,29,30,14,14,6,6,6,6,6,6,6,6,
+  2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,
+  2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0);
+ S3GSe: Array[0..255] Of ShortInt=(
+  8,-8,4,4,9,-9,-4,-4,2,2,2,2,2,2,2,2,
+  10,-10,5,5,11,-11,-5,-5,-2,-2,-2,-2,-2,-2,-2,-2,
+  1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+  12,-12,6,6,13,-13,-6,-6,3,3,3,3,3,3,3,3,
+  14,-14,7,7,15,-15,-7,-7,-3,-3,-3,-3,-3,-3,-3,-3,
+  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0);
+ S3GDirac: Array[0..255] Of Byte=(
+  0,1,0,0,2,3,1,1,0,0,0,0,0,0,0,0,
+  4,5,2,2,6,7,3,3,1,1,1,1,1,1,1,1,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  8,9,4,4,10,11,5,5,2,2,2,2,2,2,2,2,
+  12,13,6,6,14,15,7,7,3,3,3,3,3,3,3,3,
+  1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0);
+
+{ get_interleaved_ue_golomb (golomb.h, lecteur avec taille : l'index est borne a size+8) }
+Function S3Ue(Var G: TS3Gb): Int64;
+Var Buf: Int64; Ret: Int64; B8: LongInt;
 Begin
- Ret:=1; Cnt:=0; S3Se:=-$80000000;
- While True Do Begin
-  F:=S3Bits(G,1);
-  If F<>0 Then Break;
-  If Cnt>=15 Then Exit;
-  D:=S3Bits(G,1); Ret:=Ret*2+D; Inc(Cnt);
+ Buf:=S3Cache(G);
+ If (Buf And $AA800000)<>0 Then Begin
+  B8:=Buf Shr 24; S3SkipC(G,S3GVLen[B8]); S3Ue:=S3GUe[B8]; Exit;
  End;
- K:=Ret-1;
- If (Ret And 1)<>0 Then S3Se:=-(K Div 2) Else S3Se:=(K+1) Div 2;
+ Ret:=1;
+ Repeat
+  B8:=Buf Shr 24;
+  If S3GVLen[B8]<8 Then S3SkipC(G,S3GVLen[B8]) Else S3SkipC(G,8);
+  If S3GVLen[B8]<>9 Then Begin
+   Ret:=(Ret Shl ((S3GVLen[B8]-1) Shr 1)) And $FFFFFFFF;
+   Ret:=Ret Or S3GDirac[B8];
+   Break;
+  End;
+  Ret:=((Ret Shl 4) And $FFFFFFFF) Or S3GDirac[B8];
+  Buf:=S3Cache(G);
+ Until Not ((Ret<$8000000) And (G.Pos<G.Size+8));
+ S3Ue:=(Ret-1) And $FFFFFFFF;
+End;
+{ get_interleaved_se_golomb ; -$80000000 = INVALID_VLC }
+Function S3Se(Var G: TS3Gb): Int64;
+Var Buf,T,M: Int64; B8,Lg: LongInt; Sv: LongInt;
+Begin
+ M:=$FFFFFFFF;
+ Buf:=S3Cache(G);
+ If (Buf And $AA800000)<>0 Then Begin
+  B8:=Buf Shr 24; S3SkipC(G,S3GVLen[B8]); S3Se:=S3GSe[B8]; Exit;
+ End;
+ Sv:=G.Pos;
+ S3SkipC(G,8);
+ Buf:=Buf Or 1 Or (S3Cache(G) Shr 8);
+ If (Buf And $AAAAAAAA)=0 Then Begin G.Pos:=Sv; S3Se:=-$80000000; Exit; End;
+ Lg:=31;
+ While ((Buf And $80000000)=0) And (Lg>=1) Do Begin
+  Buf:=(((Buf Shl 2) And M) - ((((Buf Shl Lg) And M) Shr (Lg-1))) + (Buf Shr 30)) And M;
+  Dec(Lg);
+ End;
+ S3SkipC(G,63-2*Lg-8);
+ T:=((Buf Shl Lg) And M) Shr Lg;
+ T:=(T-1) And M;
+ If (Buf And 1)<>0 Then T:=T Xor M;
+ T:=(T+1) And M;
+ If T>=$80000000 Then T:=T-$100000000;
+ If T>=0 Then S3Se:=T Shr 1 Else S3Se:=-((-T+1) Shr 1);
 End;
 Function S3Skip1Stop8(Var G: TS3Gb): LongInt;
 Begin
@@ -78410,7 +78551,7 @@ Begin
    GetMem(Raw[K],RawSz[K]); FillChar(Raw[K]^,RawSz[K],S3FillV);
    Pl[K]:=PEABuffer(@Raw[K]^[Mg]);
   End;
-  Have:=True;
+  Have:=True; Idx:=S3PktIdx; { pts de la trame = celui du paquet qui l'a allouee (get_buffer) }
  End;
 End;
 
@@ -79061,12 +79202,68 @@ Begin
  S3Crc16:=Crc And $FFFFFFFF;
 End;
 
+{ H8 : horodatage de ffmpeg pour svq3 (libavformat/mov.c : dts_shift, ctts ; libavcodec/decode.c : guess_correct_pts) }
+Function S3RecFind(Start,Fin: LongInt; Const Name: String; Var APos,ASize: LongInt): Boolean;
+Var P,Sz: LongInt; T: String;
+Begin
+ S3RecFind:=False; P:=Start; If Fin>QXSize Then Fin:=QXSize;
+ While Fin-P>=8 Do Begin
+  Sz:=QXB32(P); If Sz=0 Then Sz:=Fin-P;
+  If (Sz<8) Or (Sz>Fin-P) Then Exit;
+  T:=QXT4(P+4);
+  If T=Name Then Begin APos:=P; ASize:=Sz; S3RecFind:=True; Exit; End;
+  If (T='moov') Or (T='trak') Or (T='mdia') Or (T='minf') Or (T='stbl') Or (T='edts') Then
+   If S3RecFind(P+8,P+Sz,Name,APos,ASize) Then Begin S3RecFind:=True; Exit; End;
+  Inc(P,Sz);
+ End;
+End;
+
+{ Dts/Pts[j] : horodatages (ticks) du paquet j apres decalage de debut ; TbN/TbD : base de temps ; DurT : duree d'une image }
+Procedure S3Times(Dts,Pts: PTLArr; Var TbN,TbD,DurT: Int64);
+Var I,J,Ap,Sp,Ts,Delta,Cnt,Ent,Dr,Shift,N,Lim: LongInt; Start: Int64; Cts: PALLong; Mp: LongInt;
+Begin
+ N:=QXCount;
+ If Not QXIsMov Then Begin
+  TbN:=AXScale; TbD:=AXRate; DurT:=1;
+  For I:=0 To N-1 Do Begin Dts^[I]:=I; Pts^[I]:=I; End;
+  Exit;
+ End;
+ Ts:=0; Delta:=0;
+ If S3RecFind(0,QXSize,'mdhd',Ap,Sp) Then Begin If EAByte(QXF,QXSize,Ap+8)=1 Then Ts:=QXB32(Ap+28) Else Ts:=QXB32(Ap+20); End;
+ If S3RecFind(0,QXSize,'stts',Ap,Sp) Then Delta:=QXB32(Ap+20);
+ If (Ts<=0) Or (Delta<=0) Then Begin
+  TbN:=QXRd; TbD:=QXRn; DurT:=1;
+  For I:=0 To N-1 Do Begin Dts^[I]:=I; Pts^[I]:=I; End;
+  Exit;
+ End;
+ GetMem(Cts,N*4+8); FillChar(Cts^,N*4+8,0);
+ Shift:=0; Mp:=0;
+ If S3RecFind(0,QXSize,'ctts',Ap,Sp) Then Begin
+  Ent:=QXB32(Ap+12); If (Ent<0) Or (Int64(Ent)*8+16>Sp) Then Ent:=0;
+  J:=0;
+  For I:=0 To Ent-1 Do Begin
+   Cnt:=QXB32(Ap+16+8*I); Dr:=QXB32(Ap+20+8*I);
+   If I+2<Ent Then If (Dr<0) And (-Dr>Shift) Then Shift:=-Dr;
+   While (Cnt>0) And (J<N) Do Begin Cts^[J]:=Dr; Inc(J); Dec(Cnt); End;
+  End;
+ End;
+ For I:=0 To N-1 Do Begin
+  Dts^[I]:=Int64(I)*Delta-Shift;
+  Pts^[I]:=Int64(I)*Delta+Cts^[I];
+ End;
+ Lim:=N; If Lim>32 Then Lim:=32;
+ Start:=Pts^[0]; For I:=1 To Lim-1 Do If Pts^[I]<Start Then Start:=Pts^[I];
+ For I:=0 To N-1 Do Begin Dts^[I]:=Dts^[I]-Start; Pts^[I]:=Pts^[I]-Start; End;
+ FreeMem(Cts);
+ TbN:=1; TbD:=Ts; DurT:=Delta;
+End;
+
 Procedure DecodeSVQ3(Const Source,Target: String; Mode: LongInt);
 Var
- Pk,Out,Ext,Wm: PEABuffer; PIdx,Sz,I,Y,W,H,CW,CH,P,M,ExtLen,Sq,Sh,Fsc,Hd,N,Off,WmLen: LongInt; Begun,Found: Boolean;
+ Pk,Out,Ext,Wm: PEABuffer; PIdx,Sz,I,Y,W,H,CW,CH,P,M,ExtLen,Sq,Sh,Fsc,Hd,N,Off,WmLen: LongInt; Begun,Found: Boolean; NbF,NbP: Int64; TsD,TsP: PTLArr; TbN,TbD,DurT,GcLastPts,GcLastDts,BestTs: Int64; GcFp,GcFd: LongInt;
  G: TS3Gb; Wd,Ht,Cap: Int64; R: Integer; Op: LongInt; WmOut: LongInt; Key: Int64;
-Procedure Emit(Pic: LongInt);
-Var K,Y: LongInt;
+Procedure Emit(Pic: LongInt; Flush: Boolean);
+Var K,Y: LongInt; Re,Dt: Int64;
 Begin
  W:=S3W; H:=S3H; CW:=(W+1) Shr 1; CH:=(H+1) Shr 1;
  If Not Begun Then Begin
@@ -79081,11 +79278,23 @@ Begin
  For Y:=0 To H-1 Do Move(S3Pic[Pic].Pl[0]^[Y*S3Ls],Out^[Y*W],W);
  For K:=1 To 2 Do
   For Y:=0 To CH-1 Do Move(S3Pic[Pic].Pl[K]^[Y*S3Cs],Out^[W*H+(K-1)*CW*CH+Y*CW],CW);
- NVEmit(Out);
+ { synchronisation CFR de ffmpeg : pts = celui du paquet d'origine ; les trous (paquets en erreur) sont combles par duplication }
+ { libavcodec/decode.c : guess_correct_pts(pts d'origine de l'image, pkt_dts du paquet courant) }
+ Re:=TsP^[S3Pic[Pic].Idx];
+ If Flush Then Begin GcLastDts:=Re; Dt:=0; End Else Begin
+  Dt:=TsD^[S3PktIdx];
+  If Dt<=GcLastDts Then Inc(GcFd);
+  GcLastDts:=Dt;
+ End;
+ If Re<=GcLastPts Then Inc(GcFp);
+ GcLastPts:=Re;
+ If (GcFp<=GcFd) Or Flush Then BestTs:=Re Else BestTs:=Dt;
+ CFSync(BestTs,DurT,NbF,NbP);
+ NVEmitN(Out,NbP,NbF); Inc(CFNext,NbF); Inc(CFFrameNo,NbF); G2CFOn:=True;
 End;
 Begin
  QXOpen(Source);
- S3Dbg:=False; S3FillV:=0;
+ S3Dbg:=False; S3PktIdx:=0; S3FillV:=0;
  W:=QXW; H:=QXH;
  S3Half:=True; S3Third:=True; S3Wm:=False; S3LowDelay:=False; S3WmKey:=0;
  { atome SMI : extradata }
@@ -79145,22 +79354,28 @@ Begin
  S3Mb2br:=Nil; S3Pkt:=Nil; S3PktCap:=0;
  S3Setup;
  Begun:=False; Out:=Nil;
+ GetMem(TsD,QXCount*8+8); GetMem(TsP,QXCount*8+8);
+ S3Times(TsD,TsP,TbN,TbD,DurT);
+ G2CFBegin(TbN,TbD,QXRn,QXRd,True);
+ GcLastPts:=-9223372036854775807-1; GcLastDts:=GcLastPts; GcFp:=0; GcFd:=0;
  For PIdx:=0 To QXCount-1 Do Begin
   Sz:=QXLen^[PIdx]; If QXPos^[PIdx]+Sz>QXSize Then Sz:=QXSize-QXPos^[PIdx]; If (QXPos^[PIdx]<0) Or (QXPos^[PIdx]>QXSize) Or (Sz<0) Then Sz:=0;
   If Sz=0 Then Continue;
   Pk:=PEABuffer(@QXF^[QXPos^[PIdx]]);
+  S3PktIdx:=PIdx;
   I:=S3DecodeFrame(Pk,Sz,Op);
-  If I<0 Then Begin If Begun Then NVRepeat; Continue; End;
+  If I<0 Then Continue;
   If Op>=0 Then Begin
-   Emit(Op);
+   Emit(Op,False);
    If NVDone Then Break;
   End;
   If (S3PictType=3) Then S3UnrefPic(S3Cur);
  End;
  If Not NVDone Then
   If S3Pic[S3Next].Have And (Not S3LowDelay) And (S3LastOut=0) Then Begin
-   S3LastOut:=1; Emit(S3Next);
+   S3LastOut:=1; Emit(S3Next,True);
   End;
+ If Begun And G2CFOn And Not NVDone Then CFFlush(Out);
  If Out<>Nil Then FreeMem(Out);
  S3Release;
  QXClose;
@@ -83176,7 +83391,6 @@ Procedure VPDNVBegin(Mode: LongInt; Const Target: String; RN,RD: LongInt);
 Var W,H: LongInt;
 Begin
  W:=VPDW; H:=VPDH;
- If (Mode<>0) And (Odd(W) Or Odd(H)) Then Fail('vp6: sortie PNG/BMP avec dimensions impaires non prise en charge (swscale generique).');
  If VPDAlpha And (Mode=0) And (OutputFormat='yuv4mpegpipe') Then
   If OptPixFmt<>'yuv420p' Then Fail('vp6a: yuv4mpeg ne gere pas yuva420p ; utiliser -pix_fmt yuv420p.');
  If VPDAlpha And (Mode<>0) Then NVBegin(Mode,Target,W,H,3,RN,RD)
@@ -83193,7 +83407,7 @@ End;
 Function VPDToRgb(Out: PEABuffer): PEABuffer;
 Var
  YTab: Array[0..2047] Of Byte; Crv,Cbu,Cgu,Cgv,Cy,Oy,Yb: Int64; I,X,Y,CW,CHh,U,V,Yv,YOffs,W,H,Bp,P: LongInt;
- TabR,TabB,TabGU,TabGV: Array[0..255] Of LongInt; Q: PEABuffer; R,G,B: LongInt;
+ TabR,TabB,TabGU,TabGV: Array[0..255] Of LongInt; Q,Q2: PEABuffer; R,G,B: LongInt;
 Function Cl(Z: Int64): LongInt; Begin If Z<0 Then Cl:=0 Else If Z>255 Then Cl:=255 Else Cl:=Z; End;
 Function Sr(X: Int64; N: LongInt): Int64;
 Begin If X>=0 Then Sr:=X Shr N Else Sr:=-((-X+(Int64(1) Shl N)-1) Shr N); End;
@@ -83213,6 +83427,20 @@ Begin
   TabB[I]:=YOffs-LongInt(Sr(Cbu,9))+LongInt(Sr(I*Cbu,16));
   TabGU[I]:=YOffs-LongInt(Sr(Cgu,9))+LongInt(Sr(I*Cgu,16));
   TabGV[I]:=-LongInt(Sr(Cgv,9))+LongInt(Sr(I*Cgv,16));
+ End;
+ If Odd(W) Or Odd(H) Then Begin
+  { dimensions impaires : chemin general de swscale (partage avec G1Yuv420ToRgb) }
+  G1YW:=W; G1YH:=H; G1YCw:=CW; G1YCh:=CHh; G1YY:=Out; G1YU:=@Out^[W*H]; G1YV:=@Out^[W*H+CW*CHh];
+  If VPDAlpha Then Begin
+   GetMem(Q2,W*H*3+16); G1Yuv420ToRgb(Q2);
+   For Y:=0 To H-1 Do
+    For X:=0 To W-1 Do Begin
+     P:=(Y*W+X)*4;
+     Q^[P]:=Q2^[(Y*W+X)*3+2]; Q^[P+1]:=Q2^[(Y*W+X)*3+1]; Q^[P+2]:=Q2^[(Y*W+X)*3]; Q^[P+3]:=Out^[W*H+2*CW*CHh+Y*W+X];
+    End;
+   FreeMem(Q2);
+  End Else G1Yuv420ToRgb(Q);
+  VPDToRgb:=Q; Exit;
  End;
  For Y:=0 To H-1 Do
   For X:=0 To W-1 Do Begin
@@ -85720,7 +85948,10 @@ Begin
  Inc(G2YCur,N);
 End;
 
-{ image suivante convertie en BGR24 (Bpp=3) ou BGR0 (Bpp=4), de haut en bas ; False en fin de fichier }
+Procedure H8YConv(Fmt: LongInt; Out: PEABuffer); Forward;
+Procedure H8YGeneral(Out: PEABuffer; Bpp: LongInt); Forward; { H8 : hauteur impaire } { H8 : yuv420p -> pal8 / rgb555le / rgb565le (yuv2rgb.c) }
+{ image suivante convertie en BGR24 (Bpp=3) ou BGR0 (Bpp=4), de haut en bas ; False en fin de fichier.
+  Bpp<0 : -Fmt zmbv (4 pal8, 5 rgb555le, 6 rgb565le) via H8YConv }
 Function G2YNext(Out: PEABuffer; Bpp: LongInt): Boolean;
 Var H: Array[0..4] Of Byte; X,Y,Yv,Uv,Vv,Rg,Gg,Bg,O: LongInt;
 Begin
@@ -85731,6 +85962,11 @@ Begin
  While G2YCur<G2YLimit Do Begin ReadAt(G2YCur,H,1); Inc(G2YCur); If H[0]=10 Then Break; End;
  If G2YCur+G2YW*G2YH+2*G2YCW*G2YCH>G2YLimit Then Exit;
  G2YReadPlane(G2YYp,G2YW*G2YH); G2YReadPlane(G2YUp,G2YCW*G2YCH); G2YReadPlane(G2YVp,G2YCW*G2YCH);
+ If Bpp<0 Then Begin H8YConv(-Bpp,Out); G2YNext:=True; Exit; End;
+ If Odd(G2YH) Then Begin
+  { hauteur impaire : chemin general de swscale (partage avec G1Yuv420ToRgb) }
+  H8YGeneral(Out,Bpp); G2YNext:=True; Exit;
+ End;
  For Y:=0 To G2YH-1 Do For X:=0 To G2YW-1 Do Begin
   Yv:=G2YYp^[Y*G2YW+X]; Uv:=G2YUp^[(Y Shr 1)*G2YCW+(X Shr 1)]; Vv:=G2YVp^[(Y Shr 1)*G2YCW+(X Shr 1)];
   Rg:=G2YTab[G2YYoffs-G2YSar(G2YCrv,9)+G2YSar(Vv*G2YCrv,16)+Yv];
@@ -85739,12 +85975,15 @@ Begin
   O:=(Y*G2YW+X)*Bpp;
   Out^[O]:=Bg; Out^[O+1]:=Gg; Out^[O+2]:=Rg;
   If Bpp=4 Then Out^[O+3]:=255;
+  { largeur impaire : le chemin non mis a l'echelle de swscale ne convertit pas le dernier pixel (tampon a zero) }
+  If Odd(G2YW) And (X=G2YW-1) Then FillChar(Out^[O],Bpp,0);
  End;
  G2YNext:=True;
 End;
 
 { ecriture AVI en memoire (meme en-tete que AWBegin) }
 Var
+ G2OClrUsed: LongInt;
  G2OB: PEABuffer; G2OBLen,G2OBCap: LongInt; G2OSizes: PALLong; G2OKeys: PEABuffer; G2OFrames,G2OMaxPk,G2OMovi,G2OCapF: LongInt;
 
 Procedure G2OEnsure(N: LongInt);
@@ -85782,8 +86021,8 @@ Begin
  G2OTag('strh'); G2O32(56); G2OTag('vids'); G2OTag(Fourcc);
  G2O32(0); G2O16(0); G2O16(0); G2O32(0); G2O32(Scale); G2O32(Rate); G2O32(0); G2O32(0); G2O32(0); G2O32(-1); G2O32(0);
  G2O16(0); G2O16(0); G2O16(W); G2O16(H);
- G2OTag('strf'); G2O32(40+ExtraLen); G2O32(40+ExtraLen); G2O32(W); G2O32(H); G2O16(1); G2O16(Bpp);
- G2OTag(Fourcc); G2O32(W*H*Bpp Div 8); G2O32(0); G2O32(0); G2O32(0); G2O32(0);
+ G2OTag('strf'); G2O32(40+ExtraLen); If G2OClrUsed<>0 Then G2O32(40) Else G2O32(40+ExtraLen); G2O32(W); G2O32(H); G2O16(1); G2O16(Bpp);
+ G2OTag(Fourcc); G2O32(W*H*Bpp Div 8); G2O32(0); G2O32(0); G2O32(G2OClrUsed); G2O32(0);
  For I:=0 To ExtraLen-1 Do G2O8(Extra^[I]);
  If Odd(ExtraLen) Then G2O8(0);
  G2OTag('JUNK'); G2O32(4120); G2O16(4); G2O16(0); G2O32(0); G2OTag('00dc'); G2OZ(4120-12);
@@ -86119,108 +86358,176 @@ Const
  G2ZKeyInt: LongInt = -1;
  G2ZMeRange: LongInt = 0;
 Var
- G2ZH: PEABuffer; G2ZHLen,G2ZHCap,G2ZDecSize: LongInt; G2ZHdrDone,G2ZBad: Boolean;
+ G2ZH: PEABuffer; G2ZHLen,G2ZHCap,G2ZDecSize: LongInt; G2ZBad: Boolean;
  G2ZDec,G2ZCur,G2ZPrev: PEABuffer; G2ZPal: Array[0..767] Of Byte;
  G2ZW,G2ZH2,G2ZFmt,G2ZBpp,G2ZComp,G2ZFlags,G2ZBw,G2ZBh,G2ZBx,G2ZBy,G2ZDecLen,G2ZOutLen: LongInt; G2ZGot: Boolean;
 
-{ inflate zlib en flux : l'historique est conserve entre les appels ; retourne 0, ou 1 en cas d'erreur de donnees }
+{ inflate zlib en flux, reprenable (comme inflate() de zlib avec Z_SYNC_FLUSH) : l'historique, le bloc courant et les
+  bits non consommes sont conserves entre les appels ; retourne 0, ou 1 en cas d'erreur de donnees }
+Var
+ G2ZStage,G2ZStoredLeft,G2ZPendLen,G2ZPendBits,G2ZPendCap: LongInt; G2ZLastB: Boolean; G2ZPend: PEABuffer;
+ G2ZLCnt,G2ZDCnt: Array[0..15] Of Integer; G2ZLSym,G2ZDSym: Array[0..319] Of Integer;
+
+Procedure G2ZInflReset;
+Begin
+ G2ZHLen:=0; G2ZStage:=-1; G2ZBad:=False; G2ZPendLen:=0; G2ZPendBits:=0; G2ZStoredLeft:=0; G2ZLastB:=False;
+End;
+
 Function G2ZInflate(Src: PEABuffer; SrcLen: LongInt): LongInt;
 Var
- Last,Typ,I,Sym,Len,Dist,NLen,NDist,NCode,Idx,Rep,Prev,Stored,Start: LongInt; Lens: Array[0..319] Of Integer; Fin: Boolean;
+ Typ,I,Sym,Len,Dist,NLen,NDist,NCode,Idx,Rep,Prev,Start,Sv,SvBuf,SvCnt,Tot,B0,B1: LongInt; Lens: Array[0..319] Of Integer;
+ Cat: PEABuffer; Stop,Exh: Boolean;
 Begin
  G2ZInflate:=1; G2ZOutLen:=0;
  If G2ZBad Then Exit;
  If SrcLen<1 Then Exit;
  If G2ZHLen>32768 Then Begin Move(G2ZH^[G2ZHLen-32768],G2ZH^[0],32768); G2ZHLen:=32768; End;
- INSrc:=Src; INLen:=SrcLen; INPos:=0; INBitBuf:=0; INBitCnt:=0; INErr:=0;
- INDst:=G2ZH; INOut:=G2ZHLen; INCap:=G2ZHLen+G2ZDecSize; INWin:=0; Start:=G2ZHLen;
- If Not G2ZHdrDone Then Begin
-  If SrcLen<2 Then Begin G2ZInflate:=0; Exit; End;
-  If ((Src^[0]*256+Src^[1]) Mod 31<>0) Or ((Src^[0] And 15)<>8) Or ((Src^[0] Shr 4)>7) Or ((Src^[1] And 32)<>0) Then Begin G2ZBad:=True; Exit; End;
-  G2ZHdrDone:=True; INPos:=2;
+ Tot:=G2ZPendLen+SrcLen; GetMem(Cat,Tot+8);
+ If G2ZPendLen>0 Then Move(G2ZPend^,Cat^,G2ZPendLen);
+ Move(Src^,Cat^[G2ZPendLen],SrcLen);
+ INSrc:=Cat; INLen:=Tot; INPos:=0; INBitBuf:=0; INBitCnt:=0; INErr:=0;
+ If (G2ZPendLen>0) And (G2ZPendBits>0) Then Begin
+  INBitBuf:=Cat^[0] Shr G2ZPendBits; INBitCnt:=8-G2ZPendBits; INPos:=1;
  End;
- Fin:=False;
- While Not Fin Do Begin
-  If (INPos>=INLen) And (INBitCnt<3) Then Break;
-  Last:=INBits(1); Typ:=INBits(2);
-  If INErr<>0 Then Break;
-  If Typ=0 Then Begin
-   INBitBuf:=0; INBitCnt:=0;
-   If INPos+4>INLen Then Begin INErr:=2; Break; End;
-   Stored:=Src^[INPos]+Src^[INPos+1]*256; Len:=Src^[INPos+2]+Src^[INPos+3]*256; Inc(INPos,4);
-   If (Stored Xor $FFFF)<>Len Then Begin INErr:=1; Break; End;
-   Len:=Stored;
-   If INPos+Len>INLen Then Begin Len:=INLen-INPos; INErr:=2; End;
-   If INOut+Len>INCap Then Begin Len:=INCap-INOut; INErr:=2; End;
-   Move(Src^[INPos],G2ZH^[INOut],Len); Inc(INPos,Len); Inc(INOut,Len);
-   If INErr<>0 Then Break;
-  End Else If Typ=3 Then Begin INErr:=1; Break; End
-  Else Begin
-   If Typ=1 Then Begin
-    For I:=0 To 143 Do Lens[I]:=8; For I:=144 To 255 Do Lens[I]:=9; For I:=256 To 279 Do Lens[I]:=7; For I:=280 To 287 Do Lens[I]:=8;
-    INBuild(INLCount,INLSym,Lens,288,1);
-    For I:=0 To 31 Do Lens[I]:=5;
-    INBuild(INDCount,INDSym,Lens,32,2);
-   End Else Begin
-    NLen:=INBits(5)+257; NDist:=INBits(5)+1; NCode:=INBits(4)+4;
-    If INErr<>0 Then Break;
-    If (NLen>286) Or (NDist>30) Then Begin INErr:=1; Break; End;
-    For I:=0 To 18 Do Lens[I]:=0;
-    For I:=0 To NCode-1 Do Lens[INOrder[I]]:=INBits(3);
-    If INErr<>0 Then Break;
-    INBuild(INCount,INSym,Lens,19,0);
-    If INErr<>0 Then Break;
-    Idx:=0;
-    While Idx<NLen+NDist Do Begin
-     Sym:=INDecode(INCount,INSym);
-     If INErr<>0 Then Break;
-     If Sym<16 Then Begin Lens[Idx]:=Sym; Inc(Idx); End
-     Else Begin
-      Prev:=0;
-      If Sym=16 Then Begin
-       If Idx=0 Then Begin INErr:=1; Break; End;
-       Prev:=Lens[Idx-1]; Rep:=3+INBits(2);
-      End Else If Sym=17 Then Rep:=3+INBits(3) Else Rep:=11+INBits(7);
-      If INErr<>0 Then Break;
-      If Idx+Rep>NLen+NDist Then Begin INErr:=1; Break; End;
-      While Rep>0 Do Begin Lens[Idx]:=Prev; Inc(Idx); Dec(Rep); End;
+ INDst:=G2ZH; INOut:=G2ZHLen; INCap:=G2ZHLen+G2ZDecSize; INWin:=0; Start:=G2ZHLen;
+ Stop:=False; Exh:=False;
+ While Not Stop Do Begin
+  Sv:=INPos; SvBuf:=INBitBuf; SvCnt:=INBitCnt;
+  If G2ZStage=-1 Then Begin
+   B0:=INBits(8); B1:=INBits(8);
+   If INErr=0 Then Begin
+    If ((B0*256+B1) Mod 31<>0) Or ((B0 And 15)<>8) Or ((B0 Shr 4)>7) Or ((B1 And 32)<>0) Then Begin INErr:=1; Stop:=True; End
+    Else G2ZStage:=0;
+   End;
+  End Else If G2ZStage=0 Then Begin
+   G2ZLastB:=INBits(1)<>0; Typ:=INBits(2);
+   If INErr=0 Then Begin
+    If Typ=0 Then Begin
+     INBitBuf:=0; INBitCnt:=0;
+     Len:=INBits(16); Dist:=INBits(16);
+     If INErr=0 Then Begin
+      If (Len Xor $FFFF)<>Dist Then Begin INErr:=1; Stop:=True; End
+      Else Begin G2ZStoredLeft:=Len; G2ZStage:=1; End;
+     End;
+    End Else If Typ=3 Then Begin INErr:=1; Stop:=True; End
+    Else If Typ=1 Then Begin
+     For I:=0 To 143 Do Lens[I]:=8; For I:=144 To 255 Do Lens[I]:=9; For I:=256 To 279 Do Lens[I]:=7; For I:=280 To 287 Do Lens[I]:=8;
+     INBuild(G2ZLCnt,G2ZLSym,Lens,288,1);
+     For I:=0 To 31 Do Lens[I]:=5;
+     INBuild(G2ZDCnt,G2ZDSym,Lens,32,2);
+     G2ZStage:=2;
+    End Else Begin
+     NLen:=INBits(5)+257; NDist:=INBits(5)+1; NCode:=INBits(4)+4;
+     If INErr=0 Then Begin
+      If (NLen>286) Or (NDist>30) Then Begin INErr:=1; Stop:=True; End
+      Else Begin
+       For I:=0 To 18 Do Lens[I]:=0;
+       For I:=0 To NCode-1 Do Lens[INOrder[I]]:=INBits(3);
+       If INErr=0 Then Begin
+        INBuild(INCount,INSym,Lens,19,0);
+        If INErr=0 Then Begin
+         Idx:=0;
+         While (Idx<NLen+NDist) And (INErr=0) Do Begin
+          { zlib : sans aucun code de longueur (inflate_table max=0) le marqueur invalide n'est pas controle ici : symbole 0 sur 1 bit }
+          If INCount[0]=19 Then Begin I:=INBits(1); Sym:=0; End Else Sym:=INDecode(INCount,INSym);
+          If INErr<>0 Then Break;
+          If Sym<16 Then Begin Lens[Idx]:=Sym; Inc(Idx); End
+          Else Begin
+           Prev:=0;
+           If Sym=16 Then Begin
+            If Idx=0 Then Begin INErr:=1; Break; End;
+            Prev:=Lens[Idx-1]; Rep:=3+INBits(2);
+           End Else If Sym=17 Then Rep:=3+INBits(3) Else Rep:=11+INBits(7);
+           If INErr<>0 Then Break;
+           If Idx+Rep>NLen+NDist Then Begin INErr:=1; Break; End;
+           While Rep>0 Do Begin Lens[Idx]:=Prev; Inc(Idx); Dec(Rep); End;
+          End;
+         End;
+         If INErr=0 Then Begin
+          If Lens[256]=0 Then INErr:=1
+          Else Begin
+           INBuild(G2ZLCnt,G2ZLSym,Lens,NLen,1);
+           If INErr=0 Then Begin
+            For I:=0 To NDist-1 Do Lens[I]:=Lens[NLen+I];
+            INBuild(G2ZDCnt,G2ZDSym,Lens,NDist,2);
+            If INErr=0 Then G2ZStage:=2;
+           End;
+          End;
+         End;
+        End;
+       End;
+      End;
      End;
     End;
-    If INErr<>0 Then Break;
-    If Lens[256]=0 Then Begin INErr:=1; Break; End;
-    INBuild(INLCount,INLSym,Lens,NLen,1);
-    If INErr<>0 Then Break;
-    For I:=0 To NDist-1 Do Lens[I]:=Lens[NLen+I];
-    INBuild(INDCount,INDSym,Lens,NDist,2);
-    If INErr<>0 Then Break;
    End;
-   Repeat
-    Sym:=INDecode(INLCount,INLSym);
-    If INErr<>0 Then Break;
+  End Else If G2ZStage=1 Then Begin
+   { bloc stocke : copie des octets disponibles (INBitCnt=0 ici) }
+   Len:=G2ZStoredLeft;
+   If INLen-INPos<Len Then Len:=INLen-INPos;
+   If INCap-INOut<Len Then Len:=INCap-INOut;
+   If Len>0 Then Begin Move(Cat^[INPos],G2ZH^[INOut],Len); Inc(INPos,Len); Inc(INOut,Len); Dec(G2ZStoredLeft,Len); End;
+   If G2ZStoredLeft=0 Then Begin If G2ZLastB Then G2ZStage:=3 Else G2ZStage:=0; End
+   Else Begin
+    If INOut>=INCap Then Begin INErr:=3; Stop:=True; End Else Begin Exh:=True; Stop:=True; End;
+   End;
+  End Else If G2ZStage=2 Then Begin
+   Sym:=INDecode(G2ZLCnt,G2ZLSym);
+   If INErr=0 Then Begin
     If Sym<256 Then Begin
-     If INOut>=INCap Then Begin INErr:=2; Break; End;
-     G2ZH^[INOut]:=Sym; Inc(INOut);
-    End Else If Sym=256 Then Break
+     If INOut>=INCap Then Begin INErr:=3; Stop:=True; End
+     Else Begin G2ZH^[INOut]:=Sym; Inc(INOut); End;
+    End Else If Sym=256 Then Begin If G2ZLastB Then G2ZStage:=3 Else G2ZStage:=0; End
     Else Begin
      Dec(Sym,257);
-     If Sym>=29 Then Begin INErr:=1; Break; End;
-     Len:=INLBase[Sym]+INBits(INLExt[Sym]);
-     Sym:=INDecode(INDCount,INDSym);
-     If INErr<>0 Then Break;
-     If Sym>=30 Then Begin INErr:=1; Break; End;
-     Dist:=INDBase[Sym]+INBits(INDExt[Sym]);
-     If INErr<>0 Then Break;
-     If Dist>INOut Then Begin INErr:=1; Break; End;
-     If INOut+Len>INCap Then Begin Len:=INCap-INOut; INErr:=2; End;
-     While Len>0 Do Begin G2ZH^[INOut]:=G2ZH^[INOut-Dist]; Inc(INOut); Dec(Len); End;
-     If INErr<>0 Then Break;
+     If Sym>=29 Then Begin INErr:=1; Stop:=True; End
+     Else Begin
+      Len:=INLBase[Sym]+INBits(INLExt[Sym]);
+      Sym:=INDecode(G2ZDCnt,G2ZDSym);
+      If INErr=0 Then Begin
+       If Sym>=30 Then Begin INErr:=1; Stop:=True; End
+       Else Begin
+        Dist:=INDBase[Sym]+INBits(INDExt[Sym]);
+        If INErr=0 Then Begin
+         If Dist>INOut Then Begin INErr:=1; Stop:=True; End
+         Else If INOut+Len>INCap Then Begin INErr:=3; Stop:=True; End
+         Else While Len>0 Do Begin G2ZH^[INOut]:=G2ZH^[INOut-Dist]; Inc(INOut); Dec(Len); End;
+        End;
+       End;
+      End;
+     End;
     End;
-   Until False;
-   If INErr<>0 Then Break;
-  End;
-  If Last<>0 Then Fin:=True;
+   End;
+  End Else Stop:=True; { flux termine (Z_STREAM_END) }
+  If INErr=2 Then Begin
+   { entree epuisee au milieu d'un element : retour au debut de l'element, les bits restants attendent la suite }
+   INPos:=Sv; INBitBuf:=SvBuf; INBitCnt:=SvCnt; Exh:=True; Stop:=True; INErr:=0;
+  End Else If INErr<>0 Then Stop:=True;
  End;
- If INErr=1 Then Begin G2ZBad:=True; Exit; End;
+ If INErr=1 Then Begin
+  G2ZBad:=True; FreeMem(Cat); Exit;
+ End;
+ { donnees en attente }
+ G2ZPendLen:=0; G2ZPendBits:=0;
+ If Exh And (INErr=0) Then Begin
+  If G2ZStage=1 Then Begin
+   { bloc stocke : octets alignes, rien a conserver }
+  End Else If INBitCnt>0 Then Begin
+   G2ZPendLen:=INLen-(INPos-1); G2ZPendBits:=8-INBitCnt;
+   If G2ZPendLen>G2ZPendCap Then Begin
+    If G2ZPend<>Nil Then FreeMem(G2ZPend);
+    G2ZPendCap:=G2ZPendLen+256; GetMem(G2ZPend,G2ZPendCap);
+   End;
+   Move(Cat^[INPos-1],G2ZPend^,G2ZPendLen);
+  End Else If INPos<INLen Then Begin
+   G2ZPendLen:=INLen-INPos;
+   If G2ZPendLen>G2ZPendCap Then Begin
+    If G2ZPend<>Nil Then FreeMem(G2ZPend);
+    G2ZPendCap:=G2ZPendLen+256; GetMem(G2ZPend,G2ZPendCap);
+   End;
+   Move(Cat^[INPos],G2ZPend^,G2ZPendLen);
+  End;
+ End;
+ FreeMem(Cat);
  G2ZOutLen:=INOut-Start;
  If G2ZOutLen>0 Then Move(G2ZH^[Start],G2ZDec^[0],G2ZOutLen);
  G2ZHLen:=INOut;
@@ -86292,7 +86599,7 @@ Begin
    8: G2ZBpp:=32;
    Else Exit;
   End;
-  G2ZHLen:=0; G2ZHdrDone:=False; G2ZBad:=False;
+  G2ZInflReset;
   G2ZBx:=(G2ZW+G2ZBw-1) Div G2ZBw; G2ZBy:=(G2ZH2+G2ZBh-1) Div G2ZBh;
   FillChar(G2ZCur^,G2ZW*G2ZH2*4,0); FillChar(G2ZPrev^,G2ZW*G2ZH2*4,0);
   G2ZGot:=True;
@@ -86335,7 +86642,7 @@ Begin
  GetMem(G2ZCur,G2ZW*G2ZH2*4+64); GetMem(G2ZPrev,G2ZW*G2ZH2*4+64);
  FillChar(G2ZCur^,G2ZW*G2ZH2*4,0); FillChar(G2ZPrev^,G2ZW*G2ZH2*4,0);
  FillChar(G2ZPal,SizeOf(G2ZPal),0);
- G2ZHLen:=0; G2ZHdrDone:=False; G2ZBad:=False; G2ZGot:=False; G2ZFlags:=0; G2ZFmt:=0; G2ZBpp:=8; G2ZComp:=1; G2ZBw:=16; G2ZBh:=16; G2ZBx:=1; G2ZBy:=1;
+ G2ZPend:=Nil; G2ZPendCap:=0; G2ZInflReset; G2ZGot:=False; G2ZFlags:=0; G2ZFmt:=0; G2ZBpp:=8; G2ZComp:=1; G2ZBw:=16; G2ZBh:=16; G2ZBx:=1; G2ZBy:=1;
  { format de sortie : premier paquet image cle valide }
  Found:=False; Fmt:=0;
  For PIdx:=0 To QXCount-1 Do Begin
@@ -86375,7 +86682,7 @@ Const BLK=16;
 Var
  Src,Prev,PrevPad,Work,Comp,Pkt: PEABuffer; Score: Array[0..1024] Of LongInt;
  Bypp,Lr,Ur,Lvl,KeyInt,CurFrm,I,J,X,Y,Ret,G,Rate,Scale,Wb,PS,PR,WorkSize,CompSize,Bw,Bh,Frames,PktLen,Mx,My,Xored,Fl,Pad,PadR: LongInt;
- Keyframe: Boolean; D: Double; Tmp: Double; W0,H0: LongInt;
+ Keyframe: Boolean; D: Double; Tmp: Double; W0,H0: LongInt; ZFmt,ConvArg,PalBase: LongInt; ExtraB: Array[0..3] Of Byte;
 Function BlockCmp(SOff,POff,Bw2,Bh2: LongInt; Var Xo: LongInt): LongInt;
 Var Hist: Array[0..255] Of Word; Jj,Ii,T,Sum,Bwb: LongInt;
 Begin
@@ -86424,8 +86731,13 @@ Begin
 End;
 Begin
  G2YOpen(Source);
- If (OptPixFmt<>'') And (OptPixFmt<>'bgr0') Then Fail('zmbv: seul le format de pixels bgr0 est pris en charge.');
- Bypp:=4; W0:=G2YW; H0:=G2YH; Wb:=W0*Bypp;
+ ZFmt:=8; Bypp:=4; ConvArg:=4;
+ If OptPixFmt='pal8' Then Begin ZFmt:=4; Bypp:=1; End
+ Else If OptPixFmt='rgb555le' Then Begin ZFmt:=5; Bypp:=2; End
+ Else If OptPixFmt='rgb565le' Then Begin ZFmt:=6; Bypp:=2; End
+ Else If (OptPixFmt<>'') And (OptPixFmt<>'bgr0') Then Fail('zmbv: formats de pixels pris en charge : pal8, rgb555le, rgb565le, bgr0.');
+ If ZFmt<>8 Then ConvArg:=-ZFmt;
+ W0:=G2YW; H0:=G2YH; Wb:=W0*Bypp;
  For I:=1 To BLK*BLK*Bypp Do Begin
   D:=I; D:=D/(BLK*BLK*Bypp);
   Tmp:=-I; Tmp:=Tmp*G2ZLog2(D); Tmp:=Tmp*256;
@@ -86450,14 +86762,26 @@ Begin
  GetMem(Src,Wb*H0+64);
  G:=G2YFN; I:=G2YFD; While I<>0 Do Begin Ret:=G Mod I; G:=I; I:=Ret; End;
  Rate:=G2YFN Div G; Scale:=G2YFD Div G;
- G2AviBegin('ZMBV',W0,H0,Rate,Scale,24,Nil,0);
+ If ZFmt=4 Then Begin
+  { avienc.c : palette PAL8 (1 entree, bits_per_coded_sample=0) ecrite apres l'en-tete bitmap }
+  FillChar(ExtraB,SizeOf(ExtraB),0); G2OClrUsed:=1;
+  G2AviBegin('ZMBV',W0,H0,Rate,Scale,24,@ExtraB,4);
+  G2OClrUsed:=0;
+ End Else G2AviBegin('ZMBV',W0,H0,Rate,Scale,24,Nil,0);
  CurFrm:=0; Frames:=0;
- While G2YNext(Src,Bypp) Do Begin
+ While G2YNext(Src,ConvArg) Do Begin
   Keyframe:=CurFrm=0;
   Inc(CurFrm); If CurFrm=KeyInt Then CurFrm:=0;
   WorkSize:=0;
   If Keyframe Then Begin
-   Move(Src^[0],Work^[0],Wb*H0); WorkSize:=Wb*H0;
+   If ZFmt=4 Then Begin
+    { palette systematique BGR8 (avpriv_set_systematic_pal2) : octets R,G,B }
+    For I:=0 To 255 Do Begin
+     Work^[I*3]:=(I And 7)*36; Work^[I*3+1]:=((I Shr 3) And 7)*36; Work^[I*3+2]:=(I Shr 6)*85;
+    End;
+    WorkSize:=768;
+   End;
+   Move(Src^[0],Work^[WorkSize],Wb*H0); Inc(WorkSize,Wb*H0);
   End Else Begin
    Bw:=(W0+BLK-1) Div BLK; Bh:=(H0+BLK-1) Div BLK;
    Mx:=0; My:=0;
@@ -86498,7 +86822,7 @@ Begin
   If Ret<>0 Then Fail('zmbv: erreur de compression.');
   PktLen:=0;
   If Keyframe Then Begin
-   Pkt^[0]:=1; Pkt^[1]:=0; Pkt^[2]:=1; Pkt^[3]:=1; Pkt^[4]:=8; Pkt^[5]:=BLK; Pkt^[6]:=BLK; PktLen:=7;
+   Pkt^[0]:=1; Pkt^[1]:=0; Pkt^[2]:=1; Pkt^[3]:=1; Pkt^[4]:=ZFmt; Pkt^[5]:=BLK; Pkt^[6]:=BLK; PktLen:=7;
   End Else Begin Pkt^[0]:=0; PktLen:=1; End;
   Move(Comp^[0],Pkt^[PktLen],ZLOutPos); Inc(PktLen,ZLOutPos);
   G2AviFrame(Pkt,PktLen,Keyframe);
@@ -91566,6 +91890,150 @@ End;
 { ==== BLOCK-ANCHOR-H6 : inserer le code du groupe H6 juste au-dessus de cette ligne ==== }
 
 { ==== BLOCK-ANCHOR-H7 : inserer le code du groupe H7 juste au-dessus de cette ligne ==== }
+
+{ ---- H8 : zmbv, conversion yuv420p -> pal8 (BGR8) / rgb555le / rgb565le (libswscale/yuv2rgb.c, chemin non mis a l'echelle) ---- }
+Const
+ H8Dith2x2_8: Array[0..2,0..1] Of Byte=((6,2),(0,4),(6,2));
+ H8Dith2x2_4: Array[0..2,0..1] Of Byte=((1,3),(2,0),(1,3));
+ H8Dith8x8_32: Array[0..8,0..7] Of Byte=(
+  (17,9,23,15,16,8,22,14),(5,29,3,27,4,28,2,26),(21,13,19,11,20,12,18,10),(0,24,6,30,1,25,7,31),
+  (16,8,22,14,17,9,23,15),(4,28,2,26,5,29,3,27),(20,12,18,10,21,13,19,11),(1,25,7,31,0,24,6,30),
+  (17,9,23,15,16,8,22,14));
+ H8Dith8x8_73: Array[0..8,0..7] Of Byte=(
+  (0,55,14,68,3,58,17,72),(37,18,50,32,40,22,54,35),(9,64,5,59,13,67,8,63),(46,27,41,23,49,31,44,26),
+  (2,57,16,71,1,56,15,70),(39,21,52,34,38,19,51,33),(11,66,7,62,10,65,6,60),(48,30,43,25,47,29,42,24),
+  (0,55,14,68,3,58,17,72));
+
+Procedure H8YGeneral(Out: PEABuffer; Bpp: LongInt);
+Var Q: PEABuffer; X,Y,O: LongInt;
+Begin
+ G1YW:=G2YW; G1YH:=G2YH; G1YCw:=G2YCW; G1YCh:=G2YCH; G1YY:=G2YYp; G1YU:=G2YUp; G1YV:=G2YVp;
+ GetMem(Q,G2YW*G2YH*3+16);
+ G1Yuv420ToRgb(Q);
+ For Y:=0 To G2YH-1 Do For X:=0 To G2YW-1 Do Begin
+  O:=(Y*G2YW+X)*Bpp;
+  Out^[O]:=Q^[(Y*G2YW+X)*3+2]; Out^[O+1]:=Q^[(Y*G2YW+X)*3+1]; Out^[O+2]:=Q^[(Y*G2YW+X)*3];
+  If Bpp=4 Then Out^[O+3]:=255;
+ End;
+ FreeMem(Q);
+End;
+
+Procedure H8YConv(Fmt: LongInt; Out: PEABuffer);
+Var
+ TR,TG,TB: Array[0..2047] Of Word; OffR,OffB,OffGU,OffGV: Array[0..255] Of LongInt;
+ Cy,Oy,Yb: Int64; I,X,Y,Yv,U,V,YD,Q,Yoffs,Bpp,W,H,Cw,Rb,Y2,XE: LongInt; Dr,Dg,Db: LongInt; Yval: LongInt; Px: LongInt;
+Function Cl(Z: Int64): LongInt; Begin If Z<0 Then Cl:=0 Else If Z>255 Then Cl:=255 Else Cl:=Z; End;
+Begin
+ W:=G2YW; H:=G2YH; Cw:=G2YCW;
+ If Odd(H) Then Fail('zmbv: hauteur impaire non prise en charge pour pal8/rgb555le/rgb565le (chemin general de swscale).');
+ If (Fmt=4) And Odd(W) Then Fail('zmbv: pal8 avec largeur impaire (diffusion d''erreur de swscale) non pris en charge.');
+ If Fmt=4 Then Bpp:=8 Else If Fmt=5 Then Bpp:=15 Else Bpp:=16;
+ Cy:=(Int64(65536)*255) Div 219; Oy:=Int64(16) Shl 16;
+ Yoffs:=326+512;
+ FillChar(TR,SizeOf(TR),0); FillChar(TG,SizeOf(TG),0); FillChar(TB,SizeOf(TB),0);
+ Yb:=-(Int64(384) Shl 16)-512*Cy-Oy;
+ For I:=0 To 2047 Do Begin
+  Yval:=Cl(G2YSar(Yb+$8000,16));
+  If Bpp=8 Then Begin
+   If I<2048-38 Then Begin
+    TR[I+16]:=((Yval+18) Div 36);
+    TG[I+16]:=((Yval+18) Div 36) Shl 3;
+    TB[I+37]:=((Yval+43) Div 85) Shl 6;
+   End;
+  End Else Begin
+   TR[I]:=(Yval Shr 3) Shl (Bpp-5);
+   TG[I]:=(Yval Shr (18-Bpp)) Shl 5;
+   TB[I]:=(Yval Shr 3);
+  End;
+  Inc(Yb,Cy);
+ End;
+ For I:=0 To 255 Do Begin
+  OffR[I]:=Yoffs-LongInt(G2YSar(G2YCrv,9))+LongInt(G2YSar(I*G2YCrv,16));
+  OffB[I]:=Yoffs-LongInt(G2YSar(G2YCbu,9))+LongInt(G2YSar(I*G2YCbu,16));
+  OffGU[I]:=Yoffs-LongInt(G2YSar(G2YCgu,9))+LongInt(G2YSar(I*G2YCgu,16));
+  OffGV[I]:=-LongInt(G2YSar(G2YCgv,9))+LongInt(G2YSar(I*G2YCgv,16));
+ End;
+ if Bpp=8 then Rb:=W else Rb:=W*2;
+ FillChar(Out^,Rb*H,0);
+ { les variantes 15/16 bits n'ont pas de traitement du reste (CLOSEYUV2RGBFUNC) : seuls les groupes de 8 pixels sont convertis ;
+   la variante 8 bits traite aussi des groupes de 4 et 2 pixels, jamais le dernier pixel d'une largeur impaire }
+ If Bpp=8 Then XE:=W And Not 1 Else XE:=W And Not 7;
+ For Y:=0 To H-1 Do Begin
+  YD:=Y; Q:=Y And 1;
+  For X:=0 To XE-1 Do Begin
+   Yv:=G2YYp^[Y*W+X]; U:=G2YUp^[(Y Shr 1)*Cw+(X Shr 1)]; V:=G2YVp^[(Y Shr 1)*Cw+(X Shr 1)];
+   If Bpp=16 Then Begin
+    Dr:=H8Dith2x2_8[Q,X And 1]; Dg:=H8Dith2x2_4[Q,X And 1]; Db:=H8Dith2x2_8[Q+1,X And 1];
+    Px:=TR[OffR[V]+Yv+Dr]+TG[OffGU[U]+OffGV[V]+Yv+Dg]+TB[OffB[U]+Yv+Db];
+   End Else If Bpp=15 Then Begin
+    If (X And 1)=0 Then Begin
+     Dr:=H8Dith2x2_8[Q,0]; Dg:=H8Dith2x2_8[Q,1]; Db:=H8Dith2x2_8[Q+1,0];
+    End Else Begin
+     Dr:=H8Dith2x2_8[Q,1]; Dg:=H8Dith2x2_8[Q,0]; Db:=H8Dith2x2_8[Q+1,1];
+    End;
+    Px:=TR[OffR[V]+Yv+Dr]+TG[OffGU[U]+OffGV[V]+Yv+Dg]+TB[OffB[U]+Yv+Db];
+   End Else Begin
+    Dr:=H8Dith8x8_32[(YD And 7),X And 7]; Db:=H8Dith8x8_73[(YD And 7),X And 7];
+    Px:=TR[OffR[V]+Yv+Dr]+TG[OffGU[U]+OffGV[V]+Yv+Dr]+TB[OffB[U]+Yv+Db];
+   End;
+   If Bpp=8 Then Out^[Y*W+X]:=Px And 255
+   Else Begin Out^[Y*Rb+X*2]:=Px And 255; Out^[Y*Rb+X*2+1]:=Px Shr 8; End;
+  End;
+ End;
+End;
+
+{ ---- H8 : xan_dpcm dans AVI (flux audio, wFormatTag 0x594A) ---- }
+{ Mode 0 : retourne True si un flux audio AVI porte l'etiquette 0x594A ; Mode 1 : decode vers WAV (Target) }
+Function H8XanAvi(Const Source,Target: String; Mode: LongInt): Boolean;
+Var
+ F: PEABuffer; Size,Pos,Sz,Idx,AIdx,Chn,Rate,Tag,Q,E2,Sz2,Id,P2,E3,Sz3: LongInt; Found,IsAud: Boolean;
+ Procedure Walk(P,E: LongInt);
+ Var Z,Cid: LongInt;
+ Begin
+  While P+8<=E Do Begin
+   Z:=NVRL32(F,Size,P+4); If (Z<0) Or (P+8+Z>Size) Then Z:=Size-P-8;
+   If (F^[P]=76) And (F^[P+1]=73) And (F^[P+2]=83) And (F^[P+3]=84) Then Begin
+    If (F^[P+8]=109) And (F^[P+9]=111) And (F^[P+10]=118) And (F^[P+11]=105) Then Walk(P+12,P+8+Z)
+    Else If (F^[P+8]=104) And (F^[P+9]=100) And (F^[P+10]=114) And (F^[P+11]=108) Then Walk(P+12,P+8+Z)
+    Else If (F^[P+8]=115) And (F^[P+9]=116) And (F^[P+10]=114) And (F^[P+11]=108) Then Begin
+     { liste de flux : le numero est compte au passage }
+     Inc(Idx); IsAud:=False;
+     Q:=P+12; E3:=P+8+Z;
+     While Q+8<=E3 Do Begin
+      Sz3:=NVRL32(F,Size,Q+4); If (Sz3<0) Or (Q+8+Sz3>Size) Then Break;
+      If (F^[Q]=115) And (F^[Q+1]=116) And (F^[Q+2]=114) And (F^[Q+3]=104) Then IsAud:=(F^[Q+8]=97) And (F^[Q+9]=117) And (F^[Q+10]=100) And (F^[Q+11]=115);
+      If (F^[Q]=115) And (F^[Q+1]=116) And (F^[Q+2]=114) And (F^[Q+3]=102) And IsAud And (Sz3>=16) And (Not Found) Then Begin
+       Tag:=NVRL16(F,Size,Q+8);
+       If Tag=$594A Then Begin Found:=True; AIdx:=Idx; Chn:=NVRL16(F,Size,Q+10); Rate:=NVRL32(F,Size,Q+12); End;
+      End;
+      Inc(Q,8+Sz3+(Sz3 And 1));
+     End;
+    End;
+   End Else If (Mode=1) And Found And (F^[P]=48+(AIdx Div 10)) And (F^[P+1]=48+(AIdx Mod 10)) And (F^[P+2]=119) And (F^[P+3]=98) Then Begin
+    Cid:=Z;
+    If Cid>0 Then XDPacket(PEABuffer(@F^[P+8]),Cid,Chn);
+   End;
+   Inc(P,8+Z+(Z And 1));
+  End;
+ End;
+Begin
+ H8XanAvi:=False;
+ G2Load(Source,F,Size);
+ If (Size<12) Or (F^[0]<>82) Or (F^[1]<>73) Or (F^[2]<>70) Or (F^[3]<>70) Or (F^[8]<>65) Or (F^[9]<>86) Or (F^[10]<>73) Then Begin FreeMem(F,Size+64); Exit; End;
+ Found:=False; Idx:=-1; AIdx:=-1; Chn:=0; Rate:=0;
+ { premiere passe : en-tetes seulement }
+ Walk(12,Size);
+ If Mode=0 Then Begin H8XanAvi:=Found; FreeMem(F,Size+64); Exit; End;
+ If Not Found Then Fail('xan_dpcm: aucun flux audio 0x594a dans l''AVI.');
+ If (Chn<1) Or (Chn>2) Then Fail('xan_dpcm: mono ou stereo requis.');
+ If Rate<1 Then Fail('xan_dpcm: frequence invalide.');
+ EAReset; OpenWrite(Target); ADPCMWaveHeader(Rate,Chn,0);
+ Mode:=1; Idx:=-1; Walk(12,Size);
+ EAFlush;
+ ADPCMPatchHeader(Rate,Chn,EAWritten); CloseWrite;
+ FreeMem(F,Size+64);
+ H8XanAvi:=True;
+End;
 
 { ==== BLOCK-ANCHOR-H8 : inserer le code du groupe H8 juste au-dessus de cette ligne ==== }
 
@@ -114999,10 +115467,10 @@ BEGIN
   WriteLn('D V    wnv1            Winnov WNV1 (AVI WNV1)');
   WriteLn('D V    xl              Miro VideoXL (AVI VIXL)');
   WriteLn('DEV    zlib            LCL ZLIB (decodeur AVI ZLIB; encodeur bgr24 vers AVI identique a FFmpeg depuis Y4M yuv420p, -compression_level)');
-  WriteLn('DEV    zmbv            Zip Motion Blocks Video (decodeur AVI; encodeur bgr0 vers AVI identique a FFmpeg depuis Y4M yuv420p, -keyint_min -me_range -compression_level)');
+  WriteLn('DEV    zmbv            Zip Motion Blocks Video (decodeur AVI; encodeur bgr0/rgb555le/rgb565le/pal8 (pal8 : largeur paire) vers AVI identique a FFmpeg depuis Y4M yuv420p, -keyint_min -me_range -compression_level)');
   { LIST-ANCHOR-G2A }
   WriteLn('D A    sol_dpcm        DPCM Sol');
-  WriteLn('D A    xan_dpcm        DPCM Xan (WAV 0x594a)');
+  WriteLn('D A    xan_dpcm        DPCM Xan (WAV et AVI, etiquette 0x594a)');
   WriteLn('D V D  vmdvideo        Sierra VMD video');
   WriteLn('D A    vmdaudio        Sierra VMD audio');
   WriteLn('D V D  xan_wc3         Wing Commander III / Xan');
@@ -115851,7 +116319,7 @@ BEGIN
  End;
  If IsHTTP(InputPath) Then Fail('Entree reseau reservee aux listes HLS.');
  If HLSBase<>'' Then Fail('-hls_base_url exige une entree HLS.');
- If ((InputFormat='mp4') Or (InputFormat='avi') Or (InputFormat='webm')) And Not ((InputFormat='avi') And WMDAviHasWMA(InputPath) And ((OutputFormat='wav') Or (OutputFormat='mp3') Or (OutputFormat='asf'))) Then Begin
+ If ((InputFormat='mp4') Or (InputFormat='avi') Or (InputFormat='webm')) And Not ((InputFormat='avi') And WMDAviHasWMA(InputPath) And ((OutputFormat='wav') Or (OutputFormat='mp3') Or (OutputFormat='asf'))) And Not ((InputFormat='avi') And (OutputFormat='wav') And H8XanAvi(InputPath,'',0)) Then Begin
   If Not (((InputFormat='mp4') And (OutputFormat='avi')) Or
   ((InputFormat='avi') And (OutputFormat='mp4')) Or
   ((InputFormat='webm') And (OutputFormat='mp4')) Or
@@ -115914,6 +116382,7 @@ BEGIN
     DecodeWMASpool(Temps[3],Temps[0]);
    End Else
    If (InputFormat='avi') And WMDAviHasWMA(InputPath) Then DecodeWMAAvi(InputPath,Temps[0]) Else
+   If (InputFormat='avi') And H8XanAvi(InputPath,'',0) Then Begin H8XanAvi(InputPath,Temps[0],1); Intermediate:=Temps[0]; End Else
    If InputFormat='mp3on4' Then DecodeMP3On4(InputPath,Temps[0]) Else
    If InputFormat='mp3adu' Then DecodeMP3ADU(InputPath,Temps[0]) Else
    If InputFormat='mlp' Then DecodeMLP(InputPath,Temps[0],False) Else
