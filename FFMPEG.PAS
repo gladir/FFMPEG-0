@@ -22718,6 +22718,9 @@ Procedure DecodeEAVideo(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeAVIX(Const Source,Target: String; Mode,Kind: LongInt); Forward;
 Procedure DecodeQTRLE(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeRPZA(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure DecodeTheoraOgg(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure DecodeVP3Avi(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure DecodeTheoraQX(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeSMC(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeQDRAW(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeQPEG(Const Source,Target: String; Mode: LongInt); Forward;
@@ -23494,6 +23497,9 @@ Procedure DecodeVPD(Const Source,Target: String; Mode,Kind: LongInt); Forward;
 Procedure DecodeNV2(Kind: LongInt; Const Source,Target: String; Mode: LongInt);
 Begin
  If Kind>=220 Then Begin DecodeG2A(Kind,Source,Target,Mode); Exit; End;
+ If Kind=170 Then Begin DecodeTheoraOgg(Source,Target,Mode); Exit; End;
+ If Kind=171 Then Begin DecodeVP3Avi(Source,Target,Mode); Exit; End;
+ If Kind=172 Then Begin DecodeTheoraQX(Source,Target,Mode); Exit; End;
  If Kind=55 Then Begin DecodePCX(Source,Target,Mode); Exit; End;
  If Kind=66 Then Begin DecodeRL2(Source,Target,Mode); Exit; End;
  If Kind=67 Then Begin DecodeSMK(Source,Target,Mode); Exit; End;
@@ -47098,6 +47104,7 @@ Begin
  Else If F='smc ' Then QXFccKind:=61
  Else If F='qdrw' Then QXFccKind:=62
  Else If (F='QPEG') Or (F='Q1.0') Or (F='Q1.1') Then QXFccKind:=63
+ Else If F='theo' Then QXFccKind:=172
  Else If (F='raw ') Or (F=#0#0#0#0) Or (F='I420') Or (F='IYUV') Or (F='YV12') Or (F='Y800') Or (F='GREY') Then QXFccKind:=64;
 End;
 
@@ -57166,6 +57173,1862 @@ Begin
  CFSync(Pts,Dur,NbF,NbP);
  NVEmitN(G2AFr,NbP,NbF); Inc(CFNext,NbF); Inc(CFFrameNo,NbF); G2CFOn:=True;
 End;
+{ ==== G4A-BEGIN : decodeur On2 VP3 / Theora (libavcodec/vp3.c, vp3dsp.c) ; Ogg Theora et AVI VP31/VP30 ==== }
+Type
+ TVP3Vlc=Record N: LongInt; Acc: Int64; Len: Array[0..63] Of Byte; Sym: Array[0..63] Of LongInt; Code: Array[0..63] Of Int64; End;
+ TVP3IntA=Array[0..200000000] Of LongInt; PVP3Int=^TVP3IntA;
+Const
+ VP3Chroma: Array[0..63] Of Byte=(
+ 17,18,24,47,99,99,99,99,18,21,26,66,99,99,99,99,24,26,56,99,99,99,99,99,47,66,99,99,99,99,99,99,
+ 99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99);
+ VP3Zig: Array[0..63] Of Byte=(0,1,8,16,9,2,3,10,17,24,32,25,18,11,4,5,12,19,26,33,40,48,41,34,27,20,13,6,7,14,21,28,35,42,49,56,57,50,43,36,29,22,15,23,30,37,44,51,58,59,52,45,38,31,39,46,53,60,61,54,47,55,62,63);
+ VP3HilX: Array[0..15] Of Byte=(0,1,1,0,0,0,1,1,2,2,3,3,3,2,2,3);
+ VP3HilY: Array[0..15] Of Byte=(0,0,1,1,2,3,3,2,2,3,3,2,1,1,0,0);
+ { modes : 0 NO_MV, 1 INTRA, 2 PLUS_MV, 3 LAST_MV, 4 PRIOR_LAST, 5 USING_GOLDEN, 6 GOLDEN_MV, 7 FOURMV }
+ VP3Alpha: Array[0..5,0..7] Of Byte=((3,4,2,0,1,5,6,7),(3,4,0,2,1,5,6,7),(3,2,4,0,1,5,6,7),(3,2,0,4,1,5,6,7),(0,3,4,2,1,5,6,7),(0,5,3,4,2,1,6,7));
+ VP3PredT: Array[0..15,0..3] Of LongInt=((0,0,0,0),(0,0,0,128),(0,0,128,0),(0,0,53,75),(0,128,0,0),(0,64,0,64),(0,128,0,0),(0,0,53,75),(128,0,0,0),(0,0,0,128),(64,0,64,0),(0,0,53,75),(0,128,0,0),(-104,116,0,116),(24,80,24,0),(-104,116,0,116));
+ VP3Compat: Array[0..8] Of Byte=(1,0,1,1,1,2,2,1,3);
+ VP3EobBase: Array[0..6] Of Byte=(1,2,3,4,8,16,0);
+ VP3EobBits: Array[0..6] Of Byte=(0,0,0,2,3,4,12);
+ VP3ZrBase: Array[0..31] Of Byte=(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,2,3,4,5,6,10,1,2);
+ VP3ZrBits: Array[0..31] Of Byte=(0,0,0,0,0,0,0,3,6,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,3,0,1);
+ VP3CfBits: Array[0..31] Of Byte=(0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,2,3,4,5,6,10,1,1,1,1,1,1,1,2,2);
+ VP3CfBase: Array[0..31] Of SmallInt=(0,0,0,0,0,0,0,0,0,1,-1,2,-2,3,4,5,6,7,9,13,21,37,69,1,1,1,1,1,1,1,2,2);
+ VP3IntraY: Array[0..63] Of Byte=(
+16,11,10,16,24,40,51,61,12,12,14,19,26,58,60,55,
+14,13,16,24,40,57,69,56,14,17,22,29,51,87,80,62,
+18,22,37,58,68,109,103,77,24,35,55,64,81,104,113,92,
+49,64,78,87,103,121,120,101,72,92,95,98,112,100,103,99);
+ VP3Inter: Array[0..63] Of Byte=(
+16,16,16,20,24,28,32,40,16,16,20,24,28,32,40,48,
+16,20,24,28,32,40,48,64,20,24,28,32,40,48,64,64,
+24,28,32,40,48,64,64,64,28,32,40,48,64,64,64,96,
+32,40,48,64,64,64,96,128,40,48,64,64,64,96,128,128);
+ VP3DcScale: Array[0..63] Of Byte=(
+220,200,190,180,170,170,160,160,150,150,140,140,130,130,120,120,
+110,110,100,100,90,90,90,80,80,80,70,70,70,60,60,60,
+60,50,50,50,50,40,40,40,40,40,30,30,30,30,30,30,
+30,20,20,20,20,20,20,20,20,10,10,10,10,10,10,10);
+ VP3AcScale: Array[0..63] Of Word=(
+500,450,400,370,340,310,285,265,245,225,210,195,185,180,170,160,
+150,145,135,130,125,115,110,107,100,96,93,89,85,82,75,74,
+70,68,64,60,57,56,52,50,49,45,44,43,40,38,37,35,
+33,32,30,29,28,25,24,22,21,19,18,17,15,13,12,10);
+ VP3FilterLim: Array[0..63] Of Byte=(
+30,25,20,20,15,15,14,14,13,13,12,12,11,11,10,10,
+9,9,8,8,7,7,7,7,6,6,6,6,5,5,5,5,
+4,4,4,4,3,3,3,3,2,2,2,2,2,2,2,2,
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0);
+ VP3SbLens: Array[0..33] Of Byte=(
+1,3,3,4,4,6,6,6,6,8,8,8,8,8,8,8,
+8,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,
+10,6);
+ VP3FrLens: Array[0..29] Of Byte=(
+2,2,3,3,4,4,6,6,6,6,7,7,7,7,9,9,
+9,9,9,9,9,9,9,9,9,9,9,9,9,9);
+ VP3ModeLens: Array[0..7] Of Byte=(
+1,2,3,4,5,6,7,7);
+ VP3MvTab: Array[0..125] Of Byte=(
+31,3,32,3,30,3,33,4,29,4,34,4,28,4,35,6,
+27,6,36,6,26,6,37,6,25,6,38,6,24,6,39,7,
+23,7,40,7,22,7,41,7,21,7,42,7,20,7,43,7,
+19,7,44,7,18,7,45,7,17,7,46,7,16,7,47,8,
+15,8,48,8,14,8,49,8,13,8,50,8,12,8,51,8,
+11,8,52,8,10,8,53,8,9,8,54,8,8,8,55,8,
+7,8,56,8,6,8,57,8,5,8,58,8,4,8,59,8,
+3,8,60,8,2,8,61,8,1,8,62,8,0,8);
+ VP3Bias: Array[0..5119] Of Byte=(
+20,3,19,3,7,5,30,6,1,7,3,8,28,9,26,12,
+8,12,6,11,29,10,14,4,12,4,17,4,13,4,21,4,
+24,6,23,6,16,5,31,7,25,8,2,9,4,10,5,11,
+27,11,0,6,22,5,18,4,15,5,11,5,10,4,9,4,
+20,3,19,3,11,4,12,4,14,4,17,4,0,5,7,6,
+3,8,29,13,8,13,26,12,6,11,5,11,28,11,25,9,
+1,7,13,4,21,4,16,5,22,5,18,4,10,4,9,4,
+15,5,30,7,23,7,24,7,31,8,4,10,27,10,2,9,
+20,3,19,3,11,4,12,4,14,4,17,4,1,6,30,7,
+2,8,3,8,16,5,21,4,13,4,0,5,22,5,18,4,
+15,5,31,8,25,10,27,11,6,11,5,11,26,12,29,14,
+8,14,28,13,4,10,24,7,7,7,23,7,10,4,9,4,
+0,4,17,4,14,4,21,5,7,6,23,6,10,3,9,3,
+11,4,12,4,20,4,3,7,25,9,6,10,5,10,29,13,
+8,13,28,12,26,11,27,10,4,9,1,6,16,5,18,4,
+13,4,19,4,22,7,30,7,24,7,31,8,2,8,15,5,
+15,4,5,9,25,9,22,8,31,7,24,6,7,6,27,9,
+6,10,29,13,8,13,28,12,26,11,4,8,2,7,17,4,
+0,4,14,4,11,4,12,4,19,4,9,3,10,3,21,6,
+23,6,16,5,18,4,13,4,1,6,3,7,30,7,20,5,
+15,4,1,5,7,6,3,6,17,4,19,4,14,4,18,4,
+20,5,27,9,5,9,29,13,8,13,28,12,26,11,25,10,
+6,10,22,10,21,7,23,6,12,4,11,4,0,4,9,3,
+10,3,16,5,2,7,30,7,4,8,31,8,24,7,13,4,
+13,3,17,4,18,4,30,6,24,6,2,6,27,9,6,9,
+21,8,31,7,14,4,1,5,20,6,3,6,16,5,19,5,
+12,4,11,4,0,4,23,6,7,7,5,9,25,10,8,13,
+29,14,22,14,28,12,26,11,4,8,15,5,10,3,9,3,
+10,2,3,5,19,5,24,6,7,7,5,8,21,9,6,9,
+16,5,14,4,23,6,2,6,1,5,11,4,12,4,20,7,
+4,7,25,10,28,12,8,13,29,14,22,14,26,11,27,9,
+31,8,30,7,18,5,17,5,15,5,13,4,0,4,9,3,
+29,5,7,5,0,4,13,4,26,6,19,6,14,5,24,4,
+12,4,11,4,17,6,1,6,28,5,18,6,8,6,25,5,
+20,7,21,8,6,11,5,11,4,10,22,9,15,6,31,5,
+10,3,9,3,23,4,27,6,3,8,2,8,16,7,30,5,
+30,4,7,5,6,10,5,10,4,9,22,8,3,7,16,6,
+13,4,24,4,19,6,26,6,14,5,0,4,12,4,11,4,
+2,7,20,7,17,6,25,5,18,6,15,6,31,5,10,3,
+9,3,23,4,1,6,21,8,8,8,29,7,28,6,27,6,
+22,7,8,7,2,6,31,5,24,4,29,6,3,6,25,5,
+30,5,1,5,23,4,16,6,7,6,19,6,26,6,13,4,
+12,4,11,4,14,5,6,10,5,10,4,9,21,8,20,7,
+17,6,0,4,28,6,18,6,27,6,15,6,10,3,9,3,
+0,3,4,7,21,7,30,6,15,5,25,5,29,6,7,7,
+6,10,5,10,22,9,8,8,23,4,26,6,19,6,16,6,
+2,6,13,4,1,5,14,5,12,4,11,4,20,7,31,7,
+17,6,3,6,18,6,27,6,28,6,24,5,10,3,9,3,
+9,2,0,3,14,5,3,5,26,6,18,6,17,6,8,8,
+21,8,30,7,12,4,11,4,15,6,7,8,6,10,5,10,
+22,9,4,7,28,6,27,6,24,5,25,6,2,6,1,5,
+23,5,29,7,19,7,16,7,31,8,20,8,13,5,10,3,
+9,2,0,3,2,5,14,5,24,5,17,6,29,7,21,8,
+5,8,12,4,11,4,28,6,4,6,15,6,27,6,23,5,
+25,6,6,10,22,10,8,9,30,8,19,7,3,5,16,7,
+26,7,7,9,31,9,20,8,18,7,13,5,1,5,10,3,
+9,2,0,3,3,4,1,4,12,4,11,4,23,5,15,6,
+30,8,21,8,7,9,6,9,31,9,22,10,8,10,2,5,
+5,7,19,7,16,7,26,7,13,5,18,7,29,8,20,8,
+24,6,14,6,17,7,28,7,4,6,25,7,27,7,10,3,
+10,2,9,2,12,4,11,4,15,6,5,6,30,9,29,9,
+28,8,22,12,8,12,7,11,31,10,21,9,26,8,19,7,
+16,7,3,4,2,5,4,5,18,7,24,7,17,7,6,8,
+25,8,13,5,14,6,27,8,20,8,23,7,1,5,0,4,
+15,4,11,4,12,4,21,4,0,5,26,7,1,7,24,6,
+22,5,30,5,14,4,10,4,9,4,17,4,13,4,23,5,
+28,7,25,7,27,8,2,9,29,11,5,13,8,14,6,14,
+4,12,3,10,31,7,20,4,18,4,16,5,7,5,19,4,
+15,4,7,4,11,4,12,4,1,6,31,6,26,7,27,8,
+2,8,22,6,17,4,14,4,30,5,0,5,9,4,10,4,
+20,4,13,4,24,6,25,7,3,8,6,12,5,12,29,12,
+8,12,4,10,28,9,21,5,18,4,16,5,23,5,19,4,
+21,5,25,6,1,6,15,4,20,4,7,4,11,4,12,4,
+17,4,14,4,3,7,22,7,31,6,24,6,27,8,2,8,
+6,12,29,13,8,13,5,11,4,10,28,9,26,8,10,4,
+9,4,19,4,18,4,30,5,0,5,13,4,16,5,23,5,
+28,7,27,7,22,8,8,12,6,12,29,11,5,10,4,9,
+2,7,21,6,1,6,15,4,23,4,7,4,11,4,17,4,
+12,4,19,4,25,6,26,7,3,7,20,5,18,4,14,4,
+31,6,24,6,30,5,10,4,9,4,13,4,16,5,0,5,
+30,4,15,4,17,4,0,4,7,4,18,4,23,4,21,7,
+27,7,2,7,26,7,25,6,1,6,12,4,11,4,14,4,
+16,5,28,8,5,10,22,11,8,13,6,13,29,12,4,9,
+3,7,20,6,13,4,19,5,31,6,24,6,10,4,9,4,
+9,3,30,4,3,6,28,7,27,7,31,5,7,4,24,5,
+19,5,0,4,12,4,11,4,14,4,23,4,16,5,21,9,
+6,11,22,13,8,13,29,12,5,10,4,8,2,7,20,7,
+26,7,13,4,18,5,25,6,1,6,17,5,15,5,10,4,
+10,3,9,3,18,5,25,5,26,6,19,6,1,5,31,5,
+17,5,14,4,24,5,3,6,6,10,8,12,22,13,21,13,
+29,11,5,9,20,8,27,7,12,4,11,4,13,4,0,4,
+23,4,15,5,7,5,4,8,28,8,2,7,16,6,30,5,
+0,3,10,3,9,3,3,5,27,6,16,6,13,4,31,5,
+17,6,4,7,28,7,11,4,12,4,24,5,7,5,25,5,
+26,6,2,6,1,5,14,5,23,4,19,8,20,13,8,13,
+22,13,21,13,29,11,6,10,5,9,18,7,15,6,30,5,
+9,3,24,4,7,4,17,5,19,6,20,7,2,8,3,9,
+4,11,6,13,5,13,22,12,21,10,14,4,25,5,15,5,
+27,6,29,6,28,5,30,4,13,4,12,4,11,4,8,7,
+1,7,16,6,31,5,23,4,18,6,26,6,0,5,10,4,
+10,3,9,3,27,6,20,7,6,12,5,12,22,11,4,10,
+21,9,8,8,25,5,14,4,19,6,1,6,15,5,0,4,
+30,4,13,4,31,5,29,7,3,8,2,8,26,6,12,4,
+11,4,28,6,16,6,7,5,23,4,18,6,17,6,24,5,
+9,3,2,6,8,7,22,12,6,12,5,11,21,10,4,9,
+20,8,1,5,15,5,26,5,24,4,29,6,18,6,28,5,
+13,4,16,6,27,6,25,5,30,4,12,4,11,4,17,6,
+19,7,3,7,31,5,0,4,7,5,14,5,23,4,10,4,
+12,4,11,4,10,3,9,3,23,3,7,5,14,5,3,6,
+6,11,22,12,21,12,5,10,20,9,4,8,18,7,1,5,
+24,4,15,6,29,6,28,5,26,5,8,8,19,8,16,7,
+27,6,13,5,30,5,25,5,17,7,2,7,31,6,0,4,
+10,3,9,3,25,4,4,7,18,7,16,7,17,7,28,5,
+0,3,23,3,24,4,29,6,2,6,13,5,26,5,30,5,
+1,5,27,6,7,6,3,6,8,8,22,13,21,13,6,12,
+20,11,5,10,19,9,15,7,14,6,31,6,12,5,11,5,
+10,3,9,3,1,4,13,5,29,6,7,6,23,3,0,3,
+24,4,30,5,3,5,28,5,14,6,31,6,12,5,11,5,
+26,5,15,7,4,7,27,6,25,5,16,8,17,8,20,12,
+22,13,21,13,6,11,19,10,5,9,8,9,18,9,2,6,
+10,3,9,3,23,3,19,10,20,11,22,12,21,12,18,9,
+17,8,5,7,14,6,30,5,1,4,0,3,24,4,28,5,
+15,7,16,8,8,9,6,9,31,6,2,5,12,5,11,5,
+4,6,27,6,26,5,13,6,29,7,7,7,3,5,25,5,
+0,3,10,3,9,3,24,4,29,7,17,10,22,13,21,13,
+18,13,20,14,19,14,8,11,16,9,15,8,27,6,12,5,
+23,3,1,4,11,5,13,6,7,7,14,7,3,4,2,5,
+26,5,28,6,5,6,4,5,6,7,31,7,30,6,25,5,
+24,5,28,6,21,6,23,4,7,4,15,4,17,4,25,6,
+2,8,22,9,8,9,1,7,0,5,19,4,11,4,12,4,
+9,4,10,4,18,4,14,4,20,5,26,7,27,8,6,12,
+5,12,4,11,29,10,3,9,31,6,30,5,16,5,13,4,
+30,4,1,6,28,6,24,5,17,4,15,4,18,4,23,4,
+31,5,27,7,3,8,21,8,25,6,7,4,12,4,11,4,
+14,4,20,6,26,7,2,8,6,13,5,13,22,12,4,11,
+29,10,8,9,16,5,9,4,10,4,19,5,0,5,13,4,
+13,3,15,4,0,4,30,4,24,5,31,5,23,4,7,4,
+20,7,8,8,4,10,5,12,22,13,6,13,21,11,29,9,
+28,6,16,5,14,4,3,8,2,8,27,7,25,6,18,5,
+11,4,12,4,10,4,9,4,17,5,19,6,26,7,1,7,
+30,4,18,5,16,5,9,3,10,3,31,5,26,6,1,6,
+0,4,14,4,17,5,24,5,23,4,11,4,12,4,13,4,
+15,5,5,11,6,12,22,13,21,13,4,10,20,9,3,8,
+19,7,25,6,28,6,27,7,2,8,29,9,8,9,7,5,
+30,4,14,4,9,3,10,3,25,5,18,6,20,10,5,11,
+6,12,22,13,21,13,4,9,29,8,3,7,31,5,15,5,
+27,6,2,7,8,8,19,8,28,5,26,6,16,6,24,5,
+13,4,12,4,11,4,0,4,23,4,17,6,1,6,7,5,
+0,3,30,4,31,5,25,5,9,3,10,3,13,4,1,5,
+7,5,27,6,29,8,8,8,19,10,20,13,6,13,22,13,
+21,13,5,11,4,9,18,8,26,6,15,6,11,4,12,4,
+14,5,28,5,24,5,17,7,16,7,2,7,3,7,23,4,
+23,3,7,5,31,5,14,5,25,5,0,3,10,3,9,3,
+18,9,22,12,21,12,6,12,20,13,19,13,5,10,8,8,
+17,8,16,8,27,6,26,6,2,6,11,4,12,4,1,5,
+30,5,28,5,3,6,29,8,4,8,15,7,24,5,13,5,
+23,3,1,4,13,5,15,8,8,9,18,12,20,13,19,13,
+22,13,21,13,17,12,16,11,6,11,7,7,27,6,0,3,
+11,4,12,4,9,3,10,3,2,5,30,5,26,6,4,6,
+25,5,31,6,5,8,29,8,14,7,3,5,28,5,24,5,
+10,3,9,3,26,5,15,5,24,4,7,4,16,6,17,6,
+25,5,30,4,13,4,1,7,8,7,27,6,31,5,0,5,
+19,8,2,9,22,13,21,13,4,13,6,14,5,14,20,11,
+3,10,18,7,29,6,12,4,11,4,14,5,28,5,23,4,
+9,3,23,3,28,4,24,4,13,4,30,4,2,7,18,7,
+1,6,14,5,0,4,25,5,15,6,4,10,6,13,5,13,
+22,13,21,13,20,11,19,9,3,8,16,7,31,5,27,6,
+17,7,8,7,12,4,11,4,7,5,29,6,26,6,10,4,
+9,3,30,4,17,7,4,9,22,12,21,12,5,12,20,13,
+6,13,19,10,18,8,8,6,1,5,23,3,24,4,26,5,
+29,5,31,5,16,7,3,7,2,7,15,7,28,4,11,4,
+12,4,7,5,25,5,13,5,14,6,27,6,0,4,10,4,
+23,3,10,3,9,3,0,3,27,5,14,6,2,6,24,4,
+13,5,26,5,30,5,29,5,1,5,15,7,4,9,19,11,
+22,13,21,13,5,13,20,14,6,14,18,10,17,9,16,9,
+31,6,28,4,25,5,7,6,8,7,3,7,12,5,11,5,
+23,3,10,3,9,3,1,4,24,4,3,5,26,5,4,7,
+15,8,16,9,17,10,18,11,22,14,21,14,6,14,20,15,
+19,15,5,12,31,6,29,5,0,3,25,5,7,6,14,7,
+8,7,13,6,30,6,11,5,28,4,12,5,2,6,27,6,
+28,3,9,3,10,3,24,4,4,6,15,8,5,9,16,10,
+22,13,21,13,18,14,6,14,20,14,19,14,17,11,14,7,
+7,6,13,6,1,4,2,5,25,5,0,3,29,5,30,6,
+8,7,31,7,12,5,11,5,3,5,27,6,26,6,23,4,
+28,3,10,3,9,3,13,6,30,6,4,5,25,5,29,5,
+0,3,1,4,12,5,11,5,3,4,15,9,6,11,18,12,
+20,13,19,13,16,11,22,13,21,13,17,12,14,8,31,7,
+26,6,2,5,27,6,7,7,5,8,8,8,24,5,23,4,
+3,3,25,5,14,9,6,9,15,10,16,12,18,13,17,13,
+20,13,19,13,22,13,21,13,8,9,13,7,29,6,4,4,
+10,3,0,3,9,3,26,6,27,6,12,5,11,5,5,6,
+7,8,31,8,30,7,1,4,24,5,2,5,23,4,28,4,
+9,3,29,6,1,6,20,7,8,7,26,6,0,4,7,4,
+16,5,24,5,31,5,18,5,30,4,23,4,14,4,17,5,
+19,6,25,6,11,4,12,4,2,8,4,10,5,12,22,13,
+6,13,21,11,3,9,27,7,28,6,15,5,13,4,10,4,
+10,3,9,3,14,4,18,6,27,6,28,5,3,7,6,12,
+5,12,22,12,21,12,20,10,4,9,19,8,2,7,8,7,
+15,5,30,4,31,5,26,6,29,6,24,5,16,6,17,6,
+0,4,23,4,13,4,12,4,11,4,1,6,25,6,7,5,
+10,3,9,3,3,6,4,8,5,10,20,12,6,12,22,12,
+21,12,19,9,8,7,15,5,25,5,17,6,16,6,1,5,
+28,5,30,4,27,6,18,7,2,7,31,5,13,4,29,6,
+26,6,24,5,23,4,7,5,14,5,12,4,11,4,0,4,
+8,7,17,7,15,6,31,5,7,5,25,5,0,3,9,3,
+10,3,13,4,14,5,28,5,4,8,19,11,20,13,6,13,
+22,13,21,13,5,10,18,9,16,7,2,6,3,6,27,6,
+12,4,11,4,1,5,29,6,26,6,24,5,30,5,23,4,
+23,3,26,5,17,8,18,10,6,11,20,13,19,13,22,13,
+21,13,5,9,8,8,16,8,4,7,15,7,3,5,25,5,
+9,3,10,3,0,3,28,5,30,5,11,4,12,4,7,6,
+27,6,29,6,14,6,13,5,24,5,31,6,2,6,1,5,
+23,3,7,6,4,6,30,5,25,5,2,5,10,3,9,3,
+0,3,1,4,29,6,31,6,13,5,12,4,11,4,27,6,
+26,6,3,5,24,5,8,9,22,13,21,13,18,13,20,14,
+19,14,17,11,16,11,6,11,15,9,5,9,14,7,28,6,
+23,3,31,6,7,7,14,8,20,13,19,13,22,13,21,13,
+16,13,8,13,18,13,17,13,15,10,6,9,4,5,3,4,
+0,3,25,5,29,7,5,7,30,6,1,4,10,3,9,3,
+2,5,28,6,13,6,11,4,12,4,27,6,26,6,24,5,
+0,3,4,4,24,5,5,5,1,4,25,5,26,7,31,7,
+27,6,23,3,10,3,9,3,12,4,11,4,2,5,7,8,
+30,10,22,13,21,13,8,13,16,14,15,14,14,12,18,14,
+17,14,20,14,19,14,29,9,6,7,28,7,13,7,3,4,
+26,5,29,5,24,4,9,3,10,3,30,4,13,4,8,6,
+22,12,21,12,5,12,20,13,6,13,4,10,19,9,3,8,
+17,7,25,5,1,6,15,6,14,5,0,4,31,5,27,6,
+16,7,18,8,2,8,7,5,28,5,12,4,11,4,23,4,
+9,3,10,3,0,3,24,4,26,5,1,5,28,4,7,5,
+25,5,11,4,12,4,15,7,3,7,14,6,30,5,13,5,
+8,6,16,8,4,10,5,13,20,14,6,14,22,14,21,14,
+19,13,18,11,17,9,2,7,23,4,29,5,27,6,31,6,
+9,3,10,3,27,5,30,5,26,5,13,5,0,3,29,4,
+3,6,2,6,25,5,12,4,11,4,28,4,23,4,1,5,
+31,6,15,8,4,9,16,10,17,11,22,14,21,14,5,13,
+6,14,20,15,19,15,18,13,14,7,7,6,8,6,24,5,
+12,4,11,4,2,5,26,5,1,4,9,3,10,3,3,5,
+30,6,14,7,15,9,18,13,6,13,20,13,19,13,5,11,
+22,13,21,13,17,12,16,11,4,8,25,5,13,6,8,6,
+0,3,28,4,23,4,29,4,31,7,7,7,27,6,24,5,
+3,4,25,5,4,6,30,7,7,7,29,3,10,3,9,3,
+23,4,28,4,0,3,1,4,8,6,27,6,2,5,24,5,
+12,5,11,5,14,9,5,10,15,11,20,14,19,14,22,14,
+21,14,16,14,6,14,18,14,17,14,31,8,13,7,26,6,
+23,4,2,4,29,3,13,7,31,8,30,8,27,6,24,5,
+28,4,12,5,11,5,5,9,14,10,18,13,17,13,20,13,
+19,13,22,13,21,13,6,13,16,14,15,14,7,8,8,7,
+25,6,4,6,26,6,0,3,3,4,1,4,10,3,9,3,
+9,2,3,3,23,5,27,6,26,6,2,4,0,3,4,5,
+24,6,12,6,11,6,25,7,5,9,14,13,6,13,16,13,
+15,13,31,11,22,13,21,13,18,14,17,14,20,14,19,14,
+30,11,8,9,13,10,7,10,28,5,29,4,1,4,10,3,
+10,2,9,2,0,2,3,4,12,7,11,7,24,9,23,9,
+27,8,5,9,25,10,6,13,8,14,7,14,22,14,21,14,
+31,14,30,14,18,14,17,14,20,14,19,14,14,14,13,14,
+16,14,15,14,26,8,29,5,2,5,28,6,4,6,1,4,
+0,3,28,4,13,4,9,3,10,3,1,5,14,5,25,5,
+31,5,7,5,16,7,4,9,6,12,20,13,19,13,22,13,
+21,13,5,12,18,10,17,8,27,6,12,4,11,4,23,4,
+8,7,3,7,2,7,15,7,30,5,24,5,26,6,29,6,
+26,5,31,5,7,5,4,7,22,12,21,12,18,13,6,13,
+20,13,19,13,5,10,17,10,16,10,15,8,14,6,10,3,
+9,3,0,3,28,4,25,5,30,5,8,6,2,6,13,5,
+23,4,12,4,24,5,29,5,11,4,27,6,3,6,1,5,
+9,3,10,3,1,4,29,4,13,5,25,5,28,4,0,3,
+3,5,8,6,4,7,5,9,20,13,19,13,22,13,21,13,
+16,13,6,13,18,13,17,13,15,10,14,8,23,4,31,6,
+27,6,24,5,12,4,11,4,7,6,30,6,26,6,2,6,
+3,4,18,12,17,12,20,12,19,12,22,12,21,12,6,12,
+16,13,15,13,14,9,5,8,31,7,7,7,30,7,25,5,
+12,4,11,4,9,3,10,3,1,4,28,4,0,3,23,4,
+2,5,4,6,8,7,13,7,29,4,24,5,26,6,27,6,
+29,3,25,5,8,7,13,8,31,10,6,10,18,13,17,13,
+20,13,19,13,22,13,21,13,14,13,16,14,15,14,7,10,
+27,6,23,4,0,3,10,3,9,3,28,4,24,5,12,5,
+3,4,11,5,26,6,5,7,30,7,1,4,2,5,4,5,
+23,3,3,3,4,4,1,4,2,3,0,3,24,6,26,9,
+17,13,16,13,19,13,18,13,13,13,7,13,15,13,14,13,
+6,11,30,12,21,14,20,14,31,14,22,14,25,8,8,8,
+27,8,29,5,12,6,11,6,28,6,5,6,10,3,9,3,
+23,3,3,3,4,4,1,4,2,3,0,3,24,6,26,9,
+17,13,16,13,19,13,18,13,13,13,7,13,15,13,14,13,
+6,11,30,12,21,14,20,14,31,14,22,14,25,8,8,8,
+27,8,29,5,12,6,11,6,28,6,5,6,10,3,9,3,
+23,3,3,3,4,4,1,4,2,3,0,3,24,6,26,9,
+17,13,16,13,19,13,18,13,13,13,7,13,15,13,14,13,
+6,11,30,12,21,14,20,14,31,14,22,14,25,8,8,8,
+27,8,29,5,12,6,11,6,28,6,5,6,10,3,9,3,
+10,3,9,3,24,4,7,5,26,5,0,3,2,6,15,7,
+6,12,20,13,19,13,22,13,21,13,5,12,18,10,4,9,
+17,9,16,9,1,5,28,4,12,4,11,4,13,5,25,5,
+30,5,29,5,14,6,27,6,3,7,8,7,31,6,23,4,
+13,5,3,5,1,4,10,3,9,3,29,4,25,5,31,6,
+8,6,12,4,11,4,0,3,28,4,23,4,14,7,4,8,
+16,10,17,11,18,14,6,14,20,14,19,14,22,14,21,14,
+5,13,15,9,7,6,24,5,27,6,30,6,2,6,26,6,
+31,6,7,6,25,5,28,4,9,3,10,3,12,4,11,4,
+30,6,8,6,2,5,29,4,23,4,1,4,0,3,24,5,
+4,7,15,9,5,10,20,13,19,13,22,13,21,13,6,13,
+18,14,17,14,16,12,14,8,27,6,3,5,13,6,26,6,
+12,4,11,4,25,5,13,6,30,7,7,7,28,4,3,4,
+24,5,4,6,27,6,23,4,29,4,0,3,1,4,26,6,
+31,8,5,9,16,13,6,13,18,13,17,13,15,12,20,14,
+19,14,22,14,21,14,14,10,8,7,2,5,9,3,10,3,
+9,2,28,4,2,4,30,8,7,8,8,7,27,6,24,6,
+25,6,29,4,11,5,12,5,3,4,0,3,23,5,13,8,
+31,10,18,13,17,13,20,13,19,13,6,13,16,14,15,14,
+22,14,21,14,14,13,5,9,26,7,4,6,1,4,10,3,
+1,3,2,4,29,5,12,6,11,6,9,2,10,2,0,3,
+23,6,4,6,28,6,30,12,6,13,15,14,14,14,7,11,
+13,11,21,14,20,14,31,14,22,14,17,14,16,14,19,14,
+18,14,5,9,25,8,27,8,24,9,8,10,26,10,3,4,
+0,2,1,3,3,4,4,6,5,10,14,13,13,13,16,13,
+15,13,6,13,8,14,7,14,27,14,26,14,31,14,30,14,
+12,9,11,9,22,14,21,14,25,14,24,14,18,14,17,14,
+20,14,19,14,23,11,29,10,28,7,2,5,10,2,9,2,
+10,2,9,2,0,2,3,4,12,7,11,7,24,9,23,9,
+27,8,5,9,25,10,6,13,8,14,7,14,22,14,21,14,
+31,14,30,14,18,14,17,14,20,14,19,14,14,14,13,14,
+16,14,15,14,26,8,29,5,2,5,28,6,4,6,1,4);
+Var
+ VP3Pk: PEABuffer; VP3PkLen,VP3Pos,VP3End: LongInt;
+ VP3Theora,VP3Ver,VP3W,VP3H,VP3VisW,VP3VisH,VP3OffX,VP3OffYB,VP3CX,VP3CY,VP3PixFmt,VP3FpsN,VP3FpsD,VP3SarN,VP3SarD,VP3ColorSp: LongInt;
+ VP3Flip,VP3HaveTables,VP3HaveHdr,VP3Ready,VP3Key: Boolean;
+ VP3DcSc: Array[0..1,0..63] Of LongInt; VP3AcSc: Array[0..63] Of LongInt;
+ VP3BaseM: Array[0..383,0..63] Of Byte;
+ VP3QrCnt: Array[0..1,0..2] Of LongInt; VP3QrSize,VP3QrBase: Array[0..1,0..2,0..64] Of LongInt;
+ VP3FLim: Array[0..63] Of LongInt;
+ VP3Vlc: Array[0..79] Of TVP3Vlc; VP3SbV,VP3FrV,VP3ModeV,VP3MvV: TVP3Vlc;
+ VP3HuffN: Array[0..79] Of LongInt; VP3HuffL,VP3HuffS: Array[0..79,0..31] Of Byte;
+ VP3Qmat: Array[0..2,0..1,0..2,0..63] Of LongInt;
+ VP3Bound: Array[0..257] Of LongInt;
+ VP3Qps: Array[0..2] Of LongInt; VP3NQps: LongInt;
+ VP3SbW,VP3SbH,VP3SbCnt,VP3CSbW,VP3CSbH,VP3CSbCnt,VP3USb,VP3VSb,VP3MbW,VP3MbH,VP3MbCnt,VP3FragW,VP3FragH,VP3CFragW,VP3CFragH,VP3FragCnt,VP3FragStart1,VP3FragStart2,VP3SbTotal: LongInt;
+ VP3FragWd,VP3FragHt,VP3FragSt: Array[0..2] Of LongInt;
+ VP3Dc: PVP3Int; VP3Cm,VP3Qpi: PEABuffer; VP3SbFrag: PVP3Int; VP3SbCod,VP3MbCod: PEABuffer;
+ VP3Mv0,VP3Mv1: PVP3Int;
+ VP3Tok: PVP3Int; VP3TokP: Array[0..2,0..63] Of LongInt; VP3NCF: Array[0..2,0..63] Of LongInt; VP3CFL: PVP3Int; VP3CFLBase: Array[0..2] Of LongInt; VP3TotalCoded: LongInt;
+ VP3Cur,VP3Last,VP3Gold: Array[0..2] Of PEABuffer; VP3PW,VP3PH: Array[0..2] Of LongInt; VP3HaveGold,VP3HaveLast: Boolean;
+ VP3Alloc: Boolean; VP3Over: Boolean;
+ VP3Block: Array[0..63] Of LongInt;
+ VP3BadFrames,VP3GpShift: LongInt;
+
+Function VP3Sar(V: LongInt; N: LongInt): LongInt;
+Begin
+ If V>=0 Then VP3Sar:=V Shr N Else VP3Sar:=-1-((-1-V) Shr N);
+End;
+
+Function VP3W16(V: LongInt): LongInt;
+Begin
+ V:=V And $FFFF; If V>=$8000 Then V:=V-$10000; VP3W16:=V;
+End;
+
+Function VP3Clip(V: LongInt): LongInt;
+Begin
+ If V<0 Then VP3Clip:=0 Else If V>255 Then VP3Clip:=255 Else VP3Clip:=V;
+End;
+
+Function VP3Byte(I: LongInt): LongInt;
+Begin
+ If (I>=0) And (I<VP3PkLen) Then VP3Byte:=VP3Pk^[I] Else VP3Byte:=0;
+End;
+
+Function VP3Peek32: Int64;
+Var B,O: LongInt; V: Int64;
+Begin
+ B:=VP3Pos Shr 3; O:=VP3Pos And 7;
+ V:=(Int64(VP3Byte(B)) Shl 32) Or (Int64(VP3Byte(B+1)) Shl 24) Or (Int64(VP3Byte(B+2)) Shl 16) Or (Int64(VP3Byte(B+3)) Shl 8) Or Int64(VP3Byte(B+4));
+ VP3Peek32:=(V Shr (8-O)) And $FFFFFFFF;
+End;
+
+Function VP3Bits(N: LongInt): LongInt;
+Var V: Int64;
+Begin
+ If N<=0 Then Begin VP3Bits:=0; Exit; End;
+ V:=VP3Peek32 Shr (32-N); Inc(VP3Pos,N); VP3Bits:=V;
+End;
+
+Function VP3Bits32: Int64;
+Var V: Int64;
+Begin
+ V:=VP3Peek32; Inc(VP3Pos,32); VP3Bits32:=V;
+End;
+
+Function VP3Bit: LongInt;
+Begin
+ VP3Bit:=VP3Bits(1);
+End;
+
+Function VP3Left: LongInt;
+Begin
+ VP3Left:=VP3End-VP3Pos;
+End;
+
+Function VP3FixedMv(Idx: LongInt): LongInt;
+Var M: LongInt;
+Begin
+ If Idx<2 Then Begin VP3FixedMv:=0; Exit; End;
+ M:=Idx Shr 1;
+ If Odd(Idx) Then VP3FixedMv:=-M Else VP3FixedMv:=M;
+End;
+
+Procedure VP3VlcAdd(Var V: TVP3Vlc; Len,Sym: LongInt);
+Begin
+ If (Len<=0) Or (V.N>=64) Then Exit;
+ V.Len[V.N]:=Len; V.Sym[V.N]:=Sym; V.Code[V.N]:=V.Acc; Inc(V.N);
+ V.Acc:=V.Acc+(Int64(1) Shl (32-Len));
+End;
+
+Function VP3VlcGet(Var V: TVP3Vlc): LongInt;
+Var P: Int64; Lo,Hi,M: LongInt;
+Begin
+ VP3VlcGet:=-1;
+ If V.N=0 Then Exit;
+ P:=VP3Peek32;
+ If P<V.Code[0] Then Exit;
+ Lo:=0; Hi:=V.N-1;
+ While Lo<Hi Do Begin
+  M:=(Lo+Hi+1) Shr 1;
+  If V.Code[M]<=P Then Lo:=M Else Hi:=M-1;
+ End;
+ If P<V.Code[Lo]+(Int64(1) Shl (32-V.Len[Lo])) Then Begin
+  Inc(VP3Pos,V.Len[Lo]); VP3VlcGet:=V.Sym[Lo];
+ End;
+End;
+
+{ ---- constructions de tables ---- }
+Procedure VP3InitStatic;
+Var I: LongInt;
+Begin
+ VP3SbV.N:=0; VP3SbV.Acc:=0; For I:=0 To 33 Do VP3VlcAdd(VP3SbV,VP3SbLens[I],I+1);
+ VP3FrV.N:=0; VP3FrV.Acc:=0; For I:=0 To 29 Do VP3VlcAdd(VP3FrV,VP3FrLens[I],I);
+ VP3ModeV.N:=0; VP3ModeV.Acc:=0; For I:=0 To 7 Do VP3VlcAdd(VP3ModeV,VP3ModeLens[I],I);
+ VP3MvV.N:=0; VP3MvV.Acc:=0; For I:=0 To 62 Do VP3VlcAdd(VP3MvV,VP3MvTab[I*2+1],VP3MvTab[I*2]-31);
+End;
+
+Procedure VP3BuildCoefVlc;
+Var I,J: LongInt;
+Begin
+ For I:=0 To 79 Do Begin
+  VP3Vlc[I].N:=0; VP3Vlc[I].Acc:=0;
+  For J:=0 To VP3HuffN[I]-1 Do VP3VlcAdd(VP3Vlc[I],VP3HuffL[I,J],VP3HuffS[I,J]);
+ End;
+End;
+
+{ tables integrees de VP3 (version 'VP30' / 'VP31', pas de tables Theora) }
+Procedure VP3InitBuiltin;
+Var I,J,Inter,Plane: LongInt;
+Begin
+ For I:=0 To 63 Do Begin
+  VP3DcSc[0,I]:=VP3DcScale[I]; VP3DcSc[1,I]:=VP3DcScale[I]; VP3AcSc[I]:=VP3AcScale[I];
+  VP3BaseM[0,I]:=VP3IntraY[I]; VP3BaseM[1,I]:=VP3Chroma[I]; VP3BaseM[2,I]:=VP3Inter[I];
+  VP3FLim[I]:=VP3FilterLim[I];
+ End;
+ For Inter:=0 To 1 Do For Plane:=0 To 2 Do Begin
+  VP3QrCnt[Inter,Plane]:=1; VP3QrSize[Inter,Plane,0]:=63;
+  J:=2*Inter; If (Plane<>0) And (Inter=0) Then Inc(J);
+  VP3QrBase[Inter,Plane,0]:=J; VP3QrBase[Inter,Plane,1]:=J;
+ End;
+ For I:=0 To 79 Do Begin
+  VP3HuffN[I]:=32;
+  For J:=0 To 31 Do Begin VP3HuffS[I,J]:=VP3Bias[(I*32+J)*2]; VP3HuffL[I,J]:=VP3Bias[(I*32+J)*2+1]; End;
+ End;
+ VP3BuildCoefVlc;
+End;
+
+Procedure VP3Free;
+Var P: LongInt;
+Begin
+ If Not VP3Alloc Then Exit;
+ FreeMem(VP3Dc); FreeMem(VP3Cm); FreeMem(VP3Qpi); FreeMem(VP3SbFrag); FreeMem(VP3SbCod); FreeMem(VP3MbCod);
+ FreeMem(VP3Mv0); FreeMem(VP3Mv1); FreeMem(VP3Tok); FreeMem(VP3CFL);
+ For P:=0 To 2 Do Begin FreeMem(VP3Cur[P]); FreeMem(VP3Last[P]); FreeMem(VP3Gold[P]); End;
+ VP3Alloc:=False;
+End;
+
+{ geometrie et allocations (vp3_decode_init / allocate_tables) }
+Procedure VP3Setup;
+Var CW,CH,P,Sb,SbX,SbY,I,X,Y,J,YF,CF: LongInt;
+Begin
+ VP3Free;
+ VP3Ver:=VP3Ver;
+ If VP3PixFmt=0 Then Begin VP3CX:=1; VP3CY:=1; End Else If VP3PixFmt=2 Then Begin VP3CX:=1; VP3CY:=0; End Else Begin VP3CX:=0; VP3CY:=0; End;
+ VP3SbW:=(VP3W+31) Div 32; VP3SbH:=(VP3H+31) Div 32; VP3SbCnt:=VP3SbW*VP3SbH;
+ CW:=VP3W Shr VP3CX; CH:=VP3H Shr VP3CY;
+ VP3CSbW:=(CW+31) Div 32; VP3CSbH:=(CH+31) Div 32; VP3CSbCnt:=VP3CSbW*VP3CSbH;
+ VP3SbTotal:=VP3SbCnt+2*VP3CSbCnt; VP3USb:=VP3SbCnt; VP3VSb:=VP3USb+VP3CSbCnt;
+ VP3MbW:=(VP3W+15) Div 16; VP3MbH:=(VP3H+15) Div 16; VP3MbCnt:=VP3MbW*VP3MbH;
+ VP3FragW:=VP3W Div 8; VP3FragH:=VP3H Div 8; VP3CFragW:=VP3FragW Shr VP3CX; VP3CFragH:=VP3FragH Shr VP3CY;
+ YF:=VP3FragW*VP3FragH; CF:=VP3CFragW*VP3CFragH; VP3FragCnt:=YF+2*CF;
+ VP3FragStart1:=YF; VP3FragStart2:=YF+CF;
+ VP3FragWd[0]:=VP3FragW; VP3FragHt[0]:=VP3FragH; VP3FragSt[0]:=0;
+ VP3FragWd[1]:=VP3CFragW; VP3FragHt[1]:=VP3CFragH; VP3FragSt[1]:=YF;
+ VP3FragWd[2]:=VP3CFragW; VP3FragHt[2]:=VP3CFragH; VP3FragSt[2]:=YF+CF;
+ GetMem(VP3Dc,Int64(VP3FragCnt)*4+16); GetMem(VP3Cm,VP3FragCnt+16); GetMem(VP3Qpi,VP3FragCnt+16);
+ GetMem(VP3SbFrag,Int64(VP3SbTotal)*64+64); GetMem(VP3SbCod,VP3SbTotal+VP3MbCnt*3+16); GetMem(VP3MbCod,VP3MbCnt+16);
+ GetMem(VP3Mv0,Int64(YF)*8+16); GetMem(VP3Mv1,Int64(CF+1)*8+16);
+ GetMem(VP3Tok,Int64(VP3FragCnt)*64*4+64); GetMem(VP3CFL,Int64(VP3FragCnt)*4+16);
+ FillChar(VP3Mv0^,YF*8,0); FillChar(VP3Mv1^,CF*8,0);
+ VP3PW[0]:=VP3W; VP3PH[0]:=VP3H; VP3PW[1]:=CW; VP3PH[1]:=CH; VP3PW[2]:=CW; VP3PH[2]:=CH;
+ For P:=0 To 2 Do Begin
+  GetMem(VP3Cur[P],Int64(VP3PW[P])*VP3PH[P]+64); GetMem(VP3Last[P],Int64(VP3PW[P])*VP3PH[P]+64); GetMem(VP3Gold[P],Int64(VP3PW[P])*VP3PH[P]+64);
+  FillChar(VP3Cur[P]^,VP3PW[P]*VP3PH[P],0); FillChar(VP3Last[P]^,VP3PW[P]*VP3PH[P],0); FillChar(VP3Gold[P]^,VP3PW[P]*VP3PH[P],0);
+ End;
+ VP3Alloc:=True; VP3HaveGold:=False; VP3HaveLast:=False;
+ { init_block_mapping }
+ J:=0;
+ For P:=0 To 2 Do Begin
+  If P=0 Then Begin SbX:=VP3SbW; SbY:=VP3SbH; End Else Begin SbX:=VP3CSbW; SbY:=VP3CSbH; End;
+  For Y:=0 To SbY-1 Do For X:=0 To SbX-1 Do For I:=0 To 15 Do Begin
+   Sb:=4*X+VP3HilX[I]; CF:=4*Y+VP3HilY[I];
+   If (Sb<VP3FragWd[P]) And (CF<VP3FragHt[P]) Then VP3SbFrag^[J]:=VP3FragSt[P]+CF*VP3FragWd[P]+Sb Else VP3SbFrag^[J]:=-1;
+   Inc(J);
+  End;
+ End;
+End;
+
+{ init_dequantizer pour tous les qpi }
+Procedure VP3InitDequant;
+Var Qpi,Inter,Plane,Sum,Bmi,Bmj,Qistart,Qri,I,Coeff,Qmin,Qscale,Qbias,Dcs,Ac,Q: LongInt;
+Begin
+ For Qpi:=0 To VP3NQps-1 Do Begin
+  Q:=VP3Qps[Qpi]; Ac:=VP3AcSc[Q];
+  For Inter:=0 To 1 Do For Plane:=0 To 2 Do Begin
+   If Plane<>0 Then Dcs:=VP3DcSc[1,Q] Else Dcs:=VP3DcSc[0,Q];
+   Sum:=0; Qri:=0;
+   While Qri<VP3QrCnt[Inter,Plane] Do Begin
+    Inc(Sum,VP3QrSize[Inter,Plane,Qri]);
+    If Q<=Sum Then Break;
+    Inc(Qri);
+   End;
+   Qistart:=Sum-VP3QrSize[Inter,Plane,Qri];
+   Bmi:=VP3QrBase[Inter,Plane,Qri]; Bmj:=VP3QrBase[Inter,Plane,Qri+1];
+   For I:=0 To 63 Do Begin
+    If VP3QrSize[Inter,Plane,Qri]=0 Then Coeff:=0
+    Else Coeff:=(2*(Sum-Q)*VP3BaseM[Bmi,I]-2*(Qistart-Q)*VP3BaseM[Bmj,I]+VP3QrSize[Inter,Plane,Qri]) Div (2*VP3QrSize[Inter,Plane,Qri]);
+    Qmin:=8 Shl (Inter+Ord(I=0));
+    If I<>0 Then Qscale:=Ac Else Qscale:=Dcs;
+    Coeff:=(Int64(Qscale)*Coeff) Div 100*4;
+    If Coeff<Qmin Then Coeff:=Qmin;
+    If Coeff>4096 Then Coeff:=4096;
+    VP3Qmat[Qpi,Inter,Plane,(I Shr 3) Or ((I And 7) Shl 3)]:=Coeff;
+   End;
+  End;
+ End;
+ { chaque DC utilise la quantification du premier qpi }
+ For Qpi:=1 To VP3NQps-1 Do For Inter:=0 To 1 Do For Plane:=0 To 2 Do VP3Qmat[Qpi,Inter,Plane,0]:=VP3Qmat[0,Inter,Plane,0];
+End;
+
+{ unpack_superblocks ; retourne 0 ou -1 }
+Function VP3UnpackSB: LongInt;
+Var
+ Bit,CurSb,CurRun,NumPartial,Plane,SbStart,SbEnd,I,J,K,CurFrag,NumCoded,Plane0Num,Dec1,Coded,SbDone: LongInt;
+ Starts: Array[0..2] Of LongInt;
+Begin
+ VP3UnpackSB:=-1;
+ Starts[0]:=0; Starts[1]:=VP3USb; Starts[2]:=VP3VSb;
+ Bit:=0; CurSb:=0; CurRun:=0; NumPartial:=0; Plane0Num:=0;
+ If VP3Key Then FillChar(VP3SbCod^,VP3SbTotal,2)
+ Else Begin
+  Bit:=VP3Bit Xor 1; CurRun:=0;
+  While (CurSb<VP3SbTotal) And (VP3Left>0) Do Begin
+   If (VP3Theora<>0) And (CurRun=4129) Then Bit:=VP3Bit Else Bit:=Bit Xor 1;
+   CurRun:=VP3VlcGet(VP3SbV);
+   If CurRun=34 Then Inc(CurRun,VP3Bits(12));
+   If CurRun>VP3SbTotal-CurSb Then Exit;
+   FillChar(VP3SbCod^[CurSb],CurRun,Bit);
+   Inc(CurSb,CurRun);
+   If Bit<>0 Then Inc(NumPartial,CurRun);
+  End;
+  If NumPartial<VP3SbTotal Then Begin
+   SbDone:=0; CurSb:=0; Bit:=VP3Bit Xor 1; CurRun:=0;
+   While (SbDone<VP3SbTotal-NumPartial) And (VP3Left>0) Do Begin
+    If (VP3Theora<>0) And (CurRun=4129) Then Bit:=VP3Bit Else Bit:=Bit Xor 1;
+    CurRun:=VP3VlcGet(VP3SbV);
+    If CurRun=34 Then Inc(CurRun,VP3Bits(12));
+    J:=0;
+    While J<CurRun Do Begin
+     If CurSb>=VP3SbTotal Then Exit;
+     If VP3SbCod^[CurSb]=0 Then Begin VP3SbCod^[CurSb]:=2*Bit; Inc(J); End;
+     Inc(CurSb);
+    End;
+    Inc(SbDone,CurRun);
+   End;
+  End;
+  If NumPartial<>0 Then Begin
+   CurRun:=0; Bit:=VP3Bit; Bit:=Bit Xor 1;
+  End;
+ End;
+ FillChar(VP3MbCod^,VP3MbCnt,8);
+ NumCoded:=0;
+ VP3CFLBase[0]:=0;
+ VP3TotalCoded:=0;
+ For Plane:=0 To 2 Do Begin
+  SbStart:=Starts[Plane];
+  If Plane<>0 Then SbEnd:=SbStart+VP3CSbCnt Else SbEnd:=SbStart+VP3SbCnt;
+  NumCoded:=0;
+  If VP3Key Then Begin
+   For I:=SbStart To SbEnd-1 Do For J:=0 To 15 Do Begin
+    CurFrag:=VP3SbFrag^[I*16+J];
+    If CurFrag<>-1 Then Begin VP3CFL^[VP3CFLBase[Plane]+NumCoded]:=CurFrag; Inc(NumCoded); End;
+   End;
+  End Else Begin
+   I:=SbStart;
+   While (I<SbEnd) And (VP3Left>0) Do Begin
+    If VP3Left<(Plane0Num Shr 2) Then Exit;
+    For J:=0 To 15 Do Begin
+     CurFrag:=VP3SbFrag^[I*16+J];
+     If CurFrag<>-1 Then Begin
+      Coded:=VP3SbCod^[I];
+      If Coded=1 Then Begin
+       K:=CurRun; Dec(CurRun);
+       If K=0 Then Begin Bit:=Bit Xor 1; CurRun:=VP3VlcGet(VP3FrV); End;
+       Coded:=Bit;
+      End;
+      If Coded<>0 Then Begin
+       VP3Cm^[CurFrag]:=0;
+       VP3CFL^[VP3CFLBase[Plane]+NumCoded]:=CurFrag; Inc(NumCoded);
+      End Else VP3Cm^[CurFrag]:=8;
+     End;
+    End;
+    Inc(I);
+   End;
+  End;
+  If Plane=0 Then Plane0Num:=NumCoded;
+  Inc(VP3TotalCoded,NumCoded);
+  For I:=0 To 63 Do VP3NCF[Plane,I]:=NumCoded;
+  If Plane<2 Then VP3CFLBase[Plane+1]:=VP3CFLBase[Plane]+NumCoded;
+ End;
+ VP3UnpackSB:=0;
+End;
+
+{ unpack_modes }
+Function VP3UnpackModes: LongInt;
+Var
+ Scheme,I,SbX,SbY,J,K,MbX,MbY,CurMb,CurFrag,Mode,Fr,Alpha: LongInt; Custom: Array[0..7] Of LongInt; Bx,By: LongInt;
+Procedure SetChroma(F: LongInt);
+Begin
+ If VP3Cm^[VP3FragStart1+F]<>8 Then VP3Cm^[VP3FragStart1+F]:=Mode;
+ If VP3Cm^[VP3FragStart2+F]<>8 Then VP3Cm^[VP3FragStart2+F]:=Mode;
+End;
+Begin
+ VP3UnpackModes:=-1;
+ If VP3Key Then Begin
+  For I:=0 To VP3FragCnt-1 Do VP3Cm^[I]:=1;
+ End Else Begin
+  Scheme:=VP3Bits(3);
+  If Scheme=0 Then Begin
+   For I:=0 To 7 Do Custom[I]:=0;
+   For I:=0 To 7 Do Custom[VP3Bits(3)]:=I;
+  End;
+  For SbY:=0 To VP3SbH-1 Do For SbX:=0 To VP3SbW-1 Do Begin
+   If VP3Left<=0 Then Exit;
+   For J:=0 To 3 Do Begin
+    MbX:=2*SbX+(J Shr 1); MbY:=2*SbY+(((J Shr 1)+J) And 1);
+    CurMb:=MbY*VP3MbW+MbX;
+    If (MbX>=VP3MbW) Or (MbY>=VP3MbH) Then Continue;
+    K:=0;
+    While K<4 Do Begin
+     Bx:=2*MbX+(K And 1); By:=2*MbY+(K Shr 1);
+     If VP3Cm^[By*VP3FragW+Bx]<>8 Then Break;
+     Inc(K);
+    End;
+    If K=4 Then Begin VP3MbCod^[CurMb]:=0; Continue; End;
+    If Scheme=7 Then Mode:=VP3Bits(3)
+    Else Begin
+     Fr:=VP3VlcGet(VP3ModeV);
+     If Fr<0 Then Fr:=0;
+     If Scheme=0 Then Mode:=Custom[Fr] Else Mode:=VP3Alpha[Scheme-1,Fr];
+    End;
+    VP3MbCod^[CurMb]:=Mode;
+    For K:=0 To 3 Do Begin
+     Bx:=2*MbX+(K And 1); By:=2*MbY+(K Shr 1);
+     Fr:=By*VP3FragW+Bx;
+     If VP3Cm^[Fr]<>8 Then VP3Cm^[Fr]:=Mode;
+    End;
+    If VP3CY<>0 Then SetChroma(MbY*VP3CFragW+MbX)
+    Else If VP3CX<>0 Then Begin
+     Fr:=2*MbY*VP3CFragW+MbX;
+     For K:=0 To 1 Do Begin SetChroma(Fr); Inc(Fr,VP3CFragW); End;
+    End Else Begin
+     For K:=0 To 3 Do Begin
+      Bx:=2*MbX+(K And 1); By:=2*MbY+(K Shr 1);
+      SetChroma(By*VP3CFragW+Bx);
+     End;
+    End;
+   End;
+  End;
+ End;
+ VP3UnpackModes:=0;
+End;
+
+Function VP3Rsh(A,B: LongInt): LongInt;
+Begin
+ If A>0 Then VP3Rsh:=VP3Sar(A+((1 Shl B) Shr 1),B) Else VP3Rsh:=VP3Sar(A+((1 Shl B) Shr 1)-1,B);
+End;
+
+{ unpack_vectors }
+Function VP3UnpackVectors: LongInt;
+Var
+ CodingMode,SbX,SbY,J,K,MbX,MbY,CurMb,CurFrag,Frag,Mode: LongInt;
+ Mx,My: Array[0..3] Of LongInt; LastX,LastY,PriorX,PriorY: LongInt; Bx,By: LongInt;
+Begin
+ VP3UnpackVectors:=-1;
+ If VP3Key Then Begin VP3UnpackVectors:=0; Exit; End;
+ CodingMode:=VP3Bit;
+ LastX:=0; LastY:=0; PriorX:=0; PriorY:=0;
+ For K:=0 To 3 Do Begin Mx[K]:=0; My[K]:=0; End;
+ For SbY:=0 To VP3SbH-1 Do For SbX:=0 To VP3SbW-1 Do Begin
+  If VP3Left<=0 Then Exit;
+  For J:=0 To 3 Do Begin
+   MbX:=2*SbX+(J Shr 1); MbY:=2*SbY+(((J Shr 1)+J) And 1);
+   CurMb:=MbY*VP3MbW+MbX;
+   If (MbX>=VP3MbW) Or (MbY>=VP3MbH) Then Continue;
+   If VP3MbCod^[CurMb]=8 Then Continue;
+   Mode:=VP3MbCod^[CurMb];
+   Case Mode Of
+    6,2: Begin
+     If CodingMode=0 Then Begin
+      Mx[0]:=VP3VlcGet(VP3MvV); My[0]:=VP3VlcGet(VP3MvV);
+     End Else Begin
+      Mx[0]:=VP3FixedMv(VP3Bits(6)); My[0]:=VP3FixedMv(VP3Bits(6));
+     End;
+     If Mode=2 Then Begin PriorX:=LastX; PriorY:=LastY; LastX:=Mx[0]; LastY:=My[0]; End;
+    End;
+    7: Begin
+     PriorX:=LastX; PriorY:=LastY;
+     For K:=0 To 3 Do Begin
+      Bx:=2*MbX+(K And 1); By:=2*MbY+(K Shr 1);
+      CurFrag:=By*VP3FragW+Bx;
+      If VP3Cm^[CurFrag]<>8 Then Begin
+       If CodingMode=0 Then Begin
+        Mx[K]:=VP3VlcGet(VP3MvV); My[K]:=VP3VlcGet(VP3MvV);
+       End Else Begin
+        Mx[K]:=VP3FixedMv(VP3Bits(6)); My[K]:=VP3FixedMv(VP3Bits(6));
+       End;
+       LastX:=Mx[K]; LastY:=My[K];
+      End Else Begin Mx[K]:=0; My[K]:=0; End;
+     End;
+    End;
+    3: Begin Mx[0]:=LastX; My[0]:=LastY; End;
+    4: Begin
+     Mx[0]:=PriorX; My[0]:=PriorY;
+     PriorX:=LastX; PriorY:=LastY; LastX:=Mx[0]; LastY:=My[0];
+    End;
+    Else Begin Mx[0]:=0; My[0]:=0; End;
+   End;
+   For K:=0 To 3 Do Begin
+    Bx:=2*MbX+(K And 1); By:=2*MbY+(K Shr 1);
+    CurFrag:=By*VP3FragW+Bx;
+    If Mode=7 Then Begin VP3Mv0^[CurFrag*2]:=Mx[K]; VP3Mv0^[CurFrag*2+1]:=My[K]; End
+    Else Begin VP3Mv0^[CurFrag*2]:=Mx[0]; VP3Mv0^[CurFrag*2+1]:=My[0]; End;
+   End;
+   If VP3CY<>0 Then Begin
+    If Mode=7 Then Begin
+     Mx[0]:=VP3Rsh(Mx[0]+Mx[1]+Mx[2]+Mx[3],2); My[0]:=VP3Rsh(My[0]+My[1]+My[2]+My[3],2);
+    End;
+    If VP3Ver<=2 Then Begin
+     Mx[0]:=VP3Sar(Mx[0],1) Or (Mx[0] And 1); My[0]:=VP3Sar(My[0],1) Or (My[0] And 1);
+    End;
+    Frag:=MbY*VP3CFragW+MbX;
+    VP3Mv1^[Frag*2]:=Mx[0]; VP3Mv1^[Frag*2+1]:=My[0];
+   End Else If VP3CX<>0 Then Begin
+    If Mode=7 Then Begin
+     Mx[0]:=VP3Rsh(Mx[0]+Mx[1],1); My[0]:=VP3Rsh(My[0]+My[1],1);
+     Mx[1]:=VP3Rsh(Mx[2]+Mx[3],1); My[1]:=VP3Rsh(My[2]+My[3],1);
+    End Else Begin Mx[1]:=Mx[0]; My[1]:=My[0]; End;
+    If VP3Ver<=2 Then Begin
+     Mx[0]:=VP3Sar(Mx[0],1) Or (Mx[0] And 1); Mx[1]:=VP3Sar(Mx[1],1) Or (Mx[1] And 1);
+    End;
+    Frag:=2*MbY*VP3CFragW+MbX;
+    For K:=0 To 1 Do Begin
+     VP3Mv1^[Frag*2]:=Mx[K]; VP3Mv1^[Frag*2+1]:=My[K];
+     Inc(Frag,VP3CFragW);
+    End;
+   End Else Begin
+    For K:=0 To 3 Do Begin
+     Bx:=2*MbX+(K And 1); By:=2*MbY+(K Shr 1);
+     Frag:=By*VP3CFragW+Bx;
+     If Mode=7 Then Begin VP3Mv1^[Frag*2]:=Mx[K]; VP3Mv1^[Frag*2+1]:=My[K]; End
+     Else Begin VP3Mv1^[Frag*2]:=Mx[0]; VP3Mv1^[Frag*2+1]:=My[0]; End;
+    End;
+   End;
+  End;
+ End;
+ VP3UnpackVectors:=0;
+End;
+
+{ unpack_block_qpis }
+Function VP3UnpackQpis: LongInt;
+Var NumBlocks,Qpi,I,BlocksDecoded,NumAtQpi,Bit,RunLen,J,F: LongInt;
+Begin
+ VP3UnpackQpis:=-1;
+ NumBlocks:=VP3TotalCoded;
+ Qpi:=0;
+ While (Qpi<VP3NQps-1) And (NumBlocks>0) Do Begin
+  I:=0; BlocksDecoded:=0; NumAtQpi:=0;
+  Bit:=VP3Bit Xor 1; RunLen:=0;
+  Repeat
+   If RunLen=4129 Then Bit:=VP3Bit Else Bit:=Bit Xor 1;
+   RunLen:=VP3VlcGet(VP3SbV);
+   If RunLen=34 Then Inc(RunLen,VP3Bits(12));
+   Inc(BlocksDecoded,RunLen);
+   If Bit=0 Then Inc(NumAtQpi,RunLen);
+   J:=0;
+   While J<RunLen Do Begin
+    If I>=VP3TotalCoded Then Exit;
+    F:=VP3CFL^[I];
+    If VP3Qpi^[F]=Qpi Then Begin VP3Qpi^[F]:=VP3Qpi^[F]+Bit; Inc(J); End;
+    Inc(I);
+   End;
+  Until Not ((BlocksDecoded<NumBlocks) And (VP3Left>0));
+  Dec(NumBlocks,NumAtQpi);
+  Inc(Qpi);
+ End;
+ VP3UnpackQpis:=0;
+End;
+
+{ unpack_vlcs : retourne l'eob_run residuel, ou -1 }
+Function VP3UnpackVlcs(Tbl,CoeffIndex,Plane,EobRun: LongInt): LongInt;
+Var
+ J,Token,ZeroRun,Coeff,BlocksEnded,CoeffI,NumCoeffs,TokBase,N,Bits,I,CfBase: LongInt;
+Begin
+ VP3UnpackVlcs:=-1;
+ J:=0; CoeffI:=0; ZeroRun:=0; Coeff:=0;
+ NumCoeffs:=VP3NCF[Plane,CoeffIndex];
+ TokBase:=VP3TokP[Plane,CoeffIndex];
+ CfBase:=VP3CFLBase[Plane];
+ If NumCoeffs<0 Then Exit;
+ If EobRun>NumCoeffs Then Begin
+  CoeffI:=NumCoeffs; BlocksEnded:=NumCoeffs; Dec(EobRun,NumCoeffs);
+ End Else Begin
+  CoeffI:=EobRun; BlocksEnded:=EobRun; EobRun:=0;
+ End;
+ If BlocksEnded<>0 Then Begin VP3Tok^[TokBase+J]:=VP3W16(BlocksEnded Shl 2); Inc(J); End;
+ While (CoeffI<NumCoeffs) And (VP3Left>0) Do Begin
+  Token:=VP3VlcGet(VP3Vlc[Tbl]);
+  If (Token>=0) And (Token<=6) Then Begin
+   EobRun:=VP3EobBase[Token];
+   If VP3EobBits[Token]<>0 Then Inc(EobRun,VP3Bits(VP3EobBits[Token]));
+   If EobRun=0 Then EobRun:=2147483647;
+   If EobRun>NumCoeffs-CoeffI Then Begin
+    VP3Tok^[TokBase+J]:=VP3W16((NumCoeffs-CoeffI) Shl 2); Inc(J);
+    Inc(BlocksEnded,NumCoeffs-CoeffI);
+    Dec(EobRun,NumCoeffs-CoeffI);
+    CoeffI:=NumCoeffs;
+   End Else Begin
+    VP3Tok^[TokBase+J]:=VP3W16(EobRun Shl 2); Inc(J);
+    Inc(BlocksEnded,EobRun);
+    Inc(CoeffI,EobRun);
+    EobRun:=0;
+   End;
+  End Else If Token>=0 Then Begin
+   { get_coeff }
+   Bits:=VP3CfBits[Token];
+   If Bits<>0 Then Bits:=VP3Bits(Bits);
+   If VP3CfBits[Token]=0 Then Coeff:=VP3CfBase[Token]
+   Else Begin
+    N:=VP3CfBits[Token]-1;
+    Coeff:=VP3CfBase[Token]+(Bits And ((1 Shl N)-1));
+    If (Bits Shr N)<>0 Then Coeff:=-Coeff;
+   End;
+   ZeroRun:=VP3ZrBase[Token];
+   If VP3ZrBits[Token]<>0 Then Inc(ZeroRun,VP3Bits(VP3ZrBits[Token]));
+   If ZeroRun<>0 Then Begin
+    VP3Tok^[TokBase+J]:=VP3W16(Coeff*512+(ZeroRun Shl 2)+1); Inc(J);
+   End Else Begin
+    If CoeffIndex=0 Then VP3Dc^[VP3CFL^[CfBase+CoeffI]]:=Coeff;
+    VP3Tok^[TokBase+J]:=VP3W16(Coeff*4+2); Inc(J);
+   End;
+   If CoeffIndex+ZeroRun>64 Then ZeroRun:=64-CoeffIndex;
+   For I:=CoeffIndex+1 To CoeffIndex+ZeroRun Do Dec(VP3NCF[Plane,I]);
+   Inc(CoeffI);
+  End Else Exit;
+ End;
+ If BlocksEnded<>0 Then
+  For I:=CoeffIndex+1 To 63 Do Dec(VP3NCF[Plane,I],BlocksEnded);
+ If Plane<2 Then VP3TokP[Plane+1,CoeffIndex]:=TokBase+J
+ Else If CoeffIndex<63 Then VP3TokP[0,CoeffIndex+1]:=TokBase+J;
+ VP3UnpackVlcs:=EobRun;
+End;
+
+Procedure VP3ReverseDcPred(FirstFrag,FragWidth,FragHeight: LongInt);
+Var
+ I,X,Y,PredictedDc,Vl,Vul,Vu,Vur,L,Ul,U,Ur,CurType,Transform: LongInt; LastDc: Array[0..2] Of LongInt;
+Function Compat(F: LongInt): Boolean;
+Begin Compat:=VP3Compat[VP3Cm^[F]]=CurType; End;
+Begin
+ I:=FirstFrag; Vl:=0; Vu:=0; Vul:=0; Vur:=0; Transform:=0;
+ LastDc[0]:=0; LastDc[1]:=0; LastDc[2]:=0;
+ For Y:=0 To FragHeight-1 Do Begin
+  For X:=0 To FragWidth-1 Do Begin
+   If VP3Cm^[I]<>8 Then Begin
+    CurType:=VP3Compat[VP3Cm^[I]];
+    Transform:=0;
+    If X<>0 Then Begin
+     L:=I-1; Vl:=VP3Dc^[L];
+     If Compat(L) Then Transform:=Transform Or 1;
+    End;
+    If Y<>0 Then Begin
+     U:=I-FragWidth; Vu:=VP3Dc^[U];
+     If Compat(U) Then Transform:=Transform Or 4;
+     If X<>0 Then Begin
+      Ul:=I-FragWidth-1; Vul:=VP3Dc^[Ul];
+      If Compat(Ul) Then Transform:=Transform Or 8;
+     End;
+     If X+1<FragWidth Then Begin
+      Ur:=I-FragWidth+1; Vur:=VP3Dc^[Ur];
+      If Compat(Ur) Then Transform:=Transform Or 2;
+     End;
+    End;
+    If Transform=0 Then PredictedDc:=LastDc[CurType]
+    Else Begin
+     PredictedDc:=VP3PredT[Transform,0]*Vul+VP3PredT[Transform,1]*Vu+VP3PredT[Transform,2]*Vur+VP3PredT[Transform,3]*Vl;
+     PredictedDc:=PredictedDc Div 128;
+     If (Transform=15) Or (Transform=13) Then Begin
+      If Abs(PredictedDc-Vu)>128 Then PredictedDc:=Vu
+      Else If Abs(PredictedDc-Vl)>128 Then PredictedDc:=Vl
+      Else If Abs(PredictedDc-Vul)>128 Then PredictedDc:=Vul;
+     End;
+    End;
+    VP3Dc^[I]:=VP3W16(VP3Dc^[I]+PredictedDc);
+    LastDc[CurType]:=VP3Dc^[I];
+   End;
+   Inc(I);
+  End;
+ End;
+End;
+
+{ unpack_dct_coeffs }
+Function VP3UnpackDct: LongInt;
+Var DcY,DcC,AcY,AcC,Resid,I,Tb: LongInt; YT,CT: Array[0..63] Of LongInt;
+Begin
+ VP3UnpackDct:=-1;
+ Resid:=0;
+ VP3TokP[0,0]:=0;
+ If VP3Left<16 Then Exit;
+ DcY:=VP3Bits(4); DcC:=VP3Bits(4);
+ Resid:=VP3UnpackVlcs(DcY,0,0,Resid);
+ If Resid<0 Then Exit;
+ If VP3Left<8 Then Exit;
+ VP3ReverseDcPred(0,VP3FragWd[0],VP3FragHt[0]);
+ Resid:=VP3UnpackVlcs(DcC,0,1,Resid);
+ If Resid<0 Then Exit;
+ Resid:=VP3UnpackVlcs(DcC,0,2,Resid);
+ If Resid<0 Then Exit;
+ VP3ReverseDcPred(VP3FragStart1,VP3FragWd[1],VP3FragHt[1]);
+ VP3ReverseDcPred(VP3FragStart2,VP3FragWd[1],VP3FragHt[1]);
+ If VP3Left<8 Then Exit;
+ AcY:=VP3Bits(4); AcC:=VP3Bits(4);
+ For I:=1 To 5 Do Begin YT[I]:=AcY+16; CT[I]:=AcC+16; End;
+ For I:=6 To 14 Do Begin YT[I]:=AcY+32; CT[I]:=AcC+32; End;
+ For I:=15 To 27 Do Begin YT[I]:=AcY+48; CT[I]:=AcC+48; End;
+ For I:=28 To 63 Do Begin YT[I]:=AcY+64; CT[I]:=AcC+64; End;
+ For I:=1 To 63 Do Begin
+  Resid:=VP3UnpackVlcs(YT[I],I,0,Resid);
+  If Resid<0 Then Exit;
+  Resid:=VP3UnpackVlcs(CT[I],I,1,Resid);
+  If Resid<0 Then Exit;
+  Resid:=VP3UnpackVlcs(CT[I],I,2,Resid);
+  If Resid<0 Then Exit;
+ End;
+ VP3UnpackDct:=0;
+End;
+
+Function VP3M(A,B: LongInt): LongInt;
+Var P: Int64;
+Begin
+ P:=Int64(A)*B;
+ P:=P And $FFFFFFFF; If P>=$80000000 Then P:=P-$100000000;
+ VP3M:=VP3Sar(LongInt(P),16);
+End;
+
+{ idct de vp3dsp.c : Typ=1 ecriture, Typ=2 addition ; le bloc est remis a zero }
+Procedure VP3Idct(Dst: PEABuffer; Off,Stride,Typ: LongInt);
+Var
+ I,K,A,B,C,D,Ad,Bd,Cd,Dd,E,F,G,H,Ed,Gd,Add,Bdd,Fd,Hd,V,X: LongInt; O: Array[0..7] Of LongInt;
+Begin
+ For I:=0 To 7 Do Begin
+  If (VP3Block[I] Or VP3Block[I+8] Or VP3Block[I+16] Or VP3Block[I+24] Or VP3Block[I+32] Or VP3Block[I+40] Or VP3Block[I+48] Or VP3Block[I+56])<>0 Then Begin
+   A:=VP3M(64277,VP3Block[I+8])+VP3M(12785,VP3Block[I+56]);
+   B:=VP3M(12785,VP3Block[I+8])-VP3M(64277,VP3Block[I+56]);
+   C:=VP3M(54491,VP3Block[I+24])+VP3M(36410,VP3Block[I+40]);
+   D:=VP3M(54491,VP3Block[I+40])-VP3M(36410,VP3Block[I+24]);
+   Ad:=VP3M(46341,A-C); Bd:=VP3M(46341,B-D);
+   Cd:=A+C; Dd:=B+D;
+   E:=VP3M(46341,VP3Block[I]+VP3Block[I+32]);
+   F:=VP3M(46341,VP3Block[I]-VP3Block[I+32]);
+   G:=VP3M(60547,VP3Block[I+16])+VP3M(25080,VP3Block[I+48]);
+   H:=VP3M(25080,VP3Block[I+16])-VP3M(60547,VP3Block[I+48]);
+   Ed:=E-G; Gd:=E+G; Add:=F+Ad; Bdd:=Bd-H; Fd:=F-Ad; Hd:=Bd+H;
+   VP3Block[I]:=VP3W16(Gd+Cd); VP3Block[I+56]:=VP3W16(Gd-Cd);
+   VP3Block[I+8]:=VP3W16(Add+Hd); VP3Block[I+16]:=VP3W16(Add-Hd);
+   VP3Block[I+24]:=VP3W16(Ed+Dd); VP3Block[I+32]:=VP3W16(Ed-Dd);
+   VP3Block[I+40]:=VP3W16(Fd+Bdd); VP3Block[I+48]:=VP3W16(Fd-Bdd);
+  End;
+ End;
+ For I:=0 To 7 Do Begin
+  K:=I*8;
+  If (VP3Block[K+1] Or VP3Block[K+2] Or VP3Block[K+3] Or VP3Block[K+4] Or VP3Block[K+5] Or VP3Block[K+6] Or VP3Block[K+7])<>0 Then Begin
+   A:=VP3M(64277,VP3Block[K+1])+VP3M(12785,VP3Block[K+7]);
+   B:=VP3M(12785,VP3Block[K+1])-VP3M(64277,VP3Block[K+7]);
+   C:=VP3M(54491,VP3Block[K+3])+VP3M(36410,VP3Block[K+5]);
+   D:=VP3M(54491,VP3Block[K+5])-VP3M(36410,VP3Block[K+3]);
+   Ad:=VP3M(46341,A-C); Bd:=VP3M(46341,B-D);
+   Cd:=A+C; Dd:=B+D;
+   E:=VP3M(46341,VP3Block[K]+VP3Block[K+4])+8;
+   F:=VP3M(46341,VP3Block[K]-VP3Block[K+4])+8;
+   If Typ=1 Then Begin Inc(E,16*128); Inc(F,16*128); End;
+   G:=VP3M(60547,VP3Block[K+2])+VP3M(25080,VP3Block[K+6]);
+   H:=VP3M(25080,VP3Block[K+2])-VP3M(60547,VP3Block[K+6]);
+   Ed:=E-G; Gd:=E+G; Add:=F+Ad; Bdd:=Bd-H; Fd:=F-Ad; Hd:=Bd+H;
+   O[0]:=VP3Sar(Gd+Cd,4); O[7]:=VP3Sar(Gd-Cd,4);
+   O[1]:=VP3Sar(Add+Hd,4); O[2]:=VP3Sar(Add-Hd,4);
+   O[3]:=VP3Sar(Ed+Dd,4); O[4]:=VP3Sar(Ed-Dd,4);
+   O[5]:=VP3Sar(Fd+Bdd,4); O[6]:=VP3Sar(Fd-Bdd,4);
+   For X:=0 To 7 Do
+    If Typ=1 Then Dst^[Off+I+X*Stride]:=VP3Clip(O[X])
+    Else Dst^[Off+I+X*Stride]:=VP3Clip(Dst^[Off+I+X*Stride]+O[X]);
+  End Else Begin
+   If Typ=1 Then Begin
+    V:=VP3Clip(128+VP3Sar(46341*VP3Block[K]+(8 Shl 16),20));
+    For X:=0 To 7 Do Dst^[Off+I+X*Stride]:=V;
+   End Else If VP3Block[K]<>0 Then Begin
+    V:=VP3Sar(46341*VP3Block[K]+(8 Shl 16),20);
+    For X:=0 To 7 Do Dst^[Off+I+X*Stride]:=VP3Clip(Dst^[Off+I+X*Stride]+V);
+   End;
+  End;
+ End;
+ FillChar(VP3Block,SizeOf(VP3Block),0);
+End;
+
+Procedure VP3IdctDcAdd(Dst: PEABuffer; Off,Stride: LongInt);
+Var Dc,X,Y: LongInt;
+Begin
+ Dc:=VP3Sar(VP3Block[0]+15,5);
+ For Y:=0 To 7 Do For X:=0 To 7 Do Dst^[Off+Y*Stride+X]:=VP3Clip(Dst^[Off+Y*Stride+X]+Dc);
+ VP3Block[0]:=0;
+End;
+
+{ extraction des jetons pour un fragment ; retourne le niveau (0 = seulement le DC) }
+Function VP3Dequant(F,Plane,Inter: LongInt): LongInt;
+Var Qp,I,Token,P,Z,Pm: LongInt;
+Begin
+ Qp:=VP3Qpi^[F]; I:=0;
+ Repeat
+  P:=VP3TokP[Plane,I];
+  Token:=VP3Tok^[P];
+  Case Token And 3 Of
+   0: Begin
+    Dec(Token);
+    If Token<4 Then Inc(VP3TokP[Plane,I]) Else VP3Tok^[P]:=VP3W16(Token And Not 3);
+    VP3Block[0]:=VP3W16(VP3Dc^[F]*VP3Qmat[0,Inter,Plane,0]);
+    VP3Dequant:=I; Exit;
+   End;
+   1: Begin
+    Inc(VP3TokP[Plane,I]);
+    Inc(I,VP3Sar(Token,2) And $7F);
+    If I>63 Then Begin VP3Dequant:=I; Exit; End;
+    Z:=VP3Zig[I]; Pm:=(Z Shr 3) Or ((Z And 7) Shl 3);
+    VP3Block[Pm]:=VP3W16(VP3Sar(Token,9)*VP3Qmat[Qp,Inter,Plane,Pm]);
+    Inc(I);
+   End;
+   2: Begin
+    Z:=VP3Zig[I]; Pm:=(Z Shr 3) Or ((Z And 7) Shl 3);
+    VP3Block[Pm]:=VP3W16(VP3Sar(Token,2)*VP3Qmat[Qp,Inter,Plane,Pm]);
+    Inc(VP3TokP[Plane,I]); Inc(I);
+   End;
+   Else Begin VP3Dequant:=I; Exit; End;
+  End;
+ Until I>=64;
+ Dec(I);
+ VP3Block[0]:=VP3W16(VP3Dc^[F]*VP3Qmat[0,Inter,Plane,0]);
+ VP3Dequant:=I;
+End;
+
+Procedure VP3LoopH(Pl: PEABuffer; Off,Stride: LongInt);
+Var R,P,F: LongInt;
+Begin
+ For R:=0 To 7 Do Begin
+  P:=Off+R*Stride;
+  F:=(Pl^[P-2]-Pl^[P+1])+(Pl^[P]-Pl^[P-1])*3;
+  F:=VP3Bound[127+VP3Sar(F+4,3)];
+  Pl^[P-1]:=VP3Clip(Pl^[P-1]+F); Pl^[P]:=VP3Clip(Pl^[P]-F);
+ End;
+End;
+
+Procedure VP3LoopV(Pl: PEABuffer; Off,Stride: LongInt);
+Var C,P,F: LongInt;
+Begin
+ For C:=0 To 7 Do Begin
+  P:=Off+C;
+  F:=(Pl^[P-2*Stride]-Pl^[P+Stride])+(Pl^[P]-Pl^[P-Stride])*3;
+  F:=VP3Bound[127+VP3Sar(F+4,3)];
+  Pl^[P-Stride]:=VP3Clip(Pl^[P-Stride]+F); Pl^[P]:=VP3Clip(Pl^[P]-F);
+ End;
+End;
+
+Procedure VP3SetBound(Limit: LongInt);
+Var X,Value: LongInt;
+Begin
+ FillChar(VP3Bound,SizeOf(VP3Bound),0);
+ For X:=0 To Limit-1 Do Begin VP3Bound[127-X]:=-X; VP3Bound[127+X]:=X; End;
+ X:=Limit; Value:=Limit;
+ While (X<128) And (Value<>0) Do Begin
+  VP3Bound[127+X]:=Value; VP3Bound[127-X]:=-Value;
+  Inc(X); Dec(Value);
+ End;
+ If Value<>0 Then VP3Bound[127+128]:=Value;
+End;
+
+Procedure VP3ApplyLoop(Plane,YStart,YEnd: LongInt);
+Var Wd,Ht,Fr,Y,X,Stride,Base: LongInt; Pl: PEABuffer;
+Begin
+ Wd:=VP3FragWd[Plane]; Ht:=VP3FragHt[Plane];
+ Fr:=VP3FragSt[Plane]+YStart*Wd;
+ Stride:=VP3PW[Plane]; Pl:=VP3Cur[Plane];
+ Base:=8*YStart*Stride;
+ For Y:=YStart To YEnd-1 Do Begin
+  For X:=0 To Wd-1 Do Begin
+   If VP3Cm^[Fr]<>8 Then Begin
+    If X>0 Then VP3LoopH(Pl,Base+8*X,Stride);
+    If Y>0 Then VP3LoopV(Pl,Base+8*X,Stride);
+    If (X<Wd-1) And (VP3Cm^[Fr+1]=8) Then VP3LoopH(Pl,Base+8*X+8,Stride);
+    If (Y<Ht-1) And (VP3Cm^[Fr+Wd]=8) Then VP3LoopV(Pl,Base+8*X+8*Stride,Stride);
+   End;
+   Inc(Fr);
+  End;
+  Inc(Base,8*Stride);
+ End;
+End;
+
+Function VP3Ref(Pl: PEABuffer; Pw,Ph,X,Y: LongInt): LongInt;
+Begin
+ If X<0 Then X:=0 Else If X>=Pw Then X:=Pw-1;
+ If Y<0 Then Y:=0 Else If Y>=Ph Then Y:=Ph-1;
+ VP3Ref:=Pl^[Y*Pw+X];
+End;
+
+Procedure VP3RenderFrag(Plane,X,Y: LongInt);
+Var
+ I,F,Cm,Mx,My,Half,Stride,Pw,Ph,Fp,Bx,By,R,C,D,Lv: LongInt; Ref,Out: PEABuffer; NeedMv: Boolean;
+Begin
+ Stride:=VP3PW[Plane]; Pw:=Stride; Ph:=VP3PH[Plane];
+ F:=Y*VP3FragWd[Plane]+X; I:=VP3FragSt[Plane]+F;
+ Cm:=VP3Cm^[I]; Out:=VP3Cur[Plane]; Fp:=8*Y*Stride+8*X;
+ If Cm=8 Then Begin
+  For R:=0 To 7 Do Move(VP3Last[Plane]^[Fp+R*Stride],Out^[Fp+R*Stride],8);
+  Exit;
+ End;
+ If Cm<>1 Then Begin
+  If (Cm=5) Or (Cm=6) Then Ref:=VP3Gold[Plane] Else Ref:=VP3Last[Plane];
+  Mx:=0; My:=0; Half:=0;
+  If (Cm>1) And (Cm<>5) Then Begin
+   If Plane=0 Then Begin Mx:=VP3Mv0^[F*2]; My:=VP3Mv0^[F*2+1]; End
+   Else Begin Mx:=VP3Mv1^[F*2]; My:=VP3Mv1^[F*2+1]; End;
+   Half:=(Mx And 1) Or ((My And 1) Shl 1);
+  End;
+  Bx:=8*X+VP3Sar(Mx,1); By:=8*Y+VP3Sar(My,1);
+  If (Cm>1) And (Cm<>5) Then Begin
+   For R:=0 To 7 Do For C:=0 To 7 Do Begin
+    Case Half Of
+     0: Lv:=VP3Ref(Ref,Pw,Ph,Bx+C,By+R);
+     1: Lv:=(VP3Ref(Ref,Pw,Ph,Bx+C,By+R)+VP3Ref(Ref,Pw,Ph,Bx+C+1,By+R)) Shr 1;
+     2: Lv:=(VP3Ref(Ref,Pw,Ph,Bx+C,By+R)+VP3Ref(Ref,Pw,Ph,Bx+C,By+R+1)) Shr 1;
+     Else Begin
+      If (Mx Xor My)<0 Then D:=-1 Else D:=0;
+      Lv:=(VP3Ref(Ref,Pw,Ph,Bx+C-D,By+R)+VP3Ref(Ref,Pw,Ph,Bx+C+1+D,By+R+1)) Shr 1;
+     End;
+    End;
+    Out^[Fp+R*Stride+C]:=Lv;
+   End;
+  End Else
+   For R:=0 To 7 Do Move(Ref^[Fp+R*Stride],Out^[Fp+R*Stride],8);
+ End;
+ If Cm=1 Then Begin
+  VP3Dequant(I,Plane,0);
+  VP3Idct(Out,Fp,Stride,1);
+ End Else Begin
+  If VP3Dequant(I,Plane,1)<>0 Then VP3Idct(Out,Fp,Stride,2)
+  Else VP3IdctDcAdd(Out,Fp,Stride);
+ End;
+End;
+
+Procedure VP3RenderPlane(Plane: LongInt);
+Var SbX,SbY,SbW0,SbH0,J,X,Y,Fw,Fh: LongInt;
+Begin
+ If Plane=0 Then Begin SbW0:=VP3SbW; SbH0:=VP3SbH; End Else Begin SbW0:=VP3CSbW; SbH0:=VP3CSbH; End;
+ Fw:=VP3FragWd[Plane]; Fh:=VP3FragHt[Plane];
+ For SbY:=0 To SbH0-1 Do Begin
+  For SbX:=0 To SbW0-1 Do
+   For J:=0 To 15 Do Begin
+    X:=4*SbX+VP3HilX[J]; Y:=4*SbY+VP3HilY[J];
+    If (X>=Fw) Or (Y>=Fh) Then Continue;
+    VP3RenderFrag(Plane,X,Y);
+   End;
+  If VP3FLim[VP3Qps[0]]<>0 Then Begin
+   Y:=4*SbY; If SbY<>0 Then Dec(Y);
+   X:=4*SbY+3; If X>Fh-1 Then X:=Fh-1;
+   VP3ApplyLoop(Plane,Y,X);
+  End;
+ End;
+ If VP3FLim[VP3Qps[0]]<>0 Then VP3ApplyLoop(Plane,Fh-1,Fh);
+End;
+
+Function VP3Log2(X: LongInt): LongInt;
+Var N: LongInt;
+Begin
+ N:=0; While X>1 Do Begin X:=X Shr 1; Inc(N); End; VP3Log2:=N;
+End;
+
+{ decodage d'un paquet de donnees ; 0 = image decodee (dans VP3Last), <0 = erreur }
+Function VP3DecodeFrame(Pk: PEABuffer; Len: LongInt): LongInt;
+Var I,P,Ver: LongInt; Tmp: PEABuffer;
+Begin
+ VP3DecodeFrame:=-1;
+ VP3Pk:=Pk; VP3PkLen:=Len; VP3Pos:=0; VP3End:=Len*8;
+ If Len<=0 Then Exit;
+ If VP3Theora<>0 Then If VP3Bit<>0 Then Exit;
+ VP3Key:=VP3Bit=0;
+ If Not VP3Ready Then Exit;
+ If VP3Theora=0 Then VP3Bit;
+ VP3NQps:=0;
+ Repeat
+  VP3Qps[VP3NQps]:=VP3Bits(6); Inc(VP3NQps);
+ Until Not ((VP3Theora>=$030200) And (VP3NQps<3) And (VP3Bit<>0));
+ For I:=VP3NQps To 2 Do VP3Qps[I]:=-1;
+ VP3SetBound(VP3FLim[VP3Qps[0]]);
+ VP3InitDequant;
+ If VP3Key Then Begin
+  If VP3Theora=0 Then Begin
+   VP3Bits(4); VP3Bits(4);
+   If VP3Ver<>0 Then Begin
+    Ver:=VP3Bits(5);
+    If Ver>=2 Then Fail('vp3: les flux VP4 (version >= 2) ne sont pas pris en charge.');
+    VP3Ver:=Ver;
+   End;
+  End;
+  If (VP3Ver<>0) Or (VP3Theora<>0) Then Begin
+   VP3Bit; VP3Bits(2);
+  End;
+ End Else Begin
+  If Not VP3HaveGold Then Begin
+   VP3HaveGold:=True; VP3HaveLast:=True;
+   For P:=0 To 2 Do Begin
+    FillChar(VP3Gold[P]^,VP3PW[P]*VP3PH[P],0); FillChar(VP3Last[P]^,VP3PW[P]*VP3PH[P],0);
+   End;
+  End;
+ End;
+ FillChar(VP3Dc^,VP3FragCnt*4,0); FillChar(VP3Cm^,VP3FragCnt,0); FillChar(VP3Qpi^,VP3FragCnt,0);
+ If VP3UnpackSB<0 Then Exit;
+ If VP3UnpackModes<0 Then Exit;
+ If VP3UnpackVectors<>0 Then Exit;
+ If VP3UnpackQpis<0 Then Exit;
+ If VP3UnpackDct<0 Then Exit;
+ If VP3Pos>VP3End Then VP3Over:=True;
+ For P:=0 To 2 Do VP3RenderPlane(P);
+ { mise a jour des references }
+ If VP3Key Then Begin
+  For P:=0 To 2 Do Move(VP3Cur[P]^,VP3Gold[P]^,VP3PW[P]*VP3PH[P]);
+  VP3HaveGold:=True;
+ End;
+ For P:=0 To 2 Do Begin Tmp:=VP3Last[P]; VP3Last[P]:=VP3Cur[P]; VP3Cur[P]:=Tmp; End;
+ VP3HaveLast:=True;
+ VP3DecodeFrame:=0;
+End;
+
+{ en-tete d'identification Theora (apres "\x80theora") ; erreur => False }
+Function VP3ParseIdent(Pk: PEABuffer; Len: LongInt): Boolean;
+Var A,B,T: LongInt; Fnum,Fden: Int64;
+Begin
+ VP3ParseIdent:=False;
+ VP3Pk:=Pk; VP3PkLen:=Len; VP3Pos:=7*8; VP3End:=Len*8;
+ If VP3Left<206 Then Exit;
+ VP3Theora:=VP3Bits(24);
+ If VP3Theora=0 Then VP3Theora:=1;
+ VP3Flip:=VP3Theora<$030200;
+ VP3W:=VP3Bits(16) Shl 4; VP3H:=VP3Bits(16) Shl 4;
+ VP3VisW:=VP3W; VP3VisH:=VP3H; VP3OffX:=0; VP3OffYB:=0;
+ If VP3Theora>=$030200 Then Begin
+  VP3VisW:=VP3Bits(24); VP3VisH:=VP3Bits(24); VP3OffX:=VP3Bits(8); VP3OffYB:=VP3Bits(8);
+ End;
+ If (VP3VisW<=0) Or (VP3VisH<=0) Or (VP3VisW>32766) Or (VP3VisH>32766) Or (VP3VisW+VP3OffX>VP3W) Or (VP3VisH+VP3OffYB>VP3H) Or (VP3VisW<18) Then Begin
+  WriteLn('FFMPEG Pascal: theora: dimensions invalides ',VP3VisW,'x',VP3VisH); Exit;
+ End;
+ Fnum:=VP3Bits32; Fden:=VP3Bits32;
+ VP3FpsN:=0; VP3FpsD:=0;
+ If (Fnum>0) And (Fden>0) Then Begin
+  A:=Fnum; B:=Fden;
+  While Fden<>0 Do Begin T:=Fnum Mod Fden; Fnum:=Fden; Fden:=T; End;
+  VP3FpsN:=A Div Fnum; VP3FpsD:=B Div Fnum;
+ End;
+ A:=VP3Bits(24); B:=VP3Bits(24);
+ VP3SarN:=0; VP3SarD:=0;
+ If A>0 Then Begin VP3SarN:=A; VP3SarD:=B; End;
+ If VP3Theora<$030200 Then VP3GpShift:=VP3Bits(5);
+ VP3ColorSp:=VP3Bits(8);
+ VP3Bits(24); VP3Bits(6);
+ If VP3Theora>=$030200 Then Begin
+  VP3GpShift:=VP3Bits(5);
+  VP3PixFmt:=VP3Bits(2);
+  If VP3PixFmt=1 Then Begin WriteLn('FFMPEG Pascal: theora: format de pixels invalide.'); Exit; End;
+  VP3Bits(3);
+ End Else VP3PixFmt:=0;
+ If VP3W<18 Then Exit;
+ VP3HaveHdr:=True;
+ VP3ParseIdent:=True;
+End;
+
+Function VP3ReadHuff(T,Len: LongInt): Boolean;
+Var Tk: LongInt;
+Begin
+ VP3ReadHuff:=True;
+ If VP3Bit<>0 Then Begin
+  If VP3HuffN[T]>=32 Then Exit;
+  Tk:=VP3Bits(5);
+  VP3HuffL[T,VP3HuffN[T]]:=Len; VP3HuffS[T,VP3HuffN[T]]:=Tk; Inc(VP3HuffN[T]);
+ End Else Begin
+  If Len>=31 Then Exit;
+  If VP3ReadHuff(T,Len+1) Then Exit;
+  If VP3ReadHuff(T,Len+1) Then Exit;
+ End;
+ VP3ReadHuff:=False;
+End;
+
+{ en-tete de tables Theora (apres "\x82theora") }
+Function VP3ParseSetup(Pk: PEABuffer; Len: LongInt): Boolean;
+Var N,Matrices,Inter,Plane,I,J,NewQr,Qtj,Plj,Qri,Qi: LongInt;
+Begin
+ VP3ParseSetup:=False;
+ If Not VP3HaveHdr Then Exit;
+ VP3Pk:=Pk; VP3PkLen:=Len; VP3Pos:=7*8; VP3End:=Len*8;
+ If VP3Theora>=$030200 Then Begin
+  N:=VP3Bits(3);
+  If N<>0 Then For I:=0 To 63 Do VP3FLim[I]:=VP3Bits(N);
+ End;
+ If VP3Theora>=$030200 Then N:=VP3Bits(4)+1 Else N:=16;
+ For I:=0 To 63 Do VP3AcSc[I]:=VP3Bits(N);
+ If VP3Theora>=$030200 Then N:=VP3Bits(4)+1 Else N:=16;
+ For I:=0 To 63 Do Begin VP3DcSc[0,I]:=VP3Bits(N); VP3DcSc[1,I]:=VP3DcSc[0,I]; End;
+ If VP3Theora>=$030200 Then Matrices:=VP3Bits(9)+1 Else Matrices:=3;
+ If Matrices>384 Then Exit;
+ For J:=0 To Matrices-1 Do For I:=0 To 63 Do VP3BaseM[J,I]:=VP3Bits(8);
+ For Inter:=0 To 1 Do For Plane:=0 To 2 Do Begin
+  NewQr:=1;
+  If (Inter<>0) Or (Plane>0) Then NewQr:=VP3Bit;
+  If NewQr=0 Then Begin
+   If (Inter<>0) And (VP3Bit<>0) Then Begin Qtj:=0; Plj:=Plane; End
+   Else Begin Qtj:=(3*Inter+Plane-1) Div 3; Plj:=(Plane+2) Mod 3; End;
+   VP3QrCnt[Inter,Plane]:=VP3QrCnt[Qtj,Plj];
+   Move(VP3QrSize[Qtj,Plj],VP3QrSize[Inter,Plane],SizeOf(VP3QrSize[0,0]));
+   Move(VP3QrBase[Qtj,Plj],VP3QrBase[Inter,Plane],SizeOf(VP3QrBase[0,0]));
+  End Else Begin
+   Qri:=0; Qi:=0;
+   While True Do Begin
+    I:=VP3Bits(VP3Log2(Matrices-1)+1);
+    If I>=Matrices Then Exit;
+    VP3QrBase[Inter,Plane,Qri]:=I;
+    If Qi>=63 Then Break;
+    I:=VP3Bits(VP3Log2(63-Qi)+1)+1;
+    VP3QrSize[Inter,Plane,Qri]:=I; Inc(Qri);
+    Inc(Qi,I);
+   End;
+   If Qi>63 Then Exit;
+   VP3QrCnt[Inter,Plane]:=Qri;
+  End;
+ End;
+ For I:=0 To 79 Do Begin
+  VP3HuffN[I]:=0;
+  If VP3ReadHuff(I,0) Then Exit;
+ End;
+ VP3BuildCoefVlc;
+ VP3HaveTables:=True;
+ VP3ParseSetup:=True;
+End;
+
+{ image decodee (VP3Last) vers le tampon NV planaire, recadree et remise a l'endroit }
+Procedure VP3Output(Dst: PEABuffer; CropLeft,CropTop,OutW,OutH: LongInt);
+Var P,R,Sx,Sy,Cw,Ch,Cl,Ct,Row,At: LongInt;
+Begin
+ At:=0;
+ For P:=0 To 2 Do Begin
+  If P=0 Then Begin Sx:=0; Sy:=0; End Else Begin Sx:=VP3CX; Sy:=VP3CY; End;
+  Cw:=(OutW+(1 Shl Sx)-1) Shr Sx; Ch:=(OutH+(1 Shl Sy)-1) Shr Sy;
+  Cl:=CropLeft Shr Sx; Ct:=CropTop Shr Sy;
+  For R:=0 To Ch-1 Do Begin
+   Row:=Ct+R;
+   If Not VP3Flip Then Row:=VP3PH[P]-1-Row;
+   If (Row<0) Or (Row>=VP3PH[P]) Then FillChar(Dst^[At+R*Cw],Cw,0)
+   Else Begin
+    If Cl+Cw<=VP3PW[P] Then Move(VP3Last[P]^[Row*VP3PW[P]+Cl],Dst^[At+R*Cw],Cw)
+    Else Begin
+     FillChar(Dst^[At+R*Cw],Cw,0);
+     If VP3PW[P]>Cl Then Move(VP3Last[P]^[Row*VP3PW[P]+Cl],Dst^[At+R*Cw],VP3PW[P]-Cl);
+    End;
+   End;
+  End;
+  Inc(At,Cw*Ch);
+ End;
+End;
+
+{ equivalent de av_frame_apply_cropping (sans AV_FRAME_CROP_UNALIGNED) : le recadrage gauche est tronque si l'alignement serait rompu }
+Function VP3EffCropLeft(CropLeft: LongInt): LongInt;
+Var Lc,Mn,L,A,P,Sx: LongInt;
+Begin
+ VP3EffCropLeft:=CropLeft;
+ If CropLeft=0 Then Exit;
+ Lc:=0; While ((CropLeft Shr Lc) And 1)=0 Do Inc(Lc);
+ Mn:=99;
+ For P:=0 To 2 Do Begin
+  If P=0 Then Sx:=0 Else Sx:=VP3CX;
+  A:=CropLeft Shr Sx;
+  If A=0 Then L:=99 Else Begin L:=0; While ((A Shr L) And 1)=0 Do Inc(L); End;
+  If L<Mn Then Mn:=L;
+ End;
+ If Mn<5 Then VP3EffCropLeft:=CropLeft And Not ((1 Shl (5+Lc-Mn))-1);
+End;
+
+{ paquets : tableaux globaux }
+Type TVP3I64A=Array[0..100000000] Of Int64; PVP3I64=^TVP3I64A;
+Var VP3IsOgg: Boolean; VP3NHdr,VP3NStreams: LongInt; VP3Adj: PVP3Int; VP3Arena: PEABuffer; VP3PkOff,VP3PkSz,VP3PkRem,VP3PkFl,VP3Pts: PVP3Int; VP3PkGr: PVP3I64; VP3NPk: LongInt;
+
+Var VP3CrcT: Array[0..255] Of LongWord; VP3CrcOk: Boolean;
+
+{ lecture d'un fichier Ogg : collecte les paquets du premier flux Theora (resynchronisation, controle du CRC et reprise de paquets comme oggdec.c) }
+Procedure VP3ReadOgg(Const Source: String);
+Var
+ F: PEABuffer; Size,At,I,NSeg,K,J,Serial,CapPk,Used,Plen,Ncomp,FirstInPage,Fl,Scanned,BodyLen,S0,E,NKnown,Ser: LongInt; Found,Good,GotData,Known: Boolean; Gr: Int64; KnownSer: Array[0..63] Of LongInt;
+ Crc,Cr0: LongWord;
+Function L32(P: LongInt): LongInt;
+Begin L32:=F^[P]+F^[P+1]*256+F^[P+2]*65536+F^[P+3]*16777216; End;
+Function Sig(P: LongInt): Boolean;
+Begin Sig:=(F^[P]=79) And (F^[P+1]=103) And (F^[P+2]=103) And (F^[P+3]=83); End;
+Begin
+ If Not VP3CrcOk Then Begin
+  For I:=0 To 255 Do Begin
+   Crc:=LongWord(I) Shl 24;
+   For K:=1 To 8 Do If (Crc And $80000000)<>0 Then Crc:=(Crc Shl 1) Xor $04C11DB7 Else Crc:=Crc Shl 1;
+   VP3CrcT[I]:=Crc;
+  End;
+  VP3CrcOk:=True;
+ End;
+ NVLoad(Source,F,Size);
+ CapPk:=Size Div 4+8;
+ GetMem(VP3Arena,Size+64); GetMem(VP3PkOff,CapPk*4+16); GetMem(VP3PkSz,CapPk*4+16); GetMem(VP3PkRem,CapPk*4+16); GetMem(VP3PkFl,CapPk*4+16);
+ GetMem(VP3PkGr,Int64(CapPk)*8+16); GetMem(VP3Pts,CapPk*4+16);
+ VP3NPk:=0; Used:=0; At:=0; Found:=False; Serial:=0; Plen:=0; VP3NStreams:=0; NKnown:=0; GotData:=False;
+ While True Do Begin
+  Scanned:=0;
+  While (At+4<=Size) And Not Sig(At) And (Scanned<65307) Do Begin Inc(At); Inc(Scanned); End;
+  If (At+27>Size) Or (Scanned>=65307) Then Break;
+  If Not Sig(At) Then Break;
+  NSeg:=F^[At+26];
+  If At+27+NSeg>Size Then Break;
+  BodyLen:=0; For K:=0 To NSeg-1 Do Inc(BodyLen,F^[At+27+K]);
+  If At+27+NSeg+BodyLen>Size Then Break;
+  Crc:=0; E:=At+27+NSeg+BodyLen;
+  For K:=At To E-1 Do Begin
+   If (K>=At+22) And (K<=At+25) Then I:=0 Else I:=F^[K];
+   Crc:=(Crc Shl 8) Xor VP3CrcT[((Crc Shr 24) Xor LongWord(I)) And 255];
+  End;
+  Cr0:=LongWord(L32(At+22));
+  Good:=(Crc=Cr0) And (F^[At+4]=0);
+  If Not Good Then Begin Inc(At,4); Continue; End;
+  J:=At+27+NSeg;
+  Fl:=F^[At+5]; Ser:=L32(At+14);
+  Known:=False; For K:=0 To NKnown-1 Do If KnownSer[K]=Ser Then Known:=True;
+  If Not Known Then Begin
+   { flux inconnu apres des donnees : ffmpeg abandonne (ogg_replace_stream) }
+   If GotData Then Break;
+   If NKnown<64 Then Begin KnownSer[NKnown]:=Ser; Inc(NKnown); End;
+  End;
+  If (Fl And 2)=0 Then GotData:=True;
+  If (Fl And 2)<>0 Then Inc(VP3NStreams);
+  If Not Found Then Begin
+   If ((Fl And 2)<>0) And (J+7<=Size) And (F^[J]=128) And (F^[J+1]=116) And (F^[J+2]=104) And (F^[J+3]=101) And (F^[J+4]=111) And (F^[J+5]=114) And (F^[J+6]=97) Then Begin
+    Found:=True; Serial:=L32(At+14);
+   End;
+  End;
+  If Found And (L32(At+14)=Serial) Then Begin
+   Gr:=0; For I:=7 Downto 0 Do Gr:=Gr*256+F^[At+6+I];
+   If F^[At+13]>=128 Then Gr:=Gr-(Int64(1) Shl 63)-(Int64(1) Shl 63);
+   S0:=0;
+   If ((Fl And 1)<>0) Or (Plen>0) Then Begin
+    If Plen=0 Then Begin
+     While S0<NSeg Do Begin
+      K:=F^[At+27+S0]; Inc(S0); Inc(J,K);
+      If K<255 Then Break;
+     End;
+    End;
+   End Else Plen:=0;
+   Ncomp:=0; For K:=S0 To NSeg-1 Do If F^[At+27+K]<255 Then Inc(Ncomp);
+   FirstInPage:=VP3NPk;
+   For K:=S0 To NSeg-1 Do Begin
+    I:=F^[At+27+K];
+    If J+I>Size Then I:=Size-J;
+    If I>0 Then Move(F^[J],VP3Arena^[Used+Plen],I);
+    Inc(Plen,I); Inc(J,I);
+    If F^[At+27+K]<255 Then Begin
+     If VP3NPk<CapPk Then Begin
+      VP3PkOff^[VP3NPk]:=Used; VP3PkSz^[VP3NPk]:=Plen; VP3PkGr^[VP3NPk]:=Gr; VP3PkFl^[VP3NPk]:=Fl;
+      VP3PkRem^[VP3NPk]:=Ncomp-1-(VP3NPk-FirstInPage);
+      Inc(VP3NPk);
+     End;
+     Inc(Used,Plen); Plen:=0;
+    End;
+   End;
+   J:=E;
+  End Else J:=E;
+  At:=J;
+ End;
+ FreeMem(F);
+ If Not Found Then Fail('ogg: aucun flux Theora dans ce fichier.');
+End;
+
+{ horodatages des paquets de donnees comme libavformat (oggdec.c + oggparsetheora.c) }
+Procedure VP3OggPts;
+Var I,Rem: LongInt; LastPts,Pts,Prev,NoPts: Int64; Gr: Int64;
+Function GpToPts(G: Int64): Int64;
+Var IFr,PFr: Int64;
+Begin
+ IFr:=G Shr VP3GpShift; PFr:=G And ((Int64(1) Shl VP3GpShift)-1);
+ If VP3Theora<$030201 Then Inc(IFr);
+ GpToPts:=IFr+PFr;
+End;
+Begin
+ NoPts:=-(Int64(1) Shl 62);
+ LastPts:=NoPts; Prev:=0;
+ For I:=0 To VP3NPk-1 Do VP3Pts^[I]:=0;
+ For I:=VP3NHdr To VP3NPk-1 Do Begin
+  Gr:=VP3PkGr^[I]; Rem:=VP3PkRem^[I];
+  If ((LastPts=0) Or (LastPts=NoPts)) And ((VP3PkFl^[I] And 4)=0) Then Begin
+   If Gr<>-1 Then LastPts:=GpToPts(Gr)-(1+Rem) Else LastPts:=NoPts;
+  End;
+  Pts:=LastPts; LastPts:=NoPts;
+  If (Rem=0) And (Gr<>-1) Then LastPts:=GpToPts(Gr);
+  If Pts=NoPts Then Pts:=Prev+1;
+  VP3Pts^[I]:=Pts; Prev:=Pts;
+ End;
+End;
+
+{ arrondi au plus proche (demi-valeurs eloignees de zero) de A*Num/Den, comme av_rescale_q }
+Function VP3Resc(A,Num,Den: Int64): Int64;
+Var P: Int64;
+Begin
+ P:=A*Num;
+ If P>=0 Then VP3Resc:=(P+Den Div 2) Div Den Else VP3Resc:=-((-P+Den Div 2) Div Den);
+End;
+
+{ correction des discontinuites d'horodatage de ffmpeg_demux.c (seuil 10 s, retour arriere > 0,1 s) ; VP3Pts -> VP3Adj (ticks, relatifs au premier paquet) }
+Procedure VP3Discont(First,FpsN,FpsD: LongInt);
+Var
+ I: LongInt; Start,Dts,Off,OffTicks,PktUs,Delta,NextDts,DsDts,DurUs,Pts: Int64; HaveNext: Boolean;
+Begin
+ Start:=VP3Pts^[First]; Off:=0; HaveNext:=False; NextDts:=0; DsDts:=0;
+ DurUs:=VP3Resc(1,Int64(FpsD)*1000000,FpsN);
+ GetMem(VP3Adj,(VP3NPk+1)*4+16);
+ For I:=0 To VP3NPk-1 Do VP3Adj^[I]:=VP3Pts^[I]-Start;
+ For I:=First To VP3NPk-1 Do Begin
+  If (VP3PkSz^[I]<=0) Or Not VP3IsOgg Then Continue;
+  Pts:=VP3Pts^[I]-Start; Dts:=Pts;
+  OffTicks:=VP3Resc(Off,FpsN,Int64(FpsD)*1000000);
+  Dts:=Dts+OffTicks; Pts:=Pts+OffTicks;
+  PktUs:=VP3Resc(Dts,Int64(FpsD)*1000000,FpsN);
+  If HaveNext Then Begin
+   Delta:=PktUs-NextDts;
+   If (Abs(Delta)>10000000) Or (PktUs+100000<DsDts) Then Begin
+    Dec(Off,Delta);
+    Dec(Dts,VP3Resc(Delta,FpsN,Int64(FpsD)*1000000)); Dec(Pts,VP3Resc(Delta,FpsN,Int64(FpsD)*1000000));
+   End;
+  End;
+  PktUs:=VP3Resc(Dts,Int64(FpsD)*1000000,FpsN);
+  NextDts:=PktUs; DsDts:=PktUs; HaveNext:=True;
+  Inc(NextDts,DurUs);
+  VP3Adj^[I]:=Pts;
+ End;
+End;
+
+{ decodage commun : liste de paquets deja prete (VP3Arena/VP3PkOff/VP3PkSz/VP3Pts) ; synchronisation CFR de ffmpeg (video_sync_process) }
+Procedure VP3Run(Mode: LongInt; Const Target: String; Vscfr: Boolean; First,FpsN,FpsD,SarN,SarD,CropLeft,CropTop,OutW,OutH: LongInt);
+Var
+ I,Cw,Ch,Sz,R,D0,Nb,NbPrev,NextPts,J,Start,H0,H1,H2,Med,OutCnt: LongInt; Fr,Prev: PEABuffer; Begun: Boolean;
+Begin
+ Begun:=False; NextPts:=0; Prev:=Nil; H0:=0; H1:=0; H2:=0; Start:=0; OutCnt:=0; VP3Discont(First,FpsN,FpsD);
+ For I:=First To VP3NPk-1 Do Begin
+  If VP3PkSz^[I]<=0 Then Continue;
+  R:=VP3DecodeFrame(PEABuffer(@VP3Arena^[VP3PkOff^[I]]),VP3PkSz^[I]);
+  If GetEnv('VP3DBG')<>'' Then WriteLn('vp3dbg pkt ',I,' size ',VP3PkSz^[I],' pts ',VP3Pts^[I],' ret ',R,' key ',VP3Key);
+  If R<0 Then Begin Inc(VP3BadFrames); Continue; End;
+  If Not Begun Then Begin
+   Cw:=(OutW+(1 Shl VP3CX)-1) Shr VP3CX; Ch:=(OutH+(1 Shl VP3CY)-1) Shr VP3CY;
+   NVBegin(Mode,Target,OutW,OutH,7,FpsN,FpsD);
+   NVSubX:=VP3CX; NVSubY:=VP3CY; NVCW:=Cw; NVCH:=Ch; NVIl:='p'; NVInitDup:=Not Vscfr;
+   Case VP3PixFmt Of 0: NVYTag:='C420jpeg'; 2: NVYTag:='C422'; Else NVYTag:='C444'; End;
+   NVSarN:=SarN; NVSarD:=SarD;
+   Begun:=True;
+  End;
+  Sz:=OutW*OutH+2*NVCW*NVCH;
+  GetMem(Fr,Sz+64);
+  VP3Output(Fr,CropLeft,CropTop,OutW,OutH);
+  D0:=VP3Adj^[I]-Start-NextPts;
+  If Vscfr And (OutCnt=0) And (D0>=1) Then Begin NextPts:=VP3Adj^[I]-Start; D0:=0; End;
+  If D0+1<-1 Then Nb:=0 Else Nb:=1;
+  NbPrev:=0;
+  If D0+1>1 Then Begin
+   Nb:=D0+1;
+   If D0>1 Then NbPrev:=D0-1;
+  End;
+  H2:=H1; H1:=H0; H0:=NbPrev;
+  If Nb>0 Then Begin
+   If D0>=1 Then For J:=1 To D0 Do NVRepeat;
+   NVEmit(Fr);
+   Inc(NextPts,Nb); Inc(OutCnt,Nb);
+  End;
+  If Prev<>Nil Then FreeMem(Prev);
+  Prev:=Fr;
+  If NVDone Then Break;
+ End;
+ If Not Begun Then Fail('theora: aucune image decodee.');
+ { fin de flux : ffmpeg repete la derniere image (mediane des 3 derniers nb_frames_prev) }
+ If (Prev<>Nil) And Not NVDone Then Begin
+  Med:=H0; If H1<Med Then Med:=H1; { min(H0,H1) }
+  Sz:=H0; If H1>Sz Then Sz:=H1; { max(H0,H1) }
+  If H2<Sz Then Sz:=H2;
+  If Sz>Med Then Med:=Sz;
+  NVGap:=0;
+  For J:=1 To Med Do NVEmit(Prev);
+ End;
+ If Prev<>Nil Then FreeMem(Prev);
+ NVFinish('theora');
+End;
+
+{ ---- Theora : initialisation depuis les trois en-tetes (theora_decode_init), puis decodage ---- }
+Var VP3HP: Array[0..2] Of PEABuffer; VP3HL: Array[0..2] Of LongInt;
+
+Procedure VP3InitHeaders;
+Var I: LongInt;
+Begin
+ VP3Ver:=1;
+ For I:=0 To 2 Do Begin
+  If VP3HL[I]<=0 Then Continue;
+  Case VP3HP[I]^[0] Of
+   $80: Begin
+    If Not VP3ParseIdent(VP3HP[I],VP3HL[I]) Then Fail('theora: en-tete d''identification invalide.');
+    If VP3Theora<$030100 Then Fail('theora: version trop ancienne ou non prise en charge.');
+   End;
+   $82: If Not VP3ParseSetup(VP3HP[I],VP3HL[I]) Then Fail('theora: en-tete de tables invalide.');
+  End;
+  If VP3Theora<$030200 Then Break;
+ End;
+ If Not VP3HaveHdr Then Fail('theora: en-tete d''identification absent.');
+ If Not VP3HaveTables Then VP3InitBuiltin;
+ VP3Setup;
+ VP3Ready:=True;
+End;
+
+Procedure VP3RunTheora(Mode: LongInt; Const Target: String; Vscfr: Boolean; First,Fn0,Fd0,SarN,SarD: LongInt);
+Var Cl,Ct,OutW,OutH,Fn,Fd: LongInt;
+Begin
+ Cl:=0; Ct:=VP3H-VP3VisH-VP3OffYB;
+ If VP3Theora>=$030200 Then Cl:=VP3EffCropLeft(VP3OffX);
+ OutW:=VP3VisW+VP3OffX-Cl; OutH:=VP3VisH;
+ If VP3Theora<$030200 Then Begin OutW:=VP3VisW; Ct:=0; End;
+ Fn:=Fn0; Fd:=Fd0; If (Fn<=0) Or (Fd<=0) Then Begin Fn:=25; Fd:=1; End;
+ VP3Run(Mode,Target,Vscfr,First,Fn,Fd,SarN,SarD,Cl,Ct,OutW,OutH);
+ If VP3Over Then WriteLn('FFMPEG Pascal: avertissement theora: lecture au-dela de la fin d''un paquet.');
+End;
+
+Procedure VP3Reset;
+Begin
+ VP3Alloc:=False; VP3Ready:=False; VP3HaveTables:=False; VP3HaveHdr:=False; VP3Over:=False; VP3BadFrames:=0;
+ FillChar(VP3FLim,SizeOf(VP3FLim),0);
+ VP3InitStatic;
+End;
+
+{ ---- Ogg Theora ---- }
+Procedure DecodeTheoraOgg(Const Source,Target: String; Mode: LongInt);
+Var I: LongInt;
+Begin
+ VP3Reset;
+ VP3IsOgg:=True; VP3ReadOgg(Source);
+ VP3NHdr:=0;
+ While (VP3NHdr<VP3NPk) And (VP3PkSz^[VP3NHdr]>0) And ((VP3Arena^[VP3PkOff^[VP3NHdr]] And $80)<>0) Do Inc(VP3NHdr);
+ If VP3NHdr<3 Then Fail('theora: en-tetes absents.');
+ { l''extradata attend un en-tete d''identification de 42 octets (avpriv_split_xiph_headers) }
+ If VP3PkSz^[0]<>42 Then Fail('theora: extradata incorrect.');
+ For I:=1 To VP3NHdr-1 Do
+  If (VP3Arena^[VP3PkOff^[I]]<>$80) And (VP3Arena^[VP3PkOff^[I]]<>$81) And (VP3Arena^[VP3PkOff^[I]]<>$82) Then Fail('theora: type d''en-tete inconnu.');
+ For I:=0 To 2 Do Begin VP3HP[I]:=PEABuffer(@VP3Arena^[VP3PkOff^[I]]); VP3HL[I]:=VP3PkSz^[I]; End;
+ VP3InitHeaders;
+ VP3OggPts;
+ VP3RunTheora(Mode,Target,VP3NStreams<=1,VP3NHdr,VP3FpsN,VP3FpsD,VP3SarN,VP3SarD);
+End;
+
+{ ---- VP3 dans AVI (VP31 / VP30) ---- }
+Procedure DecodeVP3Avi(Const Source,Target: String; Mode: LongInt);
+Var Fn,Fd: LongInt;
+Begin
+ VP3Reset;
+ VP3IsOgg:=False; QXOpen(Source);
+ If QXIsMov Then Fail('vp3: seul le conteneur AVI est pris en charge.');
+ VP3Theora:=0; If QXFcc='VP30' Then VP3Ver:=0 Else VP3Ver:=1;
+ VP3W:=(QXW+15) And Not 15; VP3H:=(QXH+15) And Not 15;
+ If VP3W<18 Then Fail('vp3: largeur insuffisante.');
+ VP3VisW:=QXW; VP3VisH:=QXH; VP3PixFmt:=0; VP3Flip:=False;
+ VP3InitBuiltin;
+ VP3Setup;
+ VP3Ready:=True;
+ VP3Arena:=QXF; VP3PkOff:=PVP3Int(QXPos); VP3PkSz:=PVP3Int(QXLen); VP3NPk:=QXCount;
+ GetMem(VP3Pts,VP3NPk*4+16); For Fn:=0 To VP3NPk-1 Do VP3Pts^[Fn]:=Fn;
+ NVAviSar(QXW,QXH);
+ VP3Run(Mode,Target,True,0,QXRn,QXRd,NVSarN,NVSarD,0,0,QXW,QXH);
+ If VP3Over Then WriteLn('FFMPEG Pascal: avertissement vp3: lecture au-dela de la fin d''un paquet.');
+End;
+
+{ detection : un des flux BOS du fichier Ogg est-il Theora ? }
+Function VP3OggIsTheora(Const Name: String): Boolean;
+Var Hd: Array[0..299] Of Byte; At,Limit,NSeg,J,I,Sum: LongInt; Lacing: Array[0..254] Of Byte;
+Begin
+ VP3OggIsTheora:=False;
+ OpenRead(Name); Limit:=InputSize; At:=0;
+ While At+27<=Limit Do Begin
+  ReadAt(At,Hd,27);
+  If (Hd[0]<>79) Or (Hd[1]<>103) Or (Hd[2]<>103) Or (Hd[3]<>83) Then Break;
+  If (Hd[5] And 2)=0 Then Break;
+  NSeg:=Hd[26];
+  If At+27+NSeg>Limit Then Break;
+  ReadAt(At+27,Lacing,NSeg);
+  Sum:=0; For I:=0 To NSeg-1 Do Inc(Sum,Lacing[I]);
+  J:=At+27+NSeg;
+  If J+7<=Limit Then Begin
+   ReadAt(J,Hd,7);
+   If (Hd[0]=128) And (Hd[1]=116) And (Hd[2]=104) And (Hd[3]=101) And (Hd[4]=111) And (Hd[5]=114) And (Hd[6]=97) Then Begin VP3OggIsTheora:=True; Break; End;
+  End;
+  At:=J+Sum;
+ End;
+ CloseRead;
+End;
+
+{ ---- Theora dans AVI / MOV (fourcc 'theo') : extradata = trois en-tetes (2 octets de longueur ou lacet Xiph) ---- }
+Procedure DecodeTheoraQX(Const Source,Target: String; Mode: LongInt);
+Var
+ Ex,ExLen,I,Q,Sz,At,L1,L2,N: LongInt; Ok: Boolean; Fn,Fd: LongInt;
+Function B(P: LongInt): LongInt;
+Begin If (P>=0) And (P<QXSize) Then B:=QXF^[P] Else B:=0; End;
+Begin
+ VP3Reset;
+ VP3IsOgg:=False; QXOpen(Source);
+ Ex:=QXExtPos; ExLen:=QXExtLen;
+ If QXIsMov Then Begin
+  Q:=QXExtPos; Ok:=False;
+  While Q+8<=QXExtPos+QXExtLen Do Begin
+   Sz:=QXB32(Q);
+   If Sz<8 Then Break;
+   If QXT4(Q+4)='glbl' Then Begin Ex:=Q+8; ExLen:=Sz-8; Ok:=True; Break; End;
+   Inc(Q,Sz);
+  End;
+  If Not Ok Then Fail('theora: extradata absent.');
+ End;
+ If Ex+ExLen>QXSize Then ExLen:=QXSize-Ex;
+ If ExLen<6 Then Fail('theora: extradata incorrect.');
+ If B(Ex)*256+B(Ex+1)=42 Then Begin
+  At:=Ex;
+  For I:=0 To 2 Do Begin
+   L1:=B(At)*256+B(At+1); Inc(At,2);
+   VP3HP[I]:=PEABuffer(@QXF^[At]); VP3HL[I]:=L1; Inc(At,L1);
+   If At>Ex+ExLen Then Fail('theora: extradata incorrect.');
+  End;
+ End Else If B(Ex)=2 Then Begin
+  At:=Ex+1; L1:=0; L2:=0;
+  While B(At)=255 Do Begin Inc(L1,255); Inc(At); End;
+  Inc(L1,B(At)); Inc(At);
+  While B(At)=255 Do Begin Inc(L2,255); Inc(At); End;
+  Inc(L2,B(At)); Inc(At);
+  If (At+L1+L2>Ex+ExLen) Then Fail('theora: extradata incorrect.');
+  VP3HP[0]:=PEABuffer(@QXF^[At]); VP3HL[0]:=L1;
+  VP3HP[1]:=PEABuffer(@QXF^[At+L1]); VP3HL[1]:=L2;
+  VP3HP[2]:=PEABuffer(@QXF^[At+L1+L2]); VP3HL[2]:=Ex+ExLen-(At+L1+L2);
+ End Else Fail('theora: extradata incorrect.');
+ VP3InitHeaders;
+ VP3Arena:=QXF; VP3PkOff:=PVP3Int(QXPos); VP3PkSz:=PVP3Int(QXLen); VP3NPk:=QXCount; VP3NHdr:=0;
+ GetMem(VP3Pts,VP3NPk*4+16); For N:=0 To VP3NPk-1 Do VP3Pts^[N]:=N;
+ If QXIsMov And (QXSarN>0) Then Begin VP3SarN:=QXSarN; VP3SarD:=QXSarD; End
+ Else If (VP3SarN>0) And (VP3SarD>0) Then Begin
+  Fn:=VP3SarN; Fd:=VP3SarD; I:=Fn; Q:=Fd; While Q<>0 Do Begin At:=I Mod Q; I:=Q; Q:=At; End;
+  VP3SarN:=Fn Div I; VP3SarD:=Fd Div I;
+ End Else Begin VP3SarN:=0; VP3SarD:=0; End;
+ VP3RunTheora(Mode,Target,True,0,QXRn,QXRd,VP3SarN,VP3SarD);
+End;
+{ ==== G4A-END ==== }
+{ ==== BLOCK-ANCHOR-G4A : inserer le code du groupe G4A juste au-dessus de cette ligne ==== }
 
 Procedure G2CFEnd;
 Begin If G2CFOn And Not NVDone Then CFFlush(G2AFr); End;
@@ -89118,6 +90981,8 @@ BEGIN
   { LIST-ANCHOR-G3A }
   { LIST-ANCHOR-G3B }
   { LIST-ANCHOR-G3C }
+  WriteLn('D V    theora          Theora (decodeur natif complet I/P: Ogg Theora 4:2:0/4:2:2/4:4:4, recadrage)');
+  WriteLn('D V    vp3             On2 VP3 (decodeur natif: AVI VP31/VP30)');
   { LIST-ANCHOR-G4A }
   WriteLn('D V    vp5             On2 VP5 (AVI VP50; decodeur exact)');
   WriteLn('D V    vp6             On2 VP6 (AVI VP60/VP61/VP62; decodeur exact)');
@@ -89437,7 +91302,7 @@ BEGIN
  Else If (InputFormat='siff') And Not IsHTTP(InputPath) And G2ASiffVideo(Intermediate) Then NVKind:=230
  Else If (InputFormat='flv') And Not IsHTTP(InputPath) And Not VPDAudioOut And ((FLVVideoCodec(Intermediate)=4) Or (FLVVideoCodec(Intermediate)=5)) Then NVKind:=484
  Else If InputFormat='bethsoftvid' Then NVKind:=1 Else If InputFormat='bfi' Then NVKind:=2 Else If InputFormat='c93' Then NVKind:=3
- Else If InputFormat='bmp' Then NVKind:=4 Else If (InputFormat='pam') Or (InputFormat='pbm') Or (InputFormat='pgm') Or (InputFormat='ppm') Or (InputFormat='pgmyuv') Then NVKind:=50 Else If InputFormat='nuv' Then NVKind:=54 Else If InputFormat='pcx' Then NVKind:=55 Else If InputFormat='png' Then NVKind:=58 Else If InputFormat='roq' Then NVKind:=65 Else If InputFormat='rl2' Then NVKind:=66 Else If InputFormat='smk' Then NVKind:=67 Else If (InputFormat='rm') And Not IsHTTP(InputPath) And (RMVideoKind(InputPath)<>0) Then NVKind:=68 Else If InputFormat='sgi' Then NVKind:=56 Else If InputFormat='ptx' Then NVKind:=57 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22 Else If (InputFormat='flic') And Not IsHTTP(InputPath) Then NVKind:=23 Else If (InputFormat='gif') And Not IsHTTP(InputPath) Then NVKind:=25 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=2) Then NVKind:=27 Else If (InputFormat='h263') And Not IsHTTP(InputPath) Then NVKind:=28 Else If (InputFormat='h261') And Not IsHTTP(InputPath) Then NVKind:=29 Else If (InputFormat='idcin') And Not IsHTTP(InputPath) Then NVKind:=30 Else If (InputFormat='ipmovie') And Not IsHTTP(InputPath) Then NVKind:=38 Else If (InputFormat='jpegls_pipe') And Not IsHTTP(InputPath) Then NVKind:=39 Else If (InputFormat='jpeg_pipe') And Not IsHTTP(InputPath) Then NVKind:=46 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And MP4HasMjpb(InputPath) Then NVKind:=47 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And (QXMovKind(InputPath)<>0) Then NVKind:=QXMovKind(InputPath) Else If (InputFormat='h264') And Not IsHTTP(InputPath) Then NVKind:=33
+ Else If InputFormat='bmp' Then NVKind:=4 Else If (InputFormat='pam') Or (InputFormat='pbm') Or (InputFormat='pgm') Or (InputFormat='ppm') Or (InputFormat='pgmyuv') Then NVKind:=50 Else If InputFormat='nuv' Then NVKind:=54 Else If InputFormat='pcx' Then NVKind:=55 Else If InputFormat='png' Then NVKind:=58 Else If InputFormat='roq' Then NVKind:=65 Else If InputFormat='rl2' Then NVKind:=66 Else If (InputFormat='ogg') And Not IsHTTP(InputPath) And VP3OggIsTheora(Intermediate) Then NVKind:=170 Else If InputFormat='smk' Then NVKind:=67 Else If (InputFormat='rm') And Not IsHTTP(InputPath) And (RMVideoKind(InputPath)<>0) Then NVKind:=68 Else If InputFormat='sgi' Then NVKind:=56 Else If InputFormat='ptx' Then NVKind:=57 Else If InputFormat='dnxhd' Then NVKind:=10 Else If InputFormat='cavsvideo' Then NVKind:=12 Else If InputFormat='dv' Then NVKind:=13 Else If InputFormat='dsicin' Then NVKind:=15 Else If InputFormat='dxa' Then NVKind:=16 Else If (InputFormat='ea') And Not IsHTTP(InputPath) And (EAVDetect(Intermediate)>0) Then NVKind:=17 Else If (InputFormat='rpl') And Not IsHTTP(InputPath) Then NVKind:=19 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=3) Then NVKind:=22 Else If (InputFormat='flic') And Not IsHTTP(InputPath) Then NVKind:=23 Else If (InputFormat='gif') And Not IsHTTP(InputPath) Then NVKind:=25 Else If (InputFormat='flv') And Not IsHTTP(InputPath) And (FLVVideoCodec(Intermediate)=2) Then NVKind:=27 Else If (InputFormat='h263') And Not IsHTTP(InputPath) Then NVKind:=28 Else If (InputFormat='h261') And Not IsHTTP(InputPath) Then NVKind:=29 Else If (InputFormat='idcin') And Not IsHTTP(InputPath) Then NVKind:=30 Else If (InputFormat='ipmovie') And Not IsHTTP(InputPath) Then NVKind:=38 Else If (InputFormat='jpegls_pipe') And Not IsHTTP(InputPath) Then NVKind:=39 Else If (InputFormat='jpeg_pipe') And Not IsHTTP(InputPath) Then NVKind:=46 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And MP4HasMjpb(InputPath) Then NVKind:=47 Else If (InputFormat='mp4') And Not IsHTTP(InputPath) And (QXMovKind(InputPath)<>0) Then NVKind:=QXMovKind(InputPath) Else If (InputFormat='h264') And Not IsHTTP(InputPath) Then NVKind:=33
  Else If (InputFormat='avi') And Not IsHTTP(InputPath) Then Begin
   AsvTag:=AVIVideoFourCC(Intermediate);
   If AsvTag='CSCD' Then NVKind:=5 Else If (AsvTag='tscc') Or (AsvTag='TSCC') Then NVKind:=6
@@ -89449,6 +91314,7 @@ BEGIN
   Else If (AsvTag='WMV1') Or (AsvTag='wmv1') Or (AsvTag='WMV2') Or (AsvTag='wmv2') Then NVKind:=150
   Else If (VPDAviKind(AsvTag)<>0) And Not VPDAudioOut Then NVKind:=VPDAviKind(AsvTag)
   Else If AsvTag='FSV1' Then NVKind:=18
+  Else If (AsvTag='VP31') Or (AsvTag='VP30') Then NVKind:=171
   Else If (AsvTag='HFYU') Or (AsvTag='FFVH') Or (AsvTag='hfyu') Then NVKind:=20
   Else If AsvTag='FFV1' Then NVKind:=21
   Else If AsvTag='FPS1' Then NVKind:=24
