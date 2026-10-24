@@ -97470,6 +97470,1262 @@ End;
 { ==== F4-END ==== }
 { ==== BLOCK-ANCHOR-F4 : inserer le code du groupe F4 juste au-dessus de cette ligne ==== }
 
+{ ==== F5 BEGIN : formats null, crc, framecrc, rawvideo, yuv4mpegpipe, image2, image2pipe, gif, mpjpeg, dv, mxf, gxf ==== }
+Const F5MaxFm=95;
+Type
+ F5TFm=Record Nm: String[12]; Pl: Byte; Hs,Vs,Bps,Bpp: Byte; Alpha,Full: Boolean; Y4: String[28]; End;
+ F5TSrc=Record
+  Path: String; IsY4M: Boolean; Fm: Integer; W,H,FN,FD,SarN,SarD: LongInt; Il: Char; Rng,Loc: Integer;
+  FBytes,N,DataOff: LongInt; Pos: PALLong; HasPos: Boolean;
+ End;
+Var
+ F5Fm: Array[0..F5MaxFm] Of F5TFm; F5NFm: Integer; F5FmInit: Boolean;
+ F5S: F5TSrc; F5SF: File; F5SOpen: Boolean;
+ F5OF: File; F5OOpen: Boolean; F5OStd: Boolean;
+ F5Tmp: Array[1..64] Of String[200]; F5NTmp: Integer; F5PrevExit: Pointer;
+ F5InPix: String[20]; F5InW,F5InH: LongInt; F5InFN,F5InFD: LongInt; F5StartNum: LongInt; F5Update: LongInt; F5Loop: LongInt;
+ F5PatType: String[12]; F5FinalDelay: LongInt; F5HasFD: Boolean; F5Quiet: Boolean; F5FrameRateSet: Boolean;
+ F5Self: String; F5OutFmt: String[20]; F5NoBanner: Boolean; F5Boundary: String[60]; F5Strftime: Boolean;
+ F5Sink: String[20]; F5InForced: String[20]; F5Hooked: Boolean;
+
+Procedure F5AddFm(Const aNm: String; aPl,aHs,aVs,aBps,aBpp: Integer; aAlpha,aFull: Boolean; Const aY4: String);
+Begin
+ If F5NFm>F5MaxFm Then Exit;
+ F5Fm[F5NFm].Nm:=aNm; F5Fm[F5NFm].Pl:=aPl; F5Fm[F5NFm].Hs:=aHs; F5Fm[F5NFm].Vs:=aVs; F5Fm[F5NFm].Bps:=aBps; F5Fm[F5NFm].Bpp:=aBpp;
+ F5Fm[F5NFm].Alpha:=aAlpha; F5Fm[F5NFm].Full:=aFull; F5Fm[F5NFm].Y4:=aY4;
+ Inc(F5NFm);
+End;
+
+Procedure F5InitFm;
+Var D,S: Integer; Dn,Sn,Tg: String; Dp: Array[0..5] Of Integer;
+Begin
+ If F5FmInit Then Exit;
+ F5FmInit:=True; F5NFm:=0;
+ Dp[0]:=8; Dp[1]:=9; Dp[2]:=10; Dp[3]:=12; Dp[4]:=14; Dp[5]:=16;
+ For D:=0 To 5 Do For S:=0 To 2 Do Begin
+  If S=0 Then Sn:='420' Else If S=1 Then Sn:='422' Else Sn:='444';
+  If Dp[D]=8 Then Begin
+   Str(Dp[D],Dn); Dn:='';
+   If S=0 Then Tg:='C420jpeg XYSCSS=420JPEG' Else Tg:='C'+Sn+' XYSCSS='+Sn;
+   F5AddFm('yuv'+Sn+'p',1,Ord(S<2),Ord(S=0),1,0,False,False,Tg);
+  End Else Begin
+   Str(Dp[D],Dn);
+   F5AddFm('yuv'+Sn+'p'+Dn+'le',1,Ord(S<2),Ord(S=0),2,0,False,False,'C'+Sn+'p'+Dn+' XYSCSS='+Sn+'P'+Dn);
+  End;
+ End;
+ F5AddFm('yuv411p',1,2,0,1,0,False,False,'C411 XYSCSS=411');
+ F5AddFm('yuv410p',1,2,2,1,0,False,False,'');
+ F5AddFm('yuva444p',1,0,0,1,0,True,False,'C444alpha XYSCSS=444');
+ F5AddFm('yuvj420p',1,1,1,1,0,False,True,'C420jpeg XYSCSS=420JPEG');
+ F5AddFm('yuvj422p',1,1,0,1,0,False,True,'C422 XYSCSS=422');
+ F5AddFm('yuvj444p',1,0,0,1,0,False,True,'C444 XYSCSS=444');
+ F5AddFm('yuvj411p',1,2,0,1,0,False,True,'');
+ F5AddFm('gray',2,0,0,1,0,False,False,'Cmono');
+ F5AddFm('gray9le',2,0,0,2,0,False,False,'Cmono9');
+ F5AddFm('gray10le',2,0,0,2,0,False,False,'Cmono10');
+ F5AddFm('gray12le',2,0,0,2,0,False,False,'Cmono12');
+ F5AddFm('gray16le',2,0,0,2,0,False,False,'Cmono16');
+ F5AddFm('rgb24',0,0,0,1,3,False,False,'');
+ F5AddFm('bgr24',0,0,0,1,3,False,False,'');
+ F5AddFm('rgba',0,0,0,1,4,True,False,'');
+ F5AddFm('bgra',0,0,0,1,4,True,False,'');
+ F5AddFm('argb',0,0,0,1,4,True,False,'');
+ F5AddFm('abgr',0,0,0,1,4,True,False,'');
+ F5AddFm('rgb0',0,0,0,1,4,False,False,'');
+ F5AddFm('bgr0',0,0,0,1,4,False,False,'');
+ F5AddFm('0rgb',0,0,0,1,4,False,False,'');
+ F5AddFm('0bgr',0,0,0,1,4,False,False,'');
+ F5AddFm('rgb565le',0,0,0,1,2,False,False,'');
+ F5AddFm('bgr565le',0,0,0,1,2,False,False,'');
+ F5AddFm('rgb555le',0,0,0,1,2,False,False,'');
+ F5AddFm('bgr555le',0,0,0,1,2,False,False,'');
+ F5AddFm('yuyv422',0,0,0,1,2,False,False,'');
+ F5AddFm('uyvy422',0,0,0,1,2,False,False,'');
+ F5AddFm('rgb48le',0,0,0,2,6,False,False,'');
+ F5AddFm('bgr48le',0,0,0,2,6,False,False,'');
+ F5AddFm('rgba64le',0,0,0,2,8,True,False,'');
+ F5AddFm('nv12',3,1,1,1,0,False,False,'');
+ F5AddFm('nv21',3,1,1,1,0,False,False,'');
+ F5AddFm('gbrp',1,0,0,1,0,False,False,'');
+End;
+
+Function F5FindFm(S: String): Integer;
+Var I: Integer; T: String;
+Begin
+ F5InitFm; S:=Lower(S);
+ If S='y8' Then S:='gray' Else If S='gray8' Then S:='gray' Else If S='gray16' Then S:='gray16le' Else If S='gray10' Then S:='gray10le'
+ Else If S='gray12' Then S:='gray12le' Else If S='gray9' Then S:='gray9le';
+ If (Length(S)>=8) And (Copy(S,1,3)='yuv') And (Pos('p',S)>0) And (S[Length(S)]<>'e') Then Begin
+  { yuv420p10 -> yuv420p10le }
+  T:=Copy(S,Length(S),1);
+  If T[1] In ['0'..'9'] Then If Length(S)>=9 Then S:=S+'le';
+ End;
+ For I:=0 To F5NFm-1 Do If F5Fm[I].Nm=S Then Begin F5FindFm:=I; Exit; End;
+ F5FindFm:=-1;
+End;
+
+Function F5CeilSh(V: LongInt; Sh: Integer): LongInt;Begin F5CeilSh:=(V+(1 Shl Sh)-1) Shr Sh; End;
+
+Function F5FrameBytes(Fm: Integer; W,H: LongInt): LongInt;
+Var CW,CH: LongInt; B: LongInt;
+Begin
+ With F5Fm[Fm] Do Begin
+  Case Pl Of
+   1: Begin CW:=F5CeilSh(W,Hs); CH:=F5CeilSh(H,Vs); B:=W*H+2*CW*CH; If Alpha Then B:=B+W*H; F5FrameBytes:=B*Bps; End;
+   2: F5FrameBytes:=W*H*Bps;
+   3: Begin CW:=F5CeilSh(W,1); CH:=F5CeilSh(H,1); F5FrameBytes:=W*H+2*CW*CH; End;
+   Else F5FrameBytes:=W*H*Bpp;
+  End;
+ End;
+End;
+
+{ ---------- sortie standard / fichier ---------- }
+Function F5Num(V: Int64; Wd: Integer): String;
+Var S: String;
+Begin
+ Str(V,S); While Length(S)<Wd Do S:=' '+S; F5Num:=S;
+End;
+
+Function F5Hex8(V: Int64): String;
+Const Dg: String[16]='0123456789abcdef';
+Var S: String; I: Integer;
+Begin
+ S:='';
+ For I:=7 Downto 0 Do S:=S+Dg[((V Shr (I*4)) And 15)+1];
+ F5Hex8:=S;
+End;
+
+Procedure F5Exit;
+Var I: Integer; F: File; Code: Integer;
+Begin
+ ExitProc:=F5PrevExit;
+ If F5SOpen Then Begin {$I-}Close(F5SF);{$I+} Code:=IOResult; F5SOpen:=False; End;
+ If F5OOpen Then Begin {$I-}Close(F5OF);{$I+} Code:=IOResult; F5OOpen:=False; End;
+ For I:=1 To F5NTmp Do If F5Tmp[I]<>'' Then Begin
+  Assign(F,F5Tmp[I]); {$I-}Erase(F);{$I+} Code:=IOResult; F5Tmp[I]:='';
+ End;
+End;
+
+Procedure F5HookExit;
+Begin
+ If F5Hooked Then Exit;
+ F5Hooked:=True; F5PrevExit:=ExitProc; ExitProc:=@F5Exit;
+End;
+
+Function F5NewTmp(Const Ext: String): String;
+Var Folder,D: String; J,K: Integer; N: String;
+Begin
+ J:=Length(OutputPath);
+ While (J>0) And Not (OutputPath[J] In ['/','\',':']) Do Dec(J);
+ Folder:=Copy(OutputPath,1,J);
+ If Length(Folder)>150 Then Folder:='';
+ If F5NTmp>=64 Then Fail('F5: trop de fichiers temporaires.');
+ For K:=1 To 200 Do Begin
+  Str(Random(900000),D); N:=Folder+'F5T'+D+Ext;
+  If Not Exists(N) Then Begin
+   Inc(F5NTmp); F5Tmp[F5NTmp]:=N; F5NewTmp:=N; Exit;
+  End;
+ End;
+ Fail('F5: nom temporaire indisponible.'); F5NewTmp:='';
+End;
+
+Procedure F5DelTmp(Const Nm: String);
+Var I: Integer; F: File; Code: Integer;
+Begin
+ For I:=1 To F5NTmp Do If F5Tmp[I]=Nm Then Begin
+  Assign(F,Nm); {$I-}Erase(F);{$I+} Code:=IOResult; F5Tmp[I]:=''; Exit;
+ End;
+End;
+
+Procedure F5OpenOut(Const Nm: String);
+Var Code: Integer;
+Begin
+ If Nm='-' Then Begin
+  Assign(F5OF,''); {$I-}Rewrite(F5OF,1);{$I+} Code:=IOResult; F5OStd:=True;
+ End Else Begin
+  If Exists(Nm) And Not Overwrite Then Fail('Sortie existante (utiliser -y): '+Nm);
+  Assign(F5OF,Nm); {$I-}Rewrite(F5OF,1);{$I+} Code:=IOResult; F5OStd:=False;
+ End;
+ If Code<>0 Then Fail('Creation impossible: '+Nm);
+ F5OOpen:=True;
+End;
+
+Procedure F5Wr(Var Buf; Cnt: LongInt);
+Var P: PEABuffer; At,Q: LongInt; Code: Integer; Actual: LongInt;
+Begin
+ P:=@Buf; At:=0;
+ While At<Cnt Do Begin
+  Q:=Cnt-At; If Q>32768 Then Q:=32768;
+  {$I-}BlockWrite(F5OF,P^[At],Q,Actual);{$I+} Code:=IOResult;
+  If (Code<>0) Or (Actual<>Q) Then Fail('Ecriture incomplete.');
+  Inc(At,Q);
+ End;
+End;
+
+Procedure F5WrS(Const S: String);
+Var T: String;
+Begin
+ T:=S; If Length(T)>0 Then F5Wr(T[1],Length(T));
+End;
+
+Procedure F5CloseOut;
+Var Code: Integer;
+Begin
+ If F5OOpen Then Begin {$I-}Close(F5OF);{$I+} Code:=IOResult; F5OOpen:=False; End;
+End;
+
+{ ---------- lecture ---------- }
+Procedure F5SrcOpen(Const Nm: String);
+Var Code: Integer; OldMode: Byte;
+Begin
+ Assign(F5SF,Nm); OldMode:=FileMode; FileMode:=0;
+ {$I-}Reset(F5SF,1);{$I+} Code:=IOResult; FileMode:=OldMode;
+ If Code<>0 Then Fail('Lecture impossible: '+Nm);
+ F5SOpen:=True;
+End;
+
+Procedure F5SrcClose;
+Var Code: Integer;
+Begin
+ If F5SOpen Then Begin {$I-}Close(F5SF);{$I+} Code:=IOResult; F5SOpen:=False; End;
+End;
+
+Function F5Rd(Pos: LongInt; Var Buf; Cnt: LongInt): Boolean;
+Var P: PEABuffer; At,Q,Actual: LongInt; Code: Integer;
+Begin
+ F5Rd:=False; P:=@Buf; At:=0;
+ {$I-}Seek(F5SF,Pos);{$I+} Code:=IOResult;
+ If Code<>0 Then Exit;
+ While At<Cnt Do Begin
+  Q:=Cnt-At; If Q>32768 Then Q:=32768;
+  {$I-}BlockRead(F5SF,P^[At],Q,Actual);{$I+} Code:=IOResult;
+  If (Code<>0) Or (Actual<>Q) Then Exit;
+  Inc(At,Q);
+ End;
+ F5Rd:=True;
+End;
+
+Function F5SrcSize: LongInt;
+Begin
+ F5SrcSize:=FileSize(F5SF);
+End;
+
+{ lit une ligne (max Lim octets) a partir de Pos ; renvoie la longueur lue y compris le LF, 0 si echec }
+Function F5RdLine(Pos: LongInt; Var Line: String; Lim: Integer): LongInt;
+Var B: Array[0..0] Of Byte; Sz,N: LongInt;
+Begin
+ Line:=''; N:=0; Sz:=F5SrcSize; F5RdLine:=0;
+ While (Pos+N<Sz) And (N<Lim) Do Begin
+  If Not F5Rd(Pos+N,B,1) Then Exit;
+  Inc(N);
+  If B[0]=10 Then Begin F5RdLine:=N; Exit; End;
+  If Length(Line)<250 Then Line:=Line+Chr(B[0]);
+ End;
+End;
+
+Function F5Gcd(A,B: Int64): Int64;
+Var T: Int64;
+Begin
+ If A<0 Then A:=-A; If B<0 Then B:=-B;
+ While B<>0 Do Begin T:=A Mod B; A:=B; B:=T; End;
+ F5Gcd:=A;
+End;
+
+Function F5ValL(Const S: String; Var P: LongInt): LongInt;
+Var V: Int64; Neg: Boolean;
+Begin
+ V:=0; Neg:=False;
+ If (P<=Length(S)) And (S[P]='-') Then Begin Neg:=True; Inc(P); End;
+ While (P<=Length(S)) And (S[P] In ['0'..'9']) Do Begin If V<2000000000 Then V:=V*10+Ord(S[P])-48; Inc(P); End;
+ If Neg Then V:=-V;
+ F5ValL:=V;
+End;
+
+{ ouvre une source Y4M ; Fail si invalide }
+Procedure F5OpenY4M(Const Nm: String);
+Var Line,Tok,Tmp: String; Hl,Cur,Sz,Fl,K,P,Code: LongInt; I: Integer; Fh: String; Cn: String; Alt: String; Idx: Integer;
+Begin
+ F5InitFm; FillChar(F5S,SizeOf(F5S),0); F5S.Path:=Nm; F5S.IsY4M:=True; F5S.HasPos:=False; F5S.Pos:=Nil;
+ F5SrcOpen(Nm); Sz:=F5SrcSize;
+ Hl:=F5RdLine(0,Line,129);
+ If (Hl=0) Or (Copy(Line,1,9)<>'YUV4MPEG2') Then Fail('Y4M: signature YUV4MPEG2 invalide.');
+ F5S.W:=-1; F5S.H:=-1; F5S.FN:=0; F5S.FD:=0; F5S.SarN:=0; F5S.SarD:=0; F5S.Il:='?'; F5S.Rng:=0; F5S.Loc:=0;
+ Cn:=''; Alt:='';
+ Tmp:=Copy(Line,11,255)+' ';
+ K:=1;
+ While K<=Length(Tmp) Do Begin
+  If Tmp[K]=' ' Then Begin Inc(K); Continue; End;
+  Code:=K; Inc(K);
+  Case Tmp[Code] Of
+   'W': Begin F5S.W:=F5ValL(Tmp,K); End;
+   'H': Begin F5S.H:=F5ValL(Tmp,K); End;
+   'C': Begin
+     Cn:=''; While (K<=Length(Tmp)) And (Tmp[K]<>' ') Do Begin Cn:=Cn+Tmp[K]; Inc(K); End;
+    End;
+   'I': Begin
+     If K<=Length(Tmp) Then Begin
+      Case Tmp[K] Of
+       '?': F5S.Il:='?'; 'p': F5S.Il:='p'; 't': F5S.Il:='t'; 'b': F5S.Il:='b';
+       Else Fail('Y4M: en-tete invalide.');
+      End;
+      Inc(K);
+     End;
+    End;
+   'F': Begin F5S.FN:=F5ValL(Tmp,K); If (K<=Length(Tmp)) And (Tmp[K]=':') Then Begin Inc(K); F5S.FD:=F5ValL(Tmp,K); End Else F5S.FD:=0; While (K<=Length(Tmp)) And (Tmp[K]<>' ') Do Inc(K); End;
+   'A': Begin F5S.SarN:=F5ValL(Tmp,K); If (K<=Length(Tmp)) And (Tmp[K]=':') Then Begin Inc(K); F5S.SarD:=F5ValL(Tmp,K); End Else F5S.SarD:=0; While (K<=Length(Tmp)) And (Tmp[K]<>' ') Do Inc(K); End;
+   'X': Begin
+     Fh:=''; While (K<=Length(Tmp)) And (Tmp[K]<>' ') Do Begin Fh:=Fh+Tmp[K]; Inc(K); End;
+     If Copy(Fh,1,6)='YSCSS=' Then Alt:=Copy(Fh,7,40)
+     Else If Copy(Fh,1,11)='COLORRANGE=' Then Begin
+      If Copy(Fh,12,4)='FULL' Then F5S.Rng:=2 Else If Copy(Fh,12,7)='LIMITED' Then F5S.Rng:=1;
+     End;
+    End;
+   Else Begin
+     While (K<=Length(Tmp)) And (Tmp[K]<>' ') Do Inc(K);
+    End;
+  End;
+ End;
+ If (F5S.W<0) Or (F5S.H<0) Then Fail('Y4M: en-tete invalide.');
+ Idx:=-1;
+ If Cn<>'' Then Begin
+  Tok:=Cn;
+  If Copy(Tok,1,7)='420jpeg' Then Begin Idx:=F5FindFm('yuv420p'); F5S.Loc:=0; End
+  Else If Copy(Tok,1,8)='420mpeg2' Then Begin Idx:=F5FindFm('yuv420p'); F5S.Loc:=1; End
+  Else If Copy(Tok,1,8)='420paldv' Then Begin Idx:=F5FindFm('yuv420p'); F5S.Loc:=2; End
+  Else If Copy(Tok,1,6)='420p16' Then Idx:=F5FindFm('yuv420p16le') Else If Copy(Tok,1,6)='422p16' Then Idx:=F5FindFm('yuv422p16le')
+  Else If Copy(Tok,1,6)='444p16' Then Idx:=F5FindFm('yuv444p16le') Else If Copy(Tok,1,6)='420p14' Then Idx:=F5FindFm('yuv420p14le')
+  Else If Copy(Tok,1,6)='422p14' Then Idx:=F5FindFm('yuv422p14le') Else If Copy(Tok,1,6)='444p14' Then Idx:=F5FindFm('yuv444p14le')
+  Else If Copy(Tok,1,6)='420p12' Then Idx:=F5FindFm('yuv420p12le') Else If Copy(Tok,1,6)='422p12' Then Idx:=F5FindFm('yuv422p12le')
+  Else If Copy(Tok,1,6)='444p12' Then Idx:=F5FindFm('yuv444p12le') Else If Copy(Tok,1,6)='420p10' Then Idx:=F5FindFm('yuv420p10le')
+  Else If Copy(Tok,1,6)='422p10' Then Idx:=F5FindFm('yuv422p10le') Else If Copy(Tok,1,6)='444p10' Then Idx:=F5FindFm('yuv444p10le')
+  Else If Copy(Tok,1,5)='420p9' Then Idx:=F5FindFm('yuv420p9le') Else If Copy(Tok,1,5)='422p9' Then Idx:=F5FindFm('yuv422p9le')
+  Else If Copy(Tok,1,5)='444p9' Then Idx:=F5FindFm('yuv444p9le')
+  Else If Copy(Tok,1,3)='420' Then Begin Idx:=F5FindFm('yuv420p'); F5S.Loc:=0; End
+  Else If Copy(Tok,1,3)='411' Then Idx:=F5FindFm('yuv411p') Else If Copy(Tok,1,3)='422' Then Idx:=F5FindFm('yuv422p')
+  Else If Copy(Tok,1,8)='444alpha' Then Idx:=F5FindFm('yuva444p') Else If Copy(Tok,1,3)='444' Then Idx:=F5FindFm('yuv444p')
+  Else If Copy(Tok,1,6)='mono16' Then Idx:=F5FindFm('gray16le') Else If Copy(Tok,1,6)='mono12' Then Idx:=F5FindFm('gray12le')
+  Else If Copy(Tok,1,6)='mono10' Then Idx:=F5FindFm('gray10le') Else If Copy(Tok,1,5)='mono9' Then Idx:=F5FindFm('gray9le')
+  Else If Copy(Tok,1,4)='mono' Then Idx:=F5FindFm('gray')
+  Else Fail('YUV4MPEG stream contains an unknown pixel format.');
+ End;
+ If Idx<0 Then Begin
+  If Alt='' Then Idx:=F5FindFm('yuv420p')
+  Else If Copy(Alt,1,4)='420J' Then Idx:=F5FindFm('yuv420p') Else If Copy(Alt,1,4)='420M' Then Idx:=F5FindFm('yuv420p') Else If Copy(Alt,1,4)='420P' Then Begin
+   If Length(Alt)>4 Then Idx:=F5FindFm('yuv420p'+Copy(Alt,6,5)) Else Idx:=F5FindFm('yuv420p');
+  End
+  Else If Copy(Alt,1,3)='422' Then Idx:=F5FindFm('yuv422p'+Copy(Alt,5,5))
+  Else If Copy(Alt,1,3)='444' Then Idx:=F5FindFm('yuv444p'+Copy(Alt,5,5))
+  Else If Copy(Alt,1,3)='411' Then Idx:=F5FindFm('yuv411p')
+  Else Idx:=F5FindFm('yuv420p');
+  If Idx<0 Then Idx:=F5FindFm('yuv420p');
+ End;
+ F5S.Fm:=Idx;
+ If (F5S.FN<=0) Or (F5S.FD<=0) Then Begin F5S.FN:=25; F5S.FD:=1; End;
+ K:=F5Gcd(F5S.FN,F5S.FD); F5S.FN:=F5S.FN Div K; F5S.FD:=F5S.FD Div K;
+ If (F5S.SarN=0) And (F5S.SarD=0) Then F5S.SarD:=1;
+ If (F5S.W<1) Or (F5S.H<1) Or (F5S.W>16384) Or (F5S.H>16384) Then Fail('Y4M: dimensions incorrectes.');
+ F5S.FBytes:=F5FrameBytes(Idx,F5S.W,F5S.H);
+ F5S.DataOff:=Hl;
+ { balayage des en-tetes de trame }
+ F5S.N:=0; Cur:=Hl;
+ If Sz>Hl Then Begin
+  GetMem(F5S.Pos,(Int64(Sz-Hl) Div (F5S.FBytes+6)+2)*4); F5S.HasPos:=True;
+  While Cur<Sz Do Begin
+   Fl:=F5RdLine(Cur,Fh,81);
+   If (Fl=0) Or (Copy(Fh,1,5)<>'FRAME') Then Break;
+   If Int64(Cur)+Fl+F5S.FBytes>Sz Then Break;
+   F5S.Pos^[F5S.N]:=Cur+Fl; Inc(F5S.N); Cur:=Cur+Fl+F5S.FBytes;
+  End;
+ End;
+End;
+
+Function F5ReadFrame(I: LongInt; Buf: PEABuffer): Boolean;
+Begin
+ F5ReadFrame:=False;
+ If (I<0) Or (I>=F5S.N) Then Exit;
+ If F5S.IsY4M Then F5ReadFrame:=F5Rd(F5S.Pos^[I],Buf^,F5S.FBytes)
+ Else F5ReadFrame:=F5Rd(F5S.DataOff+Int64(I)*F5S.FBytes,Buf^,F5S.FBytes);
+End;
+
+Procedure F5CloseSrc;
+Begin
+ F5SrcClose;
+ If F5S.HasPos And (F5S.Pos<>Nil) Then Begin FreeMem(F5S.Pos); F5S.Pos:=Nil; F5S.HasPos:=False; End;
+End;
+
+{ ---------- sommes de controle ---------- }
+Function F5Adler(Adler: LongInt; P: PEABuffer; Cnt: LongInt): LongInt;
+Var A,B: Int64; I: LongInt;
+Begin
+ A:=Adler And $FFFF; B:=(Adler Shr 16) And $FFFF;
+ For I:=0 To Cnt-1 Do Begin
+  A:=A+P^[I]; If A>=65521 Then A:=A-65521;
+  B:=B+A; If B>=65521 Then B:=B-65521;
+ End;
+ F5Adler:=LongInt((B Shl 16) Or A);
+End;
+
+Function F5Adler64(Adler: Int64; P: PEABuffer; Cnt: LongInt): Int64;
+Var A,B: Int64; I: LongInt;
+Begin
+ A:=Adler And $FFFF; B:=(Adler Shr 16) And $FFFF;
+ For I:=0 To Cnt-1 Do Begin
+  A:=A+P^[I]; If A>=65521 Then A:=A-65521;
+  B:=B+A; If B>=65521 Then B:=B-65521;
+ End;
+ F5Adler64:=(B Shl 16) Or A;
+End;
+
+{ ---------- conversions de format de pixels (sous-ensemble exact) ---------- }
+Function F5Sat(V: Int64; Hi: Int64): Int64;Begin If V>Hi Then F5Sat:=Hi Else F5Sat:=V; End;
+Function F5Sar(V: Int64; N: Integer): Int64;
+Begin
+ If V>=0 Then F5Sar:=V Shr N Else F5Sar:=-((-V+(Int64(1) Shl N)-1) Shr N);
+End;
+Function F5Cl8(V: Int64): Integer;Begin If V<0 Then F5Cl8:=0 Else If V>255 Then F5Cl8:=255 Else F5Cl8:=V; End;
+
+{ gris/luma limite -> plein (lumRangeToJpeg_c) puis arrondi 15 -> 8 bits }
+Function F5LumToJpeg(Y: Integer): Integer;
+Var V: Int64;
+Begin
+ V:=F5Sat(Int64(Y) Shl 7,30189); V:=F5Sar(V*19077-39057361,14);
+ F5LumToJpeg:=F5Cl8(F5Sar(V+64,7));
+End;
+Function F5LumFromJpeg(Y: Integer): Integer;
+Var V: Int64;
+Begin
+ V:=F5Sar(Int64(Y Shl 7)*14071+33561947,14);
+ F5LumFromJpeg:=F5Cl8(F5Sar(V+64,7));
+End;
+Function F5ChrToJpeg(C: Integer): Integer;
+Var V: Int64;
+Begin
+ V:=F5Sat(Int64(C) Shl 7,30775); V:=F5Sar(V*4663-9289992,12);
+ F5ChrToJpeg:=F5Cl8(F5Sar(V+64,7));
+End;
+Function F5ChrFromJpeg(C: Integer): Integer;
+Var V: Int64;
+Begin
+ V:=F5Sar(Int64(C Shl 7)*1799+4081085,11);
+ F5ChrFromJpeg:=F5Cl8(F5Sar(V+64,7));
+End;
+
+Function F5IsFullFm(Fm: Integer): Boolean;
+Begin
+ F5IsFullFm:=F5Fm[Fm].Full Or (F5Fm[Fm].Pl=2);
+End;
+
+Function F5Conv(Sf,Df: Integer; SrcFull: Boolean; W,H: LongInt; Src,Dst: PEABuffer): Boolean;
+Var Sn,Dn: String; I,CW,CH,N,CN: LongInt; Rgb: PEABuffer; DstFull: Boolean;
+Begin
+ F5Conv:=True;
+ Sn:=F5Fm[Sf].Nm; Dn:=F5Fm[Df].Nm;
+ If Sf=Df Then Begin Move(Src^,Dst^,F5FrameBytes(Sf,W,H)); Exit; End;
+ N:=W*H; CW:=(W+1) Div 2; CH:=(H+1) Div 2; CN:=CW*CH;
+ DstFull:=F5IsFullFm(Df);
+ If ((Sn='yuv420p') Or (Sn='yuvj420p') Or (Sn='gray')) And ((Dn='yuv420p') Or (Dn='yuvj420p') Or (Dn='gray')) Then Begin
+  For I:=0 To N-1 Do
+   If SrcFull=DstFull Then Dst^[I]:=Src^[I] Else If DstFull Then Dst^[I]:=F5LumToJpeg(Src^[I]) Else Dst^[I]:=F5LumFromJpeg(Src^[I]);
+  If Dn<>'gray' Then Begin
+   If Sn='gray' Then FillChar(Dst^[N],2*CN,128)
+   Else For I:=N To N+2*CN-1 Do
+    If SrcFull=DstFull Then Dst^[I]:=Src^[I] Else If DstFull Then Dst^[I]:=F5ChrToJpeg(Src^[I]) Else Dst^[I]:=F5ChrFromJpeg(Src^[I]);
+  End;
+  Exit;
+ End;
+ If (Sn='gray') And ((Dn='rgb24') Or (Dn='bgr24')) Then Begin
+  For I:=0 To N-1 Do Begin Dst^[I*3]:=Src^[I]; Dst^[I*3+1]:=Src^[I]; Dst^[I*3+2]:=Src^[I]; End;
+  Exit;
+ End;
+ If ((Sn='yuv420p') Or (Sn='yuvj420p')) And ((Dn='rgb24') Or (Dn='bgr24')) Then Begin
+  NVW:=W; NVH:=H; NVFmt:=7; NVSubX:=1; NVSubY:=1; NVCW:=CW; NVCH:=CH; NVFullRng:=SrcFull; NVBT709:=False; H5Dst16:=False;
+  GetMem(Rgb,N*3+16);
+  H5YuvRgb(Src,Rgb,3,Nil);
+  If Dn='rgb24' Then Move(Rgb^,Dst^,N*3) Else
+   For I:=0 To N-1 Do Begin Dst^[I*3]:=Rgb^[I*3+2]; Dst^[I*3+1]:=Rgb^[I*3+1]; Dst^[I*3+2]:=Rgb^[I*3]; End;
+  FreeMem(Rgb);
+  Exit;
+ End;
+ F5Conv:=False;
+End;
+
+Function F5CanConv(Sf,Df: Integer): Boolean;
+Var Sn,Dn: String;
+Begin
+ Sn:=F5Fm[Sf].Nm; Dn:=F5Fm[Df].Nm;
+ F5CanConv:=(Sf=Df) Or (((Sn='yuv420p') Or (Sn='yuvj420p')) And ((Dn='rgb24') Or (Dn='bgr24'))) Or
+  (((Sn='yuv420p') Or (Sn='yuvj420p') Or (Sn='gray')) And ((Dn='yuv420p') Or (Dn='yuvj420p') Or (Dn='gray'))) Or ((Sn='gray') And ((Dn='rgb24') Or (Dn='bgr24')));
+End;
+
+{ ---------- en-tete Y4M (yuv4mpegenc.c) ---------- }
+Function F5Y4MHeader(Fm: Integer; W,H,FN,FD,SarN,SarD: LongInt; Il: Char; Rng,Loc: Integer): String;
+Var S,T,Cs,Cr: String; An,Ad: LongInt; Ic: Char; Nm: String;
+Begin
+ Nm:=F5Fm[Fm].Nm;
+ An:=SarN; Ad:=SarD; If (An=0) And (Ad=1) Then Ad:=0;
+ Cr:='';
+ If Rng=1 Then Cr:=' XCOLORRANGE=LIMITED' Else If Rng=2 Then Cr:=' XCOLORRANGE=FULL';
+ If Il='t' Then Ic:='t' Else If Il='b' Then Ic:='b' Else Ic:='p';
+ Cs:=F5Fm[Fm].Y4;
+ If Nm='yuv420p' Then Begin
+  If Loc=2 Then Cs:='C420paldv XYSCSS=420PALDV' Else If Loc=1 Then Cs:='C420mpeg2 XYSCSS=420MPEG2' Else Cs:='C420jpeg XYSCSS=420JPEG';
+ End;
+ If F5Fm[Fm].Full Then Cr:=' XCOLORRANGE=FULL';
+ If Cs<>'' Then Cs:=' '+Cs;
+ S:='YUV4MPEG2 W'; Str(W,T); S:=S+T+' H'; Str(H,T); S:=S+T+' F'; Str(FN,T); S:=S+T+':'; Str(FD,T); S:=S+T+' I'+Ic+' A';
+ Str(An,T); S:=S+T+':'; Str(Ad,T); S:=S+T+Cs+Cr+#10;
+ F5Y4MHeader:=S;
+End;
+
+Function F5Y4MOk(Fm: Integer; Strict: Boolean): Boolean;
+Var Nm: String;
+Begin
+ Nm:=F5Fm[Fm].Nm;
+ F5Y4MOk:=False;
+ If F5Fm[Fm].Y4='' Then Exit;
+ If (Nm='yuv444p') Or (Nm='yuv422p') Or (Nm='yuv420p') Or (Nm='yuv411p') Or (Nm='gray') Or (Nm='yuvj420p') Or (Nm='yuvj422p') Or (Nm='yuvj444p') Then Begin F5Y4MOk:=True; Exit; End;
+ F5Y4MOk:=Strict;
+End;
+
+{ ---------- WAV ---------- }
+Var
+ F5WCh,F5WRate,F5WBits,F5WTag,F5WAlign: LongInt; F5WData,F5WLen: LongInt; F5WMask: LongInt; F5WHaveMask: Boolean;
+
+Function F5L32(Var B: Array Of Byte; At: Integer): LongInt;
+Begin
+ F5L32:=B[At]+B[At+1]*256+B[At+2]*65536+Int64(B[At+3])*16777216;
+End;
+Function F5L16(Var B: Array Of Byte; At: Integer): LongInt;
+Begin F5L16:=B[At]+B[At+1]*256; End;
+
+Function F5OpenWav(Const Nm: String): Boolean;
+Var H: Array[0..63] Of Byte; Sz,Cur,CL: LongInt; Id: String[4]; Got: Boolean; I: Integer; HaveFmt: Boolean;
+Begin
+ F5OpenWav:=False; F5SrcOpen(Nm); Sz:=F5SrcSize; HaveFmt:=False; F5WHaveMask:=False; F5WMask:=0;
+ If Sz<12 Then Exit;
+ If Not F5Rd(0,H,12) Then Exit;
+ If (Chr(H[0])+Chr(H[1])+Chr(H[2])+Chr(H[3])<>'RIFF') Or (Chr(H[8])+Chr(H[9])+Chr(H[10])+Chr(H[11])<>'WAVE') Then Exit;
+ Cur:=12; Got:=False;
+ While Cur+8<=Sz Do Begin
+  If Not F5Rd(Cur,H,8) Then Break;
+  Id:=Chr(H[0])+Chr(H[1])+Chr(H[2])+Chr(H[3]); CL:=F5L32(H,4);
+  Inc(Cur,8);
+  If Id='fmt ' Then Begin
+   If CL<16 Then Exit;
+   If Not F5Rd(Cur,H,16) Then Exit;
+   F5WTag:=F5L16(H,0); F5WCh:=F5L16(H,2); F5WRate:=F5L32(H,4); F5WAlign:=F5L16(H,12); F5WBits:=F5L16(H,14);
+   If (F5WTag=$FFFE) And (CL>=40) Then Begin
+    If F5Rd(Cur+16,H,24) Then Begin
+     F5WMask:=F5L32(H,4); F5WHaveMask:=True; F5WTag:=F5L16(H,8);
+    End;
+   End;
+   HaveFmt:=True;
+  End Else If Id='data' Then Begin
+   F5WData:=Cur; F5WLen:=CL;
+   If (CL<0) Or (Int64(Cur)+CL>Sz) Then F5WLen:=Sz-Cur;
+   Got:=True; Break;
+  End;
+  If CL<0 Then Break;
+  Cur:=Cur+CL+(CL And 1);
+ End;
+ F5OpenWav:=Got And HaveFmt;
+End;
+
+Function F5ChName(Ch: Integer; Mask: LongInt; HaveMask: Boolean): String;
+Var S: String;
+Begin
+ If HaveMask And (Mask<>0) Then Begin
+  Case Mask Of
+   $4: Begin F5ChName:='mono'; Exit; End;
+   $3: Begin F5ChName:='stereo'; Exit; End;
+   $7: Begin F5ChName:='3.0'; Exit; End;
+   $B: Begin F5ChName:='2.1'; Exit; End;
+   $107: Begin F5ChName:='3.0(back)'; Exit; End;
+   $33: Begin F5ChName:='quad'; Exit; End;
+   $603: Begin F5ChName:='quad(side)'; Exit; End;
+   $37: Begin F5ChName:='5.0'; Exit; End;
+   $607: Begin F5ChName:='5.0(side)'; Exit; End;
+   $3F: Begin F5ChName:='5.1'; Exit; End;
+   $60F: Begin F5ChName:='5.1(side)'; Exit; End;
+   $13F: Begin F5ChName:='6.1'; Exit; End;
+   $63F: Begin F5ChName:='7.1'; Exit; End;
+  End;
+ End;
+ Case Ch Of
+  1: S:='mono'; 2: S:='stereo'; 3: S:='2.1'; 4: S:='4.0'; 5: S:='5.0'; 6: S:='5.1'; 7: S:='6.1'; 8: S:='7.1';
+  Else Begin Str(Ch,S); S:=S+' channels'; End;
+ End;
+ F5ChName:=S;
+End;
+
+{ ---------- options globales ---------- }
+Function F5BitExact: Boolean;
+Var I: Integer;
+Begin
+ F5BitExact:=VGBitExact;
+End;
+
+Function F5Software: String;
+Begin
+ If F5BitExact Then F5Software:='' Else F5Software:='#software: Lavf60.16.100'#10;
+End;
+
+Function F5TbStr(N,D: LongInt): String;
+Var A,B: String;
+Begin
+ Str(N,A); Str(D,B); F5TbStr:=A+'/'+B;
+End;
+
+{ nombre d'images a sortir : -frames:v, -t }
+Function F5OutCount(N: LongInt): LongInt;
+Var K,Lim: LongInt; T: Int64;
+Begin
+ Lim:=N;
+ If (H4SVfr>0) And (H4SVfr<Lim) Then Lim:=H4SVfr;
+ If H4STSet Then Begin
+  { image k acceptee si k*FD/FN < t }
+  K:=0;
+  While (K<Lim) And (Int64(K)*F5S.FD*1000000<H4STus*F5S.FN) Do Inc(K);
+  Lim:=K;
+ End;
+ F5OutCount:=Lim;
+End;
+
+{ ---------- puits video : null, crc, framecrc, rawvideo, yuv4mpegpipe ---------- }
+Procedure F5VideoSink(Const Sink: String);
+Var Df,Sf,I,Cnt: LongInt; Fb,Db: LongInt; Sb,Db2,Pb: PEABuffer; Crc: Int64; L: String; A: Int64; Tmp: String; Strict: Boolean;
+Begin
+ Sf:=F5S.Fm; Df:=Sf;
+ If OptPixFmt<>'' Then Begin
+  Df:=F5FindFm(OptPixFmt);
+  If Df<0 Then Fail('Unknown pixel format requested: '+OptPixFmt);
+ End;
+ If (Df<>Sf) And Not F5CanConv(Sf,Df) Then Fail('Conversion de format de pixels non prise en charge: '+F5Fm[Sf].Nm+' -> '+F5Fm[Df].Nm);
+ Fb:=F5S.FBytes; Db:=F5FrameBytes(Df,F5S.W,F5S.H);
+ If (Sink='yuv4mpegpipe') Then Begin
+  Strict:=LJUnofficial;
+  If Not F5Y4MOk(Df,Strict) Then
+   Fail('yuv4mpeg can only handle yuv444p, yuv422p, yuv420p, yuv411p and gray8 pixel formats. Use -pix_fmt to select one.');
+ End;
+ GetMem(Sb,Fb+64); GetMem(Db2,Db+64);
+ Cnt:=F5OutCount(F5S.N);
+ Crc:=1;
+ If Sink<>'null' Then Begin
+  If Sink='crc' Then F5OpenOut(OutputPath) Else F5OpenOut(OutputPath);
+ End;
+ If Sink='framecrc' Then Begin
+  L:=F5Software+'#tb 0: '+F5TbStr(F5S.FD,F5S.FN)+#10+'#media_type 0: video'#10+'#codec_id 0: rawvideo'#10;
+  Str(F5S.W,Tmp); L:=L+'#dimensions 0: '+Tmp+'x'; Str(F5S.H,Tmp); L:=L+Tmp+#10;
+  Str(F5S.SarN,Tmp); L:=L+'#sar 0: '+Tmp+'/'; Str(F5S.SarD,Tmp); L:=L+Tmp+#10;
+  F5WrS(L);
+ End;
+ If Sink='yuv4mpegpipe' Then Begin
+  A:=0;
+  { plage de couleur : une conversion de format fixe la plage }
+  If Df<>Sf Then Begin
+   If F5Fm[Df].Pl=2 Then A:=2 Else If F5Fm[Df].Full Then A:=2 Else A:=1;
+   F5WrS(F5Y4MHeader(Df,F5S.W,F5S.H,F5S.FN,F5S.FD,F5S.SarN,F5S.SarD,F5S.Il,A,F5S.Loc));
+  End Else
+   F5WrS(F5Y4MHeader(Df,F5S.W,F5S.H,F5S.FN,F5S.FD,F5S.SarN,F5S.SarD,F5S.Il,F5S.Rng,F5S.Loc));
+ End;
+ For I:=0 To Cnt-1 Do Begin
+  If Not F5ReadFrame(I,Sb) Then Break;
+  If Df<>Sf Then Begin
+   If Not F5Conv(Sf,Df,(F5S.Rng=2) Or F5IsFullFm(Sf),F5S.W,F5S.H,Sb,Db2) Then Fail('Conversion de format de pixels non prise en charge: '+F5Fm[Sf].Nm+' -> '+F5Fm[Df].Nm);
+   Pb:=Db2;
+  End Else Pb:=Sb;
+  If Sink='crc' Then Crc:=F5Adler64(Crc,Pb,Db)
+  Else If Sink='framecrc' Then Begin
+   A:=F5Adler64(0,Pb,Db);
+   Str(I,Tmp); L:='0, '+F5Num(I,10)+', '+F5Num(I,10)+', '+F5Num(1,8)+', '+F5Num(Db,8)+', 0x'+F5Hex8(A)+#10;
+   F5WrS(L);
+  End
+  Else If Sink='rawvideo' Then F5Wr(Pb^,Db)
+  Else If Sink='yuv4mpegpipe' Then Begin F5WrS('FRAME'#10); F5Wr(Pb^,Db); End;
+ End;
+ If Sink='crc' Then F5WrS('CRC=0x'+F5Hex8(Crc)+#10);
+ F5CloseOut;
+ FreeMem(Sb); FreeMem(Db2);
+End;
+
+{ ---------- puits audio : null, crc, framecrc (PCM 16 bits) ---------- }
+Procedure F5AudioSink(Const Sink: String);
+Var Buf: PEABuffer; Left,At,Sz,Pts,Ns: LongInt; L,Tmp: String; Crc,A: Int64; Al: LongInt;
+Begin
+ If (F5WTag<>1) Or (F5WBits<>16) Then Fail('Audio: seul PCM 16 bits (pcm_s16le) est pris en charge pour ce format de sortie.');
+ If OptPixFmt<>'' Then Fail('Option -pix_fmt inapplicable a l''audio.');
+ Al:=F5WAlign; If Al<1 Then Al:=F5WCh*2;
+ If Sink<>'null' Then F5OpenOut(OutputPath);
+ If Sink='framecrc' Then Begin
+  Str(F5WRate,Tmp);
+  L:=F5Software+'#tb 0: 1/'+Tmp+#10+'#media_type 0: audio'#10+'#codec_id 0: pcm_s16le'#10+'#sample_rate 0: '+Tmp+#10+'#channel_layout_name 0: '+F5ChName(F5WCh,F5WMask,F5WHaveMask)+#10;
+  F5WrS(L);
+ End;
+ GetMem(Buf,8192+64);
+ Crc:=1; Left:=F5WLen; At:=F5WData; Pts:=0;
+ While Left>=Al Do Begin
+  Sz:=4096; If Al>1 Then Begin If Sz<Al Then Sz:=Al; Sz:=(Sz Div Al)*Al; End;
+  If Sz>Left Then Sz:=Left;
+  Sz:=(Sz Div Al)*Al;
+  If Sz=0 Then Break;
+  If Not F5Rd(At,Buf^,Sz) Then Break;
+  Ns:=Sz Div Al;
+  If Sink='crc' Then Crc:=F5Adler64(Crc,Buf,Sz)
+  Else If Sink='framecrc' Then Begin
+   A:=F5Adler64(0,Buf,Sz);
+   L:='0, '+F5Num(Pts,10)+', '+F5Num(Pts,10)+', '+F5Num(Ns,8)+', '+F5Num(Sz,8)+', 0x'+F5Hex8(A)+#10;
+   F5WrS(L);
+  End;
+  Inc(Pts,Ns); Inc(At,Sz); Dec(Left,Sz);
+ End;
+ If Sink='crc' Then F5WrS('CRC=0x'+F5Hex8(Crc)+#10);
+ F5CloseOut;
+ FreeMem(Buf);
+End;
+
+{ ---------- processus enfant (le programme lui-meme) ---------- }
+Function F5Q(Const S: String): String;
+Begin
+ If Pos(' ',S)>0 Then F5Q:='"'+S+'"' Else F5Q:=S;
+End;
+
+Function F5Child(Const Args: String; Const Log: String): Boolean;
+Var Ln: String;
+Begin
+ Ln:='-f5q '+F5Q(Log)+' '+Args;
+ If Length(Ln)>250 Then Fail('F5: ligne de commande interne trop longue.');
+ Exec(ParamStr(0),Ln);
+ F5Child:=(DosError=0) And (DosExitCode=0);
+End;
+
+{ options a transmettre aux processus enfants (hors entree, sortie, -f, nombre d'images, etc.) }
+Function F5Passthrough: String;
+Var I,J: Integer; A,R: String; SeenI: Boolean;
+Begin
+ R:=''; SeenI:=False; I:=1;
+ While I<ParamCount Do Begin
+  A:=ParamStr(I);
+  If Not SeenI Then Begin
+   If A='-i' Then Begin SeenI:=True; Inc(I); End;
+   Inc(I); Continue;
+  End;
+  If (A='-y') Or (A='-n') Or (A='-hide_banner') Or (A='-an') Or (A='-vn') Then Begin Inc(I); Continue; End;
+  If (A='-f') Or (A='-frames:v') Or (A='-vframes') Or (A='-t') Or (A='-start_number') Or (A='-update') Or (A='-r') Or (A='-c:v') Or (A='-vcodec') Or
+     (A='-codec:v') Or (A='-loop') Or (A='-final_delay') Or (A='-pattern_type') Or (A='-framerate') Or (A='-strftime') Or (A='-boundary_tag') Or (A='-c') Or (A='-codec') Then Begin Inc(I,2); Continue; End;
+  R:=R+' '+F5Q(A); Inc(I);
+  If (I<ParamCount) And (Copy(ParamStr(I),1,1)<>'-') Then Begin R:=R+' '+F5Q(ParamStr(I)); Inc(I); End;
+ End;
+ F5Passthrough:=R;
+End;
+
+{ ---------- ecriture d'une image seule (Y4M d'une trame) ---------- }
+Procedure F5FrameY4M(I: LongInt; Const Nm: String);
+Var Buf: PEABuffer; Code: Integer; Hd: String; Fh: File;
+Begin
+ GetMem(Buf,F5S.FBytes+64);
+ If Not F5ReadFrame(I,Buf) Then Fail('F5: lecture de l''image impossible.');
+ Assign(Fh,Nm); {$I-}Rewrite(Fh,1);{$I+} Code:=IOResult;
+ If Code<>0 Then Fail('Creation impossible: '+Nm);
+ Hd:=F5Y4MHeader(F5S.Fm,F5S.W,F5S.H,F5S.FN,F5S.FD,F5S.SarN,F5S.SarD,F5S.Il,F5S.Rng,F5S.Loc);
+ BlockWrite(Fh,Hd[1],Length(Hd)); Hd:='FRAME'#10; BlockWrite(Fh,Hd[1],6);
+ BlockWrite(Fh,Buf^,F5S.FBytes);
+ Close(Fh);
+ FreeMem(Buf);
+End;
+
+Procedure F5EraseFile(Const Nm: String);
+Var F: File; Code: Integer;
+Begin
+ If Exists(Nm) Then Begin Assign(F,Nm); {$I-}Erase(F);{$I+} Code:=IOResult; End;
+End;
+
+{ codec d'image selon l'extension / -c:v }
+Function F5ImgCodec(Const Path: String): String;
+Var E: String;
+Begin
+ If (VideoCodec<>'') And (VideoCodec<>'copy') Then Begin F5ImgCodec:=VideoCodec; Exit; End;
+ E:=Extension(Path);
+ If E='png' Then F5ImgCodec:='png' Else If E='bmp' Then F5ImgCodec:='bmp'
+ Else If (E='jpg') Or (E='jpeg') Or (E='mjpg') Then F5ImgCodec:='mjpeg'
+ Else If E='ppm' Then F5ImgCodec:='ppm' Else If E='pgm' Then F5ImgCodec:='pgm' Else If E='pbm' Then F5ImgCodec:='pbm'
+ Else If E='pam' Then F5ImgCodec:='pam' Else If E='pgmyuv' Then F5ImgCodec:='pgmyuv'
+ Else If (E='tga') Then F5ImgCodec:='targa' Else If (E='tif') Or (E='tiff') Then F5ImgCodec:='tiff'
+ Else If E='sgi' Then F5ImgCodec:='sgi' Else If E='jls' Then F5ImgCodec:='jpegls' Else If E='ljpg' Then F5ImgCodec:='ljpeg'
+ Else If E='gif' Then F5ImgCodec:='gif'
+ Else F5ImgCodec:='mjpeg';
+End;
+
+{ encode l'image I de la source dans le fichier Target avec le codec Codec }
+Procedure F5EncodeImage(I: LongInt; Const Codec,Target: String);
+Var Buf: PEABuffer; Fy: String; Args: String; Df: Integer; Sf: Integer;
+Begin
+ If Exists(Target) Then Begin
+  If Not Overwrite Then Fail('Sortie existante (utiliser -y): '+Target);
+  F5EraseFile(Target);
+ End;
+ Sf:=F5S.Fm;
+ If ((Codec='png') Or (Codec='bmp')) And (OptPixFmt='') And (F5Fm[Sf].Pl In [1,2]) And (F5Fm[Sf].Bps=1) And Not F5Fm[Sf].Alpha And (F5Fm[Sf].Nm<>'gbrp') Then Begin
+  GetMem(Buf,F5S.FBytes+64);
+  If Not F5ReadFrame(I,Buf) Then Fail('F5: lecture de l''image impossible.');
+  If Codec='png' Then NVBegin(1,Target,F5S.W,F5S.H,7,F5S.FN,F5S.FD) Else NVBegin(2,Target,F5S.W,F5S.H,7,F5S.FN,F5S.FD);
+  NVSarN:=F5S.SarN; NVSarD:=F5S.SarD;
+  If F5Fm[Sf].Pl=2 Then Begin NVSubX:=0; NVSubY:=0; NVCW:=0; NVCH:=0; End
+  Else Begin NVSubX:=F5Fm[Sf].Hs; NVSubY:=F5Fm[Sf].Vs; NVCW:=F5CeilSh(F5S.W,F5Fm[Sf].Hs); NVCH:=F5CeilSh(F5S.H,F5Fm[Sf].Vs); End;
+  NVYTag:=F5Fm[Sf].Y4;
+  NVFullRng:=(F5S.Rng=2) Or F5Fm[Sf].Full;
+  NVBT709:=False;
+  NVEmit(Buf);
+  FreeMem(Buf);
+  Exit;
+ End;
+ If (Codec='png') Or (Codec='bmp') Or (Codec='gif') Then Fail('F5: sortie '+Codec+' non prise en charge pour ce format de pixels: '+F5Fm[Sf].Nm);
+ Fy:=F5NewTmp('.y4m');
+ F5FrameY4M(I,Fy);
+ Args:='-y -i '+F5Q(Fy)+' -frames:v 1 -c:v '+Codec+F5Passthrough+' '+F5Q(Target);
+ Fy:=Fy;
+ If Not F5Child(Args,F5NewTmp('.log')) Then Fail('F5: encodage '+Codec+' impossible pour cette image (voir options -q:v, -pix_fmt).');
+ F5DelTmp(Fy);
+End;
+
+Function F5PatternOk(Const P: String): Boolean;
+Var I,J: Integer;
+Begin
+ F5PatternOk:=False; I:=1;
+ While I<=Length(P) Do Begin
+  If P[I]='%' Then Begin
+   Inc(I);
+   If (I<=Length(P)) And (P[I]='%') Then Begin Inc(I); Continue; End;
+   While (I<=Length(P)) And (P[I] In ['0'..'9']) Do Inc(I);
+   If (I<=Length(P)) And (P[I]='d') Then F5PatternOk:=True Else Exit;
+  End;
+  Inc(I);
+ End;
+End;
+
+{ av_get_frame_filename2 }
+Function F5PatName(Const P: String; Num: LongInt): String;
+Var I,Wd: Integer; R,T: String; Zero: Boolean;
+Begin
+ R:=''; I:=1;
+ While I<=Length(P) Do Begin
+  If P[I]='%' Then Begin
+   Inc(I);
+   If (I<=Length(P)) And (P[I]='%') Then Begin R:=R+'%'; Inc(I); Continue; End;
+   Wd:=0; Zero:=False;
+   If (I<=Length(P)) And (P[I]='0') Then Zero:=True;
+   While (I<=Length(P)) And (P[I] In ['0'..'9']) Do Begin Wd:=Wd*10+Ord(P[I])-48; Inc(I); End;
+   Str(Num,T);
+   While Length(T)<Wd Do T:='0'+T;
+   R:=R+T; Inc(I);
+  End Else Begin R:=R+P[I]; Inc(I); End;
+ End;
+ F5PatName:=R;
+End;
+
+{ ---------- puits image2 / image2pipe / mpjpeg ---------- }
+Procedure F5ImageSink(Const Sink: String);
+Var Cnt,I,Num: LongInt; Codec,Nm,Tf: String; Pat: Boolean; Upd: Boolean; Buf: PEABuffer; Sz,At,Q: LongInt; Fh: File; Code: Integer; Actual: LongInt; Hd: String; Lt: String;
+Begin
+ Codec:=F5ImgCodec(OutputPath);
+ If Sink='mpjpeg' Then Begin
+  If (VideoCodec<>'') And (VideoCodec<>'mjpeg') Then Fail('mpjpeg: seul le codec mjpeg est pris en charge.');
+  Codec:='mjpeg';
+ End;
+ If Sink='image2pipe' Then Begin
+  If (VideoCodec='') Then Codec:='mjpeg';
+ End;
+ Cnt:=F5OutCount(F5S.N);
+ If Cnt<=0 Then Fail('Nothing was written into output file, because at least one of its streams received no packets.');
+ If Sink='image2' Then Begin
+  Pat:=F5PatternOk(OutputPath); Upd:=F5Update<>0;
+  If F5StartNum>=0 Then Num:=F5StartNum Else Num:=1;
+  I:=0;
+  If Upd Then I:=Cnt-1;
+  While I<Cnt Do Begin
+   If Upd Then Nm:=OutputPath
+   Else If Pat Then Nm:=F5PatName(OutputPath,Num+I)
+   Else If I=0 Then Nm:=OutputPath
+   Else Begin
+    Fail('Cannot write more than one file with the same name. Are you missing the -update option or a sequence pattern?');
+   End;
+   F5EncodeImage(I,Codec,Nm);
+   Inc(I);
+  End;
+  Exit;
+ End;
+ { image2pipe, mpjpeg : fichier ou flux }
+ F5OpenOut(OutputPath);
+ If Sink='mpjpeg' Then Begin
+  If F5Boundary='' Then F5Boundary:='ffmpeg';
+  F5WrS('--'+F5Boundary+#13#10);
+ End;
+ Tf:=F5NewTmp('.img');
+ For I:=0 To Cnt-1 Do Begin
+  F5EncodeImage(I,Codec,Tf);
+  Assign(Fh,Tf); FileMode:=0; {$I-}Reset(Fh,1);{$I+} Code:=IOResult; FileMode:=2;
+  If Code<>0 Then Fail('F5: image intermediaire illisible.');
+  Sz:=FileSize(Fh);
+  GetMem(Buf,Sz+16);
+  BlockRead(Fh,Buf^,Sz,Actual); Close(Fh);
+  If Sink='mpjpeg' Then Begin
+   Str(Sz,Lt);
+   F5WrS('Content-type: image/jpeg'#13#10'Content-length: '+Lt+#13#10#13#10);
+   F5Wr(Buf^,Sz);
+   F5WrS(#13#10'--'+F5Boundary+#13#10);
+  End Else F5Wr(Buf^,Sz);
+  FreeMem(Buf);
+  F5EraseFile(Tf);
+ End;
+ F5CloseOut;
+End;
+
+{ ---------- sources : rawvideo, sequences d'images, flux decodes par le programme ---------- }
+Procedure F5SetupRaw(Const Nm: String);
+Var Fm: Integer; Sz: LongInt; Pn: String;
+Begin
+ F5InitFm;
+ Pn:=F5InPix; If Pn='' Then Pn:='yuv420p';
+ Fm:=F5FindFm(Pn);
+ If Fm<0 Then Fail('Unknown pixel format requested: '+Pn);
+ If (F5InW<=0) Or (F5InH<=0) Then Fail('Unable to parse option value "(null)" as image size');
+ FillChar(F5S,SizeOf(F5S),0);
+ F5S.Path:=Nm; F5S.IsY4M:=False; F5S.Fm:=Fm; F5S.W:=F5InW; F5S.H:=F5InH;
+ If F5InFN>0 Then Begin F5S.FN:=F5InFN; F5S.FD:=F5InFD; End Else Begin F5S.FN:=25; F5S.FD:=1; End;
+ F5S.SarN:=0; F5S.SarD:=1; F5S.Il:='p'; F5S.Rng:=0; F5S.Loc:=0;
+ F5S.FBytes:=F5FrameBytes(Fm,F5S.W,F5S.H); F5S.DataOff:=0;
+ F5SrcOpen(Nm); Sz:=F5SrcSize;
+ F5S.N:=Sz Div F5S.FBytes;
+ If F5S.N<=0 Then Fail(Nm+': Invalid data found when processing input');
+End;
+
+Procedure F5ShowLog(Const Log: String);
+Var T: Text; L: String; Code: Integer;
+Begin
+ Assign(T,Log); {$I-}Reset(T);{$I+} Code:=IOResult;
+ If Code<>0 Then Exit;
+ While Not Eof(T) Do Begin ReadLn(T,L); WriteLn(L); End;
+ Close(T);
+End;
+
+{ decode l'entree par le programme lui-meme vers un Y4M (video) ; renvoie le chemin, ou '' si aucun flux video }
+Function F5ChildVideo(Const Inp: String; Const Forced: String; Const Log: String): String;
+Var Tmp,Args: String;
+Begin
+ Tmp:=F5NewTmp('.y4m');
+ Args:='-y ';
+ If Forced<>'' Then Args:=Args+'-f '+Forced+' ';
+ Args:=Args+'-i '+F5Q(Inp)+' ';
+ If OptPixFmt='yuv420p' Then Args:=Args+'-pix_fmt yuv420p ';
+ Args:=Args+'-f yuv4mpegpipe '+F5Q(Tmp);
+ If F5Child(Args,Log) Then F5ChildVideo:=Tmp Else Begin F5DelTmp(Tmp); F5ChildVideo:=''; End;
+End;
+
+Function F5ChildAudio(Const Inp: String; Const Forced: String; Const Log: String): String;
+Var Tmp,Args: String;
+Begin
+ Tmp:=F5NewTmp('.wav');
+ Args:='-y ';
+ If Forced<>'' Then Args:=Args+'-f '+Forced+' ';
+ Args:=Args+'-i '+F5Q(Inp)+' -f wav '+F5Q(Tmp);
+ If F5Child(Args,Log) Then F5ChildAudio:=Tmp Else Begin F5DelTmp(Tmp); F5ChildAudio:=''; End;
+End;
+
+{ liste des fichiers d'une sequence }
+Const F5MaxImg=5000;
+Var F5ImgN: LongInt; F5ImgNames: Array[0..F5MaxImg] Of String[200];
+
+Procedure F5Glob(Const Pat: String);
+Var Sr: SearchRec; Dir,Mask: String; J,K: Integer; T: String[200]; Swapped: Boolean;
+Function Match(Const M,S: String; I,J: Integer): Boolean;
+Begin
+ While I<=Length(M) Do Begin
+  If M[I]='*' Then Begin
+   Match:=True;
+   While J<=Length(S)+1 Do Begin If Match(M,S,I+1,J) Then Exit; Inc(J); End;
+   Match:=False; Exit;
+  End;
+  If J>Length(S) Then Begin Match:=False; Exit; End;
+  If (M[I]<>'?') And (M[I]<>S[J]) Then Begin Match:=False; Exit; End;
+  Inc(I); Inc(J);
+ End;
+ Match:=J>Length(S);
+End;
+Begin
+ F5ImgN:=0;
+ J:=Length(Pat);
+ While (J>0) And (Pat[J]<>'/') Do Dec(J);
+ Dir:=Copy(Pat,1,J); Mask:=Copy(Pat,J+1,255);
+ If Dir='' Then FindFirst('*',AnyFile,Sr) Else FindFirst(Dir+'*',AnyFile,Sr);
+ While DosError=0 Do Begin
+  If ((Sr.Attr And Directory)=0) And Match(Mask,Sr.Name,1,1) And (F5ImgN<F5MaxImg) Then Begin
+   F5ImgNames[F5ImgN]:=Dir+Sr.Name; Inc(F5ImgN);
+  End;
+  FindNext(Sr);
+ End;
+ FindClose(Sr);
+ Repeat
+  Swapped:=False;
+  For K:=0 To F5ImgN-2 Do If F5ImgNames[K]>F5ImgNames[K+1] Then Begin
+   T:=F5ImgNames[K]; F5ImgNames[K]:=F5ImgNames[K+1]; F5ImgNames[K+1]:=T; Swapped:=True;
+  End;
+ Until Not Swapped;
+End;
+
+{ image2 demuxer : construit un Y4M a partir d'une suite d'images (chaque image decodee par le programme) }
+Function F5ImageSeqToY4M(Const Pat: String): String;
+Var Start,First,K,I,N,Sz,Tot,Lim: LongInt; Nm: String; Names: Array[0..0] Of String; Glob,Seq: Boolean;
+ Uniq: LongInt; Tmps: Array[0..F5MaxImg] Of String[200]; Fh: File; Code: Integer; Hd,Log: String;
+ Sv: F5TSrc; Buf: PEABuffer; Order: LongInt; Actual: LongInt; Outp: String; Fo: File; Total: LongInt;
+ W0,H0,Fm0: LongInt; Rng0,Loc0: Integer; SarN0,SarD0: LongInt; Il0: Char; Written: LongInt;
+Begin
+ Glob:=(F5PatType='glob') Or ((F5PatType='') And ((Pos('*',Pat)>0) Or (Pos('?',Pat)>0) Or (Pos('[',Pat)>0)));
+ Seq:=False; F5ImgN:=0;
+ If F5PatType='none' Then Begin
+  F5ImgNames[0]:=Pat; F5ImgN:=1;
+ End Else If Glob Then Begin
+  F5Glob(Pat);
+ End Else If F5PatternOk(Pat) Then Begin
+  Seq:=True;
+  If F5StartNum>=0 Then Start:=F5StartNum Else Start:=0;
+  First:=-1;
+  For K:=Start To Start+4 Do If Exists(F5PatName(Pat,K)) Then Begin First:=K; Break; End;
+  If First<0 Then Fail(Pat+': No such file or directory');
+  K:=First;
+  While Exists(F5PatName(Pat,K)) And (F5ImgN<F5MaxImg) Do Begin F5ImgNames[F5ImgN]:=F5PatName(Pat,K); Inc(F5ImgN); Inc(K); End;
+ End Else Begin
+  F5ImgNames[0]:=Pat; F5ImgN:=1;
+ End;
+ If F5ImgN=0 Then Fail(Pat+': No such file or directory');
+ Log:=F5NewTmp('.log');
+ { nombre total d'images a produire }
+ Lim:=F5ImgN;
+ If F5Loop=1 Then Begin
+  Lim:=-1;
+  If H4SVfr>0 Then Lim:=H4SVfr;
+  If H4STSet Then Begin
+   Total:=0;
+   If F5InFN>0 Then Begin I:=F5InFN; K:=F5InFD; End Else Begin I:=25; K:=1; End;
+   While (Total<100000) And (Int64(Total)*K*1000000<H4STus*I) Do Inc(Total);
+   If (Lim<0) Or (Total<Lim) Then Lim:=Total;
+  End;
+  If Lim<0 Then Fail('image2: -loop 1 sans limite (-frames:v ou -t) non pris en charge.');
+ End;
+ Outp:=F5NewTmp('.y4m');
+ Written:=0;
+ For I:=0 To F5ImgN-1 Do Tmps[I]:='';
+ Assign(Fo,Outp); {$I-}Rewrite(Fo,1);{$I+} Code:=IOResult;
+ If Code<>0 Then Fail('Creation impossible: '+Outp);
+ Order:=0;
+ While Order<Lim Do Begin
+  I:=Order Mod F5ImgN;
+  If Tmps[I]='' Then Begin
+   Tmps[I]:=F5ChildVideo(F5ImgNames[I],'',Log);
+   If Tmps[I]='' Then Begin
+    WriteLn(F5ImgNames[I],': image non decodable par le programme');
+    F5ShowLog(Log); Halt(1);
+   End;
+  End;
+  Sv:=F5S;
+  F5OpenY4M(Tmps[I]);
+  If F5S.N<1 Then Fail(F5ImgNames[I]+': aucune image decodee');
+  If Order=0 Then Begin
+   W0:=F5S.W; H0:=F5S.H; Fm0:=F5S.Fm; Rng0:=F5S.Rng; Loc0:=F5S.Loc; SarN0:=F5S.SarN; SarD0:=F5S.SarD; Il0:=F5S.Il;
+   If F5InFN>0 Then Hd:=F5Y4MHeader(Fm0,W0,H0,F5InFN,F5InFD,SarN0,SarD0,Il0,Rng0,Loc0)
+   Else Hd:=F5Y4MHeader(Fm0,W0,H0,25,1,SarN0,SarD0,Il0,Rng0,Loc0);
+   BlockWrite(Fo,Hd[1],Length(Hd));
+  End Else If (F5S.W<>W0) Or (F5S.H<>H0) Or (F5S.Fm<>Fm0) Then Fail('image2: les images doivent avoir les memes dimensions et format de pixels.');
+  GetMem(Buf,F5S.FBytes+64);
+  If Not F5ReadFrame(0,Buf) Then Fail('F5: lecture image impossible.');
+  Hd:='FRAME'#10; BlockWrite(Fo,Hd[1],6); BlockWrite(Fo,Buf^,F5S.FBytes);
+  FreeMem(Buf);
+  F5CloseSrc; F5S:=Sv;
+  Inc(Order); Inc(Written);
+ End;
+ Close(Fo);
+ For I:=0 To F5ImgN-1 Do If Tmps[I]<>'' Then F5DelTmp(Tmps[I]);
+ F5DelTmp(Log);
+ F5ImageSeqToY4M:=Outp;
+End;
+
+{ rawvideo -> Y4M (formats compatibles Y4M) }
+Function F5RawToY4M: String;
+Var Outp,Hd: String; Fo: File; Code: Integer; I: LongInt; Buf: PEABuffer;
+Begin
+ Outp:=F5NewTmp('.y4m');
+ Assign(Fo,Outp); {$I-}Rewrite(Fo,1);{$I+} Code:=IOResult;
+ If Code<>0 Then Fail('Creation impossible: '+Outp);
+ Hd:=F5Y4MHeader(F5S.Fm,F5S.W,F5S.H,F5S.FN,F5S.FD,F5S.SarN,F5S.SarD,'p',0,0);
+ BlockWrite(Fo,Hd[1],Length(Hd));
+ GetMem(Buf,F5S.FBytes+64);
+ For I:=0 To F5S.N-1 Do Begin
+  If Not F5ReadFrame(I,Buf) Then Break;
+  Hd:='FRAME'#10; BlockWrite(Fo,Hd[1],6); BlockWrite(Fo,Buf^,F5S.FBytes);
+ End;
+ FreeMem(Buf); Close(Fo);
+ F5RawToY4M:=Outp;
+End;
+
+{ ---------- options ---------- }
+Function F5IsOpt(Const A: String): Boolean;
+Begin
+ F5IsOpt:=(A='-framerate') Or (A='-video_size') Or (A='-pixel_format') Or (A='-start_number') Or (A='-update') Or (A='-pattern_type') Or
+  (A='-final_delay') Or (A='-boundary_tag') Or (A='-loop') Or (A='-f5q') Or (A='-strftime') Or (A='-frame_pts') Or (A='-atomic_writing') Or
+  (A='-start_number_range') Or (A='-ts_from_file') Or
+  ((InputPath='') And ((A='-s') Or (A='-pix_fmt') Or (A='-r')));
+End;
+
+Procedure F5SetOpt(Const A,V0: String);
+Var V: String; K: Integer; Code,N,D: LongInt; Num: LongInt;
+Begin
+ V:=V0;
+ If A='-f5q' Then Begin
+  F5Quiet:=True; Assign(Output,V); {$I-}Rewrite(Output);{$I+} Code:=IOResult; Exit;
+ End;
+ If (A='-framerate') Or ((A='-r') And (InputPath='')) Then Begin
+  H4SParseRate(V,N,D); F5InFN:=N; F5InFD:=D; Exit;
+ End;
+ If (A='-video_size') Or (A='-s') Then Begin
+  K:=Pos('x',Lower(V));
+  If K<2 Then Fail('Unable to parse option value "'+V+'" as image size');
+  Val(Copy(V,1,K-1),F5InW,Code); If Code<>0 Then Fail('Unable to parse option value "'+V+'" as image size');
+  Val(Copy(V,K+1,20),F5InH,Code); If Code<>0 Then Fail('Unable to parse option value "'+V+'" as image size');
+  Exit;
+ End;
+ If (A='-pixel_format') Or (A='-pix_fmt') Then Begin
+  F5InPix:=Lower(V);
+  If A='-pixel_format' Then OptPixFmt:=OptPixFmt;
+  Exit;
+ End;
+ If A='-start_number' Then Begin Val(V,Num,Code); If Code<>0 Then Fail('-start_number: entier requis.'); F5StartNum:=Num; Exit; End;
+ If A='-update' Then Begin Val(V,Num,Code); If Code<>0 Then Fail('-update: 0 ou 1 requis.'); F5Update:=Num; Exit; End;
+ If A='-loop' Then Begin Val(V,Num,Code); If Code<>0 Then Fail('-loop: entier requis.'); F5Loop:=Num; Exit; End;
+ If A='-pattern_type' Then Begin F5PatType:=Lower(V); If (F5PatType<>'glob') And (F5PatType<>'sequence') And (F5PatType<>'none') And (F5PatType<>'glob_sequence') Then Fail('-pattern_type invalide.'); If F5PatType='sequence' Then F5PatType:=''; Exit; End;
+ If A='-final_delay' Then Begin Val(V,Num,Code); If Code<>0 Then Fail('-final_delay: entier requis.'); F5FinalDelay:=Num; F5HasFD:=True; Exit; End;
+ If A='-boundary_tag' Then Begin F5Boundary:=V; Exit; End;
+End;
+
+{ ---------- decision et execution ---------- }
+Function F5IsImgName(Const S: String): Boolean;
+Begin
+ F5IsImgName:=(S='bmp') Or (S='jpg') Or (S='jpeg') Or (S='png') Or (S='ppm') Or (S='pgm') Or (S='pbm') Or (S='pam') Or (S='targa') Or (S='tiff') Or
+  (S='sgi') Or (S='jls') Or (S='ljpg') Or (S='pgmyuv') Or (S='tga') Or (S='tif') Or (S='sunrast') Or (S='xwd');
+End;
+
+Function F5OutName: String;
+Var S: String;
+Begin
+ S:=OutputFormat;
+ If S='' Then S:=FormatName(Extension(OutputPath));
+ If S='mjpg' Then S:='mpjpeg';
+ If S='y4m' Then S:='yuv4mpegpipe';
+ F5OutName:=S;
+End;
+
+{ nom du puits pris en charge par le module F5, ou '' }
+Function F5Take: String;
+Var S: String; Own,Single: Boolean;
+Begin
+ F5Take:='';
+ S:=F5OutName;
+ If (S='null') Or (S='crc') Or (S='framecrc') Or (S='image2pipe') Or (S='mpjpeg') Or (S='mxf') Or (S='mxf_d10') Or (S='gxf') Or (S='rtp') Then Begin F5Take:=S; Exit; End;
+ Own:=(InputFormat='yuv4mpegpipe');
+ If F5IsImgName(S) Then S:='image2img';
+ If (S='image2') Or (S='image2img') Then Begin
+  Single:=((VideoFrames=1) Or (H4SVfr=1)) And Not F5PatternOk(OutputPath) And (F5Update=0) And (F5StartNum<0) And (S='image2img') And (F5OutName<>'png') And (F5OutName<>'bmp');
+  If Single And ((OutputPath<>'') And (Extension(OutputPath)<>'')) Then Begin
+   { chemin historique : une image depuis Y4M ou depuis un decodeur natif }
+   Exit;
+  End;
+  If Own Or (S='image2') Or F5PatternOk(OutputPath) Or (H4SVfr>1) Or (F5Update<>0) Or (F5StartNum>=0) Then Begin F5Take:='image2'; Exit; End;
+  Exit;
+ End;
+ If Own Then Begin
+  If (S='yuv4mpegpipe') Or (S='rawvideo') Or (S='gif') Then Begin If Not HasCrop And (AspectNum<=0) And (ImageWidth=0) Then F5Take:=S; End;
+  Exit;
+ End;
+ If (S='gif') And (InputFormat<>'flv') Then F5Take:='gif';
+End;
+
+Function F5MineOut: Boolean;
+Var S: String;
+Begin
+ S:=F5OutName;
+ F5MineOut:=F5IsImgName(S) Or (S='image2') Or (S='null') Or (S='crc') Or (S='framecrc') Or (S='image2pipe') Or (S='mpjpeg') Or (S='mxf') Or
+  (S='mxf_d10') Or (S='gxf') Or (S='rtp') Or (S='gif') Or (S='yuv4mpegpipe') Or (S='rawvideo');
+End;
+
+Procedure F5GifSink;
+Begin
+ Fail('gif: muxeur non encore pris en charge.');
+End;
+
+{ ---------- pilote ---------- }
+Procedure F5Run(Const Sink,Src0: String);
+Var Vp,Ap,Log,Src: String; Okv: Boolean; Is4: Boolean;
+Begin
+ F5HookExit; F5Sink:=Sink;
+ F5InitFm;
+ Src:=Src0;
+ If (Sink='mxf') Or (Sink='mxf_d10') Or (Sink='gxf') Or (Sink='rtp') Then Fail('Muxeur '+Sink+' non pris en charge.');
+ Vp:=''; Ap:='';
+ If InputFormat='yuv4mpegpipe' Then Vp:=Src
+ Else If InputFormat='wav' Then Ap:=Src
+ Else Begin
+  Log:=F5NewTmp('.log');
+  Vp:=F5ChildVideo(Src,F5InForced,Log);
+  If Vp='' Then Begin
+   Ap:=F5ChildAudio(Src,F5InForced,F5NewTmp('.log'));
+   If Ap='' Then Begin F5ShowLog(Log); Fail('Entree non prise en charge par le module de sortie '+Sink+'.'); End;
+  End;
+ End;
+ If Vp<>'' Then Begin
+  F5OpenY4M(Vp);
+  If F5S.N<=0 Then Fail('Nothing was written into output file, because at least one of its streams received no packets.');
+  If (Sink='null') Or (Sink='crc') Or (Sink='framecrc') Or (Sink='rawvideo') Or (Sink='yuv4mpegpipe') Then F5VideoSink(Sink)
+  Else If (Sink='image2') Or (Sink='image2pipe') Or (Sink='mpjpeg') Then F5ImageSink(Sink)
+  Else If Sink='gif' Then F5GifSink
+  Else Fail('Muxeur '+Sink+' non pris en charge.');
+  F5CloseSrc;
+ End Else Begin
+  If Not F5OpenWav(Ap) Then Fail('Audio: WAV invalide.');
+  If (Sink='null') Or (Sink='crc') Or (Sink='framecrc') Then F5AudioSink(Sink)
+  Else Fail('Muxeur '+Sink+': entree audio non prise en charge.');
+  F5SrcClose;
+ End;
+ If F5Sink<>'null' Then Begin If Not F5Quiet Then Begin End; End;
+ Halt(0);
+End;
+
+{ avant la detection du format d'entree : rawvideo force et sequences d'images (image2) }
+Procedure F5PreProbe;
+Var S: String; Y: String; Fm: Integer;
+Begin
+ S:=InputFormat;
+ If (S='rawvideo') Then Begin
+  F5HookExit;
+  F5SetupRaw(InputPath);
+  Fm:=F5S.Fm;
+  If F5Fm[Fm].Y4<>'' Then Begin
+   Y:=F5RawToY4M; F5CloseSrc;
+   InputPath:=Y; InputFormat:='';
+  End Else Begin
+   S:=F5OutName;
+   If (S='null') Or (S='crc') Or (S='framecrc') Or (S='rawvideo') Then Begin
+    F5VideoSink(S); F5CloseSrc; Halt(0);
+   End;
+   Fail('rawvideo: format de pixels '+F5Fm[Fm].Nm+' pris en charge uniquement vers null, crc, framecrc et rawvideo.');
+  End;
+  Exit;
+ End;
+ If (S='image2') Or (S='image2pipe') Or ((S='') And ((Pos('%',InputPath)>0) Or (F5PatType='glob')) And Not Exists(InputPath) And (F5PatternOk(InputPath) Or (F5PatType='glob'))) Then Begin
+  F5HookExit;
+  If S='image2pipe' Then Fail('image2pipe en entree: non pris en charge.');
+  Y:=F5ImageSeqToY4M(InputPath);
+  InputPath:=Y; InputFormat:=''; F5InForced:='';
+ End;
+End;
+
+{ ==== F5 END ==== }
 { ==== BLOCK-ANCHOR-F5 : inserer le code du groupe F5 juste au-dessus de cette ligne ==== }
 
 { ==== F6 : formats demux-seul (film_cpk, mtv, nsv, iff, r3d ...) ; prefixe F6 ==== }
@@ -122815,6 +124071,12 @@ Begin
  WriteLn('  E image2          Une image PNG/GIF; pas de sequence');
  WriteLn(' D  libopenmpt      MOD 4 canaux, moteur Pascal interne (alias: mod)');
  WriteLn(' DE yuv4mpegpipe    Y4M YUV420 8 bits (FFV1 AVI, alias: y4m)');
+ WriteLn('  E null            raw null video');
+ WriteLn('  E crc             CRC testing');
+ WriteLn('  E framecrc        framecrc testing');
+ WriteLn('  E image2          image2 sequence (F5: PNG/BMP natifs, autres via encodeurs Y4M; entree: motifs %d/glob)');
+ WriteLn('  E image2pipe      piped image2 sequence');
+ WriteLn('  E mpjpeg          MIME multipart JPEG');
  WriteLn(' DE m4v             raw MPEG-4 video format (MPEG-4 Part 2)');
  WriteLn(' D  mp1             MPEG audio Layer I');
  WriteLn(' D  mlp             raw MLP (Meridian Lossless Packing)');
@@ -123084,7 +124346,7 @@ BEGIN
   NetSession:=Nil; NetRequest:=Nil;
  {$ENDIF}
  For J:=0 To 6 Do Temps[J]:='';
- InputPath:=''; OutputPath:=''; InputFormat:=''; OutputFormat:='';
+ InputPath:=''; OutputPath:=''; InputFormat:=''; OutputFormat:=''; F5StartNum:=-1;
  LJPredOpt:=-1; LJUnofficial:=False; MJEOptimal:=True; X4Crf:=23; X4QpFix:=-1; X4Gop:=250; X4Preset:=''; THQuality:=-1;
  AudioCodec:=''; InputCodec:=''; PendingFormat:=''; G726CodeSize:=4; G726Rate:=8000; RequestedRate:=0; RequestedChannels:=0; RequestedBitRateK:=320;
  Overwrite:=False; NoOverwrite:=False; HideBanner:=False; HasBitrate:=False;
@@ -123371,6 +124633,7 @@ BEGIN
   Else If Argument='-y' Then Overwrite:=True Else
   If Argument='-n' Then NoOverwrite:=True Else
   If Argument='-hide_banner' Then HideBanner:=True Else
+  If F5IsOpt(Argument) Then F5SetOpt(Argument,NextArgument) Else
   If Argument='-pix_fmt' Then OptPixFmt:=Lower(NextArgument) Else
   If Argument='-filter_threads' Then Begin Value:=NextArgument; Val(Value,Number,Code); If (Code<>0) Or (Number<0) Then Fail('-filter_threads: entier >= 0 requis.'); If Number=0 Then NVFilterThreads:=-1 Else NVFilterThreads:=Number; End Else
   If Argument='-vn' Then NoVideo:=True Else
@@ -123497,7 +124760,7 @@ BEGIN
   End Else
   If Argument='-i' Then Begin
    If InputPath<>'' Then Fail('Une seule entree est prise en charge.');
-   InputPath:=NextArgument; InputFormat:=PendingFormat; PendingFormat:=''; If InputFormat='matroska' Then InputFormat:='webm'; { F4 }
+   InputPath:=NextArgument; InputFormat:=PendingFormat; F5InForced:=PendingFormat; PendingFormat:=''; If InputFormat='matroska' Then InputFormat:='webm'; { F4 }
   End
   Else If (Argument='-c') Or (Argument='-codec') Or (Argument='-c:a') Or (Argument=
   '-codec:a') Or (Argument='-acodec') Then Begin
@@ -123577,7 +124840,7 @@ BEGIN
    End;
    HasBitrate:=True;
   End
-  Else If (Copy(Argument,1,1)='-') Then Fail('Option non prise en charge: '+Argument)
+  Else If (Copy(Argument,1,1)='-') And (Argument<>'-') Then Fail('Option non prise en charge: '+Argument)
    Else
   Begin
    If (OutputPath<>'') Or (InputPath='') Then Fail(
@@ -123593,7 +124856,7 @@ BEGIN
  If (InputPath='') Or (OutputPath='') Then Fail(
  'Une entree -i et une sortie sont requises.');
  If Overwrite And NoOverwrite Then Fail('-y et -n sont incompatibles.');
- If (VideoCodec<>'svq1') And (((H4SVfr>1) And (VideoCodec<>'snow')) Or (H4SRn>0) Or H4STSet Or H4SMeSet) Then Begin
+ If (VideoCodec<>'svq1') And Not F5MineOut And (((H4SVfr>1) And (VideoCodec<>'snow')) Or (H4SRn>0) Or H4STSet Or H4SMeSet) Then Begin
   If (H4SVfr>1) And (VideoCodec<>'snow') Then Fail('Extraction PNG/GIF: -vframes 1 uniquement.');
   If H4SRn>0 Then Fail('Option non prise en charge: -r');
   If H4STSet Then Fail('Option non prise en charge: -t');
@@ -123606,6 +124869,7 @@ BEGIN
  If IsDirectory(OutputPath) Then Fail('La sortie designe un dossier.');
  If Exists(OutputPath) And Not Overwrite Then Fail('Sortie existante (utiliser -y): '+
  OutputPath);
+ If Not IsHTTP(InputPath) Then F5PreProbe;
  Intermediate:=InputPath;
  If IsHTTP(InputPath) Then Begin
   Temps[0]:=NewTemporary; DownloadHLS(InputPath,Temps[0]); Intermediate:=Temps[0];
@@ -123656,6 +124920,13 @@ BEGIN
  If InputFormat='' Then Fail('Format entree non reconnu ou non pris en charge.');
  If OutputFormat='' Then OutputFormat:=FormatName(Extension(OutputPath));
  If (OutputFormat='matroska') Or (OutputFormat='webm') Then F4MainMkv; { F4 }
+ F5Sink:=''; If Not IsHTTP(InputPath) Then F5Sink:=F5Take; If F5Sink<>'' Then F5Run(F5Sink,Intermediate);
+ If F5MineOut And (VideoCodec<>'svq1') And (((H4SVfr>1) And (VideoCodec<>'snow')) Or (H4SRn>0) Or H4STSet Or H4SMeSet) Then Begin
+  If (H4SVfr>1) And (VideoCodec<>'snow') Then Fail('Extraction PNG/GIF: -vframes 1 uniquement.');
+  If H4SRn>0 Then Fail('Option non prise en charge: -r');
+  If H4STSet Then Fail('Option non prise en charge: -t');
+  Fail('Option non prise en charge: -motion-est');
+ End;
  If (InputFormat='mpeg') And ((OutputFormat='wav') Or (OutputFormat='aiff') Or (OutputFormat='daud') Or PcmIsRawName(OutputFormat)) And Not IsHTTP(InputPath) Then
   If PcmVobProbe(InputPath) Then InputFormat:='vob';
  If (InputFormat='mp4') And ((OutputFormat='wav') Or (OutputFormat='adx') Or (OutputFormat='aiff') Or
