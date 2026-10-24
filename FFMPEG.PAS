@@ -3475,7 +3475,11 @@ Type
   Budget: Double;
  End;
 
+Type
+ TMdK = Array[0..39] Of String[79];
+ TMdV = Array[0..39] Of String[255];
 Var
+ MdN,MdAN,MdCN: LongInt; MdK,MdAK,MdCK: TMdK; MdV,MdAV,MdCV: TMdV; MdCreation: Int64;
  Temps: Array[0..6] Of String;
  SavedExit: Pointer;
  InputPath,OutputPath,InputFormat,OutputFormat,AudioCodec,PendingFormat,InputCodec: String;
@@ -12024,7 +12028,7 @@ Begin
  End Else Begin
   PutLE32(50); PutLE16($02);
  End;
- PutLE16(Channels); PutLE32(Rate); PutLE32(Rate*BlockSize Div FrameSize); PutLE16(BlockSize); PutLE16(4);
+ PutLE16(Channels); PutLE32(Rate); PutLE32(16000); PutLE16(BlockSize); PutLE16(4);
  If Kind=0 Then Begin PutLE16(2); PutLE16(FrameSize); End
  Else Begin
   PutLE16(32); PutLE16(FrameSize); PutLE16(7);
@@ -12323,7 +12327,7 @@ Begin
  Blocks:=(Frames+FrameSize-1) Div FrameSize; DataSize:=Blocks*BlockSize;
  OpenWrite(Target); Used:=0;
  PutTag('RIFF'); PutLE32(4+8+18+12+8+DataSize); PutTag('WAVE'); PutTag('fmt '); PutLE32(18); PutLE16($20);
- PutLE16(Channels); PutLE32(Rate); PutLE32(Rate*BlockSize Div FrameSize); PutLE16(BlockSize); PutLE16(4); PutLE16(0);
+ PutLE16(Channels); PutLE32(Rate); PutLE32(16000); PutLE16(BlockSize); PutLE16(4); PutLE16(0);
  PutTag('fact'); PutLE32(4); PutLE32(Frames); PutTag('data'); PutLE32(DataSize);
  WriteBytes(Out,Used); Used:=0; Done:=0;
  While Done<Frames Do Begin
@@ -69230,26 +69234,92 @@ Begin
  For I:=0 To 7 Do Begin If I<4 Then WMXHdr[Start+16+I]:=(Sz Shr (8*I)) And 255 Else WMXHdr[Start+16+I]:=0; End;
 End;
 
-Procedure WMXBuildHeader(FileSize,DataSize,NbPackets,Duration: Int64);
-Var Start,HdrStart,I,WavSize,ExtraN: LongInt; Desc: String;
+Var MdTmp16: Array[0..1023] Of Byte;
+Const WMXGComment: Array[0..15] Of Byte=($33,$26,$B2,$75,$8E,$66,$CF,$11,$A6,$D9,$00,$AA,$00,$62,$CE,$6C);
+{ UTF-8 -> octets UTF-16LE avec terminateur nul ; retourne la longueur }
+Function MdPut16(Const S: String; Out_: PEABuffer): LongInt;
+Var I,U,L,N: LongInt;
+Procedure W(C: LongInt); Begin Out_^[N]:=C And 255; Out_^[N+1]:=(C Shr 8) And 255; Inc(N,2); End;
 Begin
+ N:=0; I:=1;
+ While I<=Length(S) Do Begin
+  U:=Ord(S[I]); L:=0;
+  If U>=$F0 Then Begin U:=U And 7; L:=3; End
+  Else If U>=$E0 Then Begin U:=U And 15; L:=2; End
+  Else If U>=$C0 Then Begin U:=U And 31; L:=1; End;
+  Inc(I);
+  While (L>0) And (I<=Length(S)) Do Begin U:=(U Shl 6) Or (Ord(S[I]) And 63); Inc(I); Dec(L); End;
+  If U>=$10000 Then Begin Dec(U,$10000); W($D800+(U Shr 10)); W($DC00+(U And 1023)); End Else W(U);
+ End;
+ W(0);
+ MdPut16:=N;
+End;
+
+Procedure MdAsfPrepare; Forward;
+Var MdInfo: Array[0..4095] Of Byte; MdInfoLen,MdInfoCnt: LongInt;
+Procedure MdRiffBuild; Forward;
+Function MdAsfFind(Const Key: String): LongInt;
+Var I: LongInt; A,B: String;
+Begin
+ MdAsfFind:=-1;
+ For I:=0 To MdAN-1 Do Begin
+  A:=MdAK[I]; B:=Key;
+  If Length(A)=Length(B) Then Begin
+   While (Length(A)>0) And (UpCase(A[Length(A)])=UpCase(B[Length(B)])) Do Begin Delete(A,Length(A),1); Delete(B,Length(B),1); End;
+   If Length(A)=0 Then Begin MdAsfFind:=I; Exit; End;
+  End;
+ End;
+End;
+Procedure WMX16Len(Const S: String);
+Var T: Array[0..1023] Of Byte; N,I: LongInt;
+Begin
+ N:=MdPut16(S,@T);
+ For I:=0 To N-1 Do WMXB(T[I]);
+End;
+
+Procedure WMXBuildHeader(FileSize,DataSize,NbPackets,Duration: Int64);
+Var Start,HdrStart,I,WavSize,ExtraN,Cnt,Tg: LongInt; Desc: String; TagIdx: Array[0..4] Of LongInt;
+Begin
+ MdAsfPrepare;
+ TagIdx[0]:=MdAsfFind('title'); TagIdx[1]:=MdAsfFind('author'); TagIdx[2]:=MdAsfFind('copyright');
+ TagIdx[3]:=MdAsfFind('comment'); TagIdx[4]:=MdAsfFind('rating');
+ Tg:=0; For I:=0 To 4 Do If TagIdx[I]>=0 Then Tg:=1;
+ Cnt:=3+Tg+Ord(MdAN>0)+1;
  WMXHdrLen:=0;
- WMXGuid(WMXGHeader); WMX64(-1); WMX32(5); WMXB(1); WMXB(2);
+ WMXGuid(WMXGHeader); WMX64(-1); WMX32(Cnt); WMXB(1); WMXB(2);
  HdrStart:=0;
  { proprietes du fichier }
  Start:=WMXHdrLen; WMXGuid(WMXGFile); WMX64(24);
  For I:=0 To 15 Do WMXB(0);
- WMX64(FileSize); WMX64(Int64(116444736000000000)); WMX64(NbPackets);
+ WMX64(FileSize); WMX64(MdCreation*10+Int64(116444736000000000)); WMX64(NbPackets);
  WMX64(Duration+WMXPreroll*10000); WMX64(Duration); WMX64(WMXPreroll);
  WMX32(2); WMX32(WMXPktSize); WMX32(WMXPktSize); WMX32(WMXBitRate);
  WMXObjEnd(Start);
  { extension d'en-tete }
  Start:=WMXHdrLen; WMXGuid(WMXGHead1); WMX64(24); WMXGuid(WMXGHead2); WMX16(6); WMX32(0);
  WMXObjEnd(Start);
- { contenu etendu : WM/EncodingSettings }
- Start:=WMXHdrLen; WMXGuid(WMXGExt); WMX64(24); WMX16(1);
- WMX16(40); WMXStr16('WM/EncodingSettings'); WMX16(0); WMX16(28); WMXStr16('Lavf60.16.100');
- WMXObjEnd(Start);
+ { description du contenu }
+ If Tg<>0 Then Begin
+  Start:=WMXHdrLen; WMXGuid(WMXGComment); WMX64(24);
+  For I:=0 To 4 Do Begin
+   If TagIdx[I]>=0 Then Begin
+    Desc:=MdAV[TagIdx[I]];
+    WMX16(MdPut16(Desc,@MdTmp16));
+   End Else WMX16(0);
+  End;
+  For I:=0 To 4 Do If TagIdx[I]>=0 Then WMX16Len(MdAV[TagIdx[I]]);
+  WMXObjEnd(Start);
+ End;
+ { contenu etendu }
+ If MdAN>0 Then Begin
+  Start:=WMXHdrLen; WMXGuid(WMXGExt); WMX64(24); WMX16(MdAN);
+  For I:=0 To MdAN-1 Do Begin
+   WMX16(MdPut16(MdAK[I],@MdTmp16)); WMX16Len(MdAK[I]);
+   WMX16(0);
+   WMX16(MdPut16(MdAV[I],@MdTmp16)); WMX16Len(MdAV[I]);
+  End;
+  WMXObjEnd(Start);
+ End;
  { proprietes du flux audio }
  Start:=WMXHdrLen; WMXGuid(WMXGStream); WMX64(24); WMXGuid(WMXGAudio); WMXGuid(WMXGSpread);
  WMX64(0);
@@ -69323,9 +69393,8 @@ Begin
  WMXTagEnd(L2);
  WMXTagStart('JUNK',Jk); WMXFcc('odml'); WMXFcc('dmlh'); WMX32(248); For I:=1 To 248 Do WMXB(0); WMXTagEnd(Jk);
  WMXTagEnd(L1);
- WMXTagStart('LIST',Jk); WMXFcc('INFO'); WMXFcc('ISFT'); WMX32(14);
- Id:='Lavf60.16.100'; For I:=1 To Length(Id) Do WMXB(Ord(Id[I])); WMXB(0);
- WMXTagEnd(Jk);
+ MdRiffBuild;
+ If MdInfoCnt>0 Then For I:=0 To MdInfoLen-1 Do WMXB(MdInfo[I]);
  WMXTagStart('JUNK',Jk); For I:=1 To 1016 Do WMXB(0); WMXTagEnd(Jk);
  WMXFcc('LIST'); WMX32(MoviSize); WMXFcc('movi');
 End;
@@ -87080,9 +87149,30 @@ Begin
  Else TTAShift1:=Int64($FFFFFFFF);
 End;
 
+Var TTAPassword: String; TTAHavePass: Boolean; TTACrypt: Boolean; TTAPassKey: Array[0..7] Of LongInt;
+
+{ tta_check_crc64 : cle derivee du mot de passe (little endian) }
+Procedure TTASetPassword(Const Pw: String);
+Var Crc,Poly: QWord; I,J: LongInt;
+Begin
+ Crc:=QWord($FFFFFFFFFFFFFFFF); Poly:=QWord($42F0E1EBA9EA3693);
+ For I:=1 To Length(Pw) Do Begin
+  Crc:=Crc Xor (QWord(Ord(Pw[I])) Shl 56);
+  For J:=0 To 7 Do Begin
+   If (Crc And QWord($8000000000000000))<>0 Then Crc:=(Crc Shl 1) Xor Poly Else Crc:=Crc Shl 1;
+  End;
+ End;
+ Crc:=Crc Xor QWord($FFFFFFFFFFFFFFFF);
+ For I:=0 To 7 Do Begin
+  TTAPassKey[I]:=(Crc Shr (8*I)) And 255; If TTAPassKey[I]>=128 Then Dec(TTAPassKey[I],256);
+ End;
+End;
+
 Procedure TTAInitChan(Var C: TTTAChan; Bps: LongInt);
+Var I: LongInt;
 Begin
  FillChar(C,SizeOf(C),0);
+ If TTACrypt Then For I:=0 To 7 Do C.Qm[I]:=TTAPassKey[I];
  C.Shift:=TTAFilterCfg[Bps-1]; C.Round_:=1 Shl (C.Shift-1);
  C.K0:=10; C.K1:=10; C.Sum0:=TTAShift1(14); C.Sum1:=TTAShift1(14);
 End;
@@ -87203,7 +87293,10 @@ Begin
  If Total<=0 Then Fail('tta: nombre de trames incorrect.');
  { decodeur }
  If Fmt>2 Then Fail('tta: format incorrect.');
- If Fmt=2 Then Fail('tta: mot de passe requis pour un flux chiffre.');
+ If Fmt=2 Then Begin
+  If Not TTAHavePass Then Fail('Missing password for encrypted stream. Please use the -password option');
+  TTASetPassword(TTAPassword); TTACrypt:=True;
+ End Else TTACrypt:=False;
  If (Chn=0) Or (Chn>16) Then Fail('tta: nombre de canaux incorrect.');
  Bps:=(Bits+7) Div 8;
  If (Bps<1) Or (Bps>3) Then Fail('tta: format d''echantillon non pris en charge.');
@@ -91158,6 +91251,316 @@ Begin
  CloseRead;
 End;
 { ==== fin H6 swresample ==== }
+
+
+{ ==== H6b : metadonnees (-metadata, etiquettes ASF / WAV LIST INFO) comme libavformat 6.1.1 (dict, metadata.c, riffenc.c, asfenc.c, asfdec_f.c) ==== }
+Function MdLow(Const S: String): String;
+Var I: LongInt; R: String;
+Begin
+ R:=S; For I:=1 To Length(R) Do If R[I] In ['A'..'Z'] Then R[I]:=Chr(Ord(R[I])+32);
+ MdLow:=R;
+End;
+
+{ av_dict_set : une entree existante est retiree (la derniere vient a sa place), la nouvelle est ajoutee a la fin ;
+  valeur vide = suppression si Del }
+Procedure MdSet(Var N: LongInt; Var K: TMdK; Var V: TMdV; Const Key,Val: String; MatchCase,Del: Boolean);
+Var I,J: LongInt;
+Begin
+ J:=-1;
+ For I:=0 To N-1 Do
+  If (MatchCase And (K[I]=Key)) Or (Not MatchCase And (MdLow(K[I])=MdLow(Key))) Then Begin J:=I; Break; End;
+ If J>=0 Then Begin
+  K[J]:=K[N-1]; V[J]:=V[N-1]; Dec(N);
+ End;
+ If Del And (Val='') Then Exit;
+ If N<40 Then Begin K[N]:=Key; V[N]:=Val; Inc(N); End;
+End;
+
+Const
+ MdRiffN: Array[0..12] Of String[4]=('IART','ICMT','ICOP','ICRD','IGNR','ILNG','INAM','IPRD','IPRT','ITRK','ISFT','ISMP','ITCH');
+ MdRiffG: Array[0..12] Of String[10]=('artist','comment','copyright','date','genre','language','title','album','track','track','encoder','timecode','encoded_by');
+ MdAsfN: Array[0..15] Of String[24]=('WM/AlbumArtist','WM/AlbumTitle','Author','Description','WM/Composer','WM/EncodedBy','WM/EncodingSettings','WM/Genre','WM/Language','WM/OriginalFilename','WM/PartOfSet','WM/Publisher','WM/Tool','WM/TrackNumber','WM/MediaStationCallSign','WM/MediaStationName');
+ MdAsfG: Array[0..15] Of String[16]=('album_artist','album','artist','comment','composer','encoded_by','encoder','genre','language','filename','disc','publisher','encoder','track','service_provider','service_name');
+
+{ ff_metadata_conv : Tbl 0 = riff, 1 = asf ; ToNative = generique -> natif, sinon natif -> generique }
+Procedure MdConv(Var N: LongInt; Var K: TMdK; Var V: TMdV; Tbl: LongInt; ToNative: Boolean);
+Var NK: TMdK; NV: TMdV; NN,I,J,Cnt: LongInt; Key: String;
+Begin
+ NN:=0; If Tbl=0 Then Cnt:=13 Else Cnt:=16;
+ For I:=0 To N-1 Do Begin
+  Key:=K[I];
+  For J:=0 To Cnt-1 Do Begin
+   If Tbl=0 Then Begin
+    If ToNative Then Begin If MdLow(Key)=MdLow(MdRiffG[J]) Then Begin Key:=MdRiffN[J]; Break; End; End
+    Else If MdLow(Key)=MdLow(MdRiffN[J]) Then Begin Key:=MdRiffG[J]; Break; End;
+   End Else Begin
+    If ToNative Then Begin If MdLow(Key)=MdLow(MdAsfG[J]) Then Begin Key:=MdAsfN[J]; Break; End; End
+    Else If MdLow(Key)=MdLow(MdAsfN[J]) Then Begin Key:=MdAsfG[J]; Break; End;
+   End;
+  End;
+  MdSet(NN,NK,NV,Key,V[I],True,False);
+ End;
+ For I:=0 To NN-1 Do Begin K[I]:=NK[I]; V[I]:=NV[I]; End;
+ N:=NN;
+End;
+
+{ UTF-16LE (Len octets, arret au premier caractere nul) -> UTF-8 }
+Function MdUtf16(P: PEABuffer; Len: LongInt): String;
+Var I,C,C2: LongInt; R: String;
+Procedure Put(U: LongInt);
+Begin
+ If Length(R)>240 Then Exit;
+ If U<128 Then R:=R+Chr(U)
+ Else If U<2048 Then R:=R+Chr($C0 Or (U Shr 6))+Chr($80 Or (U And 63))
+ Else If U<65536 Then R:=R+Chr($E0 Or (U Shr 12))+Chr($80 Or ((U Shr 6) And 63))+Chr($80 Or (U And 63))
+ Else R:=R+Chr($F0 Or (U Shr 18))+Chr($80 Or ((U Shr 12) And 63))+Chr($80 Or ((U Shr 6) And 63))+Chr($80 Or (U And 63));
+End;
+Begin
+ R:=''; I:=0;
+ While I+1<Len Do Begin
+  C:=P^[I]+P^[I+1]*256; Inc(I,2);
+  If C=0 Then Break;
+  If (C>=$D800) And (C<$DC00) And (I+1<Len) Then Begin
+   C2:=P^[I]+P^[I+1]*256;
+   If (C2>=$DC00) And (C2<$E000) Then Begin Inc(I,2); C:=$10000+((C-$D800) Shl 10)+(C2-$DC00); End;
+  End;
+  Put(C);
+ End;
+ MdUtf16:=R;
+End;
+
+Var MdLoaded: Boolean;
+
+{ etiquettes d'entree (dictionnaire global du format) + options -metadata ; resultat dans MdN/MdK/MdV }
+Procedure MdLoad;
+Var Lim,Pos,Cnt,Sz,I,J,Len,Nl,Vt,Vl,Off: LongInt; H: Array[0..31] Of Byte; G: Array[0..15] Of Byte; Buf: PEABuffer;
+ Name,Val: String; L: Array[0..4] Of LongInt; Q: Int64;
+Function Rd16(P: PEABuffer; At: LongInt): LongInt; Begin Rd16:=P^[At]+P^[At+1]*256; End;
+Function Rd32(P: PEABuffer; At: LongInt): Int64; Begin Rd32:=Int64(P^[At])+Int64(P^[At+1])*256+Int64(P^[At+2])*65536+Int64(P^[At+3])*16777216; End;
+Begin
+ If MdLoaded Then Exit;
+ MdLoaded:=True; MdN:=0;
+ If InputPath<>'' Then Begin
+  If InputFormat='asf' Then Begin
+   OpenRead(InputPath); Lim:=InputSize;
+   If Lim>30 Then Begin
+    ReadAt(0,H,30);
+    Pos:=30;
+    While Lim-Pos>=24 Do Begin
+     ReadAt(Pos,H,24);
+     Q:=Int64(H[16])+Int64(H[17])*256+Int64(H[18])*65536+Int64(H[19])*16777216;
+     If (Q<24) Or (Q>Lim-Pos) Or (Q>1000000) Then Break;
+     Sz:=Q;
+     If (H[0]=$33) And (H[1]=$26) And (H[2]=$B2) And (H[3]=$75) And (Sz>=34) Then Begin
+      GetMem(Buf,Sz); ReadAt(Pos+24,Buf^,Sz-24);
+      For I:=0 To 4 Do L[I]:=Rd16(Buf,2*I);
+      Off:=10;
+      For I:=0 To 3 Do Begin
+       Val:=MdUtf16(PEABuffer(PtrInt(Buf)+Off),L[I]);
+       Inc(Off,L[I]);
+       Case I Of 0: Name:='title'; 1: Name:='author'; 2: Name:='copyright'; Else Name:='comment'; End;
+       If Val<>'' Then MdSet(MdN,MdK,MdV,Name,Val,False,False);
+      End;
+      FreeMem(Buf);
+     End Else If (H[0]=$40) And (H[1]=$A4) And (H[2]=$D0) And (H[3]=$D2) And (Sz>=26) Then Begin
+      GetMem(Buf,Sz); ReadAt(Pos+24,Buf^,Sz-24);
+      Cnt:=Rd16(Buf,0); Off:=2;
+      For I:=1 To Cnt Do Begin
+       If Off+2>Sz-24 Then Break;
+       Nl:=Rd16(Buf,Off); Inc(Off,2); If Odd(Nl) Then Inc(Nl);
+       If Off+Nl+4>Sz-24 Then Break;
+       Name:=MdUtf16(PEABuffer(PtrInt(Buf)+Off),Nl); Inc(Off,Nl);
+       Vt:=Rd16(Buf,Off); Vl:=Rd16(Buf,Off+2); Inc(Off,4);
+       If (Vt=0) And Odd(Vl) Then Inc(Vl);
+       If Off+Vl>Sz-24 Then Break;
+       Val:='';
+       Case Vt Of
+        0: Val:=MdUtf16(PEABuffer(PtrInt(Buf)+Off),Vl);
+        2,3: Str(Rd32(Buf,Off),Val);
+        4: Begin Q:=Rd32(Buf,Off)+Rd32(Buf,Off+4)*4294967296; Str(Q,Val); End;
+        5: Str(Rd16(Buf,Off),Val);
+       End;
+       If (Vt<>1) And (Val<>'') And (Name<>'AspectRatioX') And (Name<>'AspectRatioY') Then MdSet(MdN,MdK,MdV,Name,Val,False,False);
+       Inc(Off,Vl);
+      End;
+      FreeMem(Buf);
+     End;
+     Inc(Pos,Sz);
+    End;
+   End;
+   CloseRead;
+   MdConv(MdN,MdK,MdV,1,False);
+  End Else If InputFormat='wav' Then Begin
+   OpenRead(InputPath); Lim:=InputSize;
+   If Lim>12 Then Begin
+    Pos:=12;
+    While Lim-Pos>=8 Do Begin
+     ReadAt(Pos,H,8);
+     Q:=Int64(H[4])+Int64(H[5])*256+Int64(H[6])*65536+Int64(H[7])*16777216;
+     If (Q>Lim-Pos-8) Or (Q>1000000) Then Break;
+     Sz:=Q;
+     If (H[0]=76) And (H[1]=73) And (H[2]=83) And (H[3]=84) And (Sz>=4) Then Begin
+      GetMem(Buf,Sz+4); ReadAt(Pos+8,Buf^,Sz);
+      If (Buf^[0]=73) And (Buf^[1]=78) And (Buf^[2]=70) And (Buf^[3]=79) Then Begin
+       Off:=4;
+       While Off+8<=Sz Do Begin
+        Name:=Chr(Buf^[Off])+Chr(Buf^[Off+1])+Chr(Buf^[Off+2])+Chr(Buf^[Off+3]);
+        Vl:=Rd32(Buf,Off+4); Inc(Off,8);
+        If Off+Vl>Sz Then Break;
+        Val:='';
+        For J:=0 To Vl-1 Do Begin If Buf^[Off+J]=0 Then Break; If Length(Val)<250 Then Val:=Val+Chr(Buf^[Off+J]); End;
+        MdSet(MdN,MdK,MdV,Name,Val,False,False);
+        Inc(Off,Vl); If Odd(Vl) Then Inc(Off);
+       End;
+      End;
+      FreeMem(Buf);
+     End;
+     Inc(Pos,8+Sz+(Sz And 1));
+    End;
+   End;
+   CloseRead;
+   MdConv(MdN,MdK,MdV,0,False);
+  End;
+ End;
+ { options -metadata : appliquees dans l'ordre }
+ For I:=0 To MdCN-1 Do MdSet(MdN,MdK,MdV,MdCK[I],MdCV[I],False,True);
+End;
+
+{ dictionnaire du muxeur ASF : encoder ajoute, conversion generique -> natif }
+Procedure MdAsfPrepare;
+Var I,J: LongInt; Ok: Boolean; T: Int64; Y,Mo,D,Hh,Mi,Ss,Fr: LongInt; S: String; Code: Integer;
+Function Num(A,B: LongInt): LongInt; Var V,C: LongInt; Begin Val(Copy(S,A,B),V,C); If C<>0 Then V:=-1; Num:=V; End;
+Function Days(Yr,Mn,Dy: LongInt): Int64;
+Var Y2,Era,Yoe,Doy,Doe: Int64; M2: LongInt;
+Begin
+ Y2:=Yr; If Mn<=2 Then Dec(Y2); Era:=Y2 Div 400; Yoe:=Y2-Era*400;
+ If Mn>2 Then M2:=Mn-3 Else M2:=Mn+9;
+ Doy:=(153*M2+2) Div 5+Dy-1; Doe:=Yoe*365+Yoe Div 4-Yoe Div 100+Doy;
+ Days:=Era*146097+Doe-719468;
+End;
+Begin
+ MdLoad;
+ MdAN:=MdN;
+ For I:=0 To MdN-1 Do Begin MdAK[I]:=MdK[I]; MdAV[I]:=MdV[I]; End;
+ If Not VGBitExact Then MdSet(MdAN,MdAK,MdAV,'encoder','Lavf60.16.100',False,False)
+ Else MdSet(MdAN,MdAK,MdAV,'encoder','',False,True);
+ MdConv(MdAN,MdAK,MdAV,1,True);
+ MdCreation:=0;
+ For I:=0 To MdAN-1 Do
+  If MdLow(MdAK[I])='creation_time' Then Begin
+   S:=MdAV[I]; Ok:=False;
+   If (Length(S)>=19) And (S[5]='-') And (S[8]='-') And ((S[11]='T') Or (S[11]=' ')) And (S[14]=':') And (S[17]=':') Then Begin
+    Y:=Num(1,4); Mo:=Num(6,2); D:=Num(9,2); Hh:=Num(12,2); Mi:=Num(15,2); Ss:=Num(18,2);
+    If (Y>=0) And (Mo>0) And (D>0) And (Hh>=0) And (Mi>=0) And (Ss>=0) Then Begin
+     T:=(Days(Y,Mo,D)*86400+Hh*3600+Mi*60+Ss)*1000000;
+     If (Length(S)>19) And (S[20]='.') Then Begin
+      J:=21; Fr:=0; Code:=0;
+      While (J<=Length(S)) And (S[J] In ['0'..'9']) And (Code<6) Do Begin Fr:=Fr*10+Ord(S[J])-48; Inc(J); Inc(Code); End;
+      While Code<6 Do Begin Fr:=Fr*10; Inc(Code); End;
+      T:=T+Fr;
+     End;
+     MdCreation:=T;
+    End;
+   End;
+   { valide ou non, l'entree est retiree (asfenc.c) }
+   S:=MdAK[I]; MdSet(MdAN,MdAK,MdAV,S,'',False,True);
+   Break;
+  End;
+End;
+
+{ ---- sortie WAV : insere LIST INFO avant le bloc data (riffenc.c ff_riff_write_info) ---- }
+Procedure MdRiffBuild;
+Const Tags: Array[0..35] Of String[4]=('IARL','IART','IAS1','IAS2','IAS3','IAS4','IAS5','IAS6','IAS7','IAS8','IAS9','ICMS','ICMT','ICOP','ICRD','ICRP','IDIM','IDPI','IENG','IGNR','IKEY','ILGT','ILNG','IMED','INAM','IPLT','IPRD','IPRT','ITRK','ISBJ','ISFT','ISHP','ISMP','ISRC','ISRF','ITCH');
+Var N,I,J,Put: LongInt; K: TMdK; V: TMdV; Found: Boolean; Q: Int64;
+Procedure B(X: LongInt); Begin MdInfo[MdInfoLen]:=X And 255; Inc(MdInfoLen); End;
+Procedure B32(X: LongInt); Begin B(X); B(X Shr 8); B(X Shr 16); B(X Shr 24); End;
+Begin
+ MdLoad;
+ N:=MdN; For I:=0 To N-1 Do Begin K[I]:=MdK[I]; V[I]:=MdV[I]; End;
+ If Not VGBitExact Then MdSet(N,K,V,'encoder','Lavf60.16.100',False,False)
+ Else MdSet(N,K,V,'encoder','',False,True);
+ MdConv(N,K,V,0,True);
+ MdInfoLen:=0; B32($5453494C); B32(0); B32($4F464E49);
+ MdInfoCnt:=0;
+ For I:=0 To 35 Do Begin
+  Found:=False;
+  For J:=0 To N-1 Do If K[J]=Tags[I] Then Begin Found:=True; Break; End;
+  If Found And (Length(V[J])>0) And (MdInfoLen+Length(V[J])+12<4000) Then Begin
+   B(Ord(Tags[I][1])); B(Ord(Tags[I][2])); B(Ord(Tags[I][3])); B(Ord(Tags[I][4]));
+   B32(Length(V[J])+1);
+   For Put:=1 To Length(V[J]) Do B(Ord(V[J][Put]));
+   B(0); If Odd(Length(V[J])+1) Then B(0);
+   Inc(MdInfoCnt);
+  End;
+ End;
+ Q:=MdInfoLen-8; MdInfo[4]:=Q And 255; MdInfo[5]:=(Q Shr 8) And 255; MdInfo[6]:=(Q Shr 16) And 255; MdInfo[7]:=(Q Shr 24) And 255;
+End;
+
+Procedure MdWavInsert(Const Source,Target: String);
+Var
+ TagCnt: LongInt; I,J,Lim,Pos,Sz,Total,Put,Cnt: LongInt; H: Array[0..11] Of Byte; Q: Int64;
+ HasList: Boolean; Left: LongInt;
+ Pc: Array[0..8191] Of Byte;
+Begin
+ MdRiffBuild; TagCnt:=MdInfoCnt;
+ OpenRead(Source); Lim:=InputSize;
+ HasList:=False;
+ If Lim<12 Then Begin CloseRead; Fail('WAV tronque.'); End;
+ OpenWrite(Target);
+ ReadAt(0,H,12); WriteBytes(H,12); Pos:=12;
+ Total:=12;
+ While Lim-Pos>=8 Do Begin
+  ReadAt(Pos,H,8);
+  Q:=Int64(H[4])+Int64(H[5])*256+Int64(H[6])*65536+Int64(H[7])*16777216;
+  If (H[0]=76) And (H[1]=73) And (H[2]=83) And (H[3]=84) Then HasList:=True;
+  If (H[0]=100) And (H[1]=97) And (H[2]=116) And (H[3]=97) And Not HasList And (TagCnt>0) Then Begin
+   WriteBytes(MdInfo,MdInfoLen); Inc(Total,MdInfoLen); HasList:=True;
+  End;
+  If (H[0]=100) And (H[1]=97) And (H[2]=116) And (H[3]=97) Then Begin
+   { data : copie du reste du fichier }
+   Left:=Lim-Pos;
+   While Left>0 Do Begin
+    Cnt:=Left; If Cnt>8192 Then Cnt:=8192;
+    ReadAt(Pos,Pc,Cnt); WriteBytes(Pc,Cnt); Inc(Pos,Cnt); Dec(Left,Cnt); Inc(Total,Cnt);
+   End;
+   Break;
+  End;
+  Sz:=Q; If Sz>Lim-Pos-8 Then Sz:=Lim-Pos-8;
+  Cnt:=8+Sz+(Sz And 1); If Cnt>Lim-Pos Then Cnt:=Lim-Pos;
+  Left:=Cnt;
+  While Left>0 Do Begin
+   Put:=Left; If Put>8192 Then Put:=8192;
+   ReadAt(Pos,Pc,Put); WriteBytes(Pc,Put); Inc(Pos,Put); Dec(Left,Put); Inc(Total,Put);
+  End;
+ End;
+ { taille RIFF }
+ {$I-}Seek(ActiveOutput,4);{$I+}
+ If IOResult<>0 Then Fail('Positionnement entete WAV impossible.');
+ Q:=Total-8; H[0]:=Q And 255; H[1]:=(Q Shr 8) And 255; H[2]:=(Q Shr 16) And 255; H[3]:=(Q Shr 24) And 255;
+ WriteBytes(H,4);
+ CloseRead; CloseWrite;
+End;
+{ vrai si Name est un WAV (RIFF/WAVE) sans bloc LIST }
+Function MdIsPlainWav(Const Name: String): Boolean;
+Var H: Array[0..11] Of Byte; Lim,Pos: LongInt; Q: Int64;
+Begin
+ MdIsPlainWav:=False;
+ OpenRead(Name); Lim:=InputSize;
+ If Lim<20 Then Begin CloseRead; Exit; End;
+ ReadAt(0,H,12);
+ If (H[0]<>82) Or (H[1]<>73) Or (H[2]<>70) Or (H[3]<>70) Or (H[8]<>87) Or (H[9]<>65) Or (H[10]<>86) Or (H[11]<>69) Then Begin CloseRead; Exit; End;
+ Pos:=12;
+ While Lim-Pos>=8 Do Begin
+  ReadAt(Pos,H,8);
+  If (H[0]=76) And (H[1]=73) And (H[2]=83) And (H[3]=84) Then Begin CloseRead; Exit; End;
+  If (H[0]=100) And (H[1]=97) And (H[2]=116) And (H[3]=97) Then Begin MdIsPlainWav:=True; CloseRead; Exit; End;
+  Q:=Int64(H[4])+Int64(H[5])*256+Int64(H[6])*65536+Int64(H[7])*16777216;
+  If Q>Lim-Pos-8 Then Break;
+  Inc(Pos,8+Q+(Q And 1));
+ End;
+ CloseRead;
+End;
+{ ==== fin H6b metadonnees ==== }
 
 
 { ==== BLOCK-ANCHOR-H6 : inserer le code du groupe H6 juste au-dessus de cette ligne ==== }
@@ -113995,6 +114398,8 @@ Begin
  End;
  If (HasAlbum Or HasComment) And ((OutputFormat='mp3') Or (OutputFormat='wav')) Then Begin
   Temps[4]:=NewTemporary; WriteAudioAlbum(Stage,Temps[4]); Ready:=Temps[4];
+ End Else If (OutputFormat='wav') And MdIsPlainWav(Stage) Then Begin
+  Temps[4]:=NewTemporary; MdWavInsert(Stage,Temps[4]); Ready:=Temps[4];
  End;
  If IsDirectory(OutputPath) Then Fail('La sortie designe un dossier.');
  If Exists(OutputPath) Then Begin
@@ -114807,6 +115212,16 @@ BEGIN
   Else If Argument='-b_qoffset' Then Begin
    BQuantOffset:=ParseBQuant(NextArgument,'-b_qoffset'); HasBQuant:=True;
   End
+  Else If (Argument='-metadata') Or (Argument='-metadata:g') Then Begin
+   Value:=NextArgument; Number:=Pos('=',Value);
+   If Number<1 Then Fail('Missing ''='' in metadata '+Value);
+   If MdCN<40 Then Begin
+    MdCK[MdCN]:=Copy(Value,1,Number-1); MdCV[MdCN]:=Copy(Value,Number+1,255); Inc(MdCN);
+   End;
+  End
+  Else If Argument='-password' Then Begin
+   TTAPassword:=NextArgument; TTAHavePass:=True;
+  End
   Else If Argument='-bufsize' Then Begin
    VideoBuffer:=ParseVideoRate(NextArgument,'-bufsize',0,16760832); HasVideoBuffer:=True;
   End
@@ -115487,6 +115902,7 @@ BEGIN
  '-c:a copy exige le meme conteneur audio et aucune conversion audio.');
  If Not HideBanner Then WriteLn('FFMPEG Pascal 1.11 - moteur audio natif du projet');
  Temps[2]:=NewTemporary;
+ MdLoad;
  If AudioCodec='copy' Then CopyFile(InputPath,Temps[2])
   Else
  Begin
