@@ -71280,7 +71280,9 @@ Var
  SnwScaleMv: Array[0..7,0..7] Of LongInt;
  { tampons de travail }
  SnwPatch: Array[0..48*48+64] Of Byte;
- SnwPB: Array[0..3,0..32*32+32] Of Byte;
+ SnwCStr: Array[0..2] Of LongInt;   { linesize ffmpeg des plans (encodeur) }
+ SnwScr: PEABuffer; SnwScrSz: LongInt;  { scratchbuf de snow.c (modele de memoire) }
+ SnwPredEmu: Boolean;
  SnwT0: Array[0..64*40+64] Of SmallInt;
  SnwT2: Array[0..2,0..64*40+64] Of Byte;
  SnwQT: Array[0..32*24] Of LongInt;
@@ -71429,11 +71431,13 @@ Begin
   B:=SnwBufN; Inc(SnwBufN);
   For P:=0 To SnwNP-1 Do Begin
    St:=SnwPlW[P]+2*SnwMG+32; Rows:=SnwPlH[P]+2*SnwMG+32;
+   If SnwCStr[P]+2*SnwMG>St Then St:=SnwCStr[P]+2*SnwMG;
    GetMem(SnwBufPl[B,P],St*Rows+64); FillChar(SnwBufPl[B,P]^,St*Rows+64,0);
   End;
  End;
  For P:=0 To SnwNP-1 Do Begin
   St:=SnwPlW[P]+2*SnwMG+32; Rows:=SnwPlH[P]+2*SnwMG+32;
+  If SnwCStr[P]+2*SnwMG>St Then St:=SnwCStr[P]+2*SnwMG;
   SnwFr[I].Pl[P]:=SnwBufPl[B,P];
   SnwFr[I].Str[P]:=St; SnwFr[I].Sz[P]:=St*Rows; SnwFr[I].Org[P]:=SnwMG*St+SnwMG;
  End;
@@ -71609,17 +71613,82 @@ Begin
  If I<2 Then SnwQ3:=0 Else If (I And 1)=0 Then SnwQ3:=1 Else SnwQ3:=-1;
 End;
 
+{ image memoire de .rodata de libavcodec (ffmpeg 6.1.1 Ubuntu) autour de ff_obmc_tab : snowenc.c lit hors des tables
+  (get_dc / get_block_rd, index negatifs) ; obmc32 est a l'indice 512, obmc16 256, obmc8 192, obmc4 160 }
+Const SnwObmcImg: Array[0..1663] Of Byte=(
+  1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,
+  1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,
+  1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,
+  1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,
+  1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,1,255,
+  16,48,48,16,48,144,144,48,48,144,144,48,16,48,48,16,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  4,12,20,28,28,20,12,4,12,36,60,84,84,60,36,12,20,60,100,140,140,100,60,20,28,84,140,196,196,140,84,28,
+  28,84,140,196,196,140,84,28,20,60,100,140,140,100,60,20,12,36,60,84,84,60,36,12,4,12,20,28,28,20,12,4,
+  0,4,4,8,8,12,12,16,16,12,12,8,8,4,4,0,4,8,16,20,28,32,40,44,44,40,32,28,20,16,8,4,
+  4,16,24,36,44,56,64,76,76,64,56,44,36,24,16,4,8,20,36,48,64,76,92,104,104,92,76,64,48,36,20,8,
+  8,28,44,64,80,100,116,136,136,116,100,80,64,44,28,8,12,32,56,76,100,120,144,164,164,144,120,100,76,56,32,12,
+  12,40,64,92,116,144,168,196,196,168,144,116,92,64,40,12,16,44,76,104,136,164,196,224,224,196,164,136,104,76,44,16,
+  16,44,76,104,136,164,196,224,224,196,164,136,104,76,44,16,12,40,64,92,116,144,168,196,196,168,144,116,92,64,40,12,
+  12,32,56,76,100,120,144,164,164,144,120,100,76,56,32,12,8,28,44,64,80,100,116,136,136,116,100,80,64,44,28,8,
+  8,20,36,48,64,76,92,104,104,92,76,64,48,36,20,8,4,16,24,36,44,56,64,76,76,64,56,44,36,24,16,4,
+  4,8,16,20,28,32,40,44,44,40,32,28,20,16,8,4,0,4,4,8,8,12,12,16,16,12,12,8,8,4,4,0,
+  0,0,0,0,4,4,4,4,4,4,4,4,8,8,8,8,8,8,8,8,4,4,4,4,4,4,4,4,0,0,0,0,
+  0,4,4,4,8,8,8,12,12,16,16,16,20,20,20,24,24,20,20,20,16,16,16,12,12,8,8,8,4,4,4,0,
+  0,4,8,8,12,12,16,20,20,24,28,28,32,32,36,40,40,36,32,32,28,28,24,20,20,16,12,12,8,8,4,0,
+  0,4,8,12,16,20,24,28,28,32,36,40,44,48,52,56,56,52,48,44,40,36,32,28,28,24,20,16,12,8,4,0,
+  4,8,12,16,20,24,28,32,40,44,48,52,56,60,64,68,68,64,60,56,52,48,44,40,32,28,24,20,16,12,8,4,
+  4,8,12,20,24,32,36,40,48,52,56,64,68,76,80,84,84,80,76,68,64,56,52,48,40,36,32,24,20,12,8,4,
+  4,8,16,24,28,36,44,48,56,60,68,76,80,88,96,100,100,96,88,80,76,68,60,56,48,44,36,28,24,16,8,4,
+  4,12,20,28,32,40,48,56,64,72,80,88,92,100,108,116,116,108,100,92,88,80,72,64,56,48,40,32,28,20,12,4,
+  4,12,20,28,40,48,56,64,72,80,88,96,108,116,124,132,132,124,116,108,96,88,80,72,64,56,48,40,28,20,12,4,
+  4,16,24,32,44,52,60,72,80,92,100,108,120,128,136,148,148,136,128,120,108,100,92,80,72,60,52,44,32,24,16,4,
+  4,16,28,36,48,56,68,80,88,100,112,120,132,140,152,164,164,152,140,132,120,112,100,88,80,68,56,48,36,28,16,4,
+  4,16,28,40,52,64,76,88,96,108,120,132,144,156,168,180,180,168,156,144,132,120,108,96,88,76,64,52,40,28,16,4,
+  8,20,32,44,56,68,80,92,108,120,132,144,156,168,180,192,192,180,168,156,144,132,120,108,92,80,68,56,44,32,20,8,
+  8,20,32,48,60,76,88,100,116,128,140,156,168,184,196,208,208,196,184,168,156,140,128,116,100,88,76,60,48,32,20,8,
+  8,20,36,52,64,80,96,108,124,136,152,168,180,196,212,224,224,212,196,180,168,152,136,124,108,96,80,64,52,36,20,8,
+  8,24,40,56,68,84,100,116,132,148,164,180,192,208,224,240,240,224,208,192,180,164,148,132,116,100,84,68,56,40,24,8,
+  8,24,40,56,68,84,100,116,132,148,164,180,192,208,224,240,240,224,208,192,180,164,148,132,116,100,84,68,56,40,24,8,
+  8,20,36,52,64,80,96,108,124,136,152,168,180,196,212,224,224,212,196,180,168,152,136,124,108,96,80,64,52,36,20,8,
+  8,20,32,48,60,76,88,100,116,128,140,156,168,184,196,208,208,196,184,168,156,140,128,116,100,88,76,60,48,32,20,8,
+  8,20,32,44,56,68,80,92,108,120,132,144,156,168,180,192,192,180,168,156,144,132,120,108,92,80,68,56,44,32,20,8,
+  4,16,28,40,52,64,76,88,96,108,120,132,144,156,168,180,180,168,156,144,132,120,108,96,88,76,64,52,40,28,16,4,
+  4,16,28,36,48,56,68,80,88,100,112,120,132,140,152,164,164,152,140,132,120,112,100,88,80,68,56,48,36,28,16,4,
+  4,16,24,32,44,52,60,72,80,92,100,108,120,128,136,148,148,136,128,120,108,100,92,80,72,60,52,44,32,24,16,4,
+  4,12,20,28,40,48,56,64,72,80,88,96,108,116,124,132,132,124,116,108,96,88,80,72,64,56,48,40,28,20,12,4,
+  4,12,20,28,32,40,48,56,64,72,80,88,92,100,108,116,116,108,100,92,88,80,72,64,56,48,40,32,28,20,12,4,
+  4,8,16,24,28,36,44,48,56,60,68,76,80,88,96,100,100,96,88,80,76,68,60,56,48,44,36,28,24,16,8,4,
+  4,8,12,20,24,32,36,40,48,52,56,64,68,76,80,84,84,80,76,68,64,56,52,48,40,36,32,24,20,12,8,4,
+  4,8,12,16,20,24,28,32,40,44,48,52,56,60,64,68,68,64,60,56,52,48,44,40,32,28,24,20,16,12,8,4,
+  0,4,8,12,16,20,24,28,28,32,36,40,44,48,52,56,56,52,48,44,40,36,32,28,28,24,20,16,12,8,4,0,
+  0,4,8,8,12,12,16,20,20,24,28,28,32,32,36,40,40,36,32,32,28,28,24,20,20,16,12,12,8,8,4,0,
+  0,4,4,4,8,8,8,12,12,16,16,16,20,20,20,24,24,20,20,20,16,16,16,12,12,8,8,8,4,4,4,0,
+  0,0,0,0,4,4,4,4,4,4,4,4,8,8,8,8,8,8,8,8,4,4,4,4,4,4,4,4,0,0,0,0,
+  12,1,0,0,239,0,0,0,239,0,0,0,213,0,0,0,0,0,0,0,224,0,0,0,224,0,0,0,152,0,0,0,
+  0,0,0,0,135,0,0,0,135,0,0,0,110,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  88,1,0,0,54,1,0,0,54,1,0,0,24,1,0,0,0,0,0,0,64,1,0,0,64,1,0,0,228,0,0,0,
+  0,0,0,0,175,0,0,0,175,0,0,0,136,0,0,0,0,0,0,0,129,0,0,0,129,0,0,0,102,0,0,0);
 Function SnwObmcPtr(Idx: LongInt): PEABuffer;
 Begin
  Case Idx Of
-  0: SnwObmcPtr:=PEABuffer(@SnwObmc32[0]);
-  1: SnwObmcPtr:=PEABuffer(@SnwObmc16[0]);
-  2: SnwObmcPtr:=PEABuffer(@SnwObmc8[0]);
-  Else SnwObmcPtr:=PEABuffer(@SnwObmc4[0]);
+  0: SnwObmcPtr:=PEABuffer(@SnwObmcImg[512]);
+  1: SnwObmcPtr:=PEABuffer(@SnwObmcImg[256]);
+  2: SnwObmcPtr:=PEABuffer(@SnwObmcImg[192]);
+  Else SnwObmcPtr:=PEABuffer(@SnwObmcImg[160]);
  End;
 End;
 
 { ff_snow_pred_block : prediction d'un bloc (Dst, pas DS) }
+{ agrandit (si besoin) le scratchbuf en conservant son contenu }
+Procedure SnwEnsureScr(Need: LongInt);
+Var Nw: PEABuffer;
+Begin
+ If (SnwScr<>Nil) And (SnwScrSz>=Need) Then Exit;
+ GetMem(Nw,Need+64); FillChar(Nw^,Need+64,0);
+ If SnwScr<>Nil Then Begin Move(SnwScr^,Nw^,SnwScrSz); FreeMem(SnwScr); End;
+ SnwScr:=Nw; SnwScrSz:=Need;
+End;
+
 Procedure SnwPred(Dst: PEABuffer; DO_,DS: LongInt; Sx,Sy,Bw,Bh,BI,Pl,W,H: LongInt);
 Var
  Bk: TSnwBlk; X,Y,Color,Sc,Mx,My,Dx,Dy,Sx2,Sy2,Xx,Yy,TI,F,Q: LongInt; Row: PEABuffer; Pt: PEABuffer;
@@ -71644,6 +71713,8 @@ Begin
    Pt^[Y*48+X]:=Row^[Xx];
   End;
  End;
+ If SnwPredEmu And ((Sx2<0) Or (Sx2>=SnwMax(W-Bw-6,0)) Or (Sy2<0) Or (Sy2>=SnwMax(H-Bh-6,0))) Then
+  For Y:=0 To Bh+6 Do Move(Pt^[Y*48],SnwScr^[16+Y*DS],Bw+7);
  TI:=3-(Bw Shr 2)+(Bw Shr 4);
  If ((Dx And 3)<>0) Or ((Dy And 3)<>0) Or Not ((Bw=Bh) Or (2*Bw=Bh) Or (Bw=2*Bh)) Or ((Bw And (Bw-1))<>0)
   Or (Bw=1) Or (Bh=1) Or Not SnwFast[Pl] Then
@@ -71680,8 +71751,8 @@ End;
 Procedure SnwAddYBlock(Dst: PSnwS16; DstO: LongInt; Dst8: PEABuffer; Dst8O: LongInt; Ob: PEABuffer; ObO: LongInt;
   SrcX,SrcY,Bw,Bh,W,H,DstStride,SrcStride,ObStride,Bx,By,Add,OffsetDst,Pl: LongInt);
 Var
- BWd,BHt,BS,Lt,Rt,Lb,Rb,X,Y,V,K,O1,O2,O3,O4: LongInt;
- Idx: Array[0..3] Of LongInt; Slot: Array[0..3] Of LongInt; Ns: LongInt;
+ BWd,BHt,BS,Lt,Rt,Lb,Rb,X,Y,V,K,O1,O2,O3,O4,Sst,TStep,Ptmp: LongInt;
+ Bo: Array[0..3] Of LongInt;
 Begin
  BWd:=SnwBw Shl SnwBMD; BHt:=SnwBh Shl SnwBMD; BS:=BWd;
  Lt:=Bx+By*BS; Rt:=Lt+1; Lb:=Lt+BS; Rb:=Lb+1;
@@ -71704,27 +71775,33 @@ Begin
  If (Bw<=0) Or (Bh<=0) Then Exit;
  If OffsetDst<>0 Then DstO:=DstO+SrcX+SrcY*DstStride;
  Dst8O:=Dst8O+SrcX+SrcY*SrcStride;
- { predictions (blocs identiques partages) }
- SnwPred(PEABuffer(@SnwPB[0,0]),0,32,SrcX,SrcY,Bw,Bh,Lt,Pl,W,H);
- Idx[0]:=0; Ns:=1;
- If SnwSame(Lt,Rt) Then Idx[1]:=Idx[0] Else Begin
-  Idx[1]:=Ns; SnwPred(PEABuffer(@SnwPB[Ns,0]),0,32,SrcX,SrcY,Bw,Bh,Rt,Pl,W,H); Inc(Ns);
+ { predictions (blocs identiques partages) ; tampon = scratchbuf de snow.c }
+ If SnwCStr[Pl]>0 Then Sst:=SnwCStr[Pl] Else Sst:=SrcStride;
+ If Sst>=7*16 Then TStep:=16 Else TStep:=16*Sst;
+ SnwEnsureScr(7*TStep+16+(Bh+8)*Sst+Bw+64);
+ Ptmp:=3*TStep;
+ Bo[0]:=Ptmp; Inc(Ptmp,TStep);
+ SnwPredEmu:=True;
+ SnwPred(SnwScr,Bo[0],Sst,SrcX,SrcY,Bw,Bh,Lt,Pl,W,H);
+ If SnwSame(Lt,Rt) Then Bo[1]:=Bo[0] Else Begin
+  Bo[1]:=Ptmp; Inc(Ptmp,TStep); SnwPred(SnwScr,Bo[1],Sst,SrcX,SrcY,Bw,Bh,Rt,Pl,W,H);
  End;
- If SnwSame(Lt,Lb) Then Idx[2]:=Idx[0]
- Else If SnwSame(Rt,Lb) Then Idx[2]:=Idx[1]
+ If SnwSame(Lt,Lb) Then Bo[2]:=Bo[0]
+ Else If SnwSame(Rt,Lb) Then Bo[2]:=Bo[1]
  Else Begin
-  Idx[2]:=Ns; SnwPred(PEABuffer(@SnwPB[Ns,0]),0,32,SrcX,SrcY,Bw,Bh,Lb,Pl,W,H); Inc(Ns);
+  Bo[2]:=Ptmp; Inc(Ptmp,TStep); SnwPred(SnwScr,Bo[2],Sst,SrcX,SrcY,Bw,Bh,Lb,Pl,W,H);
  End;
- If SnwSame(Lt,Rb) Then Idx[3]:=Idx[0]
- Else If SnwSame(Rt,Rb) Then Idx[3]:=Idx[1]
- Else If SnwSame(Lb,Rb) Then Idx[3]:=Idx[2]
+ If SnwSame(Lt,Rb) Then Bo[3]:=Bo[0]
+ Else If SnwSame(Rt,Rb) Then Bo[3]:=Bo[1]
+ Else If SnwSame(Lb,Rb) Then Bo[3]:=Bo[2]
  Else Begin
-  Idx[3]:=Ns; SnwPred(PEABuffer(@SnwPB[Ns,0]),0,32,SrcX,SrcY,Bw,Bh,Rb,Pl,W,H); Inc(Ns);
+  Bo[3]:=Ptmp; SnwPred(SnwScr,Bo[3],Sst,SrcX,SrcY,Bw,Bh,Rb,Pl,W,H);
  End;
+ SnwPredEmu:=False;
  For Y:=0 To Bh-1 Do Begin
   O1:=ObO+Y*ObStride; O2:=O1+(ObStride Shr 1); O3:=O1+ObStride*(ObStride Shr 1); O4:=O3+(ObStride Shr 1);
   For X:=0 To Bw-1 Do Begin
-   V:=Ob^[O1+X]*SnwPB[Idx[3],X+Y*32]+Ob^[O2+X]*SnwPB[Idx[2],X+Y*32]+Ob^[O3+X]*SnwPB[Idx[1],X+Y*32]+Ob^[O4+X]*SnwPB[Idx[0],X+Y*32];
+   V:=Ob^[O1+X]*SnwScr^[Bo[3]+X+Y*Sst]+Ob^[O2+X]*SnwScr^[Bo[2]+X+Y*Sst]+Ob^[O3+X]*SnwScr^[Bo[1]+X+Y*Sst]+Ob^[O4+X]*SnwScr^[Bo[0]+X+Y*Sst];
    V:=SnwSar(V,4);
    If Add<>0 Then Begin
     V:=V+Dst^[DstO+X+Y*DstStride];
@@ -72695,9 +72772,11 @@ Var
  SnwMeGen: LongWord;
  SnwMeXmin,SnwMeXmax,SnwMeYmin,SnwMeYmax,SnwMePX,SnwMePY,SnwMeSkip,SnwMePen,SnwMeSubPen,SnwMeMbPen: LongInt;
  SnwMeFlags,SnwMeSubFlags,SnwMeMbFlags,SnwMeDia,SnwMeStride,SnwMeScene: LongInt;
- SnwOptCmp,SnwOptSubCmp,SnwOptMbCmp,SnwOptDia,SnwOptSubQ,SnwOptMv0: LongInt;
+ SnwOptCmp,SnwOptSubCmp,SnwOptMbCmp,SnwOptDia,SnwOptSubQ,SnwOptMv0,SnwNsseW: LongInt;
  SnwSrcO,SnwRefO,SnwRefF: LongInt;
  SnwMeTmp: Array[0..32*32+64] Of Byte;
+ SnwMeTmpC: Array[0..127] Of Byte; SnwBlkX,SnwBlkY: LongInt;
+ SnwQvF: Single; SnwQvFrac: Boolean; SnwMaxFr: LongInt;
  SnwMeQpel: LongInt;
 
 Function SnwSq(X: LongInt): LongInt;
@@ -72806,7 +72885,20 @@ Begin
       S2:=S2+SnwAbs(A^[AO+Y*AS+X]-A^[AO+(Y+1)*AS+X]-A^[AO+Y*AS+X+1]+A^[AO+(Y+1)*AS+X+1])
            -SnwAbs(B^[BO+Y*BS+X]-B^[BO+(Y+1)*BS+X]-B^[BO+Y*BS+X+1]+B^[BO+(Y+1)*BS+X+1]);
    End;
-   S:=S1+SnwAbs(S2)*8;
+   S:=S1+SnwAbs(S2)*SnwNsseW;
+  End;
+  15: Begin
+   S:=SnwAbs(A^[AO]-B^[BO]);
+   For X:=1 To W-1 Do S:=S+SnwAbs((A^[AO+X]-B^[BO+X])-(A^[AO+X-1]-B^[BO+X-1]));
+   For Y:=1 To H-1 Do Begin
+    S:=S+SnwAbs((A^[AO+Y*AS]-B^[BO+Y*BS])-(A^[AO+(Y-1)*AS]-B^[BO+(Y-1)*BS]));
+    For X:=1 To W-1 Do Begin
+     S1:=A^[AO+Y*AS+X-1]-B^[BO+Y*BS+X-1];
+     S2:=A^[AO+(Y-1)*AS+X]-B^[BO+(Y-1)*BS+X];
+     D:=SnwMid(S2,S1,S1+S2-(A^[AO+(Y-1)*AS+X-1]-B^[BO+(Y-1)*BS+X-1]));
+     S:=S+SnwAbs((A^[AO+Y*AS+X]-B^[BO+Y*BS+X])-D);
+    End;
+   End;
   End;
   11: S:=SnwWavelet(A,AO,AS,B,BO,BS,W,H,1);
   12: S:=SnwWavelet(A,AO,AS,B,BO,BS,W,H,0);
@@ -72814,8 +72906,44 @@ Begin
  SnwCmpFn:=S;
 End;
 
-{ cmp_inline : sans chroma. Qpel=1 : quart de pixel }
-Function SnwMeCmp(Kind,X,Y,SubX,SubY,Size,H,Qpel: LongInt): LongInt;
+{ partie chroma de cmp_inline (flag FF_CMP_CHROMA) : X,Y pleine-pel, SubX,SubY sous-pel }
+Function SnwChromaCmp(Kind,X,Y,SubX,SubY,Size,H,Qpel: LongInt): LongInt;
+Var Dxy,Hx,Hy,Cx,Cy,Uv,Pln,Wc,Hc,Yy,Xx,Ro,So,Rs,A,B,C,D,Sum: LongInt; Rp,Sp: PEABuffer;
+Begin
+ If SnwNP<3 Then Fail('snow: -cmp chroma sans plans chroma.');
+ If Size<>0 Then Fail('snow: chroma + mv4 non pris en charge.');
+ If SnwCHS>1 Then Fail('snow: -cmp chroma avec yuv410p non pris en charge.');
+ Dxy:=SubX+(SubY Shl (1+Qpel));
+ If Dxy<>0 Then Begin
+  If Qpel<>0 Then Begin
+   Hx:=SubX+X*(1 Shl (1+Qpel)); Hy:=SubY+Y*(1 Shl (1+Qpel));
+   Cx:=Hx Div 2; Cy:=Hy Div 2;
+   Cx:=SnwSar(Cx,1) Or (Cx And 1); Cy:=SnwSar(Cy,1) Or (Cy And 1);
+   Uv:=(Cx And 1)+2*(Cy And 1);
+  End Else Uv:=Dxy Or (X And 1) Or (2*(Y And 1));
+ End Else Uv:=(X And 1)+2*(Y And 1);
+ Wc:=8 Shr Size; Hc:=H Shr 1; Sum:=0;
+ For Pln:=1 To 2 Do Begin
+  Rp:=SnwFr[SnwRefF].Pl[Pln]; Rs:=SnwFr[SnwRefF].Str[Pln];
+  Ro:=SnwFr[SnwRefF].Org[Pln]+(SnwBlkX Shr SnwCHS)+(SnwBlkY Shr SnwCHS)*Rs+SnwSar(X,1)+SnwSar(Y,1)*Rs;
+  SnwMc(-1,PEABuffer(@SnwMeTmpC[0]),0,8,Rp,Ro-3-3*Rs,Rs,Wc,Hc,(Uv And 1)*8,(Uv Shr 1)*8);
+  Sp:=SnwIn.Pl[Pln]; So:=SnwIn.Org[Pln]+(SnwBlkX Shr SnwCHS)+(SnwBlkY Shr SnwCVS)*SnwIn.Str[Pln];
+  Sum:=Sum+SnwCmpFn(Kind,1,PEABuffer(@SnwMeTmpC[0]),0,8,Sp,So,SnwIn.Str[Pln],Hc);
+ End;
+ SnwChromaCmp:=Sum;
+End;
+
+{ cmp_inline. Qpel=1 : quart de pixel ; Ch=1 : flag chroma }
+Function SnwMeCmp0(Kind,X,Y,SubX,SubY,Size,H,Qpel: LongInt): LongInt; Forward;
+Function SnwMeCmp(Kind,X,Y,SubX,SubY,Size,H,Qpel,Ch: LongInt): LongInt;
+Var D: LongInt;
+Begin
+ D:=SnwMeCmp0(Kind,X,Y,SubX,SubY,Size,H,Qpel);
+ If Ch<>0 Then D:=D+SnwChromaCmp(Kind,X,Y,SubX,SubY,Size,H,Qpel);
+ SnwMeCmp:=D;
+End;
+
+Function SnwMeCmp0(Kind,X,Y,SubX,SubY,Size,H,Qpel: LongInt): LongInt;
 Var Dxy,Ro,N: LongInt; Rp,Sp: PEABuffer;
 Begin
  Dxy:=SubX+(SubY Shl (1+Qpel));
@@ -72832,16 +72960,16 @@ Begin
    End;
   End Else
    SnwMc(-1,PEABuffer(@SnwMeTmp[0]),0,32,Rp,Ro-3-3*SnwMeStride,SnwMeStride,H,H,SubX*8,SubY*8);
-  SnwMeCmp:=SnwCmpFn(Kind,Size,PEABuffer(@SnwMeTmp[0]),0,32,Sp,SnwSrcO,SnwMeStride,H);
+  SnwMeCmp0:=SnwCmpFn(Kind,Size,PEABuffer(@SnwMeTmp[0]),0,32,Sp,SnwSrcO,SnwMeStride,H);
  End Else
-  SnwMeCmp:=SnwCmpFn(Kind,Size,Sp,SnwSrcO,SnwMeStride,Rp,Ro,SnwMeStride,H);
+  SnwMeCmp0:=SnwCmpFn(Kind,Size,Sp,SnwSrcO,SnwMeStride,Rp,Ro,SnwMeStride,H);
 End;
 
 Function SnwGetMbScore(Mx,My,Size,H,AddRate: LongInt): LongInt;
 Var Qpel,Mask,D: LongInt;
 Begin
  Qpel:=SnwMeMbFlags And 1; Mask:=1+2*Qpel;
- D:=SnwMeCmp(SnwOptMbCmp And $FF,SnwSar(Mx,Qpel+1),SnwSar(My,Qpel+1),Mx And Mask,My And Mask,Size,H,Qpel);
+ D:=SnwMeCmp(SnwOptMbCmp And $FF,SnwSar(Mx,Qpel+1),SnwSar(My,Qpel+1),Mx And Mask,My And Mask,Size,H,Qpel,(SnwOptMbCmp Shr 8) And 1);
  If (AddRate<>0) And ((Mx<>0) Or (My<>0) Or (Size>0)) Then
   D:=D+(SnwMvPen(Mx-SnwMePX)+SnwMvPen(My-SnwMePY))*SnwMeMbPen;
  SnwGetMbScore:=D;
@@ -72859,7 +72987,7 @@ Procedure SnwCheckHalf(Dx,Dy,X,Y,Size,H: LongInt; Var Dmin,Bx,By: LongInt);
 Var Hx,Hy,D: LongInt;
 Begin
  Hx:=2*X+Dx; Hy:=2*Y+Dy;
- D:=SnwMeCmp(SnwOptSubCmp And $FF,X,Y,Dx,Dy,Size,H,0);
+ D:=SnwMeCmp(SnwOptSubCmp And $FF,X,Y,Dx,Dy,Size,H,0,(SnwOptSubCmp Shr 8) And 1);
  D:=D+(SnwMvPen(Hx-SnwMePX)+SnwMvPen(Hy-SnwMePY))*SnwMeSubPen;
  If D<Dmin Then Begin Dmin:=D; Bx:=Hx; By:=Hy; End;
 End;
@@ -72870,7 +72998,7 @@ Begin
  Mx:=MxP; My:=MyP; Bx:=2*Mx; By:=2*My;
  If SnwMeSkip<>0 Then Begin MxP:=0; MyP:=0; SnwHpelSearch:=Dmin; Exit; End;
  If SnwOptCmp<>SnwOptSubCmp Then Begin
-  Dmin:=SnwMeCmp(SnwOptSubCmp And $FF,Mx,My,0,0,Size,H,0);
+  Dmin:=SnwMeCmp(SnwOptSubCmp And $FF,Mx,My,0,0,Size,H,0,(SnwOptSubCmp Shr 8) And 1);
   If (Mx<>0) Or (My<>0) Or (Size>0) Then Dmin:=Dmin+(SnwMvPen(2*Mx-SnwMePX)+SnwMvPen(2*My-SnwMePY))*SnwMeSubPen;
  End;
  If (Mx>SnwMeXmin) And (Mx<SnwMeXmax) And (My>SnwMeYmin) And (My<SnwMeYmax) Then Begin
@@ -72991,7 +73119,7 @@ Procedure SnwCheckQuarter(Dx,Dy,X,Y,Size,H: LongInt; Var Dmin,Bx,By: LongInt);
 Var Hx,Hy,D: LongInt;
 Begin
  Hx:=4*X+Dx; Hy:=4*Y+Dy;
- D:=SnwMeCmp(SnwOptCmp And $FF,X,Y,Dx,Dy,Size,H,1);
+ D:=SnwMeCmp(SnwOptCmp And $FF,X,Y,Dx,Dy,Size,H,1,(SnwOptSubCmp Shr 8) And 1);
  D:=D+(SnwMvPen(Hx-SnwMePX)+SnwMvPen(Hy-SnwMePY))*SnwMeSubPen;
  If D<Dmin Then Begin Dmin:=D; Bx:=Hx; By:=Hy; End;
 End;
@@ -73005,7 +73133,7 @@ Begin
  Mx:=MxP; My:=MyP;
  If SnwMeSkip<>0 Then Begin MxP:=0; MyP:=0; SnwQpelSearch:=Dmin; Exit; End;
  If SnwOptCmp<>SnwOptSubCmp Then Begin
-  Dmin:=SnwMeCmp(SnwOptSubCmp And $FF,Mx,My,0,0,Size,H,1);
+  Dmin:=SnwMeCmp(SnwOptSubCmp And $FF,Mx,My,0,0,Size,H,1,(SnwOptSubCmp Shr 8) And 1);
   If (Mx<>0) Or (My<>0) Or (Size>0) Then Dmin:=Dmin+(SnwMvPen(4*Mx-SnwMePX)+SnwMvPen(4*My-SnwMePY))*SnwMeSubPen;
  End;
  If (Mx>SnwMeXmin) And (Mx<SnwMeXmax) And (My>SnwMeYmin) And (My<SnwMeYmax) Then Begin
@@ -73035,7 +73163,7 @@ Begin
    Cx:=4*(R-L); Cx2:=R+L-2*C; Cy:=4*(B-T); Cy2:=B+T-2*C;
    Key:=SnwMapKey(Mx-1,My-1);
    If SnwMeMap[SnwMapIdx(Mx-1,My-1)]=Key Then Tl:=SnwScoreAt(Index-8-1)
-   Else Tl:=SnwMeCmp(SnwOptCmp And $FF,Mx-1,My-1,0,0,Size,H,1);
+   Else Tl:=SnwMeCmp(SnwOptCmp And $FF,Mx-1,My-1,0,0,Size,H,1,(SnwOptSubCmp Shr 8) And 1);
    Cxy:=2*Tl+(Cx+Cy) Div 4-(Cx2+Cy2)-2*C;
    For Ny:=-3 To 3 Do
     For Nx:=-3 To 3 Do Begin
@@ -73066,14 +73194,16 @@ Var
  SnwBest: Array[0..1] Of LongInt;
  SnwDmin: LongInt;
 
+Var SnwChkMiss: Boolean; SnwLastD: LongInt;
 Procedure SnwCheckMv(X,Y,Size,H,Shift: LongInt);
 Var Key: LongWord; Idx,D: LongInt;
 Begin
  Key:=SnwMapKey(X,Y); Idx:=SnwMapIdx(X,Y);
  If SnwMeMap[Idx]<>Key Then Begin
-  D:=SnwMeCmp(SnwOptCmp And $FF,X,Y,0,0,Size,H,0);
+  D:=SnwMeCmp(SnwOptCmp And $FF,X,Y,0,0,Size,H,0,(SnwOptCmp Shr 8) And 1);
   SnwMeMap[Idx]:=Key; SnwMeMap[64+Idx]:=LongWord(D);
   D:=D+(SnwMvPen((X Shl Shift)-SnwMePX)+SnwMvPen((Y Shl Shift)-SnwMePY))*SnwMePen;
+  SnwChkMiss:=True; SnwLastD:=D;
   If D<SnwDmin Then Begin SnwDmin:=D; SnwBest[0]:=X; SnwBest[1]:=Y; End;
  End;
 End;
@@ -73090,7 +73220,7 @@ Var Key: LongWord; Idx: LongInt;
 Begin
  Key:=SnwMapKey(SnwBest[0],SnwBest[1]); Idx:=SnwMapIdx(SnwBest[0],SnwBest[1]);
  If SnwMeMap[Idx]<>Key Then Begin
-  SnwMeMap[64+Idx]:=LongWord(SnwMeCmp(SnwOptCmp And $FF,SnwBest[0],SnwBest[1],0,0,Size,H,0));
+  SnwMeMap[64+Idx]:=LongWord(SnwMeCmp(SnwOptCmp And $FF,SnwBest[0],SnwBest[1],0,0,Size,H,0,(SnwOptCmp Shr 8) And 1));
   SnwMeMap[Idx]:=Key;
  End;
 End;
@@ -73102,7 +73232,7 @@ Var Key: LongWord; Idx,D: LongInt;
 Begin
  Key:=SnwMapKey(Xx,Yy); Idx:=SnwMapIdx(Xx,Yy);
  If SnwMeMap[Idx]<>Key Then Begin
-  D:=SnwMeCmp(SnwOptCmp And $FF,Xx,Yy,0,0,Size,H,0);
+  D:=SnwMeCmp(SnwOptCmp And $FF,Xx,Yy,0,0,Size,H,0,(SnwOptCmp Shr 8) And 1);
   SnwMeMap[Idx]:=Key; SnwMeMap[64+Idx]:=LongWord(D);
   D:=D+(SnwMvPen(LongInt(LongWord(Xx) Shl Shift)-SnwMePX)+SnwMvPen(LongInt(LongWord(Yy) Shl Shift)-SnwMePY))*SnwMePen;
   If D<SnwDmin Then Begin SnwBest[0]:=Xx; SnwBest[1]:=Yy; SnwDmin:=D; NextDir:=NewDir; End;
@@ -73217,19 +73347,144 @@ Begin
 End;
 
 Procedure SnwFullSearch(Size,H,Shift: LongInt);
-Var X,Y,DiaSize: LongInt;
+Var X,Y,DiaSize,Dd: LongInt;
+Procedure Cc(Ax,Ay: LongInt);
+Begin
+ SnwChkMiss:=False;
+ SnwCheckClipped(Ax,Ay,Size,H,Shift);
+ If SnwChkMiss Then Dd:=SnwLastD;
+End;
 Begin
  DiaSize:=SnwMeDia And $FF;
  For Y:=SnwMax(-DiaSize,SnwMeYmin) To SnwMin(DiaSize,SnwMeYmax) Do
   For X:=SnwMax(-DiaSize,SnwMeXmin) To SnwMin(DiaSize,SnwMeXmax) Do SnwCheckMv(X,Y,Size,H,Shift);
  X:=SnwBest[0]; Y:=SnwBest[1];
- SnwCheckClipped(X,Y,Size,H,Shift); SnwCheckClipped(X+1,Y,Size,H,Shift); SnwCheckClipped(X,Y+1,Size,H,Shift);
- SnwCheckClipped(X-1,Y,Size,H,Shift); SnwCheckClipped(X,Y-1,Size,H,Shift);
+ Dd:=SnwDmin; { le C renvoie la derniere valeur de d et non dmin }
+ Cc(X,Y); Cc(X+1,Y); Cc(X,Y+1); Cc(X-1,Y); Cc(X,Y-1);
+ SnwBest[0]:=X; SnwBest[1]:=Y; SnwDmin:=Dd;
+End;
+
+{ sab_diamond_search (dia_size < -1) ; tri AV_QSORT de libavutil/qsort.h reproduit a l'identique }
+Type TSnwMin=Record h,x,y,ck: LongInt; End;
+Var SnwMinima: Array[0..63] Of TSnwMin;
+Function SnwMinCmp(A,B: LongInt): LongInt;
+Begin SnwMinCmp:=SnwW32(Int64(SnwMinima[A].h)-SnwMinima[B].h); End;
+Procedure SnwMinSwap(A,B: LongInt);
+Var T: TSnwMin;
+Begin T:=SnwMinima[A]; SnwMinima[A]:=SnwMinima[B]; SnwMinima[B]:=T; End;
+Procedure SnwMinSort(Num: LongInt);
+Var St0,St1: Array[0..63] Of LongInt; Sp,Start,Fin,Left,Right,Mid,Chk: LongInt;
+Begin
+ If Num<2 Then Exit;
+ Sp:=1; St0[0]:=0; St1[0]:=Num-1;
+ While Sp>0 Do Begin
+  Dec(Sp); Start:=St0[Sp]; Fin:=St1[Sp];
+  While Start<Fin Do Begin
+   If Start<Fin-1 Then Begin
+    Chk:=0; Right:=Fin-2; Left:=Start+1; Mid:=Start+((Fin-Start) Shr 1);
+    If SnwMinCmp(Start,Fin)>0 Then Begin
+     If SnwMinCmp(Fin,Mid)>0 Then SnwMinSwap(Start,Mid) Else SnwMinSwap(Start,Fin);
+    End Else Begin
+     If SnwMinCmp(Start,Mid)>0 Then SnwMinSwap(Start,Mid) Else Chk:=1;
+    End;
+    If SnwMinCmp(Mid,Fin)>0 Then Begin SnwMinSwap(Mid,Fin); Chk:=0; End;
+    If Start=Fin-2 Then Break;
+    SnwMinSwap(Fin-1,Mid);
+    While Left<=Right Do Begin
+     While (Left<=Right) And (SnwMinCmp(Left,Fin-1)<0) Do Inc(Left);
+     While (Left<=Right) And (SnwMinCmp(Right,Fin-1)>0) Do Dec(Right);
+     If Left<=Right Then Begin SnwMinSwap(Left,Right); Inc(Left); Dec(Right); End;
+    End;
+    SnwMinSwap(Fin-1,Left);
+    If (Chk<>0) And ((Mid=Left-1) Or (Mid=Left)) Then Begin
+     Mid:=Start;
+     While (Mid<Fin) And (SnwMinCmp(Mid,Mid+1)<=0) Do Inc(Mid);
+     If Mid=Fin Then Break;
+    End;
+    If Fin-Left<Left-Start Then Begin
+     St0[Sp]:=Start; St1[Sp]:=Right; Inc(Sp); Start:=Left+1;
+    End Else Begin
+     St0[Sp]:=Left+1; St1[Sp]:=Fin; Inc(Sp); Fin:=Right;
+    End;
+   End Else Begin
+    If SnwMinCmp(Start,Fin)>0 Then SnwMinSwap(Start,Fin);
+    Break;
+   End;
+  End;
+ End;
+End;
+
+Procedure SnwSabDiamond(Size,H,Shift: LongInt);
+Var Cnt,I,J,X,Y,Idx: LongInt; Key: LongWord; K64: Int64; Restart: Boolean;
+Function Chk(Ax,Ay: LongInt): Boolean;
+Var Kk: LongWord; Ix,D,Jj: LongInt;
+Begin
+ Chk:=False;
+ Kk:=SnwMapKey(Ax,Ay); Ix:=SnwMapIdx(Ax,Ay);
+ If SnwMeMap[Ix]<>Kk Then Begin
+  D:=SnwMeCmp(SnwOptCmp And $FF,Ax,Ay,0,0,Size,H,0,(SnwOptCmp Shr 8) And 1);
+  SnwMeMap[Ix]:=Kk; SnwMeMap[64+Ix]:=LongWord(D);
+  D:=D+(SnwMvPen((Ax Shl Shift)-SnwMePX)+SnwMvPen((Ay Shl Shift)-SnwMePY))*SnwMePen;
+  If D<SnwMinima[Cnt-1].h Then Begin
+   Jj:=0;
+   While D>=SnwMinima[Jj].h Do Inc(Jj);
+   Move(SnwMinima[Jj],SnwMinima[Jj+1],(Cnt-Jj-1)*SizeOf(TSnwMin));
+   SnwMinima[Jj].ck:=0; SnwMinima[Jj].h:=D; SnwMinima[Jj].x:=Ax; SnwMinima[Jj].y:=Ay;
+   Chk:=True;
+  End;
+ End;
+End;
+Begin
+ Cnt:=SnwAbs(SnwMeDia);
+ J:=0; I:=0;
+ While (I<64) And (J<64) Do Begin
+  K64:=Int64(SnwMeMap[I])+1024+2097152;
+  Key:=LongWord(K64 And $FFFFFFFF);
+  If (Key And $FFC00000)=SnwMeGen Then Begin
+   SnwMinima[J].h:=LongInt(SnwMeMap[64+I]);
+   SnwMinima[J].x:=Key And 2047; Key:=Key Shr 11;
+   SnwMinima[J].y:=Key And 2047;
+   SnwMinima[J].x:=SnwMinima[J].x-1024; SnwMinima[J].y:=SnwMinima[J].y-1024;
+   If Not ((SnwMinima[J].x>SnwMeXmax) Or (SnwMinima[J].x<SnwMeXmin) Or (SnwMinima[J].y>SnwMeYmax) Or (SnwMinima[J].y<SnwMeYmin)) Then Begin
+    SnwMinima[J].ck:=0;
+    If (SnwMinima[J].x<>0) Or (SnwMinima[J].y<>0) Then
+     SnwMinima[J].h:=SnwMinima[J].h+(SnwMvPen((SnwMinima[J].x Shl Shift)-SnwMePX)+SnwMvPen((SnwMinima[J].y Shl Shift)-SnwMePY))*SnwMePen;
+    Inc(J);
+   End;
+  End;
+  Inc(I);
+ End;
+ SnwMinSort(J);
+ While J<Cnt Do Begin
+  SnwMinima[J].h:=256*256*256*64; SnwMinima[J].ck:=0; SnwMinima[J].x:=0; SnwMinima[J].y:=0;
+  Inc(J);
+ End;
+ I:=0;
+ While I<Cnt Do Begin
+  X:=SnwMinima[I].x; Y:=SnwMinima[I].y;
+  If SnwMinima[I].ck=0 Then
+   If Not ((X>=SnwMeXmax) Or (X<=SnwMeXmin) Or (Y>=SnwMeYmax) Or (Y<=SnwMeYmin)) Then Begin
+    Restart:=False;
+    If Chk(X-1,Y) Then Restart:=True
+    Else If Chk(X+1,Y) Then Restart:=True
+    Else If Chk(X,Y-1) Then Restart:=True
+    Else If Chk(X,Y+1) Then Restart:=True;
+    If Restart Then I:=-1 Else SnwMinima[I].ck:=1;
+   End;
+  Inc(I);
+ End;
+ SnwBest[0]:=SnwMinima[0].x; SnwBest[1]:=SnwMinima[0].y; SnwDmin:=SnwMinima[0].h;
+ If (SnwBest[0]<SnwMeXmax) And (SnwBest[0]>SnwMeXmin) And (SnwBest[1]<SnwMeYmax) And (SnwBest[1]>SnwMeYmin) Then Begin
+  X:=SnwBest[0]; Y:=SnwBest[1];
+  SnwCheckMv(X-1,Y,Size,H,Shift); SnwCheckMv(X+1,Y,Size,H,Shift);
+  SnwCheckMv(X,Y-1,Size,H,Shift); SnwCheckMv(X,Y+1,Size,H,Shift);
+ End;
 End;
 
 Procedure SnwDiamondSearch(Size,H,Shift: LongInt);
 Begin
  If SnwMeDia=-1 Then SnwFunnyDiamond(Size,H,Shift)
+ Else If SnwMeDia<-1 Then SnwSabDiamond(Size,H,Shift)
  Else If SnwMeDia<2 Then SnwSmallDiamond(Size,H,Shift)
  Else If SnwMeDia>1024 Then SnwFullSearch(Size,H,Shift)
  Else If SnwMeDia>768 Then SnwUmhSearch(Size,H,Shift)
@@ -73248,7 +73503,7 @@ Begin
  SnwBest[0]:=0; SnwBest[1]:=0;
  Inc(SnwMeGen,1 Shl 22);
  If SnwMeGen=0 Then Begin SnwMeGen:=1 Shl 22; FillChar(SnwMeMap,SizeOf(SnwMeMap),0); End;
- SnwDmin:=SnwMeCmp(SnwOptCmp And $FF,0,0,0,0,Size,H,Qpel);
+ SnwDmin:=SnwMeCmp(SnwOptCmp And $FF,0,0,0,0,Size,H,Qpel,(SnwOptCmp Shr 8) And 1);
  SnwMeMap[0]:=SnwMeGen; SnwMeMap[64]:=LongWord(SnwDmin);
  { premiere ligne : jamais (first_slice_line = 0) }
  If (SnwDmin<((H*H*SnwOptMv0) Shr 8)) And ((PL(1) Or PY(1) Or PL(2) Or PY(2) Or PL(3) Or PY(3))=0) Then Begin
@@ -73430,7 +73685,7 @@ Begin
  Score:=MaxLongInt; BestRef:=0; Mx:=0; My:=0;
  CurO:=SnwIn.Org[0]+(X+Y*Stride)*BlockW;
  For Ref:=0 To SnwRefFrames-1 Do Begin
-  SnwSrcO:=CurO;
+  SnwSrcO:=CurO; SnwBlkX:=BlockW*X; SnwBlkY:=BlockW*Y;
   SnwRefF:=SnwLast[Ref];
   SnwRefO:=SnwFr[SnwRefF].Org[0]+BlockW*Y*Stride+BlockW*X;
   RefScore:=SnwEpzs(RefMx,RefMy,P,LastMv,(1 Shl 16) Shr Shift,Level,BlockW);
@@ -73601,9 +73856,78 @@ Begin
  End;
 End;
 
+{ memcpy(dst,cur,n) avec n<0 de get_block_rd (comportement indefini de snowenc.c, bloc de bord droit) :
+  glibc x86-64 (variante AVX-512, VEC=64) l'execute comme une copie arriere dont la boucle ne fait qu'un tour ;
+  effet = recopie, a memes decalages, de [Rel,Rel+255], [0,255] et [-K-64,-K-1] depuis scratchbuf vers l'image.
+  Dx,Dy : position (colonne, ligne) de la destination dans le plan ; K=-n ; SrcOff : indice de cur dans scratchbuf }
+Var SnwMemVecV: LongInt;
+{ taille de vecteur de la variante memmove de glibc 2.39 choisie par l'ifunc selon le CPU :
+  AVX-512 + AVX-VNNI -> 64 octets ; AVX2 ou AVX512VL -> 32 ; sinon 16 (SNWVEC force la valeur) }
+Function SnwMemVec: LongInt;
+Var F: File; Buf: Array[0..16383] Of Char; N,I: LongInt; Z: String;
+Function Has(Const T: String): Boolean;
+Var J,L: LongInt; Ok: Boolean;
+Begin
+ Has:=False; L:=Length(T);
+ For J:=0 To N-L Do Begin
+  Ok:=True; I:=0;
+  While Ok And (I<L) Do Begin If Buf[J+I]<>T[I+1] Then Ok:=False; Inc(I); End;
+  If Ok Then Begin Has:=True; Exit; End;
+ End;
+End;
+Begin
+ If SnwMemVecV=0 Then Begin
+  Z:=GetEnv('SNWVEC'); N:=0;
+  If Z<>'' Then Val(Z,SnwMemVecV,I)
+  Else Begin
+   {$I-}
+   Assign(F,'/proc/cpuinfo'); Reset(F,1);
+   If IOResult=0 Then Begin BlockRead(F,Buf,SizeOf(Buf),N); Close(F); End;
+   {$I+}
+   If IOResult<>0 Then N:=0;
+   If Has(' avx512f') And Has(' avx_vnni') Then SnwMemVecV:=64
+   Else If Has(' avx2') Or Has(' avx512vl') Then SnwMemVecV:=32
+   Else SnwMemVecV:=16;
+  End;
+  If (SnwMemVecV<>16) And (SnwMemVecV<>32) And (SnwMemVecV<>64) Then SnwMemVecV:=32;
+ End;
+ SnwMemVec:=SnwMemVecV;
+End;
+
+Procedure SnwWildCopy(Pl,Dx,Dy,K,SrcOff: LongInt);
+Var
+ Vc: LongInt;
+ Cs,Eo,Ew,M,Rel,R,I,Idx: LongInt; FlatD,F,Row,Col: Int64; Fr: LongInt; Fl: LongInt;
+ Rg: Array[0..2,0..1] Of LongInt; Hs,Vs: LongInt; Sv: Byte;
+Begin
+ Cs:=SnwCStr[Pl]; If Cs<=0 Then Exit;
+ If Pl>0 Then Begin Hs:=SnwCHS; Vs:=SnwCVS; End Else Begin Hs:=0; Vs:=0; End;
+ Ew:=16 Shr Hs; Eo:=(16 Shr Vs)*Cs+Ew;
+ FlatD:=Int64(Dy)*Cs+Dx;
+ M:=LongInt(((Eo+FlatD) Mod 64+64) Mod 64);
+ Vc:=SnwMemVec;
+ R:=M-K-(4*Vc+1);
+ If R>=0 Then Rel:=(R Div Vc)*Vc-M Else Rel:=-(((-R)+Vc-1) Div Vc)*Vc-M;
+ Rg[0,0]:=Rel; Rg[0,1]:=Rel+4*Vc-1; Rg[1,0]:=0; Rg[1,1]:=4*Vc-1; Rg[2,0]:=-K-Vc; Rg[2,1]:=-K-1;
+ Fr:=SnwCur;
+ For Fl:=0 To 2 Do
+  For I:=Rg[Fl,0] To Rg[Fl,1] Do Begin
+   F:=FlatD+I;
+   If SrcOff+I<0 Then Continue;
+   If SrcOff+I>=SnwScrSz Then Continue;
+   Sv:=SnwScr^[SrcOff+I];
+   F:=F+Ew;
+   If F>=0 Then Row:=F Div Cs Else Row:=-((-F+Cs-1) Div Cs);
+   Col:=F-Row*Cs-Ew;
+   Idx:=SnwFr[Fr].Org[Pl]+LongInt(Row)*SnwFr[Fr].Str[Pl]+LongInt(Col);
+   If (Idx<0) Or (Idx>=SnwFr[Fr].Sz[Pl]) Then Continue;
+   SnwFr[Fr].Pl[Pl]^[Idx]:=Sv;
+  End;
+End;
+
 Function SnwBlockRd(MbX,MbY,Pl: LongInt): LongInt;
 Var
- Bs,BlW,BlH,ObStr,RefStr,Bstr,Bheight,W,H,Distortion,Rate,Pen,Sx,Sy,X0,Y0,X1,Y1,I,X,Y,V,Off,Index: LongInt;
+ Bs,BlW,BlH,ObStr,RefStr,Bstr,Bheight,W,H,Distortion,Rate,Pen,Sx,Sy,X0,Y0,X1,Y1,I,X,Y,V,Off,Index,Cst: LongInt;
  Dst,Src: PEABuffer; DstO,SrcO: LongInt; Pred: PSnwS16; PredBase: LongInt;
 Begin
  Bs:=16 Shr SnwBMD;
@@ -73619,10 +73943,12 @@ Begin
  Pen:=SnwPenaltyFactor(SnwLambda,SnwLambda2,SnwOptCmp);
  Sx:=BlW*MbX-BlW Div 2; Sy:=BlH*MbY-BlH Div 2;
  X0:=SnwMax(0,-Sx); Y0:=SnwMax(0,-Sy); X1:=SnwMin(BlW*2,W-Sx); Y1:=SnwMin(BlH*2,H-Sy);
- SnwPred(PEABuffer(@SnwCurBuf[0]),0,32,Sx,Sy,BlW*2,BlH*2,MbX+MbY*Bstr,Pl,W,H);
+ Cst:=SnwCStr[Pl];
+ SnwEnsureScr(32*Cst+64);
+ SnwPred(SnwScr,0,Cst,Sx,Sy,BlW*2,BlH*2,MbX+MbY*Bstr,Pl,W,H);
  For Y:=Y0 To Y1-1 Do
   For X:=X0 To X1-1 Do Begin
-   V:=(SnwCurBuf[Y*32+X]*SnwObEdged[Y,X]+(1 Shl 3)) Shr 4;
+   V:=(SnwScr^[Y*Cst+X]*SnwObEdged[Y,X]+(1 Shl 3)) Shr 4;
    V:=SnwSar(V+Pred^[PredBase+Y*ObStr+X],4);
    Dst^[DstO+Sx+X+(Sy+Y)*RefStr]:=SnwClipU8(V);
   End;
@@ -73630,7 +73956,8 @@ Begin
   If MbX=0 Then X1:=BlW Else X0:=BlW;
   If MbY=0 Then Y1:=BlH Else Y0:=BlH;
   For Y:=Y0 To Y1-1 Do
-   For X:=X0 To X1-1 Do Dst^[DstO+Sx+X+(Sy+Y)*RefStr]:=SnwCurBuf[Y*32+X];
+   If X1-X0<0 Then SnwWildCopy(Pl,Sx+X0,Sy+Y,X0-X1,X0+Y*Cst)
+   Else For X:=X0 To X1-1 Do Dst^[DstO+Sx+X+(Sy+Y)*RefStr]:=SnwScr^[Y*Cst+X];
  End;
  Off:=Sx+Sy*RefStr;
  If BlW=16 Then Begin
@@ -74382,7 +74709,6 @@ End;
 { ---- options, pilote ---- }
 Var
  AWKeys: PEABuffer;
- SnwNsseW: LongInt;
 Const
  SnwGopC: LongInt=12;
  SnwGopSet: Boolean=False;
@@ -74407,17 +74733,32 @@ Begin
 End;
 
 Function SnwCmpName(Const V: String; Const A: String): LongInt;
-Var L: String; N,Code: LongInt;
+Var L,Tok: String; N,Code,K,T,Acc: LongInt; Sg: Integer;
 Begin
- L:=Lower(V); N:=-1;
- If L='sad' Then N:=0 Else If L='sse' Then N:=1 Else If L='satd' Then N:=2 Else If L='zero' Then N:=7
- Else If L='vsad' Then N:=8 Else If L='vsse' Then N:=9 Else If L='nsse' Then N:=10 Else If L='w53' Then N:=11 Else If L='w97' Then N:=12
- Else Begin
-  Val(L,N,Code);
-  If Code<>0 Then Fail(A+': fonction de comparaison inconnue ou non prise en charge (sad, sse, satd, zero, vsad, vsse, nsse, w53, w97).');
-  If Not ((N=0) Or (N=1) Or (N=2) Or (N=7) Or (N=8) Or (N=9) Or (N=10) Or (N=11) Or (N=12)) Then Fail(A+': fonction de comparaison non prise en charge.');
+ L:=Lower(V); Acc:=0; Sg:=1; K:=1;
+ If L='' Then Fail(A+': valeur requise.');
+ While K<=Length(L) Do Begin
+  Tok:='';
+  While (K<=Length(L)) And (L[K]<>'+') And (L[K]<>'-') And (L[K]<>'|') Do Begin Tok:=Tok+L[K]; Inc(K); End;
+  If Tok='' Then T:=0
+  Else If Tok='sad' Then T:=0 Else If Tok='sse' Then T:=1 Else If Tok='satd' Then T:=2 Else If Tok='dct' Then T:=3
+  Else If Tok='psnr' Then T:=4 Else If Tok='bit' Then T:=5 Else If Tok='rd' Then T:=6 Else If Tok='zero' Then T:=7
+  Else If Tok='vsad' Then T:=8 Else If Tok='vsse' Then T:=9 Else If Tok='nsse' Then T:=10 Else If Tok='w53' Then T:=11
+  Else If Tok='w97' Then T:=12 Else If Tok='dctmax' Then T:=13 Else If Tok='dct264' Then T:=14 Else If Tok='msad' Then T:=15
+  Else If Tok='chroma' Then T:=256
+  Else Begin
+   Val(Tok,T,Code);
+   If Code<>0 Then Fail(A+': fonction de comparaison inconnue.');
+  End;
+  If Sg>0 Then Acc:=Acc+T Else Acc:=Acc-T;
+  If K<=Length(L) Then Begin If L[K]='-' Then Sg:=-1 Else Sg:=1; Inc(K); End;
  End;
- SnwCmpName:=N;
+ N:=Acc And $FF;
+ If (N=3) Or (N=4) Or (N=5) Or (N=6) Or (N=13) Or (N=14) Then
+  Fail(A+': dct, psnr, bit, rd, dctmax, dct264 : ffmpeg (snow) plante (segfault) avec ces fonctions.');
+ If (N>15) Or ((N<>0) And (N<>1) And (N<>2) And (N<>7) And (N<>8) And (N<>9) And (N<>10) And (N<>11) And (N<>12) And (N<>15)) Then
+  Fail(A+': invalid cmp function selection.');
+ SnwCmpName:=Acc;
 End;
 
 Procedure SnwSetOpt(Const A,V: String);
@@ -74449,7 +74790,7 @@ Begin
   Else If A='-iterative_dia_size' Then SnwIterDia:=N
   Else If A='-sc_threshold' Then SnwScThr:=N
   Else If A='-dia_size' Then Begin
-   If N<-1 Then Fail('-dia_size: valeurs inferieures a -1 non prises en charge.');
+   If N<-64 Then Fail('ME_MAP size is too small for SAB diamond');
    SnwOptDia:=N;
   End
   Else If A='-refs' Then SnwRefsOpt:=N
@@ -74463,11 +74804,21 @@ End;
 
 { ---- initialisation de l'encodeur ---- }
 Procedure SnwEncInit(W,H,Np,Chs,Cvs: LongInt);
-Var P,I,Cnt: LongInt;
+Var P,I,Cnt,Wa: LongInt;
 Begin
  SnwTrace:=GetEnv('SNWTRACE')<>'';
  SnwInitState;
  SnwImgW:=W; SnwImgH:=H; SnwNP:=Np; SnwCHS:=Chs; SnwCVS:=Cvs;
+ { linesize des tampons ffmpeg (update_frame_pool, STRIDE_ALIGN=64) }
+ Wa:=W+32;
+ If (Np>=3) And (Chs=2) Then Wa:=(Wa+3) And Not 3 Else Wa:=(Wa+15) And Not 15;
+ Repeat
+  SnwCStr[0]:=Wa; SnwCStr[1]:=0; SnwCStr[2]:=0;
+  If Np>=3 Then Begin SnwCStr[1]:=(Wa+(1 Shl Chs)-1) Shr Chs; SnwCStr[2]:=SnwCStr[1]; End;
+  Wa:=Wa+(Wa And (-Wa));
+ Until ((SnwCStr[0] Mod 64)=0) And ((SnwCStr[1] Mod 64)=0);
+ SnwScrSz:=0; SnwScr:=Nil;
+ SnwEnsureScr((2*W+256)*7*16);
  If Np=1 Then SnwCST:=1 Else SnwCST:=0;
  For P:=0 To Np-1 Do Begin
   If P=0 Then Begin SnwPlW[P]:=W; SnwPlH[P]:=H; End
@@ -74488,6 +74839,7 @@ Begin
  SnwIn.Has:=True;
  For P:=0 To Np-1 Do Begin
   SnwIn.Str[P]:=SnwPlW[P]+2*SnwMG+32;
+  If SnwCStr[P]+2*SnwMG>SnwIn.Str[P] Then SnwIn.Str[P]:=SnwCStr[P]+2*SnwMG;
   SnwIn.Sz[P]:=SnwIn.Str[P]*(SnwPlH[P]+2*SnwMG+32);
   GetMem(SnwIn.Pl[P],SnwIn.Sz[P]+64); FillChar(SnwIn.Pl[P]^,SnwIn.Sz[P]+64,0);
   SnwIn.Org[P]:=SnwMG*SnwIn.Str[P]+SnwMG;
@@ -74522,9 +74874,35 @@ Begin
  SnwEndState;
 End;
 
+{ plan de chroma yuv420p -> yuv410p (swscale : hScale8To15 puis yuv2planeX_8, filtres bicubiques) }
+Procedure SnwChroma410(Src,Dst: PEABuffer; Sw,Sh,Dw,Dh: LongInt);
+Var HF,VF: TSwsF; H15: PSwsI32; X,Y,J,Hs,Fs,Bp: LongInt; Val: Int64;
+Begin
+ SwsInitF(HF,Sw,Dw,128,128,16384); Hs:=HF.FS;
+ SwsInitF(VF,Sh,Dh,128,128,4096); Fs:=VF.FS;
+ GetMem(H15,Int64(Sh)*Dw*4+64);
+ For Y:=0 To Sh-1 Do For X:=0 To Dw-1 Do Begin
+  Val:=0;
+  For J:=0 To Hs-1 Do Val:=Val+Int64(Src^[Y*Sw+HF.Pos^[X]+J])*HF.Coef^[X*Hs+J];
+  Val:=AVSar(Val,7); If Val>32767 Then Val:=32767;
+  H15^[Y*Dw+X]:=Val;
+ End;
+ For Y:=0 To Dh-1 Do
+  For X:=0 To Dw-1 Do Begin
+   Val:=Int64(64) Shl 12;
+   For J:=0 To Fs-1 Do Begin
+    Bp:=(VF.Pos^[Y]+J)*Dw+X;
+    Val:=Val+Int64(H15^[Bp])*VF.Coef^[Y*Fs+J];
+   End;
+   Val:=AVSar(Val,19); If Val<0 Then Val:=0 Else If Val>255 Then Val:=255;
+   Dst^[Y*Dw+X]:=Val;
+  End;
+ FreeMem(H15,Int64(Sh)*Dw*4+64); SwsFreeF(HF); SwsFreeF(VF);
+End;
+
 Procedure EncodeSnow(Const Source,Target: String; Qv,VBitRate: LongInt; HasBr: Boolean);
-Var
- Limit,Cur,W,Hh,FN,FD,G2,K,Code,Np,Chs,Cvs,Cw,Ch,FrameBytes,Frames,I,P,Cap,PkLen: LongInt;
+Var QfT: Single;
+ Limit,Cur,W,Hh,FN,FD,G2,K,Code,Np,Chs,Cvs,Cw,Ch,FrameBytes,Frames,I,P,Cap,PkLen,Conv,Sw0,Sh0: LongInt; CvT: PEABuffer; GvT: Int64;
  H: Array[0..255] Of Byte; Line,Token: String; Pk: PEABuffer; KeyF: Boolean; Fmt: String;
 Function ReadLine: String;
 Var R: String;
@@ -74566,9 +74944,12 @@ Begin
    'I': If Token<>'Ip' Then Fail('snow: video progressive requise.');
   End;
  End;
- If (OptPixFmt<>'') And (((OptPixFmt='yuv420p') And (Fmt<>'420')) Or ((OptPixFmt='yuv444p') And (Fmt<>'444')) Or ((OptPixFmt='gray') And (Fmt<>'mono'))
+ Conv:=0;
+ If (OptPixFmt='yuv410p') And (Fmt='420') Then Conv:=1
+ Else If (OptPixFmt='gray') And (Fmt<>'mono') Then Conv:=2
+ Else If (OptPixFmt<>'') And (((OptPixFmt='yuv420p') And (Fmt<>'420')) Or ((OptPixFmt='yuv444p') And (Fmt<>'444')) Or ((OptPixFmt='gray') And (Fmt<>'mono'))
   Or ((OptPixFmt<>'yuv420p') And (OptPixFmt<>'yuv444p') And (OptPixFmt<>'gray'))) Then
-  Fail('snow: -pix_fmt doit correspondre au format de l''entree (yuv420p, yuv444p, gray).');
+  Fail('snow: -pix_fmt: conversions prises en charge : yuv420p vers yuv410p ou gray, yuv444p vers gray.');
  If (W<1) Or (Hh<1) Or (W>16000) Or (Hh>16000) Then Fail('snow: dimensions Y4M incorrectes.');
  If (FN<=0) Or (FD<=0) Then Begin FN:=25; FD:=1; End;
  If Fmt='420' Then Begin Np:=3; Chs:=1; Cvs:=1; End Else If Fmt='444' Then Begin Np:=3; Chs:=0; Cvs:=0; End Else Begin Np:=1; Chs:=0; Cvs:=0; End;
@@ -74576,17 +74957,20 @@ Begin
  FrameBytes:=W*Hh+2*Cw*Ch;
  { options }
  SnwFlagQscale:=Qv>=0;
- If SnwFlagQscale Then SnwGlobalQ:=Qv*118 Else SnwGlobalQ:=0;
- If SnwFlagQscale And (Qv=0) And (SnwPredOpt=0) Then Fail('The 9/7 wavelet is incompatible with lossless mode.');
+ If SnwFlagQscale Then Begin QfT:=118; QfT:=QfT*SnwQvF; SnwGlobalQ:=Trunc(QfT); End Else SnwGlobalQ:=0;
+ If SnwFlagQscale And (SnwGlobalQ=0) And (SnwPredOpt=0) Then Fail('The 9/7 wavelet is incompatible with lossless mode.');
  SnwPass1Rc:=Not SnwFlagQscale;
  SnwGop:=SnwGopC;
  If HasBr Then SnwBitRate:=VBitRate Else SnwBitRate:=200000;
  SnwBrTol:=4000000;
  SnwFps:=FN/FD;
  SnwMbCmpOpt:=SnwOptMbCmp;
- If (Lower(OptPixFmt)='yuv410p') Then Fail('snow: yuv410p non pris en charge.');
+ Sw0:=Cw; Sh0:=Ch;
+ If Conv=1 Then Begin Chs:=2; Cvs:=2; End;
+ If Conv=2 Then Begin Np:=1; Chs:=0; Cvs:=0; End;
  If ((Np=3) And (((W Shr Chs)=0))) Then Fail('snow: dimensions trop petites.');
  SnwEncInit(W,Hh,Np,Chs,Cvs);
+ If Conv=1 Then GetMem(CvT,Sw0*Sh0+64);
  Cap:=SnwBw*SnwBh*16*16*3+16384;
  GetMem(Pk,Cap+64);
  For P:=0 To Np-1 Do GetMem(SnwEncPic[P],SnwPlW[P]*SnwPlH[P]+64);
@@ -74596,11 +74980,25 @@ Begin
  AWBegin(Target,'SNOW',W,Hh,FN Div G2,FD Div G2,24,Nil,0);
  Frames:=0;
  While Cur<Limit Do Begin
+  If (SnwMaxFr>0) And (Frames>=SnwMaxFr) Then Break;
   Line:=ReadLine;
   If Copy(Line,1,5)<>'FRAME' Then Fail('snow: marqueur FRAME requis.');
   If FrameBytes>Limit-Cur Then Break;
   ReadPlane(SnwEncPic[0],Cur,W*Hh);
-  If Np=3 Then Begin
+  If Conv=2 Then
+   For I:=0 To W*Hh-1 Do Begin
+    { swscale lumRangeToJpeg puis yuv2plane1_8 }
+    GvT:=Int64(SnwEncPic[0]^[I]) Shl 7; If GvT>30189 Then GvT:=30189;
+    GvT:=AVSar(GvT*19077-39057361,14);
+    GvT:=AVSar(GvT+64,7); If GvT<0 Then GvT:=0; If GvT>255 Then GvT:=255;
+    SnwEncPic[0]^[I]:=GvT;
+   End;
+  If Conv=1 Then Begin
+   ReadPlane(CvT,Cur+W*Hh,Sw0*Sh0);
+   SnwChroma410(CvT,SnwEncPic[1],Sw0,Sh0,SnwPlW[1],SnwPlH[1]);
+   ReadPlane(CvT,Cur+W*Hh+Sw0*Sh0,Sw0*Sh0);
+   SnwChroma410(CvT,SnwEncPic[2],Sw0,Sh0,SnwPlW[2],SnwPlH[2]);
+  End Else If Np=3 Then Begin
    ReadPlane(SnwEncPic[1],Cur+W*Hh,Cw*Ch);
    ReadPlane(SnwEncPic[2],Cur+W*Hh+Cw*Ch,Cw*Ch);
   End;
@@ -74614,6 +75012,7 @@ Begin
  If Frames=0 Then Fail('snow: aucune image.');
  AWEnd;
  For P:=0 To Np-1 Do FreeMem(SnwEncPic[P]);
+ If Conv=1 Then FreeMem(CvT);
  FreeMem(Pk); FreeMem(AWKeys); AWKeys:=Nil;
  SnwEncEnd;
 End;
@@ -117230,7 +117629,7 @@ End;
 Var
  I,J,Code: Integer;
  Argument,Value,Detected,Intermediate: String; ProbeBuf: Array[0..7] Of Byte; MpcK: LongInt;
- Number: LongInt;
+ Number: LongInt; QvE: Double;
 
 Function NextArgument: String;Begin
  Inc(I); If I>ParamCount Then Fail('Valeur manquante pour '+Argument);
@@ -117706,7 +118105,11 @@ BEGIN
   If ((Argument='-fflags') Or (Argument='-flags')) And (InputPath<>'') Then VGSetFlags(NextArgument,Argument='-fflags') Else
   If (Argument='-q:v') Or (Argument='-qscale:v') Then Begin
    Value:=NextArgument; Val(Value,Number,Code);
-   If (Code<>0) Or (Number<0) Or (Number>31) Then Fail(Argument+': 0..31 attendu (0..10 pour libtheora).');
+   If (Code<>0) Or (Number<0) Or (Number>31) Then Begin
+    Val(Value,QvE,Code);
+    If (Code<>0) Or (QvE<0) Or (QvE>1000) Then Fail(Argument+': 0..31 attendu (0..10 pour libtheora).');
+    SnwQvFrac:=True; SnwQvF:=QvE; Number:=Trunc(QvE);
+   End Else Begin SnwQvF:=Number; SnwQvFrac:=False; End;
    THQuality:=Number;
   End Else
   If (Argument='-crf') Or (Argument='-qp') Or (Argument='-g') Or (Argument='-preset') Or (Argument='-tune') Then Begin
@@ -117737,8 +118140,9 @@ BEGIN
   End Else If (Argument='-vframes') Or (Argument='-frames:v') Then Begin
    If InputPath='' Then Fail('Nombre d''images attendu apres -i.');
    Value:=NextArgument; Val(Value,Number,Code);
-   If (Code<>0) Or (Number<>1) Then Fail('Extraction PNG/GIF: -vframes 1 uniquement.');
-   VideoFrames:=1;
+   If (Code<>0) Or (Number<1) Then Fail('Extraction PNG/GIF: -vframes 1 uniquement.');
+   SnwMaxFr:=Number;
+   If Number=1 Then VideoFrames:=1;
   End Else If Argument='-s' Then Begin
    If InputPath='' Then Fail('Dimensions de sortie attendues apres -i.');
    Value:=Lower(NextArgument); J:=Pos('x',Value);
@@ -117999,6 +118403,8 @@ BEGIN
   Else If (AsvTag='SP5X') Or (AsvTag='SP54') Then NVKind:=1104
   Else If (AsvTag='MJPG') Or (AsvTag='mjpg') Or (AsvTag='AVRn') Or (AsvTag='AVDJ') Or (AsvTag='dmb1') Or (AsvTag='JPGL') Or (AsvTag='MJLS') Or (AsvTag='MMJP') Or (AsvTag='jpeg') Or (AsvTag='IJPG') Then NVKind:=43;
  End;
+ If (SnwMaxFr>1) And (VideoCodec<>'snow') Then Fail('Extraction PNG/GIF: -vframes 1 uniquement.');
+ If (THQuality>=0) And (VideoCodec<>'snow') And (SnwQvFrac Or (THQuality>31)) Then Fail('-q:v: 0..31 attendu (0..10 pour libtheora).');
  If (OptPixFmt<>'') And (OptPixFmt<>'yuv420p') And (OptPixFmt<>'yuv410p') And (VideoCodec<>'svq1') And (VideoCodec<>'snow') And (VideoCodec<>'qtrle') And (VideoCodec<>'rawvideo') And (VideoCodec<>'zlib') And (VideoCodec<>'zmbv') And (VideoCodec<>'targa') And (VideoCodec<>'tiff') Then Fail('-pix_fmt: seul yuv420p est pris en charge.');
  NVAudioOut:=(OutputFormat='wav') Or (OutputFormat='roq') Or (OutputFormat='mp3') Or (OutputFormat='mp2') Or (OutputFormat='ac3') Or (OutputFormat='aac') Or (OutputFormat='adx') Or (OutputFormat='aiff');
  If ((InputFormat='mp4') Or (InputFormat='avi') Or (InputFormat='flv')) And (NVKind=0) And Not IsHTTP(InputPath) And Not NVAudioOut And Not NoVideo And (VideoCodec<>'copy') And
@@ -118190,7 +118596,7 @@ BEGIN
  End;
  If (InputFormat='yuv4mpegpipe') And (VideoCodec='snow') Then Begin
   If IsHTTP(InputPath) Or (OutputFormat<>'avi') Or NoVideo Or (AudioCodec<>'') Or HasBitrate Or
-   (RequestedRate<>0) Or (RequestedChannels<>0) Or (VideoFrames<>0) Or (ImageWidth<>0) Then
+   (RequestedRate<>0) Or (RequestedChannels<>0) Or (ImageWidth<>0) Then
    Fail('snow: Y4M local vers sortie AVI requis, sans autres options.');
   If HasCrop Then Fail('snow: -crop non supporte avec cet encodeur.');
   Temps[2]:=NewTemporary; EncodeSnow(Intermediate,Temps[2],THQuality,VideoBitrate,HasVideoBitrate);
