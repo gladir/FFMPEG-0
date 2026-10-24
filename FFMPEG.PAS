@@ -3951,8 +3951,8 @@ Begin
    Probe:='aiff'; Exit;
   End;
  End;
- If N>=12 Then If (B[0]=70) And (B[1]=79) And (B[2]=82) And (B[3]=77) And
-  (B[8]=56) And (B[9]=83) And (B[10]=86) And (B[11]=88) Then Begin Probe:='iff'; Exit; End;
+ If N>=12 Then If (B[0]=70) And (B[1]=79) And (B[2]=82) And (B[3]=77) And (((B[8]=56) And (B[9]=83) And (B[10]=86) And (B[11]=88)) Or ((B[8]=49) And (B[9]=54) And (B[10]=83) And (B[11]=86)) Or ((B[8]=77) And (B[9]=65) And (B[10]=85) And (B[11]=68)) Or ((B[8]=80) And (B[9]=66) And (B[10]=77) And (B[11]=32)) Or ((B[8]=65) And (B[9]=67) And (B[10]=66) And (B[11]=77)) Or ((B[8]=68) And (B[9]=69) And (B[10]=69) And (B[11]=80)) Or ((B[8]=73) And (B[9]=76) And (B[10]=66) And (B[11]=77)) Or ((B[8]=82) And (B[9]=71) And (B[10]=66) And (B[11]=56)) Or ((B[8]=65) And (B[9]=78) And (B[10]=73) And (B[11]=77)) Or ((B[8]=82) And (B[9]=71) And (B[10]=66) And (B[11]=78))) Then Begin Probe:='iff'; Exit; End; { F6B }
+ If N>=16 Then If (B[0]=70) And (B[1]=82) And (B[2]=77) And (B[3]=56) And (B[12]=68) And (B[13]=83) And (B[14]=68) And (B[15]=32) Then Begin Probe:='iff'; Exit; End; { F6B }
  If N>=26 Then If (B[0]=67) And (B[1]=114) And (B[2]=101) And (B[19]=$1A) Then Begin
   Probe:='voc'; Exit;
  End;
@@ -3983,6 +3983,8 @@ Begin
   End;
  End;
  If N>=58 Then If (B[0]=65) And (B[1]=77) And (B[2]=86) And (B[43]=77) And (B[44]=80) And (B[45]=51) And (B[51]<>0) And ((LongInt(B[52])+LongInt(B[53])*256<>0) Or (LongInt(B[54])+LongInt(B[55])*256<>0)) And (((LongInt(B[52])+LongInt(B[53])*256<>0) And (LongInt(B[54])+LongInt(B[55])*256<>0)) Or (LongInt(B[56])+LongInt(B[57])*256<>0)) Then Begin Probe:='mtv'; Exit; End; { F6 }
+ If N>=4 Then If (B[0]=78) And (B[1]=83) And (B[2]=86) And ((B[3]=102) Or (B[3]=115)) Then Begin Probe:='nsv'; Exit; End; { F6B }
+ If N>=8 Then If (B[4]=82) And (B[5]=69) And (B[6]=68) And (B[7]=49) Then Begin Probe:='r3d'; Exit; End; { F6B }
  If N>=20 Then If (B[0]=70) And (B[1]=73) And (B[2]=76) And (B[3]=77) And (B[16]=70) And (B[17]=68) And (B[18]=83) And (B[19]=67) Then Begin Probe:='film_cpk'; Exit; End; { F6 }
  If N>=16 Then If (B[0]=119) And (B[1]=87) And (B[2]=16) And (B[3]=0) Then Begin Probe:='avs'; Exit; End;
  If N>=8 Then If (B[0]=77) And (B[1]=65) And (B[2]=67) And (B[3]=32) Then Begin Probe:='ape'; Exit; End;
@@ -95034,7 +95036,7 @@ Const SwrWantFmt: LongInt = 1;   { format de sortie voulu par l'appelant : 1 s16
 
 Procedure SwrWriteHeader(Fmt,Ch,Rate,DataBytes: LongInt);
 Var
- H: Array[0..43] Of Byte; Bps,Tag: LongInt;
+ H: Array[0..67] Of Byte; Bps,Tag,GI: LongInt;
 Procedure P32(At: LongInt; V: LongInt);
 Var I: LongInt;
 Begin For I:=0 To 3 Do Begin H[At+I]:=V And 255; V:=V Shr 8; End; End;
@@ -95047,6 +95049,13 @@ Begin
  H[8]:=87; H[9]:=65; H[10]:=86; H[11]:=69;
  H[12]:=102; H[13]:=109; H[14]:=116; H[15]:=32; P32(16,16); P16(20,Tag);
  P16(22,Ch); P32(24,Rate); P32(28,Rate*Ch*Bps); P16(32,Ch*Bps); P16(34,Bps*8);
+ If (Rate>48000) And (Ch<=2) Then Begin { F6B: WAVE_FORMAT_EXTENSIBLE comme ffmpeg }
+  P32(4,60+DataBytes); P32(16,40); P16(20,$FFFE); P16(36,22); P16(38,Bps*8);
+  If Ch=1 Then P32(40,4) Else P32(40,3);
+  P32(44,Tag); P32(48,$00100000); P32(52,LongInt($AA000080)); P32(56,$719B3800);
+  H[60]:=100; H[61]:=97; H[62]:=116; H[63]:=97; P32(64,DataBytes);
+  WriteBytes(H,68); Exit;
+ End;
  H[36]:=100; H[37]:=97; H[38]:=116; H[39]:=97; P32(40,DataBytes);
  WriteBytes(H,44);
 End;
@@ -112404,15 +112413,2092 @@ Begin
  F6Erase(Tmp);
 End;
 
+Procedure F6NsvVideo(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure F6NsvAudio(Const Source,Target: String); Forward;
+Procedure F6R3dVideo(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure F6R3dAudio(Const Source,Target: String); Forward;
+Procedure F6IffVideo(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure F6DecodeVideo(Kind: LongInt; Const Source,Target: String; Mode: LongInt);
 Begin
  Case Kind Of
+  1962: F6NsvVideo(Source,Target,Mode);
+  1963: F6R3dVideo(Source,Target,Mode);
+  1964: F6IffVideo(Source,Target,Mode);
   1960: F6FilmVideo(Source,Target,Mode);
   1961: F6MtvVideo(Source,Target,Mode);
  Else Fail('f6: type de video inconnu.');
  End;
 End;
 
+{ ==== F6B : nsv, r3d, iff (prefixe F6) ==== }
+{ ---- Nullsoft Streaming Video (libavformat/nsvdec.c), LGPL-2.1-or-later ---- }
+Type
+ F6NInts=Array[0..100000000] Of LongInt; PF6NInts=^F6NInts;
+Var
+ F6NF: PEABuffer; F6NSz,F6NP,F6NState: LongInt; F6NEof,F6NHaveHdr,F6NNsvf,F6NPcmFilled: Boolean;
+ F6NVtag,F6NAtag: String[4]; F6NVNone,F6NANone: Boolean; F6NW,F6NH: LongInt; F6NFrN,F6NFrD: LongInt; F6NAvsync: LongInt;
+ F6NVPos,F6NVLen,F6NVDts,F6NAPos,F6NALen: PF6NInts; F6NNV,F6NNA,F6NVFrame: LongInt;
+ F6NPcmBps,F6NPcmCh,F6NPcmRate: LongInt;
+
+Function F6NR8: LongInt;
+Begin
+ If (F6NP>=0) And (F6NP<F6NSz) Then Begin F6NR8:=F6NF^[F6NP]; Inc(F6NP); End Else Begin F6NR8:=0; F6NEof:=True; End;
+End;
+Function F6NRL16: LongInt;
+Var A: LongInt;
+Begin A:=F6NR8; F6NRL16:=A+F6NR8*256; End;
+Function F6NRL32: Int64;
+Var A,B: Int64;
+Begin A:=F6NRL16; B:=F6NRL16; F6NRL32:=A+B*65536; End;
+Function F6NTag: String;
+Var S: String; I: LongInt;
+Begin S:=''; For I:=1 To 4 Do S:=S+Chr(F6NR8); F6NTag:=S; End;
+
+Function F6NResync: Integer;
+Var V: Int64; I: LongInt;
+Begin
+ V:=0; F6NResync:=-1;
+ For I:=0 To 500*1024-1 Do Begin
+  If F6NEof Then Begin F6NState:=0; Exit; End;
+  V:=((V Shl 8) Or F6NR8) And $FFFFFFFF;
+  If (V And $FFFF)=$EFBE Then Begin F6NState:=5; F6NResync:=0; Exit; End;
+  If V=$4E535666 Then Begin F6NState:=1; F6NResync:=0; Exit; End;
+  If V=$4E535673 Then Begin F6NState:=3; F6NResync:=0; Exit; End;
+ End;
+End;
+
+Function F6NParseNSVf: Integer;
+Var Size,StrSz,Used: Int64;
+Begin
+ F6NParseNSVf:=-1; F6NState:=0;
+ If F6NNsvf Then Begin F6NParseNSVf:=0; Exit; End;
+ F6NNsvf:=True;
+ Size:=F6NRL32; If Size<28 Then Exit;
+ F6NRL32; F6NRL32; StrSz:=F6NRL32; F6NRL32; Used:=F6NRL32;
+ If F6NEof Then Exit;
+ If Size>F6NSz Then Begin F6NP:=F6NSz; F6NEof:=True; Exit; End;
+ F6NP:=Size; F6NEof:=False;
+ F6NState:=2; F6NParseNSVf:=0;
+End;
+
+Function F6NParseNSVs: Integer;
+Var Vt,At: String; Vw,Vh,I,T: LongInt;
+Begin
+ F6NParseNSVs:=-1;
+ Vt:=F6NTag; At:=F6NTag; Vw:=F6NRL16; Vh:=F6NRL16; I:=F6NR8;
+ If I>=128 Then Begin
+  T:=(I And $7F) Shr 2;
+  If T<16 Then Begin F6NFrN:=1; F6NFrD:=T+1; End Else Begin F6NFrN:=T-15; F6NFrD:=1; End;
+  If (I And 1)<>0 Then Begin F6NFrN:=F6NFrN*1000; F6NFrD:=F6NFrD*1001; End;
+  If (I And 3)=3 Then F6NFrN:=F6NFrN*24 Else If (I And 3)=2 Then F6NFrN:=F6NFrN*25 Else F6NFrN:=F6NFrN*30;
+ End Else Begin F6NFrN:=I; F6NFrD:=1; End;
+ F6NAvsync:=F6NRL16; If F6NAvsync>=32768 Then Dec(F6NAvsync,65536);
+ If Not F6NHaveHdr Then Begin
+  F6NHaveHdr:=True; F6NVtag:=Vt; F6NAtag:=At; F6NW:=Vw; F6NH:=Vh;
+  F6NVNone:=Vt='NONE'; F6NANone:=At='NONE';
+ End;
+ F6NState:=4; F6NParseNSVs:=0;
+End;
+
+{ nsv_read_chunk ; renvoie <0 en fin ou erreur }
+Function F6NChunk(FillHeader: Boolean): Integer;
+Var Err,I,Aux,AuxSz,Asz,Bp,Ch,Rt: LongInt; Vsz: Int64;
+Begin
+ Err:=0;
+ While True Do Begin
+  If F6NEof Then Begin F6NChunk:=-1; Exit; End;
+  I:=0;
+  While (I<300) And (F6NState<3) And (Err=0) Do Begin Err:=F6NResync; Inc(I); End;
+  If Err<0 Then Begin F6NChunk:=Err; Exit; End;
+  If F6NState=3 Then Err:=F6NParseNSVs;
+  If Err<0 Then Begin F6NChunk:=Err; Exit; End;
+  If (F6NState<>4) And (F6NState<>5) Then Begin F6NChunk:=-1; Exit; End;
+  Aux:=F6NR8; Vsz:=F6NRL16; Asz:=F6NRL16;
+  Vsz:=(Vsz Shl 4) Or (Aux Shr 4); Aux:=Aux And 15;
+  For I:=1 To Aux Do Begin
+   AuxSz:=F6NRL16; F6NRL32; Inc(F6NP,AuxSz);
+   Vsz:=Vsz-(AuxSz+6);
+  End;
+  If F6NEof Or (F6NP>F6NSz) Then Begin F6NChunk:=-1; Exit; End;
+  If (Vsz=0) And (Asz=0) Then Begin F6NState:=0; Continue; End;
+  Break;
+ End;
+ If (Vsz>0) And Not F6NVNone Then Begin
+  If F6NP>=F6NSz Then Begin F6NChunk:=-1; Exit; End;
+  If F6NP+Vsz>F6NSz Then Vsz:=F6NSz-F6NP;
+  F6NVPos^[F6NNV]:=F6NP; F6NVLen^[F6NNV]:=Vsz; F6NVDts^[F6NNV]:=F6NVFrame; Inc(F6NNV); Inc(F6NP,Vsz);
+ End;
+ If Not F6NVNone Then Inc(F6NVFrame);
+ If (Asz>0) And Not F6NANone Then Begin
+  If F6NAtag='PCM ' Then Begin
+   Bp:=F6NR8; Ch:=F6NR8; Rt:=F6NRL16;
+   If (Ch=0) Or (Rt=0) Then Begin F6NChunk:=-1; Exit; End;
+   Dec(Asz,4);
+   If FillHeader Then Begin F6NPcmFilled:=True; F6NPcmBps:=Bp; F6NPcmCh:=Ch; F6NPcmRate:=Rt; End;
+  End;
+  If F6NP>=F6NSz Then Begin F6NChunk:=-1; Exit; End;
+  If F6NP+Asz>F6NSz Then Asz:=F6NSz-F6NP;
+  F6NAPos^[F6NNA]:=F6NP; F6NALen^[F6NNA]:=Asz; Inc(F6NNA); Inc(F6NP,Asz);
+ End;
+ F6NState:=0; F6NChunk:=0;
+End;
+
+{ analyse complete : liste des paquets video et audio ; renvoie False si en-tete invalide }
+Procedure F6NScan(F: PEABuffer; Size: LongInt);
+Var I,Err: LongInt; First: Boolean;
+Begin
+ F6NF:=F; F6NSz:=Size; F6NP:=0; F6NState:=0; F6NEof:=False; F6NHaveHdr:=False; F6NNsvf:=False; F6NPcmFilled:=False;
+ F6NNV:=0; F6NNA:=0; F6NVFrame:=0;
+ GetMem(F6NVPos,(Size Div 4+4)*4); GetMem(F6NVLen,(Size Div 4+4)*4); GetMem(F6NVDts,(Size Div 4+4)*4);
+ GetMem(F6NAPos,(Size Div 4+4)*4); GetMem(F6NALen,(Size Div 4+4)*4);
+ For I:=0 To 299 Do Begin
+  Err:=F6NResync;
+  If Err<0 Then Fail('nsv: aucun en-tete NSV.');
+  If F6NState=1 Then Begin If F6NParseNSVf<0 Then Fail('nsv: en-tete NSVf invalide.'); End;
+  If F6NState=3 Then Begin If F6NParseNSVs<0 Then Fail('nsv: en-tete NSVs invalide.'); Break; End;
+ End;
+ If Not F6NHaveHdr Then Fail('nsv: aucun en-tete NSVs.');
+ First:=True;
+ While F6NChunk(First)>=0 Do First:=False;
+End;
+
+Procedure F6NWriteAll(P: PEABuffer; N: LongInt);
+Var K,Err: LongInt;
+Begin
+ K:=0; While K<N Do Begin If N-K>30000 Then Err:=30000 Else Err:=N-K; WriteBytes(P^[K],Err); Inc(K,Err); End;
+End;
+
+Procedure F6NPut32(V: Int64);
+Var B: Array[0..3] Of Byte; I: LongInt;
+Begin For I:=0 To 3 Do Begin B[I]:=V And 255; V:=V Shr 8; End; WriteBytes(B,4); End;
+Procedure F6NPutTag(Const S: String);
+Var I: LongInt; B: Array[0..3] Of Byte;
+Begin For I:=0 To 3 Do B[I]:=Ord(S[I+1]); WriteBytes(B,4); End;
+Procedure F6NPutZ(N: LongInt);
+Var B: Array[0..63] Of Byte; Err: LongInt;
+Begin FillChar(B,SizeOf(B),0); While N>0 Do Begin If N>64 Then Err:=64 Else Err:=N; WriteBytes(B,Err); Dec(N,Err); End; End;
+
+{ ---- audio pcm_u8 des conteneurs mm, mvi et rl2 ---- }
+Procedure F6MmAudio(Const Source,Target: String);
+Var F: PEABuffer; Size,Pos,Len,Typ,HLen,N,I: LongInt; Ok: Boolean;
+Begin
+ NVLoad(Source,F,Size);
+ If Size<6+10 Then Fail('mm: fichier trop court.');
+ Typ:=EAByte(F,Size,0)+EAByte(F,Size,1)*256; HLen:=NVRL32(F,Size,2);
+ If Typ<>0 Then Fail('mm: en-tete invalide.');
+ If HLen<>$18 Then Fail('mm: pas de flux audio.');
+ CloseRead; EAReset; OpenWrite(Target); ADPCMWaveHeader(8000,1,0);
+ Pos:=6+HLen; N:=0;
+ While Pos+6<=Size Do Begin
+  Typ:=F^[Pos]+F^[Pos+1]*256; Len:=F^[Pos+2]+F^[Pos+3]*256;
+  Inc(Pos,6);
+  Case Typ Of
+   $31,$5,$8,$C,$D,$E,$F: Begin
+    If Pos+Len>Size Then Break;
+    Inc(Pos,Len);
+   End;
+   $15: Begin
+    If Pos+Len>Size Then Len:=Size-Pos;
+    For I:=0 To Len-1 Do Begin EAPut((F^[Pos+I]-128)*256); Inc(N); End;
+    Inc(Pos,Len);
+   End;
+  Else Inc(Pos,Len);
+  End;
+ End;
+ If N=0 Then Fail('mm: aucun echantillon audio.');
+ EAFlush; ADPCMPatchHeader(8000,1,EAWritten); CloseWrite;
+End;
+
+Procedure F6MviAudio(Const Source,Target: String);
+Var
+ F: PEABuffer; Size,Pos,Frames,Ms,W,H,Rate,AudioSize,Ver,PlayVer,VSz,Count,Left,I,N: LongInt; FrameSz,Counter: Int64; Is24: Boolean;
+Begin
+ NVLoad(Source,F,Size);
+ If Size<30 Then Fail('mvi: fichier trop court.');
+ Ver:=F^[0]; Frames:=NVRL32(F,Size,3); Ms:=NVRL32(F,Size,7); W:=NVRL16(F,Size,11); H:=NVRL16(F,Size,13);
+ Rate:=NVRL16(F,Size,16); AudioSize:=NVRL32(F,Size,18); PlayVer:=NVRL32(F,Size,23);
+ If (Frames=0) Or (AudioSize<=0) Then Fail('mvi: en-tete invalide.');
+ If (Ver<>7) Or (PlayVer>213) Or (PlayVer<0) Then Fail('mvi: version non prise en charge.');
+ If Rate<1 Then Fail('mvi: frequence invalide.');
+ Is24:=Int64(W)*H>=65536;
+ FrameSz:=(Int64(AudioSize) Shl 10) Div Frames;
+ If FrameSz<=(1 Shl 9) Then Fail('mvi: audio_data_size ou frames_count invalide.');
+ Counter:=(Int64(Rate)*830 div FrameSz-1)*FrameSz;
+ Left:=AudioSize;
+ CloseRead; EAReset; OpenWrite(Target); ADPCMWaveHeader(Rate,1,0);
+ Pos:=30; VSz:=0; N:=0;
+ While True Do Begin
+  If VSz=0 Then Begin
+   If Is24 Then Begin If Pos+3>Size Then Break; VSz:=F^[Pos]+F^[Pos+1]*256+F^[Pos+2]*65536; Inc(Pos,3); End
+   Else Begin If Pos+2>Size Then Break; VSz:=F^[Pos]+F^[Pos+1]*256; Inc(Pos,2); End;
+   If Left=0 Then Break;
+   Count:=(Counter+FrameSz+512) Shr 10;
+   If Count>Left Then Count:=Left;
+   If Pos+Count>Size Then Count:=Size-Pos;
+   If Count<=0 Then Break;
+   For I:=0 To Count-1 Do Begin EAPut((F^[Pos+I]-128)*256); Inc(N); End;
+   Inc(Pos,Count); Dec(Left,Count);
+   Counter:=Counter+FrameSz-(Int64(Count) Shl 10);
+  End Else Begin
+   If Pos+VSz>Size Then Break;
+   Inc(Pos,VSz); VSz:=0;
+  End;
+ End;
+ If N=0 Then Fail('mvi: aucun echantillon audio.');
+ EAFlush; ADPCMPatchHeader(Rate,1,EAWritten); CloseWrite;
+End;
+
+Procedure F6Rl2Audio(Const Source,Target: String);
+Var F: PEABuffer; Size,Back,Sig,Frames,SoundRate,Rate,Chans,I,K,N,Ex,TabPos,Co,As_,Cs,J: LongInt;
+Begin
+ NVLoad(Source,F,Size);
+ If (Size<30+774) Or (F^[0]<>70) Or (F^[1]<>79) Or (F^[2]<>82) Or (F^[3]<>77) Then Fail('rl2: signature invalide.');
+ Back:=NVRL32(F,Size,4); Sig:=F^[8]*16777216+F^[9]*65536+F^[10]*256+F^[11];
+ Frames:=NVRL32(F,Size,16); SoundRate:=NVRL16(F,Size,22); Rate:=NVRL16(F,Size,24); Chans:=NVRL16(F,Size,26);
+ If (Sig<>$524C5632) And (Sig<>$524C5633) Then Fail('rl2: signature RLV2/RLV3 requise.');
+ If (Back<0) Or (Back>1073741823) Or (Frames<0) Or (Frames>268435455) Then Fail('rl2: en-tete invalide.');
+ If SoundRate=0 Then Fail('rl2: pas de flux audio.');
+ If (Chans=0) Or (Chans>42) Then Fail('rl2: nombre de canaux invalide.');
+ If Chans>2 Then Fail('rl2: audio mono ou stereo requis.');
+ If Rate<1 Then Fail('rl2: frequence invalide.');
+ Ex:=30; TabPos:=Ex+6+768; If (Sig=$524C5633) And (Back>0) Then Inc(TabPos,Back);
+ If TabPos+12*Frames>Size Then Fail('rl2: tables tronquees.');
+ CloseRead; EAReset; OpenWrite(Target); ADPCMWaveHeader(Rate,Chans,0); N:=0;
+ For I:=0 To Frames-1 Do Begin
+  Cs:=NVRL32(F,Size,TabPos+4*I); Co:=NVRL32(F,Size,TabPos+4*Frames+4*I); As_:=NVRL32(F,Size,TabPos+8*Frames+4*I) And $FFFF;
+  If (Cs<0) Or (As_>Cs) Then Fail('rl2: table des tailles invalide.');
+  If As_>0 Then Begin
+   If (Co<0) Or (Co+As_>Size) Then Break;
+   For J:=0 To As_-1 Do Begin EAPut((F^[Co+J]-128)*256); Inc(N); End;
+  End;
+ End;
+ If N=0 Then Fail('rl2: aucun echantillon audio.');
+ EAFlush; ADPCMPatchHeader(Rate,Chans,EAWritten); CloseWrite;
+End;
+
+{ ---- RPL / ARMovie : audio pcm (s16le, u8, s8, vidc) ---- }
+Procedure F6RplAudio(Const Source,Target: String);
+Var
+ F: PEABuffer; Size,P0,LineNo,Rate,Chans,Bits,AFmt,Mode,VFmt,Cat,NChunks,I,K,N,V,Bytes: LongInt;
+ Line,ACodec,AType,Low: String; HaveVideo: Boolean; Off,VSz,ASz,Offs: Int64; Err: Boolean;
+Function ReadLine: String;
+Var S: String; B: LongInt;
+Begin
+ S:='';
+ While P0<Size Do Begin
+  B:=F^[P0]; Inc(P0);
+  If B=10 Then Begin ReadLine:=S; Exit; End;
+  If B=0 Then Break;
+  If Length(S)<255 Then S:=S+Chr(B);
+ End;
+ Err:=True; ReadLine:=S;
+End;
+Function LeadInt(Const S: String; Var Rest: String): Int64;
+Var I2: LongInt; R: Int64;
+Begin
+ R:=0; I2:=1;
+ While (I2<=Length(S)) And (S[I2] In ['0'..'9']) Do Begin R:=R*10+Ord(S[I2])-48; If R>2147483647 Then Err:=True; Inc(I2); End;
+ Rest:=Copy(S,I2,255); LeadInt:=R;
+End;
+Function Lower2(Const S: String): String;
+Var I2: LongInt; R: String;
+Begin R:=S; For I2:=1 To Length(R) Do R[I2]:=LowerCase(R[I2]); Lower2:=R; End;
+Function VidcToLinear(U: LongInt): LongInt;
+Var T: LongInt;
+Begin
+ T:=(((U And $1E) Shr 1) Shl 3)+$84; T:=T Shl ((U And $E0) Shr 5);
+ If (U And 1)<>0 Then VidcToLinear:=$84-T Else VidcToLinear:=T-$84;
+End;
+Var R2: String;
+Begin
+ NVLoad(Source,F,Size);
+ P0:=0; Err:=False;
+ If (Size<9) Or (F^[0]<>65) Or (F^[1]<>82) Or (F^[2]<>77) Or (F^[3]<>111) Then Fail('rpl: signature ARMovie absente.');
+ For LineNo:=0 To 3 Do Line:=ReadLine;
+ Line:=ReadLine; VFmt:=LeadInt(Line,R2);
+ HaveVideo:=VFmt<>0;
+ If HaveVideo Then Begin Line:=ReadLine; Line:=ReadLine; Line:=ReadLine; End Else For LineNo:=0 To 2 Do Line:=ReadLine;
+ Line:=ReadLine; { cadence video }
+ Line:=ReadLine; AFmt:=LeadInt(Line,ACodec);
+ If AFmt=0 Then Fail('rpl: pas de flux audio.');
+ Line:=ReadLine; Rate:=LeadInt(Line,R2);
+ Line:=ReadLine; Chans:=LeadInt(Line,R2);
+ Line:=ReadLine; Bits:=LeadInt(Line,AType);
+ If Bits=0 Then Bits:=4;
+ ACodec:=Lower2(ACodec); AType:=Lower2(AType);
+ Mode:=-1;
+ If AFmt=1 Then Begin
+  If Bits=16 Then Mode:=0
+  Else If Bits=8 Then Begin
+   If Pos('unsigned',AType)>0 Then Mode:=1 Else If Pos('linear',AType)>0 Then Mode:=2 Else Mode:=3;
+  End;
+ End Else If AFmt=101 Then Begin
+  If Bits=8 Then Mode:=1;
+ End;
+ If Mode<0 Then Fail('rpl: format audio non pris en charge (PCM s16le, u8, s8, vidc seulement).');
+ If (Chans<1) Or (Chans>2) Then Fail('rpl: audio mono ou stereo requis.');
+ If (Rate<1) Then Fail('rpl: frequence invalide.');
+ Line:=ReadLine; { frames par chunk }
+ Line:=ReadLine; NChunks:=LeadInt(Line,R2);
+ If NChunks=2147483647 Then Fail('rpl: nombre de chunks invalide.');
+ Inc(NChunks);
+ Line:=ReadLine; Line:=ReadLine;
+ Line:=ReadLine; Cat:=LeadInt(Line,R2);
+ Line:=ReadLine; Line:=ReadLine;
+ If HaveVideo Then Line:=ReadLine;
+ If Err Then Fail('rpl: en-tete invalide.');
+ P0:=Cat;
+ If Mode=0 Then Bytes:=2 Else Bytes:=1;
+ CloseRead; EAReset; OpenWrite(Target); ADPCMWaveHeader(Rate,Chans,0);
+ N:=0;
+ For I:=0 To NChunks-1 Do Begin
+  If P0>=Size Then Fail('rpl: table des chunks tronquee.');
+  Line:=ReadLine;
+  K:=1; Off:=0; VSz:=0; ASz:=0;
+  { "offset , video ; audio" }
+  Low:=Line;
+  Off:=LeadInt(Low,R2); Low:=R2; While (Length(Low)>0) And (Low[1]=' ') Do Delete(Low,1,1);
+  If (Length(Low)=0) Or (Low[1]<>',') Then Fail('rpl: table des chunks invalide.');
+  Delete(Low,1,1); While (Length(Low)>0) And (Low[1]=' ') Do Delete(Low,1,1);
+  VSz:=LeadInt(Low,R2); Low:=R2; While (Length(Low)>0) And (Low[1]=' ') Do Delete(Low,1,1);
+  If (Length(Low)=0) Or (Low[1]<>';') Then Fail('rpl: table des chunks invalide.');
+  Delete(Low,1,1); While (Length(Low)>0) And (Low[1]=' ') Do Delete(Low,1,1);
+  ASz:=LeadInt(Low,R2);
+  { lecture du chunk audio }
+  V:=0;
+  If Off+VSz+ASz>Size Then Break;
+  Offs:=Off+VSz;
+  K:=0;
+  While K+Bytes<=ASz Do Begin
+   Case Mode Of
+    0: Begin V:=F^[Offs+K]+F^[Offs+K+1]*256; If V>=32768 Then Dec(V,65536); End;
+    1: V:=(F^[Offs+K]-128)*256;
+    2: V:=ShortInt(F^[Offs+K])*256;
+    Else V:=VidcToLinear(F^[Offs+K]);
+   End;
+   EAPut(V); Inc(N); Inc(K,Bytes);
+  End;
+ End;
+ If N=0 Then Fail('rpl: aucun echantillon audio.');
+ EAFlush; ADPCMPatchHeader(Rate,Chans,EAWritten); CloseWrite;
+End;
+
+{ video NSV: reconstruction d'un AVI temporaire (fourcc VP3x/VP5x/VP6x) puis decodage par le chemin AVI existant }
+Procedure F6NsvVideo(Const Source,Target: String; Mode: LongInt);
+Var
+ F: PEABuffer; Size,I,J,Kind,Total,Gap,Last: LongInt; Fc,Tmp: String; Pad: Array[0..1] Of Byte;
+Begin
+ NVLoad(Source,F,Size);
+ F6NScan(F,Size);
+ If F6NVNone Then Fail('nsv: pas de flux video.');
+ Fc:=F6NVtag;
+ If (Fc='VP3 ') Or (Fc='VP31') Then Begin Fc:='VP31'; Kind:=171; End
+ Else If Fc='VP30' Then Kind:=171
+ Else If (Fc='VP5 ') Or (Fc='VP50') Then Begin Fc:='VP50'; Kind:=480; End
+ Else If Fc='VP6 ' Then Begin Fc:='VP60'; Kind:=481; End
+ Else If (Fc='VP60') Or (Fc='VP61') Or (Fc='VP62') Then Kind:=481
+ Else Fail('nsv: codec video '+Fc+' non pris en charge (VP3, VP5, VP6 seulement).');
+ If F6NNV=0 Then Fail('nsv: aucune image video.');
+ If (F6NW<1) Or (F6NH<1) Or (F6NFrN<1) Or (F6NFrD<1) Then Fail('nsv: parametres video invalides.');
+ Total:=0; Last:=-1;
+ For I:=0 To F6NNV-1 Do Begin
+  Gap:=F6NVDts^[I]-Last-1; If Gap>0 Then Inc(Total,8*Gap);
+  Inc(Total,8+F6NVLen^[I]+(F6NVLen^[I] And 1)); Last:=F6NVDts^[I];
+ End;
+ Tmp:=NewTemporary; CloseRead; OpenWrite(Tmp);
+ F6NPutTag('RIFF'); F6NPut32(4+200+12+Total); F6NPutTag('AVI ');
+ F6NPutTag('LIST'); F6NPut32(192); F6NPutTag('hdrl');
+ F6NPutTag('avih'); F6NPut32(56); F6NPutZ(56);
+ F6NPutTag('LIST'); F6NPut32(116); F6NPutTag('strl');
+ F6NPutTag('strh'); F6NPut32(56); F6NPutTag('vids'); F6NPutTag(Fc); F6NPutZ(12);
+ F6NPut32(F6NFrD); F6NPut32(F6NFrN); F6NPutZ(28);
+ F6NPutTag('strf'); F6NPut32(40); F6NPut32(40); F6NPut32(F6NW); F6NPut32(F6NH); F6NPut32(1+24*65536); F6NPutTag(Fc); F6NPutZ(20);
+ F6NPutTag('LIST'); F6NPut32(4+Total); F6NPutTag('movi');
+ Last:=-1; Pad[0]:=0;
+ For I:=0 To F6NNV-1 Do Begin
+  For J:=1 To F6NVDts^[I]-Last-1 Do Begin F6NPutTag('00dc'); F6NPut32(0); End;
+  F6NPutTag('00dc'); F6NPut32(F6NVLen^[I]);
+  F6NWriteAll(PEABuffer(@F^[F6NVPos^[I]]),F6NVLen^[I]);
+  If Odd(F6NVLen^[I]) Then WriteBytes(Pad,1);
+  Last:=F6NVDts^[I];
+ End;
+ CloseWrite;
+ FreeMem(F6NVPos); FreeMem(F6NVLen); FreeMem(F6NVDts); FreeMem(F6NAPos); FreeMem(F6NALen); FreeMem(F);
+ DecodeNV2(Kind,Tmp,Target,Mode);
+ F6Erase(Tmp);
+End;
+
+Procedure F6NsvAudio(Const Source,Target: String);
+Var
+ F: PEABuffer; Size,I,J,V,Rate,Bytes: LongInt; Tmp,At: String;
+Begin
+ NVLoad(Source,F,Size);
+ F6NScan(F,Size);
+ If F6NANone Then Fail('nsv: pas de flux audio.');
+ At:=F6NAtag;
+ If F6NNA=0 Then Fail('nsv: aucun paquet audio.');
+ If At='PCM ' Then Begin
+  If Not F6NPcmFilled Then Fail('nsv: parametres PCM absents.');
+  Rate:=F6NPcmRate Div 4;
+  If Rate<1 Then Fail('nsv: frequence PCM invalide.');
+  CloseRead; EAReset; OpenWrite(Target); ADPCMWaveHeader(Rate,1,0);
+  If (F6NPcmBps Div F6NPcmCh)=8 Then Bytes:=1 Else Bytes:=2;
+  For I:=0 To F6NNA-1 Do Begin
+   J:=0;
+   While J+Bytes<=F6NALen^[I] Do Begin
+    If Bytes=1 Then V:=(F^[F6NAPos^[I]+J]-128)*256
+    Else Begin V:=(F^[F6NAPos^[I]+J]+F^[F6NAPos^[I]+J+1]*256) Xor $8000; If V>=32768 Then Dec(V,65536); End;
+    EAPut(V); Inc(J,Bytes);
+   End;
+  End;
+  EAFlush; ADPCMPatchHeader(Rate,1,EAWritten); CloseWrite; Exit;
+ End;
+ If (At<>'MP3 ') And (At<>'AAC ') And (At<>'AACP') Then Fail('nsv: codec audio '+At+' non pris en charge (MP3, AAC ADTS, PCM).');
+ Tmp:=NewTemporary; CloseRead; OpenWrite(Tmp);
+ For I:=0 To F6NNA-1 Do F6NWriteAll(PEABuffer(@F^[F6NAPos^[I]]),F6NALen^[I]);
+ CloseWrite;
+ If At='MP3 ' Then DecodeMPA(Tmp,Target) Else DecodeAAC(Tmp,Target);
+ F6Erase(Tmp);
+End;
+
+
+{ ---- REDCODE R3D (libavformat/r3d.c): audio pcm_s32be decodee, video jpeg2000 non prise en charge ---- }
+Procedure F6R3dVideo(Const Source,Target: String; Mode: LongInt);
+Begin
+ Fail('r3d: video REDCODE (jpeg2000) non prise en charge (pas de decodeur JPEG 2000).');
+End;
+
+Procedure F6R3dAudio(Const Source,Target: String);
+Var
+ F: PEABuffer; Size,Ch,Rate: LongInt; H: Array[0..43] Of Byte; Total: Int64; Wr: Boolean;
+Procedure P32(At: LongInt; V: Int64);
+Var Z: LongInt;
+Begin For Z:=0 To 3 Do Begin H[At+Z]:=V And 255; V:=V Shr 8; End; End;
+Procedure P16(At: LongInt; V: LongInt);
+Begin H[At]:=V And 255; H[At+1]:=(V Shr 8) And 255; End;
+Procedure Walk;
+Var Pos,Sz,Frames,K,I: LongInt; Atom: Int64; B: Array[0..3] Of Byte;
+Begin
+ Pos:=8+316;
+ While Pos+8<=Size Do Begin
+  Atom:=F6BE32(F,Size,Pos);
+  If Atom<8 Then Break;
+  If (F^[Pos+4]=82) And (F^[Pos+5]=69) And (F^[Pos+6]=68) And (F^[Pos+7]=65) Then Begin
+   If Pos+8+24>Size Then Break;
+   K:=LongInt(F6BE32(F,Size,Pos+12));
+   If Rate=0 Then Begin Rate:=K; If Rate<=0 Then Fail('r3d: frequence invalide.'); End;
+   Sz:=Atom-8-24;
+   If Sz<0 Then Break;
+   If Pos+8+24+Sz>Size Then Sz:=Size-Pos-8-24;
+   Frames:=Sz Div (4*Ch);
+   For I:=0 To Frames*Ch-1 Do Begin
+    If Wr Then Begin
+     B[0]:=F^[Pos+32+I*4+3]; B[1]:=F^[Pos+32+I*4+2]; B[2]:=F^[Pos+32+I*4+1]; B[3]:=F^[Pos+32+I*4];
+     WriteBytes(B,4);
+    End;
+    Inc(Total,4);
+   End;
+  End;
+  If Pos+Atom>Size Then Break;
+  Inc(Pos,Atom);
+ End;
+End;
+Begin
+ NVLoad(Source,F,Size);
+ If (Size<8+316) Or (F6BE32(F,Size,0)<8) Or (F^[4]<>82) Or (F^[5]<>69) Or (F^[6]<>68) Or (F^[7]<>49) Then Fail('r3d: atome red1 absent.');
+ Ch:=F^[8+1+1+2+4+4+32+4+4+2+2+2];
+ If Ch=0 Then Fail('r3d: pas de flux audio.');
+ Rate:=0; Total:=0; Wr:=False; Walk;
+ If (Rate=0) Or (Total=0) Then Fail('r3d: aucun paquet audio.');
+ CloseRead; OpenWrite(Target);
+ FillChar(H,SizeOf(H),0);
+ H[0]:=82; H[1]:=73; H[2]:=70; H[3]:=70; P32(4,60+Total); H[8]:=87; H[9]:=65; H[10]:=86; H[11]:=69;
+ H[12]:=102; H[13]:=109; H[14]:=116; H[15]:=32; P32(16,40); P16(20,$FFFE); P16(22,Ch); P32(24,Rate); P32(28,Rate*Ch*4); P16(32,Ch*4); P16(34,32);
+ P16(36,22); P16(38,32); If Ch=1 Then P32(40,4) Else P32(40,3);
+ WriteBytes(H,44);
+ FillChar(H,SizeOf(H),0);
+ P16(0,1); H[4]:=0; H[5]:=0; H[6]:=16; H[7]:=0; H[8]:=128; H[9]:=0; H[10]:=0; H[11]:=170; H[12]:=0; H[13]:=56; H[14]:=155; H[15]:=113;
+ H[16]:=100; H[17]:=97; H[18]:=116; H[19]:=97; P32(20,Total);
+ WriteBytes(H,24);
+ Wr:=True; Walk;
+ CloseWrite;
+End;
+
+{ ---- IFF: ILBM/PBM/ACBM/DEEP/RGB8/RGBN/ANIM (libavcodec/iff.c, libavformat/iff.c), LGPL-2.1-or-later ---- }
+Type
+ TF6G=Record B: PEABuffer; Pos,Len: LongInt; End;
+ TF6P=Record B: PEABuffer; Pos,Size: LongInt; Eof: Boolean; End;
+ PF6U32=^LongWord;
+ TF6U32Arr=Array[0..100000000] Of LongWord; PF6U32Arr=^TF6U32Arr;
+
+Procedure F6GInit(Var G: TF6G; B: PEABuffer; Len: LongInt);
+Begin G.B:=B; G.Pos:=0; If Len<0 Then Len:=0; G.Len:=Len; End;
+Function F6GLeft(Var G: TF6G): LongInt;
+Begin F6GLeft:=G.Len-G.Pos; End;
+Function F6G8(Var G: TF6G): LongInt;
+Begin
+ If G.Len-G.Pos<1 Then Begin G.Pos:=G.Len; F6G8:=0; Exit; End;
+ F6G8:=G.B^[G.Pos]; Inc(G.Pos);
+End;
+Function F6G16(Var G: TF6G): LongInt;
+Begin
+ If G.Len-G.Pos<2 Then Begin G.Pos:=G.Len; F6G16:=0; Exit; End;
+ F6G16:=G.B^[G.Pos]*256+G.B^[G.Pos+1]; Inc(G.Pos,2);
+End;
+Function F6G24(Var G: TF6G): LongInt;
+Begin
+ If G.Len-G.Pos<3 Then Begin G.Pos:=G.Len; F6G24:=0; Exit; End;
+ F6G24:=(G.B^[G.Pos]*256+G.B^[G.Pos+1])*256+G.B^[G.Pos+2]; Inc(G.Pos,3);
+End;
+Function F6G32(Var G: TF6G): Int64;
+Begin
+ If G.Len-G.Pos<4 Then Begin G.Pos:=G.Len; F6G32:=0; Exit; End;
+ F6G32:=((Int64(G.B^[G.Pos])*256+G.B^[G.Pos+1])*256+G.B^[G.Pos+2])*256+G.B^[G.Pos+3]; Inc(G.Pos,4);
+End;
+Function F6GL32(Var G: TF6G): Int64;
+Begin
+ If G.Len-G.Pos<4 Then Begin G.Pos:=G.Len; F6GL32:=0; Exit; End;
+ F6GL32:=((Int64(G.B^[G.Pos+3])*256+G.B^[G.Pos+2])*256+G.B^[G.Pos+1])*256+G.B^[G.Pos]; Inc(G.Pos,4);
+End;
+Function F6GPeek16(Var G: TF6G): LongInt;
+Begin
+ If G.Len-G.Pos<2 Then F6GPeek16:=0 Else F6GPeek16:=G.B^[G.Pos]*256+G.B^[G.Pos+1];
+End;
+Procedure F6GSkip(Var G: TF6G; Size: Int64);
+Var L: LongInt;
+Begin
+ If Size<0 Then Size:=Size And $FFFFFFFF;
+ L:=G.Len-G.Pos; If Size>L Then Size:=L;
+ Inc(G.Pos,Size);
+End;
+
+Procedure F6PInit(Var P: TF6P; B: PEABuffer; Size: LongInt);
+Begin P.B:=B; P.Pos:=0; P.Size:=Size; P.Eof:=False; End;
+Procedure F6PSeek(Var P: TF6P; Off: Int64);
+Begin
+ P.Eof:=False;
+ Off:=Off And $FFFFFFFF; If Off>=2147483648 Then Dec(Off,4294967296);
+ If Off<0 Then Off:=0; If Off>P.Size Then Off:=P.Size;
+ P.Pos:=Off;
+End;
+Function F6PLeft(Var P: TF6P): LongInt;
+Begin F6PLeft:=P.Size-P.Pos; End;
+Procedure F6PSkip(Var P: TF6P; Size: Int64);
+Var L: LongInt;
+Begin
+ If P.Eof Then Exit;
+ Size:=Size And $FFFFFFFF;
+ L:=P.Size-P.Pos;
+ If L<Size Then Begin P.Eof:=True; Size:=L; End;
+ Inc(P.Pos,Size);
+End;
+Procedure F6P8(Var P: TF6P; V: LongInt);
+Begin
+ If Not P.Eof And (P.Size-P.Pos>=1) Then Begin P.B^[P.Pos]:=V And 255; Inc(P.Pos); End Else P.Eof:=True;
+End;
+Procedure F6P16(Var P: TF6P; V: LongInt);
+Begin
+ If Not P.Eof And (P.Size-P.Pos>=2) Then Begin P.B^[P.Pos]:=(V Shr 8) And 255; P.B^[P.Pos+1]:=V And 255; Inc(P.Pos,2); End Else P.Eof:=True;
+End;
+Procedure F6P32(Var P: TF6P; V: Int64);
+Begin
+ If Not P.Eof And (P.Size-P.Pos>=4) Then Begin
+  P.B^[P.Pos]:=(V Shr 24) And 255; P.B^[P.Pos+1]:=(V Shr 16) And 255; P.B^[P.Pos+2]:=(V Shr 8) And 255; P.B^[P.Pos+3]:=V And 255; Inc(P.Pos,4);
+ End Else P.Eof:=True;
+End;
+
+Function F6Min(A,B: Int64): Int64; Begin If A<B Then F6Min:=A Else F6Min:=B; End;
+Function F6Max(A,B: Int64): Int64; Begin If A>B Then F6Max:=A Else F6Max:=B; End;
+Function F6S16(V: LongInt): LongInt; Begin If V>=32768 Then F6S16:=V-65536 Else F6S16:=V; End;
+Function F6S32(V: Int64): Int64; Begin V:=V And $FFFFFFFF; If V>=2147483648 Then V:=V-4294967296; F6S32:=V; End;
+
+{ ---- contexte du decodeur ---- }
+Const
+ F6I_PAL8=0; F6I_GRAY8=1; F6I_BGR32=2; F6I_0BGR32=3; F6I_RGB32=4; F6I_RGB444=5; F6I_RGB24=6; F6I_RGBA=7; F6I_BGRA=8; F6I_ARGB=9; F6I_ABGR=10; F6I_NONE=11;
+Var
+ F6IW,F6IH,F6IBpc,F6IPix,F6IPlane,F6IBpp,F6IHam,F6IFlags,F6ITransp,F6IMasking,F6IComp,F6IVideoSize: LongInt;
+ F6IShort,F6IInterl,F6IBrush,F6IInit: Boolean; F6ITag: String[4]; F6ITvdc: Array[0..15] Of LongInt;
+ F6IPlaneBuf,F6IHamBuf,F6IVideo0,F6IVideo1,F6IFrame: PEABuffer; F6IHamPal,F6IMaskPal,F6IMaskBuf,F6IAnimPal: PF6U32Arr;
+ F6IExtra: PEABuffer; F6IExtraLen,F6IStride,F6IBppHdr: LongInt; F6IFramePal: Array[0..255] Of LongWord; F6IPalSet: Boolean;
+
+Function F6IPixSize: LongInt;
+Begin
+ Case F6IPix Of F6I_PAL8,F6I_GRAY8: F6IPixSize:=1; F6I_RGB444: F6IPixSize:=2; F6I_RGB24: F6IPixSize:=3; Else F6IPixSize:=4; End;
+End;
+
+Procedure F6IPut32(Off: LongInt; V: LongWord);
+Begin
+ F6IFrame^[Off]:=V And 255; F6IFrame^[Off+1]:=(V Shr 8) And 255; F6IFrame^[Off+2]:=(V Shr 16) And 255; F6IFrame^[Off+3]:=(V Shr 24) And 255;
+End;
+Function F6IGet32(Off: LongInt): LongWord;
+Begin
+ F6IGet32:=F6IFrame^[Off]+LongWord(F6IFrame^[Off+1]) Shl 8+LongWord(F6IFrame^[Off+2]) Shl 16+LongWord(F6IFrame^[Off+3]) Shl 24;
+End;
+
+{ decodeplane8 : dst = octets de ligne a partir de Off ; buf[BP..BP+N-1] }
+Procedure F6IPlane8(Dst: PEABuffer; Off: LongInt; Src: PEABuffer; BP,N,Plane: LongInt);
+Var I,K: LongInt; V: LongInt;
+Begin
+ If Plane>=8 Then Exit;
+ For I:=0 To N-1 Do Begin
+  V:=Src^[BP+I];
+  For K:=0 To 7 Do
+   Dst^[Off+I*8+K]:=Dst^[Off+I*8+K] Or (((V Shr (7-K)) And 1) Shl Plane);
+ End;
+End;
+
+{ decodeplane32 sur un tableau de mots (mots 32 bits, ordre natif) }
+Procedure F6IPlane32W(Dst: PF6U32Arr; Src: PEABuffer; BP,N,Plane: LongInt);
+Var I,K: LongInt; V: LongInt;
+Begin
+ For I:=0 To N-1 Do Begin
+  V:=Src^[BP+I];
+  For K:=0 To 7 Do
+   Dst^[I*8+K]:=Dst^[I*8+K] Or (LongWord((V Shr (7-K)) And 1) Shl Plane);
+ End;
+End;
+{ idem, vers la trame (octets, little endian) }
+Procedure F6IPlane32F(RowOff: LongInt; Src: PEABuffer; BP,N,Plane: LongInt);
+Var I,K: LongInt; V: LongInt; W: LongWord;
+Begin
+ For I:=0 To N-1 Do Begin
+  V:=Src^[BP+I];
+  For K:=0 To 7 Do Begin
+   W:=F6IGet32(RowOff+(I*8+K)*4) Or (LongWord((V Shr (7-K)) And 1) Shl Plane);
+   F6IPut32(RowOff+(I*8+K)*4,W);
+  End;
+ End;
+End;
+
+Procedure F6IHamLine(RowOff: LongInt; Buf: PEABuffer; Pal: PF6U32Arr; N: LongInt);
+Var Delta: LongWord; X,First: LongInt;
+Begin
+ Delta:=Pal^[1];
+ For X:=0 To N*8-1 Do Begin
+  First:=Buf^[X] Shl 1;
+  Delta:=Delta And Pal^[First];
+  Delta:=Delta Or Pal^[First+1];
+  F6IPut32(RowOff+X*4,Delta);
+ End;
+End;
+
+{ decode_byterun : renvoie la position absolue du contexte G }
+Function F6IByteRun(Dst: PEABuffer; Off,DstSize: LongInt; Var G: TF6G): LongInt;
+Var X,Len,Value,Left: LongInt;
+Begin
+ X:=0;
+ While (X<DstSize) And (F6GLeft(G)>0) Do Begin
+  Value:=ShortInt(F6G8(G));
+  If Value>=0 Then Begin
+   Len:=F6Min(F6Min(Value+1,DstSize-X),F6GLeft(G));
+   If Len>0 Then Move(G.B^[G.Pos],Dst^[Off+X],Len);
+   Inc(G.Pos,Len);
+   If Len<Value+1 Then F6GSkip(G,Value+1-Len);
+  End Else If Value>-128 Then Begin
+   Len:=F6Min(-Value+1,DstSize-X);
+   Value:=F6G8(G);
+   FillChar(Dst^[Off+X],Len,Value);
+  End Else Continue;
+  Inc(X,Len);
+ End;
+ If X<DstSize Then FillChar(Dst^[Off+X],DstSize-X,0);
+ F6IByteRun:=G.Pos;
+End;
+
+Procedure F6IByteRun2(Dst: PEABuffer; Height,LineSize: LongInt; Var G: TF6G);
+Var Cmds: TF6G; Count: Int64; I,YP,XP,L,R,A1,A2: LongInt; Cmd: LongInt;
+Procedure Put2(A,B: LongInt);
+Begin
+ Dst^[XP+YP*LineSize]:=A; Dst^[XP+YP*LineSize+1]:=B; Inc(YP);
+ If YP>=Height Then Begin YP:=0; Inc(XP,2); End;
+End;
+Begin
+ YP:=0; XP:=0;
+ If F6G32(G)<>$56444154 Then Exit;
+ F6GSkip(G,4);
+ Count:=(Int64(F6G16(G))-2) And $FFFFFFFF;
+ If F6GLeft(G)<Count Then Exit;
+ F6GInit(Cmds,@G.B^[G.Pos],Count);
+ Inc(G.Pos,Count);
+ I:=0;
+ While (I<Count) And (XP<LineSize) Do Begin
+  Cmd:=ShortInt(F6G8(Cmds));
+  If Cmd=0 Then Begin
+   L:=F6G16(G);
+   While (L>0) And (XP<LineSize) Do Begin Dec(L); A1:=F6G8(G); A2:=F6G8(G); Put2(A1,A2); End;
+  End Else If Cmd<0 Then Begin
+   L:=-Cmd;
+   While (L>0) And (XP<LineSize) Do Begin Dec(L); A1:=F6G8(G); A2:=F6G8(G); Put2(A1,A2); End;
+  End Else If Cmd=1 Then Begin
+   L:=F6G16(G); R:=F6G16(G);
+   While (L>0) And (XP<LineSize) Do Begin Dec(L); Put2(R Shr 8,R And 255); End;
+  End Else Begin
+   L:=Cmd; R:=F6G16(G);
+   While (L>0) And (XP<LineSize) Do Begin Dec(L); Put2(R Shr 8,R And 255); End;
+  End;
+  Inc(I);
+ End;
+End;
+
+Procedure F6IRgbX(Var G: TF6G; Wide: Boolean);
+Var X,Y,I,Len: LongInt; Pix: LongWord; Need: LongInt; Off: LongInt; Done: Boolean;
+Begin
+ X:=0; Y:=0; Done:=False;
+ If Wide Then Need:=4 Else Need:=2;
+ While Not Done And (F6GLeft(G)>=Need) Do Begin
+  If Wide Then Begin Pix:=$FF000000 Or LongWord(F6G24(G)); Len:=F6G8(G) And $7F; End
+  Else Begin Pix:=F6G16(G); Len:=Pix And 7; Pix:=Pix Shr 4; End;
+  If Len=0 Then Begin
+   Len:=F6G8(G);
+   If Len=0 Then Begin Len:=F6G16(G); If Len=0 Then Begin Done:=True; Break; End; End;
+  End;
+  For I:=0 To Len-1 Do Begin
+   Off:=Y*F6IStride+X*Need;
+   If Wide Then F6IPut32(Off,Pix) Else Begin F6IFrame^[Off]:=Pix And 255; F6IFrame^[Off+1]:=(Pix Shr 8) And 255; End;
+   Inc(X);
+   If X>=F6IW Then Begin
+    Inc(Y);
+    If Y>=F6IH Then Begin Done:=True; Break; End;
+    X:=0;
+   End;
+  End;
+ End;
+End;
+
+Procedure F6IDeepRle32(Src: PEABuffer; SrcSize: LongInt);
+Var P,X,Y,I,Opc,Size,Len: LongInt; Pix: LongWord; Ok: Boolean;
+Begin
+ P:=0; X:=0; Y:=0;
+ While SrcSize-P>=5 Do Begin
+  Opc:=ShortInt(Src^[P]); Inc(P);
+  If Opc>=0 Then Begin
+   Size:=Opc+1; I:=0;
+   While I<Size Do Begin
+    Len:=F6Min(Size-I,F6IW-X);
+    If SrcSize-P<Len*4 Then Exit;
+    Move(Src^[P],F6IFrame^[Y*F6IStride+X*4],Len*4);
+    Inc(P,Len*4); Inc(X,Len); Inc(I,Len);
+    Inc(I);
+    If X>=F6IW Then Begin X:=0; Inc(Y); If Y>=F6IH Then Exit; End;
+   End;
+  End Else Begin
+   Size:=-Opc+1;
+   Pix:=Src^[P]+LongWord(Src^[P+1]) Shl 8+LongWord(Src^[P+2]) Shl 16+LongWord(Src^[P+3]) Shl 24;
+   For I:=0 To Size-1 Do Begin
+    F6IPut32(Y*F6IStride+X*4,Pix);
+    Inc(X);
+    If X>=F6IW Then Begin X:=0; Inc(Y); If Y>=F6IH Then Exit; End;
+   End;
+   Inc(P,4);
+  End;
+ End;
+End;
+
+Procedure F6IDeepTvdc32(Src: PEABuffer; SrcSize: LongInt);
+Var X,Y,Plane,I,J,D: LongInt; Pixel: LongInt;
+Function Nib: LongInt;
+Begin If Odd(I) Then Nib:=Src^[I Shr 1] And 15 Else Nib:=Src^[I Shr 1] Shr 4; End;
+Begin
+ X:=0; Y:=0; Plane:=0; Pixel:=0; I:=0;
+ While I<SrcSize*2 Do Begin
+  D:=F6ITvdc[Nib]; Inc(I);
+  If D<>0 Then Begin
+   Pixel:=ShortInt((Pixel+D) And 255);
+   F6IFrame^[Y*F6IStride+X*4+Plane]:=Pixel And 255;
+   Inc(X);
+  End Else Begin
+   If I>=SrcSize*2 Then Exit;
+   D:=Nib+1; Inc(I);
+   D:=F6Min(D,F6IW-X);
+   For J:=0 To D-1 Do Begin F6IFrame^[Y*F6IStride+X*4+Plane]:=Pixel And 255; Inc(X); End;
+  End;
+  If X>=F6IW Then Begin
+   Inc(Plane);
+   If Plane>=4 Then Begin Inc(Y); If Y>=F6IH Then Exit; Plane:=0; End;
+   X:=0; Pixel:=0;
+   I:=(I+1) And Not 1;
+  End;
+ End;
+End;
+
+{ ---- deltas ANIM : Dst = video (taille DstSize) ; Buf = paquet, BufEnd = longueur ---- }
+Procedure F6IShortHDelta(Dst: PEABuffer; Buf: PEABuffer; BufLen,W,Bpp,DstSize: LongInt);
+Var PlanePitch,Pitch,K,Cnt,I: LongInt; Ptrs,G: TF6G; P: TF6P; Ofs,Pos,NOff: Int64; Offset,Data: LongInt;
+Begin
+ PlanePitch:=((W+15) div 16)*2; Pitch:=PlanePitch*Bpp;
+ F6GInit(Ptrs,Buf,BufLen); F6PInit(P,Dst,DstSize);
+ For K:=0 To Bpp-1 Do Begin
+  Ofs:=F6G32(Ptrs); Pos:=0;
+  If Ofs=0 Then Continue;
+  If Ofs>=BufLen Then Continue;
+  F6GInit(G,@Buf^[Ofs],BufLen-Ofs);
+  While (F6GPeek16(G)<>$FFFF) And (F6GLeft(G)>3) Do Begin
+   Offset:=F6S16(F6G16(G));
+   If Offset>=0 Then Begin
+    Data:=F6G16(G);
+    Pos:=(Pos+Offset*2) And $FFFFFFFF;
+    NOff:=(Pos div PlanePitch)*Pitch+(Pos mod PlanePitch)+K*PlanePitch;
+    F6PSeek(P,NOff); F6P16(P,Data);
+   End Else Begin
+    Cnt:=F6G16(G);
+    Pos:=(Pos+2*(-(Offset+2))) And $FFFFFFFF;
+    For I:=0 To Cnt-1 Do Begin
+     Data:=F6G16(G);
+     Pos:=(Pos+2) And $FFFFFFFF;
+     NOff:=(Pos div PlanePitch)*Pitch+(Pos mod PlanePitch)+K*PlanePitch;
+     F6PSeek(P,NOff); F6P16(P,Data);
+    End;
+   End;
+  End;
+ End;
+End;
+
+Procedure F6IByteVDelta(Dst: PEABuffer; Buf: PEABuffer; BufLen,W,Xor_,Bpp,DstSize: LongInt);
+Var NCols,DstPitch,K,J,I: LongInt; Ptrs,G: TF6G; P: TF6P; OfsSrc: Int64; OfsDst: Int64; Opc,X,Cnt: LongInt;
+Begin
+ NCols:=((W+15) div 16)*2; DstPitch:=NCols*Bpp;
+ F6GInit(Ptrs,Buf,BufLen); F6PInit(P,Dst,DstSize);
+ For K:=0 To Bpp-1 Do Begin
+  OfsSrc:=F6G32(Ptrs);
+  If OfsSrc=0 Then Continue;
+  If OfsSrc>=BufLen Then Continue;
+  F6GInit(G,@Buf^[OfsSrc],BufLen-OfsSrc);
+  For J:=0 To NCols-1 Do Begin
+   OfsDst:=J+K*NCols;
+   I:=F6G8(G);
+   While I>0 Do Begin
+    Opc:=F6G8(G);
+    If Opc=0 Then Begin
+     Cnt:=F6G8(G); X:=F6G8(G);
+     While Cnt>0 Do Begin
+      F6PSeek(P,OfsDst);
+      If (Xor_<>0) And (OfsDst<DstSize) Then F6P8(P,Dst^[OfsDst] Xor X) Else F6P8(P,X);
+      OfsDst:=(OfsDst+DstPitch) And $FFFFFFFF; Dec(Cnt);
+     End;
+    End Else If Opc<$80 Then Begin
+     OfsDst:=(OfsDst+Int64(Opc)*DstPitch) And $FFFFFFFF;
+    End Else Begin
+     Cnt:=Opc And $7F;
+     While Cnt>0 Do Begin
+      F6PSeek(P,OfsDst);
+      X:=F6G8(G);
+      If (Xor_<>0) And (OfsDst<DstSize) Then F6P8(P,Dst^[OfsDst] Xor X) Else F6P8(P,X);
+      OfsDst:=(OfsDst+DstPitch) And $FFFFFFFF; Dec(Cnt);
+     End;
+    End;
+    Dec(I);
+   End;
+  End;
+ End;
+End;
+
+Procedure F6IDeltaJ(Dst: PEABuffer; Buf: PEABuffer; BufLen,W,H,Bpp,DstSize: LongInt);
+Var Pitch,PlanePitchByte,PlanePitch,Kludge,Typ,Flag,Cols,Groups,Rows,Bytes,G,B,R,D: LongInt; Offset,NOff: Int64; Gc: TF6G; Value: LongInt;
+Begin
+ PlanePitchByte:=(W+7) div 8; PlanePitch:=((W+15) div 16)*2;
+ Pitch:=PlanePitch*Bpp;
+ If W<320 Then Kludge:=(320-W) div 8 div 2 Else Kludge:=0;
+ F6GInit(Gc,Buf,BufLen);
+ While F6GLeft(Gc)>=2 Do Begin
+  Typ:=F6G16(Gc);
+  Case Typ Of
+   0: Exit;
+   1: Begin
+    Flag:=F6G16(Gc); Cols:=F6G16(Gc); Groups:=F6G16(Gc);
+    For G:=0 To Groups-1 Do Begin
+     Offset:=F6G16(Gc);
+     If (Cols*Bpp=0) Or (F6GLeft(Gc)<Cols*Bpp) Then Exit;
+     If Kludge<>0 Then Offset:=((Offset div (320 div 8))*Pitch)+(Offset mod (320 div 8))-Kludge
+     Else Offset:=((Offset div PlanePitchByte)*Pitch)+(Offset mod PlanePitchByte);
+     Offset:=Offset And $FFFFFFFF;
+     For B:=0 To Cols-1 Do Begin
+      For D:=0 To Bpp-1 Do Begin
+       Value:=F6G8(Gc);
+       If Offset>=DstSize Then Exit;
+       If Flag<>0 Then Dst^[Offset]:=Dst^[Offset] Xor Value Else Dst^[Offset]:=Value;
+       Offset:=(Offset+PlanePitch) And $FFFFFFFF;
+      End;
+     End;
+     If Odd(Cols*Bpp) Then F6GSkip(Gc,1);
+    End;
+   End;
+   2: Begin
+    Flag:=F6G16(Gc); Rows:=F6G16(Gc); Bytes:=F6G16(Gc); Groups:=F6G16(Gc);
+    For G:=0 To Groups-1 Do Begin
+     Offset:=F6G16(Gc);
+     If Kludge<>0 Then Offset:=((Offset div (320 div 8))*Pitch)+(Offset mod (320 div 8))-Kludge
+     Else Offset:=((Offset div PlanePitchByte)*Pitch)+(Offset mod PlanePitchByte);
+     Offset:=Offset And $FFFFFFFF;
+     For R:=0 To Rows-1 Do Begin
+      For D:=0 To Bpp-1 Do Begin
+       NOff:=(Offset+Int64(R)*Pitch+D*PlanePitch) And $FFFFFFFF;
+       If (Bytes=0) Or (F6GLeft(Gc)<Bytes) Then Exit;
+       For B:=0 To Bytes-1 Do Begin
+        Value:=F6G8(Gc);
+        If NOff>=DstSize Then Exit;
+        If Flag<>0 Then Dst^[NOff]:=Dst^[NOff] Xor Value Else Dst^[NOff]:=Value;
+        NOff:=(NOff+1) And $FFFFFFFF;
+       End;
+      End;
+     End;
+     If Odd(Int64(Rows)*Bytes*Bpp) Then F6GSkip(Gc,1);
+    End;
+   End;
+  Else Exit;
+  End;
+ End;
+End;
+
+Procedure F6IShortVDelta(Dst: PEABuffer; Buf: PEABuffer; BufLen,W,Bpp,DstSize: LongInt);
+Var NCols,DstPitch,K,J,I,Cnt: LongInt; Ptrs,G,DPtrs,DG: TF6G; P: TF6P; OfsSrc,OfsData,OfsDst: Int64; Opc,X: LongInt;
+Begin
+ NCols:=(W+15) Shr 4; DstPitch:=NCols*Bpp*2;
+ If BufLen<=64 Then Exit;
+ F6GInit(Ptrs,Buf,BufLen); F6GInit(DPtrs,@Buf^[32],BufLen-32); F6PInit(P,Dst,DstSize);
+ For K:=0 To Bpp-1 Do Begin
+  OfsSrc:=F6G32(Ptrs); OfsData:=F6G32(DPtrs);
+  If OfsSrc=0 Then Continue;
+  If OfsSrc>=BufLen Then Exit;
+  If OfsData>=BufLen Then Exit;
+  F6GInit(G,@Buf^[OfsSrc],BufLen-OfsSrc); F6GInit(DG,@Buf^[OfsData],BufLen-OfsData);
+  For J:=0 To NCols-1 Do Begin
+   OfsDst:=(J+K*NCols)*2;
+   I:=F6G8(G);
+   While I>0 Do Begin
+    Opc:=F6G8(G);
+    If Opc=0 Then Begin
+     Cnt:=F6G8(G); X:=F6G16(DG);
+     While Cnt>0 Do Begin F6PSeek(P,OfsDst); F6P16(P,X); OfsDst:=(OfsDst+DstPitch) And $FFFFFFFF; Dec(Cnt); End;
+    End Else If Opc<$80 Then Begin
+     OfsDst:=(OfsDst+Int64(Opc)*DstPitch) And $FFFFFFFF;
+    End Else Begin
+     Cnt:=Opc And $7F;
+     While Cnt>0 Do Begin
+      F6PSeek(P,OfsDst); X:=F6G16(DG); F6P16(P,X); OfsDst:=(OfsDst+DstPitch) And $FFFFFFFF; Dec(Cnt);
+     End;
+    End;
+    Dec(I);
+   End;
+  End;
+ End;
+End;
+
+Procedure F6ILongVDelta(Dst: PEABuffer; Buf: PEABuffer; BufLen,W,Bpp,DstSize: LongInt);
+Var NCols,DstPitch,K,J,I,H: LongInt; Ptrs,G,DPtrs,DG: TF6G; P: TF6P; OfsSrc,OfsData,OfsDst,Opc,X,Cnt: Int64; Last: Boolean;
+Begin
+ NCols:=(W+31) Shr 5; DstPitch:=((W+15) div 16*2)*Bpp;
+ If BufLen<=64 Then Exit;
+ If ((W+15) div 16*2)<>((W+31) div 32*4) Then H:=1 Else H:=0;
+ F6GInit(Ptrs,Buf,BufLen); F6GInit(DPtrs,@Buf^[32],BufLen-32); F6PInit(P,Dst,DstSize);
+ For K:=0 To Bpp-1 Do Begin
+  OfsSrc:=F6G32(Ptrs); OfsData:=F6G32(DPtrs);
+  If OfsSrc=0 Then Continue;
+  If OfsSrc>=BufLen Then Exit;
+  If OfsData>=BufLen Then Exit;
+  F6GInit(G,@Buf^[OfsSrc],BufLen-OfsSrc); F6GInit(DG,@Buf^[OfsData],BufLen-OfsData);
+  For J:=0 To NCols-1 Do Begin
+   OfsDst:=((J+K*NCols)*4-H*(2*K)) And $FFFFFFFF;
+   Last:=(H<>0) And (J=NCols-1);
+   I:=F6G8(G);
+   While I>0 Do Begin
+    Opc:=F6G8(G);
+    If Opc=0 Then Begin
+     Opc:=F6G8(G);
+     If Last Then Begin X:=F6G16(DG); F6GSkip(DG,2); End Else X:=F6G32(DG);
+     If OfsDst+(Opc-1)*DstPitch>P.Size Then Exit;
+     While Opc<>0 Do Begin
+      F6PSeek(P,OfsDst);
+      If Last Then F6P16(P,X) Else F6P32(P,X);
+      OfsDst:=(OfsDst+DstPitch) And $FFFFFFFF; Dec(Opc);
+     End;
+    End Else If Opc<$80 Then Begin
+     OfsDst:=(OfsDst+Opc*DstPitch) And $FFFFFFFF;
+    End Else Begin
+     Cnt:=Opc And $7F;
+     While Cnt<>0 Do Begin
+      F6PSeek(P,OfsDst);
+      If Last Then Begin X:=F6G16(DG); F6P16(P,X); F6GSkip(DG,2); End
+      Else Begin X:=F6G32(DG); F6P32(P,X); End;
+      OfsDst:=(OfsDst+DstPitch) And $FFFFFFFF; Dec(Cnt);
+     End;
+    End;
+    Dec(I);
+   End;
+  End;
+ End;
+End;
+
+Procedure F6IShortVDelta2(Dst: PEABuffer; Buf: PEABuffer; BufLen,W,Bpp,DstSize: LongInt);
+Var NCols,DstPitch,K,J,I: LongInt; Ptrs,G: TF6G; P: TF6P; OfsSrc,OfsDst,Opc: Int64; X: LongInt;
+Begin
+ NCols:=(W+15) Shr 4; DstPitch:=NCols*Bpp*2;
+ F6GInit(Ptrs,Buf,BufLen); F6PInit(P,Dst,DstSize);
+ For K:=0 To Bpp-1 Do Begin
+  OfsSrc:=F6G32(Ptrs);
+  If OfsSrc=0 Then Continue;
+  If OfsSrc>=BufLen Then Continue;
+  F6GInit(G,@Buf^[OfsSrc],BufLen-OfsSrc);
+  For J:=0 To NCols-1 Do Begin
+   OfsDst:=(J+K*NCols)*2;
+   I:=F6G16(G);
+   While (I>0) And (F6GLeft(G)>4) Do Begin
+    Opc:=F6G16(G);
+    If Opc=0 Then Begin
+     Opc:=F6G16(G); X:=F6G16(G);
+     While (Opc<>0) And (F6PLeft(P)>1) Do Begin
+      F6PSeek(P,OfsDst); F6P16(P,X); OfsDst:=(OfsDst+DstPitch) And $FFFFFFFF; Dec(Opc);
+     End;
+    End Else If Opc<$8000 Then Begin
+     OfsDst:=(OfsDst+Opc*DstPitch) And $FFFFFFFF;
+    End Else Begin
+     Opc:=Opc And $7FFF;
+     While (Opc<>0) And (F6GLeft(G)>1) And (F6PLeft(P)>1) Do Begin
+      F6PSeek(P,OfsDst); X:=F6G16(G); F6P16(P,X); OfsDst:=(OfsDst+DstPitch) And $FFFFFFFF; Dec(Opc);
+     End;
+    End;
+    Dec(I);
+   End;
+  End;
+ End;
+End;
+
+Procedure F6ILongVDelta2(Dst: PEABuffer; Buf: PEABuffer; BufLen,W,Bpp,DstSize: LongInt);
+Var NCols,DstPitch,K,J,I,H: LongInt; Ptrs,G: TF6G; P: TF6P; OfsSrc,OfsDst,Opc,X,Skip,Mask: Int64; Last: Boolean;
+Begin
+ NCols:=(W+31) Shr 5; DstPitch:=((W+15) div 16*2)*Bpp;
+ Skip:=$80000000; Mask:=Skip-1;
+ If ((W+15) div 16*2)<>((W+31) div 32*4) Then H:=1 Else H:=0;
+ F6GInit(Ptrs,Buf,BufLen); F6PInit(P,Dst,DstSize);
+ For K:=0 To Bpp-1 Do Begin
+  OfsSrc:=F6G32(Ptrs);
+  If OfsSrc=0 Then Continue;
+  If OfsSrc>=BufLen Then Continue;
+  F6GInit(G,@Buf^[OfsSrc],BufLen-OfsSrc);
+  For J:=0 To NCols-1 Do Begin
+   OfsDst:=((J+K*NCols)*4-H*(2*K)) And $FFFFFFFF;
+   Last:=(H<>0) And (J=NCols-1);
+   If Last Then Begin Skip:=$8000; Mask:=Skip-1; End;
+   I:=F6G32(G);
+   If I>=2147483648 Then I:=I-4294967296;
+   While (I>0) And (F6GLeft(G)>4) Do Begin
+    Opc:=F6G32(G);
+    If Opc=0 Then Begin
+     If Last Then Begin Opc:=F6G16(G); X:=F6G16(G); End Else Begin Opc:=F6G32(G); X:=F6G32(G); End;
+     If OfsDst+(Opc-1)*DstPitch>P.Size Then Exit;
+     While (Opc<>0) And (F6PLeft(P)>1) Do Begin
+      F6PSeek(P,OfsDst);
+      If Last Then F6P16(P,X) Else F6P32(P,X);
+      OfsDst:=(OfsDst+DstPitch) And $FFFFFFFF; Dec(Opc);
+     End;
+    End Else If Opc<Skip Then Begin
+     OfsDst:=(OfsDst+Opc*DstPitch) And $FFFFFFFF;
+    End Else Begin
+     Opc:=Opc And Mask;
+     While (Opc<>0) And (F6GLeft(G)>1) And (F6PLeft(P)>1) Do Begin
+      F6PSeek(P,OfsDst);
+      If Last Then X:=F6G16(G) Else X:=F6G32(G);
+      If Last Then F6P16(P,X) Else F6P32(P,X);
+      OfsDst:=(OfsDst+DstPitch) And $FFFFFFFF; Dec(Opc);
+     End;
+    End;
+    Dec(I);
+   End;
+  End;
+ End;
+End;
+
+Procedure F6IDeltaD(Dst: PEABuffer; Buf: PEABuffer; BufLen,W,Bpp,DstSize: LongInt);
+Var PlanePitch,Pitch,PlanePitchByte,K: LongInt; Entries,OfsSrc: Int64; G,Ptrs: TF6G; P: TF6P; Opc: LongInt; Offset: Int64; X: Int64;
+Begin
+ PlanePitch:=((W+15) div 16)*2; Pitch:=PlanePitch*Bpp; PlanePitchByte:=(W+7) div 8;
+ If BufLen<=4*Bpp Then Exit;
+ F6PInit(P,Dst,DstSize); F6GInit(Ptrs,Buf,Bpp*4);
+ For K:=0 To Bpp-1 Do Begin
+  OfsSrc:=F6G32(Ptrs);
+  If OfsSrc=0 Then Continue;
+  If OfsSrc>=BufLen Then Continue;
+  F6GInit(G,@Buf^[OfsSrc],BufLen-OfsSrc);
+  Entries:=F6G32(G);
+  If Entries*8>F6GLeft(G) Then Exit;
+  While (Entries<>0) And (F6GLeft(G)>=8) Do Begin
+   Opc:=F6S32(F6G32(G)); Offset:=F6G32(G);
+   F6PSeek(P,(Offset div PlanePitchByte)*Pitch+(Offset mod PlanePitchByte)+K*PlanePitch);
+   If Opc>=0 Then Begin
+    X:=F6G32(G);
+    If (Opc<>0) And (4+(Int64(Opc)-1)*Pitch>F6PLeft(P)) Then Continue;
+    While (Opc<>0) And (F6PLeft(P)>0) Do Begin
+     F6P32(P,X); F6PSkip(P,Pitch-4); Dec(Opc);
+    End;
+   End Else Begin
+    While (Opc<>0) And (F6GLeft(G)>0) Do Begin
+     X:=F6G32(G); F6P32(P,X); F6PSkip(P,Pitch-4); Inc(Opc);
+    End;
+   End;
+   Dec(Entries);
+  End;
+ End;
+End;
+
+Procedure F6IDeltaE(Dst: PEABuffer; Buf: PEABuffer; BufLen,W,Bpp,DstSize: LongInt);
+Var PlanePitch,Pitch,PlanePitchByte,K: LongInt; Entries,OfsSrc: Int64; G,Ptrs: TF6G; P: TF6P; Opc: LongInt; Offset: Int64; X: LongInt;
+Begin
+ PlanePitch:=((W+15) div 16)*2; Pitch:=PlanePitch*Bpp; PlanePitchByte:=(W+7) div 8;
+ If BufLen<=4*Bpp Then Exit;
+ F6PInit(P,Dst,DstSize); F6GInit(Ptrs,Buf,Bpp*4);
+ For K:=0 To Bpp-1 Do Begin
+  OfsSrc:=F6G32(Ptrs);
+  If OfsSrc=0 Then Continue;
+  If OfsSrc>=BufLen Then Continue;
+  F6GInit(G,@Buf^[OfsSrc],BufLen-OfsSrc);
+  Entries:=F6G16(G);
+  While (Entries<>0) And (F6GLeft(G)>=6) Do Begin
+   Opc:=F6S16(F6G16(G)); Offset:=F6G32(G);
+   F6PSeek(P,(Offset div PlanePitchByte)*Pitch+(Offset mod PlanePitchByte)+K*PlanePitch);
+   If Opc>=0 Then Begin
+    X:=F6G16(G);
+    While (Opc<>0) And (F6PLeft(P)>0) Do Begin F6P16(P,X); F6PSkip(P,Pitch-2); Dec(Opc); End;
+   End Else Begin
+    Opc:=-Opc;
+    While (Opc<>0) And (F6GLeft(G)>0) Do Begin X:=F6G16(G); F6P16(P,X); F6PSkip(P,Pitch-2); Dec(Opc); End;
+   End;
+   Dec(Entries);
+  End;
+ End;
+End;
+
+Procedure F6IDeltaL(Dst: PEABuffer; Buf: PEABuffer; BufLen,W,Flag,Bpp,DstSize: LongInt);
+Var Off0,Off1,DG,OG: TF6G; P: TF6P; POff0,POff1,Offset: Int64; I,K,DstPitch,PlanePitchByte,PlanePitch,Pitch,Count,Cnt,Data: LongInt;
+Begin
+ PlanePitchByte:=(W+7) div 8; PlanePitch:=((W+15) div 16)*2; Pitch:=PlanePitch*Bpp; Count:=0;
+ If BufLen<=64 Then Exit;
+ F6GInit(Off0,Buf,BufLen); F6GInit(Off1,@Buf^[32],BufLen-32); F6PInit(P,Dst,DstSize);
+ If Flag<>0 Then DstPitch:=((W+7) div 8)*Bpp Else DstPitch:=2;
+ For K:=0 To Bpp-1 Do Begin
+  POff0:=F6G32(Off0); POff1:=F6G32(Off1);
+  If POff0=0 Then Continue;
+  If 2*POff0>=BufLen Then Exit;
+  If 2*POff1>=BufLen Then Exit;
+  F6GInit(DG,@Buf^[2*POff0],BufLen-2*POff0); F6GInit(OG,@Buf^[2*POff1],BufLen-2*POff1);
+  While (F6GPeek16(OG)<>$FFFF) And (F6GLeft(OG)>=4) Do Begin
+   Offset:=F6G16(OG); Cnt:=F6S16(F6G16(OG));
+   If Count>DstSize Then Break;
+   Offset:=((2*Offset) div PlanePitchByte)*Pitch+((2*Offset) mod PlanePitchByte)+K*PlanePitch;
+   If Cnt<0 Then Begin
+    If F6GLeft(DG)<2 Then Break;
+    F6PSeek(P,Offset);
+    Cnt:=-Cnt; Data:=F6G16(DG); Inc(Count,Cnt);
+    For I:=1 To Cnt Do Begin F6P16(P,Data); F6PSkip(P,DstPitch-2); End;
+   End Else Begin
+    If F6GLeft(DG)<2*Cnt Then Break;
+    F6PSeek(P,Offset);
+    Inc(Count,Cnt);
+    For I:=1 To Cnt Do Begin Data:=F6G16(DG); F6P16(P,Data); F6PSkip(P,DstPitch-2); End;
+   End;
+  End;
+ End;
+End;
+
+{ ---- IFF : en-tete, contexte du decodeur, decodage d'une image ---- }
+Function F6IGray(X: LongInt): LongWord;
+Begin F6IGray:=LongWord(X) Shl 16 Or LongWord(X) Shl 8 Or LongWord(X); End;
+
+{ cmap_read_palette : Pal recoit 0xAARRGGBB ; renvoie False en cas d'erreur }
+Function F6ICmapPalette(Pal: PF6U32Arr): Boolean;
+Var Count,I,PalSize: LongInt; Q: PEABuffer;
+Begin
+ F6ICmapPalette:=False;
+ If F6IBpc>8 Then Exit;
+ PalSize:=F6IExtraLen-41; If PalSize<0 Then PalSize:=0;
+ Q:=PEABuffer(@F6IExtra^[41]);
+ Count:=1 Shl F6IBpc;
+ Count:=F6Min(PalSize div 3,Count);
+ If Count>0 Then Begin
+  For I:=0 To Count-1 Do Pal^[I]:=$FF000000 Or (LongWord(Q^[I*3]) Shl 16) Or (LongWord(Q^[I*3+1]) Shl 8) Or Q^[I*3+2];
+  If (F6IFlags<>0) And (Count>=32) Then Begin
+   For I:=0 To 31 Do
+    Pal^[I+32]:=$FF000000 Or (((LongWord(Q^[I*3]) Shl 16) Or (LongWord(Q^[I*3+1]) Shl 8) Or Q^[I*3+2]) And $FEFEFE) Shr 1;
+   Count:=F6Max(Count,64);
+  End;
+ End Else Begin
+  Count:=1 Shl F6IBpc;
+  For I:=0 To Count-1 Do Pal^[I]:=$FF000000 Or F6IGray((I*255) Shr F6IBpc);
+ End;
+ If F6IMasking=1 Then Begin
+  If (1 Shl F6IBpc)<Count Then Exit;
+  Move(Pal^[0],Pal^[1 Shl F6IBpc],Count*4);
+  For I:=0 To Count-1 Do Pal^[I]:=Pal^[I] And $FFFFFF;
+ End Else If (F6IMasking=2) And (F6ITransp<(1 Shl F6IBpc)) Then Pal^[F6ITransp]:=Pal^[F6ITransp] And $FFFFFF;
+ F6ICmapPalette:=True;
+End;
+
+{ decode_init + extract_header ; renvoie False si le decodeur refuse le flux }
+Function F6IInitDecoder: Boolean;
+Var PalSize,Count,I,HamCount,ExtraSpace: LongInt; Tmp: LongWord; Pal: PEABuffer;
+Begin
+ F6IInitDecoder:=False;
+ F6IHamBuf:=Nil; F6IHamPal:=Nil; F6IMaskBuf:=Nil; F6IMaskPal:=Nil; F6IVideo0:=Nil; F6IVideo1:=Nil; F6IAnimPal:=Nil;
+ PalSize:=F6IExtraLen-41; If PalSize<0 Then PalSize:=0;
+ If F6IPix=F6I_NONE Then Begin
+  If F6IBpc<=8 Then Begin
+   If (F6IBpc<8) Or (PalSize>0) Then F6IPix:=F6I_PAL8 Else F6IPix:=F6I_GRAY8;
+  End Else If F6IBpc<=32 Then Begin
+   If F6ITag='RGB8' Then F6IPix:=F6I_RGB32
+   Else If F6ITag='RGBN' Then F6IPix:=F6I_RGB444
+   Else If F6ITag<>'DEEP' Then Begin
+    If F6IBpc=24 Then F6IPix:=F6I_0BGR32 Else If F6IBpc=32 Then F6IPix:=F6I_BGR32 Else Exit;
+   End;
+  End Else Exit;
+ End;
+ If (F6IW<1) Or (F6IH<1) Or (F6IW>16384) Or (F6IH>16384) Then Exit;
+ F6IPlane:=((F6IW+15) And Not 15) Shr 3;
+ GetMem(F6IPlaneBuf,F6IPlane*F6IH+64); FillChar(F6IPlaneBuf^,F6IPlane*F6IH+64,0);
+ F6IBpp:=F6IBpc;
+ F6IVideoSize:=0;
+ If F6ITag='ANIM' Then Begin
+  F6IVideoSize:=((F6IW+1) And Not 1)*F6IH*F6IBpp;
+  If F6IVideoSize=0 Then Exit;
+  GetMem(F6IVideo0,F6IVideoSize+64); GetMem(F6IVideo1,F6IVideoSize+64);
+  FillChar(F6IVideo0^,F6IVideoSize+64,0); FillChar(F6IVideo1^,F6IVideoSize+64,0);
+  GetMem(F6IAnimPal,256*4); FillChar(F6IAnimPal^,1024,0);
+ End;
+ { extract_header : parametres de l'extradata }
+ F6IBpp:=F6IBppHdr;
+ { champs deja analyses par l'appelant dans F6IComp, F6IHam, F6IFlags, F6ITransp, F6IMasking, F6ITvdc }
+ If F6IHam<>0 Then Begin
+  If F6IBpp>8 Then Exit;
+  If F6IBpp>6 Then Begin If F6IHam<>6 Then Exit; End Else If F6IHam<>4 Then Exit;
+ End;
+ If F6IMasking=1 Then Begin
+  If (F6IBpp>=8) And (F6IHam=0) Then Begin
+   F6IPix:=F6I_RGB32;
+   If F6IBpp>16 Then Exit;
+   GetMem(F6IMaskBuf,F6IPlane*32+64); FillChar(F6IMaskBuf^,F6IPlane*32+64,0);
+   GetMem(F6IMaskPal,(2 Shl F6IBpp)*4+64); FillChar(F6IMaskPal^,(2 Shl F6IBpp)*4+64,0);
+  End;
+  Inc(F6IBpp);
+ End Else If (F6IMasking<>0) And (F6IMasking<>2) Then Exit;
+ If (F6IBpp=0) Or (F6IBpp>32) Then Exit;
+ If (F6IVideoSize<>0) And (F6IPlane*F6IBpp*F6IH>F6IVideoSize) Then Exit;
+ If F6IHam<>0 Then Begin
+  Count:=F6Min(PalSize div 3,1 Shl F6IHam);
+  Pal:=PEABuffer(@F6IExtra^[41]);
+  ExtraSpace:=1;
+  If (F6ITag='PBM ') And (F6IHam=4) Then ExtraSpace:=4;
+  GetMem(F6IHamBuf,F6IPlane*8+64); FillChar(F6IHamBuf^,F6IPlane*8+64,0);
+  HamCount:=8*(1 Shl F6IHam);
+  GetMem(F6IHamPal,ExtraSpace*(HamCount Shl Ord(F6IMasking=1))*4+64); FillChar(F6IHamPal^,ExtraSpace*(HamCount Shl Ord(F6IMasking=1))*4+64,0);
+  If Count>0 Then Begin
+   FillChar(F6IHamPal^,(1 Shl F6IHam)*2*4,0);
+   For I:=0 To Count-1 Do
+    F6IHamPal^[I*2+1]:=$FF000000 Or Pal^[I*3] Or (LongWord(Pal^[I*3+1]) Shl 8) Or (LongWord(Pal^[I*3+2]) Shl 16);
+   Count:=1 Shl F6IHam;
+  End Else Begin
+   Count:=1 Shl F6IHam;
+   For I:=0 To Count-1 Do Begin
+    F6IHamPal^[I*2]:=$FF000000;
+    F6IHamPal^[I*2+1]:=$FF000000 Or F6IGray((I*255) Shr F6IHam);
+   End;
+  End;
+  For I:=0 To Count-1 Do Begin
+   Tmp:=LongWord(I) Shl (8-F6IHam);
+   Tmp:=Tmp Or (Tmp Shr F6IHam);
+   F6IHamPal^[(I+Count)*2]:=$FF00FFFF;
+   F6IHamPal^[(I+Count*2)*2]:=$FFFFFF00;
+   F6IHamPal^[(I+Count*3)*2]:=$FFFF00FF;
+   F6IHamPal^[(I+Count)*2+1]:=$FF000000 Or (Tmp Shl 16);
+   F6IHamPal^[(I+Count*2)*2+1]:=$FF000000 Or Tmp;
+   F6IHamPal^[(I+Count*3)*2+1]:=$FF000000 Or (Tmp Shl 8);
+  End;
+  If F6IMasking=1 Then
+   For I:=0 To HamCount-1 Do F6IHamPal^[(1 Shl F6IBpp)+I]:=F6IHamPal^[I] Or $FF000000;
+ End;
+ F6IStride:=((F6IW+15) And Not 15)*F6IPixSize;
+ F6IInitDecoder:=True;
+End;
+
+Procedure F6IRebuildHamPal;
+Var I,Count: LongInt; Tmp: LongWord;
+Begin
+ Count:=1 Shl F6IHam;
+ FillChar(F6IHamPal^,(1 Shl F6IHam)*2*4,0);
+ For I:=0 To Count-1 Do F6IHamPal^[I*2+1]:=F6IAnimPal^[I];
+ For I:=0 To Count-1 Do Begin
+  Tmp:=LongWord(I) Shl (8-F6IHam);
+  Tmp:=Tmp Or (Tmp Shr F6IHam);
+  F6IHamPal^[(I+Count)*2]:=$FF00FFFF;
+  F6IHamPal^[(I+Count*2)*2]:=$FFFFFF00;
+  F6IHamPal^[(I+Count*3)*2]:=$FFFF00FF;
+  F6IHamPal^[(I+Count)*2+1]:=$FF000000 Or (Tmp Shl 16);
+  F6IHamPal^[(I+Count*2)*2+1]:=$FF000000 Or Tmp;
+  F6IHamPal^[(I+Count*3)*2+1]:=$FF000000 Or (Tmp Shl 8);
+ End;
+ If F6IMasking=1 Then
+  For I:=0 To 8*(1 Shl F6IHam)-1 Do F6IHamPal^[(1 Shl F6IBpp)+I]:=F6IHamPal^[I] Or $FF000000;
+End;
+
+{ decode_frame ; Pk/PkLen : paquet ; Key : premier paquet ; renvoie False en cas d'erreur de decodage }
+Function F6IDecodeFrame(Pk: PEABuffer; PkLen: LongInt): Boolean;
+Var G: TF6G; Tmp2: PEABuffer; DP: PEABuffer; DL: LongInt; Buf,BufEnd,Y,Plane,I,RawW,BytesPp: LongInt; Row: LongInt; Ok: Boolean; VP: LongInt;
+ Dummy: LongInt; Start: LongInt; Chunk: String; Id: String[4]; Sz: Int64; Extra: Int64; CmapCnt: LongInt; ColP: LongWord;
+ NPlaneBytes: LongInt;
+Function Unsup: Boolean; Begin Unsup:=False; End;
+Begin
+ F6IDecodeFrame:=False;
+ F6GInit(G,Pk,PkLen);
+ { parse_packet_header }
+ If F6ITag='ANIM' Then Begin
+  F6GSkip(G,4);
+  While F6GLeft(G)>=1 Do Begin
+   Id[0]:=#4; Id[1]:=Chr(F6G8(G)); Id[2]:=Chr(F6G8(G)); Id[3]:=Chr(F6G8(G)); Id[4]:=Chr(F6G8(G));
+   Sz:=F6G32(G);
+   If Id='BMHD' Then F6GSkip(G,Sz+(Sz And 1))
+   Else If Id='ANHD' Then Begin
+    If Sz<40 Then Exit;
+    F6IComp:=(F6G8(G) Shl 8) Or (F6IComp And $FF);
+    F6GSkip(G,19);
+    Extra:=F6G32(G);
+    F6IShort:=(Extra And 1)=0; F6IBrush:=Extra=2; F6IInterl:=(Extra And $40)<>0;
+    Dec(Sz,24);
+    F6GSkip(G,Sz+(Sz And 1));
+   End Else If (Id='DLTA') Or (Id='BODY') Then Begin
+    If Id='BODY' Then F6IComp:=F6IComp And $FF;
+    Break;
+   End Else If Id='CMAP' Then Begin
+    CmapCnt:=Sz div 3;
+    If CmapCnt>256 Then Exit;
+    For I:=0 To CmapCnt-1 Do Begin
+     If F6IHam<>0 Then Begin
+      ColP:=F6G8(G); ColP:=ColP Or (LongWord(F6G8(G)) Shl 8); ColP:=ColP Or (LongWord(F6G8(G)) Shl 16);
+     End Else Begin
+      ColP:=LongWord(F6G8(G)) Shl 16; ColP:=ColP Or (LongWord(F6G8(G)) Shl 8); ColP:=ColP Or LongWord(F6G8(G));
+     End;
+     F6IAnimPal^[I]:=$FF000000 Or ColP;
+    End;
+    F6GSkip(G,Sz And 1);
+   End Else F6GSkip(G,Sz+(Sz And 1));
+  End;
+ End;
+ FillChar(F6IFrame^,F6IStride*F6IH+64,0);
+ Buf:=G.Pos; BufEnd:=PkLen; { buf et buf_end }
+ If Not F6IInit And (F6IBpc<=8-Ord(F6IMasking=1)) And (F6IPix=F6I_PAL8) Then Begin
+  If Not F6ICmapPalette(@F6IFramePal) Then Exit;
+  F6IPalSet:=True;
+ End Else If Not F6IInit And (F6IBpc<=8) And (F6IPix=F6I_RGB32) Then Begin
+  If Not F6ICmapPalette(F6IMaskPal) Then Exit;
+ End;
+ F6IInit:=True;
+ If (F6IComp<=$FF) And (F6ITag='ANIM') Then
+  If F6IPix=F6I_PAL8 Then For I:=0 To 255 Do F6IAnimPal^[I]:=F6IFramePal[I];
+ BytesPp:=F6IPixSize;
+ DP:=PEABuffer(@Pk^[Buf]); DL:=PkLen-Buf;
+ Case F6IComp Of
+  0: Begin
+   If F6ITag='ACBM' Then Begin
+    If (F6IPix=F6I_PAL8) Or (F6IPix=F6I_GRAY8) Then Begin
+     For Plane:=0 To F6IBpp-1 Do Begin
+      Y:=0;
+      While (Y<F6IH) And (Buf<BufEnd) Do Begin
+       F6IPlane8(F6IFrame,Y*F6IStride,Pk,Buf,F6Min(F6IPlane,BufEnd-Buf),Plane);
+       Inc(Buf,F6IPlane); Inc(Y);
+      End;
+     End;
+    End Else If F6IHam<>0 Then Begin
+     For Y:=0 To F6IH-1 Do Begin
+      FillChar(F6IHamBuf^,F6IPlane*8,0);
+      For Plane:=0 To F6IBpp-1 Do Begin
+       Start:=Buf+(Plane*F6IH+Y)*F6IPlane;
+       If Start>=BufEnd Then Break;
+       F6IPlane8(F6IHamBuf,0,Pk,Start,F6Min(F6IPlane,BufEnd-Start),Plane);
+      End;
+      F6IHamLine(Y*F6IStride,F6IHamBuf,F6IHamPal,F6IPlane);
+     End;
+    End Else Exit;
+   End Else If F6ITag='DEEP' Then Begin
+    RawW:=F6IW*BytesPp;
+    Y:=0;
+    While (Y<F6IH) And (Buf<BufEnd) Do Begin
+     Move(Pk^[Buf],F6IFrame^[Y*F6IStride],F6Min(RawW,BufEnd-Buf));
+     If (F6IPix=F6I_RGBA) Or (F6IPix=F6I_BGR32) Then
+      For I:=0 To F6IW-1 Do F6IFrame^[Y*F6IStride+4*I+3]:=(F6IFrame^[Y*F6IStride+4*I+3] And $F0) Or (F6IFrame^[Y*F6IStride+4*I+3] Shr 4);
+     Inc(Buf,RawW); Inc(Y);
+    End;
+   End Else If (F6ITag='ILBM') Or (F6ITag='ANIM') Then Begin
+    If F6ITag='ANIM' Then Move(Pk^[Buf],F6IVideo0^,F6Min(BufEnd-Buf,F6IVideoSize));
+    If (F6IPix=F6I_PAL8) Or (F6IPix=F6I_GRAY8) Then Begin
+     For Y:=0 To F6IH-1 Do Begin
+      Row:=Y*F6IStride; FillChar(F6IFrame^[Row],F6IW,0);
+      Plane:=0;
+      While (Plane<F6IBpp) And (Buf<BufEnd) Do Begin
+       F6IPlane8(F6IFrame,Row,Pk,Buf,F6Min(F6IPlane,BufEnd-Buf),Plane);
+       Inc(Buf,F6IPlane); Inc(Plane);
+      End;
+     End;
+    End Else If F6IHam<>0 Then Begin
+     For Y:=0 To F6IH-1 Do Begin
+      FillChar(F6IHamBuf^,F6IPlane*8,0);
+      Plane:=0;
+      While (Plane<F6IBpp) And (Buf<BufEnd) Do Begin
+       F6IPlane8(F6IHamBuf,0,Pk,Buf,F6Min(F6IPlane,BufEnd-Buf),Plane);
+       Inc(Buf,F6IPlane); Inc(Plane);
+      End;
+      F6IHamLine(Y*F6IStride,F6IHamBuf,F6IHamPal,F6IPlane);
+     End;
+    End Else Begin
+     For Y:=0 To F6IH-1 Do Begin
+      Row:=Y*F6IStride; FillChar(F6IFrame^[Row],F6IW*4,0);
+      Plane:=0;
+      While (Plane<F6IBpp) And (Buf<BufEnd) Do Begin
+       F6IPlane32F(Row,Pk,Buf,F6Min(F6IPlane,BufEnd-Buf),Plane);
+       Inc(Buf,F6IPlane); Inc(Plane);
+      End;
+     End;
+    End;
+   End Else If F6ITag='PBM ' Then Begin
+    If (F6IPix=F6I_PAL8) Or (F6IPix=F6I_GRAY8) Then Begin
+     Y:=0;
+     While (Y<F6IH) And (BufEnd>Buf) Do Begin
+      Move(Pk^[Buf],F6IFrame^[Y*F6IStride],F6Min(F6IW,BufEnd-Buf));
+      Inc(Buf,F6IW+(F6IW Mod 2)); Inc(Y);
+     End;
+    End Else If F6IHam<>0 Then Begin
+     Y:=0;
+     While (Y<F6IH) And (BufEnd>Buf) Do Begin
+      Move(Pk^[Buf],F6IHamBuf^,F6Min(F6IW,BufEnd-Buf));
+      Inc(Buf,F6IW+(F6IW And 1));
+      F6IHamLine(Y*F6IStride,F6IHamBuf,F6IHamPal,F6IPlane);
+      Inc(Y);
+     End;
+    End Else Exit;
+   End Else Exit;
+  End;
+  1: Begin
+   If (F6ITag='ILBM') Or (F6ITag='ANIM') Then Begin
+    If (F6IPix=F6I_PAL8) Or (F6IPix=F6I_GRAY8) Then Begin
+     VP:=0;
+     For Y:=0 To F6IH-1 Do Begin
+      Row:=Y*F6IStride; FillChar(F6IFrame^[Row],F6IW,0);
+      For Plane:=0 To F6IBpp-1 Do Begin
+       F6IByteRun(F6IPlaneBuf,0,F6IPlane,G);
+       If F6ITag='ANIM' Then Begin Move(F6IPlaneBuf^,F6IVideo0^[VP],F6IPlane); Inc(VP,F6IPlane); End;
+       F6IPlane8(F6IFrame,Row,F6IPlaneBuf,0,F6IPlane,Plane);
+      End;
+     End;
+    End Else If F6IBpc<=8 Then Begin
+     For Y:=0 To F6IH-1 Do Begin
+      Row:=Y*F6IStride;
+      FillChar(F6IMaskBuf^,F6IW*4,0);
+      For Plane:=0 To F6IBpp-1 Do Begin
+       F6IByteRun(F6IPlaneBuf,0,F6IPlane,G);
+       F6IPlane32W(F6IMaskBuf,F6IPlaneBuf,0,F6IPlane,Plane);
+      End;
+      For I:=0 To F6IW-1 Do F6IPut32(Row+I*4,F6IMaskPal^[F6IMaskBuf^[I]]);
+     End;
+    End Else If F6IHam<>0 Then Begin
+     VP:=0;
+     For Y:=0 To F6IH-1 Do Begin
+      FillChar(F6IHamBuf^,F6IPlane*8,0);
+      For Plane:=0 To F6IBpp-1 Do Begin
+       F6IByteRun(F6IPlaneBuf,0,F6IPlane,G);
+       If F6ITag='ANIM' Then Begin Move(F6IPlaneBuf^,F6IVideo0^[VP],F6IPlane); Inc(VP,F6IPlane); End;
+       F6IPlane8(F6IHamBuf,0,F6IPlaneBuf,0,F6IPlane,Plane);
+      End;
+      F6IHamLine(Y*F6IStride,F6IHamBuf,F6IHamPal,F6IPlane);
+     End;
+    End Else Begin
+     For Y:=0 To F6IH-1 Do Begin
+      Row:=Y*F6IStride; FillChar(F6IFrame^[Row],F6IW*4,0);
+      For Plane:=0 To F6IBpp-1 Do Begin
+       F6IByteRun(F6IPlaneBuf,0,F6IPlane,G);
+       F6IPlane32F(Row,F6IPlaneBuf,0,F6IPlane,Plane);
+      End;
+     End;
+    End;
+   End Else If F6ITag='PBM ' Then Begin
+    If (F6IPix=F6I_PAL8) Or (F6IPix=F6I_GRAY8) Then Begin
+     For Y:=0 To F6IH-1 Do F6IByteRun(F6IFrame,Y*F6IStride,F6IW,G);
+    End Else If F6IHam<>0 Then Begin
+     For Y:=0 To F6IH-1 Do Begin
+      F6IByteRun(F6IHamBuf,0,F6IW,G);
+      F6IHamLine(Y*F6IStride,F6IHamBuf,F6IHamPal,F6IPlane);
+     End;
+    End Else Exit;
+   End Else If F6ITag='DEEP' Then Begin
+    If BytesPp=4 Then F6IDeepRle32(PEABuffer(@Pk^[Buf]),PkLen-Buf) Else Exit;
+   End Else If F6ITag='ACBM' Then Begin
+    If (F6IPix=F6I_PAL8) Or (F6IPix=F6I_GRAY8) Then Begin
+     For Plane:=0 To F6IBpp-1 Do Begin
+      Y:=0;
+      While (Y<F6IH) And (Buf<BufEnd) Do Begin
+       F6IPlane8(F6IFrame,Y*F6IStride,Pk,Buf,F6Min(F6IPlane,BufEnd-Buf),Plane);
+       Inc(Buf,F6IPlane); Inc(Y);
+      End;
+     End;
+    End Else If F6IHam<>0 Then Begin
+     For Y:=0 To F6IH-1 Do Begin
+      FillChar(F6IHamBuf^,F6IPlane*8,0);
+      For Plane:=0 To F6IBpp-1 Do Begin
+       Start:=Buf+(Plane*F6IH+Y)*F6IPlane;
+       If Start>=BufEnd Then Break;
+       F6IPlane8(F6IHamBuf,0,Pk,Start,F6Min(F6IPlane,BufEnd-Start),Plane);
+      End;
+      F6IHamLine(Y*F6IStride,F6IHamBuf,F6IHamPal,F6IPlane);
+     End;
+    End Else Exit;
+   End Else Exit;
+  End;
+  2: Begin
+   If (F6ITag='ILBM') And (F6IPix=F6I_PAL8) Then Begin
+    For Plane:=0 To F6IBpp-1 Do Begin
+     F6IByteRun2(F6IPlaneBuf,F6IH,F6IPlane,G);
+     For Y:=0 To F6IH-1 Do F6IPlane8(F6IFrame,Y*F6IStride,F6IPlaneBuf,F6IPlane*Y,F6IPlane,Plane);
+    End;
+   End Else Exit;
+  End;
+  4: Begin
+   If (F6ITag='RGB8') And (F6IPix=F6I_RGB32) Then F6IRgbX(G,True)
+   Else If (F6ITag='RGBN') And (F6IPix=F6I_RGB444) Then F6IRgbX(G,False)
+   Else Exit;
+  End;
+  5: Begin
+   If (F6ITag='DEEP') And (BytesPp=4) Then F6IDeepTvdc32(PEABuffer(@Pk^[Buf]),PkLen-Buf) Else Exit;
+  End;
+  $300,$301: F6IShortHDelta(F6IVideo0,DP,DL,F6IW,F6IBpp,F6IVideoSize);
+  $500,$501: F6IByteVDelta(F6IVideo0,DP,DL,F6IW,Ord(F6IBrush),F6IBpp,F6IVideoSize);
+  $700,$701: Begin
+   if F6IShort Then F6IShortVDelta(F6IVideo0,DP,DL,F6IW,F6IBpp,F6IVideoSize) Else F6ILongVDelta(F6IVideo0,DP,DL,F6IW,F6IBpp,F6IVideoSize);
+  End;
+  $800,$801: Begin
+   If F6IShort Then F6IShortVDelta2(F6IVideo0,DP,DL,F6IW,F6IBpp,F6IVideoSize) Else F6ILongVDelta2(F6IVideo0,DP,DL,F6IW,F6IBpp,F6IVideoSize);
+  End;
+  $4A00,$4A01: F6IDeltaJ(F6IVideo0,DP,DL,F6IW,F6IH,F6IBpp,F6IVideoSize);
+  $6400,$6401: Begin If F6IInterl Then Exit; F6IDeltaD(F6IVideo0,DP,DL,F6IW,F6IBpp,F6IVideoSize); End;
+  $6500,$6501: Begin If F6IInterl Then Exit; F6IDeltaE(F6IVideo0,DP,DL,F6IW,F6IBpp,F6IVideoSize); End;
+  $6C00,$6C01: F6IDeltaL(F6IVideo0,DP,DL,F6IW,Ord(F6IShort),F6IBpp,F6IVideoSize);
+ Else Exit;
+ End;
+ { Note: pour les deltas, les arguments de F6IDeltaL/Short suivent la signature C (buf, buf_end - buf) }
+ If (F6IComp<=$FF) And (F6ITag='ANIM') Then Move(F6IVideo0^,F6IVideo1^,F6IVideoSize);
+ If F6IComp>$FF Then Begin
+  If (F6IPix=F6I_PAL8) Or (F6IPix=F6I_GRAY8) Then Begin
+   VP:=0;
+   For Y:=0 To F6IH-1 Do Begin
+    Row:=Y*F6IStride; FillChar(F6IFrame^[Row],F6IW,0);
+    For Plane:=0 To F6IBpp-1 Do Begin F6IPlane8(F6IFrame,Row,F6IVideo0,VP,F6IPlane,Plane); Inc(VP,F6IPlane); End;
+   End;
+   If F6IPix=F6I_PAL8 Then For I:=0 To 255 Do F6IFramePal[I]:=F6IAnimPal^[I];
+  End Else If F6IHam<>0 Then Begin
+   VP:=0;
+   F6IRebuildHamPal;
+   For Y:=0 To F6IH-1 Do Begin
+    FillChar(F6IHamBuf^,F6IPlane*8,0);
+    For Plane:=0 To F6IBpp-1 Do Begin F6IPlane8(F6IHamBuf,0,F6IVideo0,VP,F6IPlane,Plane); Inc(VP,F6IPlane); End;
+    F6IHamLine(Y*F6IStride,F6IHamBuf,F6IHamPal,F6IPlane);
+   End;
+  End Else Exit;
+  If Not F6IBrush Then Begin
+   Tmp2:=F6IVideo0; F6IVideo0:=F6IVideo1; F6IVideo1:=Tmp2;
+  End;
+ End;
+ F6IDecodeFrame:=True;
+End;
+
+{ ---- IFF : demuxeur et pilotes ---- }
+Var
+ F6IKind: Integer; { 0 inconnu, 1 audio, 2 video }
+ F6ISvxComp,F6IMaudBits,F6IMaudComp,F6IBodyPos,F6IBodyEnd,F6IBodyAll: Int64;
+ F6IRate,F6IChans,F6IBmhdComp: LongInt; F6ISarN,F6ISarD: LongInt; F6IDur: LongInt; F6IIs64: Boolean;
+ F6IScreen: Int64; F6IHaveTvdc: Boolean; F6IDsdCodec: LongInt; F6IDsdRate: LongInt;
+
+Function F6NRB16: LongInt;
+Var A: LongInt;
+Begin A:=F6NR8; F6NRB16:=A*256+F6NR8; End;
+Function F6NRB32: Int64;
+Var A,B: Int64;
+Begin A:=F6NRB16; B:=F6NRB16; F6NRB32:=A*65536+B; End;
+Function F6NRB64: Int64;
+Var A,B: Int64;
+Begin A:=F6NRB32; B:=F6NRB32; If A>=2147483648 Then F6NRB64:=High(Int64) Else F6NRB64:=A*4294967296+B; End;
+
+
+{ parse_dsd_prop : sous-blocs de PROP/SND ; EndPos = fin du bloc PROP }
+Procedure F6IDsdProp(EndPos: Int64);
+Var Id: String; Sz,O2: Int64; Cfg,Nc,I: LongInt; T4: String;
+Begin
+ While (F6NP+12<=EndPos) And Not F6NEof Do Begin
+  Id:=F6NTag; Sz:=F6NRB64; O2:=F6NP;
+  If Sz<0 Then Sz:=High(Int64) Div 4;
+  If Id='CHNL' Then Begin
+   If Sz<2 Then Fail('iff: CHNL invalide.');
+   Nc:=F6NRB16;
+   If Sz<2+Nc*4 Then Fail('iff: CHNL invalide.');
+   F6IChans:=Nc;
+  End Else If Id='CMPR' Then Begin
+   If Sz<4 Then Fail('iff: CMPR invalide.');
+   T4:=F6NTag;
+   If T4='DSD ' Then F6IDsdCodec:=1 Else If T4='DST ' Then F6IDsdCodec:=2
+   Else Fail('iff: compression DSIFF non prise en charge.');
+  End Else If Id='FS  ' Then Begin
+   If Sz<4 Then Fail('iff: FS invalide.');
+   F6IDsdRate:=F6NRB32 Div 8;
+  End Else If Id='LSCO' Then Begin
+   If Sz<2 Then Fail('iff: LSCO invalide.');
+   Cfg:=F6NRB16;
+   If Cfg<>$FFFF Then Begin
+    Case Cfg Of 0: F6IChans:=2; 3: F6IChans:=5; 4: F6IChans:=6; 1,2: F6IChans:=0; End;
+   End;
+  End;
+  O2:=O2+Sz+(Sz And 1); If O2>F6NSz+1 Then O2:=F6NSz+1;
+  F6NP:=O2;
+ End;
+End;
+
+{ iff_read_header ; Tag = codec_tag ; la fonction echoue par Fail }
+Procedure F6IffHeader(F: PEABuffer; Size: LongInt);
+Var Id: String; Sz,Orig,Num,Den: Int64; I: LongInt; Masking,Transp: LongInt; Fmt: Array[0..15] Of Byte; FmtN: LongInt;
+ CmapSz: LongInt; Ver: LongInt;
+ DR24,DRA,DBA,DAR,DAB: Boolean;
+Const
+ DeepRgb24: Array[0..15] Of Byte=(0,0,0,3,0,1,0,8,0,2,0,8,0,3,0,8);
+ DeepRgba: Array[0..15] Of Byte=(0,0,0,4,0,1,0,8,0,2,0,8,0,3,0,8);
+ DeepBgra: Array[0..15] Of Byte=(0,0,0,4,0,3,0,8,0,2,0,8,0,1,0,8);
+ DeepArgb: Array[0..15] Of Byte=(0,0,0,4,0,17,0,8,0,1,0,8,0,2,0,8);
+ DeepAbgr: Array[0..15] Of Byte=(0,0,0,4,0,17,0,8,0,3,0,8,0,2,0,8);
+Begin
+ F6NF:=F; F6NSz:=Size; F6NP:=0; F6NEof:=False;
+ F6IKind:=0; F6IChans:=1; F6IRate:=0; F6ISvxComp:=-1; F6IMaudBits:=-1; F6IMaudComp:=-1; F6IBmhdComp:=255;
+ F6IW:=0; F6IH:=0; F6IBpc:=0; F6IMasking:=0; F6ITransp:=0; F6IBodyPos:=0; F6IBodyEnd:=0; F6IBodyAll:=0; F6ISarN:=0; F6ISarD:=0; F6IDur:=0;
+ F6IExtra:=Nil; F6IExtraLen:=0; F6IPix:=F6I_NONE; F6IScreen:=0; FillChar(F6ITvdc,SizeOf(F6ITvdc),0);
+ Masking:=0; Transp:=0; CmapSz:=0;
+ If (Size<12) Then Fail('iff: fichier trop court.');
+ F6IIs64:=(F^[0]=70) And (F^[1]=82) And (F^[2]=77) And (F^[3]=56);
+ If F6IIs64 Then F6NP:=12 Else F6NP:=8;
+ F6IDsdCodec:=0; F6IDsdRate:=0;
+ If F6IIs64 Then Inc(F6NP,0);
+ F6ITag:=F6NTag;
+ If F6ITag='ANIM' Then Inc(F6NP,12);
+ While Not F6NEof Do Begin
+  Id:=F6NTag; If F6IIs64 Then Sz:=F6NRB64 Else Sz:=F6NRB32; Orig:=F6NP;
+  If Sz<0 Then Sz:=High(Int64) Div 4;
+  If Id='VHDR' Then Begin
+   F6IKind:=1;
+   If Sz<14 Then Fail('iff: VHDR trop court.');
+   Inc(F6NP,12); F6IRate:=F6NRB16;
+   If Sz>=16 Then Begin Inc(F6NP); F6ISvxComp:=F6NR8; End;
+  End Else If Id='MHDR' Then Begin
+   F6IKind:=1;
+   If Sz<32 Then Fail('iff: MHDR trop court.');
+   Inc(F6NP,4); F6IMaudBits:=F6NRB16; Inc(F6NP,2);
+   Num:=F6NRB32; Den:=F6NRB16;
+   If Den=0 Then Fail('iff: MHDR invalide.');
+   Inc(F6NP,2);
+   F6IRate:=Num div Den;
+   F6IChans:=F6NRB16; F6IMaudComp:=F6NRB16;
+  End Else If (Id='ABIT') Or (Id='BODY') Or (Id='DBOD') Or (Id='DSD ') Or (Id='DST ') Or (Id='MDAT') Then Begin
+   F6IBodyPos:=F6NP; F6IBodyEnd:=F6IBodyPos+Sz; F6IBodyAll:=Sz;
+   If Id='DST ' Then Fail('iff: DST non pris en charge.');
+  End Else If Id='PROP' Then Begin
+   If Sz<4 Then Fail('iff: PROP trop court.');
+   If F6NTag='SND ' Then F6IDsdProp(Orig+Sz);
+  End Else If Id='CHAN' Then Begin
+   If Sz<4 Then Fail('iff: CHAN trop court.');
+   If F6NRB32<6 Then F6IChans:=1 Else F6IChans:=2;
+  End Else If Id='CAMG' Then Begin
+   If Sz<4 Then Fail('iff: CAMG trop court.');
+   F6IScreen:=F6NRB32;
+  End Else If Id='CMAP' Then Begin
+   If (Sz<3) Or (Sz>768) Or ((Sz Mod 3)<>0) Then Fail('iff: CMAP invalide.');
+   If F6IExtra<>Nil Then FreeMem(F6IExtra);
+   F6IExtraLen:=41+Sz; GetMem(F6IExtra,F6IExtraLen+64); FillChar(F6IExtra^,F6IExtraLen+64,0);
+   CmapSz:=Sz;
+   If F6NP+Sz>F6NSz Then Fail('iff: CMAP tronque.');
+   Move(F^[F6NP],F6IExtra^[41],Sz);
+  End Else If Id='BMHD' Then Begin
+   F6IKind:=2;
+   If Sz<=8 Then Fail('iff: BMHD invalide.');
+   F6IW:=F6NRB16; F6IH:=F6NRB16; Inc(F6NP,4); F6IBpc:=F6NR8;
+   If Sz>=10 Then Masking:=F6NR8;
+   If Sz>=11 Then F6IBmhdComp:=F6NR8;
+   If Sz>=14 Then Begin Inc(F6NP); Transp:=F6NRB16; End;
+   If Sz>=16 Then Begin F6ISarN:=F6NR8; F6ISarD:=F6NR8; End;
+  End Else If Id='DPAN' Then Begin
+   Inc(F6NP,2); F6IDur:=F6NRB16;
+  End Else If Id='DPEL' Then Begin
+   If (Sz<4) Or ((Sz And 3)<>0) Then Fail('iff: DPEL invalide.');
+   FmtN:=0;
+   For I:=0 To 15 Do If F6NP<F6NSz Then Begin Fmt[I]:=F^[F6NP]; Inc(F6NP); Inc(FmtN); End;
+   DR24:=(FmtN=16) And (CompareByte(Fmt,DeepRgb24,16)=0);
+   DRA:=(FmtN=16) And (CompareByte(Fmt,DeepRgba,16)=0);
+   DBA:=(FmtN=16) And (CompareByte(Fmt,DeepBgra,16)=0);
+   DAR:=(FmtN=16) And (CompareByte(Fmt,DeepArgb,16)=0);
+   DAB:=(FmtN=16) And (CompareByte(Fmt,DeepAbgr,16)=0);
+   If DR24 Then F6IPix:=F6I_RGB24 Else If DRA Then F6IPix:=F6I_RGBA Else If DBA Then F6IPix:=F6I_BGRA
+   Else If DAR Then F6IPix:=F6I_ARGB Else If DAB Then F6IPix:=F6I_ABGR
+   Else Fail('iff: format de couleur DEEP non pris en charge.');
+  End Else If Id='DGBL' Then Begin
+   F6IKind:=2;
+   If Sz<8 Then Fail('iff: DGBL trop court.');
+   F6IW:=F6NRB16; F6IH:=F6NRB16; F6IBmhdComp:=F6NRB16 And 255;
+   F6ISarN:=F6NR8; F6ISarD:=F6NR8; F6IBpc:=24;
+  End Else If Id='DLOC' Then Begin
+   If Sz<4 Then Fail('iff: DLOC trop court.');
+   F6IW:=F6NRB16; F6IH:=F6NRB16;
+  End Else If Id='TVDC' Then Begin
+   If Sz<32 Then Fail('iff: TVDC trop court.');
+   For I:=0 To 15 Do F6ITvdc[I]:=F6S16(F6NRB16);
+  End Else If Id='FVER' Then Begin
+   If Sz<4 Then Fail('iff: FVER trop court.');
+   F6IKind:=1;
+  End;
+  Orig:=Orig+Sz+(Sz And 1); If Orig>Size+1 Then Orig:=Size+1; F6NP:=Orig;
+ End;
+ Masking:=Masking And 255;
+ F6IMasking:=Masking; F6ITransp:=Transp;
+End;
+
+{ preparation du contexte video : ham, flags, extradata virtuelle }
+Procedure F6IffVideoSetup;
+Var Bpp0: LongInt;
+Begin
+ F6IHam:=0; F6IFlags:=0;
+ Bpp0:=F6IBpc;
+ If ((F6IScreen And $800)<>0) And (Bpp0<=8) Then Begin
+  If Bpp0>6 Then F6IHam:=6 Else F6IHam:=4;
+  F6IBpc:=24;
+ End;
+ If ((F6IScreen And $80)<>0) And (Bpp0<=8) Then F6IFlags:=1;
+ If F6IExtra=Nil Then Begin F6IExtraLen:=41; GetMem(F6IExtra,F6IExtraLen+64); FillChar(F6IExtra^,F6IExtraLen+64,0); End;
+ F6IComp:=F6IBmhdComp;
+ F6IBppHdr:=Bpp0;
+End;
+
+{ ---- sortie d'une image decodee vers le pipeline NV ---- }
+Procedure F6IEmitFrame(Out2: PEABuffer);
+Var X,Y,I: LongInt; Src,Dst: LongInt; V: LongWord; R,G,B,A: LongWord;
+Begin
+ Case F6IPix Of
+  F6I_PAL8: For Y:=0 To F6IH-1 Do Move(F6IFrame^[Y*F6IStride],Out2^[Y*F6IW],F6IW);
+  F6I_GRAY8: For Y:=0 To F6IH-1 Do Move(F6IFrame^[Y*F6IStride],Out2^[Y*F6IW],F6IW);
+  F6I_RGB444: For Y:=0 To F6IH-1 Do Move(F6IFrame^[Y*F6IStride],Out2^[Y*F6IW*2],F6IW*2);
+  F6I_RGB24: For Y:=0 To F6IH-1 Do Move(F6IFrame^[Y*F6IStride],Out2^[Y*F6IW*3],F6IW*3);
+  F6I_RGB32: For Y:=0 To F6IH-1 Do Move(F6IFrame^[Y*F6IStride],Out2^[Y*F6IW*4],F6IW*4);
+ Else
+  For Y:=0 To F6IH-1 Do For X:=0 To F6IW-1 Do Begin
+   Src:=Y*F6IStride+X*4; Dst:=(Y*F6IW+X)*4;
+   Case F6IPix Of
+    F6I_BGR32,F6I_0BGR32,F6I_RGBA: Begin R:=F6IFrame^[Src]; G:=F6IFrame^[Src+1]; B:=F6IFrame^[Src+2]; A:=F6IFrame^[Src+3]; End;
+    F6I_BGRA: Begin B:=F6IFrame^[Src]; G:=F6IFrame^[Src+1]; R:=F6IFrame^[Src+2]; A:=F6IFrame^[Src+3]; End;
+    F6I_ARGB: Begin A:=F6IFrame^[Src]; R:=F6IFrame^[Src+1]; G:=F6IFrame^[Src+2]; B:=F6IFrame^[Src+3]; End;
+    Else Begin A:=F6IFrame^[Src]; B:=F6IFrame^[Src+1]; G:=F6IFrame^[Src+2]; R:=F6IFrame^[Src+3]; End;
+   End;
+   If F6IPix=F6I_0BGR32 Then A:=255;
+   Out2^[Dst]:=B; Out2^[Dst+1]:=G; Out2^[Dst+2]:=R; Out2^[Dst+3]:=A;
+  End;
+ End;
+End;
+
+Function F6INvFmt: LongInt;
+Begin
+ Case F6IPix Of
+  F6I_PAL8: F6INvFmt:=0; F6I_GRAY8: F6INvFmt:=4; F6I_RGB444: F6INvFmt:=6; F6I_RGB24: F6INvFmt:=9;
+ Else F6INvFmt:=3;
+ End;
+End;
+
+Procedure F6IffVideo(Const Source,Target: String; Mode: LongInt);
+Var
+ F: PEABuffer; Size,N,I,Pos,Hdr,PkLen: LongInt; Out2: PEABuffer; Sz,Orig,Sz2: Int64; Id1,Id2: String; Begun: Boolean; Rn,Rd: LongInt;
+ PkPos,PkSz: PF6NInts; Dur: PF6NInts; NPk: LongInt; Pts,PtsAcc,D2,NbF,NbP: Int64; Ok: Boolean; Pk: PEABuffer;
+Begin
+ NVLoad(Source,F,Size);
+ F6IffHeader(F,Size);
+ If F6IKind<>2 Then Fail('iff: pas de flux video (audio 8SVX/16SV/MAUD seulement).');
+ F6IffVideoSetup;
+ { liste des paquets }
+ GetMem(PkPos,(Size Div 8+4)*4); GetMem(PkSz,(Size Div 8+4)*4); GetMem(Dur,(Size Div 8+4)*4); NPk:=0;
+ If F6ITag<>'ANIM' Then Begin
+  If (F6IBodyAll<=0) Or (F6IBodyAll>2147483647) Then Fail('iff: BODY absent ou vide.');
+  If F6IBodyPos>=Size Then Fail('iff: BODY hors fichier.');
+  PkPos^[0]:=F6IBodyPos; PkSz^[0]:=F6Min(F6IBodyAll,Size-F6IBodyPos); NPk:=1;
+ End Else Begin
+  F6NF:=F; F6NSz:=Size; F6NP:=12; F6NEof:=False; Orig:=0; Sz:=0;
+  While Not F6NEof Do Begin
+   While Not F6NEof Do Begin
+    Orig:=F6NP; Id1:=F6NTag; Sz:=F6NRB32; Id2:=F6NTag;
+    If F6NEof Then Break;
+    If (Id1='FORM') And (Id2='ILBM') Then Begin Dec(F6NP,4); Break; End
+    Else If (Id1='FORM') And (Id2='ANIM') Then Continue
+    Else Begin Sz2:=F6NP+Sz; If Sz2>Size+1 Then Sz2:=Size+1; F6NP:=Sz2; End;
+   End;
+   If F6NEof Then Break;
+   If F6NP+Sz>Size Then Sz2:=Size-F6NP Else Sz2:=Sz;
+   If Sz2<=0 Then Break;
+   PkPos^[NPk]:=F6NP; PkSz^[NPk]:=Sz2; Inc(F6NP,Sz2); Inc(NPk);
+   If NPk>=Size Div 8 Then Break;
+  End;
+  If NPk=0 Then Fail('iff: aucune image ANIM.');
+ End;
+ If Not F6IInitDecoder Then Fail('iff: parametres de bitmap non pris en charge.');
+ { duree ANIM : get_anim_duration }
+ For I:=0 To NPk-1 Do Begin
+  Dur^[I]:=10;
+  If F6ITag='ANIM' Then Begin
+   Pos:=PkPos^[I]+4; N:=PkPos^[I]+PkSz^[I];
+   While N-Pos>8 Do Begin
+    Id1:=''; For Hdr:=0 To 3 Do Id1:=Id1+Chr(F^[Pos+Hdr]);
+    Sz:=Int64(F^[Pos+4])*16777216+F^[Pos+5]*65536+F^[Pos+6]*256+F^[Pos+7];
+    Inc(Pos,8);
+    If Id1='ANHD' Then Begin
+     If Sz<40 Then Break;
+     Inc(Pos,14);
+     Dur^[I]:=Int64(F^[Pos])*16777216+F^[Pos+1]*65536+F^[Pos+2]*256+F^[Pos+3];
+     Break;
+    End;
+   End;
+  End;
+ End;
+ GetMem(F6IFrame,F6IStride*F6IH+64);
+ GetMem(Out2,F6IW*F6IH*4+64); GetMem(NVPad,F6IH*4+16);
+ Rn:=90000; Rd:=1;
+ If F6ISarD>0 Then Begin NVSarN:=F6ISarN; NVSarD:=F6ISarD; End;
+ NVBegin(Mode,Target,F6IW,F6IH,F6INvFmt,Rn,Rd);
+ If F6ISarD>0 Then Begin NVSarN:=F6ISarN; NVSarD:=F6ISarD; End;
+ NVHasAlpha:=F6IPix In [F6I_RGB32,F6I_RGBA,F6I_BGRA,F6I_ARGB,F6I_ABGR,F6I_BGR32];
+ Begun:=False; PtsAcc:=0;
+ If F6ITag='ANIM' Then Begin
+  Rn:=60; Rd:=1; NVFpsN:=60; NVFpsD:=1;
+  CFTbN:=1; CFTbD:=60; CFFn:=60; CFFd:=1; CFNext:=0; CFFrameNo:=0; CFHist[0]:=0; CFHist[1]:=0; CFHist[2]:=0; CFLastDropped:=False; CFVscfr:=False;
+ End;
+ For I:=0 To NPk-1 Do Begin
+  Pk:=PEABuffer(@F^[PkPos^[I]]); PkLen:=PkSz^[I];
+  Pts:=PtsAcc; Inc(PtsAcc,Dur^[I]);
+  Ok:=F6IDecodeFrame(Pk,PkLen);
+  If Ok Then Begin
+   If F6INvFmt=0 Then Begin
+    NVPalAOn:=True;
+    For N:=0 To 255 Do Begin
+     NVPalA[N]:=F6IFramePal[N] Shr 24; NVPalR[N]:=(F6IFramePal[N] Shr 16) And 255; NVPalG[N]:=(F6IFramePal[N] Shr 8) And 255; NVPalB[N]:=F6IFramePal[N] And 255;
+    End;
+   End;
+   F6IEmitFrame(Out2);
+   { colonne de bourrage lue par swscale (largeur impaire): pixel decode au-dela de la largeur }
+   If Odd(F6IW) And (F6IPix In [F6I_BGR32,F6I_0BGR32]) Then Begin
+    For N:=0 To F6IH-1 Do Begin
+     NVPad^[N*4]:=F6IFrame^[N*F6IStride+F6IW*4+2]; NVPad^[N*4+1]:=F6IFrame^[N*F6IStride+F6IW*4+1];
+     NVPad^[N*4+2]:=F6IFrame^[N*F6IStride+F6IW*4]; NVPad^[N*4+3]:=255;
+    End;
+    NVPadOn:=True;
+   End;
+   If F6ITag='ANIM' Then Begin
+    D2:=Dur^[I]; If D2<1 Then D2:=1;
+    CFSync(Pts,D2,NbF,NbP);
+    NVEmitN(Out2,NbP,NbF);
+    Inc(CFNext,NbF); Inc(CFFrameNo,NbF);
+   End Else NVEmit(Out2);
+   NVPadOn:=False;
+   Begun:=True;
+  End;
+  If NVDone Then Break;
+ End;
+ If (F6ITag='ANIM') And Not NVDone Then CFFlush(Out2);
+ FreeMem(Out2); FreeMem(NVPad);
+ NVFinish('iff');
+End;
+
+{ ---- IFF audio : 8SVX (pcm, fibonacci, exponentiel), 16SV, MAUD, DSD ---- }
+Type TF6SArr=Array[0..100000000] Of Single; PF6SArr=^TF6SArr;
+Var F6DsdCT: Array[0..5,0..255] Of Single; F6DsdInit: Boolean;
+Procedure F6DsdTables;
+Type TQD=Record Case Byte Of 0:(Q:QWord); 1:(D:Double); End;
+Const
+ F6DsdH: Array[0..47] Of QWord=(
+  $3FB9794FCBFF93C7, $3FB87B1B489280D3, $3FB6940B3FB4DD9C, $3FB3EC5FA5D4E3B7,
+  $3FB0BAB25981128A, $3FAA7BDE6289C8E0, $3FA36D4215C3F638, $3F9981CD05B58654,
+  $3F8B65A64031B5D2, $3F6FCF550FC44E0D, $BF6AE885B7FD6A71, $BF808C60D34183E4,
+  $BF85DB6BB684D9C9, $BF8755E158D70C68, $BF85E01F9A20B962, $BF8272BC8DC00BCA,
+  $BF7BF894157B0209, $BF72937C45825E74, $BF63DDAB4458598A, $BF46AEC05B3F9E51,
+  $3F42AE2558A63A87, $3F562E687D3ACE02, $3F5C13D135ACE606, $3F5C8AAC8D086147,
+  $3F5952B921F99E85, $3F5419230ADC4891, $3F4C85B71020238E, $3F41A27192F28CBD,
+  $3F31763A56F9380E, $3F125B9CDE45ADA0, $BF0BADE67379686E, $BF1DE69BF26E361F,
+  $BF211A2B8A35FAB1, $BF1F31C1631F315D, $BF18A1B6F82FD509, $BF113E2CFB496C17,
+  $BF055D46EDCC6237, $BEF6CC001BAF0599, $BEE337613AE9FAB4, $BEC0EC7671AB36FC,
+  $3EB4F783B617B27D, $3EC22CDB49A5F4D6, $3EC031C315B271DB, $3EB622C80263D795,
+  $3EA8DD2CFA0D855A, $3E96F910B33A3136, $3E80B2FA3FEF6BA5, $3E60CE7202E7A375);
+Var E,M,T,Sign: LongInt; Acc: Array[0..5] Of Double; V: TQD; H: Array[0..47] Of Double;
+Begin
+ For T:=0 To 47 Do Begin V.Q:=F6DsdH[T]; H[T]:=V.D; End;
+ For E:=0 To 255 Do Begin
+  For T:=0 To 5 Do Acc[T]:=0;
+  For M:=0 To 7 Do Begin
+   Sign:=((E Shr (7-M)) And 1)*2-1;
+   For T:=0 To 5 Do Acc[T]:=Acc[T]+Sign*H[T*8+M];
+  End;
+  For T:=0 To 5 Do F6DsdCT[5-T,E]:=Acc[T];
+ End;
+ F6DsdInit:=True;
+End;
+Function F6Rev8(B: LongInt): LongInt;
+Var I,R: LongInt;
+Begin R:=0; For I:=0 To 7 Do If (B And (1 Shl I))<>0 Then R:=R Or (1 Shl (7-I)); F6Rev8:=R; End;
+
+Procedure F6DsdHeader(Rate,Ch,DataSize: LongInt);
+Var H: Array[0..67] Of Byte; I: LongInt;
+Procedure P32(At: LongInt; V: LongInt);
+Var K: LongInt;
+Begin For K:=0 To 3 Do Begin H[At+K]:=V And 255; V:=V Shr 8; End; End;
+Procedure P16(At: LongInt; V: LongInt);
+Begin H[At]:=V And 255; H[At+1]:=(V Shr 8) And 255; End;
+Const Guid: Array[0..15] Of Byte=(1,0,0,0,0,0,16,0,128,0,0,170,0,56,155,113);
+Begin
+ FillChar(H,SizeOf(H),0);
+ H[0]:=82; H[1]:=73; H[2]:=70; H[3]:=70; P32(4,60+DataSize);
+ H[8]:=87; H[9]:=65; H[10]:=86; H[11]:=69;
+ H[12]:=102; H[13]:=109; H[14]:=116; H[15]:=32; P32(16,40); P16(20,$FFFE);
+ P16(22,Ch); P32(24,Rate); P32(28,Rate*Ch*2); P16(32,Ch*2); P16(34,16);
+ P16(36,22); P16(38,16); If Ch=1 Then P32(40,4) Else P32(40,3);
+ For I:=0 To 15 Do H[44+I]:=Guid[I];
+ H[60]:=100; H[61]:=97; H[62]:=116; H[63]:=97; P32(64,DataSize);
+ WriteBytes(H,68);
+End;
+
+Procedure F6DsdAudio(Body: PEABuffer; BS: LongInt; Ch,Rate: LongInt; Const Target: String);
+Var Frames,C,I,J,Pos,P,A,B: LongInt; Buf: Array[0..15] Of Byte; Sum: Double; Fl: Single; Outp: Array[0..1] Of PF6SArr; V: Single; L: LongInt; Sp: Single;
+Begin
+ If Not F6DsdInit Then F6DsdTables;
+ Frames:=BS div Ch;
+ For C:=0 To Ch-1 Do Begin
+  GetMem(Outp[C],Int64(Frames+1)*4);
+  FillChar(Buf,SizeOf(Buf),$69); Pos:=0;
+  For I:=0 To Frames-1 Do Begin
+   Buf[Pos]:=Body^[I*Ch+C];
+   P:=(Pos-6) And 15; Buf[P]:=F6Rev8(Buf[P]);
+   Sum:=0.0;
+   For J:=0 To 5 Do Begin
+    A:=Buf[(Pos-J) And 15]; B:=Buf[(Pos-11+J) And 15];
+    Sp:=F6DsdCT[J,A]+F6DsdCT[J,B];
+    Sum:=Sum+Sp;
+   End;
+   Fl:=Sum; Outp[C]^[I]:=Fl;
+   Pos:=(Pos+1) And 15;
+  End;
+ End;
+ CloseRead; EAReset; OpenWrite(Target); F6DsdHeader(Rate,Ch,0);
+ For I:=0 To Frames-1 Do For C:=0 To Ch-1 Do Begin
+  V:=Outp[C]^[I]; V:=V*32768.0;
+  L:=Round(V); If L>32767 Then L:=32767; If L<-32768 Then L:=-32768;
+  EAPut(L);
+ End;
+ For C:=0 To Ch-1 Do FreeMem(Outp[C]);
+End;
+
+Function F6IAlaw(V: LongInt): LongInt;
+Var T,Seg: LongInt;
+Begin
+ V:=(V And 255) Xor $55; T:=V And $F; Seg:=(V And $70) Shr 4;
+ If Seg<>0 Then T:=(T+T+1+32) Shl (Seg+2) Else T:=(T+T+1) Shl 3;
+ If (V And $80)<>0 Then F6IAlaw:=T Else F6IAlaw:=-T;
+End;
+Function F6IUlaw(V: LongInt): LongInt;
+Var T: LongInt;
+Begin
+ V:=(Not V) And 255; T:=((V And $F) Shl 3)+$84; T:=T Shl ((V And $70) Shr 4);
+ If (V And $80)<>0 Then F6IUlaw:=$84-T Else F6IUlaw:=T-$84;
+End;
+
+Procedure F6IffAudio(Const Source,Target: String);
+Const
+ Fib: Array[0..15] Of ShortInt=(-34,-21,-13,-8,-5,-3,-2,-1,0,1,2,3,5,8,13,21);
+ Expo: Array[0..15] Of ShortInt=(-128,-64,-32,-16,-8,-4,-2,-1,0,1,2,4,8,16,32,64);
+Var
+ F: PEABuffer; Size,Ch,I,C,K,N,ChanSize,Bytes,Mode,PS,Pos,Frames,Rate: LongInt; Acc: Array[0..1] Of LongInt; V,D: LongInt; Body: PEABuffer; BS: LongInt;
+ Cd: Array[0..1] Of PEABuffer; Out8: Array[0..1] Of LongInt;
+Begin
+ NVLoad(Source,F,Size);
+ F6IffHeader(F,Size);
+ If F6IKind<>1 Then Fail('iff: pas de flux audio.');
+ Ch:=F6IChans; Rate:=F6IRate;
+ If F6ITag='DSD ' Then Begin Rate:=F6IDsdRate; End;
+ If (Ch<1) Or (Ch>2) Then Fail('iff: audio mono ou stereo requis.');
+ If Rate<1 Then Fail('iff: frequence invalide.');
+ If F6IBodyAll<=0 Then Fail('iff: BODY absent.');
+ If F6IBodyPos>=Size Then Fail('iff: BODY hors fichier.');
+ BS:=F6Min(F6IBodyAll,Size-F6IBodyPos);
+ Body:=PEABuffer(@F^[F6IBodyPos]);
+ If F6ITag='DSD ' Then Begin
+  If F6IDsdCodec<>1 Then Fail('iff: DSD/DST: compression DSD non compresse requise.');
+  F6DsdAudio(Body,BS,Ch,Rate,Target);
+  EAFlush; {$I-}Seek(ActiveOutput,0);{$I+} If IOResult<>0 Then Fail('iff: positionnement impossible.'); F6DsdHeader(Rate,Ch,EAWritten); CloseWrite; Exit;
+ End;
+ CloseRead;
+ EAReset; OpenWrite(Target); ADPCMWaveHeader(Rate,Ch,0);
+ If F6ITag='16SV' Then Begin
+  N:=BS div (2*Ch);
+  For I:=0 To N-1 Do For C:=0 To Ch-1 Do Begin
+   V:=Body^[(C*N+I)*2]*256+Body^[(C*N+I)*2+1]; If V>=32768 Then Dec(V,65536);
+   EAPut(V);
+  End;
+ End Else If F6ITag='MAUD' Then Begin
+  If (F6IMaudBits=8) And (F6IMaudComp=0) Then Mode:=0
+  Else If (F6IMaudBits=16) And (F6IMaudComp=0) Then Mode:=1
+  Else If (F6IMaudBits=8) And (F6IMaudComp=2) Then Mode:=2
+  Else If (F6IMaudBits=8) And (F6IMaudComp=3) Then Mode:=3
+  Else Fail('iff: MAUD, compression ou profondeur non pris en charge.');
+  If Mode=1 Then Bytes:=2 Else Bytes:=1;
+  PS:=1024*Ch*Bytes*8;
+  Pos:=0;
+  While Pos<BS Do Begin
+   N:=F6Min(PS,BS-Pos);
+   Frames:=N div (Ch*Bytes);
+   For I:=0 To Frames*Ch-1 Do Begin
+    Case Mode Of
+     0: V:=(Body^[Pos+I]-128)*256;
+     1: Begin V:=Body^[Pos+I*2]*256+Body^[Pos+I*2+1]; If V>=32768 Then Dec(V,65536); End;
+     2: V:=F6IAlaw(Body^[Pos+I]);
+     Else V:=F6IUlaw(Body^[Pos+I]);
+    End;
+    EAPut(V);
+   End;
+   Inc(Pos,N);
+  End;
+ End Else Begin
+  If F6ISvxComp=0 Then Begin
+   N:=BS div Ch;
+   For I:=0 To N-1 Do For C:=0 To Ch-1 Do EAPut(ShortInt(Body^[C*N+I])*256);
+  End Else If (F6ISvxComp=1) Or (F6ISvxComp=2) Then Begin
+   If BS<3*Ch Then Fail('iff: paquet 8SVX trop petit.');
+   ChanSize:=BS div Ch-2;
+   Acc[0]:=(Body^[1]+128) And 255;
+   If Ch=2 Then Acc[1]:=(Body^[2+ChanSize+1]+128) And 255;
+   Cd[0]:=PEABuffer(@Body^[2]);
+   If Ch=2 Then Cd[1]:=PEABuffer(@Body^[4+ChanSize]);
+   For I:=0 To ChanSize-1 Do Begin
+    For K:=0 To 1 Do Begin
+     For C:=0 To Ch-1 Do Begin
+      If K=0 Then D:=Cd[C]^[I] And 15 Else D:=Cd[C]^[I] Shr 4;
+      If F6ISvxComp=1 Then V:=Acc[C]+Fib[D] Else V:=Acc[C]+Expo[D];
+      If V<0 Then V:=0 Else If V>255 Then V:=255;
+      Acc[C]:=V; Out8[C]:=(V-128)*256;
+     End;
+     For C:=0 To Ch-1 Do EAPut(Out8[C]);
+    End;
+   End;
+  End Else Fail('iff: methode de compression 8SVX inconnue.');
+ End;
+ EAFlush; ADPCMPatchHeader(Rate,Ch,EAWritten); CloseWrite;
+End;
+
+Function F6IffIsVideo(Const Name: String): Boolean;
+Var B: Array[0..11] Of Byte;
+Begin
+ F6IffIsVideo:=False;
+ OpenRead(Name);
+ If InputSize<12 Then Begin CloseRead; Exit; End;
+ ReadAt(0,B,12); CloseRead;
+ If (B[8]=56) And (B[9]=83) And (B[10]=86) And (B[11]=88) Then Exit;
+ If (B[8]=49) And (B[9]=54) And (B[10]=83) And (B[11]=86) Then Exit;
+ If (B[8]=77) And (B[9]=65) And (B[10]=85) And (B[11]=68) Then Exit;
+ If (B[0]=70) And (B[1]=82) And (B[2]=77) And (B[3]=56) Then Exit;
+ F6IffIsVideo:=True;
+End;
 { ==== BLOCK-ANCHOR-F6 : inserer le code du groupe F6 juste au-dessus de cette ligne ==== }
 
 { ==== BLOCK-ANCHOR-F7 : inserer le code du groupe F7 juste au-dessus de cette ligne ==== }
@@ -112999,47 +115085,24 @@ Begin
     If HavePal Then Palette(PalBuf,PalSize);
     HavePal:=False; PalSize:=0;
     VideoBlock(Buf,BSz-4,Sub); FreeMem(Buf,BSz);
-    { image prete }
-    If PNGMode And AVSWantBMP Then Begin
-     NVBegin(2,Target,318,198,0,25,1);
-     Move(AVSR,NVPalR,256); Move(AVSG,NVPalG,256); Move(AVSB,NVPalB,256);
-     NVEmit(PEABuffer(@AVSPix)); Opened:=True; Frames:=1; Break;
-    End;
-    If PNGMode Then Begin
-     For I:=0 To 318*198-1 Do Begin
-      Rgb^[3*I]:=AVSR[AVSPix[I]]; Rgb^[3*I+1]:=AVSG[AVSPix[I]]; Rgb^[3*I+2]:=AVSB[AVSPix[I]];
-     End;
-     AVSWritePNG(Target,Rgb,318,198); Opened:=True; Frames:=1; Break;
-    End;
+    { image prete : pipeline commun NV (PAL8 -> YUV420P comme swscale) }
     If Not Opened Then Begin
-     OpenWrite(Target); Opened:=True;
-     Str(Fps,S); Hdr:='YUV4MPEG2 W318 H198 F'+S+':1 Ip A1:1 C420jpeg'+#10; WriteBytes(Hdr[1],Length(Hdr));
+     If PNGMode Then Begin If AVSWantBMP Then NVBegin(2,Target,318,198,0,Fps,1) Else NVBegin(1,Target,318,198,0,Fps,1); End
+     Else NVBegin(0,Target,318,198,0,Fps,1);
+     Opened:=True;
     End;
-    Hdr:='FRAME'+#10; WriteBytes(Hdr[1],Length(Hdr));
-    For Y:=0 To 197 Do Begin
-     For X:=0 To 317 Do Row[X]:=Y4(AVSR[AVSPix[Y*318+X]],AVSG[AVSPix[Y*318+X]],AVSB[AVSPix[Y*318+X]]);
-     WriteBytes(Row,318);
-    End;
-    For K:=0 To 1 Do For Y:=0 To 98 Do Begin
-     For X:=0 To 158 Do Begin
-      UVal:=0;
-      For J:=0 To 3 Do Begin
-       I:=AVSPix[(2*Y+(J Shr 1))*318+2*X+(J And 1)];
-       If K=0 Then Inc(UVal,U4(AVSR[I],AVSG[I],AVSB[I])) Else Inc(UVal,V4(AVSR[I],AVSG[I],AVSB[I]));
-      End;
-      Row[X]:=(UVal+2) Div 4;
-     End;
-     WriteBytes(Row,159);
-    End;
+    For I:=0 To 255 Do Begin NVPalR[I]:=AVSR[I]; NVPalG[I]:=AVSG[I]; NVPalB[I]:=AVSB[I]; End;
+    If PNGMode Then Begin NVPalAOn:=True; FillChar(NVPalA,256,255); End;
+    NVEmit(PEABuffer(@AVSPix));
     Inc(Frames);
    End;
    Inc(Pos,BSz);
   End;
-  If PNGMode And (Frames>0) Then Break;
+  If (PNGMode And (Frames>0)) Or NVDone Then Break;
  End;
  FreeMem(PalBuf,800); FreeMem(Rgb,318*198*3);
  If Frames=0 Then Fail('avs: aucune image video.');
- CloseRead; If Not PNGMode Then CloseWrite;
+ NVFinish('avs');
 End;
 
 { ASUS V1/V2 (video): decodeur et encodeur adaptes de FFmpeg libavcodec/asv.c, asvdec.c,
@@ -133255,7 +135318,7 @@ Begin
    ReadAt(Position,B,16); If (U16(0)<>1) And Not ((U16(0)=$FFFE) And (Size>=40)) Then Fail('WAV PCM entier requis.');
    Channels:=U16(2); Rate:=U32(4); Bits:=U16(14); Align:=U16(12);
    If Not (Channels In [1..255]) Or Not (Bits In [8,16,24,32]) Or (Rate<4000) Or (Rate>
-   192000) Then Fail('Format PCM non pris en charge.');
+   3000000) Then Fail('Format PCM non pris en charge.'); { F6B }
    If (Align<>Channels*(Bits Div 8)) Or (U32(8)<>Rate*Align) Then Fail(
    'Alignement PCM incorrect.');
    HasFormat:=True;
@@ -133293,9 +135356,17 @@ Begin
  If ExactFrames>(2147483600 Div (OutChannels*2)) Then Fail('Sortie PCM depassant 2 Go.');
  OutFrames:=Round(ExactFrames); If OutFrames<1 Then OutFrames:=1;
  OpenWrite(Target);
+ If OutRate>48000 Then Begin { F6B: WAVE_FORMAT_EXTENSIBLE comme ffmpeg }
+  PutTag('RIFF'); Put32(60+OutFrames*OutChannels*2); PutTag('WAVE');
+  PutTag('fmt '); Put32(40); Put16($FFFE); Put16(OutChannels); Put32(OutRate);
+  Put32(OutRate*OutChannels*2); Put16(OutChannels*2); Put16(16); Put16(22); Put16(16);
+  If OutChannels=1 Then Put32(4) Else Put32(3);
+  Put32(1); Put32($00100000); Put32(LongInt($AA000080)); Put32($719B3800);
+ End Else Begin
  PutTag('RIFF'); Put32(36+OutFrames*OutChannels*2); PutTag('WAVE');
  PutTag('fmt '); Put32(16); Put16(1); Put16(OutChannels); Put32(OutRate);
  Put32(OutRate*OutChannels*2); Put16(OutChannels*2); Put16(16);
+ End;
  PutTag('data'); Put32(OutFrames*OutChannels*2);
  CacheBase:=-1; CacheFrames:=0; Used:=0;
  For J:=0 To OutFrames-1 Do Begin
@@ -137301,12 +139372,10 @@ Begin D:=LongInt(1) Shl N; If V>=0 Then SAR:=V Div D Else SAR:=-1-((-1-V) Div D)
 Function Signed16(V:LongInt):LongInt;
 Begin V:=V And $FFFF; If V>=32768 Then Dec(V,65536); Signed16:=V; End;
 Function Mul(V,K:LongInt):LongInt;
-Var D:Double; L:LongInt;
+Var P:Int64;
 Begin
- D:=V*1.0*K; D:=D-Trunc(D/4294967296.0)*4294967296.0;
- If D<0 Then D:=D+4294967296.0;
- If D>=2147483648.0 Then D:=D-4294967296.0;
- L:=Trunc(D); Mul:=SAR(L,16);
+ P:=(Int64(V)*K) And $FFFFFFFF; If P>=2147483648 Then P:=P-4294967296;
+ Mul:=SAR(P,16);
 End;
 Procedure Transform(Var Block:TXBlock);
 Var A,T:TXBlock; Pass,I,J:Integer;
@@ -137463,7 +139532,7 @@ Begin
  Else YS:=PacketSize-BS-WS;
  If (BS Mod 4<>0) Or (BS>PacketSize) Or (WS>PacketSize-BS) Or (YS<0) Or (YS>PacketSize-BS-WS) Or (Extra>PacketSize-BS-WS-YS) Then Fail('4xm: tailles predictives invalides.');
  GB.At:=Extra; GB.Size:=BS; GB.Bit:=0; GB.Swap:=True;
- WordsAt:=Extra+BS; WordsEnd:=WordsAt+WS; BytesAt:=WordsEnd; BytesEnd:=BytesAt+YS;
+ WordsAt:=Extra+BS; WordsEnd:=PacketSize; BytesAt:=Extra+BS+WS; BytesEnd:=PacketSize; { FFmpeg: les flux mots/octets vont jusqu'a la fin du paquet }
  For Y:=0 To H Div 8-1 Do For X:=0 To W Div 8-1 Do PBlock(X*8,Y*8,3,3);
 End;
 Procedure RGB(X,Y:Integer; Var R,G,B:LongInt);
@@ -137474,50 +139543,32 @@ Begin
  Else Begin B:=(V Shr 10) And 31; G:=(V Shr 5) And 31; R:=V And 31; G:=(G Shl 3) Or (G Shr 2); End;
  R:=(R Shl 3) Or (R Shr 2); B:=(B Shl 3) Or (B Shr 2);
 End;
+Var XMOut: PEABuffer;
 Procedure OutputFrame;
-Var X,Y,P,DX,DY,Swap:Integer; R,G,B,U,V,Sum:LongInt; Row:Array[0..639] Of Byte; S:String;
+Var X,Y,Swap:Integer; V:Word; D:LongInt; NbF,NbP:Int64;
 Begin
- {$IFDEF TEST_4XM_RGB}
- For Y:=0 To H-1 Do WriteBytes(Frames^[Cur,Y]^,W*2);
- {$ELSE}
- S:='FRAME'+#10; WriteBytes(S[1],Length(S));
- For P:=0 To 2 Do Begin
-  If P=0 Then Begin
-   For Y:=0 To H-1 Do Begin
-    For X:=0 To W-1 Do Begin RGB(X,Y,R,G,B); Row[X]:=16+((66*R+129*G+25*B+128) Div 256); End;
-    WriteBytes(Row,W);
-   End;
-  End Else For Y:=0 To H Div 2-1 Do Begin
-   For X:=0 To W Div 2-1 Do Begin
-    Sum:=0;
-    For DY:=0 To 1 Do For DX:=0 To 1 Do Begin
-     RGB(X*2+DX,Y*2+DY,R,G,B);
-     If P=1 Then V:=-38*R-74*G+112*B Else V:=112*R-94*G-18*B;
-     U:=128+SAR(V+128,8); Inc(Sum,U);
-    End;
-    Row[X]:=(Sum+2) Div 4;
-   End;
-   WriteBytes(Row,W Div 2);
-  End;
+ D:=0;
+ For Y:=0 To H-1 Do For X:=0 To W-1 Do Begin
+  V:=Frames^[Cur,Y]^[X];
+  If Version<=2 Then V:=(V And $3E0) Or ((V Shr 10) And 31) Or ((V And 31) Shl 10);
+  XMOut^[D]:=V And 255; XMOut^[D+1]:=V Shr 8; Inc(D,2);
  End;
- {$ENDIF}
+ CFSync(FrameCount,1,NbF,NbP);
+ NVEmitN(XMOut,NbP,NbF);
+ Inc(CFNext,NbF); Inc(CFFrameNo,NbF);
  Swap:=Cur; Cur:=Prev; Prev:=Swap; Inc(FrameCount);
 End;
 Procedure StartOutput;
-Var S,T:String; I,J:Integer;
+Var I,J:Integer; RN,RD: LongInt;
 Begin
  If Not HaveHeader Or Not HaveRate Then Fail('4xm: piste video ou cadence absente.');
- {$IFNDEF FPC}
- If MemAvail<LongInt(W)*H*4+SizeOf(TXFrames)+SizeOf(TXPendingList)+32768 Then Fail('4xm: memoire DOS insuffisante.');
- {$ENDIF}
  New(Frames); FillChar(Frames^,SizeOf(Frames^),0);
  For I:=0 To 1 Do For J:=0 To H-1 Do Begin GetMem(Frames^[I,J],W*2); FillChar(Frames^[I,J]^,W*2,0); End;
- OpenWrite(Target); Opened:=True;
- {$IFNDEF TEST_4XM_RGB}
- Str(W,T); S:='YUV4MPEG2 W'+T; Str(H,T); S:=S+' H'+T;
- Str(RateN,T); S:=S+' F'+T; Str(RateD,T); S:=S+':'+T+' Ip A1:1 C420jpeg'+#10;
- WriteBytes(S[1],Length(S));
- {$ENDIF}
+ GetMem(XMOut,W*H*2+64);
+ RN:=RateN; RD:=RateD; NVGcd(RN,RD);
+ If Version>2 Then NVBegin(0,Target,W,H,5,RN,RD) Else NVBegin(0,Target,W,H,2,RN,RD);
+ NVOpened:=False; Opened:=True;
+ CFTbN:=RD; CFTbD:=RN; CFFn:=RN; CFFd:=RD; CFNext:=0; CFFrameNo:=0; CFHist[0]:=0; CFHist[1]:=0; CFHist[2]:=0; CFLastDropped:=False; CFVscfr:=False;
 End;
 Procedure Scan(Start,Finish:LongInt; Depth:Integer; InMovie:Boolean);
 Var P,N,EndAt,At,ID,Total,Count:LongInt; Kind,ListKind:String; I,J,Slot:Integer;
@@ -137580,7 +139631,7 @@ Begin
  Scan(12,FileEnd,0,False);
  For I:=0 To 99 Do If Pending^[I].First<>Nil Then Fail('4xm: trame fragmentee incomplete.');
  If FrameCount=0 Then Fail('4xm: aucune image video.');
- CloseRead; CloseWrite; For I:=0 To 1 Do For J:=0 To H-1 Do FreeMem(Frames^[I,J],W*2);
+ CFFlush(XMOut); NVFinish('4xm'); For I:=0 To 1 Do For J:=0 To H-1 Do FreeMem(Frames^[I,J],W*2);
  Dispose(Frames); Dispose(Pending);
 End;
 
@@ -137704,45 +139755,49 @@ Begin
  WriteLn(' D. = Demuxage (lecture)');
  WriteLn(' .E = Muxage (ecriture)');
  WriteLn(' --');
- WriteLn(' D  4xm             4X Movie (video versions 0..4 vers Y4M; audio adpcm_4xm/PCM vers WAV)');
+ WriteLn(' D  film_cpk        Sega FILM / CPK');
+ WriteLn(' D  mtv             MTV');
+ WriteLn(' D  nsv             Nullsoft Streaming Video');
+ WriteLn(' D  r3d             REDCODE R3D');
+ WriteLn(' D  4xm             4X Technologies');
  WriteLn(' DE ac3             AC-3 brut, decodeur et encodeur natifs');
  WriteLn(' D  eac3            E-AC-3 brut (decodeur eac3: sous-flux independant 0, AHT, extension spectrale; WAV 16 bits)');
  WriteLn(' DE flac            raw FLAC');
  WriteLn(' D  rpl             RPL / ARMovie (video escape124 vers Y4M/PNG/BMP)');
  WriteLn(' DE adx             CRI ADX (adpcm_adx, mono/stereo)');
- WriteLn(' D  ea              Electronic Arts Multimedia (audio adpcm_ea, r1, r2, r3, xas; video eacmv, eatgv, eatgq, eatqi vers Y4M/PNG/BMP)');
+ WriteLn(' D  ea              Electronic Arts Multimedia');
  WriteLn(' D  xa              Maxis XA (adpcm_ea_maxis_xa)');
  WriteLn(' D  amv             AMV (audio adpcm_ima_amv; video amv vers Y4M)');
  WriteLn(' D  ape             Monkey''s Audio (versions 3.93-3.99, 8/16 bits) vers WAV/MP3/...');
 
- WriteLn(' D  bethsoftvid     Bethesda Softworks VID (video + audio PCM 8 bits)');
- WriteLn(' D  bfi             Brute Force & Ignorance (video + audio PCM 8 bits)');
+ WriteLn(' D  bethsoftvid     Bethesda Softworks VID');
+ WriteLn(' D  bfi             Brute Force & Ignorance');
  WriteLn(' DE bmp             image BMP (decodage vers PNG/BMP/Y4M; encodage BMP depuis Y4M ou sources PAL8)');
- WriteLn(' D  c93             Interplay C93 (video seule)');
+ WriteLn(' D  c93             Interplay C93');
  WriteLn(' D  avi (camstudio, camtasia)  AVI CSCD / tscc (zlib, LZO, RLE) vers Y4M/PNG/BMP');
  WriteLn(' DE rm              RealMedia .rm/.rmvb: son Cook/real_144/real_288, video rv10/rv20 vers WAV/Y4M; sortie video rv10/rv20');
  WriteLn(' D  dts             DTS Coherent Acoustics brut (core 16 bits BE/LE, 14 bits; sans extensions) vers WAV (jusqu''a 5.1)/MP3 stereo/...');
  WriteLn(' D  oma             Sony OpenMG (ATRAC3 non chiffre); WAV 0x270 (ATRAC3) vers WAV/MP3/...');
  WriteLn(' DE avi (asv1/asv2) AVI ASUS V1/V2: decodage vers Y4M, encodage Y4M -c:v asv1|asv2');
- WriteLn(' D  dxa             Feeble Files/ScummVM DXA (video dxa PAL8 vers Y4M/PNG/BMP; audio WAV non extrait)');
- WriteLn(' D  dsicin          Delphine Software International CIN (video dsicinvideo PAL8 vers Y4M/PNG/BMP, audio dsicinaudio vers WAV/MP3/...)');
+ WriteLn(' D  dxa             DXA');
+ WriteLn(' D  dsicin          Delphine Software International CIN');
  WriteLn(' DE vobsub          VobSub (.idx + .sub, sous-titres DVD dvdsub): decodage vers .psub (manifeste + PNG RGBA), encodage depuis .psub');
  WriteLn(' DE dvbsub          flux brut de segments DVB (entree: -f dvbsub si non detecte; sans horodatage, debuts successifs); sortie .dvbsub');
  WriteLn(' DE psub            Liste de sous-titres PNG: ligne PNGSUB 1, size L H, puis sub hh:mm:ss.mmm hh:mm:ss.mmm image.png');
  WriteLn(' D  sunrast         Sun Rasterfile (.ras)');
  WriteLn(' DE targa          Truevision Targa (.tga)');
  WriteLn(' DE tiff           TIFF (.tif, .tiff)');
- WriteLn(' D  txd            Renderware TeXture Dictionary');
+ WriteLn(' D  txd             Renderware TeXture Dictionary');
  WriteLn(' DE dv              DV (Digital Video) .dv ou AVI dvsd: SD 25 et 50 Mbit/s (NTSC 4:1:1, PAL 4:2:0/4:1:1, DV50 4:2:2), video seule; decodage vers Y4M/PNG/BMP, encodage Y4M -c:v dvvideo (sortie .dv ou AVI)');
  WriteLn(' D  avi (cljr, cyuv, cinepak)  AVI Cirrus Logic AccuPak, Creative YUV, Cinepak vers Y4M/PNG/BMP');
- WriteLn(' D  avs             Argonaut Creature Shock AVS (video vers Y4M/PNG)');
- WriteLn(' D  iss             Funcom ISS (adpcm_ima_iss)');
+ WriteLn(' D  avs             Argonaut Games Creature Shock');
+ WriteLn(' D  iss             Funcom ISS');
  WriteLn(' D  smjpeg          Loki SDL MJPEG (adpcm_ima_smjpeg)');
- WriteLn(' D  thp             Nintendo THP (audio adpcm_thp)');
+ WriteLn(' D  thp             THP');
  WriteLn(' D  sol             Sierra SOL (sol_dpcm, pcm_u8, pcm_s16le)');
- WriteLn(' D  vmd             Sierra VMD (video vmdvideo, audio vmdaudio)');
- WriteLn(' D  wc3movie        Wing Commander III movie (video xan_wc3, audio pcm_s16le)');
- WriteLn(' D  wsvqa           Westwood Studios VQA (video vqavideo, audio pcm/ws_snd1/adpcm_ima_ws)');
+ WriteLn(' D  vmd             Sierra VMD');
+ WriteLn(' D  wc3movie        Wing Commander III movie');
+ WriteLn(' D  wsvqa           Westwood Studios VQA');
  WriteLn(' DE m4a             MP4/M4A audio ALAC (decodage et encodage, -f mp4 ou extension .m4a)');
  WriteLn(' D  psxstr          Sony PlayStation STR / RIFF CDXA (audio adpcm_xa, video mdec)');
  WriteLn(' D  msnwctcp        MSN TCP Webcam stream (video mimic, cadence reguliere)');
@@ -137754,27 +139809,27 @@ Begin
  WriteLn(' DE ass             SSA (SubStation Alpha) subtitle');
  WriteLn(' DE aac             AAC ADTS (AAC-LC mono/stereo; alias: adts; encodage libfaac natif)');
  WriteLn(' DE ogg             Ogg (decodage Speex via libspeex natif, encodage audio Vorbis via libvorbis natif, video Theora via libtheora natif; extensions .ogg, .oga, .ogv, .spx)');
- WriteLn(' D  iff             IFF 8SVX, Fibonacci/exponentiel (alias: 8svx, svx)');
+ WriteLn(' D  iff             IFF (Interchange File Format)');
  WriteLn(' DE aiff            AIFF/AIFF-C PCM; ima4 (adpcm_ima_qt) en decodage et encodage AIFF-C');
  WriteLn(' DE asf             ASF: audio WMA1/WMA2 (decodage exact, encodage wmav1/wmav2 octet par octet; alias: wma, wmv)');
  WriteLn(' DE avi             AVI H264/MPEG4, AAC/MP3 (copie); decodeurs FFV1, FLASHSV, HUFFYUV/FFVHUFF, Autodesk RLE, FRAPS, H263/H261/FLV1');
  WriteLn(' DE flv             FLV: video Sorenson Spark (decodeur I/P complet) ou Screen Video vers Y4M/PNG/BMP; FLV1 intra natif en sortie; extraction image H264 CAVLC');
- WriteLn(' D  idcin           id Cinematic (video idcinvideo PAL8 vers Y4M/PNG/BMP, audio PCM vers WAV)');
- WriteLn('D   rl2             RL2');
+ WriteLn(' D  idcin           id Cinematic');
+ WriteLn(' D  rl2             RL2');
  WriteLn('D   shn             raw Shorten');
  WriteLn('D   qcp             QCP');
  WriteLn('D   smk             Smacker');
  WriteLn('DE  tta             TTA (True Audio)');
  WriteLn('D   wv              WavPack');
- WriteLn('D   siff            Beam Software SIFF (video vb, audio PCM U8)');
- WriteLn('D   tiertexseq      Tiertex Limited SEQ (video tiertexseqvideo, audio PCM S16BE)');
- WriteLn('DE  roq             id RoQ (video roqvideo, audio roq_dpcm)');
- WriteLn(' D  ipmovie         Interplay MVE (video interplayvideo PAL8/RGB555 vers Y4M/PNG/BMP, audio PCM/interplay_dpcm vers WAV)');
+ WriteLn(' D  siff            Beam Software SIFF');
+ WriteLn(' D  tiertexseq      Tiertex Limited SEQ');
+ WriteLn(' DE roq             raw id RoQ');
+ WriteLn(' D  ipmovie         Interplay MVE');
  WriteLn(' D  jpegls_pipe     piped jpegls sequence (image JPEG-LS vers Y4M/PNG/BMP)');
  WriteLn(' D  jpeg_pipe      piped jpeg sequence (image JPEG vers Y4M/PNG/BMP)');
- WriteLn(' D  mm              American Laser Games MM (video mmvideo)');
- WriteLn(' D  mvi             Motion Pixels MVI (video motionpixels)');
- WriteLn(' D  flic            FLI/FLC/FLX animation (video flic 8/15/16/24 bits; audio TFTD non extrait)');
+ WriteLn(' D  mm              American Laser Games MM');
+ WriteLn(' D  mvi             Motion Pixels MVI');
+ WriteLn(' D  flic            FLI/FLC/FLX animation');
  WriteLn(' D  g726            G.726 big-endian brut (-code_size 2..5, -sample_rate; decodage vers WAV/MP3/...)');
  WriteLn(' D  g726le          G.726 little-endian brut (-code_size 2..5, -sample_rate; decodage vers WAV/MP3/...)');
  WriteLn(' DE gif             CompuServe GIF anime (decodage vers Y4M/PNG/BMP, rythme et synchro CFR comme ffmpeg)');
@@ -138378,8 +140433,6 @@ BEGIN
   { LIST-ANCHOR-F3 }
   { LIST-ANCHOR-F4 }
   { LIST-ANCHOR-F5 }
-  WriteLn(' D  film_cpk        Sega FILM / CPK (video cinepak, rawvideo rgb24; audio pcm_s8, pcm_s8_planar, pcm_s16be_planar)');
-  WriteLn(' D  mtv             MTV (video rawvideo rgb565be, audio mp3)');
   { LIST-ANCHOR-F6 }
   { LIST-ANCHOR-F7 }
   { LIST-ANCHOR-G6B }
@@ -138749,6 +140802,9 @@ BEGIN
  If (InputFormat='wsvqa') And Not IsHTTP(InputPath) Then NVKind:=1701;
  If (InputFormat='film_cpk') And Not IsHTTP(InputPath) Then NVKind:=1960; { F6 }
  If (InputFormat='mtv') And Not IsHTTP(InputPath) Then NVKind:=1961; { F6 }
+ If (InputFormat='nsv') And Not IsHTTP(InputPath) Then NVKind:=1962; { F6B }
+ If (InputFormat='r3d') And Not IsHTTP(InputPath) Then NVKind:=1963; { F6B }
+ If (InputFormat='iff') And Not IsHTTP(InputPath) And F6IffIsVideo(InputPath) Then NVKind:=1964; { F6B }
  If (InputFormat='vmd') And Not IsHTTP(InputPath) Then NVKind:=1700; { G2B: 220 vmd, 221 wsvqa, 222 wc3movie, 223 thp }
  If (InputFormat='psxstr') And Not IsHTTP(InputPath) Then Begin If STRHasVideo(Intermediate) Then NVKind:=44; End
  Else If (InputFormat='msnwctcp') And Not IsHTTP(InputPath) Then NVKind:=45
@@ -138798,7 +140854,7 @@ BEGIN
   Else If InputFormat='avi' Then Begin If H4AviIsH264(AVIVideoFourCC(Intermediate)) Then NVKind:=35; End
   Else If FLVVideoCodec(Intermediate)=7 Then NVKind:=36;
  End;
- If (NVKind>=1960) And (NVKind<=1969) And NVAudioOut Then NVKind:=0; { F6 }
+ If ((NVKind>=1960) And (NVKind<=1969) Or (NVKind=48) Or (NVKind=49) Or (NVKind=66) Or (NVKind=19)) And NVAudioOut Then NVKind:=0; { F6 }
  If (NVKind<>0) And Not (((NVKind=1) Or (NVKind=2) Or (NVKind=15) Or (NVKind=17) Or (NVKind=22) Or (NVKind=30) Or (NVKind=38) Or (NVKind=44) Or (NVKind=65) Or (NVKind=67) Or (NVKind=68) Or (NVKind=229) Or (NVKind=230) Or ((NVKind>=1700) And (NVKind<=1703))) And NVAudioOut) Then Begin
   If NoVideo Or (VideoCodec='copy') Or (AudioCodec<>'') Or HasBitrate Or (RequestedRate<>0) Or
    (RequestedChannels<>0) Or (ImageWidth<>0) Or IsHTTP(InputPath) Then
@@ -139330,7 +141386,7 @@ BEGIN
    If InputFormat='ogg' Then Begin If VGIsVorbisOgg(InputPath) Then VGDecodeOgg(InputPath,Temps[0]) Else DecodeSpeexOgg(InputPath,Temps[0]); End Else
    If (InputFormat='g726') Or (InputFormat='g726le') Then DecodeG726(InputPath,Temps[0],InputFormat='g726le',G726CodeSize,G726Rate) Else
    If InputFormat='aac' Then DecodeAAC(InputPath,Temps[0]) Else
-   If InputFormat='iff' Then Decode8SVX(InputPath,Temps[0]) Else
+   If InputFormat='iff' Then F6IffAudio(InputPath,Temps[0]) Else { F6B }
    If InputFormat='au' Then F1AuToWav(InputPath,Temps[0]) Else { F1 }
    If InputFormat='gsm' Then F1DecodeGSM(InputPath,Temps[0],G726Rate) Else
    If InputFormat='mmf' Then F1DecodeMMF(InputPath,Temps[0]) Else
@@ -139355,7 +141411,13 @@ BEGIN
    If InputFormat='amv' Then DecodeAMV(InputPath,Temps[0]) Else
    If InputFormat='iss' Then DecodeISS(InputPath,Temps[0]) Else
    If InputFormat='film_cpk' Then F6FilmAudio(InputPath,Temps[0]) Else { F6 }
+   If InputFormat='rpl' Then F6RplAudio(InputPath,Temps[0]) Else { F6B }
+   If InputFormat='mm' Then F6MmAudio(InputPath,Temps[0]) Else { F6B }
+   If InputFormat='mvi' Then F6MviAudio(InputPath,Temps[0]) Else { F6B }
+   If InputFormat='rl2' Then F6Rl2Audio(InputPath,Temps[0]) Else { F6B }
    If InputFormat='mtv' Then F6MtvAudio(InputPath,Temps[0]) Else { F6 }
+   If InputFormat='nsv' Then F6NsvAudio(InputPath,Temps[0]) Else { F6B }
+   If InputFormat='r3d' Then F6R3dAudio(InputPath,Temps[0]) Else { F6B }
    If InputFormat='ape' Then DecodeAPE(InputPath,Temps[0]) Else
    If InputFormat='dts' Then DecodeDCA(InputPath,Temps[0]) Else
    If (InputFormat='rm') And (RMAudioKind(InputPath)=1) Then DecodeRA144(InputPath,Temps[0]) Else
