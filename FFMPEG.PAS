@@ -46982,6 +46982,7 @@ Var
  FSizes,FKeys: PALLong; KeyFrame: Boolean; RleCode,LenTab: PALLong; SkipTab: PEABuffer;
  Tab: Array[0..2047] Of Byte; Crv,Cbu,Cgu,Cgv,Cy,Oy,Yb: Int64; Yoffs,Ix,Cn: LongInt;
  Rg,Gg,Bg,Yv,Uv,Vv: LongInt; Gv: Int64;
+ QTW: Int64; QParOk: Boolean; QG2: LongInt;
  Mv: PEABuffer; MvLen: LongInt; Stack: Array[0..15] Of LongInt; Sp: LongInt;
 Function Clip(V: LongInt): LongInt;Begin If V<0 Then Clip:=0 Else If V>255 Then Clip:=255 Else Clip:=V; End;
 Function Sar(V: Int64; N: LongInt): Int64;
@@ -47182,11 +47183,17 @@ Begin
  WriteBytes(Mv^,MvLen);
  At:=0; While At<EncLen Do Begin If EncLen-At>60000 Then Q:=60000 Else Q:=EncLen-At; WriteBytes(Enc^[At],Q); Inc(At,Q); End;
  MvLen:=0;
+ QParOk:=True;
+ If (SarD<=0) Or (SarN<0) Then QParOk:=False
+ Else If (SarN<>0) And (SarN<>SarD) Then Begin
+  If SarN<SarD Then QTW:=(Int64(W)*SarN) Div SarD Else QTW:=(Int64(Hh)*SarD) Div SarN;
+  If QTW<=0 Then QParOk:=False;
+ End;
  BoxBegin('moov');
  BoxBegin('mvhd'); M32(0); M32(0); M32(0); M32(1000); M32(MvDur); M32($10000); M16(256); MZero(10); Matrix; MZero(24); M32(2); BoxEnd;
  BoxBegin('trak');
  BoxBegin('tkhd'); M32(3); M32(0); M32(0); M32(1); M32(0); M32(MvDur); MZero(8); M16(0); M16(0); M16(0); M16(0); Matrix;
- If (SarN>0) And (SarD>0) Then M32(Round(W*65536.0*SarN/SarD)) Else M32(W Shl 16);
+ M32(W Shl 16);
  M32(Hh Shl 16); BoxEnd;
  BoxBegin('edts'); BoxBegin('elst'); M32(0); M32(1); M32(MvDur); M32(0); M32($10000); BoxEnd; BoxEnd;
  BoxBegin('mdia');
@@ -47204,9 +47211,10 @@ Begin
  If PixFmtKind=0 Then M16(24) Else If PixFmtKind=1 Then M16(32) Else M16(40);
  M16($FFFF);
  BoxBegin('fiel'); MPut(1); MPut(0); BoxEnd;
- BoxBegin('pasp');
- If (SarN>0) And (SarD>0) Then Begin M32(SarN); M32(SarD); End Else Begin M32(1); M32(1); End;
- BoxEnd;
+ If QParOk And (SarN>0) Then Begin
+  QG2:=SarN; K:=SarD; While K<>0 Do Begin I:=QG2 Mod K; QG2:=K; K:=I; End;
+  BoxBegin('pasp'); M32(SarN Div QG2); M32(SarD Div QG2); BoxEnd;
+ End;
  BoxEnd; BoxEnd;
  BoxBegin('stts'); M32(0); M32(1); M32(NFrames); M32(Delta); BoxEnd;
  Keys:=0; For I:=0 To NFrames-1 Do If FKeys^[I]<>0 Then Inc(Keys);
@@ -47222,7 +47230,16 @@ Begin
  Else Begin M32(0); M32(NFrames); For I:=0 To NFrames-1 Do M32(FSizes^[I]); End;
  BoxEnd;
  BoxBegin('stco'); M32(0); M32(1); M32(36); BoxEnd;
- BoxEnd; BoxEnd; BoxEnd; BoxEnd;
+ BoxEnd; BoxEnd; BoxEnd;
+ If (SarN>0) And ((SarD<=0) Or (SarN<>SarD)) Then Begin
+  QTW:=0; If QParOk Then QTW:=(Int64(SarN)*W+SarD Div 2) Div SarD;
+  BoxBegin('tapt');
+  M32(20); MTag('clef'); M32(0); M32(QTW Shl 16); M32(Hh Shl 16);
+  M32(20); MTag('prof'); M32(0); M32(QTW Shl 16); M32(Hh Shl 16);
+  M32(20); MTag('enof'); M32(0); M32(W Shl 16); M32(Hh Shl 16);
+  BoxEnd;
+ End;
+ BoxEnd;
  BoxBegin('udta'); BoxBegin(#169+'swr'); M16(13); M16($55C4); MTag('Lavf60.16.100'); BoxEnd; BoxEnd;
  BoxEnd;
  WriteBytes(Mv^,MvLen);
