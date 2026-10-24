@@ -1903,6 +1903,30 @@ Var
  N, J, OutCount, Align: Integer;
  Value: LongInt;
 Begin
+ If Bits >= 206 Then Begin
+  { F1 : A-law (206) / mu-law (207) }
+  If Count > 0 Then HaveSound := True;
+  While Count > 0 Do Begin
+   If Count > 1024 Then N := 1024 Else N := Count;
+   ReadAt(Position, Raw, N); OutCount := 0;
+   For J := 0 To N-1 Do Begin
+    Align := Raw[J];
+    If Bits = 206 Then Begin
+     Align := Align Xor $55; Value := Align And 15; OutCount := (Align And $70) Shr 4;
+     If OutCount <> 0 Then Value := (Value+Value+1+32) Shl (OutCount+2) Else Value := (Value+Value+1) Shl 3;
+     If (Align And $80) = 0 Then Value := -Value;
+    End Else Begin
+     Align := (Not Align) And 255; Value := ((Align And 15) Shl 3)+$84; Value := Value Shl ((Align And $70) Shr 4);
+     If (Align And $80) <> 0 Then Value := $84-Value Else Value := Value-$84;
+    End;
+    If Value < 0 Then Inc(Value, 65536);
+    PCM[2*J] := Value And 255; PCM[2*J+1] := Value Shr 8;
+   End;
+   OutCount := 2*N;
+   SubmitPCM(OutCount); Inc(Position, N); Dec(Count, N);
+  End;
+  Exit;
+ End;
  If Bits >= 102 Then Begin
   { ADPCM Sound Blaster Pro: 4 bits (104), 2.6 bits (103), 2 bits (102). }
   If Count > 0 Then HaveSound := True;
@@ -2088,11 +2112,12 @@ Begin
    If Size < 12 Then Fail('Bloc VOC 9 trop court.');
    ReadAt(Position, B, 12);
    Rate := LE32(B,0); Bits := B[4]; Channels := B[5]; Codec := LE16(B,6);
-   If Not (((Bits = 8) And (Codec = 0)) Or ((Bits = 16) And (Codec = 4)) Or
+   If Not (((Bits = 8) And (Codec = 0)) Or ((Bits = 16) And (Codec = 4)) Or ((Bits = 8) And (Codec In [6,7])) Or
     ((Bits = 4) And (Codec = $0200)) Or (Codec In [1,2,3])) Then     Fail(
    'Bloc VOC 9: PCM, ADPCM CT (codec $0200) ou ADPCM SB Pro (codecs 1 a 3) requis.');
    SetFormat(Rate, Channels);
    If Codec In [1,2,3] Then Bits := 105-Codec;
+   If Codec In [6,7] Then Bits := 200+Codec;
    ConvertData(Position+12, Size-12, Bits);
   End;
   Else Fail('Type de bloc VOC inconnu.');
@@ -3930,6 +3955,7 @@ Begin
  If N>=26 Then If (B[0]=67) And (B[1]=114) And (B[2]=101) And (B[19]=$1A) Then Begin
   Probe:='voc'; Exit;
  End;
+ If N>=24 Then If (B[0]=46) And (B[1]=115) And (B[2]=110) And (B[3]=100) And ((B[4] Or B[5] Or B[6] Or B[7])<>0) And ((B[8] Or B[9] Or B[10] Or B[11])<>0) And ((B[12] Or B[13] Or B[14] Or B[15])<>0) And ((B[16] Or B[17] Or B[18] Or B[19])<>0) And ((B[20] Or B[21] Or B[22] Or B[23])<>0) Then Begin Probe:='au'; Exit; End; { F1 }
  If N>=8 Then If (B[0]=$80) And (B[1]=0) Then Begin
   ADXOffset:=LongInt(B[2])*256+B[3];
   If (ADXOffset>=8) And (ADXOffset<=N-4) Then
@@ -96529,6 +96555,870 @@ End;
 
 { ==== BLOCK-ANCHOR-H8 : inserer le code du groupe H8 juste au-dessus de cette ligne ==== }
 
+{ F1-BLOCK-BEGIN }
+Var F1CompLevel: LongInt; F1CompSet: Boolean;
+{ ======== F1 : MD5, CRC, encodeur FQAC natif (libavcodec/flacenc.c, lpc.c, lls) et muxeur flac (libavformat/flacenc.c) ======== }
+Type
+ FQPI=^FQTI; FQTI=Array[0..16777215] Of LongInt;
+ FQPU=^FQTU; FQTU=Array[0..16777215] Of LongWord;
+ FQPB=^FQTB; FQTB=Array[0..268435455] Of Byte;
+ FQPD=^FQTD; FQTD=Array[0..16777215] Of Double;
+ FQTQ=Array[0..255] Of QWord;
+ TFLSub=Record
+  Typ,TypeCode,Obits,Wasted,Order,Shift: LongInt;
+  Coefs: Array[0..31] Of LongInt;
+  RcMode,RcPorder: LongInt;
+  RcParams: Array[0..255] Of LongInt;
+  RcUdata: FQPU;
+  RcSums: FQTQ;
+  Samples,Residual: FQPI;
+ End;
+
+Var
+ { MD5 }
+ FQMd5T: Array[0..63] Of Int64;
+ FQMd5Ready: Boolean;
+ FQMdA,FQMdB,FQMdC,FQMdD: Int64;
+ FQMdLen: Int64;
+ FQMdBlk: Array[0..63] Of Byte;
+ FQMdFill: LongInt;
+ FQMdSum: Array[0..15] Of Byte;
+ { CRC }
+ FQCrc8T: Array[0..255] Of Byte;
+ FQCrc16T: Array[0..255] Of Word;
+ FQCrcReady: Boolean;
+ { ecriture de bits }
+ FQBuf: FQPB; FQBufPos,FQBitCnt: LongInt; FQBitAcc: Int64;
+ { encodeur }
+ FQCh,FQRate,FQSr0,FQSr1,FQBpsCode,FQBits,FQMaxBS,FQMinFrame,FQMaxFrame,FQMaxEncFrame: LongInt;
+ FQFrameCount: LongInt; FQSampleCount: Int64;
+ FQLpcType,FQMinPred,FQMaxPred,FQOMethod,FQMinPart,FQMaxPart,FQPrec,FQChModeOpt,FQLevel: LongInt;
+ FQBlock,FQBs0,FQBs1,FQChMode: LongInt; FQVerb: Boolean;
+ FQSub: Array[0..7] Of TFLSub;
+ FQWinBuf: FQPD; { tampon de fenetrage : FQWinOff doubles de marge devant }
+
+Const
+ FQBlockSizeTab: Array[0..15] Of LongInt=(0,192,576,1152,2304,4608,0,0,256,512,1024,2048,4096,8192,16384,32768);
+ FQRateTab: Array[0..15] Of LongInt=(0,88200,176400,192000,8000,16000,22050,24000,32000,44100,48000,96000,0,0,0,0);
+
+Function FQSar(V: Int64; N: LongInt): Int64;
+Begin
+ If V>=0 Then FQSar:=V Shr N Else FQSar:=-((-V-1) Shr N)-1;
+End;
+
+Function FQLog2(X: QWord): LongInt;
+Var R: LongInt;
+Begin
+ R:=0; If X=0 Then Begin FQLog2:=0; Exit; End;
+ While X>1 Do Begin X:=X Shr 1; Inc(R); End;
+ FQLog2:=R;
+End;
+
+Procedure FQMd5Init;
+Var I: LongInt;
+Begin
+ If Not FQMd5Ready Then Begin
+  For I:=0 To 63 Do FQMd5T[I]:=Trunc(Abs(Sin(I+1))*4294967296.0);
+  FQMd5Ready:=True;
+ End;
+ FQMdA:=$67452301; FQMdB:=$EFCDAB89; FQMdC:=$98BADCFE; FQMdD:=$10325476;
+ FQMdLen:=0; FQMdFill:=0;
+End;
+
+Procedure FQMd5Block;
+Const S: Array[0..15] Of Byte=(7,12,17,22,5,9,14,20,4,11,16,23,6,10,15,21);
+Var X: Array[0..15] Of Int64; I,K,Sh: LongInt; A,B,C,D,F,T: Int64;
+Begin
+ For I:=0 To 15 Do X[I]:=Int64(FQMdBlk[I*4])+Int64(FQMdBlk[I*4+1])*256+Int64(FQMdBlk[I*4+2])*65536+Int64(FQMdBlk[I*4+3])*16777216;
+ A:=FQMdA; B:=FQMdB; C:=FQMdC; D:=FQMdD;
+ For I:=0 To 63 Do Begin
+  If I<16 Then Begin F:=(D Xor (B And (C Xor D))); K:=I; End
+  Else If I<32 Then Begin F:=((D And B) Or ((D Xor $FFFFFFFF) And C)); K:=(1+5*I) And 15; End
+  Else If I<48 Then Begin F:=(B Xor C Xor D); K:=(5+3*I) And 15; End
+  Else Begin F:=(C Xor (B Or (D Xor $FFFFFFFF))); K:=(7*I) And 15; End;
+  Sh:=S[(I Shr 4)*4+(I And 3)];
+  T:=(A+FQMd5T[I]+F+X[K]) And $FFFFFFFF;
+  T:=((T Shl Sh) Or (T Shr (32-Sh))) And $FFFFFFFF;
+  T:=(T+B) And $FFFFFFFF;
+  A:=D; D:=C; C:=B; B:=T;
+ End;
+ FQMdA:=(FQMdA+A) And $FFFFFFFF; FQMdB:=(FQMdB+B) And $FFFFFFFF;
+ FQMdC:=(FQMdC+C) And $FFFFFFFF; FQMdD:=(FQMdD+D) And $FFFFFFFF;
+End;
+
+Procedure FQMd5Add(Var Buf; Len: LongInt);
+Var P: FQPB; I: LongInt;
+Begin
+ P:=@Buf;
+ For I:=0 To Len-1 Do Begin
+  FQMdBlk[FQMdFill]:=P^[I]; Inc(FQMdFill);
+  If FQMdFill=64 Then Begin FQMd5Block; FQMdFill:=0; End;
+ End;
+ Inc(FQMdLen,Len);
+End;
+
+Procedure FQMd5Final;
+Var Bits: Int64; Z: Byte; I: LongInt; Q: Array[0..7] Of Byte;
+Begin
+ Bits:=FQMdLen*8;
+ Z:=$80; FQMd5Add(Z,1);
+ Z:=0; While FQMdFill<>56 Do FQMd5Add(Z,1);
+ For I:=0 To 7 Do Q[I]:=(Bits Shr (8*I)) And 255;
+ FQMd5Add(Q,8);
+ For I:=0 To 3 Do Begin
+  FQMdSum[I]:=(FQMdA Shr (8*I)) And 255; FQMdSum[4+I]:=(FQMdB Shr (8*I)) And 255;
+  FQMdSum[8+I]:=(FQMdC Shr (8*I)) And 255; FQMdSum[12+I]:=(FQMdD Shr (8*I)) And 255;
+ End;
+End;
+
+Procedure FQCrcInit;
+Var I,J: LongInt; C8: LongInt; C16: LongInt;
+Begin
+ If FQCrcReady Then Exit;
+ FQCrcReady:=True;
+ For I:=0 To 255 Do Begin
+  C8:=I; For J:=0 To 7 Do If (C8 And $80)<>0 Then C8:=((C8 Shl 1) Xor 7) And 255 Else C8:=(C8 Shl 1) And 255;
+  FQCrc8T[I]:=C8;
+  C16:=I Shl 8; For J:=0 To 7 Do If (C16 And $8000)<>0 Then C16:=((C16 Shl 1) Xor $8005) And $FFFF Else C16:=(C16 Shl 1) And $FFFF;
+  FQCrc16T[I]:=C16;
+ End;
+End;
+
+Procedure FQPutBits(N: LongInt; V: Int64);
+Begin
+ If N<=0 Then Exit;
+ V:=V And ((Int64(1) Shl N)-1);
+ FQBitAcc:=(FQBitAcc Shl N) Or V; Inc(FQBitCnt,N);
+ While FQBitCnt>=8 Do Begin
+  FQBuf^[FQBufPos]:=(FQBitAcc Shr (FQBitCnt-8)) And 255; Inc(FQBufPos); Dec(FQBitCnt,8);
+ End;
+ FQBitAcc:=FQBitAcc And ((Int64(1) Shl FQBitCnt)-1);
+End;
+
+Procedure FQFlushBits;
+Begin
+ If FQBitCnt>0 Then Begin
+  FQBuf^[FQBufPos]:=(FQBitAcc Shl (8-FQBitCnt)) And 255; Inc(FQBufPos); FQBitCnt:=0; FQBitAcc:=0;
+ End;
+End;
+
+Procedure FQPutUtf8(Val: LongInt);
+Var Bytes,Shift: LongInt; T: Int64; In_: Int64;
+Begin
+ In_:=Val;
+ If In_<$80 Then FQPutBits(8,In_) Else Begin
+  Bytes:=(FQLog2(In_)+4) Div 5; Shift:=(Bytes-1)*6;
+  T:=(256-(256 Shr Bytes)) Or (In_ Shr Shift);
+  FQPutBits(8,T);
+  While Shift>=6 Do Begin
+   Dec(Shift,6); T:=$80 Or ((In_ Shr Shift) And $3F); FQPutBits(8,T);
+  End;
+ End;
+End;
+
+Function FQCountUtf8(Val: LongInt): LongInt;
+Var Bytes: LongInt;
+Begin
+ If Val<$80 Then FQCountUtf8:=8 Else Begin Bytes:=(FQLog2(Val)+4) Div 5; FQCountUtf8:=8*Bytes; End;
+End;
+
+Function FQMaxFrameSize(BlockSize,Ch,Bps: LongInt): LongInt;
+Var Count: LongInt;
+Begin
+ Count:=16;
+ Count:=Count+Ch*((7+Bps+7) Div 8);
+ If Ch=2 Then Count:=Count+((2*Bps+1)*BlockSize+7) Div 8 Else Count:=Count+(Ch*Bps*BlockSize+7) Div 8;
+ Count:=Count+2;
+ FQMaxFrameSize:=Count;
+End;
+
+Function FQSelectBlockSize(Rate,BlockMs: LongInt): LongInt;
+Var I,Target,Bs: LongInt;
+Begin
+ Bs:=FQBlockSizeTab[1];
+ Target:=(Rate*BlockMs) Div 1000;
+ For I:=0 To 15 Do
+  If (Target>=FQBlockSizeTab[I]) And (FQBlockSizeTab[I]>Bs) Then Bs:=FQBlockSizeTab[I];
+ FQSelectBlockSize:=Bs;
+End;
+
+{ ---- entropie : parametres de Rice ---- }
+Function FQRiceCountExact(Res: FQPI; Off,N,K: LongInt): QWord;
+Var I: LongInt; V: LongWord; Count: QWord; R: LongInt;
+Begin
+ Count:=0;
+ For I:=0 To N-1 Do Begin
+  R:=Res^[Off+I];
+  V:=(LongWord(R) Shl 1) Xor LongWord(FQSar(R,31));
+  Count:=Count+(V Shr K)+1+K;
+ End;
+ FQRiceCountExact:=Count;
+End;
+
+Function FQSubframeCountExact(Sub: Integer; PredOrder: LongInt): QWord;
+Var P,Porder,Psize,I,PartEnd,K: LongInt; Count: QWord;
+Begin
+ Count:=8;
+ If FQSub[Sub].Wasted<>0 Then Count:=Count+FQSub[Sub].Wasted;
+ If FQSub[Sub].Typ=0 Then Count:=Count+FQSub[Sub].Obits
+ Else If FQSub[Sub].Typ=1 Then Count:=Count+QWord(FQBlock)*FQSub[Sub].Obits
+ Else Begin
+  Count:=Count+PredOrder*FQSub[Sub].Obits;
+  If FQSub[Sub].Typ=32 Then Count:=Count+4+5+PredOrder*FQPrec;
+  Count:=Count+2;
+  Porder:=FQSub[Sub].RcPorder; Psize:=FQBlock Shr Porder;
+  Count:=Count+4;
+  I:=PredOrder; PartEnd:=Psize;
+  For P:=0 To (1 Shl Porder)-1 Do Begin
+   K:=FQSub[Sub].RcParams[P];
+   Count:=Count+FQSub[Sub].RcMode;
+   Count:=Count+FQRiceCountExact(FQSub[Sub].Residual,I,PartEnd-I,K);
+   I:=PartEnd;
+   PartEnd:=PartEnd+Psize; If PartEnd>FQBlock Then PartEnd:=FQBlock;
+  End;
+ End;
+ FQSubframeCountExact:=Count;
+End;
+
+Function FQRiceEncodeCount(Sum: QWord; N,K: LongInt): QWord;
+Begin
+ FQRiceEncodeCount:=QWord(Int64(N)*(K+1))+((Sum-QWord(N Shr 1)) Shr K);
+End;
+
+Function FQClipl32(A: Int64): Int64;
+Begin
+ If (A>2147483647) Or (A<-2147483648) Then Begin If A<0 Then FQClipl32:=-2147483648 Else FQClipl32:=2147483647; End Else FQClipl32:=A;
+End;
+
+Function FQFindOptimalParam(Sum: QWord; N,MaxParam: LongInt): LongInt;
+Var K: LongInt; Sum2: QWord; Q: Int64;
+Begin
+ If Sum<=QWord(N Shr 1) Then Begin FQFindOptimalParam:=0; Exit; End;
+ Sum2:=Sum-QWord(N Shr 1);
+ Q:=FQClipl32(Int64(Sum2 Div QWord(N)));
+ K:=FQLog2(Q);
+ If K>MaxParam Then K:=MaxParam;
+ FQFindOptimalParam:=K;
+End;
+
+Procedure FQCalcRice(Sub: Integer; PMin,PMax,N,PredOrder: LongInt; Var BitsOut: QWord);
+Var I,PP,Part,Cnt,K,KMax,OptP,Q: LongInt; Bits: Array[0..8] Of QWord; Data: FQPI; Sums: ^FQTQ;
+ TmpParams: Array[0..255] Of LongInt; TmpP: LongInt; AllBits: QWord; Udata: FQPU;
+ Pr,Rest,Res: LongInt;
+Begin
+ KMax:=(1 Shl FQSub[Sub].RcMode)-2;
+ Data:=FQSub[Sub].Residual; Udata:=FQSub[Sub].RcUdata;
+ For I:=PredOrder To N-1 Do Udata^[I]:=(LongWord(Data^[I]) Shl 1) Xor LongWord(FQSar(Data^[I],31));
+ { sommes du plus haut niveau (k=0) }
+ Part:=1 Shl PMax;
+ Q:=PredOrder; Rest:=N Shr PMax;
+ For I:=0 To Part-1 Do Begin
+  FQSub[Sub].RcSums[I]:=0;
+  Pr:=Q;
+  While Pr<(Rest*(I+1)) Do Begin FQSub[Sub].RcSums[I]:=FQSub[Sub].RcSums[I]+Udata^[Pr]; Inc(Pr); End;
+  Q:=Rest*(I+1);
+ End;
+ OptP:=PMin;
+ Bits[PMin]:=4294967295;
+ I:=PMax;
+ While True Do Begin
+  { calc_optimal_rice_params(tmp_rc, I, sums, n, pred_order, kmax) }
+  PP:=1 Shl I; AllBits:=4*PP; Cnt:=(N Shr I)-PredOrder;
+  For Q:=0 To PP-1 Do Begin
+   K:=FQFindOptimalParam(FQSub[Sub].RcSums[Q],Cnt,KMax);
+   AllBits:=AllBits+FQRiceEncodeCount(FQSub[Sub].RcSums[Q],Cnt,K);
+   TmpParams[Q]:=K;
+   Cnt:=N Shr I;
+  End;
+  Bits[I]:=AllBits;
+  If (Bits[I]<Bits[OptP]) Or (PMax=PMin) Then Begin
+   OptP:=I; FQSub[Sub].RcPorder:=I;
+   For Q:=0 To PP-1 Do FQSub[Sub].RcParams[Q]:=TmpParams[Q];
+  End;
+  If I=PMin Then Break;
+  Dec(I);
+  PP:=1 Shl I;
+  For Q:=0 To PP-1 Do FQSub[Sub].RcSums[Q]:=FQSub[Sub].RcSums[2*Q]+FQSub[Sub].RcSums[2*Q+1];
+ End;
+ BitsOut:=Bits[OptP];
+End;
+
+Function FQGetMaxPOrder(MaxP,N,Order: LongInt): LongInt;
+Var P,L: LongInt;
+Begin
+ L:=FQLog2(QWord(Int64(N) Xor Int64(N-1)));
+ P:=MaxP; If L<P Then P:=L;
+ If Order>0 Then Begin L:=FQLog2(N Div Order); If L<P Then P:=L; End;
+ FQGetMaxPOrder:=P;
+End;
+
+Function FQFindSubframeRiceParams(Sub: Integer; PredOrder: LongInt): QWord;
+Var PMin,PMax: LongInt; Bits,B2: QWord;
+Begin
+ PMin:=FQGetMaxPOrder(FQMinPart,FQBlock,PredOrder);
+ PMax:=FQGetMaxPOrder(FQMaxPart,FQBlock,PredOrder);
+ Bits:=8+PredOrder*FQSub[Sub].Obits+2+FQSub[Sub].RcMode;
+ If FQSub[Sub].Typ=32 Then Bits:=Bits+4+5+PredOrder*FQPrec;
+ FQCalcRice(Sub,PMin,PMax,FQBlock,PredOrder,B2);
+ FQFindSubframeRiceParams:=Bits+B2;
+End;
+
+Procedure FQEncodeResidualFixed(Res,Smp: FQPI; N,Order: LongInt);
+Var I: LongInt; V: Int64;
+Begin
+ For I:=0 To Order-1 Do Res^[I]:=Smp^[I];
+ For I:=Order To N-1 Do Begin
+  Case Order Of
+   0: V:=Smp^[I];
+   1: V:=Int64(Smp^[I])-Smp^[I-1];
+   2: V:=Int64(Smp^[I])-2*Int64(Smp^[I-1])+Smp^[I-2];
+   3: V:=Int64(Smp^[I])-3*Int64(Smp^[I-1])+3*Int64(Smp^[I-2])-Smp^[I-3];
+   Else V:=Int64(Smp^[I])-4*Int64(Smp^[I-1])+6*Int64(Smp^[I-2])-4*Int64(Smp^[I-3])+Smp^[I-4];
+  End;
+  Res^[I]:=LongInt(V And $FFFFFFFF);
+ End;
+End;
+
+{ LPC : residus ; retourne True si un residu sort de <INT32_MIN,INT32_MAX] (le chemin "limit" de FFmpeg) }
+Function FQLpcEncode(Res,Smp: FQPI; Len,Order: LongInt; Var Coefs: Array Of LongInt; Shift: LongInt; Limit: Boolean): Boolean;
+Var I,J: LongInt; P,T: Int64;
+Begin
+ FQLpcEncode:=False;
+ For I:=0 To Order-1 Do Res^[I]:=Smp^[I];
+ For I:=Order To Len-1 Do Begin
+  P:=0;
+  For J:=0 To Order-1 Do P:=P+Int64(Coefs[J])*Smp^[I-1-J];
+  P:=FQSar(P,Shift);
+  T:=Int64(Smp^[I])-P;
+  If Limit Then If (T<=-2147483648) Or (T>2147483647) Then Begin FQLpcEncode:=True; Exit; End;
+  Res^[I]:=LongInt(T And $FFFFFFFF);
+ End;
+End;
+
+Function FQLpcChoose(Bps: LongInt; Res,Smp: FQPI; Len,Order: LongInt; Var Coefs: Array Of LongInt; Shift: LongInt): Boolean;
+Var I: LongInt; MaxRes,MaxS: QWord; A: Int64;
+Begin
+ MaxRes:=0; MaxS:=QWord(1) Shl (Bps-1);
+ For I:=0 To Order-1 Do Begin A:=Int64(MaxS)*Coefs[I]; If A<0 Then A:=-A; MaxRes:=MaxRes+QWord(A); End;
+ MaxRes:=MaxRes Shr Shift;
+ MaxRes:=MaxRes+MaxS;
+ FQLpcChoose:=FQLpcEncode(Res,Smp,Len,Order,Coefs,Shift,MaxRes>2147483647);
+End;
+
+{ ---- analyse LPC (libavcodec/lpc.c, LPC_USE_DOUBLE) ---- }
+Procedure FQQuantizeLpc(Var LpcIn: Array Of Double; Order,Precision: LongInt; Var LpcOut: Array Of LongInt; Var Sh_: LongInt; MinShift,MaxShift,ZeroShift: LongInt);
+Var I,Sh,Qmax: LongInt; CMax,Err,Scale,A: Double; Sg: Single; R: LongInt;
+Begin
+ Qmax:=(1 Shl (Precision-1))-1;
+ CMax:=0.0;
+ For I:=0 To Order-1 Do Begin A:=Abs(LpcIn[I]); If A>CMax Then CMax:=A; End;
+ If CMax*(1 Shl MaxShift)<1.0 Then Begin
+  Sh_:=ZeroShift; For I:=0 To Order-1 Do LpcOut[I]:=0; Exit;
+ End;
+ Sh:=MaxShift;
+ While (CMax*(1 Shl Sh)>Qmax) And (Sh>MinShift) Do Dec(Sh);
+ If (Sh=0) And (CMax>Qmax) Then Begin
+  Scale:=Qmax/CMax;
+  For I:=0 To Order-1 Do LpcIn[I]:=LpcIn[I]*Scale;
+ End;
+ Err:=0;
+ For I:=0 To Order-1 Do Begin
+  Err:=Err-LpcIn[I]*(1 Shl Sh);
+  Sg:=Err;
+  R:=Round(Sg);
+  If R<-Qmax Then R:=-Qmax; If R>Qmax Then R:=Qmax;
+  LpcOut[I]:=R;
+  Err:=Err-R;
+ End;
+ Sh_:=Sh;
+End;
+
+Function FQCalcCoefs(Smp: FQPI; BlockSize,MinOrder,MaxOrder,Precision: LongInt; Var Coefs: Array Of LongInt; Var Shift: Array Of LongInt; OMethod: LongInt): LongInt;
+Var Autoc: Array[0..32] Of Double; Ref: Array[0..31] Of Double; Lpc: Array[0..31,0..31] Of Double;
+ W: FQPD; I,J,N2,Len,Lag,Est,Opt: LongInt; Wv,C,Err,R,F,B,Sum0,Sum1,Sum: Double; Row,Last: LongInt;
+ Row_: Array[0..31] Of Double; Tmp: Array[0..31] Of LongInt; Tmp2: LongInt;
+Begin
+ W:=@FQWinBuf^[32];
+ Len:=BlockSize;
+ { fenetre de Welch }
+ If Len=1 Then W^[0]:=0.0 Else Begin
+  N2:=Len Shr 1; C:=2.0/(Len-1.0);
+  If (Len And 1)<>0 Then Begin
+   For I:=0 To N2-1 Do Begin
+    Wv:=C-I-1.0; Wv:=1.0-(Wv*Wv);
+    W^[I]:=Smp^[I]*Wv; W^[Len-1-I]:=Smp^[Len-1-I]*Wv;
+   End;
+   W^[N2]:=0.0;
+  End Else Begin
+   For I:=0 To N2-1 Do Begin
+    Wv:=C-N2+I; Wv:=1.0-(Wv*Wv);
+    W^[N2-I-1]:=Smp^[N2-I-1]*Wv; W^[N2+I]:=Smp^[N2+I]*Wv;
+   End;
+  End;
+ End;
+ W^[Len]:=0.0; W^[Len+1]:=0.0;
+ { autocorrelation }
+ Lag:=MaxOrder;
+ J:=0;
+ While J<Lag Do Begin
+  Sum0:=1.0; Sum1:=1.0;
+  For I:=J To Len-1 Do Begin
+   Sum0:=Sum0+W^[I]*W^[I-J];
+   Sum1:=Sum1+W^[I]*W^[I-J-1];
+  End;
+  Autoc[J]:=Sum0; Autoc[J+1]:=Sum1;
+  Inc(J,2);
+ End;
+ If J=Lag Then Begin
+  Sum:=1.0;
+  I:=J-1;
+  While I<Len Do Begin
+   Sum:=Sum+(W^[I]*W^[I-J]+W^[I+1]*W^[I-J+1]);
+   Inc(I,2);
+  End;
+  Autoc[J]:=Sum;
+ End;
+ { Levinson-Durbin (compute_lpc_coefs, normalize=1, fail=0) }
+ Err:=Autoc[0];
+ Last:=0;
+ For I:=0 To MaxOrder-1 Do Begin
+  R:=-Autoc[I+1];
+  For J:=0 To I-1 Do R:=R-Lpc[Last,J]*Autoc[I-J];
+  If Err<>0 Then R:=R/Err;
+  Err:=Err*(1.0-(R*R));
+  Lpc[I,I]:=R;
+  For J:=0 To ((I+1) Shr 1)-1 Do Begin
+   F:=Lpc[Last,J]; B:=Lpc[Last,I-1-J];
+   Lpc[I,J]:=F+R*B;
+   Lpc[I,I-1-J]:=B+R*F;
+  End;
+  Last:=I;
+ End;
+ For I:=0 To MaxOrder-1 Do Ref[I]:=Abs(Lpc[I,I]);
+ Opt:=MaxOrder;
+ If OMethod=0 Then Begin
+  Est:=MinOrder;
+  For I:=MaxOrder-1 DownTo MinOrder-1 Do
+   If Ref[I]>0.10 Then Begin Est:=I+1; Break; End;
+  Opt:=Est; I:=Opt-1;
+  For J:=0 To I Do Row_[J]:=Lpc[I,J];
+  FQQuantizeLpc(Row_,I+1,Precision,Tmp,Tmp2,0,15,0);
+  For J:=0 To I Do Coefs[I*32+J]:=Tmp[J];
+  Shift[I]:=Tmp2;
+ End Else Begin
+  For I:=MinOrder-1 To MaxOrder-1 Do Begin
+   For J:=0 To I Do Row_[J]:=Lpc[I,J];
+   FQQuantizeLpc(Row_,I+1,Precision,Tmp,Tmp2,0,15,0);
+   For J:=0 To I Do Coefs[I*32+J]:=Tmp[J];
+   Shift[I]:=Tmp2;
+  End;
+ End;
+ FQCalcCoefs:=Opt;
+End;
+
+Function FQEncodeResidualCh(Ch: LongInt): QWord;
+Var I,J,N,MinOrder,MaxOrder,OptOrder,OMethod,Levels,Order,LastOrder,OptIndex,Step,Last: LongInt;
+ Sub: ^TFLSub; Res,Smp: FQPI;
+ Coefs: Array[0..1023] Of LongInt; Shift: Array[0..31] Of LongInt; Bits: Array[0..31] Of QWord; FBits: Array[0..4] Of QWord;
+ CRow: Array[0..31] Of LongInt; Verb: Boolean; Const U32=4294967295;
+
+ Function CountExact(PO: LongInt): QWord;
+ Begin CountExact:=FQSubframeCountExact(Ch,PO); End;
+
+ Function Choose(Ord_: LongInt): Boolean; { retourne True en cas d'echec (residu hors limites) }
+ Var K: LongInt;
+ Begin
+  For K:=0 To Ord_-1 Do CRow[K]:=Coefs[(Ord_-1)*32+K];
+  Choose:=FQLpcChoose(Sub^.Obits,Res,Smp,N,Ord_,CRow,Shift[Ord_-1]);
+ End;
+
+Begin
+ Sub:=@FQSub[Ch]; Res:=Sub^.Residual; Smp:=Sub^.Samples; N:=FQBlock;
+ { CONSTANT }
+ I:=1; While I<N Do Begin If Smp^[I]<>Smp^[0] Then Break; Inc(I); End;
+ If I=N Then Begin
+  Sub^.Typ:=0; Sub^.TypeCode:=0; Res^[0]:=Smp^[0];
+  FQEncodeResidualCh:=CountExact(0); Exit;
+ End;
+ Verb:=FQVerb Or (N<5);
+ If Verb Then Begin
+  Sub^.Typ:=1; Sub^.TypeCode:=1; For I:=0 To N-1 Do Res^[I]:=Smp^[I];
+  FQEncodeResidualCh:=CountExact(0); Exit;
+ End;
+ MinOrder:=FQMinPred; MaxOrder:=FQMaxPred; OMethod:=FQOMethod;
+ { FIXED }
+ Sub^.Typ:=8;
+ If (FQLpcType=0) Or (FQLpcType=1) Or (N<=MaxOrder) Then Begin
+  If MaxOrder>4 Then MaxOrder:=4;
+  OptOrder:=0; FBits[0]:=U32;
+  For I:=MinOrder To MaxOrder Do Begin
+   FQEncodeResidualFixed(Res,Smp,N,I);
+   FBits[I]:=FQFindSubframeRiceParams(Ch,I);
+   If FBits[I]<FBits[OptOrder] Then OptOrder:=I;
+  End;
+  Sub^.Order:=OptOrder; Sub^.TypeCode:=Sub^.Typ Or Sub^.Order;
+  If Sub^.Order<>MaxOrder Then Begin
+   FQEncodeResidualFixed(Res,Smp,N,Sub^.Order);
+   FQFindSubframeRiceParams(Ch,Sub^.Order);
+  End;
+  FQEncodeResidualCh:=CountExact(Sub^.Order); Exit;
+ End;
+ { LPC }
+ Sub^.Typ:=32;
+ OptOrder:=FQCalcCoefs(Smp,N,MinOrder,MaxOrder,FQPrec,Coefs,Shift,OMethod);
+ If (OMethod=1) Or (OMethod=2) Or (OMethod=3) Then Begin
+  Levels:=1 Shl OMethod;
+  Order:=-1; OptIndex:=Levels-1; OptOrder:=MaxOrder-1; Bits[OptIndex]:=U32;
+  For I:=Levels-1 DownTo 0 Do Begin
+   LastOrder:=Order;
+   Order:=MinOrder+(((MaxOrder-MinOrder+1)*(I+1)) Div Levels)-1;
+   If Order<MinOrder-1 Then Order:=MinOrder-1; If Order>MaxOrder-1 Then Order:=MaxOrder-1;
+   If Order=LastOrder Then Continue;
+   If Choose(Order+1) Then Continue;
+   Bits[I]:=FQFindSubframeRiceParams(Ch,Order+1);
+   If Bits[I]<Bits[OptIndex] Then Begin OptIndex:=I; OptOrder:=Order; End;
+  End;
+  Inc(OptOrder);
+ End Else If OMethod=4 Then Begin
+  OptOrder:=0; Bits[0]:=U32;
+  For I:=MinOrder-1 To MaxOrder-1 Do Begin
+   If Choose(I+1) Then Continue;
+   Bits[I]:=FQFindSubframeRiceParams(Ch,I+1);
+   If Bits[I]<Bits[OptOrder] Then OptOrder:=I;
+  End;
+  Inc(OptOrder);
+ End Else If OMethod=5 Then Begin
+  OptOrder:=MinOrder-1+(MaxOrder-MinOrder) Div 3;
+  For I:=0 To 31 Do Bits[I]:=QWord($FFFFFFFFFFFFFFFF);
+  Step:=16;
+  While Step<>0 Do Begin
+   Last:=OptOrder;
+   I:=Last-Step;
+   While I<=Last+Step Do Begin
+    If Not ((I<MinOrder-1) Or (I>=MaxOrder) Or (Bits[I]<U32)) Then
+     If Not Choose(I+1) Then Begin
+      Bits[I]:=FQFindSubframeRiceParams(Ch,I+1);
+      If Bits[I]<Bits[OptOrder] Then OptOrder:=I;
+     End;
+    Inc(I,Step);
+   End;
+   Step:=Step Shr 1;
+  End;
+  Inc(OptOrder);
+ End;
+ Sub^.Order:=OptOrder; Sub^.TypeCode:=Sub^.Typ Or (Sub^.Order-1);
+ Sub^.Shift:=Shift[Sub^.Order-1];
+ For I:=0 To Sub^.Order-1 Do Sub^.Coefs[I]:=Coefs[(Sub^.Order-1)*32+I];
+ For I:=0 To 31 Do CRow[I]:=Sub^.Coefs[I];
+ If FQLpcChoose(Sub^.Obits,Res,Smp,N,Sub^.Order,CRow,Sub^.Shift) Then Begin
+  Sub^.Typ:=1; Sub^.TypeCode:=1; For I:=0 To N-1 Do Res^[I]:=Smp^[I];
+  FQEncodeResidualCh:=CountExact(0); Exit;
+ End;
+ FQFindSubframeRiceParams(Ch,Sub^.Order);
+ FQEncodeResidualCh:=CountExact(Sub^.Order);
+End;
+
+Function FQEncodeFrameCount: LongInt;
+Var Ch: LongInt; Count: QWord;
+Begin
+ Count:=32+FQCountUtf8(FQFrameCount);
+ If FQBs0=6 Then Count:=Count+8 Else If FQBs0=7 Then Count:=Count+16;
+ If FQSr0=12 Then Count:=Count+8 Else If FQSr0>12 Then Count:=Count+16;
+ Count:=Count+8;
+ For Ch:=0 To FQCh-1 Do Count:=Count+FQEncodeResidualCh(Ch);
+ Count:=Count+((8-(Count And 7)) And 7);
+ Count:=Count+16;
+ Count:=Count Shr 3;
+ FQEncodeFrameCount:=Count;
+End;
+
+Procedure FQRemoveWasted;
+Var Ch,I,Wb: LongInt; V: LongInt;
+Begin
+ For Ch:=0 To FQCh-1 Do Begin
+  V:=0;
+  For I:=0 To FQBlock-1 Do Begin
+   V:=V Or FQSub[Ch].Samples^[I];
+   If (V And 1)<>0 Then Break;
+  End;
+  If (V=0) Or ((V And 1)<>0) Then Exit;
+  Wb:=0; While ((V Shr Wb) And 1)=0 Do Inc(Wb);
+  For I:=0 To FQBlock-1 Do FQSub[Ch].Samples^[I]:=LongInt(FQSar(FQSub[Ch].Samples^[I],Wb));
+  FQSub[Ch].Wasted:=Wb; Dec(FQSub[Ch].Obits,Wb);
+  If FQSub[Ch].Obits<=17 Then FQSub[Ch].RcMode:=4;
+ End;
+End;
+
+Function FQEstimateStereoMode(L,R: FQPI; N,MaxRice,Bps: LongInt): LongInt;
+Var Sum,Score: Array[0..3] Of QWord; I,K,Best: LongInt; Lt,Rt: Int64; A: Int64;
+Begin
+ For I:=0 To 3 Do Sum[I]:=0;
+ For I:=2 To N-1 Do Begin
+  Lt:=Int64(L^[I])-2*Int64(L^[I-1])+L^[I-2];
+  Rt:=Int64(R^[I])-2*Int64(R^[I-1])+R^[I-2];
+  If Bps<30 Then Begin Lt:=LongInt(Lt And $FFFFFFFF); Rt:=LongInt(Rt And $FFFFFFFF); End;
+  A:=FQSar(Lt+Rt,1); If A<0 Then A:=-A; Sum[2]:=Sum[2]+QWord(A);
+  A:=Lt-Rt; If A<0 Then A:=-A; Sum[3]:=Sum[3]+QWord(A);
+  A:=Lt; If A<0 Then A:=-A; Sum[0]:=Sum[0]+QWord(A);
+  A:=Rt; If A<0 Then A:=-A; Sum[1]:=Sum[1]+QWord(A);
+ End;
+ For I:=0 To 3 Do Begin
+  K:=FQFindOptimalParam(2*Sum[I],N,MaxRice);
+  Sum[I]:=FQRiceEncodeCount(2*Sum[I],N,K);
+ End;
+ Score[0]:=Sum[0]+Sum[1]; Score[1]:=Sum[0]+Sum[3]; Score[2]:=Sum[1]+Sum[3]; Score[3]:=Sum[2]+Sum[3];
+ Best:=0;
+ For I:=1 To 3 Do If Score[I]<Score[Best] Then Best:=I;
+ FQEstimateStereoMode:=Best;
+End;
+
+Procedure FQDecorrelate;
+Var I,N: LongInt; L,R: FQPI; T: LongInt;
+Begin
+ N:=FQBlock; L:=FQSub[0].Samples; R:=FQSub[1].Samples;
+ If FQCh<>2 Then Begin FQChMode:=0; Exit; End;
+ If FQChModeOpt<0 Then FQChMode:=FQEstimateStereoMode(L,R,N,(1 Shl FQSub[0].RcMode)-2,FQBits)
+ Else FQChMode:=FQChModeOpt;
+ If FQChMode=0 Then Exit;
+ If FQChMode=3 Then Begin
+  For I:=0 To N-1 Do Begin T:=L^[I]; L^[I]:=LongInt(FQSar(Int64(T)+R^[I],1)); R^[I]:=T-R^[I]; End;
+  Inc(FQSub[1].Obits);
+ End Else If FQChMode=1 Then Begin
+  For I:=0 To N-1 Do R^[I]:=L^[I]-R^[I];
+  Inc(FQSub[1].Obits);
+ End Else Begin
+  For I:=0 To N-1 Do L^[I]:=L^[I]-R^[I];
+  Inc(FQSub[0].Obits);
+ End;
+End;
+
+Procedure FQWriteFrame(Var OutPos: LongInt);
+Var Ch,I,P,Porder,Psize,PartEnd,K,Cb,Crc: LongInt; Sub: ^TFLSub; Res: FQPI; V: LongWord; E,Mask: LongWord; Val: LongInt;
+Begin
+ FQBufPos:=0; FQBitCnt:=0; FQBitAcc:=0;
+ FQPutBits(16,$FFF8); FQPutBits(4,FQBs0); FQPutBits(4,FQSr0);
+ If FQChMode=0 Then FQPutBits(4,FQCh-1) Else FQPutBits(4,FQChMode+8-1);
+ FQPutBits(3,FQBpsCode); FQPutBits(1,0);
+ FQPutUtf8(FQFrameCount);
+ If FQBs0=6 Then FQPutBits(8,FQBs1) Else If FQBs0=7 Then FQPutBits(16,FQBs1);
+ If FQSr0=12 Then FQPutBits(8,FQSr1) Else If FQSr0>12 Then FQPutBits(16,FQSr1);
+ FQFlushBits;
+ Crc:=0; For I:=0 To FQBufPos-1 Do Crc:=FQCrc8T[Crc Xor FQBuf^[I]];
+ FQPutBits(8,Crc);
+ For Ch:=0 To FQCh-1 Do Begin
+  Sub:=@FQSub[Ch]; Res:=Sub^.Residual;
+  FQPutBits(1,0); FQPutBits(6,Sub^.TypeCode);
+  If Sub^.Wasted<>0 Then FQPutBits(1,1) Else FQPutBits(1,0);
+  If Sub^.Wasted<>0 Then FQPutBits(Sub^.Wasted,1);
+  If Sub^.Typ=0 Then FQPutBits(Sub^.Obits,Res^[0])
+  Else If Sub^.Typ=1 Then Begin
+   For I:=0 To FQBlock-1 Do FQPutBits(Sub^.Obits,Res^[I]);
+  End Else Begin
+   For I:=0 To Sub^.Order-1 Do FQPutBits(Sub^.Obits,Res^[I]);
+   If Sub^.Typ=32 Then Begin
+    FQPutBits(4,FQPrec-1); FQPutBits(5,Sub^.Shift);
+    For I:=0 To Sub^.Order-1 Do FQPutBits(FQPrec,Sub^.Coefs[I]);
+   End;
+   FQPutBits(2,Sub^.RcMode-4);
+   Porder:=Sub^.RcPorder; Psize:=FQBlock Shr Porder;
+   FQPutBits(4,Porder);
+   I:=Sub^.Order; PartEnd:=Psize;
+   For P:=0 To (1 Shl Porder)-1 Do Begin
+    K:=Sub^.RcParams[P];
+    FQPutBits(Sub^.RcMode,K);
+    While I<PartEnd Do Begin
+     Val:=Res^[I]; Inc(I);
+     V:=(LongWord(Val) Shl 1) Xor LongWord(FQSar(Val,31));
+     E:=(V Shr K)+1;
+     While E>31 Do Begin FQPutBits(31,0); Dec(E,31); End;
+     FQPutBits(E,1);
+     If K<>0 Then Begin Mask:=$FFFFFFFF Shr (32-K); FQPutBits(K,V And Mask); End;
+    End;
+    PartEnd:=PartEnd+Psize; If PartEnd>FQBlock Then PartEnd:=FQBlock;
+   End;
+  End;
+ End;
+ FQFlushBits;
+ Cb:=0; For I:=0 To FQBufPos-1 Do Cb:=((Cb Shl 8) And $FFFF) Xor FQCrc16T[((Cb Shr 8) Xor FQBuf^[I]) And 255];
+ FQPutBits(16,Cb);
+ FQFlushBits;
+ OutPos:=FQBufPos;
+End;
+
+Procedure FQWriteStreamInfo(Var H: Array Of Byte);
+Var I: LongInt; V: Int64;
+Begin
+ For I:=0 To 33 Do H[I]:=0;
+ FQBufPos:=0; FQBitCnt:=0; FQBitAcc:=0;
+ { ecriture directe dans H via une zone temporaire }
+ H[0]:=FQMaxBS Shr 8; H[1]:=FQMaxBS And 255; H[2]:=FQMaxBS Shr 8; H[3]:=FQMaxBS And 255;
+ H[4]:=(FQMinFrame Shr 16) And 255; H[5]:=(FQMinFrame Shr 8) And 255; H[6]:=FQMinFrame And 255;
+ H[7]:=(FQMaxFrame Shr 16) And 255; H[8]:=(FQMaxFrame Shr 8) And 255; H[9]:=FQMaxFrame And 255;
+ V:=Int64(FQRate) Shl 44;
+ V:=V Or (Int64(FQCh-1) Shl 41) Or (Int64(FQBits-1) Shl 36) Or (FQSampleCount And $FFFFFFFFF);
+ For I:=0 To 7 Do H[10+I]:=(V Shr (56-8*I)) And 255;
+ For I:=0 To 15 Do H[18+I]:=FQMdSum[I];
+End;
+
+{ Encode N echantillons entrelaces Smp (deja ramenes a Bps bits, signes) en FQAC dans le fichier Target.
+  Level : niveau de compression (-1 = 5). ChMask : masque de canaux WAVEFORMATEXTENSIBLE (0 = inconnu). }
+Procedure F1FlacEncode(Const Target: String; Smp: FQPI; NFr,Ch,Rate,Bps,ChMask,Level: LongInt);
+Var I,J,Pos,FrameSize,Nb,K,FrameBytes,OutBytes,Level_,Shift_: LongInt; Si: Array[0..33] Of Byte;
+ Hdr: Array[0..7] Of Byte; Md5Buf: FQPB; BlockMs: LongInt; Vendor: String; Tmp: Array[0..11] Of Byte;
+ CmN: LongInt; CmK: TMdK; CmV: TMdV; Q,Len,Cnt: LongInt; Mask: String; MaxLen: LongInt; Code: Integer;
+ Stm: Array[0..33] Of Byte; Pad: Array[0..255] Of Byte; Written: Int64;
+ Native: Boolean;
+Const
+ LpcTypes: Array[0..12] Of Byte=(1,1,1,2,2,2,2,2,2,2,2,2,2);
+ MinPred: Array[0..12] Of Byte=(2,0,0,1,1,1,1,1,1,1,1,1,1);
+ MaxPred: Array[0..12] Of Byte=(3,4,4,6,8,8,8,8,12,12,12,32,32);
+ OMeth: Array[0..12] Of Byte=(0,0,0,0,0,0,2,5,2,5,4,5,4);
+ MinPart: Array[0..12] Of Byte=(2,2,0,0,0,0,0,0,0,0,0,0,0);
+ MaxPart: Array[0..12] Of Byte=(2,2,3,3,3,8,8,8,8,8,8,8,8);
+ NatMasks: Array[0..7] Of LongInt=($4,$3,$7,$33,$607,$60F,$70F,$63F);
+Begin
+ FQCrcInit;
+ If (Ch<1) Or (Ch>8) Then Fail('flac: '+'nombre de canaux non pris en charge (1..8).');
+ FQCh:=Ch;
+ If Bps=16 Then FQBpsCode:=4 Else FQBpsCode:=6;
+ FQBits:=Bps;
+ If Rate<1 Then Fail('flac: frequence incorrecte.');
+ FQSr0:=-1;
+ For I:=1 To 11 Do If Rate=FQRateTab[I] Then Begin FQSr0:=I; FQSr1:=0; Break; End;
+ If FQSr0<0 Then Begin
+  If (Rate Mod 1000=0) And (Rate<255000) Then Begin FQSr0:=12; FQSr1:=Rate Div 1000; End
+  Else If (Rate Mod 10=0) And (Rate<655350) Then Begin FQSr0:=14; FQSr1:=Rate Div 10; End
+  Else If Rate<65535 Then Begin FQSr0:=13; FQSr1:=Rate; End
+  Else If Rate<1048576 Then Begin FQSr0:=0; FQSr1:=0; End
+  Else Fail('flac: '+'frequence non prise en charge.');
+ End;
+ FQRate:=Rate;
+ If Level<0 Then Level_:=5 Else Level_:=Level;
+ If Level_>12 Then Fail('flac: niveau de compression incorrect.');
+ FQLevel:=Level_;
+ If Level_<3 Then BlockMs:=27 Else BlockMs:=105;
+ FQLpcType:=LpcTypes[Level_]; FQMinPred:=MinPred[Level_]; FQMaxPred:=MaxPred[Level_]; FQOMethod:=OMeth[Level_];
+ FQMinPart:=MinPart[Level_]; FQMaxPart:=MaxPart[Level_]; FQPrec:=15; FQChModeOpt:=-1;
+ If FQLpcType=1 Then Begin
+  If FQMinPred>4 Then FQMinPred:=4; If FQMaxPred>4 Then FQMaxPred:=4;
+ End;
+ FrameSize:=FQSelectBlockSize(Rate,BlockMs);
+ FQMaxBS:=FrameSize;
+ FQMaxFrame:=FQMaxFrameSize(FrameSize,Ch,Bps);
+ FQFrameCount:=0; FQSampleCount:=0; FQMinFrame:=FQMaxFrame; FQMaxEncFrame:=0;
+ FQMd5Init; FQBlock:=0;
+ { tampons }
+ GetMem(FQBuf,FrameSize*Ch*5+4096);
+ For I:=0 To Ch-1 Do Begin
+  GetMem(FQSub[I].Samples,(FrameSize+16)*4); GetMem(FQSub[I].Residual,(FrameSize+16)*4); GetMem(FQSub[I].RcUdata,(FrameSize+16)*4);
+ End;
+ GetMem(FQWinBuf,(FrameSize+64)*8); FillChar(FQWinBuf^,(FrameSize+64)*8,0);
+ GetMem(Md5Buf,FrameSize*Ch*4+16);
+ { en-tete }
+ FQMaxFrame:=FQMaxFrame; { streaminfo provisoire }
+ FQWriteStreamInfo(Stm);
+ OpenWrite(Target);
+ Hdr[0]:=102; Hdr[1]:=76; Hdr[2]:=97; Hdr[3]:=67; WriteBytes(Hdr,4);
+ Hdr[0]:=0; Hdr[1]:=0; Hdr[2]:=0; Hdr[3]:=34; WriteBytes(Hdr,4);
+ WriteBytes(Stm,34);
+ { bloc VORBIS_COMMENT : dictionnaire global + encoder + masque de canaux }
+ CmN:=MdN; For I:=0 To MdN-1 Do Begin CmK[I]:=MdK[I]; CmV[I]:=MdV[I]; End;
+ If VGBitExact Then Vendor:='ffmpeg' Else Begin
+  Vendor:='Lavf60.16.100';
+  Q:=-1; For I:=0 To CmN-1 Do If MdLow(CmK[I])='encoder' Then Q:=I;
+  If Q<0 Then MdSet(CmN,CmK,CmV,'encoder','Lavf60.16.100',False,False);
+ End;
+ If ChMask<>0 Then Begin
+  Native:=False; For I:=0 To 7 Do If ChMask=NatMasks[I] Then Native:=True;
+  If (ChMask And Not $3FFFF)=0 Then If Not Native Then Begin
+   Q:=-1; For I:=0 To CmN-1 Do If MdLow(CmK[I])='waveformatextensible_channel_mask' Then Q:=I;
+   If Q<0 Then Begin
+    Mask:='0x'; Q:=ChMask;
+    Len:=0; Cnt:=Q; While Cnt<>0 Do Begin Inc(Len); Cnt:=Cnt Shr 4; End;
+    For I:=Len-1 DownTo 0 Do Mask:=Mask+Copy('0123456789abcdef',((Q Shr (4*I)) And 15)+1,1);
+    MdSet(CmN,CmK,CmV,'WAVEFORMATEXTENSIBLE_CHANNEL_MASK',Mask,False,False);
+   End;
+  End;
+ End;
+ { conversion des cles vers VorbisComment }
+ For I:=0 To CmN-1 Do Begin
+  If MdLow(CmK[I])='album_artist' Then CmK[I]:='ALBUMARTIST'
+  Else If MdLow(CmK[I])='track' Then CmK[I]:='TRACKNUMBER'
+  Else If MdLow(CmK[I])='disc' Then CmK[I]:='DISCNUMBER'
+  Else If MdLow(CmK[I])='comment' Then CmK[I]:='DESCRIPTION';
+ End;
+ Len:=8+Length(Vendor);
+ For I:=0 To CmN-1 Do Len:=Len+4+Length(CmK[I])+1+Length(CmV[I]);
+ Hdr[0]:=4; Hdr[1]:=(Len Shr 16) And 255; Hdr[2]:=(Len Shr 8) And 255; Hdr[3]:=Len And 255; WriteBytes(Hdr,4);
+ Q:=Length(Vendor); Tmp[0]:=Q And 255; Tmp[1]:=(Q Shr 8) And 255; Tmp[2]:=0; Tmp[3]:=0; WriteBytes(Tmp,4);
+ WriteBytes(Vendor[1],Q);
+ Tmp[0]:=CmN And 255; Tmp[1]:=(CmN Shr 8) And 255; Tmp[2]:=0; Tmp[3]:=0; WriteBytes(Tmp,4);
+ For I:=0 To CmN-1 Do Begin
+  Q:=Length(CmK[I])+1+Length(CmV[I]);
+  Tmp[0]:=Q And 255; Tmp[1]:=(Q Shr 8) And 255; Tmp[2]:=0; Tmp[3]:=0; WriteBytes(Tmp,4);
+  WriteBytes(CmK[I][1],Length(CmK[I])); Tmp[0]:=61; WriteBytes(Tmp,1); If Length(CmV[I])>0 Then WriteBytes(CmV[I][1],Length(CmV[I]));
+ End;
+ { bloc PADDING 8192 (dernier bloc) }
+ Hdr[0]:=$81; Hdr[1]:=0; Hdr[2]:=$20; Hdr[3]:=0; WriteBytes(Hdr,4);
+ FillChar(Pad,SizeOf(Pad),0);
+ For I:=1 To 32 Do WriteBytes(Pad,256);
+ { trames }
+ Pos:=0;
+ While Pos<NFr Do Begin
+  Nb:=FrameSize; If NFr-Pos<Nb Then Nb:=NFr-Pos;
+  If Nb<FQBlockSizeTab[0]+1 Then ;
+  If Nb<FQBlock Then Nb:=Nb;
+  { change max_framesize pour une trame finale courte }
+  If Nb<FQBlock Then FQMaxFrame:=FQMaxFrameSize(Nb,Ch,Bps);
+  { init_frame }
+  FQBlock:=Nb; FQBs0:=-1;
+  For I:=0 To 15 Do If Nb=FQBlockSizeTab[I] Then Begin FQBs0:=I; FQBs1:=0; Break; End;
+  If FQBs0<0 Then Begin
+   If Nb<=256 Then FQBs0:=6 Else FQBs0:=7;
+   FQBs1:=Nb-1;
+  End;
+  For K:=0 To Ch-1 Do Begin
+   FQSub[K].Wasted:=0; FQSub[K].Obits:=Bps;
+   If Bps>16 Then FQSub[K].RcMode:=5 Else FQSub[K].RcMode:=4;
+  End;
+  FQVerb:=False;
+  For I:=0 To Nb-1 Do For K:=0 To Ch-1 Do FQSub[K].Samples^[I]:=Smp^[(Pos+I)*Ch+K];
+  FQDecorrelate;
+  FQRemoveWasted;
+  FrameBytes:=FQEncodeFrameCount;
+  If (FrameBytes<0) Or (FrameBytes>FQMaxFrame) Then Begin
+   FQVerb:=True; FrameBytes:=FQEncodeFrameCount;
+  End;
+  FQWriteFrame(OutBytes);
+  WriteBytes(FQBuf^,OutBytes);
+  Inc(FQFrameCount); Inc(FQSampleCount,Nb);
+  { MD5 des echantillons d'origine }
+  If Bps<=16 Then Begin
+   For I:=0 To Nb*Ch-1 Do Begin
+    J:=Smp^[Pos*Ch+I]; Md5Buf^[2*I]:=J And 255; Md5Buf^[2*I+1]:=(J Shr 8) And 255;
+   End;
+   FQMd5Add(Md5Buf^,Nb*Ch*2);
+  End Else Begin
+   For I:=0 To Nb*Ch-1 Do Begin
+    J:=Smp^[Pos*Ch+I]; Md5Buf^[3*I]:=J And 255; Md5Buf^[3*I+1]:=(J Shr 8) And 255; Md5Buf^[3*I+2]:=(J Shr 16) And 255;
+   End;
+   FQMd5Add(Md5Buf^,Nb*Ch*3);
+  End;
+  If OutBytes>FQMaxEncFrame Then FQMaxEncFrame:=OutBytes;
+  If OutBytes<FQMinFrame Then FQMinFrame:=OutBytes;
+  Inc(Pos,Nb);
+ End;
+ FQMaxFrame:=FQMaxEncFrame;
+ FQMd5Final;
+ FQWriteStreamInfo(Stm);
+ {$I-}Seek(ActiveOutput,8); Code:=IOResult;{$I+}
+ If Code<>0 Then Fail('flac: positionnement impossible.');
+ WriteBytes(Stm,34);
+ CloseWrite;
+ For I:=0 To Ch-1 Do Begin FreeMem(FQSub[I].Samples); FreeMem(FQSub[I].Residual); FreeMem(FQSub[I].RcUdata); End;
+ FreeMem(FQBuf); FreeMem(FQWinBuf); FreeMem(Md5Buf);
+End;
+{ F1-BLOCK-END }
 { ==== BLOCK-ANCHOR-F1 : inserer le code du groupe F1 juste au-dessus de cette ligne ==== }
 
 { ==== BLOCK-ANCHOR-F2 : inserer le code du groupe F2 juste au-dessus de cette ligne ==== }
@@ -118156,7 +119046,9 @@ Var
  PcmL2A,PcmL2U: Array[0..16383] Of Byte;
  PcmRev: Array[0..255] Of Byte;
  PcmReady: Boolean;
- PcmInRate,PcmInCh: LongInt;
+ PcmInRate,PcmInCh,PcmInSkip: LongInt;
+ PcmSrcAiff: Boolean; { F1 : la source de PcmOpenSource est un AIFF }
+ PcmSrcMask: LongInt; { F1 : dwChannelMask du WAV extensible source (0 si absent) }
  PcmMsg: String;
 
 Function PcmSar(V: Int64; N: LongInt): Int64;
@@ -118406,7 +119298,7 @@ Begin
     0: If To_=1 Then I:=(I-128)*256 Else I:=(I-128)*16777216;
     1: If To_=0 Then I:=PcmSar(I,8)+128 Else I:=I*65536;
     2: If To_=0 Then I:=PcmSar(I,24)+128
-       Else I:=PcmClip(PcmSar(PcmSar(I,15)+1,1),-32768,32767);
+       Else I:=PcmSar(I,16); { swr audioconvert.c : S32->S16 = x>>16 }
    End;
   End Else Begin
    Case From Of
@@ -118502,8 +119394,10 @@ Begin
    If (Sz<16) Or (Limit-Pos<16) Then Break;
    ReadAt(Pos,B,16);
    Tag:=B[0]+B[1]*256; Ch:=B[2]+B[3]*256; Rate:=B[4]+B[5]*256+B[6]*65536+B[7]*16777216; Bits:=B[14]+B[15]*256;
+   PcmSrcMask:=0;
    If (Tag=$FFFE) And (Sz>=40) And (Limit-Pos>=40) Then Begin
     ReadAt(Pos,B,40); Tag:=B[24]+B[25]*256;
+    PcmSrcMask:=B[20]+B[21]*256+B[22]*65536+(B[23] And 127)*16777216;
    End;
    HasFmt:=True;
   End Else If Not Aiff And (Id='data') Then Begin
@@ -118561,12 +119455,13 @@ Begin
  End;
  If Not S.Ok Or (Ch<1) Or (Ch>8) Or (Rate<1) Then Begin CloseRead; Exit; End;
  DataSize:=(DataSize Div (Ch*S.Bytes))*(Ch*S.Bytes);
+ PcmSrcAiff:=Aiff;
  PcmOpenSource:=True;
 End;
 
 { ecrit un fichier WAV natif (classe de l'echantillon conservee) a partir d'un flux brut de specification S }
 Procedure PcmWavHeader(Var D: TPcmSpec; Ch,Rate,Frames: LongInt; Ext,Fact: Boolean; BitsValid,Tag: LongInt);
-Var Data,FmtSize,Mask: LongInt;
+Var Data,FmtSize,Mask,Tag2,Mk2: LongInt;
 Begin
  Data:=Frames*Ch*D.Bytes;
  If Ext Then FmtSize:=40 Else If Fact Then FmtSize:=18 Else FmtSize:=16;
@@ -118578,8 +119473,13 @@ Begin
  If Ext Then Begin
   PcmHL16(22); PcmHL16(BitsValid);
   Case Ch Of
-   1: Mask:=4; 2: Mask:=3; 3: Mask:=$7; 4: Mask:=$107; 5: Mask:=$37; 6: Mask:=$3F; 7: Mask:=$13F; 8: Mask:=$63F;
+   1: Mask:=4; 2: Mask:=3; 3: Mask:=$B; 4: Mask:=$107; 5: Mask:=$37; 6: Mask:=$3F; 7: Mask:=$70F; 8: Mask:=$63F;
    Else Mask:=0;
+  End;
+  { F1 : masque de canaux du WAV source s'il est coherent }
+  If PcmSrcMask<>0 Then Begin
+   Tag2:=0; Mk2:=PcmSrcMask; While Mk2<>0 Do Begin Inc(Tag2,Mk2 And 1); Mk2:=Mk2 Shr 1; End;
+   If Tag2=Ch Then Mask:=PcmSrcMask;
   End;
   PcmHL32(Mask);
   PcmHL16(Tag); PcmHL16(0); PcmHL32($00100000); PcmHL32($AA000080); PcmHL32($719B3800);
@@ -118605,8 +119505,9 @@ End;
 Procedure PcmEncodeFile(Const Source,Target,OutFmt,Codec: String);
 Var
  S,D: TPcmSpec; Ch,Rate,DS,DSz,Frames,Done,N,Chunk,InB,OutB,K,Bits,Tag: LongInt; BI,BO: TPcmBuf; Name,AT: String;
- Ext,Fact: Boolean; E: Double; M: Int64; Ex: LongInt; Dummy: LongInt;
+ Ext,Fact: Boolean; E: Double; M: Int64; Ex: LongInt; Dummy: LongInt; Ann: Array[0..2399] Of Byte; AnnN,AnnCnt: LongInt;
 Begin
+ AnnN:=0;
  If Not PcmOpenSource(Source,S,Ch,Rate,DS,DSz) Then Fail('pcm: source WAV/AIFF PCM requise.');
  CloseRead;
  If Not PcmSpecOf(Codec,D) Or (D.Spc=4) Or D.Planar Then Fail('pcm: codec d''encodage non pris en charge: '+Codec);
@@ -118642,20 +119543,68 @@ Begin
   PcmHTag('SSND'); PcmHB32(8+Frames*Ch*D.Bytes); PcmHB32(0); PcmHB32(0);
  End Else If OutFmt='daud' Then Begin
   If (Name<>'s24daud') Or (Ch<>6) Or (Rate<>96000) Then Fail('daud: pcm_s24daud, 6 canaux, 96000 Hz requis.');
+ End Else If OutFmt='au' Then Begin
+  { F1 : Sun AU (libavformat/au.c) }
+  If Name='mulaw' Then Tag:=1 Else If Name='s8' Then Tag:=2 Else If Name='s16be' Then Tag:=3 Else If Name='s24be' Then Tag:=4
+  Else If Name='s32be' Then Tag:=5 Else If Name='f32be' Then Tag:=6 Else If Name='f64be' Then Tag:=7 Else If Name='alaw' Then Tag:=27
+  Else Fail('au: codec non pris en charge: '+Codec);
+  AnnN:=0; AnnCnt:=0;
+  For K:=0 To 4 Do Begin
+   AT:=Copy('TitleArtistAlbumTrackGenre',1,0);
+   Case K Of 0: AT:='Title'; 1: AT:='Artist'; 2: AT:='Album'; 3: AT:='Track'; Else AT:='Genre'; End;
+   For Ex:=0 To MdN-1 Do If MdLow(MdK[Ex])=MdLow(AT) Then Begin
+    If AnnCnt>0 Then Begin Ann[AnnN]:=10; Inc(AnnN); End;
+    Inc(AnnCnt);
+    For Bits:=1 To Length(AT) Do Begin Ann[AnnN]:=Ord(AT[Bits]); Inc(AnnN); End;
+    Ann[AnnN]:=61; Inc(AnnN);
+    For Bits:=1 To Length(MdV[Ex]) Do Begin Ann[AnnN]:=Ord(MdV[Ex][Bits]); Inc(AnnN); End;
+    Break;
+   End;
+  End;
+  For K:=1 To 8 Do Begin Ann[AnnN]:=0; Inc(AnnN); End;
+  AnnN:=AnnN And Not 7;
+  PcmHTag('.snd'); PcmHB32(24+AnnN); PcmHB32(Frames*Ch*D.Bytes); PcmHB32(Tag); PcmHB32(Rate); PcmHB32(Ch);
+  Move(Ann,PcmH[PcmHN],0);
+ End Else If OutFmt='voc' Then Begin
+  { F1 : Creative Voice (libavformat/vocenc.c) }
+  If Name='u8' Then Tag:=0 Else If Name='s16le' Then Tag:=4 Else If Name='alaw' Then Tag:=6 Else If Name='mulaw' Then Tag:=7
+  Else Fail('voc: codec non pris en charge: '+Codec);
+  PcmHTag('Crea'); PcmHTag('tive'); PcmHTag(' Voi'); PcmHTag('ce F'); PcmHTag('ile'+#26);
+  PcmHL16(26); PcmHL16($114); PcmHL16($111F);
  End Else If PcmIsRawName(OutFmt) Or (OutFmt=Name) Then Begin
   If Name<>OutFmt Then Fail('pcm: le format brut '+OutFmt+' exige le codec pcm_'+OutFmt+'.');
  End Else Fail('pcm: conteneur de sortie non pris en charge: '+OutFmt);
  OpenWrite(Target);
  OpenRead(Source);
  If PcmHN>0 Then WriteBytes(PcmH,PcmHN);
+ If (OutFmt='au') And (AnnN>0) Then WriteBytes(Ann,AnnN);
  Done:=0;
  Chunk:=1024;
  If OutFmt='daud' Then Begin Chunk:=4096 Div (Ch*S.Bytes); If Chunk<1 Then Chunk:=1; End;
+ If (OutFmt='voc') And Not PcmSrcAiff Then Begin Chunk:=4096 Div (Ch*S.Bytes); If Chunk<1 Then Chunk:=1; End;
+ Dummy:=0;
  While Done<Frames Do Begin
   N:=Chunk; If Frames-Done<N Then N:=Frames-Done;
   InB:=N*Ch*S.Bytes; OutB:=N*Ch*D.Bytes;
   PcmReadBig(DS+Done*Ch*S.Bytes,BI,InB);
   PcmChunk(S,D,Ch,N,BI,BO);
+  If OutFmt='voc' Then Begin
+   PcmHN:=0;
+   If Dummy=0 Then Begin
+    If Tag>3 Then Begin
+     PcmH8(9); PcmH8(OutB+12); PcmH8((OutB+12) Shr 8); PcmH8((OutB+12) Shr 16); PcmHL32(Rate); PcmH8(D.Bytes*8); PcmH8(Ch); PcmHL16(Tag); PcmHL32(0);
+    End Else Begin
+     If Ch>1 Then Begin
+      PcmH8(8); PcmH8(4); PcmH8(0); PcmH8(0);
+      PcmHL16(65536-(256000000+Int64(Rate)*Ch Div 2) Div (Int64(Rate)*Ch)); PcmH8(Tag); PcmH8(Ch-1);
+     End;
+     PcmH8(1); PcmH8(OutB+2); PcmH8((OutB+2) Shr 8); PcmH8((OutB+2) Shr 16);
+     PcmH8(256-(1000000+Rate Div 2) Div Rate); PcmH8(Tag);
+    End;
+    Dummy:=1;
+   End Else Begin PcmH8(2); PcmH8(OutB); PcmH8(OutB Shr 8); PcmH8(OutB Shr 16); End;
+   WriteBytes(PcmH,PcmHN);
+  End;
   If OutFmt='daud' Then Begin
    { paquets de 2000 trames : taille sur 2 octets + 0x8010 }
    PcmHN:=0; PcmHB16(OutB); PcmHB16($8010); WriteBytes(PcmH,PcmHN);
@@ -118664,6 +119613,7 @@ Begin
   Inc(Done,N);
  End;
  If (OutFmt='wav') Or (OutFmt='aiff') Then If Odd(Frames*Ch*D.Bytes) Then Begin BO[0]:=0; WriteBytes(BO,1); End;
+ If OutFmt='voc' Then Begin BO[0]:=0; WriteBytes(BO,1); End;
  CloseRead; CloseWrite;
 End;
 
@@ -118710,12 +119660,17 @@ Begin
  Name:=Fmt; If Codec<>'' Then Name:=Codec;
  If Fmt='daud' Then Name:='s24daud';
  If Not PcmSpecOf(Name,S) Or (S.Spc=4) Then Fail('pcm: decodeur non pris en charge: '+Name);
+ PcmSrcMask:=0;
  Ch:=PcmInCh; Rate:=PcmInRate;
  If Ch<=0 Then Ch:=1;
  If Rate<=0 Then Rate:=44100;
  If Fmt='daud' Then Begin Ch:=6; Rate:=96000; End;
  NVLoad(Source,F,Size);
  CloseRead;
+ If PcmInSkip>0 Then Begin
+  If PcmInSkip>Size Then PcmInSkip:=Size;
+  Move(F^[PcmInSkip],F^[0],Size-PcmInSkip); Dec(Size,PcmInSkip); PcmInSkip:=0;
+ End;
  PcmSpecOf(PcmNativeName(S.Cls),D);
  If Fmt='daud' Then Begin
   GetMem(G,Size+64); Out:=0; Pos:=0;
@@ -118886,6 +119841,87 @@ Begin
  End;
  PcmAiffToWav:=True;
 End;
+{ F1-PCM2-BEGIN : AU, formats imposes (libavformat/au.c) }
+Procedure F1AuToWav(Const Source,Target: String);
+Var B: Array[0..27] Of Byte; Size,HS,Tag,Rate,Ch,DSz: Int64; Name: String;
+Function BE32(At: LongInt): Int64;Begin BE32:=Int64(B[At])*16777216+B[At+1]*65536+B[At+2]*256+B[At+3]; End;
+Begin
+ OpenRead(Source); Size:=InputSize;
+ If Size<24 Then Fail('au: en-tete tronque.');
+ ReadAt(0,B,24); CloseRead;
+ If (B[0]<>46) Or (B[1]<>115) Or (B[2]<>110) Or (B[3]<>100) Then Fail('au: signature incorrecte.');
+ HS:=BE32(4); DSz:=BE32(8); Tag:=BE32(12); Rate:=BE32(16); Ch:=BE32(20);
+ If (DSz>=2147483648) And (DSz<>4294967295) Then Fail('au: taille de donnees negative.');
+ If HS>Size Then Fail('au: en-tete tronque.');
+ If HS<24 Then HS:=24;
+ Case Tag Of
+  1: Name:='mulaw'; 2: Name:='s8'; 3: Name:='s16be'; 4: Name:='s24be'; 5: Name:='s32be'; 6: Name:='f32be'; 7: Name:='f64be'; 27: Name:='alaw';
+  Else Begin Str(Tag,Name); Fail('au: codec non pris en charge (etiquette '+Name+').'); End;
+ End;
+ If (Ch=0) Or (Ch>8) Then Fail('au: nombre de canaux incorrect.');
+ If (Rate=0) Or (Rate>2147483647) Then Fail('au: frequence incorrecte.');
+ PcmInCh:=Ch; PcmInRate:=Rate; PcmInSkip:=HS;
+ PcmRawToWav(Source,Target,'au',Name);
+End;
+
+Function F1ForcedFmt(Const N: String): Boolean;
+Begin
+ F1ForcedFmt:=PcmIsRawName(N) Or (N='daud');
+End;
+{ WAV natif en double precision : converti en s16 comme le fait ffmpeg pour une sortie WAV pcm_s16le }
+Function F1WavIsF64(Const Name: String): Boolean;
+Var S: TPcmSpec; Ch,Rate,DS,DSz: LongInt;
+Begin
+ F1WavIsF64:=False;
+ If PcmOpenSource(Name,S,Ch,Rate,DS,DSz) Then Begin CloseRead; F1WavIsF64:=(S.Cls=4); End;
+End;
+
+Function F1WavMulti(Const Name: String): Boolean;
+Var S: TPcmSpec; Ch,Rate,DS,DSz: LongInt;
+Begin
+ F1WavMulti:=False;
+ If PcmOpenSource(Name,S,Ch,Rate,DS,DSz) Then Begin CloseRead; F1WavMulti:=(Ch>2) Or (Rate>48000); End;
+End;
+
+{ WAV/AIFF PCM -> FLAC (format de sortie choisi comme ffmpeg : s16 pour u8/s16/lois, 24 bits pour s24/s32/flottants) }
+Procedure F1FlacFromWav(Const Source,Target: String);
+Var S,D: TPcmSpec; Ch,Rate,DS,DSz,Frames,I,J,Bps: LongInt; Buf: PEABuffer; Smp: FQPI; B: TPcmBuf; V: Int64; Dd: Double; Cl: LongInt; Mask: LongInt; Got: LongInt;
+Begin
+ If Not PcmOpenSource(Source,S,Ch,Rate,DS,DSz) Then Fail('flac: source WAV/AIFF PCM requise.');
+ Mask:=PcmSrcMask;
+ If (Ch>2) And (Mask=0) Then Begin
+  Case Ch Of 3: Mask:=$B; 4: Mask:=$107; 5: Mask:=$37; 6: Mask:=$3F; 7: Mask:=$70F; 8: Mask:=$63F; End;
+ End;
+ If Ch<=2 Then Mask:=0;
+ Frames:=DSz Div (Ch*S.Bytes);
+ If Frames<1 Then Fail('flac: aucune donnee audio.');
+ If (S.Cls<=1) Then Bps:=16 Else Bps:=24;
+ GetMem(Smp,Int64(Frames)*Ch*4+16);
+ I:=0;
+ While I<Frames Do Begin
+  Got:=Frames-I; If Got>1024 Then Got:=1024;
+  PcmReadBig(DS+I*Ch*S.Bytes,B,Got*Ch*S.Bytes);
+  For J:=0 To Got*Ch-1 Do Begin
+   V:=0; Dd:=0;
+   If S.Cls>=3 Then Dd:=PcmGetF(S,B,J*S.Bytes) Else V:=PcmGetI(S,B,J*S.Bytes);
+   If S.Cls>=3 Then Begin PcmConv(S.Cls,2,V,Dd); V:=PcmSar(V,8); End
+   Else If S.Cls=0 Then Begin PcmConv(0,1,V,Dd); End
+   Else If S.Cls=2 Then V:=PcmSar(V,8);
+   Smp^[I*Ch+J]:=V;
+  End;
+  Inc(I,Got);
+ End;
+ CloseRead;
+ If F1CompSet Then Cl:=F1CompLevel Else Cl:=-1;
+ F1FlacEncode(Target,Smp,Frames,Ch,Rate,Bps,Mask,Cl);
+ FreeMem(Smp);
+End;
+
+Function F1OutFmt(Const N: String): Boolean;
+Begin
+ F1OutFmt:=(N='au') Or (N='voc') Or (N='flac');
+End;
+{ F1-PCM2-END }
 { PCM-END }
 
 
@@ -123994,7 +125030,7 @@ Begin
  WriteLn(' D  4xm             4X Movie (video versions 0..4 vers Y4M; audio adpcm_4xm/PCM vers WAV)');
  WriteLn(' DE ac3             AC-3 brut, decodeur et encodeur natifs');
  WriteLn(' D  eac3            E-AC-3 brut (decodeur eac3: sous-flux independant 0, AHT, extension spectrale; WAV 16 bits)');
- WriteLn(' D  flac            FLAC natif (decodeur flac; WAV 16 bits)');
+ WriteLn(' DE flac            raw FLAC');
  WriteLn(' D  rpl             RPL / ARMovie (video escape124 vers Y4M/PNG/BMP)');
  WriteLn(' DE adx             CRI ADX (adpcm_adx, mono/stereo)');
  WriteLn(' D  ea              Electronic Arts Multimedia (audio adpcm_ea, r1, r2, r3, xas; video eacmv, eatgv, eatgq, eatqi vers Y4M/PNG/BMP)');
@@ -124092,7 +125128,8 @@ Begin
  WriteLn(' DE mp2             MPEG Layer II; encodage natif (octet-identique a ffmpeg mp2) ou extraction de MPEG System');
  WriteLn('  E png             PNG RGB24, une image');
  WriteLn('DEV    rawvideo          Video brute (decodeur AVI/MOV: I420, YV12, gris, BI_RGB, raw; encodeur -f rawvideo yuv420p/gray/rgb24/bgr24 depuis Y4M)');
- WriteLn(' D  voc             Creative Voice PCM');
+ WriteLn(' DE voc             Creative Voice');
+ WriteLn(' DE au              Sun AU');
  WriteLn(' D  nuv             NuppelVideo (video RTJPEG/LZO vers Y4M, PNG ou BMP; audio ignore)');
  WriteLn(' D  pam             PAM/PBM/PGM/PPM (images Portable AnyMap; decodage vers Y4M ou PNG/BMP)');
  WriteLn('  E pam, pbm       Image PAM/PBM depuis Y4M (-c:v pam|pbm -frames:v 1)');
@@ -124670,6 +125707,7 @@ BEGIN
   If Argument='-compression_level' Then Begin
    Value:=NextArgument; Val(Value,Number,Code);
    If Code<>0 Then Fail('-compression_level: nombre entier requis.');
+   F1CompLevel:=Number; F1CompSet:=True; { F1 }
    If Number>9 Then Number:=9;
    PNGLevelSet:=Number>=0; If Number<0 Then Number:=-1;
    PNGLevel:=Number;
@@ -124885,6 +125923,7 @@ BEGIN
  Commit(Temps[2]); Temps[2]:=''; Halt(0);
  {$ENDIF}
  Detected:=Probe(Intermediate);
+ If (InputFormat<>'') And Not IsHTTP(Intermediate) And F1ForcedFmt(InputFormat) Then Detected:=InputFormat; { F1 : -f impose, pas de sondage }
  If (Detected='') And Not IsHTTP(Intermediate) And (InputFormat<>'h261') And (InputFormat<>'h263') Then If H4ProbeFile(Intermediate) Then Detected:='h264';
  If (Detected='') And Not IsHTTP(Intermediate) And (InputFormat<>'h261') And (InputFormat<>'h264') Then If H3ProbeFile(Intermediate) Then Detected:='h263';
  If (Detected='') And Not IsHTTP(Intermediate) And (InputFormat<>'h263') And (InputFormat<>'h264') Then If H1ProbeFile(Intermediate) Then Detected:='h261';
@@ -125490,14 +126529,17 @@ BEGIN
  If VideoCodec<>'' Then Fail('Codec video incompatible avec une sortie audio seule.');
  If (OutputFormat<>'wav') And (OutputFormat<>'mp3') And (OutputFormat<>'mp2') And (OutputFormat<>'ac3') And (OutputFormat<>'aac') And
  (OutputFormat<>'adx') And (OutputFormat<>'aiff') And (OutputFormat<>'flv') And (OutputFormat<>'mp4') And (OutputFormat<>'ogg') And
- (OutputFormat<>'daud') And (OutputFormat<>'roq') And (OutputFormat<>'asf') And Not PcmIsRawName(OutputFormat) And Not ((OutputFormat='avi') And ((AudioCodec='sonic') Or (AudioCodec='sonicls') Or (AudioCodec='wmav1') Or (AudioCodec='wmav2'))) Then Fail(
+ (OutputFormat<>'daud') And (OutputFormat<>'roq') And (OutputFormat<>'asf') And Not PcmIsRawName(OutputFormat) And Not F1OutFmt(OutputFormat) And Not ((OutputFormat='avi') And ((AudioCodec='sonic') Or (AudioCodec='sonicls') Or (AudioCodec='wmav1') Or (AudioCodec='wmav2'))) Then Fail(
  'Sorties audio WAV, MP3, MP2, AC3, AAC (ADTS), Ogg Vorbis, ADX et AIFF-C (adpcm_ima_qt) prises en charge.');
  PcmCodecOut:='';
  If (Copy(AudioCodec,1,4)='pcm_') And (AudioCodec<>'pcm_dvd') And Not ((OutputFormat='wav') And (AudioCodec='pcm_s16le')) Then PcmCodecOut:=AudioCodec
  Else If (AudioCodec='') And PcmIsRawName(OutputFormat) Then PcmCodecOut:='pcm_'+OutputFormat
- Else If (AudioCodec='') And (OutputFormat='daud') Then PcmCodecOut:='pcm_s24daud';
+ Else If (AudioCodec='') And (OutputFormat='daud') Then PcmCodecOut:='pcm_s24daud'
+ Else If (AudioCodec='') And ((OutputFormat='au') Or (OutputFormat='aiff')) Then PcmCodecOut:='pcm_s16be'
+ Else If (AudioCodec='') And (OutputFormat='voc') Then PcmCodecOut:='pcm_s16le'
+ Else If (AudioCodec='') And (OutputFormat='flac') Then AudioCodec:='flac';
  If PcmCodecOut<>'' Then Begin
-  If Not ((OutputFormat='wav') Or (OutputFormat='aiff') Or (OutputFormat='daud') Or PcmIsRawName(OutputFormat)) Then
+  If Not ((OutputFormat='wav') Or (OutputFormat='aiff') Or (OutputFormat='daud') Or (OutputFormat='au') Or (OutputFormat='voc') Or PcmIsRawName(OutputFormat)) Then
    Fail('Codecs pcm_*: sortie WAV, AIFF, DAUD ou format brut (s16le, u8, alaw...) requise.');
   If HasBitrate Then Fail('pcm: -b:a non applicable.');
  End;
@@ -125510,7 +126552,7 @@ BEGIN
   (AudioCodec='adpcm_ms') Or (AudioCodec='adpcm_yamaha') Or (AudioCodec='sonic') Or (AudioCodec='sonicls'))) Or ((OutputFormat='avi') And ((AudioCodec='sonic') Or (AudioCodec='sonicls'))) Or ((OutputFormat='flv') And ((AudioCodec='adpcm_swf') Or (AudioCodec='nellymoser'))) Or
  ((OutputFormat='mp4') And (AudioCodec='alac')) Or ((OutputFormat='roq') And (AudioCodec='roq_dpcm')) Or
  ((OutputFormat='adx') And (AudioCodec='adpcm_adx')) Or ((OutputFormat='aiff') And (AudioCodec='adpcm_ima_qt')) Or
- ((OutputFormat='mp3') And ((AudioCodec='mp3') Or (AudioCodec='libmp3lame'))) Or ((OutputFormat='mp2') And (AudioCodec='mp2')) Or ((OutputFormat='ac3') And (AudioCodec='ac3')) Or
+ ((OutputFormat='flac') And (AudioCodec='flac')) Or ((OutputFormat='mp3') And ((AudioCodec='mp3') Or (AudioCodec='libmp3lame'))) Or ((OutputFormat='mp2') And (AudioCodec='mp2')) Or ((OutputFormat='ac3') And (AudioCodec='ac3')) Or
  ((OutputFormat='ogg') And ((AudioCodec='libvorbis') Or (AudioCodec='vorbis'))) Or (((OutputFormat='asf') Or (OutputFormat='avi')) And ((AudioCodec='wmav1') Or (AudioCodec='wmav2'))) Or
  ((OutputFormat='aac') And ((AudioCodec='aac') Or (AudioCodec='libfaac')))) Then Fail(
  'Codec de sortie non pris en charge pour ce conteneur.');
@@ -125550,6 +126592,7 @@ BEGIN
    If (InputFormat='g726') Or (InputFormat='g726le') Then DecodeG726(InputPath,Temps[0],InputFormat='g726le',G726CodeSize,G726Rate) Else
    If InputFormat='aac' Then DecodeAAC(InputPath,Temps[0]) Else
    If InputFormat='iff' Then Decode8SVX(InputPath,Temps[0]) Else
+   If InputFormat='au' Then F1AuToWav(InputPath,Temps[0]) Else { F1 }
    If InputFormat='adx' Then DecodeADX(InputPath,Temps[0]) Else
    If InputFormat='4xm' Then Decode4XMAudio(InputPath,Temps[0]) Else
    If InputFormat='ea' Then DecodeEAContainer(InputPath,Temps[0],InputCodec) Else
@@ -125601,9 +126644,10 @@ BEGIN
    If InputFormat='vob' Then PcmVobToWav(InputPath,Temps[0])
                                Else Fail('Decodeur non implemente.');
    Intermediate:=Temps[0];
+   If (PcmCodecOut='') And F1WavIsF64(Temps[0]) Then Begin Temps[3]:=NewTemporary; PcmEncodeFile(Temps[0],Temps[3],'wav','pcm_s16le'); Intermediate:=Temps[3]; End; { F1 }
   End Else If (WaveFormatTag(InputPath)=$160) Or (WaveFormatTag(InputPath)=$161) Then Begin
    Temps[0]:=NewTemporary; DecodeWMAWav(InputPath,Temps[0]); Intermediate:=Temps[0];
-  End Else If (PcmCodecOut='') And PcmWavNeedsConv(InputPath) And Not (((RequestedRate<>0) Or (RequestedChannels<>0) Or (AudioCodec='wmav1') Or (AudioCodec='wmav2')) And SwrIsF32Wav(InputPath)) Then Begin
+  End Else If (PcmCodecOut='') And (OutputFormat<>'flac') And PcmWavNeedsConv(InputPath) And Not (((RequestedRate<>0) Or (RequestedChannels<>0) Or (AudioCodec='wmav1') Or (AudioCodec='wmav2')) And SwrIsF32Wav(InputPath)) Then Begin
    Temps[0]:=NewTemporary; PcmEncodeFile(InputPath,Temps[0],'wav','pcm_s16le'); Intermediate:=Temps[0];
   End Else If IsWaveCT(InputPath) Then Begin
    Temps[0]:=NewTemporary; DecodeWaveCT(InputPath,Temps[0]); Intermediate:=Temps[0];
@@ -125655,7 +126699,9 @@ BEGIN
    Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False);
    If AudioCodec='nellymoser' Then EncodeNellyFLV(Temps[1],Temps[2]) Else
    EncodeFLVSWF(Temps[1],Temps[2]);
-  End Else If OutputFormat='wav' Then NormalizeWave(Intermediate,Temps[2],False)
+  End Else If (OutputFormat='flac') Then F1FlacFromWav(Intermediate,Temps[2]) { F1 }
+   Else If (OutputFormat='wav') And F1WavMulti(Intermediate) Then PcmEncodeFile(Intermediate,Temps[2],'wav','pcm_s16le')
+   Else If OutputFormat='wav' Then NormalizeWave(Intermediate,Temps[2],False)
    Else If OutputFormat='roq' Then Begin
     Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False);
     EncodeRoQDpcm(Temps[1],Temps[2]);
