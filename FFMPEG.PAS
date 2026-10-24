@@ -69534,19 +69534,20 @@ End;
 Procedure EncodeWMAFile(Const Source,Target: String; Ver,BitRate,Cont: LongInt);
 Var
  H: Array[0..39] Of Byte; Size,Pos,N,DataPos,DataLen,Rate,Chans,Bits,TotalSamples,Frames,K,Ch,I,J,Gain,Err,Stp,FrameN: LongInt;
- HaveFmt: Boolean; NScale: Single; Buf: PEABuffer; Pcm: Array[0..8191] Of SmallInt;
+ HaveFmt,IsFl: Boolean; NScale: Single; Buf: PEABuffer; Pcm: Array[0..8191] Of SmallInt; PcmF: Array[0..4095] Of Single;
  Dv: Double; Pts,Dts,Off,Dur: Int64; Done,Cnt,Take: LongInt; Pkt: Array[0..32767] Of Byte; Dummy: LongInt;
  FileSz: Int64;
  Function U16(At: LongInt): LongInt; Begin U16:=H[At]+H[At+1]*256; End;
  Function U32(At: LongInt): LongInt; Begin U32:=LongInt(H[At])+LongInt(H[At+1])*256+LongInt(H[At+2])*65536+(LongInt(H[At+3]) Shl 24); End;
 Begin
- OpenRead(Source); Size:=InputSize; Pos:=12; HaveFmt:=False; DataPos:=-1; DataLen:=0; Rate:=0; Chans:=0; Bits:=0;
+ OpenRead(Source); Size:=InputSize; Pos:=12; HaveFmt:=False; DataPos:=-1; DataLen:=0; Rate:=0; Chans:=0; Bits:=0; IsFl:=False;
  While Pos+8<=Size Do Begin
   ReadAt(Pos,H,8); N:=U32(4);
   If (H[0]=102) And (H[1]=109) And (H[2]=116) And (H[3]=32) Then Begin
    If (N<16) Or (Pos+8+N>Size) Then Fail('WMA: bloc fmt invalide.');
    ReadAt(Pos+8,H,16); Chans:=U16(2); Rate:=U32(4); Bits:=U16(14);
-   If (U16(0)<>1) Or (Bits<>16) Then Fail('WMA: entree PCM 16 bits requise.');
+   If Not (((U16(0)=1) And (Bits=16)) Or ((U16(0)=3) And (Bits=32))) Then Fail('WMA: entree PCM 16 bits requise.');
+   IsFl:=U16(0)=3;
    HaveFmt:=True;
   End Else If (H[0]=100) And (H[1]=97) And (H[2]=116) And (H[3]=97) Then Begin
    DataPos:=Pos+8; DataLen:=N;
@@ -69560,7 +69561,7 @@ Begin
  If Chans>2 Then Fail('WMA: too many channels.');
  If Rate>48000 Then Fail('WMA: sample rate is too high (> 48kHz).');
  If BitRate<24000 Then Fail('WMA: bitrate too low (24000 minimum).');
- TotalSamples:=DataLen Div (2*Chans);
+ If IsFl Then TotalSamples:=DataLen Div (4*Chans) Else TotalSamples:=DataLen Div (2*Chans);
  If TotalSamples<=0 Then Fail('WMA: aucun echantillon.');
  If Not WMDInit(Ver,Rate,Chans,BitRate,0,1) Then Fail('WMA: parametres audio invalides.');
  WMDAlign:=(Int64(BitRate)*WMDFrameLen) Div (Int64(Rate)*8);
@@ -69587,8 +69588,13 @@ Begin
   I:=0;
   While I<Take Do Begin
    Cnt:=Take-I; If Cnt>4096 Div Chans Then Cnt:=4096 Div Chans;
+   If IsFl Then Begin
+    ReadAt(DataPos+(FrameN*WMDFrameLen+I)*4*Chans,PcmF,Cnt*4*Chans);
+    For J:=0 To Cnt-1 Do For Ch:=0 To Chans-1 Do WMEAud[Ch][I+J]:=PcmF[J*Chans+Ch];
+   End Else Begin
    ReadAt(DataPos+(FrameN*WMDFrameLen+I)*2*Chans,Pcm,Cnt*2*Chans);
    For J:=0 To Cnt-1 Do For Ch:=0 To Chans-1 Do WMEAud[Ch][I+J]:=Pcm[J*Chans+Ch]*WMFl32;
+   End;
    Inc(I,Cnt);
   End;
   { fenetrage + MDCT }
@@ -89840,6 +89846,1073 @@ End;
 
 { ==== BLOCK-ANCHOR-H5 : inserer le code du groupe H5 juste au-dessus de cette ligne ==== }
 
+{ ==== H6 : port de libswresample 6.1.1 (comportement par defaut du CLI ffmpeg : swresample.c, resample.c,
+  resample_template.c, rematrix.c, rematrix_template.c, audioconvert.c ; LGPL-2.1-or-later) ==== }
+Const
+ SwrPi: Double = 3.14159265358979323846;
+ SwrSqrt12: Double = 0.70710678118654752440;
+ SwrSqrt32: Double = 1.22474487139158904909;
+ SwrCutoff: Double = 0.97;
+ SwrIntMax = 2147483647;
+Type
+ TSwrView = Array[0..7] Of Pointer;
+ TSwrBuf = Record P: TSwrView; Cap: LongInt; End;
+ TSwrDArr = Array[0..0] Of Double;
+ PSwrDArr = ^TSwrDArr;
+ TSwrSArr = Array[0..0] Of Single;
+ PSwrSArr = ^TSwrSArr;
+ TSwrLArr = Array[0..0] Of LongInt;
+ PSwrLArr = ^TSwrLArr;
+ TSwrMat = Array[0..7,0..7] Of Double;
+Var
+ SwrInF,SwrOutF,SwrIntF: LongInt;          { formats : 0 u8, 1 s16, 2 s32, 3 flt }
+ SwrInCh,SwrOutCh,SwrInRate,SwrOutRate,SwrChRes: LongInt;
+ SwrInMask,SwrOutMask: LongInt;
+ SwrDoRes,SwrDoRemat,SwrResFirst,SwrFlushed: Boolean;
+ SwrMat: TSwrMat;
+ SwrMatF: Array[0..7,0..7] Of Single;
+ SwrMatN: Array[0..7,0..7] Of LongInt;
+ SwrMat32: Array[0..7,0..7] Of LongInt;
+ SwrMatChN: Array[0..7] Of LongInt;
+ SwrMatChL: Array[0..7,0..7] Of LongInt;
+ SwrMixAny: LongInt;                        { 0 aucun, 1 mix6to2, 2 mix8to2 }
+ SwrMixClip: Boolean;
+ { contexte du reechantillonneur }
+ SwrCPhase,SwrCLen,SwrCAlloc,SwrCDiv,SwrCMod,SwrCIndex,SwrCFrac: LongInt;
+ SwrCSrcInc,SwrCDstInc: Int64;
+ SwrCLinear: Boolean;
+ SwrCFactor: Double;
+ SwrBank: Pointer;
+ SwrInBuf: TSwrBuf;
+ SwrInBufIdx,SwrInBufCnt,SwrConstraint: LongInt;
+ SwrPost,SwrMid,SwrPre: TSwrBuf;
+
+Function SwrAt(P: Pointer; N: LongInt): Pointer;
+Begin SwrAt:=Pointer(PtrInt(P)+Int64(N)*4); End;
+
+Function SwrSar(V: Int64; N: LongInt): Int64;
+Begin
+ If V>=0 Then SwrSar:=V Shr N Else SwrSar:=-((-V-1) Shr N)-1;
+End;
+
+Function SwrLrint(X: Single): LongInt;
+Var D: Double;
+Begin
+ D:=X;
+ If (D>2147483647.0) Or (D< -2147483648.0) Then SwrLrint:=-2147483648 Else SwrLrint:=Round(D);
+End;
+
+Function SwrLlrint(X: Single): Int64;
+Var D: Double;
+Begin
+ D:=X;
+ If (D>=9.2e18) Or (D<= -9.2e18) Then SwrLlrint:=Int64($8000000000000000) Else SwrLlrint:=Round(D);
+End;
+
+Function SwrClip16(V: Int64): LongInt;
+Begin If V>32767 Then V:=32767; If V< -32768 Then V:=-32768; SwrClip16:=V; End;
+
+Function SwrGcd(A,B: Int64): Int64;
+Var T: Int64;
+Begin
+ While B<>0 Do Begin T:=A Mod B; A:=B; B:=T; End;
+ SwrGcd:=A;
+End;
+
+{ av_reduce }
+Function SwrReduce(Var DstNum,DstDen: Int64; Num,Den,Max: Int64): Boolean;
+Var
+ A0n,A0d,A1n,A1d,Gcd,X,NextDen,A2n,A2d: Int64; Sign: Boolean;
+Begin
+ A0n:=0; A0d:=1; A1n:=1; A1d:=0;
+ Sign:=(Num<0) <> (Den<0);
+ If Num<0 Then Num:=-Num; If Den<0 Then Den:=-Den;
+ Gcd:=SwrGcd(Num,Den);
+ If Gcd<>0 Then Begin Num:=Num Div Gcd; Den:=Den Div Gcd; End;
+ If (Num<=Max) And (Den<=Max) Then Begin A1n:=Num; A1d:=Den; Den:=0; End;
+ While Den<>0 Do Begin
+  X:=Num Div Den; NextDen:=Num-Den*X;
+  A2n:=X*A1n+A0n; A2d:=X*A1d+A0d;
+  If (A2n>Max) Or (A2d>Max) Then Begin
+   If A1n<>0 Then X:=(Max-A0n) Div A1n;
+   If A1d<>0 Then Begin If (Max-A0d) Div A1d<X Then X:=(Max-A0d) Div A1d; End;
+   If Den*(2*X*A1d+A0d)>Num*A1d Then Begin A1n:=X*A1n+A0n; A1d:=X*A1d+A0d; End;
+   Break;
+  End;
+  A0n:=A1n; A0d:=A1d; A1n:=A2n; A1d:=A2d; Num:=Den; Den:=NextDen;
+ End;
+ If Sign Then DstNum:=-A1n Else DstNum:=A1n;
+ DstDen:=A1d;
+ SwrReduce:=Den=0;
+End;
+
+Function SwrRescale(A,B,C: Int64): Int64;
+Var E: Extended; Neg: Boolean; R: Int64;
+Begin
+ Neg:=A<0; If Neg Then A:=-A;
+ If A<=3000000000000000000 Div (B+1) Then R:=(A*B+C Div 2) Div C
+ Else Begin E:=A; E:=E*B; E:=E/C; R:=Trunc(E+0.5); End;
+ If Neg Then R:=-R;
+ SwrRescale:=R;
+End;
+
+Function SwrBessel(X: Double): Double;
+Const
+ P1: Array[0..14] Of Double=(-2.2335582639474375249e+15,-5.5050369673018427753e+14,-3.2940087627407749166e+13,
+  -8.4925101247114157499e+11,-1.1912746104985237192e+10,-1.0313066708737980747e+08,-5.9545626019847898221e+05,
+  -2.4125195876041896775e+03,-7.0935347449210549190e+00,-1.5453977791786851041e-02,-2.5172644670688975051e-05,
+  -3.0517226450451067446e-08,-2.6843448573468483278e-11,-1.5982226675653184646e-14,-5.2487866627945699800e-18);
+ Q1: Array[0..5] Of Double=(-2.2335582639474375245e+15,7.8858692566751002988e+12,-1.2207067397808979846e+10,
+  1.0377081058062166144e+07,-4.8527560179962773045e+03,1.0);
+Var Y,S,Sn,Sd: Double; I: LongInt;
+Begin
+ If X=0 Then Begin SwrBessel:=1.0; Exit; End;
+ If X<0 Then X:=-X;
+ { beta*sqrt(1-w*w) <= 9 < 15 : seule la branche x<=15 est utilisee }
+ If X>15 Then Begin SwrBessel:=1.0e30; Exit; End;
+ Y:=X*X;
+ S:=P1[14]; For I:=13 DownTo 0 Do Begin S:=S*Y; S:=S+P1[I]; End; Sn:=S;
+ S:=Q1[5]; For I:=4 DownTo 0 Do Begin S:=S*Y; S:=S+Q1[I]; End; Sd:=S;
+ SwrBessel:=Sn/Sd;
+End;
+
+Function SwrSin(X: Double): Double;
+Var E: Extended;
+Begin E:=X; SwrSin:=Sin(E); End;
+
+{ ---------- tampons audio (AudioData) ---------- }
+Procedure SwrBufFree(Var B: TSwrBuf; N: LongInt);
+Var I: LongInt;
+Begin
+ For I:=0 To N-1 Do If B.P[I]<>Nil Then Begin FreeMem(B.P[I]); B.P[I]:=Nil; End;
+ B.Cap:=0;
+End;
+
+{ swri_realloc_audio : la capacite devient 2*Count }
+Procedure SwrBufRealloc(Var B: TSwrBuf; N,Count: LongInt);
+Var I,NewCap: LongInt; Q: Pointer;
+Begin
+ If B.Cap>=Count Then Exit;
+ NewCap:=Count*2;
+ For I:=0 To N-1 Do Begin
+  GetMem(Q,Int64(NewCap)*4+64); FillChar(Q^,Int64(NewCap)*4+64,0);
+  If (B.P[I]<>Nil) And (B.Cap>0) Then Move(B.P[I]^,Q^,Int64(B.Cap)*4);
+  If B.P[I]<>Nil Then FreeMem(B.P[I]);
+  B.P[I]:=Q;
+ End;
+ B.Cap:=NewCap;
+End;
+
+Procedure SwrBufSet(Var Dst: TSwrView; Const Src: TSwrView; Count: LongInt);
+Var I: LongInt;
+Begin
+ For I:=0 To SwrChRes-1 Do Dst[I]:=SwrAt(Src[I],Count);
+End;
+
+Procedure SwrCopyView(Const Dst,Src: TSwrView; Count: LongInt);
+Var I: LongInt;
+Begin
+ If Count<=0 Then Exit;
+ For I:=0 To SwrChRes-1 Do Move(Src[I]^,Dst[I]^,Int64(Count)*4);
+End;
+
+{ ---------- banque de filtres (resample.c build_filter) ---------- }
+Procedure SwrBuildFilter(Factor: Double; TapCount,Alloc,PhaseCount: LongInt; Fmt: LongInt; Bank: Pointer);
+Var
+ Ph,I,PhNb,Center: LongInt; X,Y,W,S,Norm,T,U: Double; Tab,SinLut: PSwrDArr;
+ Scale: LongInt; F: Single;
+Begin
+ If Odd(PhaseCount) Then PhNb:=PhaseCount Else PhNb:=PhaseCount Div 2+1;
+ GetMem(Tab,(Int64(TapCount)+1)*8); GetMem(SinLut,Int64(PhNb)*8+8);
+ Center:=(TapCount-1) Div 2; Norm:=0;
+ If Fmt=1 Then Scale:=32768 Else Scale:=1;
+ If Factor>1.0 Then Factor:=1.0;
+ If Factor=1.0 Then
+  For Ph:=0 To PhNb-1 Do Begin
+   U:=Ph; T:=SwrPi*U; T:=T/PhaseCount;
+   If Odd(Center) Then SinLut^[Ph]:=SwrSin(T) Else SinLut^[Ph]:=-SwrSin(T);
+  End;
+ For Ph:=0 To PhNb-1 Do Begin
+  If Factor=1.0 Then S:=SinLut^[Ph] Else S:=0;
+  For I:=0 To TapCount-1 Do Begin
+   T:=I-Center; U:=Ph; U:=U/PhaseCount; T:=T-U;
+   X:=SwrPi*T; X:=X*Factor;
+   If X=0 Then Y:=1.0
+   Else If Factor=1.0 Then Y:=S/X
+   Else Y:=SwrSin(X)/X;
+   W:=2.0*X; T:=Factor*TapCount; T:=T*SwrPi; W:=W/T;
+   T:=1-W*W; If T<0 Then T:=0;
+   Y:=Y*SwrBessel(9.0*Sqrt(T));
+   Tab^[I]:=Y; S:=-S;
+   If Ph=0 Then Norm:=Norm+Y;
+  End;
+  If Fmt=1 Then Begin
+   For I:=0 To TapCount-1 Do Begin
+    T:=Tab^[I]*Scale; T:=T/Norm; F:=T;
+    PSwrLArr(Bank)^[Ph*Alloc+I]:=SwrClip16(SwrLrint(F));
+   End;
+   If Not Odd(PhaseCount) Then
+    For I:=0 To TapCount-1 Do PSwrLArr(Bank)^[(PhaseCount-Ph)*Alloc+TapCount-1-I]:=PSwrLArr(Bank)^[Ph*Alloc+I];
+  End Else Begin
+   For I:=0 To TapCount-1 Do Begin
+    T:=Tab^[I]*Scale; T:=T/Norm; F:=T;
+    PSwrSArr(Bank)^[Ph*Alloc+I]:=F;
+   End;
+   If Not Odd(PhaseCount) Then
+    For I:=0 To TapCount-1 Do PSwrSArr(Bank)^[(PhaseCount-Ph)*Alloc+TapCount-1-I]:=PSwrSArr(Bank)^[Ph*Alloc+I];
+  End;
+ End;
+ FreeMem(Tab); FreeMem(SinLut);
+End;
+
+Procedure SwrResInit;
+Var
+ Cutoff,Factor: Double; PhaseCount,FilterLength,I,Cnt: LongInt; PExact,PExactDen,A,B: Int64;
+ Ok: Boolean;
+Begin
+ Cutoff:=SwrCutoff;
+ Factor:=SwrOutRate*Cutoff; Factor:=Factor/SwrInRate;
+ If Factor>1.0 Then Factor:=1.0;
+ PhaseCount:=1 Shl 10;
+ FilterLength:=Trunc(32/Factor); If FilterLength<32/Factor Then Inc(FilterLength);
+ If FilterLength<1 Then FilterLength:=1;
+ If FilterLength>1 Then FilterLength:=(FilterLength+1) And Not 1;
+ { exact_rational }
+ SwrReduce(PExact,PExactDen,SwrOutRate,SwrInRate,SwrIntMax);
+ If PExact<=PhaseCount Then PhaseCount:=PExact;
+ SwrCPhase:=PhaseCount; SwrCLinear:=True; SwrCFactor:=Factor; SwrCLen:=FilterLength;
+ SwrCAlloc:=(FilterLength+7) And Not 7;
+ Cnt:=SwrCAlloc*(PhaseCount+1);
+ GetMem(SwrBank,Int64(Cnt)*4+64); FillChar(SwrBank^,Int64(Cnt)*4+64,0);
+ SwrBuildFilter(Factor,FilterLength,SwrCAlloc,PhaseCount,SwrIntF,SwrBank);
+ { copie de la phase 0 decalee d'un echantillon }
+ For I:=0 To SwrCAlloc-2 Do PSwrLArr(SwrBank)^[SwrCAlloc*PhaseCount+1+I]:=PSwrLArr(SwrBank)^[I];
+ PSwrLArr(SwrBank)^[SwrCAlloc*PhaseCount]:=PSwrLArr(SwrBank)^[SwrCAlloc-1];
+ Ok:=SwrReduce(A,B,SwrOutRate,Int64(SwrInRate)*PhaseCount,SwrIntMax Div 2);
+ SwrCSrcInc:=A; SwrCDstInc:=B;
+ While (SwrCDstInc<(1 Shl 20)) And (SwrCSrcInc<(1 Shl 20)) Do Begin
+  SwrCDstInc:=SwrCDstInc*2; SwrCSrcInc:=SwrCSrcInc*2;
+ End;
+ SwrCDiv:=SwrCDstInc Div SwrCSrcInc; SwrCMod:=SwrCDstInc Mod SwrCSrcInc;
+ SwrCIndex:=-PhaseCount*((FilterLength-1) Div 2); SwrCFrac:=0;
+End;
+
+{ resample_common / resample_linear pour un canal }
+Function SwrResChan(Dst,Src: Pointer; N: LongInt; Update: Boolean): LongInt;
+Var
+ Index,Frac,SampleIndex,DstIndex,I: LongInt; FilterOff: LongInt;
+ ValF,Val2F,PF,V2F: Single; ValL,Val2L,V2L,Tmp: Int64; ValD: Double; InvSrc: Double;
+ S: PSwrSArr; D: PSwrSArr; SL,DL: PSwrLArr; FB: PSwrSArr; FL: PSwrLArr;
+Begin
+ Index:=SwrCIndex; Frac:=SwrCFrac; SampleIndex:=0;
+ S:=Src; D:=Dst; SL:=Src; DL:=Dst; FB:=SwrBank; FL:=SwrBank;
+ While Index>=SwrCPhase Do Begin Inc(SampleIndex); Dec(Index,SwrCPhase); End;
+ InvSrc:=1.0/SwrCSrcInc;
+ For DstIndex:=0 To N-1 Do Begin
+  FilterOff:=SwrCAlloc*Index;
+  If SwrIntF=1 Then Begin
+   If SwrCLinear And ((Frac<>0) Or (SwrCMod<>0)) Then Begin
+    ValL:=1 Shl 14; V2L:=1 Shl 14;
+    For I:=0 To SwrCLen-1 Do Begin
+     ValL:=ValL+Int64(SL^[SampleIndex+I])*FL^[FilterOff+I];
+     V2L:=V2L+Int64(SL^[SampleIndex+I])*FL^[FilterOff+I+SwrCAlloc];
+    End;
+    { val += (v2 - val) * (int64_t) frac / c->src_incr : int32 arithmetic pour val/v2 (FELEM2 = int32) }
+    ValL:=LongInt(ValL); V2L:=LongInt(V2L);
+    Tmp:=(V2L-ValL)*Frac; ValL:=ValL+Tmp Div SwrCSrcInc;
+    DL^[DstIndex]:=SwrClip16(SwrSar(ValL,15));
+   End Else Begin
+    ValL:=1 Shl 14; Val2L:=0; I:=0;
+    While I+1<SwrCLen Do Begin
+     ValL:=ValL+Int64(SL^[SampleIndex+I])*FL^[FilterOff+I];
+     Val2L:=Val2L+Int64(SL^[SampleIndex+I+1])*FL^[FilterOff+I+1];
+     Inc(I,2);
+    End;
+    If I<SwrCLen Then ValL:=ValL+Int64(SL^[SampleIndex+I])*FL^[FilterOff+I];
+    DL^[DstIndex]:=SwrClip16(SwrSar(ValL+Val2L,15));
+   End;
+  End Else Begin
+   If SwrCLinear And ((Frac<>0) Or (SwrCMod<>0)) Then Begin
+    ValF:=0; V2F:=0;
+    For I:=0 To SwrCLen-1 Do Begin
+     PF:=S^[SampleIndex+I]*FB^[FilterOff+I]; ValF:=ValF+PF;
+     PF:=S^[SampleIndex+I]*FB^[FilterOff+I+SwrCAlloc]; V2F:=V2F+PF;
+    End;
+    PF:=V2F-ValF;
+    ValD:=PF; ValD:=ValD*InvSrc; ValD:=ValD*Frac;
+    ValD:=ValF+ValD; ValF:=ValD;
+    D^[DstIndex]:=ValF;
+   End Else Begin
+    ValF:=0; Val2F:=0; I:=0;
+    While I+1<SwrCLen Do Begin
+     PF:=S^[SampleIndex+I]*FB^[FilterOff+I]; ValF:=ValF+PF;
+     PF:=S^[SampleIndex+I+1]*FB^[FilterOff+I+1]; Val2F:=Val2F+PF;
+     Inc(I,2);
+    End;
+    If I<SwrCLen Then Begin PF:=S^[SampleIndex+I]*FB^[FilterOff+I]; ValF:=ValF+PF; End;
+    PF:=ValF+Val2F;
+    D^[DstIndex]:=PF;
+   End;
+  End;
+  Inc(Frac,SwrCMod); Inc(Index,SwrCDiv);
+  If Frac>=SwrCSrcInc Then Begin Dec(Frac,SwrCSrcInc); Inc(Index); End;
+  While Index>=SwrCPhase Do Begin Inc(SampleIndex); Dec(Index,SwrCPhase); End;
+ End;
+ If Update Then Begin SwrCFrac:=Frac; SwrCIndex:=Index; End;
+ SwrResChan:=SampleIndex;
+End;
+
+{ multiple_resample (sans compensation) }
+Function SwrMultiple(Const Dst: TSwrView; DstSize: LongInt; Const Src: TSwrView; SrcSize: LongInt; Var Consumed: LongInt): LongInt;
+Var
+ I: LongInt; EndIndex,DeltaFrac: Int64; DeltaN: LongInt;
+Begin
+ Consumed:=0;
+ EndIndex:=(1+Int64(SrcSize)-SwrCLen)*SwrCPhase;
+ DeltaFrac:=(EndIndex-SwrCIndex)*SwrCSrcInc-SwrCFrac;
+ DeltaN:=(DeltaFrac+SwrCDstInc-1) Div SwrCDstInc;
+ If DeltaN<DstSize Then DstSize:=DeltaN;
+ If DstSize<0 Then DstSize:=0;
+ If DstSize>0 Then
+  For I:=0 To SwrChRes-1 Do Consumed:=SwrResChan(Dst[I],Src[I],DstSize,I+1=SwrChRes);
+ SwrMultiple:=DstSize;
+End;
+
+{ get_delay }
+Function SwrGetDelay(Base: Int64): Int64;
+Var Num: Int64;
+Begin
+ If Not SwrDoRes Then Begin SwrGetDelay:=(SwrInBufCnt*Base+(SwrInRate Shr 1)) Div SwrInRate; Exit; End;
+ Num:=SwrInBufCnt-(SwrCLen-1) Div 2;
+ Num:=Num*SwrCPhase; Num:=Num-SwrCIndex; Num:=Num*SwrCSrcInc; Num:=Num-SwrCFrac;
+ SwrGetDelay:=SwrRescale(Num,Base,Int64(SwrInRate)*SwrCSrcInc*SwrCPhase);
+End;
+
+Procedure SwrResFlush;
+Var Reflection,I,J,M: LongInt; P: PSwrSArr;
+Begin
+ M:=SwrInBufCnt; If SwrCLen<M Then M:=SwrCLen;
+ Reflection:=(M+1) Div 2;
+ SwrBufRealloc(SwrInBuf,SwrChRes,SwrInBufIdx+SwrInBufCnt+Reflection);
+ For I:=0 To SwrChRes-1 Do Begin
+  P:=SwrInBuf.P[I];
+  For J:=0 To Reflection-1 Do P^[SwrInBufIdx+SwrInBufCnt+J]:=P^[SwrInBufIdx+SwrInBufCnt-J-1];
+ End;
+ Inc(SwrInBufCnt,Reflection);
+End;
+
+Function SwrInvertInitial(Const Src: TSwrView; InCount: LongInt): LongInt;
+Var N,Ch,Num,Res: LongInt; D,S: PSwrSArr;
+Begin
+ Num:=InCount+SwrInBufCnt; If SwrCLen+1<Num Then Num:=SwrCLen+1;
+ If SwrCIndex>=0 Then Begin SwrInvertInitial:=0; Exit; End;
+ SwrBufRealloc(SwrInBuf,SwrChRes,SwrCLen*2+1);
+ For N:=SwrInBufCnt To Num-1 Do
+  For Ch:=0 To SwrChRes-1 Do Begin
+   D:=SwrInBuf.P[Ch]; S:=Src[Ch];
+   D^[SwrCLen+N]:=S^[N-SwrInBufCnt];
+  End;
+ If Num<SwrCLen+1 Then Begin
+  SwrInBufCnt:=Num; SwrInBufIdx:=SwrCLen; SwrInvertInitial:=SwrIntMax; Exit;
+ End;
+ For N:=1 To SwrCLen Do
+  For Ch:=0 To SwrChRes-1 Do Begin
+   D:=SwrInBuf.P[Ch]; D^[SwrCLen-N]:=D^[SwrCLen+N];
+  End;
+ Res:=Num-SwrInBufCnt;
+ SwrInBufIdx:=SwrCLen;
+ While SwrCIndex<0 Do Begin Dec(SwrInBufIdx); Inc(SwrCIndex,SwrCPhase); End;
+ N:=SwrInBufCnt+SwrCLen; If 1+SwrCLen*2>N Then N:=1+SwrCLen*2;
+ SwrInBufCnt:=N-SwrInBufIdx;
+ If Res<0 Then Res:=0;
+ SwrInvertInitial:=Res;
+End;
+
+{ resample() de swresample.c }
+Function SwrResample(Const OutParam: TSwrView; OutCount: LongInt; Const InParam: TSwrView; InCount: LongInt): LongInt;
+Var
+ InV,OutV,Tmp: TSwrView; RetSum,Border,Padless,Ret,Size,Consumed,Cnt: LongInt;
+Begin
+ RetSum:=0; Padless:=7;
+ OutV:=OutParam; Tmp:=OutV; InV:=InParam;
+ Border:=SwrInvertInitial(InV,InCount);
+ If Border=SwrIntMax Then Begin SwrResample:=0; Exit; End
+ Else If Border<>0 Then Begin
+  SwrBufSet(InV,InV,Border); Dec(InCount,Border); SwrConstraint:=0;
+ End;
+ Repeat
+  If (SwrConstraint=0) And (SwrInBufCnt<>0) Then Begin
+   SwrBufSet(Tmp,SwrInBuf.P,SwrInBufIdx);
+   Ret:=SwrMultiple(OutV,OutCount,Tmp,SwrInBufCnt,Consumed);
+   Dec(OutCount,Ret); Inc(RetSum,Ret);
+   SwrBufSet(OutV,OutV,Ret);
+   Dec(SwrInBufCnt,Consumed); Inc(SwrInBufIdx,Consumed);
+   If InCount=0 Then Break;
+   If SwrInBufCnt<=Border Then Begin
+    SwrBufSet(InV,InV,-SwrInBufCnt); Inc(InCount,SwrInBufCnt);
+    SwrInBufCnt:=0; SwrInBufIdx:=0; Border:=0;
+   End;
+  End;
+  If (SwrFlushed Or (InCount>Padless)) And (SwrInBufCnt=0) Then Begin
+   SwrInBufIdx:=0;
+   Cnt:=InCount-Padless; If Cnt<0 Then Cnt:=0;
+   Ret:=SwrMultiple(OutV,OutCount,InV,Cnt,Consumed);
+   Dec(OutCount,Ret); Inc(RetSum,Ret);
+   SwrBufSet(OutV,OutV,Ret);
+   Dec(InCount,Consumed); SwrBufSet(InV,InV,Consumed);
+  End;
+  Size:=SwrInBufIdx+SwrInBufCnt+InCount;
+  If (Size>SwrInBuf.Cap) And (SwrInBufCnt+InCount<=SwrInBufIdx) Then Begin
+   SwrBufSet(Tmp,SwrInBuf.P,SwrInBufIdx);
+   SwrCopyView(SwrInBuf.P,Tmp,SwrInBufCnt);
+   SwrInBufIdx:=0;
+  End Else SwrBufRealloc(SwrInBuf,SwrChRes,Size);
+  If InCount<>0 Then Begin
+   Cnt:=InCount;
+   If (SwrInBufCnt<>0) And (SwrInBufCnt+2<Cnt) And (OutCount<>0) Then Cnt:=SwrInBufCnt+2;
+   SwrBufSet(Tmp,SwrInBuf.P,SwrInBufIdx+SwrInBufCnt);
+   SwrCopyView(Tmp,InV,Cnt);
+   Inc(SwrInBufCnt,Cnt); Dec(InCount,Cnt); Inc(Border,Cnt);
+   SwrBufSet(InV,InV,Cnt);
+   SwrConstraint:=0;
+   If (SwrInBufCnt<>Cnt) Or (InCount<>0) Then Continue;
+   If Padless<>0 Then Begin Padless:=0; Continue; End;
+  End;
+  Break;
+ Until False;
+ If OutCount<>0 Then SwrConstraint:=1 Else SwrConstraint:=0;
+ SwrResample:=RetSum;
+End;
+
+{ ---------- matrice de remixage (rematrix.c swr_build_matrix2) ---------- }
+Function SwrBitCount(M: LongInt): LongInt;
+Var N: LongInt;
+Begin N:=0; While M<>0 Do Begin If Odd(M) Then Inc(N); M:=M Shr 1; End; SwrBitCount:=N; End;
+
+Function SwrDefaultMask(N: LongInt): LongInt;
+Begin
+ Case N Of
+  1: SwrDefaultMask:=$4;
+  2: SwrDefaultMask:=$3;
+  3: SwrDefaultMask:=$B;
+  4: SwrDefaultMask:=$107;
+  5: SwrDefaultMask:=$37;
+  6: SwrDefaultMask:=$3F;
+  7: SwrDefaultMask:=$70F;
+  8: SwrDefaultMask:=$63F;
+  Else SwrDefaultMask:=0;
+ End;
+End;
+
+Function SwrEven(L: LongInt): Boolean;
+Begin
+ If L=0 Then SwrEven:=True Else SwrEven:=(L And (L-1))<>0;
+End;
+
+Function SwrSane(L: LongInt): Boolean;
+Begin
+ SwrSane:=False;
+ If (L And $7)=0 Then Exit;
+ If Not SwrEven(L And $3) Then Exit;
+ If Not SwrEven(L And $600) Then Exit;
+ If Not SwrEven(L And $30) Then Exit;
+ If Not SwrEven(L And $C0) Then Exit;
+ If Not SwrEven(L And $5000) Then Exit;
+ SwrSane:=True;
+End;
+
+Function SwrBuildMatrix(InMask,OutMask: LongInt; Clev,Slev,Lfe,MaxVal,Volume: Double; Var M: TSwrMat): Boolean;
+Const FL=0; FR=1; FC=2; LF=3; BL=4; BR=5; FLC=6; FRC=7; BC=8; SL=9; SR=10; TFL=12; TFC=13; TFR=14;
+Var
+ Mx: Array[0..17,0..17] Of Double; Unacc: LongInt; I,J,OutI,InI: LongInt; Sum,MaxCoef: Double;
+ Function InHas(C: LongInt): Boolean; Begin InHas:=(InMask And (1 Shl C))<>0; End;
+ Function OutHas(C: LongInt): Boolean; Begin OutHas:=(OutMask And (1 Shl C))<>0; End;
+Begin
+ SwrBuildMatrix:=False;
+ { couche mono sans FC : traitee comme mono }
+ If (SwrBitCount(InMask)=1) And Not InHas(FC) Then InMask:=$4;
+ If (SwrBitCount(OutMask)=1) And Not OutHas(FC) Then OutMask:=$4;
+ If Not SwrSane(InMask) Or Not SwrSane(OutMask) Then Exit;
+ FillChar(Mx,SizeOf(Mx),0);
+ For I:=0 To 17 Do If InHas(I) And OutHas(I) Then Mx[I][I]:=1.0;
+ Unacc:=InMask And Not OutMask;
+ If (Unacc And $4)<>0 Then Begin
+  If (OutMask And 3)=3 Then Begin
+   If (InMask And 3)<>0 Then Begin Mx[FL][FC]:=Mx[FL][FC]+Clev; Mx[FR][FC]:=Mx[FR][FC]+Clev; End
+   Else Begin Mx[FL][FC]:=Mx[FL][FC]+SwrSqrt12; Mx[FR][FC]:=Mx[FR][FC]+SwrSqrt12; End;
+  End Else Exit;
+ End;
+ If (Unacc And 3)<>0 Then Begin
+  If OutHas(FC) Then Begin
+   Mx[FC][FL]:=Mx[FC][FL]+SwrSqrt12; Mx[FC][FR]:=Mx[FC][FR]+SwrSqrt12;
+   If InHas(FC) Then Mx[FC][FC]:=Clev*Sqrt(2.0);
+  End Else Exit;
+ End;
+ If (Unacc And $100)<>0 Then Begin
+  If OutHas(BL) Then Begin Mx[BL][BC]:=Mx[BL][BC]+SwrSqrt12; Mx[BR][BC]:=Mx[BR][BC]+SwrSqrt12; End
+  Else If OutHas(SL) Then Begin Mx[SL][BC]:=Mx[SL][BC]+SwrSqrt12; Mx[SR][BC]:=Mx[SR][BC]+SwrSqrt12; End
+  Else If OutHas(FL) Then Begin Mx[FL][BC]:=Mx[FL][BC]+Slev*SwrSqrt12; Mx[FR][BC]:=Mx[FR][BC]+Slev*SwrSqrt12; End
+  Else If OutHas(FC) Then Mx[FC][BC]:=Mx[FC][BC]+Slev*SwrSqrt12
+  Else Exit;
+ End;
+ If (Unacc And $10)<>0 Then Begin
+  If OutHas(BC) Then Begin Mx[BC][BL]:=Mx[BC][BL]+SwrSqrt12; Mx[BC][BR]:=Mx[BC][BR]+SwrSqrt12; End
+  Else If OutHas(SL) Then Begin
+   If InHas(SL) Then Begin Mx[SL][BL]:=Mx[SL][BL]+SwrSqrt12; Mx[SR][BR]:=Mx[SR][BR]+SwrSqrt12; End
+   Else Begin Mx[SL][BL]:=Mx[SL][BL]+1.0; Mx[SR][BR]:=Mx[SR][BR]+1.0; End;
+  End Else If OutHas(FL) Then Begin Mx[FL][BL]:=Mx[FL][BL]+Slev; Mx[FR][BR]:=Mx[FR][BR]+Slev; End
+  Else If OutHas(FC) Then Begin Mx[FC][BL]:=Mx[FC][BL]+Slev*SwrSqrt12; Mx[FC][BR]:=Mx[FC][BR]+Slev*SwrSqrt12; End
+  Else Exit;
+ End;
+ If (Unacc And $200)<>0 Then Begin
+  If OutHas(BL) Then Begin
+   If InHas(BL) Then Begin Mx[BL][SL]:=Mx[BL][SL]+SwrSqrt12; Mx[BR][SR]:=Mx[BR][SR]+SwrSqrt12; End
+   Else Begin Mx[BL][SL]:=Mx[BL][SL]+1.0; Mx[BR][SR]:=Mx[BR][SR]+1.0; End;
+  End Else If OutHas(BC) Then Begin Mx[BC][SL]:=Mx[BC][SL]+SwrSqrt12; Mx[BC][SR]:=Mx[BC][SR]+SwrSqrt12; End
+  Else If OutHas(FL) Then Begin Mx[FL][SL]:=Mx[FL][SL]+Slev; Mx[FR][SR]:=Mx[FR][SR]+Slev; End
+  Else If OutHas(FC) Then Begin Mx[FC][SL]:=Mx[FC][SL]+Slev*SwrSqrt12; Mx[FC][SR]:=Mx[FC][SR]+Slev*SwrSqrt12; End
+  Else Exit;
+ End;
+ If (Unacc And $40)<>0 Then Begin
+  If OutHas(FL) Then Begin Mx[FL][FLC]:=Mx[FL][FLC]+1.0; Mx[FR][FRC]:=Mx[FR][FRC]+1.0; End
+  Else If OutHas(FC) Then Begin Mx[FC][FLC]:=Mx[FC][FLC]+SwrSqrt12; Mx[FC][FRC]:=Mx[FC][FRC]+SwrSqrt12; End
+  Else Exit;
+ End;
+ If (Unacc And $1000)<>0 Then Begin
+  If OutHas(TFC) Then Begin
+   Mx[TFC][TFL]:=Mx[TFC][TFL]+SwrSqrt12; Mx[TFC][TFR]:=Mx[TFC][TFR]+SwrSqrt12;
+   If InHas(TFC) Then Mx[TFC][TFC]:=Clev*Sqrt(2.0);
+  End Else If OutHas(FL) Then Begin
+   If InHas(FL) Then Begin Mx[FL][TFL]:=Mx[FL][TFL]+SwrSqrt12; Mx[FR][TFR]:=Mx[FR][TFR]+SwrSqrt12; End
+   Else Begin Mx[FL][TFL]:=Mx[FL][TFL]+1.0; Mx[FR][TFR]:=Mx[FR][TFR]+1.0; End;
+  End Else If OutHas(FC) Then Begin Mx[FC][TFL]:=Mx[FC][TFL]+SwrSqrt12; Mx[FC][TFR]:=Mx[FC][TFR]+SwrSqrt12; End
+  Else Exit;
+ End;
+ If (Unacc And $8)<>0 Then Begin
+  If OutHas(FC) Then Mx[FC][LF]:=Mx[FC][LF]+Lfe
+  Else If OutHas(FL) Then Begin Mx[FL][LF]:=Mx[FL][LF]+Lfe*SwrSqrt12; Mx[FR][LF]:=Mx[FR][LF]+Lfe*SwrSqrt12; End
+  Else Exit;
+ End;
+ FillChar(M,SizeOf(M),0);
+ MaxCoef:=0; OutI:=0;
+ For I:=0 To 17 Do Begin
+  If Not OutHas(I) Then Continue;
+  Sum:=0; InI:=0;
+  For J:=0 To 17 Do Begin
+   If Not InHas(J) Then Continue;
+   M[OutI][InI]:=Mx[I][J];
+   Sum:=Sum+Abs(M[OutI][InI]);
+   Inc(InI);
+  End;
+  If Sum>MaxCoef Then MaxCoef:=Sum;
+  Inc(OutI);
+ End;
+ If Volume<0 Then MaxCoef:=-Volume;
+ If (MaxCoef>MaxVal) Or (Volume<0) Then Begin
+  MaxCoef:=MaxCoef/MaxVal;
+  For I:=0 To 7 Do For J:=0 To 7 Do M[I][J]:=M[I][J]/MaxCoef;
+ End;
+ If Volume>0 Then
+  For I:=0 To 7 Do For J:=0 To 7 Do M[I][J]:=M[I][J]*Volume;
+ SwrBuildMatrix:=True;
+End;
+
+{ swri_rematrix_init }
+Function SwrRematInit: Boolean;
+Var
+ MaxVal,Rem,Target: Double; I,J,Sum,MaxSum,Nb: LongInt; F: Single; Clev,Slev,Lfe: Single;
+Begin
+ SwrRematInit:=False;
+ Clev:=SwrSqrt12; Slev:=SwrSqrt12; Lfe:=0;
+ If (SwrOutF<3) Or (SwrIntF=1) Then MaxVal:=1.0 Else MaxVal:=SwrIntMax;
+ If Not SwrBuildMatrix(SwrInMask,SwrOutMask,Clev,Slev,Lfe,MaxVal,1.0,SwrMat) Then Exit;
+ SwrMixAny:=0; SwrMixClip:=False;
+ If SwrIntF=1 Then Begin
+  MaxSum:=0;
+  For I:=0 To SwrOutCh-1 Do Begin
+   Rem:=0; Sum:=0;
+   For J:=0 To SwrInCh-1 Do Begin
+    Target:=SwrMat[I][J]*32768+Rem; F:=Target;
+    SwrMatN[I][J]:=SwrLrint(F);
+    Rem:=Rem+(Target-SwrMatN[I][J]);
+    Sum:=Sum+Abs(SwrMatN[I][J]);
+   End;
+   If Sum>MaxSum Then MaxSum:=Sum;
+  End;
+  SwrMixClip:=MaxSum>32768;
+ End Else
+  For I:=0 To SwrOutCh-1 Do For J:=0 To SwrInCh-1 Do Begin F:=SwrMat[I][J]; SwrMatF[I][J]:=F; SwrMatN[I][J]:=0; End;
+ { mix_any }
+ If (SwrOutMask=$3) And ((SwrInMask=$60F) Or (SwrInMask=$3F)) And (SwrMat[0][2]=SwrMat[1][2]) And (SwrMat[0][3]=SwrMat[1][3])
+  And (SwrMat[0][1]=0) And (SwrMat[0][5]=0) And (SwrMat[1][0]=0) And (SwrMat[1][4]=0) Then SwrMixAny:=1
+ Else If (SwrOutMask=$3) And (SwrInMask=$63F) And (SwrMat[0][2]=SwrMat[1][2]) And (SwrMat[0][3]=SwrMat[1][3])
+  And (SwrMat[0][1]=0) And (SwrMat[0][5]=0) And (SwrMat[1][0]=0) And (SwrMat[1][4]=0) And (SwrMat[0][7]=0) And (SwrMat[1][6]=0) Then SwrMixAny:=2;
+ For I:=0 To 7 Do Begin
+  Nb:=0;
+  For J:=0 To 7 Do Begin
+   F:=SwrMat[I][J]*32768; SwrMat32[I][J]:=SwrLrint(F);
+   If SwrMat[I][J]<>0 Then Begin Inc(Nb); SwrMatChL[I][Nb]:=J; End;
+  End;
+  SwrMatChN[I]:=Nb;
+ End;
+ SwrRematInit:=True;
+End;
+
+{ swri_rematrix : Len echantillons par canal, tableaux de cellules }
+Procedure SwrRematrix(Const OutV,InV: TSwrView; Len: LongInt);
+Var
+ OutI,I,J,In1,In2,K: LongInt; SF: PSwrSArr; DF: PSwrSArr; SI,DI: PSwrLArr; V,T: Single; VI,TI: LongInt; Sg: PSwrSArr;
+ C1,C2: Single; A,B: Single; P1,P2: Single; Q: Int64; Tt: Int64;
+ Function Rr(X: Int64): LongInt;
+ Var Y: Int64;
+ Begin
+  Y:=SwrSar(X+16384,15);
+  If SwrMixClip Then Rr:=SwrClip16(Y) Else Begin Y:=Y And $FFFF; If Y>=32768 Then Y:=Y-65536; Rr:=Y; End;
+ End;
+Begin
+ If SwrMixAny<>0 Then Begin
+  { mix6to2 / mix8to2 }
+  If SwrIntF=1 Then Begin
+   For I:=0 To Len-1 Do Begin
+    Tt:=Int64(PSwrLArr(InV[2])^[I])*SwrMatN[0][2]+Int64(PSwrLArr(InV[3])^[I])*SwrMatN[0][3];
+    Tt:=LongInt(Tt);
+    Q:=Tt+Int64(PSwrLArr(InV[0])^[I])*SwrMatN[0][0]+Int64(PSwrLArr(InV[4])^[I])*SwrMatN[0][4];
+    If SwrMixAny=2 Then Q:=Q+Int64(PSwrLArr(InV[6])^[I])*SwrMatN[0][6];
+    PSwrLArr(OutV[0])^[I]:=Rr(LongInt(Q));
+    Q:=Tt+Int64(PSwrLArr(InV[1])^[I])*SwrMatN[1][1]+Int64(PSwrLArr(InV[5])^[I])*SwrMatN[1][5];
+    If SwrMixAny=2 Then Q:=Q+Int64(PSwrLArr(InV[7])^[I])*SwrMatN[1][7];
+    PSwrLArr(OutV[1])^[I]:=Rr(LongInt(Q));
+   End;
+  End Else Begin
+   For I:=0 To Len-1 Do Begin
+    P1:=PSwrSArr(InV[2])^[I]*SwrMatF[0][2]; P2:=PSwrSArr(InV[3])^[I]*SwrMatF[0][3]; T:=P1+P2;
+    P1:=PSwrSArr(InV[0])^[I]*SwrMatF[0][0]; V:=T+P1;
+    P1:=PSwrSArr(InV[4])^[I]*SwrMatF[0][4]; V:=V+P1;
+    If SwrMixAny=2 Then Begin P1:=PSwrSArr(InV[6])^[I]*SwrMatF[0][6]; V:=V+P1; End;
+    PSwrSArr(OutV[0])^[I]:=V;
+    P1:=PSwrSArr(InV[1])^[I]*SwrMatF[1][1]; V:=T+P1;
+    P1:=PSwrSArr(InV[5])^[I]*SwrMatF[1][5]; V:=V+P1;
+    If SwrMixAny=2 Then Begin P1:=PSwrSArr(InV[7])^[I]*SwrMatF[1][7]; V:=V+P1; End;
+    PSwrSArr(OutV[1])^[I]:=V;
+   End;
+  End;
+  Exit;
+ End;
+ For OutI:=0 To SwrOutCh-1 Do Begin
+  Case SwrMatChN[OutI] Of
+   0: If SwrIntF=1 Then FillChar(OutV[OutI]^,Int64(Len)*4,0) Else FillChar(OutV[OutI]^,Int64(Len)*4,0);
+   1: Begin
+       In1:=SwrMatChL[OutI][1];
+       If SwrMat[OutI][In1]<>1.0 Then Begin
+        If SwrIntF=1 Then
+         For I:=0 To Len-1 Do PSwrLArr(OutV[OutI])^[I]:=Rr(Int64(SwrMatN[OutI][In1])*PSwrLArr(InV[In1])^[I])
+        Else
+         For I:=0 To Len-1 Do Begin V:=SwrMatF[OutI][In1]*PSwrSArr(InV[In1])^[I]; PSwrSArr(OutV[OutI])^[I]:=V; End;
+       End Else Move(InV[In1]^,OutV[OutI]^,Int64(Len)*4);
+      End;
+   2: Begin
+       In1:=SwrMatChL[OutI][1]; In2:=SwrMatChL[OutI][2];
+       If SwrIntF=1 Then
+        For I:=0 To Len-1 Do
+         PSwrLArr(OutV[OutI])^[I]:=Rr(LongInt(Int64(SwrMatN[OutI][In1])*PSwrLArr(InV[In1])^[I]+Int64(SwrMatN[OutI][In2])*PSwrLArr(InV[In2])^[I]))
+       Else
+        For I:=0 To Len-1 Do Begin
+         P1:=SwrMatF[OutI][In1]*PSwrSArr(InV[In1])^[I]; P2:=SwrMatF[OutI][In2]*PSwrSArr(InV[In2])^[I];
+         V:=P1+P2; PSwrSArr(OutV[OutI])^[I]:=V;
+        End;
+      End;
+   Else
+    If SwrIntF=3 Then Begin
+     For I:=0 To Len-1 Do Begin
+      V:=0;
+      For J:=1 To SwrMatChN[OutI] Do Begin
+       K:=SwrMatChL[OutI][J];
+       P1:=PSwrSArr(InV[K])^[I]*SwrMatF[OutI][K]; V:=V+P1;
+      End;
+      PSwrSArr(OutV[OutI])^[I]:=V;
+     End;
+    End Else Begin
+     For I:=0 To Len-1 Do Begin
+      VI:=0;
+      For J:=1 To SwrMatChN[OutI] Do Begin
+       K:=SwrMatChL[OutI][J];
+       VI:=VI+LongInt(PSwrLArr(InV[K])^[I])*SwrMat32[OutI][K];
+      End;
+      Tt:=SwrSar(Int64(VI)+16384,15) And $FFFF; If Tt>=32768 Then Tt:=Tt-65536;
+      PSwrLArr(OutV[OutI])^[I]:=Tt;
+     End;
+    End;
+  End;
+ End;
+End;
+
+{ ---------- conversions de format (audioconvert.c) ---------- }
+{ ecrit Count echantillons du tampon interne (cellules) dans Buf selon SwrOutF (entrelace) }
+Procedure SwrCellsToBytes(Const V: TSwrView; Count,Ch: LongInt; Buf: PByte);
+Var I,C,Pos,Bps: LongInt; X: LongInt; F: Single; Y: Int64; SI: PSwrLArr; SF: PSwrSArr;
+Begin
+ Case SwrOutF Of 0: Bps:=1; 1: Bps:=2; Else Bps:=4; End;
+ For C:=0 To Ch-1 Do Begin
+  SI:=V[C]; SF:=V[C];
+  Pos:=C*Bps;
+  For I:=0 To Count-1 Do Begin
+   If SwrIntF=1 Then Begin
+    X:=SI^[I];
+    Case SwrOutF Of
+     0: Y:=SwrSar(X,8)+128;
+     1: Y:=X;
+     2: Y:=Int64(X)*65536;
+     Else Begin F:=X*(1.0/32768); Y:=0; Move(F,Y,4); End;
+    End;
+   End Else Begin
+    F:=SF^[I];
+    Case SwrOutF Of
+     0: Begin Y:=SwrLrint(F*128)+128; If Y>255 Then Y:=255; If Y<0 Then Y:=0; End;
+     1: Y:=SwrClip16(SwrLrint(F*32768));
+     2: Begin Y:=SwrLlrint(F*2147483648.0); If Y>2147483647 Then Y:=2147483647; If Y< -2147483648 Then Y:=-2147483648; End;
+     Else Begin Y:=0; Move(F,Y,4); End;
+    End;
+   End;
+   Case Bps Of
+    1: Buf[Pos]:=Y And 255;
+    2: Begin Buf[Pos]:=Y And 255; Buf[Pos+1]:=(Y Shr 8) And 255; End;
+    Else Begin
+     Buf[Pos]:=Y And 255; Buf[Pos+1]:=(Y Shr 8) And 255; Buf[Pos+2]:=(Y Shr 16) And 255; Buf[Pos+3]:=(Y Shr 24) And 255;
+    End;
+   End;
+   Inc(Pos,Ch*Bps);
+  End;
+ End;
+End;
+
+{ octets d'entree (SwrInF) -> cellules internes (SwrIntF) }
+Procedure SwrBytesToCells(Buf: PByte; Count,Ch: LongInt; Const V: TSwrView);
+Var I,C,Pos,Bps: LongInt; X: LongInt; F: Single; SI: PSwrLArr; SF: PSwrSArr;
+Begin
+ Case SwrInF Of 0: Bps:=1; 1: Bps:=2; Else Bps:=4; End;
+ For C:=0 To Ch-1 Do Begin
+  SI:=V[C]; SF:=V[C]; Pos:=C*Bps;
+  For I:=0 To Count-1 Do Begin
+   Case SwrInF Of
+    0: X:=Buf[Pos];
+    1: Begin X:=Buf[Pos]+Buf[Pos+1]*256; If X>=32768 Then Dec(X,65536); End;
+    2: X:=LongInt(LongWord(Buf[Pos]) Or (LongWord(Buf[Pos+1]) Shl 8) Or (LongWord(Buf[Pos+2]) Shl 16) Or (LongWord(Buf[Pos+3]) Shl 24));
+    Else Begin Move(Buf[Pos],F,4); X:=0; End;
+   End;
+   If SwrIntF=1 Then Begin
+    If SwrInF=0 Then SI^[I]:=LongInt(X-128) Shl 8 Else SI^[I]:=X;
+   End Else Begin
+    Case SwrInF Of
+     0: F:=(X-128)*(1.0/128);
+     1: F:=X*(1.0/32768);
+     2: F:=X*(1.0/2147483648.0);
+    End;
+    SF^[I]:=F;
+   End;
+   Inc(Pos,Ch*Bps);
+  End;
+ End;
+End;
+
+{ conversion directe sans traitement (full_convert) : Buf in -> Buf out, Count echantillons totaux }
+Procedure SwrFullConvert(Src,Dst: PByte; Count: LongInt);
+Var I: LongInt; X: LongInt; F: Single; Y: Int64; BI,BO: LongInt;
+Begin
+ Case SwrInF Of 0: BI:=1; 1: BI:=2; Else BI:=4; End;
+ Case SwrOutF Of 0: BO:=1; 1: BO:=2; Else BO:=4; End;
+ For I:=0 To Count-1 Do Begin
+  F:=0;
+  Case SwrInF Of
+   0: X:=Src[I];
+   1: Begin X:=Src[2*I]+Src[2*I+1]*256; If X>=32768 Then Dec(X,65536); End;
+   2: X:=LongInt(LongWord(Src[4*I]) Or (LongWord(Src[4*I+1]) Shl 8) Or (LongWord(Src[4*I+2]) Shl 16) Or (LongWord(Src[4*I+3]) Shl 24));
+   Else Begin Move(Src[4*I],F,4); X:=0; End;
+  End;
+  Y:=0;
+  Case SwrInF Of
+   0: Case SwrOutF Of
+       0: Y:=X;
+       1: Y:=(X-128) Shl 8;
+       2: Y:=Int64(X-128) Shl 24;
+       Else Begin F:=(X-128)*(1.0/128); Move(F,Y,4); End;
+      End;
+   1: Case SwrOutF Of
+       0: Y:=SwrSar(X,8)+128;
+       1: Y:=X;
+       2: Y:=Int64(X)*65536;
+       Else Begin F:=X*(1.0/32768); Y:=0; Move(F,Y,4); End;
+      End;
+   2: Case SwrOutF Of
+       0: Y:=SwrSar(X,24)+128;
+       1: Y:=SwrSar(X,16);
+       2: Y:=X;
+       Else Begin F:=X*(1.0/2147483648.0); Y:=0; Move(F,Y,4); End;
+      End;
+   Else Case SwrOutF Of
+       0: Begin Y:=SwrLrint(F*128)+128; If Y>255 Then Y:=255; If Y<0 Then Y:=0; End;
+       1: Y:=SwrClip16(SwrLrint(F*32768));
+       2: Begin Y:=SwrLlrint(F*2147483648.0); If Y>2147483647 Then Y:=2147483647; If Y< -2147483648 Then Y:=-2147483648; End;
+       Else Begin Y:=0; Move(F,Y,4); End;
+      End;
+  End;
+  Case BO Of
+   1: Dst[I]:=Y And 255;
+   2: Begin Dst[2*I]:=Y And 255; Dst[2*I+1]:=(Y Shr 8) And 255; End;
+   Else Begin
+    Dst[4*I]:=Y And 255; Dst[4*I+1]:=(Y Shr 8) And 255; Dst[4*I+2]:=(Y Shr 16) And 255; Dst[4*I+3]:=(Y Shr 24) And 255;
+   End;
+  End;
+ End;
+End;
+
+{ swr_convert_internal pour le chemin avec reechantillonnage ; Produit des octets entrelaces dans OutBuf }
+Var
+ SwrChunkIn: PByte;
+
+Function SwrConvertRes(OutBuf: PByte; OutCount: LongInt; InBuf: PByte; InCount: LongInt): LongInt;
+Var
+ PostV,MidV,PreV,ResOut: TSwrView; I: LongInt; N: LongInt;
+Begin
+ SwrBufRealloc(SwrPost,SwrInCh,InCount+1);
+ If SwrResFirst Then Begin
+  SwrBufRealloc(SwrMid,SwrInCh,OutCount+1);
+ End Else Begin
+  SwrBufRealloc(SwrMid,SwrOutCh,InCount+1);
+ End;
+ SwrBufRealloc(SwrPre,SwrOutCh,OutCount+1);
+ For I:=0 To 7 Do Begin PostV[I]:=SwrPost.P[I]; MidV[I]:=SwrMid.P[I]; PreV[I]:=SwrPre.P[I]; End;
+ If InCount>0 Then SwrBytesToCells(InBuf,InCount,SwrInCh,PostV);
+ If SwrResFirst Then Begin
+  N:=SwrResample(MidV,OutCount,PostV,InCount);
+  If N<0 Then Begin SwrConvertRes:=N; Exit; End;
+  If SwrDoRemat Then Begin If N>0 Then SwrRematrix(PreV,MidV,N); ResOut:=PreV; End Else ResOut:=MidV;
+ End Else Begin
+  If SwrDoRemat Then Begin If InCount>0 Then SwrRematrix(MidV,PostV,InCount); N:=SwrResample(PreV,OutCount,MidV,InCount); End
+  Else N:=SwrResample(PreV,OutCount,PostV,InCount);
+  ResOut:=PreV;
+ End;
+ If N>0 Then SwrCellsToBytes(ResOut,N,SwrOutCh,OutBuf);
+ SwrConvertRes:=N;
+End;
+
+Const SwrWantFmt: LongInt = 1;   { format de sortie voulu par l'appelant : 1 s16 (defaut), 0 u8, 2 s32, 3 flt }
+
+Procedure SwrWriteHeader(Fmt,Ch,Rate,DataBytes: LongInt);
+Var
+ H: Array[0..43] Of Byte; Bps,Tag: LongInt;
+Procedure P32(At: LongInt; V: LongInt);
+Var I: LongInt;
+Begin For I:=0 To 3 Do Begin H[At+I]:=V And 255; V:=V Shr 8; End; End;
+Procedure P16(At: LongInt; V: LongInt);
+Begin H[At]:=V And 255; H[At+1]:=(V Shr 8) And 255; End;
+Begin
+ Case Fmt Of 0: Bps:=1; 1: Bps:=2; Else Bps:=4; End;
+ If Fmt=3 Then Tag:=3 Else Tag:=1;
+ H[0]:=82; H[1]:=73; H[2]:=70; H[3]:=70; P32(4,36+DataBytes);
+ H[8]:=87; H[9]:=65; H[10]:=86; H[11]:=69;
+ H[12]:=102; H[13]:=109; H[14]:=116; H[15]:=32; P32(16,16); P16(20,Tag);
+ P16(22,Ch); P32(24,Rate); P32(28,Rate*Ch*Bps); P16(32,Ch*Bps); P16(34,Bps*8);
+ H[36]:=100; H[37]:=97; H[38]:=116; H[39]:=97; P32(40,DataBytes);
+ WriteBytes(H,44);
+End;
+
+{ Convertit Source (WAV PCM 8/16/24/32 bits ou flottant 32 bits) vers Target (WAV) comme le CLI ffmpeg 6.1.1 : -ar / -ac
+  par swresample (parametres par defaut). Retourne False (rien ecrit) si la forme du fichier n'est pas prise en charge. }
+Function SwrNormalize(Const Source,Target: String; ForMP3: Boolean): Boolean;
+Var
+ B: Array[0..63] Of Byte; Limit,Pos,Sz,DataStart,DataSize,Rate,Chans,Bits,Tag,Align,OutRate,OutChans,Mask: LongInt;
+ HasFmt,HasData: Boolean; I,Bps,InBps,Pkt,Done,Total,N,NOut,NReq,Want,InPer: LongInt; BytesOut: Int64;
+ Raw,Cvt,OutBuf: PByte; OutCap: LongInt; MoreData: Boolean; RatioD: Double; Delay: Int64; Q,Q2: Single;
+Function U16(At: LongInt): LongInt; Begin U16:=B[At]+B[At+1]*256; End;
+Function U32(At: LongInt): Int64; Begin U32:=Int64(B[At])+Int64(B[At+1])*256+Int64(B[At+2])*65536+Int64(B[At+3])*16777216; End;
+Procedure Emit(Cnt: LongInt);
+Var Off,K: LongInt; Total2: LongInt;
+Begin
+ Total2:=Cnt*OutChans*Bps; Off:=0;
+ While Off<Total2 Do Begin
+  K:=Total2-Off; If K>32768 Then K:=32768;
+  WriteBytes(PByte(PtrInt(OutBuf)+Off)^,K); Inc(Off,K);
+ End;
+ BytesOut:=BytesOut+Total2;
+End;
+Procedure EnsureOut(Cnt: LongInt);
+Begin
+ If Int64(Cnt)*OutChans*Bps+64>OutCap Then Begin
+  If OutBuf<>Nil Then FreeMem(OutBuf);
+  OutCap:=Cnt*OutChans*Bps+4096; GetMem(OutBuf,OutCap);
+ End;
+End;
+Begin
+ SwrNormalize:=False;
+ SwrFlushed:=False;
+ OpenRead(Source); Limit:=InputSize;
+ If Limit<12 Then Begin CloseRead; Exit; End;
+ ReadAt(0,B,12);
+ If (B[0]<>82) Or (B[1]<>73) Or (B[2]<>70) Or (B[3]<>70) Or (B[8]<>87) Or (B[9]<>65) Or (B[10]<>86) Or (B[11]<>69) Then Begin CloseRead; Exit; End;
+ Pos:=12; HasFmt:=False; HasData:=False; Mask:=0; Tag:=0; Chans:=0; Rate:=0; Bits:=0; Align:=0; DataStart:=0; DataSize:=0;
+ While Limit-Pos>=8 Do Begin
+  ReadAt(Pos,B,8); Sz:=U32(4); Inc(Pos,8);
+  If (B[0]=102) And (B[1]=109) And (B[2]=116) And (B[3]=32) Then Begin
+   If (Sz<16) Or (Limit-Pos<16) Then Begin CloseRead; Exit; End;
+   ReadAt(Pos,B,16); Tag:=U16(0); Chans:=U16(2); Rate:=U32(4); Align:=U16(12); Bits:=U16(14);
+   If (Tag=$FFFE) And (Sz>=40) And (Limit-Pos>=40) Then Begin
+    ReadAt(Pos,B,40); Tag:=U16(24); Mask:=U32(20);
+   End;
+   HasFmt:=True;
+  End Else If (B[0]=100) And (B[1]=97) And (B[2]=116) And (B[3]=97) Then Begin
+   DataStart:=Pos; DataSize:=Sz; If (DataSize<0) Or (DataSize>Limit-Pos) Then DataSize:=Limit-Pos; HasData:=True; Break;
+  End;
+  Inc(Pos,Sz); If Odd(Sz) Then Inc(Pos);
+ End;
+ If Not HasFmt Or Not HasData Then Begin CloseRead; Exit; End;
+ If (Chans<1) Or (Chans>8) Or (Rate<1) Or (Rate>400000) Then Begin CloseRead; Exit; End;
+ If Not (((Tag=1) And (Bits In [8,16,24,32])) Or ((Tag=3) And (Bits=32))) Then Begin CloseRead; Exit; End;
+ InBps:=Bits Div 8;
+ If Align<>Chans*InBps Then Begin CloseRead; Exit; End;
+ Case Bits Of
+  8: SwrInF:=0;
+  16: SwrInF:=1;
+  Else If Tag=3 Then SwrInF:=3 Else SwrInF:=2;
+ End;
+ If DataSize Mod Align<>0 Then DataSize:=DataSize-DataSize Mod Align;
+ If DataSize=0 Then Begin CloseRead; Exit; End;
+ SwrOutF:=SwrWantFmt;
+ OutRate:=RequestedRate;
+ If OutRate=0 Then Begin
+  OutRate:=Rate;
+  If ForMP3 And (Rate<>32000) And (Rate<>44100) And (Rate<>48000) Then OutRate:=44100;
+ End;
+ If ForMP3 And (OutRate<>32000) And (OutRate<>44100) And (OutRate<>48000) Then Fail('MP3: -ar 32000, 44100 ou 48000 requis.');
+ OutChans:=RequestedChannels; If OutChans=0 Then OutChans:=Chans;
+ SwrInCh:=Chans; SwrOutCh:=OutChans; SwrInRate:=Rate; SwrOutRate:=OutRate;
+ If (Mask<>0) And (SwrBitCount(Mask)=Chans) And ((Mask And Not $3FFFF)=0) Then SwrInMask:=Mask Else SwrInMask:=SwrDefaultMask(Chans);
+ If OutChans=Chans Then SwrOutMask:=SwrInMask Else SwrOutMask:=SwrDefaultMask(OutChans);
+ SwrDoRes:=Rate<>OutRate; SwrDoRemat:=SwrInMask<>SwrOutMask;
+ If (SwrOutF=3) And (SwrInF=1) And Not SwrDoRes And Not SwrDoRemat Then SwrOutF:=1;
+ { format interne (swr_init) }
+ Case SwrInF Of 0: Bps:=1; 1: Bps:=2; Else Bps:=4; End;
+ InBps:=Bps;
+ Case SwrOutF Of 0: Bps:=1; 1: Bps:=2; Else Bps:=4; End;
+ If (InBps<=2) And (Bps<=2) And (Rate=OutRate) Then SwrIntF:=1
+ Else If InBps+Bps<=3 Then SwrIntF:=1
+ Else If (InBps<=2) And Not SwrDoRemat And (Rate=OutRate) Then SwrIntF:=1
+ Else SwrIntF:=3;
+ If SwrDoRemat And Not SwrRematInit Then Begin CloseRead; Exit; End;
+ SwrChRes:=SwrInCh;
+ SwrResFirst:=False;
+ If SwrDoRes Then Begin
+  Q:=SwrOutRate; Q2:=SwrInRate; Q:=Q/Q2;
+  SwrResFirst:=(SwrOutCh Div SwrInCh-1)<(Q-1.0);
+  If SwrResFirst Then SwrChRes:=SwrInCh Else SwrChRes:=SwrOutCh;
+  SwrResInit;
+  SwrInBufIdx:=0; SwrInBufCnt:=0; SwrConstraint:=0;
+  FillChar(SwrInBuf,SizeOf(SwrInBuf),0);
+ End;
+ FillChar(SwrPost,SizeOf(SwrPost),0); FillChar(SwrMid,SizeOf(SwrMid),0); FillChar(SwrPre,SizeOf(SwrPre),0);
+ { taille des paquets du demuxer WAV }
+ Pkt:=4096; If Pkt<Align Then Pkt:=Align; Pkt:=(Pkt Div Align)*Align;
+ InPer:=Pkt Div Align;
+ GetMem(Raw,Pkt+64);
+ If Bits=24 Then GetMem(Cvt,InPer*Chans*4+64) Else Cvt:=Raw;
+ OutBuf:=Nil; OutCap:=0; BytesOut:=0;
+ OpenWrite(Target);
+ SwrWriteHeader(SwrOutF,OutChans,OutRate,0);
+ Done:=0; Total:=DataSize Div Align;
+ RatioD:=OutRate; RatioD:=RatioD/Rate;
+ While Done<Total Do Begin
+  N:=InPer; If Total-Done<N Then N:=Total-Done;
+  ReadAt(DataStart+Done*Align,Raw^,N*Align);
+  If Bits=24 Then
+   For I:=0 To N*Chans-1 Do Begin
+    Cvt[4*I]:=0; Cvt[4*I+1]:=Raw[3*I]; Cvt[4*I+2]:=Raw[3*I+1]; Cvt[4*I+3]:=Raw[3*I+2];
+   End;
+  Inc(Done,N);
+  If Not SwrDoRes Then Begin
+   EnsureOut(N);
+   If Not SwrDoRemat Then Begin
+    SwrFullConvert(Cvt,OutBuf,N*Chans);
+   End Else Begin
+    SwrBufRealloc(SwrPost,SwrInCh,N+1); SwrBufRealloc(SwrMid,SwrOutCh,N+1);
+    SwrBytesToCells(Cvt,N,SwrInCh,SwrPost.P);
+    SwrRematrix(SwrMid.P,SwrPost.P,N);
+    SwrCellsToBytes(SwrMid.P,N,SwrOutCh,OutBuf);
+   End;
+   Emit(N);
+  End Else Begin
+   { aresample : filter_frame }
+   NReq:=Trunc(N*RatioD+32);
+   Delay:=SwrGetDelay(OutRate);
+   If Delay>0 Then Begin
+    Want:=4096; If NReq>Want Then Want:=NReq;
+    If Delay<Want Then NReq:=NReq+Delay Else NReq:=NReq+Want;
+   End;
+   EnsureOut(NReq+4096);
+   NOut:=SwrConvertRes(OutBuf,NReq,Cvt,N);
+   If NOut>0 Then Begin
+    MoreData:=NOut=NReq;
+    Emit(NOut);
+    While MoreData Do Begin
+     NOut:=SwrConvertRes(OutBuf,4096,Cvt,0);
+     If NOut<=0 Then MoreData:=False Else Emit(NOut);
+    End;
+   End;
+  End;
+ End;
+ If SwrDoRes Then Begin
+  { vidange finale : swr_convert(NULL) }
+  SwrResFlush; SwrFlushed:=True;
+  EnsureOut(4096);
+  Repeat
+   SwrConstraint:=0;
+   NOut:=SwrConvertRes(OutBuf,4096,Cvt,0);
+   If NOut>0 Then Emit(NOut);
+  Until NOut<=0;
+ End;
+ {$I-}Seek(ActiveOutput,0);{$I+}
+ If IOResult<>0 Then Fail('Positionnement entete WAV impossible.');
+ SwrWriteHeader(SwrOutF,OutChans,OutRate,BytesOut);
+ CloseRead; CloseWrite;
+ FreeMem(Raw); If Bits=24 Then FreeMem(Cvt); If OutBuf<>Nil Then FreeMem(OutBuf);
+ If SwrDoRes Then Begin SwrBufFree(SwrInBuf,8); FreeMem(SwrBank); End;
+ SwrBufFree(SwrPost,8); SwrBufFree(SwrMid,8); SwrBufFree(SwrPre,8);
+ SwrNormalize:=True;
+End;
+
+{ format d'echantillon que le CLI ffmpeg donne a l'encodeur PCM : 0 u8, 1 s16, 2 s32, 3 flt }
+Function SwrFmtOfCodec(Const C: String): LongInt;
+Begin
+ SwrFmtOfCodec:=1;
+ If (C='pcm_u8') Or (C='pcm_s8') Or (C='pcm_s8_planar') Then SwrFmtOfCodec:=0
+ Else If (Copy(C,1,7)='pcm_s24') Or (Copy(C,1,7)='pcm_s32') Or (Copy(C,1,7)='pcm_u24') Or (Copy(C,1,7)='pcm_u32') Then SwrFmtOfCodec:=2
+ Else If (Copy(C,1,5)='pcm_f') Then SwrFmtOfCodec:=3;
+End;
+
+{ vrai si Name est un WAV flottant 32 bits plan (traite directement par SwrNormalize) }
+Function SwrIsF32Wav(Const Name: String): Boolean;
+Var B: Array[0..39] Of Byte; Limit,Pos,Sz: LongInt;
+Begin
+ SwrIsF32Wav:=False;
+ OpenRead(Name); Limit:=InputSize;
+ If Limit<20 Then Begin CloseRead; Exit; End;
+ ReadAt(0,B,12);
+ If (B[0]<>82) Or (B[1]<>73) Or (B[2]<>70) Or (B[3]<>70) Or (B[8]<>87) Or (B[9]<>65) Or (B[10]<>86) Or (B[11]<>69) Then Begin CloseRead; Exit; End;
+ Pos:=12;
+ While Limit-Pos>=8 Do Begin
+  ReadAt(Pos,B,8); Sz:=B[4]+B[5]*256+B[6]*65536+B[7]*16777216; Inc(Pos,8);
+  If (B[0]=102) And (B[1]=109) And (B[2]=116) And (B[3]=32) Then Begin
+   If (Sz<16) Or (Limit-Pos<16) Then Break;
+   ReadAt(Pos,B,16);
+   SwrIsF32Wav:=(B[0]+B[1]*256=3) And (B[14]+B[15]*256=32) And (B[2]+B[3]*256<=8);
+   Break;
+  End;
+  If Sz<0 Then Break;
+  Inc(Pos,Sz); If Odd(Sz) Then Inc(Pos);
+ End;
+ CloseRead;
+End;
+{ ==== fin H6 swresample ==== }
+
+
 { ==== BLOCK-ANCHOR-H6 : inserer le code du groupe H6 juste au-dessus de cette ligne ==== }
 
 { ==== BLOCK-ANCHOR-H7 : inserer le code du groupe H7 juste au-dessus de cette ligne ==== }
@@ -108246,6 +109319,7 @@ Begin
  Sample:=V;
 End;
 Begin
+ If SwrNormalize(Source,Target,ForMP3) Then Exit;
  OpenRead(Source); Limit:=InputSize;
  If Limit<12 Then Fail('WAV tronque.');
  ReadAt(0,B,12);
@@ -114241,7 +115315,7 @@ BEGIN
    Intermediate:=Temps[0];
   End Else If (WaveFormatTag(InputPath)=$160) Or (WaveFormatTag(InputPath)=$161) Then Begin
    Temps[0]:=NewTemporary; DecodeWMAWav(InputPath,Temps[0]); Intermediate:=Temps[0];
-  End Else If (PcmCodecOut='') And PcmWavNeedsConv(InputPath) Then Begin
+  End Else If (PcmCodecOut='') And PcmWavNeedsConv(InputPath) And Not (((RequestedRate<>0) Or (RequestedChannels<>0) Or (AudioCodec='wmav1') Or (AudioCodec='wmav2')) And SwrIsF32Wav(InputPath)) Then Begin
    Temps[0]:=NewTemporary; PcmEncodeFile(InputPath,Temps[0],'wav','pcm_s16le'); Intermediate:=Temps[0];
   End Else If IsWaveCT(InputPath) Then Begin
    Temps[0]:=NewTemporary; DecodeWaveCT(InputPath,Temps[0]); Intermediate:=Temps[0];
@@ -114263,8 +115337,13 @@ BEGIN
   End;
   If PcmCodecOut<>'' Then Begin
    If (RequestedRate<>0) Or (RequestedChannels<>0) Then Begin
-    Temps[3]:=NewTemporary; PcmEncodeFile(Intermediate,Temps[3],'wav','pcm_s16le');
-    Temps[1]:=NewTemporary; NormalizeWave(Temps[3],Temps[1],False); Intermediate:=Temps[1];
+    Temps[1]:=NewTemporary; SwrWantFmt:=SwrFmtOfCodec(PcmCodecOut);
+    If Not SwrNormalize(Intermediate,Temps[1],False) Then Begin
+     SwrWantFmt:=1;
+     Temps[3]:=NewTemporary; PcmEncodeFile(Intermediate,Temps[3],'wav','pcm_s16le');
+     NormalizeWave(Temps[3],Temps[1],False);
+    End;
+    SwrWantFmt:=1; Intermediate:=Temps[1];
    End;
    PcmEncodeFile(Intermediate,Temps[2],OutputFormat,PcmCodecOut);
   End Else
@@ -114302,7 +115381,7 @@ BEGIN
     EncodeIMAQT(Temps[1],Temps[2]);
    End
    Else If (OutputFormat='asf') Or (OutputFormat='avi') Then Begin
-    Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False);
+    Temps[1]:=NewTemporary; SwrWantFmt:=3; NormalizeWave(Intermediate,Temps[1],False); SwrWantFmt:=1;
     If Not HasBitrate Then RequestedBitRateK:=128;
     If AudioCodec='wmav1' Then EncodeWMAFile(Temps[1],Temps[2],1,RequestedBitRateK*1000,Ord(OutputFormat='avi')) Else EncodeWMAFile(Temps[1],Temps[2],2,RequestedBitRateK*1000,Ord(OutputFormat='avi'));
    End
