@@ -98372,7 +98372,7 @@ Var
  F5Fm: Array[0..F5MaxFm] Of F5TFm; F5NFm: Integer; F5FmInit: Boolean;
  F5S: F5TSrc; F5SF: File; F5SOpen: Boolean;
  F5OF: File; F5OOpen: Boolean; F5OStd: Boolean;
- F5Tmp: Array[1..64] Of String[200]; F5NTmp: Integer; F5PrevExit: Pointer;
+ F5Tmp: Array[1..6000] Of String[200]; F5NTmp: Integer; F5PrevExit: Pointer;
  F5InPix: String[20]; F5InW,F5InH: LongInt; F5InFN,F5InFD: LongInt; F5StartNum: LongInt; F5Update: LongInt; F5Loop: LongInt;
  F5PatType: String[12]; F5FinalDelay: LongInt; F5HasFD: Boolean; F5Quiet: Boolean; F5FrameRateSet: Boolean;
  F5Self: String; F5OutFmt: String[20]; F5NoBanner: Boolean; F5Boundary: String[60]; F5Strftime: Boolean;
@@ -98509,10 +98509,11 @@ Begin
  While (J>0) And Not (OutputPath[J] In ['/','\',':']) Do Dec(J);
  Folder:=Copy(OutputPath,1,J);
  If Length(Folder)>150 Then Folder:='';
- If F5NTmp>=64 Then Fail('F5: trop de fichiers temporaires.');
  For K:=1 To 200 Do Begin
   Str(Random(900000),D); N:=Folder+'F5T'+D+Ext;
   If Not Exists(N) Then Begin
+   For J:=1 To F5NTmp Do If F5Tmp[J]='' Then Begin F5Tmp[J]:=N; F5NewTmp:=N; Exit; End;
+   If F5NTmp>=6000 Then Fail('F5: trop de fichiers temporaires.');
    Inc(F5NTmp); F5Tmp[F5NTmp]:=N; F5NewTmp:=N; Exit;
   End;
  End;
@@ -98973,9 +98974,10 @@ Begin
  Lim:=N;
  If (H4SVfr>0) And (H4SVfr<Lim) Then Lim:=H4SVfr;
  If H4STSet Then Begin
-  { image k acceptee si k*FD/FN < t }
-  K:=0;
-  While (K<Lim) And (Int64(K)*F5S.FD*1000000<H4STus*F5S.FN) Do Inc(K);
+  { fin = t arrondi au plus proche en base de temps du flux ; image k acceptee si k < fin }
+  K:=(H4STus*F5S.FN*2+Int64(F5S.FD)*1000000) Div (2*Int64(F5S.FD)*1000000);
+  If K<1 Then K:=1;
+  If K>Lim Then K:=Lim;
   Lim:=K;
  End;
  F5OutCount:=Lim;
@@ -99101,7 +99103,7 @@ Begin
   End;
   If (A='-y') Or (A='-n') Or (A='-hide_banner') Or (A='-an') Or (A='-vn') Then Begin Inc(I); Continue; End;
   If (A='-f') Or (A='-frames:v') Or (A='-vframes') Or (A='-t') Or (A='-start_number') Or (A='-update') Or (A='-r') Or (A='-c:v') Or (A='-vcodec') Or
-     (A='-codec:v') Or (A='-loop') Or (A='-final_delay') Or (A='-pattern_type') Or (A='-framerate') Or (A='-strftime') Or (A='-boundary_tag') Or (A='-c') Or (A='-codec') Then Begin Inc(I,2); Continue; End;
+     (A='-codec:v') Or (A='-loop') Or (A='-final_delay') Or (A='-pattern_type') Or (A='-framerate') Or (A='-strftime') Or (A='-boundary_tag') Or (A='-c') Or (A='-codec') Or (A='-aspect') Then Begin Inc(I,2); Continue; End;
   R:=R+' '+F5Q(A); Inc(I);
   If (I<ParamCount) And (Copy(ParamStr(I),1,1)<>'-') Then Begin R:=R+' '+F5Q(ParamStr(I)); Inc(I); End;
  End;
@@ -99154,7 +99156,7 @@ Begin
   F5EraseFile(Target);
  End;
  Sf:=F5S.Fm;
- If ((Codec='png') Or (Codec='bmp')) And (OptPixFmt='') And (F5Fm[Sf].Pl In [1,2]) And (F5Fm[Sf].Bps=1) And Not F5Fm[Sf].Alpha And (F5Fm[Sf].Nm<>'gbrp') Then Begin
+ If ((Codec='png') Or (Codec='bmp')) And ((OptPixFmt='') Or (OptPixFmt=F5Fm[Sf].Nm)) And (F5Fm[Sf].Pl In [1,2]) And (F5Fm[Sf].Bps=1) And Not F5Fm[Sf].Alpha And (F5Fm[Sf].Nm<>'gbrp') Then Begin
   GetMem(Buf,F5S.FBytes+64);
   If Not F5ReadFrame(I,Buf) Then Fail('F5: lecture de l''image impossible.');
   If Codec='png' Then NVBegin(1,Target,F5S.W,F5S.H,7,F5S.FN,F5S.FD) Else NVBegin(2,Target,F5S.W,F5S.H,7,F5S.FN,F5S.FD);
@@ -99362,15 +99364,16 @@ Begin
 End;
 
 { image2 demuxer : construit un Y4M a partir d'une suite d'images (chaque image decodee par le programme) }
-Function F5ImageSeqToY4M(Const Pat: String): String;
+Function F5ImageSeqToY4M(Const Pat: String; Pre: Boolean): String;
 Var Start,First,K,I,N,Sz,Tot,Lim: LongInt; Nm: String; Names: Array[0..0] Of String; Glob,Seq: Boolean;
  Uniq: LongInt; Tmps: Array[0..F5MaxImg] Of String[200]; Fh: File; Code: Integer; Hd,Log: String;
  Sv: F5TSrc; Buf: PEABuffer; Order: LongInt; Actual: LongInt; Outp: String; Fo: File; Total: LongInt;
  W0,H0,Fm0: LongInt; Rng0,Loc0: Integer; SarN0,SarD0: LongInt; Il0: Char; Written: LongInt;
 Begin
- Glob:=(F5PatType='glob') Or ((F5PatType='') And ((Pos('*',Pat)>0) Or (Pos('?',Pat)>0) Or (Pos('[',Pat)>0)));
- Seq:=False; F5ImgN:=0;
- If F5PatType='none' Then Begin
+ Glob:=Not Pre And ((F5PatType='glob') Or ((F5PatType='') And ((Pos('*',Pat)>0) Or (Pos('?',Pat)>0) Or (Pos('[',Pat)>0))));
+ Seq:=False; If Not Pre Then F5ImgN:=0;
+ If Pre Then Begin
+ End Else If F5PatType='none' Then Begin
   F5ImgNames[0]:=Pat; F5ImgN:=1;
  End Else If Glob Then Begin
   F5Glob(Pat);
@@ -99461,13 +99464,14 @@ Begin
  F5IsOpt:=(A='-framerate') Or (A='-video_size') Or (A='-pixel_format') Or (A='-start_number') Or (A='-update') Or (A='-pattern_type') Or
   (A='-final_delay') Or (A='-boundary_tag') Or (A='-loop') Or (A='-f5q') Or (A='-strftime') Or (A='-frame_pts') Or (A='-atomic_writing') Or
   (A='-start_number_range') Or (A='-ts_from_file') Or
-  ((InputPath='') And ((A='-s') Or (A='-pix_fmt') Or (A='-r')));
+  ((InputPath='') And ((A='-s') Or (A='-pix_fmt') Or (A='-r') Or (A='-c:v') Or (A='-vcodec') Or (A='-codec:v')));
 End;
 
 Procedure F5SetOpt(Const A,V0: String);
 Var V: String; K: Integer; Code,N,D: LongInt; Num: LongInt;
 Begin
  V:=V0;
+ If (A='-c:v') Or (A='-vcodec') Or (A='-codec:v') Then Exit;
  If A='-f5q' Then Begin
   F5Quiet:=True; Assign(Output,V); {$I-}Rewrite(Output);{$I+} Code:=IOResult; Exit;
  End;
@@ -99530,10 +99534,123 @@ Begin
   Exit;
  End;
  If Own Then Begin
-  If (S='yuv4mpegpipe') Or (S='rawvideo') Or (S='gif') Then Begin If Not HasCrop And (AspectNum<=0) And (ImageWidth=0) Then F5Take:=S; End;
+  If (S='yuv4mpegpipe') Or (S='rawvideo') Or (S='gif') Or ((S='dv') And ((H4SVfr>0) Or H4STSet Or (AspectNum>0))) Then Begin If Not HasCrop And (ImageWidth=0) Then F5Take:=S; End;
   Exit;
  End;
  If (S='gif') And (InputFormat<>'flv') Then F5Take:='gif';
+End;
+
+{ ---------- image2pipe / mpjpeg en entree : decoupage en images, ecrites en fichiers temporaires ---------- }
+Function F5BE32(P: PEABuffer; At: LongInt): LongInt;Begin F5BE32:=(P^[At] Shl 24) Or (P^[At+1] Shl 16) Or (P^[At+2] Shl 8) Or P^[At+3]; End;
+
+Procedure F5PutImg(P: PEABuffer; At,Len: LongInt);
+Var Nm: String; Fo: File; Code: Integer;
+Begin
+ If F5ImgN>=F5MaxImg Then Fail('image2pipe: trop d''images.');
+ Nm:=F5NewTmp('.img');
+ Assign(Fo,Nm); {$I-}Rewrite(Fo,1);{$I+} Code:=IOResult;
+ If Code<>0 Then Fail('Creation impossible: '+Nm);
+ BlockWrite(Fo,P^[At],Len); Close(Fo);
+ F5ImgNames[F5ImgN]:=Nm; Inc(F5ImgN);
+End;
+
+Function F5FindStr(P: PEABuffer; N,From: LongInt; Const S: String): LongInt;
+Var I,J: LongInt; Ok: Boolean;
+Begin
+ F5FindStr:=-1;
+ For I:=From To N-Length(S) Do Begin
+  Ok:=True;
+  For J:=1 To Length(S) Do If P^[I+J-1]<>Ord(S[J]) Then Begin Ok:=False; Break; End;
+  If Ok Then Begin F5FindStr:=I; Exit; End;
+ End;
+End;
+
+Procedure F5PipeSplit(Const Nm: String; Mpj: Boolean);
+Var P: PEABuffer; N,At,E,Len,M,K,Q,Hs,Cl,B2: LongInt; Ty: String; Wd,Ht,Mx,Pn: LongInt; Tok: Integer; Line: String; Code: LongInt; Bo: String;
+Function Num(Var Pp: LongInt): LongInt;
+Var V: LongInt;
+Begin
+ V:=0;
+ While (Pp<N) And (P^[Pp] In [32,9,10,13]) Do Inc(Pp);
+ While (Pp<N) And (P^[Pp]=35) Do Begin While (Pp<N) And (P^[Pp]<>10) Do Inc(Pp); While (Pp<N) And (P^[Pp] In [32,9,10,13]) Do Inc(Pp); End;
+ While (Pp<N) And (P^[Pp] In [48..57]) Do Begin V:=V*10+P^[Pp]-48; Inc(Pp); End;
+ Num:=V;
+End;
+Begin
+ F5SrcOpen(Nm); N:=F5SrcSize;
+ If N<4 Then Fail(Nm+': Invalid data found when processing input');
+ GetMem(P,N+16);
+ If Not F5Rd(0,P^,N) Then Fail('Lecture impossible: '+Nm);
+ F5SrcClose;
+ F5ImgN:=0; At:=0;
+ If Mpj Then Begin
+  While At<N Do Begin
+   K:=F5FindStr(P,N,At,'--'); If K<0 Then Break;
+   { fin de la ligne de delimitation }
+   E:=F5FindStr(P,N,K,#13#10); If E<0 Then Break;
+   At:=E+2; Cl:=-1;
+   { en-tetes }
+   While At<N Do Begin
+    If (P^[At]=13) And (At+1<N) And (P^[At+1]=10) Then Begin Inc(At,2); Break; End;
+    E:=F5FindStr(P,N,At,#13#10); If E<0 Then Begin At:=N; Break; End;
+    Line:=''; For Q:=At To E-1 Do If Length(Line)<250 Then Line:=Line+Chr(P^[Q]);
+    Line:=Lower(Line);
+    If Copy(Line,1,15)='content-length:' Then Begin Line:=Copy(Line,16,40); While (Line<>'') And (Line[1]=' ') Do Delete(Line,1,1); Val(Line,Cl,Code); If Code<>0 Then Cl:=-1; End;
+    At:=E+2;
+   End;
+   If Cl<0 Then Begin
+    E:=F5FindStr(P,N,At,#13#10'--'); If E<0 Then E:=N;
+    Cl:=E-At;
+   End;
+   If At+Cl>N Then Break;
+   If Cl>0 Then F5PutImg(P,At,Cl);
+   At:=At+Cl;
+  End;
+ End Else Begin
+  While At+8<N Do Begin
+   If (P^[At]=$89) And (P^[At+1]=$50) Then Begin
+    E:=At+8;
+    While E+12<=N Do Begin
+     Len:=F5BE32(P,E); M:=F5BE32(P,E+4); E:=E+12+Len;
+     If M=$49454E44 Then Break;
+    End;
+    If E>N Then Break;
+    F5PutImg(P,At,E-At); At:=E;
+   End Else If (P^[At]=$FF) And (P^[At+1]=$D8) Then Begin
+    E:=At+2; Q:=0;
+    While E+1<N Do Begin
+     If P^[E]<>$FF Then Begin Inc(E); Continue; End;
+     M:=P^[E+1];
+     If (M=$FF) Then Begin Inc(E); Continue; End;
+     If M=$D9 Then Begin E:=E+2; Q:=1; Break; End;
+     If (M=0) Or (M=1) Or ((M>=$D0) And (M<=$D8)) Then Begin E:=E+2; Continue; End;
+     Len:=(P^[E+2] Shl 8) Or P^[E+3]; E:=E+2+Len;
+     If M=$DA Then Begin
+      While E+1<N Do Begin
+       If (P^[E]=$FF) And (P^[E+1]<>0) And Not ((P^[E+1]>=$D0) And (P^[E+1]<=$D7)) Then Break;
+       Inc(E);
+      End;
+     End;
+    End;
+    If Q=0 Then Break;
+    F5PutImg(P,At,E-At); At:=E;
+   End Else If (P^[At]=$42) And (P^[At+1]=$4D) Then Begin
+    Len:=P^[At+2]+(P^[At+3] Shl 8)+(P^[At+4] Shl 16)+(P^[At+5] Shl 24);
+    If (Len<=0) Or (At+Len>N) Then Break;
+    F5PutImg(P,At,Len); At:=At+Len;
+   End Else If (P^[At]=80) And (P^[At+1] In [52,53,54]) Then Begin
+    E:=At+2; Wd:=Num(E); Ht:=Num(E); Mx:=1;
+    If P^[At+1]<>52 Then Mx:=Num(E);
+    Inc(E);
+    If P^[At+1]=52 Then Len:=((Wd+7) Div 8)*Ht Else If P^[At+1]=53 Then Len:=Wd*Ht Else Len:=Wd*Ht*3;
+    If (P^[At+1]<>52) And (Mx>255) Then Len:=Len*2;
+    If E+Len>N Then Break;
+    F5PutImg(P,At,E+Len-At); At:=E+Len;
+   End Else Break;
+  End;
+ End;
+ FreeMem(P);
+ If F5ImgN=0 Then Fail(Nm+': Invalid data found when processing input');
 End;
 
 Function F5MineOut: Boolean;
@@ -99541,22 +99658,1435 @@ Var S: String;
 Begin
  S:=F5OutName;
  F5MineOut:=F5IsImgName(S) Or (S='image2') Or (S='null') Or (S='crc') Or (S='framecrc') Or (S='image2pipe') Or (S='mpjpeg') Or (S='mxf') Or
-  (S='mxf_d10') Or (S='gxf') Or (S='rtp') Or (S='gif') Or (S='yuv4mpegpipe') Or (S='rawvideo');
+  (S='mxf_d10') Or (S='gxf') Or (S='rtp') Or (S='gif') Or (S='dv') Or (S='yuv4mpegpipe') Or (S='rawvideo');
 End;
 
-Procedure F5GifSink;
+{ ---------- GIF : encodeur (libavcodec/gif.c, lzwenc.c) et muxeur (libavformat/gif.c) ---------- }
+Const
+ F5D32: Array[0..8,0..7] Of Byte=((17,9,23,15,16,8,22,14),(5,29,3,27,4,28,2,26),(21,13,19,11,20,12,18,10),(0,24,6,30,1,25,7,31),
+  (16,8,22,14,17,9,23,15),(4,28,2,26,5,29,3,27),(20,12,18,10,21,13,19,11),(1,25,7,31,0,24,6,30),(17,9,23,15,16,8,22,14));
+ F5D73: Array[0..8,0..7] Of Byte=((0,55,14,68,3,58,17,72),(37,18,50,32,40,22,54,35),(9,64,5,59,13,67,8,63),(46,27,41,23,49,31,44,26),
+  (2,57,16,71,1,56,15,70),(39,21,52,34,38,19,51,33),(11,66,7,62,10,65,6,60),(48,30,43,25,47,29,42,24),(0,55,14,68,3,58,17,72));
+
+{ yuv420p (4:2:0 8 bits, largeur et hauteur paires) -> rgb8 : yuv2rgb_c_8_ordered_dither de libswscale }
+Procedure F5Yuv420ToRgb8(Src: PEABuffer; W,H: LongInt; Full: Boolean; Dst: PEABuffer);
+Var
+ P0,P1,P2: Array[0..2047] Of Byte; Crv,Cbu,Cgu,Cgv,Cy,Oy,Yb: Int64; Yoffs,I,X,Y,CW,Yv,U,V,Ir,Ig,Ib,Yval: LongInt; Cn: LongInt;
+ Pu,Pv: PEABuffer;
 Begin
- Fail('gif: muxeur non encore pris en charge.');
+ Crv:=104597; Cbu:=132201; Cgu:=-25675; Cgv:=-53279; Cy:=65536; Oy:=0;
+ If Not Full Then Begin Cy:=(Cy*255) Div 219; Oy:=Int64(16) Shl 16; End
+ Else Begin Crv:=(Crv*224) Div 255; Cbu:=(Cbu*224) Div 255; Cgu:=(Cgu*224) Div 255; Cgv:=(Cgv*224) Div 255; End;
+ Crv:=((Crv Shl 16)+$8000) Div Cy; Cbu:=((Cbu Shl 16)+$8000) Div Cy;
+ Cgu:=((Cgu*65536)+$8000) Div Cy; Cgv:=((Cgv*65536)+$8000) Div Cy;
+ If Full Then Yoffs:=384+512 Else Yoffs:=326+512;
+ FillChar(P0,SizeOf(P0),0); FillChar(P1,SizeOf(P1),0); FillChar(P2,SizeOf(P2),0);
+ Yb:=-(Int64(384) Shl 16)-512*Cy-Oy;
+ For I:=0 To 2048-39 Do Begin
+  Yval:=F5Cl8(F5Sar(Yb+$8000,16));
+  P0[I+16]:=((Yval+18) Div 36); P1[I+16]:=((Yval+18) Div 36) Shl 3; P2[I+37]:=((Yval+43) Div 85) Shl 6;
+  Yb:=Yb+Cy;
+ End;
+ CW:=W Div 2; Cn:=CW*(H Div 2);
+ For Y:=0 To H-1 Do Begin
+  Pu:=@Src^[W*H+(Y Shr 1)*CW]; Pv:=@Src^[W*H+Cn+(Y Shr 1)*CW];
+  For X:=0 To W-1 Do Begin
+   Yv:=Src^[Y*W+X]; U:=Pu^[X Shr 1]; V:=Pv^[X Shr 1];
+   Ir:=Yoffs-F5Sar(Crv,9)+F5Sar(V*Crv,16)+Yv+F5D32[Y And 7,X And 7];
+   Ig:=Yoffs-F5Sar(Cgu,9)+F5Sar(U*Cgu,16)-F5Sar(Cgv,9)+F5Sar(V*Cgv,16)+Yv+F5D32[Y And 7,X And 7];
+   Ib:=Yoffs-F5Sar(Cbu,9)+F5Sar(U*Cbu,16)+Yv+F5D73[Y And 7,X And 7];
+   Dst^[Y*W+X]:=(P0[Ir]+P1[Ig]+P2[Ib]) And 255;
+  End;
+ End;
+End;
+
+Type F5TLzw=Record
+  Pref: Array[0..16410] Of LongInt; Code: Array[0..16410] Of LongInt; Suf: Array[0..16410] Of Byte;
+  TabSize,Bits,LastCode: LongInt; Acc: Int64; NAcc: Integer; Out: PEABuffer; OutN,OutCap: LongInt;
+ End;
+ PF5Lzw=^F5TLzw;
+
+Procedure F5LzwPut(S: PF5Lzw; V,N: LongInt);
+Begin
+ S^.Acc:=S^.Acc Or (Int64(V) Shl S^.NAcc); Inc(S^.NAcc,N);
+ While S^.NAcc>=8 Do Begin
+  If S^.OutN<S^.OutCap Then S^.Out^[S^.OutN]:=S^.Acc And 255;
+  Inc(S^.OutN); S^.Acc:=S^.Acc Shr 8; Dec(S^.NAcc,8);
+ End;
+End;
+
+Function F5LzwHash(Head,Add: LongInt): LongInt;
+Begin
+ Head:=Head Xor (Add Shl 6);
+ If Head>=16411 Then Head:=Head-16411;
+ F5LzwHash:=Head;
+End;
+
+Procedure F5LzwClear(S: PF5Lzw);
+Var I,H: LongInt;
+Begin
+ F5LzwPut(S,256,S^.Bits);
+ S^.Bits:=9;
+ For I:=0 To 16410 Do S^.Pref[I]:=-2;
+ For I:=0 To 255 Do Begin
+  H:=F5LzwHash(0,I); S^.Code[H]:=I; S^.Suf[H]:=I; S^.Pref[H]:=-1;
+ End;
+ S^.TabSize:=258;
+End;
+
+Procedure F5LzwInit(S: PF5Lzw; Buf: PEABuffer; Cap: LongInt);
+Begin
+ S^.Out:=Buf; S^.OutN:=0; S^.OutCap:=Cap; S^.LastCode:=-1; S^.Bits:=9; S^.Acc:=0; S^.NAcc:=0;
+End;
+
+Procedure F5LzwEncode(S: PF5Lzw; P: PEABuffer; N: LongInt);
+Var I,C,H,Off,Hp,Cd: LongInt;
+Begin
+ If S^.LastCode=-1 Then F5LzwClear(S);
+ For I:=0 To N-1 Do Begin
+  C:=P^[I];
+  If S^.LastCode<0 Then Hp:=0 Else Hp:=S^.LastCode;
+  H:=F5LzwHash(Hp,C);
+  If H<>0 Then Off:=16411-H Else Off:=1;
+  While S^.Pref[H]<>-2 Do Begin
+   If (S^.Suf[H]=C) And (S^.Pref[H]=S^.LastCode) Then Break;
+   H:=H-Off; If H<0 Then H:=H+16411;
+  End;
+  Cd:=H;
+  If S^.Pref[Cd]=-2 Then Begin
+   F5LzwPut(S,S^.LastCode,S^.Bits);
+   S^.Code[Cd]:=S^.TabSize; S^.Suf[Cd]:=C; S^.Pref[Cd]:=S^.LastCode; Inc(S^.TabSize);
+   If S^.TabSize>=(1 Shl S^.Bits)+1 Then Inc(S^.Bits);
+   Cd:=F5LzwHash(0,C);
+  End;
+  S^.LastCode:=S^.Code[Cd];
+  If S^.TabSize>=4096-1 Then F5LzwClear(S);
+ End;
+End;
+
+Procedure F5LzwFlush(S: PF5Lzw);
+Begin
+ If S^.LastCode<>-1 Then F5LzwPut(S,S^.LastCode,S^.Bits);
+ F5LzwPut(S,257,S^.Bits);
+ F5LzwPut(S,0,1);
+ If S^.NAcc>0 Then F5LzwPut(S,0,8-S^.NAcc);
+ S^.LastCode:=-1;
+End;
+
+Var F5GifPk: Array[0..8191] Of PEABuffer; F5GifPkN: Array[0..8191] Of LongInt;
+
+Procedure F5GifSink;
+Var
+ Sf,W,H,Cnt,I,K,X,Y,Off,Xs,Ys,Wd,Ht,Trans: LongInt; Full,Honor: Boolean; Src,Cur,Last: PEABuffer; HaveLast: Boolean;
+ Lz: PF5Lzw; Lbuf,Tm: PEABuffer; Hist: Array[0..255] Of LongInt;
+ Xe,Ye: LongInt; Same: Boolean; Sz,Rem,At: LongInt; Nm: String;
+ Delay: LongInt; Sar: Int64; Gray: Boolean; Pb: Array[0..2047] Of Byte; Pn: LongInt; Nets: String;
+Procedure PB1(V: LongInt);Begin Pb[Pn]:=V And 255; Inc(Pn); End;
+Procedure PW(V: LongInt);Begin PB1(V); PB1(V Shr 8); End;
+Function Cs(Ii: LongInt): Int64;
+Var Nn,Dd: Int64;
+Begin
+ Nn:=Int64(Ii)*100*F5S.FD; Dd:=F5S.FN;
+ Cs:=(Nn*2+Dd) Div (2*Dd);
+End;
+Begin
+ Sf:=F5S.Fm; W:=F5S.W; H:=F5S.H; Nm:=F5Fm[Sf].Nm;
+ Gray:=Nm='gray';
+ If Not (Gray Or (Nm='yuv420p') Or (Nm='yuvj420p')) Then Fail('gif: format de pixels '+Nm+' non pris en charge (yuv420p ou gray requis).');
+ If (OptPixFmt<>'') And (OptPixFmt<>'rgb8') And Not (Gray And (OptPixFmt='gray')) Then Fail('gif: -pix_fmt non pris en charge.');
+ If Not Gray And (Odd(W) Or Odd(H)) Then Fail('gif: dimensions paires requises pour la conversion yuv420p -> rgb8.');
+ Full:=(F5S.Rng=2) Or F5Fm[Sf].Full;
+ Cnt:=F5OutCount(F5S.N);
+ If Cnt<=0 Then Fail('Nothing was written into output file, because at least one of its streams received no packets.');
+ If Cnt>8192 Then Fail('gif: trop d''images (8192 max).');
+ GetMem(Src,F5S.FBytes+64); GetMem(Cur,W*H+64); GetMem(Last,W*H+64); GetMem(Tm,W*H+64);
+ GetMem(Lz,SizeOf(F5TLzw)); GetMem(Lbuf,W*H*2+1000);
+ HaveLast:=False;
+ If (F5S.SarN>0) And (F5S.SarD>0) Then Begin Sar:=Int64(F5S.SarN)*64 Div F5S.SarD-15; If (Sar<0) Or (Sar>255) Then Sar:=0; End Else Sar:=0;
+ For I:=0 To Cnt-1 Do Begin
+  If Not F5ReadFrame(I,Src) Then Fail('gif: lecture image impossible.');
+  If Gray Then Move(Src^,Cur^,W*H) Else F5Yuv420ToRgb8(Src,W,H,Full,Cur);
+  Xs:=0; Ys:=0; Wd:=W; Ht:=H; Trans:=-1;
+  If HaveLast Then Begin
+   Xe:=W-1; Ye:=H-1;
+   While Ys<Ye Do Begin
+    Same:=True; For X:=0 To Wd-1 Do If Last^[Ys*W+X]<>Cur^[Ys*W+X] Then Begin Same:=False; Break; End;
+    If Not Same Then Break; Inc(Ys);
+   End;
+   While Ye>Ys Do Begin
+    Same:=True; For X:=0 To Wd-1 Do If Last^[Ye*W+X]<>Cur^[Ye*W+X] Then Begin Same:=False; Break; End;
+    If Not Same Then Break; Dec(Ye);
+   End;
+   Ht:=Ye+1-Ys;
+   While Xs<Xe Do Begin
+    Same:=True; For Y:=Ys To Ye Do If Last^[Y*W+Xs]<>Cur^[Y*W+Xs] Then Begin Same:=False; Break; End;
+    If Not Same Then Break; Inc(Xs);
+   End;
+   While Xe>Xs Do Begin
+    Same:=True; For Y:=Ys To Ye Do If Last^[Y*W+Xe]<>Cur^[Y*W+Xe] Then Begin Same:=False; Break; End;
+    If Not Same Then Break; Dec(Xe);
+   End;
+   Wd:=Xe+1-Xs;
+  End;
+  Honor:=HaveLast;
+  Pn:=0;
+  If I=0 Then Begin
+   PB1(71); PB1(73); PB1(70); PB1(56); PB1(57); PB1(97);
+   PW(W); PW(H); PB1($F7); PB1($1F); PB1(Sar);
+   For K:=0 To 255 Do Begin
+    If Gray Then Begin PB1(K); PB1(K); PB1(K); End
+    Else Begin PB1((K And 7)*36); PB1(((K Shr 3) And 7)*36); PB1((K Shr 6)*85); End;
+   End;
+  End;
+  If Honor Then Begin
+   FillChar(Hist,SizeOf(Hist),0);
+   For Y:=0 To Ht-1 Do For X:=0 To Wd-1 Do Inc(Hist[Cur^[(Ys+Y)*W+Xs+X]]);
+   Trans:=-1; For K:=0 To 255 Do If Hist[K]=0 Then Begin Trans:=K; Break; End;
+   If Trans<0 Then Honor:=False;
+  End;
+  PB1($21); PB1($F9); PB1(4);
+  PB1((1 Shl 2) Or Ord(Honor)); PW(5);
+  If Honor Then PB1(Trans) Else PB1($1F);
+  PB1(0);
+  PB1($2C); PW(Xs); PW(Ys); PW(Wd); PW(Ht); PB1(0); PB1(8);
+  F5LzwInit(Lz,Lbuf,W*H*2+1000);
+  For Y:=0 To Ht-1 Do Begin
+   Move(Cur^[(Ys+Y)*W+Xs],Tm^,Wd);
+   If Honor Then For X:=0 To Wd-1 Do If Last^[(Ys+Y)*W+Xs+X]=Tm^[X] Then Tm^[X]:=Trans;
+   F5LzwEncode(Lz,Tm,Wd);
+  End;
+  F5LzwFlush(Lz);
+  Sz:=Lz^.OutN; At:=0;
+  GetMem(F5GifPk[I],Pn+Sz+Sz Div 255+16);
+  Move(Pb,F5GifPk[I]^,Pn); K:=Pn;
+  Rem:=Sz;
+  While Rem>0 Do Begin
+   X:=Rem; If X>255 Then X:=255;
+   F5GifPk[I]^[K]:=X; Inc(K); Move(Lbuf^[At],F5GifPk[I]^[K],X); Inc(K,X); Inc(At,X); Dec(Rem,X);
+  End;
+  F5GifPk[I]^[K]:=0; Inc(K);
+  F5GifPkN[I]:=K;
+  Move(Cur^,Last^,W*H); HaveLast:=True;
+ End;
+ F5OpenOut(OutputPath);
+ Nets:='NETSCAPE2.0';
+ For I:=0 To Cnt-1 Do Begin
+  Off:=0;
+  If I=0 Then Begin
+   Off:=13+768;
+   F5Wr(F5GifPk[I]^,Off);
+   If F5Loop>=0 Then Begin
+    Pn:=0; PB1($21); PB1($FF); PB1($0B);
+    For K:=1 To 11 Do PB1(Ord(Nets[K]));
+    PB1(3); PB1(1); PW(F5Loop); PB1(0);
+    F5Wr(Pb,Pn);
+   End;
+  End;
+  If I<Cnt-1 Then Delay:=Cs(I+1)-Cs(I)
+  Else If F5HasFD And (F5FinalDelay>=0) Then Delay:=F5FinalDelay Else Delay:=Cs(1);
+  If Delay<0 Then Delay:=0;
+  If Delay>65535 Then Delay:=65535;
+  F5Wr(F5GifPk[I]^[Off],4);
+  Pn:=0; PW(Delay); F5Wr(Pb,2);
+  F5Wr(F5GifPk[I]^[Off+6],F5GifPkN[I]-Off-6);
+ End;
+ Pn:=0; PB1($3B); F5Wr(Pb,1);
+ F5CloseOut;
+End;
+Const F5MxNTag=114;
+Const F5MxTagId: Array[0..113] Of Word=($3C0A,$3B02,$3B05,$3B07,$3B06,$3B03,$3B09,$3B0A,$3B0B,$3C09,$3C01,$3C02,$3C03,$3C04,$3C05,$3C06,$3C07,$3C08,$1901,$1902,$2701,$3F07,$4401,$4405,$4404,$4402,$4403,$4701,$4801,$4804,$4B01,$4B02,$4803,$0201,$0202,$1001,$1201,$1101,$1102,$1501,$1502,$1503,$3F01,$3006,$3001,$3002,$3004,$320C,$320D,$3203,$3202,$3216,$3205,$3204,$3206,$3207,$3209,$3208,$320A,$320B,$3217,$320E,$3210,$321A,$3219,$3213,$3214,$3201,$3212,$3215,$3301,$3302,$3308,$3303,$3307,$3304,$3305,$3306,$3D02,$3D03,$3D04,$3D07,$3D01,$3D06,$3F0B,$3F0C,$3F0D,$3F05,$3F06,$3F08,$3F09,$3F0A,$8000,$8003,$8004,$8006,$8007,$8008,$3D09,$3D0A,$4406,$5001,$5003,$8100,$8200,$8201,$8202,$8301,$8302,$8303,$8304,$DFD9,$DFDA,$DFDB);
+Const F5MxTagUid: Array[0..113,0..15] Of Byte=(
+($06,$0E,$2B,$34,$01,$01,$01,$01,$01,$01,$15,$02,$00,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$07,$02,$01,$10,$02,$04,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$03,$01,$02,$01,$05,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$03,$01,$02,$01,$04,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$06,$01,$01,$04,$06,$04,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$06,$01,$01,$04,$02,$01,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$05,$01,$02,$02,$03,$00,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$05,$01,$02,$02,$10,$02,$01,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$05,$01,$02,$02,$10,$02,$02,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$05,$20,$07,$01,$01,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$05,$20,$07,$01,$02,$01,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$05,$20,$07,$01,$03,$01,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$05,$20,$07,$01,$04,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$05,$20,$07,$01,$05,$01,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$05,$20,$07,$01,$07,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$07,$02,$01,$10,$02,$03,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$05,$20,$07,$01,$0A,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$05,$20,$07,$01,$06,$01,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$06,$01,$01,$04,$05,$01,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$06,$01,$01,$04,$05,$02,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$06,$01,$01,$06,$01,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$04,$01,$03,$04,$04,$00,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$01,$01,$01,$15,$10,$00,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$07,$02,$01,$10,$01,$03,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$07,$02,$01,$10,$02,$05,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$01,$01,$03,$03,$02,$01,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$06,$01,$01,$04,$06,$05,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$06,$01,$01,$04,$02,$03,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$01,$07,$01,$01,$00,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$01,$04,$01,$03,$00,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$05,$30,$04,$05,$00,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$07,$02,$01,$03,$01,$03,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$06,$01,$01,$04,$02,$04,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$04,$07,$01,$00,$00,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$07,$02,$02,$01,$01,$03,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$06,$01,$01,$04,$06,$09,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$07,$02,$01,$03,$01,$04,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$06,$01,$01,$03,$01,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$06,$01,$01,$03,$02,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$07,$02,$01,$03,$01,$05,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$04,$04,$01,$01,$02,$06,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$01,$04,$04,$01,$01,$05,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$04,$06,$01,$01,$04,$06,$0B,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$05,$06,$01,$01,$03,$05,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$01,$04,$06,$01,$01,$00,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$01,$04,$06,$01,$02,$00,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$06,$01,$01,$04,$01,$02,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$01,$04,$01,$03,$01,$04,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$04,$01,$03,$02,$05,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$01,$04,$01,$05,$02,$02,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$01,$04,$01,$05,$02,$01,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$05,$04,$01,$03,$02,$08,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$01,$04,$01,$05,$01,$08,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$01,$04,$01,$05,$01,$07,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$01,$04,$01,$05,$01,$09,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$01,$04,$01,$05,$01,$0A,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$01,$04,$01,$05,$01,$0C,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$01,$04,$01,$05,$01,$0B,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$01,$04,$01,$05,$01,$0D,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$01,$04,$01,$05,$01,$0E,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$05,$04,$01,$03,$02,$07,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$01,$04,$01,$01,$01,$01,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$04,$01,$02,$01,$01,$01,$02,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$04,$01,$02,$01,$01,$03,$01,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$09,$04,$01,$02,$01,$01,$06,$01,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$04,$18,$01,$02,$00,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$04,$18,$01,$03,$00,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$04,$01,$06,$01,$00,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$04,$01,$03,$01,$06,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$05,$04,$05,$01,$13,$00,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$04,$01,$05,$03,$0A,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$01,$04,$01,$05,$01,$05,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$04,$01,$05,$01,$10,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$01,$04,$01,$05,$01,$06,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$04,$18,$01,$04,$00,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$01,$04,$01,$05,$03,$03,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$01,$04,$01,$05,$03,$04,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$04,$01,$05,$03,$05,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$04,$04,$02,$03,$01,$04,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$05,$04,$02,$03,$01,$01,$01,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$01,$04,$02,$01,$01,$03,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$05,$04,$02,$01,$01,$04,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$04,$04,$02,$03,$03,$04,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$04,$02,$04,$02,$00,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$05,$05,$30,$04,$06,$00,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$05,$07,$02,$01,$03,$01,$0A,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$05,$07,$02,$02,$01,$01,$02,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$04,$04,$06,$02,$01,$00,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$04,$01,$03,$04,$05,$00,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$04,$04,$04,$04,$01,$01,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$05,$04,$04,$04,$01,$06,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$05,$04,$04,$04,$02,$05,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$05,$04,$01,$06,$02,$01,$0B,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$05,$04,$01,$06,$02,$01,$05,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$05,$04,$01,$06,$02,$01,$06,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$05,$04,$01,$06,$02,$01,$08,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$05,$04,$01,$06,$02,$01,$0A,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$05,$04,$01,$06,$02,$01,$09,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$05,$04,$02,$03,$03,$05,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$05,$04,$02,$03,$02,$01,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$03,$02,$01,$02,$0C,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$03,$02,$01,$02,$09,$01,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$02,$03,$02,$01,$02,$0A,$01,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$09,$06,$01,$01,$04,$06,$10,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$0E,$04,$01,$06,$06,$01,$0E,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$0E,$04,$01,$06,$06,$01,$0A,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$0E,$04,$01,$06,$06,$01,$0D,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$0E,$04,$20,$04,$01,$01,$01,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$0E,$04,$20,$04,$01,$01,$02,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$0E,$04,$20,$04,$01,$01,$03,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$0E,$04,$20,$04,$01,$01,$04,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$0E,$04,$01,$06,$0C,$06,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$0E,$04,$01,$06,$0C,$05,$00,$00,$00),
+($06,$0E,$2B,$34,$01,$01,$01,$0E,$04,$01,$06,$0C,$01,$00,$00,$00));
+
+{ ---------- MXF OP1a (libavformat/mxfenc.c) : video DV (frames CBR) ---------- }
+Type F5TUid=Array[0..15] Of Byte;
+Const
+ F5MxUuidBase: Array[0..9] Of Byte=($AD,$AB,$44,$24,$2F,$25,$4D,$C7,$92,$FF);
+ F5MxUmidUl: Array[0..12] Of Byte=($06,$0A,$2B,$34,$01,$01,$01,$05,$01,$01,$0D,$00,$13);
+ F5MxProductUid: F5TUid=($AD,$AB,$44,$24,$2F,$25,$4D,$C7,$92,$FF,$29,$BD,$00,$0C,$00,$02);
+ F5MxOp1a: F5TUid=($06,$0E,$2B,$34,$04,$01,$01,$01,$0D,$01,$02,$01,$01,$01,$09,$00);
+ F5MxFooterKey: F5TUid=($06,$0E,$2B,$34,$02,$05,$01,$01,$0D,$01,$02,$01,$01,$04,$04,$00);
+ F5MxPrimerKey: F5TUid=($06,$0E,$2B,$34,$02,$05,$01,$01,$0D,$01,$02,$01,$01,$05,$01,$00);
+ F5MxIndexKey: F5TUid=($06,$0E,$2B,$34,$02,$53,$01,$01,$0D,$01,$02,$01,$01,$10,$01,$00);
+ F5MxHdrOpenKey: F5TUid=($06,$0E,$2B,$34,$02,$05,$01,$01,$0D,$01,$02,$01,$01,$02,$01,$00);
+ F5MxHdrClosedKey: F5TUid=($06,$0E,$2B,$34,$02,$05,$01,$01,$0D,$01,$02,$01,$01,$02,$04,$00);
+ F5MxFillKey: F5TUid=($06,$0E,$2B,$34,$01,$01,$01,$02,$03,$01,$02,$10,$01,$00,$00,$00);
+ F5MxBodyKey: F5TUid=($06,$0E,$2B,$34,$02,$05,$01,$01,$0D,$01,$02,$01,$01,$03,$04,$00);
+ F5MxHdrMetaKey: Array[0..12] Of Byte=($06,$0E,$2B,$34,$02,$53,$01,$01,$0D,$01,$01,$01,$01);
+ F5MxCdciKey: F5TUid=($06,$0E,$2B,$34,$02,$53,$01,$01,$0D,$01,$01,$01,$01,$01,$28,$00);
+ F5MxWavKey: F5TUid=($06,$0E,$2B,$34,$02,$53,$01,$01,$0D,$01,$01,$01,$01,$01,$48,$00);
+ F5MxAes3Key: F5TUid=($06,$0E,$2B,$34,$02,$53,$01,$01,$0D,$01,$01,$01,$01,$01,$47,$00);
+ F5MxRipKey: F5TUid=($06,$0E,$2B,$34,$02,$05,$01,$01,$0D,$01,$02,$01,$01,$11,$01,$00);
+ F5MxSysPackKey: F5TUid=($06,$0E,$2B,$34,$02,$05,$01,$01,$0D,$01,$03,$01,$04,$01,$01,$00);
+ F5MxSysSetKey: F5TUid=($06,$0E,$2B,$34,$02,$43,$01,$01,$0D,$01,$03,$01,$04,$01,$02,$01);
+ F5MxTcDataUl: F5TUid=($06,$0E,$2B,$34,$04,$01,$01,$01,$01,$03,$02,$01,$01,$00,$00,$00);
+ F5MxDefVideo: F5TUid=($06,$0E,$2B,$34,$04,$01,$01,$01,$01,$03,$02,$02,$01,$00,$00,$00);
+ F5MxDefAudio: F5TUid=($06,$0E,$2B,$34,$04,$01,$01,$01,$01,$03,$02,$02,$02,$00,$00,$00);
+ F5MxElemDV: F5TUid=($06,$0E,$2B,$34,$01,$02,$01,$01,$0D,$01,$03,$01,$18,$01,$01,$00);
+ F5MxElemAes3: F5TUid=($06,$0E,$2B,$34,$01,$02,$01,$01,$0D,$01,$03,$01,$16,$01,$03,$00);
+ F5MxContAes3: F5TUid=($06,$0E,$2B,$34,$04,$01,$01,$01,$0D,$01,$03,$01,$02,$06,$03,$00);
+ F5MxCodecAes3: F5TUid=($06,$0E,$2B,$34,$04,$01,$01,$01,$04,$02,$02,$01,$00,$00,$00,$00);
+ F5MxMultiDesc: F5TUid=($06,$0E,$2B,$34,$04,$01,$01,$03,$0D,$01,$03,$01,$02,$7F,$01,$00);
+ F5MxDvCont: Array[0..9,0..15] Of Byte=(
+  ($06,$0E,$2B,$34,$04,$01,$01,$01,$0D,$01,$03,$01,$02,$02,$01,$01),($06,$0E,$2B,$34,$04,$01,$01,$01,$0D,$01,$03,$01,$02,$02,$02,$01),
+  ($06,$0E,$2B,$34,$04,$01,$01,$01,$0D,$01,$03,$01,$02,$02,$40,$01),($06,$0E,$2B,$34,$04,$01,$01,$01,$0D,$01,$03,$01,$02,$02,$41,$01),
+  ($06,$0E,$2B,$34,$04,$01,$01,$01,$0D,$01,$03,$01,$02,$02,$50,$01),($06,$0E,$2B,$34,$04,$01,$01,$01,$0D,$01,$03,$01,$02,$02,$51,$01),
+  ($06,$0E,$2B,$34,$04,$01,$01,$01,$0D,$01,$03,$01,$02,$02,$60,$01),($06,$0E,$2B,$34,$04,$01,$01,$01,$0D,$01,$03,$01,$02,$02,$61,$01),
+  ($06,$0E,$2B,$34,$04,$01,$01,$01,$0D,$01,$03,$01,$02,$02,$62,$01),($06,$0E,$2B,$34,$04,$01,$01,$01,$0D,$01,$03,$01,$02,$02,$63,$01));
+ F5MxDvCodec: Array[0..9,0..15] Of Byte=(
+  ($06,$0E,$2B,$34,$04,$01,$01,$01,$04,$01,$02,$02,$02,$01,$01,$00),($06,$0E,$2B,$34,$04,$01,$01,$01,$04,$01,$02,$02,$02,$01,$02,$00),
+  ($06,$0E,$2B,$34,$04,$01,$01,$01,$04,$01,$02,$02,$02,$02,$01,$00),($06,$0E,$2B,$34,$04,$01,$01,$01,$04,$01,$02,$02,$02,$02,$02,$00),
+  ($06,$0E,$2B,$34,$04,$01,$01,$01,$04,$01,$02,$02,$02,$02,$03,$00),($06,$0E,$2B,$34,$04,$01,$01,$01,$04,$01,$02,$02,$02,$02,$04,$00),
+  ($06,$0E,$2B,$34,$04,$01,$01,$01,$04,$01,$02,$02,$02,$02,$05,$00),($06,$0E,$2B,$34,$04,$01,$01,$01,$04,$01,$02,$02,$02,$02,$06,$00),
+  ($06,$0E,$2B,$34,$04,$01,$01,$01,$04,$01,$02,$02,$02,$02,$07,$00),($06,$0E,$2B,$34,$04,$01,$01,$01,$04,$01,$02,$02,$02,$02,$08,$00));
+ { types d'ensembles de metadonnees (enum MXFMetadataSetType) }
+ MxMaterialPackage=1; MxSourcePackage=2; MxSourceClip=3; MxTimecodeComponent=4; MxSequence=6; MxMultipleDescriptor=7; MxTrack=9;
+ MxPreface=11; MxIdentification=12; MxContentStorage=13; MxSubDescriptor=14; MxIndexTableSegment=15; MxEssenceContainerData=16; MxTapeDescriptor=19;
+ F5KagSize=512;
+
+Type
+ F5TMxStream=Record
+  IsAudio: Boolean; Container,Codec,Elem: F5TUid; Interlaced: Integer; CompDepth,HSub,VSub,Siting: Integer;
+  AspN,AspD: LongInt; W,H: LongInt; FrameSize: LongInt; SliceOffset: LongInt; Rng: Integer; Rate,Ch,Bits,Align: LongInt; Cnt: LongInt;
+ End;
+Var
+ F5MxB: PEABuffer; F5MxPos,F5MxEnd,F5MxCap: LongInt;
+ F5MxTb: Array[0..1] Of LongInt; { time_base num, den }
+ F5MxS: Array[0..7] Of F5TMxStream; F5MxNS: Integer;
+ F5MxEU,F5MxLastIdx,F5MxEUBC,F5MxFooter,F5MxBodyParts,F5MxDur0: LongInt; F5MxDur: Int64; F5MxBodyPart: Array[0..3] Of LongInt;
+ F5MxTrackInst,F5MxCPR,F5MxTcBase,F5MxTcFps: LongInt; F5MxUmid: Array[0..15] Of Byte; F5MxInst: LongInt; F5MxTcRn,F5MxTcRd: LongInt;
+ F5MxBodyOff: Int64; F5MxStrictVer: Boolean; F5MxSlice: Integer;
+
+Procedure MxEnsure(N: LongInt);
+Var P: PEABuffer; Nc: LongInt;
+Begin
+ If F5MxPos+N<=F5MxCap Then Exit;
+ Nc:=F5MxCap; If Nc<65536 Then Nc:=65536;
+ While Nc<F5MxPos+N Do Nc:=Nc*2;
+ GetMem(P,Nc); FillChar(P^,Nc,0);
+ If F5MxB<>Nil Then Begin Move(F5MxB^,P^,F5MxEnd); FreeMem(F5MxB); End;
+ F5MxB:=P; F5MxCap:=Nc;
+End;
+Procedure MxP8(V: LongInt);Begin MxEnsure(1); F5MxB^[F5MxPos]:=V And 255; Inc(F5MxPos); If F5MxPos>F5MxEnd Then F5MxEnd:=F5MxPos; End;
+Procedure MxP16(V: LongInt);Begin MxP8(V Shr 8); MxP8(V); End;
+Procedure MxP24(V: LongInt);Begin MxP8(V Shr 16); MxP8(V Shr 8); MxP8(V); End;
+Procedure MxP32(V: Int64);Begin MxP8(V Shr 24); MxP8(V Shr 16); MxP8(V Shr 8); MxP8(V); End;
+Procedure MxP64(V: Int64);Begin MxP32(V Shr 32); MxP32(V And $FFFFFFFF); End;
+Procedure MxPB(Const A: Array Of Byte; N: LongInt);
+Var I: LongInt;
+Begin For I:=0 To N-1 Do MxP8(A[I]); End;
+Procedure MxFill(N: LongInt);
+Var I: LongInt;
+Begin For I:=1 To N Do MxP8(0); End;
+Procedure MxSeek(P: LongInt);Begin F5MxPos:=P; End;
+Function MxTell: LongInt;Begin MxTell:=F5MxPos; End;
+
+Function MxLog2(V: Int64): Integer;
+Var R: Integer;
+Begin R:=0; While V>1 Do Begin V:=V Shr 1; Inc(R); End; MxLog2:=R; End;
+
+Procedure MxBer(Len: Int64);
+Var N,I: Integer;
+Begin
+ If Len<128 Then Begin MxP8(Len); Exit; End;
+ N:=(MxLog2(Len) Shr 3)+1;
+ MxP8($80+N);
+ For I:=N-1 Downto 0 Do MxP8((Len Shr (8*I)) And 255);
+End;
+Procedure MxBer4(Len: LongInt);Begin MxP8($83); MxP24(Len); End;
+
+Procedure MxUuid(Ty,Val: LongInt);
+Begin MxPB(F5MxUuidBase,10); MxP16(Ty); MxP32(Val); End;
+Procedure MxUmid(Ty: LongInt);
+Var I: Integer;
+Begin
+ MxPB(F5MxUmidUl,13); MxP24(F5MxInst);
+ For I:=0 To 14 Do MxP8(F5MxUmid[I]);
+ MxP8(Ty);
+End;
+Procedure MxRefs(N: LongInt);Begin MxP32(N); MxP32(16); End;
+
+Function MxTagIdx(Tag: Word): Integer;
+Var I: Integer;
+Begin
+ For I:=0 To F5MxNTag-1 Do If F5MxTagId[I]=Tag Then Begin MxTagIdx:=I; Exit; End;
+ Fail('MXF: etiquette locale inconnue.'); MxTagIdx:=0;
+End;
+Procedure MxTag(Size,Tag: LongInt);Begin MxP16(Tag); MxP16(Size); End;
+Procedure MxMetaKey(V: LongInt);Begin MxPB(F5MxHdrMetaKey,13); MxP24(V); End;
+
+Function MxFillSize(Size: Int64): LongInt;
+Var Pad: Int64;
+Begin
+ Pad:=F5KagSize-(Size And (F5KagSize-1));
+ If Pad<20 Then MxFillSize:=Pad+F5KagSize Else MxFillSize:=Pad And (F5KagSize-1);
+End;
+Procedure MxKlvFill;
+Var Pad: LongInt;
+Begin
+ Pad:=MxFillSize(MxTell);
+ If Pad>0 Then Begin
+  MxPB(F5MxFillKey,16); Pad:=Pad-20; MxBer4(Pad); MxFill(Pad);
+ End;
+End;
+
+Procedure MxUpdateKlv(Pos: LongInt);
+Var Cur,Size: LongInt;
+Begin
+ Cur:=MxTell; Size:=Cur-Pos;
+ MxSeek(Pos-4); MxBer4(Size); MxSeek(Cur);
+End;
+
+Function MxUtf16Len(Const S: String): LongInt;Begin MxUtf16Len:=Length(S)+1; End;
+Function MxUtf16Tag(Const S: String): LongInt;Begin MxUtf16Tag:=4+MxUtf16Len(S)*2; End;
+Procedure MxTagUtf16(Tag: LongInt; Const S: String);
+Var I: Integer;
+Begin
+ MxTag(MxUtf16Len(S)*2,Tag);
+ For I:=1 To Length(S) Do MxP16(Ord(S[I]));
+ MxP16(0);
+End;
+Procedure MxVersion;
+Begin
+ If F5BitExact Then Begin MxP16(0); MxP16(0); MxP16(0); End Else Begin MxP16(60); MxP16(16); MxP16(100); End;
+ MxP16(0); MxP16(0);
+End;
+
+Function MxEc(Idx: Integer): Integer;Begin MxEc:=Idx; End;
+
+Procedure MxWriteEcRefs;
+Begin
+ MxRefs(1);
+ MxPB(F5MxS[0].Container,16);
+End;
+
+Procedure MxWritePreface;
+Begin
+ MxMetaKey($012F00); MxBer(138+16);
+ MxTag(16,$3C0A); MxUuid(MxPreface,0);
+ MxTag(8,$3B02); MxP64(0);
+ MxTag(2,$3B05); MxP16(259);
+ MxTag(4,$3B07); MxP32(1);
+ MxTag(16+8,$3B06); MxRefs(1); MxUuid(MxIdentification,0);
+ MxTag(16,$3B03); MxUuid(MxContentStorage,0);
+ MxTag(16,$3B09); MxPB(F5MxOp1a,16);
+ MxTag(8+16,$3B0A); MxWriteEcRefs;
+ MxTag(8,$3B0B); MxP64(0);
+End;
+
+Procedure MxWriteIdent;
+Var Company,Product,Platform,Version: String; Len: LongInt;
+Begin
+ Company:='FFmpeg'; Product:='OP1a Muxer';
+ If F5BitExact Then Begin Platform:='Lavf'; Version:='0.0.0'; End Else Begin Platform:='Lavf (linux)'; Version:='60.16.100'; End;
+ MxMetaKey($013000);
+ Len:=100+MxUtf16Tag(Company)+MxUtf16Tag(Product)+MxUtf16Tag(Platform)+MxUtf16Tag(Version);
+ MxBer(Len);
+ MxTag(16,$3C0A); MxUuid(MxIdentification,0);
+ MxTag(16,$3C09); MxUuid(MxIdentification,1);
+ MxTagUtf16($3C01,Company); MxTagUtf16($3C02,Product);
+ MxTag(10,$3C03); MxVersion;
+ MxTagUtf16($3C04,Version); MxTagUtf16($3C08,Platform);
+ MxTag(16,$3C05); MxPB(F5MxProductUid,16);
+ MxTag(8,$3C06); MxP64(0);
+ MxTag(10,$3C07); MxVersion;
+End;
+
+Procedure MxWriteContentStorage;
+Begin
+ MxMetaKey($011800); MxBer(60+16*2);
+ MxTag(16,$3C0A); MxUuid(MxContentStorage,0);
+ MxTag(16*2+8,$1901); MxRefs(2); MxUuid(MxMaterialPackage,0); MxUuid(MxSourcePackage,1);
+ MxTag(8+16,$1902); MxRefs(1); MxUuid(MxEssenceContainerData,0);
+End;
+
+Procedure MxWriteTrack(IsTc: Boolean; Si: Integer; PkgIsMaterial: Boolean);
+Begin
+ MxMetaKey($013B00); MxBer(80);
+ MxTag(16,$3C0A); MxUuid(MxTrack,F5MxTrackInst);
+ MxTag(4,$4801);
+ If IsTc Then MxP32(1) Else MxP32(Si+2);
+ MxTag(4,$4804);
+ If PkgIsMaterial Or IsTc Then MxP32(0) Else Begin MxP8(F5MxS[Si].Elem[12]); MxP8(F5MxS[Si].Elem[13]); MxP8(F5MxS[Si].Elem[14]); MxP8(F5MxS[Si].Elem[15]); End;
+ MxTag(8,$4B01); MxP32(F5MxTb[1]); MxP32(F5MxTb[0]);
+ MxTag(8,$4B02); MxP64(0);
+ MxTag(16,$4803); MxUuid(MxSequence,F5MxTrackInst);
+End;
+
+Procedure MxWriteCommon(IsTc: Boolean; Si: Integer);
+Begin
+ MxTag(16,$0201);
+ If IsTc Then MxPB(F5MxTcDataUl,16)
+ Else If F5MxS[Si].IsAudio Then MxPB(F5MxDefAudio,16) Else MxPB(F5MxDefVideo,16);
+ MxTag(8,$0202); MxP64(F5MxDur);
+End;
+
+Procedure MxWriteSequence(IsTc: Boolean; Si: Integer);
+Begin
+ MxMetaKey($010F00); MxBer(80);
+ MxTag(16,$3C0A); MxUuid(MxSequence,F5MxTrackInst);
+ MxWriteCommon(IsTc,Si);
+ MxTag(16+8,$1001); MxRefs(1);
+ If IsTc Then MxUuid(MxTimecodeComponent,F5MxTrackInst) Else MxUuid(MxSourceClip,F5MxTrackInst);
+End;
+
+Procedure MxWriteTcComponent;
+Begin
+ MxMetaKey($011400); MxBer(75);
+ MxTag(16,$3C0A); MxUuid(MxTimecodeComponent,F5MxTrackInst);
+ MxWriteCommon(True,0);
+ MxTag(8,$1501); MxP64(0);
+ MxTag(2,$1502); MxP16(F5MxTcBase);
+ MxTag(1,$1503); MxP8(0);
+End;
+
+Procedure MxWriteStructural(Si: Integer; PkgIsMaterial: Boolean);
+Begin
+ MxMetaKey($011100); MxBer(108);
+ MxTag(16,$3C0A); MxUuid(MxSourceClip,F5MxTrackInst);
+ MxWriteCommon(False,Si);
+ MxTag(8,$1201); MxP64(0);
+ MxTag(32,$1101);
+ If PkgIsMaterial Then MxUmid(1) Else MxFill(32);
+ MxTag(4,$1102);
+ If PkgIsMaterial Then MxP32(Si+2) Else MxP32(0);
+End;
+
+Function MxGenericDesc(Si: Integer; Const Key: F5TUid): LongInt;
+Var Pos: LongInt;
+Begin
+ MxPB(Key,16); MxBer4(0); Pos:=MxTell;
+ MxTag(16,$3C0A); MxUuid(MxSubDescriptor,Si);
+ MxTag(4,$3006); MxP32(Si+2);
+ MxTag(8,$3001);
+ If F5MxS[Si].IsAudio Then Begin MxP32(F5MxS[Si].Rate); MxP32(1); End Else Begin MxP32(F5MxTb[1]); MxP32(F5MxTb[0]); End;
+ MxTag(16,$3004); MxPB(F5MxS[Si].Container,16);
+ MxGenericDesc:=Pos;
+End;
+
+Procedure MxWriteCdci(Si: Integer);
+Var Pos,Sw,Sh,Dw,Dh,F1,F2,Il: LongInt;
+Begin
+ Pos:=MxGenericDesc(Si,F5MxCdciKey);
+ Il:=F5MxS[Si].Interlaced;
+ Sw:=F5MxS[Si].W; Sh:=F5MxS[Si].H;
+ If Sh=1080 Then Sw:=1920 Else If Sh=720 Then Sw:=1280;
+ Dw:=Sw;
+ MxTag(4,$3203); MxP32(Sw);
+ MxTag(4,$3202); MxP32(Sh Shr Il);
+ MxTag(4,$3205); MxP32(Dw);
+ MxTag(4,$3204); MxP32(F5MxS[Si].H Shr Il);
+ MxTag(4,$3206); MxP32(0);
+ MxTag(4,$3207); MxP32(0);
+ MxTag(4,$3209); MxP32(Dw);
+ Dh:=F5MxS[Si].H;
+ MxTag(4,$3208); MxP32(Dh Shr Il);
+ MxTag(4,$320A); MxP32(0);
+ MxTag(4,$320B); MxP32((F5MxS[Si].H-Dh) Shr Il);
+ If Il<>0 Then Begin MxTag(4,$3217); MxP32(-((F5MxS[Si].H-Dh) And 1)); End;
+ MxTag(4,$3301); MxP32(F5MxS[Si].CompDepth);
+ MxTag(4,$3302); MxP32(F5MxS[Si].HSub);
+ MxTag(4,$3308); MxP32(F5MxS[Si].VSub);
+ MxTag(1,$3303); MxP8(F5MxS[Si].Siting);
+ MxTag(2,$3307); MxP16(0);
+ If F5MxS[Si].Rng<>0 Then Begin
+  Dh:=F5MxS[Si].CompDepth;
+  If F5MxS[Si].Rng=1 Then Begin
+   MxTag(4,$3304); MxP32(1 Shl (Dh-4)); MxTag(4,$3305); MxP32(235 Shl (Dh-8)); MxTag(4,$3306); MxP32((14 Shl (Dh-4))+1);
+  End Else Begin
+   MxTag(4,$3304); MxP32(0); MxTag(4,$3305); MxP32((1 Shl Dh)-1); MxTag(4,$3306); MxP32(1 Shl Dh);
+  End;
+ End;
+ MxTag(1,$320C); MxP8(Il);
+ Case F5MxS[Si].H Of
+  576: Begin F1:=23; F2:=335; End;
+  480: Begin F1:=20; F2:=285; End;
+  720: Begin F1:=26; F2:=0; End;
+  1080: Begin F1:=21; F2:=584; End;
+  Else Begin F1:=0; F2:=0; End;
+ End;
+ If (Il=0) And (F2<>0) Then Begin F2:=0; F1:=F1*2; End;
+ MxTag(16,$320D); MxP32(2); MxP32(4); MxP32(F1); MxP32(F2);
+ MxTag(8,$320E); MxP32(F5MxS[Si].AspN); MxP32(F5MxS[Si].AspD);
+ MxTag(16,$3201); MxPB(F5MxS[Si].Codec,16);
+ MxUpdateKlv(Pos);
+End;
+
+Procedure MxWriteSound(Si: Integer);
+Var Pos: LongInt;
+Begin
+ Pos:=MxGenericDesc(Si,F5MxAes3Key);
+ MxTag(1,$3D02); MxP8(1);
+ MxTag(8,$3D03); MxP32(F5MxS[Si].Rate); MxP32(1);
+ MxTag(4,$3D07); MxP32(F5MxS[Si].Ch);
+ MxTag(4,$3D01); MxP32(F5MxS[Si].Bits);
+ MxTag(2,$3D0A); MxP16(F5MxS[Si].Align);
+ MxTag(4,$3D09); MxP32(F5MxS[Si].Align*F5MxS[Si].Rate);
+ MxUpdateKlv(Pos);
+End;
+
+Procedure MxWriteMultiDesc;
+Var I: Integer; Ul: F5TUid;
+Begin
+ MxMetaKey($014400); MxBer(64+16*F5MxNS);
+ MxTag(16,$3C0A); MxUuid(MxMultipleDescriptor,0);
+ MxTag(8,$3001); MxP32(F5MxTb[1]); MxP32(F5MxTb[0]);
+ MxTag(16,$3004); MxPB(F5MxMultiDesc,16);
+ MxTag(F5MxNS*16+8,$3F01); MxRefs(F5MxNS);
+ For I:=0 To F5MxNS-1 Do MxUuid(MxSubDescriptor,I);
+End;
+
+Procedure MxWritePackage(PkgType,PkgInst: Integer);
+Var TrackCount,I: Integer; IsMat: Boolean;
+Begin
+ TrackCount:=F5MxNS+1; IsMat:=PkgType=MxMaterialPackage;
+ If IsMat Then Begin MxMetaKey($013600); MxBer(92+16*TrackCount); End
+ Else Begin MxMetaKey($013700); MxBer(112+16*TrackCount); End;
+ MxTag(16,$3C0A); MxUuid(PkgType,PkgInst);
+ MxTag(32,$4401); MxUmid(PkgInst);
+ MxTag(8,$4405); MxP64(0);
+ MxTag(8,$4404); MxP64(0);
+ MxTag(TrackCount*16+8,$4403); MxRefs(TrackCount);
+ For I:=0 To TrackCount-1 Do MxUuid(MxTrack,F5MxTrackInst+I);
+ If (PkgType=MxSourcePackage) And (PkgInst=1) Then Begin
+  MxTag(16,$4701);
+  If F5MxNS>1 Then Begin MxUuid(MxMultipleDescriptor,0); MxWriteMultiDesc; End Else MxUuid(MxSubDescriptor,0);
+ End;
+ MxWriteTrack(True,0,IsMat);
+ MxWriteSequence(True,0);
+ MxWriteTcComponent;
+ Inc(F5MxTrackInst);
+ For I:=0 To F5MxNS-1 Do Begin
+  MxWriteTrack(False,I,IsMat);
+  MxWriteSequence(False,I);
+  MxWriteStructural(I,IsMat);
+  Inc(F5MxTrackInst);
+  If (PkgType=MxSourcePackage) And (PkgInst=1) Then Begin
+   If F5MxS[I].IsAudio Then MxWriteSound(I) Else MxWriteCdci(I);
+  End;
+ End;
+End;
+
+Procedure MxWriteEssenceData;
+Begin
+ MxMetaKey($012300); MxBer(72);
+ MxTag(16,$3C0A); MxUuid(MxEssenceContainerData,0);
+ MxTag(32,$2701); MxUmid(1);
+ MxTag(4,$3F07); MxP32(1);
+ MxTag(4,$3F06); MxP32(2);
+End;
+
+Procedure MxWriteHeaderSets;
+Var I: Integer;
+Begin
+ MxWritePreface; MxWriteIdent; MxWriteContentStorage;
+ F5MxTrackInst:=0;
+ MxWritePackage(MxMaterialPackage,0);
+ MxWritePackage(MxSourcePackage,1);
+ MxWriteEssenceData;
+End;
+
+Procedure MxWritePrimer;
+Var I,N: Integer; Unused: Boolean;
+Function IsUnused(T: Word): Boolean;
+Begin
+ IsUnused:=(T=$4406) Or (T=$5001) Or (T=$5003) Or (T=$8100) Or (T=$8200) Or (T=$8201) Or (T=$8202) Or (T=$8301) Or (T=$8302) Or (T=$8303) Or (T=$8304) Or
+  (T=$DFD9) Or (T=$DFDA) Or (T=$DFDB);
+End;
+Begin
+ N:=0; For I:=0 To F5MxNTag-1 Do If Not IsUnused(F5MxTagId[I]) Then Inc(N);
+ MxPB(F5MxPrimerKey,16); MxBer(N*18+8);
+ MxP32(N); MxP32(18);
+ For I:=0 To F5MxNTag-1 Do If Not IsUnused(F5MxTagId[I]) Then Begin
+  MxP16(F5MxTagId[I]);
+  MxPB(F5MxTagUid[I],16);
+ End;
+End;
+
+Procedure MxWriteIndexSegment;
+Var Pos: LongInt; I: Integer;
+Begin
+ If (F5MxEU=0) And (F5MxEUBC=0) Then Exit;
+ MxPB(F5MxIndexKey,16); MxBer4(0); Pos:=MxTell;
+ MxTag(16,$3C0A); MxUuid(MxIndexTableSegment,F5MxLastIdx);
+ MxTag(8,$3F0B); MxP32(F5MxTb[1]); MxP32(F5MxTb[0]);
+ MxTag(8,$3F0C); MxP64(F5MxLastIdx);
+ MxTag(8,$3F0D); MxP64(0);
+ MxTag(4,$3F05); MxP32(F5MxEUBC);
+ MxTag(4,$3F06); MxP32(2);
+ MxTag(4,$3F07); MxP32(1);
+ MxTag(1,$3F08); MxP8(0);
+ MxTag(8+(F5MxNS+1)*6,$3F09);
+ MxP32(F5MxNS+1); MxP32(6);
+ MxP8(0); MxP8(0); MxP32(0);
+ For I:=0 To F5MxNS-1 Do Begin
+  MxP8(0); MxP8(0); MxP32(F5MxS[I].SliceOffset);
+ End;
+ MxUpdateKlv(Pos);
+End;
+
+Procedure MxWritePartition(BodySid,IndexSid: LongInt; Const Key: F5TUid; WriteMeta: Boolean);
+Var HbOff,PartOff,Ibc,Start,Pos,Hbc: LongInt; Ec: Integer;
+Begin
+ PartOff:=MxTell; Ibc:=0;
+ If (F5MxEUBC<>0) And (IndexSid<>0) Then Ibc:=80;
+ If Ibc<>0 Then Begin Ibc:=Ibc+20; Ibc:=Ibc+MxFillSize(Ibc); End;
+ MxPB(Key,16);
+ MxBer4(88+16);
+ MxP16(1); MxP16(3); MxP32(F5KagSize);
+ MxP64(PartOff);
+ MxP64(0);
+ MxP64(F5MxFooter);
+ HbOff:=MxTell; MxP64(0);
+ MxP64(Ibc);
+ If Ibc<>0 Then MxP32(IndexSid) Else MxP32(0);
+ MxP64(0);
+ MxP32(BodySid);
+ MxPB(F5MxOp1a,16);
+ MxWriteEcRefs;
+ If WriteMeta Then Begin
+  MxKlvFill;
+  Start:=MxTell;
+  MxWritePrimer;
+  MxKlvFill;
+  MxWriteHeaderSets;
+  Pos:=MxTell;
+  Hbc:=Pos-Start+MxFillSize(Pos);
+  MxSeek(HbOff); MxP64(Hbc); MxSeek(Pos);
+ End;
+End;
+
+Procedure MxWriteSystemItem(Frame: LongInt);
+Var Bitmap,I,Ff,Ss,Mm,Hh,Fr: LongInt; Tc: Int64;
+Begin
+ Bitmap:=$58;
+ For I:=0 To F5MxNS-1 Do If F5MxS[I].IsAudio Then Bitmap:=Bitmap Or 4;
+ MxPB(F5MxSysPackKey,16); MxBer4(57);
+ MxP8(Bitmap); MxP8(F5MxCPR); MxP8(0); MxP16(0); MxP16(Frame And $FFFF);
+ MxPB(F5MxS[0].Container,16);
+ MxP8(0); MxP64(0); MxP64(0);
+ MxP8($81);
+ Fr:=Frame;
+ Ff:=Fr Mod F5MxTcFps; Ss:=(Fr Div F5MxTcFps) Mod 60; Mm:=(Fr Div (F5MxTcFps*60)) Mod 60; Hh:=(Fr Div (F5MxTcFps*3600)) Mod 24;
+ Tc:=Int64(Ff Div 10) Shl 28; Tc:=Tc Or (Int64(Ff Mod 10) Shl 24) Or (Int64(Ss Div 10) Shl 20) Or (Int64(Ss Mod 10) Shl 16) Or (Int64(Mm Div 10) Shl 12) Or
+  (Int64(Mm Mod 10) Shl 8) Or (Int64(Hh Div 10) Shl 4) Or (Hh Mod 10);
+ MxP32(Tc); MxP32(0); MxP64(0);
+ MxPB(F5MxSysSetKey,16); MxBer4(35); MxP8($83); MxP16($20); MxUmid(1);
+End;
+
+Procedure MxWriteRip;
+Var Pos: LongInt;
+Begin
+ Pos:=MxTell;
+ MxPB(F5MxRipKey,16); MxBer(28);
+ MxP32(1); MxP64(0);
+ MxP32(0); MxP64(F5MxFooter);
+ MxP32(MxTell-Pos+4);
+End;
+
+{ DV : analyse de la premiere trame (mxf_parse_dv_frame) ; renvoie False si profil non pris en charge }
+Function MxParseDv(P: PEABuffer; Sz: LongInt; Var S: F5TMxStream): Boolean;
+Var Apt,Stype,Pal,Ul: Integer; Vs,Vsc: LongInt;
+Begin
+ MxParseDv:=False;
+ If Sz<120000 Then Exit;
+ Apt:=P^[4] And 7; Vs:=80*5+48; Vsc:=80*5+53;
+ Stype:=P^[Vs+3] And $1F; Pal:=(P^[Vs+3] Shr 5) And 1;
+ If (P^[Vsc+2] And 7)=2 Then Begin S.AspN:=16; S.AspD:=9; End Else Begin S.AspN:=4; S.AspD:=3; End;
+ S.Interlaced:=(P^[Vsc+3] Shr 4) And 1;
+ Case Stype Of
+  $18: Begin Ul:=8+Pal; S.Interlaced:=0; End;
+  $14: Ul:=6+Pal;
+  $04: Ul:=4+Pal;
+  Else If Apt=0 Then Ul:=0+Pal Else Ul:=2+Pal;
+ End;
+ Move(F5MxDvCont[Ul],S.Container,16); Move(F5MxDvCodec[Ul],S.Codec,16);
+ S.FrameSize:=Sz;
+ MxParseDv:=True;
+End;
+
+{ encode la source en DV (encodeur historique) dans un fichier temporaire ; renvoie son chemin }
+Function F5DvEncodeTmp(Cnt: LongInt): String;
+Var Tmp,Hd,Dv: String; Fo: File; Code: Integer; Buf: PEABuffer; I: LongInt;
+Begin
+ Tmp:=F5NewTmp('.y4m');
+ Assign(Fo,Tmp); {$I-}Rewrite(Fo,1);{$I+} Code:=IOResult;
+ If Code<>0 Then Fail('Creation impossible: '+Tmp);
+ Hd:=F5Y4MHeader(F5S.Fm,F5S.W,F5S.H,F5S.FN,F5S.FD,F5S.SarN,F5S.SarD,F5S.Il,F5S.Rng,F5S.Loc);
+ BlockWrite(Fo,Hd[1],Length(Hd));
+ GetMem(Buf,F5S.FBytes+64);
+ For I:=0 To Cnt-1 Do Begin
+  If Not F5ReadFrame(I,Buf) Then Break;
+  Hd:='FRAME'#10; BlockWrite(Fo,Hd[1],6); BlockWrite(Fo,Buf^,F5S.FBytes);
+ End;
+ FreeMem(Buf); Close(Fo);
+ Dv:=F5NewTmp('.dv');
+ If Not F5Child('-y -i '+F5Q(Tmp)+' -c:v dvvideo -f dv '+F5Q(Dv),F5NewTmp('.log')) Then Fail('dv: encodage impossible (profil DV non pris en charge pour cette source).');
+ F5DelTmp(Tmp);
+ F5DvEncodeTmp:=Dv;
+End;
+
+{ retire les paquets de metadonnees ecrits par le muxeur dv (dv_inject_metadata) : on retrouve la trame de l'encodeur }
+Procedure F5DvUninject(P: PEABuffer; Fsz,Dseg: LongInt);
+Var B,J,K,Seq: LongInt;
+Procedure Ff5(At: LongInt);Begin FillChar(P^[At],5,255); End;
+Begin
+ B:=0; Seq:=0;
+ While B+12000<=Fsz Do Begin
+  J:=80;
+  While J<240 Do Begin
+   K:=6; While K<48 Do Begin Ff5(B+J+K); Inc(K,8); End;
+   If (Seq Mod Dseg)>5 Then Begin Ff5(B+J+14); Ff5(B+J+22); Ff5(B+J+38); Ff5(B+J+46); End;
+   Inc(J,80);
+  End;
+  J:=243;
+  While J<480 Do Begin Ff5(B+J+10); Ff5(B+J+15); Ff5(B+J+55); Ff5(B+J+60); Inc(J,80); End;
+  Inc(B,12000); Inc(Seq);
+ End;
+End;
+
+Function F5MxCprOf(N,D: LongInt): LongInt;
+Begin
+ F5MxCprOf:=0;
+ If (N=1) And (D=24) Then F5MxCprOf:=2 Else If (N=1001) And (D=24000) Then F5MxCprOf:=3 Else If (N=1) And (D=25) Then F5MxCprOf:=4
+ Else If (N=1) And (D=30) Then F5MxCprOf:=6 Else If (N=1001) And (D=30000) Then F5MxCprOf:=7 Else If (N=1) And (D=48) Then F5MxCprOf:=8
+ Else If (N=1001) And (D=48000) Then F5MxCprOf:=9 Else If (N=1) And (D=50) Then F5MxCprOf:=10 Else If (N=1) And (D=60) Then F5MxCprOf:=12
+ Else If (N=1001) And (D=60000) Then F5MxCprOf:=13;
+End;
+
+Procedure F5MxSink(Const Sink: String);
+Var Dseg,Cnt,I,Fsz,Fcount,Sz,Seed,Gv: LongInt; Dv: String; Buf,Fr: PEABuffer; Pal,Stype,Code: Integer; Cd: LongInt; Nm: String; K: Integer; Seed64: Int64;
+ Key: F5TUid; Fh: File; Actual: LongInt;
+Begin
+ If Sink='mxf_d10' Then Fail('mxf_d10: encodeur MPEG-2 D-10 (30/40/50 Mbit/s intra) non pris en charge.');
+ If VideoCodec<>'dvvideo' Then Fail('mxf: seul -c:v dvvideo est pris en charge par ce muxeur (le codec par defaut mpeg2video n''est pas reproduit).');
+ Cnt:=F5OutCount(F5S.N);
+ If Cnt<=0 Then Fail('Nothing was written into output file, because at least one of its streams received no packets.');
+ Dv:=F5DvEncodeTmp(Cnt);
+ Assign(Fh,Dv); FileMode:=0; {$I-}Reset(Fh,1);{$I+} Code:=IOResult; FileMode:=2;
+ If Code<>0 Then Fail('dv: fichier intermediaire illisible.');
+ Sz:=FileSize(Fh);
+ GetMem(Buf,Sz+16); BlockRead(Fh,Buf^,Sz,Actual); Close(Fh);
+ If Sz<120000 Then Fail('dv: fichier intermediaire invalide.');
+ Stype:=Buf^[80*5+48+3] And $1F; Pal:=(Buf^[80*5+48+3] Shr 5) And 1;
+ If Pal<>0 Then Fsz:=144000 Else Fsz:=120000;
+ If Stype=4 Then Fsz:=Fsz*2 Else If Stype<>0 Then Fail('mxf: profil DV non pris en charge (DV25 et DV50 seulement).');
+ If Pal<>0 Then Dseg:=12 Else Dseg:=10;
+ Fcount:=Sz Div Fsz;
+ If Fcount<1 Then Fail('dv: fichier intermediaire invalide.');
+ FillChar(F5MxS,SizeOf(F5MxS),0); F5MxNS:=1;
+ With F5MxS[0] Do Begin
+  IsAudio:=False; W:=F5S.W; H:=F5S.H; CompDepth:=8; Rng:=F5S.Rng;
+  If Stype=4 Then Begin HSub:=2; VSub:=1; End Else If (Pal<>0) And ((Buf^[4] And 7)=0) Then Begin HSub:=2; VSub:=2; End Else Begin HSub:=4; VSub:=1; End;
+  If VSub=1 Then Siting:=0 Else Siting:=3;
+  Move(F5MxElemDV,Elem,16);
+  If Not MxParseDv(Buf,Fsz,F5MxS[0]) Then Fail('mxf: trame DV invalide.');
+ End;
+ F5MxTb[0]:=F5S.FD; F5MxTb[1]:=F5S.FN;
+ F5MxCPR:=F5MxCprOf(F5MxTb[0],F5MxTb[1]);
+ If F5MxCPR=0 Then Fail('Unsupported frame rate; set -strict unofficial or lower in order to allow it!');
+ F5MxTcBase:=(F5MxTb[1]+F5MxTb[0] Div 2) Div F5MxTb[0];
+ F5MxTcFps:=(F5MxTb[1]+F5MxTb[0]*0+F5MxTb[0] Div 2) Div F5MxTb[0];
+ F5MxTcRn:=F5MxTb[1]; F5MxTcRd:=F5MxTb[0];
+ F5MxTcFps:=(F5MxTcRn+F5MxTcRd Div 2) Div F5MxTcRd;
+ F5MxEU:=0; F5MxLastIdx:=0; F5MxFooter:=0; F5MxBodyParts:=0; F5MxDur:=-1;
+ F5MxB:=Nil; F5MxPos:=0; F5MxEnd:=0; F5MxCap:=0; F5MxInst:=0; FillChar(F5MxUmid,SizeOf(F5MxUmid),0);
+ If Not F5BitExact Then Begin
+  Seed:=Random(16777216)*256+Random(256); Seed64:=Int64(Seed And $FFFFFFFF)+$5294713400000000;
+  For K:=0 To 7 Do F5MxUmid[K]:=(Seed64 Shr (56-8*K)) And 255;
+  Seed64:=Seed64 Shr 8;
+  For K:=0 To 7 Do F5MxUmid[8+K]:=(Seed64 Shr (56-8*K)) And 255;
+  F5MxInst:=Seed And $FFFFFF;
+ End;
+ { taille d'une unite d'edition CBR }
+ F5MxEUBC:=F5KagSize; F5MxS[0].SliceOffset:=F5MxEUBC;
+ F5MxEUBC:=F5MxEUBC+16+4+F5MxS[0].FrameSize; F5MxEUBC:=F5MxEUBC+MxFillSize(F5MxEUBC);
+ { en-tete initial }
+ MxWritePartition(1,2,F5MxHdrOpenKey,True);
+ MxKlvFill; MxWriteIndexSegment;
+ For I:=0 To Fcount-1 Do Begin
+  MxKlvFill;
+  MxWriteSystemItem(F5MxLastIdx+F5MxEU);
+  Inc(F5MxEU);
+  MxKlvFill;
+  MxPB(F5MxS[0].Elem,16);
+  MxBer4(Fsz);
+  Fr:=@Buf^[I*Fsz];
+  F5DvUninject(Fr,Fsz,Dseg);
+  MxEnsure(Fsz);
+  Move(Fr^,F5MxB^[F5MxPos],Fsz); Inc(F5MxPos,Fsz); If F5MxPos>F5MxEnd Then F5MxEnd:=F5MxPos;
+ End;
+ F5MxDur:=F5MxLastIdx+F5MxEU;
+ MxKlvFill;
+ F5MxFooter:=MxTell;
+ MxWritePartition(0,0,F5MxFooterKey,False);
+ MxKlvFill;
+ MxWriteRip;
+ If OutputPath<>'-' Then Begin
+  MxSeek(0);
+  MxWritePartition(1,2,F5MxHdrClosedKey,True);
+  MxKlvFill; MxWriteIndexSegment;
+ End;
+ F5OpenOut(OutputPath);
+ F5Wr(F5MxB^,F5MxEnd);
+ F5CloseOut;
+ FreeMem(Buf);
+End;
+
+{ ---------- MXF en entree : extraction des elements d'essence video (DV, MPEG-2) ---------- }
+Function F5IsMxfFile(Const Nm: String): Boolean;
+Var B: Array[0..15] Of Byte; Sz: LongInt; Ok: Boolean;
+Begin
+ F5IsMxfFile:=False;
+ If Not Exists(Nm) Then Exit;
+ F5SrcOpen(Nm); Sz:=F5SrcSize;
+ If Sz>=16 Then If F5Rd(0,B,16) Then
+  F5IsMxfFile:=(B[0]=$06) And (B[1]=$0E) And (B[2]=$2B) And (B[3]=$34) And (B[4]=2) And (B[5]=5) And (B[6]=1) And (B[7]=1) And (B[8]=$0D) And
+   (B[9]=1) And (B[10]=2) And (B[11]=1) And (B[12]=1) And (B[13]=2);
+ F5SrcClose;
+End;
+
+Var F5MxfRng: Integer;
+
+{ ajoute la plage de couleur a l'en-tete d'un Y4M }
+Procedure F5Y4MPatchRange(Const Nm: String; Rng: Integer);
+Var F: File; Sz,Hl,Actual: LongInt; P: PEABuffer; Code: Integer; I: LongInt; Tag: String; Fo: File;
+Begin
+ If Rng=0 Then Exit;
+ Assign(F,Nm); FileMode:=0; {$I-}Reset(F,1);{$I+} Code:=IOResult; FileMode:=2;
+ If Code<>0 Then Exit;
+ Sz:=FileSize(F); GetMem(P,Sz+16); BlockRead(F,P^,Sz,Actual); Close(F);
+ Hl:=0; While (Hl<Sz) And (P^[Hl]<>10) Do Inc(Hl);
+ If Rng=1 Then Tag:=' XCOLORRANGE=LIMITED' Else Tag:=' XCOLORRANGE=FULL';
+ Assign(Fo,Nm); {$I-}Rewrite(Fo,1);{$I+} Code:=IOResult;
+ If Code=0 Then Begin BlockWrite(Fo,P^,Hl); BlockWrite(Fo,Tag[1],Length(Tag)); BlockWrite(Fo,P^[Hl],Sz-Hl); Close(Fo); End;
+ FreeMem(P);
+End;
+
+Function F5MxfExtract(Const Nm: String): String;
+Var Sz,Pos,Len,Q,K,Take,Kind,Vtype: LongInt; B: Array[0..15] Of Byte; L: Array[0..8] Of Byte; Fo: File; Code: Integer; Out,Ext: String; Buf: PEABuffer; Started: Boolean;
+ Nvid: LongInt; Actual: LongInt; Pre: Array[0..3] Of Byte; Tg,Tl,Tp,Tv,Wh: LongInt; Tb: Array[0..3] Of Byte;
+Begin
+ F5MxfRng:=0;
+ F5SrcOpen(Nm); Sz:=F5SrcSize; Pos:=0; Started:=False; Vtype:=0; Nvid:=0; Out:='';
+ GetMem(Buf,65536);
+ While Pos+17<=Sz Do Begin
+  If Not F5Rd(Pos,B,16) Then Break;
+  Inc(Pos,16);
+  If Not F5Rd(Pos,L,1) Then Break;
+  Inc(Pos);
+  If L[0]<128 Then Len:=L[0]
+  Else Begin
+   Q:=L[0] And 127; If (Q>8) Or (Q=0) Then Break;
+   If Not F5Rd(Pos,L,Q) Then Break;
+   Inc(Pos,Q); Len:=0; For K:=0 To Q-1 Do Len:=Len*256+L[K];
+  End;
+  If (Len<0) Or (Int64(Pos)+Len>Sz) Then Break;
+  Kind:=0;
+  If (B[0]=$06) And (B[1]=$0E) And (B[2]=$2B) And (B[3]=$34) And (B[4]=1) And (B[5]=2) And (B[6]=1) And (B[7]=1) And (B[8]=$0D) And (B[9]=1) And (B[10]=3) And (B[11]=1) Then Kind:=B[12];
+  If (Kind=$18) Or (Kind=$15) Then Begin
+   If Not Started Then Begin
+    Vtype:=Kind; Started:=True;
+    If Kind=$18 Then Ext:='.dv' Else Ext:='.m2v';
+    Out:=F5NewTmp(Ext);
+    Assign(Fo,Out); {$I-}Rewrite(Fo,1);{$I+} Code:=IOResult;
+    If Code<>0 Then Fail('Creation impossible: '+Out);
+   End;
+   If Kind=Vtype Then Begin
+    If Kind=$15 Then Begin
+     If Len>=4 Then If F5Rd(Pos,Pre,4) Then If Not ((Pre[0]=0) And (Pre[1]=0) And (Pre[2]=1)) Then Fail('mxf: essence video non MPEG-2 non prise en charge.');
+    End;
+    Q:=0;
+    While Q<Len Do Begin
+     Take:=Len-Q; If Take>65536 Then Take:=65536;
+     If Not F5Rd(Pos+Q,Buf^,Take) Then Break;
+     BlockWrite(Fo,Buf^,Take); Inc(Q,Take);
+    End;
+    Inc(Nvid);
+   End;
+  End;
+  If (B[0]=$06) And (B[1]=$0E) And (B[2]=$2B) And (B[3]=$34) And (B[4]=2) And (B[5]=$53) And (B[12]=1) And (B[13]=1) And (B[14]=$28) And (B[15]=0) Then Begin
+   { descripteur CDCI : niveaux de reference noir / blanc }
+   Tp:=Pos; Wh:=-1; Tv:=-1;
+   While Tp+4<=Pos+Len Do Begin
+    If Not F5Rd(Tp,Tb,4) Then Break;
+    Tg:=Tb[0]*256+Tb[1]; Tl:=Tb[2]*256+Tb[3];
+    If ((Tg=$3304) Or (Tg=$3305)) And (Tl=4) Then Begin
+     If F5Rd(Tp+4,Tb,4) Then Begin
+      Q:=(Tb[0] Shl 24) Or (Tb[1] Shl 16) Or (Tb[2] Shl 8) Or Tb[3];
+      If Tg=$3304 Then Tv:=Q Else Wh:=Q;
+     End;
+    End;
+    Tp:=Tp+4+Tl;
+   End;
+   If (Tv>=0) And (Wh>=0) Then Begin
+    If (Tv=16) And (Wh=235) Then F5MxfRng:=1 Else If (Tv=0) And (Wh=255) Then F5MxfRng:=2;
+   End;
+  End;
+  Pos:=Pos+Len;
+ End;
+ FreeMem(Buf);
+ If Started Then Close(Fo);
+ F5SrcClose;
+ If Not Started Then Fail('mxf: aucun flux video DV ou MPEG-2 trouve.');
+ F5MxfExtract:=Out;
+End;
+
+{ ---------- GXF (libavformat/gxfenc.c) : video DV ---------- }
+Type GxTT=Record MediaType,MediaInfo,TrackType,SampleRate,SampleSize,FrameRateIdx,LinesIdx,Fields: LongInt; End;
+Var
+ GxPos0,GxPtrMax,GxFile: LongInt; GxModel: Boolean;
+ GxNbFields,GxFlags,GxUmfStart,GxUmfTrackOff,GxUmfMediaOff,GxUmfLen,GxUmfTrackSize,GxUmfMediaSize,GxPacketCount: LongInt;
+ GxFlt: PALLong; GxFltN: LongInt; GxMapOff: Array[0..4095] Of LongInt; GxMapN: LongInt;
+ GxTbN,GxTbD: LongInt;
+ GxVid,GxTcT: GxTT;
+ GxFmt422,GxFmt420: Boolean; GxH: LongInt;
+
+Procedure GxAdv(N: LongInt);
+Var P,Len,Ptr: LongInt;
+Begin
+ If Not GxModel Then Exit;
+ P:=F5MxPos-N;
+ While N>0 Do Begin
+  Ptr:=P-GxPos0; Len:=32768-Ptr; If Len>N Then Len:=N;
+  P:=P+Len; N:=N-Len;
+  If P-GxPos0>GxPtrMax Then GxPtrMax:=P-GxPos0;
+  If P-GxPos0>=32768 Then Begin
+   If GxPos0+GxPtrMax>GxFile Then GxFile:=GxPos0+GxPtrMax;
+   GxPos0:=GxPos0+GxPtrMax; GxPtrMax:=0;
+  End;
+ End;
+End;
+Procedure GxSeek(Off: LongInt);
+Var O1: LongInt;
+Begin
+ If GxModel Then Begin
+  If F5MxPos-GxPos0>GxPtrMax Then GxPtrMax:=F5MxPos-GxPos0;
+  O1:=Off-GxPos0;
+  If Not ((O1>=0) And (O1<=GxPtrMax)) Then Begin
+   If GxPtrMax>0 Then If GxPos0+GxPtrMax>GxFile Then GxFile:=GxPos0+GxPtrMax;
+   GxPos0:=Off; GxPtrMax:=0;
+  End;
+ End;
+ MxSeek(Off);
+End;
+Procedure GxP8(V: LongInt);Begin MxP8(V); GxAdv(1); End;
+Procedure GxB16(V: LongInt);Begin GxP8(V Shr 8); GxP8(V); End;
+Procedure GxB24(V: LongInt);Begin GxP8(V Shr 16); GxP8(V Shr 8); GxP8(V); End;
+Procedure GxB32(V: Int64);Begin GxP8(V Shr 24); GxP8(V Shr 16); GxP8(V Shr 8); GxP8(V); End;
+Procedure GxL16(V: LongInt);Begin GxP8(V); GxP8(V Shr 8); End;
+Procedure GxL32(V: Int64);Begin GxP8(V); GxP8(V Shr 8); GxP8(V Shr 16); GxP8(V Shr 24); End;
+Procedure GxL64(V: Int64);Begin GxL32(V And $FFFFFFFF); GxL32(V Shr 32); End;
+Procedure GxFillZ(N: LongInt);Var I: LongInt;Begin For I:=1 To N Do GxP8(0); End;
+Procedure GxStr(Const S: String);Var I: Integer;Begin For I:=1 To Length(S) Do GxP8(Ord(S[I])); End;
+
+Function GxUpdPacketSize(Pos: LongInt): LongInt;
+Var Size,Cur: LongInt;
+Begin
+ Size:=MxTell-Pos;
+ If (Size Mod 4)<>0 Then Begin GxFillZ(4-Size Mod 4); Size:=MxTell-Pos; End;
+ Cur:=MxTell;
+ GxSeek(Pos+6); GxB32(Size); GxSeek(Cur);
+ GxUpdPacketSize:=Cur-Pos;
+End;
+Function GxUpdSize(Pos: LongInt): LongInt;
+Var Cur: LongInt;
+Begin
+ Cur:=MxTell; GxSeek(Pos); GxB16(Cur-Pos-2); GxSeek(Cur);
+ GxUpdSize:=Cur-Pos;
+End;
+Procedure GxPktHeader(Ty: LongInt);
+Begin GxB32(0); GxP8(1); GxP8(Ty); GxB32(0); GxB32(0); GxP8($E1); GxP8($E2); End;
+
+Procedure GxTrackDesc(Const Sc: GxTT; Index: LongInt);
+Var Pos: LongInt; Aux: Int64;
+Begin
+ GxP8(Sc.MediaType+$80); GxP8(Index+$C0);
+ Pos:=MxTell; GxB16(0);
+ GxP8($4C); GxP8(Length('EXT:/PDR/default/ES.')+3); GxStr('EXT:/PDR/default/ES.'); GxB16(Sc.MediaInfo); GxP8(0);
+ Case Sc.TrackType Of
+  3: Begin GxP8($4D); GxP8(8); GxL32(0); GxL32(0); End;
+  5,6: Begin
+    Aux:=0; If GxFmt420 Then Aux:=Aux Or 1; Aux:=Aux Or $40000000;
+    GxP8($4D); GxP8(8); GxL64(Aux);
+   End;
+  Else Begin GxP8($4D); GxP8(8); GxL64(0); End;
+ End;
+ GxP8($4E); GxP8(4); GxB32(0);
+ GxP8($50); GxP8(4); GxB32(Sc.FrameRateIdx);
+ GxP8($51); GxP8(4); GxB32(Sc.LinesIdx);
+ GxP8($52); GxP8(4); GxB32(Sc.Fields);
+ GxUpdSize(Pos);
+End;
+
+Function GxMapPacket(Rewrite: Boolean): LongInt;
+Var Pos,P2,P3,I: LongInt; Fn,Nm: String;
+Begin
+ Pos:=MxTell;
+ If Not Rewrite Then Begin GxMapOff[GxMapN]:=Pos; Inc(GxMapN); End;
+ GxPktHeader($BC);
+ GxP8($E0); GxP8($FF);
+ { material data section }
+ P2:=MxTell; GxB16(0);
+ I:=Length(OutputPath); While (I>0) And (OutputPath[I]<>'/') Do Dec(I);
+ Fn:=Copy(OutputPath,I+1,255);
+ GxP8($40); GxP8(Length('EXT:/PDR/default/')+Length(Fn)+1); GxStr('EXT:/PDR/default/'); GxStr(Fn); GxP8(0);
+ GxP8($41); GxP8(4); GxB32(0);
+ GxP8($42); GxP8(4); GxB32(GxNbFields);
+ GxP8($43); GxP8(4); GxB32(0);
+ GxP8($44); GxP8(4); GxB32(GxNbFields);
+ GxP8($45); GxP8(4); GxB32(GxFile Div 1024);
+ GxUpdSize(P2);
+ { track description section }
+ P3:=MxTell; GxB16(0);
+ GxTrackDesc(GxVid,0);
+ GxTrackDesc(GxTcT,1);
+ GxUpdSize(P3);
+ GxMapPacket:=GxUpdPacketSize(Pos);
+End;
+
+Function GxFltPacket: LongInt;
+Var Pos,Fpf,Ne,I,J: LongInt;
+Begin
+ Pos:=MxTell;
+ Fpf:=(GxNbFields+1) Div 1000+1; Ne:=GxNbFields Div Fpf; I:=0;
+ GxPktHeader($FC);
+ GxL32(Fpf); GxL32(Ne);
+ If GxFlt<>Nil Then Begin
+  For J:=0 To Ne-1 Do GxL32(GxFlt^[(J*Fpf) Shr 1]);
+  I:=Ne;
+ End;
+ GxFillZ((1000-I)*4);
+ GxFltPacket:=GxUpdPacketSize(Pos);
+End;
+
+Procedure GxUmfMaterial;
+Var TcBase: LongInt; NbF: Int64;
+Begin
+ If GxTbD=60000 Then TcBase:=60 Else TcBase:=50;
+ NbF:=GxNbFields;
+ GxL32(GxFlags); GxL32(GxNbFields); GxL32(GxNbFields); GxL32(0); GxL32(GxNbFields);
+ GxL32(0); { timecode in : (color<<30|drop<<29|h|m|s|f) = 0 }
+ GxL32((NbF Div (TcBase*3600) Mod 24) Shl 24 Or (NbF Div (TcBase*60) Mod 60) Shl 16 Or (NbF Div TcBase Mod 60) Shl 8 Or (NbF Mod TcBase));
+ GxL64(0); GxL64(0);
+ GxL16(0); GxL16(0); GxL16(0); GxL16(1); GxL16(0); GxL16(0);
+End;
+
+Function GxUmfPacket: LongInt;
+Var Pos,Start,Sp,Cur: LongInt;
+Begin
+ Pos:=MxTell;
+ GxPktHeader($FD);
+ GxP8(3); GxB32(GxUmfLen);
+ GxUmfStart:=MxTell;
+ { payload }
+ GxL32(GxUmfLen); GxL32(3); GxL32(2); GxL32(GxUmfTrackOff); GxL32(GxUmfTrackSize); GxL32(2); GxL32(GxUmfMediaOff); GxL32(GxUmfMediaSize);
+ GxL32(GxUmfLen); GxL32(0); GxL32(0); GxL32(0);
+ GxUmfMaterial;
+ { track description }
+ Start:=MxTell; GxUmfTrackOff:=Start-GxUmfStart;
+ GxL16(GxVid.MediaInfo); GxL16(1); GxL16(GxTcT.MediaInfo); GxL16(1);
+ GxUmfTrackSize:=MxTell-Start;
+ { media description }
+ Start:=MxTell; GxUmfMediaOff:=Start-GxUmfStart;
+ Sp:=MxTell;
+ GxL16(0); GxL16(GxVid.MediaInfo); GxL16(0); GxL16(0); GxL32(GxNbFields); GxL32(0); GxL32(0); GxL32(GxNbFields);
+ GxStr('EXT:/PDR/default/ES.'); GxB16(GxVid.MediaInfo); GxFillZ(88-(Length('EXT:/PDR/default/ES.')+2));
+ GxL32(GxVid.TrackType); GxL32(GxVid.SampleRate); GxL32(GxVid.SampleSize); GxL32(0);
+ If GxFmt420 Then GxL32($20) Else GxL32(0);
+ GxFillZ(7*4);
+ Cur:=MxTell; GxSeek(Sp); GxL16(Cur-Sp); GxSeek(Cur);
+ Sp:=MxTell;
+ GxL16(0); GxL16(GxTcT.MediaInfo); GxL16(0); GxL16(0); GxL32(GxNbFields); GxL32(0); GxL32(0); GxL32(GxNbFields);
+ GxStr('EXT:/PDR/default/ES.'); GxB16(GxTcT.MediaInfo); GxFillZ(88-(Length('EXT:/PDR/default/ES.')+2));
+ GxL32(GxTcT.TrackType); GxL32(GxTcT.SampleRate); GxL32(GxTcT.SampleSize); GxL32(0);
+ GxL32(0); GxFillZ(7*4);
+ Cur:=MxTell; GxSeek(Sp); GxL16(Cur-Sp); GxSeek(Cur);
+ GxUmfMediaSize:=MxTell-Start;
+ GxUmfLen:=MxTell-GxUmfStart;
+ GxUmfPacket:=GxUpdPacketSize(Pos);
+End;
+
+Procedure F5GxSink;
+Var Cnt,I,Fsz,Fcount,Sz,Code,Pos,Pad: LongInt; Dv: String; Buf,Fr: PEABuffer; Pal,Stype: Integer; Fh: File; Actual: LongInt; Dseg: LongInt; BitRate: Int64; End1: LongInt;
+Begin
+ If OutputPath='-' Then Fail('gxf muxer does not support streamed output, patch welcome');
+ If VideoCodec<>'dvvideo' Then Fail('gxf: seul -c:v dvvideo est pris en charge par ce muxeur (le codec par defaut mpeg2video n''est pas reproduit).');
+ Cnt:=F5OutCount(F5S.N);
+ If Cnt<=0 Then Fail('Nothing was written into output file, because at least one of its streams received no packets.');
+ Dv:=F5DvEncodeTmp(Cnt);
+ Assign(Fh,Dv); FileMode:=0; {$I-}Reset(Fh,1);{$I+} Code:=IOResult; FileMode:=2;
+ If Code<>0 Then Fail('dv: fichier intermediaire illisible.');
+ Sz:=FileSize(Fh); GetMem(Buf,Sz+16); BlockRead(Fh,Buf^,Sz,Actual); Close(Fh);
+ If Sz<120000 Then Fail('dv: fichier intermediaire invalide.');
+ Stype:=Buf^[80*5+48+3] And $1F; Pal:=(Buf^[80*5+48+3] Shr 5) And 1;
+ If Pal<>0 Then Fsz:=144000 Else Fsz:=120000;
+ If Stype=4 Then Fsz:=Fsz*2 Else If Stype<>0 Then Fail('gxf: profil DV non pris en charge.');
+ If Pal<>0 Then Dseg:=12 Else Dseg:=10;
+ Fcount:=Sz Div Fsz;
+ GxFmt422:=Stype=4; GxFmt420:=(Stype=0) And (Pal<>0) And ((Buf^[4] And 7)=0);
+ If HasVideoBitrate Then BitRate:=VideoBitrate Else BitRate:=200000;
+ FillChar(GxVid,SizeOf(GxVid),0); FillChar(GxTcT,SizeOf(GxTcT),0);
+ GxH:=F5S.H;
+ If (GxH=480) Or (GxH=512) Then Begin
+  GxVid.FrameRateIdx:=5; GxVid.SampleRate:=60; GxFlags:=$80; GxTbN:=1001; GxTbD:=60000; GxVid.MediaType:=13; GxVid.LinesIdx:=1;
+ End Else If (GxH=576) Or (GxH=608) Then Begin
+  GxVid.FrameRateIdx:=6; GxVid.SampleRate:=50; GxFlags:=$40; GxTbN:=1; GxTbD:=50; GxVid.MediaType:=15; GxVid.LinesIdx:=2;
+ End Else Fail('unsupported video resolution, gxf muxer only accepts PAL or NTSC resolutions currently');
+ If GxH=576 Then GxVid.MediaType:=14 Else If GxH=480 Then GxVid.MediaType:=13;
+ GxFlags:=GxFlags Or $00080000;
+ GxVid.SampleSize:=BitRate; GxVid.Fields:=2;
+ If GxFmt422 Then Begin GxVid.MediaType:=GxVid.MediaType+2; GxVid.TrackType:=6; GxFlags:=GxFlags Or $2000; GxVid.MediaInfo:=(Ord('E') Shl 8) Or Ord('0'); End
+ Else Begin GxVid.TrackType:=5; GxFlags:=GxFlags Or $1000; GxVid.MediaInfo:=(Ord('D') Shl 8) Or Ord('0'); End;
+ If GxVid.SampleRate=60 Then GxTcT.MediaType:=7 Else GxTcT.MediaType:=8;
+ GxTcT.SampleRate:=GxVid.SampleRate; GxTcT.MediaInfo:=(Ord('T') Shl 8) Or Ord('0'); GxTcT.TrackType:=3; GxTcT.FrameRateIdx:=GxVid.FrameRateIdx;
+ GxTcT.LinesIdx:=GxVid.LinesIdx; GxTcT.SampleSize:=16; GxTcT.Fields:=GxVid.Fields;
+ GxFlags:=GxFlags Or $200000;
+ GxNbFields:=0; GxUmfStart:=0; GxUmfTrackOff:=0; GxUmfMediaOff:=0; GxUmfLen:=0; GxUmfTrackSize:=0; GxUmfMediaSize:=0; GxMapN:=0; GxFlt:=Nil; GxFltN:=0;
+ F5MxB:=Nil; F5MxPos:=0; F5MxEnd:=0; F5MxCap:=0;
+ GxPos0:=0; GxPtrMax:=0; GxFile:=0; GxModel:=True;
+ GxMapPacket(False); GxFltPacket; GxUmfPacket;
+ GxPacketCount:=3;
+ GetMem(GxFlt,(Fcount+8)*4);
+ For I:=0 To Fcount-1 Do Begin
+  Pos:=MxTell;
+  GxPktHeader($BF);
+  GxP8(GxVid.MediaType); GxP8(0); GxB32(GxNbFields);
+  GxP8(Fsz Div 4096); GxB24(0); GxB32(GxNbFields); GxP8(1); GxP8(0);
+  Fr:=@Buf^[I*Fsz];
+  F5DvUninject(Fr,Fsz,Dseg);
+  MxEnsure(Fsz);
+  Move(Fr^,F5MxB^[F5MxPos],Fsz); Inc(F5MxPos,Fsz); If F5MxPos>F5MxEnd Then F5MxEnd:=F5MxPos;
+  GxAdv(Fsz);
+  GxFlt^[GxFltN]:=Pos Div 1024; Inc(GxFltN);
+  GxNbFields:=GxNbFields+2;
+  GxUpdPacketSize(Pos);
+  Inc(GxPacketCount);
+  If GxPacketCount=100 Then Begin GxMapPacket(False); GxPacketCount:=0; End;
+ End;
+ { fin de flux }
+ Pos:=MxTell; GxPktHeader($FB); GxUpdPacketSize(Pos);
+ End1:=MxTell;
+ GxSeek(0);
+ GxMapPacket(True); GxFltPacket; GxUmfPacket;
+ For I:=1 To GxMapN-1 Do Begin
+  GxSeek(GxMapOff[I]);
+  GxMapPacket(True);
+ End;
+ GxSeek(End1);
+ F5OpenOut(OutputPath);
+ F5Wr(F5MxB^,F5MxEnd);
+ F5CloseOut;
+ GxModel:=False;
+ FreeMem(Buf);
+End;
+
+{ ---------- GXF en entree : extraction de l'essence video (DV, MPEG-2, MPEG-1) ---------- }
+Function F5IsGxfFile(Const Nm: String): Boolean;
+Var B: Array[0..15] Of Byte; Sz: LongInt;
+Begin
+ F5IsGxfFile:=False;
+ If Not Exists(Nm) Then Exit;
+ F5SrcOpen(Nm); Sz:=F5SrcSize;
+ If Sz>=16 Then If F5Rd(0,B,16) Then
+  F5IsGxfFile:=(B[0]=0) And (B[1]=0) And (B[2]=0) And (B[3]=0) And (B[4]=1) And (B[5]=$BC) And (B[14]=$E1) And (B[15]=$E2);
+ F5SrcClose;
+End;
+
+Function F5GxfExtract(Const Nm: String): String;
+Var Sz,Pos,Psz,Q,Take,Mt,Dlen,Vmt: LongInt; H: Array[0..31] Of Byte; Fo: File; Code: Integer; Out,Ext: String; Buf: PEABuffer; Started: Boolean; Kind: Integer;
+Begin
+ F5SrcOpen(Nm); Sz:=F5SrcSize; Pos:=0; Started:=False; Vmt:=0; Out:=''; Kind:=0;
+ GetMem(Buf,65536);
+ While Pos+16<=Sz Do Begin
+  If Not F5Rd(Pos,H,16) Then Break;
+  If (H[0]<>0) Or (H[1]<>0) Or (H[2]<>0) Or (H[3]<>0) Or (H[4]<>1) Or (H[14]<>$E1) Or (H[15]<>$E2) Then Break;
+  Psz:=(H[6] Shl 24) Or (H[7] Shl 16) Or (H[8] Shl 8) Or H[9];
+  If (Psz<16) Or (Int64(Pos)+Psz>Sz) Then Break;
+  If (H[5]=$BF) And (Psz>=32) Then Begin
+   If F5Rd(Pos+16,H,16) Then Begin
+    Mt:=H[0];
+    If ((Mt>=13) And (Mt<=16)) Or (Mt=11) Or (Mt=12) Or (Mt=20) Or (Mt=22) Or (Mt=23) Then Begin
+     If Not Started Then Begin
+      Started:=True; Vmt:=Mt;
+      If (Mt>=13) And (Mt<=16) Then Begin Ext:='.dv'; Kind:=1; End Else If (Mt=22) Or (Mt=23) Then Begin Ext:='.m1v'; Kind:=2; End Else Begin Ext:='.m2v'; Kind:=2; End;
+      Out:=F5NewTmp(Ext);
+      Assign(Fo,Out); {$I-}Rewrite(Fo,1);{$I+} Code:=IOResult;
+      If Code<>0 Then Fail('Creation impossible: '+Out);
+     End;
+     If Mt=Vmt Then Begin
+      If Kind=1 Then Dlen:=Psz-32 Else Dlen:=(H[7] Shl 16) Or (H[8] Shl 8) Or H[9];
+      If Dlen>Psz-32 Then Dlen:=Psz-32;
+      Q:=0;
+      While Q<Dlen Do Begin
+       Take:=Dlen-Q; If Take>65536 Then Take:=65536;
+       If Not F5Rd(Pos+32+Q,Buf^,Take) Then Break;
+       BlockWrite(Fo,Buf^,Take); Inc(Q,Take);
+      End;
+     End;
+    End;
+   End;
+  End;
+  Pos:=Pos+Psz;
+ End;
+ FreeMem(Buf);
+ If Started Then Close(Fo);
+ F5SrcClose;
+ If Not Started Then Fail('gxf: aucun flux video DV ou MPEG trouve.');
+ F5GxfExtract:=Out;
 End;
 
 { ---------- pilote ---------- }
+{ -aspect : le rapport d'image d'affichage impose fixe le SAR }
+Procedure F5ApplyAspect;
+Var N,D,G: Int64;
+Begin
+ N:=Int64(AspectNum)*F5S.H; D:=Int64(AspectDen)*F5S.W;
+ G:=F5Gcd(N,D); If G>0 Then Begin N:=N Div G; D:=D Div G; End;
+ F5S.SarN:=N; F5S.SarD:=D;
+End;
+
+{ dv avec limite de nombre d'images : Y4M tronque puis encodeur historique }
+Procedure F5DvSink;
+Var Cnt,I: LongInt; Tmp,Hd: String; Fo: File; Code: Integer; Buf: PEABuffer;
+Begin
+ Cnt:=F5OutCount(F5S.N);
+ If Cnt<=0 Then Fail('Nothing was written into output file, because at least one of its streams received no packets.');
+ Tmp:=F5NewTmp('.y4m');
+ Assign(Fo,Tmp); {$I-}Rewrite(Fo,1);{$I+} Code:=IOResult;
+ If Code<>0 Then Fail('Creation impossible: '+Tmp);
+ Hd:=F5Y4MHeader(F5S.Fm,F5S.W,F5S.H,F5S.FN,F5S.FD,F5S.SarN,F5S.SarD,F5S.Il,F5S.Rng,F5S.Loc);
+ BlockWrite(Fo,Hd[1],Length(Hd));
+ GetMem(Buf,F5S.FBytes+64);
+ For I:=0 To Cnt-1 Do Begin
+  If Not F5ReadFrame(I,Buf) Then Break;
+  Hd:='FRAME'#10; BlockWrite(Fo,Hd[1],6); BlockWrite(Fo,Buf^,F5S.FBytes);
+ End;
+ FreeMem(Buf); Close(Fo);
+ If Exists(OutputPath) And Not Overwrite Then Fail('Sortie existante (utiliser -y): '+OutputPath);
+ If Not F5Child('-y -i '+F5Q(Tmp)+' -c:v dvvideo'+F5Passthrough+' -f dv '+F5Q(OutputPath),F5NewTmp('.log')) Then Fail('dv: encodage impossible.');
+End;
+
 Procedure F5Run(Const Sink,Src0: String);
 Var Vp,Ap,Log,Src: String; Okv: Boolean; Is4: Boolean;
 Begin
  F5HookExit; F5Sink:=Sink;
  F5InitFm;
  Src:=Src0;
- If (Sink='mxf') Or (Sink='mxf_d10') Or (Sink='gxf') Or (Sink='rtp') Then Fail('Muxeur '+Sink+' non pris en charge.');
+ If Sink='rtp' Then Fail('Muxeur '+Sink+' non pris en charge.');
  Vp:=''; Ap:='';
  If InputFormat='yuv4mpegpipe' Then Vp:=Src
  Else If InputFormat='wav' Then Ap:=Src
@@ -99570,10 +101100,14 @@ Begin
  End;
  If Vp<>'' Then Begin
   F5OpenY4M(Vp);
+  If AspectNum>0 Then F5ApplyAspect;
   If F5S.N<=0 Then Fail('Nothing was written into output file, because at least one of its streams received no packets.');
   If (Sink='null') Or (Sink='crc') Or (Sink='framecrc') Or (Sink='rawvideo') Or (Sink='yuv4mpegpipe') Then F5VideoSink(Sink)
   Else If (Sink='image2') Or (Sink='image2pipe') Or (Sink='mpjpeg') Then F5ImageSink(Sink)
   Else If Sink='gif' Then F5GifSink
+  Else If Sink='dv' Then F5DvSink
+  Else If (Sink='mxf') Or (Sink='mxf_d10') Then F5MxSink(Sink)
+  Else If Sink='gxf' Then F5GxSink
   Else Fail('Muxeur '+Sink+' non pris en charge.');
   F5CloseSrc;
  End Else Begin
@@ -99586,9 +101120,26 @@ Begin
  Halt(0);
 End;
 
+Function F5LooksMpjpeg(Const Nm: String): Boolean;
+Var B: Array[0..299] Of Byte; Sz,N,I: LongInt; S: String;
+Begin
+ F5LooksMpjpeg:=False;
+ If Not Exists(Nm) Then Exit;
+ F5SrcOpen(Nm); Sz:=F5SrcSize; N:=300; If Sz<N Then N:=Sz;
+ FillChar(B,SizeOf(B),0);
+ If N>=40 Then If F5Rd(0,B,N) Then Begin
+  If (B[0]=45) And (B[1]=45) Then Begin
+   S:=''; For I:=0 To N-1 Do If (B[I]>=32) And (B[I]<127) Then S:=S+Chr(B[I]) Else S:=S+'.';
+   S:=Lower(S);
+   If Pos('content-type:',S)>0 Then F5LooksMpjpeg:=True;
+  End;
+ End;
+ F5SrcClose;
+End;
+
 { avant la detection du format d'entree : rawvideo force et sequences d'images (image2) }
 Procedure F5PreProbe;
-Var S: String; Y: String; Fm: Integer;
+Var S: String; Y,Y2: String; Fm: Integer;
 Begin
  S:=InputFormat;
  If (S='rawvideo') Then Begin
@@ -99607,10 +101158,33 @@ Begin
   End;
   Exit;
  End;
- If (S='image2') Or (S='image2pipe') Or ((S='') And ((Pos('%',InputPath)>0) Or (F5PatType='glob')) And Not Exists(InputPath) And (F5PatternOk(InputPath) Or (F5PatType='glob'))) Then Begin
+ If (S='gxf') Or ((S='') And F5IsGxfFile(InputPath)) Then Begin
   F5HookExit;
-  If S='image2pipe' Then Fail('image2pipe en entree: non pris en charge.');
-  Y:=F5ImageSeqToY4M(InputPath);
+  Y:=F5GxfExtract(InputPath);
+  Y2:=F5ChildVideo(Y,'',F5NewTmp('.log'));
+  If Y2='' Then Fail('gxf: decodage de l''essence video impossible.');
+  InputPath:=Y2; InputFormat:=''; F5InForced:='';
+  Exit;
+ End;
+ If (S='mxf') Or ((S='') And F5IsMxfFile(InputPath)) Then Begin
+  F5HookExit;
+  Y:=F5MxfExtract(InputPath);
+  Y2:=F5ChildVideo(Y,'',F5NewTmp('.log'));
+  If Y2='' Then Fail('mxf: decodage de l''essence video impossible.');
+  F5Y4MPatchRange(Y2,F5MxfRng);
+  InputPath:=Y2; InputFormat:=''; F5InForced:='';
+  Exit;
+ End;
+ If (S='mpjpeg') Or (S='image2pipe') Or ((S='') And F5LooksMpjpeg(InputPath)) Then Begin
+  F5HookExit;
+  F5PipeSplit(InputPath,(S='mpjpeg') Or (S=''));
+  Y:=F5ImageSeqToY4M('',True);
+  InputPath:=Y; InputFormat:=''; F5InForced:='';
+  Exit;
+ End;
+ If (S='image2') Or ((S='') And ((Pos('%',InputPath)>0) Or (F5PatType='glob')) And Not Exists(InputPath) And (F5PatternOk(InputPath) Or (F5PatType='glob'))) Then Begin
+  F5HookExit;
+  Y:=F5ImageSeqToY4M(InputPath,False);
   InputPath:=Y; InputFormat:=''; F5InForced:='';
  End;
 End;
@@ -125102,17 +126676,18 @@ Begin
  WriteLn(' D  h261            H.261 brut (.h261) ou AVI H261, vers Y4M/PNG/BMP');
  WriteLn(' D  h264            H.264 brut Annex B (detecte par le contenu ou -f h264), vers Y4M/PNG/BMP; aussi MP4/AVI/FLV H.264');
  WriteLn(' D  h263            H.263/H.263+ brut (detecte par le contenu ou -f h263) ou AVI H263, vers Y4M/PNG/BMP');
- WriteLn('  E gif             GIF, une image, palette 256 couleurs');
  WriteLn(' D  hls             HLS fMP4 VOD (alias: m3u8); copie vers MP4');
- WriteLn('  E image2          Une image PNG/GIF; pas de sequence');
  WriteLn(' D  libopenmpt      MOD 4 canaux, moteur Pascal interne (alias: mod)');
- WriteLn(' DE yuv4mpegpipe    Y4M YUV420 8 bits (FFV1 AVI, alias: y4m)');
+ WriteLn(' DE yuv4mpegpipe    YUV4MPEG pipe');
+ WriteLn(' DE image2          image2 sequence');
  WriteLn('  E null            raw null video');
  WriteLn('  E crc             CRC testing');
  WriteLn('  E framecrc        framecrc testing');
- WriteLn('  E image2          image2 sequence (F5: PNG/BMP natifs, autres via encodeurs Y4M; entree: motifs %d/glob)');
- WriteLn('  E image2pipe      piped image2 sequence');
- WriteLn('  E mpjpeg          MIME multipart JPEG');
+ WriteLn(' DE image2pipe      piped image2 sequence');
+ WriteLn(' DE mpjpeg          MIME multipart JPEG');
+ WriteLn(' DE rawvideo        raw video');
+ WriteLn(' DE mxf             MXF (Material eXchange Format)');
+ WriteLn(' DE gxf             GXF (General eXchange Format)');
  WriteLn(' DE m4v             raw MPEG-4 video format (MPEG-4 Part 2)');
  WriteLn(' D  mp1             MPEG audio Layer I');
  WriteLn(' D  mlp             raw MLP (Meridian Lossless Packing)');
@@ -125960,6 +127535,7 @@ BEGIN
  If OutputFormat='' Then OutputFormat:=FormatName(Extension(OutputPath));
  If (OutputFormat='matroska') Or (OutputFormat='webm') Then F4MainMkv; { F4 }
  F5Sink:=''; If Not IsHTTP(InputPath) Then F5Sink:=F5Take; If F5Sink<>'' Then F5Run(F5Sink,Intermediate);
+ If (OutputFormat='dv') And (VideoCodec='') And (InputFormat='yuv4mpegpipe') Then VideoCodec:='dvvideo';
  If F5MineOut And (VideoCodec<>'svq1') And (((H4SVfr>1) And (VideoCodec<>'snow')) Or (H4SRn>0) Or H4STSet Or H4SMeSet) Then Begin
   If (H4SVfr>1) And (VideoCodec<>'snow') Then Fail('Extraction PNG/GIF: -vframes 1 uniquement.');
   If H4SRn>0 Then Fail('Option non prise en charge: -r');
