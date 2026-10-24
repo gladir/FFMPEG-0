@@ -3590,6 +3590,7 @@ End;
 
 Function FormatName(S: String): String;Begin
  S:=Lower(S); If (S='aif') Or (S='aifc') Then S:='aiff';
+ If (S='mkv') Or (S='mka') Then S:='matroska'; { F4 }
  If (S='8svx') Or (S='svx') Then S:='iff';
  If S='adts' Then S:='aac';
  If S='mod' Then S:='libopenmpt';
@@ -96530,6 +96531,939 @@ End;
 
 { ==== BLOCK-ANCHOR-F3 : inserer le code du groupe F3 juste au-dessus de cette ligne ==== }
 
+{ ==== F4-BEGIN : Matroska / WebM / NUT (muxeurs et demuxeurs ; reference FFmpeg 6.1.1 matroskaenc.c, matroskadec.c, nutenc.c, nutdec.c) ==== }
+Procedure Commit(Const Stage: String); Forward;
+Const
+ F4MaxSt=8;
+Type
+ TF4Pkt=Record Pos,Len: LongInt; Pts,Dts,Dur: Int64; Key: Boolean; SkipS,SkipE: LongInt; End;
+ TF4PktA=Array[0..20000000] Of TF4Pkt; PF4PktA=^TF4PktA;
+ TF4St=Record
+  Typ: LongInt;                    { 0 video, 1 audio }
+  Codec: String[24];               { nom du codec ffmpeg }
+  Tag: LongWord;                   { codec_tag }
+  W,H,Bits: LongInt;               { video : taille, bits_per_coded_sample }
+  SarN,SarD: LongInt;
+  AvgN,AvgD,RN,RD: Int64;          { avg_frame_rate, r_frame_rate }
+  TbN,TbD: Int64;                  { base de temps des paquets }
+  Rate,Chans,RawBits,SampBytes,BlockAlign: LongInt;
+  InitPad: LongInt;                { initial_padding (echantillons) }
+  Dflt: Boolean;                   { disposition par defaut }
+  FieldOrder,ChromaLoc,CRange,CSpace,CTrc,CPri: LongInt;
+  PixFmt: String[16];
+  EncTag: String[64];              { valeur du tag ENCODER du flux ('' : aucun) }
+  Lang: String[8];
+  Title: String[64];
+  Extra: PEABuffer; ExtraLen: LongInt;
+  Data: PEABuffer; DataLen,DataCap: LongInt;
+  P: PF4PktA; NPk,PCap: LongInt;
+ End;
+ TF4B=Record P: PEABuffer; N,Cap: LongInt; End;
+Var
+ F4S: Array[0..F4MaxSt-1] Of TF4St; F4NS: LongInt;
+ F4Err: String;
+
+{ ---- arithmetique 128 bits : a*b/c avec les modes d'arrondi de av_rescale_rnd (0 zero, 1 inf, 2 bas, 3 haut, 4 plus proche) ---- }
+Function F4MulDivR(A,B,C: Int64; Rnd: LongInt): Int64;
+Var
+ Neg: Boolean; X,Y,Z,Q,R,Hi,Lo,A0,A1,B0,B1,P00,P01,P10,P11,Mid,Bit: QWord; I: LongInt; Up: Boolean;
+Begin
+ Neg:=False;
+ If A<0 Then Begin A:=-A; Neg:=Not Neg; End;
+ If B<0 Then Begin B:=-B; Neg:=Not Neg; End;
+ If C<0 Then Begin C:=-C; Neg:=Not Neg; End;
+ If C=0 Then Begin F4MulDivR:=0; Exit; End;
+ X:=QWord(A); Y:=QWord(B); Z:=QWord(C);
+ A0:=X And $FFFFFFFF; A1:=X Shr 32; B0:=Y And $FFFFFFFF; B1:=Y Shr 32;
+ P00:=A0*B0; P01:=A0*B1; P10:=A1*B0; P11:=A1*B1;
+ Mid:=(P00 Shr 32)+(P01 And $FFFFFFFF)+(P10 And $FFFFFFFF);
+ Lo:=(P00 And $FFFFFFFF) Or ((Mid And $FFFFFFFF) Shl 32);
+ Hi:=P11+(P01 Shr 32)+(P10 Shr 32)+(Mid Shr 32);
+ Q:=0; R:=0;
+ For I:=127 Downto 0 Do Begin
+  If I>=64 Then Bit:=(Hi Shr (I-64)) And 1 Else Bit:=(Lo Shr I) And 1;
+  If R>=QWord($8000000000000000) Then Begin R:=(R Shl 1) Or Bit; R:=R-Z; Q:=(Q Shl 1) Or 1; End
+  Else Begin
+   R:=(R Shl 1) Or Bit;
+   If R>=Z Then Begin R:=R-Z; Q:=(Q Shl 1) Or 1; End Else Q:=Q Shl 1;
+  End;
+ End;
+ { Q quotient (tronque), R reste }
+ Case Rnd Of
+  0: Up:=False;
+  1: Up:=R<>0;
+  2: Up:=Neg And (R<>0);
+  3: Up:=(Not Neg) And (R<>0);
+  Else Begin
+   If R>=QWord($8000000000000000) Then Up:=True Else Up:=(R*2>=Z);
+  End;
+ End;
+ If Up Then Inc(Q);
+ If Neg Then F4MulDivR:=-Int64(Q) Else F4MulDivR:=Int64(Q);
+End;
+
+{ av_rescale_q_rnd avec NOPTS conserve (AV_ROUND_PASS_MINMAX) }
+Const F4NoPts: Int64 = -9223372036854775807-1;
+Function F4RescQ(A,Bn,Bd,Cn,Cd: Int64; Rnd: LongInt): Int64;
+Begin
+ If (A=F4NoPts) Or (A=9223372036854775807) Then Begin F4RescQ:=A; Exit; End;
+ F4RescQ:=F4MulDivR(A,Bn*Cd,Bd*Cn,Rnd);
+End;
+
+Function F4Gcd(A,B: Int64): Int64;
+Var T: Int64;
+Begin
+ If A<0 Then A:=-A; If B<0 Then B:=-B;
+ While B<>0 Do Begin T:=A Mod B; A:=B; B:=T; End;
+ F4Gcd:=A;
+End;
+
+{ av_reduce }
+Procedure F4Reduce(Var DstN,DstD: Int64; Num,Den,Max: Int64);
+Var A0n,A0d,A1n,A1d,X,NextDen,A2n,A2d,G: Int64; Sign: Boolean;
+Begin
+ A0n:=0; A0d:=1; A1n:=1; A1d:=0;
+ Sign:=(Num<0)<>(Den<0);
+ G:=F4Gcd(Num,Den);
+ If Num<0 Then Num:=-Num; If Den<0 Then Den:=-Den;
+ If G<>0 Then Begin Num:=Num Div G; Den:=Den Div G; End;
+ If (Num<=Max) And (Den<=Max) Then Begin A1n:=Num; A1d:=Den; Den:=0; End;
+ While Den<>0 Do Begin
+  X:=Num Div Den; NextDen:=Num-Den*X;
+  A2n:=X*A1n+A0n; A2d:=X*A1d+A0d;
+  If (A2n>Max) Or (A2d>Max) Then Begin
+   If A1n<>0 Then X:=(Max-A0n) Div A1n;
+   If A1d<>0 Then Begin If (Max-A0d) Div A1d<X Then X:=(Max-A0d) Div A1d; End;
+   If Den*(2*X*A1d+A0d)>Num*A1d Then Begin A1n:=X*A1n+A0n; A1d:=X*A1d+A0d; End;
+   Break;
+  End;
+  A0n:=A1n; A0d:=A1d; A1n:=A2n; A1d:=A2d; Num:=Den; Den:=NextDen;
+ End;
+ If Sign Then DstN:=-A1n Else DstN:=A1n;
+ DstD:=A1d;
+End;
+
+{ ---- tampons d'octets extensibles (equivalent des avio dyn_buf) ---- }
+Procedure F4BInit(Var B: TF4B);
+Begin B.Cap:=4096; GetMem(B.P,B.Cap); B.N:=0; End;
+Procedure F4BFree(Var B: TF4B);
+Begin If B.P<>Nil Then FreeMem(B.P); B.P:=Nil; B.N:=0; B.Cap:=0; End;
+Procedure F4BGrow(Var B: TF4B; Need: LongInt);
+Var NC: LongInt;
+Begin
+ If B.N+Need>B.Cap Then Begin
+  NC:=B.Cap*2; If NC<B.N+Need Then NC:=B.N+Need+4096;
+  ReAllocMem(Pointer(B.P),NC); B.Cap:=NC;
+ End;
+End;
+Procedure F4B1(Var B: TF4B; V: LongInt);
+Begin F4BGrow(B,1); B.P^[B.N]:=V And 255; Inc(B.N); End;
+Procedure F4BN(Var B: TF4B; Src: Pointer; Len: LongInt);
+Begin
+ If Len<=0 Then Exit;
+ F4BGrow(B,Len); Move(Src^,B.P^[B.N],Len); Inc(B.N,Len);
+End;
+Procedure F4BCopy(Var B: TF4B; Const S: TF4B);
+Begin F4BN(B,S.P,S.N); End;
+Procedure F4BFill(Var B: TF4B; V,Cnt: LongInt);
+Begin
+ If Cnt<=0 Then Exit;
+ F4BGrow(B,Cnt); FillChar(B.P^[B.N],Cnt,V); Inc(B.N,Cnt);
+End;
+Procedure F4BWb(Var B: TF4B; V: Int64; Cnt: LongInt);
+Var I: LongInt;
+Begin For I:=Cnt-1 DownTo 0 Do F4B1(B,LongInt((V Shr (I*8)) And 255)); End;
+Procedure F4BWl(Var B: TF4B; V: Int64; Cnt: LongInt);
+Var I: LongInt;
+Begin For I:=0 To Cnt-1 Do F4B1(B,LongInt((V Shr (I*8)) And 255)); End;
+
+{ ---- ecriture EBML ---- }
+Function F4IdSize(Id: Int64): LongInt;
+Var N: LongInt;
+Begin N:=1; While (Id Shr (8*N))<>0 Do Inc(N); F4IdSize:=N; End;
+Procedure F4BId(Var B: TF4B; Id: Int64);
+Begin F4BWb(B,Id,F4IdSize(Id)); End;
+Function F4NumSize(Num: Int64): LongInt;
+Var N: LongInt;
+Begin N:=0; Repeat Inc(N); Num:=Num Shr 7; Until Num=0; F4NumSize:=N; End;
+Function F4LenSize(Len: Int64): LongInt;
+Begin F4LenSize:=F4NumSize(Len+1); End;
+Procedure F4BNum(Var B: TF4B; Num: Int64; Bytes: LongInt);
+Begin Num:=Num Or (Int64(1) Shl (Bytes*7)); F4BWb(B,Num,Bytes); End;
+Procedure F4BLen(Var B: TF4B; Len: Int64; Bytes: LongInt);
+Begin If Bytes=0 Then Bytes:=F4LenSize(Len); F4BNum(B,Len,Bytes); End;
+Function F4UIntSize(V: Int64): LongInt;
+Var N: LongInt;
+Begin N:=1; While (N<8) And ((V Shr (8*N))<>0) Do Inc(N); F4UIntSize:=N; End;
+Procedure F4BUid(Var B: TF4B; Id,V: Int64);
+Begin F4BId(B,Id); F4BLen(B,8,0); F4BWb(B,V,8); End;
+Procedure F4BUInt(Var B: TF4B; Id,V: Int64);
+Var N: LongInt;
+Begin N:=F4UIntSize(V); F4BId(B,Id); F4BLen(B,N,0); F4BWb(B,V,N); End;
+Procedure F4BFloat(Var B: TF4B; Id: Int64; D: Double);
+Var Q: Int64;
+Begin Move(D,Q,8); F4BId(B,Id); F4BLen(B,8,0); F4BWb(B,Q,8); End;
+Procedure F4BBin(Var B: TF4B; Id: Int64; Src: Pointer; Len: LongInt);
+Begin F4BId(B,Id); F4BLen(B,Len,0); F4BN(B,Src,Len); End;
+Procedure F4BStr(Var B: TF4B; Id: Int64; Const S: String);
+Begin F4BId(B,Id); F4BLen(B,Length(S),0); If Length(S)>0 Then F4BN(B,@S[1],Length(S)); End;
+Procedure F4BSInt(Var B: TF4B; Id,V: Int64);
+Var T: Int64; N: LongInt;
+Begin
+ If V<0 Then T:=(V Xor -1)*2 Else T:=V*2;
+ N:=F4UIntSize(T);
+ F4BId(B,Id); F4BLen(B,N,0); F4BWb(B,V,N);
+End;
+Procedure F4BVoid(Var B: TF4B; Size: LongInt);
+Begin
+ F4BId(B,$EC);
+ If Size<10 Then Begin Dec(Size,2); F4BLen(B,Size,0); End
+ Else Begin Dec(Size,9); F4BLen(B,Size,8); End;
+ F4BFill(B,0,Size);
+End;
+{ element maitre dont le contenu est dans C ; longueur minimale ou Bytes octets }
+Procedure F4BMaster(Var B: TF4B; Id: Int64; Const C: TF4B; Bytes: LongInt);
+Begin F4BId(B,Id); F4BLen(B,C.N,Bytes); F4BCopy(B,C); End;
+
+{ CRC-32 IEEE (identique a av_crc(AV_CRC_32_IEEE_LE, UINT32_MAX, ..) ^ UINT32_MAX) }
+Var F4CrcT: Array[0..255] Of LongWord; F4CrcOk: Boolean;
+Function F4Crc(P: PEABuffer; Start,Len: LongInt): LongWord;
+Var I,K: LongInt; C: LongWord;
+Begin
+ If Not F4CrcOk Then Begin
+  For I:=0 To 255 Do Begin
+   C:=I;
+   For K:=1 To 8 Do If (C And 1)<>0 Then C:=(C Shr 1) Xor $EDB88320 Else C:=C Shr 1;
+   F4CrcT[I]:=C;
+  End;
+  F4CrcOk:=True;
+ End;
+ C:=$FFFFFFFF;
+ For I:=Start To Start+Len-1 Do C:=(C Shr 8) Xor F4CrcT[(C Xor P^[I]) And 255];
+ F4Crc:=C Xor $FFFFFFFF;
+End;
+
+{ ---- modele de flux / paquets ---- }
+Procedure F4Reset;
+Var I: LongInt;
+Begin
+ For I:=0 To F4NS-1 Do Begin
+  If F4S[I].Extra<>Nil Then FreeMem(F4S[I].Extra);
+  If F4S[I].Data<>Nil Then FreeMem(F4S[I].Data);
+  If F4S[I].P<>Nil Then FreeMem(F4S[I].P);
+ End;
+ FillChar(F4S,SizeOf(F4S),0); F4NS:=0; F4Err:='';
+End;
+
+Function F4AddStream(Typ: LongInt; Const Codec: String): LongInt;
+Var I: LongInt;
+Begin
+ If F4NS>=F4MaxSt Then Fail('Trop de flux (8 maximum).');
+ I:=F4NS; Inc(F4NS);
+ FillChar(F4S[I],SizeOf(F4S[I]),0);
+ F4S[I].Typ:=Typ; F4S[I].Codec:=Codec;
+ F4S[I].SarN:=0; F4S[I].SarD:=1; F4S[I].TbN:=1; F4S[I].TbD:=1000;
+ F4S[I].CSpace:=2; F4S[I].CTrc:=2; F4S[I].CPri:=2;
+ F4S[I].Lang:='und';
+ F4AddStream:=I;
+End;
+
+Procedure F4SetExtra(S: LongInt; Src: Pointer; Len: LongInt);
+Begin
+ If F4S[S].Extra<>Nil Then Begin FreeMem(F4S[S].Extra); F4S[S].Extra:=Nil; End;
+ F4S[S].ExtraLen:=Len;
+ If Len>0 Then Begin GetMem(F4S[S].Extra,Len+64); Move(Src^,F4S[S].Extra^,Len); End;
+End;
+
+Procedure F4AddPkt(S: LongInt; Src: Pointer; Len: LongInt; Pts,Dts,Dur: Int64; Key: Boolean; SkipS,SkipE: LongInt);
+Var NC: LongInt;
+Begin
+ With F4S[S] Do Begin
+  If P=Nil Then Begin PCap:=1024; GetMem(P,PCap*SizeOf(TF4Pkt)); End
+  Else If NPk>=PCap Then Begin
+   NC:=PCap*2; ReAllocMem(Pointer(P),NC*SizeOf(TF4Pkt)); PCap:=NC;
+  End;
+  If Data=Nil Then Begin DataCap:=65536; GetMem(Data,DataCap); DataLen:=0; End;
+  If DataLen+Len+16>DataCap Then Begin
+   NC:=DataCap*2; If NC<DataLen+Len+16 Then NC:=DataLen+Len+65536;
+   ReAllocMem(Pointer(Data),NC); DataCap:=NC;
+  End;
+  If Len>0 Then Move(Src^,Data^[DataLen],Len);
+  P^[NPk].Pos:=DataLen; P^[NPk].Len:=Len; P^[NPk].Pts:=Pts; P^[NPk].Dts:=Dts; P^[NPk].Dur:=Dur;
+  P^[NPk].Key:=Key; P^[NPk].SkipS:=SkipS; P^[NPk].SkipE:=SkipE;
+  Inc(DataLen,Len); Inc(NPk);
+ End;
+End;
+
+{ ---- Matroska : table des codecs ---- }
+Function F4MkNative(Const C: String; Webm: Boolean; Var Id: String): Boolean;
+Begin
+ F4MkNative:=True; Id:='';
+ If Webm Then Begin
+  If C='vp8' Then Id:='V_VP8' Else If C='vp9' Then Id:='V_VP9' Else If C='av1' Then Id:='V_AV1'
+  Else If C='vorbis' Then Id:='A_VORBIS' Else If C='opus' Then Id:='A_OPUS'
+  Else F4MkNative:=False;
+  Exit;
+ End;
+ If C='mpeg4' Then Id:='V_MPEG4/ISO/ASP'
+ Else If C='msmpeg4v3' Then Id:='V_MPEG4/MS/V3'
+ Else If C='mjpeg' Then Id:='V_MJPEG'
+ Else If C='h264' Then Id:='V_MPEG4/ISO/AVC'
+ Else If C='hevc' Then Id:='V_MPEGH/ISO/HEVC'
+ Else If C='mpeg1video' Then Id:='V_MPEG1'
+ Else If C='mpeg2video' Then Id:='V_MPEG2'
+ Else If C='theora' Then Id:='V_THEORA'
+ Else If C='vp8' Then Id:='V_VP8'
+ Else If C='vp9' Then Id:='V_VP9'
+ Else If C='av1' Then Id:='V_AV1'
+ Else If C='snow' Then Id:='V_SNOW'
+ Else If C='rv10' Then Id:='V_REAL/RV10'
+ Else If C='rv20' Then Id:='V_REAL/RV20'
+ Else If C='rv30' Then Id:='V_REAL/RV30'
+ Else If C='rv40' Then Id:='V_REAL/RV40'
+ Else If C='prores' Then Id:='V_PRORES'
+ Else If C='mp2' Then Id:='A_MPEG/L2'
+ Else If C='mp1' Then Id:='A_MPEG/L1'
+ Else If C='mp3' Then Id:='A_MPEG/L3'
+ Else If C='ac3' Then Id:='A_AC3'
+ Else If C='eac3' Then Id:='A_EAC3'
+ Else If C='aac' Then Id:='A_AAC'
+ Else If C='flac' Then Id:='A_FLAC'
+ Else If C='vorbis' Then Id:='A_VORBIS'
+ Else If C='opus' Then Id:='A_OPUS'
+ Else If C='dts' Then Id:='A_DTS'
+ Else If C='truehd' Then Id:='A_TRUEHD'
+ Else If C='mlp' Then Id:='A_MLP'
+ Else If C='alac' Then Id:='A_ALAC'
+ Else If C='tta' Then Id:='A_TTA1'
+ Else If C='wavpack' Then Id:='A_WAVPACK4'
+ Else If (C='pcm_s16le') Or (C='pcm_s24le') Or (C='pcm_s32le') Or (C='pcm_u8') Then Id:='A_PCM/INT/LIT'
+ Else If (C='pcm_s16be') Or (C='pcm_s24be') Or (C='pcm_s32be') Then Id:='A_PCM/INT/BIG'
+ Else If (C='pcm_f32le') Or (C='pcm_f64le') Then Id:='A_PCM/FLOAT/IEEE'
+ Else If C='rawvideo' Then Id:='V_UNCOMPRESSED'
+ Else F4MkNative:=False;
+End;
+
+{ duree d'une trame audio d'apres av_get_audio_frame_duration2(par, 0) }
+Function F4AudioFrameSamples(Const C: String; Rate: LongInt): LongInt;
+Begin
+ F4AudioFrameSamples:=0;
+ If C='mp1' Then F4AudioFrameSamples:=384
+ Else If C='mp2' Then F4AudioFrameSamples:=1152
+ Else If C='ac3' Then F4AudioFrameSamples:=1536
+ Else If C='mp3' Then Begin If (Rate>0) And (Rate<=24000) Then F4AudioFrameSamples:=576 Else If Rate>0 Then F4AudioFrameSamples:=1152; End;
+End;
+
+{ ---- muxeur Matroska ---- }
+Type
+ TF4Trk=Record
+  Num,NumSize: LongInt; Uid: Int64; Native,WriteDts,HasCue: Boolean; CodecId: String[40];
+  TsOffset: Int64; DefLo,DefHi: Int64; LastTs,Dur: Int64; Cur: LongInt; FrameSamples: LongInt;
+ End;
+Var
+ F4T: Array[0..F4MaxSt-1] Of TF4Trk;
+ F4Out,F4Cl: TF4B; F4ClOpen: Boolean; F4ClPos,F4ClPts,F4SegOff,F4Dur: Int64;
+ F4Crcw,F4Webm,F4HaveVideo,F4MBitExact: Boolean;
+ F4CueN,F4CueCap: LongInt;
+ F4CueA: PEABuffer;
+ F4AudPkt: LongInt; F4AudStream: LongInt; F4AudValid: Boolean;
+
+Procedure F4MkTrackEntry(Var Tr: TF4B; S: LongInt);
+Var
+ C,V,A,Cc,Co,Pr: TF4B; St: ^TF4St; T: ^TF4Trk; Id,VfwId: String; FRn,FRd: Int64; Native: Boolean;
+ DWidth,Ar,Ap: Int64; I,Hc: LongInt; BDepth: LongInt; CodecPrivMax: LongInt; Pri: Int64;
+ PadN: LongInt;
+Begin
+ St:=@F4S[S]; T:=@F4T[S];
+ F4BInit(C);
+ F4BUInt(C,$D7,T^.Num);
+ F4BUid(C,$73C5,T^.Uid);
+ F4BUInt(C,$9C,0);
+ If St^.Title<>'' Then F4BStr(C,$536E,St^.Title);
+ If St^.Lang<>'' Then F4BStr(C,$22B59C,St^.Lang) Else F4BStr(C,$22B59C,'und');
+ If Not St^.Dflt Then F4BUInt(C,$88,0);
+ Native:=T^.Native;
+ If Native Then F4BStr(C,$86,T^.CodecId);
+ If St^.Typ=0 Then Begin
+  F4BUInt(C,$83,1);
+  FRn:=0; FRd:=1;
+  If (St^.AvgN>0) And (St^.AvgD>0) Then Begin FRn:=St^.AvgN; FRd:=St^.AvgD; End
+  Else If (St^.RN>0) And (St^.RD>0) Then Begin FRn:=St^.RN; FRd:=St^.RD; End;
+  If FRn>0 Then Begin
+   F4BUInt(C,$23E383,Int64(1000000000)*FRd Div FRn);
+   T^.DefLo:=Int64(1000)*FRd Div FRn;
+   T^.DefHi:=T^.DefLo; If (Int64(1000)*FRd Mod FRn)<>0 Then Inc(T^.DefHi);
+  End;
+  If Not Native Then Begin
+   F4BStr(C,$86,'V_MS/VFW/FOURCC'); T^.WriteDts:=True;
+  End;
+  { Video }
+  F4BInit(V);
+  F4BUInt(V,$B0,St^.W); F4BUInt(V,$BA,St^.H);
+  If St^.FieldOrder=1 Then F4BUInt(V,$9A,2)
+  Else If St^.FieldOrder>=2 Then Begin
+   F4BUInt(V,$9A,1);
+   If Not F4Webm Then Case St^.FieldOrder Of 2: F4BUInt(V,$9D,1); 3: F4BUInt(V,$9D,6); 4: F4BUInt(V,$9D,9); 5: F4BUInt(V,$9D,14); End;
+  End;
+  If St^.PixFmt='yuva420p' Then F4BUInt(V,$53C0,1);
+  If St^.SarN>0 Then Begin
+   DWidth:=F4MulDivR(St^.W,St^.SarN,St^.SarD,4);
+   If DWidth<>St^.W Then Begin
+    If F4Webm Then Begin F4BUInt(V,$54B0,DWidth); F4BUInt(V,$54BA,St^.H); End
+    Else Begin
+     F4Reduce(Ar,Ap,Int64(St^.W)*St^.SarN,Int64(St^.H)*St^.SarD,1024*1024);
+     F4BUInt(V,$54B0,Ar); F4BUInt(V,$54BA,Ap); F4BUInt(V,$54B2,3);
+    End;
+   End;
+  End Else If Not F4Webm Then F4BUInt(V,$54B2,4);
+  If St^.Codec='rawvideo' Then Begin
+   F4BId(V,$2EB524); F4BLen(V,4,0); F4BWl(V,St^.Tag,4);
+  End;
+  { Colour }
+  F4BInit(Co);
+  If (St^.CTrc<>2) And (St^.CTrc<19) Then F4BUInt(Co,$55BA,St^.CTrc);
+  If (St^.CSpace<>2) And (St^.CSpace<15) Then F4BUInt(Co,$55B1,St^.CSpace);
+  If (St^.CPri<>2) And (St^.CPri<23) Then F4BUInt(Co,$55BB,St^.CPri);
+  If (St^.CRange<>0) And (St^.CRange<3) Then F4BUInt(Co,$55B9,St^.CRange);
+  If (St^.ChromaLoc<>0) And (St^.ChromaLoc<=4) Then Begin
+   Case St^.ChromaLoc Of
+    1: Begin F4BUInt(Co,$55B7,1); F4BUInt(Co,$55B8,2); End;
+    2: Begin F4BUInt(Co,$55B7,2); F4BUInt(Co,$55B8,2); End;
+    3: Begin F4BUInt(Co,$55B7,1); F4BUInt(Co,$55B8,1); End;
+    4: Begin F4BUInt(Co,$55B7,2); F4BUInt(Co,$55B8,1); End;
+   End;
+  End;
+  If Co.N>0 Then F4BMaster(V,$55B0,Co,0);
+  F4BFree(Co);
+  F4BMaster(C,$E0,V,0);
+  F4BFree(V);
+ End Else Begin
+  If St^.InitPad<>0 Then
+   F4BUInt(C,$56AA,F4MulDivR(St^.InitPad,1000000000,St^.Rate,4));
+  F4BUInt(C,$83,2);
+  If T^.FrameSamples>0 Then Begin
+   F4BUInt(C,$23E383,Int64(1000000000)*T^.FrameSamples Div St^.Rate);
+   T^.DefLo:=Int64(1000)*T^.FrameSamples Div St^.Rate;
+   T^.DefHi:=T^.DefLo; If (Int64(1000)*T^.FrameSamples Mod St^.Rate)<>0 Then Inc(T^.DefHi);
+  End;
+  If Not Native Then F4BStr(C,$86,'A_MS/ACM');
+  F4BInit(A);
+  F4BUInt(A,$9F,St^.Chans);
+  F4BFloat(A,$B5,St^.Rate);
+  If St^.Bits>0 Then F4BUInt(A,$6264,St^.Bits);
+  F4BId(C,$E1); F4BLen(C,A.N,F4LenSize(42)); F4BCopy(C,A);
+  F4BFree(A);
+ End;
+ If Not F4Webm Then Begin
+  F4BUInt(C,$55EE,0);
+  If St^.Typ=0 Then F4BVoid(C,11);
+ End;
+ { CodecPrivate }
+ F4BInit(Pr);
+ If Native Then Begin
+  If St^.Codec='flac' Then Begin
+   If St^.ExtraLen>=34 Then Begin
+    F4B1(Pr,$66); F4B1(Pr,$4C); F4B1(Pr,$61); F4B1(Pr,$43); F4B1(Pr,$80); F4BWb(Pr,34,3); F4BN(Pr,St^.Extra,34);
+   End;
+  End Else If St^.ExtraLen>0 Then F4BN(Pr,St^.Extra,St^.ExtraLen);
+ End Else If St^.Typ=0 Then Begin
+  { en-tete BITMAPINFOHEADER (ff_put_bmp_header) }
+  Hc:=St^.Bits; If Hc=0 Then Hc:=24;
+  F4BWl(Pr,40+St^.ExtraLen,4); F4BWl(Pr,St^.W,4); F4BWl(Pr,St^.H,4); F4BWl(Pr,1,2); F4BWl(Pr,Hc,2);
+  F4BWl(Pr,St^.Tag,4); F4BWl(Pr,(Int64(St^.W)*St^.H*Hc+7) Div 8,4); F4BWl(Pr,0,4); F4BWl(Pr,0,4); F4BWl(Pr,0,4); F4BWl(Pr,0,4);
+  If St^.ExtraLen>0 Then Begin
+   F4BN(Pr,St^.Extra,St^.ExtraLen);
+   If Odd(St^.ExtraLen) Then F4B1(Pr,0);
+  End;
+ End;
+ If Pr.N>0 Then Begin
+  F4BId(C,$63A2); F4BLen(C,Pr.N,0); F4BCopy(C,Pr);
+ End;
+ F4BFree(Pr);
+ F4BMaster(Tr,$AE,C,8);
+ F4BFree(C);
+End;
+
+Procedure F4MkWrap(Var Dst: TF4B; Id: Int64; Const Inner: TF4B; Crc: Boolean);
+Var C: LongWord; B4: TF4B;
+Begin
+ F4BId(Dst,Id); F4BLen(Dst,Inner.N,0);
+ If Crc Then Begin
+  C:=F4Crc(Inner.P,6,Inner.N-6);
+  F4BId(Dst,$BF); F4BLen(Dst,4,0); F4BWl(Dst,C,4);
+  F4BN(Dst,@Inner.P^[6],Inner.N-6);
+ End Else F4BCopy(Dst,Inner);
+End;
+
+Var F4SegUid: Array[0..15] Of Byte;
+
+Procedure F4MkBuildInfo(Var Dst: TF4B; Dur: Int64);
+Var I: TF4B; D: Double;
+Begin
+ F4BInit(I);
+ If F4Crcw Then F4BVoid(I,6);
+ F4BUInt(I,$2AD7B1,1000000);
+ If F4MBitExact Then Begin
+  F4BStr(I,$4D80,'Lavf'); F4BStr(I,$5741,'Lavf');
+ End Else Begin
+  F4BStr(I,$4D80,'Lavf60.16.100'); F4BStr(I,$5741,'Lavf60.16.100');
+  If Not F4Webm Then F4BBin(I,$73A4,@F4SegUid[0],16);
+ End;
+ D:=Dur; F4BFloat(I,$4489,D);
+ F4MkWrap(Dst,$1549A966,I,F4Crcw);
+ F4BFree(I);
+End;
+
+Procedure F4MkDurStr(Dur: Int64; Var S: String);
+Var H,M,Sec,Ms: Int64; T: String;
+Begin
+ H:=Dur Div 3600000; M:=(Dur Div 60000) Mod 60; Ms:=Dur Mod 60000;
+ Sec:=Ms Div 1000; Ms:=Ms Mod 1000;
+ S:='';
+ Str(H:2,T); If T[1]=' ' Then T[1]:='0'; S:=S+T+':';
+ Str(M:2,T); If T[1]=' ' Then T[1]:='0'; S:=S+T+':';
+ Str(Sec:2,T); If T[1]=' ' Then T[1]:='0'; S:=S+T+'.';
+ Str(Ms:3,T); While Pos(' ',T)>0 Do T[Pos(' ',T)]:='0';
+ S:=S+T+'000000';
+End;
+
+Procedure F4MkSimpleTag(Var Dst: TF4B; Const Key,Val: String);
+Var C: TF4B;
+Begin
+ F4BInit(C);
+ F4BStr(C,$45A3,Key); F4BStr(C,$4487,Val);
+ F4BMaster(Dst,$67C8,C,0);
+ F4BFree(C);
+End;
+
+Procedure F4MkBuildTags(Var Dst: TF4B);
+Var I: TF4B; S: LongInt; Tg,Tc,Sc: TF4B; Ds: String;
+Begin
+ F4BInit(I);
+ If F4Crcw Then F4BVoid(I,6);
+ If Not F4MBitExact Then Begin
+  F4BInit(Tg);
+  F4BInit(Tc); F4BId(Tc,$63C0); F4BLen(Tc,0,F4LenSize(13)); F4BCopy(Tg,Tc); F4BFree(Tc);
+  F4MkSimpleTag(Tg,'ENCODER','Lavf60.16.100');
+  F4BMaster(I,$7373,Tg,0);
+  F4BFree(Tg);
+ End;
+ For S:=0 To F4NS-1 Do Begin
+  F4BInit(Tg);
+  F4BInit(Tc); F4BUid(Tc,$63C5,F4T[S].Uid);
+  F4BId(Tg,$63C0); F4BLen(Tg,Tc.N,F4LenSize(13)); F4BCopy(Tg,Tc); F4BFree(Tc);
+  If F4S[S].EncTag<>'' Then F4MkSimpleTag(Tg,'ENCODER',F4S[S].EncTag);
+  { DURATION : 19 octets (chaine + NUL) }
+  F4MkDurStr(F4T[S].Dur,Ds);
+  F4BInit(Sc); F4BStr(Sc,$45A3,'DURATION');
+  F4BId(Sc,$4487); F4BLen(Sc,19,0); F4BN(Sc,@Ds[1],Length(Ds)); F4B1(Sc,0);
+  F4BId(Tg,$67C8); F4BLen(Tg,Sc.N,F4LenSize(34)); F4BCopy(Tg,Sc); F4BFree(Sc);
+  F4BMaster(I,$7373,Tg,0);
+  F4BFree(Tg);
+ End;
+ F4MkWrap(Dst,$1254C367,I,F4Crcw);
+ F4BFree(I);
+End;
+
+Procedure F4MkBuildTracks(Var Dst: TF4B);
+Var I: TF4B; S: LongInt;
+Begin
+ F4BInit(I);
+ If F4Crcw Then F4BVoid(I,6);
+ For S:=0 To F4NS-1 Do F4MkTrackEntry(I,S);
+ F4MkWrap(Dst,$1654AE6B,I,F4Crcw);
+ F4BFree(I);
+End;
+
+Procedure F4MkEndCluster;
+Var C: LongWord;
+Begin
+ If Not F4ClOpen Then Exit;
+ F4BId(F4Out,$1F43B675); F4BLen(F4Out,F4Cl.N,0);
+ If F4Crcw Then Begin
+  C:=F4Crc(F4Cl.P,6,F4Cl.N-6);
+  F4BId(F4Out,$BF); F4BLen(F4Out,4,0); F4BWl(F4Out,C,4);
+  F4BN(F4Out,@F4Cl.P^[6],F4Cl.N-6);
+ End Else F4BCopy(F4Out,F4Cl);
+ F4Cl.N:=0; F4ClOpen:=False;
+ If Not F4HaveVideo Then Begin
+  { has_cue remis a zero pour chaque piste }
+  C:=0;
+ End;
+End;
+
+Procedure F4MkAddCue(Pts: Int64; Stream: LongInt; ClPos,Rel: Int64);
+Var Idx,K: LongInt; P: ^Int64;
+Begin
+ If Pts<0 Then Exit;
+ If F4CueN>=F4CueCap Then Begin
+  If F4CueCap=0 Then F4CueCap:=256 Else F4CueCap:=F4CueCap*2;
+  ReAllocMem(Pointer(F4CueA),F4CueCap*32);
+ End;
+ Idx:=F4CueN;
+ { tableau de 4 Int64 par entree : pts, flux, position de cluster, position relative }
+ While (Idx>0) And (PInt64(PtrUInt(F4CueA)+(Idx-1)*32)^>Pts) Do Dec(Idx);
+ If Idx<F4CueN Then Move(Pointer(PtrUInt(F4CueA)+Idx*32)^,Pointer(PtrUInt(F4CueA)+(Idx+1)*32)^,(F4CueN-Idx)*32);
+ PInt64(PtrUInt(F4CueA)+Idx*32)^:=Pts;
+ PInt64(PtrUInt(F4CueA)+Idx*32+8)^:=Stream;
+ PInt64(PtrUInt(F4CueA)+Idx*32+16)^:=ClPos-F4SegOff;
+ PInt64(PtrUInt(F4CueA)+Idx*32+24)^:=Rel;
+ Inc(F4CueN);
+End;
+
+Procedure F4MkInternal(S,K: LongInt);
+Var
+ P: ^TF4Pkt; Ts,Dur,CT,Dp: Int64; Keyf,Simple,Gdur: Boolean; RelPos,I: LongInt; Blk,Bg: TF4B; Rel: LongInt;
+Begin
+ P:=@F4S[S].P^[K];
+ Keyf:=P^.Key; Dur:=P^.Dur; If Dur<0 Then Dur:=0;
+ If F4T[S].WriteDts Then Ts:=P^.Dts Else Ts:=P^.Pts;
+ If Ts=F4NoPts Then Fail('Can''t write packet with unknown timestamp');
+ Ts:=Ts+F4T[S].TsOffset;
+ If F4ClOpen Then Begin
+  CT:=Ts-F4ClPts;
+  If SmallInt(CT)<>CT Then F4MkEndCluster;
+ End;
+ If Not F4ClOpen Then Begin
+  F4Cl.N:=0;
+  If F4Crcw Then F4BVoid(F4Cl,6);
+  F4ClPos:=F4Out.N;
+  If Ts>0 Then F4ClPts:=Ts Else F4ClPts:=0;
+  F4BUInt(F4Cl,$E7,F4ClPts);
+  F4ClOpen:=True;
+ End;
+ RelPos:=F4Cl.N;
+ Rel:=SmallInt(Ts-F4ClPts);
+ Gdur:=(Dur>0) And (F4T[S].DefHi>0) And (Dur<>F4T[S].DefHi) And (Dur<>F4T[S].DefLo);
+ Dp:=0;
+ If P^.SkipE<>0 Then Dp:=F4MulDivR(P^.SkipE,1000000000,F4S[S].Rate,4);
+ Simple:=(Not Gdur) And (Dp=0);
+ F4BInit(Blk);
+ F4BNum(Blk,F4T[S].Num,F4T[S].NumSize);
+ F4BWb(Blk,Rel And $FFFF,2);
+ If Simple And Keyf Then F4B1(Blk,$80) Else F4B1(Blk,0);
+ F4BN(Blk,@F4S[S].Data^[P^.Pos],P^.Len);
+ If Simple Then Begin
+  F4BId(F4Cl,$A3); F4BLen(F4Cl,Blk.N,0); F4BCopy(F4Cl,Blk);
+ End Else Begin
+  F4BInit(Bg);
+  F4BId(Bg,$A1); F4BLen(Bg,Blk.N,0); F4BCopy(Bg,Blk);
+  If Gdur Then F4BUInt(Bg,$9B,Dur);
+  If Dp<>0 Then F4BSInt(Bg,$75A2,Dp);
+  If Not Keyf Then F4BSInt(Bg,$FB,F4T[S].LastTs-Ts);
+  F4BMaster(F4Cl,$A0,Bg,0);
+  F4BFree(Bg);
+ End;
+ F4BFree(Blk);
+ If Keyf And ((F4S[S].Typ=0) Or ((Not F4HaveVideo) And (Not F4T[S].HasCue))) Then Begin
+  F4MkAddCue(Ts,S,F4ClPos,RelPos);
+  F4T[S].HasCue:=True;
+ End;
+ F4T[S].LastTs:=Ts;
+ If Ts+Dur>F4Dur Then F4Dur:=Ts+Dur;
+ If Ts+Dur>F4T[S].Dur Then F4T[S].Dur:=Ts+Dur;
+End;
+
+Procedure F4MkEndClusterX;
+Var I: LongInt;
+Begin
+ If Not F4HaveVideo Then For I:=0 To F4NS-1 Do F4T[I].HasCue:=False;
+ F4MkEndCluster;
+End;
+
+Procedure F4MkPacket(S,K: LongInt);
+Var P: ^TF4Pkt; CT: Int64; Start: Boolean; Sz: LongInt;
+Begin
+ P:=@F4S[S].P^[K];
+ If F4ClOpen Then Begin
+  If F4T[S].WriteDts Then CT:=P^.Dts-F4ClPts Else CT:=P^.Pts-F4ClPts;
+  CT:=CT+F4T[S].TsOffset;
+  Sz:=F4Cl.N;
+  Start:=(Sz>5*1024*1024) Or (CT>5000) Or ((F4S[S].Typ=0) And P^.Key And (Sz>4*1024));
+  If Start Then F4MkEndClusterX;
+ End;
+ If F4AudValid Then Begin
+  F4MkInternal(F4AudStream,F4AudPkt); F4AudValid:=False;
+ End;
+ If F4S[S].Typ=1 Then Begin
+  If P^.Len>0 Then Begin F4AudStream:=S; F4AudPkt:=K; F4AudValid:=True; End;
+ End Else F4MkInternal(S,K);
+End;
+
+{ duree de trame audio pour guess_pkt_duration (av_get_audio_frame_duration2) }
+Function F4AudioPktSamples(Const C: String; Rate,Chans,Len: LongInt): LongInt;
+Var Bps: LongInt;
+Begin
+ F4AudioPktSamples:=0;
+ Bps:=0;
+ If (C='pcm_s16le') Or (C='pcm_s16be') Then Bps:=16
+ Else If (C='pcm_s24le') Or (C='pcm_s24be') Then Bps:=24
+ Else If (C='pcm_s32le') Or (C='pcm_s32be') Or (C='pcm_f32le') Then Bps:=32
+ Else If C='pcm_f64le' Then Bps:=64
+ Else If C='pcm_u8' Then Bps:=8;
+ If (Bps>0) And (Chans>0) And (Len>0) Then F4AudioPktSamples:=(Int64(Len)*8) Div (Bps*Chans)
+ Else If C='aac' Then F4AudioPktSamples:=1024
+ Else F4AudioPktSamples:=F4AudioFrameSamples(C,Rate);
+End;
+
+{ ecrit le fichier Matroska/WebM ; flux et paquets dans F4S ; Target : fichier a creer }
+Procedure F4MuxMkv(Const Target: String; Webm: Boolean);
+Var
+ S,K,I,J,Best,Done,Total: LongInt; Id: String; Nat: Boolean; P: ^TF4Pkt; Hdr,Tr,Info,Tags,Sk,Cu,Cp,Tp,Ent,Seek: TF4B;
+ InfoPos,TracksPos,TagsPos,CuesPos,EndPos: Int64; Shift,Mn,V: Int64; Cn,Cs: LongInt; Fo: File; Wr: LongInt; Code: LongInt;
+ BestDts: Int64; Pt: PEABuffer; Cl2: Int64; Num: Int64; G: Int64; Tm: Int64;
+ Got: Boolean; Lead: Int64; UseDts: Boolean; Entries: Array[0..7] Of Int64; EntId: Array[0..7] Of Int64; NE: LongInt;
+ PtsTmp: Int64; PkTr: LongInt;
+Begin
+ F4Webm:=Webm; F4Crcw:=Not Webm; F4MBitExact:=VGBitExact;
+ If F4NS<1 Then Fail('Aucun flux a ecrire.');
+ F4HaveVideo:=False;
+ For S:=0 To F4NS-1 Do Begin
+  FillChar(F4T[S],SizeOf(F4T[S]),0);
+  Nat:=F4MkNative(F4S[S].Codec,Webm,Id);
+  If Webm And Not Nat Then Fail('Only VP8 or VP9 or AV1 video and Vorbis or Opus audio and WebVTT subtitles are supported for WebM.');
+  If (Not Webm) And (F4S[S].Typ=0) Then Begin
+   If F4S[S].Codec='ffv1' Then Nat:=False
+   Else If (F4S[S].Codec='rawvideo') And (F4S[S].Tag=0) Then Fail('Raw RGB is not supported Natively in Matroska, you can use AVI or NUT or'#10'If you would like to store it anyway using VFW mode, enable allow_raw_vfw (-allow_raw_vfw 1)');
+  End;
+  If (Not Nat) And (F4S[S].Typ=1) Then Fail('No wav codec tag found for codec '+F4S[S].Codec);
+  If (Not Nat) And (F4S[S].Typ=0) And (F4S[S].Tag=0) Then Fail('No bmp codec tag found for codec '+F4S[S].Codec);
+  F4T[S].Native:=Nat; F4T[S].CodecId:=Id;
+  F4T[S].Num:=S+1; F4T[S].NumSize:=F4NumSize(S+1);
+  If F4MBitExact Then F4T[S].Uid:=S+1
+  Else Begin F4T[S].Uid:=(Int64(Random($7FFFFFFF)) Shl 32) Or Int64(Random($7FFFFFFF)) Or 1; End;
+  If F4S[S].Typ=0 Then F4HaveVideo:=True;
+  If F4S[S].Typ=1 Then Begin
+   F4T[S].FrameSamples:=F4AudioFrameSamples(F4S[S].Codec,F4S[S].Rate);
+   If F4S[S].InitPad<>0 Then F4T[S].TsOffset:=F4MulDivR(F4S[S].InitPad,1000,F4S[S].Rate,4);
+  End;
+  { VFW : horodatage dts }
+  If (F4S[S].Typ=0) And (Not Nat) Then F4T[S].WriteDts:=True;
+ End;
+ For I:=0 To 15 Do F4SegUid[I]:=Random(256);
+ { conversion des horodatages en ms (av_packet_rescale_ts), duree par defaut (guess_pkt_duration) }
+ For S:=0 To F4NS-1 Do Begin
+  For K:=0 To F4S[S].NPk-1 Do Begin
+   P:=@F4S[S].P^[K];
+   If (P^.Pts=F4NoPts) And (P^.Dts<>F4NoPts) Then P^.Pts:=P^.Dts;
+   If (P^.Dts=F4NoPts) And (P^.Pts<>F4NoPts) Then P^.Dts:=P^.Pts;
+   P^.Pts:=F4RescQ(P^.Pts,F4S[S].TbN,F4S[S].TbD,1,1000,4);
+   P^.Dts:=F4RescQ(P^.Dts,F4S[S].TbN,F4S[S].TbD,1,1000,4);
+   P^.Dur:=F4MulDivR(P^.Dur,F4S[S].TbN*1000,F4S[S].TbD,4);
+   If P^.Dur=0 Then Begin
+    If F4S[S].Typ=0 Then Begin
+     If (F4S[S].AvgN>0) And (F4S[S].AvgD>0) Then P^.Dur:=F4MulDivR(1,F4S[S].AvgD*1000,F4S[S].AvgN,4);
+    End Else Begin
+     J:=F4AudioPktSamples(F4S[S].Codec,F4S[S].Rate,F4S[S].Chans,P^.Len);
+     If (J>0) And (F4S[S].Rate>0) Then P^.Dur:=F4MulDivR(J,1000,F4S[S].Rate,4);
+    End;
+   End;
+  End;
+ End;
+ { tete : EBML + Segment + SeekHead reserve }
+ F4BInit(F4Out); F4BInit(F4Cl);
+ F4BInit(Hdr);
+ F4BUInt(Hdr,$4286,1); F4BUInt(Hdr,$42F7,1); F4BUInt(Hdr,$42F2,4); F4BUInt(Hdr,$42F3,8);
+ If Webm Then Id:='webm' Else Id:='matroska';
+ F4BStr(Hdr,$4282,Id);
+ If Not Webm Then F4BUInt(Hdr,$4287,4) Else F4BUInt(Hdr,$4287,2);
+ F4BUInt(Hdr,$4285,2);
+ F4BMaster(F4Out,$1A45DFA3,Hdr,0);
+ F4BFree(Hdr);
+ F4BId(F4Out,$18538067); F4B1(F4Out,$01); F4BFill(F4Out,255,7);
+ F4SegOff:=F4Out.N;
+ F4BVoid(F4Out,7*21+14);
+ F4Dur:=0;
+ For S:=0 To F4NS-1 Do F4T[S].Dur:=0;
+ InfoPos:=F4Out.N; F4BInit(Info); F4MkBuildInfo(Info,0); F4BCopy(F4Out,Info);
+ TracksPos:=F4Out.N; F4BInit(Tr); F4MkBuildTracks(Tr); F4BCopy(F4Out,Tr);
+ TagsPos:=F4Out.N; F4BInit(Tags); F4MkBuildTags(Tags); F4BCopy(F4Out,Tags);
+ NE:=3; EntId[0]:=$1549A966; Entries[0]:=InfoPos-F4SegOff;
+ EntId[1]:=$1654AE6B; Entries[1]:=TracksPos-F4SegOff;
+ EntId[2]:=$1254C367; Entries[2]:=TagsPos-F4SegOff;
+ F4ClOpen:=False; F4AudValid:=False; F4CueN:=0; F4CueCap:=0; F4CueA:=Nil;
+ { ordre d'ecriture : entrelacement par dts (ordre croissant, a egalite le plus petit indice de flux) }
+ Total:=0;
+ For S:=0 To F4NS-1 Do Begin F4T[S].Cur:=0; Inc(Total,F4S[S].NPk); End;
+ { avoid_negative_ts : decalage calcule sur le premier paquet de chaque flux }
+ Shift:=0; Got:=False; Mn:=0; UseDts:=False;
+ For S:=0 To F4NS-1 Do If F4T[S].WriteDts Then UseDts:=True;
+ For S:=0 To F4NS-1 Do If F4S[S].NPk>0 Then Begin
+  P:=@F4S[S].P^[0];
+  If UseDts Then V:=P^.Dts Else V:=P^.Pts;
+  If V<>F4NoPts Then Begin
+   V:=V+F4T[S].TsOffset;
+   If (Not Got) Or (V<Mn) Then Begin Mn:=V; Got:=True; End;
+  End;
+ End;
+ { NB : avoid_negative_ts_use_pts vaut 0 des qu'une piste VFW existe ; la premiere cle suit le premier paquet ecrit }
+ If Got And (Mn<0) Then Shift:=-Mn;
+ If Shift<>0 Then
+  For S:=0 To F4NS-1 Do For K:=0 To F4S[S].NPk-1 Do Begin
+   P:=@F4S[S].P^[K];
+   If P^.Dts<>F4NoPts Then P^.Dts:=P^.Dts+Shift;
+   If P^.Pts<>F4NoPts Then P^.Pts:=P^.Pts+Shift;
+  End;
+ For Done:=1 To Total Do Begin
+  Best:=-1; BestDts:=0;
+  For S:=0 To F4NS-1 Do If F4T[S].Cur<F4S[S].NPk Then Begin
+   If (Best<0) Or (F4S[S].P^[F4T[S].Cur].Dts<BestDts) Then Begin Best:=S; BestDts:=F4S[S].P^[F4T[S].Cur].Dts; End;
+  End;
+  K:=F4T[Best].Cur; Inc(F4T[Best].Cur);
+  F4MkPacket(Best,K);
+ End;
+ { fin : paquet audio en attente, dernier cluster }
+ If F4AudValid Then Begin F4MkInternal(F4AudStream,F4AudPkt); F4AudValid:=False; End;
+ If F4ClOpen Then F4MkEndCluster;
+ EndPos:=F4Out.N;
+ { Cues }
+ If F4CueN>0 Then Begin
+  F4BInit(Cu);
+  If F4Crcw Then F4BVoid(Cu,6);
+  I:=0;
+  While I<F4CueN Do Begin
+   Tm:=PInt64(PtrUInt(F4CueA)+I*32)^;
+   F4BInit(Cp);
+   F4BUInt(Cp,$B3,Tm);
+   For S:=0 To F4NS-1 Do F4T[S].HasCue:=False;
+   Repeat
+    Cs:=LongInt(PInt64(PtrUInt(F4CueA)+I*32+8)^);
+    If Not F4T[Cs].HasCue Then Begin
+     F4T[Cs].HasCue:=True;
+     F4BInit(Tp);
+     F4BUInt(Tp,$F7,F4T[Cs].Num);
+     F4BUInt(Tp,$F1,PInt64(PtrUInt(F4CueA)+I*32+16)^);
+     F4BUInt(Tp,$F0,PInt64(PtrUInt(F4CueA)+I*32+24)^);
+     F4BId(Cp,$B7); F4BLen(Cp,Tp.N,F4LenSize(40)); F4BCopy(Cp,Tp);
+     F4BFree(Tp);
+    End;
+    Inc(I);
+   Until (I>=F4CueN) Or (PInt64(PtrUInt(F4CueA)+I*32)^<>Tm);
+   F4BMaster(Cu,$BB,Cp,0);
+   F4BFree(Cp);
+  End;
+  CuesPos:=F4Out.N;
+  F4BInit(Ent);
+  F4MkWrap(Ent,$1C53BB6B,Cu,F4Crcw);
+  F4BCopy(F4Out,Ent);
+  F4BFree(Ent); F4BFree(Cu);
+  EntId[NE]:=$1C53BB6B; Entries[NE]:=CuesPos-F4SegOff; Inc(NE);
+  EndPos:=F4Out.N;
+ End;
+ FreeMem(F4CueA); F4CueA:=Nil;
+ { taille du segment }
+ V:=EndPos-F4SegOff;
+ For I:=0 To 7 Do F4Out.P^[F4SegOff-8+I]:=(((Int64(1) Shl 56) Or V) Shr ((7-I)*8)) And 255;
+ { SeekHead }
+ F4BInit(Sk);
+ If F4Crcw Then F4BVoid(Sk,6);
+ For I:=0 To NE-1 Do Begin
+  F4BInit(Ent);
+  F4BId(Ent,$53AB); F4BLen(Ent,F4IdSize(EntId[I]),0); F4BId(Ent,EntId[I]);
+  F4BUInt(Ent,$53AC,Entries[I]);
+  F4BId(Sk,$4DBB); F4BLen(Sk,Ent.N,F4LenSize(21)); F4BCopy(Sk,Ent);
+  F4BFree(Ent);
+ End;
+ F4BInit(Seek);
+ F4MkWrap(Seek,$114D9B74,Sk,F4Crcw);
+ If Seek.N+2>7*21+14 Then Fail('SeekHead: espace reserve insuffisant.');
+ F4BVoid(Seek,7*21+14-Seek.N);
+ Move(Seek.P^,F4Out.P^[F4SegOff],Seek.N);
+ F4BFree(Seek); F4BFree(Sk);
+ { Info, Tracks et Tags definitifs }
+ F4BFree(Info); F4BInit(Info); F4MkBuildInfo(Info,F4Dur);
+ Move(Info.P^,F4Out.P^[InfoPos],Info.N);
+ F4BFree(Tags); F4BInit(Tags); F4MkBuildTags(Tags);
+ Move(Tags.P^,F4Out.P^[TagsPos],Tags.N);
+ F4BFree(Info); F4BFree(Tags); F4BFree(Tr);
+ { ecriture du fichier }
+ OpenWrite(Target);
+ K:=0;
+ While K<F4Out.N Do Begin
+  If F4Out.N-K>32768 Then J:=32768 Else J:=F4Out.N-K;
+  WriteBytes(F4Out.P^[K],J); Inc(K,J);
+ End;
+ CloseWrite;
+ F4BFree(F4Out); F4BFree(F4Cl);
+End;
+
+{ ---- lecture d'un fichier entier en memoire ---- }
+Function F4RL16(P: PEABuffer; At: LongInt): LongInt;
+Begin F4RL16:=P^[At]+P^[At+1]*256; End;
+Function F4RL32(P: PEABuffer; At: LongInt): Int64;
+Begin F4RL32:=Int64(P^[At])+Int64(P^[At+1])*256+Int64(P^[At+2])*65536+Int64(P^[At+3])*16777216; End;
+Function F4RB32(P: PEABuffer; At: LongInt): Int64;
+Begin F4RB32:=Int64(P^[At+3])+Int64(P^[At+2])*256+Int64(P^[At+1])*65536+Int64(P^[At])*16777216; End;
+Function F4Tag4(P: PEABuffer; At: LongInt): String;
+Begin F4Tag4:=Chr(P^[At])+Chr(P^[At+1])+Chr(P^[At+2])+Chr(P^[At+3]); End;
+
+{ WAV -> flux PCM (wav demuxer de ffmpeg : paquets de 4096 octets alignes sur block_align) }
+Function F4WavStream(Const Source: String): LongInt;
+Var
+ F: PEABuffer; Size,At,Sz,FmtAt,DataAt,DataSz,Tag,Ch,Rate,Bits,BA,S,Left,Chunk,Pos: LongInt; Cid: String; Tg: String; T: Int64;
+ Fmt3: Boolean; N: LongInt;
+Begin
+ NVLoad(Source,F,Size);
+ If (F4Tag4(F,0)<>'RIFF') Or (F4Tag4(F,8)<>'WAVE') Then Fail('wav: en-tete RIFF/WAVE requis.');
+ At:=12; FmtAt:=-1; DataAt:=-1; DataSz:=0;
+ While At+8<=Size Do Begin
+  Tg:=F4Tag4(F,At); Sz:=F4RL32(F,At+4);
+  If Tg='fmt ' Then FmtAt:=At+8
+  Else If Tg='data' Then Begin DataAt:=At+8; DataSz:=Sz; If DataAt+DataSz>Size Then DataSz:=Size-DataAt; Break; End;
+  At:=At+8+Sz+(Sz And 1);
+ End;
+ If (FmtAt<0) Or (DataAt<0) Then Fail('wav: chunks fmt/data requis.');
+ Tag:=F4RL16(F,FmtAt); Ch:=F4RL16(F,FmtAt+2); Rate:=F4RL32(F,FmtAt+4); BA:=F4RL16(F,FmtAt+12); Bits:=F4RL16(F,FmtAt+14);
+ If Tag=$FFFE Then Tag:=F4RL16(F,FmtAt+24);
+ Cid:='';
+ If Tag=1 Then Begin
+  Case Bits Of 8: Cid:='pcm_u8'; 16: Cid:='pcm_s16le'; 24: Cid:='pcm_s24le'; 32: Cid:='pcm_s32le'; End;
+ End Else If Tag=3 Then Begin
+  Case Bits Of 32: Cid:='pcm_f32le'; 64: Cid:='pcm_f64le'; End;
+ End;
+ If Cid='' Then Fail('wav: format WAV non pris en charge pour Matroska (PCM entier 8/16/24/32 bits ou flottant).');
+ S:=F4AddStream(1,Cid);
+ F4S[S].Rate:=Rate; F4S[S].Chans:=Ch; F4S[S].Bits:=Bits; F4S[S].BlockAlign:=BA;
+ F4S[S].TbN:=1; F4S[S].TbD:=Rate; F4S[S].Tag:=Tag;
+ If BA<1 Then BA:=1;
+ Pos:=0; T:=0;
+ While Pos<DataSz Do Begin
+  Chunk:=4096;
+  If BA>1 Then Begin If Chunk<BA Then Chunk:=BA; Chunk:=(Chunk Div BA)*BA; End;
+  If Chunk>DataSz-Pos Then Chunk:=DataSz-Pos;
+  N:=Chunk Div BA;
+  F4AddPkt(S,@F^[DataAt+Pos],Chunk,T,T,N,True,0,0);
+  Inc(T,N); Inc(Pos,Chunk);
+ End;
+ FreeMem(F);
+ F4WavStream:=S;
+End;
+
+{ ---- point d'entree : sortie Matroska / WebM ---- }
+Procedure F4MkvFromWav(Const Source,Target: String; Webm: Boolean);
+Var S: LongInt;
+Begin
+ F4Reset;
+ S:=F4WavStream(Source);
+ F4MuxMkv(Target,Webm);
+ F4Reset;
+End;
+
+{ ---- aiguillage de la sortie Matroska / WebM depuis le programme principal ---- }
+Procedure F4MainMkv;
+Var Webm: Boolean; Tmp: String;
+Begin
+ Webm:=OutputFormat='webm';
+ If IsHTTP(InputPath) Then Fail('Matroska: entree locale requise.');
+ If InputFormat='wav' Then Begin
+  Tmp:=NewTemporary; Temps[2]:=Tmp;
+  F4MkvFromWav(InputPath,Tmp,Webm);
+  Commit(Temps[2]); Temps[2]:=''; WriteLn('Sortie creee: ',OutputPath); Halt(0);
+ End;
+ Fail('Matroska/WebM: entree non prise en charge pour cette sortie.');
+End;
+
+{ ==== F4-END ==== }
 { ==== BLOCK-ANCHOR-F4 : inserer le code du groupe F4 juste au-dessus de cette ligne ==== }
 
 { ==== BLOCK-ANCHOR-F5 : inserer le code du groupe F5 juste au-dessus de cette ligne ==== }
@@ -122289,7 +123223,7 @@ BEGIN
   End Else
   If Argument='-i' Then Begin
    If InputPath<>'' Then Fail('Une seule entree est prise en charge.');
-   InputPath:=NextArgument; InputFormat:=PendingFormat; PendingFormat:='';
+   InputPath:=NextArgument; InputFormat:=PendingFormat; PendingFormat:=''; If InputFormat='matroska' Then InputFormat:='webm'; { F4 }
   End
   Else If (Argument='-c') Or (Argument='-codec') Or (Argument='-c:a') Or (Argument=
   '-codec:a') Or (Argument='-acodec') Then Begin
@@ -122447,6 +123381,7 @@ BEGIN
  'Format impose incompatible avec la signature du fichier.');
  If InputFormat='' Then Fail('Format entree non reconnu ou non pris en charge.');
  If OutputFormat='' Then OutputFormat:=FormatName(Extension(OutputPath));
+ If (OutputFormat='matroska') Or (OutputFormat='webm') Then F4MainMkv; { F4 }
  If (InputFormat='mpeg') And ((OutputFormat='wav') Or (OutputFormat='aiff') Or (OutputFormat='daud') Or PcmIsRawName(OutputFormat)) And Not IsHTTP(InputPath) Then
   If PcmVobProbe(InputPath) Then InputFormat:='vob';
  If (InputFormat='mp4') And ((OutputFormat='wav') Or (OutputFormat='adx') Or (OutputFormat='aiff') Or
