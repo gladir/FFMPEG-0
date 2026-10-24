@@ -3953,6 +3953,8 @@ Begin
    If (ADXOffset>=8) And (ADXOffset<=1048575) Then Begin Probe:='ea'; Exit; End;
   End;
  End;
+ If N>=58 Then If (B[0]=65) And (B[1]=77) And (B[2]=86) And (B[43]=77) And (B[44]=80) And (B[45]=51) And (B[51]<>0) And ((LongInt(B[52])+LongInt(B[53])*256<>0) Or (LongInt(B[54])+LongInt(B[55])*256<>0)) And (((LongInt(B[52])+LongInt(B[53])*256<>0) And (LongInt(B[54])+LongInt(B[55])*256<>0)) Or (LongInt(B[56])+LongInt(B[57])*256<>0)) Then Begin Probe:='mtv'; Exit; End; { F6 }
+ If N>=20 Then If (B[0]=70) And (B[1]=73) And (B[2]=76) And (B[3]=77) And (B[16]=70) And (B[17]=68) And (B[18]=83) And (B[19]=67) Then Begin Probe:='film_cpk'; Exit; End; { F6 }
  If N>=16 Then If (B[0]=119) And (B[1]=87) And (B[2]=16) And (B[3]=0) Then Begin Probe:='avs'; Exit; End;
  If N>=8 Then If (B[0]=77) And (B[1]=65) And (B[2]=67) And (B[3]=32) Then Begin Probe:='ape'; Exit; End;
  If N>=8 Then If (B[0]=$2E) And (B[1]=$72) And (B[2]=$61) And (B[3]=$FD) Then Begin Probe:='rm'; Exit; End;
@@ -19009,7 +19011,7 @@ Var
  R0,G0,B0,R1,G1,B1: Int64; VF: TSwsF;
 Function Px16(Rw,Col: LongInt): LongInt;
 Begin
- If Col>=NVW Then Px16:=0 Else Px16:=P^[(Rw*NVW+Col)*2]+P^[(Rw*NVW+Col)*2+1]*256;
+ If Col>=NVW Then Begin Px16:=0; If NVPadOn And (NVFmt<>3) Then Px16:=NVPad^[Rw*2]+NVPad^[Rw*2+1]*256; End Else Px16:=P^[(Rw*NVW+Col)*2]+P^[(Rw*NVW+Col)*2+1]*256; { F6: pixel de bourrage (ligne suivante) }
 End;
 Procedure Rgb8(Rw,Col: LongInt; Var R,G,B: Int64);
 Var At: LongInt;
@@ -22322,6 +22324,7 @@ Procedure DecodeWC3(Const Source,Target: String; Mode: LongInt); Forward; { G2B 
 Procedure DecodeTHPV(Const Source,Target: String; Mode: LongInt); Forward; { G2B }
 Procedure DecodeVQA(Const Source,Target: String; Mode: LongInt); Forward; { G2B }
 Procedure DecodeSMK(Const Source,Target: String; Mode: LongInt); Forward;
+Procedure F6DecodeVideo(Kind: LongInt; Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeRV(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeWMV(Const Source,Target: String; Mode: LongInt); Forward;
 Procedure DecodeG2A(Kind: LongInt; Const Source,Target: String; Mode: LongInt); Forward;
@@ -23107,6 +23110,7 @@ Begin
  If Kind=1703 Then Begin DecodeTHPV(Source,Target,Mode); Exit; End; { G2B }
  If Kind=1701 Then Begin DecodeVQA(Source,Target,Mode); Exit; End; { G2B }
  If (Kind>=480) And (Kind<=484) Then Begin DecodeVPD(Source,Target,Mode,Kind); Exit; End; { H8: avant le fourre-tout G2A }
+ If (Kind>=1960) And (Kind<=1969) Then Begin F6DecodeVideo(Kind,Source,Target,Mode); Exit; End; { F6 }
  If Kind>=220 Then Begin DecodeG2A(Kind,Source,Target,Mode); Exit; End;
  If Kind=170 Then Begin DecodeTheoraOgg(Source,Target,Mode); Exit; End;
  If Kind=171 Then Begin DecodeVP3Avi(Source,Target,Mode); Exit; End;
@@ -97468,6 +97472,274 @@ End;
 
 { ==== BLOCK-ANCHOR-F5 : inserer le code du groupe F5 juste au-dessus de cette ligne ==== }
 
+{ ==== F6 : formats demux-seul (film_cpk, mtv, nsv, iff, r3d ...) ; prefixe F6 ==== }
+{ ---- Sega FILM / CPK (libavformat/segafilm.c), LGPL-2.1-or-later ---- }
+Type
+ F6Int64Arr=Array[0..100000000] Of Int64; PF6Int64Arr=^F6Int64Arr;
+ F6IntArr=Array[0..100000000] Of LongInt; PF6IntArr=^F6IntArr;
+
+Function F6BE32(P: PEABuffer; Size,At: LongInt): Int64;
+Begin
+ F6BE32:=Int64(EAByte(P,Size,At))*16777216+EAByte(P,Size,At+1)*65536+EAByte(P,Size,At+2)*256+EAByte(P,Size,At+3);
+End;
+
+Function F6BE16(P: PEABuffer; Size,At: LongInt): LongInt;
+Begin
+ F6BE16:=EAByte(P,Size,At)*256+EAByte(P,Size,At+1);
+End;
+
+Procedure F6Erase(Const Name: String);
+Var Fl: File;
+Begin
+ Assign(Fl,Name); {$I-}Erase(Fl);{$I+} If IOResult<>0 Then;
+End;
+
+Function F6Gcd64(A,B: Int64): Int64;
+Var T: Int64;
+Begin While B<>0 Do Begin T:=A Mod B; A:=B; B:=T; End; F6Gcd64:=A; End;
+
+{ Entete FILM. Renvoie le nombre d'echantillons ; Smp[i*4..]: offset, taille, info1, info2 }
+Var
+ F6FVer,F6FVid,F6FW,F6FH,F6FBpp,F6FAudT,F6FRate,F6FCh,F6FBits,F6FCount: LongInt;
+ F6FBase: Int64; F6FTab: PF6Int64Arr;
+
+Procedure F6FilmOpen(F: PEABuffer; Size: LongInt);
+Var Data,Pos,I: LongInt; Tag: Int64;
+Begin
+ F6FTab:=Nil;
+ If (Size<16+20) Or (F6BE32(F,Size,0)<>$46494C4D) Then Fail('film_cpk: signature FILM absente.');
+ Data:=LongInt(F6BE32(F,Size,4)); F6FVer:=LongInt(F6BE32(F,Size,8));
+ Pos:=16;
+ If F6FVer=0 Then Begin
+  If Pos+20>Size Then Fail('film_cpk: en-tete tronque.');
+  F6FAudT:=1; F6FRate:=22050; F6FCh:=1; F6FBits:=8; F6FBpp:=0;
+ End Else Begin
+  If Pos+32>Size Then Fail('film_cpk: en-tete tronque.');
+  F6FRate:=F6BE16(F,Size,Pos+24); F6FCh:=F^[Pos+21]; F6FBits:=F^[Pos+22]; F6FBpp:=F^[Pos+20];
+  If (F^[Pos+23]=2) And (F6FCh>0) Then F6FAudT:=3
+  Else If F6FCh>0 Then Begin
+   If F6FBits=8 Then F6FAudT:=2 Else If F6FBits=16 Then F6FAudT:=1 Else F6FAudT:=0;
+  End Else F6FAudT:=0;
+ End;
+ If F6BE32(F,Size,Pos)<>$46445343 Then Fail('film_cpk: bloc FDSC invalide.');
+ Tag:=F6BE32(F,Size,Pos+8);
+ If Tag=$63766964 Then F6FVid:=1 Else If Tag=$72617720 Then F6FVid:=2 Else F6FVid:=0;
+ If (F6FVid=0) And (F6FAudT=0) Then Fail('film_cpk: aucun flux reconnu.');
+ F6FH:=LongInt(F6BE32(F,Size,Pos+12)); F6FW:=LongInt(F6BE32(F,Size,Pos+16));
+ If F6FVer=0 Then Inc(Pos,20) Else Inc(Pos,32);
+ If F6BE32(F,Size,Pos)<>$53544142 Then Fail('film_cpk: bloc STAB invalide.');
+ F6FBase:=F6BE32(F,Size,Pos+8); F6FCount:=LongInt(F6BE32(F,Size,Pos+12));
+ If (F6FCount<0) Or (F6FCount>(Size-Pos-16) Div 16) Then Fail('film_cpk: table des echantillons tronquee.');
+ GetMem(F6FTab,Int64(F6FCount+1)*32);
+ For I:=0 To F6FCount-1 Do Begin
+  F6FTab^[I*4]:=Data+F6BE32(F,Size,Pos+16+I*16);
+  F6FTab^[I*4+1]:=F6BE32(F,Size,Pos+16+I*16+4);
+  F6FTab^[I*4+2]:=F6BE32(F,Size,Pos+16+I*16+8);
+  F6FTab^[I*4+3]:=F6BE32(F,Size,Pos+16+I*16+12);
+ End;
+End;
+
+Procedure F6FilmVideo(Const Source,Target: String; Mode: LongInt);
+Var
+ F: PEABuffer; Size,I,J,K,W4,H4,Stride,Nv,Sz,RN,RD,Y,SegaSkip,PrevDts: LongInt; Pts0: Int64; Pic,Out2: PEABuffer;
+ Dts,Dur: PF6Int64Arr; Szs: PGFArr; Pk: PEABuffer; Ok,Begun: Boolean; NbF,NbP,D2: Int64; Pts: Int64;
+Begin
+ NVLoad(Source,F,Size);
+ F6FilmOpen(F,Size);
+ If F6FVid=0 Then Fail('film_cpk: pas de flux video.');
+ If (F6FW<1) Or (F6FH<1) Or (F6FW>8192) Or (F6FH>8192) Then Fail('film_cpk: dimensions incorrectes.');
+ If (F6FVid=2) And (F6FBpp<>24) Then Fail('film_cpk: video brute en '+'autre que 24 bpp non prise en charge.');
+ If F6FBase<=0 Then Fail('film_cpk: base de temps nulle.');
+ { liste des paquets video }
+ GetMem(Dts,Int64(F6FCount+1)*8); GetMem(Dur,Int64(F6FCount+1)*8); GetMem(Szs,Int64(F6FCount+1)*4);
+ Nv:=0;
+ For I:=0 To F6FCount-1 Do If F6FTab^[I*4+2]<>$FFFFFFFF Then Begin
+  Dts^[Nv]:=F6FTab^[I*4+2] And $7FFFFFFF; Szs^[Nv]:=F6FTab^[I*4+1]; Inc(Nv);
+ End;
+ For I:=0 To Nv-1 Do If I+1<Nv Then Dur^[I]:=Dts^[I+1]-Dts^[I] Else Dur^[I]:=0;
+ If Nv=0 Then Fail('film_cpk: aucune image.');
+ Pts0:=Dts^[0];
+ If F6FAudT<>0 Then For I:=0 To F6FCount-1 Do If F6FTab^[I*4+2]=$FFFFFFFF Then Begin Pts0:=0; Break; End; { le debut du flux audio (pts 0) fixe start_time }
+ If F6FBase<1000 Then Dur^[Nv-1]:=1; { duree par defaut de libavformat (compute_frame_duration) }
+ TLRFrameRate(PTLArr(Dts),PTLArr(Dur),Szs,Nv,1,F6FBase,(F6FBase>=101) Or (F6FBase<5),0,0,0,0,RN,RD);
+ Dur^[Nv-1]:=0;
+ D2:=Round(Single(F6FBase*RD/RN)); If D2<1 Then D2:=1;
+ CFTbN:=1; CFTbD:=F6FBase; CFFn:=RN; CFFd:=RD; CFNext:=0; CFFrameNo:=0; CFHist[0]:=0; CFHist[1]:=0; CFHist[2]:=0; CFLastDropped:=False; CFVscfr:=False;
+ W4:=(F6FW+3) And Not 3; H4:=(F6FH+3) And Not 3; Stride:=W4*3; SegaSkip:=-1;
+ FillChar(CVStrips,SizeOf(CVStrips),0);
+ GetMem(Pic,Stride*H4+64); FillChar(Pic^,Stride*H4+64,0);
+ GetMem(Out2,F6FW*F6FH*3+64); FillChar(Out2^,F6FW*F6FH*3+64,0);
+ NVBegin(Mode,Target,F6FW,F6FH,9,RN,RD); NVYC:=True; Begun:=True;
+ J:=0;
+ For I:=0 To F6FCount-1 Do If F6FTab^[I*4+2]<>$FFFFFFFF Then Begin
+  Pts:=(F6FTab^[I*4+2] And $7FFFFFFF)-Pts0;
+  Ok:=False;
+  If (F6FTab^[I*4]>=0) And (F6FTab^[I*4]+F6FTab^[I*4+1]<=Size) And (F6FTab^[I*4+1]>0) Then Begin
+   Pk:=PEABuffer(@F^[F6FTab^[I*4]]); Sz:=F6FTab^[I*4+1];
+   If F6FVid=1 Then Begin
+    Ok:=CVDecode(Pk,Sz,W4,H4,F6FH,0,Pic,Stride,SegaSkip);
+    If Ok Then For Y:=0 To F6FH-1 Do Move(Pic^[Y*Stride],Out2^[Y*F6FW*3],F6FW*3);
+   End Else Begin
+    If Sz>=F6FW*F6FH*3 Then Begin Move(Pk^,Out2^,F6FW*F6FH*3); Ok:=True; End;
+   End;
+  End;
+  If Ok Then Begin
+   If Dur^[J]>0 Then D2:=Dur^[J] Else D2:=Round(Single(F6FBase*RD/RN)); If D2<1 Then D2:=1;
+   CFSync(Pts,D2,NbF,NbP);
+   NVEmitN(Out2,NbP,NbF);
+   Inc(CFNext,NbF); Inc(CFFrameNo,NbF);
+  End;
+  Inc(J);
+  If NVDone Then Break;
+ End;
+ If Not NVDone Then CFFlush(Out2);
+ FreeMem(Pic); FreeMem(Out2);
+ NVFinish('film_cpk');
+End;
+
+Procedure F6FilmAudio(Const Source,Target: String);
+Var
+ F: PEABuffer; Size,I,N,C,K,Off,Sz,Bps: LongInt; V: LongInt;
+Begin
+ NVLoad(Source,F,Size);
+ F6FilmOpen(F,Size);
+ If F6FAudT=0 Then Fail('film_cpk: pas de flux audio.');
+ If F6FAudT=3 Then Fail('film_cpk: audio ADX sans en-tete non pris en charge.');
+ If (F6FCh<1) Or (F6FCh>2) Or (F6FRate<1) Then Fail('film_cpk: audio mono ou stereo requis.');
+ If F6FAudT=1 Then Bps:=2 Else Bps:=1;
+ EAReset; OpenWrite(Target); ADPCMWaveHeader(F6FRate,F6FCh,0);
+ For I:=0 To F6FCount-1 Do If F6FTab^[I*4+2]=$FFFFFFFF Then Begin
+  Off:=F6FTab^[I*4]; Sz:=F6FTab^[I*4+1];
+  If (Off<0) Or (Off+Sz>Size) Then Break;
+  N:=Sz Div (F6FCh*Bps);
+  For K:=0 To N-1 Do For C:=0 To F6FCh-1 Do Begin
+   If F6FVer=0 Then V:=ShortInt(F^[Off+K]) * 256
+   Else If Bps=1 Then V:=ShortInt(F^[Off+C*N+K]) * 256
+   Else Begin
+    V:=F^[Off+(C*N+K)*2]*256+F^[Off+(C*N+K)*2+1]; If V>=32768 Then Dec(V,65536);
+   End;
+   EAPut(V);
+  End;
+ End;
+ EAFlush;
+ ADPCMPatchHeader(F6FRate,F6FCh,EAWritten); CloseRead; CloseWrite;
+End;
+
+
+{ ---- MTV (libavformat/mtv.c): video rgb565be (flip vertical), audio mp3 en sous-segments de 500 octets ---- }
+Var F6MtvW,F6MtvH,F6MtvImg,F6MtvFull,F6MtvFps,F6MtvBr: LongInt;
+
+Procedure F6MtvOpen(F: PEABuffer; Size: LongInt);
+Var Sub,Bpp: LongInt;
+Begin
+ If (Size<57) Or (F^[0]<>65) Or (F^[1]<>77) Or (F^[2]<>86) Then Fail('mtv: signature absente.');
+ F6MtvBr:=F^[46]+F^[47]*256;
+ Bpp:=F^[51]; F6MtvW:=F^[52]+F^[53]*256; F6MtvH:=F^[54]+F^[55]*256; F6MtvImg:=F^[56]+F^[57]*256;
+ Bpp:=16;
+ If (F6MtvW=0) And (F6MtvH>0) Then F6MtvW:=F6MtvImg Div (Bpp Shr 3) Div F6MtvH;
+ If (F6MtvH=0) And (F6MtvW>0) Then F6MtvH:=F6MtvImg Div (Bpp Shr 3) Div F6MtvW;
+ If (F6MtvW=0) Or (F6MtvH=0) Or (F6MtvImg=0) Then Fail('mtv: dimensions ou taille de segment invalides.');
+ Sub:=F^[62]+F^[63]*256;
+ If Sub=0 Then Fail('mtv: fichiers sans audio non pris en charge.');
+ F6MtvFull:=Sub*(12+500)+F6MtvImg;
+ F6MtvFps:=(F6MtvBr Div 4) Div Sub;
+ If F6MtvFps<1 Then Fail('mtv: cadence invalide.');
+ If (F6MtvW>8192) Or (F6MtvH>8192) Then Fail('mtv: dimensions excessives.');
+End;
+
+Function F6MtvProbe(B: PEABuffer; N: LongInt): Boolean;
+Var W,H,Bpp: LongInt;
+Begin
+ F6MtvProbe:=False;
+ If N<57 Then Exit;
+ If (B^[0]<>65) Or (B^[1]<>77) Or (B^[2]<>86) Then Exit;
+ If (B^[43]<>77) Or (B^[44]<>80) Or (B^[45]<>51) Then Exit;
+ Bpp:=B^[51]; W:=B^[52]+B^[53]*256; H:=B^[54]+B^[55]*256;
+ If Not ((Bpp<>0) And ((W<>0) Or (H<>0))) Then Exit;
+ If (W=0) Or (H=0) Then Begin F6MtvProbe:=(B^[56]+B^[57]*256)<>0; Exit; End;
+ F6MtvProbe:=True;
+End;
+
+Procedure F6MtvVideo(Const Source,Target: String; Mode: LongInt);
+Var
+ F: PEABuffer; Size,Pos,Cnt,I,X,Y,RN,RD,Fb: LongInt; Out2: PEABuffer; Dts,Dur: PF6Int64Arr; Szs: PGFArr; NbF,NbP: Int64;
+ Starts: PF6IntArr;
+Begin
+ NVLoad(Source,F,Size);
+ F6MtvOpen(F,Size);
+ Fb:=F6MtvW*F6MtvH*2;
+ GetMem(Starts,(Size Div 512+4)*4);
+ Cnt:=0; Pos:=512;
+ While Pos<Size Do Begin
+  If ((Pos-512+F6MtvImg) Mod F6MtvFull)<>0 Then Begin
+   Inc(Pos,12); If Pos>=Size Then Break; Inc(Pos,500); If Pos>Size Then Pos:=Size;
+  End Else Begin
+   Starts^[Cnt]:=Pos; Inc(Cnt); Inc(Pos,F6MtvImg); If Pos>Size Then Break;
+  End;
+ End;
+ If Cnt=0 Then Fail('mtv: aucune image.');
+ GetMem(Dts,Int64(Cnt+1)*8); GetMem(Dur,Int64(Cnt+1)*8); GetMem(Szs,Int64(Cnt+1)*4);
+ For I:=0 To Cnt-1 Do Begin Dts^[I]:=I; Dur^[I]:=1; Szs^[I]:=F6MtvImg; End;
+ TLRFrameRate(PTLArr(Dts),PTLArr(Dur),Szs,Cnt,1,F6MtvFps,(F6MtvFps>=101) Or (F6MtvFps<5),0,0,0,0,RN,RD);
+ CFTbN:=1; CFTbD:=F6MtvFps; CFFn:=RN; CFFd:=RD; CFNext:=0; CFFrameNo:=0; CFHist[0]:=0; CFHist[1]:=0; CFHist[2]:=0; CFLastDropped:=False; CFVscfr:=False;
+ NVBegin(Mode,Target,F6MtvW,F6MtvH,5,RN,RD);
+ GetMem(Out2,Fb+64); GetMem(NVPad,F6MtvH*2+8);
+ For I:=0 To Cnt-1 Do Begin
+  If (F6MtvImg>=Fb) And (Starts^[I]+F6MtvImg<=Size) Then Begin
+   For Y:=0 To F6MtvH-1 Do For X:=0 To F6MtvW-1 Do Begin
+    Out2^[((F6MtvH-1-Y)*F6MtvW+X)*2]:=F^[Starts^[I]+(Y*F6MtvW+X)*2+1];
+    Out2^[((F6MtvH-1-Y)*F6MtvW+X)*2+1]:=F^[Starts^[I]+(Y*F6MtvW+X)*2];
+   End;
+   { colonne de bourrage lue par swscale (largeur impaire): premier pixel de la ligne de donnees suivante (image retournee) }
+   If Odd(F6MtvW) Then Begin
+    NVPadOn:=True;
+    For Y:=0 To F6MtvH-1 Do Begin
+     If Y=0 Then Begin
+      If F6MtvImg>=Fb+2 Then Begin NVPad^[0]:=F^[Starts^[I]+Fb+1]; NVPad^[1]:=F^[Starts^[I]+Fb]; End Else Begin NVPad^[0]:=0; NVPad^[1]:=0; End;
+     End Else Begin NVPad^[Y*2]:=Out2^[(Y-1)*F6MtvW*2]; NVPad^[Y*2+1]:=Out2^[(Y-1)*F6MtvW*2+1]; End;
+    End;
+   End;
+   CFSync(I,1,NbF,NbP);
+   NVEmitN(Out2,NbP,NbF);
+   NVPadOn:=False;
+   Inc(CFNext,NbF); Inc(CFFrameNo,NbF);
+   If NVDone Then Break;
+  End;
+ End;
+ If Not NVDone Then CFFlush(Out2);
+ FreeMem(Out2); FreeMem(NVPad);
+ NVFinish('mtv');
+End;
+
+Procedure F6MtvAudio(Const Source,Target: String);
+Var
+ F: PEABuffer; Size,Pos,N: LongInt; Tmp: String;
+Begin
+ NVLoad(Source,F,Size);
+ F6MtvOpen(F,Size);
+ Tmp:=NewTemporary; CloseRead; OpenWrite(Tmp);
+ Pos:=512;
+ While Pos<Size Do Begin
+  If ((Pos-512+F6MtvImg) Mod F6MtvFull)<>0 Then Begin
+   Inc(Pos,12); If Pos>=Size Then Break;
+   N:=500; If Pos+N>Size Then N:=Size-Pos;
+   WriteBytes(F^[Pos],N); Inc(Pos,N);
+  End Else Inc(Pos,F6MtvImg);
+ End;
+ CloseWrite;
+ DecodeMPA(Tmp,Target);
+ F6Erase(Tmp);
+End;
+
+Procedure F6DecodeVideo(Kind: LongInt; Const Source,Target: String; Mode: LongInt);
+Begin
+ Case Kind Of
+  1960: F6FilmVideo(Source,Target,Mode);
+  1961: F6MtvVideo(Source,Target,Mode);
+ Else Fail('f6: type de video inconnu.');
+ End;
+End;
+
 { ==== BLOCK-ANCHOR-F6 : inserer le code du groupe F6 juste au-dessus de cette ligne ==== }
 
 { ==== BLOCK-ANCHOR-F7 : inserer le code du groupe F7 juste au-dessus de cette ligne ==== }
@@ -123082,6 +123354,8 @@ BEGIN
   { LIST-ANCHOR-F3 }
   { LIST-ANCHOR-F4 }
   { LIST-ANCHOR-F5 }
+  WriteLn(' D  film_cpk        Sega FILM / CPK (video cinepak, rawvideo rgb24; audio pcm_s8, pcm_s8_planar, pcm_s16be_planar)');
+  WriteLn(' D  mtv             MTV (video rawvideo rgb565be, audio mp3)');
   { LIST-ANCHOR-F6 }
   { LIST-ANCHOR-F7 }
   { LIST-ANCHOR-G6B }
@@ -123427,6 +123701,8 @@ BEGIN
  If (InputFormat='wc3movie') And Not IsHTTP(InputPath) Then NVKind:=1702;
  If (InputFormat='thp') And Not IsHTTP(InputPath) Then NVKind:=1703;
  If (InputFormat='wsvqa') And Not IsHTTP(InputPath) Then NVKind:=1701;
+ If (InputFormat='film_cpk') And Not IsHTTP(InputPath) Then NVKind:=1960; { F6 }
+ If (InputFormat='mtv') And Not IsHTTP(InputPath) Then NVKind:=1961; { F6 }
  If (InputFormat='vmd') And Not IsHTTP(InputPath) Then NVKind:=1700; { G2B: 220 vmd, 221 wsvqa, 222 wc3movie, 223 thp }
  If (InputFormat='psxstr') And Not IsHTTP(InputPath) Then Begin If STRHasVideo(Intermediate) Then NVKind:=44; End
  Else If (InputFormat='msnwctcp') And Not IsHTTP(InputPath) Then NVKind:=45
@@ -123476,6 +123752,7 @@ BEGIN
   Else If InputFormat='avi' Then Begin If H4AviIsH264(AVIVideoFourCC(Intermediate)) Then NVKind:=35; End
   Else If FLVVideoCodec(Intermediate)=7 Then NVKind:=36;
  End;
+ If (NVKind>=1960) And (NVKind<=1969) And NVAudioOut Then NVKind:=0; { F6 }
  If (NVKind<>0) And Not (((NVKind=1) Or (NVKind=2) Or (NVKind=15) Or (NVKind=17) Or (NVKind=22) Or (NVKind=30) Or (NVKind=38) Or (NVKind=44) Or (NVKind=65) Or (NVKind=67) Or (NVKind=68) Or (NVKind=229) Or (NVKind=230) Or ((NVKind>=1700) And (NVKind<=1703))) And NVAudioOut) Then Begin
   If NoVideo Or (VideoCodec='copy') Or (AudioCodec<>'') Or HasBitrate Or (RequestedRate<>0) Or
    (RequestedChannels<>0) Or (ImageWidth<>0) Or IsHTTP(InputPath) Then
@@ -124020,6 +124297,8 @@ BEGIN
    If InputFormat='wsaud' Then DecodeWSAud(InputPath,Temps[0]) Else
    If InputFormat='amv' Then DecodeAMV(InputPath,Temps[0]) Else
    If InputFormat='iss' Then DecodeISS(InputPath,Temps[0]) Else
+   If InputFormat='film_cpk' Then F6FilmAudio(InputPath,Temps[0]) Else { F6 }
+   If InputFormat='mtv' Then F6MtvAudio(InputPath,Temps[0]) Else { F6 }
    If InputFormat='ape' Then DecodeAPE(InputPath,Temps[0]) Else
    If InputFormat='dts' Then DecodeDCA(InputPath,Temps[0]) Else
    If (InputFormat='rm') And (RMAudioKind(InputPath)=1) Then DecodeRA144(InputPath,Temps[0]) Else
