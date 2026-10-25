@@ -118498,6 +118498,12 @@ End;
 
 { ==== BLOCK-ANCHOR-F7 : inserer le code du groupe F7 juste au-dessus de cette ligne ==== }
 
+{ ==== BLOCK-ANCHOR-O1 : inserer le code du groupe O1 juste au-dessus de cette ligne ==== }
+
+{ ==== BLOCK-ANCHOR-O2 : inserer le code du groupe O2 juste au-dessus de cette ligne ==== }
+
+{ ==== BLOCK-ANCHOR-O3 : inserer le code du groupe O3 juste au-dessus de cette ligne ==== }
+
 Procedure DecodeAVIX(Const Source,Target: String; Mode,Kind: LongInt);
 Var Pos,PkPos,PkLen,RN,RD,I,Y,X,Cw,Ch,Bs,Msg2: LongInt; Ok,FFBegun: Boolean; Msg: String; PIdx: LongInt; NbF,NbP: Int64;
 Begin
@@ -144444,6 +144450,9 @@ BEGIN
   { LIST-ANCHOR-F5 }
   { LIST-ANCHOR-F6 }
   { LIST-ANCHOR-F7 }
+  { LIST-ANCHOR-O1 }
+  { LIST-ANCHOR-O2 }
+  { LIST-ANCHOR-O3 }
   { LIST-ANCHOR-G6B }
 
   WriteLn('D A    qcelp           QCELP / PureVoice (fichiers .qcp, QCELP-13K)');
