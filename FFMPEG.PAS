@@ -10,6 +10,7 @@ Program FFMPEG;
 
 {$IFDEF FPC}
  {$MODE TP}
+ {$R-}{$Q-}{$S-}
 {$ENDIF}
 {$IFNDEF FPC}
  {$N+}{$E+}{$M 32768,0,655360}
@@ -60499,7 +60500,7 @@ End;
 { ---- RealMedia : demuxeur (libavformat/rmdec.c) ---- }
 Const RM_MAXS=8;
 Type
- TI64A=Array[0..268435455] Of Int64; PI64A=^TI64A;
+ TI64A=Array[0..134217727] Of Int64; PI64A=^TI64A;
  TRMStream=Record
   Id,Kind,Tag,W,H,Fps,ExtPos,ExtLen: LongInt;           { Kind: 0 autre, 1
    audio, 2 video }
@@ -95685,7 +95686,8 @@ End;
 Function VGDResidue(Var R: TVGDRes; Ch: LongInt; DoNot: PEABuffer; Vec: PVGS;
  VLen,ChLeft: LongInt): LongInt;
 Var
- Cpc,ChUsed,I,J,K,L,Pass,VOffset,PartCount,Jtp,Ptns,MaxOut,Step,Coffs,Dim,
+ J,K,L,Pass: LongInt;
+ Cpc,ChUsed,I,VOffset,PartCount,Jtp,Ptns,MaxOut,Step,Coffs,Dim,
   VqClass,VqBook,VOffs,VDiv,VMod: Int64;
  LibBug: LongInt; CB: ^TVGDBook; Cv: PVGS; Ret: LongInt; Cl: PEABuffer; Rty:
   LongInt;
@@ -115875,7 +115877,7 @@ Type
   S: LongInt; Pts,Dts,Dur: Int64; Key: Boolean; Pos: Int64; Size: LongInt; Ord:
    LongInt;
  End;
- F3TPkArr=Array[0..50000000] Of F3TPkt; F3PPk=^F3TPkArr;
+ F3TPkArr=Array[0..10000000] Of F3TPkt; F3PPk=^F3TPkArr;
 Const
  F3MaxStr=32;
 Var
@@ -116292,7 +116294,7 @@ End;
 { ---------- muxeur MPEG-PS (mpegenc.c) ---------- }
 Type
  F3TDsc=Record Pts,Dts: Int64; Size,Unw: LongInt; End;
- F3TDscA=Array[0..100000000] Of F3TDsc; F3PDsc=^F3TDscA;
+ F3TDscA=Array[0..10000000] Of F3TDsc; F3PDsc=^F3TDscA;
  F3TPSS=Record
   Id,MaxBuf,BufIdx: LongInt;
   Fifo: F3PBuf; FCap,FHead,FLen: LongInt;
@@ -117549,7 +117551,7 @@ End;
 Type
  F3TQe=Record S: LongInt; Pts,Dts,Dur: Int64; Key: Boolean; Pos: Int64; Size:
   LongInt; Next: LongInt; Src: F3PBuf; End;
- F3TQeA=Array[0..50000000] Of F3TQe; F3PQe=^F3TQeA;
+ F3TQeA=Array[0..10000000] Of F3TQe; F3PQe=^F3TQeA;
  F3TOSt=Record
   InS: LongInt; InTn,InTd: Int64; LastMuxDts,CurDts,RescLast: Int64; Started,
    Done: Boolean;
@@ -118526,7 +118528,7 @@ Type
   Pts,Dts,Dur: Int64; DurNum,DurDen: Int64; RPts,RDts: Int64; Hb: LongInt; Mp2:
    Boolean; PDur: Int64; PPts,PDts: Int64;
  End;
- F3TFrmA=Array[0..20000000] Of F3TFrm; F3PFrm=^F3TFrmA;
+ F3TFrmA=Array[0..10000000] Of F3TFrm; F3PFrm=^F3TFrmA;
  F3TI64A=Array[0..50000000] Of Int64; F3PI64=^F3TI64A;
 Var
  F3E: F3PBuf; F3EN: Int64;                       { flux elementaire concatene }
@@ -175794,7 +175796,7 @@ Const
 { Speex : decodeur NB / WB / UWB (portage de speexdec.c de FFmpeg, Xiph.org /
  Jean-Marc Valin, licence BSD) + lecture Ogg }
 Type
- SXArr=Array[0..1073741822] Of Single; PSX=^SXArr;
+ SXArr=Array[0..268435455] Of Single; PSX=^SXArr;
  SXI8=Array[0..1073741822] Of ShortInt; PSXI8=^SXI8;
  SXSub=Record
   Used: Boolean; LspKind,PitchKind,InnovKind,Cb,LbrPitch,Forced,HaveGain,Dbl,
