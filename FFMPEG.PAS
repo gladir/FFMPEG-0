@@ -45,6 +45,7 @@ Begin
  If (I<0) Or (I>O3Argc) Then ParamStr:='' Else ParamStr:=O3Argv[I];
 End;
 
+Procedure O3HelpFr; Forward;
 Function O3F3Ign(Const A: String): Boolean; Forward;
 Function O3MacLangIdx(Const L: String): LongInt; Forward;
 Var O3PendN: LongInt; O3PendSpec,O3PendKey,O3PendVal: Array[0..15] Of String[
@@ -143544,7 +143545,11 @@ Begin
    If V='version' Then Begin O1TxVersion(Output); Flush(Output); Halt(0); End;
    If V='L' Then Begin O1Banner; O1TxLicense(Output); Flush(Output); Halt(0);
     End;
-   If (V='h') Or (V='help') Or (V='-help') Or (V='?') Then Begin O1Banner;
+   If (V='h') Or (V='help') Or (V='-help') Or (V='?') Then Begin
+    { aide seule : en francais, sauf si LANGUAGE=EN }
+    If (ParamCount=1) And (GetEnv('LANGUAGE')<>'EN') Then Begin
+     O3HelpFr; Halt(0); End;
+    O1Banner;
     O1TxHelp(Output); Flush(Output); Halt(0); End;
    If V='formats' Then Begin O1Banner; O1TxFormats(Output); Flush(Output); Halt(
     0); End;
@@ -181686,12 +181691,12 @@ Procedure Help;Begin
  WriteLn(
   'M4V brut MPEG-4 Part 2: MP4/AVI vers M4V et M4V vers MP4/AVI, -c copy.');
  WriteLn;
- WriteLn(' /?                             Affiche l''aide de cette commande.');
+ WriteLn(' /?                              Affiche l''aide de cette commande.');
  WriteLn(
   ' -metadata CLE=VALEUR            Metadonnees (title, artist, album, comment'+
   ', track, date, genre...); aussi -metadata:g et -metadata:s:v|a.'); { O3 }
  WriteLn(
-  ' -map_metadata -1|0              -1: ne copie pas les metadonnees de l''ent'+
+  ' -map_metadata -1|0               -1: ne copie pas les metadonnees de l''ent'+
   'ree; 0: copie (defaut).');
  WriteLn(
   ' -target [pal-|ntsc-|film-]TYPE   TYPE = vcd, svcd, dvd, dv, dv50: codecs, '+
@@ -181708,26 +181713,26 @@ Procedure Help;Begin
  WriteLn(
   '   -croptop/-cropbottom/-cropleft/-cropright -padtop/... -dct_algo -idct_al'+
   'go -er -intra -sameq -slang -newvideo -newsubtitle.' );
- WriteLn(' -ac 1|2                        Canaux de sortie (-ac apr'+#138+
+ WriteLn(' -ac 1|2                          Canaux de sortie (-ac apr'+#138+
   's -i)');
- WriteLn( ' -an                            Ne pas '+#130+
+ WriteLn( ' -an                              Ne pas '+#130+
  'crire les pistes audio (sortie vid'+#130+'o uniquement).');
  WriteLn(
- '                                AVI B-frames H264/MPEG4; Montages MP4 elst 3'+
+ '                                   AVI B-frames H264/MPEG4; Montages MP4 elst 3'+
   '2/64 bits '+
  #133+' vitesse 1.');
  WriteLn(
- '                                AVI: retards arrondis au paquet; preroll aud'+
+ '                                   AVI: retards arrondis au paquet; preroll aud'+
   'io conserve si n'+#130+'cessaire.');
- WriteLn(' -ar HZ                         Fr'+#130+
+ WriteLn(' -ar HZ                           Fr'+#130+
  'quence de sortie 4000..192000 (-ar apr'+#138+'s -i)');
  WriteLn(
- ' -aspect N:D|DECIMAL             Ratio affichage (4:3, 16:9); sorties MP4, A'+
+ ' -aspect N:D|DECIMAL              Ratio affichage (4:3, 16:9); sorties MP4, A'+
   'VI, Y4M.');
  WriteLn(
- ' -b DEBIT, -b:v DEBIT            Debit video cible, defaut 200k (bits/s; k, '+
+ ' -b DEBIT, -b:v DEBIT             Debit video cible, defaut 200k (bits/s; k, '+
   'M).');
- WriteLn(' -b:a 64k                       D'+#130+'bit MP3/AC3 CBR (d'+#130+
+ WriteLn(' -b:a 64k                         D'+#130+'bit MP3/AC3 CBR (d'+#130+
  'fauts 320k/192k); -ab 64 accepte; -vn; -hide_banner; -y; -n');
  WriteLn(
  ' -bf N                          0..16 images B entre references MPEG (defaut'+
@@ -181825,6 +181830,8 @@ Procedure Help;Begin
   'HLS local; HTTP/HTTPS sous Windows. Pas de MPEG-TS, DRM ou filtres video.');
  WriteLn('Voir FFMPEG.md pour les limites et les sources FFmpeg consultees.');
 End;
+
+Procedure O3HelpFr; Begin Help; End;
 
 Var
  I,J,Code: Integer;
