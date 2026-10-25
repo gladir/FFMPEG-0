@@ -16,6 +16,42 @@ Program FFMPEG;
 
 Uses DOS;
 
+{ ==== O3-SHADOW-BEGIN ==== }
+
+{ O3 : vecteur d'arguments modifiable ; ParamStr/ParamCount masques pour que tous les moteurs voient la ligne de commande reecrite (-target, ...) }
+Var
+ O3Argv: Array[0..2047] Of String[255]; O3Argc: LongInt; O3ArgInit: Boolean;
+
+Procedure O3LoadArgs;
+Var I: LongInt;
+Begin
+ O3ArgInit:=True; O3Argc:=System.ParamCount; If O3Argc>2046 Then O3Argc:=2046;
+ For I:=0 To O3Argc Do O3Argv[I]:=System.ParamStr(I);
+End;
+
+Function ParamCount: LongInt;
+Begin
+ If Not O3ArgInit Then O3LoadArgs;
+ ParamCount:=O3Argc;
+End;
+
+Function ParamStr(I: LongInt): String;
+Begin
+ If Not O3ArgInit Then O3LoadArgs;
+ If (I<0) Or (I>O3Argc) Then ParamStr:='' Else ParamStr:=O3Argv[I];
+End;
+
+Function O3F3Ign(Const A: String): Boolean; Forward;
+Function O3MacLangIdx(Const L: String): LongInt; Forward;
+Var O3PendN: LongInt; O3PendSpec,O3PendKey,O3PendVal: Array[0..15] Of String[80]; { -metadata:s:... en attente (multiplexeur generique) }
+Procedure O3FmxApply; Forward;
+Procedure O3FmxInputTags; Forward;
+Var O3IgnN: LongInt; { options de conversion de -target ignorees par F3Try : valables seulement pour la copie }
+Var O3NoSMeta: Boolean; { -map_metadata -1 sans specificateur : ni les flux ni les chapitres ne sont copies non plus }
+Var O3NoMeta: Boolean; { -map_metadata -1 : ne pas copier les metadonnees de l'entree }
+{ ==== O3-SHADOW-END ==== }
+
+
 {$IFDEF MSWINDOWS}
 { API du systeme declaree directement, sans unite Windows/WinInet. }
 
@@ -95561,6 +95597,7 @@ Begin
    MdConv(MdN,MdK,MdV,0,False);
   End;
  End;
+ If O3NoMeta Then MdN:=0; { O3 : -map_metadata -1 }
  { options -metadata : appliquees dans l'ordre }
  For I:=0 To MdCN-1 Do MdSet(MdN,MdK,MdV,MdCK[I],MdCV[I],False,True);
 End;
@@ -100814,11 +100851,13 @@ Begin
    End;
    F3TSFlags:=Fl;
   End
+  Else If O3F3Ign(A) Then Inc(I) { O3 : options de -target sans effet sur la copie }
   Else If (Length(A)>0) And (A[1]='-') Then Exit
   Else OutName:=A;
   Inc(I);
  End;
  If (NIn=0) Or (OutName='') Then Exit;
+ If (O3IgnN>0) And Not CpFlag Then Exit; { O3 : conversion de taille/cadence demandee par -target hors copie }
  If (Not CpFlag) And ((OptsA<>'') Or (OptsV<>'') Or (CodecA<>'') Or (CodecV<>'')) And False Then Exit;
  If OutFmt='' Then OutFmt:=FormatName(Extension(OutName)) Else OutFmt:=FormatName(OutFmt);
  If CpFlag And (NIn=1) And ((OutFmt='m4v') Or (OutFmt='h263') Or (OutFmt='h261') Or (OutFmt='mjpeg') Or (OutFmt='dnxhd') Or (OutFmt='cavsvideo') Or (OutFmt='vc1')) And ((InFmt='') Or (InFmt=OutFmt)) Then
@@ -100840,7 +100879,7 @@ Begin
  F3ForcedIn:=InFmt;
  For FileNo:=0 To NIn-1 Do Begin
   Streams0:=F3NS;
-  If Encoding Then Begin
+  If Encoding Or (F3SniffInput(InNames[FileNo])<>0) Then Begin { O3 : copie d'un flux + encodage de l'autre }
    If Not F3EncInput(InNames[FileNo],FileNo,OutFmt,CodecA,CodecV,OptsA,OptsV) Then Exit;
   End
   Else If F3ReadAudioES(InNames[FileNo],FileNo) Then Begin End
@@ -105383,7 +105422,11 @@ End;
 Procedure FMXMetaSet(Const K,V: String);
 Var I: Integer;
 Begin
- For I:=0 To FMXMetaN-1 Do If FMXMeta[I]=K Then Begin FMXMetaV[I]:=V; Exit; End;
+ { O3 : semantique d'AVDictionary : une cle existante est retiree (derniere entree deplacee a sa place) puis ajoutee en fin ; valeur vide = suppression }
+ For I:=0 To FMXMetaN-1 Do If FMXMeta[I]=K Then Begin
+  FMXMeta[I]:=FMXMeta[FMXMetaN-1]; FMXMetaV[I]:=FMXMetaV[FMXMetaN-1]; Dec(FMXMetaN); Break;
+ End;
+ If V='' Then Exit;
  If FMXMetaN<16 Then Begin FMXMeta[FMXMetaN]:=K; FMXMetaV[FMXMetaN]:=V; Inc(FMXMetaN); End;
 End;
 
@@ -106754,8 +106797,7 @@ Function MOWLang(Const L: String; Mp4: Boolean): LongInt;
 Var I, Code, C: Integer; M: Array[0..0] Of Byte;
 Begin
  If Not Mp4 Then Begin
-  If L='eng' Then Begin MOWLang:=0; Exit; End;
-  MOWLang:=-1; Exit;
+  MOWLang:=O3MacLangIdx(L); Exit; { O3 : table complete mov_mdhd_language_map }
  End;
  If Length(L)<3 Then Begin MOWLang:=MOWLangCode('und'); Exit; End;
  Code:=0;
@@ -109624,7 +109666,7 @@ Begin
   S^.Codec:=Codec;
   S^.TbN:=1; S^.TbD:=T^.Timescale;
   S^.Lang:='und';
-  S^.StTitle:=''; S^.Encoder:=T^.Compressor;
+  S^.StTitle:=''; S^.Encoder:=T^.Compressor; If O3NoSMeta Then S^.Encoder:=''; { O3 : -map_metadata -1 }
   If Audio Then Begin
    S^.Channels:=T^.Channels; S^.SampleRate:=T^.Rate;
    S^.Bps:=T^.SampleBits;
@@ -109741,6 +109783,10 @@ Begin
    Inc(I); Fm:=ParamStr(I); K:=Pos('=',Fm);
    If K>1 Then FMXMetaSet(Copy(Fm,1,K-1),Copy(Fm,K+1,255));
   End
+  Else If Copy(A,1,11)='-metadata:s' Then Begin { O3 : metadonnees de flux }
+   Inc(I); Fm:=ParamStr(I); K:=Pos('=',Fm);
+   If (K>1) And (O3PendN<16) Then Begin O3PendSpec[O3PendN]:=Copy(A,12,40); O3PendKey[O3PendN]:=Copy(Fm,1,K-1); O3PendVal[O3PendN]:=Copy(Fm,K+1,80); Inc(O3PendN); End;
+  End
   Else If (FMXInN>0) And (A='-b:v') Then Begin Inc(I); FMXVOpts:=FMXVOpts+'-b:v '+ParamStr(I)+' '; FMXVBitRate:=FMXParseRate(ParamStr(I)); End { O2 }
   Else If (FMXInN>0) And O2FmxOpt(A,ParamStr(I+1)) Then Begin FMXVOpts:=FMXVOpts+A+' '+ParamStr(I+1)+' '; Inc(I); End { O2 }
   Else If ((FMXInN>0) And ((A='-q:v') Or (A='-g'))) Or (A='-pix_fmt') Or (A='-r') Or (A='-s') Or (A='-compression_level') Then Begin { O2 }
@@ -109786,6 +109832,7 @@ Begin
  End;
  FMXReset;
  FMXTmpN:=0;
+ O3FmxInputTags; { O3 : etiquettes de l'entree WAV }
  FMXMetaSet('encoder','Lavf60.16.100');
  If (FMXVCodec='copy') Or (FMXACodec='copy') Then Begin
   Ext:=FMXExt(FMXInputs[0]);
@@ -109813,6 +109860,7 @@ Begin
  For I:=0 To FMXN-1 Do Begin
   EncN[I]:=FMXS[I].TbN; EncD[I]:=FMXS[I].TbD;
  End;
+ O3FmxApply;
  FMXOut:=FMXNew;
  FMXFmtInit;
  FMXFmtHeader;
@@ -124091,6 +124139,2741 @@ End;
 
 { ==== BLOCK-ANCHOR-O2 : inserer le code du groupe O2 juste au-dessus de cette ligne ==== }
 
+{ ==== O3-BEGIN ==== }
+Const
+ O3NDef = 193;
+ O3Def: Array[0..192] Of String = (
+  'sources|AX|list sources of the input device',
+  'sinks|AX|list sinks of the output device',
+  'L|X|show license',
+  'h|X|show help',
+  '?|X|show help',
+  'help|X|show help',
+  '-help|X|show help',
+  'version|X|show version',
+  'buildconf|X|show build configuration',
+  'formats|X|show available formats',
+  'muxers|X|show available muxers',
+  'demuxers|X|show available demuxers',
+  'devices|X|show available devices',
+  'codecs|X|show available codecs',
+  'decoders|X|show available decoders',
+  'encoders|X|show available encoders',
+  'bsfs|X|show available bit stream filters',
+  'protocols|X|show available protocols',
+  'filters|X|show available filters',
+  'pix_fmts|X|show available pixel formats',
+  'layouts|X|show standard channel layouts',
+  'sample_fmts|X|show available audio sample formats',
+  'dispositions|X|show available stream dispositions',
+  'colors|X|show available color names',
+  'loglevel|A|set logging level',
+  'v|A|set logging level',
+  'report||generate a report',
+  'max_alloc|A|set maximum size of a single allocated block',
+  'cpuflags|A|force specific cpu flags',
+  'cpucount|A|force specific cpu count',
+  'hide_banner|B|do not show program banner',
+  'f|AIOSP|force format',
+  'y|B|overwrite output files',
+  'n|B|never overwrite output files',
+  'ignore_unknown|B|Ignore unknown stream types',
+  'copy_unknown|B|Copy unknown stream types',
+  'recast_media|B|allow recasting stream type in order to force a decoder of different media type',
+  'c|AIOSP|codec name',
+  'codec|AIOSP|codec name',
+  'pre|AOSP|preset name',
+  'map|AOP|set input stream mapping',
+  'map_channel|AOP|map an audio channel from one stream to another (deprecated)',
+  'map_metadata|AOSP|set metadata information of outfile from infile',
+  'map_chapters|AONP|set chapters mapping',
+  't|AIOTP|record or transcode "duration" seconds of audio/video',
+  'to|AIOTP|record or transcode stop time',
+  'fs|AOLP|set the limit file size in bytes',
+  'ss|AIOTP|set the start time offset',
+  'sseof|AITP|set the start time offset relative to EOF',
+  'seek_timestamp|AINP|enable/disable seeking by timestamp with -ss',
+  'accurate_seek|BIP|enable/disable accurate seeking with -ss',
+  'isync|AINP|Indicate the input index for sync reference',
+  'itsoffset|AITP|set the input ts offset',
+  'itsscale|AIDP|set the input ts scale',
+  'timestamp|AOP|set the recording timestamp (''now'' to set the current time)',
+  'metadata|AOSP|add metadata',
+  'program|AOSP|add program with specified streams',
+  'dframes|AOP|set the number of data frames to output',
+  'benchmark|B|add timings for benchmarking',
+  'benchmark_all|B|add timings for each task',
+  'progress|A|write program-readable progress information',
+  'stdin|B|enable or disable interaction on standard input',
+  'timelimit|A|set max runtime in seconds in CPU user time',
+  'dump|B|dump each input packet',
+  'hex|B|when dumping packets, also dump the payload',
+  're|BIP|read input at native frame rate; equivalent to -readrate 1',
+  'readrate|AIFP|read input at specified rate',
+  'readrate_initial_burst|AIDP|The initial amount of input to burst read before imposing any readrate',
+  'target|AOP|specify target file type ("vcd", "svcd", "dvd", "dv" or "dv50" with optional prefixes "pal-", "ntsc-" or "film-")',
+  'vsync|A|set video sync method globally; deprecated, use -fps_mode',
+  'frame_drop_threshold|AF|frame drop threshold',
+  'adrift_threshold|A|deprecated, does nothing',
+  'copyts|B|copy timestamps',
+  'start_at_zero|B|shift input timestamps to start at 0 when using copyts',
+  'copytb|AN|copy input stream time base when stream copying',
+  'shortest|BOP|finish encoding within shortest input',
+  'shortest_buf_duration|AOFP|maximum buffering duration (in seconds) for the -shortest option',
+  'bitexact|BIOP|bitexact mode',
+  'apad|AOSP|audio pad',
+  'dts_delta_threshold|AF|timestamp discontinuity delta threshold',
+  'dts_error_threshold|AF|timestamp error delta threshold',
+  'xerror|B|exit on error',
+  'abort_on|A|abort on the specified condition flags',
+  'copyinkf|BOP|copy initial non-keyframes',
+  'copypriorss|AONP|copy or discard frames before start time',
+  'frames|AOLP|set the number of frames to output',
+  'tag|AIOSP|force codec tag/fourcc',
+  'q|AODP|use fixed quality scale (VBR)',
+  'qscale|AOP|use fixed quality scale (VBR)',
+  'profile|AOP|set profile',
+  'filter|AOSP|set stream filtergraph',
+  'filter_threads|A|number of non-complex filter threads',
+  'filter_script|AOSP|read stream filtergraph description from a file',
+  'reinit_filter|AINP|reinit filtergraph on input parameter changes',
+  'filter_complex|A|create a complex filtergraph',
+  'filter_complex_threads|AN|number of threads for -filter_complex',
+  'lavfi|A|create a complex filtergraph',
+  'filter_complex_script|A|read complex filtergraph description from a file',
+  'auto_conversion_filters|B|enable automatic conversion filters globally',
+  'stats|B|print progress report during encoding',
+  'stats_period|A|set the period at which ffmpeg updates stats and -progress output',
+  'attach|AOP|add an attachment to the output file',
+  'dump_attachment|AISP|extract an attachment into a file',
+  'stream_loop|AINP|set number of times input stream shall be looped',
+  'debug_ts|B|print timestamp debugging info',
+  'max_error_rate|AF|ratio of decoding errors (0.0: no errors, 1.0: 100% errors) above which ffmpeg returns an error instead of success.',
+  'discard|AISP|discard',
+  'disposition|AOSP|disposition',
+  'thread_queue_size|AIONP|set the maximum number of queued packets from the demuxer',
+  'find_stream_info|BIP|read and decode the streams to fill missing information with heuristics',
+  'bits_per_raw_sample|AONP|set the number of bits per raw sample',
+  'stats_enc_pre|AOSP|write encoding stats before encoding',
+  'stats_enc_post|AOSP|write encoding stats after encoding',
+  'stats_mux_pre|AOSP|write packets stats before muxing',
+  'stats_enc_pre_fmt|AOSP|format of the stats written with -stats_enc_pre',
+  'stats_enc_post_fmt|AOSP|format of the stats written with -stats_enc_post',
+  'stats_mux_pre_fmt|AOSP|format of the stats written with -stats_mux_pre',
+  'vframes|AOP|set the number of video frames to output',
+  'r|AIOSP|set frame rate (Hz value, fraction or abbreviation)',
+  'fpsmax|AOSP|set max frame rate (Hz value, fraction or abbreviation)',
+  's|AIOSP|set frame size (WxH or abbreviation)',
+  'aspect|AOSP|set aspect ratio (4:3, 16:9 or 1.3333, 1.7777)',
+  'pix_fmt|AIOSP|set pixel format',
+  'display_rotation|AIDP|set pure counter-clockwise rotation in degrees for stream(s)',
+  'display_hflip|BIP|set display horizontal flip for stream(s) (overrides any display rotation if it is not set)',
+  'display_vflip|BIP|set display vertical flip for stream(s) (overrides any display rotation if it is not set)',
+  'vn|BIOP|disable video',
+  'rc_override|AOSP|rate control override for specific intervals',
+  'vcodec|AIOP|force video codec (''copy'' to copy stream)',
+  'timecode|AOP|set initial TimeCode value.',
+  'pass|AONP|select the pass number (1 to 3)',
+  'passlogfile|AOSP|select two pass log file name prefix',
+  'psnr|B|calculate PSNR of compressed frames (deprecated, use -flags +psnr)',
+  'vstats||dump video coding statistics to file',
+  'vstats_file|A|dump video coding statistics to file',
+  'vstats_version|AN|Version of the vstats format to use.',
+  'vf|AOP|set video filters',
+  'intra_matrix|AOSP|specify intra matrix coeffs',
+  'inter_matrix|AOSP|specify inter matrix coeffs',
+  'chroma_intra_matrix|AOSP|specify intra matrix coeffs',
+  'top|AIONP|deprecated, use the setfield video filter',
+  'vtag|AIOP|force video tag/fourcc',
+  'qphist||deprecated, does nothing',
+  'fps_mode|AOSP|set framerate mode for matching video streams; overrides vsync',
+  'force_fps|BOP|force the selected framerate, disable the best supported framerate selection',
+  'streamid|AOP|set the value of an outfile streamid',
+  'force_key_frames|AOSP|force key frames at specified timestamps',
+  'b|AOP|video bitrate (please use -b:v)',
+  'hwaccel|AISP|use HW accelerated decoding',
+  'hwaccel_device|AISP|select a device for HW acceleration',
+  'hwaccel_output_format|AISP|select output format used with HW accelerated decoding',
+  'hwaccels|X|show available HW acceleration methods',
+  'autorotate|ABIP|automatically insert correct rotate filters',
+  'autoscale|ABOP|automatically insert a scale filter at the end of the filter graph',
+  'fix_sub_duration_heartbeat|BOP|set this video output stream to be a heartbeat stream for fix_sub_duration, according to which subtitles should be split at random access points',
+  'aframes|AOP|set the number of audio frames to output',
+  'aq|AOP|set audio quality (codec-specific)',
+  'ar|AIONP|set audio sampling rate (in Hz)',
+  'ac|AIONP|set number of audio channels',
+  'an|BIOP|disable audio',
+  'acodec|AIOP|force audio codec (''copy'' to copy stream)',
+  'ab|AOP|audio bitrate (please use -b:a)',
+  'atag|AOP|force audio tag/fourcc',
+  'sample_fmt|AIOSP|set sample format',
+  'channel_layout|AIOSP|set channel layout',
+  'ch_layout|AIOSP|set channel layout',
+  'af|AOP|set audio filters',
+  'guess_layout_max|AINP|set the maximum number of channels to try to guess the channel layout',
+  'sn|BIOP|disable subtitle',
+  'scodec|AIOP|force subtitle codec (''copy'' to copy stream)',
+  'stag|AOP|force subtitle tag/fourcc',
+  'fix_sub_duration|BIP|fix subtitles duration',
+  'canvas_size|AISP|set canvas size (WxH or abbreviation)',
+  'muxdelay|AOFP|set the maximum demux-decode delay',
+  'muxpreload|AOFP|set the initial demux-decode delay',
+  'sdp_file|AO|specify a file in which to print sdp information',
+  'time_base|AOSP|set the desired time base hint for output stream (1:24, 1:48000 or 0.04166, 2.0833e-5)',
+  'enc_time_base|AOSP|set the desired time base for the encoder (1:24, 1:48000 or 0.04166, 2.0833e-5). two special values are defined - 0 = use frame rate (video) or sample rate (audio),-1 = match source time base',
+  'bsf|AOSP|A comma-separated list of bitstream filters',
+  'absf|AOP|deprecated',
+  'vbsf|AOP|deprecated',
+  'apre|AOP|set the audio options to the indicated preset',
+  'vpre|AOP|set the video options to the indicated preset',
+  'spre|AOP|set the subtitle options to the indicated preset',
+  'fpre|AOP|set options from indicated preset file',
+  'max_muxing_queue_size|AONP|maximum number of packets that can be buffered while waiting for all streams to initialize',
+  'muxing_queue_data_threshold|AONP|set the threshold after which max_muxing_queue_size is taken into account',
+  'dcodec|AIOP|force data codec (''copy'' to copy stream)',
+  'dn|BIOP|disable data',
+  'vaapi_device|A|set VAAPI hardware device (DirectX adapter index, DRM path or X11 display name)',
+  'qsv_device|A|set QSV hardware device (DirectX adapter index, DRM path or X11 display name)',
+  'init_hw_device|A|initialise hardware device',
+  'filter_hw_device|A|set hardware device used when filtering'
+ );
+Const
+ O3NAv = 78;
+ O3Av: Array[0..77] Of String = (
+  ' b=3c ab=3c bt=1c flags=3c flags2=3c export_side_data=3c g=1c ar=3c ac=3c cutoff=1c frame_size=3c qcomp=1c qblur=1c qmin=1c qmax=1c qdiff=1c bf=1c b_qfactor=1c bug=2c strict=3c b_qoffset=1c err_detect=3c maxrate=1c minrate=1c ',
+  ' bufsize=1c i_qfactor=1c i_qoffset=1c dct=1c lumi_mask=1c tcplx_mask=1c scplx_mask=1c p_mask=1c dark_mask=1c idct=3c ec=2c aspect=3c sar=1c debug=3c dia_size=1c last_pred=1c pre_dia_size=1c subq=1c me_range=1c global_quality=1c ',
+  ' mbd=1c rc_init_occupancy=1c threads=3c dc=1c nssew=1c skip_top=2c skip_bottom=2c profile=3c level=1c lowres=2c cmp=1c subcmp=1c mbcmp=1c ildctcmp=1c precmp=1c mblmin=1c mblmax=1c skip_loop_filter=2c skip_idct=2c skip_frame=3c ',
+  ' bidir_refine=1c keyint_min=1c refs=1c trellis=1c mv0_threshold=1c compression_level=1c channel_layout=3c request_channel_layout=2c rc_max_vbv_use=1c rc_min_vbv_use=1c ticks_per_frame=3c color_primaries=3c color_trc=3c ',
+  ' colorspace=3c color_range=3c chroma_sample_location=3c slices=1c thread_type=3c audio_service_type=1c request_sample_fmt=2c sub_charenc=2c sub_charenc_mode=2c apply_cropping=2c skip_alpha=2c field_order=3c dump_separator=3c ',
+  ' codec_whitelist=3c max_pixels=3c max_samples=2c hwaccel_flags=2c extra_hw_frames=2c discard_damaged_percentage=2c mpv_flags=1 luma_elim_threshold=1 chroma_elim_threshold=1 quantizer_noise_shaping=1 error_rate=1 qsquish=1 ',
+  ' rc_qmod_amp=1 rc_qmod_freq=1 rc_eq=1 rc_init_cplx=1 rc_buf_aggressivity=1 border_mask=1 lmin=1 lmax=1 skip_threshold=1 skip_factor=1 skip_exp=1 skip_cmp=1 sc_threshold=1 noise_reduction=1 ps=1 huffman=1 force_duplicated_matrix=1 ',
+  ' dpi=1 dpm=1 pred=1 quality=1 max_extra_cb_iterations=1 skip_empty_cb=1 max_strips=1 min_strips=1 strip_number_adaptivity=1 dither_type=1 nitris_compat=1 ibias=1 quant_deadzone=1 compression=1 format=3 gamma=1 slicecrc=1 coder=1 ',
+  ' context=1 non_deterministic=1 motion_est=1 mepc=1 mepre=1 intra_penalty=1 gifflags=1 gifimage=1 global_palette=1 obmc=1 mb_info=1 umv=1 aiv=1 structured_slices=1 chunks=1 compressor=1 tile_width=1 tile_height=1 sop=1 eph=1 ',
+  ' prog=1 layer_rates=1 gop_timecode=1 drop_frame_timecode=1 scan_offset=1 timecode_frame_start=1 b_strategy=1 b_sensitivity=1 brd_scale=1 intra_vlc=1 non_linear_quant=1 alternate_scan=1 a53cc=1 seq_disp_ext=1 video_format=1 ',
+  ' data_partitioning=1 mpeg_quant=1 vendor=1 mbs_per_slice=1 bits_per_mb=1 quant_mat=1 alpha_bits=1 quake3_compat=1 skip_frame_thresh=1 start_one_color_thresh=1 continue_one_color_thresh=1 sixteen_color_thresh=1 rle=1 memc_only=1 ',
+  ' no_bitstream=1 iterative_dia_size=1 motion-est=1 compression_algo=1 tolerance=1 slice_width=1 slice_height=1 wavelet_depth=1 wavelet_type=1 qm=1 aac_coder=1 aac_ms=1 aac_is=1 aac_pns=1 aac_tns=1 aac_ltp=1 aac_pred=1 aac_pce=1 ',
+  ' center_mixlev=1 surround_mixlev=1 mixing_level=1 room_type=1 per_frame_metadata=1 copyright=1 dialnorm=1 dsur_mode=1 original=1 dmix_mode=1 ltrt_cmixlev=1 ltrt_surmixlev=1 loro_cmixlev=1 loro_surmixlev=1 dsurex_mode=1 ',
+  ' dheadphone_mode=1 ad_conv_type=1 stereo_rematrixing=1 channel_coupling=1 cpl_start_band=1 min_prediction_order=1 max_prediction_order=1 dca_adpcm=1 lpc_coeff_precision=1 lpc_type=1 lpc_passes=1 min_partition_order=1 ',
+  ' max_partition_order=1 prediction_order_method=1 ch_mode=1 exact_rice_parameters=1 multi_dim_quant=1 max_interval=1 codebook_search=1 prediction_order=1 rematrix_precision=1 opus_delay=1 apply_phase_inv=1 sbc_delay=1 msbc=1 ',
+  ' joint_stereo=1 optimize_mono=1 block_size=1 code_size=3 palette=1 even_rows_fix=1 height=1 cpu-used=1 auto-alt-ref=1 lag-in-frames=1 arnr-max-frames=1 arnr-strength=1 aq-mode=1 error-resilience=1 crf=1 static-thresh=1 ',
+  ' drop-threshold=1 denoise-noise-level=1 denoise-block-size=1 undershoot-pct=1 overshoot-pct=1 minsection-pct=1 maxsection-pct=1 frame-parallel=1 tiles=1 tile-columns=1 tile-rows=1 row-mt=1 enable-cdef=1 enable-global-motion=1 ',
+  ' enable-intrabc=1 enable-restoration=1 usage=1 tune=1 still-picture=1 enable-rect-partitions=1 enable-1to4-partitions=1 enable-ab-partitions=1 enable-angle-delta=1 enable-cfl-intra=1 enable-filter-intra=1 ',
+  ' enable-intra-edge-filter=1 enable-smooth-intra=1 enable-paeth-intra=1 enable-palette=1 enable-flip-idtx=1 enable-tx64=1 reduced-tx-type-set=1 use-intra-dct-only=1 use-inter-dct-only=1 use-intra-default-tx-only=1 ',
+  ' enable-ref-frame-mvs=1 enable-reduced-reference-set=1 enable-obmc=1 enable-dual-filter=1 enable-diff-wtd-comp=1 enable-dist-wtd-comp=1 enable-onesided-comp=1 enable-interinter-wedge=1 enable-interintra-wedge=1 ',
+  ' enable-masked-comp=1 enable-interintra-comp=1 enable-smooth-interintra=1 aom-params=1 mode=3 effort=1 distance=1 modular=1 reservoir=1 abr=1 cinema_mode=1 prog_order=1 numresolution=1 irreversible=1 disto_alloc=1 fixed_quality=1 ',
+  ' application=1 frame_duration=1 packet_loss=1 fec=3 vbr=1 mapping_family=1 qp=1 speed=3 rav1e-params=1 cbr_quality=1 frames_per_packet=3 vad=1 dtx=1 hielevel=1 la_depth=1 tier=1 preset=1 sc_detection=1 tile_columns=1 tile_rows=1 ',
+  ' svtav1-params=1 psymodel=1 energy_levels=1 error_protection=1 verbosity=1 iblock=1 arnr-maxframes=1 arnr-type=1 deadline=1 error-resilient=1 max-intra-rate=1 noise-sensitivity=1 ts-parameters=1 vp8flags=1 arnr_max_frames=1 ',
+  ' arnr_strength=1 arnr_type=1 rc_lookahead=1 sharpness=1 lossless=1 tune-content=1 corpus-complexity=1 enable-tpl=1 min-gf-interval=1 cr_threshold=1 cr_size=1 fastfirstpass=1 passlogfile=3 wpredp=1 x264opts=1 crf_max=1 ',
+  ' aq-strength=1 psy=1 psy-rd=1 rc-lookahead=1 weightb=1 weightp=1 ssim=1 intra-refresh=1 bluray-compat=1 b-bias=1 b-pyramid=1 mixed-refs=1 8x8dct=1 fast-pskip=1 aud=1 mbtree=1 deblock=1 cplxblur=1 partitions=1 direct-pred=1 ',
+  ' slice-max-size=1 stats=3 nal-hrd=1 avcintra-class=1 me_method=1 forced-idr=1 chromaoffset=1 udu_sei=1 x264-params=1 x265-params=1 lumi_aq=1 variance_aq=1 ssim_acc=1 gmc=1 me_quality=1 num_output_buffers=1 num_capture_buffers=1 ',
+  ' rc=1 multipass=1 highbitdepth=1 surfaces=1 gpu=1 rgb_mode=1 delay=1 cq=1 init_qpP=1 init_qpB=1 init_qpI=1 qp_cb_offset=1 qp_cr_offset=1 no-scenecut=1 b_adapt=1 spatial-aq=1 temporal-aq=1 zerolatency=1 nonref_p=1 strict_gop=1 ',
+  ' weighted_pred=1 b_ref_mode=1 dpb_size=1 ldkfs=1 timing-info=1 extra_sei=1 s12m_tc=1 async_depth=1 forced_idr=1 low_power=1 adaptive_i=1 adaptive_b=1 extbrc=1 low_delay_brc=1 max_frame_size=1 max_frame_size_i=1 max_frame_size_p=1 ',
+  ' tile_cols=1 look_ahead_depth=1 idr_interval=1 b_depth=1 rc_mode=1 tile_groups=1 cbr=1 2pass=1 spatial_aq=1 temporal_aq=1 single-slice-intra-refresh=1 max_slice_size=1 constrained-encoding=1 rdo=1 bitrate_limit=1 mbbrc=1 ',
+  ' p_strategy=1 dblk_idc=1 max_qp_i=1 min_qp_i=1 max_qp_p=1 min_qp_p=1 max_qp_b=1 min_qp_b=1 scenario=1 avbr_accuracy=1 avbr_convergence=1 cavlc=1 pic_timing_sei=1 single_sei_nal_unit=1 max_dec_frame_buffering=1 look_ahead=1 ',
+  ' look_ahead_downsampling=1 int_ref_type=1 int_ref_cycle_size=1 int_ref_qp_delta=1 recovery_point_sei=1 int_ref_cycle_dist=1 repeat_pps=1 sei=1 load_plugin=1 load_plugins=1 gpb=1 transform_skip=1 jfif=1 loop_filter_level=1 ',
+  ' loop_filter_sharpness=1 layer=2 part=2 apply_trc=2 skip_cursor=2 blank_value=2 change_field_order=2 trans_color=2 is_avc=2 nal_length_size=2 enable_er=2 x264_build=2 gpu_copy=2 apply_defdispwin=2 strict-displaywin=2 ',
+  ' extern_huff=2 top=3 non_pcm_mode=2 subimage=2 thumbnail=2 page=2 custom_stride=2 dual_mono_mode=2 channel_order=2 cons_noisegen=2 drc_scale=2 heavy_compr=2 target_level=2 downmix=2 extra_bits_bug=2 core_only=2 postfilter=2 ',
+  ' use_buggy_lpc=2 password=3 bits_per_codeword=2 real_time=2 real_time_latency_msec=2 data_field=2 compute_edt=2 compute_clut=2 dvb_substream=2 ifo_palette=2 forced_subs_only=2 width=2 keep_ass_markup=2 tilethreads=2 ',
+  ' framethreads=2 max_frame_delay=2 filmgrain=2 oppoint=2 alllayers=2 keep_ar=2 txt_page=2 txt_default_region=2 txt_chop_top=2 txt_format=2 txt_left=2 txt_top=2 txt_chop_spaces=2 txt_duration=2 txt_transparent=2 txt_opacity=2 ',
+  ' operating_point=2 deint=2 drop_second_field=2 crop=2 resize=2 avioflags=x probesize=x formatprobesize=x packetsize=x fflags=x seek2any=x analyzeduration=x cryptokey=x indexmem=x rtbufsize=x fdebug=x max_delay=x ',
+  ' start_time_realtime=x fpsprobesize=x audio_preload=x chunk_duration=x chunk_size=x f_err_detect=x use_wallclock_as_timestamps=x skip_initial_bytes=x correct_ts_overflow=x flush_packets=x metadata_header_padding=x ',
+  ' output_ts_offset=x max_interleave_delta=x f_strict=x max_ts_probe=x avoid_negative_ts=x format_whitelist=x protocol_whitelist=x protocol_blacklist=x max_streams=x skip_estimate_duration_from_pts=x max_probe_packets=x ',
+  ' rw_timeout=x playlist=x angle=x chapter=x read_ahead_limit=x key=x iv=x decryption_key=x decryption_iv=x encryption_key=x encryption_iv=x blocksize=x fd=x ffrtmphttp_tls=x truncate=x follow=x seekable=x timeout=x ',
+  ' ftp-write-seekable=x ftp-anonymous-password=x ftp-user=x ftp-password=x chunked_post=x http_proxy=x headers=x content_type=x user_agent=x referer=x multiple_requests=x post_data=x cookies=x icy=x auth_type=x send_expect_100=x ',
+  ' location=x offset=x end_offset=x method=x reconnect=x reconnect_at_eof=x reconnect_on_network_error=x reconnect_on_http_error=x reconnect_streamed=x reconnect_delay_max=x listen=x resource=x reply_code=x short_seek_size=x ',
+  ' ice_genre=x ice_name=x ice_description=x ice_url=x ice_public=x legacy_icecast=x tls=x ttl=x l=x d=x rtmp_app=x rtmp_buffer=x rtmp_conn=x rtmp_flashver=x rtmp_flush_interval=x rtmp_enhanced_codecs=x rtmp_live=x rtmp_pageurl=x ',
+  ' rtmp_playpath=x rtmp_subscribe=x rtmp_swfhash=x rtmp_swfsize=x rtmp_swfurl=x rtmp_swfverify=x rtmp_tcurl=x rtmp_listen=x tcp_nodelay=x buffer_size=x rtcp_port=x local_rtpport=x local_rtcpport=x connect=x write_to_source=x ',
+  ' pkt_size=x dscp=x sources=x block=x localaddr=x listen_timeout=x srtp_out_suite=x srtp_out_params=x srtp_in_suite=x srtp_in_params=x start=x end=x local_port=x local_addr=x send_buffer_size=x recv_buffer_size=x tcp_mss=x ',
+  ' ca_file=x cafile=x tls_verify=x cert_file=x key_file=x verifyhost=x bitrate=x burst_bits=x localport=x udplite_coverage=x reuse=x reuse_socket=x broadcast=x fifo_size=x overrun_nonfatal=x type=x exchange=x routing_key=x ',
+  ' connection_timeout=x delivery_mode=x rist_profile=x log_level=x secret=x encryption=x payload_size=x maxbw=x pbkeylen=x passphrase=x enforced_encryption=x kmrefreshrate=x kmpreannounce=x snddropdelay=x mss=x ffs=x ipttl=x ',
+  ' iptos=x inputbw=x oheadbw=x latency=x tsbpddelay=x rcvlatency=x peerlatency=x tlpktdrop=x nakreport=x connect_timeout=x sndbuf=x rcvbuf=x lossmaxttl=x minversion=x streamid=x srt_streamid=x smoother=x messageapi=x transtype=x ',
+  ' linger=x tsbpd=x private_key=x gateway=x write_crc=x write_id3v2=x write_apetag=x write_mpeg2=x id3v2_version=x plays=x final_delay=x version_major=x version_minor=x name=x skip_rate_check=x loop=x reverb=x packet_size=x ',
+  ' ignore_readorder=x loopstart=x loopend=x reserve_index_space=x write_channel_mask=x flipped_raw_rgb=x movie_timescale=x adaptation_sets=x window_size=x extra_window_size=x seg_duration=x frag_duration=x frag_type=x ',
+  ' remove_at_exit=x use_template=x use_timeline=x single_file=x single_file_name=x init_seg_name=x media_seg_name=x utc_timing_url=x http_user_agent=x http_persistent=x hls_playlist=x hls_master_name=x streaming=x ',
+  ' index_correction=x format_options=x global_sidx=x dash_segment_type=x ignore_io_errors=x lhls=x ldash=x master_m3u8_publish_rate=x write_prft=x mpd_profile=x http_opts=x target_latency=x min_playback_rate=x max_playback_rate=x ',
+  ' update_period=x movflags=x moov_size=x rtpflags=x skip_iods=x iods_audio_profile=x iods_video_profile=x min_frag_duration=x frag_size=x ism_lookahead=x video_track_timescale=x brand=x use_editlist=x fragment_index=x mov_gamma=x ',
+  ' frag_interleave=x encryption_scheme=x encryption_kid=x use_stream_ids_as_track_ids=x write_btrt=x write_tmcd=x empty_hdlr_name=x fifo_format=x queue_size=x format_opts=x drop_pkts_on_overflow=x restart_with_keyframe=x ',
+  ' attempt_recovery=x max_recovery_attempts=x recovery_wait_time=x recovery_wait_streamtime=x recover_any_error=x timeshift=x write_header_ret=x write_trailer_ret=x print_deinit_summary=x write_header=x flvflags=x hash=x ',
+  ' format_version=x start_number=x hls_time=x hls_init_time=x hls_list_size=x hls_delete_threshold=x hls_vtt_options=x hls_allow_cache=x hls_base_url=x hls_segment_filename=x hls_segment_options=x hls_segment_size=x ',
+  ' hls_key_info_file=x hls_enc=x hls_enc_key=x hls_enc_key_url=x hls_enc_iv=x hls_subtitle_path=x hls_segment_type=x hls_fmp4_init_filename=x hls_fmp4_init_resend=x hls_flags=x strftime=x strftime_mkdir=x hls_playlist_type=x ',
+  ' hls_start_number_source=x var_stream_map=x cc_stream_map=x master_pl_name=x master_pl_publish_rate=x update=x frame_pts=x atomic_writing=x protocol_opts=x smc-interval=x cues_to_front=x cluster_size_limit=x cluster_time_limit=x ',
+  ' dash=x dash_track_number=x live=x allow_raw_vfw=x write_crc32=x default_mode=x write_id3v1=x write_xing=x muxrate=x preload=x mpegts_transport_stream_id=x mpegts_original_network_id=x mpegts_service_id=x mpegts_service_type=x ',
+  ' mpegts_pmt_start_pid=x mpegts_start_pid=x mpegts_m2ts_mode=x pes_payload_size=x mpegts_flags=x mpegts_copyts=x tables_version=x omit_video_pes_length=x pcr_period=x pat_period=x sdt_period=x nit_period=x boundary_tag=x ',
+  ' signal_standard=x store_user_comments=x d10_channelcount=x mxf_audio_edit_rate=x syncpoints=x write_index=x serial_offset=x oggpagesize=x pagesize=x page_duration=x payload_type=x ssrc=x cname=x seq=x mpegts_muxer_options=x ',
+  ' rtp_muxer_options=x initial_pause=x rtsp_transport=x rtsp_flags=x allowed_media_types=x min_port=x max_port=x reorder_queue_size=x reference_stream=x segment_format=x segment_format_options=x segment_list=x ',
+  ' segment_header_filename=x segment_list_flags=x segment_list_size=x segment_list_type=x segment_atclocktime=x segment_clocktime_offset=x segment_clocktime_wrap_duration=x segment_time=x segment_time_delta=x min_seg_duration=x ',
+  ' segment_times=x segment_frames=x segment_wrap=x segment_list_entry_prefix=x segment_start_number=x segment_wrap_number=x increment_tc=x break_non_keyframes=x individual_header_trailer=x write_header_trailer=x reset_timestamps=x ',
+  ' initial_offset=x write_empty_segments=x lookahead_count=x spdif_flags=x dtshd_rate=x dtshd_fallback_time=x use_fifo=x fifo_options=x write_bext=x write_peak=x rf64=x peak_block_size=x peak_format=x peak_ppv=x chunk_start_index=x ',
+  ' chunk_duration_ms=x time_shift_buffer_depth=x minimum_update_period=x header=x audio_chunk_duration=x silence_threshold=x algorithm=x fp_format=x window_title=x driver=x antialias=x charset=x color=x list_drivers=x list_dither=x ',
+  ' xoffset=x yoffset=x background=x no_window=x server=x stream_name=x device=x buffer_duration=x prebuf=x minreq=x window_x=x window_y=x window_fullscreen=x window_borderless=x window_enable_quit=x display_name=x window_id=x ',
+  ' aa_fixed_key=x raw_packet_size=x linespeed=x video_size=x framerate=x ignore_loop=x max_fps=x default_fps=x sample_rate=x subfps=x no_resync_search=x export_xmp=x use_odml=x pixel_format=x frame_rate=x safe=x auto_convert=x ',
+  ' segment_time_metadata=x allowed_extensions=x cenc_decryption_key=x channels=x ch_layout=x merge_alpha=x flv_metadata=x flv_full_metadata=x flv_ignore_prevtag=x missing_streams=x bit_rate=x min_delay=x max_gif_delay=x ',
+  ' default_delay=x hca_lowkey=x hca_highkey=x hca_subkey=x live_start_index=x prefer_x_start=x max_reload=x m3u8_hold_counters=x http_multiple=x http_seekable=x seg_format_options=x seg_max_retry=x pattern_type=x ',
+  ' start_number_range=x ts_from_file=x export_path_metadata=x assetmaps=x use_absolute_path=x seek_streams_individually=x ignore_editlist=x advanced_editlist=x ignore_chapters=x use_mfra_for=x use_tfdt=x export_all=x ',
+  ' activation_bytes=x audible_key=x audible_iv=x audible_fixed_key=x enable_drefs=x max_stts_delta=x interleaved_read=x usetoc=x resync_size=x fix_teletext_pts=x ts_packetsize=x scan_all_pmts=x skip_unknown_pmt=x ',
+  ' merge_pmt_versions=x max_packet_size=x compute_pcr=x strict_mime_boundary=x eia608_extract=x rtp_flags=x max_file_size=x sdp_flags=x start_time=x chars_per_frame=x sub_name=x max_size=x ignore_length=x bandwidth=x kind=x ',
+  ' track_index=x layout=x subsong=x dvtype=x dvbuffer=x dvguid=x format_modifier=x crtc_id=x plane_id=x graph=x graph_file=x dumpgraph=x sample_size=x list_devices=x fragment_size=x wallclock=x standard=x channel=x input_format=x ',
+  ' list_formats=x list_standards=x timestamps=x ts=x use_libv4l2=x x=x y=x grab_x=x grab_y=x draw_mouse=x follow_mouse=x show_region=x region_border=x select_region=x paranoia_mode=x sws_flags=w srcw=w srch=w dstw=w dsth=w ',
+  ' src_format=w dst_format=w src_range=w dst_range=w param0=w param1=w src_v_chr_pos=w src_h_chr_pos=w dst_v_chr_pos=w dst_h_chr_pos=w sws_dither=w alphablend=w ich=w in_channel_count=w och=w out_channel_count=w uch=w ',
+  ' used_channel_count=w isr=w in_sample_rate=w osr=w out_sample_rate=w isf=w in_sample_fmt=w osf=w out_sample_fmt=w tsf=w internal_sample_fmt=w icl=w in_channel_layout=w ocl=w out_channel_layout=w ichl=w in_chlayout=w ochl=w ',
+  ' out_chlayout=w uchl=w used_chlayout=w clev=w center_mix_level=w slev=w surround_mix_level=w lfe_mix_level=w rmvol=w rematrix_volume=w rematrix_maxval=w swr_flags=w dither_scale=w dither_method=w filter_size=w phase_shift=w ',
+  ' linear_interp=w exact_rational=w resample_cutoff=w resampler=w precision=w cheby=w min_comp=w min_hard_comp=w comp_duration=w max_soft_comp=w async=w first_pts=w matrix_encoding=w filter_type=w kaiser_beta=w output_sample_bits=w '
+ );
+Const
+ O3NAvH = 522;
+ O3AvH: Array[0..521] Of String = (
+  'bt=Set video bitrate tolerance (in bits/s). In 1-pass mode, bitrate tolerance specifies how far ratecontrol is willing to deviate from the target average bitrate value. This is not related to minimum/maximum bitrate. Lowering tolerance too ',
+  '+much has an adverse effect on quality.',
+  'g=set the group of picture (GOP) size',
+  'cutoff=set cutoff bandwidth',
+  'qcomp=video quantizer scale compression (VBR). Constant of ratecontrol equation. Recommended range for default rc_eq: 0.0-1.0',
+  'qblur=video quantizer scale blur (VBR)',
+  'qmin=minimum video quantizer scale (VBR)',
+  'qmax=maximum video quantizer scale (VBR)',
+  'qdiff=maximum difference between the quantizer scales (VBR)',
+  'bf=set maximum number of B-frames between non-B-frames',
+  'b_qfactor=QP factor between P- and B-frames',
+  'bug=work around not autodetected encoder bugs',
+  'b_qoffset=QP offset between P- and B-frames',
+  'maxrate=maximum bitrate (in bits/s). Used for VBV together with bufsize.',
+  'minrate=minimum bitrate (in bits/s). Most useful in setting up a CBR encode. It is of little use otherwise.',
+  'bufsize=set ratecontrol buffer size (in bits)',
+  'i_qfactor=QP factor between P- and I-frames',
+  'i_qoffset=QP offset between P- and I-frames',
+  'dct=DCT algorithm',
+  'lumi_mask=compresses bright areas stronger than medium ones',
+  'tcplx_mask=temporal complexity masking',
+  'scplx_mask=spatial complexity masking',
+  'p_mask=inter masking',
+  'dark_mask=compresses dark areas stronger than medium ones',
+  'ec=set error concealment strategy',
+  'sar=sample aspect ratio',
+  'dia_size=diamond type & size for motion estimation',
+  'last_pred=amount of motion predictors from the previous frame',
+  'pre_dia_size=diamond type & size for motion estimation pre-pass',
+  'subq=sub-pel motion estimation quality',
+  'me_range=limit motion vectors range (1023 for DivX player)',
+  'global_quality=',
+  'mbd=macroblock decision algorithm (high quality mode)',
+  'rc_init_occupancy=number of bits which should be loaded into the rc buffer before decoding starts',
+  'dc=intra_dc_precision',
+  'nssew=nsse weight',
+  'skip_top=number of macroblock rows at the top which are skipped',
+  'skip_bottom=number of macroblock rows at the bottom which are skipped',
+  'level=Specify level',
+  'lowres=Lower the decoding resolution by a power of two',
+  'cmp=full-pel ME compare function',
+  'subcmp=sub-pel ME compare function',
+  'mbcmp=macroblock compare function',
+  'ildctcmp=interlaced DCT compare function',
+  'precmp=pre motion estimation compare function',
+  'mblmin=minimum macroblock Lagrange factor (VBR)',
+  'mblmax=maximum macroblock Lagrange factor (VBR)',
+  'skip_loop_filter=skip loop filtering process for the selected frames',
+  'skip_idct=skip IDCT/dequantization for the selected frames',
+  'bidir_refine=refine the two motion vectors used in bidirectional macroblocks',
+  'keyint_min=minimum interval between IDR-frames',
+  'refs=reference frames to consider for motion compensation',
+  'trellis=rate-distortion optimal quantization',
+  'mv0_threshold=',
+  'compression_level=',
+  'request_channel_layout=',
+  'rc_max_vbv_use=',
+  'rc_min_vbv_use=',
+  'slices=set the number of slices, used in parallelized encoding',
+  'audio_service_type=audio service type',
+  'request_sample_fmt=sample format audio decoders should prefer',
+  'sub_charenc=set input text subtitles character encoding',
+  'sub_charenc_mode=set input text subtitles character encoding mode',
+  'apply_cropping=',
+  'skip_alpha=Skip processing alpha',
+  'max_samples=maximum number of samples decoded per call',
+  'hwaccel_flags=',
+  'extra_hw_frames=Number of extra hardware frames to allocate for the user',
+  'discard_damaged_percentage=Percentage of damaged samples to discard a frame',
+  'mpv_flags=Flags common for all mpegvideo-based encoders.',
+  'luma_elim_threshold=single coefficient elimination threshold for luminance (negative values also consider dc coefficient)',
+  'chroma_elim_threshold=single coefficient elimination threshold for chrominance (negative values also consider dc coefficient)',
+  'quantizer_noise_shaping=',
+  'error_rate=Simulate errors in the bitstream to test error concealment.',
+  'qsquish=how to keep quantizer between qmin and qmax (0 = clip, 1 = use differentiable function)',
+  'rc_qmod_amp=experimental quantizer modulation',
+  'rc_qmod_freq=experimental quantizer modulation',
+  'rc_eq=Set rate control equation. When computing the expression, besides the standard functions defined in the section ''Expression Evaluation'', the following functions are available: bits2qp(bits), qp2bits(qp). Also the following constants',
+  '+ are available: iTex pTex tex mv fCode iCount mcVar var isI isP isB avgQP qComp avgIITex avgPITex avgPPTex avgBPTex avgTex.',
+  'rc_init_cplx=initial complexity for 1-pass encoding',
+  'rc_buf_aggressivity=currently useless',
+  'border_mask=increase the quantizer for macroblocks close to borders',
+  'lmin=minimum Lagrange factor (VBR)',
+  'lmax=maximum Lagrange factor (VBR)',
+  'skip_threshold=Frame skip threshold',
+  'skip_factor=Frame skip factor',
+  'skip_exp=Frame skip exponent',
+  'skip_cmp=Frame skip compare function',
+  'sc_threshold=Scene change threshold',
+  'noise_reduction=Noise reduction',
+  'ps=RTP payload size in bytes',
+  'huffman=Huffman table strategy',
+  'force_duplicated_matrix=Always write luma and chroma matrix for mjpeg, useful for rtp streaming.',
+  'dpi=Set image resolution (in dots per inch)',
+  'dpm=Set image resolution (in dots per meter)',
+  'pred=Prediction method',
+  'quality=set quality',
+  'max_extra_cb_iterations=Max extra codebook recalculation passes, more is better and slower',
+  'skip_empty_cb=Avoid wasting bytes, ignore vintage MacOS decoder',
+  'max_strips=Limit strips/frame, vintage compatible is 1..3, otherwise the more the better',
+  'min_strips=Enforce min strips/frame, more is worse and faster, must be <= max_strips',
+  'strip_number_adaptivity=How fast the strip number adapts, more is slightly better, much slower',
+  'dither_type=Dither type',
+  'nitris_compat=encode with Avid Nitris compatibility',
+  'ibias=intra quant bias',
+  'quant_deadzone=Quantizer dead zone',
+  'compression=set compression type',
+  'gamma=set gamma',
+  'slicecrc=Protect slices with CRCs',
+  'coder=Coder type',
+  'context=Context model',
+  'non_deterministic=Allow multithreading for e.g. context=1 at the expense of determinism',
+  'motion_est=motion estimation algorithm',
+  'mepc=Motion estimation bitrate penalty compensation (1.0 = 256)',
+  'mepre=pre motion estimation',
+  'intra_penalty=Penalty for intra blocks in block decision',
+  'gifflags=set GIF flags',
+  'gifimage=enable encoding only images per frame',
+  'global_palette=write a palette to the global gif header where feasible',
+  'obmc=use overlapped block motion compensation.',
+  'mb_info=emit macroblock info for RFC 2190 packetization, the parameter value is the maximum payload size',
+  'umv=Use unlimited motion vectors.',
+  'aiv=Use alternative inter VLC.',
+  'structured_slices=Write slice start position at every GOB header instead of just GOB number.',
+  'chunks=chunk count',
+  'compressor=second-stage compressor',
+  'tile_width=Tile Width',
+  'tile_height=Tile Height',
+  'sop=SOP marker',
+  'eph=EPH marker',
+  'prog=Progression Order',
+  'layer_rates=Layer Rates',
+  'gop_timecode=MPEG GOP Timecode in hh:mm:ss[:;.]ff format. Overrides timecode_frame_start.',
+  'drop_frame_timecode=Timecode is in drop frame format.',
+  'scan_offset=Reserve space for SVCD scan offset user data.',
+  'timecode_frame_start=GOP timecode frame start number, in non-drop-frame format',
+  'b_strategy=Strategy to choose between I/P/B-frames',
+  'b_sensitivity=Adjust sensitivity of b_frame_strategy 1',
+  'brd_scale=Downscale frames for dynamic B-frame decision',
+  'intra_vlc=Use MPEG-2 intra VLC table.',
+  'non_linear_quant=Use nonlinear quantizer.',
+  'alternate_scan=Enable alternate scantable.',
+  'a53cc=Use A53 Closed Captions (if available)',
+  'seq_disp_ext=Write sequence_display_extension blocks.',
+  'video_format=Video_format in the sequence_display_extension indicating the source of the video.',
+  'data_partitioning=Use data partitioning.',
+  'mpeg_quant=Use MPEG quantizers instead of H.263',
+  'vendor=vendor ID',
+  'mbs_per_slice=macroblocks per slice',
+  'bits_per_mb=desired bits per macroblock',
+  'quant_mat=quantiser matrix',
+  'alpha_bits=bits for alpha plane',
+  'quake3_compat=Whether to respect known limitations in Quake 3 decoder',
+  'skip_frame_thresh=',
+  'start_one_color_thresh=',
+  'continue_one_color_thresh=',
+  'sixteen_color_thresh=',
+  'rle=Use run-length compression',
+  'memc_only=Only do ME/MC (I frames -> ref, P frame -> ME+MC).',
+  'no_bitstream=Skip final bitstream writeout.',
+  'iterative_dia_size=Dia size for the iterative ME',
+  'motion-est=Motion estimation algorithm',
+  'compression_algo=',
+  'tolerance=Max undershoot in percent',
+  'slice_width=Slice width',
+  'slice_height=Slice height',
+  'wavelet_depth=Transform depth',
+  'wavelet_type=Transform type',
+  'qm=Custom quantization matrix',
+  'aac_coder=Coding algorithm',
+  'aac_ms=Force M/S stereo coding',
+  'aac_is=Intensity stereo coding',
+  'aac_pns=Perceptual noise substitution',
+  'aac_tns=Temporal noise shaping',
+  'aac_ltp=Long term prediction',
+  'aac_pred=AAC-Main prediction',
+  'aac_pce=Forces the use of PCEs',
+  'center_mixlev=Center Mix Level',
+  'surround_mixlev=Surround Mix Level',
+  'mixing_level=Mixing Level',
+  'room_type=Room Type',
+  'per_frame_metadata=Allow Changing Metadata Per-Frame',
+  'copyright=Copyright Bit',
+  'dialnorm=Dialogue Level (dB)',
+  'dsur_mode=Dolby Surround Mode',
+  'original=Original Bit Stream',
+  'dmix_mode=Preferred Stereo Downmix Mode',
+  'ltrt_cmixlev=Lt/Rt Center Mix Level',
+  'ltrt_surmixlev=Lt/Rt Surround Mix Level',
+  'loro_cmixlev=Lo/Ro Center Mix Level',
+  'loro_surmixlev=Lo/Ro Surround Mix Level',
+  'dsurex_mode=Dolby Surround EX Mode',
+  'dheadphone_mode=Dolby Headphone Mode',
+  'ad_conv_type=A/D Converter Type',
+  'stereo_rematrixing=Stereo Rematrixing',
+  'channel_coupling=Channel Coupling',
+  'cpl_start_band=Coupling Start Band',
+  'min_prediction_order=',
+  'max_prediction_order=',
+  'dca_adpcm=Use ADPCM encoding',
+  'lpc_coeff_precision=LPC coefficient precision',
+  'lpc_type=LPC algorithm',
+  'lpc_passes=Number of passes to use for Cholesky factorization during LPC analysis',
+  'min_partition_order=',
+  'max_partition_order=',
+  'prediction_order_method=Search method for selecting prediction order',
+  'ch_mode=Stereo decorrelation mode',
+  'exact_rice_parameters=Calculate rice parameters exactly',
+  'multi_dim_quant=Multi-dimensional quantization',
+  'max_interval=Max number of frames between each new header',
+  'codebook_search=Max number of codebook searches',
+  'prediction_order=Search method for selecting prediction order',
+  'rematrix_precision=Rematrix coefficient precision',
+  'opus_delay=Maximum delay in milliseconds',
+  'apply_phase_inv=Apply intensity stereo phase inversion',
+  'sbc_delay=set maximum algorithmic latency',
+  'msbc=use mSBC mode (wideband speech mono SBC)',
+  'joint_stereo=',
+  'optimize_mono=',
+  'block_size=set the block size',
+  'palette=set the global palette',
+  'even_rows_fix=Make number of rows even (workaround for some players)',
+  'height=Frame height, usually video height',
+  'cpu-used=Quality/Speed ratio modifier',
+  'auto-alt-ref=Enable use of alternate reference frames (2-pass only)',
+  'lag-in-frames=Number of frames to look ahead at for alternate reference frame selection',
+  'arnr-max-frames=altref noise reduction max frame count',
+  'arnr-strength=altref noise reduction filter strength',
+  'aq-mode=adaptive quantization mode',
+  'error-resilience=Error resilience configuration',
+  'crf=Select the quality for constant quality mode',
+  'static-thresh=A change threshold on blocks below which they will be skipped by the encoder',
+  'drop-threshold=Frame drop threshold',
+  'denoise-noise-level=Amount of noise to be removed',
+  'denoise-block-size=Denoise block size ',
+  'undershoot-pct=Datarate undershoot (min) target (%)',
+  'overshoot-pct=Datarate overshoot (max) target (%)',
+  'minsection-pct=GOP min bitrate (% of target)',
+  'maxsection-pct=GOP max bitrate (% of target)',
+  'frame-parallel=Enable frame parallel decodability features',
+  'tiles=Tile columns x rows',
+  'tile-columns=Log2 of number of tile columns to use',
+  'tile-rows=Log2 of number of tile rows to use',
+  'row-mt=Enable row based multi-threading',
+  'enable-cdef=Enable CDEF filtering',
+  'enable-global-motion=Enable global motion',
+  'enable-intrabc=Enable intra block copy prediction mode',
+  'enable-restoration=Enable Loop Restoration filtering',
+  'usage=Quality and compression efficiency vs speed trade-off',
+  'tune=The metric that the encoder tunes for. Automatically chosen by the encoder by default',
+  'still-picture=Encode in single frame mode (typically used for still AVIF images).',
+  'enable-rect-partitions=Enable rectangular partitions',
+  'enable-1to4-partitions=Enable 1:4/4:1 partitions',
+  'enable-ab-partitions=Enable ab shape partitions',
+  'enable-angle-delta=Enable angle delta intra prediction',
+  'enable-cfl-intra=Enable chroma predicted from luma intra prediction',
+  'enable-filter-intra=Enable filter intra predictor',
+  'enable-intra-edge-filter=Enable intra edge filter',
+  'enable-smooth-intra=Enable smooth intra prediction mode',
+  'enable-paeth-intra=Enable paeth predictor in intra prediction',
+  'enable-palette=Enable palette prediction mode',
+  'enable-flip-idtx=Enable extended transform type',
+  'enable-tx64=Enable 64-pt transform',
+  'reduced-tx-type-set=Use reduced set of transform types',
+  'use-intra-dct-only=Use DCT only for INTRA modes',
+  'use-inter-dct-only=Use DCT only for INTER modes',
+  'use-intra-default-tx-only=Use default-transform only for INTRA modes',
+  'enable-ref-frame-mvs=Enable temporal mv prediction',
+  'enable-reduced-reference-set=Use reduced set of single and compound references',
+  'enable-obmc=Enable obmc',
+  'enable-dual-filter=Enable dual filter',
+  'enable-diff-wtd-comp=Enable difference-weighted compound',
+  'enable-dist-wtd-comp=Enable distance-weighted compound',
+  'enable-onesided-comp=Enable one sided compound',
+  'enable-interinter-wedge=Enable interinter wedge compound',
+  'enable-interintra-wedge=Enable interintra wedge compound',
+  'enable-masked-comp=Enable masked compound',
+  'enable-interintra-comp=Enable interintra compound',
+  'enable-smooth-interintra=Enable smooth interintra mode',
+  'aom-params=Set libaom options using a :-separated list of key=value pairs',
+  'effort=Encoding effort',
+  'distance=Maximum Butteraugli distance (quality setting, lower = better, zero = lossless, default 1.0)',
+  'modular=Force modular mode',
+  'reservoir=use bit reservoir',
+  'abr=use ABR',
+  'cinema_mode=Digital Cinema',
+  'prog_order=Progression Order',
+  'numresolution=',
+  'irreversible=',
+  'disto_alloc=',
+  'fixed_quality=',
+  'application=Intended application type',
+  'frame_duration=Duration of a frame in milliseconds',
+  'packet_loss=Expected packet loss percentage',
+  'vbr=Variable bit rate mode',
+  'mapping_family=Channel Mapping Family',
+  'qp=use constant quantizer mode',
+  'rav1e-params=set the rav1e configuration using a :-separated list of key=value parameters',
+  'cbr_quality=Set quality value (0 to 10) for CBR',
+  'vad=Voice Activity Detection',
+  'dtx=Discontinuous Transmission',
+  'hielevel=Hierarchical prediction levels setting (Deprecated, use svtav1-params)',
+  'la_depth=Look ahead distance [0, 120] (Deprecated, use svtav1-params)',
+  'tier=Set operating point tier (Deprecated, use svtav1-params)',
+  'preset=Encoding preset',
+  'sc_detection=Scene change detection (Deprecated, use svtav1-params)',
+  'tile_columns=Log2 of number of tile columns to use (Deprecated, use svtav1-params)',
+  'tile_rows=Log2 of number of tile rows to use (Deprecated, use svtav1-params)',
+  'svtav1-params=Set the SVT-AV1 configuration using a :-separated list of key=value parameters',
+  'psymodel=Psychoacoustic Model',
+  'energy_levels=enable energy levels',
+  'error_protection=enable CRC error protection',
+  'verbosity=set library optput level (0-10)',
+  'iblock=Sets the impulse block bias',
+  'arnr-maxframes=altref noise reduction max frame count',
+  'arnr-type=altref noise reduction filter type',
+  'deadline=Time to spend encoding, in microseconds.',
+  'error-resilient=Error resilience configuration',
+  'max-intra-rate=Maximum I-frame bitrate (pct) 0=unlimited',
+  'noise-sensitivity=Noise sensitivity',
+  'ts-parameters=Temporal scaling configuration using a :-separated list of key=value parameters',
+  'vp8flags=',
+  'arnr_max_frames=altref noise reduction max frame count',
+  'arnr_strength=altref noise reduction filter strength',
+  'arnr_type=altref noise reduction filter type',
+  'rc_lookahead=Number of frames to look ahead for alternate reference frame selection',
+  'sharpness=Increase sharpness at the expense of lower PSNR',
+  'lossless=Lossless mode',
+  'tune-content=Tune content type',
+  'corpus-complexity=corpus vbr complexity midpoint',
+  'enable-tpl=Enable temporal dependency model',
+  'min-gf-interval=Minimum golden/alternate reference frame interval',
+  'cr_threshold=Conditional replenishment threshold',
+  'cr_size=Conditional replenishment block size',
+  'fastfirstpass=Use fast settings when encoding first pass',
+  'wpredp=Weighted prediction for P-frames',
+  'x264opts=x264 options',
+  'crf_max=In CRF mode, prevents VBV from lowering quality beyond this point.',
+  'aq-strength=AQ strength. Reduces blocking and blurring in flat and textured areas.',
+  'psy=Use psychovisual optimizations.',
+  'psy-rd=Strength of psychovisual optimization, in <psy-rd>:<psy-trellis> format.',
+  'rc-lookahead=Number of frames to look ahead for frametype and ratecontrol',
+  'weightb=Weighted prediction for B-frames.',
+  'weightp=Weighted prediction analysis method.',
+  'ssim=Calculate and print SSIM stats.',
+  'intra-refresh=Use Periodic Intra Refresh instead of IDR frames.',
+  'bluray-compat=Bluray compatibility workarounds.',
+  'b-bias=Influences how often B-frames are used',
+  'b-pyramid=Keep some B-frames as references.',
+  'mixed-refs=One reference per partition, as opposed to one reference per macroblock',
+  '8x8dct=High profile 8x8 transform.',
+  'fast-pskip=',
+  'aud=Use access unit delimiters.',
+  'mbtree=Use macroblock tree ratecontrol.',
+  'deblock=Loop filter parameters, in <alpha:beta> form.',
+  'cplxblur=Reduce fluctuations in QP (before curve compression)',
+  'partitions=A comma-separated list of partitions to consider. Possible values: p8x8, p4x4, b8x8, i8x8, i4x4, none, all',
+  'direct-pred=Direct MV prediction mode',
+  'slice-max-size=Limit the size of each slice in bytes',
+  'nal-hrd=Signal HRD information (requires vbv-bufsize; cbr not allowed in .mp4)',
+  'avcintra-class=AVC-Intra class 50/100/200/300/480',
+  'me_method=Set motion estimation method',
+  'forced-idr=If forcing keyframes, force them as IDR frames.',
+  'chromaoffset=QP difference between chroma and luma',
+  'udu_sei=Use user data unregistered SEI if available',
+  'x264-params=Override the x264 configuration using a :-separated list of key=value parameters',
+  'x265-params=set the x265 configuration using a :-separated list of key=value parameters',
+  'lumi_aq=Luminance masking AQ',
+  'variance_aq=Variance AQ',
+  'ssim_acc=SSIM accuracy',
+  'gmc=use GMC',
+  'me_quality=Motion estimation quality',
+  'num_output_buffers=Number of buffers in the output context',
+  'num_capture_buffers=Number of buffers in the capture context',
+  'rc=Override the preset rate-control',
+  'multipass=Set the multipass encoding',
+  'highbitdepth=Enable 10 bit encode for 8 bit input',
+  'surfaces=Number of concurrent surfaces',
+  'gpu=Selects which NVENC capable GPU to use. First GPU is 0, second is 1, and so on.',
+  'rgb_mode=Configure how nvenc handles packed RGB input.',
+  'delay=Delay frame output by the given amount of frames',
+  'cq=Set target quality level (0 to 51, 0 means automatic) for constant quality mode in VBR rate control',
+  'init_qpP=Initial QP value for P frame',
+  'init_qpB=Initial QP value for B frame',
+  'init_qpI=Initial QP value for I frame',
+  'qp_cb_offset=Quantization parameter offset for cb channel',
+  'qp_cr_offset=Quantization parameter offset for cr channel',
+  'no-scenecut=When lookahead is enabled, set this to 1 to disable adaptive I-frame insertion at scene cuts',
+  'b_adapt=When lookahead is enabled, set this to 0 to disable adaptive B-frame decision',
+  'spatial-aq=set to 1 to enable Spatial AQ',
+  'temporal-aq=set to 1 to enable Temporal AQ',
+  'zerolatency=Set 1 to indicate zero latency operation (no reordering delay)',
+  'nonref_p=Set this to 1 to enable automatic insertion of non-reference P-frames',
+  'strict_gop=Set 1 to minimize GOP-to-GOP rate fluctuations',
+  'weighted_pred=Enable weighted prediction',
+  'b_ref_mode=Use B frames as references',
+  'dpb_size=Specifies the DPB size used for encoding (0 means automatic)',
+  'ldkfs=Low delay key frame scale; Specifies the Scene Change frame size increase allowed in case of single frame VBV and CBR',
+  'timing-info=Include timing info in sequence/frame headers',
+  'extra_sei=Pass on extra SEI data (e.g. a53 cc) to be included in the bitstream',
+  's12m_tc=Use timecode (if available)',
+  'async_depth=Maximum processing parallelism',
+  'forced_idr=Forcing I frames as IDR frames',
+  'low_power=enable low power mode(experimental: many limitations by mfx version, BRC modes, etc.)',
+  'adaptive_i=Adaptive I-frame placement',
+  'adaptive_b=Adaptive B-frame placement',
+  'extbrc=Extended bitrate control',
+  'low_delay_brc=Allow to strictly obey avg frame size',
+  'max_frame_size=Maximum encoded frame size in bytes',
+  'max_frame_size_i=Maximum encoded I frame size in bytes',
+  'max_frame_size_p=Maximum encoded P frame size in bytes',
+  'tile_cols=Number of columns for tiled encoding',
+  'look_ahead_depth=Depth of look ahead in number frames, available when extbrc option is enabled',
+  'idr_interval=Distance (in I-frames) between IDR frames',
+  'b_depth=Maximum B-frame reference depth',
+  'rc_mode=Set rate control mode',
+  'tile_groups=Number of tile groups for encoding',
+  'cbr=Use cbr encoding mode',
+  '2pass=Use 2pass encoding mode',
+  'spatial_aq=set to 1 to enable Spatial AQ',
+  'temporal_aq=set to 1 to enable Temporal AQ',
+  'single-slice-intra-refresh=Use single slice intra refresh',
+  'max_slice_size=Maximum encoded slice size in bytes',
+  'constrained-encoding=Enable constrainedFrame encoding where each slice in the constrained picture is independent of other slices',
+  'rdo=Enable rate distortion optimization',
+  'bitrate_limit=Toggle bitrate limitations',
+  'mbbrc=MB level bitrate control',
+  'p_strategy=Enable P-pyramid: 0-default 1-simple 2-pyramid(bf need to be set to 0).',
+  'dblk_idc=This option disable deblocking. It has value in range 0~2.',
+  'max_qp_i=Maximum video quantizer scale for I frame',
+  'min_qp_i=Minimum video quantizer scale for I frame',
+  'max_qp_p=Maximum video quantizer scale for P frame',
+  'min_qp_p=Minimum video quantizer scale for P frame',
+  'max_qp_b=Maximum video quantizer scale for B frame',
+  'min_qp_b=Minimum video quantizer scale for B frame',
+  'scenario=A hint to encoder about the scenario for the encoding session',
+  'avbr_accuracy=Accuracy of the AVBR ratecontrol (unit of tenth of percent)',
+  'avbr_convergence=Convergence of the AVBR ratecontrol (unit of 100 frames)',
+  'cavlc=Enable CAVLC',
+  'pic_timing_sei=Insert picture timing SEI with pic_struct_syntax element',
+  'single_sei_nal_unit=Put all the SEI messages into one NALU',
+  'max_dec_frame_buffering=Maximum number of frames buffered in the DPB',
+  'look_ahead=Use VBR algorithm with look ahead',
+  'look_ahead_downsampling=Downscaling factor for the frames saved for the lookahead analysis',
+  'int_ref_type=Intra refresh type. B frames should be set to 0.',
+  'int_ref_cycle_size=Number of frames in the intra refresh cycle',
+  'int_ref_qp_delta=QP difference for the refresh MBs',
+  'recovery_point_sei=Insert recovery point SEI messages',
+  'int_ref_cycle_dist=Distance between the beginnings of the intra-refresh cycles in frames',
+  'repeat_pps=repeat pps for every frame',
+  'sei=Set SEI to include',
+  'load_plugin=A user plugin to load in an internal session',
+  'load_plugins=A :-separate list of hexadecimal plugin UIDs to load in an internal session',
+  'gpb=1: GPB (generalized P/B frame); 0: regular P frame',
+  'transform_skip=Turn this option ON to enable transformskip',
+  'jfif=Include JFIF header',
+  'loop_filter_level=Loop filter level',
+  'loop_filter_sharpness=Loop filter sharpness',
+  'layer=Set the decoding layer',
+  'part=Set the decoding part',
+  'apply_trc=color transfer characteristics to apply to EXR linear input',
+  'skip_cursor=skip the cursor',
+  'blank_value=value that is used to replace BLANK pixels in data array',
+  'change_field_order=Change field order',
+  'trans_color=color value (ARGB) that is used instead of transparent color',
+  'is_avc=is avc',
+  'nal_length_size=nal_length_size',
+  'enable_er=Enable error resilience on damaged frames (unsafe)',
+  'x264_build=Assume this x264 version if no x264 version found in any SEI',
+  'gpu_copy=A GPU-accelerated copy between video and system memory',
+  'apply_defdispwin=Apply default display window from VUI',
+  'strict-displaywin=stricly apply default display window size',
+  'extern_huff=Use external huffman table.',
+  'non_pcm_mode=Chooses what to do with NON-PCM',
+  'subimage=decode subimage instead if available',
+  'thumbnail=decode embedded thumbnail subimage instead if available',
+  'page=page number of multi-page image to decode (starting from 1)',
+  'custom_stride=Custom V210 stride',
+  'dual_mono_mode=Select the channel to decode for dual mono',
+  'channel_order=Order in which the channels are to be exported',
+  'cons_noisegen=enable consistent noise generation',
+  'drc_scale=percentage of dynamic range compression to apply',
+  'heavy_compr=enable heavy dynamic range compression',
+  'target_level=target level in -dBFS (0 not applied)',
+  'downmix=Request a specific channel layout from the decoder',
+  'extra_bits_bug=Force non-standard decoding process',
+  'core_only=Decode core only without extensions',
+  'postfilter=enable postfilter',
+  'use_buggy_lpc=emulate old buggy lavc behavior',
+  'bits_per_codeword=Bits per G722 codeword',
+  'real_time=emit subtitle events as they are decoded for real-time display',
+  'real_time_latency_msec=minimum elapsed time between emitting real-time subtitle events',
+  'data_field=select data field',
+  'compute_edt=compute end of time using pts or timeout',
+  'compute_clut=compute clut when not available(-1) or only once (-2) or always(1) or never(0)',
+  'dvb_substream=',
+  'ifo_palette=obtain the global palette from .IFO file',
+  'forced_subs_only=Only show forced subtitles',
+  'width=Frame width, usually video width',
+  'keep_ass_markup=Set if ASS tags must be escaped',
+  'tilethreads=Tile threads',
+  'framethreads=Frame threads',
+  'max_frame_delay=Max frame delay',
+  'filmgrain=Apply Film Grain',
+  'oppoint=Select an operating point of the scalable bitstream',
+  'alllayers=Output all spatial layers',
+  'keep_ar=Keep aspect ratio with custom width/height',
+  'txt_page=page numbers to decode, subtitle for subtitles, * for all',
+  'txt_default_region=default G0 character set used for decoding',
+  'txt_chop_top=discards the top teletext line',
+  'txt_format=format of the subtitles (bitmap or text or ass)',
+  'txt_left=x offset of generated bitmaps',
+  'txt_top=y offset of generated bitmaps',
+  'txt_chop_spaces=chops leading and trailing spaces from text',
+  'txt_duration=display duration of teletext pages in msecs',
+  'txt_transparent=force transparent background of the teletext',
+  'txt_opacity=set opacity of the transparent background',
+  'operating_point=Select an operating point of the scalable bitstream',
+  'deint=Set deinterlacing mode',
+  'drop_second_field=Drop second field when deinterlacing',
+  'crop=Crop (top)x(bottom)x(left)x(right)',
+  'resize=Resize (width)x(height)'
+ );
+Const
+ O3DemN = 10;
+ O3Dem: Array[0..9] Of String = (
+  ' 3dostr 3g2 3gp 4xm aa aac aax ac3 ac4 ace acm act adf adp ads adx aea afc aiff aix alaw alias_pix alp alsa amr amrnb amrwb anm apac apc ape apm apng aptx aptx_hd aqtitle argo_asf argo_brp argo_cvg asf asf_o ass ast au av1 ',
+  ' avi avr avs avs2 avs3 bethsoftvid bfi bfstm bin bink binka bit bitpacked bmp_pipe bmv boa bonk brender_pix brstm c93 caf cavsvideo cdg cdxl cine codec2 codec2raw concat cri_pipe dash data daud dcstr dds_pipe derf dfa dfpwm ',
+  ' dhav dirac dnxhd dpx_pipe dsf dsicin dss dts dtshd dv dvbsub dvbtxt dxa ea ea_cdata eac3 epaf evc exr_pipe f32be f32le f64be f64le fbdev ffmetadata film_cpk filmstrip fits flac flic flv frm fsb fwse g722 g723_1 g726 g726le ',
+  ' g729 gdv gem_pipe genh gif gif_pipe gsm gxf h261 h263 h264 hca hcom hdr_pipe hevc hls hnm ico idcin idf iec61883 iff ifv ilbc image2 image2pipe imf ingenient ipmovie ipu ircam iss iv8 ivf ivr j2k_pipe jack jacosub jpeg_pipe ',
+  ' jpegls_pipe jpegxl_anim jpegxl_pipe jv kmsgrab kux kvag laf lavfi libcdio libdc1394 libgme libopenmpt live_flv lmlm4 loas lrc luodat lvf lxf m4a m4v matroska mca mcc mgsts microdvd mj2 mjpeg mjpeg_2000 mlp mlv mm mmf mods ',
+  ' moflex mov mp3 mp4 mpc mpc8 mpeg mpegts mpegtsraw mpegvideo mpjpeg mpl2 mpsub msf msnwctcp msp mtaf mtv mulaw musx mv mvi mxf mxg nc nistsphere nsp nsv nut nuv obu ogg oma openal osq oss paf pam_pipe pbm_pipe pcx_pipe pdv ',
+  ' pfm_pipe pgm_pipe pgmyuv_pipe pgx_pipe phm_pipe photocd_pipe pictor_pipe pjs pmp png_pipe pp_bnk ppm_pipe psd_pipe psxstr pulse pva pvf qcp qdraw_pipe qoi_pipe r3d rawvideo realtext redspark rka rl2 rm roq rpl rsd rso rtp ',
+  ' rtsp s16be s16le s24be s24le s32be s32le s337m s8 sami sap sbc sbg scc scd sdns sdp sdr2 sds sdx ser sga sgi_pipe shn siff simbiosis_imx sln smjpeg smk smush sol sox spdif srt stl subviewer subviewer1 sunrast_pipe sup svag ',
+  ' svg_pipe svs swf tak tedcaptions thp tiertexseq tiff_pipe tmv truehd tta tty txd ty u16be u16le u24be u24le u32be u32le u8 usm v210 v210x v4l2 vag vbn_pipe vc1 vc1test vidc video4linux2 vividas vivo vmd vobsub voc vpk ',
+  ' vplayer vqf vvc w64 wady wav wavarc wc3movie webm webm_dash_manifest webp_pipe webvtt wsaud wsd wsvqa wtv wv wve x11grab xa xbin xbm_pipe xmd xmv xpm_pipe xvag xwd_pipe xwma yop yuv4mpegpipe '
+ );
+Const
+ O3MuxN = 189;
+ O3Mux: Array[0..188] Of String = (
+  '3g2|3g2|h263|amr_nb',
+  '3gp|3gp|h263|amr_nb',
+  'a64|a64,a64|a64_multi|',
+  'ac3|ac3||ac3',
+  'ac4|ac4||ac4',
+  'adts|aac,adts||aac',
+  'adx|adx||adpcm_adx',
+  'aiff|aif,aiff,afc,aifc|png|pcm_s16be',
+  'alaw|al||pcm_alaw',
+  'alp|tun,pcm||adpcm_ima_alp',
+  'alsa|||pcm_s16le',
+  'amr|amr||amr_nb',
+  'amv|amv|amv|adpcm_ima_amv',
+  'apm|apm||adpcm_ima_apm',
+  'apng|apng|apng|',
+  'aptx|aptx||aptx',
+  'aptx_hd|aptxhd||aptx_hd',
+  'argo_asf|||adpcm_argo',
+  'argo_cvg|cvg||adpcm_psx',
+  'asf|asf,wmv,wma|msmpeg4v3|wmav2',
+  'asf_stream|asf,wmv,wma|msmpeg4v3|wmav2',
+  'ass|ass,ssa||',
+  'ast|ast||pcm_s16be_planar',
+  'au|au||pcm_s16be',
+  'avi|avi|mpeg4|libmp3lame',
+  'avif|avif|libaom-av1|',
+  'avm2||flv1|libmp3lame',
+  'avs2|avs,avs2|avs2|',
+  'avs3|avs3|avs3|',
+  'bit|bit||g729',
+  'caca||rawvideo|',
+  'caf|caf||pcm_s16be',
+  'cavsvideo|cavs|cavs|',
+  'chromaprint|||pcm_s16le',
+  'codec2|c2||codec2',
+  'codec2raw|||codec2',
+  'crc||rawvideo|pcm_s16le',
+  'dash|mpd|libx264|aac',
+  'data|||',
+  'daud|302||pcm_s24daud',
+  'dfpwm|dfpwm||dfpwm',
+  'dirac|drc,vc2|dirac|',
+  'dnxhd|dnxhd,dnxhr|dnxhd|',
+  'dts|dts||dts',
+  'dv|dv|dvvideo|pcm_s16le',
+  'dvd|dvd|mpeg2video|mp2',
+  'eac3|eac3,ec3||eac3',
+  'evc|evc|evc|',
+  'f32be|||pcm_f32be',
+  'f32le|||pcm_f32le',
+  'f4v|f4v|libx264|aac',
+  'f64be|||pcm_f64be',
+  'f64le|||pcm_f64le',
+  'fbdev||rawvideo|',
+  'ffmetadata|ffmeta||',
+  'fifo|||',
+  'fifo_test|||',
+  'film_cpk|cpk|cinepak|pcm_s16be_planar',
+  'filmstrip|flm|rawvideo|',
+  'fits|fits|fits|',
+  'flac|flac|png|flac',
+  'flv|flv|flv1|libmp3lame',
+  'framecrc||rawvideo|pcm_s16le',
+  'framehash||rawvideo|pcm_s16le',
+  'framemd5||rawvideo|pcm_s16le',
+  'g722|g722||adpcm_g722',
+  'g723_1|tco,rco||g723_1',
+  'g726|||adpcm_g726',
+  'g726le|||adpcm_g726le',
+  'gif|gif|gif|',
+  'gsm|gsm||gsm',
+  'gxf|gxf|mpeg2video|pcm_s16le',
+  'h261|h261|h261|',
+  'h263|h263|h263|',
+  'h264|h264,264|libx264|',
+  'hash||rawvideo|pcm_s16le',
+  'hds||libx264|aac',
+  'hevc|hevc,h265,265|libx265|',
+  'hls|m3u8|libx264|aac',
+  'ico|ico|bmp|',
+  'ilbc|lbc||ilbc',
+  'image2|bmp,dpx,exr,jls,jpeg,jpg,jxl,ljpg,pam,pbm,pcx,pfm,pgm,pgmyuv,phm,png,ppm,sgi,tga,tif,tiff,jp2,j2c,j2k,xwd,sun,ras,rs,im1,im8,im24,sunras,vbn,xbm,xface,pix,y,avif,qoi,hdr,wbmp|mjpeg|',
+  'image2pipe||mjpeg|',
+  'ipod|m4v,m4a,m4b|libx264|aac',
+  'ircam|sf,ircam||pcm_s16le',
+  'ismv|ismv,isma|libx264|aac',
+  'ivf|ivf|libvpx|',
+  'jacosub|jss,js||',
+  'kvag|vag||adpcm_ima_ssi',
+  'latm|latm,loas||aac',
+  'lrc|lrc||',
+  'm4v|m4v|mpeg4|',
+  'matroska|mkv,mka|libx264|libvorbis',
+  'md5||rawvideo|pcm_s16le',
+  'microdvd|sub||',
+  'mjpeg|mjpg,mjpeg|mjpeg|',
+  'mkvtimestamp_v2||rawvideo|',
+  'mlp|mlp||mlp',
+  'mmf|mmf||adpcm_yamaha',
+  'mov|mov|libx264|aac',
+  'mp2|mp2,m2a,mpa||mp2',
+  'mp3|mp3|png|libmp3lame',
+  'mp4|mp4|libx264|aac',
+  'mpeg|mpg,mpeg|mpeg1video|mp2',
+  'mpeg1video|mpg,mpeg,m1v|mpeg1video|',
+  'mpeg2video|m2v|mpeg2video|',
+  'mpegts|ts,m2t,m2ts,mts|mpeg2video|mp2',
+  'mpjpeg|mjpg|mjpeg|',
+  'mulaw|ul||pcm_mulaw',
+  'mxf|mxf|mpeg2video|pcm_s16le',
+  'mxf_d10||mpeg2video|pcm_s16le',
+  'mxf_opatom|mxf|dnxhd|pcm_s16le',
+  'null||wrapped_avframe|pcm_s16le',
+  'nut|nut|mpeg4|libvorbis',
+  'obu|obu|libaom-av1|',
+  'oga|oga||flac',
+  'ogg|ogg|libtheora|libvorbis',
+  'ogv|ogv|libtheora|libvorbis',
+  'oma|oma||atrac3',
+  'opengl||wrapped_avframe|',
+  'opus|opus||libopus',
+  'oss|||pcm_s16le',
+  'psp|mp4,psp|libx264|aac',
+  'pulse|||pcm_s16le',
+  'rawvideo|yuv,rgb|rawvideo|',
+  'rm|rm,ra|rv10|ac3',
+  'roq|roq|roq|roq_dpcm',
+  'rso|rso||pcm_u8',
+  'rtp||mpeg4|pcm_mulaw',
+  'rtp_mpegts||mpeg4|aac',
+  'rtsp||mpeg4|aac',
+  's16be|||pcm_s16be',
+  's16le|sw||pcm_s16le',
+  's24be|||pcm_s24be',
+  's24le|||pcm_s24le',
+  's32be|||pcm_s32be',
+  's32le|||pcm_s32le',
+  's8|sb||pcm_s8',
+  'sap||mpeg4|aac',
+  'sbc|sbc,msbc||sbc',
+  'scc|scc||',
+  'sdl||rawvideo|',
+  'sdl2||rawvideo|',
+  'segment|||',
+  'smjpeg||mjpeg|pcm_s16le',
+  'smoothstreaming||libx264|aac',
+  'sox|sox||pcm_s32le',
+  'spdif|spdif||ac3',
+  'spx|spx||speex',
+  'srt|srt||',
+  'ssegment|||',
+  'stream_segment|||',
+  'streamhash||rawvideo|pcm_s16le',
+  'sup|sup||',
+  'svcd|vob|mpeg2video|mp2',
+  'swf|swf|flv1|libmp3lame',
+  'tee|||',
+  'truehd|thd||truehd',
+  'tta|tta||tta',
+  'ttml|ttml||',
+  'u16be|||pcm_u16be',
+  'u16le|uw||pcm_u16le',
+  'u24be|||pcm_u24be',
+  'u24le|||pcm_u24le',
+  'u32be|||pcm_u32be',
+  'u32le|||pcm_u32le',
+  'u8|ub||pcm_u8',
+  'uncodedframecrc||rawvideo|pcm_s16le',
+  'v4l2||rawvideo|',
+  'vc1|vc1|vc1|',
+  'vc1test|rcv|wmv3|',
+  'vcd||mpeg1video|mp2',
+  'vidc|||pcm_vidc',
+  'video4linux2||rawvideo|',
+  'vob|vob|mpeg2video|mp2',
+  'voc|voc||pcm_s16le',
+  'vvc|vvc,h266,266|vvc|',
+  'w64|w64||pcm_s16le',
+  'wav|wav||pcm_s16le',
+  'webm|webm|libvpx-vp9|libopus',
+  'webm_chunk|chk||',
+  'webm_dash_manifest|xml||',
+  'webp|webp|libwebp|',
+  'webvtt|vtt||',
+  'wsaud|aud||adpcm_ima_ws',
+  'wtv|wtv|mpeg2video|ac3',
+  'wv|wv||wavpack',
+  'xv||wrapped_avframe|',
+  'yuv4mpegpipe|y4m|wrapped_avframe|'
+ );
+Const
+ O3PixN = 10;
+ O3Pix: Array[0..9] Of String = (
+  ' yuv420p yuyv422 rgb24 bgr24 yuv422p yuv444p yuv410p yuv411p gray monow monob pal8 yuvj420p yuvj422p yuvj444p uyvy422 uyyvyy411 bgr8 bgr4 bgr4_byte rgb8 rgb4 rgb4_byte nv12 nv21 argb rgba abgr bgra gray16be gray16le yuv440p ',
+  ' yuvj440p yuva420p rgb48be rgb48le rgb565be rgb565le rgb555be rgb555le bgr565be bgr565le bgr555be bgr555le vaapi yuv420p16le yuv420p16be yuv422p16le yuv422p16be yuv444p16le yuv444p16be dxva2_vld rgb444le rgb444be bgr444le ',
+  ' bgr444be ya8 bgr48be bgr48le yuv420p9be yuv420p9le yuv420p10be yuv420p10le yuv422p10be yuv422p10le yuv444p9be yuv444p9le yuv444p10be yuv444p10le yuv422p9be yuv422p9le gbrp gbrp9be gbrp9le gbrp10be gbrp10le gbrp16be gbrp16le ',
+  ' yuva422p yuva444p yuva420p9be yuva420p9le yuva422p9be yuva422p9le yuva444p9be yuva444p9le yuva420p10be yuva420p10le yuva422p10be yuva422p10le yuva444p10be yuva444p10le yuva420p16be yuva420p16le yuva422p16be yuva422p16le ',
+  ' yuva444p16be yuva444p16le vdpau xyz12le xyz12be nv16 nv20le nv20be rgba64be rgba64le bgra64be bgra64le yvyu422 ya16be ya16le gbrap gbrap16be gbrap16le qsv mmal d3d11va_vld cuda 0rgb rgb0 0bgr bgr0 yuv420p12be yuv420p12le ',
+  ' yuv420p14be yuv420p14le yuv422p12be yuv422p12le yuv422p14be yuv422p14le yuv444p12be yuv444p12le yuv444p14be yuv444p14le gbrp12be gbrp12le gbrp14be gbrp14le yuvj411p bayer_bggr8 bayer_rggb8 bayer_gbrg8 bayer_grbg8 ',
+  ' bayer_bggr16le bayer_bggr16be bayer_rggb16le bayer_rggb16be bayer_gbrg16le bayer_gbrg16be bayer_grbg16le bayer_grbg16be xvmc yuv440p10le yuv440p10be yuv440p12le yuv440p12be ayuv64le ayuv64be videotoolbox_vld p010le p010be ',
+  ' gbrap12be gbrap12le gbrap10be gbrap10le mediacodec gray12be gray12le gray10be gray10le p016le p016be d3d11 gray9be gray9le gbrpf32be gbrpf32le gbrapf32be gbrapf32le drm_prime opencl gray14be gray14le grayf32be grayf32le ',
+  ' yuva422p12be yuva422p12le yuva444p12be yuva444p12le nv24 nv42 vulkan y210be y210le x2rgb10le x2rgb10be x2bgr10le x2bgr10be p210be p210le p410be p410le p216be p216le p416be p416le vuya rgbaf16be rgbaf16le vuyx p012le p012be ',
+  ' y212be y212le xv30be xv30le xv36be xv36le rgbf32be rgbf32le rgbaf32be rgbaf32le p212be p212le p412be p412le gbrap14be gbrap14le '
+ );
+Const
+ O3EncN = 9;
+ O3Enc: Array[0..8] Of String = (
+  ' v= va64multi va64multi5 valias_pix vamv vapng vasv1 vasv2 vlibaom-av1 vlibrav1e vlibsvtav1 vav1_nvenc vav1_qsv vav1_vaapi vavrp vavui vayuv vbitpacked vbmp vcfhd vcinepak vcljr vvc2 vdnxhd vdpx vdvvideo vexr vffv1 vffvhuff ',
+  ' vfits vflashsv vflashsv2 vflv vgif vh261 vh263 vh263_v4l2m2m vh263p vlibx264 vlibx264rgb vh264_nvenc vh264_qsv vh264_v4l2m2m vh264_vaapi vhap vhdr vlibx265 vhevc_nvenc vhevc_qsv vhevc_v4l2m2m vhevc_vaapi vhuffyuv vjpeg2000 ',
+  ' vlibopenjpeg vjpegls vlibjxl vljpeg vmagicyuv vmjpeg vmjpeg_qsv vmjpeg_vaapi vmpeg1video vmpeg2video vmpeg2_qsv vmpeg2_vaapi vmpeg4 vlibxvid vmpeg4_v4l2m2m vmsmpeg4v2 vmsmpeg4 vmsrle vmsvideo1 vpam vpbm vpcx vpfm vpgm ',
+  ' vpgmyuv vphm vpng vppm vprores vprores_aw vprores_ks vqoi vqtrle vr10k vr210 vrawvideo vroqvideo vrpza vrv10 vrv20 vsgi vsmc vsnow vspeedhq vsunrast vsvq1 vtarga vlibtheora vtiff vutvideo vv210 vv308 vv408 vv410 vvbn vvnull ',
+  ' vlibvpx vvp8_v4l2m2m vvp8_vaapi vlibvpx-vp9 vvp9_vaapi vvp9_qsv vwbmp vlibwebp_anim vlibwebp vwmv1 vwmv2 vwrapped_avframe vxbm vxface vxwd vy41p vyuv4 vzlib vzmbv a= aaac aac3 aac3_fixed aadpcm_adx aadpcm_argo ag722 ag726 ',
+  ' ag726le aadpcm_ima_alp aadpcm_ima_amv aadpcm_ima_apm aadpcm_ima_qt aadpcm_ima_ssi aadpcm_ima_wav aadpcm_ima_ws aadpcm_ms aadpcm_swf aadpcm_yamaha aalac aanull aaptx aaptx_hd alibcodec2 acomfortnoise adfpwm adca aeac3 aflac ',
+  ' ag723_1 alibgsm alibgsm_ms amlp amp2 amp2fixed alibtwolame alibmp3lame alibshine anellymoser aopus alibopus apcm_alaw apcm_bluray apcm_dvd apcm_f32be apcm_f32le apcm_f64be apcm_f64le apcm_mulaw apcm_s16be apcm_s16be_planar ',
+  ' apcm_s16le apcm_s16le_planar apcm_s24be apcm_s24daud apcm_s24le apcm_s24le_planar apcm_s32be apcm_s32le apcm_s32le_planar apcm_s64be apcm_s64le apcm_s8 apcm_s8_planar apcm_u16be apcm_u16le apcm_u24be apcm_u24le apcm_u32be ',
+  ' apcm_u32le apcm_u8 apcm_vidc areal_144 aroq_dpcm as302m asbc asonic asonicls alibspeex atruehd atta avorbis alibvorbis awavpack awmav1 awmav2 s= sssa sass sdvbsub sdvdsub smov_text ssrt ssubrip stext sttml swebvtt sxsub '
+ );
+Const
+ O3DecN = 22;
+ O3Dec: Array[0..21] Of String = (
+  ' v= v012v v4xm v8bps vaasc vagm vaic valias_pix vamv vanm vansi vapng varbc vargo vasv1 vasv2 vaura vaura2 vlibdav1d vlibaom-av1 vav1 vav1_cuvid vav1_qsv vavrn vavrp vavs vavui vayuv vbethsoftvid vbfi vbinkvideo vbintext ',
+  ' vbitpacked vbmp vbmv_video vbrender_pix vc93 vcavs vcdgraphics vcdtoons vcdxl vcfhd vcinepak vclearvideo vcljr vcllc veacmv vcpia vcri vcamstudio vcyuv vdds vdfa vdirac vdnxhd vdpx vdsicinvideo vdvvideo vdxa vdxtory vdxv ',
+  ' vescape124 vescape130 vexr vffv1 vffvhuff vfic vfits vflashsv vflashsv2 vflic vflv vfmvc vfraps vfrwu vg2m vgdv vgem vgif vh261 vh263 vh263_v4l2m2m vh263i vh263p vh264 vh264_v4l2m2m vh264_qsv vh264_cuvid vhap vhdr vhevc ',
+  ' vhevc_qsv vhevc_v4l2m2m vhevc_cuvid vhnm4video vhq_hqa vhqx vhuffyuv vhymt vidcinvideo vidf viff vimm4 vimm5 vindeo2 vindeo3 vindeo4 vindeo5 vinterplayvideo vipu vjpeg2000 vjpegls vlibjxl vjv vkgv1 vkmvc vlagarith vloco ',
+  ' vlscr vm101 veamad vmagicyuv vmdec vmedia100 vmimic vmjpeg vmjpeg_cuvid vmjpeg_qsv vmjpegb vmmvideo vmobiclip vmotionpixels vmpeg1video vmpeg1_v4l2m2m vmpeg1_cuvid vmpeg2video vmpegvideo vmpeg2_v4l2m2m vmpeg2_qsv ',
+  ' vmpeg2_cuvid vmpeg4 vmpeg4_v4l2m2m vmpeg4_cuvid vmsa1 vmscc vmsmpeg4v1 vmsmpeg4v2 vmsmpeg4 vmsp2 vmsrle vmss1 vmss2 vmsvideo1 vmszh vmts2 vmv30 vmvc1 vmvc2 vmvdv vmvha vmwsc vmxpeg vnotchlc vnuv vpaf_video vpam vpbm vpcx ',
+  ' vpdv vpfm vpgm vpgmyuv vpgx vphm vphotocd vpictor vpixlet vpng vppm vprores vprosumer vpsd vptx vqdraw vqoi vqpeg vqtrle vr10k vr210 vrasc vrawvideo vrl2 vroqvideo vrpza vrscc vrtv1 vrv10 vrv20 vrv30 vrv40 vsanm vscpr ',
+  ' vscreenpresso vsga vsgi vsgirle vsheervideo vsimbiosis_imx vsmackvid vsmc vsmvjpeg vsnow vsp5x vspeedhq vsrgc vsunrast vlibrsvg vsvq1 vsvq3 vtarga vtarga_y216 vtdsc veatgq veatgv vtheora vthp vtiertexseqvideo vtiff vtmv ',
+  ' veatqi vtruemotion1 vtruemotion2 vtruemotion2rt vcamtasia vtscc2 vtxd vultimotion vutvideo vv210 vv210x vv308 vv408 vv410 vvb vvble vvbn vvc1 vvc1_qsv vvc1_v4l2m2m vvc1_cuvid vvc1image vvcr1 vxl vvmdvideo vvmix vvmnc vvnull ',
+  ' vvp3 vvp4 vvp5 vvp6 vvp6a vvp6f vvp7 vvp8 vvp8_v4l2m2m vlibvpx vvp8_cuvid vvp8_qsv vvp9 vvp9_v4l2m2m vlibvpx-vp9 vvp9_cuvid vvp9_qsv vvqc vwbmp vwcmv vwebp vwmv1 vwmv2 vwmv3 vwmv3image vwnv1 vwrapped_avframe vvqavideo ',
+  ' vxan_wc3 vxan_wc4 vxbin vxbm vxface vxpm vxwd vy41p vylc vyop vyuv4 vzerocodec vzlib vzmbv a= a8svx_exp a8svx_fib aaac aaac_fixed aaac_latm aac3 aac3_fixed aacelp.kelvin aadpcm_4xm aadpcm_adx aadpcm_afc aadpcm_agm ',
+  ' aadpcm_aica aadpcm_argo aadpcm_ct aadpcm_dtk aadpcm_ea aadpcm_ea_maxis_xa aadpcm_ea_r1 aadpcm_ea_r2 aadpcm_ea_r3 aadpcm_ea_xas ag722 ag726 ag726le aadpcm_ima_acorn aadpcm_ima_alp aadpcm_ima_amv aadpcm_ima_apc aadpcm_ima_apm ',
+  ' aadpcm_ima_cunning aadpcm_ima_dat4 aadpcm_ima_dk3 aadpcm_ima_dk4 aadpcm_ima_ea_eacs aadpcm_ima_ea_sead aadpcm_ima_iss aadpcm_ima_moflex aadpcm_ima_mtf aadpcm_ima_oki aadpcm_ima_qt aadpcm_ima_rad aadpcm_ima_smjpeg ',
+  ' aadpcm_ima_ssi aadpcm_ima_wav aadpcm_ima_ws aadpcm_ms aadpcm_mtaf aadpcm_psx aadpcm_sbpro_2 aadpcm_sbpro_3 aadpcm_sbpro_4 aadpcm_swf aadpcm_thp aadpcm_thp_le aadpcm_vima aadpcm_xa aadpcm_xmd aadpcm_yamaha aadpcm_zork aalac ',
+  ' aamrnb aamrwb aanull aapac aape aaptx aaptx_hd aatrac1 aatrac3 aatrac3al aatrac3plus aatrac3plusal aatrac9 aon2avc abinkaudio_dct abinkaudio_rdft abmv_audio abonk acbd2_dpcm alibcodec2 acomfortnoise acook aderf_dpcm adfpwm ',
+  ' adolby_e adsd_lsbf adsd_lsbf_planar adsd_msbf adsd_msbf_planar adsicinaudio adss_sp adst adca advaudio aeac3 aevrc afastaudio aflac aftr ag723_1 ag729 agremlin_dpcm agsm alibgsm agsm_ms alibgsm_ms ahca ahcom aiac ailbc aimc ',
+  ' ainterplay_dpcm ainterplayacm amace3 amace6 ametasound amisc4 amlp amp1 amp1float amp2 amp2float amp3float amp3 amp3adufloat amp3adu amp3on4float amp3on4 aals amsnsiren ampc7 ampc8 anellymoser aopus alibopus aosq apaf_audio ',
+  ' apcm_alaw apcm_bluray apcm_dvd apcm_f16le apcm_f24le apcm_f32be apcm_f32le apcm_f64be apcm_f64le apcm_lxf apcm_mulaw apcm_s16be apcm_s16be_planar apcm_s16le apcm_s16le_planar apcm_s24be apcm_s24daud apcm_s24le ',
+  ' apcm_s24le_planar apcm_s32be apcm_s32le apcm_s32le_planar apcm_s64be apcm_s64le apcm_s8 apcm_s8_planar apcm_sga apcm_u16be apcm_u16le apcm_u24be apcm_u24le apcm_u32be apcm_u32le apcm_u8 apcm_vidc aqcelp aqdm2 aqdmc ',
+  ' areal_144 areal_288 aralf arka aroq_dpcm as302m asbc asdx2_dpcm ashorten asipr asiren asmackaud asol_dpcm asonic aspeex alibspeex atak atruehd atruespeech atta atwinvq avmdaudio avorbis alibvorbis awady_dpcm awavarc ',
+  ' awavesynth awavpack aws_snd1 awmalossless awmapro awmav1 awmav2 awmavoice axan_dpcm axma1 axma2 s= sssa sass sdvbsub slibzvbi_teletextdec sdvdsub scc_dec spgssub sjacosub smicrodvd smov_text smpl2 spjs srealtext ssami sstl ',
+  ' ssrt ssubrip ssubviewer ssubviewer1 stext svplayer swebvtt sxsub '
+ );
+Const
+ O3CodN = 19;
+ O3Cod: Array[0..18] Of String = (
+  ' 012v 4gv 4xm 8bps 8svx_exp 8svx_fib = a64_multi a64_multi5 aac aac_latm aasc ac3 ac4 acelp.kelvin adpcm_4xm adpcm_adx adpcm_afc adpcm_agm adpcm_aica adpcm_argo adpcm_ct adpcm_dtk adpcm_ea adpcm_ea_maxis_xa adpcm_ea_r1 ',
+  ' adpcm_ea_r2 adpcm_ea_r3 adpcm_ea_xas adpcm_g722 adpcm_g726 adpcm_g726le adpcm_ima_acorn adpcm_ima_alp adpcm_ima_amv adpcm_ima_apc adpcm_ima_apm adpcm_ima_cunning adpcm_ima_dat4 adpcm_ima_dk3 adpcm_ima_dk4 adpcm_ima_ea_eacs ',
+  ' adpcm_ima_ea_sead adpcm_ima_iss adpcm_ima_moflex adpcm_ima_mtf adpcm_ima_oki adpcm_ima_qt adpcm_ima_rad adpcm_ima_smjpeg adpcm_ima_ssi adpcm_ima_wav adpcm_ima_ws adpcm_ms adpcm_mtaf adpcm_psx adpcm_sbpro_2 adpcm_sbpro_3 ',
+  ' adpcm_sbpro_4 adpcm_swf adpcm_thp adpcm_thp_le adpcm_vima adpcm_xa adpcm_xmd adpcm_yamaha adpcm_zork agm aic alac alias_pix amr_nb amr_wb amv anm ansi anull apac ape apng aptx aptx_hd arbc argo arib_caption ass asv1 asv2 ',
+  ' atrac1 atrac3 atrac3al atrac3p atrac3pal atrac9 aura aura2 av1 avc avrn avrp avs avs2 avs3 avui ayuv bethsoftvid bfi bin_data binkaudio_dct binkaudio_rdft binkvideo bintext bitpacked bmp bmv_audio bmv_video bonk brender_pix ',
+  ' c93 cavs cbd2_dpcm cdgraphics cdtoons cdxl celt cfhd cinepak clearvideo cljr cllc cmv codec2 comfortnoise cook copy cpia cri cscd cyuv daala dds derf_dpcm dfa dfpwm dirac dnxhd dolby_e dpx dsd_lsbf dsd_lsbf_planar dsd_msbf ',
+  ' dsd_msbf_planar dsicinaudio dsicinvideo dss_sp dst dts dvaudio dvb_subtitle dvb_teletext dvbsub dvd_nav_packet dvd_subtitle dvdsub dvvideo dxa dxtory dxv eac3 eia_608 epg escape124 escape130 evc evrc exr fastaudio ffv1 ',
+  ' ffvhuff fic fits flac flashsv flashsv2 flic flv flv1 fmvc fraps frwu ftr g2m g723_1 g729 gdv gem gif gremlin_dpcm gsm gsm_ms h261 h263 h263i h263p h264 hap hca hcom hdmv_pgs_subtitle hdmv_text_subtitle hdr hevc hnm4video ',
+  ' hq_hqa hqx huffyuv hymt iac idcin idf iff_ilbm ilbc imc imm4 imm5 indeo2 indeo3 indeo4 indeo5 interplay_dpcm interplayacm interplayvideo ipu jacosub jpeg2000 jpegls jpegxl jv kgv1 klv kmvc lagarith libfaac libfaad ',
+  ' libmp3lame libspeex libtheora libvorbis libx264 libxvid ljpeg loco lscr m101 mace3 mace6 mad magicyuv mdec media100 metasound microdvd mimic misc4 mjpeg mjpegb mlp mmvideo mobiclip motionpixels mov_text mp1 mp2 mp3 mp3adu ',
+  ' mp3on4 mp4als mpeg1video mpeg2video mpeg4 mpegh_3d_audio mpegts mpl2 msa1 mscc msmpeg4 msmpeg4v1 msmpeg4v2 msmpeg4v3 msnsiren msp2 msrle mss1 mss2 msvideo1 mszh mts2 musepack7 musepack8 mv30 mvc1 mvc2 mvdv mvha mwsc mxpeg ',
+  ' nellymoser none notchlc nuv opus osq otf paf_audio paf_video pam pbm pcm_alaw pcm_bluray pcm_dvd pcm_f16le pcm_f24le pcm_f32be pcm_f32le pcm_f64be pcm_f64le pcm_lxf pcm_mulaw pcm_s16be pcm_s16be_planar pcm_s16le ',
+  ' pcm_s16le_planar pcm_s24be pcm_s24daud pcm_s24le pcm_s24le_planar pcm_s32be pcm_s32le pcm_s32le_planar pcm_s64be pcm_s64le pcm_s8 pcm_s8_planar pcm_sga pcm_u16be pcm_u16le pcm_u24be pcm_u24le pcm_u32be pcm_u32le pcm_u8 ',
+  ' pcm_vidc pcx pdv pfm pgm pgmyuv pgx phm photocd pictor pixlet pjs png ppm prores prosumer psd ptx qcelp qdm2 qdmc qdraw qoi qpeg qtrle r10k r210 ra_144 ra_288 ralf rasc rawvideo realtext rka rl2 roq roq_dpcm roqvideo rpza ',
+  ' rscc rtv1 rv10 rv20 rv30 rv40 s302m sami sanm sbc scpr screenpresso scte_35 sdx2_dpcm sga sgi sgirle sheervideo shorten simbiosis_imx sipr siren smackaudio smackvideo smc smpte_2038 smv smvjpeg snow sol_dpcm sonic sonicls ',
+  ' sp5x speedhq speex srgc srt ssa stl subrip subviewer subviewer1 sunrast svg svq1 svq3 tak targa targa_y216 tdsc text tgq tgv theora thp tiertexseqvideo tiff timed_id3 tmv tqi truehd truemotion1 truemotion2 truemotion2rt ',
+  ' truespeech tscc tscc2 tta ttf ttml twinvq txd ulti utvideo v210 v210x v308 v408 v410 vb vble vbn vc1 vc1image vcr1 vixl vmdaudio vmdvideo vmix vmnc vnull vorbis vp3 vp4 vp5 vp6 vp6a vp6f vp7 vp8 vp9 vplayer vqc vvc ',
+  ' wady_dpcm wavarc wavesynth wavpack wbmp wcmv webp webvtt westwood_snd1 wmalossless wmapro wmav1 wmav2 wmavoice wmv1 wmv2 wmv3 wmv3image wnv1 wrapped_avframe ws_vqa xan_dpcm xan_wc3 xan_wc4 xbin xbm xface xma1 xma2 xpm xsub ',
+  ' xwd y41p ylc yop yuv4 zerocodec zlib zmbv '
+ );
+Procedure O3BannerCfg;
+Begin
+ Write(StdErr,'  configuration: --prefix=/usr --extra-version=3ubuntu5 --toolchain=hardened --libdir=/usr/lib/x86_64-linux-gnu --incdir=/usr/include/x86_64-linux-gnu --arch=amd64 --enable-gpl --d');
+ Write(StdErr,'isable-stripping --disable-omx --enable-gnutls --enable-libaom --enable-libass --enable-libbs2b --enable-libcaca --enable-libcdio --enable-libcodec2 --enable-libdav1d --enable-libf');
+ Write(StdErr,'lite --enable-libfontconfig --enable-libfreetype --enable-libfribidi --enable-libglslang --enable-libgme --enable-libgsm --enable-libharfbuzz --enable-libmp3lame --enable-libmysofa');
+ Write(StdErr,' --enable-libopenjpeg --enable-libopenmpt --enable-libopus --enable-librubberband --enable-libshine --enable-libsnappy --enable-libsoxr --enable-libspeex --enable-libtheora --enabl');
+ Write(StdErr,'e-libtwolame --enable-libvidstab --enable-libvorbis --enable-libvpx --enable-libwebp --enable-libx265 --enable-libxml2 --enable-libxvid --enable-libzimg --enable-openal --enable-op');
+ Write(StdErr,'encl --enable-opengl --disable-sndio --enable-libvpl --disable-libmfx --enable-libdc1394 --enable-libdrm --enable-libiec61883 --enable-chromaprint --enable-frei0r --enable-ladspa -');
+ Write(StdErr,'-enable-libbluray --enable-libjack --enable-libpulse --enable-librabbitmq --enable-librist --enable-libsrt --enable-libssh --enable-libsvtav1 --enable-libx264 --enable-libzmq --ena');
+ Write(StdErr,'ble-libzvbi --enable-lv2 --enable-sdl2 --enable-libplacebo --enable-librav1e --enable-pocketsphinx --enable-librsvg --enable-libjxl --enable-shared');
+ WriteLn(StdErr);
+End;
+
+{ ======== O3 : analyse de la ligne de commande comme ffmpeg 6.1.1 (fftools/cmdutils.c, ffmpeg_opt.c, ffmpeg_mux_init.c) ======== }
+{ Les tables O3Def/O3Av/... ci-dessus sont generees a partir de ffmpeg 6.1.1 (options, AVOptions, formats, codecs). }
+Const
+ O3LFatal=8; O3LError=16; O3LWarn=24; O3LInfo=32;
+ O3Ptr='0x55d767d53dc0';
+Type
+ O3TOpt=Record Def,Grp,Pos: LongInt; Av: Char; Key: String[100]; Val: String[250]; End;
+Var
+ O3Lvl: LongInt;
+ O3LvFlag,O3HideB,O3Shown,O3Yes,O3NoOw,O3NoStdin,O3Skip: Boolean;
+ O3O: Array[0..399] Of O3TOpt; O3NOpts: LongInt;
+ O3GK: Array[0..31] Of Byte; O3GA: Array[0..31] Of String; O3GP: Array[0..31] Of LongInt; O3NG: LongInt;
+ O3Pend: LongInt;
+ O3Ac: LongInt;
+ O3Tgt: Array[0..31] Of String; { options generees par -target : cle+#1+valeur ; premier caractere : 'O' ordre, 'A' AVOption }
+ O3NTgt: LongInt;
+ O3Err8: String;
+
+Procedure O3Banner;
+Begin
+ O3Shown:=True;
+ If O3HideB Or (O3Lvl<O3LInfo) Then Exit;
+ WriteLn(StdErr,'ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers');
+ WriteLn(StdErr,'  built with gcc 13 (Ubuntu 13.2.0-23ubuntu3)');
+ O3BannerCfg;
+ WriteLn(StdErr,'  libavutil      58. 29.100 / 58. 29.100');
+ WriteLn(StdErr,'  libavcodec     60. 31.102 / 60. 31.102');
+ WriteLn(StdErr,'  libavformat    60. 16.100 / 60. 16.100');
+ WriteLn(StdErr,'  libavdevice    60.  3.100 / 60.  3.100');
+ WriteLn(StdErr,'  libavfilter     9. 12.100 /  9. 12.100');
+ WriteLn(StdErr,'  libswscale      7.  5.100 /  7.  5.100');
+ WriteLn(StdErr,'  libswresample   4. 12.100 /  4. 12.100');
+ WriteLn(StdErr,'  libpostproc    57.  3.100 / 57.  3.100');
+End;
+
+Procedure O3Msg(Lv: LongInt; Const S: AnsiString);
+Begin
+ If Lv>O3Lvl Then Exit;
+ If Not O3Shown Then O3Banner;
+ If O3LvFlag Then Begin
+  Case Lv Of
+   8: Write(StdErr,'[fatal] ');
+   16: Write(StdErr,'[error] ');
+   24: Write(StdErr,'[warning] ');
+   32: Write(StdErr,'[info] ');
+  End;
+ End;
+ WriteLn(StdErr,S);
+End;
+
+Procedure O3Die(Code: LongInt);
+Begin
+ Halt(Code And 255);
+End;
+
+Function O3ErrText(Code: LongInt): String;
+Begin
+ Case Code Of
+  234: O3ErrText:='Invalid argument';
+  254: O3ErrText:='No such file or directory';
+  8: O3ErrText:=O3Err8;
+  183: O3ErrText:='Invalid data found when processing input';
+  Else O3ErrText:='Error';
+ End;
+End;
+
+{ ---- tables ---- }
+Function O3DefName(I: LongInt): String;
+Begin
+ O3DefName:=Copy(O3Def[I],1,Pos('|',O3Def[I])-1);
+End;
+
+Function O3DefFl(I: LongInt): String;
+Var S: String; P: LongInt;
+Begin
+ S:=O3Def[I]; P:=Pos('|',S); Delete(S,1,P); P:=Pos('|',S); O3DefFl:=Copy(S,1,P-1);
+End;
+
+Function O3DefHelp(I: LongInt): String;
+Var S: String; P: LongInt;
+Begin
+ S:=O3Def[I]; P:=Pos('|',S); Delete(S,1,P); P:=Pos('|',S); Delete(S,1,P); O3DefHelp:=S;
+End;
+
+Function O3Has(I: LongInt; C: Char): Boolean;
+Begin
+ O3Has:=Pos(C,O3DefFl(I))>0;
+End;
+
+Function O3FindDef(Const Opt: String): LongInt;
+Var I,L: LongInt; N: String;
+Begin
+ O3FindDef:=-1;
+ For I:=0 To O3NDef-1 Do Begin
+  N:=O3DefName(I); L:=Length(N);
+  If (Copy(Opt,1,L)=N) And ((Length(Opt)=L) Or (Opt[L+1]=':')) Then Begin O3FindDef:=I; Exit; End;
+ End;
+End;
+
+Function O3AvLookup(Const N: String; Var Code: Char; Var Ctx: Boolean): Boolean;
+Var I,P,L: LongInt; S: String;
+Begin
+ O3AvLookup:=False; S:=' '+N+'='; L:=Length(S);
+ For I:=0 To O3NAv-1 Do Begin
+  P:=Pos(S,O3Av[I]);
+  If P>0 Then Begin
+   Code:=O3Av[I][P+L];
+   Ctx:=(P+L+1<=Length(O3Av[I])) And (O3Av[I][P+L+1]='c');
+   O3AvLookup:=True; Exit;
+  End;
+ End;
+End;
+
+Function O3AvHelp(Const N: String): AnsiString;
+Var I,J: LongInt; R: AnsiString;
+Begin
+ O3AvHelp:='';
+ For I:=0 To O3NAvH-1 Do
+  If Copy(O3AvH[I],1,Length(N)+1)=N+'=' Then Begin
+   R:=Copy(O3AvH[I],Length(N)+2,255); J:=I+1;
+   While (J<O3NAvH) And (Length(O3AvH[J])>0) And (O3AvH[J][1]='+') Do Begin R:=R+Copy(O3AvH[J],2,255); Inc(J); End;
+   O3AvHelp:=R; Exit;
+  End;
+End;
+
+{ ensemble de mots dans un tableau de lignes : ' mot1 mot2 ... ' }
+Function O3InList(Const Lst: Array Of String; Const W: String): Boolean;
+Var I: LongInt; S: String;
+Begin
+ O3InList:=False; S:=' '+W+' ';
+ For I:=0 To High(Lst) Do If Pos(S,Lst[I])>0 Then Begin O3InList:=True; Exit; End;
+End;
+
+Function O3AvKnown(Const Opt: String): Boolean;
+Var Code: Char; Ctx: Boolean; P: LongInt; Base: String;
+Begin
+ O3AvKnown:=False;
+ P:=Pos(':',Opt); If P>0 Then Base:=Copy(Opt,1,P-1) Else Base:=Opt;
+ If O3AvLookup(Base,Code,Ctx) Then Begin
+  If (P>0) And ((Code='x') Or (Code='w')) Then Exit; { les options de format/sws/swr n'ont pas de specificateur }
+  O3AvKnown:=True; Exit;
+ End;
+ If (Length(Opt)>1) And (Opt[1] In ['v','a','s']) Then
+  If O3AvLookup(Copy(Opt,2,200),Code,Ctx) And Ctx Then O3AvKnown:=True;
+End;
+
+{ options de codec sans prise en charge du decodage / de l'encodage (controle de ffmpeg sur les options inutilisees) }
+Function O3AvNoDec(C: Char): Boolean;
+Var B: LongInt;
+Begin
+ O3AvNoDec:=False;
+ If C In ['0'..'3'] Then O3AvNoDec:=((Ord(C)-48) And 2)=0
+ Else If C In ['A'..'P'] Then Begin B:=Ord(C)-65; O3AvNoDec:=((B And 2)=0) And ((B And 8)=0); End;
+End;
+
+Function O3AvNoEnc(C: Char): Boolean;
+Var B: LongInt;
+Begin
+ O3AvNoEnc:=False;
+ If C In ['0'..'3'] Then O3AvNoEnc:=((Ord(C)-48) And 1)=0
+ Else If C In ['A'..'P'] Then Begin B:=Ord(C)-65; O3AvNoEnc:=((B And 1)=0) And ((B And 4)=0); End;
+End;
+
+Function O3IsExtra(Const Opt: String): Boolean;
+Begin
+ O3IsExtra:=(Opt='f5q') Or (Opt='fmxq');
+End;
+
+{ ---- nombres ---- }
+Var O3NanF,O3InfF: Boolean;
+
+Function O3Strtod(Const S0: String; Var D: Double): Boolean;
+Var S: String; I,N: LongInt; Neg,Digs,Big: Boolean; V,Sc,E: Double; Ex: LongInt; ExNeg: Boolean; C: Char; Qa: QWord;
+Begin
+ O3Strtod:=False; D:=0; S:=S0; I:=1; O3NanF:=False; O3InfF:=False;
+ If S='' Then Begin O3Strtod:=True; Exit; End; { av_strtod("") : aucun chiffre, queue vide }
+ While (I<=Length(S)) And (S[I] In [#9,#10,#11,#12,#13,' ']) Do Inc(I);
+ Neg:=False;
+ If (I<=Length(S)) And (S[I] In ['+','-']) Then Begin Neg:=S[I]='-'; Inc(I); End;
+ V:=0; Digs:=False;
+ If (I+1<=Length(S)) And (S[I]='0') And ((S[I+1]='x') Or (S[I+1]='X')) And (I+2<=Length(S)) And (UpCase(S[I+2]) In ['0'..'9','A'..'F']) Then Begin
+  Inc(I,2);
+  While (I<=Length(S)) And (UpCase(S[I]) In ['0'..'9','A'..'F']) Do Begin
+   C:=UpCase(S[I]); If C<='9' Then N:=Ord(C)-48 Else N:=Ord(C)-55;
+   If V>1e290 Then Begin V:=1e300; O3InfF:=True; End Else V:=V*16+N;
+   Inc(I);
+  End;
+  Digs:=True;
+ End Else Begin
+  If (I+2<=Length(S)) And (Lower(Copy(S,I,3))='inf') Then Begin
+   V:=1e300; O3InfF:=True; Inc(I,3); Digs:=True;
+   If Lower(Copy(S,I,5))='inity' Then Inc(I,5);
+  End Else If (I+2<=Length(S)) And (Lower(Copy(S,I,3))='nan') Then Begin
+   V:=0; O3NanF:=True; Inc(I,3); Digs:=True;
+  End Else Begin
+   Qa:=0; Big:=False;
+   While (I<=Length(S)) And (S[I] In ['0'..'9']) Do Begin
+    If Not Big Then Begin
+     If Qa<=1844674407370955160 Then Qa:=Qa*10+QWord(Ord(S[I])-48)
+     Else Begin Big:=True; V:=Qa; End;
+    End;
+    If Big Then Begin
+     If V>1e290 Then Begin V:=1e300; O3InfF:=True; End Else V:=V*10+(Ord(S[I])-48);
+    End;
+    Inc(I); Digs:=True;
+   End;
+   If Not Big Then V:=Qa;
+   If (I<=Length(S)) And (S[I]='.') Then Begin
+    Sc:=1; Inc(I);
+    While (I<=Length(S)) And (S[I] In ['0'..'9']) Do Begin If Sc>1e-300 Then Begin Sc:=Sc/10; V:=V+Sc*(Ord(S[I])-48); End; Inc(I); Digs:=True; End;
+   End;
+   If Digs And (I<=Length(S)) And ((S[I]='e') Or (S[I]='E')) Then Begin
+    N:=I+1; ExNeg:=False;
+    If (N<=Length(S)) And (S[N] In ['+','-']) Then Begin ExNeg:=S[N]='-'; Inc(N); End;
+    If (N<=Length(S)) And (S[N] In ['0'..'9']) Then Begin
+     Ex:=0;
+     While (N<=Length(S)) And (S[N] In ['0'..'9']) Do Begin If Ex<100000 Then Ex:=Ex*10+(Ord(S[N])-48); Inc(N); End;
+     If ExNeg Then Begin
+      While (Ex>0) And (V>0) Do Begin V:=V/10; Dec(Ex); If V<1e-300 Then Begin V:=0; Break; End; End;
+     End Else Begin
+      While (Ex>0) And (V>0) Do Begin
+       If V>1e290 Then Begin V:=1e300; O3InfF:=True; Break; End;
+       V:=V*10; Dec(Ex);
+      End;
+     End;
+     I:=N;
+    End;
+   End;
+  End;
+ End;
+ If Not Digs Then Exit; { aucun chiffre : la queue est toute la chaine }
+ If Neg Then V:=-V;
+ { suffixes av_strtod }
+ If (I+1<=Length(S)) And (S[I]='d') And (S[I+1]='B') Then Begin
+  If Abs(V)<1e10 Then V:=Exp(Ln(10)*V/20) Else Begin V:=1e300; O3InfF:=True; End;
+  Inc(I,2);
+ End Else If (I<=Length(S)) And (S[I] In ['E'..'z']) Then Begin
+  Ex:=0;
+  Case S[I] Of
+   'y': Ex:=-24; 'z': Ex:=-21; 'a': Ex:=-18; 'f': Ex:=-15; 'p': Ex:=-12; 'n': Ex:=-9; 'u': Ex:=-6; 'm': Ex:=-3;
+   'c': Ex:=-2; 'd': Ex:=-1; 'h': Ex:=2; 'k': Ex:=3; 'K': Ex:=3; 'M': Ex:=6; 'G': Ex:=9; 'T': Ex:=12; 'P': Ex:=15;
+   'E': Ex:=18; 'Z': Ex:=21; 'Y': Ex:=24;
+  End;
+  If Ex<>0 Then Begin
+   If (I+1<=Length(S)) And (S[I+1]='i') Then Begin E:=Exp(Ln(2)*(Ex/0.3)); Inc(I,2); End
+   Else Begin E:=Exp(Ln(10)*Ex); Inc(I); End;
+   If (Abs(V)>1e150) And (E>1e100) Then Begin V:=1e300; O3InfF:=True; If Neg Then V:=-V; End Else V:=V*E;
+  End;
+ End;
+ If (I<=Length(S)) And (S[I]='B') Then Begin V:=V*8; Inc(I); End;
+ D:=V;
+ O3Strtod:=I>Length(S);
+End;
+
+{ entier decimal strict (Val de Free Pascal accepte aussi $, x, 0x) ; la chaine doit etre entierement consommee }
+Function O3StrictInt(Const S: String; Var V: LongInt): Boolean;
+Var I: LongInt; Neg: Boolean; R: Int64;
+Begin
+ O3StrictInt:=False; V:=0; I:=1; Neg:=False; R:=0;
+ While (I<=Length(S)) And (S[I] In [' ',#9]) Do Inc(I);
+ If (I<=Length(S)) And (S[I] In ['+','-']) Then Begin Neg:=S[I]='-'; Inc(I); End;
+ If (I>Length(S)) Or Not (S[I] In ['0'..'9']) Then Exit;
+ While (I<=Length(S)) And (S[I] In ['0'..'9']) Do Begin If R<100000000000 Then R:=R*10+(Ord(S[I])-48); Inc(I); End;
+ If I<=Length(S) Then Exit;
+ If Neg Then R:=-R;
+ If (R>2147483647) Or (R<-2147483648) Then Exit;
+ V:=R; O3StrictInt:=True;
+End;
+
+{ ---- av_small_strptime / date_get_num de libavutil/parseutils.c ---- }
+Function O3IsSp(C: Char): Boolean;
+Begin
+ O3IsSp:=C In [' ',#9,#10,#11,#12,#13];
+End;
+
+Function O3GetNum(Const S: String; Var P: LongInt; Lo,Hi: Int64; LenMax: LongInt; Var V: Int64): Boolean;
+Var Q,N: LongInt; R: Int64;
+Begin
+ Q:=P; N:=0; R:=0; O3GetNum:=False;
+ While (Q<=Length(S)) And (N<LenMax) And (S[Q] In ['0'..'9']) Do Begin
+  If R<100000000000 Then R:=R*10+(Ord(S[Q])-48);
+  Inc(Q); Inc(N);
+ End;
+ If N=0 Then Exit;
+ If (R<Lo) Or (R>Hi) Then Exit;
+ P:=Q; V:=R; O3GetNum:=True;
+End;
+
+Function O3Lit(Const S: String; Var P: LongInt; C: Char): Boolean;
+Var R: Boolean;
+Begin
+ R:=(P<=Length(S)) And (S[P]=C);
+ If R Then Inc(P);
+ O3Lit:=R;
+End;
+
+{ duree : av_parse_time(..., duration=1) }
+Function O3ParseDur(S: String): Boolean;
+Var P,Q,Q2: LongInt; H,M,Sc: Int64; Ok,SNeg,Ov: Boolean; T: Int64; Suffix: Int64;
+Begin
+ O3ParseDur:=False; P:=1; T:=0; Ov:=False;
+ If (S<>'') And (S[1]='-') Then P:=2;
+ Q:=P; Ok:=False;
+ If O3GetNum(S,Q,0,2147483647,4,H) And O3Lit(S,Q,':') And O3GetNum(S,Q,0,59,2,M) And O3Lit(S,Q,':') And O3GetNum(S,Q,0,59,2,Sc) Then Begin Ok:=True; T:=H*3600+M*60+Sc; End;
+ If Not Ok Then Begin
+  Q:=P;
+  If O3GetNum(S,Q,0,59,2,M) And O3Lit(S,Q,':') And O3GetNum(S,Q,0,59,2,Sc) Then Begin Ok:=True; T:=M*60+Sc; End;
+ End;
+ If Not Ok Then Begin
+  { S+ : strtoll en base 10 }
+  Q:=P; SNeg:=False;
+  While (Q<=Length(S)) And O3IsSp(S[Q]) Do Inc(Q);
+  If (Q<=Length(S)) And (S[Q] In ['+','-']) Then Begin SNeg:=S[Q]='-'; Inc(Q); End;
+  Q2:=Q;
+  While (Q<=Length(S)) And (S[Q] In ['0'..'9']) Do Begin
+   If T>922337203685477580 Then Ov:=True Else T:=T*10+(Ord(S[Q])-48);
+   If T<0 Then Ov:=True;
+   Inc(Q);
+  End;
+  If Q=Q2 Then Exit;
+  If Ov Then Exit;
+  If SNeg Then T:=-T;
+ End;
+ If (Q<=Length(S)) And (S[Q]='.') Then Begin
+  Inc(Q);
+  While (Q<=Length(S)) And (S[Q] In ['0'..'9']) Do Inc(Q);
+ End;
+ Suffix:=1000000;
+ If Copy(S,Q,2)='ms' Then Begin Inc(Q,2); Suffix:=1000; End
+ Else If Copy(S,Q,2)='us' Then Begin Inc(Q,2); Suffix:=1; End
+ Else If (Q<=Length(S)) And (S[Q]='s') Then Inc(Q);
+ If Q<=Length(S) Then Exit;
+ If (T>9223372036854775807 Div Suffix) Or (T< -9223372036854775807 Div Suffix) Then Exit;
+ O3ParseDur:=True;
+End;
+
+{ petit evaluateur d'expressions arithmetiques (av_expr sans fonctions ni constantes) }
+Var O3EvS: String; O3EvI: LongInt; O3EvErr: Boolean;
+Function O3EvExpr: Double; Forward;
+Function O3EvPrim: Double;
+Var V,Sc: Double; Neg: Boolean;
+Begin
+ O3EvPrim:=0; Neg:=False;
+ While (O3EvI<=Length(O3EvS)) And (O3EvS[O3EvI] In ['+','-']) Do Begin If O3EvS[O3EvI]='-' Then Neg:=Not Neg; Inc(O3EvI); End;
+ If O3EvI>Length(O3EvS) Then Begin O3EvErr:=True; Exit; End;
+ If O3EvS[O3EvI]='(' Then Begin
+  Inc(O3EvI); V:=O3EvExpr;
+  If (O3EvI>Length(O3EvS)) Or (O3EvS[O3EvI]<>')') Then O3EvErr:=True Else Inc(O3EvI);
+ End Else If O3EvS[O3EvI] In ['0'..'9','.'] Then Begin
+  V:=0;
+  While (O3EvI<=Length(O3EvS)) And (O3EvS[O3EvI] In ['0'..'9']) Do Begin V:=V*10+(Ord(O3EvS[O3EvI])-48); Inc(O3EvI); End;
+  If (O3EvI<=Length(O3EvS)) And (O3EvS[O3EvI]='.') Then Begin
+   Sc:=1; Inc(O3EvI);
+   While (O3EvI<=Length(O3EvS)) And (O3EvS[O3EvI] In ['0'..'9']) Do Begin Sc:=Sc/10; V:=V+Sc*(Ord(O3EvS[O3EvI])-48); Inc(O3EvI); End;
+  End;
+ End Else Begin O3EvErr:=True; V:=0; End;
+ If Neg Then V:=-V;
+ O3EvPrim:=V;
+End;
+Function O3EvTerm: Double;
+Var V,W: Double; Op: Char;
+Begin
+ V:=O3EvPrim;
+ While (Not O3EvErr) And (O3EvI<=Length(O3EvS)) And (O3EvS[O3EvI] In ['*','/']) Do Begin
+  Op:=O3EvS[O3EvI]; Inc(O3EvI); W:=O3EvPrim;
+  If Op='*' Then V:=V*W Else If W=0 Then V:=0 Else V:=V/W;
+ End;
+ O3EvTerm:=V;
+End;
+Function O3EvExpr: Double;
+Var V,W: Double; Op: Char;
+Begin
+ V:=O3EvTerm;
+ While (Not O3EvErr) And (O3EvI<=Length(O3EvS)) And (O3EvS[O3EvI] In ['+','-']) Do Begin
+  Op:=O3EvS[O3EvI]; Inc(O3EvI); W:=O3EvTerm;
+  If Op='+' Then V:=V+W Else V:=V-W;
+ End;
+ O3EvExpr:=V;
+End;
+Function O3Eval(Const S: String; Var V: Double): Boolean;
+Begin
+ O3EvS:=S; O3EvI:=1; O3EvErr:=False; V:=O3EvExpr;
+ O3Eval:=(Not O3EvErr) And (O3EvI>Length(O3EvS)) And (S<>'');
+End;
+
+{ av_parse_video_size }
+Function O3ParseSize(Const S0: String; Var W,H: LongInt): Boolean;
+Const Names: Array[0..52] Of String = (
+ 'ntsc 720 480','pal 720 576','qntsc 352 240','qpal 352 288','sntsc 640 480','spal 768 576','film 352 240','ntsc-film 352 240',
+ 'sqcif 128 96','qcif 176 144','cif 352 288','4cif 704 576','16cif 1408 1152','qqvga 160 120','qvga 320 240','vga 640 480',
+ 'svga 800 600','xga 1024 768','uxga 1600 1200','qxga 2048 1536','sxga 1280 1024','qsxga 2560 2048','hsxga 5120 4096',
+ 'wvga 852 480','wxga 1366 768','wsxga 1600 1024','wuxga 1920 1200','woxga 2560 1600','wqsxga 3200 2048','wquxga 3840 2400',
+ 'whsxga 6400 4096','whuxga 7680 4800','cga 320 200','ega 640 350','hd480 852 480','hd720 1280 720','hd1080 1920 1080',
+ '2k 2048 1080','2kflat 1998 1080','2kscope 2048 858','4k 4096 2160','4kflat 3996 2160','4kscope 4096 1716','nhd 640 360',
+ 'hqvga 240 160','wqvga 400 240','fwqvga 432 240','hvga 480 320','qhd 960 540','2kdci 2048 1080','4kdci 4096 2160',
+ 'uhd2160 3840 2160','uhd4320 7680 4320');
+Var I,P,Code: LongInt; N,A,B: String; V: Int64; Sign: Boolean;
+ Function Num(Var Pos: LongInt): Int64;
+ Var R: Int64; Ng: Boolean;
+ Begin
+  R:=0; Ng:=False;
+  While (Pos<=Length(S0)) And (S0[Pos] In [' ',#9]) Do Inc(Pos);
+  If (Pos<=Length(S0)) And (S0[Pos] In ['+','-']) Then Begin Ng:=S0[Pos]='-'; Inc(Pos); End;
+  While (Pos<=Length(S0)) And (S0[Pos] In ['0'..'9']) Do Begin If R<100000000000 Then R:=R*10+(Ord(S0[Pos])-48); Inc(Pos); End;
+  If Ng Then R:=-R;
+  Num:=R;
+ End;
+Begin
+ O3ParseSize:=False;
+ For I:=0 To 52 Do Begin
+  N:=Names[I]; P:=Pos(' ',N);
+  If Copy(N,1,P-1)=S0 Then Begin
+   Delete(N,1,P); P:=Pos(' ',N);
+   Val(Copy(N,1,P-1),W,Code); Val(Copy(N,P+1,20),H,Code);
+   O3ParseSize:=True; Exit;
+  End;
+ End;
+ P:=1; V:=Num(P); If V>2147483647 Then Exit; W:=V;
+ If P<=Length(S0) Then Inc(P);
+ V:=Num(P); If V>2147483647 Then Exit; H:=V;
+ If P<=Length(S0) Then Exit;
+ If (W<=0) Or (H<=0) Then Exit;
+ O3ParseSize:=True;
+End;
+
+{ av_parse_video_rate }
+Function O3ParseRate(Const S: String): Boolean;
+Var A,B,D: Double; P: LongInt; Code: LongInt; N1,N2: LongInt; C: Char;
+Begin
+ O3ParseRate:=False;
+ If (S='ntsc') Or (S='pal') Or (S='qntsc') Or (S='qpal') Or (S='sntsc') Or (S='spal') Or (S='film') Or (S='ntsc-film') Then Begin O3ParseRate:=True; Exit; End;
+ P:=Pos(':',S);
+ If P>0 Then Begin
+  If Not O3StrictInt(Copy(S,1,P-1),N1) Then Exit;
+  If Not O3StrictInt(Copy(S,P+1,50),N2) Then Exit;
+  O3ParseRate:=(N1>0) And (N2>0); Exit;
+ End;
+ If Not O3Eval(S,D) Then Exit;
+ O3ParseRate:=D>0;
+End;
+
+{ ---- analyse prealable du niveau de journalisation (parse_loglevel / locate_option) ---- }
+Function O3Locate(Const Name: String): LongInt;
+Var I,P: LongInt; Cur: String;
+Begin
+ O3Locate:=0; I:=1;
+ While I<=O3Ac Do Begin
+  Cur:=ParamStr(I);
+  If (Cur<>'') And (Cur[1]='-') Then Begin
+   Delete(Cur,1,1);
+   P:=O3FindDef(Cur);
+   If (P<0) And (Copy(Cur,1,2)='no') Then P:=O3FindDef(Copy(Cur,3,200));
+   If ((P<0) And (Cur=Name)) Or ((P>=0) And (O3DefName(P)=Name)) Then Begin O3Locate:=I; Exit; End;
+   If (P<0) Or O3Has(P,'A') Then Inc(I);
+  End;
+  Inc(I);
+ End;
+End;
+
+{ opt_loglevel : retourne False si invalide }
+Function O3SetLevel(Const A0: String; Quiet: Boolean): Boolean;
+Const Nm: Array[0..8] Of String = ('quiet','panic','fatal','error','warning','info','verbose','debug','trace');
+      Lv: Array[0..8] Of LongInt = (-8,0,8,16,24,32,40,48,56);
+Var A,Tok: String; Level,I,Cmd,N,Code: LongInt; Flags: Boolean;
+Begin
+ O3SetLevel:=True; A:=A0; Level:=O3Lvl; Flags:=O3LvFlag; N:=0;
+ While A<>'' Do Begin
+  Tok:=A; Cmd:=0;
+  If (Tok[1]='+') Or (Tok[1]='-') Then Begin Cmd:=Ord(Tok[1]); Delete(Tok,1,1); End;
+  If (N=0) And (Cmd=0) Then Flags:=False;
+  If Copy(Tok,1,6)='repeat' Then Begin A:=Copy(Tok,7,255); End
+  Else If Copy(Tok,1,5)='level' Then Begin A:=Copy(Tok,6,255); Flags:=Cmd<>Ord('-'); End
+  Else Break;
+  Inc(N);
+ End;
+ If A='' Then Begin O3LvFlag:=Flags; O3Lvl:=Level; Exit; End
+ Else If A[1]='+' Then Delete(A,1,1)
+ Else If N=0 Then Flags:=O3LvFlag;
+ For I:=0 To 8 Do If Nm[I]=A Then Begin O3LvFlag:=Flags; O3Lvl:=Lv[I]; Exit; End;
+ Code:=0; If Not O3StrictInt(A,Level) Then Code:=1;
+ If Code<>0 Then Begin
+  { strtol accepte un prefixe numerique ; la queue doit etre vide }
+  Level:=0;
+  O3SetLevel:=False;
+  If Not Quiet Then Begin
+   O3Msg(O3LFatal,'Invalid loglevel "'+A+'". Possible levels are numbers or:');
+   For I:=0 To 8 Do O3Msg(O3LFatal,'"'+Nm[I]+'"');
+  End;
+  Exit;
+ End;
+ O3LvFlag:=Flags; O3Lvl:=Level;
+End;
+
+Function O3Atoi(Const S: String): LongInt;
+Var I,R: LongInt;
+Begin
+ R:=0; I:=1;
+ If (S='') Or Not (S[1] In ['0'..'9']) Then Begin O3Atoi:=-1; Exit; End;
+ While (I<=Length(S)) And (S[I] In ['0'..'9']) Do Begin If R<100000000 Then R:=R*10+(Ord(S[I])-48); Inc(I); End;
+ O3Atoi:=R;
+End;
+
+{ ---- decoupage de la ligne de commande (split_commandline) ---- }
+Procedure O3FinishGroup(Kind: LongInt; Const Arg: String; Pos: LongInt);
+Var I: LongInt;
+Begin
+ If O3NG>=32 Then Begin O3Msg(O3LFatal,'Trop de fichiers.'); O3Die(234); End;
+ O3GK[O3NG]:=Kind; O3GA[O3NG]:=Arg; O3GP[O3NG]:=Pos;
+ For I:=0 To O3NOpts-1 Do If O3O[I].Grp=-2 Then O3O[I].Grp:=O3NG;
+ Inc(O3NG);
+End;
+
+Procedure O3AddOpt(Def: LongInt; Av: Char; Const Key,Val: String; Pos,Grp: LongInt);
+Begin
+ If O3NOpts>=400 Then Begin O3Msg(O3LFatal,'Trop d''options.'); O3Die(234); End;
+ O3O[O3NOpts].Def:=Def; O3O[O3NOpts].Av:=Av; O3O[O3NOpts].Key:=Key; O3O[O3NOpts].Val:=Val; O3O[O3NOpts].Pos:=Pos; O3O[O3NOpts].Grp:=Grp;
+ Inc(O3NOpts);
+End;
+
+Procedure O3SplitFail(Code: LongInt);
+Begin
+ O3Msg(O3LFatal,'Error splitting the argument list: '+O3ErrText(Code));
+ O3Die(Code);
+End;
+
+Procedure O3Split;
+Var I,DashDash,Po: LongInt; Opt,Arg: String; Code: Char; Ctx: Boolean; Start: LongInt;
+Begin
+ I:=1; DashDash:=-2; O3NOpts:=0; O3NG:=0;
+ While I<=O3Ac Do Begin
+  Opt:=ParamStr(I); Start:=I; Inc(I);
+  If Opt='--' Then Begin DashDash:=I; Continue; End;
+  If (Opt='') Or (Opt[1]<>'-') Or (Length(Opt)=1) Or (DashDash+1=I) Then Begin
+   O3FinishGroup(0,Opt,Start); Continue;
+  End;
+  Delete(Opt,1,1);
+  If Opt='i' Then Begin
+   If I>O3Ac Then Begin O3Msg(O3LError,'Missing argument for option '''+Opt+'''.'); O3SplitFail(234); End;
+   Arg:=ParamStr(I); Inc(I);
+   O3FinishGroup(1,Arg,Start); Continue;
+  End;
+  Po:=O3FindDef(Opt);
+  If Po>=0 Then Begin
+   If O3Has(Po,'X') Then Begin
+    If I<=O3Ac Then Arg:=ParamStr(I) Else Arg:='';
+    Inc(I);
+   End Else If O3Has(Po,'A') Then Begin
+    If I>O3Ac Then Begin O3Msg(O3LError,'Missing argument for option '''+Opt+'''.'); O3SplitFail(234); End;
+    Arg:=ParamStr(I); Inc(I);
+   End Else Arg:='1';
+   If O3Has(Po,'P') Then O3AddOpt(Po,' ',Opt,Arg,Start,-2) Else O3AddOpt(Po,' ',Opt,Arg,Start,-1);
+   Continue;
+  End;
+  If I<=O3Ac Then Begin
+   If O3AvKnown(Opt) Then Begin
+    Ctx:=False; Code:='f';
+    If Pos(':',Opt)>0 Then O3AvLookup(Copy(Opt,1,Pos(':',Opt)-1),Code,Ctx) Else O3AvLookup(Opt,Code,Ctx);
+    O3AddOpt(-1,Code,Opt,ParamStr(I),Start,-2);
+    Inc(I); Continue;
+   End;
+  End;
+  If (Copy(Opt,1,2)='no') Then Begin
+   Po:=O3FindDef(Copy(Opt,3,200));
+   If (Po>=0) And O3Has(Po,'B') Then Begin
+    If O3Has(Po,'P') Then O3AddOpt(Po,' ',Opt,'0',Start,-2) Else O3AddOpt(Po,' ',Opt,'0',Start,-1);
+    Continue;
+   End;
+  End;
+  If O3IsExtra(Opt) Then Continue;
+  O3Msg(O3LError,'Unrecognized option '''+Opt+'''.');
+  O3SplitFail(8);
+ End;
+ O3Pend:=0;
+ For I:=0 To O3NOpts-1 Do If (O3O[I].Grp=-2) And Not ((O3O[I].Def<0) And (O3O[I].Av='w')) Then Inc(O3Pend);
+ If O3Pend>0 Then O3Msg(O3LWarn,'Trailing option(s) found in the command: may be ignored.');
+End;
+
+{ ---- validation de la valeur d'une option (write_option) ; retourne False apres avoir ecrit le message ---- }
+Function O3NumCheck(Const Key,Val: String; Mode: Char): Boolean;
+{ Mode : 'i' int/bool (INT_MIN..INT_MAX), 'l' int64, 'f' flottant ou double }
+Var D,Two63: Double; I: LongInt;
+Begin
+ O3NumCheck:=True;
+ If Not O3Strtod(Val,D) Then Begin
+  O3Msg(O3LFatal,'Expected number for '+Key+' but found: '+Val); O3NumCheck:=False; Exit;
+ End;
+ If Mode='f' Then Exit;
+ Two63:=1; For I:=1 To 63 Do Two63:=Two63*2;
+ If Mode='i' Then Begin
+  If (Not O3NanF) And ((D<-2147483648.0) Or (D>2147483647.0)) Then Begin
+   O3Msg(O3LFatal,'The value for '+Key+' was '+Val+' which is not within -2147483648.000000 - 2147483647.000000'); O3NumCheck:=False; Exit;
+  End;
+  If O3NanF Or (Frac(D)<>0) Then Begin O3Msg(O3LFatal,'Expected int64 for '+Key+' but found '+Val); O3NumCheck:=False; End;
+ End Else Begin
+  If (Not O3NanF) And ((D< -Two63) Or (D>Two63)) Then Begin
+   O3Msg(O3LFatal,'The value for '+Key+' was '+Val+' which is not within -9223372036854775808.000000 - 9223372036854775808.000000'); O3NumCheck:=False; Exit;
+  End;
+  If O3NanF Or (D>=Two63) Or (Frac(D)<>0) Then Begin O3Msg(O3LFatal,'Expected int64 for '+Key+' but found '+Val); O3NumCheck:=False; End;
+ End;
+End;
+
+{ date/heure : av_parse_time(..., duration=0) }
+Function O3ParseDate(S: String): Boolean;
+Var P,Q,Q2: LongInt; Y,Mo,D,H,Mi,Sc: Int64; Today,Ok,Utc: Boolean;
+ Procedure SkipSp(Var X: LongInt);
+ Begin
+  While (X<=Length(S)) And O3IsSp(S[X]) Do Inc(X);
+ End;
+Begin
+ O3ParseDate:=False;
+ If Lower(S)='now' Then Begin O3ParseDate:=True; Exit; End;
+ P:=1; Q:=P; Ok:=False;
+ { %Y - %m - %d }
+ If O3GetNum(S,Q,0,9999,4,Y) Then Begin
+  SkipSp(Q);
+  If O3Lit(S,Q,'-') Then Begin
+   SkipSp(Q);
+   If O3GetNum(S,Q,1,12,2,Mo) Then Begin
+    SkipSp(Q);
+    If O3Lit(S,Q,'-') Then Begin SkipSp(Q); If O3GetNum(S,Q,1,31,2,D) Then Ok:=True; End;
+   End;
+  End;
+ End;
+ If Not Ok Then Begin
+  Q:=P;
+  If O3GetNum(S,Q,0,9999,4,Y) And O3GetNum(S,Q,1,12,2,Mo) And O3GetNum(S,Q,1,31,2,D) Then Ok:=True;
+ End;
+ Today:=Not Ok;
+ If Today Then Q:=P;
+ P:=Q;
+ If (P<=Length(S)) And ((S[P]='T') Or (S[P]='t')) Then Inc(P) Else SkipSp(P);
+ { %H:%M:%S ou %H%M%S }
+ Q:=P; Ok:=False;
+ If O3GetNum(S,Q,0,23,2,H) And O3Lit(S,Q,':') And O3GetNum(S,Q,0,59,2,Mi) And O3Lit(S,Q,':') And O3GetNum(S,Q,0,59,2,Sc) Then Ok:=True;
+ If Not Ok Then Begin
+  Q:=P;
+  If O3GetNum(S,Q,0,23,2,H) And O3GetNum(S,Q,0,59,2,Mi) And O3GetNum(S,Q,0,59,2,Sc) Then Ok:=True;
+ End;
+ If Not Ok Then Exit;
+ If (Q<=Length(S)) And (S[Q]='.') Then Begin
+  Inc(Q);
+  While (Q<=Length(S)) And (S[Q] In ['0'..'9']) Do Inc(Q);
+ End;
+ Utc:=(Q<=Length(S)) And ((S[Q]='Z') Or (S[Q]='z'));
+ If Utc Then Inc(Q);
+ If (Not Today) And (Not Utc) And (Q<=Length(S)) And ((S[Q]='+') Or (S[Q]='-')) Then Begin
+  Inc(Q); P:=Q; Ok:=False;
+  Q2:=P;
+  If O3GetNum(S,Q2,0,23,2,H) And O3Lit(S,Q2,':') And O3GetNum(S,Q2,0,59,2,Mi) Then Ok:=True;
+  If Not Ok Then Begin Q2:=P; If O3GetNum(S,Q2,0,23,2,H) And O3GetNum(S,Q2,0,59,2,Mi) Then Ok:=True; End;
+  If Not Ok Then Begin Q2:=P; If O3GetNum(S,Q2,0,23,2,H) Then Ok:=True; End;
+  If Not Ok Then Exit;
+  Q:=Q2;
+ End;
+ O3ParseDate:=Q>Length(S);
+End;
+
+Function O3WriteOpt(I: LongInt): Boolean;
+Var Nm,Fl,Key,Val,Sp: String; P: LongInt; Dv: Double;
+Begin
+ O3WriteOpt:=True;
+ Nm:=O3DefName(O3O[I].Def); Fl:=O3DefFl(O3O[I].Def); Key:=O3O[I].Key; Val:=O3O[I].Val;
+ If Nm='streamid' Then Begin
+  If Pos(':',Val)=0 Then Begin
+   O3Msg(O3LFatal,'Invalid value '''+Val+''' for option '''+Key+''', required syntax is ''index:value''');
+   O3Msg(O3LError,'Failed to set value '''+Val+''' for option '''+Key+''': Invalid argument');
+   O3WriteOpt:=False;
+  End;
+  Exit;
+ End;
+ If Nm='timelimit' Then Begin
+  If Not O3Strtod(Val,Dv) Then Begin
+   O3Msg(O3LFatal,'Expected number for '+Key+' but found: '+Val);
+  End Else If (Not O3NanF) And ((Dv<0) Or (Dv>2147483647.0)) Then Begin
+   O3Msg(O3LFatal,'The value for '+Key+' was '+Val+' which is not within 0.000000 - 2147483647.000000');
+  End Else If O3NanF Or (Frac(Dv)<>0) Then Begin
+   O3Msg(O3LFatal,'Expected int64 for '+Key+' but found '+Val);
+  End Else Exit;
+  O3Msg(O3LError,'Failed to set value '''+Val+''' for option '''+Key+''': Invalid argument');
+  O3WriteOpt:=False; Exit;
+ End;
+ If Nm='qscale' Then Begin
+  If Key='qscale' Then O3Msg(O3LWarn,'Please use -q:a or -q:v, -qscale is ambiguous');
+  Sp:='q'+Copy(Key,7,50); If Key='qscale' Then Sp:='q:v';
+  If Not O3NumCheck(Sp,Val,'f') Then Begin
+   O3Msg(O3LError,'Failed to set value '''+Val+''' for option '''+Key+''': Invalid argument');
+   O3WriteOpt:=False;
+  End;
+  Exit;
+ End;
+ If Nm='timestamp' Then Begin
+  If Not O3ParseDate(Val) Then Begin
+   O3Msg(O3LError,'Failed to set value '''+Val+''' for option '''+Key+''': Invalid argument');
+   O3WriteOpt:=False;
+  End;
+  Exit;
+ End;
+ If (Nm='vframes') Or (Nm='aframes') Or (Nm='dframes') Then Begin
+  Sp:='frames:'+Nm[1];
+  If Not O3NumCheck(Sp,Val,'l') Then Begin
+   O3Msg(O3LError,'Failed to set value '''+Val+''' for option '''+Key+''': Invalid argument');
+   O3WriteOpt:=False;
+  End;
+  Exit;
+ End;
+ If Pos('A',Fl)=0 Then Exit;
+ If (Pos('S',Fl)>0) Then Exit;
+ If (Pos('B',Fl)>0) Or (Pos('N',Fl)>0) Then Begin O3WriteOpt:=O3NumCheck(Key,Val,'i'); Exit; End;
+ If Pos('L',Fl)>0 Then Begin O3WriteOpt:=O3NumCheck(Key,Val,'l'); Exit; End;
+ If (Pos('F',Fl)>0) Or (Pos('D',Fl)>0) Then Begin O3WriteOpt:=O3NumCheck(Key,Val,'f'); Exit; End;
+ If Pos('T',Fl)>0 Then Begin
+  If Not O3ParseDur(Val) Then Begin
+   O3Msg(O3LError,'Invalid duration for option '+Key+': '+Val); O3WriteOpt:=False;
+  End;
+  Exit;
+ End;
+End;
+
+{ ---- nom du format d'entree d'apres l'extension (pour les messages [in#0/<format> @ ...]) ---- }
+Function O3ExtOf(Const P: String): String;
+Var I: LongInt;
+Begin
+ I:=Length(P);
+ While (I>0) And Not (P[I] In ['.','/','\']) Do Dec(I);
+ If (I>0) And (P[I]='.') Then O3ExtOf:=Lower(Copy(P,I+1,20)) Else O3ExtOf:='';
+End;
+
+Function O3InFmtName(Const P: String): String;
+Var E: String;
+Begin
+ E:=O3ExtOf(P);
+ If E='y4m' Then O3InFmtName:='yuv4mpegpipe'
+ Else If (E='mp4') Or (E='mov') Or (E='m4a') Or (E='3gp') Or (E='3g2') Or (E='m4v') Then O3InFmtName:='mov,mp4,m4a,3gp,3g2,mj2'
+ Else If (E='mkv') Or (E='mka') Or (E='webm') Then O3InFmtName:='matroska,webm'
+ Else If (E='mpg') Or (E='mpeg') Or (E='vob') Then O3InFmtName:='mpeg'
+ Else If E='ts' Then O3InFmtName:='mpegts'
+ Else If E='ogg' Then O3InFmtName:='ogg'
+ Else If (E='wmv') Or (E='wma') Or (E='asf') Then O3InFmtName:='asf'
+ Else If E='tif' Then O3InFmtName:='image2'
+ Else If (E='png') Or (E='jpg') Or (E='bmp') Or (E='jpeg') Then O3InFmtName:='image2'
+ Else O3InFmtName:=E;
+End;
+
+{ fichier present ? (avio_check) }
+Function O3FileThere(Const P: String): Boolean;
+Var SR: SearchRec;
+Begin
+ FindFirst(P,AnyFile,SR);
+ O3FileThere:=DosError=0;
+ FindClose(SR);
+End;
+
+{ type de flux presents d'apres l'extension : bit0 video, bit1 audio, 0 inconnu }
+Function O3MediaOf(Const P: String): LongInt;
+Var E: String;
+Begin
+ E:=O3ExtOf(P); O3MediaOf:=0;
+ If (E='y4m') Or (E='png') Or (E='bmp') Or (E='jpg') Or (E='gif') Or (E='tif') Or (E='tiff') Or (E='ppm') Or (E='pgm') Or (E='m1v') Or (E='m2v') Or (E='h264') Or (E='264') Or (E='ivf') Or (E='yuv') Then O3MediaOf:=1
+ Else If (E='wav') Or (E='mp3') Or (E='flac') Or (E='aiff') Or (E='aif') Or (E='au') Or (E='mp2') Or (E='ac3') Or (E='aac') Or (E='wma') Or (E='opus') Or (E='voc') Or (E='ape') Or (E='mka') Or (E='m4a') Then O3MediaOf:=2
+ Else If (E='avi') Or (E='mp4') Or (E='mov') Or (E='mkv') Or (E='webm') Or (E='flv') Or (E='mpg') Or (E='mpeg') Or (E='ts') Or (E='wmv') Or (E='asf') Or (E='ogv') Or (E='3gp') Or (E='vob') Or (E='nut') Or (E='rm') Then O3MediaOf:=3;
+End;
+
+{ trame en images/s d'un fichier d'entree y4m/avi : retourne le time_base.den*1000/num de ffmpeg, 0 si inconnu }
+Function O3InputFR(Const P: String): LongInt;
+Var F: File; B: Array[0..8191] Of Byte; N,I,J: LongInt; Num,Den,Scale,Rate: Int64; S: String; Code: LongInt;
+Begin
+ O3InputFR:=0;
+ Assign(F,P); {$I-} Reset(F,1); {$I+}
+ If IOResult<>0 Then Exit;
+ N:=0; {$I-} BlockRead(F,B,SizeOf(B),N); {$I+} Close(F);
+ If N<16 Then Exit;
+ If (B[0]=89) And (B[1]=85) And (B[2]=86) And (B[3]=52) And (B[4]=77) Then Begin
+  S:=''; I:=0;
+  While (I<N) And (B[I]<>10) And (I<250) Do Begin S:=S+Chr(B[I]); Inc(I); End;
+  J:=Pos(' F',S);
+  If J=0 Then Exit;
+  S:=Copy(S,J+2,100); J:=Pos(' ',S); If J>0 Then S:=Copy(S,1,J-1);
+  J:=Pos(':',S); If J=0 Then Exit;
+  Val(Copy(S,1,J-1),Num,Code); If Code<>0 Then Exit;
+  Val(Copy(S,J+1,50),Den,Code); If Code<>0 Then Exit;
+  If (Num<=0) Or (Den<=0) Then Exit;
+  O3InputFR:=(Num*1000) Div Den; Exit;
+ End;
+ If (B[0]=82) And (B[1]=73) And (B[2]=70) And (B[3]=70) And (B[8]=65) And (B[9]=86) And (B[10]=73) Then Begin
+  { cherche le premier strh de type vids }
+  I:=12;
+  While I+64<N Do Begin
+   If (B[I]=115) And (B[I+1]=116) And (B[I+2]=114) And (B[I+3]=104) And (B[I+8]=118) And (B[I+9]=105) And (B[I+10]=100) And (B[I+11]=115) Then Begin
+    Scale:=B[I+28]+B[I+29]*256+B[I+30]*65536+Int64(B[I+31])*16777216;
+    Rate:=B[I+32]+B[I+33]*256+B[I+34]*65536+Int64(B[I+35])*16777216;
+    If (Scale>0) And (Rate>0) Then O3InputFR:=(Rate*1000) Div Scale;
+    Exit;
+   End;
+   Inc(I);
+  End;
+ End;
+End;
+
+{ entete Y4M : taille, cadence, format de pixels }
+Function O3Y4MInfo(Const P: String; Var W,H,FN,FD: LongInt; Var Pix: String): Boolean;
+Var F: File; B: Array[0..511] Of Byte; N,I,J,Code: LongInt; S,T: String;
+Begin
+ O3Y4MInfo:=False; W:=0; H:=0; FN:=0; FD:=1; Pix:='yuv420p';
+ Assign(F,P); {$I-} Reset(F,1); {$I+}
+ If IOResult<>0 Then Exit;
+ N:=0; {$I-} BlockRead(F,B,SizeOf(B),N); {$I+} Close(F);
+ If N<10 Then Exit;
+ If Not ((B[0]=89) And (B[1]=85) And (B[2]=86) And (B[3]=52) And (B[4]=77)) Then Exit;
+ S:=''; I:=0;
+ While (I<N) And (B[I]<>10) Do Begin S:=S+Chr(B[I]); Inc(I); End;
+ If I>=N Then Exit;
+ S:=S+' ';
+ While S<>'' Do Begin
+  J:=Pos(' ',S); T:=Copy(S,1,J-1); Delete(S,1,J);
+  If T='' Then Continue;
+  Case T[1] Of
+   'W': Val(Copy(T,2,20),W,Code);
+   'H': Val(Copy(T,2,20),H,Code);
+   'F': Begin
+    J:=Pos(':',T);
+    If J>0 Then Begin Val(Copy(T,2,J-2),FN,Code); Val(Copy(T,J+1,20),FD,Code); End;
+   End;
+   'C': Begin
+    T:=Copy(T,2,40);
+    If Copy(T,1,3)='420' Then Pix:='yuv420p'
+    Else If Copy(T,1,3)='411' Then Pix:='yuv411p'
+    Else If Copy(T,1,3)='422' Then Pix:='yuv422p'
+    Else If Copy(T,1,3)='444' Then Pix:='yuv444p'
+    Else If T='mono' Then Pix:='gray'
+    Else Pix:='?';
+   End;
+  End;
+ End;
+ O3Y4MInfo:=(W>0) And (H>0) And (FN>0) And (FD>0);
+End;
+
+Function O3RateEq(Const R: String; FN,FD: LongInt): Boolean;
+Var P,Code: LongInt; A,B: Int64;
+Begin
+ O3RateEq:=False; P:=Pos('/',R);
+ If P=0 Then Begin Val(R,A,Code); B:=1; End
+ Else Begin Val(Copy(R,1,P-1),A,Code); If Code<>0 Then Exit; Val(Copy(R,P+1,20),B,Code); End;
+ If Code<>0 Then Exit;
+ O3RateEq:=(A*FD=B*FN);
+End;
+
+{ -target : retire les reglages sans effet (taille/cadence/format deja conformes a l'entree Y4M, options audio sans audio)
+  et ajoute le codec dvvideo implicite du muxeur dv }
+Procedure O3ElideTarget(G,TokPos: LongInt);
+Var K,J,M,NV,Inp,W,H,FN,FD,NN: LongInt; Media: LongInt; Pix,Key,Val,Sz,S2: String; Have,Drop,DvT,CodBefore: Boolean; NewT: Array[0..31] Of String;
+Begin
+ Media:=0; NV:=0; Inp:=-1;
+ For K:=0 To O3NG-1 Do If O3GK[K]=1 Then Begin
+  M:=O3MediaOf(O3GA[K]); Media:=Media Or M;
+  If M And 1<>0 Then Begin Inc(NV); Inp:=K; End;
+ End;
+ Have:=(NV=1) And O3Y4MInfo(O3GA[Inp],W,H,FN,FD,Pix);
+ NN:=0; DvT:=False;
+ For J:=0 To O3NTgt-1 Do Begin
+  K:=Pos('=',O3Tgt[J]); Key:=Copy(O3Tgt[J],2,K-2); Val:=Copy(O3Tgt[J],K+1,100); Drop:=False;
+  If (Key='f') And (Val='dv') Then DvT:=True;
+  If Have Then Begin
+   If Key='s' Then Begin Str(W,Sz); Str(H,S2); Sz:=Sz+'x'+S2; Drop:=(Val=Sz); End
+   Else If Key='r' Then Drop:=O3RateEq(Val,FN,FD)
+   Else If Key='pix_fmt' Then Drop:=(Val=Pix);
+  End;
+  If (Media<>0) And (Media And 2=0) And ((Key='ar') Or (Key='ac') Or (Key='b:a') Or (Key='c:a')) Then Drop:=True;
+  If Not Drop Then Begin NewT[NN]:=O3Tgt[J]; Inc(NN); End;
+ End;
+ For J:=0 To NN-1 Do O3Tgt[J]:=NewT[J];
+ O3NTgt:=NN;
+ If DvT And (Media And 1<>0) Then Begin
+  CodBefore:=False;
+  For K:=0 To O3NOpts-1 Do If (O3O[K].Grp=G) And (O3O[K].Def>=0) And (O3O[K].Pos<TokPos) Then Begin
+   Key:=O3O[K].Key;
+   If (Key='c') Or (Key='codec') Or (Key='c:v') Or (Key='codec:v') Or (Key='vcodec') Then CodBefore:=True;
+  End;
+  If (Not CodBefore) And (O3NTgt<31) Then Begin
+   For J:=O3NTgt DownTo 1 Do O3Tgt[J]:=O3Tgt[J-1];
+   O3Tgt[0]:='Oc:v=dvvideo'; Inc(O3NTgt);
+  End;
+ End;
+End;
+
+Const O3LegacyF=' alac amv bmp mace mp1 mp2 mp3adu mp3on4 mpeg1video mpeg2video pam pbm pcx pgm pgmyuv png ppm psub ptx qdm2 sgi sonicavi sunrast targa tiff tsavi vob aac dvbsub vobsub iff libopenmpt ';
+
+{ ---- recherche d'un muxer d'apres -f / extension : retourne l'indice dans O3Mux ou -1 ---- }
+Function O3MuxRow(I: LongInt; Part: LongInt): String;
+Var S: String; P,K: LongInt;
+Begin
+ S:=O3Mux[I];
+ For K:=1 To Part Do Begin P:=Pos('|',S); If P=0 Then Begin S:=''; Break; End; Delete(S,1,P); End;
+ P:=Pos('|',S); If P>0 Then S:=Copy(S,1,P-1);
+ O3MuxRow:=S;
+End;
+
+Function O3MuxByName(Const N: String): LongInt;
+Var I: LongInt; L: String;
+Begin
+ O3MuxByName:=-1; L:=Lower(N);
+ For I:=0 To O3MuxN-1 Do If O3MuxRow(I,0)=L Then Begin O3MuxByName:=I; Exit; End;
+End;
+
+Function O3MuxByExt(Const E: String): LongInt;
+Var I: LongInt;
+Begin
+ O3MuxByExt:=-1;
+ If E='' Then Exit;
+ For I:=0 To O3MuxN-1 Do If Pos(','+E+',',','+O3MuxRow(I,1)+',')>0 Then Begin O3MuxByExt:=I; Exit; End;
+End;
+
+Function O3IsPlainFile(Const P: String): Boolean;
+Begin
+ O3IsPlainFile:=(P<>'') And (P<>'-') And (Pos(':',P)=0);
+End;
+
+Procedure O3GroupFail(IsOut: Boolean; Const Arg: String; Code: LongInt);
+Begin
+ If IsOut Then Begin
+  O3Msg(O3LError,'Error opening output file '+Arg+'.');
+  O3Msg(O3LFatal,'Error opening output files: '+O3ErrText(Code));
+ End Else Begin
+  O3Msg(O3LError,'Error opening input file '+Arg+'.');
+  O3Msg(O3LFatal,'Error opening input files: '+O3ErrText(Code));
+ End;
+ O3Die(Code);
+End;
+
+Procedure O3ParseFail(IsOut: Boolean; Const Arg: String; Code: LongInt);
+Begin
+ If IsOut Then Begin
+  O3Msg(O3LError,'Error parsing options for output file '+Arg+'.');
+  O3Msg(O3LFatal,'Error opening output files: '+O3ErrText(Code));
+ End Else Begin
+  O3Msg(O3LError,'Error parsing options for input file '+Arg+'.');
+  O3Msg(O3LFatal,'Error opening input files: '+O3ErrText(Code));
+ End;
+ O3Die(Code);
+End;
+
+{ -target : cle (sans tiret) + '=' + valeur ; 'O' : place a la position de -target ; 'A' : AVOption, placee en tete du groupe }
+Procedure O3TAdd(Kind: Char; Const KV: String);
+Begin
+ If O3NTgt<32 Then Begin O3Tgt[O3NTgt]:=Kind+KV; Inc(O3NTgt); End;
+End;
+
+Function O3Target(Const Arg0: String; GIdx: LongInt): Boolean;
+Var Norm,K,J,Fr: LongInt; Arg: String; Pal: Boolean; Rate,Sz,Gop: String; Assumed: Boolean;
+Begin
+ O3Target:=False; O3NTgt:=0; Arg:=Arg0; Norm:=3;
+ If Copy(Arg,1,4)='pal-' Then Begin Norm:=0; Delete(Arg,1,4); End
+ Else If Copy(Arg,1,5)='ntsc-' Then Begin Norm:=1; Delete(Arg,1,5); End
+ Else If Copy(Arg,1,5)='film-' Then Begin Norm:=2; Delete(Arg,1,5); End
+ Else Begin
+  For K:=0 To O3NG-1 Do If (O3GK[K]=1) And (Norm=3) Then Begin
+   Fr:=O3InputFR(O3GA[K]);
+   If Fr=25000 Then Norm:=0 Else If (Fr=29970) Or (Fr=23976) Then Norm:=1;
+  End;
+  If Norm<>3 Then Begin
+   If Norm=0 Then O3Msg(O3LInfo,'Assuming PAL for target.') Else O3Msg(O3LInfo,'Assuming NTSC for target.');
+  End;
+ End;
+ If Norm=3 Then Begin
+  O3Msg(O3LFatal,'Could not determine norm (PAL/NTSC/NTSC-Film) for target.');
+  O3Msg(O3LFatal,'Please prefix target with "pal-", "ntsc-" or "film-",');
+  O3Msg(O3LFatal,'or set a framerate with "-r xxx".');
+  Exit;
+ End;
+ Case Norm Of 0: Rate:='25'; 1: Rate:='30000/1001'; Else Rate:='24000/1001'; End;
+ If Norm=0 Then Gop:='15' Else Gop:='18';
+ If Arg='vcd' Then Begin
+  O3TAdd('O','c:v=mpeg1video'); O3TAdd('O','c:a=mp2'); O3TAdd('O','f=vcd');
+  If Norm=0 Then Sz:='352x288' Else Sz:='352x240';
+  O3TAdd('O','s='+Sz); O3TAdd('O','r='+Rate);
+  O3TAdd('A','g='+Gop); O3TAdd('A','b:v=1150000'); O3TAdd('A','maxrate:v=1150000'); O3TAdd('A','minrate:v=1150000'); O3TAdd('A','bufsize:v=327680');
+  O3TAdd('A','b:a=224000'); O3TAdd('O','ar=44100'); O3TAdd('O','ac=2');
+  O3TAdd('A','packetsize=2324'); O3TAdd('A','muxrate=1411200'); O3TAdd('A','preload=440000');
+ End Else If Arg='svcd' Then Begin
+  O3TAdd('O','c:v=mpeg2video'); O3TAdd('O','c:a=mp2'); O3TAdd('O','f=svcd');
+  If Norm=0 Then Sz:='480x576' Else Sz:='480x480';
+  O3TAdd('O','s='+Sz); O3TAdd('O','r='+Rate); O3TAdd('O','pix_fmt=yuv420p');
+  O3TAdd('A','g='+Gop); O3TAdd('A','b:v=2040000'); O3TAdd('A','maxrate:v=2516000'); O3TAdd('A','minrate:v=0'); O3TAdd('A','bufsize:v=1835008');
+  O3TAdd('A','scan_offset=1'); O3TAdd('A','b:a=224000'); O3TAdd('O','ar=44100'); O3TAdd('A','packetsize=2324');
+ End Else If Arg='dvd' Then Begin
+  O3TAdd('O','c:v=mpeg2video'); O3TAdd('O','c:a=ac3'); O3TAdd('O','f=dvd');
+  If Norm=0 Then Sz:='720x576' Else Sz:='720x480';
+  O3TAdd('O','s='+Sz); O3TAdd('O','r='+Rate); O3TAdd('O','pix_fmt=yuv420p');
+  O3TAdd('A','g='+Gop); O3TAdd('A','b:v=6000000'); O3TAdd('A','maxrate:v=9000000'); O3TAdd('A','minrate:v=0'); O3TAdd('A','bufsize:v=1835008');
+  O3TAdd('A','packetsize=2048'); O3TAdd('A','muxrate=10080000'); O3TAdd('A','b:a=448000'); O3TAdd('O','ar=48000');
+ End Else If Copy(Arg,1,2)='dv' Then Begin
+  O3TAdd('O','f=dv');
+  If Norm=0 Then Sz:='720x576' Else Sz:='720x480';
+  O3TAdd('O','s='+Sz);
+  If Copy(Arg,1,4)='dv50' Then O3TAdd('O','pix_fmt=yuv422p') Else If Norm=0 Then O3TAdd('O','pix_fmt=yuv420p') Else O3TAdd('O','pix_fmt=yuv411p');
+  O3TAdd('O','r='+Rate); O3TAdd('O','ar=48000'); O3TAdd('O','ac=2');
+ End Else Begin
+  O3Msg(O3LError,'Unknown target: '+Arg);
+  Exit;
+ End;
+ O3Target:=True;
+End;
+
+{ ---- dernier codec choisi pour un type ('v' ou 'a') dans un groupe ; '' si aucun ---- }
+Function O3GroupCodec(G: LongInt; T: Char): String;
+Var I: LongInt; K,R: String;
+Begin
+ R:='';
+ For I:=0 To O3NOpts-1 Do If (O3O[I].Grp=G) And (O3O[I].Def>=0) Then Begin
+  K:=O3O[I].Key;
+  If (K='c') Or (K='codec') Or (K='c:'+T) Or (K='codec:'+T) Or ((T='v') And (K='vcodec')) Or ((T='a') And (K='acodec')) Or (K='c:'+T+':0') Then R:=O3O[I].Val;
+ End;
+ O3GroupCodec:=R;
+End;
+
+Function O3GroupOptVal(G: LongInt; Const Names: String; Var Key: String): String;
+{ derniere valeur d'une option dont la cle figure dans Names (separes par des espaces, entoures d'espaces) }
+Var I: LongInt; R: String;
+Begin
+ R:=''; Key:='';
+ For I:=0 To O3NOpts-1 Do If (O3O[I].Grp=G) And (O3O[I].Def>=0) Then
+  If Pos(' '+O3O[I].Key+' ',Names)>0 Then Begin R:=O3O[I].Val; Key:=O3O[I].Key; End;
+ O3GroupOptVal:=R;
+End;
+
+Function O3HasKey(G: LongInt; Const Names: String): Boolean;
+Var I: LongInt;
+Begin
+ O3HasKey:=False;
+ For I:=0 To O3NOpts-1 Do If (O3O[I].Grp=G) And (O3O[I].Def>=0) Then
+  If Pos(' '+O3O[I].Key+' ',Names)>0 Then O3HasKey:=True;
+End;
+
+
+Function O3I2S(N: LongInt): String;
+Var S: String;
+Begin
+ Str(N,S); O3I2S:=S;
+End;
+
+{ av_parse_ratio pour -aspect : Msg recoit le message [Eval ...] eventuel }
+Function O3AspectOk(Const V: String; Var Msg: String): Boolean;
+Var P,Code,N1,N2: LongInt; D: Double;
+Begin
+ Msg:=''; O3AspectOk:=False;
+ P:=Pos(':',V);
+ If P>0 Then Begin
+  If O3StrictInt(Copy(V,1,P-1),N1) Then Begin
+   If O3StrictInt(Copy(V,P+1,50),N2) Then Begin O3AspectOk:=(N1>0) And (N2>0); Exit; End;
+  End;
+ End;
+ If O3Eval(V,D) Then Begin O3AspectOk:=D>0; Exit; End;
+ If (V<>'') And (UpCase(V[1]) In ['A'..'Z','_']) Then Msg:='[Eval @ '+O3Ptr+'] Undefined constant or missing ''('' in '''+V+''''
+ Else Msg:='[Eval @ '+O3Ptr+'] Invalid chars '''+Copy(V,O3EvI,200)+''' at the end of expression '''+V+'''';
+End;
+
+Function O3KnownDec(Const N: String; T: Char): Boolean;
+Begin
+ O3KnownDec:=O3InList(O3Dec,T+N) Or (O3InList(O3Cod,N) And (N<>'copy') And (N<>'none'));
+End;
+
+{ ---- groupes d'entree ---- }
+Procedure O3DoInput(G,Idx: LongInt);
+Var I,Code,Media: LongInt; Arg,Fm,Cv,Pre: String; Ex: Char; Ctx,Ok: Boolean; Nm: String;
+Begin
+ Arg:=O3GA[G];
+ For I:=0 To O3NOpts-1 Do If (O3O[I].Grp=G) And (O3O[I].Def>=0) Then Begin
+  If Not O3Has(O3O[I].Def,'I') Then Begin
+   O3Msg(O3LError,AnsiString('Option ')+O3O[I].Key+' ('+O3DefHelp(O3O[I].Def)+') cannot be applied to input url '+Arg+' -- you are trying to apply an input option to an output file or vice versa. Move this option before the file it belongs to.');
+   O3ParseFail(False,Arg,234);
+  End;
+  If Not O3WriteOpt(I) Then O3ParseFail(False,Arg,234);
+ End;
+ { format force }
+ Fm:=O3GroupOptVal(G,' f format ',Nm);
+ If (Fm<>'') And Not O3InList(O3Dem,Lower(Fm)) And (Pos(' '+Lower(Fm)+' ',O3LegacyF)=0) Then Begin
+  O3Msg(O3LError,'[in#'+O3I2S(Idx)+' @ '+O3Ptr+'] Unknown input format: '''+Fm+'''');
+  O3GroupFail(False,Arg,234);
+ End;
+ Media:=O3MediaOf(Arg);
+ { options de demuxeur absentes des conteneurs courants (-s -> video_size, -pix_fmt -> pixel_format, -ar -> sample_rate) }
+ For I:=0 To O3NOpts-1 Do If (O3O[I].Grp=G) And (O3O[I].Def>=0) Then Begin
+  Nm:=O3O[I].Key; Cv:='';
+  If (Nm='s') Or (Nm='s:v') Then Cv:='video_size' Else If (Nm='pix_fmt') Or (Nm='pix_fmt:v') Then Cv:='pixel_format' Else If (Nm='ar') Or (Nm='ar:a') Then Cv:='sample_rate';
+  If Cv<>'' Then Begin
+   If Fm<>'' Then Ok:=Pos(' '+Lower(Fm)+' ',' yuv4mpegpipe avi mov mp4 matroska webm wav mp3 flac ogg mpeg flv asf mpegts aiff au ')>0
+   Else Ok:=Pos(' '+O3ExtOf(Arg)+' ',' y4m avi mp4 mov mkv webm wav mp3 flac ogg mpg mpeg flv wmv asf ts aiff au m4a mka ')>0;
+   If Ok Then Begin
+    O3Msg(O3LError,'Option '+Cv+' not found.');
+    O3GroupFail(False,Arg,8);
+   End;
+  End;
+ End;
+ { decodeurs : recherche faite avant l'ouverture du fichier (-c / -c:v / -c:a) }
+ Cv:=O3GroupCodec(G,'v');
+ If (Cv<>'') And Not O3KnownDec(Lower(Cv),'v') Then Begin
+  O3Msg(O3LFatal,'Unknown decoder '''+Cv+''''); O3Err8:='Decoder not found'; O3GroupFail(False,Arg,8);
+ End;
+ Cv:=O3GroupCodec(G,'a');
+ If (Cv<>'') And Not O3KnownDec(Lower(Cv),'a') Then Begin
+  O3Msg(O3LFatal,'Unknown decoder '''+Cv+''''); O3Err8:='Decoder not found'; O3GroupFail(False,Arg,8);
+ End;
+ { fichier present }
+ If (O3IsPlainFile(Arg) Or (Arg='')) And Not O3FileThere(Arg) And (Pos('%',Arg)=0) And (Pos('*',Arg)=0) And (Pos('?',Arg)=0) And (Pos('[',Arg)=0) And
+  (Pos(' '+Lower(Fm)+' ',' lavfi alsa pulse oss v4l2 x11grab kmsgrab fbdev jack openal dshow gdigrab avfoundation decklink iec61883 dc1394 libcdio sndio ')=0) Then Begin
+  O3Msg(O3LError,'[in#'+O3I2S(Idx)+' @ '+O3Ptr+'] Error opening input: No such file or directory');
+  O3GroupFail(False,Arg,254);
+ End;
+ { AVOptions de codec : doivent etre des options de decodage }
+ For I:=0 To O3NOpts-1 Do If (O3O[I].Grp=G) And (O3O[I].Def<0) Then Begin
+  Ex:=O3O[I].Av;
+  If O3AvNoDec(Ex) Then Begin
+   Nm:=O3O[I].Key; If Pos(':',Nm)>0 Then Nm:=Copy(Nm,1,Pos(':',Nm)-1);
+   O3Msg(O3LError,AnsiString('[in#')+O3I2S(Idx)+'/'+O3InFmtName(Arg)+' @ '+O3Ptr+'] Codec AVOption '+Nm+' ('+O3AvHelp(Nm)+') is not a decoding option.');
+   O3GroupFail(False,Arg,234);
+  End;
+ End;
+End;
+
+Function O3GetInputName(N: LongInt): String;
+Var K,C: LongInt;
+Begin
+ C:=0; O3GetInputName:='';
+ For K:=0 To O3NG-1 Do If O3GK[K]=1 Then Begin
+  If C=N Then Begin O3GetInputName:=O3GA[K]; Exit; End;
+  Inc(C);
+ End;
+End;
+
+Procedure O3StoreTarget(Tok,G: LongInt); Forward;
+
+{ ---- groupes de sortie ---- }
+Procedure O3DoOutput(G,Idx,NIn: LongInt);
+Var I,K,Mi,Media,MediaAll,W,H,SIdx: LongInt; Hit: Boolean; MapS: String; Arg,Fm,Nm,Mux,Cv,Ca,Venc,Val,Key,Ext,Pf: String; Ex: Char; Ok,NoV,NoA: Boolean; Pfx: String;
+Begin
+ Arg:=O3GA[G];
+ For I:=0 To O3NOpts-1 Do If (O3O[I].Grp=G) And (O3O[I].Def>=0) Then Begin
+  If Not O3Has(O3O[I].Def,'O') Then Begin
+   O3Msg(O3LError,AnsiString('Option ')+O3O[I].Key+' ('+O3DefHelp(O3O[I].Def)+') cannot be applied to output url '+Arg+' -- you are trying to apply an input option to an output file or vice versa. Move this option before the file it belongs to.');
+   O3ParseFail(True,Arg,234);
+  End;
+  If Not O3WriteOpt(I) Then O3ParseFail(True,Arg,234);
+  If (O3DefName(O3O[I].Def)='map') And (Copy(O3O[I].Val,1,1)<>'[') And (Copy(O3O[I].Val,1,2)<>'-[') Then Begin
+   { -map [-]FICHIER[:specificateur][?] }
+   Val:=O3O[I].Val; If Copy(Val,1,1)='-' Then Delete(Val,1,1); K:=Pos(',',Val); If K>0 Then Val:=Copy(Val,1,K-1);
+   MapS:=Val; Pf:=''; K:=Pos(':',Val);
+   If K>0 Then Begin Pf:=Copy(Val,K+1,100); Val:=Copy(Val,1,K-1); End;
+   Mi:=O3Atoi(Val); If Mi<0 Then Mi:=0;
+   If (Mi<0) Or (Mi>=NIn) Then Begin
+    If Mi<0 Then Mi:=0;
+    O3Msg(O3LError,'Invalid input file index: '+O3I2S(Mi)+'.');
+    O3Msg(O3LError,'Failed to set value '''+O3O[I].Val+''' for option ''map'': Invalid argument');
+    O3ParseFail(True,Arg,234);
+   End Else Begin
+    Media:=O3MediaOf(O3GetInputName(Mi));
+    If (Media=1) Or (Media=2) Then Begin
+     Ok:=Copy(Pf,Length(Pf),1)='?'; If Ok Then Delete(Pf,Length(Pf),1);
+     SIdx:=-1; Cv:='';
+     If Pf='' Then Cv:='*' Else If Pf[1] In ['0'..'9'] Then Begin SIdx:=O3Atoi(Pf); Cv:='n'; End
+     Else Begin
+      Cv:=Pf[1]; If (Length(Pf)>2) And (Pf[2]=':') Then SIdx:=O3Atoi(Copy(Pf,3,10));
+     End;
+     Hit:=True;
+     If Cv='*' Then Hit:=True
+     Else If Cv='n' Then Hit:=SIdx=0
+     Else If Cv='v' Then Hit:=(Media=1) And (SIdx<=0)
+     Else If Cv='a' Then Hit:=(Media=2) And (SIdx<=0)
+     Else If (Cv='s') Or (Cv='d') Or (Cv='t') Then Hit:=False;
+     If (Not Hit) And (Not Ok) Then Begin
+      O3Msg(O3LError,'Stream map '''+MapS+''' matches no streams.');
+      O3Msg(O3LError,'To ignore this, add a trailing ''?'' to the map.');
+      O3Msg(O3LError,'Failed to set value '''+O3O[I].Val+''' for option ''map'': Invalid argument');
+      O3ParseFail(True,Arg,234);
+     End;
+    End;
+   End;
+  End;
+  If O3DefName(O3O[I].Def)='target' Then Begin
+   If Not O3Target(O3O[I].Val,G) Then Begin
+    O3Msg(O3LError,'Failed to set value '''+O3O[I].Val+''' for option ''target'': Invalid argument');
+    O3ParseFail(True,Arg,234);
+   End;
+   O3ElideTarget(G,O3O[I].Pos);
+   O3StoreTarget(O3O[I].Pos,G);
+  End;
+ End;
+ { format de sortie }
+ Fm:=O3GroupOptVal(G,' f format ',Nm);
+ Mux:='';
+ If NIn=0 Then Media:=0 Else Media:=3;
+ If O3IsPlainFile(Arg) Or (Arg='-') Or (Arg='') Then Begin
+  If Fm<>'' Then Begin
+   Mi:=O3MuxByName(Fm);
+   If (Mi<0) And (Pos(' '+Lower(Fm)+' ',O3LegacyF)=0) Then Begin
+    O3Msg(O3LError,'[AVFormatContext @ '+O3Ptr+'] Requested output format '''+Fm+''' is not known.');
+    O3Msg(O3LError,'[out#'+O3I2S(Idx)+' @ '+O3Ptr+'] Error initializing the muxer for '+Arg+': Invalid argument');
+    O3GroupFail(True,Arg,234);
+   End;
+   If Mi>=0 Then Mux:=O3MuxRow(Mi,0);
+  End Else If Arg='-' Then Begin
+   O3Msg(O3LError,'[AVFormatContext @ '+O3Ptr+'] Unable to choose an output format for ''pipe:''; use a standard extension for the filename or specify the format manually.');
+   O3Msg(O3LError,'[out#'+O3I2S(Idx)+' @ '+O3Ptr+'] Error initializing the muxer for pipe:: Invalid argument');
+   O3GroupFail(True,Arg,234);
+  End Else If O3IsPlainFile(Arg) And (Pos('%',Arg)=0) Then Begin
+   Ext:=O3ExtOf(Arg); Mi:=O3MuxByExt(Ext);
+   If (Mi<0) And (Pos(' '+Ext+' ',' psub idx sub dvbsub vobsub ')=0) Then Begin
+    O3Msg(O3LError,'[AVFormatContext @ '+O3Ptr+'] Unable to choose an output format for '''+Arg+'''; use a standard extension for the filename or specify the format manually.');
+    O3Msg(O3LError,'[out#'+O3I2S(Idx)+' @ '+O3Ptr+'] Error initializing the muxer for '+Arg+': Invalid argument');
+    O3GroupFail(True,Arg,234);
+   End;
+   If Mi>=0 Then Mux:=O3MuxRow(Mi,0);
+  End;
+ End;
+ { type de flux d'apres les entrees }
+ Media:=0;
+ For K:=0 To O3NG-1 Do If O3GK[K]=1 Then Media:=Media Or O3MediaOf(O3GA[K]);
+ If (Media=0) And (NIn>0) Then Media:=0;
+ MediaAll:=Media;
+ NoV:=O3HasKey(G,' vn '); NoA:=O3HasKey(G,' an ');
+ If NoV Then Media:=Media And 2; If NoA Then Media:=Media And 1;
+ { codecs d'encodage }
+ Cv:=O3GroupCodec(G,'v'); Ca:=O3GroupCodec(G,'a');
+ If (Cv<>'') And (Cv<>'copy') And (Media And 1<>0) And Not O3InList(O3Enc,'v'+Lower(Cv)) And Not O3InList(O3Cod,Lower(Cv)) Then Begin
+  O3Msg(O3LError,'[vost#'+O3I2S(Idx)+':0 @ '+O3Ptr+'] Unknown encoder '''+Cv+'''');
+  O3Msg(O3LError,'[vost#'+O3I2S(Idx)+':0 @ '+O3Ptr+'] Error selecting an encoder');
+  O3Err8:='Encoder not found'; O3GroupFail(True,Arg,8);
+ End;
+ If (Ca<>'') And (Ca<>'copy') And (Media And 2<>0) And Not O3InList(O3Enc,'a'+Lower(Ca)) And Not O3InList(O3Cod,Lower(Ca)) Then Begin
+  If Media=3 Then K:=1 Else K:=0;
+  O3Msg(O3LError,'[aost#'+O3I2S(Idx)+':'+O3I2S(K)+' @ '+O3Ptr+'] Unknown encoder '''+Ca+'''');
+  O3Msg(O3LError,'[aost#'+O3I2S(Idx)+':'+O3I2S(K)+' @ '+O3Ptr+'] Error selecting an encoder');
+  O3Err8:='Encoder not found'; O3GroupFail(True,Arg,8);
+ End;
+ { encodeur video par defaut }
+ Venc:='';
+ If (Media And 1<>0) And (Cv<>'copy') Then Begin
+  If Cv<>'' Then Venc:=Lower(Cv)
+  Else If Mux<>'' Then Begin Mi:=O3MuxByName(Mux); If Mi>=0 Then Venc:=O3MuxRow(Mi,2); End;
+ End;
+ If Venc<>'' Then Begin
+  Pfx:='[vost#'+O3I2S(Idx)+':0/'+Venc+' @ '+O3Ptr+'] ';
+  Val:=O3GroupOptVal(G,' s s:v ',Key);
+  If Val<>'' Then Begin
+   If Not O3ParseSize(Val,W,H) Then Begin
+    O3Msg(O3LFatal,Pfx+'Invalid frame size: '+Val+'.'); O3GroupFail(True,Arg,234);
+   End;
+  End;
+  Val:=O3GroupOptVal(G,' r r:v ',Key);
+  If Val<>'' Then Begin
+   If Not O3ParseRate(Val) Then Begin
+    O3Msg(O3LFatal,Pfx+'Invalid framerate value: '+Val); O3GroupFail(True,Arg,234);
+   End;
+  End;
+  Val:=O3GroupOptVal(G,' aspect aspect:v ',Key);
+  If Val<>'' Then Begin
+   If Not O3AspectOk(Val,Pf) Then Begin
+    If Pf<>'' Then O3Msg(O3LError,Pf);
+    O3Msg(O3LFatal,Pfx+'Invalid aspect ratio: '+Val); O3GroupFail(True,Arg,234);
+   End;
+  End;
+  Val:=O3GroupOptVal(G,' pix_fmt pix_fmt:v ',Key);
+  If (Val<>'') And Not O3InList(O3Pix,Val) Then Begin
+   O3Msg(O3LFatal,Pfx+'Unknown pixel format requested: '+Val+'.'); O3GroupFail(True,Arg,234);
+  End;
+ End;
+ { metadonnees }
+ If Mux='' Then Mux:=Lower(O3ExtOf(Arg));
+ For I:=0 To O3NOpts-1 Do If (O3O[I].Grp=G) And (O3O[I].Def>=0) Then Begin
+  Nm:=O3DefName(O3O[I].Def);
+  If Nm='metadata' Then Begin
+   If O3O[I].Key='metadata:g' Then O3O[I].Av:='G'
+   Else If (O3O[I].Key<>'metadata') And (Pos(' '+Mux+' ',' wav w64 aiff flac au ac3 mp2 mp3 caf sox adts aac dts truehd ')>0) Then O3O[I].Av:='M';
+   If Pos('=',O3O[I].Val)=0 Then Begin
+    O3Msg(O3LError,'[out#'+O3I2S(Idx)+'/'+Mux+' @ '+O3Ptr+'] No ''='' character in metadata string '+O3O[I].Val+'.');
+    O3GroupFail(True,Arg,234);
+   End;
+  End Else If Nm='map_metadata' Then Begin
+   Val:=O3O[I].Val; K:=1;
+   While (K<=Length(Val)) And (Val[K] In [' ',#9]) Do Inc(K);
+   Pf:='';
+   If (K<=Length(Val)) And (Val[K] In ['+','-']) Then Begin Pf:=Val[K]; Inc(K); End;
+   Mi:=0;
+   If (K+1<=Length(Val)) And (Val[K]='0') And ((Val[K+1]='x') Or (Val[K+1]='X')) Then Begin
+    Inc(K,2);
+    While (K<=Length(Val)) And (UpCase(Val[K]) In ['0'..'9','A'..'F']) Do Begin If Mi<100000000 Then Begin If UpCase(Val[K])<='9' Then Mi:=Mi*16+Ord(Val[K])-48 Else Mi:=Mi*16+Ord(UpCase(Val[K]))-55; End; Inc(K); End;
+   End Else If (K<=Length(Val)) And (Val[K]='0') Then Begin
+    While (K<=Length(Val)) And (Val[K] In ['0'..'7']) Do Begin If Mi<100000000 Then Mi:=Mi*8+Ord(Val[K])-48; Inc(K); End;
+   End Else Begin
+    While (K<=Length(Val)) And (Val[K] In ['0'..'9']) Do Begin If Mi<100000000 Then Mi:=Mi*10+Ord(Val[K])-48; Inc(K); End;
+   End;
+   If Pf='-' Then Mi:=-Mi;
+   If Mi>=NIn Then Begin
+    O3Msg(O3LError,'[out#'+O3I2S(Idx)+'/'+Mux+' @ '+O3Ptr+'] Invalid input file index '+O3I2S(Mi)+' while processing metadata maps');
+    O3GroupFail(True,Arg,234);
+   End;
+   If (O3O[I].Key='map_metadata') Or (O3O[I].Key='map_metadata:g') Then Begin
+    If (O3O[I].Val='-1') Or (O3O[I].Val='0') Or (O3O[I].Val='0:g') Then Begin
+     O3O[I].Av:='M';
+     If O3O[I].Val='-1' Then Begin O3NoMeta:=True; If O3O[I].Key='map_metadata' Then O3NoSMeta:=True; End;
+    End;
+   End;
+   If K<=Length(Val) Then Inc(K);
+   If (K<=Length(Val)) And Not (Val[K] In ['g','s','c','p']) Then Begin
+    O3Msg(O3LError,'[out#'+O3I2S(Idx)+'/'+Mux+' @ '+O3Ptr+'] Invalid metadata type '+Val[K]+'.');
+    O3GroupFail(True,Arg,234);
+   End;
+  End;
+ End;
+ { AVOptions de codec : doivent etre des options d'encodage }
+ For I:=0 To O3NOpts-1 Do If (O3O[I].Grp=G) And (O3O[I].Def<0) Then Begin
+  Ex:=O3O[I].Av;
+  If O3AvNoEnc(Ex) Then Begin
+   Nm:=O3O[I].Key; If Pos(':',Nm)>0 Then Nm:=Copy(Nm,1,Pos(':',Nm)-1);
+   If NIn>0 Then Begin
+    O3Msg(O3LError,AnsiString('[out#')+O3I2S(Idx)+'/'+Mux+' @ '+O3Ptr+'] Codec AVOption '+Nm+' ('+O3AvHelp(Nm)+') is not an encoding option.');
+    O3GroupFail(True,Arg,234);
+   End;
+  End;
+ End;
+ If (NIn>0) And (Mux<>'') And (Media<>0) Then Begin
+  Mi:=O3MuxByName(Mux);
+  If Mi>=0 Then Begin
+   If (O3MuxRow(Mi,2)='') And (O3MuxRow(Mi,3)<>'') And (Media And 2=0) Then Media:=0
+   Else If (O3MuxRow(Mi,3)='') And (O3MuxRow(Mi,2)<>'') And (Media And 1=0) Then Media:=0;
+  End;
+ End;
+ If NIn=0 Then Begin
+  O3Msg(O3LError,'[out#'+O3I2S(Idx)+'/'+Mux+' @ '+O3Ptr+'] Output file does not contain any stream');
+  O3GroupFail(True,Arg,234);
+ End;
+ If (MediaAll<>0) And (Media=0) Then Begin
+  O3Msg(O3LError,'[out#'+O3I2S(Idx)+'/'+Mux+' @ '+O3Ptr+'] Output file does not contain any stream');
+  O3GroupFail(True,Arg,234);
+ End;
+End;
+
+{ ---- ecrasement des fichiers de sortie (assert_file_overwrite) ---- }
+Var O3InsY: Boolean;
+
+Procedure O3Overwrite(G,Idx: LongInt);
+Var Arg,Ans: String; K: LongInt;
+Begin
+ Arg:=O3GA[G];
+ If O3Yes And O3NoOw Then Begin
+  WriteLn(StdErr,'Error, both -y and -n supplied. Exiting.');
+  O3GroupFail(True,Arg,234);
+ End;
+ If (Not O3Yes) And O3IsPlainFile(Arg) And O3FileThere(Arg) Then Begin
+  If (Not O3NoStdin) And (Not O3NoOw) Then Begin
+   Write(StdErr,'File '''+Arg+''' already exists. Overwrite? [y/N] ');
+   Ans:='';
+   {$I-} If Not Eof(Input) Then ReadLn(Input,Ans); {$I+}
+   If IOResult<>0 Then Ans:='';
+   If (Ans<>'') And (Ans[1] In ['y','Y']) Then O3InsY:=True
+   Else Begin
+    O3Msg(O3LFatal,'Not overwriting - exiting');
+    O3Msg(O3LError,'Error opening output file '+Arg+'.');
+    Halt(0);
+   End;
+  End Else Begin
+   O3Msg(O3LFatal,'File '''+Arg+''' already exists. Exiting.');
+   O3Msg(O3LError,'Error opening output file '+Arg+'.');
+   Halt(0);
+  End;
+ End;
+ If O3IsPlainFile(Arg) Then Begin
+  K:=0;
+  For Idx:=0 To O3NG-1 Do If O3GK[Idx]=1 Then Begin
+   If O3GA[Idx]=Arg Then Begin
+    O3Msg(O3LFatal,'Output '+Arg+' same as Input #'+O3I2S(K)+' - exiting');
+    O3Msg(O3LWarn,'FFmpeg cannot edit existing files in-place.');
+    O3GroupFail(True,Arg,234);
+   End;
+   Inc(K);
+  End;
+ End;
+End;
+
+{ ---- reecriture du vecteur d'arguments (expansion de -target, -y apres une reponse positive) ---- }
+Var
+ O3NewV: Array[0..2047] Of String[255]; O3NN: LongInt;
+ O3RepStr: Array[0..2048] Of String[24]; O3NRew: LongInt;
+ O3Rep,O3InsAt: Array[0..2048] Of LongInt; O3XNext: Array[0..15] Of LongInt; O3Del: Array[0..2048] Of Boolean;
+ O3XPre: Array[0..15] Of Boolean;
+ O3XTok,O3XG,O3XCnt: Array[0..15] Of LongInt; O3XIt: Array[0..15,0..31] Of String[100]; O3XCod: Array[0..15] Of Boolean; O3NX: LongInt;
+
+Procedure O3Emit(Const S: String);
+Begin
+ If O3NN<2047 Then Begin O3NewV[O3NN]:=S; Inc(O3NN); End;
+End;
+
+Procedure O3StoreTarget(Tok,G: LongInt);
+Var I: LongInt;
+Begin
+ If O3NX>=16 Then Exit;
+ O3XTok[O3NX]:=Tok; O3XG[O3NX]:=G; O3XCnt[O3NX]:=O3NTgt; O3XCod[O3NX]:=False; O3XPre[O3NX]:=False;
+ For I:=0 To O3NTgt-1 Do Begin
+  O3XIt[O3NX,I]:=O3Tgt[I];
+  If Copy(O3Tgt[I],1,9)='Apreload=' Then O3XPre[O3NX]:=True;
+  If Copy(O3Tgt[I],2,4)='c:v=' Then O3XCod[O3NX]:=True;
+ End;
+ Inc(O3NX);
+End;
+
+Var O3NStrip: LongInt;
+
+{ options acceptees par ffmpeg 6.1.1 sans effet sur le resultat : retirees avant le passage aux moteurs }
+Function O3StripOpt(K: LongInt): Boolean;
+Var Nm: String;
+Begin
+ O3StripOpt:=False;
+ If O3O[K].Def>=0 Then Begin
+  If (O3O[K].Grp<>-1) Then Begin O3StripOpt:=(O3O[K].Av='M'); Exit; End;
+  Nm:=' '+O3DefName(O3O[K].Def)+' ';
+  O3StripOpt:=Pos(Nm,' loglevel v stats stdin benchmark benchmark_all report max_alloc cpuflags cpucount ignore_unknown copy_unknown recast_media ')>0;
+ End Else Begin
+  Nm:=O3O[K].Key;
+  If Pos(':',Nm)>0 Then Nm:=Copy(Nm,1,Pos(':',Nm)-1);
+  O3StripOpt:=Nm='threads';
+ End;
+End;
+
+Procedure O3Rebuild;
+Var T,X,K,G,Start,P: LongInt; Key,It: String; Is: Boolean;
+Begin
+ O3NStrip:=0; O3NRew:=0;
+ For K:=0 To O3NOpts-1 Do Begin
+  If O3StripOpt(K) Then Inc(O3NStrip);
+  If (O3O[K].Def>=0) And (O3O[K].Av='G') Then Inc(O3NRew);
+ End;
+ If (O3NX=0) And (Not O3InsY) And (O3NStrip=0) And (O3NRew=0) Then Exit;
+ For T:=0 To 2048 Do O3RepStr[T]:='';
+ For K:=0 To O3NOpts-1 Do If (O3O[K].Def>=0) And (O3O[K].Av='G') Then O3RepStr[O3O[K].Pos]:='-metadata';
+ For T:=0 To 2048 Do Begin O3Rep[T]:=-1; O3InsAt[T]:=-1; O3Del[T]:=False; End;
+ For X:=0 To 15 Do O3XNext[X]:=-1;
+ For X:=0 To O3NX-1 Do Begin
+  O3Rep[O3XTok[X]]:=X; O3Del[O3XTok[X]+1]:=True;
+  G:=O3XG[X];
+  If G=0 Then Start:=1 Else Begin
+   If O3GK[G-1]=1 Then Start:=O3GP[G-1]+2 Else Start:=O3GP[G-1]+1;
+  End;
+  { chaine d'insertion en fin de liste pour conserver l'ordre }
+  If O3InsAt[Start]<0 Then O3InsAt[Start]:=X Else Begin
+   K:=O3InsAt[Start]; While O3XNext[K]>=0 Do K:=O3XNext[K]; O3XNext[K]:=X;
+  End;
+  If O3XPre[X] Then
+   For K:=0 To O3NOpts-1 Do If (O3O[K].Grp=G) And (O3O[K].Def<0) And (O3O[K].Key='preload') Then Begin
+    O3Del[O3O[K].Pos]:=True; O3Del[O3O[K].Pos+1]:=True;
+   End;
+  If O3XCod[X] Then
+   For K:=0 To O3NOpts-1 Do If (O3O[K].Grp=G) And (O3O[K].Def>=0) And (O3O[K].Pos<O3XTok[X]) Then Begin
+    Key:=O3O[K].Key;
+    If (Key='c') Or (Key='codec') Or (Key='c:v') Or (Key='codec:v') Or (Key='vcodec') Or (Key='c:a') Or (Key='codec:a') Or (Key='acodec') Then Begin
+     O3Del[O3O[K].Pos]:=True; O3Del[O3O[K].Pos+1]:=True;
+    End;
+   End;
+ End;
+ For K:=0 To O3NOpts-1 Do If O3StripOpt(K) Then Begin
+  O3Del[O3O[K].Pos]:=True;
+  If O3O[K].Pos+1<=2048 Then If (O3O[K].Def<0) Or O3Has(O3O[K].Def,'A') Then O3Del[O3O[K].Pos+1]:=True;
+ End;
+ O3NN:=0;
+ O3Emit(O3Argv[0]);
+ If O3InsY Then O3Emit('-y');
+ For T:=1 To O3Argc Do Begin
+  X:=O3InsAt[T];
+  While X>=0 Do Begin
+   For K:=0 To O3XCnt[X]-1 Do Begin
+    It:=O3XIt[X,K];
+    If It[1]='A' Then Begin
+     P:=Pos('=',It); O3Emit('-'+Copy(It,2,P-2)); O3Emit(Copy(It,P+1,100));
+    End;
+   End;
+   X:=O3XNext[X];
+  End;
+  If O3Rep[T]>=0 Then Begin
+   X:=O3Rep[T];
+   For K:=0 To O3XCnt[X]-1 Do Begin
+    It:=O3XIt[X,K];
+    If It[1]='O' Then Begin
+     P:=Pos('=',It); O3Emit('-'+Copy(It,2,P-2)); O3Emit(Copy(It,P+1,100));
+    End;
+   End;
+  End Else If Not O3Del[T] Then Begin
+   If O3RepStr[T]<>'' Then O3Emit(O3RepStr[T]) Else O3Emit(O3Argv[T]);
+  End;
+ End;
+ For T:=0 To O3NN-1 Do O3Argv[T]:=O3NewV[T];
+ O3Argc:=O3NN-1;
+End;
+
+Procedure O3Usage;
+Begin
+ O3Msg(O3LInfo,'Hyper fast Audio and Video encoder');
+ O3Msg(O3LInfo,'usage: ffmpeg [options] [[infile options] -i infile]... {[outfile options] outfile}...');
+ O3Msg(O3LInfo,'');
+ O3Msg(O3LWarn,'Use -h to get full help or, even better, run ''man ffmpeg''');
+End;
+
+{ ---- point d'entree : appele au debut du programme principal ---- }
+Procedure O3Pre;
+Var I,G,Idx,NIn,NOut,Po: LongInt; Nm: String; ExitSeen,Ok: Boolean;
+Begin
+ If (System.ParamCount>=1) And ((System.ParamStr(1)='-fmxq') Or (System.ParamStr(1)='-f5q')) Then Exit;
+ O3Ac:=ParamCount; O3Lvl:=O3LInfo; O3LvFlag:=False; O3Shown:=False; O3HideB:=False;
+ O3NoMeta:=False; O3NoSMeta:=False; O3Err8:='Option not found'; O3Yes:=False; O3NoOw:=False; O3NoStdin:=False; O3InsY:=False; O3NX:=0; O3NTgt:=0;
+ I:=O3Locate('loglevel'); If I=0 Then I:=O3Locate('v');
+ If (I>0) And (I<O3Ac) Then Begin
+  O3Shown:=True; O3SetLevel(ParamStr(I+1),False); O3Shown:=False;
+ End;
+ If (O3Locate('hide_banner')>0) Or (O3Locate('version')>0) Then O3HideB:=True;
+ If O3Ac=0 Then Begin O3Banner; O3Usage; O3Die(1); End;
+ O3Split;
+ { options globales, dans l'ordre }
+ ExitSeen:=False;
+ For I:=0 To O3NOpts-1 Do If (O3O[I].Grp=-1) And (O3O[I].Def>=0) And Not ExitSeen Then Begin
+  Po:=O3O[I].Def; Nm:=O3DefName(Po);
+  If O3Has(Po,'X') Then Begin
+   ExitSeen:=True;
+   If (Nm='?') And (O3O[I].Pos<=O3Argc) Then O3Argv[O3O[I].Pos]:='-h';
+   Break;
+  End;
+  If (Nm='loglevel') Or (Nm='v') Then Begin
+   If Not O3SetLevel(O3O[I].Val,False) Then Begin
+    O3Msg(O3LError,'Failed to set value '''+O3O[I].Val+''' for option '''+O3O[I].Key+''': Invalid argument');
+    O3Msg(O3LFatal,'Error parsing global options: Invalid argument');
+    O3Die(234);
+   End;
+  End Else If Nm='y' Then O3Yes:=O3O[I].Val<>'0'
+  Else If Nm='n' Then O3NoOw:=O3O[I].Val<>'0'
+  Else If Nm='stdin' Then O3NoStdin:=O3O[I].Val='0'
+  Else If Not O3WriteOpt(I) Then Begin
+   O3Msg(O3LFatal,'Error parsing global options: Invalid argument');
+   O3Die(234);
+  End;
+ End;
+ If ExitSeen Then Exit;
+ NIn:=0; NOut:=0;
+ For G:=0 To O3NG-1 Do If O3GK[G]=1 Then Inc(NIn) Else Inc(NOut);
+ If (NIn=0) And (NOut=0) Then Begin O3Usage; O3Die(1); End;
+ Idx:=0;
+ For G:=0 To O3NG-1 Do If O3GK[G]=1 Then Begin O3DoInput(G,Idx); Inc(Idx); End;
+ If NOut=0 Then Begin O3Msg(O3LFatal,'At least one output file must be specified'); O3Die(1); End;
+ Idx:=0;
+ For G:=0 To O3NG-1 Do If O3GK[G]=0 Then Begin
+  O3DoOutput(G,Idx,NIn);
+  O3Overwrite(G,Idx);
+  Inc(Idx);
+ End;
+ O3Rebuild;
+ If GetEnv('O3DEBUG')<>'' Then Begin
+  For I:=0 To ParamCount Do Write(StdErr,ParamStr(I),' ');
+  WriteLn(StdErr);
+ End;
+End;
+
+{ options de -target que F3Try peut ignorer (sans effet pour la copie ; pour l'encodage les entrees doivent deja avoir la taille et la cadence cibles) }
+Function O3F3Ign(Const A: String): Boolean;
+Begin
+ O3F3Ign:=(O3NX>0) And ((A='-s') Or (A='-r') Or (A='-pix_fmt') Or (A='-maxrate:v') Or (A='-minrate:v') Or (A='-bufsize:v') Or (A='-scan_offset'));
+ If (O3NX>0) And ((A='-s') Or (A='-r') Or (A='-pix_fmt')) Then Inc(O3IgnN);
+End;
+Const
+ O3NLang = 139;
+ O3Lang: Array[0..138] Of String[3] = (
+  'eng','fra','ger','ita','dut','sve','spa','dan','por','nor','heb','jpn','ara','fin','gre','ice','mlt',
+  'tur','hr ','chi','urd','hin','tha','kor','lit','pol','hun','est','lav','smi','fo ','per','rus','chi',
+  '','iri','alb','ron','ces','slk','slv','yid','sr ','mac','bul','ukr','bel','uzb','kaz','aze','aze',
+  'arm','geo','mol','kir','tgk','tuk','mon','','pus','kur','kas','snd','tib','nep','san','mar','ben',
+  'asm','guj','pa ','ori','mal','kan','tam','tel','sin','bur','khm','lao','vie','ind','tgl','may','may',
+  'amh','tir','orm','som','swa','kin','run','nya','mlg','epo','','','','','','','','','','','','','',
+  '','','','','','','','','','','','','','','','','','','','','wel','baq','cat','lat','que','grn','aym',
+  'tat','uig','dzo','jav'
+ );
+
+Function O3MacLangIdx(Const L: String): LongInt;
+Var I: LongInt;
+Begin
+ O3MacLangIdx:=-1;
+ If L='' Then Exit;
+ For I:=0 To O3NLang-1 Do If O3Lang[I]=L Then Begin O3MacLangIdx:=I; Exit; End;
+End;
+
+{ ---- metadonnees de flux (-metadata:s:...) pour le multiplexeur generique ---- }
+Procedure O3FmxApply;
+Var P,I,N,Idx,Kd,Code: LongInt; Sp,Key,Vv: String; Hit: Boolean;
+Begin
+ For P:=0 To O3PendN-1 Do Begin
+  Sp:=O3PendSpec[P]; Key:=Lower(O3PendKey[P]); Vv:=O3PendVal[P];
+  Kd:=-1; Idx:=-1;
+  If Copy(Sp,1,2)=':v' Then Begin Kd:=FMXKind_V; Delete(Sp,1,2); End
+  Else If Copy(Sp,1,2)=':a' Then Begin Kd:=FMXKind_A; Delete(Sp,1,2); End
+  Else If Copy(Sp,1,2)=':s' Then Begin Kd:=FMXKind_S; Delete(Sp,1,2); End;
+  If (Sp<>'') And (Sp[1]=':') Then Begin
+   Idx:=O3Atoi(Copy(Sp,2,10)); Code:=0;
+  End;
+  N:=0;
+  For I:=0 To FMXN-1 Do Begin
+   Hit:=False;
+   If Kd>=0 Then Begin
+    If FMXS[I].Kind=Kd Then Begin
+     If (Idx<0) Or (Idx=N) Then Hit:=True;
+     Inc(N);
+    End;
+   End Else Begin
+    If (Idx<0) Or (Idx=I) Then Hit:=True;
+   End;
+   If Hit Then Begin
+    If Key='title' Then FMXS[I].StTitle:=Copy(Vv,1,127)
+    Else If Key='language' Then Begin If Vv<>'' Then FMXS[I].Lang:=Copy(Vv,1,3) Else FMXS[I].Lang:='und'; End
+    Else If Key='handler_name' Then FMXS[I].HandlerName:=Copy(Vv,1,63)
+    Else If Key='encoder' Then FMXS[I].Encoder:=Copy(Vv,1,63);
+   End;
+  End;
+ End;
+End;
+
+{ metadonnees globales de l'entree WAV (LIST INFO) copiees d'abord dans le dictionnaire du multiplexeur generique, puis -metadata
+  (av_dict_copy de l'entree 0 puis av_dict_set des -metadata) }
+Procedure O3FmxInputTags;
+Var I,N: LongInt; UK: Array[0..15] Of String[63]; UV: Array[0..15] Of String[255];
+Begin
+ If O3NoMeta Or (FMXInN<1) Then Exit;
+ If FMXExt(FMXInputs[0])<>'wav' Then Exit;
+ N:=FMXMetaN;
+ For I:=0 To N-1 Do Begin UK[I]:=FMXMeta[I]; UV[I]:=FMXMetaV[I]; End;
+ InputPath:=FMXInputs[0]; InputFormat:='wav'; MdLoaded:=False; MdN:=0; MdCN:=0;
+ MdLoad;
+ FMXMetaN:=0;
+ For I:=0 To MdN-1 Do FMXMetaSet(MdK[I],MdV[I]);
+ For I:=0 To N-1 Do FMXMetaSet(UK[I],UV[I]);
+End;
+
+{ ==== O3-END ==== }
 { ==== BLOCK-ANCHOR-O3 : inserer le code du groupe O3 juste au-dessus de cette ligne ==== }
 
 Procedure DecodeAVIX(Const Source,Target: String; Mode,Kind: LongInt);
@@ -149623,9 +152406,14 @@ Procedure Help;Begin
  WriteLn('M4V brut MPEG-4 Part 2: MP4/AVI vers M4V et M4V vers MP4/AVI, -c copy.');
  WriteLn;
  WriteLn(' /?                             Affiche l''aide de cette commande.');
- WriteLn(' -4mv                           MPEG4: quatre vecteurs 8x8 par macrobloc P.');
+ WriteLn(' -metadata CLE=VALEUR            Metadonnees (title, artist, album, comment, track, date, genre...); aussi -metadata:g et -metadata:s:v|a.'); { O3 }
+ WriteLn(' -map_metadata -1|0              -1: ne copie pas les metadonnees de l''entree; 0: copie (defaut).');
+ WriteLn(' -target [pal-|ntsc-|film-]TYPE   TYPE = vcd, svcd, dvd, dv, dv50: codecs, debits, taille, cadence, GOP, packetsize, muxrate.');
+ WriteLn(' -y, -n, -nostdin                 Ecraser, ne jamais ecraser, ne pas lire stdin; sans -y ni -n la question est posee sur stderr.');
+ WriteLn(' -v NIVEAU, -loglevel NIVEAU      quiet, panic, fatal, error, warning, info, verbose, debug, trace.');
+ WriteLn(' Options anciennes refusees comme ffmpeg 6.1.1 (Unrecognized option): -4mv -album -author -comment -title -track -year');
+ WriteLn('   -croptop/-cropbottom/-cropleft/-cropright -padtop/... -dct_algo -idct_algo -er -intra -sameq -slang -newvideo -newsubtitle.');
  WriteLn(' -ac 1|2                        Canaux de sortie (-ac apr'+#138+'s -i)');
- WriteLn(' -album NOM                     Nom de l''album (MP3, WAV, AVI, MP4).');
  WriteLn(' -an                            Ne pas '+#130+'crire les pistes audio (sortie vid'+#130+'o uniquement).');
  WriteLn('                                AVI B-frames H264/MPEG4; Montages MP4 elst 32/64 bits '+#133+' vitesse 1.');
  WriteLn('                                AVI: retards arrondis au paquet; preroll audio conserve si n'+#130+'cessaire.');
@@ -149642,7 +152430,6 @@ Procedure Help;Begin
  WriteLn(' -c:v mpeg1video|mpeg2video      Y4M vers M1V/M2V (I/B); M1V/MPEG1 vers Y4M.');
  WriteLn(' -c copy                        Changement de conteneur, pas de r'+#130+'encodage vid'+#130'o.');
  WriteLn(' -codecs                        Liste des codecs support'+#130+'s');
- WriteLn(' -comment TEXTE                 Commentaire MP3, WAV, AVI, MP4.');
  WriteLn(' ac3: -i entree.ac3 sortie.wav; -i entree.wav -c:a ac3 -b:a 192k sortie.ac3');
  WriteLn('      Encodeur mono/stereo 32/44.1/48 kHz; multicanal decode vers stereo, LFE omis.');
  WriteLn(' aac: -i entree.aac sortie.wav (AAC-LC ADTS mono/stereo).');
@@ -149666,8 +152453,6 @@ Procedure Help;Begin
  WriteLn(' adpcm_sbpro_*: -i entree.voc sortie.wav (blocs VOC 1 et 9, codecs 1 a 3).');
  WriteLn(' adpcm_ima_*: -i entree.amv|entree.iss|dk3.wav|dk4.wav|ima4.aifc|entree.ea sortie.wav;');
  WriteLn('              -i entree.wav -c:a adpcm_ima_qt sortie.aifc (encodage QuickTime ima4).');
- WriteLn(' -croptop N, -cropbottom N       Retirer N pixels en haut/en bas.');
- WriteLn(' -cropleft N, -cropright N       Retirer N pixels a gauche/a droite.');
  WriteLn(' -f wav|mp3|aiff|voc|iff|libopenmpt Avant -i; -f wav|mp3 avant sortie');
  WriteLn(' -formats                       Liste des formats support'+#130+'s');
  WriteLn(' -h                             Affiche l''aide de cette commande');
@@ -149836,6 +152621,7 @@ BEGIN
  AudioCodec:=''; InputCodec:=''; PendingFormat:=''; G726CodeSize:=4; G726Rate:=8000; RequestedRate:=0; RequestedChannels:=0; RequestedBitRateK:=320;
  Overwrite:=False; NoOverwrite:=False; HideBanner:=False; HasBitrate:=False;
  SavedExit:=ExitProc; ExitProc:=@ExitCleanup; Randomize;
+ O3Pre;
  If O1Route Then Halt(0);
  If FMXRoute Then Halt(0);
  If F3Try Then Halt(0);
