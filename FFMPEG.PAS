@@ -153120,6 +153120,7 @@ BEGIN
    End;
    HasBitrate:=True;
   End
+  Else If Argument='-sws_flags' Then NextArgument { sans mise a l'echelle: sans effet }
   Else If (Copy(Argument,1,1)='-') And (Argument<>'-') Then Fail('Option non prise en charge: '+Argument)
    Else
   Begin
