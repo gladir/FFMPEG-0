@@ -1900,9 +1900,10 @@ End;
 Procedure ConvertData(Position, Count: LongInt; Bits: Integer);
 Var
  Raw: Array[0..2047] Of Byte;
- N, J, OutCount, Align: Integer;
+ N, J, OutCount, Align, Drop: Integer;
  Value: LongInt;
 Begin
+ Drop := 0;
  If Bits >= 206 Then Begin
   { F1 : A-law (206) / mu-law (207) }
   If Count > 0 Then HaveSound := True;
@@ -1955,11 +1956,11 @@ Begin
   Exit;
  End;
  Align := Header.Channels * (Bits Div 8);
- If (Count Mod Align) <> 0 Then Fail('Echantillon VOC incomplet.');
  If Count > 0 Then HaveSound := True;
  While Count > 0 Do Begin
   If Count > SizeOf(Raw) Then N := SizeOf(Raw) Else N := Count;
   ReadAt(Position, Raw, N); OutCount := 0;
+  Drop := N Mod Align; If Drop <> 0 Then Begin N := N - Drop; If N = 0 Then Begin Inc(Position, Drop); Dec(Count, Drop); Continue; End; End;
   If Bits = 8 Then Begin
    For J := 0 To N-1 Do Begin
     Value := (LongInt(Raw[J])-128)*256;
@@ -1971,7 +1972,7 @@ Begin
   Begin
    Move(Raw, PCM, N); OutCount := N;
   End;
-  SubmitPCM(OutCount); Inc(Position, N); Dec(Count, N);
+  SubmitPCM(OutCount); Inc(Position, N+Drop); Dec(Count, N+Drop);
  End;
 End;
 
@@ -2008,9 +2009,9 @@ Var
  Bits, Channels, ExtendedChannels, Depth, J, Code, Kind, Codec: Integer;
  Version, Check: Word;
  OldMode: Byte;
- Extended, Terminated: Boolean;
+ Extended, Terminated: Boolean; Codec0: Integer;
 Begin
- HaveFormat := False; HaveSound := False;
+ Codec0 := -1; HaveFormat := False; HaveSound := False;
  Extended := False; Terminated := False; Depth := 0; Bits := 0; Steps := 0;
  ExtendedRate := 0; ExtendedChannels := 0;
  CTPred[0] := 0; CTPred[1] := 0; CTStep[0] := 511; CTStep[1] := 511;
@@ -2036,96 +2037,72 @@ Begin
  'Position initiale VOC incorrecte.');
  CreateOutput;
  WriteLn('Conversion VOC vers WAV PCM16...');
+ { F1 : comportement de libavformat/vocdec.c + voc_packet.c : silences, boucles, marqueurs et textes sont ignores ;
+   le format (frequence, canaux, codec) est fixe par le premier bloc audio ; le bloc 8 ne sert qu'au premier bloc 1 suivant }
  While Position < InputSize Do Begin
   Inc(Steps);
   If Steps > 1000000 Then Fail('Trop de blocs VOC developpes (limite 1000000).');
   ReadAt(Position, B, 1); Kind := B[0]; Inc(Position);
-  If Extended And (Kind <> 1) Then Fail(
-  'Le bloc VOC 8 doit preceder immediatement le bloc 1.');
   If Kind = 0 Then Begin
    Terminated := True; Break;
   End;
+  If InputSize-Position < 3 Then Begin Terminated := True; Break; End;
   ReadAt(Position, B, 3); Inc(Position, 3);
   Size := LongInt(B[0])+LongInt(B[1])*256+LongInt(B[2])*65536;
-  If Size > InputSize-Position Then Fail('Bloc VOC tronque.');
+  If Size = 0 Then Size := InputSize-Position;
+  If Size > InputSize-Position Then Size := InputSize-Position;
   Next := Position + Size;
   Case Kind Of
   1:
   Begin
    If Size < 2 Then Fail('Bloc VOC 1 trop court.');
    ReadAt(Position, B, 2);
-   If Extended Then Begin
-    Rate := ExtendedRate; Channels := ExtendedChannels; Extended := False;
-   End Else
-   Begin
-    If B[1] > 3 Then Fail('Compression VOC non prise en charge: PCM ou ADPCM SB Pro requis.');
+   If Not HaveFormat Then Begin
     Rate := 1000000 Div (256-Word(B[0])); Channels := 1;
+    If ExtendedRate <> 0 Then Rate := ExtendedRate;
+    If Extended Then Channels := ExtendedChannels;
+    SetFormat(Rate, Channels);
    End;
-   SetFormat(Rate, Channels); Bits := 8;
-   If B[1] > 0 Then Bits := 105-B[1];
+   If Codec0 < 0 Then Begin
+    Case B[1] Of 0: Codec0 := 8; 1: Codec0 := 104; 2: Codec0 := 103; 3: Codec0 := 102; 4: Codec0 := 16; 6: Codec0 := 206; 7: Codec0 := 207;
+    Else Fail('Etiquette de codec VOC inconnue.'); End;
+   End;
+   Bits := Codec0;
    ConvertData(Position+2, Size-2, Bits);
+   Extended := False; ExtendedRate := 0;
   End;
   2:
   Begin
-   If Not HaveFormat Or (Bits = 0) Then Fail('Continuation VOC sans bloc audio initial.');
-   ConvertData(Position, Size, Bits);
-  End;
-  3:
-  Begin
-   If Size <> 3 Then Fail('Taille de silence VOC incorrecte.');
-   ReadAt(Position, B, 3);
-   WriteSilence(LongInt(LE16(B,0))+1, B[2]);
-  End;
-  4: If Size <> 2 Then Fail('Taille de marqueur VOC incorrecte.');
-  5:
-  Begin
- { Texte descriptif ignore. }
-  End;
-  6:
-  Begin
-   If Size <> 2 Then Fail('Taille de boucle VOC incorrecte.');
-   If Depth = 8 Then Fail('Plus de 8 boucles VOC imbriquees.');
-   ReadAt(Position, B, 2); Check := LE16(B,0);
-   If Check = $FFFF Then Fail('Boucle VOC infinie non prise en charge.');
-   Inc(Depth); Stack[Depth].Position := Next; Stack[Depth].Left := Check;
-   Stack[Depth].Bits := Bits;
-  End;
-  7:
-  Begin
-   If (Size <> 0) Or (Depth = 0) Then Fail('Fin de boucle VOC incorrecte.');
-   If Stack[Depth].Left > 0 Then Begin
-    Dec(Stack[Depth].Left); Next := Stack[Depth].Position;
-    Bits := Stack[Depth].Bits;
-   End Else Dec(Depth);
+   If Not HaveFormat Then Fail('Frequence VOC invalide.');
+   ConvertData(Position, Size, Codec0);
+   Extended := False; ExtendedRate := 0;
   End;
   8:
   Begin
-   If Size <> 4 Then Fail('Taille du bloc VOC 8 incorrecte.');
+   If Size < 4 Then Fail('Taille du bloc VOC 8 incorrecte.');
    ReadAt(Position, B, 4);
-   If (B[2] <> 0) Or (B[3] > 1) Then Fail('Bloc VOC 8: PCM mono/stereo requis.');
    ExtendedChannels := B[3]+1;
    ExtendedRate := 256000000 Div ((65536-LongInt(LE16(B,0)))*ExtendedChannels);
    Extended := True;
+   Next := Position + 4;
   End;
   9:
   Begin
    If Size < 12 Then Fail('Bloc VOC 9 trop court.');
    ReadAt(Position, B, 12);
-   Rate := LE32(B,0); Bits := B[4]; Channels := B[5]; Codec := LE16(B,6);
-   If Not (((Bits = 8) And (Codec = 0)) Or ((Bits = 16) And (Codec = 4)) Or ((Bits = 8) And (Codec In [6,7])) Or
-    ((Bits = 4) And (Codec = $0200)) Or (Codec In [1,2,3])) Then     Fail(
-   'Bloc VOC 9: PCM, ADPCM CT (codec $0200) ou ADPCM SB Pro (codecs 1 a 3) requis.');
-   SetFormat(Rate, Channels);
-   If Codec In [1,2,3] Then Bits := 105-Codec;
-   If Codec In [6,7] Then Bits := 200+Codec;
-   ConvertData(Position+12, Size-12, Bits);
+   If Not HaveFormat Then SetFormat(LE32(B,0), B[5]);
+   Codec := LE16(B,6);
+   If Codec0 < 0 Then Begin
+    Case Codec Of 0: Codec0 := 8; 1: Codec0 := 104; 2: Codec0 := 103; 3: Codec0 := 102; 4: Codec0 := 16; 6: Codec0 := 206; 7: Codec0 := 207; $200: Codec0 := 4;
+    Else Fail('Etiquette de codec VOC inconnue.'); End;
+   End;
+   ConvertData(Position+12, Size-12, Codec0);
+   Extended := False; ExtendedRate := 0;
   End;
-  Else Fail('Type de bloc VOC inconnu.');
+  Else ;
  End;
  Position := Next;
 End;
-If Not Terminated Then Fail('Terminateur VOC manquant.');
-If Depth <> 0 Then Fail('Boucle VOC non fermee.');
 If Not HaveSound Or (Written = 0) Then Fail('Aucun son VOC.');
 {$I-}Seek(OutputFile,0); Code := IOResult;{$I+}
 If Code <> 0 Then Fail('Positionnement entete WAV impossible.');
@@ -3505,7 +3482,7 @@ Type
  TMdV = Array[0..39] Of String[255];
 Var
  MdN,MdAN,MdCN: LongInt; MdK,MdAK,MdCK: TMdK; MdV,MdAV,MdCV: TMdV; MdCreation: Int64;
- Temps: Array[0..6] Of String; F1MaskOver: LongInt; { F1 : masque de canaux impose pour la sortie WAV }
+ Temps: Array[0..6] Of String; F1A3Rate,F1A3Ch,F1A3Old,F1A3Mask,F1A3OC,F1A3OM: LongInt; F1A3Ok: Boolean; F1MaskOver: LongInt; { F1 : masque de canaux impose pour la sortie WAV }
  SavedExit: Pointer;
  InputPath,OutputPath,InputFormat,OutputFormat,AudioCodec,PendingFormat,InputCodec: String;
  NonStdBitrate: Boolean;
@@ -3958,6 +3935,7 @@ Begin
  End;
  If N>=24 Then If (B[0]=46) And (B[1]=115) And (B[2]=110) And (B[3]=100) And ((B[4] Or B[5] Or B[6] Or B[7])<>0) And ((B[8] Or B[9] Or B[10] Or B[11])<>0) And ((B[12] Or B[13] Or B[14] Or B[15])<>0) And ((B[16] Or B[17] Or B[18] Or B[19])<>0) And ((B[20] Or B[21] Or B[22] Or B[23])<>0) Then Begin Probe:='au'; Exit; End; { F1 }
  If N>=8 Then If (B[0]=67) And (B[1]=82) And (B[2]=89) And (B[3]=79) And (B[4]=95) And (B[5]=65) And (B[6]=80) And (B[7]=67) Then Begin Probe:='apc'; Exit; End; { F1 }
+ If N>=6 Then If (B[0]=35) And (B[1]=33) And (B[2]=65) And (B[3]=77) And (B[4]=82) And ((B[5]=10) Or (B[5]=45)) Then Begin Probe:='amr'; Exit; End; { F1 : #!AMR (NB) / #!AMR-WB }
  If N>=12 Then If (B[0]=77) And (B[1]=77) And (B[2]=77) And (B[3]=68) And (B[8]=67) And (B[9]=78) And (B[10]=84) And (B[11]=73) Then Begin Probe:='mmf'; Exit; End; { F1 }
  If N>=8 Then If (B[0]=$80) And (B[1]=0) Then Begin
   ADXOffset:=LongInt(B[2])*256+B[3];
@@ -95472,6 +95450,7 @@ Begin
   End;
 End;
 
+Var F1Rf64: LongInt; F1Bext: Boolean; { F1 : -rf64 (-1 auto, 0 never, 1 always), -write_bext }
 { ---- sortie WAV : insere LIST INFO avant le bloc data (riffenc.c ff_riff_write_info) ---- }
 Procedure MdRiffBuild;
 Const Tags: Array[0..35] Of String[4]=('IARL','IART','IAS1','IAS2','IAS3','IAS4','IAS5','IAS6','IAS7','IAS8','IAS9','ICMS','ICMT','ICOP','ICRD','ICRP','IDIM','IDPI','IENG','IGNR','IKEY','ILGT','ILNG','IMED','INAM','IPLT','IPRD','IPRT','ITRK','ISBJ','ISFT','ISHP','ISMP','ISRC','ISRF','ITCH');
@@ -95505,22 +95484,90 @@ Var
  TagCnt: LongInt; I,J,Lim,Pos,Sz,Total,Put,Cnt: LongInt; H: Array[0..11] Of Byte; Q: Int64;
  HasList: Boolean; Left: LongInt;
  Pc: Array[0..8191] Of Byte;
+ FactOut,DataOut,BlkAlign: LongInt; NSamp,DataSz: Int64; Bx: Array[0..699] Of Byte; BxN: LongInt;
+ Procedure BxPut(V: LongInt); Begin Bx[BxN]:=V And 255; Inc(BxN); End;
+ Procedure BxStr(Const Key: String; MaxLen: LongInt);
+ Var Z,R,Pu: LongInt; Found: Boolean;
+ Begin
+  Z:=0;
+  For R:=0 To MdN-1 Do If MdLow(MdK[R])=Key Then Begin
+   Z:=Length(MdV[R]); If Z>MaxLen Then Z:=MaxLen;
+   For Pu:=1 To Z Do BxPut(Ord(MdV[R][Pu]));
+   Break;
+  End;
+  For R:=Z+1 To MaxLen Do BxPut(0);
+ End;
+ Procedure BxBuild;
+ Var R,Ng,Dg,Pu: LongInt; Tr: Int64; Ud: String; Ch2: Char; Hv: Int64;
+ Begin
+  BxN:=0; BxPut(98); BxPut(101); BxPut(120); BxPut(116); BxPut(0); BxPut(0); BxPut(0); BxPut(0);
+  BxStr('description',256); BxStr('originator',32); BxStr('originator_reference',32); BxStr('origination_date',10); BxStr('origination_time',8);
+  Tr:=0;
+  For R:=0 To MdN-1 Do If MdLow(MdK[R])='time_reference' Then Begin
+   Ud:=MdV[R]; Ng:=1; While (Ng<=Length(Ud)) And (Ud[Ng]=' ') Do Inc(Ng);
+   While (Ng<=Length(Ud)) And (Ud[Ng] In ['0'..'9']) Do Begin Tr:=Tr*10+Ord(Ud[Ng])-48; Inc(Ng); End;
+   Break;
+  End;
+  For R:=0 To 7 Do BxPut((Tr Shr (8*R)) And 255);
+  BxPut(1); BxPut(0);
+  Ng:=0;
+  For R:=0 To MdN-1 Do If (MdLow(MdK[R])='umid') And (Length(MdV[R])>2) Then Begin
+   Ud:=Copy(MdV[R],3,255);
+   For Dg:=0 To Length(Ud) Div 16-1 Do Begin
+    Hv:=0;
+    For Pu:=1 To 16 Do Begin
+     Ch2:=Ud[Dg*16+Pu];
+     If Ch2 In ['0'..'9'] Then Hv:=Hv*16+Ord(Ch2)-48 Else If Ch2 In ['a'..'f'] Then Hv:=Hv*16+Ord(Ch2)-87 Else If Ch2 In ['A'..'F'] Then Hv:=Hv*16+Ord(Ch2)-55 Else Break;
+    End;
+    For Pu:=7 DownTo 0 Do BxPut((Hv Shr (8*Pu)) And 255);
+    Inc(Ng);
+   End;
+   Break;
+  End;
+  For R:=1 To 64-Ng*8 Do BxPut(0);
+  For R:=1 To 190 Do BxPut(0);
+  For R:=0 To MdN-1 Do If MdLow(MdK[R])='coding_history' Then Begin
+   For Pu:=1 To Length(MdV[R]) Do BxPut(Ord(MdV[R][Pu]));
+   BxPut(0);
+   Break;
+  End;
+  Tr:=BxN-8;
+  Bx[4]:=Tr And 255; Bx[5]:=(Tr Shr 8) And 255; Bx[6]:=(Tr Shr 16) And 255; Bx[7]:=(Tr Shr 24) And 255;
+  If Odd(BxN) Then BxPut(0);
+ End;
 Begin
- MdRiffBuild; TagCnt:=MdInfoCnt;
+ MdRiffBuild; TagCnt:=MdInfoCnt; FactOut:=-1; DataOut:=-1; BlkAlign:=0; NSamp:=-1; DataSz:=0;
  OpenRead(Source); Lim:=InputSize;
  HasList:=False;
  If Lim<12 Then Begin CloseRead; Fail('WAV tronque.'); End;
  OpenWrite(Target);
- ReadAt(0,H,12); WriteBytes(H,12); Pos:=12;
+ ReadAt(0,H,12);
+ If F1Rf64=1 Then Begin H[0]:=82; H[1]:=70; H[2]:=54; H[3]:=52; H[4]:=255; H[5]:=255; H[6]:=255; H[7]:=255; End;
+ WriteBytes(H,12); Pos:=12;
  Total:=12;
+ If F1Rf64<>0 Then Begin
+  FillChar(Pc,36,0);
+  If F1Rf64=1 Then Begin Pc[0]:=100; Pc[1]:=115; Pc[2]:=54; Pc[3]:=52; End Else Begin Pc[0]:=74; Pc[1]:=85; Pc[2]:=78; Pc[3]:=75; End;
+  Pc[4]:=28; WriteBytes(Pc,36); Inc(Total,36);
+ End;
  While Lim-Pos>=8 Do Begin
   ReadAt(Pos,H,8);
   Q:=Int64(H[4])+Int64(H[5])*256+Int64(H[6])*65536+Int64(H[7])*16777216;
+  If (H[0]=102) And (H[1]=109) And (H[2]=116) And (H[3]=32) And (Q>=16) Then Begin
+   ReadAt(Pos+8,Pc,16); BlkAlign:=Pc[12]+Pc[13]*256;
+  End;
+  If (H[0]=102) And (H[1]=97) And (H[2]=99) And (H[3]=116) And (Q>=4) Then Begin
+   FactOut:=Total; ReadAt(Pos+8,Pc,4); NSamp:=Pc[0]+Pc[1]*256+Pc[2]*65536+Int64(Pc[3])*16777216;
+  End;
   If (H[0]=76) And (H[1]=73) And (H[2]=83) And (H[3]=84) Then HasList:=True;
+  If (H[0]=100) And (H[1]=97) And (H[2]=116) And (H[3]=97) And F1Bext And Not HasList Then Begin
+   BxBuild; WriteBytes(Bx,BxN); Inc(Total,BxN);
+  End;
   If (H[0]=100) And (H[1]=97) And (H[2]=116) And (H[3]=97) And Not HasList And (TagCnt>0) Then Begin
    WriteBytes(MdInfo,MdInfoLen); Inc(Total,MdInfoLen); HasList:=True;
   End;
   If (H[0]=100) And (H[1]=97) And (H[2]=116) And (H[3]=97) Then Begin
+   DataOut:=Total; DataSz:=Q;
    { data : copie du reste du fichier }
    Left:=Lim-Pos;
    While Left>0 Do Begin
@@ -95541,7 +95588,18 @@ Begin
  {$I-}Seek(ActiveOutput,4);{$I+}
  If IOResult<>0 Then Fail('Positionnement entete WAV impossible.');
  Q:=Total-8; H[0]:=Q And 255; H[1]:=(Q Shr 8) And 255; H[2]:=(Q Shr 16) And 255; H[3]:=(Q Shr 24) And 255;
+ If F1Rf64=1 Then Begin H[0]:=255; H[1]:=255; H[2]:=255; H[3]:=255; End;
  WriteBytes(H,4);
+ If F1Rf64=1 Then Begin
+  If NSamp<0 Then Begin If BlkAlign>0 Then NSamp:=DataSz Div BlkAlign Else NSamp:=0; End;
+  {$I-}Seek(ActiveOutput,20);{$I+}
+  Q:=Total-8; For I:=0 To 7 Do Pc[I]:=(Q Shr (8*I)) And 255; WriteBytes(Pc,8);
+  Q:=DataSz; For I:=0 To 7 Do Pc[I]:=(Q Shr (8*I)) And 255; WriteBytes(Pc,8);
+  Q:=NSamp; For I:=0 To 7 Do Pc[I]:=(Q Shr (8*I)) And 255; WriteBytes(Pc,8);
+  FillChar(Pc,4,0); WriteBytes(Pc,4);
+  If FactOut>=0 Then Begin {$I-}Seek(ActiveOutput,FactOut+8);{$I+} FillChar(Pc,4,255); WriteBytes(Pc,4); End;
+  If DataOut>=0 Then Begin {$I-}Seek(ActiveOutput,DataOut+4);{$I+} FillChar(Pc,4,255); WriteBytes(Pc,4); End;
+ End;
  CloseRead; CloseWrite;
 End;
 { vrai si Name est un WAV (RIFF/WAVE) sans bloc LIST }
@@ -101336,6 +101394,733 @@ Begin
  CloseWrite;
  FreeMem(P); FreeMem(Hdr); FreeMem(Ev);
 End;
+{ ======== F1 : entree WAV RF64 / BW64 -> RIFF (libavformat/wavdec.c : ds64) ======== }
+Function F1IsRf64(Const Name: String): Boolean;
+Var H: Array[0..11] Of Byte; N: LongInt;
+Begin
+ F1IsRf64:=False;
+ OpenRead(Name); N:=InputSize;
+ If N<44 Then Begin CloseRead; Exit; End;
+ ReadAt(0,H,12); CloseRead;
+ If (H[8]=87) And (H[9]=65) And (H[10]=86) And (H[11]=69) And (((H[0]=82) And (H[1]=70) And (H[2]=54) And (H[3]=52)) Or ((H[0]=66) And (H[1]=87) And (H[2]=54) And (H[3]=52))) Then F1IsRf64:=True;
+End;
+
+Procedure F1Rf64ToRiff(Const Source,Target: String);
+Var Lim,Pos,Cnt,Left,Put,I: LongInt; H: Array[0..11] Of Byte; Pc: Array[0..8191] Of Byte;
+ DataSz,Sz: Int64; Total: Int64; DataOut: LongInt; Tag: String[4];
+Begin
+ OpenRead(Source); Lim:=InputSize;
+ OpenWrite(Target);
+ ReadAt(0,H,12); H[0]:=82; H[1]:=73; H[2]:=70; H[3]:=70; WriteBytes(H,12); Pos:=12; Total:=12; DataSz:=-1; DataOut:=-1;
+ While Lim-Pos>=8 Do Begin
+  ReadAt(Pos,H,8);
+  Sz:=Int64(H[4])+Int64(H[5])*256+Int64(H[6])*65536+Int64(H[7])*16777216;
+  Tag:=Chr(H[0])+Chr(H[1])+Chr(H[2])+Chr(H[3]);
+  If (Tag='ds64') And (Sz>=24) Then Begin
+   ReadAt(Pos+8,Pc,24); DataSz:=0;
+   For I:=0 To 3 Do DataSz:=DataSz+(Int64(Pc[8+I]) Shl (8*I));
+   DataSz:=DataSz+(Int64(Pc[12]) Shl 32)+(Int64(Pc[13]) Shl 40);
+   Inc(Pos,8+Sz+(Sz And 1));
+   Continue;
+  End;
+  If Tag='data' Then Begin
+   If (Sz=$FFFFFFFF) And (DataSz>=0) Then Sz:=DataSz;
+   If Sz>Lim-Pos-8 Then Sz:=Lim-Pos-8;
+   H[4]:=Sz And 255; H[5]:=(Sz Shr 8) And 255; H[6]:=(Sz Shr 16) And 255; H[7]:=(Sz Shr 24) And 255;
+   WriteBytes(H,8); Inc(Total,8); Inc(Pos,8);
+   Left:=Sz;
+   While Left>0 Do Begin
+    Cnt:=Left; If Cnt>8192 Then Cnt:=8192;
+    ReadAt(Pos,Pc,Cnt); WriteBytes(Pc,Cnt); Inc(Pos,Cnt); Dec(Left,Cnt); Inc(Total,Cnt);
+   End;
+   If Odd(Sz) And (Pos<Lim) Then Begin ReadAt(Pos,Pc,1); WriteBytes(Pc,1); Inc(Pos); Inc(Total); End;
+   Continue;
+  End;
+  If Sz>Lim-Pos-8 Then Sz:=Lim-Pos-8;
+  Cnt:=8+Sz+(Sz And 1); If Cnt>Lim-Pos Then Cnt:=Lim-Pos;
+  If (Tag='fact') And (Sz>=4) Then Begin
+   ReadAt(Pos,Pc,Cnt); If (Pc[8]=255) And (Pc[9]=255) And (Pc[10]=255) And (Pc[11]=255) Then Begin Pc[8]:=0; Pc[9]:=0; Pc[10]:=0; Pc[11]:=0; End;
+   WriteBytes(Pc,Cnt); Inc(Pos,Cnt); Inc(Total,Cnt);
+   Continue;
+  End;
+  Left:=Cnt;
+  While Left>0 Do Begin
+   Put:=Left; If Put>8192 Then Put:=8192;
+   ReadAt(Pos,Pc,Put); WriteBytes(Pc,Put); Inc(Pos,Put); Dec(Left,Put); Inc(Total,Put);
+  End;
+ End;
+ {$I-}Seek(ActiveOutput,4);{$I+}
+ If IOResult=0 Then Begin
+  Sz:=Total-8; H[0]:=Sz And 255; H[1]:=(Sz Shr 8) And 255; H[2]:=(Sz Shr 16) And 255; H[3]:=(Sz Shr 24) And 255; WriteBytes(H,4);
+ End;
+ CloseRead; CloseWrite;
+End;
+{ ======== F1 : SubRip -> ASS (libavformat/srtdec.c, libavcodec/srtdec.c, htmlsubtitles.c, assenc) ======== }
+Const
+ AHNames: Array[0..139] Of String[20]=(
+  'aliceblue',
+  'antiquewhite',
+  'aqua',
+  'aquamarine',
+  'azure',
+  'beige',
+  'bisque',
+  'black',
+  'blanchedalmond',
+  'blue',
+  'blueviolet',
+  'brown',
+  'burlywood',
+  'cadetblue',
+  'chartreuse',
+  'chocolate',
+  'coral',
+  'cornflowerblue',
+  'cornsilk',
+  'crimson',
+  'cyan',
+  'darkblue',
+  'darkcyan',
+  'darkgoldenrod',
+  'darkgray',
+  'darkgreen',
+  'darkkhaki',
+  'darkmagenta',
+  'darkolivegreen',
+  'darkorange',
+  'darkorchid',
+  'darkred',
+  'darksalmon',
+  'darkseagreen',
+  'darkslateblue',
+  'darkslategray',
+  'darkturquoise',
+  'darkviolet',
+  'deeppink',
+  'deepskyblue',
+  'dimgray',
+  'dodgerblue',
+  'firebrick',
+  'floralwhite',
+  'forestgreen',
+  'fuchsia',
+  'gainsboro',
+  'ghostwhite',
+  'gold',
+  'goldenrod',
+  'gray',
+  'green',
+  'greenyellow',
+  'honeydew',
+  'hotpink',
+  'indianred',
+  'indigo',
+  'ivory',
+  'khaki',
+  'lavender',
+  'lavenderblush',
+  'lawngreen',
+  'lemonchiffon',
+  'lightblue',
+  'lightcoral',
+  'lightcyan',
+  'lightgoldenrodyellow',
+  'lightgreen',
+  'lightgrey',
+  'lightpink',
+  'lightsalmon',
+  'lightseagreen',
+  'lightskyblue',
+  'lightslategray',
+  'lightsteelblue',
+  'lightyellow',
+  'lime',
+  'limegreen',
+  'linen',
+  'magenta',
+  'maroon',
+  'mediumaquamarine',
+  'mediumblue',
+  'mediumorchid',
+  'mediumpurple',
+  'mediumseagreen',
+  'mediumslateblue',
+  'mediumspringgreen',
+  'mediumturquoise',
+  'mediumvioletred',
+  'midnightblue',
+  'mintcream',
+  'mistyrose',
+  'moccasin',
+  'navajowhite',
+  'navy',
+  'oldlace',
+  'olive',
+  'olivedrab',
+  'orange',
+  'orangered',
+  'orchid',
+  'palegoldenrod',
+  'palegreen',
+  'paleturquoise',
+  'palevioletred',
+  'papayawhip',
+  'peachpuff',
+  'peru',
+  'pink',
+  'plum',
+  'powderblue',
+  'purple',
+  'red',
+  'rosybrown',
+  'royalblue',
+  'saddlebrown',
+  'salmon',
+  'sandybrown',
+  'seagreen',
+  'seashell',
+  'sienna',
+  'silver',
+  'skyblue',
+  'slateblue',
+  'slategray',
+  'snow',
+  'springgreen',
+  'steelblue',
+  'tan',
+  'teal',
+  'thistle',
+  'tomato',
+  'turquoise',
+  'violet',
+  'wheat',
+  'white',
+  'whitesmoke',
+  'yellow',
+  'yellowgreen');
+ AHVals: Array[0..139] Of LongInt=(
+  $F0F8FF,
+  $FAEBD7,
+  $00FFFF,
+  $7FFFD4,
+  $F0FFFF,
+  $F5F5DC,
+  $FFE4C4,
+  $000000,
+  $FFEBCD,
+  $0000FF,
+  $8A2BE2,
+  $A52A2A,
+  $DEB887,
+  $5F9EA0,
+  $7FFF00,
+  $D2691E,
+  $FF7F50,
+  $6495ED,
+  $FFF8DC,
+  $DC143C,
+  $00FFFF,
+  $00008B,
+  $008B8B,
+  $B8860B,
+  $A9A9A9,
+  $006400,
+  $BDB76B,
+  $8B008B,
+  $556B2F,
+  $FF8C00,
+  $9932CC,
+  $8B0000,
+  $E9967A,
+  $8FBC8F,
+  $483D8B,
+  $2F4F4F,
+  $00CED1,
+  $9400D3,
+  $FF1493,
+  $00BFFF,
+  $696969,
+  $1E90FF,
+  $B22222,
+  $FFFAF0,
+  $228B22,
+  $FF00FF,
+  $DCDCDC,
+  $F8F8FF,
+  $FFD700,
+  $DAA520,
+  $808080,
+  $008000,
+  $ADFF2F,
+  $F0FFF0,
+  $FF69B4,
+  $CD5C5C,
+  $4B0082,
+  $FFFFF0,
+  $F0E68C,
+  $E6E6FA,
+  $FFF0F5,
+  $7CFC00,
+  $FFFACD,
+  $ADD8E6,
+  $F08080,
+  $E0FFFF,
+  $FAFAD2,
+  $90EE90,
+  $D3D3D3,
+  $FFB6C1,
+  $FFA07A,
+  $20B2AA,
+  $87CEFA,
+  $778899,
+  $B0C4DE,
+  $FFFFE0,
+  $00FF00,
+  $32CD32,
+  $FAF0E6,
+  $FF00FF,
+  $800000,
+  $66CDAA,
+  $0000CD,
+  $BA55D3,
+  $9370D8,
+  $3CB371,
+  $7B68EE,
+  $00FA9A,
+  $48D1CC,
+  $C71585,
+  $191970,
+  $F5FFFA,
+  $FFE4E1,
+  $FFE4B5,
+  $FFDEAD,
+  $000080,
+  $FDF5E6,
+  $808000,
+  $6B8E23,
+  $FFA500,
+  $FF4500,
+  $DA70D6,
+  $EEE8AA,
+  $98FB98,
+  $AFEEEE,
+  $D87093,
+  $FFEFD5,
+  $FFDAB9,
+  $CD853F,
+  $FFC0CB,
+  $DDA0DD,
+  $B0E0E6,
+  $800080,
+  $FF0000,
+  $BC8F8F,
+  $4169E1,
+  $8B4513,
+  $FA8072,
+  $F4A460,
+  $2E8B57,
+  $FFF5EE,
+  $A0522D,
+  $C0C0C0,
+  $87CEEB,
+  $6A5ACD,
+  $708090,
+  $FFFAFA,
+  $00FF7F,
+  $4682B4,
+  $D2B48C,
+  $008080,
+  $D8BFD8,
+  $FF6347,
+  $40E0D0,
+  $EE82EE,
+  $F5DEB3,
+  $FFFFFF,
+  $F5F5F5,
+  $FFFF00,
+  $9ACD32);
+
+Type
+ TAHFont=Record Face: String[127]; Size: LongInt; Color: LongInt; HasColor: Boolean; End;
+ TAHEv=Record Pos: LongInt; Start,Dur: Int64; TOff,TLen: LongInt; Txt: PEABuffer; TxtLen: LongInt; End;
+ PAHEv=^TAHEvA; TAHEvA=Array[0..16777215] Of TAHEv;
+
+{ equivalent de ff_htmlmarkup_to_ass : In est termine par un octet nul, Dst recoit le resultat }
+Procedure AHConvert(In_: PEABuffer; Dst: PEABuffer; Var DLen: LongInt);
+Var I,J,Sptr,An,Len,K,Skip,TagClose,Sz,Nm,Cut: LongInt; LineStart,EndF,ClosingMissing,Likely: Boolean;
+ Stack: Array[0..15] Of TAHFont; Buf: Array[0..130] Of Byte; BN: LongInt; Param,TagName: LongInt; C: Byte;
+ NewT,Cur,Last: TAHFont; Col: LongInt; Ok: Boolean; S: String;
+ Procedure Put(Ch: Byte); Begin Dst^[DLen]:=Ch; Inc(DLen); End;
+ Procedure PutS(Const T: String); Var Q: LongInt; Begin For Q:=1 To Length(T) Do Put(Ord(T[Q])); End;
+ Procedure Rstrip; Begin While (DLen>0) And (Dst^[DLen-1]=32) Do Dec(DLen); End;
+ Function Lw(Ch: Byte): Byte; Begin If (Ch>=65) And (Ch<=90) Then Lw:=Ch+32 Else Lw:=Ch; End;
+ Function InAt(P: LongInt): Byte; Begin InAt:=In_^[P]; End;
+ Function HexS(V: LongInt): String;
+ Const Dg: String[16]='0123456789ABCDEF';
+ Var T: String; Q: LongInt;
+ Begin
+  T:=''; If V=0 Then T:='0';
+  While V>0 Do Begin T:=Dg[(V And 15)+1]+T; V:=V Shr 4; End;
+  HexS:=T;
+ End;
+ Function NumS(V: LongInt): String; Var T: String; Begin Str(V,T); NumS:=T; End;
+ { buffer de balise : octets Buf[0..BN-1], nul final }
+ Function BufCh(P: LongInt): Byte; Begin If P<BN Then BufCh:=Buf[P] Else BufCh:=0; End;
+ Function PrefixCI(P: LongInt; Const Pre: String): Boolean;
+ Var Q: LongInt;
+ Begin
+  PrefixCI:=False;
+  For Q:=1 To Length(Pre) Do If Lw(BufCh(P+Q-1))<>Ord(Pre[Q]) Then Exit;
+  PrefixCI:=True;
+ End;
+ Function ParseColor(P: LongInt; Var Val: LongInt): Boolean;
+ Var Sharps,Q,E,N2,H: LongInt; Name: String; Hex: Boolean; D: Byte;
+ Begin
+  ParseColor:=False; Sharps:=0;
+  While BufCh(P+Sharps)=35 Do Inc(Sharps);
+  If Sharps>1 Then Inc(P,Sharps-1);
+  { fin: " > ou espace }
+  E:=P; While (BufCh(E)<>0) And (BufCh(E)<>34) And (BufCh(E)<>32) And (BufCh(E)<>62) Do Inc(E);
+  { alpha @ }
+  Q:=P; While (Q<E) And (BufCh(Q)<>64) Do Inc(Q);
+  N2:=Q-P; { longueur sans @alpha }
+  If (BufCh(P)=35) Or ((BufCh(P)=48) And (Lw(BufCh(P+1))=120)) Then Begin
+   If BufCh(P)=35 Then Q:=P+1 Else Q:=P+2;
+   H:=0; E:=Q;
+   While (E<P+N2) And (((BufCh(E)>=48) And (BufCh(E)<=57)) Or ((Lw(BufCh(E))>=97) And (Lw(BufCh(E))<=102))) Do Begin
+    D:=Lw(BufCh(E)); If D<=57 Then D:=D-48 Else D:=D-87;
+    If E-Q<6 Then H:=H*16+D; Inc(E);
+   End;
+   If (E<>P+N2) Or ((E-Q<>6) And (E-Q<>8)) Then Exit;
+   If E-Q=8 Then Begin H:=0; For Q:=Q To E-3 Do Begin D:=Lw(BufCh(Q)); If D<=57 Then D:=D-48 Else D:=D-87; H:=H*16+D; End; End;
+   Val:=((H Shr 16) And 255) Or (H And $FF00) Or ((H And 255) Shl 16);
+   ParseColor:=True; Exit;
+  End;
+  Name:=''; For Q:=P To P+N2-1 Do If Length(Name)<20 Then Name:=Name+Chr(Lw(BufCh(Q)));
+  For Q:=0 To High(AHNames) Do If AHNames[Q]=Name Then Begin
+   H:=AHVals[Q]; Val:=((H Shr 16) And 255) Or (H And $FF00) Or ((H And 255) Shl 16); ParseColor:=True; Exit;
+  End;
+ End;
+Begin
+ DLen:=0; I:=0; Sptr:=0; An:=0; LineStart:=True; EndF:=False; ClosingMissing:=False;
+ FillChar(Stack,SizeOf(Stack),0);
+ While (Not EndF) And (In_^[I]<>0) Do Begin
+  C:=In_^[I];
+  Case C Of
+   13: ;
+   10: If LineStart Then EndF:=True Else Begin Rstrip; Put(92); Put(78); LineStart:=True; End;
+   32: If Not LineStart Then Put(32);
+   123: Begin
+         If (In_^[I]=123) And (In_^[I+1]=92) And (In_^[I+2]=97) And (In_^[I+3]=110) And (In_^[I+4]>=48) And (In_^[I+4]<=57) And (In_^[I+5]=125) Then Inc(An);
+         Ok:=False;
+         If Not ClosingMissing Then Begin
+          If ((An<>1) And (In_^[I+1]=92)) Or ((In_^[I+1]<>0) And (In_^[I+1] In [67,99,70,102,111,80,83,115,89,121]) And (In_^[I+2]=58)) Then Begin
+           J:=I+2; While (In_^[J]<>0) And (In_^[J]<>125) Do Inc(J);
+           If In_^[J]=125 Then Begin I:=J; Ok:=True; End Else ClosingMissing:=True;
+          End;
+         End;
+         If Not Ok Then Put(123);
+        End;
+   60: Begin
+        Likely:=True;
+        While In_^[I+1]=60 Do Begin Put(60); Likely:=False; Inc(I); End;
+        TagClose:=Ord(In_^[I+1]=47);
+        If TagClose=1 Then Likely:=True;
+        { scantag }
+        BN:=0; Len:=0; Ok:=False;
+        K:=I+TagClose+1;
+        For J:=0 To 127 Do Begin
+         C:=In_^[K+J];
+         If (C=0) Or (C=60) Then Break;
+         If C=62 Then Begin Buf[J]:=0; BN:=J; Len:=J+1; Ok:=True; Break; End;
+         Buf[J]:=C;
+        End;
+        If Ok And (Len>0) Then Begin
+         Buf[BN]:=0; Skip:=Len+TagClose;
+         TagName:=0; While BufCh(TagName)=32 Do Begin Likely:=False; Inc(TagName); End;
+         Param:=-1; J:=TagName; While (BufCh(J)<>0) And (BufCh(J)<>32) Do Inc(J);
+         If BufCh(J)=32 Then Begin Buf[J]:=0; Param:=J+1; End;
+         J:=TagName;
+         While BufCh(J)<>0 Do Begin
+          C:=BufCh(J);
+          If Not (((C>=48) And (C<=57)) Or ((C>=97) And (C<=122)) Or ((C>=65) And (C<=90)) Or (C=95) Or (C=47)) Then Begin Likely:=False; Break; End;
+          Inc(J);
+         End;
+         If (Lw(BufCh(TagName))=102) And (Lw(BufCh(TagName+1))=111) And (Lw(BufCh(TagName+2))=110) And (Lw(BufCh(TagName+3))=116) And (BufCh(TagName+4)=0) Then Begin
+          If (TagClose=1) And (Sptr>0) Then Begin
+           Cur:=Stack[Sptr]; Dec(Sptr); Last:=Stack[Sptr];
+           If Cur.Size<>0 Then Begin
+            If Last.Size=0 Then PutS('{\fs}') Else If Last.Size<>Cur.Size Then PutS('{\fs'+NumS(Last.Size)+'}');
+           End;
+           If Cur.HasColor Then Begin
+            If Not Last.HasColor Then PutS('{\c}') Else If Last.Color<>Cur.Color Then PutS('{\c&H'+HexS(Last.Color)+'&}');
+           End;
+           If Cur.Face<>'' Then Begin
+            If Last.Face='' Then PutS('{\fn}') Else If Last.Face<>Cur.Face Then PutS('{\fn'+Last.Face+'}');
+           End;
+          End Else If (TagClose=0) And (Sptr<15) Then Begin
+           NewT:=Stack[Sptr]; Inc(Sptr); Stack[Sptr]:=NewT;
+           While Param>=0 Do Begin
+            If PrefixCI(Param,'size=') Then Begin
+             Inc(Param,5); If BufCh(Param)=34 Then Inc(Param);
+             Nm:=0; Sz:=0; K:=Param;
+             While (BufCh(K)>=48) And (BufCh(K)<=57) Do Begin Nm:=Nm*10+BufCh(K)-48; Inc(K); Inc(Sz); End;
+             If Sz>0 Then Begin Stack[Sptr].Size:=Nm; PutS('{\fs'+NumS(Nm)+'}'); End;
+            End Else If PrefixCI(Param,'color=') Then Begin
+             Inc(Param,6); If BufCh(Param)=34 Then Inc(Param);
+             If ParseColor(Param,Col) Then Begin Stack[Sptr].Color:=Col; Stack[Sptr].HasColor:=True; PutS('{\c&H'+HexS(Col)+'&}'); End;
+            End Else If PrefixCI(Param,'face=') Then Begin
+             Inc(Param,5); If BufCh(Param)=34 Then Inc(Param);
+             K:=Param; Len:=0;
+             While (BufCh(K)<>0) And (((BufCh(Param-1)=34) And (BufCh(K)<>34)) Or ((BufCh(Param-1)<>34) And (BufCh(K)<>32))) Do Begin Inc(K); Inc(Len); End;
+             If Len>127 Then Len:=127;
+             S:=''; For J:=0 To Len-1 Do S:=S+Chr(BufCh(Param+J));
+             Stack[Sptr].Face:=S; PutS('{\fn'+S+'}');
+             Param:=K;
+            End;
+            While (BufCh(Param)<>0) And (BufCh(Param)<>32) Do Inc(Param);
+            If BufCh(Param)=32 Then Inc(Param) Else Param:=-1;
+           End;
+          End;
+          Inc(I,Skip);
+         End Else If (BufCh(TagName)<>0) And (BufCh(TagName+1)=0) And (Lw(BufCh(TagName)) In [98,105,115,117]) Then Begin
+          PutS('{\'+Chr(Lw(BufCh(TagName)))+NumS(1-TagClose)+'}'); Inc(I,Skip);
+         End Else If PrefixCI(TagName,'br') And ((BufCh(TagName+2)=0) Or ((BufCh(TagName+2)=47) And (BufCh(TagName+3)=0))) Then Begin
+          Put(92); Put(78); Inc(I,Skip);
+         End Else If Likely Then Inc(I,Skip)
+         Else Put(60);
+        End Else Put(60);
+       End;
+  Else Put(C);
+  End;
+  C:=In_^[I];
+  If (C<>32) And (C<>13) And (C<>10) Then LineStart:=False;
+  Inc(I);
+ End;
+ While (DLen>=2) And (Dst^[DLen-2]=92) And (Dst^[DLen-1]=78) Do Dec(DLen,2);
+ Rstrip;
+End;
+
+Function F1SrtProbe(Const Name: String): Boolean;
+Var P: PEABuffer; Size,I,N,L1S,L1E,L2S,L2E,A,B,Dg: LongInt;
+ Function Num(S,E: LongInt): Boolean;
+ Var Q: LongInt;
+ Begin
+  Q:=S; While (Q<E) And (P^[Q] In [9,10,11,12,13,32]) Do Inc(Q);
+  If (Q<E) And ((P^[Q]=43) Or (P^[Q]=45)) Then Inc(Q);
+  Dg:=0; While (Q<E) And (P^[Q] In [48..57]) Do Begin Inc(Q); Inc(Dg); End;
+  Num:=Dg>0;
+ End;
+ Function Dm(Var Q: LongInt; E: LongInt): Boolean; { %d: espaces, signe, chiffres }
+ Begin
+  While (Q<E) And (P^[Q] In [9,10,11,12,13,32]) Do Inc(Q);
+  If (Q<E) And ((P^[Q]=43) Or (P^[Q]=45)) Then Inc(Q);
+  Dg:=0; While (Q<E) And (P^[Q] In [48..57]) Do Begin Inc(Q); Inc(Dg); End;
+  Dm:=Dg>0;
+ End;
+Var Q,E: LongInt; K: LongInt; Ok: Boolean;
+Begin
+ F1SrtProbe:=False;
+ OpenRead(Name); N:=InputSize; If N>2048 Then N:=2048;
+ If N<10 Then Begin CloseRead; Exit; End;
+ GetMem(P,N+8); FillChar(P^,N+8,0); ReadAt(0,P^,N); CloseRead; Size:=N;
+ ASText(P,Size);
+ I:=0; While (I<Size) And ((P^[I]=13) Or (P^[I]=10)) Do Inc(I);
+ L1S:=I; While (I<Size) And (P^[I]<>13) And (P^[I]<>10) Do Inc(I); L1E:=I;
+ If Not Num(L1S,L1E) Then Begin FreeMem(P); Exit; End;
+ While (I<Size) And (P^[I]=13) Do Inc(I);
+ If (I<Size) And (P^[I]=10) Then Inc(I);
+ L2S:=I; While (I<Size) And (P^[I]<>13) And (P^[I]<>10) Do Inc(I); L2E:=I;
+ Q:=L2S; If (Q<L2E) And (P^[Q]=45) Then Inc(Q);
+ Ok:=(Q<L2E) And (P^[Q]>=48) And (P^[Q]<=57);
+ If Ok Then Begin
+  Ok:=False;
+  For K:=L2S To L2E-5 Do If (P^[K]=32) And (P^[K+1]=45) And (P^[K+2]=45) And (P^[K+3]=62) And (P^[K+4]=32) Then Ok:=True;
+ End;
+ If Ok Then Begin
+  Q:=L2S;
+  Ok:=Dm(Q,L2E) And (P^[Q]=58); Inc(Q);
+  Ok:=Ok And Dm(Q,L2E) And (P^[Q]=58); Inc(Q);
+  Ok:=Ok And Dm(Q,L2E) And ((P^[Q]=44) Or (P^[Q]=46)); Inc(Q);
+  Ok:=Ok And Dm(Q,L2E);
+  While (Q<L2E) And (P^[Q]=32) Do Inc(Q);
+  Ok:=Ok And (P^[Q]=45) And (P^[Q+1]=45) And (P^[Q+2]=62); Inc(Q,3);
+  Ok:=Ok And Dm(Q,L2E) And (P^[Q]=58); Inc(Q);
+  Ok:=Ok And Dm(Q,L2E) And (P^[Q]=58); Inc(Q);
+  Ok:=Ok And Dm(Q,L2E) And ((P^[Q]=44) Or (P^[Q]=46)); Inc(Q);
+  Ok:=Ok And Dm(Q,L2E);
+ End;
+ FreeMem(P);
+ F1SrtProbe:=Ok;
+End;
+
+Procedure F1SrtToAss(Const Source,Target: String);
+Const Hd1='[Script Info]'#13#10'; Script generated by FFmpeg/Lavc60.31.102'#13#10'ScriptType: v4.00+'#13#10'PlayResX: 384'#13#10'PlayResY: 288'#13#10'ScaledBorderAndShadow: yes'#13#10'YCbCr Matrix: None'#13#10#13#10'[V4+ Styles]'#13#10;
+ Hd2='Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding'#13#10;
+ Hd3='Style: Default,Arial,16,&Hffffff,&Hffffff,&H0,&H0,0,0,0,0,100,100,0,0,1,1,0,2,10,10,10,1'#13#10#13#10'[Events]'#13#10;
+ Hd4='Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text'#13#10;
+Var P: PEABuffer; Size,At,LS,LE,N,NEv,I,J,K,Cap,BL: LongInt; Ev: PAHEv; Idx,Tmp: PASIdx;
+ Bf: PEABuffer; HasInfo: Boolean; Cache: PEABuffer; CL: LongInt; Cur,TmpEv: TAHEv;
+ H1,M1,S1,Ms1,H2,M2,S2,Ms2: Int64; SP: LongInt; Line: PEABuffer; LLen: LongInt;
+ Out_: PEABuffer; OL: LongInt; St,Du,En: Int64; L: String; Hh1,Mm1,Ss1,Cs1,Hh2,Mm2,Ss2,Cs2: LongInt;
+ Function GI(Var V: Int64): Boolean;
+ Var Neg: Boolean; D: LongInt;
+ Begin
+  GI:=False;
+  While (SP<LLen) And (Line^[SP] In [9,10,11,12,13,32]) Do Inc(SP);
+  Neg:=False;
+  If (SP<LLen) And ((Line^[SP]=43) Or (Line^[SP]=45)) Then Begin Neg:=Line^[SP]=45; Inc(SP); End;
+  D:=0; V:=0;
+  While (SP<LLen) And (Line^[SP] In [48..57]) Do Begin If V<100000000000 Then V:=V*10+(Line^[SP]-48); Inc(SP); Inc(D); End;
+  If D=0 Then Exit;
+  If Neg Then V:=-V;
+  GI:=True;
+ End;
+ Function Lit(Ch: Byte): Boolean;
+ Begin If (SP<LLen) And (Line^[SP]=Ch) Then Begin Inc(SP); Lit:=True; End Else Lit:=False; End;
+ Function Sep: Boolean;
+ Begin If (SP<LLen) And ((Line^[SP]=44) Or (Line^[SP]=46)) Then Begin Inc(SP); Sep:=True; End Else Sep:=False; End;
+ Procedure Ws; Begin While (SP<LLen) And (Line^[SP] In [9,10,11,12,13,32]) Do Inc(SP); End;
+ Function EventInfo: Boolean;
+ Begin
+  EventInfo:=False; SP:=0;
+  If Not GI(H1) Then Exit; If Not Lit(58) Then Exit;
+  If Not GI(M1) Then Exit; If Not Lit(58) Then Exit;
+  If Not GI(S1) Then Exit; If Not Sep Then Exit;
+  If Not GI(Ms1) Then Exit; Ws;
+  If Not (Lit(45) And Lit(45) And Lit(62)) Then Exit; Ws;
+  If Not GI(H2) Then Exit; If Not Lit(58) Then Exit;
+  If Not GI(M2) Then Exit; If Not Lit(58) Then Exit;
+  If Not GI(S2) Then Exit; If Not Sep Then Exit;
+  If Not GI(Ms2) Then Exit;
+  If (SP+3<LLen) And (Line^[SP]=32) Then Begin
+   K:=SP; While (K<LLen) And (Line^[K]=32) Do Inc(K);
+   If (K+2<LLen) And (Line^[K]=88) And (Line^[K+1]=49) And (Line^[K+2]=58) Then Fail('srt: coordonnees X1/X2/Y1/Y2 non prises en charge.');
+  End;
+  EventInfo:=True;
+ End;
+ { strtol >= 0 : la ligne commence par un nombre non negatif ; Whole : le nombre occupe toute la ligne }
+ Function StrtolPos(B: PEABuffer; Len: LongInt; Var Whole: Boolean): Boolean;
+ Var Q,Dg2: LongInt; Neg,NZ: Boolean;
+ Begin
+  Q:=0; Neg:=False; NZ:=False; Dg2:=0; Whole:=False; StrtolPos:=False;
+  If Len=0 Then Begin Whole:=True; StrtolPos:=True; Exit; End;
+  While (Q<Len) And (B^[Q] In [9,10,11,12,13,32]) Do Inc(Q);
+  If (Q<Len) And ((B^[Q]=43) Or (B^[Q]=45)) Then Begin Neg:=B^[Q]=45; Inc(Q); End;
+  While (Q<Len) And (B^[Q] In [48..57]) Do Begin If B^[Q]<>48 Then NZ:=True; Inc(Q); Inc(Dg2); End;
+  If Dg2=0 Then Exit; { aucun chiffre : strtol renvoie 0 sans avancer }
+  If Neg And NZ Then Exit;
+  StrtolPos:=True; Whole:=Q=Len;
+ End;
+ Function HasNum(B: PEABuffer; Len: LongInt): Boolean; { strtol(line)<0 || line==pline -> faux }
+ Var W: Boolean;
+ Begin
+  If Len=0 Then Begin HasNum:=False; Exit; End;
+  HasNum:=StrtolPos(B,Len,W);
+ End;
+ Procedure AddEvent(Append: Boolean);
+ Begin
+  If Append And (CL>0) Then Begin Move(Cache^[0],Bf^[BL],CL); Inc(BL,CL); Bf^[BL]:=10; Inc(BL); End;
+  CL:=0;
+  While (BL>0) And (Bf^[BL-1]=10) Do Dec(BL);
+  If BL>0 Then Begin
+   GetMem(TmpEv.Txt,BL+1); Move(Bf^[0],TmpEv.Txt^[0],BL); TmpEv.Txt^[BL]:=0; TmpEv.TxtLen:=BL;
+   TmpEv.Pos:=Cur.Pos; TmpEv.Start:=Cur.Start; TmpEv.Dur:=Cur.Dur;
+   Ev^[NEv]:=TmpEv; Inc(NEv);
+   BL:=0;
+  End;
+ End;
+ Function Less(X,Y: LongInt): Boolean;
+ Begin
+  If Ev^[X].Start=Ev^[Y].Start Then Less:=Ev^[X].Pos<Ev^[Y].Pos Else Less:=Ev^[X].Start<Ev^[Y].Start;
+ End;
+ Procedure SortIdx(Lo,Hi: LongInt);
+ Var Mid,A,B,C2: LongInt;
+ Begin
+  If Hi-Lo<2 Then Exit;
+  Mid:=(Lo+Hi) Div 2; SortIdx(Lo,Mid); SortIdx(Mid,Hi);
+  A:=Lo; B:=Mid; C2:=Lo;
+  While (A<Mid) And (B<Hi) Do Begin
+   If Less(Idx^[B],Idx^[A]) Then Begin Tmp^[C2]:=Idx^[B]; Inc(B); End Else Begin Tmp^[C2]:=Idx^[A]; Inc(A); End;
+   Inc(C2);
+  End;
+  While A<Mid Do Begin Tmp^[C2]:=Idx^[A]; Inc(A); Inc(C2); End;
+  While B<Hi Do Begin Tmp^[C2]:=Idx^[B]; Inc(B); Inc(C2); End;
+  For A:=Lo To Hi-1 Do Idx^[A]:=Tmp^[A];
+ End;
+ Function SameTxt(X,Y: LongInt): Boolean;
+ Var Q: LongInt;
+ Begin
+  SameTxt:=False;
+  If Ev^[X].TxtLen<>Ev^[Y].TxtLen Then Exit;
+  For Q:=0 To Ev^[X].TxtLen-1 Do If Ev^[X].Txt^[Q]<>Ev^[Y].Txt^[Q] Then Exit;
+  SameTxt:=True;
+ End;
+ Function Cs(Ms: Int64): Int64;
+ Begin If Ms>=0 Then Cs:=(Ms+5) Div 10 Else Cs:=-((-Ms+5) Div 10); End;
+Var Keep: PASIdx; NK,LastK: LongInt; Whole,W2,Num0: Boolean;
+Begin
+ ASLoad(Source,P,Size); ASText(P,Size);
+ N:=0; For I:=0 To Size-1 Do If (P^[I]=10) Or (P^[I]=13) Then Inc(N);
+ GetMem(Ev,(N+2)*SizeOf(TAHEv)); NEv:=0;
+ GetMem(Bf,Size*2+64); BL:=0; GetMem(Cache,Size+64); CL:=0; GetMem(Line,Size+64);
+ HasInfo:=False; At:=0;
+ FillChar(Cur,SizeOf(Cur),0);
+ While At<Size Do Begin
+  LS:=At; LLen:=0;
+  While (At<Size) And (P^[At]<>13) And (P^[At]<>10) And (P^[At]<>0) Do Begin Line^[LLen]:=P^[At]; Inc(LLen); Inc(At); End;
+  If (At<Size) And (P^[At]=0) Then Break;
+  If At<Size Then Inc(At);
+  While (At<Size) And (P^[At]=13) Do Inc(At);
+  If (At<Size) And (P^[At]=10) Then Inc(At);
+  If LLen=0 Then Continue;
+  If EventInfo Then Begin
+   If HasInfo Then Begin
+    { cache : nombre isole ? }
+    Num0:=StrtolPos(Cache,CL,Whole) And Whole;
+    AddEvent((BL=0) And Not Num0);
+   End Else HasInfo:=True;
+   Cur.Pos:=LS;
+   Cur.Start:=(H1*3600+M1*60+S1)*1000+Ms1;
+   Cur.Dur:=((H2*3600+M2*60+S2)*1000+Ms2)-Cur.Start;
+  End Else Begin
+   If Not HasInfo Then Continue;
+   If CL>0 Then Begin Move(Cache^[0],Bf^[BL],CL); Inc(BL,CL); Bf^[BL]:=10; Inc(BL); CL:=0; End;
+   If Not HasNum(Line,LLen) Then Begin Move(Line^[0],Bf^[BL],LLen); Inc(BL,LLen); Bf^[BL]:=10; Inc(BL); End
+   Else Begin Move(Line^[0],Cache^[0],LLen); CL:=LLen; End;
+  End;
+ End;
+ If HasInfo Then AddEvent(True);
+ { file triee, durees negatives, doublons }
+ If NEv>0 Then Begin
+  GetMem(Idx,NEv*4); GetMem(Tmp,NEv*4); GetMem(Keep,NEv*4);
+  For I:=0 To NEv-1 Do Idx^[I]:=I;
+  SortIdx(0,NEv);
+  For I:=0 To NEv-2 Do If Ev^[Idx^[I]].Dur<0 Then Ev^[Idx^[I]].Dur:=Ev^[Idx^[I+1]].Start-Ev^[Idx^[I]].Start;
+  NK:=0; LastK:=-1;
+  For I:=0 To NEv-1 Do Begin
+   If (LastK>=0) And (Ev^[Idx^[I]].Start=Ev^[LastK].Start) And (Ev^[Idx^[I]].Dur=Ev^[LastK].Dur) And SameTxt(Idx^[I],LastK) Then
+   Else Begin Keep^[NK]:=Idx^[I]; Inc(NK); LastK:=Idx^[I]; End;
+  End;
+ End Else NK:=0;
+ OpenWrite(Target);
+ ASWriteS(Hd1); ASWriteS(Hd2); ASWriteS(Hd3); ASWriteS(Hd4);
+ GetMem(Out_,Size*6+1024);
+ For I:=0 To NK-1 Do Begin
+  J:=Keep^[I];
+  AHConvert(Ev^[J].Txt,Out_,OL);
+  St:=Cs(Ev^[J].Start); Du:=Cs(Ev^[J].Dur); En:=St+Du;
+  Hh1:=St Div 360000; Mm1:=(St Div 6000) Mod 60; Ss1:=(St Div 100) Mod 60; Cs1:=St Mod 100;
+  Hh2:=En Div 360000; Mm2:=(En Div 6000) Mod 60; Ss2:=(En Div 100) Mod 60; Cs2:=En Mod 100;
+  If Hh1>9 Then Begin Hh1:=9; Mm1:=59; Ss1:=59; Cs1:=99; End;
+  If Hh2>9 Then Begin Hh2:=9; Mm2:=59; Ss2:=59; Cs2:=99; End;
+  L:='Dialogue: 0,'+ASNum(Hh1)+':'+ASFmt2(Mm1)+':'+ASFmt2(Ss1)+'.'+ASFmt2(Cs1)+','+ASNum(Hh2)+':'+ASFmt2(Mm2)+':'+ASFmt2(Ss2)+'.'+ASFmt2(Cs2)+',Default,,0,0,0,,';
+  ASWriteS(L);
+  If OL>0 Then ASWrite(Out_^,OL);
+  ASWriteS(#13#10);
+ End;
+ CloseWrite;
+End;
 { ======== F1 : encodeur TTA (libavcodec/ttaenc.c, ttaencdsp.c, ttadata.c) + muxeur tta (libavformat/ttaenc.c, apetag.c) ======== }
 Type
  TTFilt=Record Shift,Round,Error: LongInt; Qm,Dx,Dl: Array[0..15] Of LongInt; End;
@@ -101518,6 +102303,245 @@ Begin
  CloseWrite;
  FreeMem(TTBuf); FreeMem(Sizes);
 End;
+{ ======== F1 : copie de flux MP3 (libavformat/mp3dec.c + mp3enc.c : ID3v2.4, trame Xing/Info, CRC) ======== }
+Var F1Why: LongInt;
+Function F1Mp3Copy(Const Source,Target: String): Boolean;
+Const
+ BrM1: Array[0..15] Of LongInt=(0,32,40,48,56,64,80,96,112,128,160,192,224,256,320,0);
+ BrM2: Array[0..15] Of LongInt=(0,8,16,24,32,40,48,56,64,80,96,112,128,144,160,0);
+ Freq3: Array[0..2] Of LongInt=(44100,48000,32000);
+Type TBagArr=Array[0..399] Of Int64;
+Const LavfId='Lavf60.16.100';
+Var Buf: PEABuffer; Size,Pos,At,Tag,N,I,J,K,FStart: LongInt;
+ Ver,Lsf,Srate,Mono,Ok1: LongInt;
+ Sr,Ch,FSz,FBr,Br,Hd: LongInt;
+ Fr,Sz: Array[0..0] Of LongInt;
+ NPk,Total,AudioSize,InitBr,VbrFlag,Want,Seen,BPos,XSize,XFrames: LongInt;
+ Bag: TBagArr; Crc,AudioCrc: Word; Xs: Array[0..2047] Of Byte; XFrameSize,XOff: LongInt;
+ TagFr,TagSize,TagFilesz,StartPad,EndPad,SkipTag,Cbr,HasLame: LongInt;
+ Enc: Array[0..9] Of Byte; EncOk: Boolean; ParBr,Spf: LongInt; BestErr,BestIdx,Err,B2,Bv: LongInt;
+ Delay,Padding,Fd,Ld,Smp,Disc,Hdr,ID3Ok: LongInt; PackStart: LongInt;
+ Pk: Array[0..0] Of LongInt; Firsts: Boolean;
+ Hv: Array[0..3] Of Byte; ID: Array[0..44] Of Byte; Sgn: Int64;
+ Function RB(P: LongInt): LongInt; Begin If (P>=0) And (P<Size) Then RB:=Buf^[P] Else RB:=0; End;
+ Function RB32(P: LongInt): LongInt; Begin RB32:=(RB(P) Shl 24) Or (RB(P+1) Shl 16) Or (RB(P+2) Shl 8) Or RB(P+3); End;
+ Function CrcUpd(C: Word; D: Byte): Word;
+ Var K2: LongInt; X: LongInt;
+ Begin
+  X:=(C Xor D) And 255;
+  For K2:=1 To 8 Do If (X And 1)<>0 Then X:=(X Shr 1) Xor $A001 Else X:=X Shr 1;
+  CrcUpd:=(C Shr 8) Xor X;
+ End;
+ { analyse d'un en-tete : renvoie la taille de trame, 0 si invalide / non support }
+ Function Parse(P: LongInt; Var V,L,SrI,Chn,B: LongInt): LongInt;
+ Var H,Idx,Sx,Pd,Lsf2: LongInt;
+ Begin
+  Parse:=0;
+  If P+4>Size Then Exit;
+  H:=RB32(P);
+  If (H And $FFE00000)<>$FFE00000 Then Exit;
+  V:=(H Shr 19) And 3; If V=1 Then Exit;
+  If ((H Shr 17) And 3)<>1 Then Exit; { couche III uniquement }
+  Idx:=(H Shr 12) And 15; If (Idx=0) Or (Idx=15) Then Exit;
+  Sx:=(H Shr 10) And 3; If Sx=3 Then Exit;
+  Pd:=(H Shr 9) And 1;
+  Lsf2:=Ord(V<>3);
+  If V=3 Then B:=BrM1[Idx] Else B:=BrM2[Idx];
+  SrI:=Freq3[Sx]; If V=2 Then SrI:=SrI Div 2 Else If V=0 Then SrI:=SrI Div 4;
+  Chn:=Ord(((H Shr 6) And 3)<>3)+1;
+  L:=Lsf2;
+  Parse:=(B*144000) Div (SrI Shl Lsf2)+Pd;
+ End;
+ Function Spfv(L: LongInt): LongInt; Begin If L<>0 Then Spfv:=576 Else Spfv:=1152; End;
+ Procedure W32(P: LongInt; V: LongInt); Begin Xs[P]:=(V Shr 24) And 255; Xs[P+1]:=(V Shr 16) And 255; Xs[P+2]:=(V Shr 8) And 255; Xs[P+3]:=V And 255; End;
+Begin
+ F1Mp3Copy:=False;
+ OpenRead(Source); Size:=InputSize;
+ If (Size<64) Or (Size>200000000) Then Begin CloseRead; Exit; End;
+ GetMem(Buf,Size+16);
+ At:=0; While At<Size Do Begin N:=Size-At; If N>32768 Then N:=32768; ReadAt(At,Buf^[At],N); Inc(At,N); End;
+ CloseRead;
+ { etiquette ID3v2 en tete: seule TSSE est admise }
+ Pos:=0;
+ If (RB(0)=73) And (RB(1)=68) And (RB(2)=51) Then Begin
+  If (RB(3)<3) Or (RB(3)>4) Or (RB(5)<>0) Then Begin F1Why:=1; FreeMem(Buf,Size+16); Exit; End;
+  Tag:=(RB(6) Shl 21) Or (RB(7) Shl 14) Or (RB(8) Shl 7) Or RB(9);
+  At:=10;
+  While At<10+Tag Do Begin
+   If RB(At)=0 Then Break;
+   If (RB(At)<>Ord('T')) Or (RB(At+1)<>Ord('S')) Or (RB(At+2)<>Ord('S')) Or (RB(At+3)<>Ord('E')) Then Begin F1Why:=2; FreeMem(Buf,Size+16); Exit; End;
+   If RB(3)=4 Then N:=(RB(At+4) Shl 21) Or (RB(At+5) Shl 14) Or (RB(At+6) Shl 7) Or RB(At+7)
+   Else N:=RB32(At+4);
+   Inc(At,10+N);
+  End;
+  Pos:=10+Tag;
+ End;
+ { fin: etiquette ID3v1 -> non support }
+ If (Size>128) And (RB(Size-128)=84) And (RB(Size-127)=65) And (RB(Size-126)=71) Then Begin F1Why:=3; FreeMem(Buf,Size+16); Exit; End;
+ { trame d'en-tete Xing/Info/VBRI }
+ FStart:=Pos; TagFr:=0; TagFilesz:=0; StartPad:=0; EndPad:=0; Cbr:=0; EncOk:=False; HasLame:=0; SkipTag:=0;
+ FSz:=Parse(Pos,Ver,Lsf,Sr,Ch,FBr);
+ If FSz=0 Then Begin F1Why:=4; FreeMem(Buf,Size+16); Exit; End;
+ Spf:=Spfv(Lsf);
+ Mono:=Ord(Ch=1);
+ If Lsf<>0 Then Begin If Mono<>0 Then I:=9 Else I:=17; End Else Begin If Mono<>0 Then I:=17 Else I:=32; End;
+ K:=Pos+4+I;
+ If (RB32(K)=$58696E67) Or (RB32(K)=$496E666F) Then Begin { Xing / Info }
+  Cbr:=Ord(RB32(K)=$496E666F);
+  N:=RB32(K+4); J:=K+8;
+  If (N And 1)<>0 Then Begin TagFr:=RB32(J); Inc(J,4); End;
+  If (N And 2)<>0 Then Begin TagFilesz:=RB32(J); Inc(J,4); End;
+  If TagFilesz<>0 Then Begin
+   B2:=Size-(Pos+4); Bv:=TagFilesz; If B2<Bv Then Err:=B2 Else Err:=Bv;
+   If (B2>Bv) And (B2-Bv>(Err Shr 4)) Then TagFr:=0;
+  End;
+  If (N And 4)<>0 Then Inc(J,100);
+  If (N And 8)<>0 Then Inc(J,4);
+  { version de l'encodeur }
+  FillChar(Enc,SizeOf(Enc),0); For I:=0 To 8 Do Enc[I]:=RB(J+I);
+  Inc(J,9+1+1+4+2+2+1+1);
+  N:=(RB(J) Shl 16) Or (RB(J+1) Shl 8) Or RB(J+2);
+  If (Enc[0]=Ord('L')) And (((Enc[1]=Ord('A')) And (Enc[2]=Ord('M')) And (Enc[3]=Ord('E'))) Or ((Enc[1]=Ord('a')) And (Enc[2]=Ord('v')) And ((Enc[3]=Ord('f')) Or (Enc[3]=Ord('c'))))) Then Begin
+   HasLame:=1; StartPad:=N Shr 12; EndPad:=N And 4095;
+  End;
+  Inc(J,3+1+1+2+4+2);
+  { CRC de l'etiquette : de l'en-tete de trame jusqu'ici }
+  Crc:=0; For I:=Pos To J-1 Do Crc:=CrcUpd(Crc,Buf^[I]);
+  EncOk:=(Crc=RB(J)*256+RB(J+1));
+  If (TagFr<>0) Or (TagFilesz<>0) Then SkipTag:=1;
+ End Else If RB32(Pos+4+32)=$56425249 Then Begin
+  F1Why:=5; FreeMem(Buf,Size+16); Exit; { VBRI : non support }
+ End;
+ ParBr:=0;
+ If SkipTag<>0 Then Begin
+  If (TagFilesz<>0) And (TagFr<>0) And (Cbr=0) Then
+   ParBr:=(Int64(TagFilesz)*8*Sr+(Int64(TagFr)*Spf) Div 2) Div (Int64(TagFr)*Spf)
+  Else ParBr:=0;
+  { le debit des fichiers Info (CBR) vient du premier paquet decode }
+  Pos:=Pos+FSz;
+ End Else Begin StartPad:=0; EndPad:=0; HasLame:=0; End;
+ { saut des octets parasites avant la premiere trame }
+ I:=0; While (Pos+I<Size) And (Parse(Pos+I,Ver,Lsf,Sr,Ch,FBr)=0) Do Inc(I);
+ If I>65535 Then Begin F1Why:=6; FreeMem(Buf,Size+16); Exit; End;
+ If Pos+I>=Size Then Begin F1Why:=7; FreeMem(Buf,Size+16); Exit; End;
+ Inc(Pos,I);
+ FSz:=Parse(Pos,Ver,Lsf,Sr,Ch,FBr); Spf:=Spfv(Lsf); Mono:=Ord(Ch=1);
+ If ParBr=0 Then ParBr:=FBr*1000;
+ If SkipTag<>0 Then Begin
+  If (Ver=0) Then Begin End;
+ End;
+ PackStart:=Pos;
+ { premier passage : comptage des paquets, table des sacs, CRC }
+ NPk:=0; Total:=0; AudioSize:=0; InitBr:=0; VbrFlag:=0; Want:=1; Seen:=0; BPos:=0; AudioCrc:=0;
+ { construction de la trame Xing }
+ { debit le plus proche }
+ BestErr:=MaxLongInt; BestIdx:=-1;
+ For I:=1 To 14 Do Begin
+  If Ver=3 Then B2:=BrM1[I]*1000 Else B2:=BrM2[I]*1000;
+  Err:=Abs(B2-ParBr);
+  If Err<BestErr Then Begin BestErr:=Err; BestIdx:=I; End;
+ End;
+ { en-tete factice }
+ Srate:=0; While (Srate<3) And (Not ((Sr=Freq3[Srate]) Or (Sr=Freq3[Srate] Div 2) Or (Sr=Freq3[Srate] Div 4))) Do Inc(Srate);
+ If Srate=3 Then Begin F1Why:=8; FreeMem(Buf,Size+16); Exit; End;
+ { choix de la version selon la frequence }
+ If Sr=Freq3[Srate] Then Ver:=3 Else If Sr=Freq3[Srate] Div 2 Then Ver:=2 Else Ver:=0;
+ Lsf:=Ord(Ver<>3);
+ Hdr:=0; XFrameSize:=0;
+ I:=BestIdx;
+ While True Do Begin
+  If I=15 Then Begin F1Why:=9; FreeMem(Buf,Size+16); Exit; End;
+  If Ver=3 Then B2:=BrM1[I] Else B2:=BrM2[I];
+  FSz:=(B2*144000) Div (Sr Shl Lsf);
+  If Lsf<>0 Then Begin If Mono<>0 Then XOff:=9 Else XOff:=17; End Else Begin If Mono<>0 Then XOff:=17 Else XOff:=32; End;
+  Inc(XOff,4);
+  If XOff+156<=FSz Then Break;
+  Inc(I);
+ End;
+ XFrameSize:=FSz;
+ FillChar(Xs,SizeOf(Xs),0);
+ Xs[0]:=255; Xs[1]:=$E0 Or (Ver Shl 3) Or 3; Xs[2]:=(I Shl 4) Or (Srate Shl 2); Xs[3]:=(Ord(Mono<>0) Or 0)*192;
+ If Mono=0 Then Xs[3]:=0;
+ Xs[XOff]:=88; Xs[XOff+1]:=105; Xs[XOff+2]:=110; Xs[XOff+3]:=103;
+ Xs[XOff+7]:=15;
+ For J:=0 To 99 Do Xs[XOff+16+J]:=(255*J) Div 100;
+ { chaine de l'encodeur }
+ If EncOk Then Begin For J:=0 To 8 Do Xs[XOff+120+J]:=Enc[J]; End Else Begin Xs[XOff+120]:=76; Xs[XOff+121]:=97; Xs[XOff+122]:=118; Xs[XOff+123]:=102; End;
+ XSize:=XFrameSize;
+ { parcours des trames }
+ Pos:=PackStart; Delay:=0; Padding:=0; Firsts:=True;
+ Fd:=0; Ld:=0;
+ If (HasLame<>0) And (TagFr<>0) Then Begin Fd:=-EndPad+529+TagFr*Spf; Ld:=TagFr*Spf; End;
+ While True Do Begin
+  FSz:=Parse(Pos,Hdr,K,J,N,B2);
+  If Pos>=Size Then Break;
+  If FSz=0 Then Begin F1Why:=12; FreeMem(Buf,Size+16); Exit; End;
+  If Pos+FSz>Size Then FSz:=Size-Pos;
+  { couche / frequence / canaux constants sinon non support }
+  If (J<>Sr) Or (N<>Ch) Then Begin F1Why:=10; FreeMem(Buf,Size+16); Exit; End;
+  If InitBr=0 Then InitBr:=B2;
+  If (B2=0) Or (InitBr<>B2) Then VbrFlag:=1;
+  { table des sacs }
+  Inc(NPk); Inc(Seen); Inc(XSize,FSz);
+  If Want=Seen Then Begin
+   Bag[BPos]:=XSize; Inc(BPos);
+   If BPos=400 Then Begin
+    I:=1; While I<400 Do Begin Bag[I Shr 1]:=Bag[I]; Inc(I,2); End;
+    Want:=Want*2; BPos:=200;
+   End;
+   Seen:=0;
+  End;
+  Inc(AudioSize,FSz);
+  For I:=Pos To Pos+FSz-1 Do AudioCrc:=CrcUpd(AudioCrc,Buf^[I]);
+  { donnees annexes saut/rognage }
+  Smp:=(NPk-1)*Spf; Disc:=0;
+  If Fd<>0 Then Begin
+   If (Smp+Spf>=Fd) And (Smp<Ld) Then Begin Disc:=Smp+Spf-Fd; If Disc>Spf Then Disc:=Spf; End;
+  End;
+  If (HasLame<>0) And (NPk=1) Then K:=StartPad+529 Else K:=0;
+  If (K<>0) Or (Disc<>0) Then Begin
+   Padding:=Disc+529; If Padding<0 Then Padding:=0;
+   If (Delay=0) And (K<>0) Then Delay:=K-529;
+  End Else Padding:=0;
+  Inc(Pos,FSz);
+ End;
+ If NPk=0 Then Begin F1Why:=11; FreeMem(Buf,Size+16); Exit; End;
+ { mise a jour de la trame Xing }
+ If VbrFlag=0 Then Begin Xs[XOff]:=73; Xs[XOff+1]:=110; Xs[XOff+2]:=102; Xs[XOff+3]:=111; End;
+ W32(XOff+8,NPk); W32(XOff+12,XSize);
+ Xs[XOff+16]:=0;
+ For I:=1 To 99 Do Begin
+  J:=I*BPos Div 100;
+  Sgn:=(Int64(256)*Bag[J]) Div XSize;
+  If Sgn>255 Then Sgn:=255;
+  Xs[XOff+16+I]:=Sgn;
+ End;
+ If Delay>=4096 Then Delay:=4095; If Padding>=4096 Then Padding:=4095;
+ N:=(Delay Shl 12)+Padding;
+ Xs[XOff+141]:=(N Shr 16) And 255; Xs[XOff+142]:=(N Shr 8) And 255; Xs[XOff+143]:=N And 255;
+ Inc(AudioSize,XFrameSize);
+ W32(XOff+156-8,AudioSize);
+ Xs[XOff+156-4]:=AudioCrc Shr 8; Xs[XOff+156-3]:=AudioCrc And 255;
+ Crc:=0; For I:=0 To 189 Do Crc:=CrcUpd(Crc,Xs[I]);
+ Xs[XOff+156-2]:=Crc Shr 8; Xs[XOff+156-1]:=Crc And 255;
+ { ecriture : ID3v2.4 TSSE, trame Xing, trames audio }
+ OpenWrite(Target);
+ FillChar(ID,SizeOf(ID),0);
+ ID[0]:=73; ID[1]:=68; ID[2]:=51; ID[3]:=4; ID[9]:=35;
+ ID[6]:=0; ID[7]:=0; ID[8]:=0;
+ ID[10]:=84; ID[11]:=83; ID[12]:=83; ID[13]:=69; ID[17]:=15; ID[20]:=3;
+ For I:=1 To 13 Do ID[20+I]:=Ord(LavfId[I]);
+ WriteBytes(ID,45);
+ WriteBytes(Xs,XFrameSize);
+ Pos:=PackStart;
+ For I:=1 To NPk Do Begin
+  FSz:=Parse(Pos,Hdr,K,J,N,B2); If Pos+FSz>Size Then FSz:=Size-Pos;
+  WriteBytes(Buf^[Pos],FSz); Inc(Pos,FSz);
+ End;
+ CloseWrite;
+ FreeMem(Buf,Size+16);
+ F1Mp3Copy:=True;
+End;
 { ======== F1 : Westwood AUD (libavformat/westwood_audenc.c + adpcm_ima_ws de libavcodec/adpcmenc.c) ======== }
 Procedure F1MuxWsaud(Const Wav16,Target: String);
 Const
@@ -101591,6 +102615,1618 @@ End;
 Procedure F1Ac3HalfDbg(Var X: Array of Single; N: LongInt; Var Y: Array of Single);
 Begin
  F1Ac3Half(X,N,Y);
+End;
+{ ======== F1 : encodeur AC-3 flottant (libavcodec/ac3enc.c, ac3enc_template.c, ac3enc_float.c, ac3.c, ac3dsp.c, kbdwin.c) ======== }
+Const
+ AQLogAdd: Array[0..259] Of LongInt=(
+64,63,62,61,60,59,58,57,56,55,54,53,52,52,51,50,
+49,48,47,47,46,45,44,44,43,42,41,41,40,39,38,38,
+37,36,36,35,35,34,33,33,32,32,31,30,30,29,29,28,
+28,27,27,26,26,25,25,24,24,23,23,22,22,21,21,21,
+20,20,19,19,19,18,18,18,17,17,17,16,16,16,15,15,
+15,14,14,14,13,13,13,13,12,12,12,12,11,11,11,11,
+10,10,10,10,10,9,9,9,9,9,8,8,8,8,8,8,
+7,7,7,7,7,7,6,6,6,6,6,6,6,6,5,5,
+5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,
+4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,
+2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,
+2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+0,0,0,0);
+ AQHear: Array[0..149] Of LongInt=(
+1232,1264,1408,1232,1264,1408,1088,1120,1200,1024,1040,1104,992,992,1056,960,
+976,1008,944,960,992,944,944,976,928,944,960,928,928,944,928,928,
+944,928,928,944,928,928,928,912,928,928,912,912,928,912,912,928,
+896,912,928,896,896,928,880,896,928,880,896,928,864,880,912,864,
+880,912,848,864,912,848,864,912,832,848,896,832,848,896,816,832,
+896,800,832,880,784,800,864,768,784,848,752,768,832,752,752,816,
+752,752,800,752,752,784,768,752,768,784,768,752,832,800,752,912,
+848,752,992,912,768,1056,992,784,1120,1056,816,1168,1104,848,1184,1184,
+960,1120,1168,1040,1088,1120,1136,1088,1088,1184,1312,1152,1120,2048,1584,1088,
+2112,2112,1104,2112,2112,1248);
+ AQBandStart: Array[0..50] Of LongInt=(
+0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,
+16,17,18,19,20,21,22,23,24,25,26,27,28,31,34,37,
+40,43,46,49,55,61,67,73,79,85,97,109,121,133,157,181,
+205,229,253);
+ AQBinBand: Array[0..252] Of LongInt=(
+0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,
+16,17,18,19,20,21,22,23,24,25,26,27,28,28,28,29,
+29,29,30,30,30,31,31,31,32,32,32,33,33,33,34,34,
+34,35,35,35,35,35,35,36,36,36,36,36,36,37,37,37,
+37,37,37,38,38,38,38,38,38,39,39,39,39,39,39,40,
+40,40,40,40,40,41,41,41,41,41,41,41,41,41,41,41,
+41,42,42,42,42,42,42,42,42,42,42,42,42,43,43,43,
+43,43,43,43,43,43,43,43,43,44,44,44,44,44,44,44,
+44,44,44,44,44,45,45,45,45,45,45,45,45,45,45,45,
+45,45,45,45,45,45,45,45,45,45,45,45,45,46,46,46,
+46,46,46,46,46,46,46,46,46,46,46,46,46,46,46,46,
+46,46,46,46,46,47,47,47,47,47,47,47,47,47,47,47,
+47,47,47,47,47,47,47,47,47,47,47,47,47,48,48,48,
+48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,
+48,48,48,48,48,49,49,49,49,49,49,49,49,49,49,49,
+49,49,49,49,49,49,49,49,49,49,49,49,49);
+ AQFrmTab: Array[0..113] Of LongInt=(
+64,69,96,64,70,96,80,87,120,80,88,120,96,104,144,96,
+105,144,112,121,168,112,122,168,128,139,192,128,140,192,160,174,
+240,160,175,240,192,208,288,192,209,288,224,243,336,224,244,336,
+256,278,384,256,279,384,320,348,480,320,349,480,384,417,576,384,
+418,576,448,487,672,448,488,672,512,557,768,512,558,768,640,696,
+960,640,697,960,768,835,1152,768,836,1152,896,975,1344,896,976,1344,
+1024,1114,1536,1024,1115,1536,1152,1253,1728,1152,1254,1728,1280,1393,1920,1280,
+1394,1920);
+ AQBrTab: Array[0..18] Of LongInt=(
+32,40,48,56,64,80,96,112,128,160,192,224,256,320,384,448,
+512,576,640);
+ AQBapTab: Array[0..63] Of LongInt=(
+0,1,1,1,1,1,2,2,3,3,3,4,4,5,5,6,
+6,6,6,7,7,7,7,8,8,8,8,9,9,9,9,10,
+10,10,10,11,11,11,11,12,12,12,12,13,13,13,13,14,
+14,14,14,14,14,14,14,15,15,15,15,15,15,15,15,15);
+ AQBandwidth: Array[0..284] Of LongInt=(
+0,0,0,12,16,32,48,48,48,48,48,48,48,48,48,48,
+48,48,48,0,0,0,16,20,36,56,56,56,56,56,56,56,
+56,56,56,56,56,56,0,0,0,32,40,60,60,60,60,60,
+60,60,60,60,60,60,60,60,60,0,0,0,0,0,0,0,
+20,24,32,48,48,48,48,48,48,48,48,48,0,0,0,0,
+0,0,4,24,28,36,56,56,56,56,56,56,56,56,56,0,
+0,0,0,0,0,20,44,52,60,60,60,60,60,60,60,60,
+60,60,0,0,0,0,0,0,0,0,0,16,24,32,40,48,
+48,48,48,48,48,0,0,0,0,0,0,0,0,4,20,28,
+36,44,56,56,56,56,56,56,0,0,0,0,0,0,0,0,
+20,40,48,60,60,60,60,60,60,60,60,0,0,0,0,0,
+0,0,0,0,0,12,24,32,48,48,48,48,48,48,0,0,
+0,0,0,0,0,0,0,0,16,28,36,56,56,56,56,56,
+56,0,0,0,0,0,0,0,0,0,0,32,48,60,60,60,
+60,60,60,60,0,0,0,0,0,0,0,0,0,0,0,8,
+20,32,40,48,48,48,48,0,0,0,0,0,0,0,0,0,
+0,0,12,24,36,44,56,56,56,56,0,0,0,0,0,0,
+0,0,0,0,0,28,44,60,60,60,60,60,60);
+ AQCplStart: Array[0..341] Of LongInt=(
+0,0,0,0,0,0,0,1,1,7,8,11,12,-1,-1,-1,
+-1,-1,-1,0,0,0,0,0,0,1,3,5,7,10,12,13,
+-1,-1,-1,-1,-1,-1,0,0,0,0,1,2,2,9,13,15,
+-1,-1,-1,-1,-1,-1,-1,-1,-1,0,0,0,0,0,0,0,
+0,2,2,6,9,11,12,13,-1,-1,-1,-1,0,0,0,0,
+0,0,0,0,2,2,6,9,11,12,13,-1,-1,-1,-1,-1,
+-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+-1,-1,0,0,0,0,0,0,0,0,2,2,6,9,11,12,
+13,-1,-1,-1,-1,0,0,0,0,0,0,0,0,2,2,6,
+9,11,12,13,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,0,0,0,0,0,
+0,0,0,0,0,3,2,10,11,11,12,12,14,-1,0,0,
+0,0,0,0,0,0,0,0,3,2,10,11,11,12,12,14,
+-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+-1,-1,-1,-1,0,0,0,0,0,0,0,0,0,0,3,2,
+10,11,11,12,12,14,-1,0,0,0,0,0,0,0,0,0,
+0,3,2,10,11,11,12,12,14,-1,-1,-1,-1,-1,-1,-1,
+-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,0,0,0,
+0,0,0,0,0,0,0,0,1,6,8,11,12,12,-1,-1,
+0,0,0,0,0,0,0,0,0,0,0,1,6,8,11,12,
+12,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+-1,-1,-1,-1,-1,-1);
+
+Const
+ AQEacExpStr: Array[0..31,0..5] Of Byte=(
+  (1,0,0,0,0,0),
+  (1,0,0,0,0,3),
+  (1,0,0,0,2,0),
+  (1,0,0,0,3,3),
+  (2,0,0,2,0,0),
+  (2,0,0,2,0,3),
+  (2,0,0,3,2,0),
+  (2,0,0,3,3,3),
+  (2,0,1,0,0,0),
+  (2,0,2,0,0,3),
+  (2,0,2,0,2,0),
+  (2,0,2,0,3,3),
+  (2,0,3,2,0,0),
+  (2,0,3,2,0,3),
+  (2,0,3,3,2,0),
+  (2,0,3,3,3,3),
+  (3,1,0,0,0,0),
+  (3,1,0,0,0,3),
+  (3,2,0,0,2,0),
+  (3,2,0,0,3,3),
+  (3,2,0,2,0,0),
+  (3,2,0,2,0,3),
+  (3,2,0,3,2,0),
+  (3,2,0,3,3,3),
+  (3,3,1,0,0,0),
+  (3,3,2,0,0,3),
+  (3,3,2,0,2,0),
+  (3,3,2,0,3,3),
+  (3,3,3,2,0,0),
+  (3,3,3,2,0,3),
+  (3,3,3,3,2,0),
+  (3,3,3,3,3,3));
+ AQBessP1: Array[0..14] Of Double=(
+  -2.2335582639474375249e+15,-5.5050369673018427753e+14,-3.2940087627407749166e+13,-8.4925101247114157499e+11,
+  -1.1912746104985237192e+10,-1.0313066708737980747e+08,-5.9545626019847898221e+05,-2.4125195876041896775e+03,
+  -7.0935347449210549190e+00,-1.5453977791786851041e-02,-2.5172644670688975051e-05,-3.0517226450451067446e-08,
+  -2.6843448573468483278e-11,-1.5982226675653184646e-14,-5.2487866627945699800e-18);
+ AQBessQ1: Array[0..5] Of Double=(
+  -2.2335582639474375245e+15,7.8858692566751002988e+12,-1.2207067397808979846e+10,1.0377081058062166144e+07,
+  -4.8527560179962773045e+03,1.0);
+ AQBessP2: Array[0..6] Of Double=(
+  -2.2210262233306573296e-04,1.3067392038106924055e-02,-4.4700805721174453923e-01,5.5674518371240761397e+00,
+  -2.3517945679239481621e+01,3.1611322818701131207e+01,-9.6090021968656180000e+00);
+ AQBessQ2: Array[0..7] Of Double=(
+  -5.5194330231005480228e-04,3.2547697594819615062e-02,-1.1151759188741312645e+00,1.3982595353892851542e+01,
+  -6.0228002066743340583e+01,8.5539563258012929600e+01,-3.1446690275135491500e+01,1.0);
+ AQRematTab: Array[0..4] Of LongInt=(13,25,37,61,253);
+ AQCplBandStruct: Array[0..17] Of LongInt=(0,0,0,0,0,0,0,0,1,0,1,1,0,1,1,1,1,1);
+ AQSlowDecay: Array[0..3] Of LongInt=($0f,$11,$13,$15);
+ AQFastDecay: Array[0..3] Of LongInt=($3f,$53,$67,$7b);
+ AQSlowGain: Array[0..3] Of LongInt=($540,$4d8,$478,$410);
+ AQDbPerBit: Array[0..3] Of LongInt=($000,$700,$900,$b00);
+ AQFloorTab: Array[0..7] Of LongInt=($2f0,$2b0,$270,$230,$1f0,$170,$0f0,-2048);
+ AQFastGain: Array[0..7] Of LongInt=($080,$100,$180,$200,$280,$300,$380,$400);
+ AQBapBits: Array[0..15] Of LongInt=(0,0,0,3,0,4,5,6,7,8,9,10,11,12,14,16);
+ AQRates: Array[0..2] Of LongInt=(48000,44100,32000);
+ AQChanMap: Array[0..7,0..1,0..5] Of Byte=(
+  ((0,1,0,0,0,0),(0,1,2,0,0,0)), ((0,0,0,0,0,0),(0,1,0,0,0,0)), ((0,1,0,0,0,0),(0,1,2,0,0,0)), ((0,2,1,0,0,0),(0,2,1,3,0,0)),
+  ((0,1,2,0,0,0),(0,1,3,2,0,0)), ((0,2,1,3,0,0),(0,2,1,4,3,0)), ((0,1,2,3,0,0),(0,1,3,4,2,0)), ((0,2,1,3,4,0),(0,2,1,4,5,3)));
+Type
+ TAQBytes=Array[0..65535] Of Byte;
+ TAQRowS=Array[0..255] Of Single;
+ TAQRowI=Array[0..255] Of LongInt;
+ TAQRowB=Array[0..255] Of Byte;
+ TAQRow16=Array[0..255] Of SmallInt;
+Var
+ AQCoef: Array[0..6,0..5] Of TAQRowS;
+ AQFix: Array[0..6,0..5] Of TAQRowI;
+ AQExp: Array[0..6,0..5] Of TAQRowB;
+ AQGrp: Array[0..6,0..5,0..127] Of Byte;
+ AQPsd: Array[0..6,0..5] Of TAQRow16;
+ AQBPsd,AQMask: Array[0..6,0..5,0..63] Of SmallInt;
+ AQQmant: Array[0..6,0..5] Of TAQRowI;
+ AQCplExp,AQCplMant: Array[0..6,0..5,0..15] Of LongInt;
+ AQBap: Array[0..6,0..5] Of TAQRowB;
+ AQNewRemat,AQNumRemat: Array[0..5] Of LongInt;
+ AQRematFlags: Array[0..5,0..3] Of LongInt;
+ AQNewCplStr,AQCplInUse,AQNumCplCh,AQNewSnr,AQNewLeak: Array[0..5] Of LongInt;
+ AQChInCpl,AQNewCoords,AQMasterExp: Array[0..5,0..6] Of LongInt;
+ AQEndFreq: Array[0..5,0..6] Of LongInt;
+ AQExpStrat,AQExpRef: Array[0..6,0..5] Of LongInt;
+ AQExpGroup: Array[0..1,0..2,0..255] Of Byte;
+ AQPlanar: Array[0..5] Of Array[0..1791] Of Single;
+ AQWin: Array[0..255] Of Single;
+ AQMd: TVGMdct;
+ AQNB,AQCh,AQFbw,AQLfe,AQLfeCh,AQMode,AQHasCenter,AQHasSurr,AQRateHz,AQSr,AQSrShift,AQBitRate: LongInt;
+ AQFrameSize,AQFrameMin,AQFrameCode,AQBwCode,AQCplEnd,AQCplOn,AQCplEnabled,AQNumSub,AQNumBands,AQRematEn: LongInt;
+ AQBitsW,AQSampW: Int64;
+ AQCrcInv: Array[0..1] Of LongInt;
+ AQStart: Array[0..6] Of LongInt;
+ AQCplSizes: Array[0..17] Of LongInt;
+ AQSlowD,AQFastD,AQSlowG,AQDbpb,AQFloor,AQCplFastLeak,AQCplSlowLeak: LongInt;
+ AQCoarse: LongInt; AQFineO,AQFastGC: Array[0..6] Of LongInt;
+ AQFrameBitsFixed,AQFrameBits,AQExpBits: LongInt;
+ AQChMap: Array[0..5] Of LongInt;
+ AQEac3,AQNumBlksCode,AQUseFrmExp,AQBsId,AQFrameNum: LongInt; AQFrmExpStr: Array[0..6] Of LongInt;
+ AQOutBuf: PEABuffer; AQOutPos,AQOutBits: LongInt; AQOutAcc: Int64;
+
+Function AQSar(V: Int64; N: LongInt): Int64;
+Begin If V>=0 Then AQSar:=V Shr N Else AQSar:=-((-V-1) Shr N)-1; End;
+
+Function AQLog2(V: LongInt): LongInt;
+Var R: LongInt;
+Begin R:=0; If V<=0 Then Begin AQLog2:=0; Exit; End; While V>1 Do Begin V:=V Shr 1; Inc(R); End; AQLog2:=R; End;
+
+Function AQEvalPoly(Const C: Array Of Double; Size: LongInt; X: Double): Double;
+Var Sum: Double; I: LongInt;
+Begin
+ Sum:=C[Size-1];
+ For I:=Size-2 DownTo 0 Do Begin Sum:=Sum*X; Sum:=Sum+C[I]; End;
+ AQEvalPoly:=Sum;
+End;
+
+Function AQBesselI0(X: Double): Double;
+Var Y,R,Factor: Double;
+Begin
+ If X=0 Then Begin AQBesselI0:=1.0; Exit; End;
+ X:=Abs(X);
+ If X<=15 Then Begin
+  Y:=X*X;
+  AQBesselI0:=AQEvalPoly(AQBessP1,15,Y)/AQEvalPoly(AQBessQ1,6,Y);
+ End Else Begin
+  Y:=1/X-1.0/15;
+  R:=AQEvalPoly(AQBessP2,7,Y)/AQEvalPoly(AQBessQ2,8,Y);
+  Factor:=Exp(X)/Sqrt(X);
+  AQBesselI0:=Factor*R;
+ End;
+End;
+
+Const AQPiD: Double=3.14159265358979323846;
+Procedure AQKbd(Alpha: Single; N: LongInt);
+Var I: LongInt; Sum,Tmp,Scale,Alpha2,Al: Double; Temp: Array[0..128] Of Double;
+Begin
+ Al:=Alpha;
+ Sum:=0.0; Scale:=0.0;
+ Alpha2:=4*(Al*AQPiD/N)*(Al*AQPiD/N);
+ For I:=0 To N Div 2 Do Begin
+  Tmp:=Alpha2*I*(N-I);
+  Temp[I]:=AQBesselI0(Sqrt(Tmp));
+  If (I<>0) And (I<N Div 2) Then Scale:=Scale+Temp[I]*2 Else Scale:=Scale+Temp[I]*1;
+ End;
+ Scale:=1.0/(Scale+1);
+ For I:=0 To N Div 2 Do Begin
+  Sum:=Sum+Temp[I];
+  AQWin[I]:=Sqrt(Sum*Scale);
+ End;
+ For I:=N Div 2+1 To N-1 Do Begin
+  Sum:=Sum+Temp[N-I];
+  AQWin[I]:=Sqrt(Sum*Scale);
+ End;
+End;
+
+{ ---- MDCT directe flottante (ff_tx_mdct_fwd, echelle -2/512) ---- }
+Procedure AQMdctInit;
+Var H,I,Lg,K: LongInt; Theta,Alpha,Sc,Dv: Double;
+Begin
+ H:=128; Lg:=VGLog2(H);
+ For K:=3 To Lg Do VGTabInit(K);
+ AQMd.Len:=256; AQMd.Half:=H; AQMd.Inv:=False;
+ GetMem(AQMd.Map,H*4+8);
+ For I:=0 To H-1 Do AQMd.Map^[(-VGSplit(I,H,0)) And (H-1)]:=I;
+ GetMem(AQMd.ExpRe,H*4+8); GetMem(AQMd.ExpIm,H*4+8);
+ Sc:=-2.0/512; Theta:=(H)+1.0/8.0; Sc:=Sqrt(Abs(Sc));
+ For I:=0 To H-1 Do Begin
+  Alpha:=VGPi2*(I+Theta)/H;
+  Dv:=Cos(Alpha)*Sc; AQMd.ExpRe^[I]:=Dv;
+  Dv:=Sin(Alpha)*Sc; AQMd.ExpIm^[I]:=Dv;
+ End;
+ AQMd.Ready:=True;
+End;
+
+Procedure AQMdctFwd(Src,Dst: PVGS);
+Var M: ^TVGMdct; L2,L3,L4,I,K,Idx,I0,I1: LongInt; TRe,TIm,S0r,S0i,S1r,S1i: Single;
+Begin
+ M:=@AQMd; L2:=M^.Half; L4:=M^.Len Shr 2; L3:=L2*3;
+ VGZ:=PVGCx(Dst);
+ For I:=0 To L2-1 Do Begin
+  K:=2*I; Idx:=M^.Map^[I];
+  If K<L2 Then Begin
+   TRe:=(-Src^[L2+K])+Src^[L2-1-K];
+   TIm:=(-Src^[L3+K])+(-Src^[L3-1-K]);
+  End Else Begin
+   TRe:=(-Src^[L2+K])+(-Src^[5*L2-1-K]);
+   TIm:=Src^[K-L2]+(-Src^[L3-1-K]);
+  End;
+  VGZ^[Idx].Im:=TRe*M^.ExpRe^[I]-TIm*M^.ExpIm^[I];
+  VGZ^[Idx].Re:=TRe*M^.ExpIm^[I]+TIm*M^.ExpRe^[I];
+ End;
+ VGFft(L2,0,VGLog2(L2));
+ For I:=0 To L4-1 Do Begin
+  I0:=L4+I; I1:=L4-I-1;
+  S1r:=VGZ^[I1].Re; S1i:=VGZ^[I1].Im; S0r:=VGZ^[I0].Re; S0i:=VGZ^[I0].Im;
+  VGZ^[I1].Im:=S0r*M^.ExpIm^[I0]-S0i*M^.ExpRe^[I0];
+  VGZ^[I0].Re:=S0r*M^.ExpRe^[I0]+S0i*M^.ExpIm^[I0];
+  VGZ^[I0].Im:=S1r*M^.ExpIm^[I1]-S1i*M^.ExpRe^[I1];
+  VGZ^[I1].Re:=S1r*M^.ExpRe^[I1]+S1i*M^.ExpIm^[I1];
+ End;
+End;
+
+{ ---- ecriture de bits ---- }
+Procedure AQPut(N: LongInt; V: Int64);
+Begin
+ If N<=0 Then Exit;
+ V:=V And ((Int64(1) Shl N)-1);
+ AQOutAcc:=(AQOutAcc Shl N) Or V; Inc(AQOutBits,N);
+ While AQOutBits>=8 Do Begin
+  AQOutBuf^[AQOutPos]:=(AQOutAcc Shr (AQOutBits-8)) And 255; Inc(AQOutPos); Dec(AQOutBits,8);
+ End;
+ AQOutAcc:=AQOutAcc And ((Int64(1) Shl AQOutBits)-1);
+End;
+
+{ ---- analyse psd / masque (ac3.c) ---- }
+Function AQMax(A,B: LongInt): LongInt;Begin If A>B Then AQMax:=A Else AQMax:=B; End;
+Function AQMin(A,B: LongInt): LongInt;Begin If A<B Then AQMin:=A Else AQMin:=B; End;
+
+Function AQLowComp1(A,B0,B1,C: LongInt): LongInt;
+Begin
+ If (B0+256)=B1 Then A:=C Else If B0>B1 Then A:=AQMax(A-64,0);
+ AQLowComp1:=A;
+End;
+
+Function AQLowComp(A,B0,B1,Bin: LongInt): LongInt;
+Begin
+ If Bin<7 Then AQLowComp:=AQLowComp1(A,B0,B1,384)
+ Else If Bin<20 Then AQLowComp:=AQLowComp1(A,B0,B1,320)
+ Else AQLowComp:=AQMax(A-128,0);
+End;
+
+Procedure AQCalcPsd(Var Ex: TAQRowB; Start,End_: LongInt; Var Psd: TAQRow16; Var BandPsd: Array Of SmallInt);
+Var Bin,Band,V,BandEnd,Mx,Adr: LongInt;
+Begin
+ For Bin:=Start To End_-1 Do Psd[Bin]:=3072-(LongInt(Ex[Bin]) Shl 7);
+ Bin:=Start; Band:=AQBinBand[Start];
+ Repeat
+  V:=Psd[Bin]; Inc(Bin);
+  BandEnd:=AQMin(AQBandStart[Band+1],End_);
+  While Bin<BandEnd Do Begin
+   Mx:=AQMax(V,Psd[Bin]);
+   Adr:=AQMin(Mx-((V+Psd[Bin]+1) Shr 1),255);
+   V:=Mx+AQLogAdd[Adr];
+   Inc(Bin);
+  End;
+  BandPsd[Band]:=V; Inc(Band);
+ Until End_<=AQBandStart[Band];
+End;
+
+Procedure AQCalcMask(Var BandPsd: Array Of SmallInt; Start,End_,FastGain: LongInt; IsLfe: Boolean; Var Mask: Array Of SmallInt);
+Var Excite: Array[0..49] Of LongInt; Band,BandStart,BandEnd,Begin_,End1,Lowcomp,Fastleak,Slowleak,Tmp: LongInt;
+Begin
+ BandStart:=AQBinBand[Start]; BandEnd:=AQBinBand[End_-1]+1;
+ Fastleak:=0; Slowleak:=0;
+ If BandStart=0 Then Begin
+  Lowcomp:=0;
+  Lowcomp:=AQLowComp1(Lowcomp,BandPsd[0],BandPsd[1],384);
+  Excite[0]:=BandPsd[0]-FastGain-Lowcomp;
+  Lowcomp:=AQLowComp1(Lowcomp,BandPsd[1],BandPsd[2],384);
+  Excite[1]:=BandPsd[1]-FastGain-Lowcomp;
+  Begin_:=7;
+  For Band:=2 To 6 Do Begin
+   If Not (IsLfe And (Band=6)) Then Lowcomp:=AQLowComp1(Lowcomp,BandPsd[Band],BandPsd[Band+1],384);
+   Fastleak:=BandPsd[Band]-FastGain;
+   Slowleak:=BandPsd[Band]-AQSlowG;
+   Excite[Band]:=Fastleak-Lowcomp;
+   If Not (IsLfe And (Band=6)) Then
+    If BandPsd[Band]<=BandPsd[Band+1] Then Begin Begin_:=Band+1; Break; End;
+  End;
+  End1:=AQMin(BandEnd,22);
+  For Band:=Begin_ To End1-1 Do Begin
+   If Not (IsLfe And (Band=6)) Then Lowcomp:=AQLowComp(Lowcomp,BandPsd[Band],BandPsd[Band+1],Band);
+   Fastleak:=AQMax(Fastleak-AQFastD,BandPsd[Band]-FastGain);
+   Slowleak:=AQMax(Slowleak-AQSlowD,BandPsd[Band]-AQSlowG);
+   Excite[Band]:=AQMax(Fastleak-Lowcomp,Slowleak);
+  End;
+  Begin_:=22;
+ End Else Begin
+  Begin_:=BandStart;
+  Fastleak:=(AQCplFastLeak Shl 8)+768;
+  Slowleak:=(AQCplSlowLeak Shl 8)+768;
+ End;
+ For Band:=Begin_ To BandEnd-1 Do Begin
+  Fastleak:=AQMax(Fastleak-AQFastD,BandPsd[Band]-FastGain);
+  Slowleak:=AQMax(Slowleak-AQSlowD,BandPsd[Band]-AQSlowG);
+  Excite[Band]:=AQMax(Fastleak,Slowleak);
+ End;
+ For Band:=BandStart To BandEnd-1 Do Begin
+  Tmp:=AQDbpb-BandPsd[Band];
+  If Tmp>0 Then Inc(Excite[Band],Tmp Shr 2);
+  Mask[Band]:=AQMax(AQHear[(Band Shr AQSrShift)*3+AQSr],Excite[Band]);
+ End;
+End;
+
+{ ---- exposants ---- }
+Procedure AQExpInit;
+Var ExpStr,I,GrpSize: LongInt;
+Begin
+ FillChar(AQExpGroup,SizeOf(AQExpGroup),0);
+ For ExpStr:=0 To 2 Do Begin
+  GrpSize:=3 Shl ExpStr;
+  For I:=12 To 255 Do Begin
+   AQExpGroup[0,ExpStr,I]:=(I+GrpSize-4) Div GrpSize;
+   AQExpGroup[1,ExpStr,I]:=I Div GrpSize;
+  End;
+ End;
+ AQExpGroup[0,0,7]:=2;
+End;
+
+Procedure AQExtractExponents;
+Var Ch,Blk,I,V,Ch0: LongInt;
+Begin
+ Ch0:=Ord(AQCplOn=0);
+ For Ch:=Ch0 To AQCh Do For Blk:=0 To AQNB-1 Do For I:=0 To 255 Do Begin
+  V:=Abs(AQFix[Ch,Blk,I]);
+  If V<>0 Then AQExp[Ch,Blk,I]:=23-AQLog2(V) Else AQExp[Ch,Blk,I]:=24;
+ End;
+End;
+
+Procedure AQComputeExpStrategy;
+Const Reuse3: Array[0..5] Of LongInt=(3,2,2,1,1,1);
+Var Ch,Blk,Blk1,I,ExpDiff,Fnd: LongInt;
+Begin
+ For Ch:=Ord(AQCplOn=0) To AQFbw Do Begin
+  AQExpStrat[Ch,0]:=1;
+  For Blk:=1 To AQNB-1 Do Begin
+   If Ch=0 Then Begin
+    If AQCplInUse[Blk-1]=0 Then Begin AQExpStrat[Ch,Blk]:=1; Continue; End
+    Else If AQCplInUse[Blk]=0 Then Begin AQExpStrat[Ch,Blk]:=0; Continue; End;
+   End Else If AQChInCpl[Blk,Ch]<>AQChInCpl[Blk-1,Ch] Then Begin AQExpStrat[Ch,Blk]:=1; Continue; End;
+   ExpDiff:=0;
+   For I:=0 To 255 Do ExpDiff:=ExpDiff+Abs(LongInt(AQExp[Ch,Blk,I])-AQExp[Ch,Blk-1,I]);
+   AQExpStrat[Ch,Blk]:=0;
+   If (Ch=0) And (ExpDiff>(500*(AQEndFreq[Blk,Ch]-AQStart[Ch]) Div 256)) Then AQExpStrat[Ch,Blk]:=1
+   Else If (Ch>0) And (ExpDiff>500) Then AQExpStrat[Ch,Blk]:=1;
+  End;
+  Blk:=0;
+  While Blk<AQNB Do Begin
+   Blk1:=Blk+1;
+   While (Blk1<AQNB) And (AQExpStrat[Ch,Blk1]=0) Do Inc(Blk1);
+   AQExpStrat[Ch,Blk]:=Reuse3[Blk1-Blk-1];
+   Blk:=Blk1;
+  End;
+ End;
+ If AQLfe<>0 Then Begin
+  Ch:=AQLfeCh;
+  AQExpStrat[Ch,0]:=1;
+  For Blk:=1 To AQNB-1 Do AQExpStrat[Ch,Blk]:=0;
+ End;
+ If AQEac3<>0 Then Begin
+  If AQNB<6 Then AQUseFrmExp:=0
+  Else Begin
+   AQUseFrmExp:=1;
+   For Ch:=Ord(AQCplOn=0) To AQFbw Do Begin
+    Fnd:=-1;
+    For Blk1:=0 To 31 Do
+     If (AQEacExpStr[Blk1,0]=AQExpStrat[Ch,0]) And (AQEacExpStr[Blk1,1]=AQExpStrat[Ch,1]) And (AQEacExpStr[Blk1,2]=AQExpStrat[Ch,2])
+      And (AQEacExpStr[Blk1,3]=AQExpStrat[Ch,3]) And (AQEacExpStr[Blk1,4]=AQExpStrat[Ch,4]) And (AQEacExpStr[Blk1,5]=AQExpStrat[Ch,5]) Then Begin Fnd:=Blk1; Break; End;
+    If Fnd<0 Then Begin AQUseFrmExp:=0; Break; End;
+    AQFrmExpStr[Ch]:=Fnd;
+   End;
+  End;
+ End;
+End;
+
+Procedure AQEncExpBlkCh(Var Ex: TAQRowB; Off,NbExps,Strat,Cpl: LongInt);
+Var NbGroups,I,K,EMin,E1: LongInt;
+Begin
+ NbGroups:=AQExpGroup[Cpl,Strat-1,NbExps]*3;
+ Case Strat Of
+  2: Begin
+   K:=1-Cpl;
+   For I:=1 To NbGroups Do Begin
+    EMin:=Ex[Off+K]; If Ex[Off+K+1]<EMin Then EMin:=Ex[Off+K+1];
+    Ex[Off+I-Cpl]:=EMin; Inc(K,2);
+   End;
+  End;
+  3: Begin
+   K:=1-Cpl;
+   For I:=1 To NbGroups Do Begin
+    EMin:=Ex[Off+K];
+    If Ex[Off+K+1]<EMin Then EMin:=Ex[Off+K+1];
+    If Ex[Off+K+2]<EMin Then EMin:=Ex[Off+K+2];
+    If Ex[Off+K+3]<EMin Then EMin:=Ex[Off+K+3];
+    Ex[Off+I-Cpl]:=EMin; Inc(K,4);
+   End;
+  End;
+ End;
+ If (Cpl=0) And (Ex[Off]>15) Then Ex[Off]:=15;
+ For I:=1 To NbGroups Do Ex[Off+I]:=AQMin(Ex[Off+I],Ex[Off+I-1]+2);
+ I:=NbGroups-1;
+ While I>=0 Do Begin
+  Ex[Off+I]:=AQMin(Ex[Off+I],Ex[Off+I+1]+2);
+  Dec(I);
+ End;
+ If Cpl<>0 Then Ex[Off-1]:=Ex[Off] And Not 1;
+ Case Strat Of
+  2: Begin
+   I:=NbGroups; K:=NbGroups*2-Cpl;
+   While I>0 Do Begin
+    E1:=Ex[Off+I-Cpl];
+    Ex[Off+K]:=E1; Dec(K); Ex[Off+K]:=E1; Dec(K);
+    Dec(I);
+   End;
+  End;
+  3: Begin
+   I:=NbGroups; K:=NbGroups*4-Cpl;
+   While I>0 Do Begin
+    E1:=Ex[Off+I-Cpl];
+    Ex[Off+K]:=E1; Ex[Off+K-1]:=E1; Ex[Off+K-2]:=E1; Ex[Off+K-3]:=E1;
+    Dec(K,4); Dec(I);
+   End;
+  End;
+ End;
+End;
+
+Procedure AQEncodeExponents;
+Var Ch,Blk,Blk1,Cpl,NbCoefs,NumReuse,I,J: LongInt; M: Byte;
+Begin
+ For Ch:=Ord(AQCplOn=0) To AQCh Do Begin
+  Cpl:=Ord(Ch=0);
+  Blk:=0;
+  While Blk<AQNB Do Begin
+   If (Cpl<>0) And (AQCplInUse[Blk]=0) Then Begin Inc(Blk); Continue; End;
+   NbCoefs:=AQEndFreq[Blk,Ch]-AQStart[Ch];
+   Blk1:=Blk+1;
+   AQExpRef[Ch,Blk]:=Blk;
+   While (Blk1<AQNB) And (AQExpStrat[Ch,Blk1]=0) Do Begin AQExpRef[Ch,Blk1]:=Blk; Inc(Blk1); End;
+   NumReuse:=Blk1-Blk-1;
+   If NumReuse>0 Then
+    For I:=0 To 255 Do Begin
+     M:=AQExp[Ch,Blk,I];
+     For J:=1 To NumReuse Do If AQExp[Ch,Blk+J,I]<M Then M:=AQExp[Ch,Blk+J,I];
+     AQExp[Ch,Blk,I]:=M;
+    End;
+   AQEncExpBlkCh(AQExp[Ch,Blk],AQStart[Ch],NbCoefs,AQExpStrat[Ch,Blk],Cpl);
+   Blk:=Blk1;
+  End;
+ End;
+End;
+
+Function AQCountExponentBits: LongInt;
+Var Blk,Ch,Strat,Cpl,NbCoefs,NbGroups,Bits: LongInt;
+Begin
+ Bits:=0;
+ For Blk:=0 To AQNB-1 Do
+  For Ch:=Ord(AQCplInUse[Blk]=0) To AQCh Do Begin
+   Strat:=AQExpStrat[Ch,Blk]; Cpl:=Ord(Ch=0);
+   NbCoefs:=AQEndFreq[Blk,Ch]-AQStart[Ch];
+   If Strat=0 Then Continue;
+   NbGroups:=AQExpGroup[Cpl,Strat-1,NbCoefs];
+   Inc(Bits,4+NbGroups*7);
+  End;
+ AQCountExponentBits:=Bits;
+End;
+
+Procedure AQGroupExponents;
+Var Blk,Ch,I,Cpl,GroupSize,NbGroups,P,Exp0,Exp1,D0,D1,D2,Strat: LongInt;
+Begin
+ For Blk:=0 To AQNB-1 Do
+  For Ch:=Ord(AQCplInUse[Blk]=0) To AQCh Do Begin
+   Strat:=AQExpStrat[Ch,Blk];
+   If Strat=0 Then Continue;
+   Cpl:=Ord(Ch=0);
+   GroupSize:=Strat; If Strat=3 Then GroupSize:=4;
+   NbGroups:=AQExpGroup[Cpl,Strat-1,AQEndFreq[Blk,Ch]-AQStart[Ch]];
+   P:=AQStart[Ch]-Cpl;
+   Exp1:=AQExp[Ch,Blk,P]; Inc(P);
+   AQGrp[Ch,Blk,0]:=Exp1;
+   For I:=1 To NbGroups Do Begin
+    Exp0:=Exp1; Exp1:=AQExp[Ch,Blk,P]; Inc(P,GroupSize); D0:=Exp1-Exp0+2;
+    Exp0:=Exp1; Exp1:=AQExp[Ch,Blk,P]; Inc(P,GroupSize); D1:=Exp1-Exp0+2;
+    Exp0:=Exp1; Exp1:=AQExp[Ch,Blk,P]; Inc(P,GroupSize); D2:=Exp1-Exp0+2;
+    AQGrp[Ch,Blk,I]:=((D0*5+D1)*5)+D2;
+   End;
+  End;
+End;
+
+{ ---- comptage des bits ---- }
+Procedure AQCountFrameBitsFixed;
+Const Inc_: Array[0..7] Of LongInt=(0,0,2,2,2,4,2,4);
+Var Blk,Bits: LongInt;
+Begin
+ Bits:=16;
+ If AQEac3<>0 Then Begin
+  Inc(Bits,35); Inc(Bits,1+1);
+  If AQNB<>6 Then Inc(Bits);
+  Inc(Bits);
+  If AQNB=6 Then Inc(Bits,2);
+  Inc(Bits,10);
+  If AQUseFrmExp<>0 Then Inc(Bits,5*AQFbw) Else Inc(Bits,AQNB*2*AQFbw);
+  If AQLfe<>0 Then Inc(Bits,AQNB);
+  If AQNumBlksCode<>3 Then Inc(Bits) Else Inc(Bits,AQFbw*5);
+  Inc(Bits,10);
+  If AQNB<>1 Then Inc(Bits);
+ End Else Begin
+  Inc(Bits,49); Inc(Bits,Inc_[AQMode]);
+ End;
+ For Blk:=0 To AQNB-1 Do Begin
+  If AQEac3=0 Then Begin Inc(Bits,AQFbw); Inc(Bits,AQFbw); End;
+  Inc(Bits);
+  If AQEac3<>0 Then Inc(Bits);
+  If AQEac3=0 Then Inc(Bits);
+  If AQEac3=0 Then Begin
+   Inc(Bits,2*AQFbw);
+   If AQLfe<>0 Then Inc(Bits);
+   Inc(Bits);
+   If Blk=0 Then Inc(Bits,2+2+2+2+3);
+  End;
+  Inc(Bits);
+  If AQEac3=0 Then Begin Inc(Bits); Inc(Bits); End;
+ End;
+ Inc(Bits);
+ Inc(Bits,1+16);
+ AQFrameBitsFixed:=Bits;
+End;
+
+Procedure AQCountFrameBits;
+Var Blk,Ch,Bits: LongInt;
+Begin
+ Bits:=0;
+ If AQEac3<>0 Then Begin
+  If AQMode>1 Then Begin
+   Inc(Bits);
+   For Blk:=1 To AQNB-1 Do Begin
+    Inc(Bits);
+    If AQNewCplStr[Blk]<>0 Then Inc(Bits);
+   End;
+  End;
+  If AQCplOn<>0 Then Begin
+   If AQUseFrmExp<>0 Then Inc(Bits,5)
+   Else For Blk:=0 To AQNB-1 Do Inc(Bits,2*AQCplInUse[Blk]);
+  End;
+ End;
+ For Blk:=0 To AQNB-1 Do Begin
+  If AQNewCplStr[Blk]<>0 Then Begin
+   If AQEac3=0 Then Inc(Bits);
+   If AQCplInUse[Blk]<>0 Then Begin
+    If AQEac3<>0 Then Inc(Bits);
+    If (AQEac3=0) Or (AQMode<>2) Then Bits:=Bits+AQFbw;
+    If AQMode=2 Then Inc(Bits);
+    Bits:=Bits+4+4;
+    If AQEac3<>0 Then Inc(Bits) Else Bits:=Bits+AQNumSub-1;
+   End;
+  End;
+  If AQCplInUse[Blk]<>0 Then
+   For Ch:=1 To AQFbw Do
+    If AQChInCpl[Blk,Ch]<>0 Then Begin
+     If (AQEac3=0) Or (AQNewCoords[Blk,Ch]<>2) Then Inc(Bits);
+     If AQNewCoords[Blk,Ch]<>0 Then Begin
+      Bits:=Bits+2;
+      Bits:=Bits+(4+4)*AQNumBands;
+     End;
+    End;
+  If AQMode=2 Then Begin
+   If (AQEac3=0) Or (Blk>0) Then Inc(Bits);
+   If AQNewRemat[Blk]<>0 Then Bits:=Bits+AQNumRemat[Blk];
+  End;
+  For Ch:=1 To AQFbw Do
+   If AQExpStrat[Ch,Blk]<>0 Then Begin
+    If AQChInCpl[Blk,Ch]=0 Then Bits:=Bits+6;
+    Bits:=Bits+2;
+   End;
+  If (AQEac3=0) And (AQCplInUse[Blk]<>0) Then Bits:=Bits+2;
+  If AQEac3=0 Then
+   If AQNewSnr[Blk]<>0 Then Bits:=Bits+6+(AQCh+AQCplInUse[Blk])*(4+3);
+  If AQCplInUse[Blk]<>0 Then Begin
+   If (AQEac3=0) Or (AQNewLeak[Blk]<>2) Then Inc(Bits);
+   If AQNewLeak[Blk]<>0 Then Bits:=Bits+3+3;
+  End;
+ End;
+ AQFrameBits:=AQFrameBitsFixed+Bits;
+End;
+
+Procedure AQBitAllocMasking;
+Var Blk,Ch: LongInt;
+Begin
+ For Blk:=0 To AQNB-1 Do
+  For Ch:=Ord(AQCplInUse[Blk]=0) To AQCh Do
+   If AQExpStrat[Ch,Blk]<>0 Then Begin
+    AQCalcPsd(AQExp[Ch,Blk],AQStart[Ch],AQEndFreq[Blk,Ch],AQPsd[Ch,Blk],AQBPsd[Ch,Blk]);
+    AQCalcMask(AQBPsd[Ch,Blk],AQStart[Ch],AQEndFreq[Blk,Ch],AQFastGain[AQFastGC[Ch]],Ch=AQLfeCh,AQMask[Ch,Blk]);
+   End;
+End;
+
+Procedure AQCalcBap(Var Mask: Array Of SmallInt; Var Psd: TAQRow16; Start,End_,SnrOff,Floor: LongInt; Var Bap: TAQRowB);
+Var Bin,Band,BandEnd,M,Addr: LongInt;
+Begin
+ If SnrOff=-960 Then Begin FillChar(Bap,256,0); Exit; End;
+ Bin:=Start; Band:=AQBinBand[Start];
+ Repeat
+  M:=(AQMax(Mask[Band]-SnrOff-Floor,0) And $1FE0)+Floor;
+  Inc(Band);
+  BandEnd:=AQBandStart[Band]; If End_<BandEnd Then BandEnd:=End_;
+  While Bin<BandEnd Do Begin
+   Addr:=AQSar(Psd[Bin]-M,5);
+   If Addr<0 Then Addr:=0; If Addr>63 Then Addr:=63;
+   Bap[Bin]:=AQBapTab[Addr];
+   Inc(Bin);
+  End;
+ Until End_<=BandEnd;
+End;
+
+Function AQBitAlloc(SnrOffset: LongInt): LongInt;
+Var Blk,Ch,Bin,Blk2,B,Bits,MaxEnd,Cnt: LongInt; MantCnt: Array[0..5,0..15] Of LongInt;
+Begin
+ SnrOffset:=(SnrOffset-240)*4;
+ For Blk:=0 To AQNB-1 Do
+  For Ch:=Ord(AQCplInUse[Blk]=0) To AQCh Do
+   If AQExpStrat[Ch,Blk]<>0 Then
+    AQCalcBap(AQMask[Ch,Blk],AQPsd[Ch,Blk],AQStart[Ch],AQEndFreq[Blk,Ch],SnrOffset,AQFloor,AQBap[Ch,Blk]);
+ { comptage des mantisses }
+ FillChar(MantCnt,SizeOf(MantCnt),0);
+ For Blk:=0 To 5 Do Begin MantCnt[Blk,1]:=2; MantCnt[Blk,2]:=2; MantCnt[Blk,4]:=1; End;
+ MaxEnd:=AQBwCode*3+73;
+ For Ch:=Ord(AQCplEnabled=0) To AQCh Do
+  For Blk:=0 To AQNB-1 Do Begin
+   If (Ch=0) And (AQCplInUse[Blk]=0) Then Continue;
+   Cnt:=AQMin(MaxEnd,AQEndFreq[Blk,Ch])-AQStart[Ch];
+   For Bin:=AQStart[Ch] To AQStart[Ch]+Cnt-1 Do Inc(MantCnt[Blk,AQBap[Ch,AQExpRef[Ch,Blk],Bin]]);
+  End;
+ Bits:=0;
+ For Blk:=0 To 5 Do Begin
+  Bits:=Bits+(MantCnt[Blk,1] Div 3)*5;
+  Bits:=Bits+((MantCnt[Blk,2] Div 3)+(MantCnt[Blk,4] Shr 1))*7;
+  Bits:=Bits+MantCnt[Blk,3]*3;
+  For B:=5 To 15 Do Bits:=Bits+MantCnt[Blk,B]*AQBapBits[B];
+ End;
+ AQBitAlloc:=Bits;
+End;
+
+Function AQCbrBitAllocation: Boolean;
+Var Ch,BitsLeft,SnrOffset,SnrIncr: LongInt;
+Begin
+ AQCbrBitAllocation:=False;
+ BitsLeft:=8*AQFrameSize-(AQFrameBits+AQExpBits);
+ If BitsLeft<0 Then Exit;
+ SnrOffset:=AQCoarse Shl 4;
+ If (SnrOffset Or AQFineO[1])=1023 Then Begin
+  If AQBitAlloc(1023)<=BitsLeft Then Begin AQCbrBitAllocation:=True; Exit; End;
+ End;
+ While (SnrOffset>=0) And (AQBitAlloc(SnrOffset)>BitsLeft) Do Dec(SnrOffset,64);
+ If SnrOffset<0 Then Exit;
+ SnrIncr:=64;
+ While SnrIncr>0 Do Begin
+  While (SnrOffset+SnrIncr<=1023) And (AQBitAlloc(SnrOffset+SnrIncr)<=BitsLeft) Do Inc(SnrOffset,SnrIncr);
+  SnrIncr:=SnrIncr Shr 2;
+ End;
+ AQBitAlloc(SnrOffset);
+ AQCoarse:=SnrOffset Shr 4;
+ For Ch:=Ord(AQCplOn=0) To AQCh Do AQFineO[Ch]:=SnrOffset And 15;
+ AQCbrBitAllocation:=True;
+End;
+
+{ ---- quantification ---- }
+Function AQSymQuant(C,E,Levels: LongInt): LongInt;
+Begin AQSymQuant:=LongInt(AQSar(AQSar(Int64(Levels)*C,24-E)+Levels,1)); End;
+
+Function AQAsymQuant(C,E,QBits: LongInt): LongInt;
+Var M: LongInt;
+Begin
+ C:=LongInt(AQSar(AQSar(Int64(C)*(Int64(1) Shl E),24-QBits)+1,1));
+ M:=1 Shl (QBits-1);
+ If C>=M Then C:=M-1;
+ AQAsymQuant:=C;
+End;
+
+Procedure AQQuantizeMantissas;
+Var Blk,Ch,Ch0,I,V,E,Bp,GotCpl: LongInt;
+ P1c,P1i,P2c,P2i,P4c,P4i,N1,N2,N4: LongInt;
+ Procedure BlkCh(Ch_: LongInt);
+ Var I2: LongInt;
+ Begin
+  For I2:=AQStart[Ch_] To AQEndFreq[Blk,Ch_]-1 Do Begin
+   V:=AQFix[Ch_,Blk,I2];
+   E:=AQExp[Ch_,AQExpRef[Ch_,Blk],I2];
+   Bp:=AQBap[Ch_,AQExpRef[Ch_,Blk],I2];
+   Case Bp Of
+    0: V:=0;
+    1: Begin
+     V:=AQSymQuant(V,E,3);
+     Case N1 Of
+      0: Begin P1c:=Ch_; P1i:=I2; V:=9*V; N1:=1; End;
+      1: Begin Inc(AQQmant[P1c,Blk,P1i],3*V); N1:=2; V:=128; End;
+      Else Begin Inc(AQQmant[P1c,Blk,P1i],V); N1:=0; V:=128; End;
+     End;
+    End;
+    2: Begin
+     V:=AQSymQuant(V,E,5);
+     Case N2 Of
+      0: Begin P2c:=Ch_; P2i:=I2; V:=25*V; N2:=1; End;
+      1: Begin Inc(AQQmant[P2c,Blk,P2i],5*V); N2:=2; V:=128; End;
+      Else Begin Inc(AQQmant[P2c,Blk,P2i],V); N2:=0; V:=128; End;
+     End;
+    End;
+    3: V:=AQSymQuant(V,E,7);
+    4: Begin
+     V:=AQSymQuant(V,E,11);
+     If N4=0 Then Begin P4c:=Ch_; P4i:=I2; V:=11*V; N4:=1; End
+     Else Begin Inc(AQQmant[P4c,Blk,P4i],V); N4:=0; V:=128; End;
+    End;
+    5: V:=AQSymQuant(V,E,15);
+    14: V:=AQAsymQuant(V,E,14);
+    15: V:=AQAsymQuant(V,E,16);
+    Else V:=AQAsymQuant(V,E,Bp-1);
+   End;
+   AQQmant[Ch_,Blk,I2]:=V;
+  End;
+ End;
+Begin
+ For Blk:=0 To AQNB-1 Do Begin
+  N1:=0; N2:=0; N4:=0; P1c:=0; P1i:=0; P2c:=0; P2i:=0; P4c:=0; P4i:=0;
+  GotCpl:=Ord(AQCplInUse[Blk]=0); Ch0:=0;
+  Ch:=1;
+  While Ch<=AQCh Do Begin
+   If (GotCpl=0) And (Ch>1) And (AQChInCpl[Blk,Ch-1]<>0) Then Begin Ch0:=Ch-1; Ch:=0; GotCpl:=1; End;
+   BlkCh(Ch);
+   If Ch=0 Then Ch:=Ch0;
+   Inc(Ch);
+  End;
+ End;
+End;
+
+{ ---- en-tete et blocs ---- }
+Procedure AQOutputHeader;
+Var Blk,Ch: LongInt;
+Begin
+ If AQEac3<>0 Then Begin
+  AQPut(16,$0B77);
+  AQPut(2,0); AQPut(3,0);
+  AQPut(11,(AQFrameSize Div 2)-1);
+  If AQSrShift<>0 Then Begin AQPut(2,3); AQPut(2,AQSr); End
+  Else Begin AQPut(2,AQSr); AQPut(2,AQNumBlksCode); End;
+  AQPut(3,AQMode);
+  AQPut(1,AQLfe);
+  AQPut(5,AQBsId);
+  AQPut(5,31);
+  AQPut(1,0);
+  AQPut(1,0); { mixing metadata }
+  AQPut(1,0); { info metadata }
+  If AQNB<>6 Then AQPut(1,Ord((AQFrameNum Mod 6)=0));
+  AQPut(1,0);
+  If AQNB=6 Then Begin AQPut(1,Ord(AQUseFrmExp=0)); AQPut(1,0); End;
+  AQPut(2,0); AQPut(1,0); AQPut(1,0); AQPut(1,0); AQPut(1,0); AQPut(1,0); AQPut(1,0); AQPut(1,0); AQPut(1,0);
+  If AQMode>1 Then Begin
+   AQPut(1,AQCplInUse[0]);
+   For Blk:=1 To AQNB-1 Do Begin
+    AQPut(1,AQNewCplStr[Blk]);
+    If AQNewCplStr[Blk]<>0 Then AQPut(1,AQCplInUse[Blk]);
+   End;
+  End;
+  If AQUseFrmExp<>0 Then Begin
+   For Ch:=Ord(AQCplOn=0) To AQFbw Do AQPut(5,AQFrmExpStr[Ch]);
+  End Else Begin
+   For Blk:=0 To AQNB-1 Do
+    For Ch:=Ord(AQCplInUse[Blk]=0) To AQFbw Do AQPut(2,AQExpStrat[Ch,Blk]);
+  End;
+  If AQLfe<>0 Then
+   For Blk:=0 To AQNB-1 Do AQPut(1,AQExpStrat[AQLfeCh,Blk]);
+  If AQNB<>6 Then AQPut(1,0)
+  Else
+   For Ch:=1 To AQFbw Do
+    If AQUseFrmExp<>0 Then AQPut(5,AQFrmExpStr[Ch]) Else AQPut(5,0);
+  AQPut(6,AQCoarse);
+  AQPut(4,AQFineO[1]);
+  If AQNB>1 Then AQPut(1,0);
+  Exit;
+ End;
+ AQPut(16,$0B77);
+ AQPut(16,0);
+ AQPut(2,AQSr);
+ AQPut(6,AQFrameCode+(AQFrameSize-AQFrameMin) Div 2);
+ AQPut(5,AQBsId);
+ AQPut(3,0);
+ AQPut(3,AQMode);
+ If ((AQMode And 1)<>0) And (AQMode<>1) Then AQPut(2,1);
+ If (AQMode And 4)<>0 Then AQPut(2,1);
+ If AQMode=2 Then AQPut(2,0);
+ AQPut(1,AQLfe);
+ AQPut(5,31);
+ AQPut(1,0); AQPut(1,0); AQPut(1,0);
+ AQPut(1,0); { copyright }
+ AQPut(1,1); { original }
+ AQPut(1,0); AQPut(1,0);
+ AQPut(1,0);
+End;
+
+Procedure AQOutputBlock(Blk: LongInt);
+Var Ch,I,Baie,Bnd,GotCpl,Ch0,StartSub,EndSub,NbGroups,Cpl,B,Q: LongInt;
+Begin
+ If AQEac3=0 Then Begin
+  For Ch:=0 To AQFbw-1 Do AQPut(1,0);
+  For Ch:=0 To AQFbw-1 Do AQPut(1,1);
+ End;
+ AQPut(1,0);
+ If AQEac3<>0 Then AQPut(1,0);
+ If AQEac3=0 Then AQPut(1,AQNewCplStr[Blk]);
+ If AQNewCplStr[Blk]<>0 Then Begin
+  If AQEac3=0 Then AQPut(1,AQCplInUse[Blk]);
+  If AQCplInUse[Blk]<>0 Then Begin
+   If AQEac3<>0 Then AQPut(1,0);
+   If (AQEac3=0) Or (AQMode<>2) Then
+    For Ch:=1 To AQFbw Do AQPut(1,AQChInCpl[Blk,Ch]);
+   If AQMode=2 Then AQPut(1,0);
+   StartSub:=(AQStart[0]-37) Div 12;
+   EndSub:=(AQCplEnd-37) Div 12;
+   AQPut(4,StartSub);
+   AQPut(4,EndSub-3);
+   If AQEac3<>0 Then AQPut(1,0)
+   Else For Bnd:=StartSub+1 To EndSub-1 Do AQPut(1,AQCplBandStruct[Bnd]);
+  End;
+ End;
+ If AQCplInUse[Blk]<>0 Then
+  For Ch:=1 To AQFbw Do
+   If AQChInCpl[Blk,Ch]<>0 Then Begin
+    If (AQEac3=0) Or (AQNewCoords[Blk,Ch]<>2) Then AQPut(1,AQNewCoords[Blk,Ch]);
+    If AQNewCoords[Blk,Ch]<>0 Then Begin
+     AQPut(2,AQMasterExp[Blk,Ch]);
+     For Bnd:=0 To AQNumBands-1 Do Begin
+      AQPut(4,AQCplExp[Ch,Blk,Bnd]);
+      AQPut(4,AQCplMant[Ch,Blk,Bnd]);
+     End;
+    End;
+   End;
+ If AQMode=2 Then Begin
+  If (AQEac3=0) Or (Blk>0) Then AQPut(1,AQNewRemat[Blk]);
+  If AQNewRemat[Blk]<>0 Then
+   For Bnd:=0 To AQNumRemat[Blk]-1 Do AQPut(1,AQRematFlags[Blk,Bnd]);
+ End;
+ If AQEac3=0 Then Begin
+  For Ch:=Ord(AQCplInUse[Blk]=0) To AQFbw Do AQPut(2,AQExpStrat[Ch,Blk]);
+  If AQLfe<>0 Then AQPut(1,AQExpStrat[AQLfeCh,Blk]);
+ End;
+ For Ch:=1 To AQFbw Do
+  If (AQExpStrat[Ch,Blk]<>0) And (AQChInCpl[Blk,Ch]=0) Then AQPut(6,AQBwCode);
+ For Ch:=Ord(AQCplInUse[Blk]=0) To AQCh Do Begin
+  Cpl:=Ord(Ch=0);
+  If AQExpStrat[Ch,Blk]=0 Then Continue;
+  AQPut(4,AQGrp[Ch,Blk,0] Shr Cpl);
+  NbGroups:=AQExpGroup[Cpl,AQExpStrat[Ch,Blk]-1,AQEndFreq[Blk,Ch]-AQStart[Ch]];
+  For I:=1 To NbGroups Do AQPut(7,AQGrp[Ch,Blk,I]);
+  If (Ch<>AQLfeCh) And (Cpl=0) Then AQPut(2,0);
+ End;
+ If AQEac3=0 Then Begin
+  Baie:=Ord(Blk=0);
+  AQPut(1,Baie);
+  If Baie<>0 Then Begin
+   AQPut(2,2); AQPut(2,1); AQPut(2,1); AQPut(2,3); AQPut(3,7);
+  End;
+  AQPut(1,AQNewSnr[Blk]);
+  If AQNewSnr[Blk]<>0 Then Begin
+   AQPut(6,AQCoarse);
+   For Ch:=Ord(AQCplInUse[Blk]=0) To AQCh Do Begin
+    AQPut(4,AQFineO[Ch]);
+    AQPut(3,AQFastGC[Ch]);
+   End;
+  End;
+ End Else AQPut(1,0);
+ If AQCplInUse[Blk]<>0 Then Begin
+  If (AQEac3=0) Or (AQNewLeak[Blk]<>2) Then AQPut(1,AQNewLeak[Blk]);
+  If AQNewLeak[Blk]<>0 Then Begin AQPut(3,AQCplFastLeak); AQPut(3,AQCplSlowLeak); End;
+ End;
+ If AQEac3=0 Then Begin AQPut(1,0); AQPut(1,0); End;
+ GotCpl:=Ord(AQCplInUse[Blk]=0); Ch0:=0;
+ Ch:=1;
+ While Ch<=AQCh Do Begin
+  If (GotCpl=0) And (Ch>1) And (AQChInCpl[Blk,Ch-1]<>0) Then Begin Ch0:=Ch-1; Ch:=0; GotCpl:=1; End;
+  For I:=AQStart[Ch] To AQEndFreq[Blk,Ch]-1 Do Begin
+   Q:=AQQmant[Ch,Blk,I];
+   B:=AQBap[Ch,AQExpRef[Ch,Blk],I];
+   Case B Of
+    0: ;
+    1: If Q<>128 Then AQPut(5,Q);
+    2: If Q<>128 Then AQPut(7,Q);
+    3: AQPut(3,Q);
+    4: If Q<>128 Then AQPut(7,Q);
+    14: AQPut(14,Q);
+    15: AQPut(16,Q);
+    Else AQPut(B-1,Q);
+   End;
+  End;
+  If Ch=0 Then Ch:=Ch0;
+  Inc(Ch);
+ End;
+End;
+
+Function AQMulPoly(A,B,Poly: LongInt): LongInt;
+Var C: LongInt;
+Begin
+ C:=0;
+ While A<>0 Do Begin
+  If (A And 1)<>0 Then C:=C Xor B;
+  A:=A Shr 1; B:=B Shl 1;
+  If (B And $10000)<>0 Then B:=B Xor Poly;
+ End;
+ AQMulPoly:=C;
+End;
+
+Function AQPowPoly(A,N,Poly: LongInt): LongInt;
+Var R: LongInt;
+Begin
+ R:=1;
+ While N<>0 Do Begin
+  If (N And 1)<>0 Then R:=AQMulPoly(R,A,Poly);
+  A:=AQMulPoly(A,A,Poly); N:=N Shr 1;
+ End;
+ AQPowPoly:=R;
+End;
+
+Function AQCrc16(B: PEABuffer; From_,Len: LongInt; Init: LongInt): LongInt;
+Var I,C: LongInt;
+Begin
+ C:=Init;
+ For I:=From_ To From_+Len-1 Do C:=((C Shl 8) And $FFFF) Xor FQCrc16T[((C Shr 8) Xor B^[I]) And 255];
+ AQCrc16:=C;
+End;
+
+Procedure AQOutputEnd;
+Var Fs58,Pad,Crc1,Crc2P,Crc2,CrcInv: LongInt;
+Begin
+ Fs58:=((AQFrameSize Shr 2)+(AQFrameSize Shr 4)) Shl 1;
+ If AQOutBits>0 Then Begin AQOutBuf^[AQOutPos]:=(AQOutAcc Shl (8-AQOutBits)) And 255; Inc(AQOutPos); AQOutBits:=0; AQOutAcc:=0; End;
+ Pad:=AQFrameSize-AQOutPos-2;
+ If Pad>0 Then FillChar(AQOutBuf^[AQOutPos],Pad,0);
+ If AQEac3<>0 Then Begin
+  Crc2P:=AQCrc16(AQOutBuf,2,AQFrameSize-5,0);
+  Crc2:=AQCrc16(AQOutBuf,AQFrameSize-3,1,Crc2P);
+  If Crc2=$0B77 Then Begin
+   AQOutBuf^[AQFrameSize-3]:=AQOutBuf^[AQFrameSize-3] Xor 1;
+   Crc2:=AQCrc16(AQOutBuf,AQFrameSize-3,1,Crc2P);
+  End;
+  AQOutBuf^[AQFrameSize-2]:=Crc2 Shr 8; AQOutBuf^[AQFrameSize-1]:=Crc2 And 255;
+  Exit;
+ End;
+ Crc1:=AQCrc16(AQOutBuf,4,Fs58-4,0);
+ CrcInv:=AQCrcInv[Ord(AQFrameSize>AQFrameMin)];
+ Crc1:=AQMulPoly(CrcInv,Crc1,$18005);
+ AQOutBuf^[2]:=Crc1 Shr 8; AQOutBuf^[3]:=Crc1 And 255;
+ Crc2P:=AQCrc16(AQOutBuf,Fs58,AQFrameSize-Fs58-3,0);
+ Crc2:=AQCrc16(AQOutBuf,AQFrameSize-3,1,Crc2P);
+ If Crc2=$0B77 Then Begin
+  AQOutBuf^[AQFrameSize-3]:=AQOutBuf^[AQFrameSize-3] Xor 1;
+  Crc2:=AQCrc16(AQOutBuf,AQFrameSize-3,1,Crc2P);
+ End;
+ AQOutBuf^[AQFrameSize-2]:=Crc2 Shr 8; AQOutBuf^[AQFrameSize-1]:=Crc2 And 255;
+End;
+{ ---- suite de l'encodeur AC-3 : couplage, rematricage, initialisation, boucle de trames ---- }
+Function AQRint(X: Single): LongInt;
+Var D,R: Double; F: Int64;
+Begin
+ D:=X;
+ If D>=0 Then Begin
+  F:=Trunc(D); R:=D-F;
+  If (R>0.5) Or ((R=0.5) And Odd(F)) Then Inc(F);
+ End Else Begin
+  F:=Trunc(D); R:=F-D;
+  If (R>0.5) Or ((R=0.5) And Odd(F)) Then Dec(F);
+ End;
+ AQRint:=F;
+End;
+
+Function AQCoefMax: Single;
+Var D: Double;
+Begin D:=16777215.0/16777216.0; AQCoefMax:=D; End;
+
+Function AQCalcCplCoord(EnergyCh,EnergyCpl: Single): Single;
+Var C,Q,Mx: Single;
+Begin
+ C:=0.125;
+ If EnergyCpl>0 Then Begin Q:=EnergyCh/EnergyCpl; Q:=Sqrt(Q); C:=C*Q; End;
+ Mx:=AQCoefMax;
+ If Mx<C Then C:=Mx;
+ AQCalcCplCoord:=C;
+End;
+
+Procedure AQComputeCplStrategy;
+Var Blk,Ch,GotCplSnr,NumCplBlocks: LongInt;
+Begin
+ For Blk:=0 To AQNB-1 Do
+  For Ch:=1 To AQFbw Do AQChInCpl[Blk,Ch]:=AQCplOn;
+ GotCplSnr:=0; NumCplBlocks:=0;
+ For Blk:=0 To AQNB-1 Do Begin
+  AQNumCplCh[Blk]:=0;
+  For Ch:=1 To AQFbw Do Inc(AQNumCplCh[Blk],AQChInCpl[Blk,Ch]);
+  AQCplInUse[Blk]:=Ord(AQNumCplCh[Blk]>1);
+  Inc(NumCplBlocks,AQCplInUse[Blk]);
+  If AQCplInUse[Blk]=0 Then Begin
+   AQNumCplCh[Blk]:=0;
+   For Ch:=1 To AQFbw Do AQChInCpl[Blk,Ch]:=0;
+  End;
+  AQNewCplStr[Blk]:=Ord(Blk=0);
+  If Blk>0 Then
+   For Ch:=1 To AQFbw Do
+    If AQChInCpl[Blk,Ch]<>AQChInCpl[Blk-1,Ch] Then Begin AQNewCplStr[Blk]:=1; Break; End;
+  AQNewLeak[Blk]:=AQNewCplStr[Blk];
+  If (Blk=0) Or ((AQCplInUse[Blk]<>0) And (GotCplSnr=0)) Then Begin
+   AQNewSnr[Blk]:=1;
+   If AQCplInUse[Blk]<>0 Then GotCplSnr:=1;
+  End Else AQNewSnr[Blk]:=0;
+ End;
+ If NumCplBlocks=0 Then AQCplOn:=0;
+ For Blk:=0 To AQNB-1 Do
+  For Ch:=1 To AQFbw Do
+   If AQChInCpl[Blk,Ch]<>0 Then AQEndFreq[Blk,Ch]:=AQStart[0]
+   Else AQEndFreq[Blk,Ch]:=AQBwCode*3+73;
+End;
+
+Procedure AQEac3CplStates;
+Var Ch,Blk: LongInt; First: Array[0..6] Of LongInt;
+Begin
+ For Ch:=1 To AQFbw Do First[Ch]:=1;
+ For Blk:=0 To AQNB-1 Do
+  For Ch:=1 To AQFbw Do
+   If AQChInCpl[Blk,Ch]<>0 Then Begin
+    If First[Ch]<>0 Then Begin AQNewCoords[Blk,Ch]:=2; First[Ch]:=0; End;
+   End Else First[Ch]:=1;
+ For Blk:=0 To AQNB-1 Do
+  If AQCplInUse[Blk]<>0 Then Begin AQNewLeak[Blk]:=2; Break; End;
+End;
+
+Procedure AQApplyCoupling;
+Const Thr: Double=0.03;
+Var CplCoords: Array[0..5,0..5,0..15] Of Single; Fixed: Array[0..5,0..5,0..15] Of LongInt;
+ Energy: Array[0..5,0..5,0..15] Of Single; NbB: Single;
+ Blk,Ch,Bnd,I,J,CplStart,NumCplCoefs,BandSize,Blk1,MinExp,MaxExp,MasterExp,E,CplExp,CplMant: LongInt;
+ V,Cl,Mx,Mn: Single; CoordDiff,Ec,Ecp: Single; D: Double; Q: Int64;
+Begin
+ NbB:=AQNumBands;
+ FillChar(CplCoords,SizeOf(CplCoords),0); FillChar(Fixed,SizeOf(Fixed),0); FillChar(Energy,SizeOf(Energy),0);
+ CplStart:=AQStart[0]-1;
+ NumCplCoefs:=(AQNumSub*12+1+31) And Not 31;
+ CplStart:=CplStart+NumCplCoefs; If CplStart>256 Then CplStart:=256; CplStart:=CplStart-NumCplCoefs;
+ Mx:=AQCoefMax; Mn:=-Mx;
+ For Blk:=0 To AQNB-1 Do Begin
+  If AQCplInUse[Blk]=0 Then Continue;
+  For I:=0 To NumCplCoefs-1 Do AQCoef[0,Blk][CplStart+I]:=0;
+  For Ch:=1 To AQFbw Do Begin
+   If AQChInCpl[Blk,Ch]=0 Then Continue;
+   For I:=0 To NumCplCoefs-1 Do Begin
+    V:=AQCoef[0,Blk][CplStart+I]; Cl:=AQCoef[Ch,Blk][CplStart+I]; V:=V+Cl; AQCoef[0,Blk][CplStart+I]:=V;
+   End;
+  End;
+  For I:=0 To NumCplCoefs-1 Do Begin
+   V:=AQCoef[0,Blk][CplStart+I];
+   If V<Mn Then V:=Mn Else If V>Mx Then V:=Mx;
+   AQCoef[0,Blk][CplStart+I]:=V;
+  End;
+ End;
+ Bnd:=0; I:=AQStart[0];
+ While I<AQCplEnd Do Begin
+  BandSize:=AQCplSizes[Bnd];
+  For Ch:=0 To AQFbw Do
+   For Blk:=0 To AQNB-1 Do Begin
+    If (AQCplInUse[Blk]=0) Or ((Ch>0) And (AQChInCpl[Blk,Ch]=0)) Then Continue;
+    For J:=0 To BandSize-1 Do Begin
+     V:=AQCoef[Ch,Blk][I+J]; Cl:=V*V; Ec:=Energy[Blk,Ch,Bnd]; Ec:=Ec+Cl; Energy[Blk,Ch,Bnd]:=Ec;
+    End;
+   End;
+  Inc(I,BandSize); Inc(Bnd);
+ End;
+ For Blk:=0 To AQNB-1 Do Begin
+  If AQCplInUse[Blk]=0 Then Continue;
+  For Ch:=1 To AQFbw Do Begin
+   If AQChInCpl[Blk,Ch]=0 Then Continue;
+   For Bnd:=0 To AQNumBands-1 Do
+    CplCoords[Blk,Ch,Bnd]:=AQCalcCplCoord(Energy[Blk,Ch,Bnd],Energy[Blk,0,Bnd]);
+  End;
+ End;
+ For Blk:=0 To AQNB-1 Do Begin
+  For Ch:=0 To 6 Do AQNewCoords[Blk,Ch]:=0;
+  If AQCplInUse[Blk]<>0 Then Begin
+   If (Blk=0) Or (AQCplInUse[Blk-1]=0) Then Begin
+    For Ch:=1 To AQFbw Do AQNewCoords[Blk,Ch]:=1;
+   End Else Begin
+    For Ch:=1 To AQFbw Do Begin
+     If AQChInCpl[Blk,Ch]=0 Then Continue;
+     If AQChInCpl[Blk-1,Ch]=0 Then AQNewCoords[Blk,Ch]:=1
+     Else Begin
+      CoordDiff:=0;
+      For Bnd:=0 To AQNumBands-1 Do Begin
+       Cl:=CplCoords[Blk-1,Ch,Bnd]-CplCoords[Blk,Ch,Bnd]; If Cl<0 Then Cl:=-Cl;
+       CoordDiff:=CoordDiff+Cl;
+      End;
+      CoordDiff:=CoordDiff/NbB;
+      D:=CoordDiff;
+      If D>Thr Then AQNewCoords[Blk,Ch]:=1;
+     End;
+    End;
+   End;
+  End;
+ End;
+ For Bnd:=0 To AQNumBands-1 Do Begin
+  Blk:=0; Blk1:=0;
+  While Blk<AQNB Do Begin
+   If AQCplInUse[Blk]=0 Then Begin Inc(Blk); Continue; End;
+   For Ch:=1 To AQFbw Do Begin
+    If AQChInCpl[Blk,Ch]=0 Then Continue;
+    Ecp:=Energy[Blk,0,Bnd]; Ec:=Energy[Blk,Ch,Bnd];
+    Blk1:=Blk+1;
+    While (Blk1<AQNB) And (AQNewCoords[Blk1,Ch]=0) Do Begin
+     If AQCplInUse[Blk1]<>0 Then Begin
+      Ecp:=Ecp+Energy[Blk1,0,Bnd]; Ec:=Ec+Energy[Blk1,Ch,Bnd];
+     End;
+     Inc(Blk1);
+    End;
+    CplCoords[Blk,Ch,Bnd]:=AQCalcCplCoord(Ec,Ecp);
+   End;
+   Blk:=Blk1;
+  End;
+ End;
+ For Blk:=0 To AQNB-1 Do Begin
+  If AQCplInUse[Blk]=0 Then Continue;
+  For Ch:=1 To AQFbw Do
+   For Bnd:=0 To 15 Do Begin
+    Cl:=CplCoords[Blk,Ch,Bnd]*16777216.0;
+    Fixed[Blk,Ch,Bnd]:=AQRint(Cl);
+    Q:=Abs(Int64(Fixed[Blk,Ch,Bnd]));
+    If Q<>0 Then AQCplExp[Ch,Blk,Bnd]:=23-AQLog2(LongInt(Q)) Else AQCplExp[Ch,Blk,Bnd]:=24;
+   End;
+  For Ch:=1 To AQFbw Do Begin
+   If AQNewCoords[Blk,Ch]=0 Then Continue;
+   MinExp:=AQCplExp[Ch,Blk,0]; MaxExp:=MinExp;
+   For Bnd:=1 To AQNumBands-1 Do Begin
+    E:=AQCplExp[Ch,Blk,Bnd];
+    If E<MinExp Then MinExp:=E; If E>MaxExp Then MaxExp:=E;
+   End;
+   MasterExp:=((MaxExp-15)+2) Div 3;
+   If (MaxExp-15)+2<0 Then MasterExp:=-(-((MaxExp-15)+2) Div 3);
+   If MasterExp<0 Then MasterExp:=0;
+   While MinExp<MasterExp*3 Do Dec(MasterExp);
+   For Bnd:=0 To AQNumBands-1 Do Begin
+    E:=AQCplExp[Ch,Blk,Bnd]-MasterExp*3;
+    If E<0 Then E:=0; If E>15 Then E:=15;
+    AQCplExp[Ch,Blk,Bnd]:=E;
+   End;
+   AQMasterExp[Blk,Ch]:=MasterExp;
+   For Bnd:=0 To AQNumBands-1 Do Begin
+    CplExp:=AQCplExp[Ch,Blk,Bnd];
+    Q:=Int64(Fixed[Blk,Ch,Bnd]) Shl (5+CplExp+MasterExp*3);
+    Q:=Q And $FFFFFFFF; If Q>=2147483648 Then Q:=Q-4294967296;
+    CplMant:=LongInt(AQSar(Q,24));
+    If CplExp=15 Then CplMant:=LongInt(AQSar(CplMant,1)) Else Dec(CplMant,16);
+    AQCplMant[Ch,Blk,Bnd]:=CplMant;
+   End;
+  End;
+ End;
+ If AQEac3<>0 Then AQEac3CplStates;
+End;
+
+Procedure AQComputeRemat;
+Var Blk,Bnd,NbCoefs,Start,End_,I: LongInt; S0,S1,S2,S3,Lt,Rt,Md,Sd,T: Single; M1,M2: Single; Prev: LongInt;
+Begin
+ If AQMode<>2 Then Exit;
+ For Blk:=0 To AQNB-1 Do Begin
+  AQNewRemat[Blk]:=Ord(Blk=0);
+  AQNumRemat[Blk]:=4;
+  If AQCplInUse[Blk]<>0 Then Begin
+   If AQStart[0]<=61 Then Dec(AQNumRemat[Blk]);
+   If AQStart[0]=37 Then Dec(AQNumRemat[Blk]);
+   If (Blk>0) And (AQNumRemat[Blk]<>AQNumRemat[Blk-1]) Then AQNewRemat[Blk]:=1;
+  End;
+  NbCoefs:=AQMin(AQEndFreq[Blk,1],AQEndFreq[Blk,2]);
+  If AQRematEn=0 Then Continue;
+  For Bnd:=0 To AQNumRemat[Blk]-1 Do Begin
+   Start:=AQRematTab[Bnd]; If Bnd=0 Then Start:=13;
+   End_:=AQMin(NbCoefs,AQRematTab[Bnd+1]);
+   S0:=0; S1:=0; S2:=0; S3:=0;
+   For I:=Start To End_-1 Do Begin
+    Lt:=AQCoef[1,Blk][I]; Rt:=AQCoef[2,Blk][I];
+    Md:=Lt+Rt; Sd:=Lt-Rt;
+    T:=Lt*Lt; S0:=S0+T; T:=Rt*Rt; S1:=S1+T; T:=Md*Md; S2:=S2+T; T:=Sd*Sd; S3:=S3+T;
+   End;
+   M1:=S2; If S3<M1 Then M1:=S3;
+   M2:=S0; If S1<M2 Then M2:=S1;
+   If M1<M2 Then AQRematFlags[Blk,Bnd]:=1 Else AQRematFlags[Blk,Bnd]:=0;
+   If (Blk>0) And (AQRematFlags[Blk,Bnd]<>AQRematFlags[Blk-1,Bnd]) Then AQNewRemat[Blk]:=1;
+  End;
+ End;
+End;
+
+Procedure AQApplyRemat;
+Var Blk,Bnd,NbCoefs,Start,End_,I,Lt,Rt: LongInt; Flags: Array[0..3] Of LongInt;
+Begin
+ If AQRematEn=0 Then Exit;
+ FillChar(Flags,SizeOf(Flags),0);
+ For Blk:=0 To AQNB-1 Do Begin
+  If AQNewRemat[Blk]<>0 Then For Bnd:=0 To 3 Do Flags[Bnd]:=AQRematFlags[Blk,Bnd];
+  NbCoefs:=AQMin(AQEndFreq[Blk,1],AQEndFreq[Blk,2]);
+  For Bnd:=0 To AQNumRemat[Blk]-1 Do
+   If Flags[Bnd]<>0 Then Begin
+    Start:=AQRematTab[Bnd]; If Bnd=0 Then Start:=13;
+    End_:=AQMin(NbCoefs,AQRematTab[Bnd+1]);
+    For I:=Start To End_-1 Do Begin
+     Lt:=AQFix[1,Blk][I]; Rt:=AQFix[2,Blk][I];
+     AQFix[1,Blk][I]:=LongInt(AQSar(Int64(Lt)+Rt,1));
+     AQFix[2,Blk][I]:=LongInt(AQSar(Int64(Lt)-Rt,1));
+    End;
+   End;
+ End;
+End;
+
+{ ---- MDCT d'un bloc : fenetre KBD puis transformee ---- }
+Procedure AQApplyMdct;
+Var Blk,Ch,I: LongInt; Win: Array[0..511] Of Single; Outp: Array[0..255] Of Single;
+Begin
+ For Ch:=0 To AQCh-1 Do
+  For Blk:=0 To AQNB-1 Do Begin
+   For I:=0 To 255 Do Win[I]:=AQPlanar[Ch][Blk*256+I]*AQWin[I];
+   For I:=0 To 255 Do Win[256+I]:=AQPlanar[Ch][Blk*256+256+I]*AQWin[255-I];
+   AQMdctFwd(PVGS(@Win),PVGS(@Outp));
+   Move(Outp,AQCoef[Ch+1,Blk],256*4);
+  End;
+End;
+
+Procedure AQScaleCoefs;
+Var Ch,Blk,I,Ch0: LongInt; V: Single;
+Begin
+ Ch0:=Ord(AQCplOn=0);
+ For Ch:=Ch0 To AQCh Do
+  For Blk:=0 To AQNB-1 Do
+   For I:=0 To 255 Do Begin
+    V:=AQCoef[Ch,Blk][I]*16777216.0;
+    AQFix[Ch,Blk][I]:=AQRint(V);
+   End;
+End;
+
+{ ---- initialisation ---- }
+Function AQSetup(Chn,Mask,Rate,BitRate,Eac3: LongInt): Boolean;
+Var NbC,NbBl,FrmSmp,MaxBr,MinBr,Wpf: LongInt; I,Mk,Best,BestCode,Diff,BestDiff,Br,Blk,Ch,CplStartBand,CplEndBand,CplStartV,FsCode58: LongInt;
+ Fsz: LongInt;
+Begin
+ AQSetup:=False;
+ If (Chn<1) Or (Chn>6) Then Exit;
+ Mk:=Mask;
+ If Mk=0 Then Case Chn Of 1: Mk:=4; 2: Mk:=3; 3: Mk:=$B; 4: Mk:=$107; 5: Mk:=$37; 6: Mk:=$3F; End;
+ If Mk>$7FF Then Exit;
+ AQEac3:=Eac3; AQUseFrmExp:=0; AQFrameNum:=0;
+ AQLfe:=Ord((Mk And 8)<>0);
+ AQCh:=Chn; AQFbw:=Chn-AQLfe;
+ If AQLfe<>0 Then AQLfeCh:=AQFbw+1 Else AQLfeCh:=-1;
+ If AQLfe<>0 Then Mk:=Mk-8;
+ Case Mk Of
+  4: AQMode:=1;
+  3: AQMode:=2;
+  7: AQMode:=3;
+  $103: AQMode:=4;
+  $107: AQMode:=5;
+  $33,$603: AQMode:=6;
+  $607,$37: AQMode:=7;
+  Else Exit;
+ End;
+ AQHasCenter:=Ord(((AQMode And 1)<>0) And (AQMode<>1));
+ AQHasSurr:=Ord((AQMode And 4)<>0);
+ For I:=0 To 5 Do AQChMap[I]:=AQChanMap[AQMode,AQLfe,I];
+ { frequence d'echantillonnage }
+ AQSr:=-1;
+ For I:=0 To 8-6*Eac3 Do If (AQRates[I Mod 3] Shr (I Div 3))=Rate Then Begin AQSr:=I Mod 3; AQSrShift:=I Div 3; Break; End;
+ If AQSr<0 Then Exit;
+ If Eac3<>0 Then AQBsId:=16 Else AQBsId:=8+AQSrShift;
+ AQRateHz:=Rate;
+ If BitRate=0 Then Case AQFbw Of 1: BitRate:=96000; 2: BitRate:=192000; 3: BitRate:=320000; 4: BitRate:=384000; 5: BitRate:=448000; End;
+ BestDiff:=MaxLongInt; BestCode:=0; Best:=0;
+ AQNumBlksCode:=3; AQNB:=6;
+ If Eac3<>0 Then Begin
+  NbBl:=6; FrmSmp:=1536; MaxBr:=0; MinBr:=0;
+  For NbC:=3 DownTo 0 Do Begin
+   Case NbC Of 0: NbBl:=1; 1: NbBl:=2; 2: NbBl:=3; Else NbBl:=6; End;
+   FrmSmp:=256*NbBl;
+   MaxBr:=LongInt(Int64(2048)*Rate Div FrmSmp)*16;
+   MinBr:=((Rate+(FrmSmp-1)) Div FrmSmp)*16;
+   If BitRate<=MaxBr Then Break;
+  End;
+  If (BitRate<MinBr) Or (BitRate>MaxBr) Then Exit;
+  AQNumBlksCode:=NbC; AQNB:=NbBl;
+  Wpf:=LongInt(Int64(BitRate Div 16)*FrmSmp Div Rate);
+  BestDiff:=MaxLongInt; BestCode:=0;
+  For I:=0 To 18 Do Begin
+   Diff:=Abs(AQBrTab[I]*1000-BitRate);
+   If Diff<BestDiff Then Begin BestDiff:=Diff; BestCode:=I; End;
+  End;
+  AQFrameCode:=BestCode*2;
+  While (Wpf>1) And (LongInt(Int64(Wpf)*Rate Div 1536)*16>BitRate) Do Dec(Wpf);
+  AQFrameMin:=2*Wpf;
+  AQBitRate:=BitRate;
+  AQFrameSize:=AQFrameMin;
+ End Else
+ For I:=0 To 18 Do Begin
+  Br:=(AQBrTab[I] Shr AQSrShift)*1000;
+  Diff:=Abs(Br-BitRate);
+  If Diff<BestDiff Then Begin Best:=Br; BestCode:=I; BestDiff:=Diff; End;
+  If BestDiff=0 Then Break;
+ End;
+ If Eac3=0 Then Begin AQBitRate:=Best;
+ AQFrameCode:=BestCode*2; End;
+ If Eac3=0 Then Begin AQFrameMin:=2*AQFrmTab[AQFrameCode*3+AQSr]; AQFrameSize:=AQFrameMin; End;
+ AQRematEn:=Ord(AQMode=2);
+ AQCplEnabled:=Ord(AQMode>=2);
+ AQBitsW:=0; AQSampW:=0;
+ { crc inverse }
+ FsCode58:=((AQFrameSize Shr 2)+(AQFrameSize Shr 4)) Shl 1;
+ AQCrcInv[0]:=AQPowPoly($18005 Shr 1,8*FsCode58-16,$18005);
+ If AQSr=1 Then Begin
+  FsCode58:=(((AQFrameSize+2) Shr 2)+((AQFrameSize+2) Shr 4)) Shl 1;
+  AQCrcInv[1]:=AQPowPoly($18005 Shr 1,8*FsCode58-16,$18005);
+ End;
+ { largeur de bande }
+ AQBwCode:=AQBandwidth[((AQFbw-1)*3+AQSr)*19+AQFrameCode Div 2];
+ For Ch:=0 To 6 Do AQStart[Ch]:=0;
+ For Blk:=0 To 5 Do Begin
+  For Ch:=1 To AQFbw Do AQEndFreq[Blk,Ch]:=AQBwCode*3+73;
+  If AQLfe<>0 Then AQEndFreq[Blk,AQLfeCh]:=7;
+ End;
+ If AQCplEnabled<>0 Then Begin
+  CplStartV:=AQCplStart[((AQMode-2)*3+AQSr)*19+AQFrameCode Div 2];
+  If CplStartV<0 Then AQCplEnabled:=0;
+ End;
+ If AQCplEnabled<>0 Then Begin
+  CplEndBand:=AQBwCode Div 4+3;
+  CplStartBand:=CplStartV; If CplStartBand<0 Then CplStartBand:=0;
+  If CplStartBand>AQMin(CplEndBand-1,15) Then CplStartBand:=AQMin(CplEndBand-1,15);
+  AQNumSub:=CplEndBand-CplStartBand;
+  AQNumBands:=1; I:=0; AQCplSizes[0]:=12;
+  For Ch:=CplStartBand+1 To CplEndBand-1 Do
+   If AQCplBandStruct[Ch]<>0 Then Inc(AQCplSizes[I],12)
+   Else Begin Inc(AQNumBands); Inc(I); AQCplSizes[I]:=12; End;
+  AQStart[0]:=CplStartBand*12+37;
+  AQCplEnd:=CplEndBand*12+37;
+  For Blk:=0 To 5 Do AQEndFreq[Blk,0]:=AQCplEnd;
+ End;
+ { allocation de bits }
+ AQSlowD:=AQSlowDecay[2] Shr AQSrShift; AQFastD:=AQFastDecay[1] Shr AQSrShift;
+ AQSlowG:=AQSlowGain[1]; If Eac3<>0 Then AQDbpb:=AQDbPerBit[2] Else AQDbpb:=AQDbPerBit[3]; AQFloor:=AQFloorTab[7];
+ AQCplFastLeak:=0; AQCplSlowLeak:=0;
+ For Ch:=0 To 6 Do Begin AQFastGC[Ch]:=4; AQFineO[Ch]:=0; End;
+ AQCoarse:=40;
+ AQCountFrameBitsFixed;
+ AQExpInit;
+ AQKbd(5.0,256);
+ AQMdctInit;
+ FillChar(AQPlanar,SizeOf(AQPlanar),0);
+ FillChar(AQCoef,SizeOf(AQCoef),0);
+ FillChar(AQFix,SizeOf(AQFix),0);
+ FillChar(AQExp,SizeOf(AQExp),0);
+ FillChar(AQQmant,SizeOf(AQQmant),0);
+ FillChar(AQBap,SizeOf(AQBap),0);
+ FillChar(AQExpRef,SizeOf(AQExpRef),0);
+ FillChar(AQRematFlags,SizeOf(AQRematFlags),0);
+ FQCrcInit;
+ AQSetup:=True;
+End;
+
+{ une trame : AQPlanar est deja decale ; renvoie False si l'allocation de bits echoue }
+Function AQEncodeFrame: Boolean;
+Var Blk,Ch: LongInt; Mn: Single;
+Begin
+ AQEncodeFrame:=False;
+ If (AQSr=1) Or (AQEac3<>0) Then Begin
+  While (AQBitsW>=AQBitRate) And (AQSampW>=AQRateHz) Do Begin Dec(AQBitsW,AQBitRate); Dec(AQSampW,AQRateHz); End;
+  AQFrameSize:=AQFrameMin;
+  If AQBitsW*AQRateHz<AQSampW*AQBitRate Then Inc(AQFrameSize,2);
+  Inc(AQBitsW,Int64(AQFrameSize)*8); Inc(AQSampW,256*AQNB);
+ End;
+ AQApplyMdct;
+ AQCplOn:=AQCplEnabled;
+ AQComputeCplStrategy;
+ If AQCplOn<>0 Then AQApplyCoupling;
+ AQComputeRemat;
+ AQScaleCoefs;
+ { fin commune }
+ AQApplyRemat;
+ AQExtractExponents;
+ AQComputeExpStrategy;
+ AQEncodeExponents;
+ AQCountFrameBits;
+ AQExpBits:=AQCountExponentBits;
+ AQBitAllocMasking;
+ If Not AQCbrBitAllocation Then Exit;
+ AQGroupExponents;
+ AQQuantizeMantissas;
+ AQOutPos:=0; AQOutBits:=0; AQOutAcc:=0;
+ AQOutputHeader;
+ For Blk:=0 To AQNB-1 Do AQOutputBlock(Blk);
+ AQOutputEnd;
+ Inc(AQFrameNum);
+ AQEncodeFrame:=True;
+End;
+
+{ Smp : echantillons flottants entrelaces (ordre des canaux de la disposition ffmpeg), NFr trames }
+Procedure F1Ac3EncodeFloat(Const Target: String; Smp: PVGS; NFr,Chn,Mask,Rate,BitRate,Eac3: LongInt);
+Var Fr,NFrames,I,Ch,Src,N,Pos0: LongInt; Buf: PEABuffer;
+Begin
+ If Not AQSetup(Chn,Mask,Rate,BitRate,Eac3) Then Fail('ac3: disposition des canaux, frequence ou debit non pris en charge.');
+ GetMem(Buf,4096*2); AQOutBuf:=Buf;
+ OpenWrite(Target);
+ NFrames:=(NFr+1535) Div 1536;
+ For Fr:=0 To NFrames-1 Do Begin
+  For Ch:=0 To AQCh-1 Do Begin
+   Move(AQPlanar[Ch][1536],AQPlanar[Ch][0],256*4);
+   Src:=AQChMap[Ch];
+   For I:=0 To 1535 Do Begin
+    Pos0:=Fr*1536+I;
+    If Pos0<NFr Then AQPlanar[Ch][256+I]:=Smp^[Pos0*Chn+Src] Else AQPlanar[Ch][256+I]:=0;
+   End;
+  End;
+  If Not AQEncodeFrame Then Begin CloseWrite; Fail('ac3: echec de l''allocation de bits; augmenter le debit.'); End;
+  WriteBytes(Buf^,AQFrameSize);
+ End;
+ CloseWrite;
+ FreeMem(Buf);
+End;
+{ ---- encodage AC-3 d'un WAV (encodeur flottant fidele a libavcodec/ac3enc) ---- }
+{ lit rate/canaux/format d'un WAV ; Ok = PCM 16 bits ou flottant 32 bits, 1 ou 2 canaux }
+Function F1Ac3Info(Const Wav: String; Var Rate,Ch,Mask: LongInt): Boolean;
+Var H: Array[0..63] Of Byte; Lim,Pos,Sz,Fmt,Bits: LongInt; Ok: Boolean;
+Begin
+ F1Ac3Info:=False;
+ OpenRead(Wav); Lim:=InputSize;
+ If Lim<44 Then Begin CloseRead; Exit; End;
+ ReadAt(0,H,12);
+ If (H[0]<>82) Or (H[8]<>87) Then Begin CloseRead; Exit; End;
+ Pos:=12; Ok:=False; Ch:=0; Rate:=0; Fmt:=0; Bits:=0; Mask:=0;
+ While Lim-Pos>=8 Do Begin
+  ReadAt(Pos,H,8); Sz:=H[4]+H[5]*256+H[6]*65536+H[7]*16777216;
+  If (H[0]=102) And (H[1]=109) And (H[2]=116) And (Sz>=16) Then Begin
+   If Sz>=24 Then ReadAt(Pos+8,H,24) Else ReadAt(Pos+8,H,16);
+   Fmt:=H[0]+H[1]*256; Ch:=H[2]+H[3]*256; Rate:=H[4]+H[5]*256+H[6]*65536+H[7]*16777216; Bits:=H[14];
+   If (Fmt=$FFFE) And (Sz>=24) Then Mask:=H[20]+H[21]*256+H[22]*65536+(H[23] And 127)*16777216;
+   Ok:=True;
+  End;
+  Inc(Pos,8+Sz+(Sz And 1));
+ End;
+ CloseRead;
+ If Not Ok Then Exit;
+ If (Ch<1) Or (Ch>6) Then Exit;
+ F1Ac3Info:=True;
+End;
+
+{ frequence retenue par la negociation de formats de ffmpeg : la plus proche parmi 48000, 44100, 32000 }
+Function F1Ac3PickRate(Rate: LongInt): LongInt;
+Var Best,I,D,BD: LongInt;
+Begin
+ If (Rate=48000) Or (Rate=44100) Or (Rate=32000) Then Begin F1Ac3PickRate:=0; Exit; End;
+ BD:=MaxLongInt; Best:=48000;
+ For I:=0 To 2 Do Begin
+  D:=Abs(AQRates[I]-Rate);
+  If D<BD Then Begin BD:=D; Best:=AQRates[I]; End;
+ End;
+ F1Ac3PickRate:=Best;
+End;
+
+Function F1Ac3DefMask(Ch: LongInt): LongInt;
+Begin
+ Case Ch Of 1: F1Ac3DefMask:=4; 2: F1Ac3DefMask:=3; 3: F1Ac3DefMask:=$B; 4: F1Ac3DefMask:=$107; 5: F1Ac3DefMask:=$37; 6: F1Ac3DefMask:=$3F; Else F1Ac3DefMask:=0; End;
+End;
+
+{ masque de disposition accepte par l'encodeur ac3 de ffmpeg ? }
+Function F1Ac3MaskOk(Mask: LongInt): Boolean;
+Var M: LongInt;
+Begin
+ M:=Mask And Not 8;
+ F1Ac3MaskOk:=(M=4) Or (M=3) Or (M=7) Or (M=$103) Or (M=$107) Or (M=$33) Or (M=$603) Or (M=$607) Or (M=$37);
+End;
+
+Procedure F1Ac3FromWav(Const Wav,Target: String; BitRateK,Mask,Eac3: LongInt);
+Var H: Array[0..63] Of Byte; Lim,Pos,Sz,Ch,Rate,I,DataAt,DataSz,NFr,Fmt,Bytes: LongInt; Smp: PVGS; Raw: Array[0..4095] Of Byte; Done,Cnt: LongInt;
+ V: LongInt; X: Single; Fl: Array[0..1] Of Single Absolute Raw;
+Begin
+ OpenRead(Wav); Lim:=InputSize;
+ ReadAt(0,H,12);
+ Pos:=12; Ch:=0; Rate:=0; DataAt:=0; DataSz:=0; Fmt:=1;
+ While Lim-Pos>=8 Do Begin
+  ReadAt(Pos,H,8); Sz:=H[4]+H[5]*256+H[6]*65536+H[7]*16777216;
+  If (H[0]=102) And (H[1]=109) And (H[2]=116) And (Sz>=16) Then Begin
+   ReadAt(Pos+8,H,16); Fmt:=H[0]+H[1]*256; Ch:=H[2]+H[3]*256; Rate:=H[4]+H[5]*256+H[6]*65536+H[7]*16777216;
+  End;
+  If (H[0]=100) And (H[1]=97) And (H[2]=116) And (H[3]=97) Then Begin
+   DataAt:=Pos+8; DataSz:=Sz; If DataSz>Lim-DataAt Then DataSz:=Lim-DataAt; Break;
+  End;
+  Inc(Pos,8+Sz+(Sz And 1));
+ End;
+ If Fmt=3 Then Bytes:=4 Else Bytes:=2;
+ NFr:=DataSz Div (Bytes*Ch);
+ GetMem(Smp,Int64(NFr+1)*Ch*4+16);
+ Done:=0;
+ While Done<NFr*Ch Do Begin
+  Cnt:=NFr*Ch-Done; If Cnt>1024 Then Cnt:=1024;
+  ReadAt(DataAt+Done*Bytes,Raw,Cnt*Bytes);
+  For I:=0 To Cnt-1 Do Begin
+   If Bytes=4 Then Smp^[Done+I]:=Fl[I]
+   Else Begin
+    V:=Raw[2*I]+Raw[2*I+1]*256; If V>=32768 Then Dec(V,65536);
+    X:=V; X:=X/32768.0; Smp^[Done+I]:=X;
+   End;
+  End;
+  Inc(Done,Cnt);
+ End;
+ CloseRead;
+ F1Ac3EncodeFloat(Target,Smp,NFr,Ch,Mask,Rate,BitRateK*1000,Eac3);
+ FreeMem(Smp);
 End;
 { F1-BLOCK-END }
 { ==== BLOCK-ANCHOR-F1 : inserer le code du groupe F1 juste au-dessus de cette ligne ==== }
@@ -133948,7 +136584,7 @@ Begin
  End;
 End;
 
-Type TPcmHdr=Array[0..127] Of Byte;
+Type TPcmHdr=Array[0..4095] Of Byte;
 Var PcmH: TPcmHdr; PcmHN: LongInt;
 Procedure PcmH8(V: LongInt);Begin PcmH[PcmHN]:=V And 255; Inc(PcmHN); End;
 Procedure PcmHL16(V: LongInt);Begin PcmH8(V); PcmH8(V Shr 8); End;
@@ -134097,6 +136733,20 @@ Procedure PcmEncodeFile(Const Source,Target,OutFmt,Codec: String);
 Var
  S,D: TPcmSpec; Ch,Rate,DS,DSz,Frames,Done,N,Chunk,InB,OutB,K,Bits,Tag: LongInt; BI,BO: TPcmBuf; Name,AT: String;
  Ext,Fact: Boolean; E: Double; M: Int64; Ex: LongInt; Dummy: LongInt; Ann: Array[0..2399] Of Byte; AnnN,AnnCnt: LongInt;
+ ChB: Array[0..1599] Of Byte; ChN,MaskA,Mk3,Pc,TagA,Kk: LongInt;
+ Procedure ChPut(V: LongInt); Begin ChB[ChN]:=V And 255; Inc(ChN); End;
+ Procedure ChTag(Const T: String); Var Q: LongInt; Begin For Q:=1 To 4 Do ChPut(Ord(T[Q])); End;
+ Procedure ChB32(V: LongInt); Begin ChPut(V Shr 24); ChPut(V Shr 16); ChPut(V Shr 8); ChPut(V); End;
+ Procedure ChMeta(Const Key,Id: String);
+ Var Q,R: LongInt;
+ Begin
+  For Q:=0 To MdN-1 Do If MdLow(MdK[Q])=Key Then Begin
+   ChTag(Id); ChB32((Length(MdV[Q])+1) And Not 1);
+   For R:=1 To Length(MdV[Q]) Do ChPut(Ord(MdV[Q][R]));
+   If Odd(Length(MdV[Q])) Then ChPut(0);
+   Break;
+  End;
+ End;
 Begin
  AnnN:=0;
  If Not PcmOpenSource(Source,S,Ch,Rate,DS,DSz) Then Fail('pcm: source WAV/AIFF PCM requise.');
@@ -134120,8 +136770,27 @@ Begin
  End Else If OutFmt='aiff' Then Begin
   If Not PcmAiffCodec(Name,AT) Then Fail('pcm: le conteneur AIFF ne prend pas en charge '+Codec+'.');
   Bits:=D.Bytes*8;
-  PcmHTag('FORM'); PcmHB32(4+12*Ord(AT<>'NONE')+8+18+6*Ord(AT<>'NONE')+16+Frames*Ch*D.Bytes+((Frames*Ch*D.Bytes) And 1));
+  { F1 : bloc CHAN (plus de 2 canaux) et blocs NAME/AUTH/(c) /ANNO comme libavformat/aiffenc.c }
+  ChN:=0;
+  If Ch>2 Then Begin
+   Case Ch Of 3: MaskA:=7; 4: MaskA:=$107; 5: MaskA:=$37; 6: MaskA:=$3F; 7: MaskA:=$70F; 8: MaskA:=$63F; Else MaskA:=0; End;
+   If PcmSrcMask<>0 Then Begin
+    Pc:=0; Mk3:=PcmSrcMask; While Mk3<>0 Do Begin Inc(Pc,Mk3 And 1); Mk3:=Mk3 Shr 1; End;
+    If Pc=Ch Then MaskA:=PcmSrcMask;
+   End;
+   TagA:=$10000;
+   Case MaskA Of
+    $B: TagA:=$85; $103: TagA:=$83; 7: TagA:=$71; $F: TagA:=$88; $107: TagA:=$73; $10F: TagA:=$89;
+    $607,$37: TagA:=$75; $60F,$3F: TagA:=$79; $6CF: TagA:=$7E; $63F: TagA:=$80; $603,$33: TagA:=$84;
+   End;
+   ChTag('CHAN'); ChB32(12);
+   If TagA=$10000 Then Begin ChB32($10000); ChB32(MaskA); End Else Begin ChB32((TagA Shl 16) Or Ch); ChB32(0); End;
+   ChB32(0);
+  End;
+  ChMeta('title','NAME'); ChMeta('author','AUTH'); ChMeta('copyright','(c) '); ChMeta('comment','ANNO');
+  PcmHTag('FORM'); PcmHB32(4+12*Ord(AT<>'NONE')+ChN+8+18+6*Ord(AT<>'NONE')+16+Frames*Ch*D.Bytes+((Frames*Ch*D.Bytes) And 1));
   If AT<>'NONE' Then Begin PcmHTag('AIFC'); PcmHTag('FVER'); PcmHB32(4); PcmHB32($A2805140); End Else PcmHTag('AIFF');
+  For Kk:=0 To ChN-1 Do PcmH8(ChB[Kk]);
   PcmHTag('COMM');
   If AT<>'NONE' Then PcmHB32(24) Else PcmHB32(18);
   PcmHB16(Ch); PcmHB32(Frames); PcmHB16(Bits);
@@ -134457,7 +137126,7 @@ End;
 
 Function F1ForcedFmt(Const N: String): Boolean;
 Begin
- F1ForcedFmt:=PcmIsRawName(N) Or (N='daud') Or (N='apc') Or (N='ea_cdata') Or (N='gsm') Or (N='ass');
+ F1ForcedFmt:=PcmIsRawName(N) Or (N='daud') Or (N='apc') Or (N='ea_cdata') Or (N='gsm') Or (N='ass') Or (N='amr') Or (N='srt');
 End;
 { WAV natif en double precision : converti en s16 comme le fait ffmpeg pour une sortie WAV pcm_s16le }
 Function F1WavIsF64(Const Name: String): Boolean;
@@ -139807,6 +142476,8 @@ Begin
  WriteLn(' DE gsm             raw GSM (decodeur natif, pas d''encodeur)');
  WriteLn(' DE mmf             Yamaha SMAF');
  WriteLn(' DE ass             SSA (SubStation Alpha) subtitle');
+ WriteLn(' D  srt             SubRip subtitle (vers ass)');
+ WriteLn(' D  amr             3GPP AMR (copie de flux -c copy; pas de decodeur)');
  WriteLn(' DE aac             AAC ADTS (AAC-LC mono/stereo; alias: adts; encodage libfaac natif)');
  WriteLn(' DE ogg             Ogg (decodage Speex via libspeex natif, encodage audio Vorbis via libvorbis natif, video Theora via libtheora natif; extensions .ogg, .oga, .ogv, .spx)');
  WriteLn(' D  iff             IFF (Interchange File Format)');
@@ -140619,6 +143290,11 @@ BEGIN
   Else If Argument='-b_qoffset' Then Begin
    BQuantOffset:=ParseBQuant(NextArgument,'-b_qoffset'); HasBQuant:=True;
   End
+  Else If (Argument='-rf64') And (InputPath<>'') Then Begin
+   Value:=Lower(NextArgument);
+   If Value='always' Then F1Rf64:=1 Else If Value='auto' Then F1Rf64:=-1 Else If Value='never' Then F1Rf64:=0 Else Fail('-rf64: never, auto ou always attendu.');
+  End
+  Else If (Argument='-write_bext') And (InputPath<>'') Then F1Bext:=NextArgument<>'0'
   Else If (Argument='-metadata') Or (Argument='-metadata:g') Then Begin
    Value:=NextArgument; Number:=Pos('=',Value);
    If Number<1 Then Fail('Missing ''='' in metadata '+Value);
@@ -140653,6 +143329,7 @@ BEGIN
     32,40,48,56,64,80,96,112,128,160,192,224,256,320,384,448,512,576,640: RequestedBitRateK:=Number;
     8..31,33..39,41..47,49..55,57..63,65..79,81..95,97..111,113..127,129..159,161..191,193..223,225..255,257..319,321..383,385..447,449..511,513..575:
      Begin RequestedBitRateK:=Number; NonStdBitrate:=True; End;
+    577..639,641..1024: Begin RequestedBitRateK:=Number; NonStdBitrate:=True; End;
     Else Fail('Debit audio hors limites: AAC 8..576k, MP3 32..320k, AC3 32..640k.');
    End;
    HasBitrate:=True;
@@ -140701,11 +143378,13 @@ BEGIN
  Temps[2]:=NewTemporary; DemuxASF(Intermediate,Temps[2]);
  Commit(Temps[2]); Temps[2]:=''; Halt(0);
  {$ENDIF}
+ If Not IsHTTP(Intermediate) Then If F1IsRf64(Intermediate) Then Begin Temps[6]:=NewTemporary; F1Rf64ToRiff(Intermediate,Temps[6]); Intermediate:=Temps[6]; InputPath:=Temps[6]; End; { F1 : RF64/BW64 }
  Detected:=Probe(Intermediate);
  If (InputFormat<>'') And Not IsHTTP(Intermediate) And F1ForcedFmt(InputFormat) Then Detected:=InputFormat; { F1 : -f impose, pas de sondage }
  If (Detected='') And (Lower(Extension(Intermediate))='cdata') And Not IsHTTP(Intermediate) Then Detected:='ea_cdata'; { F1 }
  If (Detected='') And (Lower(Extension(Intermediate))='gsm') And Not IsHTTP(Intermediate) Then Detected:='gsm'; { F1 }
  If ((Detected='') Or (Detected='mp1') Or (Detected='mp2') Or (Detected='mp3') Or (Detected='aac')) And Not IsHTTP(Intermediate) And ((InputFormat='') Or (InputFormat='ass')) Then If ASProbe(Intermediate) Then Detected:='ass'; { F1 }
+ If ((Detected='') Or (Detected='mp1') Or (Detected='mp2') Or (Detected='mp3') Or (Detected='aac')) And Not IsHTTP(Intermediate) And ((InputFormat='') Or (InputFormat='srt')) Then If F1SrtProbe(Intermediate) Then Detected:='srt'; { F1 }
  If (Detected='') And Not IsHTTP(Intermediate) And (InputFormat<>'h261') And (InputFormat<>'h263') Then If H4ProbeFile(Intermediate) Then Detected:='h264';
  If (Detected='') And Not IsHTTP(Intermediate) And (InputFormat<>'h261') And (InputFormat<>'h264') Then If H3ProbeFile(Intermediate) Then Detected:='h263';
  If (Detected='') And Not IsHTTP(Intermediate) And (InputFormat<>'h263') And (InputFormat<>'h264') Then If H1ProbeFile(Intermediate) Then Detected:='h261';
@@ -140740,6 +143419,10 @@ BEGIN
  'Format impose incompatible avec la signature du fichier.');
  If InputFormat='' Then Fail('Format entree non reconnu ou non pris en charge.');
  If OutputFormat='' Then OutputFormat:=FormatName(Extension(OutputPath)); { F1 }
+ If (InputFormat='srt') Then Begin { F1 : SubRip -> ASS }
+  If OutputFormat<>'ass' Then Fail('Sous-titres SRT: sortie ass/ssa requise.');
+  Temps[2]:=NewTemporary; F1SrtToAss(Intermediate,Temps[2]); Commit(Temps[2]); Temps[2]:=''; WriteLn('Sortie creee: ',OutputPath); Halt(0);
+ End;
  If (InputFormat='ass') Then Begin { F1 : SSA/ASS }
   If OutputFormat<>'ass' Then Fail('Sous-titres ASS: sortie ass/ssa requise.');
   Temps[2]:=NewTemporary; F1AssConvert(Intermediate,Temps[2]); Commit(Temps[2]); Temps[2]:=''; WriteLn('Sortie creee: ',OutputPath); Halt(0);
@@ -141347,21 +144030,21 @@ BEGIN
   (AudioCodec='adpcm_ms') Or (AudioCodec='adpcm_yamaha') Or (AudioCodec='sonic') Or (AudioCodec='sonicls'))) Or ((OutputFormat='avi') And ((AudioCodec='sonic') Or (AudioCodec='sonicls'))) Or ((OutputFormat='flv') And ((AudioCodec='adpcm_swf') Or (AudioCodec='nellymoser'))) Or
  ((OutputFormat='mp4') And (AudioCodec='alac')) Or ((OutputFormat='roq') And (AudioCodec='roq_dpcm')) Or
  ((OutputFormat='adx') And (AudioCodec='adpcm_adx')) Or ((OutputFormat='aiff') And (AudioCodec='adpcm_ima_qt')) Or
- ((OutputFormat='flac') And (AudioCodec='flac')) Or ((OutputFormat='tta') And (AudioCodec='tta')) Or ((OutputFormat='wsaud') And (AudioCodec='adpcm_ima_ws')) Or ((OutputFormat='mmf') And (AudioCodec='adpcm_yamaha')) Or ((OutputFormat='mp3') And ((AudioCodec='mp3') Or (AudioCodec='libmp3lame'))) Or ((OutputFormat='mp2') And (AudioCodec='mp2')) Or ((OutputFormat='ac3') And (AudioCodec='ac3')) Or
+ ((OutputFormat='flac') And (AudioCodec='flac')) Or ((OutputFormat='tta') And (AudioCodec='tta')) Or ((OutputFormat='wsaud') And (AudioCodec='adpcm_ima_ws')) Or ((OutputFormat='mmf') And (AudioCodec='adpcm_yamaha')) Or ((OutputFormat='mp3') And ((AudioCodec='mp3') Or (AudioCodec='libmp3lame'))) Or ((OutputFormat='mp2') And (AudioCodec='mp2')) Or ((OutputFormat='ac3') And (AudioCodec='ac3')) Or ((OutputFormat='eac3') And (AudioCodec='eac3')) Or
  ((OutputFormat='ogg') And ((AudioCodec='libvorbis') Or (AudioCodec='vorbis'))) Or (((OutputFormat='asf') Or (OutputFormat='avi')) And ((AudioCodec='wmav1') Or (AudioCodec='wmav2'))) Or
  ((OutputFormat='aac') And ((AudioCodec='aac') Or (AudioCodec='libfaac')))) Then Fail(
  'Codec de sortie non pris en charge pour ce conteneur.');
- If HasBitrate And (((OutputFormat<>'mp3') And (OutputFormat<>'mp2') And (OutputFormat<>'ac3') And (OutputFormat<>'aac') And (OutputFormat<>'ogg') And (OutputFormat<>'asf') And (OutputFormat<>'avi')) Or (AudioCodec='copy')) Then Fail(
+ If HasBitrate And (((OutputFormat<>'mp3') And (OutputFormat<>'mp2') And (OutputFormat<>'ac3') And (OutputFormat<>'eac3') And (OutputFormat<>'aac') And (OutputFormat<>'ogg') And (OutputFormat<>'asf') And (OutputFormat<>'avi')) Or (AudioCodec='copy')) Then Fail(
  '-b:a exige un encodage MP3, AAC, Vorbis ou AC3.');
  If (OutputFormat='mp3') And (RequestedBitRateK>320) Then Fail('MP3: debit maximal 320k.');
- If NonStdBitrate And (OutputFormat<>'aac') And (OutputFormat<>'ogg') And (OutputFormat<>'asf') And (OutputFormat<>'avi') Then Fail('Debit audio normalise requis: MP3 32..320k ou AC3 32..640k.');
+ If NonStdBitrate And (OutputFormat<>'aac') And (OutputFormat<>'ac3') And (OutputFormat<>'eac3') And (OutputFormat<>'ogg') And (OutputFormat<>'asf') And (OutputFormat<>'avi') Then Fail('Debit audio normalise requis: MP3 32..320k ou AC3 32..640k.');
  If (AudioCodec='copy') And ((RequestedRate<>0) Or (RequestedChannels<>0) Or (InputFormat
  <>OutputFormat)) Then  Fail(
  '-c:a copy exige le meme conteneur audio et aucune conversion audio.');
  If Not HideBanner Then WriteLn('FFMPEG Pascal 1.11 - moteur audio natif du projet');
  Temps[2]:=NewTemporary;
  MdLoad;
- If AudioCodec='copy' Then CopyFile(InputPath,Temps[2])
+ If AudioCodec='copy' Then Begin If Not ((InputFormat='mp3') And (OutputFormat='mp3') And F1Mp3Copy(InputPath,Temps[2])) Then CopyFile(InputPath,Temps[2]); End
   Else
  Begin
   Intermediate:=InputPath;
@@ -141390,7 +144073,8 @@ BEGIN
    If InputFormat='au' Then F1AuToWav(InputPath,Temps[0]) Else { F1 }
    If InputFormat='gsm' Then F1DecodeGSM(InputPath,Temps[0],G726Rate) Else
    If InputFormat='mmf' Then F1DecodeMMF(InputPath,Temps[0]) Else
-   If InputFormat='apc' Then F1DecodeAPC(InputPath,Temps[0]) Else
+   If InputFormat='amr' Then Fail('AMR-NB/AMR-WB: decodeur absent (copie de flux -c copy seulement).') Else
+  If InputFormat='apc' Then F1DecodeAPC(InputPath,Temps[0]) Else
    If InputFormat='ea_cdata' Then F1DecodeCData(InputPath,Temps[0]) Else
    If InputFormat='adx' Then DecodeADX(InputPath,Temps[0]) Else
    If InputFormat='4xm' Then Decode4XMAudio(InputPath,Temps[0]) Else
@@ -141452,7 +144136,7 @@ BEGIN
    If (PcmCodecOut='') And F1WavIsF64(Temps[0]) Then Begin Temps[3]:=NewTemporary; PcmEncodeFile(Temps[0],Temps[3],'wav','pcm_s16le'); Intermediate:=Temps[3]; End; { F1 }
   End Else If (WaveFormatTag(InputPath)=$160) Or (WaveFormatTag(InputPath)=$161) Then Begin
    Temps[0]:=NewTemporary; DecodeWMAWav(InputPath,Temps[0]); Intermediate:=Temps[0];
-  End Else If (PcmCodecOut='') And (OutputFormat<>'flac') And (OutputFormat<>'tta') And PcmWavNeedsConv(InputPath) And Not (((RequestedRate<>0) Or (RequestedChannels<>0) Or (AudioCodec='wmav1') Or (AudioCodec='wmav2')) And SwrIsF32Wav(InputPath)) Then Begin
+  End Else If (PcmCodecOut='') And (OutputFormat<>'flac') And (OutputFormat<>'tta') And (OutputFormat<>'ac3') And PcmWavNeedsConv(InputPath) And Not (((RequestedRate<>0) Or (RequestedChannels<>0) Or (AudioCodec='wmav1') Or (AudioCodec='wmav2')) And SwrIsF32Wav(InputPath)) Then Begin
    Temps[0]:=NewTemporary; PcmEncodeFile(InputPath,Temps[0],'wav','pcm_s16le'); Intermediate:=Temps[0];
   End Else If IsWaveCT(InputPath) Then Begin
    Temps[0]:=NewTemporary; DecodeWaveCT(InputPath,Temps[0]); Intermediate:=Temps[0];
@@ -141533,8 +144217,37 @@ BEGIN
     If AudioCodec='wmav1' Then EncodeWMAFile(Temps[1],Temps[2],1,RequestedBitRateK*1000,Ord(OutputFormat='avi')) Else EncodeWMAFile(Temps[1],Temps[2],2,RequestedBitRateK*1000,Ord(OutputFormat='avi'));
    End
    Else If OutputFormat='ac3' Then Begin
-    Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False);
-    If Not HasBitrate Then RequestedBitRateK:=192; ProcessAC3(Temps[1],Temps[2],True,RequestedBitRateK);
+    Temps[1]:=NewTemporary;
+    F1A3Ok:=F1Ac3Info(Intermediate,F1A3Rate,F1A3Ch,F1A3Mask);
+    If F1A3Ok Then Begin
+     F1A3OC:=F1A3Ch; If RequestedChannels<>0 Then F1A3OC:=RequestedChannels;
+     If (F1A3OC=F1A3Ch) And (F1A3Mask<>0) And (SwrBitCount(F1A3Mask)=F1A3Ch) Then F1A3OM:=F1A3Mask Else F1A3OM:=F1Ac3DefMask(F1A3OC);
+     F1A3Ok:=(F1A3OC>=1) And (F1A3OC<=6) And F1Ac3MaskOk(F1A3OM);
+    End;
+    If F1A3Ok Then Begin
+     F1A3Old:=RequestedRate;
+     If RequestedRate=0 Then RequestedRate:=F1Ac3PickRate(F1A3Rate);
+     SwrWantFmt:=3; NormalizeWave(Intermediate,Temps[1],False); SwrWantFmt:=1; RequestedRate:=F1A3Old;
+     F1Ac3FromWav(Temps[1],Temps[2],Ord(HasBitrate)*RequestedBitRateK,F1A3OM,0);
+    End Else Begin
+     If NonStdBitrate Then Fail('Debit audio normalise requis: MP3 32..320k ou AC3 32..640k.');
+     NormalizeWave(Intermediate,Temps[1],False);
+     If Not HasBitrate Then RequestedBitRateK:=192; ProcessAC3(Temps[1],Temps[2],True,RequestedBitRateK);
+    End;
+   End
+   Else If OutputFormat='eac3' Then Begin
+    Temps[1]:=NewTemporary;
+    F1A3Ok:=F1Ac3Info(Intermediate,F1A3Rate,F1A3Ch,F1A3Mask);
+    If F1A3Ok Then Begin
+     F1A3OC:=F1A3Ch; If RequestedChannels<>0 Then F1A3OC:=RequestedChannels;
+     If (F1A3OC=F1A3Ch) And (F1A3Mask<>0) And (SwrBitCount(F1A3Mask)=F1A3Ch) Then F1A3OM:=F1A3Mask Else F1A3OM:=F1Ac3DefMask(F1A3OC);
+     F1A3Ok:=(F1A3OC>=1) And (F1A3OC<=6) And F1Ac3MaskOk(F1A3OM);
+    End;
+    If Not F1A3Ok Then Fail('eac3: disposition des canaux non prise en charge.');
+    F1A3Old:=RequestedRate;
+    If RequestedRate=0 Then RequestedRate:=F1Ac3PickRate(F1A3Rate);
+    SwrWantFmt:=3; NormalizeWave(Intermediate,Temps[1],False); SwrWantFmt:=1; RequestedRate:=F1A3Old;
+    F1Ac3FromWav(Temps[1],Temps[2],Ord(HasBitrate)*RequestedBitRateK,F1A3OM,1);
    End
    Else If OutputFormat='ogg' Then Begin
     Temps[1]:=NewTemporary; NormalizeWave(Intermediate,Temps[1],False);
