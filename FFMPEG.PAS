@@ -109003,7 +109003,7 @@ Procedure Commit(Const Stage: String); Forward;
 Procedure F4MuxNut(Const Target: String); Forward;
 Procedure F4NutDemux(Var Inter: String); Forward;
 Const
- F4MaxSt=8;
+ F4MaxSt=8; F4MaxMeta=12;
 Type
  TF4Pkt=Record Pos,Len: LongInt; Pts,Dts,Dur: Int64; Key: Boolean; SkipS,SkipE: LongInt; End;
  TF4PktA=Array[0..20000000] Of TF4Pkt; PF4PktA=^TF4PktA;
@@ -109023,10 +109023,11 @@ Type
   PixFmt: String[16];
   EncTag: String[64];              { valeur du tag ENCODER du flux ('' : aucun) }
   Off: Int64;                      { decalage des horodatages (-start_time du fichier source) en ticks de TbN/TbD }
-  MetaN: LongInt; MetaK,MetaV: Array[0..3] Of String[64];   { metadonnees de flux (ordre d'insertion) }
+  MetaN: LongInt; MetaK,MetaV: Array[0..F4MaxMeta-1] Of String[64];   { metadonnees de flux (ordre d'insertion) }
   Adts: Boolean;                   { AAC : paquets ADTS bruts (en-tete conserve) }
   RsvPce: Boolean;                 { AAC : espace reserve pour l'extradata (MAX_PCE_SIZE) }
   Lang: String[8];
+  VDelay: LongInt;                 { video_delay (has_b_frames) }
   Title: String[64];
   Extra: PEABuffer; ExtraLen: LongInt;
   Data: PEABuffer; DataLen,DataCap: LongInt;
@@ -109036,6 +109037,7 @@ Type
 Var
  F4S: Array[0..F4MaxSt-1] Of TF4St; F4NS: LongInt;
  F4Err: String;
+ F4GN: LongInt; F4GK,F4GV: Array[0..15] Of String[120];   { metadonnees globales (cle generique ffmpeg) }
 
 { ---- arithmetique 128 bits : a*b/c avec les modes d'arrondi de av_rescale_rnd (0 zero, 1 inf, 2 bas, 3 haut, 4 plus proche) ---- }
 Function F4MulDivR(A,B,C: Int64; Rnd: LongInt): Int64;
@@ -109084,6 +109086,12 @@ Begin
  F4RescQ:=F4MulDivR(A,Bn*Cd,Bd*Cn,Rnd);
 End;
 
+Function F4LcS(Const S: String): String;
+Var I: LongInt;
+Begin
+ F4LcS:=S;
+ For I:=1 To Length(S) Do If S[I] In ['A'..'Z'] Then F4LcS[I]:=Chr(Ord(S[I])+32);
+End;
 Function F4Gcd(A,B: Int64): Int64;
 Var T: Int64;
 Begin
@@ -109226,8 +109234,16 @@ Begin
   If F4S[I].Data<>Nil Then FreeMem(F4S[I].Data);
   If F4S[I].P<>Nil Then FreeMem(F4S[I].P);
  End;
- FillChar(F4S,SizeOf(F4S),0); F4NS:=0; F4Err:='';
+ FillChar(F4S,SizeOf(F4S),0); F4NS:=0; F4Err:=''; F4GN:=0;
 End;
+
+Procedure F4GAdd(Const K,V: String);
+Begin
+ If F4GN<16 Then Begin F4GK[F4GN]:=K; F4GV[F4GN]:=V; Inc(F4GN); End;
+End;
+Function F4GFind(Const K: String): LongInt;
+Var I: LongInt;
+Begin F4GFind:=-1; For I:=0 To F4GN-1 Do If F4GK[I]=K Then F4GFind:=I; End;
 
 Function F4AddStream(Typ: LongInt; Const Codec: String): LongInt;
 Var I: LongInt;
@@ -109486,6 +109502,7 @@ Begin
  F4BInit(I);
  If F4Crcw Then F4BVoid(I,6);
  F4BUInt(I,$2AD7B1,1000000);
+ If F4GFind('title')>=0 Then F4BStr(I,$7BA9,F4GV[F4GFind('title')]);
  If F4MBitExact Then Begin
   F4BStr(I,$4D80,'Lavf'); F4BStr(I,$5741,'Lavf');
  End Else Begin
@@ -109520,14 +109537,20 @@ Begin
 End;
 
 Procedure F4MkBuildTags(Var Dst: TF4B);
-Var I: TF4B; S: LongInt; Tg,Tc,Sc: TF4B; Ds: String;
+Var I: TF4B; S,J,Q,Cnt: LongInt; Tg,Tc,Sc: TF4B; Ds: String;
 Begin
  F4BInit(I);
  If F4Crcw Then F4BVoid(I,6);
- If Not F4MBitExact Then Begin
+ Cnt:=0;
+ For J:=0 To F4GN-1 Do If (F4GK[J]<>'title') And (F4GK[J]<>'stereo_mode') And (F4GK[J]<>'creation_time') And (F4GK[J]<>'encoding_tool') And (F4GK[J]<>'duration') Then Inc(Cnt);
+ If (Not F4MBitExact) Or (Cnt>0) Then Begin
   F4BInit(Tg);
   F4BInit(Tc); F4BId(Tc,$63C0); F4BLen(Tc,0,F4LenSize(13)); F4BCopy(Tg,Tc); F4BFree(Tc);
-  F4MkSimpleTag(Tg,'ENCODER','Lavf60.16.100');
+  For J:=0 To F4GN-1 Do If (F4GK[J]<>'title') And (F4GK[J]<>'stereo_mode') And (F4GK[J]<>'creation_time') And (F4GK[J]<>'encoding_tool') And (F4GK[J]<>'duration') And (F4GK[J]<>'encoder') Then Begin
+   Ds:=F4GK[J]; For Q:=1 To Length(Ds) Do Begin If Ds[Q]=' ' Then Ds[Q]:='_' Else If Ds[Q] In ['a'..'z'] Then Ds[Q]:=Chr(Ord(Ds[Q])-32); End;
+   F4MkSimpleTag(Tg,Ds,F4GV[J]);
+  End;
+  If Not F4MBitExact Then F4MkSimpleTag(Tg,'ENCODER','Lavf60.16.100');
   F4BMaster(I,$7373,Tg,0);
   F4BFree(Tg);
  End;
@@ -109535,6 +109558,12 @@ Begin
   F4BInit(Tg);
   F4BInit(Tc); F4BUid(Tc,$63C5,F4T[S].Uid);
   F4BId(Tg,$63C0); F4BLen(Tg,Tc.N,F4LenSize(13)); F4BCopy(Tg,Tc); F4BFree(Tc);
+  If F4S[S].MetaN>0 Then Begin
+   For J:=0 To F4S[S].MetaN-1 Do If (F4LcS(F4S[S].MetaK[J])<>'language') And (F4LcS(F4S[S].MetaK[J])<>'title') And (F4LcS(F4S[S].MetaK[J])<>'duration') Then Begin
+    Ds:=F4S[S].MetaK[J]; For Q:=1 To Length(Ds) Do Begin If Ds[Q]=' ' Then Ds[Q]:='_' Else If Ds[Q] In ['a'..'z'] Then Ds[Q]:=Chr(Ord(Ds[Q])-32); End;
+    F4MkSimpleTag(Tg,Ds,F4S[S].MetaV[J]);
+   End;
+  End Else
   If F4S[S].EncTag<>'' Then F4MkSimpleTag(Tg,'ENCODER',F4S[S].EncTag);
   { DURATION : 19 octets (chaine + NUL) }
   F4MkDurStr(F4T[S].Dur,Ds);
@@ -109892,8 +109921,33 @@ Begin
 End;
 
 Var F4OutNut: Boolean;
+{ selection automatique des flux comme ffmpeg : meilleure video (surface), meilleur audio (canaux), defaut favorise }
+Procedure F4SelectStreams;
+Var S,BV,BA,NV,NA: LongInt; Sc,BVs,BAs: Int64; Tmp: Array[0..1] Of TF4St;
+Begin
+ BV:=-1; BA:=-1; BVs:=-1; BAs:=-1; NV:=0; NA:=0;
+ For S:=0 To F4NS-1 Do Begin
+  If F4S[S].Typ=0 Then Begin
+   Inc(NV); Sc:=Int64(F4S[S].W)*F4S[S].H; If F4S[S].Dflt Then Inc(Sc,100000000);
+   If Sc>BVs Then Begin BVs:=Sc; BV:=S; End;
+  End Else Begin
+   Inc(NA); Sc:=F4S[S].Chans; If F4S[S].Dflt Then Inc(Sc,100000000);
+   If Sc>BAs Then Begin BAs:=Sc; BA:=S; End;
+  End;
+ End;
+ If (NV<=1) And (NA<=1) And ((NV=0) Or (NA=0) Or (F4S[0].Typ=0)) Then Exit;
+ Tmp[0]:=F4S[0]; Tmp[1]:=F4S[0]; FillChar(Tmp,SizeOf(Tmp),0);
+ If BV>=0 Then Tmp[0]:=F4S[BV];
+ If BA>=0 Then Tmp[1]:=F4S[BA];
+ S:=0;
+ If BV>=0 Then Begin F4S[S]:=Tmp[0]; Inc(S); End;
+ If BA>=0 Then Begin F4S[S]:=Tmp[1]; Inc(S); End;
+ F4NS:=S;
+End;
+
 Procedure F4MuxOut(Const Target: String; Webm: Boolean);
 Begin
+ F4SelectStreams;
  If F4OutNut Then F4MuxNut(Target) Else F4MuxMkv(Target,Webm);
 End;
 
@@ -110023,11 +110077,11 @@ End;
 Procedure F4AviStreams(Const Source: String);
 Var
  F: PEABuffer; Size,At,Sz,ListEnd,Movi,MoviEnd,I,NStr,Cur,SAt,SEnd,St,Idx1,Idx1N,Ch,P,Q: LongInt;
- Tg,Lt,Fcc,Hnd,Typ: String; Info: Array[0..F4MaxSt-1] Of Record
+ Tg,Lt,Fcc,Hnd,Typ,Cd: String; Info: Array[0..F4MaxSt-1] Of Record
   IsVid: Boolean; Scale,Rate,SampSz,Tag,W,H,Bits,Chans,SRate,BA,ExtAt,ExtLen,Cnt: LongInt; Start: LongInt; AvgB: LongInt; Ok: Boolean; Pos: Int64; Cid: String[24];
  End;
  Sid: LongInt; Keys: PEABuffer; NKey: LongInt; G: Int64; K: Boolean; Dur: Int64; Gn,Gd: Int64;
- StrmOf: Array[0..F4MaxSt-1] Of LongInt; NS0: LongInt; Fl: LongInt; Xl,Xs,Xc,Xf,Xg: LongInt;
+ StrmOf: Array[0..F4MaxSt-1] Of LongInt; NS0: LongInt; Fl: LongInt; Xl,Xs,Xc,Xf,Xg,K2: LongInt;
 Procedure Strl(A,E: LongInt);
 Var Aa,Sz2,StrhAt,StrfAt,StrfSz: LongInt; T2: String;
 Begin
@@ -110043,7 +110097,7 @@ Begin
   Scale:=F4RL32(F,StrhAt+20); Rate:=F4RL32(F,StrhAt+24); Start:=F4RL32(F,StrhAt+28); SampSz:=F4RL32(F,StrhAt+44);
   ExtAt:=-1; ExtLen:=0; Cnt:=0; Pos:=0; Ok:=False; IsVid:=Typ='vids';
   If IsVid Then Begin
-   W:=F4RL32(F,StrfAt+4); H:=F4RL32(F,StrfAt+8); Bits:=F4RL16(F,StrfAt+14); Tag:=F4RL32(F,StrfAt+16);
+   W:=F4RL32(F,StrfAt+4); H:=F4RL32(F,StrfAt+8); If H<0 Then H:=-H; Bits:=F4RL16(F,StrfAt+14); Tag:=F4RL32(F,StrfAt+16);
    If StrfSz>40 Then Begin ExtAt:=StrfAt+40; ExtLen:=StrfSz-40; End;
    Ok:=True;
   End Else If Typ='auds' Then Begin
@@ -110074,6 +110128,21 @@ Begin
   If Tg='LIST' Then Begin
    Lt:=F4Tag4(F,At+8);
    If Lt='hdrl' Then Hdrl(At+12,At+8+Sz)
+   Else If Lt='INFO' Then Begin
+    Q:=At+12;
+    While Q+8<=At+8+Sz Do Begin
+     Tg:=F4Tag4(F,Q); I:=F4RL32(F,Q+4);
+     If Q+8+I>Size Then Break;
+     Cd:=''; For Xs:=0 To I-1 Do If (F^[Q+8+Xs]<>0) And (Length(Cd)<119) Then Cd:=Cd+Chr(F^[Q+8+Xs]);
+     Fcc:='';
+     If Tg='ISFT' Then Fcc:='software' Else If Tg='INAM' Then Fcc:='title' Else If Tg='IART' Then Fcc:='artist' Else If Tg='ICMT' Then Fcc:='comment'
+     Else If Tg='ICOP' Then Fcc:='copyright' Else If Tg='ICRD' Then Fcc:='date' Else If Tg='IGNR' Then Fcc:='genre' Else If Tg='IPRD' Then Fcc:='product'
+     Else If Tg='ISBJ' Then Fcc:='subject' Else If Tg='ISRC' Then Fcc:='source' Else If Tg='IENG' Then Fcc:='engineer' Else If Tg='IKEY' Then Fcc:='keywords'
+     Else If Tg='ITCH' Then Fcc:='technician' Else If Tg='IARL' Then Fcc:='archival_location' Else If Tg='IMED' Then Fcc:='medium';
+     If Fcc<>'' Then F4GAdd(Fcc,Cd);
+     Q:=Q+8+I+(I And 1);
+    End;
+   End
    Else If (Lt='movi') And (Movi<0) Then Begin Movi:=At+12; MoviEnd:=At+8+Sz; If MoviEnd>Size Then MoviEnd:=Size; End;
   End Else If (Tg='idx1') And (Idx1<0) Then Begin Idx1:=At+8; Idx1N:=Sz Div 16; End;
   At:=At+8+Sz+(Sz And 1);
@@ -110093,7 +110162,7 @@ Begin
     Else If (Fcc='MJPG') Or (Fcc='AVRN') Then Cid:='mjpeg'
     Else If Fcc='FFV1' Then Cid:='ffv1' Else If Fcc='HFYU' Then Cid:='huffyuv' Else If Fcc='FFVH' Then Cid:='ffvhuff'
     Else If Fcc='FLV1' Then Cid:='flv1' Else If Fcc='H263' Then Cid:='h263'
-    Else If Fcc='I420' Then Cid:='rawvideo';
+    Else If (Fcc='I420') Or (Fcc='IYUV') Or (Fcc='YV12') Or (Fcc='Y42B') Or (Fcc='422P') Or (Fcc='Y41B') Or (Fcc='411P') Or (Fcc='Y800') Or (Fcc='GREY') Or (Fcc='Y8  ') Or (Fcc='YUY2') Or (Fcc='YUYV') Or (Fcc='Y422') Or (Fcc='UYVY') Or (Fcc='RGBA') Or (Fcc='BGRA') Or (Fcc='ABGR') Or (Fcc='ARGB') Or (Fcc='Y444') Or (Fcc='444P') Or (Fcc='YVU9') Or (Fcc='440P') Or (Fcc=#0#0#0#0) Then Cid:='rawvideo';
     If Cid='' Then Fail('Matroska: codec video AVI '+Fcc+' non pris en charge pour la copie.');
     St:=F4AddStream(0,Cid);
     F4S[St].Tag:=Tag; F4S[St].W:=W; F4S[St].H:=H; F4S[St].Bits:=Bits; F4S[St].SarN:=1; F4S[St].SarD:=1;
@@ -110166,6 +110235,11 @@ Begin
  End;
  FreeMem(Keys); FreeMem(F);
  For I:=0 To F4NS-1 Do If F4S[I].Codec='mpeg4' Then F4Mpeg4Extra(I);
+ { audio+video, mp3 sans debit moyen : debit estime par ffmpeg = octets / duree de (n-1) trames }
+ Q:=0; For I:=0 To F4NS-1 Do If F4S[I].Typ=0 Then Q:=1;
+ If Q=1 Then For I:=0 To F4NS-1 Do If (F4S[I].Codec='mp3') And (F4S[I].BitRate=0) And (F4S[I].NPk>1) And (F4S[I].Rate>0) Then Begin
+  F4S[I].BitRate:=LongInt(F4MulDivR(Int64(F4S[I].DataLen)*8*F4S[I].Rate,1,Int64(F4S[I].NPk-1)*F4AudioFrameSamples('mp3',F4S[I].Rate),4));
+ End;
  For I:=0 To F4NS-1 Do If ((F4S[I].Codec='mp3') Or (F4S[I].Codec='mp2')) And (F4S[I].BitRate=0) And (F4S[I].NPk>0) Then Begin
   Q:=F4MpaHdr(PEABuffer(@F4S[I].Data^[F4S[I].P^[0].Pos]),0,F4S[I].P^[0].Len,Xl,Xs,Xc,Xf,Xg);
   If Q>0 Then F4S[I].BitRate:=F4MpaBr*1000;
@@ -110458,7 +110532,7 @@ Begin
    F4S[0].P^[K].Dur:=Dur*(14112000 Div Sr);
   End;
  End Else Begin
-  F4AviStreams(Stage);
+  F4AviStreams(Stage); F4GN:=0;
   F4Y4mProps(InputPath,0);
   If (F4Kind='mpeg4') And (F4S[0].ExtraLen>0) And (F4S[0].NPk>0) Then Begin
    Inc(F4S[0].P^[0].Pos,F4S[0].ExtraLen); Dec(F4S[0].P^[0].Len,F4S[0].ExtraLen);
@@ -110856,14 +110930,15 @@ Begin
     FrameBytes:=LongInt(Int64(Fs2)*F4S[Sid].BitRate Div (8*Int64(F4S[Sid].Rate)));
    End;
    For Pts:=0 To 1 Do For Pred:=0 To 1 Do Begin
-    F4NFc[Start2].Flags:=Kf; F4NFc[Start2].Sid:=Sid; F4NFc[Start2].Mul:=FrameBytes+2; F4NFc[Start2].Lsb:=FrameBytes+Pred;
-    F4NFc[Start2].Pd:=Pts*FrameSize; F4NFc[Start2].Hi:=F4NFindHdrIdx(Sid,FrameBytes+Pred,Kf=1);
+    F4NFc[Start2].Flags:=Kf; F4NFc[Start2].Sid:=Sid; F4NFc[Start2].Mul:=Word(FrameBytes+2); F4NFc[Start2].Lsb:=Word(FrameBytes+Pred);
+    F4NFc[Start2].Pd:=SmallInt(Pts*FrameSize); F4NFc[Start2].Hi:=F4NFindHdrIdx(Sid,FrameBytes+Pred,Kf=1);
     Inc(Start2);
    End;
   End Else Begin
-   F4NFc[Start2].Flags:=1 Or 32; F4NFc[Start2].Sid:=Sid; F4NFc[Start2].Mul:=1; F4NFc[Start2].Pd:=FrameSize; Inc(Start2);
+   F4NFc[Start2].Flags:=1 Or 32; F4NFc[Start2].Sid:=Sid; F4NFc[Start2].Mul:=1; F4NFc[Start2].Pd:=SmallInt(FrameSize); Inc(Start2);
   End;
-  If F4S[Sid].Codec='vorbis' Then Begin PredCount:=3; PredTab[0]:=2; PredTab[1]:=9; PredTab[2]:=16; End
+  If F4S[Sid].VDelay>0 Then Begin PredCount:=5; PredTab[0]:=-2; PredTab[1]:=-1; PredTab[2]:=1; PredTab[3]:=3; PredTab[4]:=4; End
+  Else If F4S[Sid].Codec='vorbis' Then Begin PredCount:=3; PredTab[0]:=2; PredTab[1]:=9; PredTab[2]:=16; End
   Else Begin PredCount:=1; PredTab[0]:=1; End;
   For Pred:=0 To PredCount-1 Do Begin
    Start3:=Start2+(End2-Start2)*Pred Div PredCount;
@@ -110871,7 +110946,7 @@ Begin
    PredTab[Pred]:=PredTab[Pred]*FrameSize;
    For Idx:=Start3 To End3-1 Do Begin
     F4NFc[Idx].Flags:=Kf Or 32; F4NFc[Idx].Sid:=Sid; F4NFc[Idx].Mul:=End3-Start3; F4NFc[Idx].Lsb:=Idx-Start3;
-    F4NFc[Idx].Pd:=PredTab[Pred];
+    F4NFc[Idx].Pd:=SmallInt(PredTab[Pred]);
     If IsAudio Then F4NFc[Idx].Hi:=F4NFindHdrIdx(Sid,-1,Kf=1);
    End;
   End;
@@ -110908,7 +110983,7 @@ Begin
  F4NPutV(P,F4NSt[S].Tb);
  F4NPutV(P,F4NSt[S].Shift);
  F4NPutV(P,F4NSt[S].MaxD);
- F4NPutV(P,0);
+ F4NPutV(P,F4S[S].VDelay);
  F4B1(P,0);
  F4NPutV(P,F4S[S].ExtraLen);
  If F4S[S].ExtraLen>0 Then F4BN(P,F4S[S].Extra,F4S[S].ExtraLen);
@@ -110972,14 +111047,22 @@ Begin
  End;
  { informations globales }
  F4NPutV(P,0); F4NPutV(P,0); F4NPutV(P,0); F4NPutV(P,0);
- If F4MBitExact Then F4NPutV(P,0) Else Begin
-  F4NPutV(P,1); F4NAddInfo(P,'encoder','Lavf60.16.100');
+ F4BInit(E); Cnt:=0;
+ For J:=0 To F4GN-1 Do If F4GK[J]<>'encoder' Then Begin
+  T1:=F4GK[J];
+  If T1='artist' Then T1:='Author' Else If T1='date' Then T1:='X-CreationTime' Else If T1='filename' Then T1:='SourceFilename' Else If T1='language' Then T1:='X-Language';
+  F4NAddInfo(E,T1,F4GV[J]); Inc(Cnt);
  End;
+ If Not F4MBitExact Then Begin F4NAddInfo(E,'encoder','Lavf60.16.100'); Inc(Cnt); End;
+ F4NPutV(P,Cnt); F4BCopy(P,E); F4BFree(E);
  F4NPutPacket(F4NOut,F4NStart('I',$AB68B596BA78),P); P.N:=0;
  For I:=0 To F4NS-1 Do Begin
   F4BInit(E); Cnt:=0;
   If F4S[I].MetaN>0 Then Begin
-   For J:=0 To F4S[I].MetaN-1 Do Begin F4NAddInfo(E,F4S[I].MetaK[J],F4S[I].MetaV[J]); Inc(Cnt); End;
+   For J:=0 To F4S[I].MetaN-1 Do Begin
+    T1:=F4S[I].MetaK[J];
+    If T1='artist' Then T1:='Author' Else If T1='date' Then T1:='X-CreationTime' Else If T1='filename' Then T1:='SourceFilename' Else If T1='language' Then T1:='X-Language';
+    F4NAddInfo(E,T1,F4S[I].MetaV[J]); Inc(Cnt); End;
   End Else If F4S[I].EncTag<>'' Then Begin F4NAddInfo(E,'encoder',F4S[I].EncTag); Inc(Cnt); End;
   If F4S[I].Dflt Then Begin F4NAddInfo(E,'Disposition','default'); Inc(Cnt); End;
   If F4S[I].Typ=0 Then Begin
@@ -111191,7 +111274,7 @@ End;
 { ecrit le fichier NUT ; flux et paquets dans F4S }
 Procedure F4MuxNut(Const Target: String);
 Var
- S,K,J,I,Total,Done,Best: LongInt; Q: Int64; Tn,Td: Int64; P: ^TF4Pkt; Found: Boolean; BestDts: Int64; Mn,V: Int64; Got: Boolean; Shift: Int64; Cmp: LongInt;
+ S,K,J,I,Total,Done,Best: LongInt; Q: Int64; Tn,Td: Int64; P: ^TF4Pkt; Found: Boolean; BestDts: Int64; Mn,V: Int64; Got: Boolean; Shift: Int64; Cmp: LongInt; ShS: Array[0..31] Of Int64;
  ID: String;
 Begin
  F4MBitExact:=VGBitExact;
@@ -111220,7 +111303,7 @@ Begin
    If F4S[S].Codec='mpeg4' Then F4S[S].Tag:=$34504D46 Else If F4S[S].Codec='msmpeg4v3' Then F4S[S].Tag:=$3334504D
    Else If F4S[S].Codec='msmpeg4v2' Then F4S[S].Tag:=$3234504D Else If F4S[S].Codec='mjpeg' Then F4S[S].Tag:=$47504A4D
    Else If F4S[S].Codec='h264' Then F4S[S].Tag:=$34363248 Else If F4S[S].Codec='mpeg1video' Then F4S[S].Tag:=$3147504D
-   Else If F4S[S].Codec='mpeg2video' Then F4S[S].Tag:=$3247504D;
+   Else If F4S[S].Codec='mpeg2video' Then F4S[S].Tag:=$3247504D Else If F4S[S].Codec='rawvideo' Then F4S[S].Tag:=$0F424752;
   End
   Else If F4S[S].Tag=0 Then Begin
    If F4S[S].Codec='mp2' Then F4S[S].Tag:=$50 Else If F4S[S].Codec='mp3' Then F4S[S].Tag:=$55
@@ -111238,20 +111321,19 @@ Begin
   P^.Pts:=F4RescQ(P^.Pts,F4S[S].TbN,F4S[S].TbD,F4NTbN[F4NSt[S].Tb],F4NTbD[F4NSt[S].Tb],4);
   P^.Dts:=F4RescQ(P^.Dts,F4S[S].TbN,F4S[S].TbD,F4NTbN[F4NSt[S].Tb],F4NTbD[F4NSt[S].Tb],4);
  End;
- { avoid_negative_ts (dts) }
- Got:=False; Mn:=0;
+ { avoid_negative_ts (dts) : decalage pris dans la base du flux au dts minimal, puis converti par flux }
+ Got:=False; Mn:=0; Best:=0; FillChar(ShS,SizeOf(ShS),0);
  For S:=0 To F4NS-1 Do If F4S[S].NPk>0 Then Begin
   V:=F4S[S].P^[0].Dts;
   If V<>F4NoPts Then Begin
-   { dans la base du premier flux }
-   If (Not Got) Or (F4NCmpTs(V,F4NTbN[F4NSt[S].Tb],F4NTbD[F4NSt[S].Tb],Mn,F4NTbN[F4NSt[0].Tb],F4NTbD[F4NSt[0].Tb])<0) Then Begin
-    Mn:=F4MulDivR(V,F4NTbN[F4NSt[S].Tb]*F4NTbD[F4NSt[0].Tb],F4NTbD[F4NSt[S].Tb]*F4NTbN[F4NSt[0].Tb],4); Got:=True;
+   If (Not Got) Or (F4NCmpTs(V,F4NTbN[F4NSt[S].Tb],F4NTbD[F4NSt[S].Tb],Mn,F4NTbN[F4NSt[Best].Tb],F4NTbD[F4NSt[Best].Tb])<0) Then Begin
+    Mn:=V; Best:=S; Got:=True;
    End;
   End;
  End;
  If Got And (Mn<0) Then
   For S:=0 To F4NS-1 Do Begin
-   Shift:=F4MulDivR(-Mn,F4NTbN[F4NSt[0].Tb]*F4NTbD[F4NSt[S].Tb],F4NTbD[F4NSt[0].Tb]*F4NTbN[F4NSt[S].Tb],3);
+   Shift:=F4MulDivR(-Mn,F4NTbN[F4NSt[Best].Tb]*F4NTbD[F4NSt[S].Tb],F4NTbD[F4NSt[Best].Tb]*F4NTbN[F4NSt[S].Tb],4); ShS[S]:=Shift;
    For K:=0 To F4S[S].NPk-1 Do Begin
     P:=@F4S[S].P^[K];
     If P^.Dts<>F4NoPts Then P^.Dts:=P^.Dts+Shift;
@@ -111270,7 +111352,7 @@ Begin
   For S:=0 To F4NS-1 Do If F4NSt[S].Cur<F4S[S].NPk Then Begin
    If Best<0 Then Begin Best:=S; End
    Else Begin
-    Cmp:=F4NCmpTs(F4S[S].P^[F4NSt[S].Cur].Dts,F4NTbN[F4NSt[S].Tb],F4NTbD[F4NSt[S].Tb],F4S[Best].P^[F4NSt[Best].Cur].Dts,F4NTbN[F4NSt[Best].Tb],F4NTbD[F4NSt[Best].Tb]);
+    Cmp:=F4NCmpTs(F4S[S].P^[F4NSt[S].Cur].Dts-ShS[S],F4NTbN[F4NSt[S].Tb],F4NTbD[F4NSt[S].Tb],F4S[Best].P^[F4NSt[Best].Cur].Dts-ShS[Best],F4NTbN[F4NSt[Best].Tb],F4NTbD[F4NSt[Best].Tb]);
     If Cmp<0 Then Best:=S;
    End;
   End;
@@ -111639,12 +111721,12 @@ End;
 
 Procedure F4MkvStreams(Const Source: String);
 Type TTr=Record
-  Num,Typ,Dflt,Fo9A,Fo9D,Dw,Dh,Du,PrivAt,PrivLen,W,H,Ch,Bits,S: LongInt; Uid,DefDur,Delay: Int64; Rate: Double;
+  Num,Typ,Dflt,Fo9A,Fo9D,Dw,Dh,Du,PrivAt,PrivLen,W,H,Ch,Bits,S: LongInt; Uid,DefDur,Delay,First,CumAll: Int64; HaveFirst: Boolean; Rate: Double;
   Codec: String[40]; Name,Lang: String[64]; Enc: String[64]; CSpace: LongWord; HasCs: Boolean;
-  Trc,Mat,Pri,Rng,Sx,Sy: LongInt;
+  Trc,Mat,Pri,Rng,Sx,Sy,StripAt,StripLen: LongInt;
  End;
 Var
- Tr: Array[0..F4MaxSt-1] Of TTr; NT,I,J,K,At,A2,A3,A4,Seg,SegEnd,Da,Dl,D2,L2,D3,L3,D4,L4,Bt,Fl,Lacing,Tn,Ts: LongInt; Id,Id2,Id3,Id4: Int64; Unk,U2,U3,U4: Boolean;
+ Tr: Array[0..F4MaxSt-1] Of TTr; NT,I,J,K,At,A2,A3,A4,Seg,SegEnd,Da,Dl,D2,L2,D3,L3,D4,L4,Bt,Fl,Lacing,Tn,Ts: LongInt; Id,Id2,Id3,Id4,Id5: Int64; Unk,U2,U3,U4,U5: Boolean; A5,D5,L5: LongInt; Algo: Int64;
  Scale,ClTime,Dur,TcAbs: Int64; Fcc,Cd: String; St: LongInt; Ext: PEABuffer;
  HaveBlk,Key: Boolean; BAt,BLen,BDur,BDisc: Int64; Ref: Boolean; Sar_n,Sar_d: Int64; MinPts: Int64; Pk: Int64;
  TagUid: Int64; TagEnc: String; TagName: String; Xl,Xl2,Xs,Xc,Xf,Xg: LongInt;
@@ -111658,29 +111740,84 @@ Begin
  End;
 End;
 Procedure DoBlock(DatA,DatL: LongInt; Cl,BlkDur,Disc: Int64; IsKey: Boolean);
-Var Ln,TNum,Ti,Rel,Flg,Sk: LongInt; Num: Int64; PtsT,D: Int64;
+Var Ln,Ti,Rel,Flg,Sk,Lacing,Laces,N,P0,PE,Ln2,Sum,SzN: LongInt; Num,PtsT,D,LD,Dv,Sg: Int64; Sizes: Array[0..255] Of LongInt; Buf: PEABuffer; St2,Cc: LongInt; Pts0,CumS: Int64;
 Begin
  Num:=MKVint(DatA,Ln); If Ln=0 Then Exit;
  Ti:=-1; For Sk:=0 To NT-1 Do If Tr[Sk].Num=Num Then Ti:=Sk;
  If (Ti<0) Or (DatL<Ln+4) Then Exit;
  Rel:=MKB(DatA+Ln)*256+MKB(DatA+Ln+1); If Rel>=32768 Then Dec(Rel,65536);
  Flg:=MKB(DatA+Ln+2);
- If (Flg And 6)<>0 Then Fail('Matroska: lacing non pris en charge pour la copie.');
  PtsT:=Cl+Rel;
- D:=BlkDur;
- If (D=0) And (Tr[Ti].DefDur>0) Then D:=Tr[Ti].DefDur Div Scale;
- If (Tr[Ti].Typ=2) And ((F4S[Tr[Ti].S].Codec='mp2') Or (F4S[Tr[Ti].S].Codec='mp3') Or (F4S[Tr[Ti].S].Codec='mp1') Or (F4S[Tr[Ti].S].Codec='ac3') Or (F4S[Tr[Ti].S].Codec='aac') Or (F4S[Tr[Ti].S].Codec='flac')) Then D:=0;
- If (D=0) And (Tr[Ti].Typ=2) Then Begin
-  Sk:=F4AudioPktSamples(F4S[Tr[Ti].S].Codec,F4S[Tr[Ti].S].Rate,F4S[Tr[Ti].S].Chans,DatL-Ln-3);
-  If F4S[Tr[Ti].S].Codec='flac' Then F4FlacHdr(PEABuffer(@MKF^[DatA+Ln+3]),0,DatL-Ln-3,Sk);
-  If Sk>0 Then D:=F4MulDivR(Sk,1000000000 Div Scale,Tr[Ti].S*0+F4S[Tr[Ti].S].Rate,0);
- End;
  If (Flg And 128)<>0 Then IsKey:=True;
  If PtsT<MinPts Then MinPts:=PtsT;
- Sk:=0;
- If (Disc>0) And (Tr[Ti].Typ=2) Then Sk:=LongInt(F4MulDivR(Disc,F4S[Tr[Ti].S].Rate,1000000000,4));
- If F4S[Tr[Ti].S].Codec='h263' Then IsKey:=True;
- F4AddPkt(Tr[Ti].S,@MKF^[DatA+Ln+3],DatL-Ln-3,PtsT,PtsT,D,IsKey,0,Sk);
+ St2:=Tr[Ti].S;
+ If Not Tr[Ti].HaveFirst Then Begin Tr[Ti].HaveFirst:=True; Tr[Ti].First:=PtsT; End;
+ P0:=DatA+Ln+3; PE:=DatA+DatL;
+ Lacing:=(Flg And 6) Shr 1; Laces:=1;
+ If Lacing<>0 Then Begin
+  Laces:=MKB(P0)+1; Inc(P0);
+  Case Lacing Of
+   1: Begin
+     Sum:=0;
+     For N:=0 To Laces-2 Do Begin
+      SzN:=0;
+      Repeat
+       If P0>=PE Then Exit;
+       Cc:=MKB(P0); Inc(P0); Inc(SzN,Cc);
+      Until Cc<>255;
+      Sizes[N]:=SzN; Inc(Sum,SzN);
+     End;
+     If Sum>PE-P0 Then Exit;
+     Sizes[Laces-1]:=PE-P0-Sum;
+    End;
+   2: Begin
+     If (PE-P0) Mod Laces<>0 Then Exit;
+     For N:=0 To Laces-1 Do Sizes[N]:=(PE-P0) Div Laces;
+    End;
+   3: Begin
+     Sg:=MKVint(P0,Ln2); If Ln2=0 Then Exit;
+     Inc(P0,Ln2); Sizes[0]:=Sg; Sum:=Sizes[0];
+     For N:=1 To Laces-2 Do Begin
+      Sg:=MKVint(P0,Ln2); If Ln2=0 Then Exit;
+      Inc(P0,Ln2);
+      Sg:=Sg-((Int64(1) Shl (7*Ln2-1))-1);
+      Sizes[N]:=Sizes[N-1]+LongInt(Sg); If Sizes[N]<0 Then Exit;
+      Inc(Sum,Sizes[N]);
+     End;
+     If Sum>PE-P0 Then Exit;
+     Sizes[Laces-1]:=PE-P0-Sum;
+    End;
+  End;
+ End Else Sizes[0]:=PE-P0;
+ D:=BlkDur; Pts0:=PtsT; CumS:=0;
+ If (D=0) And (Tr[Ti].DefDur>0) Then D:=Tr[Ti].DefDur*Laces Div Scale;
+ For N:=0 To Laces-1 Do Begin
+  LD:=D*(N+1) Div Laces-D*N Div Laces;
+  Dv:=LD;
+  If (Tr[Ti].Typ=2) And ((F4S[St2].Codec='mp2') Or (F4S[St2].Codec='mp3') Or (F4S[St2].Codec='mp1') Or (F4S[St2].Codec='ac3') Or (F4S[St2].Codec='aac') Or (F4S[St2].Codec='flac')) Then Dv:=0;
+  If (Dv=0) And (Tr[Ti].Typ=2) Then Begin
+   Sk:=F4AudioPktSamples(F4S[St2].Codec,F4S[St2].Rate,F4S[St2].Chans,Sizes[N]);
+   If F4S[St2].Codec='flac' Then F4FlacHdr(PEABuffer(@MKF^[P0]),0,Sizes[N],Sk);
+   If Sk>0 Then Dv:=F4MulDivR(Sk,1000000000 Div Scale,F4S[St2].Rate,0);
+  End;
+  Sk:=0;
+  If (Disc>0) And (Tr[Ti].Typ=2) And (N=Laces-1) Then Sk:=LongInt(F4MulDivR(Disc,F4S[St2].Rate,1000000000,4));
+  If F4S[St2].Codec='h263' Then IsKey:=True;
+  If Sizes[N]>0 Then Begin
+   GetMem(Buf,Sizes[N]+Tr[Ti].StripLen+16);
+   If Tr[Ti].StripLen>0 Then Move(MKF^[Tr[Ti].StripAt],Buf^,Tr[Ti].StripLen);
+   Move(MKF^[P0],Buf^[Tr[Ti].StripLen],Sizes[N]);
+   F4AddPkt(St2,Buf,Sizes[N]+Tr[Ti].StripLen,PtsT,PtsT,Dv,IsKey,0,Sk);
+   FreeMem(Buf);
+  End;
+  Inc(P0,Sizes[N]);
+  If Tr[Ti].Typ=2 Then Inc(Tr[Ti].CumAll,F4AudioPktSamples(F4S[St2].Codec,F4S[St2].Rate,F4S[St2].Chans,Sizes[N]));
+  If LD<>0 Then Inc(PtsT,LD)
+  Else If (Tr[Ti].Typ=2) And (F4S[St2].Rate>0) Then Begin
+   { pas de duree de bloc : horodatage exact d'apres les echantillons accumules }
+   PtsT:=Tr[Ti].First+F4MulDivR(Tr[Ti].CumAll,1000000000 Div Scale,F4S[St2].Rate,4);
+  End;
+ End;
 End;
 Procedure Cluster(CA,CE: LongInt);
 Var P,Da2,Dl2,Pa,Pe,Da3,Dl3,Aa: LongInt; I1,I2: Int64; Uk1,Uk2: Boolean; Cl2,Bd,Dsc: Int64; Bat,Bl: LongInt; Have,Refd: Boolean;
@@ -111739,7 +111876,19 @@ Begin
       $63A2: Begin Tr[NT].PrivAt:=D3; Tr[NT].PrivLen:=L3; End;
       $23E383: Tr[NT].DefDur:=MKUInt(D3,L3);
       $56AA: Tr[NT].Delay:=MKUInt(D3,L3);
-      $6D80: Fail('matroska: ContentEncodings non pris en charge.');
+      $6D80: Begin
+        K:=D3;
+        While F4EbNext(K,D3+L3,Id4,D4,L4,U4) Do If Id4=$6240 Then Begin
+         J:=D4;
+         While F4EbNext(J,D4+L4,Id,Da,Dl,Unk) Do If Id=$5034 Then Begin
+          A5:=Da; Algo:=0;
+          While F4EbNext(A5,Da+Dl,Id5,D5,L5,U5) Do Begin
+           If Id5=$4254 Then Algo:=MKUInt(D5,L5) Else If Id5=$4255 Then Begin Tr[NT].StripAt:=D5; Tr[NT].StripLen:=L5; End;
+          End;
+          If Algo<>3 Then Fail('matroska: ContentEncodings (zlib/bzlib/lzo/chiffrement) non pris en charge.');
+         End Else If Id=$5035 Then Fail('matroska: ContentEncodings chiffres non pris en charge.');
+        End;
+       End;
       $E0: Begin
         K:=D3;
         While F4EbNext(K,D3+L3,Id4,D4,L4,U4) Do Begin
@@ -111908,9 +112057,523 @@ Begin
  FreeMem(MKF); MKF:=Nil;
 End;
 
+{ copie vers NUT : ffmpeg donne aux paquets audio mp2/mp3/ac3/aac/pcm des horodatages exacts en echantillons }
+Procedure F4SampleExactAudio;
+Var S,K: LongInt; C: String; Cum,S0: Int64; N: LongInt;
+Begin
+ For S:=0 To F4NS-1 Do If F4S[S].Typ=1 Then Begin
+  C:=F4S[S].Codec;
+  If ((C='mp2') Or (C='mp3') Or (C='ac3') Or (C='aac') Or (Copy(C,1,4)='pcm_')) And (F4S[S].NPk>0) And (F4S[S].Rate>0) Then Begin
+   S0:=F4RescQ(F4S[S].P^[0].Pts+F4S[S].Off,F4S[S].TbN,F4S[S].TbD,1,F4S[S].Rate,4);
+   Cum:=S0;
+   For K:=0 To F4S[S].NPk-1 Do Begin
+    N:=F4AudioPktSamples(C,F4S[S].Rate,F4S[S].Chans,F4S[S].P^[K].Len);
+    F4S[S].P^[K].Pts:=Cum; F4S[S].P^[K].Dts:=Cum; F4S[S].P^[K].Dur:=N;
+    Inc(Cum,N);
+   End;
+   F4S[S].TbN:=1; F4S[S].TbD:=F4S[S].Rate; F4S[S].Off:=0;
+  End;
+ End;
+End;
+
 Procedure F4MkvFromMkv(Const Source,Target: String; Webm: Boolean);
 Begin
  F4MkvStreams(Source);
+ If F4OutNut Then F4SampleExactAudio;
+ F4MuxOut(Target,Webm);
+ F4Reset;
+End;
+
+{ ---- MP4 / MOV -> flux (copie vers Matroska / NUT) ---- }
+Var F4MB: PEABuffer; F4MBSz: LongInt;
+Function F4M32(At: LongInt): Int64;
+Begin If (At<0) Or (At+4>F4MBSz) Then F4M32:=0 Else F4M32:=F4RB32(F4MB,At); End;
+Function F4M16(At: LongInt): LongInt;
+Begin If (At<0) Or (At+2>F4MBSz) Then F4M16:=0 Else F4M16:=F4MB^[At]*256+F4MB^[At+1]; End;
+Function F4M64(At: LongInt): Int64;
+Begin F4M64:=(F4M32(At) Shl 32) Or F4M32(At+4); End;
+Function F4MBox(Var At: LongInt; Fin: LongInt; Var Typ: String; Var DAt,DEnd: LongInt): Boolean;
+Var Sz: Int64; Hl: LongInt;
+Begin
+ F4MBox:=False;
+ If At+8>Fin Then Exit;
+ Sz:=F4M32(At); Typ:=F4Tag4(F4MB,At+4); Hl:=8;
+ If Sz=1 Then Begin Sz:=F4M64(At+8); Hl:=16; End;
+ If Sz=0 Then Sz:=Fin-At;
+ If Sz<Hl Then Exit;
+ If At+Sz>Fin Then Sz:=Fin-At;
+ DAt:=At+Hl; DEnd:=At+LongInt(Sz); At:=DEnd;
+ F4MBox:=True;
+End;
+{ longueur de descripteur MPEG-4 (7 bits par octet) }
+Function F4MDescLen(Var At: LongInt): LongInt;
+Var B,N,R: LongInt;
+Begin R:=0; N:=0; Repeat B:=F4MB^[At]; Inc(At); R:=(R Shl 7) Or (B And 127); Inc(N); Until ((B And 128)=0) Or (N>=4); F4MDescLen:=R; End;
+
+Type TMv=Record
+  TS,Typ,Wd,Ht,Ch,Rt: LongInt; Cod: String[8]; Obj: LongInt; CAt,CLen: LongInt; Hnd: String[40]; Vend: String[40]; Enc: String[40]; Enabled: Boolean; PaspN,PaspD,Avg: LongInt; Lang: String[4];
+  SttsAt,CttsAt,StssAt,StszAt,StscAt,StcoAt: LongInt; Co64: Boolean; Edit: Int64; HaveEdit: Boolean; Ok: Boolean;
+ End;
+
+Procedure F4MovParseSampleEntry(Var Tk: TMv; D6,E6: LongInt);
+Var E0,Sz,Ver,A,Fin,D,E,P,L,Tg: LongInt; Ty,Xs: String;
+Begin
+ E0:=D6+8; Sz:=LongInt(F4M32(E0)); Tk.Cod:=F4Tag4(F4MB,E0+4); Fin:=E0+Sz; If Fin>E6 Then Fin:=E6;
+ Tk.Vend:=''; For A:=0 To 3 Do Begin
+  Ver:=F4MB^[E0+20+A]; If (Ver>=32) And (Ver<127) Then Tk.Vend:=Tk.Vend+Chr(Ver) Else Begin Str(Ver,Xs); Tk.Vend:=Tk.Vend+'['+Xs+']'; End;
+ End;
+ Tk.Enc:='';
+ If Tk.Typ=1 Then Begin
+  Ver:=F4MB^[E0+50]; If Ver>31 Then Ver:=31;
+  For A:=1 To Ver Do If F4MB^[E0+50+A]<>0 Then Tk.Enc:=Tk.Enc+Chr(F4MB^[E0+50+A]);
+ End;
+ If Tk.Typ=1 Then Begin
+  Tk.Wd:=F4M16(E0+32); Tk.Ht:=F4M16(E0+34); A:=E0+86;
+ End Else Begin
+  Ver:=F4M16(E0+16); Tk.Ch:=F4M16(E0+24); Tk.Rt:=F4M16(E0+32); A:=E0+36;
+  If Ver=1 Then Inc(A,16);
+ End;
+ While F4MBox(A,Fin,Ty,D,E) Do Begin
+  If Ty='wave' Then A:=D
+  Else If Ty='pasp' Then Begin Tk.PaspN:=LongInt(F4M32(D)); Tk.PaspD:=LongInt(F4M32(D+4)); End
+  Else If (Ty='avcC') Or (Ty='dac3') Then Begin Tk.CAt:=D; Tk.CLen:=E-D; End
+  Else If Ty='esds' Then Begin
+   P:=D+4;
+   While P<E Do Begin
+    Tg:=F4MB^[P]; Inc(P); L:=F4MDescLen(P);
+    If Tg=3 Then Begin Inc(P,2); If (F4MB^[P-1] And $80)<>0 Then Inc(P,2); Inc(P); End
+    Else If Tg=4 Then Begin Tk.Obj:=F4MB^[P]; Tk.Avg:=LongInt(F4M32(P+9)); Inc(P,13); End
+    Else If Tg=5 Then Begin Tk.CAt:=P; Tk.CLen:=L; Break; End
+    Else Inc(P,L);
+   End;
+  End;
+ End;
+End;
+
+Procedure F4MovBuild(Const Tk: TMv; S: LongInt);
+Var Ns,NCh,StN,CtN,SsN,Vers,SizeFix,Chk,J,N,Sample: LongInt; SIdx,SLeft,CtI,CtLeft,SsI: LongInt; Dl,Dts,CtVal,OffV,Sz1,Sub: Int64; KeyF: Boolean;
+Begin
+ SizeFix:=LongInt(F4M32(Tk.StszAt+4)); Ns:=LongInt(F4M32(Tk.StszAt+8)); NCh:=LongInt(F4M32(Tk.StcoAt+4));
+ StN:=LongInt(F4M32(Tk.SttsAt+4)); SIdx:=0; SLeft:=0; Dl:=0;
+ CtN:=0; Vers:=0; If Tk.CttsAt>0 Then Begin CtN:=LongInt(F4M32(Tk.CttsAt+4)); Vers:=F4MB^[Tk.CttsAt]; End;
+ CtI:=0; CtLeft:=0; CtVal:=0;
+ SsN:=0; If Tk.StssAt>0 Then SsN:=LongInt(F4M32(Tk.StssAt+4)); SsI:=0;
+ Dts:=0; Sample:=0; Sub:=0; If Tk.HaveEdit Then Sub:=Tk.Edit;
+ For Chk:=1 To NCh Do Begin
+  N:=0;
+  For J:=0 To LongInt(F4M32(Tk.StscAt+4))-1 Do
+   If LongInt(F4M32(Tk.StscAt+8+J*12))<=Chk Then N:=LongInt(F4M32(Tk.StscAt+8+J*12+4));
+  If Tk.Co64 Then OffV:=F4M64(Tk.StcoAt+8+(Chk-1)*8) Else OffV:=F4M32(Tk.StcoAt+8+(Chk-1)*4);
+  For J:=1 To N Do Begin
+   If Sample>=Ns Then Exit;
+   If SizeFix<>0 Then Sz1:=SizeFix Else Sz1:=F4M32(Tk.StszAt+12+Sample*4);
+   While SLeft=0 Do Begin
+    If SIdx>=StN Then Begin SLeft:=1; Dl:=0; Break; End;
+    SLeft:=LongInt(F4M32(Tk.SttsAt+8+SIdx*8)); Dl:=F4M32(Tk.SttsAt+8+SIdx*8+4); Inc(SIdx);
+   End;
+   CtVal:=0;
+   If CtN>0 Then Begin
+    While (CtLeft=0) And (CtI<CtN) Do Begin
+     CtLeft:=LongInt(F4M32(Tk.CttsAt+8+CtI*8)); CtVal:=F4M32(Tk.CttsAt+8+CtI*8+4);
+     If CtVal>=$80000000 Then CtVal:=CtVal-$100000000;
+     Inc(CtI);
+    End;
+    If CtLeft>0 Then Dec(CtLeft);
+    If CtI>0 Then Begin CtVal:=F4M32(Tk.CttsAt+8+(CtI-1)*8+4); If CtVal>=$80000000 Then CtVal:=CtVal-$100000000; End;
+   End;
+   KeyF:=True;
+   If Tk.StssAt>0 Then Begin
+    KeyF:=False;
+    While (SsI<SsN) And (F4M32(Tk.StssAt+8+SsI*4)<Sample+1) Do Inc(SsI);
+    If (SsI<SsN) And (F4M32(Tk.StssAt+8+SsI*4)=Sample+1) Then KeyF:=True;
+   End;
+   If (OffV<0) Or (OffV+Sz1>F4MBSz) Then Exit;
+   If Not (Tk.HaveEdit And (Dts+CtVal+Dl<Sub)) Then
+    F4AddPkt(S,@F4MB^[LongInt(OffV)],LongInt(Sz1),Dts+CtVal-Sub,Dts-Sub,Dl,KeyF,0,0);
+   Inc(Dts,Dl); Dec(SLeft); Inc(OffV,Sz1); Inc(Sample);
+  End;
+ End;
+End;
+
+
+{ ---- analyse du SPS H.264 (avcC) : dimensions rognees, VUI (SAR, couleur, position chroma) ---- }
+Var F4HB: Array[0..511] Of Byte; F4HN, F4HP: LongInt;
+Function F4HBit: LongInt;
+Begin
+ If F4HP>=F4HN*8 Then Begin F4HBit:=0; Inc(F4HP); Exit; End;
+ F4HBit:=(F4HB[F4HP Shr 3] Shr (7-(F4HP And 7))) And 1; Inc(F4HP);
+End;
+Function F4HBits(N: LongInt): LongInt;
+Var R: LongInt;
+Begin R:=0; While N>0 Do Begin R:=(R Shl 1) Or F4HBit; Dec(N); End; F4HBits:=R; End;
+Function F4HUe: LongInt;
+Var Z: LongInt;
+Begin
+ Z:=0; While (F4HBit=0) And (Z<32) And (F4HP<F4HN*8+40) Do Inc(Z);
+ If Z=0 Then F4HUe:=0 Else F4HUe:=LongInt((Int64(1) Shl Z)-1+F4HBits(Z));
+End;
+Function F4HSe: LongInt;
+Var K: LongInt;
+Begin K:=F4HUe; If (K And 1)<>0 Then F4HSe:=(K+1) Div 2 Else F4HSe:=-(K Div 2); End;
+Procedure F4HScaling(Sz: LongInt);
+Var L,N,D: LongInt;
+Begin
+ L:=8; N:=8;
+ While Sz>0 Do Begin
+  If N<>0 Then Begin D:=F4HSe; N:=(L+D+256) Mod 256; End;
+  If N<>0 Then L:=N;
+  Dec(Sz);
+ End;
+End;
+Procedure F4H264Sps(S: LongInt; At,Len: LongInt);
+Var P,Sl,I,Prof,Chroma,Bd,Pc,Cn,Wm,Hm,Fmo,Cl,Cr,Ct,Cb,Cux,Cuy,Idc,Sw,Sh,Vf,Lvl,Refs,Reorder: LongInt; Sep: Boolean; Restr: Boolean;
+ Tab: Array[1..16] Of LongInt;
+Begin
+ If (Len<8) Or (F4MB^[At]<>1) Or ((F4MB^[At+5] And 31)<1) Then Exit;
+ Sl:=F4MB^[At+6]*256+F4MB^[At+7]; P:=At+8;
+ If (Sl<5) Or (Sl>500) Or (P+Sl>At+Len) Then Exit;
+ { retire les octets d'emulation de depart, saute l'en-tete NAL }
+ F4HN:=0; I:=1;
+ While I<Sl Do Begin
+  If (I>=3) And (F4MB^[P+I]=3) And (F4MB^[P+I-1]=0) And (F4MB^[P+I-2]=0) Then Begin Inc(I); Continue; End;
+  F4HB[F4HN]:=F4MB^[P+I]; Inc(F4HN); Inc(I);
+ End;
+ F4HP:=0;
+ Prof:=F4HBits(8); F4HBits(8); Lvl:=F4HBits(8); F4HUe;
+ Chroma:=1; Bd:=8; Sep:=False;
+ If (Prof=100) Or (Prof=110) Or (Prof=122) Or (Prof=244) Or (Prof=44) Or (Prof=83) Or (Prof=86) Or (Prof=118) Or (Prof=128) Or (Prof=138) Or (Prof=139) Or (Prof=134) Or (Prof=135) Then Begin
+  Chroma:=F4HUe; If Chroma=3 Then Sep:=F4HBit=1;
+  Bd:=F4HUe+8; F4HUe; F4HBit;
+  If F4HBit=1 Then Begin
+   If Chroma<>3 Then Cn:=8 Else Cn:=12;
+   For I:=0 To Cn-1 Do If F4HBit=1 Then If I<6 Then F4HScaling(16) Else F4HScaling(64);
+  End;
+ End;
+ F4HUe; Pc:=F4HUe;
+ If Pc=0 Then F4HUe
+ Else If Pc=1 Then Begin F4HBit; F4HSe; F4HSe; Cn:=F4HUe; For I:=1 To Cn Do F4HSe; End;
+ Refs:=F4HUe; F4HBit; Wm:=F4HUe+1; Hm:=F4HUe+1; Fmo:=F4HBit;
+ If Fmo=0 Then F4HBit;
+ F4HBit;
+ Cl:=0; Cr:=0; Ct:=0; Cb:=0;
+ If F4HBit=1 Then Begin Cl:=F4HUe; Cr:=F4HUe; Ct:=F4HUe; Cb:=F4HUe; End;
+ If F4HP>=F4HN*8 Then Exit;
+ If (Chroma=1) Or (Chroma=2) Then Cux:=2 Else Cux:=1;
+ If Chroma=1 Then Cuy:=2 Else Cuy:=1;
+ If Sep Then Begin Cux:=1; Cuy:=1; End;
+ Cuy:=Cuy*(2-Fmo);
+ Sw:=Wm*16-(Cl+Cr)*Cux; Sh:=(2-Fmo)*Hm*16-(Ct+Cb)*Cuy;
+ If (Sw>0) And (Sh>0) And (Sw<=65535) And (Sh<=65535) Then Begin F4S[S].W:=Sw; F4S[S].H:=Sh; End;
+ If Fmo=1 Then F4S[S].FieldOrder:=1 Else F4S[S].FieldOrder:=2;
+ If (Chroma=1) And (Bd=8) Then F4S[S].PixFmt:='yuv420p'
+ Else If (Chroma=2) And (Bd=8) Then F4S[S].PixFmt:='yuv422p'
+ Else If (Chroma=3) And (Bd=8) Then F4S[S].PixFmt:='yuv444p'
+ Else If Chroma=0 Then F4S[S].PixFmt:='gray' Else F4S[S].PixFmt:='yuv420p10le';
+ If Chroma=1 Then F4S[S].ChromaLoc:=2 Else F4S[S].ChromaLoc:=1;
+ Restr:=False; Reorder:=0;
+ If F4HBit=1 Then Begin  { vui_parameters_present }
+  If F4HBit=1 Then Begin
+   Idc:=F4HBits(8);
+   If Idc=255 Then Begin Sw:=F4HBits(16); Sh:=F4HBits(16); If (Sw>0) And (Sh>0) Then Begin F4S[S].SarN:=Sw; F4S[S].SarD:=Sh; End; End
+   Else If (Idc>=1) And (Idc<=16) Then Begin
+    Tab[1]:=1; Tab[2]:=12; Tab[3]:=10; Tab[4]:=16; Tab[5]:=40; Tab[6]:=24; Tab[7]:=20; Tab[8]:=32; Tab[9]:=80; Tab[10]:=18; Tab[11]:=15; Tab[12]:=64; Tab[13]:=160; Tab[14]:=4; Tab[15]:=3; Tab[16]:=2;
+    F4S[S].SarN:=Tab[Idc];
+    Case Idc Of 1: Sh:=1; 2: Sh:=11; 3: Sh:=11; 4: Sh:=11; 5: Sh:=33; 6: Sh:=11; 7: Sh:=11; 8: Sh:=11; 9: Sh:=33; 10: Sh:=11; 11: Sh:=11; 12: Sh:=33; 13: Sh:=99; 14: Sh:=3; 15: Sh:=2; Else Sh:=1; End;
+    F4S[S].SarD:=Sh;
+   End;
+  End;
+  If F4HBit=1 Then F4HBit;
+  If F4HBit=1 Then Begin
+   F4HBits(3); Vf:=F4HBit;
+   If Vf=1 Then F4S[S].CRange:=2 Else F4S[S].CRange:=1;
+   If F4HBit=1 Then Begin
+    F4S[S].CPri:=F4HBits(8); F4S[S].CTrc:=F4HBits(8); F4S[S].CSpace:=F4HBits(8);
+   End;
+  End;
+  If F4HBit=1 Then Begin
+   Cl:=F4HUe; F4HUe;
+   If (Cl>=0) And (Cl<=5) Then F4S[S].ChromaLoc:=Cl+1 Else F4S[S].ChromaLoc:=0;
+  End;
+  If F4HBit=1 Then Begin F4HBits(32); F4HBits(32); F4HBit; End;
+  Cn:=0;
+  For I:=1 To 2 Do If F4HBit=1 Then Begin
+   Cn:=1; Idc:=F4HUe; F4HBits(8);
+   For Vf:=0 To Idc Do Begin F4HUe; F4HUe; F4HBit; End;
+   F4HBits(20);
+  End;
+  If Cn=1 Then F4HBit;
+  F4HBit;
+  If F4HBit=1 Then Begin
+   F4HBit; F4HUe; F4HUe; F4HUe; F4HUe; Reorder:=F4HUe; F4HUe; Restr:=F4HP<=F4HN*8;
+  End;
+ End;
+ If Not Restr Then Begin
+  Reorder:=0;
+  If Refs>0 Then Begin
+   Reorder:=15;
+   Case Lvl Of 9,10: Cn:=396; 11: Cn:=900; 12,13,20: Cn:=2376; 21: Cn:=4752; 22,30: Cn:=8100; 31: Cn:=18000; 32: Cn:=20480; 40,41: Cn:=32768; 42: Cn:=34816; 50: Cn:=110400; 51,52: Cn:=184320; Else Cn:=0; End;
+   If Cn>0 Then Begin Idc:=Cn Div (Wm*Hm); If Idc<Reorder Then Reorder:=Idc; End;
+  End;
+ End;
+ F4S[S].VDelay:=Reorder;
+End;
+
+
+{ ---- metadonnees globales MOV/MP4 : udta (QuickTime) et udta/meta/ilst ---- }
+Function F4MovKey(Const Ty: String): String;
+Begin
+ F4MovKey:='';
+ If Ty=#169'nam' Then F4MovKey:='title' Else If Ty=#169'ART' Then F4MovKey:='artist'
+ Else If Ty=#169'wrt' Then F4MovKey:='composer' Else If Ty=#169'alb' Then F4MovKey:='album'
+ Else If Ty=#169'day' Then F4MovKey:='date' Else If Ty=#169'too' Then F4MovKey:='encoder'
+ Else If Ty=#169'cmt' Then F4MovKey:='comment' Else If Ty=#169'gen' Then F4MovKey:='genre'
+ Else If Ty=#169'cpy' Then F4MovKey:='copyright' Else If Ty=#169'grp' Then F4MovKey:='grouping'
+ Else If Ty=#169'lyr' Then F4MovKey:='lyrics' Else If Ty=#169'des' Then F4MovKey:='description'
+ Else If Ty='desc' Then F4MovKey:='description' Else If Ty='cprt' Then F4MovKey:='copyright'
+ Else If Ty='aART' Then F4MovKey:='album_artist' Else If Ty=#169'swr' Then F4MovKey:='encoder'
+ Else If Ty='keyw' Then F4MovKey:='keywords' Else If Ty='tvsh' Then F4MovKey:='show'
+ Else If Ty='tven' Then F4MovKey:='episode_id' Else If Ty='tvnn' Then F4MovKey:='network'
+ Else If Ty='trkn' Then F4MovKey:='track' Else If Ty='disk' Then F4MovKey:='disc';
+End;
+
+Procedure F4MovUdta(Dat,Fin: LongInt);
+Var A,A2,A3,A4,D,E,D2,E2,D3,E3,D4,E4,L: LongInt; Ty,T2,T3,T4,K,V: String;
+Begin
+ A:=Dat;
+ While F4MBox(A,Fin,Ty,D,E) Do Begin
+  If Ty='meta' Then Begin
+   A2:=D; If F4M32(D)=0 Then Inc(A2,4);
+   While F4MBox(A2,E,T2,D2,E2) Do If T2='ilst' Then Begin
+    A3:=D2;
+    While F4MBox(A3,E2,T3,D3,E3) Do Begin
+     K:=F4MovKey(T3);
+     If K<>'' Then Begin
+      A4:=D3;
+      While F4MBox(A4,E3,T4,D4,E4) Do If T4='data' Then Begin
+       V:='';
+       If (K='track') Or (K='disc') Then Begin
+        L:=F4M16(D4+10); Str(L,V);
+        If F4M16(D4+12)>0 Then Begin Str(F4M16(D4+12),T4); V:=V+'/'+T4; End;
+       End Else Begin
+        L:=D4+8; While (L<E4) And (Length(V)<250) Do Begin V:=V+Chr(F4MB^[L]); Inc(L); End;
+       End;
+       F4GAdd(K,V);
+       Break;
+      End;
+     End;
+    End;
+   End;
+  End Else If (Length(Ty)=4) And (Ty[1]=#169) Then Begin
+   K:=F4MovKey(Ty);
+   If K<>'' Then Begin
+    L:=F4M16(D); V:=''; A2:=D+4;
+    While (L>0) And (A2<E) And (Length(V)<250) Do Begin V:=V+Chr(F4MB^[A2]); Inc(A2); Dec(L); End;
+    F4GAdd(K,V);
+   End;
+  End;
+ End;
+End;
+
+Procedure F4MovStreams(Const Source: String);
+Var
+ Tr: Array[0..7] Of TMv; NT,At,A2,A3,A4,A5,A6,D,E,D2,E2,D3,E3,D4,E4,D5,E5,D6,E6,I,N,Vers,S,Q: LongInt; Ty,T2,T3,T4,T5,T6: String; Dts0: Int64; Tk: ^TMv;
+ Brands: String; Isom: Boolean; Tot,Cnt0: Int64; Gn,Gd: Int64; Cid: String;
+Begin
+ F4Reset;
+ NVLoad(Source,F4MB,F4MBSz);
+ NT:=0; At:=0; Isom:=False;
+ While F4MBox(At,F4MBSz,Ty,D,E) Do Begin
+  If Ty='ftyp' Then Begin
+   Brands:='';
+   F4GAdd('major_brand',F4Tag4(F4MB,D)); Isom:=F4Tag4(F4MB,D)<>'qt  ';
+   Str(F4M32(D+4),Brands); F4GAdd('minor_version',Brands);
+   Brands:=''; Q:=D+8; While Q+4<=E Do Begin Brands:=Brands+F4Tag4(F4MB,Q); Inc(Q,4); End;
+   F4GAdd('compatible_brands',Brands);
+  End;
+  If Ty='moov' Then Begin
+   A2:=D;
+   While F4MBox(A2,E,T2,D2,E2) Do If T2='udta' Then F4MovUdta(D2,E2) Else If (T2='trak') And (NT<8) Then Begin
+    Tk:=@Tr[NT]; FillChar(Tk^,SizeOf(Tk^),0);
+    A3:=D2;
+    While F4MBox(A3,E2,T3,D3,E3) Do Begin
+     If T3='tkhd' Then Tk^.Enabled:=(F4MB^[D3+3] And 1)<>0
+     Else If T3='edts' Then Begin
+      A4:=D3;
+      While F4MBox(A4,E3,T4,D4,E4) Do If T4='elst' Then Begin
+       N:=LongInt(F4M32(D4+4)); Vers:=F4MB^[D4];
+       For I:=0 To N-1 Do Begin
+        If Vers=1 Then Dts0:=F4M64(D4+8+I*20+8) Else Begin Dts0:=F4M32(D4+8+I*12+4); If Dts0>=$80000000 Then Dts0:=Dts0-$100000000; End;
+        If Dts0>=0 Then Begin Tk^.Edit:=Dts0; Tk^.HaveEdit:=True; Break; End;
+       End;
+      End;
+     End Else If T3='mdia' Then Begin
+      A4:=D3;
+      While F4MBox(A4,E3,T4,D4,E4) Do Begin
+       If T4='mdhd' Then Begin
+        If F4MB^[D4]=1 Then Begin Tk^.TS:=LongInt(F4M32(D4+20)); Q:=F4M16(D4+32); End Else Begin Tk^.TS:=LongInt(F4M32(D4+12)); Q:=F4M16(D4+20); End;
+        Tk^.Lang:='';
+        If (Q>=$400) And (Q<>$7FFF) Then Tk^.Lang:=Chr(((Q Shr 10) And 31)+$60)+Chr(((Q Shr 5) And 31)+$60)+Chr((Q And 31)+$60);
+       End
+       Else If T4='hdlr' Then Begin
+        T5:=F4Tag4(F4MB,D4+8); If T5='vide' Then Tk^.Typ:=1 Else If T5='soun' Then Tk^.Typ:=2;
+        Tk^.Hnd:=''; Q:=D4+24; If (Not Isom) And (Q<E4) Then Inc(Q); While (Q<E4) And (F4MB^[Q]<>0) And (Length(Tk^.Hnd)<39) Do Begin Tk^.Hnd:=Tk^.Hnd+Chr(F4MB^[Q]); Inc(Q); End;
+       End Else If T4='minf' Then Begin
+        A5:=D4;
+        While F4MBox(A5,E4,T5,D5,E5) Do If T5='stbl' Then Begin
+         A6:=D5;
+         While F4MBox(A6,E5,T6,D6,E6) Do Begin
+          If T6='stsd' Then F4MovParseSampleEntry(Tk^,D6,E6)
+          Else If T6='stts' Then Tk^.SttsAt:=D6 Else If T6='ctts' Then Tk^.CttsAt:=D6 Else If T6='stss' Then Tk^.StssAt:=D6
+          Else If T6='stsz' Then Tk^.StszAt:=D6 Else If T6='stsc' Then Tk^.StscAt:=D6
+          Else If T6='stco' Then Tk^.StcoAt:=D6 Else If T6='co64' Then Begin Tk^.StcoAt:=D6; Tk^.Co64:=True; End;
+         End;
+        End;
+       End;
+      End;
+     End;
+    End;
+    Tk^.Ok:=(Tk^.Typ>0) And (Tk^.SttsAt>0) And (Tk^.StszAt>0) And (Tk^.StscAt>0) And (Tk^.StcoAt>0) And (Tk^.TS>0);
+    If Tk^.Ok Then Inc(NT);
+   End;
+  End;
+ End;
+ If NT=0 Then Fail('mp4: aucune piste exploitable.');
+ For I:=0 To NT-1 Do Begin
+  Tk:=@Tr[I]; Cid:='';
+  If Tk^.Typ=1 Then Begin
+   If (Tk^.Cod='mp4v') And (Tk^.Obj=$20) Then Cid:='mpeg4'
+   Else If (Tk^.Cod='avc1') Or (Tk^.Cod='avc3') Then Cid:='h264';
+   If Cid='' Then Fail('mp4: codec video '+Tk^.Cod+' non pris en charge pour la copie.');
+   S:=F4AddStream(0,Cid);
+   F4S[S].W:=Tk^.Wd; F4S[S].H:=Tk^.Ht;
+   F4S[S].SarN:=1; F4S[S].SarD:=1; F4S[S].PixFmt:='yuv420p';
+   If Cid='mpeg4' Then F4S[S].ChromaLoc:=1;
+   If Tk^.CLen>0 Then F4SetExtra(S,@F4MB^[Tk^.CAt],Tk^.CLen);
+   If (Cid='h264') And (Tk^.CLen>0) Then F4H264Sps(S,Tk^.CAt,Tk^.CLen);
+   If Cid='h264' Then F4S[S].Tag:=$31637661 Else F4S[S].Tag:=$7634706D;
+   If Tk^.PaspN>0 Then Begin F4S[S].SarN:=Tk^.PaspN; F4S[S].SarD:=Tk^.PaspD; End;
+  End Else Begin
+   If Tk^.Cod='mp4a' Then Begin
+    If (Tk^.Obj=$40) Or (Tk^.Obj=$66) Or (Tk^.Obj=$67) Or (Tk^.Obj=$68) Then Cid:='aac'
+    Else If (Tk^.Obj=$6B) Or (Tk^.Obj=$69) Then Cid:='mp3';
+   End Else If (Tk^.Cod='ac-3') Then Cid:='ac3' Else If Tk^.Cod='.mp3' Then Cid:='mp3';
+   If Cid='' Then Fail('mp4: codec audio '+Tk^.Cod+' non pris en charge pour la copie.');
+   S:=F4AddStream(1,Cid);
+   F4S[S].Rate:=Tk^.Rt; F4S[S].Chans:=Tk^.Ch; F4S[S].Bits:=32;
+   If Tk^.Avg>0 Then F4S[S].BitRate:=Tk^.Avg;
+   If (Cid='ac3') And (Tk^.CLen>=3) Then Begin
+    N:=(F4MB^[Tk^.CAt+1]*256+F4MB^[Tk^.CAt+2]) Shr 5;
+    N:=N And 31;
+    Case N Of 0: Q:=32; 1: Q:=40; 2: Q:=48; 3: Q:=56; 4: Q:=64; 5: Q:=80; 6: Q:=96; 7: Q:=112; 8: Q:=128; 9: Q:=160; 10: Q:=192; 11: Q:=224; 12: Q:=256; 13: Q:=320; 14: Q:=384; 15: Q:=448; 16: Q:=512; 17: Q:=576; 18: Q:=640; Else Q:=0; End;
+    If Q>0 Then F4S[S].BitRate:=Q*1000;
+   End;
+   If (Cid='aac') And (Tk^.CLen>0) Then F4SetExtra(S,@F4MB^[Tk^.CAt],Tk^.CLen);
+  End;
+  F4S[S].TbN:=1; F4S[S].TbD:=Tk^.TS; F4S[S].Dflt:=Tk^.Enabled;
+  F4S[S].MetaN:=0;
+  If Tk^.Lang<>'' Then Begin F4S[S].Lang:=Tk^.Lang; F4S[S].MetaK[0]:='language'; F4S[S].MetaV[0]:=Tk^.Lang; F4S[S].MetaN:=1; End;
+  If Tk^.Hnd<>'' Then Begin F4S[S].MetaK[F4S[S].MetaN]:='handler_name'; F4S[S].MetaV[F4S[S].MetaN]:=Tk^.Hnd; Inc(F4S[S].MetaN); End;
+  F4S[S].MetaK[F4S[S].MetaN]:='vendor_id'; F4S[S].MetaV[F4S[S].MetaN]:=Tk^.Vend; Inc(F4S[S].MetaN);
+  If Tk^.Enc<>'' Then Begin F4S[S].MetaK[F4S[S].MetaN]:='encoder'; F4S[S].MetaV[F4S[S].MetaN]:=Tk^.Enc; Inc(F4S[S].MetaN); End;
+  F4MovBuild(Tk^,S);
+  If (Tk^.Typ=2) And (Cid='ac3') Then
+   For N:=0 To F4S[S].NPk-1 Do F4S[S].P^[N].Dur:=0;
+  If (Tk^.Typ=1) And (Cid='mpeg4') Then
+   For N:=0 To F4S[S].NPk-1 Do If F4S[S].P^[N].Pts<>F4S[S].P^[N].Dts Then F4S[S].VDelay:=1;
+  If (Tk^.Typ=1) And (F4S[S].NPk>0) Then Begin
+   Tot:=0; For N:=0 To F4S[S].NPk-1 Do Inc(Tot,F4S[S].P^[N].Dur);
+   If Tot>0 Then Begin
+    F4Reduce(Gn,Gd,Int64(F4S[S].NPk)*Tk^.TS,Tot,2147483647);
+    F4S[S].AvgN:=Gn; F4S[S].AvgD:=Gd; F4S[S].RN:=Gn; F4S[S].RD:=Gd;
+   End;
+  End;
+ End;
+ FreeMem(F4MB);
+End;
+
+Procedure F4MkvFromMov(Const Source,Target: String; Webm: Boolean);
+Begin
+ F4MovStreams(Source);
+ F4MuxOut(Target,Webm);
+ F4Reset;
+End;
+{ ---- Ogg Vorbis -> flux (copie vers Matroska / NUT) : reutilise le demultiplexeur Ogg du decodeur Vorbis ---- }
+Procedure F4OggStreams(Const Source: String);
+Var
+ S: TVGOS; Cw87: Word; R,Et,St,I,L,Q,Nc,Ln: LongInt; Pts,Run,Dur: Int64; Ex: Array[0..70000] Of Byte; Eo: LongInt;
+ Cm: PEABuffer; Cl: LongInt; Ks,Vs: String; Fnd: Boolean;
+Procedure Lace(N: LongInt);
+Begin
+ While N>=255 Do Begin Ex[Eo]:=255; Inc(Eo); Dec(N,255); End;
+ Ex[Eo]:=N; Inc(Eo);
+End;
+Begin
+ F4Reset;
+ VGInit; Cw87:=Get8087CW; Set8087CW($137F);
+ If Not VGIsVorbisOgg(Source) Then Fail('ogg: aucun flux Vorbis.');
+ VGONo:=Int64(1) Shl 63; VGOFinalPts:=VGONo; VGOFinalDur:=0; VGOStartTime:=VGONo; VGODataOffset:=0;
+ VGOHeadersDone:=False; VGOHaveVp:=False; VGDHaveId:=False; VGDHaveModes:=False; VGDSoft:=False; VGDErr:=False;
+ OpenRead(Source); VGOLimit:=InputSize;
+ GetMem(VGDRaw,70000);
+ VGOInit(S,VGDSerial);
+ While Not VGOHeadersDone Do Begin
+  R:=VGOPacket(S);
+  If R<0 Then Fail('ogg: en-tetes Vorbis incomplets.');
+ End;
+ If Not VGOHaveVp Then Fail('ogg: en-tetes Vorbis incomplets.');
+ St:=F4AddStream(1,'vorbis');
+ F4S[St].Rate:=VGDRate; F4S[St].Chans:=VGDCh; F4S[St].Bits:=32;
+ F4S[St].TbN:=1; F4S[St].TbD:=VGDRate;
+ { extradata : en-tetes Xiph ; l'en-tete de commentaires est remplace par un en-tete minimal (vendeur "ffmpeg") }
+ Eo:=0; Ex[Eo]:=2; Inc(Eo);
+ Lace(S.PkLen[0]); Lace(22);
+ Move(S.Pk[0]^,Ex[Eo],S.PkLen[0]); Inc(Eo,S.PkLen[0]);
+ Ex[Eo]:=3; Move(('vorbis')[1],Ex[Eo+1],6); Inc(Eo,7);
+ Ex[Eo]:=6; Ex[Eo+1]:=0; Ex[Eo+2]:=0; Ex[Eo+3]:=0; Move(('ffmpeg')[1],Ex[Eo+4],6); Inc(Eo,10);
+ Ex[Eo]:=0; Ex[Eo+1]:=0; Ex[Eo+2]:=0; Ex[Eo+3]:=0; Ex[Eo+4]:=1; Inc(Eo,5);
+ If Eo+S.PkLen[2]<=70000 Then Begin Move(S.Pk[2]^,Ex[Eo],S.PkLen[2]); Inc(Eo,S.PkLen[2]); End;
+ F4SetExtra(St,@Ex[0],Eo);
+ { commentaires Vorbis -> metadonnees du flux }
+ Cm:=S.Pk[1]; Cl:=S.PkLen[1];
+ If (Cm<>Nil) And (Cl>8) Then Begin
+  Q:=7; Ln:=Cm^[Q]+Cm^[Q+1]*256+Cm^[Q+2]*65536; Inc(Q,4+Ln);
+  If Q+4<=Cl Then Begin
+   Nc:=Cm^[Q]+Cm^[Q+1]*256+Cm^[Q+2]*65536; Inc(Q,4);
+   While (Nc>0) And (Q+4<=Cl) Do Begin
+    Ln:=Cm^[Q]+Cm^[Q+1]*256+Cm^[Q+2]*65536; Inc(Q,4);
+    If Q+Ln>Cl Then Break;
+    Ks:=''; Vs:=''; Fnd:=False;
+    For I:=0 To Ln-1 Do Begin
+     If (Not Fnd) And (Cm^[Q+I]=61) Then Fnd:=True
+     Else If Not Fnd Then Begin If Length(Ks)<63 Then Ks:=Ks+Chr(Cm^[Q+I]); End
+     Else If Length(Vs)<63 Then Vs:=Vs+Chr(Cm^[Q+I]);
+    End;
+    If Fnd And (F4LcS(Ks)='title') Then F4S[St].Title:=Vs;
+    If Fnd And (F4S[St].MetaN<F4MaxMeta) Then Begin
+     F4S[St].MetaK[F4S[St].MetaN]:=Ks; F4S[St].MetaV[F4S[St].MetaN]:=Vs; Inc(F4S[St].MetaN);
+    End;
+    Inc(Q,Ln); Dec(Nc);
+   End;
+  End;
+ End;
+ Run:=0;
+ While True Do Begin
+  R:=VGOPacket(S);
+  If R<0 Then Break;
+  If R=0 Then Continue;
+  Pts:=VGOCalcPts(S);
+  Et:=S.EndTrim; S.EndTrim:=0;
+  Dur:=S.PDur;
+  If Pts<>VGONo Then Run:=Pts;
+  F4AddPkt(St,@S.Buf^[S.OutStart],S.OutSize,Run,Run,Dur,True,0,Et);
+  Inc(Run,Dur);
+ End;
+ CloseRead; Set8087CW(Cw87);
+End;
+
+Procedure F4MkvFromOgg(Const Source,Target: String; Webm: Boolean);
+Begin
+ F4OggStreams(Source);
  F4MuxOut(Target,Webm);
  F4Reset;
 End;
@@ -111935,6 +112598,16 @@ Begin
  If InputFormat='webm' Then Begin
   Tmp:=NewTemporary; Temps[2]:=Tmp;
   F4MkvFromMkv(InputPath,Tmp,Webm);
+  Commit(Temps[2]); Temps[2]:=''; WriteLn('Sortie creee: ',OutputPath); Halt(0);
+ End;
+ If InputFormat='ogg' Then Begin
+  Tmp:=NewTemporary; Temps[2]:=Tmp;
+  F4MkvFromOgg(InputPath,Tmp,Webm);
+  Commit(Temps[2]); Temps[2]:=''; WriteLn('Sortie creee: ',OutputPath); Halt(0);
+ End;
+ If InputFormat='mp4' Then Begin
+  Tmp:=NewTemporary; Temps[2]:=Tmp;
+  F4MkvFromMov(InputPath,Tmp,Webm);
   Commit(Temps[2]); Temps[2]:=''; WriteLn('Sortie creee: ',OutputPath); Halt(0);
  End;
  If InputFormat='wav' Then Begin
