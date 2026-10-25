@@ -49,7 +49,11 @@ Var O3PendN: LongInt; O3PendSpec,O3PendKey,O3PendVal: Array[0..15] Of String[
  80]; { -metadata:s:... en attente (multiplexeur generique) }
 Procedure O3FmxApply; Forward;
 Procedure O3FmxInputTags; Forward;
-Var O3IgnN: LongInt; { options de conversion de -target ignorees par F3Try :
+Var
+V1NoRng: Boolean; { V1 : en-tete Y4M d'une sortie vide : pas de plage de
+ couleurs }
+Var
+ O3IgnN: LongInt; { options de conversion de -target ignorees par F3Try :
  valables seulement pour la copie }
 Var O3NoSMeta: Boolean; { -map_metadata -1 sans specificateur : ni les flux ni
  les chapitres ne sont copies non plus }
@@ -134968,7 +134972,9 @@ Begin
   If Loc=2 Then Cs:='C420paldv XYSCSS=420PALDV' Else If Loc=1 Then Cs:=
    'C420mpeg2 XYSCSS=420MPEG2' Else Cs:='C420jpeg XYSCSS=420JPEG';
  End;
- If F5Fm[Fm].Full Then Cr:=' XCOLORRANGE=FULL';
+ If F5Fm[Fm].Full
+And Not V1NoRng
+ Then Cr:=' XCOLORRANGE=FULL';
  If Cs<>'' Then Cs:=' '+Cs;
  S:='YUV4MPEG2 W'; Str(W,T); S:=S+T+' H'; Str(H,T); S:=S+T+' F'; Str(FN,T); S:=
   S+T+':'; Str(FD,T); S:=S+T+' I'+Ic+' A';
@@ -141714,6 +141720,18 @@ Begin
  WriteLn(T,'');
  WriteLn(T,'Use -h to get full help or, even better, run ''man ffmpeg''');
 End;
+Var V1On,V1PosOk: Boolean;   { V1 : un filtre video est actif ; la position
+ 'pos' est celle d'un fichier Y4M }
+Procedure V1NoteBegin(NSrc: LongInt; TbN,TbD: Int64); Forward; { V1 }
+Procedure V1NoteFrame(S,K: LongInt; P: Int64); Forward; { V1 }
+Procedure V1NoteEnd(NF: LongInt); Forward; { V1 }
+Procedure V1Begin(Fm: LongInt; Var W,H,SarN,SarD: LongInt); Forward; { V1 }
+Function V1Run(Fm: LongInt; Src: PEABuffer; SrcIdx: LongInt): PEABuffer;
+ Forward; { V1 }
+Function V1Prepare(Const InNm,OutNm: String): Boolean; Forward; { V1 }
+Procedure V1AudioCheck(Const OutNm: String); Forward; { V1 }
+Procedure V1Gate(Const InNm,OutNm: String); Forward; { V1 }
+
 
 
 
@@ -142186,6 +142204,9 @@ Begin
  End;
  { trim d'entree : debut = 0 si -ss (seek precis) }
  Trim(O1HasInSS,0,RecSet,Rec);
+ V1NoteBegin(NSrc,Ftb.N,Ftb.D); For K:=0 To NF-1 Do V1NoteFrame(Fr^[K].S,K,Fr^[
+  K].P); V1NoteEnd(NF); { V1 }
+
  { ---- sortie ---- }
  Rec:=0; RecSet:=False; HasRecMax:=False; RecMax:=0;
  If O1HasOutT Then Begin Rec:=O1OutT; RecSet:=True; End
@@ -142871,6 +142892,8 @@ Var Fo: File; Buf,Sc: PEABuffer; I,Last,Cnt: LongInt; Wd,Ht: LongInt; Fb,Fb2:
  LongInt; Code: Integer; Ph: String; SarN,SarD: LongInt;
  Df,Sf: Integer; Dw,Dh: LongInt; Sn64,Sd64: Int64; Rng: Integer; DoScale:
   Boolean; SrcFull,DstFull: Boolean;
+ Cur: PEABuffer; FbCur: LongInt;
+
 Begin
  F5OpenY4M(Src);
  If F5S.N<1 Then Begin O1Msg(16,Src+
@@ -142881,6 +142904,8 @@ Begin
   '@',O1RPts^[I]); WriteLn(StdErr); End;
  Wd:=F5S.W; Ht:=F5S.H; SarN:=F5S.SarN; SarD:=F5S.SarD; Sf:=F5S.Fm; Df:=Sf; Dw:=
   Wd; Dh:=Ht; Rng:=F5S.Rng;
+ If V1On Then Begin V1Begin(Sf,Wd,Ht,SarN,SarD); Dw:=Wd; Dh:=Ht; End; { V1 }
+
  DoScale:=False;
  If O1DstFm>=0 Then Df:=O1DstFm;
  If O1DstW>0 Then Begin Dw:=O1DstW; Dh:=O1DstH; End;
@@ -142903,6 +142928,8 @@ Begin
   If DstFull Then Rng:=2 Else Rng:=1;
  End;
  If O1RN=0 Then Begin
+  Rng:=0; V1NoRng:=True; { V1 }
+
   If O1RReach<=0 Then Begin SarN:=0; SarD:=1; End;
   If (O1RPass<=0) And O1HasInR Then Begin O1RFN:=O1InRN; O1RFD:=O1InRD; End Else
    If O1RPass<=0 Then Begin O1RFN:=F5S.FN; O1RFD:=F5S.FD; End;
@@ -142910,19 +142937,25 @@ Begin
  Assign(Fo,Dst); {$I-}Rewrite(Fo,1);{$I+} Code:=IOResult;
  If Code<>0 Then Begin O1Msg(16,'Cannot create '+Dst); O1Die(1); End;
  O1WriteHdr(Fo,Df,Dw,Dh,O1RFN,O1RFD,SarN,SarD,F5S.Il,Rng,F5S.Loc);
+V1NoRng:=False;
+
  Fb:=F5S.FBytes; GetMem(Buf,Fb+64);
+ FbCur:=Fb; If V1On Then FbCur:=F5FrameBytes(Sf,Wd,Ht); { V1 }
+
  Fb2:=F5FrameBytes(Df,Dw,Dh); GetMem(Sc,Fb2+64);
  Last:=-1; Cnt:=0; Ph:='FRAME'#10;
  For I:=0 To O1RN-1 Do Begin
   If O1RSrc^[I]<>Last Then Begin
    If Not F5ReadFrame(O1RSrc^[I],Buf) Then Begin O1Msg(16,
     'Cannot read input frame'); O1Die(1); End;
-   If DoScale Then O1ScaleFrame(Sf,Buf,Wd,Ht,Df,Sc,Dw,Dh,O1SwFlags,SrcFull,
+   Cur:=Buf; If V1On Then Cur:=V1Run(Sf,Buf,O1RSrc^[I]); { V1 }
+
+   If DoScale Then O1ScaleFrame(Sf, Cur ,Wd,Ht,Df,Sc,Dw,Dh,O1SwFlags,SrcFull,
     DstFull);
    Last:=O1RSrc^[I];
   End;
   BlockWrite(Fo,Ph[1],6);
-  If DoScale Then O1WriteBuf(Fo,Sc,Fb2) Else O1WriteBuf(Fo,Buf,Fb);
+  If DoScale Then O1WriteBuf(Fo,Sc,Fb2) Else O1WriteBuf(Fo, Cur , FbCur );
   Inc(Cnt);
  End;
  Close(Fo); F5CloseSrc;
@@ -143107,7 +143140,10 @@ Begin
      (A='-fs') Or (A='-version') Or (A='-L') Or (A='-h') Or (A='-help') Or (
       A='--help') Or (A='-?') Or (A='-formats') Or (A='-sseof') Or
      (A='-dframes') Or (A='-aspect') Or (A='-pix_fmt') Or (A='-r:v') Or (
-      A='-s:v') Or (A='-t:v') Or (Copy(A,1,8)='-vframes') Then Begin O1Engaged:=
+      A='-s:v') Or (A='-t:v') Or (Copy(A,1,8)='-vframes')
+Or
+     (A='-vf') Or (A='-af') Or (A='-filter') Or (Copy(A,1,8)='-filter:')
+ Then Begin O1Engaged:=
       True; Exit; End;
  End;
 End;
@@ -143465,7 +143501,11 @@ Begin
    If (B='ss') Or (B='t') Or (B='to') Or (B='itsoffset') Or (B='vframes') Or (
     B='frames') Or (B='fs') Or (B='sseof') Or (B='dframes') Or (B='aspect') Then
     O1Used[O1Op[I].Tok]:=True;
-   If (O1Op[I].Grp=O1OutG) And ((B='r') Or (B='s')) Then O1Used[O1Op[I].Tok]:=
+   If (
+(B='vf') Or (B='af') Or (B='filter')) And (O1Op[I].Grp=O1OutG) Then Begin
+ O1Used[O1Op[I].Tok]:=True; O1Strong:=True; End;
+   If (
+O1Op[I].Grp=O1OutG) And ((B='r') Or (B='s')) Then O1Used[O1Op[I].Tok]:=
     True;
    If (O1Op[I].Grp=O1InG) And (B='r') Then O1Used[O1Op[I].Tok]:=True;
    If (B='ss') Or (B='t') Or (B='to') Or (B='itsoffset') Or (B='vframes') Or (
@@ -143516,6 +143556,8 @@ Begin
   Else Begin If O1OutG<>0 Then Exit; O1OutG:=I; End;
  End;
  If (O1InG=0) Or (O1OutG=0) Then Exit;
+ V1Gate(O1Gr[O1InG].Arg,O1Gr[O1OutG].Arg); { V1 }
+
  { copie de flux : non prise en charge ici }
  For I:=1 To O1NOp Do
   If (O1Op[I].Grp>0) And ((O1Op[I].Key='c') Or (O1Op[I].Key='codec') Or (Copy(
@@ -143626,6 +143668,8 @@ Begin
    End;
    O1Used[O1Op[I].Tok]:=True;
   End;
+ V1Prepare(InNm,OutNm); { V1 }
+
  { sortie existante }
  O1Overwrite:=O1GlobalBool('y'); O1NoOverwrite:=O1GlobalBool('n');
  Overwrite:=O1Overwrite; NoOverwrite:=O1NoOverwrite;
@@ -143644,6 +143688,8 @@ Begin
    (Hd[8]='W') And (Hd[9]='A') And (Hd[10]='V') And (Hd[11]='E') Then InIsWav:=
    True;
  End;
+ V1PosOk:=InIsY4M; { V1 }
+
  { cible de la mise a l'echelle / conversion }
  V:=''; PixI:=O1Last(O1OutG,'pix_fmt','v');
  If PixI>0 Then Begin
@@ -143743,6 +143789,8 @@ Begin
   End;
  End;
  If AudOut Then Begin
+  V1AudioCheck(OutNm); { V1 }
+
   O1Tmp2:=O1TmpName('.wav');
   N:=O1AudioJob(SrcA,O1Tmp2);
   If N<0 Then Begin O1Msg(16,SrcA+': Invalid data found when processing input');
@@ -144031,12 +144079,45 @@ Begin
   O2Log:=O2NegInf Else If O2IsInf(X) Then O2Log:=X Else O2Log:=Ln(X);
 End;
 Function O2Gcd(A,B: Double): Double;
-Var X,Y,Z: Int64;
+Var X,Y, U,V: Int64; Za,Zb,K: LongInt;
+ Function Cv(D: Double) : Int64;
 Begin
- X:=Trunc(A); Y:=Trunc(B);
- If X<0 Then X:=-X; If Y<0 Then Y:=-Y;
- While Y<>0 Do Begin Z:=X Mod Y; X:=Y; Y:=Z; End;
- O2Gcd:=X;
+ If O2IsNan(D) Or (D>=9223372036854775807.0) Or (D<-9223372036854775808.0) Then
+  Cv:=Low(Int64) Else Cv :=Trunc(
+D);
+ End;
+ Function Ab(T: Int64): Int64;
+ Begin If T<0 Then Ab:=-T Else Ab:=T; End;
+Begin
+ { av_gcd (pgcd binaire) : si une des valeurs est nulle, l'autre est renvoyee
+  telle quelle }
+ X:=Cv(
+A); Y:= Cv (B);
+ If X = 0 Then
+Begin O2Gcd:=Y; Exit; End;
+ If Y=0 Then Begin O2Gcd:=
+ X
+; Exit; End;
+ Za:=0; U
+:= X;
+While (U And 1)=0 Do Begin U:=U Div 2; Inc(Za);
+ If
+Za>62 Then Break; End;
+ Zb:=0; V:=
+ Y ; While (V And 1)= 0
+Do Begin V:=V Div 2; Inc(Zb); If Zb>62
+ Then Break; End;
+ If Za<Zb Then K:=Za Else K := Zb;
+ U:=Ab(X Div (Int64(1) Shl Za)); V:=Ab( Y
+Div (Int64(1) Shl Zb))
+;
+ While U <>
+V Do Begin
+  If U>V Then Begin Y:=U; U:=V; V:=Y; End;
+  V:=V-U;
+  While (V And 1)=
+0 Do V := V Div 2 ; End;
+ O2Gcd:= U*(Int64(1) Shl K) ;
 End;
 
 { ---- strtod / av_strtod ---- }
@@ -144281,10 +144362,15 @@ Function O2CharAt(I: LongInt): Char;
 Begin
  If (I>=1) And (I<=Length(O2PS)) Then O2CharAt:=O2PS[I] Else O2CharAt:=#0;
 End;
+Var O2ErrAll: Array[0..15] Of String[255]; O2ErrN: LongInt; { V1 : tous les
+ messages d'une analyse }
+
 
 Procedure O2ELog(Const M: String);
 Begin
  O2E^.Err:=M;
+ If O2ErrN<16 Then Begin O2ErrAll[O2ErrN]:=M; Inc(O2ErrN); End;
+
 End;
 
 Function O2ParsePrimary(Var E: LongInt): Integer;
@@ -144504,7 +144590,7 @@ End;
 
 Function O2Verify(E: LongInt): Boolean;
 Begin
- If E<0 Then Begin O2Verify:=True; Exit; End;
+ If E<0 Then Begin O2Verify:= False ; Exit; End;
  With O2E^.Nd[E] Do
   Case Typ Of
    e_value,e_const: O2Verify:=True;
@@ -144526,6 +144612,8 @@ Function O2ExprParse(X: PO2Expr; Const S: String): Integer;
 Var I: Integer; W: String; Ret: Integer; E: LongInt;
 Begin
  O2E:=X; X^.N:=0; X^.Root:=-1; X^.Ok:=False; X^.Err:='';
+O2ErrN:=0;
+
  W:='';
  For I:=1 To Length(S) Do If Not (S[I] In [#9,#10,#11,#12,#13,' ']) Then W:=W+S[
   I];
@@ -144539,6 +144627,8 @@ Begin
  If O2PP<=Length(O2PS) Then Begin
   X^.Err:='Invalid chars '''+Copy(O2PS,O2PP,255)+
    ''' at the end of expression '''+S+'''';
+  If O2ErrN<16 Then Begin O2ErrAll[O2ErrN]:=X^.Err; Inc(O2ErrN); End;
+
   O2ExprParse:=-22; Exit;
  End;
  If Not O2Verify(E) Then Begin O2ExprParse:=-22; Exit; End;
@@ -144561,6 +144651,20 @@ Function O2Clipd(A,Mn,Mx: Double): Double;
 Begin
  If A<Mn Then O2Clipd:=Mn Else If A>Mx Then O2Clipd:=Mx Else O2Clipd:=A;
 End;
+Var O2P63: Double;   { 2^63 exact }
+{ uint64 -> double avec arrondi correct (le compilateur peut traiter QWord comme
+ signe) }
+Function O2U2D(R: QWord): Double;
+Var Q: Int64; D,Two: Double;
+Begin
+ If R<QWord($8000000000000000) Then Begin D:=Int64(R); O2U2D:=D; End
+ Else Begin
+  Q:=Int64((R Shr 1) Or (R And 1));
+  D:=Q; Two:=2.0;
+  O2U2D:=D*Two;
+ End;
+End;
+
 
 Function O2VarIdx(D: Double): LongInt;
 Begin
@@ -144645,12 +144749,22 @@ Begin
   End;
   e_random: Begin
    Id:=O2VarIdx(O2EvalNode(P0));
+O2P63:=9223372036854775808.0;
+
    If O2IsNan(O2E^.Vars[Id]) Then R:=0 Else If O2E^.Vars[Id]<0 Then R:=QWord(
     Int64(Trunc(O2E^.Vars[Id]))) Else If O2E^.Vars[Id]>=1.8446744073709552E19
-    Then R:=QWord($FFFFFFFFFFFFFFFF) Else R:=QWord(Trunc(O2E^.Vars[Id]));
+    Then R:=QWord($FFFFFFFFFFFFFFFF) Else
+If O2E^.Vars[Id]>=O2P63 Then Begin Mn:=O2E^.Vars[Id]; Mn:=Mn-O2P63; R:=QWord(
+ Trunc(Mn))+QWord($8000000000000000); End Else
+ R:=QWord(Trunc(O2E^.Vars[Id]));
    R:=R*1664525+1013904223;
-   O2E^.Vars[Id]:=R*1.0;
-   O2EvalNode:=Val*((R*1.0)*(1.0/18446744073709551615.0));
+   D:=O2U2D(R);
+
+   O2E^.Vars[Id]:= D;
+   Mx:=18446744073709551615.0; Mn:= 1.0;
+Mn:=Mn/Mx;
+
+   O2EvalNode:=Val*( D * Mn );
   End;
   e_while: Begin
    D:=O2Nan; Pn:=0;
@@ -150093,6 +150207,1825 @@ Begin
 End;
 
 { ==== O3-END ==== }
+{ ==== V1-BEGIN : filtres video -vf / -filter:v (crop, pad) et -af (libavfilter
+ 6.1.1) ; prefixe V1 ==== }
+Const
+ V1Ad='0x55a0c1f2d640';
+ V1EvAd='0x7ffd5c2a1b30';
+ V1MaxF=12; V1MaxO=24;
+ V1E_Inval=-22; V1E_Range=-34; V1E_OptNF=-1129; V1E_FltNF=-1128; V1E_Patch=-
+  1163; V1E_NoSys=-38; V1E_IO=-5;
+ V1K_Crop=0; V1K_Pad=1; V1K_Null=2; V1K_Other=9;
+ V1FltV: Array[0..16] Of String[240]=(
+  ' addroi afir allrgb allyuv alphaextract alphamerge amovie amplify ass astre'+
+   'amselect atadenoise avgblur avgblur_opencl avgblur_vulkan backgroundkey bb'+
+   'ox bench bilateral bilateral_cuda bitplanenoise blackdetect blackframe ble'+
+   'nd ',
+  ' blend_vulkan blockdetect blurdetect bm3d boxblur boxblur_opencl buffer buf'+
+   'fersink bwdif bwdif_cuda bwdif_vulkan cas ccrepack cellauto chromaber_vulk'+
+   'an chromahold chromakey chromakey_cuda chromanr chromashift ciescope codec'+
+   'view ',
+  ' color color_vulkan colorbalance colorchannelmixer colorchart colorcontrast'+
+   ' colorcorrect colorhold colorize colorkey colorkey_opencl colorlevels colo'+
+   'rmap colormatrix colorspace colorspace_cuda colorspectrum colortemperature'+
+   ' ',
+  ' concat convolution convolution_opencl convolve copy corr cover_rect crop c'+
+   'ropdetect cue curves datascope dblur dctdnoiz deband deblock decimate deco'+
+   'nvolve dedot deflate deflicker deinterlace_qsv deinterlace_vaapi dejudder '+
+   'delogo ',
+  ' denoise_vaapi derain deshake deshake_opencl despill detelecine dilation di'+
+   'lation_opencl displace dnn_classify dnn_detect dnn_processing doubleweave '+
+   'drawbox drawgraph drawgrid drawtext edgedetect elbg entropy epx eq erosion'+
+   ' ',
+  ' erosion_opencl estdif exposure extractplanes fade feedback fftdnoiz fftfil'+
+   't field fieldhint fieldmatch fieldorder fifo fillborders find_rect flip_vu'+
+   'lkan floodfill format fps framepack framerate framestep freezedetect ',
+  ' freezeframes frei0r frei0r_src fspp gblur gblur_vulkan geq gradfun gradien'+
+   'ts graphmonitor grayworld greyedge guided haldclut haldclutsrc hflip hflip'+
+   '_vulkan histeq histogram hqdn3d hqx hstack hstack_qsv hstack_vaapi hsvhold'+
+   ' ',
+  ' hsvkey hue huesaturation hwdownload hwmap hwupload hwupload_cuda hysteresi'+
+   's identity idet il inflate interlace interleave kerndeint kirsch lagfun la'+
+   'tency lenscorrection libplacebo life limitdiff limiter loop lumakey lut lu'+
+   't1d ',
+  ' lut2 lut3d lutrgb lutyuv mandelbrot maskedclamp maskedmax maskedmerge mask'+
+   'edmin maskedthreshold maskfun mcdeint median mergeplanes mestimate metadat'+
+   'a midequalizer minterpolate mix monochrome morpho movie mpdecimate mptests'+
+   'rc ',
+  ' msad multiply negate nlmeans nlmeans_opencl nlmeans_vulkan nnedi noformat '+
+   'noise normalize null nullsink nullsrc openclsrc oscilloscope overlay overl'+
+   'ay_cuda overlay_opencl overlay_qsv overlay_vaapi overlay_vulkan owdenoise '+
+   'pad ',
+  ' pad_opencl pal100bars pal75bars palettegen paletteuse perms perspective ph'+
+   'ase photosensitivity pixdesctest pixelize pixscope pp pp7 premultiply prew'+
+   'itt prewitt_opencl procamp_vaapi program_opencl pseudocolor psnr pullup qp'+
+   ' ',
+  ' random readeia608 readvitc realtime remap remap_opencl removegrain removel'+
+   'ogo repeatfields reverse rgbashift rgbtestsrc roberts roberts_opencl rotat'+
+   'e sab scale scale2ref scale_cuda scale_qsv scale_vaapi scale_vulkan scdet '+
+   'scharr ',
+  ' scroll segment select selectivecolor sendcmd separatefields setdar setfiel'+
+   'd setparams setpts setrange setsar settb sharpness_vaapi shear showinfo sh'+
+   'owpalette shuffleframes shufflepixels shuffleplanes sidedata sierpinski ',
+  ' signalstats signature siti smartblur smptebars smptehdbars sobel sobel_ope'+
+   'ncl split spp sr ssim ssim360 stereo3d streamselect subtitles super2xsai s'+
+   'waprect swapuv tblend telecine testsrc testsrc2 thistogram threshold thumb'+
+   'nail ',
+  ' thumbnail_cuda tile tinterlace tlut2 tmedian tmidequalizer tmix tonemap to'+
+   'nemap_opencl tonemap_vaapi tpad transpose transpose_opencl transpose_vaapi'+
+   ' transpose_vulkan trim unpremultiply unsharp unsharp_opencl untile uspp v3'+
+   '60 ',
+  ' vaguedenoiser varblur vectorscope vflip vflip_vulkan vfrdet vibrance vidst'+
+   'abdetect vidstabtransform vif vignette vmafmotion vpp_qsv vstack vstack_qs'+
+   'v vstack_vaapi w3fdif waveform weave xbr xcorrelate xfade xfade_opencl ',
+  ' xfade_vulkan xmedian xstack xstack_qsv xstack_vaapi yadif yadif_cuda yaepb'+
+   'lur yuvtestsrc zmq zoneplate zoompan zscale '
+ );
+ V1FltA: Array[0..6] Of String[240]=(
+  ' abench abuffer abuffersink acompressor acontrast acopy acrossfade acrossov'+
+   'er acrusher acue adeclick adeclip adecorrelate adelay adenorm aderivative '+
+   'adrc adynamicequalizer adynamicsmooth aecho aemphasis aeval aevalsrc aexci'+
+   'ter ',
+  ' afade afdelaysrc afftdn afftfilt afifo afireqsrc afirsrc aformat afreqshif'+
+   't afwtdn agate aiir aintegral ainterleave alatency alimiter allpass aloop '+
+   'amerge ametadata amix amultiply anequalizer anlmdn anlmf anlms anoisesrc a'+
+   'null ',
+  ' anullsink anullsrc apad aperms aphasemeter aphaser aphaseshift apsnr apsyc'+
+   'lip apulsator arealtime aresample areverse arls arnndn asdr asegment asele'+
+   'ct asendcmd asetnsamples asetpts asetrate asettb ashowinfo asidedata asisd'+
+   'r ',
+  ' asoftclip aspectralstats asplit asr astats asubboost asubcut asupercut asu'+
+   'perpass asuperstop atempo atilt atrim axcorrelate azmq bandpass bandreject'+
+   ' bass biquad bs2b channelmap channelsplit chorus compand compensationdelay'+
+   ' ',
+  ' crossfeed crystalizer dcshift deesser dialoguenhance drmeter dynaudnorm ea'+
+   'rwax ebur128 equalizer extrastereo firequalizer flanger flite haas hdcd he'+
+   'adphone highpass highshelf hilbert join ladspa loudnorm lowpass lowshelf l'+
+   'v2 ',
+  ' mcompand pan replaygain rubberband sidechaincompress sidechaingate silence'+
+   'detect silenceremove sinc sine sofalizer speechnorm stereotools stereowide'+
+   'n superequalizer surround tiltshelf treble tremolo vibrato virtualbass vol'+
+   'ume ',
+  ' volumedetect '
+ );
+ V1FltB: Array[0..0] Of String[240]=(
+  ' a3dscope abitscope adrawgraph agraphmonitor ahistogram avectorscope avsync'+
+   'test showcqt showcwt showfreqs showspatial showspectrum showspectrumpic sh'+
+   'owvolume showwaves showwavespic spectrumsynth '
+ );
+Type
+ V1TPlane=Record Off,Rb,Rows,Hs,Vs,Step: LongInt; End;
+ V1TPl=Array[0..3] Of V1TPlane;
+ V1TFilt=Record
+  Nm,Inst: String[60];
+  Kind,Chain,Pos: LongInt;
+  NOpt: LongInt;
+  OKey: Array[1..V1MaxO] Of String[60];
+  OVal: Array[1..V1MaxO] Of String[250];
+  NIn,NOut: LongInt;
+  InL,OutL: Array[1..4] Of String[100];
+  InDone,OutDone: Boolean;
+  NextF: LongInt;
+  Ctx: String[80];
+  HasEnable: Boolean;
+  WE,HE,XE,YE: String[250];
+  KeepA,Exact,EvalM: LongInt;
+  AspN,AspD: LongInt;
+  Rgba: Array[0..3] Of Byte;
+  CXp,CYp: PO2Expr;
+  IW,IH,ISarN,ISarD: LongInt;
+  OW,OH,OSarN,OSarD: LongInt;
+  CW,CH,CX,CY,CHs,CVs: LongInt;
+  CVar: Array[0..17] Of Double;
+  PW,PH,PX,PY,PInW,PInH,PLW,PLH: LongInt;
+  Col: Array[0..3,0..7] Of Byte;
+ End;
+Var
+ V1F: Array[1..V1MaxF] Of V1TFilt;
+ V1NFl: LongInt;
+ V1Ord: Array[1..V1MaxF] Of LongInt; V1NOrd: LongInt;
+ V1Desc: String;                    { description du graphe video }
+ V1PrevLine: String; V1Rep: LongInt;
+ V1CodecNm,V1MuxNm,V1OutName: String;
+ V1ErrCode: LongInt;
+ V1CN: Array[0..39] Of String[24]; V1CV: Array[0..39] Of Double; V1NCN: LongInt;
+ V1ExT: PO2Expr;
+ { suivi des images apres le trim d'entree (O1Timeline) }
+ V1NSrc,V1NIn: LongInt; V1TbN,V1TbD: Int64; V1SrcN: O1PL32A; V1SrcP: O1PI64A;
+ V1CfgDone: Boolean; V1Fm: LongInt;
+ V1ResW,V1ResH,V1ResSN,V1ResSD: LongInt;
+ V1Buf: Array[0..1] Of PEABuffer; V1BufSz: Array[0..1] Of LongInt;
+
+Procedure V1Flush;
+Var S: String;
+Begin
+ If V1Rep>0 Then Begin
+  Str(V1Rep,S);
+  O1Msg(16,'    Last message repeated '+S+' times');
+ End;
+ V1Rep:=0; V1PrevLine:='';
+End;
+
+Procedure V1Raw(Const S: String);
+Begin
+ If O1LogLevel<16 Then Exit;
+ If (V1PrevLine<>'') And (S=V1PrevLine) Then Begin Inc(V1Rep); Exit; End;
+ V1Flush;
+ O1Msg(16,S); V1PrevLine:=S;
+End;
+
+Procedure V1Log(Const Ctx,M: String);
+Begin
+ V1Raw('['+Ctx+' @ '+V1Ad+'] '+M);
+End;
+
+Procedure V1Die(Code: LongInt);
+Begin
+ V1Flush; O1Die(Code);
+End;
+
+Function V1IStr(N: Int64): String;
+Var S: String;
+Begin Str(N,S); V1IStr:=S; End;
+
+Function V1ExitOf(E: LongInt): LongInt;
+Begin
+ Case E Of
+  -34: V1ExitOf:=222;
+  -1129,-1128: V1ExitOf:=8;
+  -1163: V1ExitOf:=176;
+  -38: V1ExitOf:=218;
+  -5: V1ExitOf:=251;
+  Else V1ExitOf:=234;
+ End;
+End;
+
+Function V1StrErr(E: LongInt): String;
+Begin
+ Case E Of
+  -34: V1StrErr:='Numerical result out of range';
+  -1129: V1StrErr:='Option not found';
+  -1128: V1StrErr:='Filter not found';
+  -1163: V1StrErr:='Not yet implemented in FFmpeg, patches welcome';
+  -38: V1StrErr:='Function not implemented';
+  -5: V1StrErr:='Input/output error';
+  Else V1StrErr:='Invalid argument';
+ End;
+End;
+
+Function V1IsWs(C: Char): Boolean;
+Begin V1IsWs:=(C=' ') Or (C=#9) Or (C=#10) Or (C=#13); End;
+
+Function V1SarI(V: Int64; N: LongInt): Int64;
+Begin
+ If V>=0 Then V1SarI:=V Shr N Else V1SarI:=-((-V+(Int64(1) Shl N)-1) Shr N);
+End;
+
+Function V1CeilR(A: Int64; N: LongInt): Int64;
+Begin V1CeilR:=-V1SarI(-A,N); End;
+
+Function V1I32(X: Int64): LongInt;
+Begin
+ X:=X And $FFFFFFFF;
+ If X>=$80000000 Then X:=X-$100000000;
+ V1I32:=X;
+End;
+
+Function V1D(X: Int64): Double;
+Begin V1D:=X; End;
+
+{ conversion double -> int du C (x86 : cvttsd2si, hors limites -> INT_MIN) }
+Function V1D2I(D: Double): LongInt;
+Begin
+ If O2IsNan(D) Or (D>=2147483648.0) Or (D<=-2147483649.0) Then V1D2I:=LongInt(
+  $80000000)
+ Else V1D2I:=Trunc(D);
+End;
+
+{ av_get_token }
+Function V1GetToken(Const S: String; Var P: LongInt; Const Term: String):
+ String;
+Var R: String; E: LongInt; C: Char;
+Begin
+ R:=''; E:=0;
+ While (P<=Length(S)) And V1IsWs(S[P]) Do Inc(P);
+ While (P<=Length(S)) And (Pos(S[P],Term)=0) Do Begin
+  C:=S[P]; Inc(P);
+  If (C='\') And (P<=Length(S)) Then Begin R:=R+S[P]; Inc(P); E:=Length(R); End
+  Else If C='''' Then Begin
+   While (P<=Length(S)) And (S[P]<>'''') Do Begin R:=R+S[P]; Inc(P); End;
+   If P<=Length(S) Then Begin Inc(P); E:=Length(R); End;
+  End Else R:=R+C;
+ End;
+ While (Length(R)>E) And V1IsWs(R[Length(R)]) Do Delete(R,Length(R),1);
+ V1GetToken:=R;
+End;
+
+Function V1IsKeyChar(C: Char): Boolean;
+Begin
+ V1IsKeyChar:=(C In ['a'..'z','A'..'Z','0'..'9','-','_','/','.']);
+End;
+
+{ ---- evaluateur d'expressions (av_expr_parse_and_eval) ---- }
+Function V1ExParse(X: PO2Expr; Const S,Ctx: String): LongInt;
+Var I: LongInt;
+Begin
+ X^.NC:=V1NCN;
+ For I:=0 To V1NCN-1 Do Begin X^.CNames[I]:=V1CN[I]; X^.CVals[I]:=0; End;
+ If O2ExprParse(X,S)<0 Then Begin
+  For I:=0 To O2ErrN-1 Do V1Log(Ctx,'[Eval @ '+V1EvAd+'] '+O2ErrAll[I]);
+  V1ExParse:=V1E_Inval;
+ End Else V1ExParse:=0;
+End;
+
+Function V1ExEval(X: PO2Expr): Double;
+Var I: LongInt;
+Begin
+ For I:=0 To V1NCN-1 Do X^.CVals[I]:=V1CV[I];
+ V1ExEval:=O2ExprEval(X);
+End;
+
+{ av_expr_parse_and_eval : les valeurs des constantes sont dans V1CV }
+Function V1ParseEval(Const S,Ctx: String; Var Res: Double): LongInt;
+Var Rc: LongInt; D: Double;
+Begin
+ If V1ExT=Nil Then Begin New(V1ExT); SetMXCSR(GetMXCSR Or $1F80); Set8087CW(
+  Get8087CW Or $3F); End;
+ Rc:=V1ExParse(V1ExT,S,Ctx);
+ If Rc<0 Then Begin Res:=O2Nan; V1ParseEval:=Rc; Exit; End;
+ D:=V1ExEval(V1ExT);
+ Res:=D;
+ If O2IsNan(D) Then V1ParseEval:=V1E_Inval Else V1ParseEval:=0;
+End;
+
+{ ---- av_opt_set ---- }
+Function V1FmtG(D: Double): String;
+Begin
+ If D=0 Then Begin V1FmtG:='0'; Exit; End;
+ If D>1.7e308 Then V1FmtG:='1.79769e+308' Else If D=Int(D) Then V1FmtG:=V1IStr(
+  Trunc(D)) Else V1FmtG:=O2FmtG(D);
+End;
+
+Function V1FmtF(D: Double): String;
+Var S: String;
+Begin
+ If O2IsNan(D) Then Begin V1FmtF:='nan'; Exit; End;
+ If D>1.7e308 Then Begin V1FmtF:='inf'; Exit; End;
+ If D<-1.7e308 Then Begin V1FmtF:='-inf'; Exit; End;
+ Str(D:0:6,S); V1FmtF:=S;
+End;
+
+{ write_number d'un entier : verification d'intervalle puis arrondi }
+Function V1WriteInt(Const Ctx,Nm: String; Num: Double; Mn,Mx: Double; Var Dst:
+ LongInt): LongInt;
+Begin
+ If (Mx<Num) Or (Mn>Num) Or O2IsNan(Num) Then Begin
+  V1Log(Ctx,'Value '+V1FmtF(Num)+' for parameter '''+Nm+''' out of range ['+
+   V1FmtG(Mn)+' - '+V1FmtG(Mx)+']');
+  V1WriteInt:=V1E_Range; Exit;
+ End;
+ Dst:=O2LRint(Num);
+ V1WriteInt:=0;
+End;
+
+{ set_string_number pour un entier avec unite : constantes nommees Cn[]/Cv[] }
+Function V1SetIntOpt(Const Ctx,Nm,Val: String; Mn,Mx,Df: Double; NC: LongInt;
+ Const Names: String; Var Vals: Array Of Double; Var Dst: LongInt): LongInt;
+Var Rc,I: LongInt; D: Double; Tk: String; P,Q: LongInt;
+Begin
+ { constante nommee exacte ? Names : liste separee par des virgules }
+ P:=1; I:=0;
+ While P<=Length(Names) Do Begin
+  Q:=P; While (Q<=Length(Names)) And (Names[Q]<>',') Do Inc(Q);
+  Tk:=Copy(Names,P,Q-P);
+  If Tk=Val Then Begin
+   D:=Vals[I];
+   V1SetIntOpt:=V1WriteInt(Ctx,Nm,D,Mn,Mx,Dst); Exit;
+  End;
+  Inc(I); P:=Q+1;
+ End;
+ V1NCN:=0;
+ P:=1; I:=0;
+ While P<=Length(Names) Do Begin
+  Q:=P; While (Q<=Length(Names)) And (Names[Q]<>',') Do Inc(Q);
+  V1CN[V1NCN]:=Copy(Names,P,Q-P); V1CV[V1NCN]:=Vals[I]; Inc(V1NCN); Inc(I); P:=
+   Q+1;
+ End;
+ V1CN[V1NCN]:='default'; V1CV[V1NCN]:=Df; Inc(V1NCN);
+ V1CN[V1NCN]:='max'; V1CV[V1NCN]:=Mx; Inc(V1NCN);
+ V1CN[V1NCN]:='min'; V1CV[V1NCN]:=Mn; Inc(V1NCN);
+ V1CN[V1NCN]:='none'; V1CV[V1NCN]:=0; Inc(V1NCN);
+ V1CN[V1NCN]:='all'; V1CV[V1NCN]:=-1; Inc(V1NCN);
+ Rc:=V1ParseEval(Val,Ctx,D);
+ If Rc<0 Then Begin V1Log(Ctx,'Unable to parse option value "'+Val+'"');
+  V1SetIntOpt:=Rc; Exit; End;
+ V1SetIntOpt:=V1WriteInt(Ctx,Nm,D,Mn,Mx,Dst);
+End;
+
+Function V1StrMatchName(Const Val,Names: String): Boolean;
+Var P,Q: LongInt; Tk: String;
+Begin
+ V1StrMatchName:=False;
+ P:=1;
+ While P<=Length(Names) Do Begin
+  Q:=P; While (Q<=Length(Names)) And (Names[Q]<>',') Do Inc(Q);
+  Tk:=Copy(Names,P,Q-P);
+  If Lower(Tk)=Lower(Val) Then Begin V1StrMatchName:=True; Exit; End;
+  P:=Q+1;
+ End;
+End;
+
+{ set_string_bool }
+Function V1SetBool(Const Ctx,Val: String; Var Dst: LongInt): LongInt;
+Var N: Int64; P: LongInt; Neg: Boolean; Ok: Boolean;
+Begin
+ V1SetBool:=0; Ok:=True;
+ If Val='auto' Then N:=-1
+ Else If V1StrMatchName(Val,'true,y,yes,enable,enabled,on') Then N:=1
+ Else If V1StrMatchName(Val,'false,n,no,disable,disabled,off') Then N:=0
+ Else Begin
+  { strtol(val,&end,10) ; la fin doit etre la fin de la chaine }
+  P:=1; Neg:=False; N:=0;
+  While (P<=Length(Val)) And V1IsWs(Val[P]) Do Inc(P);
+  If (P<=Length(Val)) And ((Val[P]='+') Or (Val[P]='-')) Then Begin Neg:=Val[
+   P]='-'; Inc(P); End;
+  If (P<=Length(Val)) And (Val[P] In ['0'..'9']) Then Begin
+   While (P<=Length(Val)) And (Val[P] In ['0'..'9']) Do Begin If N<100000000000
+    Then N:=N*10+Ord(Val[P])-48; Inc(P); End;
+   If Neg Then N:=-N;
+   If P<=Length(Val) Then Ok:=False;
+  End Else Begin
+   If Val<>'' Then Ok:=False;   { aucun chiffre : fin = debut ; valide seulement
+    si la chaine est vide }
+  End;
+ End;
+ If Ok And ((N<0) Or (N>1)) Then Ok:=False;
+ If Not Ok Then Begin
+  V1Log(Ctx,'Unable to parse option value "'+Val+'" as boolean');
+  V1SetBool:=V1E_Inval; Exit;
+ End;
+ Dst:=N;
+End;
+
+{ ---- av_parse_color ---- }
+Const
+ V1NCol=140;
+ V1ColNm: Array[0..V1NCol-1] Of String[20]=('AliceBlue','AntiqueWhite','Aqua',
+  'Aquamarine','Azure','Beige','Bisque','Black','BlanchedAlmond','Blue',
+  'BlueViolet','Brown','BurlyWood','CadetBlue','Chartreuse','Chocolate','Coral',
+  'CornflowerBlue','Cornsilk','Crimson','Cyan','DarkBlue','DarkCyan',
+  'DarkGoldenRod','DarkGray','DarkGreen','DarkKhaki','DarkMagenta',
+  'DarkOliveGreen','Darkorange','DarkOrchid','DarkRed','DarkSalmon',
+  'DarkSeaGreen','DarkSlateBlue','DarkSlateGray','DarkTurquoise','DarkViolet',
+  'DeepPink','DeepSkyBlue','DimGray','DodgerBlue','FireBrick','FloralWhite',
+  'ForestGreen','Fuchsia','Gainsboro','GhostWhite','Gold','GoldenRod','Gray',
+  'Green','GreenYellow','HoneyDew','HotPink','IndianRed','Indigo','Ivory',
+  'Khaki','Lavender','LavenderBlush','LawnGreen','LemonChiffon','LightBlue',
+  'LightCoral','LightCyan','LightGoldenRodYellow','LightGreen','LightGrey',
+  'LightPink','LightSalmon','LightSeaGreen','LightSkyBlue','LightSlateGray',
+  'LightSteelBlue','LightYellow','Lime','LimeGreen','Linen','Magenta','Maroon',
+  'MediumAquaMarine','MediumBlue','MediumOrchid','MediumPurple',
+  'MediumSeaGreen','MediumSlateBlue','MediumSpringGreen','MediumTurquoise',
+  'MediumVioletRed','MidnightBlue','MintCream','MistyRose','Moccasin',
+  'NavajoWhite','Navy','OldLace','Olive','OliveDrab','Orange','OrangeRed',
+  'Orchid','PaleGoldenRod','PaleGreen','PaleTurquoise','PaleVioletRed',
+  'PapayaWhip','PeachPuff','Peru','Pink','Plum','PowderBlue','Purple','Red',
+  'RosyBrown','RoyalBlue','SaddleBrown','Salmon','SandyBrown','SeaGreen',
+  'SeaShell','Sienna','Silver','SkyBlue','SlateBlue','SlateGray','Snow',
+  'SpringGreen','SteelBlue','Tan','Teal','Thistle','Tomato','Turquoise',
+  'Violet','Wheat','White','WhiteSmoke','Yellow','YellowGreen');
+ V1ColV: Array[0..V1NCol-1] Of LongInt=($F0F8FF,$FAEBD7,$00FFFF,$7FFFD4,$F0FFFF,
+  $F5F5DC,$FFE4C4,$000000,$FFEBCD,$0000FF,$8A2BE2,$A52A2A,$DEB887,$5F9EA0,
+  $7FFF00,$D2691E,$FF7F50,$6495ED,$FFF8DC,$DC143C,$00FFFF,$00008B,$008B8B,
+  $B8860B,$A9A9A9,$006400,$BDB76B,$8B008B,$556B2F,$FF8C00,$9932CC,$8B0000,
+  $E9967A,$8FBC8F,$483D8B,$2F4F4F,$00CED1,$9400D3,$FF1493,$00BFFF,$696969,
+  $1E90FF,$B22222,$FFFAF0,$228B22,$FF00FF,$DCDCDC,$F8F8FF,$FFD700,$DAA520,
+  $808080,$008000,$ADFF2F,$F0FFF0,$FF69B4,$CD5C5C,$4B0082,$FFFFF0,$F0E68C,
+  $E6E6FA,$FFF0F5,$7CFC00,$FFFACD,$ADD8E6,$F08080,$E0FFFF,$FAFAD2,$90EE90,
+  $D3D3D3,$FFB6C1,$FFA07A,$20B2AA,$87CEFA,$778899,$B0C4DE,$FFFFE0,$00FF00,
+  $32CD32,$FAF0E6,$FF00FF,$800000,$66CDAA,$0000CD,$BA55D3,$9370D8,$3CB371,
+  $7B68EE,$00FA9A,$48D1CC,$C71585,$191970,$F5FFFA,$FFE4E1,$FFE4B5,$FFDEAD,
+  $000080,$FDF5E6,$808000,$6B8E23,$FFA500,$FF4500,$DA70D6,$EEE8AA,$98FB98,
+  $AFEEEE,$D87093,$FFEFD5,$FFDAB9,$CD853F,$FFC0CB,$DDA0DD,$B0E0E6,$800080,
+  $FF0000,$BC8F8F,$4169E1,$8B4513,$FA8072,$F4A460,$2E8B57,$FFF5EE,$A0522D,
+  $C0C0C0,$87CEEB,$6A5ACD,$708090,$FFFAFA,$00FF7F,$4682B4,$D2B48C,$008080,
+  $D8BFD8,$FF6347,$40E0D0,$EE82EE,$F5DEB3,$FFFFFF,$F5F5F5,$FFFF00,$9ACD32);
+
+Function V1StrCmpI(Const A,B: String): LongInt;
+Var I,N: LongInt; X,Y: Char;
+Begin
+ N:=Length(A); If Length(B)<N Then N:=Length(B);
+ For I:=1 To N Do Begin
+  X:=A[I]; Y:=B[I];
+  If (X>='A') And (X<='Z') Then X:=Chr(Ord(X)+32);
+  If (Y>='A') And (Y<='Z') Then Y:=Chr(Ord(Y)+32);
+  If X<>Y Then Begin V1StrCmpI:=Ord(X)-Ord(Y); Exit; End;
+ End;
+ V1StrCmpI:=Length(A)-Length(B);
+End;
+
+{ strtoul(s,&tail,16) : renvoie la valeur ; Tail = position du premier caractere
+ non consomme }
+Function V1StrtoulHex(Const S: String; Var Tail: LongInt): Int64;
+Var P: LongInt; V: Int64; C: Char; Any: Boolean;
+Begin
+ P:=1; V:=0; Any:=False;
+ While (P<=Length(S)) And V1IsWs(S[P]) Do Inc(P);
+ If (P+1<=Length(S)) And (S[P]='0') And ((S[P+1]='x') Or (S[P+1]='X')) And (P+
+  2<=Length(S)) And (S[P+2] In ['0'..'9','a'..'f','A'..'F']) Then Inc(P,2);
+ While P<=Length(S) Do Begin
+  C:=S[P];
+  If C In ['0'..'9'] Then V:=(V*16+Ord(C)-48) And $FFFFFFFF
+  Else If C In ['a'..'f'] Then V:=(V*16+Ord(C)-87) And $FFFFFFFF
+  Else If C In ['A'..'F'] Then V:=(V*16+Ord(C)-55) And $FFFFFFFF
+  Else Break;
+  Any:=True; Inc(P);
+ End;
+ If Not Any Then P:=1;
+ Tail:=P;
+ V1StrtoulHex:=V;
+End;
+
+Function V1ParseColor(Const Ctx: String; Const Cs: String; Var Rgba: Array Of
+ Byte): LongInt;
+Var Hex: LongInt; S2,Alpha: String; I,Tl,Len,Lo,Hi,Mid,C: LongInt; Rv: Int64; D,
+ A: Double; Code: LongInt; Found: Boolean; At: LongInt;
+Begin
+ V1ParseColor:=0; Hex:=0;
+ If (Cs<>'') And (Cs[1]='#') Then Hex:=1 Else If Copy(Cs,1,2)='0x' Then Hex:=2;
+ S2:=Copy(Cs,Hex+1,127);
+ At:=Pos('@',S2); Alpha:='';
+ If At>0 Then Begin Alpha:=Copy(S2,At+1,255); S2:=Copy(S2,1,At-1); End;
+ Len:=Length(S2);
+ Rgba[3]:=255;
+ If (V1StrCmpI(S2,'random')=0) Or (V1StrCmpI(S2,'bikeshed')=0) Then Begin
+  Rv:=Random(65536)*65536+Random(65536);
+  Rgba[0]:=(Rv Shr 24) And 255; Rgba[1]:=(Rv Shr 16) And 255; Rgba[2]:=(Rv Shr
+   8) And 255; Rgba[3]:=Rv And 255;
+ End Else Begin
+  Found:=True; I:=1;
+  If Hex=0 Then Begin While (I<=Len) And (S2[I] In ['0'..'9','a'..'f','A'..'F'])
+   Do Inc(I); Found:=(I-1=Len); End;
+  If (Hex<>0) Or Found Then Begin
+   Rv:=V1StrtoulHex(S2,Tl);
+   If (Tl<=Len) Or ((Len<>6) And (Len<>8)) Then Begin
+    V1Log(Ctx,'Invalid 0xRRGGBB[AA] color string: '''+S2+'''');
+    V1ParseColor:=V1E_Inval; Exit;
+   End;
+   If Len=8 Then Begin Rgba[3]:=Rv And 255; Rv:=Rv Shr 8; End;
+   Rgba[0]:=(Rv Shr 16) And 255; Rgba[1]:=(Rv Shr 8) And 255; Rgba[2]:=Rv And
+    255;
+  End Else Begin
+   { bsearch dans la table (ordre insensible a la casse) }
+   Lo:=0; Hi:=V1NCol; Found:=False; C:=0;
+   While Lo<Hi Do Begin
+    Mid:=(Lo+Hi) Div 2;
+    C:=V1StrCmpI(S2,V1ColNm[Mid]);
+    If C<0 Then Hi:=Mid Else If C>0 Then Lo:=Mid+1 Else Begin Found:=True;
+     Break; End;
+   End;
+   If Not Found Then Begin
+    V1Log(Ctx,'Cannot find color '''+S2+'''');
+    V1ParseColor:=V1E_Inval; Exit;
+   End;
+   Rgba[0]:=(V1ColV[Mid] Shr 16) And 255; Rgba[1]:=(V1ColV[Mid] Shr 8) And 255;
+    Rgba[2]:=V1ColV[Mid] And 255;
+  End;
+ End;
+ If At>0 Then Begin
+  If Copy(Alpha,1,2)='0x' Then Begin
+   Rv:=V1StrtoulHex(Alpha,Tl); A:=Rv;
+   If Tl=1 Then Tl:=1;
+  End Else Begin
+   { strtod : partie decimale simple }
+   I:=1; While (I<=Length(Alpha)) And V1IsWs(Alpha[I]) Do Inc(I);
+   Tl:=I;
+   Lo:=I;
+   If (Lo<=Length(Alpha)) And (Alpha[Lo] In ['+','-']) Then Inc(Lo);
+   Hi:=Lo;
+   While (Hi<=Length(Alpha)) And (Alpha[Hi] In ['0'..'9']) Do Inc(Hi);
+   If (Hi<=Length(Alpha)) And (Alpha[Hi]='.') Then Begin Inc(Hi); While (
+    Hi<=Length(Alpha)) And (Alpha[Hi] In ['0'..'9']) Do Inc(Hi); End;
+   If (Hi=Lo) Or ((Hi=Lo+1) And (Alpha[Lo]='.')) Then Tl:=1
+   Else Begin
+    If (Hi<=Length(Alpha)) And (Alpha[Hi] In ['e','E']) Then Begin
+     Mid:=Hi+1; If (Mid<=Length(Alpha)) And (Alpha[Mid] In ['+','-']) Then Inc(
+      Mid);
+     If (Mid<=Length(Alpha)) And (Alpha[Mid] In ['0'..'9']) Then Begin
+      While (Mid<=Length(Alpha)) And (Alpha[Mid] In ['0'..'9']) Do Inc(Mid);
+      Hi:=Mid;
+     End;
+    End;
+    Val(Copy(Alpha,I,Hi-I),D,Code);
+    If Code<>0 Then Begin Tl:=1; D:=0; End Else Tl:=Hi;
+    If (D<0.0) Or (D>1.0) Then A:=256 Else A:=255*D;
+   End;
+   If Tl=1 Then A:=0;
+  End;
+  If (Tl=1) Or (Tl<=Length(Alpha)) Or (A>255) Or (A<0) Then Begin
+   V1Log(Ctx,'Invalid alpha value specifier '''+Alpha+''' in '''+Cs+'''');
+   V1ParseColor:=V1E_Inval; Exit;
+  End;
+  Rgba[3]:=Trunc(A);
+ End;
+End;
+
+{ ---- connaissance des filtres de ffmpeg ---- }
+Function V1FltKnown(Const Nm: String; Aud: Boolean): Boolean;
+Var I: LongInt; K: String;
+Begin
+ V1FltKnown:=False;
+ If (Nm='') Or (Pos(' ',Nm)>0) Then Exit;
+ K:=' '+Nm+' ';
+ For I:=0 To High(V1FltV) Do If Pos(K,V1FltV[I])>0 Then Begin V1FltKnown:=True;
+  Exit; End;
+ For I:=0 To High(V1FltA) Do If Pos(K,V1FltA[I])>0 Then Begin V1FltKnown:=True;
+  Exit; End;
+ For I:=0 To High(V1FltB) Do If Pos(K,V1FltB[I])>0 Then Begin V1FltKnown:=True;
+  Exit; End;
+End;
+
+{ ---- options d'un filtre : liste (nom, destination, constante) dans l'ordre de
+ la table AVOption ---- }
+Var
+ V1OpN: Array[0..15] Of String[20]; V1OpD: Array[0..15] Of LongInt; V1OpC:
+  Array[0..15] Of Boolean; V1OpCnt: LongInt;
+
+Procedure V1OptTable(Kind: LongInt);
+ Procedure A(Const N: String; D: LongInt; C: Boolean);
+ Begin V1OpN[V1OpCnt]:=N; V1OpD[V1OpCnt]:=D; V1OpC[V1OpCnt]:=C; Inc(V1OpCnt);
+  End;
+Begin
+ V1OpCnt:=0;
+ If Kind=V1K_Crop Then Begin
+  A('out_w',1,False); A('w',1,False); A('out_h',2,False); A('h',2,False); A('x',
+   3,False); A('y',4,False); A('keep_aspect',5,False); A('exact',6,False);
+ End Else If Kind=V1K_Pad Then Begin
+  A('width',1,False); A('w',1,False); A('height',2,False); A('h',2,False); A(
+   'x',3,False); A('y',4,False); A('color',5,False); A('eval',6,False);
+  A('init',0,True); A('frame',0,True); A('aspect',7,False);
+ End;
+End;
+
+{ ff_filter_opt_parse : retourne 0 ou -22 ; messages sur le graphe }
+Function V1OptParse(Var F: V1TFilt; Const Args: String): LongInt;
+Var P,Oi,Off,Kp,Q: LongInt; HaveSh: Boolean; Sh,Key,Val: String; HasKey:
+ Boolean;
+Begin
+ V1OptTable(F.Kind);
+ P:=1; Oi:=V1OpCnt; Off:=-1;
+ While P<=Length(Args) Do Begin
+  HaveSh:=False; Sh:='';
+  If V1OpCnt>0 Then Begin
+   Oi:=(Oi+1) Mod (V1OpCnt+1);
+   If Oi<V1OpCnt Then Begin
+    If V1OpC[Oi] Or (V1OpD[Oi]=Off) Then Continue;
+    Off:=V1OpD[Oi]; Sh:=V1OpN[Oi]; HaveSh:=True;
+   End;
+  End;
+  { get_key }
+  HasKey:=False; Key:='';
+  Kp:=P;
+  While (Kp<=Length(Args)) And V1IsWs(Args[Kp]) Do Inc(Kp);
+  Q:=Kp;
+  While (Q<=Length(Args)) And V1IsKeyChar(Args[Q]) Do Inc(Q);
+  Val:=Copy(Args,Kp,Q-Kp);
+  Kp:=Q;
+  While (Kp<=Length(Args)) And V1IsWs(Args[Kp]) Do Inc(Kp);
+  If (Kp<=Length(Args)) And (Args[Kp]='=') Then Begin
+   HasKey:=True; Key:=Val; P:=Kp+1;
+  End Else If Not HaveSh Then Begin
+   V1Raw('[AVFilterGraph @ '+V1Ad+'] No option name near '''+Copy(Args,P,255)+
+    '''');
+   V1OptParse:=V1E_Inval; Exit;
+  End;
+  Val:=V1GetToken(Args,P,':');
+  If P<=Length(Args) Then Inc(P);
+  If HasKey Then Begin
+   Oi:=V1OpCnt;   { toutes les abreviations restantes sont ignorees }
+  End Else Key:=Sh;
+  If F.NOpt>=V1MaxO Then Begin V1OptParse:=V1E_Inval; Exit; End;
+  Inc(F.NOpt); F.OKey[F.NOpt]:=Key; F.OVal[F.NOpt]:=Val;
+ End;
+ V1OptParse:=0;
+End;
+
+Function V1ParseColorOpt(Var F: V1TFilt; Const Val: String): LongInt;
+Var Rc: LongInt;
+Begin
+ Rc:=V1ParseColor(F.Ctx,Val,F.Rgba);
+ If Rc<0 Then V1Log(F.Ctx,'Unable to parse option value "'+Val+'" as color');
+ V1ParseColorOpt:=Rc;
+End;
+
+{ write_number pour un AVRational (num/den en entiers) }
+Function V1RatWrite(Const Ctx: String; NumV: Double; Den: Int64; IntNum: Int64;
+ Var RN,RD: LongInt): LongInt;
+Var Nn: Double;
+Begin
+ If (Den=0) Or (1.7976931348623157e308*Den<NumV*IntNum) Or (0*Den>NumV*IntNum)
+  Then Begin
+  If Den<>0 Then Nn:=NumV*IntNum/Den Else If (NumV<>0) And (IntNum<>0) Then Nn:=
+   1.7e308*10 Else Nn:=O2Nan;
+  V1Log(Ctx,'Value '+V1FmtF(Nn)+
+   ' for parameter ''aspect'' out of range [0 - 1.79769e+308]');
+  V1RatWrite:=V1E_Range; Exit;
+ End;
+ RN:=IntNum; RD:=Den;
+ V1RatWrite:=0;
+End;
+
+{ set_string_number pour AV_OPT_TYPE_RATIONAL (pad : aspect) }
+Function V1SetAspect(Var F: V1TFilt; Const Val: String): LongInt;
+Var P,Q: LongInt; Neg: Boolean; A,B: Int64; Ok: Boolean; Rc: LongInt; D: Double;
+ N64,D64: Int64; L1,L2: LongInt;
+ Function RdInt(Var Pp: LongInt; Var V: Int64): Boolean;
+ Var Ng: Boolean; Any: Boolean;
+ Begin
+  RdInt:=False; V:=0; Ng:=False; Any:=False;
+  While (Pp<=Length(Val)) And V1IsWs(Val[Pp]) Do Inc(Pp);
+  If (Pp<=Length(Val)) And ((Val[Pp]='+') Or (Val[Pp]='-')) Then Begin Ng:=Val[
+   Pp]='-'; Inc(Pp); End;
+  While (Pp<=Length(Val)) And (Val[Pp] In ['0'..'9']) Do Begin If V<10000000000
+   Then V:=V*10+Ord(Val[Pp])-48; Inc(Pp); Any:=True; End;
+  If Ng Then V:=-V;
+  RdInt:=Any;
+ End;
+Begin
+ V1SetAspect:=0;
+ P:=1; Ok:=False;
+ If RdInt(P,A) Then
+  If (P<=Length(Val)) And ((Val[P]=':') Or (Val[P]='/')) Then Begin
+   Inc(P);
+   If RdInt(P,B) Then
+    If P>Length(Val) Then Ok:=True;
+  End;
+ If Ok Then Begin
+  A:=V1I32(A); B:=V1I32(B);
+  Rc:=V1RatWrite(F.Ctx,1,B,A,L1,L2);
+  If Rc>=0 Then Begin F.AspN:=L1; F.AspD:=L2; Exit; End;
+ End;
+ V1NCN:=0;
+ V1CN[0]:='default'; V1CV[0]:=0; V1CN[1]:='max'; V1CV[1]:=
+  1.7976931348623157e308; V1CN[2]:='min'; V1CV[2]:=0;
+ V1CN[3]:='none'; V1CV[3]:=0; V1CN[4]:='all'; V1CV[4]:=-1; V1NCN:=5;
+ Rc:=V1ParseEval(Val,F.Ctx,D);
+ If Rc<0 Then Begin V1Log(F.Ctx,'Unable to parse option value "'+Val+'"');
+  V1SetAspect:=Rc; Exit; End;
+ If (1.7976931348623157e308<D) Or (0>D) Then Begin
+  V1Log(F.Ctx,'Value '+V1FmtF(D)+
+   ' for parameter ''aspect'' out of range [0 - 1.79769e+308]');
+  V1SetAspect:=V1E_Range; Exit;
+ End;
+ If (D=Int(D)) And (Abs(D)<2147483648.0) Then Begin F.AspN:=Trunc(D); F.AspD:=1;
+  End
+ Else Begin O1D2Q(D,16777216,N64,D64); F.AspN:=N64; F.AspD:=D64; End;
+End;
+
+{ av_opt_set pour un filtre (crop / pad / null) }
+Function V1OptSet(Var F: V1TFilt; Const Key,Val: String): LongInt;
+Var Rc,N: LongInt; D: Double; NumI,DenI,Code: LongInt; Cnt: LongInt; Names:
+ String; Cvals: Array[0..3] Of Double;
+ Ok: Boolean; I,Sl: LongInt; Rat: Boolean; T: Int64; R1,R2: Int64;
+Begin
+ V1OptSet:=0;
+ If Key='enable' Then Begin F.HasEnable:=True; Exit; End;
+ If Key='thread_type' Then Exit;
+ If Key='threads' Then Begin
+  Cvals[0]:=0;
+  Rc:=V1SetIntOpt(F.Ctx,'threads',Val,0,2147483647,0,0,'',Cvals,N);
+  V1OptSet:=Rc; Exit;
+ End;
+ If F.Kind=V1K_Crop Then Begin
+  If (Key='out_w') Or (Key='w') Then F.WE:=Val
+  Else If (Key='out_h') Or (Key='h') Then F.HE:=Val
+  Else If Key='x' Then F.XE:=Val
+  Else If Key='y' Then F.YE:=Val
+  Else If Key='keep_aspect' Then V1OptSet:=V1SetBool(F.Ctx,Val,F.KeepA)
+  Else If Key='exact' Then V1OptSet:=V1SetBool(F.Ctx,Val,F.Exact)
+  Else V1OptSet:=V1E_OptNF;
+ End Else If F.Kind=V1K_Pad Then Begin
+  If (Key='width') Or (Key='w') Then F.WE:=Val
+  Else If (Key='height') Or (Key='h') Then F.HE:=Val
+  Else If Key='x' Then F.XE:=Val
+  Else If Key='y' Then F.YE:=Val
+  Else If Key='color' Then V1OptSet:=V1ParseColorOpt(F,Val)
+  Else If Key='eval' Then Begin
+   Cvals[0]:=0; Cvals[1]:=1;
+   V1OptSet:=V1SetIntOpt(F.Ctx,'eval',Val,0,1,0,2,'init,frame',Cvals,F.EvalM);
+  End
+  Else If Key='aspect' Then V1OptSet:=V1SetAspect(F,Val)
+  Else V1OptSet:=V1E_OptNF;
+ End Else V1OptSet:=V1E_OptNF;
+End;
+
+{ l'option Nm existe-t-elle pour ce filtre ? }
+Function V1OptKnown(Var F: V1TFilt; Const Nm: String): Boolean;
+Var I: LongInt;
+Begin
+ V1OptKnown:=(Nm='enable') Or (Nm='threads') Or (Nm='thread_type');
+ V1OptTable(F.Kind);
+ For I:=0 To V1OpCnt-1 Do If (V1OpN[I]=Nm) And Not V1OpC[I] Then V1OptKnown:=
+  True;
+End;
+
+{ lecture d'un fichier texte (valeur d'une option) }
+Function V1ReadFile(Const Nm: String; Var Dat: String): Boolean;
+Var F: File; N: LongInt; Sz: Int64;
+Begin
+ V1ReadFile:=False; Dat:='';
+ Assign(F,Nm); {$I-}Reset(F,1);{$I+}
+ If IOResult<>0 Then Exit;
+ Sz:=FileSize(F); If Sz>250 Then Sz:=250;
+ N:=0;
+ If Sz>0 Then Begin SetLength(Dat,Sz); {$I-}BlockRead(F,Dat[1],Sz,N);{$I+}
+  SetLength(Dat,N); End;
+ Close(F);
+ V1ReadFile:=True;
+End;
+
+{ ---- analyse de la description du graphe (graphparser.c, 6.1.1) ---- }
+Procedure V1InitFilt(Var F: V1TFilt);
+Begin
+ FillChar(F,SizeOf(F),0);
+ F.WE:='iw'; F.HE:='ih'; F.XE:='(in_w-out_w)/2'; F.YE:='(in_h-out_h)/2';
+ F.Rgba[0]:=0; F.Rgba[1]:=0; F.Rgba[2]:=0; F.Rgba[3]:=255;
+ F.AspN:=0; F.AspD:=1;
+End;
+
+{ parse_link_name : P sur '[' ; Ok=False si erreur (message affiche) }
+Function V1LinkName(Const G: String; Var P: LongInt; Var Ok: Boolean): String;
+Var St: LongInt; Nm: String;
+Begin
+ St:=P; Inc(P); Ok:=False; V1LinkName:='';
+ Nm:=V1GetToken(G,P,']');
+ If Nm='' Then Begin
+  V1Raw('[AVFilterGraph @ '+V1Ad+
+   '] Bad (empty?) label found in the following: "'+Copy(G,St,255)+'".');
+  Exit;
+ End;
+ If (P>Length(G)) Or (G[P]<>']') Then Begin
+  V1Raw('[AVFilterGraph @ '+V1Ad+'] Mismatched ''['' found in the following: "'+
+   Copy(G,St,255)+'".');
+  Exit;
+ End;
+ Inc(P); Ok:=True; V1LinkName:=Nm;
+End;
+
+Function V1LinkLabels(Const G: String; Var P: LongInt; Var Lab: Array Of String;
+ Var N: LongInt; MaxN: LongInt): Boolean;
+Var Ok: Boolean; Nm: String;
+Begin
+ V1LinkLabels:=False; N:=0;
+ While (P<=Length(G)) And (G[P]='[') Do Begin
+  Nm:=V1LinkName(G,P,Ok);
+  If Not Ok Then Exit;
+  Inc(N); If N<=MaxN Then Lab[N-1]:=Nm;
+  While (P<=Length(G)) And V1IsWs(G[P]) Do Inc(P);
+ End;
+ V1LinkLabels:=True;
+End;
+
+Function V1FilterParse(Const G: String; Var P: LongInt; Ch,Ps: LongInt):
+ LongInt;
+Var Ix,At,K: LongInt; Nm,Ops: String; Ok: Boolean; LI,LO: Array[0..3] Of String;
+ Ni,No: LongInt;
+Begin
+ V1FilterParse:=V1E_Inval;
+ If V1NFl>=V1MaxF Then Begin V1Raw('Too many filters.'); Exit; End;
+ Inc(V1NFl); Ix:=V1NFl;
+ V1InitFilt(V1F[Ix]);
+ V1F[Ix].Chain:=Ch; V1F[Ix].Pos:=Ps;
+ If Not V1LinkLabels(G,P,LI,Ni,4) Then Begin V1Raw('[AVFilterGraph @ '+V1Ad+
+  '] Error parsing a filter description around: '+Copy(G,P,255)); Exit; End;
+ If Ni>4 Then Ni:=4;
+ V1F[Ix].NIn:=Ni; For K:=1 To Ni Do V1F[Ix].InL[K]:=LI[K-1];
+ Nm:=V1GetToken(G,P,'=,;[');
+ At:=Pos('@',Nm);
+ If At>0 Then Begin V1F[Ix].Inst:=Copy(Nm,At+1,60); Nm:=Copy(Nm,1,At-1); End;
+ V1F[Ix].Nm:=Copy(Nm,1,60);
+ { type de filtre }
+ V1F[Ix].Kind:=-1;
+ If Nm='crop' Then V1F[Ix].Kind:=V1K_Crop
+ Else If Nm='pad' Then V1F[Ix].Kind:=V1K_Pad
+ Else If (Nm='null') Or (Nm='copy') Or (Nm='anull') Then V1F[Ix].Kind:=V1K_Null
+ Else If V1FltKnown(Nm,False) Then V1F[Ix].Kind:=V1K_Other;
+ If V1F[Ix].Kind=V1K_Pad Then Begin V1F[Ix].XE:='0'; V1F[Ix].YE:='0'; End;
+ If (P<=Length(G)) And (G[P]='=') Then Begin
+  Inc(P);
+  Ops:=V1GetToken(G,P,'[],;');
+  If V1F[Ix].Kind=V1K_Other Then Begin
+   { options d'un filtre non pris en charge : conservees brutes }
+   V1F[Ix].NOpt:=1; V1F[Ix].OKey[1]:=''; V1F[Ix].OVal[1]:=Copy(Ops,1,250);
+  End Else If V1OptParse(V1F[Ix],Ops)<0 Then Begin
+   V1Raw('[AVFilterGraph @ '+V1Ad+
+    '] Error parsing a filter description around: '+Copy(G,P,255));
+   Exit;
+  End;
+ End;
+ If Not V1LinkLabels(G,P,LO,No,4) Then Begin V1Raw('[AVFilterGraph @ '+V1Ad+
+  '] Error parsing a filter description around: '+Copy(G,P,255)); Exit; End;
+ If No>4 Then No:=4;
+ V1F[Ix].NOut:=No; For K:=1 To No Do V1F[Ix].OutL[K]:=LO[K-1];
+ While (P<=Length(G)) And V1IsWs(G[P]) Do Inc(P);
+ V1FilterParse:=0;
+End;
+
+Function V1ChainParse(Const G: String; Var P: LongInt; Ch: LongInt): LongInt;
+Var St,Ps: LongInt; Chr: Char;
+Begin
+ St:=P; Ps:=0;
+ V1ChainParse:=V1E_Inval;
+ While P<=Length(G) Do Begin
+  Inc(Ps);
+  If V1FilterParse(G,P,Ch,Ps)<0 Then Begin
+   V1Raw('[AVFilterGraph @ '+V1Ad+'] Error parsing filterchain '''+Copy(G,St,
+    255)+''' around: '+Copy(G,P,255));
+   Exit;
+  End;
+  If P<=Length(G) Then Begin
+   Chr:=G[P];
+   If (Chr<>',') And (Chr<>';') Then Begin
+    V1Raw('[AVFilterGraph @ '+V1Ad+'] Trailing garbage after a filter: '+Copy(G,
+     P,255));
+    V1Raw('[AVFilterGraph @ '+V1Ad+'] Error parsing filterchain '''+Copy(G,St,
+     255)+''' around: '+Copy(G,P,255));
+    Exit;
+   End;
+   Inc(P);
+   While (P<=Length(G)) And V1IsWs(G[P]) Do Inc(P);
+   If Chr=';' Then Break;
+  End;
+ End;
+ V1ChainParse:=0;
+End;
+
+{ avfilter_graph_segment_parse }
+Function V1SegParse(Const G0: String): LongInt;
+Var P,Ch: LongInt; G: String; Q: LongInt;
+Begin
+ V1NFl:=0; Ch:=0; G:=G0; P:=1;
+ While (P<=Length(G)) And V1IsWs(G[P]) Do Inc(P);
+ If Copy(G,P,10)='sws_flags=' Then Begin
+  Q:=P; While (Q<=Length(G)) And (G[Q]<>';') Do Inc(Q);
+  If Q>Length(G) Then Begin V1Raw('[AVFilterGraph @ '+V1Ad+
+   '] sws_flags not terminated with '';''.'); V1SegParse:=V1E_Inval; Exit; End;
+  P:=Q+1;
+ End;
+ While (P<=Length(G)) And V1IsWs(G[P]) Do Inc(P);
+ While P<=Length(G) Do Begin
+  Inc(Ch);
+  If V1ChainParse(G,P,Ch)<0 Then Begin V1SegParse:=V1E_Inval; Exit; End;
+  While (P<=Length(G)) And V1IsWs(G[P]) Do Inc(P);
+ End;
+ If Ch=0 Then Begin
+  V1Raw('[AVFilterGraph @ '+V1Ad+
+   '] No filters specified in the graph description');
+  V1SegParse:=V1E_Inval; Exit;
+ End;
+ V1SegParse:=0;
+End;
+
+{ find_linklabel : premier filtre d'indice >= From dont la broche (sortie si
+ Outp) a l'etiquette Lab et n'est pas encore reliee }
+Function V1FindLabel(Const Lab: String; Outp: Boolean; From: LongInt): LongInt;
+Var I: LongInt;
+Begin
+ V1FindLabel:=0;
+ For I:=From To V1NFl Do Begin
+  If Outp Then Begin
+   If (V1F[I].NOut>=1) And (Not V1F[I].OutDone) And (V1F[I].OutL[1]=Lab) Then
+    Begin V1FindLabel:=I; Exit; End;
+  End Else Begin
+   If (V1F[I].NIn>=1) And (Not V1F[I].InDone) And (V1F[I].InL[1]=Lab) Then Begin
+    V1FindLabel:=I; Exit; End;
+  End;
+ End;
+End;
+
+{ creation, options, initialisation, liaison ; Aud : graphe audio }
+Function V1BuildGraph(Aud: Boolean; Var NOpenIn,NOpenOut: LongInt): LongInt;
+Var I,K,J,Cnt,Rc,Po,OpIn,OpOut: LongInt; Nm: String; Dat: String;
+ OIn,OOut: Array[0..7] Of LongInt;
+Begin
+ V1BuildGraph:=V1E_Inval;
+ { creation des filtres }
+ Cnt:=0;
+ For I:=1 To V1NFl Do Begin
+  If V1F[I].Kind<0 Then Begin
+   V1Raw('[AVFilterGraph @ '+V1Ad+'] No such filter: '''+V1F[I].Nm+'''');
+   V1BuildGraph:=V1E_FltNF; Exit;
+  End;
+  If V1F[I].Inst='' Then V1F[I].Ctx:='Parsed_'+V1F[I].Nm+'_'+V1IStr(Cnt) Else
+   V1F[I].Ctx:=V1F[I].Nm+'@'+V1F[I].Inst;
+  Inc(Cnt);
+ End;
+ { application des options (ffmpeg : graph_opts_apply) }
+ For I:=1 To V1NFl Do Begin
+  If V1F[I].Kind=V1K_Other Then Continue;
+  For K:=1 To V1F[I].NOpt Do Begin
+   Rc:=V1OptSet(V1F[I],V1F[I].OKey[K],V1F[I].OVal[K]);
+   If (Rc=V1E_OptNF) And (Copy(V1F[I].OKey[K],1,1)='/') And V1OptKnown(V1F[I],
+    Copy(V1F[I].OKey[K],2,60)) Then Begin
+    { cle precedee de '/' : la valeur est lue dans le fichier designe }
+    Nm:=Copy(V1F[I].OKey[K],2,60);
+    If Not V1ReadFile(V1F[I].OVal[K],Dat) Then Begin
+     V1Raw('Error opening file '+V1F[I].OVal[K]+'.');
+     V1Raw('Error loading value for option '''+Nm+''' from file '''+V1F[I].OVal[
+      K]+'''');
+     V1BuildGraph:=V1E_IO; Exit;
+    End;
+    Rc:=V1OptSet(V1F[I],Nm,Dat);
+    If Rc<0 Then Begin
+     V1Raw('Error applying option '''+Nm+''' to filter '''+V1F[I].Nm+''': '+
+      V1StrErr(Rc));
+     V1BuildGraph:=Rc; Exit;
+    End;
+   End Else If Rc<0 Then Begin
+    V1Raw('Error applying option '''+V1F[I].OKey[K]+''' to filter '''+V1F[I].Nm+
+     ''': '+V1StrErr(Rc));
+    V1BuildGraph:=Rc; Exit;
+   End;
+  End;
+ End;
+ { filtres connus mais non pris en charge par le programme }
+ For I:=1 To V1NFl Do If V1F[I].Kind=V1K_Other Then Begin
+  V1Flush;
+  O1Msg(16,'Filter '''+V1F[I].Nm+''' is not supported by this program.');
+  V1Die(1);
+ End;
+ { initialisation }
+ For I:=1 To V1NFl Do Begin
+  If V1F[I].HasEnable Then Begin
+   V1Log(V1F[I].Ctx,'Timeline (''enable'' option) not supported with filter '''+
+    V1F[I].Nm+'''');
+   V1Raw('[AVFilterGraph @ '+V1Ad+'] Error initializing filters');
+   V1BuildGraph:=V1E_Patch; Exit;
+  End;
+ End;
+ { liaison }
+ For I:=1 To V1NFl Do Begin V1F[I].InDone:=False; V1F[I].OutDone:=False; V1F[
+  I].NextF:=0; End;
+ OpIn:=0; OpOut:=0;
+ For I:=1 To V1NFl Do Begin
+  If V1F[I].NIn>1 Then Begin
+   V1Raw('[AVFilterGraph @ '+V1Ad+
+    '] More input link labels specified for filter '''+V1F[I].Nm+
+    ''' than it has inputs: '+V1IStr(V1F[I].NIn)+' > 1');
+   V1Raw('[AVFilterGraph @ '+V1Ad+'] Error linking filters');
+   Exit;
+  End;
+  If Not V1F[I].InDone Then Begin
+   Po:=0;
+   If (V1F[I].NIn>=1) Then Po:=V1FindLabel(V1F[I].InL[1],True,I);
+   If Po>0 Then Begin V1F[Po].OutDone:=True; V1F[I].InDone:=True; V1F[
+    Po].NextF:=I; End
+   Else Begin If OpIn<8 Then OIn[OpIn]:=I; Inc(OpIn); End;
+  End;
+  If V1F[I].NOut>1 Then Begin
+   V1Raw('[AVFilterGraph @ '+V1Ad+
+    '] More output link labels specified for filter '''+V1F[I].Nm+
+    ''' than it has outputs: '+V1IStr(V1F[I].NOut)+' > 1');
+   V1Raw('[AVFilterGraph @ '+V1Ad+'] Error linking filters');
+   Exit;
+  End;
+  If Not V1F[I].OutDone Then Begin
+   Po:=0;
+   If V1F[I].NOut>=1 Then Po:=V1FindLabel(V1F[I].OutL[1],False,I);
+   If Po>0 Then Begin V1F[I].OutDone:=True; V1F[Po].InDone:=True; V1F[I].NextF:=
+    Po; End
+   Else Begin
+    Po:=0;
+    If (V1F[I].NOut=0) And (I<V1NFl) And (V1F[I+1].Chain=V1F[I].Chain) Then
+     If (Not V1F[I+1].InDone) And (V1F[I+1].NIn=0) Then Po:=I+1;
+    If Po>0 Then Begin V1F[I].OutDone:=True; V1F[Po].InDone:=True; V1F[
+     I].NextF:=Po; End
+    Else Begin If OpOut<8 Then OOut[OpOut]:=I; Inc(OpOut); End;
+   End;
+  End;
+ End;
+ NOpenIn:=OpIn; NOpenOut:=OpOut;
+ V1NOrd:=0;
+ If (OpIn=1) And (OpOut=1) Then Begin
+  K:=OIn[0]; J:=0;
+  While (K>0) And (J<=V1NFl) Do Begin Inc(V1NOrd); V1Ord[V1NOrd]:=K; K:=V1F[
+   K].NextF; Inc(J); End;
+  If (V1NOrd<>V1NFl) Or (V1Ord[V1NOrd]<>OOut[0]) Then Begin V1NOrd:=0; Exit;
+   End;
+ End;
+ V1BuildGraph:=0;
+End;
+
+{ ---- geometrie des plans d'une image (disposition du programme : plans
+ contigus, tailles arrondies par exces) ---- }
+Procedure V1Planes(Fm,W,H: LongInt; Var NP: LongInt; Var Pl: V1TPl);
+Var Kd,Hs,Vs,Bps,Bpp,CW,CH,O,I: LongInt; Al: Boolean;
+Begin
+ Kd:=F5Fm[Fm].Pl; Hs:=F5Fm[Fm].Hs; Vs:=F5Fm[Fm].Vs; Bps:=F5Fm[Fm].Bps; Bpp:=
+  F5Fm[Fm].Bpp; Al:=F5Fm[Fm].Alpha;
+ FillChar(Pl,SizeOf(Pl),0);
+ CW:=V1CeilR(W,Hs); CH:=V1CeilR(H,Vs);
+ Case Kd Of
+  1: Begin
+   NP:=3; If Al Then NP:=4;
+   Pl[0].Off:=0; Pl[0].Rb:=W*Bps; Pl[0].Rows:=H; Pl[0].Step:=Bps;
+   O:=W*H*Bps;
+   Pl[1].Off:=O; Pl[1].Rb:=CW*Bps; Pl[1].Rows:=CH; Pl[1].Hs:=Hs; Pl[1].Vs:=Vs;
+    Pl[1].Step:=Bps; O:=O+CW*CH*Bps;
+   Pl[2].Off:=O; Pl[2].Rb:=CW*Bps; Pl[2].Rows:=CH; Pl[2].Hs:=Hs; Pl[2].Vs:=Vs;
+    Pl[2].Step:=Bps; O:=O+CW*CH*Bps;
+   If Al Then Begin Pl[3].Off:=O; Pl[3].Rb:=W*Bps; Pl[3].Rows:=H; Pl[3].Step:=
+    Bps; End;
+  End;
+  2: Begin NP:=1; Pl[0].Off:=0; Pl[0].Rb:=W*Bps; Pl[0].Rows:=H; Pl[0].Step:=Bps;
+   End;
+  3: Begin
+   NP:=2;
+   Pl[0].Off:=0; Pl[0].Rb:=W; Pl[0].Rows:=H; Pl[0].Step:=1;
+   CW:=V1CeilR(W,1); CH:=V1CeilR(H,1);
+   Pl[1].Off:=W*H; Pl[1].Rb:=CW*2; Pl[1].Rows:=CH; Pl[1].Hs:=1; Pl[1].Vs:=1; Pl[
+    1].Step:=2;
+  End;
+  Else Begin NP:=1; Pl[0].Off:=0; Pl[0].Rb:=W*Bpp; Pl[0].Rows:=H; Pl[0].Step:=
+   Bpp; End;
+ End;
+ For I:=0 To NP-1 Do If Pl[I].Step=0 Then Pl[I].Step:=1;
+End;
+
+Function V1FrameBytes(Fm,W,H: LongInt): LongInt;
+Begin
+ V1FrameBytes:=F5FrameBytes(Fm,W,H);
+End;
+
+{ ---- ff_draw_init / ff_draw_color ---- }
+Function V1DepthOf(Fm: LongInt): LongInt;
+Var Nm: String; I,D,Code: LongInt; T: String;
+Begin
+ Nm:=F5Fm[Fm].Nm;
+ If F5Fm[Fm].Bps=1 Then Begin V1DepthOf:=8; Exit; End;
+ T:='';
+ I:=Length(Nm);
+ If Copy(Nm,I-1,2)='le' Then Dec(I,2);
+ While (I>0) And (Nm[I] In ['0'..'9']) Do Begin T:=Nm[I]+T; Dec(I); End;
+ Val(T,D,Code);
+ If (Code<>0) Or (D<8) Then D:=16;
+ V1DepthOf:=D;
+End;
+
+{ le format est-il accepte par ff_draw_init ? }
+Function V1DrawOk(Fm: LongInt): Boolean;
+Var Kd: LongInt;
+Begin
+ Kd:=F5Fm[Fm].Pl;
+ V1DrawOk:=(Kd=1) Or (Kd=2) Or (Kd=3);
+End;
+
+Procedure V1DrawColor(Var F: V1TFilt; Fm: LongInt);
+Var Nm: String; IsRgb,Jpeg,Chroma: Boolean; Depth,NC,I,Pln,Off: LongInt;
+ Cr,Cg,Cb,Bs,Rs,K1,K2: Double; M: Array[0..2,0..2] Of Double; Rg,Yu: Array[0..3]
+  Of Double;
+ CPl,COf: Array[0..3] Of LongInt; V: Int64; Mx: Double; Kd: LongInt;
+Begin
+ Nm:=F5Fm[Fm].Nm; Kd:=F5Fm[Fm].Pl;
+ IsRgb:=(Nm='gbrp');
+ Jpeg:=IsRgb Or (Copy(Nm,1,4)='yuvj');
+ Depth:=V1DepthOf(Fm);
+ FillChar(F.Col,SizeOf(F.Col),0);
+ { composantes : plan et decalage en octets }
+ If Kd=2 Then Begin NC:=1; CPl[0]:=0; COf[0]:=0; End
+ Else If Kd=3 Then Begin
+  NC:=3; CPl[0]:=0; COf[0]:=0; CPl[1]:=1; CPl[2]:=1;
+  If Nm='nv12' Then Begin COf[1]:=0; COf[2]:=1; End Else Begin COf[1]:=1; COf[
+   2]:=0; End;
+ End Else If IsRgb Then Begin
+  NC:=3; CPl[0]:=2; CPl[1]:=0; CPl[2]:=1; COf[0]:=0; COf[1]:=0; COf[2]:=0;
+ End Else Begin
+  NC:=3; If F5Fm[Fm].Alpha Then NC:=4;
+  For I:=0 To NC-1 Do Begin CPl[I]:=I; COf[I]:=0; End;
+ End;
+ Cr:=29900.0/100000.0; Cg:=58700.0/100000.0; Cb:=11400.0/100000.0;
+ M[0,0]:=Cr; M[0,1]:=Cg; M[0,2]:=Cb;
+ Bs:=0.5/(Cb-1.0); Rs:=0.5/(Cr-1.0);
+ M[1,0]:=Bs*Cr; M[1,1]:=Bs*Cg; M[1,2]:=0.5;
+ M[2,0]:=0.5; M[2,1]:=Rs*Cg; M[2,2]:=Rs*Cb;
+ For I:=0 To 3 Do Rg[I]:=F.Rgba[I]/255.0;
+ If IsRgb Then Begin Yu[0]:=Rg[0]; Yu[1]:=Rg[1]; Yu[2]:=Rg[2]; End
+ Else Begin
+  For I:=0 To 2 Do Yu[I]:=Rg[0]*M[I,0]+Rg[1]*M[I,1]+Rg[2]*M[I,2];
+ End;
+ Yu[3]:=Rg[3];
+ K1:=219.0/255.0; K2:=224.0/255.0;
+ For I:=0 To 2 Do Begin
+  Chroma:=(Not IsRgb) And (I>0);
+  If Not Jpeg Then Begin
+   If Chroma Then Begin Yu[I]:=Yu[I]*K2; Yu[I]:=Yu[I]+128.0/255.0; End
+   Else Begin Yu[I]:=Yu[I]*K1; Yu[I]:=Yu[I]+16.0/255.0; End;
+  End Else If Chroma Then Yu[I]:=Yu[I]+0.5;
+ End;
+ If NC<=2 Then Yu[1]:=Yu[3];
+ Mx:=(Int64(1) Shl Depth)-1;
+ For I:=0 To NC-1 Do Begin
+  V:=Trunc(Yu[I]*Mx+0.5) And $FFFFFFFF;
+  Pln:=CPl[I]; Off:=COf[I];
+  If Depth>8 Then Begin
+   F.Col[Pln][Off*1]:=V And 255; F.Col[Pln][Off*1+1]:=(V Shr 8) And 255;
+  End Else F.Col[Pln][Off]:=V And 255;
+ End;
+End;
+
+Procedure V1FillRect(Var F: V1TFilt; Fm: LongInt; Buf: PEABuffer; DW,DH,X,Y,W,H:
+ LongInt);
+Var NP,P,Wp,Hp,I,J,P0,Sz: LongInt; Pl: V1TPl;
+Begin
+ V1Planes(Fm,DW,DH,NP,Pl);
+ For P:=0 To NP-1 Do Begin
+  Wp:=V1CeilR(W,Pl[P].Hs); Hp:=V1CeilR(H,Pl[P].Vs);
+  If Hp=0 Then Exit;
+  P0:=Pl[P].Off+V1SarI(Y,Pl[P].Vs)*Pl[P].Rb+V1SarI(X,Pl[P].Hs)*Pl[P].Step;
+  If (Wp<=0) Or (Hp<0) Then Continue;
+  If (P0<0) Or (P0+(Hp-1)*Pl[P].Rb+Wp*Pl[P].Step>Pl[P].Off+Pl[P].Rb*Pl[P].Rows)
+   Then Continue;
+  For I:=0 To Wp-1 Do
+   For J:=0 To Pl[P].Step-1 Do Buf^[P0+I*Pl[P].Step+J]:=F.Col[P][J];
+  For I:=1 To Hp-1 Do Move(Buf^[P0],Buf^[P0+I*Pl[P].Rb],Wp*Pl[P].Step);
+ End;
+End;
+
+Procedure V1CopyRect(Fm: LongInt; Dst: PEABuffer; DW,DH: LongInt; Src:
+ PEABuffer; SW,SH: LongInt; Dx,Dy,Sx,Sy,W,H: LongInt);
+Var NP,NP2,P,Wp,Hp,I,SO,DO_: LongInt; Pl,Ql: V1TPl;
+Begin
+ V1Planes(Fm,DW,DH,NP,Pl); V1Planes(Fm,SW,SH,NP2,Ql);
+ For P:=0 To NP-1 Do Begin
+  SO:=Ql[P].Off+V1SarI(Sy,Ql[P].Vs)*Ql[P].Rb+V1SarI(Sx,Ql[P].Hs)*Ql[P].Step;
+  DO_:=Pl[P].Off+V1SarI(Dy,Pl[P].Vs)*Pl[P].Rb+V1SarI(Dx,Pl[P].Hs)*Pl[P].Step;
+  Wp:=V1CeilR(W,Pl[P].Hs)*Pl[P].Step; Hp:=V1CeilR(H,Pl[P].Vs);
+  For I:=0 To Hp-1 Do Begin
+   If (SO+I*Ql[P].Rb+Wp>Ql[P].Off+Ql[P].Rb*Ql[P].Rows) Or (DO_+I*Pl[P].Rb+Wp>Pl[
+    P].Off+Pl[P].Rb*Pl[P].Rows) Then Break;
+   Move(Src^[SO+I*Ql[P].Rb],Dst^[DO_+I*Pl[P].Rb],Wp);
+  End;
+ End;
+End;
+
+{ ---- crop : config_input ---- }
+Function V1Norm(D: Double; Var N: LongInt): Boolean;
+Begin
+ If O2IsNan(D) Then Begin V1Norm:=False; Exit; End;
+ If D>2147483647.0 Then Begin N:=2147483647; V1Norm:=False; Exit; End;
+ If D<-2147483648.0 Then Begin N:=LongInt($80000000); V1Norm:=False; Exit; End;
+ N:=O2LRint(D); V1Norm:=True;
+End;
+
+Procedure V1SetCropNames;
+Const Nm: Array[0..17] Of String[8]=('in_w','iw','in_h','ih','out_w','ow',
+ 'out_h','oh','a','sar','dar','hsub','vsub','x','y','n','pos','t');
+Var I: LongInt;
+Begin
+ V1NCN:=18; For I:=0 To 17 Do V1CN[I]:=Nm[I];
+End;
+
+Function V1CropConfig(Var F: V1TFilt; Fm: LongInt): LongInt;
+Var Res: Double; Fa: Single; Ret: LongInt; Ex: String; Dn,Dd,Dn2,Dd2: Int64; Fx:
+ Boolean;
+Begin
+ V1CropConfig:=V1E_Inval;
+ F.CHs:=F5Fm[Fm].Hs; F.CVs:=F5Fm[Fm].Vs;
+ If F5Fm[Fm].Pl=0 Then Begin F.CHs:=0; F.CVs:=0; End;
+ F.CVar[0]:=F.IW; F.CVar[1]:=F.IW; F.CVar[2]:=F.IH; F.CVar[3]:=F.IH;
+ Fa:=V1D(F.IW)/V1D(F.IH);
+ F.CVar[8]:=Fa;
+ If F.ISarN<>0 Then F.CVar[9]:=V1D(F.ISarN)/V1D(F.ISarD) Else F.CVar[9]:=1;
+ F.CVar[10]:=F.CVar[8]*F.CVar[9];
+ F.CVar[11]:=1 Shl F.CHs; F.CVar[12]:=1 Shl F.CVs;
+ F.CVar[13]:=O2Nan; F.CVar[14]:=O2Nan;
+ F.CVar[4]:=O2Nan; F.CVar[5]:=O2Nan; F.CVar[6]:=O2Nan; F.CVar[7]:=O2Nan;
+ F.CVar[15]:=0; F.CVar[16]:=O2Nan; F.CVar[17]:=O2Nan;
+ V1SetCropNames;
+ Res:=0;
+ Move(F.CVar,V1CV,SizeOf(F.CVar));
+ V1ParseEval(F.WE,F.Ctx,Res);
+ F.CVar[4]:=Res; F.CVar[5]:=Res;
+ Move(F.CVar,V1CV,SizeOf(F.CVar));
+ Ex:=F.HE;
+ Ret:=V1ParseEval(F.HE,F.Ctx,Res);
+ If Ret<0 Then Begin V1Log(F.Ctx,'Error when evaluating the expression '''+Ex+
+  ''''); V1CropConfig:=Ret; Exit; End;
+ F.CVar[6]:=Res; F.CVar[7]:=Res;
+ Move(F.CVar,V1CV,SizeOf(F.CVar));
+ Ex:=F.WE;
+ Ret:=V1ParseEval(F.WE,F.Ctx,Res);
+ If Ret<0 Then Begin V1Log(F.Ctx,'Error when evaluating the expression '''+Ex+
+  ''''); V1CropConfig:=Ret; Exit; End;
+ F.CVar[4]:=Res; F.CVar[5]:=Res;
+ Fx:=V1Norm(F.CVar[4],F.CW);
+ If Not (Fx And V1Norm(F.CVar[6],F.CH)) Then Begin
+  V1Log(F.Ctx,
+   'Too big value or invalid expression for out_w/ow or out_h/oh. Maybe the ex'+
+   'pression for out_w:'''+F.WE+''' or for out_h:'''+F.HE+
+   ''' is self-referencing.');
+  V1CropConfig:=V1E_Inval; Exit;
+ End;
+ If F.Exact=0 Then Begin
+  F.CW:=F.CW And Not((1 Shl F.CHs)-1); F.CH:=F.CH And Not((1 Shl F.CVs)-1);
+ End;
+ { analyse de x et y }
+ If F.CXp=Nil Then New(F.CXp);
+ If F.CYp=Nil Then New(F.CYp);
+ V1SetCropNames;
+ If (V1ExParse(F.CXp,F.XE,F.Ctx)<0) Then Begin V1CropConfig:=V1E_Inval; Exit;
+  End;
+ If (V1ExParse(F.CYp,F.YE,F.Ctx)<0) Then Begin V1CropConfig:=V1E_Inval; Exit;
+  End;
+ If F.KeepA<>0 Then Begin
+  { dar = sar * (w/h) ; out_sar = reduce(dar.num*h, dar.den*w) }
+  O1Reduce(Dn,Dd,Int64(F.ISarN)*F.IW,Int64(F.ISarD)*F.IH,2147483647);
+  O1Reduce(Dn2,Dd2,Int64(V1I32(Dn*F.CH)),Int64(V1I32(Dd*F.CW)),2147483647);
+  F.OSarN:=Dn2; F.OSarD:=Dd2;
+ End Else Begin F.OSarN:=F.ISarN; F.OSarD:=F.ISarD; End;
+ If (F.CW<=0) Or (F.CH<=0) Or (F.CW>F.IW) Or (F.CH>F.IH) Then Begin
+  V1Log(F.Ctx,'Invalid too big or non positive size for width '''+V1IStr(F.CW)+
+   ''' or height '''+V1IStr(F.CH)+'''');
+  V1CropConfig:=V1E_Inval; Exit;
+ End;
+ F.CX:=(F.IW-F.CW) Div 2; F.CY:=(F.IH-F.CH) Div 2;
+ If F.Exact=0 Then Begin
+  F.CX:=F.CX And Not((1 Shl F.CHs)-1); F.CY:=F.CY And Not((1 Shl F.CVs)-1);
+ End;
+ F.OW:=F.CW; F.OH:=F.CH;
+ V1CropConfig:=0;
+End;
+
+{ ---- pad : config_input ---- }
+Procedure V1SetPadNames;
+Const Nm: Array[0..14] Of String[8]=('in_w','iw','in_h','ih','out_w','ow',
+ 'out_h','oh','x','y','a','sar','dar','hsub','vsub');
+Var I: LongInt;
+Begin
+ V1NCN:=15; For I:=0 To 14 Do V1CN[I]:=Nm[I];
+End;
+
+Function V1Rescale(A,B,C: Int64): Int64;
+Begin
+ If (C<=0) Or (B<0) Then Begin V1Rescale:=Low(Int64); Exit; End;
+ V1Rescale:=O1Resc(A,B,C);
+End;
+
+Function V1RoundSub(Sh: LongInt; V: LongInt): LongInt;
+Begin
+ If Sh=0 Then Begin V1RoundSub:=V; Exit; End;
+ V1RoundSub:=V1SarI(V,Sh)*(Int64(1) Shl Sh);
+End;
+
+Function V1PadConfig(Var F: V1TFilt; Fm: LongInt): LongInt;
+Var Vv: Array[0..14] Of Double; Res: Double; Ret: LongInt; Ex: String; Hs,Vs:
+ LongInt; AN,AD: Int64; RN,RD: Int64; T: Int64; Sn,Sd: Int64;
+ Procedure SetV;
+ Begin Move(Vv,V1CV,SizeOf(Vv)); End;
+Begin
+ V1PadConfig:=V1E_Inval;
+ Hs:=F5Fm[Fm].Hs; Vs:=F5Fm[Fm].Vs;
+ If F5Fm[Fm].Pl=3 Then Begin Hs:=1; Vs:=1; End;
+ V1DrawColor(F,Fm);
+ Vv[0]:=F.IW; Vv[1]:=F.IW; Vv[2]:=F.IH; Vv[3]:=F.IH;
+ Vv[4]:=O2Nan; Vv[5]:=O2Nan; Vv[6]:=O2Nan; Vv[7]:=O2Nan;
+ Vv[8]:=0; Vv[9]:=0;
+ Vv[10]:=V1D(F.IW)/V1D(F.IH);
+ If F.ISarN<>0 Then Vv[11]:=V1D(F.ISarN)/V1D(F.ISarD) Else Vv[11]:=1;
+ Vv[12]:=Vv[10]*Vv[11];
+ Vv[13]:=1 Shl Hs; Vv[14]:=1 Shl Vs;
+ V1SetPadNames;
+ { largeur puis hauteur (la premiere evaluation n'est pas verifiee) }
+ Res:=0; SetV;
+ Ex:=F.WE; V1ParseEval(F.WE,F.Ctx,Res);
+ F.PW:=V1D2I(Res); Vv[4]:=Res; Vv[5]:=Res; SetV;
+ Ex:=F.HE;
+ Ret:=V1ParseEval(F.HE,F.Ctx,Res);
+ If Ret<0 Then Begin V1Log(F.Ctx,'Error when evaluating the expression '''+Ex+
+  ''''); V1PadConfig:=Ret; Exit; End;
+ F.PH:=V1D2I(Res); Vv[6]:=Res; Vv[7]:=Res;
+ If F.PH=0 Then Begin F.PH:=F.IH; Vv[6]:=F.IH; Vv[7]:=F.IH; End;
+ SetV;
+ Ex:=F.WE;
+ Ret:=V1ParseEval(F.WE,F.Ctx,Res);
+ If Ret<0 Then Begin V1Log(F.Ctx,'Error when evaluating the expression '''+Ex+
+  ''''); V1PadConfig:=Ret; Exit; End;
+ F.PW:=V1D2I(Res); Vv[4]:=Res; Vv[5]:=Res;
+ If F.PW=0 Then Begin F.PW:=F.IW; Vv[4]:=F.IW; Vv[5]:=F.IW; End;
+ { aspect }
+ If (F.AspN<>0) And (F.AspD<>0) Then Begin
+  { adjusted = aspect / sar }
+  If F.ISarN=0 Then Begin
+   { av_div_q avec un SAR nul : 1/0 }
+   O1Reduce(RN,RD,Int64(F.AspN)*F.ISarD,Int64(F.AspD)*F.ISarN,2147483647);
+  End Else O1Reduce(RN,RD,Int64(F.AspN)*F.ISarD,Int64(F.AspD)*F.ISarN,
+   2147483647);
+  AN:=RN; AD:=RD;
+  T:=V1Rescale(F.PW,AD,AN);
+  If F.PH<T Then Begin
+   F.PH:=V1D2I(T); Vv[6]:=T; Vv[7]:=T;
+  End Else Begin
+   T:=V1Rescale(F.PH,AN,AD);
+   F.PW:=V1D2I(T); Vv[4]:=T; Vv[5]:=T;
+  End;
+ End;
+ SetV;
+ { x, y }
+ Ex:=F.XE; V1ParseEval(F.XE,F.Ctx,Res);
+ F.PX:=V1D2I(Res); Vv[8]:=Res; SetV;
+ Ex:=F.YE;
+ Ret:=V1ParseEval(F.YE,F.Ctx,Res);
+ If Ret<0 Then Begin V1Log(F.Ctx,'Error when evaluating the expression '''+Ex+
+  ''''); V1PadConfig:=Ret; Exit; End;
+ F.PY:=V1D2I(Res); Vv[9]:=Res; SetV;
+ Ex:=F.XE;
+ Ret:=V1ParseEval(F.XE,F.Ctx,Res);
+ If Ret<0 Then Begin V1Log(F.Ctx,'Error when evaluating the expression '''+Ex+
+  ''''); V1PadConfig:=Ret; Exit; End;
+ F.PX:=V1D2I(Res); Vv[8]:=Res;
+ If (F.PX<0) Or (V1I32(Int64(F.PX)+F.IW)>F.PW) Then Begin F.PX:=(F.PW-F.IW) Div
+  2; Vv[8]:=F.PX; End;
+ If (F.PY<0) Or (V1I32(Int64(F.PY)+F.IH)>F.PH) Then Begin F.PY:=(F.PH-F.IH) Div
+  2; Vv[9]:=F.PY; End;
+ F.PW:=V1RoundSub(Hs,F.PW);
+ F.PH:=V1RoundSub(Vs,F.PH);
+ If (F.PW<F.IW) Or (F.PH<F.IH) Then Begin
+  V1Log(F.Ctx,'Padded dimensions cannot be smaller than input dimensions.');
+  V1PadConfig:=V1E_Inval; Exit;
+ End;
+ F.PX:=V1RoundSub(Hs,F.PX); F.PY:=V1RoundSub(Vs,F.PY);
+ F.PInW:=V1RoundSub(Hs,F.IW); F.PInH:=V1RoundSub(Vs,F.IH);
+ F.PLW:=F.IW; F.PLH:=F.IH;
+ If (F.PX<0) Or (F.PY<0) Or (F.PW<=0) Or (F.PH<=0) Or
+    (((Int64(F.PX) And $FFFFFFFF)+(Int64(F.IW) And $FFFFFFFF)) And $FFFFFFFF > (
+     Int64(F.PW) And $FFFFFFFF)) Or
+    (((Int64(F.PY) And $FFFFFFFF)+(Int64(F.IH) And $FFFFFFFF)) And $FFFFFFFF > (
+     Int64(F.PH) And $FFFFFFFF)) Then Begin
+  V1Log(F.Ctx,'Input area '+V1IStr(F.PX)+':'+V1IStr(F.PY)+':'+V1IStr(V1I32(
+   Int64(F.PX)+F.IW))+':'+V1IStr(V1I32(Int64(F.PY)+F.IH))+
+   ' not within the padded area 0:0:'+V1IStr(F.PW)+':'+V1IStr(F.PH)+
+   ' or zero-sized');
+  V1PadConfig:=V1E_Inval; Exit;
+ End;
+ F.OW:=F.PW; F.OH:=F.PH; F.OSarN:=F.ISarN; F.OSarD:=F.ISarD;
+ V1PadConfig:=0;
+End;
+
+{ ---- application d'un filtre a une image ---- }
+Procedure V1CropFrame(Var F: V1TFilt; Fm: LongInt; Src,Dst: PEABuffer; N:
+ LongInt; T,Pos: Double);
+Var Res: Double; NP,NP2,P,I,SO,Wp,Hp,Ms,Tot: LongInt; Pl,Ql: V1TPl; Tmp: Int64;
+Begin
+ Tot:=F5FrameBytes(Fm,F.IW,F.IH);
+ F.CVar[15]:=N; F.CVar[17]:=T; F.CVar[16]:=Pos;
+ V1SetCropNames;
+ Move(F.CVar,V1CV,SizeOf(F.CVar));
+ F.CVar[13]:=V1ExEval(F.CXp);
+ Move(F.CVar,V1CV,SizeOf(F.CVar));
+ F.CVar[14]:=V1ExEval(F.CYp);
+ Move(F.CVar,V1CV,SizeOf(F.CVar));
+ F.CVar[13]:=V1ExEval(F.CXp);
+ V1Norm(F.CVar[13],F.CX);
+ V1Norm(F.CVar[14],F.CY);
+ If F.CX<0 Then F.CX:=0;
+ If F.CY<0 Then F.CY:=0;
+ If Int64(F.CX)+F.CW>F.IW Then F.CX:=F.IW-F.CW;
+ If Int64(F.CY)+F.CH>F.IH Then F.CY:=F.IH-F.CH;
+ If F.Exact=0 Then Begin
+  F.CX:=F.CX And Not((1 Shl F.CHs)-1); F.CY:=F.CY And Not((1 Shl F.CVs)-1);
+ End;
+ V1Planes(Fm,F.IW,F.IH,NP,Ql);
+ V1Planes(Fm,F.CW,F.CH,NP2,Pl);
+ For P:=0 To NP-1 Do Begin
+  SO:=Ql[P].Off+V1SarI(F.CY,Ql[P].Vs)*Ql[P].Rb+V1SarI(Int64(F.CX)*Ql[P].Step,Ql[
+   P].Hs);
+  Wp:=Pl[P].Rb; Hp:=Pl[P].Rows;
+  FillChar(Dst^[Pl[P].Off],Wp*Hp,0);
+  For I:=0 To Hp-1 Do Begin
+   Ms:=Wp;
+   Tmp:=Int64(SO)+I*Ql[P].Rb;
+   If Tmp+Ms>Tot Then Ms:=Tot-Tmp;
+   If Ms>0 Then Move(Src^[Tmp],Dst^[Pl[P].Off+I*Pl[P].Rb],Ms);
+  End;
+ End;
+End;
+
+Procedure V1PadFrame(Var F: V1TFilt; Fm: LongInt; Src,Dst: PEABuffer);
+Begin
+ FillChar(Dst^,F5FrameBytes(Fm,F.PW,F.PH),0);
+ If F.PY<>0 Then V1FillRect(F,Fm,Dst,F.PW,F.PH,0,0,F.PW,F.PY);
+ If F.PH>F.PY+F.PInH Then V1FillRect(F,Fm,Dst,F.PW,F.PH,0,F.PY+F.PInH,F.PW,F.PH-
+  F.PY-F.PInH);
+ V1FillRect(F,Fm,Dst,F.PW,F.PH,0,F.PY,F.PX,F.IH);
+ V1CopyRect(Fm,Dst,F.PW,F.PH,Src,F.IW,F.IH,F.PX,F.PY,0,0,F.IW,F.IH);
+ V1FillRect(F,Fm,Dst,F.PW,F.PH,F.PX+F.PInW,F.PY,F.PW-F.PX-F.PInW,F.IH);
+End;
+
+{ ---- API appelee par O1 ---- }
+{ suivi des images apres le trim d'entree }
+Procedure V1NoteBegin(NSrc: LongInt; TbN,TbD: Int64);
+Begin
+ If V1SrcN<>Nil Then Begin FreeMem(V1SrcN); V1SrcN:=Nil; End;
+ If V1SrcP<>Nil Then Begin FreeMem(V1SrcP); V1SrcP:=Nil; End;
+ V1NSrc:=NSrc; V1NIn:=0; V1TbN:=TbN; V1TbD:=TbD;
+ If Not V1On Then Exit;
+ GetMem(V1SrcN,(Int64(NSrc)+2)*4); GetMem(V1SrcP,(Int64(NSrc)+2)*8);
+ FillChar(V1SrcN^,(Int64(NSrc)+2)*4,255);
+End;
+
+Procedure V1NoteFrame(S,K: LongInt; P: Int64);
+Begin
+ If (V1SrcN=Nil) Or (S<0) Or (S>=V1NSrc) Then Exit;
+ V1SrcN^[S]:=K; V1SrcP^[S]:=P;
+End;
+
+Procedure V1NoteEnd(NF: LongInt);
+Begin V1NIn:=NF; End;
+
+{ configuration du graphe sur la premiere image ; met a jour W,H,SarN,SarD
+ (valeurs apres filtrage) }
+Procedure V1Begin(Fm: LongInt; Var W,H,SarN,SarD: LongInt);
+Var I,K,Rc,Cw,Ch,SN,SD: LongInt; Ff: File; Nm: String; Ax: Int64; St: Int64; Sc:
+ LongInt; Pl: V1TPl; NP: LongInt;
+ Procedure Fail(Rc: LongInt; Const Ctx: String; Pad: Boolean);
+ Begin
+  If Pad Then V1Log(Ctx,'Failed to configure input pad on '+Ctx);
+  V1Raw('[vf#0:0 @ '+V1Ad+'] Error reinitializing filters!');
+  V1Raw('Failed to inject frame into filter network: '+V1StrErr(Rc));
+  V1Raw('Error while filtering: '+V1StrErr(Rc));
+  If (V1MuxNm<>'image2') And (V1OutName<>'-') Then Begin
+   Assign(Ff,V1OutName); {$I-}Rewrite(Ff,1);{$I+} If IOResult=0 Then Close(Ff);
+  End;
+  V1Raw('[out#0/'+V1MuxNm+' @ '+V1Ad+
+   '] Nothing was written into output file, because at least one of its stream'+
+   's received no packets.');
+  V1Die(V1ExitOf(Rc));
+ End;
+ { av_image_check_size2 : Pix=True avec le format de pixels ; sinon format
+  inconnu (8 octets par pixel) }
+ Function SizeBad(Wd,Ht: LongInt; Pix: Boolean): Boolean;
+ Var Sd: Int64;
+ Begin
+  Sd:=0;
+  If Pix Then Begin V1Planes(Fm,Wd,Ht,NP,Pl); Sd:=Pl[0].Rb; End;
+  If Sd<=0 Then Sd:=8*Int64(Wd);
+  Sd:=Sd+1024;
+  SizeBad:=(Wd<=0) Or (Ht<=0) Or (Sd>=2147483647) Or (Sd*(Int64(Ht)+
+   128)>=2147483647);
+ End;
+Begin
+ V1Fm:=Fm; V1CfgDone:=True;
+ SN:=SarN; SD:=SarD;
+ If SN<=0 Then Begin SN:=0; SD:=1; End;
+ If V1NIn<=0 Then Exit;
+ Cw:=W; Ch:=H;
+ For I:=1 To V1NOrd Do Begin
+  K:=V1Ord[I];
+  V1F[K].IW:=Cw; V1F[K].IH:=Ch; V1F[K].ISarN:=SN; V1F[K].ISarD:=SD;
+  Case V1F[K].Kind Of
+   V1K_Crop: Rc:=V1CropConfig(V1F[K],Fm);
+   V1K_Pad: Begin
+    If Not V1DrawOk(Fm) Then Begin
+     V1Flush;
+     O1Msg(16,'Filter ''pad'' does not support the pixel format '+F5Fm[Fm].Nm+
+      ' in this program.');
+     V1Die(1);
+    End;
+    Rc:=V1PadConfig(V1F[K],Fm);
+   End;
+   Else Begin Rc:=0; V1F[K].OW:=Cw; V1F[K].OH:=Ch; V1F[K].OSarN:=SN; V1F[
+    K].OSarD:=SD; End;
+  End;
+  If Rc<0 Then Fail(Rc,V1F[K].Ctx,True);
+  Cw:=V1F[K].OW; Ch:=V1F[K].OH; SN:=V1F[K].OSarN; SD:=V1F[K].OSarD;
+ End;
+ { graph_check_links : taille des liens de sortie de chaque filtre }
+ For I:=1 To V1NOrd Do Begin
+  K:=V1Ord[I];
+  If SizeBad(V1F[K].OW,V1F[K].OH,True) Then Begin
+   V1Log(V1F[K].Ctx,'[IMGUTILS @ '+V1EvAd+'] Picture size '+V1IStr(Int64(V1F[
+    K].OW) And $FFFFFFFF)+'x'+V1IStr(Int64(V1F[K].OH) And $FFFFFFFF)+
+    ' is invalid');
+   Fail(V1E_Inval,'',False);
+  End;
+ End;
+ { ouverture de l'encodeur : meme controle sans format de pixels }
+ If SizeBad(Cw,Ch,False) Then Begin
+  V1Raw('['+V1CodecNm+' @ '+V1Ad+'] [IMGUTILS @ '+V1EvAd+'] Picture size '+
+   V1IStr(Cw)+'x'+V1IStr(Ch)+' is invalid');
+  V1Raw('[vost#0:0/'+V1CodecNm+' @ '+V1Ad+
+   '] Error while opening encoder - maybe incorrect parameters such as bit_rat'+
+   'e, rate, width or height.');
+  V1Raw('Error while filtering: Invalid argument');
+  If (V1MuxNm<>'image2') And (V1OutName<>'-') Then Begin
+   Assign(Ff,V1OutName); {$I-}Rewrite(Ff,1);{$I+} If IOResult=0 Then Close(Ff);
+  End;
+  V1Raw('[out#0/'+V1MuxNm+' @ '+V1Ad+
+   '] Nothing was written into output file, because at least one of its stream'+
+   's received no packets.');
+  V1Die(234);
+ End;
+ V1ResW:=Cw; V1ResH:=Ch; V1ResSN:=SN; V1ResSD:=SD;
+ W:=Cw; H:=Ch; SarN:=SN; SarD:=SD;
+ { tampons de travail }
+ Ax:=0;
+ For I:=1 To V1NOrd Do Begin
+  K:=V1Ord[I];
+  V1Planes(Fm,V1F[K].OW,V1F[K].OH,NP,Pl);
+  St:=0; For Sc:=0 To NP-1 Do St:=St+Int64(Pl[Sc].Rb)*Pl[Sc].Rows;
+  If St>Ax Then Ax:=St;
+ End;
+ If Ax>1500000000 Then Begin
+  V1Raw('Error while filtering: Cannot allocate memory');
+  V1Die(244);
+ End;
+ For I:=0 To 1 Do Begin GetMem(V1Buf[I],Ax+64); V1BufSz[I]:=Ax; End;
+End;
+
+{ applique le graphe a l'image SrcIdx (lue dans Src) ; renvoie le tampon
+ resultat }
+Function V1Run(Fm: LongInt; Src: PEABuffer; SrcIdx: LongInt): PEABuffer;
+Var I,K,Cur: LongInt; Cp,Np: PEABuffer; N: LongInt; T,Pos: Double;
+Begin
+ Cp:=Src; Cur:=0;
+ N:=0; T:=O2Nan; Pos:=O2Nan;
+ If (V1SrcN<>Nil) And (SrcIdx>=0) And (SrcIdx<V1NSrc) Then Begin
+  N:=V1SrcN^[SrcIdx]; If N<0 Then N:=0;
+  T:=V1D(V1SrcP^[SrcIdx])*(V1D(V1TbN)/V1D(V1TbD));
+ End;
+ If V1PosOk And (F5S.Pos<>Nil) And (SrcIdx>=0) And (SrcIdx<F5S.N) Then Pos:=
+  F5S.Pos^[SrcIdx];
+ For I:=1 To V1NOrd Do Begin
+  K:=V1Ord[I];
+  Np:=V1Buf[Cur];
+  Case V1F[K].Kind Of
+   V1K_Crop: V1CropFrame(V1F[K],Fm,Cp,Np,N,T,Pos);
+   V1K_Pad: V1PadFrame(V1F[K],Fm,Cp,Np);
+   Else Begin Move(Cp^,Np^,F5FrameBytes(Fm,V1F[K].OW,V1F[K].OH)); End;
+  End;
+  Cp:=Np; Cur:=1-Cur;
+ End;
+ V1Run:=Cp;
+End;
+
+{ ---- noms du muxer et de l'encodeur (messages [out#0/mux] et [vost#0:0/codec])
+ ---- }
+Function V1MuxOf(Const OutNm: String): String;
+Var E: String;
+Begin
+ E:=O1OutFmtName(O1OutG,OutNm);
+ If (E='jpg') Or (E='jpeg') Or (E='png') Or (E='bmp') Or (E='tif') Or (E='tiff')
+  Or (E='tga') Or (E='ppm') Or (E='pgm') Or (E='pbm') Or (E='pam') Or (E='sgi')
+  Or (E='pcx') Or (E='xwd') Or (E='dpx') Or (E='exr') Or (E='jxl') Then E:=
+  'image2'
+ Else If E='m4v' Then E:='ipod'
+ Else If (E='wmv') Or (E='asf') Then E:='asf'
+ Else If (E='mpg') Or (E='mpeg') Then E:='mpeg'
+ Else If E='vob' Then E:='svcd'
+ Else If (E='yuv') Or (E='rgb') Then E:='rawvideo'
+ Else If E='264' Then E:='h264'
+ Else If (E='h265') Or (E='hevc') Then E:='hevc'
+ Else If E='m1v' Then E:='mpeg1video'
+ Else If E='m2v' Then E:='mpeg2video'
+ Else If E='mkv' Then E:='matroska';
+ V1MuxOf:=E;
+End;
+
+Function V1CodecOfMux(Const Mx,Ext: String): String;
+Var C: String;
+Begin
+ C:='';
+ If Mx='yuv4mpegpipe' Then C:='wrapped_avframe'
+ Else If (Mx='avi') Or (Mx='nut') Then C:='mpeg4'
+ Else If (Mx='mov') Or (Mx='mp4') Or (Mx='ipod') Or (Mx='matroska') Or (
+  Mx='h264') Then C:='libx264'
+ Else If Mx='webm' Then C:='libvpx'
+ Else If Mx='gif' Then C:='gif'
+ Else If (Mx='flv') Or (Mx='swf') Then C:='flv'
+ Else If Mx='asf' Then C:='msmpeg4'
+ Else If (Mx='mpegts') Or (Mx='svcd') Or (Mx='mxf') Or (Mx='gxf') Or (
+  Mx='mpeg2video') Then C:='mpeg2video'
+ Else If (Mx='mpeg') Or (Mx='mpeg1video') Then C:='mpeg1video'
+ Else If Mx='rm' Then C:='rv10'
+ Else If (Mx='ogv') Or (Mx='ogg') Then C:='libtheora'
+ Else If (Mx='3gp') Or (Mx='3g2') Then C:='h263'
+ Else If Mx='dv' Then C:='dvvideo'
+ Else If Mx='rawvideo' Then C:='rawvideo'
+ Else If Mx='ivf' Then C:='libvpx'
+ Else If Mx='roq' Then C:='roqvideo'
+ Else If Mx='apng' Then C:='apng'
+ Else If Mx='webp' Then C:='libwebp_anim'
+ Else If Mx='hevc' Then C:='libx265'
+ Else If Mx='mjpeg' Then C:='mjpeg'
+ Else If Mx='image2' Then Begin
+  If (Ext='jpg') Or (Ext='jpeg') Then C:='mjpeg'
+  Else If (Ext='tif') Or (Ext='tiff') Then C:='tiff'
+  Else If Ext='tga' Then C:='targa'
+  Else If Ext='jxl' Then C:='libjxl'
+  Else C:=Ext;
+ End Else If Mx='null' Then C:='wrapped_avframe';
+ V1CodecOfMux:=C;
+End;
+
+{ description du graphe video : derniere des options -vf / -filter:v }
+Function V1FindDesc(G: Integer; Var S: String): Boolean;
+Var I,L: Integer; K: String;
+Begin
+ L:=0;
+ For I:=1 To O1NOp Do
+  If (O1Op[I].Grp=G) And Not O1Op[I].Av Then Begin
+   K:=O1Op[I].Key;
+   If K='vf' Then L:=I
+   Else If (Copy(K,1,6)='filter') And ((Length(K)=6) Or (K[7]=':')) Then
+    If O1SpecOk(K,'filter','v') Then L:=I;
+  End;
+ V1FindDesc:=L>0;
+ If L>0 Then S:=O1Op[L].Val;
+End;
+
+{ une option -af / -filter:a est-elle presente ? }
+Function V1FindAudDesc(G: Integer; Var S: String): Boolean;
+Var I,L: Integer; K: String;
+Begin
+ L:=0;
+ For I:=1 To O1NOp Do
+  If (O1Op[I].Grp=G) And Not O1Op[I].Av Then Begin
+   K:=O1Op[I].Key;
+   If K='af' Then L:=I
+   Else If (Copy(K,1,6)='filter') And ((Length(K)=6) Or (K[7]=':')) Then
+    If O1SpecOk(K,'filter','a') Then L:=I;
+  End;
+ V1FindAudDesc:=L>0;
+ If L>0 Then S:=O1Op[L].Val;
+End;
+
+{ erreur d'initialisation du graphe simple : messages de ffmpeg puis sortie }
+Procedure V1GraphFail(Rc: LongInt; Aud: Boolean; Const OutNm: String);
+Var Pf,Cd: String;
+Begin
+ If Aud Then Pf:='aost' Else Pf:='vost';
+ V1Raw('['+Pf+'#0:0/'+V1CodecNm+' @ '+V1Ad+
+  '] Error initializing a simple filtergraph');
+ V1Raw('Error opening output file '+OutNm+'.');
+ V1Raw('Error opening output files: '+V1StrErr(Rc));
+ V1Die(V1ExitOf(Rc));
+End;
+
+{ analyse complete du graphe (video ou audio) ; en cas d'echec : messages +
+ sortie }
+Procedure V1Setup(Const Desc,OutNm: String; Aud: Boolean);
+Var Rc,NI,NO_: LongInt; Pf: String;
+Begin
+ Rc:=V1SegParse(Desc);
+ If Rc=0 Then Rc:=V1BuildGraph(Aud,NI,NO_);
+ If Rc<0 Then V1GraphFail(Rc,Aud,OutNm);
+ If (NI<>1) Or (NO_<>1) Then Begin
+  If Aud Then Pf:='af' Else Pf:='vf';
+  V1Raw('['+Pf+'#0:0 @ '+V1Ad+'] Simple filtergraph '''+Desc+
+   ''' was expected to have exactly 1 input and 1 output. However, it had '+
+   V1IStr(NI)+' input(s) and '+V1IStr(NO_)+
+   ' output(s). Please adjust, or use a complex filtergraph (-filter_complex) '+
+   'instead.');
+  V1GraphFail(V1E_Inval,Aud,OutNm);
+ End;
+End;
+
+{ le fichier est-il un Y4M / un WAV ? }
+Function V1HeadIs(Const Nm: String; Wav: Boolean): Boolean;
+Var F: File; H: Array[0..15] Of Char; N: LongInt;
+Begin
+ V1HeadIs:=False;
+ Assign(F,Nm); {$I-}Reset(F,1);{$I+}
+ If IOResult<>0 Then Exit;
+ FillChar(H,SizeOf(H),0); N:=0; {$I-}BlockRead(F,H,12,N);{$I+}
+ Close(F);
+ If Wav Then V1HeadIs:=(N>=12) And (H[0]='R') And (H[1]='I') And (H[2]='F') And
+  (H[3]='F') And (H[8]='W') And (H[9]='A') And (H[10]='V') And (H[11]='E')
+ Else V1HeadIs:=(N>=9) And (H[0]='Y') And (H[1]='U') And (H[2]='V') And (H[
+  3]='4') And (H[4]='M') And (H[5]='P') And (H[6]='E') And (H[7]='G') And (H[
+  8]='2');
+End;
+
+{ controles avant la creation des flux : copie de flux, -vn }
+Procedure V1Gate(Const InNm,OutNm: String);
+Var S: String; I: LongInt;
+Begin
+ If Not V1FindDesc(O1OutG,S) Then Exit;
+ If V1HeadIs(InNm,True) Then Exit;
+ V1OutName:=OutNm;
+ V1MuxNm:=V1MuxOf(OutNm);
+ If O1CodecOf(O1OutG,OutNm)='copy' Then Begin
+  V1Raw('[vost#0:0/copy @ '+V1Ad+'] Filtergraph '''+S+
+   ''' was specified, but codec copy was selected. Filtering and streamcopy ca'+
+   'nnot be used together.');
+  V1Raw('Error opening output file '+OutNm+'.');
+  V1Raw('Error opening output files: '+V1StrErr(V1E_NoSys));
+  V1Die(V1ExitOf(V1E_NoSys));
+ End;
+ For I:=1 To O1NOp Do
+  If (O1Op[I].Grp=O1OutG) And (O1Op[I].Key='vn') And V1HeadIs(InNm,False) Then
+   Begin
+   V1Raw('[out#0/'+V1MuxNm+' @ '+V1Ad+
+    '] Output file does not contain any stream');
+   V1Raw('Error opening output file '+OutNm+'.');
+   V1Raw('Error opening output files: '+V1StrErr(V1E_Inval));
+   V1Die(V1ExitOf(V1E_Inval));
+  End;
+End;
+
+{ crochet de O1Route : prepare le graphe video ; renvoie True si un filtre video
+ est actif }
+Function V1Prepare(Const InNm,OutNm: String): Boolean;
+Var S: String; E: String;
+Begin
+ V1Prepare:=False;
+ V1On:=False;
+ If Not V1FindDesc(O1OutG,S) Then Exit;
+ If V1HeadIs(InNm,True) Then Exit;
+ V1Desc:=S; V1OutName:=OutNm;
+ V1MuxNm:=V1MuxOf(OutNm);
+ E:=O1CodecOf(O1OutG,OutNm);
+ If E='' Then E:=V1CodecOfMux(V1MuxNm,Lower(Extension(OutNm)));
+ V1CodecNm:=E;
+ V1Setup(S,OutNm,False);
+ V1On:=True;
+ V1Prepare:=True;
+End;
+
+{ -af : validation seule }
+Procedure V1AudioCheck(Const OutNm: String);
+Var S: String; E,Ex: String; Rc,NI,NO_: LongInt; I: LongInt;
+Begin
+ If Not V1FindAudDesc(O1OutG,S) Then Exit;
+ Ex:=Lower(Extension(OutNm));
+ E:='';
+ I:=O1Last(O1OutG,'c','a'); If I>0 Then E:=Lower(O1Op[I].Val);
+ I:=O1Last(O1OutG,'acodec','a'); If I>0 Then E:=Lower(O1Op[I].Val);
+ If E='' Then Begin
+  If Ex='wav' Then E:='pcm_s16le' Else If (Ex='aiff') Or (Ex='au') Or (Ex='caf')
+   Then E:='pcm_s16be'
+  Else If Ex='mp3' Then E:='libmp3lame' Else If Ex='mp2' Then E:='mp2' Else If
+   Ex='ac3' Then E:='ac3' Else If Ex='flac' Then E:='flac'
+  Else If (Ex='ogg') Or (Ex='oga') Then E:='libvorbis' Else If Ex='aac' Then E:=
+   'aac' Else If Ex='wma' Then E:='wmav2'
+  Else If Ex='voc' Then E:='pcm_u8' Else E:='pcm_s16le';
+ End;
+ V1CodecNm:=E; V1OutName:=OutNm;
+ Rc:=V1SegParse(S);
+ If Rc=0 Then Rc:=V1BuildGraph(True,NI,NO_);
+ If Rc<0 Then V1GraphFail(Rc,True,OutNm);
+ If (NI<>1) Or (NO_<>1) Then Begin
+  V1Raw('[af#0:0 @ '+V1Ad+'] Simple filtergraph '''+S+
+   ''' was expected to have exactly 1 input and 1 output. However, it had '+
+   V1IStr(NI)+' input(s) and '+V1IStr(NO_)+
+   ' output(s). Please adjust, or use a complex filtergraph (-filter_complex) '+
+   'instead.');
+  V1GraphFail(V1E_Inval,True,OutNm);
+ End;
+End;
+
+{ ==== V1-END ==== }
+
 { ==== BLOCK-ANCHOR-O3 : inserer le code du groupe O3 juste au-dessus de cette
  ligne ==== }
 
