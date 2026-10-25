@@ -29,6 +29,8 @@ Var I: LongInt;
 Begin
  O3ArgInit:=True; O3Argc:=System.ParamCount; If O3Argc>2046 Then O3Argc:=2046;
  For I:=0 To O3Argc Do O3Argv[I]:=System.ParamStr(I);
+ { '/?' (aide a la Windows) equivaut a '-h' }
+ If (O3Argc=1) And (O3Argv[1]='/?') Then O3Argv[1]:='-h';
 End;
 
 Function ParamCount: LongInt;
@@ -2286,7 +2288,7 @@ Begin
   Begin
    If Size < 4 Then Fail('Taille du bloc VOC 8 incorrecte.');
    ReadAt(Position, B, 4);
-   
+
    ExtendedChannels := B[3]+1;
    ExtendedRate := 256000000 Div ((65536-LongInt(LE16(B,0)))*ExtendedChannels);
    Extended := True;
@@ -21081,12 +21083,12 @@ INSynced:=False; INWin:=0;
   If INPos+ Len >INLen Then Begin
 Len:=INLen-INPos;
 
-   INErr:=2; 
+   INErr:=2;
   End;
   If INOut+ Len >INCap Then Begin
 Len:=INCap-INOut;
 
-   INErr:=2; 
+   INErr:=2;
   End;
   Move(Src^[INPos],Dst^[INOut], Len ); Inc(INPos, Len ); Inc(INOut, Len );
    If INErr<>0 Then Break;
@@ -21193,7 +21195,7 @@ Len:=INCap-INOut;
    If INOut+Len>INCap Then Begin
 Len:=INCap-INOut;
 
-    INErr:=2; 
+    INErr:=2;
    End;
    While Len>0 Do Begin
     Dst^[INOut]:=Dst^[INOut-Dist]; Inc(INOut); Dec(Len);
@@ -21433,7 +21435,7 @@ Begin
      65536)-256;
    End Else Begin
 
-  Yv:=Yv-16; 
+  Yv:=Yv-16;
   If NVBT709 Then Begin
    R:=(298*Yv+459*Vv+128) Div 256; G:=(298*Yv-55*Uv-136*Vv+128) Div 256;
    B:=(298*Yv+541*Uv+128) Div 256;
@@ -103820,7 +103822,7 @@ Begin
  If VPGet(S.C,128)<>0 Then Begin
   For Pos:=1 To 63 Do
    If VPGet(S.C,VP6ReorderPct[Pos])<>0 Then S.M.Reorder[Pos]:=VPGets(S.C,4);
-  VP6CoeffOrder(S); 
+  VP6CoeffOrder(S);
  End;
  For Cg:=0 To 1 Do For Node:=0 To 13 Do
   If VPGet(S.C,VP6RunvPct[Cg,Node])<>0 Then S.M.Runv[Cg,Node]:=VPGetsNN(S.C);
@@ -103983,7 +103985,7 @@ Begin
      Run:=VPTree(R^,VPDPcrV,VPDPcrP,M3);
      If Run=0 Then Begin
       Run:=9;
-      For I:=0 To 5 Do Run:=Run+(VPGet(R^,M3^[I+8]) Shl I); 
+      For I:=0 To 5 Do Run:=Run+(VPGet(R^,M3^[I+8]) Shl I);
      End;
     End;
    End;
@@ -104076,7 +104078,7 @@ Begin
    If (Delta And $F0)<>0 Then Delta:=Delta Or (VPGet(S.C,S.M.VFdv[Comp,3]) Shl
     3)
    Else Delta:=Delta Or 8;
-   
+
   End Else Begin Delta:=VPTree(S.C,VPDPvaV,VPDPvaP,PVPB(@S.M.VPdv[Comp,0]));
    End;
   If (Delta<>0) And (VPGet(S.C,S.M.VSig[Comp])<>0) Then Delta:=-Delta;
@@ -104469,7 +104471,7 @@ Begin
  End;
  If Not Damaged Then S.HaveUndamaged:=True;
  If S.Key Or (S.GoldenFrame<>0) Then Begin
- 
+
   For P:=0 To 2 Do Begin
    Sz:=S.PWd[P]*S.PHt[P];
    Move(S.Fr[0,P]^,S.Fr[2,P]^,Sz);
@@ -141016,10 +141018,9 @@ Const
 Procedure O1TxVersion(Var T: Text);
 Begin
  WriteLn(T,
-  'ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developer'+
-  's');
- WriteLn(T,'built with gcc 13 (Ubuntu 13.2.0-23ubuntu3)');
- Write(T,
+  'ffmpeg : Cette commande permet de manipuler, convertir, encoder, décoder, enregistrer et ',
+  'diffuser des fichiers audio et vidéo.');
+  Write(T,
   'configuration: --prefix=/usr --extra-version=3ubuntu5 --toolchain=hardened '+
   '--libdir=/usr/lib/x86_64-linux-gnu --incdir=/usr/include/x86_64-linux-gnu -'+
   '-arch=amd64 --enable-gpl --disable-stripping --dis');
@@ -141669,9 +141670,8 @@ End;
 Procedure O1TxBanner(Var T: Text);
 Begin
  WriteLn(T,
-  'ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developer'+
-  's');
- WriteLn(T,'  built with gcc 13 (Ubuntu 13.2.0-23ubuntu3)');
+  'ffmpeg : Cette commande permet de manipuler, convertir, encoder, d�coder, enregistrer et ',
+            'diffuser des fichiers audio et vid�o.');
  Write(T,
   '  configuration: --prefix=/usr --extra-version=3ubuntu5 --toolchain=hardene'+
   'd --libdir=/usr/lib/x86_64-linux-gnu --incdir=/usr/include/x86_64-linux-gnu'+
@@ -148340,8 +148340,8 @@ Begin
  O3Shown:=True;
  If O3HideB Or (O3Lvl<O3LInfo) Then Exit;
  WriteLn(StdErr,
-  'ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developer'+
-  's');
+  'ffmpeg : Cette commande permet de manipuler, convertir, encoder, décoder, enregistrer et ',
+  'diffuser des fichiers audio et vid'+#130+'o.');
  WriteLn(StdErr,'  built with gcc 13 (Ubuntu 13.2.0-23ubuntu3)');
  O3BannerCfg;
  WriteLn(StdErr,'  libavutil      58. 29.100 / 58. 29.100');
@@ -152720,7 +152720,7 @@ Begin
     VideoBlock(Buf,BSz-4,Sub); FreeMem(Buf,BSz);
     { image prete : pipeline commun NV (PAL8 -> YUV420P comme swscale) }
     If Not Opened Then Begin
-    If PNGMode Then Begin If AVSWantBMP Then 
+    If PNGMode Then Begin If AVSWantBMP Then
      NVBegin(2,Target,318,198,0, Fps,1) Else NVBegin(1,Target,318,198,0,Fps ,1);
      End
      Else NVBegin ( 0 ,
@@ -152736,7 +152736,7 @@ NVPalR [I]:=AVSR[I] ; NVPalG [I]:=AVSG[I] ; NVPalB
 );
 End;
 
-     NVEmit(PEABuffer(@AVSPix)); 
+     NVEmit(PEABuffer(@AVSPix));
     Inc(Frames);
    End;
    Inc(Pos,BSz);
@@ -181152,7 +181152,7 @@ Begin
  D:=0;
   For Y:=0 To H-1 Do For X:=0 To W-1 Do Begin
   V:= Frames^[Cur,Y]^ [ X ] ;
-  
+
    If Version<=2 Then V := ( V And $3E0 ) Or (( V Shr 10 ) And 31 ) Or ( ( V And
     31) Shl 10 );
       XMOut^[D] := V And 255 ;
@@ -181162,20 +181162,20 @@ Begin
     NVEmitN ( XMOut , NbP,NbF );
    Inc(CFNext,NbF) ;
   Inc(CFFrameNo,NbF) ;
- 
+
  Swap:=Cur; Cur:=Prev; Prev:=Swap; Inc(FrameCount);
 End;
 
 Procedure StartOutput;
 Var
- 
+
  I,J:Integer;
 RN,RD: LongInt;
 
 Begin
  If Not HaveHeader Or Not HaveRate Then Fail(
   '4xm: piste video ou cadence absente.');
- 
+
  New(Frames); FillChar(Frames^,SizeOf(Frames^),0);
  For I:=0 To 1 Do
  For J:=0 To H-1 Do Begin
@@ -182286,7 +182286,7 @@ G726CodeSize:=4; G726Rate:=8000;
    WriteLn(
     'DEVSD  msmpeg4v2       MPEG-4 part 2 Microsoft variant version 2 (decodeu'+
     'r I/P; encodeur Y4M->AVI images I seules, -q:v)');
-   WriteLn('D VSDT mpegvideo       MPEG-1 video (decodeur MPEG-1/MPEG-2)');   
+   WriteLn('D VSDT mpegvideo       MPEG-1 video (decodeur MPEG-1/MPEG-2)');
    WriteLn('DEA    pcm_alaw        PCM A-law');
    WriteLn(
     'D A    pcm_dvd         PCM signed 20|24-bit big-endian (LPCM DVD dans .vo'+
@@ -182753,7 +182753,7 @@ If InputFormat='matroska' Then InputFormat:='webm'; { F4 }
    End;
   End
   Else If (Argument='-ar') Or (Argument='-ac') Then Begin
-   
+
    Value:=NextArgument; Val(Value,Number,Code);
    If Code<>0 Then Fail('Valeur numerique incorrecte: '+Value);
    If
