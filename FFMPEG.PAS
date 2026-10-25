@@ -77007,9 +77007,17 @@ Var
  SnwFps: Double;
  SnwLastPicObj: LongInt;              { objet pointe par mpv->last_picture.f (-1 = NULL) }
 
+Function O2V(Id: Integer): Double; Forward; { O2 }
+Function O2JxBR(Br: Int64): LongInt; Forward; { O2 }
+Function O2Jx: LongInt; Forward; { O2 }
+Function O2BGiven: Boolean; Forward; { O2 }
+Function O2SnwEstimate(DryRun: Boolean): Single; Forward; { O2 }
+Procedure O2SnwInit; Forward; { O2 }
+Procedure O2SnwFps(N,D: LongInt); Forward; { O2 }
 Procedure SnwRcInitState;
 Var I: LongInt;
 Begin
+ O2SnwInit;
  For I:=0 To 4 Do Begin
   SnwRcPred[I].Coeff:=118*7.0; SnwRcPred[I].Count:=1.0; SnwRcPred[I].Decay:=0.4;
   SnwRcIcplx[I]:=1; SnwRcPcplx[I]:=1; SnwRcMvbits[I]:=1; SnwRcQsum[I]:=1; SnwRcFrames[I]:=1;
@@ -77074,6 +77082,8 @@ Begin
 End;
 
 Function SnwRcEstimate(DryRun: Boolean): Single;
+Forward;
+Function SnwRcEstimateOld(DryRun: Boolean): Single;
 Var
  Q,Br: Single; Qmin,Qmax,Pt: LongInt; Diff,Fps,RateFactor,Bits,ShortQ,Qd: Double; Wanted: Int64; Rce: TSnwRce; Var_,LastVar: Int64;
  NewCoeff,V: Double; PtObj: LongInt;
@@ -77135,7 +77145,12 @@ Begin
  If Not DryRun Then Begin
   SnwRcLastQ:=Q; SnwRcLastMcMb:=SnwMcMbVarSum; SnwRcLastMb:=SnwMbVarSum;
  End;
- SnwRcEstimate:=Q;
+ SnwRcEstimateOld:=Q;
+End;
+
+Function SnwRcEstimate(DryRun: Boolean): Single;
+Begin
+ SnwRcEstimate:=O2SnwEstimate(DryRun); { O2 }
 End;
 
 { ---- images : bords, entete, trame ---- }
@@ -77727,9 +77742,9 @@ Begin
  If SnwFlagQscale And (SnwGlobalQ=0) And (SnwPredOpt=0) Then Fail('The 9/7 wavelet is incompatible with lossless mode.');
  SnwPass1Rc:=Not SnwFlagQscale;
  SnwGop:=SnwGopC;
- If HasBr Then SnwBitRate:=VBitRate Else SnwBitRate:=200000;
- SnwBrTol:=4000000;
- SnwFps:=FN/FD;
+ SnwBitRate:=Trunc(O2V(0)); { O2 }
+ SnwBrTol:=Trunc(O2V(1)); { O2 }
+ SnwFps:=FN/FD; O2SnwFps(FN,FD); { O2 }
  SnwMbCmpOpt:=SnwOptMbCmp;
  Sw0:=Cw; Sh0:=Ch;
  If Conv=1 Then Begin Chs:=2; Cvs:=2; End;
@@ -89573,6 +89588,7 @@ Procedure G2OZ(N: LongInt);Begin While N>0 Do Begin G2O8(0); Dec(N); End; End;
 Procedure G2OPatch(At,V: LongInt);
 Begin G2OB^[At]:=V And 255; G2OB^[At+1]:=(V Shr 8) And 255; G2OB^[At+2]:=(V Shr 16) And 255; G2OB^[At+3]:=(V Shr 24) And 255; End;
 
+Function O2Bps: LongInt; Forward; { O2 }
 Procedure G2AviBegin(Const Fourcc: String; W,H,Rate,Scale,Bpp: LongInt; Extra: PEABuffer; ExtraLen: LongInt);
 Var I,Aw,Ah,G,K,Strf,Strl,Hdrl: LongInt;
 Begin
@@ -89580,11 +89596,11 @@ Begin
  GetMem(G2OSizes,G2OCapF*4); GetMem(G2OKeys,G2OCapF);
  Strf:=40+ExtraLen+(ExtraLen And 1);
  O1AviSar(O1AwSn,O1AwSd); O1AwHv:=(O1AwSn>0) And (O1AwSd>0);
- Strl:=4+(8+56)+(8+Strf)+(8+4120); If O1AwHv Then Strl:=Strl+(8+68);
+ Strl:=4+(8+56)+(8+Strf)+(8+O2Jx); If O1AwHv Then Strl:=Strl+(8+68);
  Hdrl:=4+(8+56)+(8+Strl)+(8+260);
  G2OTag('RIFF'); G2O32(0); G2OTag('AVI ');
  G2OTag('LIST'); G2O32(Hdrl); G2OTag('hdrl');
- G2OTag('avih'); G2O32(56); G2O32(Trunc(1000000.0*Scale/Rate)); G2O32(25000); G2O32(0); G2O32(2320); G2O32(0); G2O32(0); G2O32(1);
+ G2OTag('avih'); G2O32(56); G2O32(Trunc(1000000.0*Scale/Rate)); G2O32(O2Bps); G2O32(0); G2O32(2320); G2O32(0); G2O32(0); G2O32(1);
  G2O32(1048576); G2O32(W); G2O32(H); G2O32(0); G2O32(0); G2O32(0); G2O32(0);
  G2OTag('LIST'); G2O32(Strl); G2OTag('strl');
  G2OTag('strh'); G2O32(56); G2OTag('vids'); G2OTag(Fourcc);
@@ -89594,7 +89610,7 @@ Begin
  G2OTag(Fourcc); G2O32(W*H*Bpp Div 8); G2O32(0); G2O32(0); G2O32(G2OClrUsed); G2O32(0);
  For I:=0 To ExtraLen-1 Do G2O8(Extra^[I]);
  If Odd(ExtraLen) Then G2O8(0);
- G2OTag('JUNK'); G2O32(4120); G2O16(4); G2O16(0); G2O32(0); G2OTag('00dc'); G2OZ(4120-12);
+ G2OTag('JUNK'); G2O32(O2Jx); G2O16(4); G2O16(0); G2O32(0); G2OTag('00dc'); G2OZ(O2Jx-12);
  If O1AwHv Then Begin
  G2OTag('vprp'); G2O32(68); G2O32(0); G2O32(0); G2O32((2*Rate+Scale-1) Div (2*Scale));
  G2O32(W); G2O32(H);
@@ -93300,7 +93316,7 @@ End;
 { ff_estimate_p_frame_motion (mb_decision simple, EPZS, pas de 4MV) }
 Procedure SQ1EEstimate(Pl,MbX,MbY: LongInt; FirstLine: Boolean);
 Var
- P: Array[0..4,0..1] Of LongInt; Mx,My,X16,Y16,MotXy,Ms,B8,Xy,X,Y,Sum,Mean,IntraScore,MbType,Rng,Stride,Dm: LongInt;
+ P: Array[0..4,0..1] Of LongInt; Mx,My,X16,Y16,MotXy,Ms,B8,Xy,X,Y,Sum,Mean,IntraScore,MbType,Rng,Stride,Dm,Sq,VarC,VarD,L2: LongInt;
  V8,V16: PSQ1ELI; Skipped: Boolean;
 Function M8(Idx,C: LongInt): LongInt;
 Begin M8:=V8^[(Idx+2)*2+C]; End;
@@ -93318,8 +93334,8 @@ Begin
  If SQ1EXmin<-Rng Then SQ1EXmin:=-Rng; If SQ1EXmax>Rng Then SQ1EXmax:=Rng;
  If SQ1EYmin<-Rng Then SQ1EYmin:=-Rng; If SQ1EYmax>Rng Then SQ1EYmax:=Rng;
  SQ1ESkip:=False;
- Sum:=0;
- For Y:=0 To 15 Do For X:=0 To 15 Do Sum:=Sum+SQ1ESrcB^[SQ1ESO+Y*Stride+X];
+ Sum:=0; Sq:=0;
+ For Y:=0 To 15 Do For X:=0 To 15 Do Begin Sum:=Sum+SQ1ESrcB^[SQ1ESO+Y*Stride+X]; Sq:=Sq+SQ1ESrcB^[SQ1ESO+Y*Stride+X]*SQ1ESrcB^[SQ1ESO+Y*Stride+X]; End;
  MotXy:=2*MbY*B8+2*MbX;
  Xy:=MbX+MbY*Ms;
  P[1,0]:=M8(MotXy-1,0); P[1,1]:=M8(MotXy-1,1);
@@ -93365,6 +93381,25 @@ Begin
   End;
   SQ1ESmallDia;
   Mx:=SQ1EBx; My:=SQ1EBy;
+ End;
+ If O2V(20)>0 Then Begin { O2 : mb_decision > FF_MB_DECISION_SIMPLE }
+  VarC:=LongInt(Int64(Sq)-((Int64(Sum)*Sum) Shr 8)+500);
+  VarD:=0;
+  For Y:=0 To 15 Do For X:=0 To 15 Do Begin
+   Mean:=Integer(SQ1ESrcB^[SQ1ESO+Y*Stride+X])-Integer(SQ1ERefB^[SQ1ESO+(My+Y)*Stride+Mx+X]); VarD:=VarD+Mean*Mean;
+  End;
+  MbType:=0;
+  If (VarD*2+200*256>VarC) Then MbType:=MbType Or 1;
+  If (VarC*2+200*256>VarD) Or (((SQ1ELam*139+128*64) Shr 14)>24) Then Begin
+   MbType:=MbType Or 2;
+   If SQ1EZero Then Dm:=0 Else Dm:=SQ1EHpel(Mx,My,SQ1EDmin);
+  End Else Begin Mx:=Mx*2; My:=My*2; End;
+  V16^[(Xy+Ms+1)*2]:=Mx; V16^[(Xy+Ms+1)*2+1]:=My;
+  For Y:=0 To 1 Do For X:=0 To 1 Do Begin
+   V8^[(MotXy+Y*B8+X+2)*2]:=Mx; V8^[(MotXy+Y*B8+X+2)*2+1]:=My;
+  End;
+  SQ1EMbT[Pl]^[MbY*Ms+MbX]:=MbType;
+  Exit;
  End;
  If SQ1EZero Then Begin Mx:=0; My:=0; Dm:=0; End Else Dm:=SQ1EHpel(Mx,My,SQ1EDmin);
  V16^[(Xy+Ms+1)*2]:=Mx; V16^[(Xy+Ms+1)*2+1]:=My;
@@ -93545,7 +93580,7 @@ Begin
  OpenWrite(Target); SQ1EAU:=0; SQ1EAP:=0; SQ1EAN:=0; SQ1EAMax:=0; GetMem(SQ1EAS,1048576*4);
  Strf:=40+ExtraLen+(ExtraLen And 1);
  Hv:=(SarN>0) And (SarD>0); Vp:=0; If Hv Then Vp:=8+36+32*Fl;
- Strl:=4+(8+56)+(8+Strf)+(8+4120)+Vp;
+ Strl:=4+(8+56)+(8+Strf)+(8+O2JxBR(SQ1EBr))+Vp;
  Hdrl:=4+(8+56)+(8+Strl)+(8+260);
  SQ1EAtag('RIFF'); SQ1EAl32(0); SQ1EAtag('AVI ');
  SQ1EAtag('LIST'); SQ1EAl32(Hdrl); SQ1EAtag('hdrl');
@@ -93559,7 +93594,7 @@ Begin
  SQ1EAtag(Fourcc); SQ1EAl32(W*H*Bpp Div 8); SQ1EAl32(0); SQ1EAl32(0); SQ1EAl32(0); SQ1EAl32(0);
  For I:=0 To ExtraLen-1 Do SQ1EAb(Extra^[I]);
  If Odd(ExtraLen) Then SQ1EAb(0);
- SQ1EAtag('JUNK'); SQ1EAl32(4120); SQ1EAl16(4); SQ1EAl16(0); SQ1EAl32(0); SQ1EAtag('00dc'); SQ1EAz(4120-12);
+ SQ1EAtag('JUNK'); SQ1EAl32(O2JxBR(SQ1EBr)); SQ1EAl16(4); SQ1EAl16(0); SQ1EAl32(0); SQ1EAtag('00dc'); SQ1EAz(O2JxBR(SQ1EBr)-12);
  If Hv Then Begin
  SQ1EAtag('vprp'); SQ1EAl32(36+32*Fl); SQ1EAl32(0); SQ1EAl32(0); SQ1EAl32((2*Rate+Scale-1) Div (2*Scale));
  SQ1EAl32(W); SQ1EAl32(H);
@@ -100622,11 +100657,13 @@ Begin
  Else If (B[0]=Ord('Y')) And (B[1]=Ord('U')) And (B[2]=Ord('V')) And (B[3]=Ord('4')) And (B[4]=Ord('M')) Then F3SniffInput:=2;
 End;
 
+Var O2PSuffix: String;
+Function O2FmxOpt(Const A,V: String): Boolean; Forward; { O2 }
 Function F3RunSelf(Const Cmd: String): Boolean;
 Begin
  If GetEnv('F3DEBUG')<>'' Then WriteLn(StdErr,Cmd);
  SwapVectors;
- Exec(ParamStr(0),Cmd);
+ Exec(ParamStr(0),O2PSuffix+Cmd);
  SwapVectors;
  F3RunSelf:=(DosError=0) And (DosExitCode=0);
 End;
@@ -100657,7 +100694,7 @@ Begin
   If (Cd<>'mpeg1video') And (Cd<>'mpeg2video') Then Exit;
   If Cd='mpeg1video' Then Ext:='m1v' Else Ext:='m2v';
   Tmp:=Name+'.f3enc.'+Ext;
-  If Not F3RunSelf(' -y -i '+F3Quote(Name)+' -c:v '+Cd+OV+' '+F3Quote(Tmp)) Then Fail('Encodage video impossible.');
+  If Not F3RunSelf(' -y -i '+F3Quote(Name)+' -c:v '+Cd+OV+' '+F3Quote(Tmp)) Then Begin If DosExitCode>1 Then Halt(DosExitCode); Fail('Encodage video impossible.'); End; { O2 }
   P0:=F3NP;
   If Not F3ReadVideoES(Tmp,FileNo) Then Fail('Flux video encode illisible.');
   S:=F3NS-1;
@@ -100719,7 +100756,8 @@ Begin
    Else Begin CodecA:=CV; CodecV:=CV; End;
   End
   Else If (A='-b:a') Or (A='-ab') Or (A='-ar') Or (A='-ac') Then Begin Inc(I); OptsA:=OptsA+' '+A+' '+ParamStr(I); End
-  Else If (A='-b:v') Or (A='-g') Or (A='-bf') Or (A='-q:v') Or (A='-qscale:v') Then Begin Inc(I); OptsV:=OptsV+' '+A+' '+ParamStr(I); End
+  Else If (NIn>0) And O2FmxOpt(A,ParamStr(I+1)) Then Begin Inc(I); OptsV:=OptsV+' '+A+' '+ParamStr(I); End { O2 }
+  Else If (NIn>0) And ((A='-b:v') Or (A='-g') Or (A='-bf') Or (A='-q:v') Or (A='-qscale:v')) Then Begin Inc(I); OptsV:=OptsV+' '+A+' '+ParamStr(I); End { O2 }
   Else If A='-y' Then F3Yes:=True
   Else If (A='-n') Or (A='-hide_banner') Then
   Else If (A='-loglevel') Or (A='-v') Then Inc(I)
@@ -100789,7 +100827,7 @@ Begin
    CopyFile(InNames[0],OutName); F3Try:=True; Exit;
   End;
  If (OutFmt='mpegts') And (((Extension(OutName)='m2ts') And (F3UM2ts<>0)) Or (F3UM2ts=1)) Then OutFmt:='m2ts';
- F3EsOut:=F3IsEsFmt(OutFmt);
+ F3EsOut:=F3IsEsFmt(OutFmt); O2PSuffix:=' -o2out '+OutFmt+'|'+OutName+' '; { O2 }
  If Not (F3IsMuxFmt(OutFmt) Or F3EsOut) Then Exit;
  If Not CpFlag Then Begin
   If F3EsOut Then Exit;
@@ -108254,7 +108292,7 @@ Begin
  Fe:=Est/AVW_MAX_RIFF;
  Nn:=Trunc(Fe); If Fe>Nn Then Inc(Nn);
  Inc(Nn);
- If Nn>AVWMasterMax Then AVWMasterMax:=Nn;
+ If (Nn>AVWMasterMax) And Not O2BGiven Then AVWMasterMax:=Nn;
  If VideoSt>=0 Then FMXWL32(B,LongInt((Int64(1000000)*FMXS[VideoSt].TbN) Div FMXS[VideoSt].TbD)) Else FMXWL32(B,0);
  FMXWL32(B,LongInt(Bitrate Div 8));
  FMXWL32(B,0);
@@ -108982,11 +109020,13 @@ Begin
  FMXTmp:=FMXOutPath+'.fmxtmp'+FMXIStr(FMXTmpN)+'.'+Ext;
 End;
 
+Var O2LastRc: Integer;
 Function FMXRunChild(Const Args: String): Boolean;
 Begin
  SwapVectors;
- Exec(ParamStr(0),'-fmxq '+Args);
+ Exec(ParamStr(0),'-fmxq '+O2PSuffix+Args);
  SwapVectors;
+ O2LastRc:=DosExitCode;
  FMXRunChild:=(DosError=0) And (DosExitCode=0);
 End;
 
@@ -109078,6 +109118,7 @@ Begin
  Cmd:='-y -i '+In1+' '+FMXVOpts+' -c:v '+FMXVCodec+' '+Tmp;
  If Not FMXRunChild(Cmd) Then Begin
   Erase_F(Tmp);
+  If O2LastRc>1 Then Halt(O2LastRc); { O2 }
   Fail('Encodeur video '+FMXVCodec+' indisponible ou echec (voir -codecs).');
  End;
  S:=@FMXS[Idx];
@@ -109700,8 +109741,9 @@ Begin
    Inc(I); Fm:=ParamStr(I); K:=Pos('=',Fm);
    If K>1 Then FMXMetaSet(Copy(Fm,1,K-1),Copy(Fm,K+1,255));
   End
-  Else If A='-b:v' Then Begin Inc(I); FMXVOpts:=FMXVOpts+'-b:v '+ParamStr(I)+' '; FMXVBitRate:=FMXParseRate(ParamStr(I)); End
-  Else If (A='-q:v') Or (A='-g') Or (A='-pix_fmt') Or (A='-r') Or (A='-s') Or (A='-compression_level') Then Begin
+  Else If (FMXInN>0) And (A='-b:v') Then Begin Inc(I); FMXVOpts:=FMXVOpts+'-b:v '+ParamStr(I)+' '; FMXVBitRate:=FMXParseRate(ParamStr(I)); End { O2 }
+  Else If (FMXInN>0) And O2FmxOpt(A,ParamStr(I+1)) Then Begin FMXVOpts:=FMXVOpts+A+' '+ParamStr(I+1)+' '; Inc(I); End { O2 }
+  Else If ((FMXInN>0) And ((A='-q:v') Or (A='-g'))) Or (A='-pix_fmt') Or (A='-r') Or (A='-s') Or (A='-compression_level') Then Begin { O2 }
    FMXVOpts:=FMXVOpts+A+' '+ParamStr(I+1)+' '; Inc(I);
   End
   Else If (A='-b:a') Or (A='-strict') Then Begin
@@ -109720,6 +109762,7 @@ Begin
  Ext:=FMXExt(FMXOutPath);
  If FMXFmtOpt<>'' Then FMXFmt:=FMXFmtOpt Else FMXFmt:=FMXGuessMuxer(Ext);
  If Not FMXIsMine(FMXFmt) Then Exit;
+ O2PSuffix:=' -o2out '+FMXFmt+'|'+FMXOutPath+' '; { O2 }
  If (FMXVCodec<>'copy') And (FMXACodec<>'copy') Then Begin
   { hors des combinaisons verifiees : laisser le code historique }
   For I:=0 To FMXInN-1 Do Begin
@@ -121501,6 +121544,2551 @@ End;
 { ==== O1-END ==== }
 { ==== BLOCK-ANCHOR-O1 : inserer le code du groupe O1 juste au-dessus de cette ligne ==== }
 
+{ ======================================================================== }
+{ O2 : options de reglage de l'encodeur (ffmpeg 6.1.1)                      }
+{   - evaluateur d'expressions libavutil/eval.c (av_expr)                   }
+{   - table d'options AVCodecContext, analyse av_opt_set, messages d'erreur }
+{   - controle de debit ratecontrol.c (1 passe / 2 passes)                  }
+{ ======================================================================== }
+Const
+ O2_Pi=3.14159265358979323846264338327950288;
+ O2_E=2.71828182845904523536028747135266250;
+ O2_Phi=1.61803398874989484820458683436563812;
+ O2_MaxNodes=1024;
+ O2_NV=10;
+Type
+ TO2Node=Record
+  Typ: Integer;
+  Val: Double;
+  CIdx: LongInt;
+  P0,P1,P2: LongInt;
+ End;
+ TO2Expr=Record
+  N: LongInt;
+  Nd: Array[0..O2_MaxNodes-1] Of TO2Node;
+  Root: LongInt;
+  Vars: Array[0..O2_NV-1] Of Double;
+  NC: LongInt;
+  CNames: Array[0..79] Of String[24];
+  CVals: Array[0..79] Of Double;
+  Ok: Boolean;
+  Err: String;
+ End;
+ PO2Expr=^TO2Expr;
+Const
+ { types de noeud (ordre de libavutil/eval.c) }
+ e_value=0; e_const=1; e_func0=2; e_func1=3; e_func2=4;
+ e_squish=5; e_gauss=6; e_ld=7; e_isnan=8; e_isinf=9;
+ e_mod=10; e_max=11; e_min=12; e_eq=13; e_gt=14; e_gte=15; e_lte=16; e_lt=17;
+ e_pow=18; e_mul=19; e_div=20; e_add=21;
+ e_last=22; e_st=23; e_while=24; e_taylor=25; e_root=26; e_floor=27; e_ceil=28; e_trunc=29; e_round=30;
+ e_sqrt=31; e_not=32; e_random=33; e_hypot=34; e_gcd=35;
+ e_if=36; e_ifnot=37; e_print=38; e_bitand=39; e_bitor=40; e_between=41; e_clip=42; e_atan2=43; e_lerp=44;
+ e_sgn=45;
+ { fonctions a un argument (e_func0 : numero dans CIdx) }
+ f0_sinh=1; f0_cosh=2; f0_tanh=3; f0_sin=4; f0_cos=5; f0_tan=6; f0_atan=7; f0_asin=8; f0_acos=9; f0_exp=10; f0_log=11; f0_abs=12; f0_time=13;
+Var
+ O2E: PO2Expr;          { expression en cours d'analyse / d'evaluation }
+ O2PS: String;          { chaine en cours d'analyse (sans espaces) }
+ O2PP: LongInt;         { position courante (1..) }
+ O2StackIdx: LongInt;
+ O2Func1Names: Array[0..3] Of String[16];
+ O2NFunc1: LongInt;
+ O2RceQscale: Single;   { rce courant pour bits2qp / qp2bits }
+ O2RceITex,O2RcePTex: LongInt;
+ O2LogLine: String;     { dernier message d'erreur de l'evaluateur }
+
+Function O2IsInf(D: Double): Boolean;
+Begin
+ O2IsInf:=(D>1.7976931348623157E308) Or (D<-1.7976931348623157E308);
+End;
+
+Function O2IsNan(D: Double): Boolean;
+Begin
+ O2IsNan:=D<>D;
+End;
+
+Function O2Nan: Double;
+Var Q: Int64; D: Double Absolute Q;
+Begin
+ Q:=Int64($7FF8000000000000); O2Nan:=D;
+End;
+
+Function O2Inf: Double;
+Var Q: Int64; D: Double Absolute Q;
+Begin
+ Q:=Int64($7FF0000000000000); O2Inf:=D;
+End;
+
+Function O2NegInf: Double;
+Begin
+ O2NegInf:=-O2Inf;
+End;
+
+Function O2Floor(X: Double): Double;
+Var T: Double;
+Begin
+ If O2IsNan(X) Or O2IsInf(X) Or (Abs(X)>=4503599627370496.0) Then Begin O2Floor:=X; Exit; End;
+ T:=Int(X); If T>X Then T:=T-1;
+ O2Floor:=T;
+End;
+
+Function O2Ceil(X: Double): Double;
+Var T: Double;
+Begin
+ If O2IsNan(X) Or O2IsInf(X) Or (Abs(X)>=4503599627370496.0) Then Begin O2Ceil:=X; Exit; End;
+ T:=Int(X); If T<X Then T:=T+1;
+ O2Ceil:=T;
+End;
+
+Function O2Trunc(X: Double): Double;
+Begin
+ If O2IsNan(X) Or O2IsInf(X) Or (Abs(X)>=4503599627370496.0) Then Begin O2Trunc:=X; Exit; End;
+ O2Trunc:=Int(X);
+End;
+
+Function O2RoundC(X: Double): Double;   { round() du C : demi vers l'infini }
+Var T: Double;
+Begin
+ If O2IsNan(X) Or O2IsInf(X) Or (Abs(X)>=4503599627370496.0) Then Begin O2RoundC:=X; Exit; End;
+ If X>=0 Then Begin T:=Int(X+0.5); If T-X>0.5 Then T:=T-1; End
+ Else Begin T:=-Int(-X+0.5); If X-T>0.5 Then T:=T+1; End;
+ O2RoundC:=T;
+End;
+
+{ lrint / llrint : arrondi au plus proche pair }
+Function O2LRint(X: Double): Int64;
+Var F: Double;
+Begin
+ If O2IsNan(X) Then Begin O2LRint:=Int64($8000000000000000); Exit; End;
+ If X>=9.2233720368547758E18 Then Begin O2LRint:=Int64($8000000000000000); Exit; End;
+ If X<-9.2233720368547758E18 Then Begin O2LRint:=Int64($8000000000000000); Exit; End;
+ O2LRint:=Round(X);
+End;
+
+Function O2Pow(X,Y: Double): Double;
+Var L,R: Extended; YI: Int64; Odd_,NegX: Boolean; AX: Double;
+Begin
+ If Y=0 Then Begin O2Pow:=1; Exit; End;
+ If X=1 Then Begin O2Pow:=1; Exit; End;
+ If O2IsNan(X) Or O2IsNan(Y) Then Begin O2Pow:=O2Nan; Exit; End;
+ YI:=0; Odd_:=False;
+ If Not O2IsInf(Y) And (Abs(Y)<9.0E18) And (Int(Y)=Y) Then Begin YI:=Trunc(Y); Odd_:=(YI And 1)<>0; End
+ Else If Not O2IsInf(Y) And (Abs(Y)>=9.0E18) Then Begin Odd_:=False; End;
+ AX:=Abs(X);
+ If O2IsInf(Y) Then Begin
+  If AX=1 Then Begin O2Pow:=1; Exit; End;
+  If (AX<1)=(Y<0) Then O2Pow:=O2Inf Else O2Pow:=0;
+  Exit;
+ End;
+ If X=0 Then Begin
+  If Y<0 Then Begin
+   If Odd_ And (1/X<0) Then O2Pow:=O2NegInf Else O2Pow:=O2Inf;
+  End Else Begin
+   If Odd_ And (1/X<0) Then O2Pow:=-0.0 Else O2Pow:=0;
+  End;
+  Exit;
+ End;
+ If O2IsInf(X) Then Begin
+  If X>0 Then Begin If Y<0 Then O2Pow:=0 Else O2Pow:=O2Inf; End
+  Else Begin
+   If Y<0 Then Begin If Odd_ Then O2Pow:=-0.0 Else O2Pow:=0; End
+   Else Begin If Odd_ Then O2Pow:=O2NegInf Else O2Pow:=O2Inf; End;
+  End;
+  Exit;
+ End;
+ NegX:=X<0;
+ If NegX And ((Int(Y)<>Y) Or (Abs(Y)>=9.0E18)) Then Begin
+  If Int(Y)<>Y Then Begin O2Pow:=O2Nan; Exit; End;
+ End;
+ If Y=0.5 Then Begin If NegX Then O2Pow:=O2Nan Else O2Pow:=Sqrt(X); Exit; End;
+ If Y=1 Then Begin O2Pow:=X; Exit; End;
+ If Y=2 Then Begin O2Pow:=X*X; Exit; End;
+ If Y=-1 Then Begin O2Pow:=1/X; Exit; End;
+ If (Int(Y)=Y) And (Abs(Y)<=64) And Not NegX Then Begin
+  { puissance entiere par multiplications en precision etendue }
+  R:=1; L:=AX; YI:=Abs(YI);
+  While YI>0 Do Begin
+   If (YI And 1)<>0 Then R:=R*L;
+   YI:=YI Shr 1; If YI>0 Then L:=L*L;
+  End;
+  If Y<0 Then R:=1/R;
+  O2Pow:=R; Exit;
+ End;
+ L:=Ln(AX)*Y;
+ If L>709.78 Then R:=O2Inf Else If L<-745.2 Then R:=0 Else R:=Exp(L);
+ If NegX And Odd_ Then R:=-R;
+ O2Pow:=R;
+End;
+
+Function O2Sinh(X: Double): Double;
+Var E1: Extended;
+Begin
+ If Abs(X)<1E-5 Then Begin O2Sinh:=X+X*X*X/6; Exit; End;
+ E1:=Exp(X); O2Sinh:=(E1-1/E1)/2;
+End;
+Function O2Cosh(X: Double): Double;
+Var E1: Extended;
+Begin
+ E1:=Exp(X); O2Cosh:=(E1+1/E1)/2;
+End;
+Function O2Tanh(X: Double): Double;
+Var E1,E2: Extended;
+Begin
+ If X>40 Then Begin O2Tanh:=1; Exit; End;
+ If X<-40 Then Begin O2Tanh:=-1; Exit; End;
+ If Abs(X)<1E-5 Then Begin O2Tanh:=X-X*X*X/3; Exit; End;
+ E1:=Exp(X); E2:=1/E1; O2Tanh:=(E1-E2)/(E1+E2);
+End;
+Function O2Tan(X: Double): Double;
+Begin
+ O2Tan:=Sin(X)/Cos(X);
+End;
+Function O2Asin(X: Double): Double;
+Begin
+ If (X>1) Or (X<-1) Then Begin O2Asin:=O2Nan; Exit; End;
+ If X=1 Then Begin O2Asin:=O2_Pi/2; Exit; End;
+ If X=-1 Then Begin O2Asin:=-O2_Pi/2; Exit; End;
+ O2Asin:=ArcTan(X/Sqrt(1-X*X));
+End;
+Function O2Acos(X: Double): Double;
+Begin
+ If (X>1) Or (X<-1) Then Begin O2Acos:=O2Nan; Exit; End;
+ If X=1 Then Begin O2Acos:=0; Exit; End;
+ If X=-1 Then Begin O2Acos:=O2_Pi; Exit; End;
+ O2Acos:=O2_Pi/2-O2Asin(X);
+End;
+Function O2Atan2(Y,X: Double): Double;
+Var R: Extended;
+Begin
+ If O2IsNan(X) Or O2IsNan(Y) Then Begin O2Atan2:=O2Nan; Exit; End;
+ If X=0 Then Begin
+  If Y>0 Then O2Atan2:=O2_Pi/2 Else If Y<0 Then O2Atan2:=-O2_Pi/2 Else If 1/X<0 Then Begin If 1/Y<0 Then O2Atan2:=-O2_Pi Else O2Atan2:=O2_Pi; End Else O2Atan2:=Y;
+  Exit;
+ End;
+ R:=ArcTan(Y/X);
+ If X<0 Then Begin If Y>=0 Then R:=R+O2_Pi Else R:=R-O2_Pi; End;
+ O2Atan2:=R;
+End;
+Function O2Hypot(X,Y: Double): Double;
+Begin
+ O2Hypot:=Sqrt(X*X+Y*Y);
+End;
+Function O2Exp(X: Double): Double;
+Begin
+ If X>709.78 Then O2Exp:=O2Inf Else If X<-745.2 Then O2Exp:=0 Else O2Exp:=Exp(X);
+End;
+Function O2Log(X: Double): Double;
+Begin
+ If O2IsNan(X) Then O2Log:=X Else If X<0 Then O2Log:=O2Nan Else If X=0 Then O2Log:=O2NegInf Else If O2IsInf(X) Then O2Log:=X Else O2Log:=Ln(X);
+End;
+Function O2Gcd(A,B: Double): Double;
+Var X,Y,Z: Int64;
+Begin
+ X:=Trunc(A); Y:=Trunc(B);
+ If X<0 Then X:=-X; If Y<0 Then Y:=-Y;
+ While Y<>0 Do Begin Z:=X Mod Y; X:=Y; Y:=Z; End;
+ O2Gcd:=X;
+End;
+
+{ ---- strtod / av_strtod ---- }
+Function O2HexVal(C: Char): Integer;
+Begin
+ If (C>='0') And (C<='9') Then O2HexVal:=Ord(C)-48
+ Else If (C>='a') And (C<='f') Then O2HexVal:=Ord(C)-87
+ Else If (C>='A') And (C<='F') Then O2HexVal:=Ord(C)-55
+ Else O2HexVal:=-1;
+End;
+
+Function O2Pow10(E: LongInt): Extended;
+Var R,B: Extended; N: LongInt;
+Begin
+ R:=1; B:=10; N:=Abs(E);
+ While N>0 Do Begin
+  If (N And 1)<>0 Then R:=R*B;
+  B:=B*B; N:=N Shr 1;
+ End;
+ If E<0 Then R:=1/R;
+ O2Pow10:=R;
+End;
+
+{ strtod du C sur S a partir de P ; retourne la valeur, Nxt = position suivante (= P si aucune conversion) }
+Function O2Strtod(Const S: String; P: LongInt; Var Nxt: LongInt): Double;
+Var
+ I,Start,Digits,ExpV,ExpSign,DecN,K: LongInt; Neg: Boolean; M: Int64; Mant: Extended; Frac,Any,Big: Boolean; R: Extended; T: String; C: Char;
+ HexM: Extended; HE: LongInt;
+Begin
+ Nxt:=P; I:=P; Neg:=False;
+ If (I<=Length(S)) And ((S[I]='+') Or (S[I]='-')) Then Begin Neg:=S[I]='-'; Inc(I); End;
+ Start:=I;
+ { inf / nan }
+ If (I<=Length(S)) And ((UpCase(S[I])='I') Or (UpCase(S[I])='N')) Then Begin
+  T:=Lower(Copy(S,I,8));
+  If Copy(T,1,3)='inf' Then Begin
+   If Copy(T,1,8)='infinity' Then Nxt:=I+8 Else Nxt:=I+3;
+   If Neg Then O2Strtod:=O2NegInf Else O2Strtod:=O2Inf; Exit;
+  End;
+  If Copy(T,1,3)='nan' Then Begin
+   Nxt:=I+3;
+   If (Nxt<=Length(S)) And (S[Nxt]='(') Then Begin
+    K:=Nxt+1;
+    While (K<=Length(S)) And (S[K] In ['0'..'9','a'..'z','A'..'Z','_']) Do Inc(K);
+    If (K<=Length(S)) And (S[K]=')') Then Nxt:=K+1;
+   End;
+   O2Strtod:=O2Nan; Exit;
+  End;
+  O2Strtod:=0; Exit;
+ End;
+ { flottant hexadecimal }
+ If (I+1<=Length(S)) And (S[I]='0') And ((S[I+1]='x') Or (S[I+1]='X')) Then Begin
+  K:=I+2; HexM:=0; HE:=0; Any:=False; Frac:=False;
+  While K<=Length(S) Do Begin
+   If O2HexVal(S[K])>=0 Then Begin HexM:=HexM*16+O2HexVal(S[K]); Any:=True; If Frac Then HE:=HE-4; Inc(K); End
+   Else If (S[K]='.') And Not Frac Then Begin Frac:=True; Inc(K); End
+   Else Break;
+  End;
+  If Not Any Then Begin
+   { seul "0" est converti }
+   Nxt:=I+1; O2Strtod:=0; If Neg Then O2Strtod:=-0.0; Exit;
+  End;
+  If (K<=Length(S)) And ((S[K]='p') Or (S[K]='P')) Then Begin
+   DecN:=K+1; ExpSign:=1;
+   If (DecN<=Length(S)) And ((S[DecN]='+') Or (S[DecN]='-')) Then Begin If S[DecN]='-' Then ExpSign:=-1; Inc(DecN); End;
+   If (DecN<=Length(S)) And (S[DecN] In ['0'..'9']) Then Begin
+    ExpV:=0;
+    While (DecN<=Length(S)) And (S[DecN] In ['0'..'9']) Do Begin If ExpV<100000 Then ExpV:=ExpV*10+Ord(S[DecN])-48; Inc(DecN); End;
+    HE:=HE+ExpSign*ExpV; K:=DecN;
+   End;
+  End;
+  R:=HexM;
+  While HE>0 Do Begin R:=R*2; Dec(HE); End;
+  While HE<0 Do Begin R:=R/2; Inc(HE); End;
+  If Neg Then R:=-R;
+  Nxt:=K; O2Strtod:=R; Exit;
+ End;
+ { decimal }
+ Digits:=0; M:=0; DecN:=0; Big:=False; Frac:=False; Mant:=0; Any:=False; ExpV:=0;
+ K:=I;
+ While K<=Length(S) Do Begin
+  C:=S[K];
+  If (C>='0') And (C<='9') Then Begin
+   Any:=True;
+   If Not Big Then Begin
+    If M<=Int64(900000000000000000) Then Begin M:=M*10+Ord(C)-48; Mant:=M; If Frac Then Inc(DecN); End
+    Else Begin Big:=True; Mant:=M; If Not Frac Then Inc(ExpV); End;
+   End Else Begin
+    If Not Frac Then Inc(ExpV);
+   End;
+   Inc(K);
+  End Else If (C='.') And Not Frac Then Begin Frac:=True; Inc(K); End
+  Else Break;
+ End;
+ If Not Any Then Begin Nxt:=P; O2Strtod:=0; Exit; End;
+ { exposant }
+ If (K<=Length(S)) And ((S[K]='e') Or (S[K]='E')) Then Begin
+  I:=K+1; ExpSign:=1;
+  If (I<=Length(S)) And ((S[I]='+') Or (S[I]='-')) Then Begin If S[I]='-' Then ExpSign:=-1; Inc(I); End;
+  If (I<=Length(S)) And (S[I] In ['0'..'9']) Then Begin
+   Digits:=0;
+   While (I<=Length(S)) And (S[I] In ['0'..'9']) Do Begin If Digits<100000 Then Digits:=Digits*10+Ord(S[I])-48; Inc(I); End;
+   ExpV:=ExpV+ExpSign*Digits; K:=I;
+  End;
+ End;
+ Nxt:=K;
+ ExpV:=ExpV-DecN;
+ If M=0 Then Begin If Neg Then O2Strtod:=-0.0 Else O2Strtod:=0; Exit; End;
+ If (Not Big) And (M<9007199254740992) And (ExpV>=-22) And (ExpV<=22) Then Begin
+  If ExpV>=0 Then R:=(M*1.0)*Double(O2Pow10(ExpV)) Else R:=(M*1.0)/Double(O2Pow10(-ExpV));
+ End Else Begin
+  If ExpV>400 Then R:=O2Inf
+  Else If ExpV<-400 Then R:=0
+  Else Begin
+   R:=Mant;
+   If ExpV>=0 Then R:=R*O2Pow10(ExpV) Else R:=R/O2Pow10(-ExpV);
+  End;
+ End;
+ If Neg Then R:=-R;
+ If R>1.7976931348623157E308 Then R:=O2Inf Else If R<-1.7976931348623157E308 Then R:=O2NegInf;
+ O2Strtod:=R;
+End;
+
+{ strtoul base 16 sur S a partir de P }
+Function O2StrtoulHex(Const S: String; P: LongInt; Var Nxt: LongInt): Double;
+Var I: LongInt; V: Extended; Any: Boolean;
+Begin
+ I:=P; V:=0; Any:=False;
+ If (I+1<=Length(S)) And (S[I]='0') And ((S[I+1]='x') Or (S[I+1]='X')) And (I+2<=Length(S)) And (O2HexVal(S[I+2])>=0) Then Inc(I,2);
+ While (I<=Length(S)) And (O2HexVal(S[I])>=0) Do Begin V:=V*16+O2HexVal(S[I]); Any:=True; Inc(I); End;
+ If Not Any Then Begin Nxt:=P; O2StrtoulHex:=0; Exit; End;
+ Nxt:=I;
+ If V>18446744073709551615.0 Then V:=18446744073709551615.0;
+ O2StrtoulHex:=V;
+End;
+
+Function O2SiExp(C: Char; Var BinV,DecV: Double): Integer;
+Begin
+ O2SiExp:=0; BinV:=1; DecV:=1;
+ Case C Of
+  'y': Begin BinV:=8.271806125530276749e-25; DecV:=1e-24; O2SiExp:=-24; End;
+  'z': Begin BinV:=8.4703294725430034e-22; DecV:=1e-21; O2SiExp:=-21; End;
+  'a': Begin BinV:=8.6736173798840355e-19; DecV:=1e-18; O2SiExp:=-18; End;
+  'f': Begin BinV:=8.8817841970012523e-16; DecV:=1e-15; O2SiExp:=-15; End;
+  'p': Begin BinV:=9.0949470177292824e-13; DecV:=1e-12; O2SiExp:=-12; End;
+  'n': Begin BinV:=9.3132257461547852e-10; DecV:=1e-9; O2SiExp:=-9; End;
+  'u': Begin BinV:=9.5367431640625e-7; DecV:=1e-6; O2SiExp:=-6; End;
+  'm': Begin BinV:=9.765625e-4; DecV:=1e-3; O2SiExp:=-3; End;
+  'c': Begin BinV:=9.8431332023036951e-3; DecV:=1e-2; O2SiExp:=-2; End;
+  'd': Begin BinV:=9.921256574801246e-2; DecV:=1e-1; O2SiExp:=-1; End;
+  'h': Begin BinV:=1.0159366732596479e2; DecV:=1e2; O2SiExp:=2; End;
+  'k','K': Begin BinV:=1.024e3; DecV:=1e3; O2SiExp:=3; End;
+  'M': Begin BinV:=1.048576e6; DecV:=1e6; O2SiExp:=6; End;
+  'G': Begin BinV:=1.073741824e9; DecV:=1e9; O2SiExp:=9; End;
+  'T': Begin BinV:=1.099511627776e12; DecV:=1e12; O2SiExp:=12; End;
+  'P': Begin BinV:=1.125899906842624e15; DecV:=1e15; O2SiExp:=15; End;
+  'E': Begin BinV:=1.152921504606847e18; DecV:=1e18; O2SiExp:=18; End;
+  'Z': Begin BinV:=1.1805916207174113e21; DecV:=1e21; O2SiExp:=21; End;
+  'Y': Begin BinV:=1.2089258196146292e24; DecV:=1e24; O2SiExp:=24; End;
+ End;
+End;
+
+{ av_strtod }
+Function O2AvStrtod(Const S: String; P: LongInt; Var Nxt: LongInt): Double;
+Var D,BinV,DecV: Double; E: Integer; Nx: LongInt; C1: Char;
+Begin
+ If (P+1<=Length(S)) And (S[P]='0') And ((Ord(S[P+1]) Or $20)=Ord('x')) Then D:=O2StrtoulHex(S,P,Nx)
+ Else D:=O2Strtod(S,P,Nx);
+ If Nx<>P Then Begin
+  If (Nx+1<=Length(S)) And (S[Nx]='d') And (S[Nx+1]='B') Then Begin
+   D:=O2Pow(10,D/20); Nx:=Nx+2;
+  End Else If (Nx<=Length(S)) And (S[Nx]>='E') And (S[Nx]<='z') Then Begin
+   E:=O2SiExp(S[Nx],BinV,DecV);
+   If E<>0 Then Begin
+    If (Nx+1<=Length(S)) And (S[Nx+1]='i') Then Begin D:=D*BinV; Nx:=Nx+2; End
+    Else Begin D:=D*DecV; Inc(Nx); End;
+   End;
+  End;
+  If (Nx<=Length(S)) And (S[Nx]='B') Then Begin D:=D*8; Inc(Nx); End;
+ End;
+ Nxt:=Nx;
+ O2AvStrtod:=D;
+End;
+
+{ ---- analyse ---- }
+Function O2IsIdChar(C: Char): Boolean;
+Begin
+ O2IsIdChar:=(C In ['0'..'9','a'..'z','A'..'Z','_']);
+End;
+
+Function O2StrMatch(Const Pre: String; At: LongInt): Boolean;
+Var I: Integer;
+Begin
+ O2StrMatch:=False;
+ For I:=1 To Length(Pre) Do Begin
+  If At+I-1>Length(O2PS) Then Exit;
+  If O2PS[At+I-1]<>Pre[I] Then Exit;
+ End;
+ If At+Length(Pre)>Length(O2PS) Then O2StrMatch:=True
+ Else O2StrMatch:=Not O2IsIdChar(O2PS[At+Length(Pre)]);
+End;
+
+Function O2NewNode: LongInt;
+Begin
+ If O2E^.N>=O2_MaxNodes Then Begin O2NewNode:=-1; Exit; End;
+ O2NewNode:=O2E^.N;
+ FillChar(O2E^.Nd[O2E^.N],SizeOf(TO2Node),0);
+ O2E^.Nd[O2E^.N].P0:=-1; O2E^.Nd[O2E^.N].P1:=-1; O2E^.Nd[O2E^.N].P2:=-1;
+ Inc(O2E^.N);
+End;
+
+Function O2MakeNode(Typ: Integer; Val: Double; A,B: LongInt): LongInt;
+Var N: LongInt;
+Begin
+ N:=O2NewNode;
+ If N>=0 Then Begin
+  O2E^.Nd[N].Typ:=Typ; O2E^.Nd[N].Val:=Val; O2E^.Nd[N].P0:=A; O2E^.Nd[N].P1:=B;
+ End;
+ O2MakeNode:=N;
+End;
+
+Function O2ParseExpr(Var E: LongInt): Integer; Forward;
+
+Function O2CharAt(I: LongInt): Char;
+Begin
+ If (I>=1) And (I<=Length(O2PS)) Then O2CharAt:=O2PS[I] Else O2CharAt:=#0;
+End;
+
+Procedure O2ELog(Const M: String);
+Begin
+ O2E^.Err:=M;
+End;
+
+Function O2ParsePrimary(Var E: LongInt): Integer;
+Var D,Next,S0,I,Nx,Ret: LongInt; Num: Double; Sub: Integer; Found: Boolean; S0Str: String; FuncT: Integer; FuncId: Integer;
+Begin
+ O2ParsePrimary:=-1;
+ D:=O2NewNode; If D<0 Then Exit;
+ Next:=O2PP; S0:=O2PP;
+ Num:=O2AvStrtod(O2PS,O2PP,Nx);
+ If Nx<>O2PP Then Begin
+  O2E^.Nd[D].Typ:=e_value; O2E^.Nd[D].Val:=Num; O2PP:=Nx; E:=D; O2ParsePrimary:=0; Exit;
+ End;
+ O2E^.Nd[D].Val:=1;
+ { constantes nommees }
+ For I:=0 To O2E^.NC-1 Do
+  If O2StrMatch(O2E^.CNames[I],O2PP) Then Begin
+   O2PP:=O2PP+Length(O2E^.CNames[I]);
+   O2E^.Nd[D].Typ:=e_const; O2E^.Nd[D].CIdx:=I; E:=D; O2ParsePrimary:=0; Exit;
+  End;
+ If O2StrMatch('E',O2PP) Then Begin Inc(O2PP,1); O2E^.Nd[D].Typ:=e_value; O2E^.Nd[D].Val:=O2_E; E:=D; O2ParsePrimary:=0; Exit; End;
+ If O2StrMatch('PI',O2PP) Then Begin Inc(O2PP,2); O2E^.Nd[D].Typ:=e_value; O2E^.Nd[D].Val:=O2_Pi; E:=D; O2ParsePrimary:=0; Exit; End;
+ If O2StrMatch('PHI',O2PP) Then Begin Inc(O2PP,3); O2E^.Nd[D].Typ:=e_value; O2E^.Nd[D].Val:=O2_Phi; E:=D; O2ParsePrimary:=0; Exit; End;
+ If O2StrMatch('QP2LAMBDA',O2PP) Then Begin Inc(O2PP,9); O2E^.Nd[D].Typ:=e_value; O2E^.Nd[D].Val:=118; E:=D; O2ParsePrimary:=0; Exit; End;
+ { cherche la parenthese }
+ S0Str:=Copy(O2PS,S0,255);
+ I:=O2PP; While (I<=Length(O2PS)) And (O2PS[I]<>'(') Do Inc(I);
+ If I>Length(O2PS) Then Begin
+  O2ELog('Undefined constant or missing ''('' in '''+S0Str+'''');
+  O2PP:=Next; Exit;
+ End;
+ O2PP:=I+1;
+ If O2CharAt(Next)='(' Then Begin
+  { cas particulier : parenthese seule }
+  Ret:=O2ParseExpr(E);
+  If Ret<0 Then Begin O2ParsePrimary:=Ret; Exit; End;
+  If O2CharAt(O2PP)<>')' Then Begin O2ELog('Missing '')'' in '''+S0Str+''''); Exit; End;
+  Inc(O2PP); O2ParsePrimary:=0; Exit;
+ End;
+ Ret:=O2ParseExpr(O2E^.Nd[D].P0);
+ If Ret<0 Then Begin O2ParsePrimary:=Ret; Exit; End;
+ If O2CharAt(O2PP)=',' Then Begin Inc(O2PP); O2ParseExpr(O2E^.Nd[D].P1); End;
+ If O2CharAt(O2PP)=',' Then Begin Inc(O2PP); O2ParseExpr(O2E^.Nd[D].P2); End;
+ If O2CharAt(O2PP)<>')' Then Begin O2ELog('Missing '')'' or too many args in '''+S0Str+''''); Exit; End;
+ Inc(O2PP);
+ FuncT:=e_func0; FuncId:=0;
+      If O2StrMatch('sinh',Next) Then FuncId:=f0_sinh
+ Else If O2StrMatch('cosh',Next) Then FuncId:=f0_cosh
+ Else If O2StrMatch('tanh',Next) Then FuncId:=f0_tanh
+ Else If O2StrMatch('sin',Next) Then FuncId:=f0_sin
+ Else If O2StrMatch('cos',Next) Then FuncId:=f0_cos
+ Else If O2StrMatch('tan',Next) Then FuncId:=f0_tan
+ Else If O2StrMatch('atan',Next) Then FuncId:=f0_atan
+ Else If O2StrMatch('asin',Next) Then FuncId:=f0_asin
+ Else If O2StrMatch('acos',Next) Then FuncId:=f0_acos
+ Else If O2StrMatch('exp',Next) Then FuncId:=f0_exp
+ Else If O2StrMatch('log',Next) Then FuncId:=f0_log
+ Else If O2StrMatch('abs',Next) Then FuncId:=f0_abs
+ Else If O2StrMatch('time',Next) Then FuncId:=f0_time
+ Else If O2StrMatch('squish',Next) Then FuncT:=e_squish
+ Else If O2StrMatch('gauss',Next) Then FuncT:=e_gauss
+ Else If O2StrMatch('mod',Next) Then FuncT:=e_mod
+ Else If O2StrMatch('max',Next) Then FuncT:=e_max
+ Else If O2StrMatch('min',Next) Then FuncT:=e_min
+ Else If O2StrMatch('eq',Next) Then FuncT:=e_eq
+ Else If O2StrMatch('gte',Next) Then FuncT:=e_gte
+ Else If O2StrMatch('gt',Next) Then FuncT:=e_gt
+ Else If O2StrMatch('lte',Next) Then FuncT:=e_lte
+ Else If O2StrMatch('lt',Next) Then FuncT:=e_lt
+ Else If O2StrMatch('ld',Next) Then FuncT:=e_ld
+ Else If O2StrMatch('isnan',Next) Then FuncT:=e_isnan
+ Else If O2StrMatch('isinf',Next) Then FuncT:=e_isinf
+ Else If O2StrMatch('st',Next) Then FuncT:=e_st
+ Else If O2StrMatch('while',Next) Then FuncT:=e_while
+ Else If O2StrMatch('taylor',Next) Then FuncT:=e_taylor
+ Else If O2StrMatch('root',Next) Then FuncT:=e_root
+ Else If O2StrMatch('floor',Next) Then FuncT:=e_floor
+ Else If O2StrMatch('ceil',Next) Then FuncT:=e_ceil
+ Else If O2StrMatch('trunc',Next) Then FuncT:=e_trunc
+ Else If O2StrMatch('round',Next) Then FuncT:=e_round
+ Else If O2StrMatch('sqrt',Next) Then FuncT:=e_sqrt
+ Else If O2StrMatch('not',Next) Then FuncT:=e_not
+ Else If O2StrMatch('pow',Next) Then FuncT:=e_pow
+ Else If O2StrMatch('print',Next) Then FuncT:=e_print
+ Else If O2StrMatch('random',Next) Then FuncT:=e_random
+ Else If O2StrMatch('hypot',Next) Then FuncT:=e_hypot
+ Else If O2StrMatch('gcd',Next) Then FuncT:=e_gcd
+ Else If O2StrMatch('if',Next) Then FuncT:=e_if
+ Else If O2StrMatch('ifnot',Next) Then FuncT:=e_ifnot
+ Else If O2StrMatch('bitand',Next) Then FuncT:=e_bitand
+ Else If O2StrMatch('bitor',Next) Then FuncT:=e_bitor
+ Else If O2StrMatch('between',Next) Then FuncT:=e_between
+ Else If O2StrMatch('clip',Next) Then FuncT:=e_clip
+ Else If O2StrMatch('atan2',Next) Then FuncT:=e_atan2
+ Else If O2StrMatch('lerp',Next) Then FuncT:=e_lerp
+ Else If O2StrMatch('sgn',Next) Then FuncT:=e_sgn
+ Else Begin
+  Found:=False;
+  For I:=0 To O2NFunc1-1 Do
+   If O2StrMatch(O2Func1Names[I],Next) Then Begin
+    O2E^.Nd[D].Typ:=e_func1; O2E^.Nd[D].CIdx:=I; Found:=True; Break;
+   End;
+  If Found Then Begin E:=D; O2ParsePrimary:=0; Exit; End;
+  O2ELog('Unknown function in '''+S0Str+'''');
+  Exit;
+ End;
+ O2E^.Nd[D].Typ:=FuncT; O2E^.Nd[D].CIdx:=FuncId;
+ E:=D; O2ParsePrimary:=0;
+End;
+
+Function O2ParsePow(Var E: LongInt; Var Sign: Integer): Integer;
+Var C: Char;
+Begin
+ C:=O2CharAt(O2PP);
+ If C='+' Then Sign:=1 Else If C='-' Then Sign:=-1 Else Sign:=0;
+ If Sign<>0 Then Inc(O2PP);
+ O2ParsePow:=O2ParsePrimary(E);
+End;
+
+Function O2ParseDB(Var E: LongInt; Var Sign: Integer): Integer;
+Var Nx: LongInt; Ign: Double;
+Begin
+ If O2CharAt(O2PP)='-' Then Begin
+  Ign:=O2Strtod(O2PS,O2PP,Nx);
+  If (Nx<>O2PP) And (O2CharAt(Nx)='d') And (O2CharAt(Nx+1)='B') Then Begin
+   Sign:=0; O2ParseDB:=O2ParsePrimary(E); Exit;
+  End;
+ End;
+ O2ParseDB:=O2ParsePow(E,Sign);
+End;
+
+Function O2SgnOr1(S: Integer): Double;
+Begin
+ { (sign|1) : -1 -> -1, 0 -> 1, 1 -> 1 }
+ If S<0 Then O2SgnOr1:=-1 Else O2SgnOr1:=1;
+End;
+
+Function O2ParseFactor(Var E: LongInt): Integer;
+Var Sign,Sign2,Ret: Integer; E0,E1,E2: LongInt;
+Begin
+ O2ParseFactor:=-1;
+ Ret:=O2ParseDB(E0,Sign);
+ If Ret<0 Then Begin O2ParseFactor:=Ret; Exit; End;
+ While O2CharAt(O2PP)='^' Do Begin
+  E1:=E0; Inc(O2PP);
+  Ret:=O2ParseDB(E2,Sign2);
+  If Ret<0 Then Begin O2ParseFactor:=Ret; Exit; End;
+  E0:=O2MakeNode(e_pow,1,E1,E2);
+  If E0<0 Then Exit;
+  If O2E^.Nd[E0].P1>=0 Then O2E^.Nd[O2E^.Nd[E0].P1].Val:=O2E^.Nd[O2E^.Nd[E0].P1].Val*O2SgnOr1(Sign2);
+ End;
+ If E0>=0 Then O2E^.Nd[E0].Val:=O2E^.Nd[E0].Val*O2SgnOr1(Sign);
+ E:=E0; O2ParseFactor:=0;
+End;
+
+Function O2ParseTerm(Var E: LongInt): Integer;
+Var Ret: Integer; E0,E1,E2: LongInt; C: Char;
+Begin
+ O2ParseTerm:=-1;
+ Ret:=O2ParseFactor(E0);
+ If Ret<0 Then Begin O2ParseTerm:=Ret; Exit; End;
+ While (O2CharAt(O2PP)='*') Or (O2CharAt(O2PP)='/') Do Begin
+  C:=O2CharAt(O2PP); Inc(O2PP);
+  E1:=E0;
+  Ret:=O2ParseFactor(E2);
+  If Ret<0 Then Begin O2ParseTerm:=Ret; Exit; End;
+  If C='*' Then E0:=O2MakeNode(e_mul,1,E1,E2) Else E0:=O2MakeNode(e_div,1,E1,E2);
+  If E0<0 Then Exit;
+ End;
+ E:=E0; O2ParseTerm:=0;
+End;
+
+Function O2ParseSubexpr(Var E: LongInt): Integer;
+Var Ret: Integer; E0,E1,E2: LongInt;
+Begin
+ O2ParseSubexpr:=-1;
+ Ret:=O2ParseTerm(E0);
+ If Ret<0 Then Begin O2ParseSubexpr:=Ret; Exit; End;
+ While (O2CharAt(O2PP)='+') Or (O2CharAt(O2PP)='-') Do Begin
+  E1:=E0;
+  Ret:=O2ParseTerm(E2);
+  If Ret<0 Then Begin O2ParseSubexpr:=Ret; Exit; End;
+  E0:=O2MakeNode(e_add,1,E1,E2);
+  If E0<0 Then Exit;
+ End;
+ E:=E0; O2ParseSubexpr:=0;
+End;
+
+Function O2ParseExpr(Var E: LongInt): Integer;
+Var Ret: Integer; E0,E1,E2: LongInt;
+Begin
+ O2ParseExpr:=-1;
+ If O2StackIdx<=0 Then Exit;
+ Dec(O2StackIdx);
+ Ret:=O2ParseSubexpr(E0);
+ If Ret<0 Then Begin O2ParseExpr:=Ret; Exit; End;
+ While O2CharAt(O2PP)=';' Do Begin
+  Inc(O2PP);
+  E1:=E0;
+  Ret:=O2ParseSubexpr(E2);
+  If Ret<0 Then Begin O2ParseExpr:=Ret; Exit; End;
+  E0:=O2MakeNode(e_last,1,E1,E2);
+  If E0<0 Then Exit;
+ End;
+ Inc(O2StackIdx);
+ E:=E0; O2ParseExpr:=0;
+End;
+
+Function O2Verify(E: LongInt): Boolean;
+Begin
+ If E<0 Then Begin O2Verify:=True; Exit; End;
+ With O2E^.Nd[E] Do
+  Case Typ Of
+   e_value,e_const: O2Verify:=True;
+   e_func0,e_func1,e_squish,e_ld,e_gauss,e_isnan,e_isinf,e_floor,e_ceil,e_trunc,e_round,e_sqrt,e_not,e_random,e_sgn:
+    O2Verify:=O2Verify(P0) And (P1<0);
+   e_print: O2Verify:=O2Verify(P0) And ((P1<0) Or O2Verify(P1));
+   e_if,e_ifnot,e_taylor: O2Verify:=O2Verify(P0) And O2Verify(P1) And ((P2<0) Or O2Verify(P2));
+   e_between,e_clip,e_lerp: O2Verify:=O2Verify(P0) And O2Verify(P1) And O2Verify(P2);
+   Else O2Verify:=O2Verify(P0) And O2Verify(P1) And (P2<0);
+  End;
+End;
+
+{ av_expr_parse : S est analyse dans X ; les constantes sont dans X^.CNames/NC ; retourne 0 ou <0 (EINVAL) }
+Function O2ExprParse(X: PO2Expr; Const S: String): Integer;
+Var I: Integer; W: String; Ret: Integer; E: LongInt;
+Begin
+ O2E:=X; X^.N:=0; X^.Root:=-1; X^.Ok:=False; X^.Err:='';
+ W:='';
+ For I:=1 To Length(S) Do If Not (S[I] In [#9,#10,#11,#12,#13,' ']) Then W:=W+S[I];
+ O2PS:=W; O2PP:=1; O2StackIdx:=100;
+ E:=-1;
+ Ret:=O2ParseExpr(E);
+ If Ret<0 Then Begin
+  If X^.Err='' Then X^.Err:='';
+  O2ExprParse:=-22; Exit;
+ End;
+ If O2PP<=Length(O2PS) Then Begin
+  X^.Err:='Invalid chars '''+Copy(O2PS,O2PP,255)+''' at the end of expression '''+S+'''';
+  O2ExprParse:=-22; Exit;
+ End;
+ If Not O2Verify(E) Then Begin O2ExprParse:=-22; Exit; End;
+ FillChar(X^.Vars,SizeOf(X^.Vars),0);
+ X^.Root:=E; X^.Ok:=True;
+ O2ExprParse:=0;
+End;
+
+{ ---- evaluation ---- }
+Function O2Bits2Qp(Bits: Double): Double;
+Begin
+ O2Bits2Qp:=Double(O2RceQscale)*((O2RceITex+O2RcePTex+1)*1.0)/Bits;
+End;
+Function O2Qp2Bits(Qp: Double): Double;
+Begin
+ O2Qp2Bits:=Double(O2RceQscale)*((O2RceITex+O2RcePTex+1)*1.0)/Qp;
+End;
+
+Function O2Clipd(A,Mn,Mx: Double): Double;
+Begin
+ If A<Mn Then O2Clipd:=Mn Else If A>Mx Then O2Clipd:=Mx Else O2Clipd:=A;
+End;
+
+Function O2VarIdx(D: Double): LongInt;
+Begin
+ If O2IsNan(D) Then O2VarIdx:=0
+ Else If D<0 Then O2VarIdx:=0
+ Else If D>=O2_NV-1 Then O2VarIdx:=O2_NV-1
+ Else O2VarIdx:=Trunc(D);
+End;
+
+Function O2EvalNode(E: LongInt): Double;
+Var D,D2,V0,V1,F,X,Mn,Mx,T,V,Var0,LowV,HighV,Low,High,XMax: Double; I,J,Id: LongInt; R: QWord; Q: Int64; Pn: LongInt;
+ NdP: ^TO2Node;
+Begin
+ NdP:=@O2E^.Nd[E];
+ With NdP^ Do
+ Case Typ Of
+  e_value: O2EvalNode:=Val;
+  e_const: O2EvalNode:=Val*O2E^.CVals[CIdx];
+  e_func0: Begin
+   D:=O2EvalNode(P0);
+   Case CIdx Of
+    f0_sinh: D:=O2Sinh(D); f0_cosh: D:=O2Cosh(D); f0_tanh: D:=O2Tanh(D);
+    f0_sin: If O2IsInf(D) Or O2IsNan(D) Then D:=O2Nan Else D:=Sin(D);
+    f0_cos: If O2IsInf(D) Or O2IsNan(D) Then D:=O2Nan Else D:=Cos(D);
+    f0_tan: If O2IsInf(D) Or O2IsNan(D) Then D:=O2Nan Else D:=O2Tan(D);
+    f0_atan: D:=ArcTan(D); f0_asin: D:=O2Asin(D); f0_acos: D:=O2Acos(D);
+    f0_exp: D:=O2Exp(D); f0_log: D:=O2Log(D); f0_abs: D:=Abs(D);
+    Else D:=0;
+   End;
+   O2EvalNode:=Val*D;
+  End;
+  e_func1: Begin
+   D:=O2EvalNode(P0);
+   If CIdx=0 Then O2EvalNode:=Val*O2Bits2Qp(D) Else O2EvalNode:=Val*O2Qp2Bits(D);
+  End;
+  e_func2: O2EvalNode:=O2Nan;
+  e_squish: O2EvalNode:=1/(1+O2Exp(4*O2EvalNode(P0)));
+  e_gauss: Begin D:=O2EvalNode(P0); O2EvalNode:=O2Exp(-D*D/2)/Sqrt(2*O2_Pi); End;
+  e_ld: O2EvalNode:=Val*O2E^.Vars[O2VarIdx(O2EvalNode(P0))];
+  e_isnan: If O2IsNan(O2EvalNode(P0)) Then O2EvalNode:=Val Else O2EvalNode:=0;
+  e_isinf: If O2IsInf(O2EvalNode(P0)) Then O2EvalNode:=Val Else O2EvalNode:=0;
+  e_floor: O2EvalNode:=Val*O2Floor(O2EvalNode(P0));
+  e_ceil: O2EvalNode:=Val*O2Ceil(O2EvalNode(P0));
+  e_trunc: O2EvalNode:=Val*O2Trunc(O2EvalNode(P0));
+  e_round: O2EvalNode:=Val*O2RoundC(O2EvalNode(P0));
+  e_sgn: Begin
+   D:=O2EvalNode(P0);
+   If D>0 Then D:=1 Else If D<0 Then D:=-1 Else D:=0;
+   O2EvalNode:=Val*D;
+  End;
+  e_sqrt: Begin D:=O2EvalNode(P0); If D<0 Then O2EvalNode:=O2Nan Else O2EvalNode:=Val*Sqrt(D); End;
+  e_not: If O2EvalNode(P0)=0 Then O2EvalNode:=Val Else O2EvalNode:=0;
+  e_if: Begin
+   If O2EvalNode(P0)<>0 Then O2EvalNode:=Val*O2EvalNode(P1)
+   Else If P2>=0 Then O2EvalNode:=Val*O2EvalNode(P2) Else O2EvalNode:=0;
+  End;
+  e_ifnot: Begin
+   If O2EvalNode(P0)=0 Then O2EvalNode:=Val*O2EvalNode(P1)
+   Else If P2>=0 Then O2EvalNode:=Val*O2EvalNode(P2) Else O2EvalNode:=0;
+  End;
+  e_clip: Begin
+   X:=O2EvalNode(P0); Mn:=O2EvalNode(P1); Mx:=O2EvalNode(P2);
+   If O2IsNan(Mn) Or O2IsNan(Mx) Or O2IsNan(X) Or (Mn>Mx) Then O2EvalNode:=O2Nan
+   Else O2EvalNode:=Val*O2Clipd(O2EvalNode(P0),Mn,Mx);
+  End;
+  e_between: Begin
+   D:=O2EvalNode(P0);
+   If (D>=O2EvalNode(P1)) And (D<=O2EvalNode(P2)) Then O2EvalNode:=Val Else O2EvalNode:=0;
+  End;
+  e_lerp: Begin
+   V0:=O2EvalNode(P0); V1:=O2EvalNode(P1); F:=O2EvalNode(P2);
+   O2EvalNode:=V0+(V1-V0)*F;
+  End;
+  e_print: Begin
+   X:=O2EvalNode(P0); If P1>=0 Then D:=O2EvalNode(P1);
+   O2EvalNode:=X;
+  End;
+  e_random: Begin
+   Id:=O2VarIdx(O2EvalNode(P0));
+   If O2IsNan(O2E^.Vars[Id]) Then R:=0 Else If O2E^.Vars[Id]<0 Then R:=QWord(Int64(Trunc(O2E^.Vars[Id]))) Else If O2E^.Vars[Id]>=1.8446744073709552E19 Then R:=QWord($FFFFFFFFFFFFFFFF) Else R:=QWord(Trunc(O2E^.Vars[Id]));
+   R:=R*1664525+1013904223;
+   O2E^.Vars[Id]:=R*1.0;
+   O2EvalNode:=Val*((R*1.0)*(1.0/18446744073709551615.0));
+  End;
+  e_while: Begin
+   D:=O2Nan; Pn:=0;
+   While O2EvalNode(P0)<>0 Do Begin D:=O2EvalNode(P1); Inc(Pn); If Pn>100000000 Then Break; End;
+   O2EvalNode:=D;
+  End;
+  e_taylor: Begin
+   T:=1; D:=0; X:=O2EvalNode(P1);
+   If P2>=0 Then Id:=O2VarIdx(O2EvalNode(P2)) Else Id:=0;
+   Var0:=O2E^.Vars[Id];
+   For I:=0 To 999 Do Begin
+    F:=D;
+    O2E^.Vars[Id]:=I;
+    V:=O2EvalNode(P0);
+    D:=D+T*V;
+    If (F=D) And (V<>0) Then Break;
+    T:=T*(X/(I+1));
+   End;
+   O2E^.Vars[Id]:=Var0;
+   O2EvalNode:=D;
+  End;
+  e_root: Begin
+   Low:=-1; High:=-1; LowV:=-1.7976931348623157E308; HighV:=1.7976931348623157E308;
+   Var0:=O2E^.Vars[0];
+   XMax:=O2EvalNode(P1);
+   For I:=-1 To 1023 Do Begin
+    If I<255 Then Begin
+     { ff_reverse[i&255] : inversion de bits }
+     Id:=I And 255; J:=0;
+     J:=((Id And 1) Shl 7) Or ((Id And 2) Shl 5) Or ((Id And 4) Shl 3) Or ((Id And 8) Shl 1) Or ((Id And 16) Shr 1) Or ((Id And 32) Shr 3) Or ((Id And 64) Shr 5) Or ((Id And 128) Shr 7);
+     O2E^.Vars[0]:=J*XMax/255;
+    End Else Begin
+     O2E^.Vars[0]:=XMax*O2Pow(0.9,I-255);
+     If (I And 1)<>0 Then O2E^.Vars[0]:=-O2E^.Vars[0];
+     If (I And 2)<>0 Then O2E^.Vars[0]:=O2E^.Vars[0]+Low Else O2E^.Vars[0]:=O2E^.Vars[0]+High;
+    End;
+    V:=O2EvalNode(P0);
+    If (V<=0) And (V>LowV) Then Begin Low:=O2E^.Vars[0]; LowV:=V; End;
+    If (V>=0) And (V<HighV) Then Begin High:=O2E^.Vars[0]; HighV:=V; End;
+    If (Low>=0) And (High>=0) Then Begin
+     For J:=0 To 999 Do Begin
+      O2E^.Vars[0]:=(Low+High)*0.5;
+      If (Low=O2E^.Vars[0]) Or (High=O2E^.Vars[0]) Then Break;
+      V:=O2EvalNode(P0);
+      If V<=0 Then Low:=O2E^.Vars[0];
+      If V>=0 Then High:=O2E^.Vars[0];
+      If O2IsNan(V) Then Begin Low:=V; High:=V; Break; End;
+     End;
+     Break;
+    End;
+   End;
+   O2E^.Vars[0]:=Var0;
+   If -LowV<HighV Then O2EvalNode:=Low Else O2EvalNode:=High;
+  End;
+  Else Begin
+   D:=O2EvalNode(P0); D2:=O2EvalNode(P1);
+   Case Typ Of
+    e_mod: Begin
+     If D2<>0 Then T:=O2Floor(D/D2) Else If D>0 Then T:=O2Inf Else If D<0 Then T:=O2NegInf Else T:=O2Nan;
+     If D2=0 Then O2EvalNode:=Val*(D-T*D2) Else O2EvalNode:=Val*(D-T*D2);
+    End;
+    e_gcd: O2EvalNode:=Val*O2Gcd(D,D2);
+    e_max: If D>D2 Then O2EvalNode:=Val*D Else O2EvalNode:=Val*D2;
+    e_min: If D<D2 Then O2EvalNode:=Val*D Else O2EvalNode:=Val*D2;
+    e_eq: If D=D2 Then O2EvalNode:=Val Else O2EvalNode:=0;
+    e_gt: If D>D2 Then O2EvalNode:=Val Else O2EvalNode:=0;
+    e_gte: If D>=D2 Then O2EvalNode:=Val Else O2EvalNode:=0;
+    e_lt: If D<D2 Then O2EvalNode:=Val Else O2EvalNode:=0;
+    e_lte: If D<=D2 Then O2EvalNode:=Val Else O2EvalNode:=0;
+    e_pow: O2EvalNode:=Val*O2Pow(D,D2);
+    e_mul: O2EvalNode:=Val*(D*D2);
+    e_div: Begin
+     If D2<>0 Then O2EvalNode:=Val*(D/D2)
+     Else If D>0 Then O2EvalNode:=Val*O2Inf Else If D<0 Then O2EvalNode:=Val*O2NegInf Else O2EvalNode:=O2Nan;
+    End;
+    e_add: O2EvalNode:=Val*(D+D2);
+    e_last: O2EvalNode:=Val*D2;
+    e_st: Begin
+     Id:=O2VarIdx(D); O2E^.Vars[Id]:=D2; O2EvalNode:=Val*D2;
+    End;
+    e_hypot: O2EvalNode:=Val*O2Hypot(D,D2);
+    e_atan2: O2EvalNode:=Val*O2Atan2(D,D2);
+    e_bitand: If O2IsNan(D) Or O2IsNan(D2) Then O2EvalNode:=O2Nan Else O2EvalNode:=Val*(Trunc(D) And Trunc(D2));
+    e_bitor: If O2IsNan(D) Or O2IsNan(D2) Then O2EvalNode:=O2Nan Else O2EvalNode:=Val*(Trunc(D) Or Trunc(D2));
+    Else O2EvalNode:=O2Nan;
+   End;
+  End;
+ End;
+End;
+
+Function O2ExprEval(X: PO2Expr): Double;
+Begin
+ O2E:=X;
+ O2ExprEval:=O2EvalNode(X^.Root);
+End;
+
+{ ---- table des options AVCodecContext (libavcodec/options_table.h, mpegvideoenc.h) ---- }
+Const
+ O2_NDEF=40;
+ O2_B=0; O2_BT=1; O2_BF=2; O2_BQF=3; O2_BQO=4; O2_IQF=5; O2_IQO=6; O2_BUFSIZE=7; O2_MAXRATE=8; O2_MINRATE=9;
+ O2_G=10; O2_QMIN=11; O2_QMAX=12; O2_QCOMP=13; O2_QBLUR=14; O2_QDIFF=15; O2_LMIN=16; O2_LMAX=17;
+ O2_MBLMIN=18; O2_MBLMAX=19; O2_MBD=20; O2_RCEQ=21; O2_RCINIT=22; O2_EC=23; O2_RCOCC=24; O2_RCMAXVBV=25;
+ O2_RCMINVBV=26; O2_QSQUISH=27; O2_QMODAMP=28; O2_QMODFREQ=29; O2_BUFAGGR=30;
+ O2_FLTMAX=3.40282346638528859812E38;
+ O2_INTMAX=2147483647.0;
+ O2_INTMIN=-2147483648.0;
+ O2_I64MAX=9223372036854775807.0;
+ { entrees de la ligne de commande : nature }
+ O2K_AVOPT=0; O2K_PASS=1; O2K_PASSLOG=2; O2K_RCOVR=3; O2K_Q=4; O2K_ME=5; O2K_B=6;
+Type
+ TO2Def=Record
+  Nam: String[22]; Kind: Byte; { 1 int, 2 int64, 3 float, 4 chaine }
+  Own: Byte;                   { 0 AVCodecContext, 1 option privee mpegvideo }
+  Enc,Dec: Boolean;            { ENCODING_PARAM, DECODING_PARAM }
+  Mn,Mx,Df: Double;
+  Hlp: String[255];
+  Unit_: Byte;                 { 1 = mbd (simple,bits,rd) }
+ End;
+ TO2Ent=Record
+  Key: String[24]; Spec: String[24]; Val: String[255]; Grp: Byte; Kind: Byte; Id: Integer;
+ End;
+Var
+ O2Defs: Array[0..O2_NDEF-1] Of TO2Def; O2NDefs: Integer;
+ O2Ents: Array[0..95] Of TO2Ent; O2NEnts: Integer;
+ O2Val: Array[0..O2_NDEF-1] Of Double;
+ O2Has: Array[0..O2_NDEF-1] Of Boolean;
+ O2RcEq: String; O2RcEqSet: Boolean;
+ O2Inited: Boolean;
+ O2PassMode: LongInt;        { valeur de -pass }
+ O2PassSet: Boolean;
+ O2PassLog: String; O2PassLogSet: Boolean;
+ O2RcOverr: String; O2RcOverrSet: Boolean;
+ O2QScale: Double; O2QScaleSet: Boolean;
+ O2Codec: String;            { codec video effectif }
+ O2Ran: Boolean;
+ O2StreamIdx: LongInt;
+ O2PassFlags: LongInt; O2LogName: String; O2UseCodec: String; O2Stream: Boolean;
+ O2QErr,O2QName,O2QFail: String;
+ O2OutFmtX,O2OutPathX: String;   { sortie reelle quand le codage se fait dans un processus fils }
+
+Procedure O2AddDef(Const Nam: String; Kind,Own: Byte; Enc,Dec: Boolean; Mn,Mx,Df: Double; Const Hlp: String);
+Begin
+ O2Defs[O2NDefs].Nam:=Nam; O2Defs[O2NDefs].Kind:=Kind; O2Defs[O2NDefs].Own:=Own;
+ O2Defs[O2NDefs].Enc:=Enc; O2Defs[O2NDefs].Dec:=Dec; O2Defs[O2NDefs].Mn:=Mn; O2Defs[O2NDefs].Mx:=Mx; O2Defs[O2NDefs].Df:=Df;
+ O2Defs[O2NDefs].Hlp:=Hlp; O2Defs[O2NDefs].Unit_:=0;
+ O2Val[O2NDefs]:=Df; O2Has[O2NDefs]:=False;
+ Inc(O2NDefs);
+End;
+
+Procedure O2InitDefs;
+Begin
+ If O2Inited Then Exit;
+ SetMXCSR(GetMXCSR Or $1F80); Set8087CW(Get8087CW Or $3F);
+ O2Inited:=True; O2QErr:=''; O2QName:='q:v'; O2NDefs:=0; O2NEnts:=0; O2RcEq:=''; O2RcEqSet:=False;
+ O2PassMode:=0; O2PassSet:=False; O2PassLog:=''; O2PassLogSet:=False; O2RcOverr:=''; O2RcOverrSet:=False;
+ O2QScale:=-1; O2QScaleSet:=False; O2Codec:=''; O2Ran:=False; O2StreamIdx:=0;
+ O2AddDef('b',2,0,True,False,0,O2_I64MAX,200000,'set bitrate (in bits/s)');
+ O2AddDef('bt',1,0,True,False,0,O2_INTMAX,4000000,'Set video bitrate tolerance (in bits/s). In 1-pass mode, bitrate tolerance specifies how far ratecontrol is willing to deviate from the target average bitrate value. This is not related to minimum/maximum bitrate. Lowering tolerance too much has an adverse effect on quality.');
+ O2AddDef('bf',1,0,True,False,-1,O2_INTMAX,0,'set maximum number of B-frames between non-B-frames');
+ O2AddDef('b_qfactor',3,0,True,False,-O2_FLTMAX,O2_FLTMAX,1.25,'QP factor between P- and B-frames');
+ O2AddDef('b_qoffset',3,0,True,False,-O2_FLTMAX,O2_FLTMAX,1.25,'QP offset between P- and B-frames');
+ O2AddDef('i_qfactor',3,0,True,False,-O2_FLTMAX,O2_FLTMAX,-0.8,'QP factor between P- and I-frames');
+ O2AddDef('i_qoffset',3,0,True,False,-O2_FLTMAX,O2_FLTMAX,0,'QP offset between P- and I-frames');
+ O2AddDef('bufsize',1,0,True,False,O2_INTMIN,O2_INTMAX,0,'set ratecontrol buffer size (in bits)');
+ O2AddDef('maxrate',2,0,True,False,0,O2_INTMAX,0,'maximum bitrate (in bits/s). Used for VBV together with bufsize.');
+ O2AddDef('minrate',2,0,True,False,O2_INTMIN,O2_INTMAX,0,'minimum bitrate (in bits/s). Most useful in setting up a CBR encode. It is of little use otherwise.');
+ O2AddDef('g',1,0,True,False,O2_INTMIN,O2_INTMAX,12,'set the group of picture (GOP) size');
+ O2AddDef('qmin',1,0,True,False,-1,69,2,'minimum video quantizer scale (VBR)');
+ O2AddDef('qmax',1,0,True,False,-1,1024,31,'maximum video quantizer scale (VBR)');
+ O2AddDef('qcomp',3,0,True,False,-O2_FLTMAX,O2_FLTMAX,0.5,'video quantizer scale compression (VBR). Constant of ratecontrol equation. Recommended range for default rc_eq: 0.0-1.0');
+ O2AddDef('qblur',3,0,True,False,-1,O2_FLTMAX,0.5,'video quantizer scale blur (VBR)');
+ O2AddDef('qdiff',1,0,True,False,O2_INTMIN,O2_INTMAX,3,'maximum difference between the quantizer scales (VBR)');
+ O2AddDef('lmin',1,1,True,False,0,O2_INTMAX,236,'minimum Lagrange factor (VBR)');
+ O2AddDef('lmax',1,1,True,False,0,O2_INTMAX,3658,'maximum Lagrange factor (VBR)');
+ O2AddDef('mblmin',1,0,True,False,1,32767,236,'minimum macroblock Lagrange factor (VBR)');
+ O2AddDef('mblmax',1,0,True,False,1,32767,3658,'maximum macroblock Lagrange factor (VBR)');
+ O2AddDef('mbd',1,0,True,False,0,2,0,'macroblock decision algorithm (high quality mode)');
+ O2Defs[O2_MBD].Unit_:=1;
+ O2AddDef('rc_eq',4,1,True,False,0,0,0,'Set rate control equation. When computing the expression, besides the standard functions defined in the section ''Expression Evaluation'', the following functions are available: bits2qp(bits), qp2bits(qp). Also the following constants are available: iTex pTex tex mv fCode iCount mcVar var isI isP isB avgQP qComp avgIITex avgPITex avgPPTex avgBPTex avgTex.');
+ O2AddDef('rc_init_cplx',3,1,True,False,-O2_FLTMAX,O2_FLTMAX,0,'initial complexity for 1-pass encoding');
+ O2AddDef('ec',1,0,False,True,O2_INTMIN,O2_INTMAX,3,'set error concealment strategy');
+ O2AddDef('rc_init_occupancy',1,0,True,False,O2_INTMIN,O2_INTMAX,0,'number of bits which should be loaded into the rc buffer before decoding starts');
+ O2AddDef('rc_max_vbv_use',3,0,True,False,0,O2_FLTMAX,0,'');
+ O2AddDef('rc_min_vbv_use',3,0,True,False,0,O2_FLTMAX,3,'');
+ O2AddDef('qsquish',3,1,True,False,0,99,0,'how to keep quantizer between qmin and qmax (0 = clip, 1 = use differentiable function)');
+ O2AddDef('rc_qmod_amp',3,1,True,False,-O2_FLTMAX,O2_FLTMAX,0,'experimental quantizer modulation');
+ O2AddDef('rc_qmod_freq',1,1,True,False,O2_INTMIN,O2_INTMAX,0,'experimental quantizer modulation');
+ O2AddDef('rc_buf_aggressivity',3,1,True,False,-O2_FLTMAX,O2_FLTMAX,1.0,'currently useless');
+End;
+
+Function O2FindDef(Const Nm: String): Integer;
+Var I: Integer;
+Begin
+ O2InitDefs;
+ For I:=0 To O2NDefs-1 Do If O2Defs[I].Nam=Nm Then Begin O2FindDef:=I; Exit; End;
+ O2FindDef:=-1;
+End;
+
+{ valeur effective (defaut si non fixee) }
+Function O2V(Id: Integer): Double;
+Begin
+ O2InitDefs; O2V:=O2Val[Id];
+End;
+
+{ ---- formats C ---- }
+Function O2FmtF(D: Double): String;
+Var S: String;
+Begin
+ If O2IsNan(D) Then Begin O2FmtF:='-nan'; Exit; End;
+ If O2IsInf(D) Then Begin If D>0 Then O2FmtF:='inf' Else O2FmtF:='-inf'; Exit; End;
+ Str(D:0:6,S);
+ O2FmtF:=S;
+End;
+
+Function O2FmtG(D: Double): String;
+Var E,P,Decs: LongInt; M: Extended; Mi: Int64; S,T: String; Neg: Boolean; K: Integer;
+Begin
+ If O2IsNan(D) Then Begin O2FmtG:='-nan'; Exit; End;
+ If O2IsInf(D) Then Begin If D>0 Then O2FmtG:='inf' Else O2FmtG:='-inf'; Exit; End;
+ If D=0 Then Begin O2FmtG:='0'; Exit; End;
+ Neg:=D<0; If Neg Then D:=-D;
+ E:=0; M:=D;
+ { exposant decimal }
+ If D>=1 Then Begin While M>=10 Do Begin M:=M/10; Inc(E); End; End
+ Else Begin While M<1 Do Begin M:=M*10; Dec(E); End; End;
+ Mi:=Round(M*100000);
+ If Mi>=1000000 Then Begin Mi:=100000; Inc(E); End;
+ P:=6;
+ If (E<-4) Or (E>=P) Then Begin
+  Str(Mi,T); { 6 chiffres }
+  S:=Copy(T,1,1)+'.'+Copy(T,2,5);
+  While (S<>'') And (S[Length(S)]='0') Do Delete(S,Length(S),1);
+  If (S<>'') And (S[Length(S)]='.') Then Delete(S,Length(S),1);
+  If E<0 Then T:='-' Else T:='+';
+  K:=Abs(E);
+  If K<10 Then S:=S+'e'+T+'0'+Chr(48+K) Else Begin Str(K,T); S:=S+'e'+Copy('+-',1,0)+T; End;
+  If K>=10 Then Begin If E<0 Then S:=Copy(S,1,Pos('e',S))+'-'+Copy(S,Pos('e',S)+2,10) Else S:=Copy(S,1,Pos('e',S))+'+'+Copy(S,Pos('e',S)+2,10); End;
+ End Else Begin
+  Decs:=P-1-E; If Decs<0 Then Decs:=0;
+  Str(D:0:Decs,S);
+  If Pos('.',S)>0 Then Begin
+   While (S<>'') And (S[Length(S)]='0') Do Delete(S,Length(S),1);
+   If (S<>'') And (S[Length(S)]='.') Then Delete(S,Length(S),1);
+  End;
+ End;
+ If Neg Then S:='-'+S;
+ O2FmtG:=S;
+End;
+
+{ ---- sortie des messages ---- }
+Const
+ O2AdrCtx='0x55d4c7a81bc0'; O2AdrOst='0x55d4c7a80800'; O2AdrMux='0x55d4c7a7f4c0'; O2AdrEval='0x7ffd9c3a2e40';
+ O2AdrDemux='0x55d4c7a7ef00';
+
+Function IntToStrO2(N: LongInt): String;
+Var S: String;
+Begin
+ Str(N,S); IntToStrO2:=S;
+End;
+
+Procedure O2Msg(Const S: String);
+Begin
+ WriteLn(StdErr,S);
+End;
+
+Function O2File: String;
+Begin
+ If O2OutPathX<>'' Then O2File:=O2OutPathX Else O2File:=OutputPath;
+End;
+
+{ erreur finale : cree le fichier de sortie vide si demande, puis quitte }
+Procedure O2Die(Code: Integer; MakeEmpty: Boolean);
+Var F: File;
+Begin
+ If MakeEmpty And (O2File<>'') Then Begin
+  Assign(F,O2File); {$I-} Rewrite(F,1); Close(F); {$I+} If IOResult<>0 Then;
+ End;
+ Halt(Code);
+End;
+
+Function O2StrErr(Code: Integer): String;
+Begin
+ Case Code Of
+  -22: O2StrErr:='Invalid argument';
+  -34: O2StrErr:='Numerical result out of range';
+  -1: O2StrErr:='Operation not permitted';
+  -5: O2StrErr:='Input/output error';
+  Else O2StrErr:='Unknown error';
+ End;
+End;
+
+{ exit code d'un code d'erreur AVERROR(e) = -e }
+Function O2ExitOf(Code: Integer): Integer;
+Begin
+ O2ExitOf:=(256+Code) And 255;
+End;
+
+{ ---- av_opt_set pour un nombre ---- }
+{ Retourne 0 si OK, sinon code d'erreur negatif ; Msg recoit les lignes d'erreur (separees par #10) }
+Var O2ECtx: TO2Expr;
+
+Function O2UnitConst(Id: Integer; Const Nm: String; Var V: Double): Boolean;
+Begin
+ O2UnitConst:=False;
+ If O2Defs[Id].Unit_=1 Then Begin
+  If Nm='simple' Then Begin V:=0; O2UnitConst:=True; End
+  Else If Nm='bits' Then Begin V:=1; O2UnitConst:=True; End
+  Else If Nm='rd' Then Begin V:=2; O2UnitConst:=True; End;
+ End;
+End;
+
+{ prefixe de journal d'une option : AVCodecContext -> nom du codec ; option privee -> nom de la classe privee }
+Function O2PrivPre(Id: Integer): String;
+Var Cn: String;
+Begin
+ Cn:=O2Codec;
+ If (Id>=0) And (O2Defs[Id].Own<>0) Then Begin
+  If Cn='svq1' Then Cn:='svq1enc' Else If Cn='snow' Then Cn:='snow encoder'
+  Else If Cn='mpeg1video' Then Cn:='mpeg1video encoder' Else If Cn='mpeg2video' Then Cn:='mpeg2video encoder'
+  Else If Cn='mpeg4' Then Cn:='MPEG4 encoder' Else Cn:='generic mpegvideo encoder';
+ End;
+ O2PrivPre:='['+Cn+' @ '+O2AdrCtx+'] ';
+End;
+
+Function O2SetNumber(Id: Integer; Const Val: String; Var Msg: String): Integer;
+Var D,Num: Double; Rc,I: Integer; Nm: String; UV: Double; Kind: Byte; F: Single; Ll: Int64; Pre: String;
+Begin
+ Msg:=''; Pre:=O2PrivPre(Id);
+ If O2UnitConst(Id,Val,UV) Then D:=UV
+ Else Begin
+  FillChar(O2ECtx.CNames,SizeOf(O2ECtx.CNames),0);
+  O2ECtx.NC:=0;
+  If O2Defs[Id].Unit_=1 Then Begin
+   O2ECtx.CNames[0]:='simple'; O2ECtx.CVals[0]:=0;
+   O2ECtx.CNames[1]:='bits'; O2ECtx.CVals[1]:=1;
+   O2ECtx.CNames[2]:='rd'; O2ECtx.CVals[2]:=2;
+   O2ECtx.NC:=3;
+  End;
+  O2ECtx.CNames[O2ECtx.NC]:='default'; O2ECtx.CVals[O2ECtx.NC]:=O2Defs[Id].Df; Inc(O2ECtx.NC);
+  O2ECtx.CNames[O2ECtx.NC]:='max'; O2ECtx.CVals[O2ECtx.NC]:=O2Defs[Id].Mx; Inc(O2ECtx.NC);
+  O2ECtx.CNames[O2ECtx.NC]:='min'; O2ECtx.CVals[O2ECtx.NC]:=O2Defs[Id].Mn; Inc(O2ECtx.NC);
+  O2ECtx.CNames[O2ECtx.NC]:='none'; O2ECtx.CVals[O2ECtx.NC]:=0; Inc(O2ECtx.NC);
+  O2ECtx.CNames[O2ECtx.NC]:='all'; O2ECtx.CVals[O2ECtx.NC]:=-1; Inc(O2ECtx.NC);
+  O2NFunc1:=0;
+  Rc:=O2ExprParse(@O2ECtx,Val);
+  If Rc<0 Then Begin
+   If O2ECtx.Err<>'' Then Msg:=Pre+'[Eval @ '+O2AdrEval+'] '+O2ECtx.Err+#10;
+   Msg:=Msg+Pre+'Unable to parse option value "'+Val+'"';
+   O2SetNumber:=Rc; Exit;
+  End;
+  D:=O2ExprEval(@O2ECtx);
+ End;
+ Num:=D;
+ If (O2Defs[Id].Mx<Num) Or (O2Defs[Id].Mn>Num) Then Begin
+  Msg:=Pre+'Value '+O2FmtF(Num)+' for parameter '''+O2Defs[Id].Nam+''' out of range ['+O2FmtG(O2Defs[Id].Mn)+' - '+O2FmtG(O2Defs[Id].Mx)+']';
+  O2SetNumber:=-34; Exit;
+ End;
+ Kind:=O2Defs[Id].Kind;
+ Case Kind Of
+  1: Begin
+   If O2IsNan(Num) Then O2Val[Id]:=0 Else Begin Ll:=O2LRint(Num); O2Val[Id]:=LongInt(Ll And $FFFFFFFF); End;
+  End;
+  2: Begin
+   If (Num=9223372036854775807.0) Then O2Val[Id]:=9223372036854775807.0 Else If O2IsNan(Num) Then O2Val[Id]:=-9223372036854775808.0 Else Begin Ll:=O2LRint(Num); O2Val[Id]:=Ll*1.0; End;
+  End;
+  3: Begin F:=Num; O2Val[Id]:=F; End;
+  Else O2Val[Id]:=Num;
+ End;
+ O2Has[Id]:=True;
+ O2SetNumber:=0;
+End;
+
+{ ---- analyse de la ligne de commande ---- }
+{ specificateur de flux : retourne 1 = correspond au flux video 0, 0 = ne correspond pas, -1 = invalide }
+Function O2MatchSpec(Const Sp: String; Idx: LongInt): Integer;
+Var Rest: String; C: Char; N,Code: LongInt; Typ: Char;
+Begin
+ If Sp='' Then Begin O2MatchSpec:=1; Exit; End;
+ Rest:=Sp; Typ:=#0;
+ C:=Rest[1];
+ If C In ['v','V','a','s','d','t'] Then Begin
+  Typ:=C; Delete(Rest,1,1);
+  If Rest='' Then Begin
+   If (Typ='v') Or (Typ='V') Then O2MatchSpec:=1 Else O2MatchSpec:=0; Exit;
+  End;
+  If Rest[1]<>':' Then Begin O2MatchSpec:=-1; Exit; End;
+  Delete(Rest,1,1);
+  Val(Rest,N,Code);
+  If (Code<>0) Or (Rest='') Then Begin O2MatchSpec:=-1; Exit; End;
+  If ((Typ='v') Or (Typ='V')) And (N=0) Then O2MatchSpec:=1 Else O2MatchSpec:=0;
+  Exit;
+ End;
+ If C In ['0'..'9'] Then Begin
+  Val(Rest,N,Code);
+  If Code<>0 Then Begin O2MatchSpec:=-1; Exit; End;
+  If N=Idx Then O2MatchSpec:=1 Else O2MatchSpec:=0; Exit;
+ End;
+ If Rest='u' Then Begin O2MatchSpec:=1; Exit; End;
+ O2MatchSpec:=-1;
+End;
+
+Procedure O2AddEnt(Const Key,Spec,Val: String; Grp,Kind: Byte; Id: Integer);
+Var I: Integer;
+Begin
+ For I:=0 To O2NEnts-1 Do
+  If (O2Ents[I].Key=Key) And (O2Ents[I].Spec=Spec) And (O2Ents[I].Grp=Grp) Then Begin
+   O2Ents[I].Val:=Val; Exit;
+  End;
+ If O2NEnts>=96 Then Exit;
+ O2Ents[O2NEnts].Key:=Key; O2Ents[O2NEnts].Spec:=Spec; O2Ents[O2NEnts].Val:=Val;
+ O2Ents[O2NEnts].Grp:=Grp; O2Ents[O2NEnts].Kind:=Kind; O2Ents[O2NEnts].Id:=Id;
+ Inc(O2NEnts);
+End;
+
+Function O2Sat32(D: Double): LongInt;
+Begin
+ If O2IsNan(D) Then O2Sat32:=0 Else If D>2147483647 Then O2Sat32:=2147483647 Else If D<-2147483648.0 Then O2Sat32:=-2147483647-1 Else O2Sat32:=Trunc(D);
+End;
+
+{ valeur numerique "au mieux" pour les variables historiques ; Ok=False si illisible }
+Function O2QuickNum(Id: Integer; Const S: String; Var Ok: Boolean): Double;
+Var Sv: Double; Sh: Boolean; M: String;
+Begin
+ Sv:=O2Val[Id]; Sh:=O2Has[Id];
+ Ok:=O2SetNumber(Id,S,M)=0;
+ O2QuickNum:=O2Val[Id];
+ If Not Ok Then Begin O2Val[Id]:=Sv; O2Has[Id]:=Sh; End;
+End;
+
+Var O2GLegacy: LongInt; O2GSet: Boolean;
+
+{ synchronise les variables historiques du programme avec la valeur lue }
+Procedure O2Legacy(Id: Integer; Const S: String);
+Var V: Double; Ok: Boolean; N: LongInt;
+Begin
+ V:=O2QuickNum(Id,S,Ok);
+ If Not Ok Then Exit;
+ N:=O2Sat32(V);
+ Case Id Of
+  O2_B: Begin VideoBitrate:=N; HasVideoBitrate:=True; End;
+  O2_BT: Begin VideoTolerance:=N; HasVideoTolerance:=True; End;
+  O2_BF: If N>=0 Then Begin If N>16 Then N:=16; BFrames:=N; HasBFrames:=True; End;
+  O2_BQF: Begin BQuantFactor:=V; HasBQuant:=True; End;
+  O2_BQO: Begin BQuantOffset:=V; HasBQuant:=True; End;
+  O2_BUFSIZE: Begin VideoBuffer:=N; HasVideoBuffer:=True; End;
+  O2_G: If N>=0 Then Begin O2GLegacy:=N; O2GSet:=True; End;
+ End;
+End;
+
+Procedure O2Unrec(Const Nm: String);
+Begin
+ O2Msg('Unrecognized option '''+Nm+'''.');
+ O2Msg('Error splitting the argument list: Option not found');
+ Halt(8);
+End;
+
+{ -q:v / -qscale : retourne la valeur historique de THQuality (-1 si non fixee) }
+Function O2QIn(Const S: String): LongInt;
+Var Q,L: Double; Nx: LongInt; I: Int64;
+Begin
+ O2InitDefs;
+ O2QIn:=-1;
+ Q:=O2AvStrtod(S,1,Nx);
+ If Nx<=Length(S) Then Begin Begin O2QErr:='Expected number for '+O2QName+' but found: '+S; If Copy(O2QFail,1,6)='qscale' Then O2QErr:=O2QErr+#10+'Failed to set value '''+S+''' for option '''+O2QFail+''': Invalid argument'; End; Exit; End;
+ If O2IsNan(Q) Or (Q<0) Then Begin O2QScaleSet:=False; Exit; End;
+ O2QScale:=Q; O2QScaleSet:=True;
+ SnwQvF:=Q; SnwQvFrac:=False;
+ L:=118*Q; If L>2147483647 Then L:=2147483647;
+ I:=((Trunc(L)*139)+8192) Shr 14;
+ If I>31 Then I:=31;
+ O2QIn:=I;
+End;
+
+{ identifie une option : retourne l'indice dans O2Defs, -2 pour une option propre a ffmpeg (pass...), -1 sinon ; Nm / Sp sont decoupes }
+Function O2NameId(Const Arg: String; Var Nm,Sp: String): Integer;
+Var K: Integer; Id: Integer;
+Begin
+ O2NameId:=-1;
+ If (Length(Arg)<2) Or (Arg[1]<>'-') Then Exit;
+ O2InitDefs;
+ Nm:=Copy(Arg,2,255); Sp:=''; K:=Pos(':',Nm);
+ If K>0 Then Begin Sp:=Copy(Nm,K+1,255); Nm:=Copy(Nm,1,K-1); End;
+ Id:=O2FindDef(Nm);
+ If (Id<0) And (Length(Nm)>1) And (Nm[1]='v') Then Begin
+  Id:=O2FindDef(Copy(Nm,2,255));
+  If (Id>=0) And (O2Defs[Id].Own<>0) Then Id:=-1;
+  If Id>=0 Then Begin Nm:=Copy(Nm,2,255); If Sp='' Then Sp:='v'; End;
+ End;
+ If Id>=0 Then Begin
+  If (Id=O2_B) And (Sp<>'') And (Sp[1]='a') Then Exit;
+  O2NameId:=Id; Exit;
+ End;
+ If (Nm='pass') Or (Nm='passlogfile') Or (Nm='rc_override') Or (Nm='me_method') Then O2NameId:=-2;
+End;
+
+{ options transmises au processus fils (F3 / FMX) }
+Function O2FmxOpt(Const A,V: String): Boolean;
+Var Nm,Sp: String; Id: Integer; Ok: Boolean; D: Double;
+Begin
+ O2FmxOpt:=False;
+ If (Length(A)<2) Or (A[1]<>'-') Then Exit;
+ Nm:=Copy(A,2,255);
+ If (Nm='q') Or (Nm='qscale') Then Begin O2FmxOpt:=True; Exit; End;
+ Id:=O2NameId(A,Nm,Sp);
+ If Id=-1 Then Exit;
+ If (Id=O2_B) And (O2MatchSpec(Sp,0)=1) Then Begin D:=O2QuickNum(O2_B,V,Ok); If Ok Then FMXVBitRate:=O2Sat32(D); End;
+ O2FmxOpt:=True;
+End;
+
+{ Point d'entree de l'analyse : retourne True si l'option est prise en charge ici (valeur consommee) }
+Function O2Parse(Var Arg: String; Var Idx: Integer): Boolean;
+Var Nm,Sp,V,Full: String; K,Id: Integer; Grp: Byte; Pre: Char;
+Begin
+ O2Parse:=False;
+ If (Length(Arg)<2) Or (Arg[1]<>'-') Then Exit;
+ O2InitDefs;
+ Full:=Copy(Arg,2,255); Nm:=Full; Sp:=''; K:=Pos(':',Nm);
+ If K>0 Then Begin Sp:=Copy(Nm,K+1,255); Nm:=Copy(Nm,1,K-1); End;
+ { options rejetees par ffmpeg 6.1.1 }
+ If (Nm='er') Or (Nm='dct_algo') Or (Nm='idct_algo') Then O2Unrec(Nm);
+If Nm='o2out' Then Begin
+  If Idx+1>ParamCount Then Exit;
+  Inc(Idx); V:=ParamStr(Idx); K:=Pos('|',V);
+  If K>0 Then Begin O2OutFmtX:=Copy(V,1,K-1); O2OutPathX:=Copy(V,K+1,255); End;
+  O2Parse:=True; Exit;
+ End;
+ If (Nm='q') Or (Nm='qscale') Then Begin
+  If InputPath='' Then O2AddEnt(Nm,Sp,'',0,O2K_Q,-1);
+  O2QFail:=Copy(Arg,2,255);
+  If Sp='' Then Begin Arg:='-q:v'; If Nm='q' Then O2QName:='q' Else O2QName:='q:v'; End;
+  Exit;
+ End;
+ Pre:=#0;
+ Id:=O2FindDef(Nm);
+ If (Id<0) And (Length(Nm)>1) And (Nm[1]='v') Then Begin
+  { -vb, -vqmin ... : prefixe de type de flux }
+  Id:=O2FindDef(Copy(Nm,2,255));
+  If (Id>=0) And (O2Defs[Id].Own<>0) Then Id:=-1;
+  If Id>=0 Then Begin Pre:='v'; Nm:=Copy(Nm,2,255); If Sp='' Then Sp:='v'; End;
+ End;
+ If (Id<0) And (Nm<>'pass') And (Nm<>'passlogfile') And (Nm<>'rc_override') And (Nm<>'me_method') Then Exit;
+ { -b:a, -ab : debit audio, traite ailleurs }
+ If (Id=O2_B) And (Sp<>'') And (Sp[1]='a') Then Exit;
+ { valeur }
+ If Idx+1>ParamCount Then Begin
+  If (Id>=0) And (Id<>O2_B) Then O2Unrec(Nm);
+  O2Msg('Missing argument for option '''+Full+'''.');
+  O2Msg('Error splitting the argument list: Invalid argument'); Halt(234);
+ End;
+ Inc(Idx); V:=ParamStr(Idx);
+ If InputPath='' Then Grp:=0 Else Grp:=1;
+ If Id>=0 Then Begin
+  If Id=O2_B Then O2AddEnt('b',Sp,V,Grp,O2K_B,Id) Else O2AddEnt(Nm,Sp,V,Grp,O2K_AVOPT,Id);
+  If (Grp=1) And (O2MatchSpec(Sp,0)=1) Then O2Legacy(Id,V);
+ End Else If Nm='pass' Then O2AddEnt('pass',Sp,V,Grp,O2K_PASS,-1)
+ Else If Nm='passlogfile' Then O2AddEnt('passlogfile',Sp,V,Grp,O2K_PASSLOG,-1)
+ Else If Nm='rc_override' Then O2AddEnt('rc_override',Sp,V,Grp,O2K_RCOVR,-1)
+ Else If Nm='me_method' Then Begin If Grp=0 Then O2AddEnt('me_method',Sp,V,0,O2K_ME,-1); End
+ Else Begin
+ End;
+ O2Parse:=True;
+End;
+
+
+
+{ debit declare dans l'en-tete AVI : min(bit_rate, INT32_MAX)/8 }
+Function O2Bps: LongInt;
+Var B: Double;
+Begin
+ O2InitDefs; B:=O2Val[O2_B];
+ If B>2147483647 Then B:=2147483647;
+ O2Bps:=Trunc(B) Div 8;
+End;
+
+
+{ taille de l'index maitre ODML de ffmpeg (avienc.c) : max(256, ceil(taille_estimee / 1 Gio) + 1) ; JUNK = 24 + 16 * N }
+Function O2JxBR(Br: Int64): LongInt;
+Begin
+ O2JxBR:=4120 + 0*Integer(Br And 0); { l'index maitre reste a 256 entrees dans l'oracle }
+End;
+
+Function O2Jx: LongInt;
+Begin
+ O2Jx:=4120;
+End;
+
+{ ffmpeg copie la duree d'entree dans le flux de sortie : l'index maitre reste a 256 entrees }
+Function O2BGiven: Boolean;
+Begin
+ O2BGiven:=O2Has[0];
+End;
+{ ---- informations du flux video (Y4M) ---- }
+Var
+ O2VW,O2VH,O2VFN,O2VFD: LongInt;
+
+Procedure O2ReadY4MInfo(Const Fn: String);
+Var F: File; Buf: Array[0..511] Of Byte; N: LongInt; S,Tok: String; I,K,Code: LongInt;
+Begin
+ O2VW:=0; O2VH:=0; O2VFN:=25; O2VFD:=1;
+ Assign(F,Fn); {$I-} Reset(F,1); {$I+} If IOResult<>0 Then Exit;
+ N:=0; {$I-} BlockRead(F,Buf,512,N); {$I+} If IOResult<>0 Then N:=0;
+ {$I-} Close(F); {$I+} If IOResult<>0 Then;
+ S:='';
+ For I:=0 To N-1 Do Begin If Buf[I]=10 Then Break; If Length(S)<250 Then S:=S+Chr(Buf[I]); End;
+ If Copy(S,1,9)<>'YUV4MPEG2' Then Begin O2VW:=0; Exit; End;
+ S:=Copy(S,11,255);
+ While S<>'' Do Begin
+  K:=Pos(' ',S); If K=0 Then K:=Length(S)+1;
+  Tok:=Copy(S,1,K-1); S:=Copy(S,K+1,255);
+  If Tok='' Then Continue;
+  Case Tok[1] Of
+   'W': Val(Copy(Tok,2,20),O2VW,Code);
+   'H': Val(Copy(Tok,2,20),O2VH,Code);
+   'F': Begin K:=Pos(':',Tok); If K>0 Then Begin Val(Copy(Tok,2,K-2),O2VFN,Code); Val(Copy(Tok,K+1,20),O2VFD,Code); End; End;
+  End;
+ End;
+ If (O2VFN<=0) Or (O2VFD<=0) Then Begin O2VFN:=25; O2VFD:=1; End;
+End;
+
+Function O2Gcd32(A,B: LongInt): LongInt;
+Var T: LongInt;
+Begin
+ While B<>0 Do Begin T:=A Mod B; A:=B; B:=T; End;
+ O2Gcd32:=A;
+End;
+
+{ codec video par defaut selon le format de sortie }
+Function O2DefCodec(Const Fmt: String): String;
+Begin
+ If Fmt='avi' Then O2DefCodec:='mpeg4'
+ Else If (Fmt='mp4') Or (Fmt='mov') Or (Fmt='matroska') Or (Fmt='ipod') Or (Fmt='psp') Or (Fmt='f4v') Or (Fmt='m4v') Or (Fmt='3gp') Or (Fmt='3g2') Then O2DefCodec:='libx264'
+ Else If (Fmt='flv') Or (Fmt='swf') Then O2DefCodec:='flv'
+ Else If (Fmt='mpeg') Or (Fmt='vcd') Or (Fmt='mpeg1video') Then O2DefCodec:='mpeg1video'
+ Else If (Fmt='mpegts') Or (Fmt='mpeg2video') Or (Fmt='dvd') Or (Fmt='vob') Or (Fmt='svcd') Or (Fmt='mxf') Then O2DefCodec:='mpeg2video'
+ Else If (Fmt='asf') Or (Fmt='wmv') Then O2DefCodec:='msmpeg4'
+ Else If Fmt='webm' Then O2DefCodec:='libvpx-vp9'
+ Else If (Fmt='ogg') Or (Fmt='ogv') Then O2DefCodec:='libtheora'
+ Else If Fmt='gif' Then O2DefCodec:='gif'
+ Else If Fmt='nut' Then O2DefCodec:='mpeg4'
+ Else If Fmt='rm' Then O2DefCodec:='rv10'
+ Else If (Fmt='mjpeg') Or (Fmt='image2') Then O2DefCodec:='mjpeg'
+ Else If Fmt='yuv4mpegpipe' Then O2DefCodec:='rawvideo'
+ Else If Fmt='png' Then O2DefCodec:='png'
+ Else If Fmt='bmp' Then O2DefCodec:='bmp'
+ Else O2DefCodec:='';
+End;
+
+Function O2IsMpv(Const C: String): Boolean;
+Begin
+ O2IsMpv:=(C='amv') Or (C='flv') Or (C='h261') Or (C='h263') Or (C='h263p') Or (C='mjpeg') Or (C='mpeg1video') Or (C='mpeg2video') Or
+  (C='mpeg4') Or (C='msmpeg4v2') Or (C='msmpeg4') Or (C='rv10') Or (C='rv20') Or (C='speedhq') Or (C='wmv1') Or (C='wmv2');
+End;
+
+{ l'option est-elle connue du codec (options privees) }
+Function O2CodecHas(Id: Integer; Const C: String): Boolean;
+Begin
+ If O2Defs[Id].Own=0 Then O2CodecHas:=True
+ Else If O2IsMpv(C) Then O2CodecHas:=True
+ Else If (C='snow') And (Id=O2_RCEQ) Then O2CodecHas:=True
+ Else O2CodecHas:=False;
+End;
+
+Function O2InputName: String;
+Begin
+ If InputFormat='webm' Then O2InputName:='matroska,webm'
+ Else If (InputFormat='mp4') Or (InputFormat='mov') Then O2InputName:='mov,mp4,m4a,3gp,3g2,mj2'
+ Else O2InputName:=InputFormat;
+End;
+
+{ nom du muxeur de ffmpeg pour la sortie }
+Function O2ExtOf(Const N: String): String;
+Var J: Integer; E: String;
+Begin
+ J:=Length(N);
+ While (J>0) And (N[J]<>'.') And (N[J]<>'/') And (N[J]<>'\') Do Dec(J);
+ If (J>0) And (N[J]='.') Then E:=Copy(N,J+1,255) Else E:='';
+ For J:=1 To Length(E) Do If E[J] In ['A'..'Z'] Then E[J]:=Chr(Ord(E[J])+32);
+ O2ExtOf:=E;
+End;
+
+Function O2OutName: String;
+Var E: String;
+Begin
+ If O2OutFmtX<>'' Then Begin O2OutName:=O2OutFmtX; Exit; End;
+ E:=O2ExtOf(OutputPath);
+ O2OutName:=OutputFormat;
+ If (OutputFormat='mp4') Or (OutputFormat='mov') Or (OutputFormat='ipod') Or (OutputFormat='3gp') Or (OutputFormat='3g2') Or (OutputFormat='f4v') Then Begin
+  If E='mov' Then O2OutName:='mov' Else If E='mp4' Then O2OutName:='mp4' Else If (E='m4v') Or (E='m4a') Or (E='m4b') Then O2OutName:='ipod'
+  Else If E='3gp' Then O2OutName:='3gp' Else If E='3g2' Then O2OutName:='3g2' Else If E='f4v' Then O2OutName:='f4v';
+ End Else If (OutputFormat='png') Or (OutputFormat='bmp') Or (OutputFormat='jpg') Or (OutputFormat='jpeg') Or (OutputFormat='ppm') Or (OutputFormat='pgm') Or (OutputFormat='pbm') Or
+  (OutputFormat='pam') Or (OutputFormat='tga') Or (OutputFormat='targa') Or (OutputFormat='tif') Or (OutputFormat='tiff') Or (OutputFormat='sgi') Or (OutputFormat='xwd') Or (OutputFormat='pcx') Or (OutputFormat='pgmyuv') Then O2OutName:='image2'
+ Else If OutputFormat='mpeg' Then O2OutName:='mpeg'
+ Else If OutputFormat='mpegts' Then O2OutName:='mpegts';
+End;
+
+Function O2IsImage2: Boolean;
+Begin
+ O2IsImage2:=O2OutName='image2';
+End;
+
+{ erreur d'option en entree (avant -i) : 234 }
+Procedure O2CheckInputGroup;
+Var I,Id: Integer; Hp: String;
+Begin
+ { 1. options propres a ffmpeg appliquees a une entree }
+ For I:=0 To O2NEnts-1 Do If (O2Ents[I].Grp=0) Then Begin
+  Hp:='';
+  Case O2Ents[I].Kind Of
+   O2K_B: Hp:='b|video bitrate (please use -b:v)';
+   O2K_PASS: Hp:='pass|select the pass number (1 to 3)';
+   O2K_PASSLOG: Hp:='passlogfile|select two pass log file name prefix';
+   O2K_RCOVR: Hp:='rc_override|rate control override for specific intervals';
+   O2K_Q: Begin Hp:=O2Ents[I].Key; If O2Ents[I].Spec<>'' Then Hp:=Hp+':'+O2Ents[I].Spec; Hp:=Hp+'|use fixed quality scale (VBR)'; End;
+  End;
+  If Hp<>'' Then Begin
+   O2Msg('Option '+Copy(Hp,1,Pos('|',Hp)-1)+' ('+Copy(Hp,Pos('|',Hp)+1,255)+') cannot be applied to input url '+InputPath+' -- you are trying to apply an input option to an output file or vice versa. Move this option before the file it belongs to.');
+   O2Msg('Error parsing options for input file '+InputPath+'.');
+   O2Msg('Error opening input files: Invalid argument');
+   Halt(234);
+  End;
+ End;
+ For I:=0 To O2NEnts-1 Do If (O2Ents[I].Grp=0) And (O2Ents[I].Kind=O2K_ME) Then Begin
+  O2Msg('['+'in#0/'+O2InputName+' @ '+O2AdrDemux+'] Codec AVOption me_method (Set motion estimation method) is not a decoding option.');
+  O2Msg('Error opening input file '+InputPath+'.');
+  O2Msg('Error opening input files: Invalid argument');
+  Halt(234);
+ End;
+ { 2. options AVCodecContext : pas des options de decodage }
+ For I:=0 To O2NEnts-1 Do If (O2Ents[I].Grp=0) And (O2Ents[I].Kind=O2K_AVOPT) Then Begin
+  Id:=O2Ents[I].Id;
+  If (Id>=0) And Not O2Defs[Id].Dec Then Begin
+   O2Msg('['+'in#0/'+O2InputName+' @ '+O2AdrDemux+'] Codec AVOption '+O2Ents[I].Key+' ('+O2Defs[Id].Hlp+') is not a decoding option.');
+   O2Msg('Error opening input file '+InputPath+'.');
+   O2Msg('Error opening input files: Invalid argument');
+   Halt(234);
+  End;
+ End;
+End;
+
+Function O2Wm(Const C: String): Integer;
+Begin
+ If C='wmv2' Then O2Wm:=-1 Else O2Wm:=-22;
+End;
+
+{ ff_rate_control_init : analyse de rc_eq ; 0 ou code d'erreur }
+Function O2CheckRc(Const Cod,Pre: String): Integer;
+Var EqExpr: String; Rc: Integer;
+Begin
+ O2CheckRc:=0;
+ If O2RcEqSet Then EqExpr:=O2RcEq Else EqExpr:='tex^qComp';
+ O2ECtx.NC:=0;
+ O2ECtx.CNames[0]:='PI'; O2ECtx.CNames[1]:='E'; O2ECtx.CNames[2]:='iTex'; O2ECtx.CNames[3]:='pTex'; O2ECtx.CNames[4]:='tex'; O2ECtx.CNames[5]:='mv';
+ O2ECtx.CNames[6]:='fCode'; O2ECtx.CNames[7]:='iCount'; O2ECtx.CNames[8]:='mcVar'; O2ECtx.CNames[9]:='var'; O2ECtx.CNames[10]:='isI'; O2ECtx.CNames[11]:='isP';
+ O2ECtx.CNames[12]:='isB'; O2ECtx.CNames[13]:='avgQP'; O2ECtx.CNames[14]:='qComp'; O2ECtx.CNames[15]:='avgIITex'; O2ECtx.CNames[16]:='avgPITex';
+ O2ECtx.CNames[17]:='avgPPTex'; O2ECtx.CNames[18]:='avgBPTex'; O2ECtx.CNames[19]:='avgTex'; O2ECtx.NC:=20;
+ O2Func1Names[0]:='bits2qp'; O2Func1Names[1]:='qp2bits'; O2NFunc1:=2;
+ Rc:=O2ExprParse(@O2ECtx,EqExpr);
+ If Rc<0 Then Begin
+  If O2ECtx.Err<>'' Then O2Msg(Pre+'[Eval @ '+O2AdrEval+'] '+O2ECtx.Err);
+  O2Msg(Pre+'Error parsing rc_eq "'+EqExpr+'"');
+  O2CheckRc:=O2Wm(Cod);
+  Exit;
+ End;
+ If O2V(O2_QBLUR)>1.0 Then Begin O2Msg(Pre+'qblur too large'); O2CheckRc:=-1; Exit; End;
+End;
+
+{ codes de retour : 0 OK, <0 erreur de l'ouverture du codeur (messages deja affiches) }
+Function O2OpenEnc(Const Cod: String; HasSize: Boolean): Integer;
+Var
+ I,Id,Rc: Integer; M: String; BitRate,MaxRate,MinRate,Fps: Double; BufSize,MaxB,GopSz,Qmin,Qmax: Int64; TbN,TbD: Int64; Pre: String; Nbt: Double;
+ EqExpr: String; W,H: LongInt; Cap: Boolean;
+Begin
+ O2OpenEnc:=0; Pre:='['+Cod+' @ '+O2AdrCtx+'] ';
+ { 1. application des options (ordre du dictionnaire) }
+ For I:=0 To O2NEnts-1 Do If (O2Ents[I].Grp=1) And (O2Ents[I].Kind In [O2K_AVOPT,O2K_B]) And (O2Ents[I].Id>=0) Then Begin
+  Id:=O2Ents[I].Id;
+  If Not O2Defs[Id].Enc Then Continue;
+  If Not O2CodecHas(Id,Cod) Then Continue;
+  If O2MatchSpec(O2Ents[I].Spec,0)<>1 Then Continue;
+  If O2Defs[Id].Kind=4 Then Begin O2RcEq:=O2Ents[I].Val; O2RcEqSet:=True; O2Has[Id]:=True; Continue; End;
+  Rc:=O2SetNumber(Id,O2Ents[I].Val,M);
+  If Rc<0 Then Begin
+   O2Msg(M);
+   O2Msg(O2PrivPre(Id)+'Error setting option '+O2Ents[I].Key+' to value '+O2Ents[I].Val+'.');
+   O2OpenEnc:=Rc; Exit;
+  End;
+ End;
+ { 2. controles de ff_mpv_encode_init }
+ If Not O2IsMpv(Cod) Then Begin
+  If (Cod='snow') And (Not O2QScaleSet Or ((O2PassFlags And 2)<>0)) Then Begin
+   Rc:=O2CheckRc(Cod,Pre);
+   If Rc<0 Then O2OpenEnc:=Rc;
+  End;
+  Exit;
+ End;
+ BitRate:=O2V(O2_B); MaxRate:=O2V(O2_MAXRATE); MinRate:=O2V(O2_MINRATE);
+ BufSize:=Trunc(O2V(O2_BUFSIZE)); MaxB:=Trunc(O2V(O2_BF)); GopSz:=Trunc(O2V(O2_G));
+ Qmin:=Trunc(O2V(O2_QMIN)); Qmax:=Trunc(O2V(O2_QMAX));
+ If O2VFN>0 Then Begin TbN:=O2VFD; TbD:=O2VFN; End Else Begin TbN:=1; TbD:=25; End;
+ W:=O2VW; H:=O2VH;
+ If MaxB>16 Then Begin O2Msg(Pre+'Too many B-frames requested, maximum is 16.'); MaxB:=16; O2Val[O2_BF]:=16; End
+ Else If MaxB<0 Then Begin
+  O2Msg(Pre+'max b frames must be 0 or positive for mpegvideo based encoders'); O2OpenEnc:=O2Wm(Cod); Exit;
+ End;
+ Cap:=(Cod='mpeg1video') Or (Cod='mpeg2video') Or (Cod='mpeg4');
+ If (MaxB<>0) And Not Cap Then Begin O2Msg(Pre+'B-frames not supported by codec'); O2OpenEnc:=O2Wm(Cod); Exit; End;
+ If GopSz>600 Then Begin GopSz:=600; O2Val[O2_G]:=600; End;
+ If (MaxRate<>0) And (BufSize=0) Then Begin
+  If (Cod='mpeg1video') Or (Cod='mpeg2video') Then Begin
+   If MaxRate>15000000 Then BufSize:=Trunc(MaxRate) Else BufSize:=15000000;
+   BufSize:=(BufSize*112 Div 15000000)*16384;
+  End Else If (Cod='mpeg4') Or (Cod='msmpeg4v2') Or (Cod='msmpeg4') Then Begin
+   If MaxRate>=15000000 Then BufSize:=320+(Trunc(MaxRate)-15000000)*(760-320) Div (38400000-15000000)
+   Else If MaxRate>=2000000 Then BufSize:=80+(Trunc(MaxRate)-2000000)*(320-80) Div (15000000-2000000)
+   Else If MaxRate>=384000 Then BufSize:=40+(Trunc(MaxRate)-384000)*(80-40) Div (2000000-384000)
+   Else BufSize:=40;
+   BufSize:=BufSize*16384;
+  End;
+  O2Val[O2_BUFSIZE]:=BufSize;
+ End;
+ If (MaxRate=0)<>(BufSize=0) Then Begin
+  O2Msg(Pre+'Either both buffer size and max rate or neither must be specified'); O2OpenEnc:=O2Wm(Cod); Exit;
+ End;
+ If (MinRate<>0) And (MinRate>BitRate) Then Begin O2Msg(Pre+'bitrate below min bitrate'); O2OpenEnc:=O2Wm(Cod); Exit; End;
+ If (MaxRate<>0) And (MaxRate<BitRate) Then Begin O2Msg(Pre+'bitrate above max bitrate'); O2OpenEnc:=O2Wm(Cod); Exit; End;
+ If (BufSize<>0) And (BitRate*TbN>BufSize*TbD) Then Begin O2Msg(Pre+'VBV buffer too small for bitrate'); O2OpenEnc:=O2Wm(Cod); Exit; End;
+ If (O2QScaleSet=False) And (BitRate*(TbN*1.0/TbD)>O2V(O2_BT)) Then Begin
+  Nbt:=BitRate*(TbN*1.0/TbD)*5;
+  If Nbt<=2147483647 Then O2Val[O2_BT]:=Trunc(Nbt) Else O2Val[O2_BT]:=2147483647;
+ End;
+ If (Cod='h263') Or (Cod='h263p') Then
+  If HasSize And ((W>2048) Or (H>1152)) Then Begin O2Msg(Pre+'H.263 does not support resolutions above 2048x1152'); O2OpenEnc:=O2Wm(Cod); Exit; End;
+ If (Cod='h263') Or (Cod='h263p') Or (Cod='rv20') Then
+  If HasSize And (((W And 3)<>0) Or ((H And 3)<>0)) Then Begin O2Msg(Pre+'width and height must be a multiple of 4'); O2OpenEnc:=O2Wm(Cod); Exit; End;
+ If Cod='rv10' Then
+  If HasSize And (((W And 15)<>0) Or ((H And 15)<>0)) Then Begin O2Msg(Pre+'width and height must be a multiple of 16'); O2OpenEnc:=O2Wm(Cod); Exit; End;
+ If (Cod='wmv1') Or (Cod='wmv2') Then
+  If HasSize And ((W And 1)<>0) Then Begin O2Msg(Pre+'width must be multiple of 2'); O2OpenEnc:=O2Wm(Cod); Exit; End;
+ If (Qmin>Qmax) Or (Qmin<=0) Then Begin O2Msg(Pre+'qmin and or qmax are invalid, they must be 0 < min <= max'); O2OpenEnc:=O2Wm(Cod); Exit; End;
+ If (Cod='mpeg4') And (TbD>65535) Then Begin
+  O2Msg(Pre+'timebase '+IntToStrO2(TbN)+'/'+IntToStrO2(TbD)+' not supported by MPEG 4 standard, the maximum admitted value for the timebase denominator is 65535'); O2OpenEnc:=O2Wm(Cod); Exit;
+ End;
+ If Cod='h263' Then
+  If HasSize And Not (((W=128) And (H=96)) Or ((W=176) And (H=144)) Or ((W=352) And (H=288)) Or ((W=704) And (H=576)) Or ((W=1408) And (H=1152))) Then Begin
+   O2Msg(Pre+'The specified picture size of '+IntToStrO2(W)+'x'+IntToStrO2(H)+' is not valid for the H.263 codec.');
+   O2Msg('Valid sizes are 128x96, 176x144, 352x288, 704x576, and 1408x1152. Try H.263+.');
+   O2OpenEnc:=O2Wm(Cod); Exit;
+  End;
+ If O2V(O2_LMIN)>O2V(O2_LMAX) Then O2Val[O2_LMIN]:=O2V(O2_LMAX);
+ { 3. controle de debit : ff_rate_control_init }
+ Rc:=O2CheckRc(Cod,Pre);
+ If Rc<0 Then Begin O2OpenEnc:=Rc; Exit; End;
+End;
+
+{ nombre au sens de parse_number() de ffmpeg (cmdutils.c) ; retourne False et le message si invalide }
+Function O2ParseNumberOpt(Const Ctx,S: String; Var D: Double; Var Msg: String): Boolean;
+Var Nx: LongInt;
+Begin
+ O2ParseNumberOpt:=False; Msg:='';
+ D:=O2AvStrtod(S,1,Nx);
+ If Nx<=Length(S) Then Begin Msg:='Expected number for '+Ctx+' but found: '+S; Exit; End;
+ If (D<-2147483648.0) Or (D>2147483647.0) Then Begin
+  Msg:='The value for '+Ctx+' was '+S+' which is not within -2147483648.000000 - 2147483647.000000'; Exit;
+ End;
+ If Int(D)<>D Then Begin Msg:='Expected int64 for '+Ctx+' but found '+S; Exit; End;
+ O2ParseNumberOpt:=True;
+End;
+
+{ sscanf("%d,%d,%d") sur un segment }
+Function O2ScanInt(Const S: String; Var P: LongInt; Var V: LongInt): Boolean;
+Var Neg: Boolean; Any: Boolean; Acc: Int64;
+Begin
+ O2ScanInt:=False;
+ While (P<=Length(S)) And (S[P] In [' ',#9,#10,#13]) Do Inc(P);
+ Neg:=False;
+ If (P<=Length(S)) And ((S[P]='-') Or (S[P]='+')) Then Begin Neg:=S[P]='-'; Inc(P); End;
+ Any:=False; Acc:=0;
+ While (P<=Length(S)) And (S[P] In ['0'..'9']) Do Begin If Acc<20000000000 Then Acc:=Acc*10+Ord(S[P])-48; Any:=True; Inc(P); End;
+ If Not Any Then Exit;
+ If Neg Then Acc:=-Acc;
+ V:=LongInt(Acc And $FFFFFFFF);
+ O2ScanInt:=True;
+End;
+
+Var
+ O2OvN: LongInt;
+ O2OvS,O2OvE,O2OvQ: Array[0..63] Of LongInt;
+
+{ rc_override : "start,end,q[/start,end,q...]" ; retourne False si l'analyse echoue }
+Function O2ParseOverrides(Const S: String): Boolean;
+Var P: LongInt; A,B,C: LongInt;
+Begin
+ O2ParseOverrides:=False; O2OvN:=0; P:=1;
+ While True Do Begin
+  If Not O2ScanInt(S,P,A) Then Exit;
+  If (P>Length(S)) Or (S[P]<>',') Then Exit; Inc(P);
+  If Not O2ScanInt(S,P,B) Then Exit;
+  If (P>Length(S)) Or (S[P]<>',') Then Exit; Inc(P);
+  If Not O2ScanInt(S,P,C) Then Exit;
+  If O2OvN<64 Then Begin O2OvS[O2OvN]:=A; O2OvE[O2OvN]:=B; O2OvQ[O2OvN]:=C; Inc(O2OvN); End;
+  While (P<=Length(S)) And (S[P]<>'/') Do Inc(P);
+  If P>Length(S) Then Break;
+  Inc(P);
+ End;
+ O2ParseOverrides:=True;
+End;
+
+Procedure O2OutErr(Code: Integer);
+Begin
+ O2Msg('Error opening output file '+O2File+'.');
+ O2Msg('Error opening output files: '+O2StrErr(Code));
+ Halt(O2ExitOf(Code));
+End;
+
+Procedure O2ResetVals;
+Var I: Integer;
+Begin
+ For I:=0 To O2NDefs-1 Do Begin O2Val[I]:=O2Defs[I].Df; O2Has[I]:=False; End;
+ O2RcEq:=''; O2RcEqSet:=False;
+End;
+
+{ lit un fichier de statistiques de passe : contenu complet ou False }
+Var O2StatsIn: PEABuffer; O2StatsInLen: LongInt;
+Function O2ReadFileAll(Const Fn: String; Var Buf: PEABuffer; Var Len: LongInt): Boolean;
+Var F: File; N: LongInt; Sz: Int64;
+Begin
+ O2ReadFileAll:=False; Buf:=Nil; Len:=0;
+ Assign(F,Fn); {$I-} Reset(F,1); {$I+} If IOResult<>0 Then Exit;
+ Sz:=FileSize(F);
+ If Sz>200000000 Then Begin {$I-} Close(F); {$I+} If IOResult<>0 Then; Exit; End;
+ GetMem(Buf,Sz+16);
+ N:=0;
+ If Sz>0 Then Begin
+  {$I-} BlockRead(F,Buf^,Sz,N); {$I+} If IOResult<>0 Then N:=0;
+ End;
+ {$I-} Close(F); {$I+} If IOResult<>0 Then;
+ Buf^[Sz]:=0; Len:=Sz;
+ O2ReadFileAll:=True;
+End;
+
+
+
+{ echec de l'ouverture du codeur (messages standard de ffmpeg) puis sortie }
+Procedure O2FailOpen(Const Cod: String; Rc: Integer);
+Begin
+ O2Msg('[vost#0:0/'+Cod+' @ '+O2AdrOst+'] Error while opening encoder - maybe incorrect parameters such as bit_rate, rate, width or height.');
+ O2Msg('Error while filtering: '+O2StrErr(Rc));
+ O2Msg('[out#0/'+O2OutName+' @ '+O2AdrMux+'] Nothing was written into output file, because at least one of its streams received no packets.');
+ O2Die(O2ExitOf(Rc),Not O2IsImage2);
+End;
+
+{ ecrit le fichier de statistiques de la passe 1 }
+Procedure O2WriteLog(Buf: PEABuffer; Len: LongInt);
+Var F: File;
+Begin
+ If O2LogName='' Then Exit;
+ Assign(F,O2LogName); {$I-} Rewrite(F,1); {$I+} If IOResult<>0 Then Exit;
+ If Len>0 Then Begin {$I-} BlockWrite(F,Buf^,Len); {$I+} If IOResult<>0 Then; End;
+ {$I-} Close(F); {$I+} If IOResult<>0 Then;
+End;
+
+{ point d'entree : validation et resolution des options, avant l'encodage }
+Procedure O2Run(Const Inter: String);
+Var
+ I,Id,Rc: Integer; M,Cod,Fmt,Pre,S1: String; D: Double; Pm: Integer; HasSize,Consumer: Boolean; HasVid: Boolean;
+ LogPfx: String; PfxSet: Boolean; PassSet: Boolean;
+Begin
+ If O2Ran Then Exit;
+ O2Ran:=True;
+ O2InitDefs;
+ O2ResetVals;
+ O2CheckInputGroup;
+ If O2QErr<>'' Then Begin O2Msg(O2QErr); O2Msg('Error parsing options for output file '+O2File+'.'); O2Msg('Error opening output files: Invalid argument'); Halt(234); End;
+ If O2NEnts=0 Then Begin
+  O2Codec:=VideoCodec;
+  { aucune option : valeurs par defaut }
+  Exit;
+ End;
+ { options de sortie : analyse des nombres }
+ PassSet:=False; O2PassFlags:=0;
+ For I:=0 To O2NEnts-1 Do If (O2Ents[I].Grp=1) And (O2Ents[I].Kind=O2K_PASS) Then Begin
+  If Not O2ParseNumberOpt('pass',O2Ents[I].Val,D,M) Then Begin
+   O2Msg(M);
+   O2Msg('Error parsing options for output file '+O2File+'.');
+   O2Msg('Error opening output files: Invalid argument');
+   Halt(234);
+  End;
+ End;
+ Fmt:=OutputFormat;
+ Cod:=VideoCodec;
+ If Cod='' Then Cod:=O2DefCodec(Fmt);
+ O2Codec:=Cod;
+ HasVid:=Not NoVideo And (Cod<>'') And (Cod<>'copy');
+ If InputFormat='yuv4mpegpipe' Then Begin O2ReadY4MInfo(Inter); HasSize:=O2VW>0; End
+ Else Begin O2VW:=0; O2VH:=0; O2VFN:=25; O2VFD:=1; HasSize:=False; End;
+ { validation du flux video }
+ If HasVid Then Begin
+  { specificateurs de flux invalides }
+  For I:=0 To O2NEnts-1 Do If (O2Ents[I].Grp=1) And (O2Ents[I].Kind In [O2K_AVOPT,O2K_B]) And (O2Ents[I].Spec<>'') Then
+   If O2MatchSpec(O2Ents[I].Spec,0)<0 Then Begin
+    O2Msg('['+O2OutName+' @ '+O2AdrMux+'] Invalid stream specifier: '+O2Ents[I].Spec+'.');
+    O2Msg('    Last message repeated 1 times');
+    O2OutErr(-22);
+   End;
+  { rc_override }
+  O2OvN:=0;
+  For I:=0 To O2NEnts-1 Do If (O2Ents[I].Grp=1) And (O2Ents[I].Kind=O2K_RCOVR) And (O2MatchSpec(O2Ents[I].Spec,0)=1) Then Begin
+   O2RcOverr:=O2Ents[I].Val; O2RcOverrSet:=True;
+  End;
+  If O2RcOverrSet Then
+   If Not O2ParseOverrides(O2RcOverr) Then Begin
+    O2Msg('[vost#0:0/'+Cod+' @ '+O2AdrOst+'] error parsing rc_override');
+    O2OutErr(-22);
+   End;
+  { -pass / -passlogfile }
+  O2PassFlags:=0; PassSet:=False; PfxSet:=False; LogPfx:='';
+  For I:=0 To O2NEnts-1 Do If (O2Ents[I].Grp=1) And (O2MatchSpec(O2Ents[I].Spec,0)=1) Then Begin
+   If O2Ents[I].Kind=O2K_PASS Then Begin O2ParseNumberOpt('pass',O2Ents[I].Val,D,M); O2PassFlags:=Trunc(D); PassSet:=True; End;
+   If O2Ents[I].Kind=O2K_PASSLOG Then Begin LogPfx:=O2Ents[I].Val; PfxSet:=True; End;
+  End;
+  If PassSet And (O2PassFlags<>0) Then Begin
+   If PfxSet Then O2LogName:=LogPfx+'-0.log' Else O2LogName:='ffmpeg2pass-0.log';
+   If (O2PassFlags And 2)<>0 Then Begin
+    If Not O2ReadFileAll(O2LogName,O2StatsIn,O2StatsInLen) Then Begin
+     O2Msg('Error opening file '+O2LogName+'.');
+     O2Msg('[vost#0:0/'+Cod+' @ '+O2AdrOst+'] Error reading log file '''+O2LogName+''' for pass-2 encoding');
+     O2OutErr(-5);
+    End;
+   End;
+  End;
+ End;
+ { creation du fichier de statistiques de la passe 1 }
+ If HasVid And PassSet And ((O2PassFlags And 1)<>0) And (O2LogName<>'') Then O2WriteLog(Nil,0);
+ { options sans effet de codage : erreur }
+ For I:=0 To O2NEnts-1 Do If (O2Ents[I].Grp=1) And (O2Ents[I].Kind=O2K_AVOPT) And (O2Ents[I].Id>=0) Then
+  If Not O2Defs[O2Ents[I].Id].Enc Then Begin
+   O2Msg('[out#0/'+O2OutName+' @ '+O2AdrMux+'] Codec AVOption '+O2Ents[I].Key+' ('+O2Defs[O2Ents[I].Id].Hlp+') is not an encoding option.');
+   O2OutErr(-22);
+  End;
+ If Not HasVid Then Exit;
+ { ouverture du codeur }
+ Rc:=O2OpenEnc(Cod,HasSize);
+ If Rc<0 Then Begin
+  O2Msg('[vost#0:0/'+Cod+' @ '+O2AdrOst+'] Error while opening encoder - maybe incorrect parameters such as bit_rate, rate, width or height.');
+  O2Msg('Error while filtering: '+O2StrErr(Rc));
+  O2Msg('[out#0/'+O2OutName+' @ '+O2AdrMux+'] Nothing was written into output file, because at least one of its streams received no packets.');
+  O2Die(O2ExitOf(Rc),Not O2IsImage2);
+ End;
+ { variables historiques : seuls les codeurs concernes les consomment }
+ If Not ((Cod='mpeg4') Or (Cod='mpeg1video') Or (Cod='mpeg2video')) Then Begin HasBFrames:=False; HasBQuant:=False; End;
+ If Not ((Cod='mpeg4') Or (Cod='mpeg1video') Or (Cod='mpeg2video') Or (Cod='flv')) Then Begin HasVideoTolerance:=False; HasVideoBuffer:=False; End;
+ If Not ((Cod='mpeg4') Or (Cod='mpeg1video') Or (Cod='mpeg2video') Or (Cod='flv') Or (Cod='svq1') Or (Cod='snow') Or (Cod='wmv1') Or (Cod='wmv2') Or
+  (Cod='libtheora') Or (Cod='libx264') Or (Cod='dnxhd') Or (Cod='rv10') Or (Cod='rv20')) Then HasVideoBitrate:=False;
+End;
+
+{ ======================================================================== }
+{ Controle de debit : port de libavcodec/ratecontrol.c (ffmpeg 6.1.1)       }
+{ ======================================================================== }
+Const
+ O2P_I=1; O2P_P=2; O2P_B=3;
+ O2_QP2LAMBDA=118;
+Type
+ TO2Pred=Record Coeff,Count,Decay: Double; End;
+ TO2Rce=Record
+  PictType: LongInt;
+  Qscale: Single;
+  MvBits,ITexBits,PTexBits,MiscBits,HeaderBits: LongInt;
+  ExpectedBits: Int64;
+  NewPictType: LongInt;
+  NewQscale: Single;
+  McMbVarSum,MbVarSum: Int64;
+  ICount,SkipCount,FCode,BCode: LongInt;
+ End;
+ TO2RceTab=Array[0..999999] Of TO2Rce;
+ PO2RceTab=^TO2RceTab;
+ PO2Rce=^TO2Rce;
+Var
+ { parametres fournis par l'encodeur }
+ O2RMbNum,O2RMaxB,O2RGop: LongInt; O2RIntraOnly,O2RMpeg4,O2RLowDelay: Boolean;
+ O2RFpsN,O2RFpsD: LongInt; O2RBitRate: Int64;
+ O2RBitRateTol,O2RBufSize,O2RInitOcc: LongInt; O2RMaxRate,O2RMinRate: Int64;
+ O2RPass: LongInt;   { bit0 = passe 1, bit1 = passe 2 }
+ O2RQMin,O2RQMax,O2RLMin,O2RLMax: LongInt;
+ O2RQComp,O2RQBlur,O2RIQF,O2RIQO,O2RBQF,O2RBQO,O2RInitCplx,O2RQSquish,O2RQModAmp,O2RBufAggr,O2RMinVbv,O2RMaxVbv: Single;
+ O2RQDiff,O2RQModFreq: LongInt;
+ { etat }
+ O2RNumEntries: LongInt; O2REntry: PO2RceTab;
+ O2RBufIdx: Double; O2RPred: Array[0..4] Of TO2Pred;
+ O2RShortQs,O2RShortQc,O2RP1Eq,O2RP1Want,O2RLastQscale: Double;
+ O2RLastQFor: Array[0..4] Of Double;
+ O2RLastMcMb,O2RLastMb: Int64;
+ O2RICplx,O2RPCplx,O2RMvSum,O2RQsSum: Array[0..4] Of Int64;
+ O2RFrameCnt: Array[0..4] Of LongInt;
+ O2RLastNonB: LongInt;
+ O2RExpr: TO2Expr;
+ { entrees par image }
+ O2RPicType,O2RPicNum,O2RLastPicType,O2RFrameBits,O2RStuffBits,O2RFCode,O2RBCode,O2RQscaleCur: LongInt;
+ O2RMbVarSum,O2RMcMbVarSum,O2RTotalBits,O2RDtsPts: Int64; O2RDtsValid: Boolean;
+
+Function O2RFps: Double;
+Begin
+ If (O2RFpsN>0) And (O2RFpsD>0) Then O2RFps:=O2RFpsN/(O2RFpsD*1.0) Else O2RFps:=25;
+End;
+
+Function O2RQp2Bits(Var R: TO2Rce; Qp: Double): Double;
+Begin
+ If Qp<=0.0 Then O2Msg('qp<=0.0');
+ O2RQp2Bits:=Double(R.Qscale)*((R.ITexBits+R.PTexBits+1)*1.0)/Qp;
+End;
+
+Function O2RBits2Qp(Var R: TO2Rce; Bits: Double): Double;
+Begin
+ If Bits<0.9 Then O2Msg('bits<0.9');
+ O2RBits2Qp:=Double(R.Qscale)*((R.ITexBits+R.PTexBits+1)*1.0)/Bits;
+End;
+
+{ FFABS(float) du C }
+Function O2AbsS(S: Single): Single;
+Begin
+ If S<0 Then O2AbsS:=-S Else O2AbsS:=S;
+End;
+
+{ produit int*float du C (en simple precision) }
+Function O2IntMulF(I: LongInt; F: Single): Single;
+Var A,P: Single;
+Begin
+ A:=I; P:=A*F; O2IntMulF:=P;
+End;
+
+{ somme uint64 += float du C : l'addition se fait en simple precision }
+Procedure O2AddCplx(Var Sum: Int64; Prod: Single);
+Var A,T: Single;
+Begin
+ A:=Sum; T:=A+Prod;
+ If T<=0 Then Sum:=0 Else Sum:=Trunc(T);
+End;
+
+Function O2RDiffLimitedQ(Var R: TO2Rce; Q: Double): Double;
+Var PT: LongInt; LastPQ,LastNonBQ,LastQ: Double; MaxDiff: LongInt; A: Single;
+Begin
+ PT:=R.NewPictType;
+ LastPQ:=O2RLastQFor[O2P_P];
+ LastNonBQ:=O2RLastQFor[O2RLastNonB];
+ If (PT=O2P_I) And ((O2RIQF>0.0) Or (O2RLastNonB=O2P_P)) Then Begin
+  A:=O2AbsS(O2RIQF); Q:=LastPQ*Double(A)+Double(O2RIQO);
+ End Else If (PT=O2P_B) And (O2RBQF>0.0) Then
+  Q:=LastNonBQ*Double(O2RBQF)+Double(O2RBQO);
+ If Q<1 Then Q:=1;
+ If (O2RLastNonB=PT) Or (PT<>O2P_I) Then Begin
+  LastQ:=O2RLastQFor[PT];
+  MaxDiff:=LongInt((Int64(O2_QP2LAMBDA)*O2RQDiff) And $FFFFFFFF);
+  If Q>LastQ+MaxDiff Then Q:=LastQ+MaxDiff
+  Else If Q<LastQ-MaxDiff Then Q:=LastQ-MaxDiff;
+ End;
+ O2RLastQFor[PT]:=Q;
+ If PT<>O2P_B Then O2RLastNonB:=PT;
+ O2RDiffLimitedQ:=Q;
+End;
+
+Procedure O2RQMinMax(PT: LongInt; Var QMin,QMax: LongInt);
+Var T: Single; D: Double;
+Begin
+ QMin:=O2RLMin; QMax:=O2RLMax;
+ If PT=O2P_B Then Begin
+  T:=QMin; T:=T*O2AbsS(O2RBQF); T:=T+O2RBQO; D:=Double(T)+0.5; QMin:=Trunc(D);
+  T:=QMax; T:=T*O2AbsS(O2RBQF); T:=T+O2RBQO; D:=Double(T)+0.5; QMax:=Trunc(D);
+ End Else If PT=O2P_I Then Begin
+  T:=QMin; T:=T*O2AbsS(O2RIQF); T:=T+O2RIQO; D:=Double(T)+0.5; QMin:=Trunc(D);
+  T:=QMax; T:=T*O2AbsS(O2RIQF); T:=T+O2RIQO; D:=Double(T)+0.5; QMax:=Trunc(D);
+ End;
+ If QMin<1 Then QMin:=1 Else If QMin>32767 Then QMin:=32767;
+ If QMax<1 Then QMax:=1 Else If QMax>32767 Then QMax:=32767;
+ If QMax<QMin Then QMax:=QMin;
+End;
+
+Function O2RModifyQscale(Var R: TO2Rce; Q: Double; FrameNum: LongInt): Double;
+Var
+ BufferSize,Fps,MinRate,MaxRate,ExpectedSize,D,QLimit,Min2,Max2,V: Double; PT,QMin,QMax: LongInt;
+Begin
+ BufferSize:=O2RBufSize*1.0; Fps:=O2RFps;
+ MinRate:=O2RMinRate/Fps; MaxRate:=O2RMaxRate/Fps;
+ PT:=R.NewPictType;
+ O2RQMinMax(PT,QMin,QMax);
+ If (O2RQModFreq<>0) And ((FrameNum Mod O2RQModFreq)=0) And (PT=O2P_P) Then Q:=Q*Double(O2RQModAmp);
+ If O2RBufSize<>0 Then Begin
+  ExpectedSize:=O2RBufIdx;
+  If MinRate<>0 Then Begin
+   D:=2*(BufferSize-ExpectedSize)/BufferSize;
+   If D>1.0 Then D:=1.0 Else If D<0.0001 Then D:=0.0001;
+   Q:=Q*O2Pow(D,1.0/Double(O2RBufAggr));
+   V:=(MinRate-BufferSize+O2RBufIdx)*Double(O2RMinVbv);
+   If V<1 Then V:=1;
+   QLimit:=O2RBits2Qp(R,V);
+   If Q>QLimit Then Q:=QLimit;
+  End;
+  If MaxRate<>0 Then Begin
+   D:=2*ExpectedSize/BufferSize;
+   If D>1.0 Then D:=1.0 Else If D<0.0001 Then D:=0.0001;
+   Q:=Q/O2Pow(D,1.0/Double(O2RBufAggr));
+   V:=O2RBufIdx*Double(O2RMaxVbv);
+   If V<1 Then V:=1;
+   QLimit:=O2RBits2Qp(R,V);
+   If Q<QLimit Then Q:=QLimit;
+  End;
+ End;
+ If (O2RQSquish=0.0) Or (QMin=QMax) Then Begin
+  If Q<QMin Then Q:=QMin Else If Q>QMax Then Q:=QMax;
+ End Else Begin
+  Min2:=O2Log(QMin); Max2:=O2Log(QMax);
+  Q:=O2Log(Q);
+  Q:=(Q-Min2)/(Max2-Min2)-0.5;
+  Q:=Q*(-4.0);
+  Q:=1.0/(1.0+O2Exp(Q));
+  Q:=Q*(Max2-Min2)+Min2;
+  Q:=O2Exp(Q);
+ End;
+ O2RModifyQscale:=Q;
+End;
+
+Function O2RGetQscale(Var R: TO2Rce; RateFactor: Double; FrameNum: LongInt): Double;
+Var
+ PT,I: LongInt; MbNum,Q,Bits: Double; CV: Array[0..19] Of Double; Rf: Single;
+Begin
+ PT:=R.NewPictType;
+ MbNum:=O2RMbNum*1.0;
+ CV[0]:=O2_Pi; CV[1]:=O2_E;
+ CV[2]:=O2IntMulF(R.ITexBits,R.Qscale);
+ CV[3]:=O2IntMulF(R.PTexBits,R.Qscale);
+ CV[4]:=(R.ITexBits+R.PTexBits)*Double(R.Qscale);
+ CV[5]:=R.MvBits/MbNum;
+ If R.PictType=O2P_B Then CV[6]:=(R.FCode+R.BCode)*0.5 Else CV[6]:=R.FCode*1.0;
+ CV[7]:=R.ICount/MbNum;
+ CV[8]:=R.McMbVarSum/MbNum;
+ CV[9]:=R.MbVarSum/MbNum;
+ If R.PictType=O2P_I Then CV[10]:=1 Else CV[10]:=0;
+ If R.PictType=O2P_P Then CV[11]:=1 Else CV[11]:=0;
+ If R.PictType=O2P_B Then CV[12]:=1 Else CV[12]:=0;
+ CV[13]:=O2RQsSum[PT]/(O2RFrameCnt[PT]*1.0);
+ CV[14]:=Double(O2RQComp);
+ CV[15]:=O2RICplx[O2P_I]/(O2RFrameCnt[O2P_I]*1.0);
+ CV[16]:=O2RICplx[O2P_P]/(O2RFrameCnt[O2P_P]*1.0);
+ CV[17]:=O2RPCplx[O2P_P]/(O2RFrameCnt[O2P_P]*1.0);
+ CV[18]:=O2RPCplx[O2P_B]/(O2RFrameCnt[O2P_B]*1.0);
+ CV[19]:=(O2RICplx[PT]+O2RPCplx[PT])/(O2RFrameCnt[PT]*1.0);
+ For I:=0 To 19 Do O2RExpr.CVals[I]:=CV[I];
+ O2RceQscale:=R.Qscale; O2RceITex:=R.ITexBits; O2RcePTex:=R.PTexBits;
+ Bits:=O2ExprEval(@O2RExpr);
+ If O2IsNan(Bits) Then Begin
+  O2Msg('['+O2Codec+' @ '+O2AdrCtx+'] Error evaluating rc_eq "'+O2RcEq+'"');
+  O2RGetQscale:=-1; Exit;
+ End;
+ O2RP1Eq:=O2RP1Eq+Bits;
+ Bits:=Bits*RateFactor;
+ If Bits<0.0 Then Bits:=0.0;
+ Bits:=Bits+1.0;
+ { rc_override }
+ For I:=0 To O2OvN-1 Do Begin
+  If O2OvS[I]>FrameNum Then Continue;
+  If O2OvE[I]<FrameNum Then Continue;
+  If O2OvQ[I]>0 Then Bits:=O2RQp2Bits(R,O2OvQ[I]*1.0)
+  Else Begin
+   Rf:=(-O2OvQ[I])/100.0;
+   Bits:=Bits*Double(Rf);
+  End;
+ End;
+ Q:=O2RBits2Qp(R,Bits);
+ If (PT=O2P_I) And (O2RIQF<0.0) Then Q:=-Q*Double(O2RIQF)+Double(O2RIQO)
+ Else If (PT=O2P_B) And (O2RBQF<0.0) Then Q:=-Q*Double(O2RBQF)+Double(O2RBQO);
+ If Q<1 Then Q:=1;
+ O2RGetQscale:=Q;
+End;
+
+{ vbv : retourne le nombre d'octets de bourrage }
+Function O2RVbvUpdate(FrameSize: LongInt; Const Cod: String): LongInt;
+Var Fps,MinRate,MaxRate,T: Double; Left,Stuffing,Mn,Mx: LongInt; Pre: String;
+Begin
+ O2RVbvUpdate:=0;
+ Fps:=O2RFps;
+ MinRate:=O2RMinRate/Fps; MaxRate:=O2RMaxRate/Fps;
+ If O2RBufSize<>0 Then Begin
+  O2RBufIdx:=O2RBufIdx-FrameSize;
+  If O2RBufIdx<0 Then Begin
+   Pre:='['+Cod+' @ '+O2AdrCtx+'] ';
+   O2Msg(Pre+'rc buffer underflow');
+   If (FrameSize>MaxRate) And (O2RQscaleCur=O2RQMax) Then O2Msg(Pre+'max bitrate possibly too small or try trellis with large lmax or increase qmax');
+   O2RBufIdx:=0;
+  End;
+  Left:=O2Sat32(O2RBufSize-O2RBufIdx-1);
+  Mn:=O2Sat32(MinRate); Mx:=O2Sat32(MaxRate);
+  If Left<Mn Then Left:=Mn Else If Left>Mx Then Left:=Mx;
+  O2RBufIdx:=O2RBufIdx+Left;
+  If O2RBufIdx>O2RBufSize Then Begin
+   T:=(O2RBufIdx-O2RBufSize)/8; Stuffing:=Trunc(T); If Stuffing<T Then Inc(Stuffing);
+   If (Stuffing<4) And O2RMpeg4 Then Stuffing:=4;
+   O2RBufIdx:=O2RBufIdx-8*Stuffing;
+   O2RVbvUpdate:=Stuffing;
+  End;
+ End;
+End;
+
+Function O2RPredictSize(Var P: TO2Pred; Q,Var_: Double): Double;
+Begin
+ O2RPredictSize:=P.Coeff*Var_/(Q*P.Count);
+End;
+
+Procedure O2RUpdatePredictor(Var P: TO2Pred; Q,Var_,Size: Double);
+Var NewCoeff: Double;
+Begin
+ NewCoeff:=Size*Q/(Var_+1);
+ If Var_<10 Then Exit;
+ P.Count:=P.Count*P.Decay;
+ P.Coeff:=P.Coeff*P.Decay;
+ P.Count:=P.Count+1;
+ P.Coeff:=P.Coeff+NewCoeff;
+End;
+
+{ ---- ecriture / lecture des statistiques de passe 1 ---- }
+Function O2RStatsLine(PicIn,PicOut,PT,Quality,ITex,PTex,Mv,Misc,FCode,BCode: LongInt; McVar,Var_: Int64; ICount,SkipCount,HBits: LongInt): String;
+Var S: String;
+Function N(V: Int64): String; Var T: String; Begin Str(V,T); N:=T; End;
+Begin
+ S:='in:'+N(PicIn)+' out:'+N(PicOut)+' type:'+N(PT)+' q:'+N(Quality)+' itex:'+N(ITex)+' ptex:'+N(PTex)+' mv:'+N(Mv)+' misc:'+N(Misc)+
+  ' fcode:'+N(FCode)+' bcode:'+N(BCode)+' mc-var:'+N(McVar)+' var:'+N(Var_)+' icount:'+N(ICount)+' skipcount:'+N(SkipCount)+' hbits:'+N(HBits)+';'+#10;
+ If Length(S)>255 Then S:=Copy(S,1,255);
+ O2RStatsLine:=S;
+End;
+
+Function O2ScanTag(Const S: String; Var P: LongInt; Const Tag: String): Boolean;
+Var I: Integer;
+Begin
+ O2ScanTag:=False;
+ While (P<=Length(S)) And (S[P] In [' ',#9,#10,#13,#11,#12]) Do Inc(P);
+ For I:=1 To Length(Tag) Do Begin
+  If (P>Length(S)) Or (S[P]<>Tag[I]) Then Exit;
+  Inc(P);
+ End;
+ O2ScanTag:=True;
+End;
+
+Function O2ScanI64(Const S: String; Var P: LongInt; Var V: Int64): Boolean;
+Var Neg,Any: Boolean;
+Begin
+ O2ScanI64:=False;
+ While (P<=Length(S)) And (S[P] In [' ',#9,#10,#13,#11,#12]) Do Inc(P);
+ Neg:=False;
+ If (P<=Length(S)) And ((S[P]='-') Or (S[P]='+')) Then Begin Neg:=S[P]='-'; Inc(P); End;
+ Any:=False; V:=0;
+ While (P<=Length(S)) And (S[P] In ['0'..'9']) Do Begin V:=V*10+Ord(S[P])-48; Any:=True; Inc(P); End;
+ If Not Any Then Exit;
+ If Neg Then V:=-V;
+ O2ScanI64:=True;
+End;
+
+{ analyse d'une ligne de statistiques : retourne le nombre de conversions reussies (14 attendu) }
+Function O2RParseLine(Const S: String; Var PicNum: LongInt; Var R: TO2Rce): LongInt;
+Var P,Cnt: LongInt; V: Int64; F: Double; Nx: LongInt; T: String;
+Label Fin;
+Begin
+ Cnt:=0; P:=1;
+ If O2ScanTag(S,P,'in:') Then If O2ScanI64(S,P,V) Then Begin PicNum:=V; Cnt:=1; End;
+ If Cnt<1 Then Begin O2RParseLine:=0; Exit; End;
+ P:=1;
+ If Not O2ScanTag(S,P,'in:') Then Goto Fin;
+ If Not O2ScanI64(S,P,V) Then Goto Fin;
+ If Not O2ScanTag(S,P,'out:') Then Goto Fin;
+ If Not O2ScanI64(S,P,V) Then Goto Fin;
+ If Not O2ScanTag(S,P,'type:') Then Goto Fin;
+ If Not O2ScanI64(S,P,V) Then Goto Fin;
+ R.PictType:=V; Inc(Cnt);
+ If Not O2ScanTag(S,P,'q:') Then Goto Fin;
+ T:=Copy(S,P,255);
+ F:=O2Strtod(T,1,Nx);
+ If Nx=1 Then Goto Fin;
+ P:=P+Nx-1; R.Qscale:=F; Inc(Cnt);
+ If Not O2ScanTag(S,P,'itex:') Then Goto Fin;
+ If Not O2ScanI64(S,P,V) Then Goto Fin; R.ITexBits:=V; Inc(Cnt);
+ If Not O2ScanTag(S,P,'ptex:') Then Goto Fin;
+ If Not O2ScanI64(S,P,V) Then Goto Fin; R.PTexBits:=V; Inc(Cnt);
+ If Not O2ScanTag(S,P,'mv:') Then Goto Fin;
+ If Not O2ScanI64(S,P,V) Then Goto Fin; R.MvBits:=V; Inc(Cnt);
+ If Not O2ScanTag(S,P,'misc:') Then Goto Fin;
+ If Not O2ScanI64(S,P,V) Then Goto Fin; R.MiscBits:=V; Inc(Cnt);
+ If Not O2ScanTag(S,P,'fcode:') Then Goto Fin;
+ If Not O2ScanI64(S,P,V) Then Goto Fin; R.FCode:=V; Inc(Cnt);
+ If Not O2ScanTag(S,P,'bcode:') Then Goto Fin;
+ If Not O2ScanI64(S,P,V) Then Goto Fin; R.BCode:=V; Inc(Cnt);
+ If Not O2ScanTag(S,P,'mc-var:') Then Goto Fin;
+ If Not O2ScanI64(S,P,V) Then Goto Fin; R.McMbVarSum:=V; Inc(Cnt);
+ If Not O2ScanTag(S,P,'var:') Then Goto Fin;
+ If Not O2ScanI64(S,P,V) Then Goto Fin; R.MbVarSum:=V; Inc(Cnt);
+ If Not O2ScanTag(S,P,'icount:') Then Goto Fin;
+ If Not O2ScanI64(S,P,V) Then Goto Fin; R.ICount:=V; Inc(Cnt);
+ If Not O2ScanTag(S,P,'skipcount:') Then Goto Fin;
+ If Not O2ScanI64(S,P,V) Then Goto Fin; R.SkipCount:=V; Inc(Cnt);
+ If Not O2ScanTag(S,P,'hbits:') Then Goto Fin;
+ If Not O2ScanI64(S,P,V) Then Goto Fin; R.HeaderBits:=V; Inc(Cnt);
+Fin:
+ O2RParseLine:=Cnt;
+End;
+
+Type PO2D=^Double;
+Function O2DAt(Arr: PO2D; K: LongInt): Double; Begin O2DAt:=PO2D(PtrUInt(Arr)+K*8)^; End;
+Procedure O2DSet(Arr: PO2D; K: LongInt; V: Double); Begin PO2D(PtrUInt(Arr)+K*8)^:=V; End;
+
+{ ---- init_pass2 ---- }
+Function O2RInitPass2(Const Cod: String): Integer;
+Var
+ I,J,Toobig,FilterSize,Idx,PT: LongInt; Fps,AllAvail,RateFactor,ExpectedBits,Bits,Q,Sum,Coeff,D,StepD: Double;
+ ConstBits: Array[0..4] Of Int64; AllConst: Int64; Pre: String; Ent: PO2Rce; QA,BA: PO2D;
+Begin
+ Pre:='['+Cod+' @ '+O2AdrCtx+'] ';
+ Fps:=O2RFps;
+ FillChar(ConstBits,SizeOf(ConstBits),0);
+ AllAvail:=Int64(Trunc(O2RBitRate*(O2RNumEntries*1.0)/Fps));
+ RateFactor:=0;
+ FilterSize:=Trunc(O2RQBlur*4) Or 1;
+ ExpectedBits:=0;
+ For I:=0 To O2RNumEntries-1 Do Begin
+  Ent:=@O2REntry^[I];
+  Ent^.NewPictType:=Ent^.PictType;
+  O2AddCplx(O2RICplx[Ent^.PictType],O2IntMulF(Ent^.ITexBits,Ent^.Qscale));
+  O2AddCplx(O2RPCplx[Ent^.PictType],O2IntMulF(Ent^.PTexBits,Ent^.Qscale));
+  O2RMvSum[Ent^.PictType]:=O2RMvSum[Ent^.PictType]+Ent^.MvBits;
+  Inc(O2RFrameCnt[Ent^.PictType]);
+  ConstBits[Ent^.NewPictType]:=ConstBits[Ent^.NewPictType]+Ent^.MvBits+Ent^.MiscBits;
+ End;
+ AllConst:=ConstBits[O2P_I]+ConstBits[O2P_P]+ConstBits[O2P_B];
+ If AllAvail<AllConst Then Begin
+  O2Msg(Pre+'requested bitrate is too low');
+  O2RInitPass2:=-1; Exit;
+ End;
+ GetMem(QA,O2RNumEntries*8+16); GetMem(BA,O2RNumEntries*8+16);
+ Toobig:=0;
+ StepD:=256*256;
+ While StepD>0.0000001 Do Begin
+  ExpectedBits:=0;
+  RateFactor:=RateFactor+StepD;
+  O2RBufIdx:=(O2RBufSize Div 2)*1.0;
+  For I:=0 To O2RNumEntries-1 Do Begin
+   Ent:=@O2REntry^[I];
+   O2DSet(QA,I,O2RGetQscale(Ent^,RateFactor,I));
+   O2RLastQFor[Ent^.PictType]:=O2DAt(QA,I);
+  End;
+  If O2RNumEntries-300>0 Then Idx:=O2RNumEntries-300 Else Idx:=0;
+  For I:=Idx To O2RNumEntries-1 Do Begin
+   Ent:=@O2REntry^[I];
+   O2DSet(QA,I,O2RDiffLimitedQ(Ent^,O2DAt(QA,I)));
+  End;
+  For I:=O2RNumEntries-1 DownTo 0 Do Begin
+   Ent:=@O2REntry^[I];
+   O2DSet(QA,I,O2RDiffLimitedQ(Ent^,O2DAt(QA,I)));
+  End;
+  { lissage }
+  For I:=0 To O2RNumEntries-1 Do Begin
+   Ent:=@O2REntry^[I];
+   PT:=Ent^.NewPictType;
+   Q:=0.0; Sum:=0.0;
+   For J:=0 To FilterSize-1 Do Begin
+    Idx:=I+J-FilterSize Div 2;
+    D:=(Idx-I)*1.0;
+    If O2RQBlur=0 Then Coeff:=1.0 Else Coeff:=O2Exp(-D*D/(Double(O2RQBlur)*Double(O2RQBlur)));
+    If (Idx<0) Or (Idx>=O2RNumEntries) Then Continue;
+    If PT<>O2REntry^[Idx].NewPictType Then Continue;
+    Q:=Q+O2DAt(QA,Idx)*Coeff;
+    Sum:=Sum+Coeff;
+   End;
+   O2DSet(BA,I,Q/Sum);
+  End;
+  { bits attendus }
+  For I:=0 To O2RNumEntries-1 Do Begin
+   Ent:=@O2REntry^[I];
+   Ent^.NewQscale:=O2RModifyQscale(Ent^,O2DAt(BA,I),I);
+   Bits:=O2RQp2Bits(Ent^,Double(Ent^.NewQscale))+Ent^.MvBits+Ent^.MiscBits;
+   Bits:=Bits+8*O2RVbvUpdate(O2Sat32(Bits),Cod);
+   If ExpectedBits<0 Then Ent^.ExpectedBits:=0 Else Ent^.ExpectedBits:=Trunc(ExpectedBits);
+   ExpectedBits:=ExpectedBits+Bits;
+  End;
+  If ExpectedBits>AllAvail Then Begin
+   RateFactor:=RateFactor-StepD;
+   Inc(Toobig);
+  End;
+  StepD:=StepD*0.5;
+ End;
+ FreeMem(QA); FreeMem(BA);
+ If Toobig=40 Then Begin
+  O2Msg(Pre+'[lavc rc] Error: bitrate too low for this video with these parameters.');
+  O2RInitPass2:=-1; Exit;
+ End Else If (Toobig<>0) And (Abs(ExpectedBits/AllAvail-1.0)>0.01) Then Begin
+  O2Msg(Pre+'[lavc rc] Error: 2pass curve failed to converge');
+  O2RInitPass2:=-1; Exit;
+ End;
+ O2RInitPass2:=0;
+End;
+
+{ ---- ff_rate_control_init ; retourne 0 ou un code d'erreur negatif ---- }
+Function O2RInit(Const Cod: String): Integer;
+Var
+ I: LongInt; Pre: String; EqExpr: String; Rc: Integer; Cnt,PicNum: LongInt; Line: String;
+ Rce: TO2Rce; Bits: Double; Ent: PO2Rce; Tmp: TO2Rce; SemiPos,P: LongInt;
+ TextLen,Cur: LongInt; Txt: PEABuffer; Valid: Boolean; PosP: LongInt;
+Begin
+ Pre:='['+Cod+' @ '+O2AdrCtx+'] ';
+ O2RInit:=0;
+ If (O2RBufSize<>0) And (O2RMaxVbv=0) Then Begin
+  If O2RMaxRate<>0 Then Begin
+   O2RMaxVbv:=O2RMaxRate/(O2RBufSize*O2RFps);
+   If O2RMaxVbv<1.0/3 Then O2RMaxVbv:=1.0/3 Else If O2RMaxVbv>1.0 Then O2RMaxVbv:=1.0;
+  End Else O2RMaxVbv:=1.0;
+ End;
+ { expression }
+ If O2RcEqSet Then EqExpr:=O2RcEq Else EqExpr:='tex^qComp';
+ O2RExpr.NC:=0;
+ O2RExpr.CNames[0]:='PI'; O2RExpr.CNames[1]:='E'; O2RExpr.CNames[2]:='iTex'; O2RExpr.CNames[3]:='pTex'; O2RExpr.CNames[4]:='tex'; O2RExpr.CNames[5]:='mv';
+ O2RExpr.CNames[6]:='fCode'; O2RExpr.CNames[7]:='iCount'; O2RExpr.CNames[8]:='mcVar'; O2RExpr.CNames[9]:='var'; O2RExpr.CNames[10]:='isI'; O2RExpr.CNames[11]:='isP';
+ O2RExpr.CNames[12]:='isB'; O2RExpr.CNames[13]:='avgQP'; O2RExpr.CNames[14]:='qComp'; O2RExpr.CNames[15]:='avgIITex'; O2RExpr.CNames[16]:='avgPITex';
+ O2RExpr.CNames[17]:='avgPPTex'; O2RExpr.CNames[18]:='avgBPTex'; O2RExpr.CNames[19]:='avgTex'; O2RExpr.NC:=20;
+ O2Func1Names[0]:='bits2qp'; O2Func1Names[1]:='qp2bits'; O2NFunc1:=2;
+ Rc:=O2ExprParse(@O2RExpr,EqExpr);
+ If Rc<0 Then Begin O2RInit:=Rc; Exit; End;
+ For I:=0 To 4 Do Begin
+  O2RPred[I].Coeff:=O2_QP2LAMBDA*7.0; O2RPred[I].Count:=1.0; O2RPred[I].Decay:=0.4;
+  O2RICplx[I]:=1; O2RPCplx[I]:=1; O2RMvSum[I]:=1; O2RQsSum[I]:=1; O2RFrameCnt[I]:=1;
+  O2RLastQFor[I]:=O2_QP2LAMBDA*5;
+ End;
+ O2RBufIdx:=O2RInitOcc;
+ If O2RBufIdx=0 Then O2RBufIdx:=(Int64(O2RBufSize)*3) Div 4;
+ O2RLastQscale:=0; O2RLastMcMb:=0; O2RLastMb:=0; O2RLastNonB:=0;
+ O2RNumEntries:=0; O2REntry:=Nil;
+ If (O2RPass And 2)<>0 Then Begin
+  Txt:=O2StatsIn; TextLen:=O2StatsInLen;
+  { nombre d'images : for (i = -1; p; i++) p = strchr(p + 1, ';') }
+  Valid:=True; PosP:=0; I:=-1;
+  While Valid Do Begin
+   Cur:=PosP+1;
+   While (Cur<TextLen) And (Txt^[Cur]<>Ord(';')) Do Inc(Cur);
+   If Cur<TextLen Then PosP:=Cur Else Valid:=False;
+   Inc(I);
+  End;
+  I:=I+O2RMaxB;
+  If (I<=0) Or (I>=999999) Then Begin O2RInit:=-1; Exit; End;
+  O2RNumEntries:=I;
+  GetMem(O2REntry,Int64(I)*SizeOf(TO2Rce)+64);
+  FillChar(O2REntry^,Int64(I)*SizeOf(TO2Rce),0);
+  For I:=0 To O2RNumEntries-1 Do Begin
+   Ent:=@O2REntry^[I];
+   Ent^.PictType:=O2P_P; Ent^.NewPictType:=O2P_P;
+   Ent^.Qscale:=O2_QP2LAMBDA*2; Ent^.NewQscale:=O2_QP2LAMBDA*2;
+   Ent^.MiscBits:=O2RMbNum+10;
+   Ent^.MbVarSum:=Int64(O2RMbNum)*100;
+  End;
+  Cur:=0;
+  For I:=0 To O2RNumEntries-O2RMaxB-1 Do Begin
+   SemiPos:=Cur;
+   While (SemiPos<TextLen) And (Txt^[SemiPos]<>Ord(';')) Do Inc(SemiPos);
+   Line:='';
+   For P:=Cur To SemiPos-1 Do Begin If Length(Line)<250 Then Line:=Line+Chr(Txt^[P]); End;
+   FillChar(Tmp,SizeOf(Tmp),0);
+   PicNum:=0;
+   Cnt:=O2RParseLine(Line,PicNum,Tmp);
+   If Cnt<>14 Then Begin
+    O2Msg(Pre+'statistics are damaged at line '+IntToStrO2(I)+', parser out='+IntToStrO2(Cnt));
+    O2RInit:=-1; Exit;
+   End;
+   If (PicNum<0) Or (PicNum>=O2RNumEntries) Then Begin
+    O2RInit:=-1; Exit;
+   End;
+   O2REntry^[PicNum]:=Tmp;
+   If SemiPos<TextLen Then Cur:=SemiPos+1 Else Cur:=TextLen;
+  End;
+  Rc:=O2RInitPass2(Cod);
+  If Rc<0 Then Begin O2RInit:=-1; Exit; End;
+ End;
+ If (O2RPass And 2)=0 Then Begin
+  O2RShortQs:=0.001; O2RShortQc:=0.001; O2RP1Eq:=0.001; O2RP1Want:=0.001;
+  If O2RQBlur>1.0 Then Begin O2Msg(Pre+'qblur too large'); O2RInit:=-1; Exit; End;
+  If O2RInitCplx<>0 Then Begin
+   For I:=0 To 60*30-1 Do Begin
+    Bits:=Double(O2RInitCplx)*(I/10000.0+1.0)*O2RMbNum;
+    If (I Mod ((O2RGop+3) Div 4))=0 Then Rce.PictType:=O2P_I
+    Else If (I Mod (O2RMaxB+1))<>0 Then Rce.PictType:=O2P_B
+    Else Rce.PictType:=O2P_P;
+    Rce.NewPictType:=Rce.PictType;
+    Rce.McMbVarSum:=Trunc(Bits*O2RMbNum/100000);
+    Rce.MbVarSum:=O2RMbNum;
+    Rce.Qscale:=O2_QP2LAMBDA*2;
+    Rce.FCode:=2; Rce.BCode:=1; Rce.MiscBits:=1;
+    Rce.ICount:=0; Rce.ITexBits:=0; Rce.PTexBits:=Trunc(Bits*0.9); Rce.MvBits:=Trunc(Bits*0.1);
+    Rce.HeaderBits:=0; Rce.SkipCount:=0; Rce.ExpectedBits:=0; Rce.NewQscale:=0;
+    O2AddCplx(O2RICplx[Rce.PictType],O2IntMulF(Rce.ITexBits,Rce.Qscale));
+    O2AddCplx(O2RPCplx[Rce.PictType],O2IntMulF(Rce.PTexBits,Rce.Qscale));
+    O2RMvSum[Rce.PictType]:=O2RMvSum[Rce.PictType]+Rce.MvBits;
+    Inc(O2RFrameCnt[Rce.PictType]);
+    O2RGetQscale(Rce,O2RP1Want/O2RP1Eq,I);
+    O2RP1Want:=O2RP1Want+O2RBitRate/O2RFps;
+   End;
+  End;
+ End;
+End;
+
+{ ---- ff_rate_estimate_qscale ; retourne la qualite (lambda) ou <0 ---- }
+Function O2REstimate(DryRun: Boolean; Const Cod: String): Single;
+Var
+ Q: Single; QMin,QMax: LongInt; BrComp: Single; Diff,ShortTermQ,Fps,Bits,RateFactor: Double; PicNumber: LongInt; WantedBits: Int64;
+ LocalRce: TO2Rce; Rce: PO2Rce; PT: LongInt; LastVar: Int64; VarV: Int64; Qd,Tol: Double;
+Begin
+ PT:=O2RPicType; PicNumber:=O2RPicNum;
+ O2RQMinMax(PT,QMin,QMax);
+ Fps:=O2RFps;
+ If (PicNumber>2) And Not DryRun Then Begin
+  If O2RLastPicType=O2P_I Then LastVar:=O2RLastMb Else LastVar:=O2RLastMcMb;
+  O2RUpdatePredictor(O2RPred[O2RLastPicType],O2RLastQscale,Sqrt(LastVar*1.0),(O2RFrameBits-O2RStuffBits)*1.0);
+ End;
+ FillChar(LocalRce,SizeOf(LocalRce),0);
+ If (O2RPass And 2)<>0 Then Begin
+  If PicNumber>=O2RNumEntries Then Begin
+   O2Msg('Input is longer than 2-pass log file');
+   O2REstimate:=-1; Exit;
+  End;
+  Rce:=@O2REntry^[PicNumber];
+  WantedBits:=Rce^.ExpectedBits;
+ End Else Begin
+  Rce:=@LocalRce;
+  If Not O2RDtsValid Then WantedBits:=Trunc(O2RBitRate*(PicNumber*1.0)/Fps)
+  Else WantedBits:=Trunc(O2RBitRate*(O2RDtsPts*1.0)/Fps);
+ End;
+ Diff:=O2RTotalBits-WantedBits;
+ Tol:=O2RBitRateTol*1.0;
+ BrComp:=(O2RBitRateTol-Diff)/Tol;
+ If BrComp<=0.0 Then BrComp:=0.001;
+ If PT=O2P_I Then VarV:=O2RMbVarSum Else VarV:=O2RMcMbVarSum;
+ ShortTermQ:=0;
+ If (O2RPass And 2)<>0 Then Begin
+  Q:=Rce^.NewQscale/BrComp;
+ End Else Begin
+  Rce^.PictType:=PT; Rce^.NewPictType:=PT;
+  Rce^.McMbVarSum:=O2RMcMbVarSum; Rce^.MbVarSum:=O2RMbVarSum;
+  Rce^.Qscale:=O2_QP2LAMBDA*2;
+  Rce^.FCode:=O2RFCode; Rce^.BCode:=O2RBCode;
+  Rce^.MiscBits:=1;
+  Bits:=O2RPredictSize(O2RPred[PT],Double(Rce^.Qscale),Sqrt(VarV*1.0));
+  If PT=O2P_I Then Begin
+   Rce^.ICount:=O2RMbNum; Rce^.ITexBits:=Trunc(Bits); Rce^.PTexBits:=0; Rce^.MvBits:=0;
+  End Else Begin
+   Rce^.ICount:=0; Rce^.ITexBits:=0; Rce^.PTexBits:=Trunc(Bits*0.9); Rce^.MvBits:=Trunc(Bits*0.1);
+  End;
+  O2AddCplx(O2RICplx[PT],O2IntMulF(Rce^.ITexBits,Rce^.Qscale));
+  O2AddCplx(O2RPCplx[PT],O2IntMulF(Rce^.PTexBits,Rce^.Qscale));
+  O2RMvSum[PT]:=O2RMvSum[PT]+Rce^.MvBits;
+  Inc(O2RFrameCnt[PT]);
+  RateFactor:=O2RP1Want/O2RP1Eq*Double(BrComp);
+  Qd:=O2RGetQscale(Rce^,RateFactor,PicNumber);
+  Q:=Qd;
+  If Q<0 Then Begin O2REstimate:=-1; Exit; End;
+  Qd:=O2RDiffLimitedQ(Rce^,Double(Q));
+  Q:=Qd;
+  If (PT=O2P_P) Or O2RIntraOnly Then Begin
+   O2RShortQs:=O2RShortQs*Double(O2RQBlur);
+   O2RShortQc:=O2RShortQc*Double(O2RQBlur);
+   O2RShortQs:=O2RShortQs+Double(Q);
+   O2RShortQc:=O2RShortQc+1;
+   ShortTermQ:=O2RShortQs/O2RShortQc;
+   Q:=ShortTermQ;
+  End;
+  Qd:=O2RModifyQscale(Rce^,Double(Q),PicNumber);
+  Q:=Qd;
+  O2RP1Want:=O2RP1Want+O2RBitRate/Fps;
+ End;
+ If Q<QMin Then Q:=QMin Else If Q>QMax Then Q:=QMax;
+ Qd:=Double(Q)+0.5; Q:=Trunc(Qd);
+ If Not DryRun Then Begin
+  O2RLastQscale:=Q;
+  O2RLastMcMb:=O2RMcMbVarSum; O2RLastMb:=O2RMbVarSum;
+ End;
+ O2REstimate:=Q;
+End;
+
+{ charge les parametres de reglage dans le controle de debit }
+Procedure O2RLoadParams(MbNum: LongInt; FpsN,FpsD: LongInt);
+Begin
+ O2RMbNum:=MbNum; O2RFpsN:=FpsN; O2RFpsD:=FpsD;
+ O2RBitRate:=Trunc(O2V(O2_B)); O2RBitRateTol:=Trunc(O2V(O2_BT));
+ O2RBufSize:=Trunc(O2V(O2_BUFSIZE)); O2RMaxRate:=Trunc(O2V(O2_MAXRATE)); O2RMinRate:=Trunc(O2V(O2_MINRATE));
+ O2RInitOcc:=Trunc(O2V(O2_RCOCC));
+ O2RMaxB:=Trunc(O2V(O2_BF)); O2RGop:=Trunc(O2V(O2_G));
+ O2RQMin:=Trunc(O2V(O2_QMIN)); O2RQMax:=Trunc(O2V(O2_QMAX));
+ O2RLMin:=Trunc(O2V(O2_LMIN)); O2RLMax:=Trunc(O2V(O2_LMAX));
+ O2RQComp:=O2V(O2_QCOMP); O2RQBlur:=O2V(O2_QBLUR); O2RIQF:=O2V(O2_IQF); O2RIQO:=O2V(O2_IQO);
+ O2RBQF:=O2V(O2_BQF); O2RBQO:=O2V(O2_BQO); O2RInitCplx:=O2V(O2_RCINIT); O2RQSquish:=O2V(O2_QSQUISH);
+ O2RQModAmp:=O2V(O2_QMODAMP); O2RQModFreq:=Trunc(O2V(O2_QMODFREQ)); O2RBufAggr:=O2V(O2_BUFAGGR);
+ O2RMinVbv:=O2V(O2_RCMINVBV); O2RMaxVbv:=O2V(O2_RCMAXVBV);
+ O2RQDiff:=Trunc(O2V(O2_QDIFF));
+ O2RIntraOnly:=O2RGop<=1;
+ If O2RIntraOnly Then O2RGop:=12;
+End;
+
+{ ---- Snow : liaison avec le controle de debit generique ---- }
+Procedure O2SnwFps(N,D: LongInt);
+Begin
+ O2RFpsN:=N; O2RFpsD:=D;
+End;
+
+Procedure O2SnwInit;
+Begin
+ O2InitDefs;
+ O2RLoadParams(SnwMbNum,O2RFpsN,O2RFpsD);
+ O2RLMin:=Trunc(O2V(O2_MBLMIN)); O2RLMax:=Trunc(O2V(O2_MBLMAX));
+ O2RQSquish:=0; O2RQModAmp:=0; O2RQModFreq:=0; O2RBufAggr:=0; O2RInitCplx:=0; O2RMaxB:=0; O2RGop:=0;
+ O2RIntraOnly:=False; O2RLowDelay:=False; O2RMpeg4:=False; O2RPass:=0;
+ If (O2RBufSize<>0) And (O2RMaxRate<>0) Then Begin
+  O2RMaxVbv:=O2V(O2_RCMAXVBV);
+ End;
+ O2RInit('snow');
+End;
+
+Function O2SnwEstimate(DryRun: Boolean): Single;
+Var PtObj: LongInt;
+Begin
+ O2RPicType:=SnwPictType; O2RPicNum:=SnwPicNum; O2RLastPicType:=SnwLastPictType;
+ O2RFrameBits:=SnwFrameBits; O2RStuffBits:=0; O2RTotalBits:=SnwTotalBits;
+ O2RMbVarSum:=SnwMbVarSum; O2RMcMbVarSum:=SnwMcMbVarSum; O2RFCode:=1; O2RBCode:=0;
+ PtObj:=SnwLastPicObj;
+ If (PtObj<0) Or (SnwFrPts[PtObj]<0) Then O2RDtsValid:=False Else Begin O2RDtsValid:=True; O2RDtsPts:=SnwFrPts[PtObj]; End;
+ O2RQscaleCur:=0;
+ O2SnwEstimate:=O2REstimate(DryRun,'snow');
+End;
+
 { ==== BLOCK-ANCHOR-O2 : inserer le code du groupe O2 juste au-dessus de cette ligne ==== }
 
 { ==== BLOCK-ANCHOR-O3 : inserer le code du groupe O3 juste au-dessus de cette ligne ==== }
@@ -123319,10 +125907,10 @@ Begin
  OpenWrite(Target);
  PutTag('RIFF'); PutL32(0); PutTag('AVI ');
  If ExtraLen<>106 Then Fail('huffyuv: tables Huffman inattendues.');
- PutTag('LIST'); PutL32(4770); PutTag('hdrl');
- PutTag('avih'); PutL32(56); PutL32(Trunc(1000000.0*Scale/Rate)); PutL32(25000); PutL32(0); PutL32(2320); PutL32(0); PutL32(0); PutL32(1);
+ PutTag('LIST'); PutL32(4770+O2Jx-4120); PutTag('hdrl');
+ PutTag('avih'); PutL32(56); PutL32(Trunc(1000000.0*Scale/Rate)); PutL32(O2Bps); PutL32(0); PutL32(2320); PutL32(0); PutL32(0); PutL32(1);
  PutL32(1048576); PutL32(W); PutL32(Hh); PutL32(0); PutL32(0); PutL32(0); PutL32(0);
- PutTag('LIST'); PutL32(4426); PutTag('strl');
+ PutTag('LIST'); PutL32(4426+O2Jx-4120); PutTag('strl');
  PutTag('strh'); PutL32(56); PutTag('vids'); PutTag('HFYU');
  PutL32(0); PutL16(0); PutL16(0); PutL32(0); PutL32(Scale); PutL32(Rate); PutL32(0); PutL32(0); PutL32(0); PutL32(-1); PutL32(0);
  PutL16(0); PutL16(0); PutL16(W); PutL16(Hh);
@@ -123330,7 +125918,7 @@ Begin
  PutTag('HFYU'); PutL32(W*Hh*2); PutL32(0); PutL32(0); PutL32(0); PutL32(0);
  For I:=0 To ExtraLen-1 Do PutB(Extra[I]);
  If Odd(ExtraLen) Then PutB(0);
- PutTag('JUNK'); PutL32(4120); PutL16(4); PutL16(0); PutL32(0); PutTag('00dc'); PutZ(4120-12);
+ PutTag('JUNK'); PutL32(O2Jx); PutL16(4); PutL16(0); PutL32(0); PutTag('00dc'); PutZ(O2Jx-12);
  PutTag('vprp'); PutL32(68); PutL32(0); PutL32(0); PutL32((2*Rate+Scale-1) Div (2*Scale));
  PutL32(W); PutL32(Hh);
  Aw:=W; Ah:=Hh; G2:=Aw; K:=Ah; While K<>0 Do Begin I:=G2 Mod K; G2:=K; K:=I; End; Aw:=Aw Div G2; Ah:=Ah Div G2;
@@ -123426,16 +126014,17 @@ End;
 
 { Fourcc: 4 caracteres ; Rate/Scale: cadence reduite ; Bpp: bits par pixel declares ; Extra: donnees codec }
 Procedure AWBegin(Const Target,Fourcc: String; W,H,Rate,Scale,Bpp: LongInt; Extra: PEABuffer; ExtraLen: LongInt);
-Var I,Aw,Ah,G,K,Strf,Strl,Hdrl: LongInt;
+Var I,Aw,Ah,G,K,Strf,Strl,Hdrl,AWJx: LongInt;
 Begin
  OpenWrite(Target); AWUsed:=0; AWPos:=0; AWFrames:=0; AWMaxPk:=0; GetMem(AWSizes,1048576*4);
  Strf:=40+ExtraLen+(ExtraLen And 1);
  O1AviSar(O1AwSn,O1AwSd); O1AwHv:=(O1AwSn>0) And (O1AwSd>0);
- Strl:=4+(8+56)+(8+Strf)+(8+4120); If O1AwHv Then Strl:=Strl+(8+68);
+ If AWBpsOverride<>0 Then AWJx:=O2JxBR(Int64(AWBpsOverride)*8) Else AWJx:=O2Jx;
+ Strl:=4+(8+56)+(8+Strf)+(8+AWJx); If O1AwHv Then Strl:=Strl+(8+68);
  Hdrl:=4+(8+56)+(8+Strl)+(8+260);
  AWTag('RIFF'); AWL32(0); AWTag('AVI ');
  AWTag('LIST'); AWL32(Hdrl); AWTag('hdrl');
- AWTag('avih'); AWL32(56); AWL32(Trunc(1000000.0*Scale/Rate)); If AWBpsOverride<>0 Then AWL32(AWBpsOverride) Else AWL32(25000); AWL32(0); AWL32(2320); AWL32(0); AWL32(0); AWL32(1);
+ AWTag('avih'); AWL32(56); AWL32(Trunc(1000000.0*Scale/Rate)); If AWBpsOverride<>0 Then AWL32(AWBpsOverride) Else AWL32(O2Bps); AWL32(0); AWL32(2320); AWL32(0); AWL32(0); AWL32(1);
  AWL32(1048576); AWL32(W); AWL32(H); AWL32(0); AWL32(0); AWL32(0); AWL32(0);
  AWTag('LIST'); AWL32(Strl); AWTag('strl');
  AWTag('strh'); AWL32(56); AWTag('vids'); AWTag(Fourcc);
@@ -123445,7 +126034,7 @@ Begin
  AWTag(Fourcc); AWL32(W*H*Bpp Div 8); AWL32(0); AWL32(0); AWL32(0); AWL32(0);
  For I:=0 To ExtraLen-1 Do AWB(Extra^[I]);
  If Odd(ExtraLen) Then AWB(0);
- AWTag('JUNK'); AWL32(4120); AWL16(4); AWL16(0); AWL32(0); AWTag('00dc'); AWZ(4120-12);
+ AWTag('JUNK'); AWL32(AWJx); AWL16(4); AWL16(0); AWL32(0); AWTag('00dc'); AWZ(AWJx-12);
  If O1AwHv Then Begin
  AWTag('vprp'); AWL32(68); AWL32(0); AWL32(0); AWL32((2*Rate+Scale-1) Div (2*Scale));
  AWL32(W); AWL32(H);
@@ -134435,6 +137024,7 @@ Var
  { parametres }
  WEVer,WEW,WEH,WEMbW,WEMbH,WEPW,WEPH,WEMbStr,WEB8Str,WEGop,WEFpsN,WEFpsD: LongInt;
  WEBitRate: Int64; WEFixedQ: Boolean; WEGlobalQ: LongInt;
+ WELastBits,WEHdrBits,WEStuffBits: LongInt; WEVbvIgnore: Boolean;
  { image courante }
  WEPict,WEQscale,WELambda,WELambda2,WENoRnd,WEFCode: LongInt;
  WERlTab,WERlChrTab,WEDcTab,WEMvTab,WEInterIntra,WEUseSkip,WEEsc3L,WEEsc3R,WECbpTab: LongInt;
@@ -134701,13 +137291,15 @@ End;
 
 Procedure WEEncMbBits(Mx,My: LongInt);
 Var Cbp,CodedCbp,I,Val,Pred,Ix,Px,Py: LongInt;
+Procedure WAcct(Var Cat: LongInt);
+Begin Cat:=Cat+(WEBits-WELastBits); WELastBits:=WEBits; End;
 Begin
  If WEMbIntra=0 Then Begin
   Cbp:=0;
   For I:=0 To 5 Do If WELastIdx[I]>=0 Then Cbp:=Cbp Or (1 Shl (5-I));
   If WEVer<>5 Then Begin
    If (WEUseSkip<>0) And ((Cbp Or Mx Or My)=0) Then Begin
-    WEPut(1,1); Inc(WESkipCount); Exit;
+    WEPut(1,1); Inc(WESkipCount); WELastBits:=WEBits; Inc(WEMiscBits); Exit;
    End;
    If WEUseSkip<>0 Then WEPut(1,0);
    WEPut(MSNonIntra[(Cbp+64)*2+1],MSNonIntra[(Cbp+64)*2]);
@@ -134718,9 +137310,12 @@ Begin
     Else WEPut(W2Cbp2[(Cbp+64)*2+1],W2Cbp2[(Cbp+64)*2]);
    End;
   End;
+  WAcct(WEMiscBits);
   M4PredMotion(0,Px,Py);
   WEEncMotion(Mx-Px,My-Py);
+  WAcct(WEMvBits);
   For I:=0 To 5 Do WEEncBlock(I);
+  WAcct(WEPTexBits);
  End Else Begin
   Cbp:=0; CodedCbp:=0;
   For I:=0 To 5 Do Begin
@@ -134752,8 +137347,10 @@ Begin
    End;
    WEPut(1,0);
   End;
+  WAcct(WEMiscBits);
   For I:=0 To 5 Do WEEncBlock(I);
-  Inc(WEICount);
+  WAcct(WEITexBits);
+  If WEVer<>5 Then Inc(WEICount);
  End;
 End;
 
@@ -135299,10 +137896,11 @@ Begin
 End;
 
 Procedure WEUpdateQscale;
+Var QMx: LongInt;
 Begin
  WEQscale:=(WELambda*139+128*64) Shr 14;
- If WEQscale<2 Then WEQscale:=2;
- If WEQscale>31 Then WEQscale:=31;
+ If WEVbvIgnore Then QMx:=31 Else QMx:=O2RQMax;
+ If WEQscale<O2RQMin Then WEQscale:=O2RQMin Else If WEQscale>QMx Then WEQscale:=QMx;
  WELambda2:=(WELambda*WELambda+64) Shr 7;
 End;
 
@@ -135337,7 +137935,7 @@ Begin
  OpenWrite(Target); WEAU:=0; WEAP:=0; WEAN:=0; WEAMax:=0; GetMem(WEAS,1048576*4); GetMem(WEAKey,1048576);
  Strf:=40+ExtraLen+(ExtraLen And 1);
  Hv:=(SarN>0) And (SarD>0); Vp:=0; If Hv Then Vp:=8+68;
- Strl:=4+(8+56)+(8+Strf)+(8+4120)+Vp;
+ Strl:=4+(8+56)+(8+Strf)+(8+O2JxBR(BitRate))+Vp;
  Hdrl:=4+(8+56)+(8+Strl)+(8+260);
  WEAtag('RIFF'); WEAl32(0); WEAtag('AVI ');
  WEAtag('LIST'); WEAl32(Hdrl); WEAtag('hdrl');
@@ -135351,7 +137949,7 @@ Begin
  WEAtag(Fourcc); WEAl32(W*H*Bpp Div 8); WEAl32(0); WEAl32(0); WEAl32(0); WEAl32(0);
  For I:=0 To ExtraLen-1 Do WEAb(Extra^[I]);
  If Odd(ExtraLen) Then WEAb(0);
- WEAtag('JUNK'); WEAl32(4120); WEAl16(4); WEAl16(0); WEAl32(0); WEAtag('00dc'); WEAz(4120-12);
+ WEAtag('JUNK'); WEAl32(O2JxBR(BitRate)); WEAl16(4); WEAl16(0); WEAl32(0); WEAtag('00dc'); WEAz(O2JxBR(BitRate)-12);
  If Hv Then Begin
  WEAtag('vprp'); WEAl32(68); WEAl32(0); WEAl32(0); WEAl32((2*Rate+Scale-1) Div (2*Scale));
  WEAl32(W); WEAl32(H);
@@ -135525,6 +138123,7 @@ Var
  F,Pk,Fy,Fu,Fv: PEABuffer; Size,Cur,W,Hh,FN,FD,CW,CH,K,Code,FrameBytes,N,MbX,MbY,Xy,SarN,SarD,Rate,Scale,G2,I,J,Bytes,Intra,Mx,My,PkSize,NewPict,MbSz,Fbr: LongInt;
  Line,Token: String; Extra: Array[0..3] Of Byte; Br11: LongInt; ParOk: Boolean; TW: Int64; Quality: LongInt;
  EvTr: String; ExtLen: LongInt; Pict0: LongInt; Fps5: LongInt;
+ Retry: Boolean; NextLambda,MaxSize,MinStep,Stuffing: LongInt; Cod: String; V1,V2: Double; QS: Single; StatBuf: PEABuffer; StatLen: LongInt; StatLine: String; LogF: File;
 Function ReadLine: String;
 Var R: String;
 Begin
@@ -135570,9 +138169,14 @@ Begin
  WEVer:=Ver; WEW:=W; WEH:=Hh;
  WEFpsN:=FN; WEFpsD:=FD;
  { le debit de l'encodeur est reduit avec le rythme (framerate) : fps entier = num/den }
- If BrOpt>0 Then WEBitRate:=BrOpt Else WEBitRate:=200000;
+ If Ver=5 Then Cod:='wmv2' Else Cod:='wmv1';
+ O2InitDefs;
+ WEBitRate:=Trunc(O2V(O2_B));
  WEFixedQ:=QOpt>=0; WEGlobalQ:=QOpt*118;
- If GopOpt>=0 Then WEGop:=GopOpt Else WEGop:=12;
+ If WEFixedQ And O2QScaleSet Then WEGlobalQ:=Trunc(118*O2QScale);
+ O2RLoadParams(((W+15) Div 16)*((Hh+15) Div 16),FN,FD);
+ O2RPass:=O2PassFlags; O2RLowDelay:=True; O2RMpeg4:=False;
+ WEGop:=O2RGop; WEVbvIgnore:=False;
  If Ver>=4 Then WEMaxQ:=255 Else WEMaxQ:=127;
  M4MsStart(Ver,W,Hh,1,1,0,'');
  WEInitTables;
@@ -135587,7 +138191,10 @@ Begin
  WEOut:=Pk;
  FillChar(WEMap,SizeOf(WEMap),0); FillChar(WEScore,SizeOf(WEScore),0); WEGen:=0;
  WERcInit;
- WEPicInGop:=0; WELastPict:=0; WELastNonB:=0; WETotalBits:=0; WEFrameBits:=0; WENoRnd:=0; WEFCode:=1;
+ O2Codec:=Cod;
+ If O2RInit(Cod)<0 Then O2FailOpen(Cod,-1);
+ StatLen:=0; GetMem(StatBuf,4096*1024+16);
+ WEPicInGop:=0; WEStuffBits:=0; WELastPict:=0; WELastNonB:=0; WETotalBits:=0; WEFrameBits:=0; WENoRnd:=0; WEFCode:=1;
  For I:=0 To 4 Do WELastLambdaFor[I]:=0;
  WELambda:=0; WELambda2:=0; WERlTab:=0; WERlChrTab:=0; WEInterIntra:=0; WECbpTab:=0;
  FillChar(WEStat,SizeOf(WEStat),0);
@@ -135620,16 +138227,30 @@ Begin
   WEPicNum:=N;
   { choix du type d'image (select_input_picture) }
   Inc(WEPicInGop);
-  If (N=0) Or (WEGop<=1) Then WEPict:=WE_I
-  Else If WEPicInGop>=WEGop Then WEPict:=WE_I
-  Else WEPict:=WE_P;
+  If (N=0) Or O2RIntraOnly Then WEPict:=WE_I
+  Else Begin
+   WEPict:=WE_P;
+   If ((O2RPass And 2)<>0) And (N<O2RNumEntries) Then WEPict:=O2REntry^[N].NewPictType;
+   If WEPicInGop>=WEGop Then WEPict:=WE_I;
+   If WEPict<>WE_I Then WEPict:=WE_P;
+  End;
   WEPrepSrc(Fy,Fu,Fv);
   If WEPict=WE_I Then M4PType:=0 Else M4PType:=1;
   If Not M4FrameStart Then Fail('wmv: allocation d''image impossible.');
+  NextLambda:=0; WEVbvIgnore:=False;
+  Repeat
+  Retry:=False;
   { ---- encode_picture ---- }
   WEMbVarSum:=0; WEMcMbVarSum:=0; WESceneScore:=0;
   If WEPict=WE_I Then WENoRnd:=1 Else WENoRnd:=WENoRnd Xor 1;
-  If Not WEFixedQ Then Begin
+  If (O2RPass And 2)<>0 Then Begin
+   If NextLambda<>0 Then Quality:=NextLambda Else Begin
+    O2RPicType:=WEPict; O2RPicNum:=N; O2RLastPicType:=WELastPict; O2RFrameBits:=WEFrameBits; O2RStuffBits:=WEStuffBits; O2RTotalBits:=WETotalBits;
+    O2RMbVarSum:=WEMbVarSum; O2RMcMbVarSum:=WEMcMbVarSum; O2RFCode:=1; O2RBCode:=1; O2RDtsPts:=N; O2RDtsValid:=True; O2RQscaleCur:=WEQscale;
+    QS:=O2REstimate(True,Cod); If QS<0 Then O2FailOpen(Cod,-1); Quality:=Trunc(QS);
+   End;
+   WELambda:=Quality; WEUpdateQscale;
+  End Else If Not WEFixedQ Then Begin
    WELambda:=WELastLambdaFor[WELastNonB];
    WEUpdateQscale;
   End;
@@ -135669,7 +138290,12 @@ Begin
    End;
   End;
   { estimate_qp }
-  If Not WEFixedQ Then Quality:=WERcEstimate Else Quality:=WEGlobalQ;
+  If NextLambda<>0 Then Begin Quality:=NextLambda; NextLambda:=0; End
+  Else If Not WEFixedQ Then Begin
+   O2RPicType:=WEPict; O2RPicNum:=N; O2RLastPicType:=WELastPict; O2RFrameBits:=WEFrameBits; O2RStuffBits:=WEStuffBits; O2RTotalBits:=WETotalBits;
+   O2RMbVarSum:=WEMbVarSum; O2RMcMbVarSum:=WEMcMbVarSum; O2RFCode:=1; O2RBCode:=1; O2RDtsPts:=N; O2RDtsValid:=True; O2RQscaleCur:=WEQscale;
+   QS:=O2REstimate(False,Cod); If QS<0 Then O2FailOpen(Cod,-1); Quality:=Trunc(QS);
+  End Else Quality:=WEGlobalQ;
   WELambda:=Quality;
   WEUpdateQscale;
   If (WEQscale<3) And (WEMaxQ<=128) And (WEPict=WE_I) And Not WEFixedQ Then WEQscale:=3;
@@ -135677,7 +138303,8 @@ Begin
   If WETrace Then WriteLn(StdErr,'PIC n=',WEPicNum,' type=',WEPict,' lambda=',WELambda,' qscale=',WEQscale,' mbvar=',WEMbVarSum,' mcvar=',WEMcMbVarSum,' scene=',WESceneScore,' fcode=1 nornd=',WENoRnd);
   FillChar(Pk^,PkSize,0); WEBits:=0;
   If Ver=5 Then WEHeaderWmv2 Else WEHeaderMs;
-  WEMvBits:=0; WEICount:=0; WESkipCount:=0;
+  WEHdrBits:=WEBits; WELastBits:=WEBits;
+  WEMvBits:=0; WEICount:=0; WESkipCount:=0; WEMiscBits:=0; WEITexBits:=0; WEPTexBits:=0;
   M4NoRnd:=WENoRnd;
   M4PType:=0; If WEPict=WE_P Then M4PType:=1;
   M4RlIdx:=WERlTab; M4RlChrIdx:=WERlChrTab; M4DcIdx:=WEDcTab; M4MvIdx:=WEMvTab; M4InterIntra:=WEInterIntra;
@@ -135694,14 +138321,37 @@ Begin
     WEEncodeMb(MbX,MbY,Intra,Mx,My);
    End;
   End;
+  If (O2RPass And 1)<>0 Then Inc(WEMiscBits,((WEBits+7) And (Not 7))-WELastBits);
   If (Ver=3) And (WEPict=WE_I) Then WEExtHeader;
   Bytes:=(WEBits+7) Div 8;
   If Bytes>=PkSize-4 Then Fail('wmv: tampon de sortie insuffisant.');
-  WEFrameBits:=Bytes*8;
-  WETotalBits:=WETotalBits+WEFrameBits;
-  If WETrace Then WriteLn(StdErr,'FRAME bits=',WEFrameBits,' total=',WETotalBits-WEFrameBits);
   { frame_end }
   WELastPict:=WEPict; WELastLambdaFor[WEPict]:=Quality; WELastNonB:=WEPict;
+  { reencodage VBV }
+  If O2RBufSize<>0 Then Begin
+   V1:=O2RBufIdx*Double(O2RMaxVbv); V2:=O2RBufIdx-500; If V1<V2 Then V1:=V2;
+   MaxSize:=O2Sat32(V1);
+   If O2V(O2_MBD)=2 Then MinStep:=1 Else MinStep:=(1 Shl 14) Div 139;
+   If (WEBits>MaxSize) And (WELambda<O2RLMax) Then Begin
+    NextLambda:=WELambda+MinStep;
+    If (WELambda*(WEQscale+1)) Div WEQscale>NextLambda Then NextLambda:=(WELambda*(WEQscale+1)) Div WEQscale;
+    If WEPict=WE_P Then WENoRnd:=WENoRnd Xor 1;
+    WEVbvIgnore:=True; Retry:=True;
+   End;
+  End;
+  Until Not Retry;
+  If WETrace Then WriteLn(StdErr,'FRAME bits=',WEBits);
+  { statistiques de la passe 1 }
+  If (O2RPass And 1)<>0 Then Begin
+   StatLine:=O2RStatsLine(N,N,WEPict,Quality,WEITexBits,WEPTexBits,WEMvBits,WEMiscBits,1,1,WEMcMbVarSum,WEMbVarSum,WEICount,WESkipCount,WEHdrBits);
+   If StatLen+Length(StatLine)<4096*1024 Then Begin Move(StatLine[1],StatBuf^[StatLen],Length(StatLine)); Inc(StatLen,Length(StatLine)); End;
+  End;
+  WEFrameBits:=Bytes*8;
+  O2RQscaleCur:=WEQscale;
+  Stuffing:=O2RVbvUpdate(WEFrameBits,Cod);
+  WEStuffBits:=8*Stuffing;
+  If Stuffing<>0 Then Begin O2Msg('['+Cod+' @ '+O2AdrCtx+'] vbv buffer overflow'); WEStuffBits:=0; End;
+  WETotalBits:=WETotalBits+WEFrameBits;
   WEMakeRef;
   If WEPict=WE_I Then K:=1 Else K:=0;
   WEAviFrame(Pk,Bytes,K);
@@ -135709,6 +138359,7 @@ Begin
  End;
  If N=0 Then Fail('wmv: aucune image Y4M.');
  WEAviEnd;
+ If (O2RPass And 1)<>0 Then O2WriteLog(StatBuf,StatLen);
  FreeMem(Pk,PkSize);
  CloseRead;
 End;
@@ -147474,6 +150125,7 @@ BEGIN
   Else If Argument='-y' Then Overwrite:=True Else
   If Argument='-n' Then NoOverwrite:=True Else
   If Argument='-hide_banner' Then HideBanner:=True Else
+  If O2Parse(Argument,I) Then Begin If O2GSet Then Begin X4Gop:=O2GLegacy; RqGop:=O2GLegacy+1; SnwGopC:=O2GLegacy; O2GSet:=False; End; End Else { O2 }
   If F5IsOpt(Argument) Then F5SetOpt(Argument,NextArgument) Else
   If Argument='-pix_fmt' Then OptPixFmt:=Lower(NextArgument) Else
   If Argument='-filter_threads' Then Begin Value:=NextArgument; Val(Value,Number,Code); If (Code<>0) Or (Number<0) Then Fail('-filter_threads: entier >= 0 requis.'); If Number=0 Then NVFilterThreads:=-1 Else NVFilterThreads:=Number; End Else
@@ -147535,13 +150187,7 @@ BEGIN
   If (Argument='-q:a') Or (Argument='-qscale:a') Then VGSetQScale(NextArgument) Else
   If ((Argument='-fflags') Or (Argument='-flags')) And (InputPath<>'') Then VGSetFlags(NextArgument,Argument='-fflags') Else
   If (Argument='-q:v') Or (Argument='-qscale:v') Then Begin
-   Value:=NextArgument; Val(Value,Number,Code);
-   If (Code<>0) Or (Number<0) Or (Number>31) Then Begin
-    Val(Value,QvE,Code);
-    If (Code<>0) Or (QvE<0) Or (QvE>1000) Then Fail(Argument+': 0..31 attendu (0..10 pour libtheora).');
-    SnwQvFrac:=True; SnwQvF:=QvE; Number:=Trunc(QvE);
-   End Else Begin SnwQvF:=Number; SnwQvFrac:=False; End;
-   THQuality:=Number;
+   THQuality:=O2QIn(NextArgument); { O2 }
   End Else
   If (Argument='-crf') Or (Argument='-qp') Or (Argument='-g') Or (Argument='-preset') Or (Argument='-tune') Then Begin
    Value:=NextArgument;
@@ -147781,6 +150427,7 @@ BEGIN
   Temps[2]:=NewTemporary; F1AssConvert(Intermediate,Temps[2]); Commit(Temps[2]); Temps[2]:=''; WriteLn('Sortie creee: ',OutputPath); Halt(0);
  End;
  If OutputFormat='' Then OutputFormat:=FormatName(Extension(OutputPath));
+ O2Run(Intermediate); { O2 }
  If (OutputFormat='matroska') Or (OutputFormat='webm') Or (OutputFormat='nut') Then F4MainMkv; { F4 }
  If (InputFormat='webm') Or (InputFormat='nut') Then F4MkvDemux(Intermediate); { F4 }
  F5Sink:=''; If Not IsHTTP(InputPath) Then F5Sink:=F5Take; If F5Sink<>'' Then F5Run(F5Sink,Intermediate);
