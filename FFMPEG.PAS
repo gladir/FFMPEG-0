@@ -97027,7 +97027,7 @@ End;
 { ---------- front-end ---------- }
 Function F3IsEsFmt(Const S: String): Boolean;
 Begin
- F3IsEsFmt:=(S='mpeg1video') Or (S='mpeg2video') Or (S='h264') Or (S='ac3') Or (S='eac3') Or (S='mp2');
+ F3IsEsFmt:=(S='mpeg1video') Or (S='mpeg2video') Or (S='h264') Or (S='ac3') Or (S='eac3') Or (S='mp2') Or (S='dirac');
 End;
 Function F3EsKind(Const S: String): LongInt;
 Begin
@@ -97552,7 +97552,7 @@ Type
   PayPts,PayDts: Int64; PayKey: Boolean; Pay: F3PBuf;
   PcrPeriod,LastPcr: Int64; AcDesc: Boolean;
  End;
- F3TSect=Record Pid,Cc: LongInt; End;
+ F3TSect=Record Pid,Cc: LongInt; Disc: Boolean; End;
 Var
  F3TS: Array[0..F3MaxStr-1] Of F3TTSS;
  F3TSPat,F3TSSdt,F3TSNit,F3TSPmt: F3TSect;
@@ -97569,7 +97569,7 @@ Var
  F3TSPcrPeriodMs: LongInt;
  F3TSOmitVidLen: Boolean;
  F3TSTablesVer: LongInt;
- F3TSMuxRate: LongInt;
+ F3TSMuxRate: LongInt; F3TSNextPcr: Int64; F3UM2ts,F3UCopyTs: LongInt;
  F3TSCrc: Array[0..255] Of LongWord; F3TSCrcInit: Boolean;
  F3TSM2Vid,F3TSM2Aud,F3TSM2Pgs,F3TSM2Txt: LongInt;
  F3UTsId,F3UOnId,F3USid,F3USvc,F3UPmt,F3UStart,F3UPes,F3UPat,F3USdt,F3UNit,F3UPcr,F3UOmit,F3UVer: Int64;
@@ -97619,6 +97619,7 @@ Begin
   Pk[Q]:=B; Inc(Q); Pk[Q]:=S.Pid And 255; Inc(Q);
   S.Cc:=(S.Cc+1) And 15;
   Pk[Q]:=$10 Or S.Cc; Inc(Q);
+  If S.Disc Then Begin Pk[Q-1]:=Pk[Q-1] Or $20; Pk[Q]:=1; Inc(Q); Pk[Q]:=$80; Inc(Q); S.Disc:=False; End;
   If First=1 Then Begin Pk[Q]:=0; Inc(Q); End;
   Len1:=188-Q; If Len1>Len Then Len1:=Len;
   Move(Buf[BP],Pk[Q],Len1); Inc(Q,Len1);
@@ -97891,7 +97892,7 @@ End;
 Procedure F3TSWritePes(S: LongInt; Payload: F3PBuf; PayOff: LongInt; PaySize: LongInt; Pts,Dts: Int64; Key: Boolean; SId: LongInt);
 Var
  Buf: Array[0..187] Of Byte; Q,Val,IsStart,Len,HeaderLen,Flags,AfcLen,StuffLen,K: LongInt; WritePcr,Ext: Boolean;
- Delay,Pcr,Next: Int64; ForcePat,ForceSdt,ForceNit: Boolean; PesExt: Boolean; Stuff: LongInt; First: Boolean;
+ Delay,Pcr,Next,NextP: Int64; ForcePat,ForceSdt,ForceNit: Boolean; PesExt: Boolean; Stuff: LongInt; First: Boolean; I2,S2: LongInt;
  Cd: String;
 Begin
  Delay:=F3Resc(F3TSMaxDelay,90000,1000000);
@@ -97911,8 +97912,25 @@ Begin
   ForcePat:=False; ForceSdt:=False; ForceNit:=False;
   WritePcr:=False;
   If F3TSMuxRate>1 Then Begin
-   { mode CBR non utilise : le PCR est derive du debit }
    Pcr:=F3TSGetPcr;
+   If Pcr>=F3TSNextPcr Then Begin
+    NextP:=High(Int64);
+    For I2:=0 To F3NO-1 Do Begin
+     If I2<S Then S2:=I2 Else If I2+1=F3NO Then S2:=S Else S2:=I2+1;
+     If F3TS[S2].PcrPeriod<>0 Then Begin
+      If Pcr-F3TS[S2].LastPcr>=F3TS[S2].PcrPeriod Then Begin
+       F3TS[S2].LastPcr:=F3Max64(Pcr-F3TS[S2].PcrPeriod,F3TS[S2].LastPcr+F3TS[S2].PcrPeriod);
+       If S2<>S Then Begin F3TSPcrOnly(S2); Pcr:=F3TSGetPcr; End Else WritePcr:=True;
+      End;
+      If F3TS[S2].LastPcr+F3TS[S2].PcrPeriod<NextP Then NextP:=F3TS[S2].LastPcr+F3TS[S2].PcrPeriod;
+     End;
+    End;
+    F3TSNextPcr:=NextP;
+   End;
+   If (Dts<>F3NoPts) And ((Dts-Pcr Div 300)>Delay) Then Begin
+    If WritePcr Then F3TSPcrOnly(S) Else F3TSNullPkt;
+    Continue;
+   End;
   End Else If (F3TS[S].PcrPeriod<>0) And (Pcr<>F3NoPts) Then Begin
    If (Pcr-F3TS[S].LastPcr>=F3TS[S].PcrPeriod) And First Then Begin
     F3TS[S].LastPcr:=F3Max64(Pcr-F3TS[S].PcrPeriod,F3TS[S].LastPcr+F3TS[S].PcrPeriod);
@@ -98045,8 +98063,10 @@ Begin
  If (Not F3TSFirstDts) And (Dts<>F3NoPts) Then Begin
   Inc(F3TSFirstPcr,Dts*300); F3TSFirstDts:=True;
  End;
- If Pts<>F3NoPts Then Inc(Pts,Delay);
- If Dts<>F3NoPts Then Inc(Dts,Delay);
+ If F3UCopyTs<1 Then Begin
+  If Pts<>F3NoPts Then Inc(Pts,Delay);
+  If Dts<>F3NoPts Then Inc(Dts,Delay);
+ End;
  If (Not F3TS[S].FirstChecked) And ((Pts=F3NoPts) Or (Dts=F3NoPts)) Then Begin
   WriteLn(StdErr,'[mpegts] first pts and dts value must be set'); F3MxErr:=True; Exit;
  End;
@@ -98141,11 +98161,13 @@ Begin
   F3TSPmtPid0:=$100;
   F3TSM2Vid:=$1011; F3TSM2Aud:=$1100; F3TSM2Pgs:=$1200; F3TSM2Txt:=$1800;
  End;
- F3TSMuxRate:=1; F3TSPcrPeriodMs:=-1; F3TSOmitVidLen:=True;
+ F3TSMuxRate:=1; F3TSNextPcr:=0; F3TSPcrPeriodMs:=-1; F3TSOmitVidLen:=True;
+ If F3PSUserRate>1 Then F3TSMuxRate:=F3PSUserRate;
  If F3UPcr>=0 Then F3TSPcrPeriodMs:=F3UPcr;
  If F3UOmit=0 Then F3TSOmitVidLen:=False;
  If F3UStart>=0 Then F3TSStartPid:=F3UStart;
  If F3UPmt>=0 Then F3TSPmtPid0:=F3UPmt;
+ F3TSPat.Disc:=(F3TSFlags And $10)<>0; F3TSSdt.Disc:=F3TSPat.Disc; F3TSNit.Disc:=F3TSPat.Disc; F3TSPmt.Disc:=F3TSPat.Disc;
  F3TSPat.Pid:=0; F3TSPat.Cc:=15; F3TSSdt.Pid:=$11; F3TSSdt.Cc:=15; F3TSNit.Pid:=$10; F3TSNit.Cc:=15;
  F3TSPmt.Pid:=F3TSPmtPid0; F3TSPmt.Cc:=15;
  For I:=0 To F3NO-1 Do Begin
@@ -98159,12 +98181,12 @@ Begin
    End;
   End Else F3TS[I].Pid:=F3TSStartPid+I;
   For J:=0 To I-1 Do If F3TS[J].Pid=F3TS[I].Pid Then Fail('mpegts: Duplicate stream id');
-  F3TS[I].PayPts:=F3NoPts; F3TS[I].PayDts:=F3NoPts; F3TS[I].Cc:=15;
+  F3TS[I].PayPts:=F3NoPts; F3TS[I].PayDts:=F3NoPts; F3TS[I].Cc:=15; F3TS[I].Disc:=(F3TSFlags And $10)<>0;
  End;
  If F3TSProvRaw='' Then F3TSProvRaw:='FFmpeg';
  If F3TSNameRaw='' Then F3TSNameRaw:='Service01';
  F3TSProv:=F3TSEnc8(F3TSProvRaw); F3TSName:=F3TSEnc8(F3TSNameRaw);
- F3TSFirstPcr:=F3Resc(F3TSMaxDelay,27000000,1000000);
+ If F3UCopyTs<1 Then F3TSFirstPcr:=F3Resc(F3TSMaxDelay,27000000,1000000) Else F3TSFirstPcr:=0;
  F3TSPcrSelect;
  F3TSLastPat:=F3NoPts; F3TSLastSdt:=F3NoPts; F3TSLastNit:=F3NoPts;
  F3TSPatPer:=F3Resc(100000,27000000,1000000);
@@ -99030,7 +99052,7 @@ Type
  F3TFrm=Record
   Off,Len,PicOff: Int64; Chunk: LongInt;      { debut, taille, debut de l'image (mpeg), segment d'achevement }
   Pict,Rep: LongInt; Key: Boolean;
-  Pts,Dts,Dur: Int64; DurNum,DurDen: Int64; RPts,RDts: Int64; Hb: LongInt; Mp2: Boolean; PDur: Int64;
+  Pts,Dts,Dur: Int64; DurNum,DurDen: Int64; RPts,RDts: Int64; Hb: LongInt; Mp2: Boolean; PDur: Int64; PPts,PDts: Int64;
  End;
  F3TFrmA=Array[0..20000000] Of F3TFrm; F3PFrm=^F3TFrmA;
  F3TI64A=Array[0..50000000] Of Int64; F3PI64=^F3TI64A;
@@ -99052,7 +99074,7 @@ Begin
  If F3NF>=F3CapF Then Begin F3CapF:=F3CapF*2; ReAllocMem(F3Fr,Int64(F3CapF)*SizeOf(F3TFrm)); End;
  FillChar(F3Fr^[F3NF],SizeOf(F3TFrm),0);
  F3Fr^[F3NF].Off:=Off; F3Fr^[F3NF].Len:=Len; F3Fr^[F3NF].PicOff:=Off; F3Fr^[F3NF].Hb:=-1;
- F3Fr^[F3NF].Pts:=F3NoPts; F3Fr^[F3NF].Dts:=F3NoPts;
+ F3Fr^[F3NF].Pts:=F3NoPts; F3Fr^[F3NF].Dts:=F3NoPts; F3Fr^[F3NF].PPts:=F3NoPts; F3Fr^[F3NF].PDts:=F3NoPts;
  Inc(F3NF);
 End;
 
@@ -99350,7 +99372,7 @@ Begin
  If (Delay<>0) And F3CVideo And (Pict<>3) Then PD:=True;
  If (Delay=1) And (Dts=Pts) And (Dts<>F3NoPts) And PD Then Dts:=F3NoPts;
  { duree }
- DN:=0; DD:=0;
+ DN:=0; DD:=1;
  If Dur>0 Then Begin DN:=Dur; DD:=1; { rationnel en ticks }
   DN:=Dur*F3CTbN; DD:=F3CTbD;     { duration * time_base }
  End Else Begin
@@ -99604,6 +99626,578 @@ Begin
  End;
 End;
 
+{ ---------- video MPEG-4 partie 2, H.263, H.261, MJPEG, VC-1 : decoupage en trames (parseurs libavcodec) ---------- }
+Var
+ F3GB: F3PBuf; F3GP,F3GE: Int64;               { lecteur de bits : tampon, position et fin en bits }
+ F3M4Res,F3M4Den,F3M4Tib,F3M4Low,F3M4VolC,F3M4Vo,F3M4Pic: LongInt;
+ F3M4Tb,F3M4LTb: Int64; F3M4Vol: Boolean; F3M4W,F3M4H: LongInt;
+
+Function F3GetBits(N: LongInt): LongInt;
+Var R: Int64; I: LongInt; B: Int64;
+Begin
+ R:=0;
+ For I:=1 To N Do Begin
+  If F3GP<F3GE Then B:=(F3GB^[F3GP Shr 3] Shr (7-(F3GP And 7))) And 1 Else B:=0;
+  R:=(R Shl 1) Or B; Inc(F3GP);
+ End;
+ F3GetBits:=LongInt(R);
+End;
+
+Function F3ShowBits(N: LongInt): LongInt;
+Var Sv: Int64;
+Begin
+ Sv:=F3GP; F3ShowBits:=F3GetBits(N); F3GP:=Sv;
+End;
+
+Function F3Log2(V: LongInt): LongInt;
+Var R: LongInt;
+Begin
+ R:=0; While V>1 Do Begin V:=V Shr 1; Inc(R); End; F3Log2:=R;
+End;
+
+{ trame composee d un VOP : decoupe a partir de mpeg4_find_frame_end }
+Procedure F3SplitM4v;
+Var I,Start: Int64; State: LongWord; Found: Boolean;
+Begin
+ I:=0; Start:=0; State:=$FFFFFFFF; Found:=False;
+ While I<F3EN Do Begin
+  State:=(State Shl 8) Or F3E^[I];
+  If Not Found Then Begin
+   If State=$1B6 Then Found:=True;
+  End Else If (State And $FFFFFF00)=$100 Then Begin
+   If (State<>$1B7) And (State<>$1B8) Then Begin
+    F3FrAdd(Start,I-3-Start); F3Fr^[F3NF-1].Chunk:=F3ChunkOf(I);
+    Start:=I-3; Found:=False; State:=$FFFFFFFF; I:=Start; Continue;
+   End;
+  End;
+  Inc(I);
+ End;
+ If F3EN>Start Then Begin F3FrAdd(Start,F3EN-Start); F3Fr^[F3NF-1].Chunk:=F3NCh-1; End;
+End;
+
+Procedure F3M4Init;
+Begin
+ F3M4Res:=0; F3M4Den:=1; F3M4Tib:=0; F3M4Low:=0; F3M4VolC:=0; F3M4Vo:=0; F3M4Pic:=0; F3M4Tb:=0; F3M4LTb:=0; F3M4Vol:=False; F3M4W:=0; F3M4H:=0;
+End;
+
+{ en-tete VOL (decode_vol_header, partie utile) ; le lecteur est place apres le code de debut }
+Procedure F3M4VolHdr;
+Var VerId,Asp,Shape: LongInt;
+Begin
+ F3GetBits(1); F3M4Vo:=F3GetBits(8);
+ If (F3M4Vo=14) Or (F3M4Vo=15) Then Exit;
+ If F3GetBits(1)<>0 Then Begin VerId:=F3GetBits(4); F3GetBits(3); End Else VerId:=1;
+ Asp:=F3GetBits(4); If Asp=15 Then F3GetBits(16);
+ F3M4VolC:=F3GetBits(1);
+ If F3M4VolC<>0 Then Begin
+  F3GetBits(2); F3M4Low:=F3GetBits(1);
+  If F3GetBits(1)<>0 Then Begin F3GetBits(15); F3GetBits(15); F3GetBits(15); F3GetBits(15); F3GetBits(15); F3GetBits(15); F3GetBits(11); End;
+ End Else If F3M4Pic=0 Then Begin
+  If (F3M4Vo=1) Or (F3M4Vo=17) Then F3M4Low:=1 Else F3M4Low:=0;
+ End;
+ Shape:=F3GetBits(2);
+ If (Shape=3) And (VerId<>1) Then F3GetBits(4);
+ F3GetBits(1);
+ F3M4Res:=F3GetBits(16);
+ If F3M4Res=0 Then Exit;
+ F3M4Tib:=F3Log2(F3M4Res-1)+1; If F3M4Tib<1 Then F3M4Tib:=1;
+ F3GetBits(1);
+ If F3GetBits(1)<>0 Then F3M4Den:=F3GetBits(F3M4Tib) Else F3M4Den:=1;
+ If Shape=0 Then Begin
+  F3GetBits(1); F3M4W:=F3GetBits(13); F3GetBits(1); F3M4H:=F3GetBits(13);
+ End;
+ F3M4Vol:=True;
+End;
+
+{ analyse des en-tetes d une trame MPEG-4 ; remplit Pict, Hb, PPts }
+Procedure F3M4vHeaders(Idx: LongInt);
+Var Q,E: Int64; Code: LongInt; VolDone: Boolean; TimeIncr,TimeInc: Int64; Tm: Int64; K,Hh,Mm,Ss: LongInt;
+Begin
+ Q:=F3Fr^[Idx].Off; E:=Q+F3Fr^[Idx].Len; VolDone:=False;
+ F3GB:=F3E; F3GE:=E*8;
+ F3Fr^[Idx].Pict:=1; F3Fr^[Idx].Hb:=-1; F3Fr^[Idx].PPts:=F3NoPts;
+ While Q+4<=E Do Begin
+  If (F3E^[Q]=0) And (F3E^[Q+1]=0) And (F3E^[Q+2]=1) Then Begin
+   Code:=F3E^[Q+3];
+   If (Code>=$20) And (Code<=$2F) Then Begin
+    If Not VolDone Then Begin
+     VolDone:=True; F3GP:=(Q+4)*8; F3M4VolHdr;
+    End;
+   End Else If Code=$B3 Then Begin
+    F3GP:=(Q+4)*8;
+    If F3ShowBits(23)<>0 Then Begin
+     Hh:=F3GetBits(5); Mm:=F3GetBits(6); F3GetBits(1); Ss:=F3GetBits(6);
+     F3M4Tb:=Ss+60*(Mm+60*Int64(Hh));
+    End;
+   End Else If Code=$B6 Then Begin
+    F3GP:=(Q+4)*8;
+    F3Fr^[Idx].Hb:=1-F3M4Low;
+    F3Fr^[Idx].Pict:=F3GetBits(2)+1;
+    If (F3Fr^[Idx].Pict=3) And (F3M4Low<>0) And (F3M4VolC=0) Then F3M4Low:=0;
+    TimeIncr:=0;
+    While (F3GP<F3GE) And (F3GetBits(1)<>0) Do Inc(TimeIncr);
+    F3GetBits(1);
+    If (F3M4Tib=0) Or ((F3ShowBits(F3M4Tib+1) And 1)=0) Then Begin
+     F3M4Tib:=1;
+     While F3M4Tib<16 Do Begin
+      If (F3Fr^[Idx].Pict=2) Or (F3Fr^[Idx].Pict=4) Then Begin
+       If (F3ShowBits(F3M4Tib+6) And $37)=$30 Then Break;
+      End Else If (F3ShowBits(F3M4Tib+5) And $1F)=$18 Then Break;
+      Inc(F3M4Tib);
+     End;
+    End;
+    TimeInc:=F3GetBits(F3M4Tib);
+    If F3Fr^[Idx].Pict<>3 Then Begin
+     F3M4LTb:=F3M4Tb; Inc(F3M4Tb,TimeIncr);
+     Tm:=F3M4Tb*F3M4Res+TimeInc;
+    End Else Tm:=(F3M4LTb+TimeIncr)*F3M4Res+TimeInc;
+    If F3M4Res>0 Then F3Fr^[Idx].PPts:=F3RQ(Tm,1,F3M4Res,1,1200000);
+    Inc(F3M4Pic);
+    Break;
+   End;
+   Inc(Q,4);
+  End Else Inc(Q);
+ End;
+ F3Fr^[Idx].Key:=F3Fr^[Idx].Pict=1;
+ If (F3M4Res>0) And (F3M4Den*1000>F3M4Res) Then Begin F3Fr^[Idx].DurNum:=F3M4Den; F3Fr^[Idx].DurDen:=F3M4Res; End;
+End;
+
+{ H.263 : h263_find_frame_end }
+Procedure F3SplitH263;
+Var I,Start: Int64; State: LongWord; Found: Boolean;
+Begin
+ I:=0; Start:=0; State:=$FFFFFFFF; Found:=False;
+ While I<F3EN Do Begin
+  State:=(State Shl 8) Or F3E^[I];
+  If (State Shr 10)=$20 Then Begin
+   If Not Found Then Found:=True
+   Else Begin
+    F3FrAdd(Start,I-3-Start); F3Fr^[F3NF-1].Chunk:=F3ChunkOf(I);
+    Start:=I-3; Found:=False; State:=$FFFFFFFF; I:=Start; Continue;
+   End;
+  End;
+  Inc(I);
+ End;
+ If F3EN>Start Then Begin F3FrAdd(Start,F3EN-Start); F3Fr^[F3NF-1].Chunk:=F3NCh-1; End;
+End;
+
+{ H.261 : h261_find_frame_end }
+Procedure F3SplitH261;
+Var I,Start: Int64; State: LongWord; Found,M: Boolean; J: LongInt;
+Begin
+ I:=0; Start:=0; State:=0; Found:=False;
+ While I<F3EN Do Begin
+  State:=(State Shl 8) Or F3E^[I];
+  M:=False;
+  For J:=0 To 7 Do
+   If ((State Shr J) And $FFFFF0)=$000100 Then M:=True;
+  If M Then Begin
+   If Not Found Then Found:=True
+   Else Begin
+    F3FrAdd(Start,I-2-Start); F3Fr^[F3NF-1].Chunk:=F3ChunkOf(I);
+    State:=(State Shr 24)+$FF00;
+    Start:=I-2; Found:=False; I:=Start; Continue;
+   End;
+  End;
+  Inc(I);
+ End;
+ If F3EN>Start Then Begin F3FrAdd(Start,F3EN-Start); F3Fr^[F3NF-1].Chunk:=F3NCh-1; End;
+End;
+
+{ MJPEG : find_frame_end du parseur mjpeg }
+Procedure F3SplitMjpeg;
+Var I,Start,Sz,N: Int64; State: LongWord; Found: Boolean; Size: Int64;
+Begin
+ I:=0; Start:=0; State:=0; Found:=False; Size:=0; N:=F3EN;
+ While I<N Do Begin
+  State:=(State Shl 8) Or F3E^[I];
+  If (State>=$FFC00000) And (State<=$FFFEFFFF) Then Begin
+   If Not Found Then Begin
+    If (State>=$FFD8FFC0) And (State<=$FFD8FFFF) Then Begin Inc(I); Found:=True; Continue; End
+    Else If (State<$FFD00000) Or (State>$FFD9FFFF) Then Size:=Int64(State And $FFFF)-1;
+   End Else Begin
+    If (State>=$FFD8FFC0) And (State<=$FFD8FFFF) Then Begin
+     F3FrAdd(Start,I-3-Start); F3Fr^[F3NF-1].Chunk:=F3ChunkOf(I);
+     Start:=I-3; Found:=False; State:=0; I:=Start; Continue;
+    End Else If ((State Shr 16)=$FFD9) And ((State And $FFFF)<>$FFD8) Then
+     State:=$FFD900 Or (State And $FF)
+    Else If (State<$FFD00000) Or (State>$FFD9FFFF) Then Size:=Int64(State And $FFFF)-1;
+   End;
+  End;
+  If Size>0 Then Begin
+   Sz:=N-I; If Size<Sz Then Sz:=Size;
+   Inc(I,Sz); Dec(Size,Sz); State:=0; Continue;
+  End;
+  Inc(I);
+ End;
+ If F3EN>Start Then Begin F3FrAdd(Start,F3EN-Start); F3Fr^[F3NF-1].Chunk:=F3NCh-1; End;
+End;
+
+{ ---------- VC-1 profil avance (vc1_parse) ---------- }
+Var
+ F3VProf,F3VInter,F3VBroad,F3VTfc,F3VFinterp,F3VPsf,F3VHrd,F3VHrdN,F3VPanscan,F3VMaxW,F3VMaxH,F3VW,F3VH,F3VFrN,F3VFrD: LongInt;
+ F3VPict,F3VRep,F3VRptfrm,F3VRff,F3VTff: LongInt; F3VBad: Boolean;
+ F3VBuf: Array[0..63] Of Byte;
+
+Procedure F3Vc1Extract(Code: LongInt; S,E: Int64);
+Var N,St: LongInt; Q: Int64; B: Byte; Fcm,Pt,Fpt,Nr,Dr,Ar,I: LongInt; Z: LongInt;
+Begin
+ { depaquetage (octet 03 apres 00 00) jusqu a 37 octets }
+ N:=0; St:=0; Q:=S;
+ While (Q<E) And (N<37) Do Begin
+  B:=F3E^[Q]; Inc(Q);
+  F3VBuf[N]:=B; Inc(N);
+  If St<=1 Then Begin If B<>0 Then St:=0 Else Inc(St); End
+  Else Begin
+   If B=1 Then St:=3
+   Else If B>1 Then Begin If B=3 Then Dec(N); St:=0; End;
+  End;
+ End;
+ FillChar(F3VBuf[N],64-N,0);
+ F3GB:=@F3VBuf; F3GE:=N*8; F3GP:=0;
+ If Code=$0F Then Begin
+  F3VProf:=F3GetBits(2);
+  If F3VProf<>3 Then Begin F3VBad:=True; Exit; End;
+  F3GetBits(3);
+  If F3GetBits(2)<>1 Then Exit;
+  F3GetBits(3); F3GetBits(5); F3GetBits(1);
+  F3VMaxW:=(F3GetBits(12)+1) Shl 1; F3VMaxH:=(F3GetBits(12)+1) Shl 1;
+  F3VBroad:=F3GetBits(1); F3VInter:=F3GetBits(1); F3VTfc:=F3GetBits(1); F3VFinterp:=F3GetBits(1);
+  F3GetBits(1);
+  F3VPsf:=F3GetBits(1);
+  If F3VPsf<>0 Then Exit;
+  If F3GetBits(1)<>0 Then Begin
+   F3GetBits(14); F3GetBits(14);
+   Ar:=0;
+   If F3GetBits(1)<>0 Then Ar:=F3GetBits(4);
+   If Ar=15 Then Begin F3GetBits(8); F3GetBits(8); End;
+   If F3GetBits(1)<>0 Then Begin
+    If F3GetBits(1)<>0 Then Begin F3VFrD:=32; F3VFrN:=F3GetBits(16)+1; End
+    Else Begin
+     Nr:=F3GetBits(8); Dr:=F3GetBits(4);
+     If (Nr>0) And (Nr<8) And (Dr>0) And (Dr<3) Then Begin
+      If Dr=1 Then F3VFrD:=1000 Else F3VFrD:=1001;
+      Case Nr Of 1: F3VFrN:=24; 2: F3VFrN:=25; 3: F3VFrN:=30; 4: F3VFrN:=50; 5: F3VFrN:=60; 6: F3VFrN:=48; 7: F3VFrN:=72; End;
+      F3VFrN:=F3VFrN*1000;
+     End;
+    End;
+   End;
+   If F3GetBits(1)<>0 Then Begin F3GetBits(8); F3GetBits(8); F3GetBits(8); End;
+  End;
+  F3VHrd:=F3GetBits(1);
+  If F3VHrd<>0 Then Begin F3VHrdN:=F3GetBits(5); End;
+ End Else If Code=$0E Then Begin
+  F3GetBits(1); F3GetBits(1); F3VPanscan:=F3GetBits(1);
+  F3GetBits(1); F3GetBits(1); F3GetBits(1); F3GetBits(1); F3GetBits(2); F3GetBits(1); F3GetBits(1); F3GetBits(2);
+  If F3VHrd<>0 Then For I:=1 To F3VHrdN Do F3GetBits(8);
+  If F3GetBits(1)<>0 Then Begin F3VW:=(F3GetBits(12)+1) Shl 1; F3VH:=(F3GetBits(12)+1) Shl 1; End
+  Else Begin F3VW:=F3VMaxW; F3VH:=F3VMaxH; End;
+ End Else If Code=$0D Then Begin
+  Pt:=0; Fcm:=0;
+  If F3VInter<>0 Then Begin
+   If F3GetBits(1)<>0 Then Begin If F3GetBits(1)<>0 Then Fcm:=2 Else Fcm:=1; End;
+  End;
+  If Fcm=2 Then Begin
+   Fpt:=F3GetBits(3);
+   If (Fpt And 4)<>0 Then Pt:=3 Else If (Fpt And 2)<>0 Then Pt:=2 Else Pt:=1;
+  End Else Begin
+   Z:=0; While (Z<4) And (F3GetBits(1)<>0) Do Inc(Z);
+   Case Z Of 0: Pt:=2; 1: Pt:=3; 2: Pt:=1; 3: Pt:=3; 4: Pt:=2; End;
+  End;
+  F3VPict:=Pt;
+  If F3VTfc<>0 Then F3GetBits(8);
+  If F3VBroad<>0 Then Begin
+   If (F3VInter=0) Or (F3VPsf<>0) Then F3VRptfrm:=F3GetBits(2)
+   Else Begin F3VTff:=F3GetBits(1); F3VRff:=F3GetBits(1); End;
+  End;
+  If F3VBroad<>0 Then Begin
+   F3VRep:=1;
+   If F3VRff<>0 Then F3VRep:=2 Else If F3VRptfrm<>0 Then F3VRep:=F3VRptfrm*2+1;
+  End Else F3VRep:=0;
+ End;
+End;
+
+Procedure F3SplitVc1;
+Var
+ I,N,K,Start,PrevP,Z: Int64; PrevCode,B,Cur: LongInt; PicFound: Boolean;
+ Procedure Emit(Bound: Int64; AtIdx: Int64);
+ Begin
+  F3FrAdd(Start,Bound-Start); F3Fr^[F3NF-1].Chunk:=F3ChunkOf(AtIdx);
+  F3Fr^[F3NF-1].Pict:=F3VPict; F3Fr^[F3NF-1].Rep:=F3VRep; F3Fr^[F3NF-1].Key:=F3VPict=1;
+  If F3VFrN>0 Then Begin
+   If F3VFrD*1000>F3VFrN Then Begin F3Fr^[F3NF-1].DurNum:=Int64(F3VFrD)*(1+F3VRep); F3Fr^[F3NF-1].DurDen:=Int64(F3VFrN)*2; End;
+  End Else Begin F3Fr^[F3NF-1].DurNum:=1; F3Fr^[F3NF-1].DurDen:=25; End;
+  If GetEnv('F3DEBUG')<>'' Then WriteLn(StdErr,'VC1 frame pict=',F3VPict,' rep=',F3VRep,' fr=',F3VFrN,'/',F3VFrD,' broad=',F3VBroad,' inter=',F3VInter,' psf=',F3VPsf,' w=',F3VW,' h=',F3VH);
+  Start:=Bound;
+ End;
+Begin
+ N:=F3EN; I:=0; Start:=0; PicFound:=False; PrevCode:=-1; PrevP:=0;
+ F3VProf:=3; F3VInter:=0; F3VBroad:=0; F3VTfc:=0; F3VFinterp:=0; F3VPsf:=0; F3VHrd:=0; F3VHrdN:=0; F3VPanscan:=0;
+ F3VMaxW:=0; F3VMaxH:=0; F3VW:=0; F3VH:=0; F3VFrN:=0; F3VFrD:=1; F3VPict:=1; F3VRep:=0; F3VRptfrm:=0; F3VRff:=0; F3VTff:=1; F3VBad:=False;
+ While I+3<N Do Begin
+  If (F3E^[I]=0) And (F3E^[I+1]=0) Then Begin
+   Z:=I+2; While (Z<N) And (F3E^[Z]=0) Do Inc(Z);
+   If (Z+1<N) And (F3E^[Z]=1) Then Begin
+    Cur:=F3E^[Z+1]; K:=Z-2;
+    If PrevCode>=0 Then F3Vc1Extract(PrevCode,PrevP+4,K);
+    B:=Cur;
+    If (Not PicFound) And ((B=$0D) Or (B=$0C)) Then PicFound:=True
+    Else If PicFound And (B<>$0C) And (B<>$0B) Then Begin
+     Emit(K,Z+1); PicFound:=B=$0D;
+    End;
+    PrevCode:=B; PrevP:=K; I:=Z+2; Continue;
+   End;
+   I:=Z; Continue;
+  End;
+  Inc(I);
+ End;
+ If PrevCode>=0 Then F3Vc1Extract(PrevCode,PrevP+4,N);
+ If F3EN>Start Then Begin Emit(F3EN,F3EN-1); F3Fr^[F3NF-1].Chunk:=F3NCh-1; End;
+End;
+
+{ ---------- Dirac brut (dirac_parser.c) ---------- }
+Var
+ F3DState: LongWord; F3DSynced,F3DFetch,F3DOutOk: Boolean; F3DHbn,F3DOver,F3DIdx,F3DCap,F3DUnitSize,F3DPict,F3DHb: LongInt;
+ F3DBuf: F3PBuf; F3DBase,F3DSP,F3DSD,F3DLP,F3DLD,F3DOutOff,F3DOutLen: Int64;
+ F3DW,F3DH,F3DFrN,F3DFrD: LongInt; F3DSeqOk: Boolean; F3DOutRel: LongInt; F3DOrigE: F3PBuf; F3DOrigN: Int64; F3DArena: F3PBuf; F3DAN,F3DACap: Int64;
+
+Function F3DRb32(O: LongInt): LongInt;
+Begin
+ F3DRb32:=LongInt((LongWord(F3DBuf^[O]) Shl 24) Or (LongWord(F3DBuf^[O+1]) Shl 16) Or (LongWord(F3DBuf^[O+2]) Shl 8) Or LongWord(F3DBuf^[O+3]));
+End;
+
+Function F3DFindEnd(DP: Int64; Sz: LongInt): LongInt;
+Var State: LongWord; I: LongInt;
+Begin
+ State:=F3DState; I:=0;
+ If Not F3DSynced Then Begin
+  While I<Sz Do Begin
+   State:=(State Shl 8) Or F3E^[DP+I];
+   If State=$42424344 Then Begin State:=$FFFFFFFF; F3DSynced:=True; F3DHbn:=9; Break; End;
+   Inc(I);
+  End;
+ End;
+ If F3DSynced Then Begin
+  While I<Sz Do Begin
+   If State=$42424344 Then Begin
+    If (Sz-I)>=F3DHbn Then Begin F3DState:=$FFFFFFFF; F3DFindEnd:=I+F3DHbn; Exit; End
+    Else Begin F3DHbn:=9-(Sz-I); Break; End;
+   End Else State:=(State Shl 8) Or F3E^[DP+I];
+   Inc(I);
+  End;
+ End;
+ F3DState:=State; F3DFindEnd:=-1;
+End;
+
+Function F3DUnpack(Off: LongInt; Var PType,PNext,PPrev: LongInt): Boolean;
+Var I: LongInt; Ok: Boolean;
+Begin
+ F3DUnpack:=False;
+ If (Off<0) Or (F3DIdx-13<Off) Then Exit;
+ PType:=F3DBuf^[Off+4]; PNext:=F3DRb32(Off+5); PPrev:=F3DRb32(Off+9);
+ Ok:=(PType=$00) Or (PType=$10) Or (PType=$20) Or (PType=$30) Or (PType=$08) Or (PType=$48) Or (PType=$C8) Or (PType=$E8) Or (PType=$0A) Or (PType=$0C) Or (PType=$0D) Or (PType=$0E) Or
+  (PType=$4C) Or (PType=$09) Or (PType=$CC) Or (PType=$88) Or (PType=$CB);
+ If Not Ok Then Exit;
+ If (PType=$10) And (PNext=0) Then PNext:=13;
+ If ((PNext<>0) And (PNext<13)) Or ((PPrev<>0) And (PPrev<13)) Then Exit;
+ F3DUnpack:=True;
+End;
+
+Procedure F3DEnsure(N: LongInt);
+Begin
+ If N+64>F3DCap Then Begin F3DCap:=(N+64)*2; ReAllocMem(F3DBuf,F3DCap); End;
+End;
+
+{ dirac_combine_frame ; resultat : 0 / -1 (Sz peut etre modifie) }
+Function F3DCombine(Next: LongInt; DP: Int64; Var Sz: LongInt): LongInt;
+Var
+ Timing: Boolean; T1,N1,P1,T2,N2,P2: LongInt; Cur: LongInt; Pts: Int64;
+Begin
+ Timing:=(F3DSP=F3NoPts) And (F3DSD=F3NoPts);
+ If F3DOver<>0 Then Begin
+  Move(F3DBuf^[F3DOver],F3DBuf^[0],F3DIdx-F3DOver);
+  Dec(F3DIdx,F3DOver); F3DBase:=F3DBase+F3DOver; F3DOver:=0;
+  If (Sz=0) And (F3DBuf^[4]=$10) Then Begin
+   F3DOutRel:=0; F3DOutLen:=F3DIdx; F3DOutOk:=True; F3DCombine:=0; Exit;
+  End;
+ End;
+ If Next=-1 Then Begin
+  F3DEnsure(F3DIdx+Sz);
+  If F3DIdx=0 Then F3DBase:=DP;
+  If Sz>0 Then Move(F3E^[DP],F3DBuf^[F3DIdx],Sz);
+  Inc(F3DIdx,Sz);
+  F3DCombine:=-1; Exit;
+ End;
+ F3DEnsure(F3DIdx+Next);
+ If F3DIdx=0 Then F3DBase:=DP;
+ Move(F3E^[DP],F3DBuf^[F3DIdx],Next);
+ Inc(F3DIdx,Next);
+ If (Not F3DUnpack(F3DIdx-13,T1,N1,P1)) Or (Not F3DUnpack(F3DIdx-13-P1,T2,N2,P2)) Or (N2<>P1) Or
+    (Int64(F3DIdx)<Int64(F3DUnitSize)+13+P1) Then Begin
+  Dec(F3DIdx,9); Sz:=Next-9; F3DHbn:=9; F3DCombine:=-1; Exit;
+ End;
+ Cur:=F3DIdx-13-P1-F3DUnitSize;
+ Inc(F3DUnitSize,N2);
+ If (T2 And 8)<>8 Then Begin F3DHbn:=9; Sz:=Next; F3DCombine:=-1; Exit; End;
+ If Timing And (P1>=13) Then Begin
+  Pts:=Int64(F3DRb32(F3DIdx-13-P1+13)) And $FFFFFFFF;
+  If (F3DLP=0) And (F3DLD=0) Then F3DSD:=Pts-1
+  Else If F3DLD<>F3NoPts Then F3DSD:=F3DLD+1;
+  F3DSP:=Pts;
+  If (F3DHb=0) And ((F3DBuf^[F3DIdx-13-P1+4] And 3)<>0) Then F3DHb:=1;
+ End;
+ If (F3DHb<>0) And (F3DSP=F3DSD) Then F3DPict:=3;
+ F3DOutRel:=Cur; F3DOutLen:=F3DUnitSize; F3DOutOk:=True;
+ F3DUnitSize:=0; F3DOver:=F3DIdx-13; F3DHbn:=9;
+ F3DCombine:=0;
+End;
+
+{ av_parser_parse2 + dirac_parse ; retourne le nombre d octets consommes }
+Function F3DParse2(DP: Int64; Sz: LongInt): LongInt;
+Var Next,Len: LongInt;
+Begin
+ F3DOutOk:=False;
+ If F3DFetch Then Begin F3DFetch:=False; F3DLP:=F3DSP; F3DLD:=F3DSD; F3DSP:=F3NoPts; F3DSD:=F3NoPts; End;
+ Next:=F3DFindEnd(DP,Sz);
+ If (Not F3DSynced) And (Next=-1) Then Begin F3DParse2:=Sz; Exit; End;
+ If F3DCombine(Next,DP,Sz)<0 Then Begin F3DOutOk:=False; If Sz<0 Then Sz:=0; F3DParse2:=Sz; Exit; End;
+ If F3DOutOk Then F3DFetch:=True;
+ Len:=Next; If Len<0 Then Len:=0;
+ F3DParse2:=Len;
+End;
+
+{ lecture exp-golomb entrelace de Dirac (get_interleaved_ue_golomb) }
+Function F3DGolomb: LongInt;
+Var V: Int64;
+Begin
+ V:=1;
+ While (F3GP<F3GE) And (F3GetBits(1)=0) Do Begin
+  V:=V Shl 1;
+  If F3GetBits(1)<>0 Then Inc(V);
+  If V>$7FFFFFF Then Break;
+ End;
+ F3DGolomb:=LongInt(V-1);
+End;
+
+{ en-tete de sequence : retourne False si invalide (le decodeur refuserait le flux) }
+Function F3DSeqHeader(S,E: Int64): Boolean;
+Const
+ DefW: Array[0..20] Of LongInt=(640,176,176,352,352,704,704,720,720,1280,1280,1920,1920,1920,1920,2048,4096,3840,3840,7680,7680);
+ DefH: Array[0..20] Of LongInt=(480,120,144,240,288,480,576,480,576,720,720,1080,1080,1080,1080,1080,2160,2160,2160,4320,4320);
+ DefC: Array[0..20] Of LongInt=(2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,0,0,1,1,1,1);
+ DefF: Array[0..20] Of LongInt=(1,9,10,9,10,9,10,4,3,7,6,4,3,7,6,2,2,7,6,7,6);
+ DefP: Array[0..20] Of LongInt=(1,1,1,1,1,1,1,3,3,3,3,3,3,3,3,4,4,3,3,3,3);
+ RateN: Array[1..10] Of LongInt=(24000,24,25,30000,30,50,60000,60,15000,25);
+ RateD: Array[1..10] Of LongInt=(1001,1,1,1001,1,1,1001,1,1001,2);
+Var Fmt,Chroma,Inter,Fri,Pri,Idx,Xs,Ys,I: LongInt; W,H,Rn,Rd: LongInt;
+Begin
+ F3DSeqHeader:=False;
+ F3GB:=F3E; F3GE:=E*8; F3GP:=S*8;
+ F3DGolomb; F3DGolomb; F3DGolomb; F3DGolomb;
+ Fmt:=F3DGolomb;
+ If (Fmt<0) Or (Fmt>20) Then Exit;
+ W:=DefW[Fmt]; H:=DefH[Fmt]; Chroma:=DefC[Fmt]; Fri:=DefF[Fmt]; Pri:=DefP[Fmt]; Rn:=0; Rd:=0;
+ Inter:=0;
+ If F3GetBits(1)<>0 Then Begin W:=F3DGolomb; H:=F3DGolomb; End;
+ If F3GetBits(1)<>0 Then Chroma:=F3DGolomb;
+ If (Chroma<0) Or (Chroma>2) Then Exit;
+ If F3GetBits(1)<>0 Then Inter:=F3DGolomb;
+ If (Inter<0) Or (Inter>1) Then Exit;
+ If F3GetBits(1)<>0 Then Begin
+  Fri:=F3DGolomb;
+  If (Fri<0) Or (Fri>10) Then Exit;
+  If Fri=0 Then Begin Rn:=F3DGolomb; Rd:=F3DGolomb; End;
+ End;
+ If Fri>0 Then Begin Rn:=RateN[Fri]; Rd:=RateD[Fri]; End;
+ { rapport d aspect }
+ If F3GetBits(1)<>0 Then Begin
+  Idx:=F3DGolomb;
+  If (Idx<0) Or (Idx>6) Then Exit;
+  If Idx=0 Then Begin F3DGolomb; F3DGolomb; End;
+ End;
+ { zone utile }
+ If F3GetBits(1)<>0 Then Begin F3DGolomb; F3DGolomb; F3DGolomb; F3DGolomb; End;
+ { plage du signal }
+ If F3GetBits(1)<>0 Then Begin
+  Pri:=F3DGolomb;
+  If (Pri<0) Or (Pri>4) Then Exit;
+  If Pri=0 Then Begin F3DGolomb; F3DGolomb; F3DGolomb; F3DGolomb; End;
+ End;
+ If Pri=1 Then Inc(Pri);
+ If Pri<2 Then Exit;
+ Xs:=0; Ys:=0;
+ If Chroma=1 Then Xs:=1 Else If Chroma=2 Then Begin Xs:=1; Ys:=1; End;
+ If ((W Mod (1 Shl Xs))<>0) Or ((H Mod (1 Shl Ys))<>0) Then Exit;
+ { specification des couleurs }
+ If F3GetBits(1)<>0 Then Begin
+  Idx:=F3DGolomb;
+  If (Idx<0) Or (Idx>4) Then Exit;
+  If Idx=0 Then Begin
+   If F3GetBits(1)<>0 Then F3DGolomb;
+   If F3GetBits(1)<>0 Then F3DGolomb;
+   If F3GetBits(1)<>0 Then F3DGolomb;
+  End;
+ End;
+ If F3DGolomb<>0 Then Exit;
+ F3DW:=W; F3DH:=H; F3DFrN:=Rn; F3DFrD:=Rd;
+ F3DSeqHeader:=True;
+End;
+
+Procedure F3SplitDirac;
+Var
+ C,Len,Sz: LongInt; DP: Int64; Pos,Q,E: Int64; Found: Boolean; C0: LongInt; K: LongInt;
+ Procedure Emit(Ch: LongInt);
+ Begin
+  If F3DAN+F3DOutLen+64>F3DACap Then Begin F3DACap:=(F3DAN+F3DOutLen+64)*2; ReAllocMem(F3DArena,F3DACap); End;
+  Move(F3DBuf^[F3DOutRel],F3DArena^[F3DAN],F3DOutLen);
+  F3FrAdd(F3DAN,F3DOutLen); Inc(F3DAN,F3DOutLen); F3Fr^[F3NF-1].Chunk:=Ch;
+  F3Fr^[F3NF-1].PPts:=F3DSP; F3Fr^[F3NF-1].PDts:=F3DSD; F3Fr^[F3NF-1].Pict:=F3DPict; F3Fr^[F3NF-1].Hb:=F3DHb;
+  F3Fr^[F3NF-1].Key:=F3DPict=1;
+  If GetEnv('F3DEBUG2')<>'' Then WriteLn(StdErr,'DFR ',F3DSP,',',F3DSD,',',F3DOutLen);
+ End;
+Begin
+ F3DState:=0; F3DSynced:=False; F3DHbn:=9; F3DOver:=0; F3DIdx:=0; F3DCap:=0; F3DBuf:=Nil; F3DUnitSize:=0; F3DBase:=0;
+ F3DSP:=0; F3DSD:=0; F3DLP:=F3NoPts; F3DLD:=F3NoPts; F3DFetch:=True; F3DPict:=1; F3DHb:=0; F3DOutOk:=False;
+ F3DEnsure(4096); F3DArena:=Nil; F3DAN:=0; F3DACap:=0;
+ For C:=0 To F3NCh-1 Do Begin
+  DP:=F3CO^[C];
+  If C<F3NCh-1 Then Sz:=F3CO^[C+1]-F3CO^[C] Else Sz:=F3EN-F3CO^[C];
+  While Sz>0 Do Begin
+   Len:=F3DParse2(DP,Sz);
+   Inc(DP,Len); Dec(Sz,Len);
+   If F3DOutOk Then Emit(C);
+  End;
+ End;
+ Repeat
+  F3DParse2(0,0);
+  If F3DOutOk Then Emit(F3NCh-1);
+ Until Not F3DOutOk;
+ If F3DBuf<>Nil Then FreeMem(F3DBuf);
+ F3DOrigE:=F3E; F3DOrigN:=F3EN;
+ { informations du flux : premiere en-tete de sequence }
+ F3DW:=0; F3DH:=0; F3DFrN:=0; F3DFrD:=1; F3DSeqOk:=False;
+ Pos:=0;
+ While Pos+13<=F3EN Do Begin
+  If (F3E^[Pos]=$42) And (F3E^[Pos+1]=$42) And (F3E^[Pos+2]=$43) And (F3E^[Pos+3]=$44) And (F3E^[Pos+4]=0) Then Begin
+   E:=Pos+13+(Int64(F3E^[Pos+5]) Shl 24 Or Int64(F3E^[Pos+6]) Shl 16 Or Int64(F3E^[Pos+7]) Shl 8 Or F3E^[Pos+8])-13;
+   If E>F3EN Then E:=F3EN;
+   F3DSeqOk:=F3DSeqHeader(Pos+13,E);
+   Break;
+  End;
+  Inc(Pos);
+ End;
+ FreeMem(F3E); F3E:=F3DArena; F3EN:=F3DAN; If F3E=Nil Then Begin GetMem(F3E,64); F3EN:=0; End;
+ If F3NF>0 Then Begin
+  C0:=F3Fr^[0].Chunk;
+  For K:=0 To F3NF-1 Do Begin
+   If (F3Fr^[K].Chunk<=C0) Or (Not F3DSeqOk) Or (F3DFrN<=0) Or (F3DFrD*1000<=F3DFrN) Then Begin
+    F3Fr^[K].DurNum:=1; F3Fr^[K].DurDen:=25;
+    If F3DSeqOk And (F3DFrN>0) And (F3Fr^[K].Chunk>C0) Then Begin F3Fr^[K].DurNum:=0; F3Fr^[K].DurDen:=0; End;
+   End Else Begin F3Fr^[K].DurNum:=F3DFrD; F3Fr^[K].DurDen:=F3DFrN; End;
+  End;
+ End;
+End;
+
 { ---------- pilote d'analyse d'un flux + etage ffmpeg.c ---------- }
 Type F3TLA=Array[0..50000000] Of LongInt; F3PLA=^F3TLA;
 Var F3ChG: F3PLA;
@@ -99636,12 +100230,12 @@ End;
 Procedure F3Analyze(SI: LongInt);
 Var
  K,C0,Base: LongInt; Cd: String; IsV,IsA,Es,IsMpv: Boolean; Pk: LongInt; Poolbase: Int64; D: Int64; Fin: F3TSti; Pass: LongInt;
- EsVideoTb,Raw: Boolean; HasbFinal: LongInt;
+ EsVideoTb,Raw,Jp: Boolean; HasbFinal: LongInt; Fp: Boolean;
 Begin
  F3ResetSi;
  F3BuildEs(SI);
  F3NF:=0; F3CapF:=1024; GetMem(F3Fr,Int64(F3CapF)*SizeOf(F3TFrm));
- Cd:=F3Str[SI].Codec; Es:=F3Str[SI].BlockAlign>=1; Raw:=F3Str[SI].BlockAlign=1;
+ Cd:=F3Str[SI].Codec; Es:=F3Str[SI].BlockAlign>=1; Raw:=F3Str[SI].BlockAlign=1; Jp:=F3Str[SI].BlockAlign=3;
  IsMpv:=(Cd='mpeg1video') Or (Cd='mpeg2video');
  IsV:=F3Str[SI].Kind=0; IsA:=F3Str[SI].Kind=1;
  If (Cd='mp1') Or (Cd='mp2') Or (Cd='mp3') Then F3SplitMpa
@@ -99659,9 +100253,49 @@ Begin
    F3Fr^[K].Pict:=0; F3Fr^[K].Rep:=1;
    If F3SiFrN>0 Then Begin F3Fr^[K].DurNum:=Int64(F3SiFrD)*2; F3Fr^[K].DurDen:=Int64(F3SiFrN)*2; End;
   End;
+ End Else If Cd='mpeg4' Then Begin
+  F3M4Init; F3SplitM4v;
+  For K:=0 To F3NF-1 Do F3M4vHeaders(K);
+  F3SiW:=F3M4W; F3SiH:=F3M4H; F3SiFrN:=F3M4Res; F3SiFrD:=F3M4Den;
+ End Else If (Cd='h263') Or (Cd='h261') Or (Cd='mjpeg') Then Begin
+  If Cd='h263' Then F3SplitH263 Else If Cd='h261' Then F3SplitH261 Else F3SplitMjpeg;
+  C0:=F3Fr^[0].Chunk;
+  For K:=0 To F3NF-1 Do Begin
+   F3Fr^[K].Pict:=1; F3Fr^[K].Key:=True; F3Fr^[K].Hb:=-1;
+   If Cd='mjpeg' Then Begin F3Fr^[K].DurNum:=1; F3Fr^[K].DurDen:=25; End
+   Else If F3Fr^[K].Chunk<=C0 Then Begin F3Fr^[K].DurNum:=1; F3Fr^[K].DurDen:=25; End
+   Else Begin F3Fr^[K].DurNum:=1001; F3Fr^[K].DurDen:=30000; End;
+  End;
+  F3SiFrN:=30000; F3SiFrD:=1001;
+  If Cd='mjpeg' Then Begin F3SiW:=0; F3SiH:=0; F3JpegEnd(F3E,F3EN,0,F3SiW,F3SiH); F3SiFrN:=0; F3SiFrD:=1; End
+  Else If Cd='h263' Then Begin
+   F3SiW:=0; F3SiH:=0;
+   F3GB:=F3E; F3GE:=F3EN*8; F3GP:=35;
+   Case F3GetBits(3) Of
+    1: Begin F3SiW:=128; F3SiH:=96; End;
+    2: Begin F3SiW:=176; F3SiH:=144; End;
+    3: Begin F3SiW:=352; F3SiH:=288; End;
+    4: Begin F3SiW:=704; F3SiH:=576; End;
+    5: Begin F3SiW:=1408; F3SiH:=1152; End;
+   End;
+  End Else Begin
+   F3GB:=F3E; F3GE:=F3EN*8; F3GP:=28;
+   If F3GetBits(1)=1 Then Begin F3SiW:=352; F3SiH:=288; End Else Begin F3SiW:=176; F3SiH:=144; End;
+  End;
+ End Else If Cd='dirac' Then Begin
+  F3SplitDirac;
+  F3SiW:=F3DW; F3SiH:=F3DH; F3SiFrN:=F3DFrN; F3SiFrD:=F3DFrD;
+ End Else If Cd='vc1' Then Begin
+  F3SplitVc1;
+  If F3VBad Then Fail('vc1: profil non pris en charge pour le remuxage.');
+  F3SiW:=F3VW; F3SiH:=F3VH; F3SiFrN:=F3VFrN; F3SiFrD:=F3VFrD;
  End Else Fail('Analyse du flux '+Cd+' non prise en charge pour le remuxage.');
  If F3NF=0 Then Fail('Aucune trame '+Cd+' trouvee.');
  F3Attach(IsMpv);
+ If Cd='mpeg4' Then
+  For K:=0 To F3NF-1 Do If F3Fr^[K].PPts<>F3NoPts Then F3Fr^[K].RPts:=F3Fr^[K].PPts;
+ If Cd='dirac' Then
+  For K:=0 To F3NF-1 Do Begin F3Fr^[K].RPts:=F3Fr^[K].PPts; F3Fr^[K].RDts:=F3Fr^[K].PDts; End;
  If IsA Then
   For K:=0 To F3NF-1 Do Begin
    F3Fr^[K].Dur:=(Int64(F3SiFs)*F3Str[SI].TBd) Div F3SiRate;
@@ -99669,7 +100303,7 @@ Begin
   End;
  { configuration du moteur }
  F3CVideo:=IsV; F3CAudio:=IsA; F3COneIn:=Cd<>'h264';
- F3CTbN:=1; F3CTbD:=90000; If Raw Then F3CTbD:=1200000;
+ F3CTbN:=1; F3CTbD:=90000; If Raw Then F3CTbD:=1200000; If Jp Then F3CTbD:=25;
  F3Str[SI].TBn:=F3CTbN; F3Str[SI].TBd:=F3CTbD;
  If IsA Then Begin F3CTbD:=90000; F3Str[SI].TBd:=90000; End;
  If IsA Then Begin
@@ -99689,6 +100323,8 @@ Begin
   If Cd='h264' Then F3St.HasB:=F3SiDelay;
   C0:=F3Fr^[0].Chunk;
   For K:=0 To F3NF-1 Do Begin
+   If (Cd='mpeg4') Or (Cd='dirac') Then Begin If F3Fr^[K].Hb>=0 Then F3St.HasB:=F3Fr^[K].Hb; End;
+   If Cd='vc1' Then Begin If F3Fr^[K].Chunk<=C0 Then F3St.HasB:=0 Else F3St.HasB:=1; End;
    If IsMpv Then Begin
     If F3Fr^[K].Hb>=0 Then F3St.HasB:=F3Fr^[K].Hb
     Else If (K=0) And (Not F3Fr^[0].Mp2) Then F3St.HasB:=0;
@@ -99717,7 +100353,7 @@ Begin
  If IsV Then Begin
   F3Str[SI].Delay:=F3St.HasB;
   F3Str[SI].FrN:=F3SiFrN; F3Str[SI].FrD:=F3SiFrD;
-  If Raw Then Begin F3Str[SI].FrN:=25; F3Str[SI].FrD:=1; End;
+  If Raw Or Jp Then Begin F3Str[SI].FrN:=25; F3Str[SI].FrD:=1; End;
   F3Str[SI].HasCpb:=(F3SiCpbBuf<>0) Or (F3SiCpbMax<>0);
   F3Str[SI].CpbBuf:=F3SiCpbBuf; F3Str[SI].CpbMax:=F3SiCpbMax;
  End;
@@ -99796,21 +100432,51 @@ Begin
 End;
 
 { ---------- lecture d'un flux elementaire video brut ---------- }
+Var F3ForcedIn: String;
 Function F3ReadVideoES(Const Name: String; FileNo: LongInt): Boolean;
-Var P: F3PBuf; Size,Pos: Int64; Cd: String; Si,N: LongInt;
+Var P: F3PBuf; Size,Pos: Int64; Cd,Pr,Fm,Ex: String; Si,N,BA: LongInt; Bad: Boolean;
 Begin
  F3ReadVideoES:=False;
  P:=F3LoadFile(Name,Size);
  If Size<16 Then Begin FreeMem(P); Exit; End;
- If Not (((P^[0]=0) And (P^[1]=0) And (P^[2]=1)) Or ((P^[0]=0) And (P^[1]=0) And (P^[2]=0) And (P^[3]=1))) Then Begin FreeMem(P); Exit; End;
- If (P^[2]=1) And (P^[3]>=$80) And (P^[3]<>$B3) And (P^[3]<>$B0) Then Begin FreeMem(P); Exit; End;
- If (P^[2]=0) And (P^[4]>=$80) Then Begin FreeMem(P); Exit; End;
- Cd:=F3SniffVideo(P,0,Size);
- If (Cd<>'mpeg1video') And (Cd<>'mpeg2video') And (Cd<>'h264') Then Begin FreeMem(P); Exit; End;
- If (Cd<>'h264') Then Begin
-  If Not ((P^[0]=0) And (P^[1]=0) And (P^[2]=1) And (P^[3]=$B3)) Then Begin FreeMem(P); Exit; End;
+ Fm:=F3ForcedIn; Cd:=''; BA:=1;
+ If Fm='m4v' Then Cd:='mpeg4' Else If (Fm='h263') Or (Fm='h261') Or (Fm='mjpeg') Or (Fm='vc1') Or (Fm='dirac') Then Cd:=Fm;
+ If (Cd='') And (Fm='') And (P^[0]=$42) And (P^[1]=$42) And (P^[2]=$43) And (P^[3]=$44) Then Begin
+  Pos:=(Int64(P^[5]) Shl 24) Or (Int64(P^[6]) Shl 16) Or (Int64(P^[7]) Shl 8) Or P^[8];
+  If Pos>=13 Then Begin
+   If Pos+13>Size Then Cd:='dirac'
+   Else If (P^[Pos]=$42) And (P^[Pos+1]=$42) And (P^[Pos+2]=$43) And (P^[Pos+3]=$44) Then Cd:='dirac';
+  End;
  End;
- Si:=F3NewStr(0,Cd); F3Str[Si].FileNo:=FileNo; F3Str[Si].BlockAlign:=1; F3Str[Si].Id:=0;
+ If Cd='' Then Begin
+  Bad:=False;
+  If Not (((P^[0]=0) And (P^[1]=0) And (P^[2]=1)) Or ((P^[0]=0) And (P^[1]=0) And (P^[2]=0) And (P^[3]=1))) Then Bad:=True;
+  If (Not Bad) And (P^[2]=1) And (P^[3]>=$80) And (P^[3]<>$B3) And (P^[3]<>$B0) And (P^[3]<>$B5) Then Bad:=True;
+  If (Not Bad) And (P^[2]=0) And (P^[4]>=$80) Then Bad:=True;
+  If Not Bad Then Begin
+   Cd:=F3SniffVideo(P,0,Size);
+   If (Cd='cavs') Or ((Cd<>'h264') And Not ((P^[0]=0) And (P^[1]=0) And (P^[2]=1) And (P^[3]=$B3))) Then Cd:='';
+   If (Cd<>'') And (Cd<>'mpeg1video') And (Cd<>'mpeg2video') And (Cd<>'h264') Then Cd:='';
+  End;
+ End;
+ If (Cd='') And (Fm='') Then Begin
+  If (P^[0]=$FF) And (P^[1]=$D8) And (P^[2]=$FF) Then Begin
+   Ex:=Extension(Name);
+   If (Ex='mjpeg') Or (Ex='mjpg') Then Begin Cd:='mjpeg'; BA:=3; End;
+  End Else Begin
+   Pr:=Probe(Name);
+   If Pr='m4v' Then Cd:='mpeg4'
+   Else If Pr='vc1' Then Cd:='vc1'
+   Else If H3ProbeFile(Name) Then Cd:='h263'
+   Else If H1ProbeFile(Name) Then Cd:='h261'
+   Else If Pr='' Then Begin
+    Ex:=Extension(Name);
+    If Ex='m4v' Then Cd:='mpeg4' Else If Ex='h263' Then Cd:='h263' Else If Ex='h261' Then Cd:='h261' Else If Ex='vc1' Then Cd:='vc1';
+   End;
+  End;
+ End;
+ If Cd='' Then Begin FreeMem(P); Exit; End;
+ Si:=F3NewStr(0,Cd); F3Str[Si].FileNo:=FileNo; F3Str[Si].BlockAlign:=BA; F3Str[Si].Id:=0;
  Pos:=0;
  While Pos<Size Do Begin
   N:=1024; If Size-Pos<N Then N:=Size-Pos;
@@ -99917,7 +100583,7 @@ Begin
  F3Try:=False; If F3Redirect Then Exit;
  F3Dbg:=GetEnv('F3DEBUG')<>'';
  Encoding:=False; F3Yes:=False; CodecA:=''; CodecV:=''; OptsA:=''; OptsV:=''; CpFlag:=False; NIn:=0; OutName:=''; OutFmt:=''; InFmt:=''; I:=1; HasPre:=False; HasDelay:=False;
- F3UTsId:=-1; F3UOnId:=-1; F3USid:=-1; F3USvc:=-1; F3UPmt:=-1; F3UStart:=-1; F3UPes:=-1; F3UPat:=-1; F3USdt:=-1; F3UNit:=-1; F3UPcr:=-1; F3UOmit:=-1; F3UVer:=-1;
+ F3UM2ts:=-1; F3UCopyTs:=-1; F3UTsId:=-1; F3UOnId:=-1; F3USid:=-1; F3USvc:=-1; F3UPmt:=-1; F3UStart:=-1; F3UPes:=-1; F3UPat:=-1; F3USdt:=-1; F3UNit:=-1; F3UPcr:=-1; F3UOmit:=-1; F3UVer:=-1;
  F3TSFlags:=0; F3PSUserRate:=0; F3PSPkSize:=0; F3TSProvRaw:=''; F3TSNameRaw:='';
  While I<=ParamCount Do Begin
   A:=ParamStr(I);
@@ -99946,6 +100612,19 @@ Begin
    Else If Copy(A,1,K-1)='service_provider' Then F3TSProvRaw:=Copy(A,K+1,255)
    Else Exit;
   End
+  Else If (A='-mpegts_m2ts_mode') Or (A='-mpegts_copyts') Then Begin
+   Inc(I); Tok:=Lower(ParamStr(I));
+   If (Tok='1') Or (Tok='true') Or (Tok='yes') Then K:=1 Else If (Tok='0') Or (Tok='false') Or (Tok='no') Then K:=0
+   Else If (Tok='-1') Or (Tok='auto') Then K:=-1 Else Exit;
+   If A='-mpegts_m2ts_mode' Then F3UM2ts:=K Else F3UCopyTs:=K;
+  End
+  Else If (A='-mpegts_service_type') And (Lower(ParamStr(I+1))<>'') And (Not (ParamStr(I+1)[1] In ['0'..'9'])) Then Begin
+   Inc(I); Tok:=Lower(ParamStr(I));
+   If Tok='digital_tv' Then F3USvc:=1 Else If Tok='digital_radio' Then F3USvc:=2 Else If Tok='teletext' Then F3USvc:=3
+   Else If Tok='advanced_codec_digital_radio' Then F3USvc:=$0A Else If Tok='mpeg2_digital_hdtv' Then F3USvc:=$11
+   Else If Tok='advanced_codec_digital_sdtv' Then F3USvc:=$16 Else If Tok='advanced_codec_digital_hdtv' Then F3USvc:=$19
+   Else If Tok='hevc_digital_hdtv' Then F3USvc:=$1F Else Exit;
+  End
   Else If (A='-mpegts_transport_stream_id') Or (A='-mpegts_original_network_id') Or (A='-mpegts_service_id') Or (A='-mpegts_service_type') Or
    (A='-mpegts_pmt_start_pid') Or (A='-mpegts_start_pid') Or (A='-pes_payload_size') Or (A='-pcr_period') Or (A='-tables_version') Or (A='-omit_video_pes_length') Then Begin
    Inc(I); Val(ParamStr(I),UNum,K);
@@ -99970,7 +100649,7 @@ Begin
     K:=1; While (K<=Length(A)) And (A[K]<>'+') And (A[K]<>',') Do Inc(K);
     Tok:=Copy(A,1,K-1); Delete(A,1,K);
     If Tok='resend_headers' Then Fl:=Fl Or 1 Else If Tok='latm' Then Fl:=Fl Or 2 Else If Tok='pat_pmt_at_frames' Then Fl:=Fl Or 4
-    Else If Tok='system_b' Then Fl:=Fl Or 8 Else If Tok='nit' Then Fl:=Fl Or $20 Else If Tok='omit_rai' Then Fl:=Fl Or $40
+    Else If Tok='system_b' Then Fl:=Fl Or 8 Else If Tok='initial_discontinuity' Then Fl:=Fl Or $10 Else If Tok='nit' Then Fl:=Fl Or $20 Else If Tok='omit_rai' Then Fl:=Fl Or $40
     Else If Tok<>'' Then Exit;
    End;
    F3TSFlags:=Fl;
@@ -99987,7 +100666,7 @@ Begin
    If Exists(OutName) And (Not F3Yes) Then Fail('Le fichier de sortie existe deja (utiliser -y).');
    CopyFile(InNames[0],OutName); F3Try:=True; Exit;
   End;
- If (OutFmt='mpegts') And (Extension(OutName)='m2ts') Then OutFmt:='m2ts';
+ If (OutFmt='mpegts') And (((Extension(OutName)='m2ts') And (F3UM2ts<>0)) Or (F3UM2ts=1)) Then OutFmt:='m2ts';
  F3EsOut:=F3IsEsFmt(OutFmt);
  If Not (F3IsMuxFmt(OutFmt) Or F3EsOut) Then Exit;
  If Not CpFlag Then Begin
@@ -99998,6 +100677,7 @@ Begin
  F3NS:=0; F3NP:=0; F3CapP:=1024; GetMem(F3Pk,Int64(F3CapP)*SizeOf(F3TPkt));
  F3PoolCap:=1 Shl 20; F3PoolLen:=0; GetMem(F3Pool,F3PoolCap);
  F3NC:=0; F3CapC:=1024; GetMem(F3Ck,Int64(F3CapC)*SizeOf(F3TCk));
+ F3ForcedIn:=InFmt;
  For FileNo:=0 To NIn-1 Do Begin
   Streams0:=F3NS;
   If Encoding Then Begin
@@ -100036,6 +100716,12 @@ Begin
   End;
  End;
  If F3NO=0 Then Exit;
+ If (OutFmt<>'mpegts') And (OutFmt<>'m2ts') And (Not F3EsOut) Then
+  For I:=0 To F3NO-1 Do
+   If (F3OS[I].Kind=0) And ((F3OS[I].W=0) Or (F3OS[I].H=0)) Then Begin
+    WriteLn(StdErr,'[',OutFmt,'] dimensions not set'); WriteLn(StdErr,'Could not write header for output file (incorrect codec parameters ?): Invalid argument');
+    Halt(1);
+   End;
  F3MxMaxDelta:=0; F3PSPreload:=500000; F3PSMaxDelay:=700000; F3PSAvoidNeg:=True;
  F3TSMaxDelay:=700000;
  If HasPre Then F3PSPreload:=UPre;
