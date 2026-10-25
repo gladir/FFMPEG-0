@@ -2,6 +2,7 @@
  @created: 2026
  @version: 1.00
  @website(https://www.gladir.com/ffmpeg-0)
+ @website(https://www.gladir.com/speech-to-text-0)
  @abstract(Target: Free Pascal 3.2
  @description: FFMPEG Pascal: audio, HLS, conteneurs video et FLV H264 vers
   PNG/GIF natifs. }
