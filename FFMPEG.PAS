@@ -3570,9 +3570,128 @@ Begin
  ExitProc := SavedExit; Cleanup;
 End;
 
+Var O1QuietMode: LongInt;
 Procedure Fail(Const MessageText: String);Begin
- WriteLn('FFMPEG Pascal: ',MessageText); Halt(1);
+ If O1QuietMode=1 Then WriteLn(StdErr,'FFMPEG Pascal: ',MessageText) Else If O1QuietMode=0 Then WriteLn('FFMPEG Pascal: ',MessageText); Halt(1);
 End;
+
+{ ---- O1 : utilitaires places avant les ecrivains AVI (voir plus bas le bloc O1) ---- }
+Var O1AwSn,O1AwSd: LongInt; O1AwHv: Boolean;
+ O1BannerDone: Boolean;      { le bandeau a deja ete affiche }
+ O1LogLevel: LongInt;        { niveau de journal ffmpeg (-v/-loglevel) : -8 quiet .. 56 debug ; defaut 32 (info) }
+ O1HideBanner: Boolean;
+Procedure O1Banner; Forward;
+
+Function O1Gcd(A,B: Int64): Int64;
+Var T: Int64;
+Begin
+ If A<0 Then A:=-A; If B<0 Then B:=-B;
+ While B<>0 Do Begin T:=A Mod B; A:=B; B:=T; End;
+ O1Gcd:=A;
+End;
+
+{ av_reduce (libavutil/rational.c) }
+Procedure O1Reduce(Var ON,OD: Int64; Num,Den,Max: Int64);
+Var A0n,A0d,A1n,A1d,Sign,G,X,NextDen,A2n,A2d: Int64;
+Begin
+ A0n:=0; A0d:=1; A1n:=1; A1d:=0; Sign:=0;
+ If (Num<0) Xor (Den<0) Then Sign:=1;
+ If Num<0 Then Num:=-Num; If Den<0 Then Den:=-Den;
+ G:=O1Gcd(Num,Den);
+ If G<>0 Then Begin Num:=Num Div G; Den:=Den Div G; End;
+ If (Num<=Max) And (Den<=Max) Then Begin A1n:=Num; A1d:=Den; Den:=0; End;
+ While Den<>0 Do Begin
+  X:=Num Div Den; NextDen:=Num-Den*X;
+  A2n:=X*A1n+A0n; A2d:=X*A1d+A0d;
+  If (A2n>Max) Or (A2d>Max) Then Begin
+   If A1n<>0 Then X:=(Max-A0n) Div A1n;
+   If A1d<>0 Then Begin If (Max-A0d) Div A1d<X Then X:=(Max-A0d) Div A1d; End;
+   If Den*(2*X*A1d+A0d)>Num*A1d Then Begin
+    A2n:=X*A1n+A0n; A2d:=X*A1d+A0d; A1n:=A2n; A1d:=A2d;
+   End;
+   Break;
+  End;
+  A0n:=A1n; A0d:=A1d; A1n:=A2n; A1d:=A2d;
+  Num:=Den; Den:=NextDen;
+ End;
+ If Sign<>0 Then ON:=-A1n Else ON:=A1n;
+ OD:=A1d;
+End;
+
+{ lit le jeton A de l'en-tete Y4M du fichier d'entree ; sinon 1:1 (comportement historique) }
+Procedure O1AviSar(Var N,D: LongInt);
+Var F: File; B: Array[0..255] Of Byte; Cnt,I,P: LongInt; S: String; V: Int64;
+Begin
+ N:=1; D:=1;
+ Assign(F,InputPath); {$I-}Reset(F,1);{$I+}
+ If IOResult<>0 Then Exit;
+ Cnt:=0; {$I-}BlockRead(F,B,256,Cnt);{$I+}
+ Close(F);
+ If Cnt<10 Then Exit;
+ If Not ((B[0]=89) And (B[1]=85) And (B[2]=86) And (B[3]=52)) Then Exit;
+ S:=''; I:=0;
+ While (I<Cnt) And (B[I]<>10) And (Length(S)<250) Do Begin S:=S+Chr(B[I]); Inc(I); End;
+ N:=0; D:=1;
+ P:=Pos(' A',S);
+ If P>0 Then Begin
+  P:=P+2; V:=0;
+  While (P<=Length(S)) And (S[P] In ['0'..'9']) Do Begin V:=V*10+Ord(S[P])-48; Inc(P); End;
+  N:=V; V:=0;
+  If (P<=Length(S)) And (S[P]=':') Then Begin
+   Inc(P);
+   While (P<=Length(S)) And (S[P] In ['0'..'9']) Do Begin V:=V*10+Ord(S[P])-48; Inc(P); End;
+   D:=V;
+  End Else D:=0;
+  If (N=0) And (D=0) Then D:=1;
+ End;
+End;
+
+{ DAR = SAR * W/H reduite a 16 bits (avienc.c vprp) }
+Procedure O1AviDar(W,H,SN,SD: LongInt; Var Num,Den: LongInt);
+Var A,B,X,Y: Int64;
+Begin
+ O1Reduce(A,B,Int64(SN)*W,Int64(SD)*H,2147483647);
+ O1Reduce(X,Y,A,B,65535);
+ Num:=X; Den:=Y;
+End;
+
+{ sortie existante sans -y (fftools assert_file_overwrite) : question sur stdin ou arret }
+Procedure O1OverwriteGate(Const Path: String);
+Var Ch: Char; NoIn: Boolean; I: Integer; Yes: Boolean;
+Begin
+ NoIn:=False;
+ For I:=1 To ParamCount Do Begin
+  If ParamStr(I)='-nostdin' Then NoIn:=True;
+  If ParamStr(I)='-stdin' Then NoIn:=False;
+  If ParamStr(I)='-hide_banner' Then O1HideBanner:=True;
+  If ParamStr(I)='-n' Then NoOverwrite:=True;
+  If ParamStr(I)='-y' Then Overwrite:=True;
+ End;
+ If Overwrite Then Exit;
+ O1Banner;
+ If NoOverwrite Or NoIn Then Begin
+  If O1LogLevel>=8 Then WriteLn(StdErr,'File ''',Path,''' already exists. Exiting.');
+ End Else Begin
+  Write(StdErr,'File ''',Path,''' already exists. Overwrite? [y/N] '); Flush(StdErr);
+  Yes:=False; Ch:=#0;
+  {$I-}
+  If Not Eof(Input) Then Begin Read(Input,Ch); Yes:=(Ch='y') Or (Ch='Y'); End;
+  {$I+}
+  If IOResult<>0 Then Yes:=False;
+  If Yes Then Begin
+   While Not Eof(Input) And (Ch<>#10) Do Read(Input,Ch);
+   Overwrite:=True;
+   Exit;
+  End;
+  While Not Eof(Input) And (Ch<>#10) Do Read(Input,Ch);
+  If O1LogLevel>=8 Then WriteLn(StdErr,'Not overwriting - exiting');
+ End;
+ If O1LogLevel>=16 Then WriteLn(StdErr,'Error opening output file ',Path,'.');
+ Flush(StdErr); Halt(0);
+End;
+
+
+
 
 Function Lower(S: String): String;
 Var
@@ -89460,7 +89579,8 @@ Begin
  G2OB:=Nil; G2OBLen:=0; G2OBCap:=0; G2OFrames:=0; G2OMaxPk:=0; G2OCapF:=1024;
  GetMem(G2OSizes,G2OCapF*4); GetMem(G2OKeys,G2OCapF);
  Strf:=40+ExtraLen+(ExtraLen And 1);
- Strl:=4+(8+56)+(8+Strf)+(8+4120)+(8+68);
+ O1AviSar(O1AwSn,O1AwSd); O1AwHv:=(O1AwSn>0) And (O1AwSd>0);
+ Strl:=4+(8+56)+(8+Strf)+(8+4120); If O1AwHv Then Strl:=Strl+(8+68);
  Hdrl:=4+(8+56)+(8+Strl)+(8+260);
  G2OTag('RIFF'); G2O32(0); G2OTag('AVI ');
  G2OTag('LIST'); G2O32(Hdrl); G2OTag('hdrl');
@@ -89475,11 +89595,13 @@ Begin
  For I:=0 To ExtraLen-1 Do G2O8(Extra^[I]);
  If Odd(ExtraLen) Then G2O8(0);
  G2OTag('JUNK'); G2O32(4120); G2O16(4); G2O16(0); G2O32(0); G2OTag('00dc'); G2OZ(4120-12);
+ If O1AwHv Then Begin
  G2OTag('vprp'); G2O32(68); G2O32(0); G2O32(0); G2O32((2*Rate+Scale-1) Div (2*Scale));
  G2O32(W); G2O32(H);
- Aw:=W; Ah:=H; G:=Aw; K:=Ah; While K<>0 Do Begin I:=G Mod K; G:=K; K:=I; End; Aw:=Aw Div G; Ah:=Ah Div G;
+ O1AviDar(W,H,O1AwSn,O1AwSd,Aw,Ah);
  G2O32((Aw Shl 16) Or Ah); G2O32(W); G2O32(H); G2O32(1);
  G2O32(H); G2O32(W); G2O32(H); G2O32(W); G2O32(0); G2O32(0); G2O32(0); G2O32(0);
+ End;
  G2OTag('JUNK'); G2O32(260); G2OTag('odml'); G2OTag('dmlh'); G2O32(248); G2OZ(248);
  G2OTag('LIST'); G2O32(26); G2OTag('INFO'); G2OTag('ISFT'); G2O32(14);
  G2OTag('Lavf'); G2OTag('60.1'); G2OTag('6.10'); G2O8(48); G2O8(0);
@@ -109617,7 +109739,7 @@ Begin
  {$I-} Reset(Fo,1); {$I+}
  If IOResult=0 Then Begin
   Close(Fo);
-  If Not FMXOverwrite Then Fail('Sortie existante (utiliser -y): '+FMXOutPath);
+  If Not FMXOverwrite Then O1OverwriteGate(FMXOutPath);
  End;
  FMXReset;
  FMXTmpN:=0;
@@ -118498,6 +118620,2885 @@ End;
 
 { ==== BLOCK-ANCHOR-F7 : inserer le code du groupe F7 juste au-dessus de cette ligne ==== }
 
+Const
+ O1NOpt=193;
+ O1OptNm: Array[0..192] Of String[28]=(
+  'L','h','?','help','-help','version',
+  'buildconf','formats','muxers','demuxers','devices','codecs',
+  'decoders','encoders','bsfs','protocols','filters','pix_fmts',
+  'layouts','sample_fmts','dispositions','colors','sources','sinks',
+  'loglevel','v','report','max_alloc','cpuflags','cpucount',
+  'hide_banner','f','y','n','ignore_unknown','copy_unknown',
+  'recast_media','c','codec','pre','map','map_channel',
+  'map_metadata','map_chapters','t','to','fs','ss',
+  'sseof','seek_timestamp','accurate_seek','isync','itsoffset','itsscale',
+  'timestamp','metadata','program','dframes','benchmark','benchmark_all',
+  'progress','stdin','timelimit','dump','hex','re',
+  'readrate','readrate_initial_burst','target','vsync','frame_drop_threshold','adrift_threshold',
+  'copyts','start_at_zero','copytb','shortest','shortest_buf_duration','bitexact',
+  'apad','dts_delta_threshold','dts_error_threshold','xerror','abort_on','copyinkf',
+  'copypriorss','frames','tag','q','qscale','profile',
+  'filter','filter_threads','filter_script','reinit_filter','filter_complex','filter_complex_threads',
+  'lavfi','filter_complex_script','auto_conversion_filters','stats','stats_period','attach',
+  'dump_attachment','stream_loop','debug_ts','max_error_rate','discard','disposition',
+  'thread_queue_size','find_stream_info','bits_per_raw_sample','stats_enc_pre','stats_enc_post','stats_mux_pre',
+  'stats_enc_pre_fmt','stats_enc_post_fmt','stats_mux_pre_fmt','vframes','r','fpsmax',
+  's','aspect','pix_fmt','display_rotation','display_hflip','display_vflip',
+  'vn','rc_override','vcodec','timecode','pass','passlogfile',
+  'psnr','vstats','vstats_file','vstats_version','vf','intra_matrix',
+  'inter_matrix','chroma_intra_matrix','top','vtag','qphist','fps_mode',
+  'force_fps','streamid','force_key_frames','b','hwaccel','hwaccel_device',
+  'hwaccel_output_format','hwaccels','autorotate','autoscale','fix_sub_duration_heartbeat','aframes',
+  'aq','ar','ac','an','acodec','ab',
+  'atag','sample_fmt','channel_layout','ch_layout','af','guess_layout_max',
+  'sn','scodec','stag','fix_sub_duration','canvas_size','muxdelay',
+  'muxpreload','sdp_file','time_base','enc_time_base','bsf','absf',
+  'vbsf','apre','vpre','spre','fpre','max_muxing_queue_size',
+  'muxing_queue_data_threshold','dcodec','dn','vaapi_device','qsv_device','init_hw_device',
+  'filter_hw_device');
+ O1OptFl: Array[0..192] Of String[8]=(
+  'X','X','X','X','X','X','X','X','X','X',
+  'X','X','X','X','X','X','X','X','X','X',
+  'X','X','XA','XA','A','A','','A','A','A',
+  'B','AIOF','B','B','B','B','B','AIOS','AIOS','AOS',
+  'AOP','AOP','AOS','AOF','AIOF','AIOF','AOF','AIOF','AIF','AIF',
+  'IBF','AIF','AIF','AIS','AOP','AOS','AOS','AOP','B','B',
+  'A','B','A','B','B','IBF','AIF','AIF','AOP','A',
+  'A','A','B','B','A','OBF','AOF','IOBF','AOS','A',
+  'A','B','A','OSB','AOS','AOS','AIOS','AOS','AOP','AOP',
+  'AOS','A','AOS','AIS','A','A','A','A','B','B',
+  'A','AOP','AIS','AIF','B','A','AIS','AOS','AIOF','IBF',
+  'AOS','AOS','AOS','AOS','AOS','AOS','AOS','AOP','AIOS','AOS',
+  'AIOS','AOS','AIOS','AIS','ISB','ISB','IOBF','AOS','AIOP','AOP',
+  'AOS','AOS','B','','A','A','AOP','AOS','AOS','AOS',
+  'AIOS','AIOP','','AOS','OSB','AOP','AOS','AOP','AIS','AIS',
+  'AIS','','AISB','AOSB','OSB','AOP','AOP','AIOS','AIOS','IOBF',
+  'AIOP','AOP','AOP','AIOS','AIOS','AIOS','AOP','AIS','IOBF','AIOP',
+  'AOP','ISB','AIS','AOF','AOF','AO','AOS','AOS','AOS','AOP',
+  'AOP','AOP','AOP','AOP','AOP','AOS','AOS','AIOP','IOBF','A',
+  'A','A','A');
+
+ O1NAv=1125;
+ O1AvNm: Array[0..1124] Of String[28]=(
+  '2pass','8x8dct','a53cc','aa_fixed_key','aac_coder','aac_is','aac_ltp','aac_ms',
+  'aac_pce','aac_pns','aac_pred','aac_tns','abr','activation_bytes','ad_conv_type','adaptation_sets',
+  'adaptive_b','adaptive_i','advanced_editlist','aiv','algorithm','alllayers','allow_raw_vfw','allowed_extensions',
+  'allowed_media_types','alpha_bits','alphablend','alternate_scan','amount','analyzeduration','angle','antialias',
+  'application','apply_cropping','apply_defdispwin','apply_phase_inv','apply_trc','arnr_max_frames','arnr_strength','arnr_type',
+  'assetmaps','async','async_depth','atomic_writing','attempt_recovery','aud','audible_fixed_key','audible_iv',
+  'audible_key','audio_chunk_duration','audio_preload','audio_service_type','auth_type','auto_convert','avbr_accuracy','avbr_convergence',
+  'avioflags','avoid_negative_ts','b_adapt','b_depth','b_qfactor','b_qoffset','b_ref_mode','b_sensitivity',
+  'b_strategy','background','bandwidth','bf','bidir_refine','bit_rate','bitrate','bitrate_limit',
+  'bits_per_codeword','bits_per_mb','blank_value','block','block_size','blocksize','border_mask','boundary_tag',
+  'brand','brd_scale','break_non_keyframes','broadcast','bt','buffer_duration','buffer_size','bufsize',
+  'bug','burst_bits','ca_file','cafile','cavlc','cbr','cbr_quality','cc_stream_map',
+  'cenc_decryption_key','center_mix_level','center_mixlev','cert_file','ch_mode','change_field_order','channel','channel_coupling',
+  'channel_order','channels','chapter','chars_per_frame','charset','cheby','chroma_elim_threshold','chroma_sample_loc_type',
+  'chroma_sample_location','chroma_sample_position','chromaoffset','chunk_duration','chunk_duration_ms','chunk_size','chunk_start_index','chunked_post',
+  'chunks','cinema_mode','clev','cluster_size_limit','cluster_time_limit','cmp','cname','code_size',
+  'codebook_search','codec_whitelist','coder','color','color_primaries','color_range','color_space','color_trc',
+  'colorspace','colour_primaries','comp_duration','compression','compression_algo','compression_level','compressor','compute_clut',
+  'compute_edt','compute_pcr','connect','connect_timeout','connection_timeout','cons_noisegen','content_type','context',
+  'continue_one_color_thresh','cookies','copyright','core_only','correct_ts_overflow','cpl_start_band','cplxblur','cq',
+  'cr_size','cr_threshold','crf','crf_max','crop','crop_bottom','crop_left','crop_right',
+  'crop_top','crtc_id','cryptokey','cues_to_front','custom_stride','cutoff','d','d10_channelcount',
+  'dark_mask','dash','dash_segment_type','dash_track_number','data_field','data_partitioning','dblk_idc','dc',
+  'dca_adpcm','dct','deadline','deblock','debug','decryption_iv','decryption_key','default_delay',
+  'default_fps','default_mode','deint','delay','delete_filler','delete_padding','delivery_mode','device',
+  'dheadphone_mode','dia_size','dialnorm','discard_damaged_percentage','discard_flags','display_aspect_ratio','display_name','display_orientation',
+  'distance','disto_alloc','dither_method','dither_scale','dither_type','dmix_mode','downmix','dpb_size',
+  'dpi','dpm','draw_mouse','drc_scale','driver','drop','drop_frame_timecode','drop_pkts_on_overflow',
+  'drop_second_field','dropamount','dscp','dst_format','dst_h_chr_pos','dst_range','dst_v_chr_pos','dsth',
+  'dstw','dsur_mode','dsurex_mode','dts','dtshd_fallback_time','dtshd_rate','dtx','dual_mono_mode',
+  'dump_separator','dumpgraph','duration','dvb_substream','dvbuffer','dvguid','dvtype','ec',
+  'effort','eia608_extract','empty_hdlr_name','enable_drefs','enable_er','encryption','encryption_iv','encryption_key',
+  'encryption_kid','encryption_scheme','end','end_offset','energy_levels','enforced_encryption','eph','err_detect',
+  'error_protection','error_rate','even_rows_fix','exact_rational','exact_rice_parameters','exchange','export_all','export_path_metadata',
+  'export_side_data','export_xmp','extbrc','extern_huff','extra_bits_bug','extra_hw_frames','extra_sei','extra_window_size',
+  'f_err_detect','f_strict','fastfirstpass','fd','fdebug','fec','fflags','ffrtmphttp_tls',
+  'ffs','field_order','fifo_format','fifo_options','fifo_size','filmgrain','filter_size','filter_type',
+  'final_delay','first_pts','fix_teletext_pts','fixed_frame_rate_flag','fixed_quality','flags','flags2','flip',
+  'flipped_raw_rgb','flush_packets','flv_full_metadata','flv_ignore_prevtag','flv_metadata','flvflags','follow','follow_mouse',
+  'force_duplicated_matrix','forced_idr','forced_subs_only','format','format_modifier','format_options','format_opts','format_version',
+  'format_whitelist','formatprobesize','fp_format','fpsprobesize','frag_duration','frag_interleave','frag_size','frag_type',
+  'fragment_index','fragment_size','frame_duration','frame_pts','frame_rate','frame_size','framerate','frames_per_packet',
+  'framethreads','freq','g','gain','gamma','gateway','gifflags','gifimage',
+  'global_palette','global_quality','global_sidx','gmc','gop_timecode','gpb','gpu','gpu_copy',
+  'grab_x','grab_y','graph','graph_file','hash','hca_highkey','hca_lowkey','hca_subkey',
+  'header','headers','heavy_compr','height','hielevel','highbitdepth','hls_allow_cache','hls_base_url',
+  'hls_delete_threshold','hls_enc','hls_enc_iv','hls_enc_key','hls_enc_key_url','hls_flags','hls_fmp4_init_filename','hls_fmp4_init_resend',
+  'hls_init_time','hls_key_info_file','hls_list_size','hls_master_name','hls_playlist','hls_playlist_type','hls_segment_filename','hls_segment_options',
+  'hls_segment_size','hls_segment_type','hls_start_number_source','hls_subtitle_path','hls_time','hls_vtt_options','http_multiple','http_opts',
+  'http_persistent','http_proxy','http_seekable','http_user_agent','huffman','hwaccel_flags','i_qfactor','i_qoffset',
+  'ibias','iblock','ice_description','ice_genre','ice_name','ice_public','ice_url','ich',
+  'ichl','icl','icy','id3v2_version','idct','idr_interval','ifo_palette','ignore_chapters',
+  'ignore_editlist','ignore_io_errors','ignore_length','ignore_loop','ignore_readorder','ildctcmp','in_channel_count','in_channel_layout',
+  'in_chlayout','in_sample_fmt','in_sample_rate','increment_tc','index_correction','indexmem','individual_header_trailer','init_qpB',
+  'init_qpI','init_qpP','init_seg_name','initial_offset','initial_pause','input_format','inputbw','int_ref_cycle_dist',
+  'int_ref_cycle_size','int_ref_qp_delta','int_ref_type','interleaved_read','internal_sample_fmt','intra_penalty','intra_vlc','iods_audio_profile',
+  'iods_video_profile','iptos','ipttl','irreversible','is_avc','isf','ism_lookahead','isr',
+  'iterative_dia_size','iv','jfif','joint_stereo','kaiser_beta','keep_ar','keep_ass_markup','key',
+  'key_file','keyint_min','kind','kmpreannounce','kmrefreshrate','l','la_depth','last_pred',
+  'latency','layer','layer_rates','layout','ldash','ldkfs','legacy_icecast','level',
+  'lfe_mix_level','lhls','linear_interp','linespeed','linger','list_devices','list_dither','list_drivers',
+  'list_formats','list_standards','listen','listen_timeout','live','live_start_index','lmax','lmin',
+  'load_plugin','load_plugins','local_addr','local_port','local_rtcpport','local_rtpport','localaddr','localport',
+  'location','log_level','look_ahead','look_ahead_depth','look_ahead_downsampling','lookahead_count','loop','loop_filter_level',
+  'loop_filter_sharpness','loopend','loopstart','loro_cmixlev','loro_surmixlev','lossless','lossmaxttl','low_delay_brc',
+  'low_power','lowres','lpc_coeff_precision','lpc_passes','lpc_type','ltrt_cmixlev','ltrt_surmixlev','luma_elim_threshold',
+  'lumi_aq','lumi_mask','m3u8_hold_counters','mapping_family','master_m3u8_publish_rate','master_pl_name','master_pl_publish_rate','matrix_coefficients',
+  'matrix_encoding','max_dec_frame_buffering','max_delay','max_extra_cb_iterations','max_file_size','max_fps','max_frame_delay','max_frame_size',
+  'max_frame_size_i','max_frame_size_p','max_gif_delay','max_interleave_delta','max_interval','max_packet_size','max_partition_order','max_pixels',
+  'max_playback_rate','max_port','max_prediction_order','max_probe_packets','max_qp_b','max_qp_i','max_qp_p','max_recovery_attempts',
+  'max_reload','max_samples','max_size','max_slice_size','max_soft_comp','max_streams','max_strips','max_stts_delta',
+  'max_ts_probe','maxbw','maxrate','mb_info','mbbrc','mbcmp','mbd','mblmax',
+  'mblmin','mbs_per_slice','mbtree','me_method','me_quality','me_range','media_seg_name','memc_only',
+  'mepc','mepre','merge_alpha','merge_pmt_versions','messageapi','metadata_header_padding','method','min_comp',
+  'min_delay','min_frag_duration','min_hard_comp','min_partition_order','min_playback_rate','min_port','min_prediction_order','min_qp_b',
+  'min_qp_i','min_qp_p','min_seg_duration','min_strips','minimum_update_period','minrate','minreq','minversion',
+  'missing_streams','mixing_level','mode','modular','moov_size','motion_est','mov_gamma','movflags',
+  'movie_timescale','mpd_profile','mpeg_quant','mpegts_copyts','mpegts_flags','mpegts_m2ts_mode','mpegts_muxer_options','mpegts_original_network_id',
+  'mpegts_pmt_start_pid','mpegts_service_id','mpegts_service_type','mpegts_start_pid','mpegts_transport_stream_id','mpv_flags','msbc','mss',
+  'multi_dim_quant','multipass','multiple_requests','muxrate','mv0_threshold','mxf_audio_edit_rate','nakreport','nal_length_size',
+  'name','nb_out_samples','nit_period','nitris_compat','no_bitstream','no_resync_search','no_window','noise_reduction',
+  'non_deterministic','non_linear_quant','non_pcm_mode','nonref_p','nssew','num_capture_buffers','num_output_buffers','num_ticks_per_picture',
+  'num_ticks_poc_diff_one','numresolution','obmc','och','ochl','ocl','offset','oggpagesize',
+  'oheadbw','omit_video_pes_length','operating_point','oppoint','optimize_mono','opus_delay','original','osf',
+  'osr','out_channel_count','out_channel_layout','out_chlayout','out_sample_fmt','out_sample_rate','output_sample_bits','output_ts_offset',
+  'overrun_nonfatal','overscan_appropriate_flag','p','p_mask','p_strategy','packet_loss','packet_size','packetsize',
+  'pad','page','page_duration','pagesize','palette','param0','param1','paranoia_mode',
+  'part','partitions','pass_types','passphrase','password','pat_period','pattern_type','payload_size',
+  'payload_type','pbkeylen','pcr_period','peak_block_size','peak_format','peak_ppv','peerlatency','per_frame_metadata',
+  'pes_payload_size','phase_shift','pic_timing_sei','pixel_format','pkt_size','plane_id','playlist','plays',
+  'post_data','postfilter','pre_dia_size','prebuf','precision','precmp','pred','prediction_order',
+  'prediction_order_method','prefer_x_start','preload','preset','print_deinit_summary','private_key','probesize','prog',
+  'prog_order','protocol_blacklist','protocol_opts','protocol_whitelist','ps','psy','psymodel','pts',
+  'qblur','qcomp','qdiff','qm','qmax','qmin','qp','qp_cb_offset',
+  'qp_cr_offset','qsquish','quake3_compat','quality','quant_deadzone','quant_mat','quantizer_noise_shaping','queue_size',
+  'raw_packet_size','rc','rc_buf_aggressivity','rc_eq','rc_init_cplx','rc_init_occupancy','rc_lookahead','rc_max_vbv_use',
+  'rc_min_vbv_use','rc_mode','rc_qmod_amp','rc_qmod_freq','rcvbuf','rcvlatency','rdo','read_ahead_limit',
+  'real_time','real_time_latency_msec','reconnect','reconnect_at_eof','reconnect_delay_max','reconnect_on_http_error','reconnect_on_network_error','reconnect_streamed',
+  'recover_any_error','recovery_point_sei','recovery_wait_streamtime','recovery_wait_time','recv_buffer_size','reference_stream','referer','refs',
+  'region_border','rematrix_maxval','rematrix_precision','rematrix_volume','remove','remove_at_exit','remove_types','reorder_queue_size',
+  'repeat_pps','reply_code','request_channel_layout','request_sample_fmt','resample_cutoff','resampler','reserve_index_space','reservoir',
+  'reset_timestamps','resize','resource','restart_with_keyframe','resync_size','reuse','reuse_socket','reverb',
+  'rf64','rgb_mode','rist_profile','rle','rmvol','room_type','rotate','routing_key',
+  'rtbufsize','rtcp_port','rtmp_app','rtmp_buffer','rtmp_conn','rtmp_enhanced_codecs','rtmp_flashver','rtmp_flush_interval',
+  'rtmp_listen','rtmp_live','rtmp_pageurl','rtmp_playpath','rtmp_subscribe','rtmp_swfhash','rtmp_swfsize','rtmp_swfurl',
+  'rtmp_swfverify','rtmp_tcurl','rtp_flags','rtp_muxer_options','rtpflags','rtsp_flags','rtsp_transport','rw_timeout',
+  's12m_tc','safe','sample_aspect_ratio','sample_rate','sample_size','sar','sbc_delay','sc_detection',
+  'sc_threshold','scan_all_pmts','scan_offset','scenario','scplx_mask','sdp_flags','sdt_period','secret',
+  'seek2any','seek_streams_individually','seekable','seg_duration','seg_format_options','seg_max_retry','segment_atclocktime','segment_clocktime_offset',
+  'segment_clocktime_wrap_duration','segment_format','segment_format_options','segment_frames','segment_header_filename','segment_list','segment_list_entry_prefix','segment_list_flags',
+  'segment_list_size','segment_list_type','segment_start_number','segment_time','segment_time_delta','segment_time_metadata','segment_times','segment_wrap',
+  'segment_wrap_number','sei','sei_user_data','select_region','send_buffer_size','send_expect_100','seq','seq_disp_ext',
+  'serial_offset','server','sharpness','short_seek_size','show_region','signal_standard','silence_threshold','single_file',
+  'single_file_name','single_sei_nal_unit','sixteen_color_thresh','skip_alpha','skip_bottom','skip_cmp','skip_cursor','skip_empty_cb',
+  'skip_estimate_duration_from_pts','skip_exp','skip_factor','skip_frame','skip_frame_thresh','skip_idct','skip_initial_bytes','skip_iods',
+  'skip_loop_filter','skip_rate_check','skip_threshold','skip_top','skip_unknown_pmt','slev','slice_height','slice_width',
+  'slicecrc','slices','smoother','sndbuf','snddropdelay','sop','spatial_aq','spdif_flags',
+  'speed','src_format','src_h_chr_pos','src_range','src_v_chr_pos','srch','srcw','srt_streamid',
+  'srtp_in_params','srtp_in_suite','srtp_out_params','srtp_out_suite','ssim','ssim_acc','ssrc','sta',
+  'standard','start','start_number','start_number_range','start_one_color_thresh','start_time','start_time_realtime','stereo_rematrixing',
+  'store_user_comments','stream_name','streaming','strftime','strftime_mkdir','strict','strict_gop','strict_mime_boundary',
+  'strip_number_adaptivity','structured_slices','sub_charenc','sub_charenc_mode','sub_name','subcmp','subfps','subimage',
+  'subq','subsong','surfaces','surround_mix_level','surround_mixlev','swr_flags','sws_dither','sws_flags',
+  'syncpoints','tables_version','target_latency','target_level','tcp_mss','tcp_nodelay','tcplx_mask','td',
+  'temporal_aq','texture','thread_type','threads','thumbnail','tick_rate','ticks_per_frame','tier',
+  'tile_cols','tile_columns','tile_groups','tile_height','tile_rows','tile_width','tiles','tilethreads',
+  'time_shift_buffer_depth','timecode_frame_start','timeout','timeshift','timestamps','tlpktdrop','tls','tls_verify',
+  'tolerance','track_index','trans_color','transfer_characteristics','transform_skip','transtype','trellis','truncate',
+  'ts','ts_from_file','ts_packetsize','tsbpd','tsbpddelay','tsf','ttl','tune',
+  'txt_chop_spaces','txt_chop_top','txt_default_region','txt_duration','txt_format','txt_left','txt_opacity','txt_page',
+  'txt_top','txt_transparent','type','uch','uchl','udplite_coverage','udu_sei','umv',
+  'update','update_period','usage','use_absolute_path','use_buggy_lpc','use_editlist','use_fifo','use_libv4l2',
+  'use_mfra_for','use_odml','use_stream_ids_as_track_ids','use_template','use_tfdt','use_timeline','use_wallclock_as_timestamps','used_channel_count',
+  'used_chlayout','user_agent','usetoc','utc_timing_url','vad','var_stream_map','variance_aq','vbr',
+  'vendor','verbosity','verifyhost','version_major','version_minor','video_format','video_full_range_flag','video_size',
+  'video_track_timescale','vp8flags','wallclock','wavelet_depth','wavelet_type','weightb','weighted_pred','weightp',
+  'width','window_borderless','window_enable_quit','window_fullscreen','window_id','window_size','window_title','window_x',
+  'window_y','wpredp','write_apetag','write_bext','write_btrt','write_channel_mask','write_crc','write_crc32',
+  'write_empty_segments','write_header','write_header_ret','write_header_trailer','write_id3v1','write_id3v2','write_index','write_mpeg2',
+  'write_peak','write_prft','write_tmcd','write_to_source','write_trailer_ret','write_xing','x','x264_build',
+  'x264opts','xoffset','yoffset','zero_new_constraint_set_flags','zerolatency');
+
+ O1OptHp: Array[0..192] Of String[96]=(
+  '','','',
+  '','','',
+  '','','',
+  '','','',
+  '','','',
+  '','','',
+  '','','',
+  '','','',
+  '','','',
+  '','','',
+  '','force format','overwrite output files',
+  'never overwrite output files','Ignore unknown stream types','Copy unknown stream types',
+  'allow recasting stream type in order to force a decoder of different media type','codec name','codec name',
+  'preset name','set input stream mapping','map an audio channel from one stream to another (deprecated)',
+  'set metadata information of outfile from infile','set chapters mapping','record or transcode "duration" seconds of audio/video',
+  'record or transcode stop time','set the limit file size in bytes','set the start time offset',
+  'set the start time offset relative to EOF','enable/disable seeking by timestamp with -ss','enable/disable accurate seeking with -ss',
+  'Indicate the input index for sync reference','set the input ts offset','set the input ts scale',
+  'set the recording timestamp (''now'' to set the current time)','add metadata','add program with specified streams',
+  'set the number of data frames to output','add timings for benchmarking','add timings for each task',
+  'write program-readable progress information','enable or disable interaction on standard input','set max runtime in seconds in CPU user time',
+  'dump each input packet','when dumping packets, also dump the payload','read input at native frame rate; equivalent to -readrate 1',
+  'read input at specified rate','The initial amount of input to burst read before imposing any readrate','specify target file type ("vcd", "svcd", "dvd", "dv" or "dv50" with optional prefixes "pal-", "',
+  'set video sync method globally; deprecated, use -fps_mode','frame drop threshold','deprecated, does nothing',
+  'copy timestamps','shift input timestamps to start at 0 when using copyts','copy input stream time base when stream copying',
+  'finish encoding within shortest input','maximum buffering duration (in seconds) for the -shortest option','bitexact mode',
+  'audio pad','timestamp discontinuity delta threshold','timestamp error delta threshold',
+  'exit on error','abort on the specified condition flags','copy initial non-keyframes',
+  'copy or discard frames before start time','set the number of frames to output','force codec tag/fourcc',
+  'use fixed quality scale (VBR)','use fixed quality scale (VBR)','set profile',
+  'set stream filtergraph','number of non-complex filter threads','read stream filtergraph description from a file',
+  'reinit filtergraph on input parameter changes','create a complex filtergraph','number of threads for -filter_complex',
+  'create a complex filtergraph','read complex filtergraph description from a file','enable automatic conversion filters globally',
+  'print progress report during encoding','set the period at which ffmpeg updates stats and -progress output','add an attachment to the output file',
+  'extract an attachment into a file','set number of times input stream shall be looped','print timestamp debugging info',
+  'ratio of decoding errors (0.0: no errors, 1.0: 100% errors) above which ffmpeg returns an error','discard','disposition',
+  'set the maximum number of queued packets from the demuxer','read and decode the streams to fill missing information with heuristics','set the number of bits per raw sample',
+  'write encoding stats before encoding','write encoding stats after encoding','write packets stats before muxing',
+  'format of the stats written with -stats_enc_pre','format of the stats written with -stats_enc_post','format of the stats written with -stats_mux_pre',
+  'set the number of video frames to output','set frame rate (Hz value, fraction or abbreviation)','set max frame rate (Hz value, fraction or abbreviation)',
+  'set frame size (WxH or abbreviation)','set aspect ratio (4:3, 16:9 or 1.3333, 1.7777)','set pixel format',
+  'set pure counter-clockwise rotation in degrees for stream(s)','set display horizontal flip for stream(s) (overrides any display rotation if it is not set)','set display vertical flip for stream(s) (overrides any display rotation if it is not set)',
+  'disable video','rate control override for specific intervals','force video codec (''copy'' to copy stream)',
+  'set initial TimeCode value.','select the pass number (1 to 3)','select two pass log file name prefix',
+  'calculate PSNR of compressed frames (deprecated, use -flags +psnr)','dump video coding statistics to file','dump video coding statistics to file',
+  'Version of the vstats format to use.','set video filters','specify intra matrix coeffs',
+  'specify inter matrix coeffs','specify intra matrix coeffs','deprecated, use the setfield video filter',
+  'force video tag/fourcc','deprecated, does nothing','set framerate mode for matching video streams; overrides vsync',
+  'force the selected framerate, disable the best supported framerate selection','set the value of an outfile streamid','force key frames at specified timestamps',
+  'video bitrate (please use -b:v)','use HW accelerated decoding','select a device for HW acceleration',
+  'select output format used with HW accelerated decoding','show available HW acceleration methods','automatically insert correct rotate filters',
+  'automatically insert a scale filter at the end of the filter graph','set this video output stream to be a heartbeat stream for fix_sub_duration, according to which ','set the number of audio frames to output',
+  'set audio quality (codec-specific)','set audio sampling rate (in Hz)','set number of audio channels',
+  'disable audio','force audio codec (''copy'' to copy stream)','audio bitrate (please use -b:a)',
+  'force audio tag/fourcc','set sample format','set channel layout',
+  'set channel layout','set audio filters','set the maximum number of channels to try to guess the channel layout',
+  'disable subtitle','force subtitle codec (''copy'' to copy stream)','force subtitle tag/fourcc',
+  'fix subtitles duration','set canvas size (WxH or abbreviation)','set the maximum demux-decode delay',
+  'set the initial demux-decode delay','specify a file in which to print sdp information','set the desired time base hint for output stream (1:24, 1:48000 or 0.04166, 2.0833e-5)',
+  'set the desired time base for the encoder (1:24, 1:48000 or 0.04166, 2.0833e-5). two special va','A comma-separated list of bitstream filters','deprecated',
+  'deprecated','set the audio options to the indicated preset','set the video options to the indicated preset',
+  'set the subtitle options to the indicated preset','set options from indicated preset file','maximum number of packets that can be buffered while waiting for all streams to initialize',
+  'set the threshold after which max_muxing_queue_size is taken into account','force data codec (''copy'' to copy stream)','disable data',
+  'set VAAPI hardware device (DirectX adapter index, DRM path or X11 display name)','set QSV hardware device (DirectX adapter index, DRM path or X11 display name)','initialise hardware device',
+  'set hardware device used when filtering');
+
+ O1EncN=223;
+ O1Enc: Array[0..222] Of String[24]=(
+  'a64multi','a64multi5','aac','ac3','ac3_fixed','adpcm_adx','adpcm_argo','adpcm_ima_alp',
+  'adpcm_ima_amv','adpcm_ima_apm','adpcm_ima_qt','adpcm_ima_ssi','adpcm_ima_wav','adpcm_ima_ws','adpcm_ms','adpcm_swf',
+  'adpcm_yamaha','alac','alias_pix','amv','anull','apng','aptx','aptx_hd',
+  'ass','asv1','asv2','av1_nvenc','av1_qsv','av1_vaapi','avrp','avui',
+  'ayuv','bitpacked','bmp','cfhd','cinepak','cljr','comfortnoise','dca',
+  'dfpwm','dnxhd','dpx','dvbsub','dvdsub','dvvideo','eac3','exr',
+  'ffv1','ffvhuff','fits','flac','flashsv','flashsv2','flv','g722',
+  'g723_1','g726','g726le','gif','h261','h263','h263_v4l2m2m','h263p',
+  'h264_nvenc','h264_qsv','h264_v4l2m2m','h264_vaapi','hap','hdr','hevc_nvenc','hevc_qsv',
+  'hevc_v4l2m2m','hevc_vaapi','huffyuv','jpeg2000','jpegls','libaom-av1','libcodec2','libgsm',
+  'libgsm_ms','libjxl','libmp3lame','libopenjpeg','libopus','librav1e','libshine','libspeex',
+  'libsvtav1','libtheora','libtwolame','libvorbis','libvpx','libvpx-vp9','libwebp','libwebp_anim',
+  'libx264','libx264rgb','libx265','libxvid','ljpeg','magicyuv','mjpeg','mjpeg_qsv',
+  'mjpeg_vaapi','mlp','mov_text','mp2','mp2fixed','mpeg1video','mpeg2_qsv','mpeg2_vaapi',
+  'mpeg2video','mpeg4','mpeg4_v4l2m2m','msmpeg4','msmpeg4v2','msrle','msvideo1','nellymoser',
+  'opus','pam','pbm','pcm_alaw','pcm_bluray','pcm_dvd','pcm_f32be','pcm_f32le',
+  'pcm_f64be','pcm_f64le','pcm_mulaw','pcm_s16be','pcm_s16be_planar','pcm_s16le','pcm_s16le_planar','pcm_s24be',
+  'pcm_s24daud','pcm_s24le','pcm_s24le_planar','pcm_s32be','pcm_s32le','pcm_s32le_planar','pcm_s64be','pcm_s64le',
+  'pcm_s8','pcm_s8_planar','pcm_u16be','pcm_u16le','pcm_u24be','pcm_u24le','pcm_u32be','pcm_u32le',
+  'pcm_u8','pcm_vidc','pcx','pfm','pgm','pgmyuv','phm','png',
+  'ppm','prores','prores_aw','prores_ks','qoi','qtrle','r10k','r210',
+  'rawvideo','real_144','roq_dpcm','roqvideo','rpza','rv10','rv20','s302m',
+  'sbc','sgi','smc','snow','sonic','sonicls','speedhq','srt',
+  'ssa','subrip','sunrast','svq1','targa','text','tiff','truehd',
+  'tta','ttml','utvideo','v210','v308','v408','v410','vbn',
+  'vc2','vnull','vorbis','vp8_v4l2m2m','vp8_vaapi','vp9_qsv','vp9_vaapi','wavpack',
+  'wbmp','webvtt','wmav1','wmav2','wmv1','wmv2','wrapped_avframe','xbm',
+  'xface','xsub','xwd','y41p','yuv4','zlib','zmbv');
+
+ O1DecN=534;
+ O1Dec: Array[0..533] Of String[24]=(
+  '012v','4xm','8bps','8svx_exp','8svx_fib','aac','aac_fixed','aac_latm',
+  'aasc','ac3','ac3_fixed','acelp.kelvin','adpcm_4xm','adpcm_adx','adpcm_afc','adpcm_agm',
+  'adpcm_aica','adpcm_argo','adpcm_ct','adpcm_dtk','adpcm_ea','adpcm_ea_maxis_xa','adpcm_ea_r1','adpcm_ea_r2',
+  'adpcm_ea_r3','adpcm_ea_xas','adpcm_ima_acorn','adpcm_ima_alp','adpcm_ima_amv','adpcm_ima_apc','adpcm_ima_apm','adpcm_ima_cunning',
+  'adpcm_ima_dat4','adpcm_ima_dk3','adpcm_ima_dk4','adpcm_ima_ea_eacs','adpcm_ima_ea_sead','adpcm_ima_iss','adpcm_ima_moflex','adpcm_ima_mtf',
+  'adpcm_ima_oki','adpcm_ima_qt','adpcm_ima_rad','adpcm_ima_smjpeg','adpcm_ima_ssi','adpcm_ima_wav','adpcm_ima_ws','adpcm_ms',
+  'adpcm_mtaf','adpcm_psx','adpcm_sbpro_2','adpcm_sbpro_3','adpcm_sbpro_4','adpcm_swf','adpcm_thp','adpcm_thp_le',
+  'adpcm_vima','adpcm_xa','adpcm_xmd','adpcm_yamaha','adpcm_zork','agm','aic','alac',
+  'alias_pix','als','amrnb','amrwb','amv','anm','ansi','anull',
+  'apac','ape','apng','aptx','aptx_hd','arbc','argo','ass',
+  'asv1','asv2','atrac1','atrac3','atrac3al','atrac3plus','atrac3plusal','atrac9',
+  'aura','aura2','av1','av1_cuvid','av1_qsv','avrn','avrp','avs',
+  'avui','ayuv','bethsoftvid','bfi','binkaudio_dct','binkaudio_rdft','binkvideo','bintext',
+  'bitpacked','bmp','bmv_audio','bmv_video','bonk','brender_pix','c93','camstudio',
+  'camtasia','cavs','cbd2_dpcm','cc_dec','cdgraphics','cdtoons','cdxl','cfhd',
+  'cinepak','clearvideo','cljr','cllc','comfortnoise','cook','cpia','cri',
+  'cyuv','dca','dds','derf_dpcm','dfa','dfpwm','dirac','dnxhd',
+  'dolby_e','dpx','dsd_lsbf','dsd_lsbf_planar','dsd_msbf','dsd_msbf_planar','dsicinaudio','dsicinvideo',
+  'dss_sp','dst','dvaudio','dvbsub','dvdsub','dvvideo','dxa','dxtory',
+  'dxv','eac3','eacmv','eamad','eatgq','eatgv','eatqi','escape124',
+  'escape130','evrc','exr','fastaudio','ffv1','ffvhuff','fic','fits',
+  'flac','flashsv','flashsv2','flic','flv','fmvc','fraps','frwu',
+  'ftr','g2m','g722','g723_1','g726','g726le','g729','gdv',
+  'gem','gif','gremlin_dpcm','gsm','gsm_ms','h261','h263','h263_v4l2m2m',
+  'h263i','h263p','h264','h264_cuvid','h264_qsv','h264_v4l2m2m','hap','hca',
+  'hcom','hdr','hevc','hevc_cuvid','hevc_qsv','hevc_v4l2m2m','hnm4video','hq_hqa',
+  'hqx','huffyuv','hymt','iac','idcinvideo','idf','iff','ilbc',
+  'imc','imm4','imm5','indeo2','indeo3','indeo4','indeo5','interplay_dpcm',
+  'interplayacm','interplayvideo','ipu','jacosub','jpeg2000','jpegls','jv','kgv1',
+  'kmvc','lagarith','libaom-av1','libcodec2','libdav1d','libgsm','libgsm_ms','libjxl',
+  'libopus','librsvg','libspeex','libvorbis','libvpx','libvpx-vp9','libzvbi_teletextdec','loco',
+  'lscr','m101','mace3','mace6','magicyuv','mdec','media100','metasound',
+  'microdvd','mimic','misc4','mjpeg','mjpeg_cuvid','mjpeg_qsv','mjpegb','mlp',
+  'mmvideo','mobiclip','motionpixels','mov_text','mp1','mp1float','mp2','mp2float',
+  'mp3','mp3adu','mp3adufloat','mp3float','mp3on4','mp3on4float','mpc7','mpc8',
+  'mpeg1_cuvid','mpeg1_v4l2m2m','mpeg1video','mpeg2_cuvid','mpeg2_qsv','mpeg2_v4l2m2m','mpeg2video','mpeg4',
+  'mpeg4_cuvid','mpeg4_v4l2m2m','mpegvideo','mpl2','msa1','mscc','msmpeg4','msmpeg4v1',
+  'msmpeg4v2','msnsiren','msp2','msrle','mss1','mss2','msvideo1','mszh',
+  'mts2','mv30','mvc1','mvc2','mvdv','mvha','mwsc','mxpeg',
+  'nellymoser','notchlc','nuv','on2avc','opus','osq','paf_audio','paf_video',
+  'pam','pbm','pcm_alaw','pcm_bluray','pcm_dvd','pcm_f16le','pcm_f24le','pcm_f32be',
+  'pcm_f32le','pcm_f64be','pcm_f64le','pcm_lxf','pcm_mulaw','pcm_s16be','pcm_s16be_planar','pcm_s16le',
+  'pcm_s16le_planar','pcm_s24be','pcm_s24daud','pcm_s24le','pcm_s24le_planar','pcm_s32be','pcm_s32le','pcm_s32le_planar',
+  'pcm_s64be','pcm_s64le','pcm_s8','pcm_s8_planar','pcm_sga','pcm_u16be','pcm_u16le','pcm_u24be',
+  'pcm_u24le','pcm_u32be','pcm_u32le','pcm_u8','pcm_vidc','pcx','pdv','pfm',
+  'pgm','pgmyuv','pgssub','pgx','phm','photocd','pictor','pixlet',
+  'pjs','png','ppm','prores','prosumer','psd','ptx','qcelp',
+  'qdm2','qdmc','qdraw','qoi','qpeg','qtrle','r10k','r210',
+  'ralf','rasc','rawvideo','real_144','real_288','realtext','rka','rl2',
+  'roq_dpcm','roqvideo','rpza','rscc','rtv1','rv10','rv20','rv30',
+  'rv40','s302m','sami','sanm','sbc','scpr','screenpresso','sdx2_dpcm',
+  'sga','sgi','sgirle','sheervideo','shorten','simbiosis_imx','sipr','siren',
+  'smackaud','smackvid','smc','smvjpeg','snow','sol_dpcm','sonic','sp5x',
+  'speedhq','speex','srgc','srt','ssa','stl','subrip','subviewer',
+  'subviewer1','sunrast','svq1','svq3','tak','targa','targa_y216','tdsc',
+  'text','theora','thp','tiertexseqvideo','tiff','tmv','truehd','truemotion1',
+  'truemotion2','truemotion2rt','truespeech','tscc2','tta','twinvq','txd','ultimotion',
+  'utvideo','v210','v210x','v308','v408','v410','vb','vble',
+  'vbn','vc1','vc1_cuvid','vc1_qsv','vc1_v4l2m2m','vc1image','vcr1','vmdaudio',
+  'vmdvideo','vmix','vmnc','vnull','vorbis','vp3','vp4','vp5',
+  'vp6','vp6a','vp6f','vp7','vp8','vp8_cuvid','vp8_qsv','vp8_v4l2m2m',
+  'vp9','vp9_cuvid','vp9_qsv','vp9_v4l2m2m','vplayer','vqavideo','vqc','wady_dpcm',
+  'wavarc','wavesynth','wavpack','wbmp','wcmv','webp','webvtt','wmalossless',
+  'wmapro','wmav1','wmav2','wmavoice','wmv1','wmv2','wmv3','wmv3image',
+  'wnv1','wrapped_avframe','ws_snd1','xan_dpcm','xan_wc3','xan_wc4','xbin','xbm',
+  'xface','xl','xma1','xma2','xpm','xsub','xwd','y41p',
+  'ylc','yop','yuv4','zerocodec','zlib','zmbv');
+
+ O1MuxN=189;
+ O1Mux: Array[0..188] Of String[24]=(
+  '3g2','3gp','a64','ac3','ac4','adts','adx','aiff',
+  'alaw','alp','alsa','amr','amv','apm','apng','aptx',
+  'aptx_hd','argo_asf','argo_cvg','asf','asf_stream','ass','ast','au',
+  'avi','avif','avm2','avs2','avs3','bit','caca','caf',
+  'cavsvideo','chromaprint','codec2','codec2raw','crc','dash','data','daud',
+  'dfpwm','dirac','dnxhd','dts','dv','dvd','eac3','evc',
+  'f32be','f32le','f4v','f64be','f64le','fbdev','ffmetadata','fifo',
+  'fifo_test','film_cpk','filmstrip','fits','flac','flv','framecrc','framehash',
+  'framemd5','g722','g723_1','g726','g726le','gif','gsm','gxf',
+  'h261','h263','h264','hash','hds','hevc','hls','ico',
+  'ilbc','image2','image2pipe','ipod','ircam','ismv','ivf','jacosub',
+  'kvag','latm','lrc','m4v','matroska','md5','microdvd','mjpeg',
+  'mkvtimestamp_v2','mlp','mmf','mov','mp2','mp3','mp4','mpeg',
+  'mpeg1video','mpeg2video','mpegts','mpjpeg','mulaw','mxf','mxf_d10','mxf_opatom',
+  'null','nut','obu','oga','ogg','ogv','oma','opengl',
+  'opus','oss','psp','pulse','rawvideo','rm','roq','rso',
+  'rtp','rtp_mpegts','rtsp','s16be','s16le','s24be','s24le','s32be',
+  's32le','s8','sap','sbc','scc','sdl','sdl2','segment',
+  'smjpeg','smoothstreaming','sox','spdif','spx','srt','ssegment','stream_segment',
+  'streamhash','sup','svcd','swf','tee','truehd','tta','ttml',
+  'u16be','u16le','u24be','u24le','u32be','u32le','u8','uncodedframecrc',
+  'v4l2','vc1','vc1test','vcd','vidc','video4linux2','vob','voc',
+  'vvc','w64','wav','webm','webm_chunk','webm_dash_manifest','webp','webvtt',
+  'wsaud','wtv','wv','xv','yuv4mpegpipe');
+
+ O1DemN=374;
+ O1Dem: Array[0..373] Of String[24]=(
+  '3dostr','3g2','3gp','4xm','aa','aac','aax','ac3',
+  'ac4','ace','acm','act','adf','adp','ads','adx',
+  'aea','afc','aiff','aix','alaw','alias_pix','alp','alsa',
+  'amr','amrnb','amrwb','anm','apac','apc','ape','apm',
+  'apng','aptx','aptx_hd','aqtitle','argo_asf','argo_brp','argo_cvg','asf',
+  'asf_o','ass','ast','au','av1','avi','avr','avs',
+  'avs2','avs3','bethsoftvid','bfi','bfstm','bin','bink','binka',
+  'bit','bitpacked','bmp_pipe','bmv','boa','bonk','brender_pix','brstm',
+  'c93','caf','cavsvideo','cdg','cdxl','cine','codec2','codec2raw',
+  'concat','cri_pipe','dash','data','daud','dcstr','dds_pipe','derf',
+  'dfa','dfpwm','dhav','dirac','dnxhd','dpx_pipe','dsf','dsicin',
+  'dss','dts','dtshd','dv','dvbsub','dvbtxt','dxa','ea',
+  'ea_cdata','eac3','epaf','evc','exr_pipe','f32be','f32le','f64be',
+  'f64le','fbdev','ffmetadata','film_cpk','filmstrip','fits','flac','flic',
+  'flv','frm','fsb','fwse','g722','g723_1','g726','g726le',
+  'g729','gdv','gem_pipe','genh','gif','gif_pipe','gsm','gxf',
+  'h261','h263','h264','hca','hcom','hdr_pipe','hevc','hls',
+  'hnm','ico','idcin','idf','iec61883','iff','ifv','ilbc',
+  'image2','image2pipe','imf','ingenient','ipmovie','ipu','ircam','iss',
+  'iv8','ivf','ivr','j2k_pipe','jack','jacosub','jpeg_pipe','jpegls_pipe',
+  'jpegxl_anim','jpegxl_pipe','jv','kmsgrab','kux','kvag','laf','lavfi',
+  'libcdio','libdc1394','libgme','libopenmpt','live_flv','lmlm4','loas','lrc',
+  'luodat','lvf','lxf','m4a','m4v','matroska','mca','mcc',
+  'mgsts','microdvd','mj2','mjpeg','mjpeg_2000','mlp','mlv','mm',
+  'mmf','mods','moflex','mov','mp3','mp4','mpc','mpc8',
+  'mpeg','mpegts','mpegtsraw','mpegvideo','mpjpeg','mpl2','mpsub','msf',
+  'msnwctcp','msp','mtaf','mtv','mulaw','musx','mv','mvi',
+  'mxf','mxg','nc','nistsphere','nsp','nsv','nut','nuv',
+  'obu','ogg','oma','openal','osq','oss','paf','pam_pipe',
+  'pbm_pipe','pcx_pipe','pdv','pfm_pipe','pgm_pipe','pgmyuv_pipe','pgx_pipe','phm_pipe',
+  'photocd_pipe','pictor_pipe','pjs','pmp','png_pipe','pp_bnk','ppm_pipe','psd_pipe',
+  'psxstr','pulse','pva','pvf','qcp','qdraw_pipe','qoi_pipe','r3d',
+  'rawvideo','realtext','redspark','rka','rl2','rm','roq','rpl',
+  'rsd','rso','rtp','rtsp','s16be','s16le','s24be','s24le',
+  's32be','s32le','s337m','s8','sami','sap','sbc','sbg',
+  'scc','scd','sdns','sdp','sdr2','sds','sdx','ser',
+  'sga','sgi_pipe','shn','siff','simbiosis_imx','sln','smjpeg','smk',
+  'smush','sol','sox','spdif','srt','stl','subviewer','subviewer1',
+  'sunrast_pipe','sup','svag','svg_pipe','svs','swf','tak','tedcaptions',
+  'thp','tiertexseq','tiff_pipe','tmv','truehd','tta','tty','txd',
+  'ty','u16be','u16le','u24be','u24le','u32be','u32le','u8',
+  'usm','v210','v210x','v4l2','vag','vbn_pipe','vc1','vc1test',
+  'vidc','video4linux2','vividas','vivo','vmd','vobsub','voc','vpk',
+  'vplayer','vqf','vvc','w64','wady','wav','wavarc','wc3movie',
+  'webm','webm_dash_manifest','webp_pipe','webvtt','wsaud','wsd','wsvqa','wtv',
+  'wv','wve','x11grab','xa','xbin','xbm_pipe','xmd','xmv',
+  'xpm_pipe','xvag','xwd_pipe','xwma','yop','yuv4mpegpipe');
+
+ O1PixN=228;
+ O1Pix: Array[0..227] Of String[24]=(
+  '0bgr','0rgb','abgr','argb','ayuv64be','ayuv64le','bayer_bggr16be','bayer_bggr16le',
+  'bayer_bggr8','bayer_gbrg16be','bayer_gbrg16le','bayer_gbrg8','bayer_grbg16be','bayer_grbg16le','bayer_grbg8','bayer_rggb16be',
+  'bayer_rggb16le','bayer_rggb8','bgr0','bgr24','bgr4','bgr444be','bgr444le','bgr48be',
+  'bgr48le','bgr4_byte','bgr555be','bgr555le','bgr565be','bgr565le','bgr8','bgra',
+  'bgra64be','bgra64le','cuda','d3d11','d3d11va_vld','drm_prime','dxva2_vld','gbrap',
+  'gbrap10be','gbrap10le','gbrap12be','gbrap12le','gbrap14be','gbrap14le','gbrap16be','gbrap16le',
+  'gbrapf32be','gbrapf32le','gbrp','gbrp10be','gbrp10le','gbrp12be','gbrp12le','gbrp14be',
+  'gbrp14le','gbrp16be','gbrp16le','gbrp9be','gbrp9le','gbrpf32be','gbrpf32le','gray',
+  'gray10be','gray10le','gray12be','gray12le','gray14be','gray14le','gray16be','gray16le',
+  'gray9be','gray9le','grayf32be','grayf32le','mediacodec','mmal','monob','monow',
+  'nv12','nv16','nv20be','nv20le','nv21','nv24','nv42','opencl',
+  'p010be','p010le','p012be','p012le','p016be','p016le','p210be','p210le',
+  'p212be','p212le','p216be','p216le','p410be','p410le','p412be','p412le',
+  'p416be','p416le','pal8','qsv','rgb0','rgb24','rgb4','rgb444be',
+  'rgb444le','rgb48be','rgb48le','rgb4_byte','rgb555be','rgb555le','rgb565be','rgb565le',
+  'rgb8','rgba','rgba64be','rgba64le','rgbaf16be','rgbaf16le','rgbaf32be','rgbaf32le',
+  'rgbf32be','rgbf32le','uyvy422','uyyvyy411','vaapi','vdpau','videotoolbox_vld','vulkan',
+  'vuya','vuyx','x2bgr10be','x2bgr10le','x2rgb10be','x2rgb10le','xv30be','xv30le',
+  'xv36be','xv36le','xvmc','xyz12be','xyz12le','y210be','y210le','y212be',
+  'y212le','ya16be','ya16le','ya8','yuv410p','yuv411p','yuv420p','yuv420p10be',
+  'yuv420p10le','yuv420p12be','yuv420p12le','yuv420p14be','yuv420p14le','yuv420p16be','yuv420p16le','yuv420p9be',
+  'yuv420p9le','yuv422p','yuv422p10be','yuv422p10le','yuv422p12be','yuv422p12le','yuv422p14be','yuv422p14le',
+  'yuv422p16be','yuv422p16le','yuv422p9be','yuv422p9le','yuv440p','yuv440p10be','yuv440p10le','yuv440p12be',
+  'yuv440p12le','yuv444p','yuv444p10be','yuv444p10le','yuv444p12be','yuv444p12le','yuv444p14be','yuv444p14le',
+  'yuv444p16be','yuv444p16le','yuv444p9be','yuv444p9le','yuva420p','yuva420p10be','yuva420p10le','yuva420p16be',
+  'yuva420p16le','yuva420p9be','yuva420p9le','yuva422p','yuva422p10be','yuva422p10le','yuva422p12be','yuva422p12le',
+  'yuva422p16be','yuva422p16le','yuva422p9be','yuva422p9le','yuva444p','yuva444p10be','yuva444p10le','yuva444p12be',
+  'yuva444p12le','yuva444p16be','yuva444p16le','yuva444p9be','yuva444p9le','yuvj411p','yuvj420p','yuvj422p',
+  'yuvj440p','yuvj444p','yuyv422','yvyu422');
+
+Procedure O1TxVersion(Var T: Text);
+Begin
+ WriteLn(T,'ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers');
+ WriteLn(T,'built with gcc 13 (Ubuntu 13.2.0-23ubuntu3)');
+ Write(T,'configuration: --prefix=/usr --extra-version=3ubuntu5 --toolchain=hardened --libdir=/usr/lib/x86_64-linux-gnu --incdir=/usr/include/x86_64-linux-gnu --arch=amd64 --enable-gpl --disable-stripping --dis');
+ Write(T,'able-omx --enable-gnutls --enable-libaom --enable-libass --enable-libbs2b --enable-libcaca --enable-libcdio --enable-libcodec2 --enable-libdav1d --enable-libflite --enable-libfontconfig --enable-libfr');
+ Write(T,'eetype --enable-libfribidi --enable-libglslang --enable-libgme --enable-libgsm --enable-libharfbuzz --enable-libmp3lame --enable-libmysofa --enable-libopenjpeg --enable-libopenmpt --enable-libopus --e');
+ Write(T,'nable-librubberband --enable-libshine --enable-libsnappy --enable-libsoxr --enable-libspeex --enable-libtheora --enable-libtwolame --enable-libvidstab --enable-libvorbis --enable-libvpx --enable-libwe');
+ Write(T,'bp --enable-libx265 --enable-libxml2 --enable-libxvid --enable-libzimg --enable-openal --enable-opencl --enable-opengl --disable-sndio --enable-libvpl --disable-libmfx --enable-libdc1394 --enable-libd');
+ Write(T,'rm --enable-libiec61883 --enable-chromaprint --enable-frei0r --enable-ladspa --enable-libbluray --enable-libjack --enable-libpulse --enable-librabbitmq --enable-librist --enable-libsrt --enable-libssh');
+ Write(T,' --enable-libsvtav1 --enable-libx264 --enable-libzmq --enable-libzvbi --enable-lv2 --enable-sdl2 --enable-libplacebo --enable-librav1e --enable-pocketsphinx --enable-librsvg --enable-libjxl --enable-s');
+ WriteLn(T,'hared');
+ WriteLn(T,'libavutil      58. 29.100 / 58. 29.100');
+ WriteLn(T,'libavcodec     60. 31.102 / 60. 31.102');
+ WriteLn(T,'libavformat    60. 16.100 / 60. 16.100');
+ WriteLn(T,'libavdevice    60.  3.100 / 60.  3.100');
+ WriteLn(T,'libavfilter     9. 12.100 /  9. 12.100');
+ WriteLn(T,'libswscale      7.  5.100 /  7.  5.100');
+ WriteLn(T,'libswresample   4. 12.100 /  4. 12.100');
+ WriteLn(T,'libpostproc    57.  3.100 / 57.  3.100');
+End;
+
+Procedure O1TxLicense(Var T: Text);
+Begin
+ WriteLn(T,'ffmpeg is free software; you can redistribute it and/or modify');
+ WriteLn(T,'it under the terms of the GNU General Public License as published by');
+ WriteLn(T,'the Free Software Foundation; either version 2 of the License, or');
+ WriteLn(T,'(at your option) any later version.');
+ WriteLn(T,'');
+ WriteLn(T,'ffmpeg is distributed in the hope that it will be useful,');
+ WriteLn(T,'but WITHOUT ANY WARRANTY; without even the implied warranty of');
+ WriteLn(T,'MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the');
+ WriteLn(T,'GNU General Public License for more details.');
+ WriteLn(T,'');
+ WriteLn(T,'You should have received a copy of the GNU General Public License');
+ WriteLn(T,'along with ffmpeg; if not, write to the Free Software');
+ WriteLn(T,'Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA');
+End;
+
+Procedure O1TxHelp(Var T: Text);
+Begin
+ WriteLn(T,'Hyper fast Audio and Video encoder');
+ WriteLn(T,'usage: ffmpeg [options] [[infile options] -i infile]... {[outfile options] outfile}...');
+ WriteLn(T,'');
+ WriteLn(T,'Getting help:');
+ WriteLn(T,'    -h      -- print basic options');
+ WriteLn(T,'    -h long -- print more options');
+ WriteLn(T,'    -h full -- print all options (including all format and codec specific options, very long)');
+ WriteLn(T,'    -h type=name -- print all options for the named decoder/encoder/demuxer/muxer/filter/bsf/protocol');
+ WriteLn(T,'    See man ffmpeg for detailed description of the options.');
+ WriteLn(T,'');
+ WriteLn(T,'Print help / information / capabilities:');
+ WriteLn(T,'-L                  show license');
+ WriteLn(T,'-h topic            show help');
+ WriteLn(T,'-? topic            show help');
+ WriteLn(T,'-help topic         show help');
+ WriteLn(T,'--help topic        show help');
+ WriteLn(T,'-version            show version');
+ WriteLn(T,'-buildconf          show build configuration');
+ WriteLn(T,'-formats            show available formats');
+ WriteLn(T,'-muxers             show available muxers');
+ WriteLn(T,'-demuxers           show available demuxers');
+ WriteLn(T,'-devices            show available devices');
+ WriteLn(T,'-codecs             show available codecs');
+ WriteLn(T,'-decoders           show available decoders');
+ WriteLn(T,'-encoders           show available encoders');
+ WriteLn(T,'-bsfs               show available bit stream filters');
+ WriteLn(T,'-protocols          show available protocols');
+ WriteLn(T,'-filters            show available filters');
+ WriteLn(T,'-pix_fmts           show available pixel formats');
+ WriteLn(T,'-layouts            show standard channel layouts');
+ WriteLn(T,'-sample_fmts        show available audio sample formats');
+ WriteLn(T,'-dispositions       show available stream dispositions');
+ WriteLn(T,'-colors             show available color names');
+ WriteLn(T,'-sources device     list sources of the input device');
+ WriteLn(T,'-sinks device       list sinks of the output device');
+ WriteLn(T,'-hwaccels           show available HW acceleration methods');
+ WriteLn(T,'');
+ WriteLn(T,'Global options (affect whole program instead of just one file):');
+ WriteLn(T,'-loglevel loglevel  set logging level');
+ WriteLn(T,'-v loglevel         set logging level');
+ WriteLn(T,'-report             generate a report');
+ WriteLn(T,'-max_alloc bytes    set maximum size of a single allocated block');
+ WriteLn(T,'-y                  overwrite output files');
+ WriteLn(T,'-n                  never overwrite output files');
+ WriteLn(T,'-ignore_unknown     Ignore unknown stream types');
+ WriteLn(T,'-filter_threads     number of non-complex filter threads');
+ WriteLn(T,'-filter_complex_threads  number of threads for -filter_complex');
+ WriteLn(T,'-stats              print progress report during encoding');
+ WriteLn(T,'-max_error_rate maximum error rate  ratio of decoding errors (0.0: no errors, 1.0: 100% errors) above which ffmpeg returns an error instead of success.');
+ WriteLn(T,'');
+ WriteLn(T,'Per-file main options:');
+ WriteLn(T,'-f fmt              force format');
+ WriteLn(T,'-c codec            codec name');
+ WriteLn(T,'-codec codec        codec name');
+ WriteLn(T,'-pre preset         preset name');
+ WriteLn(T,'-map_metadata outfile[,metadata]:infile[,metadata]  set metadata information of outfile from infile');
+ WriteLn(T,'-t duration         record or transcode "duration" seconds of audio/video');
+ WriteLn(T,'-to time_stop       record or transcode stop time');
+ WriteLn(T,'-fs limit_size      set the limit file size in bytes');
+ WriteLn(T,'-ss time_off        set the start time offset');
+ WriteLn(T,'-sseof time_off     set the start time offset relative to EOF');
+ WriteLn(T,'-seek_timestamp     enable/disable seeking by timestamp with -ss');
+ WriteLn(T,'-timestamp time     set the recording timestamp (''now'' to set the current time)');
+ WriteLn(T,'-metadata string=string  add metadata');
+ WriteLn(T,'-program title=string:st=number...  add program with specified streams');
+ WriteLn(T,'-target type        specify target file type ("vcd", "svcd", "dvd", "dv" or "dv50" with optional prefixes "pal-", "ntsc-" or "film-")');
+ WriteLn(T,'-apad               audio pad');
+ WriteLn(T,'-frames number      set the number of frames to output');
+ WriteLn(T,'-filter filter_graph  set stream filtergraph');
+ WriteLn(T,'-filter_script filename  read stream filtergraph description from a file');
+ WriteLn(T,'-reinit_filter      reinit filtergraph on input parameter changes');
+ WriteLn(T,'-discard            discard');
+ WriteLn(T,'-disposition        disposition');
+ WriteLn(T,'');
+ WriteLn(T,'Video options:');
+ WriteLn(T,'-vframes number     set the number of video frames to output');
+ WriteLn(T,'-r rate             set frame rate (Hz value, fraction or abbreviation)');
+ WriteLn(T,'-fpsmax rate        set max frame rate (Hz value, fraction or abbreviation)');
+ WriteLn(T,'-s size             set frame size (WxH or abbreviation)');
+ WriteLn(T,'-aspect aspect      set aspect ratio (4:3, 16:9 or 1.3333, 1.7777)');
+ WriteLn(T,'-display_rotation angle  set pure counter-clockwise rotation in degrees for stream(s)');
+ WriteLn(T,'-display_hflip      set display horizontal flip for stream(s) (overrides any display rotation if it is not set)');
+ WriteLn(T,'-display_vflip      set display vertical flip for stream(s) (overrides any display rotation if it is not set)');
+ WriteLn(T,'-vn                 disable video');
+ WriteLn(T,'-vcodec codec       force video codec (''copy'' to copy stream)');
+ WriteLn(T,'-timecode hh:mm:ss[:;.]ff  set initial TimeCode value.');
+ WriteLn(T,'-pass n             select the pass number (1 to 3)');
+ WriteLn(T,'-vf filter_graph    set video filters');
+ WriteLn(T,'-b bitrate          video bitrate (please use -b:v)');
+ WriteLn(T,'-dn                 disable data');
+ WriteLn(T,'');
+ WriteLn(T,'Audio options:');
+ WriteLn(T,'-aframes number     set the number of audio frames to output');
+ WriteLn(T,'-aq quality         set audio quality (codec-specific)');
+ WriteLn(T,'-ar rate            set audio sampling rate (in Hz)');
+ WriteLn(T,'-ac channels        set number of audio channels');
+ WriteLn(T,'-an                 disable audio');
+ WriteLn(T,'-acodec codec       force audio codec (''copy'' to copy stream)');
+ WriteLn(T,'-ab bitrate         audio bitrate (please use -b:a)');
+ WriteLn(T,'-af filter_graph    set audio filters');
+ WriteLn(T,'');
+ WriteLn(T,'Subtitle options:');
+ WriteLn(T,'-s size             set frame size (WxH or abbreviation)');
+ WriteLn(T,'-sn                 disable subtitle');
+ WriteLn(T,'-scodec codec       force subtitle codec (''copy'' to copy stream)');
+ WriteLn(T,'-stag fourcc/tag    force subtitle tag/fourcc');
+ WriteLn(T,'-fix_sub_duration   fix subtitles duration');
+ WriteLn(T,'-canvas_size size   set canvas size (WxH or abbreviation)');
+ WriteLn(T,'-spre preset        set the subtitle options to the indicated preset');
+ WriteLn(T,'');
+ WriteLn(T,'');
+End;
+
+Procedure O1TxFormats(Var T: Text);
+Begin
+ WriteLn(T,'File formats:');
+ WriteLn(T,' D. = Demuxing supported');
+ WriteLn(T,' .E = Muxing supported');
+ WriteLn(T,' --');
+ WriteLn(T,' D  3dostr          3DO STR');
+ WriteLn(T,'  E 3g2             3GP2 (3GPP2 file format)');
+ WriteLn(T,'  E 3gp             3GP (3GPP file format)');
+ WriteLn(T,' D  4xm             4X Technologies');
+ WriteLn(T,'  E a64             a64 - video for Commodore 64');
+ WriteLn(T,' D  aa              Audible AA format files');
+ WriteLn(T,' D  aac             raw ADTS AAC (Advanced Audio Coding)');
+ WriteLn(T,' D  aax             CRI AAX');
+ WriteLn(T,' DE ac3             raw AC-3');
+ WriteLn(T,' DE ac4             raw AC-4');
+ WriteLn(T,' D  ace             tri-Ace Audio Container');
+ WriteLn(T,' D  acm             Interplay ACM');
+ WriteLn(T,' D  act             ACT Voice file format');
+ WriteLn(T,' D  adf             Artworx Data Format');
+ WriteLn(T,' D  adp             ADP');
+ WriteLn(T,' D  ads             Sony PS2 ADS');
+ WriteLn(T,'  E adts            ADTS AAC (Advanced Audio Coding)');
+ WriteLn(T,' DE adx             CRI ADX');
+ WriteLn(T,' D  aea             MD STUDIO audio');
+ WriteLn(T,' D  afc             AFC');
+ WriteLn(T,' DE aiff            Audio IFF');
+ WriteLn(T,' D  aix             CRI AIX');
+ WriteLn(T,' DE alaw            PCM A-law');
+ WriteLn(T,' D  alias_pix       Alias/Wavefront PIX image');
+ WriteLn(T,' DE alp             LEGO Racers ALP');
+ WriteLn(T,' DE alsa            ALSA audio output');
+ WriteLn(T,' DE amr             3GPP AMR');
+ WriteLn(T,' D  amrnb           raw AMR-NB');
+ WriteLn(T,' D  amrwb           raw AMR-WB');
+ WriteLn(T,'  E amv             AMV');
+ WriteLn(T,' D  anm             Deluxe Paint Animation');
+ WriteLn(T,' D  apac            raw APAC');
+ WriteLn(T,' D  apc             CRYO APC');
+ WriteLn(T,' D  ape             Monkey''s Audio');
+ WriteLn(T,' DE apm             Ubisoft Rayman 2 APM');
+ WriteLn(T,' DE apng            Animated Portable Network Graphics');
+ WriteLn(T,' DE aptx            raw aptX (Audio Processing Technology for Bluetooth)');
+ WriteLn(T,' DE aptx_hd         raw aptX HD (Audio Processing Technology for Bluetooth)');
+ WriteLn(T,' D  aqtitle         AQTitle subtitles');
+ WriteLn(T,' DE argo_asf        Argonaut Games ASF');
+ WriteLn(T,' D  argo_brp        Argonaut Games BRP');
+ WriteLn(T,' DE argo_cvg        Argonaut Games CVG');
+ WriteLn(T,' DE asf             ASF (Advanced / Active Streaming Format)');
+ WriteLn(T,' D  asf_o           ASF (Advanced / Active Streaming Format)');
+ WriteLn(T,'  E asf_stream      ASF (Advanced / Active Streaming Format)');
+ WriteLn(T,' DE ass             SSA (SubStation Alpha) subtitle');
+ WriteLn(T,' DE ast             AST (Audio Stream)');
+ WriteLn(T,' DE au              Sun AU');
+ WriteLn(T,' D  av1             AV1 Annex B');
+ WriteLn(T,' DE avi             AVI (Audio Video Interleaved)');
+ WriteLn(T,'  E avif            AVIF');
+ WriteLn(T,'  E avm2            SWF (ShockWave Flash) (AVM2)');
+ WriteLn(T,' D  avr             AVR (Audio Visual Research)');
+ WriteLn(T,' D  avs             Argonaut Games Creature Shock');
+ WriteLn(T,' DE avs2            raw AVS2-P2/IEEE1857.4 video');
+ WriteLn(T,' DE avs3            AVS3-P2/IEEE1857.10');
+ WriteLn(T,' D  bethsoftvid     Bethesda Softworks VID');
+ WriteLn(T,' D  bfi             Brute Force & Ignorance');
+ WriteLn(T,' D  bfstm           BFSTM (Binary Cafe Stream)');
+ WriteLn(T,' D  bin             Binary text');
+ WriteLn(T,' D  bink            Bink');
+ WriteLn(T,' D  binka           Bink Audio');
+ WriteLn(T,' DE bit             G.729 BIT file format');
+ WriteLn(T,' D  bitpacked       Bitpacked');
+ WriteLn(T,' D  bmp_pipe        piped bmp sequence');
+ WriteLn(T,' D  bmv             Discworld II BMV');
+ WriteLn(T,' D  boa             Black Ops Audio');
+ WriteLn(T,' D  bonk            raw Bonk');
+ WriteLn(T,' D  brender_pix     BRender PIX image');
+ WriteLn(T,' D  brstm           BRSTM (Binary Revolution Stream)');
+ WriteLn(T,' D  c93             Interplay C93');
+ WriteLn(T,'  E caca            caca (color ASCII art) output device');
+ WriteLn(T,' DE caf             Apple CAF (Core Audio Format)');
+ WriteLn(T,' DE cavsvideo       raw Chinese AVS (Audio Video Standard) video');
+ WriteLn(T,' D  cdg             CD Graphics');
+ WriteLn(T,' D  cdxl            Commodore CDXL video');
+ WriteLn(T,'  E chromaprint     Chromaprint');
+ WriteLn(T,' D  cine            Phantom Cine');
+ WriteLn(T,' DE codec2          codec2 .c2 muxer');
+ WriteLn(T,' DE codec2raw       raw codec2 muxer');
+ WriteLn(T,' D  concat          Virtual concatenation script');
+ WriteLn(T,'  E crc             CRC testing');
+ WriteLn(T,' D  cri_pipe        piped cri sequence');
+ WriteLn(T,' DE dash            DASH Muxer');
+ WriteLn(T,' DE data            raw data');
+ WriteLn(T,' DE daud            D-Cinema audio');
+ WriteLn(T,' D  dcstr           Sega DC STR');
+ WriteLn(T,' D  dds_pipe        piped dds sequence');
+ WriteLn(T,' D  derf            Xilam DERF');
+ WriteLn(T,' D  dfa             Chronomaster DFA');
+ WriteLn(T,' DE dfpwm           raw DFPWM1a');
+ WriteLn(T,' D  dhav            Video DAV');
+ WriteLn(T,' DE dirac           raw Dirac');
+ WriteLn(T,' DE dnxhd           raw DNxHD (SMPTE VC-3)');
+ WriteLn(T,' D  dpx_pipe        piped dpx sequence');
+ WriteLn(T,' D  dsf             DSD Stream File (DSF)');
+ WriteLn(T,' D  dsicin          Delphine Software International CIN');
+ WriteLn(T,' D  dss             Digital Speech Standard (DSS)');
+ WriteLn(T,' DE dts             raw DTS');
+ WriteLn(T,' D  dtshd           raw DTS-HD');
+ WriteLn(T,' DE dv              DV (Digital Video)');
+ WriteLn(T,' D  dvbsub          raw dvbsub');
+ WriteLn(T,' D  dvbtxt          dvbtxt');
+ WriteLn(T,'  E dvd             MPEG-2 PS (DVD VOB)');
+ WriteLn(T,' D  dxa             DXA');
+ WriteLn(T,' D  ea              Electronic Arts Multimedia');
+ WriteLn(T,' D  ea_cdata        Electronic Arts cdata');
+ WriteLn(T,' DE eac3            raw E-AC-3');
+ WriteLn(T,' D  epaf            Ensoniq Paris Audio File');
+ WriteLn(T,' DE evc             raw EVC video');
+ WriteLn(T,' D  exr_pipe        piped exr sequence');
+ WriteLn(T,' DE f32be           PCM 32-bit floating-point big-endian');
+ WriteLn(T,' DE f32le           PCM 32-bit floating-point little-endian');
+ WriteLn(T,'  E f4v             F4V Adobe Flash Video');
+ WriteLn(T,' DE f64be           PCM 64-bit floating-point big-endian');
+ WriteLn(T,' DE f64le           PCM 64-bit floating-point little-endian');
+ WriteLn(T,' DE fbdev           Linux framebuffer');
+ WriteLn(T,' DE ffmetadata      FFmpeg metadata in text');
+ WriteLn(T,'  E fifo            FIFO queue pseudo-muxer');
+ WriteLn(T,'  E fifo_test       Fifo test muxer');
+ WriteLn(T,' DE film_cpk        Sega FILM / CPK');
+ WriteLn(T,' DE filmstrip       Adobe Filmstrip');
+ WriteLn(T,' DE fits            Flexible Image Transport System');
+ WriteLn(T,' DE flac            raw FLAC');
+ WriteLn(T,' D  flic            FLI/FLC/FLX animation');
+ WriteLn(T,' DE flv             FLV (Flash Video)');
+ WriteLn(T,'  E framecrc        framecrc testing');
+ WriteLn(T,'  E framehash       Per-frame hash testing');
+ WriteLn(T,'  E framemd5        Per-frame MD5 testing');
+ WriteLn(T,' D  frm             Megalux Frame');
+ WriteLn(T,' D  fsb             FMOD Sample Bank');
+ WriteLn(T,' D  fwse            Capcom''s MT Framework sound');
+ WriteLn(T,' DE g722            raw G.722');
+ WriteLn(T,' DE g723_1          raw G.723.1');
+ WriteLn(T,' DE g726            raw big-endian G.726 ("left-justified")');
+ WriteLn(T,' DE g726le          raw little-endian G.726 ("right-justified")');
+ WriteLn(T,' D  g729            G.729 raw format demuxer');
+ WriteLn(T,' D  gdv             Gremlin Digital Video');
+ WriteLn(T,' D  gem_pipe        piped gem sequence');
+ WriteLn(T,' D  genh            GENeric Header');
+ WriteLn(T,' DE gif             CompuServe Graphics Interchange Format (GIF)');
+ WriteLn(T,' D  gif_pipe        piped gif sequence');
+ WriteLn(T,' DE gsm             raw GSM');
+ WriteLn(T,' DE gxf             GXF (General eXchange Format)');
+ WriteLn(T,' DE h261            raw H.261');
+ WriteLn(T,' DE h263            raw H.263');
+ WriteLn(T,' DE h264            raw H.264 video');
+ WriteLn(T,'  E hash            Hash testing');
+ WriteLn(T,' D  hca             CRI HCA');
+ WriteLn(T,' D  hcom            Macintosh HCOM');
+ WriteLn(T,' D  hdr_pipe        piped hdr sequence');
+ WriteLn(T,'  E hds             HDS Muxer');
+ WriteLn(T,' DE hevc            raw HEVC video');
+ WriteLn(T,' DE hls             Apple HTTP Live Streaming');
+ WriteLn(T,' D  hnm             Cryo HNM v4');
+ WriteLn(T,' DE ico             Microsoft Windows ICO');
+ WriteLn(T,' D  idcin           id Cinematic');
+ WriteLn(T,' D  idf             iCE Draw File');
+ WriteLn(T,' D  iec61883        libiec61883 (new DV1394) A/V input device');
+ WriteLn(T,' D  iff             IFF (Interchange File Format)');
+ WriteLn(T,' D  ifv             IFV CCTV DVR');
+ WriteLn(T,' DE ilbc            iLBC storage');
+ WriteLn(T,' DE image2          image2 sequence');
+ WriteLn(T,' DE image2pipe      piped image2 sequence');
+ WriteLn(T,' D  imf             IMF (Interoperable Master Format)');
+ WriteLn(T,' D  ingenient       raw Ingenient MJPEG');
+ WriteLn(T,' D  ipmovie         Interplay MVE');
+ WriteLn(T,'  E ipod            iPod H.264 MP4 (MPEG-4 Part 14)');
+ WriteLn(T,' D  ipu             raw IPU Video');
+ WriteLn(T,' DE ircam           Berkeley/IRCAM/CARL Sound Format');
+ WriteLn(T,'  E ismv            ISMV/ISMA (Smooth Streaming)');
+ WriteLn(T,' D  iss             Funcom ISS');
+ WriteLn(T,' D  iv8             IndigoVision 8000 video');
+ WriteLn(T,' DE ivf             On2 IVF');
+ WriteLn(T,' D  ivr             IVR (Internet Video Recording)');
+ WriteLn(T,' D  j2k_pipe        piped j2k sequence');
+ WriteLn(T,' D  jack            JACK Audio Connection Kit');
+ WriteLn(T,' DE jacosub         JACOsub subtitle format');
+ WriteLn(T,' D  jpeg_pipe       piped jpeg sequence');
+ WriteLn(T,' D  jpegls_pipe     piped jpegls sequence');
+ WriteLn(T,' D  jpegxl_anim     Animated JPEG XL');
+ WriteLn(T,' D  jpegxl_pipe     piped jpegxl sequence');
+ WriteLn(T,' D  jv              Bitmap Brothers JV');
+ WriteLn(T,' D  kmsgrab         KMS screen capture');
+ WriteLn(T,' D  kux             KUX (YouKu)');
+ WriteLn(T,' DE kvag            Simon & Schuster Interactive VAG');
+ WriteLn(T,' D  laf             LAF (Limitless Audio Format)');
+ WriteLn(T,'  E latm            LOAS/LATM');
+ WriteLn(T,' D  lavfi           Libavfilter virtual input device');
+ WriteLn(T,' D  libcdio          ');
+ WriteLn(T,' D  libdc1394       dc1394 v.2 A/V grab');
+ WriteLn(T,' D  libgme          Game Music Emu demuxer');
+ WriteLn(T,' D  libopenmpt      Tracker formats (libopenmpt)');
+ WriteLn(T,' D  live_flv        live RTMP FLV (Flash Video)');
+ WriteLn(T,' D  lmlm4           raw lmlm4');
+ WriteLn(T,' D  loas            LOAS AudioSyncStream');
+ WriteLn(T,' DE lrc             LRC lyrics');
+ WriteLn(T,' D  luodat          Video CCTV DAT');
+ WriteLn(T,' D  lvf             LVF');
+ WriteLn(T,' D  lxf             VR native stream (LXF)');
+ WriteLn(T,' DE m4v             raw MPEG-4 video');
+ WriteLn(T,'  E matroska        Matroska');
+ WriteLn(T,' D  matroska,webm   Matroska / WebM');
+ WriteLn(T,' D  mca             MCA Audio Format');
+ WriteLn(T,' D  mcc             MacCaption');
+ WriteLn(T,'  E md5             MD5 testing');
+ WriteLn(T,' D  mgsts           Metal Gear Solid: The Twin Snakes');
+ WriteLn(T,' DE microdvd        MicroDVD subtitle format');
+ WriteLn(T,' DE mjpeg           raw MJPEG video');
+ WriteLn(T,' D  mjpeg_2000      raw MJPEG 2000 video');
+ WriteLn(T,'  E mkvtimestamp_v2 extract pts as timecode v2 format, as defined by mkvtoolnix');
+ WriteLn(T,' DE mlp             raw MLP');
+ WriteLn(T,' D  mlv             Magic Lantern Video (MLV)');
+ WriteLn(T,' D  mm              American Laser Games MM');
+ WriteLn(T,' DE mmf             Yamaha SMAF');
+ WriteLn(T,' D  mods            MobiClip MODS');
+ WriteLn(T,' D  moflex          MobiClip MOFLEX');
+ WriteLn(T,'  E mov             QuickTime / MOV');
+ WriteLn(T,' D  mov,mp4,m4a,3gp,3g2,mj2 QuickTime / MOV');
+ WriteLn(T,'  E mp2             MP2 (MPEG audio layer 2)');
+ WriteLn(T,' DE mp3             MP3 (MPEG audio layer 3)');
+ WriteLn(T,'  E mp4             MP4 (MPEG-4 Part 14)');
+ WriteLn(T,' D  mpc             Musepack');
+ WriteLn(T,' D  mpc8            Musepack SV8');
+ WriteLn(T,' DE mpeg            MPEG-1 Systems / MPEG program stream');
+ WriteLn(T,'  E mpeg1video      raw MPEG-1 video');
+ WriteLn(T,'  E mpeg2video      raw MPEG-2 video');
+ WriteLn(T,' DE mpegts          MPEG-TS (MPEG-2 Transport Stream)');
+ WriteLn(T,' D  mpegtsraw       raw MPEG-TS (MPEG-2 Transport Stream)');
+ WriteLn(T,' D  mpegvideo       raw MPEG video');
+ WriteLn(T,' DE mpjpeg          MIME multipart JPEG');
+ WriteLn(T,' D  mpl2            MPL2 subtitles');
+ WriteLn(T,' D  mpsub           MPlayer subtitles');
+ WriteLn(T,' D  msf             Sony PS3 MSF');
+ WriteLn(T,' D  msnwctcp        MSN TCP Webcam stream');
+ WriteLn(T,' D  msp             Microsoft Paint (MSP))');
+ WriteLn(T,' D  mtaf            Konami PS2 MTAF');
+ WriteLn(T,' D  mtv             MTV');
+ WriteLn(T,' DE mulaw           PCM mu-law');
+ WriteLn(T,' D  musx            Eurocom MUSX');
+ WriteLn(T,' D  mv              Silicon Graphics Movie');
+ WriteLn(T,' D  mvi             Motion Pixels MVI');
+ WriteLn(T,' DE mxf             MXF (Material eXchange Format)');
+ WriteLn(T,'  E mxf_d10         MXF (Material eXchange Format) D-10 Mapping');
+ WriteLn(T,'  E mxf_opatom      MXF (Material eXchange Format) Operational Pattern Atom');
+ WriteLn(T,' D  mxg             MxPEG clip');
+ WriteLn(T,' D  nc              NC camera feed');
+ WriteLn(T,' D  nistsphere      NIST SPeech HEader REsources');
+ WriteLn(T,' D  nsp             Computerized Speech Lab NSP');
+ WriteLn(T,' D  nsv             Nullsoft Streaming Video');
+ WriteLn(T,'  E null            raw null video');
+ WriteLn(T,' DE nut             NUT');
+ WriteLn(T,' D  nuv             NuppelVideo');
+ WriteLn(T,' DE obu             AV1 low overhead OBU');
+ WriteLn(T,'  E oga             Ogg Audio');
+ WriteLn(T,' DE ogg             Ogg');
+ WriteLn(T,'  E ogv             Ogg Video');
+ WriteLn(T,' DE oma             Sony OpenMG audio');
+ WriteLn(T,' D  openal          OpenAL audio capture device');
+ WriteLn(T,'  E opengl          OpenGL output');
+ WriteLn(T,'  E opus            Ogg Opus');
+ WriteLn(T,' D  osq             raw OSQ');
+ WriteLn(T,' DE oss             OSS (Open Sound System) playback');
+ WriteLn(T,' D  paf             Amazing Studio Packed Animation File');
+ WriteLn(T,' D  pam_pipe        piped pam sequence');
+ WriteLn(T,' D  pbm_pipe        piped pbm sequence');
+ WriteLn(T,' D  pcx_pipe        piped pcx sequence');
+ WriteLn(T,' D  pdv             PlayDate Video');
+ WriteLn(T,' D  pfm_pipe        piped pfm sequence');
+ WriteLn(T,' D  pgm_pipe        piped pgm sequence');
+ WriteLn(T,' D  pgmyuv_pipe     piped pgmyuv sequence');
+ WriteLn(T,' D  pgx_pipe        piped pgx sequence');
+ WriteLn(T,' D  phm_pipe        piped phm sequence');
+ WriteLn(T,' D  photocd_pipe    piped photocd sequence');
+ WriteLn(T,' D  pictor_pipe     piped pictor sequence');
+ WriteLn(T,' D  pjs             PJS (Phoenix Japanimation Society) subtitles');
+ WriteLn(T,' D  pmp             Playstation Portable PMP');
+ WriteLn(T,' D  png_pipe        piped png sequence');
+ WriteLn(T,' D  pp_bnk          Pro Pinball Series Soundbank');
+ WriteLn(T,' D  ppm_pipe        piped ppm sequence');
+ WriteLn(T,' D  psd_pipe        piped psd sequence');
+ WriteLn(T,'  E psp             PSP MP4 (MPEG-4 Part 14)');
+ WriteLn(T,' D  psxstr          Sony Playstation STR');
+ WriteLn(T,' DE pulse           Pulse audio output');
+ WriteLn(T,' D  pva             TechnoTrend PVA');
+ WriteLn(T,' D  pvf             PVF (Portable Voice Format)');
+ WriteLn(T,' D  qcp             QCP');
+ WriteLn(T,' D  qdraw_pipe      piped qdraw sequence');
+ WriteLn(T,' D  qoi_pipe        piped qoi sequence');
+ WriteLn(T,' D  r3d             REDCODE R3D');
+ WriteLn(T,' DE rawvideo        raw video');
+ WriteLn(T,' D  realtext        RealText subtitle format');
+ WriteLn(T,' D  redspark        RedSpark');
+ WriteLn(T,' D  rka             RKA (RK Audio)');
+ WriteLn(T,' D  rl2             RL2');
+ WriteLn(T,' DE rm              RealMedia');
+ WriteLn(T,' DE roq             raw id RoQ');
+ WriteLn(T,' D  rpl             RPL / ARMovie');
+ WriteLn(T,' D  rsd             GameCube RSD');
+ WriteLn(T,' DE rso             Lego Mindstorms RSO');
+ WriteLn(T,' DE rtp             RTP output');
+ WriteLn(T,'  E rtp_mpegts      RTP/mpegts output format');
+ WriteLn(T,' DE rtsp            RTSP output');
+ WriteLn(T,' DE s16be           PCM signed 16-bit big-endian');
+ WriteLn(T,' DE s16le           PCM signed 16-bit little-endian');
+ WriteLn(T,' DE s24be           PCM signed 24-bit big-endian');
+ WriteLn(T,' DE s24le           PCM signed 24-bit little-endian');
+ WriteLn(T,' DE s32be           PCM signed 32-bit big-endian');
+ WriteLn(T,' DE s32le           PCM signed 32-bit little-endian');
+ WriteLn(T,' D  s337m           SMPTE 337M');
+ WriteLn(T,' DE s8              PCM signed 8-bit');
+ WriteLn(T,' D  sami            SAMI subtitle format');
+ WriteLn(T,' DE sap             SAP output');
+ WriteLn(T,' DE sbc             raw SBC');
+ WriteLn(T,' D  sbg             SBaGen binaural beats script');
+ WriteLn(T,' DE scc             Scenarist Closed Captions');
+ WriteLn(T,' D  scd             Square Enix SCD');
+ WriteLn(T,'  E sdl,sdl2        SDL2 output device');
+ WriteLn(T,' D  sdns            Xbox SDNS');
+ WriteLn(T,' D  sdp             SDP');
+ WriteLn(T,' D  sdr2            SDR2');
+ WriteLn(T,' D  sds             MIDI Sample Dump Standard');
+ WriteLn(T,' D  sdx             Sample Dump eXchange');
+ WriteLn(T,'  E segment         segment');
+ WriteLn(T,' D  ser             SER (Simple uncompressed video format for astronomical capturing)');
+ WriteLn(T,' D  sga             Digital Pictures SGA');
+ WriteLn(T,' D  sgi_pipe        piped sgi sequence');
+ WriteLn(T,' D  shn             raw Shorten');
+ WriteLn(T,' D  siff            Beam Software SIFF');
+ WriteLn(T,' D  simbiosis_imx   Simbiosis Interactive IMX');
+ WriteLn(T,' D  sln             Asterisk raw pcm');
+ WriteLn(T,' DE smjpeg          Loki SDL MJPEG');
+ WriteLn(T,' D  smk             Smacker');
+ WriteLn(T,'  E smoothstreaming Smooth Streaming Muxer');
+ WriteLn(T,' D  smush           LucasArts Smush');
+ WriteLn(T,' D  sol             Sierra SOL');
+ WriteLn(T,' DE sox             SoX (Sound eXchange) native');
+ WriteLn(T,' DE spdif           IEC 61937 (used on S/PDIF - IEC958)');
+ WriteLn(T,'  E spx             Ogg Speex');
+ WriteLn(T,' DE srt             SubRip subtitle');
+ WriteLn(T,' D  stl             Spruce subtitle format');
+ WriteLn(T,'  E stream_segment,ssegment streaming segment muxer');
+ WriteLn(T,'  E streamhash      Per-stream hash testing');
+ WriteLn(T,' D  subviewer       SubViewer subtitle format');
+ WriteLn(T,' D  subviewer1      SubViewer v1 subtitle format');
+ WriteLn(T,' D  sunrast_pipe    piped sunrast sequence');
+ WriteLn(T,' DE sup             raw HDMV Presentation Graphic Stream subtitles');
+ WriteLn(T,' D  svag            Konami PS2 SVAG');
+ WriteLn(T,'  E svcd            MPEG-2 PS (SVCD)');
+ WriteLn(T,' D  svg_pipe        piped svg sequence');
+ WriteLn(T,' D  svs             Square SVS');
+ WriteLn(T,' DE swf             SWF (ShockWave Flash)');
+ WriteLn(T,' D  tak             raw TAK');
+ WriteLn(T,' D  tedcaptions     TED Talks captions');
+ WriteLn(T,'  E tee             Multiple muxer tee');
+ WriteLn(T,' D  thp             THP');
+ WriteLn(T,' D  tiertexseq      Tiertex Limited SEQ');
+ WriteLn(T,' D  tiff_pipe       piped tiff sequence');
+ WriteLn(T,' D  tmv             8088flex TMV');
+ WriteLn(T,' DE truehd          raw TrueHD');
+ WriteLn(T,' DE tta             TTA (True Audio)');
+ WriteLn(T,'  E ttml            TTML subtitle');
+ WriteLn(T,' D  tty             Tele-typewriter');
+ WriteLn(T,' D  txd             Renderware TeXture Dictionary');
+ WriteLn(T,' D  ty              TiVo TY Stream');
+ WriteLn(T,' DE u16be           PCM unsigned 16-bit big-endian');
+ WriteLn(T,' DE u16le           PCM unsigned 16-bit little-endian');
+ WriteLn(T,' DE u24be           PCM unsigned 24-bit big-endian');
+ WriteLn(T,' DE u24le           PCM unsigned 24-bit little-endian');
+ WriteLn(T,' DE u32be           PCM unsigned 32-bit big-endian');
+ WriteLn(T,' DE u32le           PCM unsigned 32-bit little-endian');
+ WriteLn(T,' DE u8              PCM unsigned 8-bit');
+ WriteLn(T,'  E uncodedframecrc uncoded framecrc testing');
+ WriteLn(T,' D  usm             CRI USM');
+ WriteLn(T,' D  v210            Uncompressed 4:2:2 10-bit');
+ WriteLn(T,' D  v210x           Uncompressed 4:2:2 10-bit');
+ WriteLn(T,' D  vag             Sony PS2 VAG');
+ WriteLn(T,' D  vbn_pipe        piped vbn sequence');
+ WriteLn(T,' DE vc1             raw VC-1 video');
+ WriteLn(T,' DE vc1test         VC-1 test bitstream');
+ WriteLn(T,'  E vcd             MPEG-1 Systems / MPEG program stream (VCD)');
+ WriteLn(T,' DE vidc            PCM Archimedes VIDC');
+ WriteLn(T,' DE video4linux2,v4l2 Video4Linux2 output device');
+ WriteLn(T,' D  vividas         Vividas VIV');
+ WriteLn(T,' D  vivo            Vivo');
+ WriteLn(T,' D  vmd             Sierra VMD');
+ WriteLn(T,'  E vob             MPEG-2 PS (VOB)');
+ WriteLn(T,' D  vobsub          VobSub subtitle format');
+ WriteLn(T,' DE voc             Creative Voice');
+ WriteLn(T,' D  vpk             Sony PS2 VPK');
+ WriteLn(T,' D  vplayer         VPlayer subtitles');
+ WriteLn(T,' D  vqf             Nippon Telegraph and Telephone Corporation (NTT) TwinVQ');
+ WriteLn(T,' DE vvc             raw H.266/VVC video');
+ WriteLn(T,' DE w64             Sony Wave64');
+ WriteLn(T,' D  wady            Marble WADY');
+ WriteLn(T,' DE wav             WAV / WAVE (Waveform Audio)');
+ WriteLn(T,' D  wavarc          Waveform Archiver');
+ WriteLn(T,' D  wc3movie        Wing Commander III movie');
+ WriteLn(T,'  E webm            WebM');
+ WriteLn(T,'  E webm_chunk      WebM Chunk Muxer');
+ WriteLn(T,' DE webm_dash_manifest WebM DASH Manifest');
+ WriteLn(T,'  E webp            WebP');
+ WriteLn(T,' D  webp_pipe       piped webp sequence');
+ WriteLn(T,' DE webvtt          WebVTT subtitle');
+ WriteLn(T,' DE wsaud           Westwood Studios audio');
+ WriteLn(T,' D  wsd             Wideband Single-bit Data (WSD)');
+ WriteLn(T,' D  wsvqa           Westwood Studios VQA');
+ WriteLn(T,' DE wtv             Windows Television (WTV)');
+ WriteLn(T,' DE wv              raw WavPack');
+ WriteLn(T,' D  wve             Psion 3 audio');
+ WriteLn(T,' D  x11grab         X11 screen capture, using XCB');
+ WriteLn(T,' D  xa              Maxis XA');
+ WriteLn(T,' D  xbin            eXtended BINary text (XBIN)');
+ WriteLn(T,' D  xbm_pipe        piped xbm sequence');
+ WriteLn(T,' D  xmd             Konami XMD');
+ WriteLn(T,' D  xmv             Microsoft XMV');
+ WriteLn(T,' D  xpm_pipe        piped xpm sequence');
+ WriteLn(T,'  E xv              XV (XVideo) output device');
+ WriteLn(T,' D  xvag            Sony PS3 XVAG');
+ WriteLn(T,' D  xwd_pipe        piped xwd sequence');
+ WriteLn(T,' D  xwma            Microsoft xWMA');
+ WriteLn(T,' D  yop             Psygnosis YOP');
+ WriteLn(T,' DE yuv4mpegpipe    YUV4MPEG pipe');
+End;
+
+Procedure O1TxBanner(Var T: Text);
+Begin
+ WriteLn(T,'ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers');
+ WriteLn(T,'  built with gcc 13 (Ubuntu 13.2.0-23ubuntu3)');
+ Write(T,'  configuration: --prefix=/usr --extra-version=3ubuntu5 --toolchain=hardened --libdir=/usr/lib/x86_64-linux-gnu --incdir=/usr/include/x86_64-linux-gnu --arch=amd64 --enable-gpl --disable-stripping --d');
+ Write(T,'isable-omx --enable-gnutls --enable-libaom --enable-libass --enable-libbs2b --enable-libcaca --enable-libcdio --enable-libcodec2 --enable-libdav1d --enable-libflite --enable-libfontconfig --enable-lib');
+ Write(T,'freetype --enable-libfribidi --enable-libglslang --enable-libgme --enable-libgsm --enable-libharfbuzz --enable-libmp3lame --enable-libmysofa --enable-libopenjpeg --enable-libopenmpt --enable-libopus -');
+ Write(T,'-enable-librubberband --enable-libshine --enable-libsnappy --enable-libsoxr --enable-libspeex --enable-libtheora --enable-libtwolame --enable-libvidstab --enable-libvorbis --enable-libvpx --enable-lib');
+ Write(T,'webp --enable-libx265 --enable-libxml2 --enable-libxvid --enable-libzimg --enable-openal --enable-opencl --enable-opengl --disable-sndio --enable-libvpl --disable-libmfx --enable-libdc1394 --enable-li');
+ Write(T,'bdrm --enable-libiec61883 --enable-chromaprint --enable-frei0r --enable-ladspa --enable-libbluray --enable-libjack --enable-libpulse --enable-librabbitmq --enable-librist --enable-libsrt --enable-libs');
+ Write(T,'sh --enable-libsvtav1 --enable-libx264 --enable-libzmq --enable-libzvbi --enable-lv2 --enable-sdl2 --enable-libplacebo --enable-librav1e --enable-pocketsphinx --enable-librsvg --enable-libjxl --enable');
+ WriteLn(T,'-shared');
+ WriteLn(T,'  libavutil      58. 29.100 / 58. 29.100');
+ WriteLn(T,'  libavcodec     60. 31.102 / 60. 31.102');
+ WriteLn(T,'  libavformat    60. 16.100 / 60. 16.100');
+ WriteLn(T,'  libavdevice    60.  3.100 / 60.  3.100');
+ WriteLn(T,'  libavfilter     9. 12.100 /  9. 12.100');
+ WriteLn(T,'  libswscale      7.  5.100 /  7.  5.100');
+ WriteLn(T,'  libswresample   4. 12.100 /  4. 12.100');
+ WriteLn(T,'  libpostproc    57.  3.100 / 57.  3.100');
+End;
+
+Procedure O1TxUsage(Var T: Text);
+Begin
+ WriteLn(T,'Hyper fast Audio and Video encoder');
+ WriteLn(T,'usage: ffmpeg [options] [[infile options] -i infile]... {[outfile options] outfile}...');
+ WriteLn(T,'');
+ WriteLn(T,'Use -h to get full help or, even better, run ''man ffmpeg''');
+End;
+
+
+
+{ ==== O1-BEGIN : options generales ffmpeg 6.1.1 (-ss -t -to -itsoffset -r -s -vframes -fs -v ...) ; prefixe O1 ==== }
+Type
+ O1TRat=Record N,D: Int64; End;
+ O1TI64A=Array[0..16000000] Of Int64; O1PI64A=^O1TI64A;
+ O1TL32A=Array[0..16000000] Of LongInt; O1PL32A=^O1TL32A;
+Const
+ O1I64Max: Int64 = 9223372036854775807;
+
+Var
+ O1NoStdin: Boolean;
+ O1NoPts: Int64;
+
+{ ---- arithmetique 64/128 bits (libavutil/mathematics.c) ---- }
+Function O1Div128(A,B,Add,C: QWord): QWord;
+Var A0,A1,B0,B1,P00,P01,P10,P11,Mid,Lo,Hi,R,Q,Lo2: QWord; I: LongInt; Bit: QWord;
+Begin
+ If C=0 Then Begin O1Div128:=0; Exit; End;
+ A0:=A And $FFFFFFFF; A1:=A Shr 32; B0:=B And $FFFFFFFF; B1:=B Shr 32;
+ P00:=A0*B0; P01:=A0*B1; P10:=A1*B0; P11:=A1*B1;
+ Mid:=(P00 Shr 32)+(P01 And $FFFFFFFF)+(P10 And $FFFFFFFF);
+ Lo:=(P00 And $FFFFFFFF) Or ((Mid And $FFFFFFFF) Shl 32);
+ Hi:=P11+(P01 Shr 32)+(P10 Shr 32)+(Mid Shr 32);
+ Lo2:=Lo+Add; If Lo2<Lo Then Inc(Hi);
+ Lo:=Lo2;
+ R:=0; Q:=0;
+ For I:=127 DownTo 0 Do Begin
+  If I>=64 Then Bit:=(Hi Shr (I-64)) And 1 Else Bit:=(Lo Shr I) And 1;
+  R:=(R Shl 1) Or Bit;
+  Q:=Q Shl 1;
+  If R>=C Then Begin R:=R-C; Q:=Q Or 1; End;
+ End;
+ O1Div128:=Q;
+End;
+
+{ av_rescale_rnd(A,B,C,AV_ROUND_NEAR_INF) pour B>=0, C>0 }
+Function O1Resc(A,B,C: Int64): Int64;
+Var Neg: Boolean; Q: QWord;
+Begin
+ If (C<=0) Or (B<0) Then Begin O1Resc:=0; Exit; End;
+ Neg:=A<0; If Neg Then A:=-A;
+ Q:=O1Div128(QWord(A),QWord(B),QWord(C Div 2),QWord(C));
+ If Neg Then O1Resc:=-Int64(Q) Else O1Resc:=Int64(Q);
+End;
+
+{ av_rescale_q(A,bq,cq) }
+Function O1RescQ(A,Bn,Bd,Cn,Cd: Int64): Int64;
+Begin
+ O1RescQ:=O1Resc(A,Bn*Cd,Bd*Cn);
+End;
+
+{ av_d2q }
+Procedure O1D2Q(D: Double; Max: Int64; Var RN,RD: Int64);
+Var E: LongInt; M: Double; Den: Int64; V: Double;
+Begin
+ If D<>D Then Begin RN:=0; RD:=0; Exit; End;
+ If Abs(D)>2147483647.0+3.0 Then Begin If D<0 Then RN:=-1 Else RN:=1; RD:=0; Exit; End;
+ { frexp }
+ M:=Abs(D); E:=0;
+ If M<>0 Then Begin
+  While M>=1.0 Do Begin M:=M/2; Inc(E); End;
+  While M<0.5 Do Begin M:=M*2; Dec(E); End;
+ End;
+ E:=E-1; If E<0 Then E:=0;
+ Den:=Int64(1) Shl (61-E);
+ V:=D*Den+0.5; V:=Int(V); If V>D*Den+0.5 Then V:=V-1;
+ If (V<0) And (Frac(D*Den+0.5)<>0) Then V:=Int(D*Den+0.5)-1 Else V:=Int(D*Den+0.5);
+ O1Reduce(RN,RD,Trunc(V),Den,Max);
+ If ((RN=0) Or (RD=0)) And (D<>0) And (Max>0) And (Max<2147483647) Then O1Reduce(RN,RD,Trunc(V),Den,2147483647);
+End;
+
+{ ---- lecture de nombres : av_strtod simplifie ; renvoie False si syntaxe invalide ---- }
+Function O1StrToD(Const S: String; Var P: Integer; Var V: Double): Boolean;
+Var Q: Integer; Neg,Dig: Boolean; Ex,Sc: LongInt; Mant,F: Double; ExNeg: Boolean;
+Begin
+ O1StrToD:=False; Q:=P; Neg:=False; Dig:=False; Mant:=0;
+ While (Q<=Length(S)) And (S[Q]=' ') Do Inc(Q);
+ If (Q<=Length(S)) And ((S[Q]='-') Or (S[Q]='+')) Then Begin Neg:=S[Q]='-'; Inc(Q); End;
+ While (Q<=Length(S)) And (S[Q] In ['0'..'9']) Do Begin Mant:=Mant*10+Ord(S[Q])-48; Inc(Q); Dig:=True; End;
+ If (Q<=Length(S)) And (S[Q]='.') Then Begin
+  Inc(Q); F:=0.1;
+  While (Q<=Length(S)) And (S[Q] In ['0'..'9']) Do Begin Mant:=Mant+F*(Ord(S[Q])-48); F:=F/10; Inc(Q); Dig:=True; End;
+ End;
+ If Not Dig Then Exit;
+ If (Q<=Length(S)) And (S[Q] In ['e','E']) Then Begin
+  Sc:=Q+1; ExNeg:=False; Ex:=0;
+  If (Sc<=Length(S)) And ((S[Sc]='-') Or (S[Sc]='+')) Then Begin ExNeg:=S[Sc]='-'; Inc(Sc); End;
+  If (Sc<=Length(S)) And (S[Sc] In ['0'..'9']) Then Begin
+   While (Sc<=Length(S)) And (S[Sc] In ['0'..'9']) Do Begin Ex:=Ex*10+Ord(S[Sc])-48; Inc(Sc); End;
+   If ExNeg Then Ex:=-Ex;
+   Mant:=Mant*Exp(Ex*Ln(10.0)); Q:=Sc;
+  End;
+ End;
+ If Neg Then Mant:=-Mant;
+ V:=Mant; P:=Q; O1StrToD:=True;
+End;
+
+{ evaluation d'expressions arithmetiques (libavutil/eval.c, sous-ensemble : + - * / ^ ( ) et nombres) }
+Var O1ExS: String; O1ExP: Integer; O1ExErr: Boolean;
+Function O1ExAdd: Double; Forward;
+Function O1ExPrim: Double;
+Var V: Double;
+Begin
+ O1ExPrim:=0;
+ While (O1ExP<=Length(O1ExS)) And (O1ExS[O1ExP]=' ') Do Inc(O1ExP);
+ If O1ExP>Length(O1ExS) Then Begin O1ExErr:=True; Exit; End;
+ If O1ExS[O1ExP]='(' Then Begin
+  Inc(O1ExP); V:=O1ExAdd;
+  If (O1ExP<=Length(O1ExS)) And (O1ExS[O1ExP]=')') Then Inc(O1ExP) Else O1ExErr:=True;
+  O1ExPrim:=V; Exit;
+ End;
+ If O1ExS[O1ExP]='-' Then Begin Inc(O1ExP); O1ExPrim:=-O1ExPrim; Exit; End;
+ If O1ExS[O1ExP]='+' Then Begin Inc(O1ExP); O1ExPrim:=O1ExPrim; Exit; End;
+ If Not O1StrToD(O1ExS,O1ExP,V) Then Begin O1ExErr:=True; Exit; End;
+ O1ExPrim:=V;
+End;
+Function O1ExMul: Double;
+Var V,W: Double;
+Begin
+ V:=O1ExPrim;
+ While (O1ExP<=Length(O1ExS)) And Not O1ExErr Do Begin
+  If O1ExS[O1ExP]='*' Then Begin Inc(O1ExP); V:=V*O1ExPrim; End
+  Else If O1ExS[O1ExP]='/' Then Begin Inc(O1ExP); W:=O1ExPrim; If W=0 Then V:=0 Else V:=V/W; End
+  Else Break;
+ End;
+ O1ExMul:=V;
+End;
+Function O1ExAdd: Double;
+Var V: Double;
+Begin
+ V:=O1ExMul;
+ While (O1ExP<=Length(O1ExS)) And Not O1ExErr Do Begin
+  If O1ExS[O1ExP]='+' Then Begin Inc(O1ExP); V:=V+O1ExMul; End
+  Else If O1ExS[O1ExP]='-' Then Begin Inc(O1ExP); V:=V-O1ExMul; End
+  Else Break;
+ End;
+ O1ExAdd:=V;
+End;
+Function O1ExprEval(Const S: String; Var V: Double): Boolean;
+Begin
+ O1ExS:=S; O1ExP:=1; O1ExErr:=False;
+ V:=O1ExAdd;
+ While (O1ExP<=Length(O1ExS)) And (O1ExS[O1ExP]=' ') Do Inc(O1ExP);
+ O1ExprEval:=Not O1ExErr And (O1ExP>Length(O1ExS)) And (Length(S)>0);
+End;
+
+{ sscanf("%d:%d%c")==2 }
+Function O1ScanRatio(Const S: String; Var N,D: Int64): Boolean;
+Var P,K: Integer; Neg: Boolean; V: Int64;
+ Function Num(Var X: Int64): Boolean;
+ Var Ng: Boolean; Dg: Boolean;
+ Begin
+  Num:=False; Ng:=False; Dg:=False; X:=0;
+  While (P<=Length(S)) And (S[P]=' ') Do Inc(P);
+  If (P<=Length(S)) And ((S[P]='-') Or (S[P]='+')) Then Begin Ng:=S[P]='-'; Inc(P); End;
+  While (P<=Length(S)) And (S[P] In ['0'..'9']) Do Begin If X<2000000000 Then X:=X*10+Ord(S[P])-48; Inc(P); Dg:=True; End;
+  If Ng Then X:=-X;
+  Num:=Dg;
+ End;
+Begin
+ O1ScanRatio:=False; P:=1;
+ If Not Num(N) Then Exit;
+ If (P>Length(S)) Or (S[P]<>':') Then Exit;
+ Inc(P);
+ If Not Num(D) Then Exit;
+ If P<=Length(S) Then Exit;  { un %c supplementaire serait lu : 3 conversions }
+ O1ScanRatio:=True;
+End;
+
+{ av_parse_ratio ; renvoie False en cas d'echec }
+Function O1ParseRatio(Const S: String; Max: Int64; Var N,D: Int64): Boolean;
+Var V: Double; A,B: Int64;
+Begin
+ O1ParseRatio:=False;
+ If O1ScanRatio(S,A,B) Then Begin O1Reduce(N,D,A,B,Max); O1ParseRatio:=True; Exit; End;
+ If Not O1ExprEval(S,V) Then Exit;
+ O1D2Q(V,Max,N,D);
+ O1ParseRatio:=True;
+End;
+
+{ av_parse_video_rate }
+Function O1ParseRate(Const S: String; Var N,D: Int64): Boolean;
+Begin
+ O1ParseRate:=False;
+ If S='ntsc' Then Begin N:=30000; D:=1001; End
+ Else If S='pal' Then Begin N:=25; D:=1; End
+ Else If S='qntsc' Then Begin N:=30000; D:=1001; End
+ Else If S='qpal' Then Begin N:=25; D:=1; End
+ Else If S='sntsc' Then Begin N:=30000; D:=1001; End
+ Else If S='spal' Then Begin N:=25; D:=1; End
+ Else If S='film' Then Begin N:=24; D:=1; End
+ Else If S='ntsc-film' Then Begin N:=24000; D:=1001; End
+ Else Begin
+  If Not O1ParseRatio(S,1001000,N,D) Then Exit;
+  If (N<=0) Or (D<=0) Then Exit;
+ End;
+ O1ParseRate:=True;
+End;
+
+{ av_parse_video_size }
+Function O1ParseSize(Const S: String; Var W,H: LongInt): Boolean;
+Type O1TSz=Record Nm: String[10]; W,H: LongInt; End;
+Const
+ Tab: Array[0..54] Of O1TSz=(
+ (Nm:'ntsc';W:720;H:480),(Nm:'pal';W:720;H:576),(Nm:'qntsc';W:352;H:240),(Nm:'qpal';W:352;H:288),(Nm:'sntsc';W:640;H:480),
+ (Nm:'spal';W:768;H:576),(Nm:'film';W:352;H:240),(Nm:'ntsc-film';W:352;H:240),(Nm:'sqcif';W:128;H:96),(Nm:'qcif';W:176;H:144),
+ (Nm:'cif';W:352;H:288),(Nm:'4cif';W:704;H:576),(Nm:'16cif';W:1408;H:1152),(Nm:'qqvga';W:160;H:120),(Nm:'qvga';W:320;H:240),
+ (Nm:'vga';W:640;H:480),(Nm:'svga';W:800;H:600),(Nm:'xga';W:1024;H:768),(Nm:'uxga';W:1600;H:1200),(Nm:'qxga';W:2048;H:1536),
+ (Nm:'sxga';W:1280;H:1024),(Nm:'qsxga';W:2560;H:2048),(Nm:'hsxga';W:5120;H:4096),(Nm:'wvga';W:852;H:480),(Nm:'wxga';W:1366;H:768),
+ (Nm:'wsxga';W:1600;H:1024),(Nm:'wuxga';W:1920;H:1200),(Nm:'woxga';W:2560;H:1600),(Nm:'wqhd';W:2560;H:1440),(Nm:'wqsxga';W:3200;H:2048),
+ (Nm:'wquxga';W:3840;H:2400),(Nm:'whsxga';W:6400;H:4096),(Nm:'whuxga';W:7680;H:4800),(Nm:'cga';W:320;H:200),(Nm:'ega';W:640;H:350),
+ (Nm:'hd480';W:852;H:480),(Nm:'hd720';W:1280;H:720),(Nm:'hd1080';W:1920;H:1080),(Nm:'quadhd';W:2560;H:1440),(Nm:'2k';W:2048;H:1080),
+ (Nm:'2kdci';W:2048;H:1080),(Nm:'2kflat';W:1998;H:1080),(Nm:'2kscope';W:2048;H:858),(Nm:'4k';W:4096;H:2160),(Nm:'4kdci';W:4096;H:2160),
+ (Nm:'4kflat';W:3996;H:2160),(Nm:'4kscope';W:4096;H:1716),(Nm:'nhd';W:640;H:360),(Nm:'hqvga';W:240;H:160),(Nm:'wqvga';W:400;H:240),
+ (Nm:'fwqvga';W:432;H:240),(Nm:'hvga';W:480;H:320),(Nm:'qhd';W:960;H:540),(Nm:'uhd2160';W:3840;H:2160),(Nm:'uhd4320';W:7680;H:4320));
+Var I,P: Integer; Wd,Ht: Int64; Found: Boolean; Neg: Boolean;
+ Function StrtoL(Var X: Int64): Boolean;
+ Var Ng,Dg: Boolean;
+ Begin
+  X:=0; Ng:=False; Dg:=False;
+  While (P<=Length(S)) And (S[P] In [' ',#9]) Do Inc(P);
+  If (P<=Length(S)) And ((S[P]='-') Or (S[P]='+')) Then Begin Ng:=S[P]='-'; Inc(P); End;
+  While (P<=Length(S)) And (S[P] In ['0'..'9']) Do Begin If X<20000000000 Then X:=X*10+Ord(S[P])-48; Inc(P); Dg:=True; End;
+  If Ng Then X:=-X;
+  StrtoL:=True;
+ End;
+Begin
+ O1ParseSize:=False; Found:=False; Wd:=0; Ht:=0;
+ For I:=0 To 54 Do If Tab[I].Nm=S Then Begin Wd:=Tab[I].W; Ht:=Tab[I].H; Found:=True; Break; End;
+ If Not Found Then Begin
+  P:=1; StrtoL(Wd);
+  If P<=Length(S) Then Inc(P);
+  StrtoL(Ht);
+  If P<=Length(S) Then Exit;
+ End;
+ If (Wd<=0) Or (Ht<=0) Or (Wd>2147483647) Or (Ht>2147483647) Then Exit;
+ W:=Wd; H:=Ht; O1ParseSize:=True;
+End;
+
+{ av_parse_time(duration=1) : microsecondes ; Code<>0 si invalide }
+Function O1ParseDur(Const S: String; Var Us: Int64): Boolean;
+Var P: Integer; Neg: Boolean; H,M,Sc,T,Micro,Suffix: Int64; Ok: Boolean; Q: Integer; N: LongInt; Nn: Int64;
+ Function GetNum(Lo,Hi: Int64; Len: Integer; Var V: Int64; Var At: Integer): Boolean;
+ Var I: Integer; X: Int64; St: Integer;
+ Begin
+  St:=At; X:=0; I:=0;
+  While (I<Len) And (At<=Length(S)) And (S[At] In ['0'..'9']) Do Begin X:=X*10+Ord(S[At])-48; Inc(At); Inc(I); End;
+  If At=St Then Begin GetNum:=False; Exit; End;
+  If (X<Lo) Or (X>Hi) Then Begin At:=St; GetNum:=False; Exit; End;
+  V:=X; GetNum:=True;
+ End;
+Begin
+ O1ParseDur:=False; P:=1; Neg:=False; Micro:=0; Suffix:=1000000; Us:=0;
+ If (P<=Length(S)) And (S[P]='-') Then Begin Neg:=True; Inc(P); End;
+ { HH:MM:SS (heures sur 4 chiffres max) }
+ Q:=P; Ok:=False; H:=0; M:=0; Sc:=0;
+ If GetNum(0,2147483647,4,H,Q) Then
+  If (Q<=Length(S)) And (S[Q]=':') Then Begin
+   Inc(Q);
+   If GetNum(0,59,2,M,Q) Then
+    If (Q<=Length(S)) And (S[Q]=':') Then Begin
+     Inc(Q);
+     If GetNum(0,59,2,Sc,Q) Then Ok:=True;
+    End;
+  End;
+ If Not Ok Then Begin
+  Q:=P; H:=0; M:=0; Sc:=0;
+  If GetNum(0,59,2,M,Q) Then
+   If (Q<=Length(S)) And (S[Q]=':') Then Begin
+    Inc(Q);
+    If GetNum(0,59,2,Sc,Q) Then Ok:=True;
+   End;
+  H:=0;
+ End;
+ If Ok Then T:=H*3600+M*60+Sc
+ Else Begin
+  { S+ }
+  Q:=P; T:=0; Nn:=0;
+  While (Q<=Length(S)) And (S[Q] In ['0'..'9']) Do Begin
+   If T>922337203685477580 Then Exit;
+   T:=T*10+Ord(S[Q])-48; Inc(Q); Inc(Nn);
+  End;
+  If Nn=0 Then Exit;
+ End;
+ If (Q<=Length(S)) And (S[Q]='.') Then Begin
+  Inc(Q); N:=100000;
+  While N>=1 Do Begin
+   If (Q>Length(S)) Or Not (S[Q] In ['0'..'9']) Then Break;
+   Micro:=Micro+N*(Ord(S[Q])-48); Inc(Q); N:=N Div 10;
+  End;
+  While (Q<=Length(S)) And (S[Q] In ['0'..'9']) Do Inc(Q);
+ End;
+ If (Q+1<=Length(S)) And (S[Q]='m') And (S[Q+1]='s') Then Begin Suffix:=1000; Micro:=Micro Div 1000; Inc(Q,2); End
+ Else If (Q+1<=Length(S)) And (S[Q]='u') And (S[Q+1]='s') Then Begin Suffix:=1; Micro:=0; Inc(Q,2); End
+ Else If (Q<=Length(S)) And (S[Q]='s') Then Inc(Q);
+ If Q<=Length(S) Then Exit;
+ If (T>O1I64Max Div Suffix) Then Exit;
+ T:=T*Suffix;
+ If O1I64Max-Micro<T Then Exit;
+ T:=T+Micro;
+ If Neg Then Us:=-T Else Us:=T;
+ O1ParseDur:=True;
+End;
+
+
+{ ---- modele de synchronisation video de fftools (ffmpeg_demux.c, trim.c, ffmpeg_filter.c video_sync_process) ---- }
+Var
+ O1HasInSS,O1HasInT,O1HasInTo,O1HasInOff,O1HasInR: Boolean;
+ O1InSS,O1InT,O1InTo,O1InOff,O1InRN,O1InRD: Int64;
+ O1HasOutSS,O1HasOutT,O1HasOutTo,O1HasOutR: Boolean;
+ O1OutSS,O1OutT,O1OutTo,O1OutRN,O1OutRD: Int64;
+ O1VFrames: Int64;             { -1 : pas de limite }
+ O1VSMode: LongInt;            { 0 cfr, 1 vscfr, 2 vfr, 3 passthrough, 4 drop }
+ O1RPass,O1RReach: LongInt; O1RN,O1RCap: LongInt; O1RSrc: O1PL32A; O1RPts: O1PI64A; O1RFN,O1RFD: Int64;
+
+Function O1Rint(X: Double): Int64;
+Var F,R: Double;
+Begin
+ { llrint : arrondi au plus proche, egalite vers le pair }
+ If X>=0 Then Begin F:=Int(X); R:=X-F; If R>0.5 Then F:=F+1 Else If (R=0.5) And (Odd(Trunc(F))) Then F:=F+1; O1Rint:=Trunc(F); End
+ Else Begin F:=Int(X); R:=F-X; If R>0.5 Then F:=F-1 Else If (R=0.5) And (Odd(Trunc(F))) Then F:=F-1; O1Rint:=Trunc(F); End;
+End;
+
+Function O1Rintf(X: Double): Int64;
+Var S: Single;
+Begin
+ S:=X; O1Rintf:=O1Rint(S);
+End;
+
+Function O1Log2I(V: Int64): LongInt;
+Var K: LongInt;
+Begin
+ K:=0; While V>1 Do Begin V:=V Shr 1; Inc(K); End; O1Log2I:=K;
+End;
+
+Procedure O1RPush(Src: LongInt; Pts: Int64);
+Begin
+ If O1RN>=O1RCap Then Begin
+  If O1RCap=0 Then O1RCap:=1024 Else O1RCap:=O1RCap*2;
+  ReAllocMem(O1RSrc,Int64(O1RCap)*4); ReAllocMem(O1RPts,Int64(O1RCap)*8);
+ End;
+ O1RSrc^[O1RN]:=Src; O1RPts^[O1RN]:=Pts; Inc(O1RN);
+End;
+
+{ NSrc images de cadence FpsN/FpsD (Y4M : base de temps = FpsD/FpsN apres av_reduce) ; remplit O1RSrc/O1RPts/O1RFN/O1RFD }
+Type O1TFrm=Record P,D: Int64; S: LongInt; End; O1TFrA=Array[0..8000000] Of O1TFrm; O1PFrA=^O1TFrA;
+Procedure O1Timeline(NSrc: LongInt; FpsN,FpsD: Int64);
+Var
+ G: Int64; TbIn: O1TRat; Ftb: O1TRat; Fr: O1PFrA; NF,I,First,K: LongInt;
+ Timestamp,Ts,TsOff,Off: Int64; Rec,Stt: Int64; RecSet: Boolean; StartPts,DurTb,FirstPts: Int64; Eof,HasFirst: Boolean;
+ FrN,FrD: Int64; TbOut: O1TRat; Extra: LongInt; Tbx: O1TRat; NextPts: Int64; FNo: Int64; Hist: Array[0..2] Of Int64;
+ Last: LongInt; Stopped: Boolean; MaxF: Int64; Delta0,Delta,Sync,Dur,FP: Double; Nb,Nbp: Int64; Src: LongInt; Mode: LongInt;
+ TsOffUs: Int64; RecMax: Int64; HasRecMax: Boolean; A,B,C: Int64; Cnt: LongInt;
+ Procedure Trim(HasS: Boolean; S0: Int64; HasD: Boolean; D0: Int64);
+ Var J,M: LongInt; SP,DT,FPt: Int64; Ef,Hf: Boolean; Cur: O1PFrA;
+ Begin
+  If Not HasS And Not HasD Then Exit;
+  SP:=0; DT:=0;
+  If HasS Then SP:=O1RescQ(S0,1,1000000,Ftb.N,Ftb.D);
+  If HasD Then DT:=O1RescQ(D0,1,1000000,Ftb.N,Ftb.D);
+  Ef:=False; Hf:=False; FPt:=0; M:=0;
+  GetMem(Cur,(Int64(NF)+2)*SizeOf(O1TFrm));
+  For J:=0 To NF-1 Do Begin
+   If Ef Then Break;
+   If HasS And (Fr^[J].P<SP) Then Continue;
+   If Not Hf Then Begin FPt:=Fr^[J].P; Hf:=True; End;
+   If HasD And (DT<>0) And Not (Fr^[J].P-FPt<DT) Then Begin Ef:=True; Break; End;
+   Cur^[M]:=Fr^[J]; Inc(M);
+  End;
+  For J:=0 To M-1 Do Fr^[J]:=Cur^[J];
+  FreeMem(Cur);
+  NF:=M;
+ End;
+ Procedure Emit(Src: LongInt; P: Int64; Var Ok: Boolean);
+ Begin
+  Ok:=True;
+  If HasRecMax Then
+   If P*TbOut.N*1000000>=RecMax*TbOut.D Then Begin Ok:=False; Exit; End;
+  O1RPush(Src,P);
+ End;
+ Function MidPred(X,Y,Z: Int64): Int64;
+ Var T: Int64;
+ Begin
+  If X>Y Then Begin T:=X; X:=Y; Y:=T; End;
+  If Y>Z Then Begin Y:=Z; End;
+  If X>Y Then MidPred:=X Else MidPred:=Y;
+ End;
+Var Ok: Boolean; Nn: Int64;
+Begin
+ O1RN:=0; Mode:=O1VSMode;
+ G:=O1Gcd(FpsN,FpsD); If G=0 Then G:=1;
+ TbIn.N:=FpsD Div G; TbIn.D:=FpsN Div G;
+ { ---- entree ---- }
+ First:=0; Timestamp:=0;
+ If O1HasInSS Then Begin
+  Timestamp:=O1InSS;
+  Ts:=O1Resc(Timestamp,TbIn.D,1000000*TbIn.N);
+  Ts:=Ts-1; If Ts<0 Then Ts:=0;
+  If Ts>NSrc Then Ts:=NSrc;
+  First:=Ts;
+ End;
+ Off:=0; TsOff:=0;
+ If O1HasInOff Then TsOff:=O1InOff;
+ TsOff:=TsOff-Timestamp;
+ Off:=O1RescQ(TsOff,1,1000000,TbIn.N,TbIn.D);
+ Ftb:=TbIn;
+ GetMem(Fr,(Int64(NSrc)+2)*SizeOf(O1TFrm)); NF:=0; O1RReach:=NSrc-First;
+ If O1HasInR Then Begin
+  Ftb.N:=O1InRD; Ftb.D:=O1InRN;
+  For I:=First To NSrc-1 Do Begin Fr^[NF].P:=NF; Fr^[NF].D:=1; Fr^[NF].S:=I; Inc(NF); End;
+ End Else
+  For I:=First To NSrc-1 Do Begin Fr^[NF].P:=I+Off; Fr^[NF].D:=1; Fr^[NF].S:=I; Inc(NF); End;
+ Rec:=0; RecSet:=False;
+ If O1HasInT Then Begin Rec:=O1InT; RecSet:=True; End
+ Else If O1HasInTo Then Begin
+  Stt:=0; If O1HasInSS Then Stt:=O1InSS;
+  Rec:=O1InTo-Stt; RecSet:=True;
+ End;
+ { trim d'entree : debut = 0 si -ss (seek precis) }
+ Trim(O1HasInSS,0,RecSet,Rec);
+ { ---- sortie ---- }
+ Rec:=0; RecSet:=False; HasRecMax:=False; RecMax:=0;
+ If O1HasOutT Then Begin Rec:=O1OutT; RecSet:=True; End
+ Else If O1HasOutTo Then Begin
+  Stt:=0; If O1HasOutSS Then Stt:=O1OutSS;
+  Rec:=O1OutTo-Stt; RecSet:=True;
+ End;
+ If RecSet Then Begin HasRecMax:=True; RecMax:=Rec; End;
+ Trim(O1HasOutSS,O1OutSS,RecSet,Rec);
+ O1RPass:=NF;
+ TsOffUs:=0; If O1HasOutSS Then TsOffUs:=O1OutSS;
+ { ---- base de temps de sortie ---- }
+ If O1HasOutR Then Begin FrN:=O1OutRN; FrD:=O1OutRD; End
+ Else If O1HasInR Then Begin FrN:=O1InRN; FrD:=O1InRD; End
+ Else Begin FrN:=FpsN Div G; FrD:=FpsD Div G; End;
+ If FrN<=0 Then Begin FrN:=25; FrD:=1; End;
+ TbOut.N:=FrD; TbOut.D:=FrN;
+ O1RFN:=FrN; O1RFD:=FrD;
+ Extra:=29-O1Log2I(TbOut.D); If Extra<0 Then Extra:=0; If Extra>16 Then Extra:=16;
+ Tbx.N:=TbOut.N; Tbx.D:=TbOut.D Shl Extra;
+ NextPts:=0; FNo:=0; Hist[0]:=0; Hist[1]:=0; Hist[2]:=0; Last:=-1; Stopped:=False;
+ MaxF:=O1VFrames;
+ O1RN:=0;
+ For I:=0 To NF-1 Do Begin
+  Dur:=Fr^[I].D;
+  A:=Ftb.N; B:=Ftb.D; { duree en ticks de sortie : d * (ftb) / (tbout) }
+  Dur:=Dur*(A/B)/(TbOut.N/TbOut.D);
+  FP:=O1RescQ(Fr^[I].P,Ftb.N,Ftb.D,Tbx.N,Tbx.D)-O1RescQ(TsOffUs,1,1000000,Tbx.N,Tbx.D);
+  FP:=FP/(Int64(1) Shl Extra);
+  If FP<>O1Rint(FP) Then Begin If FP>0 Then FP:=FP+1.0/131072.0 Else If FP<0 Then FP:=FP-1.0/131072.0; End;
+  Sync:=FP;
+  Delta0:=Sync-NextPts; Delta:=Delta0+Dur;
+  Nbp:=0; Nb:=1;
+  If (Delta0<0) And (Delta>0) And (Mode<>3) And (Mode<>4) Then Begin
+   Sync:=NextPts; Dur:=Dur+Delta0; Delta0:=0;
+  End;
+  Case Mode Of
+   0,1: Begin
+    If (Mode=1) And (FNo=0) And (Delta0>=0.5) Then Begin
+     Delta:=Dur; Delta0:=0; NextPts:=O1Rint(Sync);
+    End;
+    If Delta<-1.1 Then Nb:=0
+    Else If Delta>1.1 Then Begin
+     Nb:=O1Rintf(Delta);
+     If Delta0>1.1 Then Nbp:=O1Rintf(Delta0-0.6);
+    End;
+   End;
+   2: Begin
+    If Delta<=-0.6 Then Nb:=0
+    Else If Delta>0.6 Then NextPts:=O1Rint(Sync);
+   End;
+   Else NextPts:=O1Rint(Sync);
+  End;
+  Hist[2]:=Hist[1]; Hist[1]:=Hist[0]; Hist[0]:=Nbp;
+  Nn:=0;
+  While Nn<Nb Do Begin
+   If (Nn<Nbp) And (Last>=0) Then Src:=Last Else Src:=Fr^[I].S;
+   If (MaxF>=0) And (O1RN>=MaxF) Then Begin Stopped:=True; Break; End;
+   Emit(Src,NextPts,Ok);
+   If Not Ok Then Begin Stopped:=True; Break; End;
+   Inc(FNo); Inc(NextPts); Inc(Nn);
+  End;
+  Last:=Fr^[I].S;
+  If Stopped Then Break;
+ End;
+ If Not Stopped And (Last>=0) Then Begin
+  Nb:=MidPred(Hist[0],Hist[1],Hist[2]);
+  Nn:=0;
+  While Nn<Nb Do Begin
+   If (MaxF>=0) And (O1RN>=MaxF) Then Break;
+   Emit(Last,NextPts,Ok);
+   If Not Ok Then Break;
+   Inc(NextPts); Inc(Nn);
+  End;
+ End;
+ FreeMem(Fr);
+End;
+
+
+{ ---- analyse de la ligne de commande a la maniere de cmdutils.c split_commandline ---- }
+Const O1MaxOp=300; O1MaxGr=32; O1MaxTok=400;
+Type
+ O1TOp=Record Key: String[60]; Val: String; Ti: Integer; Tok: Integer; Grp: Integer; Av: Boolean; End;
+ O1TGr=Record IsIn: Boolean; Arg: String; Tok: Integer; End;
+Var
+ O1Op: Array[1..O1MaxOp] Of O1TOp; O1NOp: Integer;
+ O1Gr: Array[1..O1MaxGr] Of O1TGr; O1NGr: Integer;
+ O1Used: Array[1..O1MaxTok] Of Boolean;
+ O1Trailing: Boolean;
+ O1ErrCode: Integer;
+
+Procedure O1Banner;
+Begin
+ If O1BannerDone Then Exit;
+ O1BannerDone:=True;
+ If O1HideBanner Or (O1LogLevel<32) Then Exit;
+ O1TxBanner(StdErr);
+End;
+
+{ message d'erreur ffmpeg (stderr) }
+Procedure O1Msg(Level: LongInt; Const S: String);
+Begin
+ O1Banner;
+ If Level<=O1LogLevel Then Begin WriteLn(StdErr,S); Flush(StdErr); End;
+End;
+
+Procedure O1Die(Code: LongInt);
+Begin
+ Flush(StdErr); Halt(Code);
+End;
+
+Function O1FindOpt(Const Opt: String): Integer;
+Var I,L: Integer; Nm: String;
+Begin
+ For I:=0 To O1NOpt-1 Do Begin
+  Nm:=O1OptNm[I]; L:=Length(Nm);
+  If Copy(Opt,1,L)=Nm Then
+   If (Length(Opt)=L) Or (Opt[L+1]=':') Then Begin O1FindOpt:=I; Exit; End;
+ End;
+ O1FindOpt:=-1;
+End;
+
+Function O1AvKnown(Const Name: String): Boolean;
+Var Lo,Hi,Mid: Integer; Nm: String;
+ Function Has(Const N: String): Boolean;
+ Var A,B,M: Integer;
+ Begin
+  Has:=False; A:=0; B:=O1NAv-1;
+  While A<=B Do Begin
+   M:=(A+B) Div 2;
+   If O1AvNm[M]=N Then Begin Has:=True; Exit; End;
+   If O1AvNm[M]<N Then A:=M+1 Else B:=M-1;
+  End;
+ End;
+Begin
+ Nm:=Name; Lo:=Pos(':',Nm); If Lo>0 Then Nm:=Copy(Nm,1,Lo-1);
+ O1AvKnown:=True;
+ If Has(Nm) Then Exit;
+ If (Length(Nm)>1) And (Nm[1] In ['v','a','s']) And Has(Copy(Nm,2,60)) Then Exit;
+ O1AvKnown:=False;
+End;
+
+Function O1HasFlag(I: Integer; C: Char): Boolean;
+Begin
+ O1HasFlag:=Pos(C,O1OptFl[I])>0;
+End;
+
+{ renvoie 0 si ok ; sinon code d'erreur (message deja affiche) }
+Function O1Split: Integer;
+Var Idx,N,Ti,Cur,PendStart,K: Integer; Opt,Arg: String; Gl: Boolean; DashDash: Integer;
+ Procedure AddOp(Key,Val: String; T,Tk: Integer; Av: Boolean);
+ Begin
+  If O1NOp>=O1MaxOp Then Begin O1Msg(16,'Too many options.'); O1Die(234); End;
+  Inc(O1NOp); O1Op[O1NOp].Key:=Key; O1Op[O1NOp].Val:=Val; O1Op[O1NOp].Ti:=T; O1Op[O1NOp].Tok:=Tk; O1Op[O1NOp].Av:=Av;
+  If (T>=0) And Not (O1HasFlag(T,'P') Or O1HasFlag(T,'S') Or O1HasFlag(T,'F')) Then O1Op[O1NOp].Grp:=-1 Else O1Op[O1NOp].Grp:=0;
+ End;
+ Procedure Finish(IsIn: Boolean; Const FileArg: String; Tk: Integer);
+ Var J: Integer;
+ Begin
+  If O1NGr>=O1MaxGr Then Begin O1Msg(16,'Too many files.'); O1Die(234); End;
+  Inc(O1NGr); O1Gr[O1NGr].IsIn:=IsIn; O1Gr[O1NGr].Arg:=FileArg; O1Gr[O1NGr].Tok:=Tk;
+  For J:=1 To O1NOp Do If O1Op[J].Grp=0 Then O1Op[J].Grp:=O1NGr;
+ End;
+Begin
+ O1Split:=0; O1NOp:=0; O1NGr:=0; O1Trailing:=False; DashDash:=-2;
+ FillChar(O1Used,SizeOf(O1Used),0);
+ N:=ParamCount; Idx:=1;
+ If N>O1MaxTok Then N:=O1MaxTok;
+ While Idx<=N Do Begin
+  Opt:=ParamStr(Idx); Ti:=Idx; Inc(Idx);
+  If (Opt='--') Then Begin DashDash:=Idx; Continue; End;
+  If (Length(Opt)=0) Or (Opt[1]<>'-') Or (Length(Opt)=1) Or (DashDash+1=Idx) Then Begin
+   Finish(False,Opt,Ti); Continue;
+  End;
+  Opt:=Copy(Opt,2,255);
+  If Opt='i' Then Begin
+   If Idx>ParamCount Then Begin O1Msg(16,'Missing argument for option '''+Opt+'''.'); O1Split:=234; Exit; End;
+   Arg:=ParamStr(Idx); Inc(Idx);
+   Finish(True,Arg,Ti); Continue;
+  End;
+  K:=O1FindOpt(Opt);
+  If K>=0 Then Begin
+   If O1HasFlag(K,'X') Then Begin
+    If Idx<=ParamCount Then Begin Arg:=ParamStr(Idx); Inc(Idx); End Else Arg:='';
+   End Else If O1HasFlag(K,'A') Then Begin
+    If Idx>ParamCount Then Begin O1Msg(16,'Missing argument for option '''+Opt+'''.'); O1Split:=234; Exit; End;
+    Arg:=ParamStr(Idx); Inc(Idx);
+   End Else Arg:='1';
+   AddOp(Opt,Arg,K,Ti,False);
+   Continue;
+  End;
+  { AVOption }
+  If Idx<=ParamCount Then Begin
+   If O1AvKnown(Opt) Then Begin
+    Arg:=ParamStr(Idx); Inc(Idx);
+    AddOp(Opt,Arg,-1,Ti,True);
+    O1Op[O1NOp].Grp:=0;
+    Continue;
+   End;
+  End;
+  { -nofoo }
+  If (Length(Opt)>2) And (Opt[1]='n') And (Opt[2]='o') Then Begin
+   K:=O1FindOpt(Copy(Opt,3,60));
+   If (K>=0) And O1HasFlag(K,'B') Then Begin AddOp(Opt,'0',K,Ti,False); Continue; End;
+  End;
+  O1Msg(16,'Unrecognized option '''+Opt+'''.');
+  O1Msg(16,'Error splitting the argument list: Option not found');
+  O1Split:=8; Exit;
+ End;
+ For K:=1 To O1NOp Do If O1Op[K].Grp=0 Then O1Trailing:=True;
+ If O1Trailing Then O1Msg(24,'Trailing option(s) found in the command: may be ignored.');
+End;
+
+
+{ ---- libswscale (version 6.1.1, code C) : filtres de redimensionnement utils.c initFilter, hscale 8->15 bits, vscale 15->8 bits ---- }
+Const
+ O1SwFast=1; O1SwBilinear=2; O1SwBicubic=4; O1SwX=8; O1SwPoint=$10; O1SwArea=$20; O1SwBicublin=$40; O1SwGauss=$80; O1SwSinc=$100; O1SwLanczos=$200; O1SwSpline=$400;
+ O1SwPrintInfo=$1000; O1SwFullChrInt=$2000; O1SwFullChrInp=$4000; O1SwAccurate=$40000; O1SwBitexact=$80000; O1SwErrDiff=$800000;
+ O1SwAlgoMask=$7FF;
+Type
+ O1TFlt=Record Pos,Coef: O1PL32A; FS,N: LongInt; End;
+ O1TPI64=^O1TI64B; O1TI64B=Array[0..16000000] Of Int64;
+ O1TSmall=Array[0..32000000] Of SmallInt; O1PSmall=^O1TSmall;
+Var
+ O1SwFlags: LongInt;          { drapeaux swscale en vigueur (-sws_flags) }
+ O1SwParam0,O1SwParam1: Double;
+ O1SwParamSet: Boolean;
+
+Function O1Sar(V: Int64; N: LongInt): Int64;
+Begin
+ If V>=0 Then O1Sar:=V Shr N Else O1Sar:=-((-V+(Int64(1) Shl N)-1) Shr N);
+End;
+
+Function O1RDiv(A,B: Int64): Int64;
+Begin
+ If A>=0 Then O1RDiv:=(A+(B Shr 1)) Div B Else O1RDiv:=(A-(B Shr 1)) Div B;
+End;
+
+Function O1SplineCoeff(A,B,C,D,Dist: Double): Double;
+Begin
+ If Dist<=1.0 Then O1SplineCoeff:=((D*Dist+C)*Dist+B)*Dist+A
+ Else O1SplineCoeff:=O1SplineCoeff(0.0,B+2.0*C+3.0*D,C+3.0*D,-B-3.0*C-6.0*D,Dist-1.0);
+End;
+
+Function O1Log2Q(V: LongInt): LongInt;
+Var K: LongInt;
+Begin
+ K:=0; While V>1 Do Begin V:=V Shr 1; Inc(K); End; O1Log2Q:=K;
+End;
+
+Procedure O1FltFree(Var F: O1TFlt);
+Begin
+ If F.Pos<>Nil Then FreeMem(F.Pos); If F.Coef<>Nil Then FreeMem(F.Coef);
+ F.Pos:=Nil; F.Coef:=Nil;
+End;
+
+{ initFilter (libswscale/utils.c), filterAlign=1, sans filtre source/destination }
+Procedure O1InitFilter(Var Fl: O1TFlt; XInc: Int64; SrcW,DstW: LongInt; One: Int64; Flags: LongInt; SrcPos,DstPos: LongInt);
+Var
+ Fone,XDst,D,Coeff,B,C,Dd,Ddd,Cut,Sum,Err,V,Acc,Dx: Int64;
+ FSz,I,J,K,Xx,MinF,Mn,Shift,Q,SizeFactor: LongInt;
+ Ft,F2: O1TPI64; FPos: O1PL32A; DFone,DLim,DCut,FloatD,Pp,Cc,A0,P0,P1: Double; IntV: Int64;
+Begin
+ Q:=O1Log2Q(SrcW Div DstW); If Q>8 Then Q:=8;
+ Fone:=Int64(1) Shl (54-Q);
+ GetMem(FPos,(Int64(DstW)+4)*4);
+ Fl.N:=DstW; Fl.Pos:=FPos;
+ If O1SwParamSet Then Begin P0:=O1SwParam0; P1:=O1SwParam1; End Else Begin P0:=123456; P1:=123456; End;
+ If (Abs(XInc-$10000)<10) And (SrcPos=DstPos) Then Begin
+  FSz:=1;
+  GetMem(Ft,Int64(DstW)*FSz*8+64);
+  For I:=0 To DstW-1 Do Begin Ft^[I]:=Fone; FPos^[I]:=I; End;
+ End Else If (Flags And O1SwPoint)<>0 Then Begin
+  FSz:=1;
+  GetMem(Ft,Int64(DstW)*FSz*8+64);
+  XDst:=O1Sar(Int64(DstPos)*XInc,8)-O1Sar(Int64(SrcPos)*$8000,7);
+  For I:=0 To DstW-1 Do Begin
+   Xx:=O1Sar(XDst-(Int64(FSz-1) Shl 15)+(Int64(1) Shl 15),16);
+   FPos^[I]:=Xx; Ft^[I]:=Fone; XDst:=XDst+XInc;
+  End;
+ End Else If ((XInc<=(1 Shl 16)) And ((Flags And O1SwArea)<>0)) Or ((Flags And O1SwFast)<>0) Then Begin
+  FSz:=2;
+  GetMem(Ft,Int64(DstW)*FSz*8+64);
+  XDst:=O1Sar(Int64(DstPos)*XInc,8)-O1Sar(Int64(SrcPos)*$8000,7);
+  For I:=0 To DstW-1 Do Begin
+   Xx:=O1Sar(XDst-(Int64(FSz-1) Shl 15)+(Int64(1) Shl 15),16);
+   FPos^[I]:=Xx;
+   For J:=0 To FSz-1 Do Begin
+    Coeff:=Fone-Abs(Int64(Xx)*(Int64(1) Shl 16)-XDst)*(Fone Shr 16);
+    If Coeff<0 Then Coeff:=0;
+    Ft^[I*FSz+J]:=Coeff; Inc(Xx);
+   End;
+   XDst:=XDst+XInc;
+  End;
+ End Else Begin
+  SizeFactor:=-1;
+  If (Flags And O1SwArea)<>0 Then SizeFactor:=1
+  Else If (Flags And O1SwBicubic)<>0 Then SizeFactor:=4
+  Else If (Flags And O1SwBilinear)<>0 Then SizeFactor:=2
+  Else If (Flags And O1SwGauss)<>0 Then SizeFactor:=8
+  Else If (Flags And O1SwSinc)<>0 Then SizeFactor:=20
+  Else If (Flags And O1SwSpline)<>0 Then SizeFactor:=20
+  Else If (Flags And O1SwX)<>0 Then SizeFactor:=8;
+  If (Flags And O1SwLanczos)<>0 Then Begin
+   If P0<>123456 Then SizeFactor:=Trunc(Int(2*P0)+Ord(Frac(2*P0)>0)) Else SizeFactor:=6;
+  End;
+  If SizeFactor<=0 Then SizeFactor:=4;
+  If XInc<=(1 Shl 16) Then FSz:=1+SizeFactor Else FSz:=1+(SizeFactor*Int64(SrcW)+DstW-1) Div DstW;
+  If FSz>SrcW-2 Then FSz:=SrcW-2;
+  If FSz<1 Then FSz:=1;
+  GetMem(Ft,Int64(DstW)*FSz*8+64);
+  XDst:=O1Sar(Int64(DstPos)*XInc,7)-O1Sar(Int64(SrcPos)*$10000,7);
+  For I:=0 To DstW-1 Do Begin
+   Xx:=(XDst-Int64(FSz-2)*(Int64(1) Shl 16)) Div (Int64(1) Shl 17);
+   If (XDst-Int64(FSz-2)*(Int64(1) Shl 16))<0 Then Begin
+    { division C tronquee vers zero : deja le comportement de Div }
+   End;
+   FPos^[I]:=Xx;
+   For J:=0 To FSz-1 Do Begin
+    D:=Abs(Int64(Xx)*(Int64(1) Shl 17)-XDst) Shl 13;
+    If XInc>(1 Shl 16) Then D:=D*DstW Div SrcW;
+    FloatD:=D*(1.0/1073741824.0);
+    Coeff:=0;
+    If (Flags And O1SwBicubic)<>0 Then Begin
+     If P0<>123456 Then B:=Trunc(P0*16777216.0) Else B:=0;
+     If P1<>123456 Then C:=Trunc(P1*16777216.0) Else C:=Trunc(0.6*16777216.0);
+     If D>=(Int64(1) Shl 31) Then Coeff:=0
+     Else Begin
+      Dd:=O1Sar(D*D,30); Ddd:=O1Sar(Dd*D,30);
+      If D<(Int64(1) Shl 30) Then
+       Coeff:=(12*(Int64(1) Shl 24)-9*B-6*C)*Ddd+(-18*(Int64(1) Shl 24)+12*B+6*C)*Dd+(6*(Int64(1) Shl 24)-2*B)*(Int64(1) Shl 30)
+      Else
+       Coeff:=(-B-6*C)*Ddd+(6*B+30*C)*Dd+(-12*B-48*C)*D+(8*B+24*C)*(Int64(1) Shl 30);
+     End;
+     Coeff:=Coeff Div ((Int64(1) Shl 54) Div Fone);
+    End Else If (Flags And O1SwX)<>0 Then Begin
+     If P0<>123456 Then A0:=P0 Else A0:=1.0;
+     If FloatD<1.0 Then Cc:=Cos(FloatD*Pi) Else Cc:=-1.0;
+     If Cc<0.0 Then Cc:=-Exp(A0*Ln(-Cc)) Else If Cc>0 Then Cc:=Exp(A0*Ln(Cc)) Else If A0=0 Then Cc:=1 Else Cc:=0;
+     Coeff:=Trunc((Cc*0.5+0.5)*Fone);
+    End Else If (Flags And O1SwArea)<>0 Then Begin
+     Dx:=D-(Int64(1) Shl 29);
+     If Dx*XInc<-(Int64(1) Shl (29+16)) Then Coeff:=Int64(1) Shl (30+16)
+     Else If Dx*XInc<(Int64(1) Shl (29+16)) Then Coeff:=-Dx*XInc+(Int64(1) Shl (29+16))
+     Else Coeff:=0;
+     Coeff:=Coeff*(Fone Shr (30+16));
+    End Else If (Flags And O1SwGauss)<>0 Then Begin
+     If P0<>123456 Then Pp:=P0 Else Pp:=3.0;
+     Coeff:=Trunc(Exp(-Pp*FloatD*FloatD*Ln(2.0))*Fone);
+    End Else If (Flags And O1SwSinc)<>0 Then Begin
+     If D<>0 Then Coeff:=Trunc(Sin(FloatD*Pi)/(FloatD*Pi)*Fone) Else Coeff:=Fone;
+    End Else If (Flags And O1SwLanczos)<>0 Then Begin
+     If P0<>123456 Then Pp:=P0 Else Pp:=3.0;
+     If D<>0 Then Coeff:=Trunc(Sin(FloatD*Pi)*Sin(FloatD*Pi/Pp)/(FloatD*FloatD*Pi*Pi/Pp)*Fone) Else Coeff:=Fone;
+     If FloatD>Pp Then Coeff:=0;
+    End Else If (Flags And O1SwBilinear)<>0 Then Begin
+     Coeff:=(Int64(1) Shl 30)-D;
+     If Coeff<0 Then Coeff:=0;
+     Coeff:=Coeff*(Fone Shr 30);
+    End Else If (Flags And O1SwSpline)<>0 Then Begin
+     Pp:=-2.196152422706632;
+     Coeff:=Trunc(O1SplineCoeff(1.0,0.0,Pp,-Pp-1.0,FloatD)*Fone);
+    End;
+    Ft^[I*FSz+J]:=Coeff; Inc(Xx);
+   End;
+   XDst:=XDst+2*XInc;
+  End;
+ End;
+ { reduction de la taille du filtre }
+ GetMem(F2,Int64(DstW)*FSz*8+64);
+ For I:=0 To DstW-1 Do For J:=0 To FSz-1 Do F2^[I*FSz+J]:=Ft^[I*FSz+J];
+ DFone:=Fone; DLim:=0.002*DFone;
+ MinF:=0;
+ For I:=DstW-1 DownTo 0 Do Begin
+  Mn:=FSz; Cut:=0;
+  For J:=0 To FSz-1 Do Begin
+   Cut:=Cut+Abs(F2^[I*FSz]);
+   DCut:=Cut; If DCut>DLim Then Break;
+   If (I<DstW-1) And (FPos^[I]>=FPos^[I+1]) Then Break;
+   For K:=1 To FSz-1 Do F2^[I*FSz+K-1]:=F2^[I*FSz+K];
+   F2^[I*FSz+FSz-1]:=0;
+   Inc(FPos^[I]);
+  End;
+  Cut:=0;
+  For J:=FSz-1 DownTo 1 Do Begin
+   Cut:=Cut+Abs(F2^[I*FSz+J]);
+   DCut:=Cut; If DCut>DLim Then Break;
+   Dec(Mn);
+  End;
+  If Mn>MinF Then MinF:=Mn;
+ End;
+ FreeMem(Ft);
+ GetMem(Ft,Int64(DstW)*MinF*8+64);
+ For I:=0 To DstW-1 Do For J:=0 To MinF-1 Do Begin
+  If J>=FSz Then Ft^[I*MinF+J]:=0 Else Ft^[I*MinF+J]:=F2^[I*FSz+J];
+  If ((Flags And O1SwBitexact)<>0) And (J>=MinF) Then Ft^[I*MinF+J]:=0;
+ End;
+ FreeMem(F2);
+ { bords }
+ For I:=0 To DstW-1 Do Begin
+  If FPos^[I]<0 Then Begin
+   For J:=1 To MinF-1 Do Begin
+    K:=J+FPos^[I]; If K<0 Then K:=0;
+    Ft^[I*MinF+K]:=Ft^[I*MinF+K]+Ft^[I*MinF+J]; Ft^[I*MinF+J]:=0;
+   End;
+   FPos^[I]:=0;
+  End;
+  If FPos^[I]+MinF>SrcW Then Begin
+   Q:=MinF-SrcW; If Q>0 Then Q:=0;
+   Shift:=FPos^[I]+Q; Acc:=0;
+   For J:=MinF-1 DownTo 0 Do If FPos^[I]+J>=SrcW Then Begin Acc:=Acc+Ft^[I*MinF+J]; Ft^[I*MinF+J]:=0; End;
+   For J:=MinF-1 DownTo 0 Do
+    If J<Shift Then Ft^[I*MinF+J]:=0 Else Ft^[I*MinF+J]:=Ft^[I*MinF+J-Shift];
+   FPos^[I]:=FPos^[I]-Shift;
+   Ft^[I*MinF+SrcW-1-FPos^[I]]:=Ft^[I*MinF+SrcW-1-FPos^[I]]+Acc;
+  End;
+ End;
+ Fl.FS:=MinF;
+ GetMem(Fl.Coef,Int64(DstW)*MinF*4+64);
+ For I:=0 To DstW-1 Do Begin
+  Err:=0; Sum:=0;
+  For J:=0 To MinF-1 Do Sum:=Sum+Ft^[I*MinF+J];
+  Sum:=(Sum+One Div 2) Div One;
+  If Sum=0 Then Sum:=1;
+  For J:=0 To MinF-1 Do Begin
+   V:=Ft^[I*MinF+J]+Err;
+   IntV:=O1RDiv(V,Sum);
+   Fl.Coef^[I*MinF+J]:=SmallInt(IntV);
+   Err:=V-IntV*Sum;
+  End;
+ End;
+ FreeMem(Ft);
+End;
+
+Function O1GetLocalPos(ChrSub,Pos: LongInt): LongInt;
+Begin
+ If (Pos=-1) Or (Pos<=-513) Then Pos:=(128 Shl ChrSub)-128;
+ Pos:=Pos+128;
+ O1GetLocalPos:=Pos Shr ChrSub;
+End;
+
+{ met a l'echelle un plan 8 bits : horizontal (-> 15 bits) puis vertical ; Mode 0 : normal ; 1 : luma->jpeg ; 2 : luma<-jpeg ; 3 : chroma->jpeg ; 4 : chroma<-jpeg }
+Procedure O1ScalePlane(Src: PEABuffer; SW,SH: LongInt; Dst: PEABuffer; DW,DH: LongInt; Flags: LongInt; SPosH,DPosH,SPosV,DPosV: LongInt; Mode: LongInt; IsChr: Boolean);
+Var
+ HF,VF: O1TFlt; H15: O1PSmall; X,Y,J,Hs,Fs,Bp,Sp: LongInt; Val: Int64; XInc,YInc: Int64; Fl: LongInt; Row: PEABuffer; Xpos,Xx,Xa: Int64;
+Begin
+ Fl:=Flags;
+ If (Fl And O1SwBicublin)<>0 Then Begin If IsChr Then Fl:=Fl Or O1SwBilinear Else Fl:=Fl Or O1SwBicubic; End;
+ XInc:=((Int64(SW) Shl 16)+(DW Shr 1)) Div DW;
+ YInc:=((Int64(SH) Shl 16)+(DH Shr 1)) Div DH;
+ O1InitFilter(HF,XInc,SW,DW,16384,Fl,SPosH,DPosH);
+ O1InitFilter(VF,YInc,SH,DH,4096,Fl,SPosV,DPosV);
+ Hs:=HF.FS; Fs:=VF.FS;
+ GetMem(H15,Int64(SH)*DW*2+64);
+ For Y:=0 To SH-1 Do Begin
+  Sp:=Y*SW;
+  If (Fl And O1SwFast)<>0 Then Begin
+   { hyscale_fast_c / hcscale_fast_c (hscale_fast_bilinear.c) }
+   For X:=0 To DW-1 Do Begin
+    Xpos:=(Int64(X)*XInc) And $FFFFFFFF; Xx:=Xpos Shr 16; Xa:=(Xpos And $FFFF) Shr 9;
+    If IsChr Then Val:=Src^[Sp+Xx]*(Xa Xor 127)+Src^[Sp+Xx+1]*Xa
+    Else Val:=(Src^[Sp+Xx] Shl 7)+(Int64(Src^[Sp+Xx+1])-Src^[Sp+Xx])*Xa;
+    H15^[Y*DW+X]:=SmallInt(Val);
+   End;
+   X:=DW-1;
+   While (X>=0) And (((Int64(X)*XInc) Shr 16)>=SW-1) Do Begin H15^[Y*DW+X]:=SmallInt(Src^[Sp+SW-1]*128); Dec(X); End;
+   For X:=0 To DW-1 Do Begin
+    Val:=H15^[Y*DW+X];
+    Case Mode Of
+     1: Begin If Val>30189 Then Val:=30189; Val:=O1Sar(Val*19077-39057361,14); End;
+     2: Val:=O1Sar(Val*14071+33561947,14);
+     3: Begin If Val>30775 Then Val:=30775; Val:=O1Sar(Val*4663-9289992,12); End;
+     4: Val:=O1Sar(Val*1799+4081085,11);
+    End;
+    H15^[Y*DW+X]:=SmallInt(Val);
+   End;
+   Continue;
+  End;
+  For X:=0 To DW-1 Do Begin
+   Val:=0;
+   For J:=0 To Hs-1 Do Val:=Val+Int64(Src^[Sp+HF.Pos^[X]+J])*HF.Coef^[X*Hs+J];
+   Val:=O1Sar(Val,7); If Val>32767 Then Val:=32767;
+   Case Mode Of
+    1: Begin If Val>30189 Then Val:=30189; Val:=O1Sar(Val*19077-39057361,14); End;
+    2: Val:=O1Sar(Val*14071+33561947,14);
+    3: Begin If Val>30775 Then Val:=30775; Val:=O1Sar(Val*4663-9289992,12); End;
+    4: Val:=O1Sar(Val*1799+4081085,11);
+   End;
+   H15^[Y*DW+X]:=SmallInt(Val);
+  End;
+ End;
+ For Y:=0 To DH-1 Do Begin
+  For X:=0 To DW-1 Do Begin
+   Val:=Int64(64) Shl 12;
+   For J:=0 To Fs-1 Do Begin
+    Bp:=(VF.Pos^[Y]+J)*DW+X;
+    Val:=Val+Int64(H15^[Bp])*VF.Coef^[Y*Fs+J];
+   End;
+   Val:=O1Sar(Val,19); If Val<0 Then Val:=0 Else If Val>255 Then Val:=255;
+   Dst^[Y*DW+X]:=Val;
+  End;
+ End;
+ FreeMem(H15); O1FltFree(HF); O1FltFree(VF);
+End;
+
+{ formats pris en charge par le redimensionneur : planaires 8 bits (F5Fm) }
+Function O1CanScaleFm(Fm: Integer): Boolean;
+Begin
+ O1CanScaleFm:=False;
+ If (Fm<0) Or (Fm>=F5NFm) Then Exit;
+ With F5Fm[Fm] Do
+  O1CanScaleFm:=((Pl=1) And (Bps=1)) Or ((Pl=2) And (Bps=1));
+End;
+
+{ taille d'un plan de chroma }
+Function O1CeilSh(V: LongInt; Sh: LongInt): LongInt;
+Begin O1CeilSh:=(V+(1 Shl Sh)-1) Shr Sh; End;
+
+{ redimensionne/convertit une image planaire : Sf -> Df ; tailles SW x SH -> DW x DH ; SrcFull/DstFull : plage complete }
+Procedure O1ScaleFrame(Sf: Integer; Src: PEABuffer; SW,SH: LongInt; Df: Integer; Dst: PEABuffer; DW,DH: LongInt; Flags: LongInt; SrcFull,DstFull: Boolean);
+Var
+ Ssx,Ssy,Dsx,Dsy: LongInt; SCW,SCH,DCW,DCH: LongInt; Mode,Mc: LongInt; SPv,DPv: LongInt; SrcHasC,DstHasC,SrcA,DstA: Boolean;
+ SOffU,SOffV,SOffA,DOffU,DOffV,DOffA: LongInt;
+Begin
+ SrcHasC:=F5Fm[Sf].Pl=1; DstHasC:=F5Fm[Df].Pl=1;
+ SrcA:=F5Fm[Sf].Alpha; DstA:=F5Fm[Df].Alpha;
+ If SrcHasC Then Begin Ssx:=F5Fm[Sf].Hs; Ssy:=F5Fm[Sf].Vs; End Else Begin Ssx:=0; Ssy:=0; End;
+ If DstHasC Then Begin Dsx:=F5Fm[Df].Hs; Dsy:=F5Fm[Df].Vs; End Else Begin Dsx:=0; Dsy:=0; End;
+ SCW:=O1CeilSh(SW,Ssx); SCH:=O1CeilSh(SH,Ssy); DCW:=O1CeilSh(DW,Dsx); DCH:=O1CeilSh(DH,Dsy);
+ If ((Flags And O1SwFast)<>0) And ((SW<8) Or (DW<8)) Then Flags:=(Flags Xor (O1SwFast Or O1SwBilinear));
+ SOffU:=SW*SH; SOffV:=SOffU+SCW*SCH; SOffA:=SOffV+SCW*SCH;
+ DOffU:=DW*DH; DOffV:=DOffU+DCW*DCH; DOffA:=DOffV+DCW*DCH;
+ Mode:=0; Mc:=0;
+ If SrcFull<>DstFull Then Begin
+  If DstFull Then Begin Mode:=1; Mc:=3; End Else Begin Mode:=2; Mc:=4; End;
+ End;
+ O1ScalePlane(Src,SW,SH,Dst,DW,DH,Flags,O1GetLocalPos(0,-513),O1GetLocalPos(0,-513),O1GetLocalPos(0,-513),O1GetLocalPos(0,-513),Mode,False);
+ If DstHasC Then Begin
+  If SrcHasC Then Begin
+   If Ssy=1 Then SPv:=128 Else SPv:=-513;
+   If Dsy=1 Then DPv:=128 Else DPv:=-513;
+   O1ScalePlane(@Src^[SOffU],SCW,SCH,@Dst^[DOffU],DCW,DCH,Flags,O1GetLocalPos(Ssx,-513),O1GetLocalPos(Dsx,-513),O1GetLocalPos(Ssy,SPv),O1GetLocalPos(Dsy,DPv),Mc,True);
+   O1ScalePlane(@Src^[SOffV],SCW,SCH,@Dst^[DOffV],DCW,DCH,Flags,O1GetLocalPos(Ssx,-513),O1GetLocalPos(Dsx,-513),O1GetLocalPos(Ssy,SPv),O1GetLocalPos(Dsy,DPv),Mc,True);
+  End Else Begin
+   FillChar(Dst^[DOffU],DCW*DCH,128); FillChar(Dst^[DOffV],DCW*DCH,128);
+  End;
+ End;
+ If DstA Then Begin
+  If SrcA Then O1ScalePlane(@Src^[SOffA],SW,SH,@Dst^[DOffA],DW,DH,Flags,O1GetLocalPos(0,-513),O1GetLocalPos(0,-513),O1GetLocalPos(0,-513),O1GetLocalPos(0,-513),0,False)
+  Else FillChar(Dst^[DOffA],DW*DH,255);
+ End;
+End;
+
+
+{ ---- execution : sous-processus (le programme lui-meme) ---- }
+Function O1Q(Const S: String): String;
+Begin
+ If (Pos(' ',S)>0) Or (S='') Or (Pos(#9,S)>0) Then O1Q:='"'+S+'"' Else O1Q:=S;
+End;
+
+Function O1Exec(Const Cmd: String): LongInt;
+Begin
+ If Length(Cmd)>254 Then Begin O1Msg(8,'Command line too long for an internal re-run: '+Copy(Cmd,1,60)+'...'); O1Die(1); End;
+ SwapVectors; Exec(ParamStr(0),Cmd); SwapVectors;
+ If DosError<>0 Then Begin O1Msg(8,'Cannot re-run the program.'); O1Die(1); End;
+ O1Exec:=DosExitCode;
+End;
+
+Function O1TmpName(Const Ext: String): String;
+Var N: String; I: Integer;
+Begin
+ F5HookExit;
+ N:=F5NewTmp(Ext);
+ If GetEnv('O1KEEP')<>'' Then Begin
+  For I:=1 To F5NTmp Do If F5Tmp[I]=N Then F5Tmp[I]:='';
+  WriteLn(StdErr,'O1KEEP ',N);
+ End;
+ O1TmpName:=N;
+End;
+
+{ ecrit l'en-tete Y4M (taille Wd x Ht) }
+Procedure O1WriteHdr(Var F: File; Fm: Integer; Wd,Ht,FN,FD,SarN,SarD: LongInt; Il: Char; Rng,Loc: Integer);
+Var H: String;
+Begin
+ H:=F5Y4MHeader(Fm,Wd,Ht,FN,FD,SarN,SarD,Il,Rng,Loc);
+ BlockWrite(F,H[1],Length(H));
+End;
+
+Procedure O1WriteBuf(Var F: File; P: PEABuffer; Cnt: LongInt);
+Var At,Q: LongInt;
+Begin
+ At:=0;
+ While At<Cnt Do Begin
+  Q:=Cnt-At; If Q>32768 Then Q:=32768;
+  BlockWrite(F,P^[At],Q); Inc(At,Q);
+ End;
+End;
+
+{ ---- redimensionnement / conversion de format : parametres fixes par la route ---- }
+Var O1AspN,O1AspD: Int64; O1DstW,O1DstH: LongInt; O1DstFm: Integer; O1DstRange: Integer;   { O1DstFm=-1 : format inchange ; O1DstRange 0 inchange 1 limite 2 complet }
+
+Function O1ScaleSar(SarN,SarD,SW,SH,DW,DH: LongInt; Var RN,RD: LongInt): Boolean;
+Var N,D: Int64;
+Begin
+ O1ScaleSar:=False;
+ If SarN<=0 Then Begin RN:=SarN; RD:=SarD; Exit; End;
+ O1Reduce(N,D,Int64(DH)*SW*SarN,Int64(DW)*SH*SarD,2147483647);
+ RN:=N; RD:=D; O1ScaleSar:=True;
+End;
+
+{ transforme la video Y4M Src selon le modele de synchronisation ; ecrit Dst. Renvoie le nombre d'images ecrites }
+Function O1VideoJob(Const Src,Dst: String): LongInt;
+Var Fo: File; Buf,Sc: PEABuffer; I,Last,Cnt: LongInt; Wd,Ht: LongInt; Fb,Fb2: LongInt; Code: Integer; Ph: String; SarN,SarD: LongInt;
+ Df,Sf: Integer; Dw,Dh: LongInt; Sn64,Sd64: Int64; Rng: Integer; DoScale: Boolean; SrcFull,DstFull: Boolean;
+Begin
+ F5OpenY4M(Src);
+ If F5S.N<1 Then Begin O1Msg(16,Src+': Invalid data found when processing input'); O1Die(234); End;
+ O1Timeline(F5S.N,F5S.FN,F5S.FD);
+ If GetEnv('O1DEBUG')<>'' Then Begin Write(StdErr,'O1 frames=',O1RN,' fps=',O1RFN,'/',O1RFD,' src:'); For I:=0 To O1RN-1 Do Write(StdErr,' ',O1RSrc^[I],'@',O1RPts^[I]); WriteLn(StdErr); End;
+ Wd:=F5S.W; Ht:=F5S.H; SarN:=F5S.SarN; SarD:=F5S.SarD; Sf:=F5S.Fm; Df:=Sf; Dw:=Wd; Dh:=Ht; Rng:=F5S.Rng;
+ DoScale:=False;
+ If O1DstFm>=0 Then Df:=O1DstFm;
+ If O1DstW>0 Then Begin Dw:=O1DstW; Dh:=O1DstH; End;
+ SrcFull:=(F5S.Rng=2) Or F5IsFullFm(Sf);
+ DstFull:=F5IsFullFm(Df);
+ If (Dw<>Wd) Or (Dh<>Ht) Or (Df<>Sf) Then Begin
+  If Not (O1CanScaleFm(Sf) And O1CanScaleFm(Df)) Then Begin
+   If (Df<>Sf) Then Begin O1Msg(16,'Conversion of pixel format '+F5Fm[Sf].Nm+' to '+F5Fm[Df].Nm+' is not supported by this program.'); O1Die(1); End;
+   Df:=Sf;
+  End;
+  DoScale:=True;
+ End;
+ If (Dw<>Wd) Or (Dh<>Ht) Then O1ScaleSar(SarN,SarD,Wd,Ht,Dw,Dh,SarN,SarD);
+ If O1AspN>0 Then Begin
+  O1Reduce(Sn64,Sd64,O1AspN*Dh,O1AspD*Dw,2147483647);
+  SarN:=Sn64; SarD:=Sd64;
+ End;
+ If DoScale Then Begin
+  If DstFull Then Rng:=2 Else Rng:=1;
+ End;
+ If O1RN=0 Then Begin
+  If O1RReach<=0 Then Begin SarN:=0; SarD:=1; End;
+  If (O1RPass<=0) And O1HasInR Then Begin O1RFN:=O1InRN; O1RFD:=O1InRD; End Else If O1RPass<=0 Then Begin O1RFN:=F5S.FN; O1RFD:=F5S.FD; End;
+ End;
+ Assign(Fo,Dst); {$I-}Rewrite(Fo,1);{$I+} Code:=IOResult;
+ If Code<>0 Then Begin O1Msg(16,'Cannot create '+Dst); O1Die(1); End;
+ O1WriteHdr(Fo,Df,Dw,Dh,O1RFN,O1RFD,SarN,SarD,F5S.Il,Rng,F5S.Loc);
+ Fb:=F5S.FBytes; GetMem(Buf,Fb+64);
+ Fb2:=F5FrameBytes(Df,Dw,Dh); GetMem(Sc,Fb2+64);
+ Last:=-1; Cnt:=0; Ph:='FRAME'#10;
+ For I:=0 To O1RN-1 Do Begin
+  If O1RSrc^[I]<>Last Then Begin
+   If Not F5ReadFrame(O1RSrc^[I],Buf) Then Begin O1Msg(16,'Cannot read input frame'); O1Die(1); End;
+   If DoScale Then O1ScaleFrame(Sf,Buf,Wd,Ht,Df,Sc,Dw,Dh,O1SwFlags,SrcFull,DstFull);
+   Last:=O1RSrc^[I];
+  End;
+  BlockWrite(Fo,Ph[1],6);
+  If DoScale Then O1WriteBuf(Fo,Sc,Fb2) Else O1WriteBuf(Fo,Buf,Fb);
+  Inc(Cnt);
+ End;
+ Close(Fo); F5CloseSrc;
+ FreeMem(Buf); FreeMem(Sc);
+ O1VideoJob:=Cnt;
+End;
+
+
+{ ---- acces aux options analysees ---- }
+Function O1SpecOk(Const Key: String; Base: String; Kind: Char): Boolean;
+Var Sp: String; P: Integer;
+Begin
+ O1SpecOk:=False;
+ Sp:=Copy(Key,Length(Base)+1,60);
+ If Sp='' Then Begin O1SpecOk:=True; Exit; End;
+ If Sp[1]<>':' Then Exit;
+ Sp:=Copy(Sp,2,60);
+ If (Sp='v') Or (Sp='v:0') Then Begin O1SpecOk:=Kind='v'; Exit; End;
+ If (Sp='a') Or (Sp='a:0') Then Begin O1SpecOk:=Kind='a'; Exit; End;
+ If (Sp='s') Or (Sp='s:0') Then Begin O1SpecOk:=Kind='s'; Exit; End;
+ If Sp='0' Then Begin O1SpecOk:=True; Exit; End;
+End;
+
+{ derniere occurrence de l'option Name dans le groupe G (sinon Idx=0) ; renvoie l'indice de O1Op }
+Function O1Last(G: Integer; Const Name: String; Kind: Char): Integer;
+Var I,R: Integer; K: String;
+Begin
+ R:=0;
+ For I:=1 To O1NOp Do
+  If (O1Op[I].Grp=G) And Not O1Op[I].Av Then Begin
+   K:=O1Op[I].Key;
+   If (Copy(K,1,Length(Name))=Name) And ((Length(K)=Length(Name)) Or (K[Length(Name)+1]=':')) Then
+    If O1SpecOk(K,Name,Kind) Then R:=I;
+  End;
+ O1Last:=R;
+End;
+
+{ une AVOption (codec/format/sws) de ce nom est-elle presente dans le groupe ? }
+Function O1HasAv(G: Integer; Const Name: String): Boolean;
+Var I: Integer;
+Begin
+ O1HasAv:=False;
+ For I:=1 To O1NOp Do If (O1Op[I].Grp=G) And O1Op[I].Av And (O1Op[I].Key=Name) Then O1HasAv:=True;
+End;
+
+Function O1GlobalLast(Const Name: String): Integer;
+Var I,R: Integer;
+Begin
+ R:=0;
+ For I:=1 To O1NOp Do If (O1Op[I].Grp=-1) And (O1Op[I].Key=Name) Then R:=I;
+ O1GlobalLast:=R;
+End;
+
+Function O1HasGlobal(Const Name: String): Boolean;
+Begin
+ O1HasGlobal:=O1GlobalLast(Name)>0;
+End;
+
+{ valeur booleenne d'une option globale (-y, -n, -hide_banner...) }
+Function O1GlobalBool(Const Name: String): Boolean;
+Var I: Integer; R: Boolean;
+Begin
+ R:=False;
+ For I:=1 To O1NOp Do
+  If (O1Op[I].Grp=-1) And ((O1Op[I].Key=Name) Or (O1Op[I].Key='no'+Name)) Then R:=O1Op[I].Val<>'0';
+ O1GlobalBool:=R;
+End;
+
+{ -loglevel / -v (opt_loglevel) : analyse silencieuse ; renvoie False si invalide }
+Function O1ParseLogLevel(Arg: String; Var Level: LongInt): Boolean;
+Const Nm: Array[0..8] Of String[8]=('quiet','panic','fatal','error','warning','info','verbose','debug','trace');
+ Lv: Array[0..8] Of LongInt=(-8,0,8,16,24,32,40,48,56);
+Var I,Code: LongInt; Tk: String; Lvl: LongInt;
+Begin
+ O1ParseLogLevel:=True;
+ Repeat
+  Tk:=Arg;
+  If (Tk<>'') And (Tk[1] In ['+','-']) Then Tk:=Copy(Tk,2,200);
+  If Copy(Tk,1,6)='repeat' Then Arg:=Copy(Tk,7,200)
+  Else If Copy(Tk,1,5)='level' Then Arg:=Copy(Tk,6,200)
+  Else Break;
+ Until False;
+ If Arg='' Then Exit;
+ If Arg[1]='+' Then Arg:=Copy(Arg,2,200);
+ For I:=0 To 8 Do If Nm[I]=Arg Then Begin Level:=Lv[I]; Exit; End;
+ Val(Arg,Lvl,Code);
+ If Code<>0 Then Begin O1ParseLogLevel:=False; Exit; End;
+ Level:=Lvl;
+End;
+
+Procedure O1LogListMsg(Const Arg: String);
+Const Nm: Array[0..8] Of String[8]=('quiet','panic','fatal','error','warning','info','verbose','debug','trace');
+Var I: Integer;
+Begin
+ WriteLn(StdErr,'Invalid loglevel "',Arg,'". Possible levels are numbers or:');
+ For I:=0 To 8 Do WriteLn(StdErr,'"',Nm[I],'"');
+End;
+
+{ niveau invalide : sequence d'erreurs de ffmpeg }
+Procedure O1BadLogLevel(Const Name,Arg: String);
+Begin
+ O1LogListMsg(Arg);
+ O1BannerDone:=False; O1LogLevel:=32; O1Banner;
+ O1LogListMsg(Arg);
+ WriteLn(StdErr,'Failed to set value ''',Arg,''' for option ''',Name,''': Invalid argument');
+ WriteLn(StdErr,'Error parsing global options: Invalid argument');
+ Flush(StdErr); Halt(234);
+End;
+
+{ redirige la sortie standard du programme selon le niveau }
+Procedure O1ApplyQuiet;
+Begin
+ If O1LogLevel>=32 Then Exit;
+ If O1LogLevel<=8 Then O1QuietMode:=2 Else O1QuietMode:=1;
+ {$IFDEF MSWINDOWS}
+ Assign(Output,'NUL');
+ {$ELSE}
+ Assign(Output,'/dev/null');
+ {$ENDIF}
+ {$I-}Rewrite(Output);{$I+}
+ If IOResult<>0 Then;
+End;
+
+{ crochet de l'analyseur historique : -v / -loglevel }
+Procedure O1ApplyLog(Const Name,Arg: String);
+Var Lv: LongInt; I: Integer;
+Begin
+ For I:=1 To ParamCount Do If ParamStr(I)='-hide_banner' Then O1HideBanner:=True;
+ Lv:=O1LogLevel;
+ If Not O1ParseLogLevel(Arg,Lv) Then O1BadLogLevel(Name,Arg);
+ O1LogLevel:=Lv;
+ O1ApplyQuiet;
+End;
+
+{ pre-analyse locate_option : -loglevel / -v / -hide_banner / -nostdin (avant tout message) }
+Procedure O1PreScan;
+Var I,K: Integer; A: String; LocL,LocV: Integer; ArgL,ArgV: String;
+Begin
+ LocL:=0; LocV:=0; ArgL:=''; ArgV:='';
+ I:=1;
+ While I<=ParamCount Do Begin
+  A:=ParamStr(I);
+  If (Length(A)>1) And (A[1]='-') Then Begin
+   A:=Copy(A,2,200);
+   K:=O1FindOpt(A);
+   If (K<0) And (Length(A)>2) And (Copy(A,1,2)='no') Then K:=O1FindOpt(Copy(A,3,200));
+   If (K>=0) And (O1OptNm[K]='loglevel') Then Begin If LocL=0 Then Begin LocL:=I; If I<ParamCount Then ArgL:=ParamStr(I+1); End; End;
+   If (K>=0) And (O1OptNm[K]='v') Then Begin If LocV=0 Then Begin LocV:=I; If I<ParamCount Then ArgV:=ParamStr(I+1); End; End;
+   If (K>=0) And (O1OptNm[K]='hide_banner') Then O1HideBanner:=True;
+   If (K<0) Or O1HasFlag(K,'A') Or O1HasFlag(K,'X') Then Inc(I);
+  End;
+  Inc(I);
+ End;
+ If LocL>0 Then Begin If ArgL<>'' Then If Not O1ParseLogLevel(ArgL,O1LogLevel) Then O1BadLogLevel('loglevel',ArgL); End
+ Else If LocV>0 Then Begin If ArgV<>'' Then If Not O1ParseLogLevel(ArgV,O1LogLevel) Then O1BadLogLevel('v',ArgV); End;
+End;
+
+{ options qui declenchent la prise en charge par ce module }
+Function O1Engaged: Boolean;
+Var I: Integer; A: String;
+Begin
+ O1Engaged:=False;
+ For I:=1 To ParamCount Do Begin
+  A:=ParamStr(I);
+  If (A='-ss') Or (A='-t') Or (A='-to') Or (A='-itsoffset') Or (A='-vframes') Or (A='-frames') Or (A='-frames:v') Or (A='-r') Or (A='-s') Or
+     (A='-fs') Or (A='-version') Or (A='-L') Or (A='-h') Or (A='-help') Or (A='--help') Or (A='-?') Or (A='-formats') Or (A='-sseof') Or
+     (A='-dframes') Or (A='-aspect') Or (A='-pix_fmt') Or (A='-r:v') Or (A='-s:v') Or (A='-t:v') Or (Copy(A,1,8)='-vframes') Then Begin O1Engaged:=True; Exit; End;
+ End;
+End;
+
+
+{ ---- audio : decoupe d'un WAV selon -ss/-t/-to (filtre atrim de ffmpeg : exact a l'echantillon) ---- }
+Function O1RdLE32(Var B: Array Of Byte; At: LongInt): Int64;
+Begin
+ O1RdLE32:=Int64(B[At])+Int64(B[At+1])*256+Int64(B[At+2])*65536+Int64(B[At+3])*16777216;
+End;
+
+{ lit l'en-tete d'un WAV : renvoie False si ce n'est pas un WAV PCM lisible }
+Function O1WavInfo(Const Nm: String; Var Fmt: Array Of Byte; Var FmtLen: LongInt; Var DataOff,DataLen: Int64; Var Rate,Align: LongInt): Boolean;
+Var F: File; Sz,Cur,CL: Int64; H: Array[0..63] Of Byte; N: LongInt; Got,HaveFmt: Boolean;
+Begin
+ O1WavInfo:=False; Got:=False; HaveFmt:=False;
+ Assign(F,Nm); {$I-}Reset(F,1);{$I+}
+ If IOResult<>0 Then Exit;
+ Sz:=FileSize(F);
+ If Sz<12 Then Begin Close(F); Exit; End;
+ BlockRead(F,H,12,N);
+ If (N<12) Or (H[0]<>82) Or (H[1]<>73) Or (H[2]<>70) Or (H[3]<>70) Or (H[8]<>87) Or (H[9]<>65) Or (H[10]<>86) Or (H[11]<>69) Then Begin Close(F); Exit; End;
+ Cur:=12;
+ While Cur+8<=Sz Do Begin
+  Seek(F,Cur); BlockRead(F,H,8,N);
+  If N<8 Then Break;
+  CL:=O1RdLE32(H,4);
+  If (H[0]=102) And (H[1]=109) And (H[2]=116) And (H[3]=32) Then Begin
+   If (CL<16) Or (CL>SizeOf(Fmt)) Then Break;
+   Seek(F,Cur+8); BlockRead(F,Fmt,CL,N);
+   If N<CL Then Break;
+   FmtLen:=CL; Rate:=O1RdLE32(Fmt,4); Align:=Fmt[12]+Fmt[13]*256; HaveFmt:=True;
+  End Else If (H[0]=100) And (H[1]=97) And (H[2]=116) And (H[3]=97) Then Begin
+   DataOff:=Cur+8; DataLen:=CL;
+   If (CL<0) Or (DataOff+CL>Sz) Or (CL=4294967295) Then DataLen:=Sz-DataOff;
+   Got:=True; Break;
+  End;
+  Cur:=Cur+8+CL+(CL And 1);
+ End;
+ Close(F);
+ O1WavInfo:=Got And HaveFmt And (Align>0) And (Rate>0);
+End;
+
+{ decoupe : ecrit Dst ; renvoie le nombre d'echantillons ecrits (-1 si Src n'est pas un WAV) }
+Function O1AudioJob(Const Src,Dst: String): Int64;
+Var Fmt: Array[0..63] Of Byte; FmtLen,Rate,Align: LongInt; DataOff,DataLen,Total,A,B,Cnt,Lim: Int64; Fi,Fo: File;
+ Hd: Array[0..43] Of Byte; Buf: PEABuffer; Pos,Q,Done: Int64; N: LongInt; I: LongInt; Rec: Int64; HasRec: Boolean; Code: Integer; Tot32: Int64;
+ Procedure Put32(At: LongInt; V: Int64); Var K: LongInt; Begin For K:=0 To 3 Do Begin Hd[At+K]:=V And 255; V:=V Shr 8; End; End;
+Begin
+ O1AudioJob:=-1;
+ If Not O1WavInfo(Src,Fmt,FmtLen,DataOff,DataLen,Rate,Align) Then Exit;
+ Total:=DataLen Div Align;
+ A:=0; B:=Total;
+ If O1HasInSS Then A:=A+O1Resc(O1InSS,Rate,1000000);
+ If A>Total Then A:=Total;
+ { duree d'entree }
+ HasRec:=False; Rec:=0;
+ If O1HasInT Then Begin HasRec:=True; Rec:=O1InT; End
+ Else If O1HasInTo Then Begin HasRec:=True; If O1HasInSS Then Rec:=O1InTo-O1InSS Else Rec:=O1InTo; End;
+ If HasRec Then Begin Lim:=O1Resc(Rec,Rate,1000000); If Lim<>0 Then If A+Lim<B Then B:=A+Lim; End;
+ { sortie : debut puis duree }
+ If O1HasOutSS Then Begin A:=A+O1Resc(O1OutSS,Rate,1000000); If A>B Then A:=B; End;
+ HasRec:=False; Rec:=0;
+ If O1HasOutT Then Begin HasRec:=True; Rec:=O1OutT; End
+ Else If O1HasOutTo Then Begin HasRec:=True; If O1HasOutSS Then Rec:=O1OutTo-O1OutSS Else Rec:=O1OutTo; End;
+ If HasRec Then Begin
+  Lim:=O1Resc(Rec,Rate,1000000);
+  If Rec=0 Then B:=A
+  Else If Lim<>0 Then If A+Lim<B Then B:=A+Lim;
+ End;
+ If B<A Then B:=A;
+ Cnt:=B-A;
+ Assign(Fi,Src); {$I-}Reset(Fi,1);{$I+}
+ If IOResult<>0 Then Exit;
+ Assign(Fo,Dst); {$I-}Rewrite(Fo,1);{$I+} Code:=IOResult;
+ If Code<>0 Then Begin O1Msg(16,'Cannot create '+Dst); O1Die(1); End;
+ FillChar(Hd,SizeOf(Hd),0);
+ Hd[0]:=82; Hd[1]:=73; Hd[2]:=70; Hd[3]:=70; Hd[8]:=87; Hd[9]:=65; Hd[10]:=86; Hd[11]:=69;
+ BlockWrite(Fo,Hd,12);
+ Hd[0]:=102; Hd[1]:=109; Hd[2]:=116; Hd[3]:=32; Put32(4,FmtLen);
+ BlockWrite(Fo,Hd,8); BlockWrite(Fo,Fmt,FmtLen); If Odd(FmtLen) Then Begin Hd[0]:=0; BlockWrite(Fo,Hd,1); End;
+ Hd[0]:=100; Hd[1]:=97; Hd[2]:=116; Hd[3]:=97; Put32(4,Cnt*Align);
+ BlockWrite(Fo,Hd,8);
+ GetMem(Buf,32768+64);
+ Pos:=DataOff+A*Align; Done:=0;
+ While Done<Cnt*Align Do Begin
+  Q:=Cnt*Align-Done; If Q>32768 Then Q:=32768;
+  Seek(Fi,Pos); BlockRead(Fi,Buf^,Q,N);
+  If N<=0 Then Break;
+  BlockWrite(Fo,Buf^,N); Inc(Pos,N); Inc(Done,N);
+ End;
+ If Odd(Cnt*Align) Then Begin Hd[0]:=0; BlockWrite(Fo,Hd,1); End;
+ Tot32:=FileSize(Fo)-8;
+ Seek(Fo,4); Put32(0,Tot32); BlockWrite(Fo,Hd,4);
+ Close(Fo); Close(Fi);
+ FreeMem(Buf);
+ O1AudioJob:=Cnt;
+End;
+
+
+Var O1InG,O1OutG: Integer;       { groupes entree / sortie }
+ O1Sz: Boolean; O1SzW,O1SzH: LongInt;
+ O1FsSet: Boolean; O1Fs: Int64;
+ O1Tmp1,O1Tmp2: String;
+ O1Overwrite,O1NoOverwrite: Boolean;
+
+{ erreur de syntaxe d'un groupe d'options }
+Procedure O1GroupErr(IsIn: Boolean; Const FileArg: String);
+Begin
+ If IsIn Then Begin
+  O1Msg(16,'Error parsing options for input file '+FileArg+'.');
+  O1Msg(16,'Error opening input files: Invalid argument');
+ End Else Begin
+  O1Msg(16,'Error parsing options for output file '+FileArg+'.');
+  O1Msg(16,'Error opening output files: Invalid argument');
+ End;
+ O1Die(234);
+End;
+
+{ verifie les drapeaux d'entree/sortie des options d'un groupe (cmdutils.c parse_optgroup) }
+Procedure O1CheckFlags(G: Integer);
+Var I: Integer; Nm,Hp: String;
+Begin
+ For I:=1 To O1NOp Do
+  If (O1Op[I].Grp=G) And (O1Op[I].Ti>=0) Then Begin
+   If (O1Gr[G].IsIn And Not O1HasFlag(O1Op[I].Ti,'I')) Or (Not O1Gr[G].IsIn And Not O1HasFlag(O1Op[I].Ti,'O')) Then Begin
+    If O1Gr[G].IsIn Then Nm:='input url' Else Nm:='output url';
+    Hp:=O1OptHp[O1Op[I].Ti];
+    O1Msg(16,'Option '+O1Op[I].Key+' ('+Hp+') cannot be applied to '+Nm+' '+O1Gr[G].Arg+' -- you are trying to apply an input option to an output file or vice versa. Move this option before the file it belongs to.');
+    O1GroupErr(O1Gr[G].IsIn,O1Gr[G].Arg);
+   End;
+  End;
+End;
+
+{ lit une duree (av_parse_time duration) pour l'option Name du groupe G }
+Function O1GetDur(G: Integer; Const Name: String; Var Us: Int64): Boolean;
+Var I: Integer; Ok: Boolean;
+Begin
+ I:=O1Last(G,Name,'v'); O1GetDur:=False;
+ If I=0 Then Exit;
+ If Not O1ParseDur(O1Op[I].Val,Us) Then Begin
+  O1Msg(16,'Invalid duration for option '+O1Op[I].Key+': '+O1Op[I].Val);
+  O1GroupErr(O1Gr[G].IsIn,O1Gr[G].Arg);
+ End;
+ O1GetDur:=True;
+End;
+
+{ nombre entier d'une option (parse_number) }
+Function O1GetInt(G: Integer; Const Name: String; Var V: Int64; Kind: Char; Const Shown: String; Const Alias: String): Boolean;
+Var I,P: Integer; D: Double; Neg: Boolean;
+Begin
+ I:=O1Last(G,Name,Kind); O1GetInt:=False;
+ If I=0 Then Exit;
+ P:=1;
+ If (Not O1StrToD(O1Op[I].Val,P,D)) Or (P<=Length(O1Op[I].Val)) Then Begin
+  O1Msg(8,'Expected number for '+Shown+' but found: '+O1Op[I].Val);
+  If Alias<>'' Then O1Msg(16,'Failed to set value '''+O1Op[I].Val+''' for option '''+Alias+''': Invalid argument');
+  O1GroupErr(O1Gr[G].IsIn,O1Gr[G].Arg);
+ End;
+ If D<>Int(D) Then Begin
+  O1Msg(8,'Expected int64 for '+Shown+' but found '+O1Op[I].Val);
+  O1GroupErr(O1Gr[G].IsIn,O1Gr[G].Arg);
+ End;
+ V:=Trunc(D); O1GetInt:=True;
+End;
+
+Function O1FileExists(Const N: String): Boolean;
+Var F: File; A: Word;
+Begin
+ Assign(F,N); {$I-}GetFAttr(F,A);{$I+}
+ O1FileExists:=DosError=0;
+End;
+
+{ ligne de commande du sous-processus, sans les options traitees par ce module }
+Function O1ChildLine(Const InputFile: String; KeepInputOpts: Boolean; Const OutFile: String; Extra: String; Mode: Integer): String;
+{ Mode 1 : decodage de l'entree (options globales + options d'entree + -i + Extra + OutFile) ; Mode 2 : transcodage (globales + -i InputFile + options de sortie + OutFile) }
+Var I,Ti: Integer; Pre,Post: String; HasVal: Boolean;
+Begin
+ Pre:=''; Post:='';
+ For I:=1 To O1NOp Do Begin
+  Ti:=O1Op[I].Tok;
+  HasVal:=O1Op[I].Av Or ((O1Op[I].Ti>=0) And (O1HasFlag(O1Op[I].Ti,'A') Or O1HasFlag(O1Op[I].Ti,'X')));
+  If O1Op[I].Grp=-1 Then Begin
+   { options globales : conservees (sauf -y/-n/-stdin geres ici) }
+   If (O1Op[I].Key='y') Or (O1Op[I].Key='n') Or (O1Op[I].Key='nostdin') Or (O1Op[I].Key='stdin') Then Continue;
+   If (Mode=1) And ((O1Op[I].Key='v') Or (O1Op[I].Key='loglevel')) Then Continue;
+   Pre:=Pre+' -'+O1Op[I].Key;
+   If HasVal Then Pre:=Pre+' '+O1Q(O1Op[I].Val);
+   Continue;
+  End;
+  If O1Used[Ti] Then Continue;
+  If (Mode=1) And KeepInputOpts And (O1Op[I].Grp=O1InG) Then Begin
+   Pre:=Pre+' -'+O1Op[I].Key;
+   If HasVal Then Pre:=Pre+' '+O1Q(O1Op[I].Val);
+  End;
+  If (Mode=2) And (O1Op[I].Grp=O1OutG) Then Begin
+   Post:=Post+' -'+O1Op[I].Key;
+   If HasVal Then Post:=Post+' '+O1Q(O1Op[I].Val);
+  End;
+ End;
+ If Mode=1 Then O1ChildLine:='-y -v quiet'+Pre+' -i '+O1Q(InputFile)+Extra+' '+O1Q(OutFile)
+ Else O1ChildLine:='-y'+Pre+' -i '+O1Q(InputFile)+Extra+Post+' '+O1Q(OutFile);
+End;
+
+Procedure O1Cleanup;
+Begin
+ { les fichiers temporaires F5NewTmp sont effaces a la sortie du programme }
+End;
+
+{ -sws_flags : drapeaux swscale (AVOption de type flags) ; renvoie False si syntaxe invalide }
+Function O1ParseSwsFlags(Const S: String; Var Fl: LongInt): Boolean;
+Const Nm: Array[0..16] Of String[16]=('fast_bilinear','bilinear','bicubic','experimental','neighbor','area','bicublin','gauss','sinc','lanczos','spline','print_info','accurate_rnd','full_chroma_int','full_chroma_inp','bitexact','error_diffusion');
+ Vl: Array[0..16] Of LongInt=(1,2,4,8,$10,$20,$40,$80,$100,$200,$400,$1000,$40000,$2000,$4000,$80000,$800000);
+Var P,K,Q: Integer; Cmd: Char; Tk: String; V: LongInt; Code: LongInt; Found: Boolean; Cur: LongInt;
+Begin
+ O1ParseSwsFlags:=False; P:=1; Cur:=Fl; Cmd:=#0;
+ If S='' Then Exit;
+ While P<=Length(S) Do Begin
+  If S[P] In ['+','-'] Then Begin Cmd:=S[P]; Inc(P); End;
+  Q:=P; While (Q<=Length(S)) And Not (S[Q] In ['+','-']) Do Inc(Q);
+  Tk:=Copy(S,P,Q-P); P:=Q;
+  If Tk='' Then Exit;
+  Found:=False; V:=0;
+  For K:=0 To 16 Do If Nm[K]=Tk Then Begin V:=Vl[K]; Found:=True; End;
+  If Not Found Then Begin Val(Tk,V,Code); If Code<>0 Then Exit; End;
+  If Cmd='+' Then Cur:=Cur Or V Else If Cmd='-' Then Cur:=Cur And Not V Else Cur:=V;
+ End;
+ Fl:=Cur; O1ParseSwsFlags:=True;
+End;
+
+{ format natif de l'encodeur pour une entree 4:2:0 (negociation de ffmpeg_filter.c) ; '' si quelconque/inconnu }
+Function O1NativeFm(Const C: String): String;
+Begin
+ O1NativeFm:='';
+ If C='huffyuv' Then O1NativeFm:='yuv422p'
+ Else If C='svq1' Then O1NativeFm:='yuv410p'
+ Else If C='mjpeg' Then O1NativeFm:='yuvj420p'
+ Else If C='dnxhd' Then O1NativeFm:='yuv422p'
+ Else If C='roqvideo' Then O1NativeFm:='yuv444p'
+ Else If (C='wmv1') Or (C='wmv2') Or (C='msmpeg4') Or (C='msmpeg4v1') Or (C='msmpeg4v2') Or (C='mpeg4') Or (C='h263') Or (C='h263p') Or (C='flv') Or (C='mpeg1video') Or (C='mpeg2video') Or (C='asv1') Or (C='asv2') Or (C='snow') Or (C='rv10') Or (C='rv20') Or (C='libx264') Or (C='libtheora') Or (C='ffv1') Then O1NativeFm:='yuv420p';
+End;
+
+{ nom du format de sortie : -f ou extension }
+Function O1OutFmtName(G: Integer; Const OutNm: String): String;
+Var I: Integer; E: String;
+Begin
+ I:=O1Last(G,'f','v');
+ If I>0 Then E:=Lower(O1Op[I].Val) Else E:=Extension(OutNm);
+ If (E='mkv') Or (E='mka') Then E:='matroska';
+ If (E='ts') Or (E='m2ts') Or (E='mts') Then E:='mpegts';
+ If E='y4m' Then E:='yuv4mpegpipe';
+ O1OutFmtName:=E;
+End;
+
+{ methode de synchronisation video par defaut (ffmpeg_mux_init.c) : 0 cfr, 1 vscfr, 2 vfr, 3 passthrough }
+Function O1VSyncMode(Const Fmt: String): LongInt;
+Var M: LongInt;
+Begin
+ If O1HasOutR Then M:=0
+ Else If Fmt='avi' Then M:=2
+ Else If (Fmt='matroska') Or (Fmt='webm') Or (Fmt='flv') Or (Fmt='gif') Or (Fmt='mpegts') Or (Fmt='nut') Or (Fmt='apng') Or (Fmt='webp') Or (Fmt='framecrc') Or (Fmt='framemd5') Then M:=2
+ Else If Fmt='null' Then M:=3
+ Else M:=0;
+ If (M=0) And (Not O1HasInOff Or (O1InOff=0)) Then M:=1;
+ O1VSyncMode:=M;
+End;
+
+{ formats de sortie ne contenant que de l'audio }
+Function O1IsAudioFmt(Const F: String): Boolean;
+Begin
+ O1IsAudioFmt:=(F='wav') Or (F='flac') Or (F='mp3') Or (F='mp2') Or (F='ac3') Or (F='eac3') Or (F='aac') Or (F='adts') Or (F='aiff') Or (F='au') Or (F='voc') Or
+  (F='adx') Or (F='amr') Or (F='caf') Or (F='w64') Or (F='tta') Or (F='wv') Or (F='dts') Or (F='oma') Or (F='s16le') Or (F='s16be') Or (F='s8') Or (F='u8') Or (F='mulaw') Or (F='alaw') Or
+  (F='s24le') Or (F='s24be') Or (F='s32le') Or (F='s32be') Or (F='f32le') Or (F='f32be') Or (F='u16le') Or (F='u16be') Or (F='ogg') Or (F='oga') Or (F='opus') Or (F='mka') Or (F='m4a') Or (F='sox') Or (F='ircam') Or (F='wma');
+End;
+
+{ nom du codec video de sortie (options -c:v/-vcodec/-codec:v/-c) ou defaut du conteneur }
+Function O1CodecOf(G: Integer; Const OutNm: String): String;
+Var I: Integer; K: String; R: String;
+Begin
+ R:='';
+ For I:=1 To O1NOp Do
+  If (O1Op[I].Grp=G) And Not O1Op[I].Av Then Begin
+   K:=O1Op[I].Key;
+   If (K='vcodec') Or (K='c:v') Or (K='codec:v') Or (K='c') Or (K='codec') Then R:=Lower(O1Op[I].Val);
+  End;
+ If R='' Then Begin
+  K:=Extension(OutNm);
+  If K='avi' Then R:='mpeg4' Else If (K='flv') Then R:='flv' Else If (K='wmv') Or (K='asf') Then R:='msmpeg4v3';
+ End;
+ O1CodecOf:=R;
+End;
+
+{ marque les jetons des options traitees par ce module }
+Var O1Strong: Boolean;
+Procedure O1MarkMine;
+Var I: Integer; B: String;
+Begin
+ O1Strong:=False;
+ For I:=1 To O1NOp Do
+  If (O1Op[I].Grp>0) And (O1Op[I].Ti>=0) Then Begin
+   B:=O1OptNm[O1Op[I].Ti];
+   If (B='ss') Or (B='t') Or (B='to') Or (B='itsoffset') Or (B='vframes') Or (B='frames') Or (B='fs') Or (B='sseof') Or (B='dframes') Or (B='aspect') Then O1Used[O1Op[I].Tok]:=True;
+   If (O1Op[I].Grp=O1OutG) And ((B='r') Or (B='s')) Then O1Used[O1Op[I].Tok]:=True;
+   If (O1Op[I].Grp=O1InG) And (B='r') Then O1Used[O1Op[I].Tok]:=True;
+   If (B='ss') Or (B='t') Or (B='to') Or (B='itsoffset') Or (B='vframes') Or (B='frames') Or (B='fs') Or (B='sseof') Or (B='dframes') Or (B='r') Or (B='s') Then O1Strong:=True;
+  End;
+End;
+
+{ ---- fonction principale ---- }
+Function O1Route: Boolean;
+Var I,J,K,Rc: Integer; Ok: Boolean; V: String; Us: Int64; Fl: Int64; InNm,OutNm,Kind,Ext: String;
+ Child: String; Code: LongInt; InIsY4M,InIsWav,AudOut: Boolean; OutFmtN,SrcV,SrcA: String; Hd: Array[0..15] Of Char; F: File; N: LongInt;
+ HasEngaged: Boolean; Aud: Boolean; E1,E2,E3: Int64; PixI: Integer;
+Begin
+ O1Route:=False;
+ O1NoPts:=-9223372036854775807-1; O1VFrames:=-1;
+ O1LogLevel:=32; O1HideBanner:=False; O1BannerDone:=False;
+ If (ParamCount=0) Or ((ParamCount=1) And (ParamStr(1)='-hide_banner')) Then Begin
+  { aucun argument : usage de ffmpeg }
+  O1HideBanner:=ParamCount=1;
+  O1Banner; O1TxUsage(StdErr); Flush(StdErr); Halt(1);
+ End;
+ If (ParamStr(1)='-fmxq') Or (ParamStr(1)='-f5q') Then Exit;
+ If Not O1Engaged Then Exit;
+ O1PreScan;
+ Rc:=O1Split;
+ If Rc<>0 Then O1Die(Rc);
+ { options globales d'information (OPT_EXIT) }
+ For I:=1 To O1NOp Do
+  If (O1Op[I].Grp=-1) And (O1Op[I].Ti>=0) And O1HasFlag(O1Op[I].Ti,'X') Then Begin
+   V:=O1OptNm[O1Op[I].Ti];
+   If V='version' Then Begin O1TxVersion(Output); Flush(Output); Halt(0); End;
+   If V='L' Then Begin O1Banner; O1TxLicense(Output); Flush(Output); Halt(0); End;
+   If (V='h') Or (V='help') Or (V='-help') Or (V='?') Then Begin O1Banner; O1TxHelp(Output); Flush(Output); Halt(0); End;
+   If V='formats' Then Begin O1Banner; O1TxFormats(Output); Flush(Output); Halt(0); End;
+  End;
+ { prise en charge : une entree et une sortie }
+ O1InG:=0; O1OutG:=0;
+ For I:=1 To O1NGr Do Begin
+  If O1Gr[I].IsIn Then Begin If O1InG<>0 Then Exit; O1InG:=I; End
+  Else Begin If O1OutG<>0 Then Exit; O1OutG:=I; End;
+ End;
+ If (O1InG=0) Or (O1OutG=0) Then Exit;
+ { copie de flux : non prise en charge ici }
+ For I:=1 To O1NOp Do
+  If (O1Op[I].Grp>0) And ((O1Op[I].Key='c') Or (O1Op[I].Key='codec') Or (Copy(O1Op[I].Key,1,2)='c:') Or (Copy(O1Op[I].Key,1,6)='codec:') Or (O1Op[I].Key='vcodec') Or (O1Op[I].Key='acodec')) And (O1Op[I].Val='copy') Then Exit;
+ InNm:=O1Gr[O1InG].Arg; OutNm:=O1Gr[O1OutG].Arg;
+ O1MarkMine;
+ { ---- options d'entree ---- }
+ O1CheckFlags(O1InG);
+ O1HasInSS:=False; O1HasInT:=False; O1HasInTo:=False; O1HasInOff:=False; O1HasInR:=False;
+ O1HasInSS:=O1GetDur(O1InG,'ss',O1InSS);
+ O1HasInT:=O1GetDur(O1InG,'t',O1InT);
+ O1HasInTo:=O1GetDur(O1InG,'to',O1InTo);
+ O1HasInOff:=O1GetDur(O1InG,'itsoffset',O1InOff);
+ If O1HasInT And O1HasInTo Then Begin O1HasInTo:=False; O1Msg(24,'[in#0 @ 0x55a0c1f2d640] -t and -to cannot be used together; using -t.'); End;
+ If O1HasInTo And Not O1HasInT Then Begin
+  If O1HasInSS Then E1:=O1InSS Else E1:=0;
+  If O1InTo<=E1 Then Begin
+   O1Msg(16,'[in#0 @ 0x55a0c1f2d640] -to value smaller than -ss; aborting.');
+   O1Msg(16,'Error opening input file '+InNm+'.'); O1Msg(16,'Error opening input files: Invalid argument'); O1Die(234);
+  End;
+ End;
+ I:=O1Last(O1InG,'r','v');
+ If I>0 Then Begin
+  If Not O1ParseRate(O1Op[I].Val,O1InRN,O1InRD) Then Begin
+   O1Msg(16,'Error parsing framerate '+O1Op[I].Val+'.');
+   O1Die(234);
+  End;
+  O1HasInR:=True;
+ End;
+ { entree inexistante }
+ If Not O1FileExists(InNm) Then Begin
+  O1Msg(16,'[in#0 @ 0x55a0c1f2d640] Error opening input: No such file or directory');
+  O1Msg(16,'Error opening input file '+InNm+'.');
+  O1Msg(16,'Error opening input files: No such file or directory');
+  O1Die(254);
+ End;
+ { ---- options de sortie ---- }
+ O1CheckFlags(O1OutG);
+ O1HasOutSS:=O1GetDur(O1OutG,'ss',O1OutSS);
+ O1HasOutT:=O1GetDur(O1OutG,'t',O1OutT);
+ O1HasOutTo:=O1GetDur(O1OutG,'to',O1OutTo);
+ If O1HasOutT And O1HasOutTo Then Begin O1HasOutTo:=False; O1Msg(24,'[out#0 @ 0x55a0c1f2d640] -t and -to cannot be used together; using -t.'); End;
+ If O1HasOutTo And Not O1HasOutT Then Begin
+  If O1HasOutSS Then E1:=O1OutSS Else E1:=0;
+  If O1OutTo<=E1 Then Begin
+   O1Msg(16,'[out#0 @ 0x55a0c1f2d640] -to value smaller than -ss; aborting.');
+   O1Msg(16,'Error opening output file '+OutNm+'.'); O1Msg(16,'Error opening output files: Invalid argument'); O1Die(234);
+  End;
+ End;
+ O1VFrames:=-1;
+ If O1GetInt(O1OutG,'frames',E1,'v','frames:v','') Then O1VFrames:=E1;
+ If O1GetInt(O1OutG,'vframes',E2,'v','frames:v','vframes') Then O1VFrames:=E2;
+ If O1VFrames<0 Then O1VFrames:=-1;
+ O1FsSet:=O1GetInt(O1OutG,'fs',O1Fs,'v','fs','');
+ O1HasOutR:=False; O1AspN:=0; O1AspD:=1;
+ I:=O1Last(O1OutG,'aspect','v');
+ If I>0 Then Begin
+  If (Not O1ParseRatio(O1Op[I].Val,255,O1AspN,O1AspD)) Or (O1AspN<=0) Or (O1AspD<=0) Then Begin
+   O1Msg(16,'[vost#0:0 @ 0x55a0c1f2d640] Invalid aspect ratio: '+O1Op[I].Val);
+   O1Msg(16,'Error opening output file '+OutNm+'.'); O1Msg(16,'Error opening output files: Invalid argument'); O1Die(234);
+  End;
+ End;
+ I:=O1Last(O1OutG,'r','v');
+ If I>0 Then Begin
+  If Not O1ParseRate(O1Op[I].Val,O1OutRN,O1OutRD) Then Begin
+   O1Msg(16,'[vost#0:0 @ 0x55a0c1f2d640] Invalid framerate value: '+O1Op[I].Val);
+   O1Msg(16,'Error opening output file '+OutNm+'.'); O1Msg(16,'Error opening output files: Invalid argument'); O1Die(234);
+  End;
+  O1HasOutR:=True;
+ End;
+ O1Sz:=False; O1DstW:=0; O1DstH:=0; O1DstFm:=-1; O1SwFlags:=O1SwBicubic; O1SwParamSet:=False;
+ I:=O1Last(O1OutG,'s','v');
+ If I>0 Then Begin
+  If Not O1ParseSize(O1Op[I].Val,O1SzW,O1SzH) Then Begin
+   O1Msg(16,'[vost#0:0 @ 0x55a0c1f2d640] Invalid frame size: '+O1Op[I].Val+'.');
+   O1Msg(16,'Error opening output file '+OutNm+'.'); O1Msg(16,'Error opening output files: Invalid argument'); O1Die(234);
+  End;
+  O1Sz:=True;
+ End;
+ { drapeaux swscale }
+ For I:=1 To O1NOp Do
+  If (O1Op[I].Grp=O1OutG) And O1Op[I].Av And (O1Op[I].Key='sws_flags') Then Begin
+   Ok:=O1ParseSwsFlags(O1Op[I].Val,O1SwFlags);
+   If Not Ok Then Begin
+    O1Msg(16,'[scaler_out_0_0 @ 0x55a0c1f2d640] Unable to parse option value "'+O1Op[I].Val+'"');
+    O1Msg(16,'[scaler_out_0_0 @ 0x55a0c1f2d640] Error setting option sws_flags to value '+O1Op[I].Val+'.');
+    O1Msg(16,'[vf#0:0 @ 0x55a0c1f2d640] Error reinitializing filters!');
+    O1Die(234);
+   End;
+   O1Used[O1Op[I].Tok]:=True;
+  End;
+ { sortie existante }
+ O1Overwrite:=O1GlobalBool('y'); O1NoOverwrite:=O1GlobalBool('n');
+ Overwrite:=O1Overwrite; NoOverwrite:=O1NoOverwrite;
+ If O1FileExists(OutNm) And (OutNm<>'-') And Not O1Overwrite Then O1OverwriteGate(OutNm);
+{ ---- sources : Y4M, WAV ou autre (decodage par le programme) ---- }
+ InIsY4M:=False; InIsWav:=False;
+ Assign(F,InNm); {$I-}Reset(F,1);{$I+}
+ If IOResult=0 Then Begin
+  FillChar(Hd,SizeOf(Hd),0); N:=0; {$I-}BlockRead(F,Hd,12,N);{$I+}
+  Close(F);
+  If (N>=9) And (Hd[0]='Y') And (Hd[1]='U') And (Hd[2]='V') And (Hd[3]='4') And (Hd[4]='M') And (Hd[5]='P') And (Hd[6]='E') And (Hd[7]='G') And (Hd[8]='2') Then InIsY4M:=True;
+  If (N>=12) And (Hd[0]='R') And (Hd[1]='I') And (Hd[2]='F') And (Hd[3]='F') And (Hd[8]='W') And (Hd[9]='A') And (Hd[10]='V') And (Hd[11]='E') Then InIsWav:=True;
+ End;
+ { cible de la mise a l'echelle / conversion }
+ V:=''; PixI:=O1Last(O1OutG,'pix_fmt','v');
+ If PixI>0 Then Begin
+  V:=Lower(O1Op[PixI].Val); If (V<>'') And (V[1]='+') Then Delete(V,1,1);
+  Ok:=False; For K:=0 To O1PixN-1 Do If O1Pix[K]=V Then Ok:=True;
+  If (V='y8') Or (V='gray8') Or (V='y16') Then Ok:=True;
+  If Not Ok Then Begin
+   O1Msg(16,'[vost#0:0 @ 0x55a0c1f2d640] Unknown pixel format requested: '+V+'.');
+   O1Msg(16,'Error opening output file '+OutNm+'.'); O1Msg(16,'Error opening output files: Invalid argument'); O1Die(234);
+  End;
+ End;
+ If (PixI>0) And (O1OutFmtName(O1OutG,OutNm)='yuv4mpegpipe') And Not O1HasAv(O1OutG,'strict') Then Begin
+  { yuv4mpegenc.c : formats de pixels acceptes sans -strict -1 }
+  If Not ((V='yuv444p') Or (V='yuv422p') Or (V='yuv420p') Or (V='yuv411p') Or (V='gray') Or (V='gray8') Or (V='y8') Or (V='yuvj420p') Or (V='yuvj422p') Or (V='yuvj444p')) Then Begin
+   Assign(F,OutNm); {$I-}Rewrite(F,1);{$I+} If IOResult=0 Then Close(F);
+   If (V='yuva444p') Or (V='gray9le') Or (V='gray10le') Or (V='gray12le') Or (V='gray16le') Or
+      ((Copy(V,1,3)='yuv') And (Pos('p',V)=7) And (Copy(V,Length(V)-1,2)='le') And (Pos(Copy(V,4,3),'444422420')>0)) Then Begin
+    O1Msg(16,'[yuv4mpegpipe @ 0x55a0c1f2d640] '''+V+''' is not an official yuv4mpegpipe pixel format. Use ''-strict -1'' to encode to this pixel format.');
+    O1Msg(16,'[out#0/yuv4mpegpipe @ 0x55a0c1f2d640] Could not write header (incorrect codec parameters ?): Invalid argument');
+    O1Msg(16,'Error while filtering: Invalid argument');
+    O1Msg(16,'[out#0/yuv4mpegpipe @ 0x55a0c1f2d640] Nothing was written into output file, because at least one of its streams received no packets.');
+    O1Msg(16,'Conversion failed!');
+    O1Die(234);
+   End;
+   O1Msg(16,'[yuv4mpegpipe @ 0x55a0c1f2d640] ERROR: yuv4mpeg can only handle yuv444p, yuv422p, yuv420p, yuv411p and gray8 pixel formats. And using ''strict -1'' also yuv444p9, yuv422p9, yuv420p9, yuv444p10, yuv422p10, yuv420p10, yuv444p12, yuv422p12, yuv420p12, yuv444p14, yuv422p14, yuv420p14, yuv444p16, yuv422p16, yuv420p16, yuva444p, gray9, gray10, gray12 and gray16 pixel formats. Use -pix_fmt to select one.');
+   O1Msg(16,'[out#0/yuv4mpegpipe @ 0x55a0c1f2d640] Could not write header (incorrect codec parameters ?): Input/output error');
+   O1Msg(16,'Error while filtering: Input/output error');
+   O1Msg(16,'[out#0/yuv4mpegpipe @ 0x55a0c1f2d640] Nothing was written into output file, because at least one of its streams received no packets.');
+   O1Msg(16,'Conversion failed!');
+   O1Die(251);
+  End;
+ End;
+ If O1Sz Then Begin
+  O1DstW:=O1SzW; O1DstH:=O1SzH;
+  If V='' Then V:=O1NativeFm(O1CodecOf(O1OutG,OutNm));
+ End;
+ If V<>'' Then Begin
+  K:=F5FindFm(V);
+  If (K>=0) And O1CanScaleFm(K) Then Begin O1DstFm:=K; If PixI>0 Then O1Used[O1Op[PixI].Tok]:=True; End;
+ End;
+ If Not InIsY4M And Not InIsWav And Not O1Strong Then Exit;   { -pix_fmt / -aspect seuls sur une entree decodee : chemin historique }
+ OutFmtN:=O1OutFmtName(O1OutG,OutNm);
+ O1VSMode:=O1VSyncMode(OutFmtN);
+ AudOut:=O1IsAudioFmt(OutFmtN);
+ SrcV:=InNm; SrcA:=InNm;
+ If InIsY4M Then AudOut:=False;
+ If InIsWav Then AudOut:=True;
+ If Not InIsY4M And Not InIsWav Then Begin
+  { decodage de l'entree par le programme }
+  For K:=0 To 1 Do Begin
+   If (K=0) Xor AudOut Then Begin
+    { video }
+    O1Tmp1:=O1TmpName('.y4m'); Rc:=O1Exec(O1ChildLine(InNm,True,O1Tmp1,' -f yuv4mpegpipe',1));
+    If (Rc<>0) Or Not O1FileExists(O1Tmp1) Then Begin
+     F5DelTmp(O1Tmp1);
+     O1Tmp1:=O1TmpName('.y4m'); Rc:=O1Exec(O1ChildLine(InNm,True,O1Tmp1,' -pix_fmt yuv420p -f yuv4mpegpipe',1));
+    End;
+    If (Rc=0) And O1FileExists(O1Tmp1) Then Begin SrcV:=O1Tmp1; AudOut:=False; Break; End;
+    F5DelTmp(O1Tmp1);
+   End Else Begin
+    O1Tmp1:=O1TmpName('.wav'); Rc:=O1Exec(O1ChildLine(InNm,True,O1Tmp1,' -f wav',1));
+    If (Rc=0) And O1FileExists(O1Tmp1) Then Begin SrcA:=O1Tmp1; AudOut:=True; Break; End;
+    F5DelTmp(O1Tmp1);
+   End;
+   If K=1 Then Begin O1Msg(16,InNm+': Invalid data found when processing input'); O1Die(234); End;
+  End;
+ End;
+ If AudOut Then Begin
+  O1Tmp2:=O1TmpName('.wav');
+  N:=O1AudioJob(SrcA,O1Tmp2);
+  If N<0 Then Begin O1Msg(16,SrcA+': Invalid data found when processing input'); O1Die(234); End;
+  Child:=O1ChildLine(O1Tmp2,False,OutNm,'',2);
+  Code:=O1Exec(Child);
+  O1Die(Code);
+ End;
+ O1Tmp2:=O1TmpName('.y4m');
+ N:=O1VideoJob(SrcV,O1Tmp2);
+ If N=0 Then Begin
+  { aucune image : sortie vide (en-tete seul pour Y4M) }
+  If OutFmtN='yuv4mpegpipe' Then Begin
+   Assign(F,O1Tmp2); {$I-}Reset(F,1);{$I+}
+   If IOResult=0 Then Begin Close(F); Assign(F,OutNm); {$I-}Erase(F);{$I+} If IOResult<>0 Then; Assign(F,O1Tmp2); {$I-}Rename(F,OutNm);{$I+} If IOResult<>0 Then Begin O1Msg(16,'Could not open file : '+OutNm); O1Die(234); End; End;
+   F5DelTmp(O1Tmp2);
+   O1Die(0);
+  End;
+  O1Msg(24,'[out#0/'+OutFmtN+' @ 0x55a0c1f2d640] Output file is empty, nothing was encoded (check -ss / -t / -frames parameters if used)');
+  O1Die(0);
+ End;
+ Child:=O1ChildLine(O1Tmp2,False,OutNm,'',2);
+ Code:=O1Exec(Child);
+ O1Die(Code);
+End;
+
+{ ==== O1-END ==== }
 { ==== BLOCK-ANCHOR-O1 : inserer le code du groupe O1 juste au-dessus de cette ligne ==== }
 
 { ==== BLOCK-ANCHOR-O2 : inserer le code du groupe O2 juste au-dessus de cette ligne ==== }
@@ -120429,7 +123430,8 @@ Var I,Aw,Ah,G,K,Strf,Strl,Hdrl: LongInt;
 Begin
  OpenWrite(Target); AWUsed:=0; AWPos:=0; AWFrames:=0; AWMaxPk:=0; GetMem(AWSizes,1048576*4);
  Strf:=40+ExtraLen+(ExtraLen And 1);
- Strl:=4+(8+56)+(8+Strf)+(8+4120)+(8+68);
+ O1AviSar(O1AwSn,O1AwSd); O1AwHv:=(O1AwSn>0) And (O1AwSd>0);
+ Strl:=4+(8+56)+(8+Strf)+(8+4120); If O1AwHv Then Strl:=Strl+(8+68);
  Hdrl:=4+(8+56)+(8+Strl)+(8+260);
  AWTag('RIFF'); AWL32(0); AWTag('AVI ');
  AWTag('LIST'); AWL32(Hdrl); AWTag('hdrl');
@@ -120444,11 +123446,13 @@ Begin
  For I:=0 To ExtraLen-1 Do AWB(Extra^[I]);
  If Odd(ExtraLen) Then AWB(0);
  AWTag('JUNK'); AWL32(4120); AWL16(4); AWL16(0); AWL32(0); AWTag('00dc'); AWZ(4120-12);
+ If O1AwHv Then Begin
  AWTag('vprp'); AWL32(68); AWL32(0); AWL32(0); AWL32((2*Rate+Scale-1) Div (2*Scale));
  AWL32(W); AWL32(H);
- Aw:=W; Ah:=H; G:=Aw; K:=Ah; While K<>0 Do Begin I:=G Mod K; G:=K; K:=I; End; Aw:=Aw Div G; Ah:=Ah Div G;
+ O1AviDar(W,H,O1AwSn,O1AwSd,Aw,Ah);
  AWL32((Aw Shl 16) Or Ah); AWL32(W); AWL32(H); AWL32(1);
  AWL32(H); AWL32(W); AWL32(H); AWL32(W); AWL32(0); AWL32(0); AWL32(0); AWL32(0);
+ End;
  AWTag('JUNK'); AWL32(260); AWTag('odml'); AWTag('dmlh'); AWL32(248); AWZ(248);
  AWTag('LIST'); AWL32(26); AWTag('INFO'); AWTag('ISFT'); AWL32(14);
  AWTag('Lavf'); AWTag('60.1'); AWTag('6.10'); AWB(48); AWB(0);
@@ -144181,6 +147185,7 @@ BEGIN
  AudioCodec:=''; InputCodec:=''; PendingFormat:=''; G726CodeSize:=4; G726Rate:=8000; RequestedRate:=0; RequestedChannels:=0; RequestedBitRateK:=320;
  Overwrite:=False; NoOverwrite:=False; HideBanner:=False; HasBitrate:=False;
  SavedExit:=ExitProc; ExitProc:=@ExitCleanup; Randomize;
+ If O1Route Then Halt(0);
  If FMXRoute Then Halt(0);
  If F3Try Then Halt(0);
  I:=1;
@@ -144464,6 +147469,8 @@ BEGIN
    Halt(0);
   End
   Else If Argument='-fmxq' Then FMXQuiet:=True
+  Else If (Argument='-v') Or (Argument='-loglevel') Then O1ApplyLog(Copy(Argument,2,20),NextArgument)
+  Else If (Argument='-nostdin') Or (Argument='-stdin') Then Begin End
   Else If Argument='-y' Then Overwrite:=True Else
   If Argument='-n' Then NoOverwrite:=True Else
   If Argument='-hide_banner' Then HideBanner:=True Else
@@ -144708,8 +147715,7 @@ BEGIN
  If Lower(FExpand(InputPath))=Lower(FExpand(OutputPath)) Then Fail(
  'Entree et sortie doivent etre differentes.');
  If IsDirectory(OutputPath) Then Fail('La sortie designe un dossier.');
- If Exists(OutputPath) And Not Overwrite Then Fail('Sortie existante (utiliser -y): '+
- OutputPath);
+ If Exists(OutputPath) And Not Overwrite Then O1OverwriteGate(OutputPath);
  If Not IsHTTP(InputPath) Then F5PreProbe;
  Intermediate:=InputPath;
  If IsHTTP(InputPath) Then Begin
