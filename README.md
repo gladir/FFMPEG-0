@@ -11,6 +11,10 @@ Tout le code est dans `ANYMP4.PAS` (aucun fichier d'inclusion, aucune unite exte
 fpc ANYMP4.PAS
 ```
 
+Option `-maxscreen` (Free Pascal uniquement) : utilise la resolution maximale disponible au lieu de 640x480 (meme technique que
+OUTLOOK.PAS : pilote D8bit, mode le plus eleve, geometrie recalculee depuis GetMaxX/GetMaxY). Les listes, le pied de page et les
+dialogues s'etirent ; `ANYMP4 -h` affiche l'aide.
+
 Video MP4 (H.264 + AAC) : lecture des fichiers MP4/MOV/M4V/3GP/FLV (miniatures et apercu decodes par le decodeur
 H.264 de FFMPEG.PAS : CAVLC/CABAC, I/P/B), sortie MP4/MOV/M4V/3GP par copie de flux (sans perte, avec decoupe) ou par
 transcodage (rotation, rognage, effets, filigrane, redimensionnement, encodeur H.264 + AAC), image/GIF anime -> MP4,

@@ -27,21 +27,55 @@ Uses {$IFDEF FPC}
       DOS,Crt,Graph
      {$ENDIF};
 
+Var
+ MaxScreen: Boolean;
+ { Geometrie de l'ecran : 640x480 par defaut, ecran maximal avec -maxscreen (Free Pascal) }
+ ScrW,ScrH: Integer;
+ BodyBot,FootY,ScrDx,ScrDy,RowsVis: Integer;
+
+Procedure UpdateScreenGeometry(Width,Height: Integer);
+Begin
+ ScrW:=Width; ScrH:=Height;
+ ScrDx:=ScrW-640; ScrDy:=ScrH-480;
+ BodyBot:=ScrH-81;
+ FootY:=ScrH-80;
+ RowsVis:=(BodyBot-99+1) Div 63;
+ If RowsVis<1 Then RowsVis:=1;
+End;
+
+{ Meme selection que OUTLOOK.PAS : palette indexee et resolution maximale. }
+Procedure SelectScreenDriverMode(WantMaxScreen: Boolean; Var Driver,Mode: Integer);
+{$IFDEF FPC}
+Var LoMode,HiMode: SmallInt;
+{$ENDIF}
+Begin
+ {$IFDEF FPC}
+ If WantMaxScreen Then Begin
+  Driver:=D8bit;
+  GetModeRange(Driver,LoMode,HiMode);
+  If HiMode>=LoMode Then Mode:=HiMode
+  Else Begin Driver:=Detect; Mode:=0; End;
+ End Else Begin
+  Driver:=VGA;
+  Mode:=VGAHi;
+ End;
+ {$ELSE}
+ Driver:=Detect;
+ Mode:=VGAHi;
+ {$ENDIF}
+End;
+
 Procedure InitializeGraphics;
 Var
  Driver, Mode: Integer;
  ErrCode: Integer;
 Begin
- {$IFDEF FPC}
-  Driver:=VGA;
-  Mode:=VGAHi;
- {$ELSE}
-  Driver:=Detect;
-  Mode:=VGAHi;
- {$ENDIF}
+ UpdateScreenGeometry(640,480);
+ SelectScreenDriverMode(MaxScreen,Driver,Mode);
  InitGraph(Driver,Mode,'');
  ErrCode:=GraphResult;
  If ErrCode=grOk Then Begin
+  UpdateScreenGeometry(GetMaxX+1,GetMaxY+1);
   SetColor(White);
   SetLineStyle(0,0,1);
  End
@@ -109,8 +143,6 @@ End;
 { Constantes, types et variables globales                                 }
 { ====================================================================== }
 Const
- ScrW = 640;
- ScrH = 480;
  { Indices de la palette personnalisee }
  cBlack = 0;  cBlue = 1;   cGreen = 2;  cSky = 3;    cRed = 4;    cNavy = 5;
  cOrange = 6; cPanel = 7;  cGrayD = 8;  cBlueL = 9;  cGreenL = 10;
@@ -100892,7 +100924,7 @@ Const
  hScrUp = 57; hScrDn = 58;
  { ligne de fichier : 100 + 10*i + k  (k : 0 edition, 1 couper, 2 effets, 3 format,
    4 supprimer, 5 piste audio, 6 sous-titre, 7 informations) }
- RowH = 63; RowsVis = 4; ListY = 99;
+ RowH = 63; ListY = 99;
 
 Var
  JobWarn: String;
@@ -101315,13 +101347,13 @@ Begin
  Combo(356,Y+34,82,16,'Piste 1',105+I*10);
  If M^.SubFile<>'' Then Combo(444,Y+34,86,16,Fit(NameOf(M^.SubFile),60),106+I*10)
  Else Combo(444,Y+34,86,16,'Sous-titre',106+I*10);
- Panel(538,Y+8,ScrW-52,Y+26,cBlue,cBlue);
- TxtC(538,ScrW-52,Y+13,Pr.Ext,cWhite);
- HotAdd(538,Y+8,ScrW-52-538+1,19,103+I*10);
+ Panel(538+ScrDx,Y+8,ScrW-52,Y+26,cBlue,cBlue);
+ TxtC(538+ScrDx,ScrW-52,Y+13,Pr.Ext,cWhite);
+ HotAdd(538+ScrDx,Y+8,ScrW-52-(538+ScrDx)+1,19,103+I*10);
  IcoClose(ScrW-44,Y+10,cGrayD); HotAdd(ScrW-48,Y+6,16,16,104+I*10);
  Case M^.Status Of
   1: ProgBar(104,Y+54,ScrW-22-104-6,5,M^.Pct);
-  2: Begin Rect(104,Y+54,ScrW-28,Y+57,cGreen); Txt(538,Y+34,#251+' Termin'#233,cGreen); End;
+  2: Begin Rect(104,Y+54,ScrW-28,Y+57,cGreen); Txt(538+ScrDx,Y+34,#251+' Termin'#233,cGreen); End;
   3: Txt(104,Y+53,Fit(M^.Msg,ScrW-140),cRed);
  End;
 End;
@@ -101383,35 +101415,38 @@ Begin
   IcoFilm(12,Y+2,cSteel);
   Txt(52,Y+8,Fit(NameOf(Converted[NConv-I+1]),400),cBlack);
   Txt(52,Y+20,Fit(DirOf(Converted[NConv-I+1]),340)+'  '+SizeStr(FileSizeOf(Converted[NConv-I+1])),cGrayD);
-  Button(500,Y+8,52,20,'Infos',107+I*10,bsNormal);
-  Button(558,Y+8,58,20,'Suppr.',104+I*10,bsNormal);
+  Button(500+ScrDx,Y+8,52,20,'Infos',107+I*10,bsNormal);
+  Button(558+ScrDx,Y+8,58,20,'Suppr.',104+I*10,bsNormal);
  End;
 End;
 
 Procedure DrawFooter;
+Var D,R: Integer;
 Begin
- Rect(0,400,ScrW-1,ScrH-1,cPanel); HLn(0,ScrW-1,400,cSteel);
- Txt(10,413,'Format de sortie:',cBlack);
- Combo(150,408,172,22,Profs[CurProf].Name+' ('+Profs[CurProf].Ext+')',hFmt);
- Panel(328,408,350,429,cWhite,cSteel); IcoGear(333,413,cNavy); HotAdd(328,408,23,22,hFmtGear);
- Txt(366,413,'Conversion 120'#215' plus rapide',cBlack);
- Toggle(592,413,Fast120,hFast);
- Txt(10,447,'Enregistrer:',cBlack);
- Combo(150,442,210,22,OutDir,hDir);
- Panel(366,442,388,463,cWhite,cSteel); IcoFolder(370,446,cGold); HotAdd(366,442,23,22,hDirBtn);
- CheckBox(402,447,'Fusionner en un seul fichier',MergeAll,hMerge);
+ { le pied de page est ancre en bas (D) et a droite (R) de l'ecran }
+ D:=ScrDy; R:=ScrDx;
+ Rect(0,FootY,ScrW-1,ScrH-1,cPanel); HLn(0,ScrW-1,FootY,cSteel);
+ Txt(10,413+D,'Format de sortie:',cBlack);
+ Combo(150,408+D,172,22,Profs[CurProf].Name+' ('+Profs[CurProf].Ext+')',hFmt);
+ Panel(328,408+D,350,429+D,cWhite,cSteel); IcoGear(333,413+D,cNavy); HotAdd(328,408+D,23,22,hFmtGear);
+ Txt(366,413+D,'Conversion 120'#215' plus rapide',cBlack);
+ Toggle(592+R,413+D,Fast120,hFast);
+ Txt(10,447+D,'Enregistrer:',cBlack);
+ Combo(150,442+D,210,22,OutDir,hDir);
+ Panel(366,442+D,388,463+D,cWhite,cSteel); IcoFolder(370,446+D,cGold); HotAdd(366,442+D,23,22,hDirBtn);
+ CheckBox(402,447+D,'Fusionner en un seul fichier',MergeAll,hMerge);
  If Running Then Begin
-  Button(548,438,84,32,'Arr'#234'ter',0,bsBlue);
-  CancelX1:=548; CancelY1:=438; CancelX2:=631; CancelY2:=469;
+  Button(548+R,438+D,84,32,'Arr'#234'ter',0,bsBlue);
+  CancelX1:=548+R; CancelY1:=438+D; CancelX2:=631+R; CancelY2:=469+D;
  End Else Begin
-  Button(496,436,136,34,'Convertir Tout',hConvAll,bsPrimary);
+  Button(496+R,436+D,136,34,'Convertir Tout',hConvAll,bsPrimary);
  End;
 End;
 
 Procedure DrawConvertScreen;
 Var I: Integer;
 Begin
- Rect(0,96,ScrW-1,399,cWhite);
+ Rect(0,96,ScrW-1,BodyBot,cWhite);
  If SubTab=1 Then Begin DrawDoneList; Exit; End;
  If NFiles=0 Then DrawEmptyState
  Else Begin
@@ -105701,7 +105736,7 @@ End;
 Procedure DrawRipper;
 Var I,Y: Integer;
 Begin
- Rect(0,96,ScrW-1,399,cWhite);
+ Rect(0,96,ScrW-1,BodyBot,cWhite);
  If RipN=0 Then Begin
   IcoDisc(304,120,cBlue); SetColor(cBlue); Circle(320,136,40); Circle(320,136,12); Circle(320,136,38);
   TxtC(0,ScrW-1,200,'Charger un DVD',cBlack);
@@ -105787,7 +105822,7 @@ Var
 Procedure DrawMV;
 Var I,X,Y: Integer; Im: PImg;
 Begin
- Rect(0,96,ScrW-1,399,cWhite);
+ Rect(0,96,ScrW-1,BodyBot,cWhite);
  Txt(10,102,'Th'#232'me',cNavy);
  For I:=1 To NThemes Do Begin
   Y:=116+(I-1)*27;
@@ -105930,7 +105965,7 @@ End;
 Procedure DrawCollage;
 Var I,N,X,Y,Pw,Ph,Ox,Oy,Cx,Cy,Cw,Ch,K: Integer; C: TLayout; L: TLayout; Nn: Integer;
 Begin
- Rect(0,96,ScrW-1,399,cWhite);
+ Rect(0,96,ScrW-1,BodyBot,cWhite);
  Txt(10,102,'Mod'#232'les',cNavy);
  For I:=1 To NLayouts Do Begin
   X:=10+((I-1) Mod 3)*50; Y:=116+((I-1) Div 3)*52;
@@ -106033,7 +106068,7 @@ Const
 Procedure DrawToolbox;
 Var I,X,Y,P: Integer; D1,D2: String;
 Begin
- Rect(0,96,ScrW-1,399,cWhite);
+ Rect(0,96,ScrW-1,BodyBot,cWhite);
  For I:=1 To NTools Do Begin
   X:=10+((I-1) Mod 4)*155; Y:=104+((I-1) Div 4)*74;
   Panel(X,Y,X+148,Y+68,cWhite,cLine);
@@ -106299,12 +106334,14 @@ End;
 { Dispatch des commandes, menus et boucle principale                       }
 { ====================================================================== }
 Procedure DrawFooterLite;
+Var D: Integer;
 Begin
- Rect(0,400,ScrW-1,ScrH-1,cPanel); HLn(0,ScrW-1,400,cSteel);
- Txt(12,413,'Enregistrer:',cBlack);
- Combo(100,408,420,22,OutDir,hDir);
- Panel(526,408,548,429,cWhite,cSteel); IcoFolder(530,412,cGold); HotAdd(526,408,23,22,hDirBtn);
- Txt(12,445,'Les fichiers cr'#233#233's sont ajout'#233's '#224' l''onglet Convertisseur > Converti.',cGrayD);
+ D:=ScrDy;
+ Rect(0,FootY,ScrW-1,ScrH-1,cPanel); HLn(0,ScrW-1,FootY,cSteel);
+ Txt(12,413+D,'Enregistrer:',cBlack);
+ Combo(100,408+D,420,22,OutDir,hDir);
+ Panel(526,408+D,548,429+D,cWhite,cSteel); IcoFolder(530,412+D,cGold); HotAdd(526,408+D,23,22,hDirBtn);
+ Txt(12,445+D,'Les fichiers cr'#233#233's sont ajout'#233's '#224' l''onglet Convertisseur > Converti.',cGrayD);
 End;
 
 Procedure DrawAll;
@@ -106523,6 +106560,41 @@ Begin
  End;
 End;
 
+Procedure ShowCommandLineHelp;
+Var HelpOutput: Text;
+Begin
+ { Un flux distinct conserve la sortie console, meme avec les unites Crt. }
+ Assign(HelpOutput,'');
+ Rewrite(HelpOutput);
+ WriteLn(HelpOutput,'ANYMP4 - Convertisseur video et audio graphique.');
+ WriteLn(HelpOutput);
+ WriteLn(HelpOutput,'Syntaxe : ANYMP4 [-maxscreen] [<fichier> ...] [/? | -h | --help]');
+ WriteLn(HelpOutput);
+ WriteLn(HelpOutput,'  Sans option          Lance l''application graphique en 640x480.');
+ WriteLn(HelpOutput,'  -h, --help           Affichent egalement cette aide.');
+ WriteLn(HelpOutput,'  -maxscreen           Utilise la resolution maximale disponible.');
+ WriteLn(HelpOutput,'  /?                   Affiche cette aide et quitte.');
+ WriteLn(HelpOutput,'  <fichier>            Ajoute ce fichier a la liste des fichiers a convertir.');
+ WriteLn(HelpOutput);
+ WriteLn(HelpOutput,'  L''option -maxscreen n''a d''effet que sous Free Pascal ; sous Turbo Pascal');
+ WriteLn(HelpOutput,'  la resolution reste 640x480.');
+ Close(HelpOutput);
+End;
+
+{ Retourne False si l'aide a ete affichee (le programme doit alors se terminer). }
+Function ParseCmdLine: Boolean;
+Var I: Integer; U: String;
+Begin
+ ParseCmdLine:=True; MaxScreen:=False;
+ For I:=1 To ParamCount Do Begin
+  U:=UpStr(ParamStr(I));
+  If (U='/?') Or (U='-H') Or (U='--HELP') Then Begin
+   ShowCommandLineHelp; ParseCmdLine:=False; Exit;
+  End;
+  If U='-MAXSCREEN' Then MaxScreen:=True;
+ End;
+End;
+
 Procedure InitApp;
 Var I: Integer; S: String;
 Begin
@@ -106564,6 +106636,7 @@ Var
  Ev: TEvent;
  Id: Integer;
 BEGIN
+ If Not ParseCmdLine Then Halt;
  InitApp;
  { fichiers passes sur la ligne de commande }
  If ParamCount>0 Then Begin
