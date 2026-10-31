@@ -3,3 +3,6 @@ FFMPEG.o
 FFMPEG_dbg
 *.o
 *.ppu
+
+ANYMP4
+ANYMP4.o
