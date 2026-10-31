@@ -1459,6 +1459,7 @@ Var
  OutDir: String;
  MergeAll: Boolean;
  Fast120: Boolean;
+ RegKey: String; RegOk: Boolean;
  HwAccel: Boolean;
  AfterAct: Integer;           { 0 rien, 1 ouvrir dossier, 2 quitter }
  OverwriteAll: Boolean;
@@ -59881,6 +59882,1505 @@ Begin
  CloseWrite;
 End;
 {$ENDIF}
+{$IFDEF FPC}
+Const
+ AMVZig: Array[0..63] Of Byte=(0,1,8,16,9,2,3,10,17,24,32,25,18,11,4,5,12,19,26,
+  33,40,48,
+ 41,34,27,20,13,6,7,14,21,28,35,42,49,56,57,50,43,36,29,22,15,23,30,37,44,51,58,
+  59,52,45,
+ 38,31,39,46,53,60,61,54,47,55,62,63);
+Procedure AVIdctPut(Var Blk: TAMVBlock; Dest: PEABuffer; Stride: LongInt);
+Const
+ W1=22725;
+ W2=21407;
+ W3=19266;
+ W4=16383;
+ W5=12873;
+ W6=8867;
+ W7=4520;
+Var
+ I,K: Integer;
+ A0,A1,A2,A3,B0,B1,B2,B3: LongInt ;
+ R: Array[0..7] Of LongInt ;
+ V: LongInt;
+Function Sar32(X: LongInt; N: Integer): LongInt;
+Begin If X>=0 Then Sar32:=X Shr N Else Sar32:=-1-((-1-X) Shr N); End ;
+
+Procedure Put(Col,Row: Integer; X: LongInt );Begin
+ X:= Sar32 (X,20); If X<0 Then X:=0; If X>255 Then X:=255;
+ Dest^[Row*Stride+Col]:=X;
+End;
+Begin
+ For I:=0 To 7 Do Begin
+  For K:=0 To 7 Do R[K]:=Blk[I*8+K];
+  If (R[1] Or R[2] Or R[3] Or R[4] Or R[5] Or R[6] Or R[7])=0 Then Begin
+   V:=SmallInt(R[0]*8);
+   For K:=0 To 7 Do Blk[I*8+K]:=V;
+  End Else
+  Begin
+   A0:=W4*R[0]+(1 Shl 10); A1:=A0; A2:=A0; A3:=A0;
+   A0 :=A0+ W2*R[2] ; A1 :=A1+ W6*R[2] ; A2 :=A2- W6*R[2] ; A3 :=A3- W2*R[2] ;
+   B0:=W1*R[1]+W3*R[3]; B1:=W3*R[1]-W7*R[3]; B2:=W5*R[1]-W1*R[3]; B3:=W7*R[1]-
+    W5*R[3];
+   If (R[4] Or R[5] Or R[6] Or R[7])<>0 Then Begin
+    A0 :=A0+( W4*R[4]+W6*R[6]); A1 :=A1+( -W4*R[4]-W2*R[6]); A2 :=A2+( -W4*R[4]+
+     W2*R[6]);
+    A3 :=A3+( W4*R[4]-W6*R[6]);
+    B0 :=B0+( W5*R[5]+W7*R[7]); B1:=B1+ ( -W1*R[5]-W5*R[7]); B2:=B2+ ( W7*R[5]+
+     W3*R[7]);
+    B3:=B3+ ( W3*R[5]-W1*R[7]);
+   End;
+   Blk[I*8+0]:= Sar32 (A0+B0,11); Blk[I*8+7]:= Sar32 (A0-B0,11);
+   Blk[I*8+1]:= Sar32 (A1+B1,11); Blk[I*8+6]:= Sar32 (A1-B1,11);
+   Blk[I*8+2]:= Sar32 (A2+B2,11); Blk[I*8+5]:= Sar32 (A2-B2,11);
+   Blk[I*8+3]:= Sar32 (A3+B3,11); Blk[I*8+4]:= Sar32 (A3-B3,11);
+  End;
+ End;
+ For I:=0 To 7 Do Begin
+  For K:=0 To 7 Do R[K]:=Blk[K*8+I];
+  A0:=W4*(R[0]+32); A1:=A0; A2:=A0; A3:=A0;
+  A0 :=A0+ W2*R[2] ; A1 :=A1+ W6*R[2] ; A2 :=A2- W6*R[2] ; A3 :=A3- W2*R[2] ;
+  B0:=W1*R[1]+W3*R[3]; B1:=W3*R[1]-W7*R[3]; B2:=W5*R[1]-W1*R[3]; B3:=W7*R[1]-W5*
+   R[3];
+  If R[4]<>0 Then Begin
+   A0 :=A0+ W4*R[4] ; A1 :=A1- W4*R[4] ; A2 :=A2- W4*R[4] ; A3 :=A3+ W4*R[4] ;
+  End;
+  If R[5]<>0 Then Begin
+   B0 :=B0+ W5*R[5] ; B1 :=B1- W1*R[5] ; B2 :=B2+ W7*R[5] ; B3 :=B3+ W3*R[5] ;
+  End;
+  If R[6]<>0 Then Begin
+   A0 :=A0+ W6*R[6] ; A1 :=A1- W2*R[6] ; A2 :=A2+ W2*R[6] ; A3 :=A3- W6*R[6] ;
+  End;
+  If R[7]<>0 Then Begin
+   B0 :=B0+ W7*R[7] ; B1 :=B1- W5*R[7] ; B2 :=B2+ W3*R[7] ; B3 :=B3- W1*R[7] ;
+  End;
+  Put(I,0,A0+B0); Put(I,1,A1+B1); Put(I,2,A2+B2); Put(I,3,A3+B3);
+  Put(I,4,A3-B3); Put(I,5,A2-B2); Put(I,6,A1-B1); Put(I,7,A0-B0);
+ End;
+End;
+Var
+ NVNDur,NVNVid,NVScanRate: LongInt;
+Procedure
+DecodeDV(Const Source,Target: String; Mode: LongInt; IsAvi: Boolean); Forward;
+Procedure DecodeMJP(Const Source,Target: String; Mode: LongInt); Forward;
+Type
+ TDVMB=Record Pos,PCnt,Sc,Fo,Md: LongInt; PBuf: Int64; End;
+Var
+ DVTLen,DVTRun: Array[0..65535] Of Byte;
+ DVTLev: Array[0..65535] Of SmallInt;
+ DVFact: Array[0..5631] Of LongInt;
+ DVReady: Boolean;
+ DVProf,DVW,DVH,DVPix,DVStype,DVDsf,DVSegs,DVChans,DVFrameSize,DVNChunks,DVFpsN,
+  DVFpsD: LongInt;
+ DVCOff: Array[0..647] Of LongInt;
+ DVCX,DVCY: Array[0..647,0..4] Of SmallInt;
+ DVBuf: PEABuffer;
+ DVBufLen: LongInt;
+ DVYP,DVUP,DVVP: PEABuffer;
+ DVCW,DVCH: LongInt;
+ DVIl: Char;
+ DVSarN,DVSarD: LongInt;
+Const
+ DVVLen: Array[0..408] Of Byte=(
+  2,3,4,4,4,4,5,5,5,5,6,6,
+  6,6,7,7,7,7,7,7,7,7,8,8,
+  8,8,8,8,8,8,8,8,8,8,8,8,
+  8,8,9,9,9,9,9,9,9,9,9,9,
+  9,9,9,9,9,9,10,10,10,10,10,10,
+  10,11,11,11,11,11,11,11,11,12,12,12,
+  12,12,12,12,12,12,12,12,12,12,12,12,
+  12,12,12,12,12,13,13,13,13,13,13,13,
+  13,13,13,13,13,13,13,13,13,13,13,13,
+  13,13,13,13,13,13,13,13,13,13,13,13,
+  13,13,13,13,13,13,13,13,13,13,13,13,
+  13,13,13,13,13,13,13,13,13,13,13,13,
+  13,13,13,13,13,13,13,13,13,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15,15,15,15,15,15,15,15,15,15,15,15,
+  15);
+ DVVRun: Array[0..408] Of Byte=(
+  0,0,127,1,0,0,2,1,0,0,3,4,
+  0,0,5,6,2,1,1,0,0,0,7,8,
+  9,10,3,4,2,1,1,1,0,0,0,0,
+  0,0,11,12,13,14,5,6,3,4,2,2,
+  1,0,0,0,0,0,5,3,3,2,1,1,
+  1,0,1,6,4,3,1,1,1,2,3,4,
+  5,7,8,9,10,7,8,4,3,2,2,2,
+  2,2,1,1,1,0,1,2,3,4,5,6,
+  7,8,9,10,11,12,13,14,15,16,17,18,
+  19,20,21,22,23,24,25,26,27,28,29,30,
+  31,32,33,34,35,36,37,38,39,40,41,42,
+  43,44,45,46,47,48,49,50,51,52,53,54,
+  55,56,57,58,59,60,61,62,63,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0);
+ DVVLev: Array[0..408] Of Byte=(
+  1,2,0,1,3,4,1,2,5,6,1,1,
+  7,8,1,1,2,3,4,9,10,11,1,1,
+  1,1,2,2,3,5,6,7,12,13,14,15,
+  16,17,1,1,1,1,2,2,3,3,4,5,
+  8,18,19,20,21,22,3,4,5,6,9,10,
+  11,0,0,3,4,6,12,13,14,0,0,0,
+  0,2,2,2,2,3,3,5,7,7,8,9,
+  10,11,15,16,17,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,1,2,
+  3,4,5,6,7,8,9,10,11,12,13,14,
+  15,16,17,18,19,20,21,22,23,24,25,26,
+  27,28,29,30,31,32,33,34,35,36,37,38,
+  39,40,41,42,43,44,45,46,47,48,49,50,
+  51,52,53,54,55,56,57,58,59,60,61,62,
+  63,64,65,66,67,68,69,70,71,72,73,74,
+  75,76,77,78,79,80,81,82,83,84,85,86,
+  87,88,89,90,91,92,93,94,95,96,97,98,
+  99,100,101,102,103,104,105,106,107,108,109,110,
+  111,112,113,114,115,116,117,118,119,120,121,122,
+  123,124,125,126,127,128,129,130,131,132,133,134,
+  135,136,137,138,139,140,141,142,143,144,145,146,
+  147,148,149,150,151,152,153,154,155,156,157,158,
+  159,160,161,162,163,164,165,166,167,168,169,170,
+  171,172,173,174,175,176,177,178,179,180,181,182,
+  183,184,185,186,187,188,189,190,191,192,193,194,
+  195,196,197,198,199,200,201,202,203,204,205,206,
+  207,208,209,210,211,212,213,214,215,216,217,218,
+  219,220,221,222,223,224,225,226,227,228,229,230,
+  231,232,233,234,235,236,237,238,239,240,241,242,
+  243,244,245,246,247,248,249,250,251,252,253,254,
+  255);
+ DVQShift: Array[0..87] Of Byte=(
+  3,3,4,4,3,3,4,4,2,3,3,4,
+  2,3,3,4,2,2,3,3,2,2,3,3,
+  1,2,2,3,1,2,2,3,1,1,2,2,
+  1,1,2,2,0,1,1,2,0,1,1,2,
+  0,0,1,1,0,0,1,1,0,0,0,1,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0);
+ DVZig248: Array[0..63] Of Byte=(
+  0,8,1,9,16,24,2,10,17,25,32,40,
+  48,56,33,41,18,26,3,11,4,12,19,27,
+  34,42,49,57,50,58,35,43,20,28,5,13,
+  6,14,21,29,36,44,51,59,52,60,37,45,
+  22,30,7,15,23,31,38,46,53,61,54,62,
+  39,47,55,63);
+ DVIw88: Array[0..63] Of Word=(
+  32768,16705,16705,17734,17032,17734,18205,18081,18081,18205,18725,18562,
+  19195,18562,18725,19266,19091,19705,19705,19091,19266,21407,19643,20267,
+  20228,20267,19643,21407,22725,21826,20853,20806,20806,20853,21826,22725,
+  23170,23170,21407,21400,21407,23170,23170,24598,23786,22018,22018,23786,
+  24598,25251,24465,22654,24465,25251,25972,25172,25172,25972,26722,27969,
+  26722,29692,29692,31521);
+ DVIw248: Array[0..63] Of Word=(
+  32768,16384,16705,16705,17734,17734,17734,17734,18081,18081,18725,18725,
+  21407,21407,19091,19091,19195,19195,18205,18205,18725,18725,19705,19705,
+  20267,20267,21826,21826,23170,23170,20806,20806,20267,20267,19266,19266,
+  21407,21407,20853,20853,21400,21400,23786,23786,24465,24465,22018,22018,
+  23170,23170,22725,22725,24598,24598,24465,24465,25172,25172,27969,27969,
+  25972,25972,29692,29692);
+Function DVPeek32(B: PEABuffer; Len,Bit: LongInt): Int64;
+Var I,Q,S: LongInt; V: Int64;
+Begin
+ Q:=Bit Shr 3; S:=Bit And 7; V:=0;
+ For I:=0 To 4 Do V:=V*256+EAByte(B,Len,Q+I);
+ DVPeek32:=(V Shr (8-S)) And $FFFFFFFF;
+End;
+Procedure DVInitTables;
+Var I,L,N,Fill,K,J,Run,Lev: LongInt; Code,Cur: Int64; Used: LongInt;
+Procedure Put(C: Int64; Ln,Rn,Lv: LongInt);
+Var Base,Cnt,Z: LongInt;
+Begin
+ Base:=C Shl (16-Ln); Cnt:=1 Shl (16-Ln);
+ For Z:=0 To Cnt-1 Do Begin DVTLen[Base+Z]:=Ln; DVTRun[Base+Z]:=Rn; DVTLev[Base+
+  Z]:=Lv; End;
+ Inc(Used,Cnt);
+End;
+Var S,C,Q: LongInt; Fa,Fb: LongInt; Wt: LongInt;
+Const Areas: Array[0..3] Of Byte=(6,21,43,64);
+Begin
+ If DVReady Then Exit;
+ Used:=0; Code:=0;
+ For I:=0 To 408 Do Begin
+  L:=DVVLen[I]; Cur:=Code Shr (32-L); Code:=Code+(Int64(1) Shl (32-L));
+  If DVVLev[I]<>0 Then Begin
+   Put(Cur Shl 1,L+1,DVVRun[I]+1,DVVLev[I]);
+   Put((Cur Shl 1) Or 1,L+1,DVVRun[I]+1,-DVVLev[I]);
+  End Else Put(Cur,L,DVVRun[I]+1,0);
+ End;
+ If Used<>65536 Then Fail('dvvideo: table VLC incoherente.');
+ { sous-tables de ffmpeg: la longueur consommee est celle de la plus longue
+  entree du prefixe de 10 bits }
+ For K:=0 To 1023 Do Begin
+  N:=0;
+  For J:=0 To 63 Do If DVTLen[K*64+J]>N Then N:=DVTLen[K*64+J];
+  If N>10 Then For J:=0 To 63 Do DVTLen[K*64+J]:=N;
+ End;
+ { facteurs de dequantification: [classe3?][mode DCT][quant 0..21][coef] }
+ Fa:=0; Fb:=2816;
+ For J:=0 To 1 Do For S:=0 To 21 Do Begin
+  I:=0;
+  For C:=0 To 3 Do Begin
+   While I<Areas[C] Do Begin
+    If J=0 Then Wt:=DVIw88[I] Else Wt:=DVIw248[I];
+    DVFact[Fa]:=Wt Shl (DVQShift[S*4+C]+1);
+    DVFact[Fb]:=DVFact[Fa] Shl 1;
+    Inc(Fa); Inc(Fb); Inc(I);
+   End;
+  End;
+ End;
+ DVReady:=True;
+End;
+Function DVFindProfile(B: PEABuffer; Size: LongInt): LongInt;
+Var Dsf,St,Pal,Z: LongInt;
+Begin
+ DVFindProfile:=-1;
+ If Size<480 Then Exit;
+ Dsf:=(B^[3] And $80) Shr 7; Z:=B^[80*5+48+3]; St:=Z And $1F; Pal:=(Z Shr 5) And
+  1;
+ If (St=$14) Or (St=$18) Then Begin DVFindProfile:=-2; Exit; End;
+ If (Dsf=1) And (St=0) And ((B^[4] And 7)<>0) Then Begin DVFindProfile:=2; Exit;
+  End;
+ If (Dsf=0) And (Pal=1) And (St=0) And (Size=144000) Then Begin DVFindProfile:=
+  1; Exit; End;
+ If (Dsf=0) And (St=0) Then Begin DVFindProfile:=0; Exit; End;
+ If (Dsf=1) And (St=0) Then Begin DVFindProfile:=1; Exit; End;
+ If (Dsf=0) And (St=4) Then Begin DVFindProfile:=3; Exit; End;
+ If (Dsf=1) And (St=4) Then Begin DVFindProfile:=4; Exit; End;
+ If (Dsf=1) And (St=1) Then Begin DVFindProfile:=5; Exit; End;
+ If ((B^[3] And $7F)=$3F) And (Z=$FF) Then Begin DVFindProfile:=Dsf; Exit; End;
+End;
+Procedure DVSetupProfile(P: LongInt);
+Const
+ Off: Array[0..4] Of Byte=(2,6,8,0,4);
+ Shuf3: Array[0..4] Of Byte=(18,9,27,0,36);
+ LStartShuffled: Array[0..4] Of Byte=(9,4,13,0,18);
+ Serpent1: Array[0..26] Of Byte=(0,1,2,2,1,0,0,1,2,2,1,0,0,1,2,2,1,0,0,1,2,2,1,
+  0,0,1,2);
+ Serpent2: Array[0..29] Of Byte=(0,1,2,3,4,5,5,4,3,2,1,0,0,1,2,3,4,5,5,4,3,2,1,
+  0,0,1,2,3,4,5);
+Var C,S,J,M,Pp,Cnt,X,Y,I,K: LongInt;
+Begin
+ DVProf:=P;
+ Case P Of
+  0: Begin DVDsf:=0; DVStype:=0; DVFrameSize:=120000; DVSegs:=10; DVChans:=1;
+   DVH:=480; DVPix:=0; DVFpsN:=30000; DVFpsD:=1001; End;
+  1: Begin DVDsf:=1; DVStype:=0; DVFrameSize:=144000; DVSegs:=12; DVChans:=1;
+   DVH:=576; DVPix:=1; DVFpsN:=25; DVFpsD:=1; End;
+  2: Begin DVDsf:=1; DVStype:=0; DVFrameSize:=144000; DVSegs:=12; DVChans:=1;
+   DVH:=576; DVPix:=0; DVFpsN:=25; DVFpsD:=1; End;
+  3: Begin DVDsf:=0; DVStype:=4; DVFrameSize:=240000; DVSegs:=10; DVChans:=2;
+   DVH:=480; DVPix:=2; DVFpsN:=30000; DVFpsD:=1001; End;
+  4: Begin DVDsf:=1; DVStype:=4; DVFrameSize:=288000; DVSegs:=12; DVChans:=2;
+   DVH:=576; DVPix:=2; DVFpsN:=25; DVFpsD:=1; End;
+  Else Begin DVDsf:=1; DVStype:=1; DVFrameSize:=144000; DVSegs:=12; DVChans:=1;
+   DVH:=576; DVPix:=1; DVFpsN:=25; DVFpsD:=1; End;
+ End;
+ DVW:=720;
+ Case DVPix Of 0: Begin DVCW:=DVW Div 4; DVCH:=DVH; End; 1: Begin DVCW:=DVW Div
+  2; DVCH:=DVH Div 2; End; Else Begin DVCW:=DVW Div 2; DVCH:=DVH; End; End;
+ Pp:=0; Cnt:=0;
+ For C:=0 To DVChans-1 Do For S:=0 To DVSegs-1 Do Begin
+  Inc(Pp,6);
+  For J:=0 To 26 Do Begin
+   If J Mod 3=0 Then Inc(Pp);
+   For M:=0 To 4 Do Begin
+    Case DVPix Of
+     2: Begin
+      X:=Shuf3[M]+J Div 3;
+      Y:=Serpent1[J]+((((S+Off[M]) Mod DVSegs) Shl 1)+C)*3;
+      DVCX[Cnt,M]:=X*2; DVCY[Cnt,M]:=Y;
+     End;
+     1: Begin
+      X:=Shuf3[M]+J Div 3;
+      Y:=Serpent1[J]+((S+Off[M]) Mod DVSegs)*3;
+      DVCX[Cnt,M]:=X*2; DVCY[Cnt,M]:=Y*2;
+     End;
+     Else Begin
+      I:=(S+Off[M]) Mod DVSegs;
+      K:=J; If (M=1) Or (M=2) Then Inc(K,3);
+      X:=LStartShuffled[M]+K Div 6;
+      Y:=Serpent2[K]+I*6;
+      If X>21 Then Y:=Y*2-I*6;
+      DVCX[Cnt,M]:=X*4; DVCY[Cnt,M]:=Y;
+     End;
+    End;
+   End;
+   DVCOff[Cnt]:=Pp; Inc(Cnt);
+   Inc(Pp,5);
+  End;
+ End;
+ DVNChunks:=Cnt;
+End;
+Function DVWrap(V: Int64): SmallInt;
+Begin
+ V:=V And $FFFF; If V>=32768 Then V:=V-65536; DVWrap:=V;
+End;
+Function DVW32(V: Int64): Int64;
+Begin
+ V:=V And $FFFFFFFF; If V>=2147483648 Then V:=V-4294967296; DVW32:=V;
+End;
+Procedure DVDecodeAC(B: PEABuffer; Len: LongInt; Var Idx: LongInt; Size:
+ LongInt; Var M: TDVMB; Var Blk: TAMVBlock);
+Var W: Int64; X,Re,Ln,Pos,Rn,Lv: LongInt;
+Begin
+ Re:=Idx; Pos:=M.Pos;
+ W:=DVPeek32(B,Len,Re);
+ If M.PCnt>0 Then Begin
+  W:=((W Shr M.PCnt) Or M.PBuf) And $FFFFFFFF; Dec(Re,M.PCnt); M.PCnt:=0;
+ End;
+ While True Do Begin
+  X:=W Shr 16; Ln:=DVTLen[X];
+  If Re+Ln>Size Then Begin
+   M.PCnt:=Size-Re; M.PBuf:=W And (Not ($FFFFFFFF Shr M.PCnt)) And $FFFFFFFF;
+    Re:=Size; Break;
+  End;
+  Inc(Re,Ln);
+  Inc(Pos,DVTRun[X]);
+  If Pos>=64 Then Break;
+  Lv:=DVTLev[X];
+  Lv:=AVSar(Int64(Lv)*DVFact[M.Fo+Pos]+8192,14);
+  If M.Sc=0 Then Blk[AMVZig[Pos]]:=DVWrap(Lv) Else Blk[DVZig248[Pos]]:=DVWrap(
+   Lv);
+  W:=DVPeek32(B,Len,Re);
+ End;
+ Idx:=Re; M.Pos:=Pos;
+End;
+Procedure DVIdctRow(Var Blk: TAMVBlock; I: LongInt);
+Const W1=22725; W2=21407; W3=19266; W4=16383; W5=12873; W6=8867; W7=4520;
+Var K: Integer; A0,A1,A2,A3,B0,B1,B2,B3,V: Int64; R: Array[0..7] Of Int64;
+Begin
+ For K:=0 To 7 Do R[K]:=Blk[I*8+K];
+ If (R[1] Or R[2] Or R[3] Or R[4] Or R[5] Or R[6] Or R[7])=0 Then Begin
+  V:=SmallInt(R[0]*8); For K:=0 To 7 Do Blk[I*8+K]:=V;
+ End Else Begin
+  A0:=W4*R[0]+(1 Shl 10); A1:=A0; A2:=A0; A3:=A0;
+  Inc(A0,W2*R[2]); Inc(A1,W6*R[2]); Dec(A2,W6*R[2]); Dec(A3,W2*R[2]);
+  B0:=W1*R[1]+W3*R[3]; B1:=W3*R[1]-W7*R[3]; B2:=W5*R[1]-W1*R[3]; B3:=W7*R[1]-W5*
+   R[3];
+  If (R[4] Or R[5] Or R[6] Or R[7])<>0 Then Begin
+   Inc(A0,W4*R[4]+W6*R[6]); Inc(A1,-W4*R[4]-W2*R[6]); Inc(A2,-W4*R[4]+W2*R[6]);
+    Inc(A3,W4*R[4]-W6*R[6]);
+   Inc(B0,W5*R[5]+W7*R[7]); Inc(B1,-W1*R[5]-W5*R[7]); Inc(B2,W7*R[5]+W3*R[7]);
+    Inc(B3,W3*R[5]-W1*R[7]);
+  End;
+  Blk[I*8+0]:=DVWrap(AVSar(DVW32(A0+B0),11)); Blk[I*8+7]:=DVWrap(AVSar(DVW32(A0-
+   B0),11));
+  Blk[I*8+1]:=DVWrap(AVSar(DVW32(A1+B1),11)); Blk[I*8+6]:=DVWrap(AVSar(DVW32(A1-
+   B1),11));
+  Blk[I*8+2]:=DVWrap(AVSar(DVW32(A2+B2),11)); Blk[I*8+5]:=DVWrap(AVSar(DVW32(A2-
+   B2),11));
+  Blk[I*8+3]:=DVWrap(AVSar(DVW32(A3+B3),11)); Blk[I*8+4]:=DVWrap(AVSar(DVW32(A3-
+   B3),11));
+ End;
+End;
+Function DVClip(V: Int64): LongInt;
+Begin If V<0 Then DVClip:=0 Else If V>255 Then DVClip:=255 Else DVClip:=V; End;
+Procedure DVIdct4Col(Dest: PEABuffer; Stride: LongInt; Var Blk: TAMVBlock; Base:
+ LongInt);
+Const C1=2676; C2=1108;
+Var A0,A1,A2,A3,Z0,Z1,Z2,Z3: Int64;
+Begin
+ A0:=Blk[Base]; A1:=Blk[Base+16]; A2:=Blk[Base+32]; A3:=Blk[Base+48];
+ Z0:=(A0+A2)*2048+(1 Shl 16); Z2:=(A0-A2)*2048+(1 Shl 16);
+ Z1:=A1*C1+A3*C2; Z3:=A1*C2-A3*C1;
+ Dest^[0]:=DVClip(AVSar(Z0+Z1,17));
+ Dest^[Stride]:=DVClip(AVSar(Z2+Z3,17));
+ Dest^[2*Stride]:=DVClip(AVSar(Z2-Z3,17));
+ Dest^[3*Stride]:=DVClip(AVSar(Z0-Z1,17));
+End;
+Procedure DVIdct248Put(Dest: PEABuffer; Stride: LongInt; Var Blk: TAMVBlock);
+Var I,K,A0,A1: LongInt;
+Begin
+ For I:=0 To 3 Do For K:=0 To 7 Do Begin
+  A0:=Blk[I*16+K]; A1:=Blk[I*16+8+K];
+  Blk[I*16+K]:=DVWrap(A0+A1); Blk[I*16+8+K]:=DVWrap(A0-A1);
+ End;
+ For I:=0 To 7 Do DVIdctRow(Blk,I);
+ For I:=0 To 7 Do Begin
+  DVIdct4Col(PEABuffer(@Dest^[I]),2*Stride,Blk,I);
+  DVIdct4Col(PEABuffer(@Dest^[Stride+I]),2*Stride,Blk,8+I);
+ End;
+End;
+Procedure DVIdct88Put(Dest: PEABuffer; Stride: LongInt; Var Blk: TAMVBlock);
+Const W1=22725; W2=21407; W3=19266; W4=16383; W5=12873; W6=8867; W7=4520;
+Var I,K: Integer; A0,A1,A2,A3,B0,B1,B2,B3: Int64; R: Array[0..7] Of Int64;
+Procedure Put(Col,Row: Integer; X: Int64);
+Begin
+ Dest^[Row*Stride+Col]:=DVClip(AVSar(DVW32(X),20));
+End;
+Begin
+ For I:=0 To 7 Do DVIdctRow(Blk,I);
+ For I:=0 To 7 Do Begin
+  For K:=0 To 7 Do R[K]:=Blk[K*8+I];
+  A0:=W4*(R[0]+32); A1:=A0; A2:=A0; A3:=A0;
+  Inc(A0,W2*R[2]); Inc(A1,W6*R[2]); Dec(A2,W6*R[2]); Dec(A3,W2*R[2]);
+  B0:=W1*R[1]+W3*R[3]; B1:=W3*R[1]-W7*R[3]; B2:=W5*R[1]-W1*R[3]; B3:=W7*R[1]-W5*
+   R[3];
+  If R[4]<>0 Then Begin Inc(A0,W4*R[4]); Dec(A1,W4*R[4]); Dec(A2,W4*R[4]); Inc(
+   A3,W4*R[4]); End;
+  If R[5]<>0 Then Begin Inc(B0,W5*R[5]); Dec(B1,W1*R[5]); Inc(B2,W7*R[5]); Inc(
+   B3,W3*R[5]); End;
+  If R[6]<>0 Then Begin Inc(A0,W6*R[6]); Dec(A1,W2*R[6]); Inc(A2,W2*R[6]); Dec(
+   A3,W6*R[6]); End;
+  If R[7]<>0 Then Begin Inc(B0,W7*R[7]); Dec(B1,W5*R[7]); Inc(B2,W3*R[7]); Dec(
+   B3,W1*R[7]); End;
+  Put(I,0,A0+B0); Put(I,1,A1+B1); Put(I,2,A2+B2); Put(I,3,A3+B3);
+  Put(I,4,A3-B3); Put(I,5,A2-B2); Put(I,6,A1-B1); Put(I,7,A0-B0);
+ End;
+End;
+Procedure DVIdctPut(Md: LongInt; Dest: PEABuffer; Stride: LongInt; Var Blk:
+ TAMVBlock);
+Begin
+ If Md<>0 Then DVIdct248Put(Dest,Stride,Blk) Else DVIdct88Put(Dest,Stride,Blk);
+End;
+Procedure DVBitCopy(Dst: PEABuffer; Var Cnt: LongInt; Src: PEABuffer; SrcLen,
+ From,Upto: LongInt);
+Var I,Bt: LongInt;
+Begin
+ For I:=From To Upto-1 Do Begin
+  Bt:=(EAByte(Src,SrcLen,I Shr 3) Shr (7-(I And 7))) And 1;
+  If Bt<>0 Then Dst^[Cnt Shr 3]:=Dst^[Cnt Shr 3] Or (128 Shr (Cnt And 7));
+  Inc(Cnt);
+ End;
+End;
+Const
+ DVBlockBits: Array[0..5] Of Word=(112,112,112,112,80,80);
+ DVQOff: Array[0..3] Of Byte=(6,3,0,1);
+Procedure DVDecodeSegment(C: LongInt);
+Var
+ SB: Array[0..29] Of TAMVBlock; MB: Array[0..29] Of TDVMB;
+ MbBuf: Array[0..127] Of Byte; VsBuf: Array[0..447] Of Byte;
+ MbCnt,VsCnt,Idx,Base,Cur,Quant,Dc,Mode,Cls,Sta,Ls,J,Mi,K,X,Y,Yst,Cof,Jp,Yy,Xx:
+  LongInt;
+ MbDam: Array[0..4] Of Boolean; VsDam,Retried,Fin: Boolean;
+ Mx,My: LongInt; Yp,Cp: PEABuffer; Tmp: Array[0..63] Of Byte; Chs: LongInt; Ci:
+  LongInt;
+Begin
+ VsDam:=False; Retried:=False; FillChar(MbDam,SizeOf(MbDam),0); Sta:=0;
+ While True Do Begin
+  FillChar(SB,SizeOf(SB),0);
+  Cur:=DVCOff[C]*80;
+  FillChar(VsBuf,SizeOf(VsBuf),0); VsCnt:=0;
+  For Mi:=0 To 4 Do Begin
+   Quant:=EAByte(DVBuf,DVBufLen,Cur+3) And 15;
+   If (EAByte(DVBuf,DVBufLen,Cur+3) Shr 4)=$E Then VsDam:=True;
+   If Mi=0 Then Sta:=EAByte(DVBuf,DVBufLen,Cur+3) Shr 4
+   Else If Sta<>(EAByte(DVBuf,DVBufLen,Cur+3) Shr 4) Then VsDam:=True;
+   Inc(Cur,4);
+   FillChar(MbBuf,SizeOf(MbBuf),0); MbCnt:=0;
+   For J:=0 To 5 Do Begin
+    Ls:=DVBlockBits[J]; Base:=Cur;
+    Dc:=(EAByte(DVBuf,DVBufLen,Base) Shl 1) Or (EAByte(DVBuf,DVBufLen,Base+1)
+     Shr 7);
+    If Dc>=256 Then Dec(Dc,512);
+    Mode:=(EAByte(DVBuf,DVBufLen,Base+1) Shr 6) And 1;
+    Cls:=(EAByte(DVBuf,DVBufLen,Base+1) Shr 4) And 3;
+    With MB[Mi*6+J] Do Begin
+     Md:=Mode; Sc:=Mode;
+     If Cls=3 Then Fo:=2816 Else Fo:=0;
+     Fo:=Fo+Mode*1408+(Quant+DVQOff[Cls])*64;
+     Pos:=0; PCnt:=0; PBuf:=0;
+    End;
+    SB[Mi*6+J][0]:=DVWrap(Dc*4+1024);
+    Inc(Cur,Ls Shr 3);
+    Idx:=12;
+    DVDecodeAC(PEABuffer(@DVBuf^[Base]),DVBufLen-Base,Idx,Ls,MB[Mi*6+J],SB[Mi*6+
+     J]);
+    If MB[Mi*6+J].Pos>=64 Then DVBitCopy(PEABuffer(@MbBuf),MbCnt,PEABuffer(
+     @DVBuf^[Base]),DVBufLen-Base,Idx,Ls);
+    If (MB[Mi*6+J].Pos>=64) And (MB[Mi*6+J].Pos<127) Then Begin VsDam:=True;
+     MbDam[Mi]:=True; End;
+   End;
+   If MbDam[Mi] Then Continue;
+   { passe 2 }
+   Idx:=0; Fin:=True;
+   For J:=0 To 5 Do Begin
+    If (MB[Mi*6+J].Pos<64) And (MbCnt-Idx>0) Then Begin
+     DVDecodeAC(PEABuffer(@MbBuf),SizeOf(MbBuf),Idx,MbCnt,MB[Mi*6+J],SB[Mi*6+
+      J]);
+     If MB[Mi*6+J].Pos<64 Then Begin Fin:=False; Break; End;
+     If MB[Mi*6+J].Pos<127 Then Begin VsDam:=True; MbDam[Mi]:=True; End;
+    End;
+   End;
+   If Fin Then DVBitCopy(PEABuffer(@VsBuf),VsCnt,PEABuffer(@MbBuf),SizeOf(
+    MbBuf),Idx,MbCnt);
+  End;
+  { passe 3 }
+  Idx:=0;
+  For Mi:=0 To 4 Do For J:=0 To 5 Do Begin
+   If (MB[Mi*6+J].Pos<64) And (VsCnt-Idx>0) And Not VsDam Then
+    DVDecodeAC(PEABuffer(@VsBuf),SizeOf(VsBuf),Idx,VsCnt,MB[Mi*6+J],SB[Mi*6+J]);
+   If (MB[Mi*6+J].Pos>=64) And (MB[Mi*6+J].Pos<127) Then VsDam:=True;
+  End;
+  If VsDam And Not Retried Then Begin Retried:=True; Continue; End;
+  Break;
+ End;
+ { IDCT et placement }
+ For Mi:=0 To 4 Do Begin
+  Mx:=DVCX[C,Mi]; My:=DVCY[C,Mi];
+  K:=Mi*6;
+  If (DVPix=1) Or ((DVPix=0) And (Mx>=88)) Then Yst:=DVW*8 Else Yst:=16;
+  Yp:=PEABuffer(@DVYP^[(My*DVW+Mx)*8]);
+  DVIdctPut(MB[K].Md,Yp,DVW,SB[K]);
+  If DVStype=4 Then DVIdctPut(MB[K+2].Md,PEABuffer(@Yp^[8]),DVW,SB[K+2])
+  Else Begin
+   DVIdctPut(MB[K+1].Md,PEABuffer(@Yp^[8]),DVW,SB[K+1]);
+   DVIdctPut(MB[K+2].Md,PEABuffer(@Yp^[Yst]),DVW,SB[K+2]);
+   DVIdctPut(MB[K+3].Md,PEABuffer(@Yp^[8+Yst]),DVW,SB[K+3]);
+  End;
+  Inc(K,4);
+  If DVPix=0 Then Cof:=(My*DVCW*8)+(Mx Shr 2)*8;
+  If DVPix=1 Then Cof:=((My Shr 1)*DVCW*8)+(Mx Shr 1)*8;
+  If DVPix=2 Then Cof:=(My*DVCW*8)+(Mx Shr 1)*8;
+  For Jp:=2 DownTo 1 Do Begin
+   If Jp=2 Then Cp:=PEABuffer(@DVVP^[Cof]) Else Cp:=PEABuffer(@DVUP^[Cof]);
+   If (DVPix=0) And (Mx>=88) Then Begin
+    DVIdctPut(MB[K].Md,PEABuffer(@Tmp),8,SB[K]);
+    For Yy:=0 To 7 Do Begin
+     For Xx:=0 To 3 Do Begin
+      Cp^[Yy*DVCW+Xx]:=Tmp[Yy*8+Xx];
+      Cp^[(Yy+8)*DVCW+Xx]:=Tmp[Yy*8+4+Xx];
+     End;
+    End;
+   End Else DVIdctPut(MB[K].Md,Cp,DVCW,SB[K]);
+   Inc(K);
+  End;
+ End;
+End;
+Var
+ DVOut: PEABuffer;
+ DVOutSize: LongInt;
+Function DVDecodeFrame(B: PEABuffer; Len: LongInt): Boolean;
+Var P,Apt,Is169,Vsc,Q,I: LongInt;
+Begin
+ DVDecodeFrame:=False;
+ P:=DVFindProfile(B,Len);
+ If P=-2 Then Fail(
+  'dvvideo: profils DV100 / DVCPRO HD (1080i, 720p) non pris en charge (SD 25 '+
+  'et 50 Mbit/s seulement).');
+ If P<0 Then Exit;
+ DVInitTables;
+ If P<>DVProf Then Begin
+  DVSetupProfile(P);
+  If DVOut<>Nil Then FreeMem(DVOut,DVOutSize);
+  DVOutSize:=DVW*DVH+2*DVCW*DVCH; GetMem(DVOut,DVOutSize+64); FillChar(DVOut^,
+   DVOutSize+64,0);
+  DVYP:=DVOut; DVUP:=PEABuffer(@DVOut^[DVW*DVH]); DVVP:=PEABuffer(@DVOut^[DVW*
+   DVH+DVCW*DVCH]);
+ End;
+ If Len<DVFrameSize Then Exit;
+ DVBuf:=B; DVBufLen:=DVFrameSize;
+ Vsc:=80*5+48+5; DVIl:='p'; DVSarN:=0; DVSarD:=0;
+ If B^[Vsc]=$61 Then Begin
+  Apt:=B^[4] And 7; Q:=B^[Vsc+2] And 7;
+  Is169:=0; If (Q=2) Or ((Apt=0) And (Q=7)) Then Is169:=1;
+  If (P=0) Or (P=3) Then Begin If Is169=1 Then Begin DVSarN:=32; DVSarD:=27; End
+   Else Begin DVSarN:=8; DVSarD:=9; End; End
+  Else Begin If Is169=1 Then Begin DVSarN:=64; DVSarD:=45; End Else Begin
+   DVSarN:=16; DVSarD:=15; End; End;
+  If (B^[Vsc+3] And $10)<>0 Then Begin If (B^[Vsc+3] And $40)=0 Then DVIl:='t'
+   Else DVIl:='b'; End;
+ End;
+ For I:=0 To DVNChunks-1 Do DVDecodeSegment(I);
+ DVDecodeFrame:=True;
+End;
+Procedure DecodeDV(Const Source,Target: String; Mode: LongInt; IsAvi: Boolean);
+Var
+ F: PEABuffer; Size,Pos,Sz,Cnt,MoviePos,Rate,Scale,RN,RD: LongInt; Started,Vids,
+  HaveFmt,InMovie: Boolean; Tag: String[4]; Fcc: String[4];
+Function T4(At: LongInt): String;
+Var S4: String[4]; Z: Integer;
+Begin S4:=''; For Z:=0 To 3 Do S4:=S4+Chr(EAByte(F,Size,At+Z)); T4:=S4; End;
+Procedure Frame(P: PEABuffer; L: LongInt);
+Begin
+ If DVDecodeFrame(P,L) Then Begin
+  If Not Started Then Begin
+   If Not IsAvi Then Begin RN:=DVFpsN; RD:=DVFpsD; End;
+   NVBegin(Mode,Target,DVW,DVH,7,RN,RD);
+   NVSubY:=0; If DVPix=0 Then NVSubX:=2 Else NVSubX:=1; If DVPix=1 Then NVSubY:=
+    1;
+   NVCW:=DVCW; NVCH:=DVCH;
+   If DVPix=0 Then NVYTag:='C411 XYSCSS=411' Else If DVPix=1 Then NVYTag:=
+    'C420paldv XYSCSS=420PALDV' Else NVYTag:='C422 XYSCSS=422';
+   NVIl:=DVIl; NVSarN:=DVSarN; NVSarD:=DVSarD; NVBT709:=False;
+   If IsAvi And (NVVN>0) And (NVVD>0) Then NVAviSar(DVW,DVH);
+   Started:=True;
+  End;
+  NVEmit(DVOut);
+ End Else If Started Then NVRepeat;
+End;
+Begin
+ NVLoad(Source,F,Size);
+ Started:=False; DVProf:=-1; DVOut:=Nil; NVNVid:=0; NVVN:=0; NVVD:=0; RN:=25;
+  RD:=1;
+ If IsAvi Then Begin
+  If (T4(0)<>'RIFF') Or (T4(8)<>'AVI ') Then Fail(
+   'dvvideo: signature RIFF/AVI requise.');
+  Pos:=12; Vids:=False; HaveFmt:=False; InMovie:=False; Cnt:=0; Rate:=25;
+   Scale:=1; MoviePos:=0;
+  While (Pos+8<=Size) And Not InMovie And (Cnt<500) Do Begin
+   Tag:=T4(Pos); Sz:=NVRL32(F,Size,Pos+4); Inc(Cnt);
+   If Sz<0 Then Break;
+   If Tag='LIST' Then Begin
+    If T4(Pos+8)='movi' Then Begin InMovie:=True; MoviePos:=Pos+12; End;
+    Inc(Pos,12);
+   End Else Begin
+    If (Tag='strh') And Not HaveFmt Then Begin
+     Vids:=T4(Pos+8)='vids';
+     If Vids Then Begin Scale:=NVRL32(F,Size,Pos+8+20); Rate:=NVRL32(F,Size,Pos+
+      8+24); End;
+    End Else If (Tag='strf') And Vids And Not HaveFmt Then Begin
+     Fcc:=T4(Pos+8+16); HaveFmt:=True;
+    End;
+    If Tag='vprp' Then Begin NVVD:=NVRL16(F,Size,Pos+8+20); NVVN:=NVRL16(F,Size,
+     Pos+8+22); End;
+    Inc(Pos,8+Sz+(Sz And 1));
+   End;
+  End;
+  If Not InMovie Or Not HaveFmt Then Fail(
+   'dvvideo: flux video AVI introuvable.');
+  If (Rate<=0) Or (Scale<=0) Then Begin Rate:=25; Scale:=1; End;
+  RN:=Rate; RD:=Scale; NVGcd(RN,RD);
+  Pos:=MoviePos;
+  While Pos+8<=Size Do Begin
+   Tag:=T4(Pos); Sz:=NVRL32(F,Size,Pos+4);
+   If Sz<0 Then Break;
+   If Tag='LIST' Then Begin Inc(Pos,12); Continue; End;
+   If Pos+8+Sz>Size Then Sz:=Size-Pos-8;
+   If (Tag[1]='0') And (Tag[2]='0') And ((Tag[3]='d') Or (Tag[3]='w')) And ((
+    Tag[4]='c') Or (Tag[4]='b')) Then Begin
+    Frame(PEABuffer(@F^[Pos+8]),Sz);
+    If NVDone Then Break;
+   End;
+   Inc(Pos,8+Sz+(Sz And 1));
+  End;
+ End Else Begin
+  Pos:=0;
+  If DVFindProfile(F,Size)=-2 Then Fail(
+   'dvvideo: profils DV100 / DVCPRO HD (1080i, 720p) non pris en charge (SD 25'+
+   ' et 50 Mbit/s seulement).');
+  If DVFindProfile(F,Size)<0 Then Fail('dvvideo: profil DV introuvable.');
+  DVSetupProfile(DVFindProfile(F,Size)); Sz:=DVFrameSize; DVProf:=-1;
+  While Pos+Sz<=Size Do Begin
+   Frame(PEABuffer(@F^[Pos]),Sz);
+   If NVDone Then Break;
+   Inc(Pos,Sz);
+  End;
+ End;
+ If DVOut<>Nil Then FreeMem(DVOut,DVOutSize);
+ FreeMem(F,Size+64);
+ NVFinish('dvvideo');
+End;
+Const
+ LJBitsDcL: Array[1..16] Of Byte=(0,1,5,1,1,1,1,1,1,0,0,0,0,0,0,0);
+ LJBitsDcC: Array[1..16] Of Byte=(0,3,1,1,1,1,1,1,1,1,1,0,0,0,0,0);
+ LJBitsAcL: Array[1..16] Of Byte=(0,2,1,3,3,2,4,3,5,5,4,4,0,0,1,125);
+ LJBitsAcC: Array[1..16] Of Byte=(0,2,1,2,4,4,3,4,7,5,4,4,0,1,2,119);
+ LJValAcL: Array[0..161] Of Byte=(
+  $01,$02,$03,$00,$04,$11,$05,$12,$21,$31,$41,$06,$13,$51,$61,$07,$22,$71,$14,
+   $32,$81,$91,$a1,$08,
+  $23,$42,$b1,$c1,$15,$52,$d1,$f0,$24,$33,$62,$72,$82,$09,$0a,$16,$17,$18,$19,
+   $1a,$25,$26,$27,$28,
+  $29,$2a,$34,$35,$36,$37,$38,$39,$3a,$43,$44,$45,$46,$47,$48,$49,$4a,$53,$54,
+   $55,$56,$57,$58,$59,
+  $5a,$63,$64,$65,$66,$67,$68,$69,$6a,$73,$74,$75,$76,$77,$78,$79,$7a,$83,$84,
+   $85,$86,$87,$88,$89,
+  $8a,$92,$93,$94,$95,$96,$97,$98,$99,$9a,$a2,$a3,$a4,$a5,$a6,$a7,$a8,$a9,$aa,
+   $b2,$b3,$b4,$b5,$b6,
+  $b7,$b8,$b9,$ba,$c2,$c3,$c4,$c5,$c6,$c7,$c8,$c9,$ca,$d2,$d3,$d4,$d5,$d6,$d7,
+   $d8,$d9,$da,$e1,$e2,
+  $e3,$e4,$e5,$e6,$e7,$e8,$e9,$ea,$f1,$f2,$f3,$f4,$f5,$f6,$f7,$f8,$f9,$fa);
+ LJValAcC: Array[0..161] Of Byte=(
+  $00,$01,$02,$03,$11,$04,$05,$21,$31,$06,$12,$41,$51,$07,$61,$71,$13,$22,$32,
+   $81,$08,$14,$42,$91,
+  $a1,$b1,$c1,$09,$23,$33,$52,$f0,$15,$62,$72,$d1,$0a,$16,$24,$34,$e1,$25,$f1,
+   $17,$18,$19,$1a,$26,
+  $27,$28,$29,$2a,$35,$36,$37,$38,$39,$3a,$43,$44,$45,$46,$47,$48,$49,$4a,$53,
+   $54,$55,$56,$57,$58,
+  $59,$5a,$63,$64,$65,$66,$67,$68,$69,$6a,$73,$74,$75,$76,$77,$78,$79,$7a,$82,
+   $83,$84,$85,$86,$87,
+  $88,$89,$8a,$92,$93,$94,$95,$96,$97,$98,$99,$9a,$a2,$a3,$a4,$a5,$a6,$a7,$a8,
+   $a9,$aa,$b2,$b3,$b4,
+  $b5,$b6,$b7,$b8,$b9,$ba,$c2,$c3,$c4,$c5,$c6,$c7,$c8,$c9,$ca,$d2,$d3,$d4,$d5,
+   $d6,$d7,$d8,$d9,$da,
+  $e2,$e3,$e4,$e5,$e6,$e7,$e8,$e9,$ea,$f2,$f3,$f4,$f5,$f6,$f7,$f8,$f9,$fa);
+Type
+ MJSArr=Array[0..1073741822] Of SmallInt;
+ PMJS=^MJSArr;
+Var
+ MJQuant: Array[0..3,0..63] Of LongInt;
+ MJSym: Array[0..2,0..3] Of PMJS;
+ MJLen: Array[0..2,0..3] Of PEABuffer;
+ MJW,MJH,MJBitsPer,MJNc,MJHmax,MJVmax,MJFmt: LongInt;
+ MJId,MJHc,MJVc,MJQi: Array[0..3] Of LongInt;
+ MJPl: Array[0..3] Of PEABuffer;
+ MJPStr,MJPRows,MJCw,MJCh: Array[0..3] Of
+  LongInt;
+ MJAlloc: Boolean;
+ MJProg,MJInterlaced,MJBottom,MJPolarity,MJFirst,MJGot,MJFull,MJItu601: Boolean;
+ MJCurScan,MJRestart,MJRestartCount,MJAdobe,MJOrigH,MJSarN,MJSarD,MJTag:
+  LongInt;
+ MJHaveJfif: Boolean;
+ MJBuf: PEABuffer;
+ MJPos,MJEnd: LongInt;
+ MJScN,MJScOrder: LongInt;
+ MJScC,MJScDc,MJScAc,MJScH,MJScV,MJScNb,MJScQ: Array[
+  0..3] Of LongInt;
+ MJMbW,MJMbH: LongInt;
+ MJLastDc: Array[0..3] Of LongInt;
+ MJBlk: Array[0..3] Of PMJS;
+ MJBlkStr: Array[0..3] Of LongInt;
+ MJNnz: Array[
+  0..3] Of PEABuffer;
+ MJBlkCnt: Array[0..3] Of LongInt;
+ MJSkipSod: LongInt;
+ MJThp: Boolean;
+Const
+ MJZ: Array[0..63] Of Byte=(0,1,8,16,9,2,3,10,17,24,32,25,18,11,4,5,12,19,26,33,
+  40,48,41,34,27,20,13,6,7,14,21,28,35,42,49,56,57,50,43,36,29,22,15,23,30,37,
+  44,51,58,59,52,45,38,31,39,46,53,60,61,54,47,55,62,63);
+Function MJLeft: LongInt; Begin MJLeft:=MJEnd-MJPos; End;
+Function MJPeek(N: LongInt): LongInt;
+Var V,I,B,Q: LongInt;
+Begin
+ V:=0; Q:=MJPos;
+ For I:=1 To N Do Begin
+  If Q<MJEnd Then B:=(MJBuf^[Q Shr 3] Shr (7-(Q And 7))) And 1 Else B:=0;
+  V:=V*2+B; Inc(Q);
+ End;
+ MJPeek:=V;
+End;
+Function MJGet(N: LongInt): LongInt;
+Begin MJGet:=MJPeek(N); Inc(MJPos,N); End;
+Function MJXbits(N: LongInt): LongInt;
+Var V: LongInt;
+Begin
+ V:=MJGet(N);
+ If V<(1 Shl (N-1)) Then V:=V-(1 Shl N)+1;
+ MJXbits:=V;
+End;
+Function MJSym1(Cls,Idx: LongInt; Var Sym: LongInt): Boolean;
+Var P16: LongInt;
+Begin
+ P16:=MJPeek(16);
+ If (MJLen[Cls,Idx]=Nil) Or (MJLen[Cls,Idx]^[P16]=0) Then Begin MJSym1:=False;
+  Exit; End;
+ Sym:=MJSym[Cls,Idx]^[P16]; Inc(MJPos,MJLen[Cls,Idx]^[P16]); MJSym1:=True;
+End;
+Procedure MJBuildVlc(Cls,Idx: LongInt; Const Bits: Array Of Byte; Const Vals:
+ Array Of Byte; IsAc: Boolean);
+Var L,K,N,Code,Total,V,Base,Cnt,S: LongInt; Sym: Array[0..255] Of LongInt; Ln:
+ Array[0..255] Of LongInt;
+Begin
+ If MJLen[Cls,Idx]=Nil Then Begin GetMem(MJLen[Cls,Idx],65536); GetMem(MJSym[
+  Cls,Idx],131072); End;
+ FillChar(MJLen[Cls,Idx]^,65536,0);
+ Total:=0;
+ For L:=1 To 16 Do Begin
+  For K:=1 To Bits[L-1] Do Begin
+   If Total>255 Then Exit;
+   V:=Vals[Total]; S:=V;
+   If IsAc Then Begin S:=V+16; If V=0 Then S:=4096; End;
+   Sym[Total]:=S; Ln[Total]:=L; Inc(Total);
+  End;
+ End;
+ Code:=0; N:=0;
+ For L:=1 To 16 Do Begin
+  For K:=1 To Bits[L-1] Do Begin
+   If N>=Total Then Break;
+   Base:=Code Shl (16-L); Cnt:=1 Shl (16-L);
+   If Base+Cnt<=65536 Then
+    For V:=0 To Cnt-1 Do Begin MJLen[Cls,Idx]^[Base+V]:=L; MJSym[Cls,Idx]^[Base+
+     V]:=Sym[N]; End;
+   Inc(Code); Inc(N);
+  End;
+  Code:=Code Shl 1;
+ End;
+End;
+Procedure MJDefaultTables;
+Var B: Array[0..15] Of Byte; I: LongInt;
+ Procedure Mk(Cls,Idx: LongInt; Const Bt: Array Of Byte; Const Vl: Array Of
+  Byte; Ac: Boolean);
+ Begin MJBuildVlc(Cls,Idx,Bt,Vl,Ac); End;
+Const DcVals: Array[0..11] Of Byte=(0,1,2,3,4,5,6,7,8,9,10,11);
+Begin
+ For I:=0 To 15 Do B[I]:=LJBitsDcL[I+1]; Mk(0,0,B,DcVals,False);
+ For I:=0 To 15 Do B[I]:=LJBitsDcC[I+1]; Mk(0,1,B,DcVals,False);
+ For I:=0 To 15 Do B[I]:=LJBitsAcL[I+1]; Mk(1,0,B,LJValAcL,True); Mk(2,0,B,
+  LJValAcL,False);
+ For I:=0 To 15 Do B[I]:=LJBitsAcC[I+1]; Mk(1,1,B,LJValAcC,True); Mk(2,1,B,
+  LJValAcC,False);
+End;
+Function MJDecDc(DcIdx: LongInt; Var Val: LongInt): Boolean;
+Var Code: LongInt;
+Begin
+ MJDecDc:=False;
+ If Not MJSym1(0,DcIdx,Code) Then Exit;
+ If (Code<0) Or (Code>16) Then Exit;
+ If Code<>0 Then Val:=MJXbits(Code) Else Val:=0;
+ MJDecDc:=True;
+End;
+Function MJClip16(V: LongInt): LongInt;
+Begin If V>32767 Then MJClip16:=32767 Else If V<-32768 Then MJClip16:=-32768
+ Else MJClip16:=V; End;
+Function MJBlock(Var Blk: TAMVBlock; Comp,DcIdx,AcIdx,Qi: LongInt): Boolean;
+Var Val,I,J,Code,Level,Sz: LongInt;
+Begin
+ MJBlock:=False;
+ If Not MJDecDc(DcIdx,Val) Then Exit;
+ Val:=MJClip16(Int64(Val)*MJQuant[Qi,0]+MJLastDc[Comp]);
+ MJLastDc[Comp]:=Val; Blk[0]:=Val;
+ I:=0;
+ Repeat
+  If Not MJSym1(1,AcIdx,Code) Then Exit;
+  Inc(I,Code Shr 4);
+  Code:=Code And 15;
+  If Code<>0 Then Begin
+   Level:=MJXbits(Code);
+   If I>63 Then Exit;
+   J:=MJZ[I];
+   Blk[J]:=Level*MJQuant[Qi,I];
+  End;
+ Until I>=63;
+ MJBlock:=True;
+End;
+Procedure MJClear(Var Blk: TAMVBlock); Begin FillChar(Blk,SizeOf(Blk),0); End;
+Function MJRstn: Boolean;
+Var I,Pos0: LongInt;
+Begin
+ MJRstn:=False;
+ If MJRestart<>0 Then Begin
+  Dec(MJRestartCount);
+  If MJThp And (MJRestartCount=0) Then Begin
+   MJPos:=(MJPos+7) And Not 7;
+   For I:=0 To MJScN-1 Do MJLastDc[I]:=4 Shl MJBitsPer;
+  End;
+  I:=8+((-MJPos) And 7);
+  If MJRestartCount=0 Then Begin
+   If (MJPeek(I)=(1 Shl I)-1) Or (MJPeek(I)=$FF) Then Begin
+    Pos0:=MJPos;
+    MJPos:=(MJPos+7) And Not 7;
+    While (MJLeft>=8) And (MJPeek(8)=$FF) Do Inc(MJPos,8);
+    If (MJLeft>=8) And ((MJGet(8) And $F8)=$D0) Then Begin
+     For I:=0 To MJScN-1 Do MJLastDc[I]:=4 Shl MJBitsPer;
+     MJRstn:=True;
+    End Else MJPos:=Pos0;
+   End;
+  End;
+ End;
+End;
+Function MJScan(Ah,Al: LongInt): Boolean;
+Var Mx,My,I,J,N,C,H,V,X,Y,Off,Stride,Cwid,Chei,BIdx,Dcv: LongInt; Blk:
+ TAMVBlock; P: PMJS; Q: LongInt;
+Begin
+ MJScan:=False;
+ MJRestartCount:=0;
+ For My:=0 To MJMbH-1 Do For Mx:=0 To MJMbW-1 Do Begin
+  If (MJRestart<>0) And (MJRestartCount=0) Then MJRestartCount:=MJRestart;
+  If MJLeft<0 Then Exit;
+  For I:=0 To MJScN-1 Do Begin
+   N:=MJScNb[I]; C:=MJScC[I]; H:=MJScH[I]; V:=MJScV[I]; X:=0; Y:=0; Q:=MJScQ[I];
+   For J:=0 To N-1 Do Begin
+    Stride:=MJPStr[C] Shl Ord(MJInterlaced);
+    Off:=Stride*(V*My+Y)*8+(H*Mx+X)*8;
+    If MJInterlaced And MJBottom Then Inc(Off,Stride Shr 1);
+    If C=0 Then Begin Cwid:=MJW; Chei:=MJH; End Else Begin Cwid:=MJCw[C]; Chei:=
+     MJCh[C]; End;
+    If Not MJProg Then Begin
+     MJClear(Blk);
+     If Not MJBlock(Blk,I,MJScDc[I],MJScAc[I],Q) Then Exit;
+     If (8*(H*Mx+X)<Cwid) And (8*(V*My+Y)<Chei) Then AVIdctPut(Blk,@MJPl[C]^[
+      Off],Stride);
+    End Else Begin
+     BIdx:=MJBlkStr[C]*(V*My+Y)+(H*Mx+X);
+     P:=PMJS(@MJBlk[C]^[BIdx*64]);
+     If Ah<>0 Then Begin
+      P^[0]:=P^[0]+(MJGet(1)*MJQuant[Q,0] Shl Al);
+     End Else Begin
+      MJClear(Blk);
+      If Not MJDecDc(MJScDc[I],Dcv) Then Exit;
+      Dcv:=Dcv*(MJQuant[Q,0] Shl Al)+MJLastDc[I];
+      MJLastDc[I]:=Dcv; P^[0]:=Dcv;
+      For Q:=1 To 63 Do P^[Q]:=0;
+      Q:=MJScQ[I];
+     End;
+    End;
+    Inc(X);
+    If X=H Then Begin X:=0; Inc(Y); End;
+   End;
+  End;
+  MJRstn;
+ End;
+ MJScan:=True;
+End;
+Function MJScanAc(Ss,Se,Ah,Al: LongInt): Boolean;
+Var Mx,My,C,Bidx,EobRun,Q,I,J,Code,Run,Val,Last,Sign,Lvl,Ac,Total: LongInt; P:
+ PMJS; Nz: ^Byte; Level: LongInt;
+Label Done,ZeroRunDone;
+Function Refine(Idx: LongInt): Boolean;  { REFINE_BIT }
+Var Sg,Bit: LongInt;
+Begin
+ Sg:=P^[Idx] Shr 15; If P^[Idx]<0 Then Sg:=-1 Else Sg:=0;
+ Bit:=MJGet(1);
+ If Bit<>0 Then Begin
+  If Sg<>0 Then P^[Idx]:=P^[Idx]-((MJQuant[Q,I]) Shl Al) Else P^[Idx]:=P^[Idx]+(
+   (MJQuant[Q,I]) Shl Al);
+ End;
+ Refine:=True;
+End;
+Begin
+ MJScanAc:=False;
+ If (Se<Ss) Or (Se>63) Then Exit;
+ C:=MJScC[0]; Q:=MJScQ[0]; EobRun:=0; MJRestartCount:=0; Ac:=MJScAc[0];
+ For My:=0 To MJMbH-1 Do Begin
+  If MJLeft<=0 Then Exit;
+  For Mx:=0 To MJMbW-1 Do Begin
+   Bidx:=My*MJBlkStr[C]+Mx;
+   P:=PMJS(@MJBlk[C]^[Bidx*64]); Nz:=@MJNnz[C]^[Bidx];
+   If (MJRestart<>0) And (MJRestartCount=0) Then MJRestartCount:=MJRestart;
+   If Ah=0 Then Begin
+    { passe de premiere approximation }
+    If EobRun<>0 Then Dec(EobRun)
+    Else Begin
+     I:=Ss;
+     While True Do Begin
+      If Not MJSym1(2,Ac,Code) Then Exit;
+      Run:=Code Shr 4; Code:=Code And 15;
+      If Code<>0 Then Begin
+       Inc(I,Run);
+       Level:=MJXbits(Code);
+       If I>=Se Then Begin
+        If I=Se Then Begin P^[MJZ[Se]]:=Level*(MJQuant[Q,Se] Shl Al); Break;
+         End;
+        Exit;
+       End;
+       P^[MJZ[I]]:=Level*(MJQuant[Q,I] Shl Al);
+      End Else Begin
+       If Run=15 Then Begin
+        Inc(I,15);
+        If I>=Se Then Exit;
+       End Else Begin
+        Val:=1 Shl Run;
+        If Run<>0 Then Val:=Val+MJGet(Run);
+        EobRun:=Val-1;
+        Break;
+       End;
+      End;
+      Inc(I);
+     End;
+     If I>Nz^ Then Nz^:=I;
+    End;
+   End Else Begin
+    { passe de raffinement }
+    Last:=Se; If Nz^<Last Then Last:=Nz^;
+    I:=Ss;
+    If EobRun<>0 Then Dec(EobRun)
+    Else Begin
+     While True Do Begin
+      If Not MJSym1(2,Ac,Code) Then Exit;
+      If (Code And 15)<>0 Then Begin
+       Run:=Code Shr 4;
+       Val:=MJGet(1);
+       { ZERO_RUN }
+       While True Do Begin
+        If I>Last Then Begin Inc(I,Run); If I>Se Then Exit; Break; End;
+        J:=MJZ[I];
+        If P^[J]<>0 Then Refine(J)
+        Else Begin If Run=0 Then Break; Dec(Run); End;
+        Inc(I);
+       End;
+       J:=MJZ[I];
+       Dec(Val);
+       If Val<>0 Then Val:=-1;
+       P^[J]:=((MJQuant[Q,I] Shl Al) Xor Val)-Val;
+       If I=Se Then Begin
+        If I>Nz^ Then Nz^:=I;
+        Goto Done;
+       End;
+      End Else Begin
+       Run:=Code Shr 4;
+       If Run=15 Then Begin
+        { ZERO_RUN avec Run=15 }
+        While True Do Begin
+         If I>Last Then Begin Inc(I,Run); If I>Se Then Exit; Break; End;
+         J:=MJZ[I];
+         If P^[J]<>0 Then Refine(J)
+         Else Begin If Run=0 Then Break; Dec(Run); End;
+         Inc(I);
+        End;
+       End Else Begin
+        Val:=Run; Run:=1 Shl Run;
+        If Val<>0 Then Run:=Run+MJGet(Val);
+        EobRun:=Run-1;
+        Break;
+       End;
+      End;
+      Inc(I);
+     End;
+     If I>Nz^ Then Nz^:=I;
+    End;
+    While I<=Last Do Begin
+     J:=MJZ[I];
+     If P^[J]<>0 Then Refine(J);
+     Inc(I);
+    End;
+   End;
+Done:
+   If (Ah<>0) And False Then ;
+   If MJRstn Then EobRun:=0;
+   If MJLeft<0 Then Exit;
+  End;
+ End;
+ MJScanAc:=True;
+End;
+Function MJDqt: Boolean;
+Var Len,Pr,Idx,I: LongInt;
+Begin
+ MJDqt:=False;
+ Len:=MJGet(16)-2;
+ If 8*Len>MJLeft Then Exit;
+ While Len>=65 Do Begin
+  Pr:=MJGet(4); If Pr>1 Then Exit;
+  Idx:=MJGet(4); If Idx>=4 Then Exit;
+  For I:=0 To 63 Do MJQuant[Idx,I]:=MJGet(8*(Pr+1));
+  Dec(Len,1+64*(1+Pr));
+ End;
+ MJDqt:=True;
+End;
+Function MJDht: Boolean;
+Var Len,Cls,Idx,I,N,V: LongInt; Bits: Array[0..15] Of Byte; Vals: Array[0..255]
+ Of Byte;
+Begin
+ MJDht:=False;
+ Len:=MJGet(16)-2;
+ If 8*Len>MJLeft Then Exit;
+ While Len>0 Do Begin
+  If Len<17 Then Exit;
+  Cls:=MJGet(4); If Cls>=2 Then Exit;
+  Idx:=MJGet(4); If Idx>=4 Then Exit;
+  N:=0;
+  For I:=0 To 15 Do Begin Bits[I]:=MJGet(8); Inc(N,Bits[I]); End;
+  Dec(Len,17);
+  If (Len<N) Or (N>256) Then Exit;
+  For I:=0 To N-1 Do Vals[I]:=MJGet(8);
+  Dec(Len,N);
+  MJBuildVlc(Cls,Idx,Bits,Vals,Cls>0);
+  If Cls>0 Then MJBuildVlc(2,Idx,Bits,Vals,False);
+ End;
+ MJDht:=True;
+End;
+Procedure MJFreePlanes;
+Var C: LongInt;
+Begin
+ If Not MJAlloc Then Exit;
+ For C:=0 To 3 Do Begin
+  If MJPl[C]<>Nil Then Begin FreeMem(MJPl[C],MJPStr[C]*MJPRows[C]+64); MJPl[C]:=
+   Nil; End;
+  If MJBlk[C]<>Nil Then Begin FreeMem(MJBlk[C],MJBlkCnt[C]*128+128); MJBlk[C]:=
+   Nil; FreeMem(MJNnz[C],MJBlkCnt[C]+16); MJNnz[C]:=Nil; End;
+ End;
+ MJAlloc:=False;
+End;
+Function MJSof(Prog: Boolean): Boolean;
+Var Len,Bits,H,W,Nc,I,Pid,Hs,Vs,Bw,Bh,C: LongInt; Hc,Vc: Array[0..3] Of LongInt;
+ Changed: Boolean; Uh,Hf: LongInt; Id32: LongWord; Shift,Dummy: LongInt;
+Begin
+ MJSof:=False;
+ MJCurScan:=0;
+ Len:=MJGet(16); Bits:=MJGet(8);
+ If (Bits>16) Or (Bits<1) Then Exit;
+ If Bits<>8 Then Exit;
+ H:=MJGet(16); W:=MJGet(16);
+ If MJInterlaced And (MJW=W) And (MJH=H+1) Then H:=MJH;
+ If (W<1) Or (H<1) Or (W>32768) Or (H>32768) Then Exit;
+ Nc:=MJGet(8);
+ If (Nc<=0) Or (Nc>4) Then Exit;
+ If MJInterlaced And (MJBottom=Not MJPolarity) Then Begin If Nc<>MJNc Then Exit;
+  End;
+ If Len<>8+3*Nc Then Exit;
+ MJNc:=Nc; MJHmax:=1; MJVmax:=1;
+ For I:=0 To 3 Do Begin Hc[I]:=0; Vc[I]:=0; End;
+ For I:=0 To Nc-1 Do Begin
+  MJId[I]:=MJGet(8); Hc[I]:=MJGet(4); Vc[I]:=MJGet(4);
+  If Hc[I]>MJHmax Then MJHmax:=Hc[I];
+  If Vc[I]>MJVmax Then MJVmax:=Vc[I];
+  MJQi[I]:=MJGet(8);
+  If MJQi[I]>=4 Then Exit;
+  If (Hc[I]=0) Or (Vc[I]=0) Then Exit;
+ End;
+ Changed:=(W<>MJW) Or (H<>MJH) Or (Bits<>MJBitsPer);
+ For I:=0 To 3 Do If (Hc[I]<>MJHc[I]) Or (Vc[I]<>MJVc[I]) Then Changed:=True;
+ If Changed Then Begin
+  MJW:=W; MJH:=H; MJBitsPer:=Bits;
+  For I:=0 To 3 Do Begin MJHc[I]:=Hc[I]; MJVc[I]:=Vc[I]; End;
+  MJInterlaced:=False; MJGot:=False;
+  If MJFirst And (MJOrigH<>0) And (MJH<(MJOrigH*3) Div 4) Then Begin
+   MJInterlaced:=True; MJBottom:=MJPolarity;
+  End;
+  MJFirst:=False;
+ End;
+ If MJGot And MJInterlaced And (MJBottom=Not MJPolarity) Then Begin
+  If Prog Then Exit;
+ End Else Begin
+  Id32:=(LongWord(MJHc[0]) Shl 28) Or (LongWord(MJVc[0]) Shl 24) Or (LongWord(
+   MJHc[1]) Shl 20) Or (LongWord(MJVc[1]) Shl 16) Or
+        (LongWord(MJHc[2]) Shl 12) Or (LongWord(MJVc[2]) Shl 8) Or (LongWord(
+         MJHc[3]) Shl 4) Or LongWord(MJVc[3]);
+  If (Id32 And $D0D0D0D0)=0 Then Id32:=Id32-((Id32 And $F0F0F0F0) Shr 1);
+  If (Id32 And $0D0D0D0D)=0 Then Id32:=Id32-((Id32 And $0F0F0F0F) Shr 1);
+  MJFull:=Not MJItu601;
+  Hf:=MJH; If MJInterlaced Then Hf:=MJH*2;
+  Case Id32 Of
+   $11111100: Begin
+    If (MJAdobe=0) Or ((MJId[0]=82) And (MJId[1]=71) And (MJId[2]=66)) Then
+     MJFmt:=5 Else MJFmt:=3;
+   End;
+   $11000000,$13000000,$14000000,$31000000,$33000000,$34000000,$41000000,
+    $43000000,$44000000: MJFmt:=0;
+   $22111100: MJFmt:=1;
+   $21111100: MJFmt:=2;
+   $41111100: MJFmt:=4;
+   Else Exit;
+  End;
+  If (Nc=1) And (MJFmt<>0) Then Exit;
+  If (Nc=3) And (MJFmt=0) Then Exit;
+  MJFreePlanes;
+  { dimensions des plans (hauteur de trame complete) }
+  Case MJFmt Of
+   0,3,5: Begin Shift:=0; Dummy:=0; End;
+   1: Begin Shift:=1; Dummy:=1; End;
+   2: Begin Shift:=1; Dummy:=0; End;
+   Else Begin Shift:=2; Dummy:=0; End;
+  End;
+  For C:=0 To 3 Do Begin MJPl[C]:=Nil; MJBlk[C]:=Nil; MJNnz[C]:=Nil; End;
+  For C:=0 To Nc-1 Do Begin
+   If (C=1) Or (C=2) Then Begin
+    MJCw[C]:=(MJW+(1 Shl Shift)-1) Shr Shift; MJCh[C]:=(Hf+(1 Shl Dummy)-1) Shr
+     Dummy;
+   End Else Begin MJCw[C]:=MJW; MJCh[C]:=Hf; End;
+   MJPStr[C]:=((MJCw[C]+7) Div 8)*8+16;
+   MJPRows[C]:=((MJCh[C]+7) Div 8)*8+32;
+   GetMem(MJPl[C],MJPStr[C]*MJPRows[C]+64); FillChar(MJPl[C]^,MJPStr[C]*MJPRows[
+    C]+64,0);
+  End;
+  MJGot:=True;
+ End;
+ MJProg:=Prog;
+ If Prog Then Begin
+  Bw:=(MJW+MJHmax*8-1) Div (MJHmax*8); Bh:=(MJH+MJVmax*8-1) Div (MJVmax*8);
+  For C:=0 To Nc-1 Do Begin
+   MJBlkCnt[C]:=Bw*Bh*MJHc[C]*MJVc[C];
+   GetMem(MJBlk[C],MJBlkCnt[C]*128+128); FillChar(MJBlk[C]^,MJBlkCnt[C]*128+128,
+    0);
+   GetMem(MJNnz[C],MJBlkCnt[C]+16); FillChar(MJNnz[C]^,MJBlkCnt[C]+16,0);
+   MJBlkStr[C]:=Bw*MJHc[C];
+  End;
+ End;
+ MJSof:=True;
+End;
+Function MJSos: Boolean;
+Var Len,Nc,I,Idx,Id,Ss,Se,Ah,Al,H,V,Bs: LongInt;
+Begin
+ MJSos:=False;
+ If Not MJGot Then Exit;
+ Len:=MJGet(16); Nc:=MJGet(8);
+ If (Nc=0) Or (Nc>4) Then Exit;
+ If Len<>6+2*Nc Then Exit;
+ For I:=0 To Nc-1 Do Begin
+  Id:=MJGet(8);
+  Idx:=0; While (Idx<MJNc) And (Id<>MJId[Idx]) Do Inc(Idx);
+  If Idx=MJNc Then Exit;
+  If (MJTag=$4A53544D) And (Nc=3) And (MJNc=3) And (I<>0) Then Idx:=3-I;
+  MJScQ[I]:=MJQi[Idx]; MJScNb[I]:=MJHc[Idx]*MJVc[Idx]; MJScH[I]:=MJHc[Idx];
+   MJScV[I]:=MJVc[Idx]; MJScC[I]:=Idx;
+  MJScDc[I]:=MJGet(4); MJScAc[I]:=MJGet(4);
+  If (MJScDc[I]>=4) Or (MJScAc[I]>=4) Then Exit;
+  If MJLen[0,MJScDc[I]]=Nil Then Exit;
+  If MJProg Then Begin If MJLen[2,MJScAc[0]]=Nil Then Exit; End Else If MJLen[1,
+   MJScAc[I]]=Nil Then Exit;
+ End;
+ Ss:=MJGet(8); Se:=MJGet(8); Ah:=MJGet(4); Al:=MJGet(4);
+ MJScN:=Nc;
+ If Nc>1 Then Begin
+  MJMbW:=(MJW+MJHmax*8-1) Div (MJHmax*8); MJMbH:=(MJH+MJVmax*8-1) Div (MJVmax*
+   8);
+ End Else Begin
+  H:=MJHmax Div MJScH[0]; V:=MJVmax Div MJScV[0];
+  MJMbW:=(MJW+H*8-1) Div (H*8); MJMbH:=(MJH+V*8-1) Div (V*8);
+  MJScNb[0]:=1; MJScH[0]:=1; MJScV[0]:=1;
+ End;
+ For I:=MJSkipSod Downto 1 Do MJGet(8);
+ For I:=0 To Nc-1 Do MJLastDc[I]:=4 Shl MJBitsPer;
+ If MJProg And (Ss<>0) Then MJSos:=MJScanAc(Ss,Se,Ah,Al) Else MJSos:=MJScan(Ah,
+  Al);
+End;
+Procedure MJIdctProg;
+Var C,H,V,Mw,Mh,My,Mx,I: LongInt; Blk: TAMVBlock; P: PMJS; Stride,Off: LongInt;
+Begin
+ For C:=0 To MJNc-1 Do Begin
+  H:=MJHmax Div MJHc[C]; V:=MJVmax Div MJVc[C];
+  Mw:=(MJW+H*8-1) Div (H*8); Mh:=(MJH+V*8-1) Div (V*8);
+  Stride:=MJPStr[C] Shl Ord(MJInterlaced);
+  For My:=0 To Mh-1 Do For Mx:=0 To Mw-1 Do Begin
+   P:=PMJS(@MJBlk[C]^[(My*MJBlkStr[C]+Mx)*64]);
+   For I:=0 To 63 Do Blk[I]:=P^[I];
+   Off:=My*Stride*8+Mx*8;
+   If MJInterlaced And MJBottom Then Inc(Off,Stride Shr 1);
+   AVIdctPut(Blk,@MJPl[C]^[Off],Stride);
+  End;
+ End;
+End;
+Function MJUnescape(Src: PEABuffer; Len: LongInt; Var Dst: PEABuffer): LongInt;
+Var Ptr,SrcP,DstN,X,Skip,L: LongInt;
+ Procedure Copy(Sk: LongInt);
+ Begin
+  L:=(Ptr-SrcP)-Sk;
+  If L>0 Then Begin Move(Src^[SrcP],Dst^[DstN],L); Inc(DstN,L); SrcP:=Ptr; End;
+ End;
+Begin
+ GetMem(Dst,Len+64); DstN:=0; Ptr:=0; SrcP:=0;
+ While Ptr<Len Do Begin
+  X:=Src^[Ptr]; Inc(Ptr);
+  If X=$FF Then Begin
+   Skip:=0;
+   While (Ptr<Len) And (X=$FF) Do Begin X:=Src^[Ptr]; Inc(Ptr); Inc(Skip); End;
+   If Skip>1 Then Begin Copy(Skip); Dec(SrcP); End;
+   If (X<$D0) Or (X>$D7) Then Begin
+    Copy(1);
+    If X<>0 Then Break;
+   End;
+  End;
+ End;
+ If SrcP<Ptr Then Copy(0);
+ FillChar(Dst^[DstN],64,0);
+ MJUnescape:=DstN;
+End;
+Function MJPacket(Buf: PEABuffer; Size: LongInt): LongInt;
+Var Ptr,Code,V,V2,Un,Used,N: LongInt; Tmp: PEABuffer; Ok: Boolean; Len,I,C:
+ LongInt;
+Begin
+ MJPacket:=-1; Ptr:=0; MJAdobe:=-1; MJItu601:=False;
+ While Ptr<Size Do Begin
+  { find_marker }
+  Code:=-1;
+  While Size-Ptr>1 Do Begin
+   V:=Buf^[Ptr]; Inc(Ptr); V2:=Buf^[Ptr];
+   If (V=$FF) And (V2>=$C0) And (V2<=$FE) And (Ptr<Size) Then Begin Code:=Buf^[
+    Ptr]; Inc(Ptr); Break; End;
+  End;
+  If Code<0 Then Begin Ptr:=Size; Break; End;
+  Tmp:=Nil;
+  If Code=$DA Then Begin
+   If MJThp Then Begin Un:=Size-Ptr; GetMem(Tmp,Un+64); Move(Buf^[Ptr],Tmp^,Un);
+    FillChar(Tmp^[Un],64,0); End Else { G2B }
+   Un:=MJUnescape(PEABuffer(@Buf^[Ptr]),Size-Ptr,Tmp);
+   MJBuf:=Tmp; MJPos:=0; MJEnd:=Un*8;
+  End Else Begin
+   MJBuf:=PEABuffer(@Buf^[Ptr]); MJPos:=0; MJEnd:=(Size-Ptr)*8;
+  End;
+  Ok:=True;
+  Case Code Of
+   $E0..$EF: Begin
+    Len:=Buf^[Ptr]*256+Buf^[Ptr+1];
+    If (Len>=6) And (Ptr+Len<=Size) Then Begin
+     V:=(Buf^[Ptr+2] Shl 24) Or (Buf^[Ptr+3] Shl 16) Or (Buf^[Ptr+4] Shl 8) Or
+      Buf^[Ptr+5];
+     If (V=$4A464946) And (Len-6>=8) Then Begin
+      MJSarN:=Buf^[Ptr+10]*256+Buf^[Ptr+11]; MJSarD:=Buf^[Ptr+12]*256+Buf^[Ptr+
+       13];
+      If (MJSarN<=0) Or (MJSarD<=0) Then Begin MJSarN:=0; MJSarD:=1; End;
+      MJHaveJfif:=True;
+     End Else If (V=$41646F62) And (Len-6>=7) And (Buf^[Ptr+6]=101) And
+      Not ((Buf^[Ptr+6]=101) And (Buf^[Ptr+7]=95) And (Buf^[Ptr+8]=67) And (
+       Buf^[Ptr+9]=77)) Then MJAdobe:=Buf^[Ptr+13];
+     Inc(Ptr,Len);
+    End Else Inc(Ptr,2);
+    MJPos:=0; Code:=-2;
+   End;
+   $FE: Begin
+    Len:=Buf^[Ptr]*256+Buf^[Ptr+1];
+    If (Len>=2) And (Ptr+Len<=Size) Then Begin
+     N:=Len-2;
+     If (N>0) And (Buf^[Ptr+1+N]=10) Then Dec(N);
+     V:=0; While (V<N) And (Buf^[Ptr+2+V]<>0) Do Inc(V);
+     N:=V;
+     If (N=9) And (Buf^[Ptr+2]=67) And (Buf^[Ptr+3]=83) And (Buf^[Ptr+4]=61) And
+      (Buf^[Ptr+5]=73) And (Buf^[Ptr+6]=84) And
+      (Buf^[Ptr+7]=85) And (Buf^[Ptr+8]=54) And (Buf^[Ptr+9]=48) And (Buf^[Ptr+
+       10]=49) Then MJItu601:=True
+     Else If (N>=4) And (Buf^[Ptr+2]=65) And (Buf^[Ptr+3]=86) And (Buf^[Ptr+
+      4]=73) And (Buf^[Ptr+5]=68) Then Begin
+      If (Len>14) And (Buf^[Ptr+2+12]=1) Then MJPolarity:=True;
+      If (Len>14) And (Buf^[Ptr+2+12]=2) Then MJPolarity:=False;
+     End;
+     Inc(Ptr,Len);
+    End Else Inc(Ptr,2);
+    MJPos:=0; Code:=-2;
+   End;
+   $DB: Begin Ok:=MJDqt; If Not Ok Then Begin MJPacket:=-1; Exit; End; End;
+   $C4: Begin Ok:=MJDht; If Not Ok Then Begin MJGot:=False; MJPacket:=-1; Exit;
+    End; End;
+   $C0,$C1,$C2: Begin
+    Ok:=MJSof(Code=$C2);
+    If Not Ok Then Begin MJGot:=False; MJPacket:=-1; Exit; End;
+   End;
+   $DD: Begin
+    If MJGet(16)<>4 Then Begin MJPacket:=-1; Exit; End;
+    MJRestart:=MJGet(16); MJRestartCount:=0;
+   End;
+   $D8: Begin MJRestart:=0; MJRestartCount:=0; End;
+   $DA: Begin
+    Inc(MJCurScan);
+    If Not MJSos Then Ok:=False;
+   End;
+   $D9: Begin
+    If MJProg And (MJCurScan>0) And MJGot Then MJIdctProg;
+    MJCurScan:=0;
+    If Not MJGot Then Begin End
+    Else Begin
+     If MJInterlaced Then Begin
+      MJBottom:=Not MJBottom;
+      If MJBottom=Not MJPolarity Then Begin Used:=(MJPos+7) Shr 3; Inc(Ptr,
+       Used); Continue; End;
+     End;
+     MJGot:=False; MJPacket:=1; Exit;
+    End;
+   End;
+   $C3,$C5..$C7,$C9..$CB,$CD..$CF: ;
+  End;
+  If Code=$DA Then FreeMem(Tmp,Un+64);
+  If Code<>-2 Then Begin Used:=(MJPos+7) Shr 3; Inc(Ptr,Used); End;
+ End;
+ If MJGot And (MJCurScan>0) Then Begin
+  { EOI manquant : emulation }
+  If MJProg Then MJIdctProg;
+  MJCurScan:=0;
+  If MJInterlaced Then Begin
+   MJBottom:=Not MJBottom;
+   If MJBottom=Not MJPolarity Then Begin MJPacket:=0; Exit; End;
+  End;
+  MJGot:=False; MJPacket:=1; Exit;
+ End;
+ MJPacket:=-1;
+End;
+Procedure MJPack(Out: PEABuffer);
+Var Y,X,H,Cw,Ch,I,Off: LongInt;
+Begin
+ H:=MJH Shl Ord(MJInterlaced);
+ Case MJFmt Of
+  0: For Y:=0 To H-1 Do Move(MJPl[0]^[Y*MJPStr[0]],Out^[Y*MJW],MJW);
+  5: For Y:=0 To H-1 Do For X:=0 To MJW-1 Do Begin
+      I:=(Y*MJW+X)*3;
+      Out^[I]:=MJPl[0]^[Y*MJPStr[0]+X]; Out^[I+1]:=MJPl[1]^[Y*MJPStr[1]+X];
+       Out^[I+2]:=MJPl[2]^[Y*MJPStr[2]+X];
+     End;
+  Else Begin
+   For Y:=0 To H-1 Do Move(MJPl[0]^[Y*MJPStr[0]],Out^[Y*MJW],MJW);
+   Cw:=MJCw[1]; Ch:=MJCh[1]; Off:=MJW*H;
+   For Y:=0 To Ch-1 Do Move(MJPl[1]^[Y*MJPStr[1]],Out^[Off+Y*Cw],Cw);
+   Off:=Off+Cw*Ch;
+   For Y:=0 To Ch-1 Do Move(MJPl[2]^[Y*MJPStr[2]],Out^[Off+Y*Cw],Cw);
+  End;
+ End;
+End;
+Procedure MJSetNV(Mode: LongInt; Const Target: String; Rn,Rd: LongInt);
+Var W,H: LongInt; Rng: String;
+Begin
+ W:=MJW; H:=MJH Shl Ord(MJInterlaced);
+ If MJFull Then Rng:=' XCOLORRANGE=FULL' Else Rng:=' XCOLORRANGE=LIMITED';
+ Case MJFmt Of
+  5: NVBegin(Mode,Target,W,H,9,Rn,Rd);
+  Else NVBegin(Mode,Target,W,H,7,Rn,Rd);
+ End;
+ NVHdrOk:=True; NVFullRng:=MJFull;
+ Case MJFmt Of
+  0: Begin NVSubX:=0; NVSubY:=0; NVCW:=0; NVCH:=0; NVYTag:='Cmono'; End;
+  1: Begin NVSubX:=1; NVSubY:=1; NVCW:=(W+1) Shr 1; NVCH:=(H+1) Shr 1; NVYTag:=
+   'C420jpeg XYSCSS=420JPEG'+Rng; End;
+  2: Begin NVSubX:=1; NVSubY:=0; NVCW:=(W+1) Shr 1; NVCH:=H; NVYTag:=
+   'C422 XYSCSS=422'+Rng; End;
+  3: Begin NVSubX:=0; NVSubY:=0; NVCW:=W; NVCH:=H; NVYTag:='C444 XYSCSS=444'+
+   Rng; End;
+  4: Begin NVSubX:=2; NVSubY:=0; NVCW:=(W+3) Shr 2; NVCH:=H; NVYTag:=
+   'C411 XYSCSS=411'+Rng; End;
+ End;
+ If (OptPixFmt='yuv420p') And MJFull And (MJFmt>=1) And (MJFmt<=3) Then Begin
+  { G2B : yuvj4xxp -> yuv420p : conversion de plage (swscale) }
+  NVTo420:=True; NVFullRng:=True; NVYTag:=
+   'C420jpeg XYSCSS=420JPEG XCOLORRANGE=LIMITED';
+ End;
+ If (MJSarN>0) And (MJSarD>0) Then Begin NVSarN:=MJSarN; NVSarD:=MJSarD; End;
+ If MJFmt=5 Then If (MJSarN>0) And (MJSarD>0) Then NVGcd(NVSarN,NVSarD);
+End;
+Procedure MJInit(OrigH,Tag: LongInt);
+Var C,I: LongInt;
+Begin
+ For C:=0 To 2 Do Begin MJSym[C,0]:=Nil;MJSym[C,1]:=Nil;MJSym[C,2]:=Nil;MJSym[C,
+  3]:=Nil;MJLen[C,0]:=Nil;MJLen[C,1]:=Nil;MJLen[C,2]:=Nil;MJLen[C,3]:=Nil; End;
+ FillChar(MJQuant,SizeOf(MJQuant),0);
+ MJDefaultTables;
+ MJW:=0; MJH:=0; MJBitsPer:=0; MJNc:=0; MJAlloc:=False; MJInterlaced:=False;
+  MJBottom:=False; MJFirst:=True; MJGot:=False;
+ MJThp:=False; MJOrigH:=OrigH; MJTag:=Tag; MJPolarity:=Tag=$47504A4D; MJSarN:=0;
+  MJSarD:=1; MJHaveJfif:=False; MJSkipSod:=0; MJRestart:=0; MJCurScan:=0;
+ For C:=0 To 3 Do Begin MJPl[C]:=Nil; MJBlk[C]:=Nil; MJNnz[C]:=Nil; MJHc[C]:=0;
+  MJVc[C]:=0; End;
+End;
+Procedure DecodeMJP(Const Source,Target: String; Mode: LongInt);
+Var Buf,Out: PEABuffer; Size,R: LongInt;
+Begin
+ NVLoad(Source,Buf,Size);
+ MJInit(0,0);
+ R:=MJPacket(Buf,Size);
+ If R<>1 Then Fail('mjpeg: aucune image decodee.');
+ MJSetNV(Mode,Target,25,1);
+ GetMem(Out,NVFrameBytes+64); MJPack(Out);
+ NVEmit(Out);
+ FreeMem(Out,NVFrameBytes+64);
+ NVFinish('mjpeg');
+End;
+{$ENDIF}
 
 { ====================================================================== }
 { Colle entre l'interface et les moteurs audio                             }
@@ -59992,6 +61492,9 @@ Begin
      5: DecodeTheoraOgg(Src,Dst,Arg Mod 10);
      6: DecodeFLVScreen(Src,Dst,Arg Mod 10);
      7: DecodeWMVAsf(Src,Dst,Arg Mod 10);
+     8: DecodeMJP(Src,Dst,Arg Mod 10);
+     9: DecodeDV(Src,Dst,Arg Mod 10,True);
+    10: DecodeDV(Src,Dst,Arg Mod 10,False);
     End;
     NtCleanup;
    End;
@@ -62240,7 +63743,7 @@ Begin
   HotAdd(MenuX[I]-4,0,MenuW[I]+8,17,hMenu+I);
  End;
  IcoKey(ScrW-130,3,cGrayD);
- Txt(ScrW-112,5,'Non enregistr'#233,cGrayD);
+ If RegOk Then Txt(ScrW-112,5,'Enregistr'#233,cGreen) Else Txt(ScrW-112,5,'Non enregistr'#233,cGrayD);
  HotAdd(ScrW-134,0,134,17,hMenu+9);
 End;
 
@@ -62380,7 +63883,7 @@ Begin
  M:=Files[I]; Pr:=Profs[CurProf];
  Panel(8,Y,ScrW-22,Y+60,cWhite,cLine);
  Rect(9,Y+1,ScrW-23,Y+59,cPanel);
- DrawThumb(M^,14,Y+5);
+ DrawThumb(M^,14,Y+5); HotAdd(14,Y+5,80,50,108+I*10);
  S:='Source: '+Fit(NameOf(M^.Path),210);
  Txt(104,Y+6,S,cBlack);
  IcoInfo(104+TextW(S)+6,Y+5,cBlue);
@@ -65305,6 +66808,44 @@ End;
 
 
 
+
+{ MJPEG dans un AVI : chaque image JPEG est decodee par le moteur d'images fixes ; les images sont jointes en un Y4M }
+Function MjpgAviToY4m(Const Src,Dst: String; Var Err: String): Boolean;
+Var V: TTrkIn; F,O: File; Buf: PBArr; I,Cap,W,H,Fn,Fd,N,Hl,Fsz,P: LongInt; J,Y: String; Ok,Hdr: Boolean; Fi: File; Got: Word; Fr: Array[0..5] Of Byte; Pix: PEABuffer; Dh: String;
+Begin
+ MjpgAviToY4m:=False;
+ If Not AviTracks(Src,V,Err) Then Exit;
+ If Not OpenSrc(Src,F) Then Begin TrkClear(V); Err:='Ouverture impossible.'; Exit; End;
+ J:=TmpName('JPG'); Y:=TmpName('Y4M'); Cap:=65536; GetMem(Buf,Cap); Hdr:=False; Ok:=True; Pix:=Nil; Fsz:=0;
+ FpsOf(V,Fn,Fd);
+ If Not CreateOut(Dst,O,Err) Then Begin Close(F); FreeMem(Buf,Cap); TrkClear(V); Exit; End;
+ For I:=0 To V.N-1 Do Begin
+  If V.Sz^[I]>Cap Then Begin ReallocMem(Buf,V.Sz^[I]+4096); Cap:=V.Sz^[I]+4096; End;
+  Seek(F,V.Off^[I]); BlockRead(F,Buf^,V.Sz^[I]);
+  If Not CreateOut(J,Fi,Err) Then Begin Ok:=False; Break; End;
+  BlockWrite(Fi,Buf^,V.Sz^[I]); Close(Fi);
+  If Not RunEng(ekDecVid,J,Y,80,Err) Then Begin Ok:=False; Break; End;
+  If Not Y4mInfo(Y,W,H,Fn,Fd,N,Hl) Then Begin Ok:=False; Err:='Image MJPEG illisible.'; Break; End;
+  If Not Hdr Then Begin
+   FpsOf(V,Fn,Fd);
+   Dh:='YUV4MPEG2 W'+IStr(W)+' H'+IStr(H)+' F'+IStr(Fn)+':'+IStr(Fd)+' Ip A1:1 C420jpeg'#10; BlockWrite(O,Dh[1],Length(Dh));
+   Fsz:=W*H+2*((W+1) Div 2)*((H+1) Div 2); GetMem(Pix,Fsz+16); Hdr:=True;
+  End;
+  If OpenSrc(Y,Fi) Then Begin
+   Seek(Fi,Hl+6); P:=0;
+   While P<Fsz Do Begin BlockRead(Fi,Pix^[P],Min(32768,Fsz-P),Got); If Got=0 Then Break; Inc(P,Got); End;
+   Close(Fi);
+   Fr[0]:=Ord('F'); Fr[1]:=Ord('R'); Fr[2]:=Ord('A'); Fr[3]:=Ord('M'); Fr[4]:=Ord('E'); Fr[5]:=10;
+   BlockWrite(O,Fr,6); BlockWrite(O,Pix^,Fsz);
+  End;
+  If (I And 3)=0 Then Begin UiTick(I,V.N); If Stopped Then Begin Ok:=False; Err:='Conversion annul'#233'e.'; Break; End; End;
+ End;
+ Close(F); Close(O); DelFile(J); DelFile(Y); FreeMem(Buf,Cap); If Pix<>Nil Then FreeMem(Pix,Fsz+16);
+ TrkClear(V);
+ If Not Ok Then DelFile(Dst);
+ MjpgAviToY4m:=Ok;
+End;
+
 { fourcc video d'un fichier ASF/WMV }
 Function AsfFourCC(Const Path: String): String;
 Var P,Sz,N,Cnt: LongInt;
@@ -65439,8 +66980,10 @@ Begin
   U:=AsfFourCC(Src);
   If InList(U,'WMV3,WVC1,WMVA,WVP2,WMVP') Then K:=1 Else If InList(U,'WMV1,WMV2') Then K:=7;
  End Else If Fmt='AVI' Then Begin
-  If InList(U,'WMV3,WVC1,WMVA') Then K:=2 Else If InList(U,'WMV1,WMV2') Then K:=3;
- End Else If Fmt='FLV' Then Begin
+  If InList(U,'WMV3,WVC1,WMVA') Then K:=2 Else If InList(U,'WMV1,WMV2') Then K:=3
+  Else If InList(U,'MJPG,AVRN,MJPA') Then K:=8 Else If InList(U,'DVSD,DVHD,DV25,DVCP,DVPP,DV50,CDVC') Then K:=9;
+ End Else If Fmt='DV' Then K:=10
+ Else If Fmt='FLV' Then Begin
   If U='FSV1' Then K:=6;
  End Else If (Fmt='OGV') Or (Fmt='OGG') Then Begin
   If (U='THEORA') Or (U='') Then K:=5;
@@ -65456,6 +66999,10 @@ Begin
     DelFile(Au); Src:=Es;
    End Else CClose;
   End;
+ End;
+ If K=8 Then Begin
+  If Not MjpgAviToY4m(Src,Y4,Err) Then Begin DelFile(Y4); Y4mSource:=-1; Exit; End;
+  Y4mSource:=1; Exit;
  End;
  If Not RunEng(ekDecVid,Src,Y4,K*10,Err) Then Begin
   DelFile(Y4); If Es<>'' Then DelFile(Es); Y4mSource:=-1; Exit;
@@ -65485,8 +67032,10 @@ Begin
   U:=AsfFourCC(Path);
   If InList(U,'WMV3,WVC1,WMVA,WVP2,WMVP') Then K:=1 Else If InList(U,'WMV1,WMV2') Then K:=7;
  End Else If Fmt='AVI' Then Begin
-  If InList(U,'WMV3,WVC1,WMVA') Then K:=2 Else If InList(U,'WMV1,WMV2') Then K:=3;
- End Else If Fmt='FLV' Then Begin
+  If InList(U,'WMV3,WVC1,WMVA') Then K:=2 Else If InList(U,'WMV1,WMV2') Then K:=3
+  Else If InList(U,'MJPG,AVRN,MJPA') Then K:=8 Else If InList(U,'DVSD,DVHD,DV25,DVCP,DVPP,DV50,CDVC') Then K:=9;
+ End Else If Fmt='DV' Then K:=10
+ Else If Fmt='FLV' Then Begin
   If U='FSV1' Then K:=6;
  End Else If (Fmt='OGV') Or (Fmt='OGG') Then K:=5
  Else If InList(Fmt,'MPG,MPEG,M2V,M1V,DAT,VOB') Then K:=4;
@@ -65514,6 +67063,101 @@ Begin
  Bmp:=TmpName('BMP');
  If RunEng(ekDecVid,Src,Bmp,K*10+2,Err) Then Y4mFirstFrame:=LoadBmp(Bmp);
  DelFile(Bmp); If Es<>'' Then DelFile(Es);
+End;
+
+
+{ ---------------------------------------------------------------------- }
+{ Lecture video (apercu anime, sans son)                                     }
+{ ---------------------------------------------------------------------- }
+Var PlStop: Boolean; PlT0,PlIdx,PlFn,PlFd: LongInt;
+
+Procedure PlayCb(B: PEABuffer; W,H: LongInt);
+Var Im: PImg; E: TEvent; Due: LongInt; Late: Boolean;
+Begin
+ Inc(PlIdx);
+ Due:=PlT0+Round(PlIdx*100.0*PlFd/PlFn);
+ Late:=(Ticks>Due) And (Ticks-Due<200);
+ If Not Late Then Begin
+  Im:=YuvToImg(B,W,H);
+  If Im<>Nil Then Begin HideMouse; DrawImg(Im,95,70,450,300); ShowMouse; ImgFree(Im); End;
+ End;
+ Repeat
+  If PollEvent(E) Then Begin If (E.Kind=evUp) Or (E.Kind=evKey) Then PlStop:=True; End;
+  If Ticks<PlT0 Then Break;
+  If Ticks<Due Then Delay(5);
+ Until PlStop Or (Ticks>=Due);
+ If PlStop Then VStopFlag:=True;
+End;
+
+Procedure PlayMedia(Var M: TMedia);
+Var V,A: TTrkIn; Ok: Boolean; Err,Y4,DecPath,Fmt: String; DecMode,K: Integer; Fn,Fd: LongInt; An: PAnim; I: Integer; E: TEvent; T0: LongInt;
+ Procedure Chrome(Const Msg: String);
+ Begin
+  HideMouse; Rect(80,56,560,396,cNavy); Frame(80,56,560,396,cWhite);
+  Rect(94,69,546,371,cBlack);
+  Txt(90,378,Msg,cWhite); ShowMouse;
+ End;
+Begin
+ If M.Kind=1 Then Begin Info('Lecture audio non disponible : aucune sortie sonore dans ce programme.'); Exit; End;
+ If M.Kind=3 Then Begin
+  If M.Fmt='BMP' Then Begin
+   Chrome('Clic ou Echap pour fermer');
+   HideMouse; DrawImg(LoadBmp(M.Path),95,70,450,300); ShowMouse;
+   Repeat Delay(20); Until PollEvent(E) And ((E.Kind=evUp) Or (E.Kind=evKey));
+   Dirty:=True; Exit;
+  End;
+  If Not (M.Fmt='GIF') Then Begin Info('Aper'#231'u indisponible pour ce format.'); Exit; End;
+ End;
+ If M.Fmt='GIF' Then Begin
+  If Not LoadAnim(M.Path,An,MaxAnim) Then Begin Info('GIF illisible.'); Exit; End;
+  Chrome('Clic ou Echap pour fermer');
+  PlStop:=False; I:=1;
+  Repeat
+   HideMouse; DrawImg(An^.F[I],95,70,450,300); ShowMouse;
+   T0:=Ticks;
+   Repeat
+    If PollEvent(E) Then Begin If (E.Kind=evUp) Or (E.Kind=evKey) Then PlStop:=True; End;
+    Delay(10);
+   Until PlStop Or (Ticks-T0>=An^.Dly[I]) Or (Ticks<T0);
+   Inc(I); If I>An^.N Then I:=1;
+  Until PlStop;
+  AnimFree(An); Dirty:=True; Exit;
+ End;
+ { video }
+ Fmt:=M.Fmt; Y4:=''; DecPath:=M.Path; Err:=''; FillChar(A,SizeOf(A),0); FillChar(V,SizeOf(V),0);
+ Chrome('Chargement... (Echap pour annuler)');
+ If InList(Fmt,'WMV,ASF,OGV,OGG,MPG,MPEG,M2V,M1V,DAT,VOB') Then Begin
+  K:=Y4mSource(M,Fmt,M.VCodec,Y4,Err);
+  If K<=0 Then Begin If Err='' Then Err:='Codec vid'#233'o non d'#233'cod'#233'.'; Info(Err); Dirty:=True; Exit; End;
+  If Not Y4mTrack(Y4,V) Then Begin DelFile(Y4); Info('Fichier interm'#233'diaire invalide.'); Dirty:=True; Exit; End;
+  DecMode:=5; DecPath:=Y4; Ok:=True;
+ End Else Begin
+  If InList(Fmt,'MP4,MOV,M4V,3GP') Then Ok:=Mp4Tracks(M.Path,V,A,Err)
+  Else If Fmt='FLV' Then Ok:=FlvTracks(M.Path,V,A,Err)
+  Else If Fmt='AVI' Then Ok:=AviTracks(M.Path,V,Err)
+  Else If InList(Fmt,'MKV,WEBM') Then Ok:=MkvTracks(M.Path,V,A,Err)
+  Else Begin Info('Lecture indisponible pour ce format.'); Dirty:=True; Exit; End;
+  If (Not Ok) Or (Not V.Ok) Then Begin If Err='' Then Err:='Aucune piste vid'#233'o.'; Info(Err); TrkClear(V); TrkClear(A); Dirty:=True; Exit; End;
+  DecMode:=VideoMode(Fmt,V);
+  If DecMode<0 Then Begin
+   K:=Y4mSource(M,Fmt,V.Codec,Y4,Err);
+   If K>0 Then Begin
+    TrkClear(V);
+    If Not Y4mTrack(Y4,V) Then Begin DelFile(Y4); Info('Fichier interm'#233'diaire invalide.'); TrkClear(A); Dirty:=True; Exit; End;
+    DecMode:=5; DecPath:=Y4;
+   End Else Begin If Err='' Then Err:='Codec vid'#233'o '+V.Codec+' non d'#233'cod'#233'.'; Info(Err); TrkClear(V); TrkClear(A); Dirty:=True; Exit; End;
+  End;
+ End;
+ FpsOf(V,Fn,Fd);
+ PlFn:=Fn; PlFd:=Fd; PlIdx:=0; PlStop:=False;
+ Chrome('Lecture (sans son) - clic ou Echap pour fermer');
+ PlT0:=Ticks;
+ VFrameCb:=PlayCb;
+ Ok:=DecodeVideoTrack(DecPath,V,0,DecMode,Err);
+ VFrameCb:=Nil; VStopFlag:=False;
+ If Y4<>'' Then DelFile(Y4);
+ TrkClear(V); TrkClear(A);
+ Dirty:=True;
 End;
 
 { ---- Y4M a partir du fichier temporaire d'images brutes ---- }
@@ -66214,14 +67858,103 @@ Begin
   'Aucune d'#233'pendance externe : tout est dans ANYMP4.PAS.','OK');
 End;
 
-Procedure RegDlg;
-Var S: String; R: Integer;
+{ ---- enregistrement hors ligne : cle de 4 groupes de 5 caracteres ; le dernier caractere est une somme de controle ---- }
+Const KeyAlpha = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+Function KeyIdx(C: Char): Integer;
+Var I: Integer;
 Begin
- S:='';
- If InputBox('Enregistrer','Entrez votre code d''enregistrement :',S,40) Then Begin
-  If S='' Then Exit;
-  R:=MsgBox('Enregistrement','Code non valide : cette version de d'#233'monstration n''a pas de serveur de licences.','OK');
+ KeyIdx:=-1; C:=UpCase(C);
+ For I:=1 To 32 Do If KeyAlpha[I]=C Then Begin KeyIdx:=I-1; Exit; End;
+End;
+
+Function KeyCheck(Const S: String): Char;
+Var I,N,T: Integer;
+Begin
+ T:=0; N:=0;
+ For I:=1 To Length(S) Do If S[I]<>'-' Then Begin Inc(N); T:=(T+KeyIdx(S[I])*(N+3)+N) Mod 32; End;
+ KeyCheck:=KeyAlpha[T+1];
+End;
+
+{ forme normalisee XXXXX-XXXXX-XXXXX-XXXXX ; '' si invalide }
+Function KeyNorm(Const S0: String): String;
+Var S,R: String; I,N: Integer;
+Begin
+ KeyNorm:=''; S:=''; R:='';
+ For I:=1 To Length(S0) Do If S0[I]<>'-' Then If S0[I]<>' ' Then S:=S+UpCase(S0[I]);
+ If Length(S)<>20 Then Exit;
+ For I:=1 To 20 Do If KeyIdx(S[I])<0 Then Exit;
+ For I:=1 To 20 Do Begin R:=R+S[I]; If (I Mod 5=0) And (I<20) Then R:=R+'-'; End;
+ If KeyCheck(Copy(R,1,Length(R)-1))<>R[Length(R)] Then Exit;
+ KeyNorm:=R;
+End;
+
+Procedure SaveCfg;
+Var F: Text; S: String;
+Begin
+ Assign(F,'ANYMP4.INI');
+ {$I-}Rewrite(F);{$I+}
+ If IOResult<>0 Then Exit;
+ WriteLn(F,'OutDir=',OutDir);
+ WriteLn(F,'TmpDir=',TmpDir);
+ WriteLn(F,'AfterAct=',AfterAct);
+ WriteLn(F,'Overwrite=',Ord(OverwriteAll));
+ WriteLn(F,'HwAccel=',Ord(HwAccel));
+ WriteLn(F,'Fast120=',Ord(Fast120));
+ WriteLn(F,'Profile=',CurProf);
+ If RegOk Then WriteLn(F,'Key=',RegKey);
+ {$I-}Close(F);{$I+}
+ If IOResult<>0 Then ;
+End;
+
+Procedure LoadCfg;
+Var F: Text; L,K,V: String; P: Integer;
+Begin
+ Assign(F,'ANYMP4.INI');
+ {$I-}Reset(F);{$I+}
+ If IOResult<>0 Then Exit;
+ While Not Eof(F) Do Begin
+  {$I-}ReadLn(F,L);{$I+}
+  If IOResult<>0 Then Break;
+  P:=Pos('=',L); If P<2 Then Continue;
+  K:=Copy(L,1,P-1); V:=Copy(L,P+1,255);
+  If K='OutDir' Then OutDir:=V
+  Else If K='TmpDir' Then TmpDir:=V
+  Else If K='AfterAct' Then AfterAct:=ValL(V)
+  Else If K='Overwrite' Then OverwriteAll:=V='1'
+  Else If K='HwAccel' Then HwAccel:=V='1'
+  Else If K='Fast120' Then Fast120:=V='1'
+  Else If K='Profile' Then Begin P:=ValL(V); If (P>=1) And (P<=NProf) Then CurProf:=P; End
+  Else If K='Key' Then Begin RegKey:=KeyNorm(V); RegOk:=RegKey<>''; End;
  End;
+ {$I-}Close(F);{$I+}
+ If IOResult<>0 Then ;
+End;
+
+Procedure RegDlg;
+Var S,K: String; R: Integer;
+Begin
+ If RegOk Then Begin
+  R:=MsgBox('Enregistrement','Ce programme est enregistr'#233'.|Cl'#233' : '+RegKey,'OK');
+  Exit;
+ End;
+ S:='';
+ If InputBox('Enregistrer','Entrez votre cl'#233' (XXXXX-XXXXX-XXXXX-XXXXX) :',S,40) Then Begin
+  If S='' Then Exit;
+  K:=KeyNorm(S);
+  If K='' Then Begin
+   R:=MsgBox('Enregistrement','Cl'#233' non valide : 4 groupes de 5 caract'#232'res (lettres et chiffres 2-9), le dernier caract'#232're est une somme de contr'#244'le.','OK');
+  End Else Begin
+   RegKey:=K; RegOk:=True; SaveCfg;
+   R:=MsgBox('Enregistrement','Merci : le programme est enregistr'#233'.','OK');
+  End;
+ End;
+End;
+
+Procedure UpdateDlg;
+Var R: Integer;
+Begin
+ R:=MsgBox('Mises '#224' jour','AnyMP4 (clone) version 1.0 (2026).|Ce programme fonctionne hors ligne : il n''ouvre aucune connexion r'#233'seau|et ne peut donc pas rechercher de nouvelle version.','OK');
 End;
 
 { ====================================================================== }
@@ -67031,6 +68764,7 @@ Begin
    Else If R=2 Then If FileDlg('Ajouter un sous-titre',False,False,4) Then Files[I]^.SubFile:=PickList[1];
   End;
   7: ShowInfo(Files[I]^);
+  8: {$IFDEF FPC}PlayMedia(Files[I]^){$ELSE}Info('Lecture indisponible dans la version Turbo Pascal.'){$ENDIF};
  End;
  Dirty:=True;
 End;
@@ -67065,7 +68799,8 @@ Begin
   5: Case It Of
    1: Info('Ajoutez des fichiers, choisissez un format de sortie puis cliquez sur Convertir Tout.|F1 .. F5 : onglets. Echap : annule une conversion.');
    2: RegDlg;
-   3: AboutDlg;
+   3: UpdateDlg;
+   4: AboutDlg;
   End;
  End;
 End;
@@ -67081,7 +68816,7 @@ Begin
    2: Items:=#201'diter la s'#233'lection|Supprimer les fichiers|-|Pr'#233'f'#233'rences...';
    3: Items:='Convertisseur^F1|Ripper^F2|MV^F3|Collage^F4|Bo'#238'te '#224' outils^F5|-|Fichiers convertis';
    4: Items:='Format de sortie...|Dossier de sortie...|Convertir tout^F9|Informations du fichier...';
-   Else Items:='Aide^F10|Enregistrer...|'#192' propos...';
+   Else Items:='Aide^F10|Enregistrer...|Mises '#224' jour...|'#192' propos...';
   End;
   If Cur=2 Then Items:='S'#233'lectionner tout|Supprimer les fichiers|-|Pr'#233'f'#233'rences...';
   PopMenuBarH:=18; PopSwitch:=0; PopCurMenu:=Cur;
@@ -67228,6 +68963,7 @@ Begin
  For I:=0 To 8 Do ColThumb[I]:=Nil;
  RipN:=0; MBtn0:=0; LastDir:=''; JobIdx:=0; LastDraw:=0;
  BarHitProc:=BarHit; PopMenuBarH:=0; RedrawHook:=DrawAll;
+ LoadCfg;
 End;
 
 Var
@@ -67256,5 +68992,6 @@ BEGIN
    End;
   End Else Delay(8);
  Until Quit;
+ SaveCfg;
  CloseGraph;
 END.

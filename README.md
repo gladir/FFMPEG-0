@@ -30,6 +30,9 @@ Formats video supplementaires (decodeurs et encodeurs de FFMPEG.PAS integres par
 lecture WMV/ASF (VC-1, WMV1, WMV2), AVI WMV, MPEG-1/2 (ES et PS), Theora (OGV), FLV Screen Video ; sorties MKV (H.264 + AAC),
 AVI (MPEG-4 + MP3), WMV (WMV2 + WMA, ASF), MPG (MPEG-2 + MP2, PS), OGV (Theora + Vorbis), WebM (encodeur VP8 ecrit pour ANYMP4 + Vorbis).
 Audio : AC-3 (decodage et encodage), DTS (decodage), Vorbis (decodage OGG/WebM/MKV, encodage OGG), WMA (decodage, encodage), MP2.
+Interface : lecture video animee (sans son) en cliquant sur la miniature d'un fichier, enregistrement hors ligne par cle
+(exemple de cle valide : ABCDE-FGHJK-LMNPQ-RSTUH), fichier de configuration ANYMP4.INI (dossiers, options, profil, cle), fichiers
+passes en argument (glisser-deposer sur l'executable), MJPEG/DV dans AVI. Le programme n'ouvre aucune connexion reseau.
 Limites : VP9 n est pas decode, pas plus
 que HEVC, AV1, VP6 ; Opus n'est pas decode ; les sorties HEVC/VP9/AV1 n'existent pas. Si l'audio d'une source n'est pas decodable
 (Opus, par exemple), la video est convertie sans audio et le message l indique.
