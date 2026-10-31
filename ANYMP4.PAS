@@ -1541,7 +1541,7 @@ End;
 { Le moteur integre sait produire ces sorties }
 Function EngineOut(Const Ext: String): Boolean;
 Begin
- EngineOut:=InList(Ext,'MP3,WAV,AIF,AU,GIF,BMP,MP4,MOV,M4V,3GP,FLV,M4A,AAC');
+ EngineOut:=InList(Ext,'MP3,WAV,AIF,AU,GIF,BMP,MP4,MOV,M4V,3GP,FLV,MKV,M4A,AAC');
 End;
 
 { ====================================================================== }
@@ -20415,7 +20415,7 @@ Begin
    StageLo:=0; StageHi:=100;
    DoConvert:=RunImageJob(M,Pr,Dst,Err);
   End Else Err:='Le d'#233'codeur vid'#233'o n''est pas inclus : seules les images BMP/GIF peuvent '#234'tre converties en image.';
- End Else If InList(Pr.Ext,'MP4,MOV,M4V,3GP,FLV') Then Begin
+ End Else If InList(Pr.Ext,'MP4,MOV,M4V,3GP,FLV,MKV') Then Begin
   {$IFDEF FPC}
   If M.Kind=1 Then Err:='Un fichier audio ne peut pas devenir une vid'#233'o. Choisissez un profil Audio.'
   Else If (M.Kind=3) Or (M.Fmt='GIF') Then Begin StageLo:=0; StageHi:=90; DoConvert:=ImageVideoJob(M,Pr,Dst,Err); End
@@ -22182,6 +22182,195 @@ Begin
  If Not Ok Then DelFile(Dst);
 End;
 
+
+{ ---------------------------------------------------------------------- }
+{ Multiplexeur Matroska / WebM (EBML)                                        }
+{ ---------------------------------------------------------------------- }
+Procedure EId(Id: LongInt);
+Begin
+ If Id>$FFFFFF Then M8(Id Shr 24);
+ If Id>$FFFF Then M8(Id Shr 16);
+ If Id>$FF Then M8(Id Shr 8);
+ M8(Id);
+End;
+
+{ element a taille connue ecrite sur 8 octets (corrigee par EEnd) }
+Function EBeg(Id: LongInt): LongInt;
+Begin
+ EId(Id); EBeg:=MBLen; M8($01); MZero(7);
+End;
+
+Procedure EEnd(P: LongInt);
+Var Z,I: LongInt;
+Begin
+ Z:=MBLen-P-8;
+ For I:=0 To 6 Do MB^[P+7-I]:=(Int64(Z) Shr (8*I)) And 255;
+End;
+
+Procedure EUInt(Id: LongInt; V: Int64);
+Var N,I: Integer;
+Begin
+ N:=1; While (N<8) And (V>=Int64(1) Shl (8*N)) Do Inc(N);
+ EId(Id); M8($80+N); For I:=N-1 DownTo 0 Do M8((V Shr (8*I)) And 255);
+End;
+
+Procedure EStr(Id: LongInt; Const S: String);
+Var I: Integer;
+Begin
+ EId(Id); M8($80+Length(S)); For I:=1 To Length(S) Do M8(Ord(S[I]));
+End;
+
+Procedure EFlt(Id: LongInt; V: Double);
+Var B: Array[0..7] Of Byte; I: Integer;
+Begin
+ EId(Id); M8($88); Move(V,B,8); For I:=7 DownTo 0 Do M8(B[I]);
+End;
+
+Function MkvCodecId(Const C: String; IsVideo: Boolean): String;
+Begin
+ MkvCodecId:='V_UNCOMPRESSED';
+ If C='avc1' Then MkvCodecId:='V_MPEG4/ISO/AVC'
+ Else If C='VP80' Then MkvCodecId:='V_VP8'
+ Else If C='mp4a' Then MkvCodecId:='A_AAC'
+ Else If C='vorb' Then MkvCodecId:='A_VORBIS'
+ Else If C='ac-3' Then MkvCodecId:='A_AC3'
+ Else If C='mp3 ' Then MkvCodecId:='A_MPEG/L3';
+End;
+
+{ Doc : 'matroska' ou 'webm' }
+Function MuxMkv(Const Dst,Doc: String; Var Tr: Array Of TMuxTrk; NT: Integer; Var Err: String): Boolean;
+Var
+ FO: File; K,I,Len,Nxt,Total,Cnt,Ms,Cts,Pts,Seg,Cl,Tk,Te,Vi,Ai,SegStart,ClStart,NCue,ClMs: LongInt;
+ Idx: Array[0..1] Of LongInt; Dp: Array[0..1] Of Int64; Ok,InCl,NeedCl: Boolean; Buf: PBArr; DurMs: LongInt; Acc: Int64;
+ CueT,CueP: PLArr; Rel,Sz: LongInt; Key: Boolean; Fl: Byte; Mn: LongInt; Hd: Array[0..11] Of Byte;
+ Procedure Flush;
+ Begin
+  If MBLen>0 Then BlockWrite(FO,MB^,MBLen); MBLen:=0;
+ End;
+Begin
+ MuxMkv:=False; Ok:=True;
+ If MB=Nil Then Begin MBCap:=65536; GetMem(MB,MBCap); End;
+ If Not CreateOut(Dst,FO,Err) Then Exit;
+ Vi:=-1; Ai:=-1;
+ For K:=0 To NT-1 Do Begin
+  If Tr[K].T^.IsVideo Then Vi:=K Else Ai:=K;
+  If Tr[K].Mem=Nil Then Begin
+   If Not OpenSrc(Tr[K].Path,Tr[K].F) Then Begin Err:='Source illisible.'; Ok:=False; End Else Tr[K].Opened:=True;
+  End;
+ End;
+ DurMs:=0;
+ For K:=0 To NT-1 Do Begin
+  Acc:=0; For I:=Tr[K].First To Tr[K].Last Do Inc(Acc,Tr[K].T^.Dur^[I]);
+  Ms:=Round(Acc*1000.0/Tr[K].T^.Ts); If Ms>DurMs Then DurMs:=Ms;
+ End;
+ { decalage pour que tous les temps de presentation soient >= 0 }
+ Mn:=0;
+ If Vi>=0 Then Begin
+  Mn:=Tr[Vi].T^.Cts^[Tr[Vi].First];
+  For I:=Tr[Vi].First To Tr[Vi].Last Do If Tr[Vi].T^.Cts^[I]<Mn Then Mn:=Tr[Vi].T^.Cts^[I];
+  If Mn>0 Then Mn:=0;
+ End;
+ Total:=0; For K:=0 To NT-1 Do Inc(Total,Tr[K].Last-Tr[K].First+1);
+ GetMem(CueT,Total*4+16); GetMem(CueP,Total*4+16); NCue:=0;
+ MBLen:=0;
+ { en-tete EBML }
+ Te:=EBeg($1A45DFA3);
+ EUInt($4286,1); EUInt($42F7,1); EUInt($42F2,4); EUInt($42F3,8); EStr($4282,Doc); EUInt($4287,4); EUInt($4285,2);
+ EEnd(Te);
+ Seg:=EBeg($18538067);             { Seg = decalage (fichier) du champ taille du segment }
+ BlockWrite(FO,MB^,MBLen); MBLen:=0;
+ SegStart:=Seg+8;
+ { Info }
+ Te:=EBeg($1549A966);
+ EUInt($2AD7B1,1000000); EFlt($4489,DurMs); EStr($4D80,'ANYMP4'); EStr($5741,'ANYMP4');
+ EEnd(Te);
+ { Tracks }
+ Tk:=EBeg($1654AE6B);
+ For K:=0 To NT-1 Do Begin
+  Te:=EBeg($AE);
+  EUInt($D7,K+1); EUInt($73C5,K+1);
+  If Tr[K].T^.IsVideo Then EUInt($83,1) Else EUInt($83,2);
+  EUInt($9C,0);
+  EStr($86,MkvCodecId(Tr[K].T^.Codec,Tr[K].T^.IsVideo));
+  If Tr[K].T^.CfgLen>0 Then Begin
+   EId($63A2); I:=Tr[K].T^.CfgLen; If I<127 Then M8($80+I) Else Begin M8($40+(I Shr 8)); M8(I); End;
+   For I:=0 To Tr[K].T^.CfgLen-1 Do M8(Tr[K].T^.Cfg[I]);
+  End;
+  If Tr[K].T^.IsVideo Then Begin
+   If Tr[K].T^.Dur^[Tr[K].First]>0 Then EUInt($23E383,Round(1.0E9*Tr[K].T^.Dur^[Tr[K].First]/Tr[K].T^.Ts));
+   I:=EBeg($E0); EUInt($B0,Tr[K].T^.W); EUInt($BA,Tr[K].T^.H); EEnd(I);
+  End Else Begin
+   I:=EBeg($E1); EFlt($B5,Tr[K].T^.Rate); EUInt($9F,Tr[K].T^.Chans); EEnd(I);
+  End;
+  EEnd(Te);
+ End;
+ EEnd(Tk);
+ Flush;
+ { clusters }
+ For K:=0 To NT-1 Do Begin Idx[K]:=Tr[K].First; Dp[K]:=0; End;
+ InCl:=False; Cnt:=0; ClMs:=0; Cl:=0; ClStart:=0;
+ While Ok And ((Idx[0]<=Tr[0].Last) Or ((NT>1) And (Idx[1]<=Tr[1].Last))) Do Begin
+  Nxt:=-1;
+  For K:=0 To NT-1 Do If Idx[K]<=Tr[K].Last Then Begin
+   If (Nxt<0) Or (Dp[K]*1000.0/Tr[K].T^.Ts<Dp[Nxt]*1000.0/Tr[Nxt].T^.Ts) Then Nxt:=K;
+  End;
+  K:=Nxt;
+  Ms:=Round(Dp[K]*1000.0/Tr[K].T^.Ts);
+  Pts:=Ms;
+  Key:=True;
+  If Tr[K].T^.IsVideo Then Begin
+   Pts:=Round((Dp[K]+Tr[K].T^.Cts^[Idx[K]]-Mn)*1000.0/Tr[K].T^.Ts);
+   Key:=Tr[K].T^.Sync^[Idx[K]]<>0;
+  End;
+  { nouveau cluster : image cle video, ou plus de 5 s }
+  NeedCl:=Not InCl;
+  If InCl And (Pts-ClMs>=5000) Then NeedCl:=True;
+  If InCl And Tr[K].T^.IsVideo And Key And (Pts-ClMs>=1000) Then NeedCl:=True;
+  If InCl And (Pts-ClMs>30000) Then NeedCl:=True;
+  If NeedCl Then Begin
+   If InCl Then Begin EEnd(Cl); Flush; End;
+   ClStart:=FilePos(FO)-SegStart+MBLen; ClMs:=Pts; If ClMs<0 Then ClMs:=0;
+   Cl:=EBeg($1F43B675); EUInt($E7,ClMs); InCl:=True;
+  End;
+  If Tr[K].T^.IsVideo And Key Then Begin
+   CueT^[NCue]:=Pts; CueP^[NCue]:=ClStart; Inc(NCue);
+  End;
+  Buf:=MuxFetch(Tr[K],Idx[K],Len);
+  Rel:=Pts-ClMs; If Rel>32767 Then Rel:=32767; If Rel<-32768 Then Rel:=-32768;
+  EId($A3); Sz:=Len+4; M8($10 Or ((Sz Shr 24) And 15)); M8(Sz Shr 16); M8(Sz Shr 8); M8(Sz);
+  M8($80+K+1); M8(Rel Shr 8); M8(Rel);
+  If Key Then M8($80) Else M8(0);
+  MEnsure(Len); Move(Buf^,MB^[MBLen],Len); Inc(MBLen,Len);
+  Inc(Dp[K],Tr[K].T^.Dur^[Idx[K]]); Inc(Idx[K]); Inc(Cnt);
+  If (Cnt And 31)=0 Then Begin
+   UiTick(Cnt,Max(1,Total));
+   If Stopped Then Ok:=False;
+  End;
+ End;
+ If InCl Then Begin EEnd(Cl); Flush; End;
+ If Not Ok Then Begin
+  If Err='' Then If Stopped Then Err:='Conversion annul'#233'e.' Else Err:='Erreur de multiplexage.';
+ End Else Begin
+  { index (Cues) : positions relatives au debut des donnees du segment }
+  Te:=EBeg($1C53BB6B);
+  For I:=0 To NCue-1 Do Begin
+   Cl:=EBeg($BB); EUInt($B3,CueT^[I]);
+   Tk:=EBeg($B7); EUInt($F7,Vi+1); EUInt($F1,CueP^[I]); EEnd(Tk);
+   EEnd(Cl);
+  End;
+  EEnd(Te);
+  Flush;
+  { taille du segment }
+  Sz:=FilePos(FO)-SegStart;
+  Seek(FO,Seg); Hd[0]:=$01; For I:=0 To 6 Do Hd[1+I]:=(Int64(Sz) Shr (8*(6-I))) And 255;
+  BlockWrite(FO,Hd,8);
+  MuxMkv:=True;
+ End;
+ Close(FO);
+ FreeMem(CueT,Total*4+16); FreeMem(CueP,Total*4+16);
+ For K:=0 To NT-1 Do If Tr[K].Opened Then Begin Close(Tr[K].F); Tr[K].Opened:=False; End;
+ If Not Ok Then DelFile(Dst);
+End;
 {$ENDIF}
 
 {$IFDEF FPC}
@@ -22366,7 +22555,10 @@ End;
 { Ecrit le conteneur choisi par l'extension du profil }
 Function MuxOut(Const Ext,Dst: String; Var Tr: Array Of TMuxTrk; NT: Integer; Var Err: String): Boolean;
 Begin
- If Ext='FLV' Then MuxOut:=MuxFlv(Dst,Tr,NT,Err) Else MuxOut:=MuxMp4(Dst,BrandFor(Ext,False),Tr,NT,Err);
+ If Ext='FLV' Then MuxOut:=MuxFlv(Dst,Tr,NT,Err)
+ Else If Ext='MKV' Then MuxOut:=MuxMkv(Dst,'matroska',Tr,NT,Err)
+ Else If Ext='WEBM' Then MuxOut:=MuxMkv(Dst,'webm',Tr,NT,Err)
+ Else MuxOut:=MuxMp4(Dst,BrandFor(Ext,False),Tr,NT,Err);
 End;
 
 { Sortie audio AAC (ADTS) ou M4A : a partir du WAV canonique }
