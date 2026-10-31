@@ -59283,7 +59283,7 @@ End;
 { Colle entre l'interface et les moteurs audio                             }
 { ====================================================================== }
 Const
- ekMP3 = 1; ekAIFF = 2; ekVOC = 3; ekMOD = 4; ekEncMP3 = 5; ekAAC = 6; ekEncAAC = 7; ekAC3 = 8; ekEncAC3 = 9; ekOgg = 10; ekEncVorbis = 11; ekVorbisPk = 12; ekDca = 13; ekWma = 14; ekEncWma = 15; ekEncMpeg4 = 16; ekEncTheora = 17; ekEncWmv = 18; ekEncMpeg1 = 19; ekDecVid = 20; ekMpa = 21; ekEncMp2 = 22; ekWmaAvi = 23;
+ ekMP3 = 1; ekAIFF = 2; ekVOC = 3; ekMOD = 4; ekEncMP3 = 5; ekAAC = 6; ekEncAAC = 7; ekAC3 = 8; ekEncAC3 = 9; ekOgg = 10; ekEncVorbis = 11; ekVorbisPk = 12; ekDca = 13; ekWma = 14; ekEncWma = 15; ekEncMpeg4 = 16; ekEncTheora = 17; ekEncWmv = 18; ekEncMpeg1 = 19; ekDecVid = 20; ekMpa = 21; ekEncMp2 = 22; ekWmaAvi = 23; ekAsfSpool = 24;
 
 Type
  TByteArr = Array[0..32767] Of Byte;
@@ -59373,10 +59373,11 @@ Begin
    ekEncWma: EncodeWMAFile(Src,Dst,2,Arg*1000,0);
    ekEncMpeg4: Begin HasVideoBitrate:=Arg>0; VideoBitrate:=Arg*1000; EncodeMPEG4(Src,Dst); End;
    ekEncTheora: EncodeTheora(Src,Dst,Arg,0);
-   ekEncWmv: Begin THQuality:=-1; EncodeWMV(Src,Dst,5,THQuality,249,0); End;
+   ekEncWmv: Begin THQuality:=-1; HasVideoBitrate:=Arg>0; VideoBitrate:=Arg*1000; EncodeWMV(Src,Dst,5,THQuality,249,Int64(Arg)*1000); End;
    ekEncMpeg1: MPEG1Video(Src,Dst,True);
    ekMpa: DecodeMPA(Src,Dst);
    ekWmaAvi: DecodeWMAAvi(Src,Dst);
+   ekAsfSpool: DemuxASF(Src,Dst);
    ekEncMp2: EncodeMP2(Src,Dst,Arg);
    ekDecVid: Begin
     NVHdrOk:=False; M4VidHook:=Nil; NVDone:=False; NVOpened:=False; NVHaveLast:=False; NVLast:=Nil; NVGap:=0; NVFrames:=0;
@@ -60360,6 +60361,7 @@ Begin
  Else If Ext='OGG' Then WriteFinal:=RunEng(ekEncVorbis,Canon,Dst,0,Err)
  Else If Ext='AC3' Then WriteFinal:=RunEng(ekEncAC3,Canon,Dst,Pr.AKb,Err)
  Else If Ext='WMA' Then WriteFinal:=RunEng(ekEncWma,Canon,Dst,Pr.AKb,Err)
+ Else If Ext='MP2' Then WriteFinal:=RunEng(ekEncMp2,Canon,Dst,Pr.AKb,Err)
  {$ENDIF}
  Else Err:='Format audio de sortie non pris en charge: '+Ext;
 End;
@@ -64174,6 +64176,350 @@ Begin
 End;
 
 
+
+{ ---- multiplexeur MPEG-PS (video MPEG-1/2 + audio MPEG Layer II) ---- }
+Procedure PsPts(Var B: Array Of Byte; At: LongInt; Pfx: Integer; V: Int64);
+Begin
+ B[At]:=(Pfx Shl 4) Or (((V Shr 30) And 7) Shl 1) Or 1;
+ B[At+1]:=(V Shr 22) And 255;
+ B[At+2]:=(((V Shr 15) And 127) Shl 1) Or 1;
+ B[At+3]:=(V Shr 7) And 255;
+ B[At+4]:=((V And 127) Shl 1) Or 1;
+End;
+
+Function MuxPs(Const Dst,VPath,APath: String; HaveA: Boolean; Fn,Fd: LongInt; Mpeg2: Boolean; Var Err: String): Boolean;
+Type TAu = Record Start,Len,Tr,Typ: LongInt; End; TAuA = Array[0..0] Of TAu; PAu = ^TAuA;
+Var
+ FV,FA,FO: File; Vs,As_,I,J,P,N,Nau,Cap,Code,LastSlice,AuStart,Npic,Disp,Base,MaxTr,Na,Q,Rate: LongInt;
+ VB,AB: PBArr; Au: PAu; Af: PLArr; HasB: Boolean; Dur: Double; Pk: Array[0..2100] Of Byte; Ok: Boolean;
+ Scr,NextV,NextA: Int64; Va,Aa,Wr,PosV,PosA: LongInt; FirstPack: Boolean; Pts,Dts: Int64; Sp: LongInt;
+ Ver,Idx,Br,Si,Pad,L,Spf,Ar: LongInt; Tmp: LongInt; MuxRate: LongInt; Frames: LongInt; Total: Int64;
+ Procedure Pack(Sid: LongInt; Data: PBArr; Len: LongInt; WithPts,WithDts: Boolean; PtsV,DtsV: Int64);
+ Var Hl,Pl,K,Pp: LongInt; Sc: Int64; Hd: LongInt;
+ Begin
+  { en-tete de pack }
+  Sc:=Scr; Pp:=0;
+  Pk[0]:=0; Pk[1]:=0; Pk[2]:=1; Pk[3]:=$BA;
+  If Mpeg2 Then Begin
+   Pk[4]:=$44 Or (((Sc Shr 30) And 7) Shl 3) Or ((Sc Shr 28) And 3);
+   Pk[5]:=(Sc Shr 20) And 255;
+   Pk[6]:=(((Sc Shr 15) And 31) Shl 3) Or 4 Or ((Sc Shr 13) And 3);
+   Pk[7]:=(Sc Shr 5) And 255;
+   Pk[8]:=((Sc And 31) Shl 3) Or 4;
+   Pk[9]:=1;
+   Pk[10]:=(MuxRate Shr 14) And 255; Pk[11]:=(MuxRate Shr 6) And 255; Pk[12]:=((MuxRate And 63) Shl 2) Or 3;
+   Pk[13]:=$F8; Pp:=14;
+  End Else Begin
+   Pk[4]:=$21 Or (((Sc Shr 30) And 7) Shl 1);
+   Pk[5]:=(Sc Shr 22) And 255;
+   Pk[6]:=(((Sc Shr 15) And 127) Shl 1) Or 1;
+   Pk[7]:=(Sc Shr 7) And 255;
+   Pk[8]:=((Sc And 127) Shl 1) Or 1;
+   Pk[9]:=$80 Or ((MuxRate Shr 15) And 127); Pk[10]:=(MuxRate Shr 7) And 255; Pk[11]:=((MuxRate And 127) Shl 1) Or 1;
+   Pp:=12;
+  End;
+  If FirstPack Then Begin
+   Pk[Pp]:=0; Pk[Pp+1]:=0; Pk[Pp+2]:=1; Pk[Pp+3]:=$BB; Pk[Pp+4]:=0; Pk[Pp+5]:=12;
+   Pk[Pp+6]:=$80 Or ((MuxRate Shr 15) And 127); Pk[Pp+7]:=(MuxRate Shr 7) And 255; Pk[Pp+8]:=((MuxRate And 127) Shl 1) Or 1;
+   Pk[Pp+9]:=$04 Or 2 Or 1; Pk[Pp+10]:=$E1; Pk[Pp+11]:=$FF;
+   Pk[Pp+12]:=$E0; Pk[Pp+13]:=$E0; Pk[Pp+14]:=$2E;
+   Pk[Pp+15]:=$C0; Pk[Pp+16]:=$C0; Pk[Pp+17]:=$20;
+   Inc(Pp,18); FirstPack:=False;
+  End;
+  { en-tete PES }
+  Pk[Pp]:=0; Pk[Pp+1]:=0; Pk[Pp+2]:=1; Pk[Pp+3]:=Sid;
+  If Mpeg2 Then Begin
+   Hd:=3; If WithDts Then Inc(Hd,10) Else If WithPts Then Inc(Hd,5);
+   Pl:=Hd+Len;
+   Pk[Pp+4]:=Pl Shr 8; Pk[Pp+5]:=Pl And 255;
+   Pk[Pp+6]:=$80;
+   If WithDts Then Pk[Pp+7]:=$C0 Else If WithPts Then Pk[Pp+7]:=$80 Else Pk[Pp+7]:=0;
+   Pk[Pp+8]:=Hd-3;
+   K:=Pp+9;
+   If WithDts Then Begin PsPts(Pk,K,3,PtsV); PsPts(Pk,K+5,1,DtsV); Inc(K,10); End
+   Else If WithPts Then Begin PsPts(Pk,K,2,PtsV); Inc(K,5); End;
+  End Else Begin
+   Hd:=1; If WithDts Then Inc(Hd,9) Else If WithPts Then Inc(Hd,4);
+   Pl:=Hd+Len;
+   Pk[Pp+4]:=Pl Shr 8; Pk[Pp+5]:=Pl And 255;
+   K:=Pp+6;
+   If WithDts Then Begin PsPts(Pk,K,3,PtsV); PsPts(Pk,K+5,1,DtsV); Inc(K,10); End
+   Else If WithPts Then Begin PsPts(Pk,K,2,PtsV); Inc(K,5); End
+   Else Begin Pk[K]:=$0F; Inc(K); End;
+  End;
+  Move(Data^,Pk[K],Len);
+  BlockWrite(FO,Pk,K+Len); Inc(Wr,K+Len);
+  Scr:=Round(Wr*8.0*90000.0/(MuxRate*400.0));
+ End;
+Begin
+ MuxPs:=False; Ok:=True; Wr:=0; FirstPack:=True; Scr:=0; Dur:=90000.0*Fd/Fn;
+ If Not OpenSrc(VPath,FV) Then Begin Err:='Flux video MPEG illisible.'; Exit; End;
+ Vs:=FileSize(FV); GetMem(VB,Vs+16); BlockRead(FV,VB^,Vs); Close(FV);
+ As_:=0; AB:=Nil;
+ If HaveA Then If OpenSrc(APath,FA) Then Begin As_:=FileSize(FA); GetMem(AB,As_+16); BlockRead(FA,AB^,As_); Close(FA); End Else HaveA:=False;
+ { images }
+ Cap:=Vs Div 16+16; GetMem(Au,Cap*SizeOf(TAu)); Nau:=0; AuStart:=-1; LastSlice:=0; HasB:=False; P:=0; Npic:=0;
+ While P+4<Vs Do Begin
+  If (VB^[P]=0) And (VB^[P+1]=0) And (VB^[P+2]=1) Then Begin
+   Code:=VB^[P+3];
+   If (Code=$B3) Or (Code=$B8) Or (Code=0) Then Begin
+    If (Code<>0) And (LastSlice<>0) And (Nau>0) Then Begin Au^[Nau-1].Len:=P-Au^[Nau-1].Start; LastSlice:=0; AuStart:=P; End
+    Else If AuStart<0 Then AuStart:=P;
+    If Code=0 Then Begin
+     If (LastSlice<>0) And (Nau>0) Then Begin Au^[Nau-1].Len:=P-Au^[Nau-1].Start; AuStart:=P; End;
+     LastSlice:=0;
+     If Nau<Cap Then Begin
+      Au^[Nau].Start:=AuStart; Au^[Nau].Tr:=(VB^[P+4] Shl 2) Or (VB^[P+5] Shr 6); Au^[Nau].Typ:=(VB^[P+5] Shr 3) And 7; Au^[Nau].Len:=0;
+      If Au^[Nau].Typ=3 Then HasB:=True;
+      Inc(Nau); AuStart:=-1;
+     End;
+    End;
+   End Else If (Code>=1) And (Code<=$AF) Then LastSlice:=1;
+   Inc(P,3);
+  End Else Inc(P);
+ End;
+ If Nau>0 Then Au^[Nau-1].Len:=Vs-Au^[Nau-1].Start;
+ If Nau=0 Then Begin Err:='Aucune image MPEG.'; FreeMem(VB,Vs+16); FreeMem(Au,Cap*SizeOf(TAu)); Exit; End;
+ { trames audio }
+ Na:=0;
+ If HaveA Then Begin
+  GetMem(Af,(As_ Div 100+16)*8); P:=0;
+  While P+4<As_ Do Begin
+   If (AB^[P]<>$FF) Or ((AB^[P+1] And $E0)<>$E0) Then Begin Inc(P); Continue; End;
+   Ver:=(AB^[P+1] Shr 3) And 3; Idx:=(AB^[P+1] Shr 1) And 3; Br:=AB^[P+2] Shr 4; Si:=(AB^[P+2] Shr 2) And 3; Pad:=(AB^[P+2] Shr 1) And 1;
+   If (Ver=1) Or (Idx<>2) Or (Br=0) Or (Br=15) Or (Si=3) Then Begin Inc(P); Continue; End;
+   { couche II : debit en kb/s }
+   If Ver=3 Then Begin
+    Case Br Of 1: Ar:=32; 2: Ar:=48; 3: Ar:=56; 4: Ar:=64; 5: Ar:=80; 6: Ar:=96; 7: Ar:=112; 8: Ar:=128; 9: Ar:=160; 10: Ar:=192; 11: Ar:=224; 12: Ar:=256; 13: Ar:=320; Else Ar:=384; End;
+    Case Si Of 0: Q:=44100; 1: Q:=48000; Else Q:=32000; End;
+    L:=144000*Ar Div Q+Pad;
+   End Else Begin
+    Case Br Of 1: Ar:=8; 2: Ar:=16; 3: Ar:=24; 4: Ar:=32; 5: Ar:=40; 6: Ar:=48; 7: Ar:=56; 8: Ar:=64; 9: Ar:=80; 10: Ar:=96; 11: Ar:=112; 12: Ar:=128; 13: Ar:=144; Else Ar:=160; End;
+    Case Si Of 0: Q:=22050; 1: Q:=24000; Else Q:=16000; End;
+    L:=144000*Ar Div Q+Pad;
+   End;
+   If P+L>As_ Then Break;
+   Af^[Na*2]:=P; Af^[Na*2+1]:=L; Inc(Na); Inc(P,L);
+  End;
+  Spf:=1152;
+  If Na=0 Then HaveA:=False;
+ End;
+ Rate:=44100;
+ If HaveA Then Begin
+  Q:=(AB^[Af^[0]+2] Shr 2) And 3;
+  If Q=1 Then Rate:=48000 Else If Q=2 Then Rate:=32000;
+ End;
+ Total:=Vs+As_;
+ MuxRate:=Round(Total/(Nau*Dur/90000.0)*1.25/50.0)+1; If MuxRate<2000 Then MuxRate:=2000;
+ If Not CreateOut(Dst,FO,Err) Then Begin FreeMem(VB,Vs+16); FreeMem(Au,Cap*SizeOf(TAu)); Exit; End;
+ { decalage initial 0,5 s }
+ Va:=0; Aa:=0; PosV:=0; PosA:=0;
+ While (Va<Nau) Or (HaveA And (Aa<Na)) Do Begin
+  { instant de decodage de la prochaine donnee }
+  NextV:=Round(45000+Va*Dur); NextA:=Round(45000+Aa*(Spf*90000.0/Rate));
+  If (Va<Nau) And ((Not HaveA) Or (Aa>=Na) Or (NextV<=NextA)) Then Begin
+   Sp:=Au^[Va].Len-PosV; If Sp>1900 Then Sp:=1900;
+   Disp:=Au^[Va].Tr;
+   { temps d'affichage : numero d'ordre dans le groupe + base }
+   If PosV=0 Then Begin
+    Dts:=NextV; Pts:=Round(45000+(Va-(Va Mod 1)+0)*Dur);
+    If HasB Then Begin
+     { PTS = DTS pour I/P, ou DTS + 1 image par decalage ; approximation : reordonnancement d'au plus une image }
+     If Au^[Va].Typ=3 Then Pts:=Dts Else Pts:=Dts+Round(Dur*(1+Ord(Va>0)));
+     If Va=0 Then Pts:=Dts+Round(2*Dur);
+    End Else Pts:=Dts;
+    Pack($E0,@VB^[Au^[Va].Start+PosV],Sp,True,HasB,Pts,Dts);
+   End Else Pack($E0,@VB^[Au^[Va].Start+PosV],Sp,False,False,0,0);
+   Inc(PosV,Sp);
+   If PosV>=Au^[Va].Len Then Begin Inc(Va); PosV:=0; End;
+  End Else Begin
+   { audio : une trame par paquet }
+   Pack($C0,@AB^[Af^[Aa*2]],Af^[Aa*2+1],True,False,NextA,0);
+   Inc(Aa);
+  End;
+  If (Va And 15)=0 Then Begin UiTick(Va,Nau); If Stopped Then Begin Ok:=False; Break; End; End;
+ End;
+ Pk[0]:=0; Pk[1]:=0; Pk[2]:=1; Pk[3]:=$B9; BlockWrite(FO,Pk,4);
+ Close(FO); FreeMem(VB,Vs+16); FreeMem(Au,Cap*SizeOf(TAu)); If AB<>Nil Then Begin FreeMem(AB,As_+16); FreeMem(Af,(As_ Div 100+16)*8); End;
+ If Not Ok Then Begin Err:='Conversion annul'#233'e.'; DelFile(Dst); End;
+ MuxPs:=Ok;
+End;
+
+
+{ ---- multiplexeur ASF (video WMV1/WMV2 + audio WMA) ---- }
+Type TLB = Record P: PBArr; Len,Cap: LongInt; End;
+Procedure LbInit(Var B: TLB); Begin B.Cap:=65536; GetMem(B.P,B.Cap); B.Len:=0; End;
+Procedure LbEnsure(Var B: TLB; N: LongInt);
+Var NB: PBArr;
+Begin
+ If B.Len+N+16>B.Cap Then Begin GetMem(NB,B.Cap*2+N+65536); Move(B.P^,NB^,B.Len); FreeMem(B.P,B.Cap); B.P:=NB; B.Cap:=B.Cap*2+N+65536; End;
+End;
+Procedure Lb8(Var B: TLB; V: LongInt); Begin LbEnsure(B,1); B.P^[B.Len]:=V And 255; Inc(B.Len); End;
+Procedure Lb16(Var B: TLB; V: LongInt); Begin Lb8(B,V); Lb8(B,V Shr 8); End;
+Procedure Lb32(Var B: TLB; V: LongInt); Begin Lb8(B,V); Lb8(B,V Shr 8); Lb8(B,V Shr 16); Lb8(B,V Shr 24); End;
+Procedure Lb64(Var B: TLB; V: Int64); Begin Lb32(B,V And $FFFFFFFF); Lb32(B,V Shr 32); End;
+Procedure LbGuid(Var B: TLB; Const G: String); Var I: Integer; Begin For I:=1 To 16 Do Lb8(B,Ord(G[I])); End;
+Procedure LbBytes(Var B: TLB; Src: PBArr; N: LongInt); Begin LbEnsure(B,N); Move(Src^,B.P^[B.Len],N); Inc(B.Len,N); End;
+Procedure LbPatch32(Var B: TLB; At,V: LongInt); Var I: Integer; Begin For I:=0 To 3 Do B.P^[At+I]:=(V Shr (8*I)) And 255; End;
+
+Const
+ GHdr: String[16]=#$30#$26#$B2#$75#$8E#$66#$CF#$11#$A6#$D9#$00#$AA#$00#$62#$CE#$6C;
+ GFileP: String[16]=#$A1#$DC#$AB#$8C#$47#$A9#$CF#$11#$8E#$E4#$00#$C0#$0C#$20#$53#$65;
+ GStrmP: String[16]=#$91#$07#$DC#$B7#$B7#$A9#$CF#$11#$8E#$E6#$00#$C0#$0C#$20#$53#$65;
+ GAudM: String[16]=#$40#$9E#$69#$F8#$4D#$5B#$CF#$11#$A8#$FD#$00#$80#$5F#$5C#$44#$2B;
+ GVidM: String[16]=#$C0#$EF#$19#$BC#$4D#$5B#$CF#$11#$A8#$FD#$00#$80#$5F#$5C#$44#$2B;
+ GDataO: String[16]=#$36#$26#$B2#$75#$8E#$66#$CF#$11#$A6#$D9#$00#$AA#$00#$62#$CE#$6C;
+ GHdrExt: String[16]=#$B5#$03#$BF#$5F#$2E#$A9#$CF#$11#$8E#$E3#$00#$C0#$0C#$20#$53#$65;
+ GNoEc: String[16]=#$00#$57#$FB#$20#$55#$5B#$CF#$11#$A8#$FD#$00#$80#$5F#$5C#$44#$2B;
+ GRes1: String[16]=#$11#$D2#$D3#$AB#$BA#$A9#$CF#$11#$8E#$E6#$00#$C0#$0C#$20#$53#$65;
+ AsPkt = 3200; AsPre = 1500;
+
+Var AsPk: TLB; AsPay: Array[0..3300] Of Byte; AsPayN,AsNPay,AsSend,AsPackets: LongInt; AsObj: Array[1..2] Of LongInt;
+
+Procedure AsFlush;
+Var Pad,Q: LongInt;
+Begin
+ If AsNPay=0 Then Exit;
+ Pad:=AsPkt-(11+AsPayN);
+ Lb8(AsPk,$11); Lb8(AsPk,$5D); Lb16(AsPk,Pad); Lb32(AsPk,AsSend); Lb16(AsPk,0);
+ Lb8(AsPk,$80 Or AsNPay);
+ LbBytes(AsPk,@AsPay,AsPayN);
+ For Q:=1 To Pad Do Lb8(AsPk,0);
+ Inc(AsPackets); AsNPay:=0; AsPayN:=0;
+End;
+
+Procedure AsPut(Stm,Key,Tms: LongInt; Src: PBArr; Len: LongInt);
+Var Off,Take,Room,Tw: LongInt;
+ Procedure P8(V: LongInt); Begin AsPay[AsPayN]:=V And 255; Inc(AsPayN); End;
+ Procedure P32(V: LongInt); Begin P8(V); P8(V Shr 8); P8(V Shr 16); P8(V Shr 24); End;
+Begin
+ Off:=0;
+ If Len=0 Then Exit;
+ While Off<Len Do Begin
+  Room:=AsPkt-11-AsPayN-(1+1+4+1+8+2);
+  If Room<16 Then Begin AsFlush; Room:=AsPkt-11-(1+1+4+1+8+2); End;
+  If AsNPay=0 Then AsSend:=Tms;
+  Take:=Len-Off; If Take>Room Then Take:=Room;
+  P8(Stm Or (Key Shl 7)); P8(AsObj[Stm]); P32(Off); P8(8); P32(Len); P32(Tms+AsPre);
+  P8(Take); P8(Take Shr 8);
+  Move(Src^[Off],AsPay[AsPayN],Take); Inc(AsPayN,Take);
+  Inc(AsNPay); Inc(Off,Take);
+  If (AsNPay>=60) Or (AsPkt-11-AsPayN<40) Then AsFlush;
+ End;
+ AsObj[Stm]:=(AsObj[Stm]+1) And 255;
+End;
+
+Function MuxAsf(Const Dst,AviPath,WmaPath: String; HaveA: Boolean; Fn,Fd: LongInt; Var Err: String): Boolean;
+Var V: TTrkIn; FAvi,FO: File; VBuf,SpB,Ex: PBArr; SpSz,ExL,ExP,VW,VH,I,P,Q,Pp,Nv,Na,Vi,Ai,Apos,Tv,Ta,AId,ACodec,ARate,ACh,AAlign,ABr,AExL,AExP,DurMs,VCap,FileSz,Pfs: LongInt;
+ Dur: Double; Found: Boolean; Hd,Pre0: TLB; Fcc: String; Sp: String;
+ Function Rd(Pos: LongInt): LongInt; Begin Rd:=SpB^[Pos]+SpB^[Pos+1]*256+SpB^[Pos+2]*65536+(SpB^[Pos+3] Shl 24); End;
+Begin
+ MuxAsf:=False; Ex:=Nil; SpB:=Nil; ExL:=0; AExL:=0; Na:=0; AId:=-1; AsNPay:=0; AsPayN:=0; AsPackets:=0; AsObj[1]:=0; AsObj[2]:=0;
+ If Not AviTracks(AviPath,V,Err) Then Exit;
+ VW:=V.W; VH:=V.H; Fcc:=V.Codec;
+ { donnees supplementaires du format video (strf) }
+ If COpen(AviPath) Then Begin
+  P:=12; Found:=False;
+  While (P+12<=CSize) And Not Found Do Begin
+   If (C4(P)='LIST') And (C4(P+8)='hdrl') Then Begin
+    Q:=P+12;
+    While (Q+8<=P+8+L32(P+4)) And Not Found Do Begin
+     If C4(Q)='LIST' Then Inc(Q,12)
+     Else Begin
+      If (C4(Q)='strf') And (L32(Q+4)>40) Then Begin
+       ExL:=L32(Q+4)-40; GetMem(Ex,ExL+8); For I:=0 To ExL-1 Do Ex^[I]:=CB(Q+8+40+I); Found:=True;
+      End;
+      Q:=Q+8+L32(Q+4)+(L32(Q+4) And 1);
+     End;
+    End;
+    Break;
+   End;
+   If L32(P+4)<0 Then Break;
+   P:=P+8+L32(P+4)+(L32(P+4) And 1);
+  End;
+  CClose;
+ End;
+ { audio : objets media du fichier ASF produit par l'encodeur WMA }
+ Apos:=0;
+ If HaveA Then Begin
+  Sp:=TmpName('SPL'); Err:='';
+  If RunEng(ekAsfSpool,WmaPath,Sp,0,Err) And OpenSrc(Sp,FAvi) Then Begin
+   SpSz:=FileSize(FAvi); GetMem(SpB,SpSz+16); BlockRead(FAvi,SpB^,SpSz); Close(FAvi);
+  End Else HaveA:=False;
+  DelFile(Sp); Err:='';
+ End;
+ If HaveA Then Begin
+  Found:=False; Pp:=Rd(8); P:=12;
+  For I:=1 To Pp Do Begin
+   If (Rd(P+4)=2) And Not Found Then Begin Found:=True; AId:=Rd(P); ACodec:=Rd(P+8); ARate:=Rd(P+20); ACh:=Rd(P+24); AAlign:=Rd(P+28); ABr:=Rd(P+32); AExL:=Rd(P+36); AExP:=P+40; End;
+   Inc(P,40+Rd(P+36));
+  End;
+  If Not Found Then HaveA:=False Else Begin
+   Apos:=P; Q:=P; Na:=0;
+   While (Q+16<=SpSz) And (Rd(Q)<>0) Do Begin If Rd(Q)=AId Then Inc(Na); Inc(Q,16+Rd(Q+12)); End;
+  End;
+ End;
+ Nv:=V.N;
+ If Not OpenSrc(AviPath,FAvi) Then Begin Err:='Video interm'#233'diaire illisible.'; Exit; End;
+ VCap:=1; For I:=0 To Nv-1 Do If V.Sz^[I]>VCap Then VCap:=V.Sz^[I];
+ GetMem(VBuf,VCap+16);
+ LbInit(AsPk); Dur:=1000.0*Fd/Fn; Vi:=0; Ai:=0;
+ While (Vi<Nv) Or (HaveA And (Ai<Na)) Do Begin
+  Tv:=Round(Vi*Dur); Ta:=MaxLongInt;
+  If HaveA And (Ai<Na) Then Begin
+   While (Apos+16<=SpSz) And (Rd(Apos)<>AId) Do Inc(Apos,16+Rd(Apos+12));
+   Ta:=Rd(Apos+8);
+  End;
+  If (Vi<Nv) And ((Not HaveA) Or (Ai>=Na) Or (Tv<=Ta)) Then Begin
+   Seek(FAvi,V.Off^[Vi]); BlockRead(FAvi,VBuf^,V.Sz^[Vi]);
+   AsPut(1,Ord((VBuf^[0] Shr 6)=0),Tv,VBuf,V.Sz^[Vi]);
+   Inc(Vi);
+  End Else Begin
+   AsPut(2,1,Ta,@SpB^[Apos+16],Rd(Apos+12));
+   Inc(Apos,16+Rd(Apos+12)); Inc(Ai);
+  End;
+  If (Vi And 15)=0 Then Begin UiTick(Vi,Nv); If Stopped Then Begin Err:='Conversion annul'#233'e.'; Break; End; End;
+ End;
+ AsFlush; Close(FAvi); FreeMem(VBuf,VCap+16);
+ If Err<>'' Then Begin FreeMem(AsPk.P,AsPk.Cap); Exit; End;
+
+ DurMs:=Round(Nv*Dur);
+ { objets d'en-tete }
+ LbInit(Hd);
+ LbGuid(Hd,GFileP); Lb64(Hd,104); LbGuid(Hd,GHdr);
+ Pfs:=Hd.Len; Lb64(Hd,0); Lb64(Hd,0); Lb64(Hd,AsPackets);
+ Lb64(Hd,Int64(DurMs+AsPre)*10000); Lb64(Hd,Int64(DurMs)*10000); Lb64(Hd,AsPre); Lb32(Hd,2); Lb32(Hd,AsPkt); Lb32(Hd,AsPkt); Lb32(Hd,2000000);
+ { flux video }
+ LbGuid(Hd,GStrmP); Lb64(Hd,24+54+51+ExL); LbGuid(Hd,GVidM); LbGuid(Hd,GNoEc); Lb64(Hd,0); Lb32(Hd,51+ExL); Lb32(Hd,0); Lb16(Hd,1); Lb32(Hd,0);
+ Lb32(Hd,VW); Lb32(Hd,VH); Lb8(Hd,2); Lb16(Hd,40+ExL);
+ Lb32(Hd,40+ExL); Lb32(Hd,VW); Lb32(Hd,VH); Lb16(Hd,1); Lb16(Hd,24); For I:=1 To 4 Do Lb8(Hd,Ord(Fcc[I]));
+ Lb32(Hd,VW*VH*3); Lb32(Hd,0); Lb32(Hd,0); Lb32(Hd,0); Lb32(Hd,0);
+ If ExL>0 Then LbBytes(Hd,Ex,ExL);
+ { flux audio }
+ If HaveA Then Begin
+  LbGuid(Hd,GStrmP); Lb64(Hd,24+54+18+AExL); LbGuid(Hd,GAudM); LbGuid(Hd,GNoEc); Lb64(Hd,0); Lb32(Hd,18+AExL); Lb32(Hd,0); Lb16(Hd,2); Lb32(Hd,0);
+  Lb16(Hd,ACodec); Lb16(Hd,ACh); Lb32(Hd,ARate); Lb32(Hd,ABr Div 8); Lb16(Hd,AAlign); Lb16(Hd,16); Lb16(Hd,AExL);
+  If AExL>0 Then LbBytes(Hd,@SpB^[AExP],AExL);
+ End;
+ { extension d'en-tete }
+ LbGuid(Hd,GHdrExt); Lb64(Hd,46); LbGuid(Hd,GRes1); Lb16(Hd,6); Lb32(Hd,0);
+ FileSz:=30+Hd.Len+50+AsPk.Len;
+ LbPatch32(Hd,Pfs,FileSz);
+ If Not CreateOut(Dst,FO,Err) Then Begin FreeMem(Hd.P,Hd.Cap); FreeMem(AsPk.P,AsPk.Cap); Exit; End;
+ LbInit(Pre0);
+ LbGuid(Pre0,GHdr); Lb64(Pre0,30+Hd.Len); Lb32(Pre0,3+Ord(HaveA)); Lb8(Pre0,1); Lb8(Pre0,2);
+ BlockWrite(FO,Pre0.P^,Pre0.Len); BlockWrite(FO,Hd.P^,Hd.Len);
+ Pre0.Len:=0;
+ LbGuid(Pre0,GDataO); Lb64(Pre0,50+AsPk.Len); LbGuid(Pre0,GHdr); Lb64(Pre0,AsPackets); Lb8(Pre0,1); Lb8(Pre0,1);
+ BlockWrite(FO,Pre0.P^,Pre0.Len); BlockWrite(FO,AsPk.P^,AsPk.Len);
+ Close(FO);
+ FreeMem(Pre0.P,Pre0.Cap); FreeMem(Hd.P,Hd.Cap); FreeMem(AsPk.P,AsPk.Cap);
+ If SpB<>Nil Then FreeMem(SpB,SpSz+16);
+ If Ex<>Nil Then FreeMem(Ex,ExL+8);
+ TrkClear(V);
+ MuxAsf:=True;
+End;
+
 { ---- fusion de deux flux Ogg (Theora + Vorbis) en un seul fichier ---- }
 Type TOgPage = Record Off,Len,Seq: LongInt; Gran: Int64; Bos: Boolean; End;
  TOgPages = Array[0..99999] Of TOgPage; POgPages = ^TOgPages;
@@ -64534,6 +64880,33 @@ Begin
   V.W:=VJOutW; V.H:=VJOutH;
   Ok:=MuxAvi(Dst,V,A,HaveA,Es,Au,'XVID',VJFn,VJFd,Err);
   TrkClear(V); If HaveA Then TrkClear(A);
+  DelFile(Es); If Au<>'' Then DelFile(Au);
+ End Else If Pr.Ext='WMV' Then Begin
+  If Not RunEng(ekEncWmv,Y4,Es,Pr.VKb,Err) Then Begin DelFile(Y4); DelFile(Es); Exit; End;
+  DelFile(Y4);
+  If HaveAudio Then Begin
+   Au:=TmpName('WMA');
+   If AltAudio(M,Pr,'WMA',Au,Err) Then HaveA:=True Else Begin
+    If Stopped Then Begin DelFile(Es); DelFile(Au); Exit; End;
+    If Pos('Aucune piste audio',Err)=0 Then JobWarn:=' (sans audio : '+Err+')';
+    Err:=''; DelFile(Au); Au:='';
+   End;
+  End;
+  Ok:=MuxAsf(Dst,Es,Au,HaveA,VJFn,VJFd,Err);
+  DelFile(Es); If Au<>'' Then DelFile(Au);
+ End Else If Pr.Ext='MPG' Then Begin
+  VideoCodec:='mpeg2video';
+  If Not RunEng(ekEncMpeg1,Y4,Es,0,Err) Then Begin DelFile(Y4); DelFile(Es); Exit; End;
+  DelFile(Y4);
+  If HaveAudio Then Begin
+   Au:=TmpName('MP2');
+   If AltAudio(M,Pr,'MP2',Au,Err) Then HaveA:=True Else Begin
+    If Stopped Then Begin DelFile(Es); DelFile(Au); Exit; End;
+    If Pos('Aucune piste audio',Err)=0 Then JobWarn:=' (sans audio : '+Err+')';
+    Err:=''; DelFile(Au); Au:='';
+   End;
+  End;
+  Ok:=MuxPs(Dst,Es,Au,HaveA,VJFn,VJFd,True,Err);
   DelFile(Es); If Au<>'' Then DelFile(Au);
  End Else If Pr.Ext='OGV' Then Begin
   If Not RunEng(ekEncTheora,Y4,Es,5,Err) Then Begin DelFile(Y4); DelFile(Es); Exit; End;
