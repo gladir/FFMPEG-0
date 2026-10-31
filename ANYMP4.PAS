@@ -1496,7 +1496,7 @@ Begin
  AddProf(0,'AVI','AVI','MPEG4','MP3','Auto',3000,192,44100,2);
  AddProf(0,'WMV','WMV','WMV2','WMA','Auto',2500,128,44100,2);
  AddProf(0,'WebM VP9','WEBM','VP9','Opus','Auto',3000,128,48000,2);
- AddProf(0,'FLV','FLV','H264','MP3','Auto',2000,128,44100,2);
+ AddProf(0,'FLV','FLV','H264','AAC','Auto',2000,128,44100,2);
  AddProf(0,'MPEG-2 PS','MPG','MPEG2','MP2','Auto',6000,192,48000,2);
  AddProf(0,'3GP','3GP','H263','AAC','352x288',512,64,22050,1);
  AddProf(0,'DVD (NTSC)','VOB','MPEG2','AC3','720x480',6000,192,48000,2);
@@ -1541,7 +1541,7 @@ End;
 { Le moteur integre sait produire ces sorties }
 Function EngineOut(Const Ext: String): Boolean;
 Begin
- EngineOut:=InList(Ext,'MP3,WAV,AIF,AU,GIF,BMP,MP4,MOV,M4V,3GP,M4A,AAC');
+ EngineOut:=InList(Ext,'MP3,WAV,AIF,AU,GIF,BMP,MP4,MOV,M4V,3GP,FLV,M4A,AAC');
 End;
 
 { ====================================================================== }
@@ -20415,7 +20415,7 @@ Begin
    StageLo:=0; StageHi:=100;
    DoConvert:=RunImageJob(M,Pr,Dst,Err);
   End Else Err:='Le d'#233'codeur vid'#233'o n''est pas inclus : seules les images BMP/GIF peuvent '#234'tre converties en image.';
- End Else If InList(Pr.Ext,'MP4,MOV,M4V,3GP') Then Begin
+ End Else If InList(Pr.Ext,'MP4,MOV,M4V,3GP,FLV') Then Begin
   {$IFDEF FPC}
   If M.Kind=1 Then Err:='Un fichier audio ne peut pas devenir une vid'#233'o. Choisissez un profil Audio.'
   Else If (M.Kind=3) Or (M.Fmt='GIF') Then Begin StageLo:=0; StageHi:=90; DoConvert:=ImageVideoJob(M,Pr,Dst,Err); End
@@ -21039,16 +21039,30 @@ End;
 { Demuxeur FLV (H.264 + AAC)                                                  }
 { ---------------------------------------------------------------------- }
 Function FlvTracks(Const Path: String; Var V,A: TTrkIn; Var Err: String): Boolean;
-Var P,Sz,Nv,Na,Pass,Iv,Ia,Ts,Tsv,Tsa: LongInt; Ty,Fl,Pk: Byte; I,L: Integer; LastV,LastA: LongInt;
+Var P,Sz,Nv,Na,Pass,Iv,Ia,Ts,Tsv,Tsa,Vc: LongInt; Ty,Fl,Pk: Byte; I,L: Integer; LastV,LastA: LongInt;
 Begin
  FlvTracks:=False; FillChar(V,SizeOf(V),0); FillChar(A,SizeOf(A),0);
  If Not COpen(Path) Then Begin Err:='Ouverture impossible.'; Exit; End;
+ { codec video de la premiere image : 7 H.264, 2 Sorenson H.263, 3/6 ecran, 4/5 VP6 }
+ Vc:=0; P:=B32(5)+4;
+ While P+15<CSize Do Begin
+  Ty:=CB(P); Sz:=LongInt(CB(P+1))*65536+B16(P+2);
+  If (Ty=9) And (Sz>1) And ((CB(P+11) Shr 4)<>5) Then Begin Vc:=CB(P+11) And 15; Break; End;
+  P:=P+11+Sz+4;
+ End;
  For Pass:=1 To 2 Do Begin
   P:=B32(5)+4; Nv:=0; Na:=0; LastV:=-1; LastA:=-1;
   While P+15<CSize Do Begin
    Ty:=CB(P); Sz:=LongInt(CB(P+1))*65536+B16(P+2);
    Ts:=LongInt(CB(P+4))*65536+B16(P+5)+LongInt(CB(P+7))*16777216;
-   If (Ty=9) And (Sz>5) And ((CB(P+11) And 15)=7) Then Begin
+   If (Ty=9) And (Sz>1) And (Vc<>7) And (Vc<>0) And ((CB(P+11) And 15)=Vc) And ((CB(P+11) Shr 4)<>5) Then Begin
+    { codecs a image complete par etiquette (Sorenson, VP6, ecran) : pas d'en-tete AVC }
+    If Pass=2 Then Begin
+     Iv:=Nv; V.Off^[Iv]:=P+12; V.Sz^[Iv]:=Sz-1; V.Sync^[Iv]:=Ord((CB(P+11) Shr 4)=1);
+     V.Cts^[Iv]:=0; V.Dur^[Iv]:=Ts;
+    End;
+    Inc(Nv);
+   End Else If (Ty=9) And (Sz>5) And ((CB(P+11) And 15)=7) Then Begin
     Pk:=CB(P+12);
     If Pk=0 Then Begin
      If Pass=2 Then Begin
@@ -21088,6 +21102,7 @@ Begin
  CClose;
  If V.N>0 Then Begin
   V.Ok:=True; V.IsVideo:=True; V.Codec:='avc1';
+  Case Vc Of 2: V.Codec:='FLV1'; 3: V.Codec:='FSV1'; 4: V.Codec:='VP6F'; 5: V.Codec:='VP6A'; 6: V.Codec:='FSV2'; End;
   { durees a partir des dts (stockes provisoirement dans Dur) }
   For I:=0 To V.N-2 Do V.Dur^[I]:=V.Dur^[I+1]-V.Dur^[I];
   If V.N>1 Then V.Dur^[V.N-1]:=V.Dur^[V.N-2] Else V.Dur^[0]:=40;
@@ -21105,7 +21120,7 @@ Begin
   End;
  End;
  FlvTracks:=V.Ok Or A.Ok;
- If Not (V.Ok Or A.Ok) Then Err:='Aucune piste H.264/AAC dans ce FLV.';
+ If Not (V.Ok Or A.Ok) Then Err:='Aucune piste video/audio lisible dans ce FLV.';
 End;
 
 { ---------------------------------------------------------------------- }
@@ -21438,7 +21453,35 @@ Begin
  If @VFrameCb<>Nil Then VFrameCb(PEABuffer(B),W,H);
 End;
 
-{ Mode 0 : H.264 AVCC (avcC) ; 1 : H.264 Annex B ; 2 : MPEG-4 Part 2 (XviD/DivX) }
+{ ---- Sorenson Spark (FLV1) : decodeur H.263 de FFMPEG.PAS ---- }
+Procedure V4Reset;
+Begin
+ H3Inited:=False; H3HaveCtx:=False; H3PkBuf:=Nil; H3PkCap:=0; H3OutBegun:=0; H3OutBuf:=Nil;
+ H3Obmc:=0; H3Umvplus:=0; H3LongVec:=0; H3Aic:=0; H3Loop:=0; H3SliceStruct:=0; H3AltInter:=0; H3ModQ:=0; H3PbFrame:=0;
+ H3NoRounding:=0; H3Plus:=0; H3CustomPcf:=0; H3Flv:=0; H3Droppable:=0; H3PicNum:=0; H3LastNonB:=0; H3Time:=0; H3PpTime:=0; H3PbTime:=0;
+ H3ChromaTab:=False; H3Aspect[0]:=12; H3Aspect[1]:=11; H3FpsN:=30000; H3FpsD:=1001; H3MbSkipped:=0; H3AcPred:=0; H3AicDir:=0;
+ H3Wd:=0; H3Ht:=0; H3PictType:=0; H3Qscale:=1; H3CurI:=-1; H3RefI:=-1;
+ H3InitTables; H3Codec:=1;
+End;
+
+Function V4Pack: Boolean;
+Var Y,CW,CH: LongInt; P: ^TH3Pic;
+Begin
+ V4Pack:=False;
+ CW:=(H3Wd+1) Div 2; CH:=(H3Ht+1) Div 2;
+ If H3OutBegun=0 Then Begin
+  H3OutW:=H3Wd; H3OutH:=H3Ht; H3OutBegun:=1;
+  GetMem(H3OutBuf,H3Wd*H3Ht+2*CW*CH+64);
+ End;
+ If (H3Wd<>H3OutW) Or (H3Ht<>H3OutH) Then Exit;
+ P:=@H3P[H3Out];
+ For Y:=0 To H3Ht-1 Do Move(P^.Y^[Y*H3LY],H3OutBuf^[Y*H3Wd],H3Wd);
+ For Y:=0 To CH-1 Do Move(P^.U^[Y*H3LC],H3OutBuf^[H3Wd*H3Ht+Y*CW],CW);
+ For Y:=0 To CH-1 Do Move(P^.V^[Y*H3LC],H3OutBuf^[H3Wd*H3Ht+CW*CH+Y*CW],CW);
+ V4Pack:=True;
+End;
+
+{ Mode 0 : H.264 AVCC (avcC) ; 1 : H.264 Annex B ; 2 : MPEG-4 Part 2 (XviD/DivX) ; 3 : VP8 ; 4 : Sorenson H.263 (FLV) }
 Function DecodeVideoTrack(Const Path: String; Var T: TTrkIn; First: LongInt; Mode: Integer; Var Err: String): Boolean;
 Var I,NalSz,P,K,Np,Ps: LongInt; Starts: Array[0..15] Of LongInt;
 Begin
@@ -21446,7 +21489,9 @@ Begin
  If Not OpenSrc(Path,VF) Then Begin Err:='Ouverture impossible.'; Exit; End;
  VFOpen:=True; EngMsg:=''; EngFirst:=0; NalSz:=0;
  If SetJmp(EngJmp)=0 Then Begin
-  If Mode=3 Then Begin
+  If Mode=4 Then Begin
+   V4Reset;
+  End Else If Mode=3 Then Begin
    Vp8Hook:=H4Trampoline; V8Have:=False;
   End Else If Mode=2 Then Begin
    M4VidHook:=H4Trampoline; M4InTag:=Copy(T.Codec+'    ',1,4); M4Scan:=False; M4Reset; M4OutBuf:=Nil;
@@ -21464,7 +21509,13 @@ Begin
     If (VLastBuf<>Nil) And (@VFrameCb<>Nil) Then VFrameCb(VLastBuf,VLastW,VLastH);
    End Else Begin
     ReadSample(VF,T.Off^[I],T.Sz^[I]);
-    If Mode=3 Then Vp8Frame(PEABuffer(SBuf),T.Sz^[I])
+    If Mode=4 Then Begin
+     If (H3Frame(PEABuffer(SBuf),T.Sz^[I])=1) And V4Pack Then Begin
+      VLastBuf:=H3OutBuf; VLastW:=H3OutW; VLastH:=H3OutH;
+      If @VFrameCb<>Nil Then VFrameCb(H3OutBuf,H3OutW,H3OutH);
+     End Else If (VLastBuf<>Nil) And (@VFrameCb<>Nil) Then VFrameCb(VLastBuf,VLastW,VLastH);
+    End
+    Else If Mode=3 Then Vp8Frame(PEABuffer(SBuf),T.Sz^[I])
     Else If Mode=2 Then Begin
      { decoupage des paquets multiples (B-images empaquetees) aux codes B6 }
      Starts[0]:=0; Np:=1; Ps:=0;
@@ -21489,7 +21540,7 @@ Begin
    If (I And 7)=0 Then UiTick(I,T.N);
    Inc(I);
   End;
-  If Mode=3 Then Begin End Else If Mode=2 Then Begin
+  If (Mode=3) Or (Mode=4) Then Begin End Else If Mode=2 Then Begin
    If Not VStopFlag Then Begin
     If (M4LowDelay=0) And (M4NextI>=0) And M4PicHave Then M4Emit(M4NextI)
     Else If M4SkippedLast And M4PicHave And (M4CurI>=0) Then M4Emit(M4CurI);
@@ -21498,7 +21549,10 @@ Begin
   VOk:=True;
  End Else Begin VOk:=False; VErr:=EngMsg; End;
  If VFOpen Then Begin Close(VF); VFOpen:=False; End;
- If Mode=3 Then V8FreeAll
+ If Mode=4 Then Begin
+  H3FreeCtx; If H3OutBuf<>Nil Then Begin FreeMem(H3OutBuf); H3OutBuf:=Nil; End;
+  If H3PkBuf<>Nil Then Begin FreeMem(H3PkBuf); H3PkBuf:=Nil; H3PkCap:=0; End;
+ End Else If Mode=3 Then V8FreeAll
  Else If Mode=2 Then Begin
   If M4OutBuf<>Nil Then Begin FreeMem(M4OutBuf); M4OutBuf:=Nil; End;
  End Else If H4Began And (H4OutBuf<>Nil) Then Begin FreeMem(H4OutBuf,H4OutSize); H4OutBuf:=Nil; End;
@@ -21527,7 +21581,8 @@ Begin
   If (C='avc1') And (T.CfgLen>=7) Then VideoMode:=0
   Else If InList(C,'MP4V,XVID,DIVX,DX50,FMP4') Then VideoMode:=2
   Else If C='VP80' Then VideoMode:=3;
- End Else If ((C='avc1') Or (C='avc3')) And (T.CfgLen>=7) Then VideoMode:=0;
+ End Else If (Fmt='FLV') And (C='FLV1') Then VideoMode:=4
+ Else If ((C='avc1') Or (C='avc3')) And (T.CfgLen>=7) Then VideoMode:=0;
 End;
 
 { ---------------------------------------------------------------------- }
@@ -22007,6 +22062,126 @@ Begin
  End;
  If Not Ok Then DelFile(Dst);
 End;
+
+{ ---------------------------------------------------------------------- }
+{ Multiplexeur FLV (H.264 + AAC)                                             }
+{ ---------------------------------------------------------------------- }
+Procedure FAmfName(Const S: String);
+Var I: Integer;
+Begin
+ M16(Length(S)); For I:=1 To Length(S) Do M8(Ord(S[I]));
+End;
+
+Procedure FAmfNum(Const Name: String; V: Double);
+Var B: Array[0..7] Of Byte; I: Integer;
+Begin
+ FAmfName(Name); M8(0);
+ Move(V,B,8);
+ For I:=7 DownTo 0 Do M8(B[I]);
+End;
+
+Function MuxFlv(Const Dst: String; Var Tr: Array Of TMuxTrk; NT: Integer; Var Err: String): Boolean;
+Var
+ FO: File; K,I,Len,Tag,Pb,Total,Nxt: LongInt; Idx: Array[0..1] Of LongInt; Dp: Array[0..1] Of Int64;
+ Ok: Boolean; Buf: PBArr; DurMs,Ms,Cts,Cnt: LongInt; HaveV,HaveA: Boolean; Vi,Ai: Integer; Acc: Int64; Fps: Double;
+ Procedure PutTag(Typ,Time,DLen: LongInt);
+ Begin
+  M8(Typ); M8(DLen Shr 16); M8(DLen Shr 8); M8(DLen);
+  M8(Time Shr 16); M8(Time Shr 8); M8(Time); M8(Time Shr 24); M8(0); M8(0); M8(0);
+ End;
+ Procedure FlushTag(DLen: LongInt);
+ Begin
+  M32(DLen+11); BlockWrite(FO,MB^,MBLen); MBLen:=0;
+ End;
+Begin
+ MuxFlv:=False; Ok:=True;
+ If MB=Nil Then Begin MBCap:=65536; GetMem(MB,MBCap); End;
+ If Not CreateOut(Dst,FO,Err) Then Exit;
+ HaveV:=False; HaveA:=False; Vi:=-1; Ai:=-1;
+ For K:=0 To NT-1 Do Begin
+  If Tr[K].T^.IsVideo Then Begin HaveV:=True; Vi:=K; End Else Begin HaveA:=True; Ai:=K; End;
+  If Tr[K].Mem=Nil Then Begin
+   If Not OpenSrc(Tr[K].Path,Tr[K].F) Then Begin Err:='Source illisible.'; Ok:=False; End Else Tr[K].Opened:=True;
+  End;
+ End;
+ DurMs:=0;
+ For K:=0 To NT-1 Do Begin
+  Acc:=0; For I:=Tr[K].First To Tr[K].Last Do Inc(Acc,Tr[K].T^.Dur^[I]);
+  Ms:=Round(Acc*1000.0/Tr[K].T^.Ts); If Ms>DurMs Then DurMs:=Ms;
+ End;
+ { en-tete + etiquette onMetaData }
+ MBLen:=0;
+ M8(Ord('F')); M8(Ord('L')); M8(Ord('V')); M8(1); M8(Ord(HaveV)+4*Ord(HaveA)); M32(9); M32(0);
+ BlockWrite(FO,MB^,MBLen); MBLen:=0;
+ Cnt:=3+2*Ord(HaveV)+Ord(HaveV)+3*Ord(HaveA);
+ Pb:=MBLen; PutTag(18,0,0);
+ M8(2); FAmfName('onMetaData'); M8(8);
+ Cnt:=1; If HaveV Then Inc(Cnt,4); If HaveA Then Inc(Cnt,3);
+ M32(Cnt);
+ FAmfNum('duration',DurMs/1000.0);
+ If HaveV Then Begin
+  FAmfNum('width',Tr[Vi].T^.W); FAmfNum('height',Tr[Vi].T^.H);
+  Fps:=25; If Tr[Vi].T^.Dur^[Tr[Vi].First]>0 Then Fps:=Tr[Vi].T^.Ts/Tr[Vi].T^.Dur^[Tr[Vi].First];
+  FAmfNum('framerate',Fps); FAmfNum('videocodecid',7);
+ End;
+ If HaveA Then Begin
+  FAmfNum('audiocodecid',10); FAmfNum('audiosamplerate',Tr[Ai].T^.Rate); FAmfNum('audiochannels',Tr[Ai].T^.Chans);
+ End;
+ M16(0); M8(9);
+ Len:=MBLen-Pb-11;
+ MB^[Pb+1]:=(Len Shr 16) And 255; MB^[Pb+2]:=(Len Shr 8) And 255; MB^[Pb+3]:=Len And 255;
+ FlushTag(Len);
+ { configurations }
+ If HaveV Then Begin
+  Len:=5+Tr[Vi].T^.CfgLen;
+  PutTag(9,0,Len); M8($17); M8(0); M8(0); M8(0); M8(0);
+  For I:=0 To Tr[Vi].T^.CfgLen-1 Do M8(Tr[Vi].T^.Cfg[I]);
+  FlushTag(Len);
+ End;
+ If HaveA Then Begin
+  Len:=2+Tr[Ai].T^.CfgLen;
+  PutTag(8,0,Len); M8($AF); M8(0);
+  For I:=0 To Tr[Ai].T^.CfgLen-1 Do M8(Tr[Ai].T^.Cfg[I]);
+  FlushTag(Len);
+ End;
+ { echantillons entrelaces par date }
+ For K:=0 To NT-1 Do Begin Idx[K]:=Tr[K].First; Dp[K]:=0; End;
+ Total:=0; For K:=0 To NT-1 Do Inc(Total,Tr[K].Last-Tr[K].First+1);
+ Cnt:=0;
+ While Ok And ((Idx[0]<=Tr[0].Last) Or ((NT>1) And (Idx[1]<=Tr[1].Last))) Do Begin
+  Nxt:=-1;
+  For K:=0 To NT-1 Do If Idx[K]<=Tr[K].Last Then Begin
+   If (Nxt<0) Or (Dp[K]*1000.0/Tr[K].T^.Ts<Dp[Nxt]*1000.0/Tr[Nxt].T^.Ts) Then Nxt:=K;
+  End;
+  K:=Nxt;
+  Ms:=Round(Dp[K]*1000.0/Tr[K].T^.Ts);
+  Buf:=MuxFetch(Tr[K],Idx[K],Len);
+  If Tr[K].T^.IsVideo Then Begin
+   Cts:=Round(Tr[K].T^.Cts^[Idx[K]]*1000.0/Tr[K].T^.Ts);
+   PutTag(9,Ms,Len+5);
+   If Tr[K].T^.Sync^[Idx[K]]<>0 Then M8($17) Else M8($27);
+   M8(1); M8(Cts Shr 16); M8(Cts Shr 8); M8(Cts);
+  End Else Begin
+   PutTag(8,Ms,Len+2); M8($AF); M8(1);
+  End;
+  BlockWrite(FO,MB^,MBLen); MBLen:=0;
+  BlockWrite(FO,Buf^,Len);
+  M32(Len+11+Ord(Tr[K].T^.IsVideo)*5+Ord(Not Tr[K].T^.IsVideo)*2);
+  BlockWrite(FO,MB^,MBLen); MBLen:=0;
+  Inc(Dp[K],Tr[K].T^.Dur^[Idx[K]]); Inc(Idx[K]); Inc(Cnt);
+  If (Cnt And 31)=0 Then Begin
+   UiTick(Cnt,Max(1,Total));
+   If Stopped Then Ok:=False;
+  End;
+ End;
+ If Not Ok Then Begin
+  If Err='' Then If Stopped Then Err:='Conversion annul'#233'e.' Else Err:='Erreur de multiplexage.';
+ End Else MuxFlv:=True;
+ Close(FO);
+ For K:=0 To NT-1 Do If Tr[K].Opened Then Begin Close(Tr[K].F); Tr[K].Opened:=False; End;
+ If Not Ok Then DelFile(Dst);
+End;
+
 {$ENDIF}
 
 {$IFDEF FPC}
@@ -22188,6 +22363,12 @@ Begin
  If Audio Then BrandFor:='M4A ' Else If Ext='MOV' Then BrandFor:='qt  ' Else If Ext='3GP' Then BrandFor:='3gp4' Else If Ext='M4V' Then BrandFor:='M4V ' Else BrandFor:='isom';
 End;
 
+{ Ecrit le conteneur choisi par l'extension du profil }
+Function MuxOut(Const Ext,Dst: String; Var Tr: Array Of TMuxTrk; NT: Integer; Var Err: String): Boolean;
+Begin
+ If Ext='FLV' Then MuxOut:=MuxFlv(Dst,Tr,NT,Err) Else MuxOut:=MuxMp4(Dst,BrandFor(Ext,False),Tr,NT,Err);
+End;
+
 { Sortie audio AAC (ADTS) ou M4A : a partir du WAV canonique }
 Function WriteAacOut(Const Canon,Dst: String; Const Pr: TProf; Var Err: String): Boolean;
 Var Adts: String; A: TTrkIn; Tr: Array[0..0] Of TMuxTrk; K: Integer; Kb: LongInt; Ok: Boolean;
@@ -22300,7 +22481,7 @@ Begin
  If Not V.Ok Then Begin TrkClear(V); TrkClear(A); Err:='Aucune piste vid'#233'o dans ce fichier.'; Exit; End;
  DecMode:=VideoMode(Fmt,V);
  If DecMode<0 Then Begin
-  Err:='Codec vid'#233'o '+V.Codec+' non d'#233'cod'#233' (H.264, MPEG-4/XviD/DivX, VP8).'; TrkClear(V); TrkClear(A); Exit;
+  Err:='Codec vid'#233'o '+V.Codec+' non d'#233'cod'#233' (H.264, MPEG-4/XviD/DivX, VP8, Sorenson H.263).'; TrkClear(V); TrkClear(A); Exit;
  End;
  If V.W=0 Then V.W:=M.W; If V.H=0 Then V.H:=M.H;
  HaveA:=A.Ok Or (M.ACodec<>''); AFlv:=Fmt='FLV';
@@ -22342,7 +22523,7 @@ Begin
    Tr[1].T:=@AOut; Tr[1].First:=AFirst; Tr[1].Last:=ALast; Tr[1].Path:=APath; NT:=2;
   End;
   StageLo:=90; StageHi:=100;
-  Ok:=MuxMp4(Dst,BrandFor(Pr.Ext,False),Tr,NT,Err);
+  Ok:=MuxOut(Pr.Ext,Dst,Tr,NT,Err);
  End Else Begin
   FpsOf(V,Fn,Fd);
   VJFn:=Fn; VJFd:=Fd; VJMed:=@M; VJIdx:=0; VJN:=V.N; VJStarted:=False; VJNeedEdit:=EditsPresent(M);
@@ -22366,7 +22547,7 @@ Begin
     Tr[1].T:=@AOut; Tr[1].First:=AFirst; Tr[1].Last:=ALast; Tr[1].Path:=APath; NT:=2;
    End;
    StageLo:=90; StageHi:=100;
-   Ok:=MuxMp4(Dst,BrandFor(Pr.Ext,False),Tr,NT,Err);
+   Ok:=MuxOut(Pr.Ext,Dst,Tr,NT,Err);
    TrkClear(Vo);
   End;
   VEncFree;
@@ -22420,7 +22601,7 @@ Begin
  FillChar(Tr,SizeOf(Tr),0);
  Tr[0].T:=@Vo; Tr[0].First:=0; Tr[0].Last:=Vo.N-1; Tr[0].Mem:=PBArr(X4O); Tr[0].Annex:=True;
  StageLo:=90; StageHi:=100;
- Ok:=MuxMp4(Dst,BrandFor(Pr.Ext,False),Tr,1,Err);
+ Ok:=MuxOut(Pr.Ext,Dst,Tr,1,Err);
  TrkClear(Vo); VEncFree;
  ImageVideoJob:=Ok;
 End;
