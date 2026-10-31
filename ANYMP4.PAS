@@ -12413,6 +12413,4687 @@ End;
 { VORBE-BEGIN }
 
 {$ENDIF}
+{$IFDEF FPC}
+{ ---- MPEG-4 Part 2 (XviD/DivX) : decodeur de FFMPEG.PAS / libavcodec (LGPL-2.1+) ---- }
+Var
+ M4VidHook: Procedure(B: Pointer; W,H: LongInt);
+Function AVSar(V: Int64; N: Integer): Int64;Begin
+ If V>=0 Then AVSar:=V Shr N Else AVSar:=-1-((-1-V) Shr N);
+End;
+Type TGFArr=Array[0..100000000] Of LongInt; PGFArr=^TGFArr;
+{ ---- H.263 / H.261 / Sorenson Spark (FLV1): tables de libavcodec/h263data.c,
+ h261data.c, mpegvideodata.c, LGPL-2.1-or-later ---- }
+Const
+ H3IntraMcbpcCode: Array[0..8] Of Byte=(
+  1,1,2,3,1,1,2,3,1);
+ H3IntraMcbpcBits: Array[0..8] Of Byte=(
+  1,3,3,3,4,6,6,6,9);
+ H3InterMcbpcCode: Array[0..27] Of Byte=(
+  1,3,2,5,3,4,3,3,3,7,6,5,4,4,3,2,
+  2,5,4,5,1,0,0,0,2,12,14,15);
+ H3InterMcbpcBits: Array[0..27] Of Byte=(
+  1,4,4,6,5,8,8,7,3,7,7,9,6,9,9,9,
+  3,7,7,8,9,0,0,0,11,13,13,13);
+ H3CbpyTab: Array[0..31] Of Byte=(
+  3,4,5,5,4,5,9,4,3,5,7,4,2,6,11,4,
+  2,5,3,6,5,4,10,4,4,4,8,4,6,4,3,2);
+ H3MvTab: Array[0..65] Of Byte=(
+  1,1,1,2,1,3,1,4,3,6,5,7,4,7,3,7,
+  11,9,10,9,9,9,17,10,16,10,15,10,14,10,13,10,
+  12,10,11,10,10,10,9,10,8,10,7,10,6,10,5,10,
+  4,10,7,11,6,11,5,11,4,11,3,11,2,11,3,12,
+  2,12);
+ H3InterVlc: Array[0..205] Of Word=(
+  2,2,15,4,21,6,23,7,31,8,37,9,36,9,33,10,
+  32,10,7,11,6,11,32,11,6,3,20,6,30,8,15,10,
+  33,11,80,12,14,4,29,8,14,10,81,12,13,5,35,9,
+  13,10,12,5,34,9,82,12,11,5,12,10,83,12,19,6,
+  11,10,84,12,18,6,10,10,17,6,9,10,16,6,8,10,
+  22,7,85,12,21,7,20,7,28,8,27,8,33,9,32,9,
+  31,9,30,9,29,9,28,9,27,9,26,9,34,11,35,11,
+  86,12,87,12,7,4,25,9,5,11,15,6,4,11,14,6,
+  13,6,12,6,19,7,18,7,17,7,16,7,26,8,25,8,
+  24,8,23,8,22,8,21,8,20,8,19,8,24,9,23,9,
+  22,9,21,9,20,9,19,9,18,9,17,9,7,10,6,10,
+  5,10,4,10,36,11,37,11,38,11,39,11,88,12,89,12,
+  90,12,91,12,92,12,93,12,94,12,95,12,3,7);
+ H3InterLevel: Array[0..101] Of ShortInt=(
+  1,2,3,4,5,6,7,8,9,10,11,12,1,2,3,4,
+  5,6,1,2,3,4,1,2,3,1,2,3,1,2,3,1,
+  2,3,1,2,1,2,1,2,1,2,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,1,1,1,2,3,1,2,1,
+  1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1);
+ H3InterRun: Array[0..101] Of ShortInt=(
+  0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,
+  1,1,2,2,2,2,3,3,3,4,4,4,5,5,5,6,
+  6,6,7,7,8,8,9,9,10,10,11,12,13,14,15,16,
+  17,18,19,20,21,22,23,24,25,26,0,0,0,1,1,2,
+  3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,
+  19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,
+  35,36,37,38,39,40);
+ H3IntraVlcAic: Array[0..205] Of Word=(
+  2,2,6,3,14,4,12,5,13,5,16,6,17,6,18,6,
+  22,7,27,8,32,9,33,9,26,9,27,9,28,9,29,9,
+  30,9,31,9,35,11,34,11,87,12,86,12,85,12,84,12,
+  83,12,15,4,20,6,20,7,30,8,15,10,33,11,80,12,
+  11,5,21,7,14,10,9,10,21,6,29,8,13,10,81,12,
+  19,6,35,9,7,11,23,7,34,9,82,12,28,8,12,10,
+  31,8,11,10,37,9,10,10,36,9,6,11,33,10,32,10,
+  8,10,32,11,7,4,12,6,16,7,19,8,17,9,18,9,
+  4,10,39,11,38,11,95,12,15,6,19,9,5,10,37,11,
+  14,6,20,9,36,11,13,6,6,10,94,12,17,7,7,10,
+  19,7,93,12,18,7,92,12,20,8,91,12,21,8,26,8,
+  25,8,24,8,23,8,22,8,25,9,21,9,22,9,24,9,
+  23,9,4,11,5,11,88,12,89,12,90,12,3,7);
+ H3IntraRunAic: Array[0..101] Of ShortInt=(
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,
+  2,2,2,2,3,3,3,3,4,4,4,5,5,5,6,6,
+  7,7,8,8,9,9,10,11,12,13,0,0,0,0,0,0,
+  0,0,0,0,1,1,1,1,2,2,2,3,3,3,4,4,
+  5,5,6,6,7,7,8,9,10,11,12,13,14,15,16,17,
+  18,19,20,21,22,23);
+ H3IntraLevelAic: Array[0..101] Of ShortInt=(
+  1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,
+  17,18,19,20,21,22,23,24,25,1,2,3,4,5,6,7,
+  1,2,3,4,1,2,3,4,1,2,3,1,2,3,1,2,
+  1,2,1,2,1,2,1,1,1,1,1,2,3,4,5,6,
+  7,8,9,10,1,2,3,4,1,2,3,1,2,3,1,2,
+  1,2,1,2,1,2,1,1,1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1);
+ H3Format: Array[0..15] Of Word=(
+  0,0,128,96,176,144,352,288,704,576,1408,1152,0,0,0,0);
+ H3AicDcScale: Array[0..31] Of Byte=(
+  0,2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,
+  32,34,36,38,40,42,44,46,48,50,52,54,56,58,60,62);
+ H3ModQuant: Array[0..63] Of Byte=(
+  0,3,1,2,3,4,5,6,7,8,9,9,10,11,12,13,
+  14,15,16,17,18,18,19,20,21,22,23,24,25,26,27,28,
+  0,2,3,4,5,6,7,8,9,10,11,13,14,15,16,17,
+  18,19,20,21,22,24,25,26,27,28,29,30,31,31,31,26);
+ H3ChromaQ: Array[0..31] Of Byte=(
+  0,1,2,3,4,5,6,6,7,8,9,9,10,10,11,11,
+  12,12,12,13,13,13,14,14,14,14,14,15,15,15,15,15);
+ H3MbaMax: Array[0..5] Of Word=(
+  47,98,395,1583,6335,9215);
+ H3MbaLength: Array[0..6] Of Byte=(
+  6,7,9,11,13,14,14);
+ H3MbtypeB: Array[0..29] Of Byte=(
+  1,1,3,3,1,5,4,4,5,4,6,6,2,4,3,4,
+  7,6,4,6,5,6,1,6,1,10,1,7,1,8);
+ H3CbpcB: Array[0..7] Of Byte=(
+  0,1,2,2,7,3,6,3);
+
+Type
+ TH3I16=Array[0..200000000] Of SmallInt; PH3I16=^TH3I16;
+ TH3Blk=Array[0..63] Of SmallInt;
+ TH3Vlc=Record Sym: Array[0..65535] Of SmallInt; Len: Array[0..65535] Of Byte;
+  Bits: LongInt; End;
+ TH3Pic=Record
+  Y,U,V: PEABuffer;
+  Mt: PGFArr;       { mb_type, decale de 2*mb_stride+1 }
+  Mv: PH3I16;       { vecteurs (x,y) par bloc 8x8, decale de 4 blocs }
+  Mv1: PH3I16;      { liste 1 (images B) }
+  Qs: PEABuffer;    { qscale par macrobloc, decale de 2*mb_stride+1 }
+ End;
+Const
+ H3_INTRA=1; H3_16X16=8; H3_8X8=64; H3_SKIP=2048; H3_ACPRED=512; H3_L0=12288;
+  H3_DIRECT2=256; H3_QUANT=65536; H3_CBP=131072;
+ H3Zigzag: Array[0..63] Of Byte=(0,1,8,16,9,2,3,10,17,24,32,25,18,11,4,5,12,19,
+  26,33,40,48,41,34,27,20,13,6,7,14,21,28,
+  35,42,49,56,57,50,43,36,29,22,15,23,30,37,44,51,58,59,52,45,38,31,39,46,53,60,
+   61,54,47,55,62,63);
+ H3AltH: Array[0..63] Of Byte=(0,1,2,3,8,9,16,17,10,11,4,5,6,7,15,14,13,12,19,
+  18,24,25,32,33,26,27,20,21,22,23,28,29,
+  30,31,34,35,40,41,48,49,42,43,36,37,38,39,44,45,46,47,50,51,56,57,58,59,52,53,
+   54,55,60,61,62,63);
+ H3AltV: Array[0..63] Of Byte=(0,8,16,24,1,9,2,10,17,25,32,40,48,56,57,49,41,33,
+  26,18,3,11,4,12,19,27,34,42,50,58,35,43,
+  51,59,20,28,5,13,6,14,21,29,36,44,52,60,37,45,53,61,22,30,7,15,23,31,38,46,54,
+   62,39,47,55,63);
+ H3LoopStrength: Array[0..31] Of Byte=(0,1,1,2,2,3,3,4,4,4,5,5,6,6,7,7,7,8,8,8,
+  9,9,9,10,10,10,11,11,11,12,12,12);
+ H3RoundTab: Array[0..15] Of Byte=(0,0,0,1,1,1,1,1,0,0,0,0,0,0,1,1);
+Var
+ { lecteur de bits }
+ H3Buf: PEABuffer; H3Size,H3Pos: LongInt;
+ { tables VLC }
+ H3VIntra,H3VInter,H3VCbpy,H3VMv: TH3Vlc;
+ H3VRlInter,H3VRlAic: TH3Vlc;   { sym: indice de table (0..102), 102 =
+  echappement }
+ H3VMbB,H3VCbpcB: TH3Vlc;
+ H3RunInter,H3RunAic: Array[0..102] Of SmallInt;  { run+1 (+192 si dernier) }
+ H3LevInter,H3LevAic: Array[0..102] Of SmallInt;
+ H3Init: Boolean;
+ H3RasterEnd: Array[0..63] Of Byte;
+ H3AltHRE,H3AltVRE: Array[0..63] Of Byte;
+
+Function H3Left: LongInt;Begin H3Left:=H3Size*8-H3Pos; End;
+Function H3Show(N: LongInt): LongInt;
+Var P: LongInt; V: Int64;
+Begin
+ If N=0 Then Begin H3Show:=0; Exit; End;
+ P:=H3Pos Shr 3;
+ V:=(Int64(H3Buf^[P]) Shl 32) Or (Int64(H3Buf^[P+1]) Shl 24) Or (Int64(H3Buf^[P+
+  2]) Shl 16) Or (Int64(H3Buf^[P+3]) Shl 8) Or Int64(H3Buf^[P+4]);
+ H3Show:=(V Shr (40-(H3Pos And 7)-N)) And ((Int64(1) Shl N)-1);
+End;
+Function H3Bits(N: LongInt): LongInt;Begin H3Bits:=H3Show(N); Inc(H3Pos,N); End;
+Function H3Bit: LongInt;Begin H3Bit:=(H3Buf^[H3Pos Shr 3] Shr (7-(H3Pos And 7)))
+ And 1; Inc(H3Pos); End;
+Procedure H3Skip(N: LongInt);Begin Inc(H3Pos,N); End;
+Function H3SBits(N: LongInt): LongInt;
+Var V: LongInt;
+Begin V:=H3Show(N); If V>=(LongInt(1) Shl (N-1)) Then V:=V-(LongInt(1) Shl N);
+ H3SBits:=V; End;
+Procedure H3Align;Begin H3Pos:=(H3Pos+7) And -8; End;
+Function H3Sar(V: LongInt; N: LongInt): LongInt;
+Begin If V>=0 Then H3Sar:=V Shr N Else H3Sar:=-1-((-1-V) Shr N); End;
+Function H3Mid(A,B,C: LongInt): LongInt;
+Var Lo,Hi: LongInt;
+Begin
+ If A<B Then Begin Lo:=A; Hi:=B; End Else Begin Lo:=B; Hi:=A; End;
+ If C<Hi Then Hi:=C;
+ If Lo>Hi Then H3Mid:=Lo Else H3Mid:=Hi;
+End;
+Function H3Clip(V,Lo,Hi: LongInt): LongInt;Begin If V<Lo Then V:=Lo; If V>Hi
+ Then V:=Hi; H3Clip:=V; End;
+
+{ construit une table VLC directe a partir de (code,longueur); Pas = 1 (tables
+ separees) ou 2 (paires) }
+Procedure H3BuildVlc(Var T: TH3Vlc; N: LongInt; Codes,Lens: PEABuffer;
+ WideCodes: Boolean; Step: LongInt);
+Var I,J,Len,Code,Span: LongInt;
+Begin
+ T.Bits:=0;
+ For I:=0 To N-1 Do Begin
+  Len:=Lens^[I*Step]; If Len>T.Bits Then T.Bits:=Len;
+ End;
+ For I:=0 To (LongInt(1) Shl T.Bits)-1 Do Begin T.Sym[I]:=-1; T.Len[I]:=0; End;
+ For I:=0 To N-1 Do Begin
+  Len:=Lens^[I*Step]; If Len=0 Then Continue;
+  Code:=Codes^[I*Step];
+  Span:=LongInt(1) Shl (T.Bits-Len);
+  For J:=0 To Span-1 Do Begin
+   T.Sym[(Code Shl (T.Bits-Len))+J]:=I; T.Len[(Code Shl (T.Bits-Len))+J]:=Len;
+  End;
+ End;
+End;
+
+Function H3GetVlc(Var T: TH3Vlc): LongInt;
+Var Ix: LongInt;
+Begin
+ Ix:=H3Show(T.Bits);
+ H3GetVlc:=T.Sym[Ix]; Inc(H3Pos,T.Len[Ix]);
+End;
+
+Procedure H3InitTables;
+Var
+ I,J: LongInt; Cd,Bt: Array[0..255] Of Byte; Cw: Array[0..255] Of Word;
+ Tmp: Array[0..3] Of Byte;
+Procedure BuildRl(Var T: TH3Vlc; Const Vl: Array Of Word; Const Run,Lev: Array
+ Of ShortInt; Var RunO,LevO: Array Of SmallInt);
+Var K,Len,J: LongInt;
+Begin
+ T.Bits:=0;
+ For K:=0 To 102 Do Begin Len:=Vl[K*2+1]; If Len>T.Bits Then T.Bits:=Len; End;
+ For K:=0 To (LongInt(1) Shl T.Bits)-1 Do Begin T.Sym[K]:=-1; T.Len[K]:=0; End;
+ For K:=0 To 102 Do Begin
+  Len:=Vl[K*2+1];
+  For J:=0 To (LongInt(1) Shl (T.Bits-Len))-1 Do Begin
+   T.Sym[(Vl[K*2] Shl (T.Bits-Len))+J]:=K; T.Len[(Vl[K*2] Shl (T.Bits-Len))+J]:=
+    Len;
+  End;
+  If K<102 Then Begin
+   RunO[K]:=Run[K]+1; If K>=58 Then Inc(RunO[K],192);
+   LevO[K]:=Lev[K];
+  End;
+ End;
+End;
+Begin
+ If H3Init Then Exit;
+ H3Init:=True;
+ H3BuildVlc(H3VIntra,9,@H3IntraMcbpcCode,@H3IntraMcbpcBits,False,1);
+ H3BuildVlc(H3VInter,28,@H3InterMcbpcCode,@H3InterMcbpcBits,False,1);
+ H3BuildVlc(H3VCbpy,16,@H3CbpyTab,@H3CbpyTab[1],False,2);
+ H3BuildVlc(H3VMv,33,@H3MvTab,@H3MvTab[1],False,2);
+ H3BuildVlc(H3VMbB,15,@H3MbtypeB,@H3MbtypeB[1],False,2);
+ H3BuildVlc(H3VCbpcB,4,@H3CbpcB,@H3CbpcB[1],False,2);
+ BuildRl(H3VRlInter,H3InterVlc,H3InterRun,H3InterLevel,H3RunInter,H3LevInter);
+ BuildRl(H3VRlAic,H3IntraVlcAic,H3IntraRunAic,H3IntraLevelAic,H3RunAic,
+  H3LevAic);
+ J:=-1;
+ For I:=0 To 63 Do Begin If H3Zigzag[I]>J Then J:=H3Zigzag[I]; H3RasterEnd[I]:=
+  J; End;
+ J:=-1;
+ For I:=0 To 63 Do Begin If H3AltH[I]>J Then J:=H3AltH[I]; H3AltHRE[I]:=J; End;
+ J:=-1;
+ For I:=0 To 63 Do Begin If H3AltV[I]>J Then J:=H3AltV[I]; H3AltVRE[I]:=J; End;
+End;
+
+Var
+ { parametres de l'image / du flux }
+ H3Wd,H3Ht,H3MbW,H3MbH,H3MbStride,H3B8Stride,H3MbNum,H3LY,H3LC,H3HEdge,H3VEdge:
+  LongInt;
+ H3PictType: LongInt;  { 0 I, 1 P, 2 B }
+ H3Qscale,H3ChromaQscale,H3YDcScale,H3CDcScale: LongInt;
+ H3Obmc,H3Umvplus,H3LongVec,H3Aic,H3Loop,H3SliceStruct,H3AltInter,H3ModQ,
+  H3PbFrame,H3NoRounding,H3Plus,H3CustomPcf,H3Flv,H3Droppable: LongInt;
+ H3PicNum,H3LastNonB,H3Time,H3PpTime,H3PbTime: LongInt;
+ H3Aspect: Array[0..1] Of LongInt;  { sample_aspect_ratio num,den }
+ H3FpsN,H3FpsD: LongInt;
+ H3ChromaTab: Boolean;  { True: table de qscale chroma modifiee }
+ H3Inited: Boolean;
+ { etat macrobloc }
+ H3MbX,H3MbY,H3MbIntra,H3AcPred,H3AicDir,H3MvType,H3MbSkipped,H3FirstLine,
+  H3ResyncX,H3ResyncY: LongInt;
+ H3Mv: Array[0..3,0..1] Of LongInt;
+ H3Blk: Array[0..5] Of TH3Blk;
+ H3BlkLast: Array[0..5] Of LongInt;
+ H3LastGb: LongInt;
+ { images }
+ H3P: Array[0..2] Of TH3Pic;
+ H3CurI,H3RefI: LongInt;  { indices dans H3P; -1 = aucune }
+ H3Dc: Array[0..2] Of PH3I16;   { dc_val: base ; acces par decalage }
+ H3Ac: PH3I16;
+ H3DcOff: Array[0..2] Of LongInt;
+ H3Intra: PEABuffer;  { mbintra_table }
+ H3DcBase: PH3I16; H3DcN,H3AcN: LongInt;
+ H3Err: Boolean;
+ { RealVideo 1.0/2.0 }
+ H3RvMode,H3Rv10Ver,H3MbNumLeft: LongInt; H3MvList,H3MvDir,H3BwdI,H3Avg:
+  LongInt; H3Mv1: Array[0..3,0..1] Of LongInt; H3DirScale: Array[0..1,0..63] Of
+  LongInt; H3RvLastDc,H3RvFirst: Array[0..2] Of LongInt;
+ H3RvLumSym,H3RvChrSym: Array[0..1023] Of Byte; H3RvLumCnt,H3RvChrCnt,
+  H3RvLumFirst,H3RvChrFirst,H3RvLumOff,H3RvChrOff: Array[0..17] Of LongInt;
+  H3RvInit: Boolean;
+
+Function H3Mt(Xy: LongInt): LongInt;Begin H3Mt:=H3P[H3CurI].Mt^[Xy+2*H3MbStride+
+ 1]; End;
+Procedure H3SetMt(Xy,V: LongInt);Begin H3P[H3CurI].Mt^[Xy+2*H3MbStride+1]:=V;
+ End;
+Function H3MvAt(M,C: LongInt): LongInt;Begin If H3MvList=0 Then H3MvAt:=H3P[
+ H3CurI].Mv^[(M+4)*2+C] Else H3MvAt:=H3P[H3CurI].Mv1^[(M+4)*2+C]; End;
+Procedure H3SetMv(M,C,V: LongInt);Begin If H3MvList=0 Then H3P[H3CurI].Mv^[(M+
+ 4)*2+C]:=V Else H3P[H3CurI].Mv1^[(M+4)*2+C]:=V; End;
+
+Procedure H3SetQscale(Q: LongInt);
+Begin
+ If Q<1 Then Q:=1 Else If Q>31 Then Q:=31;
+ H3Qscale:=Q;
+ If H3ChromaTab Then H3ChromaQscale:=H3ChromaQ[Q] Else H3ChromaQscale:=Q;
+ If H3Aic<>0 Then Begin H3YDcScale:=H3AicDcScale[Q]; H3CDcScale:=H3AicDcScale[
+  H3ChromaQscale]; End
+ Else Begin H3YDcScale:=8; H3CDcScale:=8; End;
+End;
+
+Function H3Sext(V,Bits: LongInt): LongInt;
+Begin
+ V:=V And ((LongInt(1) Shl Bits)-1);
+ If V>=(LongInt(1) Shl (Bits-1)) Then V:=V-(LongInt(1) Shl Bits);
+ H3Sext:=V;
+End;
+
+{ ff_h263_decode_mba }
+Function H3DecodeMba: LongInt;
+Var I,P: LongInt;
+Begin
+ I:=0;
+ While I<6 Do Begin If H3MbNum-1<=H3MbaMax[I] Then Break; Inc(I); End;
+ P:=H3Bits(H3MbaLength[I]);
+ H3MbX:=P Mod H3MbW; H3MbY:=P Div H3MbW;
+ H3DecodeMba:=P;
+End;
+
+{ h263_decode_gob_header: faux = erreur }
+Function H3GobHeader: Boolean;
+Var Left,Gob,I: LongInt;
+Begin
+ H3GobHeader:=False;
+ If H3Show(16)<>0 Then Exit;
+ H3Skip(16);
+ Left:=H3Left; If Left>32 Then Left:=32;
+ While Left>13 Do Begin
+  If H3Bit<>0 Then Break;
+  Dec(Left);
+ End;
+ If Left<=13 Then Exit;
+ If H3SliceStruct<>0 Then Begin
+  If H3Bit=0 Then Exit;
+  H3DecodeMba;
+  If H3MbNum>1583 Then If H3Bit=0 Then Exit;
+  H3Qscale:=H3Bits(5);
+  If H3Bit=0 Then Exit;
+  H3Skip(2);
+ End Else Begin
+  Gob:=H3Bits(5);
+  H3MbX:=0;
+  If H3Ht<=400 Then I:=1 Else If H3Ht<=800 Then I:=2 Else I:=4;
+  H3MbY:=I*Gob;
+  H3Skip(2);
+  H3Qscale:=H3Bits(5);
+ End;
+ If H3MbY>=H3MbH Then Exit;
+ If H3Qscale=0 Then Exit;
+ H3GobHeader:=True;
+End;
+
+{ ff_h263_resync: renvoie la position ou -1 }
+Function H3Resync: LongInt;
+Var Left,Pos,Bak: LongInt;
+Begin
+ H3Resync:=-1;
+ If H3Show(16)=0 Then Begin
+  Pos:=H3Pos;
+  If H3GobHeader Then Begin H3Resync:=Pos; Exit; End;
+ End;
+ H3Pos:=H3LastGb;
+ H3Align;
+ Left:=H3Left;
+ While Left>16+1+5+5 Do Begin
+  If H3Show(16)=0 Then Begin
+   Bak:=H3Pos; Pos:=H3Pos;
+   If H3GobHeader Then Begin H3Resync:=Pos; Exit; End;
+   H3Pos:=Bak;
+  End;
+  H3Skip(8);
+  Dec(Left,8);
+ End;
+End;
+
+{ ff_h263_pred_motion: renvoie l'indice du bloc ; Px,Py predicteur }
+Function H3PredMotion(Block,Dir: LongInt; Var Px,Py: LongInt): LongInt;
+Var Wrap,M,A0,A1,B0,B1,C0,C1,Off: LongInt;
+Begin
+ Wrap:=H3B8Stride;
+ M:=H3B8Stride*2*H3MbY+2*H3MbX+(Block And 1)+(Block Shr 1)*H3B8Stride;
+ Case Block Of 0: Off:=2; 1,2: Off:=1; Else Off:=-1; End;
+ A0:=H3MvAt(M-1,0); A1:=H3MvAt(M-1,1);
+ If (H3FirstLine<>0) And (Block<3) Then Begin
+  If Block=0 Then Begin
+   If H3MbX=H3ResyncX Then Begin Px:=0; Py:=0; End
+   Else Begin Px:=A0; Py:=A1; End;
+  End Else If Block=1 Then Begin
+   Px:=A0; Py:=A1;
+  End Else Begin
+   B0:=H3MvAt(M-Wrap,0); B1:=H3MvAt(M-Wrap,1);
+   C0:=H3MvAt(M+Off-Wrap,0); C1:=H3MvAt(M+Off-Wrap,1);
+   If H3MbX=H3ResyncX Then Begin A0:=0; A1:=0; H3SetMv(M-1,0,0); H3SetMv(M-1,1,
+    0); End;
+   Px:=H3Mid(A0,B0,C0); Py:=H3Mid(A1,B1,C1);
+  End;
+ End Else Begin
+  B0:=H3MvAt(M-Wrap,0); B1:=H3MvAt(M-Wrap,1);
+  C0:=H3MvAt(M+Off-Wrap,0); C1:=H3MvAt(M+Off-Wrap,1);
+  Px:=H3Mid(A0,B0,C0); Py:=H3Mid(A1,B1,C1);
+ End;
+ H3PredMotion:=M;
+End;
+
+{ ff_h263_decode_motion }
+Function H3DecMotion(Pred,FCode: LongInt): LongInt;
+Var Code,Val,Sign,Shift: LongInt;
+Begin
+ Code:=H3GetVlc(H3VMv);
+ If Code=0 Then Begin H3DecMotion:=Pred; Exit; End;
+ If Code<0 Then Begin H3DecMotion:=$FFFF; Exit; End;
+ Sign:=H3Bit;
+ Shift:=FCode-1;
+ Val:=Code;
+ If Shift<>0 Then Begin
+  Val:=(Val-1) Shl Shift;
+  Val:=Val Or H3Bits(Shift);
+  Inc(Val);
+ End;
+ If Sign<>0 Then Val:=-Val;
+ Inc(Val,Pred);
+ If H3LongVec=0 Then Val:=H3Sext(Val,5+FCode)
+ Else Begin
+  If (Pred<-31) And (Val<-63) Then Inc(Val,64);
+  If (Pred>32) And (Val>63) Then Dec(Val,64);
+ End;
+ H3DecMotion:=Val;
+End;
+
+{ h263p_decode_umotion }
+Function H3UMotion(Pred: LongInt): LongInt;
+Var Code,Sign: LongInt;
+Begin
+ If H3Bit<>0 Then Begin H3UMotion:=Pred; Exit; End;
+ Code:=2+H3Bit;
+ While H3Bit<>0 Do Begin
+  Code:=Code Shl 1;
+  Inc(Code,H3Bit);
+  If Code>=32768 Then Begin H3UMotion:=$FFFF; Exit; End;
+ End;
+ Sign:=Code And 1;
+ Code:=Code Shr 1;
+ If Sign<>0 Then H3UMotion:=Pred-Code Else H3UMotion:=Pred+Code;
+End;
+
+Function H3MotionComp(Pred: LongInt): LongInt;
+Begin If H3Umvplus<>0 Then H3MotionComp:=H3UMotion(Pred) Else H3MotionComp:=
+ H3DecMotion(Pred,1); End;
+
+Procedure H3Dquant;
+Const QT: Array[0..3] Of ShortInt=(-1,-2,1,2);
+Var Q: LongInt;
+Begin
+ If H3ModQ<>0 Then Begin
+  If H3Bit<>0 Then Begin
+   Q:=H3Bit;
+   H3Qscale:=H3ModQuant[Q*32+H3Qscale];
+  End Else H3Qscale:=H3Bits(5);
+ End Else Inc(H3Qscale,QT[H3Bits(2)]);
+ H3SetQscale(H3Qscale);
+End;
+
+{ ---- decodage des blocs et des macroblocs (ituh263dec.c) ---- }
+Procedure H3PredAcDc(Var Block: TH3Blk; N: LongInt);
+Var X,Y,Wrap,A,C,PredDc,Scale,I,AcBase,AcBase1,Comp: LongInt; Dc: PH3I16;
+Begin
+ If N<4 Then Begin
+  X:=2*H3MbX+(N And 1); Y:=2*H3MbY+(N Shr 1); Wrap:=H3B8Stride; Comp:=0; Scale:=
+   H3YDcScale;
+ End Else Begin
+  X:=H3MbX; Y:=H3MbY; Wrap:=H3MbStride; Comp:=N-4+1; Scale:=H3CDcScale;
+ End;
+ Dc:=H3Dc[Comp];
+ AcBase:=(H3DcOff[Comp]+Y*Wrap+X)*16; AcBase1:=AcBase;
+ A:=Dc^[H3DcOff[Comp]+(X-1)+Y*Wrap];
+ C:=Dc^[H3DcOff[Comp]+X+(Y-1)*Wrap];
+ If (H3FirstLine<>0) And (N<>3) Then Begin
+  If N<>2 Then C:=1024;
+  If (N<>1) And (H3MbX=H3ResyncX) Then A:=1024;
+ End;
+ If H3AcPred<>0 Then Begin
+  PredDc:=1024;
+  If H3AicDir<>0 Then Begin
+   If A<>1024 Then Begin
+    Dec(AcBase,16);
+    For I:=1 To 7 Do Block[I Shl 3]:=SmallInt(Block[I Shl 3]+H3Ac^[AcBase+I]);
+    PredDc:=A;
+   End;
+  End Else Begin
+   If C<>1024 Then Begin
+    Dec(AcBase,16*Wrap);
+    For I:=1 To 7 Do Block[I]:=SmallInt(Block[I]+H3Ac^[AcBase+I+8]);
+    PredDc:=C;
+   End;
+  End;
+ End Else Begin
+  If (A<>1024) And (C<>1024) Then PredDc:=(A+C) Shr 1
+  Else If A<>1024 Then PredDc:=A
+  Else PredDc:=C;
+ End;
+ Block[0]:=SmallInt(Block[0]*Scale+PredDc);
+ If Block[0]<0 Then Block[0]:=0 Else Block[0]:=Block[0] Or 1;
+ Dc^[H3DcOff[Comp]+X+Y*Wrap]:=Block[0];
+ For I:=1 To 7 Do H3Ac^[AcBase1+I]:=Block[I Shl 3];
+ For I:=1 To 7 Do H3Ac^[AcBase1+8+I]:=Block[I];
+End;
+
+{ h263_decode_block ; 0 = ok, -1 = erreur }
+Procedure H3RvInitTab;
+Const
+ RunLen: Array[0..18,0..1] Of Integer=((0,0),(1,0),(255,0),(3,1),(254,1),(7,3),(
+  252,3),(15,7),(248,7),(31,15),(240,15),(63,31),(224,31),(127,63),(192,63),(
+  255,127),(128,127),(127,255),(128,255));
+ LumLen: Array[0..14] Of Integer=(1,0,2,4,8,16,32,0,64,0,128,0,256,0,512);
+ ChrLen: Array[0..14] Of Integer=(1,2,4,0,8,0,16,0,32,0,64,0,128,0,256);
+Var I,T,N,L,Idx: LongInt; Cur: LongInt; Code: Int64;
+Begin
+ If H3RvInit Then Exit; H3RvInit:=True;
+ N:=0;
+ For I:=0 To 18 Do Begin Cur:=RunLen[I,0]; For T:=0 To RunLen[I,1] Do Begin
+  H3RvLumSym[N]:=Cur And 255; Dec(Cur); Inc(N); End; End;
+ N:=0;
+ For I:=0 To 16 Do Begin Cur:=RunLen[I,0]; For T:=0 To RunLen[I,1] Do Begin
+  H3RvChrSym[N]:=Cur And 255; Dec(Cur); Inc(N); End; End;
+ Code:=0; Idx:=0;
+ For L:=2 To 16 Do Begin
+  H3RvLumCnt[L]:=LumLen[L-2]; H3RvLumFirst[L]:=Code Shr (32-L); H3RvLumOff[L]:=
+   Idx;
+  Code:=Code+(Int64(LumLen[L-2]) Shl (32-L)); Inc(Idx,LumLen[L-2]);
+ End;
+ Code:=0; Idx:=0;
+ For L:=2 To 16 Do Begin
+  H3RvChrCnt[L]:=ChrLen[L-2]; H3RvChrFirst[L]:=Code Shr (32-L); H3RvChrOff[L]:=
+   Idx;
+  Code:=Code+(Int64(ChrLen[L-2]) Shl (32-L)); Inc(Idx,ChrLen[L-2]);
+ End;
+End;
+{ ff_rv_decode_dc ; < 0 = erreur }
+Function H3RvDecodeDc(N: LongInt): LongInt;
+Var V,L,Start: LongInt;
+Begin
+ H3RvInitTab;
+ Start:=H3Pos; V:=0;
+ If N<4 Then Begin
+  If H3Show(7)=$7F Then Begin H3Skip(18); H3RvDecodeDc:=255; Exit; End;
+  For L:=1 To 16 Do Begin
+   V:=V*2+H3Bit;
+   If (L>=2) And (H3RvLumCnt[L]>0) And (V>=H3RvLumFirst[L]) And (V-H3RvLumFirst[
+    L]<H3RvLumCnt[L]) Then Begin
+    H3RvDecodeDc:=H3RvLumSym[H3RvLumOff[L]+V-H3RvLumFirst[L]]; Exit;
+   End;
+  End;
+ End Else Begin
+  If H3Show(9)=$1FE Then Begin H3Skip(18); H3RvDecodeDc:=255; Exit; End;
+  For L:=1 To 16 Do Begin
+   V:=V*2+H3Bit;
+   If (L>=2) And (H3RvChrCnt[L]>0) And (V>=H3RvChrFirst[L]) And (V-H3RvChrFirst[
+    L]<H3RvChrCnt[L]) Then Begin
+    H3RvDecodeDc:=H3RvChrSym[H3RvChrOff[L]+V-H3RvChrFirst[L]]; Exit;
+   End;
+  End;
+ End;
+ H3Pos:=Start; H3RvDecodeDc:=-1;
+End;
+
+Function H3Block(Var Block: TH3Blk; N,Coded: LongInt): LongInt;
+Var
+ Level,I,J,Run,Sym,SavedPos,Rl,Is11,Comp,Diff: LongInt; Scan: PEABuffer; Acp:
+  Boolean; Retry: Boolean;
+ Done: Boolean;
+Begin
+ H3Block:=-1;
+ SavedPos:=H3Pos;
+ Scan:=@H3Zigzag; Rl:=0;
+ If (H3Aic<>0) And (H3MbIntra<>0) Then Begin
+  Rl:=1; I:=0;
+  If H3AcPred<>0 Then Begin If H3AicDir<>0 Then Scan:=@H3AltV Else Scan:=
+   @H3AltH; End;
+ End Else If H3MbIntra<>0 Then Begin
+  If H3RvMode=1 Then Begin
+   If (H3Rv10Ver=3) And (H3PictType=0) Then Begin
+    If N<=3 Then Comp:=0 Else Comp:=N-3;
+    Level:=H3RvLastDc[Comp];
+    If H3RvFirst[Comp]<>0 Then Begin
+     Diff:=H3RvDecodeDc(N);
+     If Diff<0 Then Exit;
+     Level:=(Level+Diff) And 255;
+     H3RvLastDc[Comp]:=Level;
+    End Else H3RvFirst[Comp]:=1;
+   End Else Begin
+    Level:=H3Bits(8);
+    If Level=255 Then Level:=128;
+   End;
+  End Else Begin
+   Level:=H3Bits(8);
+   If Level=255 Then Level:=128;
+  End;
+  Block[0]:=Level; I:=1;
+ End Else I:=0;
+ If Coded=0 Then Begin
+  If (H3MbIntra<>0) And (H3Aic<>0) Then Begin
+   H3PredAcDc(Block,N); H3BlkLast[N]:=63; H3Block:=0; Exit;
+  End;
+  H3BlkLast[N]:=I-1; H3Block:=0; Exit;
+ End;
+ Repeat
+  Retry:=False;
+  Dec(I);
+  Repeat
+   If Rl=0 Then Sym:=H3GetVlc(H3VRlInter) Else Sym:=H3GetVlc(H3VRlAic);
+   If Sym<0 Then Exit;
+   If Sym=102 Then Begin
+    If H3Flv>1 Then Begin
+     Is11:=H3Bit;
+     Run:=H3Bits(7)+1;
+     If Is11<>0 Then Level:=H3SBits(11) Else Level:=H3SBits(7);
+     If Is11<>0 Then H3Skip(11) Else H3Skip(7);
+    End Else Begin
+     Run:=H3Bits(7)+1;
+     Level:=H3Bits(8); If Level>=128 Then Dec(Level,256);
+     If Level=-128 Then Begin
+      If H3RvMode=1 Then Begin
+       Level:=H3SBits(12); H3Skip(12);
+      End Else Begin
+       Level:=H3Bits(5);
+       Level:=Level Or (H3SBits(6)*32);
+       H3Skip(6);
+      End;
+     End;
+    End;
+   End Else Begin
+    If Rl=0 Then Begin Run:=H3RunInter[Sym]; Level:=H3LevInter[Sym]; End
+    Else Begin Run:=H3RunAic[Sym]; Level:=H3LevAic[Sym]; End;
+    If H3Bit<>0 Then Level:=-Level;
+   End;
+   Inc(I,Run);
+   If I>=64 Then Begin
+    I:=I-Run+((Run-1) And 63)+1;
+    If I<64 Then Begin
+     Block[Scan^[I]]:=SmallInt(Level);
+     Break;
+    End;
+    If (H3AltInter<>0) And (Rl=0) And (H3MbIntra=0) Then Begin
+     Rl:=1; I:=0; H3Pos:=SavedPos; FillChar(Block,SizeOf(Block),0); Retry:=True;
+      Break;
+    End;
+    Exit;
+   End;
+   J:=Scan^[I];
+   Block[J]:=SmallInt(Level);
+  Until False;
+ Until Not Retry;
+ If (H3MbIntra<>0) And (H3Aic<>0) Then Begin
+  H3PredAcDc(Block,N); I:=63;
+ End;
+ H3BlkLast[N]:=I;
+ H3Block:=0;
+End;
+
+Procedure H3FillMv(M,Mx,My: LongInt);
+Begin
+ H3SetMv(M,0,Mx); H3SetMv(M,1,My); H3SetMv(M+1,0,Mx); H3SetMv(M+1,1,My);
+ H3SetMv(M+H3B8Stride,0,Mx); H3SetMv(M+H3B8Stride,1,My); H3SetMv(M+H3B8Stride+1,
+  0,Mx); H3SetMv(M+H3B8Stride+1,1,My);
+End;
+
+{ preview_obmc: lit les vecteurs du macrobloc suivant sans consommer le flux }
+Procedure H3PreviewObmc;
+Var
+ Saved,Cbpc,I,Px,Py,Mx,My,M,Xy: LongInt; Ok: Boolean;
+Begin
+ Saved:=H3Pos;
+ Xy:=H3MbX+1+H3MbY*H3MbStride;
+ Inc(H3MbX);
+ Repeat
+  If H3Bit<>0 Then Begin
+   M:=H3B8Stride*2*H3MbY+2*H3MbX;
+   H3FillMv(M,0,0);
+   H3SetMt(Xy,H3_SKIP Or H3_16X16 Or H3_L0);
+   Dec(H3MbX); H3Pos:=Saved; Exit;
+  End;
+  Cbpc:=H3GetVlc(H3VInter);
+ Until Cbpc<>20;
+ If (Cbpc And 4)<>0 Then H3SetMt(Xy,H3_INTRA)
+ Else Begin
+  H3GetVlc(H3VCbpy);
+  If (Cbpc And 8)<>0 Then Begin
+   If H3ModQ<>0 Then Begin
+    If H3Bit<>0 Then H3Skip(1) Else H3Skip(5);
+   End Else H3Skip(2);
+  End;
+  If (Cbpc And 16)=0 Then Begin
+   H3SetMt(Xy,H3_16X16 Or H3_L0);
+   M:=H3PredMotion(0,0,Px,Py);
+   Mx:=H3MotionComp(Px);
+   My:=H3MotionComp(Py);
+   H3FillMv(M,Mx,My);
+  End Else Begin
+   H3SetMt(Xy,H3_8X8 Or H3_L0);
+   For I:=0 To 3 Do Begin
+    M:=H3PredMotion(I,0,Px,Py);
+    Mx:=H3MotionComp(Px);
+    My:=H3MotionComp(Py);
+    If (H3Umvplus<>0) And (Mx-Px=1) And (My-Py=1) Then H3Skip(1);
+    H3SetMv(M,0,Mx); H3SetMv(M,1,My);
+   End;
+  End;
+ End;
+ Dec(H3MbX); H3Pos:=Saved;
+End;
+
+Function H3SkipBPart(Cbp: LongInt): LongInt;
+Var Db: TH3Blk; I,Mbi: LongInt; Bli: Array[0..5] Of LongInt;
+Begin
+ H3SkipBPart:=-1;
+ Mbi:=H3MbIntra;
+ Move(H3BlkLast,Bli,SizeOf(Bli));
+ H3MbIntra:=0;
+ For I:=0 To 5 Do Begin
+  FillChar(Db,SizeOf(Db),0);
+  If H3Block(Db,I,Cbp And 32)<0 Then Exit;
+  Cbp:=Cbp+Cbp;
+ End;
+ H3MbIntra:=Mbi;
+ Move(Bli,H3BlkLast,SizeOf(Bli));
+ H3SkipBPart:=0;
+End;
+
+Function H3GetModb(PbFrame: LongInt; Var Cbpb: LongInt): LongInt;
+Var C,Mv,I: LongInt;
+Begin
+ Mv:=1;
+ If PbFrame<3 Then Begin
+  C:=H3Bit;
+  If (PbFrame=2) And (C<>0) Then If H3Bit=0 Then Mv:=1 Else Mv:=0;
+ End Else Begin
+  I:=0; While (I<4) And (H3Bit<>0) Do Inc(I);
+  Mv:=I+1;
+  C:=Mv And 1;
+  If (Mv And 2)<>0 Then Mv:=1 Else Mv:=0;
+ End;
+ If C<>0 Then Cbpb:=H3Bits(6);
+ H3GetModb:=Mv;
+End;
+
+Const H3SliceOk=0; H3SliceErr=-1; H3SliceEnd=-2; H3SliceNoEnd=-3;
+ H3InvalidData=-100;
+
+{ ff_h263_decode_mb (images I et P ; les images B ne sont pas prises en charge)
+ }
+{ set_direct_mv (images B H.263/RV20) }
+Procedure H3SetDirectMv;
+Var Xy,I,M,Pmx,Pmy,Tpp,Tpb: LongInt; Nx: ^TH3Pic; Col: LongInt;
+Procedure One(K: LongInt);
+Begin
+ M:=H3B8Stride*2*H3MbY+2*H3MbX+(K And 1)+(K Shr 1)*H3B8Stride;
+ Pmx:=Nx^.Mv^[(M+4)*2]; Pmy:=Nx^.Mv^[(M+4)*2+1];
+ If (Pmx+32>=0) And (Pmx+32<64) Then Begin H3Mv[K,0]:=H3DirScale[0,Pmx+32];
+  H3Mv1[K,0]:=H3DirScale[1,Pmx+32]; End
+ Else Begin H3Mv[K,0]:=Pmx*Tpb Div Tpp; H3Mv1[K,0]:=Pmx*(Tpb-Tpp) Div Tpp; End;
+ If (Pmy+32>=0) And (Pmy+32<64) Then Begin H3Mv[K,1]:=H3DirScale[0,Pmy+32];
+  H3Mv1[K,1]:=H3DirScale[1,Pmy+32]; End
+ Else Begin H3Mv[K,1]:=Pmy*Tpb Div Tpp; H3Mv1[K,1]:=Pmy*(Tpb-Tpp) Div Tpp; End;
+End;
+Begin
+ Xy:=H3MbX+H3MbY*H3MbStride;
+ Nx:=@H3P[H3BwdI];
+ Col:=Nx^.Mt^[Xy+2*H3MbStride+1];
+ Tpp:=Word(H3PpTime); Tpb:=Word(H3PbTime);
+ If (Col And H3_8X8)<>0 Then Begin
+  For I:=0 To 3 Do One(I);
+ End Else Begin
+  One(0);
+  For I:=1 To 3 Do Begin H3Mv[I,0]:=H3Mv[0,0]; H3Mv[I,1]:=H3Mv[0,1]; H3Mv1[I,
+   0]:=H3Mv1[0,0]; H3Mv1[I,1]:=H3Mv1[0,1]; End;
+ End;
+ H3MvType:=1;
+End;
+
+Function H3DecodeMb: LongInt;
+Var
+ Cbpc,Cbpy,I,Cbp,Px,Py,Mx,My,Dquant,Xy,PbMvCount,Cbpb,M,V,Left,Bt: LongInt;
+Label Done;
+Begin
+ Xy:=H3MbX+H3MbY*H3MbStride;
+ Cbpb:=0; PbMvCount:=0; Cbp:=0; Dquant:=0;
+ If H3PictType=2 Then Begin
+  M:=H3B8Stride*2*H3MbY+2*H3MbX;
+  For I:=0 To 1 Do Begin
+   H3MvList:=I;
+   H3FillMv(M,0,0);
+  End;
+  H3MvList:=0;
+  Repeat
+   Bt:=H3GetVlc(H3VMbB);
+   If Bt<0 Then Begin H3DecodeMb:=H3SliceErr; Exit; End;
+  Until Bt<>12;
+  FillChar(H3Blk,SizeOf(H3Blk),0);
+  H3MbSkipped:=0; H3MvDir:=0; H3MvType:=0;
+  If Bt>=13 Then Begin
+   H3MbIntra:=1;
+   Cbpc:=H3GetVlc(H3VCbpcB);
+   If Bt=14 Then Dquant:=4 Else Dquant:=0;
+  End Else Begin
+   H3MbIntra:=0;
+   If Bt In [1,2,4,5,7,8,10,11] Then Begin
+    Cbpc:=H3GetVlc(H3VCbpcB);
+    Cbpy:=H3GetVlc(H3VCbpy);
+    If Cbpy<0 Then Begin H3DecodeMb:=H3SliceErr; Exit; End;
+    If (H3AltInter=0) Or ((Cbpc And 3)<>3) Then Cbpy:=Cbpy Xor $F;
+    Cbp:=(Cbpc And 3) Or (Cbpy Shl 2);
+   End Else Cbp:=0;
+   If Bt In [2,5,8,11] Then H3Dquant;
+   H3SetMt(Xy,H3_16X16);
+   If Bt<=2 Then Begin
+    H3MvDir:=3; H3SetDirectMv;
+   End Else Begin
+    If Bt In [3,4,5,9,10,11] Then Begin
+     H3MvList:=0;
+     H3PredMotion(0,0,Px,Py);
+     Mx:=H3MotionComp(Px);
+     If Mx>=$FFFF Then Begin H3DecodeMb:=H3SliceErr; Exit; End;
+     My:=H3MotionComp(Py);
+     If My>=$FFFF Then Begin H3DecodeMb:=H3SliceErr; Exit; End;
+     If (H3Umvplus<>0) And (Mx-Px=1) And (My-Py=1) Then H3Skip(1);
+     H3Mv[0,0]:=Mx; H3Mv[0,1]:=My;
+     H3FillMv(M,Mx,My);
+     H3MvDir:=1;
+    End;
+    If Bt In [6,7,8,9,10,11] Then Begin
+     H3MvList:=1;
+     H3PredMotion(0,1,Px,Py);
+     Mx:=H3MotionComp(Px);
+     If Mx>=$FFFF Then Begin H3MvList:=0; H3DecodeMb:=H3SliceErr; Exit; End;
+     My:=H3MotionComp(Py);
+     If My>=$FFFF Then Begin H3MvList:=0; H3DecodeMb:=H3SliceErr; Exit; End;
+     If (H3Umvplus<>0) And (Mx-Px=1) And (My-Py=1) Then H3Skip(1);
+     H3Mv1[0,0]:=Mx; H3Mv1[0,1]:=My;
+     H3FillMv(M,Mx,My);
+     H3MvList:=0;
+     H3MvDir:=H3MvDir Or 2;
+    End;
+   End;
+  End;
+ End Else
+ If H3PictType=1 Then Begin
+  Repeat
+   If H3Bit<>0 Then Begin
+    H3MbIntra:=0;
+    For I:=0 To 5 Do H3BlkLast[I]:=-1;
+    H3MvType:=0;
+    H3SetMt(Xy,H3_SKIP Or H3_16X16 Or H3_L0);
+    H3Mv[0,0]:=0; H3Mv[0,1]:=0;
+    If (H3Obmc Or H3Loop)=0 Then H3MbSkipped:=1 Else H3MbSkipped:=0;
+    Goto Done;
+   End;
+   Cbpc:=H3GetVlc(H3VInter);
+   If Cbpc<0 Then Begin H3DecodeMb:=H3SliceErr; Exit; End;
+  Until Cbpc<>20;
+  FillChar(H3Blk,SizeOf(H3Blk),0);
+  Dquant:=Cbpc And 8;
+  If (Cbpc And 4)<>0 Then H3MbIntra:=1 Else H3MbIntra:=0;
+  If H3MbIntra=0 Then Begin
+   If (H3PbFrame<>0) And (H3Bit<>0) Then PbMvCount:=H3GetModb(H3PbFrame,Cbpb);
+   Cbpy:=H3GetVlc(H3VCbpy);
+   If Cbpy<0 Then Begin H3DecodeMb:=H3SliceErr; Exit; End;
+   If (H3AltInter=0) Or ((Cbpc And 3)<>3) Then Cbpy:=Cbpy Xor $F;
+   Cbp:=(Cbpc And 3) Or (Cbpy Shl 2);
+   If Dquant<>0 Then H3Dquant;
+   If (Cbpc And 16)=0 Then Begin
+    H3SetMt(Xy,H3_16X16 Or H3_L0);
+    H3MvType:=0;
+    H3PredMotion(0,0,Px,Py);
+    Mx:=H3MotionComp(Px);
+    If Mx>=$FFFF Then Begin H3DecodeMb:=H3SliceErr; Exit; End;
+    My:=H3MotionComp(Py);
+    If My>=$FFFF Then Begin H3DecodeMb:=H3SliceErr; Exit; End;
+    H3Mv[0,0]:=Mx; H3Mv[0,1]:=My;
+    If (H3Umvplus<>0) And (Mx-Px=1) And (My-Py=1) Then H3Skip(1);
+   End Else Begin
+    H3SetMt(Xy,H3_8X8 Or H3_L0);
+    H3MvType:=1;
+    For I:=0 To 3 Do Begin
+     M:=H3PredMotion(I,0,Px,Py);
+     Mx:=H3MotionComp(Px);
+     If Mx>=$FFFF Then Begin H3DecodeMb:=H3SliceErr; Exit; End;
+     My:=H3MotionComp(Py);
+     If My>=$FFFF Then Begin H3DecodeMb:=H3SliceErr; Exit; End;
+     H3Mv[I,0]:=Mx; H3Mv[I,1]:=My;
+     If (H3Umvplus<>0) And (Mx-Px=1) And (My-Py=1) Then H3Skip(1);
+     H3SetMv(M,0,Mx); H3SetMv(M,1,My);
+    End;
+   End;
+  End;
+ End Else Begin
+  Repeat
+   Cbpc:=H3GetVlc(H3VIntra);
+   If Cbpc<0 Then Begin H3DecodeMb:=H3SliceErr; Exit; End;
+  Until Cbpc<>8;
+  FillChar(H3Blk,SizeOf(H3Blk),0);
+  Dquant:=Cbpc And 4;
+  H3MbIntra:=1;
+ End;
+ If H3MbIntra<>0 Then Begin
+  H3MvType:=0;
+  H3SetMt(Xy,H3_INTRA);
+  If H3Aic<>0 Then Begin
+   H3AcPred:=H3Bit;
+   If H3AcPred<>0 Then Begin
+    H3SetMt(Xy,H3_INTRA Or H3_ACPRED);
+    H3AicDir:=H3Bit;
+   End;
+  End Else H3AcPred:=0;
+  If (H3PbFrame<>0) And (H3Bit<>0) Then PbMvCount:=H3GetModb(H3PbFrame,Cbpb);
+  Cbpy:=H3GetVlc(H3VCbpy);
+  If Cbpy<0 Then Begin H3DecodeMb:=H3SliceErr; Exit; End;
+  Cbp:=(Cbpc And 3) Or (Cbpy Shl 2);
+  If Dquant<>0 Then H3Dquant;
+  If H3PbFrame<>0 Then Inc(PbMvCount);
+ End;
+ While PbMvCount>0 Do Begin
+  Dec(PbMvCount);
+  H3DecMotion(0,1); H3DecMotion(0,1);
+ End;
+ For I:=0 To 5 Do Begin
+  If H3Block(H3Blk[I],I,Cbp And 32)<0 Then Begin H3DecodeMb:=-1; Exit; End;
+  Cbp:=Cbp+Cbp;
+ End;
+ If (H3PbFrame<>0) And (H3SkipBPart(Cbpb)<0) Then Begin H3DecodeMb:=-1; Exit;
+  End;
+ If (H3Obmc<>0) And (H3MbIntra=0) Then
+  If (H3PictType=1) And (H3MbX+1<H3MbW) And (H3MbNumLeft<>1) Then H3PreviewObmc;
+Done:
+ If H3Left<0 Then Begin H3DecodeMb:=H3InvalidData; Exit; End;
+ V:=H3Show(16);
+ Left:=H3Left;
+ If Left<16 Then V:=V Shr (16-Left);
+ If V=0 Then H3DecodeMb:=H3SliceEnd Else H3DecodeMb:=H3SliceOk;
+End;
+
+{ en-tete d'image H.263 (ff_h263_decode_picture_header) ; < 0 = erreur }
+Function H3PicHeader: LongInt;
+Var Format,Width,Height,I,Ufep,Aspect,StartCode,Gcd,A,B,T: LongInt;
+Begin
+ H3PicHeader:=-1;
+ H3Align;
+ StartCode:=H3Bits(14);
+ I:=H3Left;
+ While I>24 Do Begin
+  StartCode:=((StartCode Shl 8) Or H3Bits(8)) And $003FFFFF;
+  If StartCode=$20 Then Break;
+  Dec(I,8);
+ End;
+ If StartCode<>$20 Then Exit;
+ I:=H3Bits(8);
+ Dec(I,(I-(H3PicNum And 255)+128) And -256);
+ H3PicNum:=(H3PicNum And -256)+I;
+ If H3Bit<>1 Then Exit;
+ If H3Bit<>0 Then Exit;
+ H3Skip(3);
+ Format:=H3Bits(3);
+ If (Format<>7) And (Format<>6) Then Begin
+  H3Plus:=0;
+  Width:=H3Format[Format*2]; Height:=H3Format[Format*2+1];
+  If Width=0 Then Exit;
+  H3PictType:=H3Bit;
+  H3LongVec:=H3Bit;
+  If H3Bit<>0 Then Exit;
+  H3Obmc:=H3Bit;
+  H3PbFrame:=H3Bit;
+  H3Qscale:=H3Bits(5); H3ChromaQscale:=H3Qscale;
+  H3Skip(1);
+  H3Wd:=Width; H3Ht:=Height;
+  H3Aspect[0]:=12; H3Aspect[1]:=11;
+  H3FpsN:=30000; H3FpsD:=1001;
+ End Else Begin
+  H3Plus:=1;
+  Ufep:=H3Bits(3);
+  If Ufep=1 Then Begin
+   Format:=H3Bits(3);
+   H3CustomPcf:=H3Bit;
+   H3Umvplus:=H3Bit;
+   H3Skip(1);
+   H3Obmc:=H3Bit;
+   H3Aic:=H3Bit;
+   H3Loop:=H3Bit;
+   H3SliceStruct:=H3Bit;
+   H3Skip(1);
+   H3Skip(1);
+   H3AltInter:=H3Bit;
+   H3ModQ:=H3Bit;
+   If H3ModQ<>0 Then H3ChromaTab:=True;
+   H3Skip(1);
+   H3Skip(3);
+  End Else If Ufep<>0 Then Exit;
+  T:=H3Bits(3);
+  Case T Of
+   0: H3PictType:=0;
+   1: H3PictType:=1;
+   2: Begin H3PictType:=1; H3PbFrame:=3; End;
+   3: H3PictType:=2;
+   7: H3PictType:=0;
+  Else Exit;
+  End;
+  H3Skip(2);
+  H3NoRounding:=H3Bit;
+  H3Skip(4);
+  If Ufep<>0 Then Begin
+   If Format=6 Then Begin
+    Aspect:=H3Bits(4);
+    Width:=(H3Bits(9)+1)*4;
+    H3Bit;
+    Height:=H3Bits(9)*4;
+    If Aspect=15 Then Begin H3Aspect[0]:=H3Bits(8); H3Aspect[1]:=H3Bits(8); End
+    Else Case Aspect Of
+     1: Begin H3Aspect[0]:=1; H3Aspect[1]:=1; End;
+     2: Begin H3Aspect[0]:=12; H3Aspect[1]:=11; End;
+     3: Begin H3Aspect[0]:=10; H3Aspect[1]:=11; End;
+     4: Begin H3Aspect[0]:=16; H3Aspect[1]:=11; End;
+     5: Begin H3Aspect[0]:=40; H3Aspect[1]:=33; End;
+    Else Begin H3Aspect[0]:=0; H3Aspect[1]:=1; End;
+    End;
+   End Else Begin
+    Width:=H3Format[Format*2]; Height:=H3Format[Format*2+1];
+    H3Aspect[0]:=12; H3Aspect[1]:=11;
+   End;
+   If (Width=0) Or (Height=0) Then Exit;
+   H3Wd:=Width; H3Ht:=Height;
+   If H3CustomPcf<>0 Then Begin
+    H3FpsN:=1800000; H3FpsD:=1000+H3Bit;
+    H3FpsD:=H3FpsD*H3Bits(7);
+    If H3FpsD=0 Then Exit;
+    A:=H3FpsD; B:=H3FpsN;
+    While B<>0 Do Begin Gcd:=A Mod B; A:=B; B:=Gcd; End;
+    H3FpsD:=H3FpsD Div A; H3FpsN:=H3FpsN Div A;
+   End Else Begin H3FpsN:=30000; H3FpsD:=1001; End;
+  End;
+  If H3CustomPcf<>0 Then H3Skip(2);
+  If Ufep<>0 Then Begin
+   If H3Umvplus<>0 Then If H3Bit=0 Then H3Skip(1);
+   If H3SliceStruct<>0 Then Begin H3Bit; H3Bit; End;
+   If H3PictType=2 Then Begin
+    H3Skip(4);
+    If Ufep=1 Then H3Skip(4);
+   End;
+  End;
+  H3Qscale:=H3Bits(5);
+ End;
+ If (H3Wd<=0) Or (H3Ht<=0) Or (H3Wd>32768) Or (H3Ht>32768) Or (Int64(H3Wd)*
+  H3Ht>268435456) Then Exit;
+ If (H3Wd*H3Ht Div 256 Div 8)>H3Left Then Begin H3PicHeader:=H3InvalidData;
+  Exit; End;
+ H3MbW:=(H3Wd+15) Div 16; H3MbH:=(H3Ht+15) Div 16; H3MbNum:=H3MbW*H3MbH;
+ If H3PbFrame<>0 Then Begin
+  H3Skip(3);
+  If H3CustomPcf<>0 Then H3Skip(2);
+  H3Skip(2);
+ End;
+ If H3PictType<>2 Then Begin
+  H3Time:=H3PicNum;
+  H3PpTime:=H3Time-H3LastNonB;
+  H3LastNonB:=H3Time;
+ End Else Begin
+  H3Time:=H3PicNum;
+  H3PbTime:=H3PpTime-(H3LastNonB-H3Time);
+  If (H3PpTime<=H3PbTime) Or (H3PpTime<=H3PpTime-H3PbTime) Or (H3PpTime<=0) Then
+   Begin H3PpTime:=2; H3PbTime:=1; End;
+ End;
+ { PEI }
+ If H3Left<=0 Then Begin H3PicHeader:=H3InvalidData; Exit; End;
+ While H3Bit<>0 Do Begin
+  H3Skip(8);
+  If H3Left<=0 Then Begin H3PicHeader:=H3InvalidData; Exit; End;
+ End;
+ If H3SliceStruct<>0 Then Begin
+  If H3Bit<>1 Then Exit;
+  H3DecodeMba;
+  If H3Bit<>1 Then Exit;
+ End;
+ H3PicHeader:=0;
+End;
+
+{ en-tete Sorenson Spark (ff_flv_decode_picture_header) }
+Function H3FlvHeader: LongInt;
+Var Format,Width,Height,T: LongInt;
+Begin
+ H3FlvHeader:=-1;
+ If H3Bits(17)<>1 Then Exit;
+ Format:=H3Bits(5);
+ If (Format<>0) And (Format<>1) Then Exit;
+ H3Flv:=Format+1;
+ H3PicNum:=H3Bits(8);
+ Format:=H3Bits(3);
+ Case Format Of
+  0: Begin Width:=H3Bits(8); Height:=H3Bits(8); End;
+  1: Begin Width:=H3Bits(16); Height:=H3Bits(16); End;
+  2: Begin Width:=352; Height:=288; End;
+  3: Begin Width:=176; Height:=144; End;
+  4: Begin Width:=128; Height:=96; End;
+  5: Begin Width:=320; Height:=240; End;
+  6: Begin Width:=160; Height:=120; End;
+ Else Begin Width:=0; Height:=0; End;
+ End;
+ If (Width<=0) Or (Height<=0) Then Exit;
+ H3Wd:=Width; H3Ht:=Height;
+ T:=H3Bits(2);
+ H3PictType:=T; If H3PictType>2 Then H3PictType:=3;
+ If T>1 Then H3Droppable:=1 Else H3Droppable:=0;
+ If H3Droppable<>0 Then H3PictType:=1;
+ H3Skip(1);
+ H3Qscale:=H3Bits(5); H3ChromaQscale:=H3Qscale;
+ H3Plus:=0; H3LongVec:=0;
+ If H3Left<=0 Then Begin H3FlvHeader:=H3InvalidData; Exit; End;
+ While H3Bit<>0 Do Begin
+  H3Skip(8);
+  If H3Left<=0 Then Begin H3FlvHeader:=H3InvalidData; Exit; End;
+ End;
+ H3MbW:=(H3Wd+15) Div 16; H3MbH:=(H3Ht+15) Div 16; H3MbNum:=H3MbW*H3MbH;
+ H3FlvHeader:=0;
+End;
+
+{ en-tete Intel H.263 (ff_intel_h263_decode_picture_header) }
+Function H3IntelHeader: LongInt;
+Var Fmt,Ar,Width,Height: LongInt;
+Begin
+ H3IntelHeader:=-1;
+ If H3Left=64 Then Exit; { trame factice }
+ If H3Bits(22)<>$20 Then Exit;
+ H3PicNum:=H3Bits(8);
+ If H3Bit<>1 Then Exit;
+ If H3Bit<>0 Then Exit;
+ H3Skip(3);
+ Fmt:=H3Bits(3);
+ If (Fmt=0) Or (Fmt=6) Then Exit;
+ H3Plus:=0;
+ H3PictType:=H3Bit;
+ H3LongVec:=H3Bit;
+ If H3Bit<>0 Then Exit;
+ H3Obmc:=H3Bit;
+ H3PbFrame:=H3Bit;
+ If Fmt<6 Then Begin
+  Width:=H3Format[Fmt*2]; Height:=H3Format[Fmt*2+1];
+  If Width=0 Then Exit;
+  H3Wd:=Width; H3Ht:=Height;
+  H3Aspect[0]:=12; H3Aspect[1]:=11;
+ End Else Begin
+  Fmt:=H3Bits(3);
+  If (Fmt=0) Or (Fmt=7) Then Exit;
+  H3Skip(2);
+  H3Loop:=H3Bit;
+  H3Skip(1);
+  If H3Bit<>0 Then H3PbFrame:=2;
+  H3Skip(5); H3Skip(5);
+ End;
+ If Fmt=6 Then Begin
+  Ar:=H3Bits(4);
+  H3Skip(9); H3Bit; H3Skip(9);
+  If Ar=15 Then Begin H3Aspect[0]:=H3Bits(8); H3Aspect[1]:=H3Bits(8); End
+  Else Case Ar Of
+   1: Begin H3Aspect[0]:=1; H3Aspect[1]:=1; End;
+   2: Begin H3Aspect[0]:=12; H3Aspect[1]:=11; End;
+   3: Begin H3Aspect[0]:=10; H3Aspect[1]:=11; End;
+   4: Begin H3Aspect[0]:=16; H3Aspect[1]:=11; End;
+   5: Begin H3Aspect[0]:=40; H3Aspect[1]:=33; End;
+  Else Begin H3Aspect[0]:=0; H3Aspect[1]:=1; End;
+  End;
+ End;
+ H3Qscale:=H3Bits(5); H3ChromaQscale:=H3Qscale;
+ H3Skip(1);
+ If H3PbFrame<>0 Then Begin H3Skip(3); H3Skip(2); End;
+ If (H3Wd<=0) Or (H3Ht<=0) Then Exit;
+ H3MbW:=(H3Wd+15) Div 16; H3MbH:=(H3Ht+15) Div 16; H3MbNum:=H3MbW*H3MbH;
+ If H3PictType<>2 Then Begin
+  H3Time:=H3PicNum; H3PpTime:=H3Time-H3LastNonB; H3LastNonB:=H3Time;
+ End;
+ If H3Left<=0 Then Begin H3IntelHeader:=H3InvalidData; Exit; End;
+ While H3Bit<>0 Do Begin
+  H3Skip(8);
+  If H3Left<=0 Then Begin H3IntelHeader:=H3InvalidData; Exit; End;
+ End;
+ H3IntelHeader:=0;
+End;
+
+{ ---- reconstruction (mpegvideo_motion.c, mpv_reconstruct_mb_template.c,
+ h263dsp.c, simple_idct) ---- }
+Var H3Emu: Array[0..24*24-1] Of Byte;
+ H3ObmcBuf: Array[0..4,0..63] Of Byte;
+
+{ bloc BW x BH copie avec recopie des bords (emulated_edge_mc) ; Dst de pas 24 }
+Procedure H3Fetch(Plane: PEABuffer; PW,PH,PStride,X,Y,BW,BH: LongInt);
+Var I,J,XX,YY: LongInt;
+Begin
+ If (X>=0) And (Y>=0) And (X+BW<=PW) And (Y+BH<=PH) Then Begin
+  For J:=0 To BH-1 Do Move(Plane^[(Y+J)*PStride+X],H3Emu[J*24],BW);
+  Exit;
+ End;
+ For J:=0 To BH-1 Do Begin
+  YY:=Y+J; If YY<0 Then YY:=0 Else If YY>=PH Then YY:=PH-1;
+  For I:=0 To BW-1 Do Begin
+   XX:=X+I; If XX<0 Then XX:=0 Else If XX>=PW Then XX:=PW-1;
+   H3Emu[J*24+I]:=Plane^[YY*PStride+XX];
+  End;
+ End;
+End;
+
+{ interpolation demi-pel de H3Emu vers Dst (W x H) }
+Procedure H3Pel(Dst: PEABuffer; DOff,DStr,Dxy,W,H,NoRnd: LongInt);
+Var X,Y,A,B,C,D,R1,R2,V: LongInt;
+Begin
+ R1:=1-NoRnd; R2:=2-NoRnd;
+ For Y:=0 To H-1 Do
+  For X:=0 To W-1 Do Begin
+   A:=H3Emu[Y*24+X];
+   Case Dxy Of
+    0: V:=A;
+    1: Begin B:=H3Emu[Y*24+X+1]; V:=(A+B+R1) Shr 1; End;
+    2: Begin C:=H3Emu[(Y+1)*24+X]; V:=(A+C+R1) Shr 1; End;
+   Else Begin
+    B:=H3Emu[Y*24+X+1]; C:=H3Emu[(Y+1)*24+X]; D:=H3Emu[(Y+1)*24+X+1];
+    V:=(A+B+C+D+R2) Shr 2;
+   End;
+   End;
+   If H3Avg<>0 Then V:=(Dst^[DOff+Y*DStr+X]+V+1) Shr 1;
+   Dst^[DOff+Y*DStr+X]:=V;
+  End;
+End;
+
+{ hpel_motion: bloc 8x8 ; Dst/DOff/DStr destination }
+Procedure H3HpelMotion(Dst: PEABuffer; DOff,DStr: LongInt; Ref: PEABuffer; SrcX,
+ SrcY,Mx,My,NoRnd: LongInt);
+Var Dxy: LongInt;
+Begin
+ Dxy:=0;
+ Inc(SrcX,H3Sar(Mx,1)); Inc(SrcY,H3Sar(My,1));
+ SrcX:=H3Clip(SrcX,-16,H3Wd);
+ If SrcX<>H3Wd Then Dxy:=Dxy Or (Mx And 1);
+ SrcY:=H3Clip(SrcY,-16,H3Ht);
+ If SrcY<>H3Ht Then Dxy:=Dxy Or ((My And 1) Shl 1);
+ H3Fetch(Ref,H3HEdge,H3VEdge,H3LY,SrcX,SrcY,9,9);
+ H3Pel(Dst,DOff,DStr,Dxy,8,8,NoRnd);
+End;
+
+{ chroma_4mv_motion }
+Procedure H3Chroma4Mv(RefU,RefV: PEABuffer; DstU,DstV: PEABuffer; DOff: LongInt;
+ Mx,My,NoRnd: LongInt);
+Var SrcX,SrcY,Dxy: LongInt;
+Begin
+ Mx:=H3RoundTab[Mx And 15]+H3Sar(Mx,3);
+ My:=H3RoundTab[My And 15]+H3Sar(My,3);
+ Dxy:=((My And 1) Shl 1) Or (Mx And 1);
+ Mx:=H3Sar(Mx,1); My:=H3Sar(My,1);
+ SrcX:=H3MbX*8+Mx; SrcY:=H3MbY*8+My;
+ SrcX:=H3Clip(SrcX,-8,H3Wd Shr 1);
+ If SrcX=(H3Wd Shr 1) Then Dxy:=Dxy And Not 1;
+ SrcY:=H3Clip(SrcY,-8,H3Ht Shr 1);
+ If SrcY=(H3Ht Shr 1) Then Dxy:=Dxy And Not 2;
+ H3Fetch(RefU,H3HEdge Shr 1,H3VEdge Shr 1,H3LC,SrcX,SrcY,9,9);
+ H3Pel(DstU,DOff,H3LC,Dxy,8,8,NoRnd);
+ H3Fetch(RefV,H3HEdge Shr 1,H3VEdge Shr 1,H3LC,SrcX,SrcY,9,9);
+ H3Pel(DstV,DOff,H3LC,Dxy,8,8,NoRnd);
+End;
+
+{ vecteur 16x16 sur les trois composantes (mpeg_motion_internal, sortie H.263) }
+Procedure H3MpegMotion(Ref: Integer; Mx,My,NoRnd: LongInt);
+Var Dxy,UvDxy,SrcX,SrcY,UvX,UvY,DOff,COff: LongInt; P: ^TH3Pic;
+Begin
+ P:=@H3P[Ref];
+ Dxy:=((My And 1) Shl 1) Or (Mx And 1);
+ SrcX:=H3MbX*16+H3Sar(Mx,1); SrcY:=H3MbY*16+H3Sar(My,1);
+ UvDxy:=Dxy Or (My And 2) Or ((Mx And 2) Shr 1);
+ UvX:=H3Sar(SrcX,1); UvY:=H3Sar(SrcY,1);
+ DOff:=H3MbY*16*H3LY+H3MbX*16; COff:=H3MbY*8*H3LC+H3MbX*8;
+ H3Fetch(P^.Y,H3HEdge,H3VEdge,H3LY,SrcX,SrcY,17,17);
+ H3Pel(H3P[H3CurI].Y,DOff,H3LY,Dxy,16,16,NoRnd);
+ H3Fetch(P^.U,H3HEdge Shr 1,H3VEdge Shr 1,H3LC,UvX,UvY,9,9);
+ H3Pel(H3P[H3CurI].U,COff,H3LC,UvDxy,8,8,NoRnd);
+ H3Fetch(P^.V,H3HEdge Shr 1,H3VEdge Shr 1,H3LC,UvX,UvY,9,9);
+ H3Pel(H3P[H3CurI].V,COff,H3LC,UvDxy,8,8,NoRnd);
+End;
+
+Procedure H3PutObmc(Dst: PEABuffer; DOff,DStr: LongInt);
+Procedure F(X,Y,T,L,M,R,B: LongInt);
+Var I: LongInt;
+Begin
+ I:=Y*8+X;
+ Dst^[DOff+Y*DStr+X]:=(T*H3ObmcBuf[1,I]+L*H3ObmcBuf[2,I]+M*H3ObmcBuf[0,I]+R*
+  H3ObmcBuf[3,I]+B*H3ObmcBuf[4,I]+4) Shr 3;
+End;
+Procedure F4(X,Y,T,L,M,R,B: LongInt);
+Begin F(X,Y,T,L,M,R,B); F(X+1,Y,T,L,M,R,B); F(X,Y+1,T,L,M,R,B); F(X+1,Y+1,T,L,M,
+ R,B); End;
+Begin
+ F(0,0,2,2,4,0,0); F(1,0,2,1,5,0,0); F4(2,0,2,1,5,0,0); F4(4,0,2,0,5,1,0); F(6,
+  0,2,0,5,1,0); F(7,0,2,0,4,2,0);
+ F(0,1,1,2,5,0,0); F(1,1,1,2,5,0,0); F(6,1,1,0,5,2,0); F(7,1,1,0,5,2,0);
+ F4(0,2,1,2,5,0,0); F4(2,2,1,1,6,0,0); F4(4,2,1,0,6,1,0); F4(6,2,1,0,5,2,0);
+ F4(0,4,0,2,5,0,1); F4(2,4,0,1,6,0,1); F4(4,4,0,0,6,1,1); F4(6,4,0,0,5,2,1);
+ F(0,6,0,2,5,0,1); F(1,6,0,2,5,0,1); F4(2,6,0,1,5,0,2); F4(4,6,0,0,5,1,2); F(6,
+  6,0,0,5,2,1); F(7,6,0,0,5,2,1);
+ F(0,7,0,2,4,0,2); F(1,7,0,1,5,0,2); F(6,7,0,0,5,1,2); F(7,7,0,0,4,2,2);
+End;
+
+{ apply_obmc }
+Procedure H3ApplyObmc(Ref: Integer; NoRnd: LongInt);
+Var
+ MvC: Array[0..3,0..3,0..1] Of LongInt; MotXy,Mot,Xy,I,J,X,Y,Mx,My: LongInt;
+  Mvs: Array[0..4,0..1] Of LongInt;
+ P: ^TH3Pic; Cur: ^TH3Pic; Tmp: Array[0..63] Of Byte;
+Begin
+ P:=@H3P[Ref]; Cur:=@H3P[H3CurI];
+ Xy:=H3MbX+H3MbY*H3MbStride;
+ Mot:=H3B8Stride; MotXy:=H3MbX*2+H3MbY*2*Mot;
+ For J:=0 To 1 Do Begin MvC[1,1,J]:=H3MvAt(MotXy,J); MvC[1,2,J]:=H3MvAt(MotXy+1,
+  J);
+  MvC[2,1,J]:=H3MvAt(MotXy+Mot,J); MvC[2,2,J]:=H3MvAt(MotXy+Mot+1,J);
+  MvC[3,1,J]:=H3MvAt(MotXy+Mot,J); MvC[3,2,J]:=H3MvAt(MotXy+Mot+1,J); End;
+ If (H3MbY=0) Or ((H3Mt(Xy-H3MbStride) And 7)<>0) Then
+  For J:=0 To 1 Do Begin MvC[0,1,J]:=MvC[1,1,J]; MvC[0,2,J]:=MvC[1,2,J]; End
+ Else
+  For J:=0 To 1 Do Begin MvC[0,1,J]:=H3MvAt(MotXy-Mot,J); MvC[0,2,J]:=H3MvAt(
+   MotXy-Mot+1,J); End;
+ If (H3MbX=0) Or ((H3Mt(Xy-1) And 7)<>0) Then
+  For J:=0 To 1 Do Begin MvC[1,0,J]:=MvC[1,1,J]; MvC[2,0,J]:=MvC[2,1,J]; End
+ Else
+  For J:=0 To 1 Do Begin MvC[1,0,J]:=H3MvAt(MotXy-1,J); MvC[2,0,J]:=H3MvAt(
+   MotXy-1+Mot,J); End;
+ If (H3MbX+1>=H3MbW) Or ((H3Mt(Xy+1) And 7)<>0) Then
+  For J:=0 To 1 Do Begin MvC[1,3,J]:=MvC[1,2,J]; MvC[2,3,J]:=MvC[2,2,J]; End
+ Else
+  For J:=0 To 1 Do Begin MvC[1,3,J]:=H3MvAt(MotXy+2,J); MvC[2,3,J]:=H3MvAt(
+   MotXy+2+Mot,J); End;
+ Mx:=0; My:=0;
+ For I:=0 To 3 Do Begin
+  X:=(I And 1)+1; Y:=(I Shr 1)+1;
+  For J:=0 To 1 Do Begin
+   Mvs[0,J]:=SmallInt(MvC[Y,X,J]); Mvs[1,J]:=SmallInt(MvC[Y-1,X,J]); Mvs[2,J]:=
+    SmallInt(MvC[Y,X-1,J]);
+   Mvs[3,J]:=SmallInt(MvC[Y,X+1,J]); Mvs[4,J]:=SmallInt(MvC[Y+1,X,J]);
+  End;
+  For J:=0 To 4 Do Begin
+   H3HpelMotion(@H3ObmcBuf[J],0,8,P^.Y,H3MbX*16+(I And 1)*8,H3MbY*16+(I Shr 1)*
+    8,Mvs[J,0],Mvs[J,1],NoRnd);
+  End;
+  H3PutObmc(Cur^.Y,H3MbY*16*H3LY+H3MbX*16+(I And 1)*8+(I Shr 1)*8*H3LY,H3LY);
+  Inc(Mx,Mvs[0,0]); Inc(My,Mvs[0,1]);
+ End;
+ H3Chroma4Mv(P^.U,P^.V,Cur^.U,Cur^.V,H3MbY*8*H3LC+H3MbX*8,Mx,My,NoRnd);
+End;
+
+{ apply_8x8 (sans OBMC) }
+Procedure H3Apply8x8(Ref: Integer; NoRnd: LongInt);
+Var I,Mx,My: LongInt; P,Cur: ^TH3Pic;
+Begin
+ P:=@H3P[Ref]; Cur:=@H3P[H3CurI];
+ Mx:=0; My:=0;
+ For I:=0 To 3 Do Begin
+  H3HpelMotion(Cur^.Y,H3MbY*16*H3LY+H3MbX*16+(I And 1)*8+(I Shr 1)*8*H3LY,H3LY,
+   P^.Y,
+   H3MbX*16+(I And 1)*8,H3MbY*16+(I Shr 1)*8,H3Mv[I,0],H3Mv[I,1],NoRnd);
+  Inc(Mx,H3Mv[I,0]); Inc(My,H3Mv[I,1]);
+ End;
+ H3Chroma4Mv(P^.U,P^.V,Cur^.U,Cur^.V,H3MbY*8*H3LC+H3MbX*8,Mx,My,NoRnd);
+End;
+
+{ IDCT simple 8 bits : Add=0 ecrit, Add=1 ajoute ; Dest = plan, Off decalage }
+Procedure H3Idct(Var Blk: TH3Blk; Dest: PEABuffer; Off,Stride: LongInt; Add:
+ Boolean);
+Const W1=22725; W2=21407; W3=19266; W4=16383; W5=12873; W6=8867; W7=4520;
+Var
+ I,K: Integer; A0,A1,A2,A3,B0,B1,B2,B3: Int64; R: Array[0..7] Of Int64; V:
+  Int64;
+Procedure Put(Col,Row: Integer; X: Int64);
+Var D: Int64;
+Begin
+ X:=AVSar(X,20);
+ If Add Then X:=X+Dest^[Off+Row*Stride+Col];
+ If X<0 Then X:=0; If X>255 Then X:=255;
+ Dest^[Off+Row*Stride+Col]:=X;
+End;
+Begin
+ For I:=0 To 7 Do Begin
+  For K:=0 To 7 Do R[K]:=Blk[I*8+K];
+  If (R[1] Or R[2] Or R[3] Or R[4] Or R[5] Or R[6] Or R[7])=0 Then Begin
+   V:=SmallInt(R[0]*8); For K:=0 To 7 Do Blk[I*8+K]:=V;
+  End Else Begin
+   A0:=W4*R[0]+(1 Shl 10); A1:=A0; A2:=A0; A3:=A0;
+   Inc(A0,W2*R[2]); Inc(A1,W6*R[2]); Dec(A2,W6*R[2]); Dec(A3,W2*R[2]);
+   B0:=W1*R[1]+W3*R[3]; B1:=W3*R[1]-W7*R[3]; B2:=W5*R[1]-W1*R[3]; B3:=W7*R[1]-
+    W5*R[3];
+   If (R[4] Or R[5] Or R[6] Or R[7])<>0 Then Begin
+    Inc(A0,W4*R[4]+W6*R[6]); Inc(A1,-W4*R[4]-W2*R[6]); Inc(A2,-W4*R[4]+W2*R[6]);
+     Inc(A3,W4*R[4]-W6*R[6]);
+    Inc(B0,W5*R[5]+W7*R[7]); Inc(B1,-W1*R[5]-W5*R[7]); Inc(B2,W7*R[5]+W3*R[7]);
+     Inc(B3,W3*R[5]-W1*R[7]);
+   End;
+   Blk[I*8+0]:=SmallInt(AVSar(A0+B0,11)); Blk[I*8+7]:=SmallInt(AVSar(A0-B0,11));
+   Blk[I*8+1]:=SmallInt(AVSar(A1+B1,11)); Blk[I*8+6]:=SmallInt(AVSar(A1-B1,11));
+   Blk[I*8+2]:=SmallInt(AVSar(A2+B2,11)); Blk[I*8+5]:=SmallInt(AVSar(A2-B2,11));
+   Blk[I*8+3]:=SmallInt(AVSar(A3+B3,11)); Blk[I*8+4]:=SmallInt(AVSar(A3-B3,11));
+  End;
+ End;
+ For I:=0 To 7 Do Begin
+  For K:=0 To 7 Do R[K]:=Blk[K*8+I];
+  A0:=W4*(R[0]+32); A1:=A0; A2:=A0; A3:=A0;
+  Inc(A0,W2*R[2]); Inc(A1,W6*R[2]); Dec(A2,W6*R[2]); Dec(A3,W2*R[2]);
+  B0:=W1*R[1]+W3*R[3]; B1:=W3*R[1]-W7*R[3]; B2:=W5*R[1]-W1*R[3]; B3:=W7*R[1]-W5*
+   R[3];
+  If R[4]<>0 Then Begin Inc(A0,W4*R[4]); Dec(A1,W4*R[4]); Dec(A2,W4*R[4]); Inc(
+   A3,W4*R[4]); End;
+  If R[5]<>0 Then Begin Inc(B0,W5*R[5]); Dec(B1,W1*R[5]); Inc(B2,W7*R[5]); Inc(
+   B3,W3*R[5]); End;
+  If R[6]<>0 Then Begin Inc(A0,W6*R[6]); Dec(A1,W2*R[6]); Inc(A2,W2*R[6]); Dec(
+   A3,W6*R[6]); End;
+  If R[7]<>0 Then Begin Inc(B0,W7*R[7]); Dec(B1,W5*R[7]); Inc(B2,W3*R[7]); Dec(
+   B3,W1*R[7]); End;
+  Put(I,0,A0+B0); Put(I,1,A1+B1); Put(I,2,A2+B2); Put(I,3,A3+B3);
+  Put(I,4,A3-B3); Put(I,5,A2-B2); Put(I,6,A1-B1); Put(I,7,A0-B0);
+ End;
+End;
+
+Procedure H3DequantIntra(Var Blk: TH3Blk; N,Q: LongInt);
+Var I,Level,Qmul,Qadd,NC: LongInt;
+Begin
+ Qmul:=Q Shl 1;
+ If H3Aic=0 Then Begin
+  If N<4 Then Blk[0]:=SmallInt(Blk[0]*H3YDcScale) Else Blk[0]:=SmallInt(Blk[0]*
+   H3CDcScale);
+  Qadd:=(Q-1) Or 1;
+ End Else Qadd:=0;
+ If H3AcPred<>0 Then NC:=63 Else NC:=H3RasterEnd[H3BlkLast[N]];
+ For I:=1 To NC Do Begin
+  Level:=Blk[I];
+  If Level<>0 Then Begin
+   If Level<0 Then Level:=Level*Qmul-Qadd Else Level:=Level*Qmul+Qadd;
+   Blk[I]:=SmallInt(Level);
+  End;
+ End;
+End;
+
+Procedure H3DequantInter(Var Blk: TH3Blk; N,Q: LongInt);
+Var I,Level,Qmul,Qadd,NC: LongInt;
+Begin
+ Qadd:=(Q-1) Or 1; Qmul:=Q Shl 1;
+ NC:=H3RasterEnd[H3BlkLast[N]];
+ For I:=0 To NC Do Begin
+  Level:=Blk[I];
+  If Level<>0 Then Begin
+   If Level<0 Then Level:=Level*Qmul-Qadd Else Level:=Level*Qmul+Qadd;
+   Blk[I]:=SmallInt(Level);
+  End;
+ End;
+End;
+
+{ ff_clean_intra_table_entries }
+Procedure H3CleanIntra;
+Var Xy,Wrap,I: LongInt;
+Begin
+ Wrap:=H3B8Stride;
+ Xy:=H3DcOff[0]+H3B8Stride*2*H3MbY+2*H3MbX;
+ H3Dc[0]^[Xy]:=1024; H3Dc[0]^[Xy+1]:=1024; H3Dc[0]^[Xy+Wrap]:=1024; H3Dc[0]^[Xy+
+  1+Wrap]:=1024;
+ For I:=0 To 31 Do Begin H3Ac^[Xy*16+I]:=0; H3Ac^[(Xy+Wrap)*16+I]:=0; End;
+ Xy:=H3MbX+H3MbY*H3MbStride;
+ H3Dc[1]^[H3DcOff[1]+Xy]:=1024; H3Dc[2]^[H3DcOff[2]+Xy]:=1024;
+ For I:=0 To 15 Do Begin H3Ac^[(H3DcOff[1]+Xy)*16+I]:=0; H3Ac^[(H3DcOff[2]+Xy)*
+  16+I]:=0; End;
+ H3Intra^[Xy]:=0;
+End;
+
+{ prediction des images B (mpv_motion, sens avant puis arriere en moyenne) }
+Procedure H3BPredict;
+Var Sv: Array[0..3,0..1] Of LongInt; I: LongInt;
+Begin
+ H3Avg:=0;
+ If (H3MvDir And 1)<>0 Then Begin
+  If H3MvType=0 Then H3MpegMotion(H3RefI,H3Mv[0,0],H3Mv[0,1],0) Else H3Apply8x8(
+   H3RefI,0);
+  H3Avg:=1;
+ End;
+ If (H3MvDir And 2)<>0 Then Begin
+  If H3MvType=0 Then H3MpegMotion(H3BwdI,H3Mv1[0,0],H3Mv1[0,1],0)
+  Else Begin
+   Move(H3Mv,Sv,SizeOf(Sv)); Move(H3Mv1,H3Mv,SizeOf(H3Mv));
+   H3Apply8x8(H3BwdI,0);
+   Move(Sv,H3Mv,SizeOf(Sv));
+  End;
+ End;
+ H3Avg:=0;
+End;
+
+{ ff_mpv_reconstruct_mb (H.263, images I/P) }
+Procedure H3Recon;
+Var
+ Xy,NoRnd,I,DOff,COff: LongInt; Cur,P: ^TH3Pic;
+Begin
+ Xy:=H3MbX+H3MbY*H3MbStride;
+ Cur:=@H3P[H3CurI];
+ Cur^.Qs^[Xy+2*H3MbStride+1]:=H3Qscale;
+ If H3MbIntra=0 Then Begin
+  If H3Aic<>0 Then If H3Intra^[Xy]<>0 Then H3CleanIntra;
+ End Else If H3Aic<>0 Then H3Intra^[Xy]:=1;
+ H3MbSkipped:=0;
+ DOff:=H3MbY*16*H3LY+H3MbX*16; COff:=H3MbY*8*H3LC+H3MbX*8;
+ If H3MbIntra=0 Then Begin
+  If (H3NoRounding<>0) And (H3PictType<>2) Then NoRnd:=1 Else NoRnd:=0;
+  P:=@H3P[H3RefI];
+  If H3PictType=2 Then H3BPredict
+  Else If (H3Obmc<>0) And (H3PictType<>2) Then H3ApplyObmc(H3RefI,NoRnd)
+  Else If H3MvType=0 Then H3MpegMotion(H3RefI,H3Mv[0,0],H3Mv[0,1],NoRnd)
+  Else H3Apply8x8(H3RefI,NoRnd);
+  For I:=0 To 3 Do
+   If H3BlkLast[I]>=0 Then Begin
+    H3DequantInter(H3Blk[I],I,H3Qscale);
+    H3Idct(H3Blk[I],Cur^.Y,DOff+(I And 1)*8+(I Shr 1)*8*H3LY,H3LY,True);
+   End;
+  For I:=4 To 5 Do
+   If H3BlkLast[I]>=0 Then Begin
+    H3DequantInter(H3Blk[I],I,H3ChromaQscale);
+    If I=4 Then H3Idct(H3Blk[I],Cur^.U,COff,H3LC,True) Else H3Idct(H3Blk[I],
+     Cur^.V,COff,H3LC,True);
+   End;
+ End Else Begin
+  For I:=0 To 3 Do Begin
+   H3DequantIntra(H3Blk[I],I,H3Qscale);
+   H3Idct(H3Blk[I],Cur^.Y,DOff+(I And 1)*8+(I Shr 1)*8*H3LY,H3LY,False);
+  End;
+  H3DequantIntra(H3Blk[4],4,H3ChromaQscale); H3Idct(H3Blk[4],Cur^.U,COff,H3LC,
+   False);
+  H3DequantIntra(H3Blk[5],5,H3ChromaQscale); H3Idct(H3Blk[5],Cur^.V,COff,H3LC,
+   False);
+ End;
+End;
+
+{ h263_h_loop_filter / h263_v_loop_filter }
+Procedure H3LoopH(Pl: PEABuffer; Src,Stride,Q: LongInt);
+Var Y,D1,D2,Ad1,P0,P1,P2,P3,D,St: LongInt;
+Begin
+ St:=H3LoopStrength[Q];
+ For Y:=0 To 7 Do Begin
+  P0:=Pl^[Src+Y*Stride-2]; P1:=Pl^[Src+Y*Stride-1]; P2:=Pl^[Src+Y*Stride]; P3:=
+   Pl^[Src+Y*Stride+1];
+  D:=(P0-P3+4*(P2-P1)) Div 8;
+  If D<-2*St Then D1:=0
+  Else If D<-St Then D1:=-2*St-D
+  Else If D<St Then D1:=D
+  Else If D<2*St Then D1:=2*St-D
+  Else D1:=0;
+  Inc(P1,D1); Dec(P2,D1);
+  If (P1 And 256)<>0 Then Begin If P1<0 Then P1:=0 Else P1:=255; End;
+  If (P2 And 256)<>0 Then Begin If P2<0 Then P2:=0 Else P2:=255; End;
+  Pl^[Src+Y*Stride-1]:=P1; Pl^[Src+Y*Stride]:=P2;
+  Ad1:=Abs(D1) Shr 1;
+  D2:=H3Clip((P0-P3) Div 4,-Ad1,Ad1);
+  Pl^[Src+Y*Stride-2]:=P0-D2; Pl^[Src+Y*Stride+1]:=P3+D2;
+ End;
+End;
+
+Procedure H3LoopV(Pl: PEABuffer; Src,Stride,Q: LongInt);
+Var X,D1,D2,Ad1,P0,P1,P2,P3,D,St: LongInt;
+Begin
+ St:=H3LoopStrength[Q];
+ For X:=0 To 7 Do Begin
+  P0:=Pl^[Src+X-2*Stride]; P1:=Pl^[Src+X-Stride]; P2:=Pl^[Src+X]; P3:=Pl^[Src+X+
+   Stride];
+  D:=(P0-P3+4*(P2-P1)) Div 8;
+  If D<-2*St Then D1:=0
+  Else If D<-St Then D1:=-2*St-D
+  Else If D<St Then D1:=D
+  Else If D<2*St Then D1:=2*St-D
+  Else D1:=0;
+  Inc(P1,D1); Dec(P2,D1);
+  If (P1 And 256)<>0 Then Begin If P1<0 Then P1:=0 Else P1:=255; End;
+  If (P2 And 256)<>0 Then Begin If P2<0 Then P2:=0 Else P2:=255; End;
+  Pl^[Src+X-Stride]:=P1; Pl^[Src+X]:=P2;
+  Ad1:=Abs(D1) Shr 1;
+  D2:=H3Clip((P0-P3) Div 4,-Ad1,Ad1);
+  Pl^[Src+X-2*Stride]:=P0-D2; Pl^[Src+X+Stride]:=P3+D2;
+ End;
+End;
+
+{ ff_h263_loop_filter }
+Procedure H3LoopFilter;
+Var
+ QpC,Xy,QpDt,QpTt,QpTc,ChromaQp,QpLc,DY,DC: LongInt; Cur: ^TH3Pic;
+ Function QS(I: LongInt): LongInt;Begin QS:=Cur^.Qs^[I+2*H3MbStride+1]; End;
+ Function IsSkip(I: LongInt): Boolean;Begin IsSkip:=(Cur^.Mt^[I+2*H3MbStride+1]
+  And H3_SKIP)<>0; End;
+Begin
+ Cur:=@H3P[H3CurI];
+ Xy:=H3MbY*H3MbStride+H3MbX;
+ DY:=H3MbY*16*H3LY+H3MbX*16; DC:=H3MbY*8*H3LC+H3MbX*8;
+ If Not IsSkip(Xy) Then Begin
+  QpC:=H3Qscale;
+  H3LoopV(Cur^.Y,DY+8*H3LY,H3LY,QpC);
+  H3LoopV(Cur^.Y,DY+8*H3LY+8,H3LY,QpC);
+ End Else QpC:=0;
+ If H3MbY<>0 Then Begin
+  If IsSkip(Xy-H3MbStride) Then QpTt:=0 Else QpTt:=QS(Xy-H3MbStride);
+  If QpC<>0 Then QpTc:=QpC Else QpTc:=QpTt;
+  If QpTc<>0 Then Begin
+   If H3ChromaTab Then ChromaQp:=H3ChromaQ[QpTc] Else ChromaQp:=QpTc;
+   H3LoopV(Cur^.Y,DY,H3LY,QpTc);
+   H3LoopV(Cur^.Y,DY+8,H3LY,QpTc);
+   H3LoopV(Cur^.U,DC,H3LC,ChromaQp);
+   H3LoopV(Cur^.V,DC,H3LC,ChromaQp);
+  End;
+  If QpTt<>0 Then H3LoopH(Cur^.Y,DY-8*H3LY+8,H3LY,QpTt);
+  If H3MbX<>0 Then Begin
+   If (QpTt<>0) Or IsSkip(Xy-1-H3MbStride) Then QpDt:=QpTt Else QpDt:=QS(Xy-1-
+    H3MbStride);
+   If QpDt<>0 Then Begin
+    If H3ChromaTab Then ChromaQp:=H3ChromaQ[QpDt] Else ChromaQp:=QpDt;
+    H3LoopH(Cur^.Y,DY-8*H3LY,H3LY,QpDt);
+    H3LoopH(Cur^.U,DC-8*H3LC,H3LC,ChromaQp);
+    H3LoopH(Cur^.V,DC-8*H3LC,H3LC,ChromaQp);
+   End;
+  End;
+ End;
+ If QpC<>0 Then Begin
+  H3LoopH(Cur^.Y,DY+8,H3LY,QpC);
+  If H3MbY+1=H3MbH Then H3LoopH(Cur^.Y,DY+8*H3LY+8,H3LY,QpC);
+ End;
+ If H3MbX<>0 Then Begin
+  If (QpC<>0) Or IsSkip(Xy-1) Then QpLc:=QpC Else QpLc:=QS(Xy-1);
+  If QpLc<>0 Then Begin
+   H3LoopH(Cur^.Y,DY,H3LY,QpLc);
+   If H3MbY+1=H3MbH Then Begin
+    If H3ChromaTab Then ChromaQp:=H3ChromaQ[QpLc] Else ChromaQp:=QpLc;
+    H3LoopH(Cur^.Y,DY+8*H3LY,H3LY,QpLc);
+    H3LoopH(Cur^.U,DC,H3LC,ChromaQp);
+    H3LoopH(Cur^.V,DC,H3LC,ChromaQp);
+   End;
+  End;
+ End;
+End;
+
+{ ---- images et boucle de decodage (h263dec.c, mpegvideo.c, mpegvideo_dec.c)
+ ---- }
+Var
+ H3CtxW,H3CtxH: LongInt; H3HaveCtx: Boolean; H3Codec: LongInt; { 0 h263, 1 flv }
+ H3Out: LongInt;
+ H3PkBuf: PEABuffer; H3PkCap: LongInt;
+
+Procedure H3FreeCtx;
+Var I: LongInt;
+Begin
+ If Not H3HaveCtx Then Exit;
+ For I:=0 To 2 Do Begin
+  FreeMem(H3P[I].Y); FreeMem(H3P[I].U); FreeMem(H3P[I].V); FreeMem(H3P[I].Mt);
+   FreeMem(H3P[I].Mv); FreeMem(H3P[I].Mv1); FreeMem(H3P[I].Qs);
+ End;
+ FreeMem(H3DcBase); FreeMem(H3Ac); FreeMem(H3Intra);
+ H3HaveCtx:=False;
+End;
+
+Procedure H3AllocCtx;
+Var I,YSize,CSize,YcSize,MtN,MvN: LongInt;
+Begin
+ H3FreeCtx;
+ H3MbStride:=H3MbW+1; H3B8Stride:=H3MbW*2+1;
+ H3LY:=H3MbW*16; H3LC:=H3MbW*8;
+ H3HEdge:=H3MbW*16; H3VEdge:=H3MbH*16;
+ For I:=0 To 2 Do Begin
+  GetMem(H3P[I].Y,H3LY*H3MbH*16+64); FillChar(H3P[I].Y^,H3LY*H3MbH*16+64,0);
+  GetMem(H3P[I].U,H3LC*H3MbH*8+64); FillChar(H3P[I].U^,H3LC*H3MbH*8+64,0);
+  GetMem(H3P[I].V,H3LC*H3MbH*8+64); FillChar(H3P[I].V^,H3LC*H3MbH*8+64,0);
+  MtN:=H3MbStride*(H3MbH+1)+1+H3MbStride+8;
+  GetMem(H3P[I].Mt,MtN*4); FillChar(H3P[I].Mt^,MtN*4,0);
+  GetMem(H3P[I].Qs,MtN); FillChar(H3P[I].Qs^,MtN,0);
+  MvN:=2*(H3B8Stride*H3MbH*2+16);
+  GetMem(H3P[I].Mv,MvN*2); FillChar(H3P[I].Mv^,MvN*2,0);
+  GetMem(H3P[I].Mv1,MvN*2); FillChar(H3P[I].Mv1^,MvN*2,0);
+ End;
+ YSize:=H3B8Stride*(2*H3MbH+1); CSize:=H3MbStride*(H3MbH+1); YcSize:=YSize+2*
+  CSize;
+ If (H3MbH And 1)<>0 Then Inc(YcSize,2*H3B8Stride+2*H3MbStride);
+ H3DcN:=YcSize;
+ GetMem(H3DcBase,YcSize*2); For I:=0 To YcSize-1 Do H3DcBase^[I]:=1024;
+ GetMem(H3Ac,YcSize*16*2); FillChar(H3Ac^,YcSize*16*2,0);
+ GetMem(H3Intra,H3MbStride*H3MbH+2); FillChar(H3Intra^,H3MbStride*H3MbH+2,1);
+ H3Dc[0]:=H3DcBase; H3Dc[1]:=H3DcBase; H3Dc[2]:=H3DcBase;
+ H3DcOff[0]:=H3B8Stride+1; H3DcOff[1]:=YSize+H3MbStride+1; H3DcOff[2]:=H3DcOff[
+  1]+CSize;
+ H3CtxW:=H3Wd; H3CtxH:=H3Ht; H3HaveCtx:=True;
+ H3CurI:=-1; H3RefI:=-1;
+End;
+
+Procedure H3ClearPic(I: LongInt);
+Var MtN,MvN: LongInt;
+Begin
+ MtN:=H3MbStride*(H3MbH+1)+1+H3MbStride+8;
+ FillChar(H3P[I].Mt^,MtN*4,0); FillChar(H3P[I].Qs^,MtN,0);
+ MvN:=2*(H3B8Stride*H3MbH*2+16);
+ FillChar(H3P[I].Mv^,MvN*2,0); FillChar(H3P[I].Mv1^,MvN*2,0);
+End;
+
+{ ff_h263_update_motion_val (images non B) }
+Procedure H3UpdateMotion;
+Var M,Mx,My: LongInt;
+Begin
+ If H3MvType<>1 Then Begin
+  M:=H3B8Stride*2*H3MbY+2*H3MbX;
+  If H3MbIntra<>0 Then Begin Mx:=0; My:=0; End Else Begin Mx:=H3Mv[0,0]; My:=
+   H3Mv[0,1]; End;
+  H3FillMv(M,Mx,My);
+ End;
+End;
+
+{ boucle sur une tranche (decode_slice) ; 0 = ok, <0 = erreur }
+Function H3DecodeSlice: LongInt;
+Var Ret: LongInt;
+Begin
+ H3DecodeSlice:=H3InvalidData;
+ H3LastGb:=H3Pos;
+ H3FirstLine:=1;
+ H3ResyncX:=H3MbX; H3ResyncY:=H3MbY;
+ H3SetQscale(H3Qscale);
+ While H3MbY<H3MbH Do Begin
+  While H3MbX<H3MbW Do Begin
+   If (H3ResyncX=H3MbX) And (H3ResyncY+1=H3MbY) Then H3FirstLine:=0;
+   H3MvType:=0;
+   Ret:=H3DecodeMb;
+   H3UpdateMotion;
+   If Ret<0 Then Begin
+    If Ret=H3SliceEnd Then Begin
+     H3Recon;
+     If H3Loop<>0 Then H3LoopFilter;
+     Inc(H3MbX);
+     If H3MbX>=H3MbW Then Begin H3MbX:=0; Inc(H3MbY); End;
+     H3DecodeSlice:=0; Exit;
+    End Else If Ret=H3SliceNoEnd Then Begin H3DecodeSlice:=H3InvalidData; Exit;
+     End;
+    H3Err:=True;
+    H3DecodeSlice:=H3InvalidData; Exit;
+   End;
+   H3Recon;
+   If H3Loop<>0 Then H3LoopFilter;
+   Inc(H3MbX);
+  End;
+  H3MbX:=0;
+  Inc(H3MbY);
+ End;
+ { fin de l'image sans marqueur de fin : accepte (pas de contournement de
+  bourrage a signaler) }
+ H3DecodeSlice:=0;
+End;
+
+{ decode un paquet ; renvoie 1 si une image est disponible dans H3P[H3Out] }
+Function H3Frame(Pk: PEABuffer; Len: LongInt): LongInt;
+Var Ret,PrevX,PrevY,I,Slot: LongInt; NewCtx: Boolean;
+Begin
+ H3Frame:=0;
+ If Len=0 Then Exit;
+ If H3PkCap<Len+128 Then Begin
+  If H3PkBuf<>Nil Then FreeMem(H3PkBuf);
+  H3PkCap:=Len+128; GetMem(H3PkBuf,H3PkCap);
+ End;
+ Move(Pk^,H3PkBuf^,Len); FillChar(H3PkBuf^[Len],128,0);
+ H3Buf:=H3PkBuf; H3Size:=Len; H3Pos:=0;
+ If H3Codec=1 Then Ret:=H3FlvHeader Else If H3Codec=3 Then Ret:=H3IntelHeader
+  Else Ret:=H3PicHeader;
+ If Ret<0 Then Begin
+  If H3HaveCtx Then Begin H3Wd:=H3CtxW; H3Ht:=H3CtxH; End;
+  Exit;
+ End;
+ NewCtx:=Not H3HaveCtx Or (H3Wd<>H3CtxW) Or (H3Ht<>H3CtxH);
+ If NewCtx Then H3AllocCtx;
+ If H3PictType=2 Then Exit;   { images B non prises en charge }
+ If (H3RefI<0) And (H3Droppable<>0) Then Exit;
+ { image courante : un emplacement different de la reference }
+ Slot:=0; While Slot=H3RefI Do Inc(Slot);
+ H3CurI:=Slot;
+ H3ClearPic(H3CurI);
+ If (H3PictType<>0) And (H3RefI<0) Then Begin
+  { image de reference factice }
+  Slot:=0; While Slot=H3CurI Do Inc(Slot);
+  H3RefI:=Slot;
+  FillChar(H3P[H3RefI].Y^,H3LY*H3MbH*16,16);
+  FillChar(H3P[H3RefI].U^,H3LC*H3MbH*8,128); FillChar(H3P[H3RefI].V^,H3LC*H3MbH*
+   8,128);
+ End;
+ H3MbX:=0; H3MbY:=0; H3Err:=False;
+ Ret:=H3DecodeSlice;
+ While H3MbY<H3MbH Do Begin
+  PrevX:=H3MbX; PrevY:=H3MbY;
+  If H3Resync<0 Then Break;
+  If H3DecodeSlice<0 Then Ret:=H3InvalidData;
+ End;
+ H3Out:=H3CurI;
+ If H3Droppable=0 Then H3RefI:=H3CurI;
+ H3Frame:=1;
+End;
+
+Var H3OutBuf: PEABuffer; H3OutW,H3OutH,H3OutBegun: LongInt;
+
+{ copie l'image decodee (recadree) dans le tampon de sortie planaire 4:2:0 ;
+ faux si les dimensions changent }
+{ ---- MPEG-4 Part 2 : decodeur (libavcodec/mpeg4videodec.c, mpeg4video.c,
+ h263.c, mpegvideo_motion.c, qpeldsp.c,
+       mpegvideodsp.c, LGPL-2.1-or-later) ---- }
+Const
+ M4DcLum: Array[0..25] Of Byte=(
+  3,3,3,2,2,2,2,3,1,3,1,4,1,5,1,6,
+  1,7,1,8,1,9,1,10,1,11);
+ M4DcChr: Array[0..25] Of Byte=(
+  3,2,2,2,1,2,1,3,1,4,1,5,1,6,1,7,
+  1,8,1,9,1,10,1,11,1,12);
+ M4IntraVlc: Array[0..205] Of Word=(
+  2,2,6,3,15,4,13,5,12,5,21,6,19,6,18,6,
+  23,7,31,8,30,8,29,8,37,9,36,9,35,9,33,9,
+  33,10,32,10,15,10,14,10,7,11,6,11,32,11,33,11,
+  80,12,81,12,82,12,14,4,20,6,22,7,28,8,32,9,
+  31,9,13,10,34,11,83,12,85,12,11,5,21,7,30,9,
+  12,10,86,12,17,6,27,8,29,9,11,10,16,6,34,9,
+  10,10,13,6,28,9,8,10,18,7,27,9,84,12,20,7,
+  26,9,87,12,25,8,9,10,24,8,35,11,23,8,25,9,
+  24,9,7,10,88,12,7,4,12,6,22,8,23,9,6,10,
+  5,11,4,11,89,12,15,6,22,9,5,10,14,6,4,10,
+  17,7,36,11,16,7,37,11,19,7,90,12,21,8,91,12,
+  20,8,19,8,26,8,21,9,20,9,19,9,18,9,17,9,
+  38,11,39,11,92,12,93,12,94,12,95,12,3,7);
+ M4IntraLev: Array[0..101] Of ShortInt=(
+  1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,
+  17,18,19,20,21,22,23,24,25,26,27,1,2,3,4,5,
+  6,7,8,9,10,1,2,3,4,5,1,2,3,4,1,2,
+  3,1,2,3,1,2,3,1,2,3,1,2,1,2,1,1,
+  1,1,1,1,2,3,4,5,6,7,8,1,2,3,1,2,
+  1,2,1,2,1,2,1,2,1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1);
+ M4IntraRun: Array[0..101] Of ShortInt=(
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,
+  1,1,1,1,1,2,2,2,2,2,3,3,3,3,4,4,
+  4,5,5,5,6,6,6,7,7,7,8,8,9,9,10,11,
+  12,13,14,0,0,0,0,0,0,0,0,1,1,1,2,2,
+  3,3,4,4,5,5,6,6,7,8,9,10,11,12,13,14,
+  15,16,17,18,19,20);
+ M4InterRvlc: Array[0..339] Of Word=(
+  6,3,1,4,4,5,28,7,60,8,61,8,124,9,252,10,
+  253,10,508,11,509,11,1020,12,2044,13,2045,13,3068,13,3069,13,
+  4092,14,4093,14,8188,15,7,3,12,6,92,8,125,9,380,10,
+  764,11,1021,12,3580,13,6140,14,6141,14,10,4,29,7,188,9,
+  765,11,1532,12,7164,14,7165,14,5,5,93,8,381,10,1533,12,
+  3581,13,7676,14,8189,15,8,5,108,8,892,11,3836,13,12284,15,
+  9,5,189,9,893,11,3837,13,13,6,444,10,1788,12,7677,14,
+  20,6,445,10,1789,12,12285,15,21,6,476,10,3964,13,44,7,
+  477,10,7932,14,45,7,956,11,52,7,1916,12,109,8,3965,13,
+  116,8,7933,14,117,8,8060,14,220,9,8061,14,221,9,8124,14,
+  236,9,14332,15,492,10,493,10,500,10,957,11,988,11,989,11,
+  1004,11,1005,11,1012,11,1917,12,1980,12,1981,12,4028,13,4029,13,
+  4060,13,4061,13,8125,14,8156,14,8157,14,14333,15,15356,15,11,4,
+  120,8,1013,11,4076,13,8172,14,18,5,237,9,2012,12,8173,14,
+  15357,15,19,5,1016,11,15868,15,24,6,2013,12,25,6,2028,12,
+  34,6,4077,13,35,6,4084,13,53,7,4085,13,56,7,4088,13,
+  57,7,4089,13,66,7,8180,14,67,7,8181,14,121,8,8184,14,
+  130,8,15869,15,131,8,244,9,245,9,248,9,249,9,258,9,
+  259,9,501,10,504,10,505,10,514,10,515,10,1017,11,1026,11,
+  1027,11,2029,12,2036,12,2037,12,2040,12,2041,12,2050,12,2051,12,
+  4098,13,4099,13,8185,14,8194,14,8195,14,16124,15,16125,15,16252,15,
+  16253,15,0,4);
+ M4InterRvlcRun: Array[0..168] Of ShortInt=(
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,1,1,1,1,1,1,1,1,1,1,2,2,2,
+  2,2,2,2,3,3,3,3,3,3,3,4,4,4,4,4,
+  5,5,5,5,6,6,6,6,7,7,7,7,8,8,8,9,
+  9,9,10,10,11,11,12,12,13,13,14,14,15,15,16,16,
+  17,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,
+  32,33,34,35,36,37,38,0,0,0,0,0,1,1,1,1,
+  1,2,2,2,3,3,4,4,5,5,6,6,7,7,8,8,
+  9,9,10,10,11,11,12,12,13,13,14,15,16,17,18,19,
+  20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,
+  36,37,38,39,40,41,42,43,44);
+ M4InterRvlcLev: Array[0..168] Of ShortInt=(
+  1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,
+  17,18,19,1,2,3,4,5,6,7,8,9,10,1,2,3,
+  4,5,6,7,1,2,3,4,5,6,7,1,2,3,4,5,
+  1,2,3,4,1,2,3,4,1,2,3,4,1,2,3,1,
+  2,3,1,2,1,2,1,2,1,2,1,2,1,2,1,2,
+  1,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,2,3,4,5,1,2,3,4,
+  5,1,2,3,1,2,1,2,1,2,1,2,1,2,1,2,
+  1,2,1,2,1,2,1,2,1,2,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,1);
+ M4IntraRvlc: Array[0..339] Of Word=(
+  6,3,7,3,10,4,9,5,20,6,21,6,52,7,116,8,
+  117,8,221,9,236,9,492,10,493,10,500,10,1004,11,1005,11,
+  1012,11,1917,12,1980,12,4029,13,4060,13,1981,12,4061,13,8125,14,
+  8156,14,8157,14,8188,15,1,4,8,5,45,7,108,8,109,8,
+  220,9,477,10,988,11,989,11,1916,12,4028,13,8061,14,8124,14,
+  4,5,44,7,188,9,476,10,956,11,957,11,3837,13,3964,13,
+  3965,13,7933,14,8060,14,5,5,92,8,189,9,893,11,1788,12,
+  3836,13,7677,14,7932,14,8189,15,12,6,93,8,445,10,1021,12,
+  1789,12,7165,14,13,6,125,9,764,11,1532,12,7164,14,7676,14,
+  28,7,380,10,765,11,1533,12,12284,15,29,7,381,10,892,11,
+  3581,13,12285,15,60,8,444,10,3069,13,6141,14,61,8,509,11,
+  3580,13,14332,15,124,9,1020,12,252,10,3068,13,253,10,14333,15,
+  508,11,2044,13,2045,13,4092,14,4093,14,6140,14,15356,15,11,4,
+  120,8,1013,11,4076,13,8172,14,18,5,237,9,2012,12,8173,14,
+  15357,15,19,5,1016,11,15868,15,24,6,2013,12,25,6,2028,12,
+  34,6,4077,13,35,6,4084,13,53,7,4085,13,56,7,4088,13,
+  57,7,4089,13,66,7,8180,14,67,7,8181,14,121,8,8184,14,
+  130,8,15869,15,131,8,244,9,245,9,248,9,249,9,258,9,
+  259,9,501,10,504,10,505,10,514,10,515,10,1017,11,1026,11,
+  1027,11,2029,12,2036,12,2037,12,2040,12,2041,12,2050,12,2051,12,
+  4098,13,4099,13,8185,14,8194,14,8195,14,16124,15,16125,15,16252,15,
+  16253,15,0,4);
+ M4IntraRvlcRun: Array[0..168] Of ShortInt=(
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,
+  2,2,2,3,3,3,3,3,3,3,3,3,4,4,4,4,
+  4,4,5,5,5,5,5,5,6,6,6,6,6,7,7,7,
+  7,7,8,8,8,8,9,9,9,9,10,10,11,11,12,12,
+  13,14,15,16,17,18,19,0,0,0,0,0,1,1,1,1,
+  1,2,2,2,3,3,4,4,5,5,6,6,7,7,8,8,
+  9,9,10,10,11,11,12,12,13,13,14,15,16,17,18,19,
+  20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,
+  36,37,38,39,40,41,42,43,44);
+ M4IntraRvlcLev: Array[0..168] Of ShortInt=(
+  1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,
+  17,18,19,20,21,22,23,24,25,26,27,1,2,3,4,5,
+  6,7,8,9,10,11,12,13,1,2,3,4,5,6,7,8,
+  9,10,11,1,2,3,4,5,6,7,8,9,1,2,3,4,
+  5,6,1,2,3,4,5,6,1,2,3,4,5,1,2,3,
+  4,5,1,2,3,4,1,2,3,4,1,2,1,2,1,2,
+  1,1,1,1,1,1,1,1,2,3,4,5,1,2,3,4,
+  5,1,2,3,1,2,1,2,1,2,1,2,1,2,1,2,
+  1,2,1,2,1,2,1,2,1,2,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,1);
+ M4DefIntra: Array[0..63] Of Byte=(
+  8,17,18,19,21,23,25,27,
+  17,18,19,21,23,25,27,28,
+  20,21,22,23,24,26,28,30,
+  21,22,23,24,26,28,30,32,
+  22,23,24,26,28,30,32,35,
+  23,24,26,28,30,32,35,38,
+  25,26,28,30,32,35,38,41,
+  27,28,30,32,35,38,41,45);
+ M4DefInter: Array[0..63] Of Byte=(
+  16,17,18,19,20,21,22,23,
+  17,18,19,20,21,22,23,24,
+  18,19,20,21,22,23,24,25,
+  19,20,21,22,23,24,26,27,
+  20,21,22,23,25,26,27,28,
+  21,22,23,24,26,27,28,30,
+  22,23,24,26,27,28,30,31,
+  23,24,25,27,28,30,31,33);
+ M4YDcScale: Array[0..31] Of Byte=(
+  0,8,8,8,8,10,12,14,16,17,18,19,20,21,22,23,
+  24,25,26,27,28,29,30,31,32,34,36,38,40,42,44,46);
+ M4CDcScale: Array[0..31] Of Byte=(
+  0,8,8,8,8,9,9,10,10,11,11,12,12,13,13,14,
+  14,15,15,16,16,17,17,18,18,19,20,21,22,23,24,25);
+Type
+ TM4Rl=Record Vlc: TH3Vlc; N,Last: LongInt; Run,Lev: Array[0..199] Of SmallInt;
+  MaxLev,MaxRun: Array[0..1,0..63] Of SmallInt; End;
+ PM4Rl=^TM4Rl;
+ TM4L32=Array[0..40000000] Of LongInt; PM4L32=^TM4L32;
+ TM4Pic=Record Y,U,V,Ref,Qs,Sk: PEABuffer; Mt: PM4L32; Mv: PH3I16; IsRef,Used:
+  Boolean; PType: LongInt; Time: Int64; End;
+Const
+ M4_INTRA=1; M4_16X16=2; M4_8X8=4; M4_16X8=8; M4_INTERLACED=16; M4_SKIP=32;
+  M4_ACPRED=64; M4_DIRECT=128; M4_GMC=256;
+ M4_L0=512; M4_L1=1024;
+ M4_BUG_NOPAD=16; M4_BUG_XVIDILACE=4; M4_BUG_UMP4=8; M4_BUG_QPELCH=64;
+  M4_BUG_QPELCH2=256; M4_BUG_DIRBLK=512; M4_BUG_EDGE=1024;
+ M4_BUG_HPELCH=2048; M4_BUG_DCCLIP=4096; M4_BUG_STDQPEL=128; M4_BUG_AMV=32;
+ M4_SLICE_OK=0; M4_SLICE_ERR=-1; M4_SLICE_END=-2; M4_SLICE_NOEND=-3;
+ M4_SKIPPED=-100;
+ M4DcThr: Array[0..7] Of Byte=(99,13,15,17,19,21,23,0);
+ M4SprLen: Array[0..14] Of Byte=(2,3,3,3,3,3,4,5,6,7,8,9,10,11,12);
+ M4Aspect: Array[0..15,0..1] Of Byte=((0,1),(1,1),(12,11),(10,11),(16,11),(40,
+  33),(0,1),(0,1),(0,1),(0,1),(0,1),(0,1),(0,1),(0,1),(0,1),(0,1));
+Var
+ M4Init: Boolean;
+ M4RlIntra,M4RlRvIntra,M4RlRvInter,M4RlInter: TM4Rl;
+ M4VDcL,M4VDcC,M4VSpr: TH3Vlc;
+ { flux / VOL }
+ M4W,M4H,M4MbW,M4MbH,M4MbS,M4B8S,M4MbNum,M4HEdge,M4VEdge,M4LY,M4LC: LongInt;
+ M4AllocW,M4AllocH: LongInt; M4Have: Boolean;
+ M4VoType,M4Shape,M4TIncBits,M4Res,M4FixedRate,M4Prog,M4SprUsage,M4NumWarp,
+  M4WarpAcc,M4BrightChg,M4QuantPrec,M4MpegQuant,M4QuarterS,
+ M4DataPart,M4Rvlc,M4ResyncMarker,M4NewPred,M4Scal,M4EnhType,M4LowDelay,
+  M4VolCtl: LongInt;
+ M4CplxI,M4CplxP,M4CplxB: LongInt;
+ M4SarN,M4SarD: LongInt;
+ M4IntraM,M4InterM: Array[0..63] Of LongInt;
+ M4DivxVer,M4DivxBuild,M4XvidBuild,M4LavcBuild,M4Bugs,M4PadScore: LongInt;
+  M4DivxPacked: Boolean; M4CTag: String[4];
+ { image courante }
+ M4PType,M4Part,M4NoRnd,M4IntraDcThr,M4Tff,M4AltScan,M4Qscale,M4FCode,M4BCode:
+  LongInt;
+ M4Time,M4TimeBase,M4LastTimeBase,M4LastNonBTime,M4PPTime,M4PBTime,M4TFrame,
+  M4PPField,M4PBField: Int64;
+ M4PicNum: LongInt;
+ M4SpOff: Array[0..1,0..1] Of Int64; M4SpDelta: Array[0..1,0..1] Of Int64;
+  M4SpShift: Array[0..1] Of LongInt; M4RealWarp: LongInt;
+ M4DirScale: Array[0..1,0..63] Of LongInt;
+ { macrobloc }
+ M4MbX,M4MbY,M4MbIntra,M4AcPred,M4IDct,M4MvDir,M4MvType,M4McSel,M4Skip,
+  M4ResyncX,M4ResyncY,M4FirstLine,M4MbLeft,
+ M4YDc,M4CDc,M4ChromaQ: LongInt;
+ M4Mv: Array[0..1,0..3,0..1] Of LongInt; M4LastMv: Array[0..1,0..1,0..1] Of
+  LongInt; M4FieldSel: Array[0..1,0..1] Of LongInt;
+ M4Blk: Array[0..5] Of TH3Blk; M4BlkLast: Array[0..5] Of LongInt;
+ M4ResyncPos: LongInt;
+ { images et tables de contexte }
+ M4P: Array[0..4] Of TM4Pic; M4CurI,M4LastI,M4NextI: LongInt;
+ M4Dc,M4Ac: Array[0..2] Of PH3I16; M4DcN,M4AcN: Array[0..2] Of LongInt;
+ M4IntraTab,M4CbpTab,M4DirTab: PEABuffer; M4PField: PH3I16; M4TabN: LongInt;
+ M4SkippedLast: Boolean; M4PicHave: Boolean;
+ M4OutBuf: PEABuffer; M4OutBegun,M4OutCount: LongInt; M4Mode: LongInt; M4Target:
+  String;
+ M4Err: Boolean;
+ M4Ms: LongInt; M4CodedBlk: PEABuffer; M4YDcT,M4CDcT: Array[0..31] Of Byte;
+
+Function M4Sar(V,N: LongInt): LongInt;
+Begin If V>=0 Then M4Sar:=V Shr N Else M4Sar:=-1-((-1-V) Shr N); End;
+Function M4Sar64(V: Int64; N: LongInt): Int64;
+Begin If V>=0 Then M4Sar64:=V Shr N Else M4Sar64:=-1-((-1-V) Shr N); End;
+
+Procedure M4BuildRl(Var R: TM4Rl; N,Last: LongInt; Const Vl: Array Of Word;
+ Const Run,Lev: Array Of ShortInt);
+Var K,Len,J,L,St,En,Rn,Lv,Code: LongInt;
+Begin
+ R.N:=N; R.Last:=Last; R.Vlc.Bits:=0;
+ For K:=0 To N Do Begin Len:=Vl[K*2+1]; If Len>R.Vlc.Bits Then R.Vlc.Bits:=Len;
+  End;
+ For K:=0 To (LongInt(1) Shl R.Vlc.Bits)-1 Do Begin R.Vlc.Sym[K]:=-1; R.Vlc.Len[
+  K]:=0; End;
+ For K:=0 To N Do Begin
+  Len:=Vl[K*2+1]; Code:=Vl[K*2];
+  For J:=0 To (LongInt(1) Shl (R.Vlc.Bits-Len))-1 Do Begin
+   R.Vlc.Sym[(Code Shl (R.Vlc.Bits-Len))+J]:=K; R.Vlc.Len[(Code Shl (R.Vlc.Bits-
+    Len))+J]:=Len;
+  End;
+ End;
+ FillChar(R.MaxLev,SizeOf(R.MaxLev),0); FillChar(R.MaxRun,SizeOf(R.MaxRun),0);
+ For K:=0 To N-1 Do Begin R.Run[K]:=Run[K]; R.Lev[K]:=Lev[K]; End;
+ For L:=0 To 1 Do Begin
+  If L=0 Then Begin St:=0; En:=Last; End Else Begin St:=Last; En:=N; End;
+  For K:=St To En-1 Do Begin
+   Rn:=Run[K]; Lv:=Lev[K];
+   If Lv>R.MaxLev[L,Rn] Then R.MaxLev[L,Rn]:=Lv;
+   If Rn>R.MaxRun[L,Lv] Then R.MaxRun[L,Lv]:=Rn;
+  End;
+ End;
+End;
+
+Procedure M4InitTables;
+Var K,Len,J,Code: LongInt;
+Procedure Dc(Var T: TH3Vlc; Const Tab: Array Of Byte);
+Var Q,Ln,Cd,Sp: LongInt;
+Begin
+ T.Bits:=0;
+ For Q:=0 To 9 Do If Tab[Q*2+1]>T.Bits Then T.Bits:=Tab[Q*2+1];
+ For Q:=0 To (LongInt(1) Shl T.Bits)-1 Do Begin T.Sym[Q]:=-1; T.Len[Q]:=0; End;
+ For Q:=0 To 9 Do Begin
+  Ln:=Tab[Q*2+1]; Cd:=Tab[Q*2];
+  For Sp:=0 To (LongInt(1) Shl (T.Bits-Ln))-1 Do Begin T.Sym[(Cd Shl (T.Bits-
+   Ln))+Sp]:=Q; T.Len[(Cd Shl (T.Bits-Ln))+Sp]:=Ln; End;
+ End;
+End;
+Begin
+ If M4Init Then Exit;
+ M4Init:=True;
+ H3InitTables;
+ M4BuildRl(M4RlIntra,102,67,M4IntraVlc,M4IntraRun,M4IntraLev);
+ M4BuildRl(M4RlRvInter,169,103,M4InterRvlc,M4InterRvlcRun,M4InterRvlcLev);
+ M4BuildRl(M4RlRvIntra,169,103,M4IntraRvlc,M4IntraRvlcRun,M4IntraRvlcLev);
+ M4BuildRl(M4RlInter,102,58,H3InterVlc,H3InterRun,H3InterLevel);
+ Dc(M4VDcL,M4DcLum); Dc(M4VDcC,M4DcChr);
+ M4VSpr.Bits:=12;
+ For K:=0 To 4095 Do Begin M4VSpr.Sym[K]:=-1; M4VSpr.Len[K]:=0; End;
+ Code:=0;
+ For Len:=1 To 12 Do Begin
+  For K:=0 To 14 Do If M4SprLen[K]=Len Then Begin
+   For J:=0 To (LongInt(1) Shl (12-Len))-1 Do Begin M4VSpr.Sym[(Code Shl (12-
+    Len))+J]:=K; M4VSpr.Len[(Code Shl (12-Len))+J]:=Len; End;
+   Inc(Code);
+  End;
+  Code:=Code Shl 1;
+ End;
+End;
+
+{ ---- petits utilitaires de lecture ---- }
+Function M4GetXbits(N: LongInt): LongInt;
+Var V: LongInt;
+Begin
+ V:=H3Bits(N);
+ If V<(LongInt(1) Shl (N-1)) Then V:=V-(LongInt(1) Shl N)+1;
+ M4GetXbits:=V;
+End;
+
+Function M4Marker: LongInt;
+Begin M4Marker:=H3Bit; End;
+
+Function M4Log2(V: LongInt): LongInt;
+Var R: LongInt;
+Begin R:=0; While V>1 Do Begin V:=V Shr 1; Inc(R); End; M4Log2:=R; End;
+
+Procedure M4SetQscale(Q: LongInt);
+Begin
+ If Q<1 Then Q:=1 Else If Q>31 Then Q:=31;
+ M4Qscale:=Q; M4ChromaQ:=Q;
+ M4YDc:=M4YDcT[Q]; M4CDc:=M4CDcT[Q];
+End;
+
+Function M4Div(A,B: LongInt): LongInt;   { division C : arrondi vers zero }
+Begin M4Div:=A Div B; End;
+Function M4RDiv(A,B: LongInt): LongInt;  { ROUNDED_DIV }
+Begin If A>=0 Then M4RDiv:=(A+(B Shr 1)) Div B Else M4RDiv:=(A-(B Shr 1)) Div B;
+ End;
+Function M4RDiv64(A,B: Int64): Int64;
+Begin If A>=0 Then M4RDiv64:=(A+(B Shr 1)) Div B Else M4RDiv64:=(A-(B Shr 1))
+ Div B; End;
+
+{ ---- en-tetes (mpeg4videodec.c) ---- }
+Var M4Range: LongInt;
+
+Procedure M4DefaultMatrices;
+Var I: LongInt;
+Begin
+ For I:=0 To 63 Do Begin M4IntraM[I]:=M4DefIntra[I]; M4InterM[I]:=M4DefInter[I];
+  End;
+End;
+
+Procedure M4UserData;
+Var Buf: String; I,Ver,Build,Ver2,Ver3,E: LongInt; Last: Char;
+Function Num(Var P: LongInt; Var V: LongInt): Boolean;
+Var Q: LongInt;
+Begin
+ Q:=P; V:=0;
+ While (Q<=Length(Buf)) And (Buf[Q]>='0') And (Buf[Q]<='9') Do Begin If
+  V<100000000 Then V:=V*10+Ord(Buf[Q])-48; Inc(Q); End;
+ Num:=Q>P; P:=Q;
+End;
+Function StartsWith(Const S: String; Var P: LongInt): Boolean;
+Var Ok: Boolean;
+Begin
+ Ok:=(Length(Buf)>=Length(S)) And (Copy(Buf,1,Length(S))=S);
+ If Ok Then P:=Length(S)+1;
+ StartsWith:=Ok;
+End;
+Var P: LongInt; Ok: Boolean; Hdr: Boolean;
+Begin
+ Buf:=''; I:=0;
+ While (I<255) And (H3Pos<H3Size*8) Do Begin
+  If H3Show(23)=0 Then Break;
+  Buf:=Buf+Chr(H3Bits(8)); Inc(I);
+ End;
+ { detection DivX }
+ Ver:=0; Build:=0; E:=0; Last:=#0; Hdr:=False;
+ If StartsWith('DivX',P) Then Begin
+  If Num(P,Ver) Then Begin
+   If (P<=Length(Buf)) And (Copy(Buf,P,5)='Build') Then Begin
+    Inc(P,5); If Num(P,Build) Then Begin E:=2; If P<=Length(Buf) Then Begin E:=
+     3; Last:=Buf[P]; End; End;
+   End Else If (P<=Length(Buf)) And (Buf[P]='b') Then Begin
+    Inc(P); If Num(P,Build) Then Begin E:=2; If P<=Length(Buf) Then Begin E:=3;
+     Last:=Buf[P]; End; End;
+   End;
+  End;
+  If E>=2 Then Begin M4DivxVer:=Ver; M4DivxBuild:=Build; M4DivxPacked:=(E=3) And
+   (Last='p'); End;
+ End;
+ { detection libavcodec }
+ E:=0; Ver:=0; Ver2:=0; Ver3:=0; Build:=0;
+ If StartsWith('FFmpe',P) Then Begin
+  { FFmpe%*[^b]b%d }
+  While (P<=Length(Buf)) And (Buf[P]<>'b') Do Inc(P);
+  If (P<=Length(Buf)) And (Buf[P]='b') Then Begin Inc(P); If Num(P,Build) Then
+   E:=4; End;
+ End;
+ If (E<>4) And StartsWith('FFmpeg v',P) Then Begin
+  If Num(P,Ver) And (P<=Length(Buf)) And (Buf[P]='.') Then Begin
+   Inc(P);
+   If Num(P,Ver2) And (P<=Length(Buf)) And (Buf[P]='.') Then Begin
+    Inc(P);
+    If Num(P,Ver3) Then Begin
+     If Copy(Buf,P,Length(' / libavcodec build: '))=' / libavcodec build: ' Then
+      Begin
+      Inc(P,Length(' / libavcodec build: ')); If Num(P,Build) Then E:=4;
+     End;
+    End;
+   End;
+  End;
+ End;
+ If E<>4 Then Begin
+  If StartsWith('Lavc',P) Then Begin
+   If Num(P,Ver) Then Begin
+    E:=2;
+    If (P<=Length(Buf)) And (Buf[P]='.') Then Begin
+     Inc(P);
+     If Num(P,Ver2) Then Begin
+      E:=3;
+      If (P<=Length(Buf)) And (Buf[P]='.') Then Begin Inc(P); If Num(P,Ver3)
+       Then E:=4; End;
+     End;
+    End;
+    If E=4 Then Begin Build:=((Ver And $FF) Shl 16)+((Ver2 And $FF) Shl 8)+(Ver3
+     And $FF); End
+    Else E:=2;
+   End;
+  End;
+  If (E<>4) And (Buf='ffmpeg') Then M4LavcBuild:=4600;
+ End;
+ If E=4 Then M4LavcBuild:=Build;
+ { detection Xvid }
+ If StartsWith('XviD',P) Then Begin
+  If Num(P,Build) Then M4XvidBuild:=Build;
+ End;
+End;
+
+Procedure M4GopHeader;
+Var Hrs,Mn,Sec: LongInt;
+Begin
+ If H3Show(23)=0 Then Exit;
+ Hrs:=H3Bits(5); Mn:=H3Bits(6); M4Marker; Sec:=H3Bits(6);
+ M4TimeBase:=Sec+60*(Mn+60*Hrs);
+ H3Skip(2);
+End;
+
+Procedure M4VisualObject;
+Var Id,Typ,Sig,Rng,Cd: LongInt;
+Begin
+ Id:=H3Bit;
+ If Id<>0 Then H3Skip(7);
+ Typ:=H3Bits(4);
+ If (Typ=1) Or (Typ=2) Then Begin
+  Sig:=H3Bit;
+  If Sig<>0 Then Begin
+   H3Skip(3); Rng:=H3Bit; Cd:=H3Bit;
+   If Rng<>0 Then M4Range:=2 Else M4Range:=1;
+   If Cd<>0 Then H3Skip(24);
+  End;
+ End;
+End;
+
+Function M4VolHeader: LongInt;
+Var
+ VerId,AspectInfo,ChromaFmt,I,V,Last,J,Pos0,Est,Wd,Ht: LongInt; GoNo: Boolean;
+  Bak: LongInt;
+ H1,H2,H3b,H4: LongInt; NoCplx: Boolean;
+Begin
+ M4VolHeader:=-1;
+ H3Skip(1);
+ M4VoType:=H3Bits(8);
+ If (M4VoType=15) Or (M4VoType=14) Then Fail(
+  'mpeg4: profil Simple Studio non pris en charge.');
+ If H3Bit<>0 Then Begin VerId:=H3Bits(4); H3Skip(3); End Else VerId:=1;
+ AspectInfo:=H3Bits(4);
+ If AspectInfo=15 Then Begin M4SarN:=H3Bits(8); M4SarD:=H3Bits(8); End
+ Else Begin M4SarN:=M4Aspect[AspectInfo,0]; M4SarD:=M4Aspect[AspectInfo,1]; End;
+ M4VolCtl:=H3Bit;
+ If M4VolCtl<>0 Then Begin
+  ChromaFmt:=H3Bits(2);
+  M4LowDelay:=H3Bit;
+  If H3Bit<>0 Then Begin
+   H3Skip(15); M4Marker; H3Skip(15); M4Marker; H3Skip(15); M4Marker; H3Skip(3);
+    H3Skip(11); M4Marker; H3Skip(15); M4Marker;
+  End;
+ End Else Begin
+  If M4PicNum=0 Then Begin
+   Case M4VoType Of 1,17: M4LowDelay:=1; Else M4LowDelay:=0; End;
+  End;
+ End;
+ M4Shape:=H3Bits(2);
+ If M4Shape<>0 Then Fail(
+  'mpeg4: seules les couches video rectangulaires sont prises en charge.');
+ M4Marker;
+ M4Res:=H3Bits(16);
+ If M4Res=0 Then Exit;
+ M4TIncBits:=M4Log2(M4Res-1)+1;
+ If M4TIncBits<1 Then M4TIncBits:=1;
+ M4Marker;
+ If H3Bit<>0 Then M4FixedRate:=H3Bits(M4TIncBits) Else M4FixedRate:=1;
+ M4TFrame:=0;
+ M4Marker;
+ Wd:=H3Bits(13); M4Marker; Ht:=H3Bits(13); M4Marker;
+ If (Wd<>0) And (Ht<>0) And Not ((M4W<>0) And (M4CTag='MP4S')) Then Begin M4W:=
+  Wd; M4H:=Ht; End;
+ M4Prog:=H3Bit Xor 1;
+ M4IDct:=0;
+ H3Bit;  { OBMC disable }
+ If VerId=1 Then M4SprUsage:=H3Bit Else M4SprUsage:=H3Bits(2);
+ If (M4SprUsage=1) Or (M4SprUsage=2) Then Begin
+  If M4SprUsage=1 Then Begin H3Skip(13); M4Marker; H3Skip(13); M4Marker; H3Skip(
+   13); M4Marker; H3Skip(13); M4Marker; End;
+  M4NumWarp:=H3Bits(6);
+  If M4NumWarp>3 Then Begin M4NumWarp:=0; Exit; End;
+  M4WarpAcc:=H3Bits(2);
+  M4BrightChg:=H3Bit;
+  If M4SprUsage=1 Then H3Bit;
+ End;
+ If H3Bit=1 Then Begin
+  M4QuantPrec:=H3Bits(4);
+  H3Bits(4);
+  If (M4QuantPrec<3) Or (M4QuantPrec>9) Then M4QuantPrec:=5;
+ End Else M4QuantPrec:=5;
+ M4MpegQuant:=H3Bit;
+ If M4MpegQuant<>0 Then Begin
+  M4DefaultMatrices;
+  If H3Bit<>0 Then Begin
+   Last:=0; I:=0;
+   While I<64 Do Begin
+    If H3Left<8 Then Exit;
+    V:=H3Bits(8);
+    If V=0 Then Break;
+    Last:=V; M4IntraM[H3Zigzag[I]]:=Last; Inc(I);
+   End;
+   While I<64 Do Begin M4IntraM[H3Zigzag[I]]:=Last; Inc(I); End;
+  End;
+  If H3Bit<>0 Then Begin
+   Last:=0; I:=0;
+   While I<64 Do Begin
+    If H3Left<8 Then Exit;
+    V:=H3Bits(8);
+    If V=0 Then Break;
+    Last:=V; M4InterM[H3Zigzag[I]]:=V; Inc(I);
+   End;
+   While I<64 Do Begin M4InterM[H3Zigzag[I]]:=Last; Inc(I); End;
+  End;
+ End;
+ If VerId<>1 Then M4QuarterS:=H3Bit Else M4QuarterS:=0;
+ If H3Left<4 Then Exit;
+ NoCplx:=False;
+ If H3Bit=0 Then Begin
+  Pos0:=H3Pos;
+  Est:=H3Bits(2);
+  If Est<2 Then Begin
+   If H3Bit=0 Then Begin
+    Inc(M4CplxI,8*H3Bit); Inc(M4CplxI,8*H3Bit); Inc(M4CplxI,8*H3Bit); Inc(
+     M4CplxI,8*H3Bit); Inc(M4CplxI,8*H3Bit); Inc(M4CplxI,8*H3Bit);
+   End;
+   If H3Bit=0 Then Begin
+    Inc(M4CplxI,8*H3Bit); Inc(M4CplxP,8*H3Bit); Inc(M4CplxP,8*H3Bit); Inc(
+     M4CplxI,8*H3Bit);
+   End;
+   If M4Marker=0 Then Begin H3Pos:=Pos0; NoCplx:=True; End
+   Else Begin
+    If H3Bit=0 Then Begin
+     Inc(M4CplxI,8*H3Bit); Inc(M4CplxI,8*H3Bit); Inc(M4CplxI,8*H3Bit); Inc(
+      M4CplxI,4*H3Bit);
+    End;
+    If H3Bit=0 Then Begin
+     Inc(M4CplxP,8*H3Bit); Inc(M4CplxP,8*H3Bit); Inc(M4CplxB,8*H3Bit); Inc(
+      M4CplxP,8*H3Bit); Inc(M4CplxP,8*H3Bit); Inc(M4CplxP,8*H3Bit);
+    End;
+    If M4Marker=0 Then Begin H3Pos:=Pos0; NoCplx:=True; End
+    Else If Est=1 Then Begin Inc(M4CplxI,8*H3Bit); Inc(M4CplxP,8*H3Bit); End;
+   End;
+  End;
+ End Else NoCplx:=True;
+ If NoCplx Then Begin M4CplxI:=0; M4CplxP:=0; M4CplxB:=0; End;
+ M4ResyncMarker:=H3Bit Xor 1;
+ M4DataPart:=H3Bit;
+ If M4DataPart<>0 Then M4Rvlc:=H3Bit Else M4Rvlc:=0;
+ If VerId<>1 Then Begin
+  M4NewPred:=H3Bit;
+  If M4NewPred<>0 Then Begin H3Skip(2); H3Skip(1); End;
+  H3Bit;  { reduced_res_vop }
+ End Else M4NewPred:=0;
+ M4Scal:=H3Bit;
+ If M4Scal<>0 Then Begin
+  Bak:=H3Pos;
+  H3Skip(1); H3Skip(4); H3Skip(1);
+  H1:=H3Bits(5); H2:=H3Bits(5); H3b:=H3Bits(5); H4:=H3Bits(5);
+  M4EnhType:=H3Bit;
+  If (H1=0) Or (H2=0) Or (H3b=0) Or (H4=0) Then Begin M4Scal:=0; H3Pos:=Bak;
+   End;
+ End;
+ M4VolHeader:=0;
+ M4Have:=True;
+End;
+
+Procedure M4InitDirectMv;
+Var I: LongInt;
+Begin
+ For I:=0 To 63 Do Begin
+  M4DirScale[0,I]:=SmallInt((I-32)*LongInt(M4PBTime) Div LongInt(M4PPTime));
+  M4DirScale[1,I]:=SmallInt((I-32)*(LongInt(M4PBTime)-LongInt(M4PPTime)) Div
+   LongInt(M4PPTime));
+ End;
+End;
+
+Function M4SpriteTrajectory: LongInt;
+Var
+ A,Rho,R,Alpha,Beta,W,H,MinAB,I,W2,H2,W3,H3,Len,X,Y,ShiftY,ShiftC,J: LongInt;
+ SpriteRef: Array[0..3,0..1] Of Int64; VirtualRef: Array[0..1,0..1] Of Int64;
+ SOff,SDel: Array[0..1,0..1] Of Int64; VopRef: Array[0..3,0..1] Of LongInt; D:
+  Array[0..3,0..1] Of LongInt;
+ Sd0,Sd1: Int64; Lim: Int64;
+ Div500: Boolean;
+Function Traj: LongInt;
+Begin Traj:=H3GetVlc(M4VSpr); End;
+Begin
+ M4SpriteTrajectory:=-1;
+ A:=2 Shl M4WarpAcc; Rho:=3-M4WarpAcc; R:=16 Div A; Alpha:=1; Beta:=0; W:=M4W;
+  H:=M4H;
+ Div500:=(M4DivxVer=500) And (M4DivxBuild=413);
+ If (W<=0) Or (H<=0) Then Exit;
+ VopRef[0,0]:=0; VopRef[0,1]:=0; VopRef[1,0]:=W; VopRef[1,1]:=0; VopRef[2,0]:=0;
+  VopRef[2,1]:=H; VopRef[3,0]:=W; VopRef[3,1]:=H;
+ FillChar(D,SizeOf(D),0);
+ For I:=0 To M4NumWarp-1 Do Begin
+  X:=0; Y:=0;
+  Len:=Traj; If Len>0 Then X:=M4GetXbits(Len);
+  If Not Div500 Then M4Marker;
+  Len:=Traj; If Len>0 Then Y:=M4GetXbits(Len);
+  M4Marker;
+  D[I,0]:=X; D[I,1]:=Y;
+ End;
+ While (LongInt(1) Shl Alpha)<W Do Inc(Alpha);
+ While (LongInt(1) Shl Beta)<H Do Inc(Beta);
+ W2:=LongInt(1) Shl Alpha; H2:=LongInt(1) Shl Beta;
+ If Div500 Then Begin
+  SpriteRef[0,0]:=A*VopRef[0,0]+D[0,0]; SpriteRef[0,1]:=A*VopRef[0,1]+D[0,1];
+  SpriteRef[1,0]:=A*VopRef[1,0]+D[0,0]+D[1,0]; SpriteRef[1,1]:=A*VopRef[1,1]+D[
+   0,1]+D[1,1];
+  SpriteRef[2,0]:=A*VopRef[2,0]+D[0,0]+D[2,0]; SpriteRef[2,1]:=A*VopRef[2,1]+D[
+   0,1]+D[2,1];
+ End Else Begin
+  SpriteRef[0,0]:=(A Shr 1)*(2*VopRef[0,0]+D[0,0]); SpriteRef[0,1]:=(A Shr 1)*(
+   2*VopRef[0,1]+D[0,1]);
+  SpriteRef[1,0]:=(A Shr 1)*(2*VopRef[1,0]+D[0,0]+D[1,0]); SpriteRef[1,1]:=(A
+   Shr 1)*(2*VopRef[1,1]+D[0,1]+D[1,1]);
+  SpriteRef[2,0]:=(A Shr 1)*(2*VopRef[2,0]+D[0,0]+D[2,0]); SpriteRef[2,1]:=(A
+   Shr 1)*(2*VopRef[2,1]+D[0,1]+D[2,1]);
+ End;
+ VirtualRef[0,0]:=16*(VopRef[0,0]+W2)+M4RDiv64((W-W2)*(R*SpriteRef[0,0]-16*
+  Int64(VopRef[0,0]))+W2*(R*SpriteRef[1,0]-16*Int64(VopRef[1,0])),W);
+ VirtualRef[0,1]:=16*VopRef[0,1]+M4RDiv64((W-W2)*(R*SpriteRef[0,1]-16*Int64(
+  VopRef[0,1]))+W2*(R*SpriteRef[1,1]-16*Int64(VopRef[1,1])),W);
+ VirtualRef[1,0]:=16*VopRef[0,0]+M4RDiv64((H-H2)*(R*SpriteRef[0,0]-16*Int64(
+  VopRef[0,0]))+H2*(R*SpriteRef[2,0]-16*Int64(VopRef[2,0])),H);
+ VirtualRef[1,1]:=16*(VopRef[0,1]+H2)+M4RDiv64((H-H2)*(R*SpriteRef[0,1]-16*
+  Int64(VopRef[0,1]))+H2*(R*SpriteRef[2,1]-16*Int64(VopRef[2,1])),H);
+ Case M4NumWarp Of
+  0: Begin
+   SOff[0,0]:=0; SOff[0,1]:=0; SOff[1,0]:=0; SOff[1,1]:=0;
+   SDel[0,0]:=A; SDel[0,1]:=0; SDel[1,0]:=0; SDel[1,1]:=A;
+   M4SpShift[0]:=0; M4SpShift[1]:=0;
+  End;
+  1: Begin
+   SOff[0,0]:=SpriteRef[0,0]-A*VopRef[0,0];
+   SOff[0,1]:=SpriteRef[0,1]-A*VopRef[0,1];
+   SOff[1,0]:=((SpriteRef[0,0] Shr 1) Or (SpriteRef[0,0] And 1))-A*(VopRef[0,0]
+    Div 2);
+   SOff[1,1]:=((SpriteRef[0,1] Shr 1) Or (SpriteRef[0,1] And 1))-A*(VopRef[0,1]
+    Div 2);
+   SDel[0,0]:=A; SDel[0,1]:=0; SDel[1,0]:=0; SDel[1,1]:=A;
+   M4SpShift[0]:=0; M4SpShift[1]:=0;
+  End;
+  2: Begin
+   SOff[0,0]:=SpriteRef[0,0]*(Int64(1) Shl (Alpha+Rho))+(-R*SpriteRef[0,0]+
+    VirtualRef[0,0])*(-Int64(VopRef[0,0]))+
+     (R*SpriteRef[0,1]-VirtualRef[0,1])*(-Int64(VopRef[0,1]))+(Int64(1) Shl (
+      Alpha+Rho-1));
+   SOff[0,1]:=SpriteRef[0,1]*(Int64(1) Shl (Alpha+Rho))+(-R*SpriteRef[0,1]+
+    VirtualRef[0,1])*(-Int64(VopRef[0,0]))+
+     (-R*SpriteRef[0,0]+VirtualRef[0,0])*(-Int64(VopRef[0,1]))+(Int64(1) Shl (
+      Alpha+Rho-1));
+   SOff[1,0]:=(-R*SpriteRef[0,0]+VirtualRef[0,0])*(-2*Int64(VopRef[0,0])+1)+(R*
+    SpriteRef[0,1]-VirtualRef[0,1])*(-2*Int64(VopRef[0,1])+1)+
+     2*W2*R*SpriteRef[0,0]-16*W2+(Int64(1) Shl (Alpha+Rho+1));
+   SOff[1,1]:=(-R*SpriteRef[0,1]+VirtualRef[0,1])*(-2*Int64(VopRef[0,0])+1)+(-R*
+    SpriteRef[0,0]+VirtualRef[0,0])*(-2*Int64(VopRef[0,1])+1)+
+     2*W2*R*SpriteRef[0,1]-16*W2+(Int64(1) Shl (Alpha+Rho+1));
+   SDel[0,0]:=(-R*SpriteRef[0,0]+VirtualRef[0,0]);
+   SDel[0,1]:=(R*SpriteRef[0,1]-VirtualRef[0,1]);
+   SDel[1,0]:=(-R*SpriteRef[0,1]+VirtualRef[0,1]);
+   SDel[1,1]:=(-R*SpriteRef[0,0]+VirtualRef[0,0]);
+   M4SpShift[0]:=Alpha+Rho; M4SpShift[1]:=Alpha+Rho+2;
+  End;
+  3: Begin
+   If Alpha<Beta Then MinAB:=Alpha Else MinAB:=Beta;
+   W3:=W2 Shr MinAB; H3:=H2 Shr MinAB;
+   SOff[0,0]:=SpriteRef[0,0]*(Int64(1) Shl (Alpha+Beta+Rho-MinAB))+(-R*
+    SpriteRef[0,0]+VirtualRef[0,0])*H3*(-Int64(VopRef[0,0]))+
+     (-R*SpriteRef[0,0]+VirtualRef[1,0])*W3*(-Int64(VopRef[0,1]))+(Int64(1) Shl
+      (Alpha+Beta+Rho-MinAB-1));
+   SOff[0,1]:=SpriteRef[0,1]*(Int64(1) Shl (Alpha+Beta+Rho-MinAB))+(-R*
+    SpriteRef[0,1]+VirtualRef[0,1])*H3*(-Int64(VopRef[0,0]))+
+     (-R*SpriteRef[0,1]+VirtualRef[1,1])*W3*(-Int64(VopRef[0,1]))+(Int64(1) Shl
+      (Alpha+Beta+Rho-MinAB-1));
+   SOff[1,0]:=(-R*SpriteRef[0,0]+VirtualRef[0,0])*H3*(-2*Int64(VopRef[0,0])+1)+(
+    -R*SpriteRef[0,0]+VirtualRef[1,0])*W3*(-2*Int64(VopRef[0,1])+1)+
+     2*W2*H3*R*SpriteRef[0,0]-16*W2*H3+(Int64(1) Shl (Alpha+Beta+Rho-MinAB+1));
+   SOff[1,1]:=(-R*SpriteRef[0,1]+VirtualRef[0,1])*H3*(-2*Int64(VopRef[0,0])+1)+(
+    -R*SpriteRef[0,1]+VirtualRef[1,1])*W3*(-2*Int64(VopRef[0,1])+1)+
+     2*W2*H3*R*SpriteRef[0,1]-16*W2*H3+(Int64(1) Shl (Alpha+Beta+Rho-MinAB+1));
+   SDel[0,0]:=(-R*SpriteRef[0,0]+VirtualRef[0,0])*H3;
+   SDel[0,1]:=(-R*SpriteRef[0,0]+VirtualRef[1,0])*W3;
+   SDel[1,0]:=(-R*SpriteRef[0,1]+VirtualRef[0,1])*H3;
+   SDel[1,1]:=(-R*SpriteRef[0,1]+VirtualRef[1,1])*W3;
+   M4SpShift[0]:=Alpha+Beta+Rho-MinAB; M4SpShift[1]:=Alpha+Beta+Rho-MinAB+2;
+  End;
+ End;
+ If (SDel[0,0]=Int64(A) Shl M4SpShift[0]) And (SDel[0,1]=0) And (SDel[1,0]=0)
+  And (SDel[1,1]=Int64(A) Shl M4SpShift[0]) Then Begin
+  SOff[0,0]:=M4Sar64(SOff[0,0],M4SpShift[0]); SOff[0,1]:=M4Sar64(SOff[0,1],
+   M4SpShift[0]);
+  SOff[1,0]:=M4Sar64(SOff[1,0],M4SpShift[1]); SOff[1,1]:=M4Sar64(SOff[1,1],
+   M4SpShift[1]);
+  SDel[0,0]:=A; SDel[0,1]:=0; SDel[1,0]:=0; SDel[1,1]:=A;
+  M4SpShift[0]:=0; M4SpShift[1]:=0;
+  M4RealWarp:=1;
+ End Else Begin
+  ShiftY:=16-M4SpShift[0]; ShiftC:=16-M4SpShift[1];
+  Lim:=2147483647;
+  For I:=0 To 1 Do Begin
+   If (ShiftC<0) Or (ShiftY<0) Or (Abs(SOff[0,I])>=(Lim Shr ShiftY)) Or (Abs(
+    SOff[1,I])>=(Lim Shr ShiftC)) Or
+    (Abs(SDel[0,I])>=(Lim Shr ShiftY)) Or (Abs(SDel[1,I])>=(Lim Shr ShiftY))
+     Then Begin
+    FillChar(M4SpOff,SizeOf(M4SpOff),0); FillChar(M4SpDelta,SizeOf(M4SpDelta),
+     0); Exit;
+   End;
+  End;
+  For I:=0 To 1 Do Begin
+   SOff[0,I]:=SOff[0,I]*(Int64(1) Shl ShiftY); SOff[1,I]:=SOff[1,I]*(Int64(1)
+    Shl ShiftC);
+   SDel[0,I]:=SDel[0,I]*(Int64(1) Shl ShiftY); SDel[1,I]:=SDel[1,I]*(Int64(1)
+    Shl ShiftY);
+   M4SpShift[I]:=16;
+  End;
+  For I:=0 To 1 Do Begin
+   Sd0:=SDel[I,0]-Int64(A)*65536; Sd1:=SDel[I,1]-Int64(A)*65536;
+   If (Abs(SOff[0,I]+SDel[I,0]*(W+16))>=Lim) Or (Abs(SOff[0,I]+SDel[I,1]*(H+
+    16))>=Lim) Or
+    (Abs(SOff[0,I]+SDel[I,0]*(W+16)+SDel[I,1]*(H+16))>=Lim) Or (Abs(SDel[I,0]*(
+     W+16))>=Lim) Or (Abs(SDel[I,1]*(H+16))>=Lim) Or
+    (Abs(Sd0)>=Lim) Or (Abs(Sd1)>=Lim) Or (Abs(SOff[0,I]+Sd0*(W+16))>=Lim) Or (
+     Abs(SOff[0,I]+Sd1*(H+16))>=Lim) Or
+    (Abs(SOff[0,I]+Sd0*(W+16)+Sd1*(H+16))>=Lim) Then Begin
+    FillChar(M4SpOff,SizeOf(M4SpOff),0); FillChar(M4SpDelta,SizeOf(M4SpDelta),
+     0); Exit;
+   End;
+  End;
+  M4RealWarp:=M4NumWarp;
+ End;
+ For I:=0 To 3 Do Begin
+  M4SpOff[I And 1,I Shr 1]:=SOff[I And 1,I Shr 1];
+  M4SpDelta[I And 1,I Shr 1]:=SDel[I And 1,I Shr 1];
+ End;
+ M4SpriteTrajectory:=0;
+End;
+
+Procedure M4NewPredSkip;
+Var Ln: LongInt;
+Begin
+ Ln:=M4TIncBits+3; If Ln>15 Then Ln:=15;
+ H3Bits(Ln);
+ If H3Bit<>0 Then H3Bits(Ln);
+ M4Marker;
+End;
+
+Function M4VopHeader: LongInt;
+Var TimeIncr,TimeInc,I: LongInt;
+Begin
+ M4VopHeader:=0;
+ M4McSel:=0;
+ M4PType:=H3Bits(2);
+ If (M4PType=2) And (M4LowDelay<>0) And (M4VolCtl=0) Then M4LowDelay:=0;
+ If (M4DataPart<>0) And (M4PType<>2) Then M4Part:=1 Else M4Part:=0;
+ TimeIncr:=0;
+ While (H3Bit<>0) And (H3Pos<H3Size*8) Do Inc(TimeIncr);
+ M4Marker;
+ If (M4TIncBits=0) Or ((H3Show(M4TIncBits+1) And 1)=0) Then Begin
+  M4TIncBits:=1;
+  While M4TIncBits<16 Do Begin
+   If (M4PType=1) Or ((M4PType=3) And (M4SprUsage=2)) Then Begin
+    If (H3Show(M4TIncBits+6) And $37)=$30 Then Break;
+   End Else If (H3Show(M4TIncBits+5) And $1F)=$18 Then Break;
+   Inc(M4TIncBits);
+  End;
+ End;
+ TimeInc:=H3Bits(M4TIncBits);
+ If M4PType<>2 Then Begin
+  M4LastTimeBase:=M4TimeBase;
+  M4TimeBase:=M4TimeBase+TimeIncr;
+  M4Time:=M4TimeBase*M4Res+TimeInc;
+  If (M4Bugs And M4_BUG_UMP4)<>0 Then Begin
+   If M4Time<M4LastNonBTime Then Begin Inc(M4TimeBase); Inc(M4Time,M4Res); End;
+  End;
+  M4PPTime:=(M4Time-M4LastNonBTime) And $FFFF;
+  M4LastNonBTime:=M4Time;
+ End Else Begin
+  M4Time:=(M4LastTimeBase+TimeIncr)*M4Res+TimeInc;
+  M4PBTime:=(M4PPTime-(M4LastNonBTime-M4Time)) And $FFFF;
+  If (M4PPTime<=M4PBTime) Or (M4PPTime<=M4PPTime-M4PBTime) Or (M4PPTime<=0) Then
+   Begin M4VopHeader:=M4_SKIPPED; Exit; End;
+  M4InitDirectMv;
+  If M4TFrame=0 Then M4TFrame:=M4PBTime;
+  If M4TFrame=0 Then M4TFrame:=1;
+  M4PPField:=((M4RDiv64(M4LastNonBTime,M4TFrame)-M4RDiv64(M4LastNonBTime-
+   M4PPTime,M4TFrame))*2) And $FFFF;
+  M4PBField:=((M4RDiv64(M4Time,M4TFrame)-M4RDiv64(M4LastNonBTime-M4PPTime,
+   M4TFrame))*2) And $FFFF;
+  If (M4PPField<=M4PBField) Or (M4PBField<=1) Then Begin
+   M4PBField:=2; M4PPField:=4;
+   If M4Prog=0 Then Begin M4VopHeader:=M4_SKIPPED; Exit; End;
+  End;
+ End;
+ M4Marker;
+ If H3Bit<>1 Then Begin M4VopHeader:=M4_SKIPPED; Exit; End;
+ If M4NewPred<>0 Then M4NewPredSkip;
+ If (M4PType=1) Or ((M4PType=3) And (M4SprUsage=2)) Then M4NoRnd:=H3Bit Else
+  M4NoRnd:=0;
+ I:=M4CplxI; If I>0 Then H3Skip(I);
+ If M4PType<>0 Then Begin I:=M4CplxP; If I>0 Then H3Skip(I); End;
+ If M4PType=2 Then Begin I:=M4CplxB; If I>0 Then H3Skip(I); End;
+ If H3Left<3 Then Begin M4VopHeader:=-1; Exit; End;
+ M4IntraDcThr:=M4DcThr[H3Bits(3)];
+ If M4Prog=0 Then Begin M4Tff:=H3Bit; M4AltScan:=H3Bit; End Else M4AltScan:=0;
+ If M4PType=3 Then Begin
+  If M4SprUsage=2 Then Begin
+   If M4SpriteTrajectory<0 Then Begin M4VopHeader:=-1; Exit; End;
+  End Else If M4SprUsage=1 Then Fail(
+   'mpeg4: sprites statiques non pris en charge.')
+  Else Begin FillChar(M4SpOff,SizeOf(M4SpOff),0); FillChar(M4SpDelta,SizeOf(
+   M4SpDelta),0); End;
+ End;
+ M4Qscale:=H3Bits(M4QuantPrec); M4ChromaQ:=M4Qscale;
+ If M4Qscale=0 Then Begin M4VopHeader:=-1; Exit; End;
+ If M4PType<>0 Then Begin
+  M4FCode:=H3Bits(3);
+  If M4FCode=0 Then Begin M4FCode:=1; M4VopHeader:=-1; Exit; End;
+ End Else M4FCode:=1;
+ If M4PType=2 Then Begin
+  M4BCode:=H3Bits(3);
+  If M4BCode=0 Then Begin M4BCode:=1; M4VopHeader:=-1; Exit; End;
+ End Else M4BCode:=1;
+ If M4Scal<>0 Then Begin
+  If M4EnhType<>0 Then H3Bit;
+  H3Skip(2);
+ End;
+ If (M4VoType=0) And (M4VolCtl=0) And (M4DivxVer=-1) And (M4PicNum=0) Then
+  M4LowDelay:=1;
+ Inc(M4PicNum);
+End;
+
+{ ff_mpeg4_workaround_bugs : pas de variantes STD_QPEL (encodeurs anciens) }
+Function M4Workaround: Boolean;
+Begin
+ M4Workaround:=False;
+ If (M4XvidBuild=-1) And (M4DivxVer=-1) And (M4LavcBuild=-1) Then Begin
+  If (M4CTag='XVID') Or (M4CTag='XVIX') Or (M4CTag='RMP4') Or (M4CTag='ZMP4') Or
+   (M4CTag='SIPP') Then M4XvidBuild:=0;
+ End;
+ If (M4XvidBuild=-1) And (M4DivxVer=-1) And (M4LavcBuild=-1) Then
+  If (M4CTag='DIVX') And (M4VoType=0) And (M4VolCtl=0) Then M4DivxVer:=400;
+ If (M4XvidBuild>=0) And (M4DivxVer>=0) Then Begin M4DivxVer:=-1; M4DivxBuild:=-
+  1; End;
+ If (M4CTag='XVIX') Then M4Bugs:=M4Bugs Or M4_BUG_XVIDILACE;
+ If (M4CTag='UMP4') Then M4Bugs:=M4Bugs Or M4_BUG_UMP4;
+ If (M4DivxVer>=500) And (M4DivxBuild<1814) Then M4Bugs:=M4Bugs Or
+  M4_BUG_QPELCH;
+ If (M4DivxVer>502) And (M4DivxBuild<1814) Then M4Bugs:=M4Bugs Or
+  M4_BUG_QPELCH2;
+ If (M4XvidBuild>=0) And (M4XvidBuild<=3) Then M4PadScore:=256*256*256*64;
+ If (M4XvidBuild>=0) And (M4XvidBuild<=1) Then M4Bugs:=M4Bugs Or M4_BUG_QPELCH;
+ If (M4XvidBuild>=0) And (M4XvidBuild<=12) Then M4Bugs:=M4Bugs Or M4_BUG_EDGE;
+ If (M4XvidBuild>=0) And (M4XvidBuild<=32) Then M4Bugs:=M4Bugs Or M4_BUG_DCCLIP;
+ { les comparaisons C sont non signees : -1 devient grand }
+ If (M4LavcBuild>=0) And (M4LavcBuild<4653) Then M4Bugs:=M4Bugs Or
+  M4_BUG_STDQPEL;
+ If (M4LavcBuild>=0) And (M4LavcBuild<4655) Then M4Bugs:=M4Bugs Or
+  M4_BUG_DIRBLK;
+ If (M4LavcBuild>=0) And (M4LavcBuild<4670) Then M4Bugs:=M4Bugs Or M4_BUG_EDGE;
+ If (M4LavcBuild>=0) And (M4LavcBuild<=4712) Then M4Bugs:=M4Bugs Or
+  M4_BUG_DCCLIP;
+ If M4DivxVer>=0 Then M4Bugs:=M4Bugs Or M4_BUG_DIRBLK;
+ If (M4DivxVer=501) And (M4DivxBuild=20020416) Then M4PadScore:=256*256*256*64;
+ If (M4DivxVer>=0) And (M4DivxVer<500) Then M4Bugs:=M4Bugs Or M4_BUG_EDGE;
+ If M4DivxVer>=0 Then M4Bugs:=M4Bugs Or M4_BUG_HPELCH;
+ If (M4Bugs And M4_BUG_STDQPEL)<>0 Then Fail(
+  'mpeg4: flux d''un ancien encodeur libavcodec (qpel non standard) non pris e'+
+  'n charge.');
+End;
+
+{ ---- tables de contexte, DC/AC (mpeg4video.h, mpeg4videodec.c) ---- }
+Function M4Off: LongInt;
+Begin M4Off:=M4MbS+1; End;
+
+Function M4AcIx(N: LongInt): LongInt;   { indice (blocs de 16 valeurs) dans
+ M4Dc/M4Ac }
+Begin
+ If N<4 Then M4AcIx:=M4B8S*(2*M4MbY+(N Shr 1))+2*M4MbX+(N And 1)+M4B8S+1
+ Else M4AcIx:=M4MbS*M4MbY+M4MbX+M4MbS+1;
+End;
+
+Function M4PredDc(N,Level: LongInt; Var Dir: LongInt): LongInt;
+Var A,B,C,Wrap,Pred,Scale,Ret,Ix,Pl: LongInt; D: PH3I16;
+Begin
+ If N<4 Then Scale:=M4YDc Else Scale:=M4CDc;
+ If N<4 Then Begin Pl:=0; Wrap:=M4B8S; End Else Begin Pl:=N-3; Wrap:=M4MbS; End;
+ Ix:=M4AcIx(N);
+ D:=M4Dc[Pl];
+ A:=D^[Ix-1]; B:=D^[Ix-1-Wrap]; C:=D^[Ix-Wrap];
+ If (M4FirstLine<>0) And (N<>3) Then Begin
+  If N<>2 Then Begin B:=1024; C:=1024; End;
+  If (N<>1) And (M4MbX=M4ResyncX) Then Begin B:=1024; A:=1024; End;
+ End;
+ If (M4MbX=M4ResyncX) And (M4MbY=M4ResyncY+1) Then Begin
+  If (N=0) Or (N=4) Or (N=5) Then B:=1024;
+ End;
+ If Abs(A-B)<Abs(B-C) Then Begin Pred:=C; Dir:=1; End Else Begin Pred:=A; Dir:=
+  0; End;
+ Pred:=(Pred+(Scale Shr 1)) Div Scale;
+ Level:=Level+Pred; Ret:=Level;
+ Level:=Level*Scale;
+ If (Level And Not 2047)<>0 Then Begin
+  If Level<0 Then Level:=0
+  Else If (M4Bugs And M4_BUG_DCCLIP)=0 Then Level:=2047;
+ End;
+ D^[Ix]:=SmallInt(Level);
+ M4PredDc:=Ret;
+End;
+
+Procedure M4PredAc(N,Dir: LongInt);
+Var Pl,Ix,Wrap,Xy,I,Base,Qo: LongInt; A: PH3I16; Qs: PEABuffer;
+Begin
+ If N<4 Then Pl:=0 Else Pl:=N-3;
+ If N<4 Then Wrap:=M4B8S Else Wrap:=M4MbS;
+ Ix:=M4AcIx(N);
+ A:=M4Ac[Pl];
+ Qs:=M4P[M4CurI].Qs;
+ If M4AcPred<>0 Then Begin
+  If Dir=0 Then Begin
+   Xy:=M4MbX-1+M4MbY*M4MbS+M4Off;
+   Base:=(Ix-1)*16;
+   If (M4MbX=0) Or (M4Qscale=Qs^[Xy]) Or (N=1) Or (N=3) Then Begin
+    For I:=1 To 7 Do M4Blk[N][I*8]:=SmallInt(M4Blk[N][I*8]+A^[Base+I]);
+   End Else Begin
+    For I:=1 To 7 Do M4Blk[N][I*8]:=SmallInt(M4Blk[N][I*8]+M4RDiv(A^[Base+I]*
+     Qs^[Xy],M4Qscale));
+   End;
+  End Else Begin
+   Xy:=M4MbX+M4MbY*M4MbS-M4MbS+M4Off;
+   Base:=(Ix-Wrap)*16;
+   If (M4MbY=0) Or (M4Qscale=Qs^[Xy]) Or (N=2) Or (N=3) Then Begin
+    For I:=1 To 7 Do M4Blk[N][I]:=SmallInt(M4Blk[N][I]+A^[Base+I+8]);
+   End Else Begin
+    For I:=1 To 7 Do M4Blk[N][I]:=SmallInt(M4Blk[N][I]+M4RDiv(A^[Base+I+8]*Qs^[
+     Xy],M4Qscale));
+   End;
+  End;
+ End;
+ Base:=Ix*16;
+ For I:=1 To 7 Do A^[Base+I]:=M4Blk[N][I*8];
+ For I:=1 To 7 Do A^[Base+8+I]:=M4Blk[N][I];
+End;
+
+Procedure M4CleanIntraEntries;   { ff_clean_intra_table_entries }
+Var Ix,I,Cx: LongInt;
+Begin
+ Ix:=M4AcIx(0);
+ M4Dc[0]^[Ix]:=1024; M4Dc[0]^[Ix+1]:=1024; M4Dc[0]^[Ix+M4B8S]:=1024; M4Dc[0]^[
+  Ix+1+M4B8S]:=1024;
+ FillChar(M4Ac[0]^[Ix*16],64,0);
+ FillChar(M4Ac[0]^[(Ix+M4B8S)*16],64,0);
+ Cx:=M4AcIx(4);
+ M4Dc[1]^[Cx]:=1024; M4Dc[2]^[Cx]:=1024;
+ FillChar(M4Ac[1]^[Cx*16],32,0); FillChar(M4Ac[2]^[Cx*16],32,0);
+ M4IntraTab^[M4MbX+M4MbY*M4MbS+M4Off]:=0;
+ If (M4Ms>=3) And (M4CodedBlk<>Nil) Then Begin
+  M4CodedBlk^[Ix]:=0; M4CodedBlk^[Ix+1]:=0; M4CodedBlk^[Ix+M4B8S]:=0;
+   M4CodedBlk^[Ix+1+M4B8S]:=0;
+ End;
+End;
+
+Procedure M4CleanBuffers;   { ff_mpeg4_clean_buffers }
+Var LXy,CXy: LongInt;
+Begin
+ LXy:=(2*M4MbY-1)*M4B8S+M4MbX*2-1+M4B8S+1;
+ CXy:=(M4MbY-1)*M4MbS+M4MbX-1+M4MbS+1;
+ FillChar(M4Ac[0]^[LXy*16],(M4B8S*2+1)*32,0);
+ FillChar(M4Ac[1]^[CXy*16],(M4MbS+1)*32,0);
+ FillChar(M4Ac[2]^[CXy*16],(M4MbS+1)*32,0);
+ M4LastMv[0,0,0]:=0; M4LastMv[0,0,1]:=0; M4LastMv[1,0,0]:=0; M4LastMv[1,0,1]:=0;
+End;
+
+Function M4DecodeDc(N: LongInt; Var Dir: LongInt): LongInt;
+Var Code,Level: LongInt;
+Begin
+ If N<4 Then Code:=H3GetVlc(M4VDcL) Else Code:=H3GetVlc(M4VDcC);
+ If (Code<0) Or (Code>9) Then Begin M4DecodeDc:=-1; Exit; End;
+ If Code=0 Then Level:=0
+ Else Begin
+  Level:=M4GetXbits(Code);
+  If Code>8 Then H3Bit;
+ End;
+ M4DecodeDc:=M4PredDc(N,Level,Dir);
+End;
+
+{ ---- blocs ---- }
+Function M4Block(N,Coded,Intra,UseDcVlc,Rvlc: LongInt): LongInt;
+Var
+ Level,I,Last,Run,Qmul,Qadd,Dir,Sym,Lev0,LastF,Sg,B1,B2: LongInt; Rl: PM4Rl;
+  Scan: PEABuffer; Blk: ^TH3Blk;
+Label NotCoded;
+Begin
+ M4Block:=-1;
+ Blk:=@M4Blk[N];
+ Dir:=0; Qmul:=1; Qadd:=0; Rl:=@M4RlIntra; Scan:=@H3Zigzag;
+ If Intra<>0 Then Begin
+  If UseDcVlc<>0 Then Begin
+   If M4Part<>0 Then Begin
+    If N<4 Then Level:=M4Dc[0]^[M4AcIx(N)] Else Level:=M4Dc[N-3]^[M4AcIx(N)];
+    If N<4 Then Level:=(Level+(M4YDc Shr 1)) Div M4YDc Else Level:=(Level+(M4CDc
+     Shr 1)) Div M4CDc;
+    Dir:=(M4DirTab^[M4MbX+M4MbY*M4MbS+M4Off] Shl N) And 32;
+   End Else Begin
+    Level:=M4DecodeDc(N,Dir);
+    If Level<0 Then Exit;
+   End;
+   Blk^[0]:=SmallInt(Level);
+   I:=0;
+  End Else Begin
+   I:=-1;
+   M4PredDc(N,0,Dir);
+  End;
+  If Coded=0 Then Goto NotCoded;
+  If Rvlc<>0 Then Rl:=@M4RlRvIntra Else Rl:=@M4RlIntra;
+  If M4AcPred<>0 Then Begin
+   If Dir=0 Then Begin If M4AltScan<>0 Then Scan:=@H3AltV Else Scan:=@H3AltV;
+    End   { gauche }
+   Else Begin If M4AltScan<>0 Then Scan:=@H3AltV Else Scan:=@H3AltH; End;
+    { haut }
+  End Else Begin
+   If M4AltScan<>0 Then Scan:=@H3AltV Else Scan:=@H3Zigzag;
+  End;
+ End Else Begin
+  I:=-1;
+  If Coded=0 Then Begin M4BlkLast[N]:=I; M4Block:=0; Exit; End;
+  If Rvlc<>0 Then Rl:=@M4RlRvInter Else Rl:=@M4RlInter;
+  If M4AltScan<>0 Then Scan:=@H3AltV Else Scan:=@H3Zigzag;
+  If M4MpegQuant=0 Then Begin Qmul:=M4Qscale Shl 1; Qadd:=(M4Qscale-1) Or 1;
+   End;
+ End;
+ Repeat
+  Sym:=H3GetVlc(Rl^.Vlc);
+  If Sym<0 Then Exit;
+  If Sym=Rl^.N Then Begin
+   If Rvlc<>0 Then Begin
+    If H3Bit=0 Then Exit;
+    Last:=H3Bit; Run:=H3Bits(6);
+    If H3Bit=0 Then Exit;
+    Level:=H3Bits(11);
+    If H3Bits(5)<>$10 Then Exit;
+    Level:=Level*Qmul+Qadd;
+    If H3Bit<>0 Then Level:=-Level;
+    Inc(I,Run+1);
+    If Last<>0 Then Inc(I,192);
+   End Else Begin
+    B1:=H3Bit;
+    If B1<>0 Then Begin
+     B2:=H3Bit;
+     If B2<>0 Then Begin
+      { troisieme echappement }
+      Last:=H3Bit; Run:=H3Bits(6);
+      If H3Bit=0 Then Exit;
+      Level:=H3SBits(12); H3Skip(12);
+      If H3Bit=0 Then Exit;
+      If Level>0 Then Level:=Level*Qmul+Qadd Else Level:=Level*Qmul-Qadd;
+      If (Level+2048>4095) Or (Level+2048<0) Then Begin If Level<0 Then Level:=-
+       2048 Else Level:=2047; End;
+      Inc(I,Run+1);
+      If Last<>0 Then Inc(I,192);
+     End Else Begin
+      { deuxieme echappement }
+      Sym:=H3GetVlc(Rl^.Vlc);
+      If (Sym<0) Or (Sym=Rl^.N) Then Exit;
+      Lev0:=Rl^.Lev[Sym]; LastF:=Ord(Sym>=Rl^.Last);
+      Run:=Rl^.Run[Sym];
+      Inc(I,Run+1+Rl^.MaxRun[LastF,Lev0]+1);
+      If LastF<>0 Then Inc(I,192);
+      Level:=Lev0*Qmul+Qadd;
+      If H3Bit<>0 Then Level:=-Level;
+     End;
+    End Else Begin
+     { premier echappement }
+     Sym:=H3GetVlc(Rl^.Vlc);
+     If (Sym<0) Or (Sym=Rl^.N) Then Exit;
+     Lev0:=Rl^.Lev[Sym]; LastF:=Ord(Sym>=Rl^.Last);
+     Run:=Rl^.Run[Sym];
+     Inc(I,Run+1);
+     If LastF<>0 Then Inc(I,192);
+     Level:=(Lev0+Rl^.MaxLev[LastF,Run])*Qmul+Qadd;
+     If H3Bit<>0 Then Level:=-Level;
+    End;
+   End;
+  End Else Begin
+   Lev0:=Rl^.Lev[Sym]; LastF:=Ord(Sym>=Rl^.Last);
+   Inc(I,Rl^.Run[Sym]+1);
+   If LastF<>0 Then Inc(I,192);
+   Level:=Lev0*Qmul+Qadd;
+   If H3Bit<>0 Then Level:=-Level;
+  End;
+  If I>62 Then Begin
+   Dec(I,192);
+   If (I And Not 63)<>0 Then Exit;
+   Blk^[Scan^[I]]:=SmallInt(Level);
+   Break;
+  End;
+  Blk^[Scan^[I]]:=SmallInt(Level);
+ Until False;
+NotCoded:
+ If Intra<>0 Then Begin
+  If UseDcVlc=0 Then Begin
+   Blk^[0]:=SmallInt(M4PredDc(N,Blk^[0],Dir));
+   If I=-1 Then I:=0;
+  End;
+  M4PredAc(N,Dir);
+  If M4AcPred<>0 Then I:=63;
+ End;
+ M4BlkLast[N]:=I;
+ M4Block:=0;
+End;
+
+{ ---- vecteurs de mouvement ---- }
+Function M4MvOff: LongInt;
+Begin M4MvOff:=M4B8S+8; End;
+
+Function M4MvGet(Pic,M,C: LongInt): LongInt;
+Begin M4MvGet:=M4P[Pic].Mv^[(M+M4B8S+8)*2+C]; End;
+Procedure M4MvSet(Pic,M,C,V: LongInt);
+Begin M4P[Pic].Mv^[(M+M4B8S+8)*2+C]:=SmallInt(V); End;
+
+Function M4PredMotion(Block: LongInt; Var Px,Py: LongInt): LongInt;
+Var Wrap,M,A0,A1,B0,B1,C0,C1,Off: LongInt;
+Begin
+ Wrap:=M4B8S;
+ M:=M4B8S*2*M4MbY+2*M4MbX+(Block And 1)+(Block Shr 1)*M4B8S;
+ Case Block Of 0: Off:=2; 1,2: Off:=1; Else Off:=-1; End;
+ A0:=M4MvGet(M4CurI,M-1,0); A1:=M4MvGet(M4CurI,M-1,1);
+ If (M4FirstLine<>0) And (Block<3) Then Begin
+  If Block=0 Then Begin
+   If M4MbX=M4ResyncX Then Begin Px:=0; Py:=0; End
+   Else If M4MbX+1=M4ResyncX Then Begin
+    C0:=M4MvGet(M4CurI,M+Off-Wrap,0); C1:=M4MvGet(M4CurI,M+Off-Wrap,1);
+    If M4MbX=0 Then Begin Px:=C0; Py:=C1; End Else Begin Px:=H3Mid(A0,0,C0);
+     Py:=H3Mid(A1,0,C1); End;
+   End Else Begin Px:=A0; Py:=A1; End;
+  End Else If Block=1 Then Begin
+   If M4MbX+1=M4ResyncX Then Begin
+    C0:=M4MvGet(M4CurI,M+Off-Wrap,0); C1:=M4MvGet(M4CurI,M+Off-Wrap,1);
+    Px:=H3Mid(A0,0,C0); Py:=H3Mid(A1,0,C1);
+   End Else Begin Px:=A0; Py:=A1; End;
+  End Else Begin
+   B0:=M4MvGet(M4CurI,M-Wrap,0); B1:=M4MvGet(M4CurI,M-Wrap,1);
+   C0:=M4MvGet(M4CurI,M+Off-Wrap,0); C1:=M4MvGet(M4CurI,M+Off-Wrap,1);
+   If M4MbX=M4ResyncX Then Begin A0:=0; A1:=0; M4MvSet(M4CurI,M-1,0,0); M4MvSet(
+    M4CurI,M-1,1,0); End;
+   Px:=H3Mid(A0,B0,C0); Py:=H3Mid(A1,B1,C1);
+  End;
+ End Else Begin
+  B0:=M4MvGet(M4CurI,M-Wrap,0); B1:=M4MvGet(M4CurI,M-Wrap,1);
+  C0:=M4MvGet(M4CurI,M+Off-Wrap,0); C1:=M4MvGet(M4CurI,M+Off-Wrap,1);
+  Px:=H3Mid(A0,B0,C0); Py:=H3Mid(A1,B1,C1);
+ End;
+ M4PredMotion:=M;
+End;
+
+Procedure M4FillMv4(Mx,My: LongInt);   { quatre blocs du macrobloc courant }
+Var M: LongInt;
+Begin
+ M:=M4B8S*2*M4MbY+2*M4MbX;
+ M4MvSet(M4CurI,M,0,Mx); M4MvSet(M4CurI,M,1,My);
+ M4MvSet(M4CurI,M+1,0,Mx); M4MvSet(M4CurI,M+1,1,My);
+ M4MvSet(M4CurI,M+M4B8S,0,Mx); M4MvSet(M4CurI,M+M4B8S,1,My);
+ M4MvSet(M4CurI,M+1+M4B8S,0,Mx); M4MvSet(M4CurI,M+1+M4B8S,1,My);
+End;
+
+Function M4Rshift(A,B: LongInt): LongInt;
+Begin
+ If A>0 Then M4Rshift:=M4Sar(A+((LongInt(1) Shl B) Shr 1),B)
+ Else M4Rshift:=M4Sar(A+((LongInt(1) Shl B) Shr 1)-1,B);
+End;
+
+Function M4GetAmv(N: LongInt): LongInt;
+Var X,Y,MbV,Sum,Dx,Dy,Shift,Len,A,V: LongInt;
+Begin
+ Len:=LongInt(1) Shl (M4FCode+4);
+ A:=M4WarpAcc;
+ If (M4Bugs And M4_BUG_AMV)<>0 Then Len:=Len Shr M4QuarterS;
+ If M4RealWarp=1 Then Begin
+  If (M4DivxVer=500) And (M4DivxBuild=413) And (A>=M4QuarterS) Then Sum:=
+   LongInt(M4SpOff[0,N]) Div (LongInt(1) Shl (A-M4QuarterS))
+  Else Sum:=M4Rshift(LongInt(M4SpOff[0,N])*(LongInt(1) Shl M4QuarterS),A);
+ End Else Begin
+  Dx:=LongInt(M4SpDelta[N,0]); Dy:=LongInt(M4SpDelta[N,1]); Shift:=M4SpShift[0];
+  If N<>0 Then Dy:=Dy-(LongInt(1) Shl (Shift+A+1)) Else Dx:=Dx-(LongInt(1) Shl (
+   Shift+A+1));
+  MbV:=LongInt(M4SpOff[0,N])+Dx*M4MbX*16+Dy*M4MbY*16;
+  Sum:=0;
+  For Y:=0 To 15 Do Begin
+   V:=MbV+Dy*Y;
+   For X:=0 To 15 Do Begin Sum:=Sum+M4Sar(V,Shift); V:=V+Dx; End;
+  End;
+  Sum:=M4Rshift(Sum,A+8-M4QuarterS);
+ End;
+ If Sum<-Len Then Sum:=-Len Else If Sum>=Len Then Sum:=Len-1;
+ M4GetAmv:=Sum;
+End;
+
+Procedure M4UpdateMotion;
+Var MbXy,Mx,My,I: LongInt;
+Begin
+ MbXy:=M4MbY*M4MbS+M4MbX+M4Off;
+ M4P[M4CurI].Sk^[MbXy]:=M4Skip;
+ If M4MvType<>1 Then Begin
+  If M4MbIntra<>0 Then Begin Mx:=0; My:=0; End
+  Else If M4MvType=0 Then Begin Mx:=M4Mv[0,0,0]; My:=M4Mv[0,0,1]; End
+  Else Begin
+   Mx:=M4Mv[0,0,0]+M4Mv[0,1,0]; My:=M4Mv[0,0,1]+M4Mv[0,1,1];
+   Mx:=M4Sar(Mx,1) Or (Mx And 1);
+   For I:=0 To 1 Do Begin
+    M4PField^[(I*M4TabN+MbXy)*2]:=SmallInt(M4Mv[0,I,0]); M4PField^[(I*M4TabN+
+     MbXy)*2+1]:=SmallInt(M4Mv[0,I,1]);
+   End;
+   M4P[M4CurI].Ref^[4*MbXy]:=M4FieldSel[0,0]; M4P[M4CurI].Ref^[4*MbXy+1]:=
+    M4FieldSel[0,0];
+   M4P[M4CurI].Ref^[4*MbXy+2]:=M4FieldSel[0,1]; M4P[M4CurI].Ref^[4*MbXy+3]:=
+    M4FieldSel[0,1];
+  End;
+  M4FillMv4(Mx,My);
+ End;
+End;
+
+{ ---- mode direct (mpeg4video.c) ---- }
+Procedure M4SetOneDirectMv(Mx,My,I: LongInt);
+Var M,PMx,PMy,TimePP,TimePB,V0: LongInt;
+Begin
+ M:=M4B8S*(2*M4MbY+(I Shr 1))+2*M4MbX+(I And 1);
+ TimePP:=M4PPTime And $FFFF; TimePB:=M4PBTime And $FFFF;
+ PMx:=M4MvGet(M4NextI,M,0);
+ If (PMx+32>=0) And (PMx+32<64) Then Begin
+  M4Mv[0,I,0]:=M4DirScale[0,PMx+32]+Mx;
+  If Mx<>0 Then M4Mv[1,I,0]:=M4Mv[0,I,0]-PMx Else M4Mv[1,I,0]:=M4DirScale[1,PMx+
+   32];
+ End Else Begin
+  M4Mv[0,I,0]:=PMx*TimePB Div TimePP+Mx;
+  If Mx<>0 Then M4Mv[1,I,0]:=M4Mv[0,I,0]-PMx Else M4Mv[1,I,0]:=PMx*(TimePB-
+   TimePP) Div TimePP;
+ End;
+ PMy:=M4MvGet(M4NextI,M,1);
+ If (PMy+32>=0) And (PMy+32<64) Then Begin
+  M4Mv[0,I,1]:=M4DirScale[0,PMy+32]+My;
+  If My<>0 Then M4Mv[1,I,1]:=M4Mv[0,I,1]-PMy Else M4Mv[1,I,1]:=M4DirScale[1,PMy+
+   32];
+ End Else Begin
+  M4Mv[0,I,1]:=PMy*TimePB Div TimePP+My;
+  If My<>0 Then M4Mv[1,I,1]:=M4Mv[0,I,1]-PMy Else M4Mv[1,I,1]:=PMy*(TimePB-
+   TimePP) Div TimePP;
+ End;
+End;
+
+Function M4SetDirectMv(Mx,My: LongInt): LongInt;
+Var MbIndex,Col,I,FS,TimePP,TimePB,Xy: LongInt;
+Begin
+ MbIndex:=M4MbX+M4MbY*M4MbS;
+ Col:=M4P[M4NextI].Mt^[MbIndex+M4Off];
+ If (Col And M4_8X8)<>0 Then Begin
+  M4MvType:=1;
+  For I:=0 To 3 Do M4SetOneDirectMv(Mx,My,I);
+  M4SetDirectMv:=M4_DIRECT Or M4_8X8 Or M4_L0 Or M4_L1;
+ End Else If (Col And M4_INTERLACED)<>0 Then Begin
+  M4MvType:=2;
+  Xy:=MbIndex+M4Off;
+  For I:=0 To 1 Do Begin
+   FS:=M4P[M4NextI].Ref^[4*Xy+2*I];
+   M4FieldSel[0,I]:=FS; M4FieldSel[1,I]:=I;
+   If M4Tff<>0 Then Begin TimePP:=(M4PPField-FS+I) And $FFFF; TimePB:=(
+    M4PBField-FS+I) And $FFFF; End
+   Else Begin TimePP:=(M4PPField+FS-I) And $FFFF; TimePB:=(M4PBField+FS-I) And
+    $FFFF; End;
+   M4Mv[0,I,0]:=M4PField^[(I*M4TabN+Xy)*2]*TimePB Div TimePP+Mx;
+   M4Mv[0,I,1]:=M4PField^[(I*M4TabN+Xy)*2+1]*TimePB Div TimePP+My;
+   If Mx<>0 Then M4Mv[1,I,0]:=M4Mv[0,I,0]-M4PField^[(I*M4TabN+Xy)*2]
+   Else M4Mv[1,I,0]:=M4PField^[(I*M4TabN+Xy)*2]*(TimePB-TimePP) Div TimePP;
+   If My<>0 Then M4Mv[1,I,1]:=M4Mv[0,I,1]-M4PField^[(I*M4TabN+Xy)*2+1]
+   Else M4Mv[1,I,1]:=M4PField^[(I*M4TabN+Xy)*2+1]*(TimePB-TimePP) Div TimePP;
+  End;
+  M4SetDirectMv:=M4_DIRECT Or M4_16X8 Or M4_L0 Or M4_L1 Or M4_INTERLACED;
+ End Else Begin
+  M4SetOneDirectMv(Mx,My,0);
+  For I:=1 To 3 Do Begin
+   M4Mv[0,I,0]:=M4Mv[0,0,0]; M4Mv[0,I,1]:=M4Mv[0,0,1];
+   M4Mv[1,I,0]:=M4Mv[1,0,0]; M4Mv[1,I,1]:=M4Mv[1,0,1];
+  End;
+  If ((M4Bugs And M4_BUG_DIRBLK)<>0) Or (M4QuarterS=0) Then M4MvType:=0 Else
+   M4MvType:=1;
+  M4SetDirectMv:=M4_DIRECT Or M4_16X16 Or M4_L0 Or M4_L1;
+ End;
+End;
+
+{ ---- fin de tranche / paquets video ---- }
+Function M4PrefixLength: LongInt;
+Var M: LongInt;
+Begin
+ Case M4PType Of
+  0: M4PrefixLength:=16;
+  1,3: M4PrefixLength:=M4FCode+15;
+  2: Begin M:=M4FCode; If M4BCode>M Then M:=M4BCode; If M<2 Then M:=2;
+   M4PrefixLength:=M+15; End;
+  Else M4PrefixLength:=-1;
+ End;
+End;
+
+Function M4IsResync: LongInt;
+Var BitsCount,V,Len,MbNumBits,MbNum,Save: LongInt;
+Const Prefix: Array[0..7] Of Word=($7F00,$7E00,$7C00,$7800,$7000,$6000,$4000,
+ $0000);
+Begin
+ M4IsResync:=0;
+ BitsCount:=H3Pos;
+ V:=H3Show(16);
+ If ((M4Bugs And M4_BUG_NOPAD)<>0) And (M4ResyncMarker=0) Then Exit;
+ While V<=$FF Do Begin
+  If (M4PType=2) Or ((V Shr (8-M4PType))<>1) Or (M4Part<>0) Then Break;
+  H3Skip(8+M4PType);
+  Inc(BitsCount,8+M4PType);
+  V:=H3Show(16);
+ End;
+ If BitsCount+8>=H3Size*8 Then Begin
+  V:=V Shr 8;
+  V:=V Or (($7F) Shr (7-(BitsCount And 7)));
+  If V=$7F Then M4IsResync:=M4MbNum;
+ End Else Begin
+  If V=Prefix[BitsCount And 7] Then Begin
+   MbNumBits:=M4Log2(M4MbNum-1)+1;
+   Save:=H3Pos;
+   H3Skip(1);
+   H3Align;
+   Len:=0;
+   While Len<32 Do Begin If H3Bit<>0 Then Break; Inc(Len); End;
+   MbNum:=H3Bits(MbNumBits);
+   If (MbNum=0) Or (MbNum>M4MbNum) Or (H3Pos+6>H3Size*8) Then MbNum:=-1;
+   H3Pos:=Save;
+   If Len>=M4PrefixLength Then M4IsResync:=MbNum;
+  End;
+ End;
+End;
+
+Function M4VideoPacketHeader: LongInt;
+Var MbNumBits,Len,MbNum,Q,HeaderExt,TimeIncr: LongInt;
+Begin
+ M4VideoPacketHeader:=-1;
+ MbNumBits:=M4Log2(M4MbNum-1)+1;
+ HeaderExt:=0;
+ If H3Pos>H3Size*8-20 Then Exit;
+ Len:=0;
+ While Len<32 Do Begin If H3Bit<>0 Then Break; Inc(Len); End;
+ If Len<>M4PrefixLength Then Exit;
+ MbNum:=H3Bits(MbNumBits);
+ If (MbNum>=M4MbNum) Or (MbNum=0) Then Exit;
+ M4MbX:=MbNum Mod M4MbW; M4MbY:=MbNum Div M4MbW;
+ Q:=H3Bits(M4QuantPrec);
+ If Q<>0 Then Begin M4Qscale:=Q; M4ChromaQ:=Q; End;
+ HeaderExt:=H3Bit;
+ If HeaderExt<>0 Then Begin
+  TimeIncr:=0;
+  While (H3Bit<>0) And (H3Pos<H3Size*8) Do Inc(TimeIncr);
+  M4Marker;
+  H3Skip(M4TIncBits);
+  M4Marker;
+  H3Skip(2);
+  H3Skip(3);
+  If (M4PType=3) And (M4SprUsage=2) Then Begin
+   If M4SpriteTrajectory<0 Then Exit;
+  End;
+  If M4PType<>0 Then H3Bits(3);
+  If M4PType=2 Then H3Bits(3);
+ End;
+ If M4NewPred<>0 Then M4NewPredSkip;
+ M4VideoPacketHeader:=0;
+End;
+
+{ ---- macroblocs ---- }
+Const M4QuantTab: Array[0..3] Of ShortInt=(-1,-2,1,2);
+
+Procedure M4ClearBlocks;
+Var I: LongInt;
+Begin
+ FillChar(M4Blk,SizeOf(M4Blk),0);
+ For I:=0 To 5 Do M4BlkLast[I]:=-1;
+End;
+
+Function M4TypeIndex: LongInt;
+Begin M4TypeIndex:=M4MbX+M4MbY*M4MbS+M4Off; End;
+
+Function M4DecodeMb: LongInt;
+Label Fin;
+Var
+ Cbpc,Cbpy,I,Cbp,Px,Py,Mx,My,Dquant,Xy,Modb1,Modb2,MbType,Next,Delta,M,UseDc,
+  SelFlag: LongInt;
+ IsIntra: Boolean; Mt: PM4L32;
+Begin
+ M4DecodeMb:=M4_SLICE_ERR;
+ Mt:=M4P[M4CurI].Mt;
+ Xy:=M4TypeIndex;
+ M4ClearBlocks;
+ IsIntra:=False; Dquant:=0; Cbp:=0;
+ If (M4PType=1) Or (M4PType=3) Then Begin
+  Repeat
+   If H3Bit<>0 Then Begin
+    M4MbIntra:=0;
+    For I:=0 To 5 Do M4BlkLast[I]:=-1;
+    M4MvDir:=1; M4MvType:=0;
+    If (M4PType=3) And (M4SprUsage=2) Then Begin
+     Mt^[Xy]:=M4_SKIP Or M4_GMC Or M4_16X16 Or M4_L0;
+     M4McSel:=1;
+     M4Mv[0,0,0]:=M4GetAmv(0); M4Mv[0,0,1]:=M4GetAmv(1);
+     M4Skip:=0;
+    End Else Begin
+     Mt^[Xy]:=M4_SKIP Or M4_16X16 Or M4_L0;
+     M4McSel:=0;
+     M4Mv[0,0,0]:=0; M4Mv[0,0,1]:=0;
+     M4Skip:=1;
+    End;
+    Goto Fin;
+   End;
+   Cbpc:=H3GetVlc(H3VInter);
+   If Cbpc<0 Then Exit;
+  Until Cbpc<>20;
+  Dquant:=Cbpc And 8;
+  M4MbIntra:=Ord((Cbpc And 4)<>0);
+  If M4MbIntra<>0 Then IsIntra:=True
+  Else Begin
+   If (M4PType=3) And (M4SprUsage=2) And ((Cbpc And 16)=0) Then M4McSel:=H3Bit
+    Else M4McSel:=0;
+   Cbpy:=H3GetVlc(H3VCbpy);
+   If Cbpy<0 Then Exit;
+   Cbpy:=Cbpy Xor $F;
+   Cbp:=(Cbpc And 3) Or (Cbpy Shl 2);
+   If Dquant<>0 Then M4SetQscale(M4Qscale+M4QuantTab[H3Bits(2)]);
+   If (M4Prog=0) And ((Cbp<>0) Or ((M4Bugs And M4_BUG_XVIDILACE)<>0)) Then
+    M4IDct:=H3Bit;
+   M4MvDir:=1;
+   If (Cbpc And 16)=0 Then Begin
+    If M4McSel<>0 Then Begin
+     Mt^[Xy]:=M4_GMC Or M4_16X16 Or M4_L0;
+     M4MvType:=0;
+     Mx:=M4GetAmv(0); My:=M4GetAmv(1);
+     M4Mv[0,0,0]:=Mx; M4Mv[0,0,1]:=My;
+    End Else If (M4Prog=0) And (H3Bit<>0) Then Begin
+     Mt^[Xy]:=M4_16X8 Or M4_L0 Or M4_INTERLACED;
+     M4MvType:=2;
+     M4FieldSel[0,0]:=H3Bit; M4FieldSel[0,1]:=H3Bit;
+     M4PredMotion(0,Px,Py);
+     For I:=0 To 1 Do Begin
+      Mx:=H3DecMotion(Px,M4FCode);
+      If Mx>=$FFFF Then Exit;
+      My:=H3DecMotion(Py Div 2,M4FCode);
+      If My>=$FFFF Then Exit;
+      M4Mv[0,I,0]:=Mx; M4Mv[0,I,1]:=My;
+     End;
+    End Else Begin
+     Mt^[Xy]:=M4_16X16 Or M4_L0;
+     M4MvType:=0;
+     M4PredMotion(0,Px,Py);
+     Mx:=H3DecMotion(Px,M4FCode);
+     If Mx>=$FFFF Then Exit;
+     My:=H3DecMotion(Py,M4FCode);
+     If My>=$FFFF Then Exit;
+     M4Mv[0,0,0]:=Mx; M4Mv[0,0,1]:=My;
+    End;
+   End Else Begin
+    Mt^[Xy]:=M4_8X8 Or M4_L0;
+    M4MvType:=1;
+    For I:=0 To 3 Do Begin
+     M:=M4PredMotion(I,Px,Py);
+     Mx:=H3DecMotion(Px,M4FCode);
+     If Mx>=$FFFF Then Exit;
+     My:=H3DecMotion(Py,M4FCode);
+     If My>=$FFFF Then Exit;
+     M4Mv[0,I,0]:=Mx; M4Mv[0,I,1]:=My;
+     M4MvSet(M4CurI,M,0,Mx); M4MvSet(M4CurI,M,1,My);
+    End;
+   End;
+  End;
+ End Else If M4PType=2 Then Begin
+  M4MbIntra:=0; M4McSel:=0;
+  If M4MbX=0 Then Begin
+   For I:=0 To 1 Do Begin M4LastMv[I,0,0]:=0; M4LastMv[I,0,1]:=0; M4LastMv[I,1,
+    0]:=0; M4LastMv[I,1,1]:=0; End;
+  End;
+  M4Skip:=M4P[M4NextI].Sk^[M4MbY*M4MbS+M4MbX+M4Off];
+  If M4Skip<>0 Then Begin
+   For I:=0 To 5 Do M4BlkLast[I]:=-1;
+   M4MvDir:=1; M4MvType:=0;
+   M4Mv[0,0,0]:=0; M4Mv[0,0,1]:=0; M4Mv[1,0,0]:=0; M4Mv[1,0,1]:=0;
+   Mt^[Xy]:=M4_SKIP Or M4_16X16 Or M4_L0;
+   Goto Fin;
+  End;
+  Modb1:=H3Bit;
+  If Modb1<>0 Then Begin
+   MbType:=M4_DIRECT Or M4_SKIP Or M4_L0 Or M4_L1;
+   Cbp:=0;
+  End Else Begin
+   Modb2:=H3Bit;
+   I:=0;
+   While H3Bit=0 Do Begin
+    Inc(I);
+    If I>=3 Then Begin H3Bit; Break; End;
+   End;
+   Case I Of
+    0: MbType:=M4_DIRECT Or M4_L0 Or M4_L1;
+    1: MbType:=M4_L0 Or M4_L1 Or M4_16X16;
+    2: MbType:=M4_L1 Or M4_16X16;
+    Else MbType:=M4_L0 Or M4_16X16;
+   End;
+   If Modb2<>0 Then Cbp:=0 Else Cbp:=H3Bits(6);
+   If ((MbType And M4_DIRECT)=0) And (Cbp<>0) Then Begin
+    If H3Bit<>0 Then M4SetQscale(M4Qscale+H3Bit*4-2);
+   End;
+   If M4Prog=0 Then Begin
+    If Cbp<>0 Then M4IDct:=H3Bit;
+    If ((MbType And M4_DIRECT)=0) And (H3Bit<>0) Then Begin
+     MbType:=(MbType Or M4_16X8 Or M4_INTERLACED) And Not M4_16X16;
+     If (MbType And M4_L0)<>0 Then Begin M4FieldSel[0,0]:=H3Bit; M4FieldSel[0,
+      1]:=H3Bit; End;
+     If (MbType And M4_L1)<>0 Then Begin M4FieldSel[1,0]:=H3Bit; M4FieldSel[1,
+      1]:=H3Bit; End;
+    End;
+   End;
+   M4MvDir:=0;
+   If (MbType And (M4_DIRECT Or M4_INTERLACED))=0 Then Begin
+    M4MvType:=0;
+    If (MbType And M4_L0)<>0 Then Begin
+     M4MvDir:=1;
+     Mx:=H3DecMotion(M4LastMv[0,0,0],M4FCode);
+     My:=H3DecMotion(M4LastMv[0,0,1],M4FCode);
+     M4LastMv[0,1,0]:=Mx; M4LastMv[0,0,0]:=Mx; M4Mv[0,0,0]:=Mx;
+     M4LastMv[0,1,1]:=My; M4LastMv[0,0,1]:=My; M4Mv[0,0,1]:=My;
+    End;
+    If (MbType And M4_L1)<>0 Then Begin
+     M4MvDir:=M4MvDir Or 2;
+     Mx:=H3DecMotion(M4LastMv[1,0,0],M4BCode);
+     My:=H3DecMotion(M4LastMv[1,0,1],M4BCode);
+     M4LastMv[1,1,0]:=Mx; M4LastMv[1,0,0]:=Mx; M4Mv[1,0,0]:=Mx;
+     M4LastMv[1,1,1]:=My; M4LastMv[1,0,1]:=My; M4Mv[1,0,1]:=My;
+    End;
+   End Else If (MbType And M4_DIRECT)=0 Then Begin
+    M4MvType:=2;
+    If (MbType And M4_L0)<>0 Then Begin
+     M4MvDir:=1;
+     For I:=0 To 1 Do Begin
+      Mx:=H3DecMotion(M4LastMv[0,I,0],M4FCode);
+      My:=H3DecMotion(M4LastMv[0,I,1] Div 2,M4FCode);
+      M4LastMv[0,I,0]:=Mx; M4Mv[0,I,0]:=Mx;
+      M4Mv[0,I,1]:=My; M4LastMv[0,I,1]:=My*2;
+     End;
+    End;
+    If (MbType And M4_L1)<>0 Then Begin
+     M4MvDir:=M4MvDir Or 2;
+     For I:=0 To 1 Do Begin
+      Mx:=H3DecMotion(M4LastMv[1,I,0],M4BCode);
+      My:=H3DecMotion(M4LastMv[1,I,1] Div 2,M4BCode);
+      M4LastMv[1,I,0]:=Mx; M4Mv[1,I,0]:=Mx;
+      M4Mv[1,I,1]:=My; M4LastMv[1,I,1]:=My*2;
+     End;
+    End;
+   End;
+  End;
+  If (MbType And M4_DIRECT)<>0 Then Begin
+   If (MbType And M4_SKIP)<>0 Then Begin Mx:=0; My:=0; End
+   Else Begin Mx:=H3DecMotion(0,1); My:=H3DecMotion(0,1); End;
+   M4MvDir:=7;
+   MbType:=MbType Or M4SetDirectMv(Mx,My);
+  End;
+  Mt^[Xy]:=MbType;
+ End Else Begin
+  Repeat
+   Cbpc:=H3GetVlc(H3VIntra);
+   If Cbpc<0 Then Exit;
+  Until Cbpc<>8;
+  Dquant:=Cbpc And 4;
+  M4MbIntra:=1;
+  IsIntra:=True;
+ End;
+ If IsIntra Then Begin
+  M4AcPred:=H3Bit;
+  If M4AcPred<>0 Then Mt^[Xy]:=M4_INTRA Or M4_ACPRED Else Mt^[Xy]:=M4_INTRA;
+  Cbpy:=H3GetVlc(H3VCbpy);
+  If Cbpy<0 Then Exit;
+  Cbp:=(Cbpc And 3) Or (Cbpy Shl 2);
+  If M4Qscale<M4IntraDcThr Then UseDc:=1 Else UseDc:=0;
+  If Dquant<>0 Then M4SetQscale(M4Qscale+M4QuantTab[H3Bits(2)]);
+  If M4Prog=0 Then M4IDct:=H3Bit;
+  For I:=0 To 5 Do Begin
+   If M4Block(I,Cbp And 32,1,UseDc,0)<0 Then Exit;
+   Cbp:=Cbp+Cbp;
+  End;
+  Goto Fin;
+ End;
+ For I:=0 To 5 Do Begin
+  If M4Block(I,Cbp And 32,0,0,0)<0 Then Exit;
+  Cbp:=Cbp+Cbp;
+ End;
+Fin:
+ Next:=M4IsResync;
+ If Next<>0 Then Begin
+  If M4MbX+M4MbY*M4MbW+1>=Next Then Begin M4DecodeMb:=M4_SLICE_END; Exit; End;
+  If M4PType=2 Then Begin
+   If M4MbX+1=M4MbW Then Delta:=2 Else Delta:=1;
+   If M4P[M4NextI].Sk^[Xy+Delta]<>0 Then Begin M4DecodeMb:=M4_SLICE_OK; Exit;
+    End;
+  End;
+  M4DecodeMb:=M4_SLICE_END; Exit;
+ End;
+ M4DecodeMb:=M4_SLICE_OK;
+End;
+
+{ ---- partitions de donnees (mpeg4_decode_partition_a/b, partitioned_mb) ---- }
+Function M4PartitionA: LongInt;
+Var
+ MbCount,Cbpc,I,Dir,Dc,Bits,Px,Py,Mx,My,M,Xy: LongInt; Mt: PM4L32; Done:
+  Boolean;
+Begin
+ MbCount:=0;
+ Mt:=M4P[M4CurI].Mt;
+ M4FirstLine:=1;
+ While M4MbY<M4MbH Do Begin
+  While M4MbX<M4MbW Do Begin
+   Xy:=M4TypeIndex;
+   Inc(MbCount);
+   If (M4MbX=M4ResyncX) And (M4MbY=M4ResyncY+1) Then M4FirstLine:=0;
+   If M4PType=0 Then Begin
+    Repeat
+     If H3Show(19)=$6B001 Then Begin M4PartitionA:=MbCount-1; Exit; End;
+     Cbpc:=H3GetVlc(H3VIntra);
+     If Cbpc<0 Then Begin M4PartitionA:=-1; Exit; End;
+    Until Cbpc<>8;
+    M4CbpTab^[Xy]:=Cbpc And 3;
+    Mt^[Xy]:=M4_INTRA;
+    M4MbIntra:=1;
+    If (Cbpc And 4)<>0 Then M4SetQscale(M4Qscale+M4QuantTab[H3Bits(2)]);
+    M4P[M4CurI].Qs^[Xy]:=M4Qscale;
+    M4IntraTab^[Xy]:=1;
+    Dir:=0;
+    For I:=0 To 5 Do Begin
+     Dc:=M4DecodeDc(I,M);
+     If Dc<0 Then Begin M4PartitionA:=-1; Exit; End;
+     Dir:=Dir Shl 1;
+     If M<>0 Then Dir:=Dir Or 1;
+    End;
+    M4DirTab^[Xy]:=Dir;
+   End Else Begin
+    Done:=False;
+    Repeat
+     Bits:=H3Show(17);
+     If Bits=$1F001 Then Begin M4PartitionA:=MbCount-1; Exit; End;
+     H3Skip(1);
+     If (Bits And $10000)<>0 Then Begin
+      If (M4PType=3) And (M4SprUsage=2) Then Begin
+       Mt^[Xy]:=M4_SKIP Or M4_16X16 Or M4_GMC Or M4_L0;
+       Mx:=M4GetAmv(0); My:=M4GetAmv(1);
+      End Else Begin
+       Mt^[Xy]:=M4_SKIP Or M4_16X16 Or M4_L0;
+       Mx:=0; My:=0;
+      End;
+      M4FillMv4(Mx,My);
+      If M4IntraTab^[Xy]<>0 Then M4CleanIntraEntries;
+      Done:=True; Cbpc:=-2;
+     End Else Begin
+      Cbpc:=H3GetVlc(H3VInter);
+      If Cbpc<0 Then Begin M4PartitionA:=-1; Exit; End;
+     End;
+    Until Done Or (Cbpc<>20);
+    If Not Done Then Begin
+     M4CbpTab^[Xy]:=Cbpc And (8+3);
+     M4MbIntra:=Ord((Cbpc And 4)<>0);
+     If M4MbIntra<>0 Then Begin
+      Mt^[Xy]:=M4_INTRA;
+      M4IntraTab^[Xy]:=1;
+      M4FillMv4(0,0);
+     End Else Begin
+      If M4IntraTab^[Xy]<>0 Then M4CleanIntraEntries;
+      If (M4PType=3) And (M4SprUsage=2) And ((Cbpc And 16)=0) Then M4McSel:=
+       H3Bit Else M4McSel:=0;
+      If (Cbpc And 16)=0 Then Begin
+       M4PredMotion(0,Px,Py);
+       If M4McSel=0 Then Begin
+        Mx:=H3DecMotion(Px,M4FCode);
+        If Mx>=$FFFF Then Begin M4PartitionA:=-1; Exit; End;
+        My:=H3DecMotion(Py,M4FCode);
+        If My>=$FFFF Then Begin M4PartitionA:=-1; Exit; End;
+        Mt^[Xy]:=M4_16X16 Or M4_L0;
+       End Else Begin
+        Mx:=M4GetAmv(0); My:=M4GetAmv(1);
+        Mt^[Xy]:=M4_16X16 Or M4_GMC Or M4_L0;
+       End;
+       M4FillMv4(Mx,My);
+      End Else Begin
+       Mt^[Xy]:=M4_8X8 Or M4_L0;
+       For I:=0 To 3 Do Begin
+        M:=M4PredMotion(I,Px,Py);
+        Mx:=H3DecMotion(Px,M4FCode);
+        If Mx>=$FFFF Then Begin M4PartitionA:=-1; Exit; End;
+        My:=H3DecMotion(Py,M4FCode);
+        If My>=$FFFF Then Begin M4PartitionA:=-1; Exit; End;
+        M4MvSet(M4CurI,M,0,Mx); M4MvSet(M4CurI,M,1,My);
+       End;
+      End;
+     End;
+    End;
+   End;
+   Inc(M4MbX);
+  End;
+  M4MbX:=0;
+  Inc(M4MbY);
+ End;
+ M4PartitionA:=MbCount;
+End;
+
+Function M4PartitionB(MbCount: LongInt): LongInt;
+Var MbNum,Xy,AcPred,Cbpy,I,Dir,Dc,M: LongInt; Mt: PM4L32;
+Begin
+ M4PartitionB:=-1;
+ MbNum:=0;
+ Mt:=M4P[M4CurI].Mt;
+ M4MbX:=M4ResyncX;
+ M4FirstLine:=1;
+ M4MbY:=M4ResyncY;
+ While MbNum<MbCount Do Begin
+  While (MbNum<MbCount) And (M4MbX<M4MbW) Do Begin
+   Xy:=M4TypeIndex;
+   Inc(MbNum);
+   If (M4MbX=M4ResyncX) And (M4MbY=M4ResyncY+1) Then M4FirstLine:=0;
+   If M4PType=0 Then Begin
+    AcPred:=H3Bit;
+    Cbpy:=H3GetVlc(H3VCbpy);
+    If Cbpy<0 Then Exit;
+    M4CbpTab^[Xy]:=M4CbpTab^[Xy] Or (Cbpy Shl 2);
+    If AcPred<>0 Then Mt^[Xy]:=Mt^[Xy] Or M4_ACPRED;
+   End Else Begin
+    If (Mt^[Xy] And M4_INTRA)<>0 Then Begin
+     Dir:=0;
+     AcPred:=H3Bit;
+     Cbpy:=H3GetVlc(H3VCbpy);
+     If Cbpy<0 Then Exit;
+     If (M4CbpTab^[Xy] And 8)<>0 Then M4SetQscale(M4Qscale+M4QuantTab[H3Bits(
+      2)]);
+     M4P[M4CurI].Qs^[Xy]:=M4Qscale;
+     M4MbIntra:=1;
+     For I:=0 To 5 Do Begin
+      Dc:=M4DecodeDc(I,M);
+      If Dc<0 Then Exit;
+      Dir:=Dir Shl 1;
+      If M<>0 Then Dir:=Dir Or 1;
+     End;
+     M4CbpTab^[Xy]:=M4CbpTab^[Xy] And 3;
+     M4CbpTab^[Xy]:=M4CbpTab^[Xy] Or (Cbpy Shl 2);
+     If AcPred<>0 Then Mt^[Xy]:=Mt^[Xy] Or M4_ACPRED;
+     M4DirTab^[Xy]:=Dir;
+    End Else If (Mt^[Xy] And M4_SKIP)<>0 Then Begin
+     M4P[M4CurI].Qs^[Xy]:=M4Qscale;
+     M4CbpTab^[Xy]:=0;
+    End Else Begin
+     Cbpy:=H3GetVlc(H3VCbpy);
+     If Cbpy<0 Then Exit;
+     If (M4CbpTab^[Xy] And 8)<>0 Then M4SetQscale(M4Qscale+M4QuantTab[H3Bits(
+      2)]);
+     M4P[M4CurI].Qs^[Xy]:=M4Qscale;
+     M4CbpTab^[Xy]:=M4CbpTab^[Xy] And 3;
+     M4CbpTab^[Xy]:=M4CbpTab^[Xy] Or ((Cbpy Xor $F) Shl 2);
+    End;
+   End;
+   Inc(M4MbX);
+  End;
+  If MbNum>=MbCount Then Begin M4PartitionB:=0; Exit; End;
+  M4MbX:=0;
+  Inc(M4MbY);
+ End;
+ M4PartitionB:=0;
+End;
+
+Function M4Partitions: LongInt;
+Var MbNum,Ret: LongInt;
+Begin
+ M4Partitions:=-1;
+ MbNum:=M4PartitionA;
+ If MbNum<=0 Then Exit;
+ If M4ResyncX+M4ResyncY*M4MbW+MbNum>M4MbNum Then Exit;
+ M4MbLeft:=MbNum;
+ If M4PType=0 Then Begin
+  While H3Show(9)=1 Do H3Skip(9);
+  If H3Bits(19)<>$6B001 Then Exit;
+ End Else Begin
+  While H3Show(10)=1 Do H3Skip(10);
+  If H3Bits(17)<>$1F001 Then Exit;
+ End;
+ Ret:=M4PartitionB(MbNum);
+ If Ret<0 Then Exit;
+ M4Partitions:=0;
+End;
+
+Function M4PartitionedMb: LongInt;
+Var Cbp,MbType,UseDc,I,Xy,Delta: LongInt; Mt: PM4L32;
+Begin
+ M4PartitionedMb:=M4_SLICE_ERR;
+ Mt:=M4P[M4CurI].Mt;
+ Xy:=M4TypeIndex;
+ MbType:=Mt^[Xy];
+ Cbp:=M4CbpTab^[Xy];
+ If M4Qscale<M4IntraDcThr Then UseDc:=1 Else UseDc:=0;
+ If M4P[M4CurI].Qs^[Xy]<>M4Qscale Then M4SetQscale(M4P[M4CurI].Qs^[Xy]);
+ M4ClearBlocks;
+ If (M4PType=1) Or (M4PType=3) Then Begin
+  For I:=0 To 3 Do Begin
+   M4Mv[0,I,0]:=M4MvGet(M4CurI,M4B8S*(2*M4MbY+(I Shr 1))+2*M4MbX+(I And 1),0);
+   M4Mv[0,I,1]:=M4MvGet(M4CurI,M4B8S*(2*M4MbY+(I Shr 1))+2*M4MbX+(I And 1),1);
+  End;
+  M4MbIntra:=Ord((MbType And M4_INTRA)<>0);
+  If (MbType And M4_SKIP)<>0 Then Begin
+   For I:=0 To 5 Do M4BlkLast[I]:=-1;
+   M4MvDir:=1; M4MvType:=0;
+   If (M4PType=3) And (M4SprUsage=2) Then Begin M4McSel:=1; M4Skip:=0; End
+   Else Begin M4McSel:=0; M4Skip:=1; End;
+  End Else If M4MbIntra<>0 Then Begin
+   M4AcPred:=Ord((MbType And M4_ACPRED)<>0);
+  End Else Begin
+   M4MvDir:=1;
+   If (MbType And M4_8X8)<>0 Then M4MvType:=1 Else M4MvType:=0;
+  End;
+ End Else Begin
+  M4MbIntra:=1;
+  M4AcPred:=Ord((MbType And M4_ACPRED)<>0);
+ End;
+ If (MbType And M4_SKIP)=0 Then Begin
+  For I:=0 To 5 Do Begin
+   If M4Block(I,Cbp And 32,M4MbIntra,UseDc,M4Rvlc)<0 Then Exit;
+   Cbp:=Cbp+Cbp;
+  End;
+ End;
+ Dec(M4MbLeft);
+ If M4MbLeft<=0 Then Begin
+  If M4IsResync<>0 Then M4PartitionedMb:=M4_SLICE_END Else M4PartitionedMb:=
+   M4_SLICE_NOEND;
+ End Else Begin
+  M4PartitionedMb:=M4_SLICE_OK;
+  If M4IsResync<>0 Then Begin
+   If M4MbX+1=M4MbW Then Delta:=2 Else Delta:=1;
+   If M4CbpTab^[Xy+Delta]<>0 Then M4PartitionedMb:=M4_SLICE_END;
+  End;
+ End;
+End;
+
+{ ---- compensation de mouvement (mpegvideo_motion.c, hpeldsp, qpeldsp,
+ mpegvideodsp) ---- }
+Type TM4Q=Array[0..24*24-1] Of LongInt;
+Var
+ M4Win: Array[0..24*24-1] Of Byte;
+ QF,QH,QH2,QV,QHV: TM4Q;
+
+Procedure M4Fetch(Pl: PEABuffer; PStr: LongInt; X0,RowBase,RowStep,NW,NH,EW,EH:
+ LongInt);
+Var I,J,X,Y: LongInt;
+Begin
+ For J:=0 To NH-1 Do Begin
+  Y:=RowBase+J*RowStep;
+  If Y<0 Then Y:=0 Else If Y>=EH Then Y:=EH-1;
+  For I:=0 To NW-1 Do Begin
+   X:=X0+I;
+   If X<0 Then X:=0 Else If X>=EW Then X:=EW-1;
+   M4Win[J*24+I]:=Pl^[Y*PStr+X];
+  End;
+ End;
+End;
+
+Procedure M4Hpel(Dst: PEABuffer; DOff,DStr,Dxy,W,H: LongInt; NoRnd,Avg:
+ Boolean);
+Var X,Y,A,B,C,D,V,P: LongInt;
+Begin
+ For Y:=0 To H-1 Do For X:=0 To W-1 Do Begin
+  P:=Y*24+X;
+  A:=M4Win[P];
+  Case Dxy Of
+   0: V:=A;
+   1: Begin B:=M4Win[P+1]; If NoRnd Then V:=(A+B) Shr 1 Else V:=(A+B+1) Shr 1;
+    End;
+   2: Begin C:=M4Win[P+24]; If NoRnd Then V:=(A+C) Shr 1 Else V:=(A+C+1) Shr 1;
+    End;
+   Else Begin
+    B:=M4Win[P+1]; C:=M4Win[P+24]; D:=M4Win[P+25];
+    If NoRnd Then V:=(A+B+C+D+1) Shr 2 Else V:=(A+B+C+D+2) Shr 2;
+   End;
+  End;
+  If Avg Then V:=(Dst^[DOff+Y*DStr+X]+V+1) Shr 1;
+  Dst^[DOff+Y*DStr+X]:=V;
+ End;
+End;
+
+Function M4Qcm(B,Rc: LongInt): LongInt;
+Var V: LongInt;
+Begin
+ V:=M4Sar(B+Rc,5);
+ If V<0 Then V:=0 Else If V>255 Then V:=255;
+ M4Qcm:=V;
+End;
+
+Function M4Mir(J,W: LongInt): LongInt;
+Begin
+ If J<0 Then M4Mir:=-1-J Else If J>W Then M4Mir:=2*W+1-J Else M4Mir:=J;
+End;
+
+{ filtre passe-bas horizontal sur Rows lignes, W colonnes ; source de pas 24 }
+Procedure M4HLow(Var Src,Dst: TM4Q; SOff,Rows,W,Rc: LongInt);
+Var I,J,K: LongInt; S: Array[0..16] Of LongInt;
+Begin
+ For J:=0 To Rows-1 Do Begin
+  For K:=0 To W Do S[K]:=Src[SOff+J*24+K];
+  For I:=0 To W-1 Do
+   Dst[J*24+I]:=M4Qcm((S[I]+S[I+1])*20-(S[M4Mir(I-1,W)]+S[M4Mir(I+2,W)])*6+(S[
+    M4Mir(I-2,W)]+S[M4Mir(I+3,W)])*3-(S[M4Mir(I-3,W)]+S[M4Mir(I+4,W)]),Rc);
+ End;
+End;
+
+Procedure M4VLow(Var Src,Dst: TM4Q; SOff,W,Rc: LongInt);
+Var I,J,K: LongInt; S: Array[0..16] Of LongInt;
+Begin
+ For I:=0 To W-1 Do Begin
+  For K:=0 To W Do S[K]:=Src[SOff+K*24+I];
+  For J:=0 To W-1 Do
+   Dst[J*24+I]:=M4Qcm((S[J]+S[J+1])*20-(S[M4Mir(J-1,W)]+S[M4Mir(J+2,W)])*6+(S[
+    M4Mir(J-2,W)]+S[M4Mir(J+3,W)])*3-(S[M4Mir(J-3,W)]+S[M4Mir(J+4,W)]),Rc);
+ End;
+End;
+
+{ Mode : 0 put, 1 put_no_rnd, 2 avg ; fenetre M4Win de (W+1)x(W+1) pixels }
+Procedure M4Qpel(Dst: PEABuffer; DOff,DStr,Dxy,W,Mode: LongInt);
+Var X,Y,I,J,Rc,Mx,My,V: LongInt;
+Function L2(A,B: LongInt): LongInt;
+Begin If Mode=1 Then L2:=(A+B) Shr 1 Else L2:=(A+B+1) Shr 1; End;
+Function L2p(A,B: LongInt): LongInt;
+Begin If Mode=1 Then L2p:=(A+B) Shr 1 Else L2p:=(A+B+1) Shr 1; End;
+Procedure Outp(PX,PY,Vv: LongInt);
+Begin
+ If Mode=2 Then Vv:=(Dst^[DOff+PY*DStr+PX]+Vv+1) Shr 1;
+ Dst^[DOff+PY*DStr+PX]:=Vv;
+End;
+Begin
+ If Mode=1 Then Rc:=15 Else Rc:=16;
+ Mx:=Dxy And 3; My:=Dxy Shr 2;
+ For J:=0 To W Do For I:=0 To W Do QF[J*24+I]:=M4Win[J*24+I];
+ Case My*4+Mx Of
+  0: For Y:=0 To W-1 Do For X:=0 To W-1 Do Outp(X,Y,QF[Y*24+X]);
+  1,3: Begin
+   M4HLow(QF,QH,0,W,W,Rc);
+   For Y:=0 To W-1 Do For X:=0 To W-1 Do Outp(X,Y,L2(QF[Y*24+X+(Mx Shr 1)],QH[Y*
+    24+X]));
+  End;
+  2: Begin
+   M4HLow(QF,QH,0,W,W,Rc);
+   For Y:=0 To W-1 Do For X:=0 To W-1 Do Outp(X,Y,QH[Y*24+X]);
+  End;
+  4,12: Begin
+   M4VLow(QF,QV,0,W,Rc);
+   For Y:=0 To W-1 Do For X:=0 To W-1 Do Outp(X,Y,L2(QF[(Y+(My Shr 1))*24+X],QV[
+    Y*24+X]));
+  End;
+  8: Begin
+   M4VLow(QF,QV,0,W,Rc);
+   For Y:=0 To W-1 Do For X:=0 To W-1 Do Outp(X,Y,QV[Y*24+X]);
+  End;
+  5,7,13,15: Begin
+   M4HLow(QF,QH,0,W+1,W,Rc);
+   For J:=0 To W Do For I:=0 To W-1 Do QH[J*24+I]:=L2p(QH[J*24+I],QF[J*24+I+(Mx
+    Shr 1)]);
+   M4VLow(QH,QHV,0,W,Rc);
+   For Y:=0 To W-1 Do For X:=0 To W-1 Do Outp(X,Y,L2(QH[(Y+(My Shr 1))*24+X],
+    QHV[Y*24+X]));
+  End;
+  6,14: Begin
+   M4HLow(QF,QH,0,W+1,W,Rc);
+   M4VLow(QH,QHV,0,W,Rc);
+   For Y:=0 To W-1 Do For X:=0 To W-1 Do Outp(X,Y,L2(QH[(Y+(My Shr 1))*24+X],
+    QHV[Y*24+X]));
+  End;
+  9,11: Begin
+   M4HLow(QF,QH,0,W+1,W,Rc);
+   For J:=0 To W Do For I:=0 To W-1 Do QH[J*24+I]:=L2p(QH[J*24+I],QF[J*24+I+(Mx
+    Shr 1)]);
+   M4VLow(QH,QHV,0,W,Rc);
+   For Y:=0 To W-1 Do For X:=0 To W-1 Do Outp(X,Y,QHV[Y*24+X]);
+  End;
+  10: Begin
+   M4HLow(QF,QH,0,W+1,W,Rc);
+   M4VLow(QH,QHV,0,W,Rc);
+   For Y:=0 To W-1 Do For X:=0 To W-1 Do Outp(X,Y,QHV[Y*24+X]);
+  End;
+ End;
+End;
+
+Procedure M4Gmc1(Dst: PEABuffer; DOff,DStr,H,X16,Y16,Rnd,WOff: LongInt);   {
+ fenetre M4Win ; 8 colonnes }
+Var A,B,C,D,X,Y,P: LongInt;
+Begin
+ A:=(16-X16)*(16-Y16); B:=X16*(16-Y16); C:=(16-X16)*Y16; D:=X16*Y16;
+ For Y:=0 To H-1 Do For X:=0 To 7 Do Begin
+  P:=Y*24+X+WOff;
+  Dst^[DOff+Y*DStr+X]:=(A*M4Win[P]+B*M4Win[P+1]+C*M4Win[P+24]+D*M4Win[P+25]+Rnd)
+   Shr 8;
+ End;
+End;
+
+Procedure M4GmcPlane(Pl: PEABuffer; PStr: LongInt; Dst: PEABuffer; DOff,DStr,H:
+ LongInt; Ox,Oy,Dxx,Dxy,Dyx,Dyy,Shift,R,Width,Height: LongInt);
+Var Y,X,Vx,Vy,SrcX,SrcY,FracX,FracY,Index,S: LongInt;
+Function Clip(V,Lo,Hi: LongInt): LongInt;
+Begin If V<Lo Then V:=Lo Else If V>Hi Then V:=Hi; Clip:=V; End;
+Begin
+ S:=LongInt(1) Shl Shift;
+ Dec(Width); Dec(Height);
+ For Y:=0 To H-1 Do Begin
+  Vx:=Ox; Vy:=Oy;
+  For X:=0 To 7 Do Begin
+   SrcX:=M4Sar(Vx,16); SrcY:=M4Sar(Vy,16);
+   FracX:=SrcX And (S-1); FracY:=SrcY And (S-1);
+   SrcX:=M4Sar(SrcX,Shift); SrcY:=M4Sar(SrcY,Shift);
+   If (SrcX>=0) And (SrcX<Width) Then Begin
+    If (SrcY>=0) And (SrcY<Height) Then Begin
+     Index:=SrcX+SrcY*PStr;
+     Dst^[DOff+Y*DStr+X]:=((Pl^[Index]*(S-FracX)+Pl^[Index+1]*FracX)*(S-FracY)+(
+      Pl^[Index+PStr]*(S-FracX)+Pl^[Index+PStr+1]*FracX)*FracY+R) Shr (Shift*2);
+    End Else Begin
+     Index:=SrcX+Clip(SrcY,0,Height)*PStr;
+     Dst^[DOff+Y*DStr+X]:=((Pl^[Index]*(S-FracX)+Pl^[Index+1]*FracX)*S+R) Shr (
+      Shift*2);
+    End;
+   End Else Begin
+    If (SrcY>=0) And (SrcY<Height) Then Begin
+     Index:=Clip(SrcX,0,Width)+SrcY*PStr;
+     Dst^[DOff+Y*DStr+X]:=((Pl^[Index]*(S-FracY)+Pl^[Index+PStr]*FracY)*S+R) Shr
+      (Shift*2);
+    End Else Begin
+     Index:=Clip(SrcX,0,Width)+Clip(SrcY,0,Height)*PStr;
+     Dst^[DOff+Y*DStr+X]:=Pl^[Index];
+    End;
+   End;
+   Vx:=Vx+Dxx; Vy:=Vy+Dyx;
+  End;
+  Ox:=Ox+Dxy; Oy:=Oy+Dyy;
+ End;
+End;
+
+Procedure M4McselMotion(Ref,DY,DC: LongInt);
+Var Pc: ^TM4Pic; Mx,My,SrcX,SrcY,A,Ox,Oy,Dxy: LongInt; Cur: ^TM4Pic;
+Begin
+ Pc:=@M4P[Ref]; Cur:=@M4P[M4CurI];
+ A:=M4WarpAcc;
+ If M4RealWarp=1 Then Begin
+  Mx:=LongInt(M4SpOff[0,0]); My:=LongInt(M4SpOff[0,1]);
+  SrcX:=M4MbX*16+M4Sar(Mx,A+1); SrcY:=M4MbY*16+M4Sar(My,A+1);
+  Mx:=Mx*(LongInt(1) Shl (3-A)); My:=My*(LongInt(1) Shl (3-A));
+  If SrcX<-16 Then SrcX:=-16 Else If SrcX>M4W Then SrcX:=M4W;
+  If SrcX=M4W Then Mx:=0;
+  If SrcY<-16 Then SrcY:=-16 Else If SrcY>M4H Then SrcY:=M4H;
+  If SrcY=M4H Then My:=0;
+  M4Fetch(Pc^.Y,M4LY,SrcX,SrcY,1,17,17,M4HEdge,M4VEdge);
+  If ((Mx Or My) And 7)<>0 Then Begin
+   M4Gmc1(Cur^.Y,DY,M4LY,16,Mx And 15,My And 15,128-M4NoRnd,0);
+   M4Gmc1(Cur^.Y,DY+8,M4LY,16,Mx And 15,My And 15,128-M4NoRnd,8);
+  End Else Begin
+   Dxy:=((M4Sar(Mx,3)) And 1) Or ((M4Sar(My,2)) And 2);
+   M4Hpel(Cur^.Y,DY,M4LY,Dxy,16,16,M4NoRnd<>0,False);
+  End;
+  Mx:=LongInt(M4SpOff[1,0]); My:=LongInt(M4SpOff[1,1]);
+  SrcX:=M4MbX*8+M4Sar(Mx,A+1); SrcY:=M4MbY*8+M4Sar(My,A+1);
+  Mx:=Mx*(LongInt(1) Shl (3-A)); My:=My*(LongInt(1) Shl (3-A));
+  If SrcX<-8 Then SrcX:=-8 Else If SrcX>(M4W Shr 1) Then SrcX:=M4W Shr 1;
+  If SrcX=(M4W Shr 1) Then Mx:=0;
+  If SrcY<-8 Then SrcY:=-8 Else If SrcY>(M4H Shr 1) Then SrcY:=M4H Shr 1;
+  If SrcY=(M4H Shr 1) Then My:=0;
+  M4Fetch(Pc^.U,M4LC,SrcX,SrcY,1,9,9,M4HEdge Shr 1,M4VEdge Shr 1);
+  M4Gmc1(Cur^.U,DC,M4LC,8,Mx And 15,My And 15,128-M4NoRnd,0);
+  M4Fetch(Pc^.V,M4LC,SrcX,SrcY,1,9,9,M4HEdge Shr 1,M4VEdge Shr 1);
+  M4Gmc1(Cur^.V,DC,M4LC,8,Mx And 15,My And 15,128-M4NoRnd,0);
+ End Else Begin
+  Ox:=LongInt(M4SpOff[0,0])+LongInt(M4SpDelta[0,0])*M4MbX*16+LongInt(M4SpDelta[
+   0,1])*M4MbY*16;
+  Oy:=LongInt(M4SpOff[0,1])+LongInt(M4SpDelta[1,0])*M4MbX*16+LongInt(M4SpDelta[
+   1,1])*M4MbY*16;
+  M4GmcPlane(Pc^.Y,M4LY,Cur^.Y,DY,M4LY,16,Ox,Oy,LongInt(M4SpDelta[0,0]),LongInt(
+   M4SpDelta[0,1]),LongInt(M4SpDelta[1,0]),LongInt(M4SpDelta[1,1]),A+1,(LongInt(
+   1) Shl (2*A+1))-M4NoRnd,M4HEdge,M4VEdge);
+  M4GmcPlane(Pc^.Y,M4LY,Cur^.Y,DY+8,M4LY,16,Ox+LongInt(M4SpDelta[0,0])*8,Oy+
+   LongInt(M4SpDelta[1,0])*8,LongInt(M4SpDelta[0,0]),LongInt(M4SpDelta[0,1]),
+   LongInt(M4SpDelta[1,0]),LongInt(M4SpDelta[1,1]),A+1,(LongInt(1) Shl (2*A+1))-
+   M4NoRnd,M4HEdge,M4VEdge);
+  Ox:=LongInt(M4SpOff[1,0])+LongInt(M4SpDelta[0,0])*M4MbX*8+LongInt(M4SpDelta[0,
+   1])*M4MbY*8;
+  Oy:=LongInt(M4SpOff[1,1])+LongInt(M4SpDelta[1,0])*M4MbX*8+LongInt(M4SpDelta[1,
+   1])*M4MbY*8;
+  M4GmcPlane(Pc^.U,M4LC,Cur^.U,DC,M4LC,8,Ox,Oy,LongInt(M4SpDelta[0,0]),LongInt(
+   M4SpDelta[0,1]),LongInt(M4SpDelta[1,0]),LongInt(M4SpDelta[1,1]),A+1,(LongInt(
+   1) Shl (2*A+1))-M4NoRnd,(M4HEdge+1) Shr 1,(M4VEdge+1) Shr 1);
+  M4GmcPlane(Pc^.V,M4LC,Cur^.V,DC,M4LC,8,Ox,Oy,LongInt(M4SpDelta[0,0]),LongInt(
+   M4SpDelta[0,1]),LongInt(M4SpDelta[1,0]),LongInt(M4SpDelta[1,1]),A+1,(LongInt(
+   1) Shl (2*A+1))-M4NoRnd,(M4HEdge+1) Shr 1,(M4VEdge+1) Shr 1);
+ End;
+End;
+
+{ mpeg_motion_internal (sortie H.263) : un vecteur demi-pel sur les trois
+ composantes }
+Procedure M4MpegMotion(Ref,DOffY,DOffC,FB,Bottom,FSel,Mx,My,H: LongInt; NoRnd,
+ Avg: Boolean);
+Var
+ Dxy,UvDxy,SrcX,SrcY,UvX,UvY,Mx2,My2,YStrD,CStrD,RowY,RowC,StepR,I: LongInt; Pc,
+  Cur: ^TM4Pic;
+Begin
+ Pc:=@M4P[Ref]; Cur:=@M4P[M4CurI];
+ Dxy:=((My And 1) Shl 1) Or (Mx And 1);
+ SrcX:=M4MbX*16+M4Sar(Mx,1);
+ SrcY:=(M4MbY Shl (4-FB))+M4Sar(My,1);
+ If ((M4Bugs And M4_BUG_HPELCH)<>0) And (FB<>0) Then Begin
+  Mx2:=M4Sar(Mx,1) Or (Mx And 1); My2:=M4Sar(My,1);
+  UvDxy:=((My2 And 1) Shl 1) Or (Mx2 And 1);
+  UvX:=M4MbX*8+M4Sar(Mx2,1);
+  UvY:=(M4MbY Shl (3-FB))+M4Sar(My2,1);
+ End Else Begin
+  UvDxy:=Dxy Or (My And 2) Or ((Mx And 2) Shr 1);
+  UvX:=M4Sar(SrcX,1); UvY:=M4Sar(SrcY,1);
+ End;
+ YStrD:=M4LY Shl FB; CStrD:=M4LC Shl FB;
+ If FB<>0 Then Begin
+  RowY:=2*SrcY+FSel; RowC:=2*UvY+FSel; StepR:=2;
+ End Else Begin
+  RowY:=SrcY; RowC:=UvY; StepR:=1;
+ End;
+ If Bottom<>0 Then Begin Inc(DOffY,M4LY); Inc(DOffC,M4LC); End;
+ M4Fetch(Pc^.Y,M4LY,SrcX,RowY,StepR,17,H+1,M4HEdge,M4VEdge);
+ M4Hpel(Cur^.Y,DOffY,YStrD,Dxy,16,H,NoRnd,Avg);
+ M4Fetch(Pc^.U,M4LC,UvX,RowC,StepR,9,(H Shr 1)+1,M4HEdge Shr 1,M4VEdge Shr 1);
+ M4Hpel(Cur^.U,DOffC,CStrD,UvDxy,8,H Shr 1,NoRnd,Avg);
+ M4Fetch(Pc^.V,M4LC,UvX,RowC,StepR,9,(H Shr 1)+1,M4HEdge Shr 1,M4VEdge Shr 1);
+ M4Hpel(Cur^.V,DOffC,CStrD,UvDxy,8,H Shr 1,NoRnd,Avg);
+End;
+
+{ qpel_motion }
+Procedure M4QpelMotion(Ref,DOffY,DOffC,FB,Bottom,FSel,Mx,My,H: LongInt; NoRnd,
+ Avg: Boolean);
+Var
+ Dxy,UvDxy,SrcX,SrcY,UvX,UvY,Cx,Cy,RowY,RowC,StepR,YStrD,CStrD,Mode: LongInt;
+  Pc,Cur: ^TM4Pic;
+Const RTab: Array[0..7] Of ShortInt=(0,0,1,1,0,0,0,1);
+Begin
+ Pc:=@M4P[Ref]; Cur:=@M4P[M4CurI];
+ If Avg Then Mode:=2 Else If NoRnd Then Mode:=1 Else Mode:=0;
+ Dxy:=((My And 3) Shl 2) Or (Mx And 3);
+ SrcX:=M4MbX*16+M4Sar(Mx,2);
+ SrcY:=M4MbY*(16 Shr FB)+M4Sar(My,2);
+ YStrD:=M4LY Shl FB; CStrD:=M4LC Shl FB;
+ If FB<>0 Then Begin
+  Cx:=Mx Div 2; Cy:=M4Sar(My,1);
+ End Else If (M4Bugs And M4_BUG_QPELCH2)<>0 Then Begin
+  Cx:=M4Sar(Mx,1)+RTab[Mx And 7]; Cy:=M4Sar(My,1)+RTab[My And 7];
+ End Else If (M4Bugs And M4_BUG_QPELCH)<>0 Then Begin
+  Cx:=M4Sar(Mx,1) Or (Mx And 1); Cy:=M4Sar(My,1) Or (My And 1);
+ End Else Begin
+  Cx:=Mx Div 2; Cy:=My Div 2;
+ End;
+ Cx:=M4Sar(Cx,1) Or (Cx And 1); Cy:=M4Sar(Cy,1) Or (Cy And 1);
+ UvDxy:=(Cx And 1) Or ((Cy And 1) Shl 1);
+ Cx:=M4Sar(Cx,1); Cy:=M4Sar(Cy,1);
+ UvX:=M4MbX*8+Cx;
+ UvY:=M4MbY*(8 Shr FB)+Cy;
+ If FB<>0 Then Begin RowY:=2*SrcY+FSel; RowC:=2*UvY+FSel; StepR:=2; End
+ Else Begin RowY:=SrcY; RowC:=UvY; StepR:=1; End;
+ If FB=0 Then Begin
+  M4Fetch(Pc^.Y,M4LY,SrcX,RowY,StepR,17,17,M4HEdge,M4VEdge);
+  M4Qpel(Cur^.Y,DOffY,YStrD,Dxy,16,Mode);
+ End Else Begin
+  If Bottom<>0 Then Begin Inc(DOffY,M4LY); Inc(DOffC,M4LC); End;
+  M4Fetch(Pc^.Y,M4LY,SrcX,RowY,StepR,17,9,M4HEdge,M4VEdge);
+  M4Qpel(Cur^.Y,DOffY,YStrD,Dxy,8,Mode);
+  { second bloc 8x8 : fenetre decalee de 8 colonnes }
+  M4Fetch(Pc^.Y,M4LY,SrcX+8,RowY,StepR,9,9,M4HEdge,M4VEdge);
+  M4Qpel(Cur^.Y,DOffY+8,YStrD,Dxy,8,Mode);
+ End;
+ M4Fetch(Pc^.U,M4LC,UvX,RowC,StepR,9,(H Shr 1)+1,M4HEdge Shr 1,M4VEdge Shr 1);
+ M4Hpel(Cur^.U,DOffC,CStrD,UvDxy,8,H Shr 1,NoRnd,Avg);
+ M4Fetch(Pc^.V,M4LC,UvX,RowC,StepR,9,(H Shr 1)+1,M4HEdge Shr 1,M4VEdge Shr 1);
+ M4Hpel(Cur^.V,DOffC,CStrD,UvDxy,8,H Shr 1,NoRnd,Avg);
+End;
+
+Function M4RoundChroma(X: LongInt): LongInt;
+Begin M4RoundChroma:=H3RoundTab[X And 15]+M4Sar(X,3); End;
+
+{ apply_8x8 + chroma_4mv_motion }
+Procedure M4Apply8x8(Dir,Ref,DOffY,DOffC: LongInt; NoRnd,Avg: Boolean);
+Var
+ I,Mx,My,Mvx,Mvy,Dxy,SrcX,SrcY,Mode,Off: LongInt; Pc,Cur: ^TM4Pic;
+Begin
+ Pc:=@M4P[Ref]; Cur:=@M4P[M4CurI];
+ If Avg Then Mode:=2 Else If NoRnd Then Mode:=1 Else Mode:=0;
+ Mx:=0; My:=0;
+ For I:=0 To 3 Do Begin
+  Mvx:=M4Mv[Dir,I,0]; Mvy:=M4Mv[Dir,I,1];
+  Off:=DOffY+(I And 1)*8+(I Shr 1)*8*M4LY;
+  If M4QuarterS<>0 Then Begin
+   Dxy:=((Mvy And 3) Shl 2) Or (Mvx And 3);
+   SrcX:=M4MbX*16+M4Sar(Mvx,2)+(I And 1)*8;
+   SrcY:=M4MbY*16+M4Sar(Mvy,2)+(I Shr 1)*8;
+   If SrcX<-16 Then SrcX:=-16 Else If SrcX>M4W Then SrcX:=M4W;
+   If SrcX=M4W Then Dxy:=Dxy And Not 3;
+   If SrcY<-16 Then SrcY:=-16 Else If SrcY>M4H Then SrcY:=M4H;
+   If SrcY=M4H Then Dxy:=Dxy And Not 12;
+   M4Fetch(Pc^.Y,M4LY,SrcX,SrcY,1,9,9,M4HEdge,M4VEdge);
+   M4Qpel(Cur^.Y,Off,M4LY,Dxy,8,Mode);
+   Mx:=Mx+Mvx Div 2; My:=My+Mvy Div 2;
+  End Else Begin
+   SrcX:=M4MbX*16+(I And 1)*8+M4Sar(Mvx,1);
+   SrcY:=M4MbY*16+(I Shr 1)*8+M4Sar(Mvy,1);
+   Dxy:=0;
+   If SrcX<-16 Then SrcX:=-16 Else If SrcX>M4W Then SrcX:=M4W;
+   If SrcX<>M4W Then Dxy:=Dxy Or (Mvx And 1);
+   If SrcY<-16 Then SrcY:=-16 Else If SrcY>M4H Then SrcY:=M4H;
+   If SrcY<>M4H Then Dxy:=Dxy Or ((Mvy And 1) Shl 1);
+   M4Fetch(Pc^.Y,M4LY,SrcX,SrcY,1,9,9,M4HEdge,M4VEdge);
+   M4Hpel(Cur^.Y,Off,M4LY,Dxy,8,8,NoRnd,Avg);
+   Mx:=Mx+Mvx; My:=My+Mvy;
+  End;
+ End;
+ { chroma_4mv_motion }
+ Mx:=M4RoundChroma(Mx); My:=M4RoundChroma(My);
+ Dxy:=((My And 1) Shl 1) Or (Mx And 1);
+ Mx:=M4Sar(Mx,1); My:=M4Sar(My,1);
+ SrcX:=M4MbX*8+Mx; SrcY:=M4MbY*8+My;
+ If SrcX<-8 Then SrcX:=-8 Else If SrcX>(M4W Shr 1) Then SrcX:=M4W Shr 1;
+ If SrcX=(M4W Shr 1) Then Dxy:=Dxy And Not 1;
+ If SrcY<-8 Then SrcY:=-8 Else If SrcY>(M4H Shr 1) Then SrcY:=M4H Shr 1;
+ If SrcY=(M4H Shr 1) Then Dxy:=Dxy And Not 2;
+ M4Fetch(Pc^.U,M4LC,SrcX,SrcY,1,9,9,M4HEdge Shr 1,M4VEdge Shr 1);
+ M4Hpel(Cur^.U,DOffC,M4LC,Dxy,8,8,NoRnd,Avg);
+ M4Fetch(Pc^.V,M4LC,SrcX,SrcY,1,9,9,M4HEdge Shr 1,M4VEdge Shr 1);
+ M4Hpel(Cur^.V,DOffC,M4LC,Dxy,8,8,NoRnd,Avg);
+End;
+
+{ ff_mpv_motion pour une direction }
+Procedure M4Motion(Dir,Ref,DOffY,DOffC: LongInt; NoRnd,Avg: Boolean);
+Var I: LongInt;
+Begin
+ Case M4MvType Of
+  0: Begin
+   If M4McSel<>0 Then M4McselMotion(Ref,DOffY,DOffC)
+   Else If M4QuarterS<>0 Then M4QpelMotion(Ref,DOffY,DOffC,0,0,0,M4Mv[Dir,0,0],
+    M4Mv[Dir,0,1],16,NoRnd,Avg)
+   Else M4MpegMotion(Ref,DOffY,DOffC,0,0,0,M4Mv[Dir,0,0],M4Mv[Dir,0,1],16,NoRnd,
+    Avg);
+  End;
+  1: M4Apply8x8(Dir,Ref,DOffY,DOffC,NoRnd,Avg);
+  2: For I:=0 To 1 Do Begin
+   If M4QuarterS<>0 Then M4QpelMotion(Ref,DOffY,DOffC,1,I,M4FieldSel[Dir,I],
+    M4Mv[Dir,I,0],M4Mv[Dir,I,1],8,NoRnd,Avg)
+   Else M4MpegMotion(Ref,DOffY,DOffC,1,I,M4FieldSel[Dir,I],M4Mv[Dir,I,0],M4Mv[
+    Dir,I,1],8,NoRnd,Avg);
+  End;
+ End;
+End;
+
+{ ---- dequantification ---- }
+Procedure M4DequantIntra(N: LongInt);
+Var I,J,Level,Qmul,Qadd,NC,Q,Dcs: LongInt; Blk: ^TH3Blk; Scan: PEABuffer;
+Begin
+ Blk:=@M4Blk[N];
+ If N<4 Then Dcs:=M4YDc Else Dcs:=M4CDc;
+ If N<4 Then Q:=M4Qscale Else Q:=M4ChromaQ;
+ If M4MpegQuant<>0 Then Begin
+  Q:=Q Shl 1;
+  If M4AltScan<>0 Then Scan:=@H3AltV Else Scan:=@H3Zigzag;
+  If M4AltScan<>0 Then NC:=63 Else NC:=M4BlkLast[N];
+  Blk^[0]:=SmallInt(Blk^[0]*Dcs);
+  For I:=1 To NC Do Begin
+   J:=Scan^[I];
+   Level:=Blk^[J];
+   If Level<>0 Then Begin
+    If Level<0 Then Level:=-((-Level*Q*M4IntraM[J]) Shr 4) Else Level:=(Level*Q*
+     M4IntraM[J]) Shr 4;
+    Blk^[J]:=SmallInt(Level);
+   End;
+  End;
+ End Else Begin
+  Qmul:=Q Shl 1;
+  Blk^[0]:=SmallInt(Blk^[0]*Dcs);
+  Qadd:=(Q-1) Or 1;
+  If M4AcPred<>0 Then NC:=63
+  Else If M4AltScan<>0 Then NC:=H3AltVRE[M4BlkLast[N]] Else NC:=H3RasterEnd[
+   M4BlkLast[N]];
+  For I:=1 To NC Do Begin
+   Level:=Blk^[I];
+   If Level<>0 Then Begin
+    If Level<0 Then Level:=Level*Qmul-Qadd Else Level:=Level*Qmul+Qadd;
+    Blk^[I]:=SmallInt(Level);
+   End;
+  End;
+ End;
+End;
+
+Procedure M4DequantInterMpeg(N: LongInt);
+Var I,J,Level,NC,Q,Sum: LongInt; Blk: ^TH3Blk; Scan: PEABuffer;
+Begin
+ Blk:=@M4Blk[N];
+ If N<4 Then Q:=M4Qscale Else Q:=M4ChromaQ;
+ Q:=Q Shl 1;
+ If M4AltScan<>0 Then Scan:=@H3AltV Else Scan:=@H3Zigzag;
+ If M4AltScan<>0 Then NC:=63 Else NC:=M4BlkLast[N];
+ Sum:=-1;
+ For I:=0 To NC Do Begin
+  J:=Scan^[I];
+  Level:=Blk^[J];
+  If Level<>0 Then Begin
+   If Level<0 Then Level:=-((((-Level) Shl 1)+1)*Q*M4InterM[J] Shr 5) Else
+    Level:=((Level Shl 1)+1)*Q*M4InterM[J] Shr 5;
+   Blk^[J]:=SmallInt(Level);
+   Sum:=Sum+Level;
+  End;
+ End;
+ Blk^[63]:=SmallInt(Blk^[63] Xor (Sum And 1));
+End;
+
+
+{ ---- IDCT "xvid" (xvididct.c), utilisee quand le flux est identifie comme Xvid
+ ---- }
+Function M4W32(X: Int64): LongInt;
+Begin M4W32:=LongInt(X And $FFFFFFFF); End;
+
+Function M4XvRow(Var R: Array Of SmallInt; Base: LongInt; Const Tab: Array Of
+ LongInt; Rnd: LongInt): Boolean;
+Var C1,C2,C3,C4,C5,C6,C7,K,A0,A1,A2,A3,B0,B1,B2,B3: LongInt; Left,Right:
+ LongInt;
+Begin
+ C1:=Tab[0]; C2:=Tab[1]; C3:=Tab[2]; C4:=Tab[3]; C5:=Tab[4]; C6:=Tab[5]; C7:=
+  Tab[6];
+ Right:=R[Base+5] Or R[Base+6] Or R[Base+7];
+ Left:=R[Base+1] Or R[Base+2] Or R[Base+3];
+ M4XvRow:=True;
+ If (Right Or R[Base+4])=0 Then Begin
+  K:=M4W32(Int64(C4)*R[Base]+Rnd);
+  If Left<>0 Then Begin
+   A0:=M4W32(Int64(K)+Int64(C2)*R[Base+2]); A1:=M4W32(Int64(K)+Int64(C6)*R[Base+
+    2]);
+   A2:=M4W32(Int64(K)-Int64(C6)*R[Base+2]); A3:=M4W32(Int64(K)-Int64(C2)*R[Base+
+    2]);
+   B0:=M4W32(Int64(C1)*R[Base+1]+Int64(C3)*R[Base+3]); B1:=M4W32(Int64(C3)*R[
+    Base+1]-Int64(C7)*R[Base+3]);
+   B2:=M4W32(Int64(C5)*R[Base+1]-Int64(C1)*R[Base+3]); B3:=M4W32(Int64(C7)*R[
+    Base+1]-Int64(C5)*R[Base+3]);
+   R[Base]:=SmallInt(M4Sar(M4W32(Int64(A0)+B0),11)); R[Base+1]:=SmallInt(M4Sar(
+    M4W32(Int64(A1)+B1),11));
+   R[Base+2]:=SmallInt(M4Sar(M4W32(Int64(A2)+B2),11)); R[Base+3]:=SmallInt(
+    M4Sar(M4W32(Int64(A3)+B3),11));
+   R[Base+4]:=SmallInt(M4Sar(M4W32(Int64(A3)-B3),11)); R[Base+5]:=SmallInt(
+    M4Sar(M4W32(Int64(A2)-B2),11));
+   R[Base+6]:=SmallInt(M4Sar(M4W32(Int64(A1)-B1),11)); R[Base+7]:=SmallInt(
+    M4Sar(M4W32(Int64(A0)-B0),11));
+  End Else Begin
+   A0:=M4Sar(K,11);
+   If A0<>0 Then Begin
+    For K:=0 To 7 Do R[Base+K]:=SmallInt(A0);
+   End Else M4XvRow:=False;
+  End;
+ End Else If (Left Or Right)=0 Then Begin
+  A0:=M4Sar(M4W32(Int64(Rnd)+Int64(C4)*(R[Base]+R[Base+4])),11);
+  A1:=M4Sar(M4W32(Int64(Rnd)+Int64(C4)*(R[Base]-R[Base+4])),11);
+  R[Base]:=SmallInt(A0); R[Base+3]:=SmallInt(A0); R[Base+4]:=SmallInt(A0); R[
+   Base+7]:=SmallInt(A0);
+  R[Base+1]:=SmallInt(A1); R[Base+2]:=SmallInt(A1); R[Base+5]:=SmallInt(A1); R[
+   Base+6]:=SmallInt(A1);
+ End Else Begin
+  K:=M4W32(Int64(C4)*R[Base]+Rnd);
+  A0:=M4W32(Int64(K)+Int64(C2)*R[Base+2]+Int64(C4)*R[Base+4]+Int64(C6)*R[Base+
+   6]);
+  A1:=M4W32(Int64(K)+Int64(C6)*R[Base+2]-Int64(C4)*R[Base+4]-Int64(C2)*R[Base+
+   6]);
+  A2:=M4W32(Int64(K)-Int64(C6)*R[Base+2]-Int64(C4)*R[Base+4]+Int64(C2)*R[Base+
+   6]);
+  A3:=M4W32(Int64(K)-Int64(C2)*R[Base+2]+Int64(C4)*R[Base+4]-Int64(C6)*R[Base+
+   6]);
+  B0:=M4W32(Int64(C1)*R[Base+1]+Int64(C3)*R[Base+3]+Int64(C5)*R[Base+5]+Int64(
+   C7)*R[Base+7]);
+  B1:=M4W32(Int64(C3)*R[Base+1]-Int64(C7)*R[Base+3]-Int64(C1)*R[Base+5]-Int64(
+   C5)*R[Base+7]);
+  B2:=M4W32(Int64(C5)*R[Base+1]-Int64(C1)*R[Base+3]+Int64(C7)*R[Base+5]+Int64(
+   C3)*R[Base+7]);
+  B3:=M4W32(Int64(C7)*R[Base+1]-Int64(C5)*R[Base+3]+Int64(C3)*R[Base+5]-Int64(
+   C1)*R[Base+7]);
+  R[Base]:=SmallInt(M4Sar(M4W32(Int64(A0)+B0),11)); R[Base+1]:=SmallInt(M4Sar(
+   M4W32(Int64(A1)+B1),11));
+  R[Base+2]:=SmallInt(M4Sar(M4W32(Int64(A2)+B2),11)); R[Base+3]:=SmallInt(M4Sar(
+   M4W32(Int64(A3)+B3),11));
+  R[Base+4]:=SmallInt(M4Sar(M4W32(Int64(A3)-B3),11)); R[Base+5]:=SmallInt(M4Sar(
+   M4W32(Int64(A2)-B2),11));
+  R[Base+6]:=SmallInt(M4Sar(M4W32(Int64(A1)-B1),11)); R[Base+7]:=SmallInt(M4Sar(
+   M4W32(Int64(A0)-B0),11));
+ End;
+End;
+
+Function M4XvMult(C,X: LongInt; N: LongInt): LongInt;
+Begin M4XvMult:=M4Sar(M4W32(Int64(C)*(X And $FFFFFFFF)),N); End;
+
+Procedure M4XvCol(Var R: Array Of SmallInt; Base,Kind: LongInt);
+Var Mm0,Mm1,Mm2,Mm3,Mm4,Mm5,Mm6,Mm7,Sp: LongInt;
+Const TAN1=$32EC; TAN2=$6A0A; TAN3=$AB0E; SQRT2=$5A82;
+Procedure Bf(Var A,B: LongInt; Var Tmp: LongInt);
+Begin Tmp:=M4W32(Int64(A)+B); B:=M4W32(Int64(A)-B); A:=Tmp; End;
+Begin
+ Case Kind Of
+  8: Begin
+   Mm4:=R[Base+56]; Mm5:=R[Base+40]; Mm6:=R[Base+24]; Mm7:=R[Base+8];
+   Mm0:=M4W32(Int64(M4XvMult(TAN1,Mm4,16))+Mm7);
+   Mm1:=M4W32(Int64(M4XvMult(TAN1,Mm7,16))-Mm4);
+   Mm2:=M4W32(Int64(M4XvMult(TAN3,Mm5,16))+Mm6);
+   Mm3:=M4W32(Int64(M4XvMult(TAN3,Mm6,16))-Mm5);
+   Mm7:=M4W32(Int64(Mm0)+Mm2); Mm4:=M4W32(Int64(Mm1)-Mm3); Mm0:=M4W32(Int64(
+    Mm0)-Mm2); Mm1:=M4W32(Int64(Mm1)+Mm3);
+   Mm6:=M4W32(Int64(Mm0)+Mm1); Mm5:=M4W32(Int64(Mm0)-Mm1);
+   Mm5:=M4W32(2*Int64(M4XvMult(SQRT2,Mm5,16)));
+   Mm6:=M4W32(2*Int64(M4XvMult(SQRT2,Mm6,16)));
+   Mm1:=R[Base+16]; Mm2:=R[Base+48];
+   Mm3:=M4W32(Int64(M4XvMult(TAN2,Mm2,16))+Mm1);
+   Mm2:=M4W32(Int64(M4XvMult(TAN2,Mm1,16))-Mm2);
+   Mm0:=R[Base]+R[Base+32]; Mm1:=R[Base]-R[Base+32];
+  End;
+  4: Begin
+   Mm0:=R[Base+8]; Mm2:=R[Base+24];
+   Mm1:=M4XvMult(TAN1,Mm0,16); Mm3:=M4XvMult(TAN3,Mm2,16);
+   Mm7:=M4W32(Int64(Mm0)+Mm2); Mm4:=M4W32(Int64(Mm1)-Mm3); Mm0:=M4W32(Int64(
+    Mm0)-Mm2); Mm1:=M4W32(Int64(Mm1)+Mm3);
+   Mm6:=M4W32(Int64(Mm0)+Mm1); Mm5:=M4W32(Int64(Mm0)-Mm1);
+   Mm6:=M4W32(2*Int64(M4XvMult(SQRT2,Mm6,16)));
+   Mm5:=M4W32(2*Int64(M4XvMult(SQRT2,Mm5,16)));
+   Mm0:=R[Base]; Mm1:=Mm0; Mm3:=R[Base+16];
+   Mm2:=M4XvMult(TAN2,Mm3,16);
+  End;
+  Else Begin
+   Mm7:=R[Base+8];
+   Mm4:=M4XvMult(TAN1,Mm7,16);
+   Mm6:=M4W32(Int64(Mm7)+Mm4); Mm5:=M4W32(Int64(Mm7)-Mm4);
+   Mm6:=M4W32(2*Int64(M4XvMult(SQRT2,Mm6,16)));
+   Mm5:=M4W32(2*Int64(M4XvMult(SQRT2,Mm5,16)));
+   Mm0:=R[Base]; Mm1:=Mm0; Mm3:=R[Base+16];
+   Mm2:=M4XvMult(TAN2,Mm3,16);
+  End;
+ End;
+ Bf(Mm0,Mm3,Sp);
+ Bf(Mm0,Mm7,Sp);
+ R[Base]:=SmallInt(M4Sar(Mm0,6)); R[Base+56]:=SmallInt(M4Sar(Mm7,6));
+ Bf(Mm3,Mm4,Mm0);
+ R[Base+24]:=SmallInt(M4Sar(Mm3,6)); R[Base+32]:=SmallInt(M4Sar(Mm4,6));
+ Bf(Mm1,Mm2,Mm0);
+ Bf(Mm1,Mm6,Mm0);
+ R[Base+8]:=SmallInt(M4Sar(Mm1,6)); R[Base+48]:=SmallInt(M4Sar(Mm6,6));
+ Bf(Mm2,Mm5,Mm0);
+ R[Base+16]:=SmallInt(M4Sar(Mm2,6)); R[Base+40]:=SmallInt(M4Sar(Mm5,6));
+End;
+
+Procedure M4XvidIdct(Var Blk: TH3Blk);
+Const
+ T04: Array[0..6] Of LongInt=(22725,21407,19266,16384,12873,8867,4520);
+ T17: Array[0..6] Of LongInt=(31521,29692,26722,22725,17855,12299,6270);
+ T26: Array[0..6] Of LongInt=(29692,27969,25172,21407,16819,11585,5906);
+ T35: Array[0..6] Of LongInt=(26722,25172,22654,19266,15137,10426,5315);
+Var I,Rows: LongInt;
+Begin
+ Rows:=7;
+ M4XvRow(Blk,0,T04,65536);
+ M4XvRow(Blk,8,T17,3597);
+ M4XvRow(Blk,16,T26,2260);
+ If M4XvRow(Blk,24,T35,1203) Then Rows:=Rows Or 8;
+ If M4XvRow(Blk,32,T04,0) Then Rows:=Rows Or $10;
+ If M4XvRow(Blk,40,T35,120) Then Rows:=Rows Or $20;
+ If M4XvRow(Blk,48,T26,512) Then Rows:=Rows Or $40;
+ If M4XvRow(Blk,56,T17,512) Then Rows:=Rows Or $80;
+ If (Rows And $F0)<>0 Then Begin For I:=0 To 7 Do M4XvCol(Blk,I,8); End
+ Else If (Rows And 8)<>0 Then Begin For I:=0 To 7 Do M4XvCol(Blk,I,4); End
+ Else Begin For I:=0 To 7 Do M4XvCol(Blk,I,3); End;
+End;
+
+Procedure M4IdctPut(Var Blk: TH3Blk; Dest: PEABuffer; Off,Stride: LongInt; Add:
+ Boolean);
+Var X,Y,V: LongInt;
+Begin
+ If M4XvidBuild<0 Then Begin H3Idct(Blk,Dest,Off,Stride,Add); Exit; End;
+ M4XvidIdct(Blk);
+ For Y:=0 To 7 Do For X:=0 To 7 Do Begin
+  V:=Blk[Y*8+X];
+  If Add Then V:=V+Dest^[Off+Y*Stride+X];
+  If V<0 Then V:=0 Else If V>255 Then V:=255;
+  Dest^[Off+Y*Stride+X]:=V;
+ End;
+End;
+
+{ ---- reconstruction d'un macrobloc (mpv_reconstruct_mb_internal) ---- }
+Procedure M4Recon;
+Var
+ Xy,I,DY,DC,DctStr,DctOff,Ref: LongInt; Cur: ^TM4Pic; NoRnd: Boolean;
+Begin
+ Cur:=@M4P[M4CurI];
+ Xy:=M4MbY*M4MbS+M4MbX+M4Off;
+ Cur^.Qs^[Xy]:=M4Qscale;
+ If M4MbIntra=0 Then Begin
+  If M4IntraTab^[Xy]<>0 Then M4CleanIntraEntries;
+ End Else M4IntraTab^[Xy]:=1;
+ If M4Skip<>0 Then Begin M4Skip:=0; Cur^.Sk^[Xy]:=1; End
+ Else If Not Cur^.IsRef Then Cur^.Sk^[Xy]:=1 Else Cur^.Sk^[Xy]:=0;
+ DY:=M4MbY*16*M4LY+M4MbX*16;
+ DC:=M4MbY*8*M4LC+M4MbX*8;
+ DctStr:=M4LY Shl M4IDct;
+ If M4IDct<>0 Then DctOff:=M4LY Else DctOff:=M4LY*8;
+ If M4MbIntra=0 Then Begin
+  NoRnd:=(M4NoRnd<>0) And (M4PType<>2);
+  If (M4MvDir And 1)<>0 Then Begin
+   M4Motion(0,M4LastI,DY,DC,NoRnd,False);
+   If (M4MvDir And 2)<>0 Then M4Motion(1,M4NextI,DY,DC,NoRnd,True);
+  End Else If (M4MvDir And 2)<>0 Then M4Motion(1,M4NextI,DY,DC,NoRnd,False);
+  For I:=0 To 5 Do If M4BlkLast[I]>=0 Then Begin
+   If M4MpegQuant<>0 Then M4DequantInterMpeg(I);
+   Case I Of
+    0: M4IdctPut(M4Blk[0],Cur^.Y,DY,DctStr,True);
+    1: M4IdctPut(M4Blk[1],Cur^.Y,DY+8,DctStr,True);
+    2: M4IdctPut(M4Blk[2],Cur^.Y,DY+DctOff,DctStr,True);
+    3: M4IdctPut(M4Blk[3],Cur^.Y,DY+DctOff+8,DctStr,True);
+    4: M4IdctPut(M4Blk[4],Cur^.U,DC,M4LC,True);
+    5: M4IdctPut(M4Blk[5],Cur^.V,DC,M4LC,True);
+   End;
+  End;
+ End Else Begin
+  For I:=0 To 5 Do Begin
+   M4DequantIntra(I);
+   Case I Of
+    0: M4IdctPut(M4Blk[0],Cur^.Y,DY,DctStr,False);
+    1: M4IdctPut(M4Blk[1],Cur^.Y,DY+8,DctStr,False);
+    2: M4IdctPut(M4Blk[2],Cur^.Y,DY+DctOff,DctStr,False);
+    3: M4IdctPut(M4Blk[3],Cur^.Y,DY+DctOff+8,DctStr,False);
+    4: M4IdctPut(M4Blk[4],Cur^.U,DC,M4LC,False);
+    5: M4IdctPut(M4Blk[5],Cur^.V,DC,M4LC,False);
+   End;
+  End;
+ End;
+End;
+
+{ ---- allocation et gestion des images ---- }
+Type TM4I64=Array[0..100000000] Of Int64;
+Procedure M4FreeAll;
+Var I: LongInt;
+Begin
+ For I:=0 To 4 Do With M4P[I] Do Begin
+  If Y<>Nil Then Begin FreeMem(Y); Y:=Nil; End;
+  If U<>Nil Then Begin FreeMem(U); U:=Nil; End;
+  If V<>Nil Then Begin FreeMem(V); V:=Nil; End;
+  If Ref<>Nil Then Begin FreeMem(Ref); Ref:=Nil; End;
+  If Qs<>Nil Then Begin FreeMem(Qs); Qs:=Nil; End;
+  If Sk<>Nil Then Begin FreeMem(Sk); Sk:=Nil; End;
+  If Mt<>Nil Then Begin FreeMem(Mt); Mt:=Nil; End;
+  If Mv<>Nil Then Begin FreeMem(Mv); Mv:=Nil; End;
+  Used:=False; IsRef:=False;
+ End;
+ For I:=0 To 2 Do Begin
+  If M4Dc[I]<>Nil Then Begin FreeMem(M4Dc[I]); M4Dc[I]:=Nil; End;
+  If M4Ac[I]<>Nil Then Begin FreeMem(M4Ac[I]); M4Ac[I]:=Nil; End;
+ End;
+ If M4IntraTab<>Nil Then Begin FreeMem(M4IntraTab); M4IntraTab:=Nil; End;
+ If M4CbpTab<>Nil Then Begin FreeMem(M4CbpTab); M4CbpTab:=Nil; End;
+ If M4DirTab<>Nil Then Begin FreeMem(M4DirTab); M4DirTab:=Nil; End;
+ If M4PField<>Nil Then Begin FreeMem(M4PField); M4PField:=Nil; End;
+ M4CurI:=-1; M4LastI:=-1; M4NextI:=-1;
+End;
+
+Procedure M4Alloc;
+Var I,YSize,CSize,MbN,MvN,DcN0,DcN1,K: LongInt;
+Begin
+ M4FreeAll;
+ M4MbW:=(M4W+15) Div 16; M4MbH:=(M4H+15) Div 16;
+ M4MbS:=M4MbW+1; M4B8S:=2*M4MbW+1; M4MbNum:=M4MbW*M4MbH;
+ M4HEdge:=M4MbW*16; M4VEdge:=M4MbH*16;
+ M4LY:=M4MbW*16; M4LC:=M4MbW*8;
+ YSize:=M4LY*M4MbH*16; CSize:=M4LC*M4MbH*8;
+ MbN:=(M4MbH+3)*M4MbS+16; M4TabN:=MbN;
+ MvN:=2*(M4B8S*(2*M4MbH+3)+2*(M4B8S+8)+16);
+ For I:=0 To 4 Do With M4P[I] Do Begin
+  GetMem(Y,YSize+64); GetMem(U,CSize+64); GetMem(V,CSize+64);
+  FillChar(Y^,YSize+64,128); FillChar(U^,CSize+64,128); FillChar(V^,CSize+64,
+   128);
+  GetMem(Ref,MbN*4); FillChar(Ref^,MbN*4,0);
+  GetMem(Qs,MbN); FillChar(Qs^,MbN,0);
+  GetMem(Sk,MbN); FillChar(Sk^,MbN,0);
+  GetMem(Mt,MbN*4); FillChar(Mt^,MbN*4,0);
+  GetMem(Mv,MvN*2); FillChar(Mv^,MvN*2,0);
+  Used:=False; IsRef:=False; PType:=0;
+ End;
+ DcN0:=M4B8S*(2*M4MbH+4)+64; DcN1:=M4MbS*(M4MbH+4)+64;
+ M4DcN[0]:=DcN0; M4DcN[1]:=DcN1; M4DcN[2]:=DcN1;
+ For I:=0 To 2 Do Begin
+  GetMem(M4Dc[I],M4DcN[I]*2); GetMem(M4Ac[I],M4DcN[I]*32);
+  For K:=0 To M4DcN[I]-1 Do M4Dc[I]^[K]:=1024;
+  FillChar(M4Ac[I]^,M4DcN[I]*32,0);
+ End;
+ GetMem(M4IntraTab,MbN); FillChar(M4IntraTab^,MbN,1);
+ GetMem(M4CbpTab,MbN); FillChar(M4CbpTab^,MbN,0);
+ GetMem(M4DirTab,MbN); FillChar(M4DirTab^,MbN,0);
+ GetMem(M4PField,MbN*8); FillChar(M4PField^,MbN*8,0);
+ M4AllocW:=M4W; M4AllocH:=M4H;
+End;
+
+Function M4FindFree: LongInt;
+Var I: LongInt;
+Begin
+ M4FindFree:=-1;
+ For I:=0 To 4 Do If Not M4P[I].Used Then Begin M4FindFree:=I; Exit; End;
+End;
+
+Procedure M4Gray(I: LongInt);
+Begin
+ FillChar(M4P[I].Y^,M4LY*M4MbH*16,128);
+ FillChar(M4P[I].U^,M4LC*M4MbH*8,128);
+ FillChar(M4P[I].V^,M4LC*M4MbH*8,128);
+End;
+
+Function M4FrameStart: Boolean;
+Var I,Pic: LongInt;
+Begin
+ M4FrameStart:=False;
+ M4Skip:=0;
+ If (M4PType<>2) And (M4LastI>=0) And (M4LastI<>M4NextI) Then M4P[
+  M4LastI].Used:=False;
+ For I:=0 To 4 Do
+  If (Not M4P[I].IsRef) Or ((I<>M4LastI) And (I<>M4NextI)) Then M4P[I].Used:=
+   False;
+ Pic:=M4FindFree;
+ If Pic<0 Then Exit;
+ M4P[Pic].Used:=True;
+ M4P[Pic].IsRef:=(M4PType<>2);
+ M4P[Pic].PType:=M4PType;
+ M4CurI:=Pic;
+ If M4PType<>2 Then Begin
+  M4LastI:=M4NextI;
+  M4NextI:=Pic;
+ End;
+ If ((M4LastI<0) Or Not M4P[M4LastI].Used) And (M4PType<>0) Then Begin
+  I:=M4FindFree; If I<0 Then Exit;
+  M4LastI:=I; M4P[I].Used:=True; M4P[I].IsRef:=True; M4P[I].PType:=1; M4Gray(I);
+ End;
+ If ((M4NextI<0) Or Not M4P[M4NextI].Used) And (M4PType=2) Then Begin
+  I:=M4FindFree; If I<0 Then Exit;
+  M4NextI:=I; M4P[I].Used:=True; M4P[I].IsRef:=True; M4P[I].PType:=1;
+ End;
+ If (M4Bugs And M4_BUG_EDGE)<>0 Then Begin M4HEdge:=M4W; M4VEdge:=M4H; End
+ Else Begin M4HEdge:=M4MbW*16; M4VEdge:=M4MbH*16; End;
+ M4FrameStart:=True;
+End;
+
+{ ---- boucle de decodage d'une tranche (decode_slice) ---- }
+Function M4DecodeSlice: LongInt;
+Var Ret,Qsave,BitsLeft,BitsCount,V: LongInt; Cur: ^TM4Pic;
+Begin
+ M4DecodeSlice:=-1;
+ Cur:=@M4P[M4CurI];
+ M4ResyncPos:=H3Pos;
+ M4FirstLine:=1;
+ M4ResyncX:=M4MbX; M4ResyncY:=M4MbY;
+ M4SetQscale(M4Qscale);
+ If M4Part<>0 Then Begin
+  Qsave:=M4Qscale;
+  If M4Partitions<0 Then Exit;
+  M4FirstLine:=1; M4MbX:=M4ResyncX; M4MbY:=M4ResyncY;
+  M4SetQscale(Qsave);
+ End;
+ While M4MbY<M4MbH Do Begin
+  While M4MbX<M4MbW Do Begin
+   If (M4ResyncX=M4MbX) And (M4ResyncY+1=M4MbY) Then M4FirstLine:=0;
+   M4MvDir:=1; M4MvType:=0;
+   If M4Part<>0 Then Ret:=M4PartitionedMb Else Ret:=M4DecodeMb;
+   If M4PType<>2 Then M4UpdateMotion;
+   If Ret<0 Then Begin
+    If Ret=M4_SLICE_END Then Begin
+     M4Recon;
+     Dec(M4PadScore);
+     Inc(M4MbX);
+     If M4MbX>=M4MbW Then Begin M4MbX:=0; Inc(M4MbY); End;
+     M4DecodeSlice:=0; Exit;
+    End Else Begin
+     M4Err:=True;
+     Exit;
+    End;
+   End;
+   M4Recon;
+   Inc(M4MbX);
+  End;
+  M4MbX:=0;
+  Inc(M4MbY);
+ End;
+ { detection du bug de remplissage }
+ If (H3Left>=48) And (H3Show(24)=$4010) And (M4DataPart=0) Then Inc(M4PadScore,
+  32);
+ BitsLeft:=H3Left;
+ If (BitsLeft>=0) And (BitsLeft<137) And (M4DataPart=0) Then Begin
+  BitsCount:=H3Pos;
+  If BitsLeft=0 Then Inc(M4PadScore,16)
+  Else If BitsLeft<>1 Then Begin
+   V:=H3Show(8);
+   V:=V Or ($7F Shr (7-(BitsCount And 7)));
+   If (V=$7F) And (BitsLeft<=8) Then Dec(M4PadScore)
+   Else If (V=$7F) And (((H3Pos+8) And 8)<>0) And (BitsLeft<=16) Then Inc(
+    M4PadScore,4)
+   Else Inc(M4PadScore);
+  End;
+ End;
+ If (M4PadScore>-2) And (M4DataPart=0) Then M4Bugs:=M4Bugs Or M4_BUG_NOPAD Else
+  M4Bugs:=M4Bugs And Not M4_BUG_NOPAD;
+ If (M4Bugs And M4_BUG_NOPAD)<>0 Then M4DecodeSlice:=0;
+End;
+
+Function M4Resync: LongInt;
+Var Left,Pos,Bak,Ret: LongInt;
+Begin
+ M4Resync:=-1;
+ H3Skip(1); H3Align;
+ If H3Show(16)=0 Then Begin
+  Pos:=H3Pos;
+  Ret:=M4VideoPacketHeader;
+  If Ret>=0 Then Begin M4Resync:=Pos; Exit; End;
+ End;
+ H3Pos:=M4ResyncPos; H3Align;
+ Left:=H3Left;
+ While Left>16+1+5+5 Do Begin
+  If H3Show(16)=0 Then Begin
+   Bak:=H3Pos; Pos:=H3Pos;
+   Ret:=M4VideoPacketHeader;
+   If Ret>=0 Then Begin M4Resync:=Pos; Exit; End;
+   H3Pos:=Bak;
+  End;
+  H3Skip(8);
+  Dec(Left,8);
+ End;
+End;
+
+{ ---- en-tete d'image : recherche des codes de debut
+ (ff_mpeg4_decode_picture_header) ---- }
+Function M4PictureHeader: LongInt;
+Var Start: Int64; V,Prof,Lev,Vol: LongInt;
+Begin
+ M4PictureHeader:=-1;
+ H3Align;
+ Start:=$FF; Vol:=0;
+ Repeat
+  If H3Pos>=H3Size*8 Then Begin
+   If ((H3Size*8=8) And ((M4DivxVer>=0) Or (M4XvidBuild>=0))) Or (M4CTag='QMP4')
+    Then M4PictureHeader:=M4_SKIPPED;
+   Exit;
+  End;
+  V:=H3Bits(8);
+  Start:=((Start Shl 8) Or V) And $FFFFFFFF;
+  If (Start And $FFFFFF00)<>$100 Then Continue;
+  If (Start>=$120) And (Start<=$12F) Then Begin
+   If Vol<>0 Then Continue;
+   Inc(Vol);
+   If M4VolHeader<0 Then Exit;
+  End Else If Start=$1B2 Then M4UserData
+  Else If Start=$1B3 Then M4GopHeader
+  Else If Start=$1B0 Then Begin
+   Prof:=H3Bits(4); Lev:=H3Bits(4);
+   If (Prof=14) And (Lev>0) And (Lev<9) Then Fail(
+    'mpeg4: profil Simple Studio non pris en charge.');
+  End Else If Start=$1B5 Then M4VisualObject
+  Else If Start=$1B6 Then Break;
+  H3Align;
+  Start:=$FF;
+ Until False;
+ If M4LowDelay<>0 Then ;
+ If Not M4Have Then Exit;
+ M4PictureHeader:=M4VopHeader;
+End;
+
+{ ---- sortie ---- }
+Var M4RateN,M4RateD: LongInt; M4Delta,M4T0,M4LastSlot: Int64;
+Procedure M4Emit(P: LongInt);
+Var Y,CW,CH,Size: LongInt;
+Begin
+ If M4OutBegun=0 Then Begin M4OutBegun:=1; M4T0:=M4P[P].Time; M4LastSlot:=-1; End;
+ CW:=(M4W+1) Div 2; CH:=(M4H+1) Div 2;
+ Size:=M4W*M4H+2*CW*CH;
+ If M4OutBuf=Nil Then GetMem(M4OutBuf,Size+64);
+ For Y:=0 To M4H-1 Do Move(M4P[P].Y^[Y*M4LY],M4OutBuf^[Y*M4W],M4W);
+ For Y:=0 To CH-1 Do Move(M4P[P].U^[Y*M4LC],M4OutBuf^[M4W*M4H+Y*CW],CW);
+ For Y:=0 To CH-1 Do Move(M4P[P].V^[Y*M4LC],M4OutBuf^[M4W*M4H+CW*CH+Y*CW],CW);
+ Inc(M4OutCount);
+ If @M4VidHook<>Nil Then M4VidHook(M4OutBuf,M4W,M4H);
+End;
+
+Var M4InTag: String[4]; M4Scan: Boolean; M4Times: ^TM4I64; M4TimeN,M4TimeCap:
+ LongInt;
+Procedure M4Packet(Pk: PEABuffer; Len: LongInt);
+Var Ret,Slice,PrevX,PrevY: LongInt;
+Begin
+ H3Buf:=Pk; H3Size:=Len; H3Pos:=0;
+ FillChar(Pk^[Len],32,0);
+ M4SkippedLast:=False;
+ Ret:=M4PictureHeader;
+ If Ret=M4_SKIPPED Then Begin M4SkippedLast:=True; Exit; End;
+ If Ret<0 Then Exit;
+ If M4Scan Then Begin
+  If M4TimeN>=M4TimeCap Then Begin
+   ReallocMem(M4Times,(M4TimeCap*2+1024)*8); M4TimeCap:=M4TimeCap*2+1024;
+  End;
+  M4Times^[M4TimeN]:=M4Time; Inc(M4TimeN); Exit;
+ End;
+ If (M4W<=0) Or (M4H<=0) Then Exit;
+ If (M4W<>M4AllocW) Or (M4H<>M4AllocH) Then Begin M4Alloc; M4PicHave:=False;
+  End;
+ If (M4PType<>2) And (M4MbNum Div 2>H3Left) Then Exit;
+ M4Workaround;
+ If (M4LastI<0) And (M4PType=2) Then Exit;
+ If Not M4FrameStart Then Exit;
+ M4PicHave:=True; M4P[M4CurI].Time:=M4Time;
+ M4MbX:=0; M4MbY:=0; M4Err:=False;
+ Slice:=M4DecodeSlice;
+ While M4MbY<M4MbH Do Begin
+  PrevX:=M4MbX; PrevY:=M4MbY;
+  If M4Resync<0 Then Break;
+  M4CleanBuffers;
+  If M4DecodeSlice<0 Then Slice:=-1;
+ End;
+ If (M4PType=2) Or (M4LowDelay<>0) Then M4Emit(M4CurI)
+ Else If M4LastI>=0 Then M4Emit(M4LastI);
+ M4P[M4CurI].PType:=M4PType;
+End;
+
+Procedure M4Reset;
+Var Ix: LongInt;
+Begin
+ M4Init:=False; M4InitTables;
+ M4Have:=False; M4W:=0; M4H:=0; M4AllocW:=-1; M4AllocH:=-1;
+ M4CurI:=-1; M4LastI:=-1; M4NextI:=-1;
+ M4DivxVer:=-1; M4DivxBuild:=-1; M4XvidBuild:=-1; M4LavcBuild:=-1; M4Bugs:=1;
+  M4PadScore:=0; M4DivxPacked:=False; M4CTag:=M4InTag;
+ M4VoType:=0; M4Shape:=0; M4TIncBits:=4; M4Res:=25; M4FixedRate:=1; M4Prog:=1;
+  M4SprUsage:=0; M4NumWarp:=0; M4WarpAcc:=0;
+ M4BrightChg:=0; M4QuantPrec:=5; M4MpegQuant:=0; M4QuarterS:=0; M4DataPart:=0;
+  M4Rvlc:=0; M4ResyncMarker:=1; M4NewPred:=0; M4Scal:=0;
+ M4EnhType:=0; M4LowDelay:=0; M4VolCtl:=0; M4CplxI:=0; M4CplxP:=0; M4CplxB:=0;
+  M4SarN:=0; M4SarD:=1; M4Range:=0;
+ M4Time:=0; M4TimeBase:=0; M4LastTimeBase:=0; M4LastNonBTime:=0; M4PPTime:=0;
+  M4PBTime:=0; M4TFrame:=0; M4PPField:=0; M4PBField:=0;
+ M4PicNum:=0; M4PType:=0; M4Part:=0; M4NoRnd:=0; M4Tff:=0; M4AltScan:=0;
+  M4IDct:=0;
+ FillChar(M4SpOff,SizeOf(M4SpOff),0); FillChar(M4SpDelta,SizeOf(M4SpDelta),0);
+  M4RealWarp:=0;
+ M4DefaultMatrices;
+ M4OutBuf:=Nil; M4OutBegun:=0; M4OutCount:=0; M4SkippedLast:=False; M4PicHave:=
+  False;
+ FillChar(M4Dc,SizeOf(M4Dc),0); FillChar(M4Ac,SizeOf(M4Ac),0);
+ M4IntraTab:=Nil; M4CbpTab:=Nil; M4DirTab:=Nil; M4PField:=Nil;
+ FillChar(M4P,SizeOf(M4P),0);
+  H3LongVec:=0;
+ For Ix:=0 To 31 Do Begin M4YDcT[Ix]:=M4YDcScale[Ix]; M4CDcT[Ix]:=M4CDcScale[
+  Ix]; End;
+ M4Ms:=0; M4CodedBlk:=Nil;
+End;
+{$ENDIF}
 
 { ====================================================================== }
 { Colle entre l'interface et les moteurs audio                             }
@@ -13060,6 +17741,7 @@ Begin
 End;
 
 {$IFDEF FPC}
+Function ExtractMkv(Const Src,Dst: String; Var Kind: Integer; Var Err: String): Boolean; Forward;
 Function DecodeFlac(Const Src,Dst: String; Var Err: String): Boolean; Forward;
 {$ENDIF}
 
@@ -13105,6 +17787,12 @@ Begin
   T1:=TmpName('WAV');
   If RunEng(ekAAC,M.Path,T1,0,Err) Then GetPcm:=MakeCanon(T1,Dst,Err);
  End
+ {$IFDEF FPC}
+ Else If (F='MKV') Or (F='WEBM') Then Begin
+  T1:=TmpName('TMP');
+  If ExtractMkv(M.Path,T1,Kind,Err) Then GetPcm:=DecodeKind(Kind,T1,Dst,Err) Else DelFile(T1);
+ End
+ {$ENDIF}
  Else If F='AVI' Then Begin
   T1:=TmpName('TMP');
   If ExtractAvi(M.Path,T1,Kind,Err) Then GetPcm:=DecodeKind(Kind,T1,Dst,Err) Else DelFile(T1);
@@ -14396,6 +19084,7 @@ Const
  RowH = 63; RowsVis = 4; ListY = 99;
 
 Var
+ JobWarn: String;
  ProgMode: Boolean;
  StageLo,StageHi: Integer;
  CancelX1,CancelY1,CancelX2,CancelY2: Integer;
@@ -14490,7 +19179,7 @@ End;
 Function DoConvert(Var M: TMedia; Const Pr: TProf; Const Dst: String; Const SP: TAP; Var Err: String): Boolean;
 Var T1,T2: String; P: TAP; Audio: Boolean; Ok: Boolean;
 Begin
- DoConvert:=False; Err:='';
+ DoConvert:=False; Err:=''; JobWarn:='';
  Audio:=InList(Pr.Ext,'MP3,WAV,AIF,AU,M4A,AAC');
  If Audio Then Begin
   If (M.Kind=3) Or ((M.Kind=2) And (M.Fmt='GIF')) Then Begin Err:='Ce fichier ne contient pas de piste audio.'; Exit; End;
@@ -14610,7 +19299,7 @@ Begin
   Err:='';
   Ok:=DoConvert(Files[I]^,Pr,Dst,SP,Err);
   If Ok Then Begin
-   SetStatus(I,2,NameOf(Dst)); Files[I]^.OutFile:=Dst; Files[I]^.Pct:=100;
+   SetStatus(I,2,NameOf(Dst)+JobWarn); Files[I]^.OutFile:=Dst; Files[I]^.Pct:=100;
    AddConverted(Dst); Inc(Done);
   End Else Begin
    If Err='' Then Err:='Erreur.';
@@ -14711,13 +19400,14 @@ End;
 
 { Cache de miniatures (images/GIF reduits) }
 Type TTh = Record Path: String[200]; Img: PImg; End;
-Var ThC: Array[0..15] Of TTh; ThN: Integer;
+Var ThC: Array[0..15] Of TTh; ThN: Integer; ThFail: Array[0..15] Of String[200]; ThFN: Integer;
 
 Function GetThumb(Const Path: String): PImg;
 Var K: Integer; A: PAnim; T: PImg; V: PImg;
 Begin
  GetThumb:=Nil;
  For K:=0 To 15 Do If (ThC[K].Img<>Nil) And (ThC[K].Path=Path) Then Begin GetThumb:=ThC[K].Img; Exit; End;
+ For K:=0 To 15 Do If ThFail[K]=Path Then Exit;
  If Not LoadAnim(Path,A,1) Then Begin
   {$IFDEF FPC}
   V:=VideoFirstFrame(Path,ExtOf(Path));
@@ -14725,7 +19415,7 @@ Begin
    New(A); A^.N:=1; A^.F[1]:=V; A^.Dly[1]:=100;
   End Else
   {$ENDIF}
-  Exit;
+  Begin ThFail[ThFN Mod 16]:=Path; Inc(ThFN); Exit; End;
  End;
  T:=ImgFit(A^.F[1],Min(A^.F[1]^.W,160),Min(A^.F[1]^.H,100),0,0,0,False);
  If T<>Nil Then Begin
@@ -15206,6 +19896,301 @@ Begin
 End;
 
 { ---------------------------------------------------------------------- }
+{ Demuxeur AVI (piste video)                                                 }
+{ ---------------------------------------------------------------------- }
+Function AviTracks(Const Path: String; Var V: TTrkIn; Var Err: String): Boolean;
+Var P,Sz,Mv,MvEnd,Pass,N,I: LongInt; Want,Id,Strh,Fcc: String; VidIdx,Cur: Integer; Scale,Rate,W,H: LongInt; Have: Boolean;
+ Procedure Hdrl(S,En: LongInt);
+ Var Q,Z: LongInt; K: String;
+ Begin
+  Q:=S;
+  While Q+8<=En Do Begin
+   K:=C4(Q); Z:=L32(Q+4);
+   If Z<0 Then Break;
+   If K='LIST' Then Begin
+    If C4(Q+8)='strl' Then Begin Strh:=''; Hdrl(Q+12,Q+8+Z); Inc(Cur); End
+    Else Hdrl(Q+12,Q+8+Z);
+   End Else If K='strh' Then Begin
+    Strh:=C4(Q+8);
+    If (Strh='vids') And Not Have Then Begin Scale:=L32(Q+28); Rate:=L32(Q+32); Fcc:=C4(Q+12); End;
+   End Else If (K='strf') And (Strh='vids') And Not Have Then Begin
+    Have:=True; VidIdx:=Cur; W:=L32(Q+12); H:=Abs(L32(Q+16));
+    If L32(Q+24)<>0 Then Fcc:=C4(Q+24);
+   End;
+   Q:=Q+8+Z+(Z And 1);
+  End;
+ End;
+Begin
+ AviTracks:=False; FillChar(V,SizeOf(V),0); Have:=False; Cur:=0; VidIdx:=0; Scale:=1; Rate:=25; Fcc:=''; Strh:='';
+ If Not COpen(Path) Then Begin Err:='Ouverture impossible.'; Exit; End;
+ If (C4(0)<>'RIFF') Or (C4(8)<>'AVI ') Then Begin CClose; Err:='Fichier AVI invalide.'; Exit; End;
+ Mv:=0; MvEnd:=0; P:=12;
+ While P+12<=CSize Do Begin
+  Id:=C4(P); Sz:=L32(P+4);
+  If Sz<0 Then Break;
+  If (Id='LIST') And (C4(P+8)='hdrl') Then Hdrl(P+12,P+8+Sz);
+  If (Id='LIST') And (C4(P+8)='movi') Then Begin Mv:=P+12; MvEnd:=Min(P+8+Sz,CSize); Break; End;
+  P:=P+8+Sz+(Sz And 1);
+ End;
+ If (Not Have) Or (Mv=0) Then Begin CClose; Err:='Aucune piste vid'#233'o dans cet AVI.'; Exit; End;
+ If (Scale<=0) Or (Rate<=0) Then Begin Scale:=1; Rate:=25; End;
+ Want:=Pad2(VidIdx);
+ For Pass:=1 To 2 Do Begin
+  P:=Mv; N:=0;
+  While P+8<=MvEnd Do Begin
+   Id:=C4(P); Sz:=L32(P+4);
+   If Sz<0 Then Break;
+   If Id='LIST' Then Begin Inc(P,12); Continue; End;
+   If (Copy(Id,1,2)=Want) And ((Copy(Id,3,2)='dc') Or (Copy(Id,3,2)='db')) Then Begin
+    If Pass=2 Then Begin V.Off^[N]:=P+8; V.Sz^[N]:=Min(Sz,CSize-P-8); V.Dur^[N]:=Scale; End;
+    Inc(N);
+   End;
+   P:=P+8+Sz+(Sz And 1);
+  End;
+  If Pass=1 Then Begin
+   If N<1 Then Begin CClose; Err:='Aucune image vid'#233'o dans cet AVI.'; Exit; End;
+   TrkAlloc(V,N);
+  End;
+ End;
+ CClose;
+ V.Ok:=True; V.IsVideo:=True; V.Codec:=Copy(UpStr(Fcc),1,4); V.Ts:=Rate; V.W:=W; V.H:=H;
+ AviTracks:=True;
+End;
+
+
+{ ---------------------------------------------------------------------- }
+{ Demuxeur Matroska / WebM (H.264, MPEG-4 ASP, AAC, MP3, PCM)                  }
+{ ---------------------------------------------------------------------- }
+{$IFDEF FPC}
+Function EbVInt(Var P: LongInt; Keep: Boolean): Int64;
+Var B,Mask: Byte; N,I: Integer; V: Int64;
+Begin
+ B:=CB(P); Mask:=$80; N:=1;
+ While (N<=8) And ((B And Mask)=0) Do Begin Mask:=Mask Shr 1; Inc(N); End;
+ If N>8 Then Begin EbVInt:=-1; Inc(P); Exit; End;
+ If Keep Then V:=B Else V:=B And (Mask-1);
+ For I:=1 To N-1 Do V:=V*256+CB(P+I);
+ Inc(P,N); EbVInt:=V;
+End;
+
+Type
+ TMkTrk = Record
+  Num: LongInt; Typ: Integer; Codec: String[24];
+  PrivPos,PrivLen: LongInt; W,H,Ch,Bits: LongInt; Rate: LongInt; Dd: LongInt; Used: Boolean;
+ End;
+
+Var
+ MkT: Array[0..7] Of TMkTrk;
+ MkN: Integer;
+ MkScale: LongInt;
+ MkCnt: Array[0..1] Of LongInt;
+ MkFill: Boolean;
+ MkTr: Array[0..1] Of PTrkIn;
+ MkNum: Array[0..1] Of LongInt;
+ MkIdx: Array[0..1] Of LongInt;
+ MkPts: PLArr;
+
+Function EbUInt(P: LongInt; N: Integer): Int64;
+Var I: Integer; V: Int64;
+Begin
+ V:=0; For I:=0 To N-1 Do V:=V*256+CB(P+I);
+ EbUInt:=V;
+End;
+
+Procedure MkTrackEntry(S,En: LongInt);
+Var Q,Id,Sz,Dp,P2,E2,I2,Z2: Int64; T: TMkTrk; Qq: LongInt; Qid,Qsz,Qd: LongInt;
+ Procedure Sub(S2,E3: LongInt);
+ Var R,Ri,Rs,Rd: LongInt;
+ Begin
+  R:=S2;
+  While R<E3 Do Begin
+   Ri:=EbVInt(R,True); Rs:=EbVInt(R,False); Rd:=R;
+   If Ri=$B0 Then T.W:=EbUInt(Rd,Rs) Else If Ri=$BA Then T.H:=EbUInt(Rd,Rs)
+   Else If Ri=$9F Then T.Ch:=EbUInt(Rd,Rs) Else If Ri=$6264 Then T.Bits:=EbUInt(Rd,Rs)
+   Else If Ri=$B5 Then T.Rate:=Round(BEDouble(Rd,Rs));
+   R:=Rd+Rs;
+  End;
+ End;
+Begin
+ FillChar(T,SizeOf(T),0);
+ Qq:=S;
+ While Qq<En Do Begin
+  Qid:=EbVInt(Qq,True); Qsz:=EbVInt(Qq,False); Qd:=Qq;
+  If (Qid<0) Or (Qsz<0) Then Break;
+  Case Qid Of
+   $D7: T.Num:=EbUInt(Qd,Qsz);
+   $83: T.Typ:=EbUInt(Qd,Qsz);
+   $86: T.Codec:=CStr(Qd,Min(Qsz,24));
+   $63A2: Begin T.PrivPos:=Qd; T.PrivLen:=Qsz; End;
+   $23E383: T.Dd:=EbUInt(Qd,Qsz);
+   $E0,$E1: Sub(Qd,Qd+Qsz);
+  End;
+  Qq:=Qd+Qsz;
+ End;
+ If MkN<8 Then Begin MkT[MkN]:=T; Inc(MkN); End;
+End;
+
+Procedure MkAddBlock(P,Sz: LongInt; Sync: Integer; Cluster: LongInt);
+Var Q,Num,K,Hdr: LongInt; Tc: LongInt; Fl: Byte; Pts: LongInt;
+Begin
+ Q:=P; Num:=EbVInt(Q,False);
+ Tc:=B16(Q); If Tc>=32768 Then Tc:=Tc-65536;
+ Fl:=CB(Q+2); Hdr:=(Q+3)-P;
+ If (Fl And 6)<>0 Then Exit;
+ For K:=0 To 1 Do If (MkTr[K]<>Nil) Or Not MkFill Then
+  If Num=MkNum[K] Then Begin
+   Pts:=Round((Cluster+Tc)*(MkScale/1000000.0));
+   If MkFill Then Begin
+    If MkTr[K]^.N>MkIdx[K] Then Begin
+     MkTr[K]^.Off^[MkIdx[K]]:=P+Hdr; MkTr[K]^.Sz^[MkIdx[K]]:=Sz-Hdr; If Sync=2 Then Sync:=Ord((Fl And $80)<>0);
+     MkTr[K]^.Sync^[MkIdx[K]]:=Ord((Sync<>0) Or (K=1));
+     If K=0 Then MkPts^[MkIdx[K]]:=Pts;
+     Inc(MkIdx[K]);
+    End;
+   End Else Inc(MkCnt[K]);
+  End;
+End;
+
+Procedure MkCluster(S,En: LongInt);
+Var Q,Id,Sz,Dp,Tc,Z,Z2,Zd,Zi,Zs: LongInt; HasRef: Boolean; Bp,Bs: LongInt;
+Begin
+ Q:=S; Tc:=0;
+ While Q<En Do Begin
+  Id:=EbVInt(Q,True); Sz:=EbVInt(Q,False); Dp:=Q;
+  If (Id<0) Or (Sz<0) Then Break;
+  If Dp+Sz>En Then Sz:=En-Dp;
+  Case Id Of
+   $E7: Tc:=EbUInt(Dp,Sz);
+   $A3: MkAddBlock(Dp,Sz,2,Tc);
+   $A0: Begin
+    Z:=Dp; HasRef:=False; Bp:=-1; Bs:=0;
+    While Z<Dp+Sz Do Begin
+     Zi:=EbVInt(Z,True); Zs:=EbVInt(Z,False); Zd:=Z;
+     If (Zi<0) Or (Zs<0) Then Break;
+     If Zi=$A1 Then Begin Bp:=Zd; Bs:=Zs; End Else If Zi=$FB Then HasRef:=True;
+     Z:=Zd+Zs;
+    End;
+    If Bp>=0 Then MkAddBlock(Bp,Bs,Ord(Not HasRef),Tc);
+   End;
+  End;
+  Q:=Dp+Sz;
+ End;
+End;
+
+Procedure MkSegment(S,En: LongInt; Pass: Integer);
+Var Q,Id,Sz,Dp: LongInt; Ent,Ee,Qid,Qsz,Qd: LongInt;
+Begin
+ Q:=S;
+ While Q<En Do Begin
+  Id:=EbVInt(Q,True); Sz:=EbVInt(Q,False); Dp:=Q;
+  If (Id<0) Or (Sz<0) Then Break;
+  If (Sz>En-Dp) Then Sz:=En-Dp;
+  If Pass=0 Then Begin
+   If Id=$1549A966 Then Begin
+    Ee:=Dp; While Ee<Dp+Sz Do Begin
+     Qid:=EbVInt(Ee,True); Qsz:=EbVInt(Ee,False); Qd:=Ee;
+     If (Qid<0) Or (Qsz<0) Then Break;
+     If Qid=$2AD7B1 Then MkScale:=EbUInt(Qd,Qsz);
+     Ee:=Qd+Qsz;
+    End;
+   End Else If Id=$1654AE6B Then Begin
+    Ee:=Dp; While Ee<Dp+Sz Do Begin
+     Qid:=EbVInt(Ee,True); Qsz:=EbVInt(Ee,False); Qd:=Ee;
+     If (Qid<0) Or (Qsz<0) Then Break;
+     If Qid=$AE Then MkTrackEntry(Qd,Qd+Qsz);
+     Ee:=Qd+Qsz;
+    End;
+   End;
+  End Else If Id=$1F43B675 Then MkCluster(Dp,Dp+Sz);
+  Q:=Dp+Sz;
+ End;
+End;
+
+Procedure MkSnapFps(DdNs: LongInt; Var Ts,D: LongInt);
+Var Fps: Double;
+Begin
+ Fps:=1000000000.0/DdNs; Ts:=1000; D:=Round(DdNs/1000000.0);
+ If Abs(Fps-23.976)<0.02 Then Begin Ts:=24000; D:=1001; End
+ Else If Abs(Fps-29.97)<0.02 Then Begin Ts:=30000; D:=1001; End
+ Else If Abs(Fps-59.94)<0.03 Then Begin Ts:=60000; D:=1001; End
+ Else If Abs(Fps-Round(Fps))<0.01 Then Begin Ts:=Round(Fps)*100; D:=100; End
+ Else Begin Ts:=Round(Fps*1000); D:=1000; End;
+End;
+
+Function MkvTracks(Const Path: String; Var V,A: TTrkIn; Var Err: String): Boolean;
+Var Pos0,Sz,Se,SeEnd,I,K,Vi,Ai,D,Ts,MinP,MaxP,J: LongInt; Id: LongInt; Cd: String; P: LongInt;
+Begin
+ MkvTracks:=False; FillChar(V,SizeOf(V),0); FillChar(A,SizeOf(A),0);
+ If Not COpen(Path) Then Begin Err:='Ouverture impossible.'; Exit; End;
+ If (CB(0)<>$1A) Or (CB(1)<>$45) Then Begin CClose; Err:='Fichier Matroska invalide.'; Exit; End;
+ MkN:=0; MkScale:=1000000; Se:=0; SeEnd:=0;
+ P:=0;
+ While P<CSize Do Begin
+  Id:=EbVInt(P,True); Sz:=EbVInt(P,False);
+  If (Id<0) Or (Sz<0) Then Break;
+  If Id=$18538067 Then Begin Se:=P; SeEnd:=P+Sz; If SeEnd>CSize Then SeEnd:=CSize; Break; End;
+  P:=P+Sz;
+ End;
+ If Se=0 Then Begin CClose; Err:='Segment Matroska introuvable.'; Exit; End;
+ MkSegment(Se,SeEnd,0);
+ Vi:=-1; Ai:=-1;
+ For I:=0 To MkN-1 Do Begin
+  If (MkT[I].Typ=1) And (Vi<0) Then Vi:=I;
+  If (MkT[I].Typ=2) And (Ai<0) Then Ai:=I;
+ End;
+ If Vi>=0 Then MkNum[0]:=MkT[Vi].Num Else MkNum[0]:=-1;
+ If Ai>=0 Then MkNum[1]:=MkT[Ai].Num Else MkNum[1]:=-1;
+ MkCnt[0]:=0; MkCnt[1]:=0; MkFill:=False; MkTr[0]:=Nil; MkTr[1]:=Nil;
+ MkSegment(Se,SeEnd,1);
+ If (Vi>=0) And (MkCnt[0]>0) Then Begin TrkAlloc(V,MkCnt[0]); MkTr[0]:=@V; GetMem(MkPts,MkCnt[0]*4+16); End;
+ If (Ai>=0) And (MkCnt[1]>0) Then Begin TrkAlloc(A,MkCnt[1]); MkTr[1]:=@A; End;
+ MkIdx[0]:=0; MkIdx[1]:=0; MkFill:=True;
+ MkSegment(Se,SeEnd,1);
+ { configuration de piste }
+ If V.N>0 Then Begin
+  V.Ok:=True; V.IsVideo:=True; V.W:=MkT[Vi].W; V.H:=MkT[Vi].H;
+  Cd:=MkT[Vi].Codec;
+  If Cd='V_MPEG4/ISO/AVC' Then V.Codec:='avc1'
+  Else If Cd='V_MPEG4/ISO/ASP' Then V.Codec:='MP4V'
+  Else If Cd='V_MS/VFW/FOURCC' Then V.Codec:=Copy(UpStr(C4(MkT[Vi].PrivPos+16)),1,4)
+  Else V.Codec:=Copy(Cd,3,4);
+  K:=MkT[Vi].PrivLen; If K>500 Then K:=500;
+  If Cd<>'V_MS/VFW/FOURCC' Then Begin For I:=0 To K-1 Do V.Cfg[I]:=CB(MkT[Vi].PrivPos+I); V.CfgLen:=K; End;
+  { cadence : DefaultDuration, sinon moyenne des instants }
+  MinP:=MkPts^[0]; MaxP:=MkPts^[0];
+  For I:=1 To V.N-1 Do Begin If MkPts^[I]<MinP Then MinP:=MkPts^[I]; If MkPts^[I]>MaxP Then MaxP:=MkPts^[I]; End;
+  If MkT[Vi].Dd>0 Then MkSnapFps(MkT[Vi].Dd,Ts,D)
+  Else If (V.N>1) And (MaxP>MinP) Then MkSnapFps(Round((MaxP-MinP)*1000000.0/(V.N-1)),Ts,D)
+  Else Begin Ts:=25; D:=1; End;
+  V.Ts:=Ts;
+  For I:=0 To V.N-1 Do Begin
+   V.Dur^[I]:=D;
+   V.Cts^[I]:=Round((MkPts^[I]-MinP)*(Ts/1000.0))-I*D;
+  End;
+  FreeMem(MkPts,MkCnt[0]*4+16);
+ End;
+ If A.N>0 Then Begin
+  A.Ok:=True; A.IsVideo:=False; Cd:=MkT[Ai].Codec; A.Chans:=MkT[Ai].Ch; A.Rate:=MkT[Ai].Rate; A.Ts:=A.Rate; A.Oti:=0;
+  If A.Rate<=0 Then Begin A.Rate:=44100; A.Ts:=44100; End;
+  If Copy(Cd,1,5)='A_AAC' Then Begin
+   A.Codec:='mp4a'; A.Oti:=$40;
+   K:=MkT[Ai].PrivLen; If K>20 Then K:=20;
+   For I:=0 To K-1 Do A.Cfg[I]:=CB(MkT[Ai].PrivPos+I); A.CfgLen:=K;
+  End Else If Cd='A_MPEG/L3' Then A.Codec:='mp3 '
+  Else If Copy(Cd,1,10)='A_PCM/INT/' Then Begin A.Codec:='pcm '; A.Oti:=MkT[Ai].Bits; If A.Oti=0 Then A.Oti:=16; End
+  Else A.Codec:=Copy(Cd,3,4);
+  For I:=0 To A.N-1 Do A.Dur^[I]:=1024;
+  If A.Codec='mp3 ' Then For I:=0 To A.N-1 Do A.Dur^[I]:=1152;
+  If A.Codec='pcm ' Then For I:=0 To A.N-1 Do A.Dur^[I]:=A.Sz^[I] Div Max(1,A.Chans*(A.Oti Div 8));
+ End;
+ CClose;
+ MkvTracks:=V.Ok Or A.Ok;
+ If Not (V.Ok Or A.Ok) Then Err:='Aucune piste lisible dans ce fichier Matroska.';
+End;
+
+{$ENDIF}
+
+{ ---------------------------------------------------------------------- }
 { Lecture d'echantillons et decodage H.264                                    }
 { ---------------------------------------------------------------------- }
 Function OpenSrc(Const Path: String; Var F: File): Boolean;
@@ -15231,41 +20216,99 @@ Begin
  If P<Sz Then FillChar(SBuf^[P],Sz-P,0);
 End;
 
+Var VLastBuf: PEABuffer; VLastW,VLastH: LongInt;
+
 Procedure H4Trampoline(B: Pointer; W,H: LongInt);
 Begin
+ VLastBuf:=PEABuffer(B); VLastW:=W; VLastH:=H;
  If @VFrameCb<>Nil Then VFrameCb(PEABuffer(B),W,H);
 End;
 
-{ Decode les images H.264 d'une piste a partir de l'echantillon First ;
-  VFrameCb est appele pour chaque image (ordre d'affichage) ; VStopFlag arrete. }
-Function DecodeH264Track(Const Path: String; Var T: TTrkIn; First: LongInt; Var Err: String): Boolean;
-Var I,NalSz: LongInt;
+{ Mode 0 : H.264 AVCC (avcC) ; 1 : H.264 Annex B ; 2 : MPEG-4 Part 2 (XviD/DivX) }
+Function DecodeVideoTrack(Const Path: String; Var T: TTrkIn; First: LongInt; Mode: Integer; Var Err: String): Boolean;
+Var I,NalSz,P,K,Np,Ps: LongInt; Starts: Array[0..15] Of LongInt;
 Begin
- DecodeH264Track:=False; VStopFlag:=False; VErr:=''; VFOpen:=False;
+ DecodeVideoTrack:=False; VStopFlag:=False; VErr:=''; VFOpen:=False; VLastBuf:=Nil;
  If Not OpenSrc(Path,VF) Then Begin Err:='Ouverture impossible.'; Exit; End;
- VFOpen:=True; EngMsg:=''; EngFirst:=0;
- H4VidHook:=H4Trampoline;
+ VFOpen:=True; EngMsg:=''; EngFirst:=0; NalSz:=0;
  If SetJmp(EngJmp)=0 Then Begin
-  H4InitState; H4OutBuf:=Nil;
-  NalSz:=H4FeedAvcc(PEABuffer(@T.Cfg),T.CfgLen);
+  If Mode=2 Then Begin
+   M4VidHook:=H4Trampoline; M4InTag:=Copy(T.Codec+'    ',1,4); M4Scan:=False; M4Reset; M4OutBuf:=Nil;
+   If T.CfgLen>0 Then Begin
+    NeedBuf(CvBuf,CvCap,T.CfgLen+64); Move(T.Cfg,CvBuf^,T.CfgLen); M4Packet(PEABuffer(CvBuf),T.CfgLen);
+   End;
+  End Else Begin
+   H4VidHook:=H4Trampoline; H4InitState; H4OutBuf:=Nil;
+   If Mode=0 Then NalSz:=H4FeedAvcc(PEABuffer(@T.Cfg),T.CfgLen);
+  End;
   I:=First;
   While (I<T.N) And Not VStopFlag And Not Stopped Do Begin
-   ReadSample(VF,T.Off^[I],T.Sz^[I]);
-   H4FeedNalPacket(PEABuffer(SBuf),T.Sz^[I],NalSz,0);
+   If T.Sz^[I]<=0 Then Begin
+    { image perdue (chunk vide) : repete la derniere image }
+    If (VLastBuf<>Nil) And (@VFrameCb<>Nil) Then VFrameCb(VLastBuf,VLastW,VLastH);
+   End Else Begin
+    ReadSample(VF,T.Off^[I],T.Sz^[I]);
+    If Mode=2 Then Begin
+     { decoupage des paquets multiples (B-images empaquetees) aux codes B6 }
+     Starts[0]:=0; Np:=1; Ps:=0;
+     K:=0;
+     While (K+3<T.Sz^[I]) And (Np<15) Do Begin
+      If (SBuf^[K]=0) And (SBuf^[K+1]=0) And (SBuf^[K+2]=1) And (SBuf^[K+3]=$B6) Then Begin
+       If Ps>0 Then Begin Starts[Np]:=K; Inc(Np); End;
+       Inc(Ps);
+      End;
+      Inc(K);
+     End;
+     Ps:=0;
+     Starts[Np]:=T.Sz^[I];
+     For K:=0 To Np-1 Do Begin
+      P:=Starts[K+1]-Starts[K];
+      NeedBuf(CvBuf,CvCap,P+64);
+      Move(SBuf^[Starts[K]],CvBuf^,P);
+      M4Packet(PEABuffer(CvBuf),P);
+     End;
+    End Else H4FeedNalPacket(PEABuffer(SBuf),T.Sz^[I],NalSz,0);
+   End;
    If (I And 7)=0 Then UiTick(I,T.N);
    Inc(I);
   End;
-  If Not VStopFlag Then Begin H4FinishPicture; H4Bump(True); End;
+  If Mode=2 Then Begin
+   If Not VStopFlag Then Begin
+    If (M4LowDelay=0) And (M4NextI>=0) And M4PicHave Then M4Emit(M4NextI)
+    Else If M4SkippedLast And M4PicHave And (M4CurI>=0) Then M4Emit(M4CurI);
+   End;
+  End Else If Not VStopFlag Then Begin H4FinishPicture; H4Bump(True); End;
   VOk:=True;
  End Else Begin VOk:=False; VErr:=EngMsg; End;
  If VFOpen Then Begin Close(VF); VFOpen:=False; End;
- If H4Began And (H4OutBuf<>Nil) Then Begin FreeMem(H4OutBuf,H4OutSize); H4OutBuf:=Nil; End;
+ If Mode=2 Then Begin
+  If M4OutBuf<>Nil Then Begin FreeMem(M4OutBuf); M4OutBuf:=Nil; End;
+ End Else If H4Began And (H4OutBuf<>Nil) Then Begin FreeMem(H4OutBuf,H4OutSize); H4OutBuf:=Nil; End;
  If VOk Then Begin
-  If Stopped Then Err:='Conversion annul'#233'e.' Else DecodeH264Track:=True;
+  If Stopped Then Err:='Conversion annul'#233'e.' Else DecodeVideoTrack:=True;
  End Else Begin
-  If VErr='' Then VErr:='Erreur de d'#233'codage H.264.';
+  If VErr='' Then VErr:='Erreur de d'#233'codage vid'#233'o.';
   Err:=VErr;
  End;
+End;
+
+Function DecodeH264Track(Const Path: String; Var T: TTrkIn; First: LongInt; Var Err: String): Boolean;
+Begin
+ DecodeH264Track:=DecodeVideoTrack(Path,T,First,0,Err);
+End;
+
+{ Mode de decodage selon le codec de la piste (-1 : non pris en charge) }
+Function VideoMode(Const Fmt: String; Const T: TTrkIn): Integer;
+Var C: String;
+Begin
+ C:=T.Codec; VideoMode:=-1;
+ If Fmt='AVI' Then Begin
+  If InList(C,'H264,X264,AVC1,DAVC,H.26') Then VideoMode:=1
+  Else If InList(C,'XVID,DIVX,DX50,FMP4,MP4V,3IV2,XVIX,BLZ0,DIV5,RMP4,MP4S,M4S2,SEDG,WV1F,UMP4,EM4A,DXGM,FVFW,DM4V') Then VideoMode:=2;
+ End Else If InList(Fmt,'MKV,WEBM') Then Begin
+  If (C='avc1') And (T.CfgLen>=7) Then VideoMode:=0
+  Else If InList(C,'MP4V,XVID,DIVX,DX50,FMP4') Then VideoMode:=2;
+ End Else If ((C='avc1') Or (C='avc3')) And (T.CfgLen>=7) Then VideoMode:=0;
 End;
 
 { ---------------------------------------------------------------------- }
@@ -15317,15 +20360,19 @@ Begin
 End;
 
 Function VideoFirstFrame(Const Path,Fmt: String): PImg;
-Var V,A: TTrkIn; Err: String; Ok: Boolean; SaveStop: Boolean;
+Var V,A: TTrkIn; Err: String; Ok: Boolean; SaveStop: Boolean; Md: Integer;
 Begin
  VideoFirstFrame:=Nil; FFImg:=Nil;
  If InList(Fmt,'MP4,MOV,M4V,3GP') Then Ok:=Mp4Tracks(Path,V,A,Err)
- Else If Fmt='FLV' Then Ok:=FlvTracks(Path,V,A,Err) Else Exit;
+ Else If Fmt='FLV' Then Ok:=FlvTracks(Path,V,A,Err)
+ Else If Fmt='AVI' Then Begin Ok:=AviTracks(Path,V,Err); FillChar(A,SizeOf(A),0); End
+ Else If InList(Fmt,'MKV,WEBM') Then Ok:=MkvTracks(Path,V,A,Err)
+ Else Exit;
  If Not Ok Then Exit;
- If V.Ok And ((V.Codec='avc1') Or (V.Codec='avc3')) And (V.CfgLen>0) Then Begin
+ Md:=VideoMode(Fmt,V);
+ If V.Ok And (Md>=0) Then Begin
   VFrameCb:=FFCallback; SaveStop:=Stopped; Stopped:=False;
-  Ok:=DecodeH264Track(Path,V,0,Err);
+  Ok:=DecodeVideoTrack(Path,V,0,Md,Err);
   Stopped:=SaveStop;
   VFrameCb:=Nil;
  End;
@@ -15597,7 +20644,7 @@ End;
 Function MuxMp4(Const Dst,Brand: String; Var Tr: Array Of TMuxTrk; NT: Integer; Var Err: String): Boolean;
 Var
  FO: File; H: THdr; I,K,S,Ch,MaxCh: LongInt; Mdat,Moov,Mv,Trak,Mdia,Minf,Tk,Dinf,Dref,Ud: LongInt; Ok: Boolean;
- Dp: Array[0..1] Of LongInt; Idx: Array[0..1] Of LongInt; DurMs,MaxMs: LongInt; Len: LongInt; Buf: PBArr;
+ Dp: Array[0..1] Of Int64; Idx: Array[0..1] Of LongInt; DurMs,MaxMs: LongInt; Len: LongInt; Buf: PBArr;
  TotalMs: Array[0..1] Of LongInt; Pos0,TrkMin: LongInt; Sec: LongInt; EndSample: LongInt; Acc: Int64; Written: LongInt;
  Hd: Array[0..11] Of Byte;
 Begin
@@ -15633,7 +20680,7 @@ Begin
   For K:=0 To NT-1 Do Begin
    S:=0; Pos0:=Written;
    While (Idx[K]<=Tr[K].Last) And Ok Do Begin
-    If Int64(Dp[K])*1000 Div Tr[K].T^.Ts>=(Sec+1)*1000 Then Break;
+    If Dp[K]*1000 Div Tr[K].T^.Ts>=(Sec+1)*1000 Then Break;
     Buf:=MuxFetch(Tr[K],Idx[K],Len);
     Tr[K].OutSz^[Idx[K]]:=Len;
     BlockWrite(FO,Buf^,Len); Inc(Written,Len);
@@ -15691,6 +20738,35 @@ Begin
   FreeMem(Tr[K].OutSz,Tr[K].T^.N*4+16); FreeMem(Tr[K].ChOff,MaxCh*4+16); FreeMem(Tr[K].ChCnt,MaxCh*4+16);
  End;
  If Not Ok Then DelFile(Dst);
+End;
+{$ENDIF}
+
+{$IFDEF FPC}
+{ Audio d'un fichier MKV : Kind 1 WAV (PCM), 2 MP3, 3 AAC (ADTS) }
+Function ExtractMkv(Const Src,Dst: String; Var Kind: Integer; Var Err: String): Boolean;
+Var V,A: TTrkIn; FI,FO: File; I,Tot: LongInt; H: THdr; Prof,Sfi,Cfg: Integer; Ok: Boolean;
+Begin
+ ExtractMkv:=False; Kind:=0;
+ If Not MkvTracks(Src,V,A,Err) Then Exit;
+ TrkClear(V);
+ If Not A.Ok Then Begin Err:='Aucune piste audio dans ce fichier.'; TrkClear(A); Exit; End;
+ If A.Codec='mp4a' Then Kind:=3 Else If A.Codec='mp3 ' Then Kind:=2 Else If A.Codec='pcm ' Then Kind:=1
+ Else Begin Err:='Audio MKV non pris en charge ('+A.Codec+').'; TrkClear(A); Exit; End;
+ If (Kind=3) And (A.CfgLen<2) Then Begin Err:='Configuration AAC absente.'; TrkClear(A); Exit; End;
+ If Not OpenSrc(Src,FI) Then Begin Err:='Ouverture impossible.'; TrkClear(A); Exit; End;
+ If Not CreateOut(Dst,FO,Err) Then Begin Close(FI); TrkClear(A); Exit; End;
+ If Kind=1 Then Begin PcmHeader(H,A.Rate,A.Chans,A.Oti,0); BlockWrite(FO,H,44); End;
+ Prof:=(A.Cfg[0] Shr 3)-1; Sfi:=((A.Cfg[0] And 7) Shl 1) Or (A.Cfg[1] Shr 7); Cfg:=(A.Cfg[1] Shr 3) And 15;
+ Tot:=0;
+ For I:=0 To A.N-1 Do Begin
+  If Kind=3 Then PutAdts(FO,Prof,Sfi,Cfg,A.Sz^[I]);
+  CopyRange(FI,FO,A.Off^[I],A.Sz^[I],False); Inc(Tot,A.Sz^[I]);
+  If (I And 255)=0 Then UiTick(I,A.N);
+ End;
+ If Kind=1 Then PutHeaderFix(FO,A.Rate,A.Chans,A.Oti,Tot);
+ Close(FI); Close(FO); TrkClear(A);
+ If Tot=0 Then Begin DelFile(Dst); Err:='Aucune donn'#233'e audio.'; Exit; End;
+ ExtractMkv:=True;
 End;
 {$ENDIF}
 
@@ -15944,29 +21020,33 @@ Function VideoJob(Var M: TMedia; Const Pr: TProf; Const Dst: String; Var Err: St
 Var
  V,A,Vo: TTrkIn; Ok,HaveA,Reenc,AFlv: Boolean; Fmt: String; Tr: Array[0..1] of TMuxTrk; NT: Integer;
  AFirst,ALast,First,Last,I,Fn,Fd,StartMs,EndMs,K: LongInt; AOut: TTrkIn; APath: String; Acc: Int64; SkipV: Boolean;
- Rw,Rh: LongInt;
+ Rw,Rh: LongInt; DecMode: Integer;
 Begin
  VideoJob:=False; Fmt:=M.Fmt;
  If InList(Fmt,'MP4,MOV,M4V,3GP') Then Ok:=Mp4Tracks(M.Path,V,A,Err)
  Else If Fmt='FLV' Then Ok:=FlvTracks(M.Path,V,A,Err)
- Else Begin Err:='Le moteur int'#233'gr'#233' ne d'#233'code que la vid'#233'o H.264 (MP4, MOV, M4V, 3GP, FLV).'; Exit; End;
+ Else If Fmt='AVI' Then Begin Ok:=AviTracks(M.Path,V,Err); FillChar(A,SizeOf(A),0); End
+ Else If InList(Fmt,'MKV,WEBM') Then Ok:=MkvTracks(M.Path,V,A,Err)
+ Else Begin Err:='Conteneur vid'#233'o non pris en charge : '+Fmt+' (MP4, MOV, M4V, 3GP, FLV, AVI, MKV).'; Exit; End;
  If Not Ok Then Exit;
  If Not V.Ok Then Begin TrkClear(V); TrkClear(A); Err:='Aucune piste vid'#233'o dans ce fichier.'; Exit; End;
- If ((V.Codec<>'avc1') And (V.Codec<>'avc3')) Or (V.CfgLen<7) Then Begin
-  Err:='Codec vid'#233'o '+V.Codec+' non d'#233'cod'#233' (seul H.264 est pris en charge).'; TrkClear(V); TrkClear(A); Exit;
+ DecMode:=VideoMode(Fmt,V);
+ If DecMode<0 Then Begin
+  Err:='Codec vid'#233'o '+V.Codec+' non d'#233'cod'#233' (H.264, MPEG-4/XviD/DivX seulement).'; TrkClear(V); TrkClear(A); Exit;
  End;
  If V.W=0 Then V.W:=M.W; If V.H=0 Then V.H:=M.H;
  HaveA:=A.Ok Or (M.ACodec<>''); AFlv:=Fmt='FLV';
  ParseRes(Pr.Res,VJResW,VJResH);
  If (Pr.Res='Auto') Or (Pr.Res='-') Then Begin VJResW:=0; VJResH:=0; End;
  StartMs:=M.TrimS; EndMs:=M.TrimE;
- Reenc:=EditsPresent(M) Or (StartMs>0) Or ((VJResW>0) And ((VJResW<>V.W) Or (VJResH<>V.H))) Or (V.W=0);
+ Reenc:=(DecMode<>0) Or EditsPresent(M) Or (StartMs>0) Or ((VJResW>0) And ((VJResW<>V.W) Or (VJResH<>V.H))) Or (V.W=0);
  FillChar(Tr,SizeOf(Tr),0); NT:=0; Ok:=False; APath:=''; FillChar(AOut,SizeOf(AOut),0);
  SkipV:=False;
  { ---- audio ---- }
  If HaveA And (M.Vol>0) Then Begin
   If Not PrepareAudio(M,Pr,A,A.Ok,AFlv,M.Path,StartMs,EndMs,AOut,APath,AFirst,ALast,Err) Then Begin
-   If (Err<>'') And (Pos('Aucune piste audio',Err)=0) Then Begin TrkClear(V); TrkClear(A); Exit; End;
+   If Stopped Then Begin TrkClear(V); TrkClear(A); Exit; End;
+   If Pos('Aucune piste audio',Err)=0 Then JobWarn:=' (sans audio : '+Err+')';
    HaveA:=False; Err:='';
   End;
  End Else HaveA:=False;
@@ -16002,7 +21082,7 @@ Begin
   VJTrimS:=StartMs; VJTrimE:=EndMs; VJErr:=''; VJOut:=Nil;
   VFrameCb:=TranscodeCb;
   StageLo:=10; StageHi:=50; VJStarted:=False; VJCnt:=0;
-  Ok:=DecodeH264Track(M.Path,V,0,Err);
+  Ok:=DecodeVideoTrack(M.Path,V,0,DecMode,Err);
   VFrameCb:=Nil;
   If Ok And (VJErr<>'') Then Begin Ok:=False; Err:=VJErr; End;
   If Ok And Not VJStarted Then Begin Ok:=False; Err:='Aucune image d'#233'cod'#233'e.'; End;
