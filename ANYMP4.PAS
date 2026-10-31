@@ -1492,8 +1492,10 @@ Begin
  AddProf(0,'MP4 HD 1080P','MP4','H264','AAC','1920x1080',8000,192,44100,2);
  AddProf(0,'MP4 HD 720P','MP4','H264','AAC','1280x720',4000,192,44100,2);
  AddProf(0,'MP4 SD 480P','MP4','H264','AAC','854x480',1500,128,44100,2);
+ AddProf(0,'MP4 HEVC (H.265)','MP4','HEVC','AAC','Auto',3000,160,44100,2);
  AddProf(0,'MOV QuickTime','MOV','H264','AAC','Auto',5000,192,44100,2);
  AddProf(0,'MKV','MKV','H264','AAC','Auto',5000,192,44100,2);
+ AddProf(0,'MKV HEVC (H.265)','MKV','HEVC','AAC','Auto',3000,160,44100,2);
  AddProf(0,'AVI','AVI','MPEG4','MP3','Auto',3000,192,44100,2);
  AddProf(0,'WMV','WMV','WMV2','WMA','Auto',2500,128,44100,2);
  AddProf(0,'WebM VP8','WEBM','VP8','Vorbis','Auto',3000,128,44100,2);
@@ -1668,7 +1670,9 @@ Begin
  Else If (U='WMV1') Or (U='WMV2') Or (U='WMV3') Then FourCCName:='WMV'
  Else If (U='MP42') Or (U='MP43') Or (U='MPG4') Then FourCCName:='MSMPEG4'
  Else If (U='VP80') Then FourCCName:='VP8'
- Else If (U='VP90') Then FourCCName:='VP9'
+ Else If (U='APCH') Or (U='APCN') Or (U='APCS') Or (U='APCO') Or (U='AP4H') Or (U='AP4X') Then FourCCName:='ProRes'
+ Else If (U='VP6F') Or (U='VP60') Or (U='VP61') Or (U='VP62') Or (U='VP6A') Then FourCCName:='VP6'
+ Else If (U='VP90') Or (U='VP09') Then FourCCName:='VP9'
  Else If (U='AV01') Then FourCCName:='AV1'
  Else If (U='CVID') Then FourCCName:='Cinepak'
  Else If (U='IV50') Or (U='IV41') Or (U='IV32') Then FourCCName:='Indeo'
@@ -1855,7 +1859,7 @@ Var P,Sz,Hdr: LongInt; Id: String; Brand: String; TS,Dur: LongInt;
     End Else Begin
      If (B32(Q+H+88) Shr 16>0) Then Begin M.W:=B32(Q+H+88) Shr 16; M.H:=B32(Q+H+92) Shr 16; End;
     End;
-   End Else If I='hdlr' Then Cur:=C4(Q+H+8)
+   End Else If I='hdlr' Then Begin If C4(Q+H+4)<>'dhlr' Then Cur:=C4(Q+H+8); End
    Else If I='stsd' Then Begin
     Fc:=C4(Q+H+12);
     If Cur='vide' Then M.VCodec:=FourCCName(Fc)
@@ -18975,6 +18979,2408 @@ Begin
 End;
 {$ENDIF}
 { ======================================================================== }
+{ pe_prores.pas : decodeur Apple ProRes (422 Proxy/LT/Standard/HQ, 4444,   }
+{ 4444 XQ), 10 et 12 bits, progressif et entrelace, alpha, matrices de     }
+{ quantification personnalisees.                                           }
+{                                                                          }
+{ Port fidele de FFmpeg n6.1.1 (LGPL-2.1+) :                               }
+{   libavcodec/proresdec2.c   (Copyright (c) 2010-2011 Maxim Poliakovski,  }
+{                              Elvis Presley)                              }
+{   libavcodec/proresdsp.c    (idct_put 10/12 bits, ecretage)              }
+{   libavcodec/proresdata.c   (tables de balayage)                         }
+{   libavcodec/simple_idct.c + simple_idct_template.c                      }
+{                             (ff_prores_idct_10 / ff_prores_idct_12,      }
+{                              (c) 2001 Michael Niedermayer)               }
+{                                                                          }
+{ Interface publique (prefixe PR) :                                        }
+{   Procedure PrConfig(Tag: String);   fourcc du conteneur ('apch', ...,   }
+{                                      'ap4h','ap4x') ; fixe 10/12 bits    }
+{   Function  PrFrame(P: PEABuffer; Len: LongInt): LongInt; 0 = ok, <0 = erreur }
+{        (paquet invalide : image ignoree, aucun Fail ni Halt)             }
+{   Var PrHook: Procedure(B: Pointer; W,H: LongInt);  YUV420 8 bits        }
+{   Procedure PrFree;                                                      }
+{   Plans natifs 16 bits : PrPlaneY/U/V/A, PrW, PrH, PrCW, PrCH,           }
+{   PrStrideY, PrStrideC (en echantillons Word), PrBits, PrChroma444,      }
+{   PrHasAlpha, PrInterlaced, PrTopFirst, PrPrimaries, PrTrc, PrMatrix.    }
+{ ======================================================================== }
+
+Type
+ TPrWords=Array[0..900000000] Of Word;
+ PPrWords=^TPrWords;
+ TPrSlice=Record
+  Off,Size: LongInt;      { decalage dans l'image et taille des donnees }
+  MbX,MbY,MbCount: LongInt;
+ End;
+ TPrSliceArr=Array[0..1000000] Of TPrSlice;
+ PPrSlice=^TPrSliceArr;
+ TPrBytes=Array[0..63] Of Byte; PPrBytes=^TPrBytes;
+
+Const
+ PrScanProg: Array[0..63] Of Byte=(
+   0,  1,  8,  9,  2,  3, 10, 11,
+  16, 17, 24, 25, 18, 19, 26, 27,
+   4,  5, 12, 20, 13,  6,  7, 14,
+  21, 28, 29, 22, 15, 23, 30, 31,
+  32, 33, 40, 48, 41, 34, 35, 42,
+  49, 56, 57, 50, 43, 36, 37, 44,
+  51, 58, 59, 52, 45, 38, 39, 46,
+  53, 60, 61, 54, 47, 55, 62, 63);
+ PrScanInter: Array[0..63] Of Byte=(
+   0,  8,  1,  9, 16, 24, 17, 25,
+   2, 10,  3, 11, 18, 26, 19, 27,
+  32, 40, 33, 34, 41, 48, 56, 49,
+  42, 35, 43, 50, 57, 58, 51, 59,
+   4, 12,  5,  6, 13, 20, 28, 21,
+  14,  7, 15, 22, 29, 36, 44, 37,
+  30, 23, 31, 38, 45, 52, 60, 53,
+  46, 39, 47, 54, 61, 62, 55, 63);
+ PrDcCodebook: Array[0..6] Of Byte=($04,$28,$28,$4D,$4D,$70,$70);
+ PrRunToCb: Array[0..15] Of Byte=($06,$06,$05,$05,$04,$29,$29,$29,$29,$28,$28,$28,$28,$28,$28,$4C);
+ PrLevToCb: Array[0..9] Of Byte=($04,$0A,$05,$06,$04,$28,$28,$28,$28,$4C);
+
+Var
+ PrHook: Procedure(B: Pointer; W,H: LongInt);
+ { parametres de flux }
+ PrTag: LongInt;             { fourcc du conteneur (0 = inconnu) }
+ PrBits: LongInt;            { 10 ou 12 }
+ PrW,PrH,PrCW,PrCH: LongInt; { dimensions affichees luma / chroma }
+ PrChroma444,PrHasAlpha,PrInterlaced,PrTopFirst: Boolean;
+ PrAlphaInfo,PrFrameType: LongInt;
+ PrPrimaries,PrTrc,PrMatrix: LongInt;
+ PrMbW,PrMbH: LongInt;
+ PrStrideY,PrStrideC: LongInt;
+ PrPlaneY,PrPlaneU,PrPlaneV,PrPlaneA: PPrWords;
+ PrPlY,PrPlC: LongInt;       { taille allouee (echantillons) luma / chroma }
+ PrAllocW,PrAllocH: LongInt; { dimensions pour lesquelles les plans sont alloues }
+ PrAllocKey: LongInt;
+ PrHave: Boolean;
+ PrOut: PEABuffer; PrOutSz: LongInt;
+ { etat interne }
+ PrQmatL,PrQmatC: Array[0..63] Of Byte;
+ PrQsL,PrQsC: Array[0..63] Of SmallInt;
+ PrBlk: Array[0..2047] Of SmallInt;
+ PrAlp: Array[0..2047] Of Word;
+ PrSlices: PPrSlice; PrSliceCap,PrSliceCount: LongInt;
+ PrFirstField: Boolean;
+ PrScan: PPrBytes;              { table de balayage courante }
+ PrErr: Boolean;
+ { lecteur de bits (tranche courante) }
+ PrBp: PEABuffer; PrBlen,PrBpos: LongInt;  { tampon, taille (octets), position (bits) }
+ { constantes IDCT selon la profondeur }
+ PrW1,PrW2,PrW3,PrW4,PrW5,PrW6,PrW7,PrRowSh,PrColSh,PrColAdd: LongInt;
+
+Function PrSar(V: LongInt; N: LongInt): LongInt;
+Begin
+ If V>=0 Then PrSar:=V Shr N Else PrSar:=-((-(V+1)) Shr N)-1;
+End;
+
+Function PrClip(V,Lo,Hi: LongInt): LongInt;
+Begin
+ If V<Lo Then PrClip:=Lo Else If V>Hi Then PrClip:=Hi Else PrClip:=V;
+End;
+
+Function PrRB16(Var B; O: LongInt): LongInt;
+Var Q: PEABuffer;
+Begin
+ Q:=PEABuffer(@B); PrRB16:=(Q^[O] Shl 8) Or Q^[O+1];
+End;
+
+Function PrRB32(P: PEABuffer; O: LongInt): LongInt;
+Begin
+ PrRB32:=(P^[O] Shl 24) Or (P^[O+1] Shl 16) Or (P^[O+2] Shl 8) Or P^[O+3];
+End;
+
+Function PrR16(P: PEABuffer; O: LongInt): LongInt;
+Begin
+ PrR16:=(P^[O] Shl 8) Or P^[O+1];
+End;
+
+{ ---- lecteur de bits ---- }
+
+Procedure PrBInit(P: PEABuffer; Len: LongInt);
+Begin
+ PrBp:=P; PrBlen:=Len; PrBpos:=0;
+End;
+
+{ octet a la position O de la tranche (0 au-dela de la fin) }
+Function PrByte(O: LongInt): LongInt;
+Begin
+ If (O<0) Or (O>=PrBlen) Then PrByte:=0 Else PrByte:=PrBp^[O];
+End;
+
+{ 32 bits suivants sans consommer }
+Function PrPeek32: Int64;
+Var B,S: LongInt; V: Int64;
+Begin
+ B:=PrBpos Shr 3; S:=PrBpos And 7;
+ V:=(Int64(PrByte(B)) Shl 32) Or (Int64(PrByte(B+1)) Shl 24) Or (Int64(PrByte(B+2)) Shl 16)
+    Or (Int64(PrByte(B+3)) Shl 8) Or Int64(PrByte(B+4));
+ PrPeek32:=(V Shr (8-S)) And $FFFFFFFF;
+End;
+
+Function PrGetBits(N: LongInt): LongInt;
+Var V: Int64;
+Begin
+ If N=0 Then Begin PrGetBits:=0; Exit; End;
+ V:=PrPeek32;
+ PrGetBits:=LongInt(V Shr (32-N));
+ Inc(PrBpos,N);
+End;
+
+{ DECODE_CODEWORD : renvoie la valeur ; PrErr si invalide }
+Function PrCodeword(Cb: LongInt): LongInt;
+Var RiceOrder,ExpOrder,SwitchBits,Q,Bits: LongInt; Buf: Int64; Val: LongInt;
+Begin
+ Buf:=PrPeek32;
+ SwitchBits:=Cb And 3; RiceOrder:=Cb Shr 5; ExpOrder:=(Cb Shr 2) And 7;
+ { q = 31 - av_log2(buf) ; av_log2(0)=0 }
+ If Buf=0 Then Q:=31
+ Else Begin
+  Q:=0;
+  While (Buf And $80000000)=0 Do Begin Buf:=Buf Shl 1; Inc(Q); End;
+  Buf:=PrPeek32;
+ End;
+ If Q>SwitchBits Then Begin
+  Bits:=ExpOrder-SwitchBits+(Q Shl 1);
+  If Bits>31 Then Begin PrErr:=True; PrCodeword:=0; Exit; End;
+  Val:=LongInt(Buf Shr (32-Bits))-(1 Shl ExpOrder)+((SwitchBits+1) Shl RiceOrder);
+  Inc(PrBpos,Bits);
+ End Else If RiceOrder<>0 Then Begin
+  Inc(PrBpos,Q+1);
+  Val:=(Q Shl RiceOrder)+PrGetBits(RiceOrder);
+ End Else Begin
+  Val:=Q; Inc(PrBpos,Q+1);
+ End;
+ PrCodeword:=Val;
+End;
+
+{ ---- coefficients DC / AC d'une tranche ---- }
+
+Procedure PrDecodeDc(Blocks: LongInt);
+Var PrevDc,Code,I,Sign,Idx: LongInt;
+Begin
+ Code:=PrCodeword($B8);
+ PrevDc:=(Code Shr 1) Xor (-(Code And 1));
+ PrBlk[0]:=SmallInt(PrevDc);
+ Idx:=64;
+ Code:=5; Sign:=0;
+ For I:=1 To Blocks-1 Do Begin
+  If Code>6 Then Code:=PrCodeword(PrDcCodebook[6]) Else Code:=PrCodeword(PrDcCodebook[Code]);
+  If Code<>0 Then Sign:=Sign Xor (-(Code And 1)) Else Sign:=0;
+  PrevDc:=SmallInt(PrevDc+(((Code+1) Shr 1) Xor Sign)-Sign);
+  PrBlk[Idx]:=SmallInt(PrevDc);
+  Inc(Idx,64);
+ End;
+End;
+
+Procedure PrDecodeAc(Blocks: LongInt);
+Var Log2Bc,MaxCoeffs,BlockMask,BitsLeft,Sign,I: LongInt;
+    Pos,Run,Level: Int64; Pk: Int64;
+Begin
+ Log2Bc:=0; While (1 Shl (Log2Bc+1))<=Blocks Do Inc(Log2Bc);
+ Run:=4; Level:=2;
+ MaxCoeffs:=64 Shl Log2Bc; BlockMask:=Blocks-1;
+ Pos:=BlockMask;
+ While True Do Begin
+  BitsLeft:=PrBlen*8-PrBpos;
+  If BitsLeft<=0 Then Break;
+  If BitsLeft<32 Then Begin
+   Pk:=PrPeek32;
+   If (Pk Shr (32-BitsLeft))=0 Then Break;
+  End;
+  If Run>15 Then Run:=PrCodeword(PrRunToCb[15]) Else Run:=PrCodeword(PrRunToCb[Run]);
+  If PrErr Then Exit;
+  Pos:=Pos+Run+1;
+  If (Pos>=MaxCoeffs) Or (Pos<0) Then Begin PrErr:=True; Exit; End;
+  If Level>9 Then Level:=PrCodeword(PrLevToCb[9]) Else Level:=PrCodeword(PrLevToCb[Level]);
+  If PrErr Then Exit;
+  Level:=Level+1;
+  I:=Pos Shr Log2Bc;
+  Sign:=-LongInt(PrGetBits(1));
+  PrBlk[((Pos And BlockMask) Shl 6)+PrScan^[I]]:=SmallInt((Level Xor Sign)-Sign);
+ End;
+End;
+
+{ ---- IDCT ProRes (ff_prores_idct_10 / _12) + ecretage proresdsp ---- }
+
+Procedure PrIdctPut(Dst: PPrWords; Pos,Stride: LongInt; Blk: LongInt; Var Qm: Array Of SmallInt);
+Var I,K,O,A0,A1,A2,A3,B0,B1,B2,B3,R0,R1,R2,R3,R4,R5,R6,R7,Mx,V: LongInt; Dc: Boolean;
+Begin
+ For I:=0 To 63 Do PrBlk[Blk+I]:=SmallInt(LongInt(PrBlk[Blk+I])*Qm[I]);
+ { lignes }
+ For I:=0 To 7 Do Begin
+  O:=Blk+I*8;
+  R0:=PrBlk[O]; R1:=PrBlk[O+1]; R2:=PrBlk[O+2]; R3:=PrBlk[O+3];
+  R4:=PrBlk[O+4]; R5:=PrBlk[O+5]; R6:=PrBlk[O+6]; R7:=PrBlk[O+7];
+  If (R1 Or R2 Or R3 Or R4 Or R5 Or R6 Or R7)=0 Then Begin
+   V:=SmallInt(PrSar(R0+1,1));
+   For K:=0 To 7 Do PrBlk[O+K]:=V;
+  End Else Begin
+   A0:=PrW4*R0+(1 Shl (PrRowSh-1));
+   A1:=A0; A2:=A0; A3:=A0;
+   A0:=A0+PrW2*R2; A1:=A1+PrW6*R2; A2:=A2-PrW6*R2; A3:=A3-PrW2*R2;
+   B0:=PrW1*R1+PrW3*R3;
+   B1:=PrW3*R1-PrW7*R3;
+   B2:=PrW5*R1-PrW1*R3;
+   B3:=PrW7*R1-PrW5*R3;
+   A0:=A0+PrW4*R4+PrW6*R6;
+   A1:=A1-PrW4*R4-PrW2*R6;
+   A2:=A2-PrW4*R4+PrW2*R6;
+   A3:=A3+PrW4*R4-PrW6*R6;
+   B0:=B0+PrW5*R5+PrW7*R7;
+   B1:=B1-PrW1*R5-PrW5*R7;
+   B2:=B2+PrW7*R5+PrW3*R7;
+   B3:=B3+PrW3*R5-PrW1*R7;
+   PrBlk[O  ]:=SmallInt(PrSar(A0+B0,PrRowSh));
+   PrBlk[O+7]:=SmallInt(PrSar(A0-B0,PrRowSh));
+   PrBlk[O+1]:=SmallInt(PrSar(A1+B1,PrRowSh));
+   PrBlk[O+6]:=SmallInt(PrSar(A1-B1,PrRowSh));
+   PrBlk[O+2]:=SmallInt(PrSar(A2+B2,PrRowSh));
+   PrBlk[O+5]:=SmallInt(PrSar(A2-B2,PrRowSh));
+   PrBlk[O+3]:=SmallInt(PrSar(A3+B3,PrRowSh));
+   PrBlk[O+4]:=SmallInt(PrSar(A3-B3,PrRowSh));
+  End;
+ End;
+ { colonnes }
+ For I:=0 To 7 Do Begin
+  O:=Blk+I;
+  PrBlk[O]:=SmallInt(LongInt(PrBlk[O])+8192);
+  R0:=PrBlk[O]; R1:=PrBlk[O+8]; R2:=PrBlk[O+16]; R3:=PrBlk[O+24];
+  R4:=PrBlk[O+32]; R5:=PrBlk[O+40]; R6:=PrBlk[O+48]; R7:=PrBlk[O+56];
+  A0:=PrW4*(R0+PrColAdd);
+  A1:=A0; A2:=A0; A3:=A0;
+  A0:=A0+PrW2*R2; A1:=A1+PrW6*R2; A2:=A2-PrW6*R2; A3:=A3-PrW2*R2;
+  B0:=PrW1*R1+PrW3*R3;
+  B1:=PrW3*R1-PrW7*R3;
+  B2:=PrW5*R1-PrW1*R3;
+  B3:=PrW7*R1-PrW5*R3;
+  A0:=A0+PrW4*R4; A1:=A1-PrW4*R4; A2:=A2-PrW4*R4; A3:=A3+PrW4*R4;
+  B0:=B0+PrW5*R5; B1:=B1-PrW1*R5; B2:=B2+PrW7*R5; B3:=B3+PrW3*R5;
+  A0:=A0+PrW6*R6; A1:=A1-PrW2*R6; A2:=A2+PrW2*R6; A3:=A3-PrW6*R6;
+  B0:=B0+PrW7*R7; B1:=B1-PrW5*R7; B2:=B2+PrW3*R7; B3:=B3-PrW1*R7;
+  PrBlk[O   ]:=SmallInt(PrSar(A0+B0,PrColSh));
+  PrBlk[O+8 ]:=SmallInt(PrSar(A1+B1,PrColSh));
+  PrBlk[O+16]:=SmallInt(PrSar(A2+B2,PrColSh));
+  PrBlk[O+24]:=SmallInt(PrSar(A3+B3,PrColSh));
+  PrBlk[O+32]:=SmallInt(PrSar(A3-B3,PrColSh));
+  PrBlk[O+40]:=SmallInt(PrSar(A2-B2,PrColSh));
+  PrBlk[O+48]:=SmallInt(PrSar(A1-B1,PrColSh));
+  PrBlk[O+56]:=SmallInt(PrSar(A0-B0,PrColSh));
+ End;
+ { put_pixels : ecretage [4 , (1<<bits)-4-1] }
+ Mx:=(1 Shl PrBits)-5;
+ For K:=0 To 7 Do Begin
+  O:=Pos+K*Stride;
+  For I:=0 To 7 Do Begin
+   V:=PrBlk[Blk+K*8+I];
+   If V<4 Then V:=4 Else If V>Mx Then V:=Mx;
+   Dst^[O+I]:=V;
+  End;
+ End;
+End;
+
+{ ---- alpha (unpack_alpha) ---- }
+
+Procedure PrUnpackAlpha(NumCoeffs,NumBits: LongInt);
+Var Mask,Idx,Val,AlphaVal,Sign,I,Sh: LongInt; Out: Word;
+ Procedure Put;
+ Begin
+  If NumBits=16 Then Begin
+   If PrBits=10 Then Out:=AlphaVal Shr 6 Else Out:=AlphaVal Shr 4;
+  End Else Begin
+   If PrBits=10 Then Out:=(AlphaVal Shl 2) Or (AlphaVal Shr 6)
+   Else Out:=(AlphaVal Shl 4) Or (AlphaVal Shr 4);
+  End;
+  PrAlp[Idx]:=Out; Inc(Idx);
+ End;
+Begin
+ Mask:=(1 Shl NumBits)-1;
+ Idx:=0; AlphaVal:=Mask;
+ Repeat
+  Repeat
+   If PrGetBits(1)<>0 Then Val:=PrGetBits(NumBits)
+   Else Begin
+    If NumBits=16 Then Sh:=7 Else Sh:=4;
+    Val:=PrGetBits(Sh);
+    Sign:=Val And 1;
+    Val:=(Val+2) Shr 1;
+    If Sign<>0 Then Val:=-Val;
+   End;
+   AlphaVal:=(AlphaVal+Val) And Mask;
+   Put;
+   If Idx>=NumCoeffs Then Break;
+  Until Not ((PrBlen*8-PrBpos>0) And (PrGetBits(1)<>0));
+  Val:=PrGetBits(4);
+  If Val=0 Then Val:=PrGetBits(11);
+  If Idx+Val>NumCoeffs Then Val:=NumCoeffs-Idx;
+  For I:=0 To Val-1 Do Put;
+ Until Idx>=NumCoeffs;
+End;
+
+{ ---- tranches ---- }
+
+Procedure PrSetupIdct;
+Begin
+ If PrBits=10 Then Begin
+  PrW1:=22725; PrW2:=21407; PrW3:=19265; PrW4:=16384; PrW5:=12873; PrW6:=8867; PrW7:=4520;
+  PrRowSh:=13+2; PrColSh:=18;
+ End Else Begin
+  PrW1:=45451; PrW2:=42813; PrW3:=38531; PrW4:=32767; PrW5:=25746; PrW6:=17734; PrW7:=9041;
+  PrRowSh:=16; PrColSh:=17;
+ End;
+ PrColAdd:=(1 Shl (PrColSh-1)) Div PrW4;
+End;
+
+{ renvoie False en cas de donnees invalides }
+Function PrDecodeSlice(Pic: PEABuffer; Var S: TPrSlice): Boolean;
+Var Buf: PEABuffer; I,J,HdrSize,Qscale,YSz,USz,VSz,ASz,Offs,LStride,CStride,Log2Cb,MbxShift,CBpm: LongInt;
+    DY,DU,DV,DA,MbMaxX,Row,Col,Nb,BlkIdx,Dp,Fill: LongInt; NoChroma: Boolean;
+Begin
+ PrDecodeSlice:=False;
+ Buf:=PEABuffer(@Pic^[S.Off]);
+ HdrSize:=Buf^[0] Shr 3;
+ Qscale:=PrClip(Buf^[1],1,224);
+ If Qscale>128 Then Qscale:=(Qscale-96) Shl 2;
+ YSz:=PrR16(Buf,2); USz:=PrR16(Buf,4);
+ VSz:=S.Size-YSz-USz-HdrSize;
+ If HdrSize>S.Size Then Exit;
+ If HdrSize>7 Then VSz:=PrR16(Buf,6);
+ ASz:=S.Size-YSz-USz-VSz-HdrSize;
+ If (YSz<0) Or (USz<0) Or (VSz<0) Or (HdrSize+YSz+USz+VSz>S.Size) Then Exit;
+ Buf:=PEABuffer(@Buf^[HdrSize]);
+ For I:=0 To 63 Do Begin
+  PrQsL[I]:=SmallInt(PrQmatL[I]*Qscale);
+  PrQsC[I]:=SmallInt(PrQmatC[I]*Qscale);
+ End;
+ If PrFrameType=0 Then Begin LStride:=PrStrideY; CStride:=PrStrideC; End
+ Else Begin LStride:=PrStrideY*2; CStride:=PrStrideC*2; End;
+ If PrChroma444 Then Begin MbxShift:=16; Log2Cb:=2; End Else Begin MbxShift:=8; Log2Cb:=1; End;
+ DY:=(S.MbY*16)*LStride+S.MbX*16;
+ DU:=(S.MbY*16)*CStride+S.MbX*MbxShift;
+ DV:=DU;
+ Offs:=DY;
+ If (PrFrameType<>0) And (PrFirstField<>PrTopFirst) Then Begin
+  Inc(DY,PrStrideY); Inc(DU,PrStrideC); DV:=DU; Inc(Offs,PrStrideY);
+ End;
+ { luma }
+ Nb:=S.MbCount*4;
+ FillChar(PrBlk,Nb*128,0);
+ PrBInit(Buf,YSz);
+ PrErr:=False;
+ PrDecodeDc(Nb); If PrErr Then Exit;
+ PrDecodeAc(Nb); If PrErr Then Exit;
+ BlkIdx:=0; Dp:=DY;
+ For I:=0 To S.MbCount-1 Do Begin
+  PrIdctPut(PrPlaneY,Dp,LStride,BlkIdx,PrQsL);
+  PrIdctPut(PrPlaneY,Dp+8,LStride,BlkIdx+64,PrQsL);
+  PrIdctPut(PrPlaneY,Dp+8*LStride,LStride,BlkIdx+128,PrQsL);
+  PrIdctPut(PrPlaneY,Dp+8*LStride+8,LStride,BlkIdx+192,PrQsL);
+  Inc(BlkIdx,256); Inc(Dp,16);
+ End;
+ { chroma }
+ If (USz+VSz)>0 Then Begin
+  CBpm:=Log2Cb;
+  For J:=0 To 1 Do Begin
+   Nb:=S.MbCount Shl CBpm;
+   FillChar(PrBlk,Nb*128,0);
+   If J=0 Then Begin PrBInit(PEABuffer(@Buf^[YSz]),USz); Dp:=DU; End
+   Else Begin PrBInit(PEABuffer(@Buf^[YSz+USz]),VSz); Dp:=DV; End;
+   PrErr:=False;
+   PrDecodeDc(Nb); If PrErr Then Exit;
+   PrDecodeAc(Nb); If PrErr Then Exit;
+   BlkIdx:=0;
+   For I:=0 To S.MbCount-1 Do
+    For Col:=0 To CBpm-1 Do Begin
+     If J=0 Then Begin
+      PrIdctPut(PrPlaneU,Dp,CStride,BlkIdx,PrQsC);
+      PrIdctPut(PrPlaneU,Dp+8*CStride,CStride,BlkIdx+64,PrQsC);
+     End Else Begin
+      PrIdctPut(PrPlaneV,Dp,CStride,BlkIdx,PrQsC);
+      PrIdctPut(PrPlaneV,Dp+8*CStride,CStride,BlkIdx+64,PrQsC);
+     End;
+     Inc(BlkIdx,128); Inc(Dp,8);
+    End;
+  End;
+ End Else Begin
+  MbMaxX:=S.MbCount*MbxShift;
+  If PrBits=10 Then Fill:=511 Else Fill:=511*4;
+  For Row:=0 To 15 Do
+   For Col:=0 To MbMaxX-1 Do Begin
+    PrPlaneU^[DU+Row*CStride+Col]:=Fill;
+    PrPlaneV^[DV+Row*CStride+Col]:=Fill;
+   End;
+ End;
+ { alpha }
+ If (PrAlphaInfo<>0) And (PrPlaneA<>Nil) And (ASz>0) Then Begin
+  PrBInit(PEABuffer(@Buf^[YSz+USz+VSz]),ASz);
+  If PrAlphaInfo=2 Then PrUnpackAlpha(S.MbCount*256,16) Else PrUnpackAlpha(S.MbCount*256,8);
+  Dp:=Offs; BlkIdx:=0;
+  For I:=0 To 15 Do Begin
+   For Col:=0 To 16*S.MbCount-1 Do PrPlaneA^[Dp+Col]:=PrAlp[BlkIdx+Col];
+   Inc(Dp,LStride); Inc(BlkIdx,16*S.MbCount);
+  End;
+ End;
+ PrDecodeSlice:=True;
+End;
+
+{ ---- memoire ---- }
+
+Procedure PrFreePlanes;
+Begin
+ If PrHave Then Begin
+  FreeMem(PrPlaneY,PrPlY*2+16);
+  FreeMem(PrPlaneU,PrPlC*2+16);
+  FreeMem(PrPlaneV,PrPlC*2+16);
+  If PrPlaneA<>Nil Then FreeMem(PrPlaneA,PrPlY*2+16);
+  PrPlaneA:=Nil; PrPlaneY:=Nil; PrPlaneU:=Nil; PrPlaneV:=Nil; PrHave:=False;
+ End;
+End;
+
+Procedure PrFree;
+Begin
+ PrFreePlanes;
+ If PrOut<>Nil Then Begin FreeMem(PrOut,PrOutSz); PrOut:=Nil; PrOutSz:=0; End;
+ If PrSlices<>Nil Then Begin FreeMem(PrSlices,PrSliceCap*SizeOf(TPrSlice)); PrSlices:=Nil; PrSliceCap:=0; End;
+ PrAllocW:=0; PrAllocH:=0; PrAllocKey:=-1;
+ PrW:=0; PrH:=0;
+End;
+
+Procedure PrConfig(Tag: String);
+Begin
+ PrTag:=0;
+ If Length(Tag)>=4 Then PrTag:=Ord(Tag[1]) Or (Ord(Tag[2]) Shl 8) Or (Ord(Tag[3]) Shl 16) Or (Ord(Tag[4]) Shl 24);
+End;
+
+{ allocation des plans pour la geometrie courante }
+Function PrAlloc: Boolean;
+Var Key,Rows,CRows: LongInt;
+Begin
+ PrAlloc:=True;
+ Key:=(Ord(PrChroma444) Shl 2) Or (Ord(PrHasAlpha) Shl 1) Or Ord(PrInterlaced);
+ If PrHave And (PrAllocW=PrW) And (PrAllocH=PrH) And (PrAllocKey=Key) Then Exit;
+ PrFreePlanes;
+ If (PrMbW*PrMbH*256>100000000) Then Begin PrAlloc:=False; Exit; End;
+ PrStrideY:=PrMbW*16;
+ If PrChroma444 Then PrStrideC:=PrMbW*16 Else PrStrideC:=PrMbW*8;
+ Rows:=PrMbH*16; If PrInterlaced Then Rows:=Rows*2;
+ CRows:=Rows;
+ PrPlY:=PrStrideY*Rows; PrPlC:=PrStrideC*CRows;
+ GetMem(PrPlaneY,PrPlY*2+16); FillChar(PrPlaneY^,PrPlY*2,0);
+ GetMem(PrPlaneU,PrPlC*2+16); FillChar(PrPlaneU^,PrPlC*2,0);
+ GetMem(PrPlaneV,PrPlC*2+16); FillChar(PrPlaneV^,PrPlC*2,0);
+ PrPlaneA:=Nil;
+ If PrHasAlpha Then Begin
+  GetMem(PrPlaneA,PrPlY*2+16); FillChar(PrPlaneA^,PrPlY*2,0);
+ End;
+ PrAllocW:=PrW; PrAllocH:=PrH; PrAllocKey:=Key; PrHave:=True;
+End;
+
+{ ---- en-tete d'image ---- }
+
+{ renvoie la taille de l'en-tete, ou <0 }
+Function PrFrameHeader(B: PEABuffer; DataSize: LongInt): LongInt;
+Var HdrSize,Version,Flags,Ptr,Wd,Ht,I,Fl12: LongInt;
+Begin
+ PrFrameHeader:=-1;
+ HdrSize:=PrR16(B,0);
+ If HdrSize>DataSize Then Exit;
+ If HdrSize<20 Then Exit;
+ Version:=PrR16(B,2);
+ If Version>1 Then Exit;
+ Wd:=PrR16(B,8); Ht:=PrR16(B,10);
+ If (Wd=0) Or (Ht=0) Then Exit;
+ Fl12:=B^[12];
+ PrFrameType:=(Fl12 Shr 2) And 3;
+ PrAlphaInfo:=B^[17] And $F;
+ If PrAlphaInfo>2 Then Exit;
+ PrInterlaced:=PrFrameType<>0;
+ PrTopFirst:=PrFrameType=1;
+ PrChroma444:=(Fl12 And $C0)=$C0;
+ PrHasAlpha:=PrAlphaInfo<>0;
+ { profondeur : donnee par le fourcc du conteneur (ffmpeg) }
+ If PrTag<>0 Then Begin
+  If (PrTag=(Ord('a') Or (Ord('p') Shl 8) Or (Ord('4') Shl 16) Or (Ord('h') Shl 24)))
+   Or (PrTag=(Ord('a') Or (Ord('p') Shl 8) Or (Ord('4') Shl 16) Or (Ord('x') Shl 24))) Then PrBits:=12
+  Else PrBits:=10;
+ End Else If PrChroma444 Then PrBits:=12 Else PrBits:=10;
+ PrSetupIdct;
+ PrW:=Wd; PrH:=Ht;
+ If PrChroma444 Then PrCW:=Wd Else PrCW:=(Wd+1) Shr 1;
+ PrCH:=Ht;
+ PrPrimaries:=B^[14]; PrTrc:=B^[15]; PrMatrix:=B^[16];
+ PrMbW:=(Wd+15) Shr 4;
+ If PrFrameType<>0 Then PrMbH:=(Ht+31) Shr 5 Else PrMbH:=(Ht+15) Shr 4;
+ If PrFrameType=0 Then PrScan:=@PrScanProg Else PrScan:=@PrScanInter;
+ Ptr:=20; Flags:=B^[19];
+ If (Flags And 2)<>0 Then Begin
+  If DataSize-Ptr<64 Then Exit;
+  For I:=0 To 63 Do PrQmatL[I]:=B^[Ptr+I];
+  Inc(Ptr,64);
+ End Else FillChar(PrQmatL,64,4);
+ If (Flags And 1)<>0 Then Begin
+  If DataSize-Ptr<64 Then Exit;
+  For I:=0 To 63 Do PrQmatC[I]:=B^[Ptr+I];
+ End Else Move(PrQmatL,PrQmatC,64);
+ PrFrameHeader:=HdrSize;
+End;
+
+{ analyse l'en-tete d'une image (champ) ; renvoie pic_data_size ou <0 }
+Function PrPictureHeader(B: PEABuffer; BufSize: LongInt): LongInt;
+Var I,HdrSize,PicSize,LogW,LogH,SliceCount,MbCount,Mx,My,DataOff,IdxOff,Pc,M: LongInt;
+Begin
+ PrPictureHeader:=-1;
+ HdrSize:=B^[0] Shr 3;
+ If (HdrSize<8) Or (HdrSize>BufSize) Then Exit;
+ PicSize:=PrRB32(B,1);
+ If (PicSize<0) Or (PicSize>BufSize) Then Exit;
+ LogW:=B^[7] Shr 4; LogH:=B^[7] And $F;
+ If (LogW>3) Or (LogH<>0) Then Exit;
+ { slice_count = mb_height * ((mb_width >> logw) + popcount(mb_width & ((1<<logw)-1))) }
+ M:=PrMbW And ((1 Shl LogW)-1); Pc:=0;
+ While M<>0 Do Begin Pc:=Pc+(M And 1); M:=M Shr 1; End;
+ SliceCount:=PrMbH*((PrMbW Shr LogW)+Pc);
+ If SliceCount<=0 Then Exit;
+ If SliceCount>PrSliceCap Then Begin
+  If PrSlices<>Nil Then FreeMem(PrSlices,PrSliceCap*SizeOf(TPrSlice));
+  PrSliceCap:=SliceCount;
+  GetMem(PrSlices,PrSliceCap*SizeOf(TPrSlice));
+ End;
+ PrSliceCount:=SliceCount;
+ If HdrSize+SliceCount*2>BufSize Then Exit;
+ IdxOff:=HdrSize; DataOff:=IdxOff+SliceCount*2;
+ MbCount:=1 Shl LogW; Mx:=0; My:=0;
+ For I:=0 To SliceCount-1 Do Begin
+  PrSlices^[I].Off:=DataOff;
+  Inc(DataOff,PrR16(B,IdxOff+I*2));
+  While PrMbW-Mx<MbCount Do MbCount:=MbCount Shr 1;
+  PrSlices^[I].MbX:=Mx; PrSlices^[I].MbY:=My; PrSlices^[I].MbCount:=MbCount;
+  PrSlices^[I].Size:=DataOff-PrSlices^[I].Off;
+  If PrSlices^[I].Size<6 Then Exit;
+  Inc(Mx,MbCount);
+  If Mx=PrMbW Then Begin MbCount:=1 Shl LogW; Mx:=0; Inc(My); End;
+  If DataOff>BufSize Then Exit;
+ End;
+ If (Mx<>0) Or (My<>PrMbH) Then Exit;
+ PrPictureHeader:=PicSize;
+End;
+
+{ ---- conversion vers YUV 4:2:0 8 bits pour le hook ---- }
+{ Luma : (v + 2^(b-9)) >> (b-8) borne a 255. Chroma : moyenne verticale de }
+{ 2 lignes (4:2:2) ou de 2x2 echantillons (4:4:4), arrondie, puis meme     }
+{ decalage. Les bords impairs dupliquent la derniere ligne/colonne.       }
+Procedure PrToHook;
+Var X,Y,Sh,Cw,Ch,Need,V,Y0,Y1,X0,X1,Rnd: LongInt; Q: PEABuffer; Po,Pu: LongInt;
+Begin
+ Cw:=(PrW+1) Shr 1; Ch:=(PrH+1) Shr 1;
+ Need:=PrW*PrH+2*Cw*Ch+16;
+ If (PrOut=Nil) Or (PrOutSz<Need) Then Begin
+  If PrOut<>Nil Then FreeMem(PrOut,PrOutSz);
+  GetMem(PrOut,Need); PrOutSz:=Need;
+ End;
+ Sh:=PrBits-8; Rnd:=1 Shl (Sh-1);
+ Q:=PrOut;
+ For Y:=0 To PrH-1 Do
+  For X:=0 To PrW-1 Do Begin
+   V:=(PrPlaneY^[Y*PrStrideY+X]+Rnd) Shr Sh;
+   If V>255 Then V:=255;
+   Q^[Y*PrW+X]:=V;
+  End;
+ Po:=PrW*PrH;
+ For Y:=0 To Ch-1 Do Begin
+  Y0:=Y*2; Y1:=Y0+1; If Y1>=PrH Then Y1:=PrH-1;
+  For X:=0 To Cw-1 Do Begin
+   If PrChroma444 Then Begin
+    X0:=X*2; X1:=X0+1; If X1>=PrW Then X1:=PrW-1;
+    V:=PrPlaneU^[Y0*PrStrideC+X0]+PrPlaneU^[Y0*PrStrideC+X1]+PrPlaneU^[Y1*PrStrideC+X0]+PrPlaneU^[Y1*PrStrideC+X1];
+    V:=(V+(Rnd Shl 2)) Shr (Sh+2);
+    Pu:=PrPlaneV^[Y0*PrStrideC+X0]+PrPlaneV^[Y0*PrStrideC+X1]+PrPlaneV^[Y1*PrStrideC+X0]+PrPlaneV^[Y1*PrStrideC+X1];
+    Pu:=(Pu+(Rnd Shl 2)) Shr (Sh+2);
+   End Else Begin
+    V:=PrPlaneU^[Y0*PrStrideC+X]+PrPlaneU^[Y1*PrStrideC+X];
+    V:=(V+(Rnd Shl 1)) Shr (Sh+1);
+    Pu:=PrPlaneV^[Y0*PrStrideC+X]+PrPlaneV^[Y1*PrStrideC+X];
+    Pu:=(Pu+(Rnd Shl 1)) Shr (Sh+1);
+   End;
+   If V>255 Then V:=255;
+   If Pu>255 Then Pu:=255;
+   Q^[Po+Y*Cw+X]:=V;
+   Q^[Po+Cw*Ch+Y*Cw+X]:=Pu;
+  End;
+ End;
+End;
+
+{ ---- decodage d'un paquet ---- }
+
+Function PrFrame(P: PEABuffer; Len: LongInt): LongInt;
+Var Buf: PEABuffer; BufSize,FhSize,PicSize,I,Bad: LongInt; Ok: Boolean;
+Begin
+ PrFrame:=-1;
+ If (Len<28) Or (P^[4]<>Ord('i')) Or (P^[5]<>Ord('c')) Or (P^[6]<>Ord('p')) Or (P^[7]<>Ord('f')) Then
+  Begin PrFrame:=-1; Exit; End;
+ Buf:=PEABuffer(@P^[8]); BufSize:=Len-8;
+ PrFirstField:=True;
+ FhSize:=PrFrameHeader(Buf,BufSize);
+ If FhSize<0 Then Begin PrFrame:=-2; Exit; End;
+ Buf:=PEABuffer(@Buf^[FhSize]); BufSize:=BufSize-FhSize;
+ If Not PrAlloc Then Begin PrFrame:=-3; Exit; End;
+ If PrHasAlpha Then FillChar(PrPlaneA^,PrPlY*2,0);
+ Repeat
+  PicSize:=PrPictureHeader(Buf,BufSize);
+  If PicSize<0 Then Begin PrFrame:=-4; Exit; End;
+  Bad:=0;
+  For I:=0 To PrSliceCount-1 Do Begin
+   Ok:=PrDecodeSlice(Buf,PrSlices^[I]);
+   If Not Ok Then Inc(Bad);
+  End;
+  If Bad>=PrSliceCount Then Begin PrFrame:=-5; Exit; End;
+  Buf:=PEABuffer(@Buf^[PicSize]); BufSize:=BufSize-PicSize;
+  If PrFrameType<>0 Then Begin
+   If (BufSize>0) And PrFirstField Then PrFirstField:=False
+   Else Break;
+  End Else Break;
+ Until False;
+ PrFrame:=0;
+ If @PrHook<>Nil Then Begin
+  PrToHook;
+  PrHook(PrOut,PrW,PrH);
+ End;
+End;
+{ ======================================================================== }
+{ pe_vp6.pas : decodeur On2 VP6 (vp6f Flash, vp6a avec alpha, vp6 AVI).   }
+{                                                                          }
+{ Port de FFmpeg n6.1.1 (LGPL-2.1+) :                                      }
+{   libavcodec/vp6.c, vp56.c (Copyright (C) 2006 Aurelien Jacobs),         }
+{   vp56data.c, vp6data.h, vp56dsp.c, vp6dsp.c, vpx_rac.[ch],              }
+{   vp3dsp.c (idct VP3, filtre de boucle), huffman.c (arbre VP6),          }
+{   h264chroma (mc8 bilineaire), hpeldsp (copie 8x8), videodsp (bords).    }
+{                                                                          }
+{ Interface publique (prefixe V6) :                                        }
+{   Procedure V6Config(Alpha,Flip: Boolean; Adjust: LongInt);              }
+{        Alpha : flux vp6a (3 octets de decalage alpha en tete de paquet)  }
+{        Flip  : codec AVI 'vp6' (image a l'envers) ; False pour FLV       }
+{        Adjust: octet 'extradata' FLV (largeur/hauteur a retrancher,      }
+{                nibble haut/bas) ou -1 si absent                          }
+{   Procedure V6SetSize(W,H: LongInt); optionnel (taille du conteneur,     }
+{        cas F4V : rognage signale par le conteneur)                       }
+{   Function  V6Frame(P: PEABuffer; Len: LongInt): LongInt;  0 = ok,       }
+{        <0 = paquet invalide/abime (image ignoree, aucun Fail)            }
+{   Var V6Hook: Procedure(B: Pointer; W,H: LongInt);  YUV420 8 bits        }
+{   Procedure V6Free;                                                      }
+{   V6AlphaOut : plan alpha W*H (vp6a), V6W, V6H : dimensions affichees.   }
+{ ======================================================================== }
+
+Type
+ TV6Mv=Record X,Y: SmallInt; End;
+ TV6RefDc=Record NotNullDc: Byte; RefFrame: ShortInt; DcCoeff: SmallInt; End;
+ TV6RefDcArr=Array[0..65535] Of TV6RefDc; PV6RefDcArr=^TV6RefDcArr;
+ TV6Mb=Record Typ: Byte; Mv: TV6Mv; End;
+ TV6MbArr=Array[0..1000000] Of TV6Mb; PV6MbArr=^TV6MbArr;
+ TV6Rac=Record
+  High,Bits,Pos,EndP,EndReached: LongInt;
+  CodeWord: Int64;        { unsigned int 32 bits dans ffmpeg }
+ End;
+ TV6Model=Record
+  CoeffReorder,CoeffIndexToPos,CoeffIndexToIdctSel: Array[0..63] Of Byte;
+  VectorSig,VectorDct: Array[0..1] Of Byte;
+  VectorPdv: Array[0..1,0..6] Of Byte;
+  VectorFdv: Array[0..1,0..7] Of Byte;
+  CoeffDccv: Array[0..1,0..10] Of Byte;
+  CoeffRact: Array[0..1,0..2,0..5,0..10] Of Byte;
+  CoeffDcct: Array[0..1,0..2,0..4] Of Byte;
+  CoeffRunv: Array[0..1,0..13] Of Byte;
+  MbType: Array[0..2,0..9,0..9] Of Byte;
+  MbTypesStats: Array[0..2,0..9,0..1] Of Byte;
+ End;
+ TV6Tree=Record
+  Sym,N0: Array[0..23] Of SmallInt;
+  Head: LongInt;
+ End;
+ PV6Ctx=^TV6Ctx;
+ TV6Ctx=Record
+  C,Cc: TV6Rac;
+  UseCc: Boolean;           { ccp = &cc }
+  SubVersion,GoldenFrame: LongInt;
+  MbWidth,MbHeight: LongInt;
+  BlockOffset: Array[0..5] Of LongInt;
+  Quantizer,DequantDc,DequantAc: LongInt;
+  AboveBlocks: PV6RefDcArr;
+  LeftBlock: Array[0..3] Of TV6RefDc;
+  AboveBlockIdx: Array[0..5] Of LongInt;
+  PrevDc: Array[0..2,0..2] Of SmallInt;
+  MbTyp: LongInt;
+  Macroblocks: PV6MbArr;
+  BlockCoeff: Array[0..5,0..63] Of SmallInt;
+  IdctSelector: Array[0..5] Of LongInt;
+  Mv: Array[0..5] Of TV6Mv;
+  VectorCandidate: Array[0..1] Of TV6Mv;
+  VectorCandidatePos: LongInt;
+  FilterHeader,DeblockFiltering,FilterSelection,FilterMode,MaxVectorLength,SampleVarianceThreshold: LongInt;
+  Bound: Array[0..255] Of LongInt;      { bounding_values_array }
+  IsKey: Boolean;
+  UseHuffman: Boolean;
+  HuffCoeff: Boolean;       { parse_coeff = vp6_parse_coeff_huffman }
+  GbBase,GbSize,GbPos: LongInt;  { lecteur de bits (position en octets absolue dans le paquet, taille, position bits) }
+  DccvT,RunvT: Array[0..1] Of TV6Tree;
+  RactT: Array[0..1,0..2,0..5] Of TV6Tree;
+  NbNull: Array[0..1,0..1] Of LongInt;
+  Model: TV6Model;
+  IdxCur,IdxPrev,IdxGold: LongInt;
+  HaveUndamaged: Boolean;
+  Discard: Boolean;
+ End;
+ TV6Frame=Record P: Array[0..3] Of PEABuffer; End;
+Const
+ V6CoeffParse: Array[0..65] Of Byte=(
+  159,0,0,0,0,0,0,0,0,0,0,145,165,0,0,0,
+  0,0,0,0,0,0,140,148,173,0,0,0,0,0,0,0,
+  0,135,140,155,176,0,0,0,0,0,0,0,130,134,141,157,
+  180,0,0,0,0,0,0,129,130,133,140,153,177,196,230,243,
+  254,254);
+ V6DefMbStats: Array[0..59] Of Byte=(
+  69,42,1,2,1,7,44,42,6,22,1,3,0,2,1,5,
+  0,1,0,0,229,8,1,1,0,8,0,0,0,0,1,2,
+  0,1,0,0,1,1,0,0,122,35,1,1,1,6,46,34,
+  0,0,1,2,0,1,0,1,1,1,0,0);
+ V6CoeffBias: Array[0..10] Of Byte=(
+  0,1,2,3,4,5,7,11,19,35,67);
+ V6CoeffBitLen: Array[0..5] Of Byte=(
+  0,1,2,3,4,10);
+ V6AcDequant: Array[0..63] Of Byte=(
+  94,92,90,88,86,82,78,74,70,66,62,58,54,53,52,51,
+  50,49,48,47,46,45,44,43,42,40,39,37,36,35,34,33,
+  32,31,30,29,28,27,26,25,24,23,22,21,20,19,18,17,
+  16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1);
+ V6DcDequant: Array[0..63] Of Byte=(
+  47,47,47,47,45,43,43,43,43,43,42,41,41,40,40,40,
+  40,35,35,35,35,33,33,33,33,32,32,32,27,27,26,26,
+  25,25,24,24,23,23,19,19,19,19,18,18,17,16,16,16,
+  16,16,15,11,11,11,10,10,9,8,7,5,3,3,2,2);
+ V6PreDefMbStats: Array[0..959] Of Byte=(
+  9,15,32,25,7,19,9,21,1,12,14,12,3,18,14,23,
+  3,10,0,4,41,22,1,0,1,31,0,0,0,0,0,1,
+  1,7,0,1,98,25,4,10,2,3,2,3,0,2,0,2,
+  0,0,11,4,1,4,0,2,3,2,0,4,48,39,1,2,
+  11,27,29,44,7,27,1,4,0,3,1,6,1,2,0,0,
+  123,37,6,4,1,27,0,0,0,0,5,8,1,7,0,1,
+  12,10,0,2,49,46,3,4,7,31,42,41,0,0,2,6,
+  1,7,1,4,2,4,0,1,21,32,1,2,4,10,32,43,
+  6,23,2,3,1,19,1,6,12,21,0,7,26,14,14,12,
+  0,24,0,0,0,0,55,17,1,9,0,36,5,7,1,3,
+  26,25,1,1,2,10,67,39,0,0,1,1,0,14,0,2,
+  31,26,1,6,69,83,0,0,0,2,10,29,3,12,0,1,
+  0,3,0,3,2,2,0,0,209,5,0,0,0,27,0,0,
+  0,0,0,1,0,1,0,1,0,0,0,0,103,46,1,2,
+  2,10,33,42,0,0,1,4,0,3,0,1,1,3,0,0,
+  11,20,1,4,18,36,43,48,13,35,0,2,0,5,3,12,
+  1,2,0,0,2,5,4,5,0,121,0,0,0,0,0,3,
+  2,4,1,4,2,2,0,1,14,31,9,13,14,54,22,29,
+  0,0,2,6,4,18,6,13,1,5,0,1,70,44,0,1,
+  2,10,37,46,8,26,0,2,0,2,0,2,0,1,0,0,
+  175,5,0,1,0,48,0,0,0,0,0,2,0,1,0,2,
+  0,1,0,0,85,39,0,0,1,9,69,40,0,0,0,1,
+  0,3,0,1,2,3,0,0,8,15,0,1,8,21,74,53,
+  22,42,0,1,0,2,0,3,1,2,0,0,83,5,2,3,
+  0,102,0,0,0,0,1,3,0,2,0,1,0,0,0,0,
+  31,28,0,0,3,14,130,34,0,0,0,1,0,3,0,1,
+  3,3,0,1,141,42,0,0,1,4,11,24,1,11,0,1,
+  0,1,0,2,0,0,0,0,233,6,0,0,0,8,0,0,
+  0,0,0,1,0,1,0,0,0,1,0,0,171,25,0,0,
+  1,5,25,21,0,0,0,1,0,1,0,0,0,0,0,0,
+  8,19,4,10,24,45,21,37,9,29,0,3,1,7,11,25,
+  0,2,0,1,34,16,112,21,1,28,0,0,0,0,6,8,
+  1,7,0,3,2,5,0,2,17,21,68,29,6,15,13,22,
+  0,0,6,12,3,14,4,10,1,7,0,3,46,42,0,1,
+  2,10,54,51,10,30,0,2,0,2,0,1,0,1,0,0,
+  159,35,2,2,0,25,0,0,0,0,3,6,0,5,0,1,
+  4,4,0,1,51,39,0,1,2,12,91,44,0,0,0,2,
+  0,3,0,1,2,3,0,1,28,32,0,0,3,10,75,51,
+  14,33,0,1,0,2,0,1,1,2,0,0,75,39,5,7,
+  2,48,0,0,0,0,3,11,2,16,1,4,7,10,0,2,
+  81,25,0,0,2,9,106,26,0,0,0,1,0,1,0,1,
+  1,1,0,0,100,46,0,1,3,9,21,37,5,20,0,1,
+  0,2,1,2,0,1,0,0,212,21,0,1,0,9,0,0,
+  0,0,1,2,0,2,0,0,2,2,0,0,140,37,0,1,
+  1,8,24,33,0,0,1,2,0,2,0,1,1,2,0,0,
+  27,29,0,1,9,25,53,51,12,34,0,1,0,3,1,5,
+  0,2,0,0,4,2,0,0,0,172,0,0,0,0,0,1,
+  0,2,0,0,2,0,0,0,14,23,1,3,11,53,90,31,
+  0,0,0,3,1,5,2,6,1,2,0,0,80,38,0,0,
+  1,4,69,33,5,16,0,1,0,1,0,0,0,1,0,0,
+  187,22,1,1,0,17,0,0,0,0,3,6,0,4,0,1,
+  4,4,0,1,123,29,0,0,1,7,57,30,0,0,0,1,
+  0,1,0,1,0,1,0,0,16,20,0,0,2,8,104,49,
+  15,33,0,1,0,1,0,1,1,1,0,0,133,6,1,2,
+  1,70,0,0,0,0,0,2,0,4,0,3,1,1,0,0,
+  13,14,0,0,4,20,175,20,0,0,0,1,0,1,0,1,
+  1,1,0,0,194,16,0,0,1,1,1,9,1,3,0,0,
+  0,1,0,1,0,0,0,0,251,1,0,0,0,2,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,202,23,0,0,
+  1,3,2,9,0,0,0,1,0,1,0,1,0,0,0,0);
+ V6FilterThr: Array[0..63] Of Byte=(
+  14,14,13,13,12,12,10,10,10,10,8,8,8,8,8,8,
+  8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,
+  8,8,8,8,7,7,7,7,7,7,6,6,6,6,6,6,
+  5,5,5,5,4,4,4,4,4,4,4,3,3,3,3,2);
+ V6MbTmm: Array[0..5] Of Byte=(
+  171,83,199,140,125,104);
+ V6CandPos: Array[0..23] Of ShortInt=(
+  0,-1,-1,0,-1,-1,1,-1,0,-2,-2,0,-2,-1,-1,-2,
+  1,-2,2,-1,-2,-2,2,-2);
+ V6DefFdv: Array[0..15] Of Byte=(
+  247,210,135,68,138,220,239,246,244,184,201,44,173,221,239,253);
+ V6DefPdv: Array[0..13] Of Byte=(
+  225,146,172,147,214,39,156,204,170,119,235,140,230,228);
+ V6DefReorder: Array[0..63] Of Byte=(
+  0,0,1,1,1,2,2,2,2,2,2,3,3,4,4,4,
+  5,5,5,5,6,6,7,7,7,7,7,8,8,9,9,9,
+  9,9,9,10,10,11,11,11,11,11,11,12,12,12,12,12,
+  12,13,13,13,13,13,14,14,14,14,15,15,15,15,15,15);
+ V6DefRunv: Array[0..27] Of Byte=(
+  198,197,196,146,198,204,169,142,130,136,149,149,191,249,135,201,
+  181,154,98,117,132,126,146,169,184,240,246,254);
+ V6SigDctPct: Array[0..3] Of Byte=(
+  237,246,231,243);
+ V6PdvPct: Array[0..13] Of Byte=(
+  253,253,254,254,254,254,254,245,253,254,254,254,254,254);
+ V6FdvPct: Array[0..15] Of Byte=(
+  254,254,254,254,254,250,250,252,254,254,254,254,254,251,251,254);
+ V6DccvPct: Array[0..21] Of Byte=(
+  146,255,181,207,232,243,238,251,244,250,249,179,255,214,240,250,
+  255,244,255,255,255,255);
+ V6ReorderPct: Array[0..63] Of Byte=(
+  255,132,132,159,153,151,161,170,164,162,136,110,103,114,129,118,
+  124,125,132,136,114,110,142,135,134,123,143,126,153,183,166,161,
+  171,180,179,164,203,218,225,217,215,206,203,217,229,241,248,243,
+  253,255,253,255,255,255,255,255,255,255,255,255,255,255,255,255);
+ V6RunvPct: Array[0..27] Of Byte=(
+  219,246,238,249,232,239,249,255,248,253,239,244,241,248,198,232,
+  251,253,219,241,253,255,248,249,244,238,251,255);
+ V6RactPct: Array[0..395] Of Byte=(
+  227,246,230,247,244,255,255,255,255,255,255,255,255,209,231,231,
+  249,249,253,255,255,255,255,255,225,242,241,251,253,255,255,255,
+  255,255,255,241,253,252,255,255,255,255,255,255,255,255,248,255,
+  255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+  255,255,240,255,248,255,255,255,255,255,255,255,255,255,255,240,
+  253,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+  255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+  255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+  255,255,255,255,206,203,227,239,247,255,253,255,255,255,255,207,
+  199,220,236,243,252,252,255,255,255,255,212,219,230,243,244,253,
+  252,255,255,255,255,236,237,247,252,253,255,255,255,255,255,255,
+  240,240,248,255,255,255,255,255,255,255,255,255,255,255,255,255,
+  255,255,255,255,255,255,230,233,249,255,255,255,255,255,255,255,
+  255,238,238,250,255,255,255,255,255,255,255,255,248,251,255,255,
+  255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+  255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+  255,255,255,255,255,255,255,255,225,239,227,231,244,253,243,255,
+  255,253,255,232,234,224,228,242,249,242,252,251,251,255,235,249,
+  238,240,251,255,249,255,253,253,255,249,253,251,250,255,255,255,
+  255,255,255,255,251,250,249,255,255,255,255,255,255,255,255,255,
+  255,255,255,255,255,255,255,255,255,255,243,244,250,250,255,255,
+  255,255,255,255,255,249,248,250,253,255,255,255,255,255,255,255,
+  253,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+  255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+  255,255,255,255,255,255,255,255,255,255,255,255);
+ V6DccvLc: Array[0..29] Of SmallInt=(
+  122,133,0,1,78,171,139,117,168,79,133,51,0,1,169,71,
+  214,44,210,38,142,-16,0,1,221,-30,246,-3,203,17);
+ V6CoeffGroups: Array[0..63] Of Byte=(
+  0,0,1,1,1,2,2,2,2,2,2,3,3,3,3,3,
+  3,3,3,3,3,3,4,4,4,4,4,4,4,4,4,4,
+  4,4,4,4,4,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5);
+ V6CopyFilter: Array[0..543] Of SmallInt=(
+  0,128,0,0,-3,122,9,0,-4,109,24,-1,-5,91,45,-3,
+  -4,68,68,-4,-3,45,91,-5,-1,24,109,-4,0,9,122,-3,
+  0,128,0,0,-4,124,9,-1,-5,110,25,-2,-6,91,46,-3,
+  -5,69,69,-5,-3,46,91,-6,-2,25,110,-5,-1,9,124,-4,
+  0,128,0,0,-4,123,10,-1,-6,110,26,-2,-7,92,47,-4,
+  -6,70,70,-6,-4,47,92,-7,-2,26,110,-6,-1,10,123,-4,
+  0,128,0,0,-5,124,10,-1,-7,110,27,-2,-7,91,48,-4,
+  -6,70,70,-6,-4,48,92,-8,-2,27,110,-7,-1,10,124,-5,
+  0,128,0,0,-6,124,11,-1,-8,111,28,-3,-8,92,49,-5,
+  -7,71,71,-7,-5,49,92,-8,-3,28,111,-8,-1,11,124,-6,
+  0,128,0,0,-6,123,12,-1,-9,111,29,-3,-9,93,50,-6,
+  -8,72,72,-8,-6,50,93,-9,-3,29,111,-9,-1,12,123,-6,
+  0,128,0,0,-7,124,12,-1,-10,111,30,-3,-10,93,51,-6,
+  -9,73,73,-9,-6,51,93,-10,-3,30,111,-10,-1,12,124,-7,
+  0,128,0,0,-7,123,13,-1,-11,112,31,-4,-11,94,52,-7,
+  -10,74,74,-10,-7,52,94,-11,-4,31,112,-11,-1,13,123,-7,
+  0,128,0,0,-8,124,13,-1,-12,112,32,-4,-12,94,53,-7,
+  -10,74,74,-10,-7,53,94,-12,-4,32,112,-12,-1,13,124,-8,
+  0,128,0,0,-9,124,14,-1,-13,112,33,-4,-13,95,54,-8,
+  -11,75,75,-11,-8,54,95,-13,-4,33,112,-13,-1,14,124,-9,
+  0,128,0,0,-9,123,15,-1,-14,113,34,-5,-14,95,55,-8,
+  -12,76,76,-12,-8,55,95,-14,-5,34,112,-13,-1,15,123,-9,
+  0,128,0,0,-10,124,15,-1,-14,113,34,-5,-15,96,56,-9,
+  -13,77,77,-13,-9,56,96,-15,-5,34,113,-14,-1,15,124,-10,
+  0,128,0,0,-10,123,16,-1,-15,113,35,-5,-16,98,56,-10,
+  -14,78,78,-14,-10,56,98,-16,-5,35,113,-15,-1,16,123,-10,
+  0,128,0,0,-11,124,17,-2,-16,113,36,-5,-17,98,57,-10,
+  -14,78,78,-14,-10,57,98,-17,-5,36,113,-16,-2,17,124,-11,
+  0,128,0,0,-12,125,17,-2,-17,114,37,-6,-18,99,58,-11,
+  -15,79,79,-15,-11,58,99,-18,-6,37,114,-17,-2,17,125,-12,
+  0,128,0,0,-12,124,18,-2,-18,114,38,-6,-19,99,59,-11,
+  -16,80,80,-16,-11,59,99,-19,-6,38,114,-18,-2,18,124,-12,
+  0,128,0,0,-4,118,16,-2,-7,106,34,-5,-8,90,53,-7,
+  -8,72,72,-8,-7,53,90,-8,-5,34,106,-7,-2,16,118,-4);
+ V6HuffCoeffMap: Array[0..21] Of Byte=(
+  13,14,11,0,1,15,16,18,2,17,3,4,19,20,5,6,
+  21,22,7,8,9,10);
+ V6HuffRunMap: Array[0..15] Of Byte=(
+  10,13,11,12,0,1,2,3,14,8,15,16,4,5,6,7);
+ V6Zigzag: Array[0..63] Of Byte=(
+   0,  1,  8, 16,  9,  2,  3, 10,
+  17, 24, 32, 25, 18, 11,  4,  5,
+  12, 19, 26, 33, 40, 48, 41, 34,
+  27, 20, 13,  6,  7, 14, 21, 28,
+  35, 42, 49, 56, 57, 50, 43, 36,
+  29, 22, 15, 23, 30, 37, 44, 51,
+  58, 59, 52, 45, 38, 31, 39, 46,
+  53, 60, 61, 54, 47, 55, 62, 63);
+ V6B2p: Array[0..9] Of Byte=(0,0,0,0,1,2,3,3,3,3);
+ V6B6to4: Array[0..5] Of Byte=(0,0,1,1,2,3);
+ V6CoordDiv: Array[0..5] Of Byte=(4,4,4,4,8,8);
+ { arbres : valeur et indice de probabilite (VP56Tree) }
+ V6PvaVal: Array[0..14] Of ShortInt=(8,4,2,0,-1,2,-2,-3,4,2,-4,-5,2,-6,-7);
+ V6PvaIdx: Array[0..14] Of Byte=(0,1,2,0,0,3,0,0,4,5,0,0,6,0,0);
+ V6PcVal: Array[0..10] Of ShortInt=(4,2,0,-1,4,2,-2,-3,2,-4,-5);
+ V6PcIdx: Array[0..10] Of Byte=(6,7,0,0,8,9,0,0,10,0,0);
+ V6PmbtmVal: Array[0..12] Of ShortInt=(4,2,-8,-4,8,6,4,2,-24,-20,-16,-12,0);
+ V6PmbtmIdx: Array[0..12] Of Byte=(0,1,0,0,2,3,4,5,0,0,0,0,0);
+ V6PmbtVal: Array[0..18] Of ShortInt=(8,4,2,0,-2,2,-3,-4,4,2,-1,-7,4,2,-5,-6,2,-8,-9);
+ V6PmbtIdx: Array[0..18] Of Byte=(1,2,4,0,0,5,0,0,3,6,0,0,7,8,0,0,9,0,0);
+ V6PcrVal: Array[0..16] Of ShortInt=(8,4,2,-1,-2,2,-3,-4,8,4,2,-5,-6,2,-7,-8,0);
+ V6PcrIdx: Array[0..16] Of Byte=(0,1,2,0,0,3,0,0,4,5,6,0,0,7,0,0,0);
+ V6RefFrame: Array[0..9] Of ShortInt=(1,0,1,1,1,2,2,1,2,2);
+ V6PrevDcPlane: Array[0..9] Of Byte=(0,0,0,0,1,2,3,3,3,3);
+ V6ProbOrder: Array[0..6] Of Byte=(0,1,2,7,6,5,4);
+
+Var
+ V6Hook: Procedure(B: Pointer; W,H: LongInt);
+ V6Ctx: Array[0..1] Of TV6Ctx;
+ V6Fr: Array[0..4] Of TV6Frame;
+ V6FrAlloc: Boolean;
+ V6HasAlpha,V6FlipMode: Boolean;
+ V6ExtraSize,V6Extra: LongInt;       { extradata FLV : taille (0/1) et valeur }
+ V6AvW,V6AvH: LongInt;               { largeur/hauteur affichees (avctx->width/height) }
+ V6CodedW,V6CodedH: LongInt;         { coded_width / coded_height }
+ V6W,V6H: LongInt;                   { dimensions de la derniere image sortie }
+ V6Pk: PEABuffer; V6PkLen: LongInt;  { paquet courant }
+ V6Out: PEABuffer; V6OutSz: LongInt;
+ V6AlphaOut: PEABuffer; V6AlphaSz: LongInt;
+ V6NormShift: Array[0..255] Of Byte;
+ V6IdctScan: Array[0..63] Of Byte;
+ V6TabInit: Boolean;
+ V6Emu: Array[0..32*16-1] Of Byte;   { tampon de bord 12x12 (pas 32) }
+ V6Tmp: Array[0..16*16-1] Of Byte;   { intermediaire diag2 (pas 16) }
+ V6AlphaOk: Boolean;                 { plan alpha defini (False apres une erreur alpha, jusqu'a la prochaine image cle alpha) }
+ V6Stuck: Boolean;                  { tampon courant jamais libere apres une image rejetee (comme ffmpeg) }
+
+Function V6Sar(V: LongInt; N: LongInt): LongInt;
+Begin
+ If V>=0 Then V6Sar:=V Shr N Else V6Sar:=-((-(V+1)) Shr N)-1;
+End;
+
+Function V6Clip8(V: LongInt): LongInt;
+Begin
+ If V<0 Then V6Clip8:=0 Else If V>255 Then V6Clip8:=255 Else V6Clip8:=V;
+End;
+
+Function V6PB(P: LongInt): LongInt;
+Begin
+ If (P>=0) And (P<V6PkLen) Then V6PB:=V6Pk^[P] Else V6PB:=0;
+End;
+
+Function V6RB16(P: LongInt): LongInt;
+Begin
+ V6RB16:=(V6PB(P) Shl 8) Or V6PB(P+1);
+End;
+
+Procedure V6InitTables;
+Var I,S: LongInt;
+Begin
+ For I:=0 To 255 Do Begin
+  If I=0 Then S:=8 Else Begin S:=0; While (I Shl S)<128 Do Inc(S); End;
+  V6NormShift[I]:=S;
+ End;
+ For I:=0 To 63 Do V6IdctScan[I]:=(V6Zigzag[I] Shr 3) Or ((V6Zigzag[I] And 7) Shl 3);
+ V6TabInit:=True;
+End;
+
+{ ---- decodeur arithmetique (vpx_rac) ---- }
+
+Function V6RacInit(Var C: TV6Rac; Pos,Size: LongInt): LongInt;
+Begin
+ C.High:=255; C.Bits:=-16; C.Pos:=Pos; C.EndP:=Pos+Size; C.EndReached:=0;
+ If Size<1 Then Begin C.CodeWord:=0; V6RacInit:=-1; Exit; End;
+ C.CodeWord:=(V6PB(Pos) Shl 16) Or (V6PB(Pos+1) Shl 8) Or V6PB(Pos+2);
+ C.Pos:=Pos+3;
+ V6RacInit:=0;
+End;
+
+Function V6RacIsEnd(Var C: TV6Rac): Boolean;
+Begin
+ If (C.EndP<=C.Pos) And (C.Bits>=0) Then Inc(C.EndReached);
+ V6RacIsEnd:=C.EndReached>10;
+End;
+
+Function V6Renorm(Var C: TV6Rac): Int64;
+Var Sh,Bits: LongInt; Cw: Int64;
+Begin
+ Sh:=V6NormShift[C.High];
+ Bits:=C.Bits; Cw:=C.CodeWord;
+ C.High:=C.High Shl Sh; Cw:=(Cw Shl Sh) And $FFFFFFFF; Bits:=Bits+Sh;
+ If (Bits>=0) And (C.Pos<C.EndP) Then Begin
+  Cw:=Cw Or (((V6PB(C.Pos) Shl 8) Or V6PB(C.Pos+1)) Shl Bits);
+  C.Pos:=C.Pos+2; Bits:=Bits-16;
+ End;
+ C.Bits:=Bits;
+ V6Renorm:=Cw;
+End;
+
+Function V6Prob(Var C: TV6Rac; Prob: LongInt): LongInt;
+Var Cw,Low,LowS: Int64;
+Begin
+ Cw:=V6Renorm(C);
+ Low:=1+(((C.High-1)*Prob) Shr 8);
+ LowS:=Low Shl 16;
+ If Cw>=LowS Then Begin C.High:=C.High-Low; C.CodeWord:=Cw-LowS; V6Prob:=1; End
+ Else Begin C.High:=Low; C.CodeWord:=Cw; V6Prob:=0; End;
+End;
+
+Function V6Get(Var C: TV6Rac): LongInt;
+Var Cw,Low,LowS: Int64;
+Begin
+ Cw:=V6Renorm(C);
+ Low:=(C.High+1) Shr 1;
+ LowS:=Low Shl 16;
+ If Cw>=LowS Then Begin C.High:=C.High-Low; Cw:=Cw-LowS; V6Get:=1; End
+ Else Begin C.High:=Low; V6Get:=0; End;
+ C.CodeWord:=Cw;
+End;
+
+Function V6Gets(Var C: TV6Rac; Bits: LongInt): LongInt;
+Var V: LongInt;
+Begin
+ V:=0;
+ While Bits>0 Do Begin V:=(V Shl 1) Or V6Get(C); Dec(Bits); End;
+ V6Gets:=V;
+End;
+
+Function V6GetsNN(Var C: TV6Rac): LongInt;
+Var V: LongInt;
+Begin
+ V:=V6Gets(C,7) Shl 1;
+ If V=0 Then V6GetsNN:=1 Else V6GetsNN:=V;
+End;
+
+{ vp56_rac_get_tree : arbre (valeurs Tv, indices de probabilite Ti) }
+Function V6Tree(Var C: TV6Rac; Const Tv: Array Of ShortInt; Const Ti: Array Of Byte; Const Probs: Array Of Byte): LongInt;
+Var N: LongInt;
+Begin
+ N:=0;
+ While Tv[N]>0 Do Begin
+  If V6Prob(C,Probs[Ti[N]])<>0 Then N:=N+Tv[N] Else Inc(N);
+ End;
+ V6Tree:=-Tv[N];
+End;
+
+{ ---- DSP : idct VP3 (vp3dsp.c) ---- }
+
+Type PV6Blk=^TV6BlkA; TV6BlkA=Array[0..63] Of SmallInt;
+
+Function V6M(A,B: LongInt): LongInt;
+Begin
+ V6M:=V6Sar(LongInt(Int64(A)*B),16);
+End;
+
+{ type 1 = put, 2 = add }
+Procedure V6Idct(Dst: PEABuffer; DO_,Stride: LongInt; Ip: PV6Blk; Typ: LongInt);
+Var A,B,C,D,Ad,Bd,Cd,Dd,E,F,G,H,Ed,Gd,Add_,Bdd,Fd,Hd,I,K,O,V: LongInt;
+Begin
+ For I:=0 To 7 Do Begin
+  If (Ip^[I] Or Ip^[8+I] Or Ip^[16+I] Or Ip^[24+I] Or Ip^[32+I] Or Ip^[40+I] Or Ip^[48+I] Or Ip^[56+I])<>0 Then Begin
+   A:=V6M(64277,Ip^[8+I])+V6M(12785,Ip^[56+I]);
+   B:=V6M(12785,Ip^[8+I])-V6M(64277,Ip^[56+I]);
+   C:=V6M(54491,Ip^[24+I])+V6M(36410,Ip^[40+I]);
+   D:=V6M(54491,Ip^[40+I])-V6M(36410,Ip^[24+I]);
+   Ad:=V6M(46341,A-C);
+   Bd:=V6M(46341,B-D);
+   Cd:=A+C;
+   Dd:=B+D;
+   E:=V6M(46341,Ip^[I]+Ip^[32+I]);
+   F:=V6M(46341,Ip^[I]-Ip^[32+I]);
+   G:=V6M(60547,Ip^[16+I])+V6M(25080,Ip^[48+I]);
+   H:=V6M(25080,Ip^[16+I])-V6M(60547,Ip^[48+I]);
+   Ed:=E-G; Gd:=E+G;
+   Add_:=F+Ad; Bdd:=Bd-H;
+   Fd:=F-Ad; Hd:=Bd+H;
+   Ip^[I]:=SmallInt(Gd+Cd);
+   Ip^[56+I]:=SmallInt(Gd-Cd);
+   Ip^[8+I]:=SmallInt(Add_+Hd);
+   Ip^[16+I]:=SmallInt(Add_-Hd);
+   Ip^[24+I]:=SmallInt(Ed+Dd);
+   Ip^[32+I]:=SmallInt(Ed-Dd);
+   Ip^[40+I]:=SmallInt(Fd+Bdd);
+   Ip^[48+I]:=SmallInt(Fd-Bdd);
+  End;
+ End;
+ For I:=0 To 7 Do Begin
+  O:=I*8;
+  If (Ip^[O+1] Or Ip^[O+2] Or Ip^[O+3] Or Ip^[O+4] Or Ip^[O+5] Or Ip^[O+6] Or Ip^[O+7])<>0 Then Begin
+   A:=V6M(64277,Ip^[O+1])+V6M(12785,Ip^[O+7]);
+   B:=V6M(12785,Ip^[O+1])-V6M(64277,Ip^[O+7]);
+   C:=V6M(54491,Ip^[O+3])+V6M(36410,Ip^[O+5]);
+   D:=V6M(54491,Ip^[O+5])-V6M(36410,Ip^[O+3]);
+   Ad:=V6M(46341,A-C);
+   Bd:=V6M(46341,B-D);
+   Cd:=A+C;
+   Dd:=B+D;
+   E:=V6M(46341,Ip^[O]+Ip^[O+4])+8;
+   F:=V6M(46341,Ip^[O]-Ip^[O+4])+8;
+   If Typ=1 Then Begin E:=E+16*128; F:=F+16*128; End;
+   G:=V6M(60547,Ip^[O+2])+V6M(25080,Ip^[O+6]);
+   H:=V6M(25080,Ip^[O+2])-V6M(60547,Ip^[O+6]);
+   Ed:=E-G; Gd:=E+G;
+   Add_:=F+Ad; Bdd:=Bd-H;
+   Fd:=F-Ad; Hd:=Bd+H;
+   If Typ=1 Then Begin
+    Dst^[DO_+I]:=V6Clip8(V6Sar(Gd+Cd,4));
+    Dst^[DO_+7*Stride+I]:=V6Clip8(V6Sar(Gd-Cd,4));
+    Dst^[DO_+Stride+I]:=V6Clip8(V6Sar(Add_+Hd,4));
+    Dst^[DO_+2*Stride+I]:=V6Clip8(V6Sar(Add_-Hd,4));
+    Dst^[DO_+3*Stride+I]:=V6Clip8(V6Sar(Ed+Dd,4));
+    Dst^[DO_+4*Stride+I]:=V6Clip8(V6Sar(Ed-Dd,4));
+    Dst^[DO_+5*Stride+I]:=V6Clip8(V6Sar(Fd+Bdd,4));
+    Dst^[DO_+6*Stride+I]:=V6Clip8(V6Sar(Fd-Bdd,4));
+   End Else Begin
+    Dst^[DO_+I]:=V6Clip8(Dst^[DO_+I]+V6Sar(Gd+Cd,4));
+    Dst^[DO_+7*Stride+I]:=V6Clip8(Dst^[DO_+7*Stride+I]+V6Sar(Gd-Cd,4));
+    Dst^[DO_+Stride+I]:=V6Clip8(Dst^[DO_+Stride+I]+V6Sar(Add_+Hd,4));
+    Dst^[DO_+2*Stride+I]:=V6Clip8(Dst^[DO_+2*Stride+I]+V6Sar(Add_-Hd,4));
+    Dst^[DO_+3*Stride+I]:=V6Clip8(Dst^[DO_+3*Stride+I]+V6Sar(Ed+Dd,4));
+    Dst^[DO_+4*Stride+I]:=V6Clip8(Dst^[DO_+4*Stride+I]+V6Sar(Ed-Dd,4));
+    Dst^[DO_+5*Stride+I]:=V6Clip8(Dst^[DO_+5*Stride+I]+V6Sar(Fd+Bdd,4));
+    Dst^[DO_+6*Stride+I]:=V6Clip8(Dst^[DO_+6*Stride+I]+V6Sar(Fd-Bdd,4));
+   End;
+  End Else Begin
+   If Typ=1 Then Begin
+    V:=V6Clip8(128+V6Sar(46341*Ip^[O]+(8 Shl 16),20));
+    For K:=0 To 7 Do Dst^[DO_+K*Stride+I]:=V;
+   End Else Begin
+    If Ip^[O]<>0 Then Begin
+     V:=V6Sar(46341*Ip^[O]+(8 Shl 16),20);
+     For K:=0 To 7 Do Dst^[DO_+K*Stride+I]:=V6Clip8(Dst^[DO_+K*Stride+I]+V);
+    End;
+   End;
+  End;
+ End;
+ FillChar(Ip^,128,0);
+End;
+
+Procedure V6Idct10(Dst: PEABuffer; DO_,Stride: LongInt; Ip: PV6Blk; Typ: LongInt);
+Var A,B,C,D,Ad,Bd,Cd,Dd,E,F,G,H,Ed,Gd,Add_,Bdd,Fd,Hd,I,K,O,V: LongInt;
+Begin
+ For I:=0 To 3 Do Begin
+  If (Ip^[I] Or Ip^[8+I] Or Ip^[16+I] Or Ip^[24+I])<>0 Then Begin
+   A:=V6M(64277,Ip^[8+I]);
+   B:=V6M(12785,Ip^[8+I]);
+   C:=V6M(54491,Ip^[24+I]);
+   D:=-V6M(36410,Ip^[24+I]);
+   Ad:=V6M(46341,A-C);
+   Bd:=V6M(46341,B-D);
+   Cd:=A+C;
+   Dd:=B+D;
+   E:=V6M(46341,Ip^[I]);
+   F:=E;
+   G:=V6M(60547,Ip^[16+I]);
+   H:=V6M(25080,Ip^[16+I]);
+   Ed:=E-G; Gd:=E+G;
+   Add_:=F+Ad; Bdd:=Bd-H;
+   Fd:=F-Ad; Hd:=Bd+H;
+   Ip^[I]:=SmallInt(Gd+Cd);
+   Ip^[56+I]:=SmallInt(Gd-Cd);
+   Ip^[8+I]:=SmallInt(Add_+Hd);
+   Ip^[16+I]:=SmallInt(Add_-Hd);
+   Ip^[24+I]:=SmallInt(Ed+Dd);
+   Ip^[32+I]:=SmallInt(Ed-Dd);
+   Ip^[40+I]:=SmallInt(Fd+Bdd);
+   Ip^[48+I]:=SmallInt(Fd-Bdd);
+  End;
+ End;
+ For I:=0 To 7 Do Begin
+  O:=I*8;
+  If (Ip^[O] Or Ip^[O+1] Or Ip^[O+2] Or Ip^[O+3])<>0 Then Begin
+   A:=V6M(64277,Ip^[O+1]);
+   B:=V6M(12785,Ip^[O+1]);
+   C:=V6M(54491,Ip^[O+3]);
+   D:=-V6M(36410,Ip^[O+3]);
+   Ad:=V6M(46341,A-C);
+   Bd:=V6M(46341,B-D);
+   Cd:=A+C;
+   Dd:=B+D;
+   E:=V6M(46341,Ip^[O]);
+   If Typ=1 Then E:=E+16*128;
+   F:=E;
+   G:=V6M(60547,Ip^[O+2]);
+   H:=V6M(25080,Ip^[O+2]);
+   Ed:=E-G; Gd:=E+G;
+   Add_:=F+Ad; Bdd:=Bd-H;
+   Fd:=F-Ad; Hd:=Bd+H;
+   Gd:=Gd+8; Add_:=Add_+8; Ed:=Ed+8; Fd:=Fd+8;
+   If Typ=1 Then Begin
+    Dst^[DO_+I]:=V6Clip8(V6Sar(Gd+Cd,4));
+    Dst^[DO_+7*Stride+I]:=V6Clip8(V6Sar(Gd-Cd,4));
+    Dst^[DO_+Stride+I]:=V6Clip8(V6Sar(Add_+Hd,4));
+    Dst^[DO_+2*Stride+I]:=V6Clip8(V6Sar(Add_-Hd,4));
+    Dst^[DO_+3*Stride+I]:=V6Clip8(V6Sar(Ed+Dd,4));
+    Dst^[DO_+4*Stride+I]:=V6Clip8(V6Sar(Ed-Dd,4));
+    Dst^[DO_+5*Stride+I]:=V6Clip8(V6Sar(Fd+Bdd,4));
+    Dst^[DO_+6*Stride+I]:=V6Clip8(V6Sar(Fd-Bdd,4));
+   End Else Begin
+    Dst^[DO_+I]:=V6Clip8(Dst^[DO_+I]+V6Sar(Gd+Cd,4));
+    Dst^[DO_+7*Stride+I]:=V6Clip8(Dst^[DO_+7*Stride+I]+V6Sar(Gd-Cd,4));
+    Dst^[DO_+Stride+I]:=V6Clip8(Dst^[DO_+Stride+I]+V6Sar(Add_+Hd,4));
+    Dst^[DO_+2*Stride+I]:=V6Clip8(Dst^[DO_+2*Stride+I]+V6Sar(Add_-Hd,4));
+    Dst^[DO_+3*Stride+I]:=V6Clip8(Dst^[DO_+3*Stride+I]+V6Sar(Ed+Dd,4));
+    Dst^[DO_+4*Stride+I]:=V6Clip8(Dst^[DO_+4*Stride+I]+V6Sar(Ed-Dd,4));
+    Dst^[DO_+5*Stride+I]:=V6Clip8(Dst^[DO_+5*Stride+I]+V6Sar(Fd+Bdd,4));
+    Dst^[DO_+6*Stride+I]:=V6Clip8(Dst^[DO_+6*Stride+I]+V6Sar(Fd-Bdd,4));
+   End;
+  End Else Begin
+   If Typ=1 Then Begin
+    V:=128;
+    For K:=0 To 7 Do Dst^[DO_+K*Stride+I]:=V;
+   End;
+  End;
+ End;
+ FillChar(Ip^,128,0);
+End;
+
+Procedure V6IdctDcAdd(Dst: PEABuffer; DO_,Stride: LongInt; Ip: PV6Blk);
+Var I,K,Dc: LongInt;
+Begin
+ Dc:=V6Sar(Ip^[0]+15,5);
+ For I:=0 To 7 Do
+  For K:=0 To 7 Do Dst^[DO_+I*Stride+K]:=V6Clip8(Dst^[DO_+I*Stride+K]+Dc);
+ Ip^[0]:=0;
+End;
+
+Procedure V6IdctPut(S: PV6Ctx; Dst: PEABuffer; DO_,Stride: LongInt; B,Selector: LongInt);
+Begin
+ If (Selector>10) Or (Selector=1) Then V6Idct(Dst,DO_,Stride,@S^.BlockCoeff[B,0],1)
+ Else V6Idct10(Dst,DO_,Stride,@S^.BlockCoeff[B,0],1);
+End;
+
+Procedure V6IdctAdd(S: PV6Ctx; Dst: PEABuffer; DO_,Stride: LongInt; B,Selector: LongInt);
+Begin
+ If Selector>10 Then V6Idct(Dst,DO_,Stride,@S^.BlockCoeff[B,0],2)
+ Else If Selector>1 Then V6Idct10(Dst,DO_,Stride,@S^.BlockCoeff[B,0],2)
+ Else V6IdctDcAdd(Dst,DO_,Stride,@S^.BlockCoeff[B,0]);
+End;
+
+{ ---- filtre de boucle VP3 (12 pixels) ---- }
+
+Procedure V6HLoop12(Buf: PEABuffer; Pos,Stride: LongInt; Var Bound: Array Of LongInt);
+Var I,Fv: LongInt;
+Begin
+ For I:=0 To 11 Do Begin
+  Fv:=(Buf^[Pos-2]-Buf^[Pos+1])+(Buf^[Pos]-Buf^[Pos-1])*3;
+  Fv:=Bound[127+V6Sar(Fv+4,3)];
+  Buf^[Pos-1]:=V6Clip8(Buf^[Pos-1]+Fv);
+  Buf^[Pos]:=V6Clip8(Buf^[Pos]-Fv);
+  Pos:=Pos+Stride;
+ End;
+End;
+
+Procedure V6VLoop12(Buf: PEABuffer; Pos,Stride: LongInt; Var Bound: Array Of LongInt);
+Var I,Fv: LongInt;
+Begin
+ For I:=0 To 11 Do Begin
+  Fv:=(Buf^[Pos-2*Stride]-Buf^[Pos+Stride])+(Buf^[Pos]-Buf^[Pos-Stride])*3;
+  Fv:=Bound[127+V6Sar(Fv+4,3)];
+  Buf^[Pos-Stride]:=V6Clip8(Buf^[Pos-Stride]+Fv);
+  Buf^[Pos]:=V6Clip8(Buf^[Pos]-Fv);
+  Inc(Pos);
+ End;
+End;
+
+Procedure V6SetBounding(Var Bv: Array Of LongInt; Limit: LongInt);
+Var X,Value: LongInt;
+Begin
+ FillChar(Bv,256*SizeOf(LongInt),0);
+ For X:=0 To Limit-1 Do Begin Bv[127-X]:=-X; Bv[127+X]:=X; End;
+ X:=Limit; Value:=Limit;
+ While (X<128) And (Value<>0) Do Begin
+  Bv[127+X]:=Value; Bv[127-X]:=-Value;
+  Inc(X); Dec(Value);
+ End;
+ If Value<>0 Then Bv[127+128]:=Value;
+End;
+
+{ ---- compensation de mouvement ---- }
+
+{ h264 chroma mc8 : dst 8 x H, src, poids x,y en 1/8 }
+Procedure V6Chroma8(Dst: PEABuffer; DO_,DStride: LongInt; Src: PEABuffer; SO,SStride,H,X,Y: LongInt);
+Var I,J,A,B,C,D: LongInt;
+Begin
+ A:=(8-X)*(8-Y); B:=X*(8-Y); C:=(8-X)*Y; D:=X*Y;
+ For I:=0 To H-1 Do Begin
+  For J:=0 To 7 Do Begin
+   If D<>0 Then
+    Dst^[DO_+J]:=(A*Src^[SO+J]+B*Src^[SO+J+1]+C*Src^[SO+SStride+J]+D*Src^[SO+SStride+J+1]+32) Shr 6
+   Else If B+C<>0 Then Begin
+    If C<>0 Then Dst^[DO_+J]:=(A*Src^[SO+J]+(B+C)*Src^[SO+SStride+J]+32) Shr 6
+    Else Dst^[DO_+J]:=(A*Src^[SO+J]+(B+C)*Src^[SO+J+1]+32) Shr 6;
+   End Else Dst^[DO_+J]:=(A*Src^[SO+J]+32) Shr 6;
+  End;
+  DO_:=DO_+DStride; SO:=SO+SStride;
+ End;
+End;
+
+Function V6BlockVariance(Src: PEABuffer; SO,Stride: LongInt): LongInt;
+Var Sum,Sq,X,Y: LongInt;
+Begin
+ Sum:=0; Sq:=0;
+ Y:=0;
+ While Y<8 Do Begin
+  X:=0;
+  While X<8 Do Begin
+   Sum:=Sum+Src^[SO+X]; Sq:=Sq+Src^[SO+X]*Src^[SO+X];
+   Inc(X,2);
+  End;
+  SO:=SO+2*Stride; Inc(Y,2);
+ End;
+ V6BlockVariance:=V6Sar(16*Sq-Sum*Sum,8);
+End;
+
+Procedure V6FilterHv4(Dst: PEABuffer; DO_,DStride: LongInt; Src: PEABuffer; SO,Stride,Delta,WOff: LongInt);
+Var X,Y: LongInt;
+Begin
+ For Y:=0 To 7 Do Begin
+  For X:=0 To 7 Do
+   Dst^[DO_+X]:=V6Clip8(V6Sar(Src^[SO+X-Delta]*V6CopyFilter[WOff]+Src^[SO+X]*V6CopyFilter[WOff+1]
+      +Src^[SO+X+Delta]*V6CopyFilter[WOff+2]+Src^[SO+X+2*Delta]*V6CopyFilter[WOff+3]+64,7));
+  SO:=SO+Stride; DO_:=DO_+DStride;
+ End;
+End;
+
+Procedure V6FilterDiag4(Dst: PEABuffer; DO_,DStride: LongInt; Src: PEABuffer; SO,Stride,HOff,VOff: LongInt);
+Var X,Y,T: LongInt; Tmp: Array[0..87] Of LongInt;
+Begin
+ SO:=SO-Stride;
+ T:=0;
+ For Y:=0 To 10 Do Begin
+  For X:=0 To 7 Do
+   Tmp[T+X]:=V6Clip8(V6Sar(Src^[SO+X-1]*V6CopyFilter[HOff]+Src^[SO+X]*V6CopyFilter[HOff+1]
+      +Src^[SO+X+1]*V6CopyFilter[HOff+2]+Src^[SO+X+2]*V6CopyFilter[HOff+3]+64,7));
+  SO:=SO+Stride; T:=T+8;
+ End;
+ T:=8;
+ For Y:=0 To 7 Do Begin
+  For X:=0 To 7 Do
+   Dst^[DO_+X]:=V6Clip8(V6Sar(Tmp[T+X-8]*V6CopyFilter[VOff]+Tmp[T+X]*V6CopyFilter[VOff+1]
+      +Tmp[T+X+8]*V6CopyFilter[VOff+2]+Tmp[T+X+16]*V6CopyFilter[VOff+3]+64,7));
+  DO_:=DO_+DStride; T:=T+8;
+ End;
+End;
+
+{ vp6_filter : Mv deja decompose en MvX,MvY }
+Procedure V6Filter(S: PV6Ctx; Dst: PEABuffer; DO_: LongInt; Src: PEABuffer; Offset1,Offset2,DStride,SStride: LongInt;
+                   MvX,MvY,Mask,Select: LongInt; Luma: Boolean);
+Var Filter4,X8,Y8,Hw,Vw,Sg: LongInt; Ax,Ay: LongInt;
+Begin
+ Filter4:=0;
+ X8:=MvX And Mask; Y8:=MvY And Mask;
+ If Luma Then Begin
+  X8:=X8*2; Y8:=Y8*2;
+  Filter4:=S^.FilterMode;
+  If Filter4=2 Then Begin
+   Ax:=Abs(MvX); Ay:=Abs(MvY);
+   If (S^.MaxVectorLength<>0) And ((Ax>S^.MaxVectorLength) Or (Ay>S^.MaxVectorLength)) Then
+    Filter4:=0
+   Else If (S^.SampleVarianceThreshold<>0) And (V6BlockVariance(Src,Offset1,SStride)<S^.SampleVarianceThreshold) Then
+    Filter4:=0;
+  End;
+ End;
+ { (offset2-offset1)*flip<0 : flip vaut toujours 1 en coordonnees du decodeur }
+ If ((Y8<>0) And ((Offset2-Offset1)<0)) Or ((Y8=0) And (Offset1>Offset2)) Then Offset1:=Offset2;
+ If Filter4<>0 Then Begin
+  If Y8=0 Then
+   V6FilterHv4(Dst,DO_,DStride,Src,Offset1,SStride,1,Select*32+X8*4)
+  Else If X8=0 Then
+   V6FilterHv4(Dst,DO_,DStride,Src,Offset1,SStride,SStride,Select*32+Y8*4)
+  Else Begin
+   If ((MvX Xor MvY)<0) Then Sg:=-1 Else Sg:=0;
+   V6FilterDiag4(Dst,DO_,DStride,Src,Offset1+Sg,SStride,Select*32+X8*4,Select*32+Y8*4);
+  End;
+ End Else Begin
+  If (X8=0) Or (Y8=0) Then
+   V6Chroma8(Dst,DO_,DStride,Src,Offset1,SStride,8,X8,Y8)
+  Else Begin
+   If ((MvX Xor MvY)<0) Then Sg:=-1 Else Sg:=0;
+   { vp6_filter_diag2 }
+   V6Chroma8(@V6Tmp,0,16,Src,Offset1+Sg,SStride,9,X8,0);
+   V6Chroma8(Dst,DO_,DStride,@V6Tmp,0,16,8,0,Y8);
+  End;
+ End;
+End;
+{ ---- arbre de Huffman VP6 (huffman.c) ---- }
+
+Type TV6Node=Record Count: LongInt; Sym,N0: LongInt; End;
+
+Function V6HuffCmp(Var A,B: TV6Node): LongInt;
+Begin
+ V6HuffCmp:=(A.Count-B.Count)*16+(B.Sym-A.Sym);
+End;
+
+{ Model/Map : modele de probabilites et table de correspondance ; Size : nombre de symboles }
+Function V6BuildHuff(Const Model: Array Of Byte; Const Map: Array Of Byte; MapOff,Size: LongInt; Var T: TV6Tree): LongInt;
+Var Nodes: Array[0..31] Of TV6Node; I,J,A,B,CurNode,Cnt: LongInt; Sum: Int64; Tmp: TV6Node; Swapped: Boolean;
+Begin
+ V6BuildHuff:=-1;
+ For I:=0 To 31 Do Begin Nodes[I].Count:=0; Nodes[I].Sym:=0; Nodes[I].N0:=0; End;
+ { tmp = &nodes[size] }
+ Nodes[Size].Count:=256;
+ For I:=0 To Size-2 Do Begin
+  A:=(Nodes[Size+I].Count*Model[I]) Shr 8;
+  B:=(Nodes[Size+I].Count*(255-Model[I])) Shr 8;
+  If A=0 Then Nodes[Map[MapOff+2*I]].Count:=1 Else Nodes[Map[MapOff+2*I]].Count:=A;
+  If B=0 Then Nodes[Map[MapOff+2*I+1]].Count:=1 Else Nodes[Map[MapOff+2*I+1]].Count:=B;
+ End;
+ { ff_huff_build_tree }
+ Sum:=0;
+ For I:=0 To Size-1 Do Begin Nodes[I].Sym:=I; Nodes[I].N0:=-2; Sum:=Sum+Nodes[I].Count; End;
+ If (Sum Shr 31)<>0 Then Exit;
+ { tri (ordre total : cmp ne renvoie jamais 0 car les symboles different) }
+ Repeat
+  Swapped:=False;
+  For I:=0 To Size-2 Do
+   If V6HuffCmp(Nodes[I],Nodes[I+1])>0 Then Begin
+    Tmp:=Nodes[I]; Nodes[I]:=Nodes[I+1]; Nodes[I+1]:=Tmp; Swapped:=True;
+   End;
+ Until Not Swapped;
+ CurNode:=Size;
+ Nodes[Size*2-1].Count:=0;
+ I:=0;
+ While I<Size*2-1 Do Begin
+  Cnt:=Nodes[I].Count+Nodes[I+1].Count;
+  J:=CurNode;
+  While J>I+2 Do Begin
+   { FF_HUFFMAN_FLAG_HNODE_FIRST : en cas d'egalite le nouveau noeud passe devant }
+   If Cnt>Nodes[J-1].Count Then Break;
+   Nodes[J]:=Nodes[J-1];
+   Dec(J);
+  End;
+  Nodes[J].Sym:=-1; Nodes[J].Count:=Cnt; Nodes[J].N0:=I;
+  Inc(CurNode);
+  Inc(I,2);
+ End;
+ For I:=0 To 23 Do Begin T.Sym[I]:=Nodes[I].Sym; T.N0[I]:=Nodes[I].N0; End;
+ T.Head:=Size*2-2;
+ V6BuildHuff:=0;
+End;
+
+{ ---- lecteur de bits (get_bits sur le paquet) ---- }
+
+Function V6GbBit(S: PV6Ctx): LongInt;
+Var P: LongInt;
+Begin
+ P:=S^.GbPos;
+ V6GbBit:=(V6PB(S^.GbBase+(P Shr 3)) Shr (7-(P And 7))) And 1;
+ S^.GbPos:=P+1;
+End;
+
+Function V6GbBits(S: PV6Ctx; N: LongInt): LongInt;
+Var V: LongInt;
+Begin
+ V:=0;
+ While N>0 Do Begin V:=(V Shl 1) Or V6GbBit(S); Dec(N); End;
+ V6GbBits:=V;
+End;
+
+Function V6GbVlc(S: PV6Ctx; Var T: TV6Tree): LongInt;
+Var N: LongInt;
+Begin
+ N:=T.Head;
+ While T.Sym[N]<0 Do N:=T.N0[N]+V6GbBit(S);
+ V6GbVlc:=T.Sym[N];
+End;
+
+{ ---- modeles ---- }
+
+Procedure V6CoeffOrderInit(S: PV6Ctx);
+Var I,Pos,Idx,Mx,V: LongInt;
+Begin
+ With S^.Model Do Begin
+  CoeffIndexToPos[0]:=0;
+  Idx:=1;
+  For I:=0 To 15 Do
+   For Pos:=1 To 63 Do
+    If CoeffReorder[Pos]=I Then Begin CoeffIndexToPos[Idx]:=Pos; Inc(Idx); End;
+  For Idx:=0 To 63 Do Begin
+   Mx:=0;
+   For I:=0 To Idx Do Begin
+    V:=CoeffIndexToPos[I];
+    If V>Mx Then Mx:=V;
+   End;
+   If S^.SubVersion>6 Then Inc(Mx);
+   CoeffIndexToIdctSel[Idx]:=Mx;
+  End;
+ End;
+End;
+
+Procedure V6DefaultModels(S: PV6Ctx);
+Var I,J,K: LongInt;
+Begin
+ With S^.Model Do Begin
+  VectorDct[0]:=$A2; VectorDct[1]:=$A4;
+  VectorSig[0]:=$80; VectorSig[1]:=$80;
+  For I:=0 To 2 Do For J:=0 To 9 Do For K:=0 To 1 Do MbTypesStats[I,J,K]:=V6DefMbStats[I*20+J*2+K];
+  For I:=0 To 1 Do Begin
+   For J:=0 To 7 Do VectorFdv[I,J]:=V6DefFdv[I*8+J];
+   For J:=0 To 6 Do VectorPdv[I,J]:=V6DefPdv[I*7+J];
+   For J:=0 To 13 Do CoeffRunv[I,J]:=V6DefRunv[I*14+J];
+  End;
+  For I:=0 To 63 Do CoeffReorder[I]:=V6DefReorder[I];
+ End;
+ V6CoeffOrderInit(S);
+End;
+
+Procedure V6ParseVectorModels(S: PV6Ctx);
+Var Comp,Node: LongInt;
+Begin
+ With S^.Model Do Begin
+  For Comp:=0 To 1 Do Begin
+   If V6Prob(S^.C,V6SigDctPct[Comp*2])<>0 Then VectorDct[Comp]:=V6GetsNN(S^.C);
+   If V6Prob(S^.C,V6SigDctPct[Comp*2+1])<>0 Then VectorSig[Comp]:=V6GetsNN(S^.C);
+  End;
+  For Comp:=0 To 1 Do
+   For Node:=0 To 6 Do
+    If V6Prob(S^.C,V6PdvPct[Comp*7+Node])<>0 Then VectorPdv[Comp,Node]:=V6GetsNN(S^.C);
+  For Comp:=0 To 1 Do
+   For Node:=0 To 7 Do
+    If V6Prob(S^.C,V6FdvPct[Comp*8+Node])<>0 Then VectorFdv[Comp,Node]:=V6GetsNN(S^.C);
+ End;
+End;
+
+Procedure V6ParseMbTypeModels(S: PV6Ctx);
+Var I,Ctx,Typ,Idx,Delta,Sign: LongInt;
+    P: Array[0..9] Of LongInt;
+    P02,P34,P0234,P17,P56,P89,P5689,P156789: LongInt;
+Begin
+ With S^.Model Do Begin
+  For Ctx:=0 To 2 Do Begin
+   If V6Prob(S^.C,174)<>0 Then Begin
+    Idx:=V6Gets(S^.C,4);
+    For Typ:=0 To 9 Do For I:=0 To 1 Do MbTypesStats[Ctx,Typ,I]:=V6PreDefMbStats[Idx*60+Ctx*20+Typ*2+I];
+   End;
+   If V6Prob(S^.C,254)<>0 Then Begin
+    For Typ:=0 To 9 Do
+     For I:=0 To 1 Do
+      If V6Prob(S^.C,205)<>0 Then Begin
+       Sign:=V6Get(S^.C);
+       Delta:=V6Tree(S^.C,V6PmbtmVal,V6PmbtmIdx,V6MbTmm);
+       If Delta=0 Then Delta:=4*V6Gets(S^.C,7);
+       MbTypesStats[Ctx,Typ,I]:=Byte(MbTypesStats[Ctx,Typ,I]+((Delta Xor (-Sign))+Sign));
+      End;
+   End;
+  End;
+  For Ctx:=0 To 2 Do Begin
+   For Typ:=0 To 9 Do P[Typ]:=100*MbTypesStats[Ctx,Typ,1];
+   For Typ:=0 To 9 Do Begin
+    MbType[Ctx,Typ,0]:=255-(255*MbTypesStats[Ctx,Typ,0]) Div (1+MbTypesStats[Ctx,Typ,0]+MbTypesStats[Ctx,Typ,1]);
+    P[Typ]:=0;
+    P02:=P[0]+P[2]; P34:=P[3]+P[4]; P0234:=P02+P34;
+    P17:=P[1]+P[7]; P56:=P[5]+P[6]; P89:=P[8]+P[9];
+    P5689:=P56+P89; P156789:=P17+P5689;
+    MbType[Ctx,Typ,1]:=Byte(1+255*P0234 Div (1+P0234+P156789));
+    MbType[Ctx,Typ,2]:=Byte(1+255*P02 Div (1+P0234));
+    MbType[Ctx,Typ,3]:=Byte(1+255*P17 Div (1+P156789));
+    MbType[Ctx,Typ,4]:=Byte(1+255*P[0] Div (1+P02));
+    MbType[Ctx,Typ,5]:=Byte(1+255*P[3] Div (1+P34));
+    MbType[Ctx,Typ,6]:=Byte(1+255*P[1] Div (1+P17));
+    MbType[Ctx,Typ,7]:=Byte(1+255*P56 Div (1+P5689));
+    MbType[Ctx,Typ,8]:=Byte(1+255*P[5] Div (1+P56));
+    MbType[Ctx,Typ,9]:=Byte(1+255*P[8] Div (1+P89));
+    P[Typ]:=100*MbTypesStats[Ctx,Typ,1];
+   End;
+  End;
+ End;
+End;
+Function V6ParseCoeffModels(S: PV6Ctx): LongInt;
+Var DefProb: Array[0..10] Of LongInt; Node,Cg,Ctx,Pos,Ct,Pt,V: LongInt;
+Begin
+ V6ParseCoeffModels:=0;
+ FillChar(DefProb,SizeOf(DefProb),0);
+ For Node:=0 To 10 Do DefProb[Node]:=$80;
+ With S^.Model Do Begin
+  For Pt:=0 To 1 Do
+   For Node:=0 To 10 Do
+    If V6Prob(S^.C,V6DccvPct[Pt*11+Node])<>0 Then Begin
+     DefProb[Node]:=V6GetsNN(S^.C);
+     CoeffDccv[Pt,Node]:=DefProb[Node];
+    End Else If S^.IsKey Then CoeffDccv[Pt,Node]:=DefProb[Node];
+  If V6Get(S^.C)<>0 Then Begin
+   For Pos:=1 To 63 Do
+    If V6Prob(S^.C,V6ReorderPct[Pos])<>0 Then CoeffReorder[Pos]:=V6Gets(S^.C,4);
+   V6CoeffOrderInit(S);
+  End;
+  For Cg:=0 To 1 Do
+   For Node:=0 To 13 Do
+    If V6Prob(S^.C,V6RunvPct[Cg*14+Node])<>0 Then CoeffRunv[Cg,Node]:=V6GetsNN(S^.C);
+  For Ct:=0 To 2 Do
+   For Pt:=0 To 1 Do
+    For Cg:=0 To 5 Do
+     For Node:=0 To 10 Do
+      If V6Prob(S^.C,V6RactPct[((Ct*2+Pt)*6+Cg)*11+Node])<>0 Then Begin
+       DefProb[Node]:=V6GetsNN(S^.C);
+       CoeffRact[Pt,Ct,Cg,Node]:=DefProb[Node];
+      End Else If S^.IsKey Then CoeffRact[Pt,Ct,Cg,Node]:=DefProb[Node];
+  If S^.UseHuffman Then Begin
+   For Pt:=0 To 1 Do Begin
+    If V6BuildHuff(CoeffDccv[Pt],V6HuffCoeffMap,0,12,S^.DccvT[Pt])<>0 Then Begin V6ParseCoeffModels:=-1; Exit; End;
+    If V6BuildHuff(CoeffRunv[Pt],V6HuffRunMap,0,9,S^.RunvT[Pt])<>0 Then Begin V6ParseCoeffModels:=-1; Exit; End;
+    For Ct:=0 To 2 Do
+     For Cg:=0 To 5 Do
+      If V6BuildHuff(CoeffRact[Pt,Ct,Cg],V6HuffCoeffMap,0,12,S^.RactT[Pt,Ct,Cg])<>0 Then Begin V6ParseCoeffModels:=-1; Exit; End;
+   End;
+   FillChar(S^.NbNull,SizeOf(S^.NbNull),0);
+  End Else Begin
+   For Pt:=0 To 1 Do
+    For Ctx:=0 To 2 Do
+     For Node:=0 To 4 Do Begin
+      V:=V6Sar(CoeffDccv[Pt,Node]*V6DccvLc[(Ctx*5+Node)*2]+128,8)+V6DccvLc[(Ctx*5+Node)*2+1];
+      If V<1 Then V:=1 Else If V>255 Then V:=255;
+      CoeffDcct[Pt,Ctx,Node]:=V;
+     End;
+  End;
+ End;
+End;
+
+{ ---- en-tete ---- }
+
+{ renvoie 0, 1 (changement de taille) ou <0 }
+Function V6ParseHeader(S: PV6Ctx; B,BufSize: LongInt): LongInt;
+Var ParseFilterInfo: Boolean; CoeffOffset,VrtShift,SubVersion,Rows,Cols,Res,Sep,B0,B1: LongInt;
+Begin
+ ParseFilterInfo:=False; CoeffOffset:=0; VrtShift:=0; Res:=0;
+ B0:=V6PB(B);
+ Sep:=B0 And 1;
+ S^.IsKey:=(B0 And $80)=0;
+ { ff_vp56_init_dequant }
+ If S^.Quantizer<>((B0 Shr 1) And $3F) Then V6SetBounding(S^.Bound,V6FilterThr[(B0 Shr 1) And $3F]);
+ S^.Quantizer:=(B0 Shr 1) And $3F;
+ S^.DequantDc:=V6DcDequant[S^.Quantizer] Shl 2;
+ S^.DequantAc:=V6AcDequant[S^.Quantizer] Shl 2;
+ If S^.IsKey Then Begin
+  B1:=V6PB(B+1);
+  SubVersion:=B1 Shr 3;
+  If SubVersion>8 Then Begin V6ParseHeader:=-1; Exit; End;
+  S^.FilterHeader:=B1 And 6;
+  If (B1 And 1)<>0 Then Begin V6ParseHeader:=-2; Exit; End;   { entrelacement : non supporte (comme ffmpeg) }
+  If (Sep<>0) Or (S^.FilterHeader=0) Then Begin
+   CoeffOffset:=V6RB16(B+2)-2;
+   Inc(B,2); Dec(BufSize,2);
+  End;
+  Rows:=V6PB(B+2); Cols:=V6PB(B+3);
+  If (Rows=0) Or (Cols=0) Then Begin V6ParseHeader:=-1; Exit; End;
+  If (S^.Macroblocks=Nil) Or (16*Cols<>V6CodedW) Or (16*Rows<>V6CodedH) Then Begin
+   If (V6ExtraSize=0) And (((V6AvW+15) And (Not 15))=16*Cols) And (((V6AvH+15) And (Not 15))=16*Rows) Then Begin
+    V6CodedW:=16*Cols; V6CodedH:=16*Rows;
+   End Else Begin
+    V6AvW:=16*Cols; V6AvH:=16*Rows; V6CodedW:=16*Cols; V6CodedH:=16*Rows;
+    If V6ExtraSize=1 Then Begin
+     V6AvW:=V6AvW-(V6Extra Shr 4);
+     V6AvH:=V6AvH-(V6Extra And $F);
+    End;
+   End;
+   Res:=1;
+  End;
+  If V6RacInit(S^.C,B+6,BufSize-6)<0 Then Begin
+   If Res=1 Then Begin V6AvW:=0; V6AvH:=0; V6CodedW:=0; V6CodedH:=0; End;
+   V6ParseHeader:=-1; Exit;
+  End;
+  V6Gets(S^.C,2);
+  ParseFilterInfo:=S^.FilterHeader<>0;
+  If SubVersion<8 Then VrtShift:=5;
+  S^.SubVersion:=SubVersion;
+  S^.GoldenFrame:=0;
+ End Else Begin
+  If (S^.SubVersion=0) Or (V6CodedW=0) Or (V6CodedH=0) Then Begin V6ParseHeader:=-1; Exit; End;
+  If (Sep<>0) Or (S^.FilterHeader=0) Then Begin
+   CoeffOffset:=V6RB16(B+1)-2;
+   Inc(B,2); Dec(BufSize,2);
+  End;
+  If V6RacInit(S^.C,B+1,BufSize-1)<0 Then Begin V6ParseHeader:=-1; Exit; End;
+  S^.GoldenFrame:=V6Get(S^.C);
+  If S^.FilterHeader<>0 Then Begin
+   S^.DeblockFiltering:=V6Get(S^.C);
+   If S^.DeblockFiltering<>0 Then V6Get(S^.C);
+   If S^.SubVersion>7 Then ParseFilterInfo:=V6Get(S^.C)<>0;
+  End;
+ End;
+ If ParseFilterInfo Then Begin
+  If V6Get(S^.C)<>0 Then Begin
+   S^.FilterMode:=2;
+   S^.SampleVarianceThreshold:=V6Gets(S^.C,5) Shl VrtShift;
+   S^.MaxVectorLength:=2 Shl V6Gets(S^.C,3);
+  End Else If V6Get(S^.C)<>0 Then S^.FilterMode:=1
+  Else S^.FilterMode:=0;
+  If S^.SubVersion>7 Then S^.FilterSelection:=V6Gets(S^.C,4) Else S^.FilterSelection:=16;
+ End;
+ S^.UseHuffman:=V6Get(S^.C)<>0;
+ S^.HuffCoeff:=False;
+ If CoeffOffset<>0 Then Begin
+  B:=B+CoeffOffset; BufSize:=BufSize-CoeffOffset;
+  If BufSize<0 Then Begin
+   If Res=1 Then Begin V6AvW:=0; V6AvH:=0; V6CodedW:=0; V6CodedH:=0; End;
+   V6ParseHeader:=-1; Exit;
+  End;
+  If S^.UseHuffman Then Begin
+   S^.HuffCoeff:=True;
+   S^.GbBase:=B; S^.GbSize:=BufSize; S^.GbPos:=0;
+  End Else Begin
+   If V6RacInit(S^.Cc,B,BufSize)<0 Then Begin
+    If Res=1 Then Begin V6AvW:=0; V6AvH:=0; V6CodedW:=0; V6CodedH:=0; End;
+    V6ParseHeader:=-1; Exit;
+   End;
+   S^.UseCc:=True;
+  End;
+ End Else S^.UseCc:=False;
+ V6ParseHeader:=Res;
+End;
+
+{ ---- vecteurs ---- }
+
+Procedure V6ParseVectorAdjustment(S: PV6Ctx; Var Vect: TV6Mv);
+Var Comp,I,J,Delta,X,Y: LongInt;
+Begin
+ X:=0; Y:=0;
+ If S^.VectorCandidatePos<2 Then Begin X:=S^.VectorCandidate[0].X; Y:=S^.VectorCandidate[0].Y; End;
+ For Comp:=0 To 1 Do Begin
+  Delta:=0;
+  If V6Prob(S^.C,S^.Model.VectorDct[Comp])<>0 Then Begin
+   For I:=0 To 6 Do Begin
+    J:=V6ProbOrder[I];
+    Delta:=Delta Or (V6Prob(S^.C,S^.Model.VectorFdv[Comp,J]) Shl J);
+   End;
+   If (Delta And $F0)<>0 Then Delta:=Delta Or (V6Prob(S^.C,S^.Model.VectorFdv[Comp,3]) Shl 3)
+   Else Delta:=Delta Or 8;
+  End Else Delta:=V6Tree(S^.C,V6PvaVal,V6PvaIdx,S^.Model.VectorPdv[Comp]);
+  If (Delta<>0) And (V6Prob(S^.C,S^.Model.VectorSig[Comp])<>0) Then Delta:=-Delta;
+  If Comp=0 Then X:=X+Delta Else Y:=Y+Delta;
+ End;
+ Vect.X:=X; Vect.Y:=Y;
+End;
+
+{ nombre de blocs consecutifs nuls (huffman) }
+Function V6GetNbNull(S: PV6Ctx): LongInt;
+Var Val: LongInt;
+Begin
+ Val:=V6GbBits(S,2);
+ If Val=2 Then Val:=Val+V6GbBits(S,2)
+ Else If Val=3 Then Begin
+  Val:=V6GbBit(S) Shl 2;
+  Val:=6+Val+V6GbBits(S,2+Val);
+ End;
+ V6GetNbNull:=Val;
+End;
+
+Function V6ParseCoeffHuffman(S: PV6Ctx): LongInt;
+Var Coeff,Coeff2,Sign,CoeffIdx,B,Cg,Idx,Pt,Ct,Run,Pt2,CT2,Sel: LongInt;
+    T: ^TV6Tree; TCt,TCg: LongInt; Pos: LongInt;
+Begin
+ V6ParseCoeffHuffman:=0;
+ Pt:=0;
+ For B:=0 To 5 Do Begin
+  Ct:=0;
+  If B>3 Then Pt:=1;
+  TCt:=-1; TCg:=-1;           { arbre courant : -1 = dccv }
+  CoeffIdx:=0;
+  While True Do Begin
+   Run:=1;
+   If (CoeffIdx<2) And (S^.NbNull[CoeffIdx,Pt]<>0) Then Begin
+    Dec(S^.NbNull[CoeffIdx,Pt]);
+    If CoeffIdx<>0 Then Break;
+   End Else Begin
+    If S^.GbSize*8-S^.GbPos<=0 Then Begin V6ParseCoeffHuffman:=-1; Exit; End;
+    If TCt<0 Then Coeff:=V6GbVlc(S,S^.DccvT[Pt]) Else Coeff:=V6GbVlc(S,S^.RactT[Pt,TCt,TCg]);
+    If Coeff=0 Then Begin
+     If CoeffIdx<>0 Then Begin
+      If CoeffIdx>=6 Then Pt2:=1 Else Pt2:=0;
+      Run:=Run+V6GbVlc(S,S^.RunvT[Pt2]);
+      If Run>=9 Then Run:=Run+V6GbBits(S,6);
+     End Else S^.NbNull[0,Pt]:=V6GetNbNull(S);
+     Ct:=0;
+    End Else If Coeff=11 Then Begin
+     If CoeffIdx=1 Then S^.NbNull[1,Pt]:=V6GetNbNull(S);
+     Break;
+    End Else Begin
+     Coeff2:=V6CoeffBias[Coeff];
+     If Coeff>4 Then Begin
+      If Coeff<=9 Then Coeff2:=Coeff2+V6GbBits(S,Coeff-4) Else Coeff2:=Coeff2+V6GbBits(S,11);
+     End;
+     If Coeff2>1 Then Ct:=2 Else Ct:=1;
+     Sign:=V6GbBit(S);
+     Coeff2:=(Coeff2 Xor (-Sign))+Sign;
+     If CoeffIdx<>0 Then Coeff2:=Coeff2*S^.DequantAc;
+     Idx:=S^.Model.CoeffIndexToPos[CoeffIdx];
+     S^.BlockCoeff[B,V6IdctScan[Idx]]:=SmallInt(Coeff2);
+    End;
+   End;
+   CoeffIdx:=CoeffIdx+Run;
+   If CoeffIdx>=64 Then Break;
+   Cg:=V6CoeffGroups[CoeffIdx];
+   If Cg>3 Then Cg:=3;
+   TCt:=Ct; TCg:=Cg;
+  End;
+  If CoeffIdx>63 Then Sel:=63 Else Sel:=CoeffIdx;
+  S^.IdctSelector[B]:=S^.Model.CoeffIndexToIdctSel[Sel];
+ End;
+End;
+
+Function V6ParseCoeff(S: PV6Ctx): LongInt;
+Var C: ^TV6Rac; Coeff,Sign,CoeffIdx,B,I,Cg,Idx,Ctx,Pt,Ct,Run,Ix: LongInt;
+    M1,M2: Integer; { 0 = dccv, 1 = ract[pt][ct][cg] ; pour model1 et model2 }
+    M1T,M1C,M1G: LongInt;
+    Mode2Ract: Boolean;
+    P2: Array[0..10] Of Byte; P1: Array[0..10] Of Byte;
+    Model3: Array[0..13] Of Byte;
+Begin
+ V6ParseCoeff:=0;
+ If S^.UseCc Then C:=@S^.Cc Else C:=@S^.C;
+ If V6RacIsEnd(C^) Then Begin V6ParseCoeff:=-1; Exit; End;
+ Pt:=0;
+ For B:=0 To 5 Do Begin
+  Ct:=1; Run:=1;
+  If B>3 Then Pt:=1;
+  Ctx:=S^.LeftBlock[V6B6to4[B]].NotNullDc+S^.AboveBlocks^[S^.AboveBlockIdx[B]].NotNullDc;
+  Move(S^.Model.CoeffDccv[Pt],P1,11);
+  Move(S^.Model.CoeffDcct[Pt,Ctx],P2,5);
+  CoeffIdx:=0;
+  While True Do Begin
+   If ((CoeffIdx>1) And (Ct=0)) Or (V6Prob(C^,P2[0])<>0) Then Begin
+    { coefficient }
+    If V6Prob(C^,P2[2])<>0 Then Begin
+     If V6Prob(C^,P2[3])<>0 Then Begin
+      Idx:=V6Tree(C^,V6PcVal,V6PcIdx,P1);
+      Coeff:=V6CoeffBias[Idx+5];
+      For I:=V6CoeffBitLen[Idx] Downto 0 Do
+       Coeff:=Coeff+(V6Prob(C^,V6CoeffParse[Idx*11+I]) Shl I);
+     End Else Begin
+      If V6Prob(C^,P2[4])<>0 Then Coeff:=3+V6Prob(C^,P1[5]) Else Coeff:=2;
+     End;
+     Ct:=2;
+    End Else Begin
+     Ct:=1; Coeff:=1;
+    End;
+    Sign:=V6Get(C^);
+    Coeff:=(Coeff Xor (-Sign))+Sign;
+    If CoeffIdx<>0 Then Coeff:=Coeff*S^.DequantAc;
+    Idx:=S^.Model.CoeffIndexToPos[CoeffIdx];
+    S^.BlockCoeff[B,V6IdctScan[Idx]]:=SmallInt(Coeff);
+    Run:=1;
+   End Else Begin
+    { run }
+    Ct:=0;
+    If CoeffIdx>0 Then Begin
+     If V6Prob(C^,P2[1])=0 Then Break;
+     If CoeffIdx>=6 Then Move(S^.Model.CoeffRunv[1],Model3,14) Else Move(S^.Model.CoeffRunv[0],Model3,14);
+     Run:=V6Tree(C^,V6PcrVal,V6PcrIdx,Model3);
+     If Run=0 Then Begin
+      Run:=9;
+      For I:=0 To 5 Do Run:=Run+(V6Prob(C^,Model3[I+8]) Shl I);
+     End;
+    End;
+   End;
+   CoeffIdx:=CoeffIdx+Run;
+   If CoeffIdx>=64 Then Break;
+   Cg:=V6CoeffGroups[CoeffIdx];
+   Move(S^.Model.CoeffRact[Pt,Ct,Cg],P1,11);
+   Move(S^.Model.CoeffRact[Pt,Ct,Cg],P2,11);
+  End;
+  If S^.BlockCoeff[B,0]<>0 Then Ix:=1 Else Ix:=0;
+  S^.LeftBlock[V6B6to4[B]].NotNullDc:=Ix;
+  S^.AboveBlocks^[S^.AboveBlockIdx[B]].NotNullDc:=Ix;
+  If CoeffIdx>63 Then Idx:=63 Else Idx:=CoeffIdx;
+  S^.IdctSelector[B]:=S^.Model.CoeffIndexToIdctSel[Idx];
+ End;
+End;
+{ ---- prediction des vecteurs ---- }
+
+Function V6GetVectorsPredictors(S: PV6Ctx; Row,Col,RefFrame: LongInt): LongInt;
+Var NbPred,Pos,Ox,Oy,Offset: LongInt; V0,V1: TV6Mv; Mb: ^TV6Mb;
+Begin
+ NbPred:=0;
+ V0.X:=0; V0.Y:=0; V1.X:=0; V1.Y:=0;
+ For Pos:=0 To 11 Do Begin
+  Ox:=Col+V6CandPos[Pos*2]; Oy:=Row+V6CandPos[Pos*2+1];
+  If (Ox<0) Or (Ox>=S^.MbWidth) Or (Oy<0) Or (Oy>=S^.MbHeight) Then Continue;
+  Offset:=Ox+S^.MbWidth*Oy;
+  Mb:=@S^.Macroblocks^[Offset];
+  If V6RefFrame[Mb^.Typ]<>RefFrame Then Continue;
+  If ((Mb^.Mv.X=V0.X) And (Mb^.Mv.Y=V0.Y)) Or ((Mb^.Mv.X=0) And (Mb^.Mv.Y=0)) Then Continue;
+  If NbPred=0 Then V0:=Mb^.Mv Else V1:=Mb^.Mv;
+  Inc(NbPred);
+  If NbPred>1 Then Begin NbPred:=-1; Break; End;
+  S^.VectorCandidatePos:=Pos;
+ End;
+ S^.VectorCandidate[0]:=V0; S^.VectorCandidate[1]:=V1;
+ V6GetVectorsPredictors:=NbPred+1;
+End;
+
+Function V6ParseMbType(S: PV6Ctx; PrevType,Ctx: LongInt): LongInt;
+Begin
+ If V6Prob(S^.C,S^.Model.MbType[Ctx,PrevType,0])<>0 Then V6ParseMbType:=PrevType
+ Else V6ParseMbType:=V6Tree(S^.C,V6PmbtVal,V6PmbtIdx,S^.Model.MbType[Ctx,PrevType]);
+End;
+
+Function V6Rshift2(A: LongInt): LongInt;
+Begin
+ If A>0 Then V6Rshift2:=V6Sar(A+2,2) Else V6Rshift2:=V6Sar(A+1,2);
+End;
+
+Procedure V6Decode4Mv(S: PV6Ctx; Row,Col: LongInt);
+Var Typ: Array[0..3] Of LongInt; B,MX,MY: LongInt; Cx: LongInt;
+Begin
+ MX:=0; MY:=0;
+ For B:=0 To 3 Do Begin
+  Typ[B]:=V6Gets(S^.C,2);
+  If Typ[B]<>0 Then Inc(Typ[B]);
+ End;
+ For B:=0 To 3 Do Begin
+  Case Typ[B] Of
+   0: Begin S^.Mv[B].X:=0; S^.Mv[B].Y:=0; End;
+   2: V6ParseVectorAdjustment(S,S^.Mv[B]);
+   3: S^.Mv[B]:=S^.VectorCandidate[0];
+   4: S^.Mv[B]:=S^.VectorCandidate[1];
+  End;
+  MX:=SmallInt(MX+S^.Mv[B].X);
+  MY:=SmallInt(MY+S^.Mv[B].Y);
+ End;
+ S^.Macroblocks^[Row*S^.MbWidth+Col].Mv:=S^.Mv[3];
+ Cx:=V6Rshift2(MX);
+ S^.Mv[4].X:=Cx; S^.Mv[5].X:=Cx;
+ Cx:=V6Rshift2(MY);
+ S^.Mv[4].Y:=Cx; S^.Mv[5].Y:=Cx;
+End;
+
+Function V6DecodeMv(S: PV6Ctx; Row,Col: LongInt): LongInt;
+Var Ctx,B: LongInt; Mv,Vect: TV6Mv;
+Begin
+ Vect.X:=0; Vect.Y:=0;
+ Ctx:=V6GetVectorsPredictors(S,Row,Col,1);
+ S^.MbTyp:=V6ParseMbType(S,S^.MbTyp,Ctx);
+ S^.Macroblocks^[Row*S^.MbWidth+Col].Typ:=S^.MbTyp;
+ Mv:=Vect;
+ Case S^.MbTyp Of
+  3: Mv:=S^.VectorCandidate[0];
+  4: Mv:=S^.VectorCandidate[1];
+  8: Begin V6GetVectorsPredictors(S,Row,Col,2); Mv:=S^.VectorCandidate[0]; End;
+  9: Begin V6GetVectorsPredictors(S,Row,Col,2); Mv:=S^.VectorCandidate[1]; End;
+  2: Begin V6ParseVectorAdjustment(S,Vect); Mv:=Vect; End;
+  6: Begin V6GetVectorsPredictors(S,Row,Col,2); V6ParseVectorAdjustment(S,Vect); Mv:=Vect; End;
+  7: Begin V6Decode4Mv(S,Row,Col); V6DecodeMv:=S^.MbTyp; Exit; End;
+ End;
+ S^.Macroblocks^[Row*S^.MbWidth+Col].Mv:=Mv;
+ For B:=0 To 5 Do S^.Mv[B]:=Mv;
+ V6DecodeMv:=S^.MbTyp;
+End;
+
+Procedure V6AddPredictorsDc(S: PV6Ctx; RefFrame: LongInt);
+Var Idx,B,Count,Dc: LongInt; Ab,Lb: ^TV6RefDc; Pl: LongInt;
+Begin
+ Idx:=V6IdctScan[0];
+ For B:=0 To 5 Do Begin
+  Ab:=@S^.AboveBlocks^[S^.AboveBlockIdx[B]];
+  Lb:=@S^.LeftBlock[V6B6to4[B]];
+  Pl:=V6B2p[B];
+  Count:=0; Dc:=0;
+  If RefFrame=Lb^.RefFrame Then Begin Dc:=Dc+Lb^.DcCoeff; Inc(Count); End;
+  If RefFrame=Ab^.RefFrame Then Begin Dc:=Dc+Ab^.DcCoeff; Inc(Count); End;
+  If Count=0 Then Dc:=S^.PrevDc[Pl,RefFrame]
+  Else If Count=2 Then Dc:=Dc Div 2;
+  S^.BlockCoeff[B,Idx]:=SmallInt(S^.BlockCoeff[B,Idx]+Dc);
+  S^.PrevDc[Pl,RefFrame]:=S^.BlockCoeff[B,Idx];
+  Ab^.DcCoeff:=S^.BlockCoeff[B,Idx];
+  Ab^.RefFrame:=RefFrame;
+  Lb^.DcCoeff:=S^.BlockCoeff[B,Idx];
+  Lb^.RefFrame:=RefFrame;
+  S^.BlockCoeff[B,Idx]:=SmallInt(LongInt(S^.BlockCoeff[B,Idx])*S^.DequantDc);
+ End;
+End;
+
+Function V6PlaneStride(Pl: LongInt): LongInt;
+Begin
+ If (Pl=1) Or (Pl=2) Then V6PlaneStride:=V6CodedW Div 2 Else V6PlaneStride:=V6CodedW;
+End;
+
+Function V6PlaneHeight(Pl: LongInt): LongInt;
+Begin
+ If (Pl=1) Or (Pl=2) Then V6PlaneHeight:=V6CodedH Div 2 Else V6PlaneHeight:=V6CodedH;
+End;
+
+Procedure V6Mc(S: PV6Ctx; B,Pl: LongInt; Ref: PEABuffer; Stride,X,Y: LongInt);
+Var Dst,SrcBlk: PEABuffer; DOff,Mask,Dx,Dy,SrcOffset,SbStride,Overlap,PW,PH,R,C,Xx,Yy,MX,MY,Dv: LongInt;
+Begin
+ Dst:=V6Fr[S^.IdxCur].P[Pl]; DOff:=S^.BlockOffset[B];
+ Dv:=V6CoordDiv[B];
+ Mask:=Dv-1;
+ MX:=S^.Mv[B].X; MY:=S^.Mv[B].Y;
+ Dx:=MX Div Dv; Dy:=MY Div Dv;
+ If B>=4 Then Begin X:=X Div 2; Y:=Y Div 2; End;
+ X:=X+Dx-2; Y:=Y+Dy-2;
+ PW:=V6PlaneStride(Pl); PH:=V6PlaneHeight(Pl);
+ If (X<0) Or (X+12>=PW) Or (Y<0) Or (Y+12>=PH) Then Begin
+  For R:=0 To 11 Do Begin
+   Yy:=Y+R; If Yy<0 Then Yy:=0 Else If Yy>=PH Then Yy:=PH-1;
+   For C:=0 To 11 Do Begin
+    Xx:=X+C; If Xx<0 Then Xx:=0 Else If Xx>=PW Then Xx:=PW-1;
+    V6Emu[R*32+C]:=Ref^[Yy*Stride+Xx];
+   End;
+  End;
+  SrcBlk:=@V6Emu; SbStride:=32; SrcOffset:=2+2*32;
+ End Else If S^.DeblockFiltering<>0 Then Begin
+  For R:=0 To 11 Do
+   For C:=0 To 11 Do V6Emu[R*32+C]:=Ref^[DOff+(Dy-2+R)*Stride+Dx-2+C];
+  SrcBlk:=@V6Emu; SbStride:=32; SrcOffset:=2+2*32;
+ End Else Begin
+  SrcBlk:=Ref; SbStride:=Stride; SrcOffset:=DOff+Dy*Stride+Dx;
+ End;
+ If S^.DeblockFiltering<>0 Then Begin
+  If (Dx And 7)<>0 Then V6HLoop12(SrcBlk,10-(Dx And 7),SbStride,S^.Bound);
+  If (Dy And 7)<>0 Then V6VLoop12(SrcBlk,SbStride*(10-(Dy And 7)),SbStride,S^.Bound);
+ End;
+ Overlap:=0;
+ If (MX And Mask)<>0 Then Begin If MX>0 Then Inc(Overlap) Else Dec(Overlap); End;
+ If (MY And Mask)<>0 Then Begin If MY>0 Then Overlap:=Overlap+SbStride Else Overlap:=Overlap-SbStride; End;
+ If Overlap<>0 Then
+  V6Filter(S,Dst,DOff,SrcBlk,SrcOffset,SrcOffset+Overlap,Stride,SbStride,MX,MY,Mask,S^.FilterSelection,B<4)
+ Else Begin
+  For R:=0 To 7 Do
+   For C:=0 To 7 Do Dst^[DOff+R*Stride+C]:=SrcBlk^[SrcOffset+R*SbStride+C];
+ End;
+End;
+
+Procedure V6RenderMb(S: PV6Ctx; Row,Col: LongInt; IsAlpha: Boolean; MbType: LongInt);
+Var RefFrame,RefIdx,B,Ab,BMax,Pl,Off,XOff,YOff,R,C,Stride: LongInt; Cur,Ref: PEABuffer;
+Begin
+ RefFrame:=V6RefFrame[MbType];
+ V6AddPredictorsDc(S,RefFrame);
+ If RefFrame=0 Then RefIdx:=S^.IdxCur Else If RefFrame=1 Then RefIdx:=S^.IdxPrev Else RefIdx:=S^.IdxGold;
+ If (MbType<>1) And (RefIdx<0) Then Exit;
+ If IsAlpha Then Begin Ab:=6; BMax:=4; End Else Begin Ab:=0; BMax:=6; End;
+ Case MbType Of
+  1: For B:=0 To BMax-1 Do Begin
+      Pl:=V6B2p[B+Ab]; Stride:=V6PlaneStride(Pl);
+      V6IdctPut(S,V6Fr[S^.IdxCur].P[Pl],S^.BlockOffset[B],Stride,B,S^.IdctSelector[B]);
+     End;
+  0,5: For B:=0 To BMax-1 Do Begin
+      Pl:=V6B2p[B+Ab]; Stride:=V6PlaneStride(Pl);
+      Off:=S^.BlockOffset[B];
+      Cur:=V6Fr[S^.IdxCur].P[Pl]; Ref:=V6Fr[RefIdx].P[Pl];
+      For R:=0 To 7 Do
+       For C:=0 To 7 Do Cur^[Off+R*Stride+C]:=Ref^[Off+R*Stride+C];
+      V6IdctAdd(S,Cur,Off,Stride,B,S^.IdctSelector[B]);
+     End;
+ Else
+  For B:=0 To BMax-1 Do Begin
+   If (B=1) Or (B=3) Then XOff:=8 Else XOff:=0;
+   If (B=2) Or (B=3) Then YOff:=8 Else YOff:=0;
+   Pl:=V6B2p[B+Ab]; Stride:=V6PlaneStride(Pl);
+   V6Mc(S,B,Pl,V6Fr[RefIdx].P[Pl],Stride,16*Col+XOff,16*Row+YOff);
+   V6IdctAdd(S,V6Fr[S^.IdxCur].P[Pl],S^.BlockOffset[B],Stride,B,S^.IdctSelector[B]);
+  End;
+ End;
+ If IsAlpha Then Begin S^.BlockCoeff[4,0]:=0; S^.BlockCoeff[5,0]:=0; End;
+End;
+
+Function V6DecodeMb(S: PV6Ctx; Row,Col: LongInt; IsAlpha: Boolean): LongInt;
+Var MbType,Ret: LongInt;
+Begin
+ If S^.IsKey Then MbType:=1 Else MbType:=V6DecodeMv(S,Row,Col);
+ If S^.HuffCoeff Then Ret:=V6ParseCoeffHuffman(S) Else Ret:=V6ParseCoeff(S);
+ If Ret<0 Then Begin V6DecodeMb:=Ret; Exit; End;
+ V6RenderMb(S,Row,Col,IsAlpha,MbType);
+ V6DecodeMb:=0;
+End;
+
+{ vp56_conceal_mb : macrobloc masque (copie de l'image precedente, vecteur nul) }
+Procedure V6ConcealMb(S: PV6Ctx; Row,Col: LongInt; IsAlpha: Boolean);
+Var MbType,B: LongInt;
+Begin
+ If S^.IsKey Then MbType:=1
+ Else Begin
+  S^.MbTyp:=0; MbType:=0;
+  S^.Macroblocks^[Row*S^.MbWidth+Col].Typ:=0;
+  S^.Macroblocks^[Row*S^.MbWidth+Col].Mv.X:=0;
+  S^.Macroblocks^[Row*S^.MbWidth+Col].Mv.Y:=0;
+  For B:=0 To 5 Do Begin S^.Mv[B].X:=0; S^.Mv[B].Y:=0; End;
+ End;
+ V6RenderMb(S,Row,Col,IsAlpha,MbType);
+End;
+
+{ ---- image : plans, boucle de macroblocs ---- }
+
+Procedure V6FreeFrames;
+Var I,J: LongInt;
+Begin
+ If V6FrAlloc Then Begin
+  For I:=0 To 4 Do
+   For J:=0 To 3 Do
+    If V6Fr[I].P[J]<>Nil Then Begin
+     If (J=1) Or (J=2) Then FreeMem(V6Fr[I].P[J],(V6CodedW Div 2)*(V6CodedH Div 2)+64)
+     Else FreeMem(V6Fr[I].P[J],V6CodedW*V6CodedH+64);
+     V6Fr[I].P[J]:=Nil;
+    End;
+  V6FrAlloc:=False;
+ End;
+End;
+
+Function V6DecodeMbs(S: PV6Ctx; IsAlpha: Boolean): LongInt;
+Var MbRow,MbCol,Block,Y,Uv,Ret: LongInt; StrideY,StrideUv: LongInt; Damaged: Boolean;
+Begin
+ V6DecodeMbs:=0;
+ If S^.IsKey Then Begin
+  V6DefaultModels(S);
+  For Block:=0 To S^.MbHeight*S^.MbWidth-1 Do S^.Macroblocks^[Block].Typ:=1;
+ End Else Begin
+  V6ParseMbTypeModels(S);
+  V6ParseVectorModels(S);
+  S^.MbTyp:=0;
+ End;
+ If V6ParseCoeffModels(S)<>0 Then Exit;   { -> next }
+ FillChar(S^.PrevDc,SizeOf(S^.PrevDc),0);
+ S^.PrevDc[1,0]:=128; S^.PrevDc[2,0]:=128;
+ For Block:=0 To 4*S^.MbWidth+5 Do Begin
+  S^.AboveBlocks^[Block].RefFrame:=-1;
+  S^.AboveBlocks^[Block].DcCoeff:=0;
+  S^.AboveBlocks^[Block].NotNullDc:=0;
+ End;
+ S^.AboveBlocks^[2*S^.MbWidth+2].RefFrame:=0;
+ S^.AboveBlocks^[3*S^.MbWidth+4].RefFrame:=0;
+ StrideY:=V6CodedW; StrideUv:=V6CodedW Div 2;
+ Damaged:=False;
+ For MbRow:=0 To S^.MbHeight-1 Do Begin
+  For Block:=0 To 3 Do Begin
+   S^.LeftBlock[Block].RefFrame:=-1;
+   S^.LeftBlock[Block].DcCoeff:=0;
+   S^.LeftBlock[Block].NotNullDc:=0;
+  End;
+  S^.AboveBlockIdx[0]:=1; S^.AboveBlockIdx[1]:=2; S^.AboveBlockIdx[2]:=1; S^.AboveBlockIdx[3]:=2;
+  S^.AboveBlockIdx[4]:=2*S^.MbWidth+2+1;
+  S^.AboveBlockIdx[5]:=3*S^.MbWidth+4+1;
+  S^.BlockOffset[0]:=(MbRow*16)*StrideY;
+  S^.BlockOffset[2]:=S^.BlockOffset[0]+8*StrideY;
+  S^.BlockOffset[1]:=S^.BlockOffset[0]+8;
+  S^.BlockOffset[3]:=S^.BlockOffset[2]+8;
+  S^.BlockOffset[4]:=(MbRow*8)*StrideUv;
+  S^.BlockOffset[5]:=S^.BlockOffset[4];
+  For MbCol:=0 To S^.MbWidth-1 Do Begin
+   If Not Damaged Then Begin
+    Ret:=V6DecodeMb(S,MbRow,MbCol,IsAlpha);
+    If Ret<0 Then Begin
+     Damaged:=True;
+     { avctx->error_concealment vaut 3 par defaut dans ffmpeg }
+     If Not S^.HaveUndamaged Then Begin S^.Discard:=True; V6DecodeMbs:=-1; Exit; End;
+    End;
+   End;
+   If Damaged Then V6ConcealMb(S,MbRow,MbCol,IsAlpha);
+   For Y:=0 To 3 Do Begin
+    Inc(S^.AboveBlockIdx[Y],2);
+    Inc(S^.BlockOffset[Y],16);
+   End;
+   For Uv:=4 To 5 Do Begin
+    Inc(S^.AboveBlockIdx[Uv]);
+    Inc(S^.BlockOffset[Uv],8);
+   End;
+  End;
+ End;
+ If Not Damaged Then S^.HaveUndamaged:=True;
+End;
+{ ---- gestion des tampons / API ---- }
+
+Procedure V6CtxInit(S: PV6Ctx);
+Begin
+ FillChar(S^,SizeOf(TV6Ctx),0);
+ S^.Quantizer:=-1;
+ S^.DeblockFiltering:=0;
+ S^.GoldenFrame:=0;
+ S^.IdxCur:=-1; S^.IdxPrev:=-1; S^.IdxGold:=-1;
+End;
+
+Procedure V6CtxFree(S: PV6Ctx);
+Begin
+ If S^.AboveBlocks<>Nil Then Begin FreeMem(S^.AboveBlocks,(4*S^.MbWidth+6)*SizeOf(TV6RefDc)); S^.AboveBlocks:=Nil; End;
+ If S^.Macroblocks<>Nil Then Begin FreeMem(S^.Macroblocks,S^.MbWidth*S^.MbHeight*SizeOf(TV6Mb)); S^.Macroblocks:=Nil; End;
+End;
+
+Procedure V6Free;
+Begin
+ V6CtxFree(@V6Ctx[0]); V6CtxFree(@V6Ctx[1]);
+ V6FreeFrames;
+ If V6Out<>Nil Then Begin FreeMem(V6Out,V6OutSz); V6Out:=Nil; V6OutSz:=0; End;
+ If V6AlphaOut<>Nil Then Begin FreeMem(V6AlphaOut,V6AlphaSz); V6AlphaOut:=Nil; V6AlphaSz:=0; End;
+ V6CtxInit(@V6Ctx[0]); V6CtxInit(@V6Ctx[1]);
+ V6CodedW:=0; V6CodedH:=0; V6W:=0; V6H:=0; V6Stuck:=False; V6AlphaOk:=True;
+ V6AvW:=0; V6AvH:=0;
+End;
+
+Procedure V6Reset;
+Begin
+ V6Free;
+End;
+
+Procedure V6Config(Alpha,Flip: Boolean; Adjust: LongInt);
+Var I: LongInt;
+Begin
+ If Not V6TabInit Then V6InitTables;
+ V6Reset;
+ V6HasAlpha:=Alpha; V6FlipMode:=Flip;
+ If Adjust<0 Then Begin V6ExtraSize:=0; V6Extra:=0; End
+ Else Begin V6ExtraSize:=1; V6Extra:=Adjust And $FF; End;
+End;
+
+Procedure V6SetSize(W,H: LongInt);
+Begin
+ V6AvW:=W; V6AvH:=H;
+End;
+
+{ nouvelle geometrie : liberer/realouer plans et tableaux (vp56_size_changed) }
+Function V6Resize: Boolean;
+Var I,J,N,Mw,Mh: LongInt;
+Begin
+ V6Resize:=False;
+ V6FreeFrames;
+ Mw:=(V6CodedW+15) Div 16; Mh:=(V6CodedH+15) Div 16;
+ If (Mw>1000) Or (Mh>1000) Then Begin
+  V6AvW:=0; V6AvH:=0; V6CodedW:=0; V6CodedH:=0; Exit;
+ End;
+ For I:=0 To 4 Do Begin
+  GetMem(V6Fr[I].P[0],V6CodedW*V6CodedH+64); FillChar(V6Fr[I].P[0]^,V6CodedW*V6CodedH,0);
+  GetMem(V6Fr[I].P[1],(V6CodedW Div 2)*(V6CodedH Div 2)+64); FillChar(V6Fr[I].P[1]^,(V6CodedW Div 2)*(V6CodedH Div 2),0);
+  GetMem(V6Fr[I].P[2],(V6CodedW Div 2)*(V6CodedH Div 2)+64); FillChar(V6Fr[I].P[2]^,(V6CodedW Div 2)*(V6CodedH Div 2),0);
+  GetMem(V6Fr[I].P[3],V6CodedW*V6CodedH+64); FillChar(V6Fr[I].P[3]^,V6CodedW*V6CodedH,0);
+ End;
+ V6FrAlloc:=True;
+ For J:=0 To 1 Do Begin
+  If (J=1) And (Not V6HasAlpha) Then Break;
+  V6CtxFree(@V6Ctx[J]);
+  V6Ctx[J].MbWidth:=Mw; V6Ctx[J].MbHeight:=Mh;
+  GetMem(V6Ctx[J].AboveBlocks,(4*Mw+6)*SizeOf(TV6RefDc));
+  GetMem(V6Ctx[J].Macroblocks,Mw*Mh*SizeOf(TV6Mb));
+  FillChar(V6Ctx[J].Macroblocks^,Mw*Mh*SizeOf(TV6Mb),0);
+  V6Ctx[J].IdxPrev:=-1; V6Ctx[J].IdxGold:=-1; V6Ctx[J].HaveUndamaged:=False;
+ End;
+ V6Resize:=True;
+End;
+
+Function V6PickBuffer: LongInt;
+Var I: LongInt; Used: Boolean;
+Begin
+ For I:=0 To 4 Do Begin
+  Used:=(I=V6Ctx[0].IdxPrev) Or (I=V6Ctx[0].IdxGold);
+  If V6HasAlpha Then Used:=Used Or (I=V6Ctx[1].IdxPrev) Or (I=V6Ctx[1].IdxGold);
+  If Not Used Then Begin V6PickBuffer:=I; Exit; End;
+ End;
+ V6PickBuffer:=0;
+End;
+
+{ convertit l'image courante en YUV420 8 bits affichee (rognee, retournee si flip) }
+Procedure V6ToHook(Idx: LongInt);
+Var W,H,Cw,Ch,Need,R,C,Sr,Cs: LongInt; Q: PEABuffer; Pp: TV6Frame;
+Begin
+ W:=V6AvW; H:=V6AvH;
+ If (W<=0) Or (H<=0) Or (W>V6CodedW) Or (H>V6CodedH) Then Exit;
+ Cw:=(W+1) Div 2; Ch:=(H+1) Div 2;
+ Need:=W*H+2*Cw*Ch+16;
+ If (V6Out=Nil) Or (V6OutSz<Need) Then Begin
+  If V6Out<>Nil Then FreeMem(V6Out,V6OutSz);
+  GetMem(V6Out,Need); V6OutSz:=Need;
+ End;
+ Pp:=V6Fr[Idx];
+ Q:=V6Out;
+ For R:=0 To H-1 Do Begin
+  If V6FlipMode Then Sr:=V6CodedH-1-R Else Sr:=R;
+  Move(Pp.P[0]^[Sr*V6CodedW],Q^[R*W],W);
+ End;
+ Cs:=V6CodedW Div 2;
+ For R:=0 To Ch-1 Do Begin
+  If V6FlipMode Then Sr:=V6CodedH Div 2-1-R Else Sr:=R;
+  Move(Pp.P[1]^[Sr*Cs],Q^[W*H+R*Cw],Cw);
+  Move(Pp.P[2]^[Sr*Cs],Q^[W*H+Cw*Ch+R*Cw],Cw);
+ End;
+ V6W:=W; V6H:=H;
+ If V6HasAlpha Then Begin
+  If (V6AlphaOut=Nil) Or (V6AlphaSz<W*H+16) Then Begin
+   If V6AlphaOut<>Nil Then FreeMem(V6AlphaOut,V6AlphaSz);
+   GetMem(V6AlphaOut,W*H+16); V6AlphaSz:=W*H+16;
+  End;
+  For R:=0 To H-1 Do Begin
+   If V6FlipMode Then Sr:=V6CodedH-1-R Else Sr:=R;
+   Move(Pp.P[3]^[Sr*V6CodedW],V6AlphaOut^[R*W],W);
+  End;
+ End;
+ If @V6Hook<>Nil Then V6Hook(V6Out,W,H);
+End;
+
+Function V6Frame(P: PEABuffer; Len: LongInt): LongInt;
+Var S0,S1: PV6Ctx; AlphaOffset,Pos,Rem,Res,Cur,Ret0,Ret1: LongInt;
+Begin
+ V6Frame:=-1;
+ If Not V6TabInit Then V6InitTables;
+ V6Pk:=P; V6PkLen:=Len;
+ S0:=@V6Ctx[0]; S1:=@V6Ctx[1];
+ If Len<2 Then Exit;
+ AlphaOffset:=Len; Pos:=0; Rem:=Len;
+ If V6HasAlpha Then Begin
+  If Rem<3 Then Exit;
+  AlphaOffset:=(P^[0] Shl 16) Or (P^[1] Shl 8) Or P^[2];
+  Pos:=3; Dec(Rem,3);
+  If Rem<AlphaOffset Then Exit;
+ End;
+ Res:=V6ParseHeader(S0,Pos,AlphaOffset);
+ If Res<0 Then Exit;
+ If Res=1 Then Begin
+  S0^.IdxPrev:=-1; S0^.IdxGold:=-1; S1^.IdxPrev:=-1; S1^.IdxGold:=-1;
+  S0^.IsKey:=True;
+  V6Stuck:=False;
+  If Not V6Resize Then Exit;
+ End;
+ { ffmpeg (observe) : apres une image rejetee (discard_frame) le paquet suivant echoue }
+ { dans ff_get_buffer (tampon encore reference), puis le decodage reprend normalement }
+ If V6Stuck Then Begin V6Stuck:=False; Exit; End;
+ If S0^.Macroblocks=Nil Then Exit;
+ Cur:=V6PickBuffer;
+ S0^.IdxCur:=Cur; S1^.IdxCur:=Cur;
+ If V6HasAlpha Then Begin
+  Inc(Pos,AlphaOffset); Dec(Rem,AlphaOffset);
+  Res:=V6ParseHeader(S1,Pos,Rem);
+  If Res<>0 Then Begin
+   If Res=1 Then Begin V6CodedW:=0; V6CodedH:=0; End;
+   Exit;
+  End;
+ End;
+ S0^.Discard:=False; S1^.Discard:=False;
+ Ret0:=V6DecodeMbs(S0,False);
+ Ret1:=0;
+ If V6HasAlpha Then Ret1:=V6DecodeMbs(S1,True);
+ { seul discard_frame du contexte principal est teste par ffmpeg ; un echec alpha n'annule pas l'image }
+ If (Ret0<0) Or S0^.Discard Then Begin V6Stuck:=True; Exit; End;
+ { mise a jour des references (label next: de ffmpeg) }
+ If S0^.IsKey Or (S0^.GoldenFrame<>0) Then S0^.IdxGold:=Cur;
+ S0^.IdxPrev:=Cur;
+ If Ret1<0 Then V6AlphaOk:=False Else If S1^.IsKey Then V6AlphaOk:=True;
+ If V6HasAlpha And (Ret1>=0) Then Begin
+  If S1^.IsKey Or (S1^.GoldenFrame<>0) Then S1^.IdxGold:=Cur;
+  S1^.IdxPrev:=Cur;
+ End;
+ V6Frame:=0;
+ V6ToHook(Cur);
+End;
+{ ======================================================================== }
 {  pe_hevc.pas : decodeur HEVC / H.265 (Main, Main10, Main Still Picture,  }
 {  RExt 4:0:0 / 4:2:2 / 4:4:4 8..12 bits).                                  }
 {  Port en Pascal du decodeur de FFmpeg n6.1.1 (libavcodec/hevc*.c,        }
@@ -23113,6 +25519,7005 @@ Begin
  HvFinishPic;
  While HvOutputFrame(True) Do ;
 End;
+{$B-}
+{ ====================================================================== }
+{ pe_hevc_enc.pas : encodeur HEVC / H.265 (profil Main, 8 bits, 4:2:0)     }
+{ Ecrit pour ANYMP4.PAS. Reconstruction interne (intra, inter, transformees,}
+{ deblocage) compatible bit a bit avec FFmpeg/libde265.                      }
+{ Les tables CABAC, la matrice DCT, les tables de deblocage et de filtres    }
+{ proviennent de FFmpeg (LGPL 2.1+) et de libde265 (LGPL 3) et de la norme   }
+{ ITU-T H.265.                                                               }
+{ ====================================================================== }
+
+Const
+ HE_NCTX=179;
+ { decalages des contextes CABAC (ordre de FFmpeg) }
+ HEC_SPLITCU=2; HEC_SKIP=6; HEC_PREDMODE=12; HEC_PARTMODE=13; HEC_PREVINTRA=17; HEC_CHROMAPRED=18;
+ HEC_MERGEFLAG=20; HEC_MERGEIDX=21; HEC_INTERPRED=22; HEC_REFIDX=27; HEC_MVDG0=31; HEC_MVDG1=33;
+ HEC_MVPFLAG=35; HEC_NORESID=36; HEC_SPLITTR=37; HEC_CBFLUMA=40; HEC_CBFCHROMA=42;
+ HEC_LASTX=53; HEC_LASTY=71; HEC_CSBF=89; HEC_SIG=93; HEC_GT1=137; HEC_GT2=161;
+ HE_COEFSTRIDE=1536;
+
+Type
+ THeLA=Array[0..268435000] Of LongInt;
+ PHeLA=^THeLA;
+ THePu=Record
+  Merge,MergeIdx,Dir,Ref0,Ref1,Mx0,My0,Mx1,My1,Mvp0,Mvp1: LongInt;
+  Dx0,Dy0,Dx1,Dy1: LongInt;       { mvd }
+  Px,Py,Pw,Ph: LongInt;           { position et taille }
+ End;
+ THeCu=Record
+  X,Y,L2: LongInt;
+  Pred: LongInt;                  { 1 intra, 2 inter }
+  Skip: LongInt;
+  Part: LongInt;                  { 0 2Nx2N, 1 2NxN, 2 Nx2N, 3 NxN }
+  Ipm: Array[0..3] Of LongInt;    { modes luma intra }
+  ChrSyn,ChrMode: LongInt;        { intra_chroma_pred_mode (0..4) et mode reel }
+  NPu: LongInt;
+  Pu: Array[0..3] Of THePu;
+  RqtRoot: LongInt;
+  CbfY: Array[0..3] Of LongInt;
+  CbfCb,CbfCr: LongInt;
+  SplitTr: LongInt;               { split_transform_flag (inter, profondeur 0) }
+  Co: PHeLA;                      { niveaux : luma a 0, Cb a 1024, Cr a 1280 }
+ End;
+
+Var
+ { ---- parametres de flux ---- }
+ HeW,HeH,HeWp,HeHp,HeFn,HeFd,HeBitrate,HeGop,HeCw,HeCh: LongInt;
+ HeActive: Boolean;
+ HeCropR,HeCropB: LongInt;
+ { ---- ecriture binaire ---- }
+ HeBuf: PEABuffer; HeBufCap,HeBufLen: LongInt; HeBitAcc,HeBitCnt: LongInt;
+ HeOut: PEABuffer; HeOutCap,HeOutLen: LongInt;
+ { ---- CABAC ---- }
+ HeLow,HeRange,HeOuts: LongInt; HeFirstBit: Boolean;
+ HeSt: Array[0..HE_NCTX-1] Of Byte;
+ HeEst: Boolean; HeCost: Double;
+ HeCostM,HeCostL: Array[0..63] Of Double;
+ { ---- tables ---- }
+ HeZs: PHeLA;                       { adresse z-scan par bloc 4x4 }
+ HeScanX,HeScanY: Array[0..2,0..3,0..63] Of Byte;   { balayages : scan, log2(taille)-... }
+{ Tables generees depuis FFmpeg/libde265 (LGPL) }
+Const
+ HeLpsTab: Array[0..255] Of Byte = (
+  128,176,208,240,128,167,197,227,128,158,187,216,123,150,178,205,
+  116,142,169,195,111,135,160,185,105,128,152,175,100,122,144,166,
+  95,116,137,158,90,110,130,150,85,104,123,142,81,99,117,135,
+  77,94,111,128,73,89,105,122,69,85,100,116,66,80,95,110,
+  62,76,90,104,59,72,86,99,56,69,81,94,53,65,77,89,
+  51,62,73,85,48,59,69,80,46,56,66,76,43,53,63,72,
+  41,50,59,69,39,48,56,65,37,45,54,62,35,43,51,59,
+  33,41,48,56,32,39,46,53,30,37,43,50,29,35,41,48,
+  27,33,39,45,26,31,37,43,24,30,35,41,23,28,33,39,
+  22,27,32,37,21,26,30,35,20,24,29,33,19,23,27,31,
+  18,22,26,30,17,21,25,28,16,20,23,27,15,19,22,25,
+  14,18,21,24,14,17,20,23,13,16,19,22,12,15,18,21,
+  12,14,17,20,11,14,16,19,11,13,15,18,10,12,15,17,
+  10,12,14,16,9,11,13,15,9,11,12,14,8,10,12,14,
+  8,9,11,13,7,9,11,12,7,9,10,12,7,8,10,11,
+  6,8,9,11,6,7,9,10,6,7,8,9,2,2,2,2);
+Const
+ HeNextLps: Array[0..63] Of Byte = (
+  0,0,1,2,2,4,4,5,6,7,8,9,9,11,11,12,
+  13,13,15,15,16,16,18,18,19,19,21,21,22,22,23,24,
+  24,25,26,26,27,27,28,29,29,30,30,30,31,32,32,33,
+  33,33,34,34,35,35,35,36,36,36,37,37,37,38,38,63);
+Const
+ HeInitTab: Array[0..536] Of Byte = (
+  153,200,139,141,157,154,154,154,154,154,154,154,154,184,154,154,
+  154,184,63,139,154,154,154,154,154,154,154,154,154,154,154,154,
+  154,154,154,154,154,153,138,138,111,141,94,138,182,154,154,139,
+  139,139,139,139,139,110,110,124,125,140,153,125,127,140,109,111,
+  143,127,111,79,108,123,63,110,110,124,125,140,153,125,127,140,
+  109,111,143,127,111,79,108,123,63,91,171,134,141,111,111,125,
+  110,110,94,124,108,124,107,125,141,179,153,125,107,125,141,179,
+  153,125,107,125,141,179,153,125,140,139,182,182,152,136,152,136,
+  153,136,139,111,136,139,111,141,111,140,92,137,138,140,152,138,
+  139,153,74,149,92,139,107,122,152,140,179,166,182,140,227,122,
+  197,138,153,136,167,152,152,154,154,154,154,154,154,154,154,154,
+  154,154,154,153,185,107,139,126,154,197,185,201,154,154,154,149,
+  154,139,154,154,154,152,139,110,122,95,79,63,31,31,153,153,
+  153,153,140,198,140,198,168,79,124,138,94,153,111,149,107,167,
+  154,154,139,139,139,139,139,139,125,110,94,110,95,79,125,111,
+  110,78,110,111,111,95,94,108,123,108,125,110,94,110,95,79,
+  125,111,110,78,110,111,111,95,94,108,123,108,121,140,61,154,
+  155,154,139,153,139,123,123,63,153,166,183,140,136,153,154,166,
+  183,140,136,153,154,166,183,140,136,153,154,170,153,123,123,107,
+  121,107,121,167,151,183,140,151,183,140,140,140,154,196,196,167,
+  154,152,167,182,182,134,149,136,153,121,136,137,169,194,166,167,
+  154,167,137,182,107,167,91,122,107,167,154,154,154,154,154,154,
+  154,154,154,154,154,154,153,160,107,139,126,154,197,185,201,154,
+  154,154,134,154,139,154,154,183,152,139,154,137,95,79,63,31,
+  31,153,153,153,153,169,198,169,198,168,79,224,167,122,153,111,
+  149,92,167,154,154,139,139,139,139,139,139,125,110,124,110,95,
+  94,125,111,111,79,125,126,111,111,79,108,123,93,125,110,124,
+  110,95,94,125,111,111,79,125,126,111,111,79,108,123,93,121,
+  140,61,154,170,154,139,153,139,123,123,63,124,166,183,140,136,
+  153,154,166,183,140,136,153,154,166,183,140,136,153,154,170,153,
+  138,138,122,121,122,121,167,151,183,140,151,183,140,140,140,154,
+  196,167,167,154,152,167,182,182,134,149,136,153,121,136,122,169,
+  208,166,167,154,152,167,182,107,167,91,107,107,167,154,154,154,
+  154,154,154,154,154,154,154,154,154);
+Const
+ HeDctMat: Array[0..1023] Of ShortInt = (
+  64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
+  90,90,88,85,82,78,73,67,61,54,46,38,31,22,13,4,-4,-13,-22,-31,-38,-46,-54,-61,-67,-73,-78,-82,-85,-88,-90,-90,
+  90,87,80,70,57,43,25,9,-9,-25,-43,-57,-70,-80,-87,-90,-90,-87,-80,-70,-57,-43,-25,-9,9,25,43,57,70,80,87,90,
+  90,82,67,46,22,-4,-31,-54,-73,-85,-90,-88,-78,-61,-38,-13,13,38,61,78,88,90,85,73,54,31,4,-22,-46,-67,-82,-90,
+  89,75,50,18,-18,-50,-75,-89,-89,-75,-50,-18,18,50,75,89,89,75,50,18,-18,-50,-75,-89,-89,-75,-50,-18,18,50,75,89,
+  88,67,31,-13,-54,-82,-90,-78,-46,-4,38,73,90,85,61,22,-22,-61,-85,-90,-73,-38,4,46,78,90,82,54,13,-31,-67,-88,
+  87,57,9,-43,-80,-90,-70,-25,25,70,90,80,43,-9,-57,-87,-87,-57,-9,43,80,90,70,25,-25,-70,-90,-80,-43,9,57,87,
+  85,46,-13,-67,-90,-73,-22,38,82,88,54,-4,-61,-90,-78,-31,31,78,90,61,4,-54,-88,-82,-38,22,73,90,67,13,-46,-85,
+  83,36,-36,-83,-83,-36,36,83,83,36,-36,-83,-83,-36,36,83,83,36,-36,-83,-83,-36,36,83,83,36,-36,-83,-83,-36,36,83,
+  82,22,-54,-90,-61,13,78,85,31,-46,-90,-67,4,73,88,38,-38,-88,-73,-4,67,90,46,-31,-85,-78,-13,61,90,54,-22,-82,
+  80,9,-70,-87,-25,57,90,43,-43,-90,-57,25,87,70,-9,-80,-80,-9,70,87,25,-57,-90,-43,43,90,57,-25,-87,-70,9,80,
+  78,-4,-82,-73,13,85,67,-22,-88,-61,31,90,54,-38,-90,-46,46,90,38,-54,-90,-31,61,88,22,-67,-85,-13,73,82,4,-78,
+  75,-18,-89,-50,50,89,18,-75,-75,18,89,50,-50,-89,-18,75,75,-18,-89,-50,50,89,18,-75,-75,18,89,50,-50,-89,-18,75,
+  73,-31,-90,-22,78,67,-38,-90,-13,82,61,-46,-88,-4,85,54,-54,-85,4,88,46,-61,-82,13,90,38,-67,-78,22,90,31,-73,
+  70,-43,-87,9,90,25,-80,-57,57,80,-25,-90,-9,87,43,-70,-70,43,87,-9,-90,-25,80,57,-57,-80,25,90,9,-87,-43,70,
+  67,-54,-78,38,85,-22,-90,4,90,13,-88,-31,82,46,-73,-61,61,73,-46,-82,31,88,-13,-90,-4,90,22,-85,-38,78,54,-67,
+  64,-64,-64,64,64,-64,-64,64,64,-64,-64,64,64,-64,-64,64,64,-64,-64,64,64,-64,-64,64,64,-64,-64,64,64,-64,-64,64,
+  61,-73,-46,82,31,-88,-13,90,-4,-90,22,85,-38,-78,54,67,-67,-54,78,38,-85,-22,90,4,-90,13,88,-31,-82,46,73,-61,
+  57,-80,-25,90,-9,-87,43,70,-70,-43,87,9,-90,25,80,-57,-57,80,25,-90,9,87,-43,-70,70,43,-87,-9,90,-25,-80,57,
+  54,-85,-4,88,-46,-61,82,13,-90,38,67,-78,-22,90,-31,-73,73,31,-90,22,78,-67,-38,90,-13,-82,61,46,-88,4,85,-54,
+  50,-89,18,75,-75,-18,89,-50,-50,89,-18,-75,75,18,-89,50,50,-89,18,75,-75,-18,89,-50,-50,89,-18,-75,75,18,-89,50,
+  46,-90,38,54,-90,31,61,-88,22,67,-85,13,73,-82,4,78,-78,-4,82,-73,-13,85,-67,-22,88,-61,-31,90,-54,-38,90,-46,
+  43,-90,57,25,-87,70,9,-80,80,-9,-70,87,-25,-57,90,-43,-43,90,-57,-25,87,-70,-9,80,-80,9,70,-87,25,57,-90,43,
+  38,-88,73,-4,-67,90,-46,-31,85,-78,13,61,-90,54,22,-82,82,-22,-54,90,-61,-13,78,-85,31,46,-90,67,4,-73,88,-38,
+  36,-83,83,-36,-36,83,-83,36,36,-83,83,-36,-36,83,-83,36,36,-83,83,-36,-36,83,-83,36,36,-83,83,-36,-36,83,-83,36,
+  31,-78,90,-61,4,54,-88,82,-38,-22,73,-90,67,-13,-46,85,-85,46,13,-67,90,-73,22,38,-82,88,-54,-4,61,-90,78,-31,
+  25,-70,90,-80,43,9,-57,87,-87,57,-9,-43,80,-90,70,-25,-25,70,-90,80,-43,-9,57,-87,87,-57,9,43,-80,90,-70,25,
+  22,-61,85,-90,73,-38,-4,46,-78,90,-82,54,-13,-31,67,-88,88,-67,31,13,-54,82,-90,78,-46,4,38,-73,90,-85,61,-22,
+  18,-50,75,-89,89,-75,50,-18,-18,50,-75,89,-89,75,-50,18,18,-50,75,-89,89,-75,50,-18,-18,50,-75,89,-89,75,-50,18,
+  13,-38,61,-78,88,-90,85,-73,54,-31,4,22,-46,67,-82,90,-90,82,-67,46,-22,-4,31,-54,73,-85,90,-88,78,-61,38,-13,
+  9,-25,43,-57,70,-80,87,-90,90,-87,80,-70,57,-43,25,-9,-9,25,-43,57,-70,80,-87,90,-90,87,-80,70,-57,43,-25,9,
+  4,-13,22,-31,38,-46,54,-61,67,-73,78,-82,85,-88,90,-90,90,-90,88,-85,82,-78,73,-67,61,-54,46,-38,31,-22,13,-4);
+Const
+ HeTcTab: Array[0..53] Of Byte = (
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,1,1,1,1,1,1,1,1,1,2,2,2,2,3,
+  3,3,3,4,4,4,5,5,6,6,7,8,9,10,11,13,
+  14,16,18,20,22,24);
+Const
+ HeBetaTab: Array[0..51] Of Byte = (
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  6,7,8,9,10,11,12,13,14,15,16,17,18,20,22,24,
+  26,28,30,32,34,36,38,40,42,44,46,48,50,52,54,56,
+  58,60,62,64);
+{ ---------------------------------------------------------------------- }
+{ Utilitaires                                                              }
+{ ---------------------------------------------------------------------- }
+Function HeSar(V: LongInt; N: LongInt): LongInt;
+Begin
+ If V>=0 Then HeSar:=V Shr N Else HeSar:=-((-V-1) Shr N)-1;
+End;
+
+Function HeClip(V,Lo,Hi: LongInt): LongInt;
+Begin
+ If V<Lo Then V:=Lo; If V>Hi Then V:=Hi; HeClip:=V;
+End;
+
+Function HeMin(A,B: LongInt): LongInt;
+Begin If A<B Then HeMin:=A Else HeMin:=B; End;
+
+Function HeMax(A,B: LongInt): LongInt;
+Begin If A>B Then HeMax:=A Else HeMax:=B; End;
+
+Function HeAbs(A: LongInt): LongInt;
+Begin If A<0 Then HeAbs:=-A Else HeAbs:=A; End;
+
+Function HeLog2(N: LongInt): LongInt;
+Var K: LongInt;
+Begin K:=0; While (1 Shl (K+1))<=N Do Inc(K); HeLog2:=K; End;
+
+{ ---------------------------------------------------------------------- }
+{ Ecriture de bits (RBSP)                                                   }
+{ ---------------------------------------------------------------------- }
+Procedure HeBufEnsure(N: LongInt);
+Var NB: PEABuffer; NC: LongInt;
+Begin
+ If HeBufLen+N+16>HeBufCap Then Begin
+  NC:=HeBufCap*2+N+65536;
+  GetMem(NB,NC); Move(HeBuf^,NB^,HeBufLen); FreeMem(HeBuf,HeBufCap); HeBuf:=NB; HeBufCap:=NC;
+ End;
+End;
+
+Procedure HeBits(V,N: LongInt);
+Var I: LongInt;
+Begin
+ For I:=N-1 DownTo 0 Do Begin
+  HeBitAcc:=(HeBitAcc Shl 1) Or ((V Shr I) And 1); Inc(HeBitCnt);
+  If HeBitCnt=8 Then Begin
+   HeBufEnsure(1); HeBuf^[HeBufLen]:=HeBitAcc And 255; Inc(HeBufLen); HeBitAcc:=0; HeBitCnt:=0;
+  End;
+ End;
+End;
+
+Procedure HeUe(V: LongInt);
+Var N,K: LongInt;
+Begin
+ Inc(V); N:=HeLog2(V);
+ For K:=1 To N Do HeBits(0,1);
+ HeBits(V,N+1);
+End;
+
+Procedure HeSe(V: LongInt);
+Begin
+ If V>0 Then HeUe(2*V-1) Else HeUe(-2*V);
+End;
+
+Procedure HeTrail;      { rbsp_trailing_bits }
+Begin
+ HeBits(1,1); While HeBitCnt<>0 Do HeBits(0,1);
+End;
+
+Procedure HeAlignZero;
+Begin
+ While HeBitCnt<>0 Do HeBits(0,1);
+End;
+
+Procedure HeOutEnsure(N: LongInt);
+Var NB: PEABuffer; NC: LongInt;
+Begin
+ If HeOutLen+N+16>HeOutCap Then Begin
+  NC:=HeOutCap*2+N+65536;
+  GetMem(NB,NC); Move(HeOut^,NB^,HeOutLen); FreeMem(HeOut,HeOutCap); HeOut:=NB; HeOutCap:=NC;
+ End;
+End;
+
+{ Ajoute a HeOut la NAL (en-tete 2 octets + RBSP de HeBuf avec emulation prevention).
+  Mode 0 : precede de sa longueur sur 4 octets ; mode 1 : code de depart 00 00 00 01. }
+Procedure HeEmitNal(NalType, Mode: LongInt);
+Var I,Z,Start,L: LongInt; B: Byte;
+Begin
+ HeOutEnsure(HeBufLen*2+16);
+ Start:=HeOutLen;
+ If Mode=0 Then Begin HeOut^[HeOutLen]:=0; HeOut^[HeOutLen+1]:=0; HeOut^[HeOutLen+2]:=0; HeOut^[HeOutLen+3]:=0; Inc(HeOutLen,4); End
+ Else Begin HeOut^[HeOutLen]:=0; HeOut^[HeOutLen+1]:=0; HeOut^[HeOutLen+2]:=0; HeOut^[HeOutLen+3]:=1; Inc(HeOutLen,4); End;
+ L:=HeOutLen;
+ HeOut^[HeOutLen]:=(NalType Shl 1) And $7E; Inc(HeOutLen);
+ HeOut^[HeOutLen]:=1; Inc(HeOutLen);
+ Z:=0;
+ For I:=0 To HeBufLen-1 Do Begin
+  B:=HeBuf^[I];
+  If (Z>=2) And (B<=3) Then Begin HeOut^[HeOutLen]:=3; Inc(HeOutLen); Z:=0; End;
+  HeOut^[HeOutLen]:=B; Inc(HeOutLen);
+  If B=0 Then Inc(Z) Else Z:=0;
+ End;
+ If Mode=0 Then Begin
+  Z:=HeOutLen-L;
+  HeOut^[Start]:=(Z Shr 24) And 255; HeOut^[Start+1]:=(Z Shr 16) And 255; HeOut^[Start+2]:=(Z Shr 8) And 255; HeOut^[Start+3]:=Z And 255;
+ End;
+ HeBufLen:=0; HeBitAcc:=0; HeBitCnt:=0;
+End;
+
+{ ---------------------------------------------------------------------- }
+{ CABAC (encodeur)                                                          }
+{ ---------------------------------------------------------------------- }
+Procedure HeCabacInitEnc;
+Begin
+ HeLow:=0; HeRange:=510; HeOuts:=0; HeFirstBit:=True;
+End;
+
+Procedure HePutBit(B: LongInt);
+Begin
+ If HeFirstBit Then HeFirstBit:=False Else HeBits(B,1);
+ While HeOuts>0 Do Begin HeBits(1-B,1); Dec(HeOuts); End;
+End;
+
+Procedure HeRenorm;
+Begin
+ While HeRange<256 Do Begin
+  If HeLow<256 Then HePutBit(0)
+  Else If HeLow>=512 Then Begin Dec(HeLow,512); HePutBit(1); End
+  Else Begin Dec(HeLow,256); Inc(HeOuts); End;
+  HeRange:=HeRange Shl 1; HeLow:=HeLow Shl 1;
+ End;
+End;
+
+Procedure HeBin(Ctx,Bin: LongInt);
+Var S,Ps,Mps,L: LongInt;
+Begin
+ S:=HeSt[Ctx]; Ps:=S Shr 1; Mps:=S And 1;
+ If HeEst Then Begin
+  If Bin=Mps Then HeCost:=HeCost+HeCostM[Ps] Else HeCost:=HeCost+HeCostL[Ps];
+  Exit;
+ End;
+ L:=HeLpsTab[Ps*4+((HeRange Shr 6) And 3)];
+ Dec(HeRange,L);
+ If Bin<>Mps Then Begin
+  Inc(HeLow,HeRange); HeRange:=L;
+  If Ps=0 Then Mps:=1-Mps;
+  Ps:=HeNextLps[Ps];
+ End Else If Ps<62 Then Inc(Ps);
+ HeSt[Ctx]:=(Ps Shl 1) Or Mps;
+ HeRenorm;
+End;
+
+Procedure HeBypass(Bin: LongInt);
+Begin
+ If HeEst Then Begin HeCost:=HeCost+1; Exit; End;
+ HeLow:=HeLow Shl 1;
+ If Bin<>0 Then Inc(HeLow,HeRange);
+ If HeLow>=1024 Then Begin HePutBit(1); Dec(HeLow,1024); End
+ Else If HeLow<512 Then HePutBit(0)
+ Else Begin Dec(HeLow,512); Inc(HeOuts); End;
+End;
+
+Procedure HeBypassBits(V,N: LongInt);
+Var I: LongInt;
+Begin
+ For I:=N-1 DownTo 0 Do HeBypass((V Shr I) And 1);
+End;
+
+Procedure HeTerm(Bin: LongInt);
+Begin
+ If HeEst Then Exit;
+ Dec(HeRange,2);
+ If Bin<>0 Then Begin
+  Inc(HeLow,HeRange);
+  HeRange:=2; HeRenorm;
+  HePutBit((HeLow Shr 9) And 1);
+  HeBits(((HeLow Shr 7) And 3) Or 1,2);
+ End Else HeRenorm;
+End;
+
+Procedure HeCtxInit(Qp, InitType: LongInt);
+Var I,V,M,N,Pre,Mps,Ps: LongInt;
+Begin
+ Qp:=HeClip(Qp,0,51);
+ For I:=0 To HE_NCTX-1 Do Begin
+  V:=HeInitTab[InitType*HE_NCTX+I];
+  M:=(V Shr 4)*5-45; N:=((V And 15) Shl 3)-16;
+  Pre:=HeClip(HeSar(M*Qp,4)+N,1,126);
+  If Pre>63 Then Begin Mps:=1; Ps:=Pre-64; End Else Begin Mps:=0; Ps:=63-Pre; End;
+  HeSt[I]:=(Ps Shl 1) Or Mps;
+ End;
+End;
+
+Procedure HeInitCostTab;
+Var S: LongInt; P: Double;
+Begin
+ For S:=0 To 63 Do Begin
+  P:=0.5*Exp(S*Ln(0.01875/0.5)/63);
+  HeCostL[S]:=-Ln(P)/Ln(2.0);
+  HeCostM[S]:=-Ln(1-P)/Ln(2.0);
+ End;
+End;
+
+Procedure HeInitScans;
+Var Sc,L,Blk,I,X,Y,Stop: LongInt;
+Begin
+ For L:=0 To 3 Do Begin
+  Blk:=1 Shl L;
+  { diagonale haut-droite (6.5.3) }
+  I:=0; X:=0; Y:=0; Stop:=0;
+  While Stop=0 Do Begin
+   While Y>=0 Do Begin
+    If (X<Blk) And (Y<Blk) Then Begin HeScanX[0,L,I]:=X; HeScanY[0,L,I]:=Y; Inc(I); End;
+    Dec(Y); Inc(X);
+   End;
+   Y:=X; X:=0;
+   If I>=Blk*Blk Then Stop:=1;
+  End;
+  For I:=0 To Blk*Blk-1 Do Begin
+   HeScanX[1,L,I]:=I Mod Blk; HeScanY[1,L,I]:=I Div Blk;
+   HeScanX[2,L,I]:=I Div Blk; HeScanY[2,L,I]:=I Mod Blk;
+  End;
+ End;
+End;
+{ ---------------------------------------------------------------------- }
+{ Ensembles de parametres                                                  }
+{ ---------------------------------------------------------------------- }
+Var
+ HeLevel,HeMaxRefs,HeNumReorder,HeMaxMerge: LongInt;
+ HeDeblock,HeNoDeblock: Boolean;
+ HeVpsB,HeSpsB,HePpsB: Array[0..511] Of Byte;
+ HeVpsL,HeSpsL,HePpsL: LongInt;     { longueur des NAL sans code de depart (en-tete 2 octets inclus) }
+
+Procedure HePtl;
+Var I: LongInt;
+Begin
+ HeBits(0,2); HeBits(0,1); HeBits(1,5);
+ HeBits($60000000,32);
+ HeBits(1,1); HeBits(0,1); HeBits(0,1); HeBits(1,1);
+ HeBits(0,22); HeBits(0,22);
+ HeBits(HeLevel,8);
+End;
+
+Procedure HeStoreNal(Var Dst: Array Of Byte; Var Len: LongInt; NalType: LongInt);
+Var I: LongInt;
+Begin
+ HeOutLen:=0;
+ HeEmitNal(NalType,1);
+ Len:=HeOutLen-4;
+ For I:=0 To Len-1 Do Dst[I]:=HeOut^[4+I];
+ HeOutLen:=0;
+End;
+
+Procedure HeMakeParamSets;
+Begin
+ { VPS }
+ HeBufLen:=0; HeBitAcc:=0; HeBitCnt:=0;
+ HeBits(0,4); HeBits(1,1); HeBits(1,1); HeBits(0,6); HeBits(0,3); HeBits(1,1); HeBits($FFFF,16);
+ HePtl;
+ HeBits(1,1); HeUe(HeMaxRefs); HeUe(HeNumReorder); HeUe(0);
+ HeBits(0,6); HeUe(0); HeBits(0,1); HeBits(0,1);
+ HeTrail;
+ HeStoreNal(HeVpsB,HeVpsL,32);
+ { SPS }
+ HeBufLen:=0; HeBitAcc:=0; HeBitCnt:=0;
+ HeBits(0,4); HeBits(0,3); HeBits(1,1);
+ HePtl;
+ HeUe(0);                 { sps id }
+ HeUe(1);                 { chroma_format_idc }
+ HeUe(HeWp); HeUe(HeHp);
+ If (HeCropR>0) Or (HeCropB>0) Then Begin
+  HeBits(1,1); HeUe(0); HeUe(HeCropR Div 2); HeUe(0); HeUe(HeCropB Div 2);
+ End Else HeBits(0,1);
+ HeUe(0); HeUe(0);        { bit depths }
+ HeUe(4);                 { log2_max_poc_lsb - 4 }
+ HeBits(1,1); HeUe(HeMaxRefs); HeUe(HeNumReorder); HeUe(0);
+ HeUe(0);                 { log2_min_cb - 3 }
+ HeUe(2);                 { diff max-min cb : CTB 32 }
+ HeUe(0);                 { log2_min_tb - 2 }
+ HeUe(3);                 { diff : TB max 32 }
+ HeUe(1);                 { max_transform_hierarchy_depth_inter }
+ HeUe(0);                 { max_transform_hierarchy_depth_intra }
+ HeBits(0,1);             { scaling_list_enabled_flag }
+ HeBits(0,1);             { amp_enabled_flag }
+ HeBits(0,1);             { sample_adaptive_offset_enabled_flag }
+ HeBits(0,1);             { pcm_enabled_flag }
+ HeUe(0);                 { num_short_term_ref_pic_sets }
+ HeBits(0,1);             { long_term_ref_pics_present_flag }
+ HeBits(0,1);             { sps_temporal_mvp_enabled_flag }
+ HeBits(1,1);             { strong_intra_smoothing_enabled_flag }
+ HeBits(0,1);             { vui_parameters_present_flag }
+ HeBits(0,1);             { sps_extension_present_flag }
+ HeTrail;
+ HeStoreNal(HeSpsB,HeSpsL,33);
+ { PPS }
+ HeBufLen:=0; HeBitAcc:=0; HeBitCnt:=0;
+ HeUe(0); HeUe(0);
+ HeBits(0,1);             { dependent_slice_segments_enabled_flag }
+ HeBits(0,1);             { output_flag_present_flag }
+ HeBits(0,3);             { num_extra_slice_header_bits }
+ HeBits(0,1);             { sign_data_hiding_enabled_flag }
+ HeBits(0,1);             { cabac_init_present_flag }
+ HeUe(0); HeUe(0);        { num_ref_idx_default_active_minus1 }
+ HeSe(0);                 { init_qp_minus26 }
+ HeBits(0,1);             { constrained_intra_pred_flag }
+ HeBits(0,1);             { transform_skip_enabled_flag }
+ HeBits(0,1);             { cu_qp_delta_enabled_flag }
+ HeSe(0); HeSe(0);        { cb / cr qp offsets }
+ HeBits(0,1);             { pps_slice_chroma_qp_offsets_present_flag }
+ HeBits(0,1); HeBits(0,1);{ weighted_pred, weighted_bipred }
+ HeBits(0,1);             { transquant_bypass_enabled_flag }
+ HeBits(0,1);             { tiles_enabled_flag }
+ HeBits(0,1);             { entropy_coding_sync_enabled_flag }
+ HeBits(1,1);             { pps_loop_filter_across_slices_enabled_flag }
+ HeBits(1,1);             { deblocking_filter_control_present_flag }
+ HeBits(0,1);             { deblocking_filter_override_enabled_flag }
+ If HeDeblock Then Begin HeBits(0,1); HeSe(0); HeSe(0); End Else HeBits(1,1);
+ HeBits(0,1);             { pps_scaling_list_data_present_flag }
+ HeBits(0,1);             { lists_modification_present_flag }
+ HeUe(0);                 { log2_parallel_merge_level_minus2 }
+ HeBits(0,1);             { slice_segment_header_extension_present_flag }
+ HeBits(0,1);             { pps_extension_present_flag }
+ HeTrail;
+ HeStoreNal(HePpsB,HePpsL,34);
+End;
+
+{ Annexe B : VPS+SPS+PPS avec codes de depart ; retourne la longueur }
+Function HeParamSets(Var Buf: Array Of Byte): LongInt;
+Var N,I: LongInt;
+Begin
+ N:=0;
+ Buf[N]:=0; Buf[N+1]:=0; Buf[N+2]:=0; Buf[N+3]:=1; Inc(N,4); For I:=0 To HeVpsL-1 Do Begin Buf[N]:=HeVpsB[I]; Inc(N); End;
+ Buf[N]:=0; Buf[N+1]:=0; Buf[N+2]:=0; Buf[N+3]:=1; Inc(N,4); For I:=0 To HeSpsL-1 Do Begin Buf[N]:=HeSpsB[I]; Inc(N); End;
+ Buf[N]:=0; Buf[N+1]:=0; Buf[N+2]:=0; Buf[N+3]:=1; Inc(N,4); For I:=0 To HePpsL-1 Do Begin Buf[N]:=HePpsB[I]; Inc(N); End;
+ HeParamSets:=N;
+End;
+
+{ Boite hvcC complete (taille + 'hvcC' + HEVCDecoderConfigurationRecord).
+  Pour Matroska (CodecPrivate), ignorer les 8 premiers octets. }
+Function HeHvcC(Var Buf: Array Of Byte): LongInt;
+Var N,I,Sz: LongInt;
+ Procedure P8(V: LongInt); Begin Buf[N]:=V And 255; Inc(N); End;
+ Procedure P16(V: LongInt); Begin P8(V Shr 8); P8(V); End;
+ Procedure PNal(Var Src: Array Of Byte; L, Typ: LongInt);
+ Var K: LongInt;
+ Begin
+  P8($80 Or Typ); P16(1); P16(L); For K:=0 To L-1 Do P8(Src[K]);
+ End;
+Begin
+ N:=4; P8(Ord('h')); P8(Ord('v')); P8(Ord('c')); P8(Ord('C'));
+ P8(1);                       { configurationVersion }
+ P8(1);                       { profile space 0, tier 0, profile 1 }
+ P8($60); P8(0); P8(0); P8(0);{ compatibility flags }
+ P8($90); P8(0); P8(0); P8(0); P8(0); P8(0); { constraint indicator flags (progressive, frame only) }
+ P8(HeLevel);
+ P16($F000);                  { min_spatial_segmentation_idc }
+ P8($FC);                     { parallelismType }
+ P8($FD);                     { chroma_format_idc = 1 }
+ P8($F8); P8($F8);            { bit depths }
+ P16(0);                      { avgFrameRate }
+ P8((0 Shl 6) Or (1 Shl 3) Or (1 Shl 2) Or 3);
+ P8(3);                       { numOfArrays }
+ PNal(HeVpsB,HeVpsL,32); PNal(HeSpsB,HeSpsL,33); PNal(HePpsB,HePpsL,34);
+ Sz:=N;
+ Buf[0]:=(Sz Shr 24) And 255; Buf[1]:=(Sz Shr 16) And 255; Buf[2]:=(Sz Shr 8) And 255; Buf[3]:=Sz And 255;
+ HeHvcC:=N;
+End;
+{ ---------------------------------------------------------------------- }
+{ Transformees, quantification                                             }
+{ ---------------------------------------------------------------------- }
+Const
+ HeDstMat: Array[0..15] Of ShortInt = (29,55,74,84, 74,74,0,-74, 84,-29,-74,55, 55,-84,74,-29);
+ HeQScale: Array[0..5] Of LongInt = (26214,23302,20560,18396,16384,14564);
+ HeLevScale: Array[0..5] Of LongInt = (40,45,51,57,64,72);
+ HeQpCTab: Array[0..13] Of Byte = (29,30,31,32,33,33,34,34,35,35,36,36,37,37);
+
+Var
+ HeTmpT: Array[0..1023] Of LongInt;
+
+Var
+ HeTM: Array[0..4,0..1023] Of LongInt;   { matrices DCT 4,8,16,32 et DST 4 }
+
+Procedure HeInitTM;
+Var T,N,K,I: LongInt;
+Begin
+ For T:=0 To 3 Do Begin
+  N:=4 Shl T;
+  For K:=0 To N-1 Do For I:=0 To N-1 Do HeTM[T,K*N+I]:=HeDctMat[((32 Div N)*K)*32+I];
+ End;
+ For K:=0 To 3 Do For I:=0 To 3 Do HeTM[4,K*4+I]:=HeDstMat[K*4+I];
+End;
+
+{ transformee directe 1D (papillon pair/impair) : In[0..N-1] -> Out[k*Stp] avec Stp=1 }
+Procedure HeFwd1(Var In1: Array Of LongInt; N,L2: LongInt; Var Out1: Array Of LongInt);
+Var Cur,Ev,Od: Array[0..31] Of LongInt; Nn,Hf,I,K,T,Sc,Acc: LongInt;
+Begin
+ For I:=0 To N-1 Do Cur[I]:=In1[I];
+ Nn:=N; Sc:=1;
+ While Nn>4 Do Begin
+  Hf:=Nn Shr 1; T:=HeLog2(Nn)-2;
+  For I:=0 To Hf-1 Do Begin Ev[I]:=Cur[I]+Cur[Nn-1-I]; Od[I]:=Cur[I]-Cur[Nn-1-I]; End;
+  K:=1;
+  While K<Nn Do Begin
+   Acc:=0;
+   For I:=0 To Hf-1 Do Acc:=Acc+HeTM[T,K*Nn+I]*Od[I];
+   Out1[K*(N Div Nn)]:=Acc;
+   Inc(K,2);
+  End;
+  For I:=0 To Hf-1 Do Cur[I]:=Ev[I];
+  Nn:=Hf;
+ End;
+ For K:=0 To 3 Do Begin
+  Acc:=0;
+  For I:=0 To 3 Do Acc:=Acc+HeTM[0,K*4+I]*Cur[I];
+  Out1[K*(N Div 4)]:=Acc;
+ End;
+End;
+
+{ transformee directe : Res (N*N, ligne y, colonne x) -> Co }
+Procedure HeFwdT(Var Res: Array Of LongInt; N,L2: LongInt; Dst: Boolean; Var Co: Array Of LongInt);
+Var X,Y,K,S1,S2,A1,A2,B,Acc: LongInt; V,O: Array[0..31] Of LongInt; Zero: Boolean;
+Begin
+ S1:=L2-1; S2:=L2+6; A1:=1 Shl (S1-1); A2:=1 Shl (S2-1);
+ If Dst Then Begin
+  For X:=0 To N-1 Do
+   For K:=0 To N-1 Do Begin
+    Acc:=0; B:=K*N;
+    For Y:=0 To N-1 Do Acc:=Acc+HeTM[4,B+Y]*Res[Y*N+X];
+    HeTmpT[K*N+X]:=HeSar(Acc+A1,S1);
+   End;
+  For Y:=0 To N-1 Do
+   For K:=0 To N-1 Do Begin
+    Acc:=0; B:=K*N;
+    For X:=0 To N-1 Do Acc:=Acc+HeTM[4,B+X]*HeTmpT[Y*N+X];
+    Co[Y*N+K]:=HeSar(Acc+A2,S2);
+   End;
+  Exit;
+ End;
+ For X:=0 To N-1 Do Begin
+  Zero:=True;
+  For Y:=0 To N-1 Do Begin V[Y]:=Res[Y*N+X]; If V[Y]<>0 Then Zero:=False; End;
+  If Zero Then Begin
+   For K:=0 To N-1 Do HeTmpT[K*N+X]:=0;
+  End Else Begin
+   HeFwd1(V,N,L2,O);
+   For K:=0 To N-1 Do HeTmpT[K*N+X]:=HeSar(O[K]+A1,S1);
+  End;
+ End;
+ For Y:=0 To N-1 Do Begin
+  Zero:=True;
+  For X:=0 To N-1 Do Begin V[X]:=HeTmpT[Y*N+X]; If V[X]<>0 Then Zero:=False; End;
+  If Zero Then Begin
+   For K:=0 To N-1 Do Co[Y*N+K]:=0;
+  End Else Begin
+   HeFwd1(V,N,L2,O);
+   For K:=0 To N-1 Do Co[Y*N+K]:=HeSar(O[K]+A2,S2);
+  End;
+ End;
+End;
+
+{ quantification (zone morte HM) ; retourne le nombre de coefficients non nuls }
+Function HeQuantize(Var Co: Array Of LongInt; N,L2,Qp: LongInt; Intra: Boolean; Lev: PHeLA): LongInt;
+Var I,Qb,Nz: LongInt; Sc,Add,A: Int64; C: LongInt;
+Begin
+ Qb:=21-L2+Qp Div 6; Sc:=HeQScale[Qp Mod 6];
+ If Intra Then Add:=Int64(171) Shl (Qb-9) Else Add:=Int64(85) Shl (Qb-9);
+ Nz:=0;
+ For I:=0 To N*N-1 Do Begin
+  C:=Co[I]; If C<0 Then A:=-C Else A:=C;
+  A:=(A*Sc+Add) Shr Qb;
+  If A>32767 Then A:=32767;
+  If A<>0 Then Inc(Nz);
+  If C<0 Then Lev^[I]:=-A Else Lev^[I]:=A;
+ End;
+ HeQuantize:=Nz;
+End;
+
+{ dequantification + transformee inverse -> residu reconstruit (comme le decodeur) }
+Procedure HeInvT(Lev: PHeLA; N,L2,Qp: LongInt; Dst: Boolean; Var Res: Array Of LongInt);
+Var X,Y,K,Sh,KMax,XMax,Sc,T,Acc,V32: LongInt; Add,V: Int64; D: Array[0..1023] Of LongInt;
+Begin
+ Sh:=L2+3; Sc:=HeLevScale[Qp Mod 6] Shl (Qp Div 6); Add:=Int64(1) Shl (Sh-1);
+ If Dst Then T:=4 Else T:=L2-2;
+ KMax:=-1; XMax:=-1;
+ For Y:=0 To N-1 Do
+  For X:=0 To N-1 Do Begin
+   If Lev^[Y*N+X]<>0 Then Begin
+    V:=(Int64(Lev^[Y*N+X])*16*Sc+Add);
+    If V>=0 Then V:=V Shr Sh Else V:=-((-V-1) Shr Sh)-1;
+    If V>32767 Then V:=32767; If V<-32768 Then V:=-32768;
+    D[Y*N+X]:=V;
+    If Y>KMax Then KMax:=Y; If X>XMax Then XMax:=X;
+   End Else D[Y*N+X]:=0;
+  End;
+ If KMax<0 Then Begin
+  For X:=0 To N*N-1 Do Res[X]:=0;
+  Exit;
+ End;
+ { etage vertical }
+ For X:=0 To XMax Do
+  For Y:=0 To N-1 Do Begin
+   Acc:=0;
+   For K:=0 To KMax Do Acc:=Acc+HeTM[T,K*N+Y]*D[K*N+X];
+   V32:=HeSar(Acc+64,7);
+   If V32>32767 Then V32:=32767; If V32<-32768 Then V32:=-32768;
+   HeTmpT[Y*N+X]:=V32;
+  End;
+ { etage horizontal }
+ For Y:=0 To N-1 Do
+  For X:=0 To N-1 Do Begin
+   Acc:=0;
+   For K:=0 To XMax Do Acc:=Acc+HeTM[T,K*N+X]*HeTmpT[Y*N+K];
+   Res[Y*N+X]:=HeSar(Acc+2048,12);
+  End;
+End;
+
+Function HeChromaQp(Qp: LongInt): LongInt;
+Begin
+ If Qp<30 Then HeChromaQp:=Qp Else If Qp>43 Then HeChromaQp:=Qp-6 Else HeChromaQp:=HeQpCTab[Qp-30];
+End;
+{ ---------------------------------------------------------------------- }
+{ Prediction intra                                                         }
+{ ---------------------------------------------------------------------- }
+Const
+ HeAngTab: Array[0..34] Of ShortInt = (0,0,32,26,21,17,13,9,5,2,0,-2,-5,-9,-13,-17,-21,-26,-32,-26,-21,-17,-13,-9,-5,-2,0,2,5,9,13,17,21,26,32);
+ HeInvAng: Array[11..25] Of SmallInt = (-4096,-1638,-910,-630,-482,-390,-315,-256,-315,-390,-482,-630,-910,-1638,-4096);
+
+Var
+ { image courante : source et reconstruction, paddees a HeWp x HeHp }
+ HeSrcP,HeRecP: Array[0..2] Of PEABuffer;
+ HeStr: Array[0..2] Of LongInt;
+ HeW4,HeH4: LongInt;
+ HeRefRaw,HeRefFlt: Array[0..128] Of LongInt;
+ HeRefN: LongInt;
+
+Function HeAvail(XCur,YCur,XN,YN: LongInt): Boolean;
+Begin
+ If (XN<0) Or (YN<0) Or (XN>=HeWp) Or (YN>=HeHp) Then HeAvail:=False
+ Else HeAvail:=HeZs^[(YN Shr 2)*HeW4+(XN Shr 2)]<=HeZs^[(YCur Shr 2)*HeW4+(XCur Shr 2)];
+End;
+
+{ construit les echantillons de reference (bruts et filtres) du bloc NxN de la composante CIdx,
+  origine (Xc,Yc) en coordonnees de la composante }
+Procedure HeIntraRefs(CIdx,Xc,Yc,L2: LongInt);
+Var N,Sh,U,I,X,Y,Cnt,First,Lx,Ly,Str,T: LongInt; Av: Array[0..128] Of Boolean; Pl: PEABuffer; Ok: Boolean;
+ Strong: Boolean;
+Begin
+ N:=1 Shl L2; If CIdx=0 Then Sh:=0 Else Sh:=1;
+ U:=4 Shr Sh; Pl:=HeRecP[CIdx]; Str:=HeStr[CIdx];
+ Lx:=Xc Shl Sh; Ly:=Yc Shl Sh; HeRefN:=N;
+ Cnt:=4*N+1;
+ { indice 0 = p[-1][2N-1] ... 2N-1 = p[-1][0], 2N = coin, 2N+1+x = p[x][-1] }
+ For I:=0 To 2*N-1 Do Begin
+  Y:=2*N-1-I;
+  Av[I]:=HeAvail(Lx,Ly,(Xc-1) Shl Sh,(Yc+Y) Shl Sh);
+  If Av[I] Then HeRefRaw[I]:=Pl^[(Yc+Y)*Str+Xc-1];
+ End;
+ Av[2*N]:=HeAvail(Lx,Ly,(Xc-1) Shl Sh,(Yc-1) Shl Sh);
+ If Av[2*N] Then HeRefRaw[2*N]:=Pl^[(Yc-1)*Str+Xc-1];
+ For X:=0 To 2*N-1 Do Begin
+  Av[2*N+1+X]:=HeAvail(Lx,Ly,(Xc+X) Shl Sh,(Yc-1) Shl Sh);
+  If Av[2*N+1+X] Then HeRefRaw[2*N+1+X]:=Pl^[(Yc-1)*Str+Xc+X];
+ End;
+ { substitution }
+ First:=-1;
+ For I:=0 To Cnt-1 Do If Av[I] Then Begin First:=I; Break; End;
+ If First<0 Then Begin
+  For I:=0 To Cnt-1 Do HeRefRaw[I]:=128;
+ End Else Begin
+  If First>0 Then Begin
+   For I:=0 To First-1 Do HeRefRaw[I]:=HeRefRaw[First];
+  End;
+  For I:=First+1 To Cnt-1 Do If Not Av[I] Then HeRefRaw[I]:=HeRefRaw[I-1];
+ End;
+ { filtrage (luma seulement) }
+ For I:=0 To Cnt-1 Do HeRefFlt[I]:=HeRefRaw[I];
+ If CIdx=0 Then Begin
+  Strong:=(N=32) And (HeAbs(HeRefRaw[2*N]+HeRefRaw[4*N]-2*HeRefRaw[3*N])<8)
+   And (HeAbs(HeRefRaw[2*N]+HeRefRaw[0]-2*HeRefRaw[N])<8);
+  If Strong Then Begin
+   For Y:=0 To 62 Do Begin
+    HeRefFlt[63-Y]:=((63-Y)*HeRefRaw[64]+(Y+1)*HeRefRaw[0]+32) Shr 6;
+    HeRefFlt[65+Y]:=((63-Y)*HeRefRaw[64]+(Y+1)*HeRefRaw[128]+32) Shr 6;
+   End;
+  End Else Begin
+   For I:=1 To Cnt-2 Do HeRefFlt[I]:=(HeRefRaw[I-1]+2*HeRefRaw[I]+HeRefRaw[I+1]+2) Shr 2;
+  End;
+  { drapeau de strong : memorise dans HeRefFlt non modifiable ; le choix filtre/brut est dans HeIntraPredFrom }
+ End;
+End;
+
+{ prediction pour le mode donne a partir de HeRefRaw / HeRefFlt (deja construits) }
+Procedure HeIntraPredFrom(CIdx,L2,Mode: LongInt; Var Pr: Array Of LongInt);
+Var N,X,Y,I,Ang,Inv,IIdx,IFact,Dc,Dm,Th,Sum,K: LongInt; UseF: Boolean;
+ P: Array[0..128] Of LongInt; Rf: Array[0..160] Of LongInt; (* offset 48 *)
+ Function Lf(Yy: LongInt): LongInt; Begin Lf:=P[2*N-1-Yy]; End;
+ Function Tp(Xx: LongInt): LongInt; Begin Tp:=P[2*N+1+Xx]; End;
+Begin
+ N:=1 Shl L2;
+ UseF:=False;
+ If (CIdx=0) And (Mode<>1) And (N<>4) Then Begin
+  Dm:=HeMin(HeAbs(Mode-26),HeAbs(Mode-10));
+  If N=8 Then Th:=7 Else If N=16 Then Th:=1 Else Th:=0;
+  If Dm>Th Then UseF:=True;
+ End;
+ If UseF Then For I:=0 To 4*N Do P[I]:=HeRefFlt[I] Else For I:=0 To 4*N Do P[I]:=HeRefRaw[I];
+ If Mode=0 Then Begin
+  For Y:=0 To N-1 Do For X:=0 To N-1 Do
+   Pr[Y*N+X]:=((N-1-X)*Lf(Y)+(X+1)*Tp(N)+(N-1-Y)*Tp(X)+(Y+1)*Lf(N)+N) Shr (L2+1);
+ End Else If Mode=1 Then Begin
+  Sum:=N;
+  For I:=0 To N-1 Do Sum:=Sum+Tp(I)+Lf(I);
+  Dc:=Sum Shr (L2+1);
+  For I:=0 To N*N-1 Do Pr[I]:=Dc;
+  If (CIdx=0) And (N<32) Then Begin
+   Pr[0]:=(Lf(0)+2*Dc+Tp(0)+2) Shr 2;
+   For X:=1 To N-1 Do Pr[X]:=(Tp(X)+3*Dc+2) Shr 2;
+   For Y:=1 To N-1 Do Pr[Y*N]:=(Lf(Y)+3*Dc+2) Shr 2;
+  End;
+ End Else Begin
+  Ang:=HeAngTab[Mode];
+  If Mode>=18 Then Begin
+   For X:=0 To N Do Rf[48+X]:=Tp(X-1);
+   If Ang<0 Then Begin
+    Inv:=HeInvAng[Mode];
+    K:=HeSar(N*Ang,5);
+    If K<-1 Then For X:=K To -1 Do Rf[48+X]:=Lf(-1+HeSar(X*Inv+128,8));
+   End Else For X:=N+1 To 2*N Do Rf[48+X]:=Tp(X-1);
+   For Y:=0 To N-1 Do Begin
+    IIdx:=HeSar((Y+1)*Ang,5); IFact:=((Y+1)*Ang) And 31;
+    If IFact<>0 Then Begin
+     For X:=0 To N-1 Do Pr[Y*N+X]:=((32-IFact)*Rf[48+X+IIdx+1]+IFact*Rf[48+X+IIdx+2]+16) Shr 5;
+    End Else For X:=0 To N-1 Do Pr[Y*N+X]:=Rf[48+X+IIdx+1];
+   End;
+   If (Mode=26) And (CIdx=0) And (N<32) Then
+    For Y:=0 To N-1 Do Pr[Y*N]:=HeClip(Tp(0)+HeSar(Lf(Y)-Lf(-1),1),0,255);
+  End Else Begin
+   For X:=0 To N Do Rf[48+X]:=Lf(X-1);
+   If Ang<0 Then Begin
+    Inv:=HeInvAng[Mode];
+    K:=HeSar(N*Ang,5);
+    If K<-1 Then For X:=K To -1 Do Rf[48+X]:=Tp(-1+HeSar(X*Inv+128,8));
+   End Else For X:=N+1 To 2*N Do Rf[48+X]:=Lf(X-1);
+   For X:=0 To N-1 Do Begin
+    IIdx:=HeSar((X+1)*Ang,5); IFact:=((X+1)*Ang) And 31;
+    If IFact<>0 Then Begin
+     For Y:=0 To N-1 Do Pr[Y*N+X]:=((32-IFact)*Rf[48+Y+IIdx+1]+IFact*Rf[48+Y+IIdx+2]+16) Shr 5;
+    End Else For Y:=0 To N-1 Do Pr[Y*N+X]:=Rf[48+Y+IIdx+1];
+   End;
+   If (Mode=10) And (CIdx=0) And (N<32) Then
+    For X:=0 To N-1 Do Pr[X]:=HeClip(Lf(0)+HeSar(Tp(X)-Lf(-1),1),0,255);
+  End;
+ End;
+End;
+{ ---------------------------------------------------------------------- }
+{ Syntaxe residual_coding (ecriture ou estimation du cout)                  }
+{ ---------------------------------------------------------------------- }
+Const
+ HeCtxMap4: Array[0..15] Of Byte = (0,1,4,5,2,3,4,5,6,6,8,8,7,7,8,8);
+
+Function HeSigCtx(CIdx,L2,ScanIdx,XC,YC,PrevCsbf: LongInt): LongInt;
+Var Sc,XP,YP,XS,YS: LongInt;
+Begin
+ If L2=2 Then Sc:=HeCtxMap4[(YC Shl 2)+XC]
+ Else If (XC=0) And (YC=0) Then Sc:=0
+ Else Begin
+  XS:=XC Shr 2; YS:=YC Shr 2; XP:=XC And 3; YP:=YC And 3;
+  Case PrevCsbf Of
+   0: If XP+YP=0 Then Sc:=2 Else If XP+YP<3 Then Sc:=1 Else Sc:=0;
+   1: If YP=0 Then Sc:=2 Else If YP=1 Then Sc:=1 Else Sc:=0;
+   2: If XP=0 Then Sc:=2 Else If XP=1 Then Sc:=1 Else Sc:=0;
+  Else Sc:=2;
+  End;
+  If CIdx=0 Then Begin
+   If (XS>0) Or (YS>0) Then Inc(Sc,3);
+   If L2=3 Then Begin If ScanIdx=0 Then Inc(Sc,9) Else Inc(Sc,15); End Else Inc(Sc,21);
+  End Else Begin
+   If L2=3 Then Inc(Sc,9) Else Inc(Sc,12);
+  End;
+ End;
+ If CIdx=0 Then HeSigCtx:=Sc Else HeSigCtx:=27+Sc;
+End;
+
+Procedure HeCodeLast(CIdx,L2,V,CtxBase: LongInt; Var Pre,Suf,SufBits: LongInt);
+Var K: LongInt;
+Begin
+ If V<4 Then Begin Pre:=V; Suf:=0; SufBits:=0; End
+ Else Begin
+  K:=HeLog2(V);
+  Pre:=2*K+((V Shr (K-1)) And 1);
+  SufBits:=K-1;
+  Suf:=V-((1 Shl (K-1))*(2+(Pre And 1)));
+ End;
+End;
+
+Procedure HeRemaining(V,Rice: LongInt);
+Var Pre,R,K: LongInt;
+Begin
+ If V<(4 Shl Rice) Then Begin
+  Pre:=V Shr Rice;
+  While Pre>0 Do Begin HeBypass(1); Dec(Pre); End;
+  HeBypass(0);
+  HeBypassBits(V And ((1 Shl Rice)-1),Rice);
+ End Else Begin
+  HeBypassBits(15,4);
+  R:=V-(4 Shl Rice); K:=Rice+1;
+  While R>=(1 Shl K) Do Begin HeBypass(1); Dec(R,1 Shl K); Inc(K); End;
+  HeBypass(0);
+  HeBypassBits(R,K);
+ End;
+End;
+
+{ Lev : N*N niveaux (ligne y, colonne x) ; au moins un non nul }
+Procedure HeResidual(Lev: PHeLA; L2,CIdx,ScanIdx: LongInt);
+Var N,NSb,LogSb,I,J,Sb,Pn,X,Y,LastSb,LastPn,LastX,LastY,CX,CY,PX,PY,SbX,SbY,PrevCsbf,CtxCg,Nsig,Gt1Ctx,CtxSet,M,Rice,Nn,CtxOff,CtxSh: LongInt;
+ Csb: Array[0..7,0..7] Of Byte; Pos: Array[0..15] Of LongInt; Ab,Sg: Array[0..15] Of LongInt;
+ PreX,PreY,SufX,SufY,SbitX,SbitY,Cm,FirstG1,Lv,Base,Rem,Fl,Any,Impl,CodedSb,MaxPre,Sc,Q: LongInt;
+Begin
+ N:=1 Shl L2; LogSb:=L2-2; NSb:=1 Shl LogSb;
+ FillChar(Csb,SizeOf(Csb),0);
+ { derniere position significative dans l'ordre de balayage }
+ LastSb:=-1; LastPn:=-1;
+ For I:=NSb*NSb-1 DownTo 0 Do Begin
+  SbX:=HeScanX[ScanIdx,LogSb,I]; SbY:=HeScanY[ScanIdx,LogSb,I];
+  For J:=15 DownTo 0 Do Begin
+   CX:=(SbX Shl 2)+HeScanX[ScanIdx,2,J]; CY:=(SbY Shl 2)+HeScanY[ScanIdx,2,J];
+   If Lev^[CY*N+CX]<>0 Then Begin LastSb:=I; LastPn:=J; Break; End;
+  End;
+  If LastSb>=0 Then Break;
+ End;
+ SbX:=HeScanX[ScanIdx,LogSb,LastSb]; SbY:=HeScanY[ScanIdx,LogSb,LastSb];
+ LastX:=(SbX Shl 2)+HeScanX[ScanIdx,2,LastPn]; LastY:=(SbY Shl 2)+HeScanY[ScanIdx,2,LastPn];
+ If ScanIdx=2 Then Begin I:=LastX; LastX:=LastY; LastY:=I; End;
+ { prefixes / suffixes }
+ HeCodeLast(CIdx,L2,LastX,0,PreX,SufX,SbitX);
+ HeCodeLast(CIdx,L2,LastY,0,PreY,SufY,SbitY);
+ MaxPre:=(L2 Shl 1)-1;
+ If CIdx=0 Then Begin CtxOff:=3*(L2-2)+((L2-1) Shr 2); CtxSh:=(L2+1) Shr 2; End
+ Else Begin CtxOff:=15; CtxSh:=L2-2; End;
+ For I:=0 To PreX-1 Do HeBin(HEC_LASTX+CtxOff+(I Shr CtxSh),1);
+ If PreX<MaxPre Then HeBin(HEC_LASTX+CtxOff+(PreX Shr CtxSh),0);
+ For I:=0 To PreY-1 Do HeBin(HEC_LASTY+CtxOff+(I Shr CtxSh),1);
+ If PreY<MaxPre Then HeBin(HEC_LASTY+CtxOff+(PreY Shr CtxSh),0);
+ If PreX>3 Then HeBypassBits(SufX,SbitX);
+ If PreY>3 Then HeBypassBits(SufY,SbitY);
+ { sous-blocs }
+ Gt1Ctx:=1;
+ For Sb:=LastSb DownTo 0 Do Begin
+  SbX:=HeScanX[ScanIdx,LogSb,Sb]; SbY:=HeScanY[ScanIdx,LogSb,Sb];
+  { sous-bloc non nul ? }
+  Any:=0;
+  For J:=0 To 15 Do Begin
+   CX:=(SbX Shl 2)+HeScanX[ScanIdx,2,J]; CY:=(SbY Shl 2)+HeScanY[ScanIdx,2,J];
+   If Lev^[CY*N+CX]<>0 Then Any:=1;
+  End;
+  PrevCsbf:=0;
+  If SbX<NSb-1 Then PrevCsbf:=Csb[SbX+1,SbY];
+  If SbY<NSb-1 Then PrevCsbf:=PrevCsbf Or (Csb[SbX,SbY+1] Shl 1);
+  Impl:=0;
+  If (Sb<LastSb) And (Sb>0) Then Begin
+   CtxCg:=0;
+   If SbX<NSb-1 Then CtxCg:=CtxCg+Csb[SbX+1,SbY];
+   If SbY<NSb-1 Then CtxCg:=CtxCg+Csb[SbX,SbY+1];
+   Cm:=HeMin(CtxCg,1); If CIdx>0 Then Cm:=Cm+2;
+   HeBin(HEC_CSBF+Cm,Any);
+   Csb[SbX,SbY]:=Any; Impl:=Any;
+  End Else Csb[SbX,SbY]:=1;
+  If Csb[SbX,SbY]=0 Then Continue;
+  { drapeaux significatifs }
+  Nsig:=0;
+  If Sb=LastSb Then Begin
+   Pos[0]:=LastPn; Nsig:=1; Nn:=LastPn-1;
+  End Else Nn:=15;
+  For J:=Nn DownTo 1 Do Begin
+   CX:=(SbX Shl 2)+HeScanX[ScanIdx,2,J]; CY:=(SbY Shl 2)+HeScanY[ScanIdx,2,J];
+   Fl:=Ord(Lev^[CY*N+CX]<>0);
+   HeBin(HEC_SIG+HeSigCtx(CIdx,L2,ScanIdx,CX,CY,PrevCsbf),Fl);
+   If Fl<>0 Then Begin Pos[Nsig]:=J; Inc(Nsig); End;
+   If Fl<>0 Then Impl:=0;
+  End;
+  If Nn>=0 Then Begin
+   { position 0 }
+   CX:=(SbX Shl 2)+HeScanX[ScanIdx,2,0]; CY:=(SbY Shl 2)+HeScanY[ScanIdx,2,0];
+   Fl:=Ord(Lev^[CY*N+CX]<>0);
+   If Impl=0 Then Begin
+    { coef 0 code explicitement (sauf si implicite) ; Impl vaut 1 seulement si csbf code et aucun autre significatif }
+    HeBin(HEC_SIG+HeSigCtx(CIdx,L2,ScanIdx,CX,CY,PrevCsbf),Fl);
+    If Fl<>0 Then Begin Pos[Nsig]:=0; Inc(Nsig); End;
+   End Else Begin
+    Pos[Nsig]:=0; Inc(Nsig);
+   End;
+  End;
+  If Nsig=0 Then Continue;
+  { niveaux }
+  For M:=0 To Nsig-1 Do Begin
+   J:=Pos[M]; CX:=(SbX Shl 2)+HeScanX[ScanIdx,2,J]; CY:=(SbY Shl 2)+HeScanY[ScanIdx,2,J];
+   Lv:=Lev^[CY*N+CX]; Ab[M]:=HeAbs(Lv); If Lv<0 Then Sg[M]:=1 Else Sg[M]:=0;
+  End;
+  If (Sb>0) And (CIdx=0) Then CtxSet:=2 Else CtxSet:=0;
+  If (Sb<>LastSb) And (Gt1Ctx=0) Then Inc(CtxSet);
+  Gt1Ctx:=1; FirstG1:=-1;
+  For M:=0 To HeMin(Nsig,8)-1 Do Begin
+   Fl:=Ord(Ab[M]>1);
+   Cm:=CtxSet*4+Gt1Ctx; If CIdx>0 Then Inc(Cm,16);
+   HeBin(HEC_GT1+Cm,Fl);
+   If Fl<>0 Then Begin
+    Gt1Ctx:=0; If FirstG1<0 Then FirstG1:=M;
+   End Else If (Gt1Ctx>0) And (Gt1Ctx<3) Then Inc(Gt1Ctx);
+  End;
+  If FirstG1>=0 Then Begin
+   Cm:=CtxSet; If CIdx>0 Then Inc(Cm,4);
+   HeBin(HEC_GT2+Cm,Ord(Ab[FirstG1]>2));
+  End;
+  For M:=0 To Nsig-1 Do HeBypass(Sg[M]);
+  Rice:=0;
+  For M:=0 To Nsig-1 Do Begin
+   If M<8 Then Begin
+    If M=FirstG1 Then Base:=3 Else Base:=2;
+    If Ab[M]>=Base Then Begin
+     HeRemaining(Ab[M]-Base,Rice);
+     If Ab[M]>(3 Shl Rice) Then If Rice<4 Then Inc(Rice);
+    End;
+   End Else Begin
+    HeRemaining(Ab[M]-1,Rice);
+    If Ab[M]>(3 Shl Rice) Then If Rice<4 Then Inc(Rice);
+   End;
+  End;
+ End;
+End;
+
+{ estimation du cout en bits d'un bloc de niveaux (contextes figes) }
+Function HeResBits(Lev: PHeLA; L2,CIdx,ScanIdx: LongInt): Double;
+Var Sv: Boolean; C0: Double; I,N: LongInt; Any: Boolean;
+Begin
+ N:=1 Shl (2*L2); Any:=False;
+ For I:=0 To N-1 Do If Lev^[I]<>0 Then Begin Any:=True; Break; End;
+ If Not Any Then Begin HeResBits:=0; Exit; End;
+ Sv:=HeEst; C0:=HeCost; HeEst:=True; HeCost:=0;
+ HeResidual(Lev,L2,CIdx,ScanIdx);
+ HeResBits:=HeCost; HeEst:=Sv; HeCost:=C0;
+End;
+Type
+ THePic=Record
+  P: Array[0..2] Of PEABuffer;
+  Poc: LongInt;
+  Used: Boolean;
+ End;
+Var
+ HePics: Array[0..7] Of THePic;
+ HeNPics,HeCur: LongInt;
+ HeRefL: Array[0..1,0..15] Of LongInt;      { indices d'images (HePics) des listes de reference }
+ HeRefPoc: Array[0..1,0..15] Of LongInt;
+ HeDpbN: LongInt;                           { nombre d'images de reference en memoire }
+ HeDpb: Array[0..7] Of LongInt;             { indices, de la plus recente a la plus ancienne }
+ HeFrameNo,HePoc,HeSincePoc: LongInt;
+ HeIdr: Boolean;
+ HeLastBits: LongInt;
+ HeLastKey: Boolean;
+ HePendLen: LongInt;
+ HeMeanQp: Double;
+ HeOptRefs,HeTarget,HeQpP,HeCqp: LongInt; HeCxP: Double; HeAccL: Int64;
+
+
+Var
+ HeRefPocT: Array[0..1,0..15] Of LongInt;   { POC des images de reference des listes 0/1 }
+{ ---------------------------------------------------------------------- }
+{ Cartes par bloc 4x4, syntaxe des CU                                       }
+{ ---------------------------------------------------------------------- }
+Var
+ HeMPred,HeMSkip,HeMDepth,HeMIpm,HeMCbf,HeMEdge: PEABuffer;
+ HeMMv: PHeLA;            { 6 valeurs par bloc : mvx0,mvy0,mvx1,mvy1,ref0,ref1 }
+ HeSliceType,HeNumRef0,HeNumRef1,HeQp,HeInitType: LongInt;
+ HeLambda,HeSqrtLambda: Double;
+ HeCuL: Array[0..39] Of THeCu; HeCuN,HeWi: LongInt;
+ HePool: PHeLA; HePoolN: LongInt;
+
+Function HeScanFor(CIdx,L2,Mode: LongInt; Intra: Boolean): LongInt;
+Begin
+ HeScanFor:=0;
+ If Not Intra Then Exit;
+ If (L2=2) Or ((L2=3) And (CIdx=0)) Then Begin
+  If (Mode>=6) And (Mode<=14) Then HeScanFor:=2
+  Else If (Mode>=22) And (Mode<=30) Then HeScanFor:=1;
+ End;
+End;
+
+Procedure HeSetMaps(Var Cu: THeCu);
+Var N4,I,J,B,K,Pi,Px,Py,Pw,Ph,X4,Y4: LongInt; V: LongInt;
+Begin
+ N4:=(1 Shl Cu.L2) Shr 2; X4:=Cu.X Shr 2; Y4:=Cu.Y Shr 2;
+ For J:=0 To N4-1 Do For I:=0 To N4-1 Do Begin
+  B:=(Y4+J)*HeW4+X4+I;
+  HeMPred^[B]:=Cu.Pred; HeMSkip^[B]:=Cu.Skip; HeMDepth^[B]:=5-Cu.L2;
+  HeMEdge^[B]:=0;
+  If Cu.Pred=1 Then Begin
+   If (Cu.Part=3) Then Begin
+    K:=(J*2 Div N4)*2+(I*2 Div N4);   { 0..3 }
+    HeMIpm^[B]:=Cu.Ipm[K]; HeMCbf^[B]:=Cu.CbfY[K];
+   End Else Begin HeMIpm^[B]:=Cu.Ipm[0]; HeMCbf^[B]:=Cu.CbfY[0]; End;
+   HeMMv^[B*6+4]:=-1; HeMMv^[B*6+5]:=-1;
+   HeMMv^[B*6]:=0; HeMMv^[B*6+1]:=0; HeMMv^[B*6+2]:=0; HeMMv^[B*6+3]:=0;
+  End Else Begin
+   HeMIpm^[B]:=1; HeMCbf^[B]:=Cu.CbfY[0];
+  End;
+ End;
+ If Cu.Pred=2 Then
+  For Pi:=0 To Cu.NPu-1 Do Begin
+   Px:=Cu.Pu[Pi].Px Shr 2; Py:=Cu.Pu[Pi].Py Shr 2; Pw:=Cu.Pu[Pi].Pw Shr 2; Ph:=Cu.Pu[Pi].Ph Shr 2;
+   For J:=0 To Ph-1 Do For I:=0 To Pw-1 Do Begin
+    B:=(Py+J)*HeW4+Px+I;
+    If (Cu.Pu[Pi].Dir And 1)<>0 Then Begin
+     HeMMv^[B*6]:=Cu.Pu[Pi].Mx0; HeMMv^[B*6+1]:=Cu.Pu[Pi].My0; HeMMv^[B*6+4]:=Cu.Pu[Pi].Ref0;
+    End Else Begin HeMMv^[B*6]:=0; HeMMv^[B*6+1]:=0; HeMMv^[B*6+4]:=-1; End;
+    If (Cu.Pu[Pi].Dir And 2)<>0 Then Begin
+     HeMMv^[B*6+2]:=Cu.Pu[Pi].Mx1; HeMMv^[B*6+3]:=Cu.Pu[Pi].My1; HeMMv^[B*6+5]:=Cu.Pu[Pi].Ref1;
+    End Else Begin HeMMv^[B*6+2]:=0; HeMMv^[B*6+3]:=0; HeMMv^[B*6+5]:=-1; End;
+   End;
+   { bords de PU }
+   For J:=0 To Ph-1 Do HeMEdge^[(Py+J)*HeW4+Px]:=HeMEdge^[(Py+J)*HeW4+Px] Or 2;
+   For I:=0 To Pw-1 Do HeMEdge^[Py*HeW4+Px+I]:=HeMEdge^[Py*HeW4+Px+I] Or 8;
+  End;
+ { bords de CU (transformation + prediction) }
+ For J:=0 To N4-1 Do HeMEdge^[(Y4+J)*HeW4+X4]:=HeMEdge^[(Y4+J)*HeW4+X4] Or 3;
+ For I:=0 To N4-1 Do HeMEdge^[Y4*HeW4+X4+I]:=HeMEdge^[Y4*HeW4+X4+I] Or 12;
+ { bord de TU interne : intra NxN }
+ If (Cu.Pred=1) And (Cu.Part=3) Then Begin
+  For J:=0 To N4-1 Do HeMEdge^[(Y4+J)*HeW4+X4+N4 Div 2]:=HeMEdge^[(Y4+J)*HeW4+X4+N4 Div 2] Or 1;
+  For I:=0 To N4-1 Do HeMEdge^[(Y4+N4 Div 2)*HeW4+X4+I]:=HeMEdge^[(Y4+N4 Div 2)*HeW4+X4+I] Or 4;
+ End;
+End;
+
+{ mode le plus probable : 3 candidats pour la PU en (X,Y) }
+Procedure HeMpmCand(X,Y: LongInt; Var C: Array Of LongInt);
+Var A,B,Bi: LongInt;
+Begin
+ A:=1; B:=1;
+ If X>0 Then Begin
+  Bi:=(Y Shr 2)*HeW4+((X-1) Shr 2);
+  If HeMPred^[Bi]=1 Then A:=HeMIpm^[Bi];
+ End;
+ If (Y>0) And (((Y-1) Shr 5)=(Y Shr 5)) Then Begin
+  Bi:=((Y-1) Shr 2)*HeW4+(X Shr 2);
+  If HeMPred^[Bi]=1 Then B:=HeMIpm^[Bi];
+ End;
+ If A=B Then Begin
+  If A<2 Then Begin C[0]:=0; C[1]:=1; C[2]:=26; End
+  Else Begin C[0]:=A; C[1]:=2+((A+29) Mod 32); C[2]:=2+((A-2+1) Mod 32); End;
+ End Else Begin
+  C[0]:=A; C[1]:=B;
+  If (A<>0) And (B<>0) Then C[2]:=0
+  Else If (A<>1) And (B<>1) Then C[2]:=1
+  Else C[2]:=26;
+ End;
+End;
+
+Procedure HeWriteSplitFlag(X,Y,L2,Flag: LongInt);
+Var C,Bi: LongInt;
+Begin
+ C:=0;
+ If X>0 Then Begin Bi:=(Y Shr 2)*HeW4+((X-1) Shr 2); If HeMDepth^[Bi]>5-L2 Then Inc(C); End;
+ If Y>0 Then Begin Bi:=((Y-1) Shr 2)*HeW4+(X Shr 2); If HeMDepth^[Bi]>5-L2 Then Inc(C); End;
+ HeBin(HEC_SPLITCU+C,Flag);
+End;
+
+Procedure HeWriteMvdComp(Dx,Dy: LongInt);
+Var Ax,Ay,K,V: LongInt;
+ Procedure Eg1(V: LongInt);
+ Var K: LongInt;
+ Begin
+  K:=1;
+  While V>=(1 Shl K) Do Begin HeBypass(1); Dec(V,1 Shl K); Inc(K); End;
+  HeBypass(0); HeBypassBits(V,K);
+ End;
+Begin
+ Ax:=HeAbs(Dx); Ay:=HeAbs(Dy);
+ HeBin(HEC_MVDG0,Ord(Ax>0)); HeBin(HEC_MVDG0,Ord(Ay>0));
+ If Ax>0 Then HeBin(HEC_MVDG1+1,Ord(Ax>1));
+ If Ay>0 Then HeBin(HEC_MVDG1+1,Ord(Ay>1));
+ If Ax>0 Then Begin If Ax>1 Then Eg1(Ax-2); HeBypass(Ord(Dx<0)); End;
+ If Ay>0 Then Begin If Ay>1 Then Eg1(Ay-2); HeBypass(Ord(Dy<0)); End;
+End;
+
+Procedure HeWriteMergeIdx(Idx: LongInt);
+Var I: LongInt;
+Begin
+ If HeMaxMerge<=1 Then Exit;
+ HeBin(HEC_MERGEIDX,Ord(Idx>0));
+ If Idx>0 Then Begin
+  For I:=1 To HeMaxMerge-2 Do Begin
+   HeBypass(Ord(Idx>I));
+   If Idx<=I Then Break;
+  End;
+ End;
+End;
+
+Procedure HeWriteRefIdx(Idx,NumRef: LongInt);
+Var I,Mx: LongInt;
+Begin
+ If NumRef<=1 Then Exit;
+ Mx:=NumRef-1;
+ I:=0;
+ While I<Mx Do Begin
+  If I<2 Then HeBin(HEC_REFIDX+I,Ord(Idx>I)) Else HeBypass(Ord(Idx>I));
+  If Idx<=I Then Break;
+  Inc(I);
+ End;
+End;
+
+Procedure HeWritePu(Var Cu: THeCu; Var P: THePu);
+Begin
+ If P.Merge<>0 Then Begin
+  If Cu.Skip=0 Then HeBin(HEC_MERGEFLAG,1);
+  HeWriteMergeIdx(P.MergeIdx);
+  Exit;
+ End;
+ HeBin(HEC_MERGEFLAG,0);
+ If HeSliceType=0 Then Begin
+  If P.Pw+P.Ph<>12 Then Begin
+   If P.Dir=3 Then HeBin(HEC_INTERPRED+(5-Cu.L2),1)
+   Else Begin HeBin(HEC_INTERPRED+(5-Cu.L2),0); HeBin(HEC_INTERPRED+4,P.Dir-1); End;
+  End Else HeBin(HEC_INTERPRED+4,P.Dir-1);
+ End;
+ If (P.Dir And 1)<>0 Then Begin
+  HeWriteRefIdx(P.Ref0,HeNumRef0);
+  HeWriteMvdComp(P.Dx0,P.Dy0);
+  HeBin(HEC_MVPFLAG,P.Mvp0);
+ End;
+ If (P.Dir And 2)<>0 Then Begin
+  HeWriteRefIdx(P.Ref1,HeNumRef1);
+  HeWriteMvdComp(P.Dx1,P.Dy1);
+  HeBin(HEC_MVPFLAG,P.Mvp1);
+ End;
+End;
+
+Procedure HeWriteCu(Var Cu: THeCu);
+Var X0,Y0,L2,N,I,J,K,Bi,C,Mpm,Rem,Cnt,Np,Sc: LongInt; Cd: Array[0..2] Of LongInt; Prev: Array[0..3] Of LongInt;
+ CbfC,Cb1,Cb2,Lm,A,B2: LongInt;
+ Procedure SortCand(Var V: Array Of LongInt);
+ Var T: LongInt;
+ Begin
+  If V[0]>V[1] Then Begin T:=V[0]; V[0]:=V[1]; V[1]:=T; End;
+  If V[1]>V[2] Then Begin T:=V[1]; V[1]:=V[2]; V[2]:=T; End;
+  If V[0]>V[1] Then Begin T:=V[0]; V[0]:=V[1]; V[1]:=T; End;
+ End;
+ Procedure ResBlk(Cidx,Lg,Mode: LongInt; Lev: PHeLA);
+ Begin
+  HeResidual(Lev,Lg,Cidx,HeScanFor(Cidx,Lg,Mode,Cu.Pred=1));
+ End;
+Begin
+ X0:=Cu.X; Y0:=Cu.Y; L2:=Cu.L2; N:=1 Shl L2;
+ If HeSliceType<>2 Then Begin
+  C:=0;
+  If X0>0 Then C:=C+HeMSkip^[(Y0 Shr 2)*HeW4+((X0-1) Shr 2)];
+  If Y0>0 Then C:=C+HeMSkip^[((Y0-1) Shr 2)*HeW4+(X0 Shr 2)];
+  HeBin(HEC_SKIP+C,Cu.Skip);
+  If Cu.Skip<>0 Then Begin HeWritePu(Cu,Cu.Pu[0]); Exit; End;
+  HeBin(HEC_PREDMODE,Ord(Cu.Pred=1));
+ End;
+ If Cu.Pred=1 Then Begin
+  If L2=3 Then HeBin(HEC_PARTMODE,Ord(Cu.Part=0));
+  If Cu.Part=3 Then Np:=4 Else Np:=1;
+  For I:=0 To Np-1 Do Begin
+   If Np=4 Then HeMpmCand(X0+(I And 1)*(N Shr 1),Y0+(I Shr 1)*(N Shr 1),Cd) Else HeMpmCand(X0,Y0,Cd);
+   Prev[I]:=0;
+   For K:=0 To 2 Do If Cd[K]=Cu.Ipm[I] Then Prev[I]:=1;
+   HeBin(HEC_PREVINTRA,Prev[I]);
+  End;
+  For I:=0 To Np-1 Do Begin
+   If Np=4 Then HeMpmCand(X0+(I And 1)*(N Shr 1),Y0+(I Shr 1)*(N Shr 1),Cd) Else HeMpmCand(X0,Y0,Cd);
+   If Prev[I]<>0 Then Begin
+    If Cd[0]=Cu.Ipm[I] Then HeBypass(0)
+    Else If Cd[1]=Cu.Ipm[I] Then HeBypassBits(2,2)
+    Else HeBypassBits(3,2);
+   End Else Begin
+    SortCand(Cd);
+    Rem:=Cu.Ipm[I];
+    For K:=2 DownTo 0 Do If Cu.Ipm[I]>Cd[K] Then Dec(Rem);
+    HeBypassBits(Rem,5);
+   End;
+  End;
+  If Cu.ChrSyn=4 Then HeBin(HEC_CHROMAPRED,0)
+  Else Begin HeBin(HEC_CHROMAPRED,1); HeBypassBits(Cu.ChrSyn,2); End;
+ End Else Begin
+  { inter }
+  If L2=3 Then Begin
+   If Cu.Part=0 Then HeBin(HEC_PARTMODE,1)
+   Else Begin HeBin(HEC_PARTMODE,0); HeBin(HEC_PARTMODE+1,Ord(Cu.Part=1)); End;
+  End Else Begin
+   If Cu.Part=0 Then HeBin(HEC_PARTMODE,1)
+   Else Begin HeBin(HEC_PARTMODE,0); HeBin(HEC_PARTMODE+1,Ord(Cu.Part=1)); End;
+  End;
+  For I:=0 To Cu.NPu-1 Do HeWritePu(Cu,Cu.Pu[I]);
+  If Not ((Cu.Part=0) And (Cu.Pu[0].Merge<>0)) Then HeBin(HEC_NORESID,Cu.RqtRoot);
+  If Cu.RqtRoot=0 Then Exit;
+ End;
+ { arbre de transformation }
+ If (Cu.Pred=2) And (L2<=5) And (L2>2) Then HeBin(HEC_SPLITTR+5-L2,Cu.SplitTr);
+ Cb1:=Cu.CbfCb; Cb2:=Cu.CbfCr;
+ If L2>2 Then Begin HeBin(HEC_CBFCHROMA,Cb1); HeBin(HEC_CBFCHROMA,Cb2); End;
+ If (Cu.Pred=1) And (Cu.Part=3) Then Begin
+  For I:=0 To 3 Do Begin
+   HeBin(HEC_CBFLUMA,Cu.CbfY[I]);
+   If Cu.CbfY[I]<>0 Then ResBlk(0,2,Cu.Ipm[I],@Cu.Co^[I*16]);
+   If I=3 Then Begin
+    If Cb1<>0 Then ResBlk(1,2,Cu.ChrMode,@Cu.Co^[1024]);
+    If Cb2<>0 Then ResBlk(2,2,Cu.ChrMode,@Cu.Co^[1280]);
+   End;
+  End;
+ End Else Begin
+  If (Cu.Pred=1) Or (Cb1<>0) Or (Cb2<>0) Then HeBin(HEC_CBFLUMA+1,Cu.CbfY[0]);
+  If (Cu.CbfY[0]<>0) Or (Cb1<>0) Or (Cb2<>0) Then Begin
+   If Cu.CbfY[0]<>0 Then ResBlk(0,L2,Cu.Ipm[0],@Cu.Co^[0]);
+   If Cb1<>0 Then ResBlk(1,L2-1,Cu.ChrMode,@Cu.Co^[1024]);
+   If Cb2<>0 Then ResBlk(2,L2-1,Cu.ChrMode,@Cu.Co^[1280]);
+  End;
+ End;
+End;
+
+Procedure HeWriteQuad(X,Y,L2: LongInt);
+Var Sz,H: LongInt; Leaf,Inside: Boolean;
+Begin
+ Sz:=1 Shl L2;
+ If (X>=HeWp) Or (Y>=HeHp) Then Exit;
+ Inside:=(X+Sz<=HeWp) And (Y+Sz<=HeHp);
+ Leaf:=(HeCuL[HeWi].X=X) And (HeCuL[HeWi].Y=Y) And (HeCuL[HeWi].L2=L2);
+ If (L2>3) And Inside Then HeWriteSplitFlag(X,Y,L2,Ord(Not Leaf));
+ If Leaf Then Begin
+  HeSetMaps(HeCuL[HeWi]);
+  HeWriteCu(HeCuL[HeWi]); Inc(HeWi);
+ End Else Begin
+  H:=Sz Shr 1;
+  HeWriteQuad(X,Y,L2-1); HeWriteQuad(X+H,Y,L2-1); HeWriteQuad(X,Y+H,L2-1); HeWriteQuad(X+H,Y+H,L2-1);
+ End;
+End;
+{ ---------------------------------------------------------------------- }
+{ Decision de mode, reconstruction                                          }
+{ ---------------------------------------------------------------------- }
+Var
+ HeQpC: LongInt;
+ HeScrCur,HeScrBest: Array[0..HE_COEFSTRIDE-1] Of LongInt;
+ HeBestY: Array[0..1023] Of Byte; HeBestU,HeBestV: Array[0..255] Of Byte;
+ HeSvY: Array[4..5,0..1023] Of Byte; HeSvU,HeSvV: Array[4..5,0..255] Of Byte;
+ HeSatdCnt: LongInt;
+
+Procedure HeCopyRec(ToBuf: Boolean; X,Y,L2: LongInt; PY,PU,PV: PEABuffer);
+Var N,J,Nc: LongInt;
+Begin
+ N:=1 Shl L2; Nc:=N Shr 1;
+ For J:=0 To N-1 Do
+  If ToBuf Then Move(HeRecP[0]^[(Y+J)*HeStr[0]+X],PY^[J*N],N) Else Move(PY^[J*N],HeRecP[0]^[(Y+J)*HeStr[0]+X],N);
+ For J:=0 To Nc-1 Do Begin
+  If ToBuf Then Begin
+   Move(HeRecP[1]^[((Y Shr 1)+J)*HeStr[1]+(X Shr 1)],PU^[J*Nc],Nc);
+   Move(HeRecP[2]^[((Y Shr 1)+J)*HeStr[2]+(X Shr 1)],PV^[J*Nc],Nc);
+  End Else Begin
+   Move(PU^[J*Nc],HeRecP[1]^[((Y Shr 1)+J)*HeStr[1]+(X Shr 1)],Nc);
+   Move(PV^[J*Nc],HeRecP[2]^[((Y Shr 1)+J)*HeStr[2]+(X Shr 1)],Nc);
+  End;
+ End;
+End;
+
+{ SATD 4x4 par tuiles de la difference source - prediction }
+Function HeSatd(CIdx,Xc,Yc,L2: LongInt; Var Pr: Array Of LongInt): LongInt;
+Var N,Bx,By,I,J,Tot,A,B,C,D: LongInt; M: Array[0..15] Of LongInt; T: Array[0..15] Of LongInt; Sp: PEABuffer; Str: LongInt;
+Begin
+ N:=1 Shl L2; Sp:=HeSrcP[CIdx]; Str:=HeStr[CIdx]; Tot:=0;
+ Bx:=0;
+ While Bx<N Do Begin
+  By:=0;
+  While By<N Do Begin
+   For J:=0 To 3 Do For I:=0 To 3 Do M[J*4+I]:=Sp^[(Yc+By+J)*Str+Xc+Bx+I]-Pr[(By+J)*N+Bx+I];
+   For J:=0 To 3 Do Begin
+    A:=M[J*4]+M[J*4+3]; B:=M[J*4+1]+M[J*4+2]; C:=M[J*4+1]-M[J*4+2]; D:=M[J*4]-M[J*4+3];
+    T[J*4]:=A+B; T[J*4+2]:=A-B; T[J*4+1]:=D+C; T[J*4+3]:=D-C;
+   End;
+   For I:=0 To 3 Do Begin
+    A:=T[I]+T[12+I]; B:=T[4+I]+T[8+I]; C:=T[4+I]-T[8+I]; D:=T[I]-T[12+I];
+    Tot:=Tot+HeAbs(A+B)+HeAbs(A-B)+HeAbs(D+C)+HeAbs(D-C);
+   End;
+   Inc(By,4);
+  End;
+  Inc(Bx,4);
+ End;
+ HeSatd:=(Tot+1) Shr 1;
+End;
+
+{ code un bloc de transformation : residu = source - Pr ; ecrit la reconstruction dans le plan.
+  Fast : distorsion estimee dans le domaine des coefficients, sans reconstruction (selection de mode) }
+Procedure HeCodeTb(CIdx,Xc,Yc,L2: LongInt; Var Pr: Array Of LongInt; Intra,Dst: Boolean; Qp,ScanIdx: LongInt;
+                   Co: PHeLA; Var Cbf: LongInt; Var Dist: Double; Fast: Boolean);
+Var N,X,Y,Nz,Str,V,Sh,Sc: LongInt; Rs,Cf,Rr: Array[0..1023] OF LongInt; Sp,Rp: PEABuffer; S0,S1,Bits: Double; Q: Int64;
+Begin
+ N:=1 Shl L2; Sp:=HeSrcP[CIdx]; Rp:=HeRecP[CIdx]; Str:=HeStr[CIdx];
+ S0:=0;
+ For Y:=0 To N-1 Do For X:=0 To N-1 Do Begin
+  V:=Sp^[(Yc+Y)*Str+Xc+X]-Pr[Y*N+X]; Rs[Y*N+X]:=V; S0:=S0+V*V;
+ End;
+ HeFwdT(Rs,N,L2,Dst,Cf);
+ Nz:=HeQuantize(Cf,N,L2,Qp,Intra,Co);
+ Cbf:=0; Dist:=S0;
+ If Nz>0 Then Begin
+  If Fast Then Begin
+   Sh:=L2+3; Sc:=HeLevScale[Qp Mod 6] Shl (Qp Div 6); S1:=0;
+   For X:=0 To N*N-1 Do Begin
+    Q:=(Int64(Co^[X])*16*Sc+(Int64(1) Shl (Sh-1)));
+    If Q>=0 Then Q:=Q Shr Sh Else Q:=-((-Q-1) Shr Sh)-1;
+    V:=Cf[X]-Q; S1:=S1+Int64(V)*V;
+   End;
+   S1:=S1*N*N/16384.0;
+  End Else Begin
+   HeInvT(Co,N,L2,Qp,Dst,Rr);
+   S1:=0;
+   For Y:=0 To N-1 Do For X:=0 To N-1 Do Begin
+    V:=Pr[Y*N+X]+Rr[Y*N+X]; If V<0 Then V:=0; If V>255 Then V:=255;
+    Rr[Y*N+X]:=V;
+    V:=Sp^[(Yc+Y)*Str+Xc+X]-V; S1:=S1+V*V;
+   End;
+  End;
+  Bits:=HeResBits(Co,L2,CIdx,ScanIdx);
+  If S0<=S1+HeLambda*Bits Then Begin
+   For X:=0 To N*N-1 Do Co^[X]:=0;
+  End Else Begin
+   Cbf:=1; Dist:=S1;
+   If Not Fast Then
+    For Y:=0 To N-1 Do For X:=0 To N-1 Do Rp^[(Yc+Y)*Str+Xc+X]:=Rr[Y*N+X];
+   Exit;
+  End;
+ End Else For X:=0 To N*N-1 Do Co^[X]:=0;
+ If Not Fast Then
+  For Y:=0 To N-1 Do For X:=0 To N-1 Do Rp^[(Yc+Y)*Str+Xc+X]:=Pr[Y*N+X];
+End;
+
+Function HeModeBits(Mode: LongInt; Var Cd: Array Of LongInt): Double;
+Var K,Idx: LongInt; Sv: Boolean; C0: Double;
+Begin
+ Sv:=HeEst; C0:=HeCost; HeEst:=True; HeCost:=0;
+ Idx:=-1; For K:=0 To 2 Do If Cd[K]=Mode Then Idx:=K;
+ If Idx>=0 Then Begin HeBin(HEC_PREVINTRA,1); If Idx=0 Then HeBypass(0) Else HeBypassBits(2,2); End
+ Else Begin HeBin(HEC_PREVINTRA,0); HeBypassBits(0,5); End;
+ HeModeBits:=HeCost; HeEst:=Sv; HeCost:=C0;
+End;
+
+Procedure HeSetIpm(X,Y,N4,Mode: LongInt);
+Var I,J,B: LongInt;
+Begin
+ For J:=0 To N4-1 Do For I:=0 To N4-1 Do Begin
+  B:=((Y Shr 2)+J)*HeW4+(X Shr 2)+I; HeMPred^[B]:=1; HeMIpm^[B]:=Mode;
+ End;
+End;
+
+{ choisit le mode luma pour le TB (X,Y,L2) ; retourne le mode ; ecrit niveaux dans Co.
+  Pre-selection grossiere (modes pairs) puis raffinement +-1, puis RD complet sur les meilleurs. }
+Function HeSelectLuma(X,Y,L2: LongInt; Co: PHeLA; Var Cbf: LongInt; Var Dist: Double): LongInt;
+Var N,M,I,K,NC,Best,Kmax,Kc,Mm: LongInt; Cd: Array[0..2] Of LongInt; Pr: Array[0..1023] Of LongInt;
+ Cs: Array[0..34] Of Double; Done: Array[0..34] Of Boolean; Sel: Array[0..39] Of LongInt; Bj,Jm,D1: Double; Cb1: LongInt;
+ Used: Array[0..34] Of Boolean;
+ Procedure Eval(Md: LongInt);
+ Begin
+  If Done[Md] Then Exit;
+  Done[Md]:=True;
+  HeIntraPredFrom(0,L2,Md,Pr);
+  Cs[Md]:=HeSatd(0,X,Y,L2,Pr);
+  If (Md=Cd[0]) Or (Md=Cd[1]) Or (Md=Cd[2]) Then Cs[Md]:=Cs[Md]+HeSqrtLambda*1.5 Else Cs[Md]:=Cs[Md]+HeSqrtLambda*6.5;
+ End;
+Begin
+ N:=1 Shl L2;
+ HeMpmCand(X,Y,Cd);
+ HeIntraRefs(0,X,Y,L2);
+ FillChar(Done,SizeOf(Done),0);
+ For M:=0 To 34 Do Cs[M]:=1e30;
+ If L2<=2 Then Begin
+  For M:=0 To 34 Do Eval(M);
+ End Else Begin
+  Eval(0); Eval(1);
+  M:=2; While M<=34 Do Begin Eval(M); Inc(M,2); End;
+  { raffinement autour des 3 meilleurs angulaires }
+  FillChar(Used,SizeOf(Used),0);
+  For K:=1 To 3 Do Begin
+   Best:=-1;
+   For M:=2 To 34 Do If Done[M] And (Not Used[M]) And ((Best<0) Or (Cs[M]<Cs[Best])) Then Best:=M;
+   If Best<0 Then Break;
+   Used[Best]:=True;
+   If Best>2 Then Eval(Best-1);
+   If Best<34 Then Eval(Best+1);
+  End;
+ End;
+ For K:=0 To 2 Do Eval(Cd[K]);
+ If L2<=3 Then Kmax:=4 Else Kmax:=3;
+ FillChar(Used,SizeOf(Used),0);
+ NC:=0;
+ For K:=1 To Kmax Do Begin
+  Best:=-1;
+  For M:=0 To 34 Do If (Not Used[M]) And ((Best<0) Or (Cs[M]<Cs[Best])) Then Best:=M;
+  If Cs[Best]>=1e29 Then Break;
+  Used[Best]:=True; Sel[NC]:=Best; Inc(NC);
+ End;
+ For K:=0 To 2 Do If Not Used[Cd[K]] Then Begin Used[Cd[K]]:=True; Sel[NC]:=Cd[K]; Inc(NC); End;
+ Bj:=1e30; Best:=Sel[0];
+ For K:=0 To NC-1 Do Begin
+  M:=Sel[K];
+  HeIntraPredFrom(0,L2,M,Pr);
+  HeCodeTb(0,X,Y,L2,Pr,True,L2=2,HeQp,HeScanFor(0,L2,M,True),Co,Cb1,D1,True);
+  Jm:=D1+HeLambda*(HeModeBits(M,Cd)+HeResBits(Co,L2,0,HeScanFor(0,L2,M,True))*Ord(Cb1<>0));
+  If Jm<Bj Then Begin Bj:=Jm; Best:=M; End;
+ End;
+ { refaire le meilleur (niveaux + reconstruction) }
+ HeIntraPredFrom(0,L2,Best,Pr);
+ HeCodeTb(0,X,Y,L2,Pr,True,L2=2,HeQp,HeScanFor(0,L2,Best,True),Co,Cbf,Dist,False);
+ HeSelectLuma:=Best;
+End;
+
+Function HeChromaOf(Syn,Luma: LongInt): LongInt;
+Var M: LongInt;
+Begin
+ If Syn=4 Then Begin HeChromaOf:=Luma; Exit; End;
+ Case Syn Of 0: M:=0; 1: M:=26; 2: M:=10; Else M:=1; End;
+ If M=Luma Then M:=34;
+ HeChromaOf:=M;
+End;
+
+{ codage chroma d'une CU intra : choix du mode puis reconstruction }
+Procedure HeIntraChroma(Var Cu: THeCu; Var Dist: Double);
+Var L2c,N,S,K,Bs,Cm: LongInt; Pr: Array[0..1023] Of LongInt; Cst,Bc,D1,D2: Double; Xc,Yc,Cb1,Cb2: LongInt;
+Begin
+ L2c:=Cu.L2-1; N:=1 Shl L2c; Xc:=Cu.X Shr 1; Yc:=Cu.Y Shr 1;
+ Bc:=1e30; Bs:=4;
+ For S:=4 DownTo 0 Do Begin
+  Cm:=HeChromaOf(S,Cu.Ipm[0]);
+  Cst:=0;
+  For K:=1 To 2 Do Begin
+   HeIntraRefs(K,Xc,Yc,L2c);
+   HeIntraPredFrom(K,L2c,Cm,Pr);
+   Cst:=Cst+HeSatd(K,Xc,Yc,L2c,Pr);
+  End;
+  If S=4 Then Cst:=Cst+HeSqrtLambda*1 Else Cst:=Cst+HeSqrtLambda*3;
+  If Cst<Bc Then Begin Bc:=Cst; Bs:=S; End;
+ End;
+ Cu.ChrSyn:=Bs; Cu.ChrMode:=HeChromaOf(Bs,Cu.Ipm[0]);
+ Dist:=0;
+ HeIntraRefs(1,Xc,Yc,L2c); HeIntraPredFrom(1,L2c,Cu.ChrMode,Pr);
+ HeCodeTb(1,Xc,Yc,L2c,Pr,True,False,HeQpC,HeScanFor(1,L2c,Cu.ChrMode,True),@Cu.Co^[1024],Cb1,D1,False);
+ HeIntraRefs(2,Xc,Yc,L2c); HeIntraPredFrom(2,L2c,Cu.ChrMode,Pr);
+ HeCodeTb(2,Xc,Yc,L2c,Pr,True,False,HeQpC,HeScanFor(2,L2c,Cu.ChrMode,True),@Cu.Co^[1280],Cb2,D2,False);
+ Cu.CbfCb:=Cb1; Cu.CbfCr:=Cb2; Dist:=D1+D2;
+End;
+
+{ candidat intra : renvoie J ; Cu.Co pointe sur HeScrCur }
+Function HeIntraCand(X,Y,L2: LongInt; NxN: Boolean; Var Cu: THeCu): Double;
+Var N,I,H,Cb1: LongInt; D,Dt: Double; Bits: Double;
+Begin
+ N:=1 Shl L2;
+ FillChar(Cu,SizeOf(Cu),0);
+ Cu.X:=X; Cu.Y:=Y; Cu.L2:=L2; Cu.Pred:=1; Cu.Co:=@HeScrCur;
+ FillChar(HeScrCur,SizeOf(HeScrCur),0);
+ Cu.NPu:=0;
+ Dt:=0;
+ If NxN Then Begin
+  Cu.Part:=3; H:=N Shr 1;
+  For I:=0 To 3 Do Begin
+   Cu.Ipm[I]:=HeSelectLuma(X+(I And 1)*H,Y+(I Shr 1)*H,2,@Cu.Co^[I*16],Cb1,D);
+   Cu.CbfY[I]:=Cb1; Dt:=Dt+D;
+   HeSetIpm(X+(I And 1)*H,Y+(I Shr 1)*H,1,Cu.Ipm[I]);
+  End;
+ End Else Begin
+  Cu.Part:=0;
+  Cu.Ipm[0]:=HeSelectLuma(X,Y,L2,@Cu.Co^[0],Cb1,D);
+  Cu.CbfY[0]:=Cb1; Dt:=Dt+D;
+ End;
+ HeIntraChroma(Cu,D); Dt:=Dt+D;
+ HeSetMaps(Cu);
+ HeEst:=True; HeCost:=0; HeWriteCu(Cu); HeEst:=False; Bits:=HeCost;
+ HeIntraCand:=Dt+HeLambda*Bits;
+End;
+
+{ ---------------------------------------------------------------------- }
+{ Inter : compensation de mouvement, AMVP, merge, estimation                }
+{ ---------------------------------------------------------------------- }
+Const
+ HeQpelF: Array[0..31] Of ShortInt = (0,0,0,64,0,0,0,0, -1,4,-10,58,17,-5,1,0, -1,4,-11,40,40,-11,4,-1, 0,1,-5,17,58,-10,4,-1);
+ HeEpelF: Array[0..31] Of ShortInt = (0,64,0,0, -2,58,10,-2, -4,54,16,-2, -6,46,28,-4, -4,36,36,-4, -4,28,46,-6, -2,16,54,-4, -2,10,58,-2);
+
+Var
+ HeCbX,HeCbY,HeCbL2,HePuX,HePuY,HePuW,HePuH,HePartIdx,HePartMode: LongInt;
+ HeCurPoc: LongInt;
+ HeMcR: Array[0..1599] Of LongInt;
+ HeMcT: Array[0..1599] Of LongInt;
+ HeMcA: Array[0..1,0..1023] Of LongInt;
+
+{ bloc 14 bits : Pl plan de reference (Pw x Ph), origine entiere (X0,Y0), taille Bw x Bh, fractions Fx,Fy }
+Procedure HeMcBlk(Pl: PEABuffer; Pw,Ph,X0,Y0,Bw,Bh,Fx,Fy: LongInt; Luma: Boolean; Out: PHeLA);
+Var Nt,Bef,X,Y,I,Rw,Rh,Xs,Ys,Acc,O,Q: LongInt; Th,Tv: Array[0..7] Of LongInt; Inside: Boolean;
+Begin
+ If Luma Then Begin
+  Nt:=8; Bef:=3;
+  For I:=0 To 7 Do Begin Th[I]:=HeQpelF[Fx*8+I]; Tv[I]:=HeQpelF[Fy*8+I]; End;
+ End Else Begin
+  Nt:=4; Bef:=1;
+  For I:=0 To 3 Do Begin Th[I]:=HeEpelF[Fx*4+I]; Tv[I]:=HeEpelF[Fy*4+I]; End;
+ End;
+ Rw:=Bw+Nt-1; Rh:=Bh+Nt-1;
+ Inside:=(X0-Bef>=0) And (Y0-Bef>=0) And (X0-Bef+Rw<=Pw) And (Y0-Bef+Rh<=Ph);
+ If Inside Then Begin
+  For Y:=0 To Rh-1 Do Begin
+   O:=(Y0-Bef+Y)*Pw+X0-Bef; Q:=Y*Rw;
+   For X:=0 To Rw-1 Do HeMcR[Q+X]:=Pl^[O+X];
+  End;
+ End Else Begin
+  For Y:=0 To Rh-1 Do Begin
+   Ys:=HeClip(Y0-Bef+Y,0,Ph-1)*Pw;
+   For X:=0 To Rw-1 Do Begin
+    Xs:=HeClip(X0-Bef+X,0,Pw-1);
+    HeMcR[Y*Rw+X]:=Pl^[Ys+Xs];
+   End;
+  End;
+ End;
+ If (Fx=0) And (Fy=0) Then Begin
+  For Y:=0 To Bh-1 Do For X:=0 To Bw-1 Do Out^[Y*Bw+X]:=HeMcR[(Y+Bef)*Rw+X+Bef] Shl 6;
+ End Else If Fy=0 Then Begin
+  If Luma Then Begin
+   For Y:=0 To Bh-1 Do Begin
+    O:=(Y+Bef)*Rw;
+    For X:=0 To Bw-1 Do Begin
+     Q:=O+X;
+     Out^[Y*Bw+X]:=Th[0]*HeMcR[Q]+Th[1]*HeMcR[Q+1]+Th[2]*HeMcR[Q+2]+Th[3]*HeMcR[Q+3]+Th[4]*HeMcR[Q+4]+Th[5]*HeMcR[Q+5]+Th[6]*HeMcR[Q+6]+Th[7]*HeMcR[Q+7];
+    End;
+   End;
+  End Else Begin
+   For Y:=0 To Bh-1 Do Begin
+    O:=(Y+Bef)*Rw;
+    For X:=0 To Bw-1 Do Begin
+     Q:=O+X;
+     Out^[Y*Bw+X]:=Th[0]*HeMcR[Q]+Th[1]*HeMcR[Q+1]+Th[2]*HeMcR[Q+2]+Th[3]*HeMcR[Q+3];
+    End;
+   End;
+  End;
+ End Else If Fx=0 Then Begin
+  If Luma Then Begin
+   For Y:=0 To Bh-1 Do For X:=0 To Bw-1 Do Begin
+    Q:=Y*Rw+X+Bef;
+    Out^[Y*Bw+X]:=Tv[0]*HeMcR[Q]+Tv[1]*HeMcR[Q+Rw]+Tv[2]*HeMcR[Q+2*Rw]+Tv[3]*HeMcR[Q+3*Rw]+Tv[4]*HeMcR[Q+4*Rw]+Tv[5]*HeMcR[Q+5*Rw]+Tv[6]*HeMcR[Q+6*Rw]+Tv[7]*HeMcR[Q+7*Rw];
+   End;
+  End Else Begin
+   For Y:=0 To Bh-1 Do For X:=0 To Bw-1 Do Begin
+    Q:=Y*Rw+X+Bef;
+    Out^[Y*Bw+X]:=Tv[0]*HeMcR[Q]+Tv[1]*HeMcR[Q+Rw]+Tv[2]*HeMcR[Q+2*Rw]+Tv[3]*HeMcR[Q+3*Rw];
+   End;
+  End;
+ End Else Begin
+  If Luma Then Begin
+   For Y:=0 To Rh-1 Do For X:=0 To Bw-1 Do Begin
+    Q:=Y*Rw+X;
+    HeMcT[Y*Bw+X]:=Th[0]*HeMcR[Q]+Th[1]*HeMcR[Q+1]+Th[2]*HeMcR[Q+2]+Th[3]*HeMcR[Q+3]+Th[4]*HeMcR[Q+4]+Th[5]*HeMcR[Q+5]+Th[6]*HeMcR[Q+6]+Th[7]*HeMcR[Q+7];
+   End;
+   For Y:=0 To Bh-1 Do For X:=0 To Bw-1 Do Begin
+    Q:=Y*Bw+X;
+    Acc:=Tv[0]*HeMcT[Q]+Tv[1]*HeMcT[Q+Bw]+Tv[2]*HeMcT[Q+2*Bw]+Tv[3]*HeMcT[Q+3*Bw]+Tv[4]*HeMcT[Q+4*Bw]+Tv[5]*HeMcT[Q+5*Bw]+Tv[6]*HeMcT[Q+6*Bw]+Tv[7]*HeMcT[Q+7*Bw];
+    Out^[Q]:=HeSar(Acc,6);
+   End;
+  End Else Begin
+   For Y:=0 To Rh-1 Do For X:=0 To Bw-1 Do Begin
+    Q:=Y*Rw+X;
+    HeMcT[Y*Bw+X]:=Th[0]*HeMcR[Q]+Th[1]*HeMcR[Q+1]+Th[2]*HeMcR[Q+2]+Th[3]*HeMcR[Q+3];
+   End;
+   For Y:=0 To Bh-1 Do For X:=0 To Bw-1 Do Begin
+    Q:=Y*Bw+X;
+    Acc:=Tv[0]*HeMcT[Q]+Tv[1]*HeMcT[Q+Bw]+Tv[2]*HeMcT[Q+2*Bw]+Tv[3]*HeMcT[Q+3*Bw];
+    Out^[Q]:=HeSar(Acc,6);
+   End;
+  End;
+ End;
+End;
+
+{ prediction d'une PU (luma + chroma) dans les plans de reconstruction courants }
+Procedure HeMcPu(Var P: THePu);
+Var C,L,X,Y,Bx,By,Bw,Bh,Sh,Fx,Fy,Ix,Iy,Pwid,Phei,V: LongInt; Pl: PEABuffer; Used: Array[0..1] Of Boolean; Mx,My,Rf: Array[0..1] Of LongInt;
+Begin
+ Used[0]:=(P.Dir And 1)<>0; Used[1]:=(P.Dir And 2)<>0;
+ Mx[0]:=P.Mx0; My[0]:=P.My0; Rf[0]:=P.Ref0; Mx[1]:=P.Mx1; My[1]:=P.My1; Rf[1]:=P.Ref1;
+ For C:=0 To 2 Do Begin
+  If C=0 Then Begin Sh:=0; Pwid:=HeWp; Phei:=HeHp; End Else Begin Sh:=1; Pwid:=HeCw; Phei:=HeCh; End;
+  Bx:=P.Px Shr Sh; By:=P.Py Shr Sh; Bw:=P.Pw Shr Sh; Bh:=P.Ph Shr Sh;
+  For L:=0 To 1 Do If Used[L] Then Begin
+   Pl:=HePics[HeRefL[L,Rf[L]]].P[C];
+   If C=0 Then Begin
+    HeMcBlk(Pl,Pwid,Phei,Bx+HeSar(Mx[L],2),By+HeSar(My[L],2),Bw,Bh,Mx[L] And 3,My[L] And 3,True,@HeMcA[L]);
+   End Else Begin
+    HeMcBlk(Pl,Pwid,Phei,Bx+HeSar(Mx[L],3),By+HeSar(My[L],3),Bw,Bh,Mx[L] And 7,My[L] And 7,False,@HeMcA[L]);
+   End;
+  End;
+  Pl:=HeRecP[C];
+  If Used[0] And Used[1] Then Begin
+   For Y:=0 To Bh-1 Do For X:=0 To Bw-1 Do
+    Pl^[(By+Y)*HeStr[C]+Bx+X]:=HeClip((HeMcA[0,Y*Bw+X]+HeMcA[1,Y*Bw+X]+64) Shr 7,0,255);
+  End Else Begin
+   If Used[0] Then L:=0 Else L:=1;
+   For Y:=0 To Bh-1 Do For X:=0 To Bw-1 Do
+    Pl^[(By+Y)*HeStr[C]+Bx+X]:=HeClip((HeMcA[L,Y*Bw+X]+32) Shr 6,0,255);
+  End;
+ End;
+End;
+
+{ ---- voisinage de mouvement ---- }
+Function HePbAvail(XN,YN: LongInt): Boolean;
+Var Ok: Boolean; Sz: LongInt;
+Begin
+ Sz:=1 Shl HeCbL2;
+ If (XN>=HeCbX) And (XN<HeCbX+Sz) And (YN>=HeCbY) And (YN<HeCbY+Sz) Then Begin
+  If (HePuW*2=Sz) And (HePuH*2=Sz) And (HePartIdx=1) And (HeCbY+HePuH<=YN) And (HeCbX+HePuW>XN) Then Ok:=False Else Ok:=True;
+ End Else Ok:=HeAvail(HePuX,HePuY,XN,YN);
+ If Ok Then If HeMPred^[(YN Shr 2)*HeW4+(XN Shr 2)]=1 Then Ok:=False;
+ HePbAvail:=Ok;
+End;
+
+Function HeNbIdx(XN,YN: LongInt): LongInt;
+Begin HeNbIdx:=((YN Shr 2)*HeW4+(XN Shr 2))*6; End;
+
+Function HeSameMv(A,B: LongInt): Boolean;
+Var L: LongInt;
+Begin
+ HeSameMv:=False;
+ If (HeMMv^[A+4]<>HeMMv^[B+4]) Or (HeMMv^[A+5]<>HeMMv^[B+5]) Then Exit;
+ For L:=0 To 1 Do If HeMMv^[A+4+L]>=0 Then
+  If (HeMMv^[A+2*L]<>HeMMv^[B+2*L]) Or (HeMMv^[A+2*L+1]<>HeMMv^[B+2*L+1]) Then Exit;
+ HeSameMv:=True;
+End;
+
+Const
+ HeCombIdx: Array[0..23] Of Byte = (0,1, 1,0, 0,2, 2,0, 1,2, 2,1, 0,3, 3,0, 1,3, 3,1, 2,3, 3,2);
+
+{ liste de candidats de fusion : L[i*6 ..] = mx0,my0,mx1,my1,ref0,ref1 }
+Procedure HeMergeList(Var L: Array Of LongInt; Var N: LongInt);
+Var A1,B1,B0,A0,B2,Nb,I,ZeroIdx,NR,Orig,K,C0,C1: LongInt; AvA1,AvB1,AvB0,AvA0,AvB2: Boolean;
+ Procedure Add(Src: LongInt);
+ Var K: LongInt;
+ Begin For K:=0 To 5 Do L[N*6+K]:=HeMMv^[Src+K]; Inc(N); End;
+Begin
+ N:=0;
+ AvA1:=False; AvB1:=False;
+ If Not ((HePartIdx=1) And (HePartMode=2)) Then Begin
+  AvA1:=HePbAvail(HePuX-1,HePuY+HePuH-1);
+  If AvA1 Then Add(HeNbIdx(HePuX-1,HePuY+HePuH-1));
+ End;
+ If Not ((HePartIdx=1) And (HePartMode=1)) Then Begin
+  AvB1:=HePbAvail(HePuX+HePuW-1,HePuY-1);
+  If AvB1 And Not (AvA1 And HeSameMv(HeNbIdx(HePuX+HePuW-1,HePuY-1),HeNbIdx(HePuX-1,HePuY+HePuH-1))) Then Add(HeNbIdx(HePuX+HePuW-1,HePuY-1));
+ End;
+ AvB0:=HePbAvail(HePuX+HePuW,HePuY-1);
+ If AvB0 And Not (AvB1 And HeSameMv(HeNbIdx(HePuX+HePuW,HePuY-1),HeNbIdx(HePuX+HePuW-1,HePuY-1))) Then Add(HeNbIdx(HePuX+HePuW,HePuY-1));
+ AvA0:=HePbAvail(HePuX-1,HePuY+HePuH);
+ If AvA0 And Not (AvA1 And HeSameMv(HeNbIdx(HePuX-1,HePuY+HePuH),HeNbIdx(HePuX-1,HePuY+HePuH-1))) Then Add(HeNbIdx(HePuX-1,HePuY+HePuH));
+ AvB2:=HePbAvail(HePuX-1,HePuY-1);
+ If AvB2 And Not (AvA1 And HeSameMv(HeNbIdx(HePuX-1,HePuY-1),HeNbIdx(HePuX-1,HePuY+HePuH-1)))
+   And Not (AvB1 And HeSameMv(HeNbIdx(HePuX-1,HePuY-1),HeNbIdx(HePuX+HePuW-1,HePuY-1))) And (N<>4) Then Add(HeNbIdx(HePuX-1,HePuY-1));
+ Orig:=N;
+ If (HeSliceType=0) And (Orig>1) And (Orig<HeMaxMerge) Then Begin
+  K:=0;
+  While (N<HeMaxMerge) And (K<Orig*(Orig-1)) Do Begin
+   C0:=HeCombIdx[K*2]; C1:=HeCombIdx[K*2+1];
+   If (L[C0*6+4]>=0) And (L[C1*6+5]>=0) And
+      ((HeRefPocT[0,L[C0*6+4]]<>HeRefPocT[1,L[C1*6+5]]) Or (L[C0*6]<>L[C1*6+2]) Or (L[C0*6+1]<>L[C1*6+3])) Then Begin
+    L[N*6]:=L[C0*6]; L[N*6+1]:=L[C0*6+1]; L[N*6+2]:=L[C1*6+2]; L[N*6+3]:=L[C1*6+3];
+    L[N*6+4]:=L[C0*6+4]; L[N*6+5]:=L[C1*6+5]; Inc(N);
+   End;
+   Inc(K);
+  End;
+ End;
+ If HeSliceType=1 Then NR:=HeNumRef0 Else NR:=HeMin(HeNumRef0,HeNumRef1);
+ ZeroIdx:=0;
+ While N<HeMaxMerge Do Begin
+  L[N*6]:=0; L[N*6+1]:=0; L[N*6+2]:=0; L[N*6+3]:=0;
+  If ZeroIdx<NR Then Begin L[N*6+4]:=ZeroIdx; L[N*6+5]:=ZeroIdx; End Else Begin L[N*6+4]:=0; L[N*6+5]:=0; End;
+  If HeSliceType=1 Then L[N*6+5]:=-1;
+  Inc(N); Inc(ZeroIdx);
+ End;
+ If N>HeMaxMerge Then N:=HeMaxMerge;
+End;
+
+Procedure HeMvScale(Var Mx,My: LongInt; Td,Tb: LongInt);
+Var Tx,Sf,V: LongInt;
+Begin
+ Td:=HeClip(Td,-128,127); Tb:=HeClip(Tb,-128,127);
+ Tx:=(16384+HeAbs(Td Div 2)) Div Td;
+ Sf:=HeClip(HeSar(Tb*Tx+32,6),-4096,4095);
+ V:=Sf*Mx; Mx:=HeClip(HeSar(V+127+Ord(V<0),8),-32768,32767);
+ V:=Sf*My; My:=HeClip(HeSar(V+127+Ord(V<0),8),-32768,32767);
+End;
+
+{ deux candidats AMVP pour la liste LX et l'indice de reference Ri }
+Procedure HeAmvp(Lx,Ri: LongInt; Var Cx,Cy: Array Of LongInt);
+Var A0,A1,B0,B1,B2,AvA,AvB,IsScaled,Num: LongInt; Ax,Ay,Bx,By: LongInt;
+ AvA0,AvA1,AvB0,AvB1,AvB2: Boolean; TargetPoc: LongInt;
+ Function Mx(Nb,Lst: LongInt; Var Vx,Vy: LongInt): Boolean;
+ Begin
+  Mx:=False;
+  If HeMMv^[Nb+4+Lst]>=0 Then
+   If HeRefPocT[Lst,HeMMv^[Nb+4+Lst]]=TargetPoc Then Begin Vx:=HeMMv^[Nb+2*Lst]; Vy:=HeMMv^[Nb+2*Lst+1]; Mx:=True; End;
+ End;
+ Function MxS(Nb,Lst: LongInt; Var Vx,Vy: LongInt): Boolean;
+ Var Pd: LongInt;
+ Begin
+  MxS:=False;
+  If HeMMv^[Nb+4+Lst]>=0 Then Begin
+   Vx:=HeMMv^[Nb+2*Lst]; Vy:=HeMMv^[Nb+2*Lst+1];
+   If HeRefPocT[Lst,HeMMv^[Nb+4+Lst]]<>TargetPoc Then Begin
+    Pd:=HeCurPoc-HeRefPocT[Lst,HeMMv^[Nb+4+Lst]]; If Pd=0 Then Pd:=1;
+    HeMvScale(Vx,Vy,Pd,HeCurPoc-TargetPoc);
+   End;
+   MxS:=True;
+  End;
+ End;
+ Function TryA(Scaled: Boolean): Boolean;
+ Begin
+  TryA:=True;
+  If Not Scaled Then Begin
+   If AvA0 Then Begin If Mx(A0,Lx,Ax,Ay) Then Exit; If Mx(A0,1-Lx,Ax,Ay) Then Exit; End;
+   If AvA1 Then Begin If Mx(A1,Lx,Ax,Ay) Then Exit; If Mx(A1,1-Lx,Ax,Ay) Then Exit; End;
+  End Else Begin
+   If AvA0 Then Begin If MxS(A0,Lx,Ax,Ay) Then Exit; If MxS(A0,1-Lx,Ax,Ay) Then Exit; End;
+   If AvA1 Then Begin If MxS(A1,Lx,Ax,Ay) Then Exit; If MxS(A1,1-Lx,Ax,Ay) Then Exit; End;
+  End;
+  TryA:=False;
+ End;
+Begin
+ TargetPoc:=HeRefPocT[Lx,Ri];
+ A0:=HeNbIdx(HePuX-1,HePuY+HePuH); A1:=HeNbIdx(HePuX-1,HePuY+HePuH-1);
+ B0:=HeNbIdx(HePuX+HePuW,HePuY-1); B1:=HeNbIdx(HePuX+HePuW-1,HePuY-1); B2:=HeNbIdx(HePuX-1,HePuY-1);
+ AvA0:=HePbAvail(HePuX-1,HePuY+HePuH); AvA1:=HePbAvail(HePuX-1,HePuY+HePuH-1);
+ AvB0:=HePbAvail(HePuX+HePuW,HePuY-1); AvB1:=HePbAvail(HePuX+HePuW-1,HePuY-1); AvB2:=HePbAvail(HePuX-1,HePuY-1);
+ IsScaled:=Ord(AvA0 Or AvA1);
+ Ax:=0; Ay:=0; Bx:=0; By:=0;
+ AvA:=Ord(TryA(False));
+ If AvA=0 Then AvA:=Ord(TryA(True));
+ { candidat B }
+ AvB:=1;
+ If AvB0 And (Mx(B0,Lx,Bx,By) Or Mx(B0,1-Lx,Bx,By)) Then
+ Else If AvB1 And (Mx(B1,Lx,Bx,By) Or Mx(B1,1-Lx,Bx,By)) Then
+ Else If AvB2 And (Mx(B2,Lx,Bx,By) Or Mx(B2,1-Lx,Bx,By)) Then
+ Else AvB:=0;
+ If IsScaled=0 Then Begin
+  If AvB<>0 Then Begin AvA:=1; Ax:=Bx; Ay:=By; End;
+  AvB:=0;
+  If AvB0 Then Begin AvB:=Ord(MxS(B0,Lx,Bx,By)); If AvB=0 Then AvB:=Ord(MxS(B0,1-Lx,Bx,By)); End;
+  If AvB1 And (AvB=0) Then Begin AvB:=Ord(MxS(B1,Lx,Bx,By)); If AvB=0 Then AvB:=Ord(MxS(B1,1-Lx,Bx,By)); End;
+  If AvB2 And (AvB=0) Then Begin AvB:=Ord(MxS(B2,Lx,Bx,By)); If AvB=0 Then AvB:=Ord(MxS(B2,1-Lx,Bx,By)); End;
+ End;
+ Num:=0; Cx[0]:=0; Cy[0]:=0; Cx[1]:=0; Cy[1]:=0;
+ If AvA<>0 Then Begin Cx[Num]:=Ax; Cy[Num]:=Ay; Inc(Num); End;
+ If (AvB<>0) And ((AvA=0) Or (Ax<>Bx) Or (Ay<>By)) Then Begin Cx[Num]:=Bx; Cy[Num]:=By; Inc(Num); End;
+End;
+{ ---------------------------------------------------------------------- }
+{ Estimation de mouvement et candidats inter                               }
+{ ---------------------------------------------------------------------- }
+Var
+ HeMeBx,HeMeBy: LongInt; HeMeBc: Double;
+ HeMeRi: LongInt;
+ HeMvpX,HeMvpY: Array[0..1] Of LongInt;
+ HeStartX,HeStartY: LongInt; HeHaveStart: Boolean;
+
+Function HeMvdBits(D: LongInt): Double;
+Begin
+ D:=HeAbs(D);
+ If D=0 Then HeMvdBits:=1 Else HeMvdBits:=3+2*HeLog2(D);
+End;
+
+Function HeMvCost(Mx,My: LongInt): Double;
+Var A,B: Double;
+Begin
+ A:=HeMvdBits(Mx-HeMvpX[0])+HeMvdBits(My-HeMvpY[0]);
+ B:=HeMvdBits(Mx-HeMvpX[1])+HeMvdBits(My-HeMvpY[1])+1;
+ If B<A Then A:=B;
+ HeMvCost:=HeSqrtLambda*A;
+End;
+
+Function HeSadInt(Pl: PEABuffer; Rx,Ry,Limit: LongInt): LongInt;
+Var X,Y,S,Xs,Ys,V: LongInt; Sp: PEABuffer;
+Begin
+ Sp:=HeSrcP[0]; S:=0;
+ If (Rx>=0) And (Ry>=0) And (Rx+HePuW<=HeWp) And (Ry+HePuH<=HeHp) Then Begin
+  For Y:=0 To HePuH-1 Do
+   For X:=0 To HePuW-1 Do Begin
+    V:=Sp^[(HePuY+Y)*HeWp+HePuX+X]-Pl^[(Ry+Y)*HeWp+Rx+X];
+    If V<0 Then S:=S-V Else S:=S+V;
+   End;
+ End Else Begin
+  For Y:=0 To HePuH-1 Do Begin
+   Ys:=HeClip(Ry+Y,0,HeHp-1);
+   For X:=0 To HePuW-1 Do Begin
+    Xs:=HeClip(Rx+X,0,HeWp-1);
+    V:=Sp^[(HePuY+Y)*HeWp+HePuX+X]-Pl^[Ys*HeWp+Xs];
+    If V<0 Then S:=S-V Else S:=S+V;
+   End;
+  End;
+ End;
+ HeSadInt:=S;
+End;
+
+{ cout (SAD + debit de mouvement) du vecteur Mx,My (quart de pixel) pour la reference HeMeRi }
+Function HeMeEval(Mx,My: LongInt): Double;
+Var Pl: PEABuffer; S,X,Y,V,Lim: LongInt; Sp: PEABuffer;
+Begin
+ Lim:=2000000000; If HeMeBc<1e9 Then Lim:=Trunc(HeMeBc-HeMvCost(Mx,My))+1; If Lim<1 Then Lim:=1;
+ Pl:=HePics[HeRefL[0,HeMeRi]].P[0];
+ If ((Mx And 3)=0) And ((My And 3)=0) Then S:=HeSadInt(Pl,HePuX+HeSar(Mx,2),HePuY+HeSar(My,2),Lim)
+ Else Begin
+  HeMcBlk(Pl,HeWp,HeHp,HePuX+HeSar(Mx,2),HePuY+HeSar(My,2),HePuW,HePuH,Mx And 3,My And 3,True,@HeMcA[0]);
+  Sp:=HeSrcP[0]; S:=0;
+  For Y:=0 To HePuH-1 Do For X:=0 To HePuW-1 Do Begin
+   V:=HeClip((HeMcA[0,Y*HePuW+X]+32) Shr 6,0,255);
+   V:=Sp^[(HePuY+Y)*HeWp+HePuX+X]-V;
+   If V<0 Then S:=S-V Else S:=S+V;
+  End;
+ End;
+ HeMeEval:=S+HeMvCost(Mx,My);
+End;
+
+Procedure HeMeTry(Mx,My: LongInt);
+Var C: Double;
+Begin
+ C:=HeMeEval(Mx,My);
+ If C<HeMeBc Then Begin HeMeBc:=C; HeMeBx:=Mx; HeMeBy:=My; End;
+End;
+
+{ recherche de mouvement pour la PU courante ; points de depart : candidats AMVP, zero, depart memorise }
+Procedure HeSearch(Ri: LongInt);
+Var K,S,Dx,Dy,Cx,Cy,Iter,Bx0,By0: LongInt; Imp: Boolean; Xlo,Xhi,Ylo,Yhi: LongInt; Cl,Cr,Cu,Cd,Cg: Double;
+ Const Ddx: Array[0..7] Of ShortInt = (-1,0,1,-1,1,-1,0,1);
+       Ddy: Array[0..7] Of ShortInt = (-1,-1,-1,0,0,1,1,1);
+Begin
+ HeMeRi:=Ri; HeMeBc:=1e30;
+ Xlo:=(-HePuW-8-HePuX)*4; Xhi:=(HeWp+8-HePuX)*4; Ylo:=(-HePuH-8-HePuY)*4; Yhi:=(HeHp+8-HePuY)*4;
+ For K:=0 To 3 Do Begin
+  Case K Of
+   0: Begin Cx:=HeMvpX[0]; Cy:=HeMvpY[0]; End;
+   1: Begin Cx:=HeMvpX[1]; Cy:=HeMvpY[1]; End;
+   2: Begin Cx:=0; Cy:=0; End;
+  Else If HeHaveStart Then Begin Cx:=HeStartX; Cy:=HeStartY; End Else Begin Cx:=0; Cy:=0; End;
+  End;
+  Cx:=HeClip(HeSar(Cx+2,2) Shl 2,Xlo,Xhi); Cy:=HeClip(HeSar(Cy+2,2) Shl 2,Ylo,Yhi);
+  HeMeTry(Cx,Cy);
+ End;
+ { recherche entiere en diamants successifs }
+ S:=8;
+ While S>=1 Do Begin
+  Iter:=0;
+  Repeat
+   Bx0:=HeMeBx; By0:=HeMeBy; Imp:=False;
+   For K:=0 To 7 Do Begin
+    Cx:=Bx0+Ddx[K]*S*4; Cy:=By0+Ddy[K]*S*4;
+    If (Cx>=Xlo) And (Cx<=Xhi) And (Cy>=Ylo) And (Cy<=Yhi) Then Begin
+     HeMeTry(Cx,Cy);
+    End;
+   End;
+   If (HeMeBx<>Bx0) Or (HeMeBy<>By0) Then Imp:=True;
+   Inc(Iter);
+  Until (Not Imp) Or (Iter>=4);
+  S:=S Div 2;
+ End;
+ { demi puis quart de pixel : croix puis diagonale la plus prometteuse }
+ For S:=2 DownTo 1 Do Begin
+  Bx0:=HeMeBx; By0:=HeMeBy;
+  Cl:=HeMeEval(Bx0-S,By0); Cr:=HeMeEval(Bx0+S,By0); Cu:=HeMeEval(Bx0,By0-S); Cd:=HeMeEval(Bx0,By0+S);
+  If Cl<Cr Then Dx:=-S Else Dx:=S;
+  If Cu<Cd Then Dy:=-S Else Dy:=S;
+  Cg:=HeMeEval(Bx0+Dx,By0+Dy);
+  If Cl<HeMeBc Then Begin HeMeBc:=Cl; HeMeBx:=Bx0-S; HeMeBy:=By0; End;
+  If Cr<HeMeBc Then Begin HeMeBc:=Cr; HeMeBx:=Bx0+S; HeMeBy:=By0; End;
+  If Cu<HeMeBc Then Begin HeMeBc:=Cu; HeMeBx:=Bx0; HeMeBy:=By0-S; End;
+  If Cd<HeMeBc Then Begin HeMeBc:=Cd; HeMeBx:=Bx0; HeMeBy:=By0+S; End;
+  If Cg<HeMeBc Then Begin HeMeBc:=Cg; HeMeBx:=Bx0+Dx; HeMeBy:=By0+Dy; End;
+ End;
+End;
+
+{ decide le mouvement d'une PU ; Mode : 0 auto, 1 fusion seule, 2 AMVP seul }
+Procedure HeDecidePu(Var Cu: THeCu; Pi,Px,Py,Pw,Ph,Mode: LongInt);
+Var Ml: Array[0..29] Of LongInt; N,I,K,Ri,BestI,BestRi,Cm,Dir,R0,R1,X,Y,V,S: LongInt; Bc,Bm,Ba,C: Double;
+ Cx,Cy: Array[0..1] Of LongInt; Bmx,Bmy: LongInt; Pu: THePu; Sp: PEABuffer; Pl: PEABuffer;
+ Bmv: Array[0..5] Of LongInt; Idx: LongInt; Dup: Boolean; Mvx,Mvy,Used: LongInt;
+Begin
+ HePuX:=Px; HePuY:=Py; HePuW:=Pw; HePuH:=Ph; HePartIdx:=Pi; HePartMode:=Cu.Part;
+ FillChar(Pu,SizeOf(Pu),0);
+ Pu.Px:=Px; Pu.Py:=Py; Pu.Pw:=Pw; Pu.Ph:=Ph;
+ Bm:=1e30; Ba:=1e30; BestI:=0; BestRi:=0;
+ Sp:=HeSrcP[0];
+ If Mode<>2 Then Begin
+  HeMergeList(Ml,N);
+  For I:=0 To N-1 Do Begin
+   Dup:=False;
+   For K:=0 To I-1 Do If (Ml[K*6]=Ml[I*6]) And (Ml[K*6+1]=Ml[I*6+1]) And (Ml[K*6+2]=Ml[I*6+2]) And (Ml[K*6+3]=Ml[I*6+3]) And (Ml[K*6+4]=Ml[I*6+4]) And (Ml[K*6+5]=Ml[I*6+5]) Then Dup:=True;
+   If Dup Then Continue;
+   Pu.Merge:=1; Pu.MergeIdx:=I;
+   R0:=Ml[I*6+4]; R1:=Ml[I*6+5]; Dir:=0;
+   If R0>=0 Then Dir:=Dir Or 1; If R1>=0 Then Dir:=Dir Or 2;
+   If (Dir=3) And (Pw+Ph=12) Then Begin Dir:=1; R1:=-1; End;
+   Pu.Dir:=Dir; Pu.Ref0:=R0; Pu.Ref1:=R1; Pu.Mx0:=Ml[I*6]; Pu.My0:=Ml[I*6+1]; Pu.Mx1:=Ml[I*6+2]; Pu.My1:=Ml[I*6+3];
+   { SAD de la prediction luma }
+   S:=0;
+   For K:=0 To 1 Do If (Dir And (1 Shl K))<>0 Then Begin
+    If K=0 Then Begin Mvx:=Pu.Mx0; Mvy:=Pu.My0; Ri:=R0; End Else Begin Mvx:=Pu.Mx1; Mvy:=Pu.My1; Ri:=R1; End;
+    HeMcBlk(HePics[HeRefL[K,Ri]].P[0],HeWp,HeHp,Px+HeSar(Mvx,2),Py+HeSar(Mvy,2),Pw,Ph,Mvx And 3,Mvy And 3,True,@HeMcA[K]);
+   End;
+   For Y:=0 To Ph-1 Do For X:=0 To Pw-1 Do Begin
+    If Dir=3 Then V:=HeClip((HeMcA[0,Y*Pw+X]+HeMcA[1,Y*Pw+X]+64) Shr 7,0,255)
+    Else If Dir=1 Then V:=HeClip((HeMcA[0,Y*Pw+X]+32) Shr 6,0,255)
+    Else V:=HeClip((HeMcA[1,Y*Pw+X]+32) Shr 6,0,255);
+    V:=Sp^[(Py+Y)*HeWp+Px+X]-V; S:=S+HeAbs(V);
+   End;
+   C:=S+HeSqrtLambda*(1+I);
+   If C<Bm Then Begin Bm:=C; BestI:=I; Bmv[0]:=Pu.Mx0; Bmv[1]:=Pu.My0; Bmv[2]:=Pu.Mx1; Bmv[3]:=Pu.My1; Bmv[4]:=R0; Bmv[5]:=R1; End;
+  End;
+ End;
+ Bmx:=0; Bmy:=0;
+ If Mode<>1 Then Begin
+  For Ri:=0 To HeNumRef0-1 Do Begin
+   HeAmvp(0,Ri,Cx,Cy);
+   HeMvpX[0]:=Cx[0]; HeMvpY[0]:=Cy[0]; HeMvpX[1]:=Cx[1]; HeMvpY[1]:=Cy[1];
+   HeSearch(Ri);
+   C:=HeMeBc+HeSqrtLambda*1.5*Ri;
+   If C<Ba Then Begin
+    Ba:=C; BestRi:=Ri; Bmx:=HeMeBx; Bmy:=HeMeBy;
+    HeStartX:=Bmx; HeStartY:=Bmy;
+    { choix du predicteur }
+    If HeMvdBits(Bmx-Cx[0])+HeMvdBits(Bmy-Cy[0])<=HeMvdBits(Bmx-Cx[1])+HeMvdBits(Bmy-Cy[1])+1 Then Idx:=0 Else Idx:=1;
+    Pu.Mvp0:=Idx; Pu.Dx0:=Bmx-Cx[Idx]; Pu.Dy0:=Bmy-Cy[Idx];
+   End;
+  End;
+ End;
+ FillChar(Pu,SizeOf(Pu)-0,0);
+ Pu.Px:=Px; Pu.Py:=Py; Pu.Pw:=Pw; Pu.Ph:=Ph;
+ If (Mode=1) Or ((Mode=0) And (Bm<=Ba)) Then Begin
+  Pu.Merge:=1; Pu.MergeIdx:=BestI;
+  Pu.Mx0:=Bmv[0]; Pu.My0:=Bmv[1]; Pu.Mx1:=Bmv[2]; Pu.My1:=Bmv[3]; Pu.Ref0:=Bmv[4]; Pu.Ref1:=Bmv[5];
+  Pu.Dir:=0; If Bmv[4]>=0 Then Pu.Dir:=1; If Bmv[5]>=0 Then Pu.Dir:=Pu.Dir Or 2;
+  If (Pu.Dir=3) And (Pw+Ph=12) Then Begin Pu.Dir:=1; Pu.Ref1:=-1; End;
+ End Else Begin
+  Pu.Merge:=0; Pu.Dir:=1; Pu.Ref0:=BestRi; Pu.Ref1:=-1; Pu.Mx0:=Bmx; Pu.My0:=Bmy;
+  HeAmvp(0,BestRi,Cx,Cy);
+  If HeMvdBits(Bmx-Cx[0])+HeMvdBits(Bmy-Cy[0])<=HeMvdBits(Bmx-Cx[1])+HeMvdBits(Bmy-Cy[1])+1 Then Idx:=0 Else Idx:=1;
+  Pu.Mvp0:=Idx; Pu.Dx0:=Bmx-Cx[Idx]; Pu.Dy0:=Bmy-Cy[Idx];
+ End;
+ Cu.Pu[Pi]:=Pu;
+End;
+
+Procedure HeMapPu(Var Cu: THeCu; Pi: LongInt);
+Var Sv: LongInt;
+Begin
+ { ecrit le mouvement de la PU Pi dans les cartes (pour les PU suivantes) }
+ Sv:=Cu.NPu; Cu.NPu:=Pi+1;
+ HeSetMaps(Cu);
+ Cu.NPu:=Sv;
+End;
+
+Procedure HePrFromPlane(CIdx,Xc,Yc,L2: LongInt; Var Pr: Array Of LongInt);
+Var N,X,Y: LongInt; Pl: PEABuffer;
+Begin
+ N:=1 Shl L2; Pl:=HeRecP[CIdx];
+ For Y:=0 To N-1 Do For X:=0 To N-1 Do Pr[Y*N+X]:=Pl^[(Yc+Y)*HeStr[CIdx]+Xc+X];
+End;
+
+{ evalue une CU inter dont les PU sont decidees : MC, residu, cout total }
+Function HeEvalInter(Var Cu: THeCu): Double;
+Var I,N,L2,Cb0,Cb1,Cb2: LongInt; Pr: Array[0..1023] Of LongInt; D,Dt,Bits: Double;
+Begin
+ L2:=Cu.L2;
+ For I:=0 To Cu.NPu-1 Do HeMcPu(Cu.Pu[I]);
+ FillChar(HeScrCur,SizeOf(HeScrCur),0);
+ Cu.Co:=@HeScrCur;
+ Dt:=0;
+ HePrFromPlane(0,Cu.X,Cu.Y,L2,Pr);
+ HeCodeTb(0,Cu.X,Cu.Y,L2,Pr,False,False,HeQp,0,@Cu.Co^[0],Cb0,D,False); Dt:=Dt+D;
+ HePrFromPlane(1,Cu.X Shr 1,Cu.Y Shr 1,L2-1,Pr);
+ HeCodeTb(1,Cu.X Shr 1,Cu.Y Shr 1,L2-1,Pr,False,False,HeQpC,0,@Cu.Co^[1024],Cb1,D,False); Dt:=Dt+D;
+ HePrFromPlane(2,Cu.X Shr 1,Cu.Y Shr 1,L2-1,Pr);
+ HeCodeTb(2,Cu.X Shr 1,Cu.Y Shr 1,L2-1,Pr,False,False,HeQpC,0,@Cu.Co^[1280],Cb2,D,False); Dt:=Dt+D;
+ Cu.CbfY[0]:=Cb0; Cu.CbfCb:=Cb1; Cu.CbfCr:=Cb2;
+ Cu.SplitTr:=0;
+ If (Cb0<>0) Or (Cb1<>0) Or (Cb2<>0) Then Cu.RqtRoot:=1 Else Cu.RqtRoot:=0;
+ Cu.Skip:=Ord((Cu.Part=0) And (Cu.Pu[0].Merge<>0) And (Cu.RqtRoot=0));
+ HeSetMaps(Cu);
+ HeEst:=True; HeCost:=0; HeWriteCu(Cu); HeEst:=False; Bits:=HeCost;
+ HeEvalInter:=Dt+HeLambda*Bits;
+End;
+
+{ construit et evalue une CU inter de partition Part ; Mode pour la PU unique (2Nx2N) }
+Function HeInterCand(X,Y,L2,Part,Mode: LongInt; Var Cu: THeCu): Double;
+Var N,H: LongInt;
+Begin
+ N:=1 Shl L2;
+ FillChar(Cu,SizeOf(Cu),0);
+ Cu.X:=X; Cu.Y:=Y; Cu.L2:=L2; Cu.Pred:=2; Cu.Part:=Part; Cu.Co:=@HeScrCur;
+ HeCbX:=X; HeCbY:=Y; HeCbL2:=L2;
+ Cu.NPu:=0; HeSetMaps(Cu);          { marque la zone inter }
+ HeHaveStart:=False;
+ If Part=0 Then Begin
+  Cu.NPu:=1;
+  HeDecidePu(Cu,0,X,Y,N,N,Mode);
+ End Else If Part=1 Then Begin
+  H:=N Shr 1; Cu.NPu:=2;
+  HeDecidePu(Cu,0,X,Y,N,H,0); HeMapPu(Cu,0);
+  HeDecidePu(Cu,1,X,Y+H,N,H,0);
+ End Else Begin
+  H:=N Shr 1; Cu.NPu:=2;
+  HeDecidePu(Cu,0,X,Y,H,N,0); HeMapPu(Cu,0);
+  HeDecidePu(Cu,1,X+H,Y,H,N,0);
+ End;
+ HeInterCand:=HeEvalInter(Cu);
+End;
+{ meilleure CU pour le bloc (X,Y,L2) ; Best.Co pointe sur un emplacement du pool }
+Function HeLeaf(X,Y,L2: LongInt; Var Best: THeCu): Double;
+Var Cand: THeCu; J,Bj: Double; N,K,Cnt: LongInt; BestSkip: Boolean;
+ Procedure Consider;
+ Begin
+  If J<Bj Then Begin
+   Bj:=J; Best:=Cand; Move(HeScrCur,HeScrBest,SizeOf(HeScrCur));
+   HeCopyRec(True,X,Y,L2,@HeBestY,@HeBestU,@HeBestV);
+   BestSkip:=(Cand.Skip<>0) Or ((Cand.Pred=2) And (Cand.RqtRoot=0));
+  End;
+ End;
+Begin
+ Bj:=1e30; N:=1 Shl L2; BestSkip:=False;
+ If HeSliceType<>2 Then Begin
+  J:=HeInterCand(X,Y,L2,0,1,Cand); Consider;
+  If Not BestSkip Then Begin
+   J:=HeInterCand(X,Y,L2,0,2,Cand); Consider;
+   If Not BestSkip Then Begin
+    If L2>=3 Then Begin
+     J:=HeInterCand(X,Y,L2,1,0,Cand); Consider;
+     J:=HeInterCand(X,Y,L2,2,0,Cand); Consider;
+    End;
+   End;
+  End;
+ End;
+ If Not BestSkip Then Begin
+  J:=HeIntraCand(X,Y,L2,False,Cand); Consider;
+  If L2=3 Then Begin J:=HeIntraCand(X,Y,L2,True,Cand); Consider; End;
+ End;
+ HeCopyRec(False,X,Y,L2,@HeBestY,@HeBestU,@HeBestV);
+ Best.Co:=@HePool^[HePoolN*HE_COEFSTRIDE]; Inc(HePoolN);
+ Move(HeScrBest,Best.Co^,SizeOf(HeScrBest));
+ HeSetMaps(Best);
+ HeLeaf:=Bj;
+End;
+
+Function HeSplitBits(X,Y,L2,Flag: LongInt): Double;
+Begin
+ HeEst:=True; HeCost:=0;
+ HeWriteSplitFlag(X,Y,L2,Flag);
+ HeEst:=False; HeSplitBits:=HeCost;
+End;
+
+Function HeQuad(X,Y,L2: LongInt): Double;
+Var Sz,H,N0,I: LongInt; JA,JB: Double; Cu: THeCu; Inside: Boolean;
+Begin
+ Sz:=1 Shl L2; Inside:=(X+Sz<=HeWp) And (Y+Sz<=HeHp);
+ JA:=1e30; JB:=1e30;
+ If Inside Then Begin
+  JA:=HeLeaf(X,Y,L2,Cu);
+  If L2>3 Then JA:=JA+HeLambda*HeSplitBits(X,Y,L2,0);
+  If (L2>3) And ((Cu.Skip<>0) Or ((Cu.Pred=2) And (Cu.RqtRoot=0))) Then Begin
+   HeCuL[HeCuN]:=Cu; Inc(HeCuN); HeQuad:=JA; Exit;
+  End;
+ End;
+ If L2>3 Then Begin
+  If Inside Then HeCopyRec(True,X,Y,L2,@HeSvY[L2],@HeSvU[L2],@HeSvV[L2]);
+  N0:=HeCuN; JB:=0; H:=Sz Shr 1;
+  For I:=0 To 3 Do
+   If (X+(I And 1)*H<HeWp) And (Y+(I Shr 1)*H<HeHp) Then JB:=JB+HeQuad(X+(I And 1)*H,Y+(I Shr 1)*H,L2-1);
+  If Inside Then Begin
+   JB:=JB+HeLambda*HeSplitBits(X,Y,L2,1);
+   If JA<=JB Then Begin
+    HeCopyRec(False,X,Y,L2,@HeSvY[L2],@HeSvU[L2],@HeSvV[L2]);
+    HeCuN:=N0; HeCuL[HeCuN]:=Cu; Inc(HeCuN);
+    HeSetMaps(Cu);
+    HeQuad:=JA; Exit;
+   End;
+  End;
+  HeQuad:=JB;
+ End Else Begin
+  HeCuL[HeCuN]:=Cu; Inc(HeCuN);
+  HeQuad:=JA;
+ End;
+End;
+{ ---------------------------------------------------------------------- }
+{ Filtre de deblocage (8.7.2)                                               }
+{ ---------------------------------------------------------------------- }
+
+Function HeMvDiff(Ax,Ay,Bx,By: LongInt): Boolean;
+Begin
+ HeMvDiff:=(HeAbs(Ax-Bx)>=4) Or (HeAbs(Ay-By)>=4);
+End;
+
+{ force de bord entre deux blocs 4x4 (indices de cartes) ; EdgeBits : bit TU = 1, bit PU = 2 }
+Function HeBs(Pb,Qb,Edge: LongInt): LongInt;
+Var Np,Nq,I: LongInt; Pp,Qp2: Array[0..1] Of LongInt; Pm,Qm: Array[0..1,0..1] Of LongInt; B1,B2: Boolean;
+Begin
+ If (HeMPred^[Pb]=1) Or (HeMPred^[Qb]=1) Then Begin HeBs:=2; Exit; End;
+ If ((Edge And 1)<>0) And ((HeMCbf^[Pb]<>0) Or (HeMCbf^[Qb]<>0)) Then Begin HeBs:=1; Exit; End;
+ Np:=0; Nq:=0;
+ For I:=0 To 1 Do Begin
+  If HeMMv^[Pb*6+4+I]>=0 Then Begin
+   Pp[Np]:=HeRefPocT[I,HeMMv^[Pb*6+4+I]]; Pm[Np,0]:=HeMMv^[Pb*6+2*I]; Pm[Np,1]:=HeMMv^[Pb*6+2*I+1]; Inc(Np);
+  End;
+  If HeMMv^[Qb*6+4+I]>=0 Then Begin
+   Qp2[Nq]:=HeRefPocT[I,HeMMv^[Qb*6+4+I]]; Qm[Nq,0]:=HeMMv^[Qb*6+2*I]; Qm[Nq,1]:=HeMMv^[Qb*6+2*I+1]; Inc(Nq);
+  End;
+ End;
+ HeBs:=1;
+ If Np<>Nq Then Exit;
+ If Np=1 Then Begin
+  If Pp[0]<>Qp2[0] Then Exit;
+  If HeMvDiff(Pm[0,0],Pm[0,1],Qm[0,0],Qm[0,1]) Then Exit;
+  HeBs:=0; Exit;
+ End;
+ If Np=0 Then Begin HeBs:=0; Exit; End;
+ If Not (((Pp[0]=Qp2[0]) And (Pp[1]=Qp2[1])) Or ((Pp[0]=Qp2[1]) And (Pp[1]=Qp2[0]))) Then Exit;
+ If Pp[0]<>Pp[1] Then Begin
+  If Pp[0]=Qp2[0] Then Begin
+   If HeMvDiff(Pm[0,0],Pm[0,1],Qm[0,0],Qm[0,1]) Or HeMvDiff(Pm[1,0],Pm[1,1],Qm[1,0],Qm[1,1]) Then Exit;
+  End Else Begin
+   If HeMvDiff(Pm[0,0],Pm[0,1],Qm[1,0],Qm[1,1]) Or HeMvDiff(Pm[1,0],Pm[1,1],Qm[0,0],Qm[0,1]) Then Exit;
+  End;
+  HeBs:=0;
+ End Else Begin
+  B1:=HeMvDiff(Pm[0,0],Pm[0,1],Qm[0,0],Qm[0,1]) Or HeMvDiff(Pm[1,0],Pm[1,1],Qm[1,0],Qm[1,1]);
+  B2:=HeMvDiff(Pm[0,0],Pm[0,1],Qm[1,0],Qm[1,1]) Or HeMvDiff(Pm[1,0],Pm[1,1],Qm[0,0],Qm[0,1]);
+  If B1 And B2 Then Exit;
+  HeBs:=0;
+ End;
+End;
+
+{ filtre 4 lignes de luma ; Q0 = indice du premier echantillon cote Q, Ac = pas a travers le bord, Al = pas le long }
+Procedure HeFiltLuma(Pl: PEABuffer; Q0,Ac,Al,Bs: LongInt);
+Var Qi,Tc,Beta,I,P0,P1,P2,P3,Q0v,Q1,Q2,Q3,Dp0,Dp3,Dq0,Dq3,Dpq0,Dpq3,Dp,Dq,D,De,Dep,Deq,Delta,Dl,B: LongInt; Sam0,Sam3: Boolean;
+ Function Px(K,L: LongInt): LongInt; Begin Px:=Pl^[Q0+L*Al-(K+1)*Ac]; End;
+ Function Qx(K,L: LongInt): LongInt; Begin Qx:=Pl^[Q0+L*Al+K*Ac]; End;
+Begin
+ Qi:=HeClip(HeQp,0,51); Beta:=HeBetaTab[Qi];
+ Qi:=HeClip(HeQp+2*(Bs-1),0,53); Tc:=HeTcTab[Qi];
+ Dp0:=HeAbs(Px(2,0)-2*Px(1,0)+Px(0,0)); Dp3:=HeAbs(Px(2,3)-2*Px(1,3)+Px(0,3));
+ Dq0:=HeAbs(Qx(2,0)-2*Qx(1,0)+Qx(0,0)); Dq3:=HeAbs(Qx(2,3)-2*Qx(1,3)+Qx(0,3));
+ Dpq0:=Dp0+Dq0; Dpq3:=Dp3+Dq3; Dp:=Dp0+Dp3; Dq:=Dq0+Dq3; D:=Dpq0+Dpq3;
+ If D>=Beta Then Exit;
+ Sam0:=(2*Dpq0<(Beta Shr 2)) And (HeAbs(Px(3,0)-Px(0,0))+HeAbs(Qx(0,0)-Qx(3,0))<(Beta Shr 3)) And (HeAbs(Px(0,0)-Qx(0,0))<((5*Tc+1) Shr 1));
+ Sam3:=(2*Dpq3<(Beta Shr 2)) And (HeAbs(Px(3,3)-Px(0,3))+HeAbs(Qx(0,3)-Qx(3,3))<(Beta Shr 3)) And (HeAbs(Px(0,3)-Qx(0,3))<((5*Tc+1) Shr 1));
+ If Sam0 And Sam3 Then De:=2 Else De:=1;
+ Dep:=Ord(Dp<((Beta+(Beta Shr 1)) Shr 3)); Deq:=Ord(Dq<((Beta+(Beta Shr 1)) Shr 3));
+ For I:=0 To 3 Do Begin
+  B:=Q0+I*Al;
+  P0:=Pl^[B-Ac]; P1:=Pl^[B-2*Ac]; P2:=Pl^[B-3*Ac]; P3:=Pl^[B-4*Ac];
+  Q0v:=Pl^[B]; Q1:=Pl^[B+Ac]; Q2:=Pl^[B+2*Ac]; Q3:=Pl^[B+3*Ac];
+  If De=2 Then Begin
+   Pl^[B-Ac]:=HeClip((P2+2*P1+2*P0+2*Q0v+Q1+4) Shr 3,P0-2*Tc,P0+2*Tc);
+   Pl^[B-2*Ac]:=HeClip((P2+P1+P0+Q0v+2) Shr 2,P1-2*Tc,P1+2*Tc);
+   Pl^[B-3*Ac]:=HeClip((2*P3+3*P2+P1+P0+Q0v+4) Shr 3,P2-2*Tc,P2+2*Tc);
+   Pl^[B]:=HeClip((P1+2*P0+2*Q0v+2*Q1+Q2+4) Shr 3,Q0v-2*Tc,Q0v+2*Tc);
+   Pl^[B+Ac]:=HeClip((P0+Q0v+Q1+Q2+2) Shr 2,Q1-2*Tc,Q1+2*Tc);
+   Pl^[B+2*Ac]:=HeClip((P0+Q0v+Q1+3*Q2+2*Q3+4) Shr 3,Q2-2*Tc,Q2+2*Tc);
+  End Else Begin
+   Delta:=HeSar(9*(Q0v-P0)-3*(Q1-P1)+8,4);
+   If HeAbs(Delta)<Tc*10 Then Begin
+    Delta:=HeClip(Delta,-Tc,Tc);
+    Pl^[B-Ac]:=HeClip(P0+Delta,0,255);
+    Pl^[B]:=HeClip(Q0v-Delta,0,255);
+    If Dep<>0 Then Begin
+     Dl:=HeClip(HeSar(((P2+P0+1) Shr 1)-P1+Delta,1),-(Tc Shr 1),Tc Shr 1);
+     Pl^[B-2*Ac]:=HeClip(P1+Dl,0,255);
+    End;
+    If Deq<>0 Then Begin
+     Dl:=HeClip(HeSar(((Q2+Q0v+1) Shr 1)-Q1-Delta,1),-(Tc Shr 1),Tc Shr 1);
+     Pl^[B+Ac]:=HeClip(Q1+Dl,0,255);
+    End;
+   End;
+  End;
+ End;
+End;
+
+{ filtre 2 lignes de chroma }
+Procedure HeFiltChroma(Pl: PEABuffer; Q0,Ac,Al: LongInt);
+Var Qi,Tc,I,B,P0,P1,Q0v,Q1,Delta: LongInt;
+Begin
+ Qi:=HeClip(HeQpC+2,0,53); Tc:=HeTcTab[Qi];
+ For I:=0 To 1 Do Begin
+  B:=Q0+I*Al;
+  P0:=Pl^[B-Ac]; P1:=Pl^[B-2*Ac]; Q0v:=Pl^[B]; Q1:=Pl^[B+Ac];
+  Delta:=HeClip(HeSar(((Q0v-P0) Shl 2)+P1-Q1+4,3),-Tc,Tc);
+  Pl^[B-Ac]:=HeClip(P0+Delta,0,255);
+  Pl^[B]:=HeClip(Q0v-Delta,0,255);
+ End;
+End;
+
+Procedure HeDeblockPic;
+Var X,Y,Dir,Bs,Qb,Pb,Ed,Xc,Yc: LongInt;
+Begin
+ { bords verticaux }
+ For Dir:=0 To 1 Do Begin
+  Y:=0;
+  If Dir=0 Then Begin
+   For Y:=0 To HeH4-1 Do
+    For X:=2 To HeW4-1 Do If (X And 1)=0 Then Begin
+     Qb:=Y*HeW4+X; Pb:=Qb-1;
+     Ed:=HeMEdge^[Qb] And 3;
+     If Ed=0 Then Continue;
+     Bs:=HeBs(Pb,Qb,Ed);
+     If Bs=0 Then Continue;
+     HeFiltLuma(HeRecP[0],Y*4*HeStr[0]+X*4,1,HeStr[0],Bs);
+     If (Bs=2) And ((X And 3)=0) Then Begin
+      HeFiltChroma(HeRecP[1],Y*2*HeStr[1]+X*2,1,HeStr[1]);
+      HeFiltChroma(HeRecP[2],Y*2*HeStr[2]+X*2,1,HeStr[2]);
+     End;
+    End;
+  End Else Begin
+   For Y:=2 To HeH4-1 Do If (Y And 1)=0 Then
+    For X:=0 To HeW4-1 Do Begin
+     Qb:=Y*HeW4+X; Pb:=Qb-HeW4;
+     Ed:=(HeMEdge^[Qb] Shr 2) And 3;
+     If Ed=0 Then Continue;
+     Bs:=HeBs(Pb,Qb,Ed);
+     If Bs=0 Then Continue;
+     HeFiltLuma(HeRecP[0],Y*4*HeStr[0]+X*4,HeStr[0],1,Bs);
+     If (Bs=2) And ((Y And 3)=0) Then Begin
+      HeFiltChroma(HeRecP[1],Y*2*HeStr[1]+X*2,HeStr[1],1);
+      HeFiltChroma(HeRecP[2],Y*2*HeStr[2]+X*2,HeStr[2],1);
+     End;
+    End;
+  End;
+ End;
+End;
+{ ---------------------------------------------------------------------- }
+{ Pilote : images, flux, API                                                }
+{ ---------------------------------------------------------------------- }
+Procedure HeFree;
+Var I: LongInt;
+Begin
+ If Not HeActive Then Exit;
+ For I:=0 To HeNPics-1 Do Begin
+  FreeMem(HePics[I].P[0],HeWp*HeHp); FreeMem(HePics[I].P[1],HeCw*HeCh); FreeMem(HePics[I].P[2],HeCw*HeCh);
+ End;
+ For I:=0 To 2 Do FreeMem(HeSrcP[I],HeStr[I]*(HeHp Shr Ord(I>0)));
+ FreeMem(HeMPred,HeW4*HeH4); FreeMem(HeMSkip,HeW4*HeH4); FreeMem(HeMDepth,HeW4*HeH4); FreeMem(HeMIpm,HeW4*HeH4);
+ FreeMem(HeMCbf,HeW4*HeH4); FreeMem(HeMEdge,HeW4*HeH4); FreeMem(HeMMv,HeW4*HeH4*24);
+ FreeMem(HeZs,HeW4*HeH4*4); FreeMem(HePool,24*HE_COEFSTRIDE*4);
+ FreeMem(HeBuf,HeBufCap); FreeMem(HeOut,HeOutCap);
+ HeActive:=False;
+End;
+
+Procedure HeBegin(W,H,Fn,Fd,Bitrate,Gop: LongInt);
+Var I,X,Y,Bx,By,Z,B: LongInt; Ps: LongInt;
+Begin
+ If HeActive Then HeFree;
+ HeW:=W; HeH:=H; HeFn:=Fn; HeFd:=Fd; HeBitrate:=Bitrate; HeGop:=Gop;
+ HeWp:=(W+7) And (Not 7); HeHp:=(H+7) And (Not 7);
+ HeCw:=HeWp Div 2; HeCh:=HeHp Div 2;
+ HeCropR:=HeWp-W; HeCropB:=HeHp-H;
+ HeW4:=HeWp Div 4; HeH4:=HeHp Div 4;
+ If HeOptRefs<1 Then HeOptRefs:=1; HeMaxRefs:=HeOptRefs; HeNumReorder:=0; HeMaxMerge:=3;
+ HeDeblock:=Not HeNoDeblock;
+ Ps:=HeWp*HeHp;
+ If Ps<=552960 Then HeLevel:=90 Else If Ps<=983040 Then HeLevel:=93 Else If Ps<=2228224 Then HeLevel:=120
+ Else If Ps<=8912896 Then HeLevel:=150 Else HeLevel:=180;
+ HeNPics:=HeMaxRefs+1;
+ For I:=0 To HeNPics-1 Do Begin
+  GetMem(HePics[I].P[0],HeWp*HeHp); GetMem(HePics[I].P[1],HeCw*HeCh); GetMem(HePics[I].P[2],HeCw*HeCh);
+  FillChar(HePics[I].P[0]^,HeWp*HeHp,128); FillChar(HePics[I].P[1]^,HeCw*HeCh,128); FillChar(HePics[I].P[2]^,HeCw*HeCh,128);
+  HePics[I].Used:=False;
+ End;
+ HeStr[0]:=HeWp; HeStr[1]:=HeCw; HeStr[2]:=HeCw;
+ For I:=0 To 2 Do GetMem(HeSrcP[I],HeStr[I]*(HeHp Shr Ord(I>0)));
+ GetMem(HeMPred,HeW4*HeH4); GetMem(HeMSkip,HeW4*HeH4); GetMem(HeMDepth,HeW4*HeH4); GetMem(HeMIpm,HeW4*HeH4);
+ GetMem(HeMCbf,HeW4*HeH4); GetMem(HeMEdge,HeW4*HeH4); GetMem(HeMMv,HeW4*HeH4*24);
+ GetMem(HeZs,HeW4*HeH4*4); GetMem(HePool,24*HE_COEFSTRIDE*4);
+ { adresses z-scan }
+ For Y:=0 To HeH4-1 Do For X:=0 To HeW4-1 Do Begin
+  Bx:=X And 7; By:=Y And 7; Z:=0;
+  For I:=0 To 2 Do Z:=Z Or (((Bx Shr I) And 1) Shl (2*I)) Or (((By Shr I) And 1) Shl (2*I+1));
+  HeZs^[Y*HeW4+X]:=(((Y Shr 3)*((HeW4+7) Shr 3)+(X Shr 3)) Shl 6)+Z;
+ End;
+ HeBufCap:=HeWp*HeHp*3+65536; GetMem(HeBuf,HeBufCap); HeBufLen:=0; HeBitAcc:=0; HeBitCnt:=0;
+ HeOutCap:=HeWp*HeHp*3+65536; GetMem(HeOut,HeOutCap); HeOutLen:=0;
+ HeInitCostTab; HeInitScans; HeInitTM;
+ HeMakeParamSets;
+ HeDpbN:=0; HeFrameNo:=0; HePoc:=0; HeSincePoc:=0;
+ If HeCqp<=0 Then HeCqp:=26;
+ If Bitrate>0 Then HeTarget:=Round(Int64(Bitrate)*Fd/Fn) Else HeTarget:=0;
+ HeQpP:=30; HeCxP:=0; HeAccL:=0;
+ HeActive:=True;
+End;
+
+{ en-tete de tranche }
+Procedure HeSliceHeader(NalType: LongInt);
+Var I: LongInt;
+Begin
+ HeBufLen:=0; HeBitAcc:=0; HeBitCnt:=0;
+ HeBits(1,1);                          { first_slice_segment_in_pic_flag }
+ If NalType>=16 Then HeBits(0,1);      { no_output_of_prior_pics_flag }
+ HeUe(0);                              { pps id }
+ HeUe(HeSliceType);
+ If NalType<>19 Then Begin
+  HeBits(HePoc And 255,8);
+  HeBits(0,1);                         { short_term_ref_pic_set_sps_flag }
+  HeUe(HeDpbN); HeUe(0);               { num_negative_pics, num_positive_pics }
+  For I:=0 To HeDpbN-1 Do Begin
+   If I=0 Then HeUe(HePoc-HePics[HeDpb[0]].Poc-1) Else HeUe(HePics[HeDpb[I-1]].Poc-HePics[HeDpb[I]].Poc-1);
+   HeBits(1,1);
+  End;
+ End;
+ If HeSliceType<>2 Then Begin
+  HeBits(1,1); HeUe(HeNumRef0-1);
+  If HeSliceType=0 Then HeUe(HeNumRef1-1);
+  If HeSliceType=0 Then HeBits(0,1);   { mvd_l1_zero_flag }
+  HeUe(5-HeMaxMerge);
+ End;
+ HeSe(HeQp-26);
+ If HeDeblock Then HeBits(1,1);        { slice_loop_filter_across_slices_enabled_flag }
+ HeBits(1,1); HeAlignZero;             { byte_alignment }
+End;
+
+Procedure HeEncodeSlice;
+Var Cx,Cy,Nx,Ny,Last: LongInt;
+Begin
+ HeCabacInitEnc; HeCtxInit(HeQp,HeInitType);
+ Nx:=(HeWp+31) Div 32; Ny:=(HeHp+31) Div 32;
+ FillChar(HeMPred^,HeW4*HeH4,0); FillChar(HeMSkip^,HeW4*HeH4,0); FillChar(HeMEdge^,HeW4*HeH4,0);
+ FillChar(HeMCbf^,HeW4*HeH4,0);
+ HeLambda:=0.57*Exp(Ln(2.0)*(HeQp-12)/3);
+ If HeSliceType<>2 Then HeLambda:=HeLambda*0.8;
+ HeSqrtLambda:=Sqrt(HeLambda);
+ HeQpC:=HeChromaQp(HeQp);
+ For Cy:=0 To Ny-1 Do For Cx:=0 To Nx-1 Do Begin
+  HePoolN:=0; HeCuN:=0; HeEst:=False;
+  HeQuad(Cx*32,Cy*32,5);
+  HeWi:=0; HeWriteQuad(Cx*32,Cy*32,5);
+  If (Cy=Ny-1) And (Cx=Nx-1) Then HeTerm(1) Else HeTerm(0);
+ End;
+ HeAlignZero;
+End;
+
+Procedure HeEncodePicture(Qp: LongInt);
+Var NalType,I: LongInt;
+Begin
+ HeQp:=Qp;
+ HeCur:=-1;
+ For I:=0 To HeNPics-1 Do If Not HePics[I].Used Then Begin HeCur:=I; Break; End;
+ For I:=0 To 2 Do HeRecP[I]:=HePics[HeCur].P[I];
+ HePics[HeCur].Poc:=HePoc;
+ If HeIdr Then Begin NalType:=19; HeSliceType:=2; End Else Begin NalType:=1; HeSliceType:=1; End;
+ If HeSliceType=2 Then HeInitType:=0 Else HeInitType:=1;
+ HeCurPoc:=HePoc;
+ If HeSliceType<>2 Then Begin
+  HeNumRef0:=HeDpbN; HeNumRef1:=0;
+  For I:=0 To HeDpbN-1 Do Begin HeRefL[0,I]:=HeDpb[I]; HeRefPocT[0,I]:=HePics[HeDpb[I]].Poc; End;
+ End;
+ HeSliceHeader(NalType);
+ HeEncodeSlice;
+ HeLastBits:=HeBufLen*8;
+ HeEmitNal(NalType,0);
+ If HeDeblock Then HeDeblockPic;
+End;
+
+{ valide l'image codee comme reference }
+Procedure HeCommitPicture;
+Var I: LongInt;
+Begin
+ HePics[HeCur].Used:=True;
+ For I:=HeDpbN DownTo 1 Do HeDpb[I]:=HeDpb[I-1];
+ HeDpb[0]:=HeCur; Inc(HeDpbN);
+ If HeDpbN>HeMaxRefs Then Begin
+  HePics[HeDpb[HeDpbN-1]].Used:=False; Dec(HeDpbN);
+ End;
+End;
+
+Procedure HeLoadSource(Yuv: PEABuffer);
+Var X,Y,J,I,CwS,ChS: LongInt;
+Begin
+ For Y:=0 To HeHp-1 Do Begin
+  J:=Y; If J>HeH-1 Then J:=HeH-1;
+  Move(Yuv^[J*HeW],HeSrcP[0]^[Y*HeWp],HeW);
+  For X:=HeW To HeWp-1 Do HeSrcP[0]^[Y*HeWp+X]:=Yuv^[J*HeW+HeW-1];
+ End;
+ CwS:=HeW Div 2; ChS:=HeH Div 2;
+ For I:=1 To 2 Do
+  For Y:=0 To HeCh-1 Do Begin
+   J:=Y; If J>ChS-1 Then J:=ChS-1;
+   Move(Yuv^[HeW*HeH+(I-1)*CwS*ChS+J*CwS],HeSrcP[I]^[Y*HeCw],CwS);
+   For X:=CwS To HeCw-1 Do HeSrcP[I]^[Y*HeCw+X]:=Yuv^[HeW*HeH+(I-1)*CwS*ChS+J*CwS+CwS-1];
+  End;
+End;
+
+Function HeQstep(Qp: LongInt): Double;
+Begin HeQstep:=Exp(Ln(2.0)*(Qp-4)/6); End;
+
+Function HeClampQp(Q: LongInt): LongInt;
+Begin
+ If Q<4 Then Q:=4; If Q>51 Then Q:=51; HeClampQp:=Q;
+End;
+
+Function HeFrame(Yuv: PEABuffer; Var Pkt: PEABuffer; Var PktLen: LongInt; Var IsKey: Boolean; Var Dts,Pts: LongInt): Boolean;
+Var Qp,I,Trial,Dq,Tn,Ti: LongInt; R: Double;
+Begin
+ HeFrame:=False;
+ If Not HeActive Then Exit;
+ HeLoadSource(Yuv);
+ HeIdr:=(HeFrameNo=0) Or (HeSincePoc>=HeGop);
+ If HeIdr Then Begin
+  For I:=0 To HeNPics-1 Do HePics[I].Used:=False;
+  HeDpbN:=0; HePoc:=0; HeSincePoc:=0;
+ End;
+ HeOutLen:=0;
+ If HeTarget<=0 Then Begin
+  Qp:=HeClampQp(HeCqp);
+  HeEncodePicture(Qp);
+ End Else If HeIdr Then Begin
+  { image cle : essais pour approcher ~3 fois le budget d'une image P }
+  Ti:=HeTarget*3;
+  If HeFrameNo=0 Then Qp:=28 Else Qp:=HeClampQp(HeQpP-2);
+  Trial:=0;
+  Repeat
+   HeOutLen:=0;
+   HeEncodePicture(Qp); Inc(Trial);
+   If (HeFrameNo>0) Or (Trial>=5) Then Break;
+   R:=HeLastBits/Ti;
+   If (R>0.8) And (R<1.25) Then Break;
+   Dq:=Round(6*Ln(R)/Ln(2.0)); If Dq=0 Then If R>1 Then Dq:=1 Else Dq:=-1;
+   If Dq>12 Then Dq:=12; If Dq<-12 Then Dq:=-12;
+   Tn:=HeClampQp(Qp+Dq);
+   If Tn=Qp Then Break;
+   Qp:=Tn;
+  Until False;
+  If HeFrameNo=0 Then HeQpP:=HeClampQp(Qp+3);
+ End Else Begin
+  Tn:=HeTarget-Round(HeAccL/24);
+  If Tn<HeTarget Div 3 Then Tn:=HeTarget Div 3;
+  If Tn>HeTarget*2 Then Tn:=HeTarget*2;
+  Qp:=HeQpP;
+  If HeCxP>0 Then Begin
+   Dq:=Round(4+6*Ln(HeCxP/Tn)/Ln(2.0));
+   Qp:=Dq;
+   If Qp>HeQpP+3 Then Qp:=HeQpP+3;
+   If Qp<HeQpP-3 Then Qp:=HeQpP-3;
+  End;
+  Qp:=HeClampQp(Qp);
+  HeEncodePicture(Qp);
+  R:=HeLastBits*HeQstep(Qp);
+  If HeCxP<=0 Then HeCxP:=R Else HeCxP:=0.5*HeCxP+0.5*R;
+  HeQpP:=Qp;
+ End;
+ If HeTarget>0 Then Begin
+  HeAccL:=HeAccL+HeLastBits-HeTarget;
+  If HeAccL>HeTarget*60 Then HeAccL:=HeTarget*60;
+  If HeAccL<-HeTarget*60 Then HeAccL:=-HeTarget*60;
+ End;
+ HeCommitPicture;
+ Pkt:=HeOut; PktLen:=HeOutLen; IsKey:=HeIdr; Dts:=HeFrameNo; Pts:=HeFrameNo;
+ Inc(HeFrameNo); Inc(HePoc); Inc(HeSincePoc);
+ HeFrame:=True;
+End;
+
+{ copie l'image reconstruite (rognee) de la derniere image codee, YUV420 contigu }
+Procedure HeGetRecon(Dst: PEABuffer);
+Var Y,I,Cs,Ch2: LongInt;
+Begin
+ For Y:=0 To HeH-1 Do Move(HePics[HeCur].P[0]^[Y*HeWp],Dst^[Y*HeW],HeW);
+ Cs:=HeW Div 2; Ch2:=HeH Div 2;
+ For I:=1 To 2 Do
+  For Y:=0 To Ch2-1 Do Move(HePics[HeCur].P[I]^[Y*HeCw],Dst^[HeW*HeH+(I-1)*Cs*Ch2+Y*Cs],Cs);
+End;
+
+{ Pas d'images B ni de reordonnancement : chaque HeFrame produit exactement un paquet, donc rien a vider.
+  HeFlush existe pour le protocole general et renvoie toujours False. }
+Function HeFlush(Var Pkt: PEABuffer; Var PktLen: LongInt; Var IsKey: Boolean; Var Dts,Pts: LongInt): Boolean;
+Begin
+ PktLen:=0; IsKey:=False; Dts:=0; Pts:=0; Pkt:=HeOut;
+ HeFlush:=False;
+End;
+{$IFDEF FPC}
+{ ====================================================================== }
+{ Decodeur VP9 (profils 0 a 3, 8/10/12 bits) : port en Pascal du decodeur   }
+{ de reference libvpx (BSD 3-clause, (c) The WebM Project Authors) :        }
+{ vp9/decoder/*.c, vp9/common/*.c, vpx_dsp/inv_txfm.c, intrapred.c, loopfilter.c,  
+{ vpx_convolve.c, bitreader.c. Les tables et les noyaux de transformee sont   }
+{ generes par script a partir des sources C.                                 }
+{                                                                           }
+{ Interface :  V9Free ; V9Config(P,Len) ; V9Frame(P,Len) (un paquet de      }
+{ conteneur = une trame ou un superframe) ; V9Hook(B,W,H) appele pour chaque }
+{ trame affichee avec YUV 4:2:0 8 bits contigu ; V9HookRaw (optionnel) donne }
+{ les plans natifs 16 bits (format natif, test bit-exact des profils 1-3).  }
+{ ====================================================================== }
+{$INLINE ON}
+Type
+ PV9B=^TV9B; TV9B=Array[0..2147483000] Of Byte;
+ PV9W=^TV9W; TV9W=Array[0..1073741000] Of Word;
+ TV9Mv=Record R,C: SmallInt; End;
+ TV9Mi=Record
+  Sb,Mode,Tx,Uv,Filt,Skip,Seg,SegPred: Byte;
+  R0,R1: ShortInt;
+  Mv: Array[0..1] Of TV9Mv;
+  BMode: Array[0..3] Of Byte;
+  BMv: Array[0..3,0..1] Of TV9Mv;
+ End;
+ PV9Mi=^TV9Mi;
+ TV9MiA=Array[0..4194303] Of TV9Mi; PV9MiA=^TV9MiA;
+ TV9MiG=Array[0..4194303] Of PV9Mi; PV9MiG=^TV9MiG;
+ TV9MvRef=Record R0,R1: ShortInt; Mv: Array[0..1] Of TV9Mv; End;
+ TV9MvRefA=Array[0..4194303] Of TV9MvRef; PV9MvRefA=^TV9MvRefA;
+ TV9Sf=Record XFp,YFp,XStep,YStep: LongInt; End;
+ TV9Nmv=Record
+  Sign: Byte; Classes: Array[0..9] Of Byte; Class0: Byte; Bits: Array[0..9] Of Byte;
+  Class0Fp: Array[0..1,0..2] Of Byte; Fp: Array[0..2] Of Byte; Class0Hp,Hp: Byte;
+ End;
+ TV9Fc=Record
+  YMode: Array[0..3,0..8] Of Byte; UvMode: Array[0..9,0..8] Of Byte; Part: Array[0..15,0..2] Of Byte;
+  Coef: Array[0..3,0..1,0..1,0..5,0..5,0..2] Of Byte;
+  Interp: Array[0..3,0..1] Of Byte; InterMode: Array[0..6,0..2] Of Byte;
+  IntraInter: Array[0..3] Of Byte; CompInter: Array[0..4] Of Byte;
+  SingleRef: Array[0..4,0..1] Of Byte; CompRef: Array[0..4] Of Byte;
+  Tx8: Array[0..1,0..0] Of Byte; Tx16: Array[0..1,0..1] Of Byte; Tx32: Array[0..1,0..2] Of Byte;
+  Skip: Array[0..2] Of Byte;
+  Joints: Array[0..2] Of Byte; Comp: Array[0..1] Of TV9Nmv;
+  Inited: Boolean;
+ End;
+ TV9NmvCnt=Record
+  Sign: Array[0..1] Of LongInt; Classes: Array[0..10] Of LongInt; Class0: Array[0..1] Of LongInt;
+  Bits: Array[0..9,0..1] Of LongInt; Class0Fp: Array[0..1,0..3] Of LongInt; Fp: Array[0..3] Of LongInt;
+  Class0Hp,Hp: Array[0..1] Of LongInt;
+ End;
+ TV9Cnt=Record
+  YMode: Array[0..3,0..9] Of LongInt; UvMode: Array[0..9,0..9] Of LongInt; Part: Array[0..15,0..3] Of LongInt;
+  Coef: Array[0..3,0..1,0..1,0..5,0..5,0..3] Of LongInt;
+  Eob: Array[0..3,0..1,0..1,0..5,0..5] Of LongInt;
+  Interp: Array[0..3,0..2] Of LongInt; InterMode: Array[0..6,0..3] Of LongInt;
+  IntraInter: Array[0..3,0..1] Of LongInt; CompInter: Array[0..4,0..1] Of LongInt;
+  SingleRef: Array[0..4,0..1,0..1] Of LongInt; CompRef: Array[0..4,0..1] Of LongInt;
+  Tx8: Array[0..1,0..1] Of LongInt; Tx16: Array[0..1,0..2] Of LongInt; Tx32: Array[0..1,0..3] Of LongInt;
+  Skip: Array[0..2,0..1] Of LongInt;
+  Joints: Array[0..3] Of LongInt; Comp: Array[0..1] Of TV9NmvCnt;
+ End;
+ TV9Br=Record
+  Value: QWord; Range,Count: LongInt; Buf: PV9B; Pos,Len: LongInt;
+ End;
+ TV9Rb=Record B: PV9B; Pos,Size: LongInt; End;
+ TV9Fb=Record
+  P: Array[0..2] Of PV9W;
+  St,Hh,Cap: Array[0..2] Of LongInt;
+  W,H,CW,CH,AW,AH,CAW,CAH,SsX,SsY,Bd,Cnt: LongInt;
+ End;
+ TV9RefBuf=Record Idx: LongInt; Sf: TV9Sf; End;
+ TV9Tr=Array[0..31] Of ShortInt;
+ PV9S=^TV9S; TV9S=Array[0..1073741000] Of SmallInt;
+ TV9Kr=Array[0..7] Of SmallInt; PV9Kr=^TV9Kr;
+
+Var
+ V9Hook: Procedure(B: Pointer; W,H: LongInt);
+ V9HookRaw: Procedure(Y,U,V: Pointer; W,H,CW,CH,SsX,SsY,Bd: LongInt);
+ V9Fb: Array[0..11] Of TV9Fb;
+ V9RefMap: Array[0..7] Of LongInt;
+ V9Refs: Array[0..2] Of TV9RefBuf;
+ V9NewFb: LongInt;
+ V9Norm: Array[0..255] Of Byte;
+ V9Ready: Boolean;
+ V9NeedResync: Boolean;
+ { en-tete }
+ V9Profile,V9Bd,V9SsX,V9SsY,V9ColorSpace,V9Width,V9Height,V9MiRows,V9MiCols,V9AlignCols: LongInt;
+ V9LastWidth,V9LastHeight,V9FrameType,V9LastFrameType,V9ShowFrame,V9LastShowFrame,V9ShowExisting: LongInt;
+ V9IntraOnly,V9LastIntraOnly,V9ErrorRes,V9ResetCtx,V9RefreshCtx,V9Parallel,V9CtxIdx,V9RefreshFlags: LongInt;
+ V9SignBias: Array[0..3] Of LongInt;
+ V9AllowHp,V9Interp,V9TxMode,V9RefMode,V9CompFixed: LongInt;
+ V9CompVar: Array[0..1] Of LongInt;
+ V9BaseQ,V9YDcD,V9UvDcD,V9UvAcD,V9Lossless: LongInt;
+ V9YDq,V9UvDq: Array[0..7,0..1] Of LongInt;
+ V9LfLevel,V9LfSharp,V9LfDeltaOn,V9LfDeltaUpd: LongInt;
+ V9RefDelta: Array[0..3] Of LongInt;
+ V9ModeDelta: Array[0..1] Of LongInt;
+ V9LfLvl: Array[0..7,0..3,0..1] Of LongInt;
+ V9LfLim,V9LfMblim: Array[0..63] Of LongInt;
+ V9SegOn,V9SegUpdMap,V9SegUpdData,V9SegAbs,V9SegTemporal: LongInt;
+ V9SegTree: Array[0..6] Of Byte;
+ V9SegPredP: Array[0..2] Of LongInt;
+ V9SegData: Array[0..7,0..3] Of LongInt;
+ V9SegMask: Array[0..7] Of LongInt;
+ V9Log2TileCols,V9Log2TileRows: LongInt;
+ V9Fc: TV9Fc;
+ V9FcCtx: Array[0..3] Of TV9Fc;
+ V9Cnt: TV9Cnt;
+ V9DoCnt: Boolean;
+ { tampons de contexte }
+ V9Mip: PV9MiA; V9Grid: PV9MiG; V9MipN: LongInt;
+ V9SegMaps: Array[0..1] Of PV9B; V9SegCur,V9SegLast: LongInt;
+ V9MvCur,V9MvPrev: PV9MvRefA; V9UsePrevMvs: Boolean; V9MvN: LongInt;
+ V9AboveCtx: Array[0..2] Of PV9B; V9AbovePart: PV9B; V9CtxN: LongInt;
+ V9LeftCtx: Array[0..2,0..15] Of Byte; V9LeftPart: Array[0..7] Of Byte;
+ { etat de decodage de bloc }
+ V9R: TV9Br;
+ V9TileC0,V9TileC1: LongInt;
+ V9MiRow,V9MiCol,V9Bsize,V9Bwl,V9Bhl,V9XMis,V9YMis,V9BmWl,V9BmHl: LongInt;
+ V9EdgeL,V9EdgeR,V9EdgeT,V9EdgeB: LongInt;
+ V9Cur,V9Above,V9Left: PV9Mi;
+ V9N4W,V9N4H,V9N4WL,V9N4HL,V9AOff,V9LOff,V9MaxW,V9MaxH: Array[0..2] Of LongInt;
+ V9Coef: Array[0..1023] Of LongInt;
+ V9TokCache: Array[0..1023] Of Byte;
+ V9OutBuf: PV9B; V9OutCap: LongInt;
+ V9RawBuf: Array[0..2] Of PV9W; V9RawCap: Array[0..2] Of LongInt;
+
+Const
+ V9TrIntra: Array[0..17] Of ShortInt=(0,2,-9,4,-1,6,8,12,-2,10,-4,-5,-3,14,-8,16,-6,-7);
+ V9TrInter: Array[0..5] Of ShortInt=(-2,2,0,4,-1,-3);
+ V9TrPart: Array[0..5] Of ShortInt=(0,2,-1,4,-2,-3);
+ V9TrInterp: Array[0..3] Of ShortInt=(0,2,-1,-2);
+ V9TrSeg: Array[0..13] Of ShortInt=(2,4,6,8,10,12,0,-1,-2,-3,-4,-5,-6,-7);
+ V9TrJoint: Array[0..5] Of ShortInt=(0,2,-1,4,-2,-3);
+ V9TrClass: Array[0..19] Of ShortInt=(0,2,-1,4,6,8,-2,-3,10,12,-4,-5,-6,14,16,18,-7,-8,-9,-10);
+ V9TrFp: Array[0..5] Of ShortInt=(0,2,-1,4,-2,-3);
+ V9TrC0: Array[0..1] Of ShortInt=(0,-1);
+ { tables de blocs (BLOCK_SIZES = 13) }
+ V9B4W: Array[0..12] Of Byte=(1,1,2,2,2,4,4,4,8,8,8,16,16);
+ V9B4H: Array[0..12] Of Byte=(1,2,1,2,4,2,4,8,4,8,16,8,16);
+ V9B8W: Array[0..12] Of Byte=(1,1,1,1,1,2,2,2,4,4,4,8,8);
+ V9B8H: Array[0..12] Of Byte=(1,1,1,1,2,1,2,4,2,4,8,4,8);
+ V9MiWLog2: Array[0..12] Of Byte=(0,0,0,0,0,1,1,1,2,2,2,3,3);
+ V9SizeGroup: Array[0..12] Of Byte=(0,0,0,1,1,1,2,2,2,3,3,3,3);
+ V9MaxTx: Array[0..12] Of Byte=(0,0,0,1,1,1,2,2,2,3,3,3,3);
+ V9TxModeMax: Array[0..4] Of Byte=(0,1,2,3,3);
+ V9PartCtxA: Array[0..12] Of Byte=(15,15,14,14,14,12,12,12,8,8,8,0,0);
+ V9PartCtxL: Array[0..12] Of Byte=(15,14,15,14,12,14,12,8,12,8,0,8,0);
+ V9IntraTxType: Array[0..9] Of Byte=(0,1,2,0,3,1,2,2,1,3);
+ V9Mode2Cnt: Array[0..13] Of Byte=(9,9,9,9,9,9,9,9,9,9,0,0,3,1);
+ V9CntToCtx: Array[0..18] Of Byte=(2,3,4,1,3,9,0,9,9,5,5,9,5,9,9,9,9,9,6);
+ V9Sub8Col: Array[0..3,0..1] Of Byte=((1,2),(1,3),(3,2),(3,3));
+ V9MvRefBlk: Array[0..12,0..7,0..1] Of ShortInt=(
+  ((-1,0),(0,-1),(-1,-1),(-2,0),(0,-2),(-2,-1),(-1,-2),(-2,-2)),
+  ((-1,0),(0,-1),(-1,-1),(-2,0),(0,-2),(-2,-1),(-1,-2),(-2,-2)),
+  ((-1,0),(0,-1),(-1,-1),(-2,0),(0,-2),(-2,-1),(-1,-2),(-2,-2)),
+  ((-1,0),(0,-1),(-1,-1),(-2,0),(0,-2),(-2,-1),(-1,-2),(-2,-2)),
+  ((0,-1),(-1,0),(1,-1),(-1,-1),(0,-2),(-2,0),(-2,-1),(-1,-2)),
+  ((-1,0),(0,-1),(-1,1),(-1,-1),(-2,0),(0,-2),(-1,-2),(-2,-1)),
+  ((-1,0),(0,-1),(-1,1),(1,-1),(-1,-1),(-3,0),(0,-3),(-3,-3)),
+  ((0,-1),(-1,0),(2,-1),(-1,-1),(-1,1),(0,-3),(-3,0),(-3,-3)),
+  ((-1,0),(0,-1),(-1,2),(-1,-1),(1,-1),(-3,0),(0,-3),(-3,-3)),
+  ((-1,1),(1,-1),(-1,2),(2,-1),(-1,-1),(-3,0),(0,-3),(-3,-3)),
+  ((0,-1),(-1,0),(4,-1),(-1,2),(-1,-1),(0,-3),(-3,0),(2,-1)),
+  ((-1,0),(0,-1),(-1,4),(2,-1),(-1,-1),(-3,0),(0,-3),(-1,2)),
+  ((-1,3),(3,-1),(-1,4),(4,-1),(-1,-1),(-1,0),(0,-1),(-1,6)));
+ V9Kern: Array[0..3,0..15,0..7] Of SmallInt=(
+  ((0,0,0,128,0,0,0,0),(0,1,-5,126,8,-3,1,0),(-1,3,-10,122,18,-6,2,0),(-1,4,-13,118,27,-9,3,-1),
+   (-1,4,-16,112,37,-11,4,-1),(-1,5,-18,105,48,-14,4,-1),(-1,5,-19,97,58,-16,5,-1),(-1,6,-19,88,68,-18,5,-1),
+   (-1,6,-19,78,78,-19,6,-1),(-1,5,-18,68,88,-19,6,-1),(-1,5,-16,58,97,-19,5,-1),(-1,4,-14,48,105,-18,5,-1),
+   (-1,4,-11,37,112,-16,4,-1),(-1,3,-9,27,118,-13,4,-1),(0,2,-6,18,122,-10,3,-1),(0,1,-3,8,126,-5,1,0)),
+  ((0,0,0,128,0,0,0,0),(-3,-1,32,64,38,1,-3,0),(-2,-2,29,63,41,2,-3,0),(-2,-2,26,63,43,4,-4,0),
+   (-2,-3,24,62,46,5,-4,0),(-2,-3,21,60,49,7,-4,0),(-1,-4,18,59,51,9,-4,0),(-1,-4,16,57,53,12,-4,-1),
+   (-1,-4,14,55,55,14,-4,-1),(-1,-4,12,53,57,16,-4,-1),(0,-4,9,51,59,18,-4,-1),(0,-4,7,49,60,21,-3,-2),
+   (0,-4,5,46,62,24,-3,-2),(0,-4,4,43,63,26,-2,-2),(0,-3,2,41,63,29,-2,-2),(0,-3,1,38,64,32,-1,-3)),
+  ((0,0,0,128,0,0,0,0),(-1,3,-7,127,8,-3,1,0),(-2,5,-13,125,17,-6,3,-1),(-3,7,-17,121,27,-10,5,-2),
+   (-4,9,-20,115,37,-13,6,-2),(-4,10,-23,108,48,-16,8,-3),(-4,10,-24,100,59,-19,9,-3),(-4,11,-24,90,70,-21,10,-4),
+   (-4,11,-23,80,80,-23,11,-4),(-4,10,-21,70,90,-24,11,-4),(-3,9,-19,59,100,-24,10,-4),(-3,8,-16,48,108,-23,10,-4),
+   (-2,6,-13,37,115,-20,9,-4),(-2,5,-10,27,121,-17,7,-3),(-1,3,-6,17,125,-13,5,-2),(0,1,-3,8,127,-7,3,-1)),
+  ((0,0,0,128,0,0,0,0),(0,0,0,120,8,0,0,0),(0,0,0,112,16,0,0,0),(0,0,0,104,24,0,0,0),
+   (0,0,0,96,32,0,0,0),(0,0,0,88,40,0,0,0),(0,0,0,80,48,0,0,0),(0,0,0,72,56,0,0,0),
+   (0,0,0,64,64,0,0,0),(0,0,0,56,72,0,0,0),(0,0,0,48,80,0,0,0),(0,0,0,40,88,0,0,0),
+   (0,0,0,32,96,0,0,0),(0,0,0,24,104,0,0,0),(0,0,0,16,112,0,0,0),(0,0,0,8,120,0,0,0)));
+
+{ ---- utilitaires ---- }
+Function V9Min(A,B: LongInt): LongInt; inline;
+Begin If A<B Then V9Min:=A Else V9Min:=B; End;
+Function V9Max(A,B: LongInt): LongInt; inline;
+Begin If A>B Then V9Max:=A Else V9Max:=B; End;
+Function V9Clamp(V,Lo,Hi: LongInt): LongInt; inline;
+Begin If V<Lo Then V9Clamp:=Lo Else If V>Hi Then V9Clamp:=Hi Else V9Clamp:=V; End;
+Function V9Sar(V: LongInt; N: LongInt): LongInt; inline;
+Begin V9Sar:=SarLongint(V,N); End;
+Function V9Abs(V: LongInt): LongInt; inline;
+Begin If V<0 Then V9Abs:=-V Else V9Abs:=V; End;
+Function V9MvEq(Var A,B: TV9Mv): Boolean; inline;
+Begin V9MvEq:=(A.R=B.R) And (A.C=B.C); End;
+
+{ ---- lecteur de bits de l'en-tete non compresse ---- }
+Procedure V9RbInit(Var R: TV9Rb; B: PV9B; Size: LongInt);
+Begin R.B:=B; R.Pos:=0; R.Size:=Size; End;
+
+Function V9RbBit(Var R: TV9Rb): LongInt;
+Begin
+ If (R.Pos Shr 3)>=R.Size Then Fail('VP9 : en-tete tronque.');
+ V9RbBit:=(R.B^[R.Pos Shr 3] Shr (7-(R.Pos And 7))) And 1;
+ Inc(R.Pos);
+End;
+
+Function V9RbLit(Var R: TV9Rb; N: LongInt): LongInt;
+Var V,I: LongInt;
+Begin
+ V:=0;
+ For I:=1 To N Do V:=(V Shl 1) Or V9RbBit(R);
+ V9RbLit:=V;
+End;
+
+Function V9RbSLit(Var R: TV9Rb; N: LongInt): LongInt;
+Var V: LongInt;
+Begin
+ V:=V9RbLit(R,N);
+ If V9RbBit(R)<>0 Then V9RbSLit:=-V Else V9RbSLit:=V;
+End;
+
+{ ---- decodeur booleen (libvpx vpx_dsp/bitreader) ---- }
+Procedure V9BrFill(Var R: TV9Br);
+Var Shift,BitsLeft,BitsOver,LoopEnd: LongInt;
+Begin
+ Shift:=64-8-(R.Count+8);
+ BitsLeft:=(R.Len-R.Pos)*8;
+ LoopEnd:=0;
+ If BitsLeft<=64 Then Begin
+  BitsOver:=Shift+8-BitsLeft;
+  If BitsOver>=0 Then Begin Inc(R.Count,$40000000); LoopEnd:=BitsOver; End;
+  If (BitsOver<0) Or (BitsLeft>0) Then Begin
+   While Shift>=LoopEnd Do Begin
+    Inc(R.Count,8); R.Value:=R.Value Or (QWord(R.Buf^[R.Pos]) Shl Shift); Inc(R.Pos); Dec(Shift,8);
+   End;
+  End;
+ End Else Begin
+  While Shift>=0 Do Begin
+   Inc(R.Count,8); R.Value:=R.Value Or (QWord(R.Buf^[R.Pos]) Shl Shift); Inc(R.Pos); Dec(Shift,8);
+  End;
+ End;
+End;
+
+Function V9Rd(Var R: TV9Br; P: LongInt): LongInt;
+Var Split,Sh: LongInt; Big: QWord;
+Begin
+ Split:=(R.Range*P+(256-P)) Shr 8;
+ If R.Count<0 Then V9BrFill(R);
+ Big:=QWord(Split) Shl 56;
+ If R.Value>=Big Then Begin
+  R.Range:=R.Range-Split; R.Value:=R.Value-Big; V9Rd:=1;
+ End Else Begin
+  R.Range:=Split; V9Rd:=0;
+ End;
+ Sh:=V9Norm[R.Range];
+ R.Range:=R.Range Shl Sh; R.Value:=R.Value Shl Sh; Dec(R.Count,Sh);
+End;
+
+Function V9RdBit(Var R: TV9Br): LongInt; inline;
+Begin V9RdBit:=V9Rd(R,128); End;
+
+Function V9RdLit(Var R: TV9Br; N: LongInt): LongInt;
+Var V,I: LongInt;
+Begin
+ V:=0;
+ For I:=1 To N Do V:=(V Shl 1) Or V9Rd(R,128);
+ V9RdLit:=V;
+End;
+
+Function V9RdTree(Var R: TV9Br; Var Tree; Probs: PV9B): LongInt;
+Var I: LongInt; T: ^TV9Tr;
+Begin
+ T:=@Tree; I:=0;
+ Repeat
+  I:=T^[I+V9Rd(R,Probs^[I Shr 1])];
+ Until I<=0;
+ V9RdTree:=-I;
+End;
+
+Function V9BrInit(Var R: TV9Br; B: PV9B; Len: LongInt): LongInt;
+Begin
+ If (Len<=0) Or (B=Nil) Then Begin V9BrInit:=1; Exit; End;
+ R.Buf:=B; R.Len:=Len; R.Pos:=0; R.Value:=0; R.Count:=-8; R.Range:=255;
+ V9BrFill(R);
+ V9BrInit:=V9Rd(R,128);
+End;
+
+{ position de fin du lecteur (vpx_reader_find_end) }
+Function V9BrEnd(Var R: TV9Br): LongInt;
+Var C,P: LongInt;
+Begin
+ C:=R.Count; P:=R.Pos;
+ While (C>8) And (C<64) Do Begin Dec(C,8); Dec(P); End;
+ V9BrEnd:=P;
+End;
+Const
+ V9KfYMode: Array[0..899] Of Byte=(
+  137,30,42,148,151,207,70,52,91,92,45,102,136,116,180,74,90,100,73,32,19,187,222,215,
+  46,34,100,91,30,32,116,121,186,93,86,94,72,35,36,149,68,206,68,63,105,73,31,28,
+  138,57,124,55,122,151,67,23,21,140,126,197,40,37,171,86,27,28,128,154,212,45,43,53,
+  74,32,27,107,86,160,63,134,102,59,67,44,140,161,202,78,67,119,63,36,126,146,123,158,
+  60,90,96,43,46,168,134,107,128,69,142,92,44,29,68,159,201,177,50,57,77,58,38,76,
+  114,97,172,78,133,92,46,41,76,140,63,184,69,112,57,38,32,85,140,46,112,54,151,133,
+  39,27,61,131,110,175,44,75,136,52,30,74,113,130,175,51,64,58,47,35,80,100,74,143,
+  64,163,74,36,61,116,114,128,162,80,125,82,82,26,26,171,208,204,44,32,105,55,44,68,
+  166,179,192,57,57,108,42,26,11,199,241,228,23,15,85,68,42,19,131,160,199,55,52,83,
+  58,50,25,139,115,232,39,52,118,50,35,33,153,104,162,64,59,131,44,24,16,150,177,202,
+  33,19,156,55,27,12,153,203,218,26,27,49,53,49,21,110,116,168,59,80,76,38,72,19,
+  168,203,212,50,50,107,103,26,36,129,132,201,83,80,93,59,38,83,112,103,162,98,136,90,
+  62,30,23,158,200,207,59,57,50,67,30,29,84,86,191,102,91,59,60,32,33,112,71,220,
+  64,89,104,53,26,34,130,56,149,84,120,103,53,21,23,133,109,210,56,77,172,77,19,29,
+  112,142,228,55,66,36,61,29,29,93,97,165,83,175,162,47,47,43,114,137,181,100,99,95,
+  69,23,29,128,83,199,46,44,101,53,40,55,139,69,183,61,80,110,40,29,19,161,180,207,
+  43,24,91,60,34,19,105,61,198,53,64,89,52,31,22,158,40,209,58,62,89,44,31,29,
+  147,46,158,56,102,198,35,19,12,135,87,209,41,45,167,55,25,21,118,95,215,38,39,66,
+  51,38,25,113,58,164,70,93,97,47,54,34,146,108,203,72,103,151,64,19,37,156,66,138,
+  49,95,133,46,27,80,150,55,124,55,121,135,36,23,27,165,149,166,54,64,118,53,21,36,
+  131,63,163,60,109,81,40,26,35,154,40,185,51,97,123,35,19,34,179,19,97,48,129,124,
+  36,20,26,136,62,164,33,77,154,45,18,32,130,90,157,40,79,91,45,26,28,129,45,129,
+  49,147,123,38,44,51,136,74,162,57,97,121,75,17,22,136,138,185,32,34,166,56,39,58,
+  133,117,173,48,53,187,35,21,12,161,212,207,20,23,145,56,29,19,117,109,181,55,68,112,
+  47,29,17,153,64,220,59,51,114,46,16,24,136,76,147,41,64,172,34,17,11,108,152,187,
+  13,15,209,51,24,14,115,133,209,32,26,104,55,30,18,122,79,179,44,88,116,37,49,25,
+  129,168,164,41,54,148,82,22,32,127,143,213,39,41,70,62,44,61,123,105,189,48,57,64,
+  47,25,17,175,222,220,24,30,86,68,36,17,106,102,206,59,74,74,57,39,23,151,68,216,
+  55,63,58,49,30,35,141,70,168,82,40,115,51,25,15,136,129,202,38,35,139,68,26,16,
+  111,141,215,29,28,28,59,39,19,114,75,180,77,104,42,40,61,26,126,152,206,61,59,93,
+  78,23,39,111,117,170,74,124,94,48,34,86,101,92,146,78,179,134,47,22,24,138,187,178,
+  68,69,59,56,25,33,105,112,187,95,177,129,48,31,27,114,63,183,82,116,56,43,28,37,
+  121,63,123,61,192,169,42,17,24,109,97,177,56,76,122,58,18,28,105,139,182,70,92,63,
+  46,23,32,74,86,150,67,183,88,36,38,48,92,122,165,88,137,91,65,70,60,155,159,199,
+  61,60,81,44,78,115,132,119,173,71,112,93,39,38,21,184,227,206,42,32,64,58,47,36,
+  124,137,193,80,82,78,49,50,35,144,95,205,63,78,59,41,53,52,148,71,142,65,128,51,
+  40,36,28,143,143,202,40,55,137,52,34,29,129,183,227,42,35,43,42,44,44,104,105,164,
+  64,130,80,43,81,53,140,169,204,68,84,72
+ );
+
+Const
+ V9KfUvMode: Array[0..89] Of Byte=(
+  144,11,54,157,195,130,46,58,108,118,15,123,148,131,101,44,93,131,113,12,23,188,226,142,
+  26,32,125,120,11,50,123,163,135,64,77,103,113,9,36,155,111,157,32,44,161,116,9,55,
+  176,76,96,37,61,149,115,9,28,141,161,167,21,25,193,120,12,32,145,195,142,32,38,86,
+  116,12,64,120,140,125,49,115,121,102,19,66,162,182,122,35,59,128
+ );
+
+Const
+ V9DefYProb: Array[0..35] Of Byte=(
+  65,32,18,144,162,194,41,51,98,132,68,18,165,217,196,45,40,78,173,80,19,176,240,193,
+  64,35,46,221,135,38,194,248,121,96,85,29
+ );
+
+Const
+ V9DefUvProb: Array[0..89] Of Byte=(
+  120,7,76,176,208,126,28,54,103,48,12,154,155,139,90,34,117,119,67,6,25,204,243,158,
+  13,21,96,97,5,44,131,176,139,48,68,97,83,5,42,156,111,152,26,49,152,80,5,58,
+  178,74,83,33,62,145,86,5,32,154,192,168,14,22,163,85,5,32,156,216,148,19,29,73,
+  77,7,64,116,132,122,37,126,120,101,21,107,181,192,103,19,67,125
+ );
+
+Const
+ V9KfPartProb: Array[0..47] Of Byte=(
+  158,97,94,93,24,99,85,119,44,62,59,67,149,53,53,94,20,48,83,53,24,52,18,18,
+  150,40,39,78,12,26,67,33,11,24,7,5,174,35,49,68,11,27,57,15,9,12,3,3
+ );
+
+Const
+ V9DefPartProb: Array[0..47] Of Byte=(
+  199,122,141,147,63,159,148,133,118,121,104,114,174,73,87,92,41,83,82,99,50,53,39,39,
+  177,58,59,68,26,63,52,79,25,17,14,12,222,34,30,72,16,44,58,32,12,10,7,6
+ );
+
+Const
+ V9DefInterMode: Array[0..20] Of Byte=(
+  2,173,34,7,145,85,7,166,63,7,94,66,8,64,46,17,81,31,25,29,30
+ );
+
+Const
+ V9DefCoef: Array[0..1727] Of Byte=(
+  195,29,183,84,49,136,8,42,71,0,0,0,0,0,0,0,0,0,31,107,169,35,99,159,
+  17,82,140,8,66,114,2,44,76,1,19,32,40,132,201,29,114,187,13,91,157,7,75,127,
+  3,58,95,1,28,47,69,142,221,42,122,201,15,91,159,6,67,121,1,42,77,1,17,31,
+  102,148,228,67,117,204,17,82,154,6,59,114,2,39,75,1,15,29,156,57,233,119,57,212,
+  58,48,163,29,40,124,12,30,81,3,12,31,191,107,226,124,117,204,25,99,155,0,0,0,
+  0,0,0,0,0,0,29,148,210,37,126,194,8,93,157,2,68,118,1,39,69,1,17,33,
+  41,151,213,27,123,193,3,82,144,1,58,105,1,32,60,1,13,26,59,159,220,23,126,198,
+  4,88,151,1,66,114,1,38,71,1,18,34,114,136,232,51,114,207,11,83,155,3,56,105,
+  1,33,65,1,17,34,149,65,234,121,57,215,61,49,166,28,36,114,12,25,76,3,16,42,
+  214,49,220,132,63,188,42,65,137,0,0,0,0,0,0,0,0,0,85,137,221,104,131,216,
+  49,111,192,21,87,155,2,49,87,1,16,28,89,163,230,90,137,220,29,100,183,10,70,135,
+  2,42,81,1,17,33,108,167,237,55,133,222,15,97,179,4,72,135,1,45,85,1,19,38,
+  124,146,240,66,124,224,17,88,175,4,58,122,1,36,75,1,18,37,141,79,241,126,70,227,
+  66,58,182,30,44,136,12,34,96,2,20,47,229,99,249,143,111,235,46,109,192,0,0,0,
+  0,0,0,0,0,0,82,158,236,94,146,224,25,117,191,9,87,149,3,56,99,1,33,57,
+  83,167,237,68,145,222,10,103,177,2,72,131,1,41,79,1,20,39,99,167,239,47,141,224,
+  10,104,178,2,73,133,1,44,85,1,22,47,127,145,243,71,129,228,17,93,177,3,61,124,
+  1,41,84,1,21,52,157,78,244,140,72,231,69,58,184,31,44,137,14,38,105,8,23,61,
+  125,34,187,52,41,133,6,31,56,0,0,0,0,0,0,0,0,0,37,109,153,51,102,147,
+  23,87,128,8,67,101,1,41,63,1,19,29,31,154,185,17,127,175,6,96,145,2,73,114,
+  1,51,82,1,28,45,23,163,200,10,131,185,2,93,148,1,67,111,1,41,69,1,14,24,
+  29,176,217,12,145,201,3,101,156,1,69,111,1,39,63,1,14,23,57,192,233,25,154,215,
+  6,109,167,3,78,118,1,48,69,1,21,29,202,105,245,108,106,216,18,90,144,0,0,0,
+  0,0,0,0,0,0,33,172,219,64,149,206,14,117,177,5,90,141,2,61,95,1,37,57,
+  33,179,220,11,140,198,1,89,148,1,60,104,1,33,57,1,12,21,30,181,221,8,141,198,
+  1,87,145,1,58,100,1,31,55,1,12,20,32,186,224,7,142,198,1,86,143,1,58,100,
+  1,31,55,1,12,22,57,192,227,20,143,204,3,96,154,1,68,112,1,42,69,1,19,32,
+  212,35,215,113,47,169,29,48,105,0,0,0,0,0,0,0,0,0,74,129,203,106,120,203,
+  49,107,178,19,84,144,4,50,84,1,15,25,71,172,217,44,141,209,15,102,173,6,76,133,
+  2,51,89,1,24,42,64,185,231,31,148,216,8,103,175,3,74,131,1,46,81,1,18,30,
+  65,196,235,25,157,221,5,105,174,1,67,120,1,38,69,1,15,30,65,204,238,30,156,224,
+  7,107,177,2,70,124,1,42,73,1,18,34,225,86,251,144,104,235,42,99,181,0,0,0,
+  0,0,0,0,0,0,85,175,239,112,165,229,29,136,200,12,103,162,6,77,123,2,53,84,
+  75,183,239,30,155,221,3,106,171,1,74,128,1,44,76,1,17,28,73,185,240,27,159,222,
+  2,107,172,1,75,127,1,42,73,1,17,29,62,190,238,21,159,222,2,107,172,1,72,122,
+  1,40,71,1,18,32,61,199,240,27,161,226,4,113,180,1,76,129,1,46,80,1,23,41,
+  7,27,153,5,30,95,1,16,30,0,0,0,0,0,0,0,0,0,50,75,127,57,75,124,
+  27,67,108,10,54,86,1,33,52,1,12,18,43,125,151,26,108,148,7,83,122,2,59,89,
+  1,38,60,1,17,27,23,144,163,13,112,154,2,75,117,1,50,81,1,31,51,1,14,23,
+  18,162,185,6,123,171,1,78,125,1,51,86,1,31,54,1,14,23,15,199,227,3,150,204,
+  1,91,146,1,55,95,1,30,53,1,11,20,19,55,240,19,59,196,3,52,105,0,0,0,
+  0,0,0,0,0,0,41,166,207,104,153,199,31,123,181,14,101,152,5,72,106,1,36,52,
+  35,176,211,12,131,190,2,88,144,1,60,101,1,36,60,1,16,28,28,183,213,8,134,191,
+  1,86,142,1,56,96,1,30,53,1,12,20,20,190,215,4,135,192,1,84,139,1,53,91,
+  1,28,49,1,11,20,13,196,216,2,137,192,1,86,143,1,57,99,1,32,56,1,13,24,
+  211,29,217,96,47,156,22,43,87,0,0,0,0,0,0,0,0,0,78,120,193,111,116,186,
+  46,102,164,15,80,128,2,49,76,1,18,28,71,161,203,42,132,192,10,98,150,3,69,109,
+  1,44,70,1,18,29,57,186,211,30,140,196,4,93,146,1,62,102,1,38,65,1,16,27,
+  47,199,217,14,145,196,1,88,142,1,57,98,1,36,62,1,15,26,26,219,229,5,155,207,
+  1,94,151,1,60,104,1,36,62,1,16,28,233,29,248,146,47,220,43,52,140,0,0,0,
+  0,0,0,0,0,0,100,163,232,179,161,222,63,142,204,37,113,174,26,89,137,18,68,97,
+  85,181,230,32,146,209,7,100,164,3,71,121,1,45,77,1,18,30,65,187,230,20,148,207,
+  2,97,159,1,68,116,1,40,70,1,14,29,40,194,227,8,147,204,1,94,155,1,65,112,
+  1,39,66,1,14,26,16,208,228,3,151,207,1,98,160,1,67,117,1,41,74,1,17,31,
+  17,38,140,7,34,80,1,17,29,0,0,0,0,0,0,0,0,0,37,75,128,41,76,128,
+  26,66,116,12,52,94,2,32,55,1,10,16,50,127,154,37,109,152,16,82,121,5,59,85,
+  1,35,54,1,13,20,40,142,167,17,110,157,2,71,112,1,44,72,1,27,45,1,11,17,
+  30,175,188,9,124,169,1,74,116,1,48,78,1,30,49,1,11,18,10,222,223,2,150,194,
+  1,83,128,1,48,79,1,27,45,1,11,17,36,41,235,29,36,193,10,27,111,0,0,0,
+  0,0,0,0,0,0,85,165,222,177,162,215,110,135,195,57,113,168,23,83,120,10,49,61,
+  85,190,223,36,139,200,5,90,146,1,60,103,1,38,65,1,18,30,72,202,223,23,141,199,
+  2,86,140,1,56,97,1,36,61,1,16,27,55,218,225,13,145,200,1,86,141,1,57,99,
+  1,35,61,1,13,22,15,235,212,1,132,184,1,84,139,1,57,97,1,34,56,1,14,23,
+  181,21,201,61,37,123,10,38,71,0,0,0,0,0,0,0,0,0,47,106,172,95,104,173,
+  42,93,159,18,77,131,4,50,81,1,17,23,62,147,199,44,130,189,28,102,154,18,75,115,
+  2,44,65,1,12,19,55,153,210,24,130,194,3,93,146,1,61,97,1,31,50,1,10,16,
+  49,186,223,17,148,204,1,96,142,1,53,83,1,26,44,1,11,17,13,217,212,2,136,180,
+  1,78,124,1,50,83,1,29,49,1,14,23,197,13,247,82,17,222,25,17,162,0,0,0,
+  0,0,0,0,0,0,126,186,247,234,191,243,176,177,234,104,158,220,66,128,186,55,90,137,
+  111,197,242,46,158,219,9,104,171,2,65,125,1,44,80,1,17,91,104,208,245,39,168,224,
+  3,109,162,1,79,124,1,50,102,1,43,102,84,220,246,31,177,231,2,115,180,1,79,134,
+  1,55,77,1,60,79,43,243,240,8,180,217,1,115,166,1,84,121,1,51,67,1,16,6
+ );
+
+Const
+ V9Pareto: Array[0..2039] Of Byte=(
+  3,86,128,6,86,23,88,29,6,86,128,11,87,42,91,52,9,86,129,17,88,61,94,76,
+  12,86,129,22,88,77,97,93,15,87,129,28,89,93,100,110,17,87,129,33,90,105,103,123,
+  20,88,130,38,91,118,106,136,23,88,130,43,91,128,108,146,26,89,131,48,92,139,111,156,
+  28,89,131,53,93,147,114,163,31,90,131,58,94,156,117,171,34,90,131,62,94,163,119,177,
+  37,90,132,66,95,171,122,184,39,90,132,70,96,177,124,189,42,91,132,75,97,183,127,194,
+  44,91,132,79,97,188,129,198,47,92,133,83,98,193,132,202,49,92,133,86,99,197,134,205,
+  52,93,133,90,100,201,137,208,54,93,133,94,100,204,139,211,57,94,134,98,101,208,142,214,
+  59,94,134,101,102,211,144,216,62,94,135,105,103,214,146,218,64,94,135,108,103,216,148,220,
+  66,95,135,111,104,219,151,222,68,95,135,114,105,221,153,223,71,96,136,117,106,224,155,225,
+  73,96,136,120,106,225,157,226,76,97,136,123,107,227,159,228,78,97,136,126,108,229,160,229,
+  80,98,137,129,109,231,162,231,82,98,137,131,109,232,164,232,84,98,138,134,110,234,166,233,
+  86,98,138,137,111,235,168,234,89,99,138,140,112,236,170,235,91,99,138,142,112,237,171,235,
+  93,100,139,145,113,238,173,236,95,100,139,147,114,239,174,237,97,101,140,149,115,240,176,238,
+  99,101,140,151,115,241,177,238,101,102,140,154,116,242,179,239,103,102,140,156,117,242,180,239,
+  105,103,141,158,118,243,182,240,107,103,141,160,118,243,183,240,109,104,141,162,119,244,185,241,
+  111,104,141,164,119,244,186,241,113,104,142,166,120,245,187,242,114,104,142,168,121,245,188,242,
+  116,105,143,170,122,246,190,243,118,105,143,171,122,246,191,243,120,106,143,173,123,247,192,244,
+  121,106,143,175,124,247,193,244,123,107,144,177,125,248,195,244,125,107,144,178,125,248,196,244,
+  127,108,145,180,126,249,197,245,128,108,145,181,127,249,198,245,130,109,145,183,128,249,199,245,
+  132,109,145,184,128,249,200,245,134,110,146,186,129,250,201,246,135,110,146,187,130,250,202,246,
+  137,111,147,189,131,251,203,246,138,111,147,190,131,251,204,246,140,112,147,192,132,251,205,247,
+  141,112,147,193,132,251,206,247,143,113,148,194,133,251,207,247,144,113,148,195,134,251,207,247,
+  146,114,149,197,135,252,208,248,147,114,149,198,135,252,209,248,149,115,149,199,136,252,210,248,
+  150,115,149,200,137,252,210,248,152,115,150,201,138,252,211,248,153,115,150,202,138,252,212,248,
+  155,116,151,204,139,253,213,249,156,116,151,205,139,253,213,249,158,117,151,206,140,253,214,249,
+  159,117,151,207,141,253,215,249,161,118,152,208,142,253,216,249,162,118,152,209,142,253,216,249,
+  163,119,153,210,143,253,217,249,164,119,153,211,143,253,217,249,166,120,153,212,144,254,218,250,
+  167,120,153,212,145,254,219,250,168,121,154,213,146,254,220,250,169,121,154,214,146,254,220,250,
+  171,122,155,215,147,254,221,250,172,122,155,216,147,254,221,250,173,123,155,217,148,254,222,250,
+  174,123,155,217,149,254,222,250,176,124,156,218,150,254,223,250,177,124,156,219,150,254,223,250,
+  178,125,157,220,151,254,224,251,179,125,157,220,151,254,224,251,180,126,157,221,152,254,225,251,
+  181,126,157,221,152,254,225,251,183,127,158,222,153,254,226,251,184,127,158,223,154,254,226,251,
+  185,128,159,224,155,255,227,251,186,128,159,224,155,255,227,251,187,129,160,225,156,255,228,251,
+  188,130,160,225,156,255,228,251,189,131,160,226,157,255,228,251,190,131,160,226,158,255,228,251,
+  191,132,161,227,159,255,229,251,192,132,161,227,159,255,229,251,193,133,162,228,160,255,230,252,
+  194,133,162,229,160,255,230,252,195,134,163,230,161,255,231,252,196,134,163,230,161,255,231,252,
+  197,135,163,231,162,255,231,252,198,135,163,231,162,255,231,252,199,136,164,232,163,255,232,252,
+  200,136,164,232,164,255,232,252,201,137,165,233,165,255,233,252,201,137,165,233,165,255,233,252,
+  202,138,166,233,166,255,233,252,203,138,166,233,166,255,233,252,204,139,166,234,167,255,234,252,
+  205,139,166,234,167,255,234,252,206,140,167,235,168,255,235,252,206,140,167,235,168,255,235,252,
+  207,141,168,236,169,255,235,252,208,141,168,236,170,255,235,252,209,142,169,237,171,255,236,252,
+  209,143,169,237,171,255,236,252,210,144,169,237,172,255,236,252,211,144,169,237,172,255,236,252,
+  212,145,170,238,173,255,237,252,213,145,170,238,173,255,237,252,214,146,171,239,174,255,237,253,
+  214,146,171,239,174,255,237,253,215,147,172,240,175,255,238,253,215,147,172,240,175,255,238,253,
+  216,148,173,240,176,255,238,253,217,148,173,240,176,255,238,253,218,149,173,241,177,255,239,253,
+  218,149,173,241,178,255,239,253,219,150,174,241,179,255,239,253,219,151,174,241,179,255,239,253,
+  220,152,175,242,180,255,240,253,221,152,175,242,180,255,240,253,222,153,176,242,181,255,240,253,
+  222,153,176,242,181,255,240,253,223,154,177,243,182,255,240,253,223,154,177,243,182,255,240,253,
+  224,155,178,244,183,255,241,253,224,155,178,244,183,255,241,253,225,156,178,244,184,255,241,253,
+  225,157,178,244,184,255,241,253,226,158,179,244,185,255,242,253,227,158,179,244,185,255,242,253,
+  228,159,180,245,186,255,242,253,228,159,180,245,186,255,242,253,229,160,181,245,187,255,242,253,
+  229,160,181,245,187,255,242,253,230,161,182,246,188,255,243,253,230,162,182,246,188,255,243,253,
+  231,163,183,246,189,255,243,253,231,163,183,246,189,255,243,253,232,164,184,247,190,255,243,253,
+  232,164,184,247,190,255,243,253,233,165,185,247,191,255,244,253,233,165,185,247,191,255,244,253,
+  234,166,185,247,192,255,244,253,234,167,185,247,192,255,244,253,235,168,186,248,193,255,244,253,
+  235,168,186,248,193,255,244,253,236,169,187,248,194,255,244,253,236,169,187,248,194,255,244,253,
+  236,170,188,248,195,255,245,253,236,170,188,248,195,255,245,253,237,171,189,249,196,255,245,254,
+  237,172,189,249,196,255,245,254,238,173,190,249,197,255,245,254,238,173,190,249,197,255,245,254,
+  239,174,191,249,198,255,245,254,239,174,191,249,198,255,245,254,240,175,192,249,199,255,246,254,
+  240,176,192,249,199,255,246,254,240,177,193,250,200,255,246,254,240,177,193,250,200,255,246,254,
+  241,178,194,250,201,255,246,254,241,178,194,250,201,255,246,254,242,179,195,250,202,255,246,254,
+  242,180,195,250,202,255,246,254,242,181,196,250,203,255,247,254,242,181,196,250,203,255,247,254,
+  243,182,197,251,204,255,247,254,243,183,197,251,204,255,247,254,244,184,198,251,205,255,247,254,
+  244,184,198,251,205,255,247,254,244,185,199,251,206,255,247,254,244,185,199,251,206,255,247,254,
+  245,186,200,251,207,255,247,254,245,187,200,251,207,255,247,254,246,188,201,252,207,255,248,254,
+  246,188,201,252,207,255,248,254,246,189,202,252,208,255,248,254,246,190,202,252,208,255,248,254,
+  247,191,203,252,209,255,248,254,247,191,203,252,209,255,248,254,247,192,204,252,210,255,248,254,
+  247,193,204,252,210,255,248,254,248,194,205,252,211,255,248,254,248,194,205,252,211,255,248,254,
+  248,195,206,252,212,255,249,254,248,196,206,252,212,255,249,254,249,197,207,253,213,255,249,254,
+  249,197,207,253,213,255,249,254,249,198,208,253,214,255,249,254,249,199,209,253,214,255,249,254,
+  250,200,210,253,215,255,249,254,250,200,210,253,215,255,249,254,250,201,211,253,215,255,249,254,
+  250,202,211,253,215,255,249,254,250,203,212,253,216,255,249,254,250,203,212,253,216,255,249,254,
+  251,204,213,253,217,255,250,254,251,205,213,253,217,255,250,254,251,206,214,254,218,255,250,254,
+  251,206,215,254,218,255,250,254,252,207,216,254,219,255,250,254,252,208,216,254,219,255,250,254,
+  252,209,217,254,220,255,250,254,252,210,217,254,220,255,250,254,252,211,218,254,221,255,250,254,
+  252,212,218,254,221,255,250,254,253,213,219,254,222,255,250,254,253,213,220,254,222,255,250,254,
+  253,214,221,254,223,255,250,254,253,215,221,254,223,255,250,254,253,216,222,254,224,255,251,254,
+  253,217,223,254,224,255,251,254,253,218,224,254,225,255,251,254,253,219,224,254,225,255,251,254,
+  254,220,225,254,225,255,251,254,254,221,226,254,225,255,251,254,254,222,227,255,226,255,251,254,
+  254,223,227,255,226,255,251,254,254,224,228,255,227,255,251,254,254,225,229,255,227,255,251,254,
+  254,226,230,255,228,255,251,254,254,227,230,255,229,255,251,254,255,228,231,255,230,255,251,254,
+  255,229,232,255,230,255,251,254,255,230,233,255,231,255,252,254,255,231,234,255,231,255,252,254,
+  255,232,235,255,232,255,252,254,255,233,236,255,232,255,252,254,255,235,237,255,233,255,252,254,
+  255,236,238,255,234,255,252,254,255,238,240,255,235,255,252,255,255,239,241,255,235,255,252,254,
+  255,241,243,255,236,255,252,254,255,243,245,255,237,255,252,254,255,246,247,255,239,255,253,255
+ );
+
+Const
+ V9Cat6Prob: Array[0..17] Of Byte=(
+  255,255,255,255,254,254,254,252,249,243,230,196,177,153,140,133,130,129
+ );
+
+Const
+ V9BandTx8: Array[0..1023] Of Byte=(
+  0,1,1,2,2,2,3,3,3,3,4,4,4,4,4,4,4,4,4,4,4,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
+ );
+
+Const
+ V9BandTx4: Array[0..15] Of Byte=(
+  0,1,1,2,2,2,3,3,3,3,4,4,4,5,5,5
+ );
+
+Const
+ V9ScanTab: Array[0..2031] Of SmallInt=(
+  0,4,1,5,8,2,12,9,3,6,13,10,7,14,11,15,0,1,4,2,5,3,6,8,
+  9,7,12,10,13,11,14,15,0,4,8,1,12,5,9,2,13,6,10,3,7,14,11,15,
+  0,8,1,16,9,2,17,24,10,3,18,25,32,11,4,26,33,19,40,12,34,27,5,41,
+  20,48,13,35,42,28,21,6,49,56,36,43,29,7,14,50,57,44,22,37,15,51,58,30,
+  45,23,52,59,38,31,60,53,46,39,61,54,47,62,55,63,0,1,2,8,9,3,16,10,
+  4,17,11,24,5,18,25,12,19,26,32,6,13,20,33,27,7,34,40,21,28,41,14,35,
+  48,42,29,36,49,22,43,15,56,37,50,44,30,57,23,51,58,45,38,52,31,59,53,46,
+  60,39,61,47,54,55,62,63,0,8,16,1,24,9,32,17,2,40,25,10,33,18,48,3,
+  26,41,11,56,19,34,4,49,27,42,12,35,20,57,50,28,5,43,13,36,58,51,21,44,
+  6,29,59,37,14,52,22,7,45,60,30,15,38,53,23,46,31,61,39,54,47,62,55,63,
+  0,16,1,32,17,2,48,33,18,3,64,34,49,19,65,80,50,4,35,66,20,81,96,51,
+  5,36,82,97,67,112,21,52,98,37,83,113,6,68,128,53,22,99,114,84,7,129,38,69,
+  100,115,144,130,85,54,23,8,145,39,70,116,101,131,160,146,55,86,24,71,132,117,161,40,
+  9,102,147,176,162,87,56,25,133,118,177,148,72,103,41,163,10,192,178,88,57,134,149,119,
+  26,164,73,104,193,42,179,208,11,135,89,165,120,150,58,194,180,27,74,209,105,151,136,43,
+  90,224,166,195,181,121,210,59,12,152,106,167,196,75,137,225,211,240,182,122,91,28,197,13,
+  226,168,183,153,44,212,138,107,241,60,29,123,198,184,227,169,242,76,213,154,45,92,14,199,
+  139,61,228,214,170,185,243,108,77,155,30,15,200,229,124,215,244,93,46,186,171,201,109,140,
+  230,62,216,245,31,125,78,156,231,47,187,202,217,94,246,141,63,232,172,110,247,157,79,218,
+  203,126,233,188,248,95,173,142,219,111,249,234,158,127,189,204,250,235,143,174,220,205,159,251,
+  190,221,175,236,237,191,206,252,222,253,207,238,223,254,239,255,0,1,2,16,3,17,4,18,
+  32,5,33,19,6,34,48,20,49,7,35,21,50,64,8,36,65,22,51,37,80,9,66,52,
+  23,38,81,67,10,53,24,82,68,96,39,11,54,83,97,69,25,98,84,40,112,55,12,70,
+  99,113,85,26,41,56,114,100,13,71,128,86,27,115,101,129,42,57,72,116,14,87,130,102,
+  144,73,131,117,28,58,15,88,43,145,103,132,146,118,74,160,89,133,104,29,59,147,119,44,
+  161,148,90,105,134,162,120,176,75,135,149,30,60,163,177,45,121,91,106,164,178,150,192,136,
+  165,179,31,151,193,76,122,61,137,194,107,152,180,208,46,166,167,195,92,181,138,209,123,153,
+  224,196,77,168,210,182,240,108,197,62,154,225,183,169,211,47,139,93,184,226,212,241,198,170,
+  124,155,199,78,213,185,109,227,200,63,228,242,140,214,171,186,156,229,243,125,94,201,244,215,
+  216,230,141,187,202,79,172,110,157,245,217,231,95,246,232,126,203,247,233,173,218,142,111,158,
+  188,248,127,234,219,249,189,204,143,174,159,250,235,205,220,175,190,251,221,191,206,236,207,237,
+  252,222,253,223,238,239,254,255,0,16,32,48,1,64,17,80,33,96,49,2,65,112,18,81,
+  34,128,50,97,3,66,144,19,113,35,82,160,98,51,129,4,67,176,20,114,145,83,36,99,
+  130,52,192,5,161,68,115,21,146,84,208,177,37,131,100,53,162,224,69,6,116,193,147,85,
+  22,240,132,38,178,101,163,54,209,117,70,7,148,194,86,179,225,23,133,39,164,8,102,210,
+  241,55,195,118,149,71,180,24,87,226,134,165,211,40,103,56,72,150,196,242,119,9,181,227,
+  88,166,25,135,41,104,212,57,151,197,120,73,243,182,136,167,213,89,10,228,105,152,198,26,
+  42,121,183,244,168,58,137,229,74,214,90,153,199,184,11,106,245,27,122,230,169,43,215,59,
+  200,138,185,246,75,12,91,154,216,231,107,28,44,201,123,170,60,247,232,76,139,13,92,217,
+  186,248,155,108,29,124,45,202,233,171,61,14,77,140,15,249,93,30,187,156,218,46,109,125,
+  62,172,78,203,31,141,234,94,47,188,63,157,110,250,219,79,126,204,173,142,95,189,111,235,
+  158,220,251,127,174,143,205,236,159,190,221,252,175,206,237,191,253,222,238,207,254,223,239,255,
+  0,32,1,64,33,2,96,65,34,128,3,97,66,160,129,35,98,4,67,130,161,192,36,99,
+  224,5,162,193,68,131,37,100,225,194,256,163,69,132,6,226,257,288,195,101,164,38,258,7,
+  227,289,133,320,70,196,165,290,259,228,39,321,102,352,8,197,71,134,322,291,260,353,384,229,
+  166,103,40,354,323,292,135,385,198,261,72,9,416,167,386,355,230,324,104,293,41,417,199,136,
+  262,387,448,325,356,10,73,418,231,168,449,294,388,105,419,263,42,200,357,450,137,480,74,326,
+  232,11,389,169,295,420,106,451,481,358,264,327,201,43,138,512,482,390,296,233,170,421,75,452,
+  359,12,513,265,483,328,107,202,514,544,422,391,453,139,44,234,484,297,360,171,76,515,545,266,
+  329,454,13,423,203,108,546,485,576,298,235,140,361,330,172,547,45,455,267,577,486,77,204,362,
+  608,14,299,578,109,236,487,609,331,141,579,46,15,173,610,363,78,205,16,110,237,611,142,47,
+  174,79,206,17,111,238,48,143,80,175,112,207,49,18,239,81,113,19,50,82,114,51,83,115,
+  640,516,392,268,144,20,672,641,548,517,424,393,300,269,176,145,52,21,704,673,642,580,549,518,
+  456,425,394,332,301,270,208,177,146,84,53,22,736,705,674,643,612,581,550,519,488,457,426,395,
+  364,333,302,271,240,209,178,147,116,85,54,23,737,706,675,613,582,551,489,458,427,365,334,303,
+  241,210,179,117,86,55,738,707,614,583,490,459,366,335,242,211,118,87,739,615,491,367,243,119,
+  768,644,520,396,272,148,24,800,769,676,645,552,521,428,397,304,273,180,149,56,25,832,801,770,
+  708,677,646,584,553,522,460,429,398,336,305,274,212,181,150,88,57,26,864,833,802,771,740,709,
+  678,647,616,585,554,523,492,461,430,399,368,337,306,275,244,213,182,151,120,89,58,27,865,834,
+  803,741,710,679,617,586,555,493,462,431,369,338,307,245,214,183,121,90,59,866,835,742,711,618,
+  587,494,463,370,339,246,215,122,91,867,743,619,495,371,247,123,896,772,648,524,400,276,152,28,
+  928,897,804,773,680,649,556,525,432,401,308,277,184,153,60,29,960,929,898,836,805,774,712,681,
+  650,588,557,526,464,433,402,340,309,278,216,185,154,92,61,30,992,961,930,899,868,837,806,775,
+  744,713,682,651,620,589,558,527,496,465,434,403,372,341,310,279,248,217,186,155,124,93,62,31,
+  993,962,931,869,838,807,745,714,683,621,590,559,497,466,435,373,342,311,249,218,187,125,94,63,
+  994,963,870,839,746,715,622,591,498,467,374,343,250,219,126,95,995,871,747,623,499,375,251,127,
+  900,776,652,528,404,280,156,932,901,808,777,684,653,560,529,436,405,312,281,188,157,964,933,902,
+  840,809,778,716,685,654,592,561,530,468,437,406,344,313,282,220,189,158,996,965,934,903,872,841,
+  810,779,748,717,686,655,624,593,562,531,500,469,438,407,376,345,314,283,252,221,190,159,997,966,
+  935,873,842,811,749,718,687,625,594,563,501,470,439,377,346,315,253,222,191,998,967,874,843,750,
+  719,626,595,502,471,378,347,254,223,999,875,751,627,503,379,255,904,780,656,532,408,284,936,905,
+  812,781,688,657,564,533,440,409,316,285,968,937,906,844,813,782,720,689,658,596,565,534,472,441,
+  410,348,317,286,1000,969,938,907,876,845,814,783,752,721,690,659,628,597,566,535,504,473,442,411,
+  380,349,318,287,1001,970,939,877,846,815,753,722,691,629,598,567,505,474,443,381,350,319,1002,971,
+  878,847,754,723,630,599,506,475,382,351,1003,879,755,631,507,383,908,784,660,536,412,940,909,816,
+  785,692,661,568,537,444,413,972,941,910,848,817,786,724,693,662,600,569,538,476,445,414,1004,973,
+  942,911,880,849,818,787,756,725,694,663,632,601,570,539,508,477,446,415,1005,974,943,881,850,819,
+  757,726,695,633,602,571,509,478,447,1006,975,882,851,758,727,634,603,510,479,1007,883,759,635,511,
+  912,788,664,540,944,913,820,789,696,665,572,541,976,945,914,852,821,790,728,697,666,604,573,542,
+  1008,977,946,915,884,853,822,791,760,729,698,667,636,605,574,543,1009,978,947,885,854,823,761,730,
+  699,637,606,575,1010,979,886,855,762,731,638,607,1011,887,763,639,916,792,668,948,917,824,793,700,
+  669,980,949,918,856,825,794,732,701,670,1012,981,950,919,888,857,826,795,764,733,702,671,1013,982,
+  951,889,858,827,765,734,703,1014,983,890,859,766,735,1015,891,767,920,796,952,921,828,797,984,953,
+  922,860,829,798,1016,985,954,923,892,861,830,799,1017,986,955,893,862,831,1018,987,894,863,1019,895,
+  924,956,925,988,957,926,1020,989,958,927,1021,990,959,1022,991,1023
+ );
+
+Const
+ V9NbTab: Array[0..4083] Of SmallInt=(
+  0,0,0,0,0,0,1,4,4,4,1,1,8,8,5,8,2,2,2,5,9,12,6,9,
+  3,6,10,13,7,10,11,14,0,0,0,0,0,0,0,0,1,1,4,4,2,2,5,5,
+  4,4,8,8,6,6,8,8,9,9,12,12,10,10,13,13,14,14,0,0,0,0,0,0,
+  4,4,0,0,8,8,1,1,5,5,1,1,9,9,2,2,6,6,2,2,3,3,10,10,
+  7,7,11,11,0,0,0,0,0,0,0,0,8,8,1,8,1,1,9,16,16,16,2,9,
+  2,2,10,17,17,24,24,24,3,10,3,3,18,25,25,32,11,18,32,32,4,11,26,33,
+  19,26,4,4,33,40,12,19,40,40,5,12,27,34,34,41,20,27,13,20,5,5,41,48,
+  48,48,28,35,35,42,21,28,6,6,6,13,42,49,49,56,36,43,14,21,29,36,7,14,
+  43,50,50,57,22,29,37,44,15,22,44,51,51,58,30,37,23,30,52,59,45,52,38,45,
+  31,38,53,60,46,53,39,46,54,61,47,54,55,62,0,0,0,0,0,0,1,1,0,0,
+  8,8,2,2,8,8,9,9,3,3,16,16,10,10,16,16,4,4,17,17,24,24,11,11,
+  18,18,25,25,24,24,5,5,12,12,19,19,32,32,26,26,6,6,33,33,32,32,20,20,
+  27,27,40,40,13,13,34,34,40,40,41,41,28,28,35,35,48,48,21,21,42,42,14,14,
+  48,48,36,36,49,49,43,43,29,29,56,56,22,22,50,50,57,57,44,44,37,37,51,51,
+  30,30,58,58,52,52,45,45,59,59,38,38,60,60,46,46,53,53,54,54,61,61,62,62,
+  0,0,0,0,0,0,8,8,0,0,16,16,1,1,24,24,9,9,1,1,32,32,17,17,
+  2,2,25,25,10,10,40,40,2,2,18,18,33,33,3,3,48,48,11,11,26,26,3,3,
+  41,41,19,19,34,34,4,4,27,27,12,12,49,49,42,42,20,20,4,4,35,35,5,5,
+  28,28,50,50,43,43,13,13,36,36,5,5,21,21,51,51,29,29,6,6,44,44,14,14,
+  6,6,37,37,52,52,22,22,7,7,30,30,45,45,15,15,38,38,23,23,53,53,31,31,
+  46,46,39,39,54,54,47,47,55,55,0,0,0,0,0,0,0,0,16,16,1,16,1,1,
+  32,32,17,32,2,17,2,2,48,48,18,33,33,48,3,18,49,64,64,64,34,49,3,3,
+  19,34,50,65,4,19,65,80,80,80,35,50,4,4,20,35,66,81,81,96,51,66,96,96,
+  5,20,36,51,82,97,21,36,67,82,97,112,5,5,52,67,112,112,37,52,6,21,83,98,
+  98,113,68,83,6,6,113,128,22,37,53,68,84,99,99,114,128,128,114,129,69,84,38,53,
+  7,22,7,7,129,144,23,38,54,69,100,115,85,100,115,130,144,144,130,145,39,54,70,85,
+  8,23,55,70,116,131,101,116,145,160,24,39,8,8,86,101,131,146,160,160,146,161,71,86,
+  40,55,9,24,117,132,102,117,161,176,132,147,56,71,87,102,25,40,147,162,9,9,176,176,
+  162,177,72,87,41,56,118,133,133,148,103,118,10,25,148,163,57,72,88,103,177,192,26,41,
+  163,178,192,192,10,10,119,134,73,88,149,164,104,119,134,149,42,57,178,193,164,179,11,26,
+  58,73,193,208,89,104,135,150,120,135,27,42,74,89,208,208,150,165,179,194,165,180,105,120,
+  194,209,43,58,11,11,136,151,90,105,151,166,180,195,59,74,121,136,209,224,195,210,224,224,
+  166,181,106,121,75,90,12,27,181,196,12,12,210,225,152,167,167,182,137,152,28,43,196,211,
+  122,137,91,106,225,240,44,59,13,28,107,122,182,197,168,183,211,226,153,168,226,241,60,75,
+  197,212,138,153,29,44,76,91,13,13,183,198,123,138,45,60,212,227,198,213,154,169,169,184,
+  227,242,92,107,61,76,139,154,14,29,14,14,184,199,213,228,108,123,199,214,228,243,77,92,
+  30,45,170,185,155,170,185,200,93,108,124,139,214,229,46,61,200,215,229,244,15,30,109,124,
+  62,77,140,155,215,230,31,46,171,186,186,201,201,216,78,93,230,245,125,140,47,62,216,231,
+  156,171,94,109,231,246,141,156,63,78,202,217,187,202,110,125,217,232,172,187,232,247,79,94,
+  157,172,126,141,203,218,95,110,233,248,218,233,142,157,111,126,173,188,188,203,234,249,219,234,
+  127,142,158,173,204,219,189,204,143,158,235,250,174,189,205,220,159,174,220,235,221,236,175,190,
+  190,205,236,251,206,221,237,252,191,206,222,237,207,222,238,253,223,238,239,254,0,0,0,0,
+  0,0,1,1,0,0,2,2,16,16,3,3,17,17,16,16,4,4,32,32,18,18,5,5,
+  33,33,32,32,19,19,48,48,6,6,34,34,20,20,49,49,48,48,7,7,35,35,64,64,
+  21,21,50,50,36,36,64,64,8,8,65,65,51,51,22,22,37,37,80,80,66,66,9,9,
+  52,52,23,23,81,81,67,67,80,80,38,38,10,10,53,53,82,82,96,96,68,68,24,24,
+  97,97,83,83,39,39,96,96,54,54,11,11,69,69,98,98,112,112,84,84,25,25,40,40,
+  55,55,113,113,99,99,12,12,70,70,112,112,85,85,26,26,114,114,100,100,128,128,41,41,
+  56,56,71,71,115,115,13,13,86,86,129,129,101,101,128,128,72,72,130,130,116,116,27,27,
+  57,57,14,14,87,87,42,42,144,144,102,102,131,131,145,145,117,117,73,73,144,144,88,88,
+  132,132,103,103,28,28,58,58,146,146,118,118,43,43,160,160,147,147,89,89,104,104,133,133,
+  161,161,119,119,160,160,74,74,134,134,148,148,29,29,59,59,162,162,176,176,44,44,120,120,
+  90,90,105,105,163,163,177,177,149,149,176,176,135,135,164,164,178,178,30,30,150,150,192,192,
+  75,75,121,121,60,60,136,136,193,193,106,106,151,151,179,179,192,192,45,45,165,165,166,166,
+  194,194,91,91,180,180,137,137,208,208,122,122,152,152,208,208,195,195,76,76,167,167,209,209,
+  181,181,224,224,107,107,196,196,61,61,153,153,224,224,182,182,168,168,210,210,46,46,138,138,
+  92,92,183,183,225,225,211,211,240,240,197,197,169,169,123,123,154,154,198,198,77,77,212,212,
+  184,184,108,108,226,226,199,199,62,62,227,227,241,241,139,139,213,213,170,170,185,185,155,155,
+  228,228,242,242,124,124,93,93,200,200,243,243,214,214,215,215,229,229,140,140,186,186,201,201,
+  78,78,171,171,109,109,156,156,244,244,216,216,230,230,94,94,245,245,231,231,125,125,202,202,
+  246,246,232,232,172,172,217,217,141,141,110,110,157,157,187,187,247,247,126,126,233,233,218,218,
+  248,248,188,188,203,203,142,142,173,173,158,158,249,249,234,234,204,204,219,219,174,174,189,189,
+  250,250,220,220,190,190,205,205,235,235,206,206,236,236,251,251,221,221,252,252,222,222,237,237,
+  238,238,253,253,254,254,0,0,0,0,0,0,16,16,32,32,0,0,48,48,1,1,64,64,
+  17,17,80,80,33,33,1,1,49,49,96,96,2,2,65,65,18,18,112,112,34,34,81,81,
+  2,2,50,50,128,128,3,3,97,97,19,19,66,66,144,144,82,82,35,35,113,113,3,3,
+  51,51,160,160,4,4,98,98,129,129,67,67,20,20,83,83,114,114,36,36,176,176,4,4,
+  145,145,52,52,99,99,5,5,130,130,68,68,192,192,161,161,21,21,115,115,84,84,37,37,
+  146,146,208,208,53,53,5,5,100,100,177,177,131,131,69,69,6,6,224,224,116,116,22,22,
+  162,162,85,85,147,147,38,38,193,193,101,101,54,54,6,6,132,132,178,178,70,70,163,163,
+  209,209,7,7,117,117,23,23,148,148,7,7,86,86,194,194,225,225,39,39,179,179,102,102,
+  133,133,55,55,164,164,8,8,71,71,210,210,118,118,149,149,195,195,24,24,87,87,40,40,
+  56,56,134,134,180,180,226,226,103,103,8,8,165,165,211,211,72,72,150,150,9,9,119,119,
+  25,25,88,88,196,196,41,41,135,135,181,181,104,104,57,57,227,227,166,166,120,120,151,151,
+  197,197,73,73,9,9,212,212,89,89,136,136,182,182,10,10,26,26,105,105,167,167,228,228,
+  152,152,42,42,121,121,213,213,58,58,198,198,74,74,137,137,183,183,168,168,10,10,90,90,
+  229,229,11,11,106,106,214,214,153,153,27,27,199,199,43,43,184,184,122,122,169,169,230,230,
+  59,59,11,11,75,75,138,138,200,200,215,215,91,91,12,12,28,28,185,185,107,107,154,154,
+  44,44,231,231,216,216,60,60,123,123,12,12,76,76,201,201,170,170,232,232,139,139,92,92,
+  13,13,108,108,29,29,186,186,217,217,155,155,45,45,13,13,61,61,124,124,14,14,233,233,
+  77,77,14,14,171,171,140,140,202,202,30,30,93,93,109,109,46,46,156,156,62,62,187,187,
+  15,15,125,125,218,218,78,78,31,31,172,172,47,47,141,141,94,94,234,234,203,203,63,63,
+  110,110,188,188,157,157,126,126,79,79,173,173,95,95,219,219,142,142,204,204,235,235,111,111,
+  158,158,127,127,189,189,220,220,143,143,174,174,205,205,236,236,159,159,190,190,221,221,175,175,
+  237,237,206,206,222,222,191,191,238,238,207,207,223,223,239,239,0,0,0,0,0,0,0,0,
+  32,32,1,32,1,1,64,64,33,64,2,33,96,96,2,2,65,96,34,65,128,128,97,128,
+  3,34,66,97,3,3,35,66,98,129,129,160,160,160,4,35,67,98,192,192,4,4,130,161,
+  161,192,36,67,99,130,5,36,68,99,193,224,162,193,224,224,131,162,37,68,100,131,5,5,
+  194,225,225,256,256,256,163,194,69,100,132,163,6,37,226,257,6,6,195,226,257,288,101,132,
+  288,288,38,69,164,195,133,164,258,289,227,258,196,227,7,38,289,320,70,101,320,320,7,7,
+  165,196,39,70,102,133,290,321,259,290,228,259,321,352,352,352,197,228,134,165,71,102,8,39,
+  322,353,291,322,260,291,103,134,353,384,166,197,229,260,40,71,8,8,384,384,135,166,354,385,
+  323,354,198,229,292,323,72,103,261,292,9,40,385,416,167,198,104,135,230,261,355,386,416,416,
+  293,324,324,355,9,9,41,72,386,417,199,230,136,167,417,448,262,293,356,387,73,104,387,418,
+  231,262,10,41,168,199,325,356,418,449,105,136,448,448,42,73,294,325,200,231,10,10,357,388,
+  137,168,263,294,388,419,74,105,419,450,449,480,326,357,232,263,295,326,169,200,11,42,106,137,
+  480,480,450,481,358,389,264,295,201,232,138,169,389,420,43,74,420,451,327,358,11,11,481,512,
+  233,264,451,482,296,327,75,106,170,201,482,513,512,512,390,421,359,390,421,452,107,138,12,43,
+  202,233,452,483,265,296,328,359,139,170,44,75,483,514,513,544,234,265,297,328,422,453,12,12,
+  391,422,171,202,76,107,514,545,453,484,544,544,266,297,203,234,108,139,329,360,298,329,140,171,
+  515,546,13,44,423,454,235,266,545,576,454,485,45,76,172,203,330,361,576,576,13,13,267,298,
+  546,577,77,108,204,235,455,486,577,608,299,330,109,140,547,578,14,45,14,14,141,172,578,609,
+  331,362,46,77,173,204,15,15,78,109,205,236,579,610,110,141,15,46,142,173,47,78,174,205,
+  16,16,79,110,206,237,16,47,111,142,48,79,143,174,80,111,175,206,17,48,17,17,207,238,
+  49,80,81,112,18,18,18,49,50,81,82,113,19,50,51,82,83,114,608,608,484,515,360,391,
+  236,267,112,143,19,19,640,640,609,640,516,547,485,516,392,423,361,392,268,299,237,268,144,175,
+  113,144,20,51,20,20,672,672,641,672,610,641,548,579,517,548,486,517,424,455,393,424,362,393,
+  300,331,269,300,238,269,176,207,145,176,114,145,52,83,21,52,21,21,704,704,673,704,642,673,
+  611,642,580,611,549,580,518,549,487,518,456,487,425,456,394,425,363,394,332,363,301,332,270,301,
+  239,270,208,239,177,208,146,177,115,146,84,115,53,84,22,53,22,22,705,736,674,705,643,674,
+  581,612,550,581,519,550,457,488,426,457,395,426,333,364,302,333,271,302,209,240,178,209,147,178,
+  85,116,54,85,23,54,706,737,675,706,582,613,551,582,458,489,427,458,334,365,303,334,210,241,
+  179,210,86,117,55,86,707,738,583,614,459,490,335,366,211,242,87,118,736,736,612,643,488,519,
+  364,395,240,271,116,147,23,23,768,768,737,768,644,675,613,644,520,551,489,520,396,427,365,396,
+  272,303,241,272,148,179,117,148,24,55,24,24,800,800,769,800,738,769,676,707,645,676,614,645,
+  552,583,521,552,490,521,428,459,397,428,366,397,304,335,273,304,242,273,180,211,149,180,118,149,
+  56,87,25,56,25,25,832,832,801,832,770,801,739,770,708,739,677,708,646,677,615,646,584,615,
+  553,584,522,553,491,522,460,491,429,460,398,429,367,398,336,367,305,336,274,305,243,274,212,243,
+  181,212,150,181,119,150,88,119,57,88,26,57,26,26,833,864,802,833,771,802,709,740,678,709,
+  647,678,585,616,554,585,523,554,461,492,430,461,399,430,337,368,306,337,275,306,213,244,182,213,
+  151,182,89,120,58,89,27,58,834,865,803,834,710,741,679,710,586,617,555,586,462,493,431,462,
+  338,369,307,338,214,245,183,214,90,121,59,90,835,866,711,742,587,618,463,494,339,370,215,246,
+  91,122,864,864,740,771,616,647,492,523,368,399,244,275,120,151,27,27,896,896,865,896,772,803,
+  741,772,648,679,617,648,524,555,493,524,400,431,369,400,276,307,245,276,152,183,121,152,28,59,
+  28,28,928,928,897,928,866,897,804,835,773,804,742,773,680,711,649,680,618,649,556,587,525,556,
+  494,525,432,463,401,432,370,401,308,339,277,308,246,277,184,215,153,184,122,153,60,91,29,60,
+  29,29,960,960,929,960,898,929,867,898,836,867,805,836,774,805,743,774,712,743,681,712,650,681,
+  619,650,588,619,557,588,526,557,495,526,464,495,433,464,402,433,371,402,340,371,309,340,278,309,
+  247,278,216,247,185,216,154,185,123,154,92,123,61,92,30,61,30,30,961,992,930,961,899,930,
+  837,868,806,837,775,806,713,744,682,713,651,682,589,620,558,589,527,558,465,496,434,465,403,434,
+  341,372,310,341,279,310,217,248,186,217,155,186,93,124,62,93,31,62,962,993,931,962,838,869,
+  807,838,714,745,683,714,590,621,559,590,466,497,435,466,342,373,311,342,218,249,187,218,94,125,
+  63,94,963,994,839,870,715,746,591,622,467,498,343,374,219,250,95,126,868,899,744,775,620,651,
+  496,527,372,403,248,279,124,155,900,931,869,900,776,807,745,776,652,683,621,652,528,559,497,528,
+  404,435,373,404,280,311,249,280,156,187,125,156,932,963,901,932,870,901,808,839,777,808,746,777,
+  684,715,653,684,622,653,560,591,529,560,498,529,436,467,405,436,374,405,312,343,281,312,250,281,
+  188,219,157,188,126,157,964,995,933,964,902,933,871,902,840,871,809,840,778,809,747,778,716,747,
+  685,716,654,685,623,654,592,623,561,592,530,561,499,530,468,499,437,468,406,437,375,406,344,375,
+  313,344,282,313,251,282,220,251,189,220,158,189,127,158,965,996,934,965,903,934,841,872,810,841,
+  779,810,717,748,686,717,655,686,593,624,562,593,531,562,469,500,438,469,407,438,345,376,314,345,
+  283,314,221,252,190,221,159,190,966,997,935,966,842,873,811,842,718,749,687,718,594,625,563,594,
+  470,501,439,470,346,377,315,346,222,253,191,222,967,998,843,874,719,750,595,626,471,502,347,378,
+  223,254,872,903,748,779,624,655,500,531,376,407,252,283,904,935,873,904,780,811,749,780,656,687,
+  625,656,532,563,501,532,408,439,377,408,284,315,253,284,936,967,905,936,874,905,812,843,781,812,
+  750,781,688,719,657,688,626,657,564,595,533,564,502,533,440,471,409,440,378,409,316,347,285,316,
+  254,285,968,999,937,968,906,937,875,906,844,875,813,844,782,813,751,782,720,751,689,720,658,689,
+  627,658,596,627,565,596,534,565,503,534,472,503,441,472,410,441,379,410,348,379,317,348,286,317,
+  255,286,969,1000,938,969,907,938,845,876,814,845,783,814,721,752,690,721,659,690,597,628,566,597,
+  535,566,473,504,442,473,411,442,349,380,318,349,287,318,970,1001,939,970,846,877,815,846,722,753,
+  691,722,598,629,567,598,474,505,443,474,350,381,319,350,971,1002,847,878,723,754,599,630,475,506,
+  351,382,876,907,752,783,628,659,504,535,380,411,908,939,877,908,784,815,753,784,660,691,629,660,
+  536,567,505,536,412,443,381,412,940,971,909,940,878,909,816,847,785,816,754,785,692,723,661,692,
+  630,661,568,599,537,568,506,537,444,475,413,444,382,413,972,1003,941,972,910,941,879,910,848,879,
+  817,848,786,817,755,786,724,755,693,724,662,693,631,662,600,631,569,600,538,569,507,538,476,507,
+  445,476,414,445,383,414,973,1004,942,973,911,942,849,880,818,849,787,818,725,756,694,725,663,694,
+  601,632,570,601,539,570,477,508,446,477,415,446,974,1005,943,974,850,881,819,850,726,757,695,726,
+  602,633,571,602,478,509,447,478,975,1006,851,882,727,758,603,634,479,510,880,911,756,787,632,663,
+  508,539,912,943,881,912,788,819,757,788,664,695,633,664,540,571,509,540,944,975,913,944,882,913,
+  820,851,789,820,758,789,696,727,665,696,634,665,572,603,541,572,510,541,976,1007,945,976,914,945,
+  883,914,852,883,821,852,790,821,759,790,728,759,697,728,666,697,635,666,604,635,573,604,542,573,
+  511,542,977,1008,946,977,915,946,853,884,822,853,791,822,729,760,698,729,667,698,605,636,574,605,
+  543,574,978,1009,947,978,854,885,823,854,730,761,699,730,606,637,575,606,979,1010,855,886,731,762,
+  607,638,884,915,760,791,636,667,916,947,885,916,792,823,761,792,668,699,637,668,948,979,917,948,
+  886,917,824,855,793,824,762,793,700,731,669,700,638,669,980,1011,949,980,918,949,887,918,856,887,
+  825,856,794,825,763,794,732,763,701,732,670,701,639,670,981,1012,950,981,919,950,857,888,826,857,
+  795,826,733,764,702,733,671,702,982,1013,951,982,858,889,827,858,734,765,703,734,983,1014,859,890,
+  735,766,888,919,764,795,920,951,889,920,796,827,765,796,952,983,921,952,890,921,828,859,797,828,
+  766,797,984,1015,953,984,922,953,891,922,860,891,829,860,798,829,767,798,985,1016,954,985,923,954,
+  861,892,830,861,799,830,986,1017,955,986,862,893,831,862,987,1018,863,894,892,923,924,955,893,924,
+  956,987,925,956,894,925,988,1019,957,988,926,957,895,926,989,1020,958,989,927,958,990,1021,959,990,
+  991,1022,0,0
+ );
+
+Const
+ V9ScanOff: Array[0..15] Of LongInt=(
+  0,16,32,0,48,112,176,48,240,496,752,240,1008,1008,1008,1008
+ );
+
+Const
+ V9NbOff: Array[0..15] Of LongInt=(
+  0,34,68,0,102,232,362,102,492,1006,1520,492,2034,2034,2034,2034
+ );
+
+Const
+ V9DcQ8: Array[0..255] Of Word=(
+  4,8,8,9,10,11,12,12,13,14,15,16,17,18,19,19,
+  20,21,22,23,24,25,26,26,27,28,29,30,31,32,32,33,
+  34,35,36,37,38,38,39,40,41,42,43,43,44,45,46,47,
+  48,48,49,50,51,52,53,53,54,55,56,57,57,58,59,60,
+  61,62,62,63,64,65,66,66,67,68,69,70,70,71,72,73,
+  74,74,75,76,77,78,78,79,80,81,81,82,83,84,85,85,
+  87,88,90,92,93,95,96,98,99,101,102,104,105,107,108,110,
+  111,113,114,116,117,118,120,121,123,125,127,129,131,134,136,138,
+  140,142,144,146,148,150,152,154,156,158,161,164,166,169,172,174,
+  177,180,182,185,187,190,192,195,199,202,205,208,211,214,217,220,
+  223,226,230,233,237,240,243,247,250,253,257,261,265,269,272,276,
+  280,284,288,292,296,300,304,309,313,317,322,326,330,335,340,344,
+  349,354,359,364,369,374,379,384,389,395,400,406,411,417,423,429,
+  435,441,447,454,461,467,475,482,489,497,505,513,522,530,539,549,
+  559,569,579,590,602,614,626,640,654,668,684,700,717,736,755,775,
+  796,819,843,869,896,925,955,988,1022,1058,1098,1139,1184,1232,1282,1336
+ );
+
+Const
+ V9DcQ10: Array[0..255] Of Word=(
+  4,9,10,13,15,17,20,22,25,28,31,34,37,40,43,47,
+  50,53,57,60,64,68,71,75,78,82,86,90,93,97,101,105,
+  109,113,116,120,124,128,132,136,140,143,147,151,155,159,163,166,
+  170,174,178,182,185,189,193,197,200,204,208,212,215,219,223,226,
+  230,233,237,241,244,248,251,255,259,262,266,269,273,276,280,283,
+  287,290,293,297,300,304,307,310,314,317,321,324,327,331,334,337,
+  343,350,356,362,369,375,381,387,394,400,406,412,418,424,430,436,
+  442,448,454,460,466,472,478,484,490,499,507,516,525,533,542,550,
+  559,567,576,584,592,601,609,617,625,634,644,655,666,676,687,698,
+  708,718,729,739,749,759,770,782,795,807,819,831,844,856,868,880,
+  891,906,920,933,947,961,975,988,1001,1015,1030,1045,1061,1076,1090,1105,
+  1120,1137,1153,1170,1186,1202,1218,1236,1253,1271,1288,1306,1323,1342,1361,1379,
+  1398,1416,1436,1456,1476,1496,1516,1537,1559,1580,1601,1624,1647,1670,1692,1717,
+  1741,1766,1791,1817,1844,1871,1900,1929,1958,1990,2021,2054,2088,2123,2159,2197,
+  2236,2276,2319,2363,2410,2458,2508,2561,2616,2675,2737,2802,2871,2944,3020,3102,
+  3188,3280,3375,3478,3586,3702,3823,3953,4089,4236,4394,4559,4737,4929,5130,5347
+ );
+
+Const
+ V9DcQ12: Array[0..255] Of Word=(
+  4,12,18,25,33,41,50,60,70,80,91,103,115,127,140,153,
+  166,180,194,208,222,237,251,266,281,296,312,327,343,358,374,390,
+  405,421,437,453,469,484,500,516,532,548,564,580,596,611,627,643,
+  659,674,690,706,721,737,752,768,783,798,814,829,844,859,874,889,
+  904,919,934,949,964,978,993,1008,1022,1037,1051,1065,1080,1094,1108,1122,
+  1136,1151,1165,1179,1192,1206,1220,1234,1248,1261,1275,1288,1302,1315,1329,1342,
+  1368,1393,1419,1444,1469,1494,1519,1544,1569,1594,1618,1643,1668,1692,1717,1741,
+  1765,1789,1814,1838,1862,1885,1909,1933,1957,1992,2027,2061,2096,2130,2165,2199,
+  2233,2267,2300,2334,2367,2400,2434,2467,2499,2532,2575,2618,2661,2704,2746,2788,
+  2830,2872,2913,2954,2995,3036,3076,3127,3177,3226,3275,3324,3373,3421,3469,3517,
+  3565,3621,3677,3733,3788,3843,3897,3951,4005,4058,4119,4181,4241,4301,4361,4420,
+  4479,4546,4612,4677,4742,4807,4871,4942,5013,5083,5153,5222,5291,5367,5442,5517,
+  5591,5665,5745,5825,5905,5984,6063,6149,6234,6319,6404,6495,6587,6678,6769,6867,
+  6966,7064,7163,7269,7376,7483,7599,7715,7832,7958,8085,8214,8352,8492,8635,8788,
+  8945,9104,9275,9450,9639,9832,10031,10245,10465,10702,10946,11210,11482,11776,12081,12409,
+  12750,13118,13501,13913,14343,14807,15290,15812,16356,16943,17575,18237,18949,19718,20521,21387
+ );
+
+Const
+ V9AcQ8: Array[0..255] Of Word=(
+  4,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,
+  23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,
+  39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,
+  55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,
+  71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,
+  87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,
+  104,106,108,110,112,114,116,118,120,122,124,126,128,130,132,134,
+  136,138,140,142,144,146,148,150,152,155,158,161,164,167,170,173,
+  176,179,182,185,188,191,194,197,200,203,207,211,215,219,223,227,
+  231,235,239,243,247,251,255,260,265,270,275,280,285,290,295,300,
+  305,311,317,323,329,335,341,347,353,359,366,373,380,387,394,401,
+  408,416,424,432,440,448,456,465,474,483,492,501,510,520,530,540,
+  550,560,571,582,593,604,615,627,639,651,663,676,689,702,715,729,
+  743,757,771,786,801,816,832,848,864,881,898,915,933,951,969,988,
+  1007,1026,1046,1066,1087,1108,1129,1151,1173,1196,1219,1243,1267,1292,1317,1343,
+  1369,1396,1423,1451,1479,1508,1537,1567,1597,1628,1660,1692,1725,1759,1793,1828
+ );
+
+Const
+ V9AcQ10: Array[0..255] Of Word=(
+  4,9,11,13,16,18,21,24,27,30,33,37,40,44,48,51,
+  55,59,63,67,71,75,79,83,88,92,96,100,105,109,114,118,
+  122,127,131,136,140,145,149,154,158,163,168,172,177,181,186,190,
+  195,199,204,208,213,217,222,226,231,235,240,244,249,253,258,262,
+  267,271,275,280,284,289,293,297,302,306,311,315,319,324,328,332,
+  337,341,345,349,354,358,362,367,371,375,379,384,388,392,396,401,
+  409,417,425,433,441,449,458,466,474,482,490,498,506,514,523,531,
+  539,547,555,563,571,579,588,596,604,616,628,640,652,664,676,688,
+  700,713,725,737,749,761,773,785,797,809,825,841,857,873,889,905,
+  922,938,954,970,986,1002,1018,1038,1058,1078,1098,1118,1138,1158,1178,1198,
+  1218,1242,1266,1290,1314,1338,1362,1386,1411,1435,1463,1491,1519,1547,1575,1603,
+  1631,1663,1695,1727,1759,1791,1823,1859,1895,1931,1967,2003,2039,2079,2119,2159,
+  2199,2239,2283,2327,2371,2415,2459,2507,2555,2603,2651,2703,2755,2807,2859,2915,
+  2971,3027,3083,3143,3203,3263,3327,3391,3455,3523,3591,3659,3731,3803,3876,3952,
+  4028,4104,4184,4264,4348,4432,4516,4604,4692,4784,4876,4972,5068,5168,5268,5372,
+  5476,5584,5692,5804,5916,6032,6148,6268,6388,6512,6640,6768,6900,7036,7172,7312
+ );
+
+Const
+ V9AcQ12: Array[0..255] Of Word=(
+  4,13,19,27,35,44,54,64,75,87,99,112,126,139,154,168,
+  183,199,214,230,247,263,280,297,314,331,349,366,384,402,420,438,
+  456,475,493,511,530,548,567,586,604,623,642,660,679,698,716,735,
+  753,772,791,809,828,846,865,884,902,920,939,957,976,994,1012,1030,
+  1049,1067,1085,1103,1121,1139,1157,1175,1193,1211,1229,1246,1264,1282,1299,1317,
+  1335,1352,1370,1387,1405,1422,1440,1457,1474,1491,1509,1526,1543,1560,1577,1595,
+  1627,1660,1693,1725,1758,1791,1824,1856,1889,1922,1954,1987,2020,2052,2085,2118,
+  2150,2183,2216,2248,2281,2313,2346,2378,2411,2459,2508,2556,2605,2653,2701,2750,
+  2798,2847,2895,2943,2992,3040,3088,3137,3185,3234,3298,3362,3426,3491,3555,3619,
+  3684,3748,3812,3876,3941,4005,4069,4149,4230,4310,4390,4470,4550,4631,4711,4791,
+  4871,4967,5064,5160,5256,5352,5448,5544,5641,5737,5849,5961,6073,6185,6297,6410,
+  6522,6650,6778,6906,7034,7162,7290,7435,7579,7723,7867,8011,8155,8315,8475,8635,
+  8795,8956,9132,9308,9484,9660,9836,10028,10220,10412,10604,10812,11020,11228,11437,11661,
+  11885,12109,12333,12573,12813,13053,13309,13565,13821,14093,14365,14637,14925,15213,15502,15806,
+  16110,16414,16734,17054,17390,17726,18062,18414,18766,19134,19502,19886,20270,20670,21070,21486,
+  21902,22334,22766,23214,23662,24126,24590,25070,25551,26047,26559,27071,27599,28143,28687,29247
+ );
+
+Const
+ V9InvMap: Array[0..254] Of Byte=(
+  7,20,33,46,59,72,85,98,111,124,137,150,163,176,189,202,215,228,241,254,1,2,3,4,
+  5,6,8,9,10,11,12,13,14,15,16,17,18,19,21,22,23,24,25,26,27,28,29,30,
+  31,32,34,35,36,37,38,39,40,41,42,43,44,45,47,48,49,50,51,52,53,54,55,56,
+  57,58,60,61,62,63,64,65,66,67,68,69,70,71,73,74,75,76,77,78,79,80,81,82,
+  83,84,86,87,88,89,90,91,92,93,94,95,96,97,99,100,101,102,103,104,105,106,107,108,
+  109,110,112,113,114,115,116,117,118,119,120,121,122,123,125,126,127,128,129,130,131,132,133,134,
+  135,136,138,139,140,141,142,143,144,145,146,147,148,149,151,152,153,154,155,156,157,158,159,160,
+  161,162,164,165,166,167,168,169,170,171,172,173,174,175,177,178,179,180,181,182,183,184,185,186,
+  187,188,190,191,192,193,194,195,196,197,198,199,200,201,203,204,205,206,207,208,209,210,211,212,
+  213,214,216,217,218,219,220,221,222,223,224,225,226,227,229,230,231,232,233,234,235,236,237,238,
+  239,240,242,243,244,245,246,247,248,249,250,251,252,253,253
+ );
+
+Const
+ V9SubSize: Array[0..51] Of Byte=(
+  0,1,2,3,4,5,6,7,8,9,10,11,12,
+  13,13,13,2,13,13,5,13,13,8,13,13,11,
+  13,13,13,1,13,13,4,13,13,7,13,13,10,
+  13,13,13,0,13,13,3,13,13,6,13,13,9
+ );
+
+Const
+ V9SsSize: Array[0..51] Of Byte=(
+  0,13,13,13,
+  1,0,13,13,
+  2,13,0,13,
+  3,2,1,0,
+  4,3,13,1,
+  5,13,3,2,
+  6,5,4,3,
+  7,6,13,4,
+  8,13,6,5,
+  9,8,7,6,
+  10,9,13,7,
+  11,13,9,8,
+  12,11,10,9
+ );
+
+Const
+ V9UvTx: Array[0..207] Of Byte=(
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0,
+  0,0,0,0,1,1,0,0,1,1,0,0,1,1,0,0,
+  0,0,0,0,1,0,1,0,1,0,1,1,1,0,1,1,
+  0,0,0,0,1,1,1,1,2,1,1,1,2,1,1,1,
+  0,0,0,0,1,1,1,1,2,2,1,1,2,2,1,1,
+  0,0,0,0,1,1,1,1,2,1,2,1,2,1,2,1,
+  0,0,0,0,1,1,1,1,2,2,2,2,3,2,2,2,
+  0,0,0,0,1,1,1,1,2,2,2,2,3,3,2,2,
+  0,0,0,0,1,1,1,1,2,2,2,2,3,2,3,2,
+  0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3
+ );
+Type TV9Tx=Array[0..31] Of Int64;
+Const
+ V9C1=16364;
+ V9C2=16305;
+ V9C3=16207;
+ V9C4=16069;
+ V9C5=15893;
+ V9C6=15679;
+ V9C7=15426;
+ V9C8=15137;
+ V9C9=14811;
+ V9C10=14449;
+ V9C11=14053;
+ V9C12=13623;
+ V9C13=13160;
+ V9C14=12665;
+ V9C15=12140;
+ V9C16=11585;
+ V9C17=11003;
+ V9C18=10394;
+ V9C19=9760;
+ V9C20=9102;
+ V9C21=8423;
+ V9C22=7723;
+ V9C23=7005;
+ V9C24=6270;
+ V9C25=5520;
+ V9C26=4756;
+ V9C27=3981;
+ V9C28=3196;
+ V9C29=2404;
+ V9C30=1606;
+ V9C31=804;
+ V9S1=5283;
+ V9S2=9929;
+ V9S3=13377;
+ V9S4=15212;
+
+Function V9Dcr(X: Int64): Int64;
+Begin
+ V9Dcr:=SarInt64(X+8192,14);
+End;
+
+Procedure V9Iadst4(Var in_,out_: TV9Tx);
+Var s0: Int64; s1: Int64; s2: Int64; s3: Int64; s4: Int64; s5: Int64; s6: Int64; s7: Int64; x0: Int64; x1: Int64; x2: Int64; x3: Int64;
+Begin
+ x0:=in_[0];
+ x1:=in_[1];
+ x2:=in_[2];
+ x3:=in_[3];
+ If (x0 Or x1 Or x2 Or x3)=0 Then Begin FillChar(out_,4*8,0); Exit; End;
+ s0:=V9S1 * x0;
+ s1:=V9S2 * x0;
+ s2:=V9S3 * x1;
+ s3:=V9S4 * x2;
+ s4:=V9S1 * x2;
+ s5:=V9S2 * x3;
+ s6:=V9S4 * x3;
+ s7:=(x0 - x2 + x3);
+ s0:=s0 + s3 + s5;
+ s1:=s1 - s4 - s6;
+ s3:=s2;
+ s2:=V9S3 * s7;
+ out_[0]:=(V9Dcr(s0 + s3));
+ out_[1]:=(V9Dcr(s1 + s3));
+ out_[2]:=(V9Dcr(s2));
+ out_[3]:=(V9Dcr(s0 + s1 - s3));
+End;
+
+Procedure V9Idct4(Var in_,out_: TV9Tx);
+Var step: TV9Tx; temp1: Int64; temp2: Int64;
+Begin
+ temp1:=(in_[0] + in_[2]) * V9C16;
+ temp2:=(in_[0] - in_[2]) * V9C16;
+ step[0]:=(V9Dcr(temp1));
+ step[1]:=(V9Dcr(temp2));
+ temp1:=in_[1] * V9C24 - in_[3] * V9C8;
+ temp2:=in_[1] * V9C8 + in_[3] * V9C24;
+ step[2]:=(V9Dcr(temp1));
+ step[3]:=(V9Dcr(temp2));
+ out_[0]:=(step[0] + step[3]);
+ out_[1]:=(step[1] + step[2]);
+ out_[2]:=(step[1] - step[2]);
+ out_[3]:=(step[0] - step[3]);
+End;
+
+Procedure V9Iadst8(Var in_,out_: TV9Tx);
+Var s0: Int64; s1: Int64; s2: Int64; s3: Int64; s4: Int64; s5: Int64; s6: Int64; s7: Int64; x0: Int64; x1: Int64; x2: Int64; x3: Int64; x4: Int64; x5: Int64; x6: Int64; x7: Int64;
+Begin
+ x0:=in_[7];
+ x1:=in_[0];
+ x2:=in_[5];
+ x3:=in_[2];
+ x4:=in_[3];
+ x5:=in_[4];
+ x6:=in_[1];
+ x7:=in_[6];
+ If (x0 Or x1 Or x2 Or x3 Or x4 Or x5 Or x6 Or x7)=0 Then Begin FillChar(out_,8*8,0); Exit; End;
+ s0:=V9C2 * x0 + V9C30 * x1;
+ s1:=V9C30 * x0 - V9C2 * x1;
+ s2:=V9C10 * x2 + V9C22 * x3;
+ s3:=V9C22 * x2 - V9C10 * x3;
+ s4:=V9C18 * x4 + V9C14 * x5;
+ s5:=V9C14 * x4 - V9C18 * x5;
+ s6:=V9C26 * x6 + V9C6 * x7;
+ s7:=V9C6 * x6 - V9C26 * x7;
+ x0:=(V9Dcr(s0 + s4));
+ x1:=(V9Dcr(s1 + s5));
+ x2:=(V9Dcr(s2 + s6));
+ x3:=(V9Dcr(s3 + s7));
+ x4:=(V9Dcr(s0 - s4));
+ x5:=(V9Dcr(s1 - s5));
+ x6:=(V9Dcr(s2 - s6));
+ x7:=(V9Dcr(s3 - s7));
+ s0:=x0;
+ s1:=x1;
+ s2:=x2;
+ s3:=x3;
+ s4:=V9C8 * x4 + V9C24 * x5;
+ s5:=V9C24 * x4 - V9C8 * x5;
+ s6:=(-V9C24) * x6 + V9C8 * x7;
+ s7:=V9C8 * x6 + V9C24 * x7;
+ x0:=(s0 + s2);
+ x1:=(s1 + s3);
+ x2:=(s0 - s2);
+ x3:=(s1 - s3);
+ x4:=(V9Dcr(s4 + s6));
+ x5:=(V9Dcr(s5 + s7));
+ x6:=(V9Dcr(s4 - s6));
+ x7:=(V9Dcr(s5 - s7));
+ s2:=V9C16 * (x2 + x3);
+ s3:=V9C16 * (x2 - x3);
+ s6:=V9C16 * (x6 + x7);
+ s7:=V9C16 * (x6 - x7);
+ x2:=(V9Dcr(s2));
+ x3:=(V9Dcr(s3));
+ x6:=(V9Dcr(s6));
+ x7:=(V9Dcr(s7));
+ out_[0]:=(x0);
+ out_[1]:=(-x4);
+ out_[2]:=(x6);
+ out_[3]:=(-x2);
+ out_[4]:=(x3);
+ out_[5]:=(-x7);
+ out_[6]:=(x5);
+ out_[7]:=(-x1);
+End;
+
+Procedure V9Idct8(Var in_,out_: TV9Tx);
+Var step1: TV9Tx; step2: TV9Tx; temp1: Int64; temp2: Int64;
+Begin
+ step1[0]:=in_[0];
+ step1[2]:=in_[4];
+ step1[1]:=in_[2];
+ step1[3]:=in_[6];
+ temp1:=in_[1] * V9C28 - in_[7] * V9C4;
+ temp2:=in_[1] * V9C4 + in_[7] * V9C28;
+ step1[4]:=(V9Dcr(temp1));
+ step1[7]:=(V9Dcr(temp2));
+ temp1:=in_[5] * V9C12 - in_[3] * V9C20;
+ temp2:=in_[5] * V9C20 + in_[3] * V9C12;
+ step1[5]:=(V9Dcr(temp1));
+ step1[6]:=(V9Dcr(temp2));
+ V9Idct4(step1,step1);
+ step2[4]:=(step1[4] + step1[5]);
+ step2[5]:=(step1[4] - step1[5]);
+ step2[6]:=(-step1[6] + step1[7]);
+ step2[7]:=(step1[6] + step1[7]);
+ step1[4]:=step2[4];
+ temp1:=(step2[6] - step2[5]) * V9C16;
+ temp2:=(step2[5] + step2[6]) * V9C16;
+ step1[5]:=(V9Dcr(temp1));
+ step1[6]:=(V9Dcr(temp2));
+ step1[7]:=step2[7];
+ out_[0]:=(step1[0] + step1[7]);
+ out_[1]:=(step1[1] + step1[6]);
+ out_[2]:=(step1[2] + step1[5]);
+ out_[3]:=(step1[3] + step1[4]);
+ out_[4]:=(step1[3] - step1[4]);
+ out_[5]:=(step1[2] - step1[5]);
+ out_[6]:=(step1[1] - step1[6]);
+ out_[7]:=(step1[0] - step1[7]);
+End;
+
+Procedure V9Iadst16(Var in_,out_: TV9Tx);
+Var s0: Int64; s1: Int64; s2: Int64; s3: Int64; s4: Int64; s5: Int64; s6: Int64; s7: Int64; s8: Int64; s9: Int64; s10: Int64; s11: Int64; s12: Int64; s13: Int64; s14: Int64; s15: Int64; x0: Int64; x1: Int64; x2: Int64; x3: Int64; x4: Int64; x5: Int64; x6: Int64; x7: Int64; x8: Int64; x9: Int64; x10: Int64; x11: Int64; x12: Int64; x13: Int64; x14: Int64; x15: Int64;
+Begin
+ x0:=in_[15];
+ x1:=in_[0];
+ x2:=in_[13];
+ x3:=in_[2];
+ x4:=in_[11];
+ x5:=in_[4];
+ x6:=in_[9];
+ x7:=in_[6];
+ x8:=in_[7];
+ x9:=in_[8];
+ x10:=in_[5];
+ x11:=in_[10];
+ x12:=in_[3];
+ x13:=in_[12];
+ x14:=in_[1];
+ x15:=in_[14];
+ If (x0 Or x1 Or x2 Or x3 Or x4 Or x5 Or x6 Or x7 Or x8 Or x9 Or x10 Or x11 Or x12 Or x13 Or x14 Or x15)=0 Then Begin FillChar(out_,16*8,0); Exit; End;
+ s0:=x0 * V9C1 + x1 * V9C31;
+ s1:=x0 * V9C31 - x1 * V9C1;
+ s2:=x2 * V9C5 + x3 * V9C27;
+ s3:=x2 * V9C27 - x3 * V9C5;
+ s4:=x4 * V9C9 + x5 * V9C23;
+ s5:=x4 * V9C23 - x5 * V9C9;
+ s6:=x6 * V9C13 + x7 * V9C19;
+ s7:=x6 * V9C19 - x7 * V9C13;
+ s8:=x8 * V9C17 + x9 * V9C15;
+ s9:=x8 * V9C15 - x9 * V9C17;
+ s10:=x10 * V9C21 + x11 * V9C11;
+ s11:=x10 * V9C11 - x11 * V9C21;
+ s12:=x12 * V9C25 + x13 * V9C7;
+ s13:=x12 * V9C7 - x13 * V9C25;
+ s14:=x14 * V9C29 + x15 * V9C3;
+ s15:=x14 * V9C3 - x15 * V9C29;
+ x0:=(V9Dcr(s0 + s8));
+ x1:=(V9Dcr(s1 + s9));
+ x2:=(V9Dcr(s2 + s10));
+ x3:=(V9Dcr(s3 + s11));
+ x4:=(V9Dcr(s4 + s12));
+ x5:=(V9Dcr(s5 + s13));
+ x6:=(V9Dcr(s6 + s14));
+ x7:=(V9Dcr(s7 + s15));
+ x8:=(V9Dcr(s0 - s8));
+ x9:=(V9Dcr(s1 - s9));
+ x10:=(V9Dcr(s2 - s10));
+ x11:=(V9Dcr(s3 - s11));
+ x12:=(V9Dcr(s4 - s12));
+ x13:=(V9Dcr(s5 - s13));
+ x14:=(V9Dcr(s6 - s14));
+ x15:=(V9Dcr(s7 - s15));
+ s0:=x0;
+ s1:=x1;
+ s2:=x2;
+ s3:=x3;
+ s4:=x4;
+ s5:=x5;
+ s6:=x6;
+ s7:=x7;
+ s8:=x8 * V9C4 + x9 * V9C28;
+ s9:=x8 * V9C28 - x9 * V9C4;
+ s10:=x10 * V9C20 + x11 * V9C12;
+ s11:=x10 * V9C12 - x11 * V9C20;
+ s12:=-x12 * V9C28 + x13 * V9C4;
+ s13:=x12 * V9C4 + x13 * V9C28;
+ s14:=-x14 * V9C12 + x15 * V9C20;
+ s15:=x14 * V9C20 + x15 * V9C12;
+ x0:=(s0 + s4);
+ x1:=(s1 + s5);
+ x2:=(s2 + s6);
+ x3:=(s3 + s7);
+ x4:=(s0 - s4);
+ x5:=(s1 - s5);
+ x6:=(s2 - s6);
+ x7:=(s3 - s7);
+ x8:=(V9Dcr(s8 + s12));
+ x9:=(V9Dcr(s9 + s13));
+ x10:=(V9Dcr(s10 + s14));
+ x11:=(V9Dcr(s11 + s15));
+ x12:=(V9Dcr(s8 - s12));
+ x13:=(V9Dcr(s9 - s13));
+ x14:=(V9Dcr(s10 - s14));
+ x15:=(V9Dcr(s11 - s15));
+ s0:=x0;
+ s1:=x1;
+ s2:=x2;
+ s3:=x3;
+ s4:=x4 * V9C8 + x5 * V9C24;
+ s5:=x4 * V9C24 - x5 * V9C8;
+ s6:=-x6 * V9C24 + x7 * V9C8;
+ s7:=x6 * V9C8 + x7 * V9C24;
+ s8:=x8;
+ s9:=x9;
+ s10:=x10;
+ s11:=x11;
+ s12:=x12 * V9C8 + x13 * V9C24;
+ s13:=x12 * V9C24 - x13 * V9C8;
+ s14:=-x14 * V9C24 + x15 * V9C8;
+ s15:=x14 * V9C8 + x15 * V9C24;
+ x0:=(s0 + s2);
+ x1:=(s1 + s3);
+ x2:=(s0 - s2);
+ x3:=(s1 - s3);
+ x4:=(V9Dcr(s4 + s6));
+ x5:=(V9Dcr(s5 + s7));
+ x6:=(V9Dcr(s4 - s6));
+ x7:=(V9Dcr(s5 - s7));
+ x8:=(s8 + s10);
+ x9:=(s9 + s11);
+ x10:=(s8 - s10);
+ x11:=(s9 - s11);
+ x12:=(V9Dcr(s12 + s14));
+ x13:=(V9Dcr(s13 + s15));
+ x14:=(V9Dcr(s12 - s14));
+ x15:=(V9Dcr(s13 - s15));
+ s2:=(-V9C16) * (x2 + x3);
+ s3:=V9C16 * (x2 - x3);
+ s6:=V9C16 * (x6 + x7);
+ s7:=V9C16 * (-x6 + x7);
+ s10:=V9C16 * (x10 + x11);
+ s11:=V9C16 * (-x10 + x11);
+ s14:=(-V9C16) * (x14 + x15);
+ s15:=V9C16 * (x14 - x15);
+ x2:=(V9Dcr(s2));
+ x3:=(V9Dcr(s3));
+ x6:=(V9Dcr(s6));
+ x7:=(V9Dcr(s7));
+ x10:=(V9Dcr(s10));
+ x11:=(V9Dcr(s11));
+ x14:=(V9Dcr(s14));
+ x15:=(V9Dcr(s15));
+ out_[0]:=(x0);
+ out_[1]:=(-x8);
+ out_[2]:=(x12);
+ out_[3]:=(-x4);
+ out_[4]:=(x6);
+ out_[5]:=(x14);
+ out_[6]:=(x10);
+ out_[7]:=(x2);
+ out_[8]:=(x3);
+ out_[9]:=(x11);
+ out_[10]:=(x15);
+ out_[11]:=(x7);
+ out_[12]:=(x5);
+ out_[13]:=(-x13);
+ out_[14]:=(x9);
+ out_[15]:=(-x1);
+End;
+
+Procedure V9Idct16(Var in_,out_: TV9Tx);
+Var step1: TV9Tx; step2: TV9Tx; temp1: Int64; temp2: Int64;
+Begin
+ step1[0]:=in_[(0 Div 2)];
+ step1[1]:=in_[(16 Div 2)];
+ step1[2]:=in_[(8 Div 2)];
+ step1[3]:=in_[(24 Div 2)];
+ step1[4]:=in_[(4 Div 2)];
+ step1[5]:=in_[(20 Div 2)];
+ step1[6]:=in_[(12 Div 2)];
+ step1[7]:=in_[(28 Div 2)];
+ step1[8]:=in_[(2 Div 2)];
+ step1[9]:=in_[(18 Div 2)];
+ step1[10]:=in_[(10 Div 2)];
+ step1[11]:=in_[(26 Div 2)];
+ step1[12]:=in_[(6 Div 2)];
+ step1[13]:=in_[(22 Div 2)];
+ step1[14]:=in_[(14 Div 2)];
+ step1[15]:=in_[(30 Div 2)];
+ step2[0]:=step1[0];
+ step2[1]:=step1[1];
+ step2[2]:=step1[2];
+ step2[3]:=step1[3];
+ step2[4]:=step1[4];
+ step2[5]:=step1[5];
+ step2[6]:=step1[6];
+ step2[7]:=step1[7];
+ temp1:=step1[8] * V9C30 - step1[15] * V9C2;
+ temp2:=step1[8] * V9C2 + step1[15] * V9C30;
+ step2[8]:=(V9Dcr(temp1));
+ step2[15]:=(V9Dcr(temp2));
+ temp1:=step1[9] * V9C14 - step1[14] * V9C18;
+ temp2:=step1[9] * V9C18 + step1[14] * V9C14;
+ step2[9]:=(V9Dcr(temp1));
+ step2[14]:=(V9Dcr(temp2));
+ temp1:=step1[10] * V9C22 - step1[13] * V9C10;
+ temp2:=step1[10] * V9C10 + step1[13] * V9C22;
+ step2[10]:=(V9Dcr(temp1));
+ step2[13]:=(V9Dcr(temp2));
+ temp1:=step1[11] * V9C6 - step1[12] * V9C26;
+ temp2:=step1[11] * V9C26 + step1[12] * V9C6;
+ step2[11]:=(V9Dcr(temp1));
+ step2[12]:=(V9Dcr(temp2));
+ step1[0]:=step2[0];
+ step1[1]:=step2[1];
+ step1[2]:=step2[2];
+ step1[3]:=step2[3];
+ temp1:=step2[4] * V9C28 - step2[7] * V9C4;
+ temp2:=step2[4] * V9C4 + step2[7] * V9C28;
+ step1[4]:=(V9Dcr(temp1));
+ step1[7]:=(V9Dcr(temp2));
+ temp1:=step2[5] * V9C12 - step2[6] * V9C20;
+ temp2:=step2[5] * V9C20 + step2[6] * V9C12;
+ step1[5]:=(V9Dcr(temp1));
+ step1[6]:=(V9Dcr(temp2));
+ step1[8]:=(step2[8] + step2[9]);
+ step1[9]:=(step2[8] - step2[9]);
+ step1[10]:=(-step2[10] + step2[11]);
+ step1[11]:=(step2[10] + step2[11]);
+ step1[12]:=(step2[12] + step2[13]);
+ step1[13]:=(step2[12] - step2[13]);
+ step1[14]:=(-step2[14] + step2[15]);
+ step1[15]:=(step2[14] + step2[15]);
+ temp1:=(step1[0] + step1[1]) * V9C16;
+ temp2:=(step1[0] - step1[1]) * V9C16;
+ step2[0]:=(V9Dcr(temp1));
+ step2[1]:=(V9Dcr(temp2));
+ temp1:=step1[2] * V9C24 - step1[3] * V9C8;
+ temp2:=step1[2] * V9C8 + step1[3] * V9C24;
+ step2[2]:=(V9Dcr(temp1));
+ step2[3]:=(V9Dcr(temp2));
+ step2[4]:=(step1[4] + step1[5]);
+ step2[5]:=(step1[4] - step1[5]);
+ step2[6]:=(-step1[6] + step1[7]);
+ step2[7]:=(step1[6] + step1[7]);
+ step2[8]:=step1[8];
+ step2[15]:=step1[15];
+ temp1:=-step1[9] * V9C8 + step1[14] * V9C24;
+ temp2:=step1[9] * V9C24 + step1[14] * V9C8;
+ step2[9]:=(V9Dcr(temp1));
+ step2[14]:=(V9Dcr(temp2));
+ temp1:=-step1[10] * V9C24 - step1[13] * V9C8;
+ temp2:=-step1[10] * V9C8 + step1[13] * V9C24;
+ step2[10]:=(V9Dcr(temp1));
+ step2[13]:=(V9Dcr(temp2));
+ step2[11]:=step1[11];
+ step2[12]:=step1[12];
+ step1[0]:=(step2[0] + step2[3]);
+ step1[1]:=(step2[1] + step2[2]);
+ step1[2]:=(step2[1] - step2[2]);
+ step1[3]:=(step2[0] - step2[3]);
+ step1[4]:=step2[4];
+ temp1:=(step2[6] - step2[5]) * V9C16;
+ temp2:=(step2[5] + step2[6]) * V9C16;
+ step1[5]:=(V9Dcr(temp1));
+ step1[6]:=(V9Dcr(temp2));
+ step1[7]:=step2[7];
+ step1[8]:=(step2[8] + step2[11]);
+ step1[9]:=(step2[9] + step2[10]);
+ step1[10]:=(step2[9] - step2[10]);
+ step1[11]:=(step2[8] - step2[11]);
+ step1[12]:=(-step2[12] + step2[15]);
+ step1[13]:=(-step2[13] + step2[14]);
+ step1[14]:=(step2[13] + step2[14]);
+ step1[15]:=(step2[12] + step2[15]);
+ step2[0]:=(step1[0] + step1[7]);
+ step2[1]:=(step1[1] + step1[6]);
+ step2[2]:=(step1[2] + step1[5]);
+ step2[3]:=(step1[3] + step1[4]);
+ step2[4]:=(step1[3] - step1[4]);
+ step2[5]:=(step1[2] - step1[5]);
+ step2[6]:=(step1[1] - step1[6]);
+ step2[7]:=(step1[0] - step1[7]);
+ step2[8]:=step1[8];
+ step2[9]:=step1[9];
+ temp1:=(-step1[10] + step1[13]) * V9C16;
+ temp2:=(step1[10] + step1[13]) * V9C16;
+ step2[10]:=(V9Dcr(temp1));
+ step2[13]:=(V9Dcr(temp2));
+ temp1:=(-step1[11] + step1[12]) * V9C16;
+ temp2:=(step1[11] + step1[12]) * V9C16;
+ step2[11]:=(V9Dcr(temp1));
+ step2[12]:=(V9Dcr(temp2));
+ step2[14]:=step1[14];
+ step2[15]:=step1[15];
+ out_[0]:=(step2[0] + step2[15]);
+ out_[1]:=(step2[1] + step2[14]);
+ out_[2]:=(step2[2] + step2[13]);
+ out_[3]:=(step2[3] + step2[12]);
+ out_[4]:=(step2[4] + step2[11]);
+ out_[5]:=(step2[5] + step2[10]);
+ out_[6]:=(step2[6] + step2[9]);
+ out_[7]:=(step2[7] + step2[8]);
+ out_[8]:=(step2[7] - step2[8]);
+ out_[9]:=(step2[6] - step2[9]);
+ out_[10]:=(step2[5] - step2[10]);
+ out_[11]:=(step2[4] - step2[11]);
+ out_[12]:=(step2[3] - step2[12]);
+ out_[13]:=(step2[2] - step2[13]);
+ out_[14]:=(step2[1] - step2[14]);
+ out_[15]:=(step2[0] - step2[15]);
+End;
+
+Procedure V9Idct32(Var in_,out_: TV9Tx);
+Var step1: TV9Tx; step2: TV9Tx; temp1: Int64; temp2: Int64;
+Begin
+ step1[0]:=in_[0];
+ step1[1]:=in_[16];
+ step1[2]:=in_[8];
+ step1[3]:=in_[24];
+ step1[4]:=in_[4];
+ step1[5]:=in_[20];
+ step1[6]:=in_[12];
+ step1[7]:=in_[28];
+ step1[8]:=in_[2];
+ step1[9]:=in_[18];
+ step1[10]:=in_[10];
+ step1[11]:=in_[26];
+ step1[12]:=in_[6];
+ step1[13]:=in_[22];
+ step1[14]:=in_[14];
+ step1[15]:=in_[30];
+ temp1:=in_[1] * V9C31 - in_[31] * V9C1;
+ temp2:=in_[1] * V9C1 + in_[31] * V9C31;
+ step1[16]:=(V9Dcr(temp1));
+ step1[31]:=(V9Dcr(temp2));
+ temp1:=in_[17] * V9C15 - in_[15] * V9C17;
+ temp2:=in_[17] * V9C17 + in_[15] * V9C15;
+ step1[17]:=(V9Dcr(temp1));
+ step1[30]:=(V9Dcr(temp2));
+ temp1:=in_[9] * V9C23 - in_[23] * V9C9;
+ temp2:=in_[9] * V9C9 + in_[23] * V9C23;
+ step1[18]:=(V9Dcr(temp1));
+ step1[29]:=(V9Dcr(temp2));
+ temp1:=in_[25] * V9C7 - in_[7] * V9C25;
+ temp2:=in_[25] * V9C25 + in_[7] * V9C7;
+ step1[19]:=(V9Dcr(temp1));
+ step1[28]:=(V9Dcr(temp2));
+ temp1:=in_[5] * V9C27 - in_[27] * V9C5;
+ temp2:=in_[5] * V9C5 + in_[27] * V9C27;
+ step1[20]:=(V9Dcr(temp1));
+ step1[27]:=(V9Dcr(temp2));
+ temp1:=in_[21] * V9C11 - in_[11] * V9C21;
+ temp2:=in_[21] * V9C21 + in_[11] * V9C11;
+ step1[21]:=(V9Dcr(temp1));
+ step1[26]:=(V9Dcr(temp2));
+ temp1:=in_[13] * V9C19 - in_[19] * V9C13;
+ temp2:=in_[13] * V9C13 + in_[19] * V9C19;
+ step1[22]:=(V9Dcr(temp1));
+ step1[25]:=(V9Dcr(temp2));
+ temp1:=in_[29] * V9C3 - in_[3] * V9C29;
+ temp2:=in_[29] * V9C29 + in_[3] * V9C3;
+ step1[23]:=(V9Dcr(temp1));
+ step1[24]:=(V9Dcr(temp2));
+ step2[0]:=step1[0];
+ step2[1]:=step1[1];
+ step2[2]:=step1[2];
+ step2[3]:=step1[3];
+ step2[4]:=step1[4];
+ step2[5]:=step1[5];
+ step2[6]:=step1[6];
+ step2[7]:=step1[7];
+ temp1:=step1[8] * V9C30 - step1[15] * V9C2;
+ temp2:=step1[8] * V9C2 + step1[15] * V9C30;
+ step2[8]:=(V9Dcr(temp1));
+ step2[15]:=(V9Dcr(temp2));
+ temp1:=step1[9] * V9C14 - step1[14] * V9C18;
+ temp2:=step1[9] * V9C18 + step1[14] * V9C14;
+ step2[9]:=(V9Dcr(temp1));
+ step2[14]:=(V9Dcr(temp2));
+ temp1:=step1[10] * V9C22 - step1[13] * V9C10;
+ temp2:=step1[10] * V9C10 + step1[13] * V9C22;
+ step2[10]:=(V9Dcr(temp1));
+ step2[13]:=(V9Dcr(temp2));
+ temp1:=step1[11] * V9C6 - step1[12] * V9C26;
+ temp2:=step1[11] * V9C26 + step1[12] * V9C6;
+ step2[11]:=(V9Dcr(temp1));
+ step2[12]:=(V9Dcr(temp2));
+ step2[16]:=(step1[16] + step1[17]);
+ step2[17]:=(step1[16] - step1[17]);
+ step2[18]:=(-step1[18] + step1[19]);
+ step2[19]:=(step1[18] + step1[19]);
+ step2[20]:=(step1[20] + step1[21]);
+ step2[21]:=(step1[20] - step1[21]);
+ step2[22]:=(-step1[22] + step1[23]);
+ step2[23]:=(step1[22] + step1[23]);
+ step2[24]:=(step1[24] + step1[25]);
+ step2[25]:=(step1[24] - step1[25]);
+ step2[26]:=(-step1[26] + step1[27]);
+ step2[27]:=(step1[26] + step1[27]);
+ step2[28]:=(step1[28] + step1[29]);
+ step2[29]:=(step1[28] - step1[29]);
+ step2[30]:=(-step1[30] + step1[31]);
+ step2[31]:=(step1[30] + step1[31]);
+ step1[0]:=step2[0];
+ step1[1]:=step2[1];
+ step1[2]:=step2[2];
+ step1[3]:=step2[3];
+ temp1:=step2[4] * V9C28 - step2[7] * V9C4;
+ temp2:=step2[4] * V9C4 + step2[7] * V9C28;
+ step1[4]:=(V9Dcr(temp1));
+ step1[7]:=(V9Dcr(temp2));
+ temp1:=step2[5] * V9C12 - step2[6] * V9C20;
+ temp2:=step2[5] * V9C20 + step2[6] * V9C12;
+ step1[5]:=(V9Dcr(temp1));
+ step1[6]:=(V9Dcr(temp2));
+ step1[8]:=(step2[8] + step2[9]);
+ step1[9]:=(step2[8] - step2[9]);
+ step1[10]:=(-step2[10] + step2[11]);
+ step1[11]:=(step2[10] + step2[11]);
+ step1[12]:=(step2[12] + step2[13]);
+ step1[13]:=(step2[12] - step2[13]);
+ step1[14]:=(-step2[14] + step2[15]);
+ step1[15]:=(step2[14] + step2[15]);
+ step1[16]:=step2[16];
+ step1[31]:=step2[31];
+ temp1:=-step2[17] * V9C4 + step2[30] * V9C28;
+ temp2:=step2[17] * V9C28 + step2[30] * V9C4;
+ step1[17]:=(V9Dcr(temp1));
+ step1[30]:=(V9Dcr(temp2));
+ temp1:=-step2[18] * V9C28 - step2[29] * V9C4;
+ temp2:=-step2[18] * V9C4 + step2[29] * V9C28;
+ step1[18]:=(V9Dcr(temp1));
+ step1[29]:=(V9Dcr(temp2));
+ step1[19]:=step2[19];
+ step1[20]:=step2[20];
+ temp1:=-step2[21] * V9C20 + step2[26] * V9C12;
+ temp2:=step2[21] * V9C12 + step2[26] * V9C20;
+ step1[21]:=(V9Dcr(temp1));
+ step1[26]:=(V9Dcr(temp2));
+ temp1:=-step2[22] * V9C12 - step2[25] * V9C20;
+ temp2:=-step2[22] * V9C20 + step2[25] * V9C12;
+ step1[22]:=(V9Dcr(temp1));
+ step1[25]:=(V9Dcr(temp2));
+ step1[23]:=step2[23];
+ step1[24]:=step2[24];
+ step1[27]:=step2[27];
+ step1[28]:=step2[28];
+ temp1:=(step1[0] + step1[1]) * V9C16;
+ temp2:=(step1[0] - step1[1]) * V9C16;
+ step2[0]:=(V9Dcr(temp1));
+ step2[1]:=(V9Dcr(temp2));
+ temp1:=step1[2] * V9C24 - step1[3] * V9C8;
+ temp2:=step1[2] * V9C8 + step1[3] * V9C24;
+ step2[2]:=(V9Dcr(temp1));
+ step2[3]:=(V9Dcr(temp2));
+ step2[4]:=(step1[4] + step1[5]);
+ step2[5]:=(step1[4] - step1[5]);
+ step2[6]:=(-step1[6] + step1[7]);
+ step2[7]:=(step1[6] + step1[7]);
+ step2[8]:=step1[8];
+ step2[15]:=step1[15];
+ temp1:=-step1[9] * V9C8 + step1[14] * V9C24;
+ temp2:=step1[9] * V9C24 + step1[14] * V9C8;
+ step2[9]:=(V9Dcr(temp1));
+ step2[14]:=(V9Dcr(temp2));
+ temp1:=-step1[10] * V9C24 - step1[13] * V9C8;
+ temp2:=-step1[10] * V9C8 + step1[13] * V9C24;
+ step2[10]:=(V9Dcr(temp1));
+ step2[13]:=(V9Dcr(temp2));
+ step2[11]:=step1[11];
+ step2[12]:=step1[12];
+ step2[16]:=(step1[16] + step1[19]);
+ step2[17]:=(step1[17] + step1[18]);
+ step2[18]:=(step1[17] - step1[18]);
+ step2[19]:=(step1[16] - step1[19]);
+ step2[20]:=(-step1[20] + step1[23]);
+ step2[21]:=(-step1[21] + step1[22]);
+ step2[22]:=(step1[21] + step1[22]);
+ step2[23]:=(step1[20] + step1[23]);
+ step2[24]:=(step1[24] + step1[27]);
+ step2[25]:=(step1[25] + step1[26]);
+ step2[26]:=(step1[25] - step1[26]);
+ step2[27]:=(step1[24] - step1[27]);
+ step2[28]:=(-step1[28] + step1[31]);
+ step2[29]:=(-step1[29] + step1[30]);
+ step2[30]:=(step1[29] + step1[30]);
+ step2[31]:=(step1[28] + step1[31]);
+ step1[0]:=(step2[0] + step2[3]);
+ step1[1]:=(step2[1] + step2[2]);
+ step1[2]:=(step2[1] - step2[2]);
+ step1[3]:=(step2[0] - step2[3]);
+ step1[4]:=step2[4];
+ temp1:=(step2[6] - step2[5]) * V9C16;
+ temp2:=(step2[5] + step2[6]) * V9C16;
+ step1[5]:=(V9Dcr(temp1));
+ step1[6]:=(V9Dcr(temp2));
+ step1[7]:=step2[7];
+ step1[8]:=(step2[8] + step2[11]);
+ step1[9]:=(step2[9] + step2[10]);
+ step1[10]:=(step2[9] - step2[10]);
+ step1[11]:=(step2[8] - step2[11]);
+ step1[12]:=(-step2[12] + step2[15]);
+ step1[13]:=(-step2[13] + step2[14]);
+ step1[14]:=(step2[13] + step2[14]);
+ step1[15]:=(step2[12] + step2[15]);
+ step1[16]:=step2[16];
+ step1[17]:=step2[17];
+ temp1:=-step2[18] * V9C8 + step2[29] * V9C24;
+ temp2:=step2[18] * V9C24 + step2[29] * V9C8;
+ step1[18]:=(V9Dcr(temp1));
+ step1[29]:=(V9Dcr(temp2));
+ temp1:=-step2[19] * V9C8 + step2[28] * V9C24;
+ temp2:=step2[19] * V9C24 + step2[28] * V9C8;
+ step1[19]:=(V9Dcr(temp1));
+ step1[28]:=(V9Dcr(temp2));
+ temp1:=-step2[20] * V9C24 - step2[27] * V9C8;
+ temp2:=-step2[20] * V9C8 + step2[27] * V9C24;
+ step1[20]:=(V9Dcr(temp1));
+ step1[27]:=(V9Dcr(temp2));
+ temp1:=-step2[21] * V9C24 - step2[26] * V9C8;
+ temp2:=-step2[21] * V9C8 + step2[26] * V9C24;
+ step1[21]:=(V9Dcr(temp1));
+ step1[26]:=(V9Dcr(temp2));
+ step1[22]:=step2[22];
+ step1[23]:=step2[23];
+ step1[24]:=step2[24];
+ step1[25]:=step2[25];
+ step1[30]:=step2[30];
+ step1[31]:=step2[31];
+ step2[0]:=(step1[0] + step1[7]);
+ step2[1]:=(step1[1] + step1[6]);
+ step2[2]:=(step1[2] + step1[5]);
+ step2[3]:=(step1[3] + step1[4]);
+ step2[4]:=(step1[3] - step1[4]);
+ step2[5]:=(step1[2] - step1[5]);
+ step2[6]:=(step1[1] - step1[6]);
+ step2[7]:=(step1[0] - step1[7]);
+ step2[8]:=step1[8];
+ step2[9]:=step1[9];
+ temp1:=(-step1[10] + step1[13]) * V9C16;
+ temp2:=(step1[10] + step1[13]) * V9C16;
+ step2[10]:=(V9Dcr(temp1));
+ step2[13]:=(V9Dcr(temp2));
+ temp1:=(-step1[11] + step1[12]) * V9C16;
+ temp2:=(step1[11] + step1[12]) * V9C16;
+ step2[11]:=(V9Dcr(temp1));
+ step2[12]:=(V9Dcr(temp2));
+ step2[14]:=step1[14];
+ step2[15]:=step1[15];
+ step2[16]:=(step1[16] + step1[23]);
+ step2[17]:=(step1[17] + step1[22]);
+ step2[18]:=(step1[18] + step1[21]);
+ step2[19]:=(step1[19] + step1[20]);
+ step2[20]:=(step1[19] - step1[20]);
+ step2[21]:=(step1[18] - step1[21]);
+ step2[22]:=(step1[17] - step1[22]);
+ step2[23]:=(step1[16] - step1[23]);
+ step2[24]:=(-step1[24] + step1[31]);
+ step2[25]:=(-step1[25] + step1[30]);
+ step2[26]:=(-step1[26] + step1[29]);
+ step2[27]:=(-step1[27] + step1[28]);
+ step2[28]:=(step1[27] + step1[28]);
+ step2[29]:=(step1[26] + step1[29]);
+ step2[30]:=(step1[25] + step1[30]);
+ step2[31]:=(step1[24] + step1[31]);
+ step1[0]:=(step2[0] + step2[15]);
+ step1[1]:=(step2[1] + step2[14]);
+ step1[2]:=(step2[2] + step2[13]);
+ step1[3]:=(step2[3] + step2[12]);
+ step1[4]:=(step2[4] + step2[11]);
+ step1[5]:=(step2[5] + step2[10]);
+ step1[6]:=(step2[6] + step2[9]);
+ step1[7]:=(step2[7] + step2[8]);
+ step1[8]:=(step2[7] - step2[8]);
+ step1[9]:=(step2[6] - step2[9]);
+ step1[10]:=(step2[5] - step2[10]);
+ step1[11]:=(step2[4] - step2[11]);
+ step1[12]:=(step2[3] - step2[12]);
+ step1[13]:=(step2[2] - step2[13]);
+ step1[14]:=(step2[1] - step2[14]);
+ step1[15]:=(step2[0] - step2[15]);
+ step1[16]:=step2[16];
+ step1[17]:=step2[17];
+ step1[18]:=step2[18];
+ step1[19]:=step2[19];
+ temp1:=(-step2[20] + step2[27]) * V9C16;
+ temp2:=(step2[20] + step2[27]) * V9C16;
+ step1[20]:=(V9Dcr(temp1));
+ step1[27]:=(V9Dcr(temp2));
+ temp1:=(-step2[21] + step2[26]) * V9C16;
+ temp2:=(step2[21] + step2[26]) * V9C16;
+ step1[21]:=(V9Dcr(temp1));
+ step1[26]:=(V9Dcr(temp2));
+ temp1:=(-step2[22] + step2[25]) * V9C16;
+ temp2:=(step2[22] + step2[25]) * V9C16;
+ step1[22]:=(V9Dcr(temp1));
+ step1[25]:=(V9Dcr(temp2));
+ temp1:=(-step2[23] + step2[24]) * V9C16;
+ temp2:=(step2[23] + step2[24]) * V9C16;
+ step1[23]:=(V9Dcr(temp1));
+ step1[24]:=(V9Dcr(temp2));
+ step1[28]:=step2[28];
+ step1[29]:=step2[29];
+ step1[30]:=step2[30];
+ step1[31]:=step2[31];
+ out_[0]:=(step1[0] + step1[31]);
+ out_[1]:=(step1[1] + step1[30]);
+ out_[2]:=(step1[2] + step1[29]);
+ out_[3]:=(step1[3] + step1[28]);
+ out_[4]:=(step1[4] + step1[27]);
+ out_[5]:=(step1[5] + step1[26]);
+ out_[6]:=(step1[6] + step1[25]);
+ out_[7]:=(step1[7] + step1[24]);
+ out_[8]:=(step1[8] + step1[23]);
+ out_[9]:=(step1[9] + step1[22]);
+ out_[10]:=(step1[10] + step1[21]);
+ out_[11]:=(step1[11] + step1[20]);
+ out_[12]:=(step1[12] + step1[19]);
+ out_[13]:=(step1[13] + step1[18]);
+ out_[14]:=(step1[14] + step1[17]);
+ out_[15]:=(step1[15] + step1[16]);
+ out_[16]:=(step1[15] - step1[16]);
+ out_[17]:=(step1[14] - step1[17]);
+ out_[18]:=(step1[13] - step1[18]);
+ out_[19]:=(step1[12] - step1[19]);
+ out_[20]:=(step1[11] - step1[20]);
+ out_[21]:=(step1[10] - step1[21]);
+ out_[22]:=(step1[9] - step1[22]);
+ out_[23]:=(step1[8] - step1[23]);
+ out_[24]:=(step1[7] - step1[24]);
+ out_[25]:=(step1[6] - step1[25]);
+ out_[26]:=(step1[5] - step1[26]);
+ out_[27]:=(step1[4] - step1[27]);
+ out_[28]:=(step1[3] - step1[28]);
+ out_[29]:=(step1[2] - step1[29]);
+ out_[30]:=(step1[1] - step1[30]);
+ out_[31]:=(step1[0] - step1[31]);
+End;
+
+
+{ ---- tampons d'images ---- }
+Procedure V9FreeFb(I: LongInt);
+Var P: LongInt;
+Begin
+ For P:=0 To 2 Do Begin
+  If V9Fb[I].P[P]<>Nil Then FreeMem(V9Fb[I].P[P]);
+  V9Fb[I].P[P]:=Nil; V9Fb[I].Cap[P]:=0;
+ End;
+End;
+
+Procedure V9AllocFb(I,W,H,SsX,SsY,Bd: LongInt);
+Var P,Wp,Hp,Sx,Sy,Need: LongInt;
+Begin
+ V9Fb[I].W:=W; V9Fb[I].H:=H; V9Fb[I].SsX:=SsX; V9Fb[I].SsY:=SsY; V9Fb[I].Bd:=Bd;
+ V9Fb[I].AW:=(W+7) And Not 7; V9Fb[I].AH:=(H+7) And Not 7;
+ V9Fb[I].CAW:=V9Fb[I].AW Shr SsX; V9Fb[I].CAH:=V9Fb[I].AH Shr SsY;
+ V9Fb[I].CW:=(W+SsX) Shr SsX; V9Fb[I].CH:=(H+SsY) Shr SsY;
+ Wp:=(W+63) And Not 63; Hp:=(H+63) And Not 63;
+ For P:=0 To 2 Do Begin
+  If P=0 Then Begin Sx:=0; Sy:=0; End Else Begin Sx:=SsX; Sy:=SsY; End;
+  V9Fb[I].St[P]:=(Wp Shr Sx)+16; V9Fb[I].Hh[P]:=(Hp Shr Sy)+16;
+  Need:=V9Fb[I].St[P]*V9Fb[I].Hh[P];
+  If (V9Fb[I].P[P]=Nil) Or (V9Fb[I].Cap[P]<Need) Then Begin
+   If V9Fb[I].P[P]<>Nil Then FreeMem(V9Fb[I].P[P]);
+   GetMem(V9Fb[I].P[P],Need*2+64); V9Fb[I].Cap[P]:=Need;
+   FillChar(V9Fb[I].P[P]^,Need*2,0);
+  End;
+ End;
+End;
+
+Procedure V9FreeCtx;
+Var I: LongInt;
+Begin
+ If V9Mip<>Nil Then FreeMem(V9Mip); V9Mip:=Nil;
+ If V9Grid<>Nil Then FreeMem(V9Grid); V9Grid:=Nil;
+ For I:=0 To 1 Do Begin
+  If V9SegMaps[I]<>Nil Then FreeMem(V9SegMaps[I]); V9SegMaps[I]:=Nil;
+ End;
+ If V9MvCur<>Nil Then FreeMem(V9MvCur); V9MvCur:=Nil;
+ If V9MvPrev<>Nil Then FreeMem(V9MvPrev); V9MvPrev:=Nil;
+ For I:=0 To 2 Do Begin
+  If V9AboveCtx[I]<>Nil Then FreeMem(V9AboveCtx[I]); V9AboveCtx[I]:=Nil;
+ End;
+ If V9AbovePart<>Nil Then FreeMem(V9AbovePart); V9AbovePart:=Nil;
+ V9MipN:=0; V9MvN:=0; V9CtxN:=0;
+End;
+
+Procedure V9AllocCtx;
+Var N,I: LongInt;
+Begin
+ V9FreeCtx;
+ N:=V9MiRows*V9MiCols;
+ V9MipN:=N; V9MvN:=N;
+ GetMem(V9Mip,N*SizeOf(TV9Mi)+64); FillChar(V9Mip^,N*SizeOf(TV9Mi),0);
+ GetMem(V9Grid,N*SizeOf(PV9Mi)+64); FillChar(V9Grid^,N*SizeOf(PV9Mi),0);
+ For I:=0 To 1 Do Begin GetMem(V9SegMaps[I],N+64); FillChar(V9SegMaps[I]^,N,0); End;
+ V9SegCur:=0; V9SegLast:=1;
+ GetMem(V9MvCur,N*SizeOf(TV9MvRef)+64); FillChar(V9MvCur^,N*SizeOf(TV9MvRef),0);
+ GetMem(V9MvPrev,N*SizeOf(TV9MvRef)+64); FillChar(V9MvPrev^,N*SizeOf(TV9MvRef),0);
+ V9AlignCols:=(V9MiCols+7) And Not 7;
+ V9CtxN:=V9AlignCols*2+32;
+ For I:=0 To 2 Do Begin GetMem(V9AboveCtx[I],V9CtxN); FillChar(V9AboveCtx[I]^,V9CtxN,0); End;
+ GetMem(V9AbovePart,V9AlignCols+32); FillChar(V9AbovePart^,V9AlignCols+32,0);
+End;
+
+Procedure V9FreeOutput;
+Var I: LongInt;
+Begin
+ If V9OutBuf<>Nil Then FreeMem(V9OutBuf); V9OutBuf:=Nil; V9OutCap:=0;
+ For I:=0 To 2 Do Begin
+  If V9RawBuf[I]<>Nil Then FreeMem(V9RawBuf[I]); V9RawBuf[I]:=Nil; V9RawCap[I]:=0;
+ End;
+End;
+
+Procedure V9Free;
+Var I: LongInt;
+Begin
+ For I:=0 To 11 Do Begin V9FreeFb(I); V9Fb[I].Cnt:=0; End;
+ V9FreeCtx; V9FreeOutput;
+ V9Ready:=False;
+End;
+
+{ ---- facteurs d'echelle ---- }
+Function V9ScaleX(V: LongInt; Var Sf: TV9Sf): LongInt; inline;
+Begin V9ScaleX:=LongInt(SarInt64(Int64(V)*Sf.XFp,14)); End;
+Function V9ScaleY(V: LongInt; Var Sf: TV9Sf): LongInt; inline;
+Begin V9ScaleY:=LongInt(SarInt64(Int64(V)*Sf.YFp,14)); End;
+
+Procedure V9SetSf(Var Sf: TV9Sf; OW,OH,TW,TH: LongInt);
+Begin
+ If Not ((2*TW>=OW) And (2*TH>=OH) And (TW<=16*OW) And (TH<=16*OH)) Then Begin
+  Sf.XFp:=-1; Sf.YFp:=-1; Sf.XStep:=16; Sf.YStep:=16; Exit;
+ End;
+ Sf.XFp:=(OW Shl 14) Div TW; Sf.YFp:=(OH Shl 14) Div TH;
+ Sf.XStep:=V9ScaleX(16,Sf); Sf.YStep:=V9ScaleY(16,Sf);
+End;
+
+Function V9IsScaled(Var Sf: TV9Sf): Boolean;
+Begin
+ V9IsScaled:=(Sf.XFp<>-1) And (Sf.YFp<>-1) And ((Sf.XFp<>16384) Or (Sf.YFp<>16384));
+End;
+
+{ ---- probabilites par defaut ---- }
+Procedure V9DefaultFc(Var Fc: TV9Fc);
+Const
+ DefInterp: Array[0..7] Of Byte=(235,162,36,255,34,3,149,144);
+ DefII: Array[0..3] Of Byte=(9,102,187,225);
+ DefCI: Array[0..4] Of Byte=(239,183,119,96,41);
+ DefCR: Array[0..4] Of Byte=(50,126,123,221,226);
+ DefSR: Array[0..9] Of Byte=(33,16,77,74,142,142,172,170,238,247);
+ DefCls0: Array[0..9] Of Byte=(224,144,192,168,192,176,192,198,198,245);
+ DefCls1: Array[0..9] Of Byte=(216,128,176,160,176,176,192,198,198,208);
+ DefBits: Array[0..9] Of Byte=(136,140,148,160,176,192,224,234,234,240);
+Var I: LongInt;
+Begin
+ Move(V9DefYProb,Fc.YMode,36); Move(V9DefUvProb,Fc.UvMode,90); Move(V9DefPartProb,Fc.Part,48);
+ Move(V9DefCoef,Fc.Coef,1728); Move(V9DefInterMode,Fc.InterMode,21);
+ Move(DefInterp,Fc.Interp,8); Move(DefII,Fc.IntraInter,4); Move(DefCI,Fc.CompInter,5);
+ Move(DefCR,Fc.CompRef,5); Move(DefSR,Fc.SingleRef,10);
+ Fc.Tx8[0,0]:=100; Fc.Tx8[1,0]:=66;
+ Fc.Tx16[0,0]:=20; Fc.Tx16[0,1]:=152; Fc.Tx16[1,0]:=15; Fc.Tx16[1,1]:=101;
+ Fc.Tx32[0,0]:=3; Fc.Tx32[0,1]:=136; Fc.Tx32[0,2]:=37; Fc.Tx32[1,0]:=5; Fc.Tx32[1,1]:=52; Fc.Tx32[1,2]:=13;
+ Fc.Skip[0]:=192; Fc.Skip[1]:=128; Fc.Skip[2]:=64;
+ Fc.Joints[0]:=32; Fc.Joints[1]:=64; Fc.Joints[2]:=96;
+ For I:=0 To 1 Do Begin
+  Fc.Comp[I].Sign:=128;
+  If I=0 Then Move(DefCls0,Fc.Comp[I].Classes,10) Else Move(DefCls1,Fc.Comp[I].Classes,10);
+  If I=0 Then Fc.Comp[I].Class0:=216 Else Fc.Comp[I].Class0:=208;
+  Move(DefBits,Fc.Comp[I].Bits,10);
+  Fc.Comp[I].Class0Fp[0,0]:=128; Fc.Comp[I].Class0Fp[0,1]:=128; Fc.Comp[I].Class0Fp[0,2]:=64;
+  Fc.Comp[I].Class0Fp[1,0]:=96; Fc.Comp[I].Class0Fp[1,1]:=112; Fc.Comp[I].Class0Fp[1,2]:=64;
+  Fc.Comp[I].Fp[0]:=64; Fc.Comp[I].Fp[1]:=96; Fc.Comp[I].Fp[2]:=64;
+  Fc.Comp[I].Class0Hp:=160; Fc.Comp[I].Hp:=128;
+ End;
+ Fc.Inited:=True;
+End;
+
+{ ---- mise a jour differentielle des probabilites ---- }
+Function V9InvRecenter(V,M: LongInt): LongInt;
+Begin
+ If V>2*M Then V9InvRecenter:=V
+ Else If (V And 1)<>0 Then V9InvRecenter:=M-((V+1) Shr 1)
+ Else V9InvRecenter:=M+(V Shr 1);
+End;
+
+Function V9InvRemap(V,M: LongInt): LongInt;
+Begin
+ V:=V9InvMap[V]; Dec(M);
+ If (M Shl 1)<=255 Then V9InvRemap:=1+V9InvRecenter(V,M)
+ Else V9InvRemap:=255-V9InvRecenter(V,255-1-M);
+End;
+
+Function V9DecUniform: LongInt;
+Var V: LongInt;
+Begin
+ V:=V9RdLit(V9R,7);
+ If V<65 Then V9DecUniform:=V Else V9DecUniform:=(V Shl 1)-65+V9RdBit(V9R);
+End;
+
+Function V9DecSubexp: LongInt;
+Begin
+ If V9RdBit(V9R)=0 Then Begin V9DecSubexp:=V9RdLit(V9R,4); Exit; End;
+ If V9RdBit(V9R)=0 Then Begin V9DecSubexp:=V9RdLit(V9R,4)+16; Exit; End;
+ If V9RdBit(V9R)=0 Then Begin V9DecSubexp:=V9RdLit(V9R,5)+32; Exit; End;
+ V9DecSubexp:=V9DecUniform+64;
+End;
+
+Procedure V9DiffUpd(Var P: Byte);
+Begin
+ If V9Rd(V9R,252)<>0 Then P:=V9InvRemap(V9DecSubexp,P);
+End;
+
+{ ---- adaptation arriere ---- }
+Function V9GetProb(Num,Den: Int64): LongInt;
+Var P: Int64;
+Begin
+ P:=(Num*256+(Den Shr 1)) Div Den;
+ If P>255 Then P:=255;
+ If P=0 Then P:=1;
+ V9GetProb:=P;
+End;
+
+Function V9Weighted(P1,P2,F: LongInt): LongInt;
+Begin V9Weighted:=(P1*(256-F)+P2*F+128) Shr 8; End;
+
+Function V9MergeProbs(Pre,C0,C1,Sat,MaxUpd: LongInt): LongInt;
+Var Pr,Cn,Fa: LongInt;
+Begin
+ If C0+C1=0 Then Pr:=128 Else Pr:=V9GetProb(C0,C0+C1);
+ Cn:=V9Min(C0+C1,Sat);
+ Fa:=MaxUpd*Cn Div Sat;
+ V9MergeProbs:=V9Weighted(Pre,Pr,Fa);
+End;
+
+Const
+ V9UpdFactor: Array[0..20] Of Byte=(0,6,12,19,25,32,38,44,51,57,64,70,76,83,89,96,102,108,115,121,128);
+
+Function V9ModeMvMerge(Pre,C0,C1: LongInt): LongInt;
+Var Den,Cn: LongInt;
+Begin
+ Den:=C0+C1;
+ If Den=0 Then V9ModeMvMerge:=Pre
+ Else Begin
+  Cn:=V9Min(Den,20);
+  V9ModeMvMerge:=V9Weighted(Pre,V9GetProb(C0,Den),V9UpdFactor[Cn]);
+ End;
+End;
+
+Type PV9L=^TV9L; TV9L=Array[0..1048575] Of LongInt;
+
+Function V9TreeMerge(Var Tree; I: LongInt; Pre,Dst: PV9B; Cn: PV9L): LongInt;
+Var T: ^TV9Tr; L,R,LC,RC: LongInt;
+Begin
+ T:=@Tree;
+ L:=T^[I];
+ If L<=0 Then LC:=Cn^[-L] Else LC:=V9TreeMerge(Tree,L,Pre,Dst,Cn);
+ R:=T^[I+1];
+ If R<=0 Then RC:=Cn^[-R] Else RC:=V9TreeMerge(Tree,R,Pre,Dst,Cn);
+ Dst^[I Shr 1]:=V9ModeMvMerge(Pre^[I Shr 1],LC,RC);
+ V9TreeMerge:=LC+RC;
+End;
+
+Procedure V9AdaptCoef;
+Var Pre: ^TV9Fc; Tx,Pl,Rf,Bn,Cx,M,Sat,Upd,N0,N1,N2,Ne,Eb: LongInt;
+Begin
+ Pre:=@V9FcCtx[V9CtxIdx];
+ If (V9FrameType=0) Or (V9IntraOnly<>0) Then Begin Upd:=112; Sat:=24; End
+ Else If V9LastFrameType=0 Then Begin Upd:=128; Sat:=24; End
+ Else Begin Upd:=112; Sat:=24; End;
+ For Tx:=0 To 3 Do For Pl:=0 To 1 Do For Rf:=0 To 1 Do For Bn:=0 To 5 Do Begin
+  For Cx:=0 To 5 Do Begin
+   If (Bn=0) And (Cx>=3) Then Break;
+   N0:=V9Cnt.Coef[Tx,Pl,Rf,Bn,Cx,0]; N1:=V9Cnt.Coef[Tx,Pl,Rf,Bn,Cx,1];
+   N2:=V9Cnt.Coef[Tx,Pl,Rf,Bn,Cx,2]; Ne:=V9Cnt.Coef[Tx,Pl,Rf,Bn,Cx,3];
+   Eb:=V9Cnt.Eob[Tx,Pl,Rf,Bn,Cx];
+   V9Fc.Coef[Tx,Pl,Rf,Bn,Cx,0]:=V9MergeProbs(Pre^.Coef[Tx,Pl,Rf,Bn,Cx,0],Ne,Eb-Ne,Sat,Upd);
+   V9Fc.Coef[Tx,Pl,Rf,Bn,Cx,1]:=V9MergeProbs(Pre^.Coef[Tx,Pl,Rf,Bn,Cx,1],N0,N1+N2,Sat,Upd);
+   V9Fc.Coef[Tx,Pl,Rf,Bn,Cx,2]:=V9MergeProbs(Pre^.Coef[Tx,Pl,Rf,Bn,Cx,2],N1,N2,Sat,Upd);
+  End;
+ End;
+End;
+
+Procedure V9AdaptMode;
+Var Pre: ^TV9Fc; I,J: LongInt;
+Begin
+ Pre:=@V9FcCtx[V9CtxIdx];
+ For I:=0 To 3 Do V9Fc.IntraInter[I]:=V9ModeMvMerge(Pre^.IntraInter[I],V9Cnt.IntraInter[I,0],V9Cnt.IntraInter[I,1]);
+ For I:=0 To 4 Do V9Fc.CompInter[I]:=V9ModeMvMerge(Pre^.CompInter[I],V9Cnt.CompInter[I,0],V9Cnt.CompInter[I,1]);
+ For I:=0 To 4 Do V9Fc.CompRef[I]:=V9ModeMvMerge(Pre^.CompRef[I],V9Cnt.CompRef[I,0],V9Cnt.CompRef[I,1]);
+ For I:=0 To 4 Do For J:=0 To 1 Do
+  V9Fc.SingleRef[I,J]:=V9ModeMvMerge(Pre^.SingleRef[I,J],V9Cnt.SingleRef[I,J,0],V9Cnt.SingleRef[I,J,1]);
+ For I:=0 To 6 Do V9TreeMerge(V9TrInter,0,@Pre^.InterMode[I,0],@V9Fc.InterMode[I,0],@V9Cnt.InterMode[I,0]);
+ For I:=0 To 3 Do V9TreeMerge(V9TrIntra,0,@Pre^.YMode[I,0],@V9Fc.YMode[I,0],@V9Cnt.YMode[I,0]);
+ For I:=0 To 9 Do V9TreeMerge(V9TrIntra,0,@Pre^.UvMode[I,0],@V9Fc.UvMode[I,0],@V9Cnt.UvMode[I,0]);
+ For I:=0 To 15 Do V9TreeMerge(V9TrPart,0,@Pre^.Part[I,0],@V9Fc.Part[I,0],@V9Cnt.Part[I,0]);
+ If V9Interp=4 Then
+  For I:=0 To 3 Do V9TreeMerge(V9TrInterp,0,@Pre^.Interp[I,0],@V9Fc.Interp[I,0],@V9Cnt.Interp[I,0]);
+ If V9TxMode=4 Then Begin
+  For I:=0 To 1 Do Begin
+   { 8x8 }
+   V9Fc.Tx8[I,0]:=V9ModeMvMerge(Pre^.Tx8[I,0],V9Cnt.Tx8[I,0],V9Cnt.Tx8[I,1]);
+   { 16x16 }
+   V9Fc.Tx16[I,0]:=V9ModeMvMerge(Pre^.Tx16[I,0],V9Cnt.Tx16[I,0],V9Cnt.Tx16[I,1]+V9Cnt.Tx16[I,2]);
+   V9Fc.Tx16[I,1]:=V9ModeMvMerge(Pre^.Tx16[I,1],V9Cnt.Tx16[I,1],V9Cnt.Tx16[I,2]);
+   { 32x32 }
+   V9Fc.Tx32[I,0]:=V9ModeMvMerge(Pre^.Tx32[I,0],V9Cnt.Tx32[I,0],V9Cnt.Tx32[I,1]+V9Cnt.Tx32[I,2]+V9Cnt.Tx32[I,3]);
+   V9Fc.Tx32[I,1]:=V9ModeMvMerge(Pre^.Tx32[I,1],V9Cnt.Tx32[I,1],V9Cnt.Tx32[I,2]+V9Cnt.Tx32[I,3]);
+   V9Fc.Tx32[I,2]:=V9ModeMvMerge(Pre^.Tx32[I,2],V9Cnt.Tx32[I,2],V9Cnt.Tx32[I,3]);
+  End;
+ End;
+ For I:=0 To 2 Do V9Fc.Skip[I]:=V9ModeMvMerge(Pre^.Skip[I],V9Cnt.Skip[I,0],V9Cnt.Skip[I,1]);
+End;
+
+Procedure V9AdaptMv;
+Var Pre: ^TV9Fc; I,J: LongInt;
+Begin
+ Pre:=@V9FcCtx[V9CtxIdx];
+ V9TreeMerge(V9TrJoint,0,@Pre^.Joints[0],@V9Fc.Joints[0],@V9Cnt.Joints[0]);
+ For I:=0 To 1 Do Begin
+  V9Fc.Comp[I].Sign:=V9ModeMvMerge(Pre^.Comp[I].Sign,V9Cnt.Comp[I].Sign[0],V9Cnt.Comp[I].Sign[1]);
+  V9TreeMerge(V9TrClass,0,@Pre^.Comp[I].Classes[0],@V9Fc.Comp[I].Classes[0],@V9Cnt.Comp[I].Classes[0]);
+  V9TreeMerge(V9TrC0,0,@Pre^.Comp[I].Class0,@V9Fc.Comp[I].Class0,@V9Cnt.Comp[I].Class0[0]);
+  For J:=0 To 9 Do
+   V9Fc.Comp[I].Bits[J]:=V9ModeMvMerge(Pre^.Comp[I].Bits[J],V9Cnt.Comp[I].Bits[J,0],V9Cnt.Comp[I].Bits[J,1]);
+  For J:=0 To 1 Do
+   V9TreeMerge(V9TrFp,0,@Pre^.Comp[I].Class0Fp[J,0],@V9Fc.Comp[I].Class0Fp[J,0],@V9Cnt.Comp[I].Class0Fp[J,0]);
+  V9TreeMerge(V9TrFp,0,@Pre^.Comp[I].Fp[0],@V9Fc.Comp[I].Fp[0],@V9Cnt.Comp[I].Fp[0]);
+  If V9AllowHp<>0 Then Begin
+   V9Fc.Comp[I].Class0Hp:=V9ModeMvMerge(Pre^.Comp[I].Class0Hp,V9Cnt.Comp[I].Class0Hp[0],V9Cnt.Comp[I].Class0Hp[1]);
+   V9Fc.Comp[I].Hp:=V9ModeMvMerge(Pre^.Comp[I].Hp,V9Cnt.Comp[I].Hp[0],V9Cnt.Comp[I].Hp[1]);
+  End;
+ End;
+End;
+
+{ ---- en-tete non compresse ---- }
+Procedure V9PastIndep;
+Var I: LongInt;
+Begin
+ FillChar(V9SegData,SizeOf(V9SegData),0); FillChar(V9SegMask,SizeOf(V9SegMask),0);
+ V9SegAbs:=0;
+ If V9SegMaps[V9SegLast]<>Nil Then FillChar(V9SegMaps[V9SegLast]^,V9MiRows*V9MiCols,0);
+ If V9SegMaps[V9SegCur]<>Nil Then FillChar(V9SegMaps[V9SegCur]^,V9MiRows*V9MiCols,0);
+ V9LfDeltaOn:=1; V9LfDeltaUpd:=1;
+ V9RefDelta[0]:=1; V9RefDelta[1]:=0; V9RefDelta[2]:=-1; V9RefDelta[3]:=-1;
+ V9ModeDelta[0]:=0; V9ModeDelta[1]:=0;
+ V9DefaultFc(V9Fc);
+ If (V9FrameType=0) Or (V9ErrorRes<>0) Or (V9ResetCtx=3) Then Begin
+  For I:=0 To 3 Do V9FcCtx[I]:=V9Fc;
+ End Else If V9ResetCtx=2 Then V9FcCtx[V9CtxIdx]:=V9Fc;
+ FillChar(V9SignBias,SizeOf(V9SignBias),0);
+ V9CtxIdx:=0;
+End;
+
+Procedure V9Resize(W,H: LongInt);
+Begin
+ If (W<>V9Width) Or (H<>V9Height) Or (V9Mip=Nil) Then Begin
+  V9MiCols:=(W+7) Shr 3; V9MiRows:=(H+7) Shr 3;
+  V9AllocCtx;
+  V9Width:=W; V9Height:=H;
+ End;
+End;
+
+Procedure V9ReadFrameSize(Var Rb: TV9Rb; Var W,H: LongInt);
+Begin
+ W:=V9RbLit(Rb,16)+1; H:=V9RbLit(Rb,16)+1;
+End;
+
+Procedure V9SkipRenderSize(Var Rb: TV9Rb);
+Var W,H: LongInt;
+Begin
+ If V9RbBit(Rb)<>0 Then V9ReadFrameSize(Rb,W,H);
+End;
+
+Procedure V9SetupFrameSize(Var Rb: TV9Rb);
+Var W,H: LongInt;
+Begin
+ V9ReadFrameSize(Rb,W,H);
+ V9Resize(W,H);
+ V9SkipRenderSize(Rb);
+ V9AllocFb(V9NewFb,V9Width,V9Height,V9SsX,V9SsY,V9Bd);
+End;
+
+Procedure V9SetupFrameSizeRefs(Var Rb: TV9Rb);
+Var W,H,I: LongInt; Found,Valid: Boolean;
+Begin
+ Found:=False; W:=0; H:=0;
+ For I:=0 To 2 Do Begin
+  If V9RbBit(Rb)<>0 Then Begin
+   If V9Refs[I].Idx<0 Then Fail('VP9 : taille de trame impossible a decoder.');
+   W:=V9Fb[V9Refs[I].Idx].W; H:=V9Fb[V9Refs[I].Idx].H; Found:=True; Break;
+  End;
+ End;
+ If Not Found Then V9ReadFrameSize(Rb,W,H);
+ If (W<=0) Or (H<=0) Then Fail('VP9 : taille de trame invalide.');
+ Valid:=False;
+ For I:=0 To 2 Do Begin
+  If V9Refs[I].Idx>=0 Then
+   If (2*W>=V9Fb[V9Refs[I].Idx].W) And (2*H>=V9Fb[V9Refs[I].Idx].H) And
+      (W<=16*V9Fb[V9Refs[I].Idx].W) And (H<=16*V9Fb[V9Refs[I].Idx].H) Then Valid:=True;
+ End;
+ If Not Valid Then Fail('VP9 : la reference a une taille invalide.');
+ For I:=0 To 2 Do Begin
+  If (V9Refs[I].Idx<0) Then Fail('VP9 : reference absente.');
+  If (V9Fb[V9Refs[I].Idx].Bd<>V9Bd) Or (V9Fb[V9Refs[I].Idx].SsX<>V9SsX) Or (V9Fb[V9Refs[I].Idx].SsY<>V9SsY) Then
+   Fail('VP9 : la reference a un format de couleur incompatible.');
+ End;
+ V9Resize(W,H);
+ V9SkipRenderSize(Rb);
+ V9AllocFb(V9NewFb,V9Width,V9Height,V9SsX,V9SsY,V9Bd);
+End;
+
+Procedure V9ReadBdCsSampling(Var Rb: TV9Rb);
+Begin
+ If V9Profile>=2 Then Begin
+  If V9RbBit(Rb)<>0 Then V9Bd:=12 Else V9Bd:=10;
+ End Else V9Bd:=8;
+ V9ColorSpace:=V9RbLit(Rb,3);
+ If V9ColorSpace<>7 Then Begin
+  V9RbBit(Rb); { color_range }
+  If (V9Profile=1) Or (V9Profile=3) Then Begin
+   V9SsX:=V9RbBit(Rb); V9SsY:=V9RbBit(Rb);
+   If (V9SsX=1) And (V9SsY=1) Then Fail('VP9 : 4:2:0 interdit dans les profils 1 et 3.');
+   If V9RbBit(Rb)<>0 Then Fail('VP9 : bit reserve.');
+  End Else Begin V9SsX:=1; V9SsY:=1; End;
+ End Else Begin
+  If (V9Profile=1) Or (V9Profile=3) Then Begin
+   V9SsX:=0; V9SsY:=0;
+   If V9RbBit(Rb)<>0 Then Fail('VP9 : bit reserve.');
+  End Else Fail('VP9 : 4:4:4 interdit dans les profils 0 et 2.');
+ End;
+End;
+
+Procedure V9ReadSyncCode(Var Rb: TV9Rb);
+Begin
+ If (V9RbLit(Rb,8)<>$49) Or (V9RbLit(Rb,8)<>$83) Or (V9RbLit(Rb,8)<>$42) Then Fail('VP9 : code de synchronisation invalide.');
+End;
+
+Procedure V9SetupLoopfilter(Var Rb: TV9Rb);
+Var I: LongInt;
+Begin
+ V9LfLevel:=V9RbLit(Rb,6); V9LfSharp:=V9RbLit(Rb,3);
+ V9LfDeltaUpd:=0;
+ V9LfDeltaOn:=V9RbBit(Rb);
+ If V9LfDeltaOn<>0 Then Begin
+  V9LfDeltaUpd:=V9RbBit(Rb);
+  If V9LfDeltaUpd<>0 Then Begin
+   For I:=0 To 3 Do If V9RbBit(Rb)<>0 Then V9RefDelta[I]:=V9RbSLit(Rb,6);
+   For I:=0 To 1 Do If V9RbBit(Rb)<>0 Then V9ModeDelta[I]:=V9RbSLit(Rb,6);
+  End;
+ End;
+End;
+
+Function V9ReadDeltaQ(Var Rb: TV9Rb): LongInt;
+Begin
+ If V9RbBit(Rb)<>0 Then V9ReadDeltaQ:=V9RbSLit(Rb,4) Else V9ReadDeltaQ:=0;
+End;
+
+Procedure V9SetupQuant(Var Rb: TV9Rb);
+Begin
+ V9BaseQ:=V9RbLit(Rb,8);
+ V9YDcD:=V9ReadDeltaQ(Rb); V9UvDcD:=V9ReadDeltaQ(Rb); V9UvAcD:=V9ReadDeltaQ(Rb);
+ If (V9BaseQ=0) And (V9YDcD=0) And (V9UvDcD=0) And (V9UvAcD=0) Then V9Lossless:=1 Else V9Lossless:=0;
+End;
+
+Function V9DcQuant(Q,Delta: LongInt): LongInt;
+Begin
+ Q:=V9Clamp(Q+Delta,0,255);
+ Case V9Bd Of
+  10: V9DcQuant:=V9DcQ10[Q];
+  12: V9DcQuant:=V9DcQ12[Q];
+ Else V9DcQuant:=V9DcQ8[Q];
+ End;
+End;
+
+Function V9AcQuant(Q,Delta: LongInt): LongInt;
+Begin
+ Q:=V9Clamp(Q+Delta,0,255);
+ Case V9Bd Of
+  10: V9AcQuant:=V9AcQ10[Q];
+  12: V9AcQuant:=V9AcQ12[Q];
+ Else V9AcQuant:=V9AcQ8[Q];
+ End;
+End;
+
+Function V9SegActive(Seg,Feat: LongInt): Boolean; inline;
+Begin V9SegActive:=(V9SegOn<>0) And ((V9SegMask[Seg] And (1 Shl Feat))<>0); End;
+
+Procedure V9SetupSeg(Var Rb: TV9Rb);
+Const FMax: Array[0..3] Of LongInt=(255,63,3,0);
+ FBits: Array[0..3] Of LongInt=(8,6,2,0);
+ FSign: Array[0..3] Of LongInt=(1,1,0,0);
+Var I,J,D: LongInt;
+Begin
+ V9SegUpdMap:=0; V9SegUpdData:=0;
+ V9SegOn:=V9RbBit(Rb);
+ If V9SegOn=0 Then Exit;
+ V9SegUpdMap:=V9RbBit(Rb);
+ If V9SegUpdMap<>0 Then Begin
+  For I:=0 To 6 Do If V9RbBit(Rb)<>0 Then V9SegTree[I]:=V9RbLit(Rb,8) Else V9SegTree[I]:=255;
+  V9SegTemporal:=V9RbBit(Rb);
+  If V9SegTemporal<>0 Then Begin
+   For I:=0 To 2 Do If V9RbBit(Rb)<>0 Then V9SegPredP[I]:=V9RbLit(Rb,8) Else V9SegPredP[I]:=255;
+  End Else For I:=0 To 2 Do V9SegPredP[I]:=255;
+ End;
+ V9SegUpdData:=V9RbBit(Rb);
+ If V9SegUpdData<>0 Then Begin
+  V9SegAbs:=V9RbBit(Rb);
+  FillChar(V9SegData,SizeOf(V9SegData),0); FillChar(V9SegMask,SizeOf(V9SegMask),0);
+  For I:=0 To 7 Do For J:=0 To 3 Do Begin
+   D:=0;
+   If V9RbBit(Rb)<>0 Then Begin
+    V9SegMask[I]:=V9SegMask[I] Or (1 Shl J);
+    D:=V9RbLit(Rb,FBits[J]);
+    If D>FMax[J] Then D:=FMax[J];
+    If FSign[J]<>0 Then If V9RbBit(Rb)<>0 Then D:=-D;
+   End;
+   V9SegData[I,J]:=D;
+  End;
+ End;
+End;
+
+Procedure V9SetupSegDequant;
+Var I,Q,N: LongInt;
+Begin
+ If V9SegOn<>0 Then N:=7 Else N:=0;
+ For I:=0 To N Do Begin
+  Q:=V9BaseQ;
+  If (V9SegOn<>0) And V9SegActive(I,0) Then Begin
+   If V9SegAbs<>0 Then Q:=V9SegData[I,0] Else Q:=V9BaseQ+V9SegData[I,0];
+   Q:=V9Clamp(Q,0,255);
+  End;
+  V9YDq[I,0]:=V9DcQuant(Q,V9YDcD); V9YDq[I,1]:=V9AcQuant(Q,0);
+  V9UvDq[I,0]:=V9DcQuant(Q,V9UvDcD); V9UvDq[I,1]:=V9AcQuant(Q,V9UvAcD);
+ End;
+End;
+
+Procedure V9SetupTileInfo(Var Rb: TV9Rb);
+Var MinL,MaxL,MaxOnes,Sb: LongInt;
+Begin
+ Sb:=(V9AlignCols) Shr 3;
+ MinL:=0;
+ While (64 Shl MinL)<Sb Do Inc(MinL);
+ MaxL:=1;
+ While (Sb Shr MaxL)>=4 Do Inc(MaxL);
+ Dec(MaxL);
+ MaxOnes:=MaxL-MinL;
+ V9Log2TileCols:=MinL;
+ While MaxOnes>0 Do Begin
+  Dec(MaxOnes);
+  If V9RbBit(Rb)=0 Then Break;
+  Inc(V9Log2TileCols);
+ End;
+ If V9Log2TileCols>6 Then Fail('VP9 : nombre de colonnes de tuiles invalide.');
+ V9Log2TileRows:=V9RbBit(Rb);
+ If V9Log2TileRows<>0 Then Inc(V9Log2TileRows,V9RbBit(Rb));
+End;
+
+{ Lecture de l'en-tete non compresse. Retourne la taille de la premiere partition
+  (0 pour show_existing_frame, dans ce cas V9ShowIdx contient l'image). }
+Var V9ShowIdx,V9HdrBytes: LongInt;
+
+Function V9ReadUncomp(Data: PV9B; Len: LongInt): LongInt;
+Var Rb: TV9Rb; I,P,Ref,Idx: LongInt;
+Begin
+ V9RbInit(Rb,Data,Len);
+ V9LastFrameType:=V9FrameType; V9LastIntraOnly:=V9IntraOnly;
+ If V9RbLit(Rb,2)<>2 Then Fail('VP9 : marqueur de trame invalide.');
+ P:=V9RbBit(Rb); P:=P Or (V9RbBit(Rb) Shl 1);
+ If P>2 Then Inc(P,V9RbBit(Rb));
+ If P>3 Then Fail('VP9 : profil non supporte.');
+ V9Profile:=P;
+ V9ShowExisting:=V9RbBit(Rb);
+ If V9ShowExisting<>0 Then Begin
+  Idx:=V9RefMap[V9RbLit(Rb,3)];
+  If (Idx<0) Or (V9Fb[Idx].Cnt<1) Then Fail('VP9 : le tampon ne contient pas de trame decodee.');
+  V9ShowIdx:=Idx; V9RefreshFlags:=0; V9LfLevel:=0; V9ShowFrame:=1;
+  V9HdrBytes:=(Rb.Pos+7) Shr 3;
+  V9ReadUncomp:=0; Exit;
+ End;
+ V9FrameType:=V9RbBit(Rb); V9ShowFrame:=V9RbBit(Rb); V9ErrorRes:=V9RbBit(Rb);
+ If V9FrameType=0 Then Begin
+  V9ReadSyncCode(Rb);
+  V9ReadBdCsSampling(Rb);
+  V9RefreshFlags:=255;
+  For I:=0 To 2 Do V9Refs[I].Idx:=-1;
+  V9SetupFrameSize(Rb);
+  If V9NeedResync Then Begin
+   For I:=0 To 7 Do Begin
+    If V9RefMap[I]>=0 Then Dec(V9Fb[V9RefMap[I]].Cnt);
+    V9RefMap[I]:=-1;
+   End;
+   V9NeedResync:=False;
+  End;
+ End Else Begin
+  If V9ShowFrame<>0 Then V9IntraOnly:=0 Else V9IntraOnly:=V9RbBit(Rb);
+  If V9ErrorRes<>0 Then V9ResetCtx:=0 Else V9ResetCtx:=V9RbLit(Rb,2);
+  If V9IntraOnly<>0 Then Begin
+   V9ReadSyncCode(Rb);
+   If V9Profile>0 Then V9ReadBdCsSampling(Rb)
+   Else Begin V9ColorSpace:=2; V9SsX:=1; V9SsY:=1; V9Bd:=8; End;
+   V9RefreshFlags:=V9RbLit(Rb,8);
+   For I:=0 To 2 Do V9Refs[I].Idx:=-1;
+   V9SetupFrameSize(Rb);
+   If V9NeedResync Then Begin
+    For I:=0 To 7 Do Begin
+     If V9RefMap[I]>=0 Then Dec(V9Fb[V9RefMap[I]].Cnt);
+     V9RefMap[I]:=-1;
+    End;
+    V9NeedResync:=False;
+   End;
+  End Else Begin
+   If V9NeedResync Then Fail('VP9 : une image cle ou intra seule est requise.');
+   V9RefreshFlags:=V9RbLit(Rb,8);
+   For I:=0 To 2 Do Begin
+    Ref:=V9RbLit(Rb,3);
+    V9Refs[I].Idx:=V9RefMap[Ref];
+    V9SignBias[1+I]:=V9RbBit(Rb);
+   End;
+   V9SetupFrameSizeRefs(Rb);
+   V9AllowHp:=V9RbBit(Rb);
+   If V9RbBit(Rb)<>0 Then V9Interp:=4
+   Else Begin
+    Case V9RbLit(Rb,2) Of 0: V9Interp:=1; 1: V9Interp:=0; 2: V9Interp:=2; Else V9Interp:=3; End;
+   End;
+   For I:=0 To 2 Do
+    V9SetSf(V9Refs[I].Sf,V9Fb[V9Refs[I].Idx].W,V9Fb[V9Refs[I].Idx].H,V9Width,V9Height);
+  End;
+ End;
+ If V9ErrorRes=0 Then Begin
+  V9RefreshCtx:=V9RbBit(Rb); V9Parallel:=V9RbBit(Rb);
+  If V9Parallel=0 Then FillChar(V9Cnt,SizeOf(V9Cnt),0);
+ End Else Begin V9RefreshCtx:=0; V9Parallel:=1; End;
+ V9CtxIdx:=V9RbLit(Rb,2);
+ If (V9FrameType=0) Or (V9IntraOnly<>0) Or (V9ErrorRes<>0) Then V9PastIndep;
+ V9SetupLoopfilter(Rb);
+ V9SetupQuant(Rb);
+ V9SetupSeg(Rb);
+ V9SetupSegDequant;
+ V9SetupTileInfo(Rb);
+ I:=V9RbLit(Rb,16);
+ If I=0 Then Fail('VP9 : taille d''en-tete invalide.');
+ V9ReadUncomp:=I;
+ V9HdrBytes:=(Rb.Pos+7) Shr 3;
+End;
+
+{ ---- en-tete compresse ---- }
+Procedure V9UpdMvProbs(Var P; N: LongInt);
+Var A: PV9B; I: LongInt;
+Begin
+ A:=@P;
+ For I:=0 To N-1 Do If V9Rd(V9R,252)<>0 Then A^[I]:=(V9RdLit(V9R,7) Shl 1) Or 1;
+End;
+
+Function V9CompAllowed: Boolean;
+Begin
+ V9CompAllowed:=(V9SignBias[2]<>V9SignBias[1]) Or (V9SignBias[3]<>V9SignBias[1]);
+End;
+
+Procedure V9SetupCompRef;
+Begin
+ If V9SignBias[1]=V9SignBias[2] Then Begin
+  V9CompFixed:=3; V9CompVar[0]:=1; V9CompVar[1]:=2;
+ End Else If V9SignBias[1]=V9SignBias[3] Then Begin
+  V9CompFixed:=2; V9CompVar[0]:=1; V9CompVar[1]:=3;
+ End Else Begin
+  V9CompFixed:=1; V9CompVar[0]:=2; V9CompVar[1]:=3;
+ End;
+End;
+
+Procedure V9ReadCompressed(Data: PV9B; Len: LongInt);
+Var I,J,K,L,M,Tx,MaxTx: LongInt;
+Begin
+ If V9BrInit(V9R,Data,Len)<>0 Then Fail('VP9 : en-tete compresse corrompu.');
+ If V9Lossless<>0 Then V9TxMode:=0
+ Else Begin
+  V9TxMode:=V9RdLit(V9R,2);
+  If V9TxMode=3 Then Inc(V9TxMode,V9RdBit(V9R));
+ End;
+ If V9TxMode=4 Then Begin
+  For I:=0 To 1 Do V9DiffUpd(V9Fc.Tx8[I,0]);
+  For I:=0 To 1 Do For J:=0 To 1 Do V9DiffUpd(V9Fc.Tx16[I,J]);
+  For I:=0 To 1 Do For J:=0 To 2 Do V9DiffUpd(V9Fc.Tx32[I,J]);
+ End;
+ MaxTx:=V9TxModeMax[V9TxMode];
+ For Tx:=0 To MaxTx Do Begin
+  If V9RdBit(V9R)<>0 Then
+   For I:=0 To 1 Do For J:=0 To 1 Do For K:=0 To 5 Do Begin
+    For L:=0 To 5 Do Begin
+     If (K=0) And (L>=3) Then Break;
+     For M:=0 To 2 Do V9DiffUpd(V9Fc.Coef[Tx,I,J,K,L,M]);
+    End;
+   End;
+ End;
+ For K:=0 To 2 Do V9DiffUpd(V9Fc.Skip[K]);
+ If (V9FrameType<>0) And (V9IntraOnly=0) Then Begin
+  For I:=0 To 6 Do For J:=0 To 2 Do V9DiffUpd(V9Fc.InterMode[I,J]);
+  If V9Interp=4 Then
+   For J:=0 To 3 Do For I:=0 To 1 Do V9DiffUpd(V9Fc.Interp[J,I]);
+  For I:=0 To 3 Do V9DiffUpd(V9Fc.IntraInter[I]);
+  { mode de reference }
+  If V9CompAllowed Then Begin
+   If V9RdBit(V9R)<>0 Then Begin
+    If V9RdBit(V9R)<>0 Then V9RefMode:=2 Else V9RefMode:=1;
+   End Else V9RefMode:=0;
+  End Else V9RefMode:=0;
+  If V9RefMode<>0 Then V9SetupCompRef;
+  If V9RefMode=2 Then For I:=0 To 4 Do V9DiffUpd(V9Fc.CompInter[I]);
+  If V9RefMode<>1 Then For I:=0 To 4 Do Begin
+   V9DiffUpd(V9Fc.SingleRef[I,0]); V9DiffUpd(V9Fc.SingleRef[I,1]);
+  End;
+  If V9RefMode<>0 Then For I:=0 To 4 Do V9DiffUpd(V9Fc.CompRef[I]);
+  For J:=0 To 3 Do For I:=0 To 8 Do V9DiffUpd(V9Fc.YMode[J,I]);
+  For J:=0 To 15 Do For I:=0 To 2 Do V9DiffUpd(V9Fc.Part[J,I]);
+  { mv }
+  V9UpdMvProbs(V9Fc.Joints,3);
+  For I:=0 To 1 Do Begin
+   V9UpdMvProbs(V9Fc.Comp[I].Sign,1);
+   V9UpdMvProbs(V9Fc.Comp[I].Classes,10);
+   V9UpdMvProbs(V9Fc.Comp[I].Class0,1);
+   V9UpdMvProbs(V9Fc.Comp[I].Bits,10);
+  End;
+  For I:=0 To 1 Do Begin
+   For J:=0 To 1 Do V9UpdMvProbs(V9Fc.Comp[I].Class0Fp[J],3);
+   V9UpdMvProbs(V9Fc.Comp[I].Fp,3);
+  End;
+  If V9AllowHp<>0 Then
+   For I:=0 To 1 Do Begin
+    V9UpdMvProbs(V9Fc.Comp[I].Class0Hp,1);
+    V9UpdMvProbs(V9Fc.Comp[I].Hp,1);
+   End;
+ End Else V9RefMode:=0;
+End;
+
+{ ====================== lecture des modes (vp9_decodemv.c) ====================== }
+Function V9IsInter(M: PV9Mi): Boolean; inline;
+Begin V9IsInter:=M^.R0>0; End;
+
+Function V9HasSecond(M: PV9Mi): Boolean; inline;
+Begin V9HasSecond:=M^.R1>0; End;
+
+{ ---- segmentation ---- }
+Function V9GetSegId(Map: PV9B; Off: LongInt): LongInt;
+Var X,Y,S: LongInt;
+Begin
+ S:=255;
+ For Y:=0 To V9YMis-1 Do For X:=0 To V9XMis-1 Do
+  If Map^[Off+Y*V9MiCols+X]<S Then S:=Map^[Off+Y*V9MiCols+X];
+ V9GetSegId:=S;
+End;
+
+Procedure V9SetSegId(Off,Id: LongInt);
+Var X,Y: LongInt; M: PV9B;
+Begin
+ M:=V9SegMaps[V9SegCur];
+ For Y:=0 To V9YMis-1 Do For X:=0 To V9XMis-1 Do M^[Off+Y*V9MiCols+X]:=Id;
+End;
+
+Procedure V9CopySegId(Off: LongInt);
+Var X,Y: LongInt; M,L: PV9B;
+Begin
+ M:=V9SegMaps[V9SegCur]; L:=V9SegMaps[V9SegLast];
+ For Y:=0 To V9YMis-1 Do For X:=0 To V9XMis-1 Do M^[Off+Y*V9MiCols+X]:=L^[Off+Y*V9MiCols+X];
+End;
+
+Function V9ReadIntraSegId(Off: LongInt): LongInt;
+Var S: LongInt;
+Begin
+ If V9SegOn=0 Then Begin V9ReadIntraSegId:=0; Exit; End;
+ If V9SegUpdMap=0 Then Begin V9CopySegId(Off); V9ReadIntraSegId:=0; Exit; End;
+ S:=V9RdTree(V9R,V9TrSeg,@V9SegTree);
+ V9SetSegId(Off,S); V9ReadIntraSegId:=S;
+End;
+
+Function V9ReadInterSegId(Off: LongInt): LongInt;
+Var Pred,S,Ctx: LongInt;
+Begin
+ If V9SegOn=0 Then Begin V9ReadInterSegId:=0; Exit; End;
+ Pred:=V9GetSegId(V9SegMaps[V9SegLast],Off);
+ If V9SegUpdMap=0 Then Begin V9CopySegId(Off); V9ReadInterSegId:=Pred; Exit; End;
+ If V9SegTemporal<>0 Then Begin
+  Ctx:=0;
+  If V9Above<>Nil Then Inc(Ctx,V9Above^.SegPred);
+  If V9Left<>Nil Then Inc(Ctx,V9Left^.SegPred);
+  V9Cur^.SegPred:=V9Rd(V9R,V9SegPredP[Ctx]);
+  If V9Cur^.SegPred<>0 Then S:=Pred Else S:=V9RdTree(V9R,V9TrSeg,@V9SegTree);
+ End Else S:=V9RdTree(V9R,V9TrSeg,@V9SegTree);
+ V9SetSegId(Off,S);
+ V9ReadInterSegId:=S;
+End;
+
+Function V9ReadSkip(Seg: LongInt): LongInt;
+Var Ctx,S: LongInt;
+Begin
+ If V9SegActive(Seg,3) Then Begin V9ReadSkip:=1; Exit; End;
+ Ctx:=0;
+ If V9Above<>Nil Then Inc(Ctx,V9Above^.Skip);
+ If V9Left<>Nil Then Inc(Ctx,V9Left^.Skip);
+ S:=V9Rd(V9R,V9Fc.Skip[Ctx]);
+ If V9DoCnt Then Inc(V9Cnt.Skip[Ctx,S]);
+ V9ReadSkip:=S;
+End;
+
+Function V9TxCtx: LongInt;
+Var MaxTx,A,L: LongInt;
+Begin
+ MaxTx:=V9MaxTx[V9Cur^.Sb];
+ If (V9Above<>Nil) And (V9Above^.Skip=0) Then A:=V9Above^.Tx Else A:=MaxTx;
+ If (V9Left<>Nil) And (V9Left^.Skip=0) Then L:=V9Left^.Tx Else L:=MaxTx;
+ If V9Left=Nil Then L:=A;
+ If V9Above=Nil Then A:=L;
+ If (A+L)>MaxTx Then V9TxCtx:=1 Else V9TxCtx:=0;
+End;
+
+Function V9ReadTxSize(AllowSelect: Boolean): LongInt;
+Var MaxTx,Ctx,T: LongInt;
+Begin
+ MaxTx:=V9MaxTx[V9Cur^.Sb];
+ If AllowSelect And (V9TxMode=4) And (V9Cur^.Sb>=3) Then Begin
+  Ctx:=V9TxCtx;
+  Case MaxTx Of
+   1: T:=V9Rd(V9R,V9Fc.Tx8[Ctx,0]);
+   2: Begin
+       T:=V9Rd(V9R,V9Fc.Tx16[Ctx,0]);
+       If T<>0 Then Inc(T,V9Rd(V9R,V9Fc.Tx16[Ctx,1]));
+      End;
+  Else Begin
+       T:=V9Rd(V9R,V9Fc.Tx32[Ctx,0]);
+       If T<>0 Then Begin
+        Inc(T,V9Rd(V9R,V9Fc.Tx32[Ctx,1]));
+        If T<>1 Then Inc(T,V9Rd(V9R,V9Fc.Tx32[Ctx,2]));
+       End;
+      End;
+  End;
+  If V9DoCnt Then Case MaxTx Of
+   1: Inc(V9Cnt.Tx8[Ctx,T]);
+   2: Inc(V9Cnt.Tx16[Ctx,T]);
+  Else Inc(V9Cnt.Tx32[Ctx,T]);
+  End;
+  V9ReadTxSize:=T;
+ End Else V9ReadTxSize:=V9Min(MaxTx,V9TxModeMax[V9TxMode]);
+End;
+
+{ ---- modes intra ---- }
+Function V9LeftBlockMode(M,Lm: PV9Mi; B: LongInt): LongInt;
+Begin
+ If (B=0) Or (B=2) Then Begin
+  If (Lm=Nil) Or (Lm^.R0>0) Then V9LeftBlockMode:=0
+  Else If Lm^.Sb<3 Then V9LeftBlockMode:=Lm^.BMode[B+1] Else V9LeftBlockMode:=Lm^.Mode;
+ End Else V9LeftBlockMode:=M^.BMode[B-1];
+End;
+
+Function V9AboveBlockMode(M,Am: PV9Mi; B: LongInt): LongInt;
+Begin
+ If (B=0) Or (B=1) Then Begin
+  If (Am=Nil) Or (Am^.R0>0) Then V9AboveBlockMode:=0
+  Else If Am^.Sb<3 Then V9AboveBlockMode:=Am^.BMode[B+2] Else V9AboveBlockMode:=Am^.Mode;
+ End Else V9AboveBlockMode:=M^.BMode[B-2];
+End;
+
+Function V9ReadKfMode(Blk: LongInt): LongInt;
+Var A,L: LongInt;
+Begin
+ A:=V9AboveBlockMode(V9Cur,V9Above,Blk); L:=V9LeftBlockMode(V9Cur,V9Left,Blk);
+ V9ReadKfMode:=V9RdTree(V9R,V9TrIntra,@V9KfYMode[(A*10+L)*9]);
+End;
+
+Procedure V9ReadIntraFrameModeInfo(Off: LongInt);
+Var Mi: PV9Mi; M: LongInt;
+Begin
+ Mi:=V9Cur;
+ Mi^.Seg:=V9ReadIntraSegId(Off);
+ Mi^.Skip:=V9ReadSkip(Mi^.Seg);
+ Mi^.Tx:=V9ReadTxSize(True);
+ Mi^.R0:=0; Mi^.R1:=-1;
+ Case Mi^.Sb Of
+  0: Begin
+      Mi^.BMode[0]:=V9ReadKfMode(0); Mi^.BMode[1]:=V9ReadKfMode(1);
+      Mi^.BMode[2]:=V9ReadKfMode(2); Mi^.BMode[3]:=V9ReadKfMode(3);
+      Mi^.Mode:=Mi^.BMode[3];
+     End;
+  1: Begin
+      M:=V9ReadKfMode(0); Mi^.BMode[0]:=M; Mi^.BMode[2]:=M;
+      M:=V9ReadKfMode(1); Mi^.BMode[1]:=M; Mi^.BMode[3]:=M; Mi^.Mode:=M;
+     End;
+  2: Begin
+      M:=V9ReadKfMode(0); Mi^.BMode[0]:=M; Mi^.BMode[1]:=M;
+      M:=V9ReadKfMode(2); Mi^.BMode[2]:=M; Mi^.BMode[3]:=M; Mi^.Mode:=M;
+     End;
+ Else Mi^.Mode:=V9ReadKfMode(0);
+ End;
+ Mi^.Uv:=V9RdTree(V9R,V9TrIntra,@V9KfUvMode[Mi^.Mode*9]);
+End;
+
+Function V9ReadIntraModeY(Grp: LongInt): LongInt;
+Var M: LongInt;
+Begin
+ M:=V9RdTree(V9R,V9TrIntra,@V9Fc.YMode[Grp,0]);
+ If V9DoCnt Then Inc(V9Cnt.YMode[Grp,M]);
+ V9ReadIntraModeY:=M;
+End;
+
+Procedure V9ReadIntraBlockModeInfo;
+Var Mi: PV9Mi; M,Uv: LongInt;
+Begin
+ Mi:=V9Cur;
+ Case Mi^.Sb Of
+  0: Begin
+      Mi^.BMode[0]:=V9ReadIntraModeY(0); Mi^.BMode[1]:=V9ReadIntraModeY(0);
+      Mi^.BMode[2]:=V9ReadIntraModeY(0); Mi^.BMode[3]:=V9ReadIntraModeY(0);
+      Mi^.Mode:=Mi^.BMode[3];
+     End;
+  1: Begin
+      M:=V9ReadIntraModeY(0); Mi^.BMode[0]:=M; Mi^.BMode[2]:=M;
+      M:=V9ReadIntraModeY(0); Mi^.BMode[1]:=M; Mi^.BMode[3]:=M; Mi^.Mode:=M;
+     End;
+  2: Begin
+      M:=V9ReadIntraModeY(0); Mi^.BMode[0]:=M; Mi^.BMode[1]:=M;
+      M:=V9ReadIntraModeY(0); Mi^.BMode[2]:=M; Mi^.BMode[3]:=M; Mi^.Mode:=M;
+     End;
+ Else Mi^.Mode:=V9ReadIntraModeY(V9SizeGroup[Mi^.Sb]);
+ End;
+ Uv:=V9RdTree(V9R,V9TrIntra,@V9Fc.UvMode[Mi^.Mode,0]);
+ If V9DoCnt Then Inc(V9Cnt.UvMode[Mi^.Mode,Uv]);
+ Mi^.Uv:=Uv;
+ Mi^.Filt:=3;
+ Mi^.R0:=0; Mi^.R1:=-1;
+End;
+
+{ ---- vecteurs de mouvement ---- }
+
+Function V9ReadMvComp(Ci: LongInt; UseHp: Boolean): LongInt;
+Var Sign,Cls,D,Mag,Fr,Hp,I: LongInt; P: ^TV9Nmv;
+Begin
+ P:=@V9Fc.Comp[Ci];
+ Sign:=V9Rd(V9R,P^.Sign);
+ Cls:=V9RdTree(V9R,V9TrClass,@P^.Classes);
+ If Cls=0 Then Begin
+  D:=V9Rd(V9R,P^.Class0); Mag:=0;
+ End Else Begin
+  D:=0;
+  For I:=0 To Cls-1 Do D:=D Or (V9Rd(V9R,P^.Bits[I]) Shl I);
+  Mag:=2 Shl (Cls+2);
+ End;
+ If Cls=0 Then Fr:=V9RdTree(V9R,V9TrFp,@P^.Class0Fp[D,0]) Else Fr:=V9RdTree(V9R,V9TrFp,@P^.Fp);
+ If UseHp Then Begin
+  If Cls=0 Then Hp:=V9Rd(V9R,P^.Class0Hp) Else Hp:=V9Rd(V9R,P^.Hp);
+ End Else Hp:=1;
+ Inc(Mag,((D Shl 3) Or (Fr Shl 1) Or Hp)+1);
+ If Sign<>0 Then V9ReadMvComp:=-Mag Else V9ReadMvComp:=Mag;
+End;
+
+Procedure V9IncMvComp(Ci,V: LongInt);
+Var S,Z,C,O,D,F,E,I,N: LongInt;
+Begin
+ If V<0 Then S:=1 Else S:=0;
+ Inc(V9Cnt.Comp[Ci].Sign[S]);
+ If S<>0 Then Z:=-V-1 Else Z:=V-1;
+ If Z>=8192 Then C:=10
+ Else Begin
+  N:=Z Shr 3; C:=0;
+  While N>1 Do Begin N:=N Shr 1; Inc(C); End;
+ End;
+ If C=0 Then O:=Z Else O:=Z-(2 Shl (C+2));
+ Inc(V9Cnt.Comp[Ci].Classes[C]);
+ D:=O Shr 3; F:=(O Shr 1) And 3; E:=O And 1;
+ If C=0 Then Begin
+  Inc(V9Cnt.Comp[Ci].Class0[D]);
+  Inc(V9Cnt.Comp[Ci].Class0Fp[D,F]);
+  Inc(V9Cnt.Comp[Ci].Class0Hp[E]);
+ End Else Begin
+  For I:=0 To C-1 Do Inc(V9Cnt.Comp[Ci].Bits[I,(D Shr I) And 1]);
+  Inc(V9Cnt.Comp[Ci].Fp[F]);
+  Inc(V9Cnt.Comp[Ci].Hp[E]);
+ End;
+End;
+
+Procedure V9ReadMv(Var Mv: TV9Mv; Var Ref: TV9Mv);
+Var J,Dr,Dc: LongInt; UseHp: Boolean;
+Begin
+ J:=V9RdTree(V9R,V9TrJoint,@V9Fc.Joints);
+ UseHp:=(V9AllowHp<>0) And (V9Abs(Ref.R)<64) And (V9Abs(Ref.C)<64);
+ Dr:=0; Dc:=0;
+ If (J=2) Or (J=3) Then Dr:=V9ReadMvComp(0,UseHp);
+ If (J=1) Or (J=3) Then Dc:=V9ReadMvComp(1,UseHp);
+ If V9DoCnt Then Begin
+  Inc(V9Cnt.Joints[J]);
+  If (J=2) Or (J=3) Then V9IncMvComp(0,Dr);
+  If (J=1) Or (J=3) Then V9IncMvComp(1,Dc);
+ End;
+ Mv.R:=Ref.R+Dr; Mv.C:=Ref.C+Dc;
+ If (Mv.R<=-16384) Or (Mv.R>=16383) Or (Mv.C<=-16384) Or (Mv.C>=16383) Then Fail('VP9 : vecteur de mouvement invalide.');
+End;
+
+{ ---- contextes de prediction ---- }
+Function V9RefOf(M: PV9Mi; I: LongInt): LongInt; inline;
+Begin If I=0 Then V9RefOf:=M^.R0 Else V9RefOf:=M^.R1; End;
+
+Function V9CtxCompMode: LongInt;
+Var A,L,E: PV9Mi; Ctx: LongInt;
+Begin
+ A:=V9Above; L:=V9Left;
+ If (A<>Nil) And (L<>Nil) Then Begin
+  If Not V9HasSecond(A) And Not V9HasSecond(L) Then
+   Ctx:=Ord(A^.R0=V9CompFixed) Xor Ord(L^.R0=V9CompFixed)
+  Else If Not V9HasSecond(A) Then
+   Ctx:=2+Ord((A^.R0=V9CompFixed) Or Not V9IsInter(A))
+  Else If Not V9HasSecond(L) Then
+   Ctx:=2+Ord((L^.R0=V9CompFixed) Or Not V9IsInter(L))
+  Else Ctx:=4;
+ End Else If (A<>Nil) Or (L<>Nil) Then Begin
+  If A<>Nil Then E:=A Else E:=L;
+  If Not V9HasSecond(E) Then Ctx:=Ord(E^.R0=V9CompFixed) Else Ctx:=3;
+ End Else Ctx:=1;
+ V9CtxCompMode:=Ctx;
+End;
+
+Function V9CtxCompRef: LongInt;
+Var A,L,E: PV9Mi; Fix,Vr,Ctx,Vrfa,Vrfl,Vrfc,Rfs: LongInt; AIntra,LIntra,ASg,LSg: Boolean;
+Begin
+ A:=V9Above; L:=V9Left;
+ Fix:=V9SignBias[V9CompFixed]; Vr:=1-Fix;
+ If (A<>Nil) And (L<>Nil) Then Begin
+  AIntra:=Not V9IsInter(A); LIntra:=Not V9IsInter(L);
+  If AIntra And LIntra Then Ctx:=2
+  Else If AIntra Or LIntra Then Begin
+   If AIntra Then E:=L Else E:=A;
+   If Not V9HasSecond(E) Then Ctx:=1+2*Ord(E^.R0<>V9CompVar[1])
+   Else Ctx:=1+2*Ord(V9RefOf(E,Vr)<>V9CompVar[1]);
+  End Else Begin
+   LSg:=Not V9HasSecond(L); ASg:=Not V9HasSecond(A);
+   If ASg Then Vrfa:=A^.R0 Else Vrfa:=V9RefOf(A,Vr);
+   If LSg Then Vrfl:=L^.R0 Else Vrfl:=V9RefOf(L,Vr);
+   If (Vrfa=Vrfl) And (V9CompVar[1]=Vrfa) Then Ctx:=0
+   Else If LSg And ASg Then Begin
+    If ((Vrfa=V9CompFixed) And (Vrfl=V9CompVar[0])) Or ((Vrfl=V9CompFixed) And (Vrfa=V9CompVar[0])) Then Ctx:=4
+    Else If Vrfa=Vrfl Then Ctx:=3 Else Ctx:=1;
+   End Else If LSg Or ASg Then Begin
+    If LSg Then Vrfc:=Vrfa Else Vrfc:=Vrfl;
+    If ASg Then Rfs:=Vrfa Else Rfs:=Vrfl;
+    If (Vrfc=V9CompVar[1]) And (Rfs<>V9CompVar[1]) Then Ctx:=1
+    Else If (Rfs=V9CompVar[1]) And (Vrfc<>V9CompVar[1]) Then Ctx:=2
+    Else Ctx:=4;
+   End Else If Vrfa=Vrfl Then Ctx:=4 Else Ctx:=2;
+  End;
+ End Else If (A<>Nil) Or (L<>Nil) Then Begin
+  If A<>Nil Then E:=A Else E:=L;
+  If Not V9IsInter(E) Then Ctx:=2
+  Else If V9HasSecond(E) Then Ctx:=4*Ord(V9RefOf(E,Vr)<>V9CompVar[1])
+  Else Ctx:=3*Ord(E^.R0<>V9CompVar[1]);
+ End Else Ctx:=2;
+ V9CtxCompRef:=Ctx;
+End;
+
+Function V9CtxSingle1: LongInt;
+Var A,L,E: PV9Mi; Ctx,A0,A1,L0,L1,Rfs,Crf1,Crf2: LongInt; AIntra,LIntra,A2,L2: Boolean;
+Begin
+ A:=V9Above; L:=V9Left;
+ If (A<>Nil) And (L<>Nil) Then Begin
+  AIntra:=Not V9IsInter(A); LIntra:=Not V9IsInter(L);
+  If AIntra And LIntra Then Ctx:=2
+  Else If AIntra Or LIntra Then Begin
+   If AIntra Then E:=L Else E:=A;
+   If Not V9HasSecond(E) Then Ctx:=4*Ord(E^.R0=1)
+   Else Ctx:=1+Ord((E^.R0=1) Or (E^.R1=1));
+  End Else Begin
+   A2:=V9HasSecond(A); L2:=V9HasSecond(L);
+   A0:=A^.R0; A1:=A^.R1; L0:=L^.R0; L1:=L^.R1;
+   If A2 And L2 Then Ctx:=1+Ord((A0=1) Or (A1=1) Or (L0=1) Or (L1=1))
+   Else If A2 Or L2 Then Begin
+    If Not A2 Then Rfs:=A0 Else Rfs:=L0;
+    If A2 Then Crf1:=A0 Else Crf1:=L0;
+    If A2 Then Crf2:=A1 Else Crf2:=L1;
+    If Rfs=1 Then Ctx:=3+Ord((Crf1=1) Or (Crf2=1))
+    Else Ctx:=Ord((Crf1=1) Or (Crf2=1));
+   End Else Ctx:=2*Ord(A0=1)+2*Ord(L0=1);
+  End;
+ End Else If (A<>Nil) Or (L<>Nil) Then Begin
+  If A<>Nil Then E:=A Else E:=L;
+  If Not V9IsInter(E) Then Ctx:=2
+  Else If Not V9HasSecond(E) Then Ctx:=4*Ord(E^.R0=1)
+  Else Ctx:=1+Ord((E^.R0=1) Or (E^.R1=1));
+ End Else Ctx:=2;
+ V9CtxSingle1:=Ctx;
+End;
+
+Function V9CtxSingle2: LongInt;
+Var A,L,E: PV9Mi; Ctx,A0,A1,L0,L1,Rfs,Crf1,Crf2,Edge0: LongInt; AIntra,LIntra,A2,L2: Boolean;
+Begin
+ A:=V9Above; L:=V9Left;
+ If (A<>Nil) And (L<>Nil) Then Begin
+  AIntra:=Not V9IsInter(A); LIntra:=Not V9IsInter(L);
+  If AIntra And LIntra Then Ctx:=2
+  Else If AIntra Or LIntra Then Begin
+   If AIntra Then E:=L Else E:=A;
+   If Not V9HasSecond(E) Then Begin
+    If E^.R0=1 Then Ctx:=3 Else Ctx:=4*Ord(E^.R0=2);
+   End Else Ctx:=1+2*Ord((E^.R0=2) Or (E^.R1=2));
+  End Else Begin
+   A2:=V9HasSecond(A); L2:=V9HasSecond(L);
+   A0:=A^.R0; A1:=A^.R1; L0:=L^.R0; L1:=L^.R1;
+   If A2 And L2 Then Begin
+    If (A0=L0) And (A1=L1) Then Ctx:=3*Ord((A0=2) Or (A1=2) Or (L0=2) Or (L1=2))
+    Else Ctx:=2;
+   End Else If A2 Or L2 Then Begin
+    If Not A2 Then Rfs:=A0 Else Rfs:=L0;
+    If A2 Then Crf1:=A0 Else Crf1:=L0;
+    If A2 Then Crf2:=A1 Else Crf2:=L1;
+    If Rfs=2 Then Ctx:=3+Ord((Crf1=2) Or (Crf2=2))
+    Else If Rfs=3 Then Ctx:=Ord((Crf1=2) Or (Crf2=2))
+    Else Ctx:=1+2*Ord((Crf1=2) Or (Crf2=2));
+   End Else Begin
+    If (A0=1) And (L0=1) Then Ctx:=3
+    Else If (A0=1) Or (L0=1) Then Begin
+     If A0=1 Then Edge0:=L0 Else Edge0:=A0;
+     Ctx:=4*Ord(Edge0=2);
+    End Else Ctx:=2*Ord(A0=2)+2*Ord(L0=2);
+   End;
+  End;
+ End Else If (A<>Nil) Or (L<>Nil) Then Begin
+  If A<>Nil Then E:=A Else E:=L;
+  If Not V9IsInter(E) Or ((E^.R0=1) And Not V9HasSecond(E)) Then Ctx:=2
+  Else If Not V9HasSecond(E) Then Ctx:=4*Ord(E^.R0=2)
+  Else Ctx:=3*Ord((E^.R0=2) Or (E^.R1=2));
+ End Else Ctx:=2;
+ V9CtxSingle2:=Ctx;
+End;
+
+Function V9CtxIntraInter: LongInt;
+Var AI,LI: Boolean;
+Begin
+ If (V9Above<>Nil) And (V9Left<>Nil) Then Begin
+  AI:=Not V9IsInter(V9Above); LI:=Not V9IsInter(V9Left);
+  If AI And LI Then V9CtxIntraInter:=3 Else V9CtxIntraInter:=Ord(AI Or LI);
+ End Else If (V9Above<>Nil) Or (V9Left<>Nil) Then Begin
+  If V9Above<>Nil Then V9CtxIntraInter:=2*Ord(Not V9IsInter(V9Above))
+  Else V9CtxIntraInter:=2*Ord(Not V9IsInter(V9Left));
+ End Else V9CtxIntraInter:=0;
+End;
+
+Function V9CtxInterp: LongInt;
+Var Lt,At: LongInt;
+Begin
+ If V9Left<>Nil Then Lt:=V9Left^.Filt Else Lt:=3;
+ If V9Above<>Nil Then At:=V9Above^.Filt Else At:=3;
+ If Lt=At Then V9CtxInterp:=Lt
+ Else If Lt=3 Then V9CtxInterp:=At
+ Else If At=3 Then V9CtxInterp:=Lt
+ Else V9CtxInterp:=3;
+End;
+
+{ ---- candidats de vecteurs de mouvement ---- }
+Procedure V9ClampMvRef(Var Mv: TV9Mv);
+Begin
+ Mv.C:=V9Clamp(Mv.C,V9EdgeL-128,V9EdgeR+128);
+ Mv.R:=V9Clamp(Mv.R,V9EdgeT-128,V9EdgeB+128);
+End;
+
+Procedure V9LowerMvPrec(Var Mv: TV9Mv);
+Var UseHp: Boolean;
+Begin
+ UseHp:=(V9AllowHp<>0) And (V9Abs(Mv.R)<64) And (V9Abs(Mv.C)<64);
+ If Not UseHp Then Begin
+  If (Mv.R And 1)<>0 Then If Mv.R>0 Then Dec(Mv.R) Else Inc(Mv.R);
+  If (Mv.C And 1)<>0 Then If Mv.C>0 Then Dec(Mv.C) Else Inc(Mv.C);
+ End;
+End;
+
+Function V9FindMvRefs(Mode,RefFrame,Block: LongInt; Var L0,L1: TV9Mv): LongInt;
+Var Count,I,Rr,Cc: LongInt; Early,Done,Diff: Boolean; Cand: PV9Mi; Prev: ^TV9MvRef; Mv: TV9Mv;
+ Z: TV9Mv;
+
+ Procedure Add(M: TV9Mv);
+ Begin
+  If Count>0 Then Begin
+   If Not V9MvEq(M,L0) Then Begin L1:=M; Inc(Count); Done:=True; End;
+  End Else Begin
+   L0:=M; Inc(Count);
+   If Early Then Done:=True;
+  End;
+ End;
+
+ Function Inside(I: LongInt): Boolean;
+ Begin
+  Rr:=V9MiRow+V9MvRefBlk[V9Bsize,I,0]; Cc:=V9MiCol+V9MvRefBlk[V9Bsize,I,1];
+  Inside:=Not ((Rr<0) Or (Cc<V9TileC0) Or (Rr>=V9MiRows) Or (Cc>=V9TileC1));
+ End;
+
+ Function Scaled(C: PV9Mi; Ref: LongInt): TV9Mv;
+ Var M: TV9Mv; Rf: LongInt;
+ Begin
+  M:=C^.Mv[Ref];
+  Rf:=V9RefOf(C,Ref);
+  If V9SignBias[Rf]<>V9SignBias[RefFrame] Then Begin M.R:=-M.R; M.C:=-M.C; End;
+  Scaled:=M;
+ End;
+
+ Procedure DiffRef(C: PV9Mi);
+ Begin
+  If V9IsInter(C) Then Begin
+   If C^.R0<>RefFrame Then Add(Scaled(C,0));
+   If Not Done Then
+    If V9HasSecond(C) And (C^.R1<>RefFrame) And Not V9MvEq(C^.Mv[1],C^.Mv[0]) Then Add(Scaled(C,1));
+  End;
+ End;
+
+Begin
+ Count:=0; Done:=False; Diff:=False; Early:=(Mode<>11);
+ Z.R:=0; Z.C:=0; L0:=Z; L1:=Z;
+ If V9UsePrevMvs Then Prev:=@V9MvPrev^[V9MiRow*V9MiCols+V9MiCol] Else Prev:=Nil;
+ I:=0;
+ If Block>=0 Then Begin
+  While (I<2) And Not Done Do Begin
+   If Inside(I) Then Begin
+    Cand:=V9Grid^[Rr*V9MiCols+Cc]; Diff:=True;
+    If Cand^.R0=RefFrame Then Begin
+     If Cand^.Sb<3 Then Add(Cand^.BMv[V9Sub8Col[Block,Ord(V9MvRefBlk[V9Bsize,I,1]=0)],0]) Else Add(Cand^.Mv[0]);
+    End Else If Cand^.R1=RefFrame Then Begin
+     If Cand^.Sb<3 Then Add(Cand^.BMv[V9Sub8Col[Block,Ord(V9MvRefBlk[V9Bsize,I,1]=0)],1]) Else Add(Cand^.Mv[1]);
+    End;
+   End;
+   Inc(I);
+  End;
+ End;
+ If Not Done Then Begin
+  While I<8 Do Begin
+   If Inside(I) Then Begin
+    Cand:=V9Grid^[Rr*V9MiCols+Cc]; Diff:=True;
+    If Cand^.R0=RefFrame Then Add(Cand^.Mv[0])
+    Else If Cand^.R1=RefFrame Then Add(Cand^.Mv[1]);
+    If Done Then Break;
+   End;
+   Inc(I);
+  End;
+ End;
+ If (Not Done) And (Prev<>Nil) Then Begin
+  If Prev^.R0=RefFrame Then Add(Prev^.Mv[0])
+  Else If Prev^.R1=RefFrame Then Add(Prev^.Mv[1]);
+ End;
+ If (Not Done) And Diff Then Begin
+  I:=0;
+  While (I<8) And Not Done Do Begin
+   If Inside(I) Then DiffRef(V9Grid^[Rr*V9MiCols+Cc]);
+   Inc(I);
+  End;
+ End;
+ If (Not Done) And (Prev<>Nil) Then Begin
+  If (Prev^.R0<>RefFrame) And (Prev^.R0>0) Then Begin
+   Mv:=Prev^.Mv[0];
+   If V9SignBias[Prev^.R0]<>V9SignBias[RefFrame] Then Begin Mv.R:=-Mv.R; Mv.C:=-Mv.C; End;
+   Add(Mv);
+  End;
+  If (Not Done) And (Prev^.R1>0) And (Prev^.R1<>RefFrame) And Not V9MvEq(Prev^.Mv[1],Prev^.Mv[0]) Then Begin
+   Mv:=Prev^.Mv[1];
+   If V9SignBias[Prev^.R1]<>V9SignBias[RefFrame] Then Begin Mv.R:=-Mv.R; Mv.C:=-Mv.C; End;
+   Add(Mv);
+  End;
+ End;
+ If Not Done Then Begin
+  If Mode=11 Then Count:=2 Else Count:=1;
+ End;
+ If Count>0 Then V9ClampMvRef(L0);
+ If Count>1 Then V9ClampMvRef(L1);
+ V9FindMvRefs:=Count;
+End;
+
+Procedure V9AppendSub8Mvs(BMode,Block,Ref: LongInt; Var Best: TV9Mv);
+Var L0,L1: TV9Mv; N,Cnt: LongInt; Mi: PV9Mi; Z: TV9Mv;
+Begin
+ Mi:=V9Cur; Z.R:=0; Z.C:=0;
+ Case Block Of
+  0: Begin
+      Cnt:=V9FindMvRefs(BMode,V9RefOf(Mi,Ref),Block,L0,L1);
+      If Cnt=2 Then Best:=L1 Else Best:=L0;
+     End;
+  1,2: Begin
+        If BMode=10 Then Best:=Mi^.BMv[0,Ref]
+        Else Begin
+         V9FindMvRefs(BMode,V9RefOf(Mi,Ref),Block,L0,L1);
+         Best:=Z;
+         If Not V9MvEq(Mi^.BMv[0,Ref],L0) Then Best:=L0
+         Else If Not V9MvEq(Mi^.BMv[0,Ref],L1) Then Best:=L1;
+        End;
+       End;
+  3: Begin
+      If BMode=10 Then Best:=Mi^.BMv[2,Ref]
+      Else Begin
+       Best:=Z;
+       If Not V9MvEq(Mi^.BMv[2,Ref],Mi^.BMv[1,Ref]) Then Best:=Mi^.BMv[1,Ref]
+       Else If Not V9MvEq(Mi^.BMv[2,Ref],Mi^.BMv[0,Ref]) Then Best:=Mi^.BMv[0,Ref]
+       Else Begin
+        V9FindMvRefs(BMode,V9RefOf(Mi,Ref),Block,L0,L1);
+        If Not V9MvEq(Mi^.BMv[2,Ref],L0) Then Best:=L0
+        Else If Not V9MvEq(Mi^.BMv[2,Ref],L1) Then Best:=L1;
+       End;
+      End;
+     End;
+ End;
+End;
+
+Function V9ModeContext: LongInt;
+Var I,Rr,Cc,Cn: LongInt; Cand: PV9Mi;
+Begin
+ Cn:=0;
+ For I:=0 To 1 Do Begin
+  Rr:=V9MiRow+V9MvRefBlk[V9Bsize,I,0]; Cc:=V9MiCol+V9MvRefBlk[V9Bsize,I,1];
+  If Not ((Rr<0) Or (Cc<V9TileC0) Or (Rr>=V9MiRows) Or (Cc>=V9TileC1)) Then Begin
+   Cand:=V9Grid^[Rr*V9MiCols+Cc];
+   Inc(Cn,V9Mode2Cnt[Cand^.Mode]);
+  End;
+ End;
+ V9ModeContext:=V9CntToCtx[Cn];
+End;
+
+Function V9ReadInterMode(Ctx: LongInt): LongInt;
+Var M: LongInt;
+Begin
+ M:=V9RdTree(V9R,V9TrInter,@V9Fc.InterMode[Ctx,0]);
+ If V9DoCnt Then Inc(V9Cnt.InterMode[Ctx,M]);
+ V9ReadInterMode:=10+M;
+End;
+
+Procedure V9ReadRefFrames(Seg: LongInt);
+Var Mi: PV9Mi; Mode,Idx,Ctx,Bit,Ctx1,Bit1: LongInt;
+Begin
+ Mi:=V9Cur;
+ If V9SegActive(Seg,2) Then Begin
+  Mi^.R0:=V9SegData[Seg,2]; Mi^.R1:=-1;
+ End Else Begin
+  If V9RefMode=2 Then Begin
+   Ctx:=V9CtxCompMode;
+   Mode:=V9Rd(V9R,V9Fc.CompInter[Ctx]);
+   If V9DoCnt Then Inc(V9Cnt.CompInter[Ctx,Mode]);
+  End Else Mode:=V9RefMode;
+  If Mode=1 Then Begin
+   Idx:=V9SignBias[V9CompFixed];
+   Ctx:=V9CtxCompRef;
+   Bit:=V9Rd(V9R,V9Fc.CompRef[Ctx]);
+   If V9DoCnt Then Inc(V9Cnt.CompRef[Ctx,Bit]);
+   If Idx=0 Then Begin Mi^.R0:=V9CompFixed; Mi^.R1:=V9CompVar[Bit]; End
+   Else Begin Mi^.R1:=V9CompFixed; Mi^.R0:=V9CompVar[Bit]; End;
+  End Else Begin
+   Ctx:=V9CtxSingle1;
+   Bit:=V9Rd(V9R,V9Fc.SingleRef[Ctx,0]);
+   If V9DoCnt Then Inc(V9Cnt.SingleRef[Ctx,0,Bit]);
+   If Bit<>0 Then Begin
+    Ctx1:=V9CtxSingle2;
+    Bit1:=V9Rd(V9R,V9Fc.SingleRef[Ctx1,1]);
+    If V9DoCnt Then Inc(V9Cnt.SingleRef[Ctx1,1,Bit1]);
+    If Bit1<>0 Then Mi^.R0:=3 Else Mi^.R0:=2;
+   End Else Mi^.R0:=1;
+   Mi^.R1:=-1;
+  End;
+ End;
+End;
+
+Procedure V9AssignMv(Mode: LongInt; Var Mv: Array Of TV9Mv; Var RefMv,NearMv: Array Of TV9Mv; Comp: Boolean);
+Var I: LongInt;
+Begin
+ Case Mode Of
+  13: For I:=0 To Ord(Comp) Do V9ReadMv(Mv[I],RefMv[I]);
+  11,10: Begin Mv[0]:=NearMv[0]; Mv[1]:=NearMv[1]; End;
+ Else Begin Mv[0].R:=0; Mv[0].C:=0; Mv[1].R:=0; Mv[1].C:=0; End;
+ End;
+End;
+
+Procedure V9ReadInterBlockModeInfo(Seg: LongInt);
+Var Mi: PV9Mi; Comp: Boolean; Ctx,Ref,Idx,Idy,J,Nw,Nh,Cnt,BMode: LongInt; GotNew: Boolean;
+ Best,BestRef: Array[0..1] Of TV9Mv; L0,L1: TV9Mv; Z: TV9Mv; Tmp: Array[0..1] Of TV9Mv;
+Begin
+ Mi:=V9Cur; Z.R:=0; Z.C:=0;
+ BestRef[0]:=Z; BestRef[1]:=Z; Best[0]:=Z; Best[1]:=Z;
+ V9ReadRefFrames(Seg);
+ Comp:=Mi^.R1>0;
+ Ctx:=V9ModeContext;
+ If V9SegActive(Seg,3) Then Begin
+  Mi^.Mode:=12;
+  If Mi^.Sb<3 Then Fail('VP9 : usage invalide de la caracteristique de segment sur petits blocs.');
+ End Else If Mi^.Sb>=3 Then Mi^.Mode:=V9ReadInterMode(Ctx);
+ If V9Interp=4 Then Begin
+  J:=V9CtxInterp;
+  Idx:=V9RdTree(V9R,V9TrInterp,@V9Fc.Interp[J,0]);
+  If V9DoCnt Then Inc(V9Cnt.Interp[J,Idx]);
+  Mi^.Filt:=Idx;
+ End Else Mi^.Filt:=V9Interp;
+ If Mi^.Sb<3 Then Begin
+  Nw:=1 Shl V9BmWl; Nh:=1 Shl V9BmHl;
+  GotNew:=False;
+  Idy:=0;
+  While Idy<2 Do Begin
+   Idx:=0;
+   While Idx<2 Do Begin
+    J:=Idy*2+Idx;
+    BMode:=V9ReadInterMode(Ctx);
+    If (BMode=10) Or (BMode=11) Then Begin
+     For Ref:=0 To Ord(Comp) Do V9AppendSub8Mvs(BMode,J,Ref,Best[Ref]);
+    End Else If (BMode=13) And Not GotNew Then Begin
+     For Ref:=0 To Ord(Comp) Do Begin
+      V9FindMvRefs(13,V9RefOf(Mi,Ref),-1,L0,L1);
+      V9LowerMvPrec(L0);
+      BestRef[Ref]:=L0; GotNew:=True;
+     End;
+    End;
+    Tmp[0]:=Mi^.BMv[J,0]; Tmp[1]:=Mi^.BMv[J,1];
+    V9AssignMv(BMode,Tmp,BestRef,Best,Comp);
+    Mi^.BMv[J,0]:=Tmp[0]; Mi^.BMv[J,1]:=Tmp[1];
+    If Nh=2 Then Begin Mi^.BMv[J+2,0]:=Mi^.BMv[J,0]; Mi^.BMv[J+2,1]:=Mi^.BMv[J,1]; End;
+    If Nw=2 Then Begin Mi^.BMv[J+1,0]:=Mi^.BMv[J,0]; Mi^.BMv[J+1,1]:=Mi^.BMv[J,1]; End;
+    Inc(Idx,Nw);
+   End;
+   Inc(Idy,Nh);
+  End;
+  Mi^.Mode:=BMode;
+  Mi^.Mv[0]:=Mi^.BMv[3,0]; Mi^.Mv[1]:=Mi^.BMv[3,1];
+ End Else Begin
+  If Mi^.Mode<>12 Then Begin
+   For Ref:=0 To Ord(Comp) Do Begin
+    Cnt:=V9FindMvRefs(Mi^.Mode,V9RefOf(Mi,Ref),-1,L0,L1);
+    If Cnt=2 Then Begin V9LowerMvPrec(L1); BestRef[Ref]:=L1; End
+    Else Begin V9LowerMvPrec(L0); BestRef[Ref]:=L0; End;
+   End;
+  End;
+  Tmp[0]:=Mi^.Mv[0]; Tmp[1]:=Mi^.Mv[1];
+  V9AssignMv(Mi^.Mode,Tmp,BestRef,BestRef,Comp);
+  Mi^.Mv[0]:=Tmp[0]; Mi^.Mv[1]:=Tmp[1];
+ End;
+End;
+
+Procedure V9ReadInterFrameModeInfo(Off: LongInt);
+Var Mi: PV9Mi; IsInter,Ctx: LongInt;
+Begin
+ Mi:=V9Cur;
+ Mi^.Seg:=V9ReadInterSegId(Off);
+ Mi^.Skip:=V9ReadSkip(Mi^.Seg);
+ If V9SegActive(Mi^.Seg,2) Then Begin
+  If V9SegData[Mi^.Seg,2]<>0 Then IsInter:=1 Else IsInter:=0;
+ End Else Begin
+  Ctx:=V9CtxIntraInter;
+  IsInter:=V9Rd(V9R,V9Fc.IntraInter[Ctx]);
+  If V9DoCnt Then Inc(V9Cnt.IntraInter[Ctx,IsInter]);
+ End;
+ Mi^.Tx:=V9ReadTxSize((Mi^.Skip=0) Or (IsInter=0));
+ If IsInter<>0 Then V9ReadInterBlockModeInfo(Mi^.Seg) Else V9ReadIntraBlockModeInfo;
+End;
+
+Procedure V9ReadModeInfo;
+Var Off,X,Y: LongInt; Mi: PV9Mi; P: PV9MvRefA; Q: LongInt;
+Begin
+ Off:=V9MiRow*V9MiCols+V9MiCol;
+ Mi:=V9Cur;
+ If (V9FrameType=0) Or (V9IntraOnly<>0) Then V9ReadIntraFrameModeInfo(Off)
+ Else Begin
+  V9ReadInterFrameModeInfo(Off);
+  For Y:=0 To V9YMis-1 Do For X:=0 To V9XMis-1 Do Begin
+   Q:=Off+Y*V9MiCols+X;
+   V9MvCur^[Q].R0:=Mi^.R0; V9MvCur^[Q].R1:=Mi^.R1;
+   V9MvCur^[Q].Mv[0]:=Mi^.Mv[0]; V9MvCur^[Q].Mv[1]:=Mi^.Mv[1];
+  End;
+ End;
+End;
+
+{ ====================== prediction intra (vp9_reconintra.c, intrapred.c) ====================== }
+Type TV9Ed=Array[0..95] Of LongInt;
+Var V9Ab: TV9Ed; V9Lf: Array[0..31] Of LongInt;
+
+Function V9Avg2(A,B: LongInt): LongInt; inline;
+Begin V9Avg2:=(A+B+1) Shr 1; End;
+Function V9Avg3(A,B,C: LongInt): LongInt; inline;
+Begin V9Avg3:=(A+2*B+C+2) Shr 2; End;
+
+{ above[i] = V9Ab[16+i], above[-1] = V9Ab[15] ; left[i] = V9Lf[i] }
+Procedure V9PredIntra(Mode,Bs: LongInt; D: PV9W; St: LongInt; HaveL,HaveU: Boolean; Bd: LongInt);
+Var R,C,I,Sz,S,Dc,Maxv: LongInt; Row0: PV9W; Border: Array[0..63] Of LongInt;
+ Procedure Put(X,Y,V: LongInt);
+ Begin D^[Y*St+X]:=V; End;
+Begin
+ Maxv:=(1 Shl Bd)-1;
+ Case Mode Of
+  0: Begin { DC }
+      If HaveL And HaveU Then Begin
+       S:=0; For I:=0 To Bs-1 Do Inc(S,V9Ab[16+I]+V9Lf[I]);
+       Dc:=(S+Bs) Div (2*Bs);
+      End Else If HaveL Then Begin
+       S:=0; For I:=0 To Bs-1 Do Inc(S,V9Lf[I]);
+       Dc:=(S+(Bs Shr 1)) Div Bs;
+      End Else If HaveU Then Begin
+       S:=0; For I:=0 To Bs-1 Do Inc(S,V9Ab[16+I]);
+       Dc:=(S+(Bs Shr 1)) Div Bs;
+      End Else Dc:=128 Shl (Bd-8);
+      For R:=0 To Bs-1 Do For C:=0 To Bs-1 Do D^[R*St+C]:=Dc;
+     End;
+  1: For R:=0 To Bs-1 Do For C:=0 To Bs-1 Do D^[R*St+C]:=V9Ab[16+C]; { V }
+  2: For R:=0 To Bs-1 Do For C:=0 To Bs-1 Do D^[R*St+C]:=V9Lf[R]; { H }
+  9: For R:=0 To Bs-1 Do For C:=0 To Bs-1 Do Begin { TM }
+      I:=V9Lf[R]+V9Ab[16+C]-V9Ab[15];
+      If I<0 Then I:=0 Else If I>Maxv Then I:=Maxv;
+      D^[R*St+C]:=I;
+     End;
+  3: If Bs=4 Then Begin { D45 4x4 }
+      Put(0,0,V9Avg3(V9Ab[16],V9Ab[17],V9Ab[18]));
+      I:=V9Avg3(V9Ab[17],V9Ab[18],V9Ab[19]); Put(1,0,I); Put(0,1,I);
+      I:=V9Avg3(V9Ab[18],V9Ab[19],V9Ab[20]); Put(2,0,I); Put(1,1,I); Put(0,2,I);
+      I:=V9Avg3(V9Ab[19],V9Ab[20],V9Ab[21]); Put(3,0,I); Put(2,1,I); Put(1,2,I); Put(0,3,I);
+      I:=V9Avg3(V9Ab[20],V9Ab[21],V9Ab[22]); Put(3,1,I); Put(2,2,I); Put(1,3,I);
+      I:=V9Avg3(V9Ab[21],V9Ab[22],V9Ab[23]); Put(3,2,I); Put(2,3,I);
+      Put(3,3,V9Ab[23]);
+     End Else Begin
+      S:=V9Ab[16+Bs-1];
+      For C:=0 To Bs-2 Do D^[C]:=V9Avg3(V9Ab[16+C],V9Ab[17+C],V9Ab[18+C]);
+      D^[Bs-1]:=S;
+      Sz:=Bs-2;
+      For R:=1 To Bs-1 Do Begin
+       For C:=0 To Sz-1 Do D^[R*St+C]:=D^[R+C];
+       For C:=Sz To Bs-1 Do D^[R*St+C]:=S;
+       Dec(Sz);
+      End;
+     End;
+  4: If Bs=4 Then Begin { D135 4x4 }
+      Put(0,3,V9Avg3(V9Lf[1],V9Lf[2],V9Lf[3]));
+      I:=V9Avg3(V9Lf[0],V9Lf[1],V9Lf[2]); Put(1,3,I); Put(0,2,I);
+      I:=V9Avg3(V9Ab[15],V9Lf[0],V9Lf[1]); Put(2,3,I); Put(1,2,I); Put(0,1,I);
+      I:=V9Avg3(V9Ab[16],V9Ab[15],V9Lf[0]); Put(3,3,I); Put(2,2,I); Put(1,1,I); Put(0,0,I);
+      I:=V9Avg3(V9Ab[17],V9Ab[16],V9Ab[15]); Put(3,2,I); Put(2,1,I); Put(1,0,I);
+      I:=V9Avg3(V9Ab[18],V9Ab[17],V9Ab[16]); Put(3,1,I); Put(2,0,I);
+      Put(3,0,V9Avg3(V9Ab[19],V9Ab[18],V9Ab[17]));
+     End Else Begin
+      For I:=0 To Bs-3 Do Border[I]:=V9Avg3(V9Lf[Bs-3-I],V9Lf[Bs-2-I],V9Lf[Bs-1-I]);
+      Border[Bs-2]:=V9Avg3(V9Ab[15],V9Lf[0],V9Lf[1]);
+      Border[Bs-1]:=V9Avg3(V9Lf[0],V9Ab[15],V9Ab[16]);
+      Border[Bs]:=V9Avg3(V9Ab[15],V9Ab[16],V9Ab[17]);
+      For I:=0 To Bs-3 Do Border[Bs+1+I]:=V9Avg3(V9Ab[16+I],V9Ab[17+I],V9Ab[18+I]);
+      For R:=0 To Bs-1 Do For C:=0 To Bs-1 Do D^[R*St+C]:=Border[Bs-1-R+C];
+     End;
+  5: If Bs=4 Then Begin { D117 4x4 }
+      Put(0,0,V9Avg2(V9Ab[15],V9Ab[16])); Put(1,2,D^[0]);
+      I:=V9Avg2(V9Ab[16],V9Ab[17]); Put(1,0,I); Put(2,2,I);
+      I:=V9Avg2(V9Ab[17],V9Ab[18]); Put(2,0,I); Put(3,2,I);
+      Put(3,0,V9Avg2(V9Ab[18],V9Ab[19]));
+      Put(0,3,V9Avg3(V9Lf[2],V9Lf[1],V9Lf[0]));
+      Put(0,2,V9Avg3(V9Lf[1],V9Lf[0],V9Ab[15]));
+      I:=V9Avg3(V9Lf[0],V9Ab[15],V9Ab[16]); Put(0,1,I); Put(1,3,I);
+      I:=V9Avg3(V9Ab[15],V9Ab[16],V9Ab[17]); Put(1,1,I); Put(2,3,I);
+      I:=V9Avg3(V9Ab[16],V9Ab[17],V9Ab[18]); Put(2,1,I); Put(3,3,I);
+      Put(3,1,V9Avg3(V9Ab[17],V9Ab[18],V9Ab[19]));
+     End Else Begin
+      For C:=0 To Bs-1 Do D^[C]:=V9Avg2(V9Ab[15+C],V9Ab[16+C]);
+      D^[St]:=V9Avg3(V9Lf[0],V9Ab[15],V9Ab[16]);
+      For C:=1 To Bs-1 Do D^[St+C]:=V9Avg3(V9Ab[14+C],V9Ab[15+C],V9Ab[16+C]);
+      D^[2*St]:=V9Avg3(V9Ab[15],V9Lf[0],V9Lf[1]);
+      For R:=3 To Bs-1 Do D^[(R)*St]:=V9Avg3(V9Lf[R-3],V9Lf[R-2],V9Lf[R-1]);
+      For R:=2 To Bs-1 Do For C:=1 To Bs-1 Do D^[R*St+C]:=D^[(R-2)*St+C-1];
+     End;
+  6: If Bs=4 Then Begin { D153 4x4 }
+      I:=V9Avg2(V9Lf[0],V9Ab[15]); Put(0,0,I); Put(2,1,I);
+      I:=V9Avg2(V9Lf[1],V9Lf[0]); Put(0,1,I); Put(2,2,I);
+      I:=V9Avg2(V9Lf[2],V9Lf[1]); Put(0,2,I); Put(2,3,I);
+      Put(0,3,V9Avg2(V9Lf[3],V9Lf[2]));
+      Put(3,0,V9Avg3(V9Ab[16],V9Ab[17],V9Ab[18]));
+      Put(2,0,V9Avg3(V9Ab[15],V9Ab[16],V9Ab[17]));
+      I:=V9Avg3(V9Lf[0],V9Ab[15],V9Ab[16]); Put(1,0,I); Put(3,1,I);
+      I:=V9Avg3(V9Lf[1],V9Lf[0],V9Ab[15]); Put(1,1,I); Put(3,2,I);
+      I:=V9Avg3(V9Lf[2],V9Lf[1],V9Lf[0]); Put(1,2,I); Put(3,3,I);
+      Put(1,3,V9Avg3(V9Lf[3],V9Lf[2],V9Lf[1]));
+     End Else Begin
+      D^[0]:=V9Avg2(V9Ab[15],V9Lf[0]);
+      For R:=1 To Bs-1 Do D^[R*St]:=V9Avg2(V9Lf[R-1],V9Lf[R]);
+      D^[1]:=V9Avg3(V9Lf[0],V9Ab[15],V9Ab[16]);
+      D^[St+1]:=V9Avg3(V9Ab[15],V9Lf[0],V9Lf[1]);
+      For R:=2 To Bs-1 Do D^[R*St+1]:=V9Avg3(V9Lf[R-2],V9Lf[R-1],V9Lf[R]);
+      For C:=0 To Bs-3 Do D^[2+C]:=V9Avg3(V9Ab[15+C],V9Ab[16+C],V9Ab[17+C]);
+      For R:=1 To Bs-1 Do For C:=0 To Bs-3 Do D^[R*St+2+C]:=D^[(R-1)*St+2+C-2];
+     End;
+  7: Begin { D207 }
+      For R:=0 To Bs-2 Do D^[R*St]:=V9Avg2(V9Lf[R],V9Lf[R+1]);
+      D^[(Bs-1)*St]:=V9Lf[Bs-1];
+      For R:=0 To Bs-3 Do D^[R*St+1]:=V9Avg3(V9Lf[R],V9Lf[R+1],V9Lf[R+2]);
+      D^[(Bs-2)*St+1]:=V9Avg3(V9Lf[Bs-2],V9Lf[Bs-1],V9Lf[Bs-1]);
+      D^[(Bs-1)*St+1]:=V9Lf[Bs-1];
+      For C:=0 To Bs-3 Do D^[(Bs-1)*St+2+C]:=V9Lf[Bs-1];
+      For R:=Bs-2 DownTo 0 Do For C:=0 To Bs-3 Do D^[R*St+2+C]:=D^[(R+1)*St+C];
+     End;
+  8: If Bs=4 Then Begin { D63 4x4 }
+      Put(0,0,V9Avg2(V9Ab[16],V9Ab[17]));
+      I:=V9Avg2(V9Ab[17],V9Ab[18]); Put(1,0,I); Put(0,2,I);
+      I:=V9Avg2(V9Ab[18],V9Ab[19]); Put(2,0,I); Put(1,2,I);
+      I:=V9Avg2(V9Ab[19],V9Ab[20]); Put(3,0,I); Put(2,2,I);
+      Put(3,2,V9Avg2(V9Ab[20],V9Ab[21]));
+      Put(0,1,V9Avg3(V9Ab[16],V9Ab[17],V9Ab[18]));
+      I:=V9Avg3(V9Ab[17],V9Ab[18],V9Ab[19]); Put(1,1,I); Put(0,3,I);
+      I:=V9Avg3(V9Ab[18],V9Ab[19],V9Ab[20]); Put(2,1,I); Put(1,3,I);
+      I:=V9Avg3(V9Ab[19],V9Ab[20],V9Ab[21]); Put(3,1,I); Put(2,3,I);
+      Put(3,3,V9Avg3(V9Ab[20],V9Ab[21],V9Ab[22]));
+     End Else Begin
+      For C:=0 To Bs-1 Do Begin
+       D^[C]:=V9Avg2(V9Ab[16+C],V9Ab[17+C]);
+       D^[St+C]:=V9Avg3(V9Ab[16+C],V9Ab[17+C],V9Ab[18+C]);
+      End;
+      R:=2; Sz:=Bs-2;
+      While R<Bs Do Begin
+       For C:=0 To Sz-1 Do Begin D^[R*St+C]:=D^[(R Shr 1)+C]; D^[(R+1)*St+C]:=D^[St+(R Shr 1)+C]; End;
+       For C:=Sz To Bs-1 Do Begin D^[R*St+C]:=V9Ab[16+Bs-1]; D^[(R+1)*St+C]:=V9Ab[16+Bs-1]; End;
+       Inc(R,2); Dec(Sz);
+      End;
+     End;
+ End;
+End;
+
+Const
+ V9NeedLeft: Array[0..9] Of Byte=(1,0,1,0,1,1,1,1,0,1);
+ V9NeedAbove: Array[0..9] Of Byte=(1,1,0,0,1,1,1,0,0,1);
+ V9NeedAR: Array[0..9] Of Byte=(0,0,0,1,0,0,0,0,1,0);
+
+{ construit les bords puis predit. X,Y : position en pixels dans le bloc (plan courant) }
+Procedure V9IntraBlock(Plane,Mode,Tx,X,Y: LongInt; HaveU,HaveL,HaveR: Boolean);
+Var Bs,Fw,Fh,X0,Y0,I,Base,Sx,Sy,Ext,R: LongInt; St: LongInt; Ref,D: PV9W; Fb: ^TV9Fb;
+Begin
+ Fb:=@V9Fb[V9NewFb];
+ Bs:=4 Shl Tx;
+ If Plane=0 Then Begin Sx:=0; Sy:=0; Fw:=Fb^.AW; Fh:=Fb^.AH; End
+ Else Begin Sx:=V9SsX; Sy:=V9SsY; Fw:=Fb^.CAW; Fh:=Fb^.CAH; End;
+ St:=Fb^.St[Plane];
+ X0:=((-V9EdgeL) Shr (3+Sx))+X; Y0:=((-V9EdgeT) Shr (3+Sy))+Y;
+ D:=@Fb^.P[Plane]^[Y0*St+X0];
+ Ref:=D;
+ Base:=128 Shl (V9Bd-8);
+ If V9NeedLeft[Mode]<>0 Then Begin
+  If HaveL Then Begin
+   If V9EdgeB<0 Then Begin
+    If Y0+Bs<=Fh Then Begin
+     For I:=0 To Bs-1 Do V9Lf[I]:=Ref^[I*St-1];
+    End Else Begin
+     Ext:=Fh-Y0;
+     For I:=0 To Ext-1 Do V9Lf[I]:=Ref^[I*St-1];
+     For I:=Ext To Bs-1 Do V9Lf[I]:=Ref^[(Ext-1)*St-1];
+    End;
+   End Else For I:=0 To Bs-1 Do V9Lf[I]:=Ref^[I*St-1];
+  End Else For I:=0 To Bs-1 Do V9Lf[I]:=Base+1;
+ End;
+ If V9NeedAbove[Mode]<>0 Then Begin
+  If HaveU Then Begin
+   If V9EdgeR<0 Then Begin
+    If X0+Bs<=Fw Then Begin
+     For I:=0 To Bs-1 Do V9Ab[16+I]:=Ref^[I-St];
+    End Else If X0<=Fw Then Begin
+     R:=Fw-X0;
+     For I:=0 To R-1 Do V9Ab[16+I]:=Ref^[I-St];
+     For I:=R To Bs-1 Do V9Ab[16+I]:=V9Ab[16+R-1];
+    End;
+   End Else For I:=0 To Bs-1 Do V9Ab[16+I]:=Ref^[I-St];
+   If HaveL Then V9Ab[15]:=Ref^[-St-1] Else V9Ab[15]:=Base+1;
+  End Else Begin
+   For I:=0 To Bs-1 Do V9Ab[16+I]:=Base-1;
+   V9Ab[15]:=Base-1;
+  End;
+ End;
+ If V9NeedAR[Mode]<>0 Then Begin
+  If HaveU Then Begin
+   If V9EdgeR<0 Then Begin
+    If X0+2*Bs<=Fw Then Begin
+     If HaveR And (Bs=4) Then Begin
+      For I:=0 To 2*Bs-1 Do V9Ab[16+I]:=Ref^[I-St];
+     End Else Begin
+      For I:=0 To Bs-1 Do V9Ab[16+I]:=Ref^[I-St];
+      For I:=Bs To 2*Bs-1 Do V9Ab[16+I]:=V9Ab[16+Bs-1];
+     End;
+    End Else If X0+Bs<=Fw Then Begin
+     R:=Fw-X0;
+     If HaveR And (Bs=4) Then Begin
+      For I:=0 To R-1 Do V9Ab[16+I]:=Ref^[I-St];
+      For I:=R To 2*Bs-1 Do V9Ab[16+I]:=V9Ab[16+R-1];
+     End Else Begin
+      For I:=0 To Bs-1 Do V9Ab[16+I]:=Ref^[I-St];
+      For I:=Bs To 2*Bs-1 Do V9Ab[16+I]:=V9Ab[16+Bs-1];
+     End;
+    End Else If X0<=Fw Then Begin
+     R:=Fw-X0;
+     For I:=0 To R-1 Do V9Ab[16+I]:=Ref^[I-St];
+     For I:=R To 2*Bs-1 Do V9Ab[16+I]:=V9Ab[16+R-1];
+    End;
+    If HaveL Then V9Ab[15]:=Ref^[-St-1] Else V9Ab[15]:=Base+1;
+   End Else Begin
+    For I:=0 To Bs-1 Do V9Ab[16+I]:=Ref^[I-St];
+    If (Bs=4) And HaveR Then Begin
+     For I:=Bs To 2*Bs-1 Do V9Ab[16+I]:=Ref^[I-St];
+    End Else For I:=Bs To 2*Bs-1 Do V9Ab[16+I]:=V9Ab[16+Bs-1];
+    If HaveL Then V9Ab[15]:=Ref^[-St-1] Else V9Ab[15]:=Base+1;
+   End;
+  End Else Begin
+   For I:=0 To 2*Bs-1 Do V9Ab[16+I]:=Base-1;
+   V9Ab[15]:=Base-1;
+  End;
+ End;
+ V9PredIntra(Mode,Bs,D,St,HaveL,HaveU,V9Bd);
+End;
+
+{ ====================== transformees inverses ====================== }
+Procedure V9AddPix(P: PV9W; V: Int64; Maxv: LongInt); inline;
+Var T: Int64;
+Begin
+ T:=Int64(P^[0])+V;
+ If T<0 Then T:=0 Else If T>Maxv Then T:=Maxv;
+ P^[0]:=T;
+End;
+
+Procedure V9Iwht(Dst: PV9W; St: LongInt);
+Var Out_: Array[0..15] Of Int64; I: LongInt; A1,B1,C1,D1,E1: Int64; Maxv: LongInt;
+Begin
+ Maxv:=(1 Shl V9Bd)-1;
+ For I:=0 To 3 Do Begin
+  A1:=SarInt64(V9Coef[I*4],2); C1:=SarInt64(V9Coef[I*4+1],2); D1:=SarInt64(V9Coef[I*4+2],2); B1:=SarInt64(V9Coef[I*4+3],2);
+  A1:=A1+C1; D1:=D1-B1; E1:=SarInt64(A1-D1,1); B1:=E1-B1; C1:=E1-C1; A1:=A1-B1; D1:=D1+C1;
+  Out_[I*4]:=A1; Out_[I*4+1]:=B1; Out_[I*4+2]:=C1; Out_[I*4+3]:=D1;
+ End;
+ For I:=0 To 3 Do Begin
+  A1:=Out_[I]; C1:=Out_[4+I]; D1:=Out_[8+I]; B1:=Out_[12+I];
+  A1:=A1+C1; D1:=D1-B1; E1:=SarInt64(A1-D1,1); B1:=E1-B1; C1:=E1-C1; A1:=A1-B1; D1:=D1+C1;
+  V9AddPix(@Dst^[I],A1,Maxv); V9AddPix(@Dst^[St+I],B1,Maxv);
+  V9AddPix(@Dst^[2*St+I],C1,Maxv); V9AddPix(@Dst^[3*St+I],D1,Maxv);
+ End;
+End;
+
+{ Transformee inverse 2D (n = 4,8,16,32) ; Tt = type (0 DCT_DCT, 1 ADST_DCT, 2 DCT_ADST, 3 ADST_ADST) }
+Procedure V9Itx(Tx,Tt: LongInt; Dst: PV9W; St: LongInt);
+Var N,I,J,Sh: LongInt; Tin,Tout: TV9Tx; Out_: Array[0..1023] Of Int64; Maxv: LongInt; Z: Boolean;
+ Procedure Run1(Adst: Boolean);
+ Begin
+  Case Tx Of
+   0: If Adst Then V9Iadst4(Tin,Tout) Else V9Idct4(Tin,Tout);
+   1: If Adst Then V9Iadst8(Tin,Tout) Else V9Idct8(Tin,Tout);
+   2: If Adst Then V9Iadst16(Tin,Tout) Else V9Idct16(Tin,Tout);
+  Else V9Idct32(Tin,Tout);
+  End;
+ End;
+Begin
+ Maxv:=(1 Shl V9Bd)-1;
+ N:=4 Shl Tx;
+ Case Tx Of 0: Sh:=4; 1: Sh:=5; Else Sh:=6; End;
+ { lignes : rows = ADST si type DCT_ADST(2) ou ADST_ADST(3) }
+ For I:=0 To N-1 Do Begin
+  Z:=True;
+  For J:=0 To N-1 Do Begin Tin[J]:=V9Coef[I*N+J]; If Tin[J]<>0 Then Z:=False; End;
+  If Z Then Begin
+   For J:=0 To N-1 Do Out_[I*N+J]:=0;
+  End Else Begin
+   Run1((Tt=2) Or (Tt=3));
+   For J:=0 To N-1 Do Out_[I*N+J]:=Tout[J];
+  End;
+ End;
+ For I:=0 To N-1 Do Begin
+  For J:=0 To N-1 Do Tin[J]:=Out_[J*N+I];
+  Run1((Tt=1) Or (Tt=3));
+  For J:=0 To N-1 Do
+   V9AddPix(@Dst^[J*St+I],SarInt64(Tout[J]+(Int64(1) Shl (Sh-1)),Sh),Maxv);
+ End;
+End;
+
+Procedure V9InvTx(Tx,Tt,Eob: LongInt; Dst: PV9W; St: LongInt);
+Var N,I,J,Sh: LongInt; O: Int64; Maxv: LongInt;
+Begin
+ N:=4 Shl Tx;
+ If V9Lossless<>0 Then V9Iwht(Dst,St)
+ Else If (Eob=1) And (Tt=0) Then Begin
+  Maxv:=(1 Shl V9Bd)-1;
+  Case Tx Of 0: Sh:=4; 1: Sh:=5; Else Sh:=6; End;
+  O:=V9Dcr(Int64(V9Coef[0])*V9C16);
+  O:=V9Dcr(O*V9C16);
+  O:=SarInt64(O+(Int64(1) Shl (Sh-1)),Sh);
+  For I:=0 To N-1 Do For J:=0 To N-1 Do V9AddPix(@Dst^[I*St+J],O,Maxv);
+ End Else V9Itx(Tx,Tt,Dst,St);
+ FillChar(V9Coef,N*N*4,0);
+End;
+
+{ ====================== lecture des coefficients (vp9_detokenize.c) ====================== }
+Const
+ V9Cat1: Array[0..0] Of Byte=(159);
+ V9Cat2: Array[0..1] Of Byte=(165,145);
+ V9Cat3: Array[0..2] Of Byte=(173,148,140);
+ V9Cat4: Array[0..3] Of Byte=(176,155,140,135);
+ V9Cat5: Array[0..4] Of Byte=(180,157,141,134,130);
+
+Function V9ReadCat(Var P: Byte; N: LongInt): LongInt;
+Var A: PV9B; I,V: LongInt;
+Begin
+ A:=@P; V:=0;
+ For I:=0 To N-1 Do V:=(V Shl 1) Or V9Rd(V9R,A^[I]);
+ V9ReadCat:=V;
+End;
+
+Function V9DecodeCoefs(PlType,Ref,Tx,Ctx,ScanOff,NbOff,Dq0,Dq1: LongInt): LongInt;
+Var MaxEob,Band,C,DqShift,Val,V,Cat6Off,Cat6Bits: LongInt; Dqv: LongInt;
+ Pp: PV9B; Probs: PV9B; BT: PV9B; Sc,Nb: PV9S; Pa: PV9B;
+ Cn: Boolean;
+Begin
+ MaxEob:=16 Shl (Tx Shl 1);
+ Probs:=@V9Fc.Coef[Tx,PlType,Ref,0,0,0];
+ Sc:=@V9ScanTab[ScanOff]; Nb:=@V9NbTab[NbOff];
+ If Tx=0 Then BT:=@V9BandTx4 Else BT:=@V9BandTx8;
+ If Tx=3 Then DqShift:=1 Else DqShift:=0;
+ Cat6Off:=12-V9Bd; Cat6Bits:=14+(V9Bd-8);
+ Cn:=V9DoCnt;
+ Dqv:=Dq0; C:=0;
+ While C<MaxEob Do Begin
+  Band:=BT^[C];
+  Pp:=@Probs^[(Band*6+Ctx)*3];
+  If Cn Then Inc(V9Cnt.Eob[Tx,PlType,Ref,Band,Ctx]);
+  If V9Rd(V9R,Pp^[0])=0 Then Begin
+   If Cn Then Inc(V9Cnt.Coef[Tx,PlType,Ref,Band,Ctx,3]);
+   Break;
+  End;
+  While V9Rd(V9R,Pp^[1])=0 Do Begin
+   If Cn Then Inc(V9Cnt.Coef[Tx,PlType,Ref,Band,Ctx,0]);
+   Dqv:=Dq1;
+   V9TokCache[Sc^[C]]:=0;
+   Inc(C);
+   If C>=MaxEob Then Begin V9DecodeCoefs:=C; Exit; End;
+   Ctx:=(1+V9TokCache[Nb^[2*C]]+V9TokCache[Nb^[2*C+1]]) Shr 1;
+   Band:=BT^[C];
+   Pp:=@Probs^[(Band*6+Ctx)*3];
+  End;
+  If V9Rd(V9R,Pp^[2])<>0 Then Begin
+   Pa:=@V9Pareto[(Pp^[2]-1)*8];
+   If Cn Then Inc(V9Cnt.Coef[Tx,PlType,Ref,Band,Ctx,2]);
+   If V9Rd(V9R,Pa^[0])<>0 Then Begin
+    If V9Rd(V9R,Pa^[3])<>0 Then Begin
+     V9TokCache[Sc^[C]]:=5;
+     If V9Rd(V9R,Pa^[5])<>0 Then Begin
+      If V9Rd(V9R,Pa^[7])<>0 Then Val:=67+V9ReadCat(V9Cat6Prob[Cat6Off],Cat6Bits)
+      Else Val:=35+V9ReadCat(V9Cat5[0],5);
+     End Else If V9Rd(V9R,Pa^[6])<>0 Then Val:=19+V9ReadCat(V9Cat4[0],4)
+     Else Val:=11+V9ReadCat(V9Cat3[0],3);
+    End Else Begin
+     V9TokCache[Sc^[C]]:=4;
+     If V9Rd(V9R,Pa^[4])<>0 Then Val:=7+V9ReadCat(V9Cat2[0],2)
+     Else Val:=5+V9ReadCat(V9Cat1[0],1);
+    End;
+    V:=LongInt(SarInt64(Int64(Val)*Dqv,DqShift));
+   End Else Begin
+    If V9Rd(V9R,Pa^[1])<>0 Then Begin
+     V9TokCache[Sc^[C]]:=3;
+     V:=LongInt(SarInt64(Int64(3+V9Rd(V9R,Pa^[2]))*Dqv,DqShift));
+    End Else Begin
+     V9TokCache[Sc^[C]]:=2;
+     V:=LongInt(SarInt64(Int64(2)*Dqv,DqShift));
+    End;
+   End;
+  End Else Begin
+   If Cn Then Inc(V9Cnt.Coef[Tx,PlType,Ref,Band,Ctx,1]);
+   V9TokCache[Sc^[C]]:=1;
+   V:=LongInt(SarInt64(Int64(Dqv),DqShift));
+  End;
+  If V9Rd(V9R,128)<>0 Then V9Coef[Sc^[C]]:=-V Else V9Coef[Sc^[C]]:=V;
+  Inc(C);
+  Ctx:=(1+V9TokCache[Nb^[2*C]]+V9TokCache[Nb^[2*C+1]]) Shr 1;
+  Dqv:=Dq1;
+ End;
+ V9DecodeCoefs:=C;
+End;
+
+{ lit les coefficients d'un bloc de transformee (plan Pl, position X,Y en unites 4x4 dans le bloc) }
+Function V9BlockTokens(Pl,X,Y,Tx,Seg,Tt: LongInt; Inter: Boolean): LongInt;
+Var A,L: PV9B; Ctx,I,N,Eob,Lim,Dq0,Dq1,ScanOff,NbOff,Ref: LongInt; Az,Lz: Boolean; Cv: Byte;
+Begin
+ A:=@V9AboveCtx[Pl]^[V9AOff[Pl]+X]; L:=@V9LeftCtx[Pl,V9LOff[Pl]+Y];
+ N:=1 Shl Tx;
+ Az:=False; Lz:=False;
+ For I:=0 To N-1 Do Begin If A^[I]<>0 Then Az:=True; If L^[I]<>0 Then Lz:=True; End;
+ Ctx:=Ord(Az)+Ord(Lz);
+ If Pl=0 Then Begin Dq0:=V9YDq[Seg,0]; Dq1:=V9YDq[Seg,1]; End
+ Else Begin Dq0:=V9UvDq[Seg,0]; Dq1:=V9UvDq[Seg,1]; End;
+ ScanOff:=V9ScanOff[Tx*4+Tt]; NbOff:=V9NbOff[Tx*4+Tt];
+ Ref:=Ord(Inter);
+ Eob:=V9DecodeCoefs(Ord(Pl>0),Ref,Tx,Ctx,ScanOff,NbOff,Dq0,Dq1);
+ Cv:=Ord(Eob>0);
+ If V9MaxW[Pl]<>0 Then Lim:=V9MaxW[Pl]-X Else Lim:=N;
+ For I:=0 To N-1 Do If I<Lim Then A^[I]:=Cv Else A^[I]:=0;
+ If V9MaxH[Pl]<>0 Then Lim:=V9MaxH[Pl]-Y Else Lim:=N;
+ For I:=0 To N-1 Do If I<Lim Then L^[I]:=Cv Else L^[I]:=0;
+ V9BlockTokens:=Eob;
+End;
+
+{ ====================== prediction inter ====================== }
+Var V9McBuf: Array[0..18224] Of Word; { 135 x 135 }
+ V9Tmp: Array[0..8639] Of Word; { 64 x 135 }
+
+{ Convolution generale (vpx_convolve.c). Src pointe sur l'echantillon (x0,y0) entier. }
+Procedure V9Conv(Src: PV9W; SS: LongInt; Dst: PV9W; DS: LongInt; Kern,X0q,Xs,Y0q,Ys,W,H: LongInt; Avg: Boolean);
+Var X,Y,K,Xq,Yq,Sum,Ih,P,Maxv,Sx: LongInt; F: PV9Kr; Sp: PV9W;
+Begin
+ Maxv:=(1 Shl V9Bd)-1;
+ If (Xs=16) And (Ys=16) And (X0q=0) And (Y0q=0) Then Begin
+  For Y:=0 To H-1 Do
+   For X:=0 To W-1 Do
+    If Avg Then Dst^[Y*DS+X]:=(Dst^[Y*DS+X]+Src^[Y*SS+X]+1) Shr 1 Else Dst^[Y*DS+X]:=Src^[Y*SS+X];
+  Exit;
+ End;
+ If (Xs=16) And (Ys=16) And (Y0q=0) Then Begin { horizontal seul }
+  F:=@V9Kern[Kern,X0q,0];
+  For Y:=0 To H-1 Do Begin
+   Sp:=@Src^[Y*SS-3];
+   For X:=0 To W-1 Do Begin
+    Sum:=0;
+    For K:=0 To 7 Do Inc(Sum,Sp^[X+K]*F^[K]);
+    P:=SarLongint(Sum+64,7);
+    If P<0 Then P:=0 Else If P>Maxv Then P:=Maxv;
+    If Avg Then Dst^[Y*DS+X]:=(Dst^[Y*DS+X]+P+1) Shr 1 Else Dst^[Y*DS+X]:=P;
+   End;
+  End;
+  Exit;
+ End;
+ If (Xs=16) And (Ys=16) And (X0q=0) Then Begin { vertical seul }
+  F:=@V9Kern[Kern,Y0q,0];
+  For Y:=0 To H-1 Do Begin
+   For X:=0 To W-1 Do Begin
+    Sum:=0;
+    For K:=0 To 7 Do Inc(Sum,Src^[(Y+K-3)*SS+X]*F^[K]);
+    P:=SarLongint(Sum+64,7);
+    If P<0 Then P:=0 Else If P>Maxv Then P:=Maxv;
+    If Avg Then Dst^[Y*DS+X]:=(Dst^[Y*DS+X]+P+1) Shr 1 Else Dst^[Y*DS+X]:=P;
+   End;
+  End;
+  Exit;
+ End;
+ { 2D : passe horizontale dans V9Tmp (largeur 64) puis verticale }
+ Ih:=(((H-1)*Ys+Y0q) Shr 4)+8;
+ For Y:=0 To Ih-1 Do Begin
+  Sp:=@Src^[(Y-3)*SS-3];
+  Xq:=X0q;
+  For X:=0 To W-1 Do Begin
+   F:=@V9Kern[Kern,Xq And 15,0];
+   Sx:=Xq Shr 4;
+   Sum:=0;
+   For K:=0 To 7 Do Inc(Sum,Sp^[Sx+K]*F^[K]);
+   P:=SarLongint(Sum+64,7);
+   If P<0 Then P:=0 Else If P>Maxv Then P:=Maxv;
+   V9Tmp[Y*64+X]:=P;
+   Inc(Xq,Xs);
+  End;
+ End;
+ For X:=0 To W-1 Do Begin
+  Yq:=Y0q;
+  For Y:=0 To H-1 Do Begin
+   F:=@V9Kern[Kern,Yq And 15,0];
+   Sx:=(Yq Shr 4)*64+X;
+   Sum:=0;
+   For K:=0 To 7 Do Inc(Sum,V9Tmp[Sx+K*64]*F^[K]);
+   P:=SarLongint(Sum+64,7);
+   If P<0 Then P:=0 Else If P>Maxv Then P:=Maxv;
+   If Avg Then Dst^[Y*DS+X]:=(Dst^[Y*DS+X]+P+1) Shr 1 Else Dst^[Y*DS+X]:=P;
+   Inc(Yq,Ys);
+  End;
+ End;
+End;
+
+{ port de dec_build_inter_predictors }
+Procedure V9InterPlane(Pl,Bw,Bh,X,Y,W,H,MiX,MiY,RefI: LongInt; Mv: TV9Mv);
+Var Fr,Ssx,Ssy,Fw,Fh,X0,Y0,X016,Y016,Xs,Ys,SubX,SubY,MvR,MvC,Sx0,Sy0,Rw,Rh,Xa,Ya,Xb,Yb,I,J,Cx,Cy,Rs: LongInt;
+ SMvR,SMvC,SpelL,SpelR,SpelT,SpelB,XStart,YStart,XOff,YOff,Dstride: LongInt;
+ Sc: Boolean; Rf: ^TV9Fb; Cf: ^TV9Fb; Sf: ^TV9Sf; Src,Dst: PV9W; Row: PV9W; Inside: Boolean;
+Begin
+ If RefI=0 Then Fr:=V9Cur^.R0 Else Fr:=V9Cur^.R1;
+ Sf:=@V9Refs[Fr-1].Sf;
+ If (Sf^.XFp=-1) Or (Sf^.YFp=-1) Then Fail('VP9 : la reference a des dimensions invalides.');
+ Rf:=@V9Fb[V9Refs[Fr-1].Idx];
+ Cf:=@V9Fb[V9NewFb];
+ If Pl=0 Then Begin Ssx:=0; Ssy:=0; Fw:=Rf^.W; Fh:=Rf^.H; End
+ Else Begin Ssx:=V9SsX; Ssy:=V9SsY; Fw:=Rf^.CW; Fh:=Rf^.CH; End;
+ Sc:=V9IsScaled(Sf^);
+ Dstride:=Cf^.St[Pl];
+ Dst:=@Cf^.P[Pl]^[(((V9MiRow*8) Shr Ssy)+Y)*Dstride+((V9MiCol*8) Shr Ssx)+X];
+ If Sc Then Begin
+  { clamp_mv_to_umv_border_sb }
+  SpelL:=(4+Bw) Shl 4; SpelR:=SpelL-16; SpelT:=(4+Bh) Shl 4; SpelB:=SpelT-16;
+  MvR:=Mv.R*(1 Shl (1-Ssy)); MvC:=Mv.C*(1 Shl (1-Ssx));
+  MvC:=V9Clamp(MvC,V9EdgeL*(1 Shl (1-Ssx))-SpelL,V9EdgeR*(1 Shl (1-Ssx))+SpelR);
+  MvR:=V9Clamp(MvR,V9EdgeT*(1 Shl (1-Ssy))-SpelT,V9EdgeB*(1 Shl (1-Ssy))+SpelB);
+  XStart:=(-V9EdgeL) Shr (3+Ssx); YStart:=(-V9EdgeT) Shr (3+Ssy);
+  X016:=V9ScaleX((XStart+X) Shl 4,Sf^); Y016:=V9ScaleY((YStart+Y) Shl 4,Sf^);
+  X0:=V9ScaleX(XStart+X,Sf^); Y0:=V9ScaleY(YStart+Y,Sf^);
+  XOff:=V9ScaleX((MiX+X) Shl 4,Sf^) And 15; YOff:=V9ScaleY((MiY+Y) Shl 4,Sf^) And 15;
+  SMvR:=V9ScaleY(MvR,Sf^)+YOff; SMvC:=V9ScaleX(MvC,Sf^)+XOff;
+  Xs:=Sf^.XStep; Ys:=Sf^.YStep;
+ End Else Begin
+  X0:=((-V9EdgeL) Shr (3+Ssx))+X; Y0:=((-V9EdgeT) Shr (3+Ssy))+Y;
+  SMvR:=Mv.R*(1 Shl (1-Ssy)); SMvC:=Mv.C*(1 Shl (1-Ssx));
+  Xs:=16; Ys:=16;
+ End;
+ SubX:=SMvC And 15; SubY:=SMvR And 15;
+ Inc(X0,SarLongint(SMvC,4)); Inc(Y0,SarLongint(SMvR,4));
+ { region lue : [X0-3, X0+((SubX+(W-1)*Xs)>>4)+4] }
+ Xa:=X0-3; Ya:=Y0-3;
+ Xb:=X0+((SubX+(W-1)*Xs) Shr 4)+4; Yb:=Y0+((SubY+(H-1)*Ys) Shr 4)+4;
+ Rw:=Xb-Xa+1; Rh:=Yb-Ya+1;
+ Inside:=(Xa>=0) And (Ya>=0) And (Xb<=Fw-1) And (Yb<=Fh-1);
+ If Inside Then Begin
+  Rs:=Rf^.St[Pl];
+  Src:=@Rf^.P[Pl]^[Y0*Rs+X0];
+ End Else Begin
+  Rs:=Rw;
+  For J:=0 To Rh-1 Do Begin
+   Cy:=Ya+J;
+   If Cy<0 Then Cy:=0 Else If Cy>Fh-1 Then Cy:=Fh-1;
+   Row:=@Rf^.P[Pl]^[Cy*Rf^.St[Pl]];
+   For I:=0 To Rw-1 Do Begin
+    Cx:=Xa+I;
+    If Cx<0 Then Cx:=0 Else If Cx>Fw-1 Then Cx:=Fw-1;
+    V9McBuf[J*Rw+I]:=Row^[Cx];
+   End;
+  End;
+  Src:=@V9McBuf[3*Rw+3];
+ End;
+ V9Conv(Src,Rs,Dst,Dstride,V9Cur^.Filt,SubX,Xs,SubY,Ys,W,H,RefI>0);
+End;
+
+Function V9RoundQ4(V: LongInt): LongInt;
+Begin
+ If V<0 Then V9RoundQ4:=(V-2) Div 4 Else V9RoundQ4:=(V+2) Div 4;
+End;
+Function V9RoundQ2(V: LongInt): LongInt;
+Begin
+ If V<0 Then V9RoundQ2:=(V-1) Div 2 Else V9RoundQ2:=(V+1) Div 2;
+End;
+
+Procedure V9AvgSplitMv(Pl,RefI,Blk: LongInt; Var Mv: TV9Mv);
+Var Ss: LongInt; M: PV9Mi;
+Begin
+ M:=V9Cur;
+ If Pl=0 Then Ss:=0 Else Ss:=(Ord(V9SsX>0) Shl 1) Or Ord(V9SsY>0);
+ Case Ss Of
+  0: Mv:=M^.BMv[Blk,RefI];
+  1: Begin
+      Mv.R:=V9RoundQ2(M^.BMv[Blk,RefI].R+M^.BMv[Blk+2,RefI].R);
+      Mv.C:=V9RoundQ2(M^.BMv[Blk,RefI].C+M^.BMv[Blk+2,RefI].C);
+     End;
+  2: Begin
+      Mv.R:=V9RoundQ2(M^.BMv[Blk,RefI].R+M^.BMv[Blk+1,RefI].R);
+      Mv.C:=V9RoundQ2(M^.BMv[Blk,RefI].C+M^.BMv[Blk+1,RefI].C);
+     End;
+ Else Begin
+      Mv.R:=V9RoundQ4(M^.BMv[0,RefI].R+M^.BMv[1,RefI].R+M^.BMv[2,RefI].R+M^.BMv[3,RefI].R);
+      Mv.C:=V9RoundQ4(M^.BMv[0,RefI].C+M^.BMv[1,RefI].C+M^.BMv[2,RefI].C+M^.BMv[3,RefI].C);
+     End;
+ End;
+End;
+
+Procedure V9InterBlock;
+Var Pl,RefI,Nref,Bx,By,I,N4w,N4h,MiX,MiY: LongInt; Mv: TV9Mv;
+Begin
+ MiX:=V9MiCol*8; MiY:=V9MiRow*8;
+ Nref:=1; If V9Cur^.R1>0 Then Nref:=2;
+ For RefI:=0 To Nref-1 Do Begin
+  For Pl:=0 To 2 Do Begin
+   N4w:=V9N4W[Pl]; N4h:=V9N4H[Pl];
+   If V9Cur^.Sb<3 Then Begin
+    I:=0;
+    For By:=0 To N4h-1 Do For Bx:=0 To N4w-1 Do Begin
+     V9AvgSplitMv(Pl,RefI,I,Mv); Inc(I);
+     V9InterPlane(Pl,4*N4w,4*N4h,4*Bx,4*By,4,4,MiX,MiY,RefI,Mv);
+    End;
+   End Else
+    V9InterPlane(Pl,4*N4w,4*N4h,0,0,4*N4w,4*N4h,MiX,MiY,RefI,V9Cur^.Mv[RefI]);
+  End;
+ End;
+End;
+
+{ ====================== decodage d'un bloc ====================== }
+Function V9UvTxSize(Sb,Tx: LongInt): LongInt; inline;
+Begin V9UvTxSize:=V9UvTx[((Sb*4+Tx)*2+V9SsX)*2+V9SsY]; End;
+
+Procedure V9DecodeBlock(MiRow,MiCol,Bsize,Bwl,Bhl: LongInt);
+Var Bw,Bh,Off,X,Y,Pl,Row,Col,Tx,Step,MaxW,MaxH,N4w,N4h,Mode,Tt,Eob,EobTot,Seg,Ssx,Ssy,Uvs: LongInt;
+ Mi: PV9Mi; HaveU,HaveL,HaveR: Boolean; Dst: PV9W; Fb: ^TV9Fb; ScanT: LongInt; Inter: Boolean;
+Begin
+ V9MiRow:=MiRow; V9MiCol:=MiCol; V9Bsize:=Bsize; V9Bwl:=Bwl; V9Bhl:=Bhl;
+ Bw:=1 Shl (Bwl-1); Bh:=1 Shl (Bhl-1);
+ V9XMis:=V9Min(Bw,V9MiCols-MiCol); V9YMis:=V9Min(Bh,V9MiRows-MiRow);
+ Off:=MiRow*V9MiCols+MiCol;
+ Mi:=@V9Mip^[Off]; V9Cur:=Mi;
+ Mi^.Sb:=Bsize;
+ For Y:=0 To V9YMis-1 Do For X:=0 To V9XMis-1 Do V9Grid^[Off+Y*V9MiCols+X]:=Mi;
+ For Pl:=0 To 2 Do Begin
+  If Pl=0 Then Begin Ssx:=0; Ssy:=0; End Else Begin Ssx:=V9SsX; Ssy:=V9SsY; End;
+  V9N4W[Pl]:=(Bw Shl 1) Shr Ssx; V9N4H[Pl]:=(Bh Shl 1) Shr Ssy;
+  V9N4WL[Pl]:=Bwl-Ssx; V9N4HL[Pl]:=Bhl-Ssy;
+  V9AOff[Pl]:=(MiCol*2) Shr Ssx;
+  V9LOff[Pl]:=((MiRow*2) And 15) Shr Ssy;
+ End;
+ V9EdgeT:=-((MiRow*8)*8); V9EdgeB:=((V9MiRows-Bh-MiRow)*8)*8;
+ V9EdgeL:=-((MiCol*8)*8); V9EdgeR:=((V9MiCols-Bw-MiCol)*8)*8;
+ If MiRow<>0 Then V9Above:=V9Grid^[Off-V9MiCols] Else V9Above:=Nil;
+ If MiCol>V9TileC0 Then V9Left:=V9Grid^[Off-1] Else V9Left:=Nil;
+ If (Bsize>=3) And ((V9SsX<>0) Or (V9SsY<>0)) Then Begin
+  Uvs:=V9SsSize[(Bsize*2+V9SsX)*2+V9SsY];
+  If Uvs=13 Then Fail('VP9 : taille de bloc invalide.');
+ End;
+ V9ReadModeInfo;
+ If Mi^.Skip<>0 Then Begin
+  For Pl:=0 To 2 Do Begin
+   FillChar(V9AboveCtx[Pl]^[V9AOff[Pl]],V9N4W[Pl],0);
+   FillChar(V9LeftCtx[Pl,V9LOff[Pl]],V9N4H[Pl],0);
+  End;
+ End;
+ Fb:=@V9Fb[V9NewFb];
+ Inter:=Mi^.R0>0;
+ If Not Inter Then Begin
+  For Pl:=0 To 2 Do Begin
+   If Pl=0 Then Begin Tx:=Mi^.Tx; Ssx:=0; Ssy:=0; End
+   Else Begin Tx:=V9UvTxSize(Mi^.Sb,Mi^.Tx); Ssx:=V9SsX; Ssy:=V9SsY; End;
+   N4w:=V9N4W[Pl]; N4h:=V9N4H[Pl];
+   Step:=1 Shl Tx;
+   If V9EdgeR>=0 Then MaxW:=N4w Else MaxW:=N4w+SarLongint(V9EdgeR,5+Ssx);
+   If V9EdgeB>=0 Then MaxH:=N4h Else MaxH:=N4h+SarLongint(V9EdgeB,5+Ssy);
+   If V9EdgeR>=0 Then V9MaxW[Pl]:=0 Else V9MaxW[Pl]:=MaxW;
+   If V9EdgeB>=0 Then V9MaxH[Pl]:=0 Else V9MaxH[Pl]:=MaxH;
+   Row:=0;
+   While Row<MaxH Do Begin
+    Col:=0;
+    While Col<MaxW Do Begin
+     If Pl=0 Then Mode:=Mi^.Mode Else Mode:=Mi^.Uv;
+     If (Mi^.Sb<3) And (Pl=0) Then Mode:=Mi^.BMode[(Row Shl 1)+Col];
+     HaveU:=(Row<>0) Or (V9Above<>Nil);
+     HaveL:=(Col<>0) Or (V9Left<>Nil);
+     HaveR:=(Col+Step)<(1 Shl V9N4WL[Pl]);
+     V9IntraBlock(Pl,Mode,Tx,Col*4,Row*4,HaveU,HaveL,HaveR);
+     If Mi^.Skip=0 Then Begin
+      If (Pl>0) Or (V9Lossless<>0) Then Tt:=0 Else Tt:=V9IntraTxType[Mode];
+      Eob:=V9BlockTokens(Pl,Col,Row,Tx,Mi^.Seg,Tt,False);
+      If Eob>0 Then Begin
+       Dst:=@Fb^.P[Pl]^[(((MiRow*8) Shr Ssy)+Row*4)*Fb^.St[Pl]+((MiCol*8) Shr Ssx)+Col*4];
+       V9InvTx(Tx,Tt,Eob,Dst,Fb^.St[Pl]);
+      End;
+     End;
+     Inc(Col,Step);
+    End;
+    Inc(Row,Step);
+   End;
+  End;
+ End Else Begin
+  V9InterBlock;
+  If Mi^.Skip=0 Then Begin
+   EobTot:=0;
+   For Pl:=0 To 2 Do Begin
+    If Pl=0 Then Begin Tx:=Mi^.Tx; Ssx:=0; Ssy:=0; End
+    Else Begin Tx:=V9UvTxSize(Mi^.Sb,Mi^.Tx); Ssx:=V9SsX; Ssy:=V9SsY; End;
+    N4w:=V9N4W[Pl]; N4h:=V9N4H[Pl];
+    Step:=1 Shl Tx;
+    If V9EdgeR>=0 Then MaxW:=N4w Else MaxW:=N4w+SarLongint(V9EdgeR,5+Ssx);
+    If V9EdgeB>=0 Then MaxH:=N4h Else MaxH:=N4h+SarLongint(V9EdgeB,5+Ssy);
+    If V9EdgeR>=0 Then V9MaxW[Pl]:=0 Else V9MaxW[Pl]:=MaxW;
+    If V9EdgeB>=0 Then V9MaxH[Pl]:=0 Else V9MaxH[Pl]:=MaxH;
+    Row:=0;
+    While Row<MaxH Do Begin
+     Col:=0;
+     While Col<MaxW Do Begin
+      Eob:=V9BlockTokens(Pl,Col,Row,Tx,Mi^.Seg,0,True);
+      Inc(EobTot,Eob);
+      If Eob>0 Then Begin
+       Dst:=@Fb^.P[Pl]^[(((MiRow*8) Shr Ssy)+Row*4)*Fb^.St[Pl]+((MiCol*8) Shr Ssx)+Col*4];
+       V9InvTx(Tx,0,Eob,Dst,Fb^.St[Pl]);
+      End;
+      Inc(Col,Step);
+     End;
+     Inc(Row,Step);
+    End;
+   End;
+   If (Bsize>=3) And (EobTot=0) Then Mi^.Skip:=1;
+  End;
+ End;
+End;
+
+Function V9PartCtx(MiRow,MiCol,Bsl: LongInt): LongInt;
+Var A,L: LongInt;
+Begin
+ A:=(V9AbovePart^[MiCol] Shr Bsl) And 1;
+ L:=(V9LeftPart[MiRow And 7] Shr Bsl) And 1;
+ V9PartCtx:=(L*2+A)+Bsl*4;
+End;
+
+Procedure V9DecodePartition(MiRow,MiCol,Bsize,N4l2: LongInt);
+Var N8l2,Nw,Hbs,Part,Sub,Ctx,I: LongInt; HasR,HasC: Boolean; Pr: PV9B;
+Begin
+ N8l2:=N4l2-1; Nw:=1 Shl N8l2; Hbs:=Nw Shr 1;
+ HasR:=(MiRow+Hbs)<V9MiRows; HasC:=(MiCol+Hbs)<V9MiCols;
+ If (MiRow>=V9MiRows) Or (MiCol>=V9MiCols) Then Exit;
+ Ctx:=V9PartCtx(MiRow,MiCol,N8l2);
+ If (V9FrameType=0) Or (V9IntraOnly<>0) Then Pr:=@V9KfPartProb[Ctx*3] Else Pr:=@V9Fc.Part[Ctx,0];
+ If HasR And HasC Then Part:=V9RdTree(V9R,V9TrPart,Pr)
+ Else If (Not HasR) And HasC Then Begin
+  If V9Rd(V9R,Pr^[1])<>0 Then Part:=3 Else Part:=1;
+ End Else If HasR And (Not HasC) Then Begin
+  If V9Rd(V9R,Pr^[2])<>0 Then Part:=3 Else Part:=2;
+ End Else Part:=3;
+ If V9DoCnt Then Inc(V9Cnt.Part[Ctx,Part]);
+ Sub:=V9SubSize[Part*13+Bsize];
+ If Hbs=0 Then Begin
+  V9BmWl:=1 Shr Ord((Part And 2)<>0); V9BmHl:=1 Shr Ord((Part And 1)<>0);
+  V9DecodeBlock(MiRow,MiCol,Sub,1,1);
+ End Else Begin
+  Case Part Of
+   0: V9DecodeBlock(MiRow,MiCol,Sub,N4l2,N4l2);
+   1: Begin
+       V9DecodeBlock(MiRow,MiCol,Sub,N4l2,N8l2);
+       If HasR Then V9DecodeBlock(MiRow+Hbs,MiCol,Sub,N4l2,N8l2);
+      End;
+   2: Begin
+       V9DecodeBlock(MiRow,MiCol,Sub,N8l2,N4l2);
+       If HasC Then V9DecodeBlock(MiRow,MiCol+Hbs,Sub,N8l2,N4l2);
+      End;
+  Else Begin
+       V9DecodePartition(MiRow,MiCol,Sub,N8l2);
+       V9DecodePartition(MiRow,MiCol+Hbs,Sub,N8l2);
+       V9DecodePartition(MiRow+Hbs,MiCol,Sub,N8l2);
+       V9DecodePartition(MiRow+Hbs,MiCol+Hbs,Sub,N8l2);
+      End;
+  End;
+ End;
+ If (Bsize>=3) And ((Bsize=3) Or (Part<>3)) Then Begin
+  FillChar(V9AbovePart^[MiCol],Nw,V9PartCtxA[Sub]);
+  FillChar(V9LeftPart[MiRow And 7],Nw,V9PartCtxL[Sub]);
+ End;
+End;
+
+{ ====================== filtre de boucle (vp9_loopfilter.c, vpx_dsp/loopfilter.c) ====================== }
+Const V9LfModeLut: Array[0..13] Of Byte=(0,0,0,0,0,0,0,0,0,0,1,1,0,1);
+
+Procedure V9LfFrameInit;
+Var Lv,Sh,Sg,Seg,Ref,Mode,Scale,Lvl,Data,Lim,IntraLvl: LongInt;
+Begin
+ Scale:=1 Shl (V9LfLevel Shr 5);
+ For Lv:=0 To 63 Do Begin
+  Lim:=Lv Shr (Ord(V9LfSharp>0)+Ord(V9LfSharp>4));
+  If V9LfSharp>0 Then If Lim>(9-V9LfSharp) Then Lim:=9-V9LfSharp;
+  If Lim<1 Then Lim:=1;
+  V9LfLim[Lv]:=Lim; V9LfMblim[Lv]:=2*(Lv+2)+Lim;
+ End;
+ For Seg:=0 To 7 Do Begin
+  Lvl:=V9LfLevel;
+  If V9SegActive(Seg,1) Then Begin
+   Data:=V9SegData[Seg,1];
+   If V9SegAbs<>0 Then Lvl:=V9Clamp(Data,0,63) Else Lvl:=V9Clamp(V9LfLevel+Data,0,63);
+  End;
+  If V9LfDeltaOn=0 Then Begin
+   For Ref:=0 To 3 Do For Mode:=0 To 1 Do V9LfLvl[Seg,Ref,Mode]:=Lvl;
+  End Else Begin
+   IntraLvl:=Lvl+V9RefDelta[0]*Scale;
+   V9LfLvl[Seg,0,0]:=V9Clamp(IntraLvl,0,63); V9LfLvl[Seg,0,1]:=V9LfLvl[Seg,0,0];
+   For Ref:=1 To 3 Do For Mode:=0 To 1 Do
+    V9LfLvl[Seg,Ref,Mode]:=V9Clamp(Lvl+V9RefDelta[Ref]*Scale+V9ModeDelta[Mode]*Scale,0,63);
+  End;
+ End;
+End;
+
+{ Filtre une arete de 8 positions. P pointe sur q0 de la premiere position,
+  Stp : pas a travers l'arete, Alg : pas le long de l'arete, Size = 4, 8 ou 16. }
+Procedure V9Lpf(P: PV9W; Stp,Alg,Size,Lvl: LongInt);
+Var I,Sh,Lim,Blim,Thr,One,Lo,Hi,Off,K,J,Sm: LongInt;
+ P3,P2,P1,P0,Q0,Q1,Q2,Q3: LongInt; Q: PV9W; Flat,Flat2,Hev: Boolean;
+ X: Array[0..15] Of LongInt; Y: Array[0..15] Of LongInt;
+ Ps1,Ps0,Qs0,Qs1,Fl,F1,F2: LongInt;
+
+ Function Cl(T: LongInt): LongInt;
+ Begin If T<Lo Then Cl:=Lo Else If T>Hi Then Cl:=Hi Else Cl:=T; End;
+
+ Procedure Filter4;
+ Begin
+  Ps1:=P1-Off; Ps0:=P0-Off; Qs0:=Q0-Off; Qs1:=Q1-Off;
+  Hev:=(V9Abs(P1-P0)>Thr) Or (V9Abs(Q1-Q0)>Thr);
+  If Hev Then Fl:=Cl(Ps1-Qs1) Else Fl:=0;
+  Fl:=Cl(Fl+3*(Qs0-Ps0));
+  F1:=SarLongint(Cl(Fl+4),3); F2:=SarLongint(Cl(Fl+3),3);
+  Q^[0]:=Cl(Qs0-F1)+Off;
+  Q^[-Stp]:=Cl(Ps0+F2)+Off;
+  If Not Hev Then Begin
+   Fl:=SarLongint(F1+1,1);
+   Q^[Stp]:=Cl(Qs1-Fl)+Off;
+   Q^[-2*Stp]:=Cl(Ps1+Fl)+Off;
+  End;
+ End;
+
+Begin
+ Sh:=V9Bd-8;
+ Lim:=V9LfLim[Lvl] Shl Sh; Blim:=V9LfMblim[Lvl] Shl Sh; Thr:=(Lvl Shr 4) Shl Sh;
+ One:=1 Shl Sh; Off:=128 Shl Sh; Lo:=-Off; Hi:=Off-1;
+ For I:=0 To 7 Do Begin
+  Q:=@P^[I*Alg];
+  P3:=Q^[-4*Stp]; P2:=Q^[-3*Stp]; P1:=Q^[-2*Stp]; P0:=Q^[-Stp];
+  Q0:=Q^[0]; Q1:=Q^[Stp]; Q2:=Q^[2*Stp]; Q3:=Q^[3*Stp];
+  If (V9Abs(P3-P2)>Lim) Or (V9Abs(P2-P1)>Lim) Or (V9Abs(P1-P0)>Lim) Or (V9Abs(Q1-Q0)>Lim) Or
+     (V9Abs(Q2-Q1)>Lim) Or (V9Abs(Q3-Q2)>Lim) Or (V9Abs(P0-Q0)*2+V9Abs(P1-Q1) Div 2>Blim) Then Continue;
+  If Size=4 Then Begin Filter4; Continue; End;
+  Flat:=(V9Abs(P1-P0)<=One) And (V9Abs(Q1-Q0)<=One) And (V9Abs(P2-P0)<=One) And (V9Abs(Q2-Q0)<=One)
+        And (V9Abs(P3-P0)<=One) And (V9Abs(Q3-Q0)<=One);
+  Flat2:=False;
+  If (Size=16) And Flat Then Begin
+   Flat2:=True;
+   For K:=4 To 7 Do Begin
+    If V9Abs(Q^[-(K+1)*Stp]-P0)>One Then Flat2:=False;
+    If V9Abs(Q^[K*Stp]-Q0)>One Then Flat2:=False;
+   End;
+  End;
+  If Flat2 Then Begin
+   For K:=0 To 15 Do X[K]:=Q^[(K-8)*Stp];
+   For K:=1 To 14 Do Begin
+    Sm:=X[K];
+    For J:=K-7 To K+7 Do Begin
+     If J<0 Then Sm:=Sm+X[0] Else If J>15 Then Sm:=Sm+X[15] Else Sm:=Sm+X[J];
+    End;
+    Y[K]:=(Sm+8) Shr 4;
+   End;
+   For K:=1 To 14 Do Q^[(K-8)*Stp]:=Y[K];
+  End Else If Flat Then Begin
+   X[0]:=P3; X[1]:=P2; X[2]:=P1; X[3]:=P0; X[4]:=Q0; X[5]:=Q1; X[6]:=Q2; X[7]:=Q3;
+   For K:=1 To 6 Do Begin
+    Sm:=X[K];
+    For J:=K-3 To K+3 Do Begin
+     If J<0 Then Sm:=Sm+X[0] Else If J>7 Then Sm:=Sm+X[7] Else Sm:=Sm+X[J];
+    End;
+    Y[K]:=(Sm+4) Shr 3;
+   End;
+   For K:=1 To 6 Do Q^[(K-4)*Stp]:=Y[K];
+  End Else Filter4;
+ End;
+End;
+
+{ filtre une plaque 64x64 d'un plan (vp9_filter_block_plane_non420) }
+Procedure V9LfPlane(Pl,MiRow0,MiCol0: LongInt);
+Var Ssx,Ssy,Rs,Cs,R,C,U,St,Lv,Tx,Sb: LongInt; Fb: ^TV9Fb;
+ M16,M8,M4,M4I: Array[0..7] Of LongInt; Lfl: Array[0..63] Of Byte;
+ M16c,M8c,M4c,Bm,M16r,M8r,M4r,M4ir: LongInt; Pb,Q: PV9W; Mi: PV9Mi;
+ SkipThis,EdgeL,EdgeA,SkipC,SkipR,SB4c,SB4r: Boolean; Bit: LongInt;
+Begin
+ Fb:=@V9Fb[V9NewFb];
+ If Pl=0 Then Begin Ssx:=0; Ssy:=0; End Else Begin Ssx:=V9SsX; Ssy:=V9SsY; End;
+ Rs:=1 Shl Ssy; Cs:=1 Shl Ssx;
+ St:=Fb^.St[Pl];
+ Pb:=@Fb^.P[Pl]^[((MiRow0*8) Shr Ssy)*St+((MiCol0*8) Shr Ssx)];
+ FillChar(M16,SizeOf(M16),0); FillChar(M8,SizeOf(M8),0); FillChar(M4,SizeOf(M4),0);
+ FillChar(M4I,SizeOf(M4I),0); FillChar(Lfl,SizeOf(Lfl),0);
+ R:=0;
+ While (R<8) And (MiRow0+R<V9MiRows) Do Begin
+  M16c:=0; M8c:=0; M4c:=0;
+  C:=0;
+  While (C<8) And (MiCol0+C<V9MiCols) Do Begin
+   Mi:=V9Grid^[(MiRow0+R)*V9MiCols+MiCol0+C];
+   Sb:=Mi^.Sb;
+   SkipThis:=(Mi^.Skip<>0) And (Mi^.R0>0);
+   If V9B4W[Sb]>1 Then EdgeL:=(C And (V9B8W[Sb]-1))=0 Else EdgeL:=True;
+   SkipC:=SkipThis And Not EdgeL;
+   If V9B4H[Sb]>1 Then EdgeA:=(R And (V9B8H[Sb]-1))=0 Else EdgeA:=True;
+   SkipR:=SkipThis And Not EdgeA;
+   If Pl=0 Then Tx:=Mi^.Tx Else Tx:=V9UvTxSize(Sb,Mi^.Tx);
+   SB4c:=(Ssx<>0) And (MiCol0+C=V9MiCols-1);
+   SB4r:=(Ssy<>0) And (MiRow0+R=V9MiRows-1);
+   Lv:=V9LfLvl[Mi^.Seg,Mi^.R0,V9LfModeLut[Mi^.Mode]];
+   Lfl[(R Shl 3)+(C Shr Ssx)]:=Lv;
+   If Lv<>0 Then Begin
+    Bit:=1 Shl (C Shr Ssx);
+    If Tx=3 Then Begin
+     If (Not SkipC) And (((C Shr Ssx) And 3)=0) Then Begin
+      If Not SB4c Then M16c:=M16c Or Bit Else M8c:=M8c Or Bit;
+     End;
+     If (Not SkipR) And (((R Shr Ssy) And 3)=0) Then Begin
+      If Not SB4r Then M16[R]:=M16[R] Or Bit Else M8[R]:=M8[R] Or Bit;
+     End;
+    End Else If Tx=2 Then Begin
+     If (Not SkipC) And (((C Shr Ssx) And 1)=0) Then Begin
+      If Not SB4c Then M16c:=M16c Or Bit Else M8c:=M8c Or Bit;
+     End;
+     If (Not SkipR) And (((R Shr Ssy) And 1)=0) Then Begin
+      If Not SB4r Then M16[R]:=M16[R] Or Bit Else M8[R]:=M8[R] Or Bit;
+     End;
+    End Else Begin
+     If Not SkipC Then Begin
+      If (Tx=1) Or (((C Shr Ssx) And 3)=0) Then M8c:=M8c Or Bit Else M4c:=M4c Or Bit;
+     End;
+     If Not SkipR Then Begin
+      If (Tx=1) Or (((R Shr Ssy) And 3)=0) Then M8[R]:=M8[R] Or Bit Else M4[R]:=M4[R] Or Bit;
+     End;
+     If (Not SkipThis) And (Tx<1) And (Not SB4c) Then M4I[R]:=M4I[R] Or Bit;
+    End;
+   End;
+   Inc(C,Cs);
+  End;
+  { passe verticale pour cette ligne }
+  If MiCol0=0 Then Bm:=Not 1 Else Bm:=Not 0;
+  M16c:=M16c And Bm; M8c:=M8c And Bm; M4c:=M4c And Bm;
+  For U:=0 To 7 Do Begin
+   Lv:=Lfl[(R Shl 3)+U];
+   Q:=@Pb^[((R Shr Ssy)*8)*St+U*8];
+   Bit:=1 Shl U;
+   If (M16c And Bit)<>0 Then V9Lpf(Q,1,St,16,Lv)
+   Else If (M8c And Bit)<>0 Then V9Lpf(Q,1,St,8,Lv)
+   Else If (M4c And Bit)<>0 Then V9Lpf(Q,1,St,4,Lv);
+   If (M4I[R] And Bit)<>0 Then V9Lpf(@Q^[4],1,St,4,Lv);
+  End;
+  Inc(R,Rs);
+ End;
+ { passe horizontale }
+ R:=0;
+ While (R<8) And (MiRow0+R<V9MiRows) Do Begin
+  SB4r:=(Ssy<>0) And (MiRow0+R=V9MiRows-1);
+  If SB4r Then M4ir:=0 Else M4ir:=M4I[R];
+  If MiRow0+R=0 Then Begin M16r:=0; M8r:=0; M4r:=0; End
+  Else Begin M16r:=M16[R]; M8r:=M8[R]; M4r:=M4[R]; End;
+  For U:=0 To 7 Do Begin
+   Lv:=Lfl[(R Shl 3)+U];
+   Q:=@Pb^[((R Shr Ssy)*8)*St+U*8];
+   Bit:=1 Shl U;
+   If (M16r And Bit)<>0 Then V9Lpf(Q,St,1,16,Lv)
+   Else Begin
+    If (M8r And Bit)<>0 Then V9Lpf(Q,St,1,8,Lv)
+    Else If (M4r And Bit)<>0 Then V9Lpf(Q,St,1,4,Lv);
+    If (M4ir And Bit)<>0 Then V9Lpf(@Q^[4*St],St,1,4,Lv);
+   End;
+  End;
+  Inc(R,Rs);
+ End;
+End;
+
+Procedure V9LoopFilterFrame;
+Var R,C,Pl: LongInt;
+Begin
+ V9LfFrameInit;
+ R:=0;
+ While R<V9MiRows Do Begin
+  C:=0;
+  While C<V9MiCols Do Begin
+   For Pl:=0 To 2 Do V9LfPlane(Pl,R,C);
+   Inc(C,8);
+  End;
+  Inc(R,8);
+ End;
+End;
+
+{ ====================== sortie ====================== }
+Procedure V9Output(Idx: LongInt);
+Var Fb: ^TV9Fb; W,H,Cw,Ch,Cw2,Ch2,X,Y,P,Sh,Need,Ssx,Ssy,A,B,C,D,Sx,Sy,X1,Y1,N: LongInt; O: PV9B; Row: PV9W;
+ Pw: PV9W;
+Begin
+ Fb:=@V9Fb[Idx];
+ W:=Fb^.W; H:=Fb^.H; Cw:=Fb^.CW; Ch:=Fb^.CH; Ssx:=Fb^.SsX; Ssy:=Fb^.SsY;
+ If @V9HookRaw<>Nil Then Begin
+  For P:=0 To 2 Do Begin
+   If P=0 Then Need:=W*H Else Need:=Cw*Ch;
+   If V9RawCap[P]<Need Then Begin
+    If V9RawBuf[P]<>Nil Then FreeMem(V9RawBuf[P]);
+    GetMem(V9RawBuf[P],Need*2+16); V9RawCap[P]:=Need;
+   End;
+   If P=0 Then Begin X1:=W; Y1:=H; End Else Begin X1:=Cw; Y1:=Ch; End;
+   For Y:=0 To Y1-1 Do Move(Fb^.P[P]^[Y*Fb^.St[P]],V9RawBuf[P]^[Y*X1],X1*2);
+  End;
+  V9HookRaw(V9RawBuf[0],V9RawBuf[1],V9RawBuf[2],W,H,Cw,Ch,Ssx,Ssy,Fb^.Bd);
+ End;
+ If @V9Hook=Nil Then Exit;
+ Cw2:=(W+1) Shr 1; Ch2:=(H+1) Shr 1;
+ Need:=W*H+2*Cw2*Ch2;
+ If V9OutCap<Need Then Begin
+  If V9OutBuf<>Nil Then FreeMem(V9OutBuf);
+  GetMem(V9OutBuf,Need+64); V9OutCap:=Need;
+ End;
+ Sh:=Fb^.Bd-8;
+ O:=V9OutBuf;
+ For Y:=0 To H-1 Do Begin
+  Row:=@Fb^.P[0]^[Y*Fb^.St[0]];
+  For X:=0 To W-1 Do O^[Y*W+X]:=Row^[X] Shr Sh;
+ End;
+ For P:=1 To 2 Do Begin
+  Pw:=Fb^.P[P];
+  N:=W*H+(P-1)*Cw2*Ch2;
+  For Y:=0 To Ch2-1 Do For X:=0 To Cw2-1 Do Begin
+   { echantillons sources couvrant (X,Y) du plan 4:2:0 }
+   If Ssx=1 Then Begin Sx:=X; X1:=X; End Else Begin Sx:=V9Min(2*X,Cw-1); X1:=V9Min(2*X+1,Cw-1); End;
+   If Ssy=1 Then Begin Sy:=Y; Y1:=Y; End Else Begin Sy:=V9Min(2*Y,Ch-1); Y1:=V9Min(2*Y+1,Ch-1); End;
+   A:=Pw^[Sy*Fb^.St[P]+Sx]; B:=Pw^[Sy*Fb^.St[P]+X1];
+   C:=Pw^[Y1*Fb^.St[P]+Sx]; D:=Pw^[Y1*Fb^.St[P]+X1];
+   O^[N+Y*Cw2+X]:=((A+B+C+D+2) Shr 2) Shr Sh;
+  End;
+ End;
+ V9Hook(V9OutBuf,W,H);
+End;
+
+{ ====================== decodage d'une trame ====================== }
+Function V9TileOff(Idx,Mis,Log2: LongInt): LongInt;
+Var Sb,Off: LongInt;
+Begin
+ Sb:=((Mis+7) And Not 7) Shr 3;
+ Off:=((Idx*Sb) Shr Log2) Shl 3;
+ V9TileOff:=V9Min(Off,Mis);
+End;
+
+Procedure V9DecodeTiles(Data: PV9B; DataEnd: LongInt; Start: LongInt);
+Var Tc,Tr,R,C,N,Pos,Sz,MiR,MiC,Mr0,Mr1: LongInt;
+ TB: Array[0..255] Of LongInt; TS: Array[0..255] Of LongInt;
+Begin
+ Tc:=1 Shl V9Log2TileCols; Tr:=1 Shl V9Log2TileRows;
+ Pos:=Start;
+ For R:=0 To Tr-1 Do For C:=0 To Tc-1 Do Begin
+  N:=R*Tc+C;
+  If (R=Tr-1) And (C=Tc-1) Then Sz:=DataEnd-Pos
+  Else Begin
+   If DataEnd-Pos<4 Then Fail('VP9 : paquet tronque ou longueur de tuile corrompue.');
+   Sz:=(Data^[Pos] Shl 24) Or (Data^[Pos+1] Shl 16) Or (Data^[Pos+2] Shl 8) Or Data^[Pos+3];
+   Inc(Pos,4);
+   If Sz>DataEnd-Pos Then Fail('VP9 : paquet tronque ou taille de tuile corrompue.');
+  End;
+  TB[N]:=Pos; TS[N]:=Sz; Inc(Pos,Sz);
+ End;
+ FillChar(V9AboveCtx[0]^,V9CtxN,0); FillChar(V9AboveCtx[1]^,V9CtxN,0); FillChar(V9AboveCtx[2]^,V9CtxN,0);
+ FillChar(V9AbovePart^,V9AlignCols+32,0);
+ For R:=0 To Tr-1 Do Begin
+  Mr0:=V9TileOff(R,V9MiRows,V9Log2TileRows); Mr1:=V9TileOff(R+1,V9MiRows,V9Log2TileRows);
+  For C:=0 To Tc-1 Do Begin
+   N:=R*Tc+C;
+   V9TileC0:=V9TileOff(C,V9MiCols,V9Log2TileCols); V9TileC1:=V9TileOff(C+1,V9MiCols,V9Log2TileCols);
+   If (TS[N]<=0) Or (TB[N]+TS[N]>DataEnd) Then Fail('VP9 : paquet tronque ou longueur de tuile corrompue.');
+   If V9BrInit(V9R,@Data^[TB[N]],TS[N])<>0 Then Fail('VP9 : echec d''initialisation du decodeur booleen.');
+   MiR:=Mr0;
+   While MiR<Mr1 Do Begin
+    FillChar(V9LeftCtx,SizeOf(V9LeftCtx),0); FillChar(V9LeftPart,SizeOf(V9LeftPart),0);
+    MiC:=V9TileC0;
+    While MiC<V9TileC1 Do Begin
+     V9DecodePartition(MiR,MiC,12,4);
+     Inc(MiC,8);
+    End;
+    Inc(MiR,8);
+   End;
+  End;
+ End;
+End;
+
+Function V9DecodeOne(Data: PV9B; Len: LongInt; Var Used: LongInt): LongInt;
+Var First,I,T: LongInt; M: PV9MvRefA;
+Begin
+ V9DecodeOne:=0;
+ V9NewFb:=-1;
+ For I:=0 To 11 Do If V9Fb[I].Cnt=0 Then Begin V9NewFb:=I; Break; End;
+ If V9NewFb<0 Then Fail('VP9 : aucun tampon d''image libre.');
+ First:=V9ReadUncomp(Data,Len);
+ If V9ShowExisting<>0 Then Begin
+  Used:=V9HdrBytes;
+  V9Output(V9ShowIdx);
+  V9DecodeOne:=1;
+  Exit;
+ End;
+ If V9HdrBytes+First>Len Then Fail('VP9 : paquet tronque ou longueur d''en-tete corrompue.');
+ V9UsePrevMvs:=(V9ErrorRes=0) And (V9Width=V9LastWidth) And (V9Height=V9LastHeight) And
+               (V9LastIntraOnly=0) And (V9LastShowFrame<>0) And (V9LastFrameType<>0);
+ V9Fc:=V9FcCtx[V9CtxIdx];
+ If Not V9Fc.Inited Then Fail('VP9 : contexte d''entropie non initialise.');
+ V9ReadCompressed(@Data^[V9HdrBytes],First);
+ V9DoCnt:=V9Parallel=0;
+ V9DecodeTiles(Data,Len,V9HdrBytes+First);
+ If V9LfLevel<>0 Then V9LoopFilterFrame;
+ If (V9ErrorRes=0) And (V9Parallel=0) Then Begin
+  V9AdaptCoef;
+  If (V9FrameType<>0) And (V9IntraOnly=0) Then Begin
+   V9AdaptMode; V9AdaptMv;
+  End;
+ End;
+ If V9RefreshCtx<>0 Then V9FcCtx[V9CtxIdx]:=V9Fc;
+ { mise a jour des references }
+ For I:=0 To 7 Do If ((V9RefreshFlags Shr I) And 1)<>0 Then Begin
+  If V9RefMap[I]>=0 Then Dec(V9Fb[V9RefMap[I]].Cnt);
+  V9RefMap[I]:=V9NewFb; Inc(V9Fb[V9NewFb].Cnt);
+ End;
+ V9LastShowFrame:=V9ShowFrame;
+ M:=V9MvPrev; V9MvPrev:=V9MvCur; V9MvCur:=M;
+ If V9SegOn<>0 Then Begin T:=V9SegCur; V9SegCur:=V9SegLast; V9SegLast:=T; End;
+ V9LastWidth:=V9Width; V9LastHeight:=V9Height;
+ Used:=Len;
+ If V9ShowFrame<>0 Then Begin V9Output(V9NewFb); V9DecodeOne:=1; End;
+End;
+
+{ ====================== interface publique ====================== }
+Procedure V9Config(P: PEABuffer; Len: LongInt);
+Begin
+ { Les parametres hors bande (vpcC) ne sont pas necessaires : tout est dans les trames. }
+End;
+
+Procedure V9Init;
+Var I,K,V: LongInt;
+Begin
+ V9Free;
+ FillChar(V9Fb,SizeOf(V9Fb),0);
+ V9Norm[0]:=0;
+ For I:=1 To 255 Do Begin
+  K:=0; V:=I;
+  While V<128 Do Begin V:=V*2; Inc(K); End;
+  V9Norm[I]:=K;
+ End;
+ For I:=0 To 7 Do V9RefMap[I]:=-1;
+ For I:=0 To 2 Do V9Refs[I].Idx:=-1;
+ V9NeedResync:=True;
+ V9Width:=0; V9Height:=0; V9LastWidth:=0; V9LastHeight:=0; V9MiRows:=0; V9MiCols:=0;
+ V9FrameType:=0; V9LastFrameType:=0; V9IntraOnly:=0; V9LastIntraOnly:=0; V9ShowFrame:=0; V9LastShowFrame:=0;
+ V9SegOn:=0; V9SegUpdMap:=0; V9SegUpdData:=0; V9SegAbs:=0; V9SegTemporal:=0;
+ FillChar(V9SegData,SizeOf(V9SegData),0); FillChar(V9SegMask,SizeOf(V9SegMask),0);
+ FillChar(V9SegTree,SizeOf(V9SegTree),0); FillChar(V9SegPredP,SizeOf(V9SegPredP),0);
+ FillChar(V9FcCtx,SizeOf(V9FcCtx),0); FillChar(V9Fc,SizeOf(V9Fc),0);
+ FillChar(V9Cnt,SizeOf(V9Cnt),0);
+ FillChar(V9SignBias,SizeOf(V9SignBias),0);
+ FillChar(V9RefDelta,SizeOf(V9RefDelta),0); FillChar(V9ModeDelta,SizeOf(V9ModeDelta),0);
+ V9Interp:=0; V9AllowHp:=0; V9TxMode:=0; V9RefMode:=0; V9CtxIdx:=0; V9ErrorRes:=0;
+ V9Bd:=8; V9SsX:=1; V9SsY:=1; V9Profile:=0;
+ V9Ready:=True;
+End;
+
+{ Un paquet de conteneur : une trame ou un superframe (index en fin de paquet).
+  Retourne le nombre de trames affichees (V9Hook est appele pour chacune). }
+Function V9Frame(P: PEABuffer; Len: LongInt): LongInt;
+Var Marker,Frames,Mag,IdxSz,I,J,Off,Sz,Used,N,Q: LongInt; D: PV9B; Sizes: Array[0..7] Of LongInt;
+Begin
+ V9Frame:=0;
+ If Not V9Ready Then V9Init;
+ If Len<=0 Then Exit;
+ D:=PV9B(P); N:=0; Frames:=0;
+ Marker:=D^[Len-1];
+ If (Marker And $E0)=$C0 Then Begin
+  Frames:=(Marker And 7)+1; Mag:=((Marker Shr 3) And 3)+1; IdxSz:=2+Mag*Frames;
+  If (Len>=IdxSz) And (D^[Len-IdxSz]=Marker) Then Begin
+   Q:=Len-IdxSz+1;
+   For I:=0 To Frames-1 Do Begin
+    Sz:=0;
+    For J:=0 To Mag-1 Do Begin Sz:=Sz Or (D^[Q] Shl (8*J)); Inc(Q); End;
+    Sizes[I]:=Sz;
+   End;
+  End Else Frames:=0;
+ End;
+ If Frames>0 Then Begin
+  Off:=0;
+  For I:=0 To Frames-1 Do Begin
+   Sz:=Sizes[I];
+   If (Sz<0) Or (Sz>Len-Off) Then Fail('VP9 : taille de trame invalide dans l''index.');
+   If Sz>0 Then Inc(N,V9DecodeOne(@D^[Off],Sz,Used));
+   Inc(Off,Sz);
+  End;
+ End Else Begin
+  Off:=0;
+  While Off<Len Do Begin
+   Inc(N,V9DecodeOne(@D^[Off],Len-Off,Used));
+   Inc(Off,Used);
+   While (Off<Len) And (D^[Off]=0) Do Inc(Off);
+  End;
+ End;
+ V9Frame:=N;
+End;
+{$INLINE OFF}
+{$ENDIF}
 {$IFDEF FPC}
 { ---- AC-3 : decodeur / encodeur natif (FFMPEG.PAS, d apres FFmpeg ac3dec.c / ac3enc.c, LGPL-2.1+) ---- }
 Procedure ProcessAC3E(Const Source,Target:String; Encoding:Boolean;
@@ -28083,6 +37488,3682 @@ Begin
  If N<=3 Then Fail('vorbis: aucun paquet audio.');
  EAFlush; VGWavPatch(VGDRate0,Ch,EAWritten);
  VGDFreeAll; FreeMem(Pk);
+ CloseWrite; CloseRead; Set8087CW(Cw87);
+End;
+{$ENDIF}
+{$IFDEF FPC}
+{ ---- Opus (RFC 6716) : decodeur natif CELT / SILK / hybride -------------------
+  Port fidele du decodeur Opus de FFmpeg n6.1.1 (libavcodec/opus*.c,
+  opus_celt.c, opus_pvq.c, opus_silk.c, opus_rc.c, opus_parse.c, opusdsp.c,
+  opustab.c) ainsi que du reechantillonneur libswresample (resample.c,
+  swresample.c) que le decodeur Opus de FFmpeg utilise pour amener la couche SILK
+  a 48 kHz.
+  Copyright (c) 2012 Andrew D'Addesio, (c) 2013-2014 Mozilla Corporation,
+  (c) Michael Niedermayer et al. - GNU LGPL 2.1 ou ulterieure (comme FFmpeg).
+  Les tables (OPT_*) sont extraites par deliver/gen_opus_tables.py de opustab.c.
+  Tous les identifiants globaux commencent par OP. }
+
+Const
+ OPMaxFrame=1275;
+ OPMaxFrames=48;
+ OPMaxPacketDur=5760;
+ OPOutMax=8192;           { tampon de sortie par canal (flottant) }
+ OPSilkHistory=322;
+ OPSilkMaxLag=290;        { 288 + LTP_ORDER/2 }
+ OPCeltOverlap=120;
+ OPCeltMaxBands=21;
+ OPCeltVectors=11;
+ OPCeltAllocSteps=6;
+ OPCeltFineOffset=21;
+ OPCeltMaxFineBits=8;
+ OPCeltQthetaOffset=4;
+ OPCeltQthetaOffsetTwoPhase=16;
+ OPCeltPostfilterMinPeriod=15;
+ OPSpreadNone=0; OPSpreadLight=1; OPSpreadNormal=2; OPSpreadAggressive=3;
+ OPModeSilk=0; OPModeHybrid=1; OPModeCelt=2;
+ OPBwNb=0; OPBwMb=1; OPBwWb=2; OPBwSwb=3; OPBwFb=4;
+
+Type
+ TOPFArr=Array[0..4194303] Of Single;
+ POPFA=^TOPFArr;
+ TOPWArr=Array[0..65535] Of Word;
+ POPWA=^TOPWArr;
+ TOPLArr=Array[0..65535] Of LongInt;
+ POPLA=^TOPLArr;
+ TOPRC=Record
+  Buf: PEABuffer;
+  Size: LongInt;          { octets lisibles (jusqu'a la fin du paquet) }
+  FrameBytes: LongInt;    { taille de la trame (borne du lecteur de bits : size_in_bits+8) }
+  BitPos: LongInt;        { position (en bits) du lecteur MSB-first }
+  RbPos: LongInt;         { position (octet) du lecteur de bits bruts (decroit) }
+  RbBytes: LongWord;
+  RbCacheLen,RbCacheVal: LongWord;
+  Range,Value,TotalBits: LongWord;
+ End;
+ TOPPacket=Record
+  PacketSize,DataSize,Code,Stereo,Vbr,Config,FrameCount: LongInt;
+  FrameOffset,FrameSize: Array[0..OPMaxFrames-1] Of LongInt;
+  FrameDuration,Mode,Bandwidth: LongInt;
+ End;
+
+{ ---- petites fonctions utilitaires ---- }
+Function OPSar(V,N: LongInt): LongInt;
+Begin
+ If N<=0 Then OPSar:=V
+ Else If N>31 Then Begin If V<0 Then OPSar:=-1 Else OPSar:=0; End
+ Else If V>=0 Then OPSar:=V Shr N
+ Else OPSar:=-LongInt((-(Int64(V)+1)) Shr N)-1;
+End;
+
+Function OPSar64(V: Int64; N: LongInt): Int64;
+Begin
+ If N<=0 Then OPSar64:=V
+ Else If N>62 Then Begin If V<0 Then OPSar64:=-1 Else OPSar64:=0; End
+ Else If V>=0 Then OPSar64:=V Shr N
+ Else OPSar64:=-Int64((-(V+1)) Shr N)-1;
+End;
+
+{ av_log2 : partie entiere de log2, 0 pour 0 }
+Function OPLog2(V: LongWord): LongInt;
+Var R: LongInt;
+Begin
+ R:=0;
+ While V>1 Do Begin V:=V Shr 1; Inc(R); End;
+ OPLog2:=R;
+End;
+
+{ opus_ilog : nombre de bits significatifs }
+Function OPIlog(V: LongWord): LongInt;
+Begin
+ If V=0 Then OPIlog:=0 Else OPIlog:=OPLog2(V)+1;
+End;
+
+Function OPMinI(A,B: LongInt): LongInt;
+Begin If A<B Then OPMinI:=A Else OPMinI:=B; End;
+Function OPMaxI(A,B: LongInt): LongInt;
+Begin If A>B Then OPMaxI:=A Else OPMaxI:=B; End;
+Function OPClipI(A,Lo,Hi: LongInt): LongInt;
+Begin If A<Lo Then OPClipI:=Lo Else If A>Hi Then OPClipI:=Hi Else OPClipI:=A; End;
+Function OPClipU(A: LongInt; Bits: LongInt): LongInt;  { av_clip_uintp2 }
+Begin
+ If A<0 Then OPClipU:=0
+ Else If A>(LongInt(1) Shl Bits)-1 Then OPClipU:=(LongInt(1) Shl Bits)-1
+ Else OPClipU:=A;
+End;
+Function OPClipF(A: Single; Lo,Hi: Single): Single;
+Begin If A<Lo Then OPClipF:=Lo Else If A>Hi Then OPClipF:=Hi Else OPClipF:=A; End;
+Function OPAbsI(A: LongInt): LongInt;
+Begin If A<0 Then OPAbsI:=-A Else OPAbsI:=A; End;
+
+{ racine carree entiere (ff_sqrt) }
+Function OPSqrtI(V: LongWord): LongWord;
+Var R,B: Int64;
+Begin
+ R:=0; B:=Int64(1) Shl 15;
+ While B>0 Do Begin
+  If (R+B)*(R+B)<=Int64(V) Then R:=R+B;
+  B:=B Shr 1;
+ End;
+ OPSqrtI:=LongWord(R);
+End;
+
+Function OPExp2(X: Single): Single;
+Begin
+ OPExp2:=Exp(Double(X)*0.69314718055994531);
+End;
+
+Function OPFAt(P: POPFA; N: LongInt): POPFA;
+Begin OPFAt:=POPFA(PtrInt(P)+N*4); End;
+
+{ ---- codeur par intervalles (opus_rc.c, partie decodeur) ---- }
+Const OPRcTop=LongWord($80000000); OPRcBot=LongWord($800000);
+
+Function OPRcBits8(Var R: TOPRC): LongWord;
+Var P,Sh,Nxt: LongInt; B0,B1: LongWord;
+Begin
+ P:=R.BitPos Shr 3; Sh:=R.BitPos And 7;
+ If P<R.Size Then B0:=R.Buf^[P] Else B0:=0;
+ If P+1<R.Size Then B1:=R.Buf^[P+1] Else B1:=0;
+ OPRcBits8:=(((B0 Shl 8) Or B1) Shr (8-Sh)) And 255;
+ { get_bits de FFmpeg : l'index est borne a size_in_bits+8 (SKIP_COUNTER) }
+ Nxt:=R.BitPos+8;
+ If Nxt>R.FrameBytes*8+8 Then Nxt:=R.FrameBytes*8+8;
+ R.BitPos:=Nxt;
+End;
+
+Procedure OPRcNormalize(Var R: TOPRC);
+Begin
+ While R.Range<=OPRcBot Do Begin
+  R.Value:=LongWord(((R.Value Shl 8) Or (OPRcBits8(R) Xor 255)) And (OPRcTop-1));
+  R.Range:=LongWord(R.Range Shl 8);
+  R.TotalBits:=R.TotalBits+8;
+ End;
+End;
+
+{ Avail : nombre d'octets lisibles a partir de Data (jusqu'a la fin du PAQUET) : comme FFmpeg,
+  le lecteur de bits ne s'arrete pas a la fin de la trame et lit les octets de la trame suivante ;
+  au-dela du paquet on lit des zeros (marge de remplissage des paquets FFmpeg). }
+Procedure OPRcInit(Var R: TOPRC; Data: PEABuffer; FrameBytes,Avail: LongInt);
+Var B0: LongWord;
+Begin
+ R.Buf:=Data; R.Size:=Avail; R.FrameBytes:=FrameBytes;
+ If Avail>0 Then B0:=Data^[0] Else B0:=0;
+ R.BitPos:=7;
+ R.Range:=128;
+ R.Value:=127-(B0 Shr 1);
+ R.TotalBits:=9;
+ R.RbPos:=0; R.RbBytes:=0; R.RbCacheLen:=0; R.RbCacheVal:=0;
+ OPRcNormalize(R);
+End;
+
+Procedure OPRcRawInit(Var R: TOPRC; RightEnd: LongInt; Bytes: LongWord);
+Begin
+ R.RbPos:=RightEnd; R.RbBytes:=Bytes; R.RbCacheLen:=0; R.RbCacheVal:=0;
+End;
+
+Function OPRcTell(Var R: TOPRC): LongInt;
+Begin
+ OPRcTell:=LongInt(R.TotalBits)-OPLog2(R.Range)-1;
+End;
+
+Function OPRcTellFrac(Var R: TOPRC): LongInt;
+Var I: LongInt; TotalBits,RcBuffer,Rng,Bit: LongWord;
+Begin
+ TotalBits:=R.TotalBits Shl 3;
+ RcBuffer:=OPLog2(R.Range)+1;
+ Rng:=R.Range Shr (RcBuffer-16);
+ For I:=0 To 2 Do Begin
+  Rng:=LongWord((Int64(Rng)*Int64(Rng)) Shr 15);
+  Bit:=Rng Shr 16;
+  RcBuffer:=(RcBuffer Shl 1) Or Bit;
+  Rng:=Rng Shr Bit;
+ End;
+ OPRcTellFrac:=LongInt(TotalBits-RcBuffer);
+End;
+
+Procedure OPRcUpdate(Var R: TOPRC; Scale,Low,High,Total: LongWord);
+Begin
+ R.Value:=LongWord(R.Value-Scale*(Total-High));
+ If Low<>0 Then R.Range:=LongWord(Scale*(High-Low))
+ Else R.Range:=LongWord(R.Range-Scale*(Total-High));
+ OPRcNormalize(R);
+End;
+
+{ Cdf: pointeur sur le tableau cumulatif (le 1er element est le total) }
+Function OPRcDecCdf(Var R: TOPRC; Cdf: POPWA): LongInt;
+Var K: LongInt; Scale,Total,Symbol,Low,High: LongWord;
+Begin
+ Total:=Cdf^[0];
+ Scale:=R.Range Div Total;
+ Symbol:=R.Value Div Scale+1;
+ If Symbol>Total Then Symbol:=Total;
+ Symbol:=Total-Symbol;
+ K:=0;
+ While Cdf^[1+K]<=Symbol Do Inc(K);
+ High:=Cdf^[1+K];
+ If K<>0 Then Low:=Cdf^[K] Else Low:=0;
+ OPRcUpdate(R,Scale,Low,High,Total);
+ OPRcDecCdf:=K;
+End;
+
+Function OPRcDecLog(Var R: TOPRC; Bits: LongInt): LongInt;
+Var Scale: LongWord;
+Begin
+ Scale:=R.Range Shr Bits;
+ If R.Value>=Scale Then Begin
+  R.Value:=R.Value-Scale; R.Range:=R.Range-Scale; OPRcDecLog:=0;
+ End Else Begin
+  R.Range:=Scale; OPRcDecLog:=1;
+ End;
+ OPRcNormalize(R);
+End;
+
+{ lecture de 1 a 25 bits bruts en fin de trame (octets a rebours) }
+Function OPRcGetRaw(Var R: TOPRC; Count: LongWord): LongWord;
+Var Value: LongWord;
+Begin
+ While (R.RbBytes<>0) And (R.RbCacheLen<Count) Do Begin
+  Dec(R.RbPos);
+  If (R.RbPos>=0) And (R.RbPos<R.Size) Then
+   R.RbCacheVal:=R.RbCacheVal Or (LongWord(R.Buf^[R.RbPos]) Shl R.RbCacheLen);
+  R.RbCacheLen:=R.RbCacheLen+8;
+  Dec(R.RbBytes);
+ End;
+ If Count=0 Then Value:=0
+ Else If Count>=32 Then Value:=R.RbCacheVal
+ Else Value:=R.RbCacheVal And ((LongWord(1) Shl Count)-1);
+ If Count>=32 Then R.RbCacheVal:=0 Else R.RbCacheVal:=R.RbCacheVal Shr Count;
+ If R.RbCacheLen>=Count Then R.RbCacheLen:=R.RbCacheLen-Count Else R.RbCacheLen:=0;
+ R.TotalBits:=R.TotalBits+Count;
+ OPRcGetRaw:=Value;
+End;
+
+Function OPRcDecUint(Var R: TOPRC; Size: LongWord): LongWord;
+Var Bits: LongInt; K,Scale,Total: LongWord;
+Begin
+ Bits:=OPIlog(Size-1);
+ If Bits>8 Then Total:=((Size-1) Shr (Bits-8))+1 Else Total:=Size;
+ Scale:=R.Range Div Total;
+ K:=R.Value Div Scale+1;
+ If K>Total Then K:=Total;
+ K:=Total-K;
+ OPRcUpdate(R,Scale,K,K+1,Total);
+ If Bits>8 Then Begin
+  K:=(K Shl (Bits-8)) Or OPRcGetRaw(R,Bits-8);
+  If K>Size-1 Then K:=Size-1;
+  OPRcDecUint:=K;
+ End Else OPRcDecUint:=K;
+End;
+
+Function OPRcDecUintStep(Var R: TOPRC; K0: LongInt): LongInt;
+Var K: LongInt; Scale,Symbol,Total,Lo,Hi: LongWord;
+Begin
+ Total:=LongWord((K0+1)*3+K0);
+ Scale:=R.Range Div Total;
+ Symbol:=R.Value Div Scale+1;
+ If Symbol>Total Then Symbol:=Total;
+ Symbol:=Total-Symbol;
+ If Symbol<LongWord((K0+1)*3) Then K:=Symbol Div 3 Else K:=LongInt(Symbol)-(K0+1)*2;
+ If K<=K0 Then Begin Lo:=3*K; Hi:=3*(K+1); End
+ Else Begin Lo:=LongWord((K-1-K0)+3*(K0+1)); Hi:=LongWord((K-K0)+3*(K0+1)); End;
+ OPRcUpdate(R,Scale,Lo,Hi,Total);
+ OPRcDecUintStep:=K;
+End;
+
+Function OPRcDecUintTri(Var R: TOPRC; Qn: LongInt): LongInt;
+Var K: LongInt; Scale,Symbol,Total,Low,Center: LongWord;
+Begin
+ Total:=LongWord(((Qn Shr 1)+1)*((Qn Shr 1)+1));
+ Scale:=R.Range Div Total;
+ Center:=R.Value Div Scale+1;
+ If Center>Total Then Center:=Total;
+ Center:=Total-Center;
+ If Center<(Total Shr 1) Then Begin
+  K:=LongInt((OPSqrtI(8*Center+1)-1) Shr 1);
+  Low:=LongWord(K*(K+1) Shr 1);
+  Symbol:=LongWord(K+1);
+ End Else Begin
+  K:=LongInt((LongWord(2*(Qn+1))-OPSqrtI(8*(Total-Center-1)+1)) Shr 1);
+  Low:=Total-LongWord(((Qn+1-K)*(Qn+2-K)) Shr 1);
+  Symbol:=LongWord(Qn+1-K);
+ End;
+ OPRcUpdate(R,Scale,Low,Low+Symbol,Total);
+ OPRcDecUintTri:=K;
+End;
+
+Function OPRcDecLaplace(Var R: TOPRC; Symbol: LongWord; Decay: LongInt): LongInt;
+Var Value,Distance: LongInt; Scale,Low,Center,Hi: LongWord;
+Begin
+ Value:=0; Low:=0;
+ Scale:=R.Range Shr 15;
+ Center:=R.Value Div Scale+1;
+ If Center>32768 Then Center:=32768;
+ Center:=32768-Center;
+ If Center>=Symbol Then Begin
+  Inc(Value);
+  Low:=Symbol;
+  Symbol:=1+LongWord(((32768-32-LongInt(Symbol))*(16384-Decay)) Shr 15);
+  While (Symbol>1) And (Center>=Low+2*Symbol) Do Begin
+   Inc(Value);
+   Symbol:=Symbol*2;
+   Low:=Low+Symbol;
+   Symbol:=LongWord(((LongInt(Symbol)-2)*Decay) Shr 15)+1;
+  End;
+  If Symbol<=1 Then Begin
+   Distance:=LongInt(Center-Low) Shr 1;
+   Value:=Value+Distance;
+   Low:=Low+LongWord(2*Distance);
+  End;
+  If Center<Low+Symbol Then Value:=-Value
+  Else Low:=Low+Symbol;
+ End;
+ Hi:=Low+Symbol;
+ If Hi>32768 Then Hi:=32768;
+ OPRcUpdate(R,Scale,Low,Hi,32768);
+ OPRcDecLaplace:=Value;
+End;
+
+{ Tables generees par gen_opus_tables.py depuis FFmpeg n6.1.1 libavcodec/opustab.c (LGPL-2.1+) }
+Const
+ OPT_celt_band_end: Array[0..4] Of Byte=(
+  13,17,17,19,21
+ );
+ OPT_silk_model_lbrr_flags_40: Array[0..4] Of Word=(
+  256,0,53,106,256
+ );
+ OPT_silk_model_lbrr_flags_60: Array[0..8] Of Word=(
+  256,0,41,61,90,131,146,174,
+  256
+ );
+ OPT_silk_model_stereo_s1: Array[0..25] Of Word=(
+  256,7,9,10,11,12,22,46,
+  54,55,56,59,82,174,197,200,
+  201,202,210,234,244,245,246,247,
+  249,256
+ );
+ OPT_silk_model_stereo_s2: Array[0..3] Of Word=(
+  256,85,171,256
+ );
+ OPT_silk_model_stereo_s3: Array[0..5] Of Word=(
+  256,51,102,154,205,256
+ );
+ OPT_silk_model_mid_only: Array[0..2] Of Word=(
+  256,192,256
+ );
+ OPT_silk_model_frame_type_inactive: Array[0..2] Of Word=(
+  256,26,256
+ );
+ OPT_silk_model_frame_type_active: Array[0..4] Of Word=(
+  256,24,98,246,256
+ );
+ OPT_silk_model_gain_highbits: Array[0..2,0..8] Of Word=
+  ((256,32,144,212,241,253,254,255,256),(256,2,19,64,124,186,233,252,256),(256,1,4,30,101,195,245,254,256));
+ OPT_silk_model_gain_lowbits: Array[0..8] Of Word=(
+  256,32,64,96,128,160,192,224,
+  256
+ );
+ OPT_silk_model_gain_delta: Array[0..41] Of Word=(
+  256,6,11,22,53,185,206,214,
+  218,221,223,225,227,228,229,230,
+  231,232,233,234,235,236,237,238,
+  239,240,241,242,243,244,245,246,
+  247,248,249,250,251,252,253,254,
+  255,256
+ );
+ OPT_silk_model_lsf_s1: Array[0..1,0..1,0..32] Of Word=
+  (((256,44,78,108,127,148,160,171,174,177,179,195,197,199,200,205,207,208,211,214,215,216,218,220,222,225,226,235,244,246,253,255,256),(256,1,11,12,20,23,31,39,53,66,80,81,95,107,120,131,142,154,165,175,185,196,204,213,221,228,236,237,238,244,245,251,256)),((256,31,52,55,72,73,81,98,102,103,121,137,141,143,146,147,157,158,161,177,188,204,206,208,211,213,224,225,229,238,246,253,256),(256,1,5,21,26,44,55,60,74,89,90,93,105,118,132,146,152,166,178,180,186,187,199,211,222,232,235,245,250,251,252,253,256)));
+ OPT_silk_model_lsf_s2: Array[0..15,0..9] Of Word=
+  ((256,1,2,3,18,242,253,254,255,256),(256,1,2,4,38,221,253,254,255,256),(256,1,2,6,48,197,252,254,255,256),(256,1,2,10,62,185,246,254,255,256),(256,1,4,20,73,174,248,254,255,256),(256,1,4,21,76,166,239,254,255,256),(256,1,8,32,85,159,226,252,255,256),(256,1,2,20,83,161,219,249,255,256),(256,1,2,3,12,244,253,254,255,256),(256,1,2,4,32,218,253,254,255,256),(256,1,2,5,47,199,252,254,255,256),(256,1,2,12,61,187,252,254,255,256),(256,1,5,24,72,172,249,254,255,256),(256,1,2,16,70,170,242,254,255,256),(256,1,2,17,78,165,226,251,255,256),(256,1,8,29,79,156,237,254,255,256));
+ OPT_silk_model_lsf_s2_ext: Array[0..7] Of Word=(
+  256,156,216,240,249,253,255,256
+ );
+ OPT_silk_model_lsf_interpolation_offset: Array[0..5] Of Word=(
+  256,13,35,64,75,256
+ );
+ OPT_silk_model_pitch_highbits: Array[0..32] Of Word=(
+  256,3,6,12,23,44,74,106,
+  125,136,146,158,171,184,196,207,
+  216,224,231,237,241,243,245,247,
+  248,249,250,251,252,253,254,255,
+  256
+ );
+ OPT_silk_model_pitch_lowbits_nb: Array[0..4] Of Word=(
+  256,64,128,192,256
+ );
+ OPT_silk_model_pitch_lowbits_mb: Array[0..6] Of Word=(
+  256,43,85,128,171,213,256
+ );
+ OPT_silk_model_pitch_lowbits_wb: Array[0..8] Of Word=(
+  256,32,64,96,128,160,192,224,
+  256
+ );
+ OPT_silk_model_pitch_delta: Array[0..21] Of Word=(
+  256,46,48,50,53,57,63,73,
+  88,114,152,182,204,219,229,236,
+  242,246,250,252,254,256
+ );
+ OPT_silk_model_pitch_contour_nb10ms: Array[0..3] Of Word=(
+  256,143,193,256
+ );
+ OPT_silk_model_pitch_contour_nb20ms: Array[0..11] Of Word=(
+  256,68,80,101,118,137,159,189,
+  213,230,246,256
+ );
+ OPT_silk_model_pitch_contour_mbwb10ms: Array[0..12] Of Word=(
+  256,91,137,176,195,209,221,229,
+  236,242,247,252,256
+ );
+ OPT_silk_model_pitch_contour_mbwb20ms: Array[0..34] Of Word=(
+  256,33,55,73,89,104,118,132,
+  145,158,168,177,186,194,200,206,
+  212,217,221,225,229,232,235,238,
+  240,242,244,246,248,250,252,253,
+  254,255,256
+ );
+ OPT_silk_model_ltp_filter: Array[0..3] Of Word=(
+  256,77,157,256
+ );
+ OPT_silk_model_ltp_filter0_sel: Array[0..8] Of Word=(
+  256,185,200,213,226,235,244,250,
+  256
+ );
+ OPT_silk_model_ltp_filter1_sel: Array[0..16] Of Word=(
+  256,57,91,112,132,147,160,172,
+  185,195,205,214,224,233,241,248,
+  256
+ );
+ OPT_silk_model_ltp_filter2_sel: Array[0..32] Of Word=(
+  256,15,31,45,57,69,81,92,
+  103,114,124,133,142,151,160,168,
+  176,184,192,199,206,212,218,223,
+  227,232,236,240,244,247,251,254,
+  256
+ );
+ OPT_silk_model_ltp_scale_index: Array[0..3] Of Word=(
+  256,128,192,256
+ );
+ OPT_silk_model_lcg_seed: Array[0..4] Of Word=(
+  256,64,128,192,256
+ );
+ OPT_silk_model_exc_rate: Array[0..1,0..9] Of Word=
+  ((256,15,66,78,124,169,182,215,242,256),(256,33,63,99,116,150,199,217,238,256));
+ OPT_silk_model_pulse_count: Array[0..10,0..18] Of Word=
+  ((256,131,205,230,238,241,244,245,246,247,248,249,250,251,252,253,254,255,256),(256,58,151,211,234,241,244,245,246,247,248,249,250,251,252,253,254,255,256),(256,43,94,140,173,197,213,224,232,238,241,244,247,249,250,251,253,254,256),(256,17,69,140,197,228,240,245,246,247,248,249,250,251,252,253,254,255,256),(256,6,27,68,121,170,205,226,237,243,246,248,250,251,252,253,254,255,256),(256,7,21,43,71,100,128,153,173,190,203,214,223,230,235,239,243,246,256),(256,2,7,21,50,92,138,179,210,229,240,246,249,251,252,253,254,255,256),(256,1,3,7,17,36,65,100,137,171,199,219,233,241,246,250,252,254,256),(256,1,3,5,10,19,33,53,77,104,132,158,181,201,216,227,235,241,256),(256,1,2,3,9,36,94,150,189,214,228,238,244,247,250,252,253,254,256),(256,2,3,9,36,94,150,189,214,228,238,244,247,250,252,253,254,256,256));
+ OPT_silk_model_pulse_location: Array[0..3,0..167] Of Word=
+  ((256,126,256,256,56,198,256,256,25,126,230,256,256,12,72,180,244,256,256,7,42,126,213,250,256,256,4,24,83,169,232,253,256,256,3,15,53,125,200,242,254,256,256,2,10,35,89,162,221,248,255,256,256,2,7,24,63,126,191,233,251,255,256,256,1,5,17,45,94,157,211,241,252,255,256,256,1,5,13,33,70,125,182,223,245,253,255,256,256,1,4,11,26,54,98,151,199,232,248,254,255,256,256,1,3,9,21,42,77,124,172,212,237,249,254,255,256,256,1,2,6,16,33,60,97,144,187,220,241,250,254,255,256,256,1,2,3,11,25,47,80,120,163,201,229,245,253,254,255,256,256,1,2,3,4,17,35,62,98,139,180,214,238,252,253,254,255,256),(256,127,256,256,53,202,256,256,22,127,233,256,256,11,72,183,246,256,256,6,41,127,215,251,256,256,4,24,83,170,232,253,256,256,3,16,56,127,200,241,254,256,256,3,12,39,92,162,218,246,255,256,256,3,11,30,67,124,185,229,249,255,256,256,3,10,25,53,97,151,200,233,250,255,256,256,1,8,21,43,77,123,171,209,237,251,255,256,256,1,2,13,35,62,97,139,186,219,244,254,255,256,256,1,2,8,22,48,85,128,171,208,234,248,254,255,256,256,1,2,6,16,36,67,107,149,189,220,240,250,254,255,256,256,1,2,5,13,29,55,90,128,166,201,227,243,251,254,255,256,256,1,2,4,10,22,43,73,109,147,183,213,234,246,252,254,255,256),(256,127,256,256,49,206,256,256,20,127,236,256,256,11,71,184,246,256,256,7,43,127,214,250,256,256,6,30,87,169,229,252,256,256,5,23,62,126,194,236,252,256,256,6,20,49,96,157,209,239,253,256,256,1,16,39,74,125,175,215,245,255,256,256,1,2,23,55,97,149,195,236,254,255,256,256,1,7,23,50,86,128,170,206,233,249,255,256,256,1,6,18,39,70,108,148,186,217,238,250,255,256,256,1,4,13,30,56,90,128,166,200,226,243,252,255,256,256,1,4,11,25,47,76,110,146,180,209,231,245,252,255,256,256,1,3,8,19,37,62,93,128,163,194,219,237,248,253,255,256,256,1,2,6,15,30,51,79,111,145,177,205,226,241,250,254,255,256),(256,128,256,256,42,214,256,256,21,128,235,256,256,12,72,184,245,256,256,8,42,128,214,249,256,256,8,31,86,176,231,251,256,256,5,20,58,130,202,238,253,256,256,6,18,45,97,174,221,241,251,256,256,6,25,53,88,128,168,203,231,250,256,256,4,18,40,71,108,148,185,216,238,252,256,256,3,13,31,57,90,128,166,199,225,243,253,256,256,2,10,23,44,73,109,147,183,212,233,246,254,256,256,1,6,16,33,58,90,128,166,198,223,240,250,255,256,256,1,5,12,25,46,75,110,146,181,210,231,244,251,255,256,256,1,3,8,18,35,60,92,128,164,196,221,238,248,253,255,256,256,1,3,7,14,27,48,76,110,146,180,208,229,242,249,253,255,256));
+ OPT_silk_model_excitation_lsb: Array[0..2] Of Word=(
+  256,136,256
+ );
+ OPT_silk_model_excitation_sign: Array[0..2,0..1,0..6,0..2] Of Word=
+  ((((256,2,256),(256,207,256),(256,189,256),(256,179,256),(256,174,256),(256,163,256),(256,157,256)),((256,58,256),(256,245,256),(256,238,256),(256,232,256),(256,225,256),(256,220,256),(256,211,256))),(((256,1,256),(256,210,256),(256,190,256),(256,178,256),(256,169,256),(256,162,256),(256,152,256)),((256,48,256),(256,242,256),(256,235,256),(256,224,256),(256,214,256),(256,205,256),(256,190,256))),(((256,1,256),(256,162,256),(256,152,256),(256,147,256),(256,144,256),(256,141,256),(256,138,256)),((256,8,256),(256,203,256),(256,187,256),(256,176,256),(256,168,256),(256,161,256),(256,154,256))));
+ OPT_silk_stereo_weights: Array[0..15] Of SmallInt=(
+  -13732,-10050,-8266,-7526,-6500,-5000,-2950,-820,
+  820,2950,5000,6500,7526,8266,10050,13732
+ );
+ OPT_silk_lsf_s2_model_sel_nbmb: Array[0..31,0..9] Of Byte=
+  ((0,0,0,0,0,0,0,0,0,0),(1,3,1,2,2,1,2,1,1,1),(2,1,1,1,1,1,1,1,1,1),(1,2,2,2,2,1,2,1,1,1),(2,3,3,3,3,2,2,2,2,2),(0,5,3,3,2,2,2,2,1,1),(0,2,2,2,2,2,2,2,2,1),(2,3,6,4,4,4,5,4,5,5),(2,4,5,5,4,5,4,6,4,4),(2,4,4,7,4,5,4,5,5,4),(4,3,3,3,2,3,2,2,2,2),(1,5,5,6,4,5,4,5,5,5),(2,7,4,6,5,5,5,5,5,5),(2,7,5,5,5,5,5,6,5,4),(3,3,5,4,4,5,4,5,4,4),(2,3,3,5,5,4,4,4,4,4),(2,4,4,6,4,5,4,5,5,5),(2,5,4,6,5,5,5,4,5,4),(2,7,4,5,4,5,4,5,5,5),(2,5,4,6,7,6,5,6,5,4),(3,6,7,4,6,5,5,6,4,5),(2,7,6,4,4,4,5,4,5,5),(4,5,5,4,6,6,5,6,5,4),(2,5,5,6,5,6,4,6,4,4),(4,5,5,5,3,7,4,5,5,4),(2,3,4,5,5,6,4,5,5,4),(2,3,2,3,3,4,2,3,3,3),(1,1,2,2,2,2,2,3,2,2),(4,5,5,6,6,6,5,6,4,5),(3,5,5,4,4,4,4,3,3,2),(2,5,3,7,5,5,4,4,5,4),(4,4,5,4,5,6,5,6,5,4));
+ OPT_silk_lsf_s2_model_sel_wb: Array[0..31,0..15] Of Byte=
+  ((8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8),(10,11,11,11,11,11,10,10,10,10,10,9,9,9,8,11),(10,13,13,11,15,12,12,13,10,13,12,13,13,12,11,11),(8,10,9,10,10,9,9,9,9,9,8,8,8,8,8,9),(8,14,13,12,14,12,15,13,12,12,12,13,13,12,12,11),(8,11,13,13,12,11,11,13,11,11,11,11,11,11,10,12),(8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8),(8,10,14,11,15,10,13,11,12,13,13,12,11,11,10,11),(8,14,10,14,14,12,13,12,14,13,12,12,13,11,11,11),(10,9,8,8,8,8,8,8,8,8,8,8,8,8,8,8),(8,9,8,8,8,8,8,8,8,8,8,8,8,8,8,9),(10,10,11,12,13,11,11,11,11,11,11,11,10,10,9,11),(10,10,11,11,12,11,11,11,11,11,11,11,11,10,9,11),(11,12,12,12,14,12,12,13,11,13,12,12,13,12,11,12),(8,14,12,13,12,15,13,10,14,13,15,12,12,11,13,11),(8,9,8,9,9,9,9,9,9,9,8,8,8,8,9,8),(9,14,13,15,13,12,13,11,12,13,12,12,12,11,11,12),(9,11,11,12,12,11,11,13,10,11,11,13,13,13,11,12),(10,11,11,10,10,10,11,10,9,10,9,10,9,9,9,12),(8,10,11,13,11,11,10,10,10,9,9,8,8,8,8,8),(11,12,11,13,11,11,10,10,9,9,9,9,9,10,10,12),(10,14,11,15,15,12,13,12,13,11,13,11,11,10,11,11),(10,11,13,14,14,11,13,11,12,12,11,11,11,11,10,12),(9,11,11,12,12,12,12,11,13,13,13,11,9,9,9,9),(10,13,11,14,14,12,15,12,12,13,11,12,12,11,11,11),(8,14,9,9,8,8,8,8,8,8,8,8,8,8,8,8),(8,14,14,11,13,10,13,13,11,12,12,15,15,12,12,12),(11,11,15,11,13,12,11,11,11,10,10,11,11,11,10,11),(8,8,9,8,8,8,10,9,10,9,9,10,10,10,9,9),(8,11,10,13,11,11,10,11,10,9,8,8,9,8,8,9),(11,13,13,12,15,13,11,11,10,11,10,10,9,8,9,8),(10,11,13,11,12,11,11,11,10,9,10,14,12,8,8,8));
+ OPT_silk_lsf_pred_weights_nbmb: Array[0..1,0..8] Of Byte=
+  ((179,138,140,148,151,149,153,151,163),(116,67,82,59,92,72,100,89,92));
+ OPT_silk_lsf_pred_weights_wb: Array[0..1,0..14] Of Byte=
+  ((175,148,160,176,178,173,174,164,177,174,196,182,198,192,182),(68,62,66,60,72,117,85,90,118,136,151,142,160,142,155));
+ OPT_silk_lsf_weight_sel_nbmb: Array[0..31,0..8] Of Byte=
+  ((0,1,0,0,0,0,0,0,0),(1,0,0,0,0,0,0,0,0),(0,0,0,0,0,0,0,0,0),(1,1,1,0,0,0,0,1,0),(0,1,0,0,0,0,0,0,0),(0,1,0,0,0,0,0,0,0),(1,0,1,1,0,0,0,1,0),(0,1,1,0,0,1,1,0,0),(0,0,1,1,0,1,0,1,1),(0,0,1,1,0,0,1,1,1),(0,0,0,0,0,0,0,0,0),(0,1,0,1,1,1,1,1,0),(0,1,0,1,1,1,1,1,0),(0,1,1,1,1,1,1,1,0),(1,0,1,1,0,1,1,1,1),(0,1,1,1,1,1,0,1,0),(0,0,1,1,0,1,0,1,0),(0,0,1,1,1,0,1,1,1),(0,1,1,0,0,1,1,1,0),(0,0,0,1,1,1,0,1,0),(0,1,1,0,0,1,0,1,0),(0,1,1,0,0,0,1,1,0),(0,0,0,0,0,1,1,1,1),(0,0,1,1,0,0,0,1,1),(0,0,0,1,0,1,1,1,1),(0,1,1,1,1,1,1,1,0),(0,0,0,0,0,0,0,0,0),(0,0,0,0,0,0,0,0,0),(0,0,1,0,1,1,0,1,0),(1,0,0,1,0,0,0,0,0),(0,0,0,1,1,0,1,0,1),(1,0,1,1,0,1,1,1,1));
+ OPT_silk_lsf_weight_sel_wb: Array[0..31,0..14] Of Byte=
+  ((0,0,0,0,0,0,0,0,0,0,0,0,0,0,1),(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0),(0,0,1,0,0,1,1,1,0,1,1,1,1,0,0),(0,0,0,0,0,0,0,0,0,0,0,0,1,0,0),(0,1,1,0,1,0,1,1,0,1,1,1,1,1,0),(0,0,1,0,0,0,0,0,0,0,0,0,0,0,0),(1,0,0,0,0,0,0,0,0,0,0,1,0,1,0),(0,1,1,0,0,0,1,0,1,1,1,0,1,0,1),(0,1,0,1,1,0,1,0,1,0,1,1,1,1,1),(0,0,0,0,0,0,0,0,0,0,0,0,0,0,1),(0,1,0,0,0,0,0,0,0,0,0,0,0,0,0),(0,0,1,0,1,1,1,1,1,1,1,0,1,0,0),(0,0,1,0,0,1,0,1,0,1,0,0,1,0,0),(0,0,0,0,1,1,0,1,0,1,1,1,1,0,0),(0,1,0,0,0,1,1,0,1,1,1,0,1,1,1),(0,0,1,1,0,0,0,0,0,0,0,0,1,1,0),(0,1,1,0,1,0,1,1,1,1,1,0,1,0,0),(0,0,1,0,0,0,0,1,0,0,1,1,1,0,0),(0,0,0,0,0,0,0,0,0,0,0,0,0,0,1),(0,0,0,0,0,0,0,0,0,0,0,0,1,0,0),(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0),(0,1,0,1,0,1,1,0,1,0,1,0,1,1,0),(0,0,1,1,1,1,0,1,1,0,0,1,1,0,0),(0,1,1,0,1,0,1,0,1,0,0,0,0,1,0),(0,0,0,1,1,0,1,0,1,1,1,1,1,1,1),(0,0,0,0,0,0,0,0,0,0,0,0,0,0,1),(0,1,1,0,0,0,1,1,0,0,1,1,1,1,1),(0,0,0,0,0,1,0,1,1,1,1,0,1,1,1),(0,0,0,0,0,0,0,0,0,0,0,0,0,0,1),(0,0,0,0,0,0,0,0,0,0,0,0,0,0,1),(1,0,0,0,0,0,0,0,0,0,0,1,0,0,0),(0,0,1,0,0,1,1,1,0,0,1,0,0,1,0));
+ OPT_silk_lsf_codebook_nbmb: Array[0..31,0..9] Of Byte=
+  ((12,35,60,83,108,132,157,180,206,228),(15,32,55,77,101,125,151,175,201,225),(19,42,66,89,114,137,162,184,209,230),(12,25,50,72,97,120,147,172,200,223),(26,44,69,90,114,135,159,180,205,225),(13,22,53,80,106,130,156,180,205,228),(15,25,44,64,90,115,142,168,196,222),(19,24,62,82,100,120,145,168,190,214),(22,31,50,79,103,120,151,170,203,227),(21,29,45,65,106,124,150,171,196,224),(30,49,75,97,121,142,165,186,209,229),(19,25,52,70,93,116,143,166,192,219),(26,34,62,75,97,118,145,167,194,217),(25,33,56,70,91,113,143,165,196,223),(21,34,51,72,97,117,145,171,196,222),(20,29,50,67,90,117,144,168,197,221),(22,31,48,66,95,117,146,168,196,222),(24,33,51,77,116,134,158,180,200,224),(21,28,70,87,106,124,149,170,194,217),(26,33,53,64,83,117,152,173,204,225),(27,34,65,95,108,129,155,174,210,225),(20,26,72,99,113,131,154,176,200,219),(34,43,61,78,93,114,155,177,205,229),(23,29,54,97,124,138,163,179,209,229),(30,38,56,89,118,129,158,178,200,231),(21,29,49,63,85,111,142,163,193,222),(27,48,77,103,133,158,179,196,215,232),(29,47,74,99,124,151,176,198,220,237),(33,42,61,76,93,121,155,174,207,225),(29,53,87,112,136,154,170,188,208,227),(24,30,52,84,131,150,166,186,203,229),(37,48,64,84,104,118,156,177,201,230));
+ OPT_silk_lsf_codebook_wb: Array[0..31,0..15] Of Byte=
+  ((7,23,38,54,69,85,100,116,131,147,162,178,193,208,223,239),(13,25,41,55,69,83,98,112,127,142,157,171,187,203,220,236),(15,21,34,51,61,78,92,106,126,136,152,167,185,205,225,240),(10,21,36,50,63,79,95,110,126,141,157,173,189,205,221,237),(17,20,37,51,59,78,89,107,123,134,150,164,184,205,224,240),(10,15,32,51,67,81,96,112,129,142,158,173,189,204,220,236),(8,21,37,51,65,79,98,113,126,138,155,168,179,192,209,218),(12,15,34,55,63,78,87,108,118,131,148,167,185,203,219,236),(16,19,32,36,56,79,91,108,118,136,154,171,186,204,220,237),(11,28,43,58,74,89,105,120,135,150,165,180,196,211,226,241),(6,16,33,46,60,75,92,107,123,137,156,169,185,199,214,225),(11,19,30,44,57,74,89,105,121,135,152,169,186,202,218,234),(12,19,29,46,57,71,88,100,120,132,148,165,182,199,216,233),(17,23,35,46,56,77,92,106,123,134,152,167,185,204,222,237),(14,17,45,53,63,75,89,107,115,132,151,171,188,206,221,240),(9,16,29,40,56,71,88,103,119,137,154,171,189,205,222,237),(16,19,36,48,57,76,87,105,118,132,150,167,185,202,218,236),(12,17,29,54,71,81,94,104,126,136,149,164,182,201,221,237),(15,28,47,62,79,97,115,129,142,155,168,180,194,208,223,238),(8,14,30,45,62,78,94,111,127,143,159,175,192,207,223,239),(17,30,49,62,79,92,107,119,132,145,160,174,190,204,220,235),(14,19,36,45,61,76,91,108,121,138,154,172,189,205,222,238),(12,18,31,45,60,76,91,107,123,138,154,171,187,204,221,236),(13,17,31,43,53,70,83,103,114,131,149,167,185,203,220,237),(17,22,35,42,58,78,93,110,125,139,155,170,188,206,224,240),(8,15,34,50,67,83,99,115,131,146,162,178,193,209,224,239),(13,16,41,66,73,86,95,111,128,137,150,163,183,206,225,241),(17,25,37,52,63,75,92,102,119,132,144,160,175,191,212,231),(19,31,49,65,83,100,117,133,147,161,174,187,200,213,227,242),(18,31,52,68,88,103,117,126,138,149,163,177,192,207,223,239),(16,29,47,61,76,90,106,119,133,147,161,176,193,209,224,240),(15,21,35,50,61,73,86,97,110,119,129,141,175,198,218,237));
+ OPT_silk_lsf_min_spacing_nbmb: Array[0..10] Of Word=(
+  250,3,6,3,3,3,4,3,
+  3,3,461
+ );
+ OPT_silk_lsf_min_spacing_wb: Array[0..16] Of Word=(
+  100,3,40,3,3,3,5,14,
+  14,10,11,3,8,9,7,3,
+  347
+ );
+ OPT_silk_lsf_ordering_nbmb: Array[0..9] Of Byte=(
+  0,9,6,3,4,5,8,1,
+  2,7
+ );
+ OPT_silk_lsf_ordering_wb: Array[0..15] Of Byte=(
+  0,15,8,7,4,11,12,3,
+  2,13,10,5,6,9,14,1
+ );
+ OPT_silk_cosine: Array[0..128] Of SmallInt=(
+  4096,4095,4091,4085,4076,4065,4052,4036,
+  4017,3997,3973,3948,3920,3889,3857,3822,
+  3784,3745,3703,3659,3613,3564,3513,3461,
+  3406,3349,3290,3229,3166,3102,3035,2967,
+  2896,2824,2751,2676,2599,2520,2440,2359,
+  2276,2191,2106,2019,1931,1842,1751,1660,
+  1568,1474,1380,1285,1189,1093,995,897,
+  799,700,601,501,401,301,201,101,
+  0,-101,-201,-301,-401,-501,-601,-700,
+  -799,-897,-995,-1093,-1189,-1285,-1380,-1474,
+  -1568,-1660,-1751,-1842,-1931,-2019,-2106,-2191,
+  -2276,-2359,-2440,-2520,-2599,-2676,-2751,-2824,
+  -2896,-2967,-3035,-3102,-3166,-3229,-3290,-3349,
+  -3406,-3461,-3513,-3564,-3613,-3659,-3703,-3745,
+  -3784,-3822,-3857,-3889,-3920,-3948,-3973,-3997,
+  -4017,-4036,-4052,-4065,-4076,-4085,-4091,-4095,
+  -4096
+ );
+ OPT_silk_pitch_scale: Array[0..2] Of Word=(
+  4,6,8
+ );
+ OPT_silk_pitch_min_lag: Array[0..2] Of Word=(
+  16,24,32
+ );
+ OPT_silk_pitch_max_lag: Array[0..2] Of Word=(
+  144,216,288
+ );
+ OPT_silk_pitch_offset_nb10ms: Array[0..2,0..1] Of ShortInt=
+  ((0,0),(1,0),(0,1));
+ OPT_silk_pitch_offset_nb20ms: Array[0..10,0..3] Of ShortInt=
+  ((0,0,0,0),(2,1,0,-1),(-1,0,1,2),(-1,0,0,1),(-1,0,0,0),(0,0,0,1),(0,0,1,1),(1,1,0,0),(1,0,0,0),(0,0,0,-1),(1,0,0,-1));
+ OPT_silk_pitch_offset_mbwb10ms: Array[0..11,0..1] Of ShortInt=
+  ((0,0),(0,1),(1,0),(-1,1),(1,-1),(-1,2),(2,-1),(-2,2),(2,-2),(-2,3),(3,-2),(-3,3));
+ OPT_silk_pitch_offset_mbwb20ms: Array[0..33,0..3] Of ShortInt=
+  ((0,0,0,0),(0,0,1,1),(1,1,0,0),(-1,0,0,0),(0,0,0,1),(1,0,0,0),(-1,0,0,1),(0,0,0,-1),(-1,0,1,2),(1,0,0,-1),(-2,-1,1,2),(2,1,0,-1),(-2,0,0,2),(-2,0,1,3),(2,1,-1,-2),(-3,-1,1,3),(2,0,0,-2),(3,1,0,-2),(-3,-1,2,4),(-4,-1,1,4),(3,1,-1,-3),(-4,-1,2,5),(4,2,-1,-3),(4,1,-1,-4),(-5,-1,2,6),(5,2,-1,-4),(-6,-2,2,6),(-5,-2,2,5),(6,2,-1,-5),(-7,-2,3,8),(6,2,-2,-6),(5,2,-2,-5),(8,3,-2,-7),(-9,-3,3,9));
+ OPT_silk_ltp_filter0_taps: Array[0..7,0..4] Of ShortInt=
+  ((4,6,24,7,5),(0,0,2,0,0),(12,28,41,13,-4),(-9,15,42,25,14),(1,-2,62,41,-9),(-10,37,65,-4,3),(-6,4,66,7,-8),(16,14,38,-3,33));
+ OPT_silk_ltp_filter1_taps: Array[0..15,0..4] Of ShortInt=
+  ((13,22,39,23,12),(-1,36,64,27,-6),(-7,10,55,43,17),(1,1,8,1,1),(6,-11,74,53,-9),(-12,55,76,-12,8),(-3,3,93,27,-4),(26,39,59,3,-8),(2,0,77,11,9),(-8,22,44,-6,7),(40,9,26,3,9),(-7,20,101,-7,4),(3,-8,42,26,0),(-15,33,68,2,23),(-2,55,46,-2,15),(3,-1,21,16,41));
+ OPT_silk_ltp_filter2_taps: Array[0..31,0..4] Of ShortInt=
+  ((-6,27,61,39,5),(-11,42,88,4,1),(-2,60,65,6,-4),(-1,-5,73,56,1),(-9,19,94,29,-9),(0,12,99,6,4),(8,-19,102,46,-13),(3,2,13,3,2),(9,-21,84,72,-18),(-11,46,104,-22,8),(18,38,48,23,0),(-16,70,83,-21,11),(5,-11,117,22,-8),(-6,23,117,-12,3),(3,-8,95,28,4),(-10,15,77,60,-15),(-1,4,124,2,-4),(3,38,84,24,-25),(2,13,42,13,31),(21,-4,56,46,-1),(-1,35,79,-13,19),(-7,65,88,-9,-14),(20,4,81,49,-29),(20,0,75,3,-17),(5,-9,44,92,-8),(1,-3,22,69,31),(-6,95,41,-12,5),(39,67,16,-4,1),(0,-6,120,55,-36),(-13,44,122,4,-24),(81,5,11,3,7),(2,0,9,10,88));
+ OPT_silk_ltp_scale_factor: Array[0..2] Of Word=(
+  15565,12288,8192
+ );
+ OPT_silk_shell_blocks: Array[0..2,0..1] Of Byte=
+  ((5,10),(8,15),(10,20));
+ OPT_silk_quant_offset: Array[0..1,0..1] Of Byte=
+  ((25,60),(8,25));
+ OPT_silk_stereo_interp_len: Array[0..2] Of LongInt=(
+  64,96,128
+ );
+ OPT_celt_model_tapset: Array[0..3] Of Word=(
+  4,2,3,4
+ );
+ OPT_celt_model_spread: Array[0..4] Of Word=(
+  32,7,9,30,32
+ );
+ OPT_celt_model_alloc_trim: Array[0..11] Of Word=(
+  128,2,4,9,19,41,87,109,
+  119,124,126,128
+ );
+ OPT_celt_model_energy_small: Array[0..3] Of Word=(
+  4,2,3,4
+ );
+ OPT_celt_freq_bands: Array[0..21] Of Byte=(
+  0,1,2,3,4,5,6,7,
+  8,10,12,14,16,20,24,28,
+  34,40,48,60,78,100
+ );
+ OPT_celt_freq_range: Array[0..20] Of Byte=(
+  1,1,1,1,1,1,1,1,
+  2,2,2,2,4,4,4,6,
+  6,8,12,18,22
+ );
+ OPT_celt_log_freq_range: Array[0..20] Of Byte=(
+  0,0,0,0,0,0,0,0,
+  8,8,8,8,16,16,16,21,
+  21,24,29,34,36
+ );
+ OPT_celt_tf_select: Array[0..3,0..1,0..1,0..1] Of ShortInt=
+  ((((0,-1),(0,-1)),((0,-1),(0,-1))),(((0,-1),(0,-2)),((1,0),(1,-1))),(((0,-2),(0,-3)),((2,0),(1,-1))),(((0,-2),(0,-3)),((3,0),(1,-1))));
+ OPT_celt_mean_energy: Array[0..24] Of Single=(
+  6.4375,6.25,5.75,5.3125,5.0625,4.8125,4.5,4.375,
+  4.875,4.6875,4.5625,4.4375,4.875,4.625,4.3125,4.5,
+  4.375,4.625,4.75,4.4375,3.75,3.75,3.75,3.75,
+  3.75
+ );
+ OPT_celt_alpha_coef: Array[0..3] Of Single=(
+  0.8984375,0.796875,0.6484375,0.5
+ );
+ OPT_celt_beta_coef: Array[0..3] Of Single=(
+  0.0799865723,0.320007324,0.630004883,0.799987793
+ );
+ OPT_celt_coarse_energy_dist: Array[0..3,0..1,0..41] Of Byte=
+  (((72,127,65,129,66,128,65,128,64,128,62,128,64,128,64,128,92,78,92,79,92,78,90,79,116,41,115,40,114,40,132,26,132,26,145,17,161,12,176,10,177,11),(24,179,48,138,54,135,54,132,53,134,56,133,55,132,55,132,61,114,70,96,74,88,75,88,87,74,89,66,91,67,100,59,108,50,120,40,122,37,97,43,78,50)),((83,78,84,81,88,75,86,74,87,71,90,73,93,74,93,74,109,40,114,36,117,34,117,34,143,17,145,18,146,19,162,12,165,10,178,7,189,6,190,8,177,9),(23,178,54,115,63,102,66,98,69,99,74,89,71,91,73,91,78,89,86,80,92,66,93,64,102,59,103,60,104,60,117,52,123,44,138,35,133,31,97,38,77,45)),((61,90,93,60,105,42,107,41,110,45,116,38,113,38,112,38,124,26,132,27,136,19,140,20,155,14,159,16,158,18,170,13,177,10,187,8,192,6,175,9,159,10),(21,178,59,110,71,86,75,85,84,83,91,66,88,73,87,72,92,75,98,72,105,58,107,54,115,52,114,55,112,56,129,51,132,40,150,33,140,29,98,35,77,42)),((42,121,96,66,108,43,111,40,117,44,123,32,120,36,119,33,127,33,134,34,139,21,147,23,152,20,158,25,154,26,166,21,173,16,184,13,184,10,150,13,139,15),(22,178,63,114,74,82,84,83,92,82,103,62,96,72,96,67,101,73,107,72,113,55,118,52,125,52,118,52,117,55,135,49,137,39,157,32,145,29,97,33,77,40)));
+ OPT_celt_static_alloc: Array[0..10,0..20] Of Byte=
+  ((0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0),(90,80,75,69,63,56,49,40,34,29,20,18,10,0,0,0,0,0,0,0,0),(110,100,90,84,78,71,65,58,51,45,39,32,26,20,12,0,0,0,0,0,0),(118,110,103,93,86,80,75,70,65,59,53,47,40,31,23,15,4,0,0,0,0),(126,119,112,104,95,89,83,78,72,66,60,54,47,39,32,25,17,12,1,0,0),(134,127,120,114,103,97,91,85,78,72,66,60,54,47,41,35,29,23,16,10,1),(144,137,130,124,113,107,101,95,88,82,76,70,64,57,51,45,39,33,26,15,1),(152,145,138,132,123,117,111,105,98,92,86,80,74,67,61,55,49,43,36,20,1),(162,155,148,142,133,127,121,115,108,102,96,90,84,77,71,65,59,53,46,30,1),(172,165,158,152,143,137,131,125,118,112,106,100,94,87,81,75,69,63,56,45,20),(200,200,200,200,200,200,200,200,198,193,188,183,178,173,168,163,158,153,148,129,104));
+ OPT_celt_static_caps: Array[0..3,0..1,0..20] Of Byte=
+  (((224,224,224,224,224,224,224,224,160,160,160,160,185,185,185,178,178,168,134,61,37),(224,224,224,224,224,224,224,224,240,240,240,240,207,207,207,198,198,183,144,66,40)),((160,160,160,160,160,160,160,160,185,185,185,185,193,193,193,183,183,172,138,64,38),(240,240,240,240,240,240,240,240,207,207,207,207,204,204,204,193,193,180,143,66,40)),((185,185,185,185,185,185,185,185,193,193,193,193,193,193,193,183,183,172,138,65,39),(207,207,207,207,207,207,207,207,204,204,204,204,201,201,201,188,188,176,141,66,40)),((193,193,193,193,193,193,193,193,193,193,193,193,194,194,194,184,184,173,139,65,39),(204,204,204,204,204,204,204,204,201,201,201,201,198,198,198,187,187,175,140,66,40)));
+ OPT_celt_cache_bits: Array[0..391] Of Byte=(
+  40,7,7,7,7,7,7,7,
+  7,7,7,7,7,7,7,7,
+  7,7,7,7,7,7,7,7,
+  7,7,7,7,7,7,7,7,
+  7,7,7,7,7,7,7,7,
+  7,40,15,23,28,31,34,36,
+  38,39,41,42,43,44,45,46,
+  47,47,49,50,51,52,53,54,
+  55,55,57,58,59,60,61,62,
+  63,63,65,66,67,68,69,70,
+  71,71,40,20,33,41,48,53,
+  57,61,64,66,69,71,73,75,
+  76,78,80,82,85,87,89,91,
+  92,94,96,98,101,103,105,107,
+  108,110,112,114,117,119,121,123,
+  124,126,128,40,23,39,51,60,
+  67,73,79,83,87,91,94,97,
+  100,102,105,107,111,115,118,121,
+  124,126,129,131,135,139,142,145,
+  148,150,153,155,159,163,166,169,
+  172,174,177,179,35,28,49,65,
+  78,89,99,107,114,120,126,132,
+  136,141,145,149,153,159,165,171,
+  176,180,185,189,192,199,205,211,
+  216,220,225,229,232,239,245,251,
+  21,33,58,79,97,112,125,137,
+  148,157,166,174,182,189,195,201,
+  207,217,227,235,243,251,17,35,
+  63,86,106,123,139,152,165,177,
+  187,197,206,214,222,230,237,250,
+  25,31,55,75,91,105,117,128,
+  138,146,154,161,168,174,180,185,
+  190,200,208,215,222,229,235,240,
+  245,255,16,36,65,89,110,128,
+  144,159,173,185,196,207,217,226,
+  234,242,250,11,41,74,103,128,
+  151,172,191,209,225,241,255,9,
+  43,79,110,138,163,186,207,227,
+  246,12,39,71,99,123,144,164,
+  182,198,214,228,241,253,9,44,
+  81,113,142,168,192,214,235,255,
+  7,49,90,127,160,191,220,247,
+  6,51,95,134,170,203,234,7,
+  47,87,123,155,184,212,237,6,
+  52,97,137,174,208,240,5,57,
+  106,151,192,231,5,59,111,158,
+  202,243,5,55,103,147,187,224,
+  5,60,113,161,206,248,4,65,
+  122,175,224,4,67,127,182,234
+ );
+ OPT_celt_cache_index: Array[0..104] Of SmallInt=(
+  -1,-1,-1,-1,-1,-1,-1,-1,
+  0,0,0,0,41,41,41,82,
+  82,123,164,200,222,0,0,0,
+  0,0,0,0,0,41,41,41,
+  41,123,123,123,164,164,240,266,
+  283,295,41,41,41,41,41,41,
+  41,41,123,123,123,123,240,240,
+  240,266,266,305,318,328,336,123,
+  123,123,123,123,123,123,123,240,
+  240,240,240,305,305,305,318,318,
+  343,351,358,364,240,240,240,240,
+  240,240,240,240,305,305,305,305,
+  343,343,343,351,351,370,376,382,
+  387
+ );
+ OPT_celt_log2_frac: Array[0..23] Of Byte=(
+  0,8,13,16,19,21,23,24,
+  26,27,28,29,30,31,32,32,
+  33,34,34,35,36,36,37,37
+ );
+ OPT_celt_bit_interleave: Array[0..15] Of Byte=(
+  0,1,1,1,2,3,3,3,
+  2,3,3,3,2,3,3,3
+ );
+ OPT_celt_bit_deinterleave: Array[0..15] Of Byte=(
+  0,3,12,15,48,51,60,63,
+  192,195,204,207,240,243,252,255
+ );
+ OPT_celt_hadamard_order: Array[0..45] Of Byte=(
+  1,0,3,0,2,1,7,0,
+  4,3,6,1,5,2,15,0,
+  8,7,12,3,11,4,14,1,
+  9,6,13,2,10,5,0,1,
+  2,3,4,5,6,7,8,9,
+  10,11,12,13,14,15
+ );
+ OPT_celt_qn_exp2: Array[0..7] Of Word=(
+  16384,17866,19483,21247,23170,25267,27554,30048
+ );
+ OPT_celt_pvq_u: Array[0..1271] Of LongWord=(
+  1,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,
+  0,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1,
+  1,3,5,7,9,11,13,15,
+  17,19,21,23,25,27,29,31,
+  33,35,37,39,41,43,45,47,
+  49,51,53,55,57,59,61,63,
+  65,67,69,71,73,75,77,79,
+  81,83,85,87,89,91,93,95,
+  97,99,101,103,105,107,109,111,
+  113,115,117,119,121,123,125,127,
+  129,131,133,135,137,139,141,143,
+  145,147,149,151,153,155,157,159,
+  161,163,165,167,169,171,173,175,
+  177,179,181,183,185,187,189,191,
+  193,195,197,199,201,203,205,207,
+  209,211,213,215,217,219,221,223,
+  225,227,229,231,233,235,237,239,
+  241,243,245,247,249,251,253,255,
+  257,259,261,263,265,267,269,271,
+  273,275,277,279,281,283,285,287,
+  289,291,293,295,297,299,301,303,
+  305,307,309,311,313,315,317,319,
+  321,323,325,327,329,331,333,335,
+  337,339,341,343,345,347,349,351,
+  13,25,41,61,85,113,145,181,
+  221,265,313,365,421,481,545,613,
+  685,761,841,925,1013,1105,1201,1301,
+  1405,1513,1625,1741,1861,1985,2113,2245,
+  2381,2521,2665,2813,2965,3121,3281,3445,
+  3613,3785,3961,4141,4325,4513,4705,4901,
+  5101,5305,5513,5725,5941,6161,6385,6613,
+  6845,7081,7321,7565,7813,8065,8321,8581,
+  8845,9113,9385,9661,9941,10225,10513,10805,
+  11101,11401,11705,12013,12325,12641,12961,13285,
+  13613,13945,14281,14621,14965,15313,15665,16021,
+  16381,16745,17113,17485,17861,18241,18625,19013,
+  19405,19801,20201,20605,21013,21425,21841,22261,
+  22685,23113,23545,23981,24421,24865,25313,25765,
+  26221,26681,27145,27613,28085,28561,29041,29525,
+  30013,30505,31001,31501,32005,32513,33025,33541,
+  34061,34585,35113,35645,36181,36721,37265,37813,
+  38365,38921,39481,40045,40613,41185,41761,42341,
+  42925,43513,44105,44701,45301,45905,46513,47125,
+  47741,48361,48985,49613,50245,50881,51521,52165,
+  52813,53465,54121,54781,55445,56113,56785,57461,
+  58141,58825,59513,60205,60901,61601,63,129,
+  231,377,575,833,1159,1561,2047,2625,
+  3303,4089,4991,6017,7175,8473,9919,11521,
+  13287,15225,17343,19649,22151,24857,27775,30913,
+  34279,37881,41727,45825,50183,54809,59711,64897,
+  70375,76153,82239,88641,95367,102425,109823,117569,
+  125671,134137,142975,152193,161799,171801,182207,193025,
+  204263,215929,228031,240577,253575,267033,280959,295361,
+  310247,325625,341503,357889,374791,392217,410175,428673,
+  447719,467321,487487,508225,529543,551449,573951,597057,
+  620775,645113,670079,695681,721927,748825,776383,804609,
+  833511,863097,893375,924353,956039,988441,1021567,1055425,
+  1090023,1125369,1161471,1198337,1235975,1274393,1313599,1353601,
+  1394407,1436025,1478463,1521729,1565831,1610777,1656575,1703233,
+  1750759,1799161,1848447,1898625,1949703,2001689,2054591,2108417,
+  2163175,2218873,2275519,2333121,2391687,2451225,2511743,2573249,
+  2635751,2699257,2763775,2829313,2895879,2963481,3032127,3101825,
+  3172583,3244409,3317311,3391297,3466375,3542553,3619839,3698241,
+  3777767,3858425,3940223,4023169,4107271,4192537,4278975,4366593,
+  4455399,4545401,4636607,4729025,4822663,4917529,5013631,5110977,
+  5209575,5309433,5410559,5512961,5616647,5721625,5827903,5935489,
+  6044391,6154617,6266175,6379073,6493319,6608921,6725887,6844225,
+  6963943,7085049,7207551,321,681,1289,2241,3649,
+  5641,8361,11969,16641,22569,29961,39041,50049,
+  63241,78889,97281,118721,143529,172041,204609,241601,
+  283401,330409,383041,441729,506921,579081,658689,746241,
+  842249,947241,1061761,1186369,1321641,1468169,1626561,1797441,
+  1981449,2179241,2391489,2618881,2862121,3121929,3399041,3694209,
+  4008201,4341801,4695809,5071041,5468329,5888521,6332481,6801089,
+  7295241,7815849,8363841,8940161,9545769,10181641,10848769,11548161,
+  12280841,13047849,13850241,14689089,15565481,16480521,17435329,18431041,
+  19468809,20549801,21675201,22846209,24064041,25329929,26645121,28010881,
+  29428489,30899241,32424449,34005441,35643561,37340169,39096641,40914369,
+  42794761,44739241,46749249,48826241,50971689,53187081,55473921,57833729,
+  60268041,62778409,65366401,68033601,70781609,73612041,76526529,79526721,
+  82614281,85790889,89058241,92418049,95872041,99421961,103069569,106816641,
+  110664969,114616361,118672641,122835649,127107241,131489289,135983681,140592321,
+  145317129,150160041,155123009,160208001,165417001,170752009,176215041,181808129,
+  187533321,193392681,199388289,205522241,211796649,218213641,224775361,231483969,
+  238341641,245350569,252512961,259831041,267307049,274943241,282741889,290705281,
+  298835721,307135529,315607041,324252609,333074601,342075401,351257409,360623041,
+  370174729,379914921,389846081,399970689,410291241,420810249,431530241,442453761,
+  453583369,464921641,476471169,488234561,500214441,512413449,524834241,537479489,
+  550351881,563454121,576788929,590359041,604167209,618216201,632508801,1683,
+  3653,7183,13073,22363,36365,56695,85305,124515,
+  177045,246047,335137,448427,590557,766727,982729,1244979,
+  1560549,1937199,2383409,2908411,3522221,4235671,5060441,6009091,
+  7095093,8332863,9737793,11326283,13115773,15124775,17372905,19880915,
+  22670725,25765455,29189457,32968347,37129037,41699767,46710137,52191139,
+  58175189,64696159,71789409,79491819,87841821,96879431,106646281,117185651,
+  128542501,140763503,153897073,167993403,183104493,199284183,216588185,235074115,
+  254801525,275831935,298228865,322057867,347386557,374284647,402823977,433078547,
+  465124549,499040399,534906769,572806619,612825229,655050231,699571641,746481891,
+  795875861,847850911,902506913,959946283,1020274013,1083597703,1150027593,1219676595,
+  1292660325,1369097135,1449108145,1532817275,1620351277,1711839767,1807415257,1907213187,
+  2011371957,2120032959,8989,19825,40081,75517,134245,227305,
+  369305,579125,880685,1303777,1884961,2668525,3707509,5064793,
+  6814249,9041957,11847485,15345233,19665841,24957661,31388293,39146185,
+  48442297,59511829,72616013,88043969,106114625,127178701,151620757,179861305,
+  212358985,249612805,292164445,340600625,395555537,457713341,527810725,606639529,
+  695049433,793950709,904317037,1027188385,1163673953,1314955181,1482288821,1667010073,
+  1870535785,2094367717,48639,108545,224143,433905,795455,1392065,
+  2340495,3800305,5984767,9173505,13726991,20103025,28875327,40754369,
+  56610575,77500017,104692735,139703809,184327311,240673265,311207743,398796225,
+  506750351,638878193,799538175,993696769,1226990095,1505789553,1837271615,2229491905,
+  265729,598417,1256465,2485825,4673345,8405905,14546705,24331777,
+  39490049,62390545,96220561,145198913,214828609,312193553,446304145,628496897,
+  872893441,1196924561,1621925137,2173806145,1462563,3317445,7059735,14218905,
+  27298155,50250765,89129247,152951073,254831667,413442773,654862247,1014889769,
+  1541911931,2300409629,3375210671,8097453,18474633,39753273,81270333,158819253,
+  298199265,540279585,948062325,1616336765,45046719,103274625,224298231,464387817,
+  921406335,1759885185,3248227095,251595969,579168825,1267854873,2653649025,1409933619
+ );
+ OPT_celt_postfilter_taps: Array[0..2,0..2] Of Single=
+  ((0.306640625,0.217041016,0.129638672),(0.463867188,0.268066406,0.0),(0.799804688,0.100097656,0.0));
+ OPT_celt_window2: Array[0..119] Of Single=(
+  4.52753568E-09,3.66646987E-07,2.82777E-06,1.08556997E-05,2.96370999E-05,6.60594014E-05,0.000128686006,0.000227726996,
+  0.000374999014,0.000583880988,0.00086926599,0.00124749995,0.00173629995,0.0023547099,0.00312299002,0.00406253012,
+  0.00519576017,0.0065460098,0.00813743006,0.00999481976,0.0121435001,0.0146092996,0.0174180008,0.0205956995,
+  0.0241684001,0.0281614996,0.0326002985,0.0375091992,0.0429118015,0.0488307998,0.0552873015,0.0623011999,
+  0.0698907971,0.078072302,0.0868600979,0.0962663963,0.106301002,0.116970003,0.128279999,0.140230998,
+  0.152822003,0.166049004,0.179904997,0.194379002,0.209456995,0.225123003,0.241356,0.258132994,
+  0.275427997,0.293211997,0.311453015,0.330116004,0.349162996,0.368555993,0.388253003,0.408210009,
+  0.428382009,0.448722988,0.469184995,0.489719987,0.510280013,0.530815005,0.551276982,0.571618021,
+  0.59179002,0.611747026,0.631443977,0.650837004,0.669884026,0.688547015,0.706788003,0.724572003,
+  0.741867006,0.758643985,0.774877012,0.79054302,0.805621028,0.820095003,0.833950996,0.847177982,
+  0.859768987,0.871720016,0.883029997,0.89369899,0.903734028,0.913139999,0.921927989,0.930109024,
+  0.93769902,0.944712996,0.951169014,0.957087994,0.962490976,0.967400014,0.971837997,0.975831985,
+  0.979403973,0.982581973,0.985391021,0.987856984,0.990005016,0.991863012,0.993453979,0.994804025,
+  0.99593699,0.996877015,0.99764502,0.998264015,0.998753011,0.999131024,0.999415994,0.999625027,
+  0.999772012,0.999871016,0.999934018,0.999970019,0.999988973,0.99999702,0.999999642,1.0
+ );
+ OPT_celt_window: Array[0..119] Of Single=(
+  6.72869646E-05,0.000605513458,0.00168159697,0.00329479622,0.00544399442,0.00812769216,
+  0.0113440007,0.0150906332,0.019364886,0.0241636354,0.0294833146,0.0353199057,
+  0.0416689105,0.0485253483,0.0558837168,0.0637379959,0.072081618,0.0809074268,
+  0.0902077034,0.0999741107,0.110197693,0.120868832,0.13197729,0.143512145,
+  0.155461773,0.167813897,0.180555493,0.193672895,0.207151711,0.220976815,
+  0.235132426,0.249602079,0.264368594,0.279414177,0.294720411,0.310268193,
+  0.326037884,0.342009306,0.358161777,0.374474078,0.390924633,0.407491416,
+  0.424152136,0.440884233,0.457664847,0.474471033,0.491279781,0.508067966,
+  0.524812639,0.541490793,0.55807972,0.574557006,0.590900481,0.607088387,
+  0.623099506,0.638913035,0.654508948,0.669867754,0.684970796,0.699800074,
+  0.71433872,0.728570521,0.742480457,0.756054223,0.769278944,0.78214258,
+  0.794634283,0.806744456,0.818464577,0.829787314,0.840706706,0.851217806,
+  0.861316979,0.87100184,0.880271137,0.889124811,0.897563994,0.905590951,
+  0.913209021,0.920422673,0.927237391,0.933659554,0.93969655,0.945356727,
+  0.950649083,0.955583513,0.960170686,0.96442169,0.968348503,0.971963346,
+  0.975279033,0.978308856,0.981066167,0.983564794,0.985818684,0.987841904,
+  0.989648581,0.99125272,0.992668509,0.993909717,0.994990051,0.995922983,
+  0.996721625,0.997398734,0.997966647,0.998437285,0.998821974,0.999131441,
+  0.999376059,0.999565244,0.999707997,0.999812484,0.999886155,0.999935627,
+  0.999966979,0.999985158,0.999994576,0.999998569,0.999999821,1.0
+ );
+ OPT_celt_pvq_u_row: Array[0..14] Of LongInt=(0,176,351,525,698,870,1041,1131,1178,1207,1226,1240,1248,1254,1257);
+
+{ ---- CELT : etat et fonctions auxiliaires (opus_celt.c, opusdec_celt.c, opus_pvq.c) ---- }
+Type
+ TOPCeltBlock=Record
+  Energy: Array[0..OPCeltMaxBands-1] Of Single;
+  PrevEnergy: Array[0..1,0..OPCeltMaxBands-1] Of Single;
+  CollapseMasks: Array[0..OPCeltMaxBands-1] Of Byte;
+  Buf: Array[0..2047] Of Single;
+  Coeffs: Array[0..959] Of Single;
+  PfPeriodNew: LongInt;
+  PfGainsNew: Array[0..2] Of Single;
+  PfPeriod: LongInt;
+  PfGains: Array[0..2] Of Single;
+  PfPeriodOld: LongInt;
+  PfGainsOld: Array[0..2] Of Single;
+  EmphCoeff: Single;
+ End;
+
+Var
+ OPCBlock: Array[0..1] Of TOPCeltBlock;
+ OPCChannels,OPCOutputChannels,OPCApplyPhaseInv,OPCSize,OPCStartBand,OPCEndBand,
+ OPCCodedBands,OPCTransient,OPCAllocTrim,OPCBlocks,OPCBlockSize,OPCSilence,
+ OPCAnticollapseNeeded,OPCAnticollapse,OPCIntensityStereo,OPCDualStereo,
+ OPCFlushed,OPCSpread,OPCFrameBits,OPCRemaining,OPCRemaining2: LongInt;
+ OPCSeed: LongWord;
+ OPCCaps,OPCFineBits,OPCFinePriority,OPCPulses,OPCTfChange: Array[0..OPCeltMaxBands-1] Of LongInt;
+ OPCQCoeff: Array[0..255] Of LongInt;
+ OPCHadamardTmp: Array[0..255] Of Single;
+ OPCNorm: Array[0..1599] Of Single;
+ OPCScratch: Array[0..175] Of Single;
+ OPCImdctInit: Boolean;
+ OPCTwRe,OPCTwIm: Array[0..3,0..479] Of Double;     { exp(-2 pi i k / M) }
+ OPCPreRe,OPCPreIm,OPCPostRe,OPCPostIm: Array[0..3,0..479] Of Double;
+
+Const
+ OPCEmphCoeff: Single=0.8500061035;
+
+Function OPCeltRng: LongWord;
+Begin
+ OPCSeed:=LongWord(Int64(1664525)*Int64(OPCSeed)+1013904223);
+ OPCeltRng:=OPCSeed;
+End;
+
+Procedure OPCeltRenormalize(X: POPFA; N: LongInt; Gain: Single);
+Var I: LongInt; G: Single;
+Begin
+ G:=1E-15;
+ For I:=0 To N-1 Do G:=G+X^[I]*X^[I];
+ G:=Gain/Single(Sqrt(Double(G)));
+ For I:=0 To N-1 Do X^[I]:=X^[I]*G;
+End;
+
+Function OPRound16(A,B: LongInt): LongInt;   { ROUND_MUL16 }
+Begin
+ OPRound16:=OPSar(A*B+16384,15);
+End;
+
+Function OPCeltCos(X: LongInt): LongInt;
+Var T: LongInt;
+Begin
+ T:=SmallInt(OPSar(X*X+4096,13));
+ T:=SmallInt((32767-T)+OPRound16(T,(-7651+OPRound16(T,(8277+OPRound16(-626,T))))));
+ OPCeltCos:=SmallInt(T+1);
+End;
+
+Function OPCeltLog2Tan(ISin,ICos: LongInt): LongInt;
+Var Lc,Ls: LongInt;
+Begin
+ Lc:=OPIlog(ICos); Ls:=OPIlog(ISin);
+ ICos:=ICos Shl (15-Lc);
+ ISin:=ISin Shl (15-Ls);
+ OPCeltLog2Tan:=(Ls Shl 11)-(Lc Shl 11)+
+  OPRound16(ISin,OPRound16(ISin,-2597)+7932)-
+  OPRound16(ICos,OPRound16(ICos,-2597)+7932);
+End;
+
+Function OPCeltBits2Pulses(Cache,Bits: LongInt): LongInt;
+Var I,Low,High,Center: LongInt;
+Begin
+ Low:=0; High:=OPT_celt_cache_bits[Cache];
+ Dec(Bits);
+ For I:=0 To 5 Do Begin
+  Center:=(Low+High+1) Shr 1;
+  If OPT_celt_cache_bits[Cache+Center]>=Bits Then High:=Center Else Low:=Center;
+ End;
+ If Low=0 Then Center:=-1 Else Center:=OPT_celt_cache_bits[Cache+Low];
+ If Bits-Center<=OPT_celt_cache_bits[Cache+High]-Bits Then OPCeltBits2Pulses:=Low
+ Else OPCeltBits2Pulses:=High;
+End;
+
+Function OPCeltPulses2Bits(Cache,Pulses: LongInt): LongInt;
+Begin
+ If Pulses=0 Then OPCeltPulses2Bits:=0 Else OPCeltPulses2Bits:=OPT_celt_cache_bits[Cache+Pulses]+1;
+End;
+
+Procedure OPCeltExpRotImpl(X: POPFA; Len,Stride: LongInt; C,S: Single);
+Var I: LongInt; X1,X2: Single;
+Begin
+ For I:=0 To Len-Stride-1 Do Begin
+  X1:=X^[I]; X2:=X^[I+Stride];
+  X^[I+Stride]:=C*X2+S*X1;
+  X^[I]:=C*X1-S*X2;
+ End;
+ For I:=Len-2*Stride-1 DownTo 0 Do Begin
+  X1:=X^[I]; X2:=X^[I+Stride];
+  X^[I+Stride]:=C*X2+S*X1;
+  X^[I]:=C*X1-S*X2;
+ End;
+End;
+
+Procedure OPCeltExpRotation(X: POPFA; Len,Stride,K,Spread: LongInt);
+Var Stride2,I: LongInt; C,S,Gain,G1,G2: Single; Theta: Double;
+Begin
+ If (2*K>=Len) Or (Spread=OPSpreadNone) Then Exit;
+ G1:=Len; G2:=Len+(20-5*Spread)*K; Gain:=G1/G2;
+ Theta:=3.1415926535897931*Double(Gain)*Double(Gain)/4;
+ C:=Cos(Double(Single(Theta))); S:=Sin(Double(Single(Theta)));
+ Stride2:=0;
+ If Len>=Stride Shl 3 Then Begin
+  Stride2:=1;
+  While (Stride2*Stride2+Stride2)*Stride+(Stride Shr 2)<Len Do Inc(Stride2);
+ End;
+ Len:=Len Div Stride;
+ For I:=0 To Stride-1 Do Begin
+  If Stride2<>0 Then OPCeltExpRotImpl(OPFAt(X,I*Len),Len,Stride2,S,C);
+  OPCeltExpRotImpl(OPFAt(X,I*Len),Len,1,C,S);
+ End;
+End;
+
+Function OPCeltCollapseMask(N,B: LongInt): LongWord;
+Var I,J,N0: LongInt; M: LongWord;
+Begin
+ If B<=1 Then Begin OPCeltCollapseMask:=1; Exit; End;
+ N0:=N Div B; M:=0;
+ For I:=0 To B-1 Do
+  For J:=0 To N0-1 Do
+   If OPCQCoeff[I*N0+J]<>0 Then M:=M Or (LongWord(1) Shl I);
+ OPCeltCollapseMask:=M;
+End;
+
+Procedure OPCeltStereoMerge(X,Y: POPFA; Mid: Single; N: LongInt);
+Var I: LongInt; Xp,Side,Mid2,E0,E1,G0,G1,V0,V1: Single;
+Begin
+ Xp:=0; Side:=0;
+ For I:=0 To N-1 Do Begin
+  Xp:=Xp+X^[I]*Y^[I];
+  Side:=Side+Y^[I]*Y^[I];
+ End;
+ Xp:=Xp*Mid;
+ Mid2:=Mid;
+ E0:=Mid2*Mid2+Side-2*Xp;
+ E1:=Mid2*Mid2+Side+2*Xp;
+ If (E0<6E-4) Or (E1<6E-4) Then Begin
+  For I:=0 To N-1 Do Y^[I]:=X^[I];
+  Exit;
+ End;
+ G0:=1.0/Single(Sqrt(Double(E0)));
+ G1:=1.0/Single(Sqrt(Double(E1)));
+ For I:=0 To N-1 Do Begin
+  V0:=Mid*X^[I];
+  V1:=Y^[I];
+  X^[I]:=G0*(V0-V1);
+  Y^[I]:=G1*(V0+V1);
+ End;
+End;
+
+Procedure OPCeltInterleaveHadamard(Tmp,X: POPFA; N0,Stride,Hadamard: LongInt);
+Var I,J,N,Ord0: LongInt;
+Begin
+ N:=N0*Stride;
+ If Hadamard<>0 Then Ord0:=Stride-2 Else Ord0:=30;
+ For I:=0 To Stride-1 Do
+  For J:=0 To N0-1 Do
+   Tmp^[J*Stride+I]:=X^[OPT_celt_hadamard_order[Ord0+I]*N0+J];
+ Move(Tmp^,X^,N*4);
+End;
+
+Procedure OPCeltDeinterleaveHadamard(Tmp,X: POPFA; N0,Stride,Hadamard: LongInt);
+Var I,J,N,Ord0: LongInt;
+Begin
+ N:=N0*Stride;
+ If Hadamard<>0 Then Ord0:=Stride-2 Else Ord0:=30;
+ For I:=0 To Stride-1 Do
+  For J:=0 To N0-1 Do
+   Tmp^[OPT_celt_hadamard_order[Ord0+I]*N0+J]:=X^[J*Stride+I];
+ Move(Tmp^,X^,N*4);
+End;
+
+Procedure OPCeltHaar1(X: POPFA; N0,Stride: LongInt);
+Var I,J: LongInt; X0,X1: Single;
+Const Sqrt12: Single=0.70710678118654752;
+Begin
+ N0:=N0 Shr 1;
+ For I:=0 To Stride-1 Do
+  For J:=0 To N0-1 Do Begin
+   X0:=X^[Stride*(2*J+0)+I];
+   X1:=X^[Stride*(2*J+1)+I];
+   X^[Stride*(2*J+0)+I]:=Single(Double(X0+X1)*0.70710678118654752);
+   X^[Stride*(2*J+1)+I]:=Single(Double(X0-X1)*0.70710678118654752);
+  End;
+End;
+
+Function OPCeltComputeQn(N,B,Offset,PulseCap,Stereo: LongInt): LongInt;
+Var Qn,Qb,N2,T: LongInt;
+Begin
+ N2:=2*N-1;
+ If (Stereo<>0) And (N=2) Then Dec(N2);
+ Qb:=OPMinI(OPMinI(B-PulseCap-(4 Shl 3),(B+N2*Offset) Div N2),8 Shl 3);
+ If Qb<(1 Shl 3 Shr 1) Then Qn:=1
+ Else Begin
+  T:=(OPT_celt_qn_exp2[Qb And 7] Shr (14-(Qb Shr 3)))+1;
+  Qn:=(T Shr 1) Shl 1;
+ End;
+ OPCeltComputeQn:=Qn;
+End;
+
+Function OPCeltPvqU(N,K: LongInt): LongWord;
+Begin
+ If N<K Then OPCeltPvqU:=OPT_celt_pvq_u[OPT_celt_pvq_u_row[N]+K]
+ Else OPCeltPvqU:=OPT_celt_pvq_u[OPT_celt_pvq_u_row[K]+N];
+End;
+
+Function OPCeltPvqV(N,K: LongInt): LongWord;
+Begin
+ OPCeltPvqV:=OPCeltPvqU(N,K)+OPCeltPvqU(N,K+1);
+End;
+
+{ port de celt_cwrsi (adapte de libopus) ; renvoie la norme^2 }
+Function OPCeltCwrsi(N,K: LongInt; I: LongWord; Y: POPLA): Int64;
+Var Norm: Int64; Q,P: LongWord; S,Val,K0,Row,Pos: LongInt;
+Begin
+ Norm:=0; Pos:=0;
+ While N>2 Do Begin
+  If K>=N Then Begin
+   Row:=OPT_celt_pvq_u_row[N];
+   P:=OPT_celt_pvq_u[Row+K+1];
+   If I>=P Then Begin S:=-1; I:=I-P; End Else S:=0;
+   K0:=K;
+   Q:=OPT_celt_pvq_u[Row+N];
+   If Q>I Then Begin
+    K:=N;
+    Repeat
+     Dec(K);
+     P:=OPT_celt_pvq_u[OPT_celt_pvq_u_row[K]+N];
+    Until P<=I;
+   End Else Begin
+    P:=OPT_celt_pvq_u[Row+K];
+    While P>I Do Begin Dec(K); P:=OPT_celt_pvq_u[Row+K]; End;
+   End;
+   I:=I-P;
+   If S<0 Then Val:=-(K0-K) Else Val:=K0-K;
+   Norm:=Norm+Int64(Val)*Val;
+   Y^[Pos]:=Val; Inc(Pos);
+  End Else Begin
+   P:=OPT_celt_pvq_u[OPT_celt_pvq_u_row[K]+N];
+   Q:=OPT_celt_pvq_u[OPT_celt_pvq_u_row[K+1]+N];
+   If (P<=I) And (I<Q) Then Begin
+    I:=I-P;
+    Y^[Pos]:=0; Inc(Pos);
+   End Else Begin
+    If I>=Q Then Begin S:=-1; I:=I-Q; End Else S:=0;
+    K0:=K;
+    Repeat
+     Dec(K);
+     P:=OPT_celt_pvq_u[OPT_celt_pvq_u_row[K]+N];
+    Until P<=I;
+    I:=I-P;
+    If S<0 Then Val:=-(K0-K) Else Val:=K0-K;
+    Norm:=Norm+Int64(Val)*Val;
+    Y^[Pos]:=Val; Inc(Pos);
+   End;
+  End;
+  Dec(N);
+ End;
+ { N = 2 }
+ P:=2*K+1;
+ If I>=P Then Begin S:=-1; I:=I-P; End Else S:=0;
+ K0:=K;
+ K:=LongInt((I+1) Div 2);
+ If K<>0 Then I:=I-LongWord(2*K-1);
+ If S<0 Then Val:=-(K0-K) Else Val:=K0-K;
+ Norm:=Norm+Int64(Val)*Val;
+ Y^[Pos]:=Val; Inc(Pos);
+ { N = 1 }
+ If I<>0 Then S:=-1 Else S:=0;
+ If S<0 Then Val:=-K Else Val:=K;
+ Norm:=Norm+Int64(Val)*Val;
+ Y^[Pos]:=Val;
+ OPCeltCwrsi:=Norm;
+End;
+
+Function OPCeltAlgUnquant(Var Rc: TOPRC; X: POPFA; N,K,Spread,Blocks: LongInt; Gain: Single): LongWord;
+Var Idx: LongWord; Norm: Int64; NormF: Single; I: LongInt;
+Begin
+ Idx:=OPRcDecUint(Rc,OPCeltPvqV(N,K));
+ Norm:=OPCeltCwrsi(N,K,Idx,@OPCQCoeff);
+ NormF:=Norm; Gain:=Gain/Single(Sqrt(Double(NormF)));
+ For I:=0 To N-1 Do X^[I]:=Gain*OPCQCoeff[I];
+ OPCeltExpRotation(X,N,Blocks,K,Spread);
+ OPCeltAlgUnquant:=OPCeltCollapseMask(N,Blocks);
+End;
+
+{ ---- decodage d'une bande (quant_band_template, branche decodeur) ---- }
+Function OPCeltQuantBand(Var Rc: TOPRC; Band: LongInt; X,Y: POPFA; N,B,Blocks: LongInt;
+ Lowband: POPFA; Duration: LongInt; LowbandOut: POPFA; Level: LongInt; Gain: Single;
+ LowbandScratch: POPFA; Fill: LongInt): LongWord;
+Var
+ I,K,Cache,Stereo,Split,IMid,ISide,N_B,N_B0,B0,TimeDivide,Recombine,Inv,TfChange: LongInt;
+ N0: LongInt;
+ Mid,Side: Single;
+ LongBlocks: Boolean;
+ Cm: LongWord;
+ Q,CurrBits: LongInt;
+ CmMask: LongWord;
+ Sign: LongInt;
+ X1,Nn: Single;
+ { split }
+ Qn,PulseCap,Offset,Tell,QAlloc,ITheta,OrigFill,MBits,SBits,Delta,C,Sh,Rebalance: LongInt;
+ X2,Y2: POPFA;
+ Tmp: Single;
+ NextLowband2,NextLowbandOut1: POPFA;
+ NextLevel: LongInt;
+ Cmt: LongWord;
+ SubGain: Single;
+Begin
+ If Y<>Nil Then Stereo:=1 Else Stereo:=0;
+ Split:=Stereo;
+ IMid:=0; ISide:=0;
+ N0:=N;
+ N_B:=N Div Blocks;
+ N_B0:=N_B;
+ B0:=Blocks;
+ TimeDivide:=0; Recombine:=0; Inv:=0;
+ Mid:=0; Side:=0;
+ LongBlocks:=(B0=1);
+ Cm:=0;
+
+ If N=1 Then Begin
+  For I:=0 To Stereo Do Begin
+   Sign:=0;
+   If OPCRemaining2>=1 Shl 3 Then Begin
+    Sign:=OPRcGetRaw(Rc,1);
+    Dec(OPCRemaining2,1 Shl 3);
+   End;
+   If I=0 Then X^[0]:=1.0-2.0*Sign Else Y^[0]:=1.0-2.0*Sign;
+  End;
+  If LowbandOut<>Nil Then LowbandOut^[0]:=X^[0];
+  OPCeltQuantBand:=1;
+  Exit;
+ End;
+
+ If (Stereo=0) And (Level=0) Then Begin
+  TfChange:=OPCTfChange[Band];
+  If TfChange>0 Then Recombine:=TfChange;
+  { Band recombining to increase frequency resolution }
+  If (Lowband<>Nil) And ((Recombine<>0) Or (((N_B And 1)=0) And (TfChange<0)) Or (B0>1)) Then Begin
+   For I:=0 To N-1 Do LowbandScratch^[I]:=Lowband^[I];
+   Lowband:=LowbandScratch;
+  End;
+  For K:=0 To Recombine-1 Do Begin
+   If Lowband<>Nil Then OPCeltHaar1(Lowband,N Shr K,1 Shl K);
+   Fill:=OPT_celt_bit_interleave[Fill And $F] Or (OPT_celt_bit_interleave[Fill Shr 4] Shl 2);
+  End;
+  Blocks:=Blocks Shr Recombine;
+  N_B:=N_B Shl Recombine;
+  { Increasing the time resolution }
+  While ((N_B And 1)=0) And (TfChange<0) Do Begin
+   If Lowband<>Nil Then OPCeltHaar1(Lowband,N_B,Blocks);
+   Fill:=Fill Or (Fill Shl Blocks);
+   Blocks:=Blocks Shl 1;
+   N_B:=N_B Shr 1;
+   Inc(TimeDivide);
+   Inc(TfChange);
+  End;
+  B0:=Blocks;
+  N_B0:=N_B;
+  { Reorganize the samples in time order instead of frequency order }
+  If (B0>1) And (Lowband<>Nil) Then
+   OPCeltDeinterleaveHadamard(@OPCHadamardTmp,Lowband,N_B Shr Recombine,B0 Shl Recombine,Ord(LongBlocks));
+ End;
+
+ { If we need 1.5 more bit than we can produce, split the band in two. }
+ Cache:=OPT_celt_cache_index[(Duration+1)*OPCeltMaxBands+Band];
+ If (Stereo=0) And (Duration>=0) And (B>OPT_celt_cache_bits[Cache+OPT_celt_cache_bits[Cache]]+12) And (N>2) Then Begin
+  N:=N Shr 1;
+  Y:=OPFAt(X,N);
+  Split:=1;
+  Dec(Duration);
+  If Blocks=1 Then Fill:=(Fill And 1) Or (Fill Shl 1);
+  Blocks:=(Blocks+1) Shr 1;
+ End;
+
+ If Split<>0 Then Begin
+  PulseCap:=OPT_celt_log_freq_range[Band]+Duration*8;
+  If (Stereo<>0) And (N=2) Then Offset:=(PulseCap Shr 1)-OPCeltQthetaOffsetTwoPhase
+  Else Offset:=(PulseCap Shr 1)-OPCeltQthetaOffset;
+  If (Stereo<>0) And (Band>=OPCIntensityStereo) Then Qn:=1
+  Else Qn:=OPCeltComputeQn(N,B,Offset,PulseCap,Stereo);
+  Tell:=OPRcTellFrac(Rc);
+  ITheta:=0;
+  If Qn<>1 Then Begin
+   If (Stereo<>0) And (N>2) Then ITheta:=OPRcDecUintStep(Rc,Qn Div 2)
+   Else If (Stereo<>0) Or (B0>1) Then ITheta:=LongInt(OPRcDecUint(Rc,Qn+1))
+   Else ITheta:=OPRcDecUintTri(Rc,Qn);
+   ITheta:=ITheta*16384 Div Qn;
+  End Else If Stereo<>0 Then Begin
+   If (B>2 Shl 3) And (OPCRemaining2>2 Shl 3) Then Inv:=OPRcDecLog(Rc,2) Else Inv:=0;
+   If OPCApplyPhaseInv=0 Then Inv:=0;
+   ITheta:=0;
+  End;
+  QAlloc:=OPRcTellFrac(Rc)-Tell;
+  Dec(B,QAlloc);
+
+  OrigFill:=Fill;
+  If ITheta=0 Then Begin
+   IMid:=32767; ISide:=0;
+   Fill:=Fill And ((1 Shl Blocks)-1);
+   Delta:=-16384;
+  End Else If ITheta=16384 Then Begin
+   IMid:=0; ISide:=32767;
+   Fill:=Fill And (((1 Shl Blocks)-1) Shl Blocks);
+   Delta:=16384;
+  End Else Begin
+   IMid:=OPCeltCos(ITheta);
+   ISide:=OPCeltCos(16384-ITheta);
+   Delta:=OPRound16((N-1) Shl 7,OPCeltLog2Tan(ISide,IMid));
+  End;
+
+  Mid:=IMid/32768.0;
+  Side:=ISide/32768.0;
+
+  If (N=2) And (Stereo<>0) Then Begin
+   MBits:=B;
+   If (ITheta<>0) And (ITheta<>16384) Then SBits:=1 Shl 3 Else SBits:=0;
+   Dec(MBits,SBits);
+   If ITheta>8192 Then C:=1 Else C:=0;
+   Dec(OPCRemaining2,QAlloc+SBits);
+   If C<>0 Then Begin X2:=Y; Y2:=X; End Else Begin X2:=X; Y2:=Y; End;
+   Sign:=0;
+   If SBits<>0 Then Sign:=OPRcGetRaw(Rc,1);
+   Sign:=1-2*Sign;
+   Cm:=OPCeltQuantBand(Rc,Band,X2,Nil,N,MBits,Blocks,Lowband,Duration,LowbandOut,Level,Gain,LowbandScratch,OrigFill);
+   Y2^[0]:=-Sign*X2^[1];
+   Y2^[1]:=Sign*X2^[0];
+   X^[0]:=X^[0]*Mid;
+   X^[1]:=X^[1]*Mid;
+   Y^[0]:=Y^[0]*Side;
+   Y^[1]:=Y^[1]*Side;
+   Tmp:=X^[0];
+   X^[0]:=Tmp-Y^[0];
+   Y^[0]:=Tmp+Y^[0];
+   Tmp:=X^[1];
+   X^[1]:=Tmp-Y^[1];
+   Y^[1]:=Tmp+Y^[1];
+  End Else Begin
+   NextLowband2:=Nil; NextLowbandOut1:=Nil; NextLevel:=0;
+   If (B0>1) And (Stereo=0) And ((ITheta And $3FFF)<>0) Then Begin
+    If ITheta>8192 Then Delta:=Delta-OPSar(Delta,4-Duration)
+    Else Delta:=OPMinI(0,Delta+OPSar(N Shl 3,5-Duration));
+   End;
+   MBits:=OPClipI((B-Delta) Div 2,0,B);
+   SBits:=B-MBits;
+   Dec(OPCRemaining2,QAlloc);
+   If (Lowband<>Nil) And (Stereo=0) Then NextLowband2:=OPFAt(Lowband,N);
+   If Stereo<>0 Then NextLowbandOut1:=LowbandOut Else NextLevel:=Level+1;
+   If Stereo<>0 Then Sh:=0 Else Sh:=B0 Shr 1;
+   Rebalance:=OPCRemaining2;
+   If MBits>=SBits Then Begin
+    If Stereo<>0 Then SubGain:=1.0 Else SubGain:=Gain*Mid;
+    Cm:=OPCeltQuantBand(Rc,Band,X,Nil,N,MBits,Blocks,Lowband,Duration,NextLowbandOut1,NextLevel,SubGain,LowbandScratch,Fill);
+    Rebalance:=MBits-(Rebalance-OPCRemaining2);
+    If (Rebalance>3 Shl 3) And (ITheta<>0) Then Inc(SBits,Rebalance-(3 Shl 3));
+    Cmt:=OPCeltQuantBand(Rc,Band,Y,Nil,N,SBits,Blocks,NextLowband2,Duration,Nil,NextLevel,Gain*Side,Nil,Fill Shr Blocks);
+    Cm:=Cm Or (Cmt Shl Sh);
+   End Else Begin
+    Cm:=OPCeltQuantBand(Rc,Band,Y,Nil,N,SBits,Blocks,NextLowband2,Duration,Nil,NextLevel,Gain*Side,Nil,Fill Shr Blocks);
+    Cm:=Cm Shl Sh;
+    Rebalance:=SBits-(Rebalance-OPCRemaining2);
+    If (Rebalance>3 Shl 3) And (ITheta<>16384) Then Inc(MBits,Rebalance-(3 Shl 3));
+    If Stereo<>0 Then SubGain:=1.0 Else SubGain:=Gain*Mid;
+    Cm:=Cm Or OPCeltQuantBand(Rc,Band,X,Nil,N,MBits,Blocks,Lowband,Duration,NextLowbandOut1,NextLevel,SubGain,LowbandScratch,Fill);
+   End;
+  End;
+ End Else Begin
+  { basic no-split case }
+  Q:=OPCeltBits2Pulses(Cache,B);
+  CurrBits:=OPCeltPulses2Bits(Cache,Q);
+  Dec(OPCRemaining2,CurrBits);
+  While (OPCRemaining2<0) And (Q>0) Do Begin
+   Inc(OPCRemaining2,CurrBits);
+   Dec(Q);
+   CurrBits:=OPCeltPulses2Bits(Cache,Q);
+   Dec(OPCRemaining2,CurrBits);
+  End;
+  If Q<>0 Then Begin
+   If Q<8 Then K:=Q Else K:=(8+(Q And 7)) Shl ((Q Shr 3)-1);
+   Cm:=OPCeltAlgUnquant(Rc,X,N,K,OPCSpread,Blocks,Gain);
+  End Else Begin
+   CmMask:=(LongWord(1) Shl Blocks)-1;
+   Fill:=LongInt(LongWord(Fill) And CmMask);
+   If Fill<>0 Then Begin
+    If Lowband=Nil Then Begin
+     For I:=0 To N-1 Do X^[I]:=OPSar(LongInt(OPCeltRng),20);
+     Cm:=CmMask;
+    End Else Begin
+     For I:=0 To N-1 Do Begin
+      If (OPCeltRng And $8000)<>0 Then X1:=1.0/256 Else X1:=-1.0/256;
+      X^[I]:=Lowband^[I]+X1;
+     End;
+     Cm:=LongWord(Fill);
+    End;
+    OPCeltRenormalize(X,N,Gain);
+   End Else FillChar(X^,N*4,0);
+  End;
+ End;
+
+ If Stereo<>0 Then Begin
+  If N>2 Then OPCeltStereoMerge(X,Y,Mid,N);
+  If Inv<>0 Then
+   For I:=0 To N-1 Do Y^[I]:=-Y^[I];
+ End Else If Level=0 Then Begin
+  If B0>1 Then
+   OPCeltInterleaveHadamard(@OPCHadamardTmp,X,N_B Shr Recombine,B0 Shl Recombine,Ord(LongBlocks));
+  N_B:=N_B0;
+  Blocks:=B0;
+  For K:=0 To TimeDivide-1 Do Begin
+   Blocks:=Blocks Shr 1;
+   N_B:=N_B Shl 1;
+   Cm:=Cm Or (Cm Shr Blocks);
+   OPCeltHaar1(X,N_B,Blocks);
+  End;
+  For K:=0 To Recombine-1 Do Begin
+   Cm:=OPT_celt_bit_deinterleave[Cm And $FF];
+   OPCeltHaar1(X,N0 Shr K,1 Shl K);
+  End;
+  Blocks:=Blocks Shl Recombine;
+  If LowbandOut<>Nil Then Begin
+   Nn:=Sqrt(N0*1.0);
+   For I:=0 To N0-1 Do LowbandOut^[I]:=Nn*X^[I];
+  End;
+  If Blocks>=32 Then Cm:=Cm Else Cm:=Cm And ((LongWord(1) Shl Blocks)-1);
+ End;
+ OPCeltQuantBand:=Cm;
+End;
+
+{ ---- ff_celt_quant_bands ---- }
+Procedure OPCeltQuantBands(Var Rc: TOPRC);
+Var
+ TotalBits,I,J,LowbandOffset,BandOffset,BandSize,Consumed,EffectiveLowband,B,CurrBalance,Count: LongInt;
+ UpdateLowband: Boolean;
+ Cm0,Cm1: LongWord;
+ X,Y,NormLoc1,NormLoc2: POPFA;
+ FoldStart,FoldEnd: LongInt;
+ CmI: LongWord;
+Begin
+ FillChar(OPCNorm,SizeOf(OPCNorm),0);
+ TotalBits:=(OPCFrameBits Shl 3)-OPCAnticollapseNeeded;
+ UpdateLowband:=True;
+ LowbandOffset:=0;
+ For I:=OPCStartBand To OPCEndBand-1 Do Begin
+  CmI:=(LongWord(1) Shl OPCBlocks)-1;
+  Cm0:=CmI; Cm1:=CmI;
+  BandOffset:=OPT_celt_freq_bands[I] Shl OPCSize;
+  BandSize:=OPT_celt_freq_range[I] Shl OPCSize;
+  X:=OPFAt(@OPCBlock[0].Coeffs,BandOffset);
+  If OPCChannels=2 Then Y:=OPFAt(@OPCBlock[1].Coeffs,BandOffset) Else Y:=Nil;
+  Consumed:=OPRcTellFrac(Rc);
+  EffectiveLowband:=-1;
+  B:=0;
+  If I<>OPCStartBand Then Dec(OPCRemaining,Consumed);
+  OPCRemaining2:=TotalBits-Consumed-1;
+  If I<=OPCCodedBands-1 Then Begin
+   CurrBalance:=OPCRemaining Div OPMinI(3,OPCCodedBands-I);
+   B:=OPClipU(OPMinI(OPCRemaining2+1,OPCPulses[I]+CurrBalance),14);
+  End;
+  If ((OPT_celt_freq_bands[I]-OPT_celt_freq_range[I]>=OPT_celt_freq_bands[OPCStartBand]) Or
+      (I=OPCStartBand+1)) And (UpdateLowband Or (LowbandOffset=0)) Then LowbandOffset:=I;
+  If I=OPCStartBand+1 Then Begin
+   { Special Hybrid Folding (RFC 8251 section 9) }
+   Count:=(OPT_celt_freq_range[I]-OPT_celt_freq_range[I-1]) Shl OPCSize;
+   Move(OPCNorm[BandOffset-Count],OPCNorm[BandOffset],Count*4);
+   If OPCChannels=2 Then Move(OPCNorm[800+BandOffset-Count],OPCNorm[800+BandOffset],Count*4);
+  End;
+  If (LowbandOffset<>0) And ((OPCSpread<>OPSpreadAggressive) Or (OPCBlocks>1) Or (OPCTfChange[I]<0)) Then Begin
+   EffectiveLowband:=OPMaxI(OPT_celt_freq_bands[OPCStartBand],OPT_celt_freq_bands[LowbandOffset]-OPT_celt_freq_range[I]);
+   FoldStart:=LowbandOffset;
+   Repeat Dec(FoldStart); Until OPT_celt_freq_bands[FoldStart]<=EffectiveLowband;
+   FoldEnd:=LowbandOffset-1;
+   Repeat Inc(FoldEnd); Until (FoldEnd>=I) Or (OPT_celt_freq_bands[FoldEnd]>=EffectiveLowband+OPT_celt_freq_range[I]);
+   Cm0:=0; Cm1:=0;
+   For J:=FoldStart To FoldEnd-1 Do Begin
+    Cm0:=Cm0 Or OPCBlock[0].CollapseMasks[J];
+    Cm1:=Cm1 Or OPCBlock[OPCChannels-1].CollapseMasks[J];
+   End;
+  End;
+  If (OPCDualStereo<>0) And (I=OPCIntensityStereo) Then Begin
+   OPCDualStereo:=0;
+   For J:=OPT_celt_freq_bands[OPCStartBand] Shl OPCSize To BandOffset-1 Do
+    OPCNorm[J]:=(OPCNorm[J]+OPCNorm[800+J])/2;
+  End;
+  If EffectiveLowband<>-1 Then Begin
+   NormLoc1:=OPFAt(@OPCNorm,EffectiveLowband Shl OPCSize);
+   NormLoc2:=OPFAt(@OPCNorm,800+(EffectiveLowband Shl OPCSize));
+  End Else Begin NormLoc1:=Nil; NormLoc2:=Nil; End;
+  If OPCDualStereo<>0 Then Begin
+   Cm0:=OPCeltQuantBand(Rc,I,X,Nil,BandSize,B Shr 1,OPCBlocks,NormLoc1,OPCSize,
+        OPFAt(@OPCNorm,BandOffset),0,1.0,@OPCScratch,Cm0);
+   Cm1:=OPCeltQuantBand(Rc,I,Y,Nil,BandSize,B Shr 1,OPCBlocks,NormLoc2,OPCSize,
+        OPFAt(@OPCNorm,800+BandOffset),0,1.0,@OPCScratch,Cm1);
+  End Else Begin
+   Cm0:=OPCeltQuantBand(Rc,I,X,Y,BandSize,B,OPCBlocks,NormLoc1,OPCSize,
+        OPFAt(@OPCNorm,BandOffset),0,1.0,@OPCScratch,Cm0 Or Cm1);
+   Cm1:=Cm0;
+  End;
+  OPCBlock[0].CollapseMasks[I]:=Byte(Cm0);
+  OPCBlock[OPCChannels-1].CollapseMasks[I]:=Byte(Cm1);
+  Inc(OPCRemaining,OPCPulses[I]+Consumed);
+  UpdateLowband:=(B>(BandSize Shl 3));
+ End;
+End;
+
+{ ---- allocation des bits (ff_celt_bitalloc, branche decodeur) ---- }
+Function OPCeltNormC(Bits: LongInt): LongInt;
+Begin
+ OPCeltNormC:=((Bits Shl (OPCChannels-1)) Shl OPCSize) Shr 2;
+End;
+
+Procedure OPCeltBitAlloc(Var Rc: TOPRC);
+Var
+ I,J,Low,High,Total,Done,BandBits,Remaining,TBits8ths,SkipStartBand,SkipBit,
+ IntensityStereoBit,DualStereoBit,DynAlloc,ExtraBits,Quanta,BDynAlloc,Trim,Band,
+ Duration,Scale,Center,Allocation,DoNotSkip,N,PrevExtra,Dof,Temp,FineBitsV,MaxBits,
+ Offset,FineExtra,Bits: LongInt;
+ Boost,TrimOffset,Threshold,Bits1,Bits2: Array[0..OPCeltMaxBands-1] Of LongInt;
+ IsBoost: LongInt;
+Begin
+ SkipStartBand:=OPCStartBand; SkipBit:=0; IntensityStereoBit:=0; DualStereoBit:=0;
+ DynAlloc:=6; ExtraBits:=0;
+ FillChar(Boost,SizeOf(Boost),0);
+ { Spread }
+ If OPRcTell(Rc)+4<=OPCFrameBits Then OPCSpread:=OPRcDecCdf(Rc,@OPT_celt_model_spread)
+ Else OPCSpread:=OPSpreadNormal;
+ { static allocation caps }
+ For I:=0 To OPCeltMaxBands-1 Do
+  OPCCaps[I]:=OPCeltNormC((OPT_celt_static_caps[OPCSize,OPCChannels-1,I]+64)*OPT_celt_freq_range[I]);
+ { band boosts }
+ TBits8ths:=OPCFrameBits Shl 3;
+ For I:=OPCStartBand To OPCEndBand-1 Do Begin
+  Quanta:=(OPT_celt_freq_range[I] Shl (OPCChannels-1)) Shl OPCSize;
+  BDynAlloc:=DynAlloc;
+  Quanta:=OPMinI(Quanta Shl 3,OPMaxI(6 Shl 3,Quanta));
+  While (OPRcTellFrac(Rc)+(BDynAlloc Shl 3)<TBits8ths) And (Boost[I]<OPCCaps[I]) Do Begin
+   IsBoost:=OPRcDecLog(Rc,BDynAlloc);
+   If IsBoost=0 Then Break;
+   Inc(Boost[I],Quanta);
+   Dec(TBits8ths,Quanta);
+   BDynAlloc:=1;
+  End;
+  If Boost[I]<>0 Then DynAlloc:=OPMaxI(DynAlloc-1,2);
+ End;
+ { allocation trim }
+ OPCAllocTrim:=5;
+ If OPRcTellFrac(Rc)+(6 Shl 3)<=TBits8ths Then OPCAllocTrim:=OPRcDecCdf(Rc,@OPT_celt_model_alloc_trim);
+ { anti-collapse bit reservation }
+ TBits8ths:=(OPCFrameBits Shl 3)-OPRcTellFrac(Rc)-1;
+ OPCAnticollapseNeeded:=0;
+ If (OPCTransient<>0) And (OPCSize>=2) And (TBits8ths>=((OPCSize+2) Shl 3)) Then OPCAnticollapseNeeded:=1 Shl 3;
+ Dec(TBits8ths,OPCAnticollapseNeeded);
+ { band skip bit reservation }
+ If TBits8ths>=1 Shl 3 Then SkipBit:=1 Shl 3;
+ Dec(TBits8ths,SkipBit);
+ { intensity/dual stereo bit reservation }
+ If OPCChannels=2 Then Begin
+  IntensityStereoBit:=OPT_celt_log2_frac[OPCEndBand-OPCStartBand];
+  If IntensityStereoBit<=TBits8ths Then Begin
+   Dec(TBits8ths,IntensityStereoBit);
+   If TBits8ths>=1 Shl 3 Then Begin
+    DualStereoBit:=1 Shl 3;
+    Dec(TBits8ths,1 Shl 3);
+   End;
+  End Else IntensityStereoBit:=0;
+ End;
+ { trim offsets }
+ For I:=OPCStartBand To OPCEndBand-1 Do Begin
+  Trim:=OPCAllocTrim-5-OPCSize;
+  Band:=OPT_celt_freq_range[I]*(OPCEndBand-I-1);
+  Duration:=OPCSize+3;
+  Scale:=Duration+OPCChannels-1;
+  Threshold[I]:=OPMaxI(((3*OPT_celt_freq_range[I]) Shl Duration) Shr 4,OPCChannels Shl 3);
+  TrimOffset[I]:=OPSar(Trim*(Band Shl Scale),6);
+  If (OPT_celt_freq_range[I] Shl OPCSize)=1 Then Dec(TrimOffset[I],OPCChannels Shl 3);
+ End;
+ { bisection }
+ Low:=1; High:=OPCeltVectors-1;
+ While Low<=High Do Begin
+  Center:=(Low+High) Shr 1;
+  Done:=0; Total:=0;
+  For I:=OPCEndBand-1 DownTo OPCStartBand Do Begin
+   BandBits:=OPCeltNormC(OPT_celt_freq_range[I]*OPT_celt_static_alloc[Center,I]);
+   If BandBits<>0 Then BandBits:=OPMaxI(BandBits+TrimOffset[I],0);
+   Inc(BandBits,Boost[I]);
+   If (BandBits>=Threshold[I]) Or (Done<>0) Then Begin
+    Done:=1;
+    Inc(Total,OPMinI(BandBits,OPCCaps[I]));
+   End Else If BandBits>=OPCChannels Shl 3 Then Inc(Total,OPCChannels Shl 3);
+  End;
+  If Total>TBits8ths Then High:=Center-1 Else Low:=Center+1;
+ End;
+ High:=Low; Dec(Low);
+ For I:=OPCStartBand To OPCEndBand-1 Do Begin
+  Bits1[I]:=OPCeltNormC(OPT_celt_freq_range[I]*OPT_celt_static_alloc[Low,I]);
+  If High>=OPCeltVectors Then Bits2[I]:=OPCCaps[I]
+  Else Bits2[I]:=OPCeltNormC(OPT_celt_freq_range[I]*OPT_celt_static_alloc[High,I]);
+  If Bits1[I]<>0 Then Bits1[I]:=OPMaxI(Bits1[I]+TrimOffset[I],0);
+  If Bits2[I]<>0 Then Bits2[I]:=OPMaxI(Bits2[I]+TrimOffset[I],0);
+  If Low<>0 Then Inc(Bits1[I],Boost[I]);
+  Inc(Bits2[I],Boost[I]);
+  If Boost[I]<>0 Then SkipStartBand:=I;
+  Bits2[I]:=OPMaxI(Bits2[I]-Bits1[I],0);
+ End;
+ Low:=0; High:=1 Shl OPCeltAllocSteps;
+ For I:=0 To OPCeltAllocSteps-1 Do Begin
+  Center:=(Low+High) Shr 1;
+  Done:=0; Total:=0;
+  For J:=OPCEndBand-1 DownTo OPCStartBand Do Begin
+   BandBits:=Bits1[J]+((Center*Bits2[J]) Shr OPCeltAllocSteps);
+   If (BandBits>=Threshold[J]) Or (Done<>0) Then Begin
+    Done:=1;
+    Inc(Total,OPMinI(BandBits,OPCCaps[J]));
+   End Else If BandBits>=OPCChannels Shl 3 Then Inc(Total,OPCChannels Shl 3);
+  End;
+  If Total>TBits8ths Then High:=Center Else Low:=Center;
+ End;
+ Done:=0; Total:=0;
+ For I:=OPCEndBand-1 DownTo OPCStartBand Do Begin
+  BandBits:=Bits1[I]+((Low*Bits2[I]) Shr OPCeltAllocSteps);
+  If (BandBits>=Threshold[I]) Or (Done<>0) Then Done:=1
+  Else Begin
+   If BandBits>=OPCChannels Shl 3 Then BandBits:=OPCChannels Shl 3 Else BandBits:=0;
+  End;
+  BandBits:=OPMinI(BandBits,OPCCaps[I]);
+  OPCPulses[I]:=BandBits;
+  Inc(Total,BandBits);
+ End;
+ { band skipping }
+ OPCCodedBands:=OPCEndBand;
+ While True Do Begin
+  J:=OPCCodedBands-1;
+  If J=SkipStartBand Then Begin
+   Inc(TBits8ths,SkipBit);
+   Break;
+  End;
+  Remaining:=TBits8ths-Total;
+  BandBits:=Remaining Div (OPT_celt_freq_bands[J+1]-OPT_celt_freq_bands[OPCStartBand]);
+  Dec(Remaining,BandBits*(OPT_celt_freq_bands[J+1]-OPT_celt_freq_bands[OPCStartBand]));
+  Allocation:=OPCPulses[J]+BandBits*OPT_celt_freq_range[J];
+  Inc(Allocation,OPMaxI(Remaining-(OPT_celt_freq_bands[J]-OPT_celt_freq_bands[OPCStartBand]),0));
+  If Allocation>=OPMaxI(Threshold[J],(OPCChannels+1) Shl 3) Then Begin
+   DoNotSkip:=OPRcDecLog(Rc,1);
+   If DoNotSkip<>0 Then Break;
+   Inc(Total,1 Shl 3);
+   Dec(Allocation,1 Shl 3);
+  End;
+  Dec(Total,OPCPulses[J]);
+  If IntensityStereoBit<>0 Then Begin
+   Dec(Total,IntensityStereoBit);
+   IntensityStereoBit:=OPT_celt_log2_frac[J-OPCStartBand];
+   Inc(Total,IntensityStereoBit);
+  End;
+  If Allocation>=OPCChannels Shl 3 Then OPCPulses[J]:=OPCChannels Shl 3 Else OPCPulses[J]:=0;
+  Inc(Total,OPCPulses[J]);
+  Dec(OPCCodedBands);
+ End;
+ { IS start band }
+ OPCIntensityStereo:=0; OPCDualStereo:=0;
+ If IntensityStereoBit<>0 Then
+  OPCIntensityStereo:=OPCStartBand+LongInt(OPRcDecUint(Rc,OPCCodedBands+1-OPCStartBand));
+ { DS flag }
+ If OPCIntensityStereo<=OPCStartBand Then Inc(TBits8ths,DualStereoBit)
+ Else If DualStereoBit<>0 Then OPCDualStereo:=OPRcDecLog(Rc,1);
+ { supply the remaining bits in this frame to lower bands }
+ Remaining:=TBits8ths-Total;
+ BandBits:=Remaining Div (OPT_celt_freq_bands[OPCCodedBands]-OPT_celt_freq_bands[OPCStartBand]);
+ Dec(Remaining,BandBits*(OPT_celt_freq_bands[OPCCodedBands]-OPT_celt_freq_bands[OPCStartBand]));
+ For I:=OPCStartBand To OPCCodedBands-1 Do Begin
+  Bits:=OPMinI(Remaining,OPT_celt_freq_range[I]);
+  Inc(OPCPulses[I],Bits+BandBits*OPT_celt_freq_range[I]);
+  Dec(Remaining,Bits);
+ End;
+ { finally determine the allocation }
+ I:=OPCStartBand;
+ While I<OPCCodedBands Do Begin
+  N:=OPT_celt_freq_range[I] Shl OPCSize;
+  PrevExtra:=ExtraBits;
+  Inc(OPCPulses[I],ExtraBits);
+  If N>1 Then Begin
+   ExtraBits:=OPMaxI(OPCPulses[I]-OPCCaps[I],0);
+   Dec(OPCPulses[I],ExtraBits);
+   Dof:=N*OPCChannels;
+   If (OPCChannels=2) And (N>2) And (OPCDualStereo=0) And (I<OPCIntensityStereo) Then Inc(Dof);
+   Temp:=Dof*(OPT_celt_log_freq_range[I]+(OPCSize Shl 3));
+   Offset:=(Temp Shr 1)-Dof*OPCeltFineOffset;
+   If N=2 Then Inc(Offset,Dof Shl 1);
+   If OPCPulses[I]+Offset<2*(Dof Shl 3) Then Inc(Offset,Temp Shr 2)
+   Else If OPCPulses[I]+Offset<3*(Dof Shl 3) Then Inc(Offset,Temp Shr 3);
+   FineBitsV:=(OPCPulses[I]+Offset+(Dof Shl 2)) Div (Dof Shl 3);
+   MaxBits:=OPMinI((OPCPulses[I] Shr 3) Shr (OPCChannels-1),OPCeltMaxFineBits);
+   MaxBits:=OPMaxI(MaxBits,0);
+   OPCFineBits[I]:=OPClipI(FineBitsV,0,MaxBits);
+   If OPCFineBits[I]*(Dof Shl 3)>=OPCPulses[I]+Offset Then OPCFinePriority[I]:=1 Else OPCFinePriority[I]:=0;
+   Dec(OPCPulses[I],(OPCFineBits[I] Shl (OPCChannels-1)) Shl 3);
+  End Else Begin
+   ExtraBits:=OPMaxI(OPCPulses[I]-(OPCChannels Shl 3),0);
+   Dec(OPCPulses[I],ExtraBits);
+   OPCFineBits[I]:=0;
+   OPCFinePriority[I]:=1;
+  End;
+  If ExtraBits>0 Then Begin
+   FineExtra:=OPMinI(ExtraBits Shr (OPCChannels+2),OPCeltMaxFineBits-OPCFineBits[I]);
+   Inc(OPCFineBits[I],FineExtra);
+   FineExtra:=FineExtra Shl (OPCChannels+2);
+   If FineExtra>=ExtraBits-PrevExtra Then OPCFinePriority[I]:=1 Else OPCFinePriority[I]:=0;
+   Dec(ExtraBits,FineExtra);
+  End;
+  Inc(I);
+ End;
+ OPCRemaining:=ExtraBits;
+ { skipped bands dedicate all of their bits for fine energy }
+ While I<OPCEndBand Do Begin
+  OPCFineBits[I]:=(OPCPulses[I] Shr (OPCChannels-1)) Shr 3;
+  OPCPulses[I]:=0;
+  If OPCFineBits[I]<1 Then OPCFinePriority[I]:=1 Else OPCFinePriority[I]:=0;
+  Inc(I);
+ End;
+End;
+
+
+{ ---- IMDCT (equivalent a av_tx_init(AV_TX_FLOAT_MDCT, inverse, len=120<<i, scale=-1/32768)) ----
+  La sortie est le miroir de la DCT-IV des coefficients : out[n] = scale*DCTIV(X)[L-1-n].
+  La DCT-IV est calculee avec une FFT complexe de taille L/2 (radix 2, 3 et 5), en double. }
+Procedure OPImdctInit;
+Var I,M,K: LongInt; A: Double;
+Begin
+ For I:=0 To 3 Do Begin
+  M:=60 Shl I;
+  For K:=0 To M-1 Do Begin
+   A:=-2*3.1415926535897931*K/M;
+   OPCTwRe[I,K]:=Cos(A); OPCTwIm[I,K]:=Sin(A);
+   A:=-3.1415926535897931*(K+0.25)/(2*M);
+   OPCPreRe[I,K]:=Cos(A); OPCPreIm[I,K]:=Sin(A);
+   A:=-3.1415926535897931*K/(2*M);
+   OPCPostRe[I,K]:=Cos(A); OPCPostIm[I,K]:=Sin(A);
+  End;
+ End;
+ OPCImdctInit:=True;
+End;
+
+Var
+ OPFftAr,OPFftAi,OPFftBr,OPFftBi: Array[0..479] Of Double;
+
+{ FFT recursive en place de taille N (facteurs 2,3,5) : lit In[Off+k*Stride], ecrit Out[Pos..Pos+N-1] }
+Procedure OPFft(Idx,N,Stride,Off,Pos,Top: LongInt);
+Var P,M,R,K,Q,TwStep,TwIdx: LongInt;
+    Tr,Ti,Wr,Wi: Array[0..4] Of Double;
+    Sr,Si,Cr,Ci: Double;
+Begin
+ If N=1 Then Begin
+  OPFftBr[Pos]:=OPFftAr[Off]; OPFftBi[Pos]:=OPFftAi[Off]; Exit;
+ End;
+ If (N Mod 2)=0 Then P:=2 Else If (N Mod 3)=0 Then P:=3 Else P:=5;
+ M:=N Div P;
+ For R:=0 To P-1 Do OPFft(Idx,M,Stride*P,Off+R*Stride,Pos+R*M,Top);
+ TwStep:=Top Div N;
+ For K:=0 To M-1 Do Begin
+  For R:=0 To P-1 Do Begin
+   TwIdx:=(R*K*TwStep) Mod Top;
+   Wr[R]:=OPCTwRe[Idx,TwIdx]; Wi[R]:=OPCTwIm[Idx,TwIdx];
+   Tr[R]:=OPFftBr[Pos+R*M+K]*Wr[R]-OPFftBi[Pos+R*M+K]*Wi[R];
+   Ti[R]:=OPFftBr[Pos+R*M+K]*Wi[R]+OPFftBi[Pos+R*M+K]*Wr[R];
+  End;
+  For Q:=0 To P-1 Do Begin
+   Sr:=Tr[0]; Si:=Ti[0];
+   For R:=1 To P-1 Do Begin
+    TwIdx:=(R*Q*(Top Div P)) Mod Top;     { W_p^(rq) = W_Top^(rq*Top/p) }
+    Cr:=OPCTwRe[Idx,TwIdx]; Ci:=OPCTwIm[Idx,TwIdx];
+    Sr:=Sr+Tr[R]*Cr-Ti[R]*Ci;
+    Si:=Si+Tr[R]*Ci+Ti[R]*Cr;
+   End;
+   OPFftBr[Pos+Q*M+K]:=Sr; OPFftBi[Pos+Q*M+K]:=Si;
+  End;
+ End;
+End;
+
+{ Dst[0..L-1] := -1/32768 * miroir(DCT-IV(Src[j*Stride], j=0..L-1)), L=120<<Idx }
+Procedure OPImdct(Idx: LongInt; Src: POPFA; Stride: LongInt; Dst: POPFA);
+Var L,M,K: LongInt; Ar,Ai: Double; Scale: Double;
+Begin
+ If Not OPCImdctInit Then OPImdctInit;
+ L:=120 Shl Idx; M:=L Shr 1;
+ For K:=0 To M-1 Do Begin
+  Ar:=Src^[(2*K)*Stride]; Ai:=Src^[(L-1-2*K)*Stride];
+  OPFftAr[K]:=Ar*OPCPreRe[Idx,K]-Ai*OPCPreIm[Idx,K];
+  OPFftAi[K]:=Ar*OPCPreIm[Idx,K]+Ai*OPCPreRe[Idx,K];
+ End;
+ OPFft(Idx,M,1,0,0,M);
+ Scale:=-1.0/32768;
+ For K:=0 To M-1 Do Begin
+  Ar:=OPFftBr[K]*OPCPostRe[Idx,K]-OPFftBi[K]*OPCPostIm[Idx,K];
+  Ai:=OPFftBr[K]*OPCPostIm[Idx,K]+OPFftBi[K]*OPCPostRe[Idx,K];
+  { c[2K]=Re, c[L-1-2K]=-Im ; out[n]=Scale*c[L-1-n] }
+  Dst^[L-1-2*K]:=Scale*Ar;
+  Dst^[2*K]:=-Scale*Ai;
+ End;
+End;
+
+{ ---- energie, tf, postfiltre, anti-collapse ---- }
+Procedure OPCeltCoarseEnergy(Var Rc: TOPRC);
+Var I,J,Avail,K,X,Dist: LongInt; Prev: Array[0..1] Of Single; Alpha,Beta,Value: Single;
+    E: Single;
+Begin
+ Prev[0]:=0; Prev[1]:=0;
+ Alpha:=OPT_celt_alpha_coef[OPCSize];
+ Beta:=OPT_celt_beta_coef[OPCSize];
+ Dist:=0;
+ If (OPRcTell(Rc)+3<=OPCFrameBits) And (OPRcDecLog(Rc,3)<>0) Then Begin
+  Alpha:=0.0;
+  Beta:=1.0-(4915.0/32768.0);
+  Dist:=1;
+ End;
+ For I:=0 To OPCeltMaxBands-1 Do
+  For J:=0 To OPCChannels-1 Do Begin
+   If (I<OPCStartBand) Or (I>=OPCEndBand) Then Begin
+    OPCBlock[J].Energy[I]:=0.0;
+    Continue;
+   End;
+   Avail:=OPCFrameBits-OPRcTell(Rc);
+   If Avail>=15 Then Begin
+    K:=OPMinI(I,20) Shl 1;
+    Value:=OPRcDecLaplace(Rc,LongWord(OPT_celt_coarse_energy_dist[OPCSize,Dist,K]) Shl 7,
+                          LongInt(OPT_celt_coarse_energy_dist[OPCSize,Dist,K+1]) Shl 6);
+   End Else If Avail>=2 Then Begin
+    X:=OPRcDecCdf(Rc,@OPT_celt_model_energy_small);
+    Value:=(X Shr 1) Xor (-(X And 1));
+   End Else If Avail>=1 Then Value:=-OPRcDecLog(Rc,1)
+   Else Value:=-1;
+   E:=OPCBlock[J].Energy[I];
+   If E<-9.0 Then E:=-9.0;
+   OPCBlock[J].Energy[I]:=E*Alpha+Prev[J]+Value;
+   Prev[J]:=Prev[J]+Beta*Value;
+  End;
+End;
+
+Procedure OPCeltFineEnergy(Var Rc: TOPRC);
+Var I,J,Q2: LongInt; Offset: Single;
+Begin
+ For I:=OPCStartBand To OPCEndBand-1 Do Begin
+  If OPCFineBits[I]=0 Then Continue;
+  For J:=0 To OPCChannels-1 Do Begin
+   Q2:=OPRcGetRaw(Rc,OPCFineBits[I]);
+   Offset:=(Q2+0.5)*(LongInt(1) Shl (14-OPCFineBits[I]))/16384.0-0.5;
+   OPCBlock[J].Energy[I]:=OPCBlock[J].Energy[I]+Offset;
+  End;
+ End;
+End;
+
+Procedure OPCeltFinalEnergy(Var Rc: TOPRC);
+Var Priority,I,J,Q2,BitsLeft: LongInt; Offset: Single;
+Begin
+ BitsLeft:=OPCFrameBits-OPRcTell(Rc);
+ For Priority:=0 To 1 Do Begin
+  I:=OPCStartBand;
+  While (I<OPCEndBand) And (BitsLeft>=OPCChannels) Do Begin
+   If (OPCFinePriority[I]=Priority) And (OPCFineBits[I]<OPCeltMaxFineBits) Then
+    For J:=0 To OPCChannels-1 Do Begin
+     Q2:=OPRcGetRaw(Rc,1);
+     Offset:=(Q2-0.5)*(LongInt(1) Shl (14-OPCFineBits[I]-1))/16384.0;
+     OPCBlock[J].Energy[I]:=OPCBlock[J].Energy[I]+Offset;
+     Dec(BitsLeft);
+    End;
+   Inc(I);
+  End;
+ End;
+End;
+
+Procedure OPCeltTfChanges(Var Rc: TOPRC);
+Var I,Diff,TfSelect,TfChanged,TfSelectBit,Consumed,Bits: LongInt;
+Begin
+ Diff:=0; TfSelect:=0; TfChanged:=0;
+ If OPCTransient<>0 Then Bits:=2 Else Bits:=4;
+ Consumed:=OPRcTell(Rc);
+ If (OPCSize<>0) And (Consumed+Bits+1<=OPCFrameBits) Then TfSelectBit:=1 Else TfSelectBit:=0;
+ For I:=OPCStartBand To OPCEndBand-1 Do Begin
+  If Consumed+Bits+TfSelectBit<=OPCFrameBits Then Begin
+   Diff:=Diff Xor OPRcDecLog(Rc,Bits);
+   Consumed:=OPRcTell(Rc);
+   TfChanged:=TfChanged Or Diff;
+  End;
+  OPCTfChange[I]:=Diff;
+  If OPCTransient<>0 Then Bits:=4 Else Bits:=5;
+ End;
+ If (TfSelectBit<>0) And (OPT_celt_tf_select[OPCSize,OPCTransient,0,TfChanged]<>
+                          OPT_celt_tf_select[OPCSize,OPCTransient,1,TfChanged]) Then
+  TfSelect:=OPRcDecLog(Rc,1);
+ For I:=OPCStartBand To OPCEndBand-1 Do
+  OPCTfChange[I]:=OPT_celt_tf_select[OPCSize,OPCTransient,TfSelect,OPCTfChange[I]];
+End;
+
+Procedure OPCeltDenormalize(Var Blk: TOPCeltBlock);
+Var I,J,Base: LongInt; LogNorm,Norm: Single;
+Begin
+ For I:=OPCStartBand To OPCEndBand-1 Do Begin
+  Base:=OPT_celt_freq_bands[I] Shl OPCSize;
+  LogNorm:=Blk.Energy[I]+OPT_celt_mean_energy[I];
+  If LogNorm>32.0 Then LogNorm:=32.0;
+  Norm:=OPExp2(LogNorm);
+  For J:=0 To (OPT_celt_freq_range[I] Shl OPCSize)-1 Do
+   Blk.Coeffs[Base+J]:=Blk.Coeffs[Base+J]*Norm;
+ End;
+End;
+
+{ Data est un indice dans Blk.Buf (acces aux indices negatifs possibles) }
+Procedure OPCeltPostfilterTransition(Var Blk: TOPCeltBlock; Data: LongInt);
+Var T0,T1,I: LongInt; G00,G01,G02,G10,G11,G12,X0,X1,X2,X3,X4,W: Single; Sum: Double;
+Begin
+ T0:=Blk.PfPeriodOld; T1:=Blk.PfPeriod;
+ If (Blk.PfGains[0]=0.0) And (Blk.PfGainsOld[0]=0.0) Then Exit;
+ G00:=Blk.PfGainsOld[0]; G01:=Blk.PfGainsOld[1]; G02:=Blk.PfGainsOld[2];
+ G10:=Blk.PfGains[0]; G11:=Blk.PfGains[1]; G12:=Blk.PfGains[2];
+ X1:=Blk.Buf[Data-T1+1]; X2:=Blk.Buf[Data-T1]; X3:=Blk.Buf[Data-T1-1]; X4:=Blk.Buf[Data-T1-2];
+ For I:=0 To OPCeltOverlap-1 Do Begin
+  W:=OPT_celt_window2[I];
+  X0:=Blk.Buf[Data+I-T1+2];
+  Sum:=(1.0-Double(W))*G00*Blk.Buf[Data+I-T0]
+     +(1.0-Double(W))*G01*(Blk.Buf[Data+I-T0-1]+Blk.Buf[Data+I-T0+1])
+     +(1.0-Double(W))*G02*(Blk.Buf[Data+I-T0-2]+Blk.Buf[Data+I-T0+2])
+     +Single(Single(W*G10)*X2)
+     +Single(Single(W*G11)*Single(X1+X3))
+     +Single(Single(W*G12)*Single(X0+X4));
+  Blk.Buf[Data+I]:=Single(Double(Blk.Buf[Data+I])+Sum);
+  X4:=X3; X3:=X2; X2:=X1; X1:=X0;
+ End;
+End;
+
+Procedure OPCeltPostfilterRun(Var Blk: TOPCeltBlock; Data,Period: LongInt; Const Gains: Array Of Single; Len: LongInt);
+Var I: LongInt; G0,G1,G2,X0,X1,X2,X3,X4: Single;
+Begin
+ G0:=Gains[0]; G1:=Gains[1]; G2:=Gains[2];
+ X4:=Blk.Buf[Data-Period-2]; X3:=Blk.Buf[Data-Period-1];
+ X2:=Blk.Buf[Data-Period+0]; X1:=Blk.Buf[Data-Period+1];
+ For I:=0 To Len-1 Do Begin
+  X0:=Blk.Buf[Data+I-Period+2];
+  Blk.Buf[Data+I]:=Blk.Buf[Data+I]+(Single(G0*X2)+Single(G1*Single(X1+X3))+Single(G2*Single(X0+X4)));
+  X4:=X3; X3:=X2; X2:=X1; X1:=X0;
+ End;
+End;
+
+Procedure OPCeltPostfilter(Var Blk: TOPCeltBlock);
+Var Len,FilterLen: LongInt;
+Begin
+ Len:=OPCBlockSize*OPCBlocks;
+ FilterLen:=Len-2*OPCeltOverlap;
+ OPCeltPostfilterTransition(Blk,1024);
+ Blk.PfPeriodOld:=Blk.PfPeriod;
+ Move(Blk.PfGains,Blk.PfGainsOld,SizeOf(Blk.PfGains));
+ Blk.PfPeriod:=Blk.PfPeriodNew;
+ Move(Blk.PfGainsNew,Blk.PfGains,SizeOf(Blk.PfGains));
+ If Len>OPCeltOverlap Then Begin
+  OPCeltPostfilterTransition(Blk,1024+OPCeltOverlap);
+  If (Blk.PfGains[0]>1.1920929E-07) And (FilterLen>0) Then
+   OPCeltPostfilterRun(Blk,1024+2*OPCeltOverlap,Blk.PfPeriod,Blk.PfGains,FilterLen);
+  Blk.PfPeriodOld:=Blk.PfPeriod;
+  Move(Blk.PfGains,Blk.PfGainsOld,SizeOf(Blk.PfGains));
+ End;
+ Move(Blk.Buf[Len],Blk.Buf[0],(1024+OPCeltOverlap Div 2)*4);
+End;
+
+Function OPCeltParsePostfilter(Var Rc: TOPRC; Consumed: LongInt): LongInt;
+Var I,Tapset,Octave,Period: LongInt; Gain: Single;
+Begin
+ For I:=0 To 2 Do Begin OPCBlock[0].PfGainsNew[I]:=0; OPCBlock[1].PfGainsNew[I]:=0; End;
+ If (OPCStartBand=0) And (Consumed+16<=OPCFrameBits) Then Begin
+  If OPRcDecLog(Rc,1)<>0 Then Begin
+   Octave:=OPRcDecUint(Rc,6);
+   Period:=(16 Shl Octave)+LongInt(OPRcGetRaw(Rc,4+Octave))-1;
+   Gain:=0.09375*(OPRcGetRaw(Rc,3)+1);
+   If OPRcTell(Rc)+2<=OPCFrameBits Then Tapset:=OPRcDecCdf(Rc,@OPT_celt_model_tapset) Else Tapset:=0;
+   For I:=0 To 1 Do Begin
+    OPCBlock[I].PfPeriodNew:=OPMaxI(Period,OPCeltPostfilterMinPeriod);
+    OPCBlock[I].PfGainsNew[0]:=Gain*OPT_celt_postfilter_taps[Tapset,0];
+    OPCBlock[I].PfGainsNew[1]:=Gain*OPT_celt_postfilter_taps[Tapset,1];
+    OPCBlock[I].PfGainsNew[2]:=Gain*OPT_celt_postfilter_taps[Tapset,2];
+   End;
+  End;
+  Consumed:=OPRcTell(Rc);
+ End;
+ OPCeltParsePostfilter:=Consumed;
+End;
+
+Procedure OPCeltAnticollapse(Var Blk: TOPCeltBlock);
+Var I,J,K,Depth: LongInt; Renormalize: Boolean; XPtr: POPFA; Prev0,Prev1,Ediff,R,Thresh,Sqrt1: Single;
+    Tmp: Double;
+Begin
+ For I:=OPCStartBand To OPCEndBand-1 Do Begin
+  Renormalize:=False;
+  Depth:=(1+OPCPulses[I]) Div (OPT_celt_freq_range[I] Shl OPCSize);
+  Tmp:=-1.0-Double(Single(0.125*Depth));
+  Thresh:=OPExp2(Single(Tmp));
+  Sqrt1:=1.0/Single(Sqrt((OPT_celt_freq_range[I] Shl OPCSize)*1.0));
+  XPtr:=OPFAt(@Blk.Coeffs,OPT_celt_freq_bands[I] Shl OPCSize);
+  Prev0:=Blk.PrevEnergy[0,I]; Prev1:=Blk.PrevEnergy[1,I];
+  If OPCChannels=1 Then Begin
+   If OPCBlock[1].PrevEnergy[0,I]>Prev0 Then Prev0:=OPCBlock[1].PrevEnergy[0,I];
+   If OPCBlock[1].PrevEnergy[1,I]>Prev1 Then Prev1:=OPCBlock[1].PrevEnergy[1,I];
+  End;
+  If Prev0<Prev1 Then Ediff:=Blk.Energy[I]-Prev0 Else Ediff:=Blk.Energy[I]-Prev1;
+  If Ediff<0 Then Ediff:=0;
+  R:=OPExp2(1-Ediff);
+  If OPCSize=3 Then R:=Single(Double(R)*1.4142135623730951);
+  If Thresh<R Then R:=Thresh;
+  R:=R*Sqrt1;
+  For K:=0 To (1 Shl OPCSize)-1 Do
+   If (Blk.CollapseMasks[I] And (1 Shl K))=0 Then Begin
+    For J:=0 To OPT_celt_freq_range[I]-1 Do
+     If (OPCeltRng And $8000)<>0 Then XPtr^[(J Shl OPCSize)+K]:=R Else XPtr^[(J Shl OPCSize)+K]:=-R;
+    Renormalize:=True;
+   End;
+  If Renormalize Then OPCeltRenormalize(XPtr,OPT_celt_freq_range[I] Shl OPCSize,1.0);
+ End;
+End;
+
+Procedure OPCeltFlush;
+Var I,J: LongInt;
+Begin
+ If OPCFlushed<>0 Then Exit;
+ For I:=0 To 1 Do Begin
+  For J:=0 To OPCeltMaxBands-1 Do Begin
+   OPCBlock[I].PrevEnergy[0,J]:=-28.0; OPCBlock[I].PrevEnergy[1,J]:=-28.0;
+   OPCBlock[I].Energy[J]:=0;
+  End;
+  FillChar(OPCBlock[I].Buf,SizeOf(OPCBlock[I].Buf),0);
+  FillChar(OPCBlock[I].PfGains,SizeOf(OPCBlock[I].PfGains),0);
+  FillChar(OPCBlock[I].PfGainsOld,SizeOf(OPCBlock[I].PfGainsOld),0);
+  FillChar(OPCBlock[I].PfGainsNew,SizeOf(OPCBlock[I].PfGainsNew),0);
+  OPCBlock[I].EmphCoeff:=0.0;
+ End;
+ OPCSeed:=0;
+ OPCFlushed:=1;
+End;
+
+Procedure OPCeltInit(OutputChannels,ApplyPhaseInv: LongInt);
+Begin
+ FillChar(OPCBlock,SizeOf(OPCBlock),0);
+ OPCOutputChannels:=OutputChannels;
+ OPCApplyPhaseInv:=ApplyPhaseInv;
+ OPCFlushed:=0;
+ OPCChannels:=0;
+ OPCeltFlush;
+End;
+
+{ ---- ff_celt_decode_frame ----  Output[0..1] : pointeurs sur les tampons de sortie }
+Function OPCeltDecodeFrame(Var Rc: TOPRC; Out0,Out1: POPFA; Channels,FrameSize,StartBand,EndBand: LongInt): LongInt;
+Var
+ I,J,K,Downmix,Consumed,Idx,ImdctIdx,Base: LongInt;
+ Dst,OutP: POPFA;
+ Blk: ^TOPCeltBlock;
+ Coef2,S0,S1,Wi,Wj: Single;
+Begin
+ OPCeltDecodeFrame:=-1;
+ If (Channels<>1) And (Channels<>2) Then Exit;
+ If (StartBand<0) Or (StartBand>EndBand) Or (EndBand>OPCeltMaxBands) Then Exit;
+ OPCSilence:=0; OPCTransient:=0; OPCAnticollapse:=0; OPCFlushed:=0;
+ OPCChannels:=Channels; OPCStartBand:=StartBand; OPCEndBand:=EndBand;
+ OPCFrameBits:=LongInt(Rc.RbBytes)*8;
+ OPCSize:=OPLog2(FrameSize Div OPCeltOverlap Div 1);
+ If OPCSize>3 Then Exit;
+ If FrameSize<>OPCeltOverlap*(1 Shl OPCSize) Then Exit;
+ If OPCOutputChannels=0 Then OPCOutputChannels:=Channels;
+ For I:=0 To Channels-1 Do Begin
+  FillChar(OPCBlock[I].Coeffs,SizeOf(OPCBlock[I].Coeffs),0);
+  FillChar(OPCBlock[I].CollapseMasks,SizeOf(OPCBlock[I].CollapseMasks),0);
+ End;
+ Consumed:=OPRcTell(Rc);
+ { silence flag }
+ If Consumed>=OPCFrameBits Then OPCSilence:=1
+ Else If Consumed=1 Then OPCSilence:=OPRcDecLog(Rc,15);
+ If OPCSilence<>0 Then Begin
+  Consumed:=OPCFrameBits;
+  Rc.TotalBits:=LongWord(LongInt(Rc.TotalBits)+OPCFrameBits-OPRcTell(Rc));
+ End;
+ Consumed:=OPCeltParsePostfilter(Rc,Consumed);
+ If (OPCSize<>0) And (Consumed+3<=OPCFrameBits) Then OPCTransient:=OPRcDecLog(Rc,3);
+ If OPCTransient<>0 Then OPCBlocks:=1 Shl OPCSize Else OPCBlocks:=1;
+ OPCBlockSize:=FrameSize Div OPCBlocks;
+ If OPCTransient<>0 Then ImdctIdx:=0 Else ImdctIdx:=OPCSize;
+ If Channels=1 Then
+  For I:=0 To OPCeltMaxBands-1 Do
+   If OPCBlock[1].Energy[I]>OPCBlock[0].Energy[I] Then OPCBlock[0].Energy[I]:=OPCBlock[1].Energy[I];
+ OPCeltCoarseEnergy(Rc);
+ OPCeltTfChanges(Rc);
+ OPCeltBitAlloc(Rc);
+ OPCeltFineEnergy(Rc);
+ OPCeltQuantBands(Rc);
+ If OPCAnticollapseNeeded<>0 Then OPCAnticollapse:=OPRcGetRaw(Rc,1);
+ OPCeltFinalEnergy(Rc);
+ For I:=0 To OPCChannels-1 Do Begin
+  If OPCAnticollapse<>0 Then OPCeltAnticollapse(OPCBlock[I]);
+  OPCeltDenormalize(OPCBlock[I]);
+ End;
+ { stereo -> mono downmix }
+ Downmix:=0;
+ If OPCOutputChannels<OPCChannels Then Begin
+  For I:=0 To FrameSize-1 Do OPCBlock[0].Coeffs[I]:=OPCBlock[0].Coeffs[I]+OPCBlock[1].Coeffs[I];
+  Downmix:=1;
+ End Else If OPCOutputChannels>OPCChannels Then
+  Move(OPCBlock[0].Coeffs,OPCBlock[1].Coeffs,FrameSize*4);
+ If OPCSilence<>0 Then Begin
+  For I:=0 To 1 Do Begin
+   For J:=0 To OPCeltMaxBands-1 Do OPCBlock[I].Energy[J]:=-28.0;
+   FillChar(OPCBlock[I].Coeffs,SizeOf(OPCBlock[I].Coeffs),0);
+  End;
+ End;
+ { transform and output for each output channel }
+ For I:=0 To OPCOutputChannels-1 Do Begin
+  Blk:=@OPCBlock[I];
+  If I=0 Then OutP:=Out0 Else OutP:=Out1;
+  For J:=0 To OPCBlocks-1 Do Begin
+   Base:=1024+J*OPCBlockSize;
+   Dst:=OPFAt(@Blk^.Buf,Base);
+   OPImdct(ImdctIdx,OPFAt(@Blk^.Coeffs,J),OPCBlocks,OPFAt(Dst,OPCeltOverlap Div 2));
+   { vector_fmul_window(dst, dst, dst+60, window, 60) }
+   For K:=0 To 59 Do Begin
+    S0:=Dst^[K]; S1:=Dst^[119-K]; Wi:=OPT_celt_window[K]; Wj:=OPT_celt_window[119-K];
+    Dst^[K]:=S0*Wj-S1*Wi;
+    Dst^[119-K]:=S0*Wi+S1*Wj;
+   End;
+  End;
+  If Downmix<>0 Then
+   For K:=0 To FrameSize-1 Do Blk^.Buf[1024+K]:=Blk^.Buf[1024+K]*0.5;
+  OPCeltPostfilter(Blk^);
+  { deemphasis }
+  Coef2:=Blk^.EmphCoeff;
+  For K:=0 To FrameSize-1 Do Begin
+   Coef2:=Blk^.Buf[1024-FrameSize+K]+Coef2*OPCEmphCoeff;
+   OutP^[K]:=Coef2;
+  End;
+  Blk^.EmphCoeff:=Coef2;
+ End;
+ If Channels=1 Then Move(OPCBlock[0].Energy,OPCBlock[1].Energy,SizeOf(OPCBlock[0].Energy));
+ For I:=0 To 1 Do Begin
+  Blk:=@OPCBlock[I];
+  If OPCTransient=0 Then Begin
+   Move(Blk^.PrevEnergy[0],Blk^.PrevEnergy[1],SizeOf(Blk^.PrevEnergy[0]));
+   Move(Blk^.Energy,Blk^.PrevEnergy[0],SizeOf(Blk^.PrevEnergy[0]));
+  End Else
+   For J:=0 To OPCeltMaxBands-1 Do
+    If Blk^.Energy[J]<Blk^.PrevEnergy[0,J] Then Blk^.PrevEnergy[0,J]:=Blk^.Energy[J];
+  For J:=0 To OPCStartBand-1 Do Begin
+   Blk^.PrevEnergy[0,J]:=-28.0; Blk^.Energy[J]:=0.0;
+  End;
+  For J:=OPCEndBand To OPCeltMaxBands-1 Do Begin
+   Blk^.PrevEnergy[0,J]:=-28.0; Blk^.Energy[J]:=0.0;
+  End;
+ End;
+ OPCSeed:=Rc.Range;
+ OPCeltDecodeFrame:=0;
+End;
+
+
+{ ---- SILK (opus_silk.c) ---- }
+Type
+ TOPSilkFrame=Record
+  Coded,LogGain: LongInt;
+  Nlsf: Array[0..15] Of SmallInt;
+  Lpc: Array[0..15] Of Single;
+  Output: Array[0..2*OPSilkHistory-1] Of Single;
+  LpcHistory: Array[0..2*OPSilkHistory-1] Of Single;
+  PrimaryLag,PrevVoiced: LongInt;
+ End;
+
+Var
+ OPSOutputChannels,OPSMidOnly,OPSSubframes,OPSSfLength,OPSFLength,OPSNlsfInterpFactor,
+ OPSBandwidth,OPSWb,OPSPrevCodedChannels: LongInt;
+ OPSFrame: Array[0..1] Of TOPSilkFrame;
+ OPSPrevStereoWeights,OPSStereoWeights: Array[0..1] Of Single;
+
+Function OPRoundMull(A,B: Int64; S: LongInt): Int64;
+Begin
+ OPRoundMull:=OPSar64(OPSar64(A*B,S-1)+1,1);
+End;
+
+Function OPMulH(A,B: LongInt): LongInt;
+Begin
+ OPMulH:=LongInt(OPSar64(Int64(A)*Int64(B),32));
+End;
+
+Procedure OPSilkStabilizeLsf(Var Nlsf: Array Of SmallInt; Order: LongInt; MinDelta: POPWA);
+Var Pass,I,K,MinDiff,Low,High,Diff,MinCenter,MaxCenter,CenterVal,J,Value: LongInt;
+Begin
+ K:=0;
+ For Pass:=0 To 19 Do Begin
+  MinDiff:=0;
+  For I:=0 To Order Do Begin
+   If I<>0 Then Low:=Nlsf[I-1] Else Low:=0;
+   If I<>Order Then High:=Nlsf[I] Else High:=32768;
+   Diff:=(High-Low)-MinDelta^[I];
+   If Diff<MinDiff Then Begin MinDiff:=Diff; K:=I; End;
+  End;
+  If MinDiff=0 Then Exit;
+  If K=0 Then Nlsf[0]:=MinDelta^[0]
+  Else If K=Order Then Nlsf[Order-1]:=32768-MinDelta^[Order]
+  Else Begin
+   MinCenter:=0; MaxCenter:=32768;
+   For I:=0 To K-1 Do Inc(MinCenter,MinDelta^[I]);
+   Inc(MinCenter,MinDelta^[K] Shr 1);
+   For I:=Order DownTo K+1 Do Dec(MaxCenter,MinDelta^[I]);
+   Dec(MaxCenter,MinDelta^[K] Shr 1);
+   CenterVal:=Nlsf[K-1]+Nlsf[K];
+   CenterVal:=(CenterVal Shr 1)+(CenterVal And 1);
+   CenterVal:=OPMinI(MaxCenter,OPMaxI(MinCenter,CenterVal));
+   Nlsf[K-1]:=CenterVal-(MinDelta^[K] Shr 1);
+   Nlsf[K]:=Nlsf[K-1]+MinDelta^[K];
+  End;
+ End;
+ { fall-back : tri par insertion }
+ For I:=1 To Order-1 Do Begin
+  Value:=Nlsf[I];
+  J:=I-1;
+  While (J>=0) And (Nlsf[J]>Value) Do Begin Nlsf[J+1]:=Nlsf[J]; Dec(J); End;
+  Nlsf[J+1]:=Value;
+ End;
+ If Nlsf[0]<MinDelta^[0] Then Nlsf[0]:=MinDelta^[0];
+ For I:=1 To Order-1 Do Nlsf[I]:=OPMaxI(Nlsf[I],OPMinI(Nlsf[I-1]+MinDelta^[I],32767));
+ If Nlsf[Order-1]>32768-MinDelta^[Order] Then Nlsf[Order-1]:=32768-MinDelta^[Order];
+ For I:=Order-2 DownTo 0 Do
+  If Nlsf[I]>Nlsf[I+1]-MinDelta^[I+1] Then Nlsf[I]:=Nlsf[I+1]-MinDelta^[I+1];
+End;
+
+Function OPSilkIsLpcStable(Var Lpc: Array Of SmallInt; Order: LongInt): Boolean;
+Var K,J,DCResp,TotalInvGain,Row,Prev,Rc,GainDiv,Gain,FBits,Err,X: LongInt;
+    Lpc32: Array[0..1,0..15] Of LongInt; Tmp: Int64;
+Begin
+ OPSilkIsLpcStable:=False;
+ DCResp:=0; TotalInvGain:=1 Shl 30; Row:=0;
+ For K:=0 To Order-1 Do Begin
+  Inc(DCResp,Lpc[K]);
+  Lpc32[0,K]:=Lpc[K]*4096;
+ End;
+ If DCResp>=4096 Then Exit;
+ K:=Order-1;
+ While True Do Begin
+  If OPAbsI(Lpc32[Row,K])>16773022 Then Exit;
+  Rc:=-(Lpc32[Row,K]*128);
+  GainDiv:=(1 Shl 30)-OPMulH(Rc,Rc);
+  TotalInvGain:=LongInt(Int64(OPMulH(TotalInvGain,GainDiv)) Shl 2);
+  If K=0 Then Begin
+   OPSilkIsLpcStable:=(TotalInvGain>=107374);
+   Exit;
+  End;
+  FBits:=OPIlog(GainDiv);
+  Gain:=((1 Shl 29)-1) Div (GainDiv Shr (FBits+1-16));
+  Err:=(1 Shl 29)-LongInt(OPSar64(Int64(LongInt(Int64(GainDiv) Shl (15+16-FBits)))*Int64(Gain),16));
+  Gain:=LongInt((Int64(Gain) Shl 16)+OPSar64(Int64(Err)*Int64(Gain),13));
+  Prev:=Row;
+  Row:=K And 1;
+  For J:=0 To K-1 Do Begin
+   Tmp:=Int64(Lpc32[Prev,J])-OPRoundMull(Lpc32[Prev,K-J-1],Rc,31);
+   If Tmp>2147483647 Then Tmp:=2147483647 Else If Tmp<-2147483648 Then Tmp:=-2147483648;
+   X:=LongInt(Tmp);
+   Tmp:=OPRoundMull(X,Gain,FBits);
+   If (Tmp<-2147483648) Or (Tmp>2147483647) Then Exit;
+   Lpc32[Row,J]:=LongInt(Tmp);
+  End;
+  Dec(K);
+ End;
+End;
+
+Procedure OPSilkLsp2Poly(Const Lsp: Array Of LongInt; LspOff: LongInt; Var Pol: Array Of LongInt; HalfOrder: LongInt);
+Var I,J: LongInt;
+Begin
+ Pol[0]:=65536;
+ Pol[1]:=-Lsp[LspOff];
+ For I:=1 To HalfOrder-1 Do Begin
+  Pol[I+1]:=LongInt(Int64(Pol[I-1])*2-OPRoundMull(Lsp[LspOff+2*I],Pol[I],16));
+  For J:=I DownTo 2 Do
+   Pol[J]:=LongInt(Int64(Pol[J])+Pol[J-2]-OPRoundMull(Lsp[LspOff+2*I],Pol[J-1],16));
+  Pol[1]:=Pol[1]-Lsp[LspOff+2*I];
+ End;
+End;
+
+Procedure OPSilkLsf2Lpc(Const Nlsf: Array Of SmallInt; Var LpcF: Array Of Single; Order: LongInt);
+Var I,K,J,Index,Offset,K2,PTmp,QTmp,X: LongInt;
+    Lsp,Lpc32: Array[0..15] Of LongInt; P,Q: Array[0..8] Of LongInt; Lpc: Array[0..15] Of SmallInt;
+    MaxAbs,Chirp,ChirpBase: LongWord; Broke: Boolean; Ax: LongWord;
+Begin
+ For K:=0 To Order-1 Do Begin
+  Index:=Nlsf[K] Shr 8;
+  Offset:=Nlsf[K] And 255;
+  If Order=10 Then K2:=OPT_silk_lsf_ordering_nbmb[K] Else K2:=OPT_silk_lsf_ordering_wb[K];
+  Lsp[K2]:=OPT_silk_cosine[Index]*256;
+  Lsp[K2]:=Lsp[K2]+(OPT_silk_cosine[Index+1]-OPT_silk_cosine[Index])*Offset;
+  Lsp[K2]:=OPSar(Lsp[K2]+4,3);
+ End;
+ OPSilkLsp2Poly(Lsp,0,P,Order Shr 1);
+ OPSilkLsp2Poly(Lsp,1,Q,Order Shr 1);
+ For K:=0 To (Order Shr 1)-1 Do Begin
+  PTmp:=P[K+1]+P[K];
+  QTmp:=Q[K+1]-Q[K];
+  Lpc32[K]:=-QTmp-PTmp;
+  Lpc32[Order-K-1]:=QTmp-PTmp;
+ End;
+ { limit the range of the LPC coefficients to each fit within an int16_t
+   (NB : FFmpeg lit lpc32[k] et non lpc32[j] dans la recherche du maximum) }
+ Broke:=False;
+ For I:=0 To 9 Do Begin
+  MaxAbs:=0; K:=0;
+  For J:=0 To Order-1 Do Begin
+   Ax:=LongWord(OPAbsI(Lpc32[K]));
+   If Ax>MaxAbs Then Begin MaxAbs:=Ax; K:=J; End;
+  End;
+  MaxAbs:=(MaxAbs+16) Shr 5;
+  If MaxAbs>32767 Then Begin
+   If MaxAbs>163838 Then MaxAbs:=163838;
+   Chirp:=65470-LongWord((Int64(MaxAbs-32767) Shl 14) Div Int64((Int64(MaxAbs)*(K+1)) Shr 2));
+   ChirpBase:=Chirp;
+   For K:=0 To Order-1 Do Begin
+    Lpc32[K]:=LongInt(OPRoundMull(Lpc32[K],Chirp,16));
+    Chirp:=LongWord((Int64(ChirpBase)*Int64(Chirp)+32768) Shr 16);
+   End;
+  End Else Begin Broke:=True; Break; End;
+ End;
+ If Not Broke Then Begin
+  For K:=0 To Order-1 Do Begin
+   X:=OPSar(Lpc32[K]+16,5);
+   Lpc[K]:=OPClipI(X,-32768,32767);
+   Lpc32[K]:=Lpc[K] Shl 5;
+  End;
+ End Else
+  For K:=0 To Order-1 Do Lpc[K]:=SmallInt(OPSar(Lpc32[K]+16,5));
+ I:=1;
+ While (I<=16) And Not OPSilkIsLpcStable(Lpc,Order) Do Begin
+  ChirpBase:=65536-(LongWord(1) Shl I);
+  Chirp:=ChirpBase;
+  For K:=0 To Order-1 Do Begin
+   Lpc32[K]:=LongInt(OPRoundMull(Lpc32[K],Chirp,16));
+   Lpc[K]:=SmallInt(OPSar(Lpc32[K]+16,5));
+   Chirp:=LongWord((Int64(ChirpBase)*Int64(Chirp)+32768) Shr 16);
+  End;
+  Inc(I);
+ End;
+ For I:=0 To Order-1 Do LpcF[I]:=Lpc[I]/4096.0;
+End;
+
+{ ---- lecture des parametres LPC ---- }
+Procedure OPSilkDecodeLpc(Var Rc: TOPRC; Var Frame: TOPSilkFrame; Var LpcLeadin,Lpc: Array Of Single;
+ Var LpcOrder,HasLpcLeadin: LongInt; Voiced: LongInt);
+Var I,Order,LsfI1,Index,Qstep,Weight,Cur,Prev,Next,WeightSq,IPart,FPart,Y,Value,Offset: LongInt;
+    LsfI2,LsfRes: Array[0..15] Of LongInt; Nlsf,NlsfLeadin: Array[0..15] Of SmallInt;
+    CodebookNb: Boolean;
+Begin
+ If OPSWb<>0 Then Order:=16 Else Order:=10;
+ LpcOrder:=Order;
+ LsfI1:=OPRcDecCdf(Rc,POPWA(@OPT_silk_model_lsf_s1[OPSWb,Voiced,0]));
+ For I:=0 To Order-1 Do Begin
+  If OPSWb<>0 Then Index:=OPT_silk_lsf_s2_model_sel_wb[LsfI1,I]
+  Else Index:=OPT_silk_lsf_s2_model_sel_nbmb[LsfI1,I];
+  LsfI2[I]:=OPRcDecCdf(Rc,POPWA(@OPT_silk_model_lsf_s2[Index,0]))-4;
+  If LsfI2[I]=-4 Then Dec(LsfI2[I],OPRcDecCdf(Rc,@OPT_silk_model_lsf_s2_ext))
+  Else If LsfI2[I]=4 Then Inc(LsfI2[I],OPRcDecCdf(Rc,@OPT_silk_model_lsf_s2_ext));
+ End;
+ { reverse the backwards-prediction step }
+ For I:=Order-1 DownTo 0 Do Begin
+  If OPSWb<>0 Then Qstep:=9830 Else Qstep:=11796;
+  LsfRes[I]:=LsfI2[I]*1024;
+  If LsfI2[I]<0 Then Inc(LsfRes[I],102)
+  Else If LsfI2[I]>0 Then Dec(LsfRes[I],102);
+  LsfRes[I]:=OPSar(LsfRes[I]*Qstep,16);
+  If I+1<Order Then Begin
+   If OPSWb<>0 Then Weight:=OPT_silk_lsf_pred_weights_wb[OPT_silk_lsf_weight_sel_wb[LsfI1,I],I]
+   Else Weight:=OPT_silk_lsf_pred_weights_nbmb[OPT_silk_lsf_weight_sel_nbmb[LsfI1,I],I];
+   Inc(LsfRes[I],OPSar(LsfRes[I+1]*Weight,8));
+  End;
+ End;
+ { reconstruct the NLSF coefficients from the supplied indices }
+ For I:=0 To Order-1 Do Begin
+  If OPSWb<>0 Then Cur:=OPT_silk_lsf_codebook_wb[LsfI1,I] Else Cur:=OPT_silk_lsf_codebook_nbmb[LsfI1,I];
+  If I<>0 Then Begin
+   If OPSWb<>0 Then Prev:=OPT_silk_lsf_codebook_wb[LsfI1,I-1] Else Prev:=OPT_silk_lsf_codebook_nbmb[LsfI1,I-1];
+  End Else Prev:=0;
+  If I+1<Order Then Begin
+   If OPSWb<>0 Then Next:=OPT_silk_lsf_codebook_wb[LsfI1,I+1] Else Next:=OPT_silk_lsf_codebook_nbmb[LsfI1,I+1];
+  End Else Next:=256;
+  WeightSq:=(1024 Div (Cur-Prev)+1024 Div (Next-Cur)) Shl 16;
+  IPart:=OPIlog(WeightSq);
+  FPart:=(WeightSq Shr (IPart-8)) And 127;
+  If (IPart And 1)<>0 Then Y:=32768 Else Y:=46214;
+  Y:=Y Shr ((32-IPart) Shr 1);
+  Weight:=Y+((213*FPart*Y) Shr 16);
+  Value:=Cur*128+(LsfRes[I]*16384) Div Weight;
+  Nlsf[I]:=OPClipU(Value,15);
+ End;
+ If OPSWb<>0 Then OPSilkStabilizeLsf(Nlsf,Order,@OPT_silk_lsf_min_spacing_wb)
+ Else OPSilkStabilizeLsf(Nlsf,Order,@OPT_silk_lsf_min_spacing_nbmb);
+ HasLpcLeadin:=0;
+ If OPSSubframes=4 Then Begin
+  Offset:=OPRcDecCdf(Rc,@OPT_silk_model_lsf_interpolation_offset);
+  If (Offset<>4) And (Frame.Coded<>0) Then Begin
+   HasLpcLeadin:=1;
+   If Offset<>0 Then Begin
+    For I:=0 To Order-1 Do
+     NlsfLeadin[I]:=Frame.Nlsf[I]+OPSar((Nlsf[I]-Frame.Nlsf[I])*Offset,2);
+    OPSilkLsf2Lpc(NlsfLeadin,LpcLeadin,Order);
+   End Else
+    Move(Frame.Lpc,LpcLeadin,16*4);
+  End Else Offset:=4;
+  OPSNlsfInterpFactor:=Offset;
+  OPSilkLsf2Lpc(Nlsf,Lpc,Order);
+ End Else Begin
+  OPSNlsfInterpFactor:=4;
+  OPSilkLsf2Lpc(Nlsf,Lpc,Order);
+ End;
+ For I:=0 To Order-1 Do Begin Frame.Nlsf[I]:=Nlsf[I]; Frame.Lpc[I]:=Lpc[I]; End;
+End;
+
+Procedure OPSilkCountChildren(Var Rc: TOPRC; Model: LongInt; Total: LongInt; Var Child: Array Of LongInt; Pos: LongInt);
+Begin
+ If Total<>0 Then Begin
+  Child[Pos]:=OPRcDecCdf(Rc,POPWA(@OPT_silk_model_pulse_location[Model,(((Total-1+5)*(Total-1)) Shr 1)]));
+  Child[Pos+1]:=Total-Child[Pos];
+ End Else Begin
+  Child[Pos]:=0; Child[Pos+1]:=0;
+ End;
+End;
+
+Procedure OPSilkDecodeExcitation(Var Rc: TOPRC; Var ExcF: Array Of Single; ExcOff: LongInt;
+ QoffsetHigh,Active,Voiced: LongInt);
+Var I,ShellBlocks,RateLevel,A,B,C,D,Bit,Sign,Value,Loc: LongInt; Seed: LongWord;
+    PulseCount,LsbCount: Array[0..19] Of LongInt; Excitation: Array[0..319] Of LongInt;
+    Br1,Br2,Br3,Br4: Array[0..1] Of LongInt;
+    Br0: LongInt;
+Begin
+ FillChar(LsbCount,SizeOf(LsbCount),0);
+ Seed:=OPRcDecCdf(Rc,@OPT_silk_model_lcg_seed);
+ ShellBlocks:=OPT_silk_shell_blocks[OPSBandwidth,OPSSubframes Shr 2];
+ RateLevel:=OPRcDecCdf(Rc,POPWA(@OPT_silk_model_exc_rate[Voiced,0]));
+ For I:=0 To ShellBlocks-1 Do Begin
+  PulseCount[I]:=OPRcDecCdf(Rc,POPWA(@OPT_silk_model_pulse_count[RateLevel,0]));
+  If PulseCount[I]=17 Then Begin
+   While PulseCount[I]=17 Do Begin
+    Inc(LsbCount[I]);
+    If LsbCount[I]=10 Then Break;
+    PulseCount[I]:=OPRcDecCdf(Rc,POPWA(@OPT_silk_model_pulse_count[9,0]));
+   End;
+   If LsbCount[I]=10 Then PulseCount[I]:=OPRcDecCdf(Rc,POPWA(@OPT_silk_model_pulse_count[10,0]));
+  End;
+ End;
+ { pulse locations using PVQ }
+ For I:=0 To ShellBlocks-1 Do Begin
+  If PulseCount[I]<>0 Then Begin
+   Loc:=16*I;
+   Br0:=PulseCount[I];
+   OPSilkCountChildren(Rc,0,Br0,Br1,0);
+   For B:=0 To 1 Do Begin
+    OPSilkCountChildren(Rc,1,Br1[B],Br2,0);
+    For C:=0 To 1 Do Begin
+     OPSilkCountChildren(Rc,2,Br2[C],Br3,0);
+     For D:=0 To 1 Do Begin
+      OPSilkCountChildren(Rc,3,Br3[D],Excitation,Loc);
+      Inc(Loc,2);
+     End;
+    End;
+   End;
+  End Else FillChar(Excitation[16*I],16*4,0);
+ End;
+ { least significant bits }
+ For I:=0 To (ShellBlocks Shl 4)-1 Do
+  For Bit:=0 To LsbCount[I Shr 4]-1 Do
+   Excitation[I]:=(Excitation[I] Shl 1) Or OPRcDecCdf(Rc,@OPT_silk_model_excitation_lsb);
+ { signs }
+ For I:=0 To (ShellBlocks Shl 4)-1 Do
+  If Excitation[I]<>0 Then Begin
+   Sign:=OPRcDecCdf(Rc,POPWA(@OPT_silk_model_excitation_sign[Active+Voiced,QoffsetHigh,OPMinI(PulseCount[I Shr 4],6),0]));
+   If Sign=0 Then Excitation[I]:=-Excitation[I];
+  End;
+ { assemble the excitation }
+ For I:=0 To (ShellBlocks Shl 4)-1 Do Begin
+  Value:=Excitation[I];
+  Excitation[I]:=(Value*256) Or OPT_silk_quant_offset[Voiced,QoffsetHigh];
+  If Value<0 Then Inc(Excitation[I],20)
+  Else If Value>0 Then Dec(Excitation[I],20);
+  Seed:=LongWord(Int64(196314165)*Int64(Seed)+907633515);
+  If (Seed And $80000000)<>0 Then Excitation[I]:=-Excitation[I];
+  Seed:=LongWord(Int64(Seed)+Value);
+  ExcF[ExcOff+I]:=Excitation[I]/8388608.0;
+ End;
+End;
+
+Procedure OPSilkDecodeFrame(Var Rc: TOPRC; FrameNum,Channel,CodedChannels,Active,Active1,Redundant: LongInt);
+Var
+ Voiced,QoffsetHigh,Order,HasLpcLeadin,I,J,K,N,LagAbsolute,PrimaryLag,LtpFilter,Idx,Delta,HighBits,LowBits,
+ OutEnd,DstBase,ResBase,Ty,LogGain,IPart,FPart,LinGain,DeltaGain,X: LongInt;
+ LpcLeadin,LpcBody,LpcCoeff: Array[0..15] Of Single;
+ Residual: Array[0..OPSilkMaxLag+OPSilkHistory-1] Of Single;
+ LtpScale,Scale,Rescale,Sum: Single;
+ Wi,Ws,W: Array[0..1] Of LongInt;
+ SfGain: Array[0..3] Of Single;
+ SfPitchLag: Array[0..3] Of LongInt;
+ SfTaps: Array[0..3,0..4] Of Single;
+ Offs: Array[0..3] Of LongInt;
+ Fr: ^TOPSilkFrame;
+Begin
+ Fr:=@OPSFrame[Channel];
+ { stereo weights }
+ If (CodedChannels=2) And (Channel=0) Then Begin
+  N:=OPRcDecCdf(Rc,@OPT_silk_model_stereo_s1);
+  Wi[0]:=OPRcDecCdf(Rc,@OPT_silk_model_stereo_s2)+3*(N Div 5);
+  Ws[0]:=OPRcDecCdf(Rc,@OPT_silk_model_stereo_s3);
+  Wi[1]:=OPRcDecCdf(Rc,@OPT_silk_model_stereo_s2)+3*(N Mod 5);
+  Ws[1]:=OPRcDecCdf(Rc,@OPT_silk_model_stereo_s3);
+  For I:=0 To 1 Do
+   W[I]:=OPT_silk_stereo_weights[Wi[I]]+
+    OPSar((OPT_silk_stereo_weights[Wi[I]+1]-OPT_silk_stereo_weights[Wi[I]])*6554,16)*(Ws[I]*2+1);
+  OPSStereoWeights[0]:=(W[0]-W[1])/8192.0;
+  OPSStereoWeights[1]:=W[1]/8192.0;
+  If Active1<>0 Then OPSMidOnly:=0 Else OPSMidOnly:=OPRcDecCdf(Rc,@OPT_silk_model_mid_only);
+ End;
+ { frame type }
+ If Active=0 Then Begin
+  QoffsetHigh:=OPRcDecCdf(Rc,@OPT_silk_model_frame_type_inactive);
+  Voiced:=0;
+ End Else Begin
+  Ty:=OPRcDecCdf(Rc,@OPT_silk_model_frame_type_active);
+  QoffsetHigh:=Ty And 1;
+  Voiced:=Ty Shr 1;
+ End;
+ { subframe quantization gains }
+ For I:=0 To OPSSubframes-1 Do Begin
+  If (I=0) And ((FrameNum=0) Or (Fr^.Coded=0)) Then Begin
+   X:=OPRcDecCdf(Rc,POPWA(@OPT_silk_model_gain_highbits[Active+Voiced,0]));
+   LogGain:=(X Shl 3) Or OPRcDecCdf(Rc,@OPT_silk_model_gain_lowbits);
+   If Fr^.Coded<>0 Then LogGain:=OPMaxI(LogGain,Fr^.LogGain-16);
+  End Else Begin
+   DeltaGain:=OPRcDecCdf(Rc,@OPT_silk_model_gain_delta);
+   LogGain:=OPClipU(OPMaxI((DeltaGain Shl 1)-16,Fr^.LogGain+DeltaGain-4),6);
+  End;
+  Fr^.LogGain:=LogGain;
+  LogGain:=OPSar(LogGain*$1D1C71,16)+2090;
+  IPart:=LogGain Shr 7;
+  FPart:=LogGain And 127;
+  LinGain:=(1 Shl IPart)+(OPSar(-174*FPart*(128-FPart),16)+FPart)*((1 Shl IPart) Shr 7);
+  SfGain[I]:=LinGain/65536.0;
+ End;
+ { LPC filter coefficients }
+ OPSilkDecodeLpc(Rc,Fr^,LpcLeadin,LpcBody,Order,HasLpcLeadin,Voiced);
+ { pitch lags }
+ PrimaryLag:=0;
+ FillChar(SfTaps,SizeOf(SfTaps),0);
+ FillChar(SfPitchLag,SizeOf(SfPitchLag),0);
+ If Voiced<>0 Then Begin
+  LagAbsolute:=Ord((FrameNum=0) Or (Fr^.PrevVoiced=0));
+  If LagAbsolute=0 Then Begin
+   Delta:=OPRcDecCdf(Rc,@OPT_silk_model_pitch_delta);
+   If Delta<>0 Then PrimaryLag:=Fr^.PrimaryLag+Delta-9 Else LagAbsolute:=1;
+  End;
+  If LagAbsolute<>0 Then Begin
+   HighBits:=OPRcDecCdf(Rc,@OPT_silk_model_pitch_highbits);
+   Case OPSBandwidth Of
+    0: LowBits:=OPRcDecCdf(Rc,@OPT_silk_model_pitch_lowbits_nb);
+    1: LowBits:=OPRcDecCdf(Rc,@OPT_silk_model_pitch_lowbits_mb);
+   Else LowBits:=OPRcDecCdf(Rc,@OPT_silk_model_pitch_lowbits_wb);
+   End;
+   PrimaryLag:=OPT_silk_pitch_min_lag[OPSBandwidth]+HighBits*OPT_silk_pitch_scale[OPSBandwidth]+LowBits;
+  End;
+  Fr^.PrimaryLag:=PrimaryLag;
+  If OPSSubframes=2 Then Begin
+   If OPSBandwidth=OPBwNb Then Begin
+    Idx:=OPRcDecCdf(Rc,@OPT_silk_model_pitch_contour_nb10ms);
+    For I:=0 To 1 Do Offs[I]:=OPT_silk_pitch_offset_nb10ms[Idx,I];
+   End Else Begin
+    Idx:=OPRcDecCdf(Rc,@OPT_silk_model_pitch_contour_mbwb10ms);
+    For I:=0 To 1 Do Offs[I]:=OPT_silk_pitch_offset_mbwb10ms[Idx,I];
+   End;
+  End Else Begin
+   If OPSBandwidth=OPBwNb Then Begin
+    Idx:=OPRcDecCdf(Rc,@OPT_silk_model_pitch_contour_nb20ms);
+    For I:=0 To 3 Do Offs[I]:=OPT_silk_pitch_offset_nb20ms[Idx,I];
+   End Else Begin
+    Idx:=OPRcDecCdf(Rc,@OPT_silk_model_pitch_contour_mbwb20ms);
+    For I:=0 To 3 Do Offs[I]:=OPT_silk_pitch_offset_mbwb20ms[Idx,I];
+   End;
+  End;
+  For I:=0 To OPSSubframes-1 Do
+   SfPitchLag[I]:=OPClipI(PrimaryLag+Offs[I],OPT_silk_pitch_min_lag[OPSBandwidth],OPT_silk_pitch_max_lag[OPSBandwidth]);
+  { LTP filter coefficients }
+  LtpFilter:=OPRcDecCdf(Rc,@OPT_silk_model_ltp_filter);
+  For I:=0 To OPSSubframes-1 Do Begin
+   Case LtpFilter Of
+    0: Begin
+     Idx:=OPRcDecCdf(Rc,@OPT_silk_model_ltp_filter0_sel);
+     For J:=0 To 4 Do SfTaps[I,J]:=OPT_silk_ltp_filter0_taps[Idx,J]/128.0;
+    End;
+    1: Begin
+     Idx:=OPRcDecCdf(Rc,@OPT_silk_model_ltp_filter1_sel);
+     For J:=0 To 4 Do SfTaps[I,J]:=OPT_silk_ltp_filter1_taps[Idx,J]/128.0;
+    End;
+   Else Begin
+     Idx:=OPRcDecCdf(Rc,@OPT_silk_model_ltp_filter2_sel);
+     For J:=0 To 4 Do SfTaps[I,J]:=OPT_silk_ltp_filter2_taps[Idx,J]/128.0;
+    End;
+   End;
+  End;
+ End;
+ { LTP scale factor }
+ If (Voiced<>0) And (FrameNum=0) Then
+  LtpScale:=OPT_silk_ltp_scale_factor[OPRcDecCdf(Rc,@OPT_silk_model_ltp_scale_index)]/16384.0
+ Else LtpScale:=15565.0/16384.0;
+ { excitation for the entire frame }
+ OPSilkDecodeExcitation(Rc,Residual,OPSilkMaxLag,QoffsetHigh,Active,Voiced);
+ { skip synthesising the output if we do not need it }
+ If (OPSOutputChannels=Channel) Or (Redundant<>0) Then Exit;
+ { generate the output signal }
+ For I:=0 To OPSSubframes-1 Do Begin
+  If (I<2) And (HasLpcLeadin<>0) Then LpcCoeff:=LpcLeadin Else LpcCoeff:=LpcBody;
+  DstBase:=OPSilkHistory+I*OPSSfLength;
+  ResBase:=OPSilkMaxLag+I*OPSSfLength;
+  If Voiced<>0 Then Begin
+   If (I<2) Or (OPSNlsfInterpFactor=4) Then Begin
+    OutEnd:=-I*OPSSfLength; Scale:=LtpScale;
+   End Else Begin
+    OutEnd:=-(I-2)*OPSSfLength; Scale:=1.0;
+   End;
+   For J:=-SfPitchLag[I]-2 To OutEnd-1 Do Begin
+    Sum:=Fr^.Output[DstBase+J];
+    For K:=0 To Order-1 Do Sum:=Sum-LpcCoeff[K]*Fr^.Output[DstBase+J-K-1];
+    Residual[ResBase+J]:=OPClipF(Sum,-1.0,1.0)*Scale/SfGain[I];
+   End;
+   If OutEnd<>0 Then Begin
+    Rescale:=SfGain[I-1]/SfGain[I];
+    For J:=OutEnd To -1 Do Residual[ResBase+J]:=Residual[ResBase+J]*Rescale;
+   End;
+   { LTP synthesis }
+   For J:=0 To OPSSfLength-1 Do Begin
+    Sum:=Residual[ResBase+J];
+    For K:=0 To 4 Do Sum:=Sum+SfTaps[I,K]*Residual[ResBase+J-SfPitchLag[I]+2-K];
+    Residual[ResBase+J]:=Sum;
+   End;
+  End;
+  { LPC synthesis }
+  For J:=0 To OPSSfLength-1 Do Begin
+   Sum:=Residual[ResBase+J]*SfGain[I];
+   For K:=1 To Order Do Sum:=Sum+LpcCoeff[K-1]*Fr^.LpcHistory[DstBase+J-K];
+   Fr^.LpcHistory[DstBase+J]:=Sum;
+   Fr^.Output[DstBase+J]:=OPClipF(Sum,-1.0,1.0);
+  End;
+ End;
+ Fr^.PrevVoiced:=Voiced;
+ Move(Fr^.LpcHistory[OPSFLength],Fr^.LpcHistory[0],OPSilkHistory*4);
+ Move(Fr^.Output[OPSFLength],Fr^.Output[0],OPSilkHistory*4);
+ Fr^.Coded:=1;
+End;
+
+Procedure OPSilkUnmixMs(L,R: POPFA);
+Var MB: LongInt; W0Prev,W1Prev,W0,W1,Interp0,Interp1,P0,M0,M1,M2,S1: Single; N1,I: LongInt;
+Begin
+ MB:=OPSilkHistory-OPSFLength;
+ W0Prev:=OPSPrevStereoWeights[0]; W1Prev:=OPSPrevStereoWeights[1];
+ W0:=OPSStereoWeights[0]; W1:=OPSStereoWeights[1];
+ N1:=OPT_silk_stereo_interp_len[OPSBandwidth];
+ For I:=0 To OPSFLength-1 Do Begin
+  M2:=OPSFrame[0].Output[MB+I-2]; M1:=OPSFrame[0].Output[MB+I-1];
+  P0:=0.25*(M2+2*M1+OPSFrame[0].Output[MB+I]);
+  S1:=OPSFrame[1].Output[MB+I-1];
+  If I<N1 Then Begin
+   Interp0:=W0Prev+I*(W0-W0Prev)/N1;
+   Interp1:=W1Prev+I*(W1-W1Prev)/N1;
+   L^[I]:=OPClipF((1+Interp1)*M1+S1+Interp0*P0,-1.0,1.0);
+   R^[I]:=OPClipF((1-Interp1)*M1-S1-Interp0*P0,-1.0,1.0);
+  End Else Begin
+   L^[I]:=OPClipF((1+W1)*M1+S1+W0*P0,-1.0,1.0);
+   R^[I]:=OPClipF((1-W1)*M1-S1-W0*P0,-1.0,1.0);
+  End;
+ End;
+ OPSPrevStereoWeights[0]:=OPSStereoWeights[0];
+ OPSPrevStereoWeights[1]:=OPSStereoWeights[1];
+End;
+
+Procedure OPSilkFlushFrame(Var Fr: TOPSilkFrame);
+Begin
+ If Fr.Coded=0 Then Exit;
+ FillChar(Fr.Output,SizeOf(Fr.Output),0);
+ FillChar(Fr.LpcHistory,SizeOf(Fr.LpcHistory),0);
+ FillChar(Fr.Lpc,SizeOf(Fr.Lpc),0);
+ FillChar(Fr.Nlsf,SizeOf(Fr.Nlsf),0);
+ Fr.LogGain:=0; Fr.PrimaryLag:=0; Fr.PrevVoiced:=0; Fr.Coded:=0;
+End;
+
+Procedure OPSilkFlush;
+Begin
+ OPSilkFlushFrame(OPSFrame[0]);
+ OPSilkFlushFrame(OPSFrame[1]);
+ OPSPrevStereoWeights[0]:=0; OPSPrevStereoWeights[1]:=0;
+End;
+
+Procedure OPSilkInit(OutputChannels: LongInt);
+Begin
+ FillChar(OPSFrame,SizeOf(OPSFrame),0);
+ FillChar(OPSStereoWeights,SizeOf(OPSStereoWeights),0);
+ OPSOutputChannels:=OutputChannels;
+ OPSMidOnly:=0; OPSPrevCodedChannels:=0;
+ OPSilkFlush;
+End;
+
+{ ff_silk_decode_superframe ; Out0/Out1 : tampons de sortie (960 echantillons chacun) }
+Function OPSilkDecodeSuperframe(Var Rc: TOPRC; Out0,Out1: POPFA; Bandwidth,CodedChannels,DurationMs: LongInt): LongInt;
+Var NbFrames,I,J,Active1: LongInt; Active: Array[0..1,0..5] Of LongInt; Redundancy: Array[0..1] Of LongInt;
+    OutP: POPFA;
+Begin
+ OPSilkDecodeSuperframe:=-1;
+ If (Bandwidth>OPBwWb) Or (CodedChannels>2) Or (DurationMs>60) Then Exit;
+ NbFrames:=1+Ord(DurationMs>20)+Ord(DurationMs>40);
+ OPSSubframes:=DurationMs Div NbFrames Div 5;
+ OPSSfLength:=20*(Bandwidth+2);
+ OPSFLength:=OPSSfLength*OPSSubframes;
+ OPSBandwidth:=Bandwidth;
+ OPSWb:=Ord(Bandwidth=OPBwWb);
+ If CodedChannels>OPSPrevCodedChannels Then OPSilkFlushFrame(OPSFrame[1]);
+ OPSPrevCodedChannels:=CodedChannels;
+ For I:=0 To CodedChannels-1 Do Begin
+  For J:=0 To NbFrames-1 Do Active[I,J]:=OPRcDecLog(Rc,1);
+  Redundancy[I]:=OPRcDecLog(Rc,1);
+ End;
+ For I:=0 To CodedChannels-1 Do
+  If (Redundancy[I]<>0) And (DurationMs>20) Then Begin
+   If DurationMs=40 Then Redundancy[I]:=OPRcDecCdf(Rc,@OPT_silk_model_lbrr_flags_40)
+   Else Redundancy[I]:=OPRcDecCdf(Rc,@OPT_silk_model_lbrr_flags_60);
+  End;
+ { LBRR frames }
+ For I:=0 To NbFrames-1 Do Begin
+  For J:=0 To CodedChannels-1 Do
+   If (Redundancy[J] And (1 Shl I))<>0 Then Begin
+    If (J=0) And ((Redundancy[1] And (1 Shl I))=0) Then Active1:=0 Else Active1:=1;
+    OPSilkDecodeFrame(Rc,I,J,CodedChannels,1,Active1,1);
+   End;
+  OPSMidOnly:=0;
+ End;
+ For I:=0 To NbFrames-1 Do Begin
+  J:=0;
+  While (J<CodedChannels) And (OPSMidOnly=0) Do Begin
+   OPSilkDecodeFrame(Rc,I,J,CodedChannels,Active[J,I],Active[1,I],0);
+   Inc(J);
+  End;
+  If (OPSMidOnly<>0) And (OPSFrame[1].Coded<>0) Then OPSilkFlushFrame(OPSFrame[1]);
+  If (CodedChannels=1) Or (OPSOutputChannels=1) Then Begin
+   For J:=0 To OPSOutputChannels-1 Do Begin
+    If J=0 Then OutP:=Out0 Else OutP:=Out1;
+    Move(OPSFrame[0].Output[OPSilkHistory-OPSFLength-2],OPFAt(OutP,I*OPSFLength)^,OPSFLength*4);
+   End;
+  End Else
+   OPSilkUnmixMs(OPFAt(Out0,I*OPSFLength),OPFAt(Out1,I*OPSFLength));
+  OPSMidOnly:=0;
+ End;
+ OPSilkDecodeSuperframe:=NbFrames*OPSFLength;
+End;
+
+
+{ ---- reechantillonneur libswresample (resample.c / swresample.c), tel qu'utilise par
+  opusdec.c : swr "in_rate -> 48000", planaire flottant, filter_size 16, kaiser
+  beta 9, phase_shift 10, linear_interp, exact_rational, cutoff 0.97.
+  Les rapports 6, 4, 3 donnent phase_count = 6, 4, 3 (filtre sans interpolation
+  lineaire car frac = 0). x86 : padless = 7 (comportement de FFmpeg sur x86). ---- }
+Const
+ OPRsBufMax=8192;
+ OPRsFL=16;                 { filter_length = filter_alloc }
+ OPBesselP1: Array[0..14] Of Double=(
+  -2.2335582639474375249E+15,-5.5050369673018427753E+14,-3.2940087627407749166E+13,
+  -8.4925101247114157499E+11,-1.1912746104985237192E+10,-1.0313066708737980747E+08,
+  -5.9545626019847898221E+05,-2.4125195876041896775E+03,-7.0935347449210549190E+00,
+  -1.5453977791786851041E-02,-2.5172644670688975051E-05,-3.0517226450451067446E-08,
+  -2.6843448573468483278E-11,-1.5982226675653184646E-14,-5.2487866627945699800E-18);
+ OPBesselQ1: Array[0..5] Of Double=(
+  -2.2335582639474375245E+15,7.8858692566751002988E+12,-1.2207067397808979846E+10,
+  1.0377081058062166144E+07,-4.8527560179962773045E+03,1.0);
+ OPRsDelayTab: Array[0..4] Of LongInt=(4,8,11,11,11);
+
+Type
+ TOPAD=Record Ch: Array[0..1] Of POPFA; End;
+
+Var
+ OPRsInit,OPRsFlushed,OPRsInConstraint: Boolean;
+ OPRsRate,OPRsPhaseCount,OPRsIndex,OPRsFrac,OPRsSrcIncr,OPRsDstIncr,OPRsInIdx,OPRsInCnt,OPRsCh: LongInt;
+ OPRsBank: Array[0..6,0..OPRsFL-1] Of Single;
+ OPRsBuf: Array[0..1,0..OPRsBufMax-1] Of Single;
+ OPRsBufAD: TOPAD;
+
+Function OPBesselI0(X: Double): Double;
+Var Y,S1,S2: Double; I: LongInt;
+Begin
+ If X=0 Then Begin OPBesselI0:=1.0; Exit; End;
+ If X<0 Then X:=-X;
+ Y:=X*X;
+ S1:=OPBesselP1[14];
+ For I:=13 DownTo 0 Do Begin S1:=S1*Y; S1:=S1+OPBesselP1[I]; End;
+ S2:=OPBesselQ1[5];
+ For I:=4 DownTo 0 Do Begin S2:=S2*Y; S2:=S2+OPBesselQ1[I]; End;
+ OPBesselI0:=S1/S2;
+End;
+
+{ build_filter (type flottant, facteur 1.0, 16 taps, Kaiser beta 9) }
+Procedure OPRsBuildFilter(Pc: LongInt);
+Var Ph,I,PhNb,Center: LongInt; X,Y,W,S,Norm: Double; Tab: Array[0..15] Of Double; SinLut: Array[0..6] Of Double;
+Begin
+ If (Pc Mod 2)<>0 Then PhNb:=Pc Else PhNb:=Pc Div 2+1;
+ Center:=(OPRsFL-1) Div 2;
+ Norm:=0;
+ For Ph:=0 To PhNb-1 Do Begin
+  If (Center And 1)<>0 Then SinLut[Ph]:=Sin(3.1415926535897931*Ph/Pc)
+  Else SinLut[Ph]:=-Sin(3.1415926535897931*Ph/Pc);
+ End;
+ For Ph:=0 To PhNb-1 Do Begin
+  S:=SinLut[Ph];
+  For I:=0 To OPRsFL-1 Do Begin
+   X:=3.1415926535897931*((I-Center)-Ph/Pc);
+   If X=0 Then Y:=1.0 Else Y:=S/X;
+   W:=2.0*X/(OPRsFL*3.1415926535897931);
+   W:=1-W*W; If W<0 Then W:=0;
+   Y:=Y*OPBesselI0(9.0*Sqrt(W));
+   Tab[I]:=Y;
+   S:=-S;
+   If Ph=0 Then Norm:=Norm+Y;
+  End;
+  For I:=0 To OPRsFL-1 Do OPRsBank[Ph,I]:=Tab[I]/Norm;
+  If (Pc Mod 2)=0 Then
+   For I:=0 To OPRsFL-1 Do OPRsBank[Pc-Ph,OPRsFL-1-I]:=OPRsBank[Ph,I];
+ End;
+End;
+
+Procedure OPAdSet(Var Dst: TOPAD; Const Src: TOPAD; N: LongInt);
+Var C: LongInt;
+Begin
+ For C:=0 To 1 Do
+  If Src.Ch[C]<>Nil Then Dst.Ch[C]:=OPFAt(Src.Ch[C],N) Else Dst.Ch[C]:=Nil;
+End;
+
+Procedure OPAdAdv(Var A: TOPAD; N: LongInt);
+Var C: LongInt;
+Begin
+ For C:=0 To 1 Do If A.Ch[C]<>Nil Then A.Ch[C]:=OPFAt(A.Ch[C],N);
+End;
+
+Procedure OPAdCopy(Const Dst,Src: TOPAD; Count: LongInt);
+Var C: LongInt;
+Begin
+ If Count<=0 Then Exit;
+ For C:=0 To OPRsCh-1 Do Move(Src.Ch[C]^,Dst.Ch[C]^,Count*4);
+End;
+
+{ initialisation du contexte (swr_init pour la frequence Rate) }
+Procedure OPRsInitCtx(Rate: LongInt);
+Var C: LongInt;
+Begin
+ OPRsRate:=Rate;
+ OPRsPhaseCount:=48000 Div Rate;
+ OPRsBuildFilter(OPRsPhaseCount);
+ OPRsSrcIncr:=1 Shl 20; OPRsDstIncr:=1 Shl 20;
+ OPRsIndex:=-OPRsPhaseCount*((OPRsFL-1) Div 2);
+ OPRsFrac:=0;
+ OPRsInIdx:=0; OPRsInCnt:=0;
+ OPRsInConstraint:=False; OPRsFlushed:=False;
+ For C:=0 To 1 Do OPRsBufAD.Ch[C]:=@OPRsBuf[C,0];
+ OPRsInit:=True;
+End;
+
+Procedure OPRsClose;
+Begin
+ OPRsInit:=False; OPRsInIdx:=0; OPRsInCnt:=0; OPRsInConstraint:=False; OPRsFlushed:=False;
+End;
+
+{ invert_initial_buffer ; renvoie MaxLongInt pour "attendre plus de donnees" }
+Function OPRsInvertInitial(Const InA: TOPAD; InCount: LongInt): LongInt;
+Var N,Ch,Num,Res: LongInt;
+Begin
+ Num:=OPMinI(InCount+OPRsInCnt,OPRsFL+1);
+ If OPRsIndex>=0 Then Begin OPRsInvertInitial:=0; Exit; End;
+ For N:=OPRsInCnt To Num-1 Do
+  For Ch:=0 To OPRsCh-1 Do
+   OPRsBuf[Ch,OPRsFL+N]:=InA.Ch[Ch]^[N-OPRsInCnt];
+ If Num<OPRsFL+1 Then Begin
+  OPRsInCnt:=Num; OPRsInIdx:=OPRsFL;
+  OPRsInvertInitial:=MaxLongInt; Exit;
+ End;
+ For N:=1 To OPRsFL Do
+  For Ch:=0 To OPRsCh-1 Do
+   OPRsBuf[Ch,OPRsFL-N]:=OPRsBuf[Ch,OPRsFL+N];
+ Res:=Num-OPRsInCnt;
+ OPRsInIdx:=OPRsFL;
+ While OPRsIndex<0 Do Begin
+  Dec(OPRsInIdx);
+  Inc(OPRsIndex,OPRsPhaseCount);
+ End;
+ OPRsInCnt:=OPMaxI(OPRsInCnt+OPRsFL,1+OPRsFL*2)-OPRsInIdx;
+ OPRsInvertInitial:=OPMaxI(Res,0);
+End;
+
+Function OPRsCommon(Dst,Src: POPFA; N: LongInt; UpdateCtx: Boolean): LongInt;
+Var DstIndex,Index,SampleIndex,I: LongInt; Val,Val2: Single;
+Begin
+ Index:=OPRsIndex; SampleIndex:=0;
+ While Index>=OPRsPhaseCount Do Begin Inc(SampleIndex); Dec(Index,OPRsPhaseCount); End;
+ For DstIndex:=0 To N-1 Do Begin
+  Val:=0; Val2:=0;
+  I:=0;
+  While I+1<OPRsFL Do Begin
+   Val:=Val+Src^[SampleIndex+I]*OPRsBank[Index,I];
+   Val2:=Val2+Src^[SampleIndex+I+1]*OPRsBank[Index,I+1];
+   Inc(I,2);
+  End;
+  Dst^[DstIndex]:=Val+Val2;
+  Inc(Index);                 { dst_incr_div = 1, dst_incr_mod = 0 }
+  While Index>=OPRsPhaseCount Do Begin Inc(SampleIndex); Dec(Index,OPRsPhaseCount); End;
+ End;
+ If UpdateCtx Then OPRsIndex:=Index;
+ OPRsCommon:=SampleIndex;
+End;
+
+Function OPRsMultiple(Const Dst: TOPAD; DstSize: LongInt; Const Src: TOPAD; SrcSize: LongInt; Var Consumed: LongInt): LongInt;
+Var EndIndex,DeltaFrac: Int64; DeltaN,I: LongInt;
+Begin
+ Consumed:=0;
+ EndIndex:=(1+Int64(SrcSize)-OPRsFL)*OPRsPhaseCount;
+ DeltaFrac:=(EndIndex-OPRsIndex)*OPRsSrcIncr-OPRsFrac;
+ DeltaN:=LongInt((DeltaFrac+OPRsDstIncr-1) Div OPRsDstIncr);
+ DstSize:=OPMaxI(OPMinI(DstSize,DeltaN),0);
+ If DstSize>0 Then
+  For I:=0 To OPRsCh-1 Do
+   Consumed:=OPRsCommon(Dst.Ch[I],Src.Ch[I],DstSize,I+1=OPRsCh);
+ OPRsMultiple:=DstSize;
+End;
+
+Procedure OPRsFlushReflect;
+Var Reflection,I,J: LongInt;
+Begin
+ Reflection:=(OPMinI(OPRsInCnt,OPRsFL)+1) Div 2;
+ For I:=0 To OPRsCh-1 Do
+  For J:=0 To Reflection-1 Do
+   OPRsBuf[I,OPRsInIdx+OPRsInCnt+J]:=OPRsBuf[I,OPRsInIdx+OPRsInCnt-J-1];
+ Inc(OPRsInCnt,Reflection);
+End;
+
+{ resample() de swresample.c ; renvoie le nombre d'echantillons de sortie par canal }
+Function OPRsResample(OutP: TOPAD; OutCount: LongInt; InP: TOPAD; InCount: LongInt): LongInt;
+Var InA,OutA,Tmp: TOPAD; RetSum,Border,Padless,Ret,Size,Consumed,Count: LongInt;
+Begin
+ RetSum:=0; Padless:=7;
+ OutA:=OutP; InA:=InP;
+ Border:=OPRsInvertInitial(InA,InCount);
+ If Border=MaxLongInt Then Begin OPRsResample:=0; Exit; End
+ Else If Border<>0 Then Begin
+  OPAdAdv(InA,Border);
+  Dec(InCount,Border);
+  OPRsInConstraint:=False;
+ End;
+ While True Do Begin
+  If (Not OPRsInConstraint) And (OPRsInCnt<>0) Then Begin
+   OPAdSet(Tmp,OPRsBufAD,OPRsInIdx);
+   Ret:=OPRsMultiple(OutA,OutCount,Tmp,OPRsInCnt,Consumed);
+   Dec(OutCount,Ret); Inc(RetSum,Ret);
+   OPAdAdv(OutA,Ret);
+   Dec(OPRsInCnt,Consumed); Inc(OPRsInIdx,Consumed);
+   If InCount=0 Then Break;
+   If OPRsInCnt<=Border Then Begin
+    OPAdAdv(InA,-OPRsInCnt);
+    Inc(InCount,OPRsInCnt);
+    OPRsInCnt:=0; OPRsInIdx:=0;
+    Border:=0;
+   End;
+  End;
+  If (OPRsFlushed Or (InCount>Padless)) And (OPRsInCnt=0) Then Begin
+   OPRsInIdx:=0;
+   Ret:=OPRsMultiple(OutA,OutCount,InA,OPMaxI(InCount-Padless,0),Consumed);
+   Dec(OutCount,Ret); Inc(RetSum,Ret);
+   OPAdAdv(OutA,Ret);
+   Dec(InCount,Consumed);
+   OPAdAdv(InA,Consumed);
+  End;
+  Size:=OPRsInIdx+OPRsInCnt+InCount;
+  If Size>OPRsBufMax Then Begin
+   { compactage du tampon (equivalent du realloc/copie de swr) }
+   OPAdSet(Tmp,OPRsBufAD,OPRsInIdx);
+   For Count:=0 To OPRsCh-1 Do Move(Tmp.Ch[Count]^,OPRsBuf[Count,0],OPRsInCnt*4);
+   OPRsInIdx:=0;
+  End;
+  If InCount<>0 Then Begin
+   Count:=InCount;
+   If (OPRsInCnt<>0) And (OPRsInCnt+2<Count) And (OutCount<>0) Then Count:=OPRsInCnt+2;
+   OPAdSet(Tmp,OPRsBufAD,OPRsInIdx+OPRsInCnt);
+   OPAdCopy(Tmp,InA,Count);
+   Inc(OPRsInCnt,Count);
+   Dec(InCount,Count);
+   Inc(Border,Count);
+   OPAdAdv(InA,Count);
+   OPRsInConstraint:=False;
+   If (OPRsInCnt<>Count) Or (InCount<>0) Then Continue;
+   If Padless<>0 Then Begin Padless:=0; Continue; End;
+  End;
+  Break;
+ End;
+ OPRsInConstraint:=(OutCount<>0);
+ OPRsResample:=RetSum;
+End;
+
+{ swr_convert ; Inp.Ch[0]=Nil pour le vidage (in_arg == NULL) }
+Function OPRsConvert(OutP: TOPAD; OutCount: LongInt; InP: TOPAD; InCount: LongInt; Flush: Boolean): LongInt;
+Begin
+ If Flush Then Begin
+  If Not OPRsFlushed Then OPRsFlushReflect;
+  OPRsInConstraint:=False;
+  OPRsFlushed:=True;
+  InCount:=0;
+ End;
+ OPRsConvert:=OPRsResample(OutP,OutCount,InP,InCount);
+End;
+
+
+{ ---- analyse des paquets (opus_parse.c) ---- }
+Const
+ OPFrameDuration: Array[0..31] Of Word=(
+  480,960,1920,2880, 480,960,1920,2880, 480,960,1920,2880, 480,960, 480,960,
+  120,240,480,960, 120,240,480,960, 120,240,480,960, 120,240,480,960);
+ OPSilkFrameMs: Array[0..15] Of Word=(10,20,40,60, 10,20,40,60, 10,20,40,60, 10,20, 10,20);
+
+Function OPLacing16(Buf: PEABuffer; Var Ptr: LongInt; EndP: LongInt): LongInt;
+Var Val: LongInt;
+Begin
+ If Ptr>=EndP Then Begin OPLacing16:=-1; Exit; End;
+ Val:=Buf^[Ptr]; Inc(Ptr);
+ If Val>=252 Then Begin
+  If Ptr>=EndP Then Begin OPLacing16:=-1; Exit; End;
+  Val:=Val+4*Buf^[Ptr]; Inc(Ptr);
+ End;
+ OPLacing16:=Val;
+End;
+
+Function OPLacingFull(Buf: PEABuffer; Var Ptr: LongInt; EndP: LongInt): LongInt;
+Var Val,Next: LongInt;
+Begin
+ Val:=0;
+ While True Do Begin
+  If (Ptr>=EndP) Or (Val>MaxLongInt-254) Then Begin OPLacingFull:=-1; Exit; End;
+  Next:=Buf^[Ptr]; Inc(Ptr);
+  Val:=Val+Next;
+  If Next<255 Then Break Else Dec(Val);
+ End;
+ OPLacingFull:=Val;
+End;
+
+Function OPParsePacket(Buf: PEABuffer; BufSize: LongInt; Var Pkt: TOPPacket): Boolean;
+Var Ptr,EndP,Padding,FrameBytes,I,TotalBytes: LongInt;
+Begin
+ OPParsePacket:=False;
+ FillChar(Pkt,SizeOf(Pkt),0);
+ Ptr:=0; EndP:=BufSize; Padding:=0;
+ If BufSize<1 Then Exit;
+ I:=Buf^[Ptr]; Inc(Ptr);
+ Pkt.Code:=I And 3;
+ Pkt.Stereo:=(I Shr 2) And 1;
+ Pkt.Config:=(I Shr 3) And $1F;
+ If (Pkt.Code>=2) And (BufSize<2) Then Exit;
+ Case Pkt.Code Of
+  0: Begin
+   Pkt.FrameCount:=1; Pkt.Vbr:=0;
+   FrameBytes:=EndP-Ptr;
+   If FrameBytes>OPMaxFrame Then Exit;
+   Pkt.FrameOffset[0]:=Ptr; Pkt.FrameSize[0]:=FrameBytes;
+  End;
+  1: Begin
+   Pkt.FrameCount:=2; Pkt.Vbr:=0;
+   FrameBytes:=EndP-Ptr;
+   If ((FrameBytes And 1)<>0) Or ((FrameBytes Shr 1)>OPMaxFrame) Then Exit;
+   Pkt.FrameOffset[0]:=Ptr; Pkt.FrameSize[0]:=FrameBytes Shr 1;
+   Pkt.FrameOffset[1]:=Pkt.FrameOffset[0]+Pkt.FrameSize[0];
+   Pkt.FrameSize[1]:=FrameBytes Shr 1;
+  End;
+  2: Begin
+   Pkt.FrameCount:=2; Pkt.Vbr:=1;
+   FrameBytes:=OPLacing16(Buf,Ptr,EndP);
+   If FrameBytes<0 Then Exit;
+   Pkt.FrameOffset[0]:=Ptr; Pkt.FrameSize[0]:=FrameBytes;
+   FrameBytes:=EndP-Ptr-Pkt.FrameSize[0];
+   If (FrameBytes<0) Or (FrameBytes>OPMaxFrame) Then Exit;
+   Pkt.FrameOffset[1]:=Pkt.FrameOffset[0]+Pkt.FrameSize[0];
+   Pkt.FrameSize[1]:=FrameBytes;
+  End;
+  3: Begin
+   I:=Buf^[Ptr]; Inc(Ptr);
+   Pkt.FrameCount:=I And $3F;
+   Padding:=(I Shr 6) And 1;
+   Pkt.Vbr:=(I Shr 7) And 1;
+   If (Pkt.FrameCount=0) Or (Pkt.FrameCount>OPMaxFrames) Then Exit;
+   If Padding<>0 Then Begin
+    Padding:=OPLacingFull(Buf,Ptr,EndP);
+    If Padding<0 Then Exit;
+   End;
+   If Pkt.Vbr<>0 Then Begin
+    TotalBytes:=0;
+    For I:=0 To Pkt.FrameCount-2 Do Begin
+     FrameBytes:=OPLacing16(Buf,Ptr,EndP);
+     If FrameBytes<0 Then Exit;
+     Pkt.FrameSize[I]:=FrameBytes;
+     Inc(TotalBytes,FrameBytes);
+    End;
+    FrameBytes:=EndP-Ptr-Padding;
+    If TotalBytes>FrameBytes Then Exit;
+    Pkt.FrameOffset[0]:=Ptr;
+    For I:=1 To Pkt.FrameCount-1 Do Pkt.FrameOffset[I]:=Pkt.FrameOffset[I-1]+Pkt.FrameSize[I-1];
+    Pkt.FrameSize[Pkt.FrameCount-1]:=FrameBytes-TotalBytes;
+   End Else Begin
+    FrameBytes:=EndP-Ptr-Padding;
+    If FrameBytes<0 Then Exit;
+    If ((FrameBytes Mod Pkt.FrameCount)<>0) Or ((FrameBytes Div Pkt.FrameCount)>OPMaxFrame) Then Exit;
+    FrameBytes:=FrameBytes Div Pkt.FrameCount;
+    Pkt.FrameOffset[0]:=Ptr; Pkt.FrameSize[0]:=FrameBytes;
+    For I:=1 To Pkt.FrameCount-1 Do Begin
+     Pkt.FrameOffset[I]:=Pkt.FrameOffset[I-1]+Pkt.FrameSize[I-1];
+     Pkt.FrameSize[I]:=FrameBytes;
+    End;
+   End;
+  End;
+ End;
+ Pkt.PacketSize:=BufSize;
+ Pkt.DataSize:=Pkt.PacketSize-Padding;
+ Pkt.FrameDuration:=OPFrameDuration[Pkt.Config];
+ If Pkt.FrameDuration*Pkt.FrameCount>OPMaxPacketDur Then Begin FillChar(Pkt,SizeOf(Pkt),0); Exit; End;
+ If Pkt.Config<12 Then Begin
+  Pkt.Mode:=OPModeSilk; Pkt.Bandwidth:=Pkt.Config Shr 2;
+ End Else If Pkt.Config<16 Then Begin
+  Pkt.Mode:=OPModeHybrid; Pkt.Bandwidth:=OPBwSwb+Ord(Pkt.Config>=14);
+ End Else Begin
+  Pkt.Mode:=OPModeCelt; Pkt.Bandwidth:=(Pkt.Config-16) Shr 2;
+  If Pkt.Bandwidth<>0 Then Inc(Pkt.Bandwidth);
+ End;
+ OPParsePacket:=True;
+End;
+
+{ ---- etat du decodeur (opusdec.c, un seul flux) ---- }
+Var
+ OPOpen: Boolean;
+ OPChannels,OPGainI,OPPreSkip,OPSilkRate,OPDelayed,OPRedundancyIdx,OPCur,OPCeltDelayN: LongInt;
+ OPGain: Single;
+ OPPkt: TOPPacket;
+ OPRc,OPRcRed: TOPRC;
+ OPOut,OPSilkBuf,OPCeltBuf,OPRedBuf: Array[0..1,0..OPOutMax-1] Of Single;
+ OPCeltDelayBuf: Array[0..1,0..OPOutMax-1] Of Single;
+
+Procedure OPFade(Out_,In1,In2: POPFA; Win: LongInt; Len: LongInt);
+Var I: LongInt; T: Single; W: Single;
+Begin
+ For I:=0 To Len-1 Do Begin
+  W:=OPT_celt_window2[Win+I];
+  T:=In2^[I]*W;
+  Out_^[I]:=Single(Double(T)+Double(In1^[I])*(1.0-Double(W)));
+ End;
+End;
+
+Function OPCurOut(Ch: LongInt): POPFA;
+Begin
+ OPCurOut:=POPFA(@OPOut[Ch,OPCur]);
+End;
+
+{ opus_flush_resample }
+Function OPFlushResample(NbSamples: LongInt): LongInt;
+Var OutA,InA: TOPAD; Ret,I,K,CeltSize: LongInt;
+Begin
+ OPFlushResample:=-1;
+ FillChar(OutA,SizeOf(OutA),0); FillChar(InA,SizeOf(InA),0);
+ For I:=0 To OPChannels-1 Do OutA.Ch[I]:=OPCurOut(I);
+ Ret:=OPRsConvert(OutA,NbSamples,InA,0,True);
+ If Ret<>NbSamples Then Exit;
+ CeltSize:=OPCeltDelayN;
+ If CeltSize<>0 Then Begin
+  If CeltSize<>NbSamples Then Exit;
+  For I:=0 To OPChannels-1 Do
+   For K:=0 To NbSamples-1 Do OPCeltBuf[I,K]:=OPCeltDelayBuf[I,K];
+  OPCeltDelayN:=0;
+  For I:=0 To OPChannels-1 Do
+   For K:=0 To NbSamples-1 Do OPOut[I,OPCur+K]:=OPOut[I,OPCur+K]+OPCeltBuf[I,K];
+ End;
+ If OPRedundancyIdx<>0 Then Begin
+  For I:=0 To OPChannels-1 Do
+   OPFade(OPCurOut(I),OPCurOut(I),OPFAt(POPFA(@OPRedBuf[I,0]),120+OPRedundancyIdx),OPRedundancyIdx,120-OPRedundancyIdx);
+  OPRedundancyIdx:=0;
+ End;
+ Inc(OPCur,NbSamples);
+ OPFlushResample:=0;
+End;
+
+Function OPDecodeRedundancy(Data: PEABuffer; Size,Avail: LongInt): LongInt;
+Begin
+ OPDecodeRedundancy:=-1;
+ OPRcInit(OPRcRed,Data,Size,Avail);
+ OPRcRawInit(OPRcRed,Size,Size);
+ If OPCeltDecodeFrame(OPRcRed,POPFA(@OPRedBuf[0,0]),POPFA(@OPRedBuf[1,0]),OPPkt.Stereo+1,240,0,
+    OPT_celt_band_end[OPPkt.Bandwidth])<0 Then Exit;
+ OPDecodeRedundancy:=0;
+End;
+
+Function OPDecodeFrame(Data: PEABuffer; Size,Avail: LongInt): LongInt;
+Var
+ Samples,Redundancy,RedundancySize,RedundancyPos,I,K,Consumed,DelayedSamples,Delay,CeltOutputSamples,CeltDelay: LongInt;
+ OutA,InA: TOPAD; DelayIn: Array[0..15] Of Single;
+ OutTmp: Array[0..1] Of POPFA; Dst0,Dst1: POPFA; DataP: PEABuffer;
+ Ret: LongInt;
+Begin
+ OPDecodeFrame:=-1;
+ Samples:=OPPkt.FrameDuration;
+ Redundancy:=0; RedundancySize:=0; RedundancyPos:=0;
+ DelayedSamples:=OPDelayed;
+ OPRcInit(OPRc,Data,Size,Avail);
+ { SILK }
+ If (OPPkt.Mode=OPModeSilk) Or (OPPkt.Mode=OPModeHybrid) Then Begin
+  If Not OPRsInit Then Begin
+   OPRsInitCtx(OPSilkRate);
+   FillChar(DelayIn,SizeOf(DelayIn),0);
+   FillChar(OutA,SizeOf(OutA),0); FillChar(InA,SizeOf(InA),0);
+   InA.Ch[0]:=@DelayIn; InA.Ch[1]:=@DelayIn;
+   OPRsConvert(OutA,0,InA,OPRsDelayTab[OPPkt.Bandwidth],False);
+  End;
+  Samples:=OPSilkDecodeSuperframe(OPRc,POPFA(@OPSilkBuf[0,0]),POPFA(@OPSilkBuf[1,0]),
+           OPMinI(OPPkt.Bandwidth,OPBwWb),OPPkt.Stereo+1,OPSilkFrameMs[OPPkt.Config]);
+  If Samples<0 Then Exit;
+  FillChar(OutA,SizeOf(OutA),0); FillChar(InA,SizeOf(InA),0);
+  For I:=0 To OPChannels-1 Do Begin
+   OutA.Ch[I]:=OPCurOut(I);
+   InA.Ch[I]:=POPFA(@OPSilkBuf[I,0]);
+  End;
+  Samples:=OPRsConvert(OutA,OPPkt.FrameDuration,InA,Samples,False);
+  Inc(OPDelayed,OPPkt.FrameDuration-Samples);
+ End Else OPSilkFlush;
+ { redundancy information }
+ Consumed:=OPRcTell(OPRc);
+ If (OPPkt.Mode=OPModeHybrid) And (Consumed+37<=Size*8) Then Redundancy:=OPRcDecLog(OPRc,12)
+ Else If (OPPkt.Mode=OPModeSilk) And (Consumed+17<=Size*8) Then Redundancy:=1;
+ If Redundancy<>0 Then Begin
+  RedundancyPos:=OPRcDecLog(OPRc,1);
+  If OPPkt.Mode=OPModeHybrid Then RedundancySize:=LongInt(OPRcDecUint(OPRc,256))+2
+  Else RedundancySize:=Size-(Consumed+7) Div 8;
+  Dec(Size,RedundancySize);
+  If Size<0 Then Exit;
+  If RedundancyPos<>0 Then Begin
+   DataP:=PEABuffer(PtrInt(Data)+Size);
+   If OPDecodeRedundancy(DataP,RedundancySize,Avail-Size)<0 Then Exit;
+   OPCeltFlush;
+  End;
+ End;
+ { CELT }
+ If (OPPkt.Mode=OPModeCelt) Or (OPPkt.Mode=OPModeHybrid) Then Begin
+  For I:=0 To 1 Do OutTmp[I]:=OPCurOut(I);
+  If OPPkt.Mode=OPModeCelt Then Begin Dst0:=OutTmp[0]; Dst1:=OutTmp[1]; End
+  Else Begin Dst0:=POPFA(@OPCeltBuf[0,0]); Dst1:=POPFA(@OPCeltBuf[1,0]); End;
+  CeltOutputSamples:=Samples;
+  Delay:=OPCeltDelayN;
+  If Delay<>0 Then Begin
+   If OPPkt.Mode=OPModeHybrid Then Begin
+    For I:=0 To OPChannels-1 Do Begin
+     For K:=0 To Delay-1 Do OPCeltBuf[I,K]:=OPCeltDelayBuf[I,K];
+     For K:=0 To Delay-1 Do OutTmp[I]^[K]:=OutTmp[I]^[K]+OPCeltBuf[I,K];
+     OutTmp[I]:=OPFAt(OutTmp[I],Delay);
+    End;
+    OPCeltDelayN:=0;
+    Dec(CeltOutputSamples,Delay);
+   End Else OPCeltDelayN:=0;
+  End;
+  OPRcRawInit(OPRc,Size,Size);
+  If OPPkt.Mode=OPModeHybrid Then K:=17 Else K:=0;
+  Ret:=OPCeltDecodeFrame(OPRc,Dst0,Dst1,OPPkt.Stereo+1,OPPkt.FrameDuration,K,OPT_celt_band_end[OPPkt.Bandwidth]);
+  If Ret<0 Then Exit;
+  If OPPkt.Mode=OPModeHybrid Then Begin
+   If CeltOutputSamples<0 Then CeltOutputSamples:=0;     { flux corrompu : evite les debordements }
+   CeltDelay:=OPPkt.FrameDuration-CeltOutputSamples;
+   For I:=0 To OPChannels-1 Do
+    For K:=0 To CeltOutputSamples-1 Do OutTmp[I]^[K]:=OutTmp[I]^[K]+OPCeltBuf[I,K];
+   For I:=0 To OPChannels-1 Do
+    For K:=0 To CeltDelay-1 Do OPCeltDelayBuf[I,K]:=OPCeltBuf[I,CeltOutputSamples+K];
+   OPCeltDelayN:=CeltDelay;
+  End;
+ End Else OPCeltFlush;
+ If OPRedundancyIdx<>0 Then Begin
+  For I:=0 To OPChannels-1 Do
+   OPFade(OPCurOut(I),OPCurOut(I),OPFAt(POPFA(@OPRedBuf[I,0]),120+OPRedundancyIdx),OPRedundancyIdx,120-OPRedundancyIdx);
+  OPRedundancyIdx:=0;
+ End;
+ If Redundancy<>0 Then Begin
+  If RedundancyPos=0 Then Begin
+   OPCeltFlush;
+   DataP:=PEABuffer(PtrInt(Data)+Size);
+   If OPDecodeRedundancy(DataP,RedundancySize,Avail-Size)<0 Then Exit;
+   For I:=0 To OPChannels-1 Do Begin
+    OPFade(OPFAt(OPCurOut(I),Samples-120+DelayedSamples),OPFAt(OPCurOut(I),Samples-120+DelayedSamples),
+           OPFAt(POPFA(@OPRedBuf[I,0]),120),0,120-DelayedSamples);
+    If DelayedSamples<>0 Then OPRedundancyIdx:=120-DelayedSamples;
+   End;
+  End Else Begin
+   For I:=0 To OPChannels-1 Do Begin
+    Move(OPRedBuf[I,0],OPFAt(OPCurOut(I),DelayedSamples)^,120*4);
+    OPFade(OPFAt(OPCurOut(I),120+DelayedSamples),OPFAt(POPFA(@OPRedBuf[I,0]),120),
+           OPFAt(OPCurOut(I),120+DelayedSamples),0,120);
+   End;
+  End;
+ End;
+ OPDecodeFrame:=Samples;
+End;
+
+{ opus_decode_subpacket : Buf=Nil pour vider le reechantillonneur }
+Function OPDecodeSub(Buf: PEABuffer): LongInt;
+Var FlushNeeded: Boolean; OutputSamples,I,J,Size,Samples: LongInt; FrameP: PEABuffer;
+Begin
+ OPDecodeSub:=-1;
+ OPCur:=0;
+ FlushNeeded:=False;
+ If OPRsInit Then Begin
+  If Buf<>Nil Then FlushNeeded:=(OPPkt.Mode=OPModeCelt) Or (OPRsRate<>OPSilkRate)
+  Else FlushNeeded:=(OPDelayed<>0);
+ End;
+ If (Buf=Nil) And Not FlushNeeded Then Begin OPDecodeSub:=0; Exit; End;
+ OutputSamples:=0;
+ If FlushNeeded Then Begin
+  If OPFlushResample(OPDelayed)<0 Then Exit;
+  OPRsClose;
+  Inc(OutputSamples,OPDelayed);
+  OPDelayed:=0;
+  If Buf=Nil Then Begin OPDecodeSub:=OutputSamples; Exit; End;
+ End;
+ For I:=0 To OPPkt.FrameCount-1 Do Begin
+  Size:=OPPkt.FrameSize[I];
+  FrameP:=PEABuffer(PtrInt(Buf)+OPPkt.FrameOffset[I]);
+  Samples:=OPDecodeFrame(FrameP,Size,OPPkt.PacketSize-OPPkt.FrameOffset[I]);
+  If Samples<0 Then Begin
+   For J:=0 To OPChannels-1 Do FillChar(OPOut[J,OPCur],OPPkt.FrameDuration*4,0);
+   Samples:=OPPkt.FrameDuration;
+  End;
+  Inc(OutputSamples,Samples);
+  Inc(OPCur,Samples);
+ End;
+ OPDecodeSub:=OutputSamples;
+End;
+
+{ Decode un paquet (ou vide avec Buf=Nil). Resultat : OPOut[0..OPChannels-1][0..N-1]
+  (flottant, gain applique) ; renvoie N, ou -1 en cas de paquet invalide. }
+Function OPDecodeFloat(Buf: PEABuffer; BufSize: LongInt): LongInt;
+Var Coded,Delayed,Ret,I,K: LongInt;
+Begin
+ OPDecodeFloat:=-1;
+ Delayed:=OPDelayed;
+ Coded:=0;
+ If Buf<>Nil Then Begin
+  If Not OPParsePacket(Buf,BufSize,OPPkt) Then Exit;
+  Coded:=OPPkt.FrameCount*OPPkt.FrameDuration;
+  If OPPkt.Config<4 Then OPSilkRate:=8000 Else If OPPkt.Config<8 Then OPSilkRate:=12000 Else OPSilkRate:=16000;
+ End;
+ If Coded+Delayed=0 Then Begin OPDecodeFloat:=0; Exit; End;
+ If Coded+Delayed>OPOutMax-1024 Then Exit;
+ Ret:=OPDecodeSub(Buf);
+ If Ret<0 Then Exit;
+ If (OPGainI<>0) And (Ret>0) Then
+  For I:=0 To OPChannels-1 Do
+   For K:=0 To Ret-1 Do OPOut[I,K]:=OPOut[I,K]*OPGain;
+ OPDecodeFloat:=Ret;
+End;
+
+{ lrintf : arrondi au plus proche pair }
+Function OPLrint(X: Single): LongInt;
+Var T,D: Double;
+Begin
+ T:=Int(Double(X)); D:=Double(X)-T;
+ If D>0.5 Then T:=T+1
+ Else If D<-0.5 Then T:=T-1
+ Else If D=0.5 Then Begin If Frac(T/2)<>0 Then T:=T+1; End
+ Else If D=-0.5 Then Begin If Frac(T/2)<>0 Then T:=T-1; End;
+ OPLrint:=Trunc(T);
+End;
+
+Function OPToS16(X: Single): LongInt;
+Var V: Single; R: LongInt;
+Begin
+ V:=X*32768.0;
+ { conversion SIMD x86 de swresample (cvtps2dq + packssdw) : NaN et valeurs hors de [-2^31, 2^31[
+   donnent 0x80000000, soit -32768 apres saturation }
+ If (V<>V) Or (V>=2147483648.0) Or (V<=-2147483648.0) Then R:=-32768
+ Else If V>=32768.0 Then R:=32767
+ Else If V<=-32768.0 Then R:=-32768
+ Else Begin
+  R:=OPLrint(V);
+  If R>32767 Then R:=32767 Else If R<-32768 Then R:=-32768;
+ End;
+ OPToS16:=R;
+End;
+
+{ ---- API ---- }
+{ Reinitialise l'etat complet du decodeur }
+Procedure OpReset;
+Begin
+ FillChar(OPPkt,SizeOf(OPPkt),0);
+ OPDelayed:=0; OPRedundancyIdx:=0; OPCeltDelayN:=0; OPCur:=0; OPSilkRate:=16000;
+ OPRsClose;
+ OPRsCh:=OPChannels;
+ OPCeltInit(OPChannels,1);
+ OPSilkInit(OPChannels);
+End;
+
+{ OpInit : Hdr = contenu de l'en-tete OpusHead (ou "CodecPrivate" Matroska / dOps
+  converti en OpusHead), Len = taille. Renvoie le nombre de canaux. Appelle Fail si
+  l'en-tete est invalide ou non gere (mapping family 0, ou 1/255 avec <= 2 canaux). }
+Function OpInit(Hdr: PEABuffer; Len: LongInt): LongInt;
+Var Map: LongInt;
+Begin
+ If (Len<19) Or (Hdr^[0]<>Ord('O')) Or (Hdr^[1]<>Ord('p')) Or (Hdr^[2]<>Ord('u')) Or (Hdr^[3]<>Ord('s'))
+  Or (Hdr^[4]<>Ord('H')) Or (Hdr^[5]<>Ord('e')) Or (Hdr^[6]<>Ord('a')) Or (Hdr^[7]<>Ord('d')) Then
+  Fail('opus: en-tete OpusHead invalide.');
+ If Hdr^[8]>15 Then Fail('opus: version d''en-tete non geree.');
+ OPChannels:=Hdr^[9];
+ If OPChannels=0 Then Fail('opus: zero canal.');
+ OPPreSkip:=Hdr^[10]+Hdr^[11]*256;
+ OPGainI:=SmallInt(Hdr^[16]+Hdr^[17]*256);
+ Map:=Hdr^[18];
+ If Map=0 Then Begin
+  If OPChannels>2 Then Fail('opus: mapping 0 limite a 2 canaux.');
+ End Else If (Map=1) Or (Map=255) Then Begin
+  If (OPChannels>2) Or (Len<21+OPChannels) Or (Hdr^[19]<>1) Or (Hdr^[20]<>OPChannels-1) Or (Hdr^[21]<>0)
+   Or ((OPChannels=2) And (Hdr^[22]<>1)) Then
+   Fail('opus: mapping multicanal non gere.');
+ End Else Fail('opus: type de mapping non gere.');
+ If OPGainI<>0 Then OPGain:=Single(Exp((OPGainI*1.0)/(20.0*256)*2.302585092994046)) Else OPGain:=1.0;
+ OPOpen:=True;
+ OpReset;
+ OpInit:=OPChannels;
+End;
+
+{ OpInitDops : idem OpInit a partir de la boite "dOps" de MP4 (Opus in ISOBMFF : champs
+  en gros-boutiste, sans la signature OpusHead). D = contenu de la boite sans l'en-tete. }
+Function OpInitDops(D: PEABuffer; Len: LongInt): LongInt;
+Var H: Array[0..299] Of Byte; I,N: LongInt;
+Begin
+ If (Len<11) Or (D^[1]=0) Then Fail('opus: boite dOps invalide.');
+ FillChar(H,SizeOf(H),0);
+ H[0]:=Ord('O'); H[1]:=Ord('p'); H[2]:=Ord('u'); H[3]:=Ord('s');
+ H[4]:=Ord('H'); H[5]:=Ord('e'); H[6]:=Ord('a'); H[7]:=Ord('d');
+ H[8]:=1; H[9]:=D^[1]; H[10]:=D^[3]; H[11]:=D^[2];
+ H[12]:=D^[7]; H[13]:=D^[6]; H[14]:=D^[5]; H[15]:=D^[4];
+ H[16]:=D^[9]; H[17]:=D^[8]; H[18]:=D^[10];
+ N:=19;
+ If D^[10]<>0 Then Begin
+  N:=21+D^[1];
+  If (N>SizeOf(H)) Or (Len<N-8) Then Fail('opus: boite dOps invalide.');
+  For I:=0 To N-20 Do H[19+I]:=D^[11+I];
+ End;
+ OpInitDops:=OpInit(@H,N);
+End;
+
+Function OpGetPreSkip: LongInt;
+Begin OpGetPreSkip:=OPPreSkip; End;
+Function OpGetChannels: LongInt;
+Begin OpGetChannels:=OPChannels; End;
+
+{ OpDecodePacket : decode un paquet Opus (Len octets), ecrit dans Dest des echantillons
+  16 bits entrelaces (OpGetChannels canaux, 48 kHz) ; renvoie le nombre d'echantillons par
+  canal ecrits (au plus MaxSamples), 0 pour un paquet qui ne produit rien, ou -1 si le paquet est
+  invalide (a ignorer). SkipLeft : nombre d'echantillons a supprimer en tete du flux (pre-skip :
+  passer OpGetPreSkip au premier appel puis la valeur restante renvoyee dans SkipLeft).
+  TrimEnd : echantillons a retirer a la fin de la sortie de ce paquet (discard padding).
+  P=Nil : vide le reechantillonneur interne (a appeler apres le dernier paquet). }
+Function OpDecodePacketEx(P: PEABuffer; Len: LongInt; Dest: Pointer; MaxSamples: LongInt;
+ Var SkipLeft: LongInt; TrimEnd: LongInt): LongInt;
+Var N,First,I,C,K: LongInt; Q: ^SmallInt;
+Begin
+ N:=OPDecodeFloat(P,Len);
+ If N<=0 Then Begin OpDecodePacketEx:=N; Exit; End;
+ First:=0;
+ If SkipLeft>0 Then Begin
+  If SkipLeft>=N Then Begin Dec(SkipLeft,N); OpDecodePacketEx:=0; Exit; End;
+  First:=SkipLeft; SkipLeft:=0;
+ End;
+ { discard_padding de FFmpeg : applique seulement s'il ne depasse pas ce qui reste de la trame }
+ If (TrimEnd>0) And (TrimEnd<=N-First) Then Begin
+  If TrimEnd=N-First Then Begin OpDecodePacketEx:=0; Exit; End;
+  Dec(N,TrimEnd);
+ End;
+ If N-First>MaxSamples Then N:=First+MaxSamples;
+ Q:=Dest;
+ For I:=First To N-1 Do
+  For C:=0 To OPChannels-1 Do Begin
+   K:=OPToS16(OPOut[C,I]);
+   Q^:=K;
+   Q:=Pointer(PtrInt(Q)+2);
+  End;
+ OpDecodePacketEx:=N-First;
+End;
+
+Function OpDecodePacket(P: PEABuffer; Len: LongInt; Dest: Pointer; MaxSamples: LongInt): LongInt;
+Var Z: LongInt;
+Begin
+ Z:=0;
+ OpDecodePacket:=OpDecodePacketEx(P,Len,Dest,MaxSamples,Z,0);
+End;
+
+{ ---- fichier de paquets ([taille 32 bits LE][octets]...) -> WAV ---- }
+Const OPDestMax=OPOutMax;
+
+Procedure OPPutSamples(Dest: Pointer; N: LongInt);
+Var Q: ^SmallInt; I: LongInt;
+Begin
+ Q:=Dest;
+ For I:=0 To N*OPChannels-1 Do Begin
+  EAPut(Q^);
+  Q:=Pointer(PtrInt(Q)+2);
+ End;
+End;
+
+Procedure OPFreeAll;
+Begin
+ OPOpen:=False;
+End;
+
+Procedure OpDecodeFile(Const Source,Target: String);
+Var Pos,Len,N,Skip,Got: LongInt; Hd: Array[0..3] Of Byte; Pk: PEABuffer; Pcm: Pointer; Cw87: Word;
+    Count: LongInt; First: Boolean;
+Begin
+ Cw87:=Get8087CW; Set8087CW($137F);
+ OpenRead(Source); EAReset; GetMem(Pk,70000); GetMem(Pcm,OPDestMax*2*2+64);
+ Pos:=0; Count:=0; First:=True; Skip:=0;
+ While Pos+4<=InputSize Do Begin
+  ReadAt(Pos,Hd,4); Len:=Hd[0]+Hd[1]*256+Hd[2]*65536+Hd[3]*16777216; Inc(Pos,4);
+  If (Len<0) Or (Len>65000) Or (Pos+Len>InputSize) Then Break;
+  If Len>0 Then ReadAt(Pos,Pk^,Len);
+  Inc(Pos,Len);
+  If First Then Begin
+   First:=False;
+   OpInit(Pk,Len); Skip:=OPPreSkip;
+   OpenWrite(Target); VGWavHdr(48000,OPChannels,0);
+  End Else If (Len>=8) And (Pk^[0]=Ord('O')) And (Pk^[1]=Ord('p')) And (Pk^[2]=Ord('u')) And (Pk^[3]=Ord('s'))
+   And (Pk^[4]=Ord('T')) And (Pk^[5]=Ord('a')) And (Pk^[6]=Ord('g')) And (Pk^[7]=Ord('s')) Then
+   { OpusTags : ignore }
+  Else If Len>0 Then Begin
+   Got:=OpDecodePacketEx(Pk,Len,Pcm,OPDestMax,Skip,0);
+   If Got>0 Then OPPutSamples(Pcm,Got);
+   Inc(Count);
+  End;
+  If (Count And 63)=0 Then EngTick(Pos,InputSize);
+ End;
+ If First Then Fail('opus: aucun paquet.');
+ Got:=OpDecodePacketEx(Nil,0,Pcm,OPDestMax,Skip,0);
+ If Got>0 Then OPPutSamples(Pcm,Got);
+ EAFlush; VGWavPatch(48000,OPChannels,EAWritten);
+ FreeMem(Pk); FreeMem(Pcm); OPFreeAll;
+ CloseWrite; CloseRead; Set8087CW(Cw87);
+End;
+
+
+{ ---- demultiplexeur Ogg Opus (libavformat/oggdec.c + oggparseopus.c) ---- }
+Function OPOggDuration(P: PEABuffer; Size: LongInt): LongInt;
+Var Cfg,Cnt,Fs,Nb: LongInt;
+Begin
+ If Size<1 Then Begin OPOggDuration:=-1; Exit; End;
+ Cfg:=P^[0] Shr 3; Cnt:=P^[0] And 3;
+ If Cfg<12 Then Fs:=OPMaxI(480,960*(Cfg And 3))
+ Else If Cfg<16 Then Fs:=480 Shl (Cfg And 1)
+ Else Fs:=120 Shl (Cfg And 3);
+ Nb:=1;
+ If Cnt=3 Then Begin
+  If Size<2 Then Begin OPOggDuration:=-1; Exit; End;
+  Nb:=P^[1] And $3F;
+ End Else If Cnt<>0 Then Nb:=2;
+ OPOggDuration:=Fs*Nb;
+End;
+
+Var OPDecodeSerial: LongInt;
+
+Procedure OpDecodeOgg(Const Source,Target: String);
+Const MaxWork=200000;
+Var
+ Cw87: Word; Pos,Total: LongInt; Hd: Array[0..26] Of Byte; Seg: Array[0..254] Of Byte;
+ Body,Work,Carry,Pcm: PEABuffer; CarryLen,NSegs,BodyLen,I,J,Flags,Serial,PktStart,PktLen,WorkLen: LongInt;
+ Granule: Int64; HaveSerial,Done,GotHead,GotTags,NeedBos,Eos: Boolean;
+ PStart,PLen,PDur: Array[0..254] Of LongInt; NPk,K: LongInt; CurDts,LastPts,SufDur,Skip64: Int64;
+ Skip,Got,Trim,Count,LastTrim: LongInt;
+Begin
+ Cw87:=Get8087CW; Set8087CW($137F);
+ OpenRead(Source); EAReset;
+ GetMem(Body,70000); GetMem(Work,MaxWork); GetMem(Carry,MaxWork); GetMem(Pcm,OPDestMax*2*2+64);
+ Pos:=0; Total:=InputSize; CarryLen:=0; HaveSerial:=False; Done:=False;
+ GotHead:=False; GotTags:=False; Skip:=0; LastTrim:=0; CurDts:=0; Count:=0; Serial:=0;
+ While (Not Done) And (Pos+27<=Total) Do Begin
+  ReadAt(Pos,Hd,27);
+  If (Hd[0]<>79) Or (Hd[1]<>103) Or (Hd[2]<>103) Or (Hd[3]<>83) Then Begin
+   { resynchronisation : on avance d'un octet }
+   Inc(Pos); Continue;
+  End;
+  Flags:=Hd[5];
+  Granule:=0;
+  For I:=7 DownTo 0 Do Granule:=Granule*256+Hd[6+I];
+  { granule sur 64 bits non signe lu comme signe (-1 = aucun paquet termine) }
+  Serial:=LongInt(Int64(Hd[14])+Int64(Hd[15])*256+Int64(Hd[16])*65536+Int64(Hd[17])*16777216);
+  NSegs:=Hd[26];
+  If Pos+27+NSegs>Total Then Break;
+  If NSegs>0 Then ReadAt(Pos+27,Seg,NSegs);
+  BodyLen:=0;
+  For I:=0 To NSegs-1 Do Inc(BodyLen,Seg[I]);
+  If Pos+27+NSegs+BodyLen>Total Then Break;
+  If BodyLen>0 Then ReadAt(Pos+27+NSegs,Body^,BodyLen);
+  Inc(Pos,27+NSegs+BodyLen);
+  If Not HaveSerial Then Begin
+   { le flux Opus est celui dont la page BOS commence par OpusHead }
+   If ((Flags And 2)<>0) And (BodyLen>=8) And (Body^[0]=79) And (Body^[1]=112) And (Body^[2]=117) And
+      (Body^[3]=115) And (Body^[4]=72) And (Body^[5]=101) And (Body^[6]=97) And (Body^[7]=100) Then Begin
+    HaveSerial:=True; OPDecodeSerial:=Serial;
+   End Else Continue;
+  End Else If Serial<>OPDecodeSerial Then Continue
+  Else If (Flags And 2)<>0 Then Break;     { debut d'un flux chaine : on s'arrete }
+  Eos:=(Flags And 4)<>0;
+  { assemblage : report du paquet incomplet + corps de la page }
+  If (Flags And 1)=0 Then CarryLen:=0;
+  WorkLen:=CarryLen+BodyLen;
+  If WorkLen>MaxWork Then Fail('ogg: paquet trop grand.');
+  If CarryLen>0 Then Move(Carry^,Work^,CarryLen);
+  If BodyLen>0 Then Move(Body^,PEABuffer(PtrInt(Work)+CarryLen)^,BodyLen);
+  NPk:=0; PktStart:=0; PktLen:=CarryLen;
+  For I:=0 To NSegs-1 Do Begin
+   Inc(PktLen,Seg[I]);
+   If Seg[I]<255 Then Begin
+    PStart[NPk]:=PktStart; PLen[NPk]:=PktLen; Inc(NPk);
+    PktStart:=PktStart+PktLen; PktLen:=0;
+   End;
+  End;
+  CarryLen:=WorkLen-PktStart;
+  If CarryLen>0 Then Move(PEABuffer(PtrInt(Work)+PktStart)^,Carry^,CarryLen) Else CarryLen:=0;
+  { durees des paquets de la page }
+  For K:=0 To NPk-1 Do
+   If GotHead And (GotTags Or Not ((PLen[K]>=8) And (Work^[PStart[K]]=79) And (Work^[PStart[K]+1]=112)
+      And (Work^[PStart[K]+4]=84))) Then PDur[K]:=OPOggDuration(PEABuffer(PtrInt(Work)+PStart[K]),PLen[K])
+   Else PDur[K]:=0;
+  For K:=0 To NPk-1 Do Begin
+   If Not GotHead Then Begin
+    OpInit(PEABuffer(PtrInt(Work)+PStart[K]),PLen[K]); Skip:=OPPreSkip; CurDts:=-OPPreSkip;
+    OpenWrite(Target); VGWavHdr(48000,OPChannels,0);
+    GotHead:=True;
+    Continue;
+   End;
+   If (Not GotTags) And (PLen[K]>=8) And (Work^[PStart[K]]=79) And (Work^[PStart[K]+1]=112) And
+      (Work^[PStart[K]+2]=117) And (Work^[PStart[K]+3]=115) And (Work^[PStart[K]+4]=84) Then Begin
+    GotTags:=True; Continue;
+   End;
+   GotTags:=True;
+   If PDur[K]<=0 Then Continue;
+   Trim:=0;
+   If Not Eos Then Begin
+    SufDur:=0;
+    For J:=K To NPk-1 Do If PDur[J]>0 Then SufDur:=SufDur+PDur[J];
+    LastPts:=Granule-SufDur;
+    CurDts:=LastPts-OPPreSkip;
+    CurDts:=CurDts+PDur[K];
+   End Else Begin
+    CurDts:=CurDts+PDur[K];
+    Skip64:=CurDts-Granule+OPPreSkip;
+    If Skip64>PDur[K] Then Skip64:=PDur[K];
+    If Skip64>0 Then Trim:=LongInt(Skip64);
+   End;
+   LastTrim:=Trim;
+   Got:=OpDecodePacketEx(PEABuffer(PtrInt(Work)+PStart[K]),PLen[K],Pcm,OPDestMax,Skip,Trim);
+   If Got>0 Then OPPutSamples(Pcm,Got);
+   Inc(Count);
+  End;
+  If (Count And 63)=0 Then EngTick(Pos,Total);
+  If Eos Then Done:=True;
+ End;
+ If Not GotHead Then Fail('ogg: flux Opus introuvable.');
+ { vidage du decodeur : FFmpeg applique aussi le discard_padding du dernier paquet a cette trame }
+ Got:=OpDecodePacketEx(Nil,0,Pcm,OPDestMax,Skip,LastTrim);
+ If Got>0 Then OPPutSamples(Pcm,Got);
+ EAFlush; VGWavPatch(48000,OPChannels,EAWritten);
+ FreeMem(Body); FreeMem(Work); FreeMem(Carry); FreeMem(Pcm); OPFreeAll;
  CloseWrite; CloseRead; Set8087CW(Cw87);
 End;
 {$ENDIF}
@@ -65525,7 +78606,7 @@ End;
 { Colle entre l'interface et les moteurs audio                             }
 { ====================================================================== }
 Const
- ekMP3 = 1; ekAIFF = 2; ekVOC = 3; ekMOD = 4; ekEncMP3 = 5; ekAAC = 6; ekEncAAC = 7; ekAC3 = 8; ekEncAC3 = 9; ekOgg = 10; ekEncVorbis = 11; ekVorbisPk = 12; ekDca = 13; ekWma = 14; ekEncWma = 15; ekEncMpeg4 = 16; ekEncTheora = 17; ekEncWmv = 18; ekEncMpeg1 = 19; ekDecVid = 20; ekMpa = 21; ekEncMp2 = 22; ekWmaAvi = 23; ekAsfSpool = 24;
+ ekMP3 = 1; ekAIFF = 2; ekVOC = 3; ekMOD = 4; ekEncMP3 = 5; ekAAC = 6; ekEncAAC = 7; ekAC3 = 8; ekEncAC3 = 9; ekOgg = 10; ekEncVorbis = 11; ekVorbisPk = 12; ekDca = 13; ekWma = 14; ekEncWma = 15; ekEncMpeg4 = 16; ekEncTheora = 17; ekEncWmv = 18; ekEncMpeg1 = 19; ekDecVid = 20; ekMpa = 21; ekEncMp2 = 22; ekWmaAvi = 23; ekAsfSpool = 24; ekOpusPk = 25; ekOpusOgg = 26;
 
 Type
  TByteArr = Array[0..32767] Of Byte;
@@ -65605,6 +78686,8 @@ Begin
    ekAC3: ProcessAC3E(Src,Dst,False,0);
    ekEncAC3: ProcessAC3E(Src,Dst,True,Arg);
    ekOgg: VGDecodeOgg(Src,Dst);
+   ekOpusPk: OpDecodeFile(Src,Dst);
+   ekOpusOgg: OpDecodeOgg(Src,Dst);
    ekEncVorbis: Begin VGStrictExp:=True; EncodeVorbisNative(Src,Dst); End;
    ekVorbisPk: DecodeVorbisPk(Src,Dst);
    ekDca: DecodeDCA(Src,Dst);
@@ -66119,6 +79202,26 @@ Var
    Q:=Q+Z;
   End;
  End;
+
+ Function OpusHeadFromDops(S,En: LongInt; Var F: File): Boolean;
+ Var Q,Z,Pk,I: LongInt; Hd: Array[0..18] Of Byte; Ln: LongInt;
+ Begin
+  OpusHeadFromDops:=False; Q:=S;
+  While Q+8<=En Do Begin
+   Z:=B32(Q); If Z<8 Then Break;
+   If C4(Q+4)='dOps' Then Begin
+    Pk:=Q+8; If Z<19 Then Exit;
+    For I:=0 To 7 Do Hd[I]:=Ord('OpusHead'[I+1]);
+    Hd[8]:=1; Hd[9]:=CB(Pk+1);
+    Hd[10]:=CB(Pk+3); Hd[11]:=CB(Pk+2);
+    Hd[12]:=CB(Pk+7); Hd[13]:=CB(Pk+6); Hd[14]:=CB(Pk+5); Hd[15]:=CB(Pk+4);
+    Hd[16]:=CB(Pk+9); Hd[17]:=CB(Pk+8); Hd[18]:=CB(Pk+10);
+    Ln:=19; BlockWrite(F,Ln,4); BlockWrite(F,Hd,19);
+    OpusHeadFromDops:=True; Exit;
+   End;
+   Q:=Q+Z;
+  End;
+ End;
 Var
  FI,FO: File; Old: Byte; H: THdr; DataLen,Ent,NCh,NSc,Samples,Fixed,Off,Len,Sz,Si,C: LongInt;
  ScI,ScFirst,ScSpc,ScNext,ScNextFirst,I,K: LongInt; Prof,Sfi,Cfg,Cnt: Integer; Swap: Boolean; Tmp: LongInt;
@@ -66134,6 +79237,7 @@ Begin
  Else If (Fc='mp4a') And (Oti=$40) Then Kind:=3
  Else If (Fc='ac-3') Then Kind:=4
  Else If (Fc='dtsc') Or (Fc='dtsh') Or (Fc='dtse') Then Kind:=5
+ Else If (Fc='Opus') Then Kind:=7
  Else If (Fc='sowt') Then Kind:=1
  Else If (Fc='twos') Then Begin Kind:=1; Swap:=True; End
  Else If (Fc='raw ') Then Begin Kind:=1; Bits:=8; End
@@ -66147,6 +79251,9 @@ Begin
  If IOResult<>0 Then Begin CClose; Err:='Ouverture impossible.'; Exit; End;
  If Not CreateOut(Dst,FO,Err) Then Begin Close(FI); CClose; Exit; End;
  If Kind=1 Then Begin PcmHeader(H,Rt,Chs,Bits,0); BlockWrite(FO,H,44); End;
+ If Kind=7 Then Begin
+  If Not OpusHeadFromDops(Stsd+8+36,BoxEnd(Stsd),FO) Then Begin Close(FI); Close(FO); CClose; DelFile(Dst); Err:='dOps absent.'; Exit; End;
+ End;
  Fixed:=B32(Stsz+4); Samples:=B32(Stsz+8);
  If Stco<>0 Then NCh:=B32(Stco+4) Else NCh:=B32(Co64+4);
  NSc:=B32(Stsc+4);
@@ -66169,6 +79276,7 @@ Begin
     If Fixed<>0 Then Sz:=Fixed Else Sz:=B32(Stsz+12+(Si+K)*4);
     If (Sz<=0) Or (Off+Sz>CSize) Then Break;
     If Kind=3 Then PutAdts(FO,Prof,Sfi,Cfg,Sz);
+    If Kind=7 Then BlockWrite(FO,Sz,4);
     CopyRange(FI,FO,Off,Sz,False); Inc(DataLen,Sz); Off:=Off+Sz;
    End;
   End;
@@ -66220,8 +79328,13 @@ Begin
    If RunEng(ekVorbisPk,Tmp,T2,0,Err) Then DecodeKind:=MakeCanon(T2,Dst,Err);
    DelFile(Tmp); DelFile(T2);
   End;
+  7: Begin
+   T2:=TmpName('WAV');
+   If RunEng(ekOpusPk,Tmp,T2,0,Err) Then DecodeKind:=MakeCanon(T2,Dst,Err);
+   DelFile(Tmp); DelFile(T2);
+  End;
  End;
- If Not (Kind In [1,2,3,4,5,6]) Then Err:='Type audio inconnu.';
+ If Not (Kind In [1,2,3,4,5,6,7]) Then Err:='Type audio inconnu.';
 End;
 
 {$IFDEF FPC}
@@ -66275,6 +79388,11 @@ Begin
  Else If (F='OGG') Or (F='OGV') Then Begin
   T1:=TmpName('WAV');
   If RunEng(ekOgg,M.Path,T1,0,Err) Then GetPcm:=MakeCanon(T1,Dst,Err);
+  DelFile(T1);
+ End
+ Else If F='OPUS' Then Begin
+  T1:=TmpName('WAV');
+  If RunEng(ekOpusOgg,M.Path,T1,0,Err) Then GetPcm:=MakeCanon(T1,Dst,Err);
   DelFile(T1);
  End
  Else If (F='WMA') Or (F='WMV') Or (F='ASF') Then Begin
@@ -68169,7 +81287,7 @@ Type
   N: LongInt;
   Off,Sz,Dur,Cts: PLArr;
   Sync: PBArr;
-  Cfg: Array[0..2047] Of Byte;
+  Cfg: Array[0..8191] Of Byte;
   CfgLen: Integer;
   Oti: Integer;
  End;
@@ -68271,7 +81389,7 @@ Begin
   T^.W:=B16(Sd+8+32); T^.H:=B16(Sd+8+34);
   { enregistrement avcC dans les sous-boites de l'entree }
   If BoxChild(Sd+8+86,BoxEndOf(Sd),'avcC',P) Or BoxChild(Sd+8+86,BoxEndOf(Sd),'hvcC',P) Or BoxChild(Sd+8+86,BoxEndOf(Sd),'av1C',P) Or BoxChild(Sd+8+86,BoxEndOf(Sd),'vpcC',P) Then Begin
-   L:=BoxEndOf(P)-P; If L>2000 Then L:=2000;
+   L:=BoxEndOf(P)-P; If L>8000 Then L:=8000;
    For I:=0 To L-1 Do T^.Cfg[I]:=CB(P+I);
    T^.CfgLen:=L;
   End;
@@ -68382,6 +81500,7 @@ Begin
     { codecs a image complete par etiquette (Sorenson, VP6, ecran) : pas d'en-tete AVC }
     If Pass=2 Then Begin
      Iv:=Nv; V.Off^[Iv]:=P+12; V.Sz^[Iv]:=Sz-1; V.Sync^[Iv]:=Ord((CB(P+11) Shr 4)=1);
+     If (Vc=4) Or (Vc=5) Then Begin V.Off^[Iv]:=P+13; V.Sz^[Iv]:=Sz-2; If Iv=0 Then Begin V.Cfg[0]:=CB(P+12); V.CfgLen:=1; End; End;
      V.Cts^[Iv]:=0; V.Dur^[Iv]:=Ts;
     End;
     Inc(Nv);
@@ -68709,7 +81828,7 @@ Begin
   Else If Cd='V_AV1' Then V.Codec:='av01'
   Else If Cd='V_MS/VFW/FOURCC' Then V.Codec:=Copy(UpStr(C4(MkT[Vi].PrivPos+16)),1,4)
   Else V.Codec:=Copy(Cd,3,4);
-  K:=MkT[Vi].PrivLen; If K>2000 Then K:=2000;
+  K:=MkT[Vi].PrivLen; If K>8000 Then K:=8000;
   If Cd<>'V_MS/VFW/FOURCC' Then Begin For I:=0 To K-1 Do V.Cfg[I]:=CB(MkT[Vi].PrivPos+I); V.CfgLen:=K; End;
   { cadence : DefaultDuration, sinon moyenne des instants }
   MinP:=MkPts^[0]; MaxP:=MkPts^[0];
@@ -68735,7 +81854,10 @@ Begin
   Else If Cd='A_AC3' Then A.Codec:='ac-3'
   Else If Copy(Cd,1,5)='A_DTS' Then A.Codec:='dtsc'
   Else If Cd='A_VORBIS' Then A.Codec:='vorb'
-  Else If Cd='A_OPUS' Then A.Codec:='Opus'
+  Else If Cd='A_OPUS' Then Begin
+   A.Codec:='Opus'; K:=MkT[Ai].PrivLen; If K>64 Then K:=64;
+   For I:=0 To K-1 Do A.Cfg[I]:=CB(MkT[Ai].PrivPos+I); A.CfgLen:=K;
+  End
   Else If Copy(Cd,1,10)='A_PCM/INT/' Then Begin A.Codec:='pcm '; A.Oti:=MkT[Ai].Bits; If A.Oti=0 Then A.Oti:=16; End
   Else A.Codec:=Copy(Cd,3,4);
   For I:=0 To A.N-1 Do A.Dur^[I]:=1024;
@@ -68883,7 +82005,15 @@ Begin
  If Not OpenSrc(Path,VF) Then Begin Err:='Ouverture impossible.'; Exit; End;
  VFOpen:=True; EngMsg:=''; EngFirst:=0; NalSz:=0;
  If SetJmp(EngJmp)=0 Then Begin
-  If Mode=6 Then Begin
+  If Mode=7 Then Begin
+   PrFree; PrHook:=H4Trampoline; PrConfig(T.Codec);
+  End Else If (Mode>=8) And (Mode<=10) Then Begin
+   V6Free; V6Hook:=H4Trampoline;
+   If Mode=10 Then Begin V6Config(False,T.Codec<>'VP6F',-1); V6SetSize(T.W,T.H); End
+   Else V6Config(Mode=9,False,T.Cfg[0]);
+  End Else If Mode=11 Then Begin
+   V9Free; V9Hook:=H4Trampoline;
+  End Else If Mode=6 Then Begin
    HvFree; HvHook:=H4Trampoline; HvNativeHook:=Nil; HvConfig(PEABuffer(@T.Cfg),T.CfgLen);
   End Else If Mode=4 Then Begin
    V4Reset;
@@ -68905,7 +82035,10 @@ Begin
     If (VLastBuf<>Nil) And (@VFrameCb<>Nil) Then VFrameCb(VLastBuf,VLastW,VLastH);
    End Else Begin
     ReadSample(VF,T.Off^[I],T.Sz^[I]);
-    If Mode=6 Then HvFrame(PEABuffer(SBuf),T.Sz^[I])
+    If Mode=7 Then PrFrame(PEABuffer(SBuf),T.Sz^[I])
+    Else If (Mode>=8) And (Mode<=10) Then V6Frame(PEABuffer(SBuf),T.Sz^[I])
+    Else If Mode=11 Then V9Frame(PEABuffer(SBuf),T.Sz^[I])
+    Else If Mode=6 Then HvFrame(PEABuffer(SBuf),T.Sz^[I])
     Else If Mode=4 Then Begin
      If (H3Frame(PEABuffer(SBuf),T.Sz^[I])=1) And V4Pack Then Begin
       VLastBuf:=H3OutBuf; VLastW:=H3OutW; VLastH:=H3OutH;
@@ -68938,7 +82071,7 @@ Begin
    Inc(I);
   End;
   If Mode=6 Then Begin If Not VStopFlag Then HvFlush; End
-  Else If (Mode=3) Or (Mode=4) Then Begin End Else If Mode=2 Then Begin
+  Else If (Mode=3) Or (Mode=7) Or (Mode=11) Or ((Mode>=8) And (Mode<=10)) Or (Mode=4) Then Begin End Else If Mode=2 Then Begin
    If Not VStopFlag Then Begin
     If (M4LowDelay=0) And (M4NextI>=0) And M4PicHave Then M4Emit(M4NextI)
     Else If M4SkippedLast And M4PicHave And (M4CurI>=0) Then M4Emit(M4CurI);
@@ -68948,7 +82081,10 @@ Begin
  End Else Begin VOk:=False; VErr:=EngMsg; End;
  If VFOpen Then Begin Close(VF); VFOpen:=False; End;
  If Mode=2 Then M4VidHook:=Nil;
- If Mode=6 Then Begin HvFree; HvHook:=Nil; End
+ If Mode=7 Then Begin PrFree; PrHook:=Nil; End
+ Else If (Mode>=8) And (Mode<=10) Then Begin V6Free; V6Hook:=Nil; End
+ Else If Mode=11 Then Begin V9Free; V9Hook:=Nil; End
+ Else If Mode=6 Then Begin HvFree; HvHook:=Nil; End
  Else If Mode=4 Then Begin
   H3FreeCtx; If H3OutBuf<>Nil Then Begin FreeMem(H3OutBuf); H3OutBuf:=Nil; End;
   If H3PkBuf<>Nil Then Begin FreeMem(H3PkBuf); H3PkBuf:=Nil; H3PkCap:=0; End;
@@ -68976,13 +82112,20 @@ Begin
  C:=T.Codec; VideoMode:=-1;
  If Fmt='AVI' Then Begin
   If InList(C,'H264,X264,AVC1,DAVC,H.26') Then VideoMode:=1
-  Else If InList(C,'XVID,DIVX,DX50,FMP4,MP4V,3IV2,XVIX,BLZ0,DIV5,RMP4,MP4S,M4S2,SEDG,WV1F,UMP4,EM4A,DXGM,FVFW,DM4V') Then VideoMode:=2;
+  Else If InList(C,'XVID,DIVX,DX50,FMP4,MP4V,3IV2,XVIX,BLZ0,DIV5,RMP4,MP4S,M4S2,SEDG,WV1F,UMP4,EM4A,DXGM,FVFW,DM4V') Then VideoMode:=2
+  Else If InList(C,'VP6F,VP60,VP61,VP62') Then VideoMode:=10;
  End Else If InList(Fmt,'MKV,WEBM') Then Begin
   If (C='avc1') And (T.CfgLen>=7) Then VideoMode:=0
   Else If InList(C,'MP4V,XVID,DIVX,DX50,FMP4') Then VideoMode:=2
   Else If C='VP80' Then VideoMode:=3
+  Else If C='VP90' Then VideoMode:=11
   Else If ((C='hvc1') Or (C='hev1')) And (T.CfgLen>=23) Then VideoMode:=6;
  End Else If (Fmt='FLV') And (C='FLV1') Then VideoMode:=4
+ Else If (Fmt='FLV') And (C='VP6F') Then VideoMode:=8
+ Else If (Fmt='FLV') And (C='VP6A') Then VideoMode:=9
+ Else If (Fmt='AVI') And InList(C,'VP6F,VP60,VP61,VP62') Then VideoMode:=10
+ Else If InList(C,'apch,apcn,apcs,apco,ap4h,ap4x') Then VideoMode:=7
+ Else If C='vp09' Then VideoMode:=11
  Else If ((C='avc1') Or (C='avc3')) And (T.CfgLen>=7) Then VideoMode:=0
  Else If ((C='hvc1') Or (C='hev1')) And (T.CfgLen>=23) Then VideoMode:=6;
 End;
@@ -69301,9 +82444,11 @@ Begin
  Sb:=MBegin('stbl');
  Sd:=MBegin('stsd'); M32(0); M32(1);
  If IsVideo Then Begin
-  Ent:=MBegin('avc1'); MZero(6); M16(1); MZero(16); M16(MT.T^.W); M16(MT.T^.H); M32($480000); M32($480000); M32(0); M16(1);
+  If (MT.T^.Codec='hvc1') Or (MT.T^.Codec='hev1') Then Ent:=MBegin('hvc1') Else Ent:=MBegin('avc1');
+  MZero(6); M16(1); MZero(16); M16(MT.T^.W); M16(MT.T^.H); M32($480000); M32($480000); M32(0); M16(1);
   MZero(32); M16($18); M16($FFFF);
-  Cfg:=MBegin('avcC'); For I:=0 To MT.T^.CfgLen-1 Do M8(MT.T^.Cfg[I]); MEnd(Cfg);
+  If (MT.T^.Codec='hvc1') Or (MT.T^.Codec='hev1') Then Cfg:=MBegin('hvcC') Else Cfg:=MBegin('avcC');
+  For I:=0 To MT.T^.CfgLen-1 Do M8(MT.T^.Cfg[I]); MEnd(Cfg);
   MEnd(Ent);
  End Else Begin
   Ent:=MBegin('mp4a'); MZero(6); M16(1); MZero(8); M16(MT.T^.Chans); M16(16); M16(0); M16(0); M16(MT.T^.Rate); M16(0);
@@ -69635,6 +82780,7 @@ Function MkvCodecId(Const C: String; IsVideo: Boolean): String;
 Begin
  MkvCodecId:='V_UNCOMPRESSED';
  If C='avc1' Then MkvCodecId:='V_MPEG4/ISO/AVC'
+ Else If (C='hvc1') Or (C='hev1') Then MkvCodecId:='V_MPEGH/ISO/HEVC'
  Else If C='VP80' Then MkvCodecId:='V_VP8'
  Else If C='mp4a' Then MkvCodecId:='A_AAC'
  Else If C='vorb' Then MkvCodecId:='A_VORBIS'
@@ -69819,6 +82965,7 @@ Begin
  Else If A.Codec='ac-3' Then Kind:=4
  Else If A.Codec='vorb' Then Kind:=6
  Else If A.Codec='dtsc' Then Kind:=5
+ Else If (A.Codec='Opus') And (A.CfgLen>=19) Then Kind:=7
  Else Begin Err:='Audio MKV non pris en charge ('+A.Codec+').'; TrkClear(A); Exit; End;
  If (Kind=3) And (A.CfgLen<2) Then Begin Err:='Configuration AAC absente.'; TrkClear(A); Exit; End;
  If Not OpenSrc(Src,FI) Then Begin Err:='Ouverture impossible.'; TrkClear(A); Exit; End;
@@ -69829,9 +82976,12 @@ Begin
  If Kind=6 Then Begin
   If Not VorbisHeaders(FI,FO) Then Begin Close(FI); Close(FO); TrkClear(A); DelFile(Dst); Err:='En-t'#234'tes Vorbis invalides.'; Exit; End;
  End;
+ If Kind=7 Then Begin
+  Tot:=A.CfgLen; BlockWrite(FO,Tot,4); BlockWrite(FO,A.Cfg,A.CfgLen); Tot:=0;
+ End;
  For I:=0 To A.N-1 Do Begin
   If Kind=3 Then PutAdts(FO,Prof,Sfi,Cfg,A.Sz^[I]);
-  If Kind=6 Then BlockWrite(FO,A.Sz^[I],4);
+  If (Kind=6) Or (Kind=7) Then BlockWrite(FO,A.Sz^[I],4);
   CopyRange(FI,FO,A.Off^[I],A.Sz^[I],False); Inc(Tot,A.Sz^[I]);
   If (I And 255)=0 Then UiTick(I,A.N);
  End;
@@ -69870,7 +83020,8 @@ Begin
  Gcd:=A;
 End;
 
-Var VJAlt: Boolean; VJDecim: LongInt;
+Var VJAlt,VJHevc: Boolean; VJDecim: LongInt;
+Function HevcEncodeTemp(Var Vo: TTrkIn; Var Mem: PBArr; Var Err: String): Boolean; Forward;
 Function AltVideoOut(Var M: TMedia; Const Pr: TProf; Const Dst: String; HaveAudio: Boolean; Var Err: String): Boolean; Forward;
 
 Function Y4mSource(Var M: TMedia; Const Fmt,Codec: String; Var Y4: String; Var Err: String): Integer; Forward;
@@ -70113,7 +83264,7 @@ Function VideoJob(Var M: TMedia; Const Pr: TProf; Const Dst: String; Var Err: St
 Var
  V,A,Vo: TTrkIn; Ok,HaveA,Reenc,AFlv: Boolean; Fmt: String; Tr: Array[0..1] of TMuxTrk; NT: Integer;
  AFirst,ALast,First,Last,I,Fn,Fd,StartMs,EndMs,K: LongInt; AOut: TTrkIn; APath: String; Acc: Int64; SkipV: Boolean;
- Rw,Rh: LongInt; DecMode: Integer; AltHaveA: Boolean; Y4,DecPath: String;
+ Rw,Rh: LongInt; DecMode: Integer; AltHaveA: Boolean; Y4,DecPath: String; HvMem: PBArr;
 Begin
  VideoJob:=False; Fmt:=M.Fmt;
  Y4:=''; DecPath:=M.Path; FillChar(A,SizeOf(A),0);
@@ -70150,7 +83301,8 @@ Begin
  If (Pr.Res='Auto') Or (Pr.Res='-') Then Begin VJResW:=0; VJResH:=0; End;
  StartMs:=M.TrimS; EndMs:=M.TrimE;
  VJAlt:=InList(Pr.Ext,'AVI,WMV,OGV,MPG,WEBM'); VJDecim:=1;
- Reenc:=VJAlt Or (DecMode<>0) Or EditsPresent(M) Or (StartMs>0) Or ((VJResW>0) And ((VJResW<>V.W) Or (VJResH<>V.H))) Or (V.W=0);
+ VJHevc:=Pr.VC='HEVC';
+ Reenc:=VJAlt Or (VJHevc And (DecMode<>6)) Or ((DecMode<>0) And Not (VJHevc And (DecMode=6))) Or EditsPresent(M) Or (StartMs>0) Or ((VJResW>0) And ((VJResW<>V.W) Or (VJResH<>V.H))) Or (V.W=0);
  FillChar(Tr,SizeOf(Tr),0); NT:=0; Ok:=False; APath:=''; FillChar(AOut,SizeOf(AOut),0);
  SkipV:=False;
  { ---- audio ---- }
@@ -70203,20 +83355,26 @@ Begin
   If VJStarted Then Begin
    If Ok Then Begin
     StageLo:=50; StageHi:=90;
-    If VJAlt Then Ok:=AltVideoOut(M,Pr,Dst,AltHaveA,Err) Else Ok:=EncodeTemp(Err);
+    If VJAlt Then Ok:=AltVideoOut(M,Pr,Dst,AltHaveA,Err)
+    Else If VJHevc Then Ok:=HevcEncodeTemp(Vo,HvMem,Err)
+    Else Ok:=EncodeTemp(Err);
    End;
    Close(VJTmp); DelFile(VJTmpName);
   End;
   If VJOut<>Nil Then Begin FreeMem(VJOut,VJOutW*VJOutH*3 Div 2+64); VJOut:=Nil; End;
   If Ok And Not VJAlt Then Begin
+   If VJHevc Then Begin
+    Tr[0].T:=@Vo; Tr[0].First:=0; Tr[0].Last:=Vo.N-1; Tr[0].Mem:=HvMem; Tr[0].Annex:=False; NT:=1;
+   End Else Begin
    EncoderTrack(Vo);
    Tr[0].T:=@Vo; Tr[0].First:=0; Tr[0].Last:=Vo.N-1; Tr[0].Mem:=PBArr(X4O); Tr[0].Annex:=True; NT:=1;
+   End;
    If HaveA Then Begin
     Tr[1].T:=@AOut; Tr[1].First:=AFirst; Tr[1].Last:=ALast; Tr[1].Path:=APath; NT:=2;
    End;
    StageLo:=90; StageHi:=100;
    Ok:=MuxOut(Pr.Ext,Dst,Tr,NT,Err);
-   TrkClear(Vo);
+   TrkClear(Vo); If VJHevc And (HvMem<>Nil) Then Begin FreeMem(HvMem); HvMem:=Nil; End;
   End;
   VEncFree;
  End;
@@ -71307,6 +84465,41 @@ Begin
  If Y4<>'' Then DelFile(Y4);
  TrkClear(V); TrkClear(A);
  Dirty:=True;
+End;
+
+
+{ ---- encodeur HEVC : images du fichier temporaire -> echantillons en memoire ---- }
+Function HevcEncodeTemp(Var Vo: TTrkIn; Var Mem: PBArr; Var Err: String): Boolean;
+Var I,Fsz,P,Len,Cap,Pl,Dts,Pts: LongInt; Got: Word; Buf,Pk: PEABuffer; Key,Ok: Boolean; Hb: Array[0..2047] Of Byte; Hl: LongInt;
+Begin
+ HevcEncodeTemp:=False; Fsz:=VJOutW*VJOutH*3 Div 2; Cap:=1 Shl 20; Len:=0; GetMem(Mem,Cap);
+ GetMem(Buf,Fsz+16); Seek(VJTmp,0); Ok:=True;
+ HeCqp:=26; HeOptRefs:=2; HeNoDeblock:=False;
+ HeBegin(VJOutW,VJOutH,VJFn,VJFd,VJBitrate,Max(1,(VJFn*10) Div Max(VJFd,1)));
+ FillChar(Vo,SizeOf(Vo),0); TrkAlloc(Vo,VJCnt);
+ For I:=0 To VJCnt-1 Do Begin
+  P:=0;
+  While P<Fsz Do Begin
+   {$I-}BlockRead(VJTmp,Buf^[P],Min(32768,Fsz-P),Got);{$I+}
+   If (IOResult<>0) Or (Got=0) Then Begin Ok:=False; Break; End;
+   Inc(P,Got);
+  End;
+  If Not Ok Then Break;
+  If Not HeFrame(Buf,Pk,Pl,Key,Dts,Pts) Then Begin Ok:=False; Err:='Encodage HEVC impossible.'; Break; End;
+  If Len+Pl+16>Cap Then Begin ReallocMem(Mem,Cap*2+Pl); Cap:=Cap*2+Pl; End;
+  Move(Pk^,Mem^[Len],Pl);
+  Vo.Off^[I]:=Len; Vo.Sz^[I]:=Pl; Vo.Dur^[I]:=VJFd; Vo.Sync^[I]:=Ord(Key); Vo.Cts^[I]:=0; Inc(Len,Pl);
+  If (I And 1)=0 Then Begin UiTick(I,VJCnt); If Stopped Then Begin Ok:=False; Err:='Conversion annul'#233'e.'; Break; End; End;
+ End;
+ FreeMem(Buf,Fsz+16);
+ If Ok Then Begin
+  Hl:=HeHvcC(Hb);
+  For I:=0 To Hl-9 Do Vo.Cfg[I]:=Hb[8+I]; Vo.CfgLen:=Hl-8;
+  Vo.Ok:=True; Vo.IsVideo:=True; Vo.Codec:='hvc1'; Vo.Ts:=VJFn; Vo.W:=VJOutW; Vo.H:=VJOutH;
+ End Else Begin FreeMem(Mem); Mem:=Nil; End;
+ HeFree;
+ If (Not Ok) And (Err='') Then Err:='Lecture du fichier temporaire impossible.';
+ HevcEncodeTemp:=Ok;
 End;
 
 { ---- Y4M a partir du fichier temporaire d'images brutes ---- }
