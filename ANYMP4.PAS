@@ -1516,6 +1516,7 @@ Begin
  AddProf(1,'M4A','M4A','-','AAC','-',0,256,44100,2);
  AddProf(1,'OGG Vorbis','OGG','-','Vorbis','-',0,160,44100,2);
  AddProf(1,'WMA','WMA','-','WMA','-',0,128,44100,2);
+ AddProf(1,'AC3 192 kbps','AC3','-','AC3','-',0,192,48000,2);
  AddProf(2,'iPhone / iPad','MP4','H264','AAC','1920x1080',6000,160,44100,2);
  AddProf(2,'Android','MP4','H264','AAC','1280x720',3000,128,44100,2);
  AddProf(2,'Samsung Galaxy','MP4','H264','AAC','1920x1080',6000,160,44100,2);
@@ -1541,7 +1542,7 @@ End;
 { Le moteur integre sait produire ces sorties }
 Function EngineOut(Const Ext: String): Boolean;
 Begin
- EngineOut:=InList(Ext,'MP3,WAV,AIF,AU,GIF,BMP,MP4,MOV,M4V,3GP,FLV,MKV,M4A,AAC');
+ EngineOut:=InList(Ext,'MP3,WAV,AIF,AU,GIF,BMP,MP4,MOV,M4V,3GP,FLV,MKV,M4A,AAC,OGG,AC3');
 End;
 
 { ====================================================================== }
@@ -2029,6 +2030,19 @@ Begin
  End;
 End;
 
+Procedure ProbeAC3(Var M: TMedia);
+Const Br: Array[0..18] Of Integer=(32,40,48,56,64,80,96,112,128,160,192,224,256,320,384,448,512,576,640);
+ Ch: Array[0..7] Of Integer=(2,1,2,3,3,4,4,5);
+Var Fs,Fc: Integer;
+Begin
+ M.Fmt:='AC3'; M.ACodec:='AC3';
+ Fs:=CB(4) Shr 6; Fc:=(CB(4) And 63) Shr 1;
+ Case Fs Of 0: M.Rate:=48000; 1: M.Rate:=44100; Else M.Rate:=32000; End;
+ If Fc>18 Then Fc:=18;
+ M.KBps:=Br[Fc]; M.Chans:=Ch[CB(6) Shr 5];
+ If M.KBps>0 Then M.DurMs:=Round(CSize*8.0/M.KBps);
+End;
+
 Procedure ProbeFLAC(Var M: TMedia);
 Var Tot: Double;
 Begin
@@ -2133,6 +2147,7 @@ Begin
  Else If (Mg='RIFF') And (C4(8)='AVI ') Then Begin M.Fmt:='AVI'; M.Kind:=2; ProbeAVI(M); End
  Else If (Mg='FORM') And ((C4(8)='AIFF') Or (C4(8)='AIFC')) Then Begin M.Fmt:='AIFF'; M.Kind:=1; ProbeAIFF(M); End
  Else If Mg='fLaC' Then Begin M.Kind:=1; ProbeFLAC(M); End
+ Else If (CB(0)=$0B) And (CB(1)=$77) Then Begin M.Kind:=1; ProbeAC3(M); End
  Else If Mg='OggS' Then Begin ProbeOGG(M); If M.VCodec<>'' Then M.Kind:=2 Else M.Kind:=1; End
  Else If Copy(Mg,1,3)='FLV' Then Begin M.Fmt:='FLV'; M.Kind:=2; ProbeFLV(M); End
  Else If C4(4)='ftyp' Then Begin ProbeMP4(M); If M.VCodec='' Then M.Kind:=1 Else M.Kind:=2; End
@@ -18307,12 +18322,4985 @@ Begin
  Vp8Frame:=0;
 End;
 {$ENDIF}
+{$IFDEF FPC}
+{ ---- AC-3 : decodeur / encodeur natif (FFMPEG.PAS, d apres FFmpeg ac3dec.c / ac3enc.c, LGPL-2.1+) ---- }
+Procedure ProcessAC3E(Const Source,Target:String; Encoding:Boolean;
+ BitRateK:Integer);
+Const
+ APi=3.14159265358979323846;
+ BandStart:Array[0..50] Of Integer=(
+ 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,
+ 16,17,18,19,20,21,22,23,24,25,26,27,28,31,34,37,
+ 40,43,46,49,55,61,67,73,79,85,97,109,121,133,157,181,
+ 205,229,253);
+ BinBand:Array[0..252] Of Byte=(
+ 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,
+ 16,17,18,19,20,21,22,23,24,25,26,27,28,28,28,29,
+ 29,29,30,30,30,31,31,31,32,32,32,33,33,33,34,34,
+ 34,35,35,35,35,35,35,36,36,36,36,36,36,37,37,37,
+ 37,37,37,38,38,38,38,38,38,39,39,39,39,39,39,40,
+ 40,40,40,40,40,41,41,41,41,41,41,41,41,41,41,41,
+ 41,42,42,42,42,42,42,42,42,42,42,42,42,43,43,43,
+ 43,43,43,43,43,43,43,43,43,44,44,44,44,44,44,44,
+ 44,44,44,44,44,45,45,45,45,45,45,45,45,45,45,45,
+ 45,45,45,45,45,45,45,45,45,45,45,45,45,46,46,46,
+ 46,46,46,46,46,46,46,46,46,46,46,46,46,46,46,46,
+ 46,46,46,46,46,47,47,47,47,47,47,47,47,47,47,47,
+ 47,47,47,47,47,47,47,47,47,47,47,47,47,48,48,48,
+ 48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,
+ 48,48,48,48,48,49,49,49,49,49,49,49,49,49,49,49,
+ 49,49,49,49,49,49,49,49,49,49,49,49,49);
+ LogAdd:Array[0..259] Of Byte=(
+ 64,63,62,61,60,59,58,57,56,55,54,53,52,52,51,50,
+ 49,48,47,47,46,45,44,44,43,42,41,41,40,39,38,38,
+ 37,36,36,35,35,34,33,33,32,32,31,30,30,29,29,28,
+ 28,27,27,26,26,25,25,24,24,23,23,22,22,21,21,21,
+ 20,20,19,19,19,18,18,18,17,17,17,16,16,16,15,15,
+ 15,14,14,14,13,13,13,13,12,12,12,12,11,11,11,11,
+ 10,10,10,10,10,9,9,9,9,9,8,8,8,8,8,8,
+ 7,7,7,7,7,7,6,6,6,6,6,6,6,6,5,5,
+ 5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,
+ 4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,
+ 2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,
+ 2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+ 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+ 1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+ 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+ 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+ 0,0,0,0);
+ Threshold:Array[0..149] Of Integer=(
+ 1232,1264,1408,1232,1264,1408,1088,1120,1200,1024,1040,1104,992,992,1056,960,
+ 976,1008,944,960,992,944,944,976,928,944,960,928,928,944,928,928,
+ 944,928,928,944,928,928,928,912,928,928,912,912,928,912,912,928,
+ 896,912,928,896,896,928,880,896,928,880,896,928,864,880,912,864,
+ 880,912,848,864,912,848,864,912,832,848,896,832,848,896,816,832,
+ 896,800,832,880,784,800,864,768,784,848,752,768,832,752,752,816,
+ 752,752,800,752,752,784,768,752,768,784,768,752,832,800,752,912,
+ 848,752,992,912,768,1056,992,784,1120,1056,816,1168,1104,848,1184,1184,
+ 960,1120,1168,1040,1088,1120,1136,1088,1088,1184,1312,1152,1120,2048,1584,1088,
+ 2112,2112,1104,2112,2112,1248);
+ FrameWords:Array[0..113] Of Integer=(
+ 64,69,96,64,70,96,80,87,120,80,88,120,96,104,144,96,
+ 105,144,112,121,168,112,122,168,128,139,192,128,140,192,160,174,
+ 240,160,175,240,192,208,288,192,209,288,224,243,336,224,244,336,
+ 256,278,384,256,279,384,320,348,480,320,349,480,384,417,576,384,
+ 418,576,448,487,672,448,488,672,512,557,768,512,558,768,640,696,
+ 960,640,697,960,768,835,1152,768,836,1152,896,975,1344,896,976,1344,
+ 1024,1114,1536,1024,1115,1536,1152,1253,1728,1152,1254,1728,1280,1393,1920,
+  1280,
+ 1394,1920);
+ Rates:Array[0..3] Of LongInt=(
+ 48000,44100,32000,0);
+ BitRates:Array[0..18] Of Integer=(
+ 32,40,48,56,64,80,96,112,128,160,192,224,256,320,384,448,
+ 512,576,640);
+ BAPTable:Array[0..63] Of Byte=(
+ 0,1,1,1,1,1,2,2,3,3,3,4,4,5,5,6,
+ 6,6,6,7,7,7,7,8,8,8,8,9,9,9,9,10,
+ 10,10,10,11,11,11,11,12,12,12,12,13,13,13,13,14,
+ 14,14,14,14,14,14,14,15,15,15,15,15,15,15,15,15);
+ SlowDecayTable:Array[0..3] Of Integer=(
+ 15,17,19,21);
+ FastDecayTable:Array[0..3] Of Integer=(
+ 63,83,103,123);
+ SlowGainTable:Array[0..3] Of Integer=(
+ 1344,1240,1144,1040);
+ DBTable:Array[0..3] Of Integer=(
+ 0,1792,2304,2816);
+ FloorTable:Array[0..7] Of Integer=(
+ 752,688,624,560,496,368,240,-2048);
+ FastGainTable:Array[0..7] Of Integer=(
+ 128,256,384,512,640,768,896,1024);
+ QBits:Array[0..15] Of Integer=(
+ 0,3,5,7,11,15,5,6,7,8,9,10,11,12,14,16);
+ RematBand:Array[0..4] Of Integer=(
+ 13,25,37,61,253);
+ ChannelCount:Array[0..7] Of Integer=(
+ 2,1,2,3,3,4,4,5);
+ NoiseInitLo:Array[0..63] Of Word=(
+ 0,0,0,0,0,0,0,0,27486,59235,43004,45767,59034,1455,20682,32688,
+ 59627,34723,55475,36002,46200,11700,64463,31028,58037,19762,45190,6191,38385,
+  18167,14929,
+ 47668,
+ 29477,58335,58676,62172,27601,48401,52832,44829,63054,48390,30597,56404,39566,
+  37368,
+ 57125,39662,
+ 50451,10717,55985,24362,8973,30679,14055,58055,15074,26346,15514,18114,34086,
+  59839,32073,
+ 53048);
+ NoiseInitHi:Array[0..63] Of Word=(
+ 0,0,0,0,0,0,0,0,15159,62827,52130,38737,23327,34315,11046,37545,
+ 29461,35682,11739,7433,27237,51634,38455,54338,45968,37544,8464,9641,9106,
+  50936,23643,
+ 59047,
+ 54873,42295,52096,60140,39867,11944,35846,26713,61785,49683,10845,58913,47307,
+  59044,
+ 34263,37245,
+ 45398,23513,63145,50156,21013,58038,28702,21509,56779,38328,7857,13414,35748,
+  45861,10736,
+ 51590);
+Type
+ TChannel=Record
+  Start,Stop,Strategy,FastGain,SNR,DeltaMode,Segments:Integer;
+  Expn,BAP:Array[0..255] Of Byte;
+  DOffset,DLength,DValue:Array[0..7] Of Byte;
+  Spec:Array[0..255] Of Double;
+  Delay:Array[0..127] Of Double;
+  PCM:Array[0..255] Of Double;
+  Enc:Array[0..5,0..255] Of Double;
+  Previous:Array[0..255] Of Double;
+  Coord:Array[0..17] Of Double;
+  Coupled,ShortBlock,Dither:Boolean;
+ End;
+ PChannel=^TChannel;
+ TWork=Record
+  Data:Array[0..4095] Of Byte;
+  PCMBytes:Array[0..3071] Of Byte;
+  Win:Array[0..255] Of Double;
+  Temp,Time:Array[0..511] Of Double;
+  NoiseLo,NoiseHi:Array[0..63] Of Word;
+ End;
+ PWork=^TWork;
+Var
+ W:PWork;
+ Ch:Array[0..6] Of PChannel;
+ Pos,Limit,Written,FrameNumber,Rate,DataStart,DataSize,InputFrame,
+  InputFrames:LongInt;
+ BP,BL,OldRate:LongInt;
+ FrameSize,SR,SRShift,Mode,Channels,FBW,LFE,OutChannels,BSID,BlockNo:Integer;
+ OldMode,OldLFE,SlowDecay,FastDecay,SlowGain,DBPerBit,FloorVal,FastLeak,
+  SlowLeak:Integer;
+ CplSizes:Array[0..17] Of Integer;
+ NCpl,NRemat,NoiseIndex,BitCode,EncBW,EncSNR,C,I,Code:Integer;
+ Remat:Array[0..3] Of Boolean;
+ Phase:Array[0..17] Of Boolean;
+ Coupling,PhaseUse,Counting:Boolean;
+ Gain:Array[0..1] Of Double;
+ GroupValues:Array[1..4,0..2] Of Double;
+ GroupLeft:Array[1..4] Of Integer;
+ CenterLevel,SurroundLevel:Double;
+
+Function MinI(A,B:Integer):Integer;Begin
+ If A<B Then MinI:=A Else MinI:=B;
+End;
+
+Function MaxI(A,B:Integer):Integer;Begin
+ If A>B Then MaxI:=A Else MaxI:=B;
+End;
+
+Procedure Bad(Const S:String);Begin
+ Fail('ac3: '+S);
+End;
+
+Function Bits(N:Integer):LongInt;
+Var
+ V:LongInt;
+ K:Integer;
+Begin
+ If (N<0) Or (N>24) Or (N>BL-BP) Then Bad('Trame tronquee.');
+ V:=0;
+ For K:=1 To N Do Begin
+  V:=V*2+((W^.Data[BP Div 8] Shr (7-(BP Mod 8))) And 1); Inc(BP);
+ End; Bits:=V;
+End;
+
+Procedure Put(N:Integer; V:LongInt);
+Var
+ K:Integer;
+Begin
+ If Not Counting Then Begin
+  If N>BL-BP Then Bad('Depassement de la taille AC-3.');
+  For K:=N-1 Downto 0 Do Begin
+   If ((V Shr K) And 1)<>0 Then W^.Data[BP Div 8]:=W^.Data[BP Div 8] Or (1 Shl (
+    7-(
+   BP Mod 8))); Inc(BP);
+  End;
+ End Else Inc(BP,N);
+End;
+
+Function Pow2(N:Integer):Double;Begin
+ Pow2:=Exp(N*0.69314718055994530942);
+End;
+
+Function CRC(First,Last:Integer):Word;
+Var
+ R:Word;
+ I,J:Integer;
+ High:Boolean;
+Begin
+ R:=0;
+ For I:=First To Last-1 Do Begin
+  R:=R Xor (Word(W^.Data[I]) Shl 8);
+  For J:=1 To 8 Do Begin
+   High:=(R And $8000)<>0; R:=(LongInt(R)*2) And 65535; If High Then R:=R Xor
+    $8005;
+  End;
+ End; CRC:=R;
+End;
+
+Procedure FinishCRC;
+Var
+ Split,I:Integer;
+ R:Word;
+Begin
+ Split:=((FrameSize Div 2) Div 2+(FrameSize Div 2) Div 8)*2;
+ R:=CRC(4,Split);
+ For I:=1 To (Split-2)*8 Do If (R And 1)<>0 Then R:=((R Xor $8005) Shr 1)
+ Or $8000 Else R:=R Shr 1;
+ W^.Data[2]:=R Shr 8; W^.Data[3]:=R And 255;
+ R:=CRC(Split,FrameSize-2);
+ If R=$0B77 Then Begin
+  W^.Data[FrameSize-3]:=W^.Data[FrameSize-3] Xor 1; R:=R Xor $8005;
+ End;
+ W^.Data[FrameSize-2]:=R Shr 8; W^.Data[FrameSize-1]:=R And 255;
+ If (CRC(2,Split)<>0) Or (CRC(Split,FrameSize)<>0) Then Bad(
+ 'Erreur interne CRC encodeur.');
+End;
+
+Function RandomMant:Double;
+Var
+ A,B,V:LongInt;
+Begin
+ A:=LongInt(W^.NoiseLo[(NoiseIndex+40) And 63])+W^.NoiseLo[(NoiseIndex+9) And
+  63];
+ B:=(LongInt(W^.NoiseHi[(NoiseIndex+40) And 63])+W^.NoiseHi[(NoiseIndex+9) And
+  63]+(
+ A Shr 16)) And 65535;
+ W^.NoiseLo[NoiseIndex]:=A And 65535; W^.NoiseHi[NoiseIndex]:=B;
+ V:=B*256+((A And 65535) Shr 8); NoiseIndex:=(NoiseIndex+1) And 63;
+ RandomMant:=(Trunc(V*181.0/256)-5931008)/8388608.0;
+End;
+
+Function LowComp(A,B0,B1,Value:Integer):Integer;Begin
+ If B0+256=B1 Then A:=Value Else If B0>B1 Then A:=MaxI(A-64,0); LowComp:=A;
+End;
+
+Procedure Allocate(Index:Integer);
+Var
+ P:PChannel;
+ PSD:Array[0..255] Of Integer;
+ BandPSD,Excite,Mask:Array[0..49] Of Integer;
+ Bin,Band,StopBand,StartBand,EndBin,V,Adr,M,LC,FL,SL,BeginBand,End1,K,S,
+  Delta:Integer;
+Begin
+ P:=Ch[Index]; FillChar(P^.BAP,SizeOf(P^.BAP),0);
+ If (P^.Start<0) Or (P^.Stop<=P^.Start) Or (P^.Stop>253) Then Bad(
+ 'Bande spectrale incorrecte.');
+ FillChar(BandPSD,SizeOf(BandPSD),0);
+ For Bin:=P^.Start To P^.Stop-1 Do PSD[Bin]:=3072-Integer(P^.Expn[Bin])*128;
+ Bin:=P^.Start; Band:=BinBand[Bin]; StartBand:=Band; StopBand:=BinBand[P^.Stop-
+  1]+1;
+ While Bin<P^.Stop Do Begin
+  V:=PSD[Bin]; Inc(Bin); EndBin:=MinI(BandStart[Band+1],P^.Stop);
+  While Bin<EndBin Do Begin
+   M:=MaxI(V,PSD[Bin]); Adr:=MinI(M-((V+PSD[Bin]+1) Div 2),255); V:=M+LogAdd[
+    Adr];
+   Inc(Bin);
+  End;
+  BandPSD[Band]:=V; Inc(Band);
+ End;
+ If StartBand=0 Then Begin
+  LC:=LowComp(0,BandPSD[0],BandPSD[1],384); Excite[0]:=BandPSD[0]-P^.FastGain-
+   LC;
+  LC:=LowComp(LC,BandPSD[1],BandPSD[2],384); Excite[1]:=BandPSD[1]-P^.FastGain-
+   LC;
+  BeginBand:=7;
+  For Band:=2 To 6 Do Begin
+   If Not ((Index=LFE) And (Band=6)) Then LC:=LowComp(LC,BandPSD[Band],BandPSD[
+    Band+1],
+   384);
+   FL:=BandPSD[Band]-P^.FastGain; SL:=BandPSD[Band]-SlowGain; Excite[Band]:=FL-
+    LC;
+   If Not ((Index=LFE) And (Band=6)) Then If BandPSD[Band]<=BandPSD[Band+1] Then
+    Begin
+    BeginBand:=Band+1; Break;
+   End;
+  End;
+  End1:=MinI(StopBand,22);
+  For Band:=BeginBand To End1-1 Do Begin
+   If Not ((Index=LFE) And (Band=6)) Then Begin
+    If Band<7 Then LC:=LowComp(LC,BandPSD[Band],BandPSD[Band+1],384) Else
+    If Band<20 Then LC:=LowComp(LC,BandPSD[Band],BandPSD[Band+1],320) Else LC:=
+     MaxI(
+    LC-128,0);
+   End;
+   FL:=MaxI(FL-FastDecay,BandPSD[Band]-P^.FastGain);
+   SL:=MaxI(SL-SlowDecay,BandPSD[Band]-SlowGain);
+   Excite[Band]:=MaxI(FL-LC,SL);
+  End; BeginBand:=22;
+ End Else
+ Begin
+  BeginBand:=StartBand; FL:=FastLeak*256+768; SL:=SlowLeak*256+768;
+ End;
+ For Band:=BeginBand To StopBand-1 Do Begin
+  FL:=MaxI(FL-FastDecay,BandPSD[Band]-P^.FastGain);
+  SL:=MaxI(SL-SlowDecay,BandPSD[Band]-SlowGain); Excite[Band]:=MaxI(FL,SL);
+ End;
+ For Band:=StartBand To StopBand-1 Do Begin
+  V:=DBPerBit-BandPSD[Band]; If V>0 Then Inc(Excite[Band],V Div 4);
+  Mask[Band]:=MaxI(Threshold[(Band Shr SRShift)*3+SR],Excite[Band]);
+ End;
+ If P^.DeltaMode<2 Then Begin
+  Band:=StartBand;
+  For S:=0 To P^.Segments-1 Do Begin
+   Inc(Band,P^.DOffset[S]);
+   If (Band>=50) Or (P^.DLength[S]>50-Band) Then Bad(
+    'Allocation delta hors limites.');
+   V:=P^.DValue[S]; If V>=4 Then Delta:=(V-3)*128 Else Delta:=(V-4)*128;
+   For K:=1 To P^.DLength[S] Do Begin
+    Inc(Mask[Band],Delta); Inc(Band);
+   End;
+  End;
+ End;
+ If P^.SNR=-960 Then Exit;
+ For Bin:=P^.Start To P^.Stop-1 Do Begin
+  Band:=BinBand[Bin]; M:=(MaxI(Mask[Band]-P^.SNR-FloorVal,0) And $1FE0)+
+   FloorVal;
+  V:=PSD[Bin]-M; If V<0 Then Adr:=0 Else Adr:=MinI(V Div 32,63);
+  P^.BAP[Bin]:=BAPTable[Adr];
+ End;
+End;
+
+Procedure Exponents(Index:Integer);
+Var
+ P:PChannel;
+ Size,Groups,At,V,Code,I,J,K,D:Integer;
+ Diff:Array[0..2] Of Integer;
+Begin
+ P:=Ch[Index]; Size:=P^.Strategy; If Size=3 Then Size:=4;
+ If Index=0 Then Groups:=(P^.Stop-P^.Start) Div (3*Size)
+            Else Groups:=(P^.Stop+3*Size-4) Div (3*Size);
+ V:=Bits(4); At:=P^.Start;
+ If Index=0 Then V:=V*2 Else
+ Begin
+  P^.Expn[0]:=V; Inc(At);
+ End;
+ For I:=1 To Groups Do Begin
+  Code:=Bits(7); If Code>=125 Then Bad('Exposants groupes invalides.');
+  Diff[0]:=Code Div 25; Diff[1]:=(Code Div 5) Mod 5; Diff[2]:=Code Mod 5;
+  For J:=0 To 2 Do Begin
+   Inc(V,Diff[J]-2); If (V<0) Or (V>24) Then Bad('Exposant hors limites.');
+   For K:=1 To Size Do Begin
+    If At>=256 Then Bad('Trop dexposants.'); P^.Expn[At]:=V; Inc(At);
+   End;
+  End;
+ End;
+ If (Index<>0) And (Index<>LFE) Then D:=Bits(2);
+End;
+
+Procedure Mantissas(Index:Integer);
+Var
+ P:PChannel;
+ K,B,Q,Levels,Count,I,Raw:Integer;
+ V:LongInt;
+ X:Double;
+Begin
+ P:=Ch[Index];
+ For K:=P^.Start To P^.Stop-1 Do Begin
+  B:=P^.BAP[K]; X:=0;
+  If B=0 Then Begin
+   If P^.Dither Or (Index=0) Then X:=RandomMant;
+  End
+  Else If (B=1) Or (B=2) Or (B=4) Then Begin
+   If GroupLeft[B]=0 Then Begin
+    Levels:=QBits[B]; If B=4 Then Count:=2 Else Count:=3;
+    If B=1 Then V:=Bits(5) Else V:=Bits(7);
+    Raw:=1;
+    For I:=1 To Count Do Raw:=Raw*Levels;
+    If V>=Raw Then Bad('Mantisse groupee invalide.');
+    For I:=Count-1 Downto 0 Do Begin
+     Q:=V Mod Levels; V:=V Div Levels; GroupValues[B,I]:=(2*Q-(Levels-1))/
+      Levels;
+    End;
+    GroupLeft[B]:=Count;
+   End;
+   If B=4 Then Count:=2 Else Count:=3;
+   X:=GroupValues[B,Count-GroupLeft[B]]; Dec(GroupLeft[B]);
+  End Else If (B=3) Or (B=5) Then Begin
+   If B=3 Then Q:=Bits(3) Else Q:=Bits(4); Levels:=QBits[B];
+   If Q>=Levels Then Bad('Mantisse symetrique invalide.'); X:=(2*Q-(Levels-1))/
+    Levels;
+  End Else
+  Begin
+   Q:=QBits[B]; V:=Bits(Q); If V>=(LongInt(1) Shl (Q-1)) Then Dec(V,LongInt(1)
+    Shl Q);
+   X:=V/Pow2(Q-1);
+  End;
+  P^.Spec[K]:=X*Pow2(-P^.Expn[K]);
+ End;
+End;
+
+Procedure HalfTransform(Index,N,Offset,Step:Integer);
+Var
+ I,K:Integer;
+ A,C0,C1,C2,F,Sum:Double;
+Begin
+ For I:=0 To N-1 Do Begin
+  A:=APi/N*(I+0.5+N); C0:=Cos(A/2); C1:=Cos(1.5*A); F:=2*Cos(A);
+  Sum:=Ch[Index]^.Spec[Offset]*C0;
+  For K:=1 To N-1 Do Begin
+   Sum:=Sum+Ch[Index]^.Spec[Offset+K*Step]*C1; C2:=F*C1-C0; C0:=C1; C1:=C2;
+  End;
+  W^.Temp[I]:=-2*Sum;
+ End;
+End;
+
+Procedure Synthesis(Index:Integer);
+Var
+ I:Integer;
+ S0,S1:Double;
+Begin
+ If Ch[Index]^.ShortBlock Then HalfTransform(Index,128,0,2) Else HalfTransform(
+  Index,256,
+ 0,1);
+ For I:=0 To 127 Do Begin
+  S0:=Ch[Index]^.Delay[I]; S1:=W^.Temp[127-I];
+  Ch[Index]^.PCM[I]:=S0*W^.Win[255-I]-S1*W^.Win[I];
+  Ch[Index]^.PCM[255-I]:=S0*W^.Win[I]+S1*W^.Win[255-I];
+ End;
+ If Ch[Index]^.ShortBlock Then Begin
+  HalfTransform(Index,128,1,2);
+  For I:=0 To 127 Do Ch[Index]^.Delay[I]:=W^.Temp[I];
+ End
+  Else
+ For I:=0 To 127 Do Ch[Index]^.Delay[I]:=W^.Temp[I+128];
+End;
+
+Procedure DecodeBlock;
+Var
+ I,J,K,C,B,StartSub,EndSub,Master,E,M,Coarse,First,Have:Integer;
+ NewCoord,GotCpl:Boolean;
+ X,Y:Double;
+Begin
+ For C:=1 To FBW Do Ch[C]^.ShortBlock:=Bits(1)<>0;
+ For C:=1 To FBW Do Ch[C]^.Dither:=Bits(1)<>0;
+ I:=0; If Mode=0 Then I:=1;
+ For J:=I Downto 0 Do If Bits(1)<>0 Then Begin
+  E:=Bits(8); Gain[J]:=Pow2((E Shr 5)-(E Shr 7)*8-5)*((E And 31)+32);
+ End Else If BlockNo=0 Then Gain[J]:=1;
+ If Bits(1)<>0 Then Begin
+  Coupling:=Bits(1)<>0;
+  For C:=1 To FBW Do Ch[C]^.Coupled:=False;
+  If Coupling Then Begin
+   If Mode<2 Then Bad('Couplage interdit en mono.');
+   Have:=0;
+   For C:=1 To FBW Do Begin
+    Ch[C]^.Coupled:=Bits(1)<>0; If Ch[C]^.Coupled Then Inc(Have);
+   End;
+   If Have<2 Then Bad('Couplage exige deux canaux.');
+   PhaseUse:=False; If Mode=2 Then PhaseUse:=Bits(1)<>0;
+   StartSub:=Bits(4); EndSub:=Bits(4)+3;
+   If StartSub>=EndSub Then Bad('Bande de couplage incorrecte.');
+   Ch[0]^.Start:=StartSub*12+37; Ch[0]^.Stop:=EndSub*12+37;
+   NCpl:=1; CplSizes[0]:=12;
+   For I:=StartSub+1 To EndSub-1 Do If Bits(1)<>0 Then Inc(CplSizes[NCpl-1],12)
+    Else
+   Begin
+    CplSizes[NCpl]:=12; Inc(NCpl);
+   End;
+  End;
+ End Else If BlockNo=0 Then Bad('Strategie couplage absente.');
+ If Coupling Then Begin
+  NewCoord:=False;
+  For C:=1 To FBW Do If Ch[C]^.Coupled Then Begin
+   If Bits(1)<>0 Then Begin
+    NewCoord:=True; Master:=3*Bits(2);
+    For B:=0 To NCpl-1 Do Begin
+     E:=Bits(4); M:=Bits(4); If E=15 Then X:=M*0.5 Else X:=(M+16)*0.25;
+     Ch[C]^.Coord[B]:=X*Pow2(-E-Master);
+    End;
+   End Else If BlockNo=0 Then Bad('Coordonnees couplage absentes.');
+  End;
+  If (Mode=2) And NewCoord Then
+  For B:=0 To NCpl-1 Do Begin
+   Phase[B]:=False; If PhaseUse Then Phase[B]:=Bits(1)<>0;
+  End;
+ End;
+ If Mode=2 Then Begin
+  If Bits(1)<>0 Then Begin
+   NRemat:=4; If Coupling And (Ch[0]^.Start<=61) Then Begin
+    Dec(NRemat); If Ch[0]^.Start=37 Then Dec(NRemat);
+   End;
+   For I:=0 To NRemat-1 Do Remat[I]:=Bits(1)<>0;
+  End Else If BlockNo=0 Then NRemat:=0;
+ End;
+ First:=1; If Coupling Then First:=0;
+ For C:=First To Channels Do Begin
+  If C=LFE Then Ch[C]^.Strategy:=Bits(1) Else Ch[C]^.Strategy:=Bits(2);
+  If (BlockNo=0) And (Ch[C]^.Strategy=0) Then Bad(
+   'Exposants initiaux absents.');
+ End;
+ For C:=1 To FBW Do If Ch[C]^.Strategy<>0 Then Begin
+  Ch[C]^.Start:=0;
+  If Ch[C]^.Coupled Then Ch[C]^.Stop:=Ch[0]^.Start Else
+  Begin
+   I:=Bits(6); If I>60 Then Bad('Bande passante incorrecte.'); Ch[C]^.Stop:=I*3+
+    73;
+  End;
+ End;
+ For C:=First To Channels Do If Ch[C]^.Strategy<>0 Then Exponents(C);
+ If Bits(1)<>0 Then Begin
+  SlowDecay:=SlowDecayTable[Bits(2)] Shr SRShift;
+  FastDecay:=FastDecayTable[Bits(2)] Shr SRShift;
+  SlowGain:=SlowGainTable[Bits(2)]; DBPerBit:=DBTable[Bits(2)];
+  FloorVal:=FloorTable[Bits(3)];
+ End Else If BlockNo=0 Then Bad('Allocation initiale absente.');
+ If Bits(1)<>0 Then Begin
+  Coarse:=(Bits(6)-15)*16;
+  For C:=First To Channels Do Begin
+   Ch[C]^.SNR:=(Coarse+Bits(4))*4; Ch[C]^.FastGain:=FastGainTable[Bits(3)];
+  End;
+ End Else If BlockNo=0 Then Bad('SNR initial absent.');
+ If Coupling Then Begin
+  If Bits(1)<>0 Then Begin
+   FastLeak:=Bits(3); SlowLeak:=Bits(3);
+  End Else If BlockNo=0 Then Bad('Fuite couplage absente.');
+ End;
+ If Bits(1)<>0 Then Begin
+  For C:=First To FBW Do Begin
+   Ch[C]^.DeltaMode:=Bits(2);
+   If Ch[C]^.DeltaMode=3 Then Bad('Allocation delta reservee.');
+  End;
+  For C:=First To FBW Do If Ch[C]^.DeltaMode=1 Then Begin
+   Ch[C]^.Segments:=Bits(3)+1;
+   For I:=0 To Ch[C]^.Segments-1 Do Begin
+    Ch[C]^.DOffset[I]:=Bits(5); Ch[C]^.DLength[I]:=Bits(4); Ch[C]^.DValue[I]:=
+     Bits(3);
+   End;
+  End;
+ End Else If BlockNo=0 Then
+ For C:=0 To Channels Do Ch[C]^.DeltaMode:=2;
+ For C:=First To Channels Do Allocate(C);
+ If Bits(1)<>0 Then Begin
+  I:=Bits(9);
+  For J:=1 To I Do K:=Bits(8);
+ End;
+ FillChar(GroupLeft,SizeOf(GroupLeft),0); GotCpl:=False;
+ For C:=0 To Channels Do FillChar(Ch[C]^.Spec,SizeOf(Ch[C]^.Spec),0);
+ For C:=1 To Channels Do Begin
+  Mantissas(C);
+  If Ch[C]^.Coupled And Not GotCpl Then Begin
+   Mantissas(0); GotCpl:=True;
+  End;
+ End;
+ If Coupling Then Begin
+  K:=Ch[0]^.Start;
+  For B:=0 To NCpl-1 Do Begin
+   For C:=1 To FBW Do If Ch[C]^.Coupled Then Begin
+    X:=Ch[C]^.Coord[B]; If (C=2) And Phase[B] Then X:=-X;
+    For I:=K To K+CplSizes[B]-1 Do     If (Ch[0]^.BAP[I]=0)
+    And Not Ch[C]^.Dither Then Ch[C]^.Spec[I]:=0 Else Ch[C]^.Spec[I]:=Ch[
+     0]^.Spec[I]*X;
+   End;
+   Inc(K,CplSizes[B]);
+  End;
+ End;
+ If Mode=2 Then
+ For B:=0 To NRemat-1 Do If Remat[B] Then Begin
+  J:=MinI(MinI(Ch[1]^.Stop,Ch[2]^.Stop),RematBand[B+1]);
+  For I:=RematBand[B] To J-1 Do Begin
+   X:=Ch[1]^.Spec[I]; Y:=Ch[2]^.Spec[I]; Ch[1]^.Spec[I]:=X+Y; Ch[2]^.Spec[I]:=X-
+    Y;
+  End;
+ End;
+ For C:=1 To Channels Do Begin
+  J:=0; If (Mode=0) And (C=1) Then J:=1;
+  For I:=0 To 255 Do Ch[C]^.Spec[I]:=Ch[C]^.Spec[I]*Gain[J]; Synthesis(C);
+ End;
+End;
+
+Procedure WindowInit;
+Var
+ I,K:Integer;
+ X,T,S,Total:Double;
+Begin
+ Total:=0;
+ For I:=0 To 256 Do Begin
+  X:=2.0*I/256-1; X:=25*APi*APi*(1-X*X)/4; T:=1; S:=1;
+  For K:=1 To 60 Do Begin
+   T:=T*X/(K*1.0*K); S:=S+T; If T<S*1E-16 Then Break;
+  End;
+  W^.Temp[I]:=S; Total:=Total+S;
+ End;
+ S:=0;
+ For I:=0 To 255 Do Begin
+  S:=S+W^.Temp[I]; W^.Win[I]:=Sqrt(S/Total);
+ End;
+End;
+
+Procedure WriteWaveHeader;
+Var
+ B:Array[0..43] Of Byte;
+ S:String[4];
+ Err:Integer;
+
+Procedure LE16(At:Integer; V:LongInt);Begin
+ B[At]:=V And 255; B[At+1]:=(V Shr 8) And 255;
+End;
+
+Procedure LE32(At:Integer; V:LongInt);Begin
+ LE16(At,V); LE16(At+2,V Shr 16);
+End;
+Begin
+ FillChar(B,SizeOf(B),0); S:='RIFF'; Move(S[1],B[0],4); S:='WAVE'; Move(S[1],B[
+  8],4);
+ S:='fmt '; Move(S[1],B[12],4); S:='data'; Move(S[1],B[36],4);
+ LE32(4,Written+36); LE32(16,16); LE16(20,1); LE16(22,OutChannels); LE32(24,
+  Rate);
+ LE32(28,Rate*OutChannels*2); LE16(32,OutChannels*2); LE16(34,16); LE32(40,
+  Written);
+ {$I-}Seek(ActiveOutput,0); Err:=IOResult;{$I+} If Err<>0 Then Bad(
+  'Position WAV incorrecte.'); WriteBytes(B,44);
+End;
+
+Procedure OutputBlock;
+Var
+ I,J,At:Integer;
+ V:LongInt;
+ Left,Right,Center,SurL,SurR,Norm,X:Double;
+Begin
+ At:=0;
+ For I:=0 To 255 Do Begin
+  Center:=0; SurL:=0; SurR:=0; Norm:=1;
+  Case Mode Of
+  0,2:
+  Begin
+   Left:=Ch[1]^.PCM[I]; Right:=Ch[2]^.PCM[I];
+  End;
+  1:
+  Begin
+   Left:=Ch[1]^.PCM[I]; Right:=Left;
+  End;
+  3,5,7:
+  Begin
+   Left:=Ch[1]^.PCM[I]; Center:=Ch[2]^.PCM[I]; Right:=Ch[3]^.PCM[I];
+   Norm:=Norm+CenterLevel;
+  End;
+  4,6:
+  Begin
+   Left:=Ch[1]^.PCM[I]; Right:=Ch[2]^.PCM[I];
+  End;
+ End;
+ If Mode=4 Then Begin
+  SurL:=Ch[3]^.PCM[I]; SurR:=SurL;
+ End;
+ If Mode=5 Then Begin
+  SurL:=Ch[4]^.PCM[I]; SurR:=SurL;
+ End;
+ If Mode=6 Then Begin
+  SurL:=Ch[3]^.PCM[I]; SurR:=Ch[4]^.PCM[I];
+ End;
+ If Mode=7 Then Begin
+  SurL:=Ch[4]^.PCM[I]; SurR:=Ch[5]^.PCM[I];
+ End;
+ If Mode>=4 Then Norm:=Norm+SurroundLevel;
+ Left:=(Left+Center*CenterLevel+SurL*SurroundLevel)/Norm;
+ Right:=(Right+Center*CenterLevel+SurR*SurroundLevel)/Norm;
+ For J:=0 To OutChannels-1 Do Begin
+  If J=0 Then X:=Left*32768 Else X:=Right*32768;
+  If X>=32767 Then V:=32767 Else If X<=-32768 Then V:=-32768 Else V:=Round(X);
+  If V<0 Then Inc(V,65536); W^.PCMBytes[At]:=V And 255; W^.PCMBytes[At+1]:=V Shr
+   8;
+  Inc(At,2);
+ End;
+End;
+If Written>2147483600-At Then Bad('Sortie WAV superieure a 2 Go.');
+WriteBytes(W^.PCMBytes,At); Inc(Written,At);
+End;
+
+Procedure Decode;
+Var
+ Header:Array[0..6] Of Byte;
+ I,J,V,Split,B:Integer;
+Begin
+ Pos:=0; OldRate:=-1; FrameNumber:=0;
+ While Pos<Limit Do Begin
+  If Limit-Pos<7 Then Bad('En-tete AC-3 tronquee.'); ReadAt(Pos,Header,7);
+  If (Header[0]<>$0B) Or (Header[1]<>$77) Then Bad(
+   'Synchronisation AC-3 incorrecte.');
+  SR:=Header[4] Shr 6; V:=Header[4] And 63; BSID:=Header[5] Shr 3;
+  If (SR=3) Or (V>37) Then Bad('Frequence ou taille reservee.');
+  If BSID>10 Then Bad('E-AC-3 non pris en charge.');
+  SRShift:=MaxI(BSID,8)-8; Rate:=Rates[SR] Shr SRShift; FrameSize:=FrameWords[V*
+   3+SR]*2;
+  If FrameSize>Limit-Pos Then Bad('Derniere trame AC-3 tronquee.');
+  ReadAt(Pos,W^.Data,FrameSize);
+  Split:=((FrameSize Div 2) Div 2+(FrameSize Div 2) Div 8)*2;
+  If (CRC(2,Split)<>0) Or (CRC(Split,FrameSize)<>0) Then Bad(
+   'CRC AC-3 incorrect.');
+  BP:=48; BL:=FrameSize*8-16; Mode:=Bits(3); FBW:=ChannelCount[Mode]; Channels:=
+   FBW;
+  CenterLevel:=0; SurroundLevel:=0;
+  If Odd(Mode) And (Mode<>1) Then Begin
+   I:=Bits(2); Case I Of 0:CenterLevel:=0.7071067811865475; 2:CenterLevel:=0.5;
+   Else CenterLevel:=0.5946035575013605;
+  End;
+ End;
+ If (Mode And 4)<>0 Then Begin
+  I:=Bits(2); Case I Of 0:SurroundLevel:=0.7071067811865475; 2:SurroundLevel:=0;
+  Else SurroundLevel:=0.5;
+ End;
+End;
+If Mode=2 Then V:=Bits(2);
+LFE:=-1; If Bits(1)<>0 Then Begin
+ Inc(Channels); LFE:=Channels; Ch[LFE]^.Stop:=7; Ch[LFE]^.Start:=0;
+End;
+If FBW=1 Then OutChannels:=1 Else OutChannels:=2;
+If OldRate=-1 Then Begin
+ OldRate:=Rate; OldMode:=Mode; OldLFE:=LFE; OpenWrite(Target); WriteWaveHeader;
+End
+Else If (Rate<>OldRate) Or (Mode<>OldMode) Or (LFE<>OldLFE) Then Bad(
+'Changement de configuration AC-3.');
+J:=0; If Mode=0 Then J:=1;
+For I:=0 To J Do Begin
+ V:=Bits(5); If Bits(1)<>0 Then V:=Bits(8); If Bits(1)<>0 Then V:=Bits(8);
+ If Bits(1)<>0 Then V:=Bits(7);
+End;
+V:=Bits(2); If Bits(1)<>0 Then V:=Bits(14); If Bits(1)<>0 Then V:=Bits(14);
+If Bits(1)<>0 Then Begin
+ J:=Bits(6)+1;
+ For I:=1 To J Do V:=Bits(8);
+End;
+Coupling:=False; FillChar(Phase,SizeOf(Phase),0);
+For I:=0 To Channels Do Begin
+ Ch[I]^.Segments:=0; Ch[I]^.DeltaMode:=2; Ch[I]^.Coupled:=False;
+End;
+For B:=0 To 5 Do Begin
+ BlockNo:=B; DecodeBlock; OutputBlock;
+End;
+Inc(Pos,FrameSize); Inc(FrameNumber);
+End;
+If FrameNumber=0 Then Bad('Aucune trame AC-3.'); WriteWaveHeader;
+End;
+
+Function LE32(At:Integer):LongInt;Begin
+ If W^.Data[At+3]>=128 Then Bad('Champ WAV trop grand.');
+ LE32:=LongInt(W^.Data[At])+LongInt(W^.Data[At+1])*256+LongInt(W^.Data[At+2])*
+  65536+
+ LongInt(W^.Data[At+3])*16777216;
+End;
+
+Procedure ReadWave;
+Var
+ At,N:LongInt;
+ Kind:String[4];
+ I,Format:Integer;
+ GotFmt,GotData:Boolean;
+Begin
+ If Limit<44 Then Bad('WAV tronque.'); ReadAt(0,W^.Data,12);
+ If (W^.Data[0]<>82) Or (W^.Data[1]<>73) Or (W^.Data[2]<>70) Or (W^.Data[3]<>70)
+  Or
+ (W^.Data[8]<>87) Or (W^.Data[9]<>65) Or (W^.Data[10]<>86) Or (W^.Data[11]<>69)
+  Then Bad(
+ 'WAV PCM requis.');
+ If LE32(4)<>Limit-8 Then Bad('Taille WAV incorrecte.');
+ GotFmt:=False; GotData:=False; At:=12;
+ While At<Limit Do Begin
+  If Limit-At<8 Then Bad('Bloc WAV tronque.'); ReadAt(At,W^.Data,8); N:=LE32(4);
+  Inc(At,8);
+  If N>Limit-At Then Bad('Bloc WAV hors limites.'); Kind:='';
+  For I:=0 To 3 Do Kind:=Kind+Chr(W^.Data[I]);
+  If Kind='fmt ' Then Begin
+   If GotFmt Or (N<16) Then Bad('Format WAV incorrect.'); ReadAt(At,W^.Data,16);
+   Format:=W^.Data[0]+Integer(W^.Data[1])*256;
+   Channels:=W^.Data[2]+Integer(W^.Data[3])*256; Rate:=LE32(4);
+   If (Format<>1) Or (Channels<1) Or (Channels>2) Or (W^.Data[14]<>16) Or (
+    W^.Data[15]<>0)
+   Then Bad('PCM 16 bits mono/stereo requis.');
+   If (LE32(8)<>Rate*Channels*2) Or (W^.Data[12]<>Channels*2) Or (W^.Data[
+    13]<>0)
+   Then Bad('Alignement PCM incorrect.');
+   GotFmt:=True;
+  End Else If Kind='data' Then Begin
+   If GotData Then Bad('Plusieurs blocs PCM.'); DataStart:=At; DataSize:=N;
+    GotData:=True;
+  End;
+  Inc(At,N+(N And 1)); If At>Limit Then Bad('Bourrage WAV absent.');
+ End;
+ If Not GotFmt Or Not GotData Then Bad('WAV incomplet.');
+ SR:=-1;
+ For I:=0 To 2 Do If Rate=Rates[I] Then SR:=I;
+ If SR<0 Then Bad(
+  'Encodage AC-3: 32000, 44100 ou 48000 Hz requis; utiliser -ar.');
+ If DataSize Mod (Channels*2)<>0 Then Bad('PCM tronque.');
+ InputFrames:=DataSize Div (Channels*2); If InputFrames=0 Then Bad('WAV vide.');
+ BitCode:=-1;
+ For I:=0 To 18 Do If BitRates[I]=BitRateK Then BitCode:=I*2;
+ If BitCode<0 Then Bad(
+  'Debit AC-3 invalide (32..640 kb/s, valeurs normalisees).');
+ FBW:=Channels; Mode:=Channels; LFE:=-1; SRShift:=0;
+End;
+
+Procedure AnalyzeFrame;
+Var
+ B,C,I,K,Take,At,E:Integer;
+ V:LongInt;
+ A,C0,C1,C2,Step,Sum,Peak:Double;
+Begin
+ For B:=0 To 5 Do Begin
+  Take:=256; If InputFrames-InputFrame<Take Then Take:=MaxI(0,InputFrames-
+   InputFrame);
+  If Take>0 Then ReadAt(DataStart+InputFrame*Channels*2,W^.PCMBytes,Take*
+   Channels*2);
+  For C:=1 To Channels Do Begin
+   For I:=0 To 255 Do Begin
+    W^.Time[I]:=Ch[C]^.Previous[I]*W^.Win[I]; V:=0;
+    If I<Take Then Begin
+     At:=(I*Channels+C-1)*2; V:=LongInt(W^.PCMBytes[At])+LongInt(W^.PCMBytes[At+
+      1])*256;
+     If V>=32768 Then Dec(V,65536);
+    End;
+    Ch[C]^.Previous[I]:=V/32768.0; W^.Time[256+I]:=Ch[C]^.Previous[I]*W^.Win[
+     255-I];
+   End;
+   For K:=0 To 252 Do Begin
+    A:=APi/256*(K+0.5); C0:=Cos(A*128.5); C1:=Cos(A*129.5); Step:=2*Cos(A);
+    Sum:=W^.Time[0]*C0;
+    For I:=1 To 511 Do Begin
+     Sum:=Sum+W^.Time[I]*C1; C2:=Step*C1-C0; C0:=C1; C1:=C2;
+    End;
+    Ch[C]^.Enc[B,K]:=-Sum/256;
+   End;
+  End;
+  Inc(InputFrame,Take);
+ End;
+ { Exponents are shared by all six blocks. Keep each bin's peak and limit
+   adjacent differences to +/-2, always toward a larger quantizer range. }
+ For C:=1 To Channels Do Begin
+  Ch[C]^.Start:=0; Ch[C]^.Stop:=EncBW*3+73;
+  For K:=0 To Ch[C]^.Stop-1 Do Begin
+   Peak:=0;
+   For B:=0 To 5 Do If Abs(Ch[C]^.Enc[B,K])>Peak Then Peak:=Abs(Ch[C]^.Enc[B,
+    K]);
+   E:=0;
+   While (E<24) And (Peak<0.5) Do Begin
+    Inc(E); Peak:=Peak*2;
+   End; Ch[C]^.Expn[K]:=E;
+  End;
+  If Ch[C]^.Expn[0]>15 Then Ch[C]^.Expn[0]:=15;
+  For K:=1 To Ch[C]^.Stop-1 Do If Ch[C]^.Expn[K]>Ch[C]^.Expn[K-1]+2 Then Ch[
+   C]^.Expn[K]:=
+  Ch[C]^.Expn[K-1]+2;
+  For K:=Ch[C]^.Stop-2 Downto 0 Do If Ch[C]^.Expn[K]>Ch[C]^.Expn[K+1]+
+  2 Then Ch[C]^.Expn[K]:=Ch[C]^.Expn[K+1]+2;
+  Ch[C]^.FastGain:=FastGainTable[4]; Ch[C]^.DeltaMode:=2;
+ End;
+End;
+
+Function QuantValue(B,C,K:Integer):LongInt;
+Var
+ Q,Levels:Integer;
+ X:Double;
+ V:LongInt;
+Begin
+ Q:=Ch[C]^.BAP[K]; X:=Ch[C]^.Enc[B,K]*Pow2(Ch[C]^.Expn[K]);
+ If Q<=5 Then Begin
+  Levels:=QBits[Q]; V:=Round((X*Levels+Levels-1)/2); If V<0 Then V:=0;
+  If V>=Levels Then V:=Levels-1;
+ End
+  Else
+ Begin
+  Levels:=QBits[Q]; X:=X*Pow2(Levels-1); V:=Round(X);
+  If V<-(LongInt(1) Shl (Levels-1)) Then V:=-(LongInt(1) Shl (Levels-1));
+  If V>=(LongInt(1) Shl (Levels-1)) Then V:=(LongInt(1) Shl (Levels-1))-1;
+  If V<0 Then Inc(V,LongInt(1) Shl Levels);
+ End;
+ QuantValue:=V;
+End;
+
+Procedure EncodeMantissas(B:Integer);
+Var
+ C,K,Q,CC,KK,Need,Found,Levels:Integer;
+ V:LongInt;
+ Counts:Array[1..4] Of Integer;
+Begin
+ FillChar(Counts,SizeOf(Counts),0);
+ For C:=1 To Channels Do
+ For K:=0 To Ch[C]^.Stop-1 Do Begin
+  Q:=Ch[C]^.BAP[K]; If Q<>0 Then Begin
+   If (Q=1) Or (Q=2) Or (Q=4) Then Begin
+    If Counts[Q]>0 Then Dec(Counts[Q]) Else
+    Begin
+     If Q=4 Then Need:=2 Else Need:=3; Levels:=QBits[Q]; V:=0; Found:=0; CC:=C;
+      KK:=K;
+     While (CC<=Channels) And (Found<Need) Do Begin
+      If Ch[CC]^.BAP[KK]=Q Then Begin
+       V:=V*Levels+QuantValue(B,CC,KK); Inc(Found);
+      End;
+      Inc(KK); If KK>=Ch[CC]^.Stop Then Begin
+       Inc(CC); KK:=0;
+      End;
+     End;
+     While Found<Need Do Begin
+      V:=V*Levels+(Levels Div 2); Inc(Found);
+     End;
+     Counts[Q]:=Need-1; If Q=1 Then Put(5,V) Else Put(7,V);
+    End;
+   End Else
+   Begin
+    If Q=3 Then Put(3,QuantValue(B,C,K)) Else If Q=5 Then Put(4,QuantValue(B,C,
+     K))
+           Else Put(QBits[Q],QuantValue(B,C,K));
+   End;
+  End;
+ End;
+End;
+
+Procedure EncodeBits;
+Var
+ B,C,K,V,E:Integer;
+Begin
+ BP:=0; If Not Counting Then FillChar(W^.Data,SizeOf(W^.Data),0);
+ Put(16,$0B77); Put(16,0); Put(2,SR); Put(6,Code); Put(5,8); Put(3,0); Put(3,
+  Mode);
+ If Mode=2 Then Put(2,0); Put(1,0); Put(5,31); Put(3,0); Put(2,1); Put(3,0);
+ For B:=0 To 5 Do Begin
+  For C:=1 To Channels Do Put(1,0);
+  For C:=1 To Channels Do Put(1,0); Put(1,0);
+  If B=0 Then Begin
+   Put(1,1); Put(1,0);
+  End Else Put(1,0);
+  If Mode=2 Then Begin
+   If B=0 Then Begin
+    Put(1,1); Put(4,0);
+   End Else Put(1,0);
+  End;
+  For C:=1 To Channels Do If B=0 Then Put(2,1) Else Put(2,0);
+  If B=0 Then Begin
+   For C:=1 To Channels Do Put(6,EncBW);
+   For C:=1 To Channels Do Begin
+    E:=Ch[C]^.Expn[0]; Put(4,E); K:=1;
+    While K<Ch[C]^.Stop Do Begin
+     V:=(Integer(Ch[C]^.Expn[K])-E+2)*25;
+     Inc(V,(Integer(Ch[C]^.Expn[K+1])-Ch[C]^.Expn[K]+2)*5);
+     Inc(V,Integer(Ch[C]^.Expn[K+2])-Ch[C]^.Expn[K+1]+2); E:=Ch[C]^.Expn[K+2];
+      Put(7,V);
+     Inc(K,3);
+    End; Put(2,0);
+   End;
+   Put(1,1); Put(2,2); Put(2,1); Put(2,1); Put(2,2); Put(3,7);
+   Put(1,1); Put(6,EncSNR Div 16);
+   For C:=1 To Channels Do Begin
+    Put(4,EncSNR Mod 16); Put(3,4);
+   End;
+  End Else
+  Begin
+   Put(1,0); Put(1,0);
+  End;
+  Put(1,0); Put(1,0); EncodeMantissas(B);
+ End;
+End;
+
+Procedure Encode;
+Var
+ Lo,Hi,Mid,Best,C:Integer;
+ Remainder:LongInt;
+Begin
+ ReadWave; OpenWrite(Target); FrameNumber:=0; InputFrame:=0; Remainder:=0;
+ SlowDecay:=SlowDecayTable[2]; FastDecay:=FastDecayTable[1]; SlowGain:=
+  SlowGainTable[1];
+ DBPerBit:=DBTable[2]; FloorVal:=FloorTable[7];
+ EncBW:=60; If BitRateK Div Channels<80 Then EncBW:=20;
+ If BitRateK Div Channels<48 Then EncBW:=0;
+ Repeat
+ Code:=BitCode;
+ If SR=1 Then Begin
+  Inc(Remainder,LongInt(BitRateK)*96000 Mod 44100); If Remainder>=44100 Then
+   Begin
+   Inc(Code); Dec(Remainder,44100);
+  End;
+ End;
+ FrameSize:=FrameWords[Code*3+SR]*2; BL:=FrameSize*8-18;
+ AnalyzeFrame; Lo:=0; Hi:=1023; Best:=-1; Counting:=True;
+ While Lo<=Hi Do Begin
+  Mid:=(Lo+Hi) Div 2; EncSNR:=Mid;
+  For C:=1 To Channels Do Begin
+   Ch[C]^.SNR:=(Mid-240)*4; Allocate(C);
+  End;
+  EncodeBits;
+  If BP<=BL Then Begin
+   Best:=Mid; Lo:=Mid+1;
+  End Else Hi:=Mid-1;
+ End;
+ If Best<0 Then Bad('Debit insuffisant pour ce nombre de canaux.');
+ EncSNR:=Best;
+ For C:=1 To Channels Do Begin
+  Ch[C]^.SNR:=(Best-240)*4; Allocate(C);
+ End;
+ Counting:=False; EncodeBits; FinishCRC; WriteBytes(W^.Data,FrameSize); Inc(
+  FrameNumber);
+ Until FrameNumber*1536.0>=InputFrames+256.0;
+End;
+Begin
+ New(W); FillChar(W^,SizeOf(W^),0);
+ For C:=0 To 6 Do Begin
+  New(Ch[C]); FillChar(Ch[C]^,SizeOf(TChannel),0);
+ End;
+ For I:=0 To 63 Do Begin
+  W^.NoiseLo[I]:=NoiseInitLo[I]; W^.NoiseHi[I]:=NoiseInitHi[I];
+ End;
+ NoiseIndex:=0; Written:=0; WindowInit; OpenRead(Source); Limit:=InputSize;
+ If Encoding Then Encode Else Decode;
+ CloseRead; CloseWrite;
+ For C:=0 To 6 Do Dispose(Ch[C]); Dispose(W);
+End;
+{$ENDIF}
+{$IFDEF FPC}
+{ ---- Vorbis : decodeur / encodeur natif et demultiplexeur Ogg (FFMPEG.PAS, d apres FFmpeg vorbisdec.c, vorbisenc.c, oggdec.c, LGPL-2.1+) ---- }
+Function Lower(S: String): String;
+Var
+ J: Integer;
+Begin
+ For J:=1 To Length(S) Do If S[J] In ['A'..'Z'] Then S[J]:=Chr(Ord(S[J])+32);
+  Lower:=S;
+End;
+
+Procedure ADPCMWaveHeader(Rate: LongInt; Channels: Integer; DataSize: LongInt);
+Var
+ H: Array[0..43] Of Byte;
+
+Procedure P32(At: Integer; V: LongInt);
+Var
+ I: Integer;
+Begin
+ For I:=0 To 3 Do Begin
+  H[At+I]:=V And 255; V:=V Shr 8;
+ End;
+End;
+
+Procedure P16(At: Integer; V: Integer);Begin
+ H[At]:=V And 255; H[At+1]:=(V Shr 8) And 255;
+End;
+Begin
+ H[0]:=82; H[1]:=73; H[2]:=70; H[3]:=70; P32(4,36+DataSize);
+ H[8]:=87; H[9]:=65; H[10]:=86; H[11]:=69;
+ H[12]:=102; H[13]:=109; H[14]:=116; H[15]:=32; P32(16,16); P16(20,1);
+ P16(22,Channels); P32(24,Rate); P32(28,Rate*Channels*2); P16(32,Channels*2);
+  P16(34,16);
+ H[36]:=100; H[37]:=97; H[38]:=116; H[39]:=97; P32(40,DataSize);
+ WriteBytes(H,44);
+End;
+
+Var
+ EAOut: Array[0..8191] Of Byte;
+ EAUsed: Integer;
+ EAWritten: LongInt;
+ EACur,EAPrev,EAS1,EAS2: Array[0..1] Of LongInt;
+
+Procedure EAReset;
+Var
+ I: Integer;
+Begin
+ For I:=0 To 1 Do Begin
+  EACur[I]:=0; EAPrev[I]:=0; EAS1[I]:=0; EAS2[I]:=0;
+ End;
+ EAUsed:=0; EAWritten:=0;
+End;
+
+Procedure EAFlush;Begin
+ If EAUsed>0 Then Begin
+  WriteBytes(EAOut,EAUsed); Inc(EAWritten,EAUsed); EAUsed:=0;
+ End;
+ If EAWritten>2147483000-8192 Then Fail('ea: sortie PCM superieure a 2 Go.');
+End;
+
+Procedure EAPut(S: LongInt);Begin
+ If S<0 Then Inc(S,65536);
+ EAOut[EAUsed]:=S And 255; EAOut[EAUsed+1]:=S Shr 8; Inc(EAUsed,2);
+ If EAUsed>=SizeOf(EAOut) Then EAFlush;
+End;
+{ Lecture bornee: au-dela du paquet, 0 (comme bytestream2 de FFmpeg). }
+Const
+ VGWinBits: Array[0..8159] Of LongWord=(
+$3A780018,$3C0B464C,$3CC0CCF2,$3D3BFC74,$3D9A4956,$3DE45DF1,$3E1DA3F8,$3E4EE7B4,
+$3E829D36,$3E9FDC4E,$3EBEAEC1,$3EDE8441,$3EFEC2AD,$3F0F65BA,$3F1F00F8,$3F2DE91D,
+$3F3BDBF9,$3F48A22D,$3F5411A0,$3F5E0F26,$3F668F2E,$3F6D9570,$3F7333AE,$3F77879F,
+$3F7AB842,$3F7CF2C4,$3F7E674B,$3F7F45C4,$3F7FBAF1,$3F7FEDD9,$3F7FFDA2,$3F7FFFF8,
+$397809A8,$3B0B7711,$3BC18B87,$3C3D714A,$3C9C5294,$3CE9085E,$3D22532A,$3D57764A,
+$3D89E38A,$3DAB8C07,$3DD09A22,$3DF8EF6C,$3E1234A4,$3E297064,$3E421541,$3E5C0B43,
+$3E77382F,$3E89BFC5,$3E98615C,$3EA77087,$3EB6DC04,$3EC691BC,$3ED67EE7,$3EE69030,
+$3EF6B1E3,$3F03680D,$3F0B6B79,$3F135962,$3F1B282A,$3F22CE89,$3F2A43A6,$3F317F31,
+$3F38797E,$3F3F2B99,$3F458F5C,$3F4B9F7F,$3F5157A5,$3F56B468,$3F5BB359,$3F605308,
+$3F6492FC,$3F6873B1,$3F6BF68A,$3F6F1DC6,$3F71EC6D,$3F74663E,$3F768F9A,$3F786D68,
+$3F7A0503,$3F7B5C1A,$3F7C7899,$3F7D608F,$3F7E1A11,$3F7EAB27,$3F7F19B0,$3F7F6B4A,
+$3F7FA544,$3F7FCC84,$3F7FE57B,$3F7FF411,$3F7FFB9E,$3F7FFEDB,$3F7FFFDA,$3F800000,
+$38780C05,$3A0B8332,$3AC1BA76,$3B3DCBE2,$3B9CCF26,$3BEA208B,$3C2366F5,$3C59643F,
+$3C8B7FB8,$3CAE173B,$3CD472EF,$3CFE8C60,$3D162E2D,$3D2EED72,$3D497F9B,$3D65DFDC,
+$3D82047B,$3D91FA9F,$3DA2CF47,$3DB47F26,$3DC706AD,$3DDA6210,$3DEE8D3F,$3E01C1F4,
+$3E0CA0B9,$3E17E080,$3E237EB6,$3E2F78A6,$3E3BCB74,$3E487422,$3E556F8D,$3E62BA6B,
+$3E705153,$3E7E30B4,$3E862A6E,$3E8D5CFC,$3E94AE09,$3E9C1B8A,$3EA3A364,$3EAB4370,
+$3EB2F977,$3EBAC336,$3EC29E5D,$3ECA8893,$3ED27F76,$3EDA809A,$3EE2898E,$3EEA97D9,
+$3EF2A902,$3EFABA8B,$3F0164FB,$3F056A63,$3F096C41,$3F0D6959,$3F116074,$3F15505E,
+$3F1937E7,$3F1D15E7,$3F20E93A,$3F24B0C5,$3F286B74,$3F2C183E,$3F2FB623,$3F33442B,
+$3F36C16D,$3F3A2D0A,$3F3D8630,$3F40CC1A,$3F43FE11,$3F471B6B,$3F4A238E,$3F4D15EE,
+$3F4FF20F,$3F52B784,$3F5565EF,$3F57FD03,$3F5A7C81,$3F5CE43C,$3F5F3415,$3F616BFE,
+$3F638BF6,$3F65940E,$3F678462,$3F695D21,$3F6B1E85,$3F6CC8D5,$3F6E5C67,$3F6FD99B,
+$3F7140E0,$3F7292AC,$3F73CF83,$3F74F7F1,$3F760C8B,$3F770DEF,$3F77FCC1,$3F78D9AC,
+$3F79A563,$3F7A609B,$3F7B0C0F,$3F7BA87C,$3F7C36A3,$3F7CB747,$3F7D2B29,$3F7D930D,
+$3F7DEFB7,$3F7E41E5,$3F7E8A59,$3F7EC9CD,$3F7F00FB,$3F7F3096,$3F7F594E,$3F7F7BCD,
+$3F7F98B6,$3F7FB0A7,$3F7FC435,$3F7FD3EF,$3F7FE05B,$3F7FE9F5,$3F7FF133,$3F7FF67F,
+$3F7FFA3B,$3F7FFCBE,$3F7FFE54,$3F7FFF40,$3F7FFFBA,$3F7FFFEE,$3F7FFFFE,$3F800000,
+$37780CA9,$390B8636,$39C1C626,$3A3DE25E,$3A9CEDEA,$3AEA6555,$3B23AA38,$3B59DBCF,
+$3B8BE2A9,$3BAEB22A,$3BD55B0D,$3BFFDBCC,$3C17195B,$3C302EFA,$3C4B2DC2,$3C68149C,
+$3C83712E,$3C93CAE1,$3CA516B9,$3CB75401,$3CCA81F5,$3CDE9FC6,$3CF3AC9B,$3D04D3C7,
+$3D1047D5,$3D1C31FA,$3D2891AE,$3D356665,$3D42AF8D,$3D506C8C,$3D5E9CC1,$3D6D3F85,
+$3D7C5429,$3D85ECFC,$3D8DE81A,$3D961B0D,$3D9E856E,$3DA726D4,$3DAFFED2,$3DB90CF5,
+$3DC250C8,$3DCBC9D1,$3DD57792,$3DDF598B,$3DE96F33,$3DF3B802,$3DFE3369,$3E04706A,
+$3E09DFD6,$3E0F67AB,$3E150799,$3E1ABF4D,$3E208E74,$3E2674B5,$3E2C71B8,$3E328522,
+$3E38AE95,$3E3EEDB2,$3E454215,$3E4BAB5C,$3E52291E,$3E58BAF3,$3E5F6070,$3E661928,
+$3E6CE4AA,$3E73C284,$3E7AB244,$3E80D9B9,$3E8462CB,$3E87F41A,$3E8B8D69,$3E8F2E78,
+$3E92D706,$3E9686D3,$3E9A3D9C,$3E9DFB1D,$3EA1BF13,$3EA58939,$3EA95947,$3EAD2EF9,
+$3EB10A05,$3EB4EA24,$3EB8CF0D,$3EBCB875,$3EC0A612,$3EC49799,$3EC88CBE,$3ECC8534,
+$3ED080AF,$3ED47EE1,$3ED87F7D,$3EDC8234,$3EE086B8,$3EE48CB9,$3EE893E9,$3EEC9BF8,
+$3EF0A496,$3EF4AD75,$3EF8B643,$3EFCBEB2,$3F006339,$3F026699,$3F046952,$3F066B3C,
+$3F086C30,$3F0A6C06,$3F0C6A97,$3F0E67BC,$3F10634E,$3F125D27,$3F145521,$3F164B15,
+$3F183EDE,$3F1A3057,$3F1C1F5C,$3F1E0BC7,$3F1FF575,$3F21DC42,$3F23C00C,$3F25A0B0,
+$3F277E0C,$3F2957FE,$3F2B2E68,$3F2D0127,$3F2ED01D,$3F309B2B,$3F326233,$3F342517,
+$3F35E3BC,$3F379E04,$3F3953D6,$3F3B0517,$3F3CB1AD,$3F3E5980,$3F3FFC78,$3F419A7E,
+$3F43337C,$3F44C75D,$3F46560C,$3F47DF77,$3F49638A,$3F4AE236,$3F4C5B68,$3F4DCF11,
+$3F4F3D23,$3F50A591,$3F52084C,$3F53654B,$3F54BC82,$3F560DE7,$3F575972,$3F589F1A,
+$3F59DEDA,$3F5B18AC,$3F5C4C8A,$3F5D7A71,$3F5EA25D,$3F5FC44E,$3F60E043,$3F61F63A,
+$3F630636,$3F641038,$3F651443,$3F66125C,$3F670A85,$3F67FCC6,$3F68E925,$3F69CFA8,
+$3F6AB059,$3F6B8B40,$3F6C6066,$3F6D2FD8,$3F6DF99F,$3F6EBDC9,$3F6F7C61,$3F703576,
+$3F70E917,$3F719751,$3F724035,$3F72E3D4,$3F73823D,$3F741B83,$3F74AFB8,$3F753EEE,
+$3F75C938,$3F764EAB,$3F76CF5A,$3F774B5A,$3F77C2C0,$3F7835A2,$3F78A415,$3F790E30,
+$3F797408,$3F79D5B6,$3F7A334F,$3F7A8CEB,$3F7AE2A2,$3F7B348B,$3F7B82BF,$3F7BCD55,
+$3F7C1466,$3F7C5809,$3F7C9858,$3F7CD56A,$3F7D0F58,$3F7D463A,$3F7D7A29,$3F7DAB3E,
+$3F7DD98F,$3F7E0536,$3F7E2E4B,$3F7E54E4,$3F7E791B,$3F7E9B07,$3F7EBABE,$3F7ED858,
+$3F7EF3EC,$3F7F0D90,$3F7F255B,$3F7F3B63,$3F7F4FBC,$3F7F627D,$3F7F73B9,$3F7F8387,
+$3F7F91F9,$3F7F9F24,$3F7FAB1A,$3F7FB5EE,$3F7FBFB3,$3F7FC87A,$3F7FD055,$3F7FD754,
+$3F7FDD88,$3F7FE300,$3F7FE7CC,$3F7FEBF9,$3F7FEF96,$3F7FF2B1,$3F7FF555,$3F7FF790,
+$3F7FF96D,$3F7FFAF6,$3F7FFC36,$3F7FFD37,$3F7FFE01,$3F7FFE9C,$3F7FFF12,$3F7FFF67,
+$3F7FFFA3,$3F7FFFCC,$3F7FFFE5,$3F7FFFF4,$3F7FFFFC,$3F7FFFFF,$3F800000,$3F800000,
+$36780C3C,$380B86FD,$38C1C913,$393DE7F8,$399CF594,$39EA7673,$3A23BAEE,$3A59F971,
+$3A8BFB20,$3AAED860,$3AD59422,$3B001703,$3B1752D1,$3B307D41,$3B4B9615,$3B689D08,
+$3B83C8E9,$3B943A14,$3BA5A1DA,$3BB80010,$3BCB5488,$3BDF9F10,$3BF4DF76,$3C058AC2,
+$3C112080,$3C1D30D9,$3C29BBAC,$3C36C0DB,$3C444043,$3C5239C2,$3C60AD34,$3C6F9A73,
+$3C7F0158,$3C8770DE,$3C8F9DBA,$3C98072A,$3CA0AD19,$3CA98F70,$3CB2AE17,$3CBC08F6,
+$3CC59FF3,$3CCF72F5,$3CD981E1,$3CE3CC9C,$3CEE530A,$3CF9150E,$3D020946,$3D07A5B1,
+$3D0D5FBB,$3D133751,$3D192C66,$3D1F3EE6,$3D256EC3,$3D2BBBE9,$3D322647,$3D38ADCA,
+$3D3F5261,$3D4613F7,$3D4CF279,$3D53EDD2,$3D5B05F0,$3D623ABB,$3D698C20,$3D70FA08,
+$3D78845D,$3D801584,$3D83F6F9,$3D87E682,$3D8BE413,$3D8FEF9F,$3D94091A,$3D983077,
+$3D9C65A9,$3DA0A8A3,$3DA4F958,$3DA957BA,$3DADC3BA,$3DB23D4C,$3DB6C45F,$3DBB58E6,
+$3DBFFAD1,$3DC4AA12,$3DC96698,$3DCE3055,$3DD30738,$3DD7EB30,$3DDCDC2F,$3DE1DA22,
+$3DE6E4F8,$3DEBFCA1,$3DF1210B,$3DF65223,$3DFB8FD9,$3E006D0D,$3E031869,$3E05C9F7,
+$3E0881AE,$3E0B3F85,$3E0E0371,$3E10CD68,$3E139D60,$3E16734F,$3E194F2A,$3E1C30E8,
+$3E1F187C,$3E2205DD,$3E24F8FF,$3E27F1D7,$3E2AF05A,$3E2DF47D,$3E30FE33,$3E340D72,
+$3E37222D,$3E3A3C58,$3E3D5BE8,$3E4080D0,$3E43AB03,$3E46DA76,$3E4A0F1A,$3E4D48E5,
+$3E5087C7,$3E53CBB5,$3E5714A2,$3E5A627F,$3E5DB53F,$3E610CD5,$3E646932,$3E67CA49,
+$3E6B300C,$3E6E9A6C,$3E72095C,$3E757CCB,$3E78F4AD,$3E7C70F1,$3E7FF18A,$3E81BB34,
+$3E837FBE,$3E85465B,$3E870F04,$3E88D9B0,$3E8AA659,$3E8C74F5,$3E8E457E,$3E9017EA,
+$3E91EC32,$3E93C24E,$3E959A36,$3E9773E0,$3E994F46,$3E9B2C5D,$3E9D0B1F,$3E9EEB82,
+$3EA0CD7F,$3EA2B10B,$3EA4961F,$3EA67CB1,$3EA864BA,$3EAA4E2F,$3EAC3909,$3EAE253E,
+$3EB012C6,$3EB20196,$3EB3F1A7,$3EB5E2EE,$3EB7D564,$3EB9C8FE,$3EBBBDB3,$3EBDB37A,
+$3EBFAA4A,$3EC1A219,$3EC39ADD,$3EC5948E,$3EC78F22,$3EC98A8E,$3ECB86CB,$3ECD83CD,
+$3ECF818C,$3ED17FFD,$3ED37F18,$3ED57ED2,$3ED77F21,$3ED97FFC,$3EDB8158,$3EDD832D,
+$3EDF8570,$3EE18817,$3EE38B19,$3EE58E6C,$3EE79205,$3EE995DB,$3EEB99E4,$3EED9E15,
+$3EEFA266,$3EF1A6CB,$3EF3AB3B,$3EF5AFAD,$3EF7B415,$3EF9B86B,$3EFBBCA4,$3EFDC0B5,
+$3EFFC496,$3F00E41E,$3F01E5CF,$3F02E758,$3F03E8B6,$3F04E9E2,$3F05EAD7,$3F06EB92,
+$3F07EC0C,$3F08EC42,$3F09EC2D,$3F0AEBCA,$3F0BEB13,$3F0CEA04,$3F0DE897,$3F0EE6C8,
+$3F0FE491,$3F10E1EF,$3F11DEDC,$3F12DB54,$3F13D751,$3F14D2D0,$3F15CDCA,$3F16C83D,
+$3F17C222,$3F18BB75,$3F19B432,$3F1AAC55,$3F1BA3D7,$3F1C9AB6,$3F1D90EC,$3F1E8675,
+$3F1F7B4D,$3F206F6E,$3F2162D6,$3F22557E,$3F234764,$3F243882,$3F2528D4,$3F261857,
+$3F270705,$3F27F4DB,$3F28E1D5,$3F29CDEF,$3F2AB924,$3F2BA371,$3F2C8CD1,$3F2D7540,
+$3F2E5CBC,$3F2F433F,$3F3028C7,$3F310D4E,$3F31F0D3,$3F32D350,$3F33B4C3,$3F349527,
+$3F35747A,$3F3652B8,$3F372FDC,$3F380BE5,$3F38E6CE,$3F39C095,$3F3A9936,$3F3B70AE,
+$3F3C46F9,$3F3D1C15,$3F3DEFFF,$3F3EC2B3,$3F3F9430,$3F406471,$3F413374,$3F420137,
+$3F42CDB6,$3F4398EF,$3F4462E0,$3F452B86,$3F45F2DE,$3F46B8E6,$3F477D9C,$3F4840FD,
+$3F490307,$3F49C3B8,$3F4A830E,$3F4B4106,$3F4BFD9F,$3F4CB8D7,$3F4D72AC,$3F4E2B1C,
+$3F4EE226,$3F4F97C7,$3F504BFD,$3F50FEC9,$3F51B027,$3F526016,$3F530E96,$3F53BBA4,
+$3F54673F,$3F551167,$3F55BA1A,$3F566156,$3F57071C,$3F57AB69,$3F584E3E,$3F58EF98,
+$3F598F78,$3F5A2DDD,$3F5ACAC6,$3F5B6632,$3F5C0021,$3F5C9893,$3F5D2F86,$3F5DC4FB,
+$3F5E58F2,$3F5EEB69,$3F5F7C62,$3F600BDB,$3F6099D5,$3F612650,$3F61B14C,$3F623AC9,
+$3F62C2C7,$3F634946,$3F63CE47,$3F6451CA,$3F64D3D0,$3F655458,$3F65D364,$3F6650F4,
+$3F66CD09,$3F6747A3,$3F67C0C3,$3F68386B,$3F68AE9A,$3F692352,$3F699693,$3F6A0860,
+$3F6A78B8,$3F6AE79D,$3F6B5510,$3F6BC113,$3F6C2BA6,$3F6C94CB,$3F6CFC84,$3F6D62D1,
+$3F6DC7B4,$3F6E2B30,$3F6E8D44,$3F6EEDF4,$3F6F4D40,$3F6FAB2A,$3F7007B5,$3F7062E1,
+$3F70BCB1,$3F711526,$3F716C43,$3F71C20A,$3F72167B,$3F72699B,$3F72BB6A,$3F730BEA,
+$3F735B1F,$3F73A909,$3F73F5AC,$3F744109,$3F748B23,$3F74D3FC,$3F751B97,$3F7561F5,
+$3F75A71A,$3F75EB08,$3F762DC1,$3F766F48,$3F76AF9F,$3F76EECA,$3F772CC9,$3F7769A1,
+$3F77A554,$3F77DFE4,$3F781955,$3F7851A8,$3F7888E2,$3F78BF03,$3F78F410,$3F79280B,
+$3F795AF7,$3F798CD7,$3F79BDAD,$3F79ED7D,$3F7A1C49,$3F7A4A14,$3F7A76E2,$3F7AA2B5,
+$3F7ACD90,$3F7AF776,$3F7B206B,$3F7B4870,$3F7B6F8A,$3F7B95BA,$3F7BBB05,$3F7BDF6D,
+$3F7C02F5,$3F7C25A0,$3F7C4771,$3F7C686C,$3F7C8893,$3F7CA7E9,$3F7CC672,$3F7CE430,
+$3F7D0126,$3F7D1D59,$3F7D38C9,$3F7D537C,$3F7D6D73,$3F7D86B2,$3F7D9F3C,$3F7DB713,
+$3F7DCE3C,$3F7DE4B8,$3F7DFA8B,$3F7E0FB8,$3F7E2442,$3F7E382C,$3F7E4B78,$3F7E5E2B,
+$3F7E7046,$3F7E81CC,$3F7E92C2,$3F7EA329,$3F7EB304,$3F7EC256,$3F7ED123,$3F7EDF6D,
+$3F7EED37,$3F7EFA83,$3F7F0755,$3F7F13AF,$3F7F1F94,$3F7F2B07,$3F7F360A,$3F7F40A0,
+$3F7F4ACD,$3F7F5492,$3F7F5DF2,$3F7F66EF,$3F7F6F8D,$3F7F77CE,$3F7F7FB5,$3F7F8743,
+$3F7F8E7C,$3F7F9562,$3F7F9BF7,$3F7FA23D,$3F7FA838,$3F7FADE9,$3F7FB353,$3F7FB878,
+$3F7FBD5A,$3F7FC1FC,$3F7FC65F,$3F7FCA86,$3F7FCE74,$3F7FD229,$3F7FD5A8,$3F7FD8F4,
+$3F7FDC0D,$3F7FDEF7,$3F7FE1B3,$3F7FE443,$3F7FE6A8,$3F7FE8E5,$3F7FEAFC,$3F7FECED,
+$3F7FEEBC,$3F7FF069,$3F7FF1F6,$3F7FF365,$3F7FF4B7,$3F7FF5EE,$3F7FF70B,$3F7FF810,
+$3F7FF8FE,$3F7FF9D6,$3F7FFA9B,$3F7FFB4C,$3F7FFBEC,$3F7FFC7C,$3F7FFCFC,$3F7FFD6E,
+$3F7FFDD3,$3F7FFE2C,$3F7FFE79,$3F7FFEBD,$3F7FFEF7,$3F7FFF2A,$3F7FFF54,$3F7FFF78,
+$3F7FFF96,$3F7FFFAF,$3F7FFFC3,$3F7FFFD3,$3F7FFFE0,$3F7FFFEA,$3F7FFFF1,$3F7FFFF6,
+$3F7FFFFA,$3F7FFFFD,$3F7FFFFE,$3F7FFFFF,$3F800000,$3F800000,$3F800000,$3F800000,
+$35780FAB,$370B8718,$37C1C9E1,$383DE96B,$389CF780,$38EA7ABB,$3923BF18,$395A00D5,
+$398C0138,$39AEE1E5,$39D5A258,$3A00213C,$3A176118,$3A3090AF,$3A4BAFF3,$3A68BED4,
+$3A83DE9F,$3A94558F,$3AA5C430,$3AB82A77,$3ACB885A,$3ADFDDCC,$3AF52ABF,$3B05B794,
+$3B11557C,$3B1D6F10,$3B2A0449,$3B37151F,$3B44A18A,$3B52A981,$3B612CFC,$3B702BF1,
+$3B7FA658,$3B87CE13,$3B9006A9,$3B987CE9,$3BA130CC,$3BAA224F,$3BB3516A,$3BBCBE1A,
+$3BC66856,$3BD0501A,$3BDA755F,$3BE4D81F,$3BEF7853,$3BFA55F4,$3C02B87E,$3C0864B1,
+$3C0E2F91,$3C141919,$3C1A2146,$3C204813,$3C268D7E,$3C2CF181,$3C337419,$3C3A1541,
+$3C40D4F6,$3C47B332,$3C4EAFF3,$3C55CB32,$3C5D04EB,$3C645D1A,$3C6BD3BA,$3C7368C6,
+$3C7B1C3A,$3C817707,$3C856F21,$3C897666,$3C8D8CD4,$3C91B269,$3C95E721,$3C9A2AFB,
+$3C9E7DF3,$3CA2E006,$3CA75132,$3CABD173,$3CB060C7,$3CB4FF2B,$3CB9AC9A,$3CBE6913,
+$3CC33492,$3CC80F14,$3CCCF895,$3CD1F113,$3CD6F889,$3CDC0EF5,$3CE13453,$3CE668A0,
+$3CEBABD7,$3CF0FDF6,$3CF65EF9,$3CFBCEDC,$3D00A6CD,$3D036D99,$3D063BCF,$3D09116D,
+$3D0BEE72,$3D0ED2DC,$3D11BEA7,$3D14B1D3,$3D17AC5E,$3D1AAE44,$3D1DB785,$3D20C81E,
+$3D23E00C,$3D26FF4E,$3D2A25E1,$3D2D53C4,$3D3088F3,$3D33C56D,$3D37092F,$3D3A5437,
+$3D3DA682,$3D41000F,$3D4460DA,$3D47C8E2,$3D4B3823,$3D4EAE9C,$3D522C49,$3D55B128,
+$3D593D37,$3D5CD073,$3D606AD9,$3D640C67,$3D67B519,$3D6B64EE,$3D6F1BE3,$3D72D9F4,
+$3D769F1E,$3D7A6B60,$3D7E3EB6,$3D810C8F,$3D82FD49,$3D84F18A,$3D86E94F,$3D88E496,
+$3D8AE35E,$3D8CE5A7,$3D8EEB6D,$3D90F4AF,$3D93016D,$3D9511A4,$3D972553,$3D993C78,
+$3D9B5711,$3D9D751E,$3D9F969B,$3DA1BB88,$3DA3E3E2,$3DA60FA9,$3DA83EDA,$3DAA7174,
+$3DACA774,$3DAEE0DA,$3DB11DA2,$3DB35DCD,$3DB5A157,$3DB7E83E,$3DBA3282,$3DBC8020,
+$3DBED116,$3DC12562,$3DC37D02,$3DC5D7F5,$3DC83639,$3DCA97CB,$3DCCFCA9,$3DCF64D3,
+$3DD1D044,$3DD43EFC,$3DD6B0F9,$3DD92638,$3DDB9EB8,$3DDE1A75,$3DE0996F,$3DE31BA3,
+$3DE5A10E,$3DE829AF,$3DEAB584,$3DED448A,$3DEFD6BF,$3DF26C21,$3DF504AE,$3DF7A063,
+$3DFA3F3E,$3DFCE13D,$3DFF865D,$3E01174E,$3E026CFC,$3E03C438,$3E051CFF,$3E067751,
+$3E07D32D,$3E093091,$3E0A8F7D,$3E0BEFEE,$3E0D51E4,$3E0EB55E,$3E101A59,$3E1180D6,
+$3E12E8D2,$3E14524D,$3E15BD45,$3E1729B8,$3E1897A6,$3E1A070D,$3E1B77EC,$3E1CEA41,
+$3E1E5E0B,$3E1FD349,$3E2149FA,$3E22C21C,$3E243BAD,$3E25B6AC,$3E273318,$3E28B0F0,
+$3E2A3032,$3E2BB0DC,$3E2D32EE,$3E2EB665,$3E303B40,$3E31C17E,$3E33491E,$3E34D21D,
+$3E365C7B,$3E37E836,$3E39754C,$3E3B03BB,$3E3C9383,$3E3E24A2,$3E3FB716,$3E414ADE,
+$3E42DFF8,$3E447662,$3E460E1C,$3E47A723,$3E494175,$3E4ADD12,$3E4C79F7,$3E4E1823,
+$3E4FB795,$3E51584A,$3E52FA42,$3E549D79,$3E5641F0,$3E57E7A3,$3E598E92,$3E5B36BA,
+$3E5CE01A,$3E5E8AB1,$3E60367C,$3E61E37A,$3E6391A9,$3E654107,$3E66F193,$3E68A34B,
+$3E6A562C,$3E6C0A36,$3E6DBF66,$3E6F75BB,$3E712D33,$3E72E5CC,$3E749F84,$3E765A5A,
+$3E78164B,$3E79D355,$3E7B9178,$3E7D50B0,$3E7F10FD,$3E80692E,$3E814A65,$3E822C24,
+$3E830E69,$3E83F134,$3E84D482,$3E85B854,$3E869CA9,$3E87817F,$3E8866D5,$3E894CAB,
+$3E8A32FF,$3E8B19D1,$3E8C0120,$3E8CE8E9,$3E8DD12E,$3E8EB9EC,$3E8FA322,$3E908CD0,
+$3E9176F4,$3E92618E,$3E934C9C,$3E94381D,$3E952411,$3E961076,$3E96FD4C,$3E97EA90,
+$3E98D843,$3E99C663,$3E9AB4EF,$3E9BA3E6,$3E9C9347,$3E9D8311,$3E9E7343,$3E9F63DB,
+$3EA054DA,$3EA1463C,$3EA23803,$3EA32A2B,$3EA41CB5,$3EA50FA0,$3EA602E9,$3EA6F691,
+$3EA7EA95,$3EA8DEF5,$3EA9D3B0,$3EAAC8C5,$3EABBE32,$3EACB3F6,$3EADAA11,$3EAEA081,
+$3EAF9745,$3EB08E5B,$3EB185C4,$3EB27D7D,$3EB37585,$3EB46DDC,$3EB56680,$3EB65F70,
+$3EB758AB,$3EB8522F,$3EB94BFC,$3EBA4611,$3EBB406C,$3EBC3B0B,$3EBD35EF,$3EBE3116,
+$3EBF2C7E,$3EC02826,$3EC1240D,$3EC22033,$3EC31C96,$3EC41934,$3EC5160C,$3EC6131E,
+$3EC71068,$3EC80DE9,$3EC90B9F,$3ECA098A,$3ECB07A9,$3ECC05F9,$3ECD047B,$3ECE032C,
+$3ECF020B,$3ED00118,$3ED10051,$3ED1FFB5,$3ED2FF42,$3ED3FEF8,$3ED4FED5,$3ED5FED8,
+$3ED6FEFF,$3ED7FF4B,$3ED8FFB8,$3EDA0047,$3EDB00F5,$3EDC01C3,$3EDD02AD,$3EDE03B4,
+$3EDF04D6,$3EE00611,$3EE10765,$3EE208D0,$3EE30A51,$3EE40BE7,$3EE50D90,$3EE60F4C,
+$3EE71119,$3EE812F5,$3EE914E0,$3EEA16D9,$3EEB18DD,$3EEC1AEC,$3EED1D05,$3EEE1F27,
+$3EEF214F,$3EF0237D,$3EF125B0,$3EF227E6,$3EF32A1F,$3EF42C58,$3EF52E91,$3EF630C8,
+$3EF732FD,$3EF8352D,$3EF93758,$3EFA397C,$3EFB3B99,$3EFC3DAC,$3EFD3FB5,$3EFE41B3,
+$3EFF43A3,$3F0022C3,$3F00A3AD,$3F01248E,$3F01A566,$3F022635,$3F02A6FA,$3F0327B4,
+$3F03A863,$3F042905,$3F04A99B,$3F052A24,$3F05AA9F,$3F062B0C,$3F06AB69,$3F072BB7,
+$3F07ABF4,$3F082C20,$3F08AC3B,$3F092C44,$3F09AC3A,$3F0A2C1C,$3F0AABEB,$3F0B2BA4,
+$3F0BAB49,$3F0C2AD8,$3F0CAA50,$3F0D29B1,$3F0DA8FB,$3F0E282C,$3F0EA745,$3F0F2644,
+$3F0FA529,$3F1023F3,$3F10A2A2,$3F112135,$3F119FAC,$3F121E05,$3F129C41,$3F131A5F,
+$3F13985E,$3F14163D,$3F1493FC,$3F15119B,$3F158F18,$3F160C74,$3F1689AD,$3F1706C3,
+$3F1783B6,$3F180085,$3F187D2E,$3F18F9B3,$3F197612,$3F19F24A,$3F1A6E5B,$3F1AEA45,
+$3F1B6606,$3F1BE19F,$3F1C5D0E,$3F1CD854,$3F1D536F,$3F1DCE5F,$3F1E4924,$3F1EC3BC,
+$3F1F3E28,$3F1FB866,$3F203277,$3F20AC5A,$3F21260E,$3F219F92,$3F2218E6,$3F22920A,
+$3F230AFD,$3F2383BE,$3F23FC4D,$3F2474A9,$3F24ECD3,$3F2564C8,$3F25DC8A,$3F265416,
+$3F26CB6E,$3F27428F,$3F27B97A,$3F28302F,$3F28A6AC,$3F291CF1,$3F2992FE,$3F2A08D2,
+$3F2A7E6C,$3F2AF3CD,$3F2B68F3,$3F2BDDDF,$3F2C528F,$3F2CC703,$3F2D3B3B,$3F2DAF36,
+$3F2E22F4,$3F2E9674,$3F2F09B6,$3F2F7CB9,$3F2FEF7D,$3F306201,$3F30D445,$3F314648,
+$3F31B80A,$3F32298B,$3F329ACA,$3F330BC6,$3F337C7F,$3F33ECF6,$3F345D28,$3F34CD16,
+$3F353CBF,$3F35AC24,$3F361B42,$3F368A1B,$3F36F8AE,$3F3766F9,$3F37D4FE,$3F3842BB,
+$3F38B02F,$3F391D5B,$3F398A3F,$3F39F6D9,$3F3A6329,$3F3ACF30,$3F3B3AEC,$3F3BA65D,
+$3F3C1182,$3F3C7C5D,$3F3CE6EB,$3F3D512C,$3F3DBB21,$3F3E24C9,$3F3E8E23,$3F3EF730,
+$3F3F5FEE,$3F3FC85E,$3F40307E,$3F409850,$3F40FFD1,$3F416703,$3F41CDE4,$3F423475,
+$3F429AB5,$3F4300A3,$3F436640,$3F43CB8B,$3F443083,$3F449529,$3F44F97C,$3F455D7B,
+$3F45C127,$3F46247F,$3F468784,$3F46EA33,$3F474C8E,$3F47AE94,$3F481044,$3F48719F,
+$3F48D2A4,$3F493353,$3F4993AC,$3F49F3AE,$3F4A5359,$3F4AB2AD,$3F4B11A9,$3F4B704D,
+$3F4BCE9A,$3F4C2C8F,$3F4C8A2B,$3F4CE76E,$3F4D4459,$3F4DA0EA,$3F4DFD22,$3F4E5900,
+$3F4EB485,$3F4F0FB0,$3F4F6A80,$3F4FC4F6,$3F501F12,$3F5078D2,$3F50D238,$3F512B42,
+$3F5183F2,$3F51DC45,$3F52343D,$3F528BD9,$3F52E318,$3F5339FC,$3F539083,$3F53E6AE,
+$3F543C7B,$3F5491EC,$3F54E700,$3F553BB7,$3F559010,$3F55E40C,$3F5637AA,$3F568AEB,
+$3F56DDCE,$3F573053,$3F578279,$3F57D442,$3F5825AC,$3F5876B8,$3F58C765,$3F5917B4,
+$3F5967A4,$3F59B735,$3F5A0668,$3F5A553B,$3F5AA3AF,$3F5AF1C5,$3F5B3F7B,$3F5B8CD2,
+$3F5BD9C9,$3F5C2661,$3F5C729A,$3F5CBE73,$3F5D09ED,$3F5D5507,$3F5D9FC2,$3F5DEA1D,
+$3F5E3418,$3F5E7DB3,$3F5EC6EF,$3F5F0FCB,$3F5F5848,$3F5FA064,$3F5FE821,$3F602F7E,
+$3F60767B,$3F60BD18,$3F610355,$3F614933,$3F618EB1,$3F61D3CF,$3F62188D,$3F625CEC,
+$3F62A0EB,$3F62E48A,$3F6327CA,$3F636AAA,$3F63AD2A,$3F63EF4B,$3F64310D,$3F64726F,
+$3F64B372,$3F64F415,$3F65345A,$3F65743F,$3F65B3C5,$3F65F2EC,$3F6631B4,$3F66701D,
+$3F66AE27,$3F66EBD3,$3F672920,$3F67660F,$3F67A29F,$3F67DED1,$3F681AA4,$3F68561A,
+$3F689131,$3F68CBEB,$3F690647,$3F694045,$3F6979E6,$3F69B32A,$3F69EC10,$3F6A2499,
+$3F6A5CC5,$3F6A9494,$3F6ACC07,$3F6B031D,$3F6B39D6,$3F6B7034,$3F6BA635,$3F6BDBDA,
+$3F6C1124,$3F6C4612,$3F6C7AA4,$3F6CAEDC,$3F6CE2B8,$3F6D1639,$3F6D4960,$3F6D7C2C,
+$3F6DAE9D,$3F6DE0B5,$3F6E1273,$3F6E43D6,$3F6E74E1,$3F6EA592,$3F6ED5E9,$3F6F05E8,
+$3F6F358E,$3F6F64DB,$3F6F93D1,$3F6FC26E,$3F6FF0B3,$3F701EA0,$3F704C36,$3F707975,
+$3F70A65D,$3F70D2EF,$3F70FF29,$3F712B0E,$3F71569C,$3F7181D5,$3F71ACB8,$3F71D746,
+$3F72017F,$3F722B63,$3F7254F3,$3F727E2E,$3F72A715,$3F72CFA9,$3F72F7E9,$3F731FD6,
+$3F734771,$3F736EB8,$3F7395AD,$3F73BC50,$3F73E2A2,$3F7408A1,$3F742E50,$3F7453AE,
+$3F7478BB,$3F749D77,$3F74C1E4,$3F74E601,$3F7509CE,$3F752D4C,$3F75507B,$3F75735C,
+$3F7595EE,$3F75B833,$3F75DA2A,$3F75FBD3,$3F761D30,$3F763E40,$3F765F03,$3F767F7A,
+$3F769FA6,$3F76BF86,$3F76DF1B,$3F76FE65,$3F771D65,$3F773C1B,$3F775A87,$3F7778A9,
+$3F779683,$3F77B413,$3F77D15B,$3F77EE5B,$3F780B14,$3F782784,$3F7843AE,$3F785F91,
+$3F787B2E,$3F789684,$3F78B195,$3F78CC60,$3F78E6E7,$3F790129,$3F791B26,$3F7934DF,
+$3F794E55,$3F796788,$3F798078,$3F799925,$3F79B190,$3F79C9B9,$3F79E1A1,$3F79F948,
+$3F7A10AE,$3F7A27D4,$3F7A3EB9,$3F7A5560,$3F7A6BC6,$3F7A81EE,$3F7A97D8,$3F7AAD83,
+$3F7AC2F1,$3F7AD821,$3F7AED14,$3F7B01CA,$3F7B1644,$3F7B2A82,$3F7B3E85,$3F7B524D,
+$3F7B65D9,$3F7B792B,$3F7B8C44,$3F7B9F22,$3F7BB1C8,$3F7BC434,$3F7BD668,$3F7BE863,
+$3F7BFA27,$3F7C0BB4,$3F7C1D09,$3F7C2E28,$3F7C3F11,$3F7C4FC4,$3F7C6041,$3F7C7089,
+$3F7C809C,$3F7C907C,$3F7CA027,$3F7CAF9E,$3F7CBEE2,$3F7CCDF4,$3F7CDCD3,$3F7CEB80,
+$3F7CF9FB,$3F7D0845,$3F7D165E,$3F7D2447,$3F7D31FF,$3F7D3F88,$3F7D4CE1,$3F7D5A0B,
+$3F7D6707,$3F7D73D4,$3F7D8073,$3F7D8CE5,$3F7D992A,$3F7DA542,$3F7DB12E,$3F7DBCEE,
+$3F7DC882,$3F7DD3EB,$3F7DDF29,$3F7DEA3D,$3F7DF526,$3F7DFFE6,$3F7E0A7C,$3F7E14EA,
+$3F7E1F2F,$3F7E294B,$3F7E3340,$3F7E3D0D,$3F7E46B4,$3F7E5033,$3F7E598C,$3F7E62BF,
+$3F7E6BCD,$3F7E74B5,$3F7E7D78,$3F7E8617,$3F7E8E92,$3F7E96E9,$3F7E9F1C,$3F7EA72C,
+$3F7EAF1A,$3F7EB6E5,$3F7EBE8E,$3F7EC616,$3F7ECD7C,$3F7ED4C2,$3F7EDBE7,$3F7EE2EB,
+$3F7EE9D0,$3F7EF095,$3F7EF73B,$3F7EFDC3,$3F7F042C,$3F7F0A76,$3F7F10A3,$3F7F16B3,
+$3F7F1CA5,$3F7F227B,$3F7F2834,$3F7F2DD2,$3F7F3353,$3F7F38BA,$3F7F3E05,$3F7F4335,
+$3F7F484B,$3F7F4D48,$3F7F522A,$3F7F56F3,$3F7F5BA3,$3F7F603A,$3F7F64B9,$3F7F6920,
+$3F7F6D6F,$3F7F71A6,$3F7F75C7,$3F7F79D0,$3F7F7DC4,$3F7F81A1,$3F7F8568,$3F7F8919,
+$3F7F8CB6,$3F7F903D,$3F7F93B0,$3F7F970E,$3F7F9A59,$3F7F9D8F,$3F7FA0B3,$3F7FA3C3,
+$3F7FA6C0,$3F7FA9AB,$3F7FAC84,$3F7FAF4A,$3F7FB1FF,$3F7FB4A3,$3F7FB735,$3F7FB9B7,
+$3F7FBC28,$3F7FBE89,$3F7FC0D9,$3F7FC31A,$3F7FC54C,$3F7FC76F,$3F7FC982,$3F7FCB87,
+$3F7FCD7E,$3F7FCF66,$3F7FD141,$3F7FD30E,$3F7FD4CD,$3F7FD680,$3F7FD826,$3F7FD9BF,
+$3F7FDB4C,$3F7FDCCC,$3F7FDE41,$3F7FDFAA,$3F7FE108,$3F7FE25B,$3F7FE3A3,$3F7FE4E0,
+$3F7FE613,$3F7FE73B,$3F7FE85A,$3F7FE96E,$3F7FEA7A,$3F7FEB7C,$3F7FEC74,$3F7FED64,
+$3F7FEE4B,$3F7FEF2A,$3F7FF001,$3F7FF0CF,$3F7FF195,$3F7FF254,$3F7FF30C,$3F7FF3BC,
+$3F7FF465,$3F7FF507,$3F7FF5A2,$3F7FF637,$3F7FF6C6,$3F7FF74E,$3F7FF7D1,$3F7FF84D,
+$3F7FF8C4,$3F7FF936,$3F7FF9A2,$3F7FFA09,$3F7FFA6C,$3F7FFAC9,$3F7FFB22,$3F7FFB76,
+$3F7FFBC6,$3F7FFC12,$3F7FFC59,$3F7FFC9D,$3F7FFCDD,$3F7FFD1A,$3F7FFD53,$3F7FFD88,
+$3F7FFDBB,$3F7FFDEA,$3F7FFE16,$3F7FFE40,$3F7FFE67,$3F7FFE8B,$3F7FFEAD,$3F7FFECC,
+$3F7FFEEA,$3F7FFF05,$3F7FFF1E,$3F7FFF35,$3F7FFF4A,$3F7FFF5E,$3F7FFF70,$3F7FFF80,
+$3F7FFF8F,$3F7FFF9D,$3F7FFFA9,$3F7FFFB4,$3F7FFFBF,$3F7FFFC8,$3F7FFFD0,$3F7FFFD7,
+$3F7FFFDD,$3F7FFFE3,$3F7FFFE8,$3F7FFFEC,$3F7FFFEF,$3F7FFFF3,$3F7FFFF5,$3F7FFFF8,
+$3F7FFFF9,$3F7FFFFB,$3F7FFFFC,$3F7FFFFD,$3F7FFFFE,$3F7FFFFF,$3F7FFFFF,$3F7FFFFF,
+$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,
+$347808CC,$360B86AB,$36C1CA4F,$373DE9BE,$379CF7EE,$37EA7BC0,$3823C02B,$385A02A1,
+$388C02BD,$38AEE44C,$38D5A5E3,$390023C7,$391764A8,$39309586,$394BB668,$3968C740,
+$3983E407,$39945C69,$39A5CCBF,$39B83506,$39CB9541,$39DFED69,$39F53D78,$3A05C2B8,
+$3A1162A6,$3A1D7E86,$3A2A1651,$3A372A09,$3A44B9AC,$3A52C536,$3A614CA5,$3A704FFA,
+$3A7FCF2F,$3A87E522,$3A90209A,$3A9899FF,$3AA15150,$3AAA468B,$3AB379AE,$3ABCEABA,
+$3AC699AB,$3AD08681,$3ADAB13A,$3AE519D4,$3AEFC04F,$3AFAA4A7,$3B02E36D,$3B089375,
+$3B0E6269,$3B145049,$3B1A5D13,$3B2088C7,$3B26D364,$3B2D3CE8,$3B33C553,$3B3A6CA4,
+$3B4132DA,$3B4817F3,$3B4F1BEF,$3B563ECC,$3B5D808A,$3B64E126,$3B6C60A1,$3B73FEF9,
+$3B7BBC2D,$3B81CC1D,$3B85C991,$3B89D671,$3B8DF2BC,$3B921E71,$3B965991,$3B9AA41A,
+$3B9EFE0C,$3BA36766,$3BA7E028,$3BAC6850,$3BB0FFDE,$3BB5A6D1,$3BBA5D28,$3BBF22E4,
+$3BC3F802,$3BC8DC83,$3BCDD065,$3BD2D3A8,$3BD7E64A,$3BDD084C,$3BE239AC,$3BE77A69,
+$3BECCA83,$3BF229F9,$3BF798CA,$3BFD16F5,$3C01523C,$3C0420AA,$3C06F6C4,$3C09D489,
+$3C0CB9F9,$3C0FA713,$3C129BD8,$3C159845,$3C189C5C,$3C1BA81A,$3C1EBB81,$3C21D68F,
+$3C24F945,$3C2823A0,$3C2B55A2,$3C2E8F49,$3C31D095,$3C351985,$3C386A1A,$3C3BC251,
+$3C3F222C,$3C4289A8,$3C45F8C7,$3C496F86,$3C4CEDE6,$3C5073E7,$3C540186,$3C5796C5,
+$3C5B33A2,$3C5ED81C,$3C628434,$3C6637E8,$3C69F338,$3C6DB623,$3C7180AA,$3C7552CA,
+$3C792C83,$3C7D0DD6,$3C807B60,$3C8273A1,$3C846FAE,$3C866F86,$3C887328,$3C8A7A95,
+$3C8C85CD,$3C8E94CE,$3C90A798,$3C92BE2C,$3C94D888,$3C96F6AD,$3C99189A,$3C9B3E4E,
+$3C9D67CA,$3C9F950D,$3CA1C617,$3CA3FAE7,$3CA6337D,$3CA86FD9,$3CAAAFF9,$3CACF3DF,
+$3CAF3B89,$3CB186F7,$3CB3D628,$3CB6291D,$3CB87FD5,$3CBADA50,$3CBD388C,$3CBF9A8A,
+$3CC2004A,$3CC469CA,$3CC6D70B,$3CC9480C,$3CCBBCCD,$3CCE354D,$3CD0B18C,$3CD33189,
+$3CD5B545,$3CD83CBD,$3CDAC7F3,$3CDD56E6,$3CDFE995,$3CE28000,$3CE51A27,$3CE7B808,
+$3CEA59A4,$3CECFEFA,$3CEFA809,$3CF254D2,$3CF50553,$3CF7B98D,$3CFA717E,$3CFD2D27,
+$3CFFEC86,$3D0157CE,$3D02BB34,$3D042075,$3D058790,$3D06F085,$3D085B54,$3D09C7FD,
+$3D0B3680,$3D0CA6DB,$3D0E1910,$3D0F8D1D,$3D110303,$3D127AC1,$3D13F457,$3D156FC5,
+$3D16ED0A,$3D186C27,$3D19ED1A,$3D1B6FE4,$3D1CF484,$3D1E7AFB,$3D200347,$3D218D69,
+$3D231960,$3D24A72D,$3D2636CE,$3D27C843,$3D295B8D,$3D2AF0AB,$3D2C879C,$3D2E2060,
+$3D2FBAF8,$3D315763,$3D32F5A0,$3D3495AF,$3D363790,$3D37DB43,$3D3980C7,$3D3B281C,
+$3D3CD141,$3D3E7C38,$3D4028FE,$3D41D794,$3D4387FA,$3D453A2F,$3D46EE33,$3D48A405,
+$3D4A5BA6,$3D4C1514,$3D4DD050,$3D4F8D5A,$3D514C31,$3D530CD4,$3D54CF44,$3D569380,
+$3D585987,$3D5A215A,$3D5BEAF8,$3D5DB661,$3D5F8394,$3D615291,$3D632358,$3D64F5E8,
+$3D66CA41,$3D68A064,$3D6A784E,$3D6C5201,$3D6E2D7B,$3D700ABC,$3D71E9C5,$3D73CA94,
+$3D75AD29,$3D779185,$3D7977A6,$3D7B5F8C,$3D7D4937,$3D7F34A6,$3D8090ED,$3D818869,
+$3D8280C6,$3D837A05,$3D847425,$3D856F27,$3D866B09,$3D8767CC,$3D886570,$3D8963F4,
+$3D8A6358,$3D8B639D,$3D8C64C1,$3D8D66C4,$3D8E69A7,$3D8F6D6A,$3D90720B,$3D91778B,
+$3D927DEA,$3D938528,$3D948D43,$3D95963D,$3D96A014,$3D97AAC9,$3D98B65C,$3D99C2CB,
+$3D9AD018,$3D9BDE42,$3D9CED48,$3D9DFD2A,$3D9F0DE9,$3DA01F84,$3DA131FA,$3DA2454C,
+$3DA3597A,$3DA46E82,$3DA58465,$3DA69B23,$3DA7B2BC,$3DA8CB2F,$3DA9E47C,$3DAAFEA2,
+$3DAC19A3,$3DAD357C,$3DAE522F,$3DAF6FBB,$3DB08E1F,$3DB1AD5C,$3DB2CD71,$3DB3EE5E,
+$3DB51023,$3DB632C0,$3DB75634,$3DB87A7F,$3DB99FA0,$3DBAC599,$3DBBEC68,$3DBD140D,
+$3DBE3C88,$3DBF65D9,$3DC08FFF,$3DC1BAFA,$3DC2E6CA,$3DC4136F,$3DC540E9,$3DC66F37,
+$3DC79E59,$3DC8CE4E,$3DC9FF17,$3DCB30B3,$3DCC6323,$3DCD9665,$3DCECA79,$3DCFFF60,
+$3DD13519,$3DD26BA4,$3DD3A300,$3DD4DB2D,$3DD6142C,$3DD74DFB,$3DD8889A,$3DD9C40A,
+$3DDB004A,$3DDC3D59,$3DDD7B38,$3DDEB9E6,$3DDFF963,$3DE139AE,$3DE27AC8,$3DE3BCB0,
+$3DE4FF66,$3DE642E9,$3DE7873A,$3DE8CC58,$3DEA1242,$3DEB58F9,$3DECA07C,$3DEDE8CB,
+$3DEF31E6,$3DF07BCC,$3DF1C67D,$3DF311F9,$3DF45E3F,$3DF5AB4F,$3DF6F92A,$3DF847CE,
+$3DF9973C,$3DFAE772,$3DFC3872,$3DFD8A3A,$3DFEDCCA,$3E001811,$3E00C221,$3E016C95,
+$3E02176C,$3E02C2A6,$3E036E44,$3E041A45,$3E04C6A8,$3E05736F,$3E062098,$3E06CE23,
+$3E077C11,$3E082A62,$3E08D914,$3E098828,$3E0A379D,$3E0AE775,$3E0B97AD,$3E0C4847,
+$3E0CF942,$3E0DAA9E,$3E0E5C5B,$3E0F0E78,$3E0FC0F6,$3E1073D5,$3E112713,$3E11DAB1,
+$3E128EAF,$3E13430D,$3E13F7CA,$3E14ACE7,$3E156263,$3E16183E,$3E16CE78,$3E178510,
+$3E183C07,$3E18F35C,$3E19AB10,$3E1A6321,$3E1B1B91,$3E1BD45E,$3E1C8D89,$3E1D4711,
+$3E1E00F6,$3E1EBB38,$3E1F75D7,$3E2030D3,$3E20EC2B,$3E21A7E0,$3E2263F1,$3E23205D,
+$3E23DD26,$3E249A4A,$3E2557CA,$3E2615A5,$3E26D3DB,$3E27926C,$3E285158,$3E29109F,
+$3E29D040,$3E2A903B,$3E2B5090,$3E2C113F,$3E2CD248,$3E2D93AA,$3E2E5566,$3E2F177A,
+$3E2FD9E8,$3E309CAF,$3E315FCE,$3E322345,$3E32E715,$3E33AB3D,$3E346FBD,$3E353494,
+$3E35F9C3,$3E36BF49,$3E378526,$3E384B5B,$3E3911E6,$3E39D8C7,$3E3A9FFF,$3E3B678D,
+$3E3C2F71,$3E3CF7AB,$3E3DC03B,$3E3E891F,$3E3F5259,$3E401BE8,$3E40E5CC,$3E41B005,
+$3E427A92,$3E434573,$3E4410A8,$3E44DC31,$3E45A80E,$3E46743E,$3E4740C2,$3E480D98,
+$3E48DAC1,$3E49A83D,$3E4A760C,$3E4B442C,$3E4C129F,$3E4CE164,$3E4DB07A,$3E4E7FE1,
+$3E4F4F9A,$3E501FA4,$3E50EFFF,$3E51C0AA,$3E5291A6,$3E5362F2,$3E54348D,$3E550679,
+$3E55D8B4,$3E56AB3F,$3E577E19,$3E585141,$3E5924B9,$3E59F87E,$3E5ACC93,$3E5BA0F5,
+$3E5C75A5,$3E5D4AA3,$3E5E1FEE,$3E5EF587,$3E5FCB6D,$3E60A19F,$3E61781E,$3E624EE9,
+$3E632601,$3E63FD64,$3E64D513,$3E65AD0E,$3E668554,$3E675DE5,$3E6836C1,$3E690FE7,
+$3E69E958,$3E6AC313,$3E6B9D18,$3E6C7767,$3E6D51FF,$3E6E2CE0,$3E6F080B,$3E6FE37E,
+$3E70BF3A,$3E719B3E,$3E72778B,$3E73541F,$3E7430FB,$3E750E1F,$3E75EB8A,$3E76C93B,
+$3E77A734,$3E788573,$3E7963F8,$3E7A42C4,$3E7B21D5,$3E7C012C,$3E7CE0C8,$3E7DC0AA,
+$3E7EA0D0,$3E7F813B,$3E8030F5,$3E80A16F,$3E81120B,$3E8182C9,$3E81F3A8,$3E8264A9,
+$3E82D5CC,$3E83470F,$3E83B875,$3E8429FB,$3E849BA2,$3E850D6B,$3E857F54,$3E85F15D,
+$3E866388,$3E86D5D2,$3E87483D,$3E87BAC8,$3E882D74,$3E88A03F,$3E89132A,$3E898634,
+$3E89F95E,$3E8A6CA8,$3E8AE011,$3E8B5399,$3E8BC740,$3E8C3B06,$3E8CAEEB,$3E8D22EF,
+$3E8D9711,$3E8E0B52,$3E8E7FB1,$3E8EF42E,$3E8F68C9,$3E8FDD82,$3E905259,$3E90C74E,
+$3E913C60,$3E91B18F,$3E9226DC,$3E929C46,$3E9311CD,$3E938771,$3E93FD32,$3E947310,
+$3E94E909,$3E955F20,$3E95D552,$3E964BA1,$3E96C20C,$3E973892,$3E97AF35,$3E9825F3,
+$3E989CCC,$3E9913C1,$3E998AD1,$3E9A01FC,$3E9A7942,$3E9AF0A3,$3E9B681F,$3E9BDFB5,
+$3E9C5765,$3E9CCF30,$3E9D4715,$3E9DBF14,$3E9E372D,$3E9EAF60,$3E9F27AC,$3E9FA012,
+$3EA01891,$3EA09129,$3EA109DA,$3EA182A5,$3EA1FB88,$3EA27484,$3EA2ED98,$3EA366C5,
+$3EA3E00A,$3EA45967,$3EA4D2DC,$3EA54C69,$3EA5C60E,$3EA63FCA,$3EA6B99E,$3EA73389,
+$3EA7AD8B,$3EA827A4,$3EA8A1D5,$3EA91C1B,$3EA99679,$3EAA10ED,$3EAA8B77,$3EAB0618,
+$3EAB80CE,$3EABFB9B,$3EAC767D,$3EACF175,$3EAD6C82,$3EADE7A5,$3EAE62DD,$3EAEDE2A,
+$3EAF598C,$3EAFD502,$3EB0508E,$3EB0CC2E,$3EB147E2,$3EB1C3AA,$3EB23F87,$3EB2BB77,
+$3EB3377C,$3EB3B394,$3EB42FBF,$3EB4ABFE,$3EB52850,$3EB5A4B5,$3EB6212D,$3EB69DB8,
+$3EB71A55,$3EB79705,$3EB813C7,$3EB8909C,$3EB90D82,$3EB98A7B,$3EBA0785,$3EBA84A1,
+$3EBB01CE,$3EBB7F0D,$3EBBFC5D,$3EBC79BE,$3EBCF730,$3EBD74B2,$3EBDF246,$3EBE6FE9,
+$3EBEED9D,$3EBF6B62,$3EBFE936,$3EC0671A,$3EC0E50E,$3EC16311,$3EC1E124,$3EC25F46,
+$3EC2DD77,$3EC35BB8,$3EC3DA07,$3EC45864,$3EC4D6D1,$3EC5554B,$3EC5D3D4,$3EC6526B,
+$3EC6D110,$3EC74FC3,$3EC7CE84,$3EC84D52,$3EC8CC2D,$3EC94B15,$3EC9CA0B,$3ECA490D,
+$3ECAC81D,$3ECB4738,$3ECBC661,$3ECC4595,$3ECCC4D6,$3ECD4422,$3ECDC37B,$3ECE42DF,
+$3ECEC24F,$3ECF41CA,$3ECFC151,$3ED040E2,$3ED0C07F,$3ED14026,$3ED1BFD8,$3ED23F94,
+$3ED2BF5B,$3ED33F2C,$3ED3BF07,$3ED43EEB,$3ED4BEDA,$3ED53ED2,$3ED5BED3,$3ED63EDE,
+$3ED6BEF2,$3ED73F0F,$3ED7BF35,$3ED83F63,$3ED8BF9A,$3ED93FD9,$3ED9C020,$3EDA4070,
+$3EDAC0C7,$3EDB4126,$3EDBC18C,$3EDC41FA,$3EDCC270,$3EDD42EC,$3EDDC370,$3EDE43FA,
+$3EDEC48B,$3EDF4522,$3EDFC5C0,$3EE04664,$3EE0C70E,$3EE147BD,$3EE1C873,$3EE2492E,
+$3EE2C9EF,$3EE34AB5,$3EE3CB7F,$3EE44C4F,$3EE4CD24,$3EE54DFD,$3EE5CEDB,$3EE64FBE,
+$3EE6D0A4,$3EE7518E,$3EE7D27D,$3EE8536F,$3EE8D464,$3EE9555D,$3EE9D659,$3EEA5759,
+$3EEAD85B,$3EEB5960,$3EEBDA68,$3EEC5B72,$3EECDC7E,$3EED5D8D,$3EEDDE9E,$3EEE5FB0,
+$3EEEE0C4,$3EEF61DA,$3EEFE2F1,$3EF0640A,$3EF0E523,$3EF1663E,$3EF1E759,$3EF26874,
+$3EF2E991,$3EF36AAD,$3EF3EBCA,$3EF46CE6,$3EF4EE03,$3EF56F1F,$3EF5F03B,$3EF67156,
+$3EF6F270,$3EF77389,$3EF7F4A1,$3EF875B8,$3EF8F6CE,$3EF977E2,$3EF9F8F4,$3EFA7A04,
+$3EFAFB12,$3EFB7C1E,$3EFBFD28,$3EFC7E2F,$3EFCFF34,$3EFD8036,$3EFE0134,$3EFE8230,
+$3EFF0328,$3EFF841D,$3F000287,$3F0042FE,$3F008373,$3F00C3E6,$3F010456,$3F0144C5,
+$3F018531,$3F01C59B,$3F020603,$3F024667,$3F0286CA,$3F02C72A,$3F030787,$3F0347E1,
+$3F038838,$3F03C88D,$3F0408DE,$3F04492C,$3F048977,$3F04C9BF,$3F050A03,$3F054A44,
+$3F058A82,$3F05CABC,$3F060AF2,$3F064B24,$3F068B53,$3F06CB7E,$3F070BA5,$3F074BC7,
+$3F078BE6,$3F07CC01,$3F080C17,$3F084C29,$3F088C36,$3F08CC3F,$3F090C43,$3F094C43,
+$3F098C3E,$3F09CC34,$3F0A0C25,$3F0A4C12,$3F0A8BF9,$3F0ACBDB,$3F0B0BB8,$3F0B4B90,
+$3F0B8B62,$3F0BCB2F,$3F0C0AF6,$3F0C4AB8,$3F0C8A74,$3F0CCA2B,$3F0D09DB,$3F0D4986,
+$3F0D892B,$3F0DC8CA,$3F0E0862,$3F0E47F5,$3F0E8781,$3F0EC707,$3F0F0687,$3F0F4600,
+$3F0F8572,$3F0FC4DE,$3F100443,$3F1043A1,$3F1082F9,$3F10C249,$3F110193,$3F1140D5,
+$3F118011,$3F11BF45,$3F11FE72,$3F123D97,$3F127CB5,$3F12BBCB,$3F12FADA,$3F1339E1,
+$3F1378E1,$3F13B7D8,$3F13F6C8,$3F1435B0,$3F14748F,$3F14B367,$3F14F236,$3F1530FD,
+$3F156FBC,$3F15AE72,$3F15ED20,$3F162BC5,$3F166A62,$3F16A8F6,$3F16E781,$3F172603,
+$3F17647D,$3F17A2ED,$3F17E154,$3F181FB2,$3F185E07,$3F189C53,$3F18DA95,$3F1918CE,
+$3F1956FD,$3F199523,$3F19D33F,$3F1A1152,$3F1A4F5A,$3F1A8D59,$3F1ACB4E,$3F1B0939,
+$3F1B4719,$3F1B84F0,$3F1BC2BC,$3F1C007E,$3F1C3E36,$3F1C7BE3,$3F1CB986,$3F1CF71E,
+$3F1D34AC,$3F1D722F,$3F1DAFA7,$3F1DED14,$3F1E2A76,$3F1E67CE,$3F1EA51A,$3F1EE25B,
+$3F1F1F91,$3F1F5CBC,$3F1F99DB,$3F1FD6EF,$3F2013F7,$3F2050F4,$3F208DE6,$3F20CACB,
+$3F2107A5,$3F214473,$3F218135,$3F21BDEB,$3F21FA96,$3F223734,$3F2273C6,$3F22B04B,
+$3F22ECC5,$3F232932,$3F236592,$3F23A1E6,$3F23DE2E,$3F241A69,$3F245697,$3F2492B9,
+$3F24CECD,$3F250AD5,$3F2546D0,$3F2582BE,$3F25BE9E,$3F25FA72,$3F263638,$3F2671F1,
+$3F26AD9D,$3F26E93B,$3F2724CC,$3F27604F,$3F279BC5,$3F27D72D,$3F281287,$3F284DD3,
+$3F288912,$3F28C442,$3F28FF65,$3F293A79,$3F297580,$3F29B078,$3F29EB62,$3F2A263E,
+$3F2A610B,$3F2A9BCA,$3F2AD67A,$3F2B111C,$3F2B4BAF,$3F2B8634,$3F2BC0AA,$3F2BFB10,
+$3F2C3569,$3F2C6FB2,$3F2CA9EC,$3F2CE417,$3F2D1E33,$3F2D5840,$3F2D923D,$3F2DCC2B,
+$3F2E060A,$3F2E3FDA,$3F2E799A,$3F2EB34A,$3F2EECEB,$3F2F267C,$3F2F5FFE,$3F2F9970,
+$3F2FD2D2,$3F300C24,$3F304566,$3F307E98,$3F30B7BA,$3F30F0CC,$3F3129CD,$3F3162BF,
+$3F319BA0,$3F31D471,$3F320D31,$3F3245E1,$3F327E80,$3F32B70F,$3F32EF8D,$3F3327FB,
+$3F336057,$3F3398A3,$3F33D0DE,$3F340908,$3F344122,$3F34792A,$3F34B121,$3F34E907,
+$3F3520DB,$3F35589F,$3F359051,$3F35C7F2,$3F35FF81,$3F3636FF,$3F366E6C,$3F36A5C6,
+$3F36DD10,$3F371447,$3F374B6D,$3F378281,$3F37B983,$3F37F074,$3F382752,$3F385E1E,
+$3F3894D9,$3F38CB81,$3F390217,$3F39389B,$3F396F0D,$3F39A56C,$3F39DBB9,$3F3A11F4,
+$3F3A481C,$3F3A7E32,$3F3AB435,$3F3AEA26,$3F3B2004,$3F3B55CF,$3F3B8B87,$3F3BC12D,
+$3F3BF6C0,$3F3C2C40,$3F3C61AD,$3F3C9707,$3F3CCC4E,$3F3D0182,$3F3D36A3,$3F3D6BB1,
+$3F3DA0AB,$3F3DD592,$3F3E0A66,$3F3E3F27,$3F3E73D4,$3F3EA86E,$3F3EDCF4,$3F3F1167,
+$3F3F45C6,$3F3F7A11,$3F3FAE49,$3F3FE26D,$3F40167E,$3F404A7A,$3F407E63,$3F40B238,
+$3F40E5F8,$3F4119A5,$3F414D3E,$3F4180C3,$3F41B434,$3F41E790,$3F421AD8,$3F424E0D,
+$3F42812C,$3F42B438,$3F42E72F,$3F431A12,$3F434CE0,$3F437F9A,$3F43B240,$3F43E4D0,
+$3F44174D,$3F4449B4,$3F447C07,$3F44AE45,$3F44E06F,$3F451283,$3F454483,$3F45766E,
+$3F45A844,$3F45DA05,$3F460BB1,$3F463D48,$3F466ECA,$3F46A037,$3F46D18F,$3F4702D2,
+$3F4733FF,$3F476517,$3F47961A,$3F47C708,$3F47F7E0,$3F4828A3,$3F485951,$3F4889E9,
+$3F48BA6B,$3F48EAD8,$3F491B30,$3F494B72,$3F497B9E,$3F49ABB5,$3F49DBB5,$3F4A0BA1,
+$3F4A3B76,$3F4A6B36,$3F4A9AE0,$3F4ACA74,$3F4AF9F2,$3F4B295A,$3F4B58AD,$3F4B87E9,
+$3F4BB70F,$3F4BE620,$3F4C151A,$3F4C43FE,$3F4C72CC,$3F4CA184,$3F4CD026,$3F4CFEB1,
+$3F4D2D26,$3F4D5B85,$3F4D89CE,$3F4DB800,$3F4DE61C,$3F4E1422,$3F4E4211,$3F4E6FEA,
+$3F4E9DAC,$3F4ECB58,$3F4EF8EE,$3F4F266C,$3F4F53D5,$3F4F8126,$3F4FAE61,$3F4FDB86,
+$3F500893,$3F50358A,$3F50626B,$3F508F34,$3F50BBE7,$3F50E883,$3F511508,$3F514177,
+$3F516DCE,$3F519A0F,$3F51C639,$3F51F24C,$3F521E47,$3F524A2C,$3F5275FA,$3F52A1B1,
+$3F52CD51,$3F52F8DA,$3F53244C,$3F534FA6,$3F537AEA,$3F53A616,$3F53D12C,$3F53FC2A,
+$3F542711,$3F5451E0,$3F547C99,$3F54A73A,$3F54D1C4,$3F54FC36,$3F552692,$3F5550D6,
+$3F557B02,$3F55A518,$3F55CF16,$3F55F8FC,$3F5622CC,$3F564C83,$3F567624,$3F569FAC,
+$3F56C91E,$3F56F278,$3F571BBA,$3F5744E5,$3F576DF8,$3F5796F4,$3F57BFD8,$3F57E8A5,
+$3F58115A,$3F5839F8,$3F58627E,$3F588AEC,$3F58B343,$3F58DB82,$3F5903A9,$3F592BB9,
+$3F5953B1,$3F597B91,$3F59A35A,$3F59CB0B,$3F59F2A4,$3F5A1A25,$3F5A418F,$3F5A68E1,
+$3F5A901B,$3F5AB73E,$3F5ADE48,$3F5B053B,$3F5B2C16,$3F5B52D9,$3F5B7985,$3F5BA018,
+$3F5BC694,$3F5BECF8,$3F5C1344,$3F5C3978,$3F5C5F95,$3F5C8599,$3F5CAB86,$3F5CD15B,
+$3F5CF718,$3F5D1CBD,$3F5D424A,$3F5D67BF,$3F5D8D1C,$3F5DB262,$3F5DD78F,$3F5DFCA5,
+$3F5E21A2,$3F5E4688,$3F5E6B56,$3F5E900B,$3F5EB4A9,$3F5ED92F,$3F5EFD9D,$3F5F21F3,
+$3F5F4631,$3F5F6A58,$3F5F8E66,$3F5FB25C,$3F5FD63B,$3F5FFA01,$3F601DAF,$3F604146,
+$3F6064C4,$3F60882B,$3F60AB7A,$3F60CEB0,$3F60F1CF,$3F6114D6,$3F6137C5,$3F615A9B,
+$3F617D5A,$3F61A001,$3F61C290,$3F61E508,$3F620767,$3F6229AE,$3F624BDD,$3F626DF5,
+$3F628FF4,$3F62B1DC,$3F62D3AB,$3F62F563,$3F631703,$3F63388B,$3F6359FB,$3F637B53,
+$3F639C93,$3F63BDBC,$3F63DECC,$3F63FFC5,$3F6420A6,$3F64416E,$3F646220,$3F6482B9,
+$3F64A33A,$3F64C3A4,$3F64E3F5,$3F65042F,$3F652452,$3F65445C,$3F65644E,$3F658429,
+$3F65A3EC,$3F65C397,$3F65E32B,$3F6602A7,$3F66220B,$3F664157,$3F66608B,$3F667FA8,
+$3F669EAE,$3F66BD9B,$3F66DC71,$3F66FB2F,$3F6719D6,$3F673865,$3F6756DC,$3F67753B,
+$3F679384,$3F67B1B4,$3F67CFCD,$3F67EDCE,$3F680BB8,$3F68298A,$3F684745,$3F6864E9,
+$3F688274,$3F689FE9,$3F68BD45,$3F68DA8B,$3F68F7B9,$3F6914CF,$3F6931CF,$3F694EB6,
+$3F696B87,$3F698840,$3F69A4E1,$3F69C16C,$3F69DDDF,$3F69FA3B,$3F6A167F,$3F6A32AC,
+$3F6A4EC3,$3F6A6AC1,$3F6A86A9,$3F6AA279,$3F6ABE33,$3F6AD9D5,$3F6AF560,$3F6B10D4,
+$3F6B2C30,$3F6B4776,$3F6B62A5,$3F6B7DBC,$3F6B98BD,$3F6BB3A7,$3F6BCE79,$3F6BE935,
+$3F6C03DA,$3F6C1E68,$3F6C38DF,$3F6C533F,$3F6C6D88,$3F6C87BB,$3F6CA1D6,$3F6CBBDB,
+$3F6CD5C9,$3F6CEFA1,$3F6D0961,$3F6D230B,$3F6D3C9F,$3F6D561B,$3F6D6F81,$3F6D88D1,
+$3F6DA209,$3F6DBB2C,$3F6DD438,$3F6DED2D,$3F6E060C,$3F6E1ED4,$3F6E3786,$3F6E5021,
+$3F6E68A6,$3F6E8115,$3F6E996E,$3F6EB1B0,$3F6EC9DC,$3F6EE1F1,$3F6EF9F1,$3F6F11DA,
+$3F6F29AD,$3F6F416A,$3F6F5910,$3F6F70A1,$3F6F881C,$3F6F9F80,$3F6FB6CF,$3F6FCE07,
+$3F6FE52A,$3F6FFC36,$3F70132D,$3F702A0E,$3F7040D9,$3F70578E,$3F706E2E,$3F7084B8,
+$3F709B2B,$3F70B18A,$3F70C7D2,$3F70DE05,$3F70F423,$3F710A2A,$3F71201D,$3F7135F9,
+$3F714BC1,$3F716172,$3F71770F,$3F718C96,$3F71A207,$3F71B763,$3F71CCAA,$3F71E1DC,
+$3F71F6F9,$3F720C00,$3F7220F2,$3F7235CF,$3F724A97,$3F725F49,$3F7273E7,$3F728870,
+$3F729CE3,$3F72B142,$3F72C58C,$3F72D9C1,$3F72EDE1,$3F7301EC,$3F7315E3,$3F7329C5,
+$3F733D92,$3F73514A,$3F7364EE,$3F73787D,$3F738BF8,$3F739F5E,$3F73B2AF,$3F73C5EC,
+$3F73D915,$3F73EC29,$3F73FF29,$3F741215,$3F7424EC,$3F7437AF,$3F744A5E,$3F745CF8,
+$3F746F7F,$3F7481F1,$3F749450,$3F74A69A,$3F74B8D0,$3F74CAF2,$3F74DD01,$3F74EEFB,
+$3F7500E2,$3F7512B5,$3F752474,$3F75361F,$3F7547B7,$3F75593B,$3F756AAB,$3F757C08,
+$3F758D51,$3F759E87,$3F75AFA9,$3F75C0B8,$3F75D1B3,$3F75E29B,$3F75F370,$3F760432,
+$3F7614E0,$3F76257B,$3F763603,$3F764678,$3F7656D9,$3F766728,$3F767764,$3F76878C,
+$3F7697A2,$3F76A7A5,$3F76B795,$3F76C772,$3F76D73D,$3F76E6F5,$3F76F69A,$3F77062C,
+$3F7715AC,$3F77251A,$3F773475,$3F7743BD,$3F7752F3,$3F776216,$3F777128,$3F778027,
+$3F778F13,$3F779DEE,$3F77ACB6,$3F77BB6C,$3F77CA10,$3F77D8A2,$3F77E722,$3F77F590,
+$3F7803EC,$3F781237,$3F78206F,$3F782E96,$3F783CAA,$3F784AAE,$3F78589F,$3F78667F,
+$3F78744D,$3F78820A,$3F788FB5,$3F789D4F,$3F78AAD7,$3F78B84E,$3F78C5B4,$3F78D308,
+$3F78E04C,$3F78ED7E,$3F78FA9E,$3F7907AE,$3F7914AD,$3F79219B,$3F792E77,$3F793B43,
+$3F7947FE,$3F7954A8,$3F796142,$3F796DCA,$3F797A42,$3F7986A9,$3F799300,$3F799F46,
+$3F79AB7C,$3F79B7A1,$3F79C3B5,$3F79CFBA,$3F79DBAD,$3F79E791,$3F79F364,$3F79FF28,
+$3F7A0ADB,$3F7A167E,$3F7A2210,$3F7A2D93,$3F7A3906,$3F7A4469,$3F7A4FBC,$3F7A5AFF,
+$3F7A6633,$3F7A7156,$3F7A7C6A,$3F7A876F,$3F7A9263,$3F7A9D48,$3F7AA81E,$3F7AB2E4,
+$3F7ABD9B,$3F7AC842,$3F7AD2DA,$3F7ADD63,$3F7AE7DD,$3F7AF247,$3F7AFCA2,$3F7B06EE,
+$3F7B112B,$3F7B1B59,$3F7B2578,$3F7B2F89,$3F7B398A,$3F7B437C,$3F7B4D60,$3F7B5735,
+$3F7B60FC,$3F7B6AB3,$3F7B745C,$3F7B7DF7,$3F7B8783,$3F7B9101,$3F7B9A70,$3F7BA3D1,
+$3F7BAD24,$3F7BB668,$3F7BBF9E,$3F7BC8C6,$3F7BD1E0,$3F7BDAEC,$3F7BE3EA,$3F7BECDA,
+$3F7BF5BC,$3F7BFE90,$3F7C0756,$3F7C100E,$3F7C18B9,$3F7C2156,$3F7C29E6,$3F7C3268,
+$3F7C3ADC,$3F7C4343,$3F7C4B9C,$3F7C53E8,$3F7C5C27,$3F7C6458,$3F7C6C7C,$3F7C7493,
+$3F7C7C9D,$3F7C8499,$3F7C8C89,$3F7C946B,$3F7C9C41,$3F7CA409,$3F7CABC5,$3F7CB374,
+$3F7CBB16,$3F7CC2AC,$3F7CCA34,$3F7CD1B0,$3F7CD920,$3F7CE083,$3F7CE7D9,$3F7CEF23,
+$3F7CF661,$3F7CFD92,$3F7D04B7,$3F7D0BD0,$3F7D12DD,$3F7D19DD,$3F7D20D1,$3F7D27B9,
+$3F7D2E96,$3F7D3566,$3F7D3C2A,$3F7D42E3,$3F7D498F,$3F7D5030,$3F7D56C5,$3F7D5D4E,
+$3F7D63CC,$3F7D6A3E,$3F7D70A5,$3F7D7700,$3F7D7D50,$3F7D8394,$3F7D89CD,$3F7D8FFB,
+$3F7D961D,$3F7D9C34,$3F7DA240,$3F7DA841,$3F7DAE37,$3F7DB422,$3F7DBA02,$3F7DBFD7,
+$3F7DC5A1,$3F7DCB60,$3F7DD115,$3F7DD6BE,$3F7DDC5D,$3F7DE1F2,$3F7DE77C,$3F7DECFB,
+$3F7DF270,$3F7DF7DA,$3F7DFD3A,$3F7E028F,$3F7E07DB,$3F7E0D1C,$3F7E1252,$3F7E177F,
+$3F7E1CA1,$3F7E21BA,$3F7E26C8,$3F7E2BCC,$3F7E30C7,$3F7E35B7,$3F7E3A9E,$3F7E3F7B,
+$3F7E444E,$3F7E4917,$3F7E4DD7,$3F7E528D,$3F7E573A,$3F7E5BDD,$3F7E6076,$3F7E6506,
+$3F7E698D,$3F7E6E0A,$3F7E727E,$3F7E76E9,$3F7E7B4B,$3F7E7FA4,$3F7E83F3,$3F7E8839,
+$3F7E8C77,$3F7E90AB,$3F7E94D6,$3F7E98F9,$3F7E9D12,$3F7EA123,$3F7EA52C,$3F7EA92B,
+$3F7EAD22,$3F7EB110,$3F7EB4F6,$3F7EB8D3,$3F7EBCA7,$3F7EC073,$3F7EC437,$3F7EC7F3,
+$3F7ECBA6,$3F7ECF51,$3F7ED2F3,$3F7ED68E,$3F7EDA20,$3F7EDDAB,$3F7EE12D,$3F7EE4A7,
+$3F7EE81A,$3F7EEB84,$3F7EEEE7,$3F7EF242,$3F7EF595,$3F7EF8E0,$3F7EFC24,$3F7EFF60,
+$3F7F0294,$3F7F05C1,$3F7F08E6,$3F7F0C04,$3F7F0F1B,$3F7F122A,$3F7F1532,$3F7F1832,
+$3F7F1B2B,$3F7F1E1D,$3F7F2108,$3F7F23EC,$3F7F26C9,$3F7F299E,$3F7F2C6D,$3F7F2F35,
+$3F7F31F6,$3F7F34AF,$3F7F3763,$3F7F3A0F,$3F7F3CB5,$3F7F3F53,$3F7F41EC,$3F7F447D,
+$3F7F4708,$3F7F498D,$3F7F4C0B,$3F7F4E83,$3F7F50F4,$3F7F535F,$3F7F55C3,$3F7F5821,
+$3F7F5A79,$3F7F5CCB,$3F7F5F17,$3F7F615C,$3F7F639B,$3F7F65D5,$3F7F6808,$3F7F6A36,
+$3F7F6C5D,$3F7F6E7F,$3F7F709B,$3F7F72B1,$3F7F74C1,$3F7F76CB,$3F7F78D0,$3F7F7ACF,
+$3F7F7CC9,$3F7F7EBD,$3F7F80AB,$3F7F8294,$3F7F8478,$3F7F8656,$3F7F882F,$3F7F8A02,
+$3F7F8BD1,$3F7F8D99,$3F7F8F5D,$3F7F911C,$3F7F92D5,$3F7F9489,$3F7F9639,$3F7F97E3,
+$3F7F9988,$3F7F9B28,$3F7F9CC4,$3F7F9E5A,$3F7F9FEC,$3F7FA179,$3F7FA301,$3F7FA484,
+$3F7FA603,$3F7FA77D,$3F7FA8F2,$3F7FAA63,$3F7FABCF,$3F7FAD37,$3F7FAE9A,$3F7FAFF9,
+$3F7FB154,$3F7FB2AA,$3F7FB3FB,$3F7FB549,$3F7FB692,$3F7FB7D7,$3F7FB918,$3F7FBA55,
+$3F7FBB8D,$3F7FBCC1,$3F7FBDF2,$3F7FBF1E,$3F7FC047,$3F7FC16B,$3F7FC28C,$3F7FC3A8,
+$3F7FC4C1,$3F7FC5D6,$3F7FC6E7,$3F7FC7F5,$3F7FC8FF,$3F7FCA05,$3F7FCB07,$3F7FCC06,
+$3F7FCD01,$3F7FCDF9,$3F7FCEED,$3F7FCFDE,$3F7FD0CB,$3F7FD1B5,$3F7FD29C,$3F7FD37F,
+$3F7FD45F,$3F7FD53B,$3F7FD614,$3F7FD6EA,$3F7FD7BD,$3F7FD88D,$3F7FD95A,$3F7FDA23,
+$3F7FDAE9,$3F7FDBAD,$3F7FDC6D,$3F7FDD2B,$3F7FDDE5,$3F7FDE9C,$3F7FDF51,$3F7FE003,
+$3F7FE0B2,$3F7FE15E,$3F7FE207,$3F7FE2AE,$3F7FE352,$3F7FE3F3,$3F7FE492,$3F7FE52E,
+$3F7FE5C7,$3F7FE65E,$3F7FE6F2,$3F7FE784,$3F7FE813,$3F7FE8A0,$3F7FE92A,$3F7FE9B2,
+$3F7FEA38,$3F7FEABB,$3F7FEB3C,$3F7FEBBB,$3F7FEC37,$3F7FECB1,$3F7FED29,$3F7FED9F,
+$3F7FEE12,$3F7FEE84,$3F7FEEF3,$3F7FEF60,$3F7FEFCC,$3F7FF035,$3F7FF09C,$3F7FF101,
+$3F7FF165,$3F7FF1C6,$3F7FF225,$3F7FF283,$3F7FF2DE,$3F7FF338,$3F7FF390,$3F7FF3E7,
+$3F7FF43B,$3F7FF48E,$3F7FF4DF,$3F7FF52E,$3F7FF57C,$3F7FF5C8,$3F7FF613,$3F7FF65B,
+$3F7FF6A3,$3F7FF6E9,$3F7FF72D,$3F7FF76F,$3F7FF7B1,$3F7FF7F0,$3F7FF82F,$3F7FF86C,
+$3F7FF8A7,$3F7FF8E1,$3F7FF91A,$3F7FF952,$3F7FF988,$3F7FF9BC,$3F7FF9F0,$3F7FFA22,
+$3F7FFA53,$3F7FFA83,$3F7FFAB2,$3F7FFAE0,$3F7FFB0C,$3F7FFB37,$3F7FFB61,$3F7FFB8A,
+$3F7FFBB2,$3F7FFBD9,$3F7FFBFF,$3F7FFC24,$3F7FFC48,$3F7FFC6B,$3F7FFC8D,$3F7FFCAD,
+$3F7FFCCD,$3F7FFCED,$3F7FFD0B,$3F7FFD28,$3F7FFD45,$3F7FFD60,$3F7FFD7B,$3F7FFD95,
+$3F7FFDAE,$3F7FFDC7,$3F7FFDDE,$3F7FFDF5,$3F7FFE0C,$3F7FFE21,$3F7FFE36,$3F7FFE4A,
+$3F7FFE5D,$3F7FFE70,$3F7FFE82,$3F7FFE94,$3F7FFEA5,$3F7FFEB5,$3F7FFEC5,$3F7FFED4,
+$3F7FFEE3,$3F7FFEF1,$3F7FFEFE,$3F7FFF0B,$3F7FFF18,$3F7FFF24,$3F7FFF2F,$3F7FFF3B,
+$3F7FFF45,$3F7FFF4F,$3F7FFF59,$3F7FFF63,$3F7FFF6C,$3F7FFF74,$3F7FFF7C,$3F7FFF84,
+$3F7FFF8C,$3F7FFF93,$3F7FFF9A,$3F7FFFA0,$3F7FFFA6,$3F7FFFAC,$3F7FFFB2,$3F7FFFB7,
+$3F7FFFBC,$3F7FFFC1,$3F7FFFC5,$3F7FFFCA,$3F7FFFCE,$3F7FFFD1,$3F7FFFD5,$3F7FFFD8,
+$3F7FFFDC,$3F7FFFDF,$3F7FFFE1,$3F7FFFE4,$3F7FFFE6,$3F7FFFE9,$3F7FFFEB,$3F7FFFED,
+$3F7FFFEF,$3F7FFFF0,$3F7FFFF2,$3F7FFFF3,$3F7FFFF5,$3F7FFFF6,$3F7FFFF7,$3F7FFFF8,
+$3F7FFFF9,$3F7FFFFA,$3F7FFFFB,$3F7FFFFB,$3F7FFFFC,$3F7FFFFC,$3F7FFFFD,$3F7FFFFD,
+$3F7FFFFE,$3F7FFFFE,$3F7FFFFE,$3F7FFFFF,$3F7FFFFF,$3F7FFFFF,$3F7FFFFF,$3F7FFFFF,
+$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,
+$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,
+$33783FC6,$350B8862,$35C1C897,$363DE950,$369CF7B7,$36EA7C2E,$3723C099,$375A02F4,
+$378C0338,$37AEE4E3,$37D5A6B1,$3800246C,$38176592,$383096C9,$384BB812,$3868C951,
+$3883E55E,$38945E1D,$38A5CEE5,$38B837A7,$38CB9880,$38DFF155,$38F54224,$3905C57E,
+$391165EE,$391D8263,$392A1ACF,$39372F3F,$3944BFB3,$3952CC1E,$3961548D,$397058F3,
+$397FD95E,$3987EAE3,$39902712,$3998A140,$39A15969,$39AA4F92,$39B383B5,$39BCF5D7,
+$39C6A5F5,$39D0940E,$39DAC022,$39E52A2E,$39EFD239,$39FAB83C,$3A02EE1B,$3A089F16,
+$3A0E6F0D,$3A145E00,$3A1A6BEF,$3A2098DA,$3A26E4C0,$3A2D4FA1,$3A33D97C,$3A3A8253,
+$3A414A25,$3A4830F0,$3A4F36B6,$3A565B74,$3A5D9F2D,$3A6501DE,$3A6C8388,$3A74242A,
+$3A7BE3C4,$3A81E12C,$3A85DFF1,$3A89EE31,$3A8E0BEE,$3A923925,$3A9675D7,$3A9AC205,
+$3A9F1DAE,$3AA388D1,$3AA8036E,$3AAC8D86,$3AB12718,$3AB5D024,$3ABA88A9,$3ABF50A9,
+$3AC42821,$3AC90F13,$3ACE057E,$3AD30B62,$3AD820BF,$3ADD4594,$3AE279E1,$3AE7BDA6,
+$3AED10E3,$3AF27398,$3AF7E5C4,$3AFD6767,$3B017C41,$3B044C89,$3B07248D,$3B0A044C,
+$3B0CEBC6,$3B0FDAFB,$3B12D1EB,$3B15D095,$3B18D6FB,$3B1BE51A,$3B1EFAF4,$3B221888,
+$3B253DD7,$3B286ADF,$3B2B9FA1,$3B2EDC1D,$3B322053,$3B356C42,$3B38BFEA,$3B3C1B4C,
+$3B3F7E67,$3B42E93B,$3B465BC7,$3B49D60C,$3B4D580A,$3B50E1C1,$3B547330,$3B580C56,
+$3B5BAD35,$3B5F55CC,$3B63061A,$3B66BE20,$3B6A7DDE,$3B6E4552,$3B72147F,$3B75EB61,
+$3B79C9FB,$3B7DB04C,$3B80CF29,$3B82CA08,$3B84C8C2,$3B86CB57,$3B88D1C6,$3B8ADC11,
+$3B8CEA37,$3B8EFC37,$3B911212,$3B932BC7,$3B954957,$3B976AC2,$3B999006,$3B9BB925,
+$3B9DE61E,$3BA016F1,$3BA24B9E,$3BA48425,$3BA6C086,$3BA900C0,$3BAB44D4,$3BAD8CC1,
+$3BAFD889,$3BB22829,$3BB47BA3,$3BB6D2F5,$3BB92E21,$3BBB8D26,$3BBDF004,$3BC056BA,
+$3BC2C149,$3BC52FB1,$3BC7A1F2,$3BCA180A,$3BCC91FB,$3BCF0FC4,$3BD19166,$3BD416DF,
+$3BD6A031,$3BD92D5A,$3BDBBE5B,$3BDE5333,$3BE0EBE3,$3BE3886B,$3BE628C9,$3BE8CCFF,
+$3BEB750C,$3BEE20F0,$3BF0D0AB,$3BF3843D,$3BF63BA5,$3BF8F6E4,$3BFBB5FA,$3BFE78E5,
+$3C009FD4,$3C020520,$3C036C57,$3C04D579,$3C064086,$3C07AD7E,$3C091C60,$3C0A8D2D,
+$3C0BFFE5,$3C0D7488,$3C0EEB15,$3C10638D,$3C11DDEF,$3C135A3B,$3C14D872,$3C165893,
+$3C17DA9E,$3C195E93,$3C1AE473,$3C1C6C3C,$3C1DF5F0,$3C1F818D,$3C210F14,$3C229E85,
+$3C242FE0,$3C25C324,$3C275852,$3C28EF69,$3C2A886A,$3C2C2354,$3C2DC028,$3C2F5EE5,
+$3C30FF8B,$3C32A21A,$3C344692,$3C35ECF3,$3C37953D,$3C393F70,$3C3AEB8C,$3C3C9991,
+$3C3E497E,$3C3FFB54,$3C41AF12,$3C4364B9,$3C451C48,$3C46D5C0,$3C48911F,$3C4A4E67,
+$3C4C0D97,$3C4DCEAF,$3C4F91B0,$3C515698,$3C531D67,$3C54E61F,$3C56B0BE,$3C587D45,
+$3C5A4BB3,$3C5C1C09,$3C5DEE47,$3C5FC26B,$3C619877,$3C63706A,$3C654A44,$3C672605,
+$3C6903AD,$3C6AE33C,$3C6CC4B2,$3C6EA80E,$3C708D51,$3C72747B,$3C745D8B,$3C764882,
+$3C78355F,$3C7A2422,$3C7C14CB,$3C7E075A,$3C7FFBD0,$3C80F916,$3C81F536,$3C82F24A,
+$3C83F050,$3C84EF49,$3C85EF35,$3C86F013,$3C87F1E5,$3C88F4A9,$3C89F85F,$3C8AFD08,
+$3C8C02A4,$3C8D0932,$3C8E10B2,$3C8F1925,$3C90228B,$3C912CE2,$3C92382C,$3C934468,
+$3C945196,$3C955FB6,$3C966EC9,$3C977ECD,$3C988FC4,$3C99A1AC,$3C9AB487,$3C9BC853,
+$3C9CDD11,$3C9DF2C1,$3C9F0962,$3CA020F5,$3CA1397A,$3CA252F1,$3CA36D59,$3CA488B2,
+$3CA5A4FD,$3CA6C239,$3CA7E067,$3CA8FF86,$3CAA1F97,$3CAB4098,$3CAC628B,$3CAD856F,
+$3CAEA944,$3CAFCE0A,$3CB0F3C1,$3CB21A69,$3CB34202,$3CB46A8B,$3CB59406,$3CB6BE71,
+$3CB7E9CD,$3CB9161A,$3CBA4357,$3CBB7185,$3CBCA0A3,$3CBDD0B1,$3CBF01B1,$3CC033A0,
+$3CC16680,$3CC29A50,$3CC3CF10,$3CC504C1,$3CC63B61,$3CC772F2,$3CC8AB72,$3CC9E4E3,
+$3CCB1F43,$3CCC5A93,$3CCD96D3,$3CCED403,$3CD01222,$3CD15131,$3CD29130,$3CD3D21E,
+$3CD513FC,$3CD656C9,$3CD79A85,$3CD8DF31,$3CDA24CC,$3CDB6B56,$3CDCB2D0,$3CDDFB38,
+$3CDF4490,$3CE08ED6,$3CE1DA0C,$3CE32630,$3CE47343,$3CE5C145,$3CE71036,$3CE86015,
+$3CE9B0E3,$3CEB02A0,$3CEC554B,$3CEDA8E4,$3CEEFD6C,$3CF052E2,$3CF1A946,$3CF30099,
+$3CF458DA,$3CF5B208,$3CF70C25,$3CF86730,$3CF9C329,$3CFB200F,$3CFC7DE4,$3CFDDCA6,
+$3CFF3C55,$3D004E79,$3D00FF3F,$3D01B07B,$3D02622E,$3D031458,$3D03C6F8,$3D047A0F,
+$3D052D9C,$3D05E1A1,$3D06961B,$3D074B0C,$3D080074,$3D08B652,$3D096CA7,$3D0A2371,
+$3D0ADAB3,$3D0B926A,$3D0C4A98,$3D0D033C,$3D0DBC57,$3D0E75E7,$3D0F2FEE,$3D0FEA6B,
+$3D10A55E,$3D1160C7,$3D121CA6,$3D12D8FB,$3D1395C6,$3D145307,$3D1510BE,$3D15CEEA,
+$3D168D8D,$3D174CA5,$3D180C34,$3D18CC38,$3D198CB1,$3D1A4DA1,$3D1B0F06,$3D1BD0E0,
+$3D1C9330,$3D1D55F6,$3D1E1931,$3D1EDCE2,$3D1FA108,$3D2065A4,$3D212AB5,$3D21F03B,
+$3D22B637,$3D237CA8,$3D24438E,$3D250AE9,$3D25D2BA,$3D269AFF,$3D2763BA,$3D282CEA,
+$3D28F68F,$3D29C0A8,$3D2A8B37,$3D2B563B,$3D2C21B4,$3D2CEDA1,$3D2DBA04,$3D2E86DB,
+$3D2F5426,$3D3021E7,$3D30F01C,$3D31BEC6,$3D328DE5,$3D335D78,$3D342D7F,$3D34FDFB,
+$3D35CEEC,$3D36A051,$3D37722A,$3D384478,$3D39173A,$3D39EA70,$3D3ABE1B,$3D3B923A,
+$3D3C66CC,$3D3D3BD3,$3D3E114F,$3D3EE73E,$3D3FBDA1,$3D409478,$3D416BC3,$3D424382,
+$3D431BB5,$3D43F45C,$3D44CD76,$3D45A704,$3D468106,$3D475B7C,$3D483665,$3D4911C2,
+$3D49ED92,$3D4AC9D6,$3D4BA68D,$3D4C83B8,$3D4D6156,$3D4E3F68,$3D4F1DEC,$3D4FFCE5,
+$3D50DC50,$3D51BC2E,$3D529C80,$3D537D45,$3D545E7D,$3D554028,$3D562245,$3D5704D6,
+$3D57E7DA,$3D58CB51,$3D59AF3A,$3D5A9396,$3D5B7865,$3D5C5DA7,$3D5D435B,$3D5E2982,
+$3D5F101C,$3D5FF728,$3D60DEA7,$3D61C698,$3D62AEFB,$3D6397D1,$3D648119,$3D656AD4,
+$3D665500,$3D673F9F,$3D682AB0,$3D691633,$3D6A0229,$3D6AEE90,$3D6BDB69,$3D6CC8B4,
+$3D6DB671,$3D6EA4A0,$3D6F9341,$3D708254,$3D7171D8,$3D7261CE,$3D735236,$3D74430F,
+$3D753459,$3D762616,$3D771843,$3D780AE2,$3D78FDF3,$3D79F175,$3D7AE568,$3D7BD9CC,
+$3D7CCEA2,$3D7DC3E8,$3D7EB9A0,$3D7FAFC9,$3D805331,$3D80CEB7,$3D814A75,$3D81C66B,
+$3D82429A,$3D82BF01,$3D833BA0,$3D83B878,$3D843588,$3D84B2D1,$3D853051,$3D85AE0A,
+$3D862BFB,$3D86AA25,$3D872886,$3D87A720,$3D8825F2,$3D88A4FC,$3D89243E,$3D89A3B8,
+$3D8A236A,$3D8AA354,$3D8B2376,$3D8BA3D1,$3D8C2463,$3D8CA52D,$3D8D262E,$3D8DA768,
+$3D8E28DA,$3D8EAA83,$3D8F2C64,$3D8FAE7D,$3D9030CE,$3D90B356,$3D913617,$3D91B90E,
+$3D923C3E,$3D92BFA5,$3D934343,$3D93C71A,$3D944B27,$3D94CF6D,$3D9553EA,$3D95D89E,
+$3D965D8A,$3D96E2AD,$3D976807,$3D97ED99,$3D987362,$3D98F963,$3D997F9B,$3D9A060A,
+$3D9A8CB0,$3D9B138E,$3D9B9AA3,$3D9C21EF,$3D9CA972,$3D9D312C,$3D9DB91D,$3D9E4145,
+$3D9EC9A5,$3D9F523B,$3D9FDB08,$3DA0640D,$3DA0ED48,$3DA176BA,$3DA20063,$3DA28A43,
+$3DA3145A,$3DA39EA7,$3DA4292B,$3DA4B3E6,$3DA53ED8,$3DA5CA00,$3DA6555F,$3DA6E0F5,
+$3DA76CC1,$3DA7F8C4,$3DA884FE,$3DA9116E,$3DA99E14,$3DAA2AF1,$3DAAB804,$3DAB454E,
+$3DABD2CE,$3DAC6085,$3DACEE71,$3DAD7C95,$3DAE0AEE,$3DAE997E,$3DAF2843,$3DAFB73F,
+$3DB04672,$3DB0D5DA,$3DB16578,$3DB1F54D,$3DB28558,$3DB31598,$3DB3A60F,$3DB436BB,
+$3DB4C79E,$3DB558B6,$3DB5EA04,$3DB67B89,$3DB70D43,$3DB79F32,$3DB83158,$3DB8C3B3,
+$3DB95644,$3DB9E90B,$3DBA7C07,$3DBB0F39,$3DBBA2A0,$3DBC363D,$3DBCCA10,$3DBD5E18,
+$3DBDF255,$3DBE86C8,$3DBF1B70,$3DBFB04E,$3DC04561,$3DC0DAAA,$3DC17027,$3DC205DA,
+$3DC29BC2,$3DC331E0,$3DC3C832,$3DC45EBA,$3DC4F577,$3DC58C68,$3DC6238F,$3DC6BAEB,
+$3DC7527C,$3DC7EA42,$3DC8823D,$3DC91A6C,$3DC9B2D1,$3DCA4B6A,$3DCAE439,$3DCB7D3B,
+$3DCC1673,$3DCCAFE0,$3DCD4981,$3DCDE356,$3DCE7D61,$3DCF179F,$3DCFB213,$3DD04CBB,
+$3DD0E797,$3DD182A8,$3DD21DED,$3DD2B967,$3DD35515,$3DD3F0F8,$3DD48D0E,$3DD52959,
+$3DD5C5D8,$3DD6628C,$3DD6FF73,$3DD79C8F,$3DD839DF,$3DD8D763,$3DD9751B,$3DDA1307,
+$3DDAB126,$3DDB4F7A,$3DDBEE02,$3DDC8CBD,$3DDD2BAD,$3DDDCAD0,$3DDE6A27,$3DDF09B2,
+$3DDFA970,$3DE04962,$3DE0E988,$3DE189E2,$3DE22A6F,$3DE2CB2F,$3DE36C23,$3DE40D4A,
+$3DE4AEA5,$3DE55034,$3DE5F1F5,$3DE693EA,$3DE73613,$3DE7D86E,$3DE87AFD,$3DE91DBF,
+$3DE9C0B4,$3DEA63DD,$3DEB0738,$3DEBAAC7,$3DEC4E88,$3DECF27D,$3DED96A4,$3DEE3AFF,
+$3DEEDF8C,$3DEF844C,$3DF0293F,$3DF0CE65,$3DF173BD,$3DF21949,$3DF2BF07,$3DF364F7,
+$3DF40B1A,$3DF4B170,$3DF557F8,$3DF5FEB3,$3DF6A5A0,$3DF74CC0,$3DF7F412,$3DF89B97,
+$3DF9434D,$3DF9EB37,$3DFA9352,$3DFB3B9F,$3DFBE41F,$3DFC8CD1,$3DFD35B5,$3DFDDECB,
+$3DFE8813,$3DFF318D,$3DFFDB39,$3E00428C,$3E009794,$3E00ECB5,$3E0141EE,$3E019741,
+$3E01ECAD,$3E024231,$3E0297CE,$3E02ED84,$3E034353,$3E03993B,$3E03EF3B,$3E044554,
+$3E049B86,$3E04F1D1,$3E054834,$3E059EB0,$3E05F544,$3E064BF2,$3E06A2B7,$3E06F996,
+$3E07508D,$3E07A79C,$3E07FEC4,$3E085605,$3E08AD5E,$3E0904CF,$3E095C59,$3E09B3FC,
+$3E0A0BB7,$3E0A638A,$3E0ABB76,$3E0B137A,$3E0B6B96,$3E0BC3CB,$3E0C1C18,$3E0C747D,
+$3E0CCCFA,$3E0D2590,$3E0D7E3E,$3E0DD704,$3E0E2FE3,$3E0E88D9,$3E0EE1E8,$3E0F3B0F,
+$3E0F944E,$3E0FEDA5,$3E104714,$3E10A09B,$3E10FA3A,$3E1153F1,$3E11ADC1,$3E1207A8,
+$3E1261A7,$3E12BBBE,$3E1315ED,$3E137033,$3E13CA92,$3E142509,$3E147F97,$3E14DA3D,
+$3E1534FB,$3E158FD1,$3E15EABE,$3E1645C3,$3E16A0E0,$3E16FC15,$3E175761,$3E17B2C5,
+$3E180E40,$3E1869D3,$3E18C57E,$3E192140,$3E197D1A,$3E19D90B,$3E1A3514,$3E1A9134,
+$3E1AED6C,$3E1B49BB,$3E1BA622,$3E1C02A0,$3E1C5F35,$3E1CBBE2,$3E1D18A6,$3E1D7581,
+$3E1DD274,$3E1E2F7E,$3E1E8C9F,$3E1EE9D7,$3E1F4727,$3E1FA48D,$3E20020B,$3E205FA0,
+$3E20BD4C,$3E211B10,$3E2178EA,$3E21D6DB,$3E2234E4,$3E229303,$3E22F13A,$3E234F87,
+$3E23ADEB,$3E240C67,$3E246AF9,$3E24C9A2,$3E252862,$3E258738,$3E25E626,$3E26452A,
+$3E26A445,$3E270377,$3E2762C0,$3E27C21F,$3E282195,$3E288121,$3E28E0C5,$3E29407E,
+$3E29A04F,$3E2A0036,$3E2A6033,$3E2AC048,$3E2B2072,$3E2B80B3,$3E2BE10B,$3E2C4179,
+$3E2CA1FD,$3E2D0298,$3E2D6349,$3E2DC410,$3E2E24EE,$3E2E85E2,$3E2EE6ED,$3E2F480D,
+$3E2FA944,$3E300A91,$3E306BF5,$3E30CD6E,$3E312EFE,$3E3190A3,$3E31F25F,$3E325431,
+$3E32B619,$3E331817,$3E337A2B,$3E33DC55,$3E343E94,$3E34A0EA,$3E350356,$3E3565D8,
+$3E35C86F,$3E362B1C,$3E368DDF,$3E36F0B8,$3E3753A7,$3E37B6AB,$3E3819C5,$3E387CF5,
+$3E38E03B,$3E394396,$3E39A707,$3E3A0A8D,$3E3A6E29,$3E3AD1DB,$3E3B35A2,$3E3B997E,
+$3E3BFD70,$3E3C6178,$3E3CC595,$3E3D29C7,$3E3D8E0F,$3E3DF26C,$3E3E56DE,$3E3EBB66,
+$3E3F2003,$3E3F84B5,$3E3FE97D,$3E404E5A,$3E40B34B,$3E411853,$3E417D6F,$3E41E2A0,
+$3E4247E7,$3E42AD42,$3E4312B3,$3E437839,$3E43DDD3,$3E444383,$3E44A947,$3E450F21,
+$3E45750F,$3E45DB12,$3E46412A,$3E46A757,$3E470D99,$3E4773F0,$3E47DA5B,$3E4840DB,
+$3E48A76F,$3E490E19,$3E4974D7,$3E49DBA9,$3E4A4290,$3E4AA98C,$3E4B109D,$3E4B77C1,
+$3E4BDEFB,$3E4C4649,$3E4CADAB,$3E4D1522,$3E4D7CAD,$3E4DE44C,$3E4E4C00,$3E4EB3C8,
+$3E4F1BA4,$3E4F8395,$3E4FEB9A,$3E5053B3,$3E50BBE1,$3E512422,$3E518C78,$3E51F4E1,
+$3E525D5F,$3E52C5F1,$3E532E97,$3E539751,$3E54001F,$3E546901,$3E54D1F7,$3E553B00,
+$3E55A41E,$3E560D4F,$3E567695,$3E56DFEE,$3E57495B,$3E57B2DB,$3E581C70,$3E588618,
+$3E58EFD3,$3E5959A3,$3E59C386,$3E5A2D7C,$3E5A9786,$3E5B01A4,$3E5B6BD5,$3E5BD61A,
+$3E5C4072,$3E5CAADD,$3E5D155C,$3E5D7FEF,$3E5DEA94,$3E5E554D,$3E5EC01A,$3E5F2AF9,
+$3E5F95EC,$3E6000F2,$3E606C0B,$3E60D737,$3E614277,$3E61ADCA,$3E62192F,$3E6284A8,
+$3E62F034,$3E635BD2,$3E63C784,$3E643349,$3E649F20,$3E650B0B,$3E657708,$3E65E318,
+$3E664F3B,$3E66BB71,$3E6727BA,$3E679415,$3E680083,$3E686D03,$3E68D997,$3E69463C,
+$3E69B2F5,$3E6A1FC0,$3E6A8C9D,$3E6AF98D,$3E6B6690,$3E6BD3A5,$3E6C40CC,$3E6CAE06,
+$3E6D1B52,$3E6D88B0,$3E6DF621,$3E6E63A4,$3E6ED139,$3E6F3EE1,$3E6FAC9A,$3E701A66,
+$3E708844,$3E70F634,$3E716437,$3E71D24B,$3E724071,$3E72AEA9,$3E731CF3,$3E738B50,
+$3E73F9BE,$3E74683D,$3E74D6CF,$3E754573,$3E75B428,$3E7622EF,$3E7691C8,$3E7700B3,
+$3E776FAF,$3E77DEBD,$3E784DDD,$3E78BD0E,$3E792C50,$3E799BA5,$3E7A0B0A,$3E7A7A82,
+$3E7AEA0A,$3E7B59A4,$3E7BC950,$3E7C390D,$3E7CA8DB,$3E7D18BA,$3E7D88AB,$3E7DF8AD,
+$3E7E68C0,$3E7ED8E4,$3E7F491A,$3E7FB960,$3E8014DC,$3E804D10,$3E80854D,$3E80BD93,
+$3E80F5E1,$3E812E37,$3E816696,$3E819EFD,$3E81D76D,$3E820FE5,$3E824866,$3E8280EE,
+$3E82B980,$3E82F219,$3E832ABB,$3E836366,$3E839C18,$3E83D4D3,$3E840D96,$3E844662,
+$3E847F35,$3E84B811,$3E84F0F5,$3E8529E2,$3E8562D6,$3E859BD3,$3E85D4D8,$3E860DE5,
+$3E8646FA,$3E868017,$3E86B93D,$3E86F26A,$3E872BA0,$3E8764DD,$3E879E23,$3E87D770,
+$3E8810C6,$3E884A23,$3E888389,$3E88BCF7,$3E88F66C,$3E892FE9,$3E89696F,$3E89A2FC,
+$3E89DC91,$3E8A162E,$3E8A4FD3,$3E8A897F,$3E8AC334,$3E8AFCF0,$3E8B36B4,$3E8B7080,
+$3E8BAA54,$3E8BE42F,$3E8C1E12,$3E8C57FD,$3E8C91EF,$3E8CCBE9,$3E8D05EB,$3E8D3FF5,
+$3E8D7A06,$3E8DB41F,$3E8DEE3F,$3E8E2867,$3E8E6296,$3E8E9CCD,$3E8ED70C,$3E8F1152,
+$3E8F4B9F,$3E8F85F5,$3E8FC051,$3E8FFAB5,$3E903521,$3E906F93,$3E90AA0E,$3E90E48F,
+$3E911F19,$3E9159A9,$3E919441,$3E91CEE0,$3E920986,$3E924434,$3E927EE9,$3E92B9A5,
+$3E92F469,$3E932F34,$3E936A06,$3E93A4DF,$3E93DFBF,$3E941AA7,$3E945596,$3E94908B,
+$3E94CB88,$3E95068C,$3E954198,$3E957CAA,$3E95B7C3,$3E95F2E3,$3E962E0B,$3E966939,
+$3E96A46F,$3E96DFAB,$3E971AEE,$3E975638,$3E97918A,$3E97CCE2,$3E980841,$3E9843A7,
+$3E987F13,$3E98BA87,$3E98F601,$3E993182,$3E996D0A,$3E99A899,$3E99E42F,$3E9A1FCB,
+$3E9A5B6E,$3E9A9718,$3E9AD2C8,$3E9B0E7F,$3E9B4A3D,$3E9B8602,$3E9BC1CD,$3E9BFD9E,
+$3E9C3977,$3E9C7555,$3E9CB13B,$3E9CED27,$3E9D2919,$3E9D6512,$3E9DA112,$3E9DDD18,
+$3E9E1924,$3E9E5537,$3E9E9150,$3E9ECD70,$3E9F0996,$3E9F45C3,$3E9F81F6,$3E9FBE2F,
+$3E9FFA6F,$3EA036B4,$3EA07301,$3EA0AF53,$3EA0EBAC,$3EA1280B,$3EA16470,$3EA1A0DB,
+$3EA1DD4D,$3EA219C4,$3EA25642,$3EA292C6,$3EA2CF51,$3EA30BE1,$3EA34877,$3EA38514,
+$3EA3C1B6,$3EA3FE5F,$3EA43B0D,$3EA477C2,$3EA4B47D,$3EA4F13D,$3EA52E04,$3EA56AD0,
+$3EA5A7A2,$3EA5E47B,$3EA62159,$3EA65E3D,$3EA69B27,$3EA6D817,$3EA7150C,$3EA75207,
+$3EA78F08,$3EA7CC0F,$3EA8091C,$3EA8462E,$3EA88346,$3EA8C064,$3EA8FD88,$3EA93AB1,
+$3EA977DF,$3EA9B514,$3EA9F24E,$3EAA2F8D,$3EAA6CD3,$3EAAAA1D,$3EAAE76D,$3EAB24C3,
+$3EAB621F,$3EAB9F7F,$3EABDCE6,$3EAC1A51,$3EAC57C2,$3EAC9539,$3EACD2B5,$3EAD1036,
+$3EAD4DBD,$3EAD8B49,$3EADC8DA,$3EAE0671,$3EAE440D,$3EAE81AE,$3EAEBF55,$3EAEFD00,
+$3EAF3AB1,$3EAF7867,$3EAFB623,$3EAFF3E3,$3EB031A9,$3EB06F74,$3EB0AD44,$3EB0EB19,
+$3EB128F3,$3EB166D2,$3EB1A4B6,$3EB1E2A0,$3EB2208E,$3EB25E81,$3EB29C79,$3EB2DA77,
+$3EB31879,$3EB35680,$3EB3948C,$3EB3D29D,$3EB410B2,$3EB44ECD,$3EB48CEC,$3EB4CB10,
+$3EB50939,$3EB54767,$3EB5859A,$3EB5C3D1,$3EB6020D,$3EB6404E,$3EB67E93,$3EB6BCDD,
+$3EB6FB2C,$3EB7397F,$3EB777D7,$3EB7B634,$3EB7F495,$3EB832FB,$3EB87165,$3EB8AFD4,
+$3EB8EE47,$3EB92CBF,$3EB96B3B,$3EB9A9BC,$3EB9E841,$3EBA26CA,$3EBA6558,$3EBAA3EB,
+$3EBAE281,$3EBB211C,$3EBB5FBC,$3EBB9E5F,$3EBBDD07,$3EBC1BB4,$3EBC5A64,$3EBC9919,
+$3EBCD7D2,$3EBD168F,$3EBD5550,$3EBD9416,$3EBDD2DF,$3EBE11AD,$3EBE507F,$3EBE8F55,
+$3EBECE2F,$3EBF0D0D,$3EBF4BEF,$3EBF8AD5,$3EBFC9BF,$3EC008AD,$3EC0479F,$3EC08695,
+$3EC0C58F,$3EC1048D,$3EC1438F,$3EC18294,$3EC1C19E,$3EC200AB,$3EC23FBC,$3EC27ED1,
+$3EC2BDEA,$3EC2FD06,$3EC33C26,$3EC37B4A,$3EC3BA71,$3EC3F99D,$3EC438CC,$3EC477FE,
+$3EC4B734,$3EC4F66E,$3EC535AB,$3EC574EC,$3EC5B431,$3EC5F379,$3EC632C4,$3EC67213,
+$3EC6B166,$3EC6F0BC,$3EC73015,$3EC76F72,$3EC7AED2,$3EC7EE36,$3EC82D9D,$3EC86D07,
+$3EC8AC75,$3EC8EBE6,$3EC92B5A,$3EC96AD1,$3EC9AA4C,$3EC9E9CA,$3ECA294B,$3ECA68D0,
+$3ECAA858,$3ECAE7E2,$3ECB2770,$3ECB6701,$3ECBA695,$3ECBE62D,$3ECC25C7,$3ECC6564,
+$3ECCA504,$3ECCE4A8,$3ECD244E,$3ECD63F8,$3ECDA3A4,$3ECDE353,$3ECE2305,$3ECE62BA,
+$3ECEA272,$3ECEE22D,$3ECF21EA,$3ECF61AB,$3ECFA16E,$3ECFE134,$3ED020FD,$3ED060C8,
+$3ED0A096,$3ED0E067,$3ED1203B,$3ED16011,$3ED19FEA,$3ED1DFC6,$3ED21FA4,$3ED25F85,
+$3ED29F68,$3ED2DF4E,$3ED31F37,$3ED35F21,$3ED39F0F,$3ED3DEFF,$3ED41EF1,$3ED45EE6,
+$3ED49EDD,$3ED4DED7,$3ED51ED3,$3ED55ED1,$3ED59ED2,$3ED5DED5,$3ED61EDB,$3ED65EE2,
+$3ED69EEC,$3ED6DEF8,$3ED71F07,$3ED75F18,$3ED79F2A,$3ED7DF3F,$3ED81F57,$3ED85F70,
+$3ED89F8B,$3ED8DFA9,$3ED91FC8,$3ED95FEA,$3ED9A00E,$3ED9E033,$3EDA205B,$3EDA6085,
+$3EDAA0B0,$3EDAE0DE,$3EDB210D,$3EDB613F,$3EDBA172,$3EDBE1A7,$3EDC21DE,$3EDC6217,
+$3EDCA252,$3EDCE28E,$3EDD22CC,$3EDD630C,$3EDDA34E,$3EDDE392,$3EDE23D7,$3EDE641D,
+$3EDEA466,$3EDEE4B0,$3EDF24FC,$3EDF6549,$3EDFA598,$3EDFE5E8,$3EE0263A,$3EE0668E,
+$3EE0A6E3,$3EE0E739,$3EE12791,$3EE167EA,$3EE1A845,$3EE1E8A1,$3EE228FF,$3EE2695E,
+$3EE2A9BE,$3EE2EA20,$3EE32A83,$3EE36AE7,$3EE3AB4C,$3EE3EBB3,$3EE42C1B,$3EE46C84,
+$3EE4ACEE,$3EE4ED5A,$3EE52DC7,$3EE56E34,$3EE5AEA3,$3EE5EF13,$3EE62F85,$3EE66FF7,
+$3EE6B06A,$3EE6F0DE,$3EE73153,$3EE771CA,$3EE7B241,$3EE7F2B9,$3EE83332,$3EE873AC,
+$3EE8B426,$3EE8F4A2,$3EE9351F,$3EE9759C,$3EE9B61A,$3EE9F699,$3EEA3719,$3EEA7799,
+$3EEAB81A,$3EEAF89C,$3EEB391F,$3EEB79A2,$3EEBBA26,$3EEBFAAA,$3EEC3B2F,$3EEC7BB5,
+$3EECBC3B,$3EECFCC2,$3EED3D49,$3EED7DD1,$3EEDBE59,$3EEDFEE2,$3EEE3F6B,$3EEE7FF5,
+$3EEEC07F,$3EEF010A,$3EEF4195,$3EEF8220,$3EEFC2AB,$3EF00337,$3EF043C4,$3EF08450,
+$3EF0C4DD,$3EF1056A,$3EF145F7,$3EF18684,$3EF1C712,$3EF207A0,$3EF2482D,$3EF288BB,
+$3EF2C94A,$3EF309D8,$3EF34A66,$3EF38AF4,$3EF3CB83,$3EF40C11,$3EF44C9F,$3EF48D2E,
+$3EF4CDBC,$3EF50E4A,$3EF54ED8,$3EF58F66,$3EF5CFF4,$3EF61081,$3EF6510F,$3EF6919C,
+$3EF6D229,$3EF712B6,$3EF75343,$3EF793CF,$3EF7D45B,$3EF814E7,$3EF85573,$3EF895FE,
+$3EF8D688,$3EF91713,$3EF9579D,$3EF99826,$3EF9D8AF,$3EFA1938,$3EFA59C0,$3EFA9A48,
+$3EFADACF,$3EFB1B56,$3EFB5BDC,$3EFB9C61,$3EFBDCE6,$3EFC1D6A,$3EFC5DEE,$3EFC9E71,
+$3EFCDEF3,$3EFD1F75,$3EFD5FF5,$3EFDA076,$3EFDE0F5,$3EFE2174,$3EFE61F1,$3EFEA26E,
+$3EFEE2EB,$3EFF2366,$3EFF63E0,$3EFFA45A,$3EFFE4D3,$3F0012A5,$3F0032E1,$3F00531B,
+$3F007356,$3F009390,$3F00B3C9,$3F00D402,$3F00F43A,$3F011472,$3F0134A9,$3F0154E0,
+$3F017516,$3F01954C,$3F01B581,$3F01D5B5,$3F01F5E9,$3F02161C,$3F02364E,$3F025680,
+$3F0276B2,$3F0296E2,$3F02B712,$3F02D741,$3F02F770,$3F03179D,$3F0337CB,$3F0357F7,
+$3F037823,$3F03984E,$3F03B878,$3F03D8A1,$3F03F8CA,$3F0418F2,$3F043919,$3F04593F,
+$3F047965,$3F049989,$3F04B9AD,$3F04D9D0,$3F04F9F3,$3F051A14,$3F053A34,$3F055A54,
+$3F057A73,$3F059A91,$3F05BAAD,$3F05DACA,$3F05FAE5,$3F061AFF,$3F063B18,$3F065B30,
+$3F067B48,$3F069B5E,$3F06BB74,$3F06DB88,$3F06FB9B,$3F071BAE,$3F073BBF,$3F075BD0,
+$3F077BDF,$3F079BED,$3F07BBFA,$3F07DC07,$3F07FC12,$3F081C1C,$3F083C25,$3F085C2C,
+$3F087C33,$3F089C39,$3F08BC3D,$3F08DC40,$3F08FC43,$3F091C44,$3F093C44,$3F095C42,
+$3F097C40,$3F099C3C,$3F09BC37,$3F09DC31,$3F09FC29,$3F0A1C21,$3F0A3C17,$3F0A5C0C,
+$3F0A7BFF,$3F0A9BF2,$3F0ABBE3,$3F0ADBD3,$3F0AFBC1,$3F0B1BAE,$3F0B3B9A,$3F0B5B85,
+$3F0B7B6E,$3F0B9B56,$3F0BBB3C,$3F0BDB21,$3F0BFB05,$3F0C1AE7,$3F0C3AC8,$3F0C5AA8,
+$3F0C7A86,$3F0C9A62,$3F0CBA3E,$3F0CDA17,$3F0CF9F0,$3F0D19C7,$3F0D399C,$3F0D5970,
+$3F0D7942,$3F0D9913,$3F0DB8E3,$3F0DD8B0,$3F0DF87D,$3F0E1848,$3F0E3811,$3F0E57D8,
+$3F0E779F,$3F0E9763,$3F0EB726,$3F0ED6E8,$3F0EF6A7,$3F0F1665,$3F0F3622,$3F0F55DD,
+$3F0F7596,$3F0F954E,$3F0FB504,$3F0FD4B8,$3F0FF46A,$3F10141B,$3F1033CA,$3F105378,
+$3F107324,$3F1092CE,$3F10B276,$3F10D21C,$3F10F1C1,$3F111164,$3F113106,$3F1150A5,
+$3F117043,$3F118FDF,$3F11AF79,$3F11CF11,$3F11EEA7,$3F120E3C,$3F122DCE,$3F124D5F,
+$3F126CEE,$3F128C7B,$3F12AC07,$3F12CB90,$3F12EB17,$3F130A9D,$3F132A20,$3F1349A2,
+$3F136922,$3F13889F,$3F13A81B,$3F13C795,$3F13E70D,$3F140683,$3F1425F7,$3F144568,
+$3F1464D8,$3F148446,$3F14A3B2,$3F14C31B,$3F14E283,$3F1501E9,$3F15214C,$3F1540AE,
+$3F15600D,$3F157F6A,$3F159EC5,$3F15BE1F,$3F15DD75,$3F15FCCA,$3F161C1D,$3F163B6D,
+$3F165ABC,$3F167A08,$3F169952,$3F16B899,$3F16D7DF,$3F16F722,$3F171664,$3F1735A2,
+$3F1754DF,$3F17741A,$3F179352,$3F17B288,$3F17D1BB,$3F17F0ED,$3F18101C,$3F182F49,
+$3F184E73,$3F186D9B,$3F188CC1,$3F18ABE4,$3F18CB06,$3F18EA24,$3F190941,$3F19285B,
+$3F194773,$3F196688,$3F19859B,$3F19A4AB,$3F19C3B9,$3F19E2C5,$3F1A01CE,$3F1A20D5,
+$3F1A3FD9,$3F1A5EDB,$3F1A7DDA,$3F1A9CD7,$3F1ABBD2,$3F1ADACA,$3F1AF9BF,$3F1B18B2,
+$3F1B37A2,$3F1B5690,$3F1B757B,$3F1B9464,$3F1BB34A,$3F1BD22E,$3F1BF10F,$3F1C0FED,
+$3F1C2EC9,$3F1C4DA2,$3F1C6C79,$3F1C8B4D,$3F1CAA1F,$3F1CC8ED,$3F1CE7B9,$3F1D0683,
+$3F1D254A,$3F1D440E,$3F1D62CF,$3F1D818E,$3F1DA04A,$3F1DBF03,$3F1DDDBA,$3F1DFC6E,
+$3F1E1B1F,$3F1E39CD,$3F1E5879,$3F1E7722,$3F1E95C8,$3F1EB46B,$3F1ED30C,$3F1EF1AA,
+$3F1F1045,$3F1F2EDD,$3F1F4D72,$3F1F6C05,$3F1F8A94,$3F1FA921,$3F1FC7AB,$3F1FE632,
+$3F2004B6,$3F202338,$3F2041B6,$3F206032,$3F207EAA,$3F209D20,$3F20BB93,$3F20DA03,
+$3F20F870,$3F2116DA,$3F213541,$3F2153A5,$3F217206,$3F219064,$3F21AEBF,$3F21CD17,
+$3F21EB6C,$3F2209BE,$3F22280D,$3F224659,$3F2264A2,$3F2282E8,$3F22A12B,$3F22BF6B,
+$3F22DDA7,$3F22FBE1,$3F231A18,$3F23384B,$3F23567B,$3F2374A8,$3F2392D3,$3F23B0F9,
+$3F23CF1D,$3F23ED3E,$3F240B5B,$3F242976,$3F24478D,$3F2465A1,$3F2483B1,$3F24A1BF,
+$3F24BFC9,$3F24DDD0,$3F24FBD4,$3F2519D5,$3F2537D2,$3F2555CC,$3F2573C3,$3F2591B7,
+$3F25AFA7,$3F25CD94,$3F25EB7E,$3F260965,$3F262748,$3F264528,$3F266304,$3F2680DD,
+$3F269EB3,$3F26BC86,$3F26DA55,$3F26F821,$3F2715E9,$3F2733AE,$3F275170,$3F276F2E,
+$3F278CE9,$3F27AAA0,$3F27C854,$3F27E604,$3F2803B2,$3F28215B,$3F283F01,$3F285CA4,
+$3F287A43,$3F2897DF,$3F28B578,$3F28D30C,$3F28F09E,$3F290E2B,$3F292BB6,$3F29493C,
+$3F2966C0,$3F29843F,$3F29A1BB,$3F29BF34,$3F29DCA9,$3F29FA1A,$3F2A1788,$3F2A34F2,
+$3F2A5259,$3F2A6FBC,$3F2A8D1C,$3F2AAA77,$3F2AC7D0,$3F2AE524,$3F2B0275,$3F2B1FC2,
+$3F2B3D0C,$3F2B5A52,$3F2B7794,$3F2B94D3,$3F2BB20E,$3F2BCF45,$3F2BEC78,$3F2C09A8,
+$3F2C26D4,$3F2C43FC,$3F2C6121,$3F2C7E42,$3F2C9B5F,$3F2CB878,$3F2CD58E,$3F2CF29F,
+$3F2D0FAD,$3F2D2CB8,$3F2D49BE,$3F2D66C1,$3F2D83BF,$3F2DA0BA,$3F2DBDB1,$3F2DDAA5,
+$3F2DF794,$3F2E1480,$3F2E3167,$3F2E4E4B,$3F2E6B2B,$3F2E8807,$3F2EA4E0,$3F2EC1B4,
+$3F2EDE84,$3F2EFB51,$3F2F181A,$3F2F34DE,$3F2F519F,$3F2F6E5C,$3F2F8B15,$3F2FA7CA,
+$3F2FC47B,$3F2FE128,$3F2FFDD1,$3F301A76,$3F303717,$3F3053B4,$3F30704D,$3F308CE2,
+$3F30A973,$3F30C600,$3F30E289,$3F30FF0E,$3F311B8E,$3F31380B,$3F315484,$3F3170F8,
+$3F318D69,$3F31A9D6,$3F31C63E,$3F31E2A2,$3F31FF02,$3F321B5F,$3F3237B6,$3F32540A,
+$3F32705A,$3F328CA6,$3F32A8ED,$3F32C530,$3F32E16F,$3F32FDAA,$3F3319E1,$3F333613,
+$3F335242,$3F336E6C,$3F338A92,$3F33A6B4,$3F33C2D1,$3F33DEEA,$3F33FB00,$3F341710,
+$3F34331D,$3F344F25,$3F346B29,$3F348729,$3F34A325,$3F34BF1C,$3F34DB0F,$3F34F6FD,
+$3F3512E8,$3F352ECE,$3F354AB0,$3F35668D,$3F358266,$3F359E3B,$3F35BA0B,$3F35D5D7,
+$3F35F19F,$3F360D62,$3F362921,$3F3644DC,$3F366092,$3F367C44,$3F3697F1,$3F36B39A,
+$3F36CF3F,$3F36EADF,$3F37067B,$3F372212,$3F373DA5,$3F375934,$3F3774BE,$3F379043,
+$3F37ABC4,$3F37C741,$3F37E2B9,$3F37FE2D,$3F38199C,$3F383507,$3F38506D,$3F386BCF,
+$3F38872C,$3F38A285,$3F38BDD9,$3F38D928,$3F38F473,$3F390FBA,$3F392AFC,$3F394639,
+$3F396172,$3F397CA6,$3F3997D6,$3F39B301,$3F39CE28,$3F39E94A,$3F3A0467,$3F3A1F80,
+$3F3A3A94,$3F3A55A3,$3F3A70AE,$3F3A8BB4,$3F3AA6B6,$3F3AC1B3,$3F3ADCAB,$3F3AF79F,
+$3F3B128E,$3F3B2D78,$3F3B485E,$3F3B633F,$3F3B7E1B,$3F3B98F3,$3F3BB3C5,$3F3BCE94,
+$3F3BE95D,$3F3C0422,$3F3C1EE2,$3F3C399D,$3F3C5454,$3F3C6F05,$3F3C89B2,$3F3CA45B,
+$3F3CBEFE,$3F3CD99D,$3F3CF437,$3F3D0ECC,$3F3D295D,$3F3D43E8,$3F3D5E6F,$3F3D78F1,
+$3F3D936E,$3F3DADE7,$3F3DC85B,$3F3DE2C9,$3F3DFD33,$3F3E1798,$3F3E31F9,$3F3E4C54,
+$3F3E66AB,$3F3E80FC,$3F3E9B49,$3F3EB591,$3F3ECFD4,$3F3EEA13,$3F3F044C,$3F3F1E80,
+$3F3F38B0,$3F3F52DB,$3F3F6D00,$3F3F8721,$3F3FA13D,$3F3FBB54,$3F3FD566,$3F3FEF73,
+$3F40097B,$3F40237F,$3F403D7D,$3F405776,$3F40716A,$3F408B5A,$3F40A544,$3F40BF2A,
+$3F40D90A,$3F40F2E5,$3F410CBC,$3F41268D,$3F41405A,$3F415A21,$3F4173E4,$3F418DA1,
+$3F41A759,$3F41C10D,$3F41DABB,$3F41F464,$3F420E08,$3F4227A7,$3F424141,$3F425AD6,
+$3F427466,$3F428DF1,$3F42A777,$3F42C0F8,$3F42DA73,$3F42F3EA,$3F430D5B,$3F4326C7,
+$3F43402F,$3F435991,$3F4372EE,$3F438C45,$3F43A598,$3F43BEE6,$3F43D82E,$3F43F171,
+$3F440AAF,$3F4423E8,$3F443D1C,$3F44564B,$3F446F74,$3F448899,$3F44A1B8,$3F44BAD2,
+$3F44D3E6,$3F44ECF6,$3F450600,$3F451F05,$3F453805,$3F455100,$3F4569F5,$3F4582E6,
+$3F459BD1,$3F45B4B6,$3F45CD97,$3F45E672,$3F45FF48,$3F461819,$3F4630E5,$3F4649AB,
+$3F46626C,$3F467B28,$3F4693DE,$3F46AC8F,$3F46C53B,$3F46DDE2,$3F46F683,$3F470F1F,
+$3F4727B6,$3F474047,$3F4758D3,$3F47715A,$3F4789DC,$3F47A258,$3F47BACF,$3F47D340,
+$3F47EBAC,$3F480413,$3F481C74,$3F4834D1,$3F484D27,$3F486579,$3F487DC5,$3F48960B,
+$3F48AE4D,$3F48C689,$3F48DEBF,$3F48F6F0,$3F490F1C,$3F492742,$3F493F63,$3F49577F,
+$3F496F95,$3F4987A6,$3F499FB1,$3F49B7B7,$3F49CFB7,$3F49E7B2,$3F49FFA8,$3F4A1798,
+$3F4A2F83,$3F4A4768,$3F4A5F48,$3F4A7722,$3F4A8EF7,$3F4AA6C7,$3F4ABE91,$3F4AD655,
+$3F4AEE14,$3F4B05CE,$3F4B1D82,$3F4B3531,$3F4B4CDA,$3F4B647E,$3F4B7C1C,$3F4B93B5,
+$3F4BAB48,$3F4BC2D5,$3F4BDA5D,$3F4BF1E0,$3F4C095D,$3F4C20D5,$3F4C3847,$3F4C4FB3,
+$3F4C671A,$3F4C7E7C,$3F4C95D8,$3F4CAD2E,$3F4CC47F,$3F4CDBCA,$3F4CF310,$3F4D0A50,
+$3F4D218B,$3F4D38C0,$3F4D4FF0,$3F4D671A,$3F4D7E3E,$3F4D955D,$3F4DAC76,$3F4DC389,
+$3F4DDA97,$3F4DF1A0,$3F4E08A3,$3F4E1FA0,$3F4E3697,$3F4E4D89,$3F4E6476,$3F4E7B5D,
+$3F4E923E,$3F4EA919,$3F4EBFEF,$3F4ED6C0,$3F4EED8A,$3F4F044F,$3F4F1B0F,$3F4F31C9,
+$3F4F487D,$3F4F5F2B,$3F4F75D4,$3F4F8C77,$3F4FA315,$3F4FB9AC,$3F4FD03F,$3F4FE6CB,
+$3F4FFD52,$3F5013D3,$3F502A4F,$3F5040C5,$3F505735,$3F506D9F,$3F508404,$3F509A63,
+$3F50B0BD,$3F50C710,$3F50DD5E,$3F50F3A7,$3F5109E9,$3F512026,$3F51365D,$3F514C8F,
+$3F5162BB,$3F5178E1,$3F518F01,$3F51A51C,$3F51BB30,$3F51D140,$3F51E749,$3F51FD4D,
+$3F52134B,$3F522943,$3F523F35,$3F525522,$3F526B09,$3F5280EA,$3F5296C6,$3F52AC9B,
+$3F52C26B,$3F52D835,$3F52EDFA,$3F5303B9,$3F531971,$3F532F25,$3F5344D2,$3F535A79,
+$3F53701B,$3F5385B7,$3F539B4D,$3F53B0DE,$3F53C668,$3F53DBED,$3F53F16C,$3F5406E6,
+$3F541C59,$3F5431C7,$3F54472E,$3F545C91,$3F5471ED,$3F548743,$3F549C94,$3F54B1DF,
+$3F54C723,$3F54DC63,$3F54F19C,$3F5506CF,$3F551BFD,$3F553125,$3F554647,$3F555B63,
+$3F557079,$3F55858A,$3F559A95,$3F55AF99,$3F55C498,$3F55D992,$3F55EE85,$3F560372,
+$3F56185A,$3F562D3C,$3F564218,$3F5656EE,$3F566BBE,$3F568088,$3F56954C,$3F56AA0B,
+$3F56BEC4,$3F56D376,$3F56E823,$3F56FCCB,$3F57116C,$3F572607,$3F573A9C,$3F574F2C,
+$3F5763B6,$3F57783A,$3F578CB7,$3F57A12F,$3F57B5A2,$3F57CA0E,$3F57DE74,$3F57F2D5,
+$3F58072F,$3F581B84,$3F582FD3,$3F58441C,$3F58585F,$3F586C9C,$3F5880D3,$3F589504,
+$3F58A92F,$3F58BD55,$3F58D174,$3F58E58E,$3F58F9A2,$3F590DAF,$3F5921B7,$3F5935B9,
+$3F5949B5,$3F595DAB,$3F59719B,$3F598586,$3F59996A,$3F59AD48,$3F59C121,$3F59D4F3,
+$3F59E8C0,$3F59FC87,$3F5A1047,$3F5A2402,$3F5A37B7,$3F5A4B66,$3F5A5F0F,$3F5A72B2,
+$3F5A864F,$3F5A99E6,$3F5AAD77,$3F5AC103,$3F5AD488,$3F5AE807,$3F5AFB81,$3F5B0EF4,
+$3F5B2262,$3F5B35C9,$3F5B492B,$3F5B5C87,$3F5B6FDC,$3F5B832C,$3F5B9676,$3F5BA9BA,
+$3F5BBCF8,$3F5BD02F,$3F5BE361,$3F5BF68D,$3F5C09B3,$3F5C1CD4,$3F5C2FEE,$3F5C4302,
+$3F5C5610,$3F5C6918,$3F5C7C1A,$3F5C8F17,$3F5CA20D,$3F5CB4FD,$3F5CC7E8,$3F5CDACC,
+$3F5CEDAB,$3F5D0083,$3F5D1356,$3F5D2622,$3F5D38E9,$3F5D4BA9,$3F5D5E64,$3F5D7118,
+$3F5D83C7,$3F5D9670,$3F5DA912,$3F5DBBAF,$3F5DCE46,$3F5DE0D7,$3F5DF361,$3F5E05E6,
+$3F5E1865,$3F5E2ADE,$3F5E3D51,$3F5E4FBE,$3F5E6224,$3F5E7485,$3F5E86E0,$3F5E9935,
+$3F5EAB84,$3F5EBDCD,$3F5ED010,$3F5EE24D,$3F5EF484,$3F5F06B5,$3F5F18E0,$3F5F2B05,
+$3F5F3D24,$3F5F4F3D,$3F5F6150,$3F5F735D,$3F5F8565,$3F5F9766,$3F5FA961,$3F5FBB56,
+$3F5FCD45,$3F5FDF2E,$3F5FF112,$3F6002EF,$3F6014C6,$3F602697,$3F603862,$3F604A28,
+$3F605BE7,$3F606DA0,$3F607F54,$3F609101,$3F60A2A8,$3F60B449,$3F60C5E5,$3F60D77A,
+$3F60E90A,$3F60FA93,$3F610C16,$3F611D94,$3F612F0B,$3F61407D,$3F6151E8,$3F61634D,
+$3F6174AD,$3F618606,$3F61975A,$3F61A8A7,$3F61B9EF,$3F61CB30,$3F61DC6C,$3F61EDA2,
+$3F61FED1,$3F620FFB,$3F62211E,$3F62323C,$3F624354,$3F625465,$3F626571,$3F627677,
+$3F628777,$3F629870,$3F62A964,$3F62BA52,$3F62CB3A,$3F62DC1C,$3F62ECF7,$3F62FDCD,
+$3F630E9D,$3F631F67,$3F63302B,$3F6340E9,$3F6351A1,$3F636253,$3F6372FF,$3F6383A5,
+$3F639445,$3F63A4E0,$3F63B574,$3F63C602,$3F63D68A,$3F63E70D,$3F63F789,$3F6407FF,
+$3F641870,$3F6428DA,$3F64393E,$3F64499D,$3F6459F6,$3F646A48,$3F647A95,$3F648ADB,
+$3F649B1C,$3F64AB57,$3F64BB8C,$3F64CBBA,$3F64DBE3,$3F64EC06,$3F64FC23,$3F650C3A,
+$3F651C4B,$3F652C56,$3F653C5B,$3F654C5B,$3F655C54,$3F656C47,$3F657C35,$3F658C1C,
+$3F659BFE,$3F65ABD9,$3F65BBAF,$3F65CB7E,$3F65DB48,$3F65EB0C,$3F65FACA,$3F660A82,
+$3F661A34,$3F6629E0,$3F663986,$3F664926,$3F6658C1,$3F666855,$3F6677E3,$3F66876C,
+$3F6696EE,$3F66A66B,$3F66B5E2,$3F66C553,$3F66D4BE,$3F66E423,$3F66F382,$3F6702DB,
+$3F67122E,$3F67217C,$3F6730C3,$3F674005,$3F674F40,$3F675E76,$3F676DA6,$3F677CD0,
+$3F678BF4,$3F679B12,$3F67AA2A,$3F67B93D,$3F67C849,$3F67D750,$3F67E650,$3F67F54B,
+$3F680440,$3F68132F,$3F682218,$3F6830FB,$3F683FD9,$3F684EB0,$3F685D82,$3F686C4E,
+$3F687B14,$3F6889D4,$3F68988E,$3F68A742,$3F68B5F0,$3F68C499,$3F68D33C,$3F68E1D9,
+$3F68F070,$3F68FF01,$3F690D8C,$3F691C11,$3F692A91,$3F69390B,$3F69477F,$3F6955ED,
+$3F696455,$3F6972B7,$3F698114,$3F698F6A,$3F699DBB,$3F69AC06,$3F69BA4B,$3F69C88B,
+$3F69D6C4,$3F69E4F8,$3F69F326,$3F6A014E,$3F6A0F70,$3F6A1D8D,$3F6A2BA3,$3F6A39B4,
+$3F6A47BF,$3F6A55C4,$3F6A63C4,$3F6A71BD,$3F6A7FB1,$3F6A8D9F,$3F6A9B87,$3F6AA96A,
+$3F6AB746,$3F6AC51D,$3F6AD2EE,$3F6AE0BA,$3F6AEE7F,$3F6AFC3F,$3F6B09F9,$3F6B17AD,
+$3F6B255B,$3F6B3304,$3F6B40A7,$3F6B4E44,$3F6B5BDB,$3F6B696D,$3F6B76F9,$3F6B847F,
+$3F6B91FF,$3F6B9F7A,$3F6BACEE,$3F6BBA5E,$3F6BC7C7,$3F6BD52A,$3F6BE288,$3F6BEFE0,
+$3F6BFD33,$3F6C0A80,$3F6C17C6,$3F6C2508,$3F6C3243,$3F6C3F79,$3F6C4CA9,$3F6C59D3,
+$3F6C66F8,$3F6C7417,$3F6C8130,$3F6C8E44,$3F6C9B52,$3F6CA85A,$3F6CB55C,$3F6CC259,
+$3F6CCF50,$3F6CDC41,$3F6CE92D,$3F6CF613,$3F6D02F3,$3F6D0FCE,$3F6D1CA3,$3F6D2972,
+$3F6D363C,$3F6D4300,$3F6D4FBE,$3F6D5C77,$3F6D692A,$3F6D75D7,$3F6D827F,$3F6D8F21,
+$3F6D9BBD,$3F6DA854,$3F6DB4E5,$3F6DC171,$3F6DCDF7,$3F6DDA77,$3F6DE6F2,$3F6DF367,
+$3F6DFFD6,$3F6E0C40,$3F6E18A4,$3F6E2503,$3F6E315B,$3F6E3DAF,$3F6E49FD,$3F6E5645,
+$3F6E6287,$3F6E6EC4,$3F6E7AFC,$3F6E872D,$3F6E935A,$3F6E9F80,$3F6EABA1,$3F6EB7BD,
+$3F6EC3D3,$3F6ECFE3,$3F6EDBEE,$3F6EE7F3,$3F6EF3F3,$3F6EFFED,$3F6F0BE2,$3F6F17D1,
+$3F6F23BA,$3F6F2F9E,$3F6F3B7D,$3F6F4755,$3F6F5329,$3F6F5EF7,$3F6F6ABF,$3F6F7682,
+$3F6F823F,$3F6F8DF7,$3F6F99A9,$3F6FA556,$3F6FB0FD,$3F6FBC9F,$3F6FC83B,$3F6FD3D2,
+$3F6FDF63,$3F6FEAEF,$3F6FF675,$3F7001F6,$3F700D72,$3F7018E7,$3F702458,$3F702FC3,
+$3F703B28,$3F704689,$3F7051E3,$3F705D38,$3F706888,$3F7073D2,$3F707F17,$3F708A57,
+$3F709591,$3F70A0C5,$3F70ABF4,$3F70B71E,$3F70C242,$3F70CD61,$3F70D87B,$3F70E38F,
+$3F70EE9D,$3F70F9A7,$3F7104AB,$3F710FA9,$3F711AA2,$3F712596,$3F713084,$3F713B6D,
+$3F714651,$3F71512F,$3F715C08,$3F7166DB,$3F7171AA,$3F717C72,$3F718736,$3F7191F4,
+$3F719CAD,$3F71A760,$3F71B20E,$3F71BCB7,$3F71C75B,$3F71D1F9,$3F71DC92,$3F71E725,
+$3F71F1B3,$3F71FC3C,$3F7206C0,$3F72113E,$3F721BB7,$3F72262B,$3F72309A,$3F723B03,
+$3F724567,$3F724FC5,$3F725A1F,$3F726473,$3F726EC2,$3F72790B,$3F72834F,$3F728D8F,
+$3F7297C8,$3F72A1FD,$3F72AC2C,$3F72B657,$3F72C07B,$3F72CA9B,$3F72D4B6,$3F72DECB,
+$3F72E8DB,$3F72F2E6,$3F72FCEB,$3F7306EC,$3F7310E7,$3F731ADD,$3F7324CE,$3F732EBA,
+$3F7338A0,$3F734282,$3F734C5E,$3F735635,$3F736007,$3F7369D4,$3F73739B,$3F737D5E,
+$3F73871B,$3F7390D3,$3F739A86,$3F73A434,$3F73ADDD,$3F73B780,$3F73C11F,$3F73CAB8,
+$3F73D44D,$3F73DDDC,$3F73E766,$3F73F0EB,$3F73FA6B,$3F7403E6,$3F740D5C,$3F7416CC,
+$3F742038,$3F74299F,$3F743300,$3F743C5D,$3F7445B4,$3F744F06,$3F745854,$3F74619C,
+$3F746ADF,$3F74741D,$3F747D57,$3F74868B,$3F748FBA,$3F7498E4,$3F74A209,$3F74AB29,
+$3F74B444,$3F74BD5B,$3F74C66C,$3F74CF78,$3F74D87F,$3F74E181,$3F74EA7F,$3F74F377,
+$3F74FC6A,$3F750559,$3F750E42,$3F751726,$3F752006,$3F7528E1,$3F7531B6,$3F753A87,
+$3F754353,$3F754C1A,$3F7554DC,$3F755D99,$3F756651,$3F756F04,$3F7577B3,$3F75805C,
+$3F758901,$3F7591A0,$3F759A3B,$3F75A2D1,$3F75AB62,$3F75B3EF,$3F75BC76,$3F75C4F9,
+$3F75CD76,$3F75D5EF,$3F75DE63,$3F75E6D2,$3F75EF3D,$3F75F7A2,$3F760003,$3F76085F,
+$3F7610B6,$3F761908,$3F762156,$3F76299F,$3F7631E3,$3F763A22,$3F76425C,$3F764A92,
+$3F7652C3,$3F765AEF,$3F766316,$3F766B39,$3F767356,$3F767B70,$3F768384,$3F768B94,
+$3F76939E,$3F769BA5,$3F76A3A6,$3F76ABA3,$3F76B39B,$3F76BB8E,$3F76C37D,$3F76CB67,
+$3F76D34C,$3F76DB2D,$3F76E309,$3F76EAE0,$3F76F2B2,$3F76FA80,$3F77024A,$3F770A0E,
+$3F7711CE,$3F771989,$3F772140,$3F7728F2,$3F7730A0,$3F773848,$3F773FED,$3F77478C,
+$3F774F27,$3F7756BE,$3F775E4F,$3F7765DC,$3F776D65,$3F7774E9,$3F777C69,$3F7783E4,
+$3F778B5A,$3F7792CC,$3F779A39,$3F77A1A2,$3F77A906,$3F77B065,$3F77B7C0,$3F77BF17,
+$3F77C669,$3F77CDB6,$3F77D4FF,$3F77DC44,$3F77E384,$3F77EABF,$3F77F1F6,$3F77F929,
+$3F780057,$3F780781,$3F780EA6,$3F7815C6,$3F781CE3,$3F7823FA,$3F782B0E,$3F78321C,
+$3F783927,$3F78402D,$3F78472E,$3F784E2C,$3F785524,$3F785C19,$3F786309,$3F7869F4,
+$3F7870DB,$3F7877BE,$3F787E9C,$3F788576,$3F788C4C,$3F78931D,$3F7899EA,$3F78A0B3,
+$3F78A777,$3F78AE37,$3F78B4F2,$3F78BBA9,$3F78C25C,$3F78C90B,$3F78CFB5,$3F78D65B,
+$3F78DCFC,$3F78E39A,$3F78EA33,$3F78F0C7,$3F78F758,$3F78FDE4,$3F79046C,$3F790AF0,
+$3F79116F,$3F7917EA,$3F791E61,$3F7924D3,$3F792B42,$3F7931AC,$3F793812,$3F793E74,
+$3F7944D1,$3F794B2A,$3F79517F,$3F7957D0,$3F795E1D,$3F796465,$3F796AAA,$3F7970EA,
+$3F797726,$3F797D5D,$3F798391,$3F7989C1,$3F798FEC,$3F799613,$3F799C36,$3F79A255,
+$3F79A870,$3F79AE86,$3F79B499,$3F79BAA7,$3F79C0B2,$3F79C6B8,$3F79CCBA,$3F79D2B8,
+$3F79D8B2,$3F79DEA8,$3F79E49A,$3F79EA87,$3F79F071,$3F79F657,$3F79FC38,$3F7A0216,
+$3F7A07EF,$3F7A0DC5,$3F7A1396,$3F7A1964,$3F7A1F2D,$3F7A24F3,$3F7A2AB4,$3F7A3071,
+$3F7A362B,$3F7A3BE0,$3F7A4192,$3F7A473F,$3F7A4CE9,$3F7A528E,$3F7A5830,$3F7A5DCE,
+$3F7A6367,$3F7A68FD,$3F7A6E8F,$3F7A741D,$3F7A79A7,$3F7A7F2D,$3F7A84AF,$3F7A8A2D,
+$3F7A8FA8,$3F7A951E,$3F7A9A91,$3F7A9FFF,$3F7AA56A,$3F7AAAD1,$3F7AB034,$3F7AB593,
+$3F7ABAEF,$3F7AC046,$3F7AC59A,$3F7ACAEA,$3F7AD036,$3F7AD57E,$3F7ADAC2,$3F7AE003,
+$3F7AE540,$3F7AEA79,$3F7AEFAE,$3F7AF4DF,$3F7AFA0D,$3F7AFF37,$3F7B045D,$3F7B097F,
+$3F7B0E9D,$3F7B13B8,$3F7B18CF,$3F7B1DE3,$3F7B22F2,$3F7B27FE,$3F7B2D06,$3F7B320A,
+$3F7B370B,$3F7B3C08,$3F7B4101,$3F7B45F7,$3F7B4AE9,$3F7B4FD7,$3F7B54C1,$3F7B59A8,
+$3F7B5E8B,$3F7B636B,$3F7B6847,$3F7B6D1F,$3F7B71F3,$3F7B76C4,$3F7B7B92,$3F7B805B,
+$3F7B8521,$3F7B89E4,$3F7B8EA3,$3F7B935E,$3F7B9816,$3F7B9CCA,$3F7BA17A,$3F7BA627,
+$3F7BAAD0,$3F7BAF76,$3F7BB418,$3F7BB8B7,$3F7BBD52,$3F7BC1E9,$3F7BC67D,$3F7BCB0E,
+$3F7BCF9B,$3F7BD424,$3F7BD8AA,$3F7BDD2D,$3F7BE1AC,$3F7BE627,$3F7BEA9F,$3F7BEF13,
+$3F7BF384,$3F7BF7F2,$3F7BFC5C,$3F7C00C3,$3F7C0526,$3F7C0985,$3F7C0DE2,$3F7C123A,
+$3F7C1690,$3F7C1AE2,$3F7C1F30,$3F7C237B,$3F7C27C3,$3F7C2C07,$3F7C3048,$3F7C3486,
+$3F7C38C0,$3F7C3CF7,$3F7C412A,$3F7C455A,$3F7C4987,$3F7C4DB0,$3F7C51D6,$3F7C55F9,
+$3F7C5A18,$3F7C5E34,$3F7C624D,$3F7C6662,$3F7C6A74,$3F7C6E83,$3F7C728E,$3F7C7696,
+$3F7C7A9B,$3F7C7E9D,$3F7C829B,$3F7C8696,$3F7C8A8E,$3F7C8E82,$3F7C9274,$3F7C9662,
+$3F7C9A4D,$3F7C9E34,$3F7CA218,$3F7CA5F9,$3F7CA9D7,$3F7CADB2,$3F7CB189,$3F7CB55E,
+$3F7CB92F,$3F7CBCFD,$3F7CC0C7,$3F7CC48F,$3F7CC853,$3F7CCC14,$3F7CCFD3,$3F7CD38D,
+$3F7CD745,$3F7CDAFA,$3F7CDEAB,$3F7CE25A,$3F7CE605,$3F7CE9AD,$3F7CED52,$3F7CF0F4,
+$3F7CF493,$3F7CF82E,$3F7CFBC7,$3F7CFF5D,$3F7D02EF,$3F7D067F,$3F7D0A0B,$3F7D0D94,
+$3F7D111B,$3F7D149E,$3F7D181E,$3F7D1B9B,$3F7D1F15,$3F7D228C,$3F7D2600,$3F7D2972,
+$3F7D2CE0,$3F7D304B,$3F7D33B3,$3F7D3718,$3F7D3A7A,$3F7D3DD9,$3F7D4136,$3F7D448F,
+$3F7D47E5,$3F7D4B38,$3F7D4E89,$3F7D51D6,$3F7D5521,$3F7D5868,$3F7D5BAD,$3F7D5EEF,
+$3F7D622E,$3F7D656A,$3F7D68A3,$3F7D6BD9,$3F7D6F0C,$3F7D723D,$3F7D756A,$3F7D7895,
+$3F7D7BBD,$3F7D7EE2,$3F7D8204,$3F7D8524,$3F7D8840,$3F7D8B5A,$3F7D8E70,$3F7D9185,
+$3F7D9496,$3F7D97A4,$3F7D9AB0,$3F7D9DB9,$3F7DA0BF,$3F7DA3C2,$3F7DA6C2,$3F7DA9C0,
+$3F7DACBB,$3F7DAFB3,$3F7DB2A8,$3F7DB59B,$3F7DB88B,$3F7DBB78,$3F7DBE63,$3F7DC14A,
+$3F7DC430,$3F7DC712,$3F7DC9F1,$3F7DCCCE,$3F7DCFA9,$3F7DD280,$3F7DD555,$3F7DD827,
+$3F7DDAF7,$3F7DDDC4,$3F7DE08E,$3F7DE355,$3F7DE61A,$3F7DE8DC,$3F7DEB9C,$3F7DEE59,
+$3F7DF113,$3F7DF3CB,$3F7DF680,$3F7DF933,$3F7DFBE3,$3F7DFE90,$3F7E013B,$3F7E03E3,
+$3F7E0689,$3F7E092C,$3F7E0BCC,$3F7E0E6A,$3F7E1106,$3F7E139E,$3F7E1635,$3F7E18C8,
+$3F7E1B5A,$3F7E1DE8,$3F7E2074,$3F7E22FE,$3F7E2585,$3F7E280A,$3F7E2A8C,$3F7E2D0C,
+$3F7E2F89,$3F7E3204,$3F7E347C,$3F7E36F2,$3F7E3965,$3F7E3BD6,$3F7E3E44,$3F7E40B0,
+$3F7E431A,$3F7E4581,$3F7E47E6,$3F7E4A48,$3F7E4CA8,$3F7E4F05,$3F7E5160,$3F7E53B9,
+$3F7E560F,$3F7E5863,$3F7E5AB5,$3F7E5D04,$3F7E5F51,$3F7E619B,$3F7E63E3,$3F7E6629,
+$3F7E686C,$3F7E6AAD,$3F7E6CEC,$3F7E6F28,$3F7E7162,$3F7E739A,$3F7E75D0,$3F7E7803,
+$3F7E7A33,$3F7E7C62,$3F7E7E8E,$3F7E80B8,$3F7E82E0,$3F7E8505,$3F7E8728,$3F7E8949,
+$3F7E8B68,$3F7E8D84,$3F7E8F9F,$3F7E91B7,$3F7E93CC,$3F7E95E0,$3F7E97F1,$3F7E9A00,
+$3F7E9C0D,$3F7E9E18,$3F7EA020,$3F7EA226,$3F7EA42A,$3F7EA62C,$3F7EA82C,$3F7EAA29,
+$3F7EAC25,$3F7EAE1E,$3F7EB015,$3F7EB20A,$3F7EB3FD,$3F7EB5EE,$3F7EB7DC,$3F7EB9C9,
+$3F7EBBB3,$3F7EBD9B,$3F7EBF81,$3F7EC165,$3F7EC347,$3F7EC527,$3F7EC705,$3F7EC8E0,
+$3F7ECABA,$3F7ECC91,$3F7ECE67,$3F7ED03A,$3F7ED20C,$3F7ED3DB,$3F7ED5A8,$3F7ED773,
+$3F7ED93D,$3F7EDB04,$3F7EDCC9,$3F7EDE8C,$3F7EE04D,$3F7EE20C,$3F7EE3CA,$3F7EE585,
+$3F7EE73E,$3F7EE8F5,$3F7EEAAA,$3F7EEC5E,$3F7EEE0F,$3F7EEFBE,$3F7EF16C,$3F7EF317,
+$3F7EF4C1,$3F7EF668,$3F7EF80E,$3F7EF9B2,$3F7EFB54,$3F7EFCF3,$3F7EFE91,$3F7F002E,
+$3F7F01C8,$3F7F0360,$3F7F04F7,$3F7F068B,$3F7F081E,$3F7F09AF,$3F7F0B3E,$3F7F0CCB,
+$3F7F0E56,$3F7F0FDF,$3F7F1167,$3F7F12ED,$3F7F1470,$3F7F15F2,$3F7F1773,$3F7F18F1,
+$3F7F1A6E,$3F7F1BE9,$3F7F1D62,$3F7F1ED9,$3F7F204E,$3F7F21C2,$3F7F2334,$3F7F24A4,
+$3F7F2612,$3F7F277F,$3F7F28EA,$3F7F2A53,$3F7F2BBA,$3F7F2D20,$3F7F2E83,$3F7F2FE6,
+$3F7F3146,$3F7F32A5,$3F7F3402,$3F7F355D,$3F7F36B6,$3F7F380E,$3F7F3964,$3F7F3AB9,
+$3F7F3C0C,$3F7F3D5D,$3F7F3EAC,$3F7F3FFA,$3F7F4146,$3F7F4291,$3F7F43D9,$3F7F4521,
+$3F7F4666,$3F7F47AA,$3F7F48EC,$3F7F4A2D,$3F7F4B6C,$3F7F4CA9,$3F7F4DE5,$3F7F4F1F,
+$3F7F5058,$3F7F518F,$3F7F52C4,$3F7F53F8,$3F7F552A,$3F7F565B,$3F7F578A,$3F7F58B8,
+$3F7F59E4,$3F7F5B0E,$3F7F5C37,$3F7F5D5E,$3F7F5E84,$3F7F5FA9,$3F7F60CB,$3F7F61ED,
+$3F7F630C,$3F7F642A,$3F7F6547,$3F7F6662,$3F7F677C,$3F7F6894,$3F7F69AB,$3F7F6AC0,
+$3F7F6BD4,$3F7F6CE6,$3F7F6DF7,$3F7F6F06,$3F7F7014,$3F7F7121,$3F7F722C,$3F7F7335,
+$3F7F743D,$3F7F7544,$3F7F7649,$3F7F774D,$3F7F784F,$3F7F7950,$3F7F7A50,$3F7F7B4E,
+$3F7F7C4B,$3F7F7D46,$3F7F7E40,$3F7F7F39,$3F7F8030,$3F7F8126,$3F7F821B,$3F7F830E,
+$3F7F8400,$3F7F84F0,$3F7F85DF,$3F7F86CD,$3F7F87B9,$3F7F88A4,$3F7F898E,$3F7F8A76,
+$3F7F8B5D,$3F7F8C43,$3F7F8D28,$3F7F8E0B,$3F7F8EED,$3F7F8FCD,$3F7F90AD,$3F7F918B,
+$3F7F9267,$3F7F9343,$3F7F941D,$3F7F94F6,$3F7F95CD,$3F7F96A4,$3F7F9779,$3F7F984D,
+$3F7F991F,$3F7F99F1,$3F7F9AC1,$3F7F9B90,$3F7F9C5D,$3F7F9D2A,$3F7F9DF5,$3F7F9EBF,
+$3F7F9F88,$3F7FA04F,$3F7FA116,$3F7FA1DB,$3F7FA29F,$3F7FA362,$3F7FA424,$3F7FA4E4,
+$3F7FA5A3,$3F7FA662,$3F7FA71F,$3F7FA7DB,$3F7FA895,$3F7FA94F,$3F7FAA07,$3F7FAABE,
+$3F7FAB75,$3F7FAC2A,$3F7FACDD,$3F7FAD90,$3F7FAE42,$3F7FAEF2,$3F7FAFA2,$3F7FB050,
+$3F7FB0FD,$3F7FB1A9,$3F7FB255,$3F7FB2FE,$3F7FB3A7,$3F7FB44F,$3F7FB4F6,$3F7FB59C,
+$3F7FB640,$3F7FB6E4,$3F7FB786,$3F7FB828,$3F7FB8C8,$3F7FB967,$3F7FBA06,$3F7FBAA3,
+$3F7FBB3F,$3F7FBBDB,$3F7FBC75,$3F7FBD0E,$3F7FBDA6,$3F7FBE3D,$3F7FBED4,$3F7FBF69,
+$3F7FBFFD,$3F7FC090,$3F7FC122,$3F7FC1B4,$3F7FC244,$3F7FC2D3,$3F7FC362,$3F7FC3EF,
+$3F7FC47B,$3F7FC507,$3F7FC591,$3F7FC61B,$3F7FC6A3,$3F7FC72B,$3F7FC7B2,$3F7FC838,
+$3F7FC8BD,$3F7FC941,$3F7FC9C4,$3F7FCA46,$3F7FCAC7,$3F7FCB47,$3F7FCBC7,$3F7FCC45,
+$3F7FCCC3,$3F7FCD40,$3F7FCDBB,$3F7FCE36,$3F7FCEB1,$3F7FCF2A,$3F7FCFA2,$3F7FD01A,
+$3F7FD090,$3F7FD106,$3F7FD17B,$3F7FD1EF,$3F7FD262,$3F7FD2D5,$3F7FD346,$3F7FD3B7,
+$3F7FD427,$3F7FD496,$3F7FD504,$3F7FD572,$3F7FD5DE,$3F7FD64A,$3F7FD6B5,$3F7FD720,
+$3F7FD789,$3F7FD7F2,$3F7FD859,$3F7FD8C0,$3F7FD927,$3F7FD98C,$3F7FD9F1,$3F7FDA55,
+$3F7FDAB8,$3F7FDB1B,$3F7FDB7C,$3F7FDBDD,$3F7FDC3D,$3F7FDC9D,$3F7FDCFB,$3F7FDD59,
+$3F7FDDB7,$3F7FDE13,$3F7FDE6F,$3F7FDECA,$3F7FDF24,$3F7FDF7E,$3F7FDFD7,$3F7FE02F,
+$3F7FE086,$3F7FE0DD,$3F7FE133,$3F7FE189,$3F7FE1DD,$3F7FE231,$3F7FE285,$3F7FE2D7,
+$3F7FE329,$3F7FE37A,$3F7FE3CB,$3F7FE41B,$3F7FE46A,$3F7FE4B9,$3F7FE507,$3F7FE554,
+$3F7FE5A1,$3F7FE5ED,$3F7FE638,$3F7FE683,$3F7FE6CD,$3F7FE717,$3F7FE760,$3F7FE7A8,
+$3F7FE7EF,$3F7FE836,$3F7FE87D,$3F7FE8C3,$3F7FE908,$3F7FE94C,$3F7FE990,$3F7FE9D4,
+$3F7FEA17,$3F7FEA59,$3F7FEA9A,$3F7FEADB,$3F7FEB1C,$3F7FEB5C,$3F7FEB9B,$3F7FEBDA,
+$3F7FEC18,$3F7FEC56,$3F7FEC93,$3F7FECCF,$3F7FED0B,$3F7FED47,$3F7FED82,$3F7FEDBC,
+$3F7FEDF6,$3F7FEE2F,$3F7FEE68,$3F7FEEA0,$3F7FEED8,$3F7FEF0F,$3F7FEF45,$3F7FEF7B,
+$3F7FEFB1,$3F7FEFE6,$3F7FF01B,$3F7FF04F,$3F7FF082,$3F7FF0B6,$3F7FF0E8,$3F7FF11A,
+$3F7FF14C,$3F7FF17D,$3F7FF1AE,$3F7FF1DE,$3F7FF20E,$3F7FF23D,$3F7FF26C,$3F7FF29A,
+$3F7FF2C8,$3F7FF2F5,$3F7FF322,$3F7FF34F,$3F7FF37B,$3F7FF3A6,$3F7FF3D1,$3F7FF3FC,
+$3F7FF426,$3F7FF450,$3F7FF479,$3F7FF4A2,$3F7FF4CB,$3F7FF4F3,$3F7FF51B,$3F7FF542,
+$3F7FF569,$3F7FF58F,$3F7FF5B5,$3F7FF5DB,$3F7FF600,$3F7FF625,$3F7FF649,$3F7FF66D,
+$3F7FF691,$3F7FF6B4,$3F7FF6D7,$3F7FF6FA,$3F7FF71C,$3F7FF73E,$3F7FF75F,$3F7FF780,
+$3F7FF7A0,$3F7FF7C1,$3F7FF7E1,$3F7FF800,$3F7FF81F,$3F7FF83E,$3F7FF85D,$3F7FF87B,
+$3F7FF898,$3F7FF8B6,$3F7FF8D3,$3F7FF8F0,$3F7FF90C,$3F7FF928,$3F7FF944,$3F7FF95F,
+$3F7FF97A,$3F7FF995,$3F7FF9AF,$3F7FF9CA,$3F7FF9E3,$3F7FF9FD,$3F7FFA16,$3F7FFA2F,
+$3F7FFA47,$3F7FFA60,$3F7FFA78,$3F7FFA8F,$3F7FFAA6,$3F7FFABE,$3F7FFAD4,$3F7FFAEB,
+$3F7FFB01,$3F7FFB17,$3F7FFB2C,$3F7FFB42,$3F7FFB57,$3F7FFB6C,$3F7FFB80,$3F7FFB94,
+$3F7FFBA8,$3F7FFBBC,$3F7FFBD0,$3F7FFBE3,$3F7FFBF6,$3F7FFC08,$3F7FFC1B,$3F7FFC2D,
+$3F7FFC3F,$3F7FFC51,$3F7FFC62,$3F7FFC73,$3F7FFC84,$3F7FFC95,$3F7FFCA5,$3F7FFCB6,
+$3F7FFCC6,$3F7FFCD5,$3F7FFCE5,$3F7FFCF4,$3F7FFD03,$3F7FFD12,$3F7FFD21,$3F7FFD2F,
+$3F7FFD3E,$3F7FFD4C,$3F7FFD59,$3F7FFD67,$3F7FFD74,$3F7FFD82,$3F7FFD8F,$3F7FFD9B,
+$3F7FFDA8,$3F7FFDB5,$3F7FFDC1,$3F7FFDCD,$3F7FFDD9,$3F7FFDE4,$3F7FFDF0,$3F7FFDFB,
+$3F7FFE06,$3F7FFE11,$3F7FFE1C,$3F7FFE26,$3F7FFE31,$3F7FFE3B,$3F7FFE45,$3F7FFE4F,
+$3F7FFE59,$3F7FFE62,$3F7FFE6C,$3F7FFE75,$3F7FFE7E,$3F7FFE87,$3F7FFE90,$3F7FFE98,
+$3F7FFEA1,$3F7FFEA9,$3F7FFEB1,$3F7FFEB9,$3F7FFEC1,$3F7FFEC9,$3F7FFED0,$3F7FFED8,
+$3F7FFEDF,$3F7FFEE6,$3F7FFEED,$3F7FFEF4,$3F7FFEFB,$3F7FFF02,$3F7FFF08,$3F7FFF0E,
+$3F7FFF15,$3F7FFF1B,$3F7FFF21,$3F7FFF27,$3F7FFF2D,$3F7FFF32,$3F7FFF38,$3F7FFF3D,
+$3F7FFF43,$3F7FFF48,$3F7FFF4D,$3F7FFF52,$3F7FFF57,$3F7FFF5C,$3F7FFF60,$3F7FFF65,
+$3F7FFF69,$3F7FFF6E,$3F7FFF72,$3F7FFF76,$3F7FFF7A,$3F7FFF7E,$3F7FFF82,$3F7FFF86,
+$3F7FFF8A,$3F7FFF8E,$3F7FFF91,$3F7FFF95,$3F7FFF98,$3F7FFF9B,$3F7FFF9F,$3F7FFFA2,
+$3F7FFFA5,$3F7FFFA8,$3F7FFFAB,$3F7FFFAE,$3F7FFFB0,$3F7FFFB3,$3F7FFFB6,$3F7FFFB8,
+$3F7FFFBB,$3F7FFFBD,$3F7FFFC0,$3F7FFFC2,$3F7FFFC4,$3F7FFFC6,$3F7FFFC9,$3F7FFFCB,
+$3F7FFFCD,$3F7FFFCF,$3F7FFFD1,$3F7FFFD2,$3F7FFFD4,$3F7FFFD6,$3F7FFFD8,$3F7FFFD9,
+$3F7FFFDB,$3F7FFFDC,$3F7FFFDE,$3F7FFFDF,$3F7FFFE1,$3F7FFFE2,$3F7FFFE3,$3F7FFFE5,
+$3F7FFFE6,$3F7FFFE7,$3F7FFFE8,$3F7FFFE9,$3F7FFFEA,$3F7FFFEB,$3F7FFFEC,$3F7FFFED,
+$3F7FFFEE,$3F7FFFEF,$3F7FFFF0,$3F7FFFF1,$3F7FFFF1,$3F7FFFF2,$3F7FFFF3,$3F7FFFF4,
+$3F7FFFF4,$3F7FFFF5,$3F7FFFF6,$3F7FFFF6,$3F7FFFF7,$3F7FFFF7,$3F7FFFF8,$3F7FFFF8,
+$3F7FFFF9,$3F7FFFF9,$3F7FFFFA,$3F7FFFFA,$3F7FFFFA,$3F7FFFFB,$3F7FFFFB,$3F7FFFFB,
+$3F7FFFFC,$3F7FFFFC,$3F7FFFFC,$3F7FFFFD,$3F7FFFFD,$3F7FFFFD,$3F7FFFFD,$3F7FFFFE,
+$3F7FFFFE,$3F7FFFFE,$3F7FFFFE,$3F7FFFFE,$3F7FFFFE,$3F7FFFFF,$3F7FFFFF,$3F7FFFFF,
+$3F7FFFFF,$3F7FFFFF,$3F7FFFFF,$3F7FFFFF,$3F7FFFFF,$3F7FFFFF,$3F7FFFFF,$3F800000,
+$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,
+$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,
+$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,
+$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,$3F800000,$3F800000
+);
+Const
+ VGDbBits: Array[0..255] Of LongWord=(
+$33E4B43E,$33F39109,$3401B28B,$340A203C,$34131A23,$341CA960,$3426D7A7,$3431AF4B,
+$343D3B50,$34498770,$3456A023,$346492B8,$34736D55,$34819F88,$348A0BFC,$34930493,
+$349C9269,$34A6BF32,$34B1953F,$34BD1F93,$34C969E4,$34D680AD,$34E47136,$34F349A6,
+$35018C88,$3509F7C0,$3512EF06,$351C7B76,$3526A6C0,$35317B37,$353D03DA,$35494C5E,
+$3556613B,$35644FB9,$357325FC,$3581798A,$3589E386,$3592D97C,$359C6485,$35A68E52,
+$35B16133,$35BCE825,$35C92EDC,$35D641CE,$35E42E41,$35F30257,$3601668F,$3609CF4F,
+$3612C3F5,$361C4D98,$362675E8,$36314732,$363CCC74,$3649115E,$36562265,$36640CCE,
+$3672DEB8,$36815397,$3689BB1C,$3692AE72,$369C36AF,$36A65D81,$36B12D35,$36BCB0C7,
+$36C8F3E4,$36D60301,$36E3EB60,$36F2BB1E,$370140A2,$3709A6EB,$371298F1,$371C1FC9,
+$3726451E,$3731133D,$373C951E,$3748D66F,$3755E3A2,$3763C9F7,$37729789,$37812DAF,
+$378992BE,$37928374,$379C08E6,$37A62CBE,$37B0F947,$37BC7979,$37C8B8FE,$37D5C447,
+$37E3A892,$37F273F8,$38011AC0,$38097E93,$38126DF9,$381BF206,$38261462,$3830DF56,
+$383C5DD8,$38489B92,$3855A4F2,$38638733,$3872506E,$388107D3,$38896A6B,$38925882,
+$389BDB2A,$38A5FC09,$38B0C568,$38BC423B,$38C87E29,$38D585A0,$38E365D9,$38F22CE8,
+$3900F4E9,$39095646,$3912430E,$391BC451,$3925E3B5,$3930AB7F,$393C26A2,$394860C5,
+$39556653,$39634483,$39720968,$3980E201,$39894224,$39922D9D,$399BAD7B,$39A5CB63,
+$39B09199,$39BC0B0D,$39C84366,$39D5470B,$39E32332,$39F1E5ED,$3A00CF1D,$3A092E05,
+$3A121830,$3A1B96A9,$3A25B315,$3A3077B7,$3A3BEF7C,$3A48260A,$3A5527C7,$3A6301E6,
+$3A71C278,$3A80BC3B,$3A8919E9,$3A9202C6,$3A9B7FDB,$3AA59ACB,$3AB05DD8,$3ABBD3EF,
+$3AC808B3,$3AD50888,$3AE2E09F,$3AF19F07,$3B00A95C,$3B0905D0,$3B11ED5E,$3B1B690F,
+$3B258284,$3B3043FD,$3B3BB867,$3B47EB61,$3B54E94D,$3B62BF5D,$3B717B9C,$3B80967F,
+$3B88F1BA,$3B91D7F9,$3B9B5247,$3BA56A41,$3BB02A27,$3BBB9CE2,$3BC7CE12,$3BD4CA17,
+$3BE29E20,$3BF15835,$3C0083A6,$3C08DDA7,$3C11C298,$3C1B3B82,$3C255201,$3C301054,
+$3C3B8161,$3C47B0C8,$3C54AAE5,$3C627CE8,$3C7134D4,$3C8070CF,$3C88C996,$3C91AD3A,
+$3C9B24C0,$3CA539C5,$3CAFF685,$3CBB65E5,$3CC79382,$3CD48BB9,$3CE25BB4,$3CF11179,
+$3D005DFB,$3D08B589,$3D1197DF,$3D1B0E02,$3D25218D,$3D2FDCB9,$3D3B4A6D,$3D477640,
+$3D546C91,$3D623A85,$3D70EE22,$3D804B2A,$3D88A17F,$3D918288,$3D9AF748,$3DA50958,
+$3DAFC2F2,$3DBB2EF8,$3DC75903,$3DD44D6D,$3DE2195C,$3DF0CAD1,$3E00385B,$3E088D77,
+$3E116D33,$3E1AE090,$3E24F127,$3E2FA92E,$3E3B1387,$3E473BCA,$3E542E4D,$3E61F837,
+$3E70A784,$3E80258F,$3E887973,$3E9157E2,$3E9AC9DC,$3EA4D8F9,$3EAF8F6D,$3EBAF81B,
+$3EC71E95,$3ED40F33,$3EE1D717,$3EF0843D,$3F0012C6,$3F086572,$3F114293,$3F1AB32B,
+$3F24C0CE,$3F2F75B1,$3F3ADCB2,$3F470165,$3F53F01D,$3F61B5FB,$3F7060FB,$3F800000
+);
+Const
+ VGPowPos: Array[0..28] Of LongInt=(0,1024,93,23,372,6,46,186,750,14,33,65,130,
+  260,556,3,10,18,28,39,55,79,111,158,220,312,464,650,850);
+ VGPowHi: Array[0..28] Of LongWord=($3FF00000,$4009139E,$3FF1BFD7,$3FF06A78,
+  $3FF83B27,$3FF01B83,$3FF0D7B5,$3FF3B0A5,$400278B5,$3FF0407B,$3FF0999E,
+  $3FF13415,$3FF27F57,$3FF5627B,$3FFDC0C0,$3FF00DBB,$3FF02DF4,$3FF05317,
+  $3FF081FA,$3FF0B629,$3FF10338,$3FF1796A,$3FF21C04,$3FF3159C,$3FF47388,
+  $3FF6A97D,$3FFAD9B5,$4000857C,$4004A6DB);
+ VGPowLo: Array[0..28] Of LongWord=($00000000,$4A482633,$3CF8E01F,$43660AF4,
+  $764C6076,$096E3A5A,$03D1120F,$8FB009B3,$42702B4C,$654AE974,$B99EB8F7,
+  $C8510242,$D75FDAFC,$28F4FFF0,$5C15B280,$9FF90A06,$A7F37F9D,$58D852F4,
+  $A977D215,$E9221FB0,$966C247D,$CC4648C8,$505AFC68,$542FDE89,$A4AA1628,
+  $7D881F16,$9F8FA0F1,$2C7BBDB1,$379AAD1E);
+Const
+ VGCbLens: Array[0..4787] Of Byte=(
+  2,10,8,14,7,12,11,14,1,5,3,7,4,9,7,13,1,4,2,6,3,7,5,7,1,5,7,21,5,8,9,21,10,9,
+   12,20,20,16,20,20,4,8,9,20,6,8,9,
+  20,11,11,13,20,20,15,17,20,9,11,14,20,8,10,15,20,11,13,15,20,20,20,20,20,20,
+   20,20,20,13,20,20,20,18,18,20,20,
+  20,20,20,20,3,6,8,20,6,7,9,20,10,9,12,20,20,20,20,20,5,7,9,20,6,6,9,20,10,9,
+   12,20,20,20,20,20,8,10,13,20,8,9,
+  12,20,11,10,12,20,20,20,20,20,18,20,20,20,15,17,18,20,18,17,18,20,20,20,20,20,
+   7,10,12,20,8,9,11,20,14,13,14,20,
+  20,20,20,20,6,9,12,20,7,8,11,20,12,11,13,20,20,20,20,20,9,11,15,20,8,10,14,20,
+   12,11,14,20,20,20,20,20,20,20,20,
+  20,20,20,20,20,20,20,20,20,20,20,20,20,11,16,18,20,15,15,17,20,20,17,20,20,20,
+   20,20,20,9,14,16,20,12,12,15,20,
+  17,15,18,20,20,20,20,20,16,19,18,20,15,16,20,20,17,17,20,20,20,20,20,20,20,20,
+   20,20,20,20,20,20,20,20,20,20,20,
+  20,20,20,2,3,7,13,4,4,7,15,8,6,9,17,21,16,15,21,2,5,7,11,5,5,7,14,9,7,10,16,
+   17,15,16,21,4,7,10,17,7,7,9,15,11,
+  9,11,16,21,18,15,21,18,21,21,21,15,17,17,19,21,19,18,20,21,21,21,20,5,5,5,5,6,
+   5,6,5,6,5,6,5,6,5,6,5,6,5,6,5,6,
+  5,6,5,7,5,7,5,7,5,7,5,8,6,8,6,8,6,9,6,9,6,10,6,10,6,11,6,11,7,11,7,12,7,12,7,
+   12,7,12,7,12,7,12,7,12,7,12,8,13,
+  8,12,8,12,8,13,8,13,9,13,9,13,9,13,9,12,10,12,10,13,10,14,11,14,12,14,13,14,
+   13,14,14,15,16,15,15,15,14,15,17,
+  21,22,22,21,22,22,22,22,22,22,21,21,21,21,21,21,21,21,21,21,2,5,5,4,5,4,5,4,5,
+   4,6,5,6,5,6,5,6,5,7,5,7,6,8,6,8,
+  6,8,6,9,6,9,6,8,5,8,4,9,4,9,4,9,4,9,4,9,4,9,4,9,4,9,4,9,4,8,4,8,4,9,5,9,5,9,5,
+   9,5,9,6,10,6,10,7,10,8,11,9,11,
+  11,12,13,12,14,13,15,13,15,14,16,14,17,15,17,15,15,16,16,15,16,16,16,15,18,16,
+   15,17,17,19,19,19,19,19,19,19,19,
+  19,19,19,19,19,19,19,19,19,19,19,19,19,19,1,5,5,5,5,5,5,5,6,5,6,5,6,5,6,5,6,6,
+   7,7,7,7,8,7,8,8,9,8,10,9,10,9,4,
+  3,4,3,4,4,5,4,5,4,5,5,6,5,6,5,7,5,7,6,7,6,8,7,8,7,8,7,9,8,9,9,9,9,10,10,10,11,
+   9,12,9,12,9,15,10,14,9,13,10,13,
+  10,12,10,12,10,13,10,12,11,13,11,14,12,13,13,14,14,13,14,15,14,16,13,13,14,16,
+   16,16,16,16,16,16,16,16,16,16,16,
+  16,16,16,16,16,16,16,15,15,4,5,4,5,3,5,3,5,3,5,4,4,4,4,5,5,5,3,3,4,3,4,4,4,4,
+   5,5,5,5,5,6,5,7,5,8,6,8,6,9,7,10,
+  7,10,8,10,8,11,9,11,3,7,3,8,3,10,3,8,3,9,3,8,4,9,4,9,5,9,6,10,6,9,7,11,7,12,9,
+   13,10,13,12,12,12,12,12,12,12,12,
+  12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,
+   12,12,12,12,12,12,12,12,12,12,12,
+  12,12,12,4,5,4,5,4,5,4,5,3,5,3,5,3,5,4,5,4,4,2,4,2,5,3,5,4,6,6,6,7,7,8,7,8,7,
+   8,7,9,8,9,8,9,8,10,8,11,9,12,9,12,
+  2,5,2,6,3,6,4,7,4,7,5,9,5,11,6,11,6,11,7,11,6,11,6,11,9,11,8,11,11,11,11,11,
+   11,11,11,11,11,11,11,11,11,11,11,
+  11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,
+   11,11,11,10,10,10,10,10,10,5,6,
+  11,11,11,11,10,10,12,11,5,2,11,5,6,6,7,9,11,13,13,10,7,11,6,7,8,9,10,12,11,5,
+   11,6,8,7,9,11,14,15,11,6,6,8,4,5,
+  7,8,10,13,10,5,7,7,5,5,6,8,10,11,10,7,7,8,6,5,5,7,9,9,11,8,8,11,8,7,6,6,7,9,
+   12,11,10,13,9,9,7,7,7,9,11,13,12,
+  15,12,11,9,8,8,8,2,4,4,0,0,0,0,0,0,5,6,6,0,0,0,0,0,0,5,6,6,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,5,7,7,0,
+   0,0,0,0,0,7,8,8,0,0,0,0,0,0,6,7,
+  8,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,5,7,7,0,0,0,0,0,0,6,8,7,0,0,0,0,0,0,7,8,8,0,0,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,5,7,7,0,0,0,0,0,0,7,8,8,0,0,0,0,
+   0,0,7,8,8,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,7,8,8,0,0,0,
+  0,0,0,8,8,9,0,0,0,0,0,0,8,9,9,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,6,8,8,0,0,0,0,0,0,7,9,8,0,0,0,0,0,0,8,
+   9,9,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,5,7,
+   7,0,0,0,0,0,0,7,8,8,0,0,0,0,0,0,
+  7,8,8,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,6,8,8,0,0,0,0,0,0,8,9,9,0,0,0,0,0,0,7,8,9,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,6,8,8,0,0,
+   0,0,0,0,8,9,9,0,0,0,0,0,0,8,9,8,
+  2,5,5,0,0,0,5,5,0,0,0,5,5,0,0,0,7,8,0,0,0,0,0,0,0,5,6,6,0,0,0,7,7,0,0,0,7,7,0,
+   0,0,10,10,0,0,0,0,0,0,0,5,6,6,0,
+  0,0,7,7,0,0,0,7,7,0,0,0,10,10,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,5,7,7,0,0,0,7,7,0,0,0,7,7,
+  0,0,0,9,9,0,0,0,0,0,0,0,5,7,7,0,0,0,7,7,0,0,0,7,7,0,0,0,9,9,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,5,7,7,0,0,0,7,7,0,0,0,7,7,0,0,0,9,9,0,0,0,0,0,0,0,5,7,7,0,0,0,7,7,0,0,0,7,
+   7,0,0,0,9,9,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,8,10,10,0,0,0,9,9,0,0,0,9,9,0,0,0,10,10,0,0,
+   0,0,0,0,0,8,10,10,0,0,0,9,9,0,0,
+  0,9,9,0,0,0,10,10,2,4,3,6,6,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4,4,4,6,6,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,4,4,4,6,6,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,6,6,6,9,9,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,6,
+  6,7,9,9,2,3,3,6,6,0,0,0,0,0,4,4,6,6,0,0,0,0,0,4,4,6,6,0,0,0,0,0,5,5,6,6,0,0,0,
+   0,0,0,0,6,6,0,0,0,0,0,0,0,7,8,0,
+  0,0,0,0,0,0,7,7,0,0,0,0,0,0,0,9,9,1,3,4,6,6,7,7,9,9,0,5,5,7,7,7,8,9,9,0,5,5,7,
+   7,8,8,9,9,0,7,7,8,8,8,8,10,10,0,
+  0,0,8,8,8,8,10,10,0,0,0,9,9,9,9,10,10,0,0,0,9,9,9,9,10,10,0,0,0,10,10,10,10,
+   11,11,0,0,0,0,0,10,10,11,11,2,3,3,
+  6,6,7,7,8,8,8,8,9,9,10,10,11,10,0,5,5,7,7,8,8,9,9,9,9,10,10,10,10,11,11,0,5,5,
+   7,7,8,8,9,9,9,9,10,10,10,10,11,
+  11,0,6,6,7,7,8,8,9,9,9,9,10,10,11,11,11,11,0,0,0,7,7,8,8,9,9,9,9,10,10,11,11,
+   11,12,0,0,0,8,8,8,8,9,9,9,9,10,10,
+  11,11,12,12,0,0,0,8,8,8,8,9,9,9,9,10,10,11,11,12,12,0,0,0,9,9,9,9,10,10,10,10,
+   11,10,11,11,12,12,0,0,0,0,0,9,9,
+  10,10,10,10,11,11,11,11,12,12,0,0,0,0,0,9,8,9,9,10,10,11,11,12,12,12,12,0,0,0,
+   0,0,8,8,9,9,10,10,11,11,12,11,12,
+  12,0,0,0,0,0,9,10,10,10,11,11,11,11,12,12,13,13,0,0,0,0,0,0,0,10,10,10,10,11,
+   11,12,12,13,13,0,0,0,0,0,0,0,11,
+  11,11,11,12,12,12,12,13,13,0,0,0,0,0,0,0,11,11,11,11,12,12,12,12,13,13,0,0,0,
+   0,0,0,0,11,11,12,12,12,12,13,13,
+  13,13,0,0,0,0,0,0,0,0,0,12,12,12,12,13,13,13,13,1,4,4,7,6,6,7,6,6,4,7,7,10,9,
+   9,11,9,9,4,7,7,10,9,9,11,9,9,7,10,
+  10,11,11,10,12,11,11,6,9,9,11,10,10,11,10,10,6,9,9,11,10,10,11,10,10,7,11,11,
+   11,11,11,12,11,11,6,9,9,11,10,10,
+  11,10,10,6,9,9,11,10,10,11,10,10,2,4,4,6,6,7,7,7,7,8,8,10,5,5,6,6,7,7,8,8,8,8,
+   10,5,5,6,6,7,7,8,8,8,8,10,6,6,7,
+  7,8,8,8,8,8,8,10,10,10,7,7,8,7,8,8,8,8,10,10,10,8,8,8,8,8,8,8,8,10,10,10,7,8,
+   8,8,8,8,8,8,10,10,10,8,8,8,8,8,8,
+  8,8,10,10,10,10,10,8,8,8,8,8,8,10,10,10,10,10,9,9,8,8,9,8,10,10,10,10,10,8,8,
+   8,8,8,8,1,4,4,6,6,7,7,8,8,9,9,10,
+  10,6,5,5,7,7,8,8,8,8,9,9,10,10,7,5,5,7,7,8,8,8,8,9,9,11,10,0,8,8,8,8,9,9,9,9,
+   10,10,11,11,0,8,8,8,8,9,9,9,9,10,
+  10,11,11,0,12,12,9,9,10,10,10,10,11,11,11,12,0,13,13,9,9,10,10,10,10,11,11,12,
+   12,0,0,0,10,10,10,10,11,11,12,12,
+  12,12,0,0,0,10,10,10,10,11,11,12,12,12,12,0,0,0,14,14,11,11,11,11,12,12,13,13,
+   0,0,0,14,14,11,11,11,11,12,12,13,
+  13,0,0,0,0,0,12,12,12,12,13,13,14,13,0,0,0,0,0,13,13,12,12,13,12,14,13,2,4,4,
+   5,5,6,5,5,5,5,6,4,5,5,5,6,5,5,5,
+  5,6,6,6,5,5,1,4,4,12,12,12,12,12,12,12,12,12,12,4,9,8,12,12,12,12,12,12,12,12,
+   12,12,2,9,7,12,12,12,12,12,12,12,
+  12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,11,12,12,12,12,12,12,12,
+   12,12,12,12,12,12,12,12,12,12,12,
+  12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,
+   12,12,12,12,12,12,12,12,12,12,12,
+  12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,
+   12,12,11,11,11,11,11,11,11,11,11,
+  11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,1,4,4,6,6,7,
+   7,8,7,9,9,10,10,10,10,6,5,5,7,7,
+  8,8,10,8,11,10,12,12,13,13,6,5,5,7,7,8,8,10,9,11,11,12,12,13,12,18,8,8,8,8,9,
+   9,10,9,11,10,12,12,13,13,18,8,8,
+  8,8,9,9,10,10,11,11,13,12,14,13,18,11,11,9,9,10,10,11,11,11,12,13,12,13,14,18,
+   11,11,9,8,11,10,11,11,11,11,12,
+  12,14,13,18,18,18,10,11,10,11,12,12,12,12,13,12,14,13,18,18,18,10,11,11,9,12,
+   11,12,12,12,13,13,13,18,18,17,14,
+  14,11,11,12,12,13,12,14,12,14,13,18,18,18,14,14,11,10,12,9,12,13,13,13,13,13,
+   18,18,17,16,18,13,13,12,12,13,11,
+  14,12,14,14,17,18,18,17,18,13,12,13,10,12,11,14,14,14,14,17,18,18,18,18,15,16,
+   12,12,13,10,14,12,14,15,18,18,18,
+  16,17,16,14,12,11,13,10,13,13,14,15,2,5,5,6,6,7,7,7,7,7,7,8,8,8,8,8,8,10,6,6,
+   7,7,8,7,8,8,8,8,8,9,9,9,9,9,10,6,
+  6,7,7,7,7,8,8,8,8,9,9,9,9,9,9,10,7,7,7,7,8,8,8,8,9,9,9,9,9,9,9,9,10,10,10,7,7,
+   8,8,8,9,9,9,9,9,9,9,9,9,11,11,11,
+  8,8,8,8,9,9,9,9,9,9,9,9,9,9,10,10,10,8,8,8,8,9,9,9,9,9,9,9,9,9,9,10,10,10,8,9,
+   9,9,9,9,9,9,9,9,9,9,10,9,10,10,
+  10,11,11,9,9,9,9,9,9,9,9,9,9,9,9,11,10,11,11,11,9,9,9,9,9,9,10,10,9,9,10,9,11,
+   10,11,11,11,9,9,9,9,9,9,9,9,10,
+  10,10,9,11,11,11,11,11,9,9,9,9,10,10,9,9,9,9,10,9,11,11,11,11,11,11,11,9,9,9,
+   9,9,9,10,10,10,10,11,11,11,11,11,
+  11,11,10,9,10,10,9,10,9,9,10,9,11,10,10,11,11,11,11,9,10,9,9,9,9,10,10,10,10,
+   11,11,11,11,11,11,10,10,10,9,9,10,
+  9,10,9,10,10,10,10,11,11,11,11,11,11,11,9,9,9,9,9,10,10,10);
+ VGCbQuant: Array[0..124] Of Byte=(
+  1,0,2,2,1,3,0,4,2,1,3,0,4,4,3,5,2,6,1,7,0,8,4,3,5,2,6,1,7,0,8,8,7,9,6,10,5,11,
+   4,12,3,13,2,14,1,15,0,16,1,0,2,
+  5,4,6,3,7,2,8,1,9,0,10,6,5,7,4,8,3,9,2,10,1,11,0,12,2,1,3,0,4,6,5,7,4,8,3,9,2,
+   10,1,11,0,12,7,6,8,5,9,4,10,3,11,
+  2,12,1,13,0,14,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15,0,16);
+ VGCvN = 29;
+ VGCvDim: Array[0..28] Of LongInt=(
+  2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,8,4,4,2,2,2,4,2,2,2,2,2,2);
+ VGCvLen: Array[0..28] Of LongInt=(
+  16,8,256,64,128,32,96,32,96,17,32,78,17,32,78,100,1641,443,105,68,81,289,81,
+   121,169,25,169,225,289);
+ VGCvReal: Array[0..28] Of LongInt=(
+  16,8,256,64,128,32,96,32,96,17,32,78,17,32,78,100,6561,625,625,81,81,289,81,
+   121,169,25,169,225,289);
+ VGCvLookup: Array[0..28] Of LongInt=(
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1);
+ VGCvMin: Array[0..28] Of LongInt=(
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,-1,-2,-2,-4,-4,-8,-11,-5,-30,-2,-1530,-119,-
+   8);
+ VGCvDelta: Array[0..28] Of LongInt=(
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,11,1,5,1,255,17,1);
+{ total lens 4788 quant 125 }
+{ ==== G3C : Vorbis natif ==== }
+{ Decodeur vorbis (vorbisdec.c) et encodeur vorbis (vorbisenc.c, experimental)
+ de FFmpeg 6.1.1, lecture/ecriture Ogg
+  (oggdec.c / oggparsevorbis.c / oggenc.c) et MDCT flottante (libavutil/tx,
+   versions C, split-radix).
+  LGPL-2.1-or-later; voir THIRD_PARTY_NOTICES.md. Tous les identifiants
+   commencent par VG. }
+Const
+ VGPi: Double = 3.14159265358979323846;
+ VGPi2: Double = 1.57079632679489661923;
+Type
+ TVGCx=Record Re,Im: Single; End;
+ TVGCxA=Array[0..8191] Of TVGCx; PVGCx=^TVGCxA;
+ TVGSA=Array[0..33554431] Of Single; PVGS=^TVGSA;
+ TVGIA=Array[0..33554431] Of LongInt; PVGI=^TVGIA;
+ TVGLA=Array[0..33554431] Of LongWord; PVGL=^TVGLA;
+ TVGMdct=Record Ready,Inv: Boolean; Len,Half: LongInt; Map: PVGI; ExpRe,ExpIm:
+  PVGS; End;
+Var
+ VGInited: Boolean;
+ VGTab: Array[3..12] Of PVGS;
+ VGMd: Array[0..1,0..13] Of TVGMdct;
+ VGWin: Array[0..7] Of PVGS;
+ VGWinData: PVGS;
+ VGDb: Array[0..255] Of Single;
+ VGZ: PVGCx;
+ VGBitExact,VGCodecBX,VGStrictExp,VGDebug: Boolean;
+ VGQuality: Single;
+ VGCrcTab: Array[0..255] Of LongWord;
+ VGPowD: Array[0..28] Of Double;
+ VGPowX: Array[0..28] Of LongInt;
+
+Procedure VGInit;
+Var I,B,Off: LongInt; C: LongWord; K: LongInt; Q: Int64; D: Double;
+Begin
+ If VGInited Then Exit;
+ VGInited:=True;
+ SetMXCSR(GetMXCSR Or $1F80);
+ GetMem(VGWinData,8160*4);
+ Move(VGWinBits,VGWinData^,8160*4);
+ Off:=0;
+ For B:=0 To 7 Do Begin VGWin[B]:=PVGS(@VGWinData^[Off]); Inc(Off,32 Shl B);
+  End;
+ Move(VGDbBits,VGDb,256*4);
+ For I:=0 To 255 Do Begin
+  C:=LongWord(I) Shl 24;
+  For K:=0 To 7 Do If (C And $80000000)<>0 Then C:=(C Shl 1) Xor $04C11DB7 Else
+   C:=C Shl 1;
+  VGCrcTab[I]:=C;
+ End;
+ For I:=0 To 28 Do Begin
+  Q:=Int64(VGPowHi[I])*4294967296+Int64(VGPowLo[I]);
+  Move(Q,D,8);
+  VGPowD[I]:=D; VGPowX[I]:=VGPowPos[I];
+ End;
+End;
+
+Procedure VGTabInit(K: LongInt);
+Var N,I: LongInt; Fr,Dv: Double;
+Begin
+ If VGTab[K]<>Nil Then Exit;
+ N:=1 Shl K; GetMem(VGTab[K],(N Div 4+1)*4);
+ Fr:=2.0*VGPi/N;
+ For I:=0 To N Div 4-1 Do Begin Dv:=I; Dv:=Dv*Fr; VGTab[K]^[I]:=Cos(Dv); End;
+ VGTab[K]^[N Div 4]:=0.0;
+End;
+
+Function VGSplit(I,Len,Inv: LongInt): LongInt;
+Var X: LongInt;
+Begin
+ Len:=Len Shr 1;
+ If Len<=1 Then Begin VGSplit:=I And 1; Exit; End;
+ If (I And Len)=0 Then Begin VGSplit:=VGSplit(I,Len,Inv)*2; Exit; End;
+ Len:=Len Shr 1;
+ If (I And Len)=0 Then X:=1 Else X:=0;
+ X:=X Xor Inv;
+ VGSplit:=VGSplit(I,Len,Inv)*4+1-2*X;
+End;
+
+{ ---- FFT split-radix en place (codelets ff_tx_fftN_ns) ---- }
+Procedure VGBfly(A0,A1,A2,A3: LongInt; T1,T2,T5,T6: Single);
+Var R0,I0,R1,I1,T3,T4: Single;
+Begin
+ R0:=VGZ^[A0].Re; I0:=VGZ^[A0].Im; R1:=VGZ^[A1].Re; I1:=VGZ^[A1].Im;
+ T3:=T5-T1; T5:=T5+T1;
+ VGZ^[A2].Re:=R0-T5; VGZ^[A0].Re:=R0+T5;
+ VGZ^[A3].Im:=I1-T3; VGZ^[A1].Im:=I1+T3;
+ T4:=T2-T6; T6:=T2+T6;
+ VGZ^[A3].Re:=R1-T4; VGZ^[A1].Re:=R1+T4;
+ VGZ^[A2].Im:=I0-T6; VGZ^[A0].Im:=I0+T6;
+End;
+Procedure VGTrans(A0,A1,A2,A3: LongInt; Wre,Wim: Single);
+Var T1,T2,T5,T6,Nw: Single;
+Begin
+ Nw:=-Wim;
+ T1:=VGZ^[A2].Re*Wre-VGZ^[A2].Im*Nw;
+ T2:=VGZ^[A2].Re*Nw+VGZ^[A2].Im*Wre;
+ T5:=VGZ^[A3].Re*Wre-VGZ^[A3].Im*Wim;
+ T6:=VGZ^[A3].Re*Wim+VGZ^[A3].Im*Wre;
+ VGBfly(A0,A1,A2,A3,T1,T2,T5,T6);
+End;
+Procedure VGFft2(B: LongInt);
+Var Tr,Ti: Single;
+Begin
+ Tr:=VGZ^[B].Re-VGZ^[B+1].Re; VGZ^[B].Re:=VGZ^[B].Re+VGZ^[B+1].Re;
+ Ti:=VGZ^[B].Im-VGZ^[B+1].Im; VGZ^[B].Im:=VGZ^[B].Im+VGZ^[B+1].Im;
+ VGZ^[B+1].Re:=Tr; VGZ^[B+1].Im:=Ti;
+End;
+Procedure VGFft4(B: LongInt);
+Var T1,T2,T3,T4,T5,T6,T7,T8: Single;
+Begin
+ T3:=VGZ^[B].Re-VGZ^[B+1].Re; T1:=VGZ^[B].Re+VGZ^[B+1].Re;
+ T8:=VGZ^[B+3].Re-VGZ^[B+2].Re; T6:=VGZ^[B+3].Re+VGZ^[B+2].Re;
+ VGZ^[B+2].Re:=T1-T6; VGZ^[B].Re:=T1+T6;
+ T4:=VGZ^[B].Im-VGZ^[B+1].Im; T2:=VGZ^[B].Im+VGZ^[B+1].Im;
+ T7:=VGZ^[B+2].Im-VGZ^[B+3].Im; T5:=VGZ^[B+2].Im+VGZ^[B+3].Im;
+ VGZ^[B+3].Im:=T4-T8; VGZ^[B+1].Im:=T4+T8;
+ VGZ^[B+3].Re:=T3-T7; VGZ^[B+1].Re:=T3+T7;
+ VGZ^[B+2].Im:=T2-T5; VGZ^[B].Im:=T2+T5;
+End;
+Procedure VGFft8(B: LongInt);
+Var T1,T2,T5,T6,Nr,Ni: Single;
+Begin
+ VGFft4(B);
+ Nr:=-VGZ^[B+5].Re; T1:=VGZ^[B+4].Re-Nr; VGZ^[B+5].Re:=VGZ^[B+4].Re+Nr;
+ Ni:=-VGZ^[B+5].Im; T2:=VGZ^[B+4].Im-Ni; VGZ^[B+5].Im:=VGZ^[B+4].Im+Ni;
+ Nr:=-VGZ^[B+7].Re; T5:=VGZ^[B+6].Re-Nr; VGZ^[B+7].Re:=VGZ^[B+6].Re+Nr;
+ Ni:=-VGZ^[B+7].Im; T6:=VGZ^[B+6].Im-Ni; VGZ^[B+7].Im:=VGZ^[B+6].Im+Ni;
+ VGBfly(B+0,B+2,B+4,B+6,T1,T2,T5,T6);
+ VGTrans(B+1,B+3,B+5,B+7,VGTab[3]^[1],VGTab[3]^[1]);
+End;
+Procedure VGFft16(B: LongInt);
+Var T1,T2,T5,T6,C1,C2,C3: Single;
+Begin
+ C1:=VGTab[4]^[1]; C2:=VGTab[4]^[2]; C3:=VGTab[4]^[3];
+ VGFft8(B); VGFft4(B+8); VGFft4(B+12);
+ T1:=VGZ^[B+8].Re; T2:=VGZ^[B+8].Im; T5:=VGZ^[B+12].Re; T6:=VGZ^[B+12].Im;
+ VGBfly(B+0,B+4,B+8,B+12,T1,T2,T5,T6);
+ VGTrans(B+2,B+6,B+10,B+14,C2,C2);
+ VGTrans(B+1,B+5,B+9,B+13,C1,C3);
+ VGTrans(B+3,B+7,B+11,B+15,C3,C1);
+End;
+Procedure VGComb(B,L,Len: LongInt);
+Var O1,O2,O3,I,C,W: LongInt; T: PVGS;
+Begin
+ T:=VGTab[L];
+ O1:=2*Len; O2:=4*Len; O3:=6*Len;
+ C:=0; W:=O1-7; I:=0;
+ While I<Len Do Begin
+  VGTrans(B+0,B+O1+0,B+O2+0,B+O3+0,T^[C+0],T^[W+7]);
+  VGTrans(B+2,B+O1+2,B+O2+2,B+O3+2,T^[C+2],T^[W+5]);
+  VGTrans(B+4,B+O1+4,B+O2+4,B+O3+4,T^[C+4],T^[W+3]);
+  VGTrans(B+6,B+O1+6,B+O2+6,B+O3+6,T^[C+6],T^[W+1]);
+  VGTrans(B+1,B+O1+1,B+O2+1,B+O3+1,T^[C+1],T^[W+6]);
+  VGTrans(B+3,B+O1+3,B+O2+3,B+O3+3,T^[C+3],T^[W+4]);
+  VGTrans(B+5,B+O1+5,B+O2+5,B+O3+5,T^[C+5],T^[W+2]);
+  VGTrans(B+7,B+O1+7,B+O2+7,B+O3+7,T^[C+7],T^[W+0]);
+  Inc(I,4); Inc(B,8); Inc(C,8); Dec(W,8);
+ End;
+End;
+Procedure VGFft(N,B,L: LongInt);
+Begin
+ Case N Of
+  2: VGFft2(B);
+  4: VGFft4(B);
+  8: VGFft8(B);
+  16: VGFft16(B);
+ Else Begin
+  VGFft(N Div 2,B,L-1);
+  VGFft(N Div 4,B+N Div 2,L-2);
+  VGFft(N Div 4,B+(N Div 4)*3,L-2);
+  VGComb(B,L,N Div 8);
+ End;
+ End;
+End;
+
+Function VGLog2(V: LongInt): LongInt;
+Var R: LongInt;
+Begin
+ R:=0; While (V Shr (R+1))<>0 Do Inc(R); VGLog2:=R;
+End;
+
+{ ---- MDCT (ff_tx_mdct_fwd / ff_tx_mdct_inv, flottant) ---- }
+Procedure VGMdctInit(Var M: TVGMdct; Len: LongInt; Inv: Boolean);
+Var H,I,K,Lg,Off: LongInt; Theta,Alpha,Dv: Double; Pre: PVGI;
+Begin
+ M.Len:=Len; M.Inv:=Inv; H:=Len Shr 1; M.Half:=H; Lg:=VGLog2(H);
+ For K:=3 To Lg Do VGTabInit(K);
+ GetMem(M.Map,H*4+8);
+ If Not Inv Then Begin
+  For I:=0 To H-1 Do M.Map^[(-VGSplit(I,H,0)) And (H-1)]:=I;
+ End Else Begin
+  For I:=0 To H-1 Do M.Map^[I]:=(-VGSplit(I,H,1)) And (H-1);
+ End;
+ If Inv Then Begin
+  GetMem(M.ExpRe,2*H*4+8); GetMem(M.ExpIm,2*H*4+8); Off:=H; Theta:=H+1.0/8.0;
+ End Else Begin
+  GetMem(M.ExpRe,H*4+8); GetMem(M.ExpIm,H*4+8); Off:=0; Theta:=1.0/8.0;
+ End;
+ For I:=0 To H-1 Do Begin
+  Alpha:=VGPi2*(I+Theta)/H;
+  Dv:=Cos(Alpha); M.ExpRe^[Off+I]:=Dv;
+  Dv:=Sin(Alpha); M.ExpIm^[Off+I]:=Dv;
+ End;
+ If Inv Then Begin
+  For I:=0 To H-1 Do Begin M.ExpRe^[I]:=M.ExpRe^[H+M.Map^[I]]; M.ExpIm^[I]:=
+   M.ExpIm^[H+M.Map^[I]]; End;
+  For I:=0 To H-1 Do M.Map^[I]:=M.Map^[I] Shl 1;
+ End;
+ M.Ready:=True;
+End;
+
+Function VGMdctFor(Inv: LongInt; Len: LongInt): LongInt;
+Var Lg: LongInt;
+Begin
+ Lg:=VGLog2(Len);
+ If Not VGMd[Inv,Lg].Ready Then VGMdctInit(VGMd[Inv,Lg],Len,Inv<>0);
+ VGMdctFor:=Lg;
+End;
+
+{ MDCT directe : Src[0..2*Len-1] -> Dst[0..Len-1] }
+Procedure VGMdctFwd(Lg: LongInt; Src,Dst: PVGS);
+Var M: ^TVGMdct; L2,L3,L4,I,K,Idx,I0,I1: LongInt; TRe,TIm,S0r,S0i,S1r,S1i:
+ Single;
+Begin
+ M:=@VGMd[0,Lg]; L2:=M^.Half; L4:=M^.Len Shr 2; L3:=L2*3;
+ VGZ:=PVGCx(Dst);
+ For I:=0 To L2-1 Do Begin
+  K:=2*I; Idx:=M^.Map^[I];
+  If K<L2 Then Begin
+   TRe:=(-Src^[L2+K])+Src^[L2-1-K];
+   TIm:=(-Src^[L3+K])+(-Src^[L3-1-K]);
+  End Else Begin
+   TRe:=(-Src^[L2+K])+(-Src^[5*L2-1-K]);
+   TIm:=Src^[K-L2]+(-Src^[L3-1-K]);
+  End;
+  VGZ^[Idx].Im:=TRe*M^.ExpRe^[I]-TIm*M^.ExpIm^[I];
+  VGZ^[Idx].Re:=TRe*M^.ExpIm^[I]+TIm*M^.ExpRe^[I];
+ End;
+ VGFft(L2,0,VGLog2(L2));
+ For I:=0 To L4-1 Do Begin
+  I0:=L4+I; I1:=L4-I-1;
+  S1r:=VGZ^[I1].Re; S1i:=VGZ^[I1].Im; S0r:=VGZ^[I0].Re; S0i:=VGZ^[I0].Im;
+  VGZ^[I1].Im:=S0r*M^.ExpIm^[I0]-S0i*M^.ExpRe^[I0];
+  VGZ^[I0].Re:=S0r*M^.ExpRe^[I0]+S0i*M^.ExpIm^[I0];
+  VGZ^[I0].Im:=S1r*M^.ExpIm^[I1]-S1i*M^.ExpRe^[I1];
+  VGZ^[I1].Re:=S1r*M^.ExpRe^[I1]+S1i*M^.ExpIm^[I1];
+ End;
+End;
+
+{ MDCT inverse : Src[0..Len-1] -> Dst[0..Len-1] }
+Procedure VGMdctInv(Lg: LongInt; Src,Dst: PVGS);
+Var M: ^TVGMdct; L2,L4,I,K,I0,I1,Hh: LongInt; TRe,TIm,S0r,S0i,S1r,S1i: Single;
+Begin
+ M:=@VGMd[1,Lg]; L2:=M^.Half; L4:=M^.Len Shr 2; Hh:=L2;
+ VGZ:=PVGCx(Dst);
+ For I:=0 To L2-1 Do Begin
+  K:=M^.Map^[I];
+  TRe:=Src^[2*L2-1-K]; TIm:=Src^[K];
+  VGZ^[I].Re:=TRe*M^.ExpRe^[I]-TIm*M^.ExpIm^[I];
+  VGZ^[I].Im:=TRe*M^.ExpIm^[I]+TIm*M^.ExpRe^[I];
+ End;
+ VGFft(L2,0,VGLog2(L2));
+ For I:=0 To L4-1 Do Begin
+  I0:=L4+I; I1:=L4-I-1;
+  S1r:=VGZ^[I1].Im; S1i:=VGZ^[I1].Re;
+  S0r:=VGZ^[I0].Im; S0i:=VGZ^[I0].Re;
+  VGZ^[I1].Re:=S1r*M^.ExpIm^[Hh+I1]-S1i*M^.ExpRe^[Hh+I1];
+  VGZ^[I0].Im:=S1r*M^.ExpRe^[Hh+I1]+S1i*M^.ExpIm^[Hh+I1];
+  VGZ^[I0].Re:=S0r*M^.ExpIm^[Hh+I0]-S0i*M^.ExpRe^[Hh+I0];
+  VGZ^[I1].Im:=S0r*M^.ExpRe^[Hh+I0]+S0i*M^.ExpIm^[Hh+I0];
+ End;
+End;
+
+{ ---- fonctions communes vorbis.c ---- }
+Function VGIlog(V: LongInt): LongInt;
+Var N: LongInt;
+Begin
+ N:=0; While V>0 Do Begin Inc(N); V:=V Shr 1; End; VGIlog:=N;
+End;
+
+Function VGNthRoot(X,N: LongWord): LongWord;
+Var Ret,J: LongWord; I: LongWord;
+Begin
+ Ret:=0;
+ Repeat
+  Inc(Ret); J:=Ret; I:=0;
+  While I+1<N Do Begin J:=J*Ret; Inc(I); End;
+ Until J>X;
+ VGNthRoot:=Ret-1;
+End;
+
+Function VGLen2Vlc(Bits: PEABuffer; Codes: PVGL; Num: LongInt): Boolean;
+Var Ex: Array[0..32] Of LongWord; I,J,P: LongInt; Code: LongWord;
+Begin
+ FillChar(Ex,SizeOf(Ex),0); Ex[0]:=404;
+ VGLen2Vlc:=False;
+ P:=0; While (P<Num) And (Bits^[P]=0) Do Inc(P);
+ If P=Num Then Begin VGLen2Vlc:=True; Exit; End;
+ Codes^[P]:=0;
+ If Bits^[P]>32 Then Exit;
+ For I:=0 To Bits^[P]-1 Do Ex[I+1]:=LongWord(1) Shl I;
+ Inc(P);
+ I:=P; While (I<Num) And (Bits^[I]=0) Do Inc(I);
+ If I=Num Then Begin VGLen2Vlc:=True; Exit; End;
+ While P<Num Do Begin
+  If Bits^[P]>32 Then Exit;
+  If Bits^[P]<>0 Then Begin
+   I:=Bits^[P]; While (I>0) And (Ex[I]=0) Do Dec(I);
+   If I=0 Then Exit;
+   Code:=Ex[I]; Ex[I]:=0;
+   For J:=I+1 To Bits^[P] Do Ex[J]:=Code+(LongWord(1) Shl (J-1));
+   Codes^[P]:=Code;
+  End;
+  Inc(P);
+ End;
+ For P:=1 To 32 Do If Ex[P]<>0 Then Exit;
+ VGLen2Vlc:=True;
+End;
+
+{ liste des X du plancher 1 : low/high/sort (ff_vorbis_ready_floor1_list) }
+Type
+ TVGFl=Record X,Low,High,Sort: LongInt; End;
+ TVGFlA=Array[0..299] Of TVGFl;
+Function VGReadyFloor(Var L: TVGFlA; Values: LongInt): Boolean;
+Var I,J,Tmp: LongInt;
+Begin
+ VGReadyFloor:=False;
+ L[0].Sort:=0; L[1].Sort:=1;
+ For I:=2 To Values-1 Do Begin
+  L[I].Low:=0; L[I].High:=1; L[I].Sort:=I;
+  For J:=2 To I-1 Do Begin
+   Tmp:=L[J].X;
+   If Tmp<L[I].X Then Begin
+    If Tmp>L[L[I].Low].X Then L[I].Low:=J;
+   End Else Begin
+    If Tmp<L[L[I].High].X Then L[I].High:=J;
+   End;
+  End;
+ End;
+ For I:=0 To Values-2 Do
+  For J:=I+1 To Values-1 Do Begin
+   If L[I].X=L[J].X Then Exit;
+   If L[L[I].Sort].X>L[L[J].Sort].X Then Begin Tmp:=L[I].Sort; L[I].Sort:=L[
+    J].Sort; L[J].Sort:=Tmp; End;
+  End;
+ VGReadyFloor:=True;
+End;
+
+Function VGClip8(V: LongInt): LongInt;
+Begin
+ If V<0 Then VGClip8:=0 Else If V>255 Then VGClip8:=255 Else VGClip8:=V;
+End;
+
+Procedure VGRenderLine(X0,Y0,X1,Y1: LongInt; Buf: PVGS);
+Var Dy,Adx,Ady,Sy,Base,X,Y,Err: LongInt;
+Begin
+ Dy:=Y1-Y0; Adx:=X1-X0; Ady:=Abs(Dy);
+ If Dy<0 Then Sy:=-1 Else Sy:=1;
+ Buf^[X0]:=VGDb[VGClip8(Y0)];
+ If Ady*2<=Adx Then Begin
+  { render_line_unrolled(x0, y0, x1, sy, ady, adx, buf) }
+  Err:=-Adx; X:=X0-(X1-1); Y:=Y0;
+  { buf += x1 - 1 : indices relatifs a X1-1 }
+  Inc(X);
+  While X<0 Do Begin
+   Err:=Err+Ady;
+   If Err>=0 Then Begin
+    Err:=Err+Ady-Adx; Y:=Y+Sy;
+    Buf^[X1-1+X]:=VGDb[VGClip8(Y)]; Inc(X);
+   End;
+   Buf^[X1-1+X]:=VGDb[VGClip8(Y)];
+   Inc(X);
+  End;
+  If X<=0 Then Begin
+   If Err+Ady>=0 Then Y:=Y+Sy;
+   Buf^[X1-1+X]:=VGDb[VGClip8(Y)];
+  End;
+ End Else Begin
+  Base:=Dy Div Adx; X:=X0; Y:=Y0; Err:=-Adx;
+  Ady:=Ady-Abs(Base)*Adx;
+  Inc(X);
+  While X<X1 Do Begin
+   Y:=Y+Base; Err:=Err+Ady;
+   If Err>=0 Then Begin Err:=Err-Adx; Y:=Y+Sy; End;
+   Buf^[X]:=VGDb[VGClip8(Y)];
+   Inc(X);
+  End;
+ End;
+End;
+
+Procedure VGRenderList(Var L: TVGFlA; Values: LongInt; Y: Array Of Word; Flag:
+ Array Of LongInt; Mult: LongInt; Out_: PVGS; Samples: LongInt);
+Var Lx,Ly,I,Pos,X1,Y1: LongInt;
+Begin
+ Lx:=0; Ly:=Y[0]*Mult;
+ For I:=1 To Values-1 Do Begin
+  Pos:=L[I].Sort;
+  If Flag[Pos]<>0 Then Begin
+   X1:=L[Pos].X; Y1:=Y[Pos]*Mult;
+   If Lx<Samples Then Begin
+    If X1<Samples Then VGRenderLine(Lx,Ly,X1,Y1,Out_) Else VGRenderLine(Lx,Ly,
+     Samples,Y1,Out_);
+   End;
+   Lx:=X1; Ly:=Y1;
+  End;
+  If Lx>=Samples Then Break;
+ End;
+ If Lx<Samples Then VGRenderLine(Lx,Ly,Samples,Ly,Out_);
+End;
+
+{ ---- ecriture de bits little-endian (put_bits avec BITSTREAM_WRITER_LE) ---- }
+Var
+ VGW: PEABuffer; VGWBits,VGWLimit: LongInt;
+
+Procedure VGPut(V: Int64; N: LongInt);
+Var K: LongInt;
+Begin
+ For K:=0 To N-1 Do Begin
+  If ((V Shr K) And 1)<>0 Then VGW^[VGWBits Shr 3]:=VGW^[VGWBits Shr 3] Or (1
+   Shl (VGWBits And 7));
+  Inc(VGWBits);
+ End;
+End;
+
+{ ---- encodeur vorbis natif ---- }
+Type
+ TVGBook=Record
+  N,Dim,Lookup: LongInt; Lens: PEABuffer; Codes: PVGL; Quant: PVGI;
+  Vec,Pow2: PVGS; Min,Delta: Single;
+ End;
+Var
+ VGBooks: Array[0..28] Of TVGBook;
+ VGFlList: TVGFlA; VGFlValues: LongInt;
+ VGRMax: Array[0..9,0..1] Of Single;
+
+Const
+ VGFlCls: Array[0..7] Of LongInt=(0,1,2,2,3,3,4,4);
+ VGFlX: Array[0..26] Of LongInt=(93,23,372,6,46,186,750,14,33,65,130,260,556,3,
+  10,18,28,39,55,79,111,158,220,312,464,650,850);
+ VGFcDim: Array[0..4] Of LongInt=(3,4,3,4,3);
+ VGFcSub: Array[0..4] Of LongInt=(0,1,1,2,2);
+ VGFcMaster: Array[0..4] Of LongInt=(0,0,1,2,3);
+ VGFcBooks: Array[0..4,0..3] Of LongInt=((4,0,0,0),(5,6,0,0),(7,8,0,0),(-1,9,10,
+  11),(-1,12,13,14));
+ VGResBooks: Array[0..9,0..7] Of LongInt=(
+  (-1,-1,-1,-1,-1,-1,-1,-1),(-1,-1,16,-1,-1,-1,-1,-1),(-1,-1,17,-1,-1,-1,-1,-1),
+   (-1,-1,18,-1,-1,-1,-1,-1),
+  (-1,-1,19,-1,-1,-1,-1,-1),(-1,-1,20,-1,-1,-1,-1,-1),(-1,-1,21,-1,-1,-1,-1,-1),
+   (22,23,-1,-1,-1,-1,-1,-1),
+  (24,25,-1,-1,-1,-1,-1,-1),(26,27,28,-1,-1,-1,-1,-1));
+
+Procedure VGEncInit;
+Var Bk,I,J,Vals,Off,Div_,LensOff,QOff: LongInt; B: ^TVGBook; Last,Tmp,A: Single;
+ Mx: Double;
+Begin
+ LensOff:=0; QOff:=0;
+ For Bk:=0 To VGCvN-1 Do Begin
+  B:=@VGBooks[Bk];
+  B^.Dim:=VGCvDim[Bk]; B^.N:=VGCvReal[Bk]; B^.Lookup:=VGCvLookup[Bk];
+  B^.Min:=VGCvMin[Bk]; B^.Delta:=VGCvDelta[Bk];
+  GetMem(B^.Lens,B^.N+8); GetMem(B^.Codes,B^.N*4+8);
+  FillChar(B^.Lens^,B^.N,0); FillChar(B^.Codes^,B^.N*4,0);
+  For I:=0 To VGCvLen[Bk]-1 Do B^.Lens^[I]:=VGCbLens[LensOff+I];
+  Inc(LensOff,VGCvLen[Bk]);
+  B^.Quant:=Nil; B^.Vec:=Nil; B^.Pow2:=Nil;
+  If B^.Lookup<>0 Then Begin
+   Vals:=VGNthRoot(B^.N,B^.Dim);
+   GetMem(B^.Quant,Vals*4+8);
+   For I:=0 To Vals-1 Do Begin B^.Quant^[I]:=VGCbQuant[QOff]; Inc(QOff); End;
+  End;
+  If Not VGLen2Vlc(B^.Lens,B^.Codes,B^.N) Then Fail(
+   'vorbis: livre de code interne invalide.');
+  If B^.Lookup<>0 Then Begin
+   GetMem(B^.Vec,B^.N*B^.Dim*4+8); GetMem(B^.Pow2,B^.N*4+8);
+   For I:=0 To B^.N-1 Do Begin
+    Last:=0.0; B^.Pow2^[I]:=0.0; Div_:=1;
+    For J:=0 To B^.Dim-1 Do Begin
+     Off:=(I Div Div_) Mod Vals;
+     A:=B^.Quant^[Off]; Tmp:=A*B^.Delta;
+     Last:=Last+B^.Min; Last:=Last+Tmp;
+     B^.Vec^[I*B^.Dim+J]:=Last;
+     Last:=0.0;
+     Tmp:=B^.Vec^[I*B^.Dim+J]*B^.Vec^[I*B^.Dim+J];
+     B^.Pow2^[I]:=B^.Pow2^[I]+Tmp;
+     Div_:=Div_*Vals;
+    End;
+    Mx:=B^.Pow2^[I]; Mx:=Mx/2.0; B^.Pow2^[I]:=Mx;
+   End;
+  End;
+ End;
+ { plancher }
+ VGFlValues:=29;
+ VGFlList[0].X:=0; VGFlList[1].X:=1024;
+ For I:=2 To 28 Do VGFlList[I].X:=VGFlX[I-2];
+ If Not VGReadyFloor(VGFlList,VGFlValues) Then Fail(
+  'vorbis: liste de plancher invalide.');
+ { classes de residu : maxima par classe }
+ FillChar(VGRMax,SizeOf(VGRMax),0);
+ For I:=0 To 9 Do Begin
+  J:=0; While (J<8) And (VGResBooks[I,J]=-1) Do Inc(J);
+  If J<8 Then Begin
+   B:=@VGBooks[VGResBooks[I,J]];
+   For Bk:=0 To B^.N-1 Do If B^.Lens^[Bk]<>0 Then Begin
+    A:=Abs(B^.Vec^[Bk*B^.Dim]); If A>VGRMax[I,0] Then VGRMax[I,0]:=A;
+    A:=Abs(B^.Vec^[Bk*B^.Dim+1]); If A>VGRMax[I,1] Then VGRMax[I,1]:=A;
+   End;
+  End;
+ End;
+ For I:=0 To 9 Do Begin
+  Mx:=VGRMax[I,0]; Mx:=Mx+0.8; VGRMax[I,0]:=Mx;
+  Mx:=VGRMax[I,1]; Mx:=Mx+0.8; VGRMax[I,1]:=Mx;
+ End;
+End;
+
+Procedure VGPutCode(Bk,Entry: LongInt);
+Var B: ^TVGBook;
+Begin
+ B:=@VGBooks[Bk];
+ If VGWBits+B^.Lens^[Entry]>VGWLimit Then Fail(
+  'vorbis: output buffer is too small.');
+ VGPut(B^.Codes^[Entry],B^.Lens^[Entry]);
+End;
+
+Procedure VGPutFloat(F: Double);
+Var E: LongInt; M: Double; Mant: LongInt; Res: Int64;
+Begin
+ E:=0; M:=F;
+ If M<>0 Then Begin
+  While Abs(M)>=1.0 Do Begin M:=M/2.0; Inc(E); End;
+  While Abs(M)<0.5 Do Begin M:=M*2.0; Dec(E); End;
+ End;
+ Mant:=Trunc(M*1048576.0);
+ Inc(E,788-20);
+ Res:=0;
+ If Mant<0 Then Begin Res:=Res Or Int64($80000000); Mant:=-Mant; End;
+ Res:=Res Or Mant Or (Int64(E) Shl 21);
+ VGPut(Res And $FFFFFFFF,32);
+End;
+
+Procedure VGPutBookHeader(Bk: LongInt);
+Var B: ^TVGBook; I,J,Len,Ordered,Sparse,Tmp,Bits: LongInt;
+Begin
+ B:=@VGBooks[Bk];
+ VGPut($564342,24); VGPut(B^.Dim,16); VGPut(B^.N,24);
+ Ordered:=0;
+ I:=1; While I<B^.N Do Begin If B^.Lens^[I]<B^.Lens^[I-1] Then Break; Inc(I);
+  End;
+ If I=B^.N Then Ordered:=1;
+ VGPut(Ordered,1);
+ If Ordered<>0 Then Begin
+  Len:=B^.Lens^[0]; VGPut(Len-1,5); I:=0;
+  While I<B^.N Do Begin
+   J:=0; While J+I<B^.N Do Begin If B^.Lens^[J+I]<>Len Then Break; Inc(J); End;
+   VGPut(J,VGIlog(B^.N-I)); Inc(I,J); Inc(Len);
+  End;
+ End Else Begin
+  Sparse:=0;
+  I:=0; While I<B^.N Do Begin If B^.Lens^[I]=0 Then Break; Inc(I); End;
+  If I<>B^.N Then Sparse:=1;
+  VGPut(Sparse,1);
+  For I:=0 To B^.N-1 Do Begin
+   If Sparse<>0 Then Begin If B^.Lens^[I]<>0 Then VGPut(1,1) Else VGPut(0,1);
+    End;
+   If B^.Lens^[I]<>0 Then VGPut(B^.Lens^[I]-1,5);
+  End;
+ End;
+ VGPut(B^.Lookup,4);
+ If B^.Lookup<>0 Then Begin
+  Tmp:=VGNthRoot(B^.N,B^.Dim);
+  Bits:=VGIlog(B^.Quant^[0]);
+  For I:=1 To Tmp-1 Do If VGIlog(B^.Quant^[I])>Bits Then Bits:=VGIlog(B^.Quant^[
+   I]);
+  VGPutFloat(B^.Min); VGPutFloat(B^.Delta);
+  VGPut(Bits-1,4); VGPut(0,1);
+  For I:=0 To Tmp-1 Do VGPut(B^.Quant^[I],Bits);
+ End;
+End;
+
+{ trois en-tetes : identification, setup (le commentaire est ecrit par le
+ muxeur) }
+Procedure VGBuildHeaders(Ch,Rate: LongInt; Var IdBuf: PEABuffer; Var IdLen:
+ LongInt; Var SetBuf: PEABuffer; Var SetLen: LongInt);
+Var I,J,Bk: LongInt;
+Begin
+ VGWLimit:=50000*8;
+ GetMem(IdBuf,64); FillChar(IdBuf^,64,0); VGW:=IdBuf; VGWBits:=0;
+ VGPut(1,8); For I:=1 To 6 Do VGPut(Ord('vorbis'[I]),8);
+ VGPut(0,32); VGPut(Ch,8); VGPut(Rate,32); VGPut(0,32); VGPut(0,32); VGPut(0,
+  32);
+ VGPut(11,4); VGPut(11,4); VGPut(1,1);
+ IdLen:=(VGWBits+7) Shr 3;
+ GetMem(SetBuf,50000); FillChar(SetBuf^,50000,0); VGW:=SetBuf; VGWBits:=0;
+ VGPut(5,8); For I:=1 To 6 Do VGPut(Ord('vorbis'[I]),8);
+ VGPut(VGCvN-1,8);
+ For Bk:=0 To VGCvN-1 Do VGPutBookHeader(Bk);
+ VGPut(0,6); VGPut(0,16);
+ { planchers }
+ VGPut(0,6);
+ VGPut(1,16); VGPut(8,5);
+ For I:=0 To 7 Do VGPut(VGFlCls[I],4);
+ For I:=0 To 4 Do Begin
+  VGPut(VGFcDim[I]-1,3); VGPut(VGFcSub[I],2);
+  If VGFcSub[I]<>0 Then VGPut(VGFcMaster[I],8);
+  For J:=0 To (1 Shl VGFcSub[I])-1 Do VGPut(VGFcBooks[I,J]+1,8);
+ End;
+ VGPut(1,2); VGPut(10,4);
+ For I:=2 To 28 Do VGPut(VGFlList[I].X,10);
+ { residus }
+ VGPut(0,6);
+ VGPut(2,16); VGPut(0,24); VGPut(1600,24); VGPut(31,24); VGPut(9,6); VGPut(15,
+  8);
+ For I:=0 To 9 Do Begin
+  J:=0;
+  For Bk:=0 To 7 Do If VGResBooks[I,Bk]<>-1 Then J:=J Or (1 Shl Bk);
+  VGPut(J And 7,3); If J>7 Then VGPut(1,1) Else VGPut(0,1);
+  If J>7 Then VGPut(J Shr 3,5);
+ End;
+ For I:=0 To 9 Do
+  For Bk:=0 To 7 Do If VGResBooks[I,Bk]<>-1 Then VGPut(VGResBooks[I,Bk],8);
+ { mappings }
+ VGPut(0,6);
+ VGPut(0,16); VGPut(0,1);
+ VGPut(1,1); VGPut(0,8); VGPut(0,VGIlog(Ch-1)); VGPut(1,VGIlog(Ch-1));
+ VGPut(0,2);
+ VGPut(0,8); VGPut(0,8); VGPut(0,8);
+ { modes }
+ VGPut(1,6);
+ VGPut(0,1); VGPut(0,16); VGPut(0,16); VGPut(0,8);
+ VGPut(1,1); VGPut(0,16); VGPut(0,16); VGPut(0,8);
+ VGPut(1,1);
+ SetLen:=(VGWBits+7) Shr 3;
+End;
+
+Function VGPowFor(X: LongInt): Double;
+Var I: LongInt;
+Begin
+ For I:=0 To 28 Do If VGPowX[I]=X Then Begin VGPowFor:=VGPowD[I]; Exit; End;
+ VGPowFor:=1.0;
+End;
+
+Procedure VGFloorFit(Coeffs: PVGS; Var Posts: Array Of Word);
+Var Range,I,J,Pos,Bg,En,K: LongInt; Tot,Avg,Prod,Av,Dn,Fv: Single; Aver: Array[
+ 0..28] Of Single; D: Double;
+Begin
+ Range:=255 Div 2+1;
+ Tot:=0.0;
+ For I:=0 To VGFlValues-1 Do Begin
+  If I=0 Then K:=0 Else K:=I-1;
+  Bg:=VGFlList[VGFlList[K].Sort].X;
+  If I+1>VGFlValues-1 Then K:=VGFlValues-1 Else K:=I+1;
+  En:=VGFlList[VGFlList[K].Sort].X;
+  Av:=0.0;
+  For J:=Bg To En-1 Do Av:=Av+Abs(Coeffs^[J]);
+  Dn:=En-Bg;
+  Av:=Av/Dn;
+  Aver[I]:=Av; Tot:=Tot+Av;
+ End;
+ Fv:=VGFlValues;
+ Tot:=Tot/Fv;
+ Tot:=Tot/VGQuality;
+ For I:=0 To VGFlValues-1 Do Begin
+  Pos:=VGFlList[VGFlList[I].Sort].X;
+  Avg:=Aver[I];
+  Prod:=Tot*Avg;
+  D:=Sqrt(Double(Prod))*VGPowFor(Pos);
+  Avg:=D;
+  J:=0; While J<Range-1 Do Begin If VGDb[J*2]>Avg Then Break; Inc(J); End;
+  Posts[VGFlList[I].Sort]:=J;
+ End;
+End;
+
+Function VGRenderPoint(X0,Y0,X1,Y1,X: LongInt): LongInt;
+Begin
+ VGRenderPoint:=Y0+(X-X0)*(Y1-Y0) Div (X1-X0);
+End;
+
+Procedure VGFloorEncode(Var Posts: Array Of Word; Floor_: PVGS; Samples:
+ LongInt);
+Var Range,I,Counter,Pred,HighRoom,LowRoom,Room,K,L,Cval,Cshift,Csub,MaxVal,Cls,
+ Book,Entry,Part: LongInt;
+ Coded: Array[0..28] Of LongInt; Flags: Array[0..28] Of LongInt;
+Begin
+ Range:=128;
+ If VGWBits+1+2*VGIlog(Range-1)>VGWLimit Then Fail(
+  'vorbis: output buffer is too small.');
+ VGPut(1,1); VGPut(Posts[0],VGIlog(Range-1)); VGPut(Posts[1],VGIlog(Range-1));
+ Coded[0]:=1; Coded[1]:=1;
+ For I:=2 To VGFlValues-1 Do Begin
+  Pred:=VGRenderPoint(VGFlList[VGFlList[I].Low].X,Posts[VGFlList[I].Low],
+   VGFlList[VGFlList[I].High].X,Posts[VGFlList[I].High],VGFlList[I].X);
+  HighRoom:=Range-Pred; LowRoom:=Pred;
+  If HighRoom<LowRoom Then Room:=HighRoom Else Room:=LowRoom;
+  If Pred=Posts[I] Then Begin Coded[I]:=0; Continue; End
+  Else Begin
+   If Coded[VGFlList[I].Low]=0 Then Coded[VGFlList[I].Low]:=-1;
+   If Coded[VGFlList[I].High]=0 Then Coded[VGFlList[I].High]:=-1;
+  End;
+  If Posts[I]>Pred Then Begin
+   If Posts[I]-Pred>Room Then Coded[I]:=Posts[I]-Pred+LowRoom Else Coded[I]:=(
+    Posts[I]-Pred) Shl 1;
+  End Else Begin
+   If Pred-Posts[I]>Room Then Coded[I]:=Pred-Posts[I]+HighRoom-1 Else Coded[I]:=
+    ((Pred-Posts[I]) Shl 1)-1;
+  End;
+ End;
+ Counter:=2;
+ For Part:=0 To 7 Do Begin
+  Cls:=VGFlCls[Part]; Cval:=0; Csub:=1 Shl VGFcSub[Cls];
+  If VGFcSub[Cls]<>0 Then Begin
+   Cshift:=0;
+   For K:=0 To VGFcDim[Cls]-1 Do Begin
+    L:=0;
+    While L<Csub Do Begin
+     MaxVal:=1;
+     If VGFcBooks[Cls,L]<>-1 Then MaxVal:=VGBooks[VGFcBooks[Cls,L]].N;
+     If Coded[Counter+K]<MaxVal Then Break;
+     Inc(L);
+    End;
+    Cval:=Cval Or (L Shl Cshift);
+    Inc(Cshift,VGFcSub[Cls]);
+   End;
+   VGPutCode(VGFcMaster[Cls],Cval);
+  End;
+  For K:=0 To VGFcDim[Cls]-1 Do Begin
+   Book:=VGFcBooks[Cls,Cval And (Csub-1)];
+   Entry:=Coded[Counter]; Inc(Counter);
+   Cval:=Cval Shr VGFcSub[Cls];
+   If Book=-1 Then Continue;
+   If Entry=-1 Then Entry:=0;
+   VGPutCode(Book,Entry);
+  End;
+ End;
+ For I:=0 To VGFlValues-1 Do Flags[I]:=Coded[I];
+ VGRenderList(VGFlList,VGFlValues,Posts,Flags,2,Floor_,Samples);
+End;
+
+{ choix du vecteur le plus proche : retourne l'indice d'entree }
+Function VGPutVector(Bk: LongInt; Num: PVGS): LongInt;
+Var B: ^TVGBook; I,J,Entry: LongInt; D,Dist,Pr: Single; Vc: PVGS;
+Begin
+ B:=@VGBooks[Bk];
+ Entry:=-1; Dist:=3.402823466e+38;
+ For I:=0 To B^.N-1 Do Begin
+  If B^.Lens^[I]=0 Then Continue;
+  Vc:=PVGS(@B^.Vec^[I*B^.Dim]); D:=B^.Pow2^[I];
+  For J:=0 To B^.Dim-1 Do Begin Pr:=Vc^[J]*Num^[J]; D:=D-Pr; End;
+  If Dist>D Then Begin Entry:=I; Dist:=D; End;
+ End;
+ VGPutCode(Bk,Entry);
+ VGPutVector:=Entry;
+End;
+
+Procedure VGResidueEncode(Coeffs: PVGS; Samples: LongInt);
+Var Pass,I,J,P,K,Partitions,Psize,Entry,NBook,S,A1,B1,A2,B2,Dim,Ent,Ci: LongInt;
+ Classes: Array[0..63] Of LongInt; Max1,Max2,A: Single; Vec: Array[0..7] Of
+  Single; B: ^TVGBook;
+Begin
+ Psize:=32; Partitions:=50;
+ For P:=0 To Partitions-1 Do Begin
+  Max1:=0.0; Max2:=0.0; S:=P*Psize;
+  K:=S;
+  While K<S+Psize Do Begin
+   A:=Abs(Coeffs^[K Div 2]); If A>Max1 Then Max1:=A;
+   A:=Abs(Coeffs^[Samples+K Div 2]); If A>Max2 Then Max2:=A;
+   Inc(K,2);
+  End;
+  I:=0;
+  While I<9 Do Begin
+   If (Max1<VGRMax[I,0]) And (Max2<VGRMax[I,1]) Then Break;
+   Inc(I);
+  End;
+  Classes[P]:=I;
+ End;
+ For Pass:=0 To 7 Do Begin
+  P:=0;
+  While P<Partitions Do Begin
+   If Pass=0 Then Begin
+    Entry:=0;
+    For I:=0 To 1 Do Begin Entry:=Entry*10; Entry:=Entry+Classes[P+I]; End;
+    VGPutCode(15,Entry);
+   End;
+   I:=0;
+   While (I<2) And (P<Partitions) Do Begin
+    NBook:=VGResBooks[Classes[P],Pass];
+    If NBook<>-1 Then Begin
+     B:=@VGBooks[NBook];
+     S:=P*Psize; A1:=(S Mod 2)*Samples; B1:=S Div 2;
+     S:=2*Samples;
+     K:=0;
+     While K<Psize Do Begin
+      A2:=A1; B2:=B1;
+      For Dim:=0 To B^.Dim-1 Do Begin
+       Vec[Dim]:=Coeffs^[A2+B2];
+       Inc(A2,Samples);
+       If A2=S Then Begin A2:=0; Inc(B2); End;
+      End;
+      Ent:=VGPutVector(NBook,PVGS(@Vec));
+      For Dim:=0 To B^.Dim-1 Do Begin
+       Coeffs^[A1+B1]:=Coeffs^[A1+B1]-B^.Vec^[Ent*B^.Dim+Dim];
+       Inc(A1,Samples);
+       If A1=S Then Begin A1:=0; Inc(B1); End;
+      End;
+      Inc(K,B^.Dim);
+     End;
+    End;
+    Inc(I); Inc(P);
+   End;
+  End;
+ End;
+End;
+
+{ ---- Ogg : ecriture de pages (oggenc.c) ---- }
+Type
+ TVGPage=Record StartG,Gran: Int64; Flags,Segs,Size: LongInt; Seg: Array[0..254]
+  Of Byte; Data: Array[0..65024] Of Byte; End;
+Var
+ VGPg: TVGPage; VGPgHave: Boolean; VGPend: ^TVGPage; VGPendOk: Boolean;
+ VGOut: PEABuffer; VGOutLen,VGOutCap: LongInt; VGSeq,VGSerial,VGRate: LongInt;
+
+Function VGRescale(A: Int64): Int64;
+Var Q: Int64;
+Begin
+ If A<0 Then Begin Q:=(-A)*1000000+VGRate Div 2; VGRescale:=-(Q Div VGRate); End
+ Else Begin Q:=A*1000000+VGRate Div 2; VGRescale:=Q Div VGRate; End;
+End;
+
+Procedure VGOutBytes(Const P; N: LongInt);
+Begin
+ If VGOutLen+N>VGOutCap Then Begin
+  While VGOutLen+N>VGOutCap Do VGOutCap:=VGOutCap*2;
+  ReallocMem(Pointer(VGOut),VGOutCap);
+ End;
+ Move(P,VGOut^[VGOutLen],N); Inc(VGOutLen,N);
+End;
+
+Procedure VGWritePage(Var Pg: TVGPage; Extra: LongInt);
+Var H: Array[0..300] Of Byte; N,I: LongInt; Crc: LongWord; G: Int64;
+Begin
+ H[0]:=79; H[1]:=103; H[2]:=103; H[3]:=83; H[4]:=0; H[5]:=Pg.Flags Or Extra;
+ G:=Pg.Gran; For I:=0 To 7 Do Begin H[6+I]:=G And 255; G:=G Shr 8; End;
+ For I:=0 To 3 Do H[14+I]:=(VGSerial Shr (8*I)) And 255;
+ For I:=0 To 3 Do H[18+I]:=(VGSeq Shr (8*I)) And 255;
+ Inc(VGSeq);
+ H[22]:=0; H[23]:=0; H[24]:=0; H[25]:=0; H[26]:=Pg.Segs;
+ For I:=0 To Pg.Segs-1 Do H[27+I]:=Pg.Seg[I];
+ N:=27+Pg.Segs;
+ Crc:=0;
+ For I:=0 To N-1 Do Crc:=(Crc Shl 8) Xor VGCrcTab[((Crc Shr 24) Xor H[I]) And
+  255];
+ For I:=0 To Pg.Size-1 Do Crc:=(Crc Shl 8) Xor VGCrcTab[((Crc Shr 24) Xor
+  Pg.Data[I]) And 255];
+ H[25]:=(Crc Shr 24) And 255; H[24]:=(Crc Shr 16) And 255; H[23]:=(Crc Shr 8)
+  And 255; H[22]:=Crc And 255;
+ VGOutBytes(H,N); VGOutBytes(Pg.Data,Pg.Size);
+End;
+
+Procedure VGBufferPage;
+Begin
+ If VGPendOk Then VGWritePage(VGPend^,0);
+ Move(VGPg,VGPend^,SizeOf(TVGPage)); VGPendOk:=True;
+ VGPg.StartG:=VGPg.Gran;
+ VGPg.Gran:=-1; VGPg.Flags:=0; VGPg.Segs:=0; VGPg.Size:=0;
+End;
+
+Procedure VGOggData(P: PEABuffer; Size: LongInt; Granule: Int64; Header:
+ Boolean);
+Var Total,I,Segments,Len,Off: LongInt; St,Nx: Int64;
+Begin
+ If (Not Header) And (VGPg.Size>0) And (65025-VGPg.Size<Size) Then VGBufferPage;
+ Total:=Size Div 255+1; I:=0; Off:=0;
+ While I<Total Do Begin
+  Segments:=Total-I; If Segments>255-VGPg.Segs Then Segments:=255-VGPg.Segs;
+  If (I>0) And (VGPg.Segs=0) Then VGPg.Flags:=VGPg.Flags Or 1;
+  If Segments>1 Then FillChar(VGPg.Seg[VGPg.Segs],Segments-1,255);
+  Inc(VGPg.Segs,Segments-1);
+  Len:=Segments*255; If Size<Len Then Len:=Size;
+  VGPg.Seg[VGPg.Segs]:=Len-(Segments-1)*255; Inc(VGPg.Segs);
+  If Len>0 Then Move(P^[Off],VGPg.Data[VGPg.Size],Len);
+  Inc(Off,Len); Dec(Size,Len); Inc(I,Segments); Inc(VGPg.Size,Len);
+  If I=Total Then VGPg.Gran:=Granule;
+  St:=VGRescale(VGPg.StartG); Nx:=VGRescale(VGPg.Gran);
+  If VGPg.Segs=255 Then VGBufferPage
+  Else If Not Header Then Begin
+   If Nx-St>=1000000 Then VGBufferPage;
+  End;
+ End;
+End;
+
+{ ---- boucle d'encodage ---- }
+Function VGLE32(Var B: Array Of Byte; P: LongInt): LongInt;
+Begin VGLE32:=B[P]+B[P+1]*256+B[P+2]*65536+B[P+3]*16777216; End;
+
+Procedure EncodeVorbisNative(Const Source,Target: String);
+Var
+ Hd: Array[0..63] Of Byte; Limit,At,Sz,DataStart,DataSize,Rate,Ch,Fmt,BitsPer,N,
+  I,J,K,C: LongInt;
+ Tag: String[4]; Rd: Array[0..2047] Of Byte;
+ P,Frames,Full,R,Jn,Jp,IdLen,SetLen,CmtLen,Lg,Pos,Q: LongInt;
+ IdBuf,SetBuf,Cmt,Pk: PEABuffer; Vendor,Enc: String; Sam,Coef,Flr,Cur,Prv: PVGS;
+  Win: PVGS; Scale,V: Single;
+ Posts: Array[0..28] Of Word; Gr: Int64; Mg,An,Aa: Single; Qual: Single;
+  StartSet: Boolean;
+Procedure PutLE(Var B: PEABuffer; Var L: LongInt; V: LongInt);
+Var Z: LongInt;
+Begin For Z:=0 To 3 Do Begin B^[L]:=(V Shr (8*Z)) And 255; Inc(L); End; End;
+Begin
+ VGInit; VGEncInit;
+ OpenRead(Source); Limit:=InputSize;
+ If Limit<12 Then Fail('vorbis: WAV tronque.');
+ ReadAt(0,Hd,12);
+ If (Hd[0]<>82) Or (Hd[1]<>73) Or (Hd[2]<>70) Or (Hd[3]<>70) Then Fail(
+  'vorbis: WAV RIFF requis.');
+ At:=12; Ch:=0; Rate:=0; DataStart:=0; DataSize:=-1; BitsPer:=0; Fmt:=0;
+ While At+8<=Limit Do Begin
+  ReadAt(At,Hd,8); Sz:=VGLE32(Hd,4); Tag:=Chr(Hd[0])+Chr(Hd[1])+Chr(Hd[2])+Chr(
+   Hd[3]); Inc(At,8);
+  If (Sz<0) Or (Sz>Limit-At) Then Sz:=Limit-At;
+  If Tag='fmt ' Then Begin
+   ReadAt(At,Hd,16); Fmt:=Hd[0]+Hd[1]*256; Ch:=Hd[2]+Hd[3]*256; Rate:=VGLE32(Hd,
+    4); BitsPer:=Hd[14]+Hd[15]*256;
+  End Else If Tag='data' Then Begin DataStart:=At; DataSize:=Sz; Break; End;
+  Inc(At,Sz+(Sz And 1));
+ End;
+ If ((Fmt<>1) And (Fmt<>$FFFE)) Or (BitsPer<>16) Or (Ch<1) Or (DataSize<=0) Or (
+  Rate<=0) Then Fail('vorbis: PCM 16 bits requis.');
+ If Ch<>2 Then Fail('Current FFmpeg Vorbis encoder only supports 2 channels.');
+ N:=DataSize Div (2*Ch);
+ If N<1 Then Fail('vorbis: aucun echantillon.');
+ Frames:=(N+63) Div 64; P:=Frames*64;
+ VGBuildHeaders(Ch,Rate,IdBuf,IdLen,SetBuf,SetLen);
+ { commentaire du muxeur Ogg }
+ If VGBitExact Then Vendor:='ffmpeg' Else Vendor:='Lavf60.16.100';
+ If VGBitExact Or VGCodecBX Then Enc:='encoder=Lavc vorbis' Else Enc:=
+  'encoder=Lavc60.31.102 vorbis';
+ CmtLen:=7+4+Length(Vendor)+4+4+Length(Enc)+1;
+ GetMem(Cmt,CmtLen+8); I:=0;
+ Cmt^[0]:=3; For J:=1 To 6 Do Cmt^[J]:=Ord('vorbis'[J]); I:=7;
+ PutLE(Cmt,I,Length(Vendor)); For J:=1 To Length(Vendor) Do Begin Cmt^[I]:=Ord(
+  Vendor[J]); Inc(I); End;
+ PutLE(Cmt,I,1); PutLE(Cmt,I,Length(Enc)); For J:=1 To Length(Enc) Do Begin
+  Cmt^[I]:=Ord(Enc[J]); Inc(I); End;
+ Cmt^[I]:=1; Inc(I);
+ { Ogg }
+ VGRate:=Rate; VGSeq:=0; VGOutLen:=0; VGOutCap:=65536; GetMem(VGOut,VGOutCap);
+ If VGBitExact Then VGSerial:=0 Else VGSerial:=LongInt((Int64(Random(65536))*
+  65536+Random(65536)) And $7FFFFFFF);
+ GetMem(VGPend,SizeOf(TVGPage)); VGPendOk:=False;
+ FillChar(VGPg,SizeOf(VGPg),0); VGPg.Gran:=-1;
+ VGPg.Gran:=0; VGPg.StartG:=0;
+ VGOggData(IdBuf,IdLen,0,True);
+ VGPg.Flags:=VGPg.Flags Or 2; VGBufferPage;
+ VGOggData(Cmt,I,0,True); VGOggData(SetBuf,SetLen,0,True);
+ VGBufferPage;
+ StartSet:=False;
+ { fenetres et MDCT }
+ Lg:=VGMdctFor(0,1024);
+ Win:=VGWin[5];
+ GetMem(Sam,Ch*2048*4); GetMem(Coef,Ch*1024*4); GetMem(Flr,Ch*1024*4); GetMem(
+  Cur,Ch*1024*4); GetMem(Prv,Ch*1024*4);
+ FillChar(Prv^,Ch*1024*4,0);
+ Full:=P Div 1024; R:=P Mod 1024; Jn:=Full+1; If R>0 Then Inc(Jn);
+ VGWBits:=0; VGWLimit:=8192*8;
+ GetMem(Pk,8192+16);
+ Scale:=1.0/512.0;
+ If VGQuality<=0 Then Qual:=64.0 Else Qual:=VGQuality;
+ For Jp:=0 To Jn-1 Do Begin
+  { bloc courant : 1024 echantillons par voie lus dans le fichier (zeros au-dela
+   de la fin) }
+  FillChar(Cur^,Ch*1024*4,0);
+  Q:=0;
+  While (Q<1024) And (Jp*1024+Q<N) Do Begin
+   Sz:=1024-Q; If Jp*1024+Q+Sz>N Then Sz:=N-(Jp*1024+Q);
+   If Sz>512 Then Sz:=512;
+   ReadAt(DataStart+(Jp*1024+Q)*2*Ch,Rd,Sz*2*Ch);
+   For I:=0 To Sz-1 Do
+    For C:=0 To Ch-1 Do Begin
+     K:=Rd[(I*Ch+C)*2]+Rd[(I*Ch+C)*2+1]*256; If K>=32768 Then Dec(K,65536);
+     V:=K; V:=V*(1.0/32768.0);
+     Cur^[C*1024+Q+I]:=V;
+    End;
+   Inc(Q,Sz);
+  End;
+  For C:=0 To Ch-1 Do Begin
+   For I:=0 To 1023 Do Begin
+    V:=Prv^[C*1024+I];
+    V:=V*Win^[I]; V:=V*Scale;
+    Sam^[C*2048+I]:=V;
+    V:=Cur^[C*1024+I];
+    V:=V*Win^[1023-I]; V:=V*Scale;
+    Sam^[C*2048+1024+I]:=V;
+   End;
+   VGMdctFwd(Lg,PVGS(@Sam^[C*2048]),PVGS(@Coef^[C*1024]));
+  End;
+  FillChar(Pk^,8192+16,0); VGW:=Pk; VGWBits:=0; VGWLimit:=8192*8;
+  VGPut(0,1); VGPut(1,1); VGPut(1,1); VGPut(1,1);
+  VGQuality:=Qual;
+  For C:=0 To Ch-1 Do Begin
+   VGFloorFit(PVGS(@Coef^[C*1024]),Posts);
+   VGFloorEncode(Posts,PVGS(@Flr^[C*1024]),1024);
+  End;
+  For I:=0 To Ch*1024-1 Do Coef^[I]:=Coef^[I]/Flr^[I];
+  For I:=0 To 1023 Do Begin
+   Aa:=Coef^[1024+I];
+   An:=Aa; Mg:=Coef^[I];
+   An:=An-Mg;
+   If Mg>0 Then An:=-An;
+   If An<0 Then Mg:=Aa;
+   Coef^[1024+I]:=An; Coef^[I]:=Mg;
+  End;
+  VGResidueEncode(Coef,1024);
+  Move(Cur^,Prv^,Ch*1024*4);
+  Sz:=(VGWBits+7) Shr 3;
+  If Jp<Jn-1 Then Gr:=Int64(Jp)*1024 Else Gr:=P;
+  If Jp=Jn-1 Then Begin If Gr>P Then Gr:=P; End;
+  If Not StartSet Then Begin VGPg.StartG:=-1024; StartSet:=True; End;
+  VGOggData(Pk,Sz,Gr,False);
+ End;
+ If VGPg.Size>0 Then VGBufferPage;
+ VGWritePage(VGPend^,4);
+ CloseRead;
+ OpenWrite(Target);
+ I:=0; While I<VGOutLen Do Begin If VGOutLen-I>32768 Then K:=32768 Else K:=
+  VGOutLen-I; WriteBytes(VGOut^[I],K); Inc(I,K); End;
+ CloseWrite;
+End;
+
+{ ---- decodeur vorbis (vorbisdec.c) ---- }
+Type
+ TVGDBook=Record Dim,Lookup,N: LongInt; Vec: PVGS; Trie: PVGI; NNodes: LongInt;
+  End;
+ TVGDFloor=Record
+  Typ,F0Order,F0Rate,F0Bark,F0AmpBits,F0AmpOff,F0NBooks: LongInt; F0Books:
+   Array[0..15] Of Byte; F0Map: Array[0..1] Of PVGI; F0MapSize: Array[0..1] Of
+   LongInt; F0Lsp: PVGS;
+  Partitions,Mult,XDim: LongInt;
+  PCls: Array[0..31] Of Byte; CDim,CSub,CMaster: Array[0..15] Of Byte; SBooks:
+   Array[0..15,0..7] Of SmallInt;
+  List: TVGFlA;
+ End;
+ TVGDRes=Record
+  Typ,Begin_,End_,PSize,NCls,ClassBook,MaxPass,Ptns: LongInt; Books: Array[
+   0..63,0..7] Of SmallInt; Classifs: PEABuffer;
+ End;
+ TVGDMap=Record
+  Submaps,Coupling: LongInt; Mag,Ang: Array[0..255] Of Byte; Mux: Array[0..255]
+   Of Byte; SubFloor,SubRes: Array[0..15] Of Byte;
+ End;
+Var
+ VGDBooks: Array[0..255] Of TVGDBook; VGDNBooks: LongInt;
+ VGDFloors: Array[0..63] Of TVGDFloor; VGDNFloors: LongInt;
+ VGDRes: Array[0..63] Of TVGDRes; VGDNRes: LongInt;
+ VGDMaps: Array[0..63] Of TVGDMap; VGDNMaps: LongInt;
+ VGDModeFlag,VGDModeMap: Array[0..63] Of LongInt; VGDNModes: LongInt;
+ VGDCh,VGDRate,VGDBs0,VGDBs1: LongInt;
+ VGDPkt: PEABuffer; VGDPLen,VGDPos,VGDExtra: LongInt;
+ VGDChanRes,VGDSaved: PVGS; VGDFloorBuf: Array[0..254] Of PVGS;
+ VGDPrevWin: LongInt; VGDFirst: Boolean; VGDLg: Array[0..1] Of LongInt;
+ VGDTmpBits: Array[0..65535] Of Byte;
+ VGDMode: LongInt;
+ VGDOffs: Array[0..7,0..7] Of Byte;
+
+Const
+ VGDChOff: Array[0..7,0..7] Of Byte=((0,0,0,0,0,0,0,0),(0,1,0,0,0,0,0,0),(0,2,1,
+  0,0,0,0,0),(0,1,2,3,0,0,0,0),
+  (0,2,1,3,4,0,0,0),(0,2,1,5,3,4,0,0),(0,2,1,6,5,3,4,0),(0,2,1,7,5,6,3,4));
+
+Var VGDSoft,VGDErr: Boolean;
+
+Procedure VGDBad(Const S: String);
+Begin
+ If VGDSoft Then Begin VGDErr:=True; Exit; End;
+ Fail('vorbis: '+S);
+End;
+
+Function VGDByte(P: LongInt): LongWord;
+Begin
+ If (P>=0) And (P<VGDPLen+VGDExtra) Then VGDByte:=VGDPkt^[P] Else VGDByte:=0;
+End;
+
+Function VGDPeek32: LongWord;
+Var B,I: LongInt; Acc: Int64;
+Begin
+ B:=VGDPos Shr 3; Acc:=0;
+ For I:=0 To 4 Do Acc:=Acc Or (Int64(VGDByte(B+I)) Shl (8*I));
+ Acc:=Acc Shr (VGDPos And 7);
+ VGDPeek32:=LongWord(Acc And $FFFFFFFF);
+End;
+
+Function VGDBits(N: LongInt): LongWord;
+Var V: LongWord;
+Begin
+ If N<=0 Then Begin VGDBits:=0; Exit; End;
+ V:=VGDPeek32;
+ If N<32 Then V:=V And ((LongWord(1) Shl N)-1);
+ Inc(VGDPos,N);
+ VGDBits:=V;
+End;
+
+Procedure VGDSkip(N: LongInt);
+Begin
+ Inc(VGDPos,N);
+End;
+
+Function VGDFloat(V: LongWord): Single;
+Var M,P2: Double; E: LongInt; Q: Int64;
+Begin
+ M:=V And $1FFFFF; E:=LongInt((V And $7FE00000) Shr 21);
+ If (V And $80000000)<>0 Then M:=-M;
+ E:=E-788;
+ Q:=Int64(E+1023) Shl 52;
+ Move(Q,P2,8);
+ P2:=M*P2;
+ VGDFloat:=P2;
+End;
+
+{ decodage Huffman : arbre binaire, bits lus dans l'ordre du flux }
+Function VGDVlc(Var B: TVGDBook): LongInt;
+Var W: LongWord; Node,I,C: LongInt;
+Begin
+ W:=VGDPeek32; Node:=0;
+ For I:=0 To 31 Do Begin
+  C:=B.Trie^[Node*2+LongInt((W Shr I) And 1)];
+  If C=0 Then Begin VGDVlc:=-1; Exit; End;
+  If C<0 Then Begin Inc(VGDPos,I+1); VGDVlc:=-C-1; Exit; End;
+  Node:=C;
+ End;
+ VGDVlc:=-1;
+End;
+
+Procedure VGDFreeSetup;
+Var I: LongInt;
+Begin
+ For I:=0 To VGDNFloors-1 Do If VGDFloors[I].Typ=0 Then Begin
+  If VGDFloors[I].F0Map[0]<>Nil Then FreeMem(VGDFloors[I].F0Map[0]);
+  If VGDFloors[I].F0Map[1]<>Nil Then FreeMem(VGDFloors[I].F0Map[1]);
+  If VGDFloors[I].F0Lsp<>Nil Then FreeMem(VGDFloors[I].F0Lsp);
+  VGDFloors[I].F0Map[0]:=Nil; VGDFloors[I].F0Map[1]:=Nil; VGDFloors[I].F0Lsp:=
+   Nil;
+ End;
+ VGDNFloors:=0;
+ For I:=0 To VGDNBooks-1 Do Begin
+  If VGDBooks[I].Vec<>Nil Then FreeMem(VGDBooks[I].Vec);
+  If VGDBooks[I].Trie<>Nil Then FreeMem(VGDBooks[I].Trie);
+  VGDBooks[I].Vec:=Nil; VGDBooks[I].Trie:=Nil;
+ End;
+ For I:=0 To VGDNRes-1 Do If VGDRes[I].Classifs<>Nil Then Begin FreeMem(VGDRes[
+  I].Classifs); VGDRes[I].Classifs:=Nil; End;
+ VGDNBooks:=0; VGDNRes:=0;
+End;
+
+Procedure VGDParseId(P: PEABuffer; Len: LongInt);
+Var Bl0,Bl1: LongInt; I: LongInt;
+Begin
+ VGDPkt:=P; VGDPLen:=Len; VGDPos:=0;
+ If VGDBits(8)<>1 Then Begin VGDBad('premier en-tete non identification.');
+  Exit; End;
+ For I:=1 To 6 Do If VGDBits(8)<>LongWord(Ord('vorbis'[I])) Then Begin VGDBad(
+  'signature de l''en-tete d''identification absente.'); Exit; End;
+ VGDSkip(32);
+ VGDCh:=VGDBits(8);
+ If VGDCh<=0 Then Begin VGDBad('nombre de canaux invalide.'); Exit; End;
+ VGDRate:=VGDBits(32);
+ If VGDRate<=0 Then Begin VGDBad('frequence invalide.'); Exit; End;
+ VGDSkip(96);
+ Bl0:=VGDBits(4); Bl1:=VGDBits(4);
+ If (Bl0>13) Or (Bl0<6) Or (Bl1>13) Or (Bl1<6) Or (Bl1<Bl0) Then Begin VGDBad(
+  'taille de bloc illegale.'); Exit; End;
+ VGDBs0:=1 Shl Bl0; VGDBs1:=1 Shl Bl1;
+ If VGDBits(1)=0 Then Begin VGDBad(
+  'bit de cadrage de l''en-tete d''identification absent.'); Exit; End;
+ GetMem(VGDChanRes,Int64(VGDBs1 Div 2)*VGDCh*4+16);
+ GetMem(VGDSaved,Int64(VGDBs1 Div 4)*VGDCh*4+16);
+ FillChar(VGDSaved^,Int64(VGDBs1 Div 4)*VGDCh*4,0);
+ For I:=0 To VGDCh-1 Do Begin GetMem(VGDFloorBuf[I],(VGDBs1 Div 2)*4+16); End;
+ VGDPrevWin:=-1;
+ VGDLg[0]:=VGMdctFor(1,VGDBs0 Shr 1); VGDLg[1]:=VGMdctFor(1,VGDBs1 Shr 1);
+End;
+
+{ ---- plancher 0 (vorbisdec.c : create_map, vorbis_floor0_decode) ---- }
+Function VGDBark(X: Single): Double;
+Var K1,K2,K3,K4,K5,A,B,C: Single; T1,T2: Double;
+Begin
+ K1:=0.00074; K2:=13.1; K3:=1.85e-8; K4:=2.24; K5:=1e-4;
+ A:=K1*X; T1:=Double(K2)*ArcTan(Double(A));
+ B:=K3*X; B:=B*X; T2:=Double(K4)*ArcTan(Double(B));
+ C:=K5*X;
+ T1:=T1+T2; T1:=T1+Double(C);
+ VGDBark:=T1;
+End;
+
+Function VGDBits64(N: LongInt): QWord;
+Var Lo,Hi: QWord;
+Begin
+ If N<=32 Then VGDBits64:=VGDBits(N)
+ Else Begin Lo:=VGDBits(32); Hi:=VGDBits(N-32); VGDBits64:=Lo Or (Hi Shl 32);
+  End;
+End;
+
+Function VGDQToD(V: QWord): Double;
+Var I: Int64; D: Double;
+Begin
+ If V>=QWord($8000000000000000) Then I:=Int64((V Shr 1) Or (V And 1)) Else I:=
+  Int64(V);
+ D:=I;
+ If V>=QWord($8000000000000000) Then D:=D*2.0;
+ VGDQToD:=D;
+End;
+
+Procedure VGDParseFloor0(Var F: TVGDFloor);
+Var I,Bi,Bd,MaxDim,Bl,N,Idx: LongInt; Fa,Fb,Fh: Single; D,E: Double;
+Begin
+ F.F0Order:=VGDBits(8);
+ If F.F0Order=0 Then Begin VGDBad('Floor 0 order is 0.'); Exit; End;
+ F.F0Rate:=VGDBits(16);
+ If F.F0Rate=0 Then Begin VGDBad('Floor 0 rate is 0.'); Exit; End;
+ F.F0Bark:=VGDBits(16);
+ If F.F0Bark=0 Then Begin VGDBad('Floor 0 bark map size is 0.'); Exit; End;
+ F.F0AmpBits:=VGDBits(6); F.F0AmpOff:=VGDBits(8); F.F0NBooks:=VGDBits(4)+1;
+ MaxDim:=0;
+ For I:=0 To F.F0NBooks-1 Do Begin
+  Bi:=VGDBits(8);
+  If Bi>=VGDNBooks Then Begin VGDBad('indice de livre hors limites.'); Exit;
+   End;
+  F.F0Books[I]:=Bi;
+  Bd:=VGDBooks[Bi].Dim; If Bd>MaxDim Then MaxDim:=Bd;
+ End;
+ For Bl:=0 To 1 Do Begin
+  If Bl=0 Then N:=VGDBs0 Div 2 Else N:=VGDBs1 Div 2;
+  GetMem(F.F0Map[Bl],(Int64(N)+1)*4+16);
+  Fh:=F.F0Rate; Fh:=Fh/2.0;
+  D:=F.F0Bark; D:=D/VGDBark(Fh);
+  For Idx:=0 To N-1 Do Begin
+   Fa:=F.F0Rate*Idx; Fb:=2.0; Fb:=Fb*N; Fa:=Fa/Fb;
+   E:=VGDBark(Fa)*D;
+   If E<-2147483648.0 Then E:=-2147483648.0;
+   If E>2147483647.0 Then E:=2147483647.0;
+   F.F0Map[Bl]^[Idx]:=Trunc(Int(E));
+   If F.F0Bark-1<F.F0Map[Bl]^[Idx] Then F.F0Map[Bl]^[Idx]:=F.F0Bark-1;
+  End;
+  F.F0Map[Bl]^[N]:=-1;
+  F.F0MapSize[Bl]:=N;
+ End;
+ GetMem(F.F0Lsp,(Int64(F.F0Order)+1+MaxDim)*4+16);
+End;
+
+{ retourne 0 si utilise, 1 si silence, <0 si erreur }
+Function VGDFloor0(Var F: TVGDFloor; Vec: PVGS; BlockFlag: LongInt): LongInt;
+Var
+ Amp,Lim,Prod: QWord; Last,P,Q,Wstep,TwoCos,Cv,Tc,Two,Four,Half,K9: Single;
+ BookIdx,LspLen,Idx,VecOff,Order,I,J,IterCond,Dim: LongInt; CB: ^TVGDBook; Lsp:
+  PVGS; Dd,Num,Den,Sq,Ex: Double;
+Begin
+ VGDFloor0:=1;
+ If F.F0AmpBits=0 Then Exit;
+ Amp:=VGDBits64(F.F0AmpBits);
+ If Amp=0 Then Exit;
+ Lsp:=F.F0Lsp; Last:=0;
+ BookIdx:=VGDBits(VGIlog(F.F0NBooks));
+ If BookIdx>=F.F0NBooks Then BookIdx:=0;
+ CB:=@VGDBooks[F.F0Books[BookIdx]];
+ If CB^.Vec=Nil Then Begin VGDFloor0:=-1; Exit; End;
+ Dim:=CB^.Dim; LspLen:=0; Order:=F.F0Order;
+ While LspLen<Order Do Begin
+  VecOff:=VGDVlc(CB^);
+  If VecOff<0 Then Begin VGDFloor0:=-1; Exit; End;
+  VecOff:=VecOff*Dim;
+  For Idx:=0 To Dim-1 Do Begin Cv:=CB^.Vec^[VecOff+Idx]; Cv:=Cv+Last; Lsp^[
+   LspLen+Idx]:=Cv; End;
+  Last:=Lsp^[LspLen+Dim-1];
+  Inc(LspLen,Dim);
+ End;
+ Dd:=Pi; Dd:=Dd/F.F0Bark; Wstep:=Dd;
+ Two:=2.0; Four:=4.0; Half:=0.5; K9:=0.11512925;
+ For I:=0 To Order-1 Do Begin Dd:=Lsp^[I]; Dd:=Cos(Dd); Dd:=Double(Two)*Dd;
+  Lsp^[I]:=Dd; End;
+ I:=0;
+ While I<F.F0MapSize[BlockFlag] Do Begin
+  IterCond:=F.F0Map[BlockFlag]^[I];
+  P:=Half; Q:=Half;
+  Tc:=IterCond; Tc:=Wstep*Tc; Dd:=Tc; Dd:=Cos(Dd); Dd:=Double(Two)*Dd; TwoCos:=
+   Dd;
+  J:=0;
+  While J+1<Order Do Begin
+   Cv:=Lsp^[J]-TwoCos; Q:=Q*Cv;
+   Cv:=Lsp^[J+1]-TwoCos; P:=P*Cv;
+   Inc(J,2);
+  End;
+  If J=Order Then Begin
+   Cv:=Two-TwoCos; Cv:=P*Cv; P:=P*Cv;
+   Cv:=Two+TwoCos; Cv:=Q*Cv; Q:=Q*Cv;
+  End Else Begin
+   Cv:=TwoCos-Lsp^[J]; Q:=Q*Cv;
+   Cv:=TwoCos*TwoCos; Cv:=Four-Cv; Cv:=P*Cv; P:=P*Cv;
+   Q:=Q*Q;
+  End;
+  Cv:=P+Q;
+  If Cv=0.0 Then Begin VGDFloor0:=-1; Exit; End;
+  Sq:=Cv; Sq:=Sqrt(Sq);
+  Prod:=Amp*QWord(F.F0AmpOff);
+  Num:=VGDQToD(Prod);
+  Lim:=(QWord(1) Shl F.F0AmpBits)-1;
+  Den:=VGDQToD(Lim); Den:=Den*Sq;
+  Ex:=Num/Den; Ex:=Ex-F.F0AmpOff; Ex:=Ex*Double(K9);
+  Q:=Exp(Ex);
+  Repeat
+   Vec^[I]:=Q; Inc(I);
+  Until F.F0Map[BlockFlag]^[I]<>IterCond;
+ End;
+ VGDFloor0:=0;
+End;
+
+Procedure VGDParseSetup(P: PEABuffer; Len: LongInt);
+Var
+ Cb,I,J,K,Entries,Used,Ordered,Sparse,CurE,CurL,Num,LookV,ValBits,SeqP,Ce,Dim,
+  Lu,Maxc,Cls,Rb,RMax,N: LongInt;
+ Mn,Dl,Last,Cv: Single; Codes: PVGL; Mult: PVGI; Tmp,Bits8: LongWord; Total,
+  Nodes,Node,Bit,C2,Ln: LongInt;
+ B: ^TVGDBook; F: ^TVGDFloor; R: ^TVGDRes; Mp: ^TVGDMap; Cascade: Array[0..63]
+  Of Byte; Hi,Lo: LongInt;
+Begin
+ VGDPkt:=P; VGDPLen:=Len; VGDPos:=0;
+ If VGDBits(8)<>5 Then Begin VGDBad('troisieme en-tete non setup.'); Exit; End;
+ For I:=1 To 6 Do If VGDBits(8)<>LongWord(Ord('vorbis'[I])) Then Begin VGDBad(
+  'signature de l''en-tete setup absente.'); Exit; End;
+ VGDNBooks:=VGDBits(8)+1;
+ For I:=0 To VGDNBooks-1 Do Begin VGDBooks[I].Vec:=Nil; VGDBooks[I].Trie:=Nil;
+  End;
+ GetMem(Codes,65536*4+8); GetMem(Mult,65536*4+8);
+ FillChar(VGDTmpBits,SizeOf(VGDTmpBits),0);
+ For Cb:=0 To VGDNBooks-1 Do Begin
+  B:=@VGDBooks[Cb];
+  If VGDBits(24)<>$564342 Then Begin VGDBad('livre de code corrompu.'); Exit;
+   End;
+  B^.Dim:=VGDBits(16);
+  If (B^.Dim>16) Or (B^.Dim=0) Then Begin VGDBad(
+   'dimension de livre invalide.'); Exit; End;
+  Entries:=VGDBits(24);
+  If Entries>65536 Then Begin VGDBad('trop d''entrees dans un livre.'); Exit;
+   End;
+  Ordered:=VGDBits(1); Used:=0;
+  If Ordered=0 Then Begin
+   Sparse:=VGDBits(1);
+   If Sparse<>0 Then Begin
+    Used:=0;
+    For Ce:=0 To Entries-1 Do
+     If VGDBits(1)<>0 Then Begin VGDTmpBits[Ce]:=VGDBits(5)+1; Inc(Used); End
+      Else VGDTmpBits[Ce]:=0;
+   End Else Begin
+    Used:=Entries;
+    For Ce:=0 To Entries-1 Do VGDTmpBits[Ce]:=VGDBits(5)+1;
+   End;
+  End Else Begin
+   CurE:=0; CurL:=VGDBits(5)+1; Used:=Entries;
+   While (CurE<Used) And (CurL<=32) Do Begin
+    Num:=VGDBits(VGIlog(Entries-CurE));
+    For I:=CurE To Num+CurE-1 Do If I<Used Then VGDTmpBits[I]:=CurL;
+    Inc(CurE,Num); Inc(CurL);
+   End;
+   If CurE>Used Then Begin VGDBad('plus de longueurs que de codes.'); Exit; End;
+  End;
+  B^.Lookup:=VGDBits(4);
+  B^.N:=Entries;
+  If B^.Lookup=1 Then Begin
+   LookV:=VGNthRoot(Entries,B^.Dim);
+   Mn:=VGDFloat(VGDBits(32)); Dl:=VGDFloat(VGDBits(32));
+   ValBits:=VGDBits(4)+1; SeqP:=VGDBits(1);
+   Move(Mn,Tmp,4); Move(Dl,Bits8,4);
+   If (((Tmp Shr 23) And 255)=255) Or (((Bits8 Shr 23) And 255)=255) Then Begin
+    VGDBad('valeurs de livre non finies.'); Exit; End;
+   For I:=0 To LookV-1 Do Mult^[I]:=VGDBits(ValBits);
+   If Used<>0 Then Begin
+    GetMem(B^.Vec,Int64(Used)*B^.Dim*4+8);
+    FillChar(B^.Vec^,Int64(Used)*B^.Dim*4,0);
+   End;
+   J:=0;
+   For I:=0 To Entries-1 Do Begin
+    If VGDTmpBits[I]<>0 Then Begin
+     Last:=0.0; Lu:=I;
+     For K:=0 To B^.Dim-1 Do Begin
+      Num:=Lu Mod LookV;
+      Cv:=Mult^[Num]; Cv:=Cv*Dl; Cv:=Cv+Mn; Cv:=Cv+Last;
+      B^.Vec^[J*B^.Dim+K]:=Cv;
+      If SeqP<>0 Then Last:=Cv;
+      Lu:=Lu Div LookV;
+     End;
+     VGDTmpBits[J]:=VGDTmpBits[I];
+     Inc(J);
+    End;
+   End;
+   If J<>Used Then Begin VGDBad('erreur de construction des vecteurs.'); Exit;
+    End;
+   Entries:=Used;
+  End Else If B^.Lookup>=2 Then Begin VGDBad(
+   'type de lookup non pris en charge.'); Exit; End;
+  If Not VGLen2Vlc(PEABuffer(@VGDTmpBits),Codes,Entries) Then Begin VGDBad(
+   'longueurs de code invalides.'); Exit; End;
+  { arbre de decodage }
+  Total:=1;
+  For I:=0 To Entries-1 Do Inc(Total,VGDTmpBits[I]);
+  GetMem(B^.Trie,Int64(Total)*2*4+16); FillChar(B^.Trie^,Int64(Total)*2*4,0);
+  Nodes:=1;
+  For I:=0 To Entries-1 Do If VGDTmpBits[I]<>0 Then Begin
+   Node:=0; Ln:=VGDTmpBits[I];
+   For K:=0 To Ln-1 Do Begin
+    Bit:=LongInt((Codes^[I] Shr K) And 1);
+    If K=Ln-1 Then B^.Trie^[Node*2+Bit]:=-(I+1)
+    Else Begin
+     C2:=B^.Trie^[Node*2+Bit];
+     If C2<=0 Then Begin C2:=Nodes; Inc(Nodes); B^.Trie^[Node*2+Bit]:=C2; End;
+     Node:=C2;
+    End;
+   End;
+  End;
+  B^.NNodes:=Nodes;
+ End;
+ FreeMem(Codes); FreeMem(Mult);
+ { transformations temporelles }
+ N:=VGDBits(6)+1;
+ For I:=0 To N-1 Do If VGDBits(16)<>0 Then Begin VGDBad(
+  'transformation temporelle non nulle.'); Exit; End;
+ { planchers }
+ VGDNFloors:=VGDBits(6)+1;
+ For I:=0 To VGDNFloors-1 Do Begin
+  F:=@VGDFloors[I];
+  K:=VGDBits(16);
+  F^.Typ:=K; F^.F0Map[0]:=Nil; F^.F0Map[1]:=Nil; F^.F0Lsp:=Nil;
+  If K=0 Then Begin VGDParseFloor0(F^); If VGDErr Then Exit; Continue; End;
+  If K<>1 Then Begin VGDBad('type de plancher invalide.'); Exit; End;
+  Maxc:=-1;
+  F^.Partitions:=VGDBits(5);
+  For J:=0 To F^.Partitions-1 Do Begin
+   F^.PCls[J]:=VGDBits(4); If F^.PCls[J]>Maxc Then Maxc:=F^.PCls[J];
+  End;
+  For J:=0 To Maxc Do Begin
+   F^.CDim[J]:=VGDBits(3)+1; F^.CSub[J]:=VGDBits(2);
+   If F^.CSub[J]<>0 Then Begin
+    F^.CMaster[J]:=VGDBits(8);
+    If F^.CMaster[J]>=VGDNBooks Then Begin VGDBad(
+     'indice de livre hors limites.'); Exit; End;
+   End;
+   For K:=0 To (1 Shl F^.CSub[J])-1 Do Begin
+    Rb:=LongInt(VGDBits(8))-1;
+    If Rb<>-1 Then If Rb>=VGDNBooks Then Begin VGDBad(
+     'indice de livre hors limites.'); Exit; End;
+    F^.SBooks[J,K]:=Rb;
+   End;
+  End;
+  F^.Mult:=VGDBits(2)+1; F^.XDim:=2;
+  For J:=0 To F^.Partitions-1 Do Inc(F^.XDim,F^.CDim[F^.PCls[J]]);
+  Rb:=VGDBits(4);
+  If (Rb=0) And (F^.Partitions<>0) Then Begin VGDBad(
+   'rangebits nul non conforme.'); Exit; End;
+  RMax:=1 Shl Rb;
+  If RMax>VGDBs1 Div 2 Then Begin VGDBad(
+   'valeur de plancher trop grande pour la taille de bloc.'); Exit; End;
+  F^.List[0].X:=0; F^.List[1].X:=RMax; K:=2;
+  For J:=0 To F^.Partitions-1 Do
+   For Lu:=0 To F^.CDim[F^.PCls[J]]-1 Do Begin F^.List[K].X:=VGDBits(Rb); Inc(
+    K); End;
+  If Not VGReadyFloor(F^.List,F^.XDim) Then Begin VGDBad(
+   'X dupliques dans le plancher.'); Exit; End;
+ End;
+ { residus }
+ VGDNRes:=VGDBits(6)+1;
+ For I:=0 To VGDNRes-1 Do VGDRes[I].Classifs:=Nil;
+ For I:=0 To VGDNRes-1 Do Begin
+  R:=@VGDRes[I];
+  R^.Typ:=VGDBits(16); R^.Begin_:=VGDBits(24); R^.End_:=VGDBits(24); R^.PSize:=
+   VGDBits(24)+1;
+  If (R^.Begin_>R^.End_) Or ((R^.End_-R^.Begin_) Div R^.PSize>65535) Then Begin
+   VGDBad('partition hors limites.'); Exit; End;
+  R^.NCls:=VGDBits(6)+1;
+  R^.ClassBook:=VGDBits(8);
+  If R^.ClassBook>=VGDNBooks Then Begin VGDBad('indice de livre hors limites.');
+   Exit; End;
+  R^.Ptns:=(R^.End_-R^.Begin_) Div R^.PSize;
+  GetMem(R^.Classifs,Int64(R^.Ptns+1)*VGDCh+8);
+  For J:=0 To R^.NCls-1 Do Begin
+   Hi:=0; Lo:=VGDBits(3);
+   If VGDBits(1)<>0 Then Hi:=VGDBits(5);
+   Cascade[J]:=(Hi Shl 3)+Lo;
+  End;
+  R^.MaxPass:=0;
+  For J:=0 To R^.NCls-1 Do
+   For K:=0 To 7 Do Begin
+    If (Cascade[J] And (1 Shl K))<>0 Then Begin
+     Rb:=VGDBits(8);
+     If Rb>=VGDNBooks Then Begin VGDBad('indice de livre hors limites.'); Exit;
+      End;
+     R^.Books[J,K]:=Rb;
+     If K>R^.MaxPass Then R^.MaxPass:=K;
+    End Else R^.Books[J,K]:=-1;
+   End;
+ End;
+ { mappings }
+ VGDNMaps:=VGDBits(6)+1;
+ For I:=0 To VGDNMaps-1 Do Begin
+  Mp:=@VGDMaps[I];
+  If VGDBits(16)<>0 Then Begin VGDBad('type de mapping non conforme.'); Exit;
+   End;
+  If VGDBits(1)<>0 Then Mp^.Submaps:=VGDBits(4)+1 Else Mp^.Submaps:=1;
+  If VGDBits(1)<>0 Then Begin
+   Mp^.Coupling:=VGDBits(8)+1;
+   If VGDCh<2 Then Begin VGDBad('couplage avec moins de deux canaux.'); Exit;
+    End;
+   For J:=0 To Mp^.Coupling-1 Do Begin
+    Mp^.Mag[J]:=VGDBits(VGIlog(VGDCh-1)); If Mp^.Mag[J]>=VGDCh Then Begin
+     VGDBad('indice de canal hors limites.'); Exit; End;
+    Mp^.Ang[J]:=VGDBits(VGIlog(VGDCh-1)); If Mp^.Ang[J]>=VGDCh Then Begin
+     VGDBad('indice de canal hors limites.'); Exit; End;
+   End;
+  End Else Mp^.Coupling:=0;
+  If VGDBits(2)<>0 Then Begin VGDBad('mapping invalide.'); Exit; End;
+  FillChar(Mp^.Mux,SizeOf(Mp^.Mux),0);
+  If Mp^.Submaps>1 Then
+   For J:=0 To VGDCh-1 Do Mp^.Mux[J]:=VGDBits(4);
+  For J:=0 To Mp^.Submaps-1 Do Begin
+   VGDSkip(8);
+   Mp^.SubFloor[J]:=VGDBits(8); If Mp^.SubFloor[J]>=VGDNFloors Then Begin
+    VGDBad('indice de plancher hors limites.'); Exit; End;
+   Mp^.SubRes[J]:=VGDBits(8); If Mp^.SubRes[J]>=VGDNRes Then Begin VGDBad(
+    'indice de residu hors limites.'); Exit; End;
+  End;
+ End;
+ { modes }
+ VGDNModes:=VGDBits(6)+1;
+ For I:=0 To VGDNModes-1 Do Begin
+  VGDModeFlag[I]:=VGDBits(1); VGDSkip(32);
+  VGDModeMap[I]:=VGDBits(8);
+  If VGDModeMap[I]>=VGDNMaps Then Begin VGDBad(
+   'indice de mapping hors limites.'); Exit; End;
+ End;
+ If VGDBits(1)=0 Then Begin VGDBad(
+  'bit de cadrage de l''en-tete setup absent.'); Exit; End;
+End;
+
+{ ---- plancher 1 : retourne 0 si utilise, 1 si silence, <0 si erreur ---- }
+Function VGDFloor1(Var F: TVGDFloor; Vec: PVGS): LongInt;
+Const RangeV: Array[0..3] Of LongInt=(256,128,86,64);
+Var
+ Range,I,J,Offset,PartCls,CDim,CBits,CSub,Book,V,Adx,Ady,Dy,Off,Err,Predicted,
+  LowN,HighN: LongInt; Cval: LongWord;
+ Y: Array[0..257] Of Word; Yf: Array[0..257] Of Word; Flag: Array[0..257] Of
+  LongInt;
+ Val,HighRoom,LowRoom,Room: LongWord; T: LongInt;
+Function Clip16(A: LongInt): Word;
+Begin If A<0 Then Clip16:=0 Else If A>65535 Then Clip16:=65535 Else Clip16:=A;
+ End;
+Begin
+ Range:=RangeV[F.Mult-1];
+ If VGDBits(1)=0 Then Begin VGDFloor1:=1; Exit; End;
+ Y[0]:=VGDBits(VGIlog(Range-1)); Y[1]:=VGDBits(VGIlog(Range-1));
+ Offset:=2;
+ For I:=0 To F.Partitions-1 Do Begin
+  PartCls:=F.PCls[I]; CDim:=F.CDim[PartCls]; CBits:=F.CSub[PartCls]; CSub:=(1
+   Shl CBits)-1; Cval:=0;
+  If CBits<>0 Then Cval:=LongWord(VGDVlc(VGDBooks[F.CMaster[PartCls]]));
+  For J:=0 To CDim-1 Do Begin
+   Book:=F.SBooks[PartCls,Cval And CSub];
+   Cval:=Cval Shr CBits;
+   If Book>-1 Then Begin
+    V:=VGDVlc(VGDBooks[Book]);
+    If V<0 Then Begin VGDFloor1:=-1; Exit; End;
+    Y[Offset+J]:=V;
+   End Else Y[Offset+J]:=0;
+  End;
+  Inc(Offset,CDim);
+ End;
+ Flag[0]:=1; Flag[1]:=1; Yf[0]:=Y[0]; Yf[1]:=Y[1];
+ For I:=2 To F.XDim-1 Do Begin
+  LowN:=F.List[I].Low; HighN:=F.List[I].High;
+  Dy:=LongInt(Yf[HighN])-LongInt(Yf[LowN]);
+  Adx:=F.List[HighN].X-F.List[LowN].X;
+  Ady:=Abs(Dy);
+  Err:=Ady*(F.List[I].X-F.List[LowN].X);
+  Off:=Err Div Adx;
+  If Dy<0 Then Predicted:=Yf[LowN]-Off Else Predicted:=Yf[LowN]+Off;
+  Val:=Y[I];
+  HighRoom:=LongWord(Range-Predicted); LowRoom:=LongWord(Predicted);
+  If HighRoom<LowRoom Then Room:=HighRoom*2 Else Room:=LowRoom*2;
+  If Val<>0 Then Begin
+   Flag[LowN]:=1; Flag[HighN]:=1; Flag[I]:=1;
+   If Val>=Room Then Begin
+    If HighRoom>LowRoom Then Begin
+     T:=LongInt(LongWord(Val-LowRoom+LongWord(Predicted))); Yf[I]:=Clip16(T);
+    End Else Begin
+     T:=LongInt(LongWord(LongWord(Predicted)-Val+HighRoom-1)); Yf[I]:=Clip16(T);
+    End;
+   End Else Begin
+    If (Val And 1)<>0 Then T:=LongInt(LongWord(LongWord(Predicted)-(Val+1) Div
+     2))
+    Else T:=LongInt(LongWord(LongWord(Predicted)+Val Div 2));
+    Yf[I]:=Clip16(T);
+   End;
+  End Else Begin
+   Flag[I]:=0; Yf[I]:=Clip16(Predicted);
+  End;
+ End;
+ VGRenderList(F.List,F.XDim,Yf,Flag,F.Mult,Vec,F.List[1].X);
+ VGDFloor1:=0;
+End;
+
+{ ---- residu ---- }
+Function VGDSetupClassifs(Var R: TVGDRes; DoNot: PEABuffer; ChUsed,PartCount,
+ PtnsToRead: LongInt): LongInt;
+Var CB: ^TVGDBook; P,J,I,Temp,Temp2,Cpc: LongInt;
+Begin
+ CB:=@VGDBooks[R.ClassBook]; Cpc:=CB^.Dim; P:=0;
+ For J:=0 To ChUsed-1 Do Begin
+  If DoNot^[J]=0 Then Begin
+   Temp:=VGDVlc(CB^);
+   If Temp<0 Then Begin VGDSetupClassifs:=-1; Exit; End;
+   If R.NCls=1 Then Begin
+    For I:=PartCount+Cpc-1 Downto PartCount Do If I<PtnsToRead Then R.Classifs^[
+     P+I]:=0;
+   End Else Begin
+    For I:=PartCount+Cpc-1 Downto PartCount Do Begin
+     Temp2:=Temp Div R.NCls;
+     If I<PtnsToRead Then R.Classifs^[P+I]:=Temp-Temp2*R.NCls;
+     Temp:=Temp2;
+    End;
+   End;
+  End;
+  Inc(P,PtnsToRead);
+ End;
+ VGDSetupClassifs:=0;
+End;
+
+Function VGDResidue(Var R: TVGDRes; Ch: LongInt; DoNot: PEABuffer; Vec: PVGS;
+ VLen,ChLeft: LongInt): LongInt;
+Var
+ J,K,L,Pass: LongInt;
+ Cpc,ChUsed,I,VOffset,PartCount,Jtp,Ptns,MaxOut,Step,Coffs,Dim,
+  VqClass,VqBook,VOffs,VDiv,VMod: Int64;
+ LibBug: LongInt; CB: ^TVGDBook; Cv: PVGS; Ret: LongInt; Cl: PEABuffer; Rty:
+  LongInt;
+Begin
+ Rty:=R.Typ; If Rty>2 Then Begin VGDResidue:=-1; Exit; End;
+ Cpc:=VGDBooks[R.ClassBook].Dim; Cl:=R.Classifs;
+ Ptns:=R.Ptns; LibBug:=0;
+ MaxOut:=Int64(Ch-1)*VLen;
+ If Rty=2 Then Begin
+  For J:=1 To Ch-1 Do DoNot^[0]:=DoNot^[0] And DoNot^[J];
+  If DoNot^[0]<>0 Then Begin VGDResidue:=0; Exit; End;
+  ChUsed:=1; Inc(MaxOut,R.End_ Div Ch);
+ End Else Begin
+  ChUsed:=Ch; Inc(MaxOut,R.End_);
+ End;
+ If MaxOut>Int64(ChLeft)*VLen Then Begin
+  If MaxOut<=Int64(ChLeft)*VLen+(Int64(R.PSize)*ChUsed) Div Ch Then Begin Dec(
+   Ptns); LibBug:=1; End
+  Else Begin VGDResidue:=-1; Exit; End;
+ End;
+ For Pass:=0 To R.MaxPass Do Begin
+  VOffset:=R.Begin_; PartCount:=0;
+  While PartCount<Ptns Do Begin
+   If Pass=0 Then Begin
+    Ret:=VGDSetupClassifs(R,DoNot,ChUsed,PartCount,Ptns);
+    If Ret<0 Then Begin VGDResidue:=Ret; Exit; End;
+   End;
+   I:=0;
+   While (I<Cpc) And (PartCount<Ptns) Do Begin
+    Jtp:=0;
+    For J:=0 To ChUsed-1 Do Begin
+     If DoNot^[J]=0 Then Begin
+      VqClass:=Cl^[Jtp+PartCount];
+      VqBook:=R.Books[VqClass,Pass];
+      If VqBook>=0 Then Begin
+       CB:=@VGDBooks[VqBook];
+       If CB^.Vec<>Nil Then Begin
+        Cv:=CB^.Vec; Dim:=CB^.Dim; Step:=R.PSize Div Dim;
+        If Rty=0 Then Begin
+         VOffs:=VOffset+J*VLen;
+         For K:=0 To Step-1 Do Begin
+          Coffs:=VGDVlc(CB^);
+          If Coffs<0 Then Begin VGDResidue:=Coffs; Exit; End;
+          Coffs:=Coffs*Dim;
+          For L:=0 To Dim-1 Do Vec^[VOffs+K+L*Step]:=Vec^[VOffs+K+L*Step]+Cv^[
+           Coffs+L];
+         End;
+        End Else If Rty=1 Then Begin
+         VOffs:=VOffset+J*VLen;
+         For K:=0 To Step-1 Do Begin
+          Coffs:=VGDVlc(CB^);
+          If Coffs<0 Then Begin VGDResidue:=Coffs; Exit; End;
+          Coffs:=Coffs*Dim;
+          For L:=0 To Dim-1 Do Begin
+           Vec^[VOffs]:=Vec^[VOffs]+Cv^[Coffs+L]; Inc(VOffs);
+          End;
+         End;
+        End Else If (Ch=2) And ((VOffset And 1)=0) And ((Dim And 1)=0) Then
+         Begin
+         VOffs:=VOffset Shr 1;
+         If Dim=2 Then Begin
+          For K:=0 To Step-1 Do Begin
+           Coffs:=VGDVlc(CB^);
+           If Coffs<0 Then Begin VGDResidue:=Coffs; Exit; End;
+           Coffs:=Coffs*2;
+           Vec^[VOffs+K]:=Vec^[VOffs+K]+Cv^[Coffs];
+           Vec^[VOffs+K+VLen]:=Vec^[VOffs+K+VLen]+Cv^[Coffs+1];
+          End;
+         End Else If Dim=4 Then Begin
+          For K:=0 To Step-1 Do Begin
+           Coffs:=VGDVlc(CB^);
+           If Coffs<0 Then Begin VGDResidue:=Coffs; Exit; End;
+           Coffs:=Coffs*4;
+           Vec^[VOffs]:=Vec^[VOffs]+Cv^[Coffs];
+           Vec^[VOffs+1]:=Vec^[VOffs+1]+Cv^[Coffs+2];
+           Vec^[VOffs+VLen]:=Vec^[VOffs+VLen]+Cv^[Coffs+1];
+           Vec^[VOffs+VLen+1]:=Vec^[VOffs+VLen+1]+Cv^[Coffs+3];
+           Inc(VOffs,2);
+          End;
+         End Else Begin
+          For K:=0 To Step-1 Do Begin
+           Coffs:=VGDVlc(CB^);
+           If Coffs<0 Then Begin VGDResidue:=Coffs; Exit; End;
+           Coffs:=Coffs*Dim;
+           L:=0;
+           While L<Dim Do Begin
+            Vec^[VOffs]:=Vec^[VOffs]+Cv^[Coffs+L];
+            Vec^[VOffs+VLen]:=Vec^[VOffs+VLen]+Cv^[Coffs+L+1];
+            Inc(VOffs); Inc(L,2);
+           End;
+          End;
+         End;
+        End Else Begin
+         If Ch=1 Then VDiv:=VOffset Else VDiv:=VOffset Div Ch;
+         VMod:=VOffset-VDiv*Ch;
+         For K:=0 To Step-1 Do Begin
+          Coffs:=VGDVlc(CB^);
+          If Coffs<0 Then Begin VGDResidue:=Coffs; Exit; End;
+          Coffs:=Coffs*Dim;
+          For L:=0 To Dim-1 Do Begin
+           Vec^[VDiv+VMod*VLen]:=Vec^[VDiv+VMod*VLen]+Cv^[Coffs+L];
+           Inc(VMod);
+           If VMod=Ch Then Begin Inc(VDiv); VMod:=0; End;
+          End;
+         End;
+        End;
+       End;
+      End;
+     End;
+     Inc(Jtp,Ptns);
+    End;
+    Inc(PartCount); Inc(VOffset,R.PSize); Inc(I);
+   End;
+  End;
+  If (LibBug<>0) And (Pass=0) Then Begin
+   For J:=0 To ChUsed-1 Do If DoNot^[J]=0 Then Ret:=VGDVlc(VGDBooks[
+    R.ClassBook]);
+  End;
+ End;
+ VGDResidue:=0;
+End;
+
+{ ---- paquet audio (vorbis_parse_audio_packet) : retourne le nombre
+ d'echantillons ou <0 ---- }
+Procedure VGDWindow(Dst,S0,S1,Win: PVGS; Len: LongInt);
+Var I,J: LongInt; A,B,Wi,Wj: Single; T1,T2: Single;
+Begin
+ { vector_fmul_window : dst, src0, win decales de len ; src1 non decale }
+ J:=Len-1;
+ For I:=-Len To -1 Do Begin
+  A:=S0^[Len+I]; B:=S1^[J]; Wi:=Win^[Len+I]; Wj:=Win^[Len+J];
+  T1:=A*Wj; T2:=B*Wi; Dst^[Len+I]:=T1-T2;
+  T1:=A*Wi; T2:=B*Wj; Dst^[Len+J]:=T1+T2;
+  Dec(J);
+ End;
+End;
+
+Function VGDAudio: LongInt;
+Var
+ Prev,ModeNo,BlockFlag,BlockSize,VLen,I,J,ChLeft,ResNum,Ret,Ch,K,Code,RetLen,Ci,
+  Bs0,Bs1: LongInt;
+ Mp: ^TVGDMap; NoRes,DoNot,ResChan: Array[0..254] Of Byte; Fl: ^TVGDFloor;
+  ChRes,Mag,Ang,Buf,Saved,RetP: PVGS;
+ Win: PVGS; M,A,Tmp,Fv: Single;
+Begin
+ VGDAudio:=-1;
+ Prev:=VGDPrevWin; Ch:=VGDCh; Bs0:=VGDBs0; Bs1:=VGDBs1;
+ If VGDBits(1)<>0 Then Exit;
+ If VGDNModes=1 Then ModeNo:=0 Else Begin
+  ModeNo:=VGDBits(VGIlog(VGDNModes-1));
+  If ModeNo>=VGDNModes Then Exit;
+ End;
+ VGDMode:=ModeNo;
+ Mp:=@VGDMaps[VGDModeMap[ModeNo]];
+ BlockFlag:=VGDModeFlag[ModeNo];
+ If BlockFlag<>0 Then BlockSize:=Bs1 Else BlockSize:=Bs0;
+ VLen:=BlockSize Div 2;
+ If BlockFlag<>0 Then Begin
+  Code:=VGDBits(2);
+  If Prev<0 Then Prev:=Code Shr 1;
+ End Else If Prev<0 Then Prev:=0;
+ FillChar(VGDChanRes^,Int64(Ch)*VLen*4,0);
+ For I:=0 To Ch-1 Do FillChar(VGDFloorBuf[I]^,VLen*4,0);
+ For I:=0 To Ch-1 Do Begin
+  If Mp^.Submaps>1 Then Fl:=@VGDFloors[Mp^.SubFloor[Mp^.Mux[I]]] Else Fl:=
+   @VGDFloors[Mp^.SubFloor[0]];
+  If Fl^.Typ=0 Then Ret:=VGDFloor0(Fl^,VGDFloorBuf[I],BlockFlag) Else Ret:=
+   VGDFloor1(Fl^,VGDFloorBuf[I]);
+  If Ret<0 Then Begin If VGDebug Then WriteLn(EngOut,'floor fail ',I); Exit; End;
+  NoRes[I]:=Ret;
+ End;
+ For I:=Mp^.Coupling-1 Downto 0 Do
+  If (NoRes[Mp^.Mag[I]] And NoRes[Mp^.Ang[I]])=0 Then Begin NoRes[Mp^.Mag[I]]:=
+   0; NoRes[Mp^.Ang[I]]:=0; End;
+ ChRes:=VGDChanRes; ChLeft:=Ch; ResNum:=0;
+ For I:=0 To Mp^.Submaps-1 Do Begin
+  K:=0;
+  For J:=0 To Ch-1 Do Begin
+   If (Mp^.Submaps=1) Or (I=Mp^.Mux[J]) Then Begin
+    ResChan[J]:=ResNum;
+    If NoRes[J]<>0 Then DoNot[K]:=1 Else DoNot[K]:=0;
+    Inc(K); Inc(ResNum);
+   End;
+  End;
+  If ChLeft<K Then Exit;
+  If K<>0 Then Begin
+   Ret:=VGDResidue(VGDRes[Mp^.SubRes[I]],K,PEABuffer(@DoNot),ChRes,VLen,ChLeft);
+   If Ret<0 Then Begin If VGDebug Then WriteLn(EngOut,'res fail ',Ret); Exit; End;
+  End;
+  ChRes:=PVGS(@ChRes^[Int64(K)*VLen]);
+  Dec(ChLeft,K);
+ End;
+ If ChLeft>0 Then Exit;
+ For I:=Mp^.Coupling-1 Downto 0 Do Begin
+  Mag:=PVGS(@VGDChanRes^[Int64(ResChan[Mp^.Mag[I]])*VLen]);
+  Ang:=PVGS(@VGDChanRes^[Int64(ResChan[Mp^.Ang[I]])*VLen]);
+  For K:=0 To VLen-1 Do Begin
+   A:=Ang^[K]; M:=Mag^[K];
+   If M>0.0 Then Begin
+    If A>0.0 Then Ang^[K]:=M-A
+    Else Begin Ang^[K]:=M; Mag^[K]:=M+A; End;
+   End Else Begin
+    If A>0.0 Then Ang^[K]:=M+A
+    Else Begin Ang^[K]:=M; Mag^[K]:=M-A; End;
+   End;
+  End;
+ End;
+ For J:=Ch-1 Downto 0 Do Begin
+  ChRes:=PVGS(@VGDChanRes^[Int64(ResChan[J])*VLen]);
+  For K:=0 To VLen-1 Do Begin Fv:=VGDFloorBuf[J]^[K]; Fv:=Fv*ChRes^[K];
+   VGDFloorBuf[J]^[K]:=Fv; End;
+  VGMdctInv(VGDLg[BlockFlag],PVGS(VGDFloorBuf[J]),ChRes);
+ End;
+ If Prev<0 Then Prev:=0;
+ If Prev<>0 Then RetLen:=(BlockSize+Bs1) Div 4 Else RetLen:=(BlockSize+Bs0) Div
+  4;
+ For J:=0 To Ch-1 Do Begin
+  Buf:=PVGS(@VGDChanRes^[Int64(ResChan[J])*VLen]);
+  Saved:=PVGS(@VGDSaved^[Int64(J)*(Bs1 Div 4)]);
+  RetP:=VGDFloorBuf[J];
+  If (BlockFlag And Prev)<>0 Then Win:=VGWin[VGLog2(Bs1)-6] Else Win:=VGWin[
+   VGLog2(Bs0)-6];
+  If BlockFlag=Prev Then VGDWindow(RetP,Saved,Buf,Win,BlockSize Div 4)
+  Else If BlockFlag>Prev Then Begin
+   VGDWindow(RetP,Saved,Buf,Win,Bs0 Div 4);
+   Move(Buf^[Bs0 Div 4],RetP^[Bs0 Div 2],((Bs1-Bs0) Div 4)*4);
+  End Else Begin
+   Move(Saved^,RetP^,((Bs1-Bs0) Div 4)*4);
+   VGDWindow(PVGS(@RetP^[(Bs1-Bs0) Div 4]),PVGS(@Saved^[(Bs1-Bs0) Div 4]),Buf,
+    Win,Bs0 Div 4);
+  End;
+  Move(Buf^[BlockSize Div 4],Saved^,(BlockSize Div 4)*4);
+ End;
+ VGDPrevWin:=BlockFlag;
+ VGDAudio:=RetLen;
+End;
+
+{ ---- analyseur de paquets (vorbis_parser.c) : modes deduits de l'en-tete setup
+ par la meme heuristique ---- }
+Var
+ VGDPrevBlock,VGDModeMask,VGDPrevMask,VGDPMode,VGDPB0,VGDPB1: LongInt; VGDPBs:
+  Array[0..63] Of LongInt;
+
+Function VGDParserInit(P: PEABuffer; Len: LongInt): Boolean;
+Var Rev: PEABuffer; I,Pos,Total,Framing,MC,LastMC,Pos0,A,B,C,V: LongInt; Got:
+ Boolean;
+Function RB(N: LongInt): LongInt;
+Var K,R: LongInt; Bt: LongInt;
+Begin
+ R:=0;
+ For K:=1 To N Do Begin
+  If (Pos Shr 3)<Len Then Bt:=(Rev^[Pos Shr 3] Shr (7-(Pos And 7))) And 1 Else
+   Bt:=0;
+  R:=R*2+Bt; Inc(Pos);
+ End;
+ RB:=R;
+End;
+Begin
+ VGDParserInit:=False;
+ If Len<7 Then Exit;
+ If P^[0]<>5 Then Exit;
+ GetMem(Rev,Len+8);
+ For I:=0 To Len-1 Do Rev^[I]:=P^[Len-1-I];
+ Total:=Len*8; Pos:=0; Framing:=0;
+ While Total-Pos>97 Do Begin
+  If RB(1)<>0 Then Begin Framing:=Pos; Break; End;
+ End;
+ If Framing=0 Then Begin FreeMem(Rev); Exit; End;
+ MC:=0; Got:=False; LastMC:=0;
+ While Total-Pos>=97 Do Begin
+  A:=RB(8);
+  If A>63 Then Break;
+  B:=RB(16); If B<>0 Then Break;
+  C:=RB(16); If C<>0 Then Break;
+  RB(1);
+  Inc(MC);
+  If MC>64 Then Break;
+  Pos0:=Pos; V:=RB(6); Pos:=Pos0;
+  If V+1=MC Then Begin Got:=True; LastMC:=MC; End;
+ End;
+ If (Not Got) Or (LastMC>63) Then Begin FreeMem(Rev); Exit; End;
+ VGDPMode:=LastMC;
+ If LastMC>1 Then VGDModeMask:=((1 Shl (VGLog2(LastMC-1)+1))-1) Shl 1 Else
+  VGDModeMask:=2;
+ VGDPrevMask:=(VGDModeMask Or 1)+1;
+ Pos:=Framing;
+ For I:=LastMC-1 Downto 0 Do Begin
+  Inc(Pos,40); VGDPBs[I]:=RB(1);
+ End;
+ FreeMem(Rev);
+ VGDPB0:=VGDBs0; VGDPB1:=VGDBs1;
+ VGDPrevBlock:=VGDPB0;
+ If VGDPBs[0]<>0 Then VGDPrevBlock:=VGDPB1;
+ VGDParserInit:=True;
+End;
+
+Function VGDParseDur(P: PEABuffer; Len: LongInt): LongInt;
+Var Mode,PrevB,CurB,Flag: LongInt;
+Begin
+ VGDParseDur:=0;
+ If Len<=0 Then Exit;
+ PrevB:=VGDPrevBlock;
+ If (P^[0] And 1)<>0 Then Exit;
+ If VGDPMode=1 Then Mode:=0 Else Mode:=(P^[0] And VGDModeMask) Shr 1;
+ If Mode>=VGDPMode Then Begin VGDParseDur:=-1; Exit; End;
+ If VGDPBs[Mode]<>0 Then Begin
+  If (P^[0] And VGDPrevMask)<>0 Then Flag:=1 Else Flag:=0;
+  If Flag<>0 Then PrevB:=VGDPB1 Else PrevB:=VGDPB0;
+ End;
+ If VGDPBs[Mode]<>0 Then CurB:=VGDPB1 Else CurB:=VGDPB0;
+ VGDParseDur:=(PrevB+CurB) Shr 2;
+ VGDPrevBlock:=CurB;
+End;
+
+{ ---- en-tete WAV (muxer wav de FFmpeg : WAVE_FORMAT_EXTENSIBLE au-dela de 2
+ canaux) ---- }
+Procedure VGWavHdr(Rate,Ch,Bytes: LongInt);
+Var Wr: Array[0..67] Of Byte; Mask: LongInt;
+Procedure P32(At: Integer; Vv: LongInt);
+Var Q: Integer;
+Begin For Q:=0 To 3 Do Begin Wr[At+Q]:=Vv And 255; Vv:=Vv Shr 8; End; End;
+Procedure P16(At: Integer; Vv: LongInt);
+Begin Wr[At]:=Vv And 255; Wr[At+1]:=(Vv Shr 8) And 255; End;
+Begin
+ If Ch<=2 Then Begin ADPCMWaveHeader(Rate,Ch,Bytes); Exit; End;
+ If Ch>8 Then Begin ADPCMWaveHeader(Rate,Ch,Bytes); Exit; End;
+ Case Ch Of 3: Mask:=$7; 4: Mask:=$33; 5: Mask:=$37; 6: Mask:=$3F; 7: Mask:=
+  $70F; 8: Mask:=$63F; Else Mask:=0; End;
+ FillChar(Wr,SizeOf(Wr),0);
+ Wr[0]:=82; Wr[1]:=73; Wr[2]:=70; Wr[3]:=70; Wr[8]:=87; Wr[9]:=65; Wr[10]:=86;
+  Wr[11]:=69;
+ Wr[12]:=102; Wr[13]:=109; Wr[14]:=116; Wr[15]:=32;
+ P32(4,60+Bytes); P32(16,40); P16(20,$FFFE); P16(22,Ch); P32(24,Rate); P32(28,
+  Rate*Ch*2); P16(32,Ch*2); P16(34,16);
+ P16(36,22); P16(38,16); P32(40,Mask);
+ Wr[44]:=1; Wr[47]:=0; Wr[48]:=0; Wr[49]:=0; Wr[50]:=16; Wr[52]:=128; Wr[55]:=
+  170; Wr[57]:=56; Wr[58]:=155; Wr[59]:=113;
+ Wr[60]:=100; Wr[61]:=97; Wr[62]:=116; Wr[63]:=97; P32(64,Bytes); WriteBytes(Wr,
+  68);
+End;
+
+Procedure VGWavPatch(Rate,Ch,Bytes: LongInt);
+Var Code: Integer;
+Begin
+ {$I-}Seek(ActiveOutput,0); Code:=IOResult;{$I+}
+ If Code<>0 Then Fail('Positionnement entete WAV impossible.');
+ VGWavHdr(Rate,Ch,Bytes);
+End;
+
+{ ---- lecture Ogg + decodage ---- }
+Var VGDSerial: LongInt;
+
+Function VGIsVorbisOgg(Const Source: String): Boolean;
+Var Hd: Array[0..299] Of Byte; Limit,NSeg,At,K,I,Pgs: LongInt; Pk: Array[0..6]
+ Of Byte; Lc: Array[0..254] Of Byte; Found: Boolean;
+Begin
+ VGIsVorbisOgg:=False; Found:=False;
+ OpenRead(Source); Limit:=InputSize; At:=0; Pgs:=0;
+ While (At+27<=Limit) And (Pgs<16) And Not Found Do Begin
+  ReadAt(At,Hd,27);
+  If (Hd[0]<>79) Or (Hd[1]<>103) Or (Hd[2]<>103) Or (Hd[3]<>83) Then Break;
+  If (Hd[5] And 2)=0 Then Break;
+  NSeg:=Hd[26];
+  If At+27+NSeg>Limit Then Break;
+  ReadAt(At+27,Lc,NSeg);
+  K:=0; For I:=0 To NSeg-1 Do Inc(K,Lc[I]);
+  If (K>=7) And (At+27+NSeg+7<=Limit) Then Begin
+   ReadAt(At+27+NSeg,Pk,7);
+   If (Pk[0]=1) And (Pk[1]=118) And (Pk[2]=111) And (Pk[3]=114) And (Pk[4]=98)
+    And (Pk[5]=105) And (Pk[6]=115) Then Begin Found:=True; VGDSerial:=Hd[14]+
+    Hd[15]*256+Hd[16]*65536+Hd[17]*16777216; End;
+  End;
+  Inc(At,27+NSeg+K); Inc(Pgs);
+ End;
+ CloseRead;
+ VGIsVorbisOgg:=Found;
+End;
+
+{ ---- lecture d'une page Ogg validee (ogg_read_page : recherche de OggS, CRC,
+ version) ---- }
+Type
+ TVGDPage=Record Flags,Sn,NSeg,Body: LongInt; Gran: Int64; Lacing: Array[0..254]
+  Of Byte; End;
+Var
+ VGDRaw: PEABuffer;
+
+{ At : position de recherche en entree, debut de la page en sortie ; l'appelant
+ avance de 27+NSeg+Body }
+Function VGDGetPage(Var At: LongInt; Limit: LongInt; Var Pg: TVGDPage): Boolean;
+Var
+ Hd: Array[0..26] Of Byte; Blk: Array[0..4095] Of Byte; Crc: LongWord; Stored:
+  Array[0..3] Of Byte;
+ Scan,I,Sk,K,J: LongInt; Found: Boolean;
+Begin
+ VGDGetPage:=False;
+ While True Do Begin
+  Scan:=0; Found:=False;
+  While (At+27<=Limit) And (Scan<65307) And Not Found Do Begin
+   If At+SizeOf(Blk)<=Limit Then Sk:=SizeOf(Blk) Else Sk:=Limit-At;
+   ReadAt(At,Blk,Sk);
+   I:=0;
+   While (I+4<=Sk) And Not Found Do Begin
+    If (Blk[I]=79) And (Blk[I+1]=103) And (Blk[I+2]=103) And (Blk[I+3]=83) Then
+     Found:=True Else Inc(I);
+   End;
+   If Found Then Inc(At,I) Else Begin
+    If Sk<4 Then Break;
+    Inc(At,Sk-3); Inc(Scan,Sk-3);
+   End;
+  End;
+  If Not Found Then Exit;
+  If At+27>Limit Then Exit;
+  ReadAt(At,Hd,27);
+  Pg.NSeg:=Hd[26];
+  If At+27+Pg.NSeg>Limit Then Exit;
+  If Pg.NSeg>0 Then ReadAt(At+27,Pg.Lacing,Pg.NSeg);
+  K:=0; For I:=0 To Pg.NSeg-1 Do Inc(K,Pg.Lacing[I]);
+  If At+27+Pg.NSeg+K>Limit Then Exit;
+  J:=At+27+Pg.NSeg; I:=0;
+  While I<K Do Begin
+   If K-I>32768 Then Sk:=32768 Else Sk:=K-I;
+   ReadAt(J+I,VGDRaw^[I],Sk); Inc(I,Sk);
+  End;
+  Stored[0]:=Hd[22]; Stored[1]:=Hd[23]; Stored[2]:=Hd[24]; Stored[3]:=Hd[25];
+  Hd[22]:=0; Hd[23]:=0; Hd[24]:=0; Hd[25]:=0;
+  Crc:=0;
+  For I:=0 To 26 Do Crc:=(Crc Shl 8) Xor VGCrcTab[((Crc Shr 24) Xor Hd[I]) And
+   255];
+  For I:=0 To Pg.NSeg-1 Do Crc:=(Crc Shl 8) Xor VGCrcTab[((Crc Shr 24) Xor
+   Pg.Lacing[I]) And 255];
+  For I:=0 To K-1 Do Crc:=(Crc Shl 8) Xor VGCrcTab[((Crc Shr 24) Xor VGDRaw^[I])
+   And 255];
+  If (Crc<>(LongWord(Stored[0])+LongWord(Stored[1])*256+LongWord(Stored[2])*
+   65536+LongWord(Stored[3])*16777216)) Or (Hd[4]<>0) Then Begin
+   Inc(At,4); Continue;
+  End;
+  Pg.Flags:=Hd[5]; Pg.Gran:=0; For I:=7 Downto 0 Do Pg.Gran:=Pg.Gran*256+Hd[6+
+   I];
+  Pg.Sn:=Hd[14]+Hd[15]*256+Hd[16]*65536+Hd[17]*16777216;
+  Pg.Body:=K;
+  VGDGetPage:=True;
+  Exit;
+ End;
+End;
+
+Var VGDFirstFrame: Boolean; VGDOutCh: LongInt;
+
+Procedure VGDPutSample(V: Single);
+Var X: Double; S,W: LongInt; R: Int64;
+Begin
+ { swresample : av_clip_int16(lrintf(x*32768)) ; lrintf hors limites donne
+  LONG_MIN, tronque en int par l'appelant }
+ X:=V; X:=X*32768.0;
+ If (X<>X) Or (X>=9.2233720368547758e18) Or (X<=-9.2233720368547758e18) Then S:=
+  0
+ Else Begin
+  R:=Round(X);
+  W:=LongInt(R And $FFFFFFFF);
+  If (W>=-32768) And (W<=32767) Then S:=W Else If W<0 Then S:=-32768 Else S:=
+   32767;
+ End;
+ EAPut(S);
+End;
+
+Procedure VGDEmitFrame(Nm: LongInt);
+Var S,C2: LongInt;
+Begin
+ For S:=0 To Nm-1 Do
+  For C2:=0 To VGDOutCh-1 Do Begin
+   If VGDOutCh>8 Then VGDPutSample(VGDFloorBuf[C2]^[S]) Else VGDPutSample(
+    VGDFloorBuf[VGDChOff[VGDOutCh-1,C2]]^[S]);
+  End;
+End;
+
+{ ---- liberation / reinitialisation du decodeur (vorbis_free) ---- }
+Var VGDHaveId,VGDHaveModes: Boolean;
+
+Procedure VGDFreeAll;
+Var I: LongInt;
+Begin
+ VGDFreeSetup;
+ If VGDHaveId Then Begin
+  If VGDChanRes<>Nil Then FreeMem(VGDChanRes);
+  If VGDSaved<>Nil Then FreeMem(VGDSaved);
+  For I:=0 To VGDCh-1 Do If VGDFloorBuf[I]<>Nil Then Begin FreeMem(VGDFloorBuf[
+   I]); VGDFloorBuf[I]:=Nil; End;
+  VGDChanRes:=Nil; VGDSaved:=Nil;
+ End;
+ VGDHaveId:=False; VGDHaveModes:=False;
+End;
+
+{ decode un paquet audio : le premier cadre decode est ecarte (skip_samples),
+ EndTrim echantillons sont retires en fin }
+Procedure VGDDoAudio(P: PEABuffer; Len,EndTrim: LongInt);
+Var Nm: LongInt;
+Begin
+ VGDPkt:=P; VGDPLen:=Len; VGDPos:=0;
+ If Len<=0 Then Exit;
+ Nm:=VGDAudio;
+ If Nm<=0 Then Exit;
+ { le champ skip_samples des donnees laterales du paquet ecrase le saut du
+  decodeur }
+ If VGDFirstFrame Then Begin
+  VGDFirstFrame:=False;
+  If EndTrim<=0 Then Exit;
+ End;
+ If (EndTrim>0) And (EndTrim<=Nm) Then Dec(Nm,EndTrim);
+ If Nm>0 Then VGDEmitFrame(Nm);
+End;
+
+Var VGDRate0,VGDCh0: LongInt;
+
+{ vorbis_decode_frame : en-tetes transmis dans le flux de paquets (flux Ogg
+ chaines) puis paquets audio }
+Procedure VGDPacketIn(P: PEABuffer; Len,EndTrim: LongInt);
+Begin
+ If Len<=0 Then Exit;
+ If (P^[0]=1) And (Len>7) Then Begin
+  VGDFreeAll;
+  VGDSoft:=True; VGDErr:=False;
+  VGDParseId(P,Len);
+  VGDSoft:=False;
+  If VGDErr Then Begin VGDFreeAll; VGDErr:=False; Exit; End;
+  VGDHaveId:=True;
+  If (VGDCh<>VGDCh0) Or (VGDRate<>VGDRate0) Then
+   Fail(
+    'ogg: flux Vorbis chaine avec une frequence ou un nombre de canaux differe'+
+    'nt (reechantillonnage non pris en charge).');
+  Exit;
+ End;
+ If (P^[0]=3) And (Len>7) Then Exit;
+ If (P^[0]=5) And (Len>7) And VGDHaveId And Not VGDHaveModes Then Begin
+  VGDSoft:=True; VGDErr:=False;
+  VGDParseSetup(P,Len);
+  VGDSoft:=False;
+  If VGDErr Then Begin VGDFreeAll; VGDErr:=False; Exit; End;
+  VGDHaveModes:=True;
+  Exit;
+ End;
+ If Not (VGDHaveId And VGDHaveModes) Then Exit;
+ VGDDoAudio(P,Len,EndTrim);
+End;
+
+{ ---- demultiplexeur Ogg (oggdec.c, oggparsevorbis.c) : etat d'un flux logique
+ ---- }
+Type
+ TVGOS=Record
+  Buf: PEABuffer; Cap,BufPos,PStart,PSize,Segp,NSegs,Flags,Serial,Header,NKnown,
+   At: LongInt;
+  SyncPos,PagePos: Int64;
+  Segs: Array[0..254] Of Byte;
+  Granule,LastPts,EndTrim,PDur: Int64;
+  Incomplete,PageEnd,GotData,PCorrupt,NoMore: Boolean;
+  Known: Array[0..31] Of LongInt; KnownGot: Array[0..31] Of Boolean;
+  Pk: Array[0..2] Of PEABuffer; PkLen: Array[0..2] Of LongInt;
+  OutStart,OutSize: LongInt;
+ End;
+Var
+ VGONo,VGOFinalPts,VGOFinalDur,VGOStartTime,VGODataOffset: Int64;
+ VGOLimit: LongInt; VGOHeadersDone,VGOHaveVp: Boolean;
+
+Function VGOW32(X: Int64): LongInt;
+Begin
+ X:=X And $FFFFFFFF;
+ If X>=$80000000 Then X:=X-$100000000;
+ VGOW32:=X;
+End;
+
+Procedure VGOInit(Var S: TVGOS; Serial: LongInt);
+Begin
+ FillChar(S,SizeOf(S),0);
+ S.Cap:=262144; GetMem(S.Buf,S.Cap+64); FillChar(S.Buf^,64,0);
+ S.Serial:=Serial; S.Header:=-1; S.NKnown:=1; S.Known[0]:=Serial;
+ S.LastPts:=0; S.Granule:=-1;
+End;
+
+{ ogg_read_page : 1 = page du flux, 0 = autre flux ou page ignoree, -1 = fin ou
+ erreur }
+Function VGOReadPage(Var S: TVGOS; Probing: Boolean): LongInt;
+Var Pg: TVGDPage; I,K,PageStart: LongInt; AnyData,Mine: Boolean; Mg: Array[0..6]
+ Of Byte;
+Begin
+ VGOReadPage:=-1;
+ PageStart:=S.At;
+ If Not VGDGetPage(PageStart,VGOLimit,Pg) Then Begin S.NoMore:=True; Exit; End;
+ S.At:=PageStart+27+Pg.NSeg+Pg.Body;
+ Mine:=Pg.Sn=S.Serial;
+ If Not Mine Then Begin
+  K:=-1;
+  For I:=0 To S.NKnown-1 Do If S.Known[I]=Pg.Sn Then K:=I;
+  If K>=0 Then Begin
+   S.KnownGot[K]:=(Pg.Flags And 2)=0;
+   VGOReadPage:=0; Exit;
+  End;
+  AnyData:=S.GotData;
+  For I:=0 To S.NKnown-1 Do If S.KnownGot[I] Then AnyData:=True;
+  If Not AnyData Then Begin
+   If S.NKnown<32 Then Begin
+    S.Known[S.NKnown]:=Pg.Sn; S.KnownGot[S.NKnown]:=(Pg.Flags And 2)=0; Inc(
+     S.NKnown);
+   End;
+   VGOReadPage:=0; Exit;
+  End;
+  { ogg_replace_stream : un seul flux, meme codec (vorbis) }
+  If S.NKnown<>1 Then Begin S.NoMore:=True; Exit; End;
+  FillChar(Mg,SizeOf(Mg),0);
+  If Pg.Body>=7 Then Move(VGDRaw^[0],Mg,7);
+  If (Pg.Body<7) Or (Mg[0]<>1) Or (Mg[1]<>118) Or (Mg[2]<>111) Or (Mg[3]<>114)
+   Or (Mg[4]<>98) Or (Mg[5]<>105) Or (Mg[6]<>115) Then Begin
+   S.NoMore:=True; Exit;
+  End;
+  S.Serial:=Pg.Sn; S.Known[0]:=Pg.Sn; S.KnownGot[0]:=False;
+  S.LastPts:=0; S.EndTrim:=0;
+ End;
+ { la page appartient au flux }
+ S.PagePos:=PageStart;
+ S.NSegs:=Pg.NSeg; S.Segp:=0; S.Granule:=Pg.Gran; S.Flags:=Pg.Flags;
+ S.GotData:=(Pg.Flags And 2)=0;
+ If S.NKnown>=1 Then S.KnownGot[0]:=S.GotData;
+ If Pg.NSeg>0 Then Move(Pg.Lacing,S.Segs,Pg.NSeg);
+ If S.BufPos+Pg.Body+64>S.Cap Then Begin
+  While S.BufPos+Pg.Body+64>S.Cap Do S.Cap:=S.Cap*2;
+  ReallocMem(Pointer(S.Buf),S.Cap+64);
+ End;
+ If Pg.Body>0 Then Move(VGDRaw^[0],S.Buf^[S.BufPos],Pg.Body);
+ Inc(S.BufPos,Pg.Body);
+ FillChar(S.Buf^[S.BufPos],8,0);
+ If ((Pg.Flags And 1)<>0) Or S.Incomplete Then Begin
+  If S.PSize=0 Then Begin
+   While S.Segp<S.NSegs Do Begin
+    K:=S.Segs[S.Segp]; Inc(S.Segp); Inc(S.PStart,K);
+    If K<255 Then Break;
+   End;
+   S.SyncPos:=S.PagePos;
+  End;
+ End Else Begin
+  S.PSize:=0; S.SyncPos:=S.PagePos;
+ End;
+ VGOReadPage:=1;
+End;
+
+{ av_vorbis_parse_frame_flags sur le premier octet du paquet }
+Function VGOParse(B: Byte): LongInt;
+Var Pk: Array[0..0] Of Byte;
+Begin
+ Pk[0]:=B;
+ VGOParse:=VGDParseDur(PEABuffer(@Pk),1);
+End;
+
+{ vorbis_packet }
+Procedure VGOVorbisPacket(Var S: TVGOS);
+Var Seg,D,Dur: LongInt; LastPk,NextPk: LongInt; Skip: Int64;
+Begin
+ If ((S.LastPts=0) Or (S.LastPts=VGONo)) And ((S.Flags And 4)=0) And (
+  S.Granule>=0) Then Begin
+  VGDPrevBlock:=VGDPB0;
+  Dur:=0; Seg:=S.Segp;
+  LastPk:=S.PStart;
+  D:=VGOParse(S.Buf^[LastPk]);
+  If D<0 Then Begin S.PCorrupt:=True; Exit; End;
+  Dur:=Dur+D;
+  LastPk:=S.PStart+S.PSize; NextPk:=LastPk;
+  While Seg<S.NSegs Do Begin
+   If S.Segs[Seg]<255 Then Begin
+    D:=VGOParse(S.Buf^[LastPk]);
+    If D<0 Then Begin Dur:=VGOW32(S.Granule); Break; End;
+    Dur:=Dur+D;
+    LastPk:=NextPk+S.Segs[Seg];
+   End;
+   Inc(NextPk,S.Segs[Seg]); Inc(Seg);
+  End;
+  S.LastPts:=S.Granule-Dur;
+  If (S.Granule=0) And (Dur<>0) Then S.LastPts:=VGONo;
+  If VGOStartTime=VGONo Then Begin
+   If S.LastPts>0 Then VGOStartTime:=S.LastPts Else VGOStartTime:=0;
+  End;
+  VGOFinalPts:=VGONo;
+  VGDPrevBlock:=VGDPB0;
+ End;
+ If S.PSize>0 Then Begin
+  D:=VGOParse(S.Buf^[S.PStart]);
+  If D<0 Then Begin S.PCorrupt:=True; Exit; End;
+  S.PDur:=D;
+ End;
+ If (S.Flags And 4)<>0 Then Begin
+  If S.LastPts<>VGONo Then Begin VGOFinalPts:=S.LastPts; VGOFinalDur:=0; End;
+  If S.Segp=S.NSegs Then Begin
+   Skip:=VGOFinalPts+VGOFinalDur+S.PDur-S.Granule;
+   If Skip>0 Then S.EndTrim:=VGOW32(Skip);
+   S.PDur:=(S.Granule-VGOFinalPts-VGOFinalDur) And $FFFFFFFF;
+  End;
+  VGOFinalDur:=VGOW32(VGOFinalDur+S.PDur);
+ End;
+End;
+
+{ ogg_calc_pts }
+Function VGOCalcPts(Var S: TVGOS): Int64;
+Var Pts: Int64;
+Begin
+ Pts:=VGONo;
+ If S.LastPts<>VGONo Then Begin Pts:=S.LastPts; S.LastPts:=VGONo; End;
+ If S.PageEnd Then Begin
+  If S.Granule<>-1 Then Begin
+   If (S.Granule<0) And (S.Granule<>VGONo) Then S.LastPts:=VGONo Else
+    S.LastPts:=S.Granule;
+   S.Granule:=-1;
+  End;
+ End;
+ VGOCalcPts:=Pts;
+End;
+
+{ vorbis_header : 1 = en-tete valide, 0 = paquet de donnees, Fail sinon }
+Function VGOHeader(Var S: TVGOS): LongInt;
+Var PT,I: LongInt; B: PEABuffer;
+Procedure Bad;
+Begin
+ Case PT Of
+  1: Fail('ogg: flux Vorbis: en-tete d''identification invalide.');
+  3: Fail('ogg: flux Vorbis: en-tete de commentaire invalide.');
+ Else Fail('ogg: flux Vorbis: en-tete setup invalide.');
+ End;
+End;
+Begin
+ B:=PEABuffer(@S.Buf^[S.PStart]);
+ PT:=B^[0];
+ If (PT And 1)=0 Then Begin
+  If VGOHaveVp Then VGOHeader:=0 Else Fail(
+   'ogg: flux Vorbis: en-tete invalide.');
+  Exit;
+ End;
+ If PT>5 Then Begin VGOHeader:=1; Exit; End;
+ If S.PSize<1 Then Bad;
+ If S.Pk[PT Shr 1]<>Nil Then Bad;
+ If ((PT>1) And (S.Pk[0]=Nil)) Or ((PT>3) And (S.Pk[1]=Nil)) Then Begin
+  If VGOHaveVp Then VGOHeader:=0 Else Bad;
+  Exit;
+ End;
+ GetMem(S.Pk[PT Shr 1],S.PSize+8); Move(B^,S.Pk[PT Shr 1]^,S.PSize); S.PkLen[PT
+  Shr 1]:=S.PSize;
+ If PT=1 Then Begin
+  If (S.PSize<>30) Or (B^[7]<>0) Or (B^[8]<>0) Or (B^[9]<>0) Or (B^[10]<>0) Then
+   Bad;
+ End Else If PT=5 Then Begin
+  VGDParseId(S.Pk[0],S.PkLen[0]);
+  VGDParseSetup(S.Pk[2],S.PkLen[2]);
+  If Not VGDParserInit(S.Pk[2],S.PkLen[2]) Then Fail(
+   'ogg: flux Vorbis: en-tete setup non analysable (modes).');
+  VGOHaveVp:=True;
+ End;
+ VGOHeader:=1;
+End;
+
+{ ogg_packet : 1 = paquet de donnees pret (S.OutStart,S.OutSize), 0 = en-tete
+ traite, -1 = fin ou erreur }
+Function VGOPacket(Var S: TVGOS): LongInt;
+Var Segp0,PSize0,R,SS,I: LongInt; Complete: Boolean;
+Begin
+ VGOPacket:=-1;
+ Repeat
+  While S.Segp>=S.NSegs Do Begin
+   If S.NoMore Then Exit;
+   R:=VGOReadPage(S,False);
+   If R<0 Then Exit;
+  End;
+  Segp0:=S.Segp; PSize0:=S.PSize; Complete:=False;
+  While S.Segp<S.NSegs Do Begin
+   SS:=S.Segs[S.Segp]; Inc(S.Segp); Inc(S.PSize,SS);
+   If SS<255 Then Begin Complete:=True; Break; End;
+  End;
+  If (Not Complete) And (S.Segp=S.NSegs) Then S.Incomplete:=S.PSize<>0;
+ Until Complete;
+ S.Incomplete:=False;
+ VGOPacket:=0;
+ If S.Header<>0 Then Begin
+  R:=VGOHeader(S);
+  S.Header:=R;
+  If R=0 Then Begin
+   S.Segp:=Segp0; S.PSize:=PSize0;
+   VGOHeadersDone:=True;
+   If VGODataOffset=0 Then VGODataOffset:=S.SyncPos;
+  End Else Begin
+   Inc(S.PStart,S.PSize); S.PSize:=0;
+  End;
+ End Else Begin
+  S.PCorrupt:=False; S.PDur:=0;
+  VGOVorbisPacket(S);
+  S.OutStart:=S.PStart; S.OutSize:=S.PSize;
+  VGOPacket:=1;
+  Inc(S.PStart,S.PSize); S.PSize:=0;
+  If S.PStart=S.BufPos Then Begin S.BufPos:=0; S.PStart:=0; End;
+  S.SyncPos:=S.PagePos;
+ End;
+ S.PageEnd:=True;
+ For I:=S.Segp To S.NSegs-1 Do If S.Segs[I]<255 Then Begin S.PageEnd:=False;
+  Break; End;
+End;
+
+{ ogg_get_length : retourne True si la passe preliminaire (analyse des premiers
+ paquets) a lieu }
+Function VGOPrePass(Var S0: TVGOS): Boolean;
+Var
+ P: TVGOS; At,Left,R,I: LongInt; Pg: TVGDPage; Cur: LongInt; Found,GotStart,
+  Ended: Boolean; Pts: Int64; Mg: Array[0..6] Of Byte;
+Begin
+ VGOPrePass:=False;
+ { phase 1 : pages des 65307 derniers octets }
+ At:=VGOLimit-65307; If At<0 Then At:=0;
+ Cur:=S0.Serial; Found:=False;
+ While VGDGetPage(At,VGOLimit,Pg) Do Begin
+  Inc(At,27+Pg.NSeg+Pg.Body);
+  If Pg.Sn<>Cur Then Begin
+   { page d'un autre flux : remplacement possible seulement avec un seul flux de
+    meme codec }
+   I:=0;
+   If (S0.NKnown<>1) Then Break;
+   If Pg.Body>=7 Then Begin Move(VGDRaw^[0],Mg,7); I:=1; End;
+   If (I=0) Or (Mg[0]<>1) Or (Mg[1]<>118) Or (Mg[2]<>111) Or (Mg[3]<>114) Or (
+    Mg[4]<>98) Or (Mg[5]<>105) Or (Mg[6]<>115) Then Break;
+   Cur:=Pg.Sn;
+  End;
+  If (Pg.Gran<>-1) And (Pg.Gran<>0) Then Found:=True;
+ End;
+ If Not Found Then Exit;
+ VGOPrePass:=True;
+ { phase 2 : lecture des premiers paquets depuis data_offset avec un etat de
+  flux remis a zero }
+ If VGODataOffset<=0 Then Exit;
+ VGOInit(P,S0.Serial);
+ P.Header:=0; P.NKnown:=S0.NKnown; Move(S0.Known,P.Known,SizeOf(P.Known));
+ P.At:=VGODataOffset; P.LastPts:=0; P.Granule:=-1;
+ Left:=1; GotStart:=False; Ended:=False;
+ While (Left>0) And Not Ended Do Begin
+  R:=VGOPacket(P);
+  If R<0 Then Break;
+  If R=0 Then Continue;
+  Pts:=VGOCalcPts(P);
+  P.EndTrim:=0;
+  If (Pts<>VGONo) And (VGOStartTime=VGONo) And Not GotStart Then Begin
+   GotStart:=True; Dec(Left); End
+  Else If (VGOStartTime<>VGONo) And Not GotStart Then Begin GotStart:=True; Dec(
+   Left); End;
+ End;
+ FreeMem(P.Buf);
+End;
+
+Procedure VGDecodeOgg(Const Source,Target: String);
+Var
+ S: TVGOS; Cw87: Word; R,Ch,Et: LongInt; Pts: Int64; PrePass: Boolean;
+Begin
+ VGInit; Cw87:=Get8087CW; Set8087CW($137F);
+ If Not VGIsVorbisOgg(Source) Then Fail('ogg: aucun flux Vorbis.');
+ VGONo:=Int64(1) Shl 63; VGOFinalPts:=VGONo; VGOFinalDur:=0; VGOStartTime:=
+  VGONo; VGODataOffset:=0;
+ VGOHeadersDone:=False; VGOHaveVp:=False; VGDHaveId:=False; VGDHaveModes:=False;
+  VGDSoft:=False; VGDErr:=False;
+ OpenRead(Source); VGOLimit:=InputSize;
+ GetMem(VGDRaw,70000);
+ VGOInit(S,VGDSerial);
+ VGDFirstFrame:=True;
+ EAReset; OpenWrite(Target);
+ { en-tetes (ogg_read_header) }
+ While Not VGOHeadersDone Do Begin
+  R:=VGOPacket(S);
+  If R<0 Then Fail('ogg: en-tetes Vorbis incomplets.');
+ End;
+ If Not VGOHaveVp Then Fail('ogg: en-tetes Vorbis incomplets.');
+ Ch:=VGDCh; VGDOutCh:=Ch; VGDCh0:=VGDCh; VGDRate0:=VGDRate;
+ VGDHaveId:=True; VGDHaveModes:=True;
+ VGWavHdr(VGDRate,Ch,0);
+ PrePass:=VGOPrePass(S);
+ { paquets de donnees }
+ While True Do Begin
+  R:=VGOPacket(S);
+  If R<0 Then Break;
+  If R=0 Then Continue;
+  Pts:=VGOCalcPts(S);
+  Et:=S.EndTrim; S.EndTrim:=0;
+  VGDPacketIn(PEABuffer(@S.Buf^[S.OutStart]),S.OutSize,Et);
+ End;
+ EAFlush;
+ VGWavPatch(VGDRate0,Ch,EAWritten);
+ CloseWrite; CloseRead; Set8087CW(Cw87);
+End;
+
+{ ---- options de la ligne de commande ---- }
+Procedure VGSetQScale(Const S: String);
+Var Q: Double; Code: Integer; G: LongInt; F,D: Single;
+Begin
+ Val(S,Q,Code);
+ If Code<>0 Then Fail('-q:a: valeur numerique attendue.');
+ If Q>=0 Then Begin
+  G:=Trunc(118*Q);
+  F:=G; D:=118; F:=F/D;
+  VGQuality:=F*F;
+ End;
+End;
+
+{ -fflags / -flags : seul "bitexact" est pris en compte (apres -i) }
+Procedure VGSetFlags(Const S: String; Format_: Boolean);
+Var I: LongInt; Tok: String; Sign: Char; Val_: Boolean;
+Begin
+ I:=1;
+ While I<=Length(S) Do Begin
+  Sign:='+';
+  If (S[I]='+') Or (S[I]='-') Then Begin Sign:=S[I]; Inc(I); End;
+  Tok:='';
+  While (I<=Length(S)) And (S[I]<>'+') And (S[I]<>'-') Do Begin Tok:=Tok+S[I];
+   Inc(I); End;
+  If Lower(Tok)='bitexact' Then Begin
+   Val_:=Sign='+';
+   If Format_ Then VGBitExact:=Val_ Else VGCodecBX:=Val_;
+  End;
+ End;
+End;
+
+{ encodeur experimental "vorbis" : erreurs identiques a celles de FFmpeg }
+Procedure VGEncodeFile(Const Source,Target: String);
+Begin
+ If Not VGStrictExp Then Fail(
+  'Codec vorbis is experimental but experimental codecs are not enabled, add'+
+  ' ''-strict -2'' if you want to use it.');
+ EncodeVorbisNative(Source,Target);
+End;
+
+{ ==== BLOCK-ANCHOR-G3C : inserer le code du groupe G3C juste au-dessus de cette
+ ligne ==== }
+
+
+{ Decodage d'un fichier de paquets Vorbis ([taille 32 bits][octets]...) : les trois
+ premiers paquets sont les en-tetes (identification, commentaires, configuration). }
+Procedure DecodeVorbisPk(Const Source,Target: String);
+Var Cw87: Word; Pos,Len,N,Ch: LongInt; Hd: Array[0..3] Of Byte; Pk: PEABuffer;
+Begin
+ VGInit; Cw87:=Get8087CW; Set8087CW($137F);
+ VGDHaveId:=False; VGDHaveModes:=False; VGDSoft:=False; VGDErr:=False; VGDFirstFrame:=True;
+ OpenRead(Source); EAReset; GetMem(Pk,70000); Pos:=0; N:=0; Ch:=0;
+ While Pos+4<=InputSize Do Begin
+  ReadAt(Pos,Hd,4); Len:=Hd[0]+Hd[1]*256+Hd[2]*65536+Hd[3]*16777216; Inc(Pos,4);
+  If (Len<=0) Or (Len>65000) Or (Pos+Len>InputSize) Then Break;
+  ReadAt(Pos,Pk^,Len); Inc(Pos,Len);
+  If N=0 Then Begin
+   VGDParseId(Pk,Len); VGDHaveId:=True;
+  End Else If N=2 Then Begin
+   VGDParseSetup(Pk,Len); VGDHaveModes:=True;
+   Ch:=VGDCh; VGDOutCh:=Ch; VGDCh0:=VGDCh; VGDRate0:=VGDRate;
+   OpenWrite(Target); VGWavHdr(VGDRate,Ch,0);
+  End Else If N>2 Then VGDPacketIn(Pk,Len,0);
+  Inc(N);
+  If (N And 63)=0 Then EngTick(Pos,InputSize);
+ End;
+ If N<=3 Then Fail('vorbis: aucun paquet audio.');
+ EAFlush; VGWavPatch(VGDRate0,Ch,EAWritten);
+ VGDFreeAll; FreeMem(Pk);
+ CloseWrite; CloseRead; Set8087CW(Cw87);
+End;
+{$ENDIF}
 
 { ====================================================================== }
 { Colle entre l'interface et les moteurs audio                             }
 { ====================================================================== }
 Const
- ekMP3 = 1; ekAIFF = 2; ekVOC = 3; ekMOD = 4; ekEncMP3 = 5; ekAAC = 6; ekEncAAC = 7;
+ ekMP3 = 1; ekAIFF = 2; ekVOC = 3; ekMOD = 4; ekEncMP3 = 5; ekAAC = 6; ekEncAAC = 7; ekAC3 = 8; ekEncAC3 = 9; ekOgg = 10; ekEncVorbis = 11; ekVorbisPk = 12;
 
 Type
  TByteArr = Array[0..32767] Of Byte;
@@ -18385,10 +23373,15 @@ Begin
    ekEncMP3: EncodeMP3(Src,Dst,Arg);
    ekAAC: DecodeAAC(Src,Dst);
    ekEncAAC: AEEncodeAAC(Src,Dst,Arg);
+   ekAC3: ProcessAC3E(Src,Dst,False,0);
+   ekEncAC3: ProcessAC3E(Src,Dst,True,Arg);
+   ekOgg: VGDecodeOgg(Src,Dst);
+   ekEncVorbis: Begin VGStrictExp:=True; EncodeVorbisNative(Src,Dst); End;
+   ekVorbisPk: DecodeVorbisPk(Src,Dst);
   End;
   RunEng:=True;
  End Else Begin
-  If (Kind=ekAAC) Or (Kind=ekEncAAC) Then AacCleanup(True);
+  If (Kind=ekAAC) Or (Kind=ekEncAAC) Or (Kind>=ekAC3) Then AacCleanup(True);
   If EngMsg='' Then EngMsg:='Erreur de conversion.';
   Err:=EngMsg; RunEng:=False;
  End;
@@ -18697,11 +23690,11 @@ Begin
   P:=P+8+Sz+(Sz And 1);
  End;
  If Not HaveAud Then Begin CClose; Err:='Aucune piste audio dans ce fichier AVI.'; Exit; End;
- If Not (Tag In [1,$11,$55,$FFFE,6,7,3]) Then Begin
+ If Not (Tag In [1,$11,$55,$FFFE,6,7,3,$2000]) Then Begin
   CClose; Err:='Audio AVI non pris en charge ('+WavTagName(Tag)+').'; Exit;
  End;
  Want:=Pad2(Idx)+'wb';
- If Tag=$55 Then Kind:=2 Else Kind:=1;
+ If Tag=$55 Then Kind:=2 Else If Tag=$2000 Then Kind:=4 Else Kind:=1;
  Assign(FI,Src); Old:=FileMode; FileMode:=0;
  {$I-}Reset(FI,1);{$I+}
  FileMode:=Old;
@@ -18878,6 +23871,7 @@ Begin
  Swap:=False;
  If (Fc='.mp3') Or ((Fc='mp4a') And ((Oti=$6B) Or (Oti=$69))) Then Kind:=2
  Else If (Fc='mp4a') And (Oti=$40) Then Kind:=3
+ Else If (Fc='ac-3') Then Kind:=4
  Else If (Fc='sowt') Then Kind:=1
  Else If (Fc='twos') Then Begin Kind:=1; Swap:=True; End
  Else If (Fc='raw ') Then Begin Kind:=1; Bits:=8; End
@@ -18949,8 +23943,18 @@ Begin
    If RunEng(ekAAC,Tmp,T2,0,Err) Then DecodeKind:=MakeCanon(T2,Dst,Err);
    DelFile(Tmp);
   End;
+  4: Begin
+   T2:=TmpName('WAV');
+   If RunEng(ekAC3,Tmp,T2,0,Err) Then DecodeKind:=MakeCanon(T2,Dst,Err);
+   DelFile(Tmp); DelFile(T2);
+  End;
+  6: Begin
+   T2:=TmpName('WAV');
+   If RunEng(ekVorbisPk,Tmp,T2,0,Err) Then DecodeKind:=MakeCanon(T2,Dst,Err);
+   DelFile(Tmp); DelFile(T2);
+  End;
  End;
- If Not (Kind In [1,2,3]) Then Err:='Type audio inconnu.';
+ If Not (Kind In [1,2,3,4,6]) Then Err:='Type audio inconnu.';
 End;
 
 {$IFDEF FPC}
@@ -18999,6 +24003,16 @@ Begin
  Else If ExtOf(M.Path)='AAC' Then Begin
   T1:=TmpName('WAV');
   If RunEng(ekAAC,M.Path,T1,0,Err) Then GetPcm:=MakeCanon(T1,Dst,Err);
+ End
+ Else If F='OGG' Then Begin
+  T1:=TmpName('WAV');
+  If RunEng(ekOgg,M.Path,T1,0,Err) Then GetPcm:=MakeCanon(T1,Dst,Err);
+  DelFile(T1);
+ End
+ Else If F='AC3' Then Begin
+  T1:=TmpName('WAV');
+  If RunEng(ekAC3,M.Path,T1,0,Err) Then GetPcm:=MakeCanon(T1,Dst,Err);
+  DelFile(T1);
  End
  {$IFDEF FPC}
  Else If (F='MKV') Or (F='WEBM') Then Begin
@@ -19285,6 +24299,8 @@ Begin
  End
  {$IFDEF FPC}
  Else If (Ext='M4A') Or (Ext='AAC') Then WriteFinal:=WriteAacOut(Canon,Dst,Pr,Err)
+ Else If Ext='OGG' Then WriteFinal:=RunEng(ekEncVorbis,Canon,Dst,0,Err)
+ Else If Ext='AC3' Then WriteFinal:=RunEng(ekEncAC3,Canon,Dst,Pr.AKb,Err)
  {$ENDIF}
  Else Err:='Format audio de sortie non pris en charge: '+Ext;
 End;
@@ -20373,6 +25389,7 @@ Begin
   Else If Pr.Ch=1 Then P.OutCh:=1
   Else P.OutCh:=0;
  End;
+ If Pr.Ext='OGG' Then P.OutCh:=2;
 End;
 
 Function AppendWavData(Const Src: String; Var FO: File; Var Rate: LongInt; Var Ch: Integer; Var Total: LongInt; Var Err: String): Boolean;
@@ -20393,7 +25410,7 @@ Function DoConvert(Var M: TMedia; Const Pr: TProf; Const Dst: String; Const SP: 
 Var T1,T2: String; P: TAP; Audio: Boolean; Ok: Boolean;
 Begin
  DoConvert:=False; Err:=''; JobWarn:='';
- Audio:=InList(Pr.Ext,'MP3,WAV,AIF,AU,M4A,AAC');
+ Audio:=InList(Pr.Ext,'MP3,WAV,AIF,AU,M4A,AAC,OGG,AC3,FLAC,WMA');
  If Audio Then Begin
   If (M.Kind=3) Or ((M.Kind=2) And (M.Fmt='GIF')) Then Begin Err:='Ce fichier ne contient pas de piste audio.'; Exit; End;
   StageLo:=0; StageHi:=45;
@@ -20496,7 +25513,7 @@ Begin
  Stopped:=False; Running:=True; ProgMode:=False; Done:=0; Err:='';
  For I:=1 To NFiles Do Begin Files[I]^.Status:=0; Files[I]^.Pct:=0; Files[I]^.Msg:=''; End;
  SubTab:=0; Tab:=0; DrawAll;
- If MergeAll And InList(Pr.Ext,'MP3,WAV,AIF,AU,M4A,AAC') And (NFiles>1) Then Begin
+ If MergeAll And InList(Pr.Ext,'MP3,WAV,AIF,AU,M4A,AAC,OGG,AC3,FLAC,WMA') And (NFiles>1) Then Begin
   Ok:=MergeAudio(Pr,Dst,Err);
   If Ok Then Begin
    AddConverted(Dst); Inc(Done);
@@ -20683,7 +25700,7 @@ Var Pr: TProf; S: String;
 Begin
  Pr:=Profs[CurProf];
  S:=Pr.Ext;
- If InList(Pr.Ext,'MP3,WAV,AIF,AU,M4A,AAC') Then Begin
+ If InList(Pr.Ext,'MP3,WAV,AIF,AU,M4A,AAC,OGG,AC3,FLAC,WMA') Then Begin
   If Pr.AKb>0 Then S:=S+'  '+IStr(Pr.AKb)+' kbps';
   S:=S+' '+TimeStr(M.DurMs);
  End Else Begin
@@ -21406,10 +26423,15 @@ Begin
    K:=MkT[Ai].PrivLen; If K>20 Then K:=20;
    For I:=0 To K-1 Do A.Cfg[I]:=CB(MkT[Ai].PrivPos+I); A.CfgLen:=K;
   End Else If Cd='A_MPEG/L3' Then A.Codec:='mp3 '
+  Else If Cd='A_AC3' Then A.Codec:='ac-3'
+  Else If Copy(Cd,1,5)='A_DTS' Then A.Codec:='dtsc'
+  Else If Cd='A_VORBIS' Then A.Codec:='vorb'
+  Else If Cd='A_OPUS' Then A.Codec:='Opus'
   Else If Copy(Cd,1,10)='A_PCM/INT/' Then Begin A.Codec:='pcm '; A.Oti:=MkT[Ai].Bits; If A.Oti=0 Then A.Oti:=16; End
   Else A.Codec:=Copy(Cd,3,4);
   For I:=0 To A.N-1 Do A.Dur^[I]:=1024;
   If A.Codec='mp3 ' Then For I:=0 To A.N-1 Do A.Dur^[I]:=1152;
+  If A.Codec='ac-3' Then For I:=0 To A.N-1 Do A.Dur^[I]:=1536;
   If A.Codec='pcm ' Then For I:=0 To A.N-1 Do A.Dur^[I]:=A.Sz^[I] Div Max(1,A.Chans*(A.Oti Div 8));
  End;
  CClose;
@@ -22375,6 +27397,29 @@ End;
 
 {$IFDEF FPC}
 { Audio d'un fichier MKV : Kind 1 WAV (PCM), 2 MP3, 3 AAC (ADTS) }
+{ en-tetes Vorbis (CodecPrivate en lacet Xiph) -> fichier de paquets }
+Function VorbisHeaders(Var FI,FO: File): Boolean;
+Var K,I,P,L1,L2,L3,Tot: LongInt; B: Array[0..9] Of Byte; Buf: PBArr; Sz: LongInt;
+Begin
+ VorbisHeaders:=False; K:=-1;
+ For I:=0 To MkN-1 Do If (MkT[I].Typ=2) And (K<0) Then K:=I;
+ If (K<0) Or (MkT[K].PrivLen<10) Or (MkT[K].PrivLen>65000) Then Exit;
+ Tot:=MkT[K].PrivLen; GetMem(Buf,Tot+8);
+ {$I-}Seek(FI,MkT[K].PrivPos); BlockRead(FI,Buf^,Tot);{$I+}
+ If IOResult<>0 Then Begin FreeMem(Buf,Tot+8); Exit; End;
+ If Buf^[0]<>2 Then Begin FreeMem(Buf,Tot+8); Exit; End;
+ P:=1; L1:=0; L2:=0;
+ While (P<Tot) And (Buf^[P]=255) Do Begin Inc(L1,255); Inc(P); End; Inc(L1,Buf^[P]); Inc(P);
+ While (P<Tot) And (Buf^[P]=255) Do Begin Inc(L2,255); Inc(P); End; Inc(L2,Buf^[P]); Inc(P);
+ L3:=Tot-P-L1-L2;
+ If (L3<=0) Or (L1<=0) Or (L2<=0) Then Begin FreeMem(Buf,Tot+8); Exit; End;
+ BlockWrite(FO,L1,4); BlockWrite(FO,Buf^[P],L1); Inc(P,L1);
+ BlockWrite(FO,L2,4); BlockWrite(FO,Buf^[P],L2); Inc(P,L2);
+ BlockWrite(FO,L3,4); BlockWrite(FO,Buf^[P],L3);
+ FreeMem(Buf,Tot+8);
+ VorbisHeaders:=True;
+End;
+
 Function ExtractMkv(Const Src,Dst: String; Var Kind: Integer; Var Err: String): Boolean;
 Var V,A: TTrkIn; FI,FO: File; I,Tot: LongInt; H: THdr; Prof,Sfi,Cfg: Integer; Ok: Boolean;
 Begin
@@ -22383,6 +27428,8 @@ Begin
  TrkClear(V);
  If Not A.Ok Then Begin Err:='Aucune piste audio dans ce fichier.'; TrkClear(A); Exit; End;
  If A.Codec='mp4a' Then Kind:=3 Else If A.Codec='mp3 ' Then Kind:=2 Else If A.Codec='pcm ' Then Kind:=1
+ Else If A.Codec='ac-3' Then Kind:=4
+ Else If A.Codec='vorb' Then Kind:=6
  Else Begin Err:='Audio MKV non pris en charge ('+A.Codec+').'; TrkClear(A); Exit; End;
  If (Kind=3) And (A.CfgLen<2) Then Begin Err:='Configuration AAC absente.'; TrkClear(A); Exit; End;
  If Not OpenSrc(Src,FI) Then Begin Err:='Ouverture impossible.'; TrkClear(A); Exit; End;
@@ -22390,8 +27437,12 @@ Begin
  If Kind=1 Then Begin PcmHeader(H,A.Rate,A.Chans,A.Oti,0); BlockWrite(FO,H,44); End;
  Prof:=(A.Cfg[0] Shr 3)-1; Sfi:=((A.Cfg[0] And 7) Shl 1) Or (A.Cfg[1] Shr 7); Cfg:=(A.Cfg[1] Shr 3) And 15;
  Tot:=0;
+ If Kind=6 Then Begin
+  If Not VorbisHeaders(FI,FO) Then Begin Close(FI); Close(FO); TrkClear(A); DelFile(Dst); Err:='En-t'#234'tes Vorbis invalides.'; Exit; End;
+ End;
  For I:=0 To A.N-1 Do Begin
   If Kind=3 Then PutAdts(FO,Prof,Sfi,Cfg,A.Sz^[I]);
+  If Kind=6 Then BlockWrite(FO,A.Sz^[I],4);
   CopyRange(FI,FO,A.Off^[I],A.Sz^[I],False); Inc(Tot,A.Sz^[I]);
   If (I And 255)=0 Then UiTick(I,A.N);
  End;
