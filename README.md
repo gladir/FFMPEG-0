@@ -19,6 +19,11 @@ audio -> M4A/AAC.
 Audio : decodage MP3, AAC-LC, FLAC, AIFF, VOC, MOD, WAV et extraction de l'audio des fichiers AVI, FLV, MP4/MOV/M4A ;
 sortie MP3, WAV (16/8 bits, IMA ADPCM), AIFF, AU, AAC, M4A. Images BMP et GIF anime (lecture/ecriture, rotation,
 rognage, effets, filigrane texte), collage, diaporama MV (GIF + musique), copie des titres DVD (VIDEO_TS) vers MPEG-PS.
-Limites : la video source doit etre en H.264 ou MPEG-4 Part 2 (AVI, MKV, MP4...) ; VP8/VP9, WMV, MS-MPEG4, etc. et les
-sorties autres que MP4/MOV/M4V/3GP produisent un message d'erreur explicite. Si l'audio d'une source n'est pas decodable
+WebM / MKV : lecture video VP8 (decodeur VP8 complet ecrit d'apres la specification RFC 6386 : images cle et inter,
+interpolation au quart de pixel, 6 taps / bilineaire, filtre de boucle, images de reference or / alt-ref, partitions multiples ;
+verifie identique bit a bit a la sortie de FFmpeg sur plusieurs fichiers libvpx).
+Encodeur H.264 : filtre de deblocage dans la boucle (meme algorithme que le decodeur) et controle de debit adaptatif
+(QP de l'image cle cherche par essais, modele de complexite pour les images P, correction de l'ecart cumule).
+Limites : la video source doit etre en H.264, MPEG-4 Part 2 ou VP8 (AVI, MKV, WebM, MP4...) ; VP9 n'est pas decode, pas plus
+que WMV, MS-MPEG4, etc., et les sorties autres que MP4/MOV/M4V/3GP (dont WebM) produisent un message d'erreur explicite. Si l'audio d'une source n'est pas decodable
 (Vorbis, AC3...), la video est convertie sans audio et le message l'indique.

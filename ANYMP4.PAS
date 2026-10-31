@@ -11600,6 +11600,70 @@ Begin
  X4SetInfo(Mx,My,1,Vx,Vy);
 End;
 
+{ ---- filtre de deblocage de la reconstruction (meme algorithme que le decodeur) ---- }
+Function X4HasNz(Mx,My,Bx,By: LongInt): Boolean;
+Begin X4HasNz:=X4NnzY^[(My*4+By)*X4Mbw*4+Mx*4+Bx]>0; End;
+
+Function X4BsAt(Mx,My,Dir,E,Seg: LongInt): LongInt;
+Var Bq,Bp,Mp,Mq: LongInt; Xq,Yq,Xp,Yp: LongInt; Np,Nq: Boolean;
+Begin
+ Mq:=My*X4Mbw+Mx;
+ If Dir=0 Then Begin Xq:=E; Yq:=Seg; End Else Begin Xq:=Seg; Yq:=E; End;
+ If E=0 Then Begin
+  If Dir=0 Then Begin Mp:=Mq-1; Xp:=3; Yp:=Seg; End Else Begin Mp:=Mq-X4Mbw; Xp:=Seg; Yp:=3; End;
+ End Else Begin
+  Mp:=Mq;
+  If Dir=0 Then Begin Xp:=E-1; Yp:=Seg; End Else Begin Xp:=Seg; Yp:=E-1; End;
+ End;
+ If (X4Kind^[Mq]=0) Or (X4Kind^[Mp]=0) Then Begin
+  If E=0 Then X4BsAt:=4 Else X4BsAt:=3; Exit;
+ End;
+ Nq:=X4HasNz(Mx,My,Xq,Yq);
+ If Mp=Mq Then Np:=X4HasNz(Mx,My,Xp,Yp)
+ Else If Dir=0 Then Np:=X4HasNz(Mx-1,My,Xp,Yp) Else Np:=X4HasNz(Mx,My-1,Xp,Yp);
+ If Nq Or Np Then Begin X4BsAt:=2; Exit; End;
+ If (Abs(X4Mvx^[Mq]-X4Mvx^[Mp])>=4) Or (Abs(X4Mvy^[Mq]-X4Mvy^[Mp])>=4) Then X4BsAt:=1 Else X4BsAt:=0;
+End;
+
+Procedure X4Deblock;
+Var Mx,My,Dir,E,Seg,Ln,Cb,Q,IdxA,IdxB,Alpha,Beta,Tc0,Pos,Step,Qc: LongInt; Bsv: Array[0..3] Of LongInt; Pl: PEABuffer;
+Begin
+ Q:=X4Qp;
+ For My:=0 To X4Mbh-1 Do For Mx:=0 To X4Mbw-1 Do
+  For Dir:=0 To 1 Do For E:=0 To 3 Do Begin
+   If (E=0) And (((Dir=0) And (Mx=0)) Or ((Dir=1) And (My=0))) Then Continue;
+   For Seg:=0 To 3 Do Bsv[Seg]:=X4BsAt(Mx,My,Dir,E,Seg);
+   IdxA:=H4Clip3(0,51,Q); IdxB:=IdxA;
+   Alpha:=H4Alpha[52+IdxA]; Beta:=H4Beta[52+IdxB];
+   If (Alpha<>0) And (Beta<>0) Then
+    For Seg:=0 To 3 Do If Bsv[Seg]>0 Then Begin
+     If Bsv[Seg]<4 Then Tc0:=H4Tc0[(52+IdxA)*4+Bsv[Seg]] Else Tc0:=0;
+     For Ln:=0 To 3 Do Begin
+      If Dir=0 Then Begin Pos:=(My*16+Seg*4+Ln)*X4Wp+Mx*16+E*4; Step:=1; End
+      Else Begin Pos:=(My*16+E*4)*X4Wp+Mx*16+Seg*4+Ln; Step:=X4Wp; End;
+      H4FiltLuma(X4Plane(X4Rec,0),Pos,Step,Bsv[Seg],Alpha,Beta,Tc0);
+     End;
+    End;
+   If (E=0) Or (E=2) Then Begin
+    Qc:=H4ChromaQp(Q,0);
+    IdxA:=H4Clip3(0,51,Qc); IdxB:=IdxA;
+    Alpha:=H4Alpha[52+IdxA]; Beta:=H4Beta[52+IdxB];
+    If (Alpha<>0) And (Beta<>0) Then
+     For Cb:=1 To 2 Do Begin
+      Pl:=X4Plane(X4Rec,Cb);
+      For Seg:=0 To 3 Do If Bsv[Seg]>0 Then Begin
+       If Bsv[Seg]<4 Then Tc0:=H4Tc0[(52+IdxA)*4+Bsv[Seg]] Else Tc0:=0;
+       For Ln:=0 To 1 Do Begin
+        If Dir=0 Then Begin Pos:=(My*8+Seg*2+Ln)*X4Cw+Mx*8+E*2; Step:=1; End
+        Else Begin Pos:=(My*8+E*2)*X4Cw+Mx*8+Seg*2+Ln; Step:=X4Cw; End;
+        H4FiltChroma(Pl,Pos,Step,Bsv[Seg],Alpha,Beta,Tc0);
+       End;
+      End;
+     End;
+   End;
+  End;
+End;
+
 { ---- image ---- }
 Function X4EncodeFrame(Idr: Boolean; FrameNum,Qp: LongInt): LongInt;
 Var
@@ -11627,7 +11691,7 @@ Begin
  X4Ue(0); If Idr Then X4Ue(7) Else X4Ue(5); X4Ue(0); X4Put(FrameNum And 255,8);
  If Idr Then X4Ue(0) Else Begin X4Put(0,1); X4Put(0,1); End;
  If Idr Then Begin X4Put(0,1); X4Put(0,1); End Else X4Put(0,1);
- X4Se(Qp-26); X4Ue(1);
+ X4Se(Qp-26); X4Ue(0); X4Se(0); X4Se(0);
  X4SkipRun:=0;
  FillChar(X4NnzY^,X4Mbw*X4Mbh*16,0); FillChar(X4NnzU^,X4Mbw*X4Mbh*4,0);
   FillChar(X4NnzV^,X4Mbw*X4Mbh*4,0);
@@ -11698,6 +11762,7 @@ Begin
  End;
  If X4SkipRun>0 Then Begin X4Ue(X4SkipRun); X4SkipRun:=0; End;
  X4Trail;
+ X4Deblock;
  X4EncodeFrame:=X4RbBits;
 End;
 
@@ -17094,6 +17159,1154 @@ Begin
  M4Ms:=0; M4CodedBlk:=Nil;
 End;
 {$ENDIF}
+{$IFDEF FPC}
+{ Tables VP8 extraites de libvpx (BSD) }
+Const
+ Vp8KfBmode: Array[0..899] Of Byte=(
+  231,120,48,89,115,113,120,152,112,152,179,64,126,170,118,46,70,95,175,69,
+  143,80,85,82,72,155,103,56,58,10,171,218,189,17,13,152,144,71,10,38,
+  171,213,144,34,26,114,26,17,163,44,195,21,10,173,121,24,80,195,26,62,
+  44,64,85,170,46,55,19,136,160,33,206,71,63,20,8,114,114,208,12,9,
+  226,81,40,11,96,182,84,29,16,36,134,183,89,137,98,101,106,165,148,72,
+  187,100,130,157,111,32,75,80,66,102,167,99,74,62,40,234,128,41,53,9,
+  178,241,141,26,8,107,104,79,12,27,217,255,87,17,7,74,43,26,146,73,
+  166,49,23,157,65,38,105,160,51,52,31,115,128,87,68,71,44,114,51,15,
+  186,23,47,41,14,110,182,183,21,17,194,66,45,25,102,197,189,23,18,22,
+  88,88,147,150,42,46,45,196,205,43,97,183,117,85,38,35,179,61,39,53,
+  200,87,26,21,43,232,171,56,34,51,104,114,102,29,93,77,107,54,32,26,
+  51,1,81,43,31,39,28,85,171,58,165,90,98,64,34,22,116,206,23,34,
+  43,166,73,68,25,106,22,64,171,36,225,114,34,19,21,102,132,188,16,76,
+  124,62,18,78,95,85,57,50,48,51,193,101,35,159,215,111,89,46,111,60,
+  148,31,172,219,228,21,18,111,112,113,77,85,179,255,38,120,114,40,42,1,
+  196,245,209,10,25,109,100,80,8,43,154,1,51,26,71,88,43,29,140,166,
+  213,37,43,154,61,63,30,155,67,45,68,1,209,142,78,78,16,255,128,34,
+  197,171,41,40,5,102,211,183,4,1,221,51,50,17,168,209,192,23,25,82,
+  125,98,42,88,104,85,117,175,82,95,84,53,89,128,100,113,101,45,75,79,
+  123,47,51,128,81,171,1,57,17,5,71,102,57,53,41,49,115,21,2,10,
+  102,255,166,23,6,38,33,13,121,57,73,26,1,85,41,10,67,138,77,110,
+  90,47,114,101,29,16,10,85,128,101,196,26,57,18,10,102,102,213,34,20,
+  43,117,20,15,36,163,128,68,1,26,138,31,36,171,27,166,38,44,229,67,
+  87,58,169,82,115,26,59,179,63,59,90,180,59,166,93,73,154,40,40,21,
+  116,143,209,34,39,175,57,46,22,24,128,1,54,17,37,47,15,16,183,34,
+  223,49,45,183,46,17,33,183,6,98,15,32,183,65,32,73,115,28,128,23,
+  128,205,40,3,9,115,51,192,18,6,223,87,37,9,115,59,77,64,21,47,
+  104,55,44,218,9,54,53,130,226,64,90,70,205,40,41,23,26,57,54,57,
+  112,184,5,41,38,166,213,30,34,26,133,152,116,10,32,134,75,32,12,51,
+  192,255,160,43,51,39,19,53,221,26,114,32,73,255,31,9,65,234,2,15,
+  1,118,73,88,31,35,67,102,85,55,186,85,56,21,23,111,59,205,45,37,
+  192,55,38,70,124,73,102,1,34,98,102,61,71,37,34,53,31,243,192,69,
+  60,71,38,73,119,28,222,37,68,45,128,34,1,47,11,245,171,62,17,19,
+  70,146,85,55,62,70,75,15,9,9,64,255,184,119,16,37,43,37,154,100,
+  163,85,160,1,63,9,92,136,28,64,32,201,85,86,6,28,5,64,255,25,
+  248,1,56,8,17,132,137,255,55,116,128,58,15,20,82,135,57,26,121,40,
+  164,50,31,137,154,133,25,35,218,51,103,44,131,131,123,31,6,158,86,40,
+  64,135,148,224,45,183,128,22,26,17,131,240,154,14,1,209,83,12,13,54,
+  192,255,68,47,28,45,16,21,91,64,222,7,1,197,56,21,39,155,60,138,
+  23,102,213,85,26,85,85,128,128,32,146,171,18,11,7,63,144,171,4,4,
+  246,35,27,10,146,174,171,12,26,128,190,80,35,99,180,80,126,54,45,85,
+  126,47,87,176,51,41,20,32,101,75,128,139,118,146,116,128,85,56,41,15,
+  176,236,85,37,9,62,146,36,19,30,171,255,97,27,20,71,30,17,119,118,
+  255,17,18,138,101,38,60,138,55,70,43,26,142,138,45,61,62,219,1,81,
+  188,64,32,41,20,117,151,142,20,21,163,112,19,12,61,195,128,48,4,24
+ );
+ Vp8CoefDef: Array[0..1055] Of Byte=(
+  128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,
+  128,128,128,128,128,128,128,128,128,128,128,128,128,253,136,254,255,228,219,128,
+  128,128,128,128,189,129,242,255,227,213,255,219,128,128,128,106,126,227,252,214,
+  209,255,255,128,128,128,1,98,248,255,236,226,255,255,128,128,128,181,133,238,
+  254,221,234,255,154,128,128,128,78,134,202,247,198,180,255,219,128,128,128,1,
+  185,249,255,243,255,128,128,128,128,128,184,150,247,255,236,224,128,128,128,128,
+  128,77,110,216,255,236,230,128,128,128,128,128,1,101,251,255,241,255,128,128,
+  128,128,128,170,139,241,252,236,209,255,255,128,128,128,37,116,196,243,228,255,
+  255,255,128,128,128,1,204,254,255,245,255,128,128,128,128,128,207,160,250,255,
+  238,128,128,128,128,128,128,102,103,231,255,211,171,128,128,128,128,128,1,152,
+  252,255,240,255,128,128,128,128,128,177,135,243,255,234,225,128,128,128,128,128,
+  80,129,211,255,194,224,128,128,128,128,128,1,1,255,128,128,128,128,128,128,
+  128,128,246,1,255,128,128,128,128,128,128,128,128,255,128,128,128,128,128,128,
+  128,128,128,128,198,35,237,223,193,187,162,160,145,155,62,131,45,198,221,172,
+  176,220,157,252,221,1,68,47,146,208,149,167,221,162,255,223,128,1,149,241,
+  255,221,224,255,255,128,128,128,184,141,234,253,222,220,255,199,128,128,128,81,
+  99,181,242,176,190,249,202,255,255,128,1,129,232,253,214,197,242,196,255,255,
+  128,99,121,210,250,201,198,255,202,128,128,128,23,91,163,242,170,187,247,210,
+  255,255,128,1,200,246,255,234,255,128,128,128,128,128,109,178,241,255,231,245,
+  255,255,128,128,128,44,130,201,253,205,192,255,255,128,128,128,1,132,239,251,
+  219,209,255,165,128,128,128,94,136,225,251,218,190,255,255,128,128,128,22,100,
+  174,245,186,161,255,199,128,128,128,1,182,249,255,232,235,128,128,128,128,128,
+  124,143,241,255,227,234,128,128,128,128,128,35,77,181,251,193,211,255,205,128,
+  128,128,1,157,247,255,236,231,255,255,128,128,128,121,141,235,255,225,227,255,
+  255,128,128,128,45,99,188,251,195,217,255,224,128,128,128,1,1,251,255,213,
+  255,128,128,128,128,128,203,1,248,255,255,128,128,128,128,128,128,137,1,177,
+  255,224,255,128,128,128,128,128,253,9,248,251,207,208,255,192,128,128,128,175,
+  13,224,243,193,185,249,198,255,255,128,73,17,171,221,161,179,236,167,255,234,
+  128,1,95,247,253,212,183,255,255,128,128,128,239,90,244,250,211,209,255,255,
+  128,128,128,155,77,195,248,188,195,255,255,128,128,128,1,24,239,251,218,219,
+  255,205,128,128,128,201,51,219,255,196,186,128,128,128,128,128,69,46,190,239,
+  201,218,255,228,128,128,128,1,191,251,255,255,128,128,128,128,128,128,223,165,
+  249,255,213,255,128,128,128,128,128,141,124,248,255,255,128,128,128,128,128,128,
+  1,16,248,255,255,128,128,128,128,128,128,190,36,230,255,236,255,128,128,128,
+  128,128,149,1,255,128,128,128,128,128,128,128,128,1,226,255,128,128,128,128,
+  128,128,128,128,247,192,255,128,128,128,128,128,128,128,128,240,128,255,128,128,
+  128,128,128,128,128,128,1,134,252,255,255,128,128,128,128,128,128,213,62,250,
+  255,255,128,128,128,128,128,128,55,93,255,128,128,128,128,128,128,128,128,128,
+  128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,
+  128,128,128,128,128,128,128,128,128,128,128,128,202,24,213,235,186,191,220,160,
+  240,175,255,126,38,182,232,169,184,228,174,255,187,128,61,46,138,219,151,178,
+  240,170,255,216,128,1,112,230,250,199,191,247,159,255,255,128,166,109,228,252,
+  211,215,255,174,128,128,128,39,77,162,232,172,180,245,178,255,255,128,1,52,
+  220,246,198,199,249,220,255,255,128,124,74,191,243,183,193,250,221,255,255,128,
+  24,71,130,219,154,170,243,182,255,255,128,1,182,225,249,219,240,255,224,128,
+  128,128,149,150,226,252,216,205,255,171,128,128,128,28,108,170,242,183,194,254,
+  223,255,255,128,1,81,230,252,204,203,255,192,128,128,128,123,102,209,247,188,
+  196,255,233,128,128,128,20,95,153,243,164,173,255,203,128,128,128,1,222,248,
+  255,216,213,128,128,128,128,128,168,175,246,252,235,205,255,255,128,128,128,47,
+  116,215,255,211,212,255,255,128,128,128,1,121,236,253,212,214,255,255,128,128,
+  128,141,84,213,252,201,202,255,219,128,128,128,42,80,160,240,162,185,255,205,
+  128,128,128,1,1,255,128,128,128,128,128,128,128,128,244,1,255,128,128,128,
+  128,128,128,128,128,238,1,255,128,128,128,128,128,128,128,128
+ );
+ Vp8CoefUpd: Array[0..1055] Of Byte=(
+  255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+  255,255,255,255,255,255,255,255,255,255,255,255,255,176,246,255,255,255,255,255,
+  255,255,255,255,223,241,252,255,255,255,255,255,255,255,255,249,253,253,255,255,
+  255,255,255,255,255,255,255,244,252,255,255,255,255,255,255,255,255,234,254,254,
+  255,255,255,255,255,255,255,255,253,255,255,255,255,255,255,255,255,255,255,255,
+  246,254,255,255,255,255,255,255,255,255,239,253,254,255,255,255,255,255,255,255,
+  255,254,255,254,255,255,255,255,255,255,255,255,255,248,254,255,255,255,255,255,
+  255,255,255,251,255,254,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+  255,255,255,255,255,255,253,254,255,255,255,255,255,255,255,255,251,254,254,255,
+  255,255,255,255,255,255,255,254,255,254,255,255,255,255,255,255,255,255,255,254,
+  253,255,254,255,255,255,255,255,255,250,255,254,255,254,255,255,255,255,255,255,
+  254,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+  255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+  255,255,255,255,217,255,255,255,255,255,255,255,255,255,255,225,252,241,253,255,
+  255,254,255,255,255,255,234,250,241,250,253,255,253,254,255,255,255,255,254,255,
+  255,255,255,255,255,255,255,255,223,254,254,255,255,255,255,255,255,255,255,238,
+  253,254,254,255,255,255,255,255,255,255,255,248,254,255,255,255,255,255,255,255,
+  255,249,254,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+  255,255,255,255,253,255,255,255,255,255,255,255,255,255,247,254,255,255,255,255,
+  255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,253,254,255,
+  255,255,255,255,255,255,255,252,255,255,255,255,255,255,255,255,255,255,255,255,
+  255,255,255,255,255,255,255,255,255,255,254,254,255,255,255,255,255,255,255,255,
+  253,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+  255,255,255,254,253,255,255,255,255,255,255,255,255,250,255,255,255,255,255,255,
+  255,255,255,255,254,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+  255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+  255,255,255,255,255,255,255,255,186,251,250,255,255,255,255,255,255,255,255,234,
+  251,244,254,255,255,255,255,255,255,255,251,251,243,253,254,255,254,255,255,255,
+  255,255,253,254,255,255,255,255,255,255,255,255,236,253,254,255,255,255,255,255,
+  255,255,255,251,253,253,254,254,255,255,255,255,255,255,255,254,254,255,255,255,
+  255,255,255,255,255,254,254,254,255,255,255,255,255,255,255,255,255,255,255,255,
+  255,255,255,255,255,255,255,255,254,255,255,255,255,255,255,255,255,255,254,254,
+  255,255,255,255,255,255,255,255,255,254,255,255,255,255,255,255,255,255,255,255,
+  255,255,255,255,255,255,255,255,255,255,255,254,255,255,255,255,255,255,255,255,
+  255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+  255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+  255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+  255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+  255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+  255,255,255,255,255,255,255,255,255,255,255,255,248,255,255,255,255,255,255,255,
+  255,255,255,250,254,252,254,255,255,255,255,255,255,255,248,254,249,253,255,255,
+  255,255,255,255,255,255,253,253,255,255,255,255,255,255,255,255,246,253,253,255,
+  255,255,255,255,255,255,255,252,254,251,254,254,255,255,255,255,255,255,255,254,
+  252,255,255,255,255,255,255,255,255,248,254,253,255,255,255,255,255,255,255,255,
+  253,255,254,254,255,255,255,255,255,255,255,255,251,254,255,255,255,255,255,255,
+  255,255,245,251,254,255,255,255,255,255,255,255,255,253,253,254,255,255,255,255,
+  255,255,255,255,255,251,253,255,255,255,255,255,255,255,255,252,253,254,255,255,
+  255,255,255,255,255,255,255,254,255,255,255,255,255,255,255,255,255,255,252,255,
+  255,255,255,255,255,255,255,255,249,255,254,255,255,255,255,255,255,255,255,255,
+  255,254,255,255,255,255,255,255,255,255,255,255,253,255,255,255,255,255,255,255,
+  255,250,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+  255,255,255,255,255,255,255,255,255,255,255,255,255,255,254,255,255,255,255,255,
+  255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255
+ );
+ Vp8DcQ: Array[0..127] Of Word=(
+  4,5,6,7,8,9,10,10,11,12,13,14,15,16,17,17,18,19,20,20,
+  21,21,22,22,23,23,24,25,25,26,27,28,29,30,31,32,33,34,35,36,
+  37,37,38,39,40,41,42,43,44,45,46,46,47,48,49,50,51,52,53,54,
+  55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,
+  75,76,76,77,78,79,80,81,82,83,84,85,86,87,88,89,91,93,95,96,
+  98,100,101,102,104,106,108,110,112,114,116,118,122,124,126,128,130,132,134,136,
+  138,140,143,145,148,151,154,157
+ );
+ Vp8AcQ: Array[0..127] Of Word=(
+  4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,
+  24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,
+  44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,60,62,64,66,68,
+  70,72,74,76,78,80,82,84,86,88,90,92,94,96,98,100,102,104,106,108,
+  110,112,114,116,119,122,125,128,131,134,137,140,143,146,149,152,155,158,161,164,
+  167,170,173,177,181,185,189,193,197,201,205,209,213,217,221,225,229,234,239,245,
+  249,254,259,264,269,274,279,284
+ );
+
+{ ====================================================================== }
+{ Decodeur VP8 (RFC 6386) : port en Pascal du decodeur de reference libvpx   }
+{ (BSD). Tables extraites de libvpx. Sortie : images YUV 4:2:0 via Vp8Hook.   }
+{ ====================================================================== }
+Type
+ TV8Mv = Record R,C: SmallInt; End;
+ TV8Bm = Record Mode: Byte; Mv: TV8Mv; End;
+ TV8Mbi = Record
+  Mode,UvMode,Ref,Seg,Skip,Part: Byte;
+  Clamp,Is4: Boolean;
+  Mv: TV8Mv;
+  Bm: Array[0..15] Of TV8Bm;
+ End;
+ TV8MbiA = Array[0..0] Of TV8Mbi;
+ PV8Mbi = ^TV8Mbi;
+ PV8Arr = ^TV8MbiA;
+ TV8Bool = Record
+  Buf: PEABuffer; Pos,Len: LongInt; Value,Range: LongInt; Bits: Integer;
+ End;
+ TV8Fc = Record
+  Coef: Array[0..1055] Of Byte;
+  Mvc: Array[0..1,0..18] Of Byte;
+  Ymode: Array[0..3] Of Byte;
+  Uvmode: Array[0..2] Of Byte;
+ End;
+ TV8Fb = Record Y,U,V: PEABuffer; End;
+
+Var
+ Vp8Hook: Procedure(B: Pointer; W,H: LongInt);
+ V8W,V8H,V8MbW,V8MbH,V8Stride,V8YS,V8CS: LongInt;
+ V8Have: Boolean;
+ V8Fb: Array[0..3] Of TV8Fb;
+ V8Last,V8Gold,V8Alt,V8New: Integer;
+ V8Mip: PV8Arr;
+ V8Out: PEABuffer;
+ V8Fc,V8Lfc: TV8Fc;
+ V8Key,V8Show,V8Ver: Integer;
+ V8SegOn,V8SegMap,V8SegData,V8SegAbs: Integer;
+ V8SegQ,V8SegLf: Array[0..3] Of Integer;
+ V8SegProb: Array[0..2] Of Integer;
+ V8FType,V8FLevel,V8Sharp: Integer;
+ V8LfDeltaOn: Integer;
+ V8RefLf,V8ModeLf: Array[0..3] Of Integer;
+ V8Base,V8Y1dc,V8Y2dc,V8Y2ac,V8Uvdc,V8Uvac: Integer;
+ V8SignBias: Array[0..3] Of Integer;
+ V8RefreshGold,V8RefreshAlt,V8CopyGold,V8CopyAlt,V8RefreshProbs,V8RefreshLast: Integer;
+ V8NoSkip,V8ProbSkip,V8ProbIntra,V8ProbLast,V8ProbGf: Integer;
+ V8Bilinear,V8FullPix: Boolean;
+ V8Parts: Integer;
+ V8Bc: TV8Bool;
+ V8Tok: Array[0..7] Of TV8Bool;
+ V8ACtx: Array[0..8192] Of Byte;
+ V8LCtx: Array[0..8] Of Byte;
+ V8Q: Array[0..399] Of SmallInt;
+ V8Eob: Array[0..24] Of Integer;
+ V8Win: Array[0..399] Of Byte;
+ V8Tmp: Array[0..399] Of Integer;
+
+Const
+ V8BmodeTree: Array[0..17] Of ShortInt=(0,2,-1,4,-2,6,8,12,-3,10,-5,-6,-4,14,-7,16,-8,-9);
+ V8YmodeTree: Array[0..7] Of ShortInt=(0,2,4,6,-1,-2,-3,-4);
+ V8KfYmodeTree: Array[0..7] Of ShortInt=(-4,2,4,6,0,-1,-2,-3);
+ V8UvTree: Array[0..5] Of ShortInt=(0,2,-1,4,-2,-3);
+ V8SmallMv: Array[0..13] Of ShortInt=(2,8,4,6,0,-1,-2,-3,10,12,-4,-5,-6,-7);
+ V8KfYprob: Array[0..3] Of Byte=(145,156,163,128);
+ V8KfUvprob: Array[0..2] Of Byte=(142,114,183);
+ V8DefYprob: Array[0..3] Of Byte=(112,86,140,37);
+ V8DefUvprob: Array[0..2] Of Byte=(162,101,204);
+ V8DefBprob: Array[0..8] Of Byte=(120,90,79,133,87,85,80,111,151);
+ V8MvUpd: Array[0..1,0..18] Of Byte=(
+  (237,246,253,253,254,254,254,254,254,254,254,254,254,254,250,250,252,254,254),
+  (231,243,245,253,254,254,254,254,254,254,254,254,254,254,251,251,254,254,254));
+ V8MvDef: Array[0..1,0..18] Of Byte=(
+  (162,128,225,146,172,147,214,39,156,128,129,132,75,145,178,206,239,254,254),
+  (164,128,204,170,119,235,140,230,228,128,130,130,74,148,180,203,236,254,254));
+ V8ModeCtx: Array[0..5,0..3] Of Byte=((7,1,1,143),(14,18,14,107),(135,64,57,68),(60,56,128,65),(159,134,128,34),(234,188,128,28));
+ V8SubMvProb: Array[0..7,0..2] Of Byte=((147,136,18),(223,1,34),(106,145,1),(208,1,1),(179,121,1),(223,1,34),(179,121,1),(208,1,1));
+ V8SplitOff: Array[0..3,0..15] Of Byte=(
+  (0,8,0,0,0,0,0,0,0,0,0,0,0,0,0,0),(0,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0),(0,2,8,10,0,0,0,0,0,0,0,0,0,0,0,0),(0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15));
+ V8SplitFillCnt: Array[0..3] Of Byte=(8,8,4,1);
+ V8SplitFill: Array[0..3,0..15] Of Byte=(
+  (0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15),(0,1,4,5,8,9,12,13,2,3,6,7,10,11,14,15),(0,1,4,5,2,3,6,7,8,9,12,13,10,11,14,15),(0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15));
+ V8SplitNum: Array[0..3] Of Byte=(2,2,4,16);
+ V8Bands: Array[0..16] Of Byte=(0,1,2,3,6,4,5,6,6,6,6,6,6,6,6,7,0);
+ V8Zig: Array[0..15] Of Byte=(0,1,4,8,5,2,3,6,9,12,13,10,7,11,14,15);
+ V8Cat3: Array[0..3] Of Byte=(173,148,140,0);
+ V8Cat4: Array[0..4] Of Byte=(176,155,140,135,0);
+ V8Cat5: Array[0..5] Of Byte=(180,157,141,134,130,0);
+ V8Cat6: Array[0..11] Of Byte=(254,254,243,230,196,177,153,140,133,130,129,0);
+ V8Six: Array[0..7,0..5] Of SmallInt=((0,0,128,0,0,0),(0,-6,123,12,-1,0),(2,-11,108,36,-8,1),(0,-9,93,50,-6,0),(3,-16,77,77,-16,3),(0,-6,50,93,-9,0),(1,-8,36,108,-11,2),(0,-1,12,123,-6,0));
+ V8LfMode: Array[0..9] Of Byte=(1,1,1,1,0,2,2,1,2,3);
+
+{ ---- decodeur booleen ---- }
+Procedure V8BInit(Var B: TV8Bool; P: PEABuffer; Len: LongInt);
+Begin
+ B.Buf:=P; B.Len:=Len; B.Pos:=0; B.Range:=255; B.Bits:=0; B.Value:=0;
+ If Len>0 Then B.Value:=P^[0]*256;
+ If Len>1 Then B.Value:=B.Value+P^[1];
+ B.Pos:=2;
+End;
+
+Function V8BRead(Var B: TV8Bool; Prob: Integer): Integer;
+Var Split,Sp: LongInt;
+Begin
+ Split:=1+(((B.Range-1)*Prob) Shr 8);
+ Sp:=Split Shl 8;
+ If B.Value>=Sp Then Begin V8BRead:=1; Dec(B.Range,Split); Dec(B.Value,Sp); End
+ Else Begin V8BRead:=0; B.Range:=Split; End;
+ While B.Range<128 Do Begin
+  B.Value:=B.Value Shl 1; B.Range:=B.Range Shl 1; Inc(B.Bits);
+  If B.Bits=8 Then Begin
+   B.Bits:=0;
+   If B.Pos<B.Len Then B.Value:=B.Value Or B.Buf^[B.Pos];
+   Inc(B.Pos);
+  End;
+ End;
+End;
+
+Function V8Lit(Var B: TV8Bool; N: Integer): Integer;
+Var V,I: Integer;
+Begin
+ V:=0;
+ For I:=1 To N Do V:=(V Shl 1) Or V8BRead(B,128);
+ V8Lit:=V;
+End;
+
+Function V8Sar(V: LongInt; N: Integer): LongInt;
+Begin
+ If V>=0 Then V8Sar:=V Shr N Else V8Sar:=-((-V-1) Shr N)-1;
+End;
+
+Function V8Clip(V: LongInt): LongInt;
+Begin
+ If V<0 Then V:=0; If V>255 Then V:=255; V8Clip:=V;
+End;
+
+{ ---- allocation ---- }
+Procedure V8FreeAll;
+Var I: Integer;
+Begin
+ If V8Have Then Begin
+  For I:=0 To 3 Do Begin
+   FreeMem(V8Fb[I].Y,V8YS*V8MbH*16+16); FreeMem(V8Fb[I].U,V8CS*V8MbH*8+16); FreeMem(V8Fb[I].V,V8CS*V8MbH*8+16);
+  End;
+  FreeMem(V8Mip,(V8MbW+1)*(V8MbH+1)*SizeOf(TV8Mbi)+SizeOf(TV8Mbi)*4);
+  FreeMem(V8Out,V8W*V8H*3+64);
+  V8Have:=False;
+ End;
+End;
+
+Procedure V8Alloc(W,H: LongInt);
+Var I: Integer;
+Begin
+ V8FreeAll;
+ V8W:=W; V8H:=H; V8MbW:=(W+15) Div 16; V8MbH:=(H+15) Div 16; V8YS:=V8MbW*16; V8CS:=V8MbW*8; V8Stride:=V8MbW+1;
+ For I:=0 To 3 Do Begin
+  GetMem(V8Fb[I].Y,V8YS*V8MbH*16+16); GetMem(V8Fb[I].U,V8CS*V8MbH*8+16); GetMem(V8Fb[I].V,V8CS*V8MbH*8+16);
+  FillChar(V8Fb[I].Y^,V8YS*V8MbH*16,0); FillChar(V8Fb[I].U^,V8CS*V8MbH*8,0); FillChar(V8Fb[I].V^,V8CS*V8MbH*8,0);
+ End;
+ GetMem(V8Mip,(V8MbW+1)*(V8MbH+1)*SizeOf(TV8Mbi)+SizeOf(TV8Mbi)*4);
+ FillChar(V8Mip^,(V8MbW+1)*(V8MbH+1)*SizeOf(TV8Mbi)+SizeOf(TV8Mbi)*4,0);
+ GetMem(V8Out,W*H*3+64);
+ V8Last:=0; V8Gold:=1; V8Alt:=2; V8New:=3;
+ V8Have:=True;
+End;
+
+Function V8Mb(R,C: LongInt): PV8Mbi;
+Begin
+ V8Mb:=@V8Mip^[(R+1)*V8Stride+C+1];
+End;
+
+{ ---- lecture des modes ---- }
+Function V8Tree(Var B: TV8Bool; Const T: Array Of ShortInt; P: PEABuffer): Integer;
+Var I: Integer;
+Begin
+ I:=0;
+ Repeat I:=T[I+V8BRead(B,P^[I Shr 1])]; Until I<=0;
+ V8Tree:=-I;
+End;
+
+Function V8MvComp(Var B: TV8Bool; Var Mvc: Array Of Byte): Integer;
+Var X,I: Integer;
+Begin
+ X:=0;
+ If V8BRead(B,Mvc[0])<>0 Then Begin
+  For I:=0 To 2 Do X:=X+(V8BRead(B,Mvc[9+I]) Shl I);
+  For I:=9 DownTo 4 Do X:=X+(V8BRead(B,Mvc[9+I]) Shl I);
+  If ((X And $FFF0)=0) Or (V8BRead(B,Mvc[9+3])<>0) Then Inc(X,8);
+ End Else Begin
+  I:=0;
+  Repeat I:=V8SmallMv[I+V8BRead(B,Mvc[2+(I Shr 1)])]; Until I<=0;
+  X:=-I;
+ End;
+ If (X<>0) And (V8BRead(B,Mvc[1])<>0) Then X:=-X;
+ V8MvComp:=X;
+End;
+
+{ Mode de sous-bloc voisin (contexte B_PRED des images cle) }
+Function V8NbMode(Idx: LongInt; B: Integer; Above: Boolean): Integer;
+Var P: PV8Mbi;
+ Function Map(Q: PV8Mbi; Sb: Integer): Integer;
+ Begin
+  Case Q^.Mode Of
+   4: Map:=Q^.Bm[Sb].Mode;
+   1: Map:=2; 2: Map:=3; 3: Map:=1;
+   Else Map:=0;
+  End;
+ End;
+Begin
+ If Above Then Begin
+  If (B Shr 2)=0 Then V8NbMode:=Map(@V8Mip^[Idx-V8Stride],B+12) Else V8NbMode:=V8Mip^[Idx].Bm[B-4].Mode;
+ End Else Begin
+  If (B And 3)=0 Then V8NbMode:=Map(@V8Mip^[Idx-1],B+3) Else V8NbMode:=V8Mip^[Idx].Bm[B-1].Mode;
+ End;
+End;
+
+Procedure V8ClampMv(Var Mv: TV8Mv; L,Rr,T,Bt: Integer);
+Begin
+ If Mv.C<L Then Mv.C:=L Else If Mv.C>Rr Then Mv.C:=Rr;
+ If Mv.R<T Then Mv.R:=T Else If Mv.R>Bt Then Mv.R:=Bt;
+End;
+
+Procedure V8Modes;
+Var R,C,I,J,Idx: LongInt; Mi,Above,Left,AL: PV8Mbi; B: Integer; Cnt: Array[0..3] Of Integer; Nm: Array[0..3] Of TV8Mv;
+ N,Cx,Ref,Near,S,NumP,K,Ci: Integer; L,Rt,T,Bt: LongInt; This: TV8Mv; Tmp: Integer; Tm: TV8Mv;
+ LMv,AMv,Bmv: TV8Mv; Pr: Integer; Fl: Integer;
+ Procedure Bias(Var Mv: TV8Mv; MbRef: Integer);
+ Begin
+  If V8SignBias[MbRef]<>V8SignBias[Ref] Then Begin Mv.R:=-Mv.R; Mv.C:=-Mv.C; End;
+ End;
+ Function Eq(Const A,Bb: TV8Mv): Boolean;
+ Begin Eq:=(A.R=Bb.R) And (A.C=Bb.C); End;
+ Function Zero(Const A: TV8Mv): Boolean;
+ Begin Zero:=(A.R=0) And (A.C=0); End;
+Begin
+ V8NoSkip:=V8BRead(V8Bc,128); V8ProbSkip:=0;
+ If V8NoSkip<>0 Then V8ProbSkip:=V8Lit(V8Bc,8);
+ If V8Key=0 Then Begin
+  V8ProbIntra:=V8Lit(V8Bc,8); V8ProbLast:=V8Lit(V8Bc,8); V8ProbGf:=V8Lit(V8Bc,8);
+  If V8BRead(V8Bc,128)<>0 Then For I:=0 To 3 Do V8Fc.Ymode[I]:=V8Lit(V8Bc,8);
+  If V8BRead(V8Bc,128)<>0 Then For I:=0 To 2 Do V8Fc.Uvmode[I]:=V8Lit(V8Bc,8);
+  For I:=0 To 1 Do For J:=0 To 18 Do
+   If V8BRead(V8Bc,V8MvUpd[I,J])<>0 Then Begin
+    K:=V8Lit(V8Bc,7); If K<>0 Then V8Fc.Mvc[I,J]:=K Shl 1 Else V8Fc.Mvc[I,J]:=1;
+   End;
+ End;
+ For R:=0 To V8MbH-1 Do For C:=0 To V8MbW-1 Do Begin
+  Idx:=(R+1)*V8Stride+C+1;
+  Mi:=@V8Mip^[Idx];
+  If V8SegMap<>0 Then Begin
+   If V8BRead(V8Bc,V8SegProb[0])<>0 Then Mi^.Seg:=2+V8BRead(V8Bc,V8SegProb[2]) Else Mi^.Seg:=V8BRead(V8Bc,V8SegProb[1]);
+  End Else If V8Key<>0 Then Mi^.Seg:=0;
+  If V8NoSkip<>0 Then Mi^.Skip:=V8BRead(V8Bc,V8ProbSkip) Else Mi^.Skip:=0;
+  Mi^.Is4:=False; Mi^.Clamp:=False;
+  L:=-C*128; Rt:=(V8MbW-1-C)*128; T:=-R*128; Bt:=(V8MbH-1-R)*128;
+  If V8Key<>0 Then Begin
+   Mi^.Ref:=0; Mi^.Mv.R:=0; Mi^.Mv.C:=0;
+   Mi^.Mode:=V8Tree(V8Bc,V8KfYmodeTree,@V8KfYprob);
+   If Mi^.Mode=4 Then Begin
+    Mi^.Is4:=True;
+    For B:=0 To 15 Do
+     Mi^.Bm[B].Mode:=V8Tree(V8Bc,V8BmodeTree,@Vp8KfBmode[(V8NbMode(Idx,B,True)*10+V8NbMode(Idx,B,False))*9]);
+   End;
+   Mi^.UvMode:=V8Tree(V8Bc,V8UvTree,@V8KfUvprob);
+  End Else Begin
+   Mi^.Ref:=V8BRead(V8Bc,V8ProbIntra);
+   If Mi^.Ref<>0 Then Begin
+    Above:=@V8Mip^[Idx-V8Stride]; Left:=@V8Mip^[Idx-1]; AL:=@V8Mip^[Idx-V8Stride-1];
+    If V8BRead(V8Bc,V8ProbLast)<>0 Then Mi^.Ref:=2+V8BRead(V8Bc,V8ProbGf);
+    Ref:=Mi^.Ref;
+    FillChar(Nm,SizeOf(Nm),0); Cnt[0]:=0; Cnt[1]:=0; Cnt[2]:=0; Cnt[3]:=0; N:=0; Cx:=0;
+    If Above^.Ref<>0 Then Begin
+     If Not Zero(Above^.Mv) Then Begin Inc(N); Nm[N]:=Above^.Mv; Bias(Nm[N],Above^.Ref); Inc(Cx); End;
+     Inc(Cnt[Cx],2);
+    End;
+    If Left^.Ref<>0 Then Begin
+     If Not Zero(Left^.Mv) Then Begin
+      This:=Left^.Mv; Bias(This,Left^.Ref);
+      If Not Eq(This,Nm[N]) Then Begin Inc(N); Nm[N]:=This; Inc(Cx); End;
+      Inc(Cnt[Cx],2);
+     End Else Inc(Cnt[0],2);
+    End;
+    If AL^.Ref<>0 Then Begin
+     If Not Zero(AL^.Mv) Then Begin
+      This:=AL^.Mv; Bias(This,AL^.Ref);
+      If Not Eq(This,Nm[N]) Then Begin Inc(N); Nm[N]:=This; Inc(Cx); End;
+      Inc(Cnt[Cx],1);
+     End Else Inc(Cnt[0],1);
+    End;
+    If V8BRead(V8Bc,V8ModeCtx[Cnt[0],0])<>0 Then Begin
+     If (Cnt[3]>0) And Eq(Nm[N],Nm[1]) Then Inc(Cnt[1]);
+     If Cnt[2]>Cnt[1] Then Begin
+      Tmp:=Cnt[1]; Cnt[1]:=Cnt[2]; Cnt[2]:=Tmp; Tm:=Nm[1]; Nm[1]:=Nm[2]; Nm[2]:=Tm;
+     End;
+     If V8BRead(V8Bc,V8ModeCtx[Cnt[1],1])<>0 Then Begin
+      If V8BRead(V8Bc,V8ModeCtx[Cnt[2],2])<>0 Then Begin
+       Near:=Ord(Cnt[1]>=Cnt[0]);
+       V8ClampMv(Nm[Near],L-128,Rt+128,T-128,Bt+128);
+       Cnt[3]:=((Ord(Above^.Mode=9)+Ord(Left^.Mode=9))*2)+Ord(AL^.Mode=9);
+       If V8BRead(V8Bc,V8ModeCtx[Cnt[3],3])<>0 Then Begin
+        { SPLITMV }
+        S:=3; NumP:=16;
+        If V8BRead(V8Bc,110)<>0 Then Begin
+         S:=2; NumP:=4;
+         If V8BRead(V8Bc,111)<>0 Then Begin S:=V8BRead(V8Bc,150); NumP:=2; End;
+        End;
+        For J:=0 To NumP-1 Do Begin
+         K:=V8SplitOff[S,J];
+         { mv gauche / dessus du sous-bloc K }
+         If (K And 3)=0 Then Begin
+          If Left^.Mode<>9 Then LMv:=Left^.Mv Else LMv:=Left^.Bm[K+3].Mv;
+         End Else LMv:=Mi^.Bm[K-1].Mv;
+         If (K Shr 2)=0 Then Begin
+          If Above^.Mode<>9 Then AMv:=Above^.Mv Else AMv:=Above^.Bm[K+12].Mv;
+         End Else AMv:=Mi^.Bm[K-4].Mv;
+         Pr:=(Ord(Zero(AMv)) Shl 2) Or (Ord(Zero(LMv)) Shl 1) Or Ord(Eq(LMv,AMv));
+         If V8BRead(V8Bc,V8SubMvProb[Pr,0])<>0 Then Begin
+          If V8BRead(V8Bc,V8SubMvProb[Pr,1])<>0 Then Begin
+           Bmv.R:=0; Bmv.C:=0;
+           If V8BRead(V8Bc,V8SubMvProb[Pr,2])<>0 Then Begin
+            Bmv.R:=V8MvComp(V8Bc,V8Fc.Mvc[0])*2+Nm[Near].R;
+            Bmv.C:=V8MvComp(V8Bc,V8Fc.Mvc[1])*2+Nm[Near].C;
+           End;
+          End Else Bmv:=AMv;
+         End Else Bmv:=LMv;
+         If (Bmv.C<L-128) Or (Bmv.C>Rt+128) Or (Bmv.R<T-128) Or (Bmv.R>Bt+128) Then Mi^.Clamp:=True;
+         For K:=0 To V8SplitFillCnt[S]-1 Do Mi^.Bm[V8SplitFill[S,J*V8SplitFillCnt[S]+K]].Mv:=Bmv;
+        End;
+        Mi^.Part:=S; Mi^.Mv:=Mi^.Bm[15].Mv; Mi^.Mode:=9; Mi^.Is4:=True;
+       End Else Begin
+        Mi^.Mv.R:=V8MvComp(V8Bc,V8Fc.Mvc[0])*2+Nm[Near].R;
+        Mi^.Mv.C:=V8MvComp(V8Bc,V8Fc.Mvc[1])*2+Nm[Near].C;
+        Mi^.Clamp:=(Mi^.Mv.C<L-128) Or (Mi^.Mv.C>Rt+128) Or (Mi^.Mv.R<T-128) Or (Mi^.Mv.R>Bt+128);
+        Mi^.Mode:=8;
+       End;
+      End Else Begin
+       Mi^.Mode:=6; Mi^.Mv:=Nm[2]; V8ClampMv(Mi^.Mv,L-128,Rt+128,T-128,Bt+128);
+      End;
+     End Else Begin
+      Mi^.Mode:=5; Mi^.Mv:=Nm[1]; V8ClampMv(Mi^.Mv,L-128,Rt+128,T-128,Bt+128);
+     End;
+    End Else Begin
+     Mi^.Mode:=7; Mi^.Mv.R:=0; Mi^.Mv.C:=0;
+    End;
+   End Else Begin
+    Mi^.Mv.R:=0; Mi^.Mv.C:=0;
+    Mi^.Mode:=V8Tree(V8Bc,V8YmodeTree,@V8Fc.Ymode);
+    If Mi^.Mode=4 Then Begin
+     Mi^.Is4:=True;
+     For B:=0 To 15 Do Mi^.Bm[B].Mode:=V8Tree(V8Bc,V8BmodeTree,@V8DefBprob);
+    End;
+    Mi^.UvMode:=V8Tree(V8Bc,V8UvTree,@V8Fc.Uvmode);
+   End;
+  End;
+ End;
+End;
+
+{ ---- jetons (coefficients) ---- }
+Function V8Coeffs(Var B: TV8Bool; TB: LongInt; Ctx,N,OutOff: Integer): Integer;
+Var P: LongInt; V,J,Bit1,Bit0,Cat,K: Integer; Tb2: ^Byte;
+ Function G(Off: Integer): Integer;
+ Begin G:=V8BRead(B,V8Fc.Coef[P+Off]); End;
+Begin
+ P:=TB+N*33+Ctx*11;
+ V8Coeffs:=0;
+ If G(0)=0 Then Exit;
+ While True Do Begin
+  Inc(N);
+  If G(1)=0 Then P:=TB+V8Bands[N]*33
+  Else Begin
+   If G(2)=0 Then Begin P:=TB+V8Bands[N]*33+11; V:=1; End
+   Else Begin
+    If G(3)=0 Then Begin
+     If G(4)=0 Then V:=2 Else V:=3+G(5);
+    End Else Begin
+     If G(6)=0 Then Begin
+      If G(7)=0 Then V:=5+V8BRead(B,159)
+      Else Begin V:=7+2*V8BRead(B,165); V:=V+V8BRead(B,145); End;
+     End Else Begin
+      Bit1:=G(8); Bit0:=G(9+Bit1); Cat:=2*Bit1+Bit0; V:=0;
+      Case Cat Of
+       0: Begin K:=0; While V8Cat3[K]<>0 Do Begin V:=V+V+V8BRead(B,V8Cat3[K]); Inc(K); End; End;
+       1: Begin K:=0; While V8Cat4[K]<>0 Do Begin V:=V+V+V8BRead(B,V8Cat4[K]); Inc(K); End; End;
+       2: Begin K:=0; While V8Cat5[K]<>0 Do Begin V:=V+V+V8BRead(B,V8Cat5[K]); Inc(K); End; End;
+       Else Begin K:=0; While V8Cat6[K]<>0 Do Begin V:=V+V+V8BRead(B,V8Cat6[K]); Inc(K); End; End;
+      End;
+      V:=V+3+(8 Shl Cat);
+     End;
+    End;
+    P:=TB+V8Bands[N]*33+22;
+   End;
+   J:=V8Zig[N-1];
+   If V8BRead(B,128)<>0 Then V8Q[OutOff+J]:=-V Else V8Q[OutOff+J]:=V;
+   If (N=16) Or (G(0)=0) Then Begin V8Coeffs:=N; Exit; End;
+  End;
+  If N=16 Then Begin V8Coeffs:=16; Exit; End;
+ End;
+End;
+
+Function V8Tokens(Col: LongInt; Mi: PV8Mbi; Var B: TV8Bool): Integer;
+Var A,L: Integer; Total,I,Nz,Skip,Ao,Lo,Tb: Integer;
+Begin
+ Total:=0; Ao:=Col*9;
+ If Not Mi^.Is4 Then Begin
+  Nz:=V8Coeffs(B,1*264,V8ACtx[Ao+8]+V8LCtx[8],0,24*16);
+  V8ACtx[Ao+8]:=Ord(Nz>0); V8LCtx[8]:=Ord(Nz>0); V8Eob[24]:=Nz; Inc(Total,Nz-16);
+  Tb:=0; Skip:=1;
+ End Else Begin Tb:=3*264; Skip:=0; End;
+ For I:=0 To 15 Do Begin
+  Nz:=V8Coeffs(B,Tb,V8ACtx[Ao+(I And 3)]+V8LCtx[(I And 12) Shr 2],Skip,I*16);
+  V8ACtx[Ao+(I And 3)]:=Ord(Nz>0); V8LCtx[(I And 12) Shr 2]:=Ord(Nz>0);
+  Inc(Nz,Skip); V8Eob[I]:=Nz; Inc(Total,Nz);
+ End;
+ For I:=16 To 23 Do Begin
+  A:=Ao+4+(Ord(I>19) Shl 1)+(I And 1); L:=4+(Ord(I>19) Shl 1)+Ord((I And 3)>1);
+  Nz:=V8Coeffs(B,2*264,V8ACtx[A]+V8LCtx[L],0,I*16);
+  V8ACtx[A]:=Ord(Nz>0); V8LCtx[L]:=Ord(Nz>0); V8Eob[I]:=Nz; Inc(Total,Nz);
+ End;
+ V8Tokens:=Total;
+End;
+
+{ ---- IDCT / WHT ---- }
+Procedure V8IdctAdd(Q: Integer; Fy,Fc: Integer; Pl: PEABuffer; Idx,Stride: LongInt);
+Var I,A1,B1,C1,D1,T1,T2: LongInt; Ip: Array[0..15] Of LongInt; Op: Array[0..15] Of LongInt; R,C,V: LongInt;
+Begin
+ For I:=0 To 15 Do Begin
+  If I=0 Then Ip[I]:=V8Q[Q+I]*Fy Else Ip[I]:=V8Q[Q+I]*Fc;
+ End;
+ For I:=0 To 3 Do Begin
+  A1:=Ip[I]+Ip[8+I]; B1:=Ip[I]-Ip[8+I];
+  T1:=V8Sar(Ip[4+I]*35468,16); T2:=Ip[12+I]+V8Sar(Ip[12+I]*20091,16); C1:=T1-T2;
+  T1:=Ip[4+I]+V8Sar(Ip[4+I]*20091,16); T2:=V8Sar(Ip[12+I]*35468,16); D1:=T1+T2;
+  Op[I]:=A1+D1; Op[12+I]:=A1-D1; Op[4+I]:=B1+C1; Op[8+I]:=B1-C1;
+ End;
+ For I:=0 To 3 Do Begin
+  A1:=Op[I*4]+Op[I*4+2]; B1:=Op[I*4]-Op[I*4+2];
+  T1:=V8Sar(Op[I*4+1]*35468,16); T2:=Op[I*4+3]+V8Sar(Op[I*4+3]*20091,16); C1:=T1-T2;
+  T1:=Op[I*4+1]+V8Sar(Op[I*4+1]*20091,16); T2:=V8Sar(Op[I*4+3]*35468,16); D1:=T1+T2;
+  Ip[I*4]:=V8Sar(A1+D1+4,3); Ip[I*4+3]:=V8Sar(A1-D1+4,3); Ip[I*4+1]:=V8Sar(B1+C1+4,3); Ip[I*4+2]:=V8Sar(B1-C1+4,3);
+ End;
+ For R:=0 To 3 Do For C:=0 To 3 Do Begin
+  V:=Pl^[Idx+R*Stride+C]+Ip[R*4+C]; Pl^[Idx+R*Stride+C]:=V8Clip(V);
+ End;
+End;
+
+Procedure V8DcAdd(Dc: LongInt; Pl: PEABuffer; Idx,Stride: LongInt);
+Var A,R,C: LongInt;
+Begin
+ A:=V8Sar(Dc+4,3);
+ For R:=0 To 3 Do For C:=0 To 3 Do Pl^[Idx+R*Stride+C]:=V8Clip(Pl^[Idx+R*Stride+C]+A);
+End;
+
+Procedure V8Walsh(Dc2,Ac2: Integer);
+Var I,A1,B1,C1,D1,A2,B2,C2,D2: LongInt; Ip,Op: Array[0..15] Of LongInt;
+Begin
+ If V8Eob[24]>1 Then Begin
+  For I:=0 To 15 Do Begin
+   If I=0 Then Ip[I]:=V8Q[24*16]*Dc2 Else Ip[I]:=V8Q[24*16+I]*Ac2;
+  End;
+  For I:=0 To 3 Do Begin
+   A1:=Ip[I]+Ip[12+I]; B1:=Ip[4+I]+Ip[8+I]; C1:=Ip[4+I]-Ip[8+I]; D1:=Ip[I]-Ip[12+I];
+   Op[I]:=A1+B1; Op[4+I]:=C1+D1; Op[8+I]:=A1-B1; Op[12+I]:=D1-C1;
+  End;
+  For I:=0 To 3 Do Begin
+   A1:=Op[I*4]+Op[I*4+3]; B1:=Op[I*4+1]+Op[I*4+2]; C1:=Op[I*4+1]-Op[I*4+2]; D1:=Op[I*4]-Op[I*4+3];
+   A2:=A1+B1; B2:=C1+D1; C2:=A1-B1; D2:=D1-C1;
+   V8Q[(I*4)*16]:=V8Sar(A2+3,3); V8Q[(I*4+1)*16]:=V8Sar(B2+3,3); V8Q[(I*4+2)*16]:=V8Sar(C2+3,3); V8Q[(I*4+3)*16]:=V8Sar(D2+3,3);
+  End;
+ End Else Begin
+  A1:=V8Sar(V8Q[24*16]*Dc2+3,3);
+  For I:=0 To 15 Do V8Q[I*16]:=A1;
+ End;
+End;
+
+{ ---- pixels et prediction intra ---- }
+Function V8Px(Pln: Integer; X,Y: LongInt): Integer;
+Var Pl: PEABuffer; W,S: LongInt;
+Begin
+ If Y<0 Then Begin V8Px:=127; Exit; End;
+ If X<0 Then Begin V8Px:=129; Exit; End;
+ If Pln=0 Then Begin Pl:=V8Fb[V8New].Y; S:=V8YS; End Else If Pln=1 Then Begin Pl:=V8Fb[V8New].U; S:=V8CS; End Else Begin Pl:=V8Fb[V8New].V; S:=V8CS; End;
+ If X>=S Then X:=S-1;
+ V8Px:=Pl^[Y*S+X];
+End;
+
+Function V8Plane(Pln: Integer; B: Integer): PEABuffer;
+Begin
+ If Pln=0 Then V8Plane:=V8Fb[B].Y Else If Pln=1 Then V8Plane:=V8Fb[B].U Else V8Plane:=V8Fb[B].V;
+End;
+
+Procedure V8IntraBlock(Pln: Integer; Mx,My,Size,Mode: Integer);
+Var Pl: PEABuffer; S,X0,Y0,I,J,SumA,SumL,Cnt,Dc,P: LongInt; A,L: Array[0..15] Of Integer; Up,Lf: Boolean; Sh: Integer;
+Begin
+ Pl:=V8Plane(Pln,V8New); If Pln=0 Then S:=V8YS Else S:=V8CS;
+ X0:=Mx*Size; Y0:=My*Size; Up:=My>0; Lf:=Mx>0;
+ For I:=0 To Size-1 Do Begin A[I]:=V8Px(Pln,X0+I,Y0-1); L[I]:=V8Px(Pln,X0-1,Y0+I); End;
+ P:=V8Px(Pln,X0-1,Y0-1);
+ Case Mode Of
+  0: Begin
+   SumA:=0; SumL:=0; For I:=0 To Size-1 Do Begin Inc(SumA,A[I]); Inc(SumL,L[I]); End;
+   If Size=16 Then Sh:=3 Else Sh:=2;
+   If Up And Lf Then Dc:=(SumA+SumL+Size) Shr (Sh+2)
+   Else If Up Then Dc:=(SumA+(Size Shr 1)) Shr (Sh+1)
+   Else If Lf Then Dc:=(SumL+(Size Shr 1)) Shr (Sh+1) Else Dc:=128;
+   For J:=0 To Size-1 Do For I:=0 To Size-1 Do Pl^[(Y0+J)*S+X0+I]:=Dc;
+  End;
+  1: For J:=0 To Size-1 Do For I:=0 To Size-1 Do Pl^[(Y0+J)*S+X0+I]:=A[I];
+  2: For J:=0 To Size-1 Do For I:=0 To Size-1 Do Pl^[(Y0+J)*S+X0+I]:=L[J];
+  Else For J:=0 To Size-1 Do For I:=0 To Size-1 Do Pl^[(Y0+J)*S+X0+I]:=V8Clip(L[J]+A[I]-P);
+ End;
+End;
+
+Procedure V8Intra4(Mx,My,B,Mode: Integer);
+Var Pl: PEABuffer; X,Y,I,J: LongInt; A: Array[-1..7] Of LongInt; L: Array[0..3] Of LongInt; E: Array[0..8] Of LongInt; Bx,By: Integer; Pr: Array[0..3,0..3] Of LongInt; Dc,P: LongInt;
+ Function Av(K: Integer): LongInt; Begin Av:=A[K]; End;
+Begin
+ Pl:=V8Fb[V8New].Y; Bx:=B And 3; By:=B Shr 2;
+ X:=Mx*16+Bx*4; Y:=My*16+By*4;
+ For I:=0 To 3 Do A[I]:=V8Px(0,X+I,Y-1);
+ If Bx<3 Then Begin For I:=4 To 7 Do A[I]:=V8Px(0,X+I,Y-1); End
+ Else Begin For I:=4 To 7 Do A[I]:=V8Px(0,Mx*16+12+I,My*16-1); End;
+ For I:=0 To 3 Do L[I]:=V8Px(0,X-1,Y+I);
+ A[-1]:=V8Px(0,X-1,Y-1); P:=A[-1];
+ E[0]:=L[3]; E[1]:=L[2]; E[2]:=L[1]; E[3]:=L[0]; E[4]:=P; For I:=0 To 3 Do E[5+I]:=A[I];
+ Case Mode Of
+  0: Begin Dc:=4; For I:=0 To 3 Do Dc:=Dc+A[I]+L[I]; Dc:=Dc Shr 3; For J:=0 To 3 Do For I:=0 To 3 Do Pr[J,I]:=Dc; End;
+  1: For J:=0 To 3 Do For I:=0 To 3 Do Pr[J,I]:=V8Clip(L[J]+A[I]-P);
+  2: For J:=0 To 3 Do For I:=0 To 3 Do Pr[J,I]:=(A[I-1]+2*A[I]+A[I+1]+2) Shr 2;
+  3: Begin
+   For I:=0 To 3 Do Pr[0,I]:=(P+2*L[0]+L[1]+2) Shr 2;
+   For I:=0 To 3 Do Pr[1,I]:=(L[0]+2*L[1]+L[2]+2) Shr 2;
+   For I:=0 To 3 Do Pr[2,I]:=(L[1]+2*L[2]+L[3]+2) Shr 2;
+   For I:=0 To 3 Do Pr[3,I]:=(L[2]+2*L[3]+L[3]+2) Shr 2;
+  End;
+  4: Begin
+   For J:=0 To 3 Do For I:=0 To 3 Do Pr[J,I]:=(A[I+J]+2*A[I+J+1]+A[I+J+2]+2) Shr 2;
+   Pr[3,3]:=(A[6]+2*A[7]+A[7]+2) Shr 2;
+  End;
+  5: For J:=0 To 3 Do For I:=0 To 3 Do Pr[J,I]:=(E[3-J+I]+2*E[4-J+I]+E[5-J+I]+2) Shr 2;
+  6: Begin
+   Pr[3,0]:=(E[1]+2*E[2]+E[3]+2) Shr 2; Pr[2,0]:=(E[2]+2*E[3]+E[4]+2) Shr 2;
+   Pr[3,1]:=(E[3]+2*E[4]+E[5]+2) Shr 2; Pr[1,0]:=Pr[3,1];
+   Pr[2,1]:=(E[4]+E[5]+1) Shr 1; Pr[0,0]:=Pr[2,1];
+   Pr[3,2]:=(E[4]+2*E[5]+E[6]+2) Shr 2; Pr[1,1]:=Pr[3,2];
+   Pr[2,2]:=(E[5]+E[6]+1) Shr 1; Pr[0,1]:=Pr[2,2];
+   Pr[3,3]:=(E[5]+2*E[6]+E[7]+2) Shr 2; Pr[1,2]:=Pr[3,3];
+   Pr[2,3]:=(E[6]+E[7]+1) Shr 1; Pr[0,2]:=Pr[2,3];
+   Pr[1,3]:=(E[6]+2*E[7]+E[8]+2) Shr 2; Pr[0,3]:=(E[7]+E[8]+1) Shr 1;
+  End;
+  7: Begin
+   Pr[0,0]:=(A[0]+A[1]+1) Shr 1; Pr[1,0]:=(A[0]+2*A[1]+A[2]+2) Shr 2;
+   Pr[2,0]:=(A[1]+A[2]+1) Shr 1; Pr[0,1]:=Pr[2,0];
+   Pr[1,1]:=(A[1]+2*A[2]+A[3]+2) Shr 2; Pr[3,0]:=Pr[1,1];
+   Pr[2,1]:=(A[2]+A[3]+1) Shr 1; Pr[0,2]:=Pr[2,1];
+   Pr[3,1]:=(A[2]+2*A[3]+A[4]+2) Shr 2; Pr[1,2]:=Pr[3,1];
+   Pr[0,3]:=(A[3]+A[4]+1) Shr 1; Pr[2,2]:=Pr[0,3];
+   Pr[1,3]:=(A[3]+2*A[4]+A[5]+2) Shr 2; Pr[3,2]:=Pr[1,3];
+   Pr[2,3]:=(A[4]+2*A[5]+A[6]+2) Shr 2; Pr[3,3]:=(A[5]+2*A[6]+A[7]+2) Shr 2;
+  End;
+  8: Begin
+   Pr[3,0]:=(E[0]+E[1]+1) Shr 1; Pr[3,1]:=(E[0]+2*E[1]+E[2]+2) Shr 2;
+   Pr[2,0]:=(E[1]+E[2]+1) Shr 1; Pr[3,2]:=Pr[2,0];
+   Pr[2,1]:=(E[1]+2*E[2]+E[3]+2) Shr 2; Pr[3,3]:=Pr[2,1];
+   Pr[2,2]:=(E[2]+E[3]+1) Shr 1; Pr[1,0]:=Pr[2,2];
+   Pr[2,3]:=(E[2]+2*E[3]+E[4]+2) Shr 2; Pr[1,1]:=Pr[2,3];
+   Pr[1,2]:=(E[3]+E[4]+1) Shr 1; Pr[0,0]:=Pr[1,2];
+   Pr[1,3]:=(E[3]+2*E[4]+E[5]+2) Shr 2; Pr[0,1]:=Pr[1,3];
+   Pr[0,2]:=(E[4]+2*E[5]+E[6]+2) Shr 2; Pr[0,3]:=(E[5]+2*E[6]+E[7]+2) Shr 2;
+  End;
+  Else Begin
+   Pr[0,0]:=(L[0]+L[1]+1) Shr 1; Pr[0,1]:=(L[0]+2*L[1]+L[2]+2) Shr 2;
+   Pr[0,2]:=(L[1]+L[2]+1) Shr 1; Pr[1,0]:=Pr[0,2];
+   Pr[0,3]:=(L[1]+2*L[2]+L[3]+2) Shr 2; Pr[1,1]:=Pr[0,3];
+   Pr[1,2]:=(L[2]+L[3]+1) Shr 1; Pr[2,0]:=Pr[1,2];
+   Pr[1,3]:=(L[2]+2*L[3]+L[3]+2) Shr 2; Pr[2,1]:=Pr[1,3];
+   Pr[2,2]:=L[3]; Pr[2,3]:=L[3]; Pr[3,0]:=L[3]; Pr[3,1]:=L[3]; Pr[3,2]:=L[3]; Pr[3,3]:=L[3];
+  End;
+ End;
+ For J:=0 To 3 Do For I:=0 To 3 Do Pl^[(Y+J)*V8YS+X+I]:=Pr[J,I];
+End;
+
+{ ---- prediction inter ---- }
+Procedure V8Inter(Pln: Integer; Ref: Integer; X,Y,W,H,MvR,MvC: LongInt);
+Var Pl,Dst: PEABuffer; PW,PH,S,X0,Y0,Fx,Fy,R,C,K,XX,YY,Sum,Ww: LongInt; Wn: Integer;
+ Function Wp(Rr,Cc: LongInt): LongInt;
+ Var Xs,Ys: LongInt;
+ Begin
+  Xs:=X0-2+Cc; Ys:=Y0-2+Rr;
+  If Xs<0 Then Xs:=0; If Xs>=PW Then Xs:=PW-1; If Ys<0 Then Ys:=0; If Ys>=PH Then Ys:=PH-1;
+  Wp:=Pl^[Ys*S+Xs];
+ End;
+Begin
+ Pl:=V8Plane(Pln,Ref); Dst:=V8Plane(Pln,V8New);
+ If Pln=0 Then Begin S:=V8YS; PH:=V8MbH*16; End Else Begin S:=V8CS; PH:=V8MbH*8; End;
+ PW:=S;
+ X0:=X+V8Sar(MvC,3); Y0:=Y+V8Sar(MvR,3); Fx:=MvC And 7; Fy:=MvR And 7;
+ If (Fx=0) And (Fy=0) Then Begin
+  For R:=0 To H-1 Do For C:=0 To W-1 Do Begin
+   XX:=X0+C; YY:=Y0+R;
+   If XX<0 Then XX:=0; If XX>=PW Then XX:=PW-1; If YY<0 Then YY:=0; If YY>=PH Then YY:=PH-1;
+   Dst^[(Y+R)*S+X+C]:=Pl^[YY*S+XX];
+  End;
+  Exit;
+ End;
+ If Not V8Bilinear Then Begin
+  { fenetre (W+5)x(H+5) puis passe horizontale sur H+5 lignes }
+  Ww:=W+5;
+  For R:=0 To H+4 Do For C:=0 To W-1 Do Begin
+   Sum:=0;
+   For K:=0 To 5 Do Inc(Sum,V8Six[Fx,K]*Wp(R,C+K));
+   V8Tmp[R*16+C]:=V8Clip(V8Sar(Sum+64,7));
+  End;
+  For R:=0 To H-1 Do For C:=0 To W-1 Do Begin
+   Sum:=0;
+   For K:=0 To 5 Do Inc(Sum,V8Six[Fy,K]*V8Tmp[(R+K)*16+C]);
+   Dst^[(Y+R)*S+X+C]:=V8Clip(V8Sar(Sum+64,7));
+  End;
+ End Else Begin
+  For R:=0 To H Do For C:=0 To W-1 Do
+   V8Tmp[R*16+C]:=((128-Fx*16)*Wp(R+2,C+2)+(Fx*16)*Wp(R+2,C+3)+64) Shr 7;
+  For R:=0 To H-1 Do For C:=0 To W-1 Do
+   Dst^[(Y+R)*S+X+C]:=((128-Fy*16)*V8Tmp[R*16+C]+(Fy*16)*V8Tmp[(R+1)*16+C]+64) Shr 7;
+ End;
+End;
+
+Procedure V8ClampUmv(Var Mv: TV8Mv; L,Rt,T,Bt: LongInt);
+Begin
+ If Mv.C<L-(19 Shl 3) Then Mv.C:=L-(16 Shl 3) Else If Mv.C>Rt+(18 Shl 3) Then Mv.C:=Rt+(16 Shl 3);
+ If Mv.R<T-(19 Shl 3) Then Mv.R:=T-(16 Shl 3) Else If Mv.R>Bt+(18 Shl 3) Then Mv.R:=Bt+(16 Shl 3);
+End;
+
+Procedure V8ClampUv(Var Mv: TV8Mv; L,Rt,T,Bt: LongInt);
+Begin
+ If 2*Mv.C<L-(19 Shl 3) Then Mv.C:=V8Sar(L-(16 Shl 3),1);
+ If 2*Mv.C>Rt+(18 Shl 3) Then Mv.C:=V8Sar(Rt+(16 Shl 3),1);
+ If 2*Mv.R<T-(19 Shl 3) Then Mv.R:=V8Sar(T-(16 Shl 3),1);
+ If 2*Mv.R>Bt+(18 Shl 3) Then Mv.R:=V8Sar(Bt+(16 Shl 3),1);
+End;
+
+Procedure V8InterMb(Mx,My: LongInt; Mi: PV8Mbi);
+Var L,Rt,T,Bt: LongInt; Mv,Uv: TV8Mv; Ref,I,J,B,Fm: Integer; Tmp,Mask: LongInt; Bm: Array[0..15] Of TV8Mv; Um: Array[0..3] Of TV8Mv;
+Begin
+ Ref:=Mi^.Ref; If Ref=1 Then Ref:=V8Last Else If Ref=2 Then Ref:=V8Gold Else Ref:=V8Alt;
+ L:=-Mx*128; Rt:=(V8MbW-1-Mx)*128; T:=-My*128; Bt:=(V8MbH-1-My)*128;
+ If V8FullPix Then Mask:=-8 Else Mask:=-1;
+ If Mi^.Mode<>9 Then Begin
+  Mv:=Mi^.Mv;
+  If Mi^.Clamp Then V8ClampUmv(Mv,L,Rt,T,Bt);
+  V8Inter(0,Ref,Mx*16,My*16,16,16,Mv.R,Mv.C);
+  If Mv.R<0 Then Uv.R:=Mv.R-1 Else Uv.R:=Mv.R+1;
+  If Mv.C<0 Then Uv.C:=Mv.C-1 Else Uv.C:=Mv.C+1;
+  Uv.R:=(Uv.R Div 2) And Mask; Uv.C:=(Uv.C Div 2) And Mask;
+  V8ClampUv(Uv,L,Rt,T,Bt);
+  V8Inter(1,Ref,Mx*8,My*8,8,8,Uv.R,Uv.C); V8Inter(2,Ref,Mx*8,My*8,8,8,Uv.R,Uv.C);
+ End Else Begin
+  For I:=0 To 15 Do Bm[I]:=Mi^.Bm[I].Mv;
+  If Mi^.Part<3 Then Begin
+   For I:=0 To 3 Do Begin
+    B:=(I Shr 1)*8+(I And 1)*2; Mv:=Bm[B];
+    If Mi^.Clamp Then V8ClampUmv(Mv,L,Rt,T,Bt);
+    V8Inter(0,Ref,Mx*16+(I And 1)*8,My*16+(I Shr 1)*8,8,8,Mv.R,Mv.C);
+   End;
+  End Else Begin
+   For I:=0 To 15 Do Begin
+    Mv:=Bm[I];
+    If Mi^.Clamp Then V8ClampUmv(Mv,L,Rt,T,Bt);
+    V8Inter(0,Ref,Mx*16+(I And 3)*4,My*16+(I Shr 2)*4,4,4,Mv.R,Mv.C);
+   End;
+  End;
+  For I:=0 To 1 Do For J:=0 To 1 Do Begin
+   B:=I*8+J*2;
+   Tmp:=Bm[B].R+Bm[B+1].R+Bm[B+4].R+Bm[B+5].R; If Tmp<0 Then Tmp:=Tmp+4-8 Else Tmp:=Tmp+4; Uv.R:=(Tmp Div 8) And Mask;
+   Tmp:=Bm[B].C+Bm[B+1].C+Bm[B+4].C+Bm[B+5].C; If Tmp<0 Then Tmp:=Tmp+4-8 Else Tmp:=Tmp+4; Uv.C:=(Tmp Div 8) And Mask;
+   If Mi^.Clamp Then V8ClampUv(Uv,L,Rt,T,Bt);
+   V8Inter(1,Ref,Mx*8+J*4,My*8+I*4,4,4,Uv.R,Uv.C); V8Inter(2,Ref,Mx*8+J*4,My*8+I*4,4,4,Uv.R,Uv.C);
+  End;
+ End;
+End;
+
+{ ---- filtre de boucle ---- }
+Function V8Sc(V: LongInt): LongInt;
+Begin
+ If V<-128 Then V:=-128; If V>127 Then V:=127; V8Sc:=V;
+End;
+
+Procedure V8Edge(Pl: PEABuffer; Idx,Step,Along,Cnt: LongInt; Kind: Integer; Blim,Lim,Thr: LongInt);
+Var I: LongInt; P3,P2,P1,P0,Q0,Q1,Q2,Q3: LongInt; Mask,Hev: Boolean; Ps1,Ps0,Qs0,Qs1,Ps2,Qs2,F,F1,F2,U: LongInt;
+Begin
+ For I:=0 To Cnt-1 Do Begin
+  P3:=Pl^[Idx-4*Step]; P2:=Pl^[Idx-3*Step]; P1:=Pl^[Idx-2*Step]; P0:=Pl^[Idx-Step];
+  Q0:=Pl^[Idx]; Q1:=Pl^[Idx+Step]; Q2:=Pl^[Idx+2*Step]; Q3:=Pl^[Idx+3*Step];
+  If Kind=2 Then Mask:=(Abs(P0-Q0)*2+(Abs(P1-Q1) Shr 1))<=Blim
+  Else Mask:=(Abs(P3-P2)<=Lim) And (Abs(P2-P1)<=Lim) And (Abs(P1-P0)<=Lim) And (Abs(Q1-Q0)<=Lim) And (Abs(Q2-Q1)<=Lim) And (Abs(Q3-Q2)<=Lim)
+   And ((Abs(P0-Q0)*2+(Abs(P1-Q1) Shr 1))<=Blim);
+  If Mask Then Begin
+   Ps1:=P1-128; Ps0:=P0-128; Qs0:=Q0-128; Qs1:=Q1-128; Ps2:=P2-128; Qs2:=Q2-128;
+   If Kind=2 Then Begin
+    F:=V8Sc(Ps1-Qs1); F:=V8Sc(F+3*(Qs0-Ps0));
+    F1:=V8Sar(V8Sc(F+4),3); Qs0:=V8Sc(Qs0-F1);
+    F2:=V8Sar(V8Sc(F+3),3); Ps0:=V8Sc(Ps0+F2);
+    Pl^[Idx]:=Qs0+128; Pl^[Idx-Step]:=Ps0+128;
+   End Else Begin
+    Hev:=(Abs(P1-P0)>Thr) Or (Abs(Q1-Q0)>Thr);
+    If Kind=0 Then Begin
+     If Hev Then F:=V8Sc(Ps1-Qs1) Else F:=0;
+     F:=V8Sc(F+3*(Qs0-Ps0));
+     F1:=V8Sar(V8Sc(F+4),3); F2:=V8Sar(V8Sc(F+3),3);
+     Qs0:=V8Sc(Qs0-F1); Ps0:=V8Sc(Ps0+F2);
+     If Not Hev Then Begin
+      F:=V8Sar(F1+1,1);
+      Qs1:=V8Sc(Qs1-F); Ps1:=V8Sc(Ps1+F);
+     End;
+     Pl^[Idx]:=Qs0+128; Pl^[Idx-Step]:=Ps0+128; Pl^[Idx+Step]:=Qs1+128; Pl^[Idx-2*Step]:=Ps1+128;
+    End Else Begin
+     F:=V8Sc(Ps1-Qs1); F:=V8Sc(F+3*(Qs0-Ps0));
+     If Hev Then Begin
+      F1:=V8Sar(V8Sc(F+4),3); F2:=V8Sar(V8Sc(F+3),3);
+      Qs0:=V8Sc(Qs0-F1); Ps0:=V8Sc(Ps0+F2);
+      Pl^[Idx]:=Qs0+128; Pl^[Idx-Step]:=Ps0+128;
+     End Else Begin
+      U:=V8Sc(V8Sar(63+F*27,7)); Qs0:=V8Sc(Qs0-U); Ps0:=V8Sc(Ps0+U);
+      U:=V8Sc(V8Sar(63+F*18,7)); Qs1:=V8Sc(Qs1-U); Ps1:=V8Sc(Ps1+U);
+      U:=V8Sc(V8Sar(63+F*9,7)); Qs2:=V8Sc(Qs2-U); Ps2:=V8Sc(Ps2+U);
+      Pl^[Idx]:=Qs0+128; Pl^[Idx-Step]:=Ps0+128; Pl^[Idx+Step]:=Qs1+128; Pl^[Idx-2*Step]:=Ps1+128;
+      Pl^[Idx+2*Step]:=Qs2+128; Pl^[Idx-3*Step]:=Ps2+128;
+     End;
+    End;
+   End;
+  End;
+  Inc(Idx,Along);
+ End;
+End;
+
+Procedure V8LoopFilter;
+Var R,C,Seg,Ref,Mi2,I,Sl,Lvl,Ilim,Ml,Bl,Hv,Mode,Lm: Integer; Mi: PV8Mbi; Lv: Array[0..3,0..3,0..3] Of Integer; Skip: Boolean;
+ Yp,Up,Vp: PEABuffer; Ys,Cs,Yo,Co: LongInt; L2,L3,L4,Base,Lr,Lmo: Integer;
+Begin
+ If V8FLevel=0 Then Exit;
+ { niveaux par segment / ref / mode }
+ For Seg:=0 To 3 Do Begin
+  Lvl:=V8FLevel;
+  If V8SegOn<>0 Then Begin
+   If V8SegAbs<>0 Then Lvl:=V8SegLf[Seg] Else Lvl:=Lvl+V8SegLf[Seg];
+   If Lvl<0 Then Lvl:=0; If Lvl>63 Then Lvl:=63;
+  End;
+  If V8LfDeltaOn=0 Then Begin
+   For Ref:=0 To 3 Do For Mode:=0 To 3 Do Lv[Seg,Ref,Mode]:=Lvl;
+  End Else Begin
+   Lr:=Lvl+V8RefLf[0];
+   L2:=Lr+V8ModeLf[0]; If L2<0 Then L2:=0; If L2>63 Then L2:=63; Lv[Seg,0,0]:=L2;
+   L2:=Lr; If L2<0 Then L2:=0; If L2>63 Then L2:=63; Lv[Seg,0,1]:=L2;
+   For Ref:=1 To 3 Do Begin
+    Lr:=Lvl+V8RefLf[Ref];
+    For Mode:=1 To 3 Do Begin
+     L2:=Lr+V8ModeLf[Mode]; If L2<0 Then L2:=0; If L2>63 Then L2:=63; Lv[Seg,Ref,Mode]:=L2;
+    End;
+   End;
+  End;
+ End;
+ Yp:=V8Fb[V8New].Y; Up:=V8Fb[V8New].U; Vp:=V8Fb[V8New].V; Ys:=V8YS; Cs:=V8CS;
+ For R:=0 To V8MbH-1 Do For C:=0 To V8MbW-1 Do Begin
+  Mi:=V8Mb(R,C);
+  Skip:=(Mi^.Mode<>4) And (Mi^.Mode<>9) And (Mi^.Skip<>0);
+  Lvl:=Lv[Mi^.Seg,Mi^.Ref,V8LfMode[Mi^.Mode]];
+  If Lvl<>0 Then Begin
+   Ilim:=Lvl Shr Ord(V8Sharp>0); Ilim:=Ilim Shr Ord(V8Sharp>4);
+   If V8Sharp>0 Then If Ilim>9-V8Sharp Then Ilim:=9-V8Sharp;
+   If Ilim<1 Then Ilim:=1;
+   Bl:=2*Lvl+Ilim; Ml:=2*(Lvl+2)+Ilim;
+   If V8Key<>0 Then Begin If Lvl>=40 Then Hv:=2 Else If Lvl>=15 Then Hv:=1 Else Hv:=0; End
+   Else Begin If Lvl>=40 Then Hv:=3 Else If Lvl>=20 Then Hv:=2 Else If Lvl>=15 Then Hv:=1 Else Hv:=0; End;
+   Yo:=R*16*Ys+C*16; Co:=R*8*Cs+C*8;
+   If V8FType=0 Then Begin
+    If C>0 Then Begin V8Edge(Yp,Yo,1,Ys,16,1,Ml,Ilim,Hv); V8Edge(Up,Co,1,Cs,8,1,Ml,Ilim,Hv); V8Edge(Vp,Co,1,Cs,8,1,Ml,Ilim,Hv); End;
+    If Not Skip Then Begin
+     V8Edge(Yp,Yo+4,1,Ys,16,0,Bl,Ilim,Hv); V8Edge(Yp,Yo+8,1,Ys,16,0,Bl,Ilim,Hv); V8Edge(Yp,Yo+12,1,Ys,16,0,Bl,Ilim,Hv);
+     V8Edge(Up,Co+4,1,Cs,8,0,Bl,Ilim,Hv); V8Edge(Vp,Co+4,1,Cs,8,0,Bl,Ilim,Hv);
+    End;
+    If R>0 Then Begin V8Edge(Yp,Yo,Ys,1,16,1,Ml,Ilim,Hv); V8Edge(Up,Co,Cs,1,8,1,Ml,Ilim,Hv); V8Edge(Vp,Co,Cs,1,8,1,Ml,Ilim,Hv); End;
+    If Not Skip Then Begin
+     V8Edge(Yp,Yo+4*Ys,Ys,1,16,0,Bl,Ilim,Hv); V8Edge(Yp,Yo+8*Ys,Ys,1,16,0,Bl,Ilim,Hv); V8Edge(Yp,Yo+12*Ys,Ys,1,16,0,Bl,Ilim,Hv);
+     V8Edge(Up,Co+4*Cs,Cs,1,8,0,Bl,Ilim,Hv); V8Edge(Vp,Co+4*Cs,Cs,1,8,0,Bl,Ilim,Hv);
+    End;
+   End Else Begin
+    If C>0 Then V8Edge(Yp,Yo,1,Ys,16,2,Ml,0,0);
+    If Not Skip Then Begin V8Edge(Yp,Yo+4,1,Ys,16,2,Bl,0,0); V8Edge(Yp,Yo+8,1,Ys,16,2,Bl,0,0); V8Edge(Yp,Yo+12,1,Ys,16,2,Bl,0,0); End;
+    If R>0 Then V8Edge(Yp,Yo,Ys,1,16,2,Ml,0,0);
+    If Not Skip Then Begin V8Edge(Yp,Yo+4*Ys,Ys,1,16,2,Bl,0,0); V8Edge(Yp,Yo+8*Ys,Ys,1,16,2,Bl,0,0); V8Edge(Yp,Yo+12*Ys,Ys,1,16,2,Bl,0,0); End;
+   End;
+  End;
+ End;
+End;
+
+{ ---- quantificateurs ---- }
+Function V8Qi(V: Integer): Integer;
+Begin
+ If V<0 Then V:=0; If V>127 Then V:=127; V8Qi:=V;
+End;
+
+{ ---- reconstruction d'un macrobloc ---- }
+Procedure V8Recon(R,C: LongInt; Mi: PV8Mbi; Qi: Integer);
+Var Y1dc,Y1ac,Y2dc,Y2ac,Uvdc,Uvac: Integer; I,B,Yo,Co,K: LongInt; Dcf: Integer; Pl: PEABuffer;
+Begin
+ Y1dc:=Vp8DcQ[V8Qi(Qi+V8Y1dc)]; Y1ac:=Vp8AcQ[V8Qi(Qi)];
+ Y2dc:=Vp8DcQ[V8Qi(Qi+V8Y2dc)]*2; Y2ac:=(Vp8AcQ[V8Qi(Qi+V8Y2ac)]*101581) Shr 16; If Y2ac<8 Then Y2ac:=8;
+ Uvdc:=Vp8DcQ[V8Qi(Qi+V8Uvdc)]; If Uvdc>132 Then Uvdc:=132; Uvac:=Vp8AcQ[V8Qi(Qi+V8Uvac)];
+ If Mi^.Ref=0 Then Begin
+  V8IntraBlock(1,C,R,8,Mi^.UvMode); V8IntraBlock(2,C,R,8,Mi^.UvMode);
+  If Mi^.Mode<>4 Then V8IntraBlock(0,C,R,16,Mi^.Mode)
+  Else Begin
+   If Mi^.Skip<>0 Then FillChar(V8Eob,SizeOf(V8Eob),0);
+   For B:=0 To 15 Do Begin
+    V8Intra4(C,R,B,Mi^.Bm[B].Mode);
+    Yo:=(R*16+(B Shr 2)*4)*V8YS+C*16+(B And 3)*4;
+    If V8Eob[B]>1 Then V8IdctAdd(B*16,Y1dc,Y1ac,V8Fb[V8New].Y,Yo,V8YS)
+    Else If V8Eob[B]=1 Then V8DcAdd(V8Q[B*16]*Y1dc,V8Fb[V8New].Y,Yo,V8YS);
+   End;
+  End;
+ End Else V8InterMb(C,R,Mi);
+ If Mi^.Skip=0 Then Begin
+  If Mi^.Mode<>4 Then Begin
+   Dcf:=Y1dc;
+   If Mi^.Mode<>9 Then Begin V8Walsh(Y2dc,Y2ac); Dcf:=1; End;
+   For B:=0 To 15 Do Begin
+    Yo:=(R*16+(B Shr 2)*4)*V8YS+C*16+(B And 3)*4;
+    If V8Eob[B]>1 Then V8IdctAdd(B*16,Dcf,Y1ac,V8Fb[V8New].Y,Yo,V8YS)
+    Else V8DcAdd(V8Q[B*16]*Dcf,V8Fb[V8New].Y,Yo,V8YS);
+   End;
+  End;
+  For B:=16 To 23 Do Begin
+   If B<20 Then Pl:=V8Fb[V8New].U Else Pl:=V8Fb[V8New].V;
+   K:=(B-16) And 3;
+   Co:=(R*8+(K Shr 1)*4)*V8CS+C*8+(K And 1)*4;
+   If V8Eob[B]>1 Then V8IdctAdd(B*16,Uvdc,Uvac,Pl,Co,V8CS)
+   Else V8DcAdd(V8Q[B*16]*Uvdc,Pl,Co,V8CS);
+  End;
+ End;
+End;
+
+{ ---- image complete ---- }
+Function Vp8Frame(P: PEABuffer; Len: LongInt): Integer;
+Var D,FirstLen,I,J,K,L,Np,Off,Sz,R,C,Seg,Qi,Eobt,W,H,Cw,Ch: LongInt; Fl: LongInt; Mi: PV8Mbi; Used: Array[0..3] Of Boolean; Tmp: Integer;
+ Fb: TV8Fb;
+Begin
+ Vp8Frame:=-1;
+ If Len<3 Then Fail('VP8 : paquet tronque.');
+ V8Key:=1-(P^[0] And 1); { 0 = image cle dans le flux ; ici 1 = cle }
+ V8Ver:=(P^[0] Shr 1) And 7; V8Show:=(P^[0] Shr 4) And 1;
+ FirstLen:=(P^[0] Or (P^[1] Shl 8) Or (P^[2] Shl 16)) Shr 5;
+ D:=3;
+ If V8Ver=0 Then Begin V8Bilinear:=False; V8FullPix:=False; End Else Begin V8Bilinear:=True; V8FullPix:=V8Ver=3; End;
+ If V8Key<>0 Then Begin
+  If Len<10 Then Fail('VP8 : en-tete d''image cle tronque.');
+  If (P^[3]<>$9D) Or (P^[4]<>$01) Or (P^[5]<>$2A) Then Fail('VP8 : code de synchronisation invalide.');
+  W:=(P^[6] Or (P^[7] Shl 8)) And $3FFF; H:=(P^[8] Or (P^[9] Shl 8)) And $3FFF;
+  If (W<1) Or (H<1) Then Fail('VP8 : dimensions invalides.');
+  If (Not V8Have) Or (W<>V8W) Or (H<>V8H) Then V8Alloc(W,H);
+  D:=10;
+ End Else If Not V8Have Then Fail('VP8 : le flux doit commencer par une image cle.');
+ If D+FirstLen>Len Then FirstLen:=Len-D;
+ If V8Key<>0 Then Begin
+  Move(Vp8CoefDef,V8Fc.Coef,1056);
+  Move(V8MvDef,V8Fc.Mvc,38); Move(V8DefYprob,V8Fc.Ymode,4); Move(V8DefUvprob,V8Fc.Uvmode,3);
+  FillChar(V8SegQ,SizeOf(V8SegQ),0); FillChar(V8SegLf,SizeOf(V8SegLf),0); V8SegAbs:=0;
+  FillChar(V8RefLf,SizeOf(V8RefLf),0); FillChar(V8ModeLf,SizeOf(V8ModeLf),0);
+  V8RefreshGold:=1; V8RefreshAlt:=1; V8CopyGold:=0; V8CopyAlt:=0; V8SignBias[2]:=0; V8SignBias[3]:=0;
+ End;
+ V8BInit(V8Bc,PEABuffer(@P^[D]),FirstLen);
+ If V8Key<>0 Then Begin V8BRead(V8Bc,128); V8BRead(V8Bc,128); End;
+ V8SegOn:=V8BRead(V8Bc,128); V8SegMap:=0; V8SegData:=0;
+ If V8SegOn<>0 Then Begin
+  V8SegMap:=V8BRead(V8Bc,128); V8SegData:=V8BRead(V8Bc,128);
+  If V8SegData<>0 Then Begin
+   V8SegAbs:=V8BRead(V8Bc,128);
+   FillChar(V8SegQ,SizeOf(V8SegQ),0); FillChar(V8SegLf,SizeOf(V8SegLf),0);
+   For I:=0 To 1 Do For J:=0 To 3 Do Begin
+    If V8BRead(V8Bc,128)<>0 Then Begin
+     If I=0 Then K:=V8Lit(V8Bc,7) Else K:=V8Lit(V8Bc,6);
+     If V8BRead(V8Bc,128)<>0 Then K:=-K;
+    End Else K:=0;
+    If I=0 Then V8SegQ[J]:=K Else V8SegLf[J]:=K;
+   End;
+  End;
+  If V8SegMap<>0 Then Begin
+   V8SegProb[0]:=255; V8SegProb[1]:=255; V8SegProb[2]:=255;
+   For I:=0 To 2 Do If V8BRead(V8Bc,128)<>0 Then V8SegProb[I]:=V8Lit(V8Bc,8);
+  End;
+ End;
+ V8FType:=V8BRead(V8Bc,128); V8FLevel:=V8Lit(V8Bc,6); V8Sharp:=V8Lit(V8Bc,3);
+ V8LfDeltaOn:=V8BRead(V8Bc,128);
+ If V8LfDeltaOn<>0 Then Begin
+  If V8BRead(V8Bc,128)<>0 Then Begin
+   For I:=0 To 3 Do If V8BRead(V8Bc,128)<>0 Then Begin V8RefLf[I]:=V8Lit(V8Bc,6); If V8BRead(V8Bc,128)<>0 Then V8RefLf[I]:=-V8RefLf[I]; End;
+   For I:=0 To 3 Do If V8BRead(V8Bc,128)<>0 Then Begin V8ModeLf[I]:=V8Lit(V8Bc,6); If V8BRead(V8Bc,128)<>0 Then V8ModeLf[I]:=-V8ModeLf[I]; End;
+  End;
+ End;
+ { partitions de jetons }
+ V8Parts:=1 Shl V8Lit(V8Bc,2);
+ Off:=D+FirstLen+3*(V8Parts-1);
+ For I:=0 To V8Parts-1 Do Begin
+  If I<V8Parts-1 Then Begin
+   K:=D+FirstLen+3*I; Sz:=P^[K] Or (P^[K+1] Shl 8) Or (P^[K+2] Shl 16);
+  End Else Sz:=Len-Off;
+  If Off>Len Then Off:=Len;
+  If Off+Sz>Len Then Sz:=Len-Off;
+  V8BInit(V8Tok[I],PEABuffer(@P^[Off]),Sz); Inc(Off,Sz);
+ End;
+ V8Base:=V8Lit(V8Bc,7);
+ For I:=0 To 4 Do Begin
+  If V8BRead(V8Bc,128)<>0 Then Begin K:=V8Lit(V8Bc,4); If V8BRead(V8Bc,128)<>0 Then K:=-K; End Else K:=0;
+  Case I Of 0: V8Y1dc:=K; 1: V8Y2dc:=K; 2: V8Y2ac:=K; 3: V8Uvdc:=K; Else V8Uvac:=K; End;
+ End;
+ If V8Key=0 Then Begin
+  V8RefreshGold:=V8BRead(V8Bc,128); V8RefreshAlt:=V8BRead(V8Bc,128);
+  V8CopyGold:=0; If V8RefreshGold=0 Then V8CopyGold:=V8Lit(V8Bc,2);
+  V8CopyAlt:=0; If V8RefreshAlt=0 Then V8CopyAlt:=V8Lit(V8Bc,2);
+  V8SignBias[2]:=V8BRead(V8Bc,128); V8SignBias[3]:=V8BRead(V8Bc,128);
+ End;
+ V8RefreshProbs:=V8BRead(V8Bc,128);
+ If V8RefreshProbs=0 Then V8Lfc:=V8Fc;
+ If V8Key<>0 Then V8RefreshLast:=1 Else V8RefreshLast:=V8BRead(V8Bc,128);
+ For I:=0 To 1055 Do If V8BRead(V8Bc,Vp8CoefUpd[I])<>0 Then V8Fc.Coef[I]:=V8Lit(V8Bc,8);
+ { tampon de la nouvelle image }
+ FillChar(Used,SizeOf(Used),False); Used[V8Last]:=True; Used[V8Gold]:=True; Used[V8Alt]:=True;
+ V8New:=0; While Used[V8New] Do Inc(V8New);
+ V8Modes;
+ FillChar(V8ACtx,(V8MbW+1)*9,0);
+ For R:=0 To V8MbH-1 Do Begin
+  FillChar(V8LCtx,SizeOf(V8LCtx),0);
+  For C:=0 To V8MbW-1 Do Begin
+   Mi:=V8Mb(R,C);
+   Qi:=V8Base;
+   If V8SegOn<>0 Then Begin
+    If V8SegAbs<>0 Then Qi:=V8SegQ[Mi^.Seg] Else Qi:=V8Base+V8SegQ[Mi^.Seg];
+    If Qi<0 Then Qi:=0; If Qi>127 Then Qi:=127;
+   End;
+   FillChar(V8Q,SizeOf(V8Q),0); FillChar(V8Eob,SizeOf(V8Eob),0);
+   If Mi^.Skip<>0 Then Begin
+    FillChar(V8ACtx[C*9],8,0); FillChar(V8LCtx,8,0);
+    If Not Mi^.Is4 Then Begin V8ACtx[C*9+8]:=0; V8LCtx[8]:=0; End;
+   End Else Begin
+    Eobt:=V8Tokens(C,Mi,V8Tok[R And (V8Parts-1)]);
+    If Eobt=0 Then Mi^.Skip:=1;
+   End;
+   V8Recon(R,C,Mi,Qi);
+  End;
+ End;
+ If V8FType<2 Then V8LoopFilter;
+ { gestion des tampons de reference }
+ If V8Key=0 Then Begin
+  If V8CopyAlt=1 Then V8Alt:=V8Last Else If V8CopyAlt=2 Then V8Alt:=V8Gold;
+  If V8CopyGold=1 Then V8Gold:=V8Last Else If V8CopyGold=2 Then V8Gold:=V8Alt;
+ End;
+ If V8RefreshGold<>0 Then V8Gold:=V8New;
+ If V8RefreshAlt<>0 Then V8Alt:=V8New;
+ If V8RefreshProbs=0 Then V8Fc:=V8Lfc;
+ { sortie }
+ Tmp:=V8New;
+ If V8RefreshLast<>0 Then V8Last:=V8New;
+ If V8Show<>0 Then Begin
+  Cw:=(V8W+1) Div 2; Ch:=(V8H+1) Div 2;
+  For I:=0 To V8H-1 Do Move(V8Fb[Tmp].Y^[I*V8YS],V8Out^[I*V8W],V8W);
+  For I:=0 To Ch-1 Do Move(V8Fb[Tmp].U^[I*V8CS],V8Out^[V8W*V8H+I*Cw],Cw);
+  For I:=0 To Ch-1 Do Move(V8Fb[Tmp].V^[I*V8CS],V8Out^[V8W*V8H+Cw*Ch+I*Cw],Cw);
+  If @Vp8Hook<>Nil Then Vp8Hook(V8Out,V8W,V8H);
+ End;
+ Vp8Frame:=0;
+End;
+{$ENDIF}
 
 { ====================================================================== }
 { Colle entre l'interface et les moteurs audio                             }
@@ -20152,6 +21365,7 @@ Begin
   Cd:=MkT[Vi].Codec;
   If Cd='V_MPEG4/ISO/AVC' Then V.Codec:='avc1'
   Else If Cd='V_MPEG4/ISO/ASP' Then V.Codec:='MP4V'
+  Else If Cd='V_VP8' Then V.Codec:='VP80'
   Else If Cd='V_MS/VFW/FOURCC' Then V.Codec:=Copy(UpStr(C4(MkT[Vi].PrivPos+16)),1,4)
   Else V.Codec:=Copy(Cd,3,4);
   K:=MkT[Vi].PrivLen; If K>500 Then K:=500;
@@ -20232,7 +21446,9 @@ Begin
  If Not OpenSrc(Path,VF) Then Begin Err:='Ouverture impossible.'; Exit; End;
  VFOpen:=True; EngMsg:=''; EngFirst:=0; NalSz:=0;
  If SetJmp(EngJmp)=0 Then Begin
-  If Mode=2 Then Begin
+  If Mode=3 Then Begin
+   Vp8Hook:=H4Trampoline; V8Have:=False;
+  End Else If Mode=2 Then Begin
    M4VidHook:=H4Trampoline; M4InTag:=Copy(T.Codec+'    ',1,4); M4Scan:=False; M4Reset; M4OutBuf:=Nil;
    If T.CfgLen>0 Then Begin
     NeedBuf(CvBuf,CvCap,T.CfgLen+64); Move(T.Cfg,CvBuf^,T.CfgLen); M4Packet(PEABuffer(CvBuf),T.CfgLen);
@@ -20248,7 +21464,8 @@ Begin
     If (VLastBuf<>Nil) And (@VFrameCb<>Nil) Then VFrameCb(VLastBuf,VLastW,VLastH);
    End Else Begin
     ReadSample(VF,T.Off^[I],T.Sz^[I]);
-    If Mode=2 Then Begin
+    If Mode=3 Then Vp8Frame(PEABuffer(SBuf),T.Sz^[I])
+    Else If Mode=2 Then Begin
      { decoupage des paquets multiples (B-images empaquetees) aux codes B6 }
      Starts[0]:=0; Np:=1; Ps:=0;
      K:=0;
@@ -20272,7 +21489,7 @@ Begin
    If (I And 7)=0 Then UiTick(I,T.N);
    Inc(I);
   End;
-  If Mode=2 Then Begin
+  If Mode=3 Then Begin End Else If Mode=2 Then Begin
    If Not VStopFlag Then Begin
     If (M4LowDelay=0) And (M4NextI>=0) And M4PicHave Then M4Emit(M4NextI)
     Else If M4SkippedLast And M4PicHave And (M4CurI>=0) Then M4Emit(M4CurI);
@@ -20281,7 +21498,8 @@ Begin
   VOk:=True;
  End Else Begin VOk:=False; VErr:=EngMsg; End;
  If VFOpen Then Begin Close(VF); VFOpen:=False; End;
- If Mode=2 Then Begin
+ If Mode=3 Then V8FreeAll
+ Else If Mode=2 Then Begin
   If M4OutBuf<>Nil Then Begin FreeMem(M4OutBuf); M4OutBuf:=Nil; End;
  End Else If H4Began And (H4OutBuf<>Nil) Then Begin FreeMem(H4OutBuf,H4OutSize); H4OutBuf:=Nil; End;
  If VOk Then Begin
@@ -20307,7 +21525,8 @@ Begin
   Else If InList(C,'XVID,DIVX,DX50,FMP4,MP4V,3IV2,XVIX,BLZ0,DIV5,RMP4,MP4S,M4S2,SEDG,WV1F,UMP4,EM4A,DXGM,FVFW,DM4V') Then VideoMode:=2;
  End Else If InList(Fmt,'MKV,WEBM') Then Begin
   If (C='avc1') And (T.CfgLen>=7) Then VideoMode:=0
-  Else If InList(C,'MP4V,XVID,DIVX,DX50,FMP4') Then VideoMode:=2;
+  Else If InList(C,'MP4V,XVID,DIVX,DX50,FMP4') Then VideoMode:=2
+  Else If C='VP80' Then VideoMode:=3;
  End Else If ((C='avc1') Or (C='avc3')) And (T.CfgLen>=7) Then VideoMode:=0;
 End;
 
@@ -20388,6 +21607,9 @@ Var
  VERaw: PEABuffer;
  VEUsed: LongInt;
  VEActive: Boolean;
+ VEQpP: LongInt;          { dernier QP des images P }
+ VECxP: Double;           { complexite lissee des images P : bits * pas de quantification }
+ VEAccL: Int64;           { ecart cumule (bits reels - bits cibles) }
 
 Function VEncBegin(W,H,Fn,Fd,MaxFrames,Bitrate: LongInt; Var Err: String): Boolean;
 Var Lvl,I: LongInt;
@@ -20412,15 +21634,26 @@ Begin
  GetMem(VERaw,W*H*3 Div 2+64);
  VEQp:=26; If Bitrate>0 Then VEQp:=28;
  If Bitrate>0 Then VETarget:=Round(Int64(Bitrate)*Fd/Fn) Else VETarget:=0;
- VEAcc:=0; VENum:=0; VEFrame:=0;
+ VEAcc:=0; VENum:=0; VEFrame:=0; VEQpP:=30; VECxP:=0; VEAccL:=0;
  VEGop:=Max(1,(Fn*10) Div Max(Fd,1));
  X4WriteSps(W,H,0,Lvl); X4WritePps;
  VEActive:=True; VEncBegin:=True;
 End;
 
-{ Encode l'image YUV 4:2:0 (W*H*3/2 octets) }
+{ pas de quantification H.264 (double tous les 6 QP) }
+Function VEQstep(Qp: LongInt): Double;
+Begin VEQstep:=Exp(Ln(2.0)*(Qp-4)/6); End;
+
+Function VEClampQp(Q: LongInt): LongInt;
+Begin
+ If Q<8 Then Q:=8; If Q>51 Then Q:=51; VEClampQp:=Q;
+End;
+
+{ Encode l'image YUV 4:2:0 (W*H*3/2 octets) ; controle de debit adaptatif :
+  QP de l'image cle cherche par essais (premiere image), puis modele
+  bits ~ complexite / pas de quantification pour les images P. }
 Procedure VEncFrame(Yuv: PEABuffer);
-Var X,Y,I,J,K,CW,CH,Bits: LongInt; Idr: Boolean; Tmp: PEABuffer;
+Var X,Y,I,J,K,CW,CH,Bits,Qp,Trial,Ti,Tn,Dq: LongInt; Idr: Boolean; Tmp: PEABuffer; R: Double;
 Begin
  CW:=VEW Div 2; CH:=VEH Div 2;
  For Y:=0 To X4Hp-1 Do Begin
@@ -20439,18 +21672,53 @@ Begin
  End;
  Idr:=(VEFrame=0) Or ((VEGop>0) And (VEFrame Mod VEGop=0));
  If Idr Then VENum:=0;
- Bits:=X4EncodeFrame(Idr,VENum,VEQp);
+ If VETarget<=0 Then Begin
+  Qp:=VEQp; Bits:=X4EncodeFrame(Idr,VENum,Qp);
+ End Else If Idr Then Begin
+  { image cle : essais successifs pour approcher ~5 fois le budget d'une image P }
+  Ti:=VETarget*3;
+  If VEFrame=0 Then Qp:=VEQp Else Qp:=VEClampQp(VEQpP-2);
+  Trial:=0;
+  Repeat
+   Bits:=X4EncodeFrame(True,0,Qp); Inc(Trial);
+   If (VEFrame>0) Or (Trial>=5) Then Break;
+   R:=Bits/Ti;
+   If (R>0.8) And (R<1.25) Then Break;
+   Dq:=Round(6*Ln(R)/Ln(2.0)); If Dq=0 Then If R>1 Then Dq:=1 Else Dq:=-1;
+   If Dq>12 Then Dq:=12; If Dq<-12 Then Dq:=-12;
+   Tn:=VEClampQp(Qp+Dq);
+   If Tn=Qp Then Break;
+   Qp:=Tn;
+  Until False;
+  If VEFrame=0 Then VEQpP:=VEClampQp(Qp+3);
+ End Else Begin
+  Tn:=VETarget-Round(VEAccL/24);
+  If Tn<VETarget Div 3 Then Tn:=VETarget Div 3;
+  If Tn>VETarget*2 Then Tn:=VETarget*2;
+  Qp:=VEQpP;
+  If VECxP>0 Then Begin
+   Dq:=Round(4+6*Ln(VECxP/Tn)/Ln(2.0));
+   Qp:=Dq;
+   If Qp>VEQpP+3 Then Qp:=VEQpP+3;
+   If Qp<VEQpP-3 Then Qp:=VEQpP-3;
+  End;
+  Qp:=VEClampQp(Qp);
+  Bits:=X4EncodeFrame(False,VENum,Qp);
+  R:=Bits*VEQstep(Qp);
+  If VECxP<=0 Then VECxP:=R Else VECxP:=0.5*VECxP+0.5*R;
+  VEQpP:=Qp;
+ End;
  If Idr Then X4NalBuild(3,5) Else X4NalBuild(2,1);
  X4SampOff^[VEFrame]:=X4OLen; If Idr Then X4SampKey^[VEFrame]:=1 Else X4SampKey^[VEFrame]:=0;
  X4EmitNal;
  X4SampSz^[VEFrame]:=X4OLen-X4SampOff^[VEFrame];
+ If VETarget>0 Then Begin
+  VEAccL:=VEAccL+Bits-VETarget;
+  If VEAccL>VETarget*60 Then VEAccL:=VETarget*60;
+  If VEAccL<-VETarget*60 Then VEAccL:=-VETarget*60;
+ End;
  Inc(VENum); Inc(VEFrame);
  Tmp:=X4Rec; X4Rec:=X4Ref; X4Ref:=Tmp;
- If VETarget>0 Then Begin
-  Inc(VEAcc,Bits-VETarget);
-  If VEAcc>2*VETarget Then Begin If VEQp<51 Then Inc(VEQp); VEAcc:=VEAcc Div 2; End
-  Else If VEAcc<-2*VETarget Then Begin If VEQp>10 Then Dec(VEQp); VEAcc:=VEAcc Div 2; End;
- End;
 End;
 
 Procedure VEncFree;
@@ -21032,7 +22300,7 @@ Begin
  If Not V.Ok Then Begin TrkClear(V); TrkClear(A); Err:='Aucune piste vid'#233'o dans ce fichier.'; Exit; End;
  DecMode:=VideoMode(Fmt,V);
  If DecMode<0 Then Begin
-  Err:='Codec vid'#233'o '+V.Codec+' non d'#233'cod'#233' (H.264, MPEG-4/XviD/DivX seulement).'; TrkClear(V); TrkClear(A); Exit;
+  Err:='Codec vid'#233'o '+V.Codec+' non d'#233'cod'#233' (H.264, MPEG-4/XviD/DivX, VP8).'; TrkClear(V); TrkClear(A); Exit;
  End;
  If V.W=0 Then V.W:=M.W; If V.H=0 Then V.H:=M.H;
  HaveA:=A.Ok Or (M.ACodec<>''); AFlv:=Fmt='FLV';
