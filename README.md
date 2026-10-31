@@ -11,8 +11,13 @@ Tout le code est dans `ANYMP4.PAS` (aucun fichier d'inclusion, aucune unite exte
 fpc ANYMP4.PAS
 ```
 
-Pris en charge par le moteur integre : decodage MP3, AAC-LC, FLAC, AIFF, VOC, MOD, WAV (PCM, IMA ADPCM, A-law,
-mu-law, float) et extraction de l'audio des fichiers AVI, FLV, MP4/MOV/M4A ; sortie MP3 (encodeur de FFMPEG.PAS),
-WAV (16/8 bits, IMA ADPCM), AIFF, AU ; images BMP et GIF anime (lecture/ecriture, rotation, rognage, effets,
-filigrane texte), collage, diaporama MV (GIF + musique), copie des titres DVD (VIDEO_TS) vers MPEG-PS.
-Les sorties video (H.264, HEVC, ...) ne sont pas disponibles : l'application l'indique au lieu de simuler la conversion.
+Video MP4 (H.264 + AAC) : lecture des fichiers MP4/MOV/M4V/3GP/FLV (miniatures et apercu decodes par le decodeur
+H.264 de FFMPEG.PAS : CAVLC/CABAC, I/P/B), sortie MP4/MOV/M4V/3GP par copie de flux (sans perte, avec decoupe) ou par
+transcodage (rotation, rognage, effets, filigrane, redimensionnement, encodeur H.264 + AAC), image/GIF anime -> MP4,
+audio -> M4A/AAC.
+
+Audio : decodage MP3, AAC-LC, FLAC, AIFF, VOC, MOD, WAV et extraction de l'audio des fichiers AVI, FLV, MP4/MOV/M4A ;
+sortie MP3, WAV (16/8 bits, IMA ADPCM), AIFF, AU, AAC, M4A. Images BMP et GIF anime (lecture/ecriture, rotation,
+rognage, effets, filigrane texte), collage, diaporama MV (GIF + musique), copie des titres DVD (VIDEO_TS) vers MPEG-PS.
+Limites : la video source doit etre en H.264 (MP4/MOV/M4V/3GP/FLV) ; les autres codecs/conteneurs video (AVI, MKV,
+WebM, WMV...) et les sorties autres que MP4/MOV/M4V/3GP produisent un message d'erreur explicite.
