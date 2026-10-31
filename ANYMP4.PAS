@@ -18974,6 +18974,4145 @@ Begin
  Inc(E8Frame);
 End;
 {$ENDIF}
+{ ======================================================================== }
+{  pe_hevc.pas : decodeur HEVC / H.265 (Main, Main10, Main Still Picture,  }
+{  RExt 4:0:0 / 4:2:2 / 4:4:4 8..12 bits).                                  }
+{  Port en Pascal du decodeur de FFmpeg n6.1.1 (libavcodec/hevc*.c,        }
+{  hevcdsp_template.c, hevcpred_template.c, hevc_refs.c, hevc_mvs.c,       }
+{  hevc_filter.c, hevc_cabac.c, hevc_ps.c), copyright (C) 2012-2013        }
+{  Guillaume Martres, Gildas Cocherel, Mickael Raulet, Seppo Tomperi et    }
+{  al., licence GNU LGPL 2.1 ou superieure. Tables extraites par script.   }
+{  Le deblocage et le SAO sont appliques sur l'image entiere apres le      }
+{  decodage de toutes les CTU (meme resultat que le pipeline de FFmpeg).   }
+{  Interface : HvFree, HvConfig, HvFrame, HvAnnexB, HvFlush, HvHook,       }
+{  HvNativeHook (voir README).                                             }
+{ ======================================================================== }
+Type
+ HvTB=Array[0..1000000000] Of Byte; HvPB=^HvTB;
+ HvTSb=Array[0..1000000000] Of ShortInt; HvPSb=^HvTSb;
+ HvTW=Array[0..500000000] Of Word; HvPW=^HvTW;
+ HvTL=Array[0..250000000] Of LongInt; HvPL=^HvTL;
+ HvTSm=Array[0..500000000] Of SmallInt; HvPSm=^HvTSm;
+
+Const
+ HV_DPB=32;
+ HV_CTX=179;
+ HV_NAL_TRAIL_N=0; HV_NAL_TRAIL_R=1; HV_NAL_TSA_N=2; HV_NAL_TSA_R=3; HV_NAL_STSA_N=4; HV_NAL_STSA_R=5;
+ HV_NAL_RADL_N=6; HV_NAL_RADL_R=7; HV_NAL_RASL_N=8; HV_NAL_RASL_R=9;
+ HV_NAL_BLA_W_LP=16; HV_NAL_BLA_W_RADL=17; HV_NAL_BLA_N_LP=18; HV_NAL_IDR_W_RADL=19; HV_NAL_IDR_N_LP=20;
+ HV_NAL_CRA=21; HV_NAL_VPS=32; HV_NAL_SPS=33; HV_NAL_PPS=34; HV_NAL_AUD=35; HV_NAL_EOS=36; HV_NAL_EOB=37;
+ HV_SLICE_B=0; HV_SLICE_P=1; HV_SLICE_I=2;
+ HV_FL_OUTPUT=1; HV_FL_SHORT=2; HV_FL_LONG=4; HV_FL_BUMP=8;
+ HV_SEQ_MASK=255; HV_SEQ_INVALID=256;
+ { numeros de contextes CABAC (disposition de FFmpeg) }
+ HC_SAO_MERGE=0; HC_SAO_TYPE=1; HC_SPLIT_CU=2; HC_TQ_BYPASS=5; HC_SKIP=6; HC_QP_DELTA=9; HC_PRED_MODE=12;
+ HC_PART_MODE=13; HC_PREV_INTRA=17; HC_CHROMA_PRED=18; HC_MERGE_FLAG=20; HC_MERGE_IDX=21; HC_INTER_PRED=22;
+ HC_REF_IDX=27; HC_MVD_GT0=31; HC_MVD_GT1=33; HC_MVP_FLAG=35; HC_NO_RESIDUAL=36; HC_SPLIT_TR=37;
+ HC_CBF_LUMA=40; HC_CBF_CBCR=42; HC_TSKIP=47; HC_RDPCM_FLAG=49; HC_RDPCM_DIR=51; HC_LAST_X=53; HC_LAST_Y=71;
+ HC_SIG_CG=89; HC_SIG=93; HC_GT1=137; HC_GT2=161; HC_RES_SCALE=167; HC_RES_SIGN=175; HC_CQP_FLAG=177; HC_CQP_IDX=178;
+
+Const
+ HvCabacInit: Array[0..536] Of Byte=(
+  153,200,139,141,157,154,154,154,154,154,154,154,154,184,154,154,154,184,63,139,154,154,154,154,154,154,154,154,154,154,
+  154,154,154,154,154,154,154,153,138,138,111,141,94,138,182,154,154,139,139,139,139,139,139,110,110,124,125,140,153,125,
+  127,140,109,111,143,127,111,79,108,123,63,110,110,124,125,140,153,125,127,140,109,111,143,127,111,79,108,123,63,91,
+  171,134,141,111,111,125,110,110,94,124,108,124,107,125,141,179,153,125,107,125,141,179,153,125,107,125,141,179,153,125,
+  140,139,182,182,152,136,152,136,153,136,139,111,136,139,111,141,111,140,92,137,138,140,152,138,139,153,74,149,92,139,
+  107,122,152,140,179,166,182,140,227,122,197,138,153,136,167,152,152,154,154,154,154,154,154,154,154,154,154,154,154,153,
+  185,107,139,126,154,197,185,201,154,154,154,149,154,139,154,154,154,152,139,110,122,95,79,63,31,31,153,153,153,153,
+  140,198,140,198,168,79,124,138,94,153,111,149,107,167,154,154,139,139,139,139,139,139,125,110,94,110,95,79,125,111,
+  110,78,110,111,111,95,94,108,123,108,125,110,94,110,95,79,125,111,110,78,110,111,111,95,94,108,123,108,121,140,
+  61,154,155,154,139,153,139,123,123,63,153,166,183,140,136,153,154,166,183,140,136,153,154,166,183,140,136,153,154,170,
+  153,123,123,107,121,107,121,167,151,183,140,151,183,140,140,140,154,196,196,167,154,152,167,182,182,134,149,136,153,121,
+  136,137,169,194,166,167,154,167,137,182,107,167,91,122,107,167,154,154,154,154,154,154,154,154,154,154,154,154,153,160,
+  107,139,126,154,197,185,201,154,154,154,134,154,139,154,154,183,152,139,154,137,95,79,63,31,31,153,153,153,153,169,
+  198,169,198,168,79,224,167,122,153,111,149,92,167,154,154,139,139,139,139,139,139,125,110,124,110,95,94,125,111,111,
+  79,125,126,111,111,79,108,123,93,125,110,124,110,95,94,125,111,111,79,125,126,111,111,79,108,123,93,121,140,61,
+  154,170,154,139,153,139,123,123,63,124,166,183,140,136,153,154,166,183,140,136,153,154,166,183,140,136,153,154,170,153,
+  138,138,122,121,122,121,167,151,183,140,151,183,140,140,140,154,196,167,167,154,152,167,182,182,134,149,136,153,121,136,
+  122,169,208,166,167,154,152,167,182,107,167,91,107,107,167,154,154,154,154,154,154,154,154,154,154,154,154
+ );
+ HvLpsTab: Array[0..255] Of Byte=(
+  128,176,208,240,128,167,197,227,128,158,187,216,123,150,178,205,116,142,169,195,111,135,160,185,105,128,152,175,100,122,144,166,
+  95,116,137,158,90,110,130,150,85,104,123,142,81,99,117,135,77,94,111,128,73,89,105,122,69,85,100,116,66,80,95,110,
+  62,76,90,104,59,72,86,99,56,69,81,94,53,65,77,89,51,62,73,85,48,59,69,80,46,56,66,76,43,53,63,72,
+  41,50,59,69,39,48,56,65,37,45,54,62,35,43,51,59,33,41,48,56,32,39,46,53,30,37,43,50,29,35,41,48,
+  27,33,39,45,26,31,37,43,24,30,35,41,23,28,33,39,22,27,32,37,21,26,30,35,20,24,29,33,19,23,27,31,
+  18,22,26,30,17,21,25,28,16,20,23,27,15,19,22,25,14,18,21,24,14,17,20,23,13,16,19,22,12,15,18,21,
+  12,14,17,20,11,14,16,19,11,13,15,18,10,12,15,17,10,12,14,16,9,11,13,15,9,11,12,14,8,10,12,14,
+  8,9,11,13,7,9,11,12,7,9,10,12,7,8,10,11,6,8,9,11,6,7,9,10,6,7,8,9,2,2,2,2
+ );
+ HvTrMat: Array[0..1023] Of ShortInt=(
+  64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
+  90,90,88,85,82,78,73,67,61,54,46,38,31,22,13,4,-4,-13,-22,-31,-38,-46,-54,-61,-67,-73,-78,-82,-85,-88,-90,-90,
+  90,87,80,70,57,43,25,9,-9,-25,-43,-57,-70,-80,-87,-90,-90,-87,-80,-70,-57,-43,-25,-9,9,25,43,57,70,80,87,90,
+  90,82,67,46,22,-4,-31,-54,-73,-85,-90,-88,-78,-61,-38,-13,13,38,61,78,88,90,85,73,54,31,4,-22,-46,-67,-82,-90,
+  89,75,50,18,-18,-50,-75,-89,-89,-75,-50,-18,18,50,75,89,89,75,50,18,-18,-50,-75,-89,-89,-75,-50,-18,18,50,75,89,
+  88,67,31,-13,-54,-82,-90,-78,-46,-4,38,73,90,85,61,22,-22,-61,-85,-90,-73,-38,4,46,78,90,82,54,13,-31,-67,-88,
+  87,57,9,-43,-80,-90,-70,-25,25,70,90,80,43,-9,-57,-87,-87,-57,-9,43,80,90,70,25,-25,-70,-90,-80,-43,9,57,87,
+  85,46,-13,-67,-90,-73,-22,38,82,88,54,-4,-61,-90,-78,-31,31,78,90,61,4,-54,-88,-82,-38,22,73,90,67,13,-46,-85,
+  83,36,-36,-83,-83,-36,36,83,83,36,-36,-83,-83,-36,36,83,83,36,-36,-83,-83,-36,36,83,83,36,-36,-83,-83,-36,36,83,
+  82,22,-54,-90,-61,13,78,85,31,-46,-90,-67,4,73,88,38,-38,-88,-73,-4,67,90,46,-31,-85,-78,-13,61,90,54,-22,-82,
+  80,9,-70,-87,-25,57,90,43,-43,-90,-57,25,87,70,-9,-80,-80,-9,70,87,25,-57,-90,-43,43,90,57,-25,-87,-70,9,80,
+  78,-4,-82,-73,13,85,67,-22,-88,-61,31,90,54,-38,-90,-46,46,90,38,-54,-90,-31,61,88,22,-67,-85,-13,73,82,4,-78,
+  75,-18,-89,-50,50,89,18,-75,-75,18,89,50,-50,-89,-18,75,75,-18,-89,-50,50,89,18,-75,-75,18,89,50,-50,-89,-18,75,
+  73,-31,-90,-22,78,67,-38,-90,-13,82,61,-46,-88,-4,85,54,-54,-85,4,88,46,-61,-82,13,90,38,-67,-78,22,90,31,-73,
+  70,-43,-87,9,90,25,-80,-57,57,80,-25,-90,-9,87,43,-70,-70,43,87,-9,-90,-25,80,57,-57,-80,25,90,9,-87,-43,70,
+  67,-54,-78,38,85,-22,-90,4,90,13,-88,-31,82,46,-73,-61,61,73,-46,-82,31,88,-13,-90,-4,90,22,-85,-38,78,54,-67,
+  64,-64,-64,64,64,-64,-64,64,64,-64,-64,64,64,-64,-64,64,64,-64,-64,64,64,-64,-64,64,64,-64,-64,64,64,-64,-64,64,
+  61,-73,-46,82,31,-88,-13,90,-4,-90,22,85,-38,-78,54,67,-67,-54,78,38,-85,-22,90,4,-90,13,88,-31,-82,46,73,-61,
+  57,-80,-25,90,-9,-87,43,70,-70,-43,87,9,-90,25,80,-57,-57,80,25,-90,9,87,-43,-70,70,43,-87,-9,90,-25,-80,57,
+  54,-85,-4,88,-46,-61,82,13,-90,38,67,-78,-22,90,-31,-73,73,31,-90,22,78,-67,-38,90,-13,-82,61,46,-88,4,85,-54,
+  50,-89,18,75,-75,-18,89,-50,-50,89,-18,-75,75,18,-89,50,50,-89,18,75,-75,-18,89,-50,-50,89,-18,-75,75,18,-89,50,
+  46,-90,38,54,-90,31,61,-88,22,67,-85,13,73,-82,4,78,-78,-4,82,-73,-13,85,-67,-22,88,-61,-31,90,-54,-38,90,-46,
+  43,-90,57,25,-87,70,9,-80,80,-9,-70,87,-25,-57,90,-43,-43,90,-57,-25,87,-70,-9,80,-80,9,70,-87,25,57,-90,43,
+  38,-88,73,-4,-67,90,-46,-31,85,-78,13,61,-90,54,22,-82,82,-22,-54,90,-61,-13,78,-85,31,46,-90,67,4,-73,88,-38,
+  36,-83,83,-36,-36,83,-83,36,36,-83,83,-36,-36,83,-83,36,36,-83,83,-36,-36,83,-83,36,36,-83,83,-36,-36,83,-83,36,
+  31,-78,90,-61,4,54,-88,82,-38,-22,73,-90,67,-13,-46,85,-85,46,13,-67,90,-73,22,38,-82,88,-54,-4,61,-90,78,-31,
+  25,-70,90,-80,43,9,-57,87,-87,57,-9,-43,80,-90,70,-25,-25,70,-90,80,-43,-9,57,-87,87,-57,9,43,-80,90,-70,25,
+  22,-61,85,-90,73,-38,-4,46,-78,90,-82,54,-13,-31,67,-88,88,-67,31,13,-54,82,-90,78,-46,4,38,-73,90,-85,61,-22,
+  18,-50,75,-89,89,-75,50,-18,-18,50,-75,89,-89,75,-50,18,18,-50,75,-89,89,-75,50,-18,-18,50,-75,89,-89,75,-50,18,
+  13,-38,61,-78,88,-90,85,-73,54,-31,4,22,-46,67,-82,90,-90,82,-67,46,-22,-4,31,-54,73,-85,90,-88,78,-61,38,-13,
+  9,-25,43,-57,70,-80,87,-90,90,-87,80,-70,57,-43,25,-9,-9,25,-43,57,-70,80,-87,90,-90,87,-80,70,-57,43,-25,9,
+  4,-13,22,-31,38,-46,54,-61,67,-73,78,-82,85,-88,90,-90,90,-90,88,-85,82,-78,73,-67,61,-54,46,-38,31,-22,13,-4
+ );
+ HvDefSlIntra: Array[0..63] Of Byte=(
+  16,16,16,16,17,18,21,24,16,16,16,16,17,19,22,25,16,16,17,18,20,22,25,29,16,16,18,21,24,27,31,36,
+  17,17,20,24,30,35,41,47,18,19,22,27,35,44,54,65,21,22,25,31,41,54,70,88,24,25,29,36,47,65,88,115
+ );
+ HvDefSlInter: Array[0..63] Of Byte=(
+  16,16,16,16,17,18,20,24,16,16,16,17,18,20,24,25,16,16,17,18,20,24,25,28,16,17,18,20,24,25,28,33,
+  17,18,20,24,25,28,33,41,18,20,24,25,28,33,41,54,20,24,25,28,33,41,54,71,24,25,28,33,41,54,71,91
+ );
+ HvTcTab: Array[0..53] Of Byte=(
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,
+  2,2,2,2,3,3,3,3,4,4,4,5,5,6,6,7,8,9,10,11,13,14,16,18,20,22,24
+ );
+ HvBetaTab: Array[0..51] Of Byte=(
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,6,7,8,9,10,11,12,13,14,15,16,
+  17,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46,48,50,52,54,56,58,60,62,64
+ );
+
+Type
+ THvScal=Record
+  Sl: Array[0..3,0..5,0..63] Of Byte;
+  Dc: Array[0..1,0..5] Of Byte;
+ End;
+ THvRps=Record
+  NumNeg,NumDelta: LongInt;
+  DeltaPoc: Array[0..32] Of LongInt;
+  Used: Array[0..32] Of Byte;
+ End;
+ PHvSps=^THvSps;
+ THvSps=Record
+  Id,VpsId,MaxSubLayers,Chroma,SepPlane,Width,Height: LongInt;
+  CropL,CropR,CropT,CropB: LongInt;
+  BitDepth,BitDepthC,Log2MaxPocLsb: LongInt;
+  MaxDecPicBuf,NumReorder,MaxLatencyInc: Array[0..7] Of LongInt;
+  Log2MinCb,Log2DiffCb,Log2MinTb,Log2DiffTb,Log2MaxTb,MaxThInter,MaxThIntra: LongInt;
+  ScalingEnable,ScalingPresent: LongInt;
+  Scal: THvScal;
+  Amp,Sao,Pcm,PcmBd,PcmBdC,PcmLog2Min,PcmLog2Max,PcmLfDisable: LongInt;
+  NbStRps: LongInt;
+  StRps: Array[0..64] Of THvRps;
+  LtPresent,NumLtSps: LongInt;
+  LtPocLsb: Array[0..32] Of LongInt;
+  LtUsed: Array[0..32] Of Byte;
+  TemporalMvp,StrongIntra: LongInt;
+  TsRotation,TsContext,ImplicitRdpcm,ExplicitRdpcm,ExtPrec,IntraSmoothDis,HighPrecOff,PersistRice,CabacAlign: LongInt;
+  SccExt: LongInt;
+  { derives }
+  Log2Ctb,CtbW,CtbH,CtbCount,MinCbW,MinCbH,MinTbW,MinTbH,QpBdOffset: LongInt;
+  W4,H4: LongInt;  { dimensions en unites de 4x4 }
+  HShift,VShift: Array[0..2] Of LongInt;
+  Raw: HvPB; RawLen: LongInt;
+ End;
+ PHvPps=^THvPps;
+ THvPps=Record
+  Id,SpsId: LongInt;
+  DepSlice,OutputFlagPresent,NumExtraBits,SignHide,CabacInitPresent: LongInt;
+  NumRefL0,NumRefL1,InitQp,ConstrainedIntra,TransformSkip,CuQpDeltaEnabled,DiffCuQpDeltaDepth: LongInt;
+  CbQpOffset,CrQpOffset,SliceChromaQpPresent,WeightedPred,WeightedBipred,TransquantBypass: LongInt;
+  TilesEnabled,EntropySync,NumTileCols,NumTileRows,Uniform: LongInt;
+  ColW,RowH: Array[0..1023] Of LongInt;
+  LfAcrossTiles,SeqLfAcrossSlices,DbkControl,DbkOverride,DisableDbf,BetaOff,TcOff: LongInt;
+  ScalingPresent: LongInt;
+  Scal: THvScal;
+  ListsModPresent,Log2ParMrg,SliceHdrExt: LongInt;
+  Log2MaxTsSize,CrossComp,CqpListEnabled,DiffCuChromaQpDepth,CqpListLen: LongInt;
+  CbQpList,CrQpList: Array[0..5] Of LongInt;
+  Log2SaoScaleL,Log2SaoScaleC: LongInt;
+  SccExt: LongInt;
+  Raw: HvPB; RawLen: LongInt;
+ End;
+ THvSh=Record
+  FirstSlice,NoOutPrior,PpsId,DepSlice,SegAddr,SliceAddr,SliceType,PicOutputFlag,PocLsb: LongInt;
+  StSpsFlag,HasStRps: LongInt;
+  StRps: THvRps;
+  LtNb: LongInt;
+  LtPoc: Array[0..32] Of LongInt;
+  LtUsed,LtMsb: Array[0..32] Of Byte;
+  TemporalMvp,SaoLuma,SaoChroma: LongInt;
+  NbRefs,RplMod: Array[0..1] Of LongInt;
+  ListEntry: Array[0..1,0..15] Of LongInt;
+  MvdL1Zero,CabacInit,ColList,ColRefIdx: LongInt;
+  LumaLog2Wd,ChromaLog2Wd: LongInt;
+  LumaW,LumaO: Array[0..1,0..15] Of LongInt;
+  ChromaW,ChromaO: Array[0..1,0..15,0..1] Of LongInt;
+  MaxMerge,SliceQpDelta,CbOff,CrOff,CuChromaQpOffEnabled,DisableDbf,BetaOff,TcOff,LfAcrossSlices: LongInt;
+  SliceQp,SliceCtbRs,DataPos: LongInt;
+ End;
+ THvMvf=Record
+  Mv: Array[0..3] Of SmallInt;   { mv0x,mv0y,mv1x,mv1y }
+  Ref: Array[0..1] Of ShortInt;
+  Pf: Byte;                       { 0 intra/indisponible, 1 L0, 2 L1, 3 bi }
+ End;
+ HvTMvf=Array[0..100000000] Of THvMvf; HvPMvf=^HvTMvf;
+ THvRpl=Record
+  N: Array[0..1] Of LongInt;
+  Poc: Array[0..1,0..15] Of LongInt;
+  Lt: Array[0..1,0..15] Of Byte;
+ End;
+ PHvRpl=^THvRpl; PHvMvf=^THvMvf;
+ HvTRpl=Array[0..1000000] Of THvRpl; HvPRpl=^HvTRpl;
+ THvRefList=Record
+  N: LongInt;
+  Pic: Array[0..15] Of LongInt;
+  Poc: Array[0..15] Of LongInt;
+  Lt: Array[0..15] Of Byte;
+ End;
+ THvPic=Record
+  InUse,HasBuf: Boolean;
+  Plane: Array[0..2] Of HvPW;
+  Stride,PW,PH: Array[0..2] Of LongInt;
+  Poc,Flags,Seq: LongInt;
+  Mvf: HvPMvf; MvfCap: LongInt;
+  RplTab: HvPW; RplTabCap: LongInt;
+  Rpl: HvPRpl; NRpl,CapRpl: LongInt;
+  CtbCount: LongInt;
+  W,H,CropL,CropR,CropT,CropB,Chroma,BitDepth: LongInt;
+ End;
+ THvSao=Record
+  Typ: Array[0..2] Of Byte;     { 0 aucun, 1 band, 2 edge }
+  Eo,Band: Array[0..2] Of Byte;
+  Ab: Array[0..2,0..3] Of Byte;
+  Sg: Array[0..2,0..3] Of Byte;
+  Off: Array[0..2,0..4] Of SmallInt;
+ End;
+ HvTSao=Array[0..10000000] Of THvSao; HvPSao=^HvTSao;
+ THvDbk=Record Beta,Tc,Lf,Dis: ShortInt; End;
+ HvTDbk=Array[0..10000000] Of THvDbk; HvPDbk=^HvTDbk;
+
+Var
+ { sorties }
+ HvHook: Procedure(B: Pointer; W,H: LongInt);
+ HvNativeHook: Procedure(B: Pointer; W,H,Chroma,Depth: LongInt);
+ { jeux de parametres }
+ HvSpsL: Array[0..15] Of PHvSps;
+ HvPpsL: Array[0..63] Of PHvPps;
+ HvS: PHvSps; HvP: PHvPps; HvActSps: PHvSps; HvActPps: PHvPps;
+ HvSh: THvSh;
+ { lecteur de bits (RBSP sans octets d'echappement) }
+ HvRb: HvPB; HvRbCap,HvRbLen,HvBp,HvBitsEnd: LongInt; HvOver: Boolean;
+ HvNalLenSize: LongInt;
+ { etat du flux }
+ HvInit: Boolean;
+ HvSeqDecode,HvSeqOutput,HvMaxRa,HvPoc,HvPocTid0,HvNalType,HvTid,HvFirstNalType,HvOutCount: LongInt;
+ HvAfterEos,HvLastEos,HvNoRaslOutput,HvSliceInit,HvSliceIdx,HvDecoded,HvCtbsDone: LongInt;
+ HvDpb: Array[0..HV_DPB-1] Of THvPic;
+ HvCur,HvColPic: LongInt;     { indices DPB, -1 = aucun }
+ HvPendOut: LongInt;          { image choisie pour la sortie mais pas encore terminee }
+ HvRps: Array[0..4] Of THvRefList;   { ST_CURR_BEF, ST_CURR_AFT, ST_FOLL, LT_CURR, LT_FOLL }
+ HvRefPic: Array[0..1,0..15] Of LongInt;
+ HvCurRpl: ^THvRpl;
+ HvOutBuf: HvPB; HvOutCap: LongInt;
+ { tables de l'image }
+ HvSkipT,HvCtDepthT,HvIpmT,HvCbfT,HvNoFiltT,HvVbs,HvHbs: HvPB;
+ HvQpT: HvPSb;
+ HvSliceAddrT: HvPL;
+ HvSaoT: HvPSao; HvDbkT: HvPDbk;
+ HvRsToTs,HvTsToRs,HvTileId,HvMinTbZs,HvColBd,HvRowBd,HvColIdx: HvPL;
+ HvAllocSps: PHvSps; HvAllocW,HvAllocH,HvAllocChroma,HvAllocDepth,HvAllocCtb: LongInt;
+ HvTmpPlane: Array[0..2] Of HvPW; HvTmpCap: Array[0..2] Of LongInt;
+ { CABAC }
+ HvCb: HvPB; HvCbPos,HvCbEnd,HvCbRange,HvCbValue,HvCbBits: LongInt;
+ HvCtx: Array[0..HV_CTX-1] Of Byte; HvStat: Array[0..3] Of LongInt;
+ HvWppCtx: Array[0..HV_CTX-1] Of Byte; HvWppStat: Array[0..3] Of LongInt;
+ HvDsCtx: Array[0..HV_CTX-1] Of Byte; HvDsStat: Array[0..3] Of LongInt;
+ { CU / PU / TU }
+ HvCuX,HvCuY,HvCuPred,HvCuPart,HvCuIntraSplit,HvCuBypass,HvCuMaxTr,HvCtDepth: LongInt;
+ HvIpmY,HvIpmC,HvChromaMode: Array[0..3] Of LongInt;
+ HvMergeFlag,HvMpmIdx,HvRemIntra,HvMvdX,HvMvdY: LongInt;
+ HvTuIpm,HvTuIpmC,HvTuChromaMode,HvQpDeltaCoded,HvQpDelta,HvCqpCoded,HvCqpOffCb,HvCqpOffCr: LongInt;
+ HvCrossPf,HvResScale,HvQpY,HvQpPred,HvFirstQpGroup: LongInt;
+ HvCtbLeft,HvCtbUp,HvBoundFlags: LongInt;
+ HvResY,HvResC: Array[0..1023] Of LongInt;
+ HvSigFlags: Array[0..7,0..7] Of Byte;
+ { prediction inter }
+ HvPred0,HvPred1: Array[0..4095] Of LongInt;
+ HvMcTmp: Array[0..5400] Of LongInt;
+ HvMcMid: Array[0..5400] Of LongInt;
+ { scans }
+ HvSc4X,HvSc4Y: Array[0..47] Of Byte;
+ HvScCgX,HvScCgY: Array[0..2,0..3,0..63] Of Byte;
+ HvInv4: Array[0..2,0..15] Of Byte;
+ HvInvCg: Array[0..2,0..3,0..63] Of Byte;
+ HvTabInit: Boolean;
+ HvMvfCur: HvPMvf; HvCbSize: LongInt;
+
+{ ---------------------------------------------------------------- }
+{ utilitaires                                                      }
+{ ---------------------------------------------------------------- }
+Function HvSar(V,N: LongInt): LongInt;
+Begin
+ HvSar:=((V+$40000000) Shr N)-($40000000 Shr N);
+End;
+
+Function HvSar64(V: Int64; N: LongInt): Int64;
+Begin
+ If V>=0 Then HvSar64:=V Shr N Else HvSar64:=-((-V-1) Shr N)-1;
+End;
+
+Function HvMin(A,B: LongInt): LongInt;Begin If A<B Then HvMin:=A Else HvMin:=B; End;
+Function HvMax(A,B: LongInt): LongInt;Begin If A>B Then HvMax:=A Else HvMax:=B; End;
+Function HvClip(V,Lo,Hi: LongInt): LongInt;Begin If V<Lo Then HvClip:=Lo Else If V>Hi Then HvClip:=Hi Else HvClip:=V; End;
+Function HvAbs(V: LongInt): LongInt;Begin If V<0 Then HvAbs:=-V Else HvAbs:=V; End;
+Function HvCeilLog2(V: LongInt): LongInt;
+Var R: LongInt;
+Begin
+ R:=0;
+ While (1 Shl R)<V Do Inc(R);
+ HvCeilLog2:=R;
+End;
+
+{ ---------------------------------------------------------------- }
+{ lecteur de bits                                                   }
+{ ---------------------------------------------------------------- }
+Function HvBit: LongInt;
+Begin
+ If HvBp>=HvBitsEnd Then Begin HvOver:=True; HvBit:=0; Inc(HvBp); Exit; End;
+ HvBit:=(HvRb^[HvBp Shr 3] Shr (7-(HvBp And 7))) And 1;
+ Inc(HvBp);
+End;
+
+Function HvBits(N: LongInt): LongInt;
+Var R,I: LongInt;
+Begin
+ R:=0;
+ For I:=1 To N Do R:=(R Shl 1) Or HvBit;
+ HvBits:=R;
+End;
+
+Procedure HvSkip(N: LongInt);Begin Inc(HvBp,N); If HvBp>HvBitsEnd Then HvOver:=True; End;
+
+Function HvUe: LongInt;
+Var Z: LongInt;
+Begin
+ Z:=0;
+ While (HvBit=0) And (Z<32) And (Not HvOver) Do Inc(Z);
+ If Z>=32 Then Begin HvOver:=True; HvUe:=0; Exit; End;
+ If Z=0 Then HvUe:=0 Else HvUe:=(1 Shl Z)-1+HvBits(Z);
+End;
+
+Function HvSe: LongInt;
+Var K: LongInt;
+Begin
+ K:=HvUe;
+ If (K And 1)<>0 Then HvSe:=(K+1) Shr 1 Else HvSe:=-(K Shr 1);
+End;
+
+Function HvBitsLeft: LongInt;Begin HvBitsLeft:=HvBitsEnd-HvBp; End;
+
+{ copie la NAL (sans en-tete de 2 octets) dans HvRb en retirant les 0x03 d'echappement }
+Procedure HvUnescape(Src: HvPB; Len: LongInt);
+Var I,J,Z: LongInt;
+Begin
+ If Len+16>HvRbCap Then Begin
+  HvRbCap:=Len+Len Div 2+4096;
+  If HvRb=Nil Then GetMem(HvRb,HvRbCap) Else ReallocMem(HvRb,HvRbCap);
+ End;
+ J:=0; Z:=0;
+ For I:=0 To Len-1 Do Begin
+  If (Z>=2) And (Src^[I]=3) Then Begin
+   Z:=0;
+  End Else Begin
+   HvRb^[J]:=Src^[I]; Inc(J);
+   If Src^[I]=0 Then Inc(Z) Else Z:=0;
+  End;
+ End;
+ For I:=0 To 15 Do HvRb^[J+I]:=0;
+ HvRbLen:=J; HvBp:=0; HvBitsEnd:=J*8; HvOver:=False;
+End;
+
+{ ---------------------------------------------------------------- }
+{ tables de balayage                                                }
+{ ---------------------------------------------------------------- }
+Procedure HvMakeDiag(Blk: LongInt; Var X,Y: Array Of Byte);
+Var I,Xx,Yy: LongInt; Stop: Boolean;
+Begin
+ I:=0; Xx:=0; Yy:=0; Stop:=False;
+ While Not Stop Do Begin
+  While Yy>=0 Do Begin
+   If (Xx<Blk) And (Yy<Blk) Then Begin X[I]:=Xx; Y[I]:=Yy; Inc(I); End;
+   Dec(Yy); Inc(Xx);
+  End;
+  Yy:=Xx; Xx:=0;
+  If I>=Blk*Blk Then Stop:=True;
+ End;
+End;
+
+Procedure HvInitTables;
+Var S,G,I,N,Sz: LongInt; TX,TY: Array[0..63] Of Byte;
+Begin
+ If HvTabInit Then Exit;
+ HvTabInit:=True;
+ { 4x4 : diag, horiz, vert }
+ HvMakeDiag(4,TX,TY);
+ For I:=0 To 15 Do Begin
+  HvSc4X[I]:=TX[I]; HvSc4Y[I]:=TY[I];
+  HvSc4X[16+I]:=I And 3; HvSc4Y[16+I]:=I Shr 2;
+  HvSc4X[32+I]:=I Shr 2; HvSc4Y[32+I]:=I And 3;
+ End;
+ For S:=0 To 2 Do For I:=0 To 15 Do HvInv4[S,HvSc4Y[S*16+I]*4+HvSc4X[S*16+I]]:=I;
+ { balayage des sous-blocs 1x1,2x2,4x4,8x8 (grille G : taille 1 shl G) }
+ FillChar(HvScCgX,SizeOf(HvScCgX),0); FillChar(HvScCgY,SizeOf(HvScCgY),0);
+ For G:=0 To 3 Do Begin
+  Sz:=1 Shl G; N:=Sz*Sz;
+  HvMakeDiag(Sz,TX,TY);
+  For I:=0 To N-1 Do Begin HvScCgX[0,G,I]:=TX[I]; HvScCgY[0,G,I]:=TY[I]; End;
+  For I:=0 To N-1 Do Begin
+   HvScCgX[1,G,I]:=I Mod Sz; HvScCgY[1,G,I]:=I Div Sz;
+   HvScCgX[2,G,I]:=I Div Sz; HvScCgY[2,G,I]:=I Mod Sz;
+  End;
+  For S:=0 To 2 Do For I:=0 To N-1 Do HvInvCg[S,G,HvScCgY[S,G,I]*Sz+HvScCgX[S,G,I]]:=I;
+ End;
+End;
+
+{ ---------------------------------------------------------------- }
+{ liste de listes d'images de reference courtes                     }
+{ ---------------------------------------------------------------- }
+Function HvStRpsParse(Var R: THvRps; Sps: PHvSps; Idx: LongInt; IsSlice: Boolean): Boolean;
+Var Predict,DeltaIdx,Sign,AbsD,DeltaRps,I,K,K0,Used,UseDelta,DeltaPoc,Tmp,NPos,Prev,RefIdx,J: LongInt;
+ Ref: ^THvRps;
+Begin
+ HvStRpsParse:=False;
+ Predict:=0;
+ If (Not IsSlice) And (Idx>0) Then Predict:=HvBit
+ Else If IsSlice And (Sps^.NbStRps>0) Then Predict:=HvBit;
+ If Predict<>0 Then Begin
+  If IsSlice Then Begin
+   DeltaIdx:=HvUe+1;
+   If DeltaIdx>Sps^.NbStRps Then Exit;
+   RefIdx:=Sps^.NbStRps-DeltaIdx;
+  End Else RefIdx:=Idx-1;
+  Ref:=@Sps^.StRps[RefIdx];
+  Sign:=HvBit; AbsD:=HvUe+1;
+  If AbsD>32768 Then Exit;
+  DeltaRps:=(1-(Sign Shl 1))*AbsD;
+  K:=0; K0:=0;
+  For I:=0 To Ref^.NumDelta Do Begin
+   Used:=HvBit; UseDelta:=0;
+   If K>32 Then Exit;
+   R.Used[K]:=Used;
+   If Used=0 Then UseDelta:=HvBit;
+   If (Used<>0) Or (UseDelta<>0) Then Begin
+    If I<Ref^.NumDelta Then DeltaPoc:=DeltaRps+Ref^.DeltaPoc[I] Else DeltaPoc:=DeltaRps;
+    R.DeltaPoc[K]:=DeltaPoc;
+    If DeltaPoc<0 Then Inc(K0);
+    Inc(K);
+   End;
+  End;
+  If K>=32 Then Exit;
+  R.NumDelta:=K; R.NumNeg:=K0;
+  { tri croissant }
+  If R.NumDelta<>0 Then Begin
+   For I:=1 To R.NumDelta-1 Do Begin
+    DeltaPoc:=R.DeltaPoc[I]; Used:=R.Used[I];
+    For K:=I-1 DownTo 0 Do Begin
+     Tmp:=R.DeltaPoc[K];
+     If DeltaPoc<Tmp Then Begin
+      R.DeltaPoc[K+1]:=Tmp; R.Used[K+1]:=R.Used[K];
+      R.DeltaPoc[K]:=DeltaPoc; R.Used[K]:=Used;
+     End;
+    End;
+   End;
+  End;
+  If (R.NumNeg Shr 1)<>0 Then Begin
+   K:=R.NumNeg-1;
+   For I:=0 To (R.NumNeg Shr 1)-1 Do Begin
+    DeltaPoc:=R.DeltaPoc[I]; Used:=R.Used[I];
+    R.DeltaPoc[I]:=R.DeltaPoc[K]; R.Used[I]:=R.Used[K];
+    R.DeltaPoc[K]:=DeltaPoc; R.Used[K]:=Used;
+    Dec(K);
+   End;
+  End;
+ End Else Begin
+  R.NumNeg:=HvUe; NPos:=HvUe;
+  If (R.NumNeg>=16) Or (NPos>=16) Then Exit;
+  R.NumDelta:=R.NumNeg+NPos;
+  If R.NumDelta<>0 Then Begin
+   Prev:=0;
+   For I:=0 To R.NumNeg-1 Do Begin
+    DeltaPoc:=HvUe+1;
+    If (DeltaPoc<1) Or (DeltaPoc>32768) Then Exit;
+    Dec(Prev,DeltaPoc);
+    R.DeltaPoc[I]:=Prev; R.Used[I]:=HvBit;
+   End;
+   Prev:=0;
+   For I:=0 To NPos-1 Do Begin
+    DeltaPoc:=HvUe+1;
+    If (DeltaPoc<1) Or (DeltaPoc>32768) Then Exit;
+    Inc(Prev,DeltaPoc);
+    R.DeltaPoc[R.NumNeg+I]:=Prev; R.Used[R.NumNeg+I]:=HvBit;
+   End;
+  End;
+ End;
+ J:=0;
+ HvStRpsParse:=Not HvOver;
+End;
+
+{ ---------------------------------------------------------------- }
+{ listes de quantification                                          }
+{ ---------------------------------------------------------------- }
+Procedure HvScalDefault(Var Sl: THvScal);
+Var M,I,Sz: LongInt;
+Begin
+ For M:=0 To 5 Do Begin
+  For I:=0 To 15 Do Sl.Sl[0,M,I]:=16;
+  Sl.Dc[0,M]:=16; Sl.Dc[1,M]:=16;
+  For Sz:=1 To 3 Do For I:=0 To 63 Do
+   If M<3 Then Sl.Sl[Sz,M,I]:=HvDefSlIntra[I] Else Sl.Sl[Sz,M,I]:=HvDefSlInter[I];
+ End;
+End;
+
+Function HvScalParse(Var Sl: THvScal; Sps: PHvSps): Boolean;
+Var SizeId,MatrixId,Step,Delta,Nxt,CoefNum,I,Pos,D,Cn: LongInt;
+Begin
+ HvScalParse:=False;
+ For SizeId:=0 To 3 Do Begin
+  MatrixId:=0;
+  While MatrixId<6 Do Begin
+   If HvBit=0 Then Begin
+    Delta:=HvUe;
+    If Delta<>0 Then Begin
+     If SizeId=3 Then Delta:=Delta*3;
+     If MatrixId<Delta Then Exit;
+     If SizeId>0 Then Cn:=64 Else Cn:=16;
+     Move(Sl.Sl[SizeId,MatrixId-Delta,0],Sl.Sl[SizeId,MatrixId,0],Cn);
+     If SizeId>1 Then Sl.Dc[SizeId-2,MatrixId]:=Sl.Dc[SizeId-2,MatrixId-Delta];
+    End;
+   End Else Begin
+    Nxt:=8;
+    CoefNum:=64; If SizeId=0 Then CoefNum:=16;
+    If SizeId>1 Then Begin
+     D:=HvSe;
+     If (D<-7) Or (D>247) Then Exit;
+     Nxt:=D+8;
+     Sl.Dc[SizeId-2,MatrixId]:=Nxt;
+    End;
+    For I:=0 To CoefNum-1 Do Begin
+     If SizeId=0 Then Pos:=4*HvSc4Y[I]+HvSc4X[I]
+     Else Pos:=8*HvScCgY[0,3,I]+HvScCgX[0,3,I];
+     D:=HvSe;
+     Nxt:=(Nxt+256+D) Mod 256;
+     Sl.Sl[SizeId,MatrixId,Pos]:=Nxt;
+    End;
+   End;
+   If SizeId=3 Then Inc(MatrixId,3) Else Inc(MatrixId);
+  End;
+ End;
+ If Sps^.Chroma=3 Then Begin
+  For I:=0 To 63 Do Begin
+   Sl.Sl[3,1,I]:=Sl.Sl[2,1,I]; Sl.Sl[3,2,I]:=Sl.Sl[2,2,I];
+   Sl.Sl[3,4,I]:=Sl.Sl[2,4,I]; Sl.Sl[3,5,I]:=Sl.Sl[2,5,I];
+  End;
+  Sl.Dc[1,1]:=Sl.Dc[0,1]; Sl.Dc[1,2]:=Sl.Dc[0,2]; Sl.Dc[1,4]:=Sl.Dc[0,4]; Sl.Dc[1,5]:=Sl.Dc[0,5];
+ End;
+ HvScalParse:=Not HvOver;
+End;
+{ ---------------------------------------------------------------- }
+{ SPS / PPS                                                        }
+{ ---------------------------------------------------------------- }
+Procedure HvSkipPtl(MaxSub: LongInt);
+Var I: LongInt; PP,LP: Array[0..7] Of LongInt;
+Begin
+ HvSkip(88); HvSkip(8);
+ For I:=0 To MaxSub-2 Do Begin PP[I]:=HvBit; LP[I]:=HvBit; End;
+ If MaxSub-1>0 Then For I:=MaxSub-1 To 7 Do HvSkip(2);
+ For I:=0 To MaxSub-2 Do Begin
+  If PP[I]<>0 Then HvSkip(88);
+  If LP[I]<>0 Then HvSkip(8);
+ End;
+End;
+
+Procedure HvSubLayerHrd(Cnt,SubPic: LongInt);
+Var I: LongInt;
+Begin
+ For I:=0 To Cnt-1 Do Begin
+  HvUe; HvUe;
+  If SubPic<>0 Then Begin HvUe; HvUe; End;
+  HvBit;
+ End;
+End;
+
+Procedure HvHrd(Common,MaxSub: LongInt);
+Var Nal,Vcl,SubPic,I,Gen,Cvs,Low,Cnt: LongInt;
+Begin
+ Nal:=0; Vcl:=0; SubPic:=0;
+ If Common<>0 Then Begin
+  Nal:=HvBit; Vcl:=HvBit;
+  If (Nal<>0) Or (Vcl<>0) Then Begin
+   SubPic:=HvBit;
+   If SubPic<>0 Then Begin HvSkip(8); HvSkip(5); HvSkip(1); HvSkip(5); End;
+   HvSkip(4); HvSkip(4);
+   If SubPic<>0 Then HvSkip(4);
+   HvSkip(5); HvSkip(5); HvSkip(5);
+  End;
+ End;
+ For I:=0 To MaxSub-1 Do Begin
+  Gen:=HvBit; Cvs:=1; Low:=0; Cnt:=0;
+  If Gen=0 Then Cvs:=HvBit;
+  If Cvs<>0 Then HvUe Else Low:=HvBit;
+  If Low=0 Then Cnt:=HvUe;
+  If Cnt>31 Then Begin HvOver:=True; Exit; End;
+  If Nal<>0 Then HvSubLayerHrd(Cnt+1,SubPic);
+  If Vcl<>0 Then HvSubLayerHrd(Cnt+1,SubPic);
+ End;
+End;
+
+Procedure HvVui(Sps: PHvSps);
+Var T: LongInt;
+Begin
+ If HvBit<>0 Then Begin T:=HvBits(8); If T=255 Then Begin HvSkip(16); HvSkip(16); End; End;
+ If HvBit<>0 Then HvBit;
+ If HvBit<>0 Then Begin
+  HvSkip(3); HvBit;
+  If HvBit<>0 Then HvSkip(24);
+ End;
+ If HvBit<>0 Then Begin HvUe; HvUe; End;
+ HvBit; HvBit; HvBit;
+ If HvBit<>0 Then Begin HvUe; HvUe; HvUe; HvUe; End;
+ If HvBit<>0 Then Begin
+  HvSkip(16); HvSkip(16); HvSkip(16); HvSkip(16);
+  If HvBit<>0 Then HvUe;
+  If HvBit<>0 Then HvHrd(1,Sps^.MaxSubLayers);
+ End;
+ If HvBit<>0 Then Begin
+  HvBit; HvBit; HvBit;
+  HvUe; HvUe; HvUe; HvUe; HvUe;
+ End;
+End;
+
+Procedure HvFreeSps(Var S: PHvSps);
+Begin
+ If S<>Nil Then Begin
+  If S^.Raw<>Nil Then FreeMem(S^.Raw);
+  Dispose(S); S:=Nil;
+ End;
+End;
+
+Procedure HvFreePps(Var P: PHvPps);
+Begin
+ If P<>Nil Then Begin
+  If P^.Raw<>Nil Then FreeMem(P^.Raw);
+  Dispose(P); P:=Nil;
+ End;
+End;
+
+Procedure HvRemovePpsOf(SpsId: LongInt);
+Var I: LongInt;
+Begin
+ For I:=0 To 63 Do If HvPpsL[I]<>Nil Then If HvPpsL[I]^.SpsId=SpsId Then Begin
+  If HvPpsL[I]=HvActPps Then HvActPps:=Nil;
+  If HvPpsL[I]=HvP Then HvP:=Nil;
+  HvFreePps(HvPpsL[I]);
+ End;
+End;
+
+Procedure HvParseSps(Nal: HvPB; NalLen: LongInt);
+Var Sp: PHvSps; Id,I,J,Start,Mw,Mh,Tmp,Left: LongInt; Ok: Boolean;
+ Wd,Ht: LongInt;
+Begin
+ New(Sp); FillChar(Sp^,SizeOf(Sp^),0);
+ Sp^.VpsId:=HvBits(4);
+ Sp^.MaxSubLayers:=HvBits(3)+1;
+ HvBit;
+ HvSkipPtl(Sp^.MaxSubLayers);
+ Id:=HvUe;
+ If (Id>15) Or HvOver Then Begin Dispose(Sp); Fail('HEVC : SPS invalide.'); End;
+ Sp^.Id:=Id;
+ Sp^.Chroma:=HvUe;
+ If Sp^.Chroma>3 Then Begin Dispose(Sp); Fail('HEVC : chroma_format_idc invalide.'); End;
+ If Sp^.Chroma=3 Then Sp^.SepPlane:=HvBit;
+ If Sp^.SepPlane<>0 Then Begin Dispose(Sp); Fail('HEVC : separate_colour_plane_flag non supporte.'); End;
+ Sp^.Width:=HvUe; Sp^.Height:=HvUe;
+ If (Sp^.Width<=0) Or (Sp^.Height<=0) Or (Sp^.Width>16384) Or (Sp^.Height>16384) Then Begin Dispose(Sp); Fail('HEVC : dimensions invalides.'); End;
+ If HvBit<>0 Then Begin
+  If Sp^.Chroma=1 Then Mw:=2 Else If Sp^.Chroma=2 Then Mw:=2 Else Mw:=1;
+  If Sp^.Chroma=1 Then Mh:=2 Else Mh:=1;
+  Sp^.CropL:=HvUe*Mw; Sp^.CropR:=HvUe*Mw; Sp^.CropT:=HvUe*Mh; Sp^.CropB:=HvUe*Mh;
+ End;
+ Sp^.BitDepth:=HvUe+8; Sp^.BitDepthC:=HvUe+8;
+ If (Sp^.BitDepth>12) Or (Sp^.BitDepthC>12) Then Begin Dispose(Sp); Fail('HEVC : profondeur de bits > 12 non supportee.'); End;
+ If (Sp^.Chroma<>0) And (Sp^.BitDepth<>Sp^.BitDepthC) Then Begin Dispose(Sp); Fail('HEVC : profondeurs luma/chroma differentes non supportees.'); End;
+ Sp^.Log2MaxPocLsb:=HvUe+4;
+ If Sp^.Log2MaxPocLsb>16 Then Begin Dispose(Sp); Fail('HEVC : log2_max_poc_lsb invalide.'); End;
+ Tmp:=HvBit;
+ If Tmp<>0 Then Start:=0 Else Start:=Sp^.MaxSubLayers-1;
+ For I:=Start To Sp^.MaxSubLayers-1 Do Begin
+  Sp^.MaxDecPicBuf[I]:=HvUe+1;
+  Sp^.NumReorder[I]:=HvUe;
+  Sp^.MaxLatencyInc[I]:=HvUe-1;
+  If Sp^.MaxDecPicBuf[I]>16 Then Begin Dispose(Sp); Fail('HEVC : sps_max_dec_pic_buffering invalide.'); End;
+  If Sp^.NumReorder[I]>Sp^.MaxDecPicBuf[I]-1 Then Sp^.MaxDecPicBuf[I]:=Sp^.NumReorder[I]+1;
+ End;
+ If Tmp=0 Then For I:=0 To Start-1 Do Begin
+  Sp^.MaxDecPicBuf[I]:=Sp^.MaxDecPicBuf[Start]; Sp^.NumReorder[I]:=Sp^.NumReorder[Start];
+  Sp^.MaxLatencyInc[I]:=Sp^.MaxLatencyInc[Start];
+ End;
+ Sp^.Log2MinCb:=HvUe+3; Sp^.Log2DiffCb:=HvUe; Sp^.Log2MinTb:=HvUe+2; Sp^.Log2DiffTb:=HvUe;
+ Sp^.Log2MaxTb:=Sp^.Log2DiffTb+Sp^.Log2MinTb;
+ If (Sp^.Log2MinCb<3) Or (Sp^.Log2MinCb>6) Or (Sp^.Log2DiffCb>3) Or (Sp^.Log2MinTb>=Sp^.Log2MinCb) Or (Sp^.Log2MinTb<2) Or (Sp^.Log2DiffTb>3) Or HvOver Then Begin
+  Dispose(Sp); Fail('HEVC : tailles de blocs invalides.');
+ End;
+ Sp^.MaxThInter:=HvUe; Sp^.MaxThIntra:=HvUe;
+ Sp^.ScalingEnable:=HvBit;
+ If Sp^.ScalingEnable<>0 Then Begin
+  HvScalDefault(Sp^.Scal);
+  Sp^.ScalingPresent:=HvBit;
+  If Sp^.ScalingPresent<>0 Then Begin
+   If Not HvScalParse(Sp^.Scal,Sp) Then Begin Dispose(Sp); Fail('HEVC : scaling list invalide.'); End;
+  End;
+ End;
+ Sp^.Amp:=HvBit; Sp^.Sao:=HvBit; Sp^.Pcm:=HvBit;
+ If Sp^.Pcm<>0 Then Begin
+  Sp^.PcmBd:=HvBits(4)+1; Sp^.PcmBdC:=HvBits(4)+1;
+  Sp^.PcmLog2Min:=HvUe+3; Sp^.PcmLog2Max:=Sp^.PcmLog2Min+HvUe;
+  If (Sp^.PcmBd>Sp^.BitDepth) Or (Sp^.PcmBdC>Sp^.BitDepth) Then Begin Dispose(Sp); Fail('HEVC : profondeur PCM invalide.'); End;
+  Sp^.PcmLfDisable:=HvBit;
+ End;
+ Sp^.NbStRps:=HvUe;
+ If Sp^.NbStRps>64 Then Begin Dispose(Sp); Fail('HEVC : trop de RPS courts.'); End;
+ For I:=0 To Sp^.NbStRps-1 Do
+  If Not HvStRpsParse(Sp^.StRps[I],Sp,I,False) Then Begin Dispose(Sp); Fail('HEVC : RPS court invalide.'); End;
+ Sp^.LtPresent:=HvBit;
+ If Sp^.LtPresent<>0 Then Begin
+  Sp^.NumLtSps:=HvUe;
+  If Sp^.NumLtSps>32 Then Begin Dispose(Sp); Fail('HEVC : trop de references longues.'); End;
+  For I:=0 To Sp^.NumLtSps-1 Do Begin
+   Sp^.LtPocLsb[I]:=HvBits(Sp^.Log2MaxPocLsb);
+   Sp^.LtUsed[I]:=HvBit;
+  End;
+ End;
+ Sp^.TemporalMvp:=HvBit; Sp^.StrongIntra:=HvBit;
+ If HvBit<>0 Then HvVui(Sp);
+ If HvBit<>0 Then Begin
+  I:=HvBit; { range }
+  J:=HvBit; { multilayer }
+  Tmp:=HvBit; { 3d }
+  Mw:=HvBit; { scc }
+  HvSkip(4);
+  If I<>0 Then Begin
+   Sp^.TsRotation:=HvBit; Sp^.TsContext:=HvBit; Sp^.ImplicitRdpcm:=HvBit; Sp^.ExplicitRdpcm:=HvBit;
+   Sp^.ExtPrec:=HvBit; Sp^.IntraSmoothDis:=HvBit; Sp^.HighPrecOff:=HvBit; Sp^.PersistRice:=HvBit;
+   Sp^.CabacAlign:=HvBit;
+  End;
+  If J<>0 Then HvBit;
+  If Mw<>0 Then Sp^.SccExt:=1;
+ End;
+ If HvOver Then Begin Dispose(Sp); Fail('HEVC : SPS tronque.'); End;
+ { parametres derives }
+ Sp^.Log2Ctb:=Sp^.Log2MinCb+Sp^.Log2DiffCb;
+ If (Sp^.Log2Ctb>6) Or (Sp^.Log2Ctb<4) Then Begin Dispose(Sp); Fail('HEVC : taille de CTB non supportee.'); End;
+ Sp^.CtbW:=(Sp^.Width+(1 Shl Sp^.Log2Ctb)-1) Shr Sp^.Log2Ctb;
+ Sp^.CtbH:=(Sp^.Height+(1 Shl Sp^.Log2Ctb)-1) Shr Sp^.Log2Ctb;
+ Sp^.CtbCount:=Sp^.CtbW*Sp^.CtbH;
+ Sp^.MinCbW:=Sp^.Width Shr Sp^.Log2MinCb; Sp^.MinCbH:=Sp^.Height Shr Sp^.Log2MinCb;
+ Sp^.MinTbW:=Sp^.Width Shr Sp^.Log2MinTb; Sp^.MinTbH:=Sp^.Height Shr Sp^.Log2MinTb;
+ Sp^.QpBdOffset:=6*(Sp^.BitDepth-8);
+ Sp^.W4:=Sp^.Width Shr 2; Sp^.H4:=Sp^.Height Shr 2;
+ If ((Sp^.Width And ((1 Shl Sp^.Log2MinCb)-1))<>0) Or ((Sp^.Height And ((1 Shl Sp^.Log2MinCb)-1))<>0) Then Begin
+  Dispose(Sp); Fail('HEVC : dimensions codees invalides.');
+ End;
+ If (Sp^.MaxThInter>Sp^.Log2Ctb-Sp^.Log2MinTb) Or (Sp^.MaxThIntra>Sp^.Log2Ctb-Sp^.Log2MinTb) Or
+    (Sp^.Log2MaxTb>HvMin(Sp^.Log2Ctb,5)) Then Begin
+  Dispose(Sp); Fail('HEVC : profondeur de transformation invalide.');
+ End;
+ Case Sp^.Chroma Of
+  0: Begin Sp^.HShift[1]:=0; Sp^.VShift[1]:=0; End;
+  1: Begin Sp^.HShift[1]:=1; Sp^.VShift[1]:=1; End;
+  2: Begin Sp^.HShift[1]:=1; Sp^.VShift[1]:=0; End;
+  3: Begin Sp^.HShift[1]:=0; Sp^.VShift[1]:=0; End;
+ End;
+ Sp^.HShift[0]:=0; Sp^.VShift[0]:=0; Sp^.HShift[2]:=Sp^.HShift[1]; Sp^.VShift[2]:=Sp^.VShift[1];
+ If (Sp^.CropL+Sp^.CropR>=Sp^.Width) Or (Sp^.CropT+Sp^.CropB>=Sp^.Height) Then Begin
+  Sp^.CropL:=0; Sp^.CropR:=0; Sp^.CropT:=0; Sp^.CropB:=0;
+ End;
+ { copie brute pour detecter une retransmission identique }
+ GetMem(Sp^.Raw,NalLen+1); Move(Nal^,Sp^.Raw^,NalLen); Sp^.RawLen:=NalLen;
+ If HvSpsL[Id]<>Nil Then Begin
+  If (HvSpsL[Id]^.RawLen=NalLen) And (CompareByte(HvSpsL[Id]^.Raw^,Sp^.Raw^,NalLen)=0) Then Begin
+   HvFreeSps(Sp); Exit;
+  End;
+  HvRemovePpsOf(Id);
+  If HvSpsL[Id]=HvS Then HvS:=Nil;
+  If HvSpsL[Id]=HvActSps Then HvActSps:=Nil;
+  HvFreeSps(HvSpsL[Id]);
+ End;
+ HvSpsL[Id]:=Sp;
+End;
+
+Procedure HvParsePps(Nal: HvPB; NalLen: LongInt);
+Var Pp: PHvPps; Id,I,Tmp: LongInt; Rg,Ml,D3,Sc: LongInt;
+Begin
+ New(Pp); FillChar(Pp^,SizeOf(Pp^),0);
+ Pp^.LfAcrossTiles:=1; Pp^.NumTileCols:=1; Pp^.NumTileRows:=1; Pp^.Uniform:=1; Pp^.Log2MaxTsSize:=2;
+ Id:=HvUe; Pp^.Id:=Id;
+ Pp^.SpsId:=HvUe;
+ If (Id>63) Or (Pp^.SpsId>15) Or HvOver Then Begin Dispose(Pp); Fail('HEVC : PPS invalide.'); End;
+ Pp^.DepSlice:=HvBit; Pp^.OutputFlagPresent:=HvBit; Pp^.NumExtraBits:=HvBits(3);
+ Pp^.SignHide:=HvBit; Pp^.CabacInitPresent:=HvBit;
+ Pp^.NumRefL0:=HvUe+1; Pp^.NumRefL1:=HvUe+1;
+ If (Pp^.NumRefL0>15) Or (Pp^.NumRefL1>15) Then Begin Dispose(Pp); Fail('HEVC : trop de references par defaut.'); End;
+ Pp^.InitQp:=HvSe;
+ Pp^.ConstrainedIntra:=HvBit; Pp^.TransformSkip:=HvBit;
+ Pp^.CuQpDeltaEnabled:=HvBit;
+ If Pp^.CuQpDeltaEnabled<>0 Then Pp^.DiffCuQpDeltaDepth:=HvUe;
+ Pp^.CbQpOffset:=HvSe; Pp^.CrQpOffset:=HvSe;
+ If (Pp^.CbQpOffset<-12) Or (Pp^.CbQpOffset>12) Or (Pp^.CrQpOffset<-12) Or (Pp^.CrQpOffset>12) Then Begin Dispose(Pp); Fail('HEVC : pps_cb_qp_offset invalide.'); End;
+ Pp^.SliceChromaQpPresent:=HvBit;
+ Pp^.WeightedPred:=HvBit; Pp^.WeightedBipred:=HvBit;
+ Pp^.TransquantBypass:=HvBit; Pp^.TilesEnabled:=HvBit; Pp^.EntropySync:=HvBit;
+ If Pp^.TilesEnabled<>0 Then Begin
+  Pp^.NumTileCols:=HvUe+1; Pp^.NumTileRows:=HvUe+1;
+  If (Pp^.NumTileCols<1) Or (Pp^.NumTileCols>1000) Or (Pp^.NumTileRows<1) Or (Pp^.NumTileRows>1000) Then Begin Dispose(Pp); Fail('HEVC : nombre de tuiles invalide.'); End;
+  Pp^.Uniform:=HvBit;
+  If Pp^.Uniform=0 Then Begin
+   For I:=0 To Pp^.NumTileCols-2 Do Pp^.ColW[I]:=HvUe+1;
+   For I:=0 To Pp^.NumTileRows-2 Do Pp^.RowH[I]:=HvUe+1;
+  End;
+  Pp^.LfAcrossTiles:=HvBit;
+ End;
+ Pp^.SeqLfAcrossSlices:=HvBit;
+ Pp^.DbkControl:=HvBit;
+ If Pp^.DbkControl<>0 Then Begin
+  Pp^.DbkOverride:=HvBit; Pp^.DisableDbf:=HvBit;
+  If Pp^.DisableDbf=0 Then Begin
+   Pp^.BetaOff:=2*HvSe; Pp^.TcOff:=2*HvSe;
+   If (Pp^.BetaOff<-12) Or (Pp^.BetaOff>12) Or (Pp^.TcOff<-12) Or (Pp^.TcOff>12) Then Begin Dispose(Pp); Fail('HEVC : offsets de deblocage invalides.'); End;
+  End;
+ End;
+ Pp^.ScalingPresent:=HvBit;
+ If Pp^.ScalingPresent<>0 Then Begin
+  HvScalDefault(Pp^.Scal);
+  { le format 4:4:4 est connu via le SPS ; a defaut on suppose que le SPS existe }
+  If HvSpsL[Pp^.SpsId]=Nil Then Begin Dispose(Pp); Fail('HEVC : PPS sans SPS.'); End;
+  If Not HvScalParse(Pp^.Scal,HvSpsL[Pp^.SpsId]) Then Begin Dispose(Pp); Fail('HEVC : scaling list de PPS invalide.'); End;
+ End;
+ Pp^.ListsModPresent:=HvBit;
+ Pp^.Log2ParMrg:=HvUe+2;
+ If Pp^.Log2ParMrg>8 Then Begin Dispose(Pp); Fail('HEVC : log2_parallel_merge_level invalide.'); End;
+ Pp^.SliceHdrExt:=HvBit;
+ If HvBit<>0 Then Begin
+  Rg:=HvBit; Ml:=HvBit; D3:=HvBit; Sc:=HvBit; HvSkip(4);
+  If Rg<>0 Then Begin
+   If Pp^.TransformSkip<>0 Then Pp^.Log2MaxTsSize:=HvUe+2;
+   Pp^.CrossComp:=HvBit;
+   Pp^.CqpListEnabled:=HvBit;
+   If Pp^.CqpListEnabled<>0 Then Begin
+    Pp^.DiffCuChromaQpDepth:=HvUe;
+    Pp^.CqpListLen:=HvUe;
+    If Pp^.CqpListLen>5 Then Begin Dispose(Pp); Fail('HEVC : chroma_qp_offset_list_len invalide.'); End;
+    For I:=0 To Pp^.CqpListLen Do Begin Pp^.CbQpList[I]:=HvSe; Pp^.CrQpList[I]:=HvSe; End;
+   End;
+   Pp^.Log2SaoScaleL:=HvUe; Pp^.Log2SaoScaleC:=HvUe;
+  End;
+  If Sc<>0 Then Pp^.SccExt:=1;
+ End;
+ If HvOver Then Begin Dispose(Pp); Fail('HEVC : PPS tronque.'); End;
+ GetMem(Pp^.Raw,NalLen+1); Move(Nal^,Pp^.Raw^,NalLen); Pp^.RawLen:=NalLen;
+ If HvPpsL[Id]<>Nil Then Begin
+  If HvPpsL[Id]=HvActPps Then HvActPps:=Nil;
+  If HvPpsL[Id]=HvP Then HvP:=Nil;
+  HvFreePps(HvPpsL[Id]);
+ End;
+ HvPpsL[Id]:=Pp;
+End;
+{ ---------------------------------------------------------------- }
+{ CABAC                                                            }
+{ ---------------------------------------------------------------- }
+Const
+ HvRenorm: Array[0..31] Of Byte=(6,5,4,4,3,3,3,3,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1);
+ HvNextLps: Array[0..63] Of Byte=(0,0,1,2,2,4,4,5,6,7,8,9,9,11,11,12,13,13,15,15,16,16,18,18,19,19,21,21,22,22,23,24,
+  24,25,26,26,27,27,28,29,29,30,30,30,31,32,32,33,33,33,34,34,35,35,35,36,36,36,37,37,37,38,38,63);
+
+Var
+ HvZsW: LongInt;
+Function HvCbNext: LongInt;
+Begin
+ If HvCbPos<HvCbEnd Then HvCbNext:=HvCb^[HvCbPos] Else HvCbNext:=0;
+ Inc(HvCbPos);
+End;
+
+Procedure HvCbInit(Pos: LongInt);
+Begin
+ HvCbPos:=Pos;
+ HvCbRange:=510;
+ HvCbValue:=HvCbNext Shl 8;
+ HvCbValue:=HvCbValue Or HvCbNext;
+ HvCbBits:=-8;
+End;
+
+Function HvBin(Ctx: LongInt): LongInt;
+Var St,S,Mps,Lps,Sc,Nb: LongInt;
+Begin
+ St:=HvCtx[Ctx]; S:=St Shr 1; Mps:=St And 1;
+ Lps:=HvLpsTab[S*4+((HvCbRange Shr 6) And 3)];
+ Dec(HvCbRange,Lps);
+ Sc:=HvCbRange Shl 7;
+ If HvCbValue<Sc Then Begin
+  HvBin:=Mps;
+  If S<62 Then HvCtx[Ctx]:=((S+1) Shl 1) Or Mps;
+  If Sc<(256 Shl 7) Then Begin
+   HvCbRange:=Sc Shr 6;
+   HvCbValue:=HvCbValue Shl 1;
+   Inc(HvCbBits);
+   If HvCbBits=0 Then Begin HvCbBits:=-8; HvCbValue:=HvCbValue Or HvCbNext; End;
+  End;
+ End Else Begin
+  Nb:=HvRenorm[Lps Shr 3];
+  HvCbValue:=(HvCbValue-Sc) Shl Nb;
+  HvCbRange:=Lps Shl Nb;
+  HvBin:=1-Mps;
+  If S=0 Then Mps:=1-Mps;
+  HvCtx[Ctx]:=(HvNextLps[S] Shl 1) Or Mps;
+  Inc(HvCbBits,Nb);
+  If HvCbBits>=0 Then Begin
+   HvCbValue:=HvCbValue Or (HvCbNext Shl HvCbBits);
+   Dec(HvCbBits,8);
+  End;
+ End;
+End;
+
+Function HvByp: LongInt;
+Var Sc: LongInt;
+Begin
+ HvCbValue:=HvCbValue Shl 1;
+ Inc(HvCbBits);
+ If HvCbBits>=0 Then Begin HvCbBits:=-8; HvCbValue:=HvCbValue Or HvCbNext; End;
+ Sc:=HvCbRange Shl 7;
+ If HvCbValue>=Sc Then Begin Dec(HvCbValue,Sc); HvByp:=1; End Else HvByp:=0;
+End;
+
+Function HvBypN(N: LongInt): LongInt;
+Var R,I: LongInt;
+Begin
+ R:=0;
+ For I:=1 To N Do R:=(R Shl 1) Or HvByp;
+ HvBypN:=R;
+End;
+
+Function HvTerm: LongInt;
+Var Sc: LongInt;
+Begin
+ Dec(HvCbRange,2);
+ Sc:=HvCbRange Shl 7;
+ If HvCbValue>=Sc Then HvTerm:=1
+ Else Begin
+  If Sc<(256 Shl 7) Then Begin
+   HvCbRange:=Sc Shr 6;
+   HvCbValue:=HvCbValue Shl 1;
+   Inc(HvCbBits);
+   If HvCbBits=0 Then Begin HvCbBits:=-8; HvCbValue:=HvCbValue Or HvCbNext; End;
+  End;
+  HvTerm:=0;
+ End;
+End;
+
+Function HvTermPcm: LongInt;
+Begin
+ HvTermPcm:=HvTerm;
+End;
+
+Procedure HvCtxInit;
+Var It,I,Iv,M,N,Pre,Q,Mps,St: LongInt;
+Begin
+ It:=2-HvSh.SliceType;
+ If (HvSh.CabacInit<>0) And (HvSh.SliceType<>HV_SLICE_I) Then It:=It Xor 3;
+ Q:=HvClip(HvSh.SliceQp,0,51);
+ For I:=0 To HV_CTX-1 Do Begin
+  Iv:=HvCabacInit[It*HV_CTX+I];
+  M:=(Iv Shr 4)*5-45;
+  N:=((Iv And 15) Shl 3)-16;
+  Pre:=HvClip(HvSar(M*Q,4)+N,1,126);
+  If Pre<=63 Then Begin Mps:=0; St:=63-Pre; End Else Begin Mps:=1; St:=Pre-64; End;
+  HvCtx[I]:=(St Shl 1) Or Mps;
+ End;
+ For I:=0 To 3 Do HvStat[I]:=0;
+End;
+
+{ ---------------------------------------------------------------- }
+{ disponibilite (6.4.1)                                             }
+{ ---------------------------------------------------------------- }
+Function HvZAvail(XC,YC,XN,YN: LongInt): Boolean;
+Var S: PHvSps; CtbN,CtbC: LongInt;
+Begin
+ S:=HvS; HvZAvail:=False;
+ If (XN<0) Or (YN<0) Or (XN>=S^.Width) Or (YN>=S^.Height) Then Exit;
+ If HvMinTbZs^[(YN Shr S^.Log2MinTb)*HvZsW+(XN Shr S^.Log2MinTb)]>HvMinTbZs^[(YC Shr S^.Log2MinTb)*HvZsW+(XC Shr S^.Log2MinTb)] Then Exit;
+ CtbN:=(YN Shr S^.Log2Ctb)*S^.CtbW+(XN Shr S^.Log2Ctb);
+ CtbC:=(YC Shr S^.Log2Ctb)*S^.CtbW+(XC Shr S^.Log2Ctb);
+ If CtbN<>CtbC Then Begin
+  If HvSliceAddrT^[CtbN]<>HvSliceAddrT^[CtbC] Then Exit;
+  If HvTileId^[HvRsToTs^[CtbN]]<>HvTileId^[HvRsToTs^[CtbC]] Then Exit;
+ End;
+ HvZAvail:=True;
+End;
+
+{ ---------------------------------------------------------------- }
+{ elements de syntaxe                                               }
+{ ---------------------------------------------------------------- }
+Function HvSplitCuFlag(Depth,X0,Y0: LongInt): LongInt;
+Var S: PHvSps; Inc1,DL,DT,XB,YB,Xc,Yc: LongInt;
+Begin
+ S:=HvS; Inc1:=0; DL:=0; DT:=0;
+ XB:=X0 And ((1 Shl S^.Log2Ctb)-1); YB:=Y0 And ((1 Shl S^.Log2Ctb)-1);
+ Xc:=X0 Shr S^.Log2MinCb; Yc:=Y0 Shr S^.Log2MinCb;
+ If (HvCtbLeft<>0) Or (XB<>0) Then DL:=HvCtDepthT^[Yc*S^.MinCbW+Xc-1];
+ If (HvCtbUp<>0) Or (YB<>0) Then DT:=HvCtDepthT^[(Yc-1)*S^.MinCbW+Xc];
+ If DL>Depth Then Inc(Inc1);
+ If DT>Depth Then Inc(Inc1);
+ HvSplitCuFlag:=HvBin(HC_SPLIT_CU+Inc1);
+End;
+
+Function HvSkipFlag(X0,Y0: LongInt): LongInt;
+Var S: PHvSps; Inc1,XB,YB,Xc,Yc: LongInt;
+Begin
+ S:=HvS; Inc1:=0;
+ XB:=X0 And ((1 Shl S^.Log2Ctb)-1); YB:=Y0 And ((1 Shl S^.Log2Ctb)-1);
+ Xc:=X0 Shr S^.Log2MinCb; Yc:=Y0 Shr S^.Log2MinCb;
+ If (HvCtbLeft<>0) Or (XB<>0) Then If HvSkipT^[Yc*S^.MinCbW+Xc-1]<>0 Then Inc(Inc1);
+ If (HvCtbUp<>0) Or (YB<>0) Then If HvSkipT^[(Yc-1)*S^.MinCbW+Xc]<>0 Then Inc(Inc1);
+ HvSkipFlag:=HvBin(HC_SKIP+Inc1);
+End;
+
+Function HvCuQpDeltaAbs: LongInt;
+Var Pre,Suf,Inc1,K: LongInt;
+Begin
+ Pre:=0; Suf:=0; Inc1:=0;
+ While (Pre<5) And (HvBin(HC_QP_DELTA+Inc1)<>0) Do Begin Inc(Pre); Inc1:=1; End;
+ If Pre>=5 Then Begin
+  K:=0;
+  While (K<7) And (HvByp<>0) Do Begin Inc(Suf,1 Shl K); Inc(K); End;
+  If K=7 Then Begin HvCuQpDeltaAbs:=-1000; Exit; End;
+  While K>0 Do Begin Dec(K); Inc(Suf,HvByp Shl K); End;
+ End;
+ HvCuQpDeltaAbs:=Pre+Suf;
+End;
+
+Function HvPartMode(Log2Cb: LongInt): LongInt;
+{ 0 2Nx2N, 1 2NxN, 2 Nx2N, 3 NxN, 4 2NxnU, 5 2NxnD, 6 nLx2N, 7 nRx2N }
+Begin
+ If HvBin(HC_PART_MODE)<>0 Then Begin HvPartMode:=0; Exit; End;
+ If Log2Cb=HvS^.Log2MinCb Then Begin
+  If HvCuPred=1 Then Begin HvPartMode:=3; Exit; End;
+  If HvBin(HC_PART_MODE+1)<>0 Then Begin HvPartMode:=1; Exit; End;
+  If Log2Cb=3 Then Begin HvPartMode:=2; Exit; End;
+  If HvBin(HC_PART_MODE+2)<>0 Then HvPartMode:=2 Else HvPartMode:=3;
+  Exit;
+ End;
+ If HvS^.Amp=0 Then Begin
+  If HvBin(HC_PART_MODE+1)<>0 Then HvPartMode:=1 Else HvPartMode:=2;
+  Exit;
+ End;
+ If HvBin(HC_PART_MODE+1)<>0 Then Begin
+  If HvBin(HC_PART_MODE+3)<>0 Then Begin HvPartMode:=1; Exit; End;
+  If HvByp<>0 Then HvPartMode:=5 Else HvPartMode:=4;
+  Exit;
+ End;
+ If HvBin(HC_PART_MODE+3)<>0 Then Begin HvPartMode:=2; Exit; End;
+ If HvByp<>0 Then HvPartMode:=7 Else HvPartMode:=6;
+End;
+
+Function HvMpmIdxDec: LongInt;
+Var I: LongInt;
+Begin
+ I:=0;
+ While (I<2) And (HvByp<>0) Do Inc(I);
+ HvMpmIdxDec:=I;
+End;
+
+Function HvIntraChromaPredMode: LongInt;
+Var R: LongInt;
+Begin
+ If HvBin(HC_CHROMA_PRED)=0 Then Begin HvIntraChromaPredMode:=4; Exit; End;
+ R:=HvByp Shl 1;
+ R:=R Or HvByp;
+ HvIntraChromaPredMode:=R;
+End;
+
+Function HvMergeIdxDec: LongInt;
+Var I: LongInt;
+Begin
+ I:=HvBin(HC_MERGE_IDX);
+ If I<>0 Then Begin
+  While (I<HvSh.MaxMerge-1) And (HvByp<>0) Do Inc(I);
+ End;
+ HvMergeIdxDec:=I;
+End;
+
+Function HvInterPredIdc(W,H: LongInt): LongInt;
+{ 0 L0, 1 L1, 2 BI }
+Begin
+ If W+H=12 Then Begin HvInterPredIdc:=HvBin(HC_INTER_PRED+4); Exit; End;
+ If HvBin(HC_INTER_PRED+HvCtDepth)<>0 Then Begin HvInterPredIdc:=2; Exit; End;
+ HvInterPredIdc:=HvBin(HC_INTER_PRED+4);
+End;
+
+Function HvRefIdxDec(Num: LongInt): LongInt;
+Var I,Mx,MxC: LongInt;
+Begin
+ I:=0; Mx:=Num-1; MxC:=HvMin(Mx,2);
+ While (I<MxC) And (HvBin(HC_REF_IDX+I)<>0) Do Inc(I);
+ If I=2 Then While (I<Mx) And (HvByp<>0) Do Inc(I);
+ HvRefIdxDec:=I;
+End;
+
+Function HvMvdBypass: LongInt;
+Var Ret,K: LongInt;
+Begin
+ Ret:=2; K:=1;
+ While (K<31) And (HvByp<>0) Do Begin Inc(Ret,1 Shl K); Inc(K); End;
+ If K=31 Then Begin HvMvdBypass:=0; Exit; End;
+ While K>0 Do Begin Dec(K); Inc(Ret,HvByp Shl K); End;
+ If HvByp<>0 Then HvMvdBypass:=-Ret Else HvMvdBypass:=Ret;
+End;
+
+Procedure HvMvdCoding;
+Var X,Y: LongInt;
+Begin
+ X:=HvBin(HC_MVD_GT0); Y:=HvBin(HC_MVD_GT0);
+ If X<>0 Then Inc(X,HvBin(HC_MVD_GT1+1));
+ If Y<>0 Then Inc(Y,HvBin(HC_MVD_GT1+1));
+ Case X Of
+  2: HvMvdX:=HvMvdBypass;
+  1: If HvByp<>0 Then HvMvdX:=-1 Else HvMvdX:=1;
+  0: HvMvdX:=0;
+ End;
+ Case Y Of
+  2: HvMvdY:=HvMvdBypass;
+  1: If HvByp<>0 Then HvMvdY:=-1 Else HvMvdY:=1;
+  0: HvMvdY:=0;
+ End;
+End;
+
+Function HvCoeffAbsRemaining(Rice: LongInt): LongInt;
+Var Prefix,Suffix,I,P3: LongInt;
+Begin
+ Prefix:=0; Suffix:=0;
+ While (Prefix<31) And (HvByp<>0) Do Inc(Prefix);
+ If Prefix<3 Then Begin
+  For I:=1 To Rice Do Suffix:=(Suffix Shl 1) Or HvByp;
+  HvCoeffAbsRemaining:=(Prefix Shl Rice)+Suffix;
+ End Else Begin
+  P3:=Prefix-3;
+  If (Prefix=31) Or (P3+Rice>22) Then Begin HvCoeffAbsRemaining:=0; Exit; End;
+  For I:=1 To P3+Rice Do Suffix:=(Suffix Shl 1) Or HvByp;
+  HvCoeffAbsRemaining:=(((1 Shl P3)+3-1) Shl Rice)+Suffix;
+ End;
+End;
+{ ---------------------------------------------------------------- }
+{ prediction intra                                                  }
+{ ---------------------------------------------------------------- }
+Const
+ HvIntraAngle: Array[0..34] Of ShortInt=(0,0,32,26,21,17,13,9,5,2,0,-2,-5,-9,-13,-17,-21,-26,-32,-26,-21,-17,-13,-9,-5,-2,0,2,5,9,13,17,21,26,32);
+ HvInvAngle: Array[11..25] Of SmallInt=(-4096,-1638,-910,-630,-482,-390,-315,-256,-315,-390,-482,-630,-910,-1638,-4096);
+
+Var
+ HvIpP,HvIpF: Array[0..260] Of LongInt;
+ HvIpAv: Array[0..260] Of Byte;
+ HvIpRef: Array[0..200] Of LongInt;
+
+Procedure HvIntraPred(X0,Y0,Log2,CIdx: LongInt);
+Var
+ S: PHvSps; Pic: ^THvPic; Pl: HvPW; Stride,Hs,Vs,Size,Xc,Yc,Cx,Cy,I,J,K,N4,Mode,Bd,MaxV,Ul,Uh: LongInt;
+ Cip,Any,First,Dc,Filt,Strong,Th,MinD,Idx,Fact,Angle,Last,Ofs,XN,YN: LongInt;
+ Pp,Ff: ^HvTL; Av: HvPB; Left0,Top0: LongInt; Disable: Boolean;
+Begin
+ S:=HvS; Pic:=@HvDpb[HvCur]; Pl:=Pic^.Plane[CIdx]; Stride:=Pic^.Stride[CIdx];
+ Hs:=S^.HShift[CIdx]; Vs:=S^.VShift[CIdx];
+ Size:=1 Shl Log2; Xc:=X0 Shr Hs; Yc:=Y0 Shr Vs;
+ Cx:=Xc Shl Hs; Cy:=Yc Shl Vs;
+ If CIdx=0 Then Mode:=HvTuIpm Else Mode:=HvTuIpmC;
+ Bd:=S^.BitDepth; MaxV:=(1 Shl Bd)-1;
+ Cip:=HvP^.ConstrainedIntra;
+ Pp:=@HvIpP; Ff:=@HvIpF; Av:=@HvIpAv;
+ N4:=4*Size;
+ Ul:=4 Shr Vs; Uh:=4 Shr Hs;   { unites verticale / horizontale en echantillons du plan }
+ If Ul<1 Then Ul:=1;
+ If Uh<1 Then Uh:=1;
+ { colonne de gauche, du bas vers le haut : indices 0..2*size-1 ; coin : 2*size ; ligne du haut : 2*size+1.. }
+ Any:=0;
+ J:=0;
+ While J<2*Size Do Begin
+  { echantillons y = J .. J+Ul-1 de la colonne de gauche }
+  XN:=(Xc-1) Shl Hs; YN:=(Yc+J) Shl Vs;
+  If HvZAvail(Cx,Cy,XN,YN) And ((Cip=0) Or (HvMvfCur^[(YN Shr 2)*S^.W4+(XN Shr 2)].Pf=0)) Then Begin
+   For K:=0 To Ul-1 Do Begin
+    Idx:=2*Size-1-(J+K);
+    Av^[Idx]:=1; Pp^[Idx]:=Pl^[(Yc+J+K)*Stride+Xc-1];
+   End;
+   Any:=1;
+  End Else For K:=0 To Ul-1 Do Av^[2*Size-1-(J+K)]:=0;
+  Inc(J,Ul);
+ End;
+ XN:=(Xc-1) Shl Hs; YN:=(Yc-1) Shl Vs;
+ If HvZAvail(Cx,Cy,XN,YN) And ((Cip=0) Or (HvMvfCur^[(YN Shr 2)*S^.W4+(XN Shr 2)].Pf=0)) Then Begin
+  Av^[2*Size]:=1; Pp^[2*Size]:=Pl^[(Yc-1)*Stride+Xc-1]; Any:=1;
+ End Else Av^[2*Size]:=0;
+ J:=0;
+ While J<2*Size Do Begin
+  XN:=(Xc+J) Shl Hs; YN:=(Yc-1) Shl Vs;
+  If HvZAvail(Cx,Cy,XN,YN) And ((Cip=0) Or (HvMvfCur^[(YN Shr 2)*S^.W4+(XN Shr 2)].Pf=0)) Then Begin
+   For K:=0 To Uh-1 Do Begin
+    Idx:=2*Size+1+J+K;
+    Av^[Idx]:=1; Pp^[Idx]:=Pl^[(Yc-1)*Stride+Xc+J+K];
+   End;
+   Any:=1;
+  End Else For K:=0 To Uh-1 Do Av^[2*Size+1+J+K]:=0;
+  Inc(J,Uh);
+ End;
+ { substitution }
+ If Any=0 Then Begin
+  For I:=0 To N4 Do Pp^[I]:=1 Shl (Bd-1);
+ End Else Begin
+  If Av^[0]=0 Then Begin
+   I:=1;
+   While (I<=N4) And (Av^[I]=0) Do Inc(I);
+   Pp^[0]:=Pp^[I];
+  End;
+  For I:=1 To N4 Do If Av^[I]=0 Then Pp^[I]:=Pp^[I-1];
+ End;
+ { filtrage des voisins }
+ Filt:=0;
+ If (HvS^.IntraSmoothDis=0) And ((CIdx=0) Or (S^.Chroma=3)) Then Begin
+  If (Mode<>1) And (Size<>4) Then Begin
+   MinD:=HvMin(HvAbs(Mode-26),HvAbs(Mode-10));
+   Case Log2 Of 3: Th:=7; 4: Th:=1; Else Th:=0; End;
+   If MinD>Th Then Filt:=1;
+  End;
+ End;
+ If Filt<>0 Then Begin
+  Strong:=0;
+  If (S^.StrongIntra<>0) And (CIdx=0) And (Log2=5) Then Begin
+   Th:=1 Shl (Bd-5);
+   { bas-gauche : P[0], haut : P[2*size+1+..] }
+   If (HvAbs(Pp^[2*Size]+Pp^[N4]-2*Pp^[2*Size+Size])<Th) And
+      (HvAbs(Pp^[2*Size]+Pp^[0]-2*Pp^[2*Size-Size])<Th) Then Strong:=1;
+  End;
+  If Strong<>0 Then Begin
+   Ff^[0]:=Pp^[0]; Ff^[2*Size]:=Pp^[2*Size]; Ff^[N4]:=Pp^[N4];
+   { gauche : y=0..62 -> indice 2*size-1-y }
+   For I:=0 To 62 Do Begin
+    Ff^[2*Size-1-I]:=((63-I)*Pp^[2*Size]+(I+1)*Pp^[0]+32) Shr 6;
+    Ff^[2*Size+1+I]:=((63-I)*Pp^[2*Size]+(I+1)*Pp^[N4]+32) Shr 6;
+   End;
+  End Else Begin
+   Ff^[0]:=Pp^[0]; Ff^[N4]:=Pp^[N4];
+   For I:=1 To N4-1 Do Ff^[I]:=(Pp^[I-1]+2*Pp^[I]+Pp^[I+1]+2) Shr 2;
+  End;
+  Pp:=Ff;
+ End;
+ { Pp^[2*size-1-y] = left[y], Pp^[2*size] = coin, Pp^[2*size+1+x] = top[x] }
+ Case Mode Of
+  0: Begin { planar }
+   For J:=0 To Size-1 Do
+    For I:=0 To Size-1 Do
+     Pl^[(Yc+J)*Stride+Xc+I]:=((Size-1-I)*Pp^[2*Size-1-J]+(I+1)*Pp^[2*Size+1+Size]+
+        (Size-1-J)*Pp^[2*Size+1+I]+(J+1)*Pp^[2*Size-1-Size]+Size) Shr (Log2+1);
+  End;
+  1: Begin { DC }
+   Dc:=Size;
+   For I:=0 To Size-1 Do Inc(Dc,Pp^[2*Size-1-I]+Pp^[2*Size+1+I]);
+   Dc:=Dc Shr (Log2+1);
+   For J:=0 To Size-1 Do
+    For I:=0 To Size-1 Do Pl^[(Yc+J)*Stride+Xc+I]:=Dc;
+   If (CIdx=0) And (Size<32) Then Begin
+    Pl^[Yc*Stride+Xc]:=(Pp^[2*Size-1]+2*Dc+Pp^[2*Size+1]+2) Shr 2;
+    For I:=1 To Size-1 Do Pl^[Yc*Stride+Xc+I]:=(Pp^[2*Size+1+I]+3*Dc+2) Shr 2;
+    For J:=1 To Size-1 Do Pl^[(Yc+J)*Stride+Xc]:=(Pp^[2*Size-1-J]+3*Dc+2) Shr 2;
+   End;
+  End;
+  Else Begin
+   Angle:=HvIntraAngle[Mode];
+   Last:=HvSar(Size*Angle,5);
+   Ofs:=Size+1;  { HvIpRef[Ofs+k] = ref[k] }
+   Disable:=(HvS^.ImplicitRdpcm<>0) And (HvCuBypass<>0);
+   If Mode>=18 Then Begin
+    { ref[k] = top[k-1] : k=0 -> coin }
+    For I:=0 To 2*Size Do HvIpRef[Ofs+I]:=Pp^[2*Size+I];
+    If (Angle<0) And (Last<-1) Then
+     For I:=Last To -1 Do
+      HvIpRef[Ofs+I]:=Pp^[2*Size-(HvSar(I*HvInvAngle[Mode]+128,8))];
+    For J:=0 To Size-1 Do Begin
+     Idx:=HvSar((J+1)*Angle,5); Fact:=((J+1)*Angle) And 31;
+     If Fact<>0 Then
+      For I:=0 To Size-1 Do
+       Pl^[(Yc+J)*Stride+Xc+I]:=((32-Fact)*HvIpRef[Ofs+I+Idx+1]+Fact*HvIpRef[Ofs+I+Idx+2]+16) Shr 5
+     Else
+      For I:=0 To Size-1 Do Pl^[(Yc+J)*Stride+Xc+I]:=HvIpRef[Ofs+I+Idx+1];
+    End;
+    If (Mode=26) And (CIdx=0) And (Size<32) And (Not Disable) Then
+     For J:=0 To Size-1 Do
+      Pl^[(Yc+J)*Stride+Xc]:=HvClip(Pp^[2*Size+1]+HvSar(Pp^[2*Size-1-J]-Pp^[2*Size],1),0,MaxV);
+   End Else Begin
+    { ref[k] = left[k-1] : k=0 -> coin ; left[y] = Pp[2*size-1-y] }
+    For I:=0 To 2*Size Do HvIpRef[Ofs+I]:=Pp^[2*Size-I];
+    If (Angle<0) And (Last<-1) Then
+     For I:=Last To -1 Do
+      HvIpRef[Ofs+I]:=Pp^[2*Size+(HvSar(I*HvInvAngle[Mode]+128,8))];
+    For I:=0 To Size-1 Do Begin
+     Idx:=HvSar((I+1)*Angle,5); Fact:=((I+1)*Angle) And 31;
+     If Fact<>0 Then
+      For J:=0 To Size-1 Do
+       Pl^[(Yc+J)*Stride+Xc+I]:=((32-Fact)*HvIpRef[Ofs+J+Idx+1]+Fact*HvIpRef[Ofs+J+Idx+2]+16) Shr 5
+     Else
+      For J:=0 To Size-1 Do Pl^[(Yc+J)*Stride+Xc+I]:=HvIpRef[Ofs+J+Idx+1];
+    End;
+    If (Mode=10) And (CIdx=0) And (Size<32) And (Not Disable) Then
+     For I:=0 To Size-1 Do
+      Pl^[Yc*Stride+Xc+I]:=HvClip(Pp^[2*Size-1]+HvSar(Pp^[2*Size+1+I]-Pp^[2*Size],1),0,MaxV);
+   End;
+  End;
+ End;
+End;
+{ ---------------------------------------------------------------- }
+{ transformees inverses                                             }
+{ ---------------------------------------------------------------- }
+Const
+ HvDst4: Array[0..15] Of ShortInt=(29,55,74,84, 74,74,0,-74, 84,-29,-74,55, 55,-84,74,-29);
+ HvLevelScale: Array[0..5] Of Byte=(40,45,51,57,64,72);
+ HvQpC: Array[0..13] Of Byte=(29,30,31,32,33,33,34,34,35,35,36,36,37,37);
+
+Var
+ HvTrTmp: Array[0..1023] Of LongInt;
+
+Function HvClip16(V: LongInt): LongInt;
+Begin
+ If V<-32768 Then HvClip16:=-32768 Else If V>32767 Then HvClip16:=32767 Else HvClip16:=V;
+End;
+
+{ transformee inverse 2D de HvCoef (Log2 = 2..5), MaxX/MaxY = bornes des coefficients non nuls }
+Procedure HvInvTransform(Co: HvPL; Log2,MaxX,MaxY,Bd: LongInt; Dst: Boolean);
+Var N,Step,X,Y,K,Sum,Sh,Rnd: LongInt;
+Begin
+ N:=1 Shl Log2; Step:=32 Shr Log2;
+ Sh:=20-Bd; Rnd:=1 Shl (Sh-1);
+ If Dst Then Begin
+  For X:=0 To MaxX Do
+   For Y:=0 To 3 Do Begin
+    Sum:=0;
+    For K:=0 To MaxY Do Inc(Sum,HvDst4[K*4+Y]*Co^[K*4+X]);
+    HvTrTmp[Y*4+X]:=HvClip16(HvSar(Sum+64,7));
+   End;
+  For Y:=0 To 3 Do
+   For X:=0 To 3 Do Begin
+    Sum:=0;
+    For K:=0 To MaxX Do Inc(Sum,HvDst4[K*4+X]*HvTrTmp[Y*4+K]);
+    Co^[Y*4+X]:=HvSar(Sum+Rnd,Sh);
+   End;
+  Exit;
+ End;
+ For X:=0 To MaxX Do
+  For Y:=0 To N-1 Do Begin
+   Sum:=0;
+   For K:=0 To MaxY Do Inc(Sum,HvTrMat[K*Step*32+Y]*Co^[K*N+X]);
+   HvTrTmp[Y*N+X]:=HvClip16(HvSar(Sum+64,7));
+  End;
+ For Y:=0 To N-1 Do
+  For X:=0 To N-1 Do Begin
+   Sum:=0;
+   For K:=0 To MaxX Do Inc(Sum,HvTrMat[K*Step*32+X]*HvTrTmp[Y*N+K]);
+   Co^[Y*N+X]:=HvSar(Sum+Rnd,Sh);
+  End;
+End;
+
+Procedure HvRdpcm(Co: HvPL; Log2,Vert: LongInt);
+Var N,X,Y: LongInt;
+Begin
+ N:=1 Shl Log2;
+ If Vert<>0 Then Begin
+  For Y:=1 To N-1 Do For X:=0 To N-1 Do Co^[Y*N+X]:=Co^[Y*N+X]+Co^[(Y-1)*N+X];
+ End Else Begin
+  For Y:=0 To N-1 Do For X:=1 To N-1 Do Co^[Y*N+X]:=Co^[Y*N+X]+Co^[Y*N+X-1];
+ End;
+End;
+
+Procedure HvAddResidual(CIdx,X0,Y0,Log2: LongInt; Co: HvPL);
+Var S: PHvSps; Pic: ^THvPic; Pl: HvPW; Stride,Xc,Yc,N,X,Y,MaxV,V: LongInt;
+Begin
+ S:=HvS; Pic:=@HvDpb[HvCur]; Pl:=Pic^.Plane[CIdx]; Stride:=Pic^.Stride[CIdx];
+ Xc:=X0 Shr S^.HShift[CIdx]; Yc:=Y0 Shr S^.VShift[CIdx];
+ N:=1 Shl Log2; MaxV:=(1 Shl S^.BitDepth)-1;
+ For Y:=0 To N-1 Do
+  For X:=0 To N-1 Do Begin
+   V:=Pl^[(Yc+Y)*Stride+Xc+X]+Co^[Y*N+X];
+   If V<0 Then V:=0 Else If V>MaxV Then V:=MaxV;
+   Pl^[(Yc+Y)*Stride+Xc+X]:=V;
+  End;
+End;
+
+{ ---------------------------------------------------------------- }
+{ codage des coefficients (residual_coding)                         }
+{ ---------------------------------------------------------------- }
+Const
+ HvCtxIdxMap: Array[0..79] Of Byte=(
+  0,1,4,5,2,3,4,5,6,6,8,8,7,7,8,8,
+  1,1,1,0,1,1,0,0,1,0,0,0,0,0,0,0,
+  2,2,2,2,1,1,1,1,0,0,0,0,0,0,0,0,
+  2,1,0,0,2,1,0,0,2,1,0,0,2,1,0,0,
+  2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2);
+
+Procedure HvResidual(X0,Y0,Log2,ScanIdx,CIdx: LongInt);
+Var
+ S: PHvSps; Pp: PHvPps; Co: HvPL;
+ TSkip,LastX,LastY,NumCoeff,NumLastSub,XCgLast,YCgLast,G,Sz,I,N,M,NEnd,Xc,Yc,Pos: LongInt;
+ Qp,Shift,Scl,ScaleM,DcScale,Add: LongInt;
+ QpI,Off: LongInt;
+ UseSl: Boolean; Sl: ^THvScal; Mat: LongInt;
+ ExplRdpcm,ExplDir,TrafoSize,PredIntra: LongInt;
+ Suf,XCg,YCg,CtxCg,ImplNz,PrevSig,Offset,RiceInit,NbSig,ScfOff,CtxMapOfs,LastScanPos: LongInt;
+ SigIdx: Array[0..15] Of Byte;
+ Gt1: Array[0..7] Of LongInt;
+ CtxSet,Gt1Ctx,FirstGt1,SignHidden,SbType,CRice,FirstNz,LastNz,SumAbs,SignBits,Rem,InitRice: LongInt;
+ Lvl: Int64; Ma,Mb,Rot,Tmp,MaxNz: LongInt; PrevG1: LongInt;
+ DstFlag: Boolean; Bd,QpBd,SignHide: LongInt;
+ MaxX,MaxY: LongInt;
+Begin
+ S:=HvS; Pp:=HvP;
+ If CIdx=0 Then Co:=HvPL(@HvResY) Else Co:=HvPL(@HvResC);
+ TrafoSize:=1 Shl Log2;
+ FillChar(Co^,TrafoSize*TrafoSize*4,0);
+ FillChar(HvSigFlags,SizeOf(HvSigFlags),0);
+ TSkip:=0; ExplRdpcm:=0; ExplDir:=0;
+ Bd:=S^.BitDepth; QpBd:=S^.QpBdOffset;
+ If CIdx=0 Then PredIntra:=HvTuIpm Else PredIntra:=HvTuIpmC;
+ ScaleM:=16; DcScale:=16; Scl:=0; Shift:=0; Add:=0; UseSl:=False; Sl:=Nil; Mat:=0;
+ If HvCuBypass=0 Then Begin
+  If (Pp^.TransformSkip<>0) And (Log2<=Pp^.Log2MaxTsSize) Then
+   TSkip:=HvBin(HC_TSKIP+Ord(CIdx>0));
+  If CIdx=0 Then Qp:=HvQpY+QpBd
+  Else Begin
+   If CIdx=1 Then Off:=Pp^.CbQpOffset+HvSh.CbOff+HvCqpOffCb
+   Else Off:=Pp^.CrQpOffset+HvSh.CrOff+HvCqpOffCr;
+   QpI:=HvClip(HvQpY+Off,-QpBd,57);
+   If S^.Chroma=1 Then Begin
+    If QpI<30 Then Qp:=QpI Else If QpI>43 Then Qp:=QpI-6 Else Qp:=HvQpC[QpI-30];
+   End Else Begin
+    If QpI>51 Then Qp:=51 Else Qp:=QpI;
+   End;
+   Inc(Qp,QpBd);
+  End;
+  Shift:=Bd+Log2-5; Add:=1 Shl (Shift-1);
+  Scl:=HvLevelScale[Qp Mod 6] Shl (Qp Div 6);
+  If (S^.ScalingEnable<>0) And Not ((TSkip<>0) And (Log2>2)) Then Begin
+   UseSl:=True;
+   If Pp^.ScalingPresent<>0 Then Sl:=@Pp^.Scal Else Sl:=@S^.Scal;
+   If HvCuPred<>1 Then Mat:=3 Else Mat:=0;
+   Inc(Mat,CIdx);
+   If Log2>=4 Then DcScale:=Sl^.Dc[Log2-4,Mat];
+  End;
+ End;
+ If (HvCuPred=0) And (S^.ExplicitRdpcm<>0) And ((TSkip<>0) Or (HvCuBypass<>0)) Then Begin
+  ExplRdpcm:=HvBin(HC_RDPCM_FLAG+Ord(CIdx>0));
+  If ExplRdpcm<>0 Then ExplDir:=HvBin(HC_RDPCM_DIR+Ord(CIdx>0));
+ End;
+ { dernier coefficient significatif }
+ If CIdx=0 Then Begin
+  Mat:=Mat; Ma:=3*(Log2-2)+((Log2-1) Shr 2); Mb:=(Log2+1) Shr 2;
+ End Else Begin Ma:=15; Mb:=Log2-2; End;
+ N:=(Log2 Shl 1)-1;
+ LastX:=0; While (LastX<N) And (HvBin(HC_LAST_X+(LastX Shr Mb)+Ma)<>0) Do Inc(LastX);
+ LastY:=0; While (LastY<N) And (HvBin(HC_LAST_Y+(LastY Shr Mb)+Ma)<>0) Do Inc(LastY);
+ If LastX>3 Then Begin
+  Suf:=(LastX Shr 1)-1; Pos:=HvBypN(Suf);
+  LastX:=(1 Shl ((LastX Shr 1)-1))*(2+(LastX And 1))+Pos;
+ End;
+ If LastY>3 Then Begin
+  Suf:=(LastY Shr 1)-1; Pos:=HvBypN(Suf);
+  LastY:=(1 Shl ((LastY Shr 1)-1))*(2+(LastY And 1))+Pos;
+ End;
+ If ScanIdx=2 Then Begin Tmp:=LastX; LastX:=LastY; LastY:=Tmp; End;
+ G:=Log2-2; Sz:=1 Shl G;
+ XCgLast:=LastX Shr 2; YCgLast:=LastY Shr 2;
+ NumCoeff:=HvInvCg[ScanIdx,G,YCgLast*Sz+XCgLast]*16+HvInv4[ScanIdx,(LastY And 3)*4+(LastX And 3)]+1;
+ NumLastSub:=(NumCoeff-1) Shr 4;
+ Gt1Ctx:=1;
+ MaxX:=0; MaxY:=0;
+ For I:=NumLastSub DownTo 0 Do Begin
+  ImplNz:=0; PrevSig:=0; Offset:=I Shl 4; RiceInit:=0; NbSig:=0;
+  XCg:=HvScCgX[ScanIdx,G,I]; YCg:=HvScCgY[ScanIdx,G,I];
+  If (I<NumLastSub) And (I>0) Then Begin
+   CtxCg:=0;
+   If XCg<Sz-1 Then Inc(CtxCg,HvSigFlags[XCg+1,YCg]);
+   If YCg<Sz-1 Then Inc(CtxCg,HvSigFlags[XCg,YCg+1]);
+   HvSigFlags[XCg,YCg]:=HvBin(HC_SIG_CG+HvMin(CtxCg,1)+Ord(CIdx>0)*2);
+   ImplNz:=1;
+  End Else Begin
+   If ((XCg=XCgLast) And (YCg=YCgLast)) Or ((XCg=0) And (YCg=0)) Then HvSigFlags[XCg,YCg]:=1 Else HvSigFlags[XCg,YCg]:=0;
+  End;
+  LastScanPos:=NumCoeff-Offset-1;
+  If I=NumLastSub Then Begin
+   NEnd:=LastScanPos-1; SigIdx[0]:=LastScanPos; NbSig:=1;
+  End Else NEnd:=15;
+  If XCg<Sz-1 Then PrevSig:=HvSigFlags[XCg+1,YCg];
+  If YCg<Sz-1 Then Inc(PrevSig,HvSigFlags[XCg,YCg+1] Shl 1);
+  If (HvSigFlags[XCg,YCg]<>0) And (NEnd>=0) Then Begin
+   ScfOff:=0;
+   If (S^.TsContext<>0) And ((TSkip<>0) Or (HvCuBypass<>0)) Then Begin
+    CtxMapOfs:=64;
+    If CIdx=0 Then ScfOff:=40 Else ScfOff:=14+27;
+   End Else Begin
+    If CIdx<>0 Then ScfOff:=27;
+    If Log2=2 Then CtxMapOfs:=0
+    Else Begin
+     CtxMapOfs:=(PrevSig+1) Shl 4;
+     If CIdx=0 Then Begin
+      If (XCg>0) Or (YCg>0) Then Inc(ScfOff,3);
+      If Log2=3 Then Begin
+       If ScanIdx=0 Then Inc(ScfOff,9) Else Inc(ScfOff,15);
+      End Else Inc(ScfOff,21);
+     End Else Begin
+      If Log2=3 Then Inc(ScfOff,9) Else Inc(ScfOff,12);
+     End;
+    End;
+   End;
+   N:=NEnd;
+   While N>0 Do Begin
+    Xc:=HvSc4X[ScanIdx*16+N]; Yc:=HvSc4Y[ScanIdx*16+N];
+    If HvBin(HC_SIG+HvCtxIdxMap[CtxMapOfs+(Yc Shl 2)+Xc]+ScfOff)<>0 Then Begin
+     SigIdx[NbSig]:=N; Inc(NbSig); ImplNz:=0;
+    End;
+    Dec(N);
+   End;
+   If ImplNz=0 Then Begin
+    If (S^.TsContext<>0) And ((TSkip<>0) Or (HvCuBypass<>0)) Then Begin
+     If CIdx=0 Then ScfOff:=42 Else ScfOff:=16+27;
+    End Else Begin
+     If I=0 Then Begin
+      If CIdx=0 Then ScfOff:=0 Else ScfOff:=27;
+     End Else ScfOff:=2+ScfOff;
+    End;
+    If HvBin(HC_SIG+ScfOff)<>0 Then Begin SigIdx[NbSig]:=0; Inc(NbSig); End;
+   End Else Begin
+    SigIdx[NbSig]:=0; Inc(NbSig);
+   End;
+  End;
+  If NbSig<>0 Then Begin
+   CRice:=0; FirstGt1:=-1; SbType:=0;
+   If (I>0) And (CIdx=0) Then CtxSet:=2 Else CtxSet:=0;
+   If S^.PersistRice<>0 Then Begin
+    If (TSkip=0) And (HvCuBypass=0) Then SbType:=2*Ord(CIdx=0) Else SbType:=2*Ord(CIdx=0)+1;
+    CRice:=HvStat[SbType] Div 4;
+   End;
+   If (I<>NumLastSub) And (Gt1Ctx=0) Then Inc(CtxSet);
+   Gt1Ctx:=1;
+   LastNz:=SigIdx[0];
+   For M:=0 To HvMin(NbSig,8)-1 Do Begin
+    Gt1[M]:=HvBin(HC_GT1+(CtxSet Shl 2)+Gt1Ctx+16*Ord(CIdx>0));
+    If Gt1[M]<>0 Then Begin
+     Gt1Ctx:=0;
+     If FirstGt1=-1 Then FirstGt1:=M;
+    End Else If (Gt1Ctx>0) And (Gt1Ctx<3) Then Inc(Gt1Ctx);
+   End;
+   FirstNz:=SigIdx[NbSig-1];
+   If (HvCuBypass<>0) Or ((HvCuPred=1) And (S^.ImplicitRdpcm<>0) And (TSkip<>0) And ((PredIntra=10) Or (PredIntra=26))) Or (ExplRdpcm<>0) Then
+    SignHidden:=0
+   Else SignHidden:=Ord(LastNz-FirstNz>=4);
+   If FirstGt1<>-1 Then Inc(Gt1[FirstGt1],HvBin(HC_GT2+CtxSet+4*Ord(CIdx>0)));
+   If (Pp^.SignHide=0) Or (SignHidden=0) Then Begin
+    SignBits:=HvBypN(NbSig) Shl (16-NbSig);
+   End Else Begin
+    SignBits:=HvBypN(NbSig-1) Shl (16-(NbSig-1));
+   End;
+   SumAbs:=0;
+   For M:=0 To NbSig-1 Do Begin
+    N:=SigIdx[M];
+    Xc:=(XCg Shl 2)+HvSc4X[ScanIdx*16+N]; Yc:=(YCg Shl 2)+HvSc4Y[ScanIdx*16+N];
+    If M<8 Then Begin
+     Lvl:=1+Gt1[M];
+     If M=FirstGt1 Then Tmp:=3 Else Tmp:=2;
+     If Lvl=Tmp Then Begin
+      Rem:=HvCoeffAbsRemaining(CRice);
+      Lvl:=Lvl+Rem;
+      If Lvl>(3 Shl CRice) Then Begin
+       If S^.PersistRice<>0 Then Inc(CRice) Else CRice:=HvMin(CRice+1,4);
+      End;
+      If (S^.PersistRice<>0) And (RiceInit=0) Then Begin
+       InitRice:=HvStat[SbType] Div 4;
+       If Rem>=(3 Shl InitRice) Then Inc(HvStat[SbType])
+       Else If 2*Rem<(1 Shl InitRice) Then If HvStat[SbType]>0 Then Dec(HvStat[SbType]);
+       RiceInit:=1;
+      End;
+     End;
+    End Else Begin
+     Rem:=HvCoeffAbsRemaining(CRice);
+     Lvl:=1+Rem;
+     If Lvl>(3 Shl CRice) Then Begin
+      If S^.PersistRice<>0 Then Inc(CRice) Else CRice:=HvMin(CRice+1,4);
+     End;
+     If (S^.PersistRice<>0) And (RiceInit=0) Then Begin
+      InitRice:=HvStat[SbType] Div 4;
+      If Rem>=(3 Shl InitRice) Then Inc(HvStat[SbType])
+      Else If 2*Rem<(1 Shl InitRice) Then If HvStat[SbType]>0 Then Dec(HvStat[SbType]);
+      RiceInit:=1;
+     End;
+    End;
+    If (Pp^.SignHide<>0) And (SignHidden<>0) Then Begin
+     Inc(SumAbs,Lvl);
+     If (N=FirstNz) And ((SumAbs And 1)<>0) Then Lvl:=-Lvl;
+    End;
+    If (SignBits Shr 15)<>0 Then Lvl:=-Lvl;
+    SignBits:=(SignBits Shl 1) And $FFFF;
+    If HvCuBypass=0 Then Begin
+     If UseSl Then Begin
+      If (Yc<>0) Or (Xc<>0) Or (Log2<4) Then Begin
+       Case Log2 Of
+        3: Pos:=(Yc Shl 3)+Xc;
+        4: Pos:=((Yc Shr 1) Shl 3)+(Xc Shr 1);
+        5: Pos:=((Yc Shr 2) Shl 3)+(Xc Shr 2);
+       Else Pos:=(Yc Shl 2)+Xc;
+       End;
+       ScaleM:=Sl^.Sl[Log2-2,Mat,Pos];
+      End Else ScaleM:=DcScale;
+     End;
+     Lvl:=HvSar64(Lvl*Scl*ScaleM+Add,Shift);
+     If Lvl<-32768 Then Lvl:=-32768 Else If Lvl>32767 Then Lvl:=32767;
+    End;
+    Co^[Yc*TrafoSize+Xc]:=Lvl;
+    If Xc>MaxX Then MaxX:=Xc;
+    If Yc>MaxY Then MaxY:=Yc;
+   End;
+  End;
+ End;
+ { transformee inverse }
+ If HvCuBypass<>0 Then Begin
+  If (S^.TsRotation<>0) And (Log2=2) And (HvCuPred=1) Then
+   For I:=0 To 7 Do Begin Tmp:=Co^[I]; Co^[I]:=Co^[15-I]; Co^[15-I]:=Tmp; End;
+  If (ExplRdpcm<>0) Or ((S^.ImplicitRdpcm<>0) And (HvCuPred=1) And ((PredIntra=10) Or (PredIntra=26))) Then Begin
+   If ExplRdpcm<>0 Then Tmp:=ExplDir Else Tmp:=Ord(PredIntra=26);
+   HvRdpcm(Co,Log2,Tmp);
+  End;
+ End Else Begin
+  If TSkip<>0 Then Begin
+   If (S^.TsRotation<>0) And (Log2=2) And (HvCuPred=1) Then
+    For I:=0 To 7 Do Begin Tmp:=Co^[I]; Co^[I]:=Co^[15-I]; Co^[15-I]:=Tmp; End;
+   Tmp:=15-Bd-Log2;
+   If Tmp>0 Then Begin
+    For I:=0 To TrafoSize*TrafoSize-1 Do Co^[I]:=HvSar(Co^[I]+(1 Shl (Tmp-1)),Tmp);
+   End Else Begin
+    For I:=0 To TrafoSize*TrafoSize-1 Do Co^[I]:=Co^[I] Shl (-Tmp);
+   End;
+   If (ExplRdpcm<>0) Or ((S^.ImplicitRdpcm<>0) And (HvCuPred=1) And ((PredIntra=10) Or (PredIntra=26))) Then Begin
+    If ExplRdpcm<>0 Then Tmp:=ExplDir Else Tmp:=Ord(PredIntra=26);
+    HvRdpcm(Co,Log2,Tmp);
+   End;
+  End Else Begin
+   DstFlag:=(HvCuPred=1) And (CIdx=0) And (Log2=2);
+   If DstFlag Then HvInvTransform(Co,2,3,3,Bd,True)
+   Else HvInvTransform(Co,Log2,MaxX,MaxY,Bd,False);
+  End;
+ End;
+ If HvCrossPf<>0 Then Begin
+  For I:=0 To TrafoSize*TrafoSize-1 Do Co^[I]:=Co^[I]+HvSar(HvResScale*HvResY[I],3);
+ End;
+ HvAddResidual(CIdx,X0,Y0,Log2,Co);
+End;
+{ ---------------------------------------------------------------- }
+{ compensation de mouvement                                         }
+{ ---------------------------------------------------------------- }
+Const
+ HvQpelF: Array[1..3,0..7] Of ShortInt=((-1,4,-10,58,17,-5,1,0),(-1,4,-11,40,40,-11,4,-1),(0,1,-5,17,58,-10,4,-1));
+ HvEpelF: Array[1..7,0..3] Of ShortInt=((-2,58,10,-2),(-4,54,16,-2),(-6,46,28,-4),(-4,36,36,-4),(-4,28,46,-6),(-2,16,54,-4),(-2,10,58,-2));
+
+
+{ calcule un bloc W x H de la prediction (precision 14 bits) dans Dst (pas 64) }
+Procedure HvMcBlock(Ref,CIdx,XInt,YInt,FX,FY,W,H: LongInt; Dst: HvPL);
+Var
+ Pic: ^THvPic; Pl: HvPW; Stride,PW,PH,Taps,Bef,RW,RH,R,C,X,Y,K,Sum,Sh1,Sh3,Bd,Cy,Cx,Row,Ofs: LongInt;
+ F: Array[0..7] Of LongInt; Fy2: Array[0..7] Of LongInt;
+Begin
+ Pic:=@HvDpb[Ref]; Pl:=Pic^.Plane[CIdx]; Stride:=Pic^.Stride[CIdx]; PW:=Pic^.PW[CIdx]; PH:=Pic^.PH[CIdx];
+ Bd:=HvS^.BitDepth; Sh1:=Bd-8; Sh3:=14-Bd;
+ If CIdx=0 Then Begin Taps:=8; Bef:=3; End Else Begin Taps:=4; Bef:=1; End;
+ RW:=W+Taps-1; RH:=H+Taps-1;
+ { recuperation de la zone de reference avec duplication des bords }
+ If (XInt-Bef>=0) And (YInt-Bef>=0) And (XInt-Bef+RW<=PW) And (YInt-Bef+RH<=PH) Then Begin
+  For R:=0 To RH-1 Do Begin
+   Ofs:=(YInt-Bef+R)*Stride+XInt-Bef;
+   For C:=0 To RW-1 Do HvMcTmp[R*RW+C]:=Pl^[Ofs+C];
+  End;
+ End Else Begin
+  For R:=0 To RH-1 Do Begin
+   Cy:=YInt-Bef+R; If Cy<0 Then Cy:=0 Else If Cy>=PH Then Cy:=PH-1;
+   Ofs:=Cy*Stride;
+   For C:=0 To RW-1 Do Begin
+    Cx:=XInt-Bef+C; If Cx<0 Then Cx:=0 Else If Cx>=PW Then Cx:=PW-1;
+    HvMcTmp[R*RW+C]:=Pl^[Ofs+Cx];
+   End;
+  End;
+ End;
+ If CIdx=0 Then Begin
+  If FX<>0 Then For K:=0 To 7 Do F[K]:=HvQpelF[FX,K];
+  If FY<>0 Then For K:=0 To 7 Do Fy2[K]:=HvQpelF[FY,K];
+ End Else Begin
+  If FX<>0 Then For K:=0 To 3 Do F[K]:=HvEpelF[FX,K];
+  If FY<>0 Then For K:=0 To 3 Do Fy2[K]:=HvEpelF[FY,K];
+ End;
+ If (FX=0) And (FY=0) Then Begin
+  For Y:=0 To H-1 Do For X:=0 To W-1 Do Dst^[Y*64+X]:=HvMcTmp[(Y+Bef)*RW+X+Bef] Shl Sh3;
+ End Else If FY=0 Then Begin
+  For Y:=0 To H-1 Do For X:=0 To W-1 Do Begin
+   Sum:=0; Row:=(Y+Bef)*RW+X;
+   For K:=0 To Taps-1 Do Inc(Sum,F[K]*HvMcTmp[Row+K]);
+   Dst^[Y*64+X]:=((Sum+$40000000) Shr Sh1)-($40000000 Shr Sh1);
+  End;
+ End Else If FX=0 Then Begin
+  For Y:=0 To H-1 Do For X:=0 To W-1 Do Begin
+   Sum:=0; Row:=Y*RW+X+Bef;
+   For K:=0 To Taps-1 Do Inc(Sum,Fy2[K]*HvMcTmp[Row+K*RW]);
+   Dst^[Y*64+X]:=((Sum+$40000000) Shr Sh1)-($40000000 Shr Sh1);
+  End;
+ End Else Begin
+  For Y:=0 To RH-1 Do For X:=0 To W-1 Do Begin
+   Sum:=0; Row:=Y*RW+X;
+   For K:=0 To Taps-1 Do Inc(Sum,F[K]*HvMcTmp[Row+K]);
+   HvMcMid[Y*W+X]:=((Sum+$40000000) Shr Sh1)-($40000000 Shr Sh1);
+  End;
+  For Y:=0 To H-1 Do For X:=0 To W-1 Do Begin
+   Sum:=0; Row:=Y*W+X;
+   For K:=0 To Taps-1 Do Inc(Sum,Fy2[K]*HvMcMid[Row+K*W]);
+   Dst^[Y*64+X]:=((Sum+$40000000) Shr 6)-($40000000 Shr 6);
+  End;
+ End;
+End;
+
+{ ecrit la prediction (une ou deux listes) dans le plan, avec ponderation eventuelle }
+Procedure HvPredStore(CIdx,X,Y,W,H,Pf,R0,R1: LongInt);
+Var
+ Pic: ^THvPic; Pl: HvPW; Stride,Bd,MaxV,Sh1,Sh2,O1,O2,I,J,V,Wt,Log2Wd,W0,W1,Of0,Of1,Ofs: LongInt; Weighted: Boolean;
+Begin
+ Pic:=@HvDpb[HvCur]; Pl:=Pic^.Plane[CIdx]; Stride:=Pic^.Stride[CIdx];
+ Bd:=HvS^.BitDepth; MaxV:=(1 Shl Bd)-1;
+ Sh1:=14-Bd; Sh2:=15-Bd;
+ Weighted:=((HvSh.SliceType=HV_SLICE_P) And (HvP^.WeightedPred<>0)) Or ((HvSh.SliceType=HV_SLICE_B) And (HvP^.WeightedBipred<>0));
+ If Not Weighted Then Begin
+  If Pf=3 Then Begin
+   O2:=1 Shl (Sh2-1);
+   For J:=0 To H-1 Do For I:=0 To W-1 Do Begin
+    V:=(HvPred0[J*64+I]+HvPred1[J*64+I]+O2) Shr Sh2;
+    If V<0 Then V:=0 Else If V>MaxV Then V:=MaxV;
+    Pl^[(Y+J)*Stride+X+I]:=V;
+   End;
+  End Else Begin
+   O1:=0; If Sh1>0 Then O1:=1 Shl (Sh1-1);
+   For J:=0 To H-1 Do For I:=0 To W-1 Do Begin
+    If Pf=1 Then V:=(HvPred0[J*64+I]+O1) Shr Sh1 Else V:=(HvPred1[J*64+I]+O1) Shr Sh1;
+    If V<0 Then V:=0 Else If V>MaxV Then V:=MaxV;
+    Pl^[(Y+J)*Stride+X+I]:=V;
+   End;
+  End;
+  Exit;
+ End;
+ If CIdx=0 Then Log2Wd:=HvSh.LumaLog2Wd+Sh1 Else Log2Wd:=HvSh.ChromaLog2Wd+Sh1;
+ If Pf=3 Then Begin
+  If CIdx=0 Then Begin
+   W0:=HvSh.LumaW[0,R0]; Of0:=HvSh.LumaO[0,R0] Shl (Bd-8); W1:=HvSh.LumaW[1,R1]; Of1:=HvSh.LumaO[1,R1] Shl (Bd-8);
+  End Else Begin
+   W0:=HvSh.ChromaW[0,R0,CIdx-1]; Of0:=HvSh.ChromaO[0,R0,CIdx-1] Shl (Bd-8);
+   W1:=HvSh.ChromaW[1,R1,CIdx-1]; Of1:=HvSh.ChromaO[1,R1,CIdx-1] Shl (Bd-8);
+  End;
+  Ofs:=(Of0+Of1+1) Shl Log2Wd;
+  For J:=0 To H-1 Do For I:=0 To W-1 Do Begin
+   V:=HvSar(HvPred0[J*64+I]*W0+HvPred1[J*64+I]*W1+Ofs,Log2Wd+1);
+   If V<0 Then V:=0 Else If V>MaxV Then V:=MaxV;
+   Pl^[(Y+J)*Stride+X+I]:=V;
+  End;
+ End Else Begin
+  If Pf=1 Then Begin
+   If CIdx=0 Then Begin Wt:=HvSh.LumaW[0,R0]; Of0:=HvSh.LumaO[0,R0] Shl (Bd-8); End
+   Else Begin Wt:=HvSh.ChromaW[0,R0,CIdx-1]; Of0:=HvSh.ChromaO[0,R0,CIdx-1] Shl (Bd-8); End;
+  End Else Begin
+   If CIdx=0 Then Begin Wt:=HvSh.LumaW[1,R1]; Of0:=HvSh.LumaO[1,R1] Shl (Bd-8); End
+   Else Begin Wt:=HvSh.ChromaW[1,R1,CIdx-1]; Of0:=HvSh.ChromaO[1,R1,CIdx-1] Shl (Bd-8); End;
+  End;
+  For J:=0 To H-1 Do For I:=0 To W-1 Do Begin
+   If Pf=1 Then V:=HvPred0[J*64+I] Else V:=HvPred1[J*64+I];
+   If Log2Wd>=1 Then V:=HvSar(V*Wt+(1 Shl (Log2Wd-1)),Log2Wd)+Of0
+   Else V:=V*Wt+Of0;
+   If V<0 Then V:=0 Else If V>MaxV Then V:=MaxV;
+   Pl^[(Y+J)*Stride+X+I]:=V;
+  End;
+ End;
+End;
+
+Procedure HvInterPredict(X0,Y0,W,H: LongInt; Var M: THvMvf);
+Var
+ C,Hs,Vs,Xc,Yc,Wc,Hc,Mx,My,Fx,Fy,Rp0,Rp1,L: LongInt; Pf: LongInt; Cn: LongInt;
+Begin
+ Pf:=M.Pf;
+ If (Pf And 1)<>0 Then Begin Rp0:=HvRefPic[0,M.Ref[0]]; If Rp0<0 Then Exit; End;
+ If (Pf And 2)<>0 Then Begin Rp1:=HvRefPic[1,M.Ref[1]]; If Rp1<0 Then Exit; End;
+ If HvS^.Chroma<>0 Then Cn:=2 Else Cn:=0;
+ For C:=0 To Cn Do Begin
+  Hs:=HvS^.HShift[C]; Vs:=HvS^.VShift[C];
+  Xc:=X0 Shr Hs; Yc:=Y0 Shr Vs; Wc:=W Shr Hs; Hc:=H Shr Vs;
+  If (Pf And 1)<>0 Then Begin
+   Mx:=M.Mv[0]; My:=M.Mv[1];
+   If C=0 Then HvMcBlock(Rp0,0,Xc+HvSar(Mx,2),Yc+HvSar(My,2),Mx And 3,My And 3,Wc,Hc,HvPL(@HvPred0))
+   Else HvMcBlock(Rp0,C,Xc+HvSar(Mx,2+Hs),Yc+HvSar(My,2+Vs),(Mx And ((4 Shl Hs)-1)) Shl (1-Hs),(My And ((4 Shl Vs)-1)) Shl (1-Vs),Wc,Hc,HvPL(@HvPred0));
+  End;
+  If (Pf And 2)<>0 Then Begin
+   Mx:=M.Mv[2]; My:=M.Mv[3];
+   If C=0 Then HvMcBlock(Rp1,0,Xc+HvSar(Mx,2),Yc+HvSar(My,2),Mx And 3,My And 3,Wc,Hc,HvPL(@HvPred1))
+   Else HvMcBlock(Rp1,C,Xc+HvSar(Mx,2+Hs),Yc+HvSar(My,2+Vs),(Mx And ((4 Shl Hs)-1)) Shl (1-Hs),(My And ((4 Shl Vs)-1)) Shl (1-Vs),Wc,Hc,HvPL(@HvPred1));
+  End;
+  HvPredStore(C,Xc,Yc,Wc,Hc,Pf,M.Ref[0],M.Ref[1]);
+ End;
+End;
+
+{ ---------------------------------------------------------------- }
+{ vecteurs de mouvement                                             }
+{ ---------------------------------------------------------------- }
+Const
+ HvL0L1Idx: Array[0..11,0..1] Of Byte=((0,1),(1,0),(0,2),(2,0),(1,2),(2,1),(0,3),(3,0),(1,3),(3,1),(2,3),(3,2));
+
+Function HvMvfPtr(X,Y: LongInt): Pointer;
+Begin
+ HvMvfPtr:=@HvMvfCur^[(Y Shr 2)*HvS^.W4+(X Shr 2)];
+End;
+
+Function HvAvailPb(XCb,YCb,NCbS,XPb,YPb,NPbW,NPbH,PartIdx,XN,YN: LongInt): Boolean;
+Var Same,A: Boolean;
+Begin
+ Same:=(XCb<=XN) And (YCb<=YN) And (XCb+NCbS>XN) And (YCb+NCbS>YN);
+ If Not Same Then A:=HvZAvail(XPb,YPb,XN,YN)
+ Else If ((NPbW Shl 1)=NCbS) And ((NPbH Shl 1)=NCbS) And (PartIdx=1) And (YCb+NPbH<=YN) And (XCb+NPbW>XN) Then A:=False
+ Else A:=True;
+ If A Then Begin
+  If HvMvfCur^[(YN Shr 2)*HvS^.W4+(XN Shr 2)].Pf=0 Then A:=False;
+ End;
+ HvAvailPb:=A;
+End;
+
+Procedure HvMvScale(Var Ox,Oy: LongInt; Sx,Sy,Td,Tb: LongInt);
+Var Tx,Sf: LongInt;
+Begin
+ Td:=HvClip(Td,-128,127); Tb:=HvClip(Tb,-128,127);
+ Tx:=(16384+HvAbs(Td Div 2)) Div Td;
+ Sf:=HvClip(HvSar(Tb*Tx+32,6),-4096,4095);
+ Ox:=HvSar(Sf*Sx+127+Ord(Sf*Sx<0),8); If Ox<-32768 Then Ox:=-32768 Else If Ox>32767 Then Ox:=32767;
+ Oy:=HvSar(Sf*Sy+127+Ord(Sf*Sy<0),8); If Oy<-32768 Then Oy:=-32768 Else If Oy>32767 Then Oy:=32767;
+End;
+
+Function HvCheckMvSet(Var Ox,Oy: LongInt; Cx,Cy,ColPoc: LongInt; X,RefIdx: LongInt; Col: PHvRpl; ListCol,RefIdxCol: LongInt): Boolean;
+Var CurLt,ColLt,ColDiff,CurDiff: LongInt;
+Begin
+ CurLt:=HvCurRpl^.Lt[X,RefIdx]; ColLt:=Col^.Lt[ListCol,RefIdxCol];
+ If CurLt<>ColLt Then Begin Ox:=0; Oy:=0; HvCheckMvSet:=False; Exit; End;
+ ColDiff:=ColPoc-Col^.Poc[ListCol,RefIdxCol];
+ CurDiff:=HvPoc-HvCurRpl^.Poc[X,RefIdx];
+ If (CurLt<>0) Or (ColDiff=CurDiff) Or (ColDiff=0) Then Begin Ox:=Cx; Oy:=Cy; End
+ Else HvMvScale(Ox,Oy,Cx,Cy,ColDiff,CurDiff);
+ HvCheckMvSet:=True;
+End;
+
+Function HvColMv(Col: PHvMvf; ColPoc: LongInt; RefIdxLx,X: LongInt; Var Ox,Oy: LongInt; ColRpl: PHvRpl): Boolean;
+Var Chk,I,J,L: LongInt;
+Begin
+ HvColMv:=False;
+ If Col^.Pf=0 Then Exit;
+ If (Col^.Pf And 1)=0 Then Begin
+  HvColMv:=HvCheckMvSet(Ox,Oy,Col^.Mv[2],Col^.Mv[3],ColPoc,X,RefIdxLx,ColRpl,1,Col^.Ref[1]); Exit;
+ End;
+ If Col^.Pf=1 Then Begin
+  HvColMv:=HvCheckMvSet(Ox,Oy,Col^.Mv[0],Col^.Mv[1],ColPoc,X,RefIdxLx,ColRpl,0,Col^.Ref[0]); Exit;
+ End;
+ Chk:=0;
+ For J:=0 To 1 Do
+  For I:=0 To HvCurRpl^.N[J]-1 Do
+   If HvCurRpl^.Poc[J,I]>HvPoc Then Begin Inc(Chk); Break; End;
+ If Chk=0 Then L:=X Else Begin If HvSh.ColList=1 Then L:=0 Else L:=1; End;
+ HvColMv:=HvCheckMvSet(Ox,Oy,Col^.Mv[2*L],Col^.Mv[2*L+1],ColPoc,X,RefIdxLx,ColRpl,L,Col^.Ref[L]);
+End;
+
+Function HvTemporalMv(X0,Y0,NPbW,NPbH,RefIdxLx: LongInt; Var Ox,Oy: LongInt; X: LongInt): Boolean;
+Var S: PHvSps; Cp: ^THvPic; Xx,Yy,Ct: LongInt; Av: Boolean; Cm: ^THvMvf; Rp: ^THvRpl;
+Begin
+ S:=HvS; Ox:=0; Oy:=0; HvTemporalMv:=False;
+ If HvColPic<0 Then Exit;
+ Cp:=@HvDpb[HvColPic];
+ If Cp^.Mvf=Nil Then Exit;
+ Av:=False;
+ Xx:=X0+NPbW; Yy:=Y0+NPbH;
+ If ((Y0 Shr S^.Log2Ctb)=(Yy Shr S^.Log2Ctb)) And (Yy<S^.Height) And (Xx<S^.Width) Then Begin
+  Xx:=Xx And Not 15; Yy:=Yy And Not 15;
+  Cm:=@Cp^.Mvf^[(Yy Shr 2)*S^.W4+(Xx Shr 2)];
+  Ct:=(Yy Shr S^.Log2Ctb)*S^.CtbW+(Xx Shr S^.Log2Ctb);
+  Rp:=@Cp^.Rpl^[Cp^.RplTab^[Ct]];
+  Av:=HvColMv(Cm,Cp^.Poc,RefIdxLx,X,Ox,Oy,Rp);
+ End;
+ If Not Av Then Begin
+  Xx:=(X0+(NPbW Shr 1)) And Not 15; Yy:=(Y0+(NPbH Shr 1)) And Not 15;
+  Cm:=@Cp^.Mvf^[(Yy Shr 2)*S^.W4+(Xx Shr 2)];
+  Ct:=(Yy Shr S^.Log2Ctb)*S^.CtbW+(Xx Shr S^.Log2Ctb);
+  Rp:=@Cp^.Rpl^[Cp^.RplTab^[Ct]];
+  Av:=HvColMv(Cm,Cp^.Poc,RefIdxLx,X,Ox,Oy,Rp);
+ End;
+ HvTemporalMv:=Av;
+End;
+
+Function HvSameMv(Var A,B: THvMvf): Boolean;
+Begin
+ HvSameMv:=False;
+ If A.Pf<>B.Pf Then Exit;
+ If A.Pf=3 Then
+  HvSameMv:=(A.Ref[0]=B.Ref[0]) And (A.Mv[0]=B.Mv[0]) And (A.Mv[1]=B.Mv[1]) And (A.Ref[1]=B.Ref[1]) And (A.Mv[2]=B.Mv[2]) And (A.Mv[3]=B.Mv[3])
+ Else If A.Pf=1 Then
+  HvSameMv:=(A.Ref[0]=B.Ref[0]) And (A.Mv[0]=B.Mv[0]) And (A.Mv[1]=B.Mv[1])
+ Else If A.Pf=2 Then
+  HvSameMv:=(A.Ref[1]=B.Ref[1]) And (A.Mv[2]=B.Mv[2]) And (A.Mv[3]=B.Mv[3]);
+End;
+
+Procedure HvDeriveMerge(X0,Y0,NPbW,NPbH,PartIdx,MergeIdx: LongInt; Var Out: THvMvf);
+Var
+ S: PHvSps; Cl: Array[0..5] Of THvMvf; Nb,NbOrig,Plevel,SingleMcl,NPbW2,NPbH2: LongInt;
+ XCb,YCb,NCbS: LongInt;
+ XA1,YA1,XB1,YB1,XB0,YB0,XA0,YA0,XB2,YB2: LongInt;
+ AvA0,AvA1,AvB0,AvB1,AvB2: Boolean;
+ NbRefs,Zi,CombIdx,L0i,L1i: LongInt; Mv0x,Mv0y,Mv1x,Mv1y: LongInt; Av0,Av1: Boolean;
+ PA1,PB1,PB0,PA0,PB2: ^THvMvf; Found: Boolean;
+ Function SameMer(XN,YN: LongInt): Boolean;
+ Begin
+  SameMer:=((XN Shr Plevel)=(X0 Shr Plevel)) And ((YN Shr Plevel)=(Y0 Shr Plevel));
+ End;
+Begin
+ S:=HvS; XCb:=HvCuX; YCb:=HvCuY; NCbS:=HvCbSize;
+ NPbW2:=NPbW; NPbH2:=NPbH; SingleMcl:=0;
+ Plevel:=HvP^.Log2ParMrg;
+ If (Plevel>2) And (NCbS=8) Then Begin
+  SingleMcl:=1; X0:=XCb; Y0:=YCb; NPbW:=NCbS; NPbH:=NCbS; PartIdx:=0;
+ End;
+ FillChar(Cl,SizeOf(Cl),0);
+ XA1:=X0-1; YA1:=Y0+NPbH-1; XB1:=X0+NPbW-1; YB1:=Y0-1; XB0:=X0+NPbW; YB0:=Y0-1;
+ XA0:=X0-1; YA0:=Y0+NPbH; XB2:=X0-1; YB2:=Y0-1;
+ If HvSh.SliceType=HV_SLICE_P Then NbRefs:=HvSh.NbRefs[0] Else NbRefs:=HvMin(HvSh.NbRefs[0],HvSh.NbRefs[1]);
+ Nb:=0; Found:=False;
+ PA1:=@Cl[5]; PB1:=@Cl[5]; PB0:=@Cl[5]; PA0:=@Cl[5]; PB2:=@Cl[5]; AvA1:=False; AvB1:=False; AvB0:=False; AvA0:=False; AvB2:=False;
+ { A1 }
+ If ((SingleMcl=0) And (PartIdx=1) And ((HvCuPart=2) Or (HvCuPart=6) Or (HvCuPart=7))) Or SameMer(XA1,YA1) Then AvA1:=False
+ Else Begin
+  AvA1:=HvAvailPb(XCb,YCb,NCbS,X0,Y0,NPbW,NPbH,PartIdx,XA1,YA1);
+  If AvA1 Then Begin
+   PA1:=HvMvfPtr(XA1,YA1); Cl[Nb]:=PA1^;
+   If MergeIdx=0 Then Found:=True;
+   Inc(Nb);
+  End;
+ End;
+ { B1 }
+ If Not Found Then Begin
+  If ((SingleMcl=0) And (PartIdx=1) And ((HvCuPart=1) Or (HvCuPart=4) Or (HvCuPart=5))) Or SameMer(XB1,YB1) Then AvB1:=False
+  Else Begin
+   AvB1:=HvAvailPb(XCb,YCb,NCbS,X0,Y0,NPbW,NPbH,PartIdx,XB1,YB1);
+   If AvB1 Then Begin
+    PB1:=HvMvfPtr(XB1,YB1);
+    If Not (AvA1 And HvSameMv(PB1^,PA1^)) Then Begin
+     Cl[Nb]:=PB1^;
+     If MergeIdx=Nb Then Found:=True;
+     Inc(Nb);
+    End;
+   End;
+  End;
+ End;
+ { B0 }
+ If Not Found Then Begin
+  AvB0:=(XB0<S^.Width) And HvAvailPb(XCb,YCb,NCbS,X0,Y0,NPbW,NPbH,PartIdx,XB0,YB0) And Not SameMer(XB0,YB0);
+  If AvB0 Then Begin
+   PB0:=HvMvfPtr(XB0,YB0);
+   If Not (AvB1 And HvSameMv(PB0^,PB1^)) Then Begin
+    Cl[Nb]:=PB0^;
+    If MergeIdx=Nb Then Found:=True;
+    Inc(Nb);
+   End;
+  End;
+ End;
+ { A0 }
+ If Not Found Then Begin
+  AvA0:=(YA0<S^.Height) And HvAvailPb(XCb,YCb,NCbS,X0,Y0,NPbW,NPbH,PartIdx,XA0,YA0) And Not SameMer(XA0,YA0);
+  If AvA0 Then Begin
+   PA0:=HvMvfPtr(XA0,YA0);
+   If Not (AvA1 And HvSameMv(PA0^,PA1^)) Then Begin
+    Cl[Nb]:=PA0^;
+    If MergeIdx=Nb Then Found:=True;
+    Inc(Nb);
+   End;
+  End;
+ End;
+ { B2 }
+ If Not Found Then Begin
+  AvB2:=HvAvailPb(XCb,YCb,NCbS,X0,Y0,NPbW,NPbH,PartIdx,XB2,YB2) And Not SameMer(XB2,YB2);
+  If AvB2 Then Begin
+   PB2:=HvMvfPtr(XB2,YB2);
+   If Not (AvA1 And HvSameMv(PB2^,PA1^)) And Not (AvB1 And HvSameMv(PB2^,PB1^)) And (Nb<>4) Then Begin
+    Cl[Nb]:=PB2^;
+    If MergeIdx=Nb Then Found:=True;
+    Inc(Nb);
+   End;
+  End;
+ End;
+ { temporel }
+ If Not Found Then Begin
+  If (HvSh.TemporalMvp<>0) And (Nb<HvSh.MaxMerge) Then Begin
+   Av0:=HvTemporalMv(X0,Y0,NPbW,NPbH,0,Mv0x,Mv0y,0);
+   Av1:=False; Mv1x:=0; Mv1y:=0;
+   If HvSh.SliceType=HV_SLICE_B Then Av1:=HvTemporalMv(X0,Y0,NPbW,NPbH,0,Mv1x,Mv1y,1);
+   If Av0 Or Av1 Then Begin
+    Cl[Nb].Pf:=Ord(Av0)+(Ord(Av1) Shl 1);
+    Cl[Nb].Ref[0]:=0; Cl[Nb].Ref[1]:=0;
+    Cl[Nb].Mv[0]:=Mv0x; Cl[Nb].Mv[1]:=Mv0y; Cl[Nb].Mv[2]:=Mv1x; Cl[Nb].Mv[3]:=Mv1y;
+    If MergeIdx=Nb Then Found:=True;
+    Inc(Nb);
+   End;
+  End;
+ End;
+ If Not Found Then Begin
+  NbOrig:=Nb;
+  If (HvSh.SliceType=HV_SLICE_B) And (NbOrig>1) And (NbOrig<HvSh.MaxMerge) Then Begin
+   CombIdx:=0;
+   While (Nb<HvSh.MaxMerge) And (CombIdx<NbOrig*(NbOrig-1)) And Not Found Do Begin
+    L0i:=HvL0L1Idx[CombIdx,0]; L1i:=HvL0L1Idx[CombIdx,1];
+    If ((Cl[L0i].Pf And 1)<>0) And ((Cl[L1i].Pf And 2)<>0) And
+       ((HvCurRpl^.Poc[0,Cl[L0i].Ref[0]]<>HvCurRpl^.Poc[1,Cl[L1i].Ref[1]]) Or
+        (Cl[L0i].Mv[0]<>Cl[L1i].Mv[2]) Or (Cl[L0i].Mv[1]<>Cl[L1i].Mv[3])) Then Begin
+     Cl[Nb].Ref[0]:=Cl[L0i].Ref[0]; Cl[Nb].Ref[1]:=Cl[L1i].Ref[1];
+     Cl[Nb].Pf:=3;
+     Cl[Nb].Mv[0]:=Cl[L0i].Mv[0]; Cl[Nb].Mv[1]:=Cl[L0i].Mv[1];
+     Cl[Nb].Mv[2]:=Cl[L1i].Mv[2]; Cl[Nb].Mv[3]:=Cl[L1i].Mv[3];
+     If MergeIdx=Nb Then Found:=True;
+     Inc(Nb);
+    End;
+    Inc(CombIdx);
+   End;
+  End;
+ End;
+ If Not Found Then Begin
+  Zi:=0;
+  While (Nb<HvSh.MaxMerge) And Not Found Do Begin
+   Cl[Nb].Pf:=1+(Ord(HvSh.SliceType=HV_SLICE_B) Shl 1);
+   Cl[Nb].Mv[0]:=0; Cl[Nb].Mv[1]:=0; Cl[Nb].Mv[2]:=0; Cl[Nb].Mv[3]:=0;
+   If Zi<NbRefs Then Begin Cl[Nb].Ref[0]:=Zi; Cl[Nb].Ref[1]:=Zi; End Else Begin Cl[Nb].Ref[0]:=0; Cl[Nb].Ref[1]:=0; End;
+   If MergeIdx=Nb Then Found:=True;
+   Inc(Nb); Inc(Zi);
+  End;
+ End;
+ Out:=Cl[MergeIdx];
+ If (Out.Pf=3) And (NPbW2+NPbH2=12) Then Out.Pf:=1;
+End;
+
+{ ----- AMVP ----- }
+Var
+ HvAmX,HvAmY: LongInt;
+
+Function HvMpMx(X,Y,PredIdx,RefIdxCurr,RefIdx: LongInt): Boolean;
+Var P: ^THvMvf;
+Begin
+ HvMpMx:=False;
+ P:=HvMvfPtr(X,Y);
+ If ((P^.Pf And (1 Shl PredIdx))<>0) And
+    (HvCurRpl^.Poc[PredIdx,P^.Ref[PredIdx]]=HvCurRpl^.Poc[RefIdxCurr,RefIdx]) Then Begin
+  HvAmX:=P^.Mv[2*PredIdx]; HvAmY:=P^.Mv[2*PredIdx+1];
+  HvMpMx:=True;
+ End;
+End;
+
+Function HvMpMxLt(X,Y,PredIdx,RefIdxCurr,RefIdx: LongInt): Boolean;
+Var P: ^THvMvf; CurLt,ColLt,PocE,PocC,Pd: LongInt;
+Begin
+ HvMpMxLt:=False;
+ P:=HvMvfPtr(X,Y);
+ If (P^.Pf And (1 Shl PredIdx))<>0 Then Begin
+  CurLt:=HvCurRpl^.Lt[RefIdxCurr,RefIdx];
+  ColLt:=HvCurRpl^.Lt[PredIdx,P^.Ref[PredIdx]];
+  If ColLt=CurLt Then Begin
+   HvAmX:=P^.Mv[2*PredIdx]; HvAmY:=P^.Mv[2*PredIdx+1];
+   If CurLt=0 Then Begin
+    PocE:=HvCurRpl^.Poc[PredIdx,P^.Ref[PredIdx]];
+    PocC:=HvCurRpl^.Poc[RefIdxCurr,RefIdx];
+    If PocE<>PocC Then Begin
+     Pd:=HvPoc-PocE; If Pd=0 Then Pd:=1;
+     HvMvScale(HvAmX,HvAmY,HvAmX,HvAmY,Pd,HvPoc-PocC);
+    End;
+   End;
+   HvMpMxLt:=True;
+  End;
+ End;
+End;
+
+Procedure HvDeriveAmvp(X0,Y0,NPbW,NPbH,PartIdx,MvpFlag,LX: LongInt; Var M: THvMvf);
+Var
+ S: PHvSps; XCb,YCb,NCbS,IsScaled,NumCand,RefIdx,L0,L1: LongInt;
+ AvA0,AvA1,AvB0,AvB1,AvB2,FlA,FlB: Boolean;
+ XA0,YA0,XA1,YA1,XB0,YB0,XB1,YB1,XB2,YB2: LongInt;
+ MxA,MyA,MxB,MyB: LongInt; Cx,Cy: Array[0..1] Of LongInt; Tx,Ty: LongInt; Done: Boolean;
+Begin
+ S:=HvS; XCb:=HvCuX; YCb:=HvCuY; NCbS:=HvCbSize;
+ IsScaled:=0; FlA:=True; FlB:=True; NumCand:=0;
+ RefIdx:=M.Ref[LX]; L0:=LX; L1:=1-LX;
+ XA0:=X0-1; YA0:=Y0+NPbH; XA1:=X0-1; YA1:=Y0+NPbH-1;
+ AvA0:=(YA0<S^.Height) And HvAvailPb(XCb,YCb,NCbS,X0,Y0,NPbW,NPbH,PartIdx,XA0,YA0);
+ AvA1:=HvAvailPb(XCb,YCb,NCbS,X0,Y0,NPbW,NPbH,PartIdx,XA1,YA1);
+ If AvA0 Or AvA1 Then IsScaled:=1;
+ Done:=False; MxA:=0; MyA:=0; MxB:=0; MyB:=0;
+ If AvA0 Then Begin
+  If HvMpMx(XA0,YA0,L0,LX,RefIdx) Then Begin MxA:=HvAmX; MyA:=HvAmY; Done:=True; End
+  Else If HvMpMx(XA0,YA0,L1,LX,RefIdx) Then Begin MxA:=HvAmX; MyA:=HvAmY; Done:=True; End;
+ End;
+ If (Not Done) And AvA1 Then Begin
+  If HvMpMx(XA1,YA1,L0,LX,RefIdx) Then Begin MxA:=HvAmX; MyA:=HvAmY; Done:=True; End
+  Else If HvMpMx(XA1,YA1,L1,LX,RefIdx) Then Begin MxA:=HvAmX; MyA:=HvAmY; Done:=True; End;
+ End;
+ If (Not Done) And AvA0 Then Begin
+  If HvMpMxLt(XA0,YA0,L0,LX,RefIdx) Then Begin MxA:=HvAmX; MyA:=HvAmY; Done:=True; End
+  Else If HvMpMxLt(XA0,YA0,L1,LX,RefIdx) Then Begin MxA:=HvAmX; MyA:=HvAmY; Done:=True; End;
+ End;
+ If (Not Done) And AvA1 Then Begin
+  If HvMpMxLt(XA1,YA1,L0,LX,RefIdx) Then Begin MxA:=HvAmX; MyA:=HvAmY; Done:=True; End
+  Else If HvMpMxLt(XA1,YA1,L1,LX,RefIdx) Then Begin MxA:=HvAmX; MyA:=HvAmY; Done:=True; End;
+ End;
+ FlA:=Done;
+ { candidats B }
+ XB0:=X0+NPbW; YB0:=Y0-1; XB1:=X0+NPbW-1; YB1:=Y0-1; XB2:=X0-1; YB2:=Y0-1;
+ AvB0:=(XB0<S^.Width) And HvAvailPb(XCb,YCb,NCbS,X0,Y0,NPbW,NPbH,PartIdx,XB0,YB0);
+ AvB1:=HvAvailPb(XCb,YCb,NCbS,X0,Y0,NPbW,NPbH,PartIdx,XB1,YB1);
+ AvB2:=HvAvailPb(XCb,YCb,NCbS,X0,Y0,NPbW,NPbH,PartIdx,XB2,YB2);
+ Done:=False;
+ If AvB0 Then Begin
+  If HvMpMx(XB0,YB0,L0,LX,RefIdx) Then Begin MxB:=HvAmX; MyB:=HvAmY; Done:=True; End
+  Else If HvMpMx(XB0,YB0,L1,LX,RefIdx) Then Begin MxB:=HvAmX; MyB:=HvAmY; Done:=True; End;
+ End;
+ If (Not Done) And AvB1 Then Begin
+  If HvMpMx(XB1,YB1,L0,LX,RefIdx) Then Begin MxB:=HvAmX; MyB:=HvAmY; Done:=True; End
+  Else If HvMpMx(XB1,YB1,L1,LX,RefIdx) Then Begin MxB:=HvAmX; MyB:=HvAmY; Done:=True; End;
+ End;
+ If (Not Done) And AvB2 Then Begin
+  If HvMpMx(XB2,YB2,L0,LX,RefIdx) Then Begin MxB:=HvAmX; MyB:=HvAmY; Done:=True; End
+  Else If HvMpMx(XB2,YB2,L1,LX,RefIdx) Then Begin MxB:=HvAmX; MyB:=HvAmY; Done:=True; End;
+ End;
+ FlB:=Done;
+ If IsScaled=0 Then Begin
+  If FlB Then Begin FlA:=True; MxA:=MxB; MyA:=MyB; End;
+  FlB:=False;
+  If AvB0 Then Begin
+   FlB:=HvMpMxLt(XB0,YB0,L0,LX,RefIdx);
+   If Not FlB Then FlB:=HvMpMxLt(XB0,YB0,L1,LX,RefIdx);
+   If FlB Then Begin MxB:=HvAmX; MyB:=HvAmY; End;
+  End;
+  If AvB1 And Not FlB Then Begin
+   FlB:=HvMpMxLt(XB1,YB1,L0,LX,RefIdx);
+   If Not FlB Then FlB:=HvMpMxLt(XB1,YB1,L1,LX,RefIdx);
+   If FlB Then Begin MxB:=HvAmX; MyB:=HvAmY; End;
+  End;
+  If AvB2 And Not FlB Then Begin
+   FlB:=HvMpMxLt(XB2,YB2,L0,LX,RefIdx);
+   If Not FlB Then FlB:=HvMpMxLt(XB2,YB2,L1,LX,RefIdx);
+   If FlB Then Begin MxB:=HvAmX; MyB:=HvAmY; End;
+  End;
+ End;
+ Cx[0]:=0; Cy[0]:=0; Cx[1]:=0; Cy[1]:=0;
+ If FlA Then Begin Cx[NumCand]:=MxA; Cy[NumCand]:=MyA; Inc(NumCand); End;
+ If FlB And ((Not FlA) Or (MxA<>MxB) Or (MyA<>MyB)) Then Begin Cx[NumCand]:=MxB; Cy[NumCand]:=MyB; Inc(NumCand); End;
+ If (NumCand<2) And (HvSh.TemporalMvp<>0) And (MvpFlag=NumCand) Then Begin
+  If HvTemporalMv(X0,Y0,NPbW,NPbH,RefIdx,Tx,Ty,LX) Then Begin Cx[NumCand]:=Tx; Cy[NumCand]:=Ty; Inc(NumCand); End;
+ End;
+ M.Mv[2*LX]:=Cx[MvpFlag]; M.Mv[2*LX+1]:=Cy[MvpFlag];
+End;
+{ ---------------------------------------------------------------- }
+{ QP                                                               }
+{ ---------------------------------------------------------------- }
+Function HvQpPredict(XBase,YBase: LongInt): LongInt;
+Var S: PHvSps; CtbMask,QgMask,XQg,YQg,Xcb,Ycb,QA,QB,QPred: LongInt; AvA,AvB: Boolean;
+Begin
+ S:=HvS;
+ CtbMask:=(1 Shl S^.Log2Ctb)-1;
+ QgMask:=(1 Shl (S^.Log2Ctb-HvP^.DiffCuQpDeltaDepth))-1;
+ XQg:=XBase-(XBase And QgMask); YQg:=YBase-(YBase And QgMask);
+ Xcb:=XQg Shr S^.Log2MinCb; Ycb:=YQg Shr S^.Log2MinCb;
+ AvA:=((XBase And CtbMask)<>0) And ((XQg And CtbMask)<>0);
+ AvB:=((YBase And CtbMask)<>0) And ((YQg And CtbMask)<>0);
+ If (HvFirstQpGroup<>0) Or ((XQg=0) And (YQg=0)) Then Begin
+  If HvQpDeltaCoded=0 Then HvFirstQpGroup:=1 Else HvFirstQpGroup:=0;
+  QPred:=HvSh.SliceQp;
+ End Else QPred:=HvQpPred;
+ If AvA Then QA:=HvQpT^[Xcb-1+Ycb*S^.MinCbW] Else QA:=QPred;
+ If AvB Then QB:=HvQpT^[Xcb+(Ycb-1)*S^.MinCbW] Else QB:=QPred;
+ HvQpPredict:=(QA+QB+1) Shr 1;
+End;
+
+Procedure HvSetQpY(XBase,YBase: LongInt);
+Var Q,Off: LongInt;
+Begin
+ Q:=HvQpPredict(XBase,YBase);
+ If HvQpDelta<>0 Then Begin
+  Off:=HvS^.QpBdOffset;
+  HvQpY:=((Q+HvQpDelta+52+2*Off) Mod (52+Off))-Off;
+ End Else HvQpY:=Q;
+End;
+
+{ ---------------------------------------------------------------- }
+{ force de filtrage du deblocage                                    }
+{ ---------------------------------------------------------------- }
+Function HvBsMv(Var C,N: THvMvf; NR: PHvRpl): LongInt;
+Var P0c,P1c,P0n,P1n,RA,RB,Ax,Ay,Bx,By: LongInt;
+Begin
+ HvBsMv:=1;
+ If (C.Pf=3) And (N.Pf=3) Then Begin
+  P0c:=HvCurRpl^.Poc[0,C.Ref[0]]; P1c:=HvCurRpl^.Poc[1,C.Ref[1]];
+  P0n:=NR^.Poc[0,N.Ref[0]]; P1n:=NR^.Poc[1,N.Ref[1]];
+  If (P0c=P0n) And (P0c=P1c) And (P0n=P1n) Then Begin
+   If ((HvAbs(N.Mv[0]-C.Mv[0])>=4) Or (HvAbs(N.Mv[1]-C.Mv[1])>=4) Or (HvAbs(N.Mv[2]-C.Mv[2])>=4) Or (HvAbs(N.Mv[3]-C.Mv[3])>=4)) And
+      ((HvAbs(N.Mv[2]-C.Mv[0])>=4) Or (HvAbs(N.Mv[3]-C.Mv[1])>=4) Or (HvAbs(N.Mv[0]-C.Mv[2])>=4) Or (HvAbs(N.Mv[1]-C.Mv[3])>=4)) Then HvBsMv:=1
+   Else HvBsMv:=0;
+  End Else If (P0n=P0c) And (P1n=P1c) Then Begin
+   If (HvAbs(N.Mv[0]-C.Mv[0])>=4) Or (HvAbs(N.Mv[1]-C.Mv[1])>=4) Or (HvAbs(N.Mv[2]-C.Mv[2])>=4) Or (HvAbs(N.Mv[3]-C.Mv[3])>=4) Then HvBsMv:=1
+   Else HvBsMv:=0;
+  End Else If (P1n=P0c) And (P0n=P1c) Then Begin
+   If (HvAbs(N.Mv[2]-C.Mv[0])>=4) Or (HvAbs(N.Mv[3]-C.Mv[1])>=4) Or (HvAbs(N.Mv[0]-C.Mv[2])>=4) Or (HvAbs(N.Mv[1]-C.Mv[3])>=4) Then HvBsMv:=1
+   Else HvBsMv:=0;
+  End Else HvBsMv:=1;
+ End Else If (C.Pf<>3) And (N.Pf<>3) Then Begin
+  If (C.Pf And 1)<>0 Then Begin Ax:=C.Mv[0]; Ay:=C.Mv[1]; RA:=HvCurRpl^.Poc[0,C.Ref[0]]; End
+  Else Begin Ax:=C.Mv[2]; Ay:=C.Mv[3]; RA:=HvCurRpl^.Poc[1,C.Ref[1]]; End;
+  If (N.Pf And 1)<>0 Then Begin Bx:=N.Mv[0]; By:=N.Mv[1]; RB:=NR^.Poc[0,N.Ref[0]]; End
+  Else Begin Bx:=N.Mv[2]; By:=N.Mv[3]; RB:=NR^.Poc[1,N.Ref[1]]; End;
+  If RA=RB Then Begin
+   If (HvAbs(Ax-Bx)>=4) Or (HvAbs(Ay-By)>=4) Then HvBsMv:=1 Else HvBsMv:=0;
+  End Else HvBsMv:=1;
+ End;
+End;
+
+Function HvRplAt(X,Y: LongInt): Pointer;
+Var Ct: LongInt; Pc: ^THvPic;
+Begin
+ Pc:=@HvDpb[HvCur];
+ Ct:=(Y Shr HvS^.Log2Ctb)*HvS^.CtbW+(X Shr HvS^.Log2Ctb);
+ HvRplAt:=@Pc^.Rpl^[Pc^.RplTab^[Ct]];
+End;
+
+Procedure HvDeblockBs(X0,Y0,Log2Tr: LongInt);
+Var
+ S: PHvSps; W4,I,J,Bs,Yp,Yq,Xp,Xq,Xx,Yy,Size,CtbMask: LongInt; BUp,BLeft,IsIntra: Boolean;
+ Rpl: ^THvRpl; Curr,Oth: ^THvMvf;
+Begin
+ S:=HvS; W4:=S^.W4; Size:=1 Shl Log2Tr; CtbMask:=(1 Shl S^.Log2Ctb)-1;
+ IsIntra:=HvMvfCur^[(Y0 Shr 2)*W4+(X0 Shr 2)].Pf=0;
+ BUp:=(Y0>0) And ((Y0 And 7)=0);
+ If BUp And ((Y0 And CtbMask)=0) Then Begin
+  If (HvSh.LfAcrossSlices=0) And ((HvBoundFlags And 2)<>0) Then BUp:=False;
+  If (HvP^.LfAcrossTiles=0) And ((HvBoundFlags And 8)<>0) Then BUp:=False;
+ End;
+ If BUp Then Begin
+  If ((HvBoundFlags And 2)<>0) And ((Y0 And CtbMask)=0) Then Rpl:=HvRplAt(X0,Y0-1) Else Rpl:=HvCurRpl;
+  I:=0;
+  While I<Size Do Begin
+   Xx:=X0+I;
+   Oth:=@HvMvfCur^[((Y0-1) Shr 2)*W4+(Xx Shr 2)];
+   Curr:=@HvMvfCur^[(Y0 Shr 2)*W4+(Xx Shr 2)];
+   If (Curr^.Pf=0) Or (Oth^.Pf=0) Then Bs:=2
+   Else If (HvCbfT^[(Y0 Shr 2)*W4+(Xx Shr 2)]<>0) Or (HvCbfT^[((Y0-1) Shr 2)*W4+(Xx Shr 2)]<>0) Then Bs:=1
+   Else Bs:=HvBsMv(Curr^,Oth^,Rpl);
+   HvHbs^[(Y0 Shr 2)*W4+(Xx Shr 2)]:=Bs;
+   Inc(I,4);
+  End;
+ End;
+ BLeft:=(X0>0) And ((X0 And 7)=0);
+ If BLeft And ((X0 And CtbMask)=0) Then Begin
+  If (HvSh.LfAcrossSlices=0) And ((HvBoundFlags And 1)<>0) Then BLeft:=False;
+  If (HvP^.LfAcrossTiles=0) And ((HvBoundFlags And 4)<>0) Then BLeft:=False;
+ End;
+ If BLeft Then Begin
+  If ((HvBoundFlags And 1)<>0) And ((X0 And CtbMask)=0) Then Rpl:=HvRplAt(X0-1,Y0) Else Rpl:=HvCurRpl;
+  I:=0;
+  While I<Size Do Begin
+   Yy:=Y0+I;
+   Oth:=@HvMvfCur^[(Yy Shr 2)*W4+((X0-1) Shr 2)];
+   Curr:=@HvMvfCur^[(Yy Shr 2)*W4+(X0 Shr 2)];
+   If (Curr^.Pf=0) Or (Oth^.Pf=0) Then Bs:=2
+   Else If (HvCbfT^[(Yy Shr 2)*W4+(X0 Shr 2)]<>0) Or (HvCbfT^[(Yy Shr 2)*W4+((X0-1) Shr 2)]<>0) Then Bs:=1
+   Else Bs:=HvBsMv(Curr^,Oth^,Rpl);
+   HvVbs^[(Yy Shr 2)*W4+(X0 Shr 2)]:=Bs;
+   Inc(I,4);
+  End;
+ End;
+ If (Log2Tr>2) And Not IsIntra Then Begin
+  J:=8;
+  While J<Size Do Begin
+   I:=0;
+   While I<Size Do Begin
+    Oth:=@HvMvfCur^[((Y0+J-1) Shr 2)*W4+((X0+I) Shr 2)];
+    Curr:=@HvMvfCur^[((Y0+J) Shr 2)*W4+((X0+I) Shr 2)];
+    HvHbs^[((Y0+J) Shr 2)*W4+((X0+I) Shr 2)]:=HvBsMv(Curr^,Oth^,HvCurRpl);
+    Inc(I,4);
+   End;
+   Inc(J,8);
+  End;
+  J:=0;
+  While J<Size Do Begin
+   I:=8;
+   While I<Size Do Begin
+    Oth:=@HvMvfCur^[((Y0+J) Shr 2)*W4+((X0+I-1) Shr 2)];
+    Curr:=@HvMvfCur^[((Y0+J) Shr 2)*W4+((X0+I) Shr 2)];
+    HvVbs^[((Y0+J) Shr 2)*W4+((X0+I) Shr 2)]:=HvBsMv(Curr^,Oth^,HvCurRpl);
+    Inc(I,8);
+   End;
+   Inc(J,4);
+  End;
+ End;
+End;
+
+Procedure HvMarkNoFilt(X0,Y0,Log2Cb: LongInt);
+Var I,J,N,W4: LongInt;
+Begin
+ W4:=HvS^.W4; N:=(1 Shl Log2Cb) Shr 2;
+ For J:=0 To N-1 Do For I:=0 To N-1 Do HvNoFiltT^[((Y0 Shr 2)+J)*W4+(X0 Shr 2)+I]:=1;
+End;
+
+{ ---------------------------------------------------------------- }
+{ modes intra                                                       }
+{ ---------------------------------------------------------------- }
+Function HvLumaIntraMode(X0,Y0,PuSize,PrevFlag: LongInt): LongInt;
+Var
+ S: PHvSps; W4,Xp,Yp,SzPu,XB,YB,CUp,CLeft,YCtb,Mode,I,J,Tmp: LongInt; Cand: Array[0..2] Of LongInt;
+Begin
+ S:=HvS; W4:=S^.W4; Xp:=X0 Shr 2; Yp:=Y0 Shr 2; SzPu:=PuSize Shr 2;
+ XB:=X0 And ((1 Shl S^.Log2Ctb)-1); YB:=Y0 And ((1 Shl S^.Log2Ctb)-1);
+ If (HvCtbUp<>0) Or (YB<>0) Then CUp:=HvIpmT^[(Yp-1)*W4+Xp] Else CUp:=1;
+ If (HvCtbLeft<>0) Or (XB<>0) Then CLeft:=HvIpmT^[Yp*W4+Xp-1] Else CLeft:=1;
+ YCtb:=(Y0 Shr S^.Log2Ctb) Shl S^.Log2Ctb;
+ If (Y0-1)<YCtb Then CUp:=1;
+ If CLeft=CUp Then Begin
+  If CLeft<2 Then Begin Cand[0]:=0; Cand[1]:=1; Cand[2]:=26; End
+  Else Begin
+   Cand[0]:=CLeft; Cand[1]:=2+((CLeft-2-1+32) And 31); Cand[2]:=2+((CLeft-2+1) And 31);
+  End;
+ End Else Begin
+  Cand[0]:=CLeft; Cand[1]:=CUp;
+  If (Cand[0]<>0) And (Cand[1]<>0) Then Cand[2]:=0
+  Else If (Cand[0]<>1) And (Cand[1]<>1) Then Cand[2]:=1
+  Else Cand[2]:=26;
+ End;
+ If PrevFlag<>0 Then Mode:=Cand[HvMpmIdx]
+ Else Begin
+  If Cand[0]>Cand[1] Then Begin Tmp:=Cand[0]; Cand[0]:=Cand[1]; Cand[1]:=Tmp; End;
+  If Cand[0]>Cand[2] Then Begin Tmp:=Cand[0]; Cand[0]:=Cand[2]; Cand[2]:=Tmp; End;
+  If Cand[1]>Cand[2] Then Begin Tmp:=Cand[1]; Cand[1]:=Cand[2]; Cand[2]:=Tmp; End;
+  Mode:=HvRemIntra;
+  For I:=0 To 2 Do If Mode>=Cand[I] Then Inc(Mode);
+ End;
+ If SzPu=0 Then SzPu:=1;
+ For I:=0 To SzPu-1 Do
+  For J:=0 To SzPu-1 Do HvIpmT^[(Yp+I)*W4+Xp+J]:=Mode;
+ HvLumaIntraMode:=Mode;
+End;
+
+Const
+ HvChromaTab: Array[0..3] Of Byte=(0,26,10,1);
+ HvModeIdx422: Array[0..34] Of Byte=(0,1,2,2,2,2,3,5,7,8,10,12,13,15,17,18,19,20,21,22,23,23,24,24,25,25,26,27,27,28,28,29,29,30,31);
+
+Procedure HvIntraPredictionUnit(X0,Y0,Log2Cb: LongInt);
+Var
+ Split,PbSize,Side,I,J,CM,Mi: LongInt; Prev: Array[0..3] Of LongInt;
+Begin
+ If HvCuPart=3 Then Split:=1 Else Split:=0;
+ PbSize:=(1 Shl Log2Cb) Shr Split; Side:=Split+1;
+ For I:=0 To Side-1 Do For J:=0 To Side-1 Do Prev[2*I+J]:=HvBin(HC_PREV_INTRA);
+ For I:=0 To Side-1 Do
+  For J:=0 To Side-1 Do Begin
+   If Prev[2*I+J]<>0 Then HvMpmIdx:=HvMpmIdxDec Else HvRemIntra:=HvBypN(5);
+   HvIpmY[2*I+J]:=HvLumaIntraMode(X0+PbSize*J,Y0+PbSize*I,PbSize,Prev[2*I+J]);
+  End;
+ If HvS^.Chroma=3 Then Begin
+  For I:=0 To Side-1 Do For J:=0 To Side-1 Do Begin
+   CM:=HvIntraChromaPredMode; HvChromaMode[2*I+J]:=CM;
+   If CM<>4 Then Begin
+    If HvIpmY[2*I+J]=HvChromaTab[CM] Then HvIpmC[2*I+J]:=34 Else HvIpmC[2*I+J]:=HvChromaTab[CM];
+   End Else HvIpmC[2*I+J]:=HvIpmY[2*I+J];
+  End;
+ End Else If HvS^.Chroma=2 Then Begin
+  CM:=HvIntraChromaPredMode; HvChromaMode[0]:=CM;
+  If CM<>4 Then Begin
+   If HvIpmY[0]=HvChromaTab[CM] Then Mi:=34 Else Mi:=HvChromaTab[CM];
+  End Else Mi:=HvIpmY[0];
+  HvIpmC[0]:=HvModeIdx422[Mi];
+ End Else If HvS^.Chroma<>0 Then Begin
+  CM:=HvIntraChromaPredMode; HvChromaMode[0]:=CM;
+  If CM<>4 Then Begin
+   If HvIpmY[0]=HvChromaTab[CM] Then HvIpmC[0]:=34 Else HvIpmC[0]:=HvChromaTab[CM];
+  End Else HvIpmC[0]:=HvIpmY[0];
+ End;
+End;
+
+Procedure HvIntraDefault(X0,Y0,Log2Cb: LongInt);
+Var I,J,N,W4: LongInt;
+Begin
+ W4:=HvS^.W4; N:=(1 Shl Log2Cb) Shr 2;
+ For J:=0 To N-1 Do For I:=0 To N-1 Do HvIpmT^[((Y0 Shr 2)+J)*W4+(X0 Shr 2)+I]:=1;
+End;
+
+{ ---------------------------------------------------------------- }
+{ unite de prediction inter                                         }
+{ ---------------------------------------------------------------- }
+Procedure HvPredictionUnit(X0,Y0,NPbW,NPbH,PartIdx: LongInt);
+Var
+ S: PHvSps; Mv: THvMvf; MergeIdx,SkipF,IPI,I,J,W4,Mvp: LongInt;
+Begin
+ S:=HvS; W4:=S^.W4;
+ FillChar(Mv,SizeOf(Mv),0);
+ SkipF:=HvSkipT^[(Y0 Shr S^.Log2MinCb)*S^.MinCbW+(X0 Shr S^.Log2MinCb)];
+ If SkipF=0 Then HvMergeFlag:=HvBin(HC_MERGE_FLAG);
+ If (SkipF<>0) Or (HvMergeFlag<>0) Then Begin
+  If HvSh.MaxMerge>1 Then MergeIdx:=HvMergeIdxDec Else MergeIdx:=0;
+  HvDeriveMerge(X0,Y0,NPbW,NPbH,PartIdx,MergeIdx,Mv);
+ End Else Begin
+  IPI:=0;
+  Mv.Pf:=0;
+  If HvSh.SliceType=HV_SLICE_B Then IPI:=HvInterPredIdc(NPbW,NPbH);
+  If IPI<>1 Then Begin
+   If HvSh.NbRefs[0]>0 Then Mv.Ref[0]:=HvRefIdxDec(HvSh.NbRefs[0]);
+   Mv.Pf:=1;
+   HvMvdCoding;
+   Mvp:=HvBin(HC_MVP_FLAG);
+   HvDeriveAmvp(X0,Y0,NPbW,NPbH,PartIdx,Mvp,0,Mv);
+   Mv.Mv[0]:=Mv.Mv[0]+HvMvdX; Mv.Mv[1]:=Mv.Mv[1]+HvMvdY;
+  End;
+  If IPI<>0 Then Begin
+   If HvSh.NbRefs[1]>0 Then Mv.Ref[1]:=HvRefIdxDec(HvSh.NbRefs[1]);
+   If (HvSh.MvdL1Zero=1) And (IPI=2) Then Begin HvMvdX:=0; HvMvdY:=0; End
+   Else HvMvdCoding;
+   Mv.Pf:=Mv.Pf+2;
+   Mvp:=HvBin(HC_MVP_FLAG);
+   HvDeriveAmvp(X0,Y0,NPbW,NPbH,PartIdx,Mvp,1,Mv);
+   Mv.Mv[2]:=Mv.Mv[2]+HvMvdX; Mv.Mv[3]:=Mv.Mv[3]+HvMvdY;
+  End;
+ End;
+ { stockage }
+ For J:=0 To (NPbH Shr 2)-1 Do
+  For I:=0 To (NPbW Shr 2)-1 Do HvMvfCur^[((Y0 Shr 2)+J)*W4+(X0 Shr 2)+I]:=Mv;
+ { validite des references }
+ If ((Mv.Pf And 1)<>0) And ((Mv.Ref[0]<0) Or (Mv.Ref[0]>=HvSh.NbRefs[0])) Then Exit;
+ If ((Mv.Pf And 2)<>0) And ((Mv.Ref[1]<0) Or (Mv.Ref[1]>=HvSh.NbRefs[1])) Then Exit;
+ HvInterPredict(X0,Y0,NPbW,NPbH,Mv);
+End;
+{ ---------------------------------------------------------------- }
+{ arbre de transformation                                           }
+{ ---------------------------------------------------------------- }
+Procedure HvCrossComp(Idx: LongInt);
+Var L: LongInt;
+Begin
+ L:=0;
+ While (L<4) And (HvBin(HC_RES_SCALE+4*Idx+L)<>0) Do Inc(L);
+ If L<>0 Then Begin
+  If HvBin(HC_RES_SIGN+Idx)<>0 Then HvResScale:=-(1 Shl (L-1)) Else HvResScale:=1 Shl (L-1);
+ End Else HvResScale:=0;
+End;
+
+Procedure HvCrossOnly(CIdx,X0,Y0,Log2C: LongInt);
+Var I,N: LongInt;
+Begin
+ N:=1 Shl Log2C;
+ For I:=0 To N*N-1 Do HvResC[I]:=HvSar(HvResScale*HvResY[I],3);
+ HvAddResidual(CIdx,X0,Y0,Log2C,HvPL(@HvResC));
+End;
+
+Function HvScanOf(Mode: LongInt): LongInt;
+Begin
+ If (Mode>=6) And (Mode<=14) Then HvScanOf:=2
+ Else If (Mode>=22) And (Mode<=30) Then HvScanOf:=1
+ Else HvScanOf:=0;
+End;
+
+Function HvTransformUnit(X0,Y0,XBase,YBase,CbXBase,CbYBase,Log2Cb,Log2Tr,BlkIdx,CbfLuma,CbfCb0,CbfCb1,CbfCr0,CbfCr1: LongInt): Boolean;
+Var
+ S: PHvSps; Pp: PHvPps; Log2Tc,CbfChroma,ScanIdx,ScanC,I,N2,Idx,TsH,TsV,Q: LongInt; CbfCb,CbfCr: Array[0..1] Of LongInt;
+ Lim: LongInt;
+Begin
+ S:=HvS; Pp:=HvP; HvTransformUnit:=False;
+ CbfCb[0]:=CbfCb0; CbfCb[1]:=CbfCb1; CbfCr[0]:=CbfCr0; CbfCr[1]:=CbfCr1;
+ Log2Tc:=Log2Tr-S^.HShift[1];
+ If S^.Chroma=2 Then N2:=2 Else N2:=1;
+ If HvCuPred=1 Then HvIntraPred(X0,Y0,Log2Tr,0);
+ CbfChroma:=CbfCb[0] Or CbfCr[0];
+ If S^.Chroma=2 Then CbfChroma:=CbfChroma Or CbfCb[1] Or CbfCr[1];
+ If (CbfLuma<>0) Or (CbfChroma<>0) Then Begin
+  ScanIdx:=0; ScanC:=0;
+  If (Pp^.CuQpDeltaEnabled<>0) And (HvQpDeltaCoded=0) Then Begin
+   HvQpDelta:=HvCuQpDeltaAbs;
+   If HvQpDelta<0 Then Exit;
+   If HvQpDelta<>0 Then If HvByp=1 Then HvQpDelta:=-HvQpDelta;
+   HvQpDeltaCoded:=1;
+   If (HvQpDelta<-(26+S^.QpBdOffset Div 2)) Or (HvQpDelta>(25+S^.QpBdOffset Div 2)) Then Exit;
+   HvSetQpY(CbXBase,CbYBase);
+  End;
+  If (HvSh.CuChromaQpOffEnabled<>0) And (CbfChroma<>0) And (HvCuBypass=0) And (HvCqpCoded=0) Then Begin
+   If HvBin(HC_CQP_FLAG)<>0 Then Begin
+    Idx:=0;
+    If Pp^.CqpListLen>0 Then Begin
+     While (Idx<Pp^.CqpListLen) And (HvBin(HC_CQP_IDX)<>0) Do Inc(Idx);
+    End;
+    HvCqpOffCb:=Pp^.CbQpList[Idx]; HvCqpOffCr:=Pp^.CrQpList[Idx];
+   End Else Begin HvCqpOffCb:=0; HvCqpOffCr:=0; End;
+   HvCqpCoded:=1;
+  End;
+  If (HvCuPred=1) And (Log2Tr<4) Then Begin
+   ScanIdx:=HvScanOf(HvTuIpm);
+   ScanC:=HvScanOf(HvTuIpmC);
+  End;
+  HvCrossPf:=0;
+  If CbfLuma<>0 Then HvResidual(X0,Y0,Log2Tr,ScanIdx,0);
+  If (S^.Chroma<>0) And ((Log2Tr>2) Or (S^.Chroma=3)) Then Begin
+   If (Pp^.CrossComp<>0) And (CbfLuma<>0) And ((HvCuPred=0) Or (HvTuChromaMode=4)) Then HvCrossPf:=1 Else HvCrossPf:=0;
+   If HvCrossPf<>0 Then HvCrossComp(0);
+   For I:=0 To N2-1 Do Begin
+    If HvCuPred=1 Then HvIntraPred(X0,Y0+(I Shl Log2Tc),Log2Tc,1);
+    If CbfCb[I]<>0 Then HvResidual(X0,Y0+(I Shl Log2Tc),Log2Tc,ScanC,1)
+    Else If HvCrossPf<>0 Then HvCrossOnly(1,X0,Y0+(I Shl Log2Tc),Log2Tc);
+   End;
+   If HvCrossPf<>0 Then HvCrossComp(1);
+   For I:=0 To N2-1 Do Begin
+    If HvCuPred=1 Then HvIntraPred(X0,Y0+(I Shl Log2Tc),Log2Tc,2);
+    If CbfCr[I]<>0 Then HvResidual(X0,Y0+(I Shl Log2Tc),Log2Tc,ScanC,2)
+    Else If HvCrossPf<>0 Then HvCrossOnly(2,X0,Y0+(I Shl Log2Tc),Log2Tc);
+   End;
+   HvCrossPf:=0;
+  End Else If (S^.Chroma<>0) And (BlkIdx=3) Then Begin
+   For I:=0 To N2-1 Do Begin
+    If HvCuPred=1 Then HvIntraPred(XBase,YBase+(I Shl Log2Tr),Log2Tr,1);
+    If CbfCb[I]<>0 Then HvResidual(XBase,YBase+(I Shl Log2Tr),Log2Tr,ScanC,1);
+   End;
+   For I:=0 To N2-1 Do Begin
+    If HvCuPred=1 Then HvIntraPred(XBase,YBase+(I Shl Log2Tr),Log2Tr,2);
+    If CbfCr[I]<>0 Then HvResidual(XBase,YBase+(I Shl Log2Tr),Log2Tr,ScanC,2);
+   End;
+  End;
+ End Else If (S^.Chroma<>0) And (HvCuPred=1) Then Begin
+  If (Log2Tr>2) Or (S^.Chroma=3) Then Begin
+   HvIntraPred(X0,Y0,Log2Tc,1);
+   HvIntraPred(X0,Y0,Log2Tc,2);
+   If S^.Chroma=2 Then Begin
+    HvIntraPred(X0,Y0+(1 Shl Log2Tc),Log2Tc,1);
+    HvIntraPred(X0,Y0+(1 Shl Log2Tc),Log2Tc,2);
+   End;
+  End Else If BlkIdx=3 Then Begin
+   HvIntraPred(XBase,YBase,Log2Tr,1);
+   HvIntraPred(XBase,YBase,Log2Tr,2);
+   If S^.Chroma=2 Then Begin
+    HvIntraPred(XBase,YBase+(1 Shl Log2Tr),Log2Tr,1);
+    HvIntraPred(XBase,YBase+(1 Shl Log2Tr),Log2Tr,2);
+   End;
+  End;
+ End;
+ HvTransformUnit:=True;
+End;
+
+Function HvTransformTree(X0,Y0,XBase,YBase,CbXBase,CbYBase,Log2Cb,Log2Tr,Depth,BlkIdx,BCb0,BCb1,BCr0,BCr1: LongInt): Boolean;
+Var
+ S: PHvSps; Split,Cb0,Cb1,Cr0,Cr1,CbfLuma,InterSplit,X1,Y1,Half,I,J,Mn,W4,Xt,Yt: LongInt;
+Begin
+ S:=HvS; HvTransformTree:=False;
+ Cb0:=BCb0; Cb1:=BCb1; Cr0:=BCr0; Cr1:=BCr1;
+ If HvCuIntraSplit<>0 Then Begin
+  If Depth=1 Then Begin
+   HvTuIpm:=HvIpmY[BlkIdx];
+   If S^.Chroma=3 Then Begin HvTuIpmC:=HvIpmC[BlkIdx]; HvTuChromaMode:=HvChromaMode[BlkIdx]; End
+   Else Begin HvTuIpmC:=HvIpmC[0]; HvTuChromaMode:=HvChromaMode[0]; End;
+  End;
+ End Else Begin
+  HvTuIpm:=HvIpmY[0]; HvTuIpmC:=HvIpmC[0]; HvTuChromaMode:=HvChromaMode[0];
+ End;
+ If (Log2Tr<=S^.Log2MaxTb) And (Log2Tr>S^.Log2MinTb) And (Depth<HvCuMaxTr) And Not ((HvCuIntraSplit<>0) And (Depth=0)) Then
+  Split:=HvBin(HC_SPLIT_TR+5-Log2Tr)
+ Else Begin
+  InterSplit:=Ord((S^.MaxThInter=0) And (HvCuPred=0) And (HvCuPart<>0) And (Depth=0));
+  Split:=Ord((Log2Tr>S^.Log2MaxTb) Or ((HvCuIntraSplit<>0) And (Depth=0)) Or (InterSplit<>0));
+ End;
+ If (S^.Chroma<>0) And ((Log2Tr>2) Or (S^.Chroma=3)) Then Begin
+  If (Depth=0) Or (Cb0<>0) Then Begin
+   Cb0:=HvBin(HC_CBF_CBCR+Depth);
+   If (S^.Chroma=2) And ((Split=0) Or (Log2Tr=3)) Then Cb1:=HvBin(HC_CBF_CBCR+Depth);
+  End;
+  If (Depth=0) Or (Cr0<>0) Then Begin
+   Cr0:=HvBin(HC_CBF_CBCR+Depth);
+   If (S^.Chroma=2) And ((Split=0) Or (Log2Tr=3)) Then Cr1:=HvBin(HC_CBF_CBCR+Depth);
+  End;
+ End;
+ If Split<>0 Then Begin
+  Half:=1 Shl (Log2Tr-1); X1:=X0+Half; Y1:=Y0+Half;
+  If Not HvTransformTree(X0,Y0,X0,Y0,CbXBase,CbYBase,Log2Cb,Log2Tr-1,Depth+1,0,Cb0,Cb1,Cr0,Cr1) Then Exit;
+  If Not HvTransformTree(X1,Y0,X0,Y0,CbXBase,CbYBase,Log2Cb,Log2Tr-1,Depth+1,1,Cb0,Cb1,Cr0,Cr1) Then Exit;
+  If Not HvTransformTree(X0,Y1,X0,Y0,CbXBase,CbYBase,Log2Cb,Log2Tr-1,Depth+1,2,Cb0,Cb1,Cr0,Cr1) Then Exit;
+  If Not HvTransformTree(X1,Y1,X0,Y0,CbXBase,CbYBase,Log2Cb,Log2Tr-1,Depth+1,3,Cb0,Cb1,Cr0,Cr1) Then Exit;
+ End Else Begin
+  CbfLuma:=1;
+  If (HvCuPred=1) Or (Depth<>0) Or (Cb0<>0) Or (Cr0<>0) Or ((S^.Chroma=2) And ((Cb1<>0) Or (Cr1<>0))) Then
+   CbfLuma:=HvBin(HC_CBF_LUMA+Ord(Depth=0));
+  If Not HvTransformUnit(X0,Y0,XBase,YBase,CbXBase,CbYBase,Log2Cb,Log2Tr,BlkIdx,CbfLuma,Cb0,Cb1,Cr0,Cr1) Then Exit;
+  If CbfLuma<>0 Then Begin
+   W4:=S^.W4; Mn:=(1 Shl Log2Tr) Shr 2;
+   For J:=0 To Mn-1 Do For I:=0 To Mn-1 Do HvCbfT^[((Y0 Shr 2)+J)*W4+(X0 Shr 2)+I]:=1;
+  End;
+  If HvSh.DisableDbf=0 Then HvDeblockBs(X0,Y0,Log2Tr);
+ End;
+ HvTransformTree:=True;
+End;
+
+{ ---------------------------------------------------------------- }
+{ PCM                                                               }
+{ ---------------------------------------------------------------- }
+Procedure HvPcmSample(X0,Y0,Log2Cb: LongInt);
+Var
+ S: PHvSps; Pic: ^THvPic; Bits,C,Cn,W,H,Y,X,Pos,Bd: LongInt; Pl: HvPW;
+Begin
+ S:=HvS; Pic:=@HvDpb[HvCur];
+ If HvSh.DisableDbf=0 Then HvDeblockBs(X0,Y0,Log2Cb);
+ Pos:=HvCbPos;
+ HvBp:=Pos*8;
+ HvBitsEnd:=HvRbLen*8;
+ If S^.Chroma<>0 Then Cn:=2 Else Cn:=0;
+ For C:=0 To Cn Do Begin
+  W:=(1 Shl Log2Cb) Shr S^.HShift[C]; H:=(1 Shl Log2Cb) Shr S^.VShift[C];
+  If C=0 Then Bd:=S^.PcmBd Else Bd:=S^.PcmBdC;
+  Pl:=Pic^.Plane[C];
+  For Y:=0 To H-1 Do
+   For X:=0 To W-1 Do
+    Pl^[((Y0 Shr S^.VShift[C])+Y)*Pic^.Stride[C]+(X0 Shr S^.HShift[C])+X]:=HvBits(Bd) Shl (S^.BitDepth-Bd);
+ End;
+ HvCbInit((HvBp+7) Shr 3);
+End;
+
+{ ---------------------------------------------------------------- }
+{ unite de codage                                                   }
+{ ---------------------------------------------------------------- }
+Function HvCodingUnit(X0,Y0,Log2Cb: LongInt): Boolean;
+Var
+ S: PHvSps; CbSize,Half,Len,W4,I,J,PcmFlag,RqtRoot,QpMask,Xcb,Ycb: LongInt; SkipF: LongInt;
+Begin
+ S:=HvS; HvCodingUnit:=False;
+ CbSize:=1 Shl Log2Cb; HvCbSize:=CbSize;
+ Len:=CbSize Shr S^.Log2MinCb; W4:=S^.W4;
+ Xcb:=X0 Shr S^.Log2MinCb; Ycb:=Y0 Shr S^.Log2MinCb;
+ QpMask:=(1 Shl (S^.Log2Ctb-HvP^.DiffCuQpDeltaDepth))-1;
+ HvCuX:=X0; HvCuY:=Y0; HvCuPred:=1; HvCuPart:=0; HvCuIntraSplit:=0;
+ For I:=0 To 3 Do HvIpmY[I]:=1;
+ If HvP^.TransquantBypass<>0 Then Begin
+  HvCuBypass:=HvBin(HC_TQ_BYPASS);
+  If HvCuBypass<>0 Then HvMarkNoFilt(X0,Y0,Log2Cb);
+ End Else HvCuBypass:=0;
+ If HvSh.SliceType<>HV_SLICE_I Then Begin
+  SkipF:=HvSkipFlag(X0,Y0);
+  If SkipF<>0 Then HvCuPred:=2 Else HvCuPred:=0;
+ End Else SkipF:=0;
+ For J:=0 To Len-1 Do For I:=0 To Len-1 Do HvSkipT^[(Ycb+J)*S^.MinCbW+Xcb+I]:=SkipF;
+ If SkipF<>0 Then Begin
+  HvPredictionUnit(X0,Y0,CbSize,CbSize,0);
+  HvIntraDefault(X0,Y0,Log2Cb);
+  If HvSh.DisableDbf=0 Then HvDeblockBs(X0,Y0,Log2Cb);
+ End Else Begin
+  PcmFlag:=0;
+  If HvSh.SliceType<>HV_SLICE_I Then HvCuPred:=HvBin(HC_PRED_MODE);
+  If (HvCuPred<>1) Or (Log2Cb=S^.Log2MinCb) Then Begin
+   HvCuPart:=HvPartMode(Log2Cb);
+   HvCuIntraSplit:=Ord((HvCuPart=3) And (HvCuPred=1));
+  End;
+  If HvCuPred=1 Then Begin
+   If (HvCuPart=0) And (S^.Pcm<>0) And (Log2Cb>=S^.PcmLog2Min) And (Log2Cb<=S^.PcmLog2Max) Then PcmFlag:=HvTermPcm;
+   If PcmFlag<>0 Then Begin
+    HvIntraDefault(X0,Y0,Log2Cb);
+    HvPcmSample(X0,Y0,Log2Cb);
+    If S^.PcmLfDisable<>0 Then HvMarkNoFilt(X0,Y0,Log2Cb);
+   End Else HvIntraPredictionUnit(X0,Y0,Log2Cb);
+  End Else Begin
+   HvIntraDefault(X0,Y0,Log2Cb);
+   Half:=CbSize Shr 1;
+   Case HvCuPart Of
+    0: HvPredictionUnit(X0,Y0,CbSize,CbSize,0);
+    1: Begin HvPredictionUnit(X0,Y0,CbSize,Half,0); HvPredictionUnit(X0,Y0+Half,CbSize,Half,1); End;
+    2: Begin HvPredictionUnit(X0,Y0,Half,CbSize,0); HvPredictionUnit(X0+Half,Y0,Half,CbSize,1); End;
+    4: Begin HvPredictionUnit(X0,Y0,CbSize,CbSize Div 4,0); HvPredictionUnit(X0,Y0+CbSize Div 4,CbSize,CbSize*3 Div 4,1); End;
+    5: Begin HvPredictionUnit(X0,Y0,CbSize,CbSize*3 Div 4,0); HvPredictionUnit(X0,Y0+CbSize*3 Div 4,CbSize,CbSize Div 4,1); End;
+    6: Begin HvPredictionUnit(X0,Y0,CbSize Div 4,CbSize,0); HvPredictionUnit(X0+CbSize Div 4,Y0,CbSize*3 Div 4,CbSize,1); End;
+    7: Begin HvPredictionUnit(X0,Y0,CbSize*3 Div 4,CbSize,0); HvPredictionUnit(X0+CbSize*3 Div 4,Y0,CbSize Div 4,CbSize,1); End;
+    3: Begin
+     HvPredictionUnit(X0,Y0,Half,Half,0); HvPredictionUnit(X0+Half,Y0,Half,Half,1);
+     HvPredictionUnit(X0,Y0+Half,Half,Half,2); HvPredictionUnit(X0+Half,Y0+Half,Half,Half,3);
+    End;
+   End;
+  End;
+  If PcmFlag=0 Then Begin
+   RqtRoot:=1;
+   If (HvCuPred<>1) And Not ((HvCuPart=0) And (HvMergeFlag<>0)) Then RqtRoot:=HvBin(HC_NO_RESIDUAL);
+   If RqtRoot<>0 Then Begin
+    If HvCuPred=1 Then HvCuMaxTr:=S^.MaxThIntra+HvCuIntraSplit Else HvCuMaxTr:=S^.MaxThInter;
+    If Not HvTransformTree(X0,Y0,X0,Y0,X0,Y0,Log2Cb,Log2Cb,0,0,0,0,0,0) Then Exit;
+   End Else Begin
+    If HvSh.DisableDbf=0 Then HvDeblockBs(X0,Y0,Log2Cb);
+   End;
+  End;
+ End;
+ If (HvP^.CuQpDeltaEnabled<>0) And (HvQpDeltaCoded=0) Then HvSetQpY(X0,Y0);
+ For J:=0 To Len-1 Do For I:=0 To Len-1 Do HvQpT^[(Ycb+J)*S^.MinCbW+Xcb+I]:=HvQpY;
+ If (((X0+CbSize) And QpMask)=0) And (((Y0+CbSize) And QpMask)=0) Then HvQpPred:=HvQpY;
+ For J:=0 To Len-1 Do For I:=0 To Len-1 Do HvCtDepthT^[(Ycb+J)*S^.MinCbW+Xcb+I]:=HvCtDepth;
+ HvCodingUnit:=True;
+End;
+
+{ renvoie 1 s'il reste des donnees, 0 en fin de tranche, -1 en cas d'erreur }
+Function HvCodingQuadtree(X0,Y0,Log2Cb,Depth: LongInt): LongInt;
+Var
+ S: PHvSps; CbSize,Split,More,X1,Y1,Half,QpMask,EndFlag: LongInt;
+Begin
+ S:=HvS; CbSize:=1 Shl Log2Cb; HvCtDepth:=Depth;
+ If (X0+CbSize<=S^.Width) And (Y0+CbSize<=S^.Height) And (Log2Cb>S^.Log2MinCb) Then
+  Split:=HvSplitCuFlag(Depth,X0,Y0)
+ Else Split:=Ord(Log2Cb>S^.Log2MinCb);
+ If (HvP^.CuQpDeltaEnabled<>0) And (Log2Cb>=S^.Log2Ctb-HvP^.DiffCuQpDeltaDepth) Then Begin
+  HvQpDeltaCoded:=0; HvQpDelta:=0;
+ End;
+ If (HvSh.CuChromaQpOffEnabled<>0) And (Log2Cb>=S^.Log2Ctb-HvP^.DiffCuChromaQpDepth) Then HvCqpCoded:=0;
+ If Split<>0 Then Begin
+  QpMask:=(1 Shl (S^.Log2Ctb-HvP^.DiffCuQpDeltaDepth))-1;
+  Half:=CbSize Shr 1; X1:=X0+Half; Y1:=Y0+Half;
+  More:=HvCodingQuadtree(X0,Y0,Log2Cb-1,Depth+1);
+  If More<0 Then Begin HvCodingQuadtree:=More; Exit; End;
+  If (More<>0) And (X1<S^.Width) Then Begin
+   More:=HvCodingQuadtree(X1,Y0,Log2Cb-1,Depth+1);
+   If More<0 Then Begin HvCodingQuadtree:=More; Exit; End;
+  End;
+  If (More<>0) And (Y1<S^.Height) Then Begin
+   More:=HvCodingQuadtree(X0,Y1,Log2Cb-1,Depth+1);
+   If More<0 Then Begin HvCodingQuadtree:=More; Exit; End;
+  End;
+  If (More<>0) And (X1<S^.Width) And (Y1<S^.Height) Then Begin
+   More:=HvCodingQuadtree(X1,Y1,Log2Cb-1,Depth+1);
+   If More<0 Then Begin HvCodingQuadtree:=More; Exit; End;
+  End;
+  If (((X0+CbSize) And QpMask)=0) And (((Y0+CbSize) And QpMask)=0) Then HvQpPred:=HvQpY;
+  If More<>0 Then HvCodingQuadtree:=Ord((X1+Half<S^.Width) Or (Y1+Half<S^.Height))
+  Else HvCodingQuadtree:=0;
+ End Else Begin
+  If Not HvCodingUnit(X0,Y0,Log2Cb) Then Begin HvCodingQuadtree:=-1; Exit; End;
+  If ((((X0+CbSize) And ((1 Shl S^.Log2Ctb)-1))=0) Or (X0+CbSize>=S^.Width)) And
+     ((((Y0+CbSize) And ((1 Shl S^.Log2Ctb)-1))=0) Or (Y0+CbSize>=S^.Height)) Then Begin
+   EndFlag:=HvTerm;
+   HvCodingQuadtree:=1-EndFlag;
+  End Else HvCodingQuadtree:=1;
+ End;
+End;
+{ ---------------------------------------------------------------- }
+{ SAO (syntaxe)                                                    }
+{ ---------------------------------------------------------------- }
+Procedure HvSaoParse(Rx,Ry: LongInt);
+Var
+ S: PHvSps; Sao: ^THvSao; MergeL,MergeU,C,I,Cn,Scale,Len,V,Rs: LongInt;
+Begin
+ S:=HvS; Rs:=Ry*S^.CtbW+Rx; Sao:=@HvSaoT^[Rs];
+ MergeL:=0; MergeU:=0;
+ If (HvSh.SaoLuma<>0) Or (HvSh.SaoChroma<>0) Then Begin
+  If Rx>0 Then If HvCtbLeft<>0 Then MergeL:=HvBin(HC_SAO_MERGE);
+  If (Ry>0) And (MergeL=0) Then If HvCtbUp<>0 Then MergeU:=HvBin(HC_SAO_MERGE);
+ End;
+ If MergeL<>0 Then Begin Sao^:=HvSaoT^[Rs-1]; End
+ Else If MergeU<>0 Then Begin Sao^:=HvSaoT^[Rs-S^.CtbW]; End
+ Else FillChar(Sao^,SizeOf(Sao^),0);
+ If S^.Chroma<>0 Then Cn:=2 Else Cn:=0;
+ For C:=0 To Cn Do Begin
+  If C=0 Then Scale:=HvP^.Log2SaoScaleL Else Scale:=HvP^.Log2SaoScaleC;
+  If ((C=0) And (HvSh.SaoLuma=0)) Or ((C>0) And (HvSh.SaoChroma=0)) Then Begin
+   Sao^.Typ[C]:=0; Continue;
+  End;
+  If (MergeL=0) And (MergeU=0) Then Begin
+   If C=2 Then Begin Sao^.Typ[2]:=Sao^.Typ[1]; Sao^.Eo[2]:=Sao^.Eo[1]; End
+   Else Begin
+    If HvBin(HC_SAO_TYPE)=0 Then Sao^.Typ[C]:=0
+    Else If HvByp=0 Then Sao^.Typ[C]:=1 Else Sao^.Typ[C]:=2;
+   End;
+  End Else Begin
+   If C=2 Then Begin Sao^.Typ[2]:=Sao^.Typ[1]; Sao^.Eo[2]:=Sao^.Eo[1]; End;
+  End;
+  If Sao^.Typ[C]=0 Then Continue;
+  If (MergeL=0) And (MergeU=0) Then Begin
+   Len:=(1 Shl (HvMin(S^.BitDepth,10)-5))-1;
+   For I:=0 To 3 Do Begin
+    V:=0;
+    While (V<Len) And (HvByp<>0) Do Inc(V);
+    Sao^.Ab[C,I]:=V;
+   End;
+   If Sao^.Typ[C]=1 Then Begin
+    For I:=0 To 3 Do Begin
+     If Sao^.Ab[C,I]<>0 Then Sao^.Sg[C,I]:=HvByp Else Sao^.Sg[C,I]:=0;
+    End;
+    Sao^.Band[C]:=HvBypN(5);
+   End Else If C<>2 Then Sao^.Eo[C]:=HvBypN(2);
+  End;
+  Sao^.Off[C,0]:=0;
+  For I:=0 To 3 Do Begin
+   V:=Sao^.Ab[C,I];
+   If Sao^.Typ[C]=2 Then Begin
+    If I>1 Then V:=-V;
+   End Else If Sao^.Sg[C,I]<>0 Then V:=-V;
+   Sao^.Off[C,I+1]:=V Shl Scale;
+  End;
+ End;
+End;
+
+{ ---------------------------------------------------------------- }
+{ boucle de decodage des CTU d'une tranche                          }
+{ ---------------------------------------------------------------- }
+Procedure HvCtuNeighbours(Xctb,Yctb,Ts: LongInt);
+Var S: PHvSps; Rs,Cw,Cur: LongInt;
+Begin
+ S:=HvS; Rs:=HvTsToRs^[Ts]; Cw:=S^.CtbW;
+ HvSliceAddrT^[Rs]:=HvSh.SliceAddr;
+ Cur:=HvSh.SliceAddr;
+ HvBoundFlags:=0;
+ If Xctb>0 Then Begin
+  If HvSliceAddrT^[Rs-1]<>Cur Then HvBoundFlags:=HvBoundFlags Or 1;
+  If HvTileId^[Ts]<>HvTileId^[HvRsToTs^[Rs-1]] Then HvBoundFlags:=HvBoundFlags Or 4;
+ End;
+ If Yctb>0 Then Begin
+  If HvSliceAddrT^[Rs-Cw]<>Cur Then HvBoundFlags:=HvBoundFlags Or 2;
+  If HvTileId^[Ts]<>HvTileId^[HvRsToTs^[Rs-Cw]] Then HvBoundFlags:=HvBoundFlags Or 8;
+ End;
+ HvCtbLeft:=Ord((Xctb>0) And ((HvBoundFlags And 5)=0));
+ HvCtbUp:=Ord((Yctb>0) And ((HvBoundFlags And 10)=0));
+End;
+
+Procedure HvSaveWpp;
+Begin
+ Move(HvCtx,HvWppCtx,SizeOf(HvCtx)); Move(HvStat,HvWppStat,SizeOf(HvStat));
+End;
+Procedure HvLoadWpp;
+Begin
+ Move(HvWppCtx,HvCtx,SizeOf(HvCtx)); Move(HvWppStat,HvStat,SizeOf(HvStat));
+End;
+Procedure HvSaveDs;
+Begin
+ Move(HvCtx,HvDsCtx,SizeOf(HvCtx)); Move(HvStat,HvDsStat,SizeOf(HvStat));
+End;
+Procedure HvLoadDs;
+Begin
+ Move(HvDsCtx,HvCtx,SizeOf(HvCtx)); Move(HvDsStat,HvStat,SizeOf(HvStat));
+End;
+
+{ initialisation CABAC / contextes au debut d'une CTU }
+Procedure HvCabacCtuStart(Ts,Xctb,Yctb: LongInt);
+Var S: PHvSps; FirstInSlice,FirstInTile,RowStart: Boolean; TileCol0: LongInt;
+Begin
+ S:=HvS;
+ FirstInSlice:=Ts=HvRsToTs^[HvSh.SliceCtbRs];
+ FirstInTile:=(Ts=0) Or (HvTileId^[Ts]<>HvTileId^[Ts-1]);
+ RowStart:=False;
+ If HvP^.EntropySync<>0 Then Begin
+  TileCol0:=HvColBd^[HvColIdx^[Xctb Shr S^.Log2Ctb]];
+  RowStart:=(Xctb Shr S^.Log2Ctb)=TileCol0;
+ End;
+ If FirstInSlice Then HvCbInit(HvSh.DataPos) Else If FirstInTile Or RowStart Then HvCbInit(HvCbPos);
+ If FirstInTile Then HvCtxInit
+ Else If RowStart Then Begin
+  If HvZAvail(Xctb,Yctb,Xctb+(1 Shl S^.Log2Ctb),Yctb-(1 Shl S^.Log2Ctb)) Then HvLoadWpp Else HvCtxInit;
+ End Else If FirstInSlice Then Begin
+  If HvSh.DepSlice<>0 Then HvLoadDs Else HvCtxInit;
+ End;
+End;
+
+{ renvoie le nombre de CTU decodees dans cette tranche, ou une valeur negative si erreur }
+Function HvDecodeSliceData: LongInt;
+Var
+ S: PHvSps; Ts,Rs,Xctb,Yctb,More,Ctb,Tile0: LongInt; Cw: LongInt;
+Begin
+ S:=HvS; Cw:=S^.CtbW; Ctb:=1 Shl S^.Log2Ctb;
+ Ts:=HvRsToTs^[HvSh.SliceCtbRs];
+ HvDecodeSliceData:=0;
+ If (Ts=0) And (HvSh.DepSlice<>0) Then Begin HvDecodeSliceData:=-1; Exit; End;
+ If HvSh.DepSlice<>0 Then Begin
+  If HvSliceAddrT^[HvTsToRs^[Ts-1]]<>HvSh.SliceAddr Then Begin HvDecodeSliceData:=-1; Exit; End;
+ End;
+ More:=1;
+ While (More>0) And (Ts<S^.CtbCount) Do Begin
+  Rs:=HvTsToRs^[Ts];
+  Xctb:=(Rs Mod Cw)*Ctb; Yctb:=(Rs Div Cw)*Ctb;
+  { reinitialisation de la prediction de QP }
+  If HvP^.EntropySync<>0 Then Begin
+   Tile0:=HvColBd^[HvColIdx^[Xctb Shr S^.Log2Ctb]];
+   If (Xctb Shr S^.Log2Ctb)=Tile0 Then HvFirstQpGroup:=1;
+  End;
+  If (Ts>0) And (HvTileId^[Ts]<>HvTileId^[Ts-1]) Then HvFirstQpGroup:=1;
+  HvCtuNeighbours(Xctb,Yctb,Ts);
+  HvCabacCtuStart(Ts,Xctb,Yctb);
+  If (HvCbPos>HvCbEnd+4) Then Begin HvDecodeSliceData:=-1; Exit; End;
+  HvSaoParse(Xctb Shr S^.Log2Ctb,Yctb Shr S^.Log2Ctb);
+  HvDbkT^[Rs].Beta:=HvSh.BetaOff; HvDbkT^[Rs].Tc:=HvSh.TcOff; HvDbkT^[Rs].Lf:=HvSh.LfAcrossSlices; HvDbkT^[Rs].Dis:=HvSh.DisableDbf;
+  More:=HvCodingQuadtree(Xctb,Yctb,S^.Log2Ctb,0);
+  If More<0 Then Begin HvDecodeSliceData:=-1; Exit; End;
+  Inc(HvCtbsDone);
+  { memorisation WPP : seconde CTU d'une ligne de tuile }
+  If HvP^.EntropySync<>0 Then Begin
+   Tile0:=HvColBd^[HvColIdx^[Xctb Shr S^.Log2Ctb]];
+   If (Xctb Shr S^.Log2Ctb)=Tile0+1 Then HvSaveWpp;
+  End;
+  Inc(Ts);
+  HvDecodeSliceData:=Ts;
+ End;
+ If HvP^.DepSlice<>0 Then HvSaveDs;
+End;
+{ ---------------------------------------------------------------- }
+{ filtre de deblocage (image entiere)                               }
+{ ---------------------------------------------------------------- }
+Function HvQpAt(X,Y: LongInt): LongInt;
+Begin
+ HvQpAt:=HvQpT^[(Y Shr HvS^.Log2MinCb)*HvS^.MinCbW+(X Shr HvS^.Log2MinCb)];
+End;
+
+Function HvNoFiltAt(X,Y: LongInt): Boolean;
+Begin
+ HvNoFiltAt:=HvNoFiltT^[(Y Shr 2)*HvS^.W4+(X Shr 2)]<>0;
+End;
+
+{ filtre luma : 4 lignes ; Pos = indice de q0 de la premiere ligne ; Ac = pas perpendiculaire au bord ; Al = pas le long du bord }
+Procedure HvLumaEdge(Pl: HvPW; Pos,Ac,Al,Beta,Tc: LongInt; NoP,NoQ: Boolean; MaxV: LongInt);
+Var
+ P0,P1,P2,P3,Q0,Q1,Q2,Q3,Dp0,Dp3,Dq0,Dq3,D0,D3,Dp,Dq,I,Base,Tc2,Delta,Dd,DEp,DEq,L0,L3: LongInt;
+ Strong0,Strong3,Strong: Boolean;
+ Function Px(Line,K: LongInt): LongInt;  { K<0 : p(-K-1), K>=0 : q(K) }
+ Begin
+  Px:=Pl^[Pos+Line*Al+K*Ac];
+ End;
+Begin
+ Dp0:=HvAbs(Px(0,-3)-2*Px(0,-2)+Px(0,-1));
+ Dp3:=HvAbs(Px(3,-3)-2*Px(3,-2)+Px(3,-1));
+ Dq0:=HvAbs(Px(0,2)-2*Px(0,1)+Px(0,0));
+ Dq3:=HvAbs(Px(3,2)-2*Px(3,1)+Px(3,0));
+ D0:=Dp0+Dq0; D3:=Dp3+Dq3; Dp:=Dp0+Dp3; Dq:=Dq0+Dq3;
+ If D0+D3>=Beta Then Exit;
+ Strong0:=(2*D0<(Beta Shr 2)) And (HvAbs(Px(0,-4)-Px(0,-1))+HvAbs(Px(0,0)-Px(0,3))<(Beta Shr 3)) And (HvAbs(Px(0,-1)-Px(0,0))<((5*Tc+1) Shr 1));
+ Strong3:=(2*D3<(Beta Shr 2)) And (HvAbs(Px(3,-4)-Px(3,-1))+HvAbs(Px(3,0)-Px(3,3))<(Beta Shr 3)) And (HvAbs(Px(3,-1)-Px(3,0))<((5*Tc+1) Shr 1));
+ Strong:=Strong0 And Strong3;
+ DEp:=Ord(Dp<((Beta+(Beta Shr 1)) Shr 3)); DEq:=Ord(Dq<((Beta+(Beta Shr 1)) Shr 3));
+ Tc2:=Tc*2;
+ For I:=0 To 3 Do Begin
+  Base:=Pos+I*Al;
+  P0:=Pl^[Base-Ac]; P1:=Pl^[Base-2*Ac]; P2:=Pl^[Base-3*Ac]; P3:=Pl^[Base-4*Ac];
+  Q0:=Pl^[Base]; Q1:=Pl^[Base+Ac]; Q2:=Pl^[Base+2*Ac]; Q3:=Pl^[Base+3*Ac];
+  If Strong Then Begin
+   If Not NoP Then Begin
+    Pl^[Base-Ac]:=HvClip((P2+2*P1+2*P0+2*Q0+Q1+4) Shr 3,P0-Tc2,P0+Tc2);
+    Pl^[Base-2*Ac]:=HvClip((P2+P1+P0+Q0+2) Shr 2,P1-Tc2,P1+Tc2);
+    Pl^[Base-3*Ac]:=HvClip((2*P3+3*P2+P1+P0+Q0+4) Shr 3,P2-Tc2,P2+Tc2);
+   End;
+   If Not NoQ Then Begin
+    Pl^[Base]:=HvClip((P1+2*P0+2*Q0+2*Q1+Q2+4) Shr 3,Q0-Tc2,Q0+Tc2);
+    Pl^[Base+Ac]:=HvClip((P0+Q0+Q1+Q2+2) Shr 2,Q1-Tc2,Q1+Tc2);
+    Pl^[Base+2*Ac]:=HvClip((P0+Q0+Q1+3*Q2+2*Q3+4) Shr 3,Q2-Tc2,Q2+Tc2);
+   End;
+  End Else Begin
+   Delta:=HvSar(9*(Q0-P0)-3*(Q1-P1)+8,4);
+   If HvAbs(Delta)<Tc*10 Then Begin
+    Delta:=HvClip(Delta,-Tc,Tc);
+    If Not NoP Then Begin
+     Pl^[Base-Ac]:=HvClip(P0+Delta,0,MaxV);
+     If DEp<>0 Then Begin
+      Dd:=HvClip(HvSar(((P2+P0+1) Shr 1)-P1+Delta,1),-(Tc Shr 1),Tc Shr 1);
+      Pl^[Base-2*Ac]:=HvClip(P1+Dd,0,MaxV);
+     End;
+    End;
+    If Not NoQ Then Begin
+     Pl^[Base]:=HvClip(Q0-Delta,0,MaxV);
+     If DEq<>0 Then Begin
+      Dd:=HvClip(HvSar(((Q2+Q0+1) Shr 1)-Q1-Delta,1),-(Tc Shr 1),Tc Shr 1);
+      Pl^[Base+Ac]:=HvClip(Q1+Dd,0,MaxV);
+     End;
+    End;
+   End;
+  End;
+ End;
+End;
+
+Procedure HvChromaEdge(Pl: HvPW; Pos,Ac,Al,Tc: LongInt; NoP,NoQ: Boolean; MaxV: LongInt);
+Var I,Base,P0,P1,Q0,Q1,Delta: LongInt;
+Begin
+ For I:=0 To 3 Do Begin
+  Base:=Pos+I*Al;
+  P0:=Pl^[Base-Ac]; P1:=Pl^[Base-2*Ac]; Q0:=Pl^[Base]; Q1:=Pl^[Base+Ac];
+  Delta:=HvClip(HvSar(((Q0-P0) Shl 2)+P1-Q1+4,3),-Tc,Tc);
+  If Not NoP Then Pl^[Base-Ac]:=HvClip(P0+Delta,0,MaxV);
+  If Not NoQ Then Pl^[Base]:=HvClip(Q0-Delta,0,MaxV);
+ End;
+End;
+
+Function HvChromaTc(QpY,CIdx,TcOff: LongInt): LongInt;
+Var Off,QpI,Qp: LongInt;
+Begin
+ If CIdx=1 Then Off:=HvP^.CbQpOffset Else Off:=HvP^.CrQpOffset;
+ QpI:=HvClip(QpY+Off,0,57);
+ If HvS^.Chroma=1 Then Begin
+  If QpI<30 Then Qp:=QpI Else If QpI>43 Then Qp:=QpI-6 Else Qp:=HvQpC[QpI-30];
+ End Else Qp:=HvMin(QpI,51);
+ HvChromaTc:=HvTcTab[HvClip(Qp+2+TcOff,0,53)];
+End;
+
+Procedure HvDeblockPicture;
+Var
+ S: PHvSps; Pic: ^THvPic; Pl: HvPW; Stride,W,H,W4,Bd,MaxV,X,Y,Bs0,Bs1,Qp,Qp1,Beta,Tc0,Tc1,Ctb,BetaOff,TcOff,C,Hs,Vs,Hh,Vv,Pos,Sc: LongInt;
+ Pcmf: Boolean; Pass: LongInt; Cw,Ch,Ctb2: LongInt;
+ Function TcFor(Qp,Bs,TcOffs: LongInt): LongInt;
+ Begin
+  If Bs=0 Then TcFor:=0 Else TcFor:=HvTcTab[HvClip(Qp+2*(Bs-1)+TcOffs,0,53)] Shl (Bd-8);
+ End;
+Begin
+ S:=HvS; Pic:=@HvDpb[HvCur]; W:=S^.Width; H:=S^.Height; W4:=S^.W4; Bd:=S^.BitDepth; MaxV:=(1 Shl Bd)-1;
+ Pcmf:=(HvP^.TransquantBypass<>0) Or ((S^.Pcm<>0) And (S^.PcmLfDisable<>0));
+ Stride:=Pic^.Stride[0]; Pl:=Pic^.Plane[0];
+ For Pass:=0 To 1 Do Begin
+  { Pass 0 : bords verticaux ; Pass 1 : bords horizontaux }
+  Y:=0;
+  While Y<H Do Begin
+   X:=0;
+   While X<W Do Begin
+    If Pass=0 Then Begin
+     If X=0 Then Begin Inc(X,8); Continue; End;
+     Bs0:=HvVbs^[(Y Shr 2)*W4+(X Shr 2)]; Bs1:=HvVbs^[((Y+4) Shr 2)*W4+(X Shr 2)];
+    End Else Begin
+     If Y=0 Then Begin Inc(X,8); Continue; End;
+     Bs0:=HvHbs^[(Y Shr 2)*W4+(X Shr 2)]; Bs1:=HvHbs^[(Y Shr 2)*W4+((X+4) Shr 2)];
+    End;
+    If (Bs0<>0) Or (Bs1<>0) Then Begin
+     Ctb:=(Y Shr S^.Log2Ctb)*S^.CtbW+(X Shr S^.Log2Ctb);
+     BetaOff:=HvDbkT^[Ctb].Beta; TcOff:=HvDbkT^[Ctb].Tc;
+     If Pass=0 Then Qp:=(HvQpAt(X-1,Y)+HvQpAt(X,Y)+1) Shr 1 Else Qp:=(HvQpAt(X,Y-1)+HvQpAt(X,Y)+1) Shr 1;
+     Beta:=HvBetaTab[HvClip(Qp+BetaOff,0,51)] Shl (Bd-8);
+     Tc0:=TcFor(Qp,Bs0,TcOff And -2); Tc1:=TcFor(Qp,Bs1,TcOff And -2);
+     If Pass=0 Then Begin
+      Pos:=Y*Stride+X;
+      If Bs0<>0 Then HvLumaEdge(Pl,Pos,1,Stride,Beta,Tc0,Pcmf And HvNoFiltAt(X-1,Y),Pcmf And HvNoFiltAt(X,Y),MaxV);
+      If Bs1<>0 Then HvLumaEdge(Pl,Pos+4*Stride,1,Stride,Beta,Tc1,Pcmf And HvNoFiltAt(X-1,Y+4),Pcmf And HvNoFiltAt(X,Y+4),MaxV);
+     End Else Begin
+      Pos:=Y*Stride+X;
+      If Bs0<>0 Then HvLumaEdge(Pl,Pos,Stride,1,Beta,Tc0,Pcmf And HvNoFiltAt(X,Y-1),Pcmf And HvNoFiltAt(X,Y),MaxV);
+      If Bs1<>0 Then HvLumaEdge(Pl,Pos+4,Stride,1,Beta,Tc1,Pcmf And HvNoFiltAt(X+4,Y-1),Pcmf And HvNoFiltAt(X+4,Y),MaxV);
+     End;
+    End;
+    Inc(X,8);
+   End;
+   Inc(Y,8);
+  End;
+  { chrominance }
+  If S^.Chroma<>0 Then Begin
+   For C:=1 To 2 Do Begin
+    Hs:=S^.HShift[C]; Vs:=S^.VShift[C]; Hh:=1 Shl Hs; Vv:=1 Shl Vs;
+    Stride:=Pic^.Stride[C]; Pl:=Pic^.Plane[C];
+    Y:=0;
+    While Y<H Do Begin
+     X:=0;
+     While X<W Do Begin
+      If Pass=0 Then Begin
+       If X=0 Then Begin Inc(X,8*Hh); Continue; End;
+       Bs0:=HvVbs^[(Y Shr 2)*W4+(X Shr 2)]; Bs1:=0;
+       If Y+4*Vv<H Then Bs1:=HvVbs^[((Y+4*Vv) Shr 2)*W4+(X Shr 2)];
+      End Else Begin
+       If Y=0 Then Begin Inc(X,8*Hh); Continue; End;
+       Bs0:=HvHbs^[(Y Shr 2)*W4+(X Shr 2)]; Bs1:=0;
+       If X+4*Hh<W Then Bs1:=HvHbs^[(Y Shr 2)*W4+((X+4*Hh) Shr 2)];
+      End;
+      If (Bs0=2) Or (Bs1=2) Then Begin
+       Ctb:=(Y Shr S^.Log2Ctb)*S^.CtbW+(X Shr S^.Log2Ctb);
+       TcOff:=HvDbkT^[Ctb].Tc;
+       Pos:=(Y Shr Vs)*Stride+(X Shr Hs);
+       If Pass=0 Then Begin
+        If Bs0=2 Then Begin
+         Qp:=(HvQpAt(X-1,Y)+HvQpAt(X,Y)+1) Shr 1;
+         Sc:=HvChromaTc(Qp,C,TcOff) Shl (Bd-8);
+         HvChromaEdge(Pl,Pos,1,Stride,Sc,Pcmf And HvNoFiltAt(X-1,Y),Pcmf And HvNoFiltAt(X,Y),MaxV);
+        End;
+        If Bs1=2 Then Begin
+         Qp:=(HvQpAt(X-1,Y+4*Vv)+HvQpAt(X,Y+4*Vv)+1) Shr 1;
+         Sc:=HvChromaTc(Qp,C,TcOff) Shl (Bd-8);
+         HvChromaEdge(Pl,Pos+4*Stride,1,Stride,Sc,Pcmf And HvNoFiltAt(X-1,Y+4*Vv),Pcmf And HvNoFiltAt(X,Y+4*Vv),MaxV);
+        End;
+       End Else Begin
+        If Bs0=2 Then Begin
+         Qp:=(HvQpAt(X,Y-1)+HvQpAt(X,Y)+1) Shr 1;
+         Sc:=HvChromaTc(Qp,C,TcOff) Shl (Bd-8);
+         HvChromaEdge(Pl,Pos,Stride,1,Sc,Pcmf And HvNoFiltAt(X,Y-1),Pcmf And HvNoFiltAt(X,Y),MaxV);
+        End;
+        If Bs1=2 Then Begin
+         Qp:=(HvQpAt(X+4*Hh,Y-1)+HvQpAt(X+4*Hh,Y)+1) Shr 1;
+         Sc:=HvChromaTc(Qp,C,TcOff) Shl (Bd-8);
+         HvChromaEdge(Pl,Pos+4,Stride,1,Sc,Pcmf And HvNoFiltAt(X+4*Hh,Y-1),Pcmf And HvNoFiltAt(X+4*Hh,Y),MaxV);
+        End;
+       End;
+      End;
+      Inc(X,8*Hh);
+     End;
+     Inc(Y,8*Vv);
+    End;
+   End;
+  End;
+  Stride:=Pic^.Stride[0]; Pl:=Pic^.Plane[0];
+ End;
+End;
+
+{ ---------------------------------------------------------------- }
+{ SAO (image entiere)                                               }
+{ ---------------------------------------------------------------- }
+Procedure HvSaoPicture;
+Var
+ S: PHvSps; Pic: ^THvPic; C,Cn,Cx,Cy,Rs,Ts,Hs,Vs,Pw,Ph,X0,Y0,X1,Y1,X,Y,Stride,Bd,MaxV,V,Sh,K,A,B,Ei,I,J: LongInt;
+ Pl,Tmp: HvPW; Sao: ^THvSao; Band: Array[0..31] Of Byte; Allow: Array[-1..1,-1..1] Of Boolean;
+ Hp,Vp: Array[0..1] Of LongInt; Dx,Dy,Nx,Ny,Nrs,Nts,CtbS,AnyNo,Cur,Ax,Ay,Bx,By,Sa,Sb,Dxa,Dya,Dxb,Dyb: LongInt; Chk: Boolean;
+ AnySao: Array[0..2] Of Boolean;
+ Function Ok(Ddx,Ddy: LongInt): Boolean;
+ Begin
+  Ok:=Allow[Ddx,Ddy];
+ End;
+Begin
+ S:=HvS; Pic:=@HvDpb[HvCur]; Bd:=S^.BitDepth; MaxV:=(1 Shl Bd)-1;
+ If S^.Chroma<>0 Then Cn:=2 Else Cn:=0;
+ CtbS:=1 Shl S^.Log2Ctb;
+ AnyNo:=Ord((HvP^.TransquantBypass<>0) Or ((S^.Pcm<>0) And (S^.PcmLfDisable<>0)));
+ For C:=0 To Cn Do Begin
+  AnySao[C]:=False;
+  For Rs:=0 To S^.CtbCount-1 Do If HvSaoT^[Rs].Typ[C]<>0 Then AnySao[C]:=True;
+ End;
+ For C:=0 To Cn Do Begin
+  If Not AnySao[C] Then Continue;
+  Hs:=S^.HShift[C]; Vs:=S^.VShift[C]; Pw:=Pic^.PW[C]; Ph:=Pic^.PH[C]; Stride:=Pic^.Stride[C];
+  Pl:=Pic^.Plane[C];
+  If HvTmpCap[C]<Pw*Ph Then Begin
+   If HvTmpPlane[C]<>Nil Then FreeMem(HvTmpPlane[C]);
+   GetMem(HvTmpPlane[C],Pw*Ph*2); HvTmpCap[C]:=Pw*Ph;
+  End;
+  Tmp:=HvTmpPlane[C];
+  Move(Pl^,Tmp^,Pw*Ph*2);
+  For Cy:=0 To S^.CtbH-1 Do
+   For Cx:=0 To S^.CtbW-1 Do Begin
+    Rs:=Cy*S^.CtbW+Cx; Sao:=@HvSaoT^[Rs];
+    If Sao^.Typ[C]=0 Then Continue;
+    Ts:=HvRsToTs^[Rs];
+    X0:=(Cx*CtbS) Shr Hs; Y0:=(Cy*CtbS) Shr Vs;
+    X1:=HvMin(X0+(CtbS Shr Hs),Pw); Y1:=HvMin(Y0+(CtbS Shr Vs),Ph);
+    If Sao^.Typ[C]=1 Then Begin
+     { band offset }
+     FillChar(Band,SizeOf(Band),0);
+     For K:=0 To 3 Do Band[(K+Sao^.Band[C]) And 31]:=K+1;
+     Sh:=Bd-5;
+     For Y:=Y0 To Y1-1 Do
+      For X:=X0 To X1-1 Do Begin
+       If AnyNo<>0 Then If HvNoFiltAt(X Shl Hs,Y Shl Vs) Then Continue;
+       V:=Tmp^[Y*Stride+X];
+       V:=V+Sao^.Off[C,Band[V Shr Sh]];
+       If V<0 Then V:=0 Else If V>MaxV Then V:=MaxV;
+       Pl^[Y*Stride+X]:=V;
+      End;
+    End Else Begin
+     { edge offset : voisinage autorise ? }
+     For Dy:=-1 To 1 Do For Dx:=-1 To 1 Do Begin
+      Allow[Dx,Dy]:=True;
+      If (Dx=0) And (Dy=0) Then Continue;
+      Nx:=Cx+Dx; Ny:=Cy+Dy;
+      If (Nx<0) Or (Ny<0) Or (Nx>=S^.CtbW) Or (Ny>=S^.CtbH) Then Begin Allow[Dx,Dy]:=False; Continue; End;
+      Nrs:=Ny*S^.CtbW+Nx; Nts:=HvRsToTs^[Nrs];
+      If HvSliceAddrT^[Nrs]<>HvSliceAddrT^[Rs] Then Begin
+        If Nts<Ts Then Begin
+         If HvDbkT^[Rs].Lf=0 Then Allow[Dx,Dy]:=False;
+        End Else Begin
+         If HvDbkT^[Nrs].Lf=0 Then Allow[Dx,Dy]:=False;
+        End;
+      End;
+      If (HvP^.LfAcrossTiles=0) And (HvTileId^[Nts]<>HvTileId^[Ts]) Then Allow[Dx,Dy]:=False;
+     End;
+     Case Sao^.Eo[C] Of
+      0: Begin Hp[0]:=-1; Vp[0]:=0; Hp[1]:=1; Vp[1]:=0; End;
+      1: Begin Hp[0]:=0; Vp[0]:=-1; Hp[1]:=0; Vp[1]:=1; End;
+      2: Begin Hp[0]:=-1; Vp[0]:=-1; Hp[1]:=1; Vp[1]:=1; End;
+     Else Begin Hp[0]:=1; Vp[0]:=-1; Hp[1]:=-1; Vp[1]:=1; End;
+     End;
+     For Y:=Y0 To Y1-1 Do
+      For X:=X0 To X1-1 Do Begin
+       If AnyNo<>0 Then If HvNoFiltAt(X Shl Hs,Y Shl Vs) Then Continue;
+       Ax:=X+Hp[0]; Ay:=Y+Vp[0]; Bx:=X+Hp[1]; By:=Y+Vp[1];
+       If (Ax<0) Or (Ay<0) Or (Ax>=Pw) Or (Ay>=Ph) Or (Bx<0) Or (By<0) Or (Bx>=Pw) Or (By>=Ph) Then Continue;
+       { voisin dans une autre CTU ? }
+       Dxa:=0; Dya:=0; Dxb:=0; Dyb:=0;
+       If Ax<X0 Then Dxa:=-1 Else If Ax>=X1 Then Dxa:=1;
+       If Ay<Y0 Then Dya:=-1 Else If Ay>=Y1 Then Dya:=1;
+       If Bx<X0 Then Dxb:=-1 Else If Bx>=X1 Then Dxb:=1;
+       If By<Y0 Then Dyb:=-1 Else If By>=Y1 Then Dyb:=1;
+       If Not Allow[Dxa,Dya] Then Continue;
+       If Not Allow[Dxb,Dyb] Then Continue;
+       V:=Tmp^[Y*Stride+X];
+       Sa:=Tmp^[Ay*Stride+Ax]; Sb:=Tmp^[By*Stride+Bx];
+       Ei:=2;
+       If V>Sa Then Inc(Ei) Else If V<Sa Then Dec(Ei);
+       If V>Sb Then Inc(Ei) Else If V<Sb Then Dec(Ei);
+       Case Ei Of 0: Ei:=1; 1: Ei:=2; 2: Ei:=0; End;
+       If Ei<>0 Then Begin
+        V:=V+Sao^.Off[C,Ei];
+        If V<0 Then V:=0 Else If V>MaxV Then V:=MaxV;
+        Pl^[Y*Stride+X]:=V;
+       End;
+      End;
+    End;
+   End;
+ End;
+End;
+{ ---------------------------------------------------------------- }
+{ memoire des tables et des images                                  }
+{ ---------------------------------------------------------------- }
+Procedure HvFreeTables;
+Begin
+ If HvSkipT<>Nil Then FreeMem(HvSkipT); HvSkipT:=Nil;
+ If HvCtDepthT<>Nil Then FreeMem(HvCtDepthT); HvCtDepthT:=Nil;
+ If HvQpT<>Nil Then FreeMem(HvQpT); HvQpT:=Nil;
+ If HvIpmT<>Nil Then FreeMem(HvIpmT); HvIpmT:=Nil;
+ If HvCbfT<>Nil Then FreeMem(HvCbfT); HvCbfT:=Nil;
+ If HvNoFiltT<>Nil Then FreeMem(HvNoFiltT); HvNoFiltT:=Nil;
+ If HvVbs<>Nil Then FreeMem(HvVbs); HvVbs:=Nil;
+ If HvHbs<>Nil Then FreeMem(HvHbs); HvHbs:=Nil;
+ If HvSliceAddrT<>Nil Then FreeMem(HvSliceAddrT); HvSliceAddrT:=Nil;
+ If HvSaoT<>Nil Then FreeMem(HvSaoT); HvSaoT:=Nil;
+ If HvDbkT<>Nil Then FreeMem(HvDbkT); HvDbkT:=Nil;
+ If HvRsToTs<>Nil Then FreeMem(HvRsToTs); HvRsToTs:=Nil;
+ If HvTsToRs<>Nil Then FreeMem(HvTsToRs); HvTsToRs:=Nil;
+ If HvTileId<>Nil Then FreeMem(HvTileId); HvTileId:=Nil;
+ If HvMinTbZs<>Nil Then FreeMem(HvMinTbZs); HvMinTbZs:=Nil;
+ If HvColBd<>Nil Then FreeMem(HvColBd); HvColBd:=Nil;
+ If HvRowBd<>Nil Then FreeMem(HvRowBd); HvRowBd:=Nil;
+ If HvColIdx<>Nil Then FreeMem(HvColIdx); HvColIdx:=Nil;
+End;
+
+Procedure HvFreePicBuf(I: LongInt);
+Var C: LongInt;
+Begin
+ With HvDpb[I] Do Begin
+  For C:=0 To 2 Do Begin
+   If Plane[C]<>Nil Then FreeMem(Plane[C]); Plane[C]:=Nil;
+  End;
+  If Mvf<>Nil Then FreeMem(Mvf); Mvf:=Nil;
+  If RplTab<>Nil Then FreeMem(RplTab); RplTab:=Nil;
+  If Rpl<>Nil Then FreeMem(Rpl); Rpl:=Nil;
+  HasBuf:=False; NRpl:=0; CapRpl:=0;
+ End;
+End;
+
+Procedure HvFreeAll;
+Var I: LongInt;
+Begin
+ For I:=0 To HV_DPB-1 Do Begin HvFreePicBuf(I); HvDpb[I].InUse:=False; End;
+ For I:=0 To 2 Do Begin
+  If HvTmpPlane[I]<>Nil Then FreeMem(HvTmpPlane[I]); HvTmpPlane[I]:=Nil; HvTmpCap[I]:=0;
+ End;
+ HvFreeTables;
+ HvAllocSps:=Nil;
+End;
+
+{ calcule les tables de tuiles / parcours (6.5.1, 6.5.2) pour le couple SPS/PPS actif }
+Procedure HvSetupPps;
+Var
+ S: PHvSps; Pp: PHvPps; Cols,Rows,I,J,K,Rs,Ts,Tx,Ty,Tb,TbX,TbY,M,X,Y,Tile,Cw,Ch,Sh,Zw,Zh,V,Sum: LongInt;
+ ColW,RowH: HvPL;
+Begin
+ S:=HvS; Pp:=HvP; Cols:=Pp^.NumTileCols; Rows:=Pp^.NumTileRows; Cw:=S^.CtbW; Ch:=S^.CtbH;
+ If Pp^.TilesEnabled=0 Then Begin Cols:=1; Rows:=1; End;
+ If Cols>Cw Then Cols:=Cw;
+ If Rows>Ch Then Rows:=Ch;
+ GetMem(ColW,(Cols+1)*4); GetMem(RowH,(Rows+1)*4);
+ If (Pp^.Uniform<>0) Or (Pp^.TilesEnabled=0) Then Begin
+  For I:=0 To Cols-1 Do ColW^[I]:=((I+1)*Cw) Div Cols-(I*Cw) Div Cols;
+  For I:=0 To Rows-1 Do RowH^[I]:=((I+1)*Ch) Div Rows-(I*Ch) Div Rows;
+ End Else Begin
+  Sum:=0;
+  For I:=0 To Cols-2 Do Begin ColW^[I]:=Pp^.ColW[I]; Inc(Sum,ColW^[I]); End;
+  If Sum>=Cw Then Fail('HEVC : largeurs de tuiles invalides.');
+  ColW^[Cols-1]:=Cw-Sum;
+  Sum:=0;
+  For I:=0 To Rows-2 Do Begin RowH^[I]:=Pp^.RowH[I]; Inc(Sum,RowH^[I]); End;
+  If Sum>=Ch Then Fail('HEVC : hauteurs de tuiles invalides.');
+  RowH^[Rows-1]:=Ch-Sum;
+ End;
+ If HvColBd<>Nil Then FreeMem(HvColBd); If HvRowBd<>Nil Then FreeMem(HvRowBd); If HvColIdx<>Nil Then FreeMem(HvColIdx);
+ GetMem(HvColBd,(Cols+1)*4); GetMem(HvRowBd,(Rows+1)*4); GetMem(HvColIdx,(Cw+1)*4);
+ HvColBd^[0]:=0; For I:=0 To Cols-1 Do HvColBd^[I+1]:=HvColBd^[I]+ColW^[I];
+ HvRowBd^[0]:=0; For I:=0 To Rows-1 Do HvRowBd^[I+1]:=HvRowBd^[I]+RowH^[I];
+ For I:=0 To Cols-1 Do For J:=HvColBd^[I] To HvColBd^[I+1]-1 Do HvColIdx^[J]:=I;
+ If HvRsToTs<>Nil Then FreeMem(HvRsToTs); If HvTsToRs<>Nil Then FreeMem(HvTsToRs); If HvTileId<>Nil Then FreeMem(HvTileId);
+ GetMem(HvRsToTs,(Cw*Ch+1)*4); GetMem(HvTsToRs,(Cw*Ch+1)*4); GetMem(HvTileId,(Cw*Ch+1)*4);
+ For Rs:=0 To Cw*Ch-1 Do Begin
+  TbX:=Rs Mod Cw; TbY:=Rs Div Cw; Tx:=0; Ty:=0;
+  For I:=0 To Cols-1 Do If TbX>=HvColBd^[I] Then Tx:=I;
+  For J:=0 To Rows-1 Do If TbY>=HvRowBd^[J] Then Ty:=J;
+  V:=0;
+  For I:=0 To Tx-1 Do Inc(V,RowH^[Ty]*ColW^[I]);
+  For J:=0 To Ty-1 Do Inc(V,Cw*RowH^[J]);
+  Inc(V,(TbY-HvRowBd^[Ty])*ColW^[Tx]+TbX-HvColBd^[Tx]);
+  HvRsToTs^[Rs]:=V; HvTsToRs^[V]:=Rs;
+ End;
+ Tile:=0;
+ For J:=0 To Rows-1 Do For I:=0 To Cols-1 Do Begin
+  For Y:=HvRowBd^[J] To HvRowBd^[J+1]-1 Do For X:=HvColBd^[I] To HvColBd^[I+1]-1 Do HvTileId^[HvRsToTs^[Y*Cw+X]]:=Tile;
+  Inc(Tile);
+ End;
+ Sh:=S^.Log2Ctb-S^.Log2MinTb;
+ Zw:=Cw Shl Sh; Zh:=Ch Shl Sh; HvZsW:=Zw;
+ If HvMinTbZs<>Nil Then FreeMem(HvMinTbZs);
+ GetMem(HvMinTbZs,Zw*Zh*4);
+ For Y:=0 To Zh-1 Do
+  For X:=0 To Zw-1 Do Begin
+   TbX:=X Shr Sh; TbY:=Y Shr Sh;
+   V:=HvRsToTs^[TbY*Cw+TbX] Shl (Sh*2);
+   For I:=0 To Sh-1 Do Begin
+    M:=1 Shl I;
+    If (M And X)<>0 Then Inc(V,M*M);
+    If (M And Y)<>0 Then Inc(V,2*M*M);
+   End;
+   HvMinTbZs^[Y*Zw+X]:=V;
+  End;
+ FreeMem(ColW); FreeMem(RowH);
+End;
+
+{ (re)alloue les tables par image pour le SPS actif }
+Procedure HvSetSps;
+Var S: PHvSps; N4,Nc,Ncb,I: LongInt;
+Begin
+ S:=HvS;
+ If (HvAllocSps<>Nil) Then Begin
+  If (HvAllocW<>S^.Width) Or (HvAllocH<>S^.Height) Or (HvAllocChroma<>S^.Chroma) Or (HvAllocDepth<>S^.BitDepth) Or (HvAllocCtb<>S^.CtbCount) Then Begin
+   For I:=0 To HV_DPB-1 Do Begin HvFreePicBuf(I); HvDpb[I].InUse:=False; End;
+  End;
+ End;
+ HvFreeTables;
+ N4:=S^.W4*(S^.H4+2); Nc:=S^.CtbCount; Ncb:=S^.MinCbW*S^.MinCbH;
+ GetMem(HvSkipT,Ncb+16); GetMem(HvCtDepthT,Ncb+16); GetMem(HvQpT,Ncb+16);
+ GetMem(HvIpmT,N4+16); GetMem(HvCbfT,N4+16); GetMem(HvNoFiltT,N4+16);
+ GetMem(HvVbs,N4+16); GetMem(HvHbs,N4+16);
+ GetMem(HvSliceAddrT,Nc*4+16);
+ GetMem(HvSaoT,Nc*SizeOf(THvSao)+16); GetMem(HvDbkT,Nc*SizeOf(THvDbk)+16);
+ FillChar(HvSkipT^,Ncb,0); FillChar(HvCtDepthT^,Ncb,0); FillChar(HvQpT^,Ncb,0);
+ HvAllocSps:=S; HvAllocW:=S^.Width; HvAllocH:=S^.Height; HvAllocChroma:=S^.Chroma; HvAllocDepth:=S^.BitDepth; HvAllocCtb:=S^.CtbCount;
+ HvActPps:=Nil;
+End;
+
+{ ---------------------------------------------------------------- }
+{ DPB                                                               }
+{ ---------------------------------------------------------------- }
+Procedure HvUnrefFrame(I,Flags: LongInt);
+Begin
+ If Not HvDpb[I].InUse Then Exit;
+ HvDpb[I].Flags:=HvDpb[I].Flags And Not Flags;
+ If HvDpb[I].Flags=0 Then HvDpb[I].InUse:=False;
+End;
+
+Procedure HvClearRefs;
+Var I: LongInt;
+Begin
+ For I:=0 To HV_DPB-1 Do HvUnrefFrame(I,HV_FL_SHORT Or HV_FL_LONG);
+End;
+
+Function HvAllocFrame: LongInt;
+Var I,C,Wd,Ht: LongInt; S: PHvSps;
+Begin
+ S:=HvS; HvAllocFrame:=-1;
+ For I:=0 To HV_DPB-1 Do If Not HvDpb[I].InUse Then Begin
+  With HvDpb[I] Do Begin
+   If Not HasBuf Then Begin
+    For C:=0 To 2 Do Begin
+     Plane[C]:=Nil;
+     If (C=0) Or (S^.Chroma<>0) Then Begin
+      Wd:=S^.Width Shr S^.HShift[C]; Ht:=S^.Height Shr S^.VShift[C];
+      PW[C]:=Wd; PH[C]:=Ht; Stride[C]:=Wd;
+      GetMem(Plane[C],Wd*Ht*2+64);
+     End Else Begin PW[C]:=0; PH[C]:=0; Stride[C]:=0; End;
+    End;
+    GetMem(Mvf,S^.W4*S^.H4*SizeOf(THvMvf)+64); MvfCap:=S^.W4*S^.H4;
+    GetMem(RplTab,S^.CtbCount*2+16); RplTabCap:=S^.CtbCount;
+    Rpl:=Nil; CapRpl:=0; NRpl:=0;
+    HasBuf:=True;
+   End;
+   InUse:=True; Flags:=0; Poc:=0; Seq:=0; NRpl:=0;
+   CtbCount:=S^.CtbCount;
+   W:=S^.Width; H:=S^.Height; Chroma:=S^.Chroma; BitDepth:=S^.BitDepth;
+   CropL:=S^.CropL; CropR:=S^.CropR; CropT:=S^.CropT; CropB:=S^.CropB;
+  End;
+  HvAllocFrame:=I; Exit;
+ End;
+End;
+
+Procedure HvEnsureRpl(I,N: LongInt);
+Var Nc: LongInt; P: HvPRpl;
+Begin
+ With HvDpb[I] Do Begin
+  If N>=CapRpl Then Begin
+   Nc:=N+16;
+   GetMem(P,Nc*SizeOf(THvRpl));
+   FillChar(P^,Nc*SizeOf(THvRpl),0);
+   If Rpl<>Nil Then Begin Move(Rpl^,P^,CapRpl*SizeOf(THvRpl)); FreeMem(Rpl); End;
+   Rpl:=P; CapRpl:=Nc;
+  End;
+ End;
+End;
+
+Function HvFindRef(Poc: LongInt; UseMsb: Boolean): LongInt;
+Var I,Mask: LongInt;
+Begin
+ If UseMsb Then Mask:=-1 Else Mask:=(1 Shl HvS^.Log2MaxPocLsb)-1;
+ HvFindRef:=-1;
+ For I:=0 To HV_DPB-1 Do
+  If HvDpb[I].InUse And (HvDpb[I].Seq=HvSeqDecode) Then
+   If ((HvDpb[I].Poc And Mask)=Poc) And (UseMsb Or (HvDpb[I].Poc<>HvPoc)) Then Begin HvFindRef:=I; Exit; End;
+End;
+
+Function HvGenMissing(Poc: LongInt): LongInt;
+Var I,C,N: LongInt; Fr: LongInt; V: Word; S: PHvSps;
+Begin
+ S:=HvS; Fr:=HvAllocFrame; HvGenMissing:=Fr;
+ If Fr<0 Then Exit;
+ V:=1 Shl (S^.BitDepth-1);
+ For C:=0 To 2 Do If HvDpb[Fr].Plane[C]<>Nil Then Begin
+  N:=HvDpb[Fr].PW[C]*HvDpb[Fr].PH[C];
+  For I:=0 To N-1 Do HvDpb[Fr].Plane[C]^[I]:=V;
+ End;
+ FillChar(HvDpb[Fr].Mvf^,S^.W4*S^.H4*SizeOf(THvMvf),0);
+ FillChar(HvDpb[Fr].RplTab^,S^.CtbCount*2,0);
+ HvEnsureRpl(Fr,0);
+ HvDpb[Fr].NRpl:=1;
+ HvDpb[Fr].Poc:=Poc; HvDpb[Fr].Seq:=HV_SEQ_INVALID; HvDpb[Fr].Flags:=0;
+End;
+
+Function HvAddCandRef(L: LongInt; Poc,RefFlag: LongInt; UseMsb: Boolean): Boolean;
+Var Ref: LongInt;
+Begin
+ HvAddCandRef:=False;
+ Ref:=HvFindRef(Poc,UseMsb);
+ If (Ref=HvCur) Or (HvRps[L].N>=16) Then Exit;
+ If Ref<0 Then Begin
+  Ref:=HvGenMissing(Poc);
+  If Ref<0 Then Exit;
+ End;
+ HvRps[L].Poc[HvRps[L].N]:=HvDpb[Ref].Poc;
+ HvRps[L].Pic[HvRps[L].N]:=Ref;
+ Inc(HvRps[L].N);
+ HvDpb[Ref].Flags:=(HvDpb[Ref].Flags And Not (HV_FL_SHORT Or HV_FL_LONG)) Or RefFlag;
+ HvAddCandRef:=True;
+End;
+
+Function HvFrameRps: Boolean;
+Var I,L,Poc: LongInt; Ok: Boolean;
+Begin
+ HvFrameRps:=True;
+ If HvSh.HasStRps=0 Then Begin HvRps[0].N:=0; HvRps[1].N:=0; Exit; End;
+ For I:=0 To HV_DPB-1 Do If HvDpb[I].InUse And (HvDpb[I].Seq=HV_SEQ_INVALID) Then HvUnrefFrame(I,-1);
+ For I:=0 To HV_DPB-1 Do If (I<>HvCur) And HvDpb[I].InUse Then HvDpb[I].Flags:=HvDpb[I].Flags And Not (HV_FL_SHORT Or HV_FL_LONG);
+ For I:=0 To 4 Do HvRps[I].N:=0;
+ Ok:=True;
+ For I:=0 To HvSh.StRps.NumDelta-1 Do Begin
+  Poc:=HvPoc+HvSh.StRps.DeltaPoc[I];
+  If HvSh.StRps.Used[I]=0 Then L:=2
+  Else If I<HvSh.StRps.NumNeg Then L:=0
+  Else L:=1;
+  If Not HvAddCandRef(L,Poc,HV_FL_SHORT,True) Then Begin Ok:=False; Break; End;
+ End;
+ If Ok Then
+  For I:=0 To HvSh.LtNb-1 Do Begin
+   If HvSh.LtUsed[I]<>0 Then L:=3 Else L:=4;
+   If Not HvAddCandRef(L,HvSh.LtPoc[I],HV_FL_LONG,HvSh.LtMsb[I]<>0) Then Begin Ok:=False; Break; End;
+  End;
+ For I:=0 To HV_DPB-1 Do HvUnrefFrame(I,0);
+ HvFrameRps:=Ok;
+End;
+
+Function HvFrameNbRefs: LongInt;
+Var I,R: LongInt;
+Begin
+ R:=0;
+ If HvSh.HasStRps<>0 Then For I:=0 To HvSh.StRps.NumDelta-1 Do If HvSh.StRps.Used[I]<>0 Then Inc(R);
+ For I:=0 To HvSh.LtNb-1 Do If HvSh.LtUsed[I]<>0 Then Inc(R);
+ HvFrameNbRefs:=R;
+End;
+
+{ listes de reference de la tranche (8.3.4) }
+Function HvSliceRpl: Boolean;
+Var
+ NbList,L,I,J,K,Idx: LongInt; Tmp: THvRefList; Cand: Array[0..2] Of LongInt; Rp: ^THvRpl;
+Begin
+ HvSliceRpl:=False;
+ If HvSh.SliceType=HV_SLICE_B Then NbList:=2 Else NbList:=1;
+ HvEnsureRpl(HvCur,HvSliceIdx);
+ If HvSliceIdx>=HvDpb[HvCur].NRpl Then HvDpb[HvCur].NRpl:=HvSliceIdx+1;
+ { associe les CTU suivantes a cette tranche }
+ For I:=HvRsToTs^[HvSh.SegAddr] To HvS^.CtbCount-1 Do HvDpb[HvCur].RplTab^[HvTsToRs^[I]]:=HvSliceIdx;
+ Rp:=@HvDpb[HvCur].Rpl^[HvSliceIdx];
+ HvCurRpl:=Rp;
+ FillChar(Rp^,SizeOf(Rp^),0);
+ If HvRps[0].N+HvRps[1].N+HvRps[3].N=0 Then Exit;
+ For L:=0 To NbList-1 Do Begin
+  FillChar(Tmp,SizeOf(Tmp),0);
+  If L=0 Then Begin Cand[0]:=0; Cand[1]:=1; End Else Begin Cand[0]:=1; Cand[1]:=0; End;
+  Cand[2]:=3;
+  While Tmp.N<HvSh.NbRefs[L] Do Begin
+   For I:=0 To 2 Do
+    For J:=0 To HvRps[Cand[I]].N-1 Do
+     If Tmp.N<16 Then Begin
+      Tmp.Poc[Tmp.N]:=HvRps[Cand[I]].Poc[J];
+      Tmp.Pic[Tmp.N]:=HvRps[Cand[I]].Pic[J];
+      Tmp.Lt[Tmp.N]:=Ord(I=2);
+      Inc(Tmp.N);
+     End;
+  End;
+  If HvSh.RplMod[L]<>0 Then Begin
+   For I:=0 To HvSh.NbRefs[L]-1 Do Begin
+    Idx:=HvSh.ListEntry[L,I];
+    If Idx>=Tmp.N Then Exit;
+    Rp^.Poc[L,I]:=Tmp.Poc[Idx]; HvRefPic[L,I]:=Tmp.Pic[Idx]; Rp^.Lt[L,I]:=Tmp.Lt[Idx];
+    Inc(Rp^.N[L]);
+   End;
+  End Else Begin
+   K:=HvMin(Tmp.N,HvSh.NbRefs[L]);
+   For I:=0 To K-1 Do Begin Rp^.Poc[L,I]:=Tmp.Poc[I]; HvRefPic[L,I]:=Tmp.Pic[I]; Rp^.Lt[L,I]:=Tmp.Lt[I]; End;
+   Rp^.N[L]:=K;
+  End;
+  If (HvSh.ColList=L) And (HvSh.ColRefIdx<Rp^.N[L]) Then HvColPic:=HvRefPic[L,HvSh.ColRefIdx];
+ End;
+ HvSliceRpl:=True;
+End;
+
+{ ---------------------------------------------------------------- }
+{ sortie des images                                                 }
+{ ---------------------------------------------------------------- }
+Procedure HvEmit(I: LongInt);
+Var
+ P: ^THvPic; Cw,Ch,Hs,Vs,C,X,Y,Bd,Sh,V,Pw,Ofs,Sz,Pos,X2,Y2,Nx,Ny,Bps,Cn: LongInt; Out8: HvPB; Pl: HvPW; W16: HvPW;
+ Cl,Cr,Ct,Cb: LongInt; Tot: LongInt;
+Begin
+ P:=@HvDpb[I]; Bd:=P^.BitDepth;
+ Cw:=P^.W-P^.CropL-P^.CropR; Ch:=P^.H-P^.CropT-P^.CropB;
+ If P^.Chroma=0 Then Begin Hs:=0; Vs:=0; End Else Begin
+  If P^.Chroma=1 Then Begin Hs:=1; Vs:=1; End Else If P^.Chroma=2 Then Begin Hs:=1; Vs:=0; End Else Begin Hs:=0; Vs:=0; End;
+ End;
+ { sortie native }
+ If @HvNativeHook<>Nil Then Begin
+  If Bd>8 Then Bps:=2 Else Bps:=1;
+  Tot:=Cw*Ch;
+  If P^.Chroma<>0 Then Inc(Tot,2*(Cw Shr Hs)*(Ch Shr Vs));
+  Tot:=Tot*Bps;
+  If HvOutCap<Tot+64 Then Begin
+   If HvOutBuf<>Nil Then FreeMem(HvOutBuf);
+   HvOutCap:=Tot+Tot Div 2+64; GetMem(HvOutBuf,HvOutCap);
+  End;
+  Pos:=0;
+  If P^.Chroma<>0 Then Cn:=2 Else Cn:=0;
+  For C:=0 To Cn Do Begin
+   If C=0 Then Begin Pw:=Cw; Sz:=Ch; Ofs:=P^.CropT*P^.Stride[0]+P^.CropL; End
+   Else Begin Pw:=Cw Shr Hs; Sz:=Ch Shr Vs; Ofs:=(P^.CropT Shr Vs)*P^.Stride[C]+(P^.CropL Shr Hs); End;
+   Pl:=P^.Plane[C];
+   For Y:=0 To Sz-1 Do
+    For X:=0 To Pw-1 Do Begin
+     V:=Pl^[Ofs+Y*P^.Stride[C]+X];
+     If Bps=1 Then Begin HvOutBuf^[Pos]:=V; Inc(Pos); End
+     Else Begin HvOutBuf^[Pos]:=V And 255; HvOutBuf^[Pos+1]:=V Shr 8; Inc(Pos,2); End;
+    End;
+  End;
+  HvNativeHook(HvOutBuf,Cw,Ch,P^.Chroma,Bd);
+ End;
+ { sortie 4:2:0 8 bits }
+ If @HvHook<>Nil Then Begin
+  Tot:=Cw*Ch+2*((Cw+1) Div 2)*((Ch+1) Div 2);
+  If HvOutCap<Tot+64 Then Begin
+   If HvOutBuf<>Nil Then FreeMem(HvOutBuf);
+   HvOutCap:=Tot+Tot Div 2+64; GetMem(HvOutBuf,HvOutCap);
+  End;
+  Sh:=Bd-8;
+  Pl:=P^.Plane[0]; Ofs:=P^.CropT*P^.Stride[0]+P^.CropL; Pos:=0;
+  For Y:=0 To Ch-1 Do
+   For X:=0 To Cw-1 Do Begin
+    V:=Pl^[Ofs+Y*P^.Stride[0]+X];
+    If Sh>0 Then Begin V:=(V+(1 Shl (Sh-1))) Shr Sh; If V>255 Then V:=255; End;
+    HvOutBuf^[Pos]:=V; Inc(Pos);
+   End;
+  Nx:=(Cw+1) Div 2; Ny:=(Ch+1) Div 2;
+  For C:=1 To 2 Do Begin
+   If P^.Chroma=0 Then Begin
+    For Y:=1 To Nx*Ny Do Begin HvOutBuf^[Pos]:=128; Inc(Pos); End;
+   End Else Begin
+    Pl:=P^.Plane[C];
+    Ofs:=(P^.CropT Shr Vs)*P^.Stride[C]+(P^.CropL Shr Hs);
+    For Y:=0 To Ny-1 Do
+     For X:=0 To Nx-1 Do Begin
+      { moyenne des echantillons correspondant a la position 4:2:0 }
+      If P^.Chroma=1 Then V:=Pl^[Ofs+Y*P^.Stride[C]+X]
+      Else If P^.Chroma=2 Then Begin
+       Y2:=HvMin(2*Y+1,(Ch Shr Vs)-1);
+       V:=(Pl^[Ofs+(2*Y)*P^.Stride[C]+X]+Pl^[Ofs+Y2*P^.Stride[C]+X]+1) Shr 1;
+      End Else Begin
+       X2:=HvMin(2*X+1,Cw-1); Y2:=HvMin(2*Y+1,Ch-1);
+       V:=(Pl^[Ofs+(2*Y)*P^.Stride[C]+2*X]+Pl^[Ofs+(2*Y)*P^.Stride[C]+X2]+Pl^[Ofs+Y2*P^.Stride[C]+2*X]+Pl^[Ofs+Y2*P^.Stride[C]+X2]+2) Shr 2;
+      End;
+      If Sh>0 Then Begin V:=(V+(1 Shl (Sh-1))) Shr Sh; If V>255 Then V:=255; End;
+      HvOutBuf^[Pos]:=V; Inc(Pos);
+     End;
+   End;
+  End;
+  HvHook(HvOutBuf,Cw,Ch);
+ End;
+ Inc(HvOutCount);
+End;
+
+{ choisit (et emet) une image a afficher ; renvoie True si une image a ete choisie }
+Function HvOutputFrame(Flush: Boolean): Boolean;
+Var I,NbOut,MinPoc,MinIdx,Ret: LongInt; Mask: LongInt;
+Begin
+ HvOutputFrame:=False;
+ If ((HvNalType>=16) And (HvNalType<=23)) And (HvNoRaslOutput=1) Then Begin
+  Mask:=HV_FL_BUMP Or HV_FL_OUTPUT;
+  For I:=0 To HV_DPB-1 Do
+   If HvDpb[I].InUse And ((HvDpb[I].Flags And Mask)=HV_FL_OUTPUT) And (HvDpb[I].Seq<>HvSeqDecode) Then Begin
+    If HvSh.NoOutPrior=1 Then HvUnrefFrame(I,HV_FL_OUTPUT)
+    Else HvDpb[I].Flags:=HvDpb[I].Flags Or HV_FL_BUMP;
+   End;
+ End;
+ While True Do Begin
+  NbOut:=0; MinPoc:=$7FFFFFFF; MinIdx:=-1;
+  For I:=0 To HV_DPB-1 Do
+   If HvDpb[I].InUse And ((HvDpb[I].Flags And HV_FL_OUTPUT)<>0) And (HvDpb[I].Seq=HvSeqOutput) Then Begin
+    Inc(NbOut);
+    If (HvDpb[I].Poc<MinPoc) Or (NbOut=1) Then Begin MinPoc:=HvDpb[I].Poc; MinIdx:=I; End;
+   End;
+  If (Not Flush) And (HvSeqOutput=HvSeqDecode) And (HvS<>Nil) Then
+   If NbOut<=HvS^.NumReorder[HvS^.MaxSubLayers-1] Then Exit;
+  If NbOut>0 Then Begin
+   If (HvDpb[MinIdx].Flags And HV_FL_BUMP)<>0 Then HvUnrefFrame(MinIdx,HV_FL_OUTPUT Or HV_FL_BUMP)
+   Else HvUnrefFrame(MinIdx,HV_FL_OUTPUT);
+   { l'image est encore marquee InUse si elle est de reference ; sinon elle a ete liberee mais ses donnees restent valides }
+   If (MinIdx=HvCur) And (HvCtbsDone<HvS^.CtbCount) Then HvPendOut:=MinIdx
+   Else HvEmit(MinIdx);
+   HvOutputFrame:=True;
+   Exit;
+  End;
+  If HvSeqOutput<>HvSeqDecode Then HvSeqOutput:=(HvSeqOutput+1) And HV_SEQ_MASK
+  Else Break;
+ End;
+End;
+
+Procedure HvBumpFrame;
+Var I,Dpb,MinPoc: LongInt;
+Begin
+ Dpb:=0; MinPoc:=$7FFFFFFF;
+ For I:=0 To HV_DPB-1 Do
+  If HvDpb[I].InUse And (HvDpb[I].Flags<>0) And (HvDpb[I].Seq=HvSeqOutput) And (HvDpb[I].Poc<>HvPoc) Then Inc(Dpb);
+ If (HvS<>Nil) And (Dpb>=HvS^.MaxDecPicBuf[HvS^.MaxSubLayers-1]) Then Begin
+  For I:=0 To HV_DPB-1 Do
+   If HvDpb[I].InUse And (HvDpb[I].Flags<>0) And (HvDpb[I].Seq=HvSeqOutput) And (HvDpb[I].Poc<>HvPoc) Then
+    If (HvDpb[I].Flags=HV_FL_OUTPUT) And (HvDpb[I].Poc<MinPoc) Then MinPoc:=HvDpb[I].Poc;
+  For I:=0 To HV_DPB-1 Do
+   If HvDpb[I].InUse And ((HvDpb[I].Flags And HV_FL_OUTPUT)<>0) And (HvDpb[I].Seq=HvSeqOutput) And (HvDpb[I].Poc<=MinPoc) Then
+    HvDpb[I].Flags:=HvDpb[I].Flags Or HV_FL_BUMP;
+ End;
+End;
+{ ---------------------------------------------------------------- }
+{ en-tete de tranche                                                }
+{ ---------------------------------------------------------------- }
+Procedure HvFinishPic;
+Var Pic: ^THvPic;
+Begin
+ If HvCur<0 Then Begin
+  Exit;
+ End;
+ If HvCtbsDone>0 Then Begin
+  HvDeblockPicture;
+  If HvS^.Sao<>0 Then HvSaoPicture;
+ End;
+ If HvPendOut=HvCur Then Begin HvEmit(HvCur); HvPendOut:=-1; End;
+ HvCur:=-1;
+End;
+
+Function HvComputePoc(PocTid0,PocLsb,NalType: LongInt): LongInt;
+Var MaxLsb,PrevLsb,PrevMsb,Msb: LongInt;
+Begin
+ MaxLsb:=1 Shl HvS^.Log2MaxPocLsb;
+ PrevLsb:=PocTid0 Mod MaxLsb; If PrevLsb<0 Then Inc(PrevLsb,MaxLsb);
+ PrevMsb:=PocTid0-PrevLsb;
+ If (PocLsb<PrevLsb) And (PrevLsb-PocLsb>=MaxLsb Div 2) Then Msb:=PrevMsb+MaxLsb
+ Else If (PocLsb>PrevLsb) And (PocLsb-PrevLsb>MaxLsb Div 2) Then Msb:=PrevMsb-MaxLsb
+ Else Msb:=PrevMsb;
+ If (NalType=HV_NAL_BLA_W_LP) Or (NalType=HV_NAL_BLA_W_RADL) Or (NalType=HV_NAL_BLA_N_LP) Then Msb:=0;
+ HvComputePoc:=Msb+PocLsb;
+End;
+
+Function HvPredWeightTable: Boolean;
+Var I,J,Dw,Do_,Ld,Cd: LongInt; LF,CF: Array[0..1,0..15] Of LongInt; NL,L: LongInt;
+Begin
+ HvPredWeightTable:=False;
+ Ld:=HvUe;
+ If Ld>7 Then Exit;
+ HvSh.LumaLog2Wd:=Ld;
+ If HvS^.Chroma<>0 Then Begin
+  Cd:=Ld+HvSe;
+  If (Cd<0) Or (Cd>7) Then Exit;
+  HvSh.ChromaLog2Wd:=Cd;
+ End;
+ If HvSh.SliceType=HV_SLICE_B Then NL:=2 Else NL:=1;
+ For L:=0 To NL-1 Do Begin
+  For I:=0 To HvSh.NbRefs[L]-1 Do Begin
+   LF[L,I]:=HvBit;
+   If LF[L,I]=0 Then Begin HvSh.LumaW[L,I]:=1 Shl Ld; HvSh.LumaO[L,I]:=0; End;
+  End;
+  For I:=0 To HvSh.NbRefs[L]-1 Do
+   If HvS^.Chroma<>0 Then CF[L,I]:=HvBit Else CF[L,I]:=0;
+  For I:=0 To HvSh.NbRefs[L]-1 Do Begin
+   If LF[L,I]<>0 Then Begin
+    Dw:=HvSe;
+    If (Dw<-128) Or (Dw>127) Then Exit;
+    HvSh.LumaW[L,I]:=(1 Shl Ld)+Dw;
+    HvSh.LumaO[L,I]:=HvSe;
+   End;
+   If CF[L,I]<>0 Then Begin
+    For J:=0 To 1 Do Begin
+     Dw:=HvSe; Do_:=HvSe;
+     If (Dw<-128) Or (Dw>127) Or (Do_<-(1 Shl 17)) Or (Do_>(1 Shl 17)) Then Exit;
+     HvSh.ChromaW[L,I,J]:=(1 Shl HvSh.ChromaLog2Wd)+Dw;
+     HvSh.ChromaO[L,I,J]:=HvClip((Do_-HvSar(128*HvSh.ChromaW[L,I,J],HvSh.ChromaLog2Wd)+128),-128,127);
+    End;
+   End Else Begin
+    HvSh.ChromaW[L,I,0]:=1 Shl HvSh.ChromaLog2Wd; HvSh.ChromaO[L,I,0]:=0;
+    HvSh.ChromaW[L,I,1]:=1 Shl HvSh.ChromaLog2Wd; HvSh.ChromaO[L,I,1]:=0;
+   End;
+  End;
+ End;
+ HvPredWeightTable:=Not HvOver;
+End;
+
+Function HvLtRps: Boolean;
+Var S: PHvSps; MaxLsb,PrevDelta,NbSps,NbSh,I,Idx,Delta: LongInt; Poc: Int64;
+Begin
+ S:=HvS; HvLtRps:=True; HvSh.LtNb:=0;
+ If S^.LtPresent=0 Then Exit;
+ HvLtRps:=False;
+ MaxLsb:=1 Shl S^.Log2MaxPocLsb; PrevDelta:=0; NbSps:=0;
+ If S^.NumLtSps>0 Then NbSps:=HvUe;
+ NbSh:=HvUe;
+ If (NbSps>S^.NumLtSps) Or (NbSh+NbSps>32) Or (NbSh<0) Or (NbSps<0) Then Exit;
+ HvSh.LtNb:=NbSh+NbSps;
+ For I:=0 To HvSh.LtNb-1 Do Begin
+  If I<NbSps Then Begin
+   Idx:=0;
+   If S^.NumLtSps>1 Then Idx:=HvBits(HvCeilLog2(S^.NumLtSps));
+   HvSh.LtPoc[I]:=S^.LtPocLsb[Idx]; HvSh.LtUsed[I]:=S^.LtUsed[Idx];
+  End Else Begin
+   HvSh.LtPoc[I]:=HvBits(S^.Log2MaxPocLsb); HvSh.LtUsed[I]:=HvBit;
+  End;
+  HvSh.LtMsb[I]:=HvBit;
+  If HvSh.LtMsb[I]<>0 Then Begin
+   Delta:=HvUe;
+   If (I<>0) And (I<>NbSps) Then Inc(Delta,PrevDelta);
+   Poc:=HvSh.LtPoc[I]+HvPoc-Int64(Delta)*MaxLsb-HvSh.PocLsb;
+   HvSh.LtPoc[I]:=Poc;
+   PrevDelta:=Delta;
+  End;
+ End;
+ HvLtRps:=Not HvOver;
+End;
+
+Procedure HvUnsupported(S: PHvSps);
+Begin
+ If S^.SccExt<>0 Then Fail('HEVC : extension Screen Content Coding non supportee.');
+ If S^.CabacAlign<>0 Then Fail('HEVC : cabac_bypass_alignment non supporte.');
+ If (S^.ExtPrec<>0) And (S^.BitDepth>9) Then Fail('HEVC : extended_precision_processing non supporte.');
+ If S^.HighPrecOff<>0 Then Fail('HEVC : high_precision_offsets non supporte.');
+End;
+
+{ 0 = ok, 1 = tranche a ignorer, -1 = erreur }
+Function HvSliceHeader: LongInt;
+Var
+ S: PHvSps; Pp: PHvPps; I,Cnt,Pos,Nr,NumBits,Idx,OvrFlag,Lt,Len,OffLen: LongInt; Irap,Idr,Bla: Boolean; Poc: LongInt; NewSps: PHvSps;
+Begin
+ HvSliceHeader:=-1;
+ Irap:=(HvNalType>=16) And (HvNalType<=23);
+ Idr:=(HvNalType=HV_NAL_IDR_W_RADL) Or (HvNalType=HV_NAL_IDR_N_LP);
+ Bla:=(HvNalType>=16) And (HvNalType<=18);
+ HvSh.FirstSlice:=HvBit;
+ If HvSh.FirstSlice<>0 Then Begin
+  HvFinishPic;
+  HvLastEos:=HvAfterEos; HvAfterEos:=0;
+ End;
+ If (Idr Or Bla) And (HvSh.FirstSlice<>0) Then Begin
+  HvSeqDecode:=(HvSeqDecode+1) And HV_SEQ_MASK;
+  HvMaxRa:=$7FFFFFFF;
+  If Idr Then HvClearRefs;
+ End;
+ HvSh.NoOutPrior:=0;
+ If Irap Then HvSh.NoOutPrior:=HvBit;
+ HvSh.PpsId:=HvUe;
+ If (HvSh.PpsId>63) Or (HvPpsL[HvSh.PpsId]=Nil) Then Exit;
+ If (HvSh.FirstSlice=0) And (HvP<>HvPpsL[HvSh.PpsId]) Then Exit;
+ HvP:=HvPpsL[HvSh.PpsId]; Pp:=HvP;
+ If (HvNalType=HV_NAL_CRA) And (HvLastEos=1) Then HvSh.NoOutPrior:=1;
+ NewSps:=HvSpsL[Pp^.SpsId];
+ If NewSps=Nil Then Exit;
+ If HvS<>NewSps Then Begin
+  HvUnsupported(NewSps);
+  HvClearRefs;
+  HvS:=NewSps;
+  HvSetSps;
+  HvSeqDecode:=(HvSeqDecode+1) And HV_SEQ_MASK;
+  HvMaxRa:=$7FFFFFFF;
+ End;
+ S:=HvS;
+ If HvActPps<>HvP Then Begin
+  If (Pp^.DiffCuQpDeltaDepth>S^.Log2DiffCb) Or (Pp^.Log2SaoScaleL>HvMax(S^.BitDepth-10,0)) Or (Pp^.Log2SaoScaleC>HvMax(S^.BitDepthC-10,0)) Then Exit;
+  If Pp^.SccExt<>0 Then Fail('HEVC : extension Screen Content Coding non supportee.');
+  HvSetupPps; HvActPps:=HvP;
+ End;
+ HvSh.DepSlice:=0;
+ If HvSh.FirstSlice=0 Then Begin
+  If Pp^.DepSlice<>0 Then HvSh.DepSlice:=HvBit;
+  HvSh.SegAddr:=HvBits(HvCeilLog2(S^.CtbCount));
+  If HvSh.SegAddr>=S^.CtbCount Then Exit;
+  If HvSh.DepSlice=0 Then Begin HvSh.SliceAddr:=HvSh.SegAddr; Inc(HvSliceIdx); End;
+ End Else Begin
+  HvSh.SegAddr:=0; HvSh.SliceAddr:=0; HvSliceIdx:=0; HvSliceInit:=0;
+ End;
+ If HvSh.DepSlice=0 Then Begin
+  HvSliceInit:=0;
+  HvSkip(Pp^.NumExtraBits);
+  HvSh.SliceType:=HvUe;
+  If HvSh.SliceType>2 Then Exit;
+  If Irap And (HvSh.SliceType<>HV_SLICE_I) Then Exit;
+  HvSh.PicOutputFlag:=1;
+  If Pp^.OutputFlagPresent<>0 Then HvSh.PicOutputFlag:=HvBit;
+  HvSh.HasStRps:=0; HvSh.LtNb:=0;
+  If Not Idr Then Begin
+   HvSh.PocLsb:=HvBits(S^.Log2MaxPocLsb);
+   Poc:=HvComputePoc(HvPocTid0,HvSh.PocLsb,HvNalType);
+   If (HvSh.FirstSlice=0) And (Poc<>HvPoc) Then Poc:=HvPoc;
+   HvPoc:=Poc;
+   HvSh.StSpsFlag:=HvBit;
+   If HvSh.StSpsFlag=0 Then Begin
+    If Not HvStRpsParse(HvSh.StRps,S,S^.NbStRps,True) Then Exit;
+    HvSh.HasStRps:=1;
+   End Else Begin
+    If S^.NbStRps=0 Then Exit;
+    NumBits:=HvCeilLog2(S^.NbStRps);
+    Idx:=0; If NumBits>0 Then Idx:=HvBits(NumBits);
+    If Idx>=S^.NbStRps Then Exit;
+    HvSh.StRps:=S^.StRps[Idx]; HvSh.HasStRps:=1;
+   End;
+   If Not HvLtRps Then Begin HvSh.LtNb:=0; End;
+   If S^.TemporalMvp<>0 Then HvSh.TemporalMvp:=HvBit Else HvSh.TemporalMvp:=0;
+  End Else Begin
+   HvPoc:=0; HvSh.PocLsb:=0; HvSh.TemporalMvp:=0;
+  End;
+  If (HvSh.FirstSlice<>0) And (HvTid=0) And (HvNalType<>HV_NAL_TRAIL_N) And (HvNalType<>HV_NAL_TSA_N) And (HvNalType<>HV_NAL_STSA_N) And
+     (HvNalType<>HV_NAL_RADL_N) And (HvNalType<>HV_NAL_RADL_R) And (HvNalType<>HV_NAL_RASL_N) And (HvNalType<>HV_NAL_RASL_R) Then
+   HvPocTid0:=HvPoc;
+  If S^.Sao<>0 Then Begin
+   HvSh.SaoLuma:=HvBit;
+   If S^.Chroma<>0 Then HvSh.SaoChroma:=HvBit Else HvSh.SaoChroma:=0;
+  End Else Begin HvSh.SaoLuma:=0; HvSh.SaoChroma:=0; End;
+  HvSh.NbRefs[0]:=0; HvSh.NbRefs[1]:=0;
+  HvSh.RplMod[0]:=0; HvSh.RplMod[1]:=0;
+  HvSh.ColList:=0; HvSh.ColRefIdx:=0; HvSh.MaxMerge:=5; HvSh.CabacInit:=0; HvSh.MvdL1Zero:=0;
+  If HvSh.SliceType<>HV_SLICE_I Then Begin
+   HvSh.NbRefs[0]:=Pp^.NumRefL0;
+   If HvSh.SliceType=HV_SLICE_B Then HvSh.NbRefs[1]:=Pp^.NumRefL1;
+   If HvBit<>0 Then Begin
+    HvSh.NbRefs[0]:=HvUe+1;
+    If HvSh.SliceType=HV_SLICE_B Then HvSh.NbRefs[1]:=HvUe+1;
+   End;
+   If (HvSh.NbRefs[0]>=16) Or (HvSh.NbRefs[1]>=16) Or (HvSh.NbRefs[0]<=0) Then Exit;
+   Nr:=HvFrameNbRefs;
+   If Nr=0 Then Exit;
+   If (Pp^.ListsModPresent<>0) And (Nr>1) Then Begin
+    HvSh.RplMod[0]:=HvBit;
+    If HvSh.RplMod[0]<>0 Then
+     For I:=0 To HvSh.NbRefs[0]-1 Do HvSh.ListEntry[0,I]:=HvBits(HvCeilLog2(Nr));
+    If HvSh.SliceType=HV_SLICE_B Then Begin
+     HvSh.RplMod[1]:=HvBit;
+     If HvSh.RplMod[1]<>0 Then
+      For I:=0 To HvSh.NbRefs[1]-1 Do HvSh.ListEntry[1,I]:=HvBits(HvCeilLog2(Nr));
+    End;
+   End;
+   If HvSh.SliceType=HV_SLICE_B Then HvSh.MvdL1Zero:=HvBit;
+   If Pp^.CabacInitPresent<>0 Then HvSh.CabacInit:=HvBit;
+   If HvSh.TemporalMvp<>0 Then Begin
+    HvSh.ColList:=0;
+    If HvSh.SliceType=HV_SLICE_B Then HvSh.ColList:=1-HvBit;
+    If HvSh.NbRefs[HvSh.ColList]>1 Then Begin
+     HvSh.ColRefIdx:=HvUe;
+     If HvSh.ColRefIdx>=HvSh.NbRefs[HvSh.ColList] Then Exit;
+    End;
+   End;
+   If ((Pp^.WeightedPred<>0) And (HvSh.SliceType=HV_SLICE_P)) Or ((Pp^.WeightedBipred<>0) And (HvSh.SliceType=HV_SLICE_B)) Then
+    If Not HvPredWeightTable Then Exit;
+   HvSh.MaxMerge:=5-HvUe;
+   If (HvSh.MaxMerge<1) Or (HvSh.MaxMerge>5) Then Exit;
+  End;
+  HvSh.SliceQpDelta:=HvSe;
+  If Pp^.SliceChromaQpPresent<>0 Then Begin
+   HvSh.CbOff:=HvSe; HvSh.CrOff:=HvSe;
+   If (HvSh.CbOff<-12) Or (HvSh.CbOff>12) Or (HvSh.CrOff<-12) Or (HvSh.CrOff>12) Then Exit;
+  End Else Begin HvSh.CbOff:=0; HvSh.CrOff:=0; End;
+  If Pp^.CqpListEnabled<>0 Then HvSh.CuChromaQpOffEnabled:=HvBit Else HvSh.CuChromaQpOffEnabled:=0;
+  If Pp^.DbkControl<>0 Then Begin
+   OvrFlag:=0;
+   If Pp^.DbkOverride<>0 Then OvrFlag:=HvBit;
+   If OvrFlag<>0 Then Begin
+    HvSh.DisableDbf:=HvBit;
+    If HvSh.DisableDbf=0 Then Begin
+     I:=HvSe; Cnt:=HvSe;
+     If (I<-6) Or (I>6) Or (Cnt<-6) Or (Cnt>6) Then Exit;
+     HvSh.BetaOff:=I*2; HvSh.TcOff:=Cnt*2;
+    End;
+   End Else Begin
+    HvSh.DisableDbf:=Pp^.DisableDbf; HvSh.BetaOff:=Pp^.BetaOff; HvSh.TcOff:=Pp^.TcOff;
+   End;
+  End Else Begin HvSh.DisableDbf:=0; HvSh.BetaOff:=0; HvSh.TcOff:=0; End;
+  If (Pp^.SeqLfAcrossSlices<>0) And ((HvSh.SaoLuma<>0) Or (HvSh.SaoChroma<>0) Or (HvSh.DisableDbf=0)) Then
+   HvSh.LfAcrossSlices:=HvBit
+  Else HvSh.LfAcrossSlices:=Pp^.SeqLfAcrossSlices;
+ End Else If HvSliceInit=0 Then Exit;
+ If (Pp^.TilesEnabled<>0) Or (Pp^.EntropySync<>0) Then Begin
+  Cnt:=HvUe;
+  If (Cnt<0) Or (Cnt>HvBitsLeft) Then Exit;
+  If Cnt>0 Then Begin
+   OffLen:=HvUe+1;
+   If (OffLen<1) Or (OffLen>32) Then Exit;
+   For I:=1 To Cnt Do HvSkip(OffLen);
+  End;
+ End;
+ If Pp^.SliceHdrExt<>0 Then Begin
+  Len:=HvUe;
+  If (Len<0) Or (Len*8>HvBitsLeft) Then Exit;
+  HvSkip(Len*8);
+ End;
+ HvSh.SliceQp:=26+Pp^.InitQp+HvSh.SliceQpDelta;
+ If (HvSh.SliceQp>51) Or (HvSh.SliceQp<-S^.QpBdOffset) Then Exit;
+ HvSh.SliceCtbRs:=HvSh.SegAddr;
+ If (HvSh.SliceCtbRs=0) And (HvSh.DepSlice<>0) Then Exit;
+ If HvOver Then Exit;
+ HvFirstQpGroup:=Ord(HvSh.DepSlice=0);
+ If Pp^.CuQpDeltaEnabled=0 Then HvQpY:=HvSh.SliceQp;
+ HvSliceInit:=1;
+ HvCqpOffCb:=0; HvCqpOffCr:=0;
+ HvSh.DataPos:=(HvBp+1+7) Shr 3;
+ HvSliceHeader:=0;
+End;
+
+{ ---------------------------------------------------------------- }
+{ debut d'image                                                     }
+{ ---------------------------------------------------------------- }
+Function HvFrameStart: Boolean;
+Var S: PHvSps; N4,I,Nc: LongInt; Irap,Idr,Bla: Boolean;
+Begin
+ S:=HvS; HvFrameStart:=False;
+ Irap:=(HvNalType>=16) And (HvNalType<=23);
+ Idr:=(HvNalType=HV_NAL_IDR_W_RADL) Or (HvNalType=HV_NAL_IDR_N_LP);
+ Bla:=(HvNalType>=16) And (HvNalType<=18);
+ N4:=S^.W4*(S^.H4+2); Nc:=S^.CtbCount;
+ FillChar(HvHbs^,N4,0); FillChar(HvVbs^,N4,0); FillChar(HvCbfT^,N4,0); FillChar(HvNoFiltT^,N4,0);
+ FillChar(HvIpmT^,N4,1);
+ For I:=0 To Nc-1 Do HvSliceAddrT^[I]:=-1;
+ FillChar(HvSaoT^,Nc*SizeOf(THvSao),0); FillChar(HvDbkT^,Nc*SizeOf(THvDbk),0);
+ HvCtbsDone:=0;
+ HvFirstNalType:=HvNalType;
+ If Idr Or Bla Or ((HvNalType=HV_NAL_CRA) And (HvLastEos=1)) Then HvNoRaslOutput:=1 Else HvNoRaslOutput:=0;
+ { duplicata de POC dans la meme sequence ? }
+ For I:=0 To HV_DPB-1 Do
+  If HvDpb[I].InUse And (HvDpb[I].Seq=HvSeqDecode) And (HvDpb[I].Poc=HvPoc) Then Exit;
+ HvCur:=HvAllocFrame;
+ If HvCur<0 Then Exit;
+ With HvDpb[HvCur] Do Begin
+  If HvSh.PicOutputFlag<>0 Then Flags:=HV_FL_OUTPUT Or HV_FL_SHORT Else Flags:=HV_FL_SHORT;
+  Poc:=HvPoc; Seq:=HvSeqDecode;
+  FillChar(Mvf^,S^.W4*S^.H4*SizeOf(THvMvf),0);
+  FillChar(RplTab^,Nc*2,0);
+ End;
+ HvEnsureRpl(HvCur,0);
+ HvMvfCur:=HvDpb[HvCur].Mvf;
+ HvColPic:=-1;
+ HvPendOut:=-1;
+ If Not HvFrameRps Then Begin
+  { echec de construction du RPS : l'image est abandonnee }
+  HvUnrefFrame(HvCur,-1); HvCur:=-1; Exit;
+ End;
+ If Not Irap Then HvBumpFrame;
+ HvOutputFrame(False);
+ HvFrameStart:=True;
+End;
+
+{ ---------------------------------------------------------------- }
+{ unites NAL                                                        }
+{ ---------------------------------------------------------------- }
+Procedure HvSliceNal;
+Var R,Ts: LongInt; Irap,Idr,Bla: Boolean;
+Begin
+ R:=HvSliceHeader;
+ If R<>0 Then Exit;
+ Irap:=(HvNalType>=16) And (HvNalType<=23);
+ Idr:=(HvNalType=HV_NAL_IDR_W_RADL) Or (HvNalType=HV_NAL_IDR_N_LP);
+ Bla:=(HvNalType>=16) And (HvNalType<=18);
+ If HvSh.FirstSlice<>0 Then Begin
+  If HvMaxRa=$7FFFFFFF Then Begin
+   If (HvNalType=HV_NAL_CRA) Or Bla Then HvMaxRa:=HvPoc
+   Else If Idr Then HvMaxRa:=-$7FFFFFFF;
+  End;
+  If ((HvNalType=HV_NAL_RASL_R) Or (HvNalType=HV_NAL_RASL_N)) And (HvPoc<=HvMaxRa) Then Begin
+   HvCur:=-1; Exit;
+  End Else Begin
+   If (HvNalType=HV_NAL_RASL_R) And (HvPoc>HvMaxRa) Then HvMaxRa:=-$7FFFFFFF;
+  End;
+  If Not HvFrameStart Then Exit;
+ End Else If HvCur<0 Then Exit;
+ If HvNalType<>HvFirstNalType Then Exit;
+ If (HvSh.DepSlice=0) And (HvSh.SliceType<>HV_SLICE_I) Then
+  If Not HvSliceRpl Then Exit;
+ If (HvSh.DepSlice=0) And (HvSh.SliceType=HV_SLICE_I) Then Begin
+  { I : seule la table de tranche est a jour }
+  HvEnsureRpl(HvCur,HvSliceIdx);
+  If HvSliceIdx>=HvDpb[HvCur].NRpl Then HvDpb[HvCur].NRpl:=HvSliceIdx+1;
+  For Ts:=HvRsToTs^[HvSh.SegAddr] To HvS^.CtbCount-1 Do HvDpb[HvCur].RplTab^[HvTsToRs^[Ts]]:=HvSliceIdx;
+  HvCurRpl:=@HvDpb[HvCur].Rpl^[HvSliceIdx];
+  FillChar(HvCurRpl^,SizeOf(HvCurRpl^),0);
+ End;
+ HvCb:=HvRb; HvCbEnd:=HvRbLen;
+ Ts:=HvDecodeSliceData;
+ If HvCtbsDone>=HvS^.CtbCount Then HvFinishPic;
+End;
+
+Procedure HvNalUnit(P: HvPB; Len: LongInt);
+Var T,Layer: LongInt;
+Begin
+ If Len<2 Then Exit;
+ If (P^[0] And $80)<>0 Then Exit;
+ T:=(P^[0] Shr 1) And 63;
+ Layer:=((P^[0] And 1) Shl 5) Or (P^[1] Shr 3);
+ If Layer>0 Then Exit;
+ HvTid:=(P^[1] And 7)-1;
+ HvNalType:=T;
+ If T=HV_NAL_VPS Then Exit;
+ If (T>=48) Or (T=39) Or (T=40) Then Exit;
+ If (T=HV_NAL_SPS) Or (T=HV_NAL_PPS) Or (T=HV_NAL_AUD) Or (T=HV_NAL_EOS) Or (T=HV_NAL_EOB) Then HvFinishPic;
+ HvUnescape(@P^[2],Len-2);
+ Case T Of
+  HV_NAL_SPS: HvParseSps(HvPB(HvRb),HvRbLen);
+  HV_NAL_PPS: HvParsePps(HvPB(HvRb),HvRbLen);
+  0..9,16..21: HvSliceNal;
+  HV_NAL_EOS,HV_NAL_EOB: Begin
+   HvSeqDecode:=(HvSeqDecode+1) And HV_SEQ_MASK; HvMaxRa:=$7FFFFFFF; HvAfterEos:=1;
+  End;
+ End;
+End;
+
+{ ---------------------------------------------------------------- }
+{ interface publique                                                }
+{ ---------------------------------------------------------------- }
+Procedure HvStart;
+Var I: LongInt;
+Begin
+ If HvInit Then Exit;
+ HvInit:=True;
+ HvInitTables;
+ HvSeqDecode:=0; HvSeqOutput:=0; HvMaxRa:=$7FFFFFFF; HvCur:=-1; HvColPic:=-1; HvPendOut:=-1;
+ HvPoc:=0; HvPocTid0:=0; HvAfterEos:=0; HvLastEos:=0; HvSliceInit:=0; HvOutCount:=0;
+ HvS:=Nil; HvP:=Nil; HvActPps:=Nil; HvAllocSps:=Nil;
+End;
+
+Procedure HvFree;
+Var I: LongInt;
+Begin
+ HvFreeAll;
+ For I:=0 To 15 Do HvFreeSps(HvSpsL[I]);
+ For I:=0 To 63 Do HvFreePps(HvPpsL[I]);
+ If HvRb<>Nil Then FreeMem(HvRb); HvRb:=Nil; HvRbCap:=0; HvRbLen:=0;
+ If HvOutBuf<>Nil Then FreeMem(HvOutBuf); HvOutBuf:=Nil; HvOutCap:=0;
+ HvS:=Nil; HvP:=Nil; HvActSps:=Nil; HvActPps:=Nil; HvAllocSps:=Nil;
+ HvCur:=-1; HvColPic:=-1; HvPendOut:=-1; HvNalLenSize:=4;
+ HvInit:=False; HvOutCount:=0;
+End;
+
+Procedure HvConfig(P: PEABuffer; Len: LongInt);
+Var Pb: HvPB; Pos,NArr,I,J,NN,L: LongInt;
+Begin
+ HvStart;
+ Pb:=HvPB(P);
+ If Len<23 Then Exit;
+ HvNalLenSize:=(Pb^[21] And 3)+1;
+ NArr:=Pb^[22]; Pos:=23;
+ For I:=1 To NArr Do Begin
+  If Pos+3>Len Then Exit;
+  NN:=(Pb^[Pos+1] Shl 8) Or Pb^[Pos+2]; Inc(Pos,3);
+  For J:=1 To NN Do Begin
+   If Pos+2>Len Then Exit;
+   L:=(Pb^[Pos] Shl 8) Or Pb^[Pos+1]; Inc(Pos,2);
+   If Pos+L>Len Then Exit;
+   HvNalUnit(@Pb^[Pos],L);
+   Inc(Pos,L);
+  End;
+ End;
+End;
+
+Function HvFrame(P: PEABuffer; Len: LongInt): LongInt;
+Var Pb: HvPB; Pos,L,K,N0: LongInt;
+Begin
+ HvStart;
+ N0:=HvOutCount;
+ Pb:=HvPB(P); Pos:=0;
+ If HvNalLenSize<1 Then HvNalLenSize:=4;
+ While Pos+HvNalLenSize<=Len Do Begin
+  L:=0;
+  For K:=0 To HvNalLenSize-1 Do L:=(L Shl 8) Or Pb^[Pos+K];
+  Inc(Pos,HvNalLenSize);
+  If (L<=0) Or (Pos+L>Len) Then Break;
+  HvNalUnit(@Pb^[Pos],L);
+  Inc(Pos,L);
+ End;
+ HvFrame:=HvOutCount-N0;
+End;
+
+Function HvAnnexB(P: PEABuffer; Len: LongInt): LongInt;
+Var Pb: HvPB; I,Start,N0,E: LongInt;
+Begin
+ HvStart;
+ N0:=HvOutCount;
+ Pb:=HvPB(P);
+ I:=0; Start:=-1;
+ While I+2<Len Do Begin
+  If (Pb^[I]=0) And (Pb^[I+1]=0) And (Pb^[I+2]=1) Then Begin
+   If Start>=0 Then Begin
+    E:=I; While (E>Start) And (Pb^[E-1]=0) Do Dec(E);
+    HvNalUnit(@Pb^[Start],E-Start);
+   End;
+   Start:=I+3; Inc(I,3);
+  End Else Inc(I);
+ End;
+ If Start>=0 Then Begin
+  E:=Len; While (E>Start) And (Pb^[E-1]=0) Do Dec(E);
+  HvNalUnit(@Pb^[Start],E-Start);
+ End;
+ HvAnnexB:=HvOutCount-N0;
+End;
+
+Procedure HvFlush;
+Begin
+ HvStart;
+ HvFinishPic;
+ While HvOutputFrame(True) Do ;
+End;
 {$IFDEF FPC}
 { ---- AC-3 : decodeur / encodeur natif (FFMPEG.PAS, d apres FFmpeg ac3dec.c / ac3enc.c, LGPL-2.1+) ---- }
 Procedure ProcessAC3E(Const Source,Target:String; Encoding:Boolean;
@@ -64030,7 +68169,7 @@ Type
   N: LongInt;
   Off,Sz,Dur,Cts: PLArr;
   Sync: PBArr;
-  Cfg: Array[0..511] Of Byte;
+  Cfg: Array[0..2047] Of Byte;
   CfgLen: Integer;
   Oti: Integer;
  End;
@@ -64131,8 +68270,8 @@ Begin
  If T^.IsVideo Then Begin
   T^.W:=B16(Sd+8+32); T^.H:=B16(Sd+8+34);
   { enregistrement avcC dans les sous-boites de l'entree }
-  If BoxChild(Sd+8+86,BoxEndOf(Sd),'avcC',P) Then Begin
-   L:=BoxEndOf(P)-P; If L>500 Then L:=500;
+  If BoxChild(Sd+8+86,BoxEndOf(Sd),'avcC',P) Or BoxChild(Sd+8+86,BoxEndOf(Sd),'hvcC',P) Or BoxChild(Sd+8+86,BoxEndOf(Sd),'av1C',P) Or BoxChild(Sd+8+86,BoxEndOf(Sd),'vpcC',P) Then Begin
+   L:=BoxEndOf(P)-P; If L>2000 Then L:=2000;
    For I:=0 To L-1 Do T^.Cfg[I]:=CB(P+I);
    T^.CfgLen:=L;
   End;
@@ -64565,9 +68704,12 @@ Begin
   If Cd='V_MPEG4/ISO/AVC' Then V.Codec:='avc1'
   Else If Cd='V_MPEG4/ISO/ASP' Then V.Codec:='MP4V'
   Else If Cd='V_VP8' Then V.Codec:='VP80'
+  Else If Cd='V_VP9' Then V.Codec:='VP90'
+  Else If Cd='V_MPEGH/ISO/HEVC' Then V.Codec:='hvc1'
+  Else If Cd='V_AV1' Then V.Codec:='av01'
   Else If Cd='V_MS/VFW/FOURCC' Then V.Codec:=Copy(UpStr(C4(MkT[Vi].PrivPos+16)),1,4)
   Else V.Codec:=Copy(Cd,3,4);
-  K:=MkT[Vi].PrivLen; If K>500 Then K:=500;
+  K:=MkT[Vi].PrivLen; If K>2000 Then K:=2000;
   If Cd<>'V_MS/VFW/FOURCC' Then Begin For I:=0 To K-1 Do V.Cfg[I]:=CB(MkT[Vi].PrivPos+I); V.CfgLen:=K; End;
   { cadence : DefaultDuration, sinon moyenne des instants }
   MinP:=MkPts^[0]; MaxP:=MkPts^[0];
@@ -64741,7 +68883,9 @@ Begin
  If Not OpenSrc(Path,VF) Then Begin Err:='Ouverture impossible.'; Exit; End;
  VFOpen:=True; EngMsg:=''; EngFirst:=0; NalSz:=0;
  If SetJmp(EngJmp)=0 Then Begin
-  If Mode=4 Then Begin
+  If Mode=6 Then Begin
+   HvFree; HvHook:=H4Trampoline; HvNativeHook:=Nil; HvConfig(PEABuffer(@T.Cfg),T.CfgLen);
+  End Else If Mode=4 Then Begin
    V4Reset;
   End Else If Mode=3 Then Begin
    Vp8Hook:=H4Trampoline; V8Have:=False;
@@ -64761,7 +68905,8 @@ Begin
     If (VLastBuf<>Nil) And (@VFrameCb<>Nil) Then VFrameCb(VLastBuf,VLastW,VLastH);
    End Else Begin
     ReadSample(VF,T.Off^[I],T.Sz^[I]);
-    If Mode=4 Then Begin
+    If Mode=6 Then HvFrame(PEABuffer(SBuf),T.Sz^[I])
+    Else If Mode=4 Then Begin
      If (H3Frame(PEABuffer(SBuf),T.Sz^[I])=1) And V4Pack Then Begin
       VLastBuf:=H3OutBuf; VLastW:=H3OutW; VLastH:=H3OutH;
       If @VFrameCb<>Nil Then VFrameCb(H3OutBuf,H3OutW,H3OutH);
@@ -64792,7 +68937,8 @@ Begin
    If (I And 7)=0 Then UiTick(I,T.N);
    Inc(I);
   End;
-  If (Mode=3) Or (Mode=4) Then Begin End Else If Mode=2 Then Begin
+  If Mode=6 Then Begin If Not VStopFlag Then HvFlush; End
+  Else If (Mode=3) Or (Mode=4) Then Begin End Else If Mode=2 Then Begin
    If Not VStopFlag Then Begin
     If (M4LowDelay=0) And (M4NextI>=0) And M4PicHave Then M4Emit(M4NextI)
     Else If M4SkippedLast And M4PicHave And (M4CurI>=0) Then M4Emit(M4CurI);
@@ -64802,7 +68948,8 @@ Begin
  End Else Begin VOk:=False; VErr:=EngMsg; End;
  If VFOpen Then Begin Close(VF); VFOpen:=False; End;
  If Mode=2 Then M4VidHook:=Nil;
- If Mode=4 Then Begin
+ If Mode=6 Then Begin HvFree; HvHook:=Nil; End
+ Else If Mode=4 Then Begin
   H3FreeCtx; If H3OutBuf<>Nil Then Begin FreeMem(H3OutBuf); H3OutBuf:=Nil; End;
   If H3PkBuf<>Nil Then Begin FreeMem(H3PkBuf); H3PkBuf:=Nil; H3PkCap:=0; End;
  End Else If Mode=3 Then V8FreeAll
@@ -64833,9 +68980,11 @@ Begin
  End Else If InList(Fmt,'MKV,WEBM') Then Begin
   If (C='avc1') And (T.CfgLen>=7) Then VideoMode:=0
   Else If InList(C,'MP4V,XVID,DIVX,DX50,FMP4') Then VideoMode:=2
-  Else If C='VP80' Then VideoMode:=3;
+  Else If C='VP80' Then VideoMode:=3
+  Else If ((C='hvc1') Or (C='hev1')) And (T.CfgLen>=23) Then VideoMode:=6;
  End Else If (Fmt='FLV') And (C='FLV1') Then VideoMode:=4
- Else If ((C='avc1') Or (C='avc3')) And (T.CfgLen>=7) Then VideoMode:=0;
+ Else If ((C='avc1') Or (C='avc3')) And (T.CfgLen>=7) Then VideoMode:=0
+ Else If ((C='hvc1') Or (C='hev1')) And (T.CfgLen>=23) Then VideoMode:=6;
 End;
 
 { ---------------------------------------------------------------------- }
