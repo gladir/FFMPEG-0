@@ -1495,7 +1495,7 @@ Begin
  AddProf(0,'MKV','MKV','H264','AAC','Auto',5000,192,44100,2);
  AddProf(0,'AVI','AVI','MPEG4','MP3','Auto',3000,192,44100,2);
  AddProf(0,'WMV','WMV','WMV2','WMA','Auto',2500,128,44100,2);
- AddProf(0,'WebM VP9','WEBM','VP9','Opus','Auto',3000,128,48000,2);
+ AddProf(0,'WebM VP8','WEBM','VP8','Vorbis','Auto',3000,128,44100,2);
  AddProf(0,'FLV','FLV','H264','AAC','Auto',2000,128,44100,2);
  AddProf(0,'MPEG-2 PS','MPG','MPEG2','MP2','Auto',6000,192,48000,2);
  AddProf(0,'3GP','3GP','H263','AAC','352x288',512,64,22050,1);
@@ -18368,6 +18368,609 @@ Begin
   If @Vp8Hook<>Nil Then Vp8Hook(V8Out,V8W,V8H);
  End;
  Vp8Frame:=0;
+End;
+{$ENDIF}
+{$IFDEF FPC}
+{ ====================================================================== }
+{ Encodeur VP8 : images cle intra 16x16 (DC/V/H/TM) et images inter       }
+{ (ZEROMV / NEWMV en pixels entiers), reconstruction par le decodeur       }
+{ VP8 ci-dessus (memes fonctions de prediction, IDCT et filtre de boucle). }
+{ ====================================================================== }
+Type
+ TV8Enc = Record Buf: PEABuffer; Len,Cap: LongInt; Range,Bottom: LongWord; BitCount: LongInt; End;
+
+Var
+ E8Q0,E8Q1: TV8Enc;                 { premiere partition, partition de jetons }
+ E8W,E8H,E8Fn,E8Fd,E8Frame,E8Gop: LongInt;
+ E8SrcY,E8SrcU,E8SrcV: PEABuffer;
+ E8Pkt: PEABuffer; E8PktLen,E8PktCap: LongInt;
+ E8Qi,E8LfLevel,E8PSkip,E8PIntra,E8NSkip,E8NIntra: LongInt;
+ E8Active,E8KeyNow: Boolean;
+ E8Target: LongInt; E8Cx: Double; E8AccL: Int64; E8QiP: LongInt;
+ E8PathI,E8PathB: Array[0..31] Of Integer; E8PathN: Integer;
+ E8Cnt: Array[0..3] Of Integer; E8Nm: Array[0..3] Of TV8Mv;
+
+{ ---- codeur booleen (RFC 6386, section 7) ---- }
+Procedure E8Init(Var E: TV8Enc);
+Begin
+ E.Cap:=65536; GetMem(E.Buf,E.Cap); E.Len:=0; E.Range:=255; E.Bottom:=0; E.BitCount:=24;
+End;
+
+Procedure E8Byte(Var E: TV8Enc; V: LongInt);
+Var NB: PEABuffer;
+Begin
+ If E.Len>=E.Cap Then Begin GetMem(NB,E.Cap*2); Move(E.Buf^,NB^,E.Len); FreeMem(E.Buf,E.Cap); E.Buf:=NB; E.Cap:=E.Cap*2; End;
+ E.Buf^[E.Len]:=V And 255; Inc(E.Len);
+End;
+
+Procedure E8Carry(Var E: TV8Enc);
+Var Q: LongInt;
+Begin
+ Q:=E.Len-1;
+ While (Q>=0) And (E.Buf^[Q]=255) Do Begin E.Buf^[Q]:=0; Dec(Q); End;
+ If Q>=0 Then Inc(E.Buf^[Q]);
+End;
+
+Procedure E8Put(Var E: TV8Enc; Prob,Bit: LongInt);
+Var Split: LongWord;
+Begin
+ Split:=1+(((E.Range-1)*LongWord(Prob)) Shr 8);
+ If Bit<>0 Then Begin E.Bottom:=E.Bottom+Split; E.Range:=E.Range-Split; End Else E.Range:=Split;
+ While E.Range<128 Do Begin
+  E.Range:=E.Range Shl 1;
+  If (E.Bottom And $80000000)<>0 Then E8Carry(E);
+  E.Bottom:=E.Bottom Shl 1;
+  Dec(E.BitCount);
+  If E.BitCount=0 Then Begin E8Byte(E,E.Bottom Shr 24); E.Bottom:=E.Bottom And $FFFFFF; E.BitCount:=8; End;
+ End;
+End;
+
+Procedure E8Lit(Var E: TV8Enc; V,N: LongInt);
+Var I: LongInt;
+Begin
+ For I:=N-1 Downto 0 Do E8Put(E,128,(V Shr I) And 1);
+End;
+
+Procedure E8Flush(Var E: TV8Enc);
+Var C,I: LongInt; V: LongWord;
+Begin
+ C:=E.BitCount; V:=E.Bottom;
+ If (V And (LongWord(1) Shl (32-C)))<>0 Then E8Carry(E);
+ V:=V Shl (C And 7); C:=C Shr 3;
+ While C>0 Do Begin V:=V Shl 8; Dec(C); End;
+ For I:=1 To 4 Do Begin E8Byte(E,V Shr 24); V:=V Shl 8; End;
+End;
+
+{ ---- ecriture d'un arbre ---- }
+Function E8Find(Const T: Array Of ShortInt; I,Target: Integer; Depth: Integer): Boolean;
+Var B: Integer; Ch: Integer;
+Begin
+ E8Find:=False;
+ For B:=0 To 1 Do Begin
+  Ch:=T[I+B];
+  If Ch<=0 Then Begin
+   If -Ch=Target Then Begin E8PathI[Depth]:=I; E8PathB[Depth]:=B; E8PathN:=Depth+1; E8Find:=True; Exit; End;
+  End Else If E8Find(T,Ch,Target,Depth+1) Then Begin E8PathI[Depth]:=I; E8PathB[Depth]:=B; E8Find:=True; Exit; End;
+ End;
+End;
+
+Procedure E8Tree(Var E: TV8Enc; Const T: Array Of ShortInt; P: PEABuffer; Target: Integer);
+Var K: Integer;
+Begin
+ If Not E8Find(T,0,Target,0) Then Exit;
+ For K:=0 To E8PathN-1 Do E8Put(E,P^[E8PathI[K] Shr 1],E8PathB[K]);
+End;
+
+{ ---- transformees directes ---- }
+Procedure E8Fdct(Var Inp: Array Of LongInt; Var Outp: Array Of LongInt);
+Var I,A1,B1,C1,D1: LongInt; Tmp: Array[0..15] Of LongInt;
+Begin
+ For I:=0 To 3 Do Begin
+  A1:=(Inp[I*4]+Inp[I*4+3])*8; B1:=(Inp[I*4+1]+Inp[I*4+2])*8; C1:=(Inp[I*4+1]-Inp[I*4+2])*8; D1:=(Inp[I*4]-Inp[I*4+3])*8;
+  Tmp[I*4]:=A1+B1; Tmp[I*4+2]:=A1-B1;
+  Tmp[I*4+1]:=V8Sar(C1*2217+D1*5352+14500,12);
+  Tmp[I*4+3]:=V8Sar(D1*2217-C1*5352+7500,12);
+ End;
+ For I:=0 To 3 Do Begin
+  A1:=Tmp[I]+Tmp[12+I]; B1:=Tmp[4+I]+Tmp[8+I]; C1:=Tmp[4+I]-Tmp[8+I]; D1:=Tmp[I]-Tmp[12+I];
+  Outp[I]:=V8Sar(A1+B1+7,4); Outp[8+I]:=V8Sar(A1-B1+7,4);
+  Outp[4+I]:=V8Sar(C1*2217+D1*5352+12000,16)+Ord(D1<>0);
+  Outp[12+I]:=V8Sar(D1*2217-C1*5352+51000,16);
+ End;
+End;
+
+Procedure E8Walsh(Var Inp: Array Of LongInt; Var Outp: Array Of LongInt);
+Var I,A1,B1,C1,D1,A2,B2,C2,D2: LongInt; Tmp: Array[0..15] Of LongInt;
+Begin
+ For I:=0 To 3 Do Begin
+  A1:=(Inp[I*4]+Inp[I*4+2])*4; D1:=(Inp[I*4+1]+Inp[I*4+3])*4; C1:=(Inp[I*4+1]-Inp[I*4+3])*4; B1:=(Inp[I*4]-Inp[I*4+2])*4;
+  Tmp[I*4]:=A1+D1+Ord(A1<>0); Tmp[I*4+1]:=B1+C1; Tmp[I*4+2]:=B1-C1; Tmp[I*4+3]:=A1-D1;
+ End;
+ For I:=0 To 3 Do Begin
+  A1:=Tmp[I]+Tmp[8+I]; D1:=Tmp[4+I]+Tmp[12+I]; C1:=Tmp[4+I]-Tmp[12+I]; B1:=Tmp[I]-Tmp[8+I];
+  A2:=A1+D1; B2:=B1+C1; C2:=B1-C1; D2:=A1-D1;
+  A2:=A2+Ord(A2<0); B2:=B2+Ord(B2<0); C2:=C2+Ord(C2<0); D2:=D2+Ord(D2<0);
+  Outp[I]:=V8Sar(A2+3,3); Outp[4+I]:=V8Sar(B2+3,3); Outp[8+I]:=V8Sar(C2+3,3); Outp[12+I]:=V8Sar(D2+3,3);
+ End;
+End;
+
+Function E8Quant(C,Step,Dz: LongInt): LongInt;
+Var A: LongInt;
+Begin
+ A:=Abs(C); A:=(A*100+Step*Dz) Div (Step*100);
+ If A>2047 Then A:=2047;
+ If C<0 Then E8Quant:=-A Else E8Quant:=A;
+End;
+
+{ ---- ecriture des jetons d'un bloc ---- }
+Procedure E8Block(Var E: TV8Enc; TB: LongInt; Ctx,First,Q,Last: Integer);
+{ Q : numero de bloc dans V8Q ; Last : nombre de positions ecrites (indice du dernier coefficient non nul + 1), 0 si aucun }
+Var P,N,V,Av,Cat,K,Ex: LongInt; More: Boolean;
+ Procedure Pb(Off,Bit: Integer); Begin E8Put(E,V8Fc.Coef[P+Off],Bit); End;
+Begin
+ N:=First; P:=TB+N*33+Ctx*11;
+ If Last<=First Then Begin Pb(0,0); Exit; End;
+ Pb(0,1);
+ While N<Last Do Begin
+  V:=V8Q[Q*16+V8Zig[N]]; Av:=Abs(V);
+  If Av=0 Then Begin
+   Pb(1,0);
+   Inc(N); P:=TB+V8Bands[N]*33;
+  End Else Begin
+   Pb(1,1);
+   If Av=1 Then Begin Pb(2,0); Inc(N); P:=TB+V8Bands[N]*33+11; End
+   Else Begin
+    Pb(2,1);
+    If Av<=4 Then Begin
+     Pb(3,0);
+     If Av=2 Then Pb(4,0) Else Begin Pb(4,1); Pb(5,Av-3); End;
+    End Else Begin
+     Pb(3,1);
+     If Av<=10 Then Begin
+      Pb(6,0);
+      If Av<=6 Then Begin Pb(7,0); E8Put(E,159,Av-5); End
+      Else Begin Pb(7,1); E8Put(E,165,((Av-7) Shr 1) And 1); E8Put(E,145,(Av-7) And 1); End;
+     End Else Begin
+      Pb(6,1);
+      If Av<19 Then Begin Pb(8,0); Pb(9,0); Cat:=0; Ex:=Av-11; End
+      Else If Av<35 Then Begin Pb(8,0); Pb(9,1); Cat:=1; Ex:=Av-19; End
+      Else If Av<67 Then Begin Pb(8,1); Pb(10,0); Cat:=2; Ex:=Av-35; End
+      Else Begin Pb(8,1); Pb(10,1); Cat:=3; Ex:=Av-67; End;
+      Case Cat Of
+       0: Begin K:=0; While V8Cat3[K]<>0 Do Inc(K); For V:=K-1 Downto 0 Do E8Put(E,V8Cat3[K-1-V],(Ex Shr V) And 1); End;
+       1: Begin K:=0; While V8Cat4[K]<>0 Do Inc(K); For V:=K-1 Downto 0 Do E8Put(E,V8Cat4[K-1-V],(Ex Shr V) And 1); End;
+       2: Begin K:=0; While V8Cat5[K]<>0 Do Inc(K); For V:=K-1 Downto 0 Do E8Put(E,V8Cat5[K-1-V],(Ex Shr V) And 1); End;
+       Else Begin K:=0; While V8Cat6[K]<>0 Do Inc(K); For V:=K-1 Downto 0 Do E8Put(E,V8Cat6[K-1-V],(Ex Shr V) And 1); End;
+      End;
+      V:=V8Q[Q*16+V8Zig[N]];
+     End;
+    End;
+    Inc(N); P:=TB+V8Bands[N]*33+22;
+   End;
+   If V<0 Then E8Put(E,128,1) Else E8Put(E,128,0);
+   If N<16 Then Begin
+    More:=N<Last;
+    If More Then Pb(0,1) Else Pb(0,0);
+   End;
+  End;
+ End;
+End;
+
+{ ---- voisins pour le codage des vecteurs (meme logique que V8Modes) ---- }
+Procedure E8Near(R,C: LongInt; Var Near: Integer);
+Var Mi,Above,Left,AL: PV8Mbi; N,Cx,Tmp: Integer; This,Tm: TV8Mv; Idx: LongInt;
+ Function Zr(Const A: TV8Mv): Boolean; Begin Zr:=(A.R=0) And (A.C=0); End;
+ Function Eq(Const A,B: TV8Mv): Boolean; Begin Eq:=(A.R=B.R) And (A.C=B.C); End;
+Begin
+ Idx:=(R+1)*V8Stride+C+1;
+ Above:=@V8Mip^[Idx-V8Stride]; Left:=@V8Mip^[Idx-1]; AL:=@V8Mip^[Idx-V8Stride-1];
+ FillChar(E8Nm,SizeOf(E8Nm),0); E8Cnt[0]:=0; E8Cnt[1]:=0; E8Cnt[2]:=0; E8Cnt[3]:=0; N:=0; Cx:=0;
+ If Above^.Ref<>0 Then Begin
+  If Not Zr(Above^.Mv) Then Begin Inc(N); E8Nm[N]:=Above^.Mv; Inc(Cx); End;
+  Inc(E8Cnt[Cx],2);
+ End;
+ If Left^.Ref<>0 Then Begin
+  If Not Zr(Left^.Mv) Then Begin
+   This:=Left^.Mv;
+   If Not Eq(This,E8Nm[N]) Then Begin Inc(N); E8Nm[N]:=This; Inc(Cx); End;
+   Inc(E8Cnt[Cx],2);
+  End Else Inc(E8Cnt[0],2);
+ End;
+ If AL^.Ref<>0 Then Begin
+  If Not Zr(AL^.Mv) Then Begin
+   This:=AL^.Mv;
+   If Not Eq(This,E8Nm[N]) Then Begin Inc(N); E8Nm[N]:=This; Inc(Cx); End;
+   Inc(E8Cnt[Cx],1);
+  End Else Inc(E8Cnt[0],1);
+ End;
+ { fusion / echange (apres le premier bit de mode) }
+ If (E8Cnt[3]>0) And Eq(E8Nm[N],E8Nm[1]) Then Inc(E8Cnt[1]);
+ If E8Cnt[2]>E8Cnt[1] Then Begin
+  Tmp:=E8Cnt[1]; E8Cnt[1]:=E8Cnt[2]; E8Cnt[2]:=Tmp; Tm:=E8Nm[1]; E8Nm[1]:=E8Nm[2]; E8Nm[2]:=Tm;
+ End;
+ Near:=Ord(E8Cnt[1]>=E8Cnt[0]);
+ E8Cnt[3]:=((Ord(Above^.Mode=9)+Ord(Left^.Mode=9))*2)+Ord(AL^.Mode=9);
+End;
+
+{ ---- ecriture d'une composante de vecteur (unites de 1/4 pixel) ---- }
+Procedure E8MvComp(Var E: TV8Enc; D,Comp: Integer);
+Var A,I: Integer; Mvc: PEABuffer;
+Begin
+ Mvc:=PEABuffer(@V8Fc.Mvc[Comp,0]); A:=Abs(D);
+ If A<8 Then Begin
+  E8Put(E,Mvc^[0],0);
+  E8Tree(E,V8SmallMv,PEABuffer(@Mvc^[2]),A);
+ End Else Begin
+  E8Put(E,Mvc^[0],1);
+  For I:=0 To 2 Do E8Put(E,Mvc^[9+I],(A Shr I) And 1);
+  For I:=9 Downto 4 Do E8Put(E,Mvc^[9+I],(A Shr I) And 1);
+  If (A And $FFF0)<>0 Then E8Put(E,Mvc^[9+3],(A Shr 3) And 1);
+ End;
+ If A<>0 Then Begin If D<0 Then E8Put(E,Mvc^[1],1) Else E8Put(E,Mvc^[1],0); End;
+End;
+
+{ ---- parametres de quantification ---- }
+Procedure E8Steps(Qi: Integer; Var Y1dc,Y1ac,Y2dc,Y2ac,Uvdc,Uvac: Integer);
+Begin
+ Y1dc:=Vp8DcQ[V8Qi(Qi)]; Y1ac:=Vp8AcQ[V8Qi(Qi)];
+ Y2dc:=Vp8DcQ[V8Qi(Qi)]*2; Y2ac:=(Vp8AcQ[V8Qi(Qi)]*101581) Shr 16; If Y2ac<8 Then Y2ac:=8;
+ Uvdc:=Vp8DcQ[V8Qi(Qi)]; If Uvdc>132 Then Uvdc:=132; Uvac:=Vp8AcQ[V8Qi(Qi)];
+End;
+
+Function E8Sad(Src: PEABuffer; Ss: LongInt; Dst: PEABuffer; Ds,W,H: LongInt): LongInt;
+Var I,J,S: LongInt;
+Begin
+ S:=0;
+ For J:=0 To H-1 Do For I:=0 To W-1 Do Inc(S,Abs(Src^[J*Ss+I]-Dst^[J*Ds+I]));
+ E8Sad:=S;
+End;
+
+{ ---- jetons d'un macrobloc ---- }
+Procedure E8MbTokens(C: LongInt; SkipMb: Boolean);
+Var Ao,Last,B,I,J: LongInt;
+Begin
+   Ao:=C*9;
+   If SkipMb Then Begin
+    FillChar(V8ACtx[Ao],8,0); FillChar(V8LCtx,8,0); V8ACtx[Ao+8]:=0; V8LCtx[8]:=0;
+   End Else Begin
+    Last:=V8Eob[24];
+    E8Block(E8Q1,1*264,V8ACtx[Ao+8]+V8LCtx[8],0,24,Last);
+    V8ACtx[Ao+8]:=Ord(Last>0); V8LCtx[8]:=Ord(Last>0);
+    For B:=0 To 15 Do Begin
+     Last:=V8Eob[B]; If Last<=1 Then Last:=0;
+     E8Block(E8Q1,0*264,V8ACtx[Ao+(B And 3)]+V8LCtx[(B And 12) Shr 2],1,B,Last);
+     V8ACtx[Ao+(B And 3)]:=Ord(Last>0); V8LCtx[(B And 12) Shr 2]:=Ord(Last>0);
+    End;
+    For B:=16 To 23 Do Begin
+     I:=Ao+4+(Ord(B>19) Shl 1)+(B And 1); J:=4+(Ord(B>19) Shl 1)+Ord((B And 3)>1);
+     Last:=V8Eob[B];
+     E8Block(E8Q1,2*264,V8ACtx[I]+V8LCtx[J],0,B,Last);
+     V8ACtx[I]:=Ord(Last>0); V8LCtx[J]:=Ord(Last>0);
+    End;
+   End;
+End;
+
+{ ---- codage d'une image ---- }
+Function E8EncodeFrame(Yuv: PEABuffer; Key: Boolean; Qi: Integer): LongInt;
+Var
+ R,C,I,J,K,B,Mode,UvMode,BestMode,BestUv,Cost,BestCost,Ao,Lvl,Tb,Nz,Last,Mvr,Mvc,BestR,BestC,Cand,Sad,Sad0,Bx,By: LongInt;
+ Mi: PV8Mbi; Y1dc,Y1ac,Y2dc,Y2ac,Uvdc,Uvac: Integer;
+ Blk,Cf: Array[0..15] Of LongInt; Y2in,Y2out: Array[0..15] Of LongInt;
+ Yo,Co: LongInt; Used: Array[0..3] Of Boolean; Lt,Rt,Tp,Bt: LongInt;
+ IsInter,AnySkip: Boolean; Near: Integer; Best: TV8Mv; Hl: LongInt; Total: LongInt;
+ Pl: PEABuffer; SrcP: PEABuffer; SStr: LongInt; Pln: Integer; SkipMb: Boolean;
+ CW,CH,Cs: LongInt; Cm: LongInt;
+ Function Src8(Pl: Integer; X,Y: LongInt): LongInt;
+ Begin
+  If Pl=0 Then Src8:=E8SrcY^[Y*V8YS+X] Else If Pl=1 Then Src8:=E8SrcU^[Y*V8CS+X] Else Src8:=E8SrcV^[Y*V8CS+X];
+ End;
+ Procedure ModeCost(Pl: Integer; Mx,My,Size,Md: Integer; Var Sd: LongInt);
+ Var Ii,Jj,S,Pp,Q: LongInt; Pb: PEABuffer;
+ Begin
+  V8IntraBlock(Pl,Mx,My,Size,Md);
+  If Pl=0 Then Pb:=V8Fb[V8New].Y Else If Pl=1 Then Pb:=V8Fb[V8New].U Else Pb:=V8Fb[V8New].V;
+  If Pl=0 Then Q:=V8YS Else Q:=V8CS;
+  S:=0;
+  For Jj:=0 To Size-1 Do For Ii:=0 To Size-1 Do Inc(S,Abs(Src8(Pl,Mx*Size+Ii,My*Size+Jj)-Pb^[(My*Size+Jj)*Q+Mx*Size+Ii]));
+  Sd:=S;
+ End;
+Begin
+ E8EncodeFrame:=0;
+ E8Qi:=Qi; V8Key:=Ord(Key); V8SegOn:=0; V8SegMap:=0; V8LfDeltaOn:=0; V8FType:=0; V8Sharp:=0; V8Bilinear:=False; V8FullPix:=False;
+ V8Base:=Qi; V8Y1dc:=0; V8Y2dc:=0; V8Y2ac:=0; V8Uvdc:=0; V8Uvac:=0; V8Show:=1;
+ E8LfLevel:=Qi Div 3; If E8LfLevel>63 Then E8LfLevel:=63; V8FLevel:=E8LfLevel;
+ E8Steps(Qi,Y1dc,Y1ac,Y2dc,Y2ac,Uvdc,Uvac);
+ FillChar(Used,SizeOf(Used),False); Used[V8Last]:=True; Used[V8Gold]:=True; Used[V8Alt]:=True;
+ V8New:=0; While Used[V8New] Do Inc(V8New);
+ If Key Then Begin
+  Move(Vp8CoefDef,V8Fc.Coef,1056); Move(V8MvDef,V8Fc.Mvc,38); Move(V8DefYprob,V8Fc.Ymode,4); Move(V8DefUvprob,V8Fc.Uvmode,3);
+ End;
+ FillChar(V8Mip^,(V8MbW+1)*(V8MbH+1)*SizeOf(TV8Mbi),0);
+ { copie de la source (bords repliques) }
+ { (deja faite par l'appelant dans E8SrcY/U/V) }
+ E8Init(E8Q0); E8Init(E8Q1);
+ { ---- en-tete (premiere partition) ---- }
+ If Key Then Begin E8Put(E8Q0,128,0); E8Put(E8Q0,128,0); End;
+ E8Put(E8Q0,128,0);                       { segmentation }
+ E8Put(E8Q0,128,0); E8Lit(E8Q0,E8LfLevel,6); E8Lit(E8Q0,0,3);
+ E8Put(E8Q0,128,0);                       { deltas de filtre }
+ E8Lit(E8Q0,0,2);                         { une partition de jetons }
+ E8Lit(E8Q0,Qi,7);
+ For I:=1 To 5 Do E8Put(E8Q0,128,0);
+ If Not Key Then Begin
+  E8Put(E8Q0,128,0); E8Put(E8Q0,128,0);   { refresh golden / alt }
+  E8Lit(E8Q0,0,2); E8Lit(E8Q0,0,2);       { copies }
+  E8Put(E8Q0,128,0); E8Put(E8Q0,128,0);   { sign bias }
+ End;
+ E8Put(E8Q0,128,1);                       { refresh_entropy_probs }
+ If Not Key Then E8Put(E8Q0,128,1);       { refresh_last }
+ For I:=0 To 1055 Do E8Put(E8Q0,Vp8CoefUpd[I],0);
+ E8Put(E8Q0,128,1); E8Lit(E8Q0,E8PSkip,8);  { mb_no_coeff_skip }
+ If Not Key Then Begin
+  E8Lit(E8Q0,E8PIntra,8); E8Lit(E8Q0,255,8); E8Lit(E8Q0,128,8);
+  E8Put(E8Q0,128,0); E8Put(E8Q0,128,0);
+  For I:=0 To 1 Do For J:=0 To 18 Do E8Put(E8Q0,V8MvUpd[I,J],0);
+ End;
+ E8NSkip:=0; E8NIntra:=0;
+ FillChar(V8ACtx,(V8MbW+1)*9,0);
+ For R:=0 To V8MbH-1 Do Begin
+  FillChar(V8LCtx,SizeOf(V8LCtx),0);
+  For C:=0 To V8MbW-1 Do Begin
+   Mi:=V8Mb(R,C);
+   FillChar(V8Q,SizeOf(V8Q),0); FillChar(V8Eob,SizeOf(V8Eob),0);
+   FillChar(Mi^,SizeOf(Mi^),0);
+   Lt:=-C*128; Rt:=(V8MbW-1-C)*128; Tp:=-R*128; Bt:=(V8MbH-1-R)*128;
+   IsInter:=False; BestCost:=MaxLongInt;
+   { ---- choix du mode intra ---- }
+   BestMode:=0;
+   For Mode:=0 To 3 Do Begin
+    ModeCost(0,C,R,16,Mode,Sad);
+    Cost:=Sad+Ord(Mode<>0)*Qi*2;
+    If Cost<BestCost Then Begin BestCost:=Cost; BestMode:=Mode; End;
+   End;
+   BestUv:=0; Sad0:=MaxLongInt;
+   For Mode:=0 To 3 Do Begin
+    ModeCost(1,C,R,8,Mode,Sad); ModeCost(2,C,R,8,Mode,K); Cost:=Sad+K;
+    If Cost<Sad0 Then Begin Sad0:=Cost; BestUv:=Mode; End;
+   End;
+   { ---- inter ---- }
+   If Not Key Then Begin
+    Mi^.Ref:=1; Mi^.Mode:=7; Mi^.Mv.R:=0; Mi^.Mv.C:=0; Mi^.Clamp:=False;
+    { ZEROMV }
+    V8Inter(0,V8Last,C*16,R*16,16,16,0,0);
+    Sad:=E8Sad(@E8SrcY^[R*16*V8YS+C*16],V8YS,@V8Fb[V8New].Y^[R*16*V8YS+C*16],V8YS,16,16);
+    Cost:=Sad;
+    BestR:=0; BestC:=0; Cand:=Cost;
+    { recherche entiere autour de zero (pas de 8 = 1 pixel) }
+    E8Near(R,C,Near);
+    Best:=E8Nm[Near]; V8ClampMv(Best,Lt-128,Rt+128,Tp-128,Bt+128);
+    For K:=0 To 2 Do Begin
+     Case K Of
+      0: Begin Mvr:=0; Mvc:=0; End;
+      1: Begin Mvr:=Best.R And Not 7; Mvc:=Best.C And Not 7; End;
+      Else Begin Mvr:=BestR; Mvc:=BestC; End;
+     End;
+     For I:=1 To 8 Do Begin
+      Hl:=0;
+      For J:=0 To 3 Do Begin
+       Case J Of
+        0: Begin B:=Mvr; Bx:=Mvc+8; End; 1: Begin B:=Mvr; Bx:=Mvc-8; End;
+        2: Begin B:=Mvr+8; Bx:=Mvc; End; Else Begin B:=Mvr-8; Bx:=Mvc; End;
+       End;
+       If (Bx<Lt-128) Or (Bx>Rt+128) Or (B<Tp-128) Or (B>Bt+128) Then Continue;
+       V8Inter(0,V8Last,C*16,R*16,16,16,B,Bx);
+       Sad:=E8Sad(@E8SrcY^[R*16*V8YS+C*16],V8YS,@V8Fb[V8New].Y^[R*16*V8YS+C*16],V8YS,16,16)+Qi Div 2*(Ord(B<>0)+Ord(Bx<>0));
+       If Sad<Cand Then Begin Cand:=Sad; BestR:=B; BestC:=Bx; Mvr:=B; Mvc:=Bx; Hl:=1; End;
+      End;
+      If Hl=0 Then Break;
+     End;
+    End;
+    If Cand+Qi*3<BestCost Then Begin
+     IsInter:=True; BestCost:=Cand;
+    End;
+    If IsInter Then Begin
+     If (BestR=0) And (BestC=0) Then Begin Mi^.Mode:=7; Mi^.Mv.R:=0; Mi^.Mv.C:=0; End
+     Else Begin Mi^.Mode:=8; Mi^.Mv.R:=BestR; Mi^.Mv.C:=BestC; End;
+     Mi^.Ref:=1; Mi^.Clamp:=(Mi^.Mv.C<Lt-128) Or (Mi^.Mv.C>Rt+128) Or (Mi^.Mv.R<Tp-128) Or (Mi^.Mv.R>Bt+128);
+     Mi^.UvMode:=0;
+    End;
+   End;
+   If Not IsInter Then Begin
+    Mi^.Ref:=0; Mi^.Mode:=BestMode; Mi^.UvMode:=BestUv; Mi^.Mv.R:=0; Mi^.Mv.C:=0; Inc(E8NIntra);
+   End;
+   Mi^.Is4:=False; Mi^.Seg:=0;
+   { ---- prediction finale ---- }
+   If IsInter Then V8InterMb(C,R,Mi)
+   Else Begin
+    V8IntraBlock(1,C,R,8,Mi^.UvMode); V8IntraBlock(2,C,R,8,Mi^.UvMode); V8IntraBlock(0,C,R,16,Mi^.Mode);
+   End;
+   { ---- residu luma : DCT des 16 blocs, Y2 ---- }
+   For B:=0 To 15 Do Begin
+    Bx:=(B And 3)*4; By:=(B Shr 2)*4;
+    For J:=0 To 3 Do For I:=0 To 3 Do Blk[J*4+I]:=E8SrcY^[(R*16+By+J)*V8YS+C*16+Bx+I]-V8Fb[V8New].Y^[(R*16+By+J)*V8YS+C*16+Bx+I];
+    E8Fdct(Blk,Cf);
+    Y2in[B]:=Cf[0];
+    Last:=0;
+    For K:=1 To 15 Do Begin
+     V8Q[B*16+V8Zig[K]]:=E8Quant(Cf[V8Zig[K]],Y1ac,34);
+     If V8Q[B*16+V8Zig[K]]<>0 Then Last:=K+1;
+    End;
+    V8Eob[B]:=Max(Last,1);
+   End;
+   E8Walsh(Y2in,Y2out);
+   Last:=0;
+   For K:=0 To 15 Do Begin
+    If K=0 Then V8Q[24*16+V8Zig[K]]:=E8Quant(Y2out[V8Zig[K]],Y2dc,46) Else V8Q[24*16+V8Zig[K]]:=E8Quant(Y2out[V8Zig[K]],Y2ac,34);
+    If V8Q[24*16+V8Zig[K]]<>0 Then Last:=K+1;
+   End;
+   V8Eob[24]:=Last;
+   { ---- chrominance ---- }
+   For Pln:=1 To 2 Do Begin
+    If Pln=1 Then Pl:=V8Fb[V8New].U Else Pl:=V8Fb[V8New].V;
+    For B:=0 To 3 Do Begin
+     Bx:=(B And 1)*4; By:=(B Shr 1)*4;
+     For J:=0 To 3 Do For I:=0 To 3 Do Blk[J*4+I]:=Src8(Pln,C*8+Bx+I,R*8+By+J)-Pl^[(R*8+By+J)*V8CS+C*8+Bx+I];
+     E8Fdct(Blk,Cf);
+     Last:=0;
+     For K:=0 To 15 Do Begin
+      If K=0 Then V8Q[(16+(Pln-1)*4+B)*16+V8Zig[K]]:=E8Quant(Cf[V8Zig[K]],Uvdc,46) Else V8Q[(16+(Pln-1)*4+B)*16+V8Zig[K]]:=E8Quant(Cf[V8Zig[K]],Uvac,34);
+      If V8Q[(16+(Pln-1)*4+B)*16+V8Zig[K]]<>0 Then Last:=K+1;
+     End;
+     V8Eob[16+(Pln-1)*4+B]:=Last;
+    End;
+   End;
+   { saut si aucun coefficient }
+   SkipMb:=(V8Eob[24]=0);
+   For B:=0 To 15 Do If V8Eob[B]>1 Then SkipMb:=False;
+   For B:=16 To 23 Do If V8Eob[B]>0 Then SkipMb:=False;
+   Mi^.Skip:=Ord(SkipMb);
+   If SkipMb Then Inc(E8NSkip);
+   { ---- reconstruction (fonctions du decodeur) ---- }
+   V8Recon(R,C,Mi,Qi);
+   { ---- modes (premiere partition) ---- }
+   E8Put(E8Q0,E8PSkip,Ord(SkipMb));
+   If Key Then Begin
+    E8Tree(E8Q0,V8KfYmodeTree,@V8KfYprob,Mi^.Mode);
+    E8Tree(E8Q0,V8UvTree,@V8KfUvprob,Mi^.UvMode);
+   End Else Begin
+    If IsInter Then Begin
+     E8Put(E8Q0,E8PIntra,1); E8Put(E8Q0,255,0);
+     E8Near(R,C,Near);
+     { le premier bit de mode utilise le compte avant fusion : le recalculer }
+     If Mi^.Mode=7 Then Begin
+      { Cnt[0] n'est pas modifie par la fusion }
+      E8Put(E8Q0,V8ModeCtx[E8Cnt[0],0],0);
+     End Else Begin
+      E8Put(E8Q0,V8ModeCtx[E8Cnt[0],0],1);
+      E8Put(E8Q0,V8ModeCtx[E8Cnt[1],1],1);
+      E8Put(E8Q0,V8ModeCtx[E8Cnt[2],2],1);
+      E8Put(E8Q0,V8ModeCtx[E8Cnt[3],3],0);
+      Best:=E8Nm[Near]; V8ClampMv(Best,Lt-128,Rt+128,Tp-128,Bt+128);
+      E8MvComp(E8Q0,(Mi^.Mv.R-Best.R) Div 2,0);
+      E8MvComp(E8Q0,(Mi^.Mv.C-Best.C) Div 2,1);
+     End;
+    End Else Begin
+     E8Put(E8Q0,E8PIntra,0);
+     E8Tree(E8Q0,V8YmodeTree,PEABuffer(@V8Fc.Ymode),Mi^.Mode);
+     E8Tree(E8Q0,V8UvTree,PEABuffer(@V8Fc.Uvmode),Mi^.UvMode);
+    End;
+   End;
+   E8MbTokens(C,SkipMb);
+  End;
+ End;
+ If V8FLevel>0 Then V8LoopFilter;
+ { gestion des references }
+ If Key Then Begin V8Gold:=V8New; V8Alt:=V8New; End;
+ V8Last:=V8New;
+ E8Flush(E8Q0); E8Flush(E8Q1);
+ { paquet : etiquette, en-tete d'image cle, partitions }
+ Total:=3+Ord(Key)*7+E8Q0.Len+E8Q1.Len;
+ If Total+16>E8PktCap Then Begin
+  If E8Pkt<>Nil Then FreeMem(E8Pkt,E8PktCap);
+  E8PktCap:=Total*2+1024; GetMem(E8Pkt,E8PktCap);
+ End;
+ K:=(1-Ord(Key)) Or (0 Shl 1) Or (1 Shl 4) Or (E8Q0.Len Shl 5);
+ E8Pkt^[0]:=K And 255; E8Pkt^[1]:=(K Shr 8) And 255; E8Pkt^[2]:=(K Shr 16) And 255;
+ I:=3;
+ If Key Then Begin
+  E8Pkt^[3]:=$9D; E8Pkt^[4]:=$01; E8Pkt^[5]:=$2A; E8Pkt^[6]:=E8W And 255; E8Pkt^[7]:=E8W Shr 8; E8Pkt^[8]:=E8H And 255; E8Pkt^[9]:=E8H Shr 8; I:=10;
+ End;
+ Move(E8Q0.Buf^,E8Pkt^[I],E8Q0.Len); Inc(I,E8Q0.Len);
+ Move(E8Q1.Buf^,E8Pkt^[I],E8Q1.Len); Inc(I,E8Q1.Len);
+ E8PktLen:=I;
+ FreeMem(E8Q0.Buf,E8Q0.Cap); FreeMem(E8Q1.Buf,E8Q1.Cap);
+ { statistiques pour le prochain en-tete }
+ K:=V8MbW*V8MbH;
+ E8PSkip:=((K-E8NSkip)*256+K Div 2) Div K; If E8PSkip<1 Then E8PSkip:=1; If E8PSkip>255 Then E8PSkip:=255;
+ E8PIntra:=(E8NIntra*256+K Div 2) Div K; If E8PIntra<1 Then E8PIntra:=1; If E8PIntra>255 Then E8PIntra:=255;
+ E8EncodeFrame:=E8PktLen;
+End;
+
+{ ---- interface ---- }
+Procedure E8Begin(W,H,Fn,Fd,Bitrate: LongInt);
+Begin
+ V8Alloc(W,H);
+ E8W:=W; E8H:=H; E8Fn:=Fn; E8Fd:=Fd; E8Frame:=0;
+ E8Gop:=Max(1,(Fn*10) Div Max(Fd,1));
+ GetMem(E8SrcY,V8YS*V8MbH*16+16); GetMem(E8SrcU,V8CS*V8MbH*8+16); GetMem(E8SrcV,V8CS*V8MbH*8+16);
+ E8Pkt:=Nil; E8PktCap:=0; E8PktLen:=0;
+ E8PSkip:=128; E8PIntra:=30; E8Cx:=0; E8AccL:=0; E8QiP:=40;
+ If Bitrate>0 Then E8Target:=Round(Int64(Bitrate)*Fd/Fn) Else E8Target:=0;
+ E8Active:=True;
+End;
+
+Procedure E8Free;
+Begin
+ If Not E8Active Then Exit;
+ FreeMem(E8SrcY,V8YS*V8MbH*16+16); FreeMem(E8SrcU,V8CS*V8MbH*8+16); FreeMem(E8SrcV,V8CS*V8MbH*8+16);
+ If E8Pkt<>Nil Then FreeMem(E8Pkt,E8PktCap);
+ E8Pkt:=Nil; V8FreeAll; E8Active:=False;
+End;
+
+{ pas de quantification (ordre de grandeur) pour un indice }
+Function E8Qstep(Qi: Integer): Double;
+Begin
+ E8Qstep:=Vp8AcQ[V8Qi(Qi)];
+End;
+
+{ Encode une image YUV 4:2:0 (W*H*3/2 octets) ; paquet dans E8Pkt/E8PktLen ; Key : image cle }
+Procedure E8Frame1(Yuv: PEABuffer; Var Key: Boolean);
+Var X,Y,I,J,CW,CH,Qi,Trial,Bits,Ti,Tn: LongInt; R: Double; Saved: Array[0..3] Of LongInt;
+Begin
+ CW:=(E8W+1) Div 2; CH:=(E8H+1) Div 2;
+ For Y:=0 To V8MbH*16-1 Do Begin
+  J:=Y; If J>E8H-1 Then J:=E8H-1;
+  For X:=0 To V8YS-1 Do Begin I:=X; If I>E8W-1 Then I:=E8W-1; E8SrcY^[Y*V8YS+X]:=Yuv^[J*E8W+I]; End;
+ End;
+ For Y:=0 To V8MbH*8-1 Do Begin
+  J:=Y; If J>CH-1 Then J:=CH-1;
+  For X:=0 To V8CS-1 Do Begin
+   I:=X; If I>CW-1 Then I:=CW-1;
+   E8SrcU^[Y*V8CS+X]:=Yuv^[E8W*E8H+J*CW+I]; E8SrcV^[Y*V8CS+X]:=Yuv^[E8W*E8H+CW*CH+J*CW+I];
+  End;
+ End;
+ If (E8Frame Mod E8Gop)=0 Then Key:=True;
+ If E8Target<=0 Then Begin
+  Qi:=36; Bits:=E8EncodeFrame(Yuv,Key,Qi)*8;
+ End Else If Key Then Begin
+  Ti:=E8Target*3; Qi:=E8QiP-6; If E8Frame=0 Then Qi:=50;
+  If Qi<4 Then Qi:=4; If Qi>120 Then Qi:=120;
+  Trial:=0;
+  Saved[0]:=V8Last; Saved[1]:=V8Gold; Saved[2]:=V8Alt;
+  Repeat
+   V8Last:=Saved[0]; V8Gold:=Saved[1]; V8Alt:=Saved[2];
+   Bits:=E8EncodeFrame(Yuv,True,Qi)*8; Inc(Trial);
+   If (E8Frame>0) Or (Trial>=4) Then Break;
+   R:=Bits/Ti;
+   If (R>0.8) And (R<1.25) Then Break;
+   J:=Qi+Round(24*Ln(Ti/Bits)/Ln(2.0)/1.0*0.5); If J<4 Then J:=4; If J>120 Then J:=120;
+   If J=Qi Then Break;
+   Qi:=J;
+  Until False;
+  If E8Frame=0 Then E8QiP:=Qi+8;
+ End Else Begin
+  Tn:=E8Target-Round(E8AccL/24);
+  If Tn<E8Target Div 3 Then Tn:=E8Target Div 3; If Tn>E8Target*2 Then Tn:=E8Target*2;
+  Qi:=E8QiP;
+  If E8Cx>0 Then Begin
+   R:=E8Cx/Tn;
+   { chercher l'indice dont le pas vaut R }
+   J:=0; While (J<127) And (Vp8AcQ[J]<R) Do Inc(J);
+   Qi:=J;
+   If Qi>E8QiP+6 Then Qi:=E8QiP+6; If Qi<E8QiP-6 Then Qi:=E8QiP-6;
+  End;
+  If Qi<4 Then Qi:=4; If Qi>127 Then Qi:=127;
+  Bits:=E8EncodeFrame(Yuv,False,Qi)*8;
+  R:=Bits*E8Qstep(Qi);
+  If E8Cx<=0 Then E8Cx:=R Else E8Cx:=0.5*E8Cx+0.5*R;
+  E8QiP:=Qi;
+ End;
+ If E8Target>0 Then Begin
+  E8AccL:=E8AccL+Bits-E8Target;
+  If E8AccL>Int64(E8Target)*60 Then E8AccL:=Int64(E8Target)*60;
+  If E8AccL<-Int64(E8Target)*60 Then E8AccL:=-Int64(E8Target)*60;
+ End;
+ Inc(E8Frame);
 End;
 {$ENDIF}
 {$IFDEF FPC}
@@ -61493,7 +62096,7 @@ Begin
    StageLo:=0; StageHi:=100;
    DoConvert:=RunImageJob(M,Pr,Dst,Err);
   End Else Err:='Le d'#233'codeur vid'#233'o n''est pas inclus : seules les images BMP/GIF peuvent '#234'tre converties en image.';
- End Else If InList(Pr.Ext,'MP4,MOV,M4V,3GP,FLV,MKV,AVI,WMV,OGV,MPG') Then Begin
+ End Else If InList(Pr.Ext,'MP4,MOV,M4V,3GP,FLV,MKV,AVI,WMV,OGV,MPG,WEBM') Then Begin
   {$IFDEF FPC}
   If M.Kind=1 Then Err:='Un fichier audio ne peut pas devenir une vid'#233'o. Choisissez un profil Audio.'
   Else If (M.Kind=3) Or (M.Fmt='GIF') Then Begin StageLo:=0; StageHi:=90; DoConvert:=ImageVideoJob(M,Pr,Dst,Err); End
@@ -63388,6 +63991,8 @@ Begin
 End;
 
 { Doc : 'matroska' ou 'webm' }
+Var MkvPrivBuf: PBArr; MkvPrivLen: LongInt;
+
 Function MuxMkv(Const Dst,Doc: String; Var Tr: Array Of TMuxTrk; NT: Integer; Var Err: String): Boolean;
 Var
  FO: File; K,I,Len,Nxt,Total,Cnt,Ms,Cts,Pts,Seg,Cl,Tk,Te,Vi,Ai,SegStart,ClStart,NCue,ClMs: LongInt;
@@ -63442,7 +64047,10 @@ Begin
   If Tr[K].T^.IsVideo Then EUInt($83,1) Else EUInt($83,2);
   EUInt($9C,0);
   EStr($86,MkvCodecId(Tr[K].T^.Codec,Tr[K].T^.IsVideo));
-  If Tr[K].T^.CfgLen>0 Then Begin
+  If (Tr[K].T^.Codec='vorb') And (MkvPrivLen>0) Then Begin
+   EId($63A2); I:=MkvPrivLen; M8($40+(I Shr 8)); M8(I);
+   For I:=0 To MkvPrivLen-1 Do M8(MkvPrivBuf^[I]);
+  End Else If Tr[K].T^.CfgLen>0 Then Begin
    EId($63A2); I:=Tr[K].T^.CfgLen; If I<127 Then M8($80+I) Else Begin M8($40+(I Shr 8)); M8(I); End;
    For I:=0 To Tr[K].T^.CfgLen-1 Do M8(Tr[K].T^.Cfg[I]);
   End;
@@ -63889,7 +64497,7 @@ Begin
  ParseRes(Pr.Res,VJResW,VJResH);
  If (Pr.Res='Auto') Or (Pr.Res='-') Then Begin VJResW:=0; VJResH:=0; End;
  StartMs:=M.TrimS; EndMs:=M.TrimE;
- VJAlt:=InList(Pr.Ext,'AVI,WMV,OGV,MPG'); VJDecim:=1;
+ VJAlt:=InList(Pr.Ext,'AVI,WMV,OGV,MPG,WEBM'); VJDecim:=1;
  Reenc:=VJAlt Or (DecMode<>0) Or EditsPresent(M) Or (StartMs>0) Or ((VJResW>0) And ((VJResW<>V.W) Or (VJResH<>V.H))) Or (V.W=0);
  FillChar(Tr,SizeOf(Tr),0); NT:=0; Ok:=False; APath:=''; FillChar(AOut,SizeOf(AOut),0);
  SkipV:=False;
@@ -64520,6 +65128,101 @@ Begin
  MuxAsf:=True;
 End;
 
+
+{ ---- sortie WebM : VP8 + Vorbis ---- }
+{ Paquets Vorbis d'un fichier Ogg -> piste audio en memoire (les 3 premiers paquets = en-tetes) }
+Function OggVorbisTrack(Const Path: String; Var A: TTrkIn; Var Mem: PBArr): Boolean;
+Var F: File; Buf: PBArr; Sz,P,I,Nseg,L,N,Cap,Cur,PktStart,H3,K,Np,PageFirst: LongInt; G,Gp: Int64; Seg: Array[0..254] Of Byte;
+ PSz,POff: PLArr; Pg: PLArr; Cont: Boolean; Nm,Rate,Ch: LongInt; Total: LongInt;
+ Hd: Array[0..2] Of LongInt;
+Begin
+ OggVorbisTrack:=False; Mem:=Nil; FillChar(A,SizeOf(A),0); MkvPrivLen:=0;
+ If Not OpenSrc(Path,F) Then Exit;
+ Sz:=FileSize(F); GetMem(Buf,Sz+16); BlockRead(F,Buf^,Sz); Close(F);
+ GetMem(Mem,Sz+16); GetMem(PSz,(Sz Div 8+16)*4); GetMem(POff,(Sz Div 8+16)*4); GetMem(Pg,(Sz Div 8+16)*4);
+ N:=0; Cur:=0; P:=0; Gp:=0; Cont:=False;
+ While P+27<=Sz Do Begin
+  If (Buf^[P]<>Ord('O')) Or (Buf^[P+1]<>Ord('g')) Then Break;
+  Nseg:=Buf^[P+26]; G:=0; For K:=7 DownTo 0 Do G:=G*256+Buf^[P+6+K];
+  L:=P+27+Nseg; PageFirst:=N;
+  For I:=0 To Nseg-1 Do Begin
+   K:=Buf^[P+27+I];
+   Move(Buf^[L],Mem^[Cur],K); Inc(Cur,K); Inc(L,K);
+   If K<255 Then Begin
+    { paquet termine }
+    PSz^[N]:=Cur-0; POff^[N]:=0; Pg^[N]:=0; Inc(N);
+   End;
+  End;
+  { stocker la taille cumulee ; recalcul ensuite }
+  Pg^[PageFirst]:=Pg^[PageFirst];
+  If N>PageFirst Then For I:=PageFirst To N-1 Do Pg^[I]:=Round(G);
+  P:=L;
+ End;
+ FreeMem(Buf,Sz+16);
+ { PSz contient le cumul de fin de paquet : convertir en (offset,taille) }
+ If N<4 Then Begin FreeMem(Mem,Sz+16); Mem:=Nil; FreeMem(PSz,(Sz Div 8+16)*4); FreeMem(POff,(Sz Div 8+16)*4); FreeMem(Pg,(Sz Div 8+16)*4); Exit; End;
+ Cur:=0;
+ For I:=0 To N-1 Do Begin L:=PSz^[I]; POff^[I]:=Cur; PSz^[I]:=L-Cur; Cur:=L; End;
+ { identification : canaux et frequence }
+ Ch:=Mem^[POff^[0]+11]; Rate:=Mem^[POff^[0]+12]+Mem^[POff^[0]+13]*256+Mem^[POff^[0]+14]*65536+Mem^[POff^[0]+15]*16777216;
+ { en-tete CodecPrivate : lacet Xiph des 3 premiers paquets }
+ GetMem(MkvPrivBuf,PSz^[0]+PSz^[1]+PSz^[2]+16); MkvPrivLen:=0;
+ MkvPrivBuf^[0]:=2; MkvPrivLen:=1;
+ For K:=0 To 1 Do Begin
+  L:=PSz^[K];
+  While L>=255 Do Begin MkvPrivBuf^[MkvPrivLen]:=255; Inc(MkvPrivLen); Dec(L,255); End;
+  MkvPrivBuf^[MkvPrivLen]:=L; Inc(MkvPrivLen);
+ End;
+ For K:=0 To 2 Do Begin Move(Mem^[POff^[K]],MkvPrivBuf^[MkvPrivLen],PSz^[K]); Inc(MkvPrivLen,PSz^[K]); End;
+ Np:=N-3;
+ TrkAlloc(A,Np);
+ { durees : echantillons ecoules par page, partages entre les paquets de la page }
+ I:=3; Gp:=0;
+ While I<N Do Begin
+  K:=I; While (K+1<N) And (Pg^[K+1]=Pg^[I]) Do Inc(K);
+  Total:=Pg^[I]-Gp; If Total<0 Then Total:=0;
+  For L:=I To K Do Begin
+   A.Off^[L-3]:=POff^[L]; A.Sz^[L-3]:=PSz^[L];
+   A.Dur^[L-3]:=Total Div (K-I+1);
+  End;
+  A.Dur^[K-3]:=A.Dur^[K-3]+Total-(Total Div (K-I+1))*(K-I+1);
+  Gp:=Pg^[I]; I:=K+1;
+ End;
+ A.Ok:=True; A.IsVideo:=False; A.Codec:='vorb'; A.Rate:=Rate; A.Ts:=Rate; A.Chans:=Ch;
+ FreeMem(PSz,(Sz Div 8+16)*4); FreeMem(POff,(Sz Div 8+16)*4); FreeMem(Pg,(Sz Div 8+16)*4);
+ OggVorbisTrack:=True;
+End;
+
+{ Phase 2 VP8 : images du fichier temporaire -> paquets en memoire }
+Function Vp8Track(Var V: TTrkIn; Var Mem: PBArr; Bitrate: LongInt; Var Err: String): Boolean;
+Var I,Fsz,P,Cap,Len: LongInt; Got: Word; Buf: PEABuffer; Key: Boolean; Ok: Boolean;
+Begin
+ Vp8Track:=False; Fsz:=VJOutW*VJOutH*3 Div 2; Cap:=1 Shl 20; Len:=0; GetMem(Mem,Cap);
+ GetMem(Buf,Fsz+16); Seek(VJTmp,0); Ok:=True;
+ E8Begin(VJOutW,VJOutH,VJFn,VJFd,Bitrate);
+ FillChar(V,SizeOf(V),0); TrkAlloc(V,VJCnt);
+ For I:=0 To VJCnt-1 Do Begin
+  P:=0;
+  While P<Fsz Do Begin
+   {$I-}BlockRead(VJTmp,Buf^[P],Min(32768,Fsz-P),Got);{$I+}
+   If (IOResult<>0) Or (Got=0) Then Begin Ok:=False; Break; End;
+   Inc(P,Got);
+  End;
+  If Not Ok Then Break;
+  Key:=False;
+  E8Frame1(Buf,Key);
+  If Len+E8PktLen+16>Cap Then Begin ReallocMem(Mem,Cap*2+E8PktLen); Cap:=Cap*2+E8PktLen; End;
+  Move(E8Pkt^,Mem^[Len],E8PktLen);
+  V.Off^[I]:=Len; V.Sz^[I]:=E8PktLen; V.Dur^[I]:=VJFd; V.Sync^[I]:=Ord(Key); V.Cts^[I]:=0; Inc(Len,E8PktLen);
+  If (I And 3)=0 Then Begin UiTick(I,VJCnt); If Stopped Then Begin Ok:=False; Err:='Conversion annul'#233'e.'; Break; End; End;
+ End;
+ FreeMem(Buf,Fsz+16); E8Free;
+ If (Not Ok) And (Err='') Then Err:='Lecture du fichier temporaire impossible.';
+ If Ok Then Begin V.Ok:=True; V.IsVideo:=True; V.Codec:='VP80'; V.Ts:=VJFn; V.W:=VJOutW; V.H:=VJOutH; End
+ Else Begin FreeMem(Mem,Cap); Mem:=Nil; End;
+ Vp8Track:=Ok;
+End;
+
 { ---- fusion de deux flux Ogg (Theora + Vorbis) en un seul fichier ---- }
 Type TOgPage = Record Off,Len,Seq: LongInt; Gran: Int64; Bos: Boolean; End;
  TOgPages = Array[0..99999] Of TOgPage; POgPages = ^TOgPages;
@@ -64860,7 +65563,7 @@ Begin
 End;
 
 Function AltVideoOut(Var M: TMedia; Const Pr: TProf; Const Dst: String; HaveAudio: Boolean; Var Err: String): Boolean;
-Var Y4,Es,Au: String; V,A: TTrkIn; HaveA,Ok: Boolean;
+Var Y4,Es,Au: String; V,A: TTrkIn; HaveA,Ok: Boolean; Tr: Array[0..1] Of TMuxTrk; NT: Integer; VMem,AMem: PBArr;
 Begin
  AltVideoOut:=False; HaveA:=False; Ok:=False;
  Y4:=TmpName('Y4M'); Es:=TmpName('M4V'); Au:='';
@@ -64881,6 +65584,24 @@ Begin
   Ok:=MuxAvi(Dst,V,A,HaveA,Es,Au,'XVID',VJFn,VJFd,Err);
   TrkClear(V); If HaveA Then TrkClear(A);
   DelFile(Es); If Au<>'' Then DelFile(Au);
+ End Else If Pr.Ext='WEBM' Then Begin
+  DelFile(Y4); DelFile(Es);
+  If Not Vp8Track(V,VMem,VJBitrate,Err) Then Exit;
+  FillChar(Tr,SizeOf(Tr),0); Tr[0].T:=@V; Tr[0].First:=0; Tr[0].Last:=V.N-1; Tr[0].Mem:=VMem; NT:=1;
+  If HaveAudio Then Begin
+   Au:=TmpName('OGG');
+   If AltAudio(M,Pr,'OGG',Au,Err) Then Begin
+    If OggVorbisTrack(Au,A,AMem) Then Begin Tr[1].T:=@A; Tr[1].First:=0; Tr[1].Last:=A.N-1; Tr[1].Mem:=AMem; NT:=2; HaveA:=True; End;
+   End Else Begin
+    If Stopped Then Begin DelFile(Au); Exit; End;
+    If Pos('Aucune piste audio',Err)=0 Then JobWarn:=' (sans audio : '+Err+')';
+    Err:='';
+   End;
+   DelFile(Au); Au:='';
+  End;
+  Ok:=MuxMkv(Dst,'webm',Tr,NT,Err);
+  TrkClear(V); FreeMem(VMem);
+  If HaveA Then TrkClear(A);
  End Else If Pr.Ext='WMV' Then Begin
   If Not RunEng(ekEncWmv,Y4,Es,Pr.VKb,Err) Then Begin DelFile(Y4); DelFile(Es); Exit; End;
   DelFile(Y4);
