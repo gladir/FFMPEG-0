@@ -1,5 +1,5 @@
 # FFMPEG-0
-Cette commande, ecrite en Pascal, permet de manipuler, convertir, encoder, décoder, enregistrer et diffuser des fichiers audio et vidéo.
+Suite de commande écrit en Turbo Pascal/Free Pascal des commandes FFMPEG ou relation avec celle-ci.
 
 Aperçu de AnyMP4 :
 
