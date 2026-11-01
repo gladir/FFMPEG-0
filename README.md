@@ -1,5 +1,28 @@
 # FFMPEG-0
-Cette commande, ecrite en Pascal, permet de manipuler, convertir, encoder, décoder, enregistrer et diffuser des fichiers audio et vidéo.
+Suite de commande écrit en Turbo Pascal/Free Pascal des commandes FFMPEG ou relation avec celle-ci.
+
+Aperçu de AnyMP4 :
+
+<img width="640" height="480" alt="image" src="https://github.com/user-attachments/assets/f4c290c3-4fa7-43cd-917b-644fd9b62db9" />
+
+<h3>Liste des fichiers</h3>
+
+Voici la liste des différents fichiers proposés dans FFMPEG-0 :
+
+<table>
+	<tr>
+		<th>Nom</th>
+		<th>Description</th>
+	</tr>
+	<tr>
+    <td><b>ANYMP4.PAS</b></td>
+    <td>Cette commande permet de lancer un clone AnyMP4.</td>
+  </tr>
+  <tr>	
+    <td><b>FFMPEG.PAS</b></td>
+    <td>Cette commande permet de manipuler, convertir, encoder, décoder, enregistrer et diffuser des fichiers audio et vidéo.</td>
+  </tr>
+</table>
 
 ## ANYMP4.PAS
 
