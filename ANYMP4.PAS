@@ -1541,6 +1541,9 @@ Begin
  AddProf(0,'M2TS (Blu-ray) H.264','M2TS','H264','AAC','Auto',8000,192,48000,2);
  AddProf(0,'MTS (AVCHD) H.264','MTS','H264','AAC','Auto',8000,192,48000,2);
  AddProf(0,'TS (MPEG-TS) HEVC','TS','HEVC','AAC','Auto',3000,160,48000,2);
+ AddProf(0,'MXF H.264 + PCM','MXF','H264','PCM16','Auto',20000,1536,48000,2);
+ AddProf(0,'MXF DNxHD/DNxHR + PCM','MXF','DNxHD','PCM16','Auto',0,1536,48000,2);
+ AddProf(0,'MXF ProRes HQ + PCM','MXF','PrRsHQ','PCM16','Auto',0,1536,48000,2);
  AddProf(0,'MKV HEVC (H.265)','MKV','HEVC','AAC','Auto',3000,160,44100,2);
  AddProf(0,'AVI','AVI','MPEG4','MP3','Auto',3000,192,44100,2);
  AddProf(0,'WMV','WMV','WMV2','WMA','Auto',2500,128,44100,2);
@@ -1593,7 +1596,7 @@ End;
 { Le moteur integre sait produire ces sorties }
 Function EngineOut(Const Ext: String): Boolean;
 Begin
- EngineOut:=InList(Ext,'MP3,WAV,AIF,AU,GIF,BMP,MP4,MOV,M4V,3GP,3G2,TS,M2TS,MTS,FLV,MKV,M4A,AAC,OGG,AC3,WMA');
+ EngineOut:=InList(Ext,'MP3,WAV,AIF,AU,GIF,BMP,MP4,MOV,M4V,3GP,3G2,TS,M2TS,MTS,MXF,FLV,MKV,M4A,AAC,OGG,AC3,WMA');
 End;
 
 { ====================================================================== }
@@ -2224,6 +2227,7 @@ Begin
 End;
 
 Procedure ProbeTsMedia(Var M: TMedia; Raw: Boolean); Forward;
+Procedure ProbeMxfMedia(Var M: TMedia); Forward;
 
 Procedure Analyze(Var M: TMedia; Const Path: String);
 Var E,Mg: String; St: LongInt;
@@ -2261,6 +2265,7 @@ Begin
   If M.Title='' Then M.Title:=BaseOf(Path);
  End
  Else If ((CB(0)=$47) And (CB(188)=$47)) Or ((CB(4)=$47) And (CB(196)=$47)) Or ((CB(0)=$47) And (CB(204)=$47)) Then Begin M.Fmt:='TS'; M.Kind:=2; CClose; ProbeTsMedia(M,False); Exit; End
+ Else If ((Mg=#$06#$0E#$2B#$34) Or (E='MXF')) And (Mg<>'RIFF') Then Begin M.Fmt:='MXF'; M.Kind:=2; CClose; ProbeMxfMedia(M); Exit; End
  Else If InList(E,'264,H264,AVC,HEVC,H265,265,M2V,MPV,M1V,BIT,26L') Then Begin M.Fmt:='ES'; M.Kind:=2; CClose; ProbeTsMedia(M,True); Exit; End
  Else If (M.Kind=0) Then M.Msg:='Format non reconnu';
  CClose;
@@ -33531,6 +33536,3642 @@ Begin
  If TSM.Scratch<>Nil Then Begin FreeMem(TSM.Scratch); TSM.Scratch:=Nil; End;
  If TSM.PesBuf<>Nil Then Begin FreeMem(TSM.PesBuf); TSM.PesBuf:=Nil; End;
 End;
+{ ====================================================================================================
+  pe_mxf.pas - MXF (SMPTE 377M) : demultiplexeur + multiplexeur OP1a, Free Pascal 3.2.2 mode TP
+  ====================================================================================================
+  Portage/adaptation de FFmpeg n6.1.1 libavformat/mxfdec.c, mxfenc.c, mxf.c (LGPL-2.1+) et des
+  structures SMPTE 377M/379M/380M/381M/382M/383M. Tous les identifiants globaux commencent par
+  Mxf / TMxf / MXF_. Autonome : aucune unite hors DOS (GetDate/GetTime pour l'horodatage), pas de
+  directive include, pas d'EXEC. Depend de PEABuffer (pe_v.pas). N'appelle jamais Fail/Halt : les fonctions
+  retournent False et MxfMsg contient le message.
+  Voir README.txt pour l'API et les formats.
+
+  API publique
+   Function  MxfProbe(Path: String; Var Info: TMxfInfo): Boolean;
+   Function  MxfExtract(Path, VDst, ADst, IdxDst: String; VSel, ASel: LongInt; Var Info: TMxfInfo): Boolean;
+   Function  MxfMuxOpen(Path: String; Var Cfg: TMxfMuxCfg): Boolean;
+   Function  MxfMuxVideo(P: PEABuffer; Len: LongInt; IsKey: Boolean; Pts: LongInt): Boolean;
+   Function  MxfMuxAudio(P: PEABuffer; Bytes: LongInt): Boolean;
+   Function  MxfMuxClose: Boolean;       Procedure MxfMuxAbort;
+   Variables : MxfMsg (dernier message d'erreur), MxfMerge, MxfWavKeep (options de MxfExtract)
+  ==================================================================================================== }
+{$PUSH}{$I-}
+Const
+ MXF_MAXTRK = 24;
+ { genres de piste }
+ MXF_K_NONE = 0; MXF_K_VIDEO = 1; MXF_K_AUDIO = 2; MXF_K_DATA = 3; MXF_K_TC = 4;
+ { codecs (video 1..31, audio 32..63) }
+ MXF_C_NONE = 0; MXF_C_MPEG2 = 1; MXF_C_H264 = 2; MXF_C_DNXHD = 3; MXF_C_PRORES = 4; MXF_C_MJPEG = 5;
+ MXF_C_MPEG4 = 6; MXF_C_DV = 7; MXF_C_J2K = 8; MXF_C_VC1 = 9; MXF_C_RAWVIDEO = 10; MXF_C_FFV1 = 11;
+ MXF_C_V210 = 12; MXF_C_HEVC = 13; MXF_C_VC2 = 14; MXF_C_CFHD = 15; MXF_C_TIFF = 16; MXF_C_HQ = 17; MXF_C_HQX = 18;
+ MXF_C_PCM = 32; MXF_C_PCMBE = 33; MXF_C_ALAW = 34; MXF_C_AC3 = 35; MXF_C_MP2 = 36; MXF_C_AAC = 37;
+ { wrapping }
+ MXF_W_UNKNOWN = 0; MXF_W_FRAME = 1; MXF_W_CLIP = 2;
+ { options audio du multiplexeur }
+ MXF_A_BWF = 0; MXF_A_AES3 = 1;
+
+Type
+ TMxfUid = Array[0..15] Of Byte;
+ TMxfTrack = Record
+  Kind: LongInt;            { MXF_K_VIDEO / MXF_K_AUDIO / MXF_K_DATA }
+  Codec: LongInt;           { MXF_C_* }
+  Name: String[16];         { nom ffmpeg du codec : mpeg2video h264 dnxhd prores mjpeg pcm_s16le pcm_s24le ... }
+  TrackId, TrackNum: LongInt;   { TrackID et TrackNumber (cle des elements d'essence) }
+  W, H: LongInt;            { video : dimensions d'une image (hauteur de trame x2 si SeparateFields) }
+  FpsN, FpsD: LongInt;      { video : cadence (edit rate) }
+  AspN, AspD: LongInt;      { rapport d'aspect d'affichage (0 si absent) }
+  FrameLayout: LongInt;     { 0 plein cadre, 1 separate fields, 2 one field, 3 mixed ... }
+  ColorRange: LongInt;      { video : 0 non precise, 1 limitee (16-235), 2 pleine }
+  Bt709: Boolean;           { video : etiquettes BT.709 presentes (primaires, transfert ou matrice) }
+  CompDepth: LongInt;       { video : profondeur de composante declaree (0 si absente) }
+  Chans, Rate, Bits: LongInt;   { audio : canaux, frequence, profondeur declaree (16/24/32) }
+  Wrap: LongInt;            { MXF_W_* }
+  Aes3: Boolean;            { audio D-10/AES3 8 voies dans l'element }
+  DurUnits: Int64;          { duree declaree en unites d'edition (-1 inconnue) }
+  Frames: LongInt;          { video : nombre d'unites d'acces trouvees ; audio : nombre d'echantillons (par canal) }
+  DurMs: LongInt;           { duree en ms (declaree, sinon deduite du contenu) }
+  BodySid, IndexSid: LongInt;
+  EcUl: TMxfUid;
+  CodecUl: TMxfUid;
+  { interne }
+  SetIx: LongInt;           { indice du descripteur }
+  EdN, EdD: LongInt;        { edit rate de la piste }
+  SrcTrack: LongInt;        { indice de l'ensemble Track source }
+ End;
+ TMxfInfo = Record
+  Ok: Boolean;
+  Op: LongInt;              { 1=OP1a 2=OP1b 3=OP1c 4=OP2a ... 9=OP3c 10=OP-Atom 0=inconnu }
+  NTrk: LongInt;
+  Trk: Array[0..MXF_MAXTRK-1] Of TMxfTrack;
+  DurMs: LongInt;           { duree du fichier (piste video, sinon audio) }
+  Timecode: String[16];     { timecode de depart hh:mm:ss:ff ('' si absent) }
+  TcStart: Int64;           { timecode de depart en images (0 si absent) }
+  TcDrop: Boolean;          { timecode drop-frame }
+  TcBase: LongInt;          { base arrondie du timecode (25, 30...) }
+  Producer: String[60];     { societe + produit (Identification) }
+  NParts: LongInt;          { nombre de partitions }
+  HasRip, HasFooter, HasIndex, HdrClosed, Truncated: Boolean;
+  RunIn: LongInt;
+  FileSize: Int64;
+ End;
+
+Var
+ MxfMsg: String;             { dernier message d'erreur }
+ MxfMerge: Boolean;          { MxfExtract : fusionner les pistes audio mono/identiques (defaut False) }
+ MxfWavKeep: Boolean;        { MxfExtract : conserver 24/32 bits dans le WAV au lieu de tronquer a 16 (defaut False) }
+
+{ ---- tables UL generees (voir gen_tables.py) ---- }
+Const
+
+ MxfTabCodec: Array[0..779] Of Byte = (
+  6,14,43,52,4,1,1,3,4,1,2,2,1,1,17,0,14,1,0,0,
+  6,14,43,52,4,1,1,1,4,1,2,2,1,2,1,1,14,1,0,0,
+  6,14,43,52,4,1,1,3,4,1,2,2,1,3,3,0,14,1,0,0,
+  6,14,43,52,4,1,1,3,4,1,2,2,1,4,2,0,14,1,0,0,
+  6,14,43,52,4,1,1,3,4,1,2,2,1,32,2,3,14,6,0,0,
+  6,14,43,52,4,1,1,1,4,1,2,2,2,1,2,0,13,7,0,0,
+  6,14,43,52,4,1,1,7,4,1,2,2,3,1,1,0,14,8,0,0,
+  6,14,43,52,4,1,1,10,4,1,2,2,4,1,0,0,14,9,0,0,
+  6,14,43,52,4,1,1,10,4,1,2,2,4,2,0,0,14,9,0,0,
+  6,14,43,52,4,1,1,10,4,1,2,2,4,3,0,0,14,9,0,0,
+  6,14,43,52,4,1,1,10,4,1,2,2,4,4,0,0,14,9,0,0,
+  6,14,43,52,4,1,1,10,4,1,2,2,4,5,0,0,14,9,0,0,
+  6,14,43,52,4,1,1,10,4,1,2,2,4,6,0,0,14,9,0,0,
+  6,14,43,52,4,1,1,10,4,1,2,2,4,7,0,0,14,9,0,0,
+  6,14,43,52,4,1,1,10,4,1,2,2,4,8,0,0,14,9,0,0,
+  6,14,43,52,4,1,1,10,4,1,2,2,4,9,0,0,14,9,0,0,
+  6,14,43,52,4,1,1,10,4,1,2,2,4,10,0,0,14,9,0,0,
+  6,14,43,52,4,1,1,1,4,1,2,1,127,0,0,0,13,10,0,0,
+  6,14,43,52,4,1,1,10,4,1,2,1,1,2,1,0,15,10,0,0,
+  6,14,43,52,4,1,1,1,4,1,2,2,113,0,0,0,13,3,0,0,
+  6,14,43,52,4,1,1,1,4,1,2,2,3,2,0,0,14,3,0,0,
+  6,14,43,52,4,1,1,1,14,4,2,1,2,4,1,0,16,3,0,0,
+  6,14,43,52,4,1,1,10,4,1,2,2,1,50,0,0,14,2,0,0,
+  6,14,43,52,4,1,1,10,4,1,2,2,1,49,17,1,14,2,0,0,
+  6,14,43,52,4,1,1,10,4,1,2,1,1,2,2,1,16,12,0,0,
+  6,14,43,52,4,1,1,1,14,4,2,1,2,17,0,0,14,4,0,0,
+  6,14,43,52,4,1,1,13,4,1,2,2,3,6,0,0,14,4,0,0,
+  6,14,43,52,4,1,1,13,4,1,2,2,3,9,1,0,15,11,0,0,
+  6,14,43,52,4,1,1,13,4,1,2,2,3,9,2,0,15,11,0,0,
+  6,14,43,52,4,1,1,13,4,1,2,2,3,9,4,0,15,11,0,0,
+  6,14,43,52,4,1,1,3,4,2,2,2,3,3,1,0,14,37,0,0,
+  6,14,43,52,4,1,1,1,4,2,2,1,0,0,0,0,13,32,0,0,
+  6,14,43,52,4,1,1,1,4,2,2,1,127,0,0,0,13,32,0,0,
+  6,14,43,52,4,1,1,7,4,2,2,1,126,0,0,0,13,33,0,0,
+  6,14,43,52,4,1,1,4,4,2,2,2,3,1,1,0,15,34,0,0,
+  6,14,43,52,4,1,1,1,4,2,2,2,3,2,1,0,15,35,0,0,
+  6,14,43,52,4,1,1,1,4,2,2,2,3,2,5,0,15,36,0,0,
+  6,14,43,52,4,1,1,13,4,2,2,2,4,3,0,0,14,37,0,0,
+  6,14,43,52,4,1,1,13,4,2,2,2,4,4,0,0,14,37,0,0);
+
+
+ MxfTabPicEC: Array[0..339] Of Byte = (
+  6,14,43,52,4,1,1,7,13,1,3,1,2,12,1,0,14,8,14,4,
+  6,14,43,52,4,1,1,2,13,1,3,1,2,16,96,1,14,2,15,0,
+  6,14,43,52,4,1,1,2,13,1,3,1,2,17,1,0,14,3,14,0,
+  6,14,43,52,4,1,1,2,13,1,3,1,2,18,1,0,14,9,14,0,
+  6,14,43,52,4,1,1,2,13,1,3,1,2,20,1,0,14,16,14,0,
+  6,14,43,52,4,1,1,2,13,1,3,1,2,21,1,0,14,14,14,0,
+  6,14,43,52,4,1,1,2,13,1,3,1,2,27,1,0,14,15,14,0,
+  6,14,43,52,4,1,1,2,13,1,3,1,2,28,1,0,14,4,14,0,
+  6,14,43,52,4,1,1,2,13,1,3,1,2,4,96,1,14,1,15,0,
+  6,14,43,52,4,1,1,1,13,1,3,1,2,1,4,1,14,1,15,1,
+  6,14,43,52,4,1,1,13,13,1,3,1,2,35,1,0,14,11,14,0,
+  6,14,43,52,4,1,1,1,13,1,3,1,2,2,65,1,14,7,15,0,
+  6,14,43,52,4,1,1,1,13,1,3,1,2,5,0,0,14,10,15,3,
+  6,14,43,52,4,1,1,10,14,15,3,1,2,32,1,1,15,17,0,0,
+  6,14,43,52,4,1,1,10,14,15,3,1,2,32,2,1,15,18,0,0,
+  6,14,43,52,4,1,1,10,14,21,0,4,2,16,0,1,16,13,15,0,
+  6,14,43,52,1,1,1,255,75,70,65,65,0,13,77,79,14,10,0,0);
+
+
+ MxfTabSndEC: Array[0..159] Of Byte = (
+  6,14,43,52,4,1,1,1,13,1,3,1,2,6,1,0,14,32,14,2,
+  6,14,43,52,4,1,1,2,13,1,3,1,2,4,64,1,14,36,15,0,
+  6,14,43,52,4,1,1,1,13,1,3,1,2,1,1,1,14,32,13,0,
+  6,14,43,52,1,1,1,255,75,70,65,65,0,13,77,79,14,32,0,0,
+  6,14,43,52,4,1,1,3,4,2,2,2,3,3,1,0,14,37,0,0,
+  6,14,43,52,4,1,1,13,13,1,3,1,2,22,0,0,14,37,14,0,
+  6,14,43,52,4,1,1,13,13,1,3,1,2,23,0,0,14,37,14,0,
+  6,14,43,52,4,1,1,13,13,1,3,1,2,24,0,0,14,37,14,0);
+
+ MXF_NCODEC = 39; MXF_NPICEC = 17; MXF_NSNDEC = 8;
+
+Const
+ MXF_S_MAT = 1; MXF_S_SRC = 2; MXF_S_CLIP = 3; MXF_S_TC = 4; MXF_S_SEQ = 5; MXF_S_MDESC = 6; MXF_S_DESC = 7;
+ MXF_S_TRACK = 8; MXF_S_CSTOR = 9; MXF_S_ECD = 10; MXF_S_PULL = 11; MXF_S_EGRP = 12; MXF_S_IDENT = 13; MXF_S_PREF = 14;
+
+Type
+ TMxfPart = Record
+  Ofs, Prev, Foot, HdrBC, IdxBC, BodyOff: Int64;
+  Typ, Stat, Kag, IdxSid, BodySid, OpB12, OpB13, NEc: LongInt;
+ End;
+ TMxfPartA = Array[0..0] Of TMxfPart;
+ PMxfPartA = ^TMxfPartA;
+ TMxfEl = Record
+  Pos, Len: Int64;
+  Trk, Bsid, Part: LongInt;
+  Trunc: Boolean;
+ End;
+ TMxfElA = Array[0..0] Of TMxfEl;
+ PMxfElA = ^TMxfElA;
+ TMxfSet = Record
+  Kind, Code: LongInt;
+  Uid: TMxfUid;
+  Score: Int64;
+  Umid: Array[0..31] Of Byte;
+  Ref, DataDef: TMxfUid;
+  Refs, Refs2: PEABuffer;
+  NRefs, NRefs2: LongInt;
+  Dur, Start, CDur: Int64;
+  TrackId, TrackNum, ErN, ErD, SrcTrackId: LongInt;
+  TcStart: Int64;
+  TcRate, TcDrop: LongInt;
+  EcUl, CodUl, PkgUl, ClPri, ClTrc, ClMat: TMxfUid;
+  BlackRef, WhiteRef, ColRange: LongInt;
+  Linked, SrN, SrD, Sr1N, Sr1D, AspN, AspD, W, H, DW, DH, SW, SH, Layout, Chans, Bits, CDepth, HSub, VSub, BAlign: LongInt;
+  BodySid, IndexSid: LongInt;
+  Name: String[60];
+ End;
+ TMxfSetA = Array[0..0] Of TMxfSet;
+ PMxfSetA = ^TMxfSetA;
+ TMxfIE = Record
+  Off: Int64;
+  Tref, Kfo, Flags: LongInt;
+ End;
+ TMxfIEA = Array[0..0] Of TMxfIE;
+ PMxfIEA = ^TMxfIEA;
+ TMxfSeg = Record
+  IdxSid, BodySid, Eubc, RateN, RateD, NEnt: LongInt;
+  Start, Dur: Int64;
+  Ent: PMxfIEA;
+ End;
+ TMxfSegA = Array[0..0] Of TMxfSeg;
+ PMxfSegA = ^TMxfSegA;
+
+Var
+ MxfRf: File;
+ MxfRfOpen: Boolean;
+ MxfRSize, MxfRunIn: Int64;
+ MxfParts: PMxfPartA; MxfNParts, MxfCapParts: LongInt;
+ MxfEls: PMxfElA; MxfNEls, MxfCapEls: LongInt;
+ MxfSets: PMxfSetA; MxfNSets, MxfCapSets: LongInt;
+ MxfSegs: PMxfSegA; MxfNSegs, MxfCapSegs: LongInt;
+ MxfHasRip, MxfSawFooter: Boolean;
+ MxfProducer: String;
+ MxfScanTrunc: Boolean;
+
+{ ---- petits utilitaires ---- }
+Function MxfB16(P: PEABuffer; O: LongInt): LongInt;
+Begin MxfB16:=LongInt(P^[O])*256+P^[O+1]; End;
+
+Function MxfB32(P: PEABuffer; O: LongInt): LongInt;
+Begin MxfB32:=(LongInt(P^[O]) Shl 24) Or (LongInt(P^[O+1]) Shl 16) Or (LongInt(P^[O+2]) Shl 8) Or LongInt(P^[O+3]); End;
+
+Function MxfB64(P: PEABuffer; O: LongInt): Int64;
+Var K: LongInt; V: Int64;
+Begin
+ V:=0;
+ For K:=0 To 7 Do V:=V*256+P^[O+K];
+ MxfB64:=V;
+End;
+
+Function MxfRd(Pos: Int64; Dst: Pointer; N: LongInt): LongInt;
+Var Got: LongInt;
+Begin
+ MxfRd:=0;
+ If (Not MxfRfOpen) Or (Pos<0) Or (N<=0) Then Exit;
+ If Pos>=MxfRSize Then Exit;
+ 
+ Seek(MxfRf,Pos);
+ If IOResult<>0 Then Begin  Exit; End;
+ Got:=0;
+ BlockRead(MxfRf,Dst^,N,Got);
+ If IOResult<>0 Then Got:=0;
+ 
+ MxfRd:=Got;
+End;
+
+{ evalue la longueur BER a partir de H[O..] ; retourne le nombre d'octets de la longueur (0 si invalide) }
+Function MxfBer(P: PEABuffer; O, Avail: LongInt; Var L: Int64): LongInt;
+Var K, Nb: LongInt;
+Begin
+ MxfBer:=0; L:=0;
+ If Avail<1 Then Exit;
+ If P^[O]<$80 Then Begin L:=P^[O]; MxfBer:=1; Exit; End;
+ Nb:=P^[O] And $7F;
+ If (Nb>8) Or (Nb+1>Avail) Then Exit;
+ For K:=1 To Nb Do L:=L*256+P^[O+K];
+ If L<0 Then Exit;
+ MxfBer:=Nb+1;
+End;
+
+Function MxfUidEq(Var A, B: TMxfUid): Boolean;
+Var K: LongInt;
+Begin
+ MxfUidEq:=False;
+ For K:=0 To 15 Do If A[K]<>B[K] Then Exit;
+ MxfUidEq:=True;
+End;
+
+{ comparaison d'une UL a un prefixe de N octets en ignorant l'octet de version (7) }
+Function MxfMatchUl(Var U: TMxfUid; Const Tab: Array Of Byte; Ent, Len: LongInt): Boolean;
+Var K: LongInt;
+Begin
+ MxfMatchUl:=False;
+ For K:=0 To Len-1 Do
+  If K<>7 Then If U[K]<>Tab[Ent*20+K] Then Exit;
+ MxfMatchUl:=True;
+End;
+
+{ retourne l'indice dans la table (ou -1) }
+Function MxfLookupUl(Var U: TMxfUid; Const Tab: Array Of Byte; N: LongInt): LongInt;
+Var E: LongInt;
+Begin
+ MxfLookupUl:=-1;
+ For E:=0 To N-1 Do
+  If MxfMatchUl(U,Tab,E,Tab[E*20+16]) Then Begin MxfLookupUl:=E; Exit; End;
+End;
+
+Procedure MxfFreeSetData(Var S: TMxfSet);
+Begin
+ If S.Refs<>Nil Then FreeMem(S.Refs); S.Refs:=Nil; S.NRefs:=0;
+ If S.Refs2<>Nil Then FreeMem(S.Refs2); S.Refs2:=Nil; S.NRefs2:=0;
+End;
+
+Procedure MxfFreeAll;
+Var K: LongInt;
+Begin
+ If MxfRfOpen Then Begin
+   Close(MxfRf); If IOResult<>0 Then ; 
+  MxfRfOpen:=False;
+ End;
+ If MxfParts<>Nil Then FreeMem(MxfParts); MxfParts:=Nil; MxfNParts:=0; MxfCapParts:=0;
+ If MxfEls<>Nil Then FreeMem(MxfEls); MxfEls:=Nil; MxfNEls:=0; MxfCapEls:=0;
+ If MxfSets<>Nil Then Begin
+  For K:=0 To MxfNSets-1 Do MxfFreeSetData(MxfSets^[K]);
+  FreeMem(MxfSets);
+ End;
+ MxfSets:=Nil; MxfNSets:=0; MxfCapSets:=0;
+ If MxfSegs<>Nil Then Begin
+  For K:=0 To MxfNSegs-1 Do If MxfSegs^[K].Ent<>Nil Then FreeMem(MxfSegs^[K].Ent);
+  FreeMem(MxfSegs);
+ End;
+ MxfSegs:=Nil; MxfNSegs:=0; MxfCapSegs:=0;
+End;
+
+Function MxfAddPart(Var P: TMxfPart): LongInt;
+Begin
+ If MxfNParts>=MxfCapParts Then Begin
+  MxfCapParts:=MxfCapParts*2+16;
+  ReallocMem(MxfParts,MxfCapParts*SizeOf(TMxfPart));
+ End;
+ MxfParts^[MxfNParts]:=P; MxfAddPart:=MxfNParts; Inc(MxfNParts);
+End;
+
+Function MxfAddEl(Var E: TMxfEl): LongInt;
+Begin
+ If MxfNEls>=MxfCapEls Then Begin
+  MxfCapEls:=MxfCapEls*2+256;
+  ReallocMem(MxfEls,MxfCapEls*SizeOf(TMxfEl));
+ End;
+ MxfEls^[MxfNEls]:=E; MxfAddEl:=MxfNEls; Inc(MxfNEls);
+End;
+
+Function MxfNewSet: LongInt;
+Begin
+ If MxfNSets>=MxfCapSets Then Begin
+  MxfCapSets:=MxfCapSets*2+64;
+  ReallocMem(MxfSets,MxfCapSets*SizeOf(TMxfSet));
+ End;
+ FillChar(MxfSets^[MxfNSets],SizeOf(TMxfSet),0);
+ MxfNewSet:=MxfNSets; Inc(MxfNSets);
+End;
+
+Function MxfNewSeg: LongInt;
+Begin
+ If MxfNSegs>=MxfCapSegs Then Begin
+  MxfCapSegs:=MxfCapSegs*2+16;
+  ReallocMem(MxfSegs,MxfCapSegs*SizeOf(TMxfSeg));
+ End;
+ FillChar(MxfSegs^[MxfNSegs],SizeOf(TMxfSeg),0);
+ MxfNewSeg:=MxfNSegs; Inc(MxfNSegs);
+End;
+
+{ lit un tableau de references fortes (batch) : u32 n, u32 size, n*16 octets }
+Procedure MxfGetRefs(P: PEABuffer; O, Sz: LongInt; Var R: PEABuffer; Var N: LongInt);
+Var C: LongInt;
+Begin
+ If R<>Nil Then FreeMem(R); R:=Nil; N:=0;
+ If Sz<8 Then Exit;
+ C:=MxfB32(P,O);
+ If (C<=0) Or (C>1000000) Then Exit;
+ If 8+Int64(C)*16>Sz Then C:=(Sz-8) Div 16;
+ If C<=0 Then Exit;
+ GetMem(R,C*16);
+ Move(P^[O+8],R^,C*16);
+ N:=C;
+End;
+
+Function MxfUtf16BeToAscii(P: PEABuffer; O, Sz: LongInt): String;
+Var K, V: LongInt; S: String;
+Begin
+ S:=''; K:=0;
+ While (K+1<Sz) And (Length(S)<60) Do Begin
+  V:=MxfB16(P,O+K);
+  If V=0 Then Break;
+  If V<128 Then S:=S+Chr(V) Else S:=S+'?';
+  Inc(K,2);
+ End;
+ MxfUtf16BeToAscii:=S;
+End;
+
+Function MxfSetKind(Code: LongInt): LongInt;
+Begin
+ Case Code Of
+  $36: MxfSetKind:=MXF_S_MAT;
+  $37: MxfSetKind:=MXF_S_SRC;
+  $11: MxfSetKind:=MXF_S_CLIP;
+  $14: MxfSetKind:=MXF_S_TC;
+  $0F: MxfSetKind:=MXF_S_SEQ;
+  $44: MxfSetKind:=MXF_S_MDESC;
+  $05: MxfSetKind:=MXF_S_EGRP;
+  $18: MxfSetKind:=MXF_S_CSTOR;
+  $23: MxfSetKind:=MXF_S_ECD;
+  $3A,$3B: MxfSetKind:=MXF_S_TRACK;
+  $0C: MxfSetKind:=MXF_S_PULL;
+  $30: MxfSetKind:=MXF_S_IDENT;
+  $2F: MxfSetKind:=MXF_S_PREF;
+  $42,$28,$29,$48,$47,$51,$5B,$5C,$5E,$64,$25,$27,$43: MxfSetKind:=MXF_S_DESC;
+ Else MxfSetKind:=0;
+ End;
+End;
+
+{ analyse un ensemble de metadonnees a etiquettes locales (cle 06.0e.2b.34.02.53...) }
+Procedure MxfParseSet(Code: LongInt; B: PEABuffer; Len: LongInt; Score: Int64);
+Var
+ T: TMxfSet;
+ Pos, Tag, Sz, K, Ix, Kind: LongInt;
+ Company, Product: String;
+Begin
+ Kind:=MxfSetKind(Code);
+ If Kind=0 Then Exit;
+ FillChar(T,SizeOf(T),0);
+ T.Kind:=Kind; T.Code:=Code; T.Score:=Score; T.CDur:=-1; T.Dur:=-1;
+ Company:=''; Product:='';
+ Pos:=0;
+ While Pos+4<=Len Do Begin
+  Tag:=MxfB16(B,Pos); Sz:=MxfB16(B,Pos+2); Pos:=Pos+4;
+  If Pos+Sz>Len Then Sz:=Len-Pos;
+  If Sz<=0 Then Continue;
+  Case Tag Of
+   $3C0A: If Sz>=16 Then Move(B^[Pos],T.Uid,16);
+   $3C01: Company:=MxfUtf16BeToAscii(B,Pos,Sz);
+   $3C02: Product:=MxfUtf16BeToAscii(B,Pos,Sz);
+   $1901,$4403,$1001,$0501,$3F01: MxfGetRefs(B,Pos,Sz,T.Refs,T.NRefs);
+   $1902: MxfGetRefs(B,Pos,Sz,T.Refs2,T.NRefs2);
+   $4401,$1101,$2701: If Sz>=32 Then Move(B^[Pos],T.Umid,32);
+   $4701,$4803,$0D01: If Sz>=16 Then Move(B^[Pos],T.Ref,16);
+   $4402,$4802: T.Name:=MxfUtf16BeToAscii(B,Pos,Sz);
+   $4801: If Sz>=4 Then T.TrackId:=MxfB32(B,Pos);
+   $4804: If Sz>=4 Then T.TrackNum:=MxfB32(B,Pos);
+   $4B01: If Sz>=8 Then Begin T.ErN:=MxfB32(B,Pos); T.ErD:=MxfB32(B,Pos+4); End;
+   $0201: If Sz>=16 Then Move(B^[Pos],T.DataDef,16);
+   $0202: If Sz>=8 Then T.Dur:=MxfB64(B,Pos);
+   $1201: If Sz>=8 Then T.Start:=MxfB64(B,Pos);
+   $1102: If Sz>=4 Then T.SrcTrackId:=MxfB32(B,Pos);
+   $1501: If Sz>=8 Then T.TcStart:=MxfB64(B,Pos);
+   $1502: If Sz>=2 Then T.TcRate:=MxfB16(B,Pos);
+   $1503: If Sz>=1 Then T.TcDrop:=B^[Pos];
+   $3002: If Sz>=8 Then T.CDur:=MxfB64(B,Pos);
+   $3004: If Sz>=16 Then Move(B^[Pos],T.EcUl,16);
+   $3005: If Sz>=16 Then Move(B^[Pos],T.PkgUl,16);
+   $3201,$3D06: If Sz>=16 Then Move(B^[Pos],T.CodUl,16);
+   $3006: If Sz>=4 Then T.Linked:=MxfB32(B,Pos);
+   $3203: If Sz>=4 Then T.W:=MxfB32(B,Pos);
+   $3202: If Sz>=4 Then T.H:=MxfB32(B,Pos);
+   $3209: If Sz>=4 Then T.DW:=MxfB32(B,Pos);
+   $3208: If Sz>=4 Then T.DH:=MxfB32(B,Pos);
+   $3205: If Sz>=4 Then T.SW:=MxfB32(B,Pos);
+   $3204: If Sz>=4 Then T.SH:=MxfB32(B,Pos);
+   $320C: If Sz>=1 Then T.Layout:=B^[Pos];
+   $320E: If Sz>=8 Then Begin T.AspN:=MxfB32(B,Pos); T.AspD:=MxfB32(B,Pos+4); End;
+   $3D03: If Sz>=8 Then Begin T.SrN:=MxfB32(B,Pos); T.SrD:=MxfB32(B,Pos+4); End;
+   $3001: If Sz>=8 Then Begin T.Sr1N:=MxfB32(B,Pos); T.Sr1D:=MxfB32(B,Pos+4); End;
+   $3D07: If Sz>=4 Then T.Chans:=MxfB32(B,Pos);
+   $3D01: If Sz>=4 Then T.Bits:=MxfB32(B,Pos);
+   $3301: If Sz>=4 Then T.CDepth:=MxfB32(B,Pos);
+   $3304: If Sz>=4 Then T.BlackRef:=MxfB32(B,Pos);
+   $3305: If Sz>=4 Then T.WhiteRef:=MxfB32(B,Pos);
+   $3306: If Sz>=4 Then T.ColRange:=MxfB32(B,Pos);
+   $3219: If Sz>=16 Then Move(B^[Pos],T.ClPri,16);
+   $3210: If Sz>=16 Then Move(B^[Pos],T.ClTrc,16);
+   $321A: If Sz>=16 Then Move(B^[Pos],T.ClMat,16);
+   $3302: If Sz>=4 Then T.HSub:=MxfB32(B,Pos);
+   $3308: If Sz>=4 Then T.VSub:=MxfB32(B,Pos);
+   $3D0A: If Sz>=2 Then T.BAlign:=MxfB16(B,Pos);
+   $3F06: If Sz>=4 Then T.IndexSid:=MxfB32(B,Pos);
+   $3F07: If Sz>=4 Then T.BodySid:=MxfB32(B,Pos);
+   $3B09: If Sz>=16 Then Move(B^[Pos],T.PkgUl,16);
+  End;
+  Pos:=Pos+Sz;
+ End;
+ If Kind=MXF_S_IDENT Then Begin
+  If Company<>'' Then MxfProducer:=Company;
+  If Product<>'' Then Begin
+   If MxfProducer<>'' Then MxfProducer:=MxfProducer+' ';
+   MxfProducer:=MxfProducer+Product;
+  End;
+  MxfFreeSetData(T); Exit;
+ End;
+ If Kind=MXF_S_PREF Then Begin
+  MxfFreeSetData(T); Exit;
+ End;
+ { remplace un ensemble identique (meme UID et meme genre) de score inferieur ou egal }
+ For Ix:=0 To MxfNSets-1 Do
+  If (MxfSets^[Ix].Kind=Kind) And MxfUidEq(MxfSets^[Ix].Uid,T.Uid) Then Begin
+   If MxfSets^[Ix].Score>T.Score Then Begin MxfFreeSetData(T); Exit; End;
+   MxfFreeSetData(MxfSets^[Ix]);
+   MxfSets^[Ix]:=T;
+   Exit;
+  End;
+ K:=MxfNewSet;
+ MxfSets^[K]:=T;
+End;
+
+Procedure MxfParseIndexSeg(B: PEABuffer; Len: LongInt);
+Var
+ Sg: TMxfSeg;
+ Pos, Tag, Sz, K, Cnt, EL, Nx, SIx: LongInt;
+ Ent: PMxfIEA;
+ V: LongInt;
+Begin
+ FillChar(Sg,SizeOf(Sg),0);
+ Pos:=0;
+ While Pos+4<=Len Do Begin
+  Tag:=MxfB16(B,Pos); Sz:=MxfB16(B,Pos+2); Pos:=Pos+4;
+  Nx:=Pos+Sz;
+  If Nx>Len Then Begin Sz:=Len-Pos; Nx:=Len; End;
+  Case Tag Of
+   $3F05: If Sz>=4 Then Sg.Eubc:=MxfB32(B,Pos);
+   $3F06: If Sz>=4 Then Sg.IdxSid:=MxfB32(B,Pos);
+   $3F07: If Sz>=4 Then Sg.BodySid:=MxfB32(B,Pos);
+   $3F0B: If Sz>=8 Then Begin Sg.RateN:=MxfB32(B,Pos); Sg.RateD:=MxfB32(B,Pos+4); End;
+   $3F0C: If Sz>=8 Then Sg.Start:=MxfB64(B,Pos);
+   $3F0D: If Sz>=8 Then Sg.Dur:=MxfB64(B,Pos);
+   $3F0A: If (Sz>=8) And (Sg.Ent=Nil) Then Begin
+    Cnt:=MxfB32(B,Pos); EL:=MxfB32(B,Pos+4);
+    If (Cnt>0) And (EL>=11) And (Int64(Cnt)*EL<=Len) Then Begin
+     GetMem(Ent,Cnt*SizeOf(TMxfIE));
+     For K:=0 To Cnt-1 Do Begin
+      SIx:=Pos+8+K*EL;
+      V:=B^[SIx]; If V>127 Then V:=V-256;
+      Ent^[K].Tref:=V;
+      V:=B^[SIx+1]; If V>127 Then V:=V-256;
+      Ent^[K].Kfo:=V;
+      Ent^[K].Flags:=B^[SIx+2];
+      Ent^[K].Off:=MxfB64(B,SIx+3);
+     End;
+     Sg.Ent:=Ent; Sg.NEnt:=Cnt;
+     If Pos+8+Int64(Cnt)*EL>Nx Then Nx:=Pos+8+Cnt*EL;  { tolerance : tableau plus long que le champ de 16 bits }
+    End;
+   End;
+  End;
+  Pos:=Nx;
+ End;
+ If (Sg.Eubc<=0) And (Sg.NEnt=0) Then Begin
+  If Sg.Ent<>Nil Then FreeMem(Sg.Ent);
+  Exit;
+ End;
+ K:=MxfNewSeg;
+ MxfSegs^[K]:=Sg;
+End;
+
+Function MxfIsPartKey(Var K: TMxfUid): Boolean;
+Begin
+ MxfIsPartKey:=(K[0]=6) And (K[1]=$0E) And (K[2]=$2B) And (K[3]=$34) And (K[4]=2) And (K[5]=5) And (K[6]=1)
+  And (K[8]=$0D) And (K[9]=1) And (K[10]=2) And (K[11]=1) And (K[12]=1) And (K[13]>=2) And (K[13]<=4);
+End;
+
+Function MxfIsEssKey(Var K: TMxfUid): Boolean;
+Begin
+ MxfIsEssKey:=(K[0]=6) And (K[1]=$0E) And (K[2]=$2B) And (K[3]=$34) And (K[4]=1) And (K[5]=2) And (K[6]=1)
+  And ((K[8]=$0D) Or (K[8]=$0E)) And (K[10]=3) And (K[11]=1) And ((K[9]=1) Or (K[9]=4) Or (K[9]=$0F));
+End;
+
+{ cherche la prochaine cle KLV (06 0e 2b 34) a partir de From ; -1 si absente (fenetre 4 Mo) }
+Function MxfFindKey(From: Int64): Int64;
+Var Buf: PEABuffer; Got, K: LongInt; Base: Int64;
+Begin
+ MxfFindKey:=-1;
+ GetMem(Buf,65536+8);
+ Base:=From;
+ While (Base<MxfRSize) And (Base-From<4194304) Do Begin
+  Got:=MxfRd(Base,Buf,65536);
+  If Got<4 Then Break;
+  For K:=0 To Got-4 Do
+   If (Buf^[K]=6) And (Buf^[K+1]=$0E) And (Buf^[K+2]=$2B) And (Buf^[K+3]=$34) Then Begin
+    MxfFindKey:=Base+K; FreeMem(Buf); Exit;
+   End;
+  Base:=Base+Got-3;
+ End;
+ FreeMem(Buf);
+End;
+
+Function MxfPartScore(Typ, Stat: LongInt; Ofs: Int64): Int64;
+Var S: Int64;
+Begin
+ If Typ=4 Then S:=5 Else If Stat>2 Then S:=4 Else If (Stat And 1)=0 Then S:=3 Else S:=1;
+ MxfPartScore:=S*1000000000000000+(Ofs Div 16);
+End;
+
+{ analyse sequentielle : partitions, ensembles de metadonnees, tables d'index, elements d'essence }
+Function MxfScan: Boolean;
+Var
+ Pos, L, Dp: Int64;
+ Hd: Array[0..31] Of Byte;
+ Key: TMxfUid;
+ Got, Bl, K, CurPart, CurBsid, N, Cap: LongInt;
+ Pr: TMxfPart;
+ El: TMxfEl;
+ Sc: Int64;
+ Buf: PEABuffer;
+ Pb: PEABuffer;
+ Jmp: Int64;
+Begin
+ MxfScan:=False;
+ { recherche du premier pack de partition (run-in) }
+ GetMem(Pb,65536+64);
+ Got:=MxfRd(0,Pb,65536+32);
+ MxfRunIn:=-1;
+ For K:=0 To Got-16 Do
+  If (Pb^[K]=6) And (Pb^[K+1]=$0E) And (Pb^[K+2]=$2B) And (Pb^[K+3]=$34) And (Pb^[K+4]=2) And (Pb^[K+5]=5) And (Pb^[K+6]=1)
+     And (Pb^[K+8]=$0D) And (Pb^[K+9]=1) And (Pb^[K+10]=2) And (Pb^[K+11]=1) And (Pb^[K+12]=1) And (Pb^[K+13]>=2) And (Pb^[K+13]<=4) Then Begin
+   MxfRunIn:=K; Break;
+  End;
+ FreeMem(Pb);
+ If MxfRunIn<0 Then Begin MxfMsg:='pas de partition MXF (cle 06.0e.2b.34.02.05.01.01.0d.01.02.01.01 introuvable)'; Exit; End;
+ Cap:=0; Buf:=Nil;
+ CurPart:=-1; CurBsid:=0;
+ Pos:=MxfRunIn;
+ While Pos+17<=MxfRSize Do Begin
+  Got:=MxfRd(Pos,@Hd,32);
+  If Got<17 Then Break;
+  If Not ((Hd[0]=6) And (Hd[1]=$0E) And (Hd[2]=$2B) And (Hd[3]=$34)) Then Begin
+   { perte de synchronisation : on cherche la cle suivante }
+   Jmp:=MxfFindKey(Pos);
+   If Jmp<0 Then Begin MxfScanTrunc:=True; Break; End;
+   Pos:=Jmp; Continue;
+  End;
+  Move(Hd[0],Key,16);
+  Bl:=MxfBer(@Hd,16,Got-16,L);
+  If Bl=0 Then Begin MxfScanTrunc:=True; Break; End;
+  Dp:=Pos+16+Bl;
+  If MxfIsPartKey(Key) Then Begin
+   FillChar(Pr,SizeOf(Pr),0);
+   If (L>=88) And (L<=1048576) Then Begin
+    N:=L;
+    If N>Cap Then Begin Cap:=N+4096; ReallocMem(Buf,Cap); End;
+    If MxfRd(Dp,Buf,N)<N Then Begin MxfScanTrunc:=True; Break; End;
+    Pr.Ofs:=Pos-MxfRunIn;
+    Pr.Typ:=Key[13]; Pr.Stat:=Key[14];
+    Pr.Kag:=MxfB32(Buf,4);
+    Pr.Prev:=MxfB64(Buf,16); Pr.Foot:=MxfB64(Buf,24);
+    Pr.HdrBC:=MxfB64(Buf,32); Pr.IdxBC:=MxfB64(Buf,40);
+    Pr.IdxSid:=MxfB32(Buf,48); Pr.BodyOff:=MxfB64(Buf,52); Pr.BodySid:=MxfB32(Buf,60);
+    Pr.OpB12:=Buf^[64+12]; Pr.OpB13:=Buf^[64+13];
+    Pr.NEc:=MxfB32(Buf,80);
+    CurPart:=MxfAddPart(Pr); CurBsid:=Pr.BodySid;
+    If Pr.Typ=4 Then MxfSawFooter:=True;
+   End;
+  End Else If MxfIsEssKey(Key) Then Begin
+   El.Pos:=Dp; El.Len:=L; El.Trk:=MxfB32(@Key,12); El.Bsid:=CurBsid; El.Part:=CurPart; El.Trunc:=False;
+   If Dp+L>MxfRSize Then Begin
+    El.Len:=MxfRSize-Dp; El.Trunc:=True; MxfScanTrunc:=True;
+    MxfAddEl(El);
+    Break;
+   End;
+   MxfAddEl(El);
+  End Else If (Key[4]=2) And (Key[5]=5) And (Key[6]=1) And (Key[8]=$0D) And (Key[9]=1) And (Key[10]=2) And (Key[11]=1) And (Key[12]=1) And (Key[13]=$11) Then Begin
+   MxfHasRip:=True;
+   Break;
+  End Else If (Key[5]=$53) And (Key[8]=$0D) And (Key[9]=1) And (Key[10]=1) And (Key[11]=1) And (Key[12]=1) And (Key[13]=1) Then Begin
+   If (L>0) And (L<=67108864) And (Dp+L<=MxfRSize) Then Begin
+    N:=L;
+    If N>Cap Then Begin Cap:=N+4096; ReallocMem(Buf,Cap); End;
+    If MxfRd(Dp,Buf,N)<N Then Begin MxfScanTrunc:=True; Break; End;
+    If CurPart>=0 Then Sc:=MxfPartScore(MxfParts^[CurPart].Typ,MxfParts^[CurPart].Stat,MxfParts^[CurPart].Ofs)
+    Else Sc:=1;
+    MxfParseSet(Key[14],Buf,N,Sc);
+   End;
+  End Else If (Key[5]=$53) And (Key[8]=$0D) And (Key[9]=1) And (Key[10]=2) And (Key[11]=1) And (Key[12]=1) And (Key[13]=$10) Then Begin
+   If (L>0) And (L<=67108864) And (Dp+L<=MxfRSize) Then Begin
+    N:=L;
+    If N>Cap Then Begin Cap:=N+4096; ReallocMem(Buf,Cap); End;
+    If MxfRd(Dp,Buf,N)<N Then Begin MxfScanTrunc:=True; Break; End;
+    MxfParseIndexSeg(Buf,N);
+   End;
+  End;
+  If Dp+L>MxfRSize Then Begin MxfScanTrunc:=True; Break; End;
+  Pos:=Dp+L;
+ End;
+ If Buf<>Nil Then FreeMem(Buf);
+ If MxfNParts=0 Then Begin MxfMsg:='aucune partition lisible'; Exit; End;
+ MxfScan:=True;
+End;
+
+Function MxfFindSet(Var U: TMxfUid; Kind: LongInt): LongInt;
+Var K: LongInt;
+Begin
+ MxfFindSet:=-1;
+ For K:=MxfNSets-1 Downto 0 Do
+  If (MxfSets^[K].Kind=Kind) Or (Kind=0) Then
+   If MxfUidEq(MxfSets^[K].Uid,U) Then Begin MxfFindSet:=K; Exit; End;
+End;
+
+Function MxfRefAt(Refs: PEABuffer; N, Ix: LongInt; Var U: TMxfUid): Boolean;
+Begin
+ MxfRefAt:=False;
+ If (Refs=Nil) Or (Ix<0) Or (Ix>=N) Then Exit;
+ Move(Refs^[Ix*16],U,16);
+ MxfRefAt:=True;
+End;
+
+Function MxfFindPkg(Var Um: Array Of Byte; Kind: LongInt): LongInt;
+Var K, J: LongInt; Eq: Boolean;
+Begin
+ MxfFindPkg:=-1;
+ For K:=0 To MxfNSets-1 Do
+  If MxfSets^[K].Kind=Kind Then Begin
+   Eq:=True;
+   For J:=0 To 31 Do If MxfSets^[K].Umid[J]<>Um[J] Then Begin Eq:=False; Break; End;
+   If Eq Then Begin MxfFindPkg:=K; Exit; End;
+  End;
+End;
+
+{ genre de piste a partir de l'UL de definition de donnees }
+Function MxfDataKind(Var U: TMxfUid): LongInt;
+Begin
+ MxfDataKind:=MXF_K_NONE;
+ If (U[0]=6) And (U[8]=1) And (U[9]=3) And (U[10]=2) Then Begin
+  If U[11]=2 Then Begin
+   Case U[12] Of
+    1: MxfDataKind:=MXF_K_VIDEO;
+    2: MxfDataKind:=MXF_K_AUDIO;
+    3: MxfDataKind:=MXF_K_DATA;
+   End;
+  End Else If U[11]=1 Then MxfDataKind:=MXF_K_TC;
+ End Else If (U[0]=$80) And (U[8]=$6F) And (U[9]=$3C) Then MxfDataKind:=MXF_K_VIDEO
+ Else If (U[0]=$80) And (U[8]=$78) And (U[9]=$E1) Then MxfDataKind:=MXF_K_AUDIO;
+End;
+
+Function MxfCodecName(C, Bits: LongInt): String;
+Begin
+ Case C Of
+  MXF_C_MPEG2: MxfCodecName:='mpeg2video';
+  MXF_C_H264: MxfCodecName:='h264';
+  MXF_C_DNXHD: MxfCodecName:='dnxhd';
+  MXF_C_PRORES: MxfCodecName:='prores';
+  MXF_C_MJPEG: MxfCodecName:='mjpeg';
+  MXF_C_MPEG4: MxfCodecName:='mpeg4';
+  MXF_C_DV: MxfCodecName:='dvvideo';
+  MXF_C_J2K: MxfCodecName:='jpeg2000';
+  MXF_C_VC1: MxfCodecName:='vc1';
+  MXF_C_RAWVIDEO: MxfCodecName:='rawvideo';
+  MXF_C_FFV1: MxfCodecName:='ffv1';
+  MXF_C_V210: MxfCodecName:='v210';
+  MXF_C_HEVC: MxfCodecName:='hevc';
+  MXF_C_VC2: MxfCodecName:='dirac';
+  MXF_C_CFHD: MxfCodecName:='cfhd';
+  MXF_C_TIFF: MxfCodecName:='tiff';
+  MXF_C_HQ: MxfCodecName:='hq_hqa';
+  MXF_C_HQX: MxfCodecName:='hqx';
+  MXF_C_PCM: Case Bits Of 24: MxfCodecName:='pcm_s24le'; 32: MxfCodecName:='pcm_s32le'; Else MxfCodecName:='pcm_s16le'; End;
+  MXF_C_PCMBE: Case Bits Of 24: MxfCodecName:='pcm_s24be'; 32: MxfCodecName:='pcm_s32be'; Else MxfCodecName:='pcm_s16be'; End;
+  MXF_C_ALAW: MxfCodecName:='pcm_alaw';
+  MXF_C_AC3: MxfCodecName:='ac3';
+  MXF_C_MP2: MxfCodecName:='mp2';
+  MXF_C_AAC: MxfCodecName:='aac';
+ Else MxfCodecName:='unknown';
+ End;
+End;
+
+{ wrapping selon l'UL du conteneur d'essence (mxf_get_wrapping_kind) }
+Function MxfWrapKind(Var Ec: TMxfUid): LongInt;
+Var E, Wp, Wt, V: LongInt;
+Begin
+ MxfWrapKind:=MXF_W_UNKNOWN;
+ E:=MxfLookupUl(Ec,MxfTabPicEC,MXF_NPICEC);
+ If E>=0 Then Begin Wp:=MxfTabPicEC[E*20+18]; Wt:=MxfTabPicEC[E*20+19]; End
+ Else Begin
+  E:=MxfLookupUl(Ec,MxfTabSndEC,MXF_NSNDEC);
+  If E<0 Then Exit;
+  Wp:=MxfTabSndEC[E*20+18]; Wt:=MxfTabSndEC[E*20+19];
+ End;
+ If Wp=0 Then Exit;
+ V:=Ec[Wp];
+ Case Wt Of
+  3: V:=V Mod 4;
+  2: If (V=3) Or (V=4) Then V:=V-2;
+  1: If V=2 Then V:=1;
+  4: If V<>2 Then V:=1;
+ End;
+ If V=1 Then MxfWrapKind:=MXF_W_FRAME Else If V=2 Then MxfWrapKind:=MXF_W_CLIP;
+End;
+
+Function MxfTcStr(Start: Int64; Base, Drop: LongInt): String;
+Var F, S, M, H: Int64; T: String; Fr, DropN, F10, D, Mm: Int64;
+ Function Two(V: Int64): String; Var Q: String; Begin Str(V:0,Q); If Length(Q)<2 Then Q:='0'+Q; Two:=Q; End;
+Begin
+ If Base<=0 Then Begin MxfTcStr:=''; Exit; End;
+ Fr:=Start;
+ If (Drop<>0) And (Base Mod 30=0) Then Begin
+  { av_timecode_adjust_ntsc_framenum2 }
+  DropN:=Base Div 30*2; F10:=Base Div 30*17982;
+  D:=Fr Div F10; Mm:=Fr Mod F10;
+  Fr:=Fr+9*DropN*D+DropN*((Mm-DropN) Div (F10 Div 10));
+ End;
+ F:=Fr Mod Base; S:=(Fr Div Base) Mod 60; M:=(Fr Div (Int64(Base)*60)) Mod 60; H:=(Fr Div (Int64(Base)*3600)) Mod 24;
+ T:=Two(H)+':'+Two(M)+':'+Two(S);
+ If Drop<>0 Then T:=T+';' Else T:=T+':';
+ MxfTcStr:=T+Two(F);
+End;
+
+Function MxfOpFromBytes(B12, B13, NEc: LongInt): LongInt;
+Begin
+ MxfOpFromBytes:=1;
+ If (B12>=1) And (B12<=3) And (B13>=1) And (B13<=3) Then MxfOpFromBytes:=(B12-1)*3+B13
+ Else If B12=$10 Then Begin
+  If NEc<>1 Then Begin If NEc>0 Then MxfOpFromBytes:=1 Else MxfOpFromBytes:=10; End Else MxfOpFromBytes:=10;
+ End;
+End;
+
+{ resolution des pistes a partir des metadonnees structurelles }
+Function MxfBuild(Var Info: TMxfInfo): Boolean;
+Var
+ CsIx, MatIx, TI, SqIx, K, J, Q, Sx, SrcIx, StIx, DsIx: LongInt;
+ U: TMxfUid;
+ Mt: LongInt;
+ T: ^TMxfTrack;
+ C, Bits, Ec: LongInt;
+ Dk: LongInt;
+ ClipIx: LongInt;
+ Dur: Int64;
+ HdrP: LongInt;
+ Found: Boolean;
+Begin
+ MxfBuild:=False;
+ Info.NTrk:=0;
+ { operational pattern }
+ HdrP:=0;
+ For K:=0 To MxfNParts-1 Do If MxfParts^[K].Typ=2 Then Begin HdrP:=K; Break; End;
+ Info.Op:=MxfOpFromBytes(MxfParts^[HdrP].OpB12,MxfParts^[HdrP].OpB13,MxfParts^[HdrP].NEc);
+ { paquet materiel : via ContentStorage, sinon premier }
+ MatIx:=-1;
+ CsIx:=-1;
+ For K:=0 To MxfNSets-1 Do If MxfSets^[K].Kind=MXF_S_CSTOR Then CsIx:=K;
+ If CsIx>=0 Then
+  For K:=0 To MxfSets^[CsIx].NRefs-1 Do Begin
+   If Not MxfRefAt(MxfSets^[CsIx].Refs,MxfSets^[CsIx].NRefs,K,U) Then Continue;
+   Q:=MxfFindSet(U,MXF_S_MAT);
+   If Q>=0 Then Begin MatIx:=Q; Break; End;
+  End;
+ If MatIx<0 Then
+  For K:=0 To MxfNSets-1 Do If MxfSets^[K].Kind=MXF_S_MAT Then Begin MatIx:=K; Break; End;
+ If MatIx<0 Then Begin MxfMsg:='pas de paquet materiel (metadonnees absentes ou tronquees)'; Exit; End;
+
+ For TI:=0 To MxfSets^[MatIx].NRefs-1 Do Begin
+  If Info.NTrk>=MXF_MAXTRK Then Break;
+  If Not MxfRefAt(MxfSets^[MatIx].Refs,MxfSets^[MatIx].NRefs,TI,U) Then Continue;
+  Mt:=MxfFindSet(U,MXF_S_TRACK);
+  If Mt<0 Then Continue;
+  SqIx:=MxfFindSet(MxfSets^[Mt].Ref,MXF_S_SEQ);
+  If SqIx<0 Then Continue;
+  Dk:=MxfDataKind(MxfSets^[SqIx].DataDef);
+  { piste de timecode }
+  If Dk=MXF_K_TC Then Begin
+   If Info.Timecode='' Then
+    For K:=0 To MxfSets^[SqIx].NRefs-1 Do Begin
+     If Not MxfRefAt(MxfSets^[SqIx].Refs,MxfSets^[SqIx].NRefs,K,U) Then Continue;
+     Q:=MxfFindSet(U,MXF_S_TC);
+     If Q<0 Then Begin
+      Q:=MxfFindSet(U,MXF_S_PULL);
+      If Q>=0 Then Q:=MxfFindSet(MxfSets^[Q].Ref,MXF_S_TC);
+     End;
+     If Q>=0 Then Begin
+      Info.Timecode:=MxfTcStr(MxfSets^[Q].TcStart,MxfSets^[Q].TcRate,MxfSets^[Q].TcDrop);
+      Info.TcStart:=MxfSets^[Q].TcStart; Info.TcDrop:=(MxfSets^[Q].TcDrop<>0); Info.TcBase:=MxfSets^[Q].TcRate;
+      Break;
+     End;
+    End;
+   Continue;
+  End;
+  If (Dk<>MXF_K_VIDEO) And (Dk<>MXF_K_AUDIO) And (Dk<>MXF_K_DATA) Then Continue;
+  { premiere SourceClip valide }
+  ClipIx:=-1; SrcIx:=-1;
+  For K:=0 To MxfSets^[SqIx].NRefs-1 Do Begin
+   If Not MxfRefAt(MxfSets^[SqIx].Refs,MxfSets^[SqIx].NRefs,K,U) Then Continue;
+   Q:=MxfFindSet(U,MXF_S_CLIP);
+   If Q<0 Then Begin
+    { groupe d'essence : premier choix ayant un descripteur }
+    Sx:=MxfFindSet(U,MXF_S_EGRP);
+    If Sx>=0 Then
+     For J:=0 To MxfSets^[Sx].NRefs-1 Do Begin
+      If Not MxfRefAt(MxfSets^[Sx].Refs,MxfSets^[Sx].NRefs,J,U) Then Continue;
+      Q:=MxfFindSet(U,MXF_S_CLIP);
+      If Q>=0 Then Begin
+       SrcIx:=MxfFindPkg(MxfSets^[Q].Umid,MXF_S_SRC);
+       If SrcIx>=0 Then Break;
+      End;
+     End;
+    If SrcIx>=0 Then Begin ClipIx:=Q; Break; End;
+    Continue;
+   End;
+   SrcIx:=MxfFindPkg(MxfSets^[Q].Umid,MXF_S_SRC);
+   ClipIx:=Q;
+   If SrcIx>=0 Then Break;
+  End;
+  If (ClipIx<0) Or (SrcIx<0) Then Continue;
+  { piste source }
+  StIx:=-1;
+  For K:=0 To MxfSets^[SrcIx].NRefs-1 Do Begin
+   If Not MxfRefAt(MxfSets^[SrcIx].Refs,MxfSets^[SrcIx].NRefs,K,U) Then Continue;
+   Q:=MxfFindSet(U,MXF_S_TRACK);
+   If (Q>=0) And (MxfSets^[Q].TrackId=MxfSets^[ClipIx].SrcTrackId) Then Begin StIx:=Q; Break; End;
+  End;
+  If StIx<0 Then Continue;
+  { descripteur }
+  DsIx:=-1;
+  Q:=MxfFindSet(MxfSets^[SrcIx].Ref,0);
+  If Q>=0 Then Begin
+   If MxfSets^[Q].Kind=MXF_S_DESC Then DsIx:=Q
+   Else If MxfSets^[Q].Kind=MXF_S_MDESC Then
+    For K:=0 To MxfSets^[Q].NRefs-1 Do Begin
+     If Not MxfRefAt(MxfSets^[Q].Refs,MxfSets^[Q].NRefs,K,U) Then Continue;
+     J:=MxfFindSet(U,MXF_S_DESC);
+     If (J>=0) And (MxfSets^[J].Linked=MxfSets^[StIx].TrackId) Then Begin DsIx:=J; Break; End;
+    End;
+  End;
+  If DsIx<0 Then Continue;
+  { remplissage }
+  T:=@Info.Trk[Info.NTrk];
+  FillChar(T^,SizeOf(TMxfTrack),0);
+  T^.Kind:=Dk;
+  T^.TrackId:=MxfSets^[Mt].TrackId;
+  T^.TrackNum:=MxfSets^[StIx].TrackNum;
+  T^.SrcTrack:=StIx; T^.SetIx:=DsIx;
+  T^.EdN:=MxfSets^[Mt].ErN; T^.EdD:=MxfSets^[Mt].ErD;
+  If (T^.EdN<=0) Or (T^.EdD<=0) Then Begin T^.EdN:=25; T^.EdD:=1; End;
+  T^.EcUl:=MxfSets^[DsIx].EcUl; T^.CodecUl:=MxfSets^[DsIx].CodUl;
+  T^.AspN:=MxfSets^[DsIx].AspN; T^.AspD:=MxfSets^[DsIx].AspD;
+  T^.FrameLayout:=MxfSets^[DsIx].Layout;
+  { duree }
+  Dur:=MxfSets^[ClipIx].Dur;
+  If (MxfSets^[DsIx].CDur>=0) And ((Dur<0) Or (MxfSets^[DsIx].CDur<Dur)) Then Dur:=MxfSets^[DsIx].CDur;
+  T^.DurUnits:=Dur;
+  { BodySID / IndexSID via EssenceContainerData }
+  For K:=0 To MxfNSets-1 Do
+   If MxfSets^[K].Kind=MXF_S_ECD Then Begin
+    Found:=True;
+    For J:=0 To 31 Do If MxfSets^[K].Umid[J]<>MxfSets^[ClipIx].Umid[J] Then Begin Found:=False; Break; End;
+    If Found Then Begin T^.BodySid:=MxfSets^[K].BodySid; T^.IndexSid:=MxfSets^[K].IndexSid; Break; End;
+   End;
+  { codec }
+  C:=0;
+  If Dk=MXF_K_VIDEO Then Begin
+   Ec:=MxfLookupUl(MxfSets^[DsIx].CodUl,MxfTabCodec,MXF_NCODEC);
+   If Ec>=0 Then C:=MxfTabCodec[Ec*20+17];
+   If C=0 Then Begin
+    Ec:=MxfLookupUl(MxfSets^[DsIx].PkgUl,MxfTabCodec,MXF_NCODEC);
+    If Ec>=0 Then C:=MxfTabCodec[Ec*20+17];
+   End;
+   If C=0 Then Begin
+    Ec:=MxfLookupUl(MxfSets^[DsIx].EcUl,MxfTabPicEC,MXF_NPICEC);
+    If Ec>=0 Then C:=MxfTabPicEC[Ec*20+17];
+   End;
+   T^.Codec:=C;
+   { dimensions d'affichage si presentes (rognage), sinon echantillonnees, sinon stockees ; hauteur de trame x2 si champs separes }
+   T^.W:=MxfSets^[DsIx].W; T^.H:=MxfSets^[DsIx].H;
+   If (MxfSets^[DsIx].DW>0) And (MxfSets^[DsIx].DH>0) Then Begin T^.W:=MxfSets^[DsIx].DW; T^.H:=MxfSets^[DsIx].DH; End
+   Else If (MxfSets^[DsIx].SW>0) And (MxfSets^[DsIx].SH>0) Then Begin T^.W:=MxfSets^[DsIx].SW; T^.H:=MxfSets^[DsIx].SH; End;
+   If T^.FrameLayout In [1,4] Then T^.H:=T^.H*2;
+   T^.FpsN:=T^.EdN; T^.FpsD:=T^.EdD;
+   T^.Name:=MxfCodecName(C,0);
+   T^.CompDepth:=MxfSets^[DsIx].CDepth;
+   Bits:=MxfSets^[DsIx].CDepth;
+   If (MxfSets^[DsIx].BlackRef<>0) Or (MxfSets^[DsIx].WhiteRef<>0) Or (MxfSets^[DsIx].ColRange<>0) Then Begin
+    If (Bits>=8) And (Bits<31) Then Begin
+     If (MxfSets^[DsIx].BlackRef=0) And (MxfSets^[DsIx].WhiteRef=(1 Shl Bits)-1) And
+        ((MxfSets^[DsIx].ColRange=(1 Shl Bits)) Or (MxfSets^[DsIx].ColRange=(1 Shl Bits)-1)) Then T^.ColorRange:=2
+     Else If (MxfSets^[DsIx].BlackRef=(1 Shl (Bits-4))) And (MxfSets^[DsIx].WhiteRef=(235 Shl (Bits-8))) And
+        (MxfSets^[DsIx].ColRange=(14 Shl (Bits-4))+1) Then T^.ColorRange:=1;
+    End;
+   End;
+   T^.Bt709:=((MxfSets^[DsIx].ClPri[0]=6) And (MxfSets^[DsIx].ClPri[12]=3) And (MxfSets^[DsIx].ClPri[13]=3))
+     Or ((MxfSets^[DsIx].ClMat[0]=6) And (MxfSets^[DsIx].ClMat[12]=2) And (MxfSets^[DsIx].ClMat[13]=2));
+  End Else If Dk=MXF_K_AUDIO Then Begin
+   Ec:=MxfLookupUl(MxfSets^[DsIx].CodUl,MxfTabCodec,MXF_NCODEC);
+   If Ec>=0 Then C:=MxfTabCodec[Ec*20+17];
+   If C=0 Then Begin
+    Ec:=MxfLookupUl(MxfSets^[DsIx].PkgUl,MxfTabCodec,MXF_NCODEC);
+    If Ec>=0 Then C:=MxfTabCodec[Ec*20+17];
+   End;
+   Ec:=MxfLookupUl(MxfSets^[DsIx].EcUl,MxfTabSndEC,MXF_NSNDEC);
+   If Ec>=0 Then
+    If (C=0) Or (C=MXF_C_ALAW) Then C:=MxfTabSndEC[Ec*20+17];
+   If C=0 Then C:=MXF_C_PCM;   { defaut raisonnable : PCM (RP224 : A-law par defaut, mais les fichiers PCM sans UL sont courants) }
+   T^.Codec:=C;
+   Bits:=MxfSets^[DsIx].Bits;
+   T^.Chans:=MxfSets^[DsIx].Chans;
+   If MxfSets^[DsIx].SrD>0 Then T^.Rate:=MxfSets^[DsIx].SrN Div MxfSets^[DsIx].SrD
+   Else If MxfSets^[DsIx].Sr1D>0 Then T^.Rate:=MxfSets^[DsIx].Sr1N Div MxfSets^[DsIx].Sr1D
+   Else T^.Rate:=48000;
+   If T^.Rate<=0 Then T^.Rate:=48000;
+   If (C=MXF_C_PCM) Or (C=MXF_C_PCMBE) Then Begin
+    If (Bits>16) And (Bits<=24) Then Bits:=24 Else If Bits=32 Then Bits:=32 Else Bits:=16;
+   End;
+   T^.Bits:=Bits;
+   T^.Aes3:=((MxfSets^[StIx].TrackNum Shr 8)=$060110);
+   T^.Name:=MxfCodecName(C,Bits);
+
+  End Else Begin
+   T^.Name:='data';
+  End;
+  { wrapping }
+  If Info.Op=10 Then T^.Wrap:=MXF_W_CLIP Else T^.Wrap:=MxfWrapKind(T^.EcUl);
+  Inc(Info.NTrk);
+ End;
+ MxfBuild:=True;
+End;
+
+Type
+ TMxfLA = Array[0..0] Of LongInt;
+ PMxfLA = ^TMxfLA;
+
+Var
+ MxfElMap: PMxfLA;
+
+Function MxfTrkOfEl(Var Info: TMxfInfo; E: LongInt): LongInt;
+Var K, Av, Only: LongInt;
+Begin
+ MxfTrkOfEl:=-1;
+ Av:=0; Only:=-1;
+ For K:=0 To Info.NTrk-1 Do Begin
+  If (Info.Trk[K].Kind=MXF_K_VIDEO) Or (Info.Trk[K].Kind=MXF_K_AUDIO) Then Begin Inc(Av); Only:=K; End;
+  If (Info.Trk[K].TrackNum=MxfEls^[E].Trk) And ((MxfEls^[E].Bsid=0) Or (Info.Trk[K].BodySid=0) Or (Info.Trk[K].BodySid=MxfEls^[E].Bsid)) Then Begin
+   MxfTrkOfEl:=K; Exit;
+  End;
+ End;
+ { une seule piste : tous les elements lui appartiennent (OP-Atom, numeros de piste a 0) }
+ If Av=1 Then Begin
+  Av:=0;
+  For K:=0 To Info.NTrk-1 Do If Info.Trk[K].TrackNum=MxfEls^[E].Trk Then Av:=1;
+  If Av=0 Then MxfTrkOfEl:=Only;
+ End;
+End;
+
+Procedure MxfMapEls(Var Info: TMxfInfo);
+Var E: LongInt;
+Begin
+ If MxfElMap<>Nil Then FreeMem(MxfElMap);
+ MxfElMap:=Nil;
+ If MxfNEls=0 Then Exit;
+ GetMem(MxfElMap,MxfNEls*SizeOf(LongInt));
+ For E:=0 To MxfNEls-1 Do MxfElMap^[E]:=MxfTrkOfEl(Info,E);
+End;
+
+{ segments d'index d'une piste, tries par position de depart ; retourne leur nombre dans Ix[] }
+Function MxfTrackSegs(Var T: TMxfTrack; Var Ix: Array Of LongInt): LongInt;
+Var K, N, J, Tmp: LongInt;
+Begin
+ N:=0;
+ For K:=0 To MxfNSegs-1 Do
+  If ((T.IndexSid<>0) And (MxfSegs^[K].IdxSid=T.IndexSid)) Or
+     ((T.IndexSid=0) And (T.BodySid<>0) And (MxfSegs^[K].BodySid=T.BodySid) And (MxfSegs^[K].IdxSid<>0)) Then
+   If N<=High(Ix) Then Begin Ix[N]:=K; Inc(N); End;
+ { tri par insertion }
+ For K:=1 To N-1 Do Begin
+  Tmp:=Ix[K]; J:=K-1;
+  While (J>=0) And (MxfSegs^[Ix[J]].Start>MxfSegs^[Tmp].Start) Do Begin Ix[J+1]:=Ix[J]; Dec(J); End;
+  Ix[J+1]:=Tmp;
+ End;
+ MxfTrackSegs:=N;
+End;
+
+Function MxfCountSegEntries(Ns: LongInt; Var Ix: Array Of LongInt): LongInt;
+Var K, S: LongInt;
+Begin
+ S:=0;
+ For K:=0 To Ns-1 Do S:=S+MxfSegs^[Ix[K]].NEnt;
+ MxfCountSegEntries:=S;
+End;
+
+{ liste des elements d'une piste (indices dans MxfEls) }
+Function MxfTrackEls(Tk: LongInt; Var N: LongInt): PMxfLA;
+Var E, C: LongInt; R: PMxfLA;
+Begin
+ C:=0;
+ For E:=0 To MxfNEls-1 Do If MxfElMap^[E]=Tk Then Inc(C);
+ N:=C;
+ If C=0 Then Begin MxfTrackEls:=Nil; Exit; End;
+ GetMem(R,C*SizeOf(LongInt));
+ C:=0;
+ For E:=0 To MxfNEls-1 Do If MxfElMap^[E]=Tk Then Begin R^[C]:=E; Inc(C); End;
+ MxfTrackEls:=R;
+End;
+
+{ lecture dans le flux virtuel (concatenation des valeurs des elements d'une piste) }
+Function MxfVirtRead(Els: PMxfLA; NEl: LongInt; Var Cursor: LongInt; Var CurBase: Int64; VOff: Int64; Dst: PEABuffer; N: LongInt): LongInt;
+Var Done, Take, E: LongInt; Rel: Int64; Got: LongInt;
+Begin
+ Done:=0;
+ { repositionne le curseur si necessaire }
+ If (Cursor<0) Or (Cursor>=NEl) Or (VOff<CurBase) Then Begin Cursor:=0; CurBase:=0; End;
+ While (Cursor<NEl) And (VOff>=CurBase+MxfEls^[Els^[Cursor]].Len) Do Begin
+  CurBase:=CurBase+MxfEls^[Els^[Cursor]].Len; Inc(Cursor);
+ End;
+ While (Done<N) And (Cursor<NEl) Do Begin
+  E:=Els^[Cursor];
+  Rel:=VOff+Done-CurBase;
+  Take:=N-Done;
+  If Rel+Take>MxfEls^[E].Len Then Take:=MxfEls^[E].Len-Rel;
+  If Take<=0 Then Begin CurBase:=CurBase+MxfEls^[E].Len; Inc(Cursor); Continue; End;
+  Got:=MxfRd(MxfEls^[E].Pos+Rel,@Dst^[Done],Take);
+  Done:=Done+Got;
+  If Got<Take Then Break;
+  If Rel+Take>=MxfEls^[E].Len Then Begin CurBase:=CurBase+MxfEls^[E].Len; Inc(Cursor); End;
+ End;
+ MxfVirtRead:=Done;
+End;
+
+{ taille d'une image DNxHD clip-wrapped sans index : distance entre deux en-tetes 00 00 02 80 01 }
+Function MxfDnxFrameSize(Els: PMxfLA; NEl: LongInt): LongInt;
+Var Buf: PEABuffer; Got, K, Cur: LongInt; CurBase: Int64;
+Begin
+ MxfDnxFrameSize:=0;
+ GetMem(Buf,4194304+16);
+ Cur:=0; CurBase:=0;
+ Got:=MxfVirtRead(Els,NEl,Cur,CurBase,0,Buf,4194304);
+ If (Got>16) And (Buf^[0]=0) And (Buf^[1]=0) And (Buf^[2]=2) And (Buf^[3]=$80) Then
+  For K:=64 To Got-6 Do
+   If (Buf^[K]=0) And (Buf^[K+1]=0) And (Buf^[K+2]=2) And (Buf^[K+3]=$80) And (Buf^[K+4]=1) Then Begin
+    MxfDnxFrameSize:=K; Break;
+   End;
+ FreeMem(Buf);
+End;
+
+
+{ identification du codec video par le contenu de la premiere image (UL absente ou inconnue) }
+Function MxfSniffCodec(Tk: LongInt): LongInt;
+Var Els: PMxfLA; NEl, Got: LongInt; B: Array[0..31] Of Byte; Cur: LongInt; Base: Int64;
+Begin
+ MxfSniffCodec:=MXF_C_NONE;
+ Els:=MxfTrackEls(Tk,NEl);
+ If NEl=0 Then Exit;
+ Cur:=0; Base:=0;
+ FillChar(B,SizeOf(B),0);
+ Got:=MxfVirtRead(Els,NEl,Cur,Base,0,@B,32);
+ FreeMem(Els);
+ If Got<8 Then Exit;
+ If (B[0]=$FF) And (B[1]=$D8) And (B[2]=$FF) Then MxfSniffCodec:=MXF_C_MJPEG
+ Else If (B[0]=0) And (B[1]=0) And (B[2]=1) And (B[3]=$B3) Then MxfSniffCodec:=MXF_C_MPEG2
+ Else If (B[0]=0) And (B[1]=0) And (B[2]=0) And (B[3]=1) And ((B[4] And $1F) In [6,7,9]) Then MxfSniffCodec:=MXF_C_H264
+ Else If (B[0]=0) And (B[1]=0) And (B[2]=1) And ((B[3] And $1F) In [6,7,9]) Then MxfSniffCodec:=MXF_C_H264
+ Else If (B[4]=Ord('i')) And (B[5]=Ord('c')) And (B[6]=Ord('p')) And (B[7]=Ord('f')) Then MxfSniffCodec:=MXF_C_PRORES
+ Else If (B[0]=0) And (B[1]=0) And (B[2]=2) And (B[3]=$80) Then MxfSniffCodec:=MXF_C_DNXHD;
+End;
+
+Function MxfClipFrames(Var T: TMxfTrack; Tk: LongInt; Tot: Int64): LongInt;
+Var Els: PMxfLA; NEl, Sz, R: LongInt;
+Begin
+ R:=0;
+ If (T.DurUnits>0) And (Tot Mod T.DurUnits=0) Then R:=T.DurUnits
+ Else If T.Codec=MXF_C_DNXHD Then Begin
+  Els:=MxfTrackEls(Tk,NEl);
+  If NEl>0 Then Begin
+   Sz:=MxfDnxFrameSize(Els,NEl);
+   If Sz>0 Then R:=Tot Div Sz;
+   FreeMem(Els);
+  End;
+ End;
+ If (R=0) And (T.DurUnits>0) Then R:=T.DurUnits;
+ MxfClipFrames:=R;
+End;
+
+Procedure MxfFinishInfo(Var Info: TMxfInfo);
+Var
+ K, E, Tk, Ns: LongInt;
+ Cnt: Array[0..MXF_MAXTRK-1] Of Int64;
+ Byt: Array[0..MXF_MAXTRK-1] Of Int64;
+ Ix: Array[0..255] Of LongInt;
+ Blk: LongInt;
+ T: ^TMxfTrack;
+ Samples: Int64;
+ Dm: Int64;
+Begin
+ MxfMapEls(Info);
+ FillChar(Cnt,SizeOf(Cnt),0); FillChar(Byt,SizeOf(Byt),0);
+ For E:=0 To MxfNEls-1 Do Begin
+  Tk:=MxfElMap^[E];
+  If Tk<0 Then Continue;
+  If MxfEls^[E].Trunc And (Info.Trk[Tk].Wrap<>MXF_W_CLIP) And (Info.Trk[Tk].Kind=MXF_K_VIDEO) Then Continue;
+  Inc(Cnt[Tk]);
+  If Info.Trk[Tk].Aes3 Then Byt[Tk]:=Byt[Tk]+((MxfEls^[E].Len-4) Div 32)
+  Else Byt[Tk]:=Byt[Tk]+MxfEls^[E].Len;
+ End;
+ { wrapping inconnu : peu d'elements pour beaucoup d'unites => conteneur clip-wrapped }
+ For K:=0 To Info.NTrk-1 Do
+  If (Info.Trk[K].Kind=MXF_K_VIDEO) And (Info.Trk[K].Wrap=MXF_W_UNKNOWN) Then Begin
+   If (Cnt[K]>0) And (Cnt[K]*4<Info.Trk[K].DurUnits) Then Info.Trk[K].Wrap:=MXF_W_CLIP Else Info.Trk[K].Wrap:=MXF_W_FRAME;
+  End;
+ For K:=0 To Info.NTrk-1 Do Begin
+  T:=@Info.Trk[K];
+  If (T^.Kind=MXF_K_VIDEO) And (T^.Codec=MXF_C_NONE) Then Begin
+   T^.Codec:=MxfSniffCodec(K);
+   If T^.Codec<>MXF_C_NONE Then T^.Name:=MxfCodecName(T^.Codec,0);
+  End;
+  If T^.Kind=MXF_K_VIDEO Then Begin
+   If T^.Wrap=MXF_W_CLIP Then Begin
+    Ns:=MxfTrackSegs(T^,Ix);
+    T^.Frames:=0;
+    If Ns>0 Then Begin
+     If MxfSegs^[Ix[0]].Eubc>0 Then Begin
+      If Byt[K]>0 Then T^.Frames:=Byt[K] Div MxfSegs^[Ix[0]].Eubc;
+     End Else T^.Frames:=MxfCountSegEntries(Ns,Ix);
+    End;
+    If T^.Frames=0 Then T^.Frames:=MxfClipFrames(T^,K,Byt[K]);
+   End Else T^.Frames:=Cnt[K];
+   If T^.DurUnits>0 Then Dm:=T^.DurUnits*1000*T^.EdD Div T^.EdN
+   Else Dm:=Int64(T^.Frames)*1000*T^.EdD Div T^.EdN;
+   If Info.Truncated Or (T^.DurUnits<=0) Then Dm:=Int64(T^.Frames)*1000*T^.EdD Div T^.EdN;
+   T^.DurMs:=Dm;
+  End Else If T^.Kind=MXF_K_AUDIO Then Begin
+   If (T^.Codec=MXF_C_PCM) Or (T^.Codec=MXF_C_PCMBE) Or (T^.Codec=MXF_C_ALAW) Then Begin
+    If T^.Aes3 Then Samples:=Byt[K]
+    Else Begin
+     If T^.Codec=MXF_C_ALAW Then Blk:=T^.Chans Else Blk:=T^.Chans*(T^.Bits Div 8);
+     If Blk<=0 Then Blk:=1;
+     Samples:=Byt[K] Div Blk;
+    End;
+    T^.Frames:=Samples;
+    Dm:=Samples*1000 Div T^.Rate;
+    If (T^.DurUnits>0) And (Not Info.Truncated) Then Dm:=T^.DurUnits*T^.EdD*1000 Div T^.EdN;
+    T^.DurMs:=Dm;
+   End Else Begin
+    T^.Frames:=Cnt[K];
+    If (T^.DurUnits>0) Then T^.DurMs:=T^.DurUnits*T^.EdD*1000 Div T^.EdN;
+   End;
+  End;
+ End;
+ Info.DurMs:=0;
+ For K:=0 To Info.NTrk-1 Do If Info.Trk[K].Kind=MXF_K_VIDEO Then Begin Info.DurMs:=Info.Trk[K].DurMs; Break; End;
+ If Info.DurMs=0 Then
+  For K:=0 To Info.NTrk-1 Do If Info.Trk[K].Kind=MXF_K_AUDIO Then Begin Info.DurMs:=Info.Trk[K].DurMs; Break; End;
+End;
+
+Function MxfOpenAll(Path: String; Var Info: TMxfInfo): Boolean;
+Var K: LongInt; Hp: LongInt; Fm: Byte;
+Begin
+ MxfOpenAll:=False;
+ MxfMsg:='';
+ FillChar(Info,SizeOf(Info),0);
+ MxfFreeAll;
+ MxfProducer:=''; MxfHasRip:=False; MxfSawFooter:=False; MxfScanTrunc:=False;
+ If MxfElMap<>Nil Then FreeMem(MxfElMap);
+ MxfElMap:=Nil;
+ Assign(MxfRf,Path);
+ 
+ Fm:=FileMode; FileMode:=0;
+ Reset(MxfRf,1);
+ FileMode:=Fm;
+ If IOResult<>0 Then Begin  MxfMsg:='fichier illisible : '+Path; Exit; End;
+ MxfRSize:=FileSize(MxfRf);
+ 
+ MxfRfOpen:=True;
+ If Not MxfScan Then Begin MxfFreeAll; Exit; End;
+ Info.FileSize:=MxfRSize; Info.RunIn:=MxfRunIn; Info.NParts:=MxfNParts;
+ Info.HasRip:=MxfHasRip; Info.HasFooter:=MxfSawFooter; Info.HasIndex:=MxfNSegs>0;
+ Hp:=0;
+ For K:=0 To MxfNParts-1 Do If MxfParts^[K].Typ=2 Then Begin Hp:=K; Break; End;
+ Info.HdrClosed:=(MxfParts^[Hp].Stat=2) Or (MxfParts^[Hp].Stat=4);
+ Info.Truncated:=MxfScanTrunc Or (Not MxfSawFooter) Or (Not Info.HdrClosed);
+ Info.Producer:=MxfProducer;
+ If Not MxfBuild(Info) Then Begin MxfFreeAll; Exit; End;
+ MxfFinishInfo(Info);
+ Info.Ok:=True;
+ MxfOpenAll:=True;
+End;
+
+Function MxfProbe(Path: String; Var Info: TMxfInfo): Boolean;
+Begin
+ MxfProbe:=MxfOpenAll(Path,Info);
+ If MxfElMap<>Nil Then FreeMem(MxfElMap);
+ MxfElMap:=Nil;
+ MxfFreeAll;
+End;
+
+{ PTS/DTS/cle a partir de l'index (algorithme de mxf_compute_ptses_fake_index) ; N = nombre d'unites d'acces }
+Function MxfIndexPts(Tk: LongInt; Var Info: TMxfInfo; N: LongInt; Pts, Dts, Key: PMxfLA): Boolean;
+Var
+ Ix: Array[0..255] Of LongInt;
+ Ns, K, J, X, Off, Index, Nb, Dl, Nn, Idelta, MaxOff: LongInt;
+ Sg: ^TMxfSeg;
+ Fl: PMxfLA;
+Begin
+ MxfIndexPts:=False;
+ Ns:=MxfTrackSegs(Info.Trk[Tk],Ix);
+ If Ns=0 Then Exit;
+ Nb:=0;
+ For K:=0 To Ns-1 Do Begin
+  Sg:=@MxfSegs^[Ix[K]];
+  If Sg^.NEnt=0 Then Exit;   { indice CBR : pas de decalages temporels }
+  Dl:=Sg^.Dur;
+  If Dl<=0 Then Dl:=Sg^.NEnt;
+  If (Sg^.NEnt<>Dl) And (Sg^.NEnt<>Dl+1) And (Sg^.NEnt<>Dl*2+1) Then Exit;
+  Nb:=Nb+Dl;
+ End;
+ If Nb<=0 Then Exit;
+ GetMem(Fl,Nb*SizeOf(LongInt));
+ For X:=0 To N-1 Do Begin Pts^[X]:=-1; Dts^[X]:=0; Key^[X]:=0; End;
+ MaxOff:=-128;
+ X:=0;
+ For K:=0 To Ns-1 Do Begin
+  Sg:=@MxfSegs^[Ix[K]];
+  Dl:=Sg^.Dur; If Dl<=0 Then Dl:=Sg^.NEnt;
+  Idelta:=1;
+  If Sg^.NEnt=2*Dl+1 Then Idelta:=2;
+  Nn:=Sg^.NEnt;
+  If Sg^.NEnt=Idelta*Dl+1 Then Dec(Nn);
+  J:=0;
+  While J<Nn Do Begin
+   If X>=Nb Then Break;
+   Off:=Sg^.Ent^[J].Tref Div Idelta;
+   Index:=X+Off;
+   If (Sg^.Ent^[J].Flags And $30)=0 Then Fl^[X]:=1 Else Fl^[X]:=0;
+   If (Index>=0) And (Index<Nb) Then Begin
+    If Index<N Then Pts^[Index]:=X;      { ptses[index]=x : image affichee a la position 'index' stockee en x }
+    If Off>MaxOff Then MaxOff:=Off;
+   End;
+   If X<N Then Key^[X]:=Fl^[X];
+   Inc(X); Inc(J,Idelta);
+  End;
+ End;
+ FreeMem(Fl);
+ If MaxOff=-128 Then MaxOff:=0;
+ For X:=0 To N-1 Do Begin
+  Dts^[X]:=X-MaxOff;
+  { ptses[x] est indexe par position d'affichage : le PTS du paquet x est ptses[x] }
+ End;
+ MxfIndexPts:=True;
+End;
+
+Type
+ TMxfAU = Record
+  Pos: Int64;     { position fichier (trame) ou decalage virtuel (clip) }
+  Len: LongInt;
+ End;
+ TMxfAUA = Array[0..0] Of TMxfAU;
+ PMxfAUA = ^TMxfAUA;
+
+{ analyse sommaire d'une unite d'acces sans index : retourne cle, ordre d'affichage relatif (MPEG-2) }
+Procedure MxfSniffAU(Codec: LongInt; B: PEABuffer; Len: LongInt; Var IsKey: Boolean; Var HasGop: Boolean; Var Tref: LongInt);
+Var K, Lim, Nt: LongInt; PicT: LongInt;
+Begin
+ IsKey:=True; HasGop:=False; Tref:=-1;
+ Lim:=Len; If Lim>262144 Then Lim:=262144;
+ If Codec=MXF_C_MPEG2 Then Begin
+  IsKey:=False;
+  K:=0;
+  While K+4<Lim Do Begin
+   If (B^[K]=0) And (B^[K+1]=0) And (B^[K+2]=1) Then Begin
+    If B^[K+3]=$B8 Then HasGop:=True
+    Else If B^[K+3]=0 Then Begin
+     If K+5<Lim Then Begin
+      Tref:=(LongInt(B^[K+4]) Shl 2) Or (B^[K+5] Shr 6);
+      PicT:=(B^[K+5] Shr 3) And 7;
+      IsKey:=(PicT=1);
+     End;
+     Break;
+    End;
+    Inc(K,3);
+   End Else Inc(K);
+  End;
+ End Else If Codec=MXF_C_H264 Then Begin
+  IsKey:=False;
+  K:=0;
+  While K+4<Lim Do Begin
+   If (B^[K]=0) And (B^[K+1]=0) And (B^[K+2]=1) Then Begin
+    Nt:=B^[K+3] And $1F;
+    If Nt=5 Then Begin IsKey:=True; Break; End;
+    If Nt=1 Then Break;
+    Inc(K,3);
+   End Else Inc(K);
+  End;
+ End;
+End;
+
+Function MxfWriteIdx(Path: String; N: LongInt; Offs, Sizes, Pts, Dts, Key: PMxfLA): Boolean;
+Var F: File; I: LongInt; Rec: Array[0..4] Of LongInt; Ok: Boolean;
+Begin
+ MxfWriteIdx:=False;
+ If Path='' Then Begin MxfWriteIdx:=True; Exit; End;
+ Assign(F,Path);
+ 
+ Rewrite(F,1);
+ If IOResult<>0 Then Begin  MxfMsg:='ecriture impossible : '+Path; Exit; End;
+ Ok:=True;
+ For I:=0 To N-1 Do Begin
+  Rec[0]:=Offs^[I]; Rec[1]:=Sizes^[I]; Rec[2]:=Pts^[I]; Rec[3]:=Dts^[I]; Rec[4]:=Key^[I];
+  BlockWrite(F,Rec,20);
+  If IOResult<>0 Then Begin Ok:=False; Break; End;
+ End;
+ Close(F);
+ If IOResult<>0 Then Ok:=False;
+ 
+ If Not Ok Then MxfMsg:='erreur d''ecriture de l''index';
+ MxfWriteIdx:=Ok;
+End;
+
+Function MxfExtractVideo(Var Info: TMxfInfo; Tk: LongInt; VDst, IdxDst: String): Boolean;
+Var
+ T: ^TMxfTrack;
+ Els: PMxfLA; NEl, K, J, E, N, Ns, Cur: LongInt;
+ Au: PMxfAUA;
+ Ix: Array[0..255] Of LongInt;
+ TotBytes, CurBase: Int64;
+ Eubc: LongInt;
+ Pts, Dts, Key, Offs, Sizes: PMxfLA;
+ FromIdx, Ok, IsK, HasG: Boolean;
+ Buf: PEABuffer; BufCap, Got, Tr, Delay, GopBase, Disp: LongInt;
+ F: File;
+ OutPos: Int64;
+ Disps: PMxfLA;
+Begin
+ MxfExtractVideo:=False;
+ T:=@Info.Trk[Tk];
+ Els:=MxfTrackEls(Tk,NEl);
+ If NEl=0 Then Begin MxfMsg:='aucun element d''essence video'; Exit; End;
+ Au:=Nil; N:=0;
+ TotBytes:=0;
+ For K:=0 To NEl-1 Do TotBytes:=TotBytes+MxfEls^[Els^[K]].Len;
+ If T^.Wrap=MXF_W_CLIP Then Begin
+  { decoupage d'un conteneur clip-wrapped via la table d'index }
+  Ns:=MxfTrackSegs(T^,Ix);
+  If Ns=0 Then Begin
+   { pas d'index : on devine EditUnitByteCount comme ffmpeg (taille / duree) }
+   Eubc:=0;
+   If (T^.DurUnits>0) And (TotBytes Mod T^.DurUnits=0) Then Eubc:=TotBytes Div T^.DurUnits
+   Else If T^.Codec=MXF_C_DNXHD Then Eubc:=MxfDnxFrameSize(Els,NEl);
+   If Eubc>0 Then Begin
+    N:=TotBytes Div Eubc;
+    GetMem(Au,(N+1)*SizeOf(TMxfAU));
+    For K:=0 To N-1 Do Begin Au^[K].Pos:=Int64(K)*Eubc; Au^[K].Len:=Eubc; End;
+   End Else Begin
+    FreeMem(Els);
+    MxfMsg:='video clip-wrapped sans table d''index : impossible de decouper les images';
+    Exit;
+   End;
+  End Else If MxfSegs^[Ix[0]].Eubc>0 Then Begin
+   Eubc:=MxfSegs^[Ix[0]].Eubc;
+   N:=TotBytes Div Eubc;
+   GetMem(Au,(N+1)*SizeOf(TMxfAU));
+   For K:=0 To N-1 Do Begin Au^[K].Pos:=Int64(K)*Eubc; Au^[K].Len:=Eubc; End;
+  End Else Begin
+   N:=MxfCountSegEntries(Ns,Ix);
+   GetMem(Au,(N+1)*SizeOf(TMxfAU));
+   J:=0;
+   For K:=0 To Ns-1 Do
+    For E:=0 To MxfSegs^[Ix[K]].NEnt-1 Do Begin
+     Au^[J].Pos:=MxfSegs^[Ix[K]].Ent^[E].Off; Inc(J);
+    End;
+   For K:=0 To N-1 Do Begin
+    If K<N-1 Then Au^[K].Len:=Au^[K+1].Pos-Au^[K].Pos Else Au^[K].Len:=TotBytes-Au^[K].Pos;
+    If (Au^[K].Len<=0) Or (Au^[K].Pos+Au^[K].Len>TotBytes) Then Begin N:=K; Break; End;
+   End;
+  End;
+ End Else Begin
+  N:=0;
+  For K:=0 To NEl-1 Do If Not MxfEls^[Els^[K]].Trunc Then Inc(N);
+  GetMem(Au,(N+1)*SizeOf(TMxfAU));
+  J:=0;
+  For K:=0 To NEl-1 Do Begin
+   E:=Els^[K];
+   If MxfEls^[E].Trunc Then Continue;
+   Au^[J].Pos:=MxfEls^[E].Pos; Au^[J].Len:=MxfEls^[E].Len; Inc(J);
+  End;
+ End;
+ If N<=0 Then Begin FreeMem(Els); If Au<>Nil Then FreeMem(Au); MxfMsg:='aucune image video'; Exit; End;
+ GetMem(Pts,N*SizeOf(LongInt)); GetMem(Dts,N*SizeOf(LongInt)); GetMem(Key,N*SizeOf(LongInt));
+ GetMem(Offs,N*SizeOf(LongInt)); GetMem(Sizes,N*SizeOf(LongInt)); GetMem(Disps,N*SizeOf(LongInt));
+ FromIdx:=MxfIndexPts(Tk,Info,N,Pts,Dts,Key);
+ If FromIdx Then
+  For K:=0 To N-1 Do If Pts^[K]<0 Then Pts^[K]:=K;
+ BufCap:=0;
+ For K:=0 To N-1 Do If Au^[K].Len>BufCap Then BufCap:=Au^[K].Len;
+ GetMem(Buf,BufCap+16);
+ Assign(F,VDst);
+ 
+ Rewrite(F,1);
+ If IOResult<>0 Then Begin  MxfMsg:='ecriture impossible : '+VDst; Ok:=False; End Else Ok:=True;
+ 
+ OutPos:=0; Cur:=0; CurBase:=0; GopBase:=0;
+ If Ok Then
+  For K:=0 To N-1 Do Begin
+   If T^.Wrap=MXF_W_CLIP Then Got:=MxfVirtRead(Els,NEl,Cur,CurBase,Au^[K].Pos,Buf,Au^[K].Len)
+   Else Got:=MxfRd(Au^[K].Pos,Buf,Au^[K].Len);
+   If Got<Au^[K].Len Then Begin MxfMsg:='lecture incomplete d''une image'; Ok:=False; Break; End;
+   If OutPos+Got>2147483647 Then Begin MxfMsg:='essence video > 2 Gio : indice LongInt insuffisant'; Ok:=False; Break; End;
+   If Not FromIdx Then Begin
+    MxfSniffAU(T^.Codec,Buf,Got,IsK,HasG,Tr);
+    Key^[K]:=Ord(IsK);
+    If HasG Then GopBase:=K;
+    If (T^.Codec=MXF_C_MPEG2) And (Tr>=0) Then Disp:=GopBase+Tr Else Disp:=K;
+    Disps^[K]:=Disp;
+    Pts^[K]:=Disp;
+   End;
+   
+   BlockWrite(F,Buf^,Got);
+   If IOResult<>0 Then Begin  MxfMsg:='erreur d''ecriture video'; Ok:=False; Break; End;
+   
+   Offs^[K]:=OutPos; Sizes^[K]:=Got; OutPos:=OutPos+Got;
+  End;
+  Close(F); If IOResult<>0 Then ; 
+ If Ok And (Not FromIdx) Then Begin
+  { sans index : DTS = n - retard maximal (equivalent de first_dts = -max(TemporalOffset)) }
+  Delay:=0;
+  If T^.Codec=MXF_C_MPEG2 Then
+   For K:=0 To N-1 Do If K-Pts^[K]>Delay Then Delay:=K-Pts^[K];
+  For K:=0 To N-1 Do Dts^[K]:=K-Delay;
+ End;
+ If Ok Then Ok:=MxfWriteIdx(IdxDst,N,Offs,Sizes,Pts,Dts,Key);
+ If Ok Then Begin
+  T^.Frames:=N;
+  If Info.Truncated Or (T^.DurUnits<=0) Then T^.DurMs:=Int64(N)*1000*T^.EdD Div T^.EdN;
+  Info.DurMs:=T^.DurMs;
+ End;
+ FreeMem(Buf); FreeMem(Pts); FreeMem(Dts); FreeMem(Key); FreeMem(Offs); FreeMem(Sizes); FreeMem(Disps);
+ FreeMem(Au); FreeMem(Els);
+ MxfExtractVideo:=Ok;
+End;
+
+Type
+ TMxfAR = Record
+  Tk: LongInt;             { piste }
+  Els: PMxfLA; NEl: LongInt;
+  Cur: LongInt;            { prochain element }
+  ElOff: Int64;            { decalage deja consomme dans l'element courant }
+  Chans, SrcB, OutB: LongInt;  { canaux, octets/echantillon source, octets/echantillon sortie }
+  Be, Aes3, Alaw: Boolean;
+  Buf: PEABuffer; BufCap, BufLen, BufPos: LongInt;   { trames de sortie converties }
+  Src: PEABuffer; SrcCap: LongInt;
+  Done: Boolean;
+ End;
+
+Const
+ MXF_ALAW_DUMMY = 0;
+
+Function MxfAlaw(A: LongInt): LongInt;
+Var T, Seg: LongInt;
+Begin
+ A:=A Xor $55;
+ T:=(A And $0F) Shl 4;
+ Seg:=(A And $70) Shr 4;
+ Case Seg Of
+  0: T:=T+8;
+  1: T:=T+$108;
+ Else T:=(T+$108) Shl (Seg-1);
+ End;
+ If (A And $80)<>0 Then MxfAlaw:=T Else MxfAlaw:=-T;
+End;
+
+Procedure MxfARInit(Var R: TMxfAR; Var Info: TMxfInfo; Tk: LongInt; Keep: Boolean);
+Var T: ^TMxfTrack;
+Begin
+ FillChar(R,SizeOf(R),0);
+ T:=@Info.Trk[Tk];
+ R.Tk:=Tk; R.Els:=MxfTrackEls(Tk,R.NEl);
+ R.Chans:=T^.Chans; If R.Chans<1 Then R.Chans:=1;
+ R.Be:=(T^.Codec=MXF_C_PCMBE); R.Aes3:=T^.Aes3; R.Alaw:=(T^.Codec=MXF_C_ALAW);
+ R.SrcB:=T^.Bits Div 8; If R.SrcB<1 Then R.SrcB:=2;
+ If R.Alaw Then R.SrcB:=1;
+ If Keep And (Not R.Alaw) Then R.OutB:=R.SrcB Else R.OutB:=2;
+ If R.OutB>R.SrcB Then R.OutB:=R.SrcB;
+ R.BufCap:=1048576*2+65536; GetMem(R.Buf,R.BufCap);
+ R.SrcCap:=1048576+65536; GetMem(R.Src,R.SrcCap);
+End;
+
+Procedure MxfARFree(Var R: TMxfAR);
+Begin
+ If R.Els<>Nil Then FreeMem(R.Els); R.Els:=Nil;
+ If R.Buf<>Nil Then FreeMem(R.Buf); R.Buf:=Nil;
+ If R.Src<>Nil Then FreeMem(R.Src); R.Src:=Nil;
+End;
+
+{ charge et convertit la tranche suivante ; retourne False en fin de piste }
+Function MxfARFill(Var R: TMxfAR): Boolean;
+Var
+ E, Take, Got, Frames, F, C, Sb, O, Si, V, W: LongInt;
+ Rem: Int64;
+ Blk: LongInt;
+Begin
+ MxfARFill:=False;
+ R.BufLen:=0; R.BufPos:=0;
+ While R.Cur<R.NEl Do Begin
+  E:=R.Els^[R.Cur];
+  Rem:=MxfEls^[E].Len-R.ElOff;
+  If R.Aes3 Then Begin
+   { element AES3 complet : 4 octets d'en-tete SMPTE 331M puis groupes de 8 mots de 32 bits }
+   If R.ElOff>0 Then Rem:=0;
+   If (Rem<36) Or (Rem>R.SrcCap) Then Begin Inc(R.Cur); R.ElOff:=0; Continue; End;
+   Take:=Rem;
+  End Else Begin
+   Blk:=R.Chans*R.SrcB;
+   Take:=R.SrcCap-Blk;
+   If Take>Rem Then Take:=Rem;
+   Take:=(Take Div Blk)*Blk;
+   If Take<=0 Then Begin Inc(R.Cur); R.ElOff:=0; Continue; End;
+  End;
+  Got:=MxfRd(MxfEls^[E].Pos+R.ElOff,R.Src,Take);
+  If Got<Take Then Begin
+   If Not R.Aes3 Then Begin Blk:=R.Chans*R.SrcB; Take:=(Got Div Blk)*Blk; End Else Take:=0;
+   If Take<=0 Then Begin R.Cur:=R.NEl; Break; End;
+  End;
+  R.ElOff:=R.ElOff+Take;
+  If R.ElOff>=MxfEls^[E].Len Then Begin Inc(R.Cur); R.ElOff:=0; End;
+  O:=0;
+  If R.Aes3 Then Begin
+   Si:=4;
+   While Si+32<=Take Do Begin
+    For C:=0 To R.Chans-1 Do Begin
+     V:=MxfB32(R.Src,Si+C*4);   { mot 32 bits little endian }
+     V:=(LongInt(R.Src^[Si+C*4+3]) Shl 24) Or (LongInt(R.Src^[Si+C*4+2]) Shl 16) Or (LongInt(R.Src^[Si+C*4+1]) Shl 8) Or R.Src^[Si+C*4];
+     If R.OutB>=3 Then Begin
+      W:=(V Shr 4) And $FFFFFF;
+      R.Buf^[O]:=W And $FF; R.Buf^[O+1]:=(W Shr 8) And $FF; R.Buf^[O+2]:=(W Shr 16) And $FF; Inc(O,3);
+     End Else Begin
+      W:=(V Shr 12) And $FFFF;
+      R.Buf^[O]:=W And $FF; R.Buf^[O+1]:=(W Shr 8) And $FF; Inc(O,2);
+     End;
+    End;
+    Si:=Si+32;
+   End;
+  End Else If R.Alaw Then Begin
+   For Si:=0 To Take-1 Do Begin
+    W:=MxfAlaw(R.Src^[Si]);
+    R.Buf^[O]:=W And $FF; R.Buf^[O+1]:=(W Shr 8) And $FF; Inc(O,2);
+   End;
+  End Else Begin
+   Frames:=Take Div (R.Chans*R.SrcB);
+   Si:=0;
+   For F:=0 To Frames*R.Chans-1 Do Begin
+    Sb:=R.SrcB;
+    If R.Be Then Begin
+     { big endian : octet de poids fort en premier }
+     If R.OutB=Sb Then Begin
+      For V:=0 To Sb-1 Do R.Buf^[O+V]:=R.Src^[Si+Sb-1-V];
+      Inc(O,Sb);
+     End Else Begin
+      R.Buf^[O]:=R.Src^[Si+1]; R.Buf^[O+1]:=R.Src^[Si]; Inc(O,2);
+     End;
+    End Else Begin
+     If R.OutB=Sb Then Begin
+      Move(R.Src^[Si],R.Buf^[O],Sb); Inc(O,Sb);
+     End Else Begin
+      R.Buf^[O]:=R.Src^[Si+Sb-2]; R.Buf^[O+1]:=R.Src^[Si+Sb-1]; Inc(O,2);
+     End;
+    End;
+    Inc(Si,Sb);
+   End;
+  End;
+  R.BufLen:=O;
+  If O>0 Then Begin MxfARFill:=True; Exit; End;
+ End;
+ R.Done:=True;
+End;
+
+Procedure MxfPut32(Var F: File; V: LongInt);
+Var B: Array[0..3] Of Byte;
+Begin
+ B[0]:=V And $FF; B[1]:=(V Shr 8) And $FF; B[2]:=(V Shr 16) And $FF; B[3]:=(V Shr 24) And $FF;
+ BlockWrite(F,B,4);
+End;
+
+Procedure MxfPut16(Var F: File; V: LongInt);
+Var B: Array[0..1] Of Byte;
+Begin
+ B[0]:=V And $FF; B[1]:=(V Shr 8) And $FF;
+ BlockWrite(F,B,2);
+End;
+
+Procedure MxfWavHeader(Var F: File; Chans, Rate, Bytes, DataLen: LongInt);
+Var Tag: Array[0..3] Of Char;
+Begin
+ Tag:='RIFF'; BlockWrite(F,Tag,4);
+ MxfPut32(F,36+DataLen);
+ Tag:='WAVE'; BlockWrite(F,Tag,4);
+ Tag:='fmt '; BlockWrite(F,Tag,4);
+ MxfPut32(F,16); MxfPut16(F,1); MxfPut16(F,Chans); MxfPut32(F,Rate);
+ MxfPut32(F,Rate*Chans*Bytes); MxfPut16(F,Chans*Bytes); MxfPut16(F,Bytes*8);
+ Tag:='data'; BlockWrite(F,Tag,4);
+ MxfPut32(F,DataLen);
+End;
+
+{ extrait les pistes audio selectionnees (liste Sel[0..NSel-1]) vers un WAV (ou un flux brut pour les codecs compresses) }
+Function MxfExtractAudio(Var Info: TMxfInfo; Var Sel: Array Of LongInt; NSel: LongInt; ADst: String): Boolean;
+Var
+ Rd: Array[0..MXF_MAXTRK-1] Of TMxfAR;
+ K, C, TotCh, OutB, Rate, OutFr, Cn, Ln, Sm, Pos, MaxFr: LongInt;
+ F: File;
+ Ok, Any: Boolean;
+ DataLen: Int64;
+ Ob: PEABuffer; ObCap: LongInt;
+ T: ^TMxfTrack;
+ Raw: Boolean;
+ Els: PMxfLA; NEl, E, Got: LongInt; Rb: PEABuffer;
+ Fr: Array[0..MXF_MAXTRK-1] Of LongInt;
+Begin
+ MxfExtractAudio:=False;
+ T:=@Info.Trk[Sel[0]];
+ Raw:=Not ((T^.Codec=MXF_C_PCM) Or (T^.Codec=MXF_C_PCMBE) Or (T^.Codec=MXF_C_ALAW));
+ Assign(F,ADst);
+ 
+ Rewrite(F,1);
+ If IOResult<>0 Then Begin  MxfMsg:='ecriture impossible : '+ADst; Exit; End;
+ 
+ Ok:=True;
+ If Raw Then Begin
+  { flux compresse (AC-3, MP2, AAC...) : concatenation des elements }
+  Els:=MxfTrackEls(Sel[0],NEl);
+  GetMem(Rb,1048576+16);
+  
+  For K:=0 To NEl-1 Do Begin
+   E:=Els^[K]; Pos:=0;
+   While Pos<MxfEls^[E].Len Do Begin
+    Ln:=1048576; If Ln>MxfEls^[E].Len-Pos Then Ln:=MxfEls^[E].Len-Pos;
+    Got:=MxfRd(MxfEls^[E].Pos+Pos,Rb,Ln);
+    If Got<=0 Then Break;
+    BlockWrite(F,Rb^,Got); Pos:=Pos+Got;
+   End;
+  End;
+  Close(F); If IOResult<>0 Then Ok:=False;
+  
+  FreeMem(Rb); If Els<>Nil Then FreeMem(Els);
+  MxfExtractAudio:=Ok;
+  Exit;
+ End;
+ TotCh:=0;
+ For K:=0 To NSel-1 Do Begin
+  MxfARInit(Rd[K],Info,Sel[K],MxfWavKeep);
+  TotCh:=TotCh+Rd[K].Chans;
+ End;
+ OutB:=Rd[0].OutB; Rate:=T^.Rate;
+ For K:=1 To NSel-1 Do If Rd[K].OutB<OutB Then OutB:=Rd[K].OutB;
+ ObCap:=1048576; GetMem(Ob,ObCap+64);
+ 
+ MxfWavHeader(F,TotCh,Rate,OutB,0);
+ 
+ DataLen:=0;
+ Repeat
+  { nombre de trames disponibles dans chaque lecteur }
+  Any:=False; MaxFr:=ObCap Div (TotCh*OutB);
+  For K:=0 To NSel-1 Do Begin
+   If (Rd[K].BufPos>=Rd[K].BufLen) And (Not Rd[K].Done) Then MxfARFill(Rd[K]);
+   If Rd[K].BufPos<Rd[K].BufLen Then Any:=True;
+  End;
+  If Not Any Then Break;
+  { lecteurs avec donnees : trames communes = min ; les lecteurs epuises fournissent du silence }
+  OutFr:=MaxFr;
+  For K:=0 To NSel-1 Do Begin
+   If Rd[K].BufPos<Rd[K].BufLen Then Begin
+    Fr[K]:=(Rd[K].BufLen-Rd[K].BufPos) Div (Rd[K].Chans*Rd[K].OutB);
+    If Fr[K]<OutFr Then OutFr:=Fr[K];
+   End Else Fr[K]:=0;
+  End;
+  If OutFr<=0 Then Break;
+  Pos:=0;
+  For Sm:=0 To OutFr-1 Do
+   For K:=0 To NSel-1 Do Begin
+    Cn:=Rd[K].Chans*Rd[K].OutB;
+    If Fr[K]>0 Then Begin
+     If Rd[K].OutB=OutB Then Begin
+      Move(Rd[K].Buf^[Rd[K].BufPos+Sm*Cn],Ob^[Pos],Cn); Pos:=Pos+Cn;
+     End Else Begin
+      { profondeurs differentes : on ramene a la plus petite (octets de poids fort) }
+      For C:=0 To Rd[K].Chans-1 Do Begin
+       Move(Rd[K].Buf^[Rd[K].BufPos+Sm*Cn+C*Rd[K].OutB+(Rd[K].OutB-OutB)],Ob^[Pos],OutB); Pos:=Pos+OutB;
+      End;
+     End;
+    End Else Begin
+     FillChar(Ob^[Pos],Rd[K].Chans*OutB,0); Pos:=Pos+Rd[K].Chans*OutB;
+    End;
+   End;
+  For K:=0 To NSel-1 Do If Fr[K]>0 Then Rd[K].BufPos:=Rd[K].BufPos+OutFr*Rd[K].Chans*Rd[K].OutB;
+  
+  BlockWrite(F,Ob^,Pos);
+  If IOResult<>0 Then Begin  MxfMsg:='erreur d''ecriture audio'; Ok:=False; Break; End;
+  
+  DataLen:=DataLen+Pos;
+ Until False;
+ If Ok Then Begin
+  
+  If DataLen>2147483000 Then DataLen:=2147483000;
+  Seek(F,0);
+  MxfWavHeader(F,TotCh,Rate,OutB,DataLen);
+  Close(F);
+  If IOResult<>0 Then Ok:=False;
+  
+ End Else Begin
+   Close(F); If IOResult<>0 Then ; 
+ End;
+ For K:=0 To NSel-1 Do MxfARFree(Rd[K]);
+ FreeMem(Ob);
+ MxfExtractAudio:=Ok;
+End;
+
+{ ---------------------------------------------------------------------------------------------
+  MxfExtract : demultiplexe un fichier MXF.
+   VDst   : fichier d'essence video brute ('' = pas de video)
+   ADst   : fichier audio (WAV PCM 16 bits entrelace ; '' = pas d'audio)
+   IdxDst : index des unites d'acces video ('' = pas d'index) - enregistrements de 5 LongInt little-endian :
+            Offset (dans VDst), Taille, PTS, DTS (en unites d'image = 1/cadence), Cle (1/0)
+   VSel   : piste video (1 = premiere, 0 = premiere aussi, <0 = aucune)
+   ASel   : piste audio (>=1 numero parmi les pistes audio ; 0 = premiere, avec MxfMerge fusion des pistes de meme format)
+  --------------------------------------------------------------------------------------------- }
+Function MxfExtract(Path, VDst, ADst, IdxDst: String; VSel, ASel: LongInt; Var Info: TMxfInfo): Boolean;
+Var
+ K, Nv, Na, Tk, NSel: LongInt;
+ Sel: Array[0..MXF_MAXTRK-1] Of LongInt;
+ Ok: Boolean;
+ First: LongInt;
+Begin
+ MxfExtract:=False;
+ If Not MxfOpenAll(Path,Info) Then Exit;
+ Ok:=True;
+ If (VDst<>'') And (VSel>=0) Then Begin
+  Tk:=-1; Nv:=0;
+  For K:=0 To Info.NTrk-1 Do
+   If Info.Trk[K].Kind=MXF_K_VIDEO Then Begin
+    Inc(Nv);
+    If (Nv=VSel) Or ((VSel=0) And (Nv=1)) Then Begin Tk:=K; Break; End;
+   End;
+  If Tk<0 Then Begin MxfMsg:='piste video absente'; Ok:=False; End
+  Else Ok:=MxfExtractVideo(Info,Tk,VDst,IdxDst);
+ End;
+ If Ok And (ADst<>'') And (ASel>=0) Then Begin
+  Na:=0; NSel:=0; First:=-1;
+  For K:=0 To Info.NTrk-1 Do
+   If Info.Trk[K].Kind=MXF_K_AUDIO Then Begin
+    Inc(Na);
+    If ASel>=1 Then Begin
+     If Na=ASel Then Begin Sel[0]:=K; NSel:=1; End;
+    End Else Begin
+     If First<0 Then Begin First:=K; Sel[0]:=K; NSel:=1; End
+     Else If MxfMerge And (Info.Trk[K].Rate=Info.Trk[First].Rate) And (Info.Trk[K].Codec=Info.Trk[First].Codec)
+          And (Info.Trk[K].Bits=Info.Trk[First].Bits) And (NSel<MXF_MAXTRK) Then Begin Sel[NSel]:=K; Inc(NSel); End;
+    End;
+   End;
+  If NSel=0 Then Begin MxfMsg:='piste audio absente'; Ok:=False; End
+  Else Ok:=MxfExtractAudio(Info,Sel,NSel,ADst);
+ End;
+ If MxfElMap<>Nil Then FreeMem(MxfElMap);
+ MxfElMap:=Nil;
+ MxfFreeAll;
+ MxfExtract:=Ok;
+End;
+
+{ ======================================================================================================
+  MULTIPLEXEUR MXF OP1a (port de FFmpeg mxfenc.c, mode 'mxf')
+  ====================================================================================================== }
+Type
+ TMxfMuxCfg = Record
+  Codec: LongInt;            { MXF_C_MPEG2, MXF_C_H264, MXF_C_DNXHD, MXF_C_PRORES, MXF_C_MJPEG (mapping prive) }
+  W, H: LongInt;             { dimensions affichees }
+  FpsN, FpsD: LongInt;       { cadence (25/1, 30000/1001 ...) }
+  AspN, AspD: LongInt;       { rapport d'aspect d'affichage (0 = W:H ; 16:9 pour DNxHD <1270 comme ffmpeg) }
+  Interlaced: LongInt;       { 0 progressif, 1 TFF, 2 BFF (MPEG-2 : detecte dans le flux) }
+  BitRate: LongInt;          { debit video indicatif (descripteur MPEG-2) }
+  Annexb: Boolean;           { H.264 : paquets deja en Annex B (sinon AVCC avec longueurs sur 4 octets) }
+  Extra: PEABuffer;          { H.264 AVCC : enregistrement avcC (pour SPS/PPS) ; nil si Annexb }
+  ExtraLen: LongInt;
+  Profile: LongInt;          { ProRes : 0 proxy 1 LT 2 standard 3 HQ 4 4444 5 XQ (-1 auto) }
+  Cbr: LongInt;              { 1 = index CBR (EditUnitByteCount) : toutes les images ont la meme taille (DNxHD : defaut) ; 0 = VBR ; -1 auto }
+  AChans, ARate, ABits: LongInt;  { audio PCM LE entrelace ; AChans=0 : pas d'audio. ARate=48000 uniquement (comme ffmpeg) }
+  AMode: LongInt;            { MXF_A_BWF (SMPTE 382M, par defaut) ou MXF_A_AES3 (comme ffmpeg -f mxf) }
+  TcStart: LongInt;          { timecode de depart en images }
+  TcDrop: Boolean;
+  ColorRange: LongInt;       { 0 auto (limite pour DNxHD/ProRes, sinon non precise), 1 non precise, 2 limite (16-235), 3 pleine }
+  Bt709: Boolean;            { ecrit les etiquettes primaires/transfert/matrice BT.709 }
+  Bitexact: Boolean;         { identifiants/horodatage constants (comme -fflags +bitexact de ffmpeg) }
+  Company, Product: String[40];
+ End;
+
+ TMxfEu = Record
+  Off: Int64;           { decalage dans le conteneur d'essence }
+  Slice: LongInt;       { decalage de l'element audio }
+  Tref: LongInt;        { temps de reference MPEG-2 }
+  Flags: LongInt;
+  Disp: LongInt;        { position d'affichage }
+  Size: LongInt;
+ End;
+ TMxfEuA = Array[0..0] Of TMxfEu;
+ PMxfEuA = ^TMxfEuA;
+
+ TMxfMB = Record
+  P: PEABuffer; N, Cap: LongInt;
+ End;
+ PMxfMB = ^TMxfMB;
+
+Const
+ MXF_KAG = 512;
+
+Var
+ MxfCfg: TMxfMuxCfg;
+ MxfWf: File;
+ MxfWOpen: Boolean;
+ MxfWPos: Int64;
+ MxfWOut: PEABuffer; MxfWOutN: LongInt;
+ MxfMetaMB, MxfSetMB, MxfTmpMB: TMxfMB;
+ MxfCur, MxfSetRet: PMxfMB;
+ MxfBase: Int64;           { position fichier du debut du tampon en construction }
+
+{ ---- tampon memoire ---- }
+Procedure MxfMbInit(Var B: TMxfMB);
+Begin B.P:=Nil; B.N:=0; B.Cap:=0; End;
+
+Procedure MxfMbFree(Var B: TMxfMB);
+Begin If B.P<>Nil Then FreeMem(B.P); B.P:=Nil; B.N:=0; B.Cap:=0; End;
+
+Procedure MxfMbNeed(Var B: TMxfMB; Extra: LongInt);
+Begin
+ If B.N+Extra>B.Cap Then Begin
+  B.Cap:=(B.N+Extra)*2+4096;
+  ReallocMem(B.P,B.Cap);
+ End;
+End;
+
+Procedure MxfP8(V: LongInt);
+Begin MxfMbNeed(MxfCur^,1); MxfCur^.P^[MxfCur^.N]:=V And $FF; Inc(MxfCur^.N); End;
+Procedure MxfP16(V: LongInt);
+Begin MxfP8(V Shr 8); MxfP8(V); End;
+Procedure MxfP24(V: LongInt);
+Begin MxfP8(V Shr 16); MxfP8(V Shr 8); MxfP8(V); End;
+Procedure MxfP32(V: LongInt);
+Begin MxfP8(V Shr 24); MxfP8(V Shr 16); MxfP8(V Shr 8); MxfP8(V); End;
+Procedure MxfP64(V: Int64);
+Begin MxfP32(V Shr 32); MxfP32(V And $FFFFFFFF); End;
+Procedure MxfPN(Const D; N: LongInt);
+Begin
+ If N<=0 Then Exit;
+ MxfMbNeed(MxfCur^,N);
+ Move(D,MxfCur^.P^[MxfCur^.N],N); Inc(MxfCur^.N,N);
+End;
+Procedure MxfPFill(V, N: LongInt);
+Begin
+ If N<=0 Then Exit;
+ MxfMbNeed(MxfCur^,N);
+ FillChar(MxfCur^.P^[MxfCur^.N],N,V); Inc(MxfCur^.N,N);
+End;
+Procedure MxfPUl(Const U: Array Of Byte);
+Begin MxfPN(U[0],16); End;
+
+{ ---- sortie fichier avec tampon ---- }
+Function MxfWFlush: Boolean;
+Begin
+ MxfWFlush:=True;
+ If MxfWOutN>0 Then Begin
+  
+  BlockWrite(MxfWf,MxfWOut^,MxfWOutN);
+  If IOResult<>0 Then Begin MxfMsg:='erreur d''ecriture du fichier MXF'; MxfWFlush:=False; End;
+  
+  MxfWOutN:=0;
+ End;
+End;
+
+Function MxfWPut(P: Pointer; N: LongInt): Boolean;
+Begin
+ MxfWPut:=True;
+ If N<=0 Then Exit;
+ If N>=262144 Then Begin
+  If Not MxfWFlush Then Begin MxfWPut:=False; Exit; End;
+  
+  BlockWrite(MxfWf,P^,N);
+  If IOResult<>0 Then Begin MxfMsg:='erreur d''ecriture du fichier MXF'; MxfWPut:=False; End;
+  
+ End Else Begin
+  If MxfWOutN+N>1048576 Then If Not MxfWFlush Then Begin MxfWPut:=False; Exit; End;
+  Move(P^,MxfWOut^[MxfWOutN],N); Inc(MxfWOutN,N);
+ End;
+ MxfWPos:=MxfWPos+N;
+End;
+
+Function MxfWSeek(Pos: Int64): Boolean;
+Begin
+ MxfWSeek:=MxfWFlush;
+ 
+ Seek(MxfWf,Pos);
+ If IOResult<>0 Then Begin MxfMsg:='seek impossible'; MxfWSeek:=False; End;
+ 
+ MxfWPos:=Pos;
+End;
+
+Function MxfFillSize(Pos: Int64): LongInt;
+Var Pad: LongInt;
+Begin
+ Pad:=MXF_KAG-LongInt(Pos And (MXF_KAG-1));
+ If Pad<20 Then MxfFillSize:=Pad+MXF_KAG Else MxfFillSize:=Pad And (MXF_KAG-1);
+End;
+
+Const
+ MxfKeyFill: Array[0..15] Of Byte = ($06,$0E,$2B,$34,$01,$01,$01,$02,$03,$01,$02,$10,$01,$00,$00,$00);
+
+{ longueur BER minimale (klv_encode_ber_length) }
+Procedure MxfPBer(Len: Int64);
+Var Sz, K: LongInt;
+Begin
+ If Len<128 Then Begin MxfP8(Len); Exit; End;
+ Sz:=1;
+ While (Sz<8) And ((Len Shr (Sz*8))<>0) Do Inc(Sz);
+ MxfP8($80+Sz);
+ For K:=Sz-1 Downto 0 Do MxfP8(Len Shr (K*8));
+End;
+
+Procedure MxfPBer4(Len: LongInt);
+Begin MxfP8($83); MxfP24(Len); End;
+
+{ ecrit un bloc de remplissage KLV pour atteindre l'alignement KAG, d'apres la position fichier courante }
+Procedure MxfPKlvFill;
+Var Pad: LongInt;
+Begin
+ Pad:=MxfFillSize(MxfBase+MxfCur^.N);
+ If Pad>0 Then Begin
+  MxfPUl(MxfKeyFill);
+  Dec(Pad,20);
+  MxfPBer4(Pad);
+  MxfPFill(0,Pad);
+ End;
+End;
+
+{ ---- identifiants ---- }
+Var
+ MxfUuidBase: Array[0..9] Of Byte;
+ MxfUmid: Array[0..14] Of Byte;
+ MxfInstNo: LongInt;
+ MxfTimestamp: Int64;
+ MxfRandSeed2: LongInt;
+
+Const
+ MXF_T_MAT = 1; MXF_T_SRC = 2; MXF_T_CLIP = 3; MXF_T_TC = 4; MXF_T_PULL = 5; MXF_T_SEQ = 6; MXF_T_MDESC = 7;
+ MXF_T_DESC = 8; MXF_T_TRK = 9; MXF_T_PREF = 11; MXF_T_IDENT = 12; MXF_T_CSTOR = 13; MXF_T_SUBD = 14;
+ MXF_T_INDEX = 15; MXF_T_ECD = 16; MXF_T_AVCSUB = 20;
+
+Procedure MxfPUuid(Typ, Val: LongInt);
+Begin
+ MxfPN(MxfUuidBase,10); MxfP16(Typ); MxfP32(Val);
+End;
+
+Const
+ MxfUmidUl: Array[0..12] Of Byte = ($06,$0A,$2B,$34,$01,$01,$01,$05,$01,$01,$0D,$00,$13);
+
+Procedure MxfPUmid(Typ: LongInt);
+Begin
+ MxfPN(MxfUmidUl,13); MxfP24(MxfInstNo); MxfPN(MxfUmid,15); MxfP8(Typ);
+End;
+
+{ ---- ensembles de metadonnees ---- }
+Procedure MxfSetBegin(Const Key: Array Of Byte);
+Begin
+ MxfSetMB.N:=0;
+ MxfSetRet:=MxfCur;
+ MxfCur:=@MxfSetMB;
+ MxfTmpMB.N:=0;
+ MxfMbNeed(MxfTmpMB,16);
+ Move(Key[0],MxfTmpMB.P^[0],16); MxfTmpMB.N:=16;
+End;
+
+Procedure MxfSetEnd(Ber4: Boolean);
+Begin
+ MxfCur:=MxfSetRet;
+ MxfPN(MxfTmpMB.P^[0],16);
+ If Ber4 Then MxfPBer4(MxfSetMB.N) Else MxfPBer(MxfSetMB.N);
+ MxfPN(MxfSetMB.P^[0],MxfSetMB.N);
+End;
+
+Procedure MxfPTag(Tag, Size: LongInt);
+Begin MxfP16(Tag); MxfP16(Size); End;
+
+Procedure MxfPKey13(Val: LongInt);
+Const Pre: Array[0..12] Of Byte = ($06,$0E,$2B,$34,$02,$53,$01,$01,$0D,$01,$01,$01,$01);
+Var K: LongInt;
+Begin
+ MxfSetMB.N:=0;
+ MxfSetRet:=MxfCur;
+ MxfCur:=@MxfSetMB;
+ MxfTmpMB.N:=0;
+ MxfMbNeed(MxfTmpMB,16);
+ For K:=0 To 12 Do MxfTmpMB.P^[K]:=Pre[K];
+ MxfTmpMB.P^[13]:=(Val Shr 16) And $FF; MxfTmpMB.P^[14]:=(Val Shr 8) And $FF; MxfTmpMB.P^[15]:=Val And $FF;
+ MxfTmpMB.N:=16;
+End;
+
+Function MxfUtf16Len(Const S: String): LongInt;   { nombre de caracteres UTF-16 + 1 (comme mxf_utf16len) }
+Begin MxfUtf16Len:=Length(S)+1; End;
+
+Procedure MxfPTagUtf16(Tag: LongInt; Const S: String);
+Var K: LongInt;
+Begin
+ MxfPTag(Tag,(Length(S)+1)*2);
+ For K:=1 To Length(S) Do Begin MxfP8(0); MxfP8(Ord(S[K])); End;
+ MxfP16(0);
+End;
+
+Function MxfUtf16TagLen(Const S: String): LongInt;
+Begin
+ If S='' Then MxfUtf16TagLen:=0 Else MxfUtf16TagLen:=4+(Length(S)+1)*2;
+End;
+{ batch de tags locaux (mxfenc.c) : 2 octets tag + 16 octets UL }
+Const
+ MXF_NTAGS = 114;
+ MxfTagTab: Array[0..2051] Of Byte = (
+  60,10,6,14,43,52,1,1,1,1,1,1,21,2,0,0,0,0,
+  59,2,6,14,43,52,1,1,1,2,7,2,1,16,2,4,0,0,
+  59,5,6,14,43,52,1,1,1,2,3,1,2,1,5,0,0,0,
+  59,7,6,14,43,52,1,1,1,2,3,1,2,1,4,0,0,0,
+  59,6,6,14,43,52,1,1,1,2,6,1,1,4,6,4,0,0,
+  59,3,6,14,43,52,1,1,1,2,6,1,1,4,2,1,0,0,
+  59,9,6,14,43,52,1,1,1,5,1,2,2,3,0,0,0,0,
+  59,10,6,14,43,52,1,1,1,5,1,2,2,16,2,1,0,0,
+  59,11,6,14,43,52,1,1,1,5,1,2,2,16,2,2,0,0,
+  60,9,6,14,43,52,1,1,1,2,5,32,7,1,1,0,0,0,
+  60,1,6,14,43,52,1,1,1,2,5,32,7,1,2,1,0,0,
+  60,2,6,14,43,52,1,1,1,2,5,32,7,1,3,1,0,0,
+  60,3,6,14,43,52,1,1,1,2,5,32,7,1,4,0,0,0,
+  60,4,6,14,43,52,1,1,1,2,5,32,7,1,5,1,0,0,
+  60,5,6,14,43,52,1,1,1,2,5,32,7,1,7,0,0,0,
+  60,6,6,14,43,52,1,1,1,2,7,2,1,16,2,3,0,0,
+  60,7,6,14,43,52,1,1,1,2,5,32,7,1,10,0,0,0,
+  60,8,6,14,43,52,1,1,1,2,5,32,7,1,6,1,0,0,
+  25,1,6,14,43,52,1,1,1,2,6,1,1,4,5,1,0,0,
+  25,2,6,14,43,52,1,1,1,2,6,1,1,4,5,2,0,0,
+  39,1,6,14,43,52,1,1,1,2,6,1,1,6,1,0,0,0,
+  63,7,6,14,43,52,1,1,1,4,1,3,4,4,0,0,0,0,
+  68,1,6,14,43,52,1,1,1,1,1,1,21,16,0,0,0,0,
+  68,5,6,14,43,52,1,1,1,2,7,2,1,16,1,3,0,0,
+  68,4,6,14,43,52,1,1,1,2,7,2,1,16,2,5,0,0,
+  68,2,6,14,43,52,1,1,1,1,1,3,3,2,1,0,0,0,
+  68,3,6,14,43,52,1,1,1,2,6,1,1,4,6,5,0,0,
+  71,1,6,14,43,52,1,1,1,2,6,1,1,4,2,3,0,0,
+  72,1,6,14,43,52,1,1,1,2,1,7,1,1,0,0,0,0,
+  72,4,6,14,43,52,1,1,1,2,1,4,1,3,0,0,0,0,
+  75,1,6,14,43,52,1,1,1,2,5,48,4,5,0,0,0,0,
+  75,2,6,14,43,52,1,1,1,2,7,2,1,3,1,3,0,0,
+  72,3,6,14,43,52,1,1,1,2,6,1,1,4,2,4,0,0,
+  2,1,6,14,43,52,1,1,1,2,4,7,1,0,0,0,0,0,
+  2,2,6,14,43,52,1,1,1,2,7,2,2,1,1,3,0,0,
+  16,1,6,14,43,52,1,1,1,2,6,1,1,4,6,9,0,0,
+  18,1,6,14,43,52,1,1,1,2,7,2,1,3,1,4,0,0,
+  17,1,6,14,43,52,1,1,1,2,6,1,1,3,1,0,0,0,
+  17,2,6,14,43,52,1,1,1,2,6,1,1,3,2,0,0,0,
+  21,1,6,14,43,52,1,1,1,2,7,2,1,3,1,5,0,0,
+  21,2,6,14,43,52,1,1,1,2,4,4,1,1,2,6,0,0,
+  21,3,6,14,43,52,1,1,1,1,4,4,1,1,5,0,0,0,
+  63,1,6,14,43,52,1,1,1,4,6,1,1,4,6,11,0,0,
+  48,6,6,14,43,52,1,1,1,5,6,1,1,3,5,0,0,0,
+  48,1,6,14,43,52,1,1,1,1,4,6,1,1,0,0,0,0,
+  48,2,6,14,43,52,1,1,1,1,4,6,1,2,0,0,0,0,
+  48,4,6,14,43,52,1,1,1,2,6,1,1,4,1,2,0,0,
+  50,12,6,14,43,52,1,1,1,1,4,1,3,1,4,0,0,0,
+  50,13,6,14,43,52,1,1,1,2,4,1,3,2,5,0,0,0,
+  50,3,6,14,43,52,1,1,1,1,4,1,5,2,2,0,0,0,
+  50,2,6,14,43,52,1,1,1,1,4,1,5,2,1,0,0,0,
+  50,22,6,14,43,52,1,1,1,5,4,1,3,2,8,0,0,0,
+  50,5,6,14,43,52,1,1,1,1,4,1,5,1,8,0,0,0,
+  50,4,6,14,43,52,1,1,1,1,4,1,5,1,7,0,0,0,
+  50,6,6,14,43,52,1,1,1,1,4,1,5,1,9,0,0,0,
+  50,7,6,14,43,52,1,1,1,1,4,1,5,1,10,0,0,0,
+  50,9,6,14,43,52,1,1,1,1,4,1,5,1,12,0,0,0,
+  50,8,6,14,43,52,1,1,1,1,4,1,5,1,11,0,0,0,
+  50,10,6,14,43,52,1,1,1,1,4,1,5,1,13,0,0,0,
+  50,11,6,14,43,52,1,1,1,1,4,1,5,1,14,0,0,0,
+  50,23,6,14,43,52,1,1,1,5,4,1,3,2,7,0,0,0,
+  50,14,6,14,43,52,1,1,1,1,4,1,1,1,1,0,0,0,
+  50,16,6,14,43,52,1,1,1,2,4,1,2,1,1,1,2,0,
+  50,26,6,14,43,52,1,1,1,2,4,1,2,1,1,3,1,0,
+  50,25,6,14,43,52,1,1,1,9,4,1,2,1,1,6,1,0,
+  50,19,6,14,43,52,1,1,1,2,4,24,1,2,0,0,0,0,
+  50,20,6,14,43,52,1,1,1,2,4,24,1,3,0,0,0,0,
+  50,1,6,14,43,52,1,1,1,2,4,1,6,1,0,0,0,0,
+  50,18,6,14,43,52,1,1,1,2,4,1,3,1,6,0,0,0,
+  50,21,6,14,43,52,1,1,1,5,4,5,1,19,0,0,0,0,
+  51,1,6,14,43,52,1,1,1,2,4,1,5,3,10,0,0,0,
+  51,2,6,14,43,52,1,1,1,1,4,1,5,1,5,0,0,0,
+  51,8,6,14,43,52,1,1,1,2,4,1,5,1,16,0,0,0,
+  51,3,6,14,43,52,1,1,1,1,4,1,5,1,6,0,0,0,
+  51,7,6,14,43,52,1,1,1,2,4,24,1,4,0,0,0,0,
+  51,4,6,14,43,52,1,1,1,1,4,1,5,3,3,0,0,0,
+  51,5,6,14,43,52,1,1,1,1,4,1,5,3,4,0,0,0,
+  51,6,6,14,43,52,1,1,1,2,4,1,5,3,5,0,0,0,
+  61,2,6,14,43,52,1,1,1,4,4,2,3,1,4,0,0,0,
+  61,3,6,14,43,52,1,1,1,5,4,2,3,1,1,1,0,0,
+  61,4,6,14,43,52,1,1,1,1,4,2,1,1,3,0,0,0,
+  61,7,6,14,43,52,1,1,1,5,4,2,1,1,4,0,0,0,
+  61,1,6,14,43,52,1,1,1,4,4,2,3,3,4,0,0,0,
+  61,6,6,14,43,52,1,1,1,2,4,2,4,2,0,0,0,0,
+  63,11,6,14,43,52,1,1,1,5,5,48,4,6,0,0,0,0,
+  63,12,6,14,43,52,1,1,1,5,7,2,1,3,1,10,0,0,
+  63,13,6,14,43,52,1,1,1,5,7,2,2,1,1,2,0,0,
+  63,5,6,14,43,52,1,1,1,4,4,6,2,1,0,0,0,0,
+  63,6,6,14,43,52,1,1,1,4,1,3,4,5,0,0,0,0,
+  63,8,6,14,43,52,1,1,1,4,4,4,4,1,1,0,0,0,
+  63,9,6,14,43,52,1,1,1,5,4,4,4,1,6,0,0,0,
+  63,10,6,14,43,52,1,1,1,5,4,4,4,2,5,0,0,0,
+  128,0,6,14,43,52,1,1,1,5,4,1,6,2,1,11,0,0,
+  128,3,6,14,43,52,1,1,1,5,4,1,6,2,1,5,0,0,
+  128,4,6,14,43,52,1,1,1,5,4,1,6,2,1,6,0,0,
+  128,6,6,14,43,52,1,1,1,5,4,1,6,2,1,8,0,0,
+  128,7,6,14,43,52,1,1,1,5,4,1,6,2,1,10,0,0,
+  128,8,6,14,43,52,1,1,1,5,4,1,6,2,1,9,0,0,
+  61,9,6,14,43,52,1,1,1,5,4,2,3,3,5,0,0,0,
+  61,10,6,14,43,52,1,1,1,5,4,2,3,2,1,0,0,0,
+  68,6,6,14,43,52,1,1,1,2,3,2,1,2,12,0,0,0,
+  80,1,6,14,43,52,1,1,1,2,3,2,1,2,9,1,0,0,
+  80,3,6,14,43,52,1,1,1,2,3,2,1,2,10,1,0,0,
+  129,0,6,14,43,52,1,1,1,9,6,1,1,4,6,16,0,0,
+  130,0,6,14,43,52,1,1,1,14,4,1,6,6,1,14,0,0,
+  130,1,6,14,43,52,1,1,1,14,4,1,6,6,1,10,0,0,
+  130,2,6,14,43,52,1,1,1,14,4,1,6,6,1,13,0,0,
+  131,1,6,14,43,52,1,1,1,14,4,32,4,1,1,1,0,0,
+  131,2,6,14,43,52,1,1,1,14,4,32,4,1,1,2,0,0,
+  131,3,6,14,43,52,1,1,1,14,4,32,4,1,1,3,0,0,
+  131,4,6,14,43,52,1,1,1,14,4,32,4,1,1,4,0,0,
+  223,217,6,14,43,52,1,1,1,14,4,1,6,12,6,0,0,0,
+  223,218,6,14,43,52,1,1,1,14,4,1,6,12,5,0,0,0,
+  223,219,6,14,43,52,1,1,1,14,4,1,6,12,1,0,0,0);
+{ ordre : 3C0A 3B02 3B05 3B07 3B06 3B03 3B09 3B0A 3B0B 3C09 3C01 3C02 3C03 3C04 3C05 3C06 3C07 3C08 1901 1902 2701 3F07 4401 4405 4404 4402 4403 4701 4801 4804 4B01 4B02 4803 0201 0202 1001 1201 1101 1102 1501 1502 1503 3F01 3006 3001 3002 3004 320C 320D 3203 3202 3216 3205 3204 3206 3207 3209 3208 320A 320B 3217 320E 3210 321A 3219 3213 3214 3201 3212 3215 3301 3302 3308 3303 3307 3304 3305 3306 3D02 3D03 3D04 3D07 3D01 3D06 3F0B 3F0C 3F0D 3F05 3F06 3F08 3F09 3F0A 8000 8003 8004 8006 8007 8008 3D09 3D0A 4406 5001 5003 8100 8200 8201 8202 8301 8302 8303 8304 DFD9 DFDA DFDB }
+
+Type
+ TMxfSC = Record
+  Cu, El, Co: TMxfUid;        { UL conteneur, cle d'element, UL de codage }
+  Interlaced, FieldDom, CompDepth, ColorSiting, SignalStd, HSub, VSub: LongInt;
+  TempReord: LongInt;
+  AspN, AspD: LongInt;
+  ClosedGop, SeqClosedGop, MaxGop, BCount, LowDelay, FrameSize, SliceOff, VBitRate, Profile, Level: LongInt;
+  CodecId, Cid: LongInt;
+ End;
+
+Var
+ MxfScV, MxfScA: TMxfSC;
+ MxfHasAudio: Boolean;
+ MxfNS: LongInt;               { nombre de flux (1 ou 2) }
+ MxfEcCount: LongInt;          { conteneurs d'essence distincts }
+ MxfDuration: Int64;           { -1 tant que non finalise }
+ MxfTcBase: LongInt;
+ MxfTrackInst: LongInt;
+ MxfEubc: LongInt;             { EditUnitByteCount (CBR) ou 0 }
+ MxfHdrWritten: Boolean;
+ MxfFooterOfs: Int64;
+ MxfWAudioBlk: LongInt;
+
+Const
+ MxfOp1aUl: Array[0..15] Of Byte = ($06,$0E,$2B,$34,$04,$01,$01,$01,$0D,$01,$02,$01,$01,$01,$09,$00);
+ MxfMultiDescUl: Array[0..15] Of Byte = ($06,$0E,$2B,$34,$04,$01,$01,$03,$0D,$01,$03,$01,$02,$7F,$01,$00);
+ MxfKeyHdrOpen: Array[0..15] Of Byte = ($06,$0E,$2B,$34,$02,$05,$01,$01,$0D,$01,$02,$01,$01,$02,$01,$00);
+ MxfKeyHdrClosed: Array[0..15] Of Byte = ($06,$0E,$2B,$34,$02,$05,$01,$01,$0D,$01,$02,$01,$01,$02,$04,$00);
+ MxfKeyBody: Array[0..15] Of Byte = ($06,$0E,$2B,$34,$02,$05,$01,$01,$0D,$01,$02,$01,$01,$03,$04,$00);
+ MxfKeyFooter: Array[0..15] Of Byte = ($06,$0E,$2B,$34,$02,$05,$01,$01,$0D,$01,$02,$01,$01,$04,$04,$00);
+ MxfKeyPrimer: Array[0..15] Of Byte = ($06,$0E,$2B,$34,$02,$05,$01,$01,$0D,$01,$02,$01,$01,$05,$01,$00);
+ MxfKeyIndex: Array[0..15] Of Byte = ($06,$0E,$2B,$34,$02,$53,$01,$01,$0D,$01,$02,$01,$01,$10,$01,$00);
+ MxfKeyRip: Array[0..15] Of Byte = ($06,$0E,$2B,$34,$02,$05,$01,$01,$0D,$01,$02,$01,$01,$11,$01,$00);
+ MxfDdTc: Array[0..15] Of Byte = ($06,$0E,$2B,$34,$04,$01,$01,$01,$01,$03,$02,$01,$01,$00,$00,$00);
+ MxfDdVideo: Array[0..15] Of Byte = ($06,$0E,$2B,$34,$04,$01,$01,$01,$01,$03,$02,$02,$01,$00,$00,$00);
+ MxfDdAudio: Array[0..15] Of Byte = ($06,$0E,$2B,$34,$04,$01,$01,$01,$01,$03,$02,$02,$02,$00,$00,$00);
+ MxfProductUid: Array[0..15] Of Byte = ($AD,$AB,$44,$24,$2F,$25,$4D,$C7,$92,$FF,$29,$BD,$00,$0C,$00,$02);
+
+ MxfUl709Pri: Array[0..15] Of Byte = ($06,$0E,$2B,$34,$04,$01,$01,$06,$04,$01,$01,$01,$03,$03,$00,$00);
+ MxfUl709Trc: Array[0..15] Of Byte = ($06,$0E,$2B,$34,$04,$01,$01,$01,$04,$01,$01,$01,$01,$02,$00,$00);
+ MxfUl709Mat: Array[0..15] Of Byte = ($06,$0E,$2B,$34,$04,$01,$01,$01,$04,$01,$01,$01,$02,$02,$00,$00);
+
+ { descripteurs (cles) }
+ MxfKeyMpegDesc: Array[0..15] Of Byte = ($06,$0E,$2B,$34,$02,$53,$01,$01,$0D,$01,$01,$01,$01,$01,$51,$00);
+ MxfKeyWavDesc: Array[0..15] Of Byte = ($06,$0E,$2B,$34,$02,$53,$01,$01,$0D,$01,$01,$01,$01,$01,$48,$00);
+ MxfKeyAesDesc: Array[0..15] Of Byte = ($06,$0E,$2B,$34,$02,$53,$01,$01,$0D,$01,$01,$01,$01,$01,$47,$00);
+ MxfKeyCdciDesc: Array[0..15] Of Byte = ($06,$0E,$2B,$34,$02,$53,$01,$01,$0D,$01,$01,$01,$01,$01,$28,$00);
+ MxfKeyAvcSub: Array[0..15] Of Byte = ($06,$0E,$2B,$34,$02,$53,$01,$01,$0D,$01,$01,$01,$01,$01,$6E,$00);
+
+ { couples (conteneur, element, codage par defaut) }
+ MxfEcMpeg2: Array[0..47] Of Byte = (
+  $06,$0E,$2B,$34,$04,$01,$01,$02,$0D,$01,$03,$01,$02,$04,$60,$01,
+  $06,$0E,$2B,$34,$01,$02,$01,$01,$0D,$01,$03,$01,$15,$01,$05,$00,
+  $06,$0E,$2B,$34,$04,$01,$01,$03,$04,$01,$02,$02,$01,$00,$00,$00);
+ MxfEcH264: Array[0..47] Of Byte = (
+  $06,$0E,$2B,$34,$04,$01,$01,$0A,$0D,$01,$03,$01,$02,$10,$60,$01,
+  $06,$0E,$2B,$34,$01,$02,$01,$01,$0D,$01,$03,$01,$15,$01,$05,$00,
+  $06,$0E,$2B,$34,$04,$01,$01,$0A,$04,$01,$02,$02,$01,$00,$00,$00);
+ MxfEcDnx: Array[0..47] Of Byte = (
+  $06,$0E,$2B,$34,$04,$01,$01,$0A,$0D,$01,$03,$01,$02,$11,$01,$00,
+  $06,$0E,$2B,$34,$01,$02,$01,$01,$0D,$01,$03,$01,$15,$01,$0C,$00,
+  $06,$0E,$2B,$34,$04,$01,$01,$0A,$04,$01,$02,$02,$71,$01,$00,$00);
+ MxfEcProres: Array[0..47] Of Byte = (
+  $06,$0E,$2B,$34,$04,$01,$01,$0D,$0D,$01,$03,$01,$02,$1C,$01,$00,
+  $06,$0E,$2B,$34,$01,$02,$01,$01,$0D,$01,$03,$01,$15,$01,$17,$00,
+  $06,$0E,$2B,$34,$04,$01,$01,$0D,$04,$01,$02,$02,$03,$06,$03,$00);
+ { MJPEG : mapping PRIVE (aucune etiquette SMPTE enregistree que ffmpeg reconnaisse) }
+ MxfEcMjpeg: Array[0..47] Of Byte = (
+  $06,$0E,$2B,$34,$04,$01,$01,$0A,$0D,$01,$03,$01,$02,$FE,$01,$00,
+  $06,$0E,$2B,$34,$01,$02,$01,$01,$0D,$01,$03,$01,$15,$01,$1E,$00,
+  $06,$0E,$2B,$34,$04,$01,$01,$0A,$04,$01,$02,$02,$03,$FE,$01,$00);
+ MxfEcAes3: Array[0..47] Of Byte = (
+  $06,$0E,$2B,$34,$04,$01,$01,$01,$0D,$01,$03,$01,$02,$06,$03,$00,
+  $06,$0E,$2B,$34,$01,$02,$01,$01,$0D,$01,$03,$01,$16,$01,$03,$00,
+  $06,$0E,$2B,$34,$04,$01,$01,$01,$04,$02,$02,$01,$00,$00,$00,$00);
+ MxfEcWav: Array[0..47] Of Byte = (
+  $06,$0E,$2B,$34,$04,$01,$01,$01,$0D,$01,$03,$01,$02,$06,$01,$00,
+  $06,$0E,$2B,$34,$01,$02,$01,$01,$0D,$01,$03,$01,$16,$01,$01,$00,
+  $06,$0E,$2B,$34,$04,$01,$01,$01,$04,$02,$02,$01,$00,$00,$00,$00);
+
+Procedure MxfLoadEc(Const Tab: Array Of Byte; Var Sc: TMxfSC);
+Begin
+ Move(Tab[0],Sc.Cu,16); Move(Tab[16],Sc.El,16); Move(Tab[32],Sc.Co,16);
+End;
+
+Function MxfDescCount: LongInt;
+Begin
+ If MxfEcCount>1 Then MxfDescCount:=MxfEcCount+1 Else MxfDescCount:=MxfEcCount;
+End;
+
+Procedure MxfPEcRefs;
+Begin
+ MxfP32(MxfDescCount); MxfP32(16);
+ MxfPN(MxfScV.Cu,16);
+ If MxfEcCount>1 Then Begin MxfPN(MxfScA.Cu,16); MxfPN(MxfMultiDescUl,16); End;
+End;
+
+Procedure MxfPPrimer;
+Var K, Cnt: LongInt; Tag: LongInt; Use: Boolean;
+Begin
+ Cnt:=0;
+ For K:=0 To MXF_NTAGS-1 Do Begin
+  Tag:=MxfTagTab[K*18]*256+MxfTagTab[K*18+1];
+  Use:=True;
+  Case Tag Of
+   $4406,$5001,$5003,$8301,$8302,$8303,$8304,$DFD9,$DFDA,$DFDB: Use:=False;
+   $8100,$8200,$8201,$8202: Use:=(MxfCfg.Codec=MXF_C_H264);
+  End;
+  If Use Then Inc(Cnt);
+ End;
+ MxfPN(MxfKeyPrimer,16);
+ MxfPBer(Cnt*18+8);
+ MxfP32(Cnt); MxfP32(18);
+ For K:=0 To MXF_NTAGS-1 Do Begin
+  Tag:=MxfTagTab[K*18]*256+MxfTagTab[K*18+1];
+  Use:=True;
+  Case Tag Of
+   $4406,$5001,$5003,$8301,$8302,$8303,$8304,$DFD9,$DFDA,$DFDB: Use:=False;
+   $8100,$8200,$8201,$8202: Use:=(MxfCfg.Codec=MXF_C_H264);
+  End;
+  If Use Then MxfPN(MxfTagTab[K*18],18);
+ End;
+End;
+
+Procedure MxfPPreface;
+Begin
+ MxfPKey13($012F00);
+ MxfPTag($3C0A,16); MxfPUuid(MXF_T_PREF,0);
+ MxfPTag($3B02,8); MxfP64(MxfTimestamp);
+ MxfPTag($3B05,2); MxfP16(259);
+ MxfPTag($3B07,4); MxfP32(1);
+ MxfPTag($3B06,16+8); MxfP32(1); MxfP32(16); MxfPUuid(MXF_T_IDENT,0);
+ MxfPTag($3B03,16); MxfPUuid(MXF_T_CSTOR,0);
+ MxfPTag($3B09,16); MxfPN(MxfOp1aUl,16);
+ MxfPTag($3B0A,8+16*MxfDescCount); MxfPEcRefs;
+ MxfPTag($3B0B,8); MxfP64(0);
+ MxfSetEnd(False);
+End;
+
+Procedure MxfPVersion;
+Begin
+ If MxfCfg.Bitexact Then Begin MxfP16(0); MxfP16(0); MxfP16(0); End
+ Else Begin MxfP16(1); MxfP16(0); MxfP16(0); End;
+ MxfP16(0); MxfP16(0);
+End;
+
+Procedure MxfPIdent;
+Var Company, Product, Platform, Version: String;
+Begin
+ Company:=MxfCfg.Company;
+ If Company='' Then Begin If MxfCfg.Bitexact Then Company:='FFmpeg' Else Company:='Gladir'; End;
+ Product:=MxfCfg.Product;
+ If Product='' Then Begin If MxfCfg.Bitexact Then Product:='OP1a Muxer' Else Product:='ANYMP4 MXF OP1a Muxer'; End;
+ If MxfCfg.Bitexact Then Begin Platform:='Lavf'; Version:='0.0.0'; End Else Begin Platform:='ANYMP4 Pascal'; Version:='1.0.0'; End;
+ MxfPKey13($013000);
+ MxfPTag($3C0A,16); MxfPUuid(MXF_T_IDENT,0);
+ MxfPTag($3C09,16); MxfPUuid(MXF_T_IDENT,1);
+ MxfPTagUtf16($3C01,Company);
+ MxfPTagUtf16($3C02,Product);
+ MxfPTag($3C03,10); MxfPVersion;
+ MxfPTagUtf16($3C04,Version);
+ MxfPTagUtf16($3C08,Platform);
+ MxfPTag($3C05,16); MxfPN(MxfProductUid,16);
+ MxfPTag($3C06,8); MxfP64(MxfTimestamp);
+ MxfPTag($3C07,10); MxfPVersion;
+ MxfSetEnd(False);
+End;
+
+Procedure MxfPContentStorage;
+Begin
+ MxfPKey13($011800);
+ MxfPTag($3C0A,16); MxfPUuid(MXF_T_CSTOR,0);
+ MxfPTag($1901,16*2+8); MxfP32(2); MxfP32(16); MxfPUuid(MXF_T_MAT,0); MxfPUuid(MXF_T_SRC,1);
+ MxfPTag($1902,8+16); MxfP32(1); MxfP32(16); MxfPUuid(MXF_T_ECD,0);
+ MxfSetEnd(False);
+End;
+
+{ St : -1 = piste timecode, 0 = video, 1 = audio ; Pk : 0 = materiel, 1 = source }
+Procedure MxfPTrack(St, Pk: LongInt);
+Begin
+ MxfPKey13($013B00);
+ MxfPTag($3C0A,16); MxfPUuid(MXF_T_TRK,MxfTrackInst);
+ MxfPTag($4801,4); MxfP32(St+2);
+ MxfPTag($4804,4);
+ If (Pk=0) Or (St<0) Then MxfP32(0)
+ Else If St=0 Then MxfPN(MxfScV.El[12],4) Else MxfPN(MxfScA.El[12],4);
+ MxfPTag($4B01,8); MxfP32(MxfCfg.FpsN); MxfP32(MxfCfg.FpsD);
+ MxfPTag($4B02,8); MxfP64(0);
+ MxfPTag($4803,16); MxfPUuid(MXF_T_SEQ,MxfTrackInst);
+ MxfSetEnd(False);
+End;
+
+Procedure MxfPCommon(St: LongInt);
+Begin
+ MxfPTag($0201,16);
+ If St<0 Then MxfPN(MxfDdTc,16) Else If St=0 Then MxfPN(MxfDdVideo,16) Else MxfPN(MxfDdAudio,16);
+ MxfPTag($0202,8); MxfP64(MxfDuration);
+End;
+
+Procedure MxfPSequence(St: LongInt);
+Begin
+ MxfPKey13($010F00);
+ MxfPTag($3C0A,16); MxfPUuid(MXF_T_SEQ,MxfTrackInst);
+ MxfPCommon(St);
+ MxfPTag($1001,16+8); MxfP32(1); MxfP32(16);
+ If St<0 Then MxfPUuid(MXF_T_TC,MxfTrackInst) Else MxfPUuid(MXF_T_CLIP,MxfTrackInst);
+ MxfSetEnd(False);
+End;
+
+Procedure MxfPTimecode;
+Begin
+ MxfPKey13($011400);
+ MxfPTag($3C0A,16); MxfPUuid(MXF_T_TC,MxfTrackInst);
+ MxfPCommon(-1);
+ MxfPTag($1501,8); MxfP64(MxfCfg.TcStart);
+ MxfPTag($1502,2); MxfP16(MxfTcBase);
+ MxfPTag($1503,1); If MxfCfg.TcDrop Then MxfP8(1) Else MxfP8(0);
+ MxfSetEnd(False);
+End;
+
+Procedure MxfPStructural(St, Pk: LongInt);
+Begin
+ MxfPKey13($011100);
+ MxfPTag($3C0A,16); MxfPUuid(MXF_T_CLIP,MxfTrackInst);
+ MxfPCommon(St);
+ MxfPTag($1201,8); MxfP64(0);
+ MxfPTag($1101,32);
+ If Pk=0 Then MxfPUmid(1) Else MxfPFill(0,32);
+ MxfPTag($1102,4);
+ If Pk=1 Then MxfP32(0) Else MxfP32(St+2);
+ MxfSetEnd(False);
+End;
+
+Procedure MxfPMultiDesc;
+Begin
+ MxfPKey13($014400);
+ MxfPTag($3C0A,16); MxfPUuid(MXF_T_MDESC,0);
+ MxfPTag($3001,8); MxfP32(MxfCfg.FpsN); MxfP32(MxfCfg.FpsD);
+ MxfPTag($3004,16);
+ If MxfEcCount>1 Then MxfPN(MxfMultiDescUl,16) Else MxfPN(MxfScV.Cu,16);
+ MxfPTag($3F01,MxfNS*16+8); MxfP32(MxfNS); MxfP32(16);
+ MxfPUuid(MXF_T_SUBD,0);
+ If MxfNS>1 Then MxfPUuid(MXF_T_SUBD,1);
+ MxfSetEnd(False);
+End;
+
+{ debut commun d'un descripteur (mxf_write_generic_desc) }
+Procedure MxfPGenericDesc(Const Key: Array Of Byte; St: LongInt; Audio: Boolean);
+Begin
+ MxfSetBegin(Key);
+ MxfPTag($3C0A,16); MxfPUuid(MXF_T_SUBD,St);
+ MxfPTag($3006,4); MxfP32(St+2);
+ MxfPTag($3001,8);
+ If Audio Then Begin MxfP32(MxfCfg.ARate); MxfP32(1); End
+ Else Begin MxfP32(MxfCfg.FpsN); MxfP32(MxfCfg.FpsD); End;
+ MxfPTag($3004,16);
+ If Audio Then MxfPN(MxfScA.Cu,16) Else MxfPN(MxfScV.Cu,16);
+End;
+
+Procedure MxfPAvcSub;
+Begin
+ MxfSetBegin(MxfKeyAvcSub);
+ MxfPTag($3C0A,16); MxfPUuid(MXF_T_AVCSUB,0);
+ MxfPTag($8200,1); MxfP8($FF);
+ MxfPTag($8201,1); MxfP8(MxfScV.Profile);
+ MxfPTag($8202,1); MxfP8(MxfScV.Level);
+ MxfSetEnd(True);
+End;
+
+{ descripteur d'image CDCI / MPEG (mxf_write_cdci_common + mxf_write_mpegvideo_desc) }
+Procedure MxfPVideoDesc;
+Var
+ SW, SH, DispW, DispH, F1, F2, Il, Cr, Dp, Blk, Wht, Col: LongInt;
+Begin
+ SW:=MxfCfg.W; SH:=MxfCfg.H;
+ DispW:=SW;
+ If (MxfCfg.Codec=MXF_C_MPEG2) Or (MxfCfg.Codec=MXF_C_H264) Then Begin
+  SW:=(SW+15) Div 16*16; SH:=(SH+15) Div 16*16;
+ End;
+ Il:=MxfScV.Interlaced;
+ If MxfCfg.Codec=MXF_C_MPEG2 Then MxfPGenericDesc(MxfKeyMpegDesc,0,False) Else MxfPGenericDesc(MxfKeyCdciDesc,0,False);
+ MxfPTag($3203,4); MxfP32(SW);
+ MxfPTag($3202,4); MxfP32(SH Shr Il);
+ MxfPTag($3205,4); MxfP32(DispW);
+ MxfPTag($3204,4); MxfP32(MxfCfg.H Shr Il);
+ MxfPTag($3206,4); MxfP32(0);
+ MxfPTag($3207,4); MxfP32(0);
+ MxfPTag($3209,4); MxfP32(DispW);
+ If MxfCfg.H=608 Then DispH:=576 Else If MxfCfg.H=512 Then DispH:=486 Else DispH:=MxfCfg.H;
+ MxfPTag($3208,4); MxfP32(DispH Shr Il);
+ MxfPTag($320A,4); MxfP32(0);
+ MxfPTag($320B,4); MxfP32((MxfCfg.H-DispH) Shr Il);
+ If Il<>0 Then Begin
+  MxfPTag($3217,4); MxfP32(-((MxfCfg.H-DispH) And 1));
+ End;
+ MxfPTag($3301,4); MxfP32(MxfScV.CompDepth);
+ MxfPTag($3302,4); MxfP32(MxfScV.HSub);
+ MxfPTag($3308,4); MxfP32(MxfScV.VSub);
+ MxfPTag($3303,1); MxfP8(MxfScV.ColorSiting);
+ MxfPTag($3307,2); MxfP16(0);
+ Cr:=MxfCfg.ColorRange;
+ If Cr=0 Then Begin If (MxfCfg.Codec=MXF_C_DNXHD) Or (MxfCfg.Codec=MXF_C_PRORES) Then Cr:=2 Else Cr:=1; End;
+ If Cr>=2 Then Begin
+  Dp:=MxfScV.CompDepth;
+  If Cr=2 Then Begin Blk:=1 Shl (Dp-4); Wht:=235 Shl (Dp-8); Col:=(14 Shl (Dp-4))+1; End
+  Else Begin Blk:=0; Wht:=(1 Shl Dp)-1; Col:=1 Shl Dp; End;
+  MxfPTag($3304,4); MxfP32(Blk);
+  MxfPTag($3305,4); MxfP32(Wht);
+  MxfPTag($3306,4); MxfP32(Col);
+ End;
+ If MxfScV.SignalStd<>0 Then Begin MxfPTag($3215,1); MxfP8(MxfScV.SignalStd); End;
+ MxfPTag($320C,1); MxfP8(Il);
+ { video line map }
+ F1:=0; F2:=0;
+ Case MxfCfg.H Of
+  576: Begin F1:=23; F2:=336; End;
+  608: Begin F1:=7; F2:=320; End;
+  480: Begin F1:=20; F2:=283; End;
+  512: Begin F1:=7; F2:=270; End;
+  720: Begin F1:=26; F2:=0; End;
+  1080: Begin F1:=21; F2:=584; End;
+ End;
+ If (Il=0) And (F2<>0) Then Begin F2:=0; F1:=F1*2; End;
+ MxfPTag($320D,16); MxfP32(2); MxfP32(4); MxfP32(F1); MxfP32(F2);
+ MxfPTag($320E,8); MxfP32(MxfScV.AspN); MxfP32(MxfScV.AspD);
+ If MxfCfg.Bt709 Then Begin
+  MxfPTag($3219,16); MxfPN(MxfUl709Pri,16);
+  MxfPTag($3210,16); MxfPN(MxfUl709Trc,16);
+  MxfPTag($321A,16); MxfPN(MxfUl709Mat,16);
+ End;
+ MxfPTag($3201,16); MxfPN(MxfScV.Co,16);
+ If (Il<>0) And (MxfScV.FieldDom<>0) Then Begin MxfPTag($3212,1); MxfP8(MxfScV.FieldDom); End;
+ If MxfCfg.Codec=MXF_C_H264 Then Begin
+  MxfPTag($8100,8+16); MxfP32(1); MxfP32(16); MxfPUuid(MXF_T_AVCSUB,0);
+ End;
+ If MxfCfg.Codec=MXF_C_MPEG2 Then Begin
+  MxfPTag($8000,4); MxfP32(MxfScV.VBitRate);
+  MxfPTag($8007,1);
+  If MxfScV.Profile=0 Then MxfP8(((MxfScV.Profile Shl 4) Or MxfScV.Level) Or $80) Else MxfP8((MxfScV.Profile Shl 4) Or MxfScV.Level);
+  MxfPTag($8003,1); MxfP8(MxfScV.LowDelay);
+  MxfPTag($8004,1); MxfP8(MxfScV.SeqClosedGop);
+  MxfPTag($8006,2); MxfP16(MxfScV.MaxGop);
+  MxfPTag($8008,2); MxfP16(MxfScV.BCount);
+ End;
+ MxfSetEnd(True);
+ If MxfCfg.Codec=MXF_C_H264 Then MxfPAvcSub;
+End;
+
+Procedure MxfPAudioDesc;
+Begin
+ If MxfCfg.AMode=MXF_A_AES3 Then MxfPGenericDesc(MxfKeyAesDesc,1,True) Else MxfPGenericDesc(MxfKeyWavDesc,1,True);
+ MxfPTag($3D02,1); MxfP8(1);
+ MxfPTag($3D03,8); MxfP32(MxfCfg.ARate); MxfP32(1);
+ MxfPTag($3D07,4); MxfP32(MxfCfg.AChans);
+ MxfPTag($3D01,4); MxfP32(MxfCfg.ABits);
+ MxfPTag($3D0A,2); MxfP16(MxfWAudioBlk);
+ MxfPTag($3D09,4); MxfP32(MxfWAudioBlk*MxfCfg.ARate);
+ MxfSetEnd(True);
+End;
+
+Procedure MxfPPackage(Pk: LongInt);
+Var K, TrackCount: LongInt;
+Begin
+ TrackCount:=MxfNS+1;
+ If Pk=0 Then MxfPKey13($013600) Else MxfPKey13($013700);
+ MxfPTag($3C0A,16); MxfPUuid(MXF_T_MAT+Pk,Pk);
+ MxfPTag($4401,32); MxfPUmid(Pk);
+ MxfPTag($4405,8); MxfP64(MxfTimestamp);
+ MxfPTag($4404,8); MxfP64(MxfTimestamp);
+ MxfPTag($4403,TrackCount*16+8); MxfP32(TrackCount); MxfP32(16);
+ For K:=0 To TrackCount-1 Do MxfPUuid(MXF_T_TRK,MxfTrackInst+K);
+ If Pk=1 Then Begin
+  MxfPTag($4701,16);
+  If MxfNS>1 Then MxfPUuid(MXF_T_MDESC,0) Else MxfPUuid(MXF_T_SUBD,0);
+ End;
+ MxfSetEnd(False);
+ If (Pk=1) And (MxfNS>1) Then MxfPMultiDesc;
+ { piste de timecode }
+ MxfPTrack(-1,Pk); MxfPSequence(-1); MxfPTimecode;
+ Inc(MxfTrackInst);
+ For K:=0 To MxfNS-1 Do Begin
+  MxfPTrack(K,Pk); MxfPSequence(K); MxfPStructural(K,Pk);
+  Inc(MxfTrackInst);
+  If Pk=1 Then Begin
+   If K=0 Then MxfPVideoDesc Else MxfPAudioDesc;
+  End;
+ End;
+End;
+
+Procedure MxfPEcData;
+Begin
+ MxfPKey13($012300);
+ MxfPTag($3C0A,16); MxfPUuid(MXF_T_ECD,0);
+ MxfPTag($2701,32); MxfPUmid(1);
+ MxfPTag($3F07,4); MxfP32(1);
+ MxfPTag($3F06,4); MxfP32(2);
+ MxfSetEnd(False);
+End;
+
+Procedure MxfPHeaderSets;
+Begin
+ MxfPPreface;
+ MxfPIdent;
+ MxfPContentStorage;
+ MxfTrackInst:=0;
+ MxfPPackage(0);
+ MxfPPackage(1);
+ MxfPEcData;
+End;
+
+{ ---- analyse des trames a ecrire ---- }
+Var
+ MxfAvcSps: PEABuffer;                  { SPS+PPS Annex B (issus de avcC) pour insertion aux images cles }
+ MxfAvcSpsLen: LongInt;
+ MxfAvcLenSz: LongInt;                  { taille du champ longueur des paquets AVCC }
+ MxfFrameN: LongInt;                    { nombre de trames analysees }
+ MxfGopBase: LongInt;
+ MxfSawGop: Boolean;
+ MxfSpsSarN, MxfSpsSarD, MxfSpsInterl, MxfSpsDepth, MxfSpsChroma, MxfSpsOk: LongInt;
+
+Type
+ TMxfBr = Record
+  P: PEABuffer; Len, Pos: LongInt;
+ End;
+
+Function MxfBrBit(Var B: TMxfBr): LongInt;
+Begin
+ If B.Pos>=B.Len*8 Then Begin MxfBrBit:=0; Inc(B.Pos); Exit; End;
+ MxfBrBit:=(B.P^[B.Pos Shr 3] Shr (7-(B.Pos And 7))) And 1;
+ Inc(B.Pos);
+End;
+
+Function MxfBrBits(Var B: TMxfBr; N: LongInt): LongInt;
+Var V: LongInt;
+Begin
+ V:=0;
+ While N>0 Do Begin V:=(V Shl 1) Or MxfBrBit(B); Dec(N); End;
+ MxfBrBits:=V;
+End;
+
+Function MxfBrUe(Var B: TMxfBr): LongInt;
+Var Z: LongInt;
+Begin
+ Z:=0;
+ While (MxfBrBit(B)=0) And (Z<31) And (B.Pos<=B.Len*8) Do Inc(Z);
+ If Z=0 Then MxfBrUe:=0 Else MxfBrUe:=((1 Shl Z)-1)+MxfBrBits(B,Z);
+End;
+
+Function MxfBrSe(Var B: TMxfBr): LongInt;
+Var K: LongInt;
+Begin
+ K:=MxfBrUe(B);
+ If (K And 1)<>0 Then MxfBrSe:=(K+1) Div 2 Else MxfBrSe:=-(K Div 2);
+End;
+
+{ retire les octets d'echappement 00 00 03 et copie dans Dst ; retourne la longueur }
+Function MxfUnescape(Src: PEABuffer; N: LongInt; Dst: PEABuffer): LongInt;
+Var I, O, Z: LongInt;
+Begin
+ O:=0; Z:=0;
+ For I:=0 To N-1 Do Begin
+  If (Z>=2) And (Src^[I]=3) Then Begin Z:=0; Continue; End;
+  Dst^[O]:=Src^[I]; Inc(O);
+  If Src^[I]=0 Then Inc(Z) Else Z:=0;
+ End;
+ MxfUnescape:=O;
+End;
+
+Procedure MxfSkipScaling(Var B: TMxfBr; Sz: LongInt);
+Var J, Last, Nxt, D: LongInt;
+Begin
+ Last:=8; Nxt:=8;
+ For J:=0 To Sz-1 Do Begin
+  If Nxt<>0 Then Begin
+   D:=MxfBrSe(B);
+   Nxt:=(Last+D+256) Mod 256;
+  End;
+  If Nxt<>0 Then Last:=Nxt;
+ End;
+End;
+
+{ analyse d'un SPS H.264 (octets apres l'en-tete NAL) : profil, niveau, entrelacement, profondeur, SAR }
+Procedure MxfParseSps(P: PEABuffer; N: LongInt; Var Profile, Level, ConstrFlags: LongInt);
+Var
+ B: TMxfBr; Tmp: PEABuffer; M, ChromaFmt, K, PocType, Cnt, MbsOnly, Idc: LongInt;
+Begin
+ MxfSpsOk:=0; MxfSpsSarN:=0; MxfSpsSarD:=0; MxfSpsInterl:=0; MxfSpsDepth:=8; MxfSpsChroma:=1;
+ If N<4 Then Exit;
+ GetMem(Tmp,N+8);
+ M:=MxfUnescape(P,N,Tmp);
+ B.P:=Tmp; B.Len:=M; B.Pos:=0;
+ Profile:=MxfBrBits(B,8); ConstrFlags:=MxfBrBits(B,8); Level:=MxfBrBits(B,8);
+ MxfBrUe(B);
+ ChromaFmt:=1;
+ If (Profile=100) Or (Profile=110) Or (Profile=122) Or (Profile=244) Or (Profile=44) Or (Profile=83) Or (Profile=86)
+    Or (Profile=118) Or (Profile=128) Or (Profile=138) Or (Profile=139) Or (Profile=134) Or (Profile=135) Then Begin
+  ChromaFmt:=MxfBrUe(B);
+  If ChromaFmt=3 Then MxfBrBit(B);
+  MxfSpsDepth:=MxfBrUe(B)+8;
+  MxfBrUe(B); MxfBrBit(B);
+  If MxfBrBit(B)<>0 Then
+   For K:=0 To 7+Ord(ChromaFmt=3)*4 Do
+    If MxfBrBit(B)<>0 Then Begin If K<6 Then MxfSkipScaling(B,16) Else MxfSkipScaling(B,64); End;
+ End;
+ MxfSpsChroma:=ChromaFmt;
+ MxfBrUe(B);
+ PocType:=MxfBrUe(B);
+ If PocType=0 Then MxfBrUe(B)
+ Else If PocType=1 Then Begin
+  MxfBrBit(B); MxfBrSe(B); MxfBrSe(B);
+  Cnt:=MxfBrUe(B);
+  For K:=1 To Cnt Do MxfBrSe(B);
+ End;
+ MxfBrUe(B); MxfBrBit(B);
+ MxfBrUe(B); MxfBrUe(B);
+ MbsOnly:=MxfBrBit(B);
+ MxfSpsInterl:=1-MbsOnly;
+ If MbsOnly=0 Then MxfBrBit(B);
+ MxfBrBit(B);
+ If MxfBrBit(B)<>0 Then Begin MxfBrUe(B); MxfBrUe(B); MxfBrUe(B); MxfBrUe(B); End;
+ If MxfBrBit(B)<>0 Then Begin
+  If MxfBrBit(B)<>0 Then Begin
+   Idc:=MxfBrBits(B,8);
+   If Idc=255 Then Begin MxfSpsSarN:=MxfBrBits(B,16); MxfSpsSarD:=MxfBrBits(B,16); End
+   Else Begin
+    Case Idc Of
+     1: Begin MxfSpsSarN:=1; MxfSpsSarD:=1; End;
+     2: Begin MxfSpsSarN:=12; MxfSpsSarD:=11; End;
+     3: Begin MxfSpsSarN:=10; MxfSpsSarD:=11; End;
+     4: Begin MxfSpsSarN:=16; MxfSpsSarD:=11; End;
+     5: Begin MxfSpsSarN:=40; MxfSpsSarD:=33; End;
+     6: Begin MxfSpsSarN:=24; MxfSpsSarD:=11; End;
+     7: Begin MxfSpsSarN:=20; MxfSpsSarD:=11; End;
+     8: Begin MxfSpsSarN:=32; MxfSpsSarD:=11; End;
+     9: Begin MxfSpsSarN:=80; MxfSpsSarD:=33; End;
+     10: Begin MxfSpsSarN:=18; MxfSpsSarD:=11; End;
+     11: Begin MxfSpsSarN:=15; MxfSpsSarD:=11; End;
+     12: Begin MxfSpsSarN:=64; MxfSpsSarD:=33; End;
+     13: Begin MxfSpsSarN:=160; MxfSpsSarD:=99; End;
+     14: Begin MxfSpsSarN:=4; MxfSpsSarD:=3; End;
+     15: Begin MxfSpsSarN:=3; MxfSpsSarD:=2; End;
+     16: Begin MxfSpsSarN:=2; MxfSpsSarD:=1; End;
+    End;
+   End;
+  End;
+ End;
+ MxfSpsOk:=1;
+ FreeMem(Tmp);
+End;
+
+Function MxfGcd(A, B: LongInt): LongInt;
+Var T: LongInt;
+Begin
+ While B<>0 Do Begin T:=A Mod B; A:=B; B:=T; End;
+ If A=0 Then A:=1;
+ MxfGcd:=A;
+End;
+
+Procedure MxfReduce(Var N, D: LongInt);
+Var G: LongInt;
+Begin
+ If (N=0) Or (D=0) Then Exit;
+ G:=MxfGcd(N,D); N:=N Div G; D:=D Div G;
+End;
+
+Const
+ { DNxHD : CID, entrelace, octet 13 de l'UL de codage (mxf_dnxhd_codec_uls) }
+ MxfDnxTab: Array[0..19*3-1] Of LongInt = (
+  1235,0,$01, 1237,0,$03, 1238,0,$04, 1241,1,$07, 1242,1,$08, 1243,1,$09, 1244,1,$0A,
+  1250,0,$10, 1251,0,$11, 1252,0,$12, 1253,0,$13, 1256,0,$16, 1258,0,$18, 1259,0,$19,
+  1260,1,$1A, 1270,0,$24, 1271,0,$25, 1272,0,$26, 1273,0,$27);
+ MXF_NDNX = 18;
+
+ { H.264 : profil, intra_only (-1 indifferent), octets 13..14 de l'UL, octet 7 }
+ MxfAvcTab: Array[0..8*5-1] Of LongInt = (
+  66,-1,$31,$11,$0A,  77,-1,$31,$20,$0A,  88,-1,$31,$30,$0A,  100,-1,$31,$40,$0A,
+  110,0,$31,$50,$0A,  122,0,$31,$60,$0A,  244,0,$31,$70,$0A,  110,1,$32,$20,$0A);
+
+{ analyse MPEG-2 (mxf_parse_mpeg2_frame) ; Fl : indicateurs d'index, Tr : temporal_ref }
+Procedure MxfParseMpeg2(P: PEABuffer; N: LongInt; Var Fl, Tr: LongInt);
+Var C: LongWord; I, Pt, Ar: LongInt;
+Begin
+ C:=$FFFFFFFF;
+ Fl:=0; Tr:=0;
+ For I:=0 To N-5 Do Begin
+  C:=(C Shl 8) Or P^[I];
+  If C=$1B5 Then Begin
+   If (P^[I+1] And $F0)=$10 Then Begin
+    MxfScV.Profile:=P^[I+1] And 7;
+    MxfScV.Level:=P^[I+2] Shr 4;
+    MxfScV.LowDelay:=P^[I+6] Shr 7;
+    If MxfScV.Profile=0 Then Begin MxfScV.VSub:=1; End;
+   End Else If (I+5<N) And ((P^[I+1] And $F0)=$80) Then Begin
+    If (P^[I+5] And $80)=0 Then MxfScV.Interlaced:=1 Else MxfScV.Interlaced:=0;
+    If MxfScV.Interlaced<>0 Then Begin
+     If (P^[I+4] And $80)<>0 Then MxfScV.FieldDom:=1 Else MxfScV.FieldDom:=2;
+    End;
+    Break;
+   End;
+  End Else If C=$1B8 Then Begin
+   If ((P^[I+4] Shr 6) And 1)<>0 Then Begin
+    If MxfScV.SeqClosedGop=-1 Then MxfScV.SeqClosedGop:=1;
+    MxfScV.ClosedGop:=1;
+    If (Fl And $40)<>0 Then Fl:=Fl Or $80;
+   End Else Begin
+    MxfScV.SeqClosedGop:=0; MxfScV.ClosedGop:=0;
+   End;
+   MxfSawGop:=True;   { un en-tete GOP a ete rencontre dans cette trame }
+  End Else If C=$1B3 Then Begin
+   Fl:=Fl Or $40;
+   Ar:=(P^[I+4] Shr 4) And $F;
+   Case Ar Of
+    2: Begin MxfScV.AspN:=4; MxfScV.AspD:=3; End;
+    3: Begin MxfScV.AspN:=16; MxfScV.AspD:=9; End;
+    4: Begin MxfScV.AspN:=221; MxfScV.AspD:=100; End;
+   Else Begin MxfScV.AspN:=MxfCfg.W; MxfScV.AspD:=MxfCfg.H; MxfReduce(MxfScV.AspN,MxfScV.AspD); End;
+   End;
+  End Else If C=$100 Then Begin
+   Pt:=(P^[I+2] Shr 3) And 7;
+   Tr:=(LongInt(P^[I+1]) Shl 2) Or (P^[I+2] Shr 6);
+   If Pt=2 Then Begin
+    Fl:=Fl Or $22; MxfScV.ClosedGop:=0;
+   End Else If Pt=3 Then Begin
+    If MxfScV.ClosedGop<>0 Then Fl:=Fl Or $13 Else Fl:=Fl Or $33;
+    MxfScV.TempReord:=-1;
+   End;
+  End;
+ End;
+End;
+
+{ analyse H.264 Annex B (mxf_parse_h264_frame) ; retourne les indicateurs ; HdrDone : l'en-tete est deja ecrit }
+Procedure MxfParseH264(P: PEABuffer; N: LongInt; HdrDone: Boolean; Var Fl: LongInt; Var HasSps: Boolean);
+Var
+ K, Nt, St, Profile, Level, Cf, NalEnd: LongInt;
+ B: TMxfBr;
+Begin
+ Fl:=0; HasSps:=False;
+ K:=0;
+ While K+4<N Do Begin
+  If (P^[K]=0) And (P^[K+1]=0) And (P^[K+2]=1) Then Begin
+   Nt:=P^[K+3] And $1F;
+   Case Nt Of
+    7: Begin
+     Fl:=Fl Or $40;
+     HasSps:=True;
+     If Not HdrDone Then Begin
+      { fin du NAL : prochain 00 00 01 }
+      NalEnd:=K+4;
+      While (NalEnd+3<N) And Not ((P^[NalEnd]=0) And (P^[NalEnd+1]=0) And ((P^[NalEnd+2]=1) Or (P^[NalEnd+2]=0))) Do Inc(NalEnd);
+      If NalEnd+3>=N Then NalEnd:=N;
+      MxfParseSps(@P^[K+4],NalEnd-(K+4),Profile,Level,Cf);
+      If MxfSpsOk<>0 Then Begin
+       MxfScV.Profile:=Profile; MxfScV.Level:=Level;
+       MxfScV.CodecId:=(Cf Shr 4) And 1;   { constraint_set3 : intra }
+       If (MxfSpsSarN>0) And (MxfSpsSarD>0) Then Begin
+        MxfScV.AspN:=Int64(MxfCfg.W)*MxfSpsSarN; MxfScV.AspD:=Int64(MxfCfg.H)*MxfSpsSarD;
+        MxfReduce(MxfScV.AspN,MxfScV.AspD);
+       End;
+       MxfScV.Interlaced:=MxfSpsInterl;
+       MxfScV.CompDepth:=MxfSpsDepth;
+       If MxfSpsChroma=2 Then Begin MxfScV.HSub:=2; MxfScV.VSub:=1; End
+       Else If MxfSpsChroma=3 Then Begin MxfScV.HSub:=1; MxfScV.VSub:=1; End;
+      End;
+      K:=NalEnd-1;
+     End;
+    End;
+    8: If (Fl And $40)<>0 Then Fl:=Fl Or $80;
+    5: Begin Fl:=Fl Or $04; Break; End;
+    1: Begin
+     B.P:=@P^[K+4]; B.Len:=N-(K+4); If B.Len>32 Then B.Len:=32; B.Pos:=0;
+     MxfBrUe(B);
+     St:=MxfBrUe(B) Mod 5;
+     If St=0 Then Fl:=Fl Or $26
+     Else If St=1 Then Fl:=Fl Or $33;
+     Break;
+    End;
+   End;
+   Inc(K,3);
+  End Else Inc(K);
+ End;
+End;
+
+{ avcC -> SPS+PPS Annex B }
+Function MxfLoadAvcc(P: PEABuffer; N: LongInt): Boolean;
+Var K, Cnt, L, J, O: LongInt;
+Begin
+ MxfLoadAvcc:=False;
+ If (P=Nil) Or (N<7) Or (P^[0]<>1) Then Exit;
+ MxfAvcLenSz:=(P^[4] And 3)+1;
+ GetMem(MxfAvcSps,N*2+64);
+ O:=0; K:=5;
+ Cnt:=P^[K] And $1F; Inc(K);
+ For J:=1 To Cnt Do Begin
+  If K+2>N Then Exit;
+  L:=MxfB16(P,K); Inc(K,2);
+  If K+L>N Then Exit;
+  MxfAvcSps^[O]:=0; MxfAvcSps^[O+1]:=0; MxfAvcSps^[O+2]:=0; MxfAvcSps^[O+3]:=1; Inc(O,4);
+  Move(P^[K],MxfAvcSps^[O],L); Inc(O,L); Inc(K,L);
+ End;
+ If K>=N Then Exit;
+ Cnt:=P^[K]; Inc(K);
+ For J:=1 To Cnt Do Begin
+  If K+2>N Then Exit;
+  L:=MxfB16(P,K); Inc(K,2);
+  If K+L>N Then Exit;
+  MxfAvcSps^[O]:=0; MxfAvcSps^[O+1]:=0; MxfAvcSps^[O+2]:=0; MxfAvcSps^[O+3]:=1; Inc(O,4);
+  Move(P^[K],MxfAvcSps^[O],L); Inc(O,L); Inc(K,L);
+ End;
+ MxfAvcSpsLen:=O;
+ MxfLoadAvcc:=True;
+End;
+
+Var
+ MxfEus: PMxfEuA; MxfEuN, MxfEuCap: LongInt;
+ MxfTOff, MxfKOff, MxfFlFin: PMxfLA;      { decalage temporel, decalage de cle, indicateurs finaux }
+ MxfBodyOffset: Int64;
+ MxfBodyPartOfs: Int64;                   { position de la partition de corps }
+ MxfHdrEnd: Int64;                        { fin de la zone d'en-tete (partition + metadonnees + index CBR) }
+ { FIFO audio }
+ MxfAq: PEABuffer; MxfAqCap, MxfAqHead, MxfAqLen: LongInt;
+ MxfErr: Boolean;
+
+Const
+ MxfSysPackKey: Array[0..15] Of Byte = ($06,$0E,$2B,$34,$02,$05,$01,$01,$0D,$01,$03,$01,$04,$01,$01,$00);
+ MxfSysSetKey: Array[0..15] Of Byte = ($06,$0E,$2B,$34,$02,$43,$01,$01,$0D,$01,$03,$01,$04,$01,$02,$01);
+
+{ taux de paquet de contenu SMPTE 326M }
+Function MxfContentRate: LongInt;
+Begin
+ MxfContentRate:=0;
+ If MxfCfg.FpsD=1 Then Begin
+  Case MxfCfg.FpsN Of 24: MxfContentRate:=2; 25: MxfContentRate:=4; 30: MxfContentRate:=6; 48: MxfContentRate:=8;
+   50: MxfContentRate:=10; 60: MxfContentRate:=12; 72: MxfContentRate:=14; 75: MxfContentRate:=16; 90: MxfContentRate:=18;
+   96: MxfContentRate:=20; 100: MxfContentRate:=22; 120: MxfContentRate:=24; End;
+ End Else If MxfCfg.FpsD=1001 Then Begin
+  Case MxfCfg.FpsN Of 24000: MxfContentRate:=3; 30000: MxfContentRate:=7; 48000: MxfContentRate:=9; 60000: MxfContentRate:=13;
+   72000: MxfContentRate:=15; 90000: MxfContentRate:=19; 96000: MxfContentRate:=21; 120000: MxfContentRate:=25; End;
+ End;
+End;
+
+Function MxfAdjustNtsc(Fr, Fps: LongInt): LongInt;
+Var Drop, F10, D, M: LongInt;
+Begin
+ If (Fps<=0) Or (Fps Mod 30<>0) Then Begin MxfAdjustNtsc:=Fr; Exit; End;
+ Drop:=Fps Div 30*2; F10:=Fps Div 30*17982;
+ D:=Fr Div F10; M:=Fr Mod F10;
+ MxfAdjustNtsc:=Fr+9*Drop*D+Drop*((M-Drop) Div (F10 Div 10));
+End;
+
+Function MxfSmpteTc(Fr: LongInt): LongInt;
+Var Hh, Mm, Ss, Ff, Fps, Drop: LongInt; Tc: LongInt;
+Begin
+ Fps:=MxfTcBase;
+ If MxfCfg.TcDrop Then Drop:=1 Else Drop:=0;
+ Fr:=Fr+MxfCfg.TcStart;
+ If Drop<>0 Then Fr:=MxfAdjustNtsc(Fr,Fps);
+ Ff:=Fr Mod Fps; Ss:=Fr Div Fps Mod 60; Mm:=Fr Div (Fps*60) Mod 60; Hh:=Fr Div (Fps*3600) Mod 24;
+ Tc:=0;
+ If Fps>30 Then Begin
+  If (Ff Mod 2)=1 Then Begin
+   If Fps=50 Then Tc:=Tc Or (1 Shl 7) Else Tc:=Tc Or (1 Shl 23);
+  End;
+  Ff:=Ff Div 2;
+ End;
+ Ff:=Ff Mod 40;
+ Tc:=Tc Or (Drop Shl 30) Or ((Ff Div 10) Shl 28) Or ((Ff Mod 10) Shl 24) Or ((Ss Div 10) Shl 20) Or ((Ss Mod 10) Shl 16)
+     Or ((Mm Div 10) Shl 12) Or ((Mm Mod 10) Shl 8) Or ((Hh Div 10) Shl 4) Or (Hh Mod 10);
+ MxfSmpteTc:=Tc;
+End;
+
+{ element systeme : bloc de metadonnees systeme + ensemble de package (mxf_write_system_item) }
+Procedure MxfPSystemItem(Frame: LongInt);
+Var Bitmap: LongInt;
+Begin
+ Bitmap:=$58;
+ If MxfHasAudio Then Bitmap:=Bitmap Or 4;
+ MxfPN(MxfSysPackKey,16); MxfPBer4(57);
+ MxfP8(Bitmap); MxfP8(MxfContentRate); MxfP8(0); MxfP16(0); MxfP16(Frame And $FFFF);
+ If MxfEcCount>1 Then MxfPN(MxfMultiDescUl,16) Else MxfPN(MxfScV.Cu,16);
+ MxfP8(0); MxfP64(0); MxfP64(0);
+ MxfP8($81); MxfP32(MxfSmpteTc(Frame)); MxfP32(0); MxfP64(0);
+ MxfPN(MxfSysSetKey,16); MxfPBer4(35);
+ MxfP8($83); MxfP16($20); MxfPUmid(1);
+End;
+
+{ nombre d'echantillons audio du paquet n (pcm_rechunk : arrondi au plus proche de n*rate*den/num) }
+Function MxfAudioSamples(N: LongInt): LongInt;
+Var A, B: Int64;
+Begin
+ A:=(Int64(N+1)*MxfCfg.ARate*MxfCfg.FpsD*2+MxfCfg.FpsN) Div (2*Int64(MxfCfg.FpsN));
+ B:=(Int64(N)*MxfCfg.ARate*MxfCfg.FpsD*2+MxfCfg.FpsN) Div (2*Int64(MxfCfg.FpsN));
+ MxfAudioSamples:=A-B;
+End;
+
+Procedure MxfEuGrow;
+Begin
+ If MxfEuN>=MxfEuCap Then Begin
+  MxfEuCap:=MxfEuCap*2+1024;
+  ReallocMem(MxfEus,MxfEuCap*SizeOf(TMxfEu));
+ End;
+End;
+
+
+Var
+ MxfPartMB: TMxfMB;
+
+Type
+ TMxfVqE = Record
+  P: PEABuffer; Len, Fl, Tref, Disp: LongInt;
+ End;
+ TMxfVqA = Array[0..0] Of TMxfVqE;
+ PMxfVqA = ^TMxfVqA;
+
+Var
+ MxfVqA: PMxfVqA; MxfVqCap, MxfVqH, MxfVqN: LongInt;
+
+{ pack de partition (+ metadonnees d'en-tete) dans MxfCur }
+Procedure MxfPPartition(Const Key: Array Of Byte; BodySid, IndexSid: LongInt; WriteMeta: Boolean; IndexBytes, PrevOfs: Int64);
+Var Start0, StartMeta, Pos, Hbc: Int64; HbcAt, K: LongInt;
+Begin
+ Start0:=MxfBase+MxfCur^.N;
+ MxfPN(Key[0],16);
+ MxfPBer4(88+16*MxfDescCount);
+ MxfP16(1); MxfP16(3); MxfP32(MXF_KAG);
+ MxfP64(Start0);
+ MxfP64(PrevOfs);
+ MxfP64(MxfFooterOfs);
+ HbcAt:=MxfCur^.N;
+ MxfP64(0);
+ MxfP64(IndexBytes);
+ If IndexBytes>0 Then MxfP32(IndexSid) Else MxfP32(0);
+ MxfP64(0);
+ MxfP32(BodySid);
+ MxfPN(MxfOp1aUl,16);
+ MxfPEcRefs;
+ If WriteMeta Then Begin
+  MxfPKlvFill;
+  StartMeta:=MxfBase+MxfCur^.N;
+  MxfPPrimer;
+  MxfPKlvFill;
+  MxfPHeaderSets;
+  Pos:=MxfBase+MxfCur^.N;
+  Hbc:=Pos-StartMeta+MxfFillSize(Pos);
+  For K:=7 Downto 0 Do Begin
+   MxfCur^.P^[HbcAt+K]:=Hbc And $FF; Hbc:=Hbc Shr 8;
+  End;
+ End;
+End;
+
+{ segment d'index CBR (EditUnitByteCount) }
+Procedure MxfPIndexCbr;
+Begin
+ MxfSetBegin(MxfKeyIndex);
+ MxfPTag($3C0A,16); MxfPUuid(MXF_T_INDEX,0);
+ MxfPTag($3F0B,8); MxfP32(MxfCfg.FpsN); MxfP32(MxfCfg.FpsD);
+ MxfPTag($3F0C,8); MxfP64(0);
+ MxfPTag($3F0D,8); MxfP64(0);
+ MxfPTag($3F05,4); MxfP32(MxfEubc);
+ MxfPTag($3F06,4); MxfP32(2);
+ MxfPTag($3F07,4); MxfP32(1);
+ MxfPTag($3F08,1); MxfP8(0);
+ MxfPTag($3F09,8+(MxfNS+1)*6); MxfP32(MxfNS+1); MxfP32(6);
+ MxfP8(0); MxfP8(0); MxfP32(0);
+ If MxfScV.TempReord<>0 Then MxfP8($FF) Else MxfP8(0);
+ MxfP8(0); MxfP32(MxfScV.SliceOff);
+ If MxfNS>1 Then Begin MxfP8(0); MxfP8(0); MxfP32(MxfScA.SliceOff); End;
+ MxfSetEnd(True);
+End;
+
+{ calcul de l'index VBR complet : decalages temporels, decalages de cle, indicateurs, statistiques }
+Procedure MxfFinalizeIndex;
+Var
+ N, I, J, D, KeyIndex, LastKey, PrevNonB, T: LongInt;
+ Stored: PMxfLA; Mark: PMxfLA;
+ Perm, Reord: Boolean;
+ Fl: LongInt;
+Begin
+ N:=MxfEuN;
+ If N=0 Then Exit;
+ GetMem(Stored,N*SizeOf(LongInt)); GetMem(Mark,N*SizeOf(LongInt));
+ If MxfTOff<>Nil Then FreeMem(MxfTOff); If MxfKOff<>Nil Then FreeMem(MxfKOff); If MxfFlFin<>Nil Then FreeMem(MxfFlFin);
+ GetMem(MxfTOff,N*SizeOf(LongInt)); GetMem(MxfKOff,N*SizeOf(LongInt)); GetMem(MxfFlFin,N*SizeOf(LongInt));
+ { permutation d'affichage }
+ For I:=0 To N-1 Do Begin Stored^[I]:=-1; Mark^[I]:=0; End;
+ Perm:=True; Reord:=False;
+ For I:=0 To N-1 Do Begin
+  D:=MxfEus^[I].Disp;
+  If D<>I Then Reord:=True;
+  If (D<0) Or (D>=N) Or (Mark^[D]<>0) Then Begin Perm:=False; Break; End;
+  Mark^[D]:=1; Stored^[D]:=I;
+ End;
+ If Not Perm Then Begin
+  { classement par ordre d'affichage (tri par rang) }
+  For I:=0 To N-1 Do Stored^[I]:=I;
+  For I:=1 To N-1 Do Begin
+   T:=Stored^[I]; J:=I-1;
+   While (J>=0) And (MxfEus^[Stored^[J]].Disp>MxfEus^[T].Disp) Do Begin Stored^[J+1]:=Stored^[J]; Dec(J); End;
+   Stored^[J+1]:=T;
+  End;
+ End;
+ If Reord Then MxfScV.TempReord:=-1 Else MxfScV.TempReord:=0;
+ KeyIndex:=0; LastKey:=0; PrevNonB:=0;
+ MxfScV.MaxGop:=0; MxfScV.BCount:=0;
+ For I:=0 To N-1 Do Begin
+  Fl:=MxfEus^[I].Flags;
+  If (Fl And $33)=0 Then Begin
+   If I-LastKey>MxfScV.MaxGop Then MxfScV.MaxGop:=I-LastKey;
+   LastKey:=KeyIndex; KeyIndex:=I;
+  End;
+  T:=0;
+  If Reord Then Begin
+   T:=Stored^[I]-I;
+   If (T<-128) Or (T>127) Then T:=0;
+  End;
+  MxfTOff^[I]:=T;
+  If (Fl And $30)=$30 Then Begin
+   If I-PrevNonB>MxfScV.BCount Then MxfScV.BCount:=I-PrevNonB;
+   MxfKOff^[I]:=LastKey-I;
+  End Else Begin
+   MxfKOff^[I]:=KeyIndex-I;
+   If (Fl And $20)=$20 Then LastKey:=KeyIndex;
+   PrevNonB:=I;
+  End;
+  If ((Fl And $33)=0) And ((Fl And $40)<>0) And (T=0) Then Fl:=Fl Or $80;
+  MxfFlFin^[I]:=Fl;
+ End;
+ If MxfCfg.Codec<>MXF_C_MPEG2 Then Begin MxfScV.MaxGop:=0; MxfScV.BCount:=0; End;
+ FreeMem(Stored); FreeMem(Mark);
+End;
+
+Procedure MxfPIndexSeg(Start, Cnt: LongInt);
+Var I: LongInt;
+Begin
+ MxfSetBegin(MxfKeyIndex);
+ MxfPTag($3C0A,16); MxfPUuid(MXF_T_INDEX,Start);
+ MxfPTag($3F0B,8); MxfP32(MxfCfg.FpsN); MxfP32(MxfCfg.FpsD);
+ MxfPTag($3F0C,8); MxfP64(Start);
+ MxfPTag($3F0D,8); MxfP64(Cnt);
+ MxfPTag($3F05,4); MxfP32(0);
+ MxfPTag($3F06,4); MxfP32(2);
+ MxfPTag($3F07,4); MxfP32(1);
+ MxfPTag($3F08,1); MxfP8(1);
+ MxfPTag($3F09,8+(MxfNS+1)*6); MxfP32(MxfNS+1); MxfP32(6);
+ MxfP8(0); MxfP8(0); MxfP32(0);
+ If MxfScV.TempReord<>0 Then MxfP8($FF) Else MxfP8(0);
+ MxfP8(0); MxfP32(MXF_KAG);
+ If MxfNS>1 Then Begin MxfP8(0); MxfP8(1); MxfP32(0); End;
+ MxfPTag($3F0A,8+Cnt*15); MxfP32(Cnt); MxfP32(15);
+ For I:=Start To Start+Cnt-1 Do Begin
+  MxfP8(MxfTOff^[I]); MxfP8(MxfKOff^[I]); MxfP8(MxfFlFin^[I]);
+  MxfP64(MxfEus^[I].Off);
+  If MxfNS>1 Then MxfP32(MxfEus^[I].Slice) Else MxfP32(0);
+ End;
+ MxfSetEnd(True);
+End;
+
+{ ---- ecriture de l'en-tete (au premier paquet) ---- }
+Function MxfWriteHeader(Closed: Boolean): Boolean;
+Var Ib: Int64; Key: TMxfUid;
+Begin
+ MxfBase:=MxfWPos;
+ MxfPartMB.N:=0;
+ MxfCur:=@MxfPartMB;
+ If Closed Then Move(MxfKeyHdrClosed,Key,16) Else Move(MxfKeyHdrOpen,Key,16);
+ If MxfEubc>0 Then Begin
+  { index CBR : taille exacte calculee d'abord }
+  MxfTmpMB.N:=0;
+  MxfPPartition(Key,1,2,True,0,0);
+  MxfPKlvFill;
+  Ib:=MxfBase+MxfCur^.N;
+  MxfPIndexCbr;
+  MxfPKlvFill;
+  Ib:=MxfBase+MxfCur^.N-Ib;
+  { second passage pour fixer IndexByteCount }
+  MxfPartMB.N:=0;
+  MxfPPartition(Key,1,2,True,Ib,0);
+  MxfPKlvFill;
+  MxfPIndexCbr;
+  MxfPKlvFill;
+ End Else MxfPPartition(Key,0,0,True,0,0);
+ MxfWriteHeader:=MxfWPut(MxfPartMB.P,MxfPartMB.N);
+ MxfHdrEnd:=MxfWPos;
+End;
+
+{ ---- ecriture d'un paquet de contenu ---- }
+Function MxfEmit(VP: PEABuffer; VLen, VFl, VTref, VDisp: LongInt; AP: PEABuffer; ABytes: LongInt): Boolean;
+Var
+ E: ^TMxfEu;
+Begin
+ MxfEmit:=False;
+ If (MxfEubc>0) Then Begin
+  If VLen<>MxfScV.FrameSize Then Begin MxfMsg:='index CBR : taille d''image variable'; Exit; End;
+  If MxfHasAudio And (ABytes<>MxfScA.FrameSize) Then Begin MxfMsg:='index CBR : taille audio variable'; Exit; End;
+ End;
+ If Not MxfHdrWritten Then Begin
+  If Not MxfWriteHeader(False) Then Exit;
+  MxfHdrWritten:=True;
+ End;
+ If (MxfEubc=0) And (MxfEuN=0) Then Begin
+  { partition de corps unique }
+  MxfBase:=MxfWPos; MxfPartMB.N:=0; MxfCur:=@MxfPartMB;
+  MxfPKlvFill;
+  MxfBodyPartOfs:=MxfBase+MxfCur^.N;
+  MxfPPartition(MxfKeyBody,1,2,False,0,0);
+  MxfPKlvFill;
+  If Not MxfWPut(MxfPartMB.P,MxfPartMB.N) Then Exit;
+ End;
+ MxfEuGrow;
+ E:=@MxfEus^[MxfEuN];
+ { systeme + debut de l'element video }
+ MxfBase:=MxfWPos; MxfPartMB.N:=0; MxfCur:=@MxfPartMB;
+ MxfPKlvFill;
+ MxfPSystemItem(MxfEuN);
+ E^.Off:=MxfBodyOffset; E^.Slice:=0; E^.Tref:=VTref; E^.Flags:=VFl; E^.Disp:=VDisp; E^.Size:=VLen;
+ MxfBodyOffset:=MxfBodyOffset+MXF_KAG;
+ MxfPKlvFill;
+ MxfPN(MxfScV.El,16); MxfPBer4(VLen);
+ If Not MxfWPut(MxfPartMB.P,MxfPartMB.N) Then Exit;
+ If Not MxfWPut(VP,VLen) Then Exit;
+ MxfBodyOffset:=MxfBodyOffset+20+VLen+MxfFillSize(20+VLen);
+ If MxfHasAudio Then Begin
+  E^.Slice:=MxfBodyOffset-E^.Off;
+  MxfBase:=MxfWPos; MxfPartMB.N:=0; MxfCur:=@MxfPartMB;
+  MxfPKlvFill;
+  MxfPN(MxfScA.El,16); MxfPBer4(ABytes);
+  MxfPN(AP^,ABytes);
+  If Not MxfWPut(MxfPartMB.P,MxfPartMB.N) Then Exit;
+  MxfBodyOffset:=MxfBodyOffset+20+ABytes+MxfFillSize(20+ABytes);
+ End;
+ Inc(MxfEuN);
+ MxfEmit:=True;
+End;
+
+{ ---- file d'attente video ---- }
+Procedure MxfVqPush(P: PEABuffer; Len, Fl, Tref, Disp: LongInt);
+Begin
+ If MxfVqH+MxfVqN>=MxfVqCap Then Begin
+  If MxfVqH>0 Then Begin
+   Move(MxfVqA^[MxfVqH],MxfVqA^[0],MxfVqN*SizeOf(TMxfVqE)); MxfVqH:=0;
+  End;
+  If MxfVqN>=MxfVqCap Then Begin
+   MxfVqCap:=MxfVqCap*2+64;
+   ReallocMem(MxfVqA,MxfVqCap*SizeOf(TMxfVqE));
+  End;
+ End;
+ MxfVqA^[MxfVqH+MxfVqN].P:=P; MxfVqA^[MxfVqH+MxfVqN].Len:=Len; MxfVqA^[MxfVqH+MxfVqN].Fl:=Fl;
+ MxfVqA^[MxfVqH+MxfVqN].Tref:=Tref; MxfVqA^[MxfVqH+MxfVqN].Disp:=Disp;
+ Inc(MxfVqN);
+End;
+
+Procedure MxfAqPush(P: PEABuffer; N: LongInt);
+Begin
+ If MxfAqLen+N>MxfAqCap Then Begin
+  If MxfAqHead>0 Then Begin
+   Move(MxfAq^[MxfAqHead],MxfAq^[0],MxfAqLen-MxfAqHead); MxfAqLen:=MxfAqLen-MxfAqHead; MxfAqHead:=0;
+  End;
+  If MxfAqLen+N>MxfAqCap Then Begin
+   MxfAqCap:=(MxfAqLen+N)*2+65536;
+   ReallocMem(MxfAq,MxfAqCap);
+  End;
+ End;
+ Move(P^,MxfAq^[MxfAqLen],N); Inc(MxfAqLen,N);
+End;
+
+{ ecrit les paquets de contenu dont le bloc audio est disponible (Flush : complete par du silence) }
+Function MxfPump(Flush: Boolean): Boolean;
+Var Need, Avail: LongInt; Q: ^TMxfVqE; Tmp: PEABuffer; Ok: Boolean;
+Begin
+ MxfPump:=True;
+ While MxfVqN>0 Do Begin
+  Q:=@MxfVqA^[MxfVqH];
+  Need:=0; Tmp:=Nil;
+  If MxfHasAudio Then Begin
+   Need:=MxfAudioSamples(MxfEuN)*MxfWAudioBlk;
+   Avail:=MxfAqLen-MxfAqHead;
+   If Avail<Need Then Begin
+    If Not Flush Then Break;
+    GetMem(Tmp,Need+16);
+    FillChar(Tmp^,Need,0);
+    If Avail>0 Then Move(MxfAq^[MxfAqHead],Tmp^,Avail);
+    MxfAqHead:=MxfAqLen;
+    Ok:=MxfEmit(Q^.P,Q^.Len,Q^.Fl,Q^.Tref,Q^.Disp,Tmp,Need);
+    FreeMem(Tmp);
+   End Else Begin
+    Ok:=MxfEmit(Q^.P,Q^.Len,Q^.Fl,Q^.Tref,Q^.Disp,@MxfAq^[MxfAqHead],Need);
+    MxfAqHead:=MxfAqHead+Need;
+   End;
+  End Else Ok:=MxfEmit(Q^.P,Q^.Len,Q^.Fl,Q^.Tref,Q^.Disp,Nil,0);
+  FreeMem(Q^.P);
+  Inc(MxfVqH); Dec(MxfVqN);
+  If Not Ok Then Begin MxfPump:=False; MxfErr:=True; Exit; End;
+ End;
+End;
+
+Procedure MxfMuxCleanup;
+Var K: LongInt;
+Begin
+ If MxfWOpen Then Begin
+   Close(MxfWf); If IOResult<>0 Then ; 
+  MxfWOpen:=False;
+ End;
+ If MxfWOut<>Nil Then FreeMem(MxfWOut); MxfWOut:=Nil; MxfWOutN:=0;
+ MxfMbFree(MxfMetaMB); MxfMbFree(MxfSetMB); MxfMbFree(MxfTmpMB); MxfMbFree(MxfPartMB);
+ If MxfEus<>Nil Then FreeMem(MxfEus); MxfEus:=Nil; MxfEuN:=0; MxfEuCap:=0;
+ If MxfTOff<>Nil Then FreeMem(MxfTOff); MxfTOff:=Nil;
+ If MxfKOff<>Nil Then FreeMem(MxfKOff); MxfKOff:=Nil;
+ If MxfFlFin<>Nil Then FreeMem(MxfFlFin); MxfFlFin:=Nil;
+ If MxfVqA<>Nil Then Begin
+  For K:=0 To MxfVqN-1 Do If MxfVqA^[MxfVqH+K].P<>Nil Then FreeMem(MxfVqA^[MxfVqH+K].P);
+  FreeMem(MxfVqA);
+ End;
+ MxfVqA:=Nil; MxfVqN:=0; MxfVqH:=0; MxfVqCap:=0;
+ If MxfAq<>Nil Then FreeMem(MxfAq); MxfAq:=Nil; MxfAqCap:=0; MxfAqHead:=0; MxfAqLen:=0;
+ If MxfAvcSps<>Nil Then FreeMem(MxfAvcSps); MxfAvcSps:=Nil; MxfAvcSpsLen:=0;
+End;
+
+{ abandonne l'ecriture en cours (ferme le fichier sans le finaliser, libere la memoire) }
+Procedure MxfMuxAbort;
+Begin
+ MxfMuxCleanup;
+End;
+
+Procedure MxfRandInit;
+Var H, M, S, C, Y, Mo, D, Dw: Word; K: LongInt;
+Begin
+ GetTime(H,M,S,C); GetDate(Y,Mo,D,Dw);
+ MxfRandSeed2:=((H*60+M)*60+S)*100+C+LongInt(Y)*7919+Mo*104729+D*1299709+MxfRandSeed2*16807+12345;
+ If MxfCfg.Bitexact Then Begin
+  MxfUuidBase[0]:=$AD; MxfUuidBase[1]:=$AB; MxfUuidBase[2]:=$44; MxfUuidBase[3]:=$24; MxfUuidBase[4]:=$2F;
+  MxfUuidBase[5]:=$25; MxfUuidBase[6]:=$4D; MxfUuidBase[7]:=$C7; MxfUuidBase[8]:=$92; MxfUuidBase[9]:=$FF;
+  FillChar(MxfUmid,SizeOf(MxfUmid),0); MxfInstNo:=0; MxfTimestamp:=0;
+  Exit;
+ End;
+ For K:=0 To 9 Do Begin
+  MxfRandSeed2:=MxfRandSeed2*1103515245+12345;
+  MxfUuidBase[K]:=(MxfRandSeed2 Shr 16) And $FF;
+ End;
+ MxfUuidBase[6]:=(MxfUuidBase[6] And $0F) Or $40; MxfUuidBase[8]:=(MxfUuidBase[8] And $3F) Or $80;
+ For K:=0 To 14 Do Begin
+  MxfRandSeed2:=MxfRandSeed2*1103515245+12345;
+  MxfUmid[K]:=(MxfRandSeed2 Shr 16) And $FF;
+ End;
+ MxfRandSeed2:=MxfRandSeed2*1103515245+12345;
+ MxfInstNo:=(MxfRandSeed2 Shr 8) And $FFFFFF;
+ { horodatage : annee(16) mois(8) jour(8) heure(8) minute(8) seconde(8) msec/4(8) }
+ MxfTimestamp:=(Int64(Y) Shl 48) Or (Int64(Mo) Shl 40) Or (Int64(D) Shl 32) Or (Int64(H) Shl 24) Or (Int64(M) Shl 16) Or (Int64(S) Shl 8) Or (C*10 Div 4);
+End;
+
+Function MxfMuxOpen(Path: String; Var Cfg: TMxfMuxCfg): Boolean;
+Var Au: LongInt; Cbr: Boolean;
+Begin
+ MxfMuxOpen:=False;
+ MxfMuxCleanup;
+ MxfMsg:='';
+ MxfCfg:=Cfg;
+ If (Cfg.Codec<>MXF_C_MPEG2) And (Cfg.Codec<>MXF_C_H264) And (Cfg.Codec<>MXF_C_DNXHD) And (Cfg.Codec<>MXF_C_PRORES) And (Cfg.Codec<>MXF_C_MJPEG) Then Begin
+  MxfMsg:='codec video non supporte par le multiplexeur MXF'; Exit;
+ End;
+ If (Cfg.W<=0) Or (Cfg.H<=0) Or (Cfg.FpsN<=0) Or (Cfg.FpsD<=0) Then Begin MxfMsg:='parametres video invalides'; Exit; End;
+ If Cfg.AChans>0 Then Begin
+  If Cfg.AChans>8 Then Begin MxfMsg:='audio : 8 canaux maximum'; Exit; End;
+  If (Cfg.ABits<>16) And (Cfg.ABits<>24) Then Begin MxfMsg:='audio : 16 ou 24 bits seulement'; Exit; End;
+  If (Cfg.ARate<8000) Or (Cfg.ARate>192000) Then Begin MxfMsg:='audio : frequence invalide'; Exit; End;
+ End;
+ MxfReduce(MxfCfg.FpsN,MxfCfg.FpsD);
+ MxfHasAudio:=Cfg.AChans>0;
+ If MxfHasAudio Then MxfNS:=2 Else MxfNS:=1;
+ MxfWAudioBlk:=Cfg.AChans*Cfg.ABits Div 8;
+ MxfTcBase:=(MxfCfg.FpsN+MxfCfg.FpsD Div 2) Div MxfCfg.FpsD;
+ If MxfContentRate=0 Then ;
+ MxfDuration:=-1; MxfHdrWritten:=False; MxfFooterOfs:=0; MxfBodyOffset:=0; MxfBodyPartOfs:=0; MxfErr:=False;
+ MxfFrameN:=0; MxfGopBase:=0; MxfSawGop:=False;
+ FillChar(MxfScV,SizeOf(MxfScV),0); FillChar(MxfScA,SizeOf(MxfScA),0);
+ MxfScV.CompDepth:=8; MxfScV.HSub:=2; MxfScV.VSub:=2; MxfScV.ColorSiting:=$FF;
+ MxfScV.AspN:=Cfg.AspN; MxfScV.AspD:=Cfg.AspD;
+ If (MxfScV.AspN<=0) Or (MxfScV.AspD<=0) Then Begin MxfScV.AspN:=Cfg.W; MxfScV.AspD:=Cfg.H; MxfReduce(MxfScV.AspN,MxfScV.AspD); End;
+ MxfScV.VBitRate:=Cfg.BitRate;
+ MxfScV.Interlaced:=0; If Cfg.Interlaced<>0 Then Begin MxfScV.Interlaced:=1; MxfScV.FieldDom:=Cfg.Interlaced; End;
+ Case Cfg.Codec Of
+  MXF_C_MPEG2: Begin MxfLoadEc(MxfEcMpeg2,MxfScV); MxfScV.SeqClosedGop:=-1; End;
+  MXF_C_H264: MxfLoadEc(MxfEcH264,MxfScV);
+  MXF_C_DNXHD: Begin MxfLoadEc(MxfEcDnx,MxfScV); MxfScV.VSub:=1; MxfScV.ColorSiting:=0; End;
+  MXF_C_PRORES: Begin MxfLoadEc(MxfEcProres,MxfScV); MxfScV.CompDepth:=10; MxfScV.VSub:=1; MxfScV.ColorSiting:=0; End;
+  MXF_C_MJPEG: Begin MxfLoadEc(MxfEcMjpeg,MxfScV); MxfScV.ColorSiting:=3; End;
+ End;
+ If MxfHasAudio Then Begin
+  If Cfg.AMode=MXF_A_AES3 Then MxfLoadEc(MxfEcAes3,MxfScA) Else MxfLoadEc(MxfEcWav,MxfScA);
+  Au:=(Int64(Cfg.ARate)*MxfCfg.FpsD+MxfCfg.FpsN-1) Div MxfCfg.FpsN;   { arrondi superieur : taille de trame CBR comme ffmpeg }
+  MxfScA.FrameSize:=Cfg.AChans*Au*Cfg.ABits Div 8;
+  MxfEcCount:=2;
+ End Else MxfEcCount:=1;
+ { index CBR ? }
+ Cbr:=(Cfg.Cbr=1) Or ((Cfg.Cbr<0) And (Cfg.Codec=MXF_C_DNXHD));
+ If Cbr And MxfHasAudio And ((Int64(Cfg.ARate)*MxfCfg.FpsD) Mod MxfCfg.FpsN<>0) Then Cbr:=False;   { trames audio de taille variable }
+ If Cbr Then MxfEubc:=1 Else MxfEubc:=0;     { remplace par la vraie valeur a la premiere image }
+ If (Cfg.Codec=MXF_C_H264) And (Not Cfg.Annexb) Then Begin
+  If Not MxfLoadAvcc(Cfg.Extra,Cfg.ExtraLen) Then Begin MxfMsg:='H.264 AVCC : enregistrement avcC invalide ou absent (Cfg.Extra)'; MxfMuxCleanup; Exit; End;
+ End;
+ MxfRandInit;
+ GetMem(MxfWOut,1048576+64); MxfWOutN:=0;
+ MxfMbInit(MxfMetaMB); MxfMbInit(MxfSetMB); MxfMbInit(MxfTmpMB); MxfMbInit(MxfPartMB);
+ Assign(MxfWf,Path);
+ 
+ Rewrite(MxfWf,1);
+ If IOResult<>0 Then Begin  MxfMsg:='creation impossible : '+Path; MxfMuxCleanup; Exit; End;
+ 
+ MxfWOpen:=True; MxfWPos:=0;
+ MxfMuxOpen:=True;
+End;
+
+{ calcule l'EditUnitByteCount CBR a partir de la taille de la premiere image }
+Procedure MxfSetupCbr(VLen: LongInt);
+Var Eu: LongInt;
+Begin
+ MxfScV.FrameSize:=VLen;
+ MxfScV.SliceOff:=MXF_KAG;
+ Eu:=MXF_KAG+16+4+VLen; Eu:=Eu+MxfFillSize(Eu);
+ If MxfHasAudio Then Begin
+  MxfScA.SliceOff:=Eu;
+  Eu:=Eu+16+4+MxfScA.FrameSize; Eu:=Eu+MxfFillSize(Eu);
+ End;
+ MxfEubc:=Eu;
+End;
+
+{ configure les descripteurs a partir de la premiere image (profil, niveau, UL de codage) }
+Function MxfSetupFirst(Q: PEABuffer; Len: LongInt): Boolean;
+Var K, Cid, Depth, Pr, Lv: LongInt; Found: Boolean;
+Begin
+ MxfSetupFirst:=False;
+ Case MxfCfg.Codec Of
+  MXF_C_MPEG2: Begin
+   Pr:=MxfScV.Profile; Lv:=MxfScV.Level;
+   Pr:=Pr*16+Lv;
+   { UL de codage : MP-ML long GOP par defaut }
+   MxfScV.Co[13]:=$01; MxfScV.Co[14]:=$11; MxfScV.Co[15]:=0;
+   If Pr=$48 Then Begin MxfScV.Co[13]:=1; MxfScV.Co[14]:=$11; End
+   Else If Pr=$44 Then Begin MxfScV.Co[13]:=3; MxfScV.Co[14]:=3; End
+   Else If Pr=$46 Then Begin MxfScV.Co[13]:=5; MxfScV.Co[14]:=3; End
+   Else If Pr=$05 Then Begin MxfScV.Co[13]:=2; MxfScV.Co[14]:=3; End
+   Else If Pr=$02 Then Begin MxfScV.Co[13]:=4; MxfScV.Co[14]:=3; End;
+   MxfScV.Co[7]:=$03;
+   If MxfScV.Profile=0 Then MxfScV.VSub:=1;
+   If (MxfScV.Interlaced<>0) And (MxfScV.VSub=2) Then MxfScV.ColorSiting:=6;
+   If MxfScV.VSub=1 Then MxfScV.ColorSiting:=0;
+  End;
+  MXF_C_H264: Begin
+   Found:=False;
+   For K:=0 To 7 Do
+    If (MxfAvcTab[K*5]=MxfScV.Profile) And ((MxfAvcTab[K*5+1]<0) Or (MxfAvcTab[K*5+1]=MxfScV.CodecId)) Then Begin
+     MxfScV.Co[7]:=MxfAvcTab[K*5+4]; MxfScV.Co[13]:=MxfAvcTab[K*5+2]; MxfScV.Co[14]:=MxfAvcTab[K*5+3]; MxfScV.Co[15]:=1;
+     Found:=True;
+    End;
+   If Not Found Then Begin MxfMsg:='profil H.264 non supporte par le mapping MXF (SPS absent dans la premiere image ?)'; Exit; End;
+   If MxfScV.VSub=1 Then MxfScV.ColorSiting:=0;
+  End;
+  MXF_C_DNXHD: Begin
+   If Len<43 Then Begin MxfMsg:='image DNxHD trop courte'; Exit; End;
+   Cid:=MxfB32(Q,$28);
+   Found:=False;
+   For K:=0 To MXF_NDNX-1 Do
+    If MxfDnxTab[K*3]=Cid Then Begin
+     MxfScV.Co[13]:=MxfDnxTab[K*3+2]; MxfScV.Interlaced:=MxfDnxTab[K*3+1]; Found:=True;
+     Break;
+    End;
+   If Not Found Then Begin MxfMsg:='CID DNxHD inconnu'; Exit; End;
+   Depth:=0;
+   Case Q^[$21] Shr 5 Of 1: Depth:=8; 2: Depth:=10; 3: Depth:=12; End;
+   If Depth=0 Then Begin MxfMsg:='profondeur DNxHD inconnue'; Exit; End;
+   MxfScV.CompDepth:=Depth;
+   If Cid>=1270 Then Begin MxfScV.AspN:=MxfCfg.W; MxfScV.AspD:=MxfCfg.H; MxfReduce(MxfScV.AspN,MxfScV.AspD); End
+   Else Begin MxfScV.AspN:=16; MxfScV.AspD:=9; End;
+   If (Cid=1270) Or (Cid=1256) Then Begin MxfScV.HSub:=1; MxfScV.VSub:=1; End;
+  End;
+  MXF_C_PRORES: Begin
+   Pr:=MxfCfg.Profile;
+   If Pr<0 Then Begin
+    Pr:=3;
+    If (Len>=21) And ((Q^[20] Shr 6)=3) Then Pr:=4;
+   End;
+   If Pr>5 Then Pr:=5;
+   MxfScV.Co[14]:=1+Pr;
+   If Pr=4 Then Begin MxfScV.HSub:=1; MxfScV.VSub:=1; End;
+  End;
+ End;
+ MxfSetupFirst:=True;
+End;
+
+Function MxfMuxVideo(P: PEABuffer; Len: LongInt; IsKey: Boolean; Pts: LongInt): Boolean;
+Var
+ Q: PEABuffer; QLen, K, Fl, Tr, Disp, L, O, Cnt, Sz: LongInt;
+ HasSps: Boolean;
+Begin
+ MxfMuxVideo:=False;
+ If (Not MxfWOpen) Or MxfErr Then Begin If MxfMsg='' Then MxfMsg:='multiplexeur non ouvert'; Exit; End;
+ If Len<=0 Then Begin MxfMsg:='image vide'; Exit; End;
+ If Len>16000000 Then Begin MxfMsg:='image trop grande pour une longueur BER sur 4 octets (16 Mo)'; Exit; End;
+ { copie de travail ; H.264 AVCC -> Annex B avec insertion SPS/PPS aux images cles }
+ If (MxfCfg.Codec=MXF_C_H264) And (Not MxfCfg.Annexb) Then Begin
+  GetMem(Q,Len*2+MxfAvcSpsLen+64);
+  QLen:=0;
+  O:=0;
+  If IsKey Then Begin Move(MxfAvcSps^,Q^[0],MxfAvcSpsLen); QLen:=MxfAvcSpsLen; End;
+  While O+MxfAvcLenSz<=Len Do Begin
+   L:=0;
+   For K:=0 To MxfAvcLenSz-1 Do L:=(L Shl 8) Or P^[O+K];
+   Inc(O,MxfAvcLenSz);
+   If (L<=0) Or (O+L>Len) Then Break;
+   Q^[QLen]:=0; Q^[QLen+1]:=0; Q^[QLen+2]:=0; Q^[QLen+3]:=1; Inc(QLen,4);
+   Move(P^[O],Q^[QLen],L); Inc(QLen,L); Inc(O,L);
+  End;
+ End Else Begin
+  GetMem(Q,Len+64);
+  Move(P^,Q^,Len); QLen:=Len;
+ End;
+ Fl:=0; Tr:=0; Disp:=MxfFrameN;
+ Case MxfCfg.Codec Of
+  MXF_C_MPEG2: Begin
+   MxfSawGop:=False;
+   MxfParseMpeg2(Q,QLen,Fl,Tr);
+   If MxfSawGop Then MxfGopBase:=MxfFrameN;
+   Disp:=MxfGopBase+Tr;
+  End;
+  MXF_C_H264: Begin
+   MxfParseH264(Q,QLen,MxfFrameN>0,Fl,HasSps);
+   If Pts>=0 Then Disp:=Pts;
+  End;
+ Else Begin
+  Fl:=$80;
+  If Pts>=0 Then Disp:=Pts;
+ End;
+ End;
+ If MxfFrameN=0 Then Begin
+  If Not MxfSetupFirst(Q,QLen) Then Begin FreeMem(Q); Exit; End;
+  If MxfEubc>0 Then MxfSetupCbr(QLen);
+ End;
+ Inc(MxfFrameN);
+ MxfVqPush(Q,QLen,Fl,Tr,Disp);
+ MxfMuxVideo:=MxfPump(False);
+End;
+
+Function MxfMuxAudio(P: PEABuffer; Bytes: LongInt): Boolean;
+Begin
+ MxfMuxAudio:=False;
+ If (Not MxfWOpen) Or MxfErr Then Begin If MxfMsg='' Then MxfMsg:='multiplexeur non ouvert'; Exit; End;
+ If Not MxfHasAudio Then Begin MxfMsg:='audio non declare dans MxfMuxOpen'; Exit; End;
+ If Bytes<=0 Then Begin MxfMuxAudio:=True; Exit; End;
+ MxfAqPush(P,Bytes);
+ { l'audio est coupe aux images : le surplus apres la derniere image est abandonne }
+ MxfMuxAudio:=MxfPump(False);
+End;
+
+Function MxfMuxClose: Boolean;
+Var
+ Ok: Boolean;
+ K, Cnt, Nb: LongInt;
+ PackAt, IdxStart, TotIdx: LongInt;
+ Pos0, RipAt: Int64;
+ B8: Array[0..7] of Byte;
+ V: Int64;
+Begin
+ MxfMuxClose:=False;
+ If Not MxfWOpen Then Begin If MxfMsg='' Then MxfMsg:='multiplexeur non ouvert'; Exit; End;
+ Ok:=Not MxfErr;
+ If Ok Then Ok:=MxfPump(True);
+ If Ok And (MxfEuN=0) Then Begin MxfMsg:='aucune image ecrite'; Ok:=False; End;
+ If Ok Then Begin
+  MxfDuration:=MxfEuN;
+  If MxfEubc=0 Then MxfFinalizeIndex;
+  { partition de pied (+ index VBR) + RIP }
+  MxfBase:=MxfWPos; MxfPartMB.N:=0; MxfCur:=@MxfPartMB;
+  MxfPKlvFill;
+  MxfFooterOfs:=MxfBase+MxfCur^.N;
+  PackAt:=MxfCur^.N;
+  If MxfEubc>0 Then MxfPPartition(MxfKeyFooter,0,0,False,0,0)
+  Else MxfPPartition(MxfKeyFooter,0,2,False,0,MxfBodyPartOfs);
+  If MxfEubc=0 Then Begin
+   MxfPKlvFill;
+   IdxStart:=MxfCur^.N;
+   K:=0;
+   While K<MxfEuN Do Begin
+    Cnt:=MxfEuN-K; If Cnt>1000 Then Cnt:=1000;
+    MxfPIndexSeg(K,Cnt);
+    MxfPKlvFill;
+    Inc(K,Cnt);
+   End;
+   TotIdx:=MxfCur^.N-IdxStart;
+   V:=TotIdx;
+   For K:=7 Downto 0 Do Begin MxfPartMB.P^[PackAt+60+K]:=V And $FF; V:=V Shr 8; End;
+   { IndexSID du pied : octets suivants }
+   MxfPartMB.P^[PackAt+68]:=0; MxfPartMB.P^[PackAt+69]:=0; MxfPartMB.P^[PackAt+70]:=0; MxfPartMB.P^[PackAt+71]:=2;
+  End;
+  MxfPKlvFill;
+  { RIP }
+  If MxfEubc>0 Then Nb:=0 Else Nb:=1;
+  RipAt:=MxfBase+MxfCur^.N;
+  MxfPN(MxfKeyRip,16);
+  MxfPBer(28+12*Nb);
+  If MxfEubc>0 Then MxfP32(1) Else MxfP32(0);
+  MxfP64(0);
+  If Nb>0 Then Begin MxfP32(1); MxfP64(MxfBodyPartOfs); End;
+  MxfP32(0); MxfP64(MxfFooterOfs);
+  MxfP32(MxfBase+MxfCur^.N-RipAt+4);
+  Ok:=MxfWPut(MxfPartMB.P,MxfPartMB.N);
+  { en-tete definitif (ferme) a la place de l'en-tete ouvert }
+  If Ok Then Begin
+   Pos0:=MxfHdrEnd;
+   Ok:=MxfWSeek(0);
+   If Ok Then Ok:=MxfWriteHeader(True);
+   If Ok And (MxfHdrEnd<>Pos0) Then Begin MxfMsg:='taille d''en-tete incoherente'; Ok:=False; End;
+  End;
+  If Ok And (MxfEubc=0) Then Begin
+   { champ FooterPartition de la partition de corps }
+   V:=MxfFooterOfs;
+   For K:=7 Downto 0 Do Begin B8[K]:=V And $FF; V:=V Shr 8; End;
+   Ok:=MxfWSeek(MxfBodyPartOfs+44);
+   If Ok Then Ok:=MxfWPut(@B8,8);
+  End;
+  If Ok Then Ok:=MxfWFlush;
+ End;
+ MxfMuxCleanup;
+ MxfMuxClose:=Ok;
+End;
+
+{$POP}
 {$IFDEF FPC}
 { Colle entre le demultiplexeur TS / flux bruts (pe_ts.pas, pe_rawes.pas) et le programme :
   sonde, extraction video convertie en echantillons AVCC/HVCC, extraction audio.
@@ -33583,27 +37224,12 @@ Begin
 End;
 
 { Raw=False : Src = TS ; Raw=True : Src = flux elementaire. Dst = nom de base des fichiers temporaires. }
-Procedure TsEngVideo(Const Src,Dst: String; Raw: Boolean);
+{ Partie commune : Es = fichier d'essence video, Idx[0..N-1] = unites d'acces (Off/Size/Flags, Pts/Dts en 90 kHz) }
+Procedure TsEngVideoCommon(Const Es,Dst: String; Raw: Boolean; Codec: LongInt; Idx: PRawEsIdxArr; N: LongInt);
 Var
- Hdr: TRawEsIdxHdr; Idx: PRawEsIdxArr; N,I,MaxSz,Len,Pos,CvLen: LongInt; Buf,Cv: PEABuffer;
- Pr: TRawEsParams; Key: Boolean; Es,Cvf: String; Codec: LongInt; Ok: Boolean; Dt: Int64;
+ I,MaxSz,Len,Pos,CvLen: LongInt; Buf,Cv: PEABuffer;
+ Pr: TRawEsParams; Key: Boolean; Cvf: String; Dt: Int64;
 Begin
- TsGFree; TsGTemp:=False; TsGCfgLen:=0; TsGEsPath:='';
- Idx:=Nil; N:=0;
- If Raw Then Begin
-  RawEsLoad(Src,0,TsGRaw,Idx,N);
-  Codec:=TsGRaw.Codec; TsGW:=TsGRaw.Width; TsGH:=TsGRaw.Height; TsGFpsN:=TsGRaw.FpsNum; TsGFpsD:=TsGRaw.FpsDen;
-  Es:=Src;
- End Else Begin
-  Es:=Dst+'.es';
-  TSWriteIdx:=True;
-  TSExtract(Src,-2,-1,Es,'');
-  Ok:=RawEsReadIdx(Es+'.idx',Hdr,Idx,N);
-  If Not Ok Then Fail('Aucun flux video dans ce fichier TS.');
-  Codec:=Hdr.Codec; TsGW:=Hdr.P1; TsGH:=Hdr.P2; TsGFpsN:=Hdr.P3; TsGFpsD:=Hdr.P4;
-  TsGVStart:=TSExt.VStartPts;
-  DelFile(Es+'.idx');
- End;
  If (N<=0) Or (Idx=Nil) Then Fail('Aucune image video trouvee.');
  TsGVCodec:=Codec;
  TsGN:=N;
@@ -33645,6 +37271,56 @@ Begin
   TsGEsPath:=Es; TsGTemp:=Not Raw;
  End;
  RawEsFreeIdx(Idx,N);
+End;
+
+Procedure TsEngVideo(Const Src,Dst: String; Raw: Boolean);
+Var Hdr: TRawEsIdxHdr; Idx: PRawEsIdxArr; N: LongInt; Es: String; Ok: Boolean;
+Begin
+ TsGFree; TsGTemp:=False; TsGCfgLen:=0; TsGEsPath:='';
+ Idx:=Nil; N:=0;
+ If Raw Then Begin
+  RawEsLoad(Src,0,TsGRaw,Idx,N);
+  TsGW:=TsGRaw.Width; TsGH:=TsGRaw.Height; TsGFpsN:=TsGRaw.FpsNum; TsGFpsD:=TsGRaw.FpsDen;
+  TsEngVideoCommon(Src,Dst,True,TsGRaw.Codec,Idx,N);
+ End Else Begin
+  Es:=Dst+'.es';
+  TSWriteIdx:=True;
+  TSExtract(Src,-2,-1,Es,'');
+  Ok:=RawEsReadIdx(Es+'.idx',Hdr,Idx,N);
+  If Not Ok Then Fail('Aucun flux video dans ce fichier TS.');
+  TsGW:=Hdr.P1; TsGH:=Hdr.P2; TsGFpsN:=Hdr.P3; TsGFpsD:=Hdr.P4;
+  TsGVStart:=TSExt.VStartPts;
+  DelFile(Es+'.idx');
+  TsEngVideoCommon(Es,Dst,False,Hdr.Codec,Idx,N);
+ End;
+End;
+
+{ MXF : essence video extraite par MxfExtract (H.264 Annex B, MPEG-2, ProRes) }
+Var TsGMxfInfo: TMxfInfo;
+Procedure MxfEngVideo(Const Src,Dst: String);
+Var Es,IdxF: String; F: File; N,I,Vi: LongInt; Idx: PRawEsIdxArr; Rec: Array[0..4] Of LongInt; Codec: LongInt; Nm: String; Fn,Fd: LongInt; Ts90: Int64;
+Begin
+ TsGFree; TsGTemp:=False; TsGCfgLen:=0; TsGEsPath:='';
+ Es:=Dst+'.es'; IdxF:=Dst+'.idx';
+ If Not MxfExtract(Src,Es,'',IdxF,1,-1,TsGMxfInfo) Then Fail('MXF : '+MxfMsg);
+ Vi:=-1; For I:=0 To TsGMxfInfo.NTrk-1 Do If (Vi<0) And (TsGMxfInfo.Trk[I].Kind=MXF_K_VIDEO) Then Vi:=I;
+ If Vi<0 Then Fail('MXF : aucune piste video.');
+ Nm:=TsGMxfInfo.Trk[Vi].Name; TsGW:=TsGMxfInfo.Trk[Vi].W; TsGH:=TsGMxfInfo.Trk[Vi].H;
+ Fn:=TsGMxfInfo.Trk[Vi].FpsN; Fd:=TsGMxfInfo.Trk[Vi].FpsD; If (Fn<=0) Or (Fd<=0) Then Begin Fn:=25; Fd:=1; End;
+ TsGFpsN:=Fn; TsGFpsD:=Fd;
+ If Nm='h264' Then Codec:=RawEsCH264 Else If Nm='mpeg2video' Then Codec:=RawEsCMpeg2 Else If Nm='prores' Then Codec:=100
+ Else Begin DelFile(Es); DelFile(IdxF); Fail('MXF : codec video '+Nm+' non decode (H.264, MPEG-2 et ProRes seulement).'); End;
+ { index : 5 LongInt par image (Off, Taille, PTS, DTS, Cle), PTS/DTS en images -> 90 kHz }
+ OpenRead(IdxF); N:=InputSize Div 20;
+ If N<=0 Then Fail('MXF : aucune image video.');
+ GetMem(Idx,N*SizeOf(TRawEsIdx)+64);
+ Ts90:=90000;
+ For I:=0 To N-1 Do Begin
+  ReadAt(I*20,Rec,20);
+  Idx^[I].Off:=Rec[0]; Idx^[I].Size:=Rec[1]; Idx^[I].Pts:=Int64(Rec[2])*Fd*Ts90 Div Fn; Idx^[I].Dts:=Int64(Rec[3])*Fd*Ts90 Div Fn; Idx^[I].Flags:=Rec[4] And 1;
+ End;
+ CloseRead; DelFile(IdxF);
+ TsEngVideoCommon(Es,Dst,False,Codec,Idx,N);
 End;
 
 Procedure TsEngAudio(Const Src,Dst: String);
@@ -108624,7 +112300,7 @@ End;
 { Colle entre l'interface et les moteurs audio                             }
 { ====================================================================== }
 Const
- ekMP3 = 1; ekAIFF = 2; ekVOC = 3; ekMOD = 4; ekEncMP3 = 5; ekAAC = 6; ekEncAAC = 7; ekAC3 = 8; ekEncAC3 = 9; ekOgg = 10; ekEncVorbis = 11; ekVorbisPk = 12; ekDca = 13; ekWma = 14; ekEncWma = 15; ekEncMpeg4 = 16; ekEncTheora = 17; ekEncWmv = 18; ekEncMpeg1 = 19; ekDecVid = 20; ekMpa = 21; ekEncMp2 = 22; ekWmaAvi = 23; ekAsfSpool = 24; ekOpusPk = 25; ekOpusOgg = 26; ekEncH263 = 27; ekTsProbe = 28; ekRawProbe = 29; ekTsVideo = 30; ekRawVideo = 31; ekTsAudio = 32;
+ ekMP3 = 1; ekAIFF = 2; ekVOC = 3; ekMOD = 4; ekEncMP3 = 5; ekAAC = 6; ekEncAAC = 7; ekAC3 = 8; ekEncAC3 = 9; ekOgg = 10; ekEncVorbis = 11; ekVorbisPk = 12; ekDca = 13; ekWma = 14; ekEncWma = 15; ekEncMpeg4 = 16; ekEncTheora = 17; ekEncWmv = 18; ekEncMpeg1 = 19; ekDecVid = 20; ekMpa = 21; ekEncMp2 = 22; ekWmaAvi = 23; ekAsfSpool = 24; ekOpusPk = 25; ekOpusOgg = 26; ekEncH263 = 27; ekTsProbe = 28; ekRawProbe = 29; ekTsVideo = 30; ekRawVideo = 31; ekTsAudio = 32; ekMxfVideo = 33;
 
 Type
  TByteArr = Array[0..32767] Of Byte;
@@ -108710,6 +112386,7 @@ Begin
    ekTsVideo: TsEngVideo(Src,Dst,False);
    ekRawVideo: TsEngVideo(Src,Dst,True);
    ekTsAudio: TsEngAudio(Src,Dst);
+   ekMxfVideo: MxfEngVideo(Src,Dst);
    ekEncH263: Begin H3ERv:=0; InputPath:=Src; HasVideoBitrate:=True; VideoBitrate:=Abs(Arg)*1000; EncodeH263(Src,Dst,Arg<0); End;
    ekOpusOgg: OpDecodeOgg(Src,Dst);
    ekEncVorbis: Begin VGStrictExp:=True; EncodeVorbisNative(Src,Dst); End;
@@ -108747,7 +112424,7 @@ Begin
   End;
   RunEng:=True;
  End Else Begin
-  If (Kind>=ekTsProbe) And (Kind<=ekTsAudio) Then TSCleanup;
+  If (Kind>=ekTsProbe) And (Kind<=ekMxfVideo) Then TSCleanup;
   If (Kind=ekAAC) Or (Kind=ekEncAAC) Or ((Kind>=ekAC3) And (Kind<ekTsProbe)) Then AacCleanup(True);
   If EngSpool<>'' Then Begin DelFile(EngSpool); EngSpool:=''; End;
   NtCleanup;
@@ -108758,6 +112435,33 @@ Begin
  Err:='Moteur audio indisponible dans la version Turbo Pascal.'; RunEng:=False;
  {$ENDIF}
 End;
+
+{$IFDEF FPC}
+Var ProbeMxfInfo: TMxfInfo;
+Procedure ProbeMxfMedia(Var M: TMedia);
+Var I: LongInt; HaveV,HaveA: Boolean;
+ Function VName(Const C: String): String;
+ Begin
+  If C='h264' Then VName:='H.264' Else If C='mpeg2video' Then VName:='MPEG-2' Else If C='dnxhd' Then VName:='DNxHD'
+  Else If C='prores' Then VName:='ProRes' Else If C='mjpeg' Then VName:='MJPEG' Else VName:=C;
+ End;
+Begin
+ M.Fmt:='MXF'; HaveV:=False; HaveA:=False;
+ If Not MxfProbe(M.Path,ProbeMxfInfo) Then Begin M.Msg:=Copy(MxfMsg,1,90); M.Kind:=0; Exit; End;
+ M.DurMs:=ProbeMxfInfo.DurMs;
+ For I:=0 To ProbeMxfInfo.NTrk-1 Do Begin
+  If (ProbeMxfInfo.Trk[I].Kind=MXF_K_VIDEO) And Not HaveV Then Begin
+   HaveV:=True; M.VCodec:=VName(ProbeMxfInfo.Trk[I].Name); M.W:=ProbeMxfInfo.Trk[I].W; M.H:=ProbeMxfInfo.Trk[I].H;
+   If ProbeMxfInfo.Trk[I].FpsD>0 Then M.FpsX100:=Round(ProbeMxfInfo.Trk[I].FpsN*100.0/ProbeMxfInfo.Trk[I].FpsD);
+   M.Frames:=ProbeMxfInfo.Trk[I].Frames;
+  End Else If (ProbeMxfInfo.Trk[I].Kind=MXF_K_AUDIO) And Not HaveA Then Begin
+   HaveA:=True; M.ACodec:=ProbeMxfInfo.Trk[I].Name; If Copy(M.ACodec,1,3)='pcm' Then M.ACodec:='PCM';
+   M.Chans:=ProbeMxfInfo.Trk[I].Chans; M.Rate:=ProbeMxfInfo.Trk[I].Rate; M.Bits:=ProbeMxfInfo.Trk[I].Bits;
+  End;
+ End;
+ If HaveV Then M.Kind:=2 Else M.Kind:=1;
+End;
+{$ENDIF}
 
 {$IFDEF FPC}
 { Sonde d'un fichier TS / M2TS / MTS (Raw=False) ou d'un flux elementaire brut (Raw=True) }
@@ -109486,6 +113190,11 @@ Begin
  End
  {$ENDIF}
  {$IFDEF FPC}
+ Else If F='MXF' Then Begin
+  T1:=TmpName('WAV'); MxfMerge:=True; MxfWavKeep:=False;
+  If MxfExtract(M.Path,'',T1,'',-1,0,ProbeMxfInfo) Then GetPcm:=NormalizeWav(T1,Dst,Err) Else Err:='MXF : '+MxfMsg;
+  DelFile(T1);
+ End
  Else If F='TS' Then Begin
   T1:=TmpName('AUD'); T2:=TmpName('WAV');
   If RunEng(ekTsAudio,M.Path,T1,0,Err) Then Begin
@@ -110936,7 +114645,7 @@ Begin
    StageLo:=0; StageHi:=100;
    DoConvert:=RunImageJob(M,Pr,Dst,Err);
   End Else Err:='Le d'#233'codeur vid'#233'o n''est pas inclus : seules les images BMP/GIF peuvent '#234'tre converties en image.';
- End Else If InList(Pr.Ext,'MP4,MOV,M4V,3GP,3G2,TS,M2TS,MTS,FLV,MKV,AVI,WMV,OGV,MPG,WEBM') Then Begin
+ End Else If InList(Pr.Ext,'MP4,MOV,M4V,3GP,3G2,TS,M2TS,MTS,MXF,FLV,MKV,AVI,WMV,OGV,MPG,WEBM') Then Begin
   {$IFDEF FPC}
   If M.Kind=1 Then Err:='Un fichier audio ne peut pas devenir une vid'#233'o. Choisissez un profil Audio.'
   Else If (M.Kind=3) Or (M.Fmt='GIF') Then Begin StageLo:=0; StageHi:=90; DoConvert:=ImageVideoJob(M,Pr,Dst,Err); End
@@ -111402,7 +115111,7 @@ Var
  VOk: Boolean;
  VErr: String;
 
-Function TsVideoTracks(Const Path: String; Raw,Head: Boolean; Var V: TTrkIn; Var Err: String): Boolean; Forward;
+Function TsVideoTracks(Const Path,Fmt: String; Head: Boolean; Var V: TTrkIn; Var Err: String): Boolean; Forward;
 Procedure TsDropFiles; Forward;
 
 Procedure TrkClear(Var T: TTrkIn);
@@ -112285,14 +115994,14 @@ Begin
  Else If Fmt='FLV' Then Ok:=FlvTracks(Path,V,A,Err)
  Else If Fmt='AVI' Then Begin Ok:=AviTracks(Path,V,Err); FillChar(A,SizeOf(A),0); End
  Else If InList(Fmt,'MKV,WEBM') Then Ok:=MkvTracks(Path,V,A,Err)
- Else If InList(Fmt,'TS,ES') Then Begin Ok:=TsVideoTracks(Path,Fmt='ES',True,V,Err); FillChar(A,SizeOf(A),0); End
+ Else If InList(Fmt,'TS,ES,MXF') Then Begin Ok:=TsVideoTracks(Path,Fmt,True,V,Err); FillChar(A,SizeOf(A),0); End
  Else Begin VideoFirstFrame:=Y4mFirstFrame(Path,Fmt,''); Exit; End;
  If Not Ok Then Exit;
  Md:=VideoMode(Fmt,V);
  If V.Ok And (Md<0) Then Begin VideoFirstFrame:=Y4mFirstFrame(Path,Fmt,V.Codec); TrkClear(V); TrkClear(A); TsDropFiles; Exit; End;
  If V.Ok And (Md>=0) Then Begin
   VFrameCb:=FFCallback; SaveStop:=Stopped; Stopped:=False;
-  If InList(Fmt,'TS,ES') Then Ok:=DecodeVideoTrack(TsGEsPath,V,0,Md,Err) Else Ok:=DecodeVideoTrack(Path,V,0,Md,Err);
+  If InList(Fmt,'TS,ES,MXF') Then Ok:=DecodeVideoTrack(TsGEsPath,V,0,Md,Err) Else Ok:=DecodeVideoTrack(Path,V,0,Md,Err);
   Stopped:=SaveStop;
   VFrameCb:=Nil;
  End;
@@ -113196,15 +116905,18 @@ End;
 { ---------------------------------------------------------------------- }
 { MPEG-TS / M2TS / MTS et flux elementaires bruts : entree video et sortie TS }
 { ---------------------------------------------------------------------- }
+Var MxfWavPath: String;
+
 Procedure TsDropFiles;
 Begin
+ If MxfWavPath<>'' Then Begin DelFile(MxfWavPath); MxfWavPath:=''; End;
  If TsGTemp And (TsGEsPath<>'') Then DelFile(TsGEsPath);
  TsGEsPath:=''; TsGTemp:=False; TsGFree;
 End;
 
 { Head=True : seuls les premiers Mo du fichier sont utilises (miniature, apercu). }
-Function TsVideoTracks(Const Path: String; Raw,Head: Boolean; Var V: TTrkIn; Var Err: String): Boolean;
-Var Src,Base,HeadF: String; I,Rd,Sz: LongInt; Ok: Boolean; F,G: File; Buf: PBArr; Got: Word;
+Function TsVideoTracks(Const Path,Fmt: String; Head: Boolean; Var V: TTrkIn; Var Err: String): Boolean;
+Var Src,Base,HeadF: String; I,Rd,Sz: LongInt; Ok,Raw: Boolean; F,G: File; Buf: PBArr; Got: Word;
 Begin
  TsVideoTracks:=False; TsDropFiles; Src:=Path; HeadF:='';
  If Head Then Begin
@@ -113220,7 +116932,9 @@ Begin
   End Else HeadF:='';
  End;
  Base:=TmpName('TSX');
- If Raw Then Ok:=RunEng(ekRawVideo,Src,Base,0,Err) Else Ok:=RunEng(ekTsVideo,Src,Base,0,Err);
+ Raw:=Fmt='ES';
+ If Fmt='MXF' Then Ok:=RunEng(ekMxfVideo,Src,Base,0,Err)
+ Else If Raw Then Ok:=RunEng(ekRawVideo,Src,Base,0,Err) Else Ok:=RunEng(ekTsVideo,Src,Base,0,Err);
  If (HeadF<>'') And (Not (Raw And (TsGEsPath=Src))) Then DelFile(HeadF);
  If (HeadF<>'') And Raw And (TsGEsPath=Src) Then TsGTemp:=True;
  If Not Ok Then Begin TsDropFiles; Exit; End;
@@ -113233,6 +116947,7 @@ Begin
  Else If TsGVCodec=RawEsCHEVC Then V.Codec:='hvc1'
  Else If TsGVCodec=RawEsCMpeg1 Then V.Codec:='mpg1'
  Else If TsGVCodec=RawEsCMpeg2 Then V.Codec:='mpg2'
+ Else If TsGVCodec=100 Then V.Codec:='apch'
  Else Begin TrkClear(V); TsDropFiles; Err:='Codec video non pris en charge dans ce flux (VC-1).'; Exit; End;
  If TsGCfgLen>0 Then Begin
   If TsGCfgLen>SizeOf(V.Cfg) Then TsGCfgLen:=SizeOf(V.Cfg);
@@ -113310,6 +117025,104 @@ Begin
   DelFile(Dst);
  End;
  For K:=0 To NT-1 Do If Tr[K].Opened Then Begin Close(Tr[K].F); Tr[K].Opened:=False; End;
+End;
+
+{ ---------------------------------------------------------------------- }
+{ Sortie MXF OP1a (video H.264 / DNxHD / ProRes + audio PCM 48 kHz)          }
+{ ---------------------------------------------------------------------- }
+Function PrepareMxfAudio(Var M: TMedia; Const Pr: TProf; StartMs,EndMs: LongInt; Var Err: String): Boolean;
+Var T1,T2: String; SP,AP: TAP;
+Begin
+ PrepareMxfAudio:=False; MxfWavPath:='';
+ T1:=TmpName('WAV'); T2:=TmpName('WAV');
+ If Not GetPcm(M,T1,Err) Then Begin DelFile(T1); Exit; End;
+ FillChar(SP,SizeOf(SP),0); SP.Vol:=100; SP.Speed:=100;
+ BuildAP(M,Pr,AP,SP);
+ AP.StartMs:=StartMs; AP.EndMs:=EndMs; AP.OutRate:=48000;
+ If (AP.OutCh<1) Or (AP.OutCh>2) Then AP.OutCh:=2;
+ If Not ProcessWav(T1,T2,AP,Err) Then Begin DelFile(T1); DelFile(T2); Exit; End;
+ DelFile(T1);
+ MxfWavPath:=T2; PrepareMxfAudio:=True;
+End;
+
+Function GcdL(A,B: LongInt): LongInt;
+Var T: LongInt;
+Begin
+ While B<>0 Do Begin T:=A Mod B; A:=B; B:=T; End;
+ GcdL:=A;
+End;
+
+Function MuxMxf(Const Dst: String; Var Tr: Array Of TMuxTrk; NT: Integer; Var Err: String): Boolean;
+Var
+ Cfg: TMxfMuxCfg; V: PTrkIn; Cod: String; I,Len,Gc,Total,Fn,Fd,MinC: LongInt; Buf: PBArr; Ok,Open,HaveA: Boolean;
+ FW: File; Wi: TWavInfo; AErr: String; Disp: LongInt; AudPos,AudSent,Target,Chunk,Got: LongInt; Pb: PBArr; Dp: Int64; Dummy: Boolean;
+Begin
+ MuxMxf:=False; Ok:=True; Open:=False; HaveA:=False; V:=Tr[0].T; Cod:=V^.Codec;
+ FillChar(Cfg,SizeOf(Cfg),0);
+ If Cod='avc1' Then Cfg.Codec:=MXF_C_H264
+ Else If (Cod='AVdn') Or (Cod='AVdh') Then Cfg.Codec:=MXF_C_DNXHD
+ Else If InList(Cod,'apco,apcs,apcn,apch,ap4h') Then Cfg.Codec:=MXF_C_PRORES
+ Else Begin Err:='Codec video '+Cod+' non pris en charge dans un fichier MXF (H.264, DNxHD, ProRes).'; Ok:=False; End;
+ If Ok Then Begin
+  Fn:=V^.Ts; Fd:=V^.Dur^[Tr[0].First]; If Fd<=0 Then Fd:=1;
+  Gc:=GcdL(Fn,Fd); If Gc>1 Then Begin Fn:=Fn Div Gc; Fd:=Fd Div Gc; End;
+  Cfg.W:=V^.W; Cfg.H:=V^.H; Cfg.FpsN:=Fn; Cfg.FpsD:=Fd; Cfg.Cbr:=-1; Cfg.Bitexact:=False;
+  If Cfg.Codec=MXF_C_H264 Then Begin Cfg.Annexb:=False; Cfg.Extra:=PEABuffer(@V^.Cfg); Cfg.ExtraLen:=V^.CfgLen; End;
+  If Cfg.Codec=MXF_C_PRORES Then Begin
+   If Cod='apco' Then Cfg.Profile:=0 Else If Cod='apcs' Then Cfg.Profile:=1 Else If Cod='apcn' Then Cfg.Profile:=2
+   Else If Cod='apch' Then Cfg.Profile:=3 Else Cfg.Profile:=4;
+  End;
+  If MxfWavPath<>'' Then Begin
+   If OpenWavIn(MxfWavPath,FW,Wi,AErr) Then Begin
+    HaveA:=True; Cfg.AChans:=Wi.Ch; Cfg.ARate:=Wi.Rate; Cfg.ABits:=Wi.Bits; Cfg.AMode:=MXF_A_BWF;
+    Seek(FW,Wi.DataOfs);
+   End;
+  End;
+  If Tr[0].Mem=Nil Then Begin
+   If Not OpenSrc(Tr[0].Path,Tr[0].F) Then Begin Err:='Source illisible.'; Ok:=False; End Else Tr[0].Opened:=True;
+  End;
+ End;
+ If Ok Then Begin
+  Cfg.Company:='Gladir'; Cfg.Product:='ANYMP4';
+  If Not MxfMuxOpen(Dst,Cfg) Then Begin Err:='MXF : '+MxfMsg; Ok:=False; End Else Open:=True;
+ End;
+ If Ok Then Begin
+  MinC:=0; For I:=Tr[0].First To Tr[0].Last Do If V^.Cts^[I]<MinC Then MinC:=V^.Cts^[I];
+  Total:=Tr[0].Last-Tr[0].First+1; Dp:=0; AudSent:=0; GetMem(Pb,65536);
+  For I:=Tr[0].First To Tr[0].Last Do Begin
+   Buf:=MuxFetch(Tr[0],I,Len);
+   Disp:=Round((Dp+V^.Cts^[I]-MinC)/V^.Dur^[I]);
+   If Not MxfMuxVideo(PEABuffer(Buf),Len,V^.Sync^[I]<>0,Disp) Then Begin Err:='MXF : '+MxfMsg; Ok:=False; Break; End;
+   Inc(Dp,V^.Dur^[I]);
+   If HaveA Then Begin
+    { audio correspondant a l'image }
+    Target:=Round(Dp*1.0/V^.Ts*Wi.Rate)*Wi.Align;
+    If Target>Wi.DataLen Then Target:=Wi.DataLen;
+    While AudSent<Target Do Begin
+     Chunk:=Target-AudSent; If Chunk>65536 Then Chunk:=65536;
+     {$I-}BlockRead(FW,Pb^,Chunk,Got);{$I+}
+     If (IOResult<>0) Or (Got=0) Then Begin AudSent:=Target; Break; End;
+     If Not MxfMuxAudio(PEABuffer(Pb),Got) Then Begin Err:='MXF : '+MxfMsg; Ok:=False; Break; End;
+     Inc(AudSent,Got);
+    End;
+    If Not Ok Then Break;
+   End;
+   If ((I-Tr[0].First) And 15)=0 Then Begin UiTick(I-Tr[0].First,Max(1,Total)); If Stopped Then Begin Ok:=False; Break; End; End;
+  End;
+  FreeMem(Pb,65536);
+ End;
+ If Open Then Begin
+  If Ok Then Begin If Not MxfMuxClose Then Begin Err:='MXF : '+MxfMsg; Ok:=False; End; End
+  Else MxfMuxAbort;
+ End;
+ If HaveA Then Close(FW);
+ If Tr[0].Opened Then Begin Close(Tr[0].F); Tr[0].Opened:=False; End;
+ If MxfWavPath<>'' Then Begin DelFile(MxfWavPath); MxfWavPath:=''; End;
+ If Ok Then MuxMxf:=True
+ Else Begin
+  If Err='' Then If Stopped Then Err:='Conversion annul'#233'e.' Else Err:='Erreur de multiplexage MXF.';
+  DelFile(Dst);
+ End;
 End;
 {$ENDIF}
 
@@ -113484,6 +117297,7 @@ Begin
  Else If Ext='MKV' Then MuxOut:=MuxMkv(Dst,'matroska',Tr,NT,Err)
  Else If Ext='WEBM' Then MuxOut:=MuxMkv(Dst,'webm',Tr,NT,Err)
  Else If InList(Ext,'TS,M2TS,MTS') Then MuxOut:=MuxTs(Dst,Tr,NT,Err)
+ Else If Ext='MXF' Then MuxOut:=MuxMxf(Dst,Tr,NT,Err)
  Else MuxOut:=MuxMp4(Dst,BrandFor(Ext,False),Tr,NT,Err);
 End;
 
@@ -113606,7 +117420,7 @@ Begin
  Else If Fmt='FLV' Then Ok:=FlvTracks(M.Path,V,A,Err)
  Else If Fmt='AVI' Then Begin Ok:=AviTracks(M.Path,V,Err); FillChar(A,SizeOf(A),0); End
  Else If InList(Fmt,'MKV,WEBM') Then Ok:=MkvTracks(M.Path,V,A,Err)
- Else If InList(Fmt,'TS,ES') Then Begin Ok:=TsVideoTracks(M.Path,Fmt='ES',False,V,Err); FillChar(A,SizeOf(A),0); DecPath:=TsGEsPath; End
+ Else If InList(Fmt,'TS,ES,MXF') Then Begin Ok:=TsVideoTracks(M.Path,Fmt,False,V,Err); FillChar(A,SizeOf(A),0); DecPath:=TsGEsPath; End
  Else Begin Err:='Conteneur vid'#233'o non pris en charge : '+Fmt+' (MP4, MOV, M4V, 3GP, FLV, AVI, MKV, WMV, MPEG, OGV).'; Exit; End;
  If Not Ok Then Exit;
  If Not V.Ok Then Begin TrkClear(V); TrkClear(A); Err:='Aucune piste vid'#233'o dans ce fichier.'; Exit; End;
@@ -113636,7 +117450,16 @@ Begin
  SkipV:=False;
  { ---- audio ---- }
  AltHaveA:=HaveA And (M.Vol>0);
- If HaveA And (M.Vol>0) And Not VJAlt Then Begin
+ If Pr.Ext='MXF' Then Begin
+  If HaveA And (M.Vol>0) Then Begin
+   If Not PrepareMxfAudio(M,Pr,StartMs,EndMs,Err) Then Begin
+    If Stopped Then Begin TrkClear(V); TrkClear(A); Exit; End;
+    If Pos('Aucune piste audio',Err)=0 Then JobWarn:=' (sans audio : '+Err+')';
+    Err:='';
+   End;
+  End;
+  HaveA:=False;
+ End Else If HaveA And (M.Vol>0) And Not VJAlt Then Begin
   If Not PrepareAudio(M,Pr,A,A.Ok,AFlv,M.Path,StartMs,EndMs,AOut,APath,AFirst,ALast,Err) Then Begin
    If Stopped Then Begin TrkClear(V); TrkClear(A); Exit; End;
    If Pos('Aucune piste audio',Err)=0 Then JobWarn:=' (sans audio : '+Err+')';
@@ -114630,7 +118453,7 @@ Begin
  End Else If (Fmt='OGV') Or (Fmt='OGG') Then Begin
   If (U='THEORA') Or (U='') Then K:=5;
  End Else If InList(Fmt,'MPG,MPEG,M2V,M1V,DAT,VOB') Then K:=4
- Else If InList(Fmt,'TS,ES') And InList(U,'MPG1,MPG2') Then Begin K:=4; Src:=TsGEsPath; End;
+ Else If InList(Fmt,'TS,ES,MXF') And InList(U,'MPG1,MPG2') Then Begin K:=4; Src:=TsGEsPath; End;
  If K=0 Then Exit;
  Y4:=TmpName('Y4M'); Es:='';
  If K=4 Then Begin
@@ -114682,9 +118505,9 @@ Begin
   If U='FSV1' Then K:=6;
  End Else If (Fmt='OGV') Or (Fmt='OGG') Then K:=5
  Else If InList(Fmt,'MPG,MPEG,M2V,M1V,DAT,VOB') Then K:=4
- Else If InList(Fmt,'TS,ES') And InList(U,'MPG1,MPG2') Then Begin K:=4; Src:=TsGEsPath; End;
+ Else If InList(Fmt,'TS,ES,MXF') And InList(U,'MPG1,MPG2') Then Begin K:=4; Src:=TsGEsPath; End;
  If K=0 Then Exit;
- If (K=4) And InList(Fmt,'TS,ES') Then Begin End
+ If (K=4) And InList(Fmt,'TS,ES,MXF') Then Begin End
  Else If K=4 Then Begin
   { debut du fichier seulement }
   If COpen(Path) Then Begin
@@ -114781,7 +118604,7 @@ Begin
   Else If Fmt='FLV' Then Ok:=FlvTracks(M.Path,V,A,Err)
   Else If Fmt='AVI' Then Ok:=AviTracks(M.Path,V,Err)
   Else If InList(Fmt,'MKV,WEBM') Then Ok:=MkvTracks(M.Path,V,A,Err)
-  Else If InList(Fmt,'TS,ES') Then Begin Ok:=TsVideoTracks(M.Path,Fmt='ES',True,V,Err); DecPath:=TsGEsPath; End
+  Else If InList(Fmt,'TS,ES,MXF') Then Begin Ok:=TsVideoTracks(M.Path,Fmt,True,V,Err); DecPath:=TsGEsPath; End
   Else Begin Info('Lecture indisponible pour ce format.'); Dirty:=True; Exit; End;
   If (Not Ok) Or (Not V.Ok) Then Begin If Err='' Then Err:='Aucune piste vid'#233'o.'; Info(Err); TrkClear(V); TrkClear(A); Dirty:=True; Exit; End;
   DecMode:=VideoMode(Fmt,V);
