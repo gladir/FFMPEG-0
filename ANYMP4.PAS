@@ -33060,7 +33060,7 @@ Var
  TSMuxFmt: LongInt;          { 0 = d'apres l'extension (.ts 188 octets ; .m2ts/.mts 192 octets avec TP_extra_header), 1 = 188, 2 = 192 }
  TSMuxVPid, TSMuxAPid, TSMuxPmtPid, TSMuxProgram: LongInt;   { defauts : 0x100, 0x101, 0x1000, 1 (m2ts/mts : 0x1011, 0x1100, 0x100, 1) ; 0 = defaut }
  TSMuxBitrate: LongInt;      { debit constant (bit/s) avec paquets nuls ; 0 = debit variable }
- TSMuxVbrRate: LongInt;      { debit supposé pour l'horloge PCR en mode variable (defaut 20 000 000) }
+ TSMuxVbrRate: LongInt;      { debit suppose pour l'horloge PCR en mode variable (defaut 20 000 000) }
  TSMuxPcrPeriod: LongInt;    { periode PCR en ms (defaut 20, maximum 40) }
  TSMuxPatPeriod: LongInt;    { periode PAT/PMT en ms (defaut 100) }
  TSMuxOffset: Int64;         { decalage ajoute aux PTS/DTS en sortie, 90 kHz (defaut 126000 = 1.4 s) }
