@@ -125984,7 +125984,7 @@ Begin
   HotAdd(MenuX[I]-4,0,MenuW[I]+8,17,hMenu+I);
  End;
  IcoKey(ScrW-130,3,cGrayD);
- If RegOk Then Txt(ScrW-112,5,'Enregistr'#233,cGreen) Else Txt(ScrW-112,5,'Non enregistr'#233,cGrayD);
+ If RegOk Then Txt(ScrW-112,5,'Enregistr'#233,cGreen);
  HotAdd(ScrW-134,0,134,17,hMenu+9);
 End;
 
@@ -132095,7 +132095,7 @@ Begin
  { Un flux distinct conserve la sortie console, meme avec les unites Crt. }
  Assign(HelpOutput,'');
  Rewrite(HelpOutput);
- WriteLn(HelpOutput,'ANYMP4 - Convertisseur video et audio graphique.');
+ WriteLn(HelpOutput,'ANYMP4 - Cette commande permet de lancer le convertisseur video et audio graphique.');
  WriteLn(HelpOutput);
  WriteLn(HelpOutput,'Syntaxe : ANYMP4 [-maxscreen] [<fichier> ...] [/? | -h | --help]');
  WriteLn(HelpOutput);
