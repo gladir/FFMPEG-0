@@ -1531,6 +1531,11 @@ Begin
  AddProf(0,'MOV ProRes 422 LT','MOV','PrRsLT','AAC','Auto',0,192,44100,2);
  AddProf(0,'MOV ProRes Proxy','MOV','PrRsPxy','AAC','Auto',0,192,44100,2);
  AddProf(0,'MOV ProRes 4444','MOV','PrRs4444','AAC','Auto',0,192,44100,2);
+ AddProf(0,'MOV DNxHD/DNxHR 120M','MOV','DNxHD','AAC','Auto',0,192,44100,2);
+ AddProf(0,'AVI DNxHD/DNxHR 120M','AVI','DNxHD','MP3','Auto',0,192,44100,2);
+ AddProf(0,'MOV MJPEG','MOV','MJPEG','AAC','Auto',8000,192,44100,2);
+ AddProf(0,'AVI MJPEG','AVI','MJPEG','MP3','Auto',8000,192,44100,2);
+ AddProf(0,'MKV MJPEG','MKV','MJPEG','AAC','Auto',8000,192,44100,2);
  AddProf(0,'MKV','MKV','H264','AAC','Auto',5000,192,44100,2);
  AddProf(0,'MKV HEVC (H.265)','MKV','HEVC','AAC','Auto',3000,160,44100,2);
  AddProf(0,'AVI','AVI','MPEG4','MP3','Auto',3000,192,44100,2);
@@ -31088,6 +31093,1921 @@ Begin
  For Y:=0 To PREH-1 Do For X:=0 To PRECw-1 Do Begin Wd^[Po]:=PrPlaneV^[Y*PrStrideC+X]; Inc(Po); End;
 End;
 
+{ pe_mjpeg_enc.pas - encodeur MJPEG (JPEG baseline, une image JPEG par paquet) pour AVI 'MJPG', MOV 'jpeg'/'mjpa', MKV V_MS/VFW.
+  Prefixes : MJE. Voir README.txt.
+  Provenance : les routines de Huffman optimal (MJEQSort, MJEComputeBits, MJEClose, MJEBuildCodes) et la quantification du mode
+  "ffmpeg -q:v" (MJEQuantFf, MJEIntra) viennent de EncodeMJPEG de FFMPEG.PAS (port de libavcodec/mjpegenc*.c, mpegvideo_enc.c,
+  FFmpeg n6.1.1, LGPL). Tout le reste (API image par image, FDCT, tables annexe K, controle de debit, 4:2:2, en-tetes) est nouveau. }
+Type
+ TMJEP2=Record A,B: LongInt; End;
+ TMJEArr=Array[0..1023] Of TMJEP2;
+ TMJEPkg=Record N: LongInt; Idx: Array[0..515] Of LongInt; Prob: Array[0..513]
+  Of LongInt; Items: Array[0..4111] Of LongInt; End;
+ TMJEHuge=Array[0..800000000] Of SmallInt;
+Const
+ MJEIntra: Array[0..63] Of Byte=(
+  8,16,19,22,26,27,29,34,16,16,22,24,27,29,34,37,19,22,26,27,29,34,34,38,22,22,
+   26,27,29,34,37,40,
+  22,26,27,29,32,35,40,48,26,27,29,32,35,40,48,58,26,27,29,34,38,46,56,69,27,29,
+   35,38,46,56,69,83);
+Var
+ MJEA,MJED: TMJEArr;
+ MJEList: Array[0..1] Of TMJEPkg;
+ MJEBits: Array[0..3,0..16] Of Byte; MJEVal: Array[0..3,0..255] Of Byte; MJECnt:
+  Array[0..3,0..255] Of LongInt;
+ MJESize: Array[0..3,0..255] Of Byte; MJECode: Array[0..3,0..255] Of Word;
+ MJEMat,MJEQmat: Array[0..63] Of LongInt;
+ MJEOut: PEABuffer; MJEPos: LongInt; MJEAcc: Int64; MJEAccN: LongInt;
+ MJEHT,MJEHC: PEABuffer; MJEHM: ^TMJEHuge; MJENc: LongInt; MJEOptimal: Boolean;
+
+Function MJECmp(X,Y: LongInt): LongInt;
+Begin MJECmp:=MJEA[X].B-MJEA[Y].B; End;
+Procedure MJESwap(X,Y: LongInt);
+Var T: TMJEP2;
+Begin T:=MJEA[X]; MJEA[X]:=MJEA[Y]; MJEA[Y]:=T; End;
+{ AV_QSORT de libavutil/qsort.h, cle = champ B }
+Procedure MJEQSort(Num: LongInt);
+Var
+ StkA,StkB: Array[0..63] Of LongInt; Sp,Start,Fin,Left,Right,Mid: LongInt;
+  CheckSort: Boolean;
+Begin
+ If Num<2 Then Exit;
+ Sp:=1; StkA[0]:=0; StkB[0]:=Num-1;
+ While Sp>0 Do Begin
+  Dec(Sp); Start:=StkA[Sp]; Fin:=StkB[Sp];
+  While Start<Fin Do Begin
+   If Start<Fin-1 Then Begin
+    CheckSort:=False; Right:=Fin-2; Left:=Start+1; Mid:=Start+((Fin-Start) Shr
+     1);
+    If MJECmp(Start,Fin)>0 Then Begin
+     If MJECmp(Fin,Mid)>0 Then MJESwap(Start,Mid) Else MJESwap(Start,Fin);
+    End Else Begin
+     If MJECmp(Start,Mid)>0 Then MJESwap(Start,Mid) Else CheckSort:=True;
+    End;
+    If MJECmp(Mid,Fin)>0 Then Begin MJESwap(Mid,Fin); CheckSort:=False; End;
+    If Start=Fin-2 Then Break;
+    MJESwap(Fin-1,Mid);
+    While Left<=Right Do Begin
+     While (Left<=Right) And (MJECmp(Left,Fin-1)<0) Do Inc(Left);
+     While (Left<=Right) And (MJECmp(Right,Fin-1)>0) Do Dec(Right);
+     If Left<=Right Then Begin MJESwap(Left,Right); Inc(Left); Dec(Right); End;
+    End;
+    MJESwap(Fin-1,Left);
+    If CheckSort And ((Mid=Left-1) Or (Mid=Left)) Then Begin
+     Mid:=Start;
+     While (Mid<Fin) And (MJECmp(Mid,Mid+1)<=0) Do Inc(Mid);
+     If Mid=Fin Then Break;
+    End;
+    If Fin-Left<Left-Start Then Begin
+     StkA[Sp]:=Start; StkB[Sp]:=Right; Inc(Sp); Start:=Left+1;
+    End Else Begin
+     StkA[Sp]:=Left+1; StkB[Sp]:=Fin; Inc(Sp); Fin:=Right;
+    End;
+   End Else Begin
+    If MJECmp(Start,Fin)>0 Then MJESwap(Start,Fin);
+    Break;
+   End;
+  End;
+ End;
+End;
+
+{ ff_mjpegenc_huffman_compute_bits : MJEA[0..Size-1] (A=valeur, B=occurrences)
+ -> MJED, renvoie le nombre de symboles }
+Function MJEComputeBits(Size,MaxLen: LongInt): LongInt;
+Var To_,From_,Times,I,J,K,Mn,N2: LongInt; NBits: Array[0..256] Of LongInt;
+Begin
+ FillChar(NBits,SizeOf(NBits),0);
+ MJEList[0].N:=0; MJEList[1].N:=0; MJEList[0].Idx[0]:=0; MJEList[1].Idx[0]:=0;
+ To_:=0; From_:=1; I:=0;
+ MJEQSort(Size);
+ For Times:=0 To MaxLen Do Begin
+  MJEList[To_].N:=0; MJEList[To_].Idx[0]:=0;
+  J:=0;
+  If Times<MaxLen Then I:=0;
+  While (I<Size) Or (J+1<MJEList[From_].N) Do Begin
+   Inc(MJEList[To_].N); N2:=MJEList[To_].N;
+   MJEList[To_].Idx[N2]:=MJEList[To_].Idx[N2-1];
+   If (I<Size) And ((J+1>=MJEList[From_].N) Or (MJEA[I].B<MJEList[From_].Prob[
+    J]+MJEList[From_].Prob[J+1])) Then Begin
+    MJEList[To_].Items[MJEList[To_].Idx[N2]]:=MJEA[I].A; Inc(MJEList[To_].Idx[
+     N2]);
+    MJEList[To_].Prob[N2-1]:=MJEA[I].B; Inc(I);
+   End Else Begin
+    For K:=MJEList[From_].Idx[J] To MJEList[From_].Idx[J+2]-1 Do Begin
+     MJEList[To_].Items[MJEList[To_].Idx[N2]]:=MJEList[From_].Items[K]; Inc(
+      MJEList[To_].Idx[N2]);
+    End;
+    MJEList[To_].Prob[N2-1]:=MJEList[From_].Prob[J]+MJEList[From_].Prob[J+1];
+    Inc(J,2);
+   End;
+  End;
+  K:=To_; To_:=From_; From_:=K;
+ End;
+ If Size-1<MJEList[From_].N Then Mn:=Size-1 Else Mn:=MJEList[From_].N;
+ For I:=0 To MJEList[From_].Idx[Mn]-1 Do Inc(NBits[MJEList[From_].Items[I]]);
+ J:=0;
+ For I:=0 To 255 Do If NBits[I]>0 Then Begin MJED[J].A:=I; MJED[J].B:=NBits[I];
+  Inc(J); End;
+ MJEComputeBits:=J;
+End;
+
+{ ff_mjpeg_encode_huffman_close pour la table T }
+Procedure MJEClose(T: LongInt);
+Var I,J,Nval: LongInt;
+Begin
+ Nval:=0; For I:=0 To 255 Do If MJECnt[T,I]<>0 Then Inc(Nval);
+ J:=0;
+ For I:=0 To 255 Do If MJECnt[T,I]<>0 Then Begin MJEA[J].A:=I; MJEA[J].B:=
+  MJECnt[T,I]; Inc(J); End;
+ MJEA[J].A:=256; MJEA[J].B:=0;
+ MJEComputeBits(Nval+1,16);
+ For I:=0 To Nval-1 Do MJEA[I]:=MJED[I];
+ MJEQSort(Nval);
+ FillChar(MJEBits[T],17,0);
+ For I:=0 To Nval-1 Do Begin MJEVal[T,I]:=MJEA[I].A; Inc(MJEBits[T,MJEA[I].B]);
+  End;
+End;
+
+Procedure MJEBuildCodes(T: LongInt);
+Var K,Code,I,J,Nb: LongInt;
+Begin
+ K:=0; Code:=0;
+ FillChar(MJESize[T],SizeOf(MJESize[T]),0); FillChar(MJECode[T],SizeOf(MJECode[
+  T]),0);
+ For I:=1 To 16 Do Begin
+  Nb:=MJEBits[T,I];
+  For J:=0 To Nb-1 Do Begin
+   MJESize[T,MJEVal[T,K]]:=I; MJECode[T,MJEVal[T,K]]:=Code; Inc(K); Inc(Code);
+  End;
+  Code:=Code Shl 1;
+ End;
+End;
+
+
+Const
+ MJESDcLB: Array[1..16] Of Byte=(0,1,5,1,1,1,1,1,1,0,0,0,0,0,0,0);
+ MJESDcCB: Array[1..16] Of Byte=(0,3,1,1,1,1,1,1,1,1,1,0,0,0,0,0);
+ MJESAcLB: Array[1..16] Of Byte=(0,2,1,3,3,2,4,3,5,5,4,4,0,0,1,125);
+ MJESAcCB: Array[1..16] Of Byte=(0,2,1,2,4,4,3,4,7,5,4,4,0,1,2,119);
+ MJESAcLV: Array[0..161] Of Byte=(
+  $01,$02,$03,$00,$04,$11,$05,$12,$21,$31,$41,$06,$13,$51,$61,$07,$22,$71,$14,
+   $32,$81,$91,$a1,$08,
+  $23,$42,$b1,$c1,$15,$52,$d1,$f0,$24,$33,$62,$72,$82,$09,$0a,$16,$17,$18,$19,
+   $1a,$25,$26,$27,$28,
+  $29,$2a,$34,$35,$36,$37,$38,$39,$3a,$43,$44,$45,$46,$47,$48,$49,$4a,$53,$54,
+   $55,$56,$57,$58,$59,
+  $5a,$63,$64,$65,$66,$67,$68,$69,$6a,$73,$74,$75,$76,$77,$78,$79,$7a,$83,$84,
+   $85,$86,$87,$88,$89,
+  $8a,$92,$93,$94,$95,$96,$97,$98,$99,$9a,$a2,$a3,$a4,$a5,$a6,$a7,$a8,$a9,$aa,
+   $b2,$b3,$b4,$b5,$b6,
+  $b7,$b8,$b9,$ba,$c2,$c3,$c4,$c5,$c6,$c7,$c8,$c9,$ca,$d2,$d3,$d4,$d5,$d6,$d7,
+   $d8,$d9,$da,$e1,$e2,
+  $e3,$e4,$e5,$e6,$e7,$e8,$e9,$ea,$f1,$f2,$f3,$f4,$f5,$f6,$f7,$f8,$f9,$fa);
+ MJESAcCV: Array[0..161] Of Byte=(
+  $00,$01,$02,$03,$11,$04,$05,$21,$31,$06,$12,$41,$51,$07,$61,$71,$13,$22,$32,
+   $81,$08,$14,$42,$91,
+  $a1,$b1,$c1,$09,$23,$33,$52,$f0,$15,$62,$72,$d1,$0a,$16,$24,$34,$e1,$25,$f1,
+   $17,$18,$19,$1a,$26,
+  $27,$28,$29,$2a,$35,$36,$37,$38,$39,$3a,$43,$44,$45,$46,$47,$48,$49,$4a,$53,
+   $54,$55,$56,$57,$58,
+  $59,$5a,$63,$64,$65,$66,$67,$68,$69,$6a,$73,$74,$75,$76,$77,$78,$79,$7a,$82,
+   $83,$84,$85,$86,$87,
+  $88,$89,$8a,$92,$93,$94,$95,$96,$97,$98,$99,$9a,$a2,$a3,$a4,$a5,$a6,$a7,$a8,
+   $a9,$aa,$b2,$b3,$b4,
+  $b5,$b6,$b7,$b8,$b9,$ba,$c2,$c3,$c4,$c5,$c6,$c7,$c8,$c9,$ca,$d2,$d3,$d4,$d5,
+   $d6,$d7,$d8,$d9,$da,
+  $e2,$e3,$e4,$e5,$e6,$e7,$e8,$e9,$ea,$f2,$f3,$f4,$f5,$f6,$f7,$f8,$f9,$fa);
+
+{ ====================================================================== }
+{ Partie propre a cette part : encodeur image par image (API MJE*).      }
+{ ====================================================================== }
+Const
+ MJEZig: Array[0..63] Of Byte=(0,1,8,16,9,2,3,10,17,24,32,25,18,11,4,5,12,19,26,
+  33,40,48,41,34,27,20,13,6,7,14,21,28,35,42,49,56,57,50,43,36,29,22,15,23,30,
+  37,44,51,58,59,52,45,38,31,39,46,53,60,61,54,47,55,62,63);
+ { tables de quantification de l'annexe K de la norme JPEG, ordre naturel }
+ MJEQtLum: Array[0..63] Of Byte=(
+  16,11,10,16,24,40,51,61, 12,12,14,19,26,58,60,55,
+  14,13,16,24,40,57,69,56, 14,17,22,29,51,87,80,62,
+  18,22,37,56,68,109,103,77, 24,35,55,64,81,104,113,92,
+  49,64,78,87,103,121,120,101, 72,92,95,98,112,100,103,99);
+ MJEQtChr: Array[0..63] Of Byte=(
+  17,18,24,47,99,99,99,99, 18,21,26,66,99,99,99,99,
+  24,26,56,99,99,99,99,99, 47,66,99,99,99,99,99,99,
+  99,99,99,99,99,99,99,99, 99,99,99,99,99,99,99,99,
+  99,99,99,99,99,99,99,99, 99,99,99,99,99,99,99,99);
+Type
+ TMJEBlk=Array[0..63] Of LongInt;
+ PMJEBlk=^TMJEBlk;
+ TMJEDct=Array[0..200000000] Of LongInt;
+ PMJEDct=^TMJEDct;
+Var
+ { reglages (a fixer AVANT MJEBegin) }
+ MJEFfQ: LongInt;        { 0 = tables JPEG annexe K a l'echelle libjpeg (defaut) ; 2..31 = mode "ffmpeg -q:v" :
+                           matrice MPEG-1 * qscale, quantification et en-tetes de mjpegenc.c (flux identique a ffmpeg, 4:2:0) }
+ MJEMatrix: LongInt;     { (mode MJEFfQ=0) 0 = tables annexe K (defaut) ; 1 = matrice MPEG-1 intra unique (celle de ffmpeg mjpeg) mise a l'echelle
+                           par la meme courbe de qualite : meilleur PSNR a debit egal, moins adaptee a l'oeil }
+ MJEChroma: LongInt;     { 0 = 4:2:0 (defaut), 1 = 4:2:2 (chroma sur-echantillonnee verticalement) }
+ MJERange: LongInt;      { 0 = la source I420 est en plage limitee (16..235) : elle est etendue en pleine plage (defaut,
+                           comme le fait l'auto-scale de ffmpeg vers yuvj420p) ; 1 = source deja pleine plage, aucun changement ;
+                           2 = plage limitee conservee et signalee par le commentaire CS=ITU601 (ffmpeg -strict unofficial) }
+ MJESarN,MJESarD: LongInt; { rapport d'aspect ecrit dans JFIF (defaut 1:1 si 0) }
+ MJENoJfif: Boolean;     { True = pas de segment APP0 JFIF (ffmpeg n'en ecrit que si un rapport d'aspect est connu) }
+ { etat }
+ MJEW,MJEH,MJEFn,MJEFd,MJEBr,MJEQ0,MJEFmt,MJEFrNo,MJECw,MJECh,MJEMbW,MJEMbH,MJENb,MJEQcur,MJEPrevQ,MJEQsc: LongInt;
+ MJEDct: PMJEDct; MJEDctSize: LongInt;
+ MJEPY,MJEPU,MJEPV: PEABuffer; MJEPSize: Array[0..2] Of LongInt;
+ MJEYLut,MJECLut: Array[0..255] Of Byte;
+ MJEQt: Array[0..1,0..63] Of LongInt; { tables en ordre naturel (0 = luma, 1 = chroma) }
+ MJENQt: LongInt;
+ MJELastDc: Array[0..2] Of LongInt;
+ MJEOutSize: LongInt;
+ MJECumT,MJECumB: Double;
+ MJEActive: Boolean;
+ MJEPassN: LongInt;     { nombre de passes d'encodage de la derniere image (info) }
+ MJELastQ: LongInt;     { qualite effectivement utilisee pour la derniere image }
+
+Function MJEDesc(V: Int64; N: LongInt): Int64;
+Begin
+ V:=V+(Int64(1) Shl (N-1));
+ If V>=0 Then MJEDesc:=V Shr N Else MJEDesc:=-((-V-1) Shr N)-1;
+End;
+
+{ ff_jpeg_fdct_islow_8 (jfdctint_template.c) ; sortie = 8 x DCT orthonormale }
+Procedure MJEFdct(Var D: TMJEBlk);
+Const
+ F0541=4433; F0765=6270; F1847=15137; F1175=9633; F0298=2446; F2053=16819;
+ F3072=25172; F1501=12299; F0899=7373; F2562=20995; F1961=16069; F0390=3196;
+Var
+ I: LongInt;
+ T0,T1,T2,T3,T4,T5,T6,T7,T10,T11,T12,T13,Z1,Z2,Z3,Z4,Z5: Int64;
+Begin
+ For I:=0 To 7 Do Begin
+  T0:=D[I*8]+D[I*8+7]; T7:=D[I*8]-D[I*8+7]; T1:=D[I*8+1]+D[I*8+6];
+  T6:=D[I*8+1]-D[I*8+6]; T2:=D[I*8+2]+D[I*8+5]; T5:=D[I*8+2]-D[I*8+5];
+  T3:=D[I*8+3]+D[I*8+4]; T4:=D[I*8+3]-D[I*8+4];
+  T10:=T0+T3; T13:=T0-T3; T11:=T1+T2; T12:=T1-T2;
+  D[I*8]:=(T10+T11)*16; D[I*8+4]:=(T10-T11)*16;
+  Z1:=(T12+T13)*F0541;
+  D[I*8+2]:=MJEDesc(Z1+T13*F0765,9); D[I*8+6]:=MJEDesc(Z1+T12*(-F1847),9);
+  Z1:=T4+T7; Z2:=T5+T6; Z3:=T4+T6; Z4:=T5+T7; Z5:=(Z3+Z4)*F1175;
+  T4:=T4*F0298; T5:=T5*F2053; T6:=T6*F3072; T7:=T7*F1501;
+  Z1:=Z1*(-F0899); Z2:=Z2*(-F2562); Z3:=Z3*(-F1961); Z4:=Z4*(-F0390);
+  Inc(Z3,Z5); Inc(Z4,Z5);
+  D[I*8+7]:=MJEDesc(T4+Z1+Z3,9); D[I*8+5]:=MJEDesc(T5+Z2+Z4,9);
+  D[I*8+3]:=MJEDesc(T6+Z2+Z3,9); D[I*8+1]:=MJEDesc(T7+Z1+Z4,9);
+ End;
+ For I:=0 To 7 Do Begin
+  T0:=D[I]+D[56+I]; T7:=D[I]-D[56+I]; T1:=D[8+I]+D[48+I]; T6:=D[8+I]-D[48+I];
+  T2:=D[16+I]+D[40+I]; T5:=D[16+I]-D[40+I]; T3:=D[24+I]+D[32+I];
+  T4:=D[24+I]-D[32+I];
+  T10:=T0+T3; T13:=T0-T3; T11:=T1+T2; T12:=T1-T2;
+  D[I]:=MJEDesc(T10+T11,4); D[32+I]:=MJEDesc(T10-T11,4);
+  Z1:=(T12+T13)*F0541;
+  D[16+I]:=MJEDesc(Z1+T13*F0765,17); D[48+I]:=MJEDesc(Z1+T12*(-F1847),17);
+  Z1:=T4+T7; Z2:=T5+T6; Z3:=T4+T6; Z4:=T5+T7; Z5:=(Z3+Z4)*F1175;
+  T4:=T4*F0298; T5:=T5*F2053; T6:=T6*F3072; T7:=T7*F1501;
+  Z1:=Z1*(-F0899); Z2:=Z2*(-F2562); Z3:=Z3*(-F1961); Z4:=Z4*(-F0390);
+  Inc(Z3,Z5); Inc(Z4,Z5);
+  D[56+I]:=MJEDesc(T4+Z1+Z3,17); D[40+I]:=MJEDesc(T5+Z2+Z4,17);
+  D[24+I]:=MJEDesc(T6+Z2+Z3,17); D[8+I]:=MJEDesc(T7+Z1+Z4,17);
+ End;
+End;
+
+{ ---- entropie : jetons (table, code run/taille, mantisse) ---- }
+Procedure MJEAdd(T,Code,Mant: LongInt);
+Begin MJEHT^[MJENc]:=T; MJEHC^[MJENc]:=Code; MJEHM^[MJENc]:=Mant; Inc(MJENc); End;
+
+Procedure MJECoef(T,Val,Run: LongInt);
+Var Mant,A,N: LongInt;
+Begin
+ If Val=0 Then MJEAdd(T,0,0) Else Begin
+  Mant:=Val; A:=Val; If Val<0 Then Begin A:=-Val; Dec(Mant); End;
+  N:=0; While (A Shr (N+1))>0 Do Inc(N);
+  MJEAdd(T,(Run Shl 4) Or (N+1),Mant);
+ End;
+End;
+
+{ quantification "annexe K" : niveaux = arrondi de coef/(8*Q) ; zone morte reduite pour les AC (offset 3/8 comme ffmpeg) }
+Function MJEQuantStd(Src: PMJEBlk; Var Lev: TMJEBlk; Tab: LongInt): LongInt;
+Var I,J,C,A,Q,L,Last: LongInt;
+Begin
+ C:=Src^[0]; Q:=MJEQt[Tab,0]*8; A:=Abs(C); L:=(A+(Q Shr 1)) Div Q;
+ If L>2047 Then L:=2047;
+ If C<0 Then L:=-L;
+ Lev[0]:=L;
+ Last:=0;
+ For I:=1 To 63 Do Begin
+  J:=MJEZig[I]; C:=Src^[J]; A:=Abs(C); Q:=MJEQt[Tab,J]*8;
+  L:=(A+3*MJEQt[Tab,J]) Div Q;
+  If L>1023 Then L:=1023;
+  If C<0 Then L:=-L;
+  Lev[J]:=L;
+  If L<>0 Then Last:=I;
+ End;
+ MJEQuantStd:=Last;
+End;
+
+{ dct_quantize_c de mpegvideo_enc.c pour un bloc intra (mode ffmpeg) ; Src = sortie de MJEFdct sans decalage de niveau }
+Function MJEQuantFf(Src: PMJEBlk; Var Lev: TMJEBlk): LongInt;
+Const Bias=786432; T1=1310719; T2=2621438;
+Var I,J,Last,Level,Mx: LongInt; U,Prod: Int64;
+Begin
+ Lev:=Src^;
+ Lev[0]:=(Lev[0]+32) Div 64;
+ Last:=0; Mx:=0;
+ For I:=63 DownTo 1 Do Begin
+  J:=MJEZig[I];
+  Prod:=Int64(Lev[J])*MJEQmat[J]; Level:=LongInt(Prod And $FFFFFFFF);
+  U:=(Int64(Level)+T1) And $FFFFFFFF;
+  If U>T2 Then Begin Last:=I; Break; End Else Lev[J]:=0;
+ End;
+ For I:=1 To Last Do Begin
+  J:=MJEZig[I];
+  Prod:=Int64(Lev[J])*MJEQmat[J]; Level:=LongInt(Prod And $FFFFFFFF);
+  U:=(Int64(Level)+T1) And $FFFFFFFF;
+  If U>T2 Then Begin
+   If Level>0 Then Begin Level:=LongInt((Int64(Bias)+Level) Shr 21); Lev[J]:=Level; End
+   Else Begin Level:=LongInt((Int64(Bias)-Level) Shr 21); Lev[J]:=-Level; End;
+   Mx:=Mx Or Level;
+  End Else Lev[J]:=0;
+ End;
+ If Mx>1023 Then
+  For I:=1 To Last Do Begin
+   J:=MJEZig[I];
+   If Lev[J]>1023 Then Lev[J]:=1023 Else If Lev[J]<-1023 Then Lev[J]:=-1023;
+  End;
+ MJEQuantFf:=Last;
+End;
+
+Procedure MJETok(Var Lev: TMJEBlk; Comp,Last: LongInt);
+Var Tb,I,J,Val,Run,Dc: LongInt;
+Begin
+ If Comp=0 Then Tb:=0 Else Tb:=1;
+ Dc:=Lev[0]; MJECoef(Tb,Dc-MJELastDc[Comp],0); MJELastDc[Comp]:=Dc;
+ Tb:=Tb Or 2; Run:=0;
+ For I:=1 To Last Do Begin
+  J:=MJEZig[I]; Val:=Lev[J];
+  If Val=0 Then Inc(Run) Else Begin
+   While Run>=16 Do Begin MJEAdd(Tb,$F0,0); Dec(Run,16); End;
+   MJECoef(Tb,Val,Run); Run:=0;
+  End;
+ End;
+ If Last<63 Then MJEAdd(Tb,0,0);
+End;
+
+{ ---- ecriture ---- }
+Procedure MJEByte(B: LongInt); Begin MJEOut^[MJEPos]:=B And 255; Inc(MJEPos); End;
+Procedure MJEWord(B: LongInt); Begin MJEByte(B Shr 8); MJEByte(B); End;
+Procedure MJEMarker(M: LongInt); Begin MJEByte($FF); MJEByte(M); End;
+Procedure MJEPut(V,N: LongInt);
+Var B: LongInt;
+Begin
+ If N=0 Then Exit;
+ MJEAcc:=(MJEAcc Shl N) Or (Int64(V) And ((Int64(1) Shl N)-1)); Inc(MJEAccN,N);
+ While MJEAccN>=8 Do Begin
+  Dec(MJEAccN,8); B:=(MJEAcc Shr MJEAccN) And 255;
+  MJEOut^[MJEPos]:=B; Inc(MJEPos);
+  If B=$FF Then Begin MJEOut^[MJEPos]:=0; Inc(MJEPos); End;
+ End;
+ MJEAcc:=MJEAcc And ((Int64(1) Shl MJEAccN)-1);
+End;
+
+{ tables de quantification selon la qualite (echelle libjpeg) ou le qscale ffmpeg }
+Procedure MJESetTables(Q: LongInt);
+Var I,Sc,V: LongInt;
+Begin
+ If MJEFfQ>0 Then Begin
+  MJENQt:=1;
+  MJEMat[0]:=8;
+  For I:=1 To 63 Do Begin
+   V:=(MJEIntra[I]*MJEFfQ) Shr 3; If V>255 Then V:=255;
+   MJEMat[I]:=V;
+  End;
+  For I:=0 To 63 Do MJEQmat[I]:=LongInt((Int64(2) Shl 21) Div (Int64(16)*MJEMat[I]));
+  For I:=0 To 63 Do MJEQt[0,I]:=MJEMat[I];
+  MJEQt[1]:=MJEQt[0];
+ End Else Begin
+  MJENQt:=2;
+  If Q<1 Then Q:=1; If Q>100 Then Q:=100;
+  If Q<50 Then Sc:=5000 Div Q Else Sc:=200-2*Q;
+  If MJEMatrix=1 Then Begin
+   MJENQt:=1;
+   For I:=0 To 63 Do Begin
+    V:=(MJEIntra[I]*Sc+50) Div 100; If V<1 Then V:=1; If V>255 Then V:=255;
+    MJEQt[0,I]:=V; MJEQt[1,I]:=V;
+   End;
+  End Else
+  For I:=0 To 63 Do Begin
+   V:=(MJEQtLum[I]*Sc+50) Div 100; If V<1 Then V:=1; If V>255 Then V:=255;
+   MJEQt[0,I]:=V;
+   V:=(MJEQtChr[I]*Sc+50) Div 100; If V<1 Then V:=1; If V>255 Then V:=255;
+   MJEQt[1,I]:=V;
+  End;
+ End;
+End;
+
+{ un passage complet : quantification, jetons, tables de Huffman, en-tete, flux ; renvoie la taille du paquet }
+Function MJEPass(Q: LongInt): LongInt;
+Var
+ Mcu,K,I,J,Tb,Code,Nbits,Sz,Lenp,Hdr,Comp,Tq,Hs,Vs,T: LongInt;
+ Lev: TMJEBlk; Last: LongInt; Ident: String; Sn,Sd,G: LongInt;
+Begin
+ Inc(MJEPassN);
+ MJESetTables(Q);
+ MJENc:=0; FillChar(MJECnt,SizeOf(MJECnt),0);
+ If MJEFfQ>0 Then Begin MJELastDc[0]:=128; MJELastDc[1]:=128; MJELastDc[2]:=128; End
+ Else Begin MJELastDc[0]:=0; MJELastDc[1]:=0; MJELastDc[2]:=0; End;
+ For Mcu:=0 To MJEMbW*MJEMbH-1 Do
+  For K:=0 To MJENb-1 Do Begin
+   If K<MJENb-2 Then Comp:=0 Else Comp:=K-(MJENb-2)+1;
+   If MJEFfQ>0 Then Last:=MJEQuantFf(@MJEDct^[(Mcu*MJENb+K)*64],Lev)
+   Else Begin
+    If Comp=0 Then Tq:=0 Else Tq:=1;
+    Last:=MJEQuantStd(@MJEDct^[(Mcu*MJENb+K)*64],Lev,Tq);
+   End;
+   MJETok(Lev,Comp,Last);
+  End;
+ For I:=0 To MJENc-1 Do Inc(MJECnt[MJEHT^[I],MJEHC^[I]]);
+ If MJEOptimal Then Begin
+  For I:=0 To 3 Do MJEClose(I);
+ End Else Begin
+  FillChar(MJEBits,SizeOf(MJEBits),0);
+  For I:=1 To 16 Do Begin
+   MJEBits[0,I]:=MJESDcLB[I]; MJEBits[1,I]:=MJESDcCB[I];
+   MJEBits[2,I]:=MJESAcLB[I]; MJEBits[3,I]:=MJESAcCB[I];
+  End;
+  For I:=0 To 11 Do Begin MJEVal[0,I]:=I; MJEVal[1,I]:=I; End;
+  For I:=0 To 161 Do Begin MJEVal[2,I]:=MJESAcLV[I]; MJEVal[3,I]:=MJESAcCV[I]; End;
+ End;
+ For I:=0 To 3 Do MJEBuildCodes(I);
+ { en-tete }
+ MJEPos:=0; MJEAcc:=0; MJEAccN:=0;
+ MJEMarker($D8);
+ Sn:=MJESarN; Sd:=MJESarD; If (Sn<=0) Or (Sd<=0) Then Begin Sn:=1; Sd:=1; End;
+ G:=Sn; J:=Sd; While J<>0 Do Begin I:=G Mod J; G:=J; J:=I; End;
+ If (Sn>65535) Or (Sd>65535) Then Begin Sn:=Sn Div G; Sd:=Sd Div G; End;
+ If Not MJENoJfif Then Begin
+  MJEMarker($E0); MJEWord(16); MJEByte(74); MJEByte(70); MJEByte(73); MJEByte(70); MJEByte(0);
+  MJEWord($0102); MJEByte(0); MJEWord(Sn); MJEWord(Sd); MJEByte(0); MJEByte(0);
+ End;
+ If MJEFfQ>0 Then Begin
+  Ident:='Lavc60.31.102';
+  MJEMarker($FE); MJEWord(Length(Ident)+3);
+  For I:=1 To Length(Ident) Do MJEByte(Ord(Ident[I])); MJEByte(0);
+ End;
+ If MJERange=2 Then Begin
+  Ident:='CS=ITU601';
+  MJEMarker($FE); MJEWord(Length(Ident)+3);
+  For I:=1 To Length(Ident) Do MJEByte(Ord(Ident[I])); MJEByte(0);
+ End;
+ For T:=0 To MJENQt-1 Do Begin
+  MJEMarker($DB); MJEWord(2+65); MJEByte(T);
+  For I:=0 To 63 Do MJEByte(MJEQt[T,MJEZig[I]]);
+ End;
+ MJEMarker($C4); Lenp:=MJEPos; MJEWord(0); Sz:=2;
+ For I:=0 To 3 Do Begin
+  Tb:=0; For J:=1 To 16 Do Inc(Tb,MJEBits[I,J]);
+  Case I Of 0: MJEByte($00); 1: MJEByte($01); 2: MJEByte($10); Else MJEByte($11); End;
+  For J:=1 To 16 Do MJEByte(MJEBits[I,J]);
+  For J:=0 To Tb-1 Do MJEByte(MJEVal[I,J]);
+  Inc(Sz,17+Tb);
+ End;
+ MJEOut^[Lenp]:=Sz Shr 8; MJEOut^[Lenp+1]:=Sz And 255;
+ If MJEFmt=0 Then Begin Hs:=2; Vs:=2; End Else Begin Hs:=2; Vs:=1; End;
+ If MJENQt=2 Then Tq:=1 Else Tq:=0;
+ MJEMarker($C0); MJEWord(17); MJEByte(8); MJEWord(MJEH); MJEWord(MJEW); MJEByte(3);
+ MJEByte(1); MJEByte((Hs Shl 4) Or Vs); MJEByte(0);
+ MJEByte(2); MJEByte($11); MJEByte(Tq);
+ MJEByte(3); MJEByte($11); MJEByte(Tq);
+ MJEMarker($DA); MJEWord(12); MJEByte(3);
+ MJEByte(1); MJEByte($00); MJEByte(2); MJEByte($11); MJEByte(3); MJEByte($11);
+ MJEByte(0); MJEByte(63); MJEByte(0);
+ { donnees entropiques }
+ For I:=0 To MJENc-1 Do Begin
+  Tb:=MJEHT^[I]; Code:=MJEHC^[I]; Nbits:=Code And 15;
+  MJEPut(MJECode[Tb,Code],MJESize[Tb,Code]);
+  If Nbits<>0 Then MJEPut(MJEHM^[I],Nbits);
+ End;
+ If MJEAccN<>0 Then MJEPut((1 Shl (8-MJEAccN))-1,8-MJEAccN);
+ MJEMarker($D9);
+ MJELastQ:=Q;
+ MJEPass:=MJEPos;
+End;
+
+{ ---- preparation de l'image : conversion de plage, chroma 4:2:2, DCT de tous les blocs ---- }
+Procedure MJEPrepare(Yuv: PEABuffer);
+Var
+ I,X,Y,Cw0,Ch0,Mx,My,K,Shift,X0,Y0,R,C,Xs,Ys,Ya,Yb,Bk,CwE,ChE: LongInt;
+ Blk: TMJEBlk;
+ Src: PEABuffer;
+ Procedure Gather(Pl: PEABuffer; Stride,PW,PH,Xb,Yb2: LongInt);
+ Var Rr,Cc,Xx,Yy: LongInt;
+ Begin
+  For Rr:=0 To 7 Do Begin
+   Yy:=Yb2+Rr; If Yy>PH-1 Then Yy:=PH-1;
+   For Cc:=0 To 7 Do Begin
+    Xx:=Xb+Cc; If Xx>PW-1 Then Xx:=PW-1;
+    Blk[Rr*8+Cc]:=Pl^[Yy*Stride+Xx]-Shift;
+   End;
+  End;
+  MJEFdct(Blk);
+  Move(Blk,MJEDct^[Bk*64],256);
+  Inc(Bk);
+ End;
+Procedure GatherC(Xb,Yb2: LongInt);
+ Begin
+  Gather(MJEPU,MJECw,CwE,ChE,Xb,Yb2);
+  Gather(MJEPV,MJECw,CwE,ChE,Xb,Yb2);
+ End;
+Begin
+ { mode ffmpeg : mpegvideo_enc.c prolonge les bords avec w = largeur>>1 (arrondi par defaut) : la derniere colonne/ligne de
+   chroma d'une image de dimension impaire est remplacee par la precedente ; reproduit pour obtenir un flux identique }
+ Cw0:=(MJEW+1) Shr 1; Ch0:=(MJEH+1) Shr 1;
+ CwE:=MJECw; ChE:=MJECh;
+ If MJEFfQ>0 Then Begin CwE:=MJEW Shr 1; ChE:=MJEH Shr 1; If CwE<1 Then CwE:=1; If ChE<1 Then ChE:=1; End;
+ For I:=0 To MJEW*MJEH-1 Do MJEPY^[I]:=MJEYLut[Yuv^[I]];
+ Src:=@Yuv^[MJEW*MJEH];
+ If MJEFmt=0 Then Begin
+  For I:=0 To Cw0*Ch0-1 Do Begin
+   MJEPU^[I]:=MJECLut[Src^[I]]; MJEPV^[I]:=MJECLut[Src^[Cw0*Ch0+I]];
+  End;
+ End Else Begin
+  { 4:2:0 -> 4:2:2 : interpolation verticale (3a+b+2)/4 au centre de l'echantillonnage chroma }
+  For K:=0 To 1 Do
+   For Y:=0 To MJEH-1 Do Begin
+    Ya:=Y Shr 1;
+    If (Y And 1)=0 Then Yb:=Ya-1 Else Yb:=Ya+1;
+    If Yb<0 Then Yb:=0; If Yb>Ch0-1 Then Yb:=Ch0-1;
+    For X:=0 To Cw0-1 Do Begin
+     R:=MJECLut[Src^[K*Cw0*Ch0+Ya*Cw0+X]]; C:=MJECLut[Src^[K*Cw0*Ch0+Yb*Cw0+X]];
+     If K=0 Then MJEPU^[Y*Cw0+X]:=(3*R+C+2) Shr 2 Else MJEPV^[Y*Cw0+X]:=(3*R+C+2) Shr 2;
+    End;
+   End;
+ End;
+ If MJEFfQ>0 Then Shift:=0 Else Shift:=128;
+ Bk:=0;
+ For My:=0 To MJEMbH-1 Do
+  For Mx:=0 To MJEMbW-1 Do Begin
+   X0:=Mx*16;
+   If MJEFmt=0 Then Begin
+    Y0:=My*16;
+    Gather(MJEPY,MJEW,MJEW,MJEH,X0,Y0); Gather(MJEPY,MJEW,MJEW,MJEH,X0+8,Y0);
+    Gather(MJEPY,MJEW,MJEW,MJEH,X0,Y0+8); Gather(MJEPY,MJEW,MJEW,MJEH,X0+8,Y0+8);
+    GatherC(Mx*8,My*8);
+   End Else Begin
+    Y0:=My*8;
+    Gather(MJEPY,MJEW,MJEW,MJEH,X0,Y0); Gather(MJEPY,MJEW,MJEW,MJEH,X0+8,Y0);
+    GatherC(Mx*8,My*8);
+   End;
+  End;
+End;
+
+{ ---- API ---- }
+Procedure MJEFree;
+Begin
+ If MJEActive Then Begin
+  FreeMem(MJEDct,MJEDctSize);
+  FreeMem(MJEPY,MJEPSize[0]); FreeMem(MJEPU,MJEPSize[1]); FreeMem(MJEPV,MJEPSize[2]);
+  FreeMem(MJEOut,MJEOutSize);
+  FreeMem(MJEHT,MJEMbW*MJEMbH*MJENb*70+64); FreeMem(MJEHC,MJEMbW*MJEMbH*MJENb*70+64);
+  FreeMem(MJEHM,MJEMbW*MJEMbH*MJENb*70*2+64);
+  MJEActive:=False;
+ End;
+End;
+
+Function MJETag: String;
+Begin MJETag:='MJPG'; End;
+
+{ BITMAPINFOHEADER de 40 octets (little-endian) pour la piste : strf d'un AVI, CodecPrivate Matroska V_MS/VFW/FOURCC. Retourne 40. }
+Function MJEBmpInfo(Var Buf: Array Of Byte): LongInt;
+Var I: LongInt;
+ Procedure P4(At,V: LongInt); Var K: LongInt; Begin For K:=0 To 3 Do Buf[At+K]:=(V Shr (8*K)) And 255; End;
+Begin
+ For I:=0 To 39 Do Buf[I]:=0;
+ P4(0,40); P4(4,MJEW); P4(8,MJEH); Buf[12]:=1; Buf[14]:=24;
+ For I:=1 To 4 Do Buf[16+I-1]:=Ord(MJETag[I]);
+ P4(20,MJEW*MJEH*3);
+ MJEBmpInfo:=40;
+End;
+
+Procedure MJEBegin(W,H,Fn,Fd,Bitrate,Quality: LongInt);
+Var I,V: LongInt;
+Begin
+ MJEFree;
+ MJEW:=W; MJEH:=H; MJEFn:=Fn; MJEFd:=Fd; MJEBr:=Bitrate;
+ If MJEFn<=0 Then MJEFn:=25; If MJEFd<=0 Then MJEFd:=1;
+ If Quality<1 Then Quality:=85; If Quality>100 Then Quality:=100;
+ MJEQ0:=Quality; MJEPrevQ:=Quality;
+ If MJEChroma=1 Then MJEFmt:=1 Else MJEFmt:=0;
+ If (MJEFfQ<0) Or (MJEFfQ=1) Then MJEFfQ:=2; If MJEFfQ>31 Then MJEFfQ:=31;
+ If (MJEFfQ>0) And (MJEFmt<>0) Then MJEFfQ:=0; { le mode ffmpeg n'est offert qu'en 4:2:0 }
+ MJECw:=(W+1) Shr 1;
+ If MJEFmt=0 Then Begin MJECh:=(H+1) Shr 1; MJENb:=6; MJEMbW:=(W+15) Div 16; MJEMbH:=(H+15) Div 16; End
+ Else Begin MJECh:=H; MJENb:=4; MJEMbW:=(W+15) Div 16; MJEMbH:=(H+7) Div 8; End;
+ MJEDctSize:=MJEMbW*MJEMbH*MJENb*64*4+64; GetMem(MJEDct,MJEDctSize);
+ MJEPSize[0]:=W*H+64; MJEPSize[1]:=MJECw*MJECh+64; MJEPSize[2]:=MJEPSize[1];
+ GetMem(MJEPY,MJEPSize[0]); GetMem(MJEPU,MJEPSize[1]); GetMem(MJEPV,MJEPSize[2]);
+ MJEOutSize:=MJEMbW*MJEMbH*MJENb*430+8192; GetMem(MJEOut,MJEOutSize);
+ GetMem(MJEHT,MJEMbW*MJEMbH*MJENb*70+64); GetMem(MJEHC,MJEMbW*MJEMbH*MJENb*70+64);
+ GetMem(MJEHM,MJEMbW*MJEMbH*MJENb*70*2+64);
+ { tables de plage }
+ For I:=0 To 255 Do Begin
+  If MJERange=0 Then Begin
+   V:=(I-16)*255; If V<0 Then V:=0 Else V:=(V+109) Div 219;
+   If V>255 Then V:=255; MJEYLut[I]:=V;
+   V:=(I-128)*255; If V>=0 Then V:=(V+112) Div 224 Else V:=-((-V+112) Div 224);
+   V:=V+128; If V<0 Then V:=0; If V>255 Then V:=255; MJECLut[I]:=V;
+  End Else Begin MJEYLut[I]:=I; MJECLut[I]:=I; End;
+ End;
+ MJEFrNo:=0; MJECumT:=0; MJECumB:=0; MJEPassN:=0; MJELastQ:=Quality;
+ MJEActive:=True;
+End;
+
+Function MJEQScale(Q: LongInt): Double;
+Begin If Q<50 Then MJEQScale:=5000.0/Q Else MJEQScale:=200.0-2*Q; End;
+
+Function MJEScaleQ(S: Double): LongInt;
+Var Q: LongInt;
+Begin
+ If S>=100 Then Q:=Round(5000.0/S) Else Q:=Round((200.0-S)/2);
+ If Q<1 Then Q:=1; If Q>100 Then Q:=100;
+ MJEScaleQ:=Q;
+End;
+
+Function MJEFrame(Yuv: PEABuffer; Var Pkt: PEABuffer; Var PktLen: LongInt; Var IsKey: Boolean; Var Dts,Pts: LongInt): Boolean;
+Var
+ Base,Tgt: Double; Sz,Q,Lo,Hi,Best,BestS,It,Nq,LastQ,LastS: LongInt; R: Double;
+Begin
+ MJEPassN:=0;
+ MJEPrepare(Yuv);
+ If MJEFfQ>0 Then Sz:=MJEPass(0)
+ Else If MJEBr<=0 Then Sz:=MJEPass(MJEQ0)
+ Else Begin
+  Base:=MJEBr/8.0*MJEFd/MJEFn;
+  Tgt:=Base+(MJECumT-MJECumB)/3.0;
+  If Tgt<0.4*Base Then Tgt:=0.4*Base; If Tgt>2.0*Base Then Tgt:=2.0*Base;
+  Lo:=1; Hi:=100; Best:=0; BestS:=0; Q:=MJEPrevQ; LastQ:=0; LastS:=0;
+  For It:=1 To 10 Do Begin
+   Sz:=MJEPass(Q); LastQ:=Q; LastS:=Sz;
+   If Sz<=Tgt Then Begin
+    If Q>Best Then Begin Best:=Q; BestS:=Sz; End;
+    Lo:=Q+1;
+    If Sz>=0.97*Tgt Then Break;
+   End Else Hi:=Q-1;
+   If Lo>Hi Then Break;
+   R:=Tgt/Sz; If R<0.05 Then R:=0.05; If R>20 Then R:=20;
+   Nq:=MJEScaleQ(MJEQScale(Q)*Exp(Ln(R)/0.8));
+   If Nq<Lo Then Nq:=Lo; If Nq>Hi Then Nq:=Hi;
+   If Nq=Q Then Begin
+    If Sz<=Tgt Then Nq:=Q+1 Else Nq:=Q-1;
+    If Nq<Lo Then Nq:=Lo; If Nq>Hi Then Nq:=Hi;
+    If (Nq=Q) Or (Nq<Lo) Or (Nq>Hi) Then Break;
+   End;
+   If It>=6 Then Nq:=(Lo+Hi) Div 2;
+   Q:=Nq;
+  End;
+  If Best=0 Then Best:=1; { rien ne tient : qualite minimale }
+  If LastQ<>Best Then Sz:=MJEPass(Best) Else Sz:=LastS;
+  MJEPrevQ:=Best;
+  MJECumT:=MJECumT+Base; MJECumB:=MJECumB+Sz;
+ End;
+ Pkt:=MJEOut; PktLen:=Sz; IsKey:=True; Dts:=MJEFrNo; Pts:=MJEFrNo;
+ Inc(MJEFrNo);
+ MJEFrame:=True;
+End;
+
+{ protocole general : pas de reordonnancement, donc rien en attente }
+Function MJEFlush(Var Pkt: PEABuffer; Var PktLen: LongInt; Var IsKey: Boolean; Var Dts,Pts: LongInt): Boolean;
+Begin MJEFlush:=False; End;
+{ pe_dnxhd_enc.pas - encodeur DNxHD / DNxHR (VC-3), 8 bits 4:2:2, CBR (taille de trame fixe), une image = un paquet.
+  Prefixes : DNX / TDNX / PDNX. Voir README.txt.
+  Port de FFmpeg n6.1.1 libavcodec/dnxhdenc.c (chemin par defaut, controle de debit "fast" : dnxhd_find_qscale + tri par variance),
+  dnxhddata.c (tables extraites par script), mpegvideo_enc.c (ff_convert_matrix, ff_dct_quantize_c), jfdctint_template.c (FDCT islow
+  8 bits), et, pour la reconstruction, dnxhddec.c + simple_idct_template.c. Licence d'origine : LGPL 2.1+. }
+Const
+ DNX_1235_luma_weight: Array[0..63] Of Byte=(
+ 0,32,32,32,33,32,32,32,32,31,32,33,33,33,33,35,36,36,34,34,36,37,37,36,36,35,36,38,39,39,37,36,37,37,39,41,
+ 42,41,39,39,40,41,42,43,42,42,41,41,41,44,47,46,46,48,51,51,50,50,53,55,55,56,60,60);
+ DNX_1235_chroma_weight: Array[0..63] Of Byte=(
+ 0,32,33,34,34,33,34,35,37,40,43,42,39,38,39,41,43,44,47,50,55,61,63,56,48,46,49,54,59,58,55,58,63,65,67,74,
+ 84,82,75,72,70,74,84,87,87,94,93,81,75,78,83,89,91,86,82,85,90,90,85,79,73,73,73,73);
+ DNX_1237_luma_weight: Array[0..63] Of Byte=(
+ 0,32,33,34,34,36,37,36,36,37,38,38,38,39,41,44,43,41,40,41,46,49,47,46,47,49,51,54,60,62,59,55,54,56,58,61,
+ 65,66,64,63,66,73,78,79,80,79,78,78,82,87,89,90,93,95,96,97,97,100,104,102,98,98,99,99);
+ DNX_1237_chroma_weight: Array[0..63] Of Byte=(
+ 0,32,36,39,39,38,39,41,45,51,57,58,53,48,47,51,55,58,66,75,81,83,82,78,73,72,74,77,83,85,83,82,89,99,96,90,
+ 94,97,99,105,109,105,95,89,92,95,94,93,92,88,89,90,93,95,96,97,97,100,104,102,98,98,99,99);
+ DNX_1238_luma_weight: Array[0..63] Of Byte=(
+ 0,32,32,33,34,33,33,33,33,33,33,33,33,35,37,37,36,36,35,36,38,38,36,35,36,37,38,41,42,41,39,38,38,38,39,41,
+ 42,41,39,39,40,41,43,44,44,44,44,44,45,47,47,47,49,50,51,51,51,53,55,57,58,59,57,57);
+ DNX_1238_chroma_weight: Array[0..63] Of Byte=(
+ 0,32,35,35,35,34,34,35,39,43,45,45,41,39,40,41,42,44,48,55,59,63,65,59,53,52,52,55,61,62,58,58,63,66,66,65,
+ 70,74,70,66,65,68,75,77,74,74,77,76,73,73,73,73,76,80,89,90,82,77,80,86,84,82,82,82);
+ DNX_1241_luma_weight: Array[0..63] Of Byte=(
+ 0,32,33,34,34,35,36,37,36,37,38,38,38,39,39,40,40,38,38,39,38,37,39,41,41,42,43,45,45,46,47,46,45,43,39,37,
+ 37,40,44,45,45,46,46,46,47,47,46,44,42,43,45,47,48,49,50,49,48,46,47,48,48,49,49,49);
+ DNX_1241_chroma_weight: Array[0..63] Of Byte=(
+ 0,32,36,38,37,37,40,41,40,40,42,42,41,41,41,41,42,43,44,44,45,46,46,45,44,45,45,45,45,46,47,46,45,44,42,41,
+ 43,45,45,47,48,48,48,46,47,47,46,47,46,45,45,47,48,49,50,49,48,46,48,49,48,49,49,49);
+ DNX_1242_luma_weight: Array[0..63] Of Byte=(
+ 0,32,33,33,34,35,36,35,33,33,35,36,37,37,38,37,37,37,36,37,37,37,38,39,37,36,37,40,42,45,46,44,41,42,44,45,
+ 47,49,50,48,46,48,49,50,52,52,50,49,47,48,50,50,51,51,50,49,49,51,52,51,49,47,47,47);
+ DNX_1242_chroma_weight: Array[0..63] Of Byte=(
+ 0,32,37,42,45,45,45,44,38,37,40,42,44,49,51,47,41,40,43,44,46,48,51,54,51,47,47,45,47,50,51,49,46,47,49,47,
+ 50,55,55,51,48,49,51,51,52,52,54,54,49,49,52,53,54,54,53,53,55,59,63,62,60,60,60,60);
+ DNX_1243_luma_weight: Array[0..63] Of Byte=(
+ 0,32,32,33,33,35,35,35,35,35,35,35,34,35,38,40,39,37,37,37,36,35,36,38,40,41,42,44,45,44,42,41,40,38,36,36,
+ 37,38,40,43,44,45,45,45,45,45,45,41,39,41,45,47,47,48,48,48,46,44,45,47,47,48,47,47);
+ DNX_1243_chroma_weight: Array[0..63] Of Byte=(
+ 0,32,36,37,36,37,39,39,41,43,43,42,41,41,41,42,43,43,43,44,44,44,46,47,46,45,45,45,45,46,44,44,45,44,42,41,
+ 43,46,45,44,45,45,45,46,46,46,45,44,45,44,45,47,47,48,49,48,46,45,46,47,47,48,47,47);
+ DNX_1250_luma_weight: Array[0..63] Of Byte=(
+ 0,32,32,33,34,35,35,35,34,34,35,36,36,36,36,36,37,38,38,38,38,38,39,39,38,38,39,41,43,43,42,41,40,40,39,40,
+ 41,41,39,39,40,42,47,50,47,45,46,46,44,45,46,47,49,54,58,54,48,49,54,57,60,62,63,63);
+ DNX_1250_chroma_weight: Array[0..63] Of Byte=(
+ 0,32,35,36,36,35,36,39,41,43,45,44,41,39,40,42,43,43,45,48,49,51,52,50,50,51,51,51,51,52,53,54,51,49,51,52,
+ 52,56,57,55,54,54,55,56,55,58,58,58,60,61,62,62,59,57,58,58,61,59,59,59,60,62,63,63);
+ DNX_1251_luma_weight: Array[0..63] Of Byte=(
+ 0,32,32,34,34,34,34,35,35,35,36,37,36,36,35,36,38,38,38,38,38,38,38,38,38,38,39,41,44,43,41,40,40,40,40,39,
+ 40,41,40,39,40,43,46,46,44,44,44,42,41,43,46,48,50,55,58,53,48,50,55,58,61,62,62,62);
+ DNX_1251_chroma_weight: Array[0..63] Of Byte=(
+ 0,32,35,36,36,35,36,39,41,43,45,44,41,39,40,42,43,43,45,48,48,48,50,50,50,51,51,51,51,52,53,54,51,49,51,52,
+ 52,56,57,55,54,54,55,56,55,58,58,58,60,61,62,62,59,57,58,58,61,59,59,59,61,62,62,62);
+ DNX_1252_luma_weight: Array[0..63] Of Byte=(
+ 0,32,34,35,36,36,36,37,36,37,39,40,41,40,40,40,41,41,42,41,41,43,44,44,45,46,48,55,60,57,52,50,49,49,52,52,
+ 53,55,58,62,65,73,82,82,80,78,73,68,71,82,90,90,88,87,90,95,100,107,103,97,95,93,99,99);
+ DNX_1252_chroma_weight: Array[0..63] Of Byte=(
+ 0,32,35,36,37,37,38,40,42,46,49,50,50,49,49,53,56,56,57,58,60,62,64,65,63,64,64,65,66,65,67,71,72,74,74,74,
+ 74,77,81,78,72,73,82,85,89,88,84,80,90,100,90,90,88,87,90,95,114,128,125,129,134,125,116,116);
+ DNX_1260_luma_weight: Array[0..63] Of Byte=(
+ 0,32,33,34,36,37,37,36,34,33,34,35,37,38,40,41,40,39,38,37,34,33,34,37,40,44,48,52,53,49,47,45,42,38,36,36,
+ 38,41,43,44,46,49,52,54,54,49,44,44,44,47,51,51,52,51,48,50,52,53,53,50,50,54,54,54);
+ DNX_1260_chroma_weight: Array[0..63] Of Byte=(
+ 0,32,34,38,42,40,38,36,35,35,38,42,43,43,42,40,38,39,43,43,42,41,43,43,42,44,46,45,45,46,47,46,44,44,45,46,
+ 46,46,50,50,47,47,49,49,49,49,51,53,51,49,53,57,56,52,50,52,56,56,53,53,53,54,58,58);
+ DNX_1235_dc_codes: Array[0..13] Of Byte=(
+ 10,62,11,12,13,0,1,2,3,4,14,30,126,127);
+ DNX_1235_dc_bits: Array[0..13] Of Byte=(
+ 4,6,4,4,4,3,3,3,3,3,4,5,7,7);
+ DNX_1237_dc_codes: Array[0..11] Of Byte=(
+ 0,12,13,1,2,3,4,5,14,30,62,63);
+ DNX_1237_dc_bits: Array[0..11] Of Byte=(
+ 3,4,4,3,3,3,3,3,4,5,6,6);
+ DNX_1237_ac_codes: Array[0..256] Of Word=(
+ 0,1,4,5,12,26,27,56,57,58,59,120,121,244,245,246,247,248,498,499,500,501,502,1006,1007,1008,1009,1010,1011,
+ 2024,2025,2026,2027,2028,2029,2030,2031,4064,4065,4066,4067,4068,4069,4070,4071,4072,4073,8148,8149,8150,
+ 8151,8152,8153,8154,8155,8156,8157,8158,16318,16319,16320,16321,16322,16323,16324,16325,16326,16327,16328,
+ 16329,16330,16331,16332,16333,32668,32669,32670,32671,32672,32673,32674,32675,32676,32677,32678,32679,32680,
+ 32681,32682,32683,32684,65370,65371,65372,65373,65374,65375,65376,65377,65378,65379,65380,65381,65382,65383,
+ 65384,65385,65386,65387,65388,65389,65390,65391,65392,65393,65394,65395,65396,65397,65398,65399,65400,65401,
+ 65402,65403,65404,65405,65406,65407,65408,65409,65410,65411,65412,65413,65414,65415,65416,65417,65418,65419,
+ 65420,65421,65422,65423,65424,65425,65426,65427,65428,65429,65430,65431,65432,65433,65434,65435,65436,65437,
+ 65438,65439,65440,65441,65442,65443,65444,65445,65446,65447,65448,65449,65450,65451,65452,65453,65454,65455,
+ 65456,65457,65458,65459,65460,65461,65462,65463,65464,65465,65466,65467,65468,65469,65470,65471,65472,65473,
+ 65474,65475,65476,65477,65478,65479,65480,65481,65482,65483,65484,65485,65486,65487,65488,65489,65490,65491,
+ 65492,65493,65494,65495,65496,65497,65498,65499,65500,65501,65502,65503,65504,65505,65506,65507,65508,65509,
+ 65510,65511,65512,65513,65514,65515,65516,65517,65518,65519,65520,65521,65522,65523,65524,65525,65526,65527,
+ 65528,65529,65530,65531,65532,65533,65534,65535);
+ DNX_1237_ac_bits: Array[0..256] Of Byte=(
+ 2,2,3,3,4,5,5,6,6,6,6,7,7,8,8,8,8,8,9,9,9,9,9,10,10,10,10,10,10,11,11,11,11,11,11,11,11,12,12,12,12,12,12,12,
+ 12,12,12,13,13,13,13,13,13,13,13,13,13,13,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,15,15,15,15,15,15,
+ 15,15,15,15,15,15,15,15,15,15,15,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,
+ 16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,
+ 16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,
+ 16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,
+ 16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16);
+ DNX_1237_ac_info: Array[0..513] Of Byte=(
+ 3,0,3,2,5,0,0,0,7,0,9,0,5,2,11,0,13,0,15,0,7,2,17,0,19,0,21,0,23,0,25,0,9,2,11,2,27,0,29,0,31,0,33,0,13,2,35,
+ 0,37,0,39,0,41,0,43,0,15,2,45,0,47,0,49,0,51,0,53,0,55,0,17,2,19,2,57,0,59,0,61,0,63,0,65,0,67,0,69,0,21,2,
+ 23,2,25,2,71,0,73,0,75,0,77,0,79,0,81,0,83,0,27,2,29,2,31,2,33,2,85,0,87,0,89,0,91,0,93,0,95,0,97,0,99,0,101,
+ 0,103,0,105,0,35,2,37,2,39,2,41,2,43,2,107,0,109,0,111,0,113,0,115,0,117,0,119,0,121,0,123,0,129,0,3,1,45,2,
+ 47,2,49,2,51,2,53,2,55,2,125,0,127,0,5,1,7,1,9,1,11,1,13,1,15,1,17,1,19,1,21,1,23,1,25,1,27,1,29,1,31,1,33,1,
+ 35,1,37,1,39,1,41,1,43,1,45,1,47,1,49,1,51,1,53,1,55,1,57,1,59,1,61,1,63,1,65,1,67,1,69,1,71,1,73,1,75,1,77,
+ 1,79,1,81,1,83,1,85,1,87,1,89,1,91,1,93,1,95,1,97,1,99,1,101,1,103,1,105,1,107,1,109,1,111,1,113,1,115,1,117,
+ 1,119,1,121,1,123,1,125,1,127,1,129,1,57,2,59,2,61,2,63,2,65,2,67,2,69,2,71,2,73,2,75,2,77,2,79,2,81,2,83,2,
+ 85,2,87,2,89,2,91,2,93,2,95,2,97,2,99,2,101,2,103,2,105,2,107,2,109,2,111,2,113,2,115,2,117,2,119,2,121,2,
+ 123,2,125,2,127,2,129,2,3,3,5,3,7,3,9,3,11,3,13,3,15,3,17,3,19,3,21,3,23,3,25,3,27,3,29,3,31,3,33,3,35,3,37,
+ 3,39,3,41,3,43,3,45,3,47,3,49,3,51,3,53,3,55,3,57,3,59,3,61,3,63,3,65,3,67,3,69,3,71,3,73,3,75,3,77,3,79,3,
+ 81,3,83,3,85,3,87,3,89,3,91,3,93,3,95,3,97,3,99,3,101,3,103,3,105,3,107,3,109,3,111,3,113,3,115,3,117,3,119,
+ 3,121,3,123,3,125,3,127,3,129,3);
+ DNX_1238_ac_codes: Array[0..256] Of Word=(
+ 0,1,4,10,11,24,25,26,54,55,56,57,116,117,118,119,240,241,242,243,244,245,492,493,494,495,496,497,498,499,
+ 1000,1001,1002,1003,1004,1005,1006,1007,1008,2018,2019,2020,2021,2022,2023,2024,2025,2026,2027,4056,4057,
+ 4058,4059,4060,4061,4062,4063,4064,4065,4066,4067,4068,4069,8140,8141,8142,8143,8144,8145,8146,8147,8148,
+ 8149,8150,8151,8152,8153,8154,8155,8156,16314,16315,16316,16317,16318,16319,16320,16321,16322,16323,16324,
+ 16325,16326,16327,16328,16329,16330,16331,16332,16333,16334,16335,16336,16337,16338,32678,32679,32680,32681,
+ 32682,32683,32684,32685,32686,32687,32688,32689,32690,32691,32692,32693,32694,32695,32696,32697,32698,32699,
+ 32700,32701,32702,32703,32704,32705,65412,65413,65414,65415,65416,65417,65418,65419,65420,65421,65422,65423,
+ 65424,65425,65426,65427,65428,65429,65430,65431,65432,65433,65434,65435,65436,65437,65438,65439,65440,65441,
+ 65442,65443,65444,65445,65446,65447,65448,65449,65450,65451,65452,65453,65454,65455,65456,65457,65458,65459,
+ 65460,65461,65462,65463,65464,65465,65466,65467,65468,65469,65470,65471,65472,65473,65474,65475,65476,65477,
+ 65478,65479,65480,65481,65482,65483,65484,65485,65486,65487,65488,65489,65490,65491,65492,65493,65494,65495,
+ 65496,65497,65498,65499,65500,65501,65502,65503,65504,65505,65506,65507,65508,65509,65510,65511,65512,65513,
+ 65514,65515,65516,65517,65518,65519,65520,65521,65522,65523,65524,65525,65526,65527,65528,65529,65530,65531,
+ 65532,65533,65534,65535);
+ DNX_1238_ac_bits: Array[0..256] Of Byte=(
+ 2,2,3,4,4,5,5,5,6,6,6,6,7,7,7,7,8,8,8,8,8,8,9,9,9,9,9,9,9,9,10,10,10,10,10,10,10,10,10,11,11,11,11,11,11,11,
+ 11,11,11,12,12,12,12,12,12,12,12,12,12,12,12,12,12,13,13,13,13,13,13,13,13,13,13,13,13,13,13,13,13,13,14,14,
+ 14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,15,15,15,15,15,15,15,15,15,15,15,15,15,
+ 15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,
+ 16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,
+ 16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,
+ 16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16);
+ DNX_1238_ac_info: Array[0..513] Of Byte=(
+ 3,0,3,2,5,0,7,0,0,0,9,0,11,0,5,2,13,0,15,0,17,0,7,2,19,0,21,0,23,0,9,2,25,0,27,0,29,0,31,0,33,0,11,2,35,0,37,
+ 0,39,0,41,0,43,0,45,0,13,2,15,2,47,0,49,0,51,0,53,0,55,0,57,0,59,0,17,2,19,2,61,0,63,0,65,0,67,0,69,0,71,0,
+ 73,0,75,0,21,2,23,2,77,0,79,0,81,0,83,0,85,0,87,0,89,0,91,0,93,0,95,0,97,0,25,2,27,2,29,2,99,0,101,0,103,0,
+ 105,0,107,0,109,0,111,0,113,0,115,0,117,0,119,0,121,0,123,0,31,2,33,2,35,2,37,2,125,0,127,0,129,0,3,1,5,1,7,
+ 1,9,1,11,1,13,1,15,1,17,1,19,1,21,1,23,1,25,1,27,1,29,1,31,1,33,1,39,2,41,2,43,2,45,2,47,2,49,2,35,1,37,1,39,
+ 1,41,1,43,1,45,1,47,1,49,1,51,1,53,1,55,1,57,1,59,1,61,1,63,1,65,1,67,1,69,1,71,1,73,1,75,1,81,1,51,2,53,2,
+ 55,2,57,2,59,2,61,2,77,1,79,1,83,1,85,1,87,1,89,1,91,1,93,1,95,1,97,1,99,1,101,1,103,1,105,1,107,1,109,1,111,
+ 1,113,1,115,1,117,1,119,1,121,1,123,1,125,1,127,1,129,1,63,2,65,2,67,2,69,2,71,2,73,2,75,2,77,2,79,2,81,2,83,
+ 2,85,2,87,2,89,2,91,2,93,2,95,2,97,2,99,2,101,2,103,2,105,2,107,2,109,2,111,2,113,2,115,2,117,2,119,2,121,2,
+ 123,2,125,2,127,2,129,2,3,3,5,3,7,3,9,3,11,3,13,3,15,3,17,3,19,3,21,3,23,3,25,3,27,3,29,3,31,3,33,3,35,3,37,
+ 3,39,3,41,3,43,3,45,3,47,3,49,3,51,3,53,3,55,3,57,3,59,3,61,3,63,3,65,3,67,3,69,3,71,3,73,3,75,3,77,3,79,3,
+ 81,3,83,3,85,3,87,3,89,3,91,3,93,3,95,3,97,3,99,3,101,3,103,3,105,3,107,3,109,3,111,3,113,3,115,3,117,3,119,
+ 3,121,3,123,3,125,3,127,3,129,3);
+ DNX_1235_ac_codes: Array[0..256] Of Word=(
+ 0,1,4,10,11,24,25,26,54,55,56,57,116,117,118,119,240,241,242,243,244,245,492,493,494,495,496,497,498,998,999,
+ 1000,1001,1002,1003,1004,1005,1006,1007,2016,2017,2018,2019,2020,2021,2022,2023,2024,2025,2026,4054,4055,
+ 4056,4057,4058,4059,4060,4061,4062,4063,4064,4065,4066,4067,4068,4069,8140,8141,8142,8143,8144,8145,8146,
+ 8147,8148,8149,8150,8151,8152,8153,8154,8155,8156,8157,16316,16317,16318,16319,16320,16321,16322,16323,16324,
+ 16325,16326,16327,16328,16329,16330,16331,16332,16333,16334,16335,16336,16337,32676,32677,32678,32679,32680,
+ 32681,32682,32683,32684,32685,32686,32687,32688,32689,32690,32691,32692,32693,32694,32695,32696,32697,32698,
+ 32699,32700,32701,32702,32703,32704,32705,32706,32707,32708,65418,65419,65420,65421,65422,65423,65424,65425,
+ 65426,65427,65428,65429,65430,65431,65432,65433,65434,65435,65436,65437,65438,65439,65440,65441,65442,65443,
+ 65444,65445,65446,65447,65448,65449,65450,65451,65452,65453,65454,65455,65456,65457,65458,65459,65460,65461,
+ 65462,65463,65464,65465,65466,65467,65468,65469,65470,65471,65472,65473,65474,65475,65476,65477,65478,65479,
+ 65480,65481,65482,65483,65484,65485,65486,65487,65488,65489,65490,65491,65492,65493,65494,65495,65496,65497,
+ 65498,65499,65500,65501,65502,65503,65504,65505,65506,65507,65508,65509,65510,65511,65512,65513,65514,65515,
+ 65516,65517,65518,65519,65520,65521,65522,65523,65524,65525,65526,65527,65528,65529,65530,65531,65532,65533,
+ 65534,65535);
+ DNX_1235_ac_bits: Array[0..256] Of Byte=(
+ 2,2,3,4,4,5,5,5,6,6,6,6,7,7,7,7,8,8,8,8,8,8,9,9,9,9,9,9,9,10,10,10,10,10,10,10,10,10,10,11,11,11,11,11,11,11,
+ 11,11,11,11,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,13,13,13,13,13,13,13,13,13,13,13,13,13,13,13,13,
+ 13,13,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,15,15,15,15,15,15,15,15,15,15,15,15,
+ 15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,
+ 16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,
+ 16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,
+ 16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16);
+ DNX_1235_ac_info: Array[0..513] Of Byte=(
+ 3,0,3,2,5,0,7,0,0,0,9,0,11,0,5,2,13,0,15,0,17,0,7,2,19,0,21,0,23,0,9,2,25,0,27,0,29,0,31,0,33,0,11,2,35,0,37,
+ 0,39,0,41,0,43,0,13,2,15,2,45,0,47,0,49,0,51,0,53,0,55,0,57,0,59,0,17,2,19,2,61,0,63,0,65,0,67,0,69,0,71,0,
+ 73,0,75,0,77,0,21,2,23,2,79,0,81,0,83,0,85,0,87,0,89,0,91,0,93,0,95,0,97,0,99,0,101,0,25,2,27,2,29,2,31,2,
+ 103,0,105,0,107,0,109,0,111,0,113,0,115,0,117,0,119,0,121,0,123,0,125,0,127,0,3,1,33,2,35,2,37,2,39,2,129,0,
+ 5,1,7,1,9,1,11,1,13,1,15,1,17,1,19,1,21,1,23,1,25,1,27,1,29,1,31,1,33,1,35,1,41,2,43,2,45,2,47,2,49,2,37,1,
+ 39,1,41,1,43,1,45,1,47,1,49,1,51,1,53,1,55,1,57,1,59,1,61,1,63,1,65,1,67,1,69,1,71,1,73,1,75,1,77,1,79,1,81,
+ 1,83,1,85,1,51,2,53,2,55,2,57,2,59,2,61,2,63,2,65,2,87,1,89,1,91,1,93,1,95,1,97,1,99,1,101,1,103,1,105,1,107,
+ 1,109,1,111,1,113,1,115,1,117,1,119,1,121,1,123,1,125,1,127,1,129,1,67,2,69,2,71,2,73,2,75,2,77,2,79,2,81,2,
+ 83,2,85,2,87,2,89,2,91,2,93,2,95,2,97,2,99,2,101,2,103,2,105,2,107,2,109,2,111,2,113,2,115,2,117,2,119,2,121,
+ 2,123,2,125,2,127,2,129,2,3,3,5,3,7,3,9,3,11,3,13,3,15,3,17,3,19,3,21,3,23,3,25,3,27,3,29,3,31,3,33,3,35,3,
+ 37,3,39,3,41,3,43,3,45,3,47,3,49,3,51,3,53,3,55,3,57,3,59,3,61,3,63,3,65,3,67,3,69,3,71,3,73,3,75,3,77,3,79,
+ 3,81,3,83,3,85,3,87,3,89,3,91,3,93,3,95,3,97,3,99,3,101,3,103,3,105,3,107,3,109,3,111,3,113,3,115,3,117,3,
+ 119,3,121,3,123,3,125,3,127,3,129,3);
+ DNX_1250_ac_codes: Array[0..256] Of Word=(
+ 0,1,4,10,11,24,25,26,54,55,56,57,116,117,118,119,240,241,242,243,244,245,492,493,494,495,496,497,498,998,999,
+ 1000,1001,1002,1003,1004,1005,1006,2014,2015,2016,2017,2018,2019,2020,2021,2022,2023,2024,2025,4052,4053,
+ 4054,4055,4056,4057,4058,4059,4060,4061,4062,4063,4064,4065,4066,4067,8136,8137,8138,8139,8140,8141,8142,
+ 8143,8144,8145,8146,8147,8148,8149,8150,8151,8152,8153,8154,8155,8156,16314,16315,16316,16317,16318,16319,
+ 16320,16321,16322,16323,16324,16325,16326,16327,16328,16329,16330,16331,16332,16333,16334,16335,16336,16337,
+ 16338,32678,32679,32680,32681,32682,32683,32684,32685,32686,32687,32688,32689,32690,32691,32692,32693,32694,
+ 32695,32696,32697,32698,32699,32700,32701,32702,32703,32704,32705,32706,32707,32708,32709,32710,32711,32712,
+ 65426,65427,65428,65429,65430,65431,65432,65433,65434,65435,65436,65437,65438,65439,65440,65441,65442,65443,
+ 65444,65445,65446,65447,65448,65449,65450,65451,65452,65453,65454,65455,65456,65457,65458,65459,65460,65461,
+ 65462,65463,65464,65465,65466,65467,65468,65469,65470,65471,65472,65473,65474,65475,65476,65477,65478,65479,
+ 65480,65481,65482,65483,65484,65485,65486,65487,65488,65489,65490,65491,65492,65493,65494,65495,65496,65497,
+ 65498,65499,65500,65501,65502,65503,65504,65505,65506,65507,65508,65509,65510,65511,65512,65513,65514,65515,
+ 65516,65517,65518,65519,65520,65521,65522,65523,65524,65525,65526,65527,65528,65529,65530,65531,65532,65533,
+ 65534,65535);
+ DNX_1250_ac_bits: Array[0..256] Of Byte=(
+ 2,2,3,4,4,5,5,5,6,6,6,6,7,7,7,7,8,8,8,8,8,8,9,9,9,9,9,9,9,10,10,10,10,10,10,10,10,10,11,11,11,11,11,11,11,11,
+ 11,11,11,11,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,13,13,13,13,13,13,13,13,13,13,13,13,13,13,13,13,
+ 13,13,13,13,13,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,15,15,15,15,15,15,
+ 15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,16,16,16,16,16,16,16,
+ 16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,
+ 16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,
+ 16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16);
+ DNX_1250_ac_info: Array[0..513] Of Byte=(
+ 3,0,3,2,5,0,7,0,0,0,9,0,11,0,5,2,13,0,15,0,17,0,7,2,19,0,21,0,23,0,9,2,25,0,27,0,29,0,31,0,33,0,11,2,35,0,37,
+ 0,39,0,41,0,43,0,45,0,13,2,47,0,49,0,51,0,53,0,55,0,57,0,59,0,15,2,17,2,61,0,63,0,65,0,67,0,69,0,71,0,73,0,
+ 75,0,77,0,79,0,19,2,21,2,81,0,83,0,85,0,87,0,89,0,91,0,93,0,95,0,97,0,99,0,101,0,103,0,105,0,23,2,25,2,27,2,
+ 107,0,109,0,111,0,113,0,115,0,117,0,119,0,121,0,123,0,125,0,127,0,129,0,3,1,5,1,7,1,9,1,11,1,29,2,31,2,33,2,
+ 35,2,13,1,15,1,17,1,19,1,21,1,23,1,25,1,27,1,29,1,31,1,33,1,35,1,37,1,39,1,41,1,43,1,45,1,47,1,49,1,51,1,53,
+ 1,37,2,39,2,41,2,43,2,55,1,57,1,59,1,61,1,63,1,65,1,67,1,69,1,71,1,73,1,75,1,77,1,79,1,81,1,83,1,85,1,87,1,
+ 89,1,91,1,93,1,95,1,97,1,99,1,101,1,103,1,105,1,107,1,111,1,113,1,45,2,47,2,49,2,51,2,53,2,55,2,109,1,115,1,
+ 117,1,119,1,121,1,123,1,125,1,127,1,129,1,57,2,59,2,61,2,63,2,65,2,67,2,69,2,71,2,73,2,75,2,77,2,79,2,81,2,
+ 83,2,85,2,87,2,89,2,91,2,93,2,95,2,97,2,99,2,101,2,103,2,105,2,107,2,109,2,111,2,113,2,115,2,117,2,119,2,121,
+ 2,123,2,125,2,127,2,129,2,3,3,5,3,7,3,9,3,11,3,13,3,15,3,17,3,19,3,21,3,23,3,25,3,27,3,29,3,31,3,33,3,35,3,
+ 37,3,39,3,41,3,43,3,45,3,47,3,49,3,51,3,53,3,55,3,57,3,59,3,61,3,63,3,65,3,67,3,69,3,71,3,73,3,75,3,77,3,79,
+ 3,81,3,83,3,85,3,87,3,89,3,91,3,93,3,95,3,97,3,99,3,101,3,103,3,105,3,107,3,109,3,111,3,113,3,115,3,117,3,
+ 119,3,121,3,123,3,125,3,127,3,129,3);
+ DNX_1251_ac_codes: Array[0..256] Of Word=(
+ 0,1,4,10,11,24,25,26,54,55,56,57,116,117,118,119,240,241,242,243,244,245,492,493,494,495,496,497,996,997,998,
+ 999,1000,1001,1002,1003,1004,1005,2012,2013,2014,2015,2016,2017,2018,2019,2020,2021,2022,2023,2024,2025,4052,
+ 4053,4054,4055,4056,4057,4058,4059,4060,4061,4062,4063,4064,4065,4066,8134,8135,8136,8137,8138,8139,8140,
+ 8141,8142,8143,8144,8145,8146,8147,8148,8149,8150,8151,8152,8153,8154,8155,8156,16314,16315,16316,16317,
+ 16318,16319,16320,16321,16322,16323,16324,16325,16326,16327,16328,16329,16330,16331,16332,16333,16334,16335,
+ 16336,16337,16338,16339,32680,32681,32682,32683,32684,32685,32686,32687,32688,32689,32690,32691,32692,32693,
+ 32694,32695,32696,32697,32698,32699,32700,32701,32702,32703,32704,32705,32706,32707,32708,32709,32710,32711,
+ 32712,32713,32714,65430,65431,65432,65433,65434,65435,65436,65437,65438,65439,65440,65441,65442,65443,65444,
+ 65445,65446,65447,65448,65449,65450,65451,65452,65453,65454,65455,65456,65457,65458,65459,65460,65461,65462,
+ 65463,65464,65465,65466,65467,65468,65469,65470,65471,65472,65473,65474,65475,65476,65477,65478,65479,65480,
+ 65481,65482,65483,65484,65485,65486,65487,65488,65489,65490,65491,65492,65493,65494,65495,65496,65497,65498,
+ 65499,65500,65501,65502,65503,65504,65505,65506,65507,65508,65509,65510,65511,65512,65513,65514,65515,65516,
+ 65517,65518,65519,65520,65521,65522,65523,65524,65525,65526,65527,65528,65529,65530,65531,65532,65533,65534,
+ 65535);
+ DNX_1251_ac_bits: Array[0..256] Of Byte=(
+ 2,2,3,4,4,5,5,5,6,6,6,6,7,7,7,7,8,8,8,8,8,8,9,9,9,9,9,9,10,10,10,10,10,10,10,10,10,10,11,11,11,11,11,11,11,
+ 11,11,11,11,11,11,11,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,13,13,13,13,13,13,13,13,13,13,13,13,13,13,
+ 13,13,13,13,13,13,13,13,13,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,15,
+ 15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,16,16,
+ 16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,
+ 16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,
+ 16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16);
+ DNX_1251_ac_info: Array[0..513] Of Byte=(
+ 3,0,3,2,5,0,7,0,0,0,9,0,11,0,5,2,13,0,15,0,17,0,7,2,19,0,21,0,23,0,9,2,25,0,27,0,29,0,31,0,33,0,11,2,35,0,37,
+ 0,39,0,41,0,43,0,13,2,45,0,47,0,49,0,51,0,53,0,55,0,57,0,59,0,15,2,17,2,61,0,63,0,65,0,67,0,69,0,71,0,73,0,
+ 75,0,77,0,79,0,81,0,19,2,21,2,23,2,83,0,85,0,87,0,89,0,91,0,93,0,95,0,97,0,99,0,101,0,103,0,105,0,25,2,27,2,
+ 29,2,107,0,109,0,111,0,113,0,115,0,117,0,119,0,121,0,123,0,125,0,127,0,129,0,3,1,5,1,7,1,9,1,11,1,13,1,15,1,
+ 17,1,31,2,33,2,35,2,19,1,21,1,23,1,25,1,27,1,29,1,31,1,33,1,35,1,37,1,39,1,41,1,43,1,45,1,47,1,49,1,51,1,53,
+ 1,55,1,57,1,59,1,37,2,39,2,41,2,43,2,45,2,61,1,63,1,65,1,67,1,69,1,71,1,73,1,75,1,77,1,79,1,81,1,83,1,85,1,
+ 87,1,89,1,91,1,93,1,95,1,97,1,99,1,101,1,103,1,105,1,107,1,109,1,111,1,113,1,115,1,117,1,47,2,49,2,51,2,53,2,
+ 55,2,57,2,119,1,121,1,123,1,125,1,127,1,129,1,59,2,61,2,63,2,65,2,67,2,69,2,71,2,73,2,75,2,77,2,79,2,81,2,83,
+ 2,85,2,87,2,89,2,91,2,93,2,95,2,97,2,99,2,101,2,103,2,105,2,107,2,109,2,111,2,113,2,115,2,117,2,119,2,121,2,
+ 123,2,125,2,127,2,129,2,3,3,5,3,7,3,9,3,11,3,13,3,15,3,17,3,19,3,21,3,23,3,25,3,27,3,29,3,31,3,33,3,35,3,37,
+ 3,39,3,41,3,43,3,45,3,47,3,49,3,51,3,53,3,55,3,57,3,59,3,61,3,63,3,65,3,67,3,69,3,71,3,73,3,75,3,77,3,79,3,
+ 81,3,83,3,85,3,87,3,89,3,91,3,93,3,95,3,97,3,99,3,101,3,103,3,105,3,107,3,109,3,111,3,113,3,115,3,117,3,119,
+ 3,121,3,123,3,125,3,127,3,129,3);
+ DNX_1252_ac_codes: Array[0..256] Of Word=(
+ 0,1,4,10,11,12,26,27,56,57,58,118,119,120,242,243,244,245,246,247,496,497,498,499,500,1002,1003,1004,1005,
+ 1006,1007,1008,1009,2020,2021,2022,2023,2024,2025,2026,2027,2028,2029,4060,4061,4062,4063,4064,4065,4066,
+ 4067,4068,4069,4070,4071,8144,8145,8146,8147,8148,8149,8150,8151,8152,8153,8154,8155,8156,8157,8158,16318,
+ 16319,16320,16321,16322,16323,16324,16325,16326,16327,16328,16329,16330,16331,16332,16333,16334,16335,32672,
+ 32673,32674,32675,32676,32677,32678,32679,32680,32681,32682,32683,32684,32685,32686,32687,32688,32689,32690,
+ 32691,32692,32693,32694,65390,65391,65392,65393,65394,65395,65396,65397,65398,65399,65400,65401,65402,65403,
+ 65404,65405,65406,65407,65408,65409,65410,65411,65412,65413,65414,65415,65416,65417,65418,65419,65420,65421,
+ 65422,65423,65424,65425,65426,65427,65428,65429,65430,65431,65432,65433,65434,65435,65436,65437,65438,65439,
+ 65440,65441,65442,65443,65444,65445,65446,65447,65448,65449,65450,65451,65452,65453,65454,65455,65456,65457,
+ 65458,65459,65460,65461,65462,65463,65464,65465,65466,65467,65468,65469,65470,65471,65472,65473,65474,65475,
+ 65476,65477,65478,65479,65480,65481,65482,65483,65484,65485,65486,65487,65488,65489,65490,65491,65492,65493,
+ 65494,65495,65496,65497,65498,65499,65500,65501,65502,65503,65504,65505,65506,65507,65508,65509,65510,65511,
+ 65512,65513,65514,65515,65516,65517,65518,65519,65520,65521,65522,65523,65524,65525,65526,65527,65528,65529,
+ 65530,65531,65532,65533,65534,65535);
+ DNX_1252_ac_bits: Array[0..256] Of Byte=(
+ 2,2,3,4,4,4,5,5,6,6,6,7,7,7,8,8,8,8,8,8,9,9,9,9,9,10,10,10,10,10,10,10,10,11,11,11,11,11,11,11,11,11,11,12,
+ 12,12,12,12,12,12,12,12,12,12,12,13,13,13,13,13,13,13,13,13,13,13,13,13,13,13,14,14,14,14,14,14,14,14,14,14,
+ 14,14,14,14,14,14,14,14,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,16,16,16,16,16,
+ 16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,
+ 16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,
+ 16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,
+ 16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16);
+ DNX_1252_ac_info: Array[0..513] Of Byte=(
+ 3,0,3,2,5,0,7,0,5,2,0,0,9,0,11,0,13,0,15,0,7,2,17,0,19,0,21,0,23,0,25,0,27,0,29,0,9,2,11,2,31,0,33,0,35,0,37,
+ 0,13,2,39,0,41,0,43,0,45,0,47,0,49,0,15,2,17,2,51,0,53,0,55,0,57,0,59,0,61,0,63,0,65,0,19,2,21,2,67,0,69,0,
+ 71,0,73,0,75,0,77,0,79,0,81,0,83,0,23,2,25,2,27,2,85,0,87,0,89,0,91,0,93,0,95,0,97,0,99,0,101,0,103,0,105,0,
+ 107,0,29,2,31,2,33,2,109,0,111,0,113,0,115,0,117,0,119,0,121,0,123,0,125,0,127,0,129,0,3,1,5,1,7,1,35,2,37,2,
+ 39,2,41,2,9,1,11,1,13,1,15,1,17,1,19,1,21,1,23,1,25,1,27,1,29,1,31,1,33,1,35,1,37,1,39,1,41,1,43,1,43,2,45,2,
+ 47,2,49,2,51,2,45,1,47,1,49,1,51,1,53,1,55,1,57,1,59,1,61,1,63,1,65,1,67,1,69,1,71,1,73,1,75,1,77,1,79,1,81,
+ 1,83,1,85,1,87,1,89,1,91,1,93,1,95,1,97,1,99,1,101,1,103,1,105,1,107,1,109,1,111,1,113,1,115,1,117,1,119,1,
+ 121,1,123,1,125,1,127,1,129,1,53,2,55,2,57,2,59,2,61,2,63,2,65,2,67,2,69,2,71,2,73,2,75,2,77,2,79,2,81,2,83,
+ 2,85,2,87,2,89,2,91,2,93,2,95,2,97,2,99,2,101,2,103,2,105,2,107,2,109,2,111,2,113,2,115,2,117,2,119,2,121,2,
+ 123,2,125,2,127,2,129,2,3,3,5,3,7,3,9,3,11,3,13,3,15,3,17,3,19,3,21,3,23,3,25,3,27,3,29,3,31,3,33,3,35,3,37,
+ 3,39,3,41,3,43,3,45,3,47,3,49,3,51,3,53,3,55,3,57,3,59,3,61,3,63,3,65,3,67,3,69,3,71,3,73,3,75,3,77,3,79,3,
+ 81,3,83,3,85,3,87,3,89,3,91,3,93,3,95,3,97,3,99,3,101,3,103,3,105,3,107,3,109,3,111,3,113,3,115,3,117,3,119,
+ 3,121,3,123,3,125,3,127,3,129,3);
+ DNX_1235_run_codes: Array[0..61] Of Word=(
+ 0,4,10,11,24,25,26,27,56,57,58,59,120,242,486,487,488,489,980,981,982,983,984,985,986,987,988,989,990,991,
+ 992,993,994,995,996,997,998,999,1000,1001,1002,1003,1004,1005,1006,1007,1008,1009,1010,1011,1012,1013,1014,
+ 1015,1016,1017,1018,1019,1020,1021,1022,1023);
+ DNX_1235_run_bits: Array[0..61] Of Byte=(
+ 1,3,4,4,5,5,5,5,6,6,6,6,7,8,9,9,9,9,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,
+ 10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10);
+ DNX_1235_run: Array[0..61] Of Byte=(
+ 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,18,20,17,19,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,
+ 40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62);
+ DNX_1237_run_codes: Array[0..61] Of Word=(
+ 0,4,10,11,24,25,26,54,55,56,57,58,118,119,240,482,483,484,485,486,487,488,489,490,491,492,493,494,990,991,
+ 992,993,994,995,996,997,998,999,1000,1001,1002,1003,1004,1005,1006,1007,1008,1009,1010,1011,1012,1013,1014,
+ 1015,1016,1017,1018,1019,1020,1021,1022,1023);
+ DNX_1237_run_bits: Array[0..61] Of Byte=(
+ 1,3,4,4,5,5,5,6,6,6,6,6,7,7,8,9,9,9,9,9,9,9,9,9,9,9,9,9,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,
+ 10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10);
+ DNX_1237_run: Array[0..61] Of Byte=(
+ 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,53,57,58,59,60,61,62,22,23,24,25,26,27,28,29,30,31,32,
+ 33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,54,55,56);
+ DNX_1238_run: Array[0..61] Of Byte=(
+ 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,20,21,17,18,19,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,
+ 40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62);
+ DNX_1250_run_codes: Array[0..61] Of Word=(
+ 0,4,5,12,26,27,28,58,118,119,120,242,486,487,976,977,978,979,980,981,982,983,984,985,986,987,988,989,990,991,
+ 992,993,994,995,996,997,998,999,1000,1001,1002,1003,1004,1005,1006,1007,1008,1009,1010,1011,1012,1013,1014,
+ 1015,1016,1017,1018,1019,1020,1021,1022,1023);
+ DNX_1250_run_bits: Array[0..61] Of Byte=(
+ 1,3,3,4,5,5,5,6,7,7,7,8,9,9,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,
+ 10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10);
+ DNX_1250_run: Array[0..61] Of Byte=(
+ 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,
+ 40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62);
+
+Type
+ PDNXB=^TDNXBArr; TDNXBArr=Array[0..65535] Of Byte;
+ PDNXW=^TDNXWArr; TDNXWArr=Array[0..65535] Of Word;
+ PDNXL=^TDNXL; TDNXL=Array[0..536870000] Of LongInt;
+ TDNXBlk=Array[0..63] Of LongInt;
+ PDNXBlk=^TDNXBlk;
+ TDNXCache=Array[0..200000000] Of LongInt;
+ PDNXCache=^TDNXCache;
+Const
+ DNXZig: Array[0..63] Of Byte=(0,1,8,16,9,2,3,10,17,24,32,25,18,11,4,5,12,19,26,
+  33,40,48,41,34,27,20,13,6,7,14,21,28,35,42,49,56,57,50,43,36,29,22,15,23,30,
+  37,44,51,58,59,52,45,38,31,39,46,53,60,61,54,47,55,62,63);
+ DNXBlkComp: Array[0..7] Of Byte=(0,0,1,2,0,0,1,2);
+ { CID pris en charge par ce codeur (8 bits 4:2:2) }
+ DNXCidList: Array[0..13] Of Word=(1237,1238,1242,1243,1244,1251,1252,1253,1258,1259,1260,1272,1273,1274);
+Var
+ { reglages (a fixer AVANT DNXBegin) }
+ DNXInterlaced: Boolean;   { True = images entrelacees : codage de deux trames (cid 1242/1243/1244) }
+ DNXBottomFirst: Boolean;  { entrelace : trame basse en premier (defaut : trame haute en premier) }
+ DNXQmax: LongInt;         { qscale maximal (defaut 1024 comme ffmpeg) }
+ DNXMinPadding: LongInt;   { 0 ; 1600 = option nitris_compat de ffmpeg }
+ { resultat de DNXBegin }
+ DNXOk: Boolean; DNXErr: String;
+ DNXCid: LongInt;          { cid retenu }
+ DNXFrameSize: LongInt;    { taille en octets de chaque paquet (constante : CBR) }
+ { etat }
+ DNXW,DNXH,DNXFn,DNXFd,DNXBr,DNXFrNo,DNXCw,DNXMbW,DNXMbH,DNXMbNum,DNXDataOff,DNXCuSize,DNXFlags,DNXIdxBits,DNXFrameBits: LongInt;
+ DNXQscale,DNXLambda,DNXIsHR,DNXPSn,DNXPSd,DNXFieldH,DNXNFields: LongInt;
+ DNXWgtL,DNXWgtC,DNXDcCodes,DNXDcBits,DNXAcBits,DNXAcInfo,DNXRunBitsT,DNXRunT: PDNXB;
+ DNXAcCodes,DNXRunCodesT: PDNXW;
+ DNXRates: Array[0..4] Of LongInt;
+ DNXTW,DNXTH,DNXTFrame,DNXTCu: LongInt;
+ DNXQmL,DNXQmC: PDNXL;                 { [qscale*64+j] }
+ DNXVlcCodes,DNXVlcBits: PDNXL;        { indices level*2+run + DNXVlcOff }
+ DNXVlcOff,DNXVlcSize: LongInt;
+ DNXRunCodes: Array[0..63] Of LongInt; DNXRunBits: Array[0..63] Of LongInt;
+ DNXPY,DNXPU,DNXPV: PEABuffer; DNXPSz: Array[0..2] Of LongInt;
+ DNXCache: PDNXCache; DNXCacheSz: LongInt;
+ DNXRc: Array[0..1025] Of PDNXL;       { bits par macrobloc pour chaque qscale essaye (alloc. paresseuse) }
+ DNXMbQ,DNXMbBits,DNXSliceSize,DNXSliceOffs: PDNXL;
+ DNXCmpV,DNXCmpM,DNXCmpV2,DNXCmpM2: PDNXL;
+ DNXOut: PEABuffer;
+ DNXAcc: Int64; DNXAccN,DNXWPos: LongInt;
+ DNXLastDc: Array[0..2] Of LongInt;
+ DNXActive: Boolean;
+ DNXRec: PEABuffer;                    { reconstruction (I420 rognee) de la derniere image, voir DNXGetRecon }
+ DNXTagStr: String;
+ DNXCurField,DNXWLimit,DNXRecSz,DNXQmaxI: LongInt;
+ DNXOutBuf: PEABuffer;
+ DNXWantRecon: Boolean;   { True = calcule la reconstruction (voir DNXGetRecon), a fixer avant DNXBegin }
+
+Function DNXSar(V: Int64; N: LongInt): Int64;
+Begin
+ If V>=0 Then DNXSar:=V Shr N Else DNXSar:=-((-V-1) Shr N)-1;
+End;
+Function DNXDesc(V: Int64; N: LongInt): Int64;
+Begin DNXDesc:=DNXSar(V+(Int64(1) Shl (N-1)),N); End;
+
+{ ff_jpeg_fdct_islow_8 }
+Procedure DNXFdct(Var D: TDNXBlk);
+Const
+ F0541=4433; F0765=6270; F1847=15137; F1175=9633; F0298=2446; F2053=16819;
+ F3072=25172; F1501=12299; F0899=7373; F2562=20995; F1961=16069; F0390=3196;
+Var
+ I: LongInt;
+ T0,T1,T2,T3,T4,T5,T6,T7,T10,T11,T12,T13,Z1,Z2,Z3,Z4,Z5: Int64;
+Begin
+ For I:=0 To 7 Do Begin
+  T0:=D[I*8]+D[I*8+7]; T7:=D[I*8]-D[I*8+7]; T1:=D[I*8+1]+D[I*8+6];
+  T6:=D[I*8+1]-D[I*8+6]; T2:=D[I*8+2]+D[I*8+5]; T5:=D[I*8+2]-D[I*8+5];
+  T3:=D[I*8+3]+D[I*8+4]; T4:=D[I*8+3]-D[I*8+4];
+  T10:=T0+T3; T13:=T0-T3; T11:=T1+T2; T12:=T1-T2;
+  D[I*8]:=(T10+T11)*16; D[I*8+4]:=(T10-T11)*16;
+  Z1:=(T12+T13)*F0541;
+  D[I*8+2]:=DNXDesc(Z1+T13*F0765,9); D[I*8+6]:=DNXDesc(Z1+T12*(-F1847),9);
+  Z1:=T4+T7; Z2:=T5+T6; Z3:=T4+T6; Z4:=T5+T7; Z5:=(Z3+Z4)*F1175;
+  T4:=T4*F0298; T5:=T5*F2053; T6:=T6*F3072; T7:=T7*F1501;
+  Z1:=Z1*(-F0899); Z2:=Z2*(-F2562); Z3:=Z3*(-F1961); Z4:=Z4*(-F0390);
+  Inc(Z3,Z5); Inc(Z4,Z5);
+  D[I*8+7]:=DNXDesc(T4+Z1+Z3,9); D[I*8+5]:=DNXDesc(T5+Z2+Z4,9);
+  D[I*8+3]:=DNXDesc(T6+Z2+Z3,9); D[I*8+1]:=DNXDesc(T7+Z1+Z4,9);
+ End;
+ For I:=0 To 7 Do Begin
+  T0:=D[I]+D[56+I]; T7:=D[I]-D[56+I]; T1:=D[8+I]+D[48+I]; T6:=D[8+I]-D[48+I];
+  T2:=D[16+I]+D[40+I]; T5:=D[16+I]-D[40+I]; T3:=D[24+I]+D[32+I];
+  T4:=D[24+I]-D[32+I];
+  T10:=T0+T3; T13:=T0-T3; T11:=T1+T2; T12:=T1-T2;
+  D[I]:=DNXDesc(T10+T11,4); D[32+I]:=DNXDesc(T10-T11,4);
+  Z1:=(T12+T13)*F0541;
+  D[16+I]:=DNXDesc(Z1+T13*F0765,17); D[48+I]:=DNXDesc(Z1+T12*(-F1847),17);
+  Z1:=T4+T7; Z2:=T5+T6; Z3:=T4+T6; Z4:=T5+T7; Z5:=(Z3+Z4)*F1175;
+  T4:=T4*F0298; T5:=T5*F2053; T6:=T6*F3072; T7:=T7*F1501;
+  Z1:=Z1*(-F0899); Z2:=Z2*(-F2562); Z3:=Z3*(-F1961); Z4:=Z4*(-F0390);
+  Inc(Z3,Z5); Inc(Z4,Z5);
+  D[56+I]:=DNXDesc(T4+Z1+Z3,17); D[40+I]:=DNXDesc(T5+Z2+Z4,17);
+  D[24+I]:=DNXDesc(T6+Z2+Z3,17); D[8+I]:=DNXDesc(T7+Z1+Z4,17);
+ End;
+End;
+
+{ ---- table des profils (ff_dnxhd_cid_table, entrees 8 bits) ---- }
+Function DNXLoadCid(Cid: LongInt): Boolean;
+Var I: LongInt;
+Begin
+ DNXLoadCid:=False; DNXIsHR:=0; DNXPSn:=0; DNXPSd:=1; DNXFlags:=0;
+ For I:=0 To 4 Do DNXRates[I]:=0;
+ DNXIdxBits:=4;
+ Case Cid Of
+  1237: Begin DNXTW:=1920; DNXTH:=1080; DNXTFrame:=606208; DNXTCu:=606208; DNXFlags:=0;
+    DNXWgtL:=@DNX_1237_luma_weight; DNXWgtC:=@DNX_1237_chroma_weight; DNXDcCodes:=@DNX_1237_dc_codes; DNXDcBits:=@DNX_1237_dc_bits;
+    DNXAcCodes:=@DNX_1237_ac_codes; DNXAcBits:=@DNX_1237_ac_bits; DNXAcInfo:=@DNX_1237_ac_info;
+    DNXRunCodesT:=@DNX_1237_run_codes; DNXRunBitsT:=@DNX_1237_run_bits; DNXRunT:=@DNX_1237_run;
+    DNXRates[0]:=115; DNXRates[1]:=120; DNXRates[2]:=145; DNXRates[3]:=240; DNXRates[4]:=290; End;
+  1238: Begin DNXTW:=1920; DNXTH:=1080; DNXTFrame:=917504; DNXTCu:=917504; DNXFlags:=0;
+    DNXWgtL:=@DNX_1238_luma_weight; DNXWgtC:=@DNX_1238_chroma_weight; DNXDcCodes:=@DNX_1237_dc_codes; DNXDcBits:=@DNX_1237_dc_bits;
+    DNXAcCodes:=@DNX_1238_ac_codes; DNXAcBits:=@DNX_1238_ac_bits; DNXAcInfo:=@DNX_1238_ac_info;
+    DNXRunCodesT:=@DNX_1235_run_codes; DNXRunBitsT:=@DNX_1235_run_bits; DNXRunT:=@DNX_1238_run;
+    DNXRates[0]:=175; DNXRates[1]:=185; DNXRates[2]:=220; DNXRates[3]:=365; DNXRates[4]:=440; End;
+  1242: Begin DNXTW:=1920; DNXTH:=1080; DNXTFrame:=606208; DNXTCu:=303104; DNXFlags:=1;
+    DNXWgtL:=@DNX_1242_luma_weight; DNXWgtC:=@DNX_1242_chroma_weight; DNXDcCodes:=@DNX_1237_dc_codes; DNXDcBits:=@DNX_1237_dc_bits;
+    DNXAcCodes:=@DNX_1237_ac_codes; DNXAcBits:=@DNX_1237_ac_bits; DNXAcInfo:=@DNX_1237_ac_info;
+    DNXRunCodesT:=@DNX_1237_run_codes; DNXRunBitsT:=@DNX_1237_run_bits; DNXRunT:=@DNX_1237_run;
+    DNXRates[0]:=120; DNXRates[1]:=145; End;
+  1243: Begin DNXTW:=1920; DNXTH:=1080; DNXTFrame:=917504; DNXTCu:=458752; DNXFlags:=1;
+    DNXWgtL:=@DNX_1243_luma_weight; DNXWgtC:=@DNX_1243_chroma_weight; DNXDcCodes:=@DNX_1237_dc_codes; DNXDcBits:=@DNX_1237_dc_bits;
+    DNXAcCodes:=@DNX_1238_ac_codes; DNXAcBits:=@DNX_1238_ac_bits; DNXAcInfo:=@DNX_1238_ac_info;
+    DNXRunCodesT:=@DNX_1235_run_codes; DNXRunBitsT:=@DNX_1235_run_bits; DNXRunT:=@DNX_1238_run;
+    DNXRates[0]:=185; DNXRates[1]:=220; End;
+  1244: Begin DNXTW:=1440; DNXTH:=1080; DNXTFrame:=606208; DNXTCu:=303104; DNXFlags:=1;
+    DNXWgtL:=@DNX_1260_luma_weight; DNXWgtC:=@DNX_1260_chroma_weight; DNXDcCodes:=@DNX_1237_dc_codes; DNXDcBits:=@DNX_1237_dc_bits;
+    DNXAcCodes:=@DNX_1237_ac_codes; DNXAcBits:=@DNX_1237_ac_bits; DNXAcInfo:=@DNX_1237_ac_info;
+    DNXRunCodesT:=@DNX_1237_run_codes; DNXRunBitsT:=@DNX_1237_run_bits; DNXRunT:=@DNX_1237_run;
+    DNXRates[0]:=120; DNXRates[1]:=145; End;
+  1251: Begin DNXTW:=1280; DNXTH:=720; DNXTFrame:=458752; DNXTCu:=458752; DNXFlags:=0;
+    DNXWgtL:=@DNX_1251_luma_weight; DNXWgtC:=@DNX_1251_chroma_weight; DNXDcCodes:=@DNX_1237_dc_codes; DNXDcBits:=@DNX_1237_dc_bits;
+    DNXAcCodes:=@DNX_1251_ac_codes; DNXAcBits:=@DNX_1251_ac_bits; DNXAcInfo:=@DNX_1251_ac_info;
+    DNXRunCodesT:=@DNX_1250_run_codes; DNXRunBitsT:=@DNX_1250_run_bits; DNXRunT:=@DNX_1250_run;
+    DNXRates[0]:=90; DNXRates[1]:=110; DNXRates[2]:=180; DNXRates[3]:=220; End;
+  1252: Begin DNXTW:=1280; DNXTH:=720; DNXTFrame:=303104; DNXTCu:=303104; DNXFlags:=0;
+    DNXWgtL:=@DNX_1252_luma_weight; DNXWgtC:=@DNX_1252_chroma_weight; DNXDcCodes:=@DNX_1237_dc_codes; DNXDcBits:=@DNX_1237_dc_bits;
+    DNXAcCodes:=@DNX_1252_ac_codes; DNXAcBits:=@DNX_1252_ac_bits; DNXAcInfo:=@DNX_1252_ac_info;
+    DNXRunCodesT:=@DNX_1250_run_codes; DNXRunBitsT:=@DNX_1250_run_bits; DNXRunT:=@DNX_1250_run;
+    DNXRates[0]:=60; DNXRates[1]:=75; DNXRates[2]:=120; DNXRates[3]:=145; End;
+  1253: Begin DNXTW:=1920; DNXTH:=1080; DNXTFrame:=188416; DNXTCu:=188416; DNXFlags:=0;
+    DNXWgtL:=@DNX_1237_luma_weight; DNXWgtC:=@DNX_1237_chroma_weight; DNXDcCodes:=@DNX_1237_dc_codes; DNXDcBits:=@DNX_1237_dc_bits;
+    DNXAcCodes:=@DNX_1237_ac_codes; DNXAcBits:=@DNX_1237_ac_bits; DNXAcInfo:=@DNX_1237_ac_info;
+    DNXRunCodesT:=@DNX_1237_run_codes; DNXRunBitsT:=@DNX_1237_run_bits; DNXRunT:=@DNX_1237_run;
+    DNXRates[0]:=36; DNXRates[1]:=45; DNXRates[2]:=75; DNXRates[3]:=90; End;
+  1258: Begin DNXTW:=960; DNXTH:=720; DNXTFrame:=212992; DNXTCu:=212992; DNXFlags:=0;
+    DNXWgtL:=@DNX_1252_luma_weight; DNXWgtC:=@DNX_1252_chroma_weight; DNXDcCodes:=@DNX_1237_dc_codes; DNXDcBits:=@DNX_1237_dc_bits;
+    DNXAcCodes:=@DNX_1252_ac_codes; DNXAcBits:=@DNX_1252_ac_bits; DNXAcInfo:=@DNX_1252_ac_info;
+    DNXRunCodesT:=@DNX_1250_run_codes; DNXRunBitsT:=@DNX_1250_run_bits; DNXRunT:=@DNX_1250_run;
+    DNXRates[0]:=42; DNXRates[1]:=60; DNXRates[2]:=75; DNXRates[3]:=115; End;
+  1259: Begin DNXTW:=1440; DNXTH:=1080; DNXTFrame:=417792; DNXTCu:=417792; DNXFlags:=0;
+    DNXWgtL:=@DNX_1237_luma_weight; DNXWgtC:=@DNX_1237_chroma_weight; DNXDcCodes:=@DNX_1237_dc_codes; DNXDcBits:=@DNX_1237_dc_bits;
+    DNXAcCodes:=@DNX_1237_ac_codes; DNXAcBits:=@DNX_1237_ac_bits; DNXAcInfo:=@DNX_1237_ac_info;
+    DNXRunCodesT:=@DNX_1237_run_codes; DNXRunBitsT:=@DNX_1237_run_bits; DNXRunT:=@DNX_1237_run;
+    DNXRates[0]:=63; DNXRates[1]:=84; DNXRates[2]:=100; DNXRates[3]:=110; End;
+  1260: Begin DNXTW:=1440; DNXTH:=1080; DNXTFrame:=835584; DNXTCu:=417792; DNXFlags:=3;
+    DNXWgtL:=@DNX_1260_luma_weight; DNXWgtC:=@DNX_1260_chroma_weight; DNXDcCodes:=@DNX_1237_dc_codes; DNXDcBits:=@DNX_1237_dc_bits;
+    DNXAcCodes:=@DNX_1237_ac_codes; DNXAcBits:=@DNX_1237_ac_bits; DNXAcInfo:=@DNX_1237_ac_info;
+    DNXRunCodesT:=@DNX_1237_run_codes; DNXRunBitsT:=@DNX_1237_run_bits; DNXRunT:=@DNX_1237_run;
+    DNXRates[0]:=80; DNXRates[1]:=90; DNXRates[2]:=100; DNXRates[3]:=110; End;
+  1272: Begin DNXTW:=0; DNXTH:=0; DNXTFrame:=0; DNXTCu:=0; DNXFlags:=0; DNXIsHR:=1; DNXPSn:=28672; DNXPSd:=255;
+    DNXWgtL:=@DNX_1238_luma_weight; DNXWgtC:=@DNX_1238_chroma_weight; DNXDcCodes:=@DNX_1237_dc_codes; DNXDcBits:=@DNX_1237_dc_bits;
+    DNXAcCodes:=@DNX_1238_ac_codes; DNXAcBits:=@DNX_1238_ac_bits; DNXAcInfo:=@DNX_1238_ac_info;
+    DNXRunCodesT:=@DNX_1235_run_codes; DNXRunBitsT:=@DNX_1235_run_bits; DNXRunT:=@DNX_1238_run; End;
+  1273: Begin DNXTW:=0; DNXTH:=0; DNXTFrame:=0; DNXTCu:=0; DNXFlags:=0; DNXIsHR:=1; DNXPSn:=18944; DNXPSd:=255;
+    DNXWgtL:=@DNX_1237_luma_weight; DNXWgtC:=@DNX_1237_chroma_weight; DNXDcCodes:=@DNX_1237_dc_codes; DNXDcBits:=@DNX_1237_dc_bits;
+    DNXAcCodes:=@DNX_1237_ac_codes; DNXAcBits:=@DNX_1237_ac_bits; DNXAcInfo:=@DNX_1237_ac_info;
+    DNXRunCodesT:=@DNX_1237_run_codes; DNXRunBitsT:=@DNX_1237_run_bits; DNXRunT:=@DNX_1237_run; End;
+  1274: Begin DNXTW:=0; DNXTH:=0; DNXTFrame:=0; DNXTCu:=0; DNXFlags:=0; DNXIsHR:=1; DNXPSn:=5888; DNXPSd:=255;
+    DNXWgtL:=@DNX_1237_luma_weight; DNXWgtC:=@DNX_1237_chroma_weight; DNXDcCodes:=@DNX_1237_dc_codes; DNXDcBits:=@DNX_1237_dc_bits;
+    DNXAcCodes:=@DNX_1237_ac_codes; DNXAcBits:=@DNX_1237_ac_bits; DNXAcInfo:=@DNX_1237_ac_info;
+    DNXRunCodesT:=@DNX_1237_run_codes; DNXRunBitsT:=@DNX_1237_run_bits; DNXRunT:=@DNX_1237_run; End;
+  Else Exit;
+ End;
+ DNXLoadCid:=True;
+End;
+
+{ ff_dnxhd_get_hr_frame_size }
+Function DNXHrFrameSize(W,H: LongInt): LongInt;
+Var R: Int64;
+Begin
+ R:=Int64((H+15) Div 16)*((W+15) Div 16)*DNXPSn Div DNXPSd;
+ R:=(R+2048) Div 4096*4096;
+ If R<8192 Then R:=8192;
+ DNXHrFrameSize:=R;
+End;
+
+Function DNXProfileName(Cid: LongInt): String;
+Begin
+ Case Cid Of
+  1237: DNXProfileName:='DNxHD 1080p 8 bits 120/145 Mb/s (cid 1237)';
+  1238: DNXProfileName:='DNxHD 1080p 8 bits 185/220 Mb/s (cid 1238)';
+  1242: DNXProfileName:='DNxHD 1080i 8 bits 120/145 Mb/s (cid 1242)';
+  1243: DNXProfileName:='DNxHD 1080i 8 bits 185/220 Mb/s (cid 1243)';
+  1244: DNXProfileName:='DNxHD 1440x1080i 8 bits 120/145 Mb/s (cid 1244)';
+  1251: DNXProfileName:='DNxHD 720p 8 bits 90/110/180/220 Mb/s (cid 1251)';
+  1252: DNXProfileName:='DNxHD 720p 8 bits 60/75/120/145 Mb/s (cid 1252)';
+  1253: DNXProfileName:='DNxHD 1080p 8 bits 36/45/75/90 Mb/s (cid 1253)';
+  1258: DNXProfileName:='DNxHD 960x720p 8 bits 42/60/75/115 Mb/s (cid 1258)';
+  1259: DNXProfileName:='DNxHD 1440x1080p 8 bits 63/84/100/110 Mb/s (cid 1259)';
+  1260: DNXProfileName:='DNxHD 1440x1080i MBAFF 8 bits (cid 1260, experimental)';
+  1272: DNXProfileName:='DNxHR HQ 8 bits 4:2:2 (cid 1272)';
+  1273: DNXProfileName:='DNxHR SQ 8 bits 4:2:2 (cid 1273)';
+  1274: DNXProfileName:='DNxHR LB 8 bits 4:2:2 (cid 1274)';
+  Else DNXProfileName:='cid inconnu';
+ End;
+End;
+
+{ codec_tag que ffmpeg donne a la piste (MOV 'AVdn' / 'AVdh', AVI idem) }
+Function DNXTag: String;
+Begin
+ If (DNXCid>=1270) And (DNXCid<=1274) Then DNXTag:='AVdh' Else DNXTag:='AVdn';
+End;
+
+{ Choisit le profil convenant a (W,H,fps,debit demande en bits/s). Interl : image entrelacee.
+  Renvoie un cid (voir DNXCidList), ou 0 si les dimensions sont inferieures a 256x120.
+  Regle : parmi les profils DNxHD 8 bits de meme taille et de meme balayage, et les DNxHR LB/SQ/HQ, on prend celui dont le debit reel
+  (taille de trame fixe * 8 * fps) est le plus proche du debit demande (en echelle logarithmique) ; a egalite le DNxHD est prefere ;
+  debit demande 0 = niveau SQ. }
+Function DNXFindCid(W,H,Fn,Fd,Bitrate: LongInt; Interl: Boolean): LongInt;
+Var
+ I,Best,Cid: LongInt; Req,Real_,Sc,BestSc,Fps: Double; Fs: Int64;
+Begin
+ DNXFindCid:=0;
+ If (W<256) Or (H<120) Or (W>65000) Or (H>65000) Or (Fn<=0) Or (Fd<=0) Then Exit;
+ Fps:=Fn/Fd;
+ Best:=0; BestSc:=1E30;
+ If Bitrate<=0 Then Begin
+  If DNXLoadCid(1273) Then Begin
+   Req:=DNXHrFrameSize(W,H)*8.0*Fps;
+  End;
+ End Else Req:=Bitrate;
+ For I:=0 To 13 Do Begin
+  Cid:=DNXCidList[I];
+  If Not DNXLoadCid(Cid) Then Continue;
+  If DNXIsHR=0 Then Begin
+   If (DNXTW<>W) Or (DNXTH<>H) Then Continue;
+   If Interl<>((DNXFlags And 1)<>0) Then Continue;
+   If (DNXFlags And 2)<>0 Then Continue; { MBAFF experimental }
+   Fs:=DNXTFrame;
+  End Else Begin
+   If Interl Then Continue;
+   Fs:=DNXHrFrameSize(W,H);
+  End;
+  Real_:=Fs*8.0*Fps;
+  Sc:=Abs(Ln(Real_/Req));
+  If DNXIsHR=0 Then Sc:=Sc-0.0001; { prefere le DNxHD a egalite }
+  If Sc<BestSc Then Begin BestSc:=Sc; Best:=Cid; End;
+ End;
+ DNXFindCid:=Best;
+End;
+
+{ ---- initialisation des tables (dnxhd_init_vlc, dnxhd_init_qmat) ---- }
+Procedure DNXInitVlc;
+Var Level,Run,Index,Sign,Off,ALevel,J,I,MaxLevel,Cd,Bt,Ok: LongInt;
+Begin
+ MaxLevel:=1 Shl 10; { bit_depth 8 : 1 << (8+2) }
+ DNXVlcOff:=MaxLevel*2; DNXVlcSize:=MaxLevel*4+8;
+ GetMem(DNXVlcCodes,DNXVlcSize*4); GetMem(DNXVlcBits,DNXVlcSize*4);
+ FillChar(DNXVlcCodes^,DNXVlcSize*4,0); FillChar(DNXVlcBits^,DNXVlcSize*4,0);
+ For Level:=-MaxLevel To MaxLevel-1 Do
+  For Run:=0 To 1 Do Begin
+   Index:=Level*2+Run; Off:=0; ALevel:=Level; Sign:=0;
+   If ALevel<0 Then Begin ALevel:=-ALevel; Sign:=1; End;
+   If ALevel>64 Then Begin Off:=(ALevel-1) Shr 6; ALevel:=ALevel-(Off Shl 6); End;
+   Cd:=0; Bt:=0; Ok:=0;
+   For J:=0 To 256 Do Begin
+    If ((DNXAcInfo^[2*J] Shr 1)=ALevel) And ((Off=0) Or ((DNXAcInfo^[2*J+1] And 1)<>0))
+       And ((Run=0) Or ((DNXAcInfo^[2*J+1] And 2)<>0)) Then Begin
+     If ALevel<>0 Then Begin
+      Cd:=(DNXAcCodes^[J] Shl 1) Or (Sign And 1); Bt:=DNXAcBits^[J]+1;
+     End Else Begin Cd:=DNXAcCodes^[J]; Bt:=DNXAcBits^[J]; End;
+     Ok:=1; Break;
+    End;
+   End;
+   If Off<>0 Then Begin Cd:=(Cd Shl DNXIdxBits) Or Off; Bt:=Bt+DNXIdxBits; End;
+   DNXVlcCodes^[Index+DNXVlcOff]:=Cd; DNXVlcBits^[Index+DNXVlcOff]:=Bt;
+  End;
+ FillChar(DNXRunCodes,SizeOf(DNXRunCodes),0); FillChar(DNXRunBits,SizeOf(DNXRunBits),0);
+ For I:=0 To 61 Do Begin
+  DNXRunCodes[DNXRunT^[I]]:=DNXRunCodesT^[I]; DNXRunBits[DNXRunT^[I]]:=DNXRunBitsT^[I];
+ End;
+End;
+
+Procedure DNXInitQmat;
+Var Q,I,Qm: LongInt; Wl,Wc: Array[0..63] Of LongInt;
+Begin
+ Qm:=DNXQmaxI;
+ GetMem(DNXQmL,(Qm+1)*64*4); GetMem(DNXQmC,(Qm+1)*64*4);
+ FillChar(DNXQmL^,(Qm+1)*64*4,0); FillChar(DNXQmC^,(Qm+1)*64*4,0);
+ Wl[0]:=1; Wc[0]:=1;
+ For I:=1 To 63 Do Begin Wl[DNXZig[I]]:=DNXWgtL^[I]; Wc[DNXZig[I]]:=DNXWgtC^[I]; End;
+ For Q:=1 To Qm Do
+  For I:=0 To 63 Do Begin
+   DNXQmL^[Q*64+I]:=LongInt((Int64(2) Shl 21) Div (Int64(2)*Q*Wl[I])) Shl 2;
+   DNXQmC^[Q*64+I]:=LongInt((Int64(2) Shl 21) Div (Int64(2)*Q*Wc[I])) Shl 2;
+  End;
+End;
+
+{ ---- ecriture de bits (put_bits) ---- }
+Procedure DNXPut(N: LongInt; V: Int64);
+Var B: LongInt;
+Begin
+ If N=0 Then Exit;
+ DNXAcc:=(DNXAcc Shl N) Or (V And ((Int64(1) Shl N)-1)); Inc(DNXAccN,N);
+ While DNXAccN>=8 Do Begin
+  Dec(DNXAccN,8); B:=(DNXAcc Shr DNXAccN) And 255;
+  If DNXWPos<DNXWLimit Then DNXOut^[DNXWPos]:=B;
+  Inc(DNXWPos);
+ End;
+ DNXAcc:=DNXAcc And ((Int64(1) Shl DNXAccN)-1);
+End;
+
+Function DNXLog2(V: LongInt): LongInt;
+Var N: LongInt;
+Begin
+ N:=0; While (V Shr (N+1))<>0 Do Inc(N);
+ DNXLog2:=N;
+End;
+
+{ ---- quantification (ff_dct_quantize_c avec h263_aic, bit_depth 8) ; Src = sortie de la FDCT ; renvoie last_non_zero ---- }
+Function DNXQuant(Src: PDNXL; Var Blk: TDNXBlk; Q: LongInt; Chroma: Boolean): LongInt;
+Const Thr1=(1 Shl 21)-1; Thr2=((1 Shl 21)-1)*2;
+Var I,J,Last,Lv: LongInt; Qm: PDNXL; U: Int64;
+Begin
+ Move(Src^,Blk,256);
+ Blk[0]:=(Blk[0]+4) Div 8;
+ If Chroma Then Qm:=@DNXQmC^[Q*64] Else Qm:=@DNXQmL^[Q*64];
+ Last:=0;
+ For I:=63 DownTo 1 Do Begin
+  J:=DNXZig[I];
+  Lv:=LongInt((Int64(Blk[J])*Qm^[J]) And $FFFFFFFF);
+  U:=(Int64(Lv)+Thr1) And $FFFFFFFF;
+  If U>Thr2 Then Begin Last:=I; Break; End Else Blk[J]:=0;
+ End;
+ For I:=1 To Last Do Begin
+  J:=DNXZig[I];
+  Lv:=LongInt((Int64(Blk[J])*Qm^[J]) And $FFFFFFFF);
+  U:=(Int64(Lv)+Thr1) And $FFFFFFFF;
+  If U>Thr2 Then Begin
+   If Lv>0 Then Blk[J]:=Lv Shr 21 Else Blk[J]:=-((-Int64(Lv)) Shr 21);
+  End Else Blk[J]:=0;
+ End;
+ DNXQuant:=Last;
+End;
+
+Function DNXAcBitsOf(Var Blk: TDNXBlk; Last: LongInt): LongInt;
+Var I,J,Lv,LastNz,Run,Bits,Ix: LongInt;
+Begin
+ LastNz:=0; Bits:=0;
+ For I:=1 To Last Do Begin
+  J:=DNXZig[I]; Lv:=Blk[J];
+  If Lv<>0 Then Begin
+   Run:=I-LastNz-1;
+   Ix:=Lv*2; If Run>0 Then Inc(Ix); Ix:=Ix+DNXVlcOff;
+   If (Ix<0) Or (Ix>=DNXVlcSize) Then Ix:=DNXVlcOff;
+   Bits:=Bits+DNXVlcBits^[Ix]+DNXRunBits[Run];
+   LastNz:=I;
+  End;
+ End;
+ DNXAcBitsOf:=Bits;
+End;
+
+Procedure DNXEncodeDc(Diff: LongInt);
+Var N: LongInt;
+Begin
+ If Diff<0 Then Begin N:=DNXLog2(-2*Diff); Dec(Diff); End Else N:=DNXLog2(2*Diff);
+ DNXPut(DNXDcBits^[N]+N,(Int64(DNXDcCodes^[N]) Shl N)+(Diff And ((1 Shl N)-1)));
+End;
+
+Procedure DNXEncodeBlock(Var Blk: TDNXBlk; Last,N: LongInt);
+Var I,J,Lv,LastNz,Run,Ix: LongInt;
+Begin
+ DNXEncodeDc(Blk[0]-DNXLastDc[N]); DNXLastDc[N]:=Blk[0];
+ LastNz:=0;
+ For I:=1 To Last Do Begin
+  J:=DNXZig[I]; Lv:=Blk[J];
+  If Lv<>0 Then Begin
+   Run:=I-LastNz-1;
+   Ix:=Lv*2; If Run>0 Then Inc(Ix); Ix:=Ix+DNXVlcOff;
+   If (Ix<0) Or (Ix>=DNXVlcSize) Then Ix:=DNXVlcOff;
+   DNXPut(DNXVlcBits^[Ix],DNXVlcCodes^[Ix]);
+   If Run>0 Then DNXPut(DNXRunBits[Run],DNXRunCodes[Run]);
+   LastNz:=I;
+  End;
+ End;
+ DNXPut(DNXVlcBits^[DNXVlcOff],DNXVlcCodes^[DNXVlcOff]);
+End;
+
+{ ---- lecture des blocs d'un coding unit (dnxhd_get_blocks) + FDCT, stockes dans DNXCache ---- }
+Procedure DNXBuildCache(Field: LongInt);
+Var
+ MbY,MbX,I,Mb,R,C,X0,Y0,Yy,Xx,Il,Pw,Ph,Fr: LongInt; Pl: PEABuffer; Blk: TDNXBlk; Sym,Zero: Boolean;
+Begin
+ Il:=Ord(DNXInterlaced);
+ For MbY:=0 To DNXMbH-1 Do
+  For MbX:=0 To DNXMbW-1 Do Begin
+   Mb:=MbY*DNXMbW+MbX;
+   For I:=0 To 7 Do Begin
+    Zero:=False; Sym:=False;
+    If (I>=4) And (MbY+1=DNXMbH) And (DNXH=1080) Then Begin
+     If DNXInterlaced Then Sym:=True Else Zero:=True;
+    End;
+    If Zero Then FillChar(Blk,SizeOf(Blk),0) Else Begin
+     If DNXBlkComp[I]=0 Then Begin
+      Pl:=DNXPY; Pw:=DNXW; X0:=MbX*16+(I And 1)*8;
+     End Else Begin
+      If DNXBlkComp[I]=1 Then Pl:=DNXPU Else Pl:=DNXPV;
+      Pw:=DNXCw; X0:=MbX*8;
+     End;
+     Ph:=DNXFieldH; Y0:=MbY*16; If I>=4 Then Inc(Y0,8);
+     For R:=0 To 7 Do Begin
+      If Sym And (R>=4) Then Yy:=Y0+(7-R) Else Yy:=Y0+R;
+      If Yy>Ph-1 Then Yy:=Ph-1;
+      Fr:=Yy*(1 Shl Il)+Field;
+      For C:=0 To 7 Do Begin
+       Xx:=X0+C; If Xx>Pw-1 Then Xx:=Pw-1;
+       Blk[R*8+C]:=Pl^[Fr*Pw+Xx];
+      End;
+     End;
+    End;
+    DNXFdct(Blk);
+    Move(Blk,DNXCache^[(Mb*8+I)*64],256);
+   End;
+  End;
+End;
+
+{ dnxhd_calc_bits_thread pour tous les macroblocs au qscale Q ; remplit DNXRc[Q] }
+Procedure DNXCalcBits(Q: LongInt);
+Var MbY,MbX,Mb,I,N,Last,Ac,Dc,Diff,Nb: LongInt; Blk: TDNXBlk; Ld: Array[0..2] Of LongInt;
+Begin
+ If DNXRc[Q]=Nil Then GetMem(DNXRc[Q],DNXMbNum*4+16);
+ For MbY:=0 To DNXMbH-1 Do Begin
+  Ld[0]:=1 Shl 10; Ld[1]:=Ld[0]; Ld[2]:=Ld[0];
+  For MbX:=0 To DNXMbW-1 Do Begin
+   Mb:=MbY*DNXMbW+MbX; Ac:=0; Dc:=0;
+   For I:=0 To 7 Do Begin
+    N:=DNXBlkComp[I];
+    Last:=DNXQuant(@DNXCache^[(Mb*8+I)*64],Blk,Q,N>0);
+    Ac:=Ac+DNXAcBitsOf(Blk,Last);
+    Diff:=Blk[0]-Ld[N];
+    If Diff<0 Then Nb:=DNXLog2(-2*Diff) Else Nb:=DNXLog2(2*Diff);
+    Dc:=Dc+DNXDcBits^[Nb]+Nb;
+    Ld[N]:=Blk[0];
+   End;
+   DNXRc[Q]^[Mb]:=Ac+Dc+12+8*DNXVlcBits^[DNXVlcOff];
+  End;
+ End;
+End;
+
+{ dnxhd_find_qscale ; 0 ou 1 (qscale 1 suffit) ; -1 = echec }
+Function DNXFindQscale: LongInt;
+Var Bits,UpStep,DownStep,LastHigher,LastLower,Q,X,Y: LongInt; Stop: Boolean;
+Begin
+ UpStep:=1; DownStep:=1; LastHigher:=0; LastLower:=MaxLongInt;
+ Q:=DNXQscale;
+ DNXFindQscale:=0;
+ While True Do Begin
+  Bits:=0; DNXQscale:=Q;
+  DNXCalcBits(Q);
+  For Y:=0 To DNXMbH-1 Do Begin
+   For X:=0 To DNXMbW-1 Do Inc(Bits,DNXRc[Q]^[Y*DNXMbW+X]);
+   Bits:=(Bits+31) And Not 31;
+   If Bits>DNXFrameBits Then Break;
+  End;
+  If Bits<DNXFrameBits Then Begin
+   If Q=1 Then Begin DNXFindQscale:=1; Exit; End;
+   If LastHigher=Q-1 Then Begin Q:=LastHigher; Break; End;
+   If Q<LastLower Then LastLower:=Q;
+   If LastHigher<>0 Then Q:=(Q+LastHigher) Shr 1 Else Begin Q:=Q-DownStep; Inc(DownStep); End;
+   If Q<1 Then Q:=1;
+   UpStep:=1;
+  End Else Begin
+   If LastLower=Q+1 Then Break;
+   If Q>LastHigher Then LastHigher:=Q;
+   If LastLower<>MaxLongInt Then Q:=(Q+LastLower) Shr 1 Else Begin Q:=Q+UpStep; Inc(UpStep); End;
+   DownStep:=1;
+   If Q>=DNXQmaxI Then Begin DNXFindQscale:=-1; Exit; End;
+  End;
+ End;
+ DNXQscale:=Q;
+End;
+
+{ variance par macrobloc (dnxhd_mb_var_thread, 8 bits) }
+Procedure DNXMbVar(Field: LongInt);
+Var MbY,MbX,Mb,X,Y,Bw,Bh,Sum,Varc,Il,Fr: LongInt; V: LongInt; Sq: Int64;
+Begin
+ Il:=Ord(DNXInterlaced);
+ For MbY:=0 To DNXMbH-1 Do
+  For MbX:=0 To DNXMbW-1 Do Begin
+   Mb:=MbY*DNXMbW+MbX;
+   Bw:=DNXW-16*MbX; If Bw>16 Then Bw:=16;
+   Bh:=(DNXH Shr Il)-16*MbY; If Bh>16 Then Bh:=16;
+   Sum:=0; Varc:=0;
+   For Y:=0 To Bh-1 Do Begin
+    Fr:=(MbY*16+Y)*(1 Shl Il)+Field;
+    For X:=0 To Bw-1 Do Begin
+     V:=DNXPY^[Fr*DNXW+MbX*16+X]; Inc(Sum,V); Inc(Varc,V*V);
+    End;
+   End;
+   Sq:=Int64(Sum)*Sum;
+   Varc:=LongInt((Int64(Varc)-(Sq Shr 8)+128) Shr 8);
+   DNXCmpV^[Mb]:=Varc; DNXCmpM^[Mb]:=Mb;
+  End;
+End;
+
+{ tri radix decroissant stable, 4 passes de 8 bits (radix_sort de dnxhdenc.c) ; resultat dans DNXCmpV/DNXCmpM }
+Procedure DNXRadixPass(Sv,Sm,Dv,Dm: PDNXL; Size,Shift: LongInt);
+Var Cnt: Array[0..255] Of LongInt; I,Bk,Acc,T: LongInt;
+Begin
+ FillChar(Cnt,SizeOf(Cnt),0);
+ For I:=0 To Size-1 Do Inc(Cnt[255-((Sv^[I] Shr Shift) And 255)]);
+ Acc:=0;
+ For I:=0 To 255 Do Begin T:=Cnt[I]; Cnt[I]:=Acc; Inc(Acc,T); End;
+ For I:=0 To Size-1 Do Begin
+  Bk:=255-((Sv^[I] Shr Shift) And 255);
+  Dv^[Cnt[Bk]]:=Sv^[I]; Dm^[Cnt[Bk]]:=Sm^[I]; Inc(Cnt[Bk]);
+ End;
+End;
+Procedure DNXRadix(Size: LongInt);
+Begin
+ DNXRadixPass(DNXCmpV,DNXCmpM,DNXCmpV2,DNXCmpM2,Size,0);
+ DNXRadixPass(DNXCmpV2,DNXCmpM2,DNXCmpV,DNXCmpM,Size,8);
+ DNXRadixPass(DNXCmpV,DNXCmpM,DNXCmpV2,DNXCmpM2,Size,16);
+ DNXRadixPass(DNXCmpV2,DNXCmpM2,DNXCmpV,DNXCmpM,Size,24);
+End;
+
+{ dnxhd_encode_fast : choisit mb_qscale / mb_bits (ret : 0 ou <0) }
+Function DNXEncodeFast(Field: LongInt): LongInt;
+Var Ret,MaxBits,X,Y,Mb,Rq,I: LongInt;
+Begin
+ Ret:=DNXFindQscale;
+ DNXEncodeFast:=Ret;
+ If Ret<0 Then Exit;
+ MaxBits:=0;
+ For Y:=0 To DNXMbH-1 Do Begin
+  For X:=0 To DNXMbW-1 Do Begin
+   Mb:=Y*DNXMbW+X;
+   DNXMbQ^[Mb]:=DNXQscale; DNXMbBits^[Mb]:=DNXRc[DNXQscale]^[Mb];
+   Inc(MaxBits,DNXRc[DNXQscale]^[Mb]);
+  End;
+  Inc(MaxBits,31);
+ End;
+ If Ret=0 Then Begin
+  DNXMbVar(Field);
+  DNXRadix(DNXMbNum);
+  Repeat
+   X:=0;
+   While (X<DNXMbNum) And (MaxBits>DNXFrameBits) Do Begin
+    Mb:=DNXCmpM^[X];
+    MaxBits:=MaxBits-(DNXRc[DNXQscale]^[Mb]-DNXRc[DNXQscale+1]^[Mb]);
+    If DNXMbQ^[Mb]<255 Then Inc(DNXMbQ^[Mb]);
+    DNXMbBits^[Mb]:=DNXRc[DNXQscale+1]^[Mb];
+    Inc(X);
+   End;
+  Until MaxBits<=DNXFrameBits;
+ End;
+ DNXEncodeFast:=0;
+End;
+
+{ ---- en-tete d'un coding unit (dnxhd_write_header) ---- }
+Procedure DNXWrB16(Buf: PEABuffer; At,V: LongInt);
+Begin Buf^[At]:=(V Shr 8) And 255; Buf^[At+1]:=V And 255; End;
+Procedure DNXWrB32(Buf: PEABuffer; At,V: LongInt);
+Begin Buf^[At]:=(V Shr 24) And 255; Buf^[At+1]:=(V Shr 16) And 255; Buf^[At+2]:=(V Shr 8) And 255; Buf^[At+3]:=V And 255; End;
+
+Procedure DNXWriteHeader(Buf: PEABuffer; Field: LongInt);
+Var Il: LongInt;
+Begin
+ Il:=Ord(DNXInterlaced);
+ FillChar(Buf^,DNXDataOff,0);
+ DNXWrB16(Buf,2,DNXDataOff);
+ If (DNXCid>=1270) And (DNXCid<=1274) Then Buf^[4]:=3 Else Buf^[4]:=1;
+ If DNXInterlaced Then Buf^[5]:=Field+2 Else Buf^[5]:=1;
+ Buf^[6]:=$80; Buf^[7]:=$A0;
+ DNXWrB16(Buf,$18,DNXH Shr Il);
+ DNXWrB16(Buf,$1A,DNXW);
+ DNXWrB16(Buf,$1D,DNXH Shr Il);
+ Buf^[$21]:=$38;
+ Buf^[$22]:=$88+(Il Shl 2);
+ DNXWrB32(Buf,$28,DNXCid);
+ Buf^[$2C]:=(1-Il) Shl 7;
+ Buf^[$5F]:=1;
+ Buf^[$167]:=2;
+ DNXWrB16(Buf,$16A,DNXMbH*4+4);
+ DNXWrB16(Buf,$16C,DNXMbH);
+ Buf^[$16F]:=$10;
+End;
+
+
+{ ---- reconstruction (optionnelle) : dequantification + IDCT du decodeur de ffmpeg (dnxhd_decode_dct_block, ff_simple_idct_put_int16_8bit) ---- }
+Function DNXWrap32(X: Int64): LongInt;
+Begin DNXWrap32:=LongInt(X And $FFFFFFFF); End;
+Function DNXTrunc16(X: LongInt): LongInt;
+Var V: LongInt;
+Begin V:=X And $FFFF; If V>=32768 Then V:=V-65536; DNXTrunc16:=V; End;
+
+Procedure DNXSimpleIdctPut(Var B: TDNXBlk; Var Px: Array Of Byte);
+Const W1=22725; W2=21407; W3=19266; W4=16383; W5=12873; W6=8867; W7=4520;
+Var
+ I,K,V0,I2: LongInt; A0,A1,A2,A3,B0,B1,B2,B3: Int64; C: Array[0..7] Of LongInt;
+ Function Clip(X: LongInt): LongInt; Begin If X<0 Then X:=0; If X>255 Then X:=255; Clip:=X; End;
+Begin
+ For I:=0 To 7 Do Begin
+  K:=I*8;
+  If (B[K+1]=0) And (B[K+2]=0) And (B[K+3]=0) And (B[K+4]=0) And (B[K+5]=0) And (B[K+6]=0) And (B[K+7]=0) Then Begin
+   V0:=DNXTrunc16(B[K]*8);
+   For I2:=0 To 7 Do B[K+I2]:=V0;
+  End Else Begin
+   A0:=Int64(W4)*B[K]+(1 Shl 10); A1:=A0; A2:=A0; A3:=A0;
+   A0:=A0+Int64(W2)*B[K+2]; A1:=A1+Int64(W6)*B[K+2]; A2:=A2-Int64(W6)*B[K+2]; A3:=A3-Int64(W2)*B[K+2];
+   B0:=Int64(W1)*B[K+1]+Int64(W3)*B[K+3];
+   B1:=Int64(W3)*B[K+1]-Int64(W7)*B[K+3];
+   B2:=Int64(W5)*B[K+1]-Int64(W1)*B[K+3];
+   B3:=Int64(W7)*B[K+1]-Int64(W5)*B[K+3];
+   A0:=A0+Int64(W4)*B[K+4]+Int64(W6)*B[K+6];
+   A1:=A1-Int64(W4)*B[K+4]-Int64(W2)*B[K+6];
+   A2:=A2-Int64(W4)*B[K+4]+Int64(W2)*B[K+6];
+   A3:=A3+Int64(W4)*B[K+4]-Int64(W6)*B[K+6];
+   B0:=B0+Int64(W5)*B[K+5]+Int64(W7)*B[K+7];
+   B1:=B1-Int64(W1)*B[K+5]-Int64(W5)*B[K+7];
+   B2:=B2+Int64(W7)*B[K+5]+Int64(W3)*B[K+7];
+   B3:=B3+Int64(W3)*B[K+5]-Int64(W1)*B[K+7];
+   B[K]:=DNXTrunc16(DNXSar(DNXWrap32(A0+B0),11)); B[K+7]:=DNXTrunc16(DNXSar(DNXWrap32(A0-B0),11));
+   B[K+1]:=DNXTrunc16(DNXSar(DNXWrap32(A1+B1),11)); B[K+6]:=DNXTrunc16(DNXSar(DNXWrap32(A1-B1),11));
+   B[K+2]:=DNXTrunc16(DNXSar(DNXWrap32(A2+B2),11)); B[K+5]:=DNXTrunc16(DNXSar(DNXWrap32(A2-B2),11));
+   B[K+3]:=DNXTrunc16(DNXSar(DNXWrap32(A3+B3),11)); B[K+4]:=DNXTrunc16(DNXSar(DNXWrap32(A3-B3),11));
+  End;
+ End;
+ For I:=0 To 7 Do Begin
+  A0:=Int64(W4)*(B[I]+((1 Shl 19) Div W4)); A1:=A0; A2:=A0; A3:=A0;
+  A0:=A0+Int64(W2)*B[16+I]; A1:=A1+Int64(W6)*B[16+I]; A2:=A2-Int64(W6)*B[16+I]; A3:=A3-Int64(W2)*B[16+I];
+  B0:=Int64(W1)*B[8+I]+Int64(W3)*B[24+I];
+  B1:=Int64(W3)*B[8+I]-Int64(W7)*B[24+I];
+  B2:=Int64(W5)*B[8+I]-Int64(W1)*B[24+I];
+  B3:=Int64(W7)*B[8+I]-Int64(W5)*B[24+I];
+  A0:=A0+Int64(W4)*B[32+I]+Int64(W6)*B[48+I];
+  A1:=A1-Int64(W4)*B[32+I]-Int64(W2)*B[48+I];
+  A2:=A2-Int64(W4)*B[32+I]+Int64(W2)*B[48+I];
+  A3:=A3+Int64(W4)*B[32+I]-Int64(W6)*B[48+I];
+  B0:=B0+Int64(W5)*B[40+I]+Int64(W7)*B[56+I];
+  B1:=B1-Int64(W1)*B[40+I]-Int64(W5)*B[56+I];
+  B2:=B2+Int64(W7)*B[40+I]+Int64(W3)*B[56+I];
+  B3:=B3+Int64(W3)*B[40+I]-Int64(W1)*B[56+I];
+  Px[0*8+I]:=Clip(DNXSar(DNXWrap32(A0+B0),20));
+  Px[1*8+I]:=Clip(DNXSar(DNXWrap32(A1+B1),20));
+  Px[2*8+I]:=Clip(DNXSar(DNXWrap32(A2+B2),20));
+  Px[3*8+I]:=Clip(DNXSar(DNXWrap32(A3+B3),20));
+  Px[4*8+I]:=Clip(DNXSar(DNXWrap32(A3-B3),20));
+  Px[5*8+I]:=Clip(DNXSar(DNXWrap32(A2-B2),20));
+  Px[6*8+I]:=Clip(DNXSar(DNXWrap32(A1-B1),20));
+  Px[7*8+I]:=Clip(DNXSar(DNXWrap32(A0-B0),20));
+ End;
+End;
+
+{ reconstruit un bloc quantifie (Blk : niveaux, ordre naturel, Blk[0] = DC) dans le tampon DNXRec (4:2:2 planaire) }
+Procedure DNXReconBlock(Var Blk: TDNXBlk; Q,I,MbX,MbY,Field: LongInt);
+Var
+ J,Z,Lv,A,S,Wt,Sg,X0,Y0,R,C,Pw,Fr,Xx,Yy,Il,Off: LongInt; D: TDNXBlk; Px: Array[0..63] Of Byte; Wtab: PDNXB;
+Begin
+ Il:=Ord(DNXInterlaced);
+ If DNXBlkComp[I]=0 Then Wtab:=DNXWgtL Else Wtab:=DNXWgtC;
+ FillChar(D,SizeOf(D),0);
+ D[0]:=Blk[0];
+ For Z:=1 To 63 Do Begin
+  J:=DNXZig[Z]; Lv:=Blk[J];
+  If Lv<>0 Then Begin
+   Sg:=0; A:=Lv; If A<0 Then Begin A:=-A; Sg:=1; End;
+   Wt:=Wtab^[Z]; S:=Q*Wt;
+   Lv:=(2*A+1)*S+(S Shr 1);
+   If Wt<>32 Then Inc(Lv,32);
+   Lv:=Lv Shr 6;
+   If Sg<>0 Then Lv:=-Lv;
+   D[J]:=DNXTrunc16(Lv);
+  End;
+ End;
+ DNXSimpleIdctPut(D,Px);
+ If DNXBlkComp[I]=0 Then Begin Off:=0; Pw:=DNXW; X0:=MbX*16+(I And 1)*8; End
+ Else Begin
+  Pw:=DNXCw; X0:=MbX*8;
+  If DNXBlkComp[I]=1 Then Off:=DNXW*DNXH Else Off:=DNXW*DNXH+DNXCw*DNXH;
+ End;
+ Y0:=MbY*16; If I>=4 Then Inc(Y0,8);
+ For R:=0 To 7 Do Begin
+  Yy:=Y0+R; If Yy>=DNXFieldH Then Continue;
+  Fr:=Yy*(1 Shl Il)+Field;
+  For C:=0 To 7 Do Begin
+   Xx:=X0+C; If Xx>=Pw Then Continue;
+   DNXRec^[Off+Fr*Pw+Xx]:=Px[R*8+C];
+  End;
+ End;
+End;
+
+{ un coding unit complet (une image progressive, ou une trame) ecrit dans Buf[0..CuSize-1] ; False si le debit ne tient pas }
+Function DNXEncodeUnit(Buf: PEABuffer; Field: LongInt): Boolean;
+Var
+ Ret,Y,X,Mb,I,N,Last,Offset,Q,SBits: LongInt; Blk: TDNXBlk;
+Begin
+ DNXEncodeUnit:=False;
+ DNXBuildCache(Field);
+ FillChar(Buf^,DNXCuSize,0);
+ DNXWriteHeader(Buf,Field);
+ Ret:=DNXEncodeFast(Field);
+ If Ret<0 Then Begin
+  DNXErr:='dnxhd: l''image ne tient pas dans la taille de trame (qmax trop faible).'; Exit;
+ End;
+ { dnxhd_setup_threads_slices }
+ Offset:=0;
+ For Y:=0 To DNXMbH-1 Do Begin
+  DNXSliceOffs^[Y]:=Offset; DNXSliceSize^[Y]:=0;
+  For X:=0 To DNXMbW-1 Do Inc(DNXSliceSize^[Y],DNXMbBits^[Y*DNXMbW+X]);
+  DNXSliceSize^[Y]:=((DNXSliceSize^[Y]+31) And Not 31) Shr 3;
+  DNXWrB32(Buf,$170+Y*4,Offset);
+  Inc(Offset,DNXSliceSize^[Y]);
+ End;
+ If DNXDataOff+Offset+4>DNXCuSize Then Begin DNXErr:='dnxhd: depassement de la taille de trame.'; Exit; End;
+ DNXOut:=Buf;
+ For Y:=0 To DNXMbH-1 Do Begin
+  DNXAcc:=0; DNXAccN:=0; DNXWPos:=DNXDataOff+DNXSliceOffs^[Y];
+  DNXWLimit:=DNXWPos+DNXSliceSize^[Y]; SBits:=DNXWPos;
+  DNXLastDc[0]:=1 Shl 10; DNXLastDc[1]:=DNXLastDc[0]; DNXLastDc[2]:=DNXLastDc[0];
+  For X:=0 To DNXMbW-1 Do Begin
+   Mb:=Y*DNXMbW+X; Q:=DNXMbQ^[Mb];
+   DNXPut(11,Q); DNXPut(1,0);
+   For I:=0 To 7 Do Begin
+    N:=DNXBlkComp[I];
+    Last:=DNXQuant(@DNXCache^[(Mb*8+I)*64],Blk,Q,N>0);
+    DNXEncodeBlock(Blk,Last,N);
+    If DNXWantRecon Then DNXReconBlock(Blk,Q,I,X,Y,Field);
+   End;
+  End;
+  I:=(DNXWPos-SBits)*8+DNXAccN;
+  If (I And 31)<>0 Then DNXPut(32-(I And 31),0);
+ End;
+ DNXWrB32(Buf,DNXCuSize-4,LongInt($600DC0DE));
+ DNXEncodeUnit:=True;
+End;
+
+Procedure DNXFree;
+Var I: LongInt;
+Begin
+ If DNXActive Then Begin
+  FreeMem(DNXQmL,(DNXQmaxI+1)*64*4); FreeMem(DNXQmC,(DNXQmaxI+1)*64*4);
+  FreeMem(DNXVlcCodes,DNXVlcSize*4); FreeMem(DNXVlcBits,DNXVlcSize*4);
+  FreeMem(DNXPU,DNXPSz[1]); FreeMem(DNXPV,DNXPSz[2]);
+  FreeMem(DNXCache,DNXCacheSz);
+  FreeMem(DNXMbQ,DNXMbNum*4+16); FreeMem(DNXMbBits,DNXMbNum*4+16);
+  FreeMem(DNXSliceSize,DNXMbH*4+16); FreeMem(DNXSliceOffs,DNXMbH*4+16);
+  FreeMem(DNXCmpV,DNXMbNum*4+16); FreeMem(DNXCmpM,DNXMbNum*4+16);
+  FreeMem(DNXCmpV2,DNXMbNum*4+16); FreeMem(DNXCmpM2,DNXMbNum*4+16);
+  FreeMem(DNXOutBuf,DNXFrameSize+16); FreeMem(DNXRec,DNXRecSz);
+  For I:=0 To 1025 Do If DNXRc[I]<>Nil Then Begin FreeMem(DNXRc[I],DNXMbNum*4+16); DNXRc[I]:=Nil; End;
+  DNXActive:=False;
+ End;
+End;
+
+{ Initialise le codeur. Profile : 0 = automatique (DNXFindCid) ou un cid de DNXCidList (1237, ..., 1272 = DNxHR HQ, 1273 = SQ, 1274 = LB).
+  En cas d'erreur DNXOk = False et DNXErr explique (dimensions < 256x120, profil absent ou ne correspondant pas a la taille...). }
+Procedure DNXBegin(W,H,Fn,Fd,Bitrate,Profile: LongInt);
+Var Cid,I: LongInt; Sx: String;
+Begin
+ DNXFree;
+ DNXOk:=False; DNXErr:='';
+ If (Fn<=0) Or (Fd<=0) Then Begin Fn:=25; Fd:=1; End;
+ If (W<256) Or (H<120) Then Begin DNXErr:='dnxhd: dimensions minimales 256x120.'; Exit; End;
+ If (W>65000) Or (H>65000) Then Begin DNXErr:='dnxhd: dimensions trop grandes.'; Exit; End;
+ Cid:=Profile;
+ If Cid=0 Then Cid:=DNXFindCid(W,H,Fn,Fd,Bitrate,DNXInterlaced);
+ If Cid=0 Then Begin DNXErr:='dnxhd: aucun profil pour cette taille/ce balayage.'; Exit; End;
+ Str(Cid,Sx);
+ If Not DNXLoadCid(Cid) Then Begin DNXErr:='dnxhd: cid non pris en charge (8 bits 4:2:2 seulement).'; Exit; End;
+ If DNXIsHR=0 Then Begin
+  If (DNXTW<>W) Or (DNXTH<>H) Then Begin DNXErr:='dnxhd: le cid '+Sx+' impose une taille differente.'; Exit; End;
+  If ((DNXFlags And 1)<>0)<>DNXInterlaced Then Begin
+   If (DNXFlags And 1)<>0 Then DNXErr:='dnxhd: ce cid est entrelace (DNXInterlaced=True).'
+   Else DNXErr:='dnxhd: ce cid est progressif.';
+   Exit;
+  End;
+ End Else If DNXInterlaced Then Begin DNXErr:='dnxhd: DNxHR n''accepte pas l''entrelace.'; Exit; End;
+ If (DNXFlags And 2)<>0 Then Begin DNXErr:='dnxhd: cid MBAFF (1260) non pris en charge.'; Exit; End;
+ DNXCid:=Cid; DNXW:=W; DNXH:=H; DNXFn:=Fn; DNXFd:=Fd; DNXBr:=Bitrate;
+ DNXCw:=(W+1) Shr 1;
+ DNXMbW:=(W+15) Div 16; DNXMbH:=(H+15) Div 16;
+ If DNXInterlaced Then Begin DNXMbH:=DNXMbH Div 2; DNXNFields:=2; DNXFieldH:=H Div 2; End Else Begin DNXNFields:=1; DNXFieldH:=H; End;
+ DNXMbNum:=DNXMbW*DNXMbH;
+ If DNXIsHR<>0 Then Begin DNXFrameSize:=DNXHrFrameSize(W,H); DNXCuSize:=DNXFrameSize; End
+ Else Begin DNXFrameSize:=DNXTFrame; DNXCuSize:=DNXTCu; End;
+ If DNXMbH>68 Then DNXDataOff:=$170+(DNXMbH Shl 2) Else DNXDataOff:=$280;
+ DNXQmaxI:=DNXQmax;
+ If DNXQmaxI<=1 Then DNXQmaxI:=1024;
+ If DNXQmaxI>1024 Then DNXQmaxI:=1024;
+ DNXInitQmat; DNXInitVlc;
+ DNXFrameBits:=(DNXCuSize-DNXDataOff-4-DNXMinPadding)*8;
+ DNXQscale:=1; DNXLambda:=2 Shl 10;
+ DNXPSz[0]:=0; DNXPSz[1]:=DNXCw*H+64; DNXPSz[2]:=DNXPSz[1];
+ GetMem(DNXPU,DNXPSz[1]); GetMem(DNXPV,DNXPSz[2]);
+ DNXCacheSz:=DNXMbNum*8*64*4+64; GetMem(DNXCache,DNXCacheSz);
+ GetMem(DNXMbQ,DNXMbNum*4+16); GetMem(DNXMbBits,DNXMbNum*4+16);
+ GetMem(DNXSliceSize,DNXMbH*4+16); GetMem(DNXSliceOffs,DNXMbH*4+16);
+ GetMem(DNXCmpV,DNXMbNum*4+16); GetMem(DNXCmpM,DNXMbNum*4+16);
+ GetMem(DNXCmpV2,DNXMbNum*4+16); GetMem(DNXCmpM2,DNXMbNum*4+16);
+ GetMem(DNXOutBuf,DNXFrameSize+16);
+ DNXRecSz:=DNXW*DNXH+2*DNXCw*DNXH+64; GetMem(DNXRec,DNXRecSz);
+ For I:=0 To 1025 Do DNXRc[I]:=Nil;
+ DNXFrNo:=0; DNXActive:=True; DNXOk:=True;
+End;
+
+{ coeur : image 4:2:2 planaire (Y W*H, U (W+1)/2*H, V idem, contigus) -> un paquet de DNXFrameSize octets }
+Function DNXFrame422(Yuv: PEABuffer; Var Pkt: PEABuffer; Var PktLen: LongInt; Var IsKey: Boolean; Var Dts,Pts: LongInt): Boolean;
+Var F,First: LongInt;
+Begin
+ DNXFrame422:=False;
+ If Not DNXActive Then Exit;
+ DNXPY:=Yuv;
+ Move(Yuv^[DNXW*DNXH],DNXPU^,DNXCw*DNXH);
+ Move(Yuv^[DNXW*DNXH+DNXCw*DNXH],DNXPV^,DNXCw*DNXH);
+ For F:=0 To DNXNFields-1 Do Begin
+  If DNXInterlaced And DNXBottomFirst Then First:=1-F Else First:=F;
+  If Not DNXEncodeUnit(@DNXOutBuf^[F*DNXCuSize],First) Then Exit;
+ End;
+ Pkt:=DNXOutBuf; PktLen:=DNXFrameSize; IsKey:=True; Dts:=DNXFrNo; Pts:=DNXFrNo; Inc(DNXFrNo);
+ DNXFrame422:=True;
+End;
+
+{ entree I420 8 bits (comme les autres codeurs du projet). La chroma est sur-echantillonnee verticalement en 4:2:2 par interpolation
+  lineaire (3a+b+2)>>2 aux positions de chroma des lignes paires/impaires (siting vertical "milieu", celui de MPEG-1/JPEG/H.264). }
+Function DNXFrame(Yuv: PEABuffer; Var Pkt: PEABuffer; Var PktLen: LongInt; Var IsKey: Boolean; Var Dts,Pts: LongInt): Boolean;
+Var K,Y,X,Ya,Yb,Ch0,Cw0,A,B: LongInt; Src: PEABuffer;
+Begin
+ DNXFrame:=False;
+ If Not DNXActive Then Exit;
+ Cw0:=DNXCw; Ch0:=(DNXH+1) Shr 1;
+ Src:=@Yuv^[DNXW*DNXH];
+ For K:=0 To 1 Do
+  For Y:=0 To DNXH-1 Do Begin
+   Ya:=Y Shr 1;
+   If (Y And 1)=0 Then Yb:=Ya-1 Else Yb:=Ya+1;
+   If Yb<0 Then Yb:=0; If Yb>Ch0-1 Then Yb:=Ch0-1;
+   For X:=0 To Cw0-1 Do Begin
+    A:=Src^[K*Cw0*Ch0+Ya*Cw0+X]; B:=Src^[K*Cw0*Ch0+Yb*Cw0+X];
+    If K=0 Then DNXPU^[Y*Cw0+X]:=(3*A+B+2) Shr 2 Else DNXPV^[Y*Cw0+X]:=(3*A+B+2) Shr 2;
+   End;
+  End;
+ DNXPY:=Yuv;
+ For K:=0 To DNXNFields-1 Do Begin
+  If DNXInterlaced And DNXBottomFirst Then Y:=1-K Else Y:=K;
+  If Not DNXEncodeUnit(@DNXOutBuf^[K*DNXCuSize],Y) Then Exit;
+ End;
+ Pkt:=DNXOutBuf; PktLen:=DNXFrameSize; IsKey:=True; Dts:=DNXFrNo; Pts:=DNXFrNo; Inc(DNXFrNo);
+ DNXFrame:=True;
+End;
+
+{ BITMAPINFOHEADER de 40 octets (little-endian) : strf d'un AVI, CodecPrivate Matroska V_MS/VFW/FOURCC (compression = DNXTag). Retourne 40. }
+Function DNXBmpInfo(Var Buf: Array Of Byte): LongInt;
+Var I: LongInt;
+ Procedure P4(At,V: LongInt); Var K: LongInt; Begin For K:=0 To 3 Do Buf[At+K]:=(V Shr (8*K)) And 255; End;
+Begin
+ For I:=0 To 39 Do Buf[I]:=0;
+ P4(0,40); P4(4,DNXW); P4(8,DNXH); Buf[12]:=1; Buf[14]:=24;
+ For I:=1 To 4 Do Buf[16+I-1]:=Ord(DNXTag[I]);
+ P4(20,DNXFrameSize);
+ DNXBmpInfo:=40;
+End;
+
+{ Ecrit les atomes Avid ('ACLR', 'APRG', 'ARES' ou 'ADHR') qui suivent la VisualSampleEntry 'AVdn'/'AVdh' dans un MOV, comme
+  mov_write_avid_tag de ffmpeg (plage limitee). Retourne le nombre d'octets ecrits dans Buf (>= 256). }
+Function DNXAvidAtoms(Var Buf: Array Of Byte): LongInt;
+Var N: LongInt;
+ Procedure B4(V: LongInt); Begin Buf[N]:=(V Shr 24) And 255; Buf[N+1]:=(V Shr 16) And 255; Buf[N+2]:=(V Shr 8) And 255; Buf[N+3]:=V And 255; Inc(N,4); End;
+ Procedure Tg(S: String); Var K: LongInt; Begin For K:=1 To 4 Do Buf[N+K-1]:=Ord(S[K]); Inc(N,4); End;
+ Procedure Z(C: LongInt); Var K: LongInt; Begin For K:=1 To C Do Begin Buf[N]:=0; Inc(N); End; End;
+Begin
+ N:=0;
+ B4(24); Tg('ACLR'); Tg('ACLR'); Tg('0001'); B4(1); B4(0);
+ If DNXTag='AVdh' Then Begin
+  B4(32); Tg('ADHR'); Tg('0001'); B4(DNXCid); B4(0); B4(1); B4(0); B4(0);
+ End Else Begin
+  B4(24); Tg('APRG'); Tg('APRG'); Tg('0001'); B4(1); B4(0);
+  B4(120); Tg('ARES'); Tg('ARES'); Tg('0001'); B4(DNXCid); B4(DNXW);
+  If DNXInterlaced Then Begin B4(DNXH Div 2); B4(2); B4(0); B4(4); End
+  Else Begin B4(DNXH); B4(1); B4(0); If DNXH=1080 Then B4(5) Else B4(6); End;
+  Z(80);
+ End;
+ DNXAvidAtoms:=N;
+End;
+
+{ Copie la reconstruction (image 4:2:2 planaire Y W*H, U (W+1)/2*H, V idem, telle que la decode ffmpeg) de la derniere image codee.
+  Requiert DNXWantRecon=True avant DNXBegin. Dst >= W*H + 2*((W+1)/2)*H octets. }
+Procedure DNXGetRecon(Dst: PEABuffer);
+Begin
+ If DNXActive Then Move(DNXRec^,Dst^,DNXW*DNXH+2*DNXCw*DNXH);
+End;
+
+{ protocole general : pas de reordonnancement, donc rien en attente }
+Function DNXFlush(Var Pkt: PEABuffer; Var PktLen: LongInt; Var IsKey: Boolean; Var Dts,Pts: LongInt): Boolean;
+Begin DNXFlush:=False; End;
 {$IFDEF FPC}
 { ====================================================================== }
 { Decodeur VP9 (profils 0 a 3, 8/10/12 bits) : port en Pascal du decodeur   }
@@ -104725,9 +106645,15 @@ Begin
  M8(V Shr 8); M8(V);
 End;
 
+Procedure M32LE(V: LongInt); Forward;
 Procedure M32(V: LongInt);
 Begin
  M8(V Shr 24); M8(V Shr 16); M8(V Shr 8); M8(V);
+End;
+
+Procedure M32LE(V: LongInt);
+Begin
+ M8(V And 255); M8((V Shr 8) And 255); M8((V Shr 16) And 255); M8((V Shr 24) And 255);
 End;
 
 Procedure MTag(Const S: String);
@@ -104804,10 +106730,13 @@ Begin
  Sb:=MBegin('stbl');
  Sd:=MBegin('stsd'); M32(0); M32(1);
  If IsVideo Then Begin
-  If (MT.T^.Codec='hvc1') Or (MT.T^.Codec='hev1') Then Ent:=MBegin('hvc1') Else If MT.T^.Codec='s263' Then Ent:=MBegin('s263') Else If InList(MT.T^.Codec,'apco,apcs,apcn,apch,ap4h') Then Ent:=MBegin(MT.T^.Codec) Else Ent:=MBegin('avc1');
+  If (MT.T^.Codec='hvc1') Or (MT.T^.Codec='hev1') Then Ent:=MBegin('hvc1') Else If MT.T^.Codec='s263' Then Ent:=MBegin('s263') Else If InList(MT.T^.Codec,'apco,apcs,apcn,apch,ap4h') Then Ent:=MBegin(MT.T^.Codec) Else If (MT.T^.Codec='AVdn') Or (MT.T^.Codec='AVdh') Then Ent:=MBegin(MT.T^.Codec) Else If MT.T^.Codec='MJPG' Then Ent:=MBegin('jpeg') Else Ent:=MBegin('avc1');
   MZero(6); M16(1); MZero(16); M16(MT.T^.W); M16(MT.T^.H); M32($480000); M32($480000); M32(0); M16(1);
   MZero(32); M16($18); M16($FFFF);
-  If MT.T^.CfgLen>0 Then Begin
+  If (MT.T^.CfgLen>0) And ((MT.T^.Codec='AVdn') Or (MT.T^.Codec='AVdh')) Then Begin
+   { atomes Avid (ACLR/APRG/ARES ou ADHR) directement apres l'entree visuelle }
+   For I:=0 To MT.T^.CfgLen-1 Do M8(MT.T^.Cfg[I]);
+  End Else If MT.T^.CfgLen>0 Then Begin
   If (MT.T^.Codec='hvc1') Or (MT.T^.Codec='hev1') Then Cfg:=MBegin('hvcC') Else If MT.T^.Codec='s263' Then Cfg:=MBegin('d263') Else Cfg:=MBegin('avcC');
   For I:=0 To MT.T^.CfgLen-1 Do M8(MT.T^.Cfg[I]); MEnd(Cfg);
   End;
@@ -105184,6 +107113,7 @@ Begin
  If C='avc1' Then MkvCodecId:='V_MPEG4/ISO/AVC'
  Else If (C='hvc1') Or (C='hev1') Then MkvCodecId:='V_MPEGH/ISO/HEVC'
  Else If C='VP80' Then MkvCodecId:='V_VP8'
+ Else If (C='MJPG') Or (C='AVdn') Or (C='AVdh') Then MkvCodecId:='V_MS/VFW/FOURCC'
  Else If C='mp4a' Then MkvCodecId:='A_AAC'
  Else If C='vorb' Then MkvCodecId:='A_VORBIS'
  Else If C='ac-3' Then MkvCodecId:='A_AC3'
@@ -105252,6 +107182,12 @@ Begin
   If (Tr[K].T^.Codec='vorb') And (MkvPrivLen>0) Then Begin
    EId($63A2); I:=MkvPrivLen; M8($40+(I Shr 8)); M8(I);
    For I:=0 To MkvPrivLen-1 Do M8(MkvPrivBuf^[I]);
+  End Else If (Tr[K].T^.Codec='MJPG') Or (Tr[K].T^.Codec='AVdn') Or (Tr[K].T^.Codec='AVdh') Then Begin
+   { CodecPrivate = BITMAPINFOHEADER (40 octets) }
+   EId($63A2); M8($80+40);
+   M32LE(40); M32LE(Tr[K].T^.W); M32LE(Tr[K].T^.H); M8(1); M8(0); M8(24); M8(0);
+   For I:=1 To 4 Do M8(Ord(Tr[K].T^.Codec[I]));
+   M32LE(Tr[K].T^.W*Tr[K].T^.H*3); M32LE(0); M32LE(0); M32LE(0); M32LE(0);
   End Else If Tr[K].T^.CfgLen>0 Then Begin
    EId($63A2); I:=Tr[K].T^.CfgLen; If I<127 Then M8($80+I) Else Begin M8($40+(I Shr 8)); M8(I); End;
    For I:=0 To Tr[K].T^.CfgLen-1 Do M8(Tr[K].T^.Cfg[I]);
@@ -106960,10 +108896,36 @@ Begin
  DelFile(T2);
 End;
 
+{ AVI avec un encodeur dont les paquets sont en memoire (MJPEG, DNxHD) }
+Function AviMemOut(Var M: TMedia; Const Pr: TProf; Const Dst: String; HaveAudio: Boolean; Var Err: String): Boolean;
+Var Vo,A: TTrkIn; Mem: PBArr; Es,Au: String; F: File; Tot: LongInt; HaveA,Ok: Boolean; Cap: LongInt;
+Begin
+ AviMemOut:=False; HaveA:=False; Mem:=Nil; Au:='';
+ FillChar(A,SizeOf(A),0);
+ If Not MemEncodeTemp(MemEncKind(Pr),Vo,Mem,Err) Then Exit;
+ Es:=TmpName('ES');
+ If Not CreateOut(Es,F,Err) Then Begin TrkClear(Vo); FreeMem(Mem); Exit; End;
+ Tot:=Vo.Off^[Vo.N-1]+Vo.Sz^[Vo.N-1];
+ BlockWrite(F,Mem^,Tot); Close(F); FreeMem(Mem); Mem:=Nil;
+ If HaveAudio Then Begin
+  Au:=TmpName('MP3');
+  If AltAudio(M,Pr,'MP3',Au,Err) Then HaveA:=ParseMp3(Au,A) Else Begin
+   If Stopped Then Begin DelFile(Es); DelFile(Au); TrkClear(Vo); Exit; End;
+   If Pos('Aucune piste audio',Err)=0 Then JobWarn:=' (sans audio : '+Err+')';
+   Err:='';
+  End;
+ End;
+ Ok:=MuxAvi(Dst,Vo,A,HaveA,Es,Au,Vo.Codec,VJFn,VJFd,Err);
+ TrkClear(Vo); If HaveA Then TrkClear(A);
+ DelFile(Es); If Au<>'' Then DelFile(Au);
+ AviMemOut:=Ok;
+End;
+
 Function AltVideoOut(Var M: TMedia; Const Pr: TProf; Const Dst: String; HaveAudio: Boolean; Var Err: String): Boolean;
 Var Y4,Es,Au: String; V,A: TTrkIn; HaveA,Ok: Boolean; Tr: Array[0..1] Of TMuxTrk; NT: Integer; VMem,AMem: PBArr;
 Begin
  AltVideoOut:=False; HaveA:=False; Ok:=False;
+ If (Pr.Ext='AVI') And (MemEncKind(Pr)>=6) And (MemEncKind(Pr)<=7) Then Begin AltVideoOut:=AviMemOut(M,Pr,Dst,HaveAudio,Err); Exit; End;
  Y4:=TmpName('Y4M'); Es:=TmpName('M4V'); Au:='';
  If Not WriteY4m(Y4,Err) Then Exit;
  If Pr.Ext='AVI' Then Begin
@@ -107083,7 +109045,8 @@ End;
 
 { ---- Boucle generique : fichier temporaire I420 -> encodeur (protocole XxFrame) -> paquets en memoire ---- }
 Type TEncFrameFn = Function(Yuv: PEABuffer; Var Pkt: PEABuffer; Var PktLen: LongInt; Var IsKey: Boolean; Var Dts,Pts: LongInt): Boolean;
-Var GenFrameFn,GenFlushFn: TEncFrameFn;
+Type TEncFlushFn = Function(Var Pkt: PEABuffer; Var PktLen: LongInt; Var IsKey: Boolean; Var Dts,Pts: LongInt): Boolean;
+Var GenFrameFn: TEncFrameFn; GenFlushFn: TEncFlushFn;
 
 Function GenMemEncode(Var Vo: TTrkIn; Var Mem: PBArr; Const Tag: String; Var Err: String): Boolean;
 Var I,N,Fsz,P,Len,Cap,Pl,Dts,Pts: LongInt; Got: Word; Buf,Pk: PEABuffer; Key,Ok: Boolean;
@@ -107109,7 +109072,7 @@ Begin
   If GenFrameFn(Buf,Pk,Pl,Key,Dts,Pts) Then Put;
   If (I And 1)=0 Then Begin UiTick(I,VJCnt); If Stopped Then Begin Ok:=False; Err:='Conversion annul'#233'e.'; Break; End; End;
  End;
- If Ok And (@GenFlushFn<>Nil) Then While GenFlushFn(Buf,Pk,Pl,Key,Dts,Pts) Do Put;
+ If Ok And (@GenFlushFn<>Nil) Then While GenFlushFn(Pk,Pl,Key,Dts,Pts) Do Put;
  FreeMem(Buf,Fsz+16);
  If Ok Then Begin
   Vo.N:=N; Vo.Ok:=True; Vo.IsVideo:=True; Vo.Ts:=VJFn; Vo.W:=VJOutW; Vo.H:=VJOutH;
@@ -107120,6 +109083,31 @@ Begin
 End;
 
 Var MemEncSub: Integer;
+
+Function DnxEncodeTemp(Var Vo: TTrkIn; Var Mem: PBArr; Var Err: String): Boolean;
+Var Hb: Array[0..255] Of Byte; Hl,I,Br: LongInt;
+Begin
+ DnxEncodeTemp:=False;
+ If MemEncSub<0 Then Br:=120000000 Else Br:=VJBitrate;
+ DNXBegin(VJOutW,VJOutH,VJFn,VJFd,Br,0);
+ If Not DNXOk Then Begin Err:='DNxHD/DNxHR : '+DNXErr; DNXFree; Exit; End;
+ GenFrameFn:=DNXFrame; GenFlushFn:=DNXFlush;
+ If GenMemEncode(Vo,Mem,DNXTag,Err) Then Begin
+  Hl:=DNXAvidAtoms(Hb);
+  For I:=0 To Hl-1 Do Vo.Cfg[I]:=Hb[I]; Vo.CfgLen:=Hl;
+  DnxEncodeTemp:=True;
+ End;
+ DNXFree;
+End;
+
+Function MjpegEncodeTemp(Var Vo: TTrkIn; Var Mem: PBArr; Var Err: String): Boolean;
+Begin
+ MJEOptimal:=True; MJEMatrix:=1; MJEChroma:=0; MJEFfQ:=0;
+ MJEBegin(VJOutW,VJOutH,VJFn,VJFd,VJBitrate,85);
+ GenFrameFn:=MJEFrame; GenFlushFn:=Nil;
+ MjpegEncodeTemp:=GenMemEncode(Vo,Mem,MJETag,Err);
+ MJEFree;
+End;
 
 Function ProResEncodeTemp(Var Vo: TTrkIn; Var Mem: PBArr; Var Err: String): Boolean;
 Begin
@@ -107135,6 +109123,8 @@ Begin
  MemEncKind:=0; MemEncSub:=0;
  If Pr.VC='HEVC' Then MemEncKind:=1
  Else If Pr.VC='H263' Then MemEncKind:=2
+ Else If Pr.VC='DNxHD' Then Begin MemEncKind:=6; If Pr.VKb<=0 Then MemEncSub:=-1 Else MemEncSub:=Pr.VKb; End
+ Else If Pr.VC='MJPEG' Then MemEncKind:=7
  Else If Copy(Pr.VC,1,4)='PrRs' Then Begin
   MemEncKind:=5;
   If Pr.VC='PrRsPxy' Then MemEncSub:=0 Else If Pr.VC='PrRsLT' Then MemEncSub:=1
@@ -107149,6 +109139,8 @@ Begin
   1: MemEncodeTemp:=HevcEncodeTemp(Vo,Mem,Err);
   2: MemEncodeTemp:=H263EncodeTemp(Vo,Mem,Err);
   5: MemEncodeTemp:=ProResEncodeTemp(Vo,Mem,Err);
+  6: MemEncodeTemp:=DnxEncodeTemp(Vo,Mem,Err);
+  7: MemEncodeTemp:=MjpegEncodeTemp(Vo,Mem,Err);
   Else Err:='Encodeur video inconnu.';
  End;
 End;
