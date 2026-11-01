@@ -30058,6 +30058,2203 @@ Begin
  PktLen:=0; IsKey:=False; Dts:=0; Pts:=0; Pkt:=HeOut;
  HeFlush:=False;
 End;
+{ ====================================================================== }
+{ pe_disc.pas : supports optiques en image (ISO 9660 / Joliet / UDF) ou en }
+{ dossier : DVD-Video (VIDEO_TS) et Blu-ray (BDMV).                        }
+{ Prefixe : Dsc                                                            }
+{                                                                          }
+{ Ecrit pour ce projet (formats ECMA-119, ECMA-167/OSTA UDF 2.60, DVD-Video}
+{ et Blu-ray decrits d'apres les specifications publiques et la lecture    }
+{ de libdvdread / libbluray / libudfread pour la structure des champs).    }
+{ AUCUN dechiffrement (CSS, AACS, BD+) n'est implemente ni tente.          }
+{ ====================================================================== }
+
+Const
+ DSC_FS_NONE   = 0;
+ DSC_FS_DIR    = 1;   { dossier de l'hote }
+ DSC_FS_ISO    = 2;   { ISO 9660 (noms primaires) }
+ DSC_FS_JOLIET = 3;   { ISO 9660 + Joliet }
+ DSC_FS_UDF    = 4;   { UDF (1.02 a 2.60) }
+ DSC_MODE_AUTO = 0;   { choix : UDF > Joliet > ISO }
+ DSC_SEGSIZE   = 1073741824;  { taille d'un segment de l'interface LongInt }
+
+Type
+ TDscBuf = Array[0..2147483000] Of Byte;
+ PDscBuf = ^TDscBuf;
+ { Un extent : octets [Lo,Lo+Len[ du fichier, stockes a Disk dans l'image (offset logique 2048/secteur) }
+ TDscExt = Record
+  Lo,Len,Disk: Int64;
+  Hole: LongInt;       { 1 = non enregistre / non alloue : lit des zeros }
+ End;
+ TDscExtArr = Array[0..20000000] Of TDscExt;
+ PDscExtArr = ^TDscExtArr;
+ { Fichier virtuel (image, memoire ou fichier de l'hote) : lecture aleatoire Int64 }
+ TDscFile = Record
+  Kind: LongInt;       { 0 ferme, 1 extents dans l'image, 2 fichier hote, 3 memoire }
+  Size: Int64;
+  NExt,CapExt,Cur: LongInt;
+  Ext: PDscExtArr;
+  Mem: PDscBuf;
+  Hf: File;
+ End;
+ TDscEnt = Record
+  Name: String;
+  IsDir: Boolean;
+  Size: Int64;
+  A: Int64;            { reference interne (ISO : offset de l'enregistrement ; UDF : LBN de l'ICB) }
+  B: LongInt;          { UDF : numero de partition de l'ICB }
+ End;
+ TDscEntArr = Array[0..4000000] Of TDscEnt;
+ PDscEntArr = ^TDscEntArr;
+ TDscPm = Record
+  Kind: LongInt;       { 1 physique, 2 metadonnees (UDF 2.50), 3 virtuelle (non geree), 4 sparable }
+  PartNo: LongInt;
+  Start,Len: Int64;    { physique : debut en octets }
+  Host: LongInt;       { metadonnees : indice de la partition physique hote }
+  MetaLoc,MetaMir: LongInt;
+  MExt: PDscExtArr; MN: LongInt;   { etendues du fichier de metadonnees }
+ End;
+
+Var
+ DscMsg: String;                 { dernier message d'erreur / d'avertissement }
+ DscProgress: Procedure(Done,Total: Int64);   { rappel de progression (peut rester Nil) }
+ DscStop: Boolean;               { a mettre a True dans le rappel pour interrompre une copie }
+ DscFsType: LongInt;             { systeme de fichiers actif (DSC_FS_*) }
+ DscHasIso,DscHasJoliet,DscHasUdf: Boolean;   { structures detectees dans l'image }
+ DscUdfRev: LongInt;             { revision UDF lue ($0102,$0150,$0201,$0250,$0260) }
+ DscVolId: String;               { nom du volume }
+ DscImgPath: String;             { chemin de l'image ou du dossier ouvert }
+ DscImgOpen: Boolean;
+ DscImgSize: Int64;              { taille logique de l'image (octets, secteurs de 2048) }
+ DscLst: PDscEntArr;             { resultat de DscIsoList / DscVList }
+ DscLstN: LongInt;
+ { ---- internes ---- }
+ DscImg: File;
+ DscSecSize,DscSecHdr: LongInt;
+ DscRootDir: String;
+ DscIsoRootRec,DscJolRootRec: Array[0..33] Of Byte;
+ DscIsoRootOk,DscJolRootOk: Boolean;
+ DscPm: Array[0..15] Of TDscPm;
+ DscPmN: LongInt;
+ DscLbs: LongInt;
+ DscRootPart,DscRootLbn: LongInt;
+ DscUdfOk: Boolean;
+ DscCacheKey: Int64; DscCacheB: LongInt; DscCacheFs: LongInt; DscCacheN: LongInt; DscCacheL: PDscEntArr;
+
+{ ---------------------------------------------------------------------- }
+{ Utilitaires                                                              }
+{ ---------------------------------------------------------------------- }
+Function DscUp(S: String): String;
+Var I: LongInt;
+Begin
+ For I:=1 To Length(S) Do If (S[I]>='a') And (S[I]<='z') Then S[I]:=Chr(Ord(S[I])-32);
+ DscUp:=S;
+End;
+
+Function DscIStr(N: Int64): String;
+Var S: String;
+Begin
+ Str(N,S); DscIStr:=S;
+End;
+
+Function DscLE16(P: PDscBuf; O: LongInt): LongInt;
+Begin
+ DscLE16:=P^[O] Or (LongInt(P^[O+1]) Shl 8);
+End;
+
+Function DscLE32(P: PDscBuf; O: LongInt): Int64;
+Begin
+ DscLE32:=Int64(P^[O]) Or (Int64(P^[O+1]) Shl 8) Or (Int64(P^[O+2]) Shl 16) Or (Int64(P^[O+3]) Shl 24);
+End;
+
+Function DscLE64(P: PDscBuf; O: LongInt): Int64;
+Begin
+ DscLE64:=DscLE32(P,O) Or (DscLE32(P,O+4) Shl 32);
+End;
+
+Function DscBE16(P: PDscBuf; O: LongInt): LongInt;
+Begin
+ DscBE16:=(LongInt(P^[O]) Shl 8) Or P^[O+1];
+End;
+
+Function DscBE32(P: PDscBuf; O: LongInt): Int64;
+Begin
+ DscBE32:=(Int64(P^[O]) Shl 24) Or (Int64(P^[O+1]) Shl 16) Or (Int64(P^[O+2]) Shl 8) Or Int64(P^[O+3]);
+End;
+
+Function DscSplitName(Var S: String; Var Rest: String): String;
+{ extrait le premier composant de S (separateurs / ou \) }
+Var I: LongInt;
+Begin
+ While (Length(S)>0) And ((S[1]='/') Or (S[1]='\')) Do Delete(S,1,1);
+ I:=1;
+ While (I<=Length(S)) And (S[I]<>'/') And (S[I]<>'\') Do Inc(I);
+ DscSplitName:=Copy(S,1,I-1);
+ Delete(S,1,I-1);
+ Rest:=S;
+End;
+
+Function DscIsDirHost(Const Name: String): Boolean;
+Var F: File; A: Word; N: String;
+Begin
+ N:=Name;
+ If (Length(N)>1) And ((N[Length(N)]='\') Or (N[Length(N)]='/')) Then Dec(N[0]);
+ Assign(F,N); GetFAttr(F,A);
+ DscIsDirHost:=(DosError=0) And ((A And Directory)<>0);
+End;
+
+Function DscUcs2ToUtf8(P: PDscBuf; O,N: LongInt; BigEndian: Boolean): String;
+{ N = nombre d'octets ; convertit UCS-2/UTF-16 en UTF-8 (tronque a 255 octets) }
+Var I,C,D: LongInt; S: String;
+Begin
+ S:=''; I:=0;
+ While I+1<N Do Begin
+  If BigEndian Then C:=(LongInt(P^[O+I]) Shl 8) Or P^[O+I+1] Else C:=(LongInt(P^[O+I+1]) Shl 8) Or P^[O+I];
+  Inc(I,2);
+  If (C>=$D800) And (C<$DC00) And (I+1<N) Then Begin
+   If BigEndian Then D:=(LongInt(P^[O+I]) Shl 8) Or P^[O+I+1] Else D:=(LongInt(P^[O+I+1]) Shl 8) Or P^[O+I];
+   If (D>=$DC00) And (D<$E000) Then Begin C:=$10000+((C-$D800) Shl 10)+(D-$DC00); Inc(I,2); End;
+  End;
+  If Length(S)>248 Then Break;
+  If C<$80 Then S:=S+Chr(C)
+  Else If C<$800 Then S:=S+Chr($C0 Or (C Shr 6))+Chr($80 Or (C And $3F))
+  Else If C<$10000 Then S:=S+Chr($E0 Or (C Shr 12))+Chr($80 Or ((C Shr 6) And $3F))+Chr($80 Or (C And $3F))
+  Else S:=S+Chr($F0 Or (C Shr 18))+Chr($80 Or ((C Shr 12) And $3F))+Chr($80 Or ((C Shr 6) And $3F))+Chr($80 Or (C And $3F));
+ End;
+ DscUcs2ToUtf8:=S;
+End;
+
+Function DscLatin1ToUtf8(P: PDscBuf; O,N: LongInt): String;
+Var I,C: LongInt; S: String;
+Begin
+ S:='';
+ For I:=0 To N-1 Do Begin
+  C:=P^[O+I];
+  If Length(S)>250 Then Break;
+  If C<$80 Then S:=S+Chr(C) Else S:=S+Chr($C0 Or (C Shr 6))+Chr($80 Or (C And $3F));
+ End;
+ DscLatin1ToUtf8:=S;
+End;
+
+{ ---------------------------------------------------------------------- }
+{ Lecture de l'image (offsets logiques, secteurs de 2048 octets)           }
+{ ---------------------------------------------------------------------- }
+Function DscImgRead(Off: Int64; Var Buf; Len: LongInt): LongInt;
+Var B: PDscBuf; Done,Got,N,Within: LongInt; Sec,Phys: Int64;
+Begin
+ DscImgRead:=0;
+ If (Not DscImgOpen) Or (Len<=0) Or (Off<0) Or (Off>=DscImgSize) Then Exit;
+ If Off+Len>DscImgSize Then Len:=DscImgSize-Off;
+ B:=PDscBuf(@Buf); Done:=0;
+ If DscSecSize=2048 Then Begin
+  {$I-}Seek(DscImg,Off); Got:=0; BlockRead(DscImg,B^,Len,Got);{$I+}
+  If IOResult<>0 Then Got:=0;
+  DscImgRead:=Got; Exit;
+ End;
+ While Done<Len Do Begin
+  Sec:=(Off+Done) Div 2048; Within:=(Off+Done) Mod 2048;
+  N:=2048-Within; If N>Len-Done Then N:=Len-Done;
+  Phys:=Sec*DscSecSize+DscSecHdr+Within;
+  {$I-}Seek(DscImg,Phys); Got:=0; BlockRead(DscImg,B^[Done],N,Got);{$I+}
+  If IOResult<>0 Then Got:=0;
+  Inc(Done,Got);
+  If Got<N Then Break;
+ End;
+ DscImgRead:=Done;
+End;
+
+{ Lecture brute dans l'image a un offset logique absolu (API publique) }
+Function DscIsoRead(Off: Int64; Var Buf; Len: LongInt): LongInt;
+Begin
+ DscIsoRead:=DscImgRead(Off,Buf,Len);
+End;
+
+{ ---------------------------------------------------------------------- }
+{ Fichiers virtuels                                                        }
+{ ---------------------------------------------------------------------- }
+Procedure DscFInit(Var F: TDscFile);
+Begin
+ FillChar(F,SizeOf(F),0);
+End;
+
+Procedure DscFClose(Var F: TDscFile);
+Begin
+ If F.Kind=2 Then Begin {$I-}Close(F.Hf);{$I+} If IOResult<>0 Then ; End;
+ If F.Ext<>Nil Then FreeMem(F.Ext,F.CapExt*SizeOf(TDscExt));
+ If F.Mem<>Nil Then FreeMem(F.Mem,F.Size+1);
+ FillChar(F,SizeOf(F),0);
+End;
+
+Procedure DscFAddExt(Var F: TDscFile; Lo,Len,Disk: Int64; H: LongInt);
+Var NewCap: LongInt; P: PDscExtArr;
+Begin
+ If Len<=0 Then Exit;
+ { fusionne avec l'extent precedent s'il est contigu }
+ If F.NExt>0 Then Begin
+  If (F.Ext^[F.NExt-1].Hole=H) And (F.Ext^[F.NExt-1].Lo+F.Ext^[F.NExt-1].Len=Lo)
+     And ((H<>0) Or (F.Ext^[F.NExt-1].Disk+F.Ext^[F.NExt-1].Len=Disk)) Then Begin
+   Inc(F.Ext^[F.NExt-1].Len,Len); Exit;
+  End;
+ End;
+ If F.NExt>=F.CapExt Then Begin
+  NewCap:=F.CapExt*2; If NewCap<16 Then NewCap:=16;
+  GetMem(P,NewCap*SizeOf(TDscExt));
+  If F.NExt>0 Then Move(F.Ext^,P^,F.NExt*SizeOf(TDscExt));
+  If F.Ext<>Nil Then FreeMem(F.Ext,F.CapExt*SizeOf(TDscExt));
+  F.Ext:=P; F.CapExt:=NewCap;
+ End;
+ F.Ext^[F.NExt].Lo:=Lo; F.Ext^[F.NExt].Len:=Len; F.Ext^[F.NExt].Disk:=Disk; F.Ext^[F.NExt].Hole:=H;
+ Inc(F.NExt);
+End;
+
+{ Lecture aleatoire (offset Int64) dans un fichier virtuel. Retourne le nombre d'octets lus. }
+Function DscFRead(Var F: TDscFile; Off: Int64; Var Buf; Len: LongInt): LongInt;
+Var B: PDscBuf; Done,Got,Lo,Hi,Mid: LongInt; Pos,Within: Int64; Take: LongInt; Found: Boolean;
+Begin
+ DscFRead:=0;
+ If (F.Kind=0) Or (Len<=0) Or (Off<0) Or (Off>=F.Size) Then Exit;
+ If Off+Len>F.Size Then Len:=F.Size-Off;
+ B:=PDscBuf(@Buf);
+ Case F.Kind Of
+  2: Begin
+   {$I-}Seek(F.Hf,Off); Got:=0; BlockRead(F.Hf,B^,Len,Got);{$I+}
+   If IOResult<>0 Then Got:=0;
+   DscFRead:=Got;
+  End;
+  3: Begin
+   Move(F.Mem^[Off],B^,Len); DscFRead:=Len;
+  End;
+  1: Begin
+   Done:=0;
+   While Done<Len Do Begin
+    Pos:=Off+Done; Found:=False;
+    If (F.Cur>=0) And (F.Cur<F.NExt) Then
+     If (F.Ext^[F.Cur].Lo<=Pos) And (Pos<F.Ext^[F.Cur].Lo+F.Ext^[F.Cur].Len) Then Found:=True;
+    If Not Found Then Begin
+     Lo:=0; Hi:=F.NExt-1;
+     While Lo<=Hi Do Begin
+      Mid:=(Lo+Hi) Div 2;
+      If Pos<F.Ext^[Mid].Lo Then Hi:=Mid-1
+      Else If Pos>=F.Ext^[Mid].Lo+F.Ext^[Mid].Len Then Lo:=Mid+1
+      Else Begin F.Cur:=Mid; Found:=True; Break; End;
+     End;
+    End;
+    If Not Found Then Begin
+     { au-dela des extents : zeros }
+     FillChar(B^[Done],Len-Done,0); Done:=Len; Break;
+    End;
+    Within:=Pos-F.Ext^[F.Cur].Lo;
+    If F.Ext^[F.Cur].Len-Within>Len-Done Then Take:=Len-Done Else Take:=F.Ext^[F.Cur].Len-Within;
+    If F.Ext^[F.Cur].Hole<>0 Then Begin
+     FillChar(B^[Done],Take,0); Inc(Done,Take);
+    End Else Begin
+     Got:=DscImgRead(F.Ext^[F.Cur].Disk+Within,B^[Done],Take);
+     Inc(Done,Got);
+     If Got<Take Then Break;
+    End;
+   End;
+   DscFRead:=Done;
+  End;
+ End;
+End;
+
+{ ---- interface par segments pour les programmes en LongInt (limite 2 Go) ---- }
+{ Un fichier est vu comme une suite de segments de 1 Gio (DSC_SEGSIZE) ; chaque    }
+{ segment a une taille tenant dans un LongInt et des offsets LongInt.            }
+Function DscFSegCount(Var F: TDscFile): LongInt;
+Begin
+ DscFSegCount:=(F.Size+DSC_SEGSIZE-1) Div DSC_SEGSIZE;
+End;
+
+Function DscFSegLen(Var F: TDscFile; Seg: LongInt): LongInt;
+Var Rest: Int64;
+Begin
+ Rest:=F.Size-Int64(Seg)*DSC_SEGSIZE;
+ If Rest<0 Then Rest:=0;
+ If Rest>DSC_SEGSIZE Then Rest:=DSC_SEGSIZE;
+ DscFSegLen:=Rest;
+End;
+
+Function DscFReadSeg(Var F: TDscFile; Seg,Off: LongInt; Var Buf; Len: LongInt): LongInt;
+Begin
+ If (Seg<0) Or (Off<0) Or (Off>=DSC_SEGSIZE) Then Begin DscFReadSeg:=0; Exit; End;
+ DscFReadSeg:=DscFRead(F,Int64(Seg)*DSC_SEGSIZE+Off,Buf,Len);
+End;
+
+Function DscFSizeKB(Var F: TDscFile): LongInt;
+Begin
+ DscFSizeKB:=(F.Size+1023) Div 1024;
+End;
+
+Var
+ DscProgBase,DscProgTotal: Int64;   { progression globale d'une operation multi-fichiers }
+
+{ Copie [Off,Off+Len[ du fichier virtuel vers un fichier Pascal deja ouvert (Rewrite(f,1)). }
+Function DscFCopyTo(Var F: TDscFile; Off,Len: Int64; Var Dst: File): Boolean;
+Var Buf: PDscBuf; Done: Int64; N,Got,Wr: LongInt;
+Begin
+ DscFCopyTo:=False;
+ If Off+Len>F.Size Then Len:=F.Size-Off;
+ If Len<0 Then Len:=0;
+ GetMem(Buf,1048576);
+ Done:=0;
+ While Done<Len Do Begin
+  If Len-Done>1048576 Then N:=1048576 Else N:=Len-Done;
+  Got:=DscFRead(F,Off+Done,Buf^,N);
+  If Got<N Then Begin
+   DscMsg:='Lecture incomplete dans l''image (donnees tronquees ?).'; FreeMem(Buf,1048576); Exit;
+  End;
+  {$I-}BlockWrite(Dst,Buf^,N,Wr);{$I+}
+  If (IOResult<>0) Or (Wr<>N) Then Begin
+   DscMsg:='Ecriture impossible (disque plein ?).'; FreeMem(Buf,1048576); Exit;
+  End;
+  Inc(Done,N);
+  If @DscProgress<>Nil Then Begin
+   If DscProgTotal>0 Then DscProgress(DscProgBase+Done,DscProgTotal) Else DscProgress(Done,Len);
+  End;
+  If DscStop Then Begin DscMsg:='Operation interrompue.'; FreeMem(Buf,1048576); Exit; End;
+ End;
+ Inc(DscProgBase,Len);
+ FreeMem(Buf,1048576);
+ DscFCopyTo:=True;
+End;
+
+{ Lit tout le fichier en memoire (fichiers de metadonnees : taille limitee a 256 Mo) }
+Function DscFReadAll(Var F: TDscFile; Var P: PDscBuf): Boolean;
+Var Got: LongInt;
+Begin
+ DscFReadAll:=False; P:=Nil;
+ If F.Size>268435456 Then Begin DscMsg:='Fichier de metadonnees trop grand.'; Exit; End;
+ GetMem(P,F.Size+16);
+ FillChar(P^[F.Size],16,0);
+ If F.Size>0 Then Begin
+  Got:=DscFRead(F,0,P^,F.Size);
+  If Got<F.Size Then Begin FreeMem(P,F.Size+16); P:=Nil; DscMsg:='Lecture des metadonnees incomplete.'; Exit; End;
+ End;
+ DscFReadAll:=True;
+End;
+
+Procedure DscFFreeBuf(Var P: PDscBuf; Size: Int64);
+Begin
+ If P<>Nil Then FreeMem(P,Size+16);
+ P:=Nil;
+End;
+
+{ ---------------------------------------------------------------------- }
+{ Listes d'entrees                                                         }
+{ ---------------------------------------------------------------------- }
+Procedure DscLFree(Var L: PDscEntArr; Var N: LongInt);
+Begin
+ If L<>Nil Then FreeMem(L);
+ L:=Nil; N:=0;
+End;
+
+Procedure DscLAdd(Var L: PDscEntArr; Var N: LongInt; Const Name: String; IsDir: Boolean; Size,A: Int64; B: LongInt);
+Begin
+ If (N Mod 256)=0 Then ReallocMem(Pointer(L),(N+256)*SizeOf(TDscEnt));
+ L^[N].Name:=Name; L^[N].IsDir:=IsDir; L^[N].Size:=Size; L^[N].A:=A; L^[N].B:=B;
+ Inc(N);
+End;
+
+{ ---------------------------------------------------------------------- }
+{ UDF                                                                      }
+{ ---------------------------------------------------------------------- }
+Function DscUdfMap(Part: LongInt; Lbn: Int64): Int64;
+Var Off: Int64; Lo,Hi,Mid: LongInt;
+Begin
+ DscUdfMap:=-1;
+ If (Part<0) Or (Part>=DscPmN) Or (Lbn<0) Then Exit;
+ Case DscPm[Part].Kind Of
+  1,4: DscUdfMap:=DscPm[Part].Start+Lbn*DscLbs;
+  2: Begin
+   Off:=Lbn*DscLbs; Lo:=0; Hi:=DscPm[Part].MN-1;
+   While Lo<=Hi Do Begin
+    Mid:=(Lo+Hi) Div 2;
+    If Off<DscPm[Part].MExt^[Mid].Lo Then Hi:=Mid-1
+    Else If Off>=DscPm[Part].MExt^[Mid].Lo+DscPm[Part].MExt^[Mid].Len Then Lo:=Mid+1
+    Else Begin
+     If DscPm[Part].MExt^[Mid].Hole=0 Then DscUdfMap:=DscPm[Part].MExt^[Mid].Disk+(Off-DscPm[Part].MExt^[Mid].Lo);
+     Exit;
+    End;
+   End;
+  End;
+ End;
+End;
+
+Function DscUdfTagOk(P: PDscBuf; Id: LongInt): Boolean;
+Var I,S: LongInt;
+Begin
+ DscUdfTagOk:=False;
+ If DscLE16(P,0)<>Id Then Exit;
+ S:=0;
+ For I:=0 To 15 Do If I<>4 Then S:=S+P^[I];
+ DscUdfTagOk:=((S And 255)=P^[4]);
+End;
+
+Procedure DscUdfParseAds(Var F: TDscFile; Buf: PDscBuf; Pos,Len,AdType,Part: LongInt; Var Logical: Int64; Depth: LongInt);
+Var Size,Ty,Pr,Lad: LongInt; Ln,Lbn: Int64; L4: Int64; Disk: Int64; Cont: PDscBuf; Got: LongInt; AedOff: Int64;
+Begin
+ Case AdType Of
+  0: Size:=8;
+  1: Size:=16;
+  2: Size:=20;
+ Else Exit;
+ End;
+ While Len>=Size Do Begin
+  L4:=DscLE32(Buf,Pos);
+  Ty:=(L4 Shr 30) And 3; Ln:=L4 And $3FFFFFFF;
+  Pr:=Part;
+  Case AdType Of
+   0: Lbn:=DscLE32(Buf,Pos+4);
+   1: Begin Lbn:=DscLE32(Buf,Pos+4); Pr:=DscLE16(Buf,Pos+8); End;
+  Else Begin Lbn:=DscLE32(Buf,Pos+12); Pr:=DscLE16(Buf,Pos+16); End;
+  End;
+  Inc(Pos,Size); Dec(Len,Size);
+  If Ln=0 Then Break;
+  If Ty=3 Then Begin
+   { prolongement : etendue contenant d'autres descripteurs d'allocation }
+   If Depth>=16 Then Break;
+   AedOff:=DscUdfMap(Pr,Lbn);
+   If AedOff<0 Then Break;
+   If Ln>1048576 Then Ln:=1048576;
+   GetMem(Cont,Ln+16);
+   Got:=DscImgRead(AedOff,Cont^,Ln);
+   If (Got>=24) And (DscLE16(Cont,0)=258) Then Begin
+    Lad:=DscLE32(Cont,20);
+    If Lad>Got-24 Then Lad:=Got-24;
+    DscUdfParseAds(F,Cont,24,Lad,AdType,Part,Logical,Depth+1);
+   End;
+   FreeMem(Cont,Ln+16);
+   Break;
+  End;
+  If Ty=0 Then Begin
+   Disk:=DscUdfMap(Pr,Lbn);
+   { disque non conforme : short_ad d'un ICB de metadonnees visant la partition physique }
+   If (Disk<0) And (Pr>=0) And (Pr<DscPmN) Then
+    If DscPm[Pr].Kind=2 Then Disk:=DscUdfMap(DscPm[Pr].Host,Lbn);
+   If Disk<0 Then Begin DscFAddExt(F,Logical,Ln,0,1); End
+   Else DscFAddExt(F,Logical,Ln,Disk,0);
+  End Else DscFAddExt(F,Logical,Ln,0,1);
+  Inc(Logical,Ln);
+ End;
+End;
+
+{ Ouvre le fichier decrit par l'ICB (Part,Lbn) : File Entry (261) ou Extended File Entry (266). }
+Function DscUdfOpenICB(Part,Lbn: LongInt; Var F: TDscFile; Var FType: LongInt): Boolean;
+Var Blk: Array[0..2047] Of Byte; P: PDscBuf; Off,Info,Logical: Int64; Tag,Depth,Flags,AdType,Lea,Lad,Base: LongInt;
+Begin
+ DscUdfOpenICB:=False; DscFInit(F); P:=PDscBuf(@Blk); Depth:=0; FType:=0;
+ While True Do Begin
+  Off:=DscUdfMap(Part,Lbn);
+  If Off<0 Then Begin DscMsg:='ICB UDF hors partition.'; Exit; End;
+  FillChar(Blk,SizeOf(Blk),0);
+  If DscImgRead(Off,Blk,2048)<176 Then Begin DscMsg:='ICB UDF illisible.'; Exit; End;
+  Tag:=DscLE16(P,0);
+  If Tag=259 Then Begin
+   { entree indirecte : suit l'ICB suivant }
+   Lbn:=DscLE32(P,40); Part:=DscLE16(P,44);
+   Inc(Depth); If Depth>8 Then Begin DscMsg:='Chaine d''ICB trop longue.'; Exit; End;
+   Continue;
+  End;
+  If (Tag<>261) And (Tag<>266) Then Begin DscMsg:='ICB UDF invalide (tag '+DscIStr(Tag)+').'; Exit; End;
+  Break;
+ End;
+ FType:=Blk[27]; Flags:=DscLE16(P,34); AdType:=Flags And 7;
+ Info:=DscLE64(P,56);
+ If Tag=261 Then Begin Lea:=DscLE32(P,168); Lad:=DscLE32(P,172); Base:=176; End
+ Else Begin Lea:=DscLE32(P,208); Lad:=DscLE32(P,212); Base:=216; End;
+ If (Lea<0) Or (Lea>2048) Then Lea:=0;
+ If Base+Lea+Lad>2048 Then Lad:=2048-Base-Lea;
+ If Lad<0 Then Lad:=0;
+ F.Size:=Info;
+ If AdType=3 Then Begin
+  { donnees integrees dans le File Entry }
+  If Info>Lad Then Info:=Lad;
+  F.Size:=Info; F.Kind:=3;
+  GetMem(F.Mem,Info+1);
+  If Info>0 Then Move(P^[Base+Lea],F.Mem^,Info);
+  DscUdfOpenICB:=True; Exit;
+ End;
+ If AdType>2 Then Begin DscMsg:='Type d''allocation UDF inconnu.'; Exit; End;
+ F.Kind:=1; Logical:=0;
+ DscUdfParseAds(F,P,Base+Lea,Lad,AdType,Part,Logical,0);
+ { la taille declaree ne peut pas depasser les extents alloues (taille corrompue) }
+ If F.Size>Logical Then F.Size:=Logical;
+ DscUdfOpenICB:=True;
+End;
+
+{ Decode un identifiant OSTA (compression 8 ou 16) }
+Function DscUdfName(P: PDscBuf; O,N: LongInt): String;
+Begin
+ DscUdfName:='';
+ If N<=1 Then Exit;
+ If P^[O]=8 Then DscUdfName:=DscLatin1ToUtf8(P,O+1,N-1)
+ Else If P^[O]=16 Then DscUdfName:=DscUcs2ToUtf8(P,O+1,N-1,True)
+ Else DscUdfName:=DscLatin1ToUtf8(P,O+1,N-1);
+End;
+
+Procedure DscUdfLoadDirData(Buf: PDscBuf; Size: Int64; Var L: PDscEntArr; Var N: LongInt);
+Var Pos: Int64; Chars,Lfi,Liu,Part,Tl,Ft: LongInt; Lbn: Int64; Nm: String; F: TDscFile; IsDir: Boolean; Sz: Int64;
+Begin
+ Pos:=0;
+ While Pos+38<=Size Do Begin
+  If DscLE16(Buf,Pos)<>257 Then Break;
+  Chars:=Buf^[Pos+18]; Lfi:=Buf^[Pos+19];
+  Lbn:=DscLE32(Buf,Pos+24); Part:=DscLE16(Buf,Pos+28);
+  Liu:=DscLE16(Buf,Pos+36);
+  Tl:=(38+Liu+Lfi+3) And Not 3;
+  If Pos+Tl>Size Then Break;
+  If ((Chars And 12)=0) And (Lfi>0) Then Begin
+   Nm:=DscUdfName(Buf,Pos+38+Liu,Lfi);
+   IsDir:=(Chars And 2)<>0; Sz:=0;
+   If DscUdfOpenICB(Part,Lbn,F,Ft) Then Begin
+    Sz:=F.Size; If Ft=4 Then IsDir:=True;
+    DscFClose(F);
+   End;
+   DscLAdd(L,N,Nm,IsDir,Sz,Lbn,Part);
+  End;
+  Inc(Pos,Tl);
+ End;
+End;
+
+Procedure DscUdfFreeMaps;
+Var I: LongInt;
+Begin
+ For I:=0 To DscPmN-1 Do
+  If DscPm[I].MExt<>Nil Then Begin FreeMem(DscPm[I].MExt); DscPm[I].MExt:=Nil; End;
+ DscPmN:=0;
+End;
+
+{ Initialisation UDF : AVDP -> VDS -> partitions -> FSD -> repertoire racine }
+Function DscUdfInit: Boolean;
+Var Blk: Array[0..2047] Of Byte; P: PDscBuf; Avdp: Array[0..2] Of Int64; I,K,Got,Pass: LongInt;
+    VdsLoc,VdsLen: Int64; Sec: Int64; Tag: LongInt; LvdN,LvdSeq: LongInt; HaveLvd: Boolean;
+    PdNo: Array[0..15] Of LongInt; PdStart,PdLen: Array[0..15] Of Int64; PdSeq: Array[0..15] Of Int64; PdN: LongInt;
+    Seq: Int64; Maps: Array[0..511] Of Byte; MapN,MapLen,MapOff,MapTy,Pn,J,Found: LongInt;
+    FsdPart,FsdLbn: LongInt; Ident: String; Ft: LongInt; MF: TDscFile; Ok: Boolean; Last: Int64; Rev: LongInt; Hops: LongInt;
+    LvdSeqN: Int64;
+Begin
+ DscUdfInit:=False; DscUdfOk:=False; P:=PDscBuf(@Blk);
+ DscPmN:=0; DscLbs:=2048;
+ Last:=DscImgSize Div 2048-1;
+ Avdp[0]:=256; Avdp[1]:=Last-256; Avdp[2]:=Last;
+ For Pass:=0 To 2 Do Begin
+  If Avdp[Pass]<=0 Then Continue;
+  If DscImgRead(Avdp[Pass]*2048,Blk,2048)<2048 Then Continue;
+  If Not DscUdfTagOk(P,2) Then Continue;
+  { ---- analyse de la sequence VDS principale puis de reserve ---- }
+  For K:=0 To 1 Do Begin
+   VdsLen:=DscLE32(P,16+K*8); VdsLoc:=DscLE32(P,20+K*8);
+   PdN:=0; HaveLvd:=False; LvdSeqN:=-1; MapN:=0; Hops:=0;
+   Sec:=0;
+   While (Sec*2048<VdsLen) And (Sec<65536) Do Begin
+    If DscImgRead((VdsLoc+Sec)*2048,Blk,2048)<2048 Then Break;
+    Inc(Sec);
+    Tag:=DscLE16(P,0);
+    If Not DscUdfTagOk(P,Tag) Then Break;
+    Seq:=DscLE32(P,16);
+    If Tag=3 Then Begin
+     { Volume Descriptor Pointer : suite de la sequence }
+     Inc(Hops); If Hops>8 Then Break;
+     VdsLen:=DscLE32(P,20); VdsLoc:=DscLE32(P,24); Sec:=0; Continue;
+    End;
+    If Tag=8 Then Break;
+    If Tag=5 Then Begin
+     Pn:=DscLE16(P,22); Found:=-1;
+     For J:=0 To PdN-1 Do If PdNo[J]=Pn Then Found:=J;
+     If Found<0 Then Begin
+      If PdN>=16 Then Continue;
+      Found:=PdN; Inc(PdN); PdSeq[Found]:=-1;
+     End;
+     If Seq>=PdSeq[Found] Then Begin
+      PdNo[Found]:=Pn; PdSeq[Found]:=Seq; PdStart[Found]:=DscLE32(P,188)*2048; PdLen[Found]:=DscLE32(P,192)*2048;
+     End;
+    End;
+    If Tag=6 Then Begin
+     If Seq>=LvdSeqN Then Begin
+      LvdSeqN:=Seq; HaveLvd:=True;
+      DscLbs:=DscLE32(P,212);
+      FsdLbn:=DscLE32(P,252); FsdPart:=DscLE16(P,256);
+      Rev:=DscLE16(P,240);
+      MapN:=DscLE32(P,268); MapLen:=DscLE32(P,264);
+      If MapLen>512 Then MapLen:=512;
+      If MapLen>2048-440 Then MapLen:=2048-440;
+      FillChar(Maps,SizeOf(Maps),0);
+      Move(P^[440],Maps,MapLen);
+     End;
+    End;
+   End;
+   If HaveLvd And (PdN>0) Then Break;
+  End;
+  If Not HaveLvd Then Continue;
+  If DscLbs<>2048 Then Begin DscMsg:='UDF : taille de bloc '+DscIStr(DscLbs)+' non geree (2048 requis).'; Continue; End;
+  { ---- table des partitions ---- }
+  DscPmN:=0; MapOff:=0; Ok:=True;
+  For I:=0 To MapN-1 Do Begin
+   If (MapOff+2>MapLen) Or (DscPmN>=16) Then Break;
+   MapTy:=Maps[MapOff];
+   FillChar(DscPm[DscPmN],SizeOf(TDscPm),0);
+   If Maps[MapOff+1]<2 Then Break;
+   If MapTy=1 Then Begin
+    DscPm[DscPmN].Kind:=1; DscPm[DscPmN].PartNo:=Maps[MapOff+4] Or (Maps[MapOff+5] Shl 8);
+   End Else If MapTy=2 Then Begin
+    Ident:='';
+    For J:=0 To 22 Do If Maps[MapOff+5+J]<>0 Then Ident:=Ident+Chr(Maps[MapOff+5+J]);
+    DscPm[DscPmN].PartNo:=Maps[MapOff+38] Or (Maps[MapOff+39] Shl 8);
+    If Pos('Metadata',Ident)>0 Then Begin
+     DscPm[DscPmN].Kind:=2;
+     DscPm[DscPmN].MetaLoc:=Maps[MapOff+40] Or (Maps[MapOff+41] Shl 8) Or (Maps[MapOff+42] Shl 16) Or (LongInt(Maps[MapOff+43]) Shl 24);
+     DscPm[DscPmN].MetaMir:=Maps[MapOff+44] Or (Maps[MapOff+45] Shl 8) Or (Maps[MapOff+46] Shl 16) Or (LongInt(Maps[MapOff+47]) Shl 24);
+    End Else If Pos('Sparing',Ident)>0 Then Begin
+     DscPm[DscPmN].Kind:=4;   { traite comme physique : les secteurs defectueux ne sont pas remappes }
+    End Else If Pos('Virtual',Ident)>0 Then Begin
+     DscPm[DscPmN].Kind:=3; Ok:=False;
+    End Else Begin DscPm[DscPmN].Kind:=3; Ok:=False; End;
+   End Else Begin DscPm[DscPmN].Kind:=3; Ok:=False; End;
+   Inc(DscPmN);
+   Inc(MapOff,Maps[MapOff+1]);
+  End;
+  If (Not Ok) Or (DscPmN=0) Then Begin
+   DscMsg:='UDF : partition virtuelle (VAT, disque a ecriture par paquets) non geree.'; DscUdfFreeMaps; Continue;
+  End;
+  For I:=0 To DscPmN-1 Do If DscPm[I].Kind<>2 Then Begin
+   Found:=-1;
+   For J:=0 To PdN-1 Do If PdNo[J]=DscPm[I].PartNo Then Found:=J;
+   If Found<0 Then Begin Ok:=False; Break; End;
+   DscPm[I].Start:=PdStart[Found]; DscPm[I].Len:=PdLen[Found];
+  End;
+  If Not Ok Then Begin DscMsg:='UDF : descripteur de partition introuvable.'; DscUdfFreeMaps; Continue; End;
+  { partitions de metadonnees : lecture du fichier de metadonnees }
+  For I:=0 To DscPmN-1 Do If DscPm[I].Kind=2 Then Begin
+   Found:=-1;
+   For J:=0 To DscPmN-1 Do If (DscPm[J].Kind=1) And (DscPm[J].PartNo=DscPm[I].PartNo) Then Found:=J;
+   If Found<0 Then Begin Ok:=False; Break; End;
+   DscPm[I].Host:=Found;
+   If Not DscUdfOpenICB(Found,DscPm[I].MetaLoc,MF,Ft) Then Begin
+    DscFClose(MF);
+    If Not DscUdfOpenICB(Found,DscPm[I].MetaMir,MF,Ft) Then Begin Ok:=False; DscFClose(MF); Break; End;
+   End;
+   DscPm[I].MExt:=MF.Ext; DscPm[I].MN:=MF.NExt;
+   MF.Ext:=Nil; MF.CapExt:=0; DscFClose(MF);
+  End;
+  If Not Ok Then Begin DscMsg:='UDF : fichier de metadonnees illisible.'; DscUdfFreeMaps; Continue; End;
+  { ---- File Set Descriptor ---- }
+  Sec:=DscUdfMap(FsdPart,FsdLbn);
+  If (Sec<0) Or (DscImgRead(Sec,Blk,2048)<2048) Or (Not DscUdfTagOk(P,256)) Then Begin
+   DscMsg:='UDF : File Set Descriptor illisible.'; DscUdfFreeMaps; Continue;
+  End;
+  DscRootLbn:=DscLE32(P,404); DscRootPart:=DscLE16(P,408);
+  DscUdfRev:=Rev;
+  DscUdfOk:=True; DscUdfInit:=True; Exit;
+ End;
+End;
+
+{ ---------------------------------------------------------------------- }
+{ ISO 9660                                                                 }
+{ ---------------------------------------------------------------------- }
+Procedure DscIsoLoadDirData(Buf: PDscBuf; Size,DiskOff: Int64; Joliet: Boolean; Var L: PDscEntArr; Var N: LongInt);
+Var Ps,Sz,First,Nx: Int64; Ln,Nl,Flags,I,Ln2: LongInt; Nm: String; IsDir,Multi: Boolean;
+Begin
+ Ps:=0;
+ While Ps<Size Do Begin
+  Ln:=Buf^[Ps];
+  If Ln=0 Then Begin Ps:=(Ps Div 2048+1)*2048; Continue; End;
+  If (Ln<34) Or (Ps+Ln>Size) Then Break;
+  Nl:=Buf^[Ps+32]; Flags:=Buf^[Ps+25];
+  If (Nl=0) Or (Ps+33+Nl>Size) Then Begin Inc(Ps,Ln); Continue; End;
+  If (Nl=1) And (Buf^[Ps+33]<=1) Then Begin Inc(Ps,Ln); Continue; End;
+  If Joliet Then Nm:=DscUcs2ToUtf8(Buf,Ps+33,Nl,True)
+  Else Nm:=DscLatin1ToUtf8(Buf,Ps+33,Nl);
+  I:=Pos(';',Nm); If I>0 Then Nm:=Copy(Nm,1,I-1);
+  If (Length(Nm)>1) And (Nm[Length(Nm)]='.') Then Dec(Nm[0]);
+  IsDir:=(Flags And 2)<>0;
+  Sz:=DscLE32(Buf,Ps+10);
+  First:=Ps; Nx:=Ps+Ln; Multi:=(Flags And $80)<>0;
+  { fichier en plusieurs extents (> 4 Gio ou niveau 3) : enregistrements consecutifs }
+  While Multi And (Nx<Size) Do Begin
+   Ln2:=Buf^[Nx];
+   If Ln2=0 Then Begin Nx:=(Nx Div 2048+1)*2048; Continue; End;
+   If (Ln2<34) Or (Nx+Ln2>Size) Then Break;
+   Sz:=Sz+DscLE32(Buf,Nx+10);
+   Multi:=(Buf^[Nx+25] And $80)<>0;
+   Inc(Nx,Ln2);
+  End;
+  DscLAdd(L,N,Nm,IsDir,Sz,DiskOff+First,0);
+  Ps:=Nx;
+ End;
+End;
+
+{ ---------------------------------------------------------------------- }
+{ Ouverture du fichier / de l'arborescence                                 }
+{ ---------------------------------------------------------------------- }
+Procedure DscCacheFree;
+Begin
+ DscLFree(DscCacheL,DscCacheN);
+ DscCacheKey:=-2; DscCacheB:=0; DscCacheFs:=0;
+End;
+
+Procedure DscIsoClose;
+Begin
+ DscCacheFree;
+ If DscImgOpen Then Begin {$I-}Close(DscImg);{$I+} If IOResult<>0 Then ; End;
+ DscImgOpen:=False; DscUdfFreeMaps;
+ DscLFree(DscLst,DscLstN);
+ DscFsType:=DSC_FS_NONE; DscHasIso:=False; DscHasJoliet:=False; DscHasUdf:=False; DscUdfOk:=False;
+ DscIsoRootOk:=False; DscJolRootOk:=False; DscUdfRev:=0; DscVolId:=''; DscImgPath:=''; DscImgSize:=0;
+ DscSecSize:=2048; DscSecHdr:=0; DscRootDir:='';
+End;
+
+Function DscIsoOpenEx(Const Path: String; Mode: LongInt): Boolean;
+{ Mode : 0 auto (UDF, sinon Joliet, sinon ISO), 2 ISO 9660 primaire, 3 Joliet, 4 UDF }
+Var Blk: Array[0..2047] Of Byte; P: PDscBuf; Old: Byte; Sz: Int64; I,Cd: LongInt; Id: String; UdfCand: Boolean; Sec: LongInt;
+    Pre: Array[0..5] Of Byte;
+Begin
+ DscIsoOpenEx:=False; DscIsoClose; DscMsg:='';
+ P:=PDscBuf(@Blk);
+ Assign(DscImg,Path); Old:=FileMode; FileMode:=0;
+ {$I-}Reset(DscImg,1);{$I+}
+ FileMode:=Old;
+ If IOResult<>0 Then Begin DscMsg:='Ouverture impossible : '+Path; Exit; End;
+ Sz:=FileSize(DscImg);
+ DscImgOpen:=True; DscImgPath:=Path;
+ { disposition des secteurs : 2048 (ISO), 2352 mode 1 (+16), 2352 mode 2 forme 1 (+24) }
+ DscSecSize:=2048; DscSecHdr:=0; DscImgSize:=Sz;
+ FillChar(Pre,SizeOf(Pre),0);
+ {$I-}Seek(DscImg,Int64(16)*2048+1); BlockRead(DscImg,Pre,5,Cd);{$I+}
+ If IOResult<>0 Then Cd:=0;
+ If (Cd<5) Or (Chr(Pre[0])+Chr(Pre[1])+Chr(Pre[2])+Chr(Pre[3])+Chr(Pre[4])<>'CD001') And
+    (Chr(Pre[0])+Chr(Pre[1])+Chr(Pre[2])+Chr(Pre[3])+Chr(Pre[4])<>'BEA01') Then Begin
+  For I:=0 To 1 Do Begin
+   FillChar(Pre,SizeOf(Pre),0);
+   {$I-}Seek(DscImg,Int64(16)*2352+16+I*8+1); BlockRead(DscImg,Pre,5,Cd);{$I+}
+   If IOResult<>0 Then Cd:=0;
+   If (Cd=5) And ((Chr(Pre[0])+Chr(Pre[1])+Chr(Pre[2])+Chr(Pre[3])+Chr(Pre[4])='CD001') Or
+      (Chr(Pre[0])+Chr(Pre[1])+Chr(Pre[2])+Chr(Pre[3])+Chr(Pre[4])='BEA01')) Then Begin
+    DscSecSize:=2352; DscSecHdr:=16+I*8; Break;
+   End;
+  End;
+ End;
+ DscImgSize:=(Sz Div DscSecSize)*2048;
+ UdfCand:=False;
+ For Sec:=16 To 47 Do Begin
+  If DscImgRead(Int64(Sec)*2048,Blk,2048)<2048 Then Break;
+  Id:=Chr(Blk[1])+Chr(Blk[2])+Chr(Blk[3])+Chr(Blk[4])+Chr(Blk[5]);
+  If Id='CD001' Then Begin
+   If Blk[0]=1 Then Begin
+    Move(Blk[156],DscIsoRootRec,34); DscIsoRootOk:=True; DscHasIso:=True;
+    DscVolId:='';
+    For I:=0 To 31 Do DscVolId:=DscVolId+Chr(Blk[40+I]);
+    While (Length(DscVolId)>0) And (DscVolId[Length(DscVolId)]=' ') Do Dec(DscVolId[0]);
+   End Else If Blk[0]=2 Then Begin
+    If (Blk[88]=Ord('%')) And (Blk[89]=Ord('/')) And ((Blk[90]=Ord('@')) Or (Blk[90]=Ord('C')) Or (Blk[90]=Ord('E'))) Then Begin
+     Move(Blk[156],DscJolRootRec,34); DscJolRootOk:=True; DscHasJoliet:=True;
+    End;
+   End;
+  End Else If (Id='BEA01') Or (Id='NSR02') Or (Id='NSR03') Then UdfCand:=True;
+ End;
+ If (Mode=0) Or (Mode=4) Then Begin
+  If UdfCand Or (Mode=4) Or Not DscHasIso Then Begin
+   If DscUdfInit Then DscHasUdf:=True;
+  End;
+ End Else If UdfCand Then Begin
+  { detecte seulement la presence d'UDF : analyse pour renseigner DscHasUdf puis la libere }
+  If DscUdfInit Then Begin DscHasUdf:=True; DscUdfFreeMaps; DscUdfOk:=False; End;
+ End;
+ DscFsType:=DSC_FS_NONE;
+ If (Mode=0) Or (Mode=4) Then If DscHasUdf And DscUdfOk Then DscFsType:=DSC_FS_UDF;
+ If (DscFsType=DSC_FS_NONE) And ((Mode=0) Or (Mode=3)) And DscJolRootOk Then DscFsType:=DSC_FS_JOLIET;
+ If (DscFsType=DSC_FS_NONE) And ((Mode=0) Or (Mode=2)) And DscIsoRootOk Then DscFsType:=DSC_FS_ISO;
+ If DscFsType=DSC_FS_NONE Then Begin
+  If DscMsg='' Then DscMsg:='Aucun systeme de fichiers ISO 9660 / UDF reconnu dans : '+Path;
+  DscIsoClose; Exit;
+ End;
+ DscMsg:='';
+ DscCacheKey:=-2;
+ DscIsoOpenEx:=True;
+End;
+
+Function DscIsoOpen(Const Path: String): Boolean;
+Begin
+ DscIsoOpen:=DscIsoOpenEx(Path,0);
+End;
+
+{ ---------------------------------------------------------------------- }
+{ Entrees (ISO / UDF)                                                      }
+{ ---------------------------------------------------------------------- }
+Procedure DscRootEnt(Var E: TDscEnt);
+Begin
+ E.Name:=''; E.IsDir:=True; E.Size:=0;
+ Case DscFsType Of
+  DSC_FS_UDF: Begin E.A:=DscRootLbn; E.B:=DscRootPart; End;
+  DSC_FS_JOLIET: Begin E.A:=-1; E.B:=1; End;
+ Else Begin E.A:=-1; E.B:=0; End;
+ End;
+End;
+
+Function DscEntOpen(Var E: TDscEnt; Var F: TDscFile): Boolean;
+Var Rec: Array[0..259] Of Byte; P: PDscBuf; Ft: LongInt; Pos,Lo: Int64; Flags,Eal,Got: LongInt; Len,Lba: Int64; Guard: LongInt; Ln: LongInt;
+Begin
+ DscEntOpen:=False; DscFInit(F);
+ If Not DscImgOpen Then Begin DscMsg:='Aucune image ouverte.'; Exit; End;
+ If DscFsType=DSC_FS_UDF Then Begin
+  If Not DscUdfOpenICB(E.B,E.A,F,Ft) Then Begin DscFClose(F); Exit; End;
+  DscEntOpen:=True; Exit;
+ End;
+ If (DscFsType<>DSC_FS_ISO) And (DscFsType<>DSC_FS_JOLIET) Then Exit;
+ P:=PDscBuf(@Rec); F.Kind:=1; Lo:=0; Pos:=E.A; Guard:=0;
+ If E.A<0 Then Begin
+  If E.B=1 Then Move(DscJolRootRec,Rec,34) Else Move(DscIsoRootRec,Rec,34);
+ End Else Begin
+  FillChar(Rec,SizeOf(Rec),0);
+  If DscImgRead(Pos,Rec,256)<34 Then Begin DscMsg:='Entree ISO illisible.'; DscFClose(F); Exit; End;
+ End;
+ While True Do Begin
+  Lba:=DscLE32(P,2); Len:=DscLE32(P,10); Eal:=Rec[1]; Flags:=Rec[25];
+  DscFAddExt(F,Lo,Len,(Lba+Eal)*2048,0);
+  Inc(Lo,Len);
+  If ((Flags And $80)=0) Or (E.A<0) Then Break;
+  Inc(Guard); If Guard>100000 Then Break;
+  Ln:=Rec[0]; If Ln<34 Then Break;
+  Inc(Pos,Ln);
+  FillChar(Rec,SizeOf(Rec),0);
+  Got:=DscImgRead(Pos,Rec,256);
+  If Got<1 Then Break;
+  If Rec[0]=0 Then Begin
+   Pos:=(Pos Div 2048+1)*2048;
+   FillChar(Rec,SizeOf(Rec),0);
+   Got:=DscImgRead(Pos,Rec,256);
+   If (Got<34) Or (Rec[0]=0) Then Break;
+  End;
+ End;
+ F.Size:=Lo;
+ DscEntOpen:=True;
+End;
+
+Function DscLoadDir(Var E: TDscEnt; Var L: PDscEntArr; Var N: LongInt): Boolean;
+Var F: TDscFile; Buf: PDscBuf; Disk: Int64;
+Begin
+ DscLoadDir:=False;
+ If Not E.IsDir Then Begin DscMsg:='Ce n''est pas un repertoire : '+E.Name; Exit; End;
+ If Not DscEntOpen(E,F) Then Exit;
+ If F.Size>67108864 Then Begin DscFClose(F); DscMsg:='Repertoire trop grand.'; Exit; End;
+ If Not DscFReadAll(F,Buf) Then Begin DscFClose(F); Exit; End;
+ Case DscFsType Of
+  DSC_FS_UDF: DscUdfLoadDirData(Buf,F.Size,L,N);
+ Else Begin
+  If F.NExt>0 Then Disk:=F.Ext^[0].Disk Else Disk:=0;
+  DscIsoLoadDirData(Buf,F.Size,Disk,DscFsType=DSC_FS_JOLIET,L,N);
+ End;
+ End;
+ DscFFreeBuf(Buf,F.Size); DscFClose(F);
+ DscLoadDir:=True;
+End;
+
+{ Repertoire avec cache d'un niveau (accelere la resolution de chemins successifs) }
+Function DscLoadDirCached(Var E: TDscEnt): Boolean;
+Begin
+ DscLoadDirCached:=True;
+ If (DscCacheKey=E.A) And (DscCacheB=E.B) And (DscCacheFs=DscFsType) And (DscCacheN>=0) Then Exit;
+ DscCacheFree;
+ If Not DscLoadDir(E,DscCacheL,DscCacheN) Then Begin DscCacheFree; DscLoadDirCached:=False; Exit; End;
+ DscCacheKey:=E.A; DscCacheB:=E.B; DscCacheFs:=DscFsType;
+End;
+
+Function DscResolve(Const Path: String; Var E: TDscEnt): Boolean;
+Var S,Comp,Rest: String; I,Best: LongInt; U: String;
+Begin
+ DscResolve:=False;
+ If Not DscImgOpen Then Begin DscMsg:='Aucune image ouverte.'; Exit; End;
+ DscRootEnt(E); S:=Path;
+ While True Do Begin
+  Comp:=DscSplitName(S,Rest);
+  If Comp='' Then Break;
+  If Comp='.' Then Continue;
+  If Not E.IsDir Then Begin DscMsg:='Chemin introuvable : '+Path; Exit; End;
+  If Not DscLoadDirCached(E) Then Exit;
+  U:=DscUp(Comp); Best:=-1;
+  For I:=0 To DscCacheN-1 Do
+   If DscCacheL^[I].Name=Comp Then Begin Best:=I; Break; End
+   Else If (Best<0) And (DscUp(DscCacheL^[I].Name)=U) Then Best:=I;
+  If Best<0 Then Begin DscMsg:='Chemin introuvable : '+Path; Exit; End;
+  E:=DscCacheL^[Best];
+ End;
+ DscResolve:=True;
+End;
+
+{ ---------------------------------------------------------------------- }
+{ API ISO / UDF                                                            }
+{ ---------------------------------------------------------------------- }
+{ Liste le repertoire Dir de l'image dans DscLst[0..DscLstN-1] ('' ou '/' = racine) }
+Function DscIsoList(Const Dir: String): Boolean;
+Var E: TDscEnt;
+Begin
+ DscIsoList:=False;
+ DscLFree(DscLst,DscLstN);
+ If Not DscResolve(Dir,E) Then Exit;
+ If Not DscLoadDir(E,DscLst,DscLstN) Then Exit;
+ DscIsoList:=True;
+End;
+
+Var DscFindFrags: LongInt;   { nombre d'extents du dernier fichier trouve par DscIsoFind }
+
+{ Localise un fichier : Off = offset (Int64) du premier extent dans l'image, Size = taille totale.
+  Retourne False si absent ; DscFindFrags > 1 si le fichier n'est pas contigu (utiliser alors DscIsoOpenFile). }
+Function DscIsoFind(Const PathInIso: String; Var Off,Size: Int64): Boolean;
+Var E: TDscEnt; F: TDscFile;
+Begin
+ DscIsoFind:=False; Off:=-1; Size:=0; DscFindFrags:=0;
+ If Not DscResolve(PathInIso,E) Then Exit;
+ If E.IsDir Then Begin DscMsg:='C''est un repertoire : '+PathInIso; Exit; End;
+ If Not DscEntOpen(E,F) Then Exit;
+ Size:=F.Size; DscFindFrags:=F.NExt;
+ If F.Kind=1 Then Begin
+  If F.NExt>0 Then Off:=F.Ext^[0].Disk Else Off:=0;
+  If (F.NExt>0) And (F.Ext^[0].Hole<>0) Then Off:=-1;
+ End;
+ DscFClose(F);
+ DscIsoFind:=True;
+End;
+
+Function DscIsoOpenFile(Const PathInIso: String; Var F: TDscFile): Boolean;
+Var E: TDscEnt;
+Begin
+ DscIsoOpenFile:=False; DscFInit(F);
+ If Not DscResolve(PathInIso,E) Then Exit;
+ If E.IsDir Then Begin DscMsg:='C''est un repertoire : '+PathInIso; Exit; End;
+ DscIsoOpenFile:=DscEntOpen(E,F);
+End;
+
+{ Extrait un fichier de l'image vers le disque }
+Function DscIsoExtract(Const PathInIso,Dst: String): Boolean;
+Var F: TDscFile; Df: File; Ok: Boolean;
+Begin
+ DscIsoExtract:=False;
+ If Not DscIsoOpenFile(PathInIso,F) Then Exit;
+ Assign(Df,Dst);
+ {$I-}Rewrite(Df,1);{$I+}
+ If IOResult<>0 Then Begin DscMsg:='Creation impossible : '+Dst; DscFClose(F); Exit; End;
+ DscProgBase:=0; DscProgTotal:=0; DscStop:=False;
+ Ok:=DscFCopyTo(F,0,F.Size,Df);
+ {$I-}Close(Df);{$I+} If IOResult<>0 Then ;
+ DscFClose(F);
+ If Not Ok Then Begin {$I-}Erase(Df);{$I+} If IOResult<>0 Then ; End;
+ DscIsoExtract:=Ok;
+End;
+
+{ ---------------------------------------------------------------------- }
+{ Dossier de l'hote                                                        }
+{ ---------------------------------------------------------------------- }
+Function DscHostResolve(Const Rel: String; Var Real: String; Var IsDir: Boolean): Boolean;
+Var S,Comp,Rest,Cur,U: String; SR: SearchRec; Found: Boolean; Fh: File; A: Word;
+Begin
+ DscHostResolve:=False; Cur:=DscRootDir; S:=Rel; IsDir:=True;
+ While True Do Begin
+  Comp:=DscSplitName(S,Rest);
+  If Comp='' Then Break;
+  If Comp='.' Then Continue;
+  Assign(Fh,Cur+Comp); GetFAttr(Fh,A);
+  If DosError=0 Then Begin
+   IsDir:=(A And Directory)<>0; Cur:=Cur+Comp;
+  End Else Begin
+   U:=DscUp(Comp); Found:=False;
+   FindFirst(Cur+'*',AnyFile,SR);
+   While DosError=0 Do Begin
+    If DscUp(SR.Name)=U Then Begin
+     Found:=True; Cur:=Cur+SR.Name; IsDir:=(SR.Attr And Directory)<>0; Break;
+    End;
+    FindNext(SR);
+   End;
+   FindClose(SR);
+   If Not Found Then Begin DscMsg:='Chemin introuvable : '+Rel; Exit; End;
+  End;
+  If IsDir Then Cur:=Cur+'/';
+ End;
+ If (Length(Cur)>0) And IsDir And (Cur[Length(Cur)]='/') And (Cur<>'/') Then Dec(Cur[0]);
+ Real:=Cur;
+ DscHostResolve:=True;
+End;
+
+{ ---------------------------------------------------------------------- }
+{ Couche volume : image ISO/UDF ou dossier, acces uniforme                 }
+{ ---------------------------------------------------------------------- }
+Var
+ DscVobVts: LongInt;                      { VTS actuellement ouvert (0 = aucun) }
+ DscVobN: LongInt;
+ DscVobF: Array[1..9] Of TDscFile;
+ DscVobFirst: Array[1..10] Of Int64;      { premier secteur de chaque fichier ; [N+1] = total }
+
+Procedure DscVobClose;
+Var I: LongInt;
+Begin
+ For I:=1 To 9 Do If DscVobF[I].Kind<>0 Then DscFClose(DscVobF[I]);
+ DscVobVts:=0; DscVobN:=0;
+End;
+
+Procedure DscVolClose;
+Begin
+ DscVobClose; DscIsoClose; DscFsType:=DSC_FS_NONE; DscRootDir:=''; DscImgPath:='';
+End;
+
+Function DscVolOpen(Const Path: String): Boolean;
+Var P: String;
+Begin
+ DscVolOpen:=False;
+ If (DscFsType<>DSC_FS_NONE) And (DscImgPath=Path) Then Begin DscVolOpen:=True; Exit; End;
+ DscVolClose;
+ P:=Path;
+ If DscIsDirHost(P) Then Begin
+  While (Length(P)>1) And ((P[Length(P)]='/') Or (P[Length(P)]='\')) Do Dec(P[0]);
+  DscRootDir:=P+'/'; DscFsType:=DSC_FS_DIR; DscImgPath:=Path; DscMsg:='';
+  DscVolOpen:=True; Exit;
+ End;
+ If DscIsoOpen(Path) Then DscVolOpen:=True;
+End;
+
+Function DscVOpen(Const Rel: String; Var F: TDscFile): Boolean;
+Var E: TDscEnt; Real: String; IsDir: Boolean; Old: Byte;
+Begin
+ DscVOpen:=False; DscFInit(F);
+ If DscFsType=DSC_FS_DIR Then Begin
+  If Not DscHostResolve(Rel,Real,IsDir) Then Exit;
+  If IsDir Then Begin DscMsg:='C''est un repertoire : '+Rel; Exit; End;
+  Assign(F.Hf,Real); Old:=FileMode; FileMode:=0;
+  {$I-}Reset(F.Hf,1);{$I+}
+  FileMode:=Old;
+  If IOResult<>0 Then Begin DscMsg:='Ouverture impossible : '+Real; Exit; End;
+  F.Kind:=2; F.Size:=FileSize(F.Hf);
+  DscVOpen:=True; Exit;
+ End;
+ If DscFsType=DSC_FS_NONE Then Begin DscMsg:='Aucun volume ouvert.'; Exit; End;
+ DscVOpen:=DscIsoOpenFile(Rel,F);
+End;
+
+Function DscVExists(Const Rel: String): Boolean;
+Var E: TDscEnt; Real: String; IsDir: Boolean;
+Begin
+ If DscFsType=DSC_FS_DIR Then DscVExists:=DscHostResolve(Rel,Real,IsDir)
+ Else If DscFsType=DSC_FS_NONE Then DscVExists:=False
+ Else DscVExists:=DscResolve(Rel,E);
+End;
+
+Function DscVIsDir(Const Rel: String): Boolean;
+Var E: TDscEnt; Real: String; IsDir: Boolean;
+Begin
+ DscVIsDir:=False;
+ If DscFsType=DSC_FS_DIR Then Begin
+  If DscHostResolve(Rel,Real,IsDir) Then DscVIsDir:=IsDir;
+ End Else If DscFsType<>DSC_FS_NONE Then Begin
+  If DscResolve(Rel,E) Then DscVIsDir:=E.IsDir;
+ End;
+End;
+
+{ Liste un repertoire du volume (image ou dossier) dans DscLst }
+Function DscVList(Const Dir: String): Boolean;
+Var Real: String; IsDir: Boolean; SR: SearchRec; Fh: File; Sz: Int64; Old: Byte; Nm: String;
+Begin
+ DscVList:=False;
+ If DscFsType=DSC_FS_NONE Then Begin DscMsg:='Aucun volume ouvert.'; Exit; End;
+ If DscFsType<>DSC_FS_DIR Then Begin DscVList:=DscIsoList(Dir); Exit; End;
+ DscLFree(DscLst,DscLstN);
+ If Not DscHostResolve(Dir,Real,IsDir) Then Exit;
+ If Not IsDir Then Begin DscMsg:='Ce n''est pas un repertoire : '+Dir; Exit; End;
+ If (Real<>'') And (Real[Length(Real)]<>'/') Then Real:=Real+'/';
+ FindFirst(Real+'*',AnyFile,SR);
+ While DosError=0 Do Begin
+  Nm:=SR.Name;
+  If (Nm<>'.') And (Nm<>'..') Then Begin
+   Sz:=0;
+   If (SR.Attr And Directory)=0 Then Begin
+    Assign(Fh,Real+Nm); Old:=FileMode; FileMode:=0;
+    {$I-}Reset(Fh,1);{$I+}
+    FileMode:=Old;
+    If IOResult=0 Then Begin Sz:=FileSize(Fh); Close(Fh); End;
+   End;
+   DscLAdd(DscLst,DscLstN,Nm,(SR.Attr And Directory)<>0,Sz,0,0);
+  End;
+  FindNext(SR);
+ End;
+ FindClose(SR);
+ DscVList:=True;
+End;
+
+{ Extrait un fichier du volume (image ou dossier) }
+Function DscVExtract(Const Rel,Dst: String): Boolean;
+Var F: TDscFile; Df: File; Ok: Boolean;
+Begin
+ DscVExtract:=False;
+ If Not DscVOpen(Rel,F) Then Exit;
+ Assign(Df,Dst);
+ {$I-}Rewrite(Df,1);{$I+}
+ If IOResult<>0 Then Begin DscMsg:='Creation impossible : '+Dst; DscFClose(F); Exit; End;
+ DscProgBase:=0; DscProgTotal:=0; DscStop:=False;
+ Ok:=DscFCopyTo(F,0,F.Size,Df);
+ {$I-}Close(Df);{$I+} If IOResult<>0 Then ;
+ DscFClose(F);
+ If Not Ok Then Begin {$I-}Erase(Df);{$I+} If IOResult<>0 Then ; End;
+ DscVExtract:=Ok;
+End;
+
+{ Lit un petit fichier entier en memoire (IFO, MPLS, CLPI...). L'appelant libere avec DscFFreeBuf(P,Size). }
+Function DscVReadAll(Const Rel: String; Var P: PDscBuf; Var Size: Int64): Boolean;
+Var F: TDscFile;
+Begin
+ DscVReadAll:=False; P:=Nil; Size:=0;
+ If Not DscVOpen(Rel,F) Then Exit;
+ Size:=F.Size;
+ DscVReadAll:=DscFReadAll(F,P);
+ DscFClose(F);
+End;
+
+{ Extrait recursivement un repertoire de l'image vers un dossier de l'hote (DstDir doit exister) }
+Var DscTreeDepth: LongInt;
+Function DscIsoExtractTree(Const Dir,DstDir: String): Boolean;
+Var L: PDscEntArr; N,I: LongInt; E: TDscEnt; D: String; Ok: Boolean;
+Begin
+ DscIsoExtractTree:=False; L:=Nil; N:=0;
+ If DscTreeDepth>=24 Then Begin DscMsg:='Arborescence trop profonde (boucle ?) : '+Dir; Exit; End;
+ If Not DscResolve(Dir,E) Then Exit;
+ If Not DscLoadDir(E,L,N) Then Exit;
+ D:=DstDir; If (D<>'') And (D[Length(D)]<>'/') Then D:=D+'/';
+ Ok:=True; Inc(DscTreeDepth);
+ For I:=0 To N-1 Do Begin
+  If L^[I].IsDir Then Begin
+   {$I-}MkDir(D+L^[I].Name);{$I+} If IOResult<>0 Then ;
+   If Not DscIsoExtractTree(Dir+'/'+L^[I].Name,D+L^[I].Name) Then Begin Ok:=False; Break; End;
+  End Else If Not DscIsoExtract(Dir+'/'+L^[I].Name,D+L^[I].Name) Then Begin Ok:=False; Break; End;
+  If DscStop Then Begin Ok:=False; Break; End;
+ End;
+ Dec(DscTreeDepth);
+ DscLFree(L,N);
+ DscIsoExtractTree:=Ok;
+End;
+
+{ ====================================================================== }
+{ Types communs aux titres DVD / Blu-ray                                   }
+{ ====================================================================== }
+Type
+ TDscStream = Record
+  Id: LongInt;           { DVD : numero de flux dans l'IFO ; BD : PID }
+  Codec: String[16];     { 'MPEG-2','H.264','AC-3','DTS','TrueHD','LPCM','PGS','IGS','TextST'... }
+  Ch: LongInt;           { audio : nombre de canaux (BD : 6 = multicanal 5.1/7.1 selon le code de format) }
+  Rate: LongInt;         { audio : frequence d'echantillonnage (Hz) }
+  Lang: String[3];       { code de langue ('fra','eng' pour BD ; 'fr','en' pour DVD) }
+  W,H: LongInt;          { video : dimensions }
+  FpsN,FpsD: LongInt;    { video : cadence (FpsN/FpsD) }
+  Aspect: String[5];     { '4:3', '16:9' }
+  Info: String[40];      { description complementaire }
+ End;
+
+ TDscCell = Record
+  First,Last: LongInt;   { secteurs [First,Last] dans l'espace VOB du jeu de titres (DVD) }
+  DurMs: LongInt;
+ End;
+
+ TDscDvdTitle = Record
+  Src: String;           { chemin de l'image ou du dossier }
+  Num: LongInt;          { numero de titre du disque (VIDEO_TS.IFO), 0 = non reference }
+  Vts,Ttn,Pgc: LongInt;  { jeu de titres, numero de titre dans le VTS, PGC }
+  DurMs: LongInt;        { duree (ms) }
+  NChap: LongInt;        { chapitres }
+  ChapMs: Array[1..99] Of LongInt;      { debut de chaque chapitre (ms depuis le debut du titre) }
+  NCell: LongInt;        { cellules jouees (angle 1) }
+  Cell: Array[1..255] Of TDscCell;
+  Sectors: LongInt;      { total de secteurs de 2048 octets des cellules jouees }
+  NVob: LongInt;         { nombre de fichiers VTS_nn_1..9.VOB }
+  VobBytes: Int64;       { taille totale de ces fichiers }
+  Vid: TDscStream;
+  NAud: LongInt; Aud: Array[1..8] Of TDscStream;
+  NSub: LongInt; Sub: Array[1..32] Of TDscStream;
+  Angles: LongInt;
+  Encrypted: Boolean;    { secteurs brouilles (CSS) detectes : le titre ne sera pas copie }
+  Msg: String;
+ End;
+
+ TDscDvdList = Record
+  N: LongInt;
+  T: Array[1..99] Of TDscDvdTitle;
+  Encrypted: Boolean;    { au moins un titre est protege par CSS }
+  Msg: String;
+ End;
+
+Var
+ DscDvdDir: String;       { prefixe du dossier VIDEO_TS dans le volume ('VIDEO_TS/' ou '') }
+
+{ ---------------------------------------------------------------------- }
+{ MPEG-PS : horloge SCR d'un secteur (fallback sans IFO)                   }
+{ ---------------------------------------------------------------------- }
+Function DscPsScr(P: PDscBuf): Int64;
+Begin
+ DscPsScr:=-1;
+ If (P^[0]<>0) Or (P^[1]<>0) Or (P^[2]<>1) Or (P^[3]<>$BA) Then Exit;
+ If (P^[4] And $C0)<>$40 Then Exit;
+ DscPsScr:=(Int64((P^[4] Shr 3) And 7) Shl 30) Or (Int64(P^[4] And 3) Shl 28) Or (Int64(P^[5]) Shl 20)
+  Or (Int64((P^[6] Shr 3) And 31) Shl 15) Or (Int64(P^[6] And 3) Shl 13) Or (Int64(P^[7]) Shl 5) Or Int64((P^[8] Shr 3) And 31);
+End;
+
+{ true si le secteur est un paquet de programme dont le PES est brouille (CSS) }
+Function DscSectorScrambled(P: PDscBuf): Boolean;
+Var Q: LongInt;
+Begin
+ DscSectorScrambled:=False;
+ If (P^[0]<>0) Or (P^[1]<>0) Or (P^[2]<>1) Or (P^[3]<>$BA) Then Exit;
+ If (P^[4] And $C0)<>$40 Then Exit;
+ Q:=14+(P^[13] And 7);
+ If (P^[Q]<>0) Or (P^[Q+1]<>0) Or (P^[Q+2]<>1) Then Exit;
+ If (P^[Q+3]=$BB) Or (P^[Q+3]=$BF) Or (P^[Q+3]=$BE) Then Exit;   { system header, private stream 2 (NAV), padding }
+ If (P^[Q+6] And $C0)<>$80 Then Exit;
+ DscSectorScrambled:=((P^[Q+6] Shr 4) And 3)<>0;
+End;
+
+{ ---------------------------------------------------------------------- }
+{ Lecture du jeu de VOB d'un VTS comme un espace de secteurs continu       }
+{ ---------------------------------------------------------------------- }
+Function DscVobOpen(Vts: LongInt): Boolean;
+Var I: LongInt; Nm: String; F: TDscFile; Tot: Int64;
+Begin
+ DscVobOpen:=False;
+ If (DscVobVts=Vts) And (DscVobN>0) Then Begin DscVobOpen:=True; Exit; End;
+ DscVobClose; Tot:=0;
+ For I:=1 To 9 Do Begin
+  Nm:=DscDvdDir+'VTS_'+Chr(48+Vts Div 10)+Chr(48+Vts Mod 10)+'_'+Chr(48+I)+'.VOB';
+  If Not DscVOpen(Nm,F) Then Break;
+  DscVobF[I]:=F; DscVobFirst[I]:=Tot; Tot:=Tot+F.Size Div 2048;
+  DscVobN:=I;
+ End;
+ DscVobFirst[DscVobN+1]:=Tot;
+ If DscVobN=0 Then Begin DscMsg:='VTS_'+DscIStr(Vts)+' : aucun fichier VOB.'; Exit; End;
+ DscVobVts:=Vts; DscVobOpen:=True;
+End;
+
+{ lit Cnt secteurs a partir du secteur Sec de l'espace du VTS ouvert }
+Function DscVobReadSec(Sec: Int64; Cnt: LongInt; Var Buf): LongInt;
+Var B: PDscBuf; Done,K,N: LongInt; Lo: Int64; Got: LongInt;
+Begin
+ B:=PDscBuf(@Buf); Done:=0;
+ While Done<Cnt Do Begin
+  K:=0;
+  While (K<DscVobN) And (Sec+Done>=DscVobFirst[K+2]) Do Inc(K);
+  If K>=DscVobN Then Break;
+  Lo:=Sec+Done-DscVobFirst[K+1];
+  N:=DscVobFirst[K+2]-(Sec+Done); If N>Cnt-Done Then N:=Cnt-Done;
+  Got:=DscFRead(DscVobF[K+1],Lo*2048,B^[Done*2048],N*2048);
+  Inc(Done,Got Div 2048);
+  If Got<N*2048 Then Break;
+ End;
+ DscVobReadSec:=Done;
+End;
+
+{ ---------------------------------------------------------------------- }
+{ Analyse des IFO                                                          }
+{ ---------------------------------------------------------------------- }
+Function DscBcd(B: LongInt): LongInt;
+Begin
+ DscBcd:=((B Shr 4) And $F)*10+(B And $F);
+End;
+
+Function DscDvdTimeMs(P: PDscBuf; O: LongInt): LongInt;
+Var Fr,Fps100: LongInt; Ms: Int64;
+Begin
+ Ms:=(Int64(DscBcd(P^[O]))*3600+DscBcd(P^[O+1])*60+DscBcd(P^[O+2]))*1000;
+ Fr:=DscBcd(P^[O+3] And $3F);
+ Case P^[O+3] Shr 6 Of
+  1: Ms:=Ms+Fr*40;                       { 25 i/s }
+  3: Ms:=Ms+(Int64(Fr)*1001000) Div 30000;   { 29,97 i/s }
+ End;
+ DscDvdTimeMs:=Ms;
+End;
+
+Function DscLangName(P: PDscBuf; O: LongInt): String;
+Var S: String;
+Begin
+ S:='';
+ If (P^[O]>32) And (P^[O]<127) Then S:=S+Chr(P^[O]);
+ If (P^[O+1]>32) And (P^[O+1]<127) Then S:=S+Chr(P^[O+1]);
+ DscLangName:=S;
+End;
+
+{ lit un IFO (ou sa copie BUP) en memoire ; verifie la signature }
+Function DscDvdReadIfo(Const Base: String; Const Sig: String; Var P: PDscBuf; Var Size: Int64): Boolean;
+Var I: LongInt; Ok: Boolean; Nm: String;
+Begin
+ DscDvdReadIfo:=False;
+ For I:=0 To 1 Do Begin
+  If I=0 Then Nm:=DscDvdDir+Base+'.IFO' Else Nm:=DscDvdDir+Base+'.BUP';
+  If DscVReadAll(Nm,P,Size) Then Begin
+   Ok:=Size>=1024;
+   If Ok Then Ok:=(Chr(P^[0])+Chr(P^[1])+Chr(P^[2])+Chr(P^[3])+Chr(P^[4])+Chr(P^[5])+Chr(P^[6])+Chr(P^[7])+Chr(P^[8])+Chr(P^[9])+Chr(P^[10])+Chr(P^[11]))=Sig;
+   If Ok Then Begin DscDvdReadIfo:=True; Exit; End;
+   DscFFreeBuf(P,Size);
+  End;
+ End;
+End;
+
+Procedure DscDvdVideoAttr(P: PDscBuf; O: LongInt; Var V: TDscStream);
+Var B0,B1,Fmt,Sz: LongInt;
+Begin
+ B0:=P^[O]; B1:=P^[O+1];
+ If (B0 Shr 6)=0 Then V.Codec:='MPEG-1' Else V.Codec:='MPEG-2';
+ Fmt:=(B0 Shr 4) And 3;
+ If ((B0 Shr 2) And 3)=3 Then V.Aspect:='16:9' Else V.Aspect:='4:3';
+ Sz:=(B1 Shr 3) And 3;
+ If Fmt=1 Then Begin V.H:=576; V.FpsN:=25; V.FpsD:=1; End Else Begin V.H:=480; V.FpsN:=30000; V.FpsD:=1001; End;
+ Case Sz Of
+  0: V.W:=720;
+  1: V.W:=704;
+  2: V.W:=352;
+ Else Begin V.W:=352; V.H:=V.H Div 2; End;
+ End;
+ If Fmt=1 Then V.Info:='PAL' Else V.Info:='NTSC';
+End;
+
+Procedure DscDvdAudioAttr(P: PDscBuf; O: LongInt; Var A: TDscStream);
+Var B0,B1: LongInt;
+Begin
+ B0:=P^[O]; B1:=P^[O+1];
+ Case B0 Shr 5 Of
+  0: A.Codec:='AC-3';
+  2: A.Codec:='MPEG-1';
+  3: A.Codec:='MPEG-2';
+  4: A.Codec:='LPCM';
+  6: A.Codec:='DTS';
+  7: A.Codec:='SDDS';
+ Else A.Codec:='?';
+ End;
+ A.Ch:=(B1 And 7)+1;
+ If ((B1 Shr 4) And 3)=1 Then A.Rate:=96000 Else A.Rate:=48000;
+ A.Lang:='';
+ If ((B0 Shr 2) And 3)=1 Then A.Lang:=DscLangName(P,O+2);
+ A.Info:='';
+ If (A.Codec='LPCM') Then Case B1 Shr 6 Of 0: A.Info:='16 bits'; 1: A.Info:='20 bits'; 2: A.Info:='24 bits'; End;
+End;
+
+{ Remplit T (Vts,Ttn deja fixes) a partir de l'IFO du VTS. }
+Function DscDvdFillTitle(Var T: TDscDvdTitle; P: PDscBuf; Size: Int64): Boolean;
+Var Ptt,Pgcit,PgcOff,Srp,NPtt,I,K,E0,E1,NE,PgcnT,Pgn,PgcStart,NProg,NCell,PmOff,CpOff,B0,Bm,Bt,Cn,Cell1,Pc,Pd: LongInt;
+    NAudio,NSubp,AngleOn: LongInt; Tot: Int64; PgcP: PDscBuf;
+    CellStart: Array[1..256] Of LongInt; CellPlayed: Array[1..256] Of Boolean; ProgCell: Array[1..256] Of LongInt;
+    Acc: LongInt; PgcAbs: Int64; First,Last: Int64; Fl: LongInt;
+Begin
+ DscDvdFillTitle:=False;
+ Ptt:=DscBE32(P,$C8)*2048; Pgcit:=DscBE32(P,$CC)*2048;
+ If (Ptt<=0) Or (Ptt+8>Size) Or (Pgcit<=0) Or (Pgcit+8>Size) Then Exit;
+ NPtt:=DscBE16(P,Ptt);
+ If (T.Ttn<1) Or (T.Ttn>NPtt) Or (Ptt+8+4*NPtt>Size) Then Exit;
+ E0:=DscBE32(P,Ptt+8+4*(T.Ttn-1));
+ If T.Ttn<NPtt Then E1:=DscBE32(P,Ptt+8+4*T.Ttn) Else E1:=DscBE32(P,Ptt+4)+1;
+ NE:=(E1-E0) Div 4;
+ If (NE<1) Or (Ptt+E0+NE*4>Size) Then Exit;
+ PgcnT:=DscBE16(P,Ptt+E0);
+ T.Pgc:=PgcnT;
+ If (PgcnT<1) Or (PgcnT>DscBE16(P,Pgcit)) Or (Pgcit+8+8*PgcnT>Size) Then Exit;
+ PgcOff:=Pgcit+DscBE32(P,Pgcit+8+8*(PgcnT-1)+4);
+ If (PgcOff<=0) Or (PgcOff+236>Size) Then Exit;
+ PgcP:=PDscBuf(@P^[PgcOff]);
+ NProg:=PgcP^[2]; NCell:=PgcP^[3];
+ T.DurMs:=DscDvdTimeMs(PgcP,4);
+ PmOff:=DscBE16(PgcP,230); CpOff:=DscBE16(PgcP,232);
+ If (NCell<1) Or (PgcOff+CpOff+NCell*24>Size) Or (PgcOff+PmOff+NProg>Size) Then Exit;
+ { cellules jouees : angle 1 seulement }
+ T.NCell:=0; T.Sectors:=0; Acc:=0; T.Angles:=1; AngleOn:=0;
+ For I:=1 To NCell Do Begin
+  B0:=PgcP^[CpOff+(I-1)*24]; Bm:=B0 Shr 6; Bt:=(B0 Shr 4) And 3;
+  CellPlayed[I]:=True;
+  If Bt=1 Then Begin
+   If Bm=1 Then AngleOn:=1
+   Else Begin CellPlayed[I]:=False; End;
+   If Bm=3 Then AngleOn:=0;
+  End;
+  CellStart[I]:=Acc;
+  If CellPlayed[I] Then Begin
+   If T.NCell<255 Then Begin
+    Inc(T.NCell);
+    T.Cell[T.NCell].DurMs:=DscDvdTimeMs(PgcP,CpOff+(I-1)*24+4);
+    First:=DscBE32(PgcP,CpOff+(I-1)*24+8); Last:=DscBE32(PgcP,CpOff+(I-1)*24+20);
+    T.Cell[T.NCell].First:=First; T.Cell[T.NCell].Last:=Last;
+    If Last>=First Then Inc(T.Sectors,Last-First+1);
+    Inc(Acc,T.Cell[T.NCell].DurMs);
+   End;
+  End;
+ End;
+ For I:=1 To NProg Do ProgCell[I]:=PgcP^[PmOff+I-1];
+ { chapitres : entrees du PTT de ce titre qui visent le meme PGC }
+ T.NChap:=0;
+ For I:=0 To NE-1 Do Begin
+  If DscBE16(P,Ptt+E0+I*4)=PgcnT Then Begin
+   Pgn:=DscBE16(P,Ptt+E0+I*4+2);
+   If (Pgn>=1) And (Pgn<=NProg) And (T.NChap<99) Then Begin
+    Cn:=ProgCell[Pgn];
+    If (Cn>=1) And (Cn<=NCell) Then Begin
+     Inc(T.NChap); T.ChapMs[T.NChap]:=CellStart[Cn];
+    End;
+   End;
+  End;
+ End;
+ { attributs video / audio / sous-titres }
+ FillChar(T.Vid,SizeOf(T.Vid),0);
+ If Size>=$200+2 Then DscDvdVideoAttr(P,$200,T.Vid);
+ T.NAud:=0; T.NSub:=0;
+ If Size>=$256+6 Then Begin
+  NAudio:=P^[$203]; If NAudio>8 Then NAudio:=8;
+  For I:=0 To NAudio-1 Do Begin
+   If PgcP^[12+I*2] And $80=0 Then Continue;
+   Inc(T.NAud); FillChar(T.Aud[T.NAud],SizeOf(TDscStream),0);
+   T.Aud[T.NAud].Id:=I;
+   DscDvdAudioAttr(P,$204+I*8,T.Aud[T.NAud]);
+  End;
+  If (T.NAud=0) And (NAudio>0) Then
+   For I:=0 To NAudio-1 Do Begin
+    Inc(T.NAud); FillChar(T.Aud[T.NAud],SizeOf(TDscStream),0);
+    T.Aud[T.NAud].Id:=I; DscDvdAudioAttr(P,$204+I*8,T.Aud[T.NAud]);
+   End;
+  NSubp:=P^[$255]; If NSubp>32 Then NSubp:=32;
+  For I:=0 To NSubp-1 Do Begin
+   If PgcP^[28+I*4] And $80=0 Then Continue;
+   Inc(T.NSub); FillChar(T.Sub[T.NSub],SizeOf(TDscStream),0);
+   T.Sub[T.NSub].Id:=I; T.Sub[T.NSub].Codec:='VobSub';
+   T.Sub[T.NSub].Lang:='';
+   If P^[$256+I*6+0] And $03<>0 Then T.Sub[T.NSub].Lang:=DscLangName(P,$256+I*6+2);
+  End;
+ End;
+ DscDvdFillTitle:=True;
+End;
+
+{ Echantillonne des secteurs des cellules : detecte le brouillage CSS }
+Procedure DscDvdCheckCss(Var T: TDscDvdTitle);
+Var Buf: Array[0..2047] Of Byte; C,K,Cnt: LongInt; Sec,Span: Int64; Seen,Empty: LongInt;
+Begin
+ T.Encrypted:=False; Seen:=0; Empty:=0;
+ If Not DscVobOpen(T.Vts) Then Exit;
+ For C:=1 To T.NCell Do Begin
+  Span:=T.Cell[C].Last-T.Cell[C].First+1;
+  If Span<=0 Then Continue;
+  Cnt:=Span; If Cnt>24 Then Cnt:=24;
+  For K:=0 To Cnt-1 Do Begin
+   If Span<=24 Then Sec:=T.Cell[C].First+K Else Sec:=T.Cell[C].First+(Span-1)*K Div (Cnt-1);
+   If DscVobReadSec(Sec,1,Buf)<1 Then Continue;
+   Inc(Seen);
+   If DscSectorScrambled(PDscBuf(@Buf)) Then Begin T.Encrypted:=True; T.Msg:='disque protege (CSS) : non pris en charge'; Exit; End;
+  End;
+ End;
+End;
+
+{ Nom du dossier VIDEO_TS : cherche VIDEO_TS/ dans le volume ou le volume lui-meme }
+Function DscDvdLocate: Boolean;
+Var B: String; I: LongInt;
+Begin
+ DscDvdLocate:=False; DscDvdDir:='';
+ If DscVIsDir('VIDEO_TS') Then Begin DscDvdDir:='VIDEO_TS/'; DscDvdLocate:=True; Exit; End;
+ If DscVExists('VIDEO_TS.IFO') Or DscVExists('VTS_01_0.IFO') Or DscVExists('VTS_01_1.VOB') Then Begin DscDvdLocate:=True; Exit; End;
+ DscMsg:='Dossier VIDEO_TS introuvable.';
+End;
+
+Procedure DscDvdSortByNum(Var L: TDscDvdList);
+Var I,J: LongInt; Tmp: ^TDscDvdTitle; Key: LongInt;
+Begin
+ GetMem(Tmp,SizeOf(TDscDvdTitle));
+ For I:=2 To L.N Do Begin
+  Move(L.T[I],Tmp^,SizeOf(TDscDvdTitle));
+  If Tmp^.Num=0 Then Key:=1000+I Else Key:=Tmp^.Num;
+  J:=I-1;
+  While J>=1 Do Begin
+   If L.T[J].Num=0 Then Begin If 1000+J<=Key Then Break; End
+   Else If L.T[J].Num<=Key Then Break;
+   Move(L.T[J],L.T[J+1],SizeOf(TDscDvdTitle));
+   Dec(J);
+  End;
+  Move(Tmp^,L.T[J+1],SizeOf(TDscDvdTitle));
+ End;
+ FreeMem(Tmp,SizeOf(TDscDvdTitle));
+End;
+
+{ Liste les titres d'un DVD (image .iso ou dossier). Meme niveau d'information que l'onglet Ripper
+  (titres, fichiers VOB, taille) + chapitres, duree, cellules, flux audio / sous-titres lus dans les IFO. }
+Function DscDvdTitles(Const IsoOrDir: String; Var L: TDscDvdList): Boolean;
+Var Vts,Ttn,NTt,I,K,J,Nt: LongInt; Ifo,Vmg: PDscBuf; IfoSz,VmgSz: Int64; T: ^TDscDvdTitle; Nm: String;
+    HasVmg: Boolean; Ptt,NPtt,Tt: LongInt; Tot: Int64; Buf: Array[0..2047] Of Byte; Sc0,Sc1: Int64; Sec: Int64; Got: LongInt;
+    Found: Boolean; VobN: LongInt; VobBytes: Int64; F: TDscFile;
+Begin
+ DscDvdTitles:=False; FillChar(L,SizeOf(L),0); DscMsg:='';
+ If Not DscVolOpen(IsoOrDir) Then Exit;
+ If Not DscDvdLocate Then Exit;
+ DscVobClose;
+ L.N:=0;
+ GetMem(T,SizeOf(TDscDvdTitle));
+ For Vts:=1 To 99 Do Begin
+  Nm:='VTS_'+Chr(48+Vts Div 10)+Chr(48+Vts Mod 10);
+  { fichiers VOB du jeu de titres }
+  VobN:=0; VobBytes:=0;
+  For K:=1 To 9 Do If DscVOpen(DscDvdDir+Nm+'_'+Chr(48+K)+'.VOB',F) Then Begin
+   Inc(VobN); VobBytes:=VobBytes+F.Size; DscFClose(F);
+  End;
+  Ifo:=Nil;
+  Found:=DscDvdReadIfo(Nm+'_0','DVDVIDEO-VTS',Ifo,IfoSz);
+  If (Not Found) And (VobN=0) Then Continue;
+  If Found Then Begin
+   Ptt:=DscBE32(Ifo,$C8)*2048;
+   NPtt:=0;
+   If (Ptt>0) And (Ptt+8<=IfoSz) Then NPtt:=DscBE16(Ifo,Ptt);
+   If NPtt>99 Then NPtt:=99;
+   For Ttn:=1 To NPtt Do Begin
+    If L.N>=99 Then Break;
+    FillChar(T^,SizeOf(TDscDvdTitle),0);
+    T^.Src:=IsoOrDir; T^.Vts:=Vts; T^.Ttn:=Ttn; T^.NVob:=VobN; T^.VobBytes:=VobBytes;
+    If DscDvdFillTitle(T^,Ifo,IfoSz) Then Begin
+     If T^.Sectors>0 Then Begin
+      Inc(L.N); Move(T^,L.T[L.N],SizeOf(TDscDvdTitle));
+     End;
+    End;
+   End;
+   DscFFreeBuf(Ifo,IfoSz);
+  End Else If VobN>0 Then Begin
+   { pas d'IFO exploitable : un titre par jeu de VOB, duree estimee par les horloges SCR }
+   If VobN>0 Then Begin
+    If L.N<99 Then Begin
+     FillChar(T^,SizeOf(TDscDvdTitle),0);
+     T^.Src:=IsoOrDir; T^.Vts:=Vts; T^.Ttn:=1; T^.NVob:=VobN; T^.VobBytes:=VobBytes;
+     T^.NCell:=1; T^.Cell[1].First:=0; T^.Cell[1].Last:=VobBytes Div 2048-1; T^.Sectors:=VobBytes Div 2048;
+     T^.Msg:='IFO absent : duree estimee par les horloges SCR du flux.';
+     If DscVobOpen(Vts) Then Begin
+      Sc0:=-1; Sc1:=-1;
+      If DscVobReadSec(0,1,Buf)=1 Then Sc0:=DscPsScr(PDscBuf(@Buf));
+      Sec:=VobBytes Div 2048-1;
+      While (Sec>=0) And (Sec>VobBytes Div 2048-64) Do Begin
+       If DscVobReadSec(Sec,1,Buf)=1 Then Sc1:=DscPsScr(PDscBuf(@Buf));
+       If Sc1>=0 Then Break;
+       Dec(Sec);
+      End;
+      If (Sc0>=0) And (Sc1>=Sc0) Then T^.DurMs:=(Sc1-Sc0) Div 90;
+     End;
+     T^.Cell[1].DurMs:=T^.DurMs;
+     T^.NChap:=1; T^.ChapMs[1]:=0;
+     Inc(L.N); Move(T^,L.T[L.N],SizeOf(TDscDvdTitle));
+    End;
+   End;
+  End;
+ End;
+ FreeMem(T,SizeOf(TDscDvdTitle));
+ If L.N=0 Then Begin DscMsg:='Aucun titre DVD exploitable.'; Exit; End;
+ { numeros de titres du disque : VIDEO_TS.IFO (TT_SRPT) }
+ HasVmg:=DscDvdReadIfo('VIDEO_TS','DVDVIDEO-VMG',Vmg,VmgSz);
+ If HasVmg Then Begin
+  Tt:=DscBE32(Vmg,$C4)*2048;
+  If (Tt>0) And (Tt+8<=VmgSz) Then Begin
+   NTt:=DscBE16(Vmg,Tt);
+   For I:=0 To NTt-1 Do Begin
+    If Tt+8+I*12+12>VmgSz Then Break;
+    Vts:=Vmg^[Tt+8+I*12+6]; Ttn:=Vmg^[Tt+8+I*12+7];
+    For K:=1 To L.N Do If (L.T[K].Vts=Vts) And (L.T[K].Ttn=Ttn) Then Begin
+     L.T[K].Num:=I+1; L.T[K].Angles:=Vmg^[Tt+8+I*12+1];
+    End;
+   End;
+  End;
+  DscFFreeBuf(Vmg,VmgSz);
+  DscDvdSortByNum(L);
+ End;
+ { detection du brouillage CSS }
+ L.Encrypted:=False;
+ For K:=1 To L.N Do Begin
+  DscDvdCheckCss(L.T[K]);
+  If L.T[K].Encrypted Then Begin L.Encrypted:=True; L.Msg:='disque protege (CSS) : non pris en charge'; End;
+ End;
+ DscVobClose; DscMsg:='';
+ DscDvdTitles:=True;
+End;
+
+{ Copie, sans reencodage, les cellules du titre vers un fichier MPEG-2 PS (.vob / .mpg).
+  Refuse les titres brouilles (CSS). }
+Function DscDvdExtractTitle(Var T: TDscDvdTitle; Const Dst: String): Boolean;
+Var Df: File; C: LongInt; Tot,First,Cnt,Done: Int64; K,N: LongInt; Lo,Take: Int64; Ok: Boolean; Buf: Array[0..2047] Of Byte;
+Begin
+ DscDvdExtractTitle:=False;
+ If Not DscVolOpen(T.Src) Then Exit;
+ If Not DscDvdLocate Then Exit;
+ DscVobClose;
+ If Not DscVobOpen(T.Vts) Then Exit;
+ DscDvdCheckCss(T);
+ If T.Encrypted Then Begin DscMsg:='Titre protege (CSS) : non pris en charge, aucun fichier produit.'; Exit; End;
+ Assign(Df,Dst);
+ {$I-}Rewrite(Df,1);{$I+}
+ If IOResult<>0 Then Begin DscMsg:='Creation impossible : '+Dst; Exit; End;
+ Tot:=0;
+ For C:=1 To T.NCell Do If T.Cell[C].Last>=T.Cell[C].First Then Tot:=Tot+(T.Cell[C].Last-T.Cell[C].First+1)*2048;
+ DscProgBase:=0; DscProgTotal:=Tot; DscStop:=False; Ok:=True;
+ For C:=1 To T.NCell Do Begin
+  First:=T.Cell[C].First; Cnt:=T.Cell[C].Last-First+1;
+  While (Cnt>0) And Ok Do Begin
+   K:=0;
+   While (K<DscVobN) And (First>=DscVobFirst[K+2]) Do Inc(K);
+   If K>=DscVobN Then Begin DscMsg:='Cellule hors des fichiers VOB (disque tronque ?).'; Ok:=False; Break; End;
+   Lo:=First-DscVobFirst[K+1];
+   Take:=DscVobFirst[K+2]-First; If Take>Cnt Then Take:=Cnt;
+   Ok:=DscFCopyTo(DscVobF[K+1],Lo*2048,Take*2048,Df);
+   First:=First+Take; Cnt:=Cnt-Take;
+  End;
+  If Not Ok Then Break;
+ End;
+ {$I-}Close(Df);{$I+} If IOResult<>0 Then ;
+ If Not Ok Then Begin {$I-}Erase(Df);{$I+} If IOResult<>0 Then ; End;
+ If Ok Then DscMsg:='';
+ DscVobClose;
+ DscDvdExtractTitle:=Ok;
+End;
+
+{ ====================================================================== }
+{ Blu-ray : BDMV/PLAYLIST/*.mpls, CLIPINF/*.clpi, STREAM/*.m2ts            }
+{ ====================================================================== }
+Const
+ DSC_BD_MAXCLIP = 255;
+ DSC_BD_MAXCHAP = 255;
+ DSC_BD_MAXTITLES = 255;
+
+Type
+ TDscBdClip = Record
+  Name: String[8];       { '00001' (fichier STREAM/00001.m2ts) }
+  InT,OutT: Int64;       { instants d'entree / de sortie (unites de 45 kHz) }
+  DurMs: LongInt;        { duree de l'element de lecture }
+  ClipMs: LongInt;       { duree complete du clip (CLPI), 0 si inconnue }
+  Bytes: Int64;          { taille du fichier .m2ts }
+  Angles: LongInt;
+ End;
+ TDscBdTitle = Record
+  Src: String;           { chemin de l'image ou du dossier }
+  Name: String[8];       { nom de la playlist ('00800') }
+  DurMs: LongInt;
+  NChap: LongInt;        { nombre de reperes de chapitre (PlayListMark type 1) }
+  ChapMs: Array[1..DSC_BD_MAXCHAP] Of LongInt;   { debuts de chapitres (ms), jusqu'a 255 }
+  NClip: LongInt;
+  Clip: Array[1..DSC_BD_MAXCLIP] Of TDscBdClip;
+  NVid: LongInt; Vid: Array[1..4] Of TDscStream;
+  NAud: LongInt; Aud: Array[1..32] Of TDscStream;
+  NPg: LongInt; Pg: Array[1..32] Of TDscStream;     { sous-titres bitmap PGS / TextST }
+  NIg: LongInt; Ig: Array[1..8] Of TDscStream;      { menus interactifs }
+  Bytes: Int64;          { estimation (taille des clips au prorata des durees) }
+  Angles: LongInt;
+  Encrypted: Boolean;    { flux chiffre (AACS) ou brouille : le titre ne sera pas copie }
+  Msg: String;
+ End;
+ TDscBdList = Record
+  N: LongInt;
+  T: Array[1..DSC_BD_MAXTITLES] Of TDscBdTitle;
+  Aacs,BdPlus,Encrypted: Boolean;
+  Msg: String;
+ End;
+ TDscEpArr = Array[0..50000000] Of Int64;
+ PDscEpArr = ^TDscEpArr;
+ TDscSpnArr = Array[0..50000000] Of LongInt;
+ PDscSpnArr = ^TDscSpnArr;
+
+Var
+ DscBdDir: String;        { prefixe de BDMV dans le volume ('BDMV/' ou '') }
+ DscBdMinMs: LongInt;     { les playlists plus courtes sont ignorees (defaut 0 : seulement les durees nulles) }
+
+Function DscBdVideoCodec(C: LongInt): String;
+Begin
+ Case C Of
+  $01: DscBdVideoCodec:='MPEG-1';
+  $02: DscBdVideoCodec:='MPEG-2';
+  $1B: DscBdVideoCodec:='H.264';
+  $EA: DscBdVideoCodec:='VC-1';
+  $24: DscBdVideoCodec:='HEVC';
+ Else DscBdVideoCodec:='video?'+DscIStr(C);
+ End;
+End;
+
+Function DscBdAudioCodec(C: LongInt): String;
+Begin
+ Case C Of
+  $03: DscBdAudioCodec:='MPEG-1 audio';
+  $04: DscBdAudioCodec:='MPEG-2 audio';
+  $80: DscBdAudioCodec:='LPCM';
+  $81: DscBdAudioCodec:='AC-3';
+  $82: DscBdAudioCodec:='DTS';
+  $83: DscBdAudioCodec:='TrueHD';
+  $84: DscBdAudioCodec:='E-AC-3';
+  $85: DscBdAudioCodec:='DTS-HD HRA';
+  $86: DscBdAudioCodec:='DTS-HD MA';
+  $A1: DscBdAudioCodec:='E-AC-3';
+  $A2: DscBdAudioCodec:='DTS-HD';
+ Else DscBdAudioCodec:='audio?'+DscIStr(C);
+ End;
+End;
+
+Procedure DscBdVideoFmt(Var V: TDscStream; Fmt,Rate: LongInt);
+Begin
+ Case Fmt Of
+  1: Begin V.W:=720; V.H:=480; V.Info:='480i'; End;
+  2: Begin V.W:=720; V.H:=576; V.Info:='576i'; End;
+  3: Begin V.W:=720; V.H:=480; V.Info:='480p'; End;
+  4: Begin V.W:=1920; V.H:=1080; V.Info:='1080i'; End;
+  5: Begin V.W:=1280; V.H:=720; V.Info:='720p'; End;
+  6: Begin V.W:=1920; V.H:=1080; V.Info:='1080p'; End;
+  7: Begin V.W:=720; V.H:=576; V.Info:='576p'; End;
+  8: Begin V.W:=3840; V.H:=2160; V.Info:='2160p'; End;
+ End;
+ Case Rate Of
+  1: Begin V.FpsN:=24000; V.FpsD:=1001; End;
+  2: Begin V.FpsN:=24; V.FpsD:=1; End;
+  3: Begin V.FpsN:=25; V.FpsD:=1; End;
+  4: Begin V.FpsN:=30000; V.FpsD:=1001; End;
+  6: Begin V.FpsN:=50; V.FpsD:=1; End;
+  7: Begin V.FpsN:=60000; V.FpsD:=1001; End;
+ End;
+End;
+
+Procedure DscBdAudioFmt(Var A: TDscStream; Fmt,Rate: LongInt);
+Begin
+ Case Fmt Of
+  1: Begin A.Ch:=1; A.Info:='mono'; End;
+  3: Begin A.Ch:=2; A.Info:='stereo'; End;
+  6: Begin A.Ch:=6; A.Info:='multicanal'; End;
+  12: Begin A.Ch:=6; A.Info:='combo stereo+multicanal'; End;
+ Else Begin A.Ch:=0; A.Info:=''; End;
+ End;
+ Case Rate Of
+  1,12: A.Rate:=48000;
+  4,14: A.Rate:=96000;
+  5: A.Rate:=192000;
+ Else A.Rate:=0;
+ End;
+End;
+
+Function DscBdLang(P: PDscBuf; O: LongInt): String;
+Var S: String; I: LongInt;
+Begin
+ S:='';
+ For I:=0 To 2 Do If (P^[O+I]>32) And (P^[O+I]<127) Then S:=S+Chr(P^[O+I]);
+ DscBdLang:=S;
+End;
+
+Function DscBdName5(P: PDscBuf; O: LongInt): String;
+Var S: String; I: LongInt;
+Begin
+ S:='';
+ For I:=0 To 4 Do S:=S+Chr(P^[O+I]);
+ DscBdName5:=S;
+End;
+
+{ Analyse d'un MPLS. Remplit T (sauf Src/Encrypted). }
+Function DscBdParseMpls(P: PDscBuf; Size: Int64; Var T: TDscBdTitle; Full: Boolean): Boolean;
+Var Ps,Ms,NItems,I,J,K,Pos,Len,Base,Flags,Mult,NAng,Q,Cnt: LongInt; Tin,Tout,Acc,Tot: Int64;
+    ItemEnd: LongInt; NV,NA,NPg,NIg,Ent,Al,Cod,Fmt,El,NMarks,Ty,Ref,Typ: LongInt; Ts: Int64;
+    ItemStart: Array[1..DSC_BD_MAXCLIP] Of Int64;
+Begin
+ DscBdParseMpls:=False;
+ If (Size<60) Or (P^[0]<>Ord('M')) Or (P^[1]<>Ord('P')) Or (P^[2]<>Ord('L')) Or (P^[3]<>Ord('S')) Then Exit;
+ Ps:=DscBE32(P,8); Ms:=DscBE32(P,12);
+ If (Ps<40) Or (Ps+10>Size) Then Exit;
+ NItems:=DscBE16(P,Ps+6);
+ T.NClip:=0; T.DurMs:=0; Tot:=0; T.Angles:=1;
+ Pos:=Ps+10;
+ For I:=1 To NItems Do Begin
+  If Pos+2>Size Then Break;
+  Len:=DscBE16(P,Pos); Base:=Pos+2; ItemEnd:=Base+Len;
+  If (Len<32) Or (ItemEnd>Size) Then Break;
+  If T.NClip<DSC_BD_MAXCLIP Then Begin
+   Inc(T.NClip);
+   T.Clip[T.NClip].Name:=DscBdName5(P,Base);
+   Flags:=DscBE16(P,Base+9);
+   Tin:=DscBE32(P,Base+12); Tout:=DscBE32(P,Base+16);
+   T.Clip[T.NClip].InT:=Tin; T.Clip[T.NClip].OutT:=Tout;
+   If Tout>=Tin Then T.Clip[T.NClip].DurMs:=(Tout-Tin) Div 45 Else T.Clip[T.NClip].DurMs:=0;
+   T.Clip[T.NClip].ClipMs:=0; T.Clip[T.NClip].Bytes:=0; T.Clip[T.NClip].Angles:=1;
+   ItemStart[T.NClip]:=Tot;
+   If Tout>Tin Then Inc(Tot,Tout-Tin);
+  End;
+  Q:=Base+32;
+  NAng:=1;
+  If (Flags Shr 4) And 1=1 Then Begin
+   NAng:=P^[Q]; If NAng<1 Then NAng:=1;
+   If T.NClip>0 Then T.Clip[T.NClip].Angles:=NAng;
+   If NAng>T.Angles Then T.Angles:=NAng;
+   Inc(Q,2+(NAng-1)*10);
+  End;
+  { table STN : flux du premier element de lecture }
+  If (I=1) And (Q+16<=ItemEnd) And Full Then Begin
+   NV:=P^[Q+4]; NA:=P^[Q+5]; NPg:=P^[Q+6]; NIg:=P^[Q+7];
+   J:=Q+16;
+   T.NVid:=0; T.NAud:=0; T.NPg:=0; T.NIg:=0;
+   For K:=1 To NV+NA+NPg+NIg Do Begin
+    If J+2>ItemEnd Then Break;
+    El:=P^[J]; Ent:=J+1;
+    Typ:=P^[Ent]; Cnt:=0;
+    { identifiant du flux (PID) }
+    Case Typ Of
+     1: Cnt:=DscBE16(P,Ent+1);
+     2: Cnt:=DscBE16(P,Ent+3);
+     3: Cnt:=DscBE16(P,Ent+2);
+     4: Cnt:=DscBE16(P,Ent+3);
+    End;
+    J:=J+1+El;
+    If J+2>ItemEnd Then Break;
+    Al:=P^[J]; Cod:=P^[J+1];
+    If K<=NV Then Begin
+     If T.NVid<4 Then Begin
+      Inc(T.NVid); FillChar(T.Vid[T.NVid],SizeOf(TDscStream),0);
+      T.Vid[T.NVid].Id:=Cnt; T.Vid[T.NVid].Codec:=DscBdVideoCodec(Cod);
+      Fmt:=P^[J+2];
+      DscBdVideoFmt(T.Vid[T.NVid],Fmt Shr 4,Fmt And 15);
+     End;
+    End Else If K<=NV+NA Then Begin
+     If T.NAud<32 Then Begin
+      Inc(T.NAud); FillChar(T.Aud[T.NAud],SizeOf(TDscStream),0);
+      T.Aud[T.NAud].Id:=Cnt; T.Aud[T.NAud].Codec:=DscBdAudioCodec(Cod);
+      Fmt:=P^[J+2];
+      DscBdAudioFmt(T.Aud[T.NAud],Fmt Shr 4,Fmt And 15);
+      T.Aud[T.NAud].Lang:=DscBdLang(P,J+3);
+     End;
+    End Else If K<=NV+NA+NPg Then Begin
+     If T.NPg<32 Then Begin
+      Inc(T.NPg); FillChar(T.Pg[T.NPg],SizeOf(TDscStream),0);
+      T.Pg[T.NPg].Id:=Cnt;
+      If Cod=$92 Then Begin T.Pg[T.NPg].Codec:='TextST'; T.Pg[T.NPg].Lang:=DscBdLang(P,J+3); End
+      Else Begin T.Pg[T.NPg].Codec:='PGS'; T.Pg[T.NPg].Lang:=DscBdLang(P,J+2); End;
+     End;
+    End Else Begin
+     If T.NIg<8 Then Begin
+      Inc(T.NIg); FillChar(T.Ig[T.NIg],SizeOf(TDscStream),0);
+      T.Ig[T.NIg].Id:=Cnt; T.Ig[T.NIg].Codec:='IGS'; T.Ig[T.NIg].Lang:=DscBdLang(P,J+2);
+     End;
+    End;
+    J:=J+1+Al;
+   End;
+  End;
+  Pos:=ItemEnd;
+ End;
+ T.DurMs:=Tot Div 45;
+ { reperes de chapitres }
+ T.NChap:=0;
+ If (Ms>40) And (Ms+6<=Size) Then Begin
+  NMarks:=DscBE16(P,Ms+4);
+  For I:=0 To NMarks-1 Do Begin
+   Q:=Ms+6+I*14;
+   If Q+14>Size Then Break;
+   Ty:=P^[Q+1]; Ref:=DscBE16(P,Q+2); Ts:=DscBE32(P,Q+4);
+   If (Ty=1) And (Ref<T.NClip) Then Begin
+    If (Ts>=T.Clip[Ref+1].InT) And (Ts<=T.Clip[Ref+1].OutT) Then Begin
+     Inc(T.NChap);
+     If T.NChap<=DSC_BD_MAXCHAP Then T.ChapMs[T.NChap]:=(ItemStart[Ref+1]+(Ts-T.Clip[Ref+1].InT)) Div 45;
+    End;
+   End;
+  End;
+ End;
+ DscBdParseMpls:=True;
+End;
+
+{ ---------------------------------------------------------------------- }
+{ CLPI                                                                     }
+{ ---------------------------------------------------------------------- }
+Type
+ TDscClpi = Record
+  Ok: Boolean;
+  Packets: LongInt;      { nombre de paquets source de 192 octets }
+  StcStart,StcEnd: Int64;
+  NEp: LongInt;
+  EpPts: PDscEpArr;
+  EpSpn: PDscSpnArr;
+  Aspect: LongInt;
+  VPid: LongInt;
+ End;
+
+Procedure DscClpiFree(Var C: TDscClpi);
+Begin
+ If C.EpPts<>Nil Then FreeMem(C.EpPts,C.NEp*SizeOf(Int64));
+ If C.EpSpn<>Nil Then FreeMem(C.EpSpn,C.NEp*SizeOf(LongInt));
+ FillChar(C,SizeOf(C),0);
+End;
+
+Function DscClpiRead(Const Name: String; Var C: TDscClpi; WantEp: Boolean): Boolean;
+Var P: PDscBuf; Size: Int64; SeqS,ProgS,CpiS,I,J,K,NSeq,NStc,Q,NPid,Ty,NCo,NFi,Nstr,Cl: LongInt; Addr: Int64; Bits: Int64;
+    Epm,EpOne,FineStart,Cf,Ci: LongInt; CoRef: Array[0..0] Of LongInt; Pc,Sc: Int64; Fv: Int64; Fine0,Coarse0: LongInt; Rf,Nx: LongInt;
+    Tot: Int64; VPid: LongInt; Pid,Cod: LongInt;
+Begin
+ DscClpiRead:=False; FillChar(C,SizeOf(C),0);
+ If Not DscVReadAll(DscBdDir+'CLIPINF/'+Name+'.clpi',P,Size) Then Exit;
+ If (Size<60) Or (P^[0]<>Ord('H')) Or (P^[1]<>Ord('D')) Or (P^[2]<>Ord('M')) Or (P^[3]<>Ord('V')) Then Begin DscFFreeBuf(P,Size); Exit; End;
+ SeqS:=DscBE32(P,8); ProgS:=DscBE32(P,12); CpiS:=DscBE32(P,16);
+ C.Packets:=DscBE32(P,40+4+2+2+4+4);
+ { SequenceInfo : bornes STC }
+ If (SeqS>0) And (SeqS+8<=Size) Then Begin
+  Q:=SeqS+4+1; NSeq:=P^[Q]; Inc(Q); Tot:=0; C.StcStart:=-1;
+  For I:=1 To NSeq Do Begin
+   If Q+6>Size Then Break;
+   NStc:=P^[Q+4]; Inc(Q,6);
+   For J:=1 To NStc Do Begin
+    If Q+14>Size Then Break;
+    If C.StcStart<0 Then C.StcStart:=DscBE32(P,Q+6);
+    C.StcEnd:=DscBE32(P,Q+10);
+    Inc(Tot,Int64(DscBE32(P,Q+10))-DscBE32(P,Q+6));
+    Inc(Q,14);
+   End;
+  End;
+  C.Aspect:=0;
+  If C.StcStart<0 Then C.StcStart:=0;
+ End;
+ { ProgramInfo : aspect du flux video }
+ If (ProgS>0) And (ProgS+10<=Size) Then Begin
+  Q:=ProgS+4+1; Q:=Q+1;     { reserved, nb de sequences }
+  Q:=Q+4+2;                  { SPN, PID PMT }
+  Nstr:=P^[Q]; Inc(Q,2);
+  For I:=1 To Nstr Do Begin
+   If Q+4>Size Then Break;
+   Pid:=DscBE16(P,Q); Cl:=P^[Q+2]; Cod:=P^[Q+3];
+   If (Cod=$01) Or (Cod=$02) Or (Cod=$1B) Or (Cod=$EA) Or (Cod=$24) Then Begin
+    C.Aspect:=P^[Q+5] Shr 4; C.VPid:=Pid; Break;
+   End;
+   Q:=Q+3+Cl-1+0; Inc(Q);
+   Q:=Q;
+  End;
+ End;
+ C.Ok:=True;
+ { EP map (point d'entree) du premier flux video }
+ If WantEp And (CpiS>0) And (CpiS+8<=Size) Then Begin
+  If DscBE32(P,CpiS)>0 Then Begin
+   Epm:=CpiS+6;
+   NPid:=P^[Epm+1];
+   If (NPid>0) And (Epm+2+12<=Size) Then Begin
+    Q:=Epm+2;
+    { choisit le flux dont le PID est la video, sinon le premier }
+    K:=0;
+    For I:=0 To NPid-1 Do If DscBE16(P,Epm+2+I*12)=C.VPid Then K:=I;
+    Q:=Epm+2+K*12;
+    Bits:=(Int64(P^[Q+2]) Shl 40) Or (Int64(P^[Q+3]) Shl 32) Or (Int64(P^[Q+4]) Shl 24) Or (Int64(P^[Q+5]) Shl 16) Or (Int64(P^[Q+6]) Shl 8) Or Int64(P^[Q+7]);
+    NFi:=Bits And $3FFFF; NCo:=(Bits Shr 18) And $FFFF;
+    Addr:=DscBE32(P,Q+8);
+    EpOne:=Epm+Addr;
+    If (NFi>0) And (EpOne+4+NCo*8<=Size) Then Begin
+     FineStart:=EpOne+DscBE32(P,EpOne);
+     If FineStart+NFi*4<=Size Then Begin
+      C.NEp:=NFi;
+      GetMem(C.EpPts,NFi*SizeOf(Int64)); GetMem(C.EpSpn,NFi*SizeOf(LongInt));
+      Ci:=0;
+      For J:=0 To NFi-1 Do Begin
+       { coarse applicable : dernier dont ref_to_fine <= J }
+       While (Ci+1<NCo) And ((DscBE32(P,EpOne+4+(Ci+1)*8) Shr 14)<=J) Do Inc(Ci);
+       Cf:=DscBE32(P,EpOne+4+Ci*8);
+       Pc:=Cf And $3FFF; Sc:=DscBE32(P,EpOne+4+Ci*8+4);
+       Fv:=DscBE32(P,FineStart+J*4);
+       C.EpPts^[J]:=((Pc And $3FFE) Shl 18) Or (((Fv Shr 17) And $7FF) Shl 8);
+       C.EpSpn^[J]:=(Sc And Not $1FFFF) Or (Fv And $1FFFF);
+      End;
+     End;
+    End;
+   End;
+  End;
+ End;
+ DscFFreeBuf(P,Size);
+ DscClpiRead:=True;
+End;
+
+{ ---------------------------------------------------------------------- }
+{ Detection des protections                                                }
+{ ---------------------------------------------------------------------- }
+{ 0 = en clair, 1 = chiffre / brouille, -1 = illisible. Echantillonne des unites alignees de 6144 octets. }
+Function DscBdSampleClip(Const Name: String): LongInt;
+Var F: TDscFile; U: Array[0..6143] Of Byte; N,K,S,Syncs,Bad,Seen,Cpi: LongInt; Pos,Units: Int64;
+Begin
+ DscBdSampleClip:=-1;
+ If Not DscVOpen(DscBdDir+'STREAM/'+Name+'.m2ts',F) Then Exit;
+ Units:=F.Size Div 6144; Bad:=0; Seen:=0; Cpi:=0;
+ If Units<1 Then Begin DscFClose(F); Exit; End;
+ For K:=0 To 7 Do Begin
+  If Units<=8 Then Pos:=K Else Pos:=(Units-1)*K Div 7;
+  If Pos>=Units Then Break;
+  If DscFRead(F,Pos*6144,U,6144)<6144 Then Continue;
+  Inc(Seen);
+  Syncs:=0;
+  For S:=0 To 31 Do If U[S*192+4]=$47 Then Inc(Syncs);
+  If Syncs<24 Then Begin Inc(Bad); If (U[0] And $C0)<>0 Then Inc(Cpi); End;
+ End;
+ DscFClose(F);
+ If Seen=0 Then Exit;
+ If Bad=0 Then DscBdSampleClip:=0
+ Else If Cpi>0 Then DscBdSampleClip:=1
+ Else DscBdSampleClip:=-1;
+End;
+
+Function DscBdLocate: Boolean;
+Begin
+ DscBdLocate:=False; DscBdDir:='';
+ If DscVIsDir('BDMV') Then Begin DscBdDir:='BDMV/'; DscBdLocate:=True; Exit; End;
+ If DscVIsDir('PLAYLIST') And DscVIsDir('CLIPINF') Then Begin DscBdLocate:=True; Exit; End;
+ DscMsg:='Dossier BDMV introuvable.';
+End;
+
+Function DscBdHasRootDir(Const Name: String): Boolean;
+Var Parent: String; I: LongInt;
+Begin
+ DscBdHasRootDir:=False;
+ If DscBdDir<>'' Then Begin DscBdHasRootDir:=DscVIsDir(Name); Exit; End;
+ { dossier BDMV passe directement : les dossiers freres sont dans le parent (volume dossier seulement) }
+ If DscFsType=DSC_FS_DIR Then Begin
+  Parent:=DscRootDir; If (Length(Parent)>1) Then Dec(Parent[0]);
+  I:=Length(Parent); While (I>0) And (Parent[I]<>'/') Do Dec(I);
+  Parent:=Copy(Parent,1,I);
+  DscBdHasRootDir:=DscIsDirHost(Parent+Name);
+ End;
+End;
+
+{ ---------------------------------------------------------------------- }
+{ Liste des titres                                                         }
+{ ---------------------------------------------------------------------- }
+Function DscBdList(Const RootOrIso: String; Var L: TDscBdList): Boolean;
+Var Names: Array[1..2000] Of String[8]; Durs: Array[1..2000] Of LongInt; Order: Array[1..2000] Of LongInt;
+    NPl,I,J,K,Tmp,Cnt: LongInt; Nm: String; P: PDscBuf; Size: Int64; T: ^TDscBdTitle; C: TDscClpi;
+    Samp: LongInt; SName: Array[1..64] Of String[8]; SRes: Array[1..64] Of LongInt; NS,Si,Res: LongInt; F: TDscFile;
+Begin
+ DscBdList:=False; FillChar(L,SizeOf(L),0); DscMsg:='';
+ If Not DscVolOpen(RootOrIso) Then Exit;
+ If Not DscBdLocate Then Exit;
+ L.Aacs:=DscBdHasRootDir('AACS');
+ L.BdPlus:=DscBdHasRootDir('BDSVM');
+ If Not DscVList(DscBdDir+'PLAYLIST') Then Exit;
+ NPl:=0;
+ For I:=0 To DscLstN-1 Do Begin
+  Nm:=DscLst^[I].Name;
+  If DscLst^[I].IsDir Then Continue;
+  If (Length(Nm)>=6) And (DscUp(Copy(Nm,Length(Nm)-4,5))='.MPLS') And (NPl<2000) Then Begin
+   Inc(NPl); Names[NPl]:=Copy(Nm,1,Length(Nm)-5);
+  End;
+ End;
+ If NPl=0 Then Begin DscMsg:='Aucune playlist (.mpls) dans BDMV/PLAYLIST.'; Exit; End;
+ GetMem(T,SizeOf(TDscBdTitle));
+ { passe 1 : durees }
+ For I:=1 To NPl Do Begin
+  Durs[I]:=-1;
+  If DscVReadAll(DscBdDir+'PLAYLIST/'+Names[I]+'.mpls',P,Size) Then Begin
+   FillChar(T^,SizeOf(TDscBdTitle),0);
+   If DscBdParseMpls(P,Size,T^,False) Then Durs[I]:=T^.DurMs;
+   DscFFreeBuf(P,Size);
+  End;
+  Order[I]:=I;
+ End;
+ { tri par duree decroissante (stable) }
+ For I:=2 To NPl Do Begin
+  Tmp:=Order[I]; J:=I-1;
+  While (J>=1) And (Durs[Order[J]]<Durs[Tmp]) Do Begin Order[J+1]:=Order[J]; Dec(J); End;
+  Order[J+1]:=Tmp;
+ End;
+ { passe 2 : analyse complete }
+ NS:=0;
+ For K:=1 To NPl Do Begin
+  I:=Order[K];
+  If (Durs[I]<=0) Or (Durs[I]<DscBdMinMs) Then Continue;
+  If L.N>=DSC_BD_MAXTITLES Then Break;
+  If Not DscVReadAll(DscBdDir+'PLAYLIST/'+Names[I]+'.mpls',P,Size) Then Continue;
+  FillChar(T^,SizeOf(TDscBdTitle),0);
+  If DscBdParseMpls(P,Size,T^,True) Then Begin
+   T^.Src:=RootOrIso; T^.Name:=Names[I];
+   Tmp:=0;
+   For J:=1 To T^.NClip Do Begin
+    If DscVOpen(DscBdDir+'STREAM/'+T^.Clip[J].Name+'.m2ts',F) Then Begin
+     T^.Clip[J].Bytes:=F.Size; DscFClose(F);
+    End;
+    If DscClpiRead(T^.Clip[J].Name,C,False) Then Begin
+     If C.StcEnd>C.StcStart Then T^.Clip[J].ClipMs:=(C.StcEnd-C.StcStart) Div 45;
+     If (J=1) And (T^.NVid>0) And (C.Aspect=3) Then T^.Vid[1].Aspect:='16:9'
+     Else If (J=1) And (T^.NVid>0) And (C.Aspect=2) Then T^.Vid[1].Aspect:='4:3';
+    End;
+    DscClpiFree(C);
+    If (T^.Clip[J].ClipMs>0) And (T^.Clip[J].Bytes>0) Then
+     T^.Bytes:=T^.Bytes+T^.Clip[J].Bytes*T^.Clip[J].DurMs Div T^.Clip[J].ClipMs
+    Else T^.Bytes:=T^.Bytes+T^.Clip[J].Bytes;
+   End;
+   { protection : echantillon du premier clip }
+   If T^.NClip>0 Then Begin
+    Res:=-9;
+    For Si:=1 To NS Do If SName[Si]=T^.Clip[1].Name Then Res:=SRes[Si];
+    If Res=-9 Then Begin
+     Res:=DscBdSampleClip(T^.Clip[1].Name);
+     If NS<64 Then Begin Inc(NS); SName[NS]:=T^.Clip[1].Name; SRes[NS]:=Res; End;
+    End;
+    If Res=1 Then Begin
+     T^.Encrypted:=True; T^.Msg:='disque protege (AACS) : non pris en charge'; L.Encrypted:=True;
+    End Else If Res<0 Then Begin
+     T^.Encrypted:=True; T^.Msg:='flux illisible (chiffre ou corrompu) : non pris en charge'; L.Encrypted:=True;
+    End;
+    If L.BdPlus Then Begin
+     T^.Encrypted:=True; T^.Msg:='disque protege (BD+) : non pris en charge'; L.Encrypted:=True;
+    End;
+   End;
+   Inc(L.N); Move(T^,L.T[L.N],SizeOf(TDscBdTitle));
+  End;
+  DscFFreeBuf(P,Size);
+ End;
+ FreeMem(T,SizeOf(TDscBdTitle));
+ If L.Encrypted Then Begin
+  If L.BdPlus Then L.Msg:='disque protege (BD+) : non pris en charge'
+  Else L.Msg:='disque protege (AACS) : non pris en charge';
+ End Else If L.Aacs Then L.Msg:='dossier AACS present mais flux en clair';
+ If L.N=0 Then Begin DscMsg:='Aucune playlist exploitable.'; Exit; End;
+ DscMsg:='';
+ DscBdList:=True;
+End;
+
+{ Concatene sans reencodage les clips .m2ts du titre (ordre de la playlist) vers un fichier .m2ts.
+  Les points d'entree (EP map du CLPI) servent a placer les bornes in/out : la coupe se fait au paquet
+  source de 192 octets, au point d'entree (debut de GOP) a l'entree et au premier point d'entree apres la
+  sortie. Refuse les disques chiffres (AACS / BD+). }
+Function DscBdConcat(Var T: TDscBdTitle; Const Dst: String): Boolean;
+Var Df: File; I,J,Lo,Hi,Mid: LongInt; C: TDscClpi; F: TDscFile; Sp0,Sp1,PrevEnd: Int64; PrevClip: String;
+    Tot: Int64; Starts,Ends: Array[1..DSC_BD_MAXCLIP] Of Int64; Ok: Boolean; Pk: Int64; Res: LongInt; Tin,Tout: Int64;
+Begin
+ DscBdConcat:=False;
+ If Not DscVolOpen(T.Src) Then Exit;
+ If Not DscBdLocate Then Exit;
+ If T.Encrypted Then Begin DscMsg:='Titre protege (AACS/BD+) : non pris en charge, aucun fichier produit.'; Exit; End;
+ If DscBdHasRootDir('BDSVM') Then Begin DscMsg:='Disque protege (BD+) : non pris en charge, aucun fichier produit.'; Exit; End;
+ If T.NClip<1 Then Begin DscMsg:='Titre vide.'; Exit; End;
+ { recalcul des bornes en paquets source }
+ PrevClip:=''; PrevEnd:=0; Tot:=0;
+ For I:=1 To T.NClip Do Begin
+  If Not DscClpiRead(T.Clip[I].Name,C,True) Then Begin DscMsg:='CLPI illisible : '+T.Clip[I].Name; Exit; End;
+  If Not DscVOpen(DscBdDir+'STREAM/'+T.Clip[I].Name+'.m2ts',F) Then Begin DscClpiFree(C); Exit; End;
+  Pk:=F.Size Div 192;
+  DscFClose(F);
+  Tin:=T.Clip[I].InT; Tout:=T.Clip[I].OutT;
+  Sp0:=0; Sp1:=Pk;
+  If C.NEp>0 Then Begin
+   { les PTS de l'EP map sont tronques a 256 unites (~5,7 ms) : tolerance pour le debut de clip }
+   If Tin>C.EpPts^[0]+255 Then Begin
+    Lo:=0; Hi:=C.NEp-1;
+    While Lo<Hi Do Begin
+     Mid:=(Lo+Hi+1) Div 2;
+     If C.EpPts^[Mid]<=Tin Then Lo:=Mid Else Hi:=Mid-1;
+    End;
+    Sp0:=C.EpSpn^[Lo];
+   End;
+   If (Tout<C.StcEnd) Or (C.StcEnd=0) Then Begin
+    Lo:=0; Hi:=C.NEp;
+    While Lo<Hi Do Begin
+     Mid:=(Lo+Hi) Div 2;
+     If C.EpPts^[Mid]>Tout Then Hi:=Mid Else Lo:=Mid+1;
+    End;
+    If Lo<C.NEp Then Sp1:=C.EpSpn^[Lo];
+   End;
+  End;
+  If Sp1>Pk Then Sp1:=Pk;
+  { element de lecture enchaine sur le meme clip : evite de repeter le GOP }
+  If (T.Clip[I].Name=PrevClip) And (Sp0<PrevEnd) Then Sp0:=PrevEnd;
+  If Sp1<Sp0 Then Sp1:=Sp0;
+  Starts[I]:=Sp0; Ends[I]:=Sp1; PrevClip:=T.Clip[I].Name; PrevEnd:=Sp1;
+  Inc(Tot,(Sp1-Sp0)*192);
+  DscClpiFree(C);
+ End;
+ Assign(Df,Dst);
+ {$I-}Rewrite(Df,1);{$I+}
+ If IOResult<>0 Then Begin DscMsg:='Creation impossible : '+Dst; Exit; End;
+ DscProgBase:=0; DscProgTotal:=Tot; DscStop:=False; Ok:=True;
+ For I:=1 To T.NClip Do Begin
+  If Ends[I]<=Starts[I] Then Continue;
+  If Not DscVOpen(DscBdDir+'STREAM/'+T.Clip[I].Name+'.m2ts',F) Then Begin Ok:=False; Break; End;
+  Ok:=DscFCopyTo(F,Starts[I]*192,(Ends[I]-Starts[I])*192,Df);
+  DscFClose(F);
+  If Not Ok Then Break;
+ End;
+ {$I-}Close(Df);{$I+} If IOResult<>0 Then ;
+ If Not Ok Then Begin {$I-}Erase(Df);{$I+} If IOResult<>0 Then ; End
+ Else DscMsg:='';
+ DscBdConcat:=Ok;
+End;
 { ======================================================================== }
 { pe_prores_enc.pas : encodeur Apple ProRes 4:2:2 10 bits (Proxy, LT,      }
 { Standard, HQ) et 4:4:4 10 bits sans alpha (4444), progressif.            }
@@ -109915,19 +112112,45 @@ Begin
 End;
 
 { ====================================================================== }
-{ Ripper (DVD)                                                               }
+{ Ripper (DVD : dossier VIDEO_TS ou image ISO/UDF ; Blu-ray : dossier BDMV ou image)  }
 { ====================================================================== }
 Type
  TRipTitle = Record
   Num: Integer; Vobs: Integer; Size: LongInt; Sel: Boolean;
   Names: Array[1..9] Of String[12];
+  Kind: Byte;            { 0 : copie des VOB d'un dossier, 1 : DVD (pe_disc), 2 : Blu-ray (pe_disc) }
+  Idx: Integer;          { indice dans RipDvd / RipBd }
+  DurMs: LongInt; SizeB: Double; Prot: Boolean;
+  Desc: String[90];
  End;
 Var
  RipDir: String;
- RipT: Array[1..20] Of TRipTitle;
+ RipT: Array[1..64] Of TRipTitle;
  RipN: Integer;
+ RipTop: Integer;
+ RipKind: Integer;
+ RipDvd: TDscDvdList;
+ RipBd: TDscBdList;
 
-Procedure RipScan(Const Dir: String);
+Function SizeStrD(B: Double): String;
+Var V: LongInt;
+Begin
+ If B<1048576.0 Then SizeStrD:=SizeStr(Round(B))
+ Else If B<1073741824.0 Then Begin V:=Round(B/104857.6); SizeStrD:=IStr(V Div 10)+'.'+IStr(V Mod 10)+' Mo'; End
+ Else Begin V:=Round(B/107374182.4); SizeStrD:=IStr(V Div 10)+'.'+IStr(V Mod 10)+' Go'; End;
+End;
+
+Function DscStreamTxt(Var S: TDscStream; Video: Boolean): String;
+Var T: String;
+Begin
+ T:=S.Codec;
+ If Video Then Begin If S.W>0 Then T:=T+' '+IStr(S.W)+'x'+IStr(S.H); End
+ Else Begin If S.Ch>0 Then T:=T+' '+IStr(S.Ch)+'c'; If S.Lang<>'' Then T:=T+' '+S.Lang; End;
+ DscStreamTxt:=T;
+End;
+
+{ Ancien balayage : copie des fichiers VTS_xx_y.VOB d'un dossier (sans IFO) }
+Procedure RipScanVobs(Const Dir: String);
 Var SR: SearchRec; D,Nm: String; Num,Part,I,K: Integer; T: Integer;
 Begin
  RipN:=0; D:=AddSlash(Dir);
@@ -109948,58 +112171,135 @@ Begin
     If T=0 Then Begin
      If RipN>=20 Then Exit;
      Inc(RipN); T:=RipN; RipT[T].Num:=Num; RipT[T].Vobs:=0; RipT[T].Size:=0; RipT[T].Sel:=False;
+     RipT[T].Kind:=0; RipT[T].Idx:=0; RipT[T].Prot:=False;
     End;
     Inc(RipT[T].Vobs); RipT[T].Names[RipT[T].Vobs]:=Nm; Inc(RipT[T].Size,SR.Size);
    End;
   End;
-  If (T>0) And (RipT[T].Size<100000) Then Begin Dec(RipN); End;
+  If (T>0) Then Begin
+   If RipT[T].Size<100000 Then Dec(RipN)
+   Else Begin
+    RipT[T].SizeB:=RipT[T].Size; RipT[T].DurMs:=RipT[T].Size Div 560*1000;
+    RipT[T].Desc:='VTS_'+Pad2(RipT[T].Num)+'  '+IStr(RipT[T].Vobs)+' fichier(s) VOB';
+   End;
+  End;
  End;
  For I:=1 To RipN Do RipT[I].Sel:=True;
 End;
 
+Procedure RipScan(Const Dir: String);
+Var I,N: Integer; Ok: Boolean;
+Begin
+ RipN:=0; RipKind:=0; RipTop:=0; RipDir:=AddSlash(Dir);
+ If (Dir<>'') And (Dir[Length(Dir)] In ['/','\']) And (Length(Dir)>1) Then RipDir:=Dir;
+ { 1) DVD-Video (IFO) : dossier ou image }
+ Ok:=DscDvdTitles(Dir,RipDvd);
+ If Ok And (RipDvd.N>0) Then Begin
+  RipKind:=1; N:=RipDvd.N; If N>64 Then N:=64;
+  For I:=1 To N Do Begin
+   RipN:=I; RipT[I].Kind:=1; RipT[I].Idx:=I; RipT[I].Sel:=Not RipDvd.T[I].Encrypted; RipT[I].Vobs:=RipDvd.T[I].NVob;
+   If RipDvd.T[I].Num>0 Then RipT[I].Num:=RipDvd.T[I].Num Else RipT[I].Num:=I;
+   RipT[I].DurMs:=RipDvd.T[I].DurMs; RipT[I].SizeB:=RipDvd.T[I].Sectors*2048.0; RipT[I].Size:=0;
+   RipT[I].Prot:=RipDvd.T[I].Encrypted;
+   RipT[I].Desc:='Titre '+IStr(RipT[I].Num)+'  '+TimeStr(RipDvd.T[I].DurMs)+'  '+IStr(RipDvd.T[I].NChap)+' chap.  '+DscStreamTxt(RipDvd.T[I].Vid,True);
+   If RipDvd.T[I].NAud>0 Then RipT[I].Desc:=RipT[I].Desc+'  '+DscStreamTxt(RipDvd.T[I].Aud[1],False);
+  End;
+  Exit;
+ End;
+ { 2) Blu-ray (BDMV) : dossier ou image ; les listes de moins d'une minute sont ignorees }
+ DscBdMinMs:=60000;
+ Ok:=DscBdList(Dir,RipBd);
+ If Not (Ok And (RipBd.N>0)) Then Begin DscBdMinMs:=0; Ok:=DscBdList(Dir,RipBd); End;
+ If Ok And (RipBd.N>0) Then Begin
+  RipKind:=2; N:=RipBd.N; If N>64 Then N:=64;
+  For I:=1 To N Do Begin
+   RipN:=I; RipT[I].Kind:=2; RipT[I].Idx:=I; RipT[I].Sel:=(I=1) And Not RipBd.T[I].Encrypted; RipT[I].Vobs:=RipBd.T[I].NClip;
+   RipT[I].Num:=I; RipT[I].DurMs:=RipBd.T[I].DurMs; RipT[I].SizeB:=RipBd.T[I].Bytes; RipT[I].Size:=0;
+   RipT[I].Prot:=RipBd.T[I].Encrypted;
+   RipT[I].Desc:=RipBd.T[I].Name+'  '+TimeStr(RipBd.T[I].DurMs)+'  '+IStr(RipBd.T[I].NChap)+' chap.';
+   If RipBd.T[I].NVid>0 Then RipT[I].Desc:=RipT[I].Desc+'  '+DscStreamTxt(RipBd.T[I].Vid[1],True);
+   If RipBd.T[I].NAud>0 Then RipT[I].Desc:=RipT[I].Desc+'  '+DscStreamTxt(RipBd.T[I].Aud[1],False);
+  End;
+  Exit;
+ End;
+ { 3) dossier de fichiers VOB sans IFO exploitable }
+ RipScanVobs(Dir);
+End;
+
 Procedure DrawRipper;
-Var I,Y: Integer;
+Var I,Y,Rows: Integer; K: String;
 Begin
  Rect(0,96,ScrW-1,BodyBot,cWhite);
  If RipN=0 Then Begin
   IcoDisc(304,120,cBlue); SetColor(cBlue); Circle(320,136,40); Circle(320,136,12); Circle(320,136,38);
-  TxtC(0,ScrW-1,200,'Charger un DVD',cBlack);
-  TxtC(0,ScrW-1,222,'Cliquez sur "Charger DVD" puis choisissez le dossier du disque',cGrayD);
-  TxtC(0,ScrW-1,234,'(le dossier contenant VIDEO_TS ou VIDEO_TS lui-m'#234'me).',cGrayD);
-  TxtC(0,ScrW-1,260,'Les titres sont copi'#233's sans r'#233'encodage (flux MPEG-2 PS).',cGrayD);
+  TxtC(0,ScrW-1,200,'Charger un disque DVD ou Blu-ray',cBlack);
+  TxtC(0,ScrW-1,222,'Cliquez sur "Charger" puis choisissez le dossier du disque (VIDEO_TS ou BDMV)',cGrayD);
+  TxtC(0,ScrW-1,234,'ou une image ISO / UDF.',cGrayD);
+  TxtC(0,ScrW-1,260,'DVD : copie sans r'#233'encodage (MPEG-2 PS) ; Blu-ray : copie sans r'#233'encodage (.m2ts).',cGrayD);
+  TxtC(0,ScrW-1,272,'Les disques prot'#233'g'#233's (CSS, AACS, BD+) ne sont pas pris en charge.',cGrayD);
   HotAdd(100,110,440,200,hAdd);
  End Else Begin
-  Txt(14,102,'Disque : '+Fit(RipDir,520),cNavy);
-  For I:=1 To Min(RipN,10) Do Begin
-   Y:=118+(I-1)*27;
+  If RipKind=2 Then K:='Blu-ray' Else If RipKind=1 Then K:='DVD' Else K:='DVD (VOB)';
+  Txt(14,102,K+' : '+Fit(RipDir,480),cNavy);
+  Rows:=(BodyBot-118+1) Div 27; If Rows<1 Then Rows:=1;
+  If RipTop>RipN-Rows Then RipTop:=RipN-Rows; If RipTop<0 Then RipTop:=0;
+  For I:=RipTop+1 To Min(RipN,RipTop+Rows) Do Begin
+   Y:=118+(I-RipTop-1)*27;
    Panel(8,Y,ScrW-10,Y+24,cWhite,cLine);
    CheckBox(16,Y+6,'',RipT[I].Sel,1200+I);
-   Txt(44,Y+8,'Titre '+IStr(RipT[I].Num),cBlack);
-   Txt(130,Y+8,'VTS_'+Pad2(RipT[I].Num)+'  '+IStr(RipT[I].Vobs)+' fichier(s) VOB',cGrayD);
-   TxtR(430,Y+8,SizeStr(RipT[I].Size),cBlack);
-   TxtR(540,Y+8,'~'+TimeStr((RipT[I].Size Div 560)),cGrayD);
+   If RipT[I].Prot Then Txt(44,Y+8,Fit(RipT[I].Desc,ScrW-230),cRed) Else Txt(44,Y+8,Fit(RipT[I].Desc,ScrW-230),cBlack);
+   If RipT[I].Prot Then TxtR(ScrW-14,Y+8,'prot'#233'g'#233,cRed)
+   Else TxtR(ScrW-14,Y+8,SizeStrD(RipT[I].SizeB),cBlack);
   End;
+  If RipN>Rows Then Txt(14,BodyBot-12,IStr(RipN)+' titres (Page pr'#233'c'#233'dente / suivante pour d'#233'filer)',cGrayD);
  End;
+End;
+
+Procedure RipProgress(Done,Total: Int64);
+Begin
+ If Total>0 Then UiTick(Round(Done/1024.0),Round(Total/1024.0));
+ If Stopped Then DscStop:=True;
 End;
 
 Procedure RipRun;
 Var I,J,Done: Integer; FO,FI: File; Dst,Err,Base: String; Old: Byte; Tot,Cur,Sz: LongInt; Ok: Boolean;
 Begin
  Done:=0;
- If RipN=0 Then Begin Info('Chargez d''abord un DVD.'); Exit; End;
+ If RipN=0 Then Begin Info('Chargez d''abord un disque.'); Exit; End;
+ If RipKind<>2 Then
  If Not InList(Profs[CurProf].Ext,'MPG,VOB') Then Begin
   I:=MsgBox('Ripper','Seule la copie MPEG-2 (profils "MPEG-2 PS" ou "DVD") est disponible : le d'#233'codeur AC3/MPEG-2 n''est pas inclus.|Utiliser le profil "MPEG-2 PS" ?','Oui|Non');
   If I<>1 Then Exit;
   For J:=1 To NProf Do If Profs[J].Ext='MPG' Then Begin CurProf:=J; Break; End;
  End;
  Base:=NameOf(Copy(RipDir,1,Length(RipDir)-1));
- If UpStr(Base)='VIDEO_TS' Then Base:='DVD' Else Base:=Base;
+ If (UpStr(Base)='VIDEO_TS') Or (UpStr(Base)='BDMV') Or (Base='') Then Begin
+  If RipKind=2 Then Base:='BD' Else Base:='DVD';
+ End;
+ If (RipKind>0) And (Pos('.',Base)>0) Then Base:=Copy(Base,1,Pos('.',Base)-1);
  NewSlot(MaxFiles+1);
  For I:=1 To RipN Do If RipT[I].Sel Then Begin
-  Dst:=UniqueOut(OutDir,Base+'_Titre'+IStr(RipT[I].Num),'MPG');
+  If RipT[I].Prot Then Begin
+   Info('Le titre '+IStr(RipT[I].Num)+' est prot'#233'g'#233' (CSS / AACS / BD+) : non pris en charge.');
+   Continue;
+  End;
+  If RipKind=2 Then Dst:=UniqueOut(OutDir,Base+'_'+RipBd.T[RipT[I].Idx].Name,'M2TS')
+  Else Dst:=UniqueOut(OutDir,Base+'_Titre'+IStr(RipT[I].Num),'MPG');
   FillChar(Files[MaxFiles+1]^,SizeOf(TMedia),0);
   ProgBegin('Ripper','Titre '+IStr(RipT[I].Num)+' -> '+NameOf(Dst),MaxFiles+1);
-  Err:=''; Ok:=CreateOut(Dst,FO,Err); Tot:=RipT[I].Size; Cur:=0;
+  Err:='';
+  If RipKind>0 Then Begin
+   DscProgress:=RipProgress;
+   If RipKind=1 Then Ok:=DscDvdExtractTitle(RipDvd.T[RipT[I].Idx],Dst) Else Ok:=DscBdConcat(RipBd.T[RipT[I].Idx],Dst);
+   DscProgress:=Nil;
+   If Stopped Then Begin DelFile(Dst); End
+   Else If Ok Then Begin AddConverted(Dst); Inc(Done); End
+   Else Begin Info('Copie impossible : '+DscMsg); End;
+   ProgEnd;
+   If Stopped Then Break;
+   Continue;
+  End;
+  Ok:=CreateOut(Dst,FO,Err); Tot:=RipT[I].Size; Cur:=0;
   If Ok Then Begin
    For J:=1 To RipT[I].Vobs Do If Not Stopped Then Begin
     Assign(FI,RipDir+RipT[I].Names[J]); Old:=FileMode; FileMode:=0;
@@ -110721,13 +113021,15 @@ Begin
   2: If (Id>=1300) And (Id<1400) Then Begin MvClick(Id); Exit; End;
   3: If (Id>=1400) And (Id<1500) Then Begin ColClick(Id); Exit; End;
   4: If (Id>=1501) And (Id<=1500+NTools) Then Begin ToolGo(Id-1500); Exit; End;
-  1: If (Id>=1201) And (Id<=1220) Then Begin RipT[Id-1200].Sel:=Not RipT[Id-1200].Sel; Dirty:=True; Exit; End;
+  1: If (Id>=1201) And (Id<=1264) Then Begin RipT[Id-1200].Sel:=Not RipT[Id-1200].Sel; Dirty:=True; Exit; End;
  End;
  Case Id Of
   hAdd,hAddArrow: Begin
    If Tab=1 Then Begin
-    If FileDlg('Charger un dossier DVD',False,True,0) Then RipScan(PickList[1]);
-    If RipN=0 Then Info('Aucun titre DVD (VTS_xx_x.VOB) trouv'#233' dans ce dossier.');
+    K:=MsgBox('Ripper','Charger un disque DVD ou Blu-ray depuis :','Dossier|Image ISO');
+    If K=1 Then Begin If FileDlg('Charger un dossier DVD / Blu-ray',False,True,0) Then RipScan(PickList[1]); End
+    Else If K=2 Then Begin If FileDlg('Charger une image ISO / UDF',False,False,4) Then RipScan(PickList[1]); End;
+    If (K>0) And (RipN=0) Then Info('Aucun titre DVD ou Blu-ray trouv'#233'.|'+DscMsg);
     Dirty:=True;
    End Else If Id=hAddArrow Then Begin
     K:=PopupMenu(6,94,'Ajouter Fichier(s)|Ajouter un dossier',0,150);
@@ -110778,8 +113080,8 @@ Begin
   315..319: Begin Tab:=K-315; Dirty:=True; End;
   323: Begin Tab:=0; ConvertAll; End;
   15: AddFilesDlg;
-  kPgUp: Begin If ListTop>0 Then Dec(ListTop); Dirty:=True; End;
-  kPgDn: Begin If ListTop+RowsVis<NFiles Then Inc(ListTop); Dirty:=True; End;
+  kPgUp: Begin If Tab=1 Then Begin If RipTop>0 Then Dec(RipTop,5); If RipTop<0 Then RipTop:=0; End Else If ListTop>0 Then Dec(ListTop); Dirty:=True; End;
+  kPgDn: Begin If Tab=1 Then Inc(RipTop,5) Else If ListTop+RowsVis<NFiles Then Inc(ListTop); Dirty:=True; End;
   kEsc: ;
  End;
 End;
