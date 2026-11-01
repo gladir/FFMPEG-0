@@ -1526,6 +1526,11 @@ Begin
  AddProf(0,'MP4 SD 480P','MP4','H264','AAC','854x480',1500,128,44100,2);
  AddProf(0,'MP4 HEVC (H.265)','MP4','HEVC','AAC','Auto',3000,160,44100,2);
  AddProf(0,'MOV QuickTime','MOV','H264','AAC','Auto',5000,192,44100,2);
+ AddProf(0,'MOV ProRes 422 HQ','MOV','PrRsHQ','AAC','Auto',0,192,44100,2);
+ AddProf(0,'MOV ProRes 422','MOV','PrRs422','AAC','Auto',0,192,44100,2);
+ AddProf(0,'MOV ProRes 422 LT','MOV','PrRsLT','AAC','Auto',0,192,44100,2);
+ AddProf(0,'MOV ProRes Proxy','MOV','PrRsPxy','AAC','Auto',0,192,44100,2);
+ AddProf(0,'MOV ProRes 4444','MOV','PrRs4444','AAC','Auto',0,192,44100,2);
  AddProf(0,'MKV','MKV','H264','AAC','Auto',5000,192,44100,2);
  AddProf(0,'MKV HEVC (H.265)','MKV','HEVC','AAC','Auto',3000,160,44100,2);
  AddProf(0,'AVI','AVI','MPEG4','MP3','Auto',3000,192,44100,2);
@@ -30048,6 +30053,1041 @@ Begin
  PktLen:=0; IsKey:=False; Dts:=0; Pts:=0; Pkt:=HeOut;
  HeFlush:=False;
 End;
+{ ======================================================================== }
+{ pe_prores_enc.pas : encodeur Apple ProRes 4:2:2 10 bits (Proxy, LT,      }
+{ Standard, HQ) et 4:4:4 10 bits sans alpha (4444), progressif.            }
+{                                                                          }
+{ Port fidele de FFmpeg n6.1.1 (LGPL-2.1+) :                               }
+{   libavcodec/proresenc_kostya.c (prores_ks, (c) 2012 Konstantin Shishkov)}
+{   libavcodec/jfdctint_template.c (ff_jpeg_fdct_islow_10, IJG/Independent }
+{                                   JPEG Group, (c) Thomas G. Lane)        }
+{   libavcodec/proresdata.c (table de balayage progressive)                }
+{   libswscale/utils.c initFilter (bicubique, param 0/0.6) + conversion    }
+{     verticale/horizontale 8 bits -> 10 bits des chromas, pour reproduire }
+{     ffmpeg -pix_fmt yuv422p10le / yuv444p10le (voir PREConvert).         }
+{                                                                          }
+{ Interface publique (prefixe PRE) :                                       }
+{   Var PREMbsPerSlice, PREForceQ, PREBitsPerMb, PREVendor, PREPrimaries,   }
+{       PRETrc, PREMatrix, PREQuantSel, PREKsCompat                          }
+{   Procedure PREBegin(W,H,Fn,Fd,Bitrate,Profile: LongInt);                 }
+{   Function  PREFrame(Yuv: PEABuffer; Var Pkt: PEABuffer; Var PktLen: LongInt; }
+{                      Var IsKey: Boolean; Var Dts,Pts: LongInt): Boolean; }
+{   Procedure PREFree;   Function PRETag: String;                          }
+{   Procedure PREGetRecon(Dst: PEABuffer);  (utilise pe_prores.pas : Pr*)  }
+{ ======================================================================== }
+{$B-}
+
+Type
+ TPREWArr=Array[0..1073741823] Of Word;
+ PPREWArr=^TPREWArr;
+ TPREIArr=Array[0..268435455] Of LongInt;
+ PPREIArr=^TPREIArr;
+ TPREI64Arr=Array[0..134217727] Of Int64;
+ PPREI64Arr=^TPREI64Arr;
+ TPREBlk=Array[0..2047] Of SmallInt;
+ TPRENode=Record Prev,Quant,Bits,Score: LongInt; End;
+ TPRENodeArr=Array[0..1048575] Of TPRENode;
+ PPRENodeArr=^TPRENodeArr;
+ TPREQm=Array[0..63] Of LongInt;
+
+Const
+ PRE_MAXMBS=8;
+ PRE_TRELLIS=16;
+ PRE_SCORE_LIMIT=1073741823;
+ PRE_MAX_STORED_Q=16;
+ PRE_FIRST_DC_CB=$B8;
+ PRE_QM: Array[0..6,0..63] Of Byte=(
+  ( 4,  7,  9, 11, 13, 14, 15, 63,
+    7,  7, 11, 12, 14, 15, 63, 63,
+    9, 11, 13, 14, 15, 63, 63, 63,
+   11, 11, 13, 14, 63, 63, 63, 63,
+   11, 13, 14, 63, 63, 63, 63, 63,
+   13, 14, 63, 63, 63, 63, 63, 63,
+   13, 63, 63, 63, 63, 63, 63, 63,
+   63, 63, 63, 63, 63, 63, 63, 63),
+  ( 4,  7,  9, 11, 13, 14, 63, 63,
+    7,  7, 11, 12, 14, 63, 63, 63,
+    9, 11, 13, 14, 63, 63, 63, 63,
+   11, 11, 13, 14, 63, 63, 63, 63,
+   11, 13, 14, 63, 63, 63, 63, 63,
+   13, 14, 63, 63, 63, 63, 63, 63,
+   13, 63, 63, 63, 63, 63, 63, 63,
+   63, 63, 63, 63, 63, 63, 63, 63),
+  ( 4,  5,  6,  7,  9, 11, 13, 15,
+    5,  5,  7,  8, 11, 13, 15, 17,
+    6,  7,  9, 11, 13, 15, 15, 17,
+    7,  7,  9, 11, 13, 15, 17, 19,
+    7,  9, 11, 13, 14, 16, 19, 23,
+    9, 11, 13, 14, 16, 19, 23, 29,
+    9, 11, 13, 15, 17, 21, 28, 35,
+   11, 13, 16, 17, 21, 28, 35, 41),
+  ( 4,  4,  5,  5,  6,  7,  7,  9,
+    4,  4,  5,  6,  7,  7,  9,  9,
+    5,  5,  6,  7,  7,  9,  9, 10,
+    5,  5,  6,  7,  7,  9,  9, 10,
+    5,  6,  7,  7,  8,  9, 10, 12,
+    6,  7,  7,  8,  9, 10, 12, 15,
+    6,  7,  7,  9, 10, 11, 14, 17,
+    7,  7,  9, 10, 11, 14, 17, 21),
+  ( 4,  4,  4,  4,  4,  4,  4,  4,
+    4,  4,  4,  4,  4,  4,  4,  4,
+    4,  4,  4,  4,  4,  4,  4,  4,
+    4,  4,  4,  4,  4,  4,  4,  5,
+    4,  4,  4,  4,  4,  4,  5,  5,
+    4,  4,  4,  4,  4,  5,  5,  6,
+    4,  4,  4,  4,  5,  5,  6,  7,
+    4,  4,  4,  4,  5,  6,  7,  7),
+  ( 2,  2,  2,  2,  2,  2,  2,  2,
+    2,  2,  2,  2,  2,  2,  2,  2,
+    2,  2,  2,  2,  2,  2,  2,  2,
+    2,  2,  2,  2,  2,  2,  2,  3,
+    2,  2,  2,  2,  2,  2,  3,  3,
+    2,  2,  2,  2,  2,  3,  3,  3,
+    2,  2,  2,  2,  3,  3,  3,  4,
+    2,  2,  2,  2,  3,  3,  4,  4),
+  ( 4,  4,  4,  4,  4,  4,  4,  4,
+    4,  4,  4,  4,  4,  4,  4,  4,
+    4,  4,  4,  4,  4,  4,  4,  4,
+    4,  4,  4,  4,  4,  4,  4,  4,
+    4,  4,  4,  4,  4,  4,  4,  4,
+    4,  4,  4,  4,  4,  4,  4,  4,
+    4,  4,  4,  4,  4,  4,  4,  4,
+    4,  4,  4,  4,  4,  4,  4,  4));
+ PRE_DCCB: Array[0..3] Of Byte=($04,$28,$4D,$70);
+ PRE_ACCB: Array[0..6] Of Byte=($04,$28,$4C,$05,$29,$06,$0A);
+ PRE_RUN2CB: Array[0..15] Of Byte=(5,5,3,3,0,4,4,4,4,1,1,1,1,1,1,2);
+ PRE_LEV2CB: Array[0..9] Of Byte=(0,6,3,5,0,1,1,1,1,2);
+ PRE_MBLIM: Array[0..3] Of LongInt=(1620,2700,6075,9216);
+ { profils : 0 proxy, 1 lt, 2 standard, 3 hq, 4 4444 }
+ PRE_PMINQ: Array[0..4] Of LongInt=(4,1,1,1,1);
+ PRE_PMAXQ: Array[0..4] Of LongInt=(8,9,6,6,6);
+ PRE_PQUANT: Array[0..4] Of LongInt=(0,2,3,4,4);
+ PRE_PQUANTC: Array[0..4] Of LongInt=(1,2,3,4,4);
+ PRE_PBR: Array[0..4,0..3] Of LongInt=((300,242,220,194),(720,560,490,440),(1050,808,710,632),(1566,1216,1070,950),(2350,1828,1600,1425));
+ PRE_PTAG: Array[0..4] Of String[4]=('apco','apcs','apcn','apch','ap4h');
+ PRE_SCAN: Array[0..63] Of Byte=(
+   0,  1,  8,  9,  2,  3, 10, 11,
+  16, 17, 24, 25, 18, 19, 26, 27,
+   4,  5, 12, 20, 13,  6,  7, 14,
+  21, 28, 29, 22, 15, 23, 30, 31,
+  32, 33, 40, 48, 41, 34, 35, 42,
+  49, 56, 57, 50, 43, 36, 37, 44,
+  51, 58, 59, 52, 45, 38, 39, 46,
+  53, 60, 61, 54, 47, 55, 62, 63);
+
+Var
+ { ---- parametres publics (a regler AVANT PREBegin) ---- }
+ PREMbsPerSlice: LongInt;   { macroblocs par tranche : 1,2,4,8 (defaut 8) }
+ PREForceQ: LongInt;        { >0 : qscale fixe 1..64 (comme -qscale:v de prores_ks) }
+ PREBitsPerMb: LongInt;     { >0 : bits par macrobloc fixes (comme -bits_per_mb), >=128 }
+ PREVendor: String;         { 4 caracteres, defaut 'Lavc' }
+ PREPrimaries,PRETrc,PREMatrix: LongInt;  { octets color_primaries/trc/matrix de l'en-tete (0 = defaut = 2 = non specifie ; 1 = BT.709) }
+ PREQuantSel: LongInt;      { 0 auto (matrice du profil) ; N>0 : matrice N-1 de l'option quant_mat de prores_ks
+                              (1 proxy, 3 lt, 4 standard, 5 hq, 7 'default' = matrices absentes de l'en-tete) }
+ PREKsCompat: Boolean;      { True : reproduit exactement deux defauts de prores_ks (octets identiques) :
+                              (a) matrice chroma de l'en-tete = matrice luma (faux pour Proxy),
+                              (b) largeur chroma = W div 2 (colonne chroma perdue si W impair).
+                              False (defaut) : corrige les deux. }
+ { ---- etat ---- }
+ PREOn: Boolean;
+ PREW,PREH,PREFn,PREFd,PREBitrate,PREProf,PREMbW,PREMbH,PREMps,PRESlW,PRESlPic: LongInt;
+ PRECf,PREBpm,PREBpmBase,PREFq,PRECw,PRENFrames: LongInt;
+ PREMinQ,PREMaxQ: LongInt;
+ PRECumTarget,PRECumActual: Int64;
+ PREQuant,PREQuantC: Array[0..63] Of Byte;     { matrices (luma / chroma du profil) }
+ PREQuants,PREQuantsC: Array[0..PRE_MAX_STORED_Q-1] Of TPREQm;
+ PRECustomQ,PRECustomQC: TPREQm;
+ PREPl: Array[0..2] Of PPREWArr;  { plans 10 bits : Y, U, V }
+ PREPlW,PREPlH,PREPlStride,PREPlSize: Array[0..2] Of LongInt;
+ PREPwid: Array[0..2] Of LongInt; { largeur utilisee par get_slice_data (pwidth) }
+ PREBlkT: Array[0..2] Of TPREBlk;
+ PREBlkE: TPREBlk;
+ PRENodes: PPRENodeArr;
+ PRESliceQ: PPREIArr;
+ PREEmu: Array[0..255] Of Word;
+ PREOut: PEABuffer; PREOutCap,PREOutPos: LongInt;
+ PREAcc: QWord; PREAccN: LongInt;
+ PRELastLen: LongInt;
+
+Function PRESar(V: LongInt; N: LongInt): LongInt;
+Begin
+ If V>=0 Then PRESar:=V Shr N Else PRESar:=-((-V-1) Shr N)-1;
+End;
+
+Function PRESar64(V: Int64; N: LongInt): Int64;
+Begin
+ If V>=0 Then PRESar64:=V Shr N Else PRESar64:=-((-V-1) Shr N)-1;
+End;
+
+Function PRELog2(V: LongInt): LongInt;  { av_log2 }
+Var R: LongInt;
+Begin
+ R:=0; If V<=0 Then Begin PRELog2:=0; Exit; End;
+ While V>1 Do Begin V:=V Shr 1; Inc(R); End;
+ PRELog2:=R;
+End;
+
+Function PREI16(V: LongInt): LongInt;   { troncature int16_t }
+Begin
+ V:=V And $FFFF; If V>=32768 Then V:=V-65536;
+ PREI16:=V;
+End;
+
+{ ---- ecriture de bits (put_bits de FFmpeg) ---- }
+Procedure PREEnsure(Extra: LongInt);
+Begin
+ If PREOutPos+Extra+16>PREOutCap Then Begin
+  While PREOutPos+Extra+16>PREOutCap Do PREOutCap:=PREOutCap*2;
+  ReallocMem(PREOut,PREOutCap);
+ End;
+End;
+
+Procedure PRETByte(V: LongInt);
+Begin
+ PREOut^[PREOutPos]:=V And 255; Inc(PREOutPos);
+End;
+
+Procedure PRETBe16(V: LongInt);
+Begin
+ PRETByte(V Shr 8); PRETByte(V);
+End;
+
+Procedure PRETBe32(V: LongInt);
+Begin
+ PRETByte(V Shr 24); PRETByte(V Shr 16); PRETByte(V Shr 8); PRETByte(V);
+End;
+
+Procedure PREPutBits(N: LongInt; V: LongInt);
+Var VV: Int64;
+Begin
+ If N<=0 Then Exit;
+ VV:=Int64(V) And ((Int64(1) Shl N)-1);
+ PREAcc:=(PREAcc Shl N) Or QWord(VV);
+ Inc(PREAccN,N);
+ While PREAccN>=8 Do Begin
+  Dec(PREAccN,8);
+  PREOut^[PREOutPos]:=(PREAcc Shr PREAccN) And 255; Inc(PREOutPos);
+ End;
+End;
+
+Procedure PREFlushBits;
+Begin
+ If PREAccN>0 Then PREPutBits(8-PREAccN,0);
+ PREAccN:=0; PREAcc:=0;
+End;
+
+{ ---- FDCT 10 bits (ff_jpeg_fdct_islow_10) ---- }
+Procedure PREFdct(Var Blk: TPREBlk; Off: LongInt);
+Var D: Array[0..63] Of LongInt; Ctr,P: LongInt;
+    T0,T1,T2,T3,T4,T5,T6,T7,T10,T11,T12,T13,Z1,Z2,Z3,Z4,Z5: LongInt;
+Begin
+ For P:=0 To 63 Do D[P]:=Blk[Off+P];
+ { passe 1 : lignes }
+ For Ctr:=0 To 7 Do Begin
+  P:=Ctr*8;
+  T0:=D[P]+D[P+7]; T7:=D[P]-D[P+7];
+  T1:=D[P+1]+D[P+6]; T6:=D[P+1]-D[P+6];
+  T2:=D[P+2]+D[P+5]; T5:=D[P+2]-D[P+5];
+  T3:=D[P+3]+D[P+4]; T4:=D[P+3]-D[P+4];
+  T10:=T0+T3; T13:=T0-T3; T11:=T1+T2; T12:=T1-T2;
+  D[P]:=PREI16((T10+T11)*2);
+  D[P+4]:=PREI16((T10-T11)*2);
+  Z1:=(T12+T13)*4433;
+  D[P+2]:=PREI16(PRESar(Z1+T13*6270+(1 Shl 11),12));
+  D[P+6]:=PREI16(PRESar(Z1+T12*(-15137)+(1 Shl 11),12));
+  Z1:=T4+T7; Z2:=T5+T6; Z3:=T4+T6; Z4:=T5+T7;
+  Z5:=(Z3+Z4)*9633;
+  T4:=T4*2446; T5:=T5*16819; T6:=T6*25172; T7:=T7*12299;
+  Z1:=Z1*(-7373); Z2:=Z2*(-20995); Z3:=Z3*(-16069); Z4:=Z4*(-3196);
+  Z3:=Z3+Z5; Z4:=Z4+Z5;
+  D[P+7]:=PREI16(PRESar(T4+Z1+Z3+(1 Shl 11),12));
+  D[P+5]:=PREI16(PRESar(T5+Z2+Z4+(1 Shl 11),12));
+  D[P+3]:=PREI16(PRESar(T6+Z2+Z3+(1 Shl 11),12));
+  D[P+1]:=PREI16(PRESar(T7+Z1+Z4+(1 Shl 11),12));
+ End;
+ { passe 2 : colonnes }
+ For Ctr:=0 To 7 Do Begin
+  P:=Ctr;
+  T0:=D[P]+D[P+56]; T7:=D[P]-D[P+56];
+  T1:=D[P+8]+D[P+48]; T6:=D[P+8]-D[P+48];
+  T2:=D[P+16]+D[P+40]; T5:=D[P+16]-D[P+40];
+  T3:=D[P+24]+D[P+32]; T4:=D[P+24]-D[P+32];
+  T10:=T0+T3; T13:=T0-T3; T11:=T1+T2; T12:=T1-T2;
+  D[P]:=PREI16(PRESar(T10+T11+2,2));
+  D[P+32]:=PREI16(PRESar(T10-T11+2,2));
+  Z1:=(T12+T13)*4433;
+  D[P+16]:=PREI16(PRESar(Z1+T13*6270+(1 Shl 14),15));
+  D[P+48]:=PREI16(PRESar(Z1+T12*(-15137)+(1 Shl 14),15));
+  Z1:=T4+T7; Z2:=T5+T6; Z3:=T4+T6; Z4:=T5+T7;
+  Z5:=(Z3+Z4)*9633;
+  T4:=T4*2446; T5:=T5*16819; T6:=T6*25172; T7:=T7*12299;
+  Z1:=Z1*(-7373); Z2:=Z2*(-20995); Z3:=Z3*(-16069); Z4:=Z4*(-3196);
+  Z3:=Z3+Z5; Z4:=Z4+Z5;
+  D[P+56]:=PREI16(PRESar(T4+Z1+Z3+(1 Shl 14),15));
+  D[P+40]:=PREI16(PRESar(T5+Z2+Z4+(1 Shl 14),15));
+  D[P+24]:=PREI16(PRESar(T6+Z2+Z3+(1 Shl 14),15));
+  D[P+8]:=PREI16(PRESar(T7+Z1+Z4+(1 Shl 14),15));
+ End;
+ For P:=0 To 63 Do Blk[Off+P]:=D[P];
+End;
+
+{ ---- get_slice_data : DCT des blocs d'une tranche ---- }
+{ Pl : plan (0 Y, 1 U, 2 V) ; X,Y en pixels du plan ; W,H = pwidth / hauteur }
+Procedure PREGetSlice(Pl: LongInt; X,Y,W,H: LongInt; Var Blocks: TPREBlk; Mbs,Bpm: LongInt; IsChroma: Boolean);
+Var I,J,K,MbW,Bw,Bh,Pix,Bp,Stride: LongInt; Src: PPREWArr;
+ Procedure Dct8(Rx,Ry: LongInt);   { bloc 8x8 en (Rx,Ry) de l'emu_buf }
+ Var A,B: LongInt;
+ Begin
+  For A:=0 To 7 Do For B:=0 To 7 Do Blocks[Bp+A*8+B]:=PREEmu[(Ry+A)*16+Rx+B];
+  PREFdct(Blocks,Bp);
+  Inc(Bp,64);
+ End;
+Begin
+ MbW:=4*Bpm; Stride:=PREPlStride[Pl]; Src:=PREPl[Pl]; Bp:=0;
+ For I:=0 To Mbs-1 Do Begin
+  If X>=W Then Begin
+   FillChar(Blocks[Bp],64*(Mbs-I)*Bpm*2,0);
+   Exit;
+  End;
+  Bw:=W-X; If Bw>MbW Then Bw:=MbW;
+  Bh:=H-Y; If Bh>16 Then Bh:=16;
+  For J:=0 To Bh-1 Do Begin
+   For K:=0 To Bw-1 Do PREEmu[J*16+K]:=Src^[(Y+J)*Stride+X+K];
+   Pix:=PREEmu[J*16+Bw-1];
+   For K:=Bw To MbW-1 Do PREEmu[J*16+K]:=Pix;
+  End;
+  For J:=Bh To 15 Do
+   For K:=0 To MbW-1 Do PREEmu[J*16+K]:=PREEmu[(Bh-1)*16+K];
+  If Not IsChroma Then Begin
+   Dct8(0,0);
+   If Bpm>2 Then Dct8(8,0);
+   Dct8(0,8);
+   If Bpm>2 Then Dct8(8,8);
+  End Else Begin
+   Dct8(0,0);
+   Dct8(0,8);
+   If Bpm>2 Then Begin
+    Dct8(8,0);
+    Dct8(8,8);
+   End;
+  End;
+  Inc(X,MbW);
+ End;
+End;
+
+{ ---- codes VLC ---- }
+Procedure PREEncVlc(Cb: LongInt; Val: LongInt);
+Var Rice,Exp,Sw,SwVal,Ex: LongInt;
+Begin
+ Sw:=(Cb And 3)+1; Rice:=Cb Shr 5; Exp:=(Cb Shr 2) And 7;
+ SwVal:=Sw Shl Rice;
+ If Val>=SwVal Then Begin
+  Val:=Val-(SwVal-(1 Shl Exp));
+  Ex:=PRELog2(Val);
+  PREPutBits(Ex-Exp+Sw,0);
+  PREPutBits(Ex+1,Val);
+ End Else Begin
+  Ex:=Val Shr Rice;
+  If Ex>0 Then PREPutBits(Ex,0);
+  PREPutBits(1,1);
+  If Rice>0 Then PREPutBits(Rice,Val);
+ End;
+End;
+
+Function PREEstVlc(Cb: LongInt; Val: LongInt): LongInt;
+Var Rice,Exp,Sw,SwVal,Ex: LongInt;
+Begin
+ Sw:=(Cb And 3)+1; Rice:=Cb Shr 5; Exp:=(Cb Shr 2) And 7;
+ SwVal:=Sw Shl Rice;
+ If Val>=SwVal Then Begin
+  Val:=Val-(SwVal-(1 Shl Exp));
+  Ex:=PRELog2(Val);
+  PREEstVlc:=Ex*2-Exp+Sw+1;
+ End Else
+  PREEstVlc:=(Val Shr Rice)+Rice+1;
+End;
+
+Function PRESign(X: LongInt): LongInt;   { x >> 31 arithmetique }
+Begin
+ If X<0 Then PRESign:=-1 Else PRESign:=0;
+End;
+
+Function PREMakeCode(X: LongInt): LongInt;
+Begin
+ PREMakeCode:=(X*2) Xor PRESign(X);
+End;
+
+Procedure PREEncDcs(Var Blk: TPREBlk; Nb: LongInt; Scale: LongInt);
+Var I,Codebook,Code,Dc,PrevDc,Delta,Sign,NewSign,Off: LongInt;
+Begin
+ PrevDc:=(Blk[0]-$4000) Div Scale;
+ PREEncVlc(PRE_FIRST_DC_CB,PREMakeCode(PrevDc));
+ Sign:=0; Codebook:=3; Off:=64;
+ For I:=1 To Nb-1 Do Begin
+  Dc:=(Blk[Off]-$4000) Div Scale;
+  Delta:=Dc-PrevDc;
+  NewSign:=PRESign(Delta);
+  Delta:=(Delta Xor Sign)-Sign;
+  Code:=PREMakeCode(Delta);
+  PREEncVlc(PRE_DCCB[Codebook],Code);
+  Codebook:=(Code+(Code And 1)) Shr 1;
+  If Codebook>3 Then Codebook:=3;
+  Sign:=NewSign; PrevDc:=Dc;
+  Inc(Off,64);
+ End;
+End;
+
+Procedure PREEncAcs(Var Blk: TPREBlk; Nb: LongInt; Var Qm: TPREQm);
+Var Idx,I,Run,Level,RunCb,LevCb,MaxC,AbsL: LongInt;
+Begin
+ MaxC:=Nb Shl 6;
+ RunCb:=PRE_RUN2CB[4]; LevCb:=PRE_LEV2CB[2]; Run:=0;
+ For I:=1 To 63 Do Begin
+  Idx:=PRE_SCAN[I];
+  While Idx<MaxC Do Begin
+   Level:=Blk[Idx] Div Qm[PRE_SCAN[I]];
+   If Level<>0 Then Begin
+    AbsL:=Abs(Level);
+    PREEncVlc(PRE_ACCB[RunCb],Run);
+    PREEncVlc(PRE_ACCB[LevCb],AbsL-1);
+    If Level<0 Then PREPutBits(1,1) Else PREPutBits(1,0);
+    If Run>15 Then RunCb:=PRE_RUN2CB[15] Else RunCb:=PRE_RUN2CB[Run];
+    If AbsL>9 Then LevCb:=PRE_LEV2CB[9] Else LevCb:=PRE_LEV2CB[AbsL];
+    Run:=0;
+   End Else Inc(Run);
+   Inc(Idx,64);
+  End;
+ End;
+End;
+
+Function PREEstDcs(Var Err: LongInt; Var Blk: TPREBlk; Nb: LongInt; Scale: LongInt): LongInt;
+Var I,Codebook,Code,Dc,PrevDc,Delta,Sign,NewSign,Bits,Off: LongInt;
+Begin
+ PrevDc:=(Blk[0]-$4000) Div Scale;
+ Bits:=PREEstVlc(PRE_FIRST_DC_CB,PREMakeCode(PrevDc));
+ Sign:=0; Codebook:=3; Off:=64;
+ Err:=Err+(Abs(Blk[Off]-$4000) Mod Scale);   { (sic) comme prores_ks : bloc 1 compte deux fois }
+ For I:=1 To Nb-1 Do Begin
+  Dc:=(Blk[Off]-$4000) Div Scale;
+  Err:=Err+(Abs(Blk[Off]-$4000) Mod Scale);
+  Delta:=Dc-PrevDc;
+  NewSign:=PRESign(Delta);
+  Delta:=(Delta Xor Sign)-Sign;
+  Code:=PREMakeCode(Delta);
+  Bits:=Bits+PREEstVlc(PRE_DCCB[Codebook],Code);
+  Codebook:=(Code+(Code And 1)) Shr 1;
+  If Codebook>3 Then Codebook:=3;
+  Sign:=NewSign; PrevDc:=Dc;
+  Inc(Off,64);
+ End;
+ PREEstDcs:=Bits;
+End;
+
+Function PREEstAcs(Var Err: LongInt; Var Blk: TPREBlk; Nb: LongInt; Var Qm: TPREQm): LongInt;
+Var Idx,I,Run,Level,RunCb,LevCb,MaxC,AbsL,Bits,Q: LongInt;
+Begin
+ MaxC:=Nb Shl 6; Bits:=0;
+ RunCb:=PRE_RUN2CB[4]; LevCb:=PRE_LEV2CB[2]; Run:=0;
+ For I:=1 To 63 Do Begin
+  Idx:=PRE_SCAN[I]; Q:=Qm[PRE_SCAN[I]];
+  While Idx<MaxC Do Begin
+   Level:=Blk[Idx] Div Q;
+   Err:=Err+(Abs(Blk[Idx]) Mod Q);
+   If Level<>0 Then Begin
+    AbsL:=Abs(Level);
+    Bits:=Bits+PREEstVlc(PRE_ACCB[RunCb],Run);
+    Bits:=Bits+PREEstVlc(PRE_ACCB[LevCb],AbsL-1)+1;
+    If Run>15 Then RunCb:=PRE_RUN2CB[15] Else RunCb:=PRE_RUN2CB[Run];
+    If AbsL>9 Then LevCb:=PRE_LEV2CB[9] Else LevCb:=PRE_LEV2CB[AbsL];
+    Run:=0;
+   End Else Inc(Run);
+   Inc(Idx,64);
+  End;
+ End;
+ PREEstAcs:=Bits;
+End;
+
+Function PREEstSlicePlane(Var Err: LongInt; Plane: LongInt; Nb: LongInt; Var Qm: TPREQm): LongInt;
+Var Bits: LongInt;
+Begin
+ Bits:=PREEstDcs(Err,PREBlkT[Plane],Nb,Qm[0]);
+ Bits:=Bits+PREEstAcs(Err,PREBlkT[Plane],Nb,Qm);
+ PREEstSlicePlane:=(Bits+7) And (Not 7);
+End;
+
+{ ---- recherche du quantificateur d'une tranche (find_slice_quant) ---- }
+Procedure PRESetCustom(Q: LongInt);
+Var J: LongInt;
+Begin
+ For J:=0 To 63 Do Begin
+  PRECustomQ[J]:=PREQuant[J]*Q;
+  PRECustomQC[J]:=PREQuantC[J]*Q;
+ End;
+End;
+
+Function PREFindSliceQuant(TNode,X,Y,Mbs: LongInt): LongInt;
+Var I,Q,Pq,Xp,Yp: LongInt;
+    NCb: Array[0..2] Of LongInt;
+    Err,Bits,BitsLimit,MbsEnd,Prev,Cur,NewScore,OverQ: LongInt;
+    SBits,SScore: Array[0..PRE_TRELLIS-1] Of LongInt;
+    IsC: Boolean;
+Begin
+ MbsEnd:=X+Mbs;
+ For I:=0 To 2 Do Begin
+  IsC:=I>0;
+  If (Not IsC) Or (PRECf=3) Then Begin
+   Xp:=X Shl 4; Yp:=Y Shl 4; NCb[I]:=4;
+  End Else Begin
+   Xp:=X Shl 3; Yp:=Y Shl 4; NCb[I]:=2;
+  End;
+  PREGetSlice(I,Xp,Yp,PREPwid[I],PREH,PREBlkT[I],Mbs,NCb[I],IsC);
+ End;
+ For Q:=PREMinQ To PREMaxQ+1 Do Begin
+  PRENodes^[TNode+Q].Prev:=-1;
+  PRENodes^[TNode+Q].Quant:=Q;
+ End;
+ For Q:=PREMinQ To PREMaxQ Do Begin
+  Bits:=0; Err:=0;
+  Bits:=Bits+PREEstSlicePlane(Err,0,Mbs*NCb[0],PREQuants[Q]);
+  For I:=1 To 2 Do
+   Bits:=Bits+PREEstSlicePlane(Err,I,Mbs*NCb[I],PREQuantsC[Q]);
+  If Bits>65000*8 Then Err:=PRE_SCORE_LIMIT;
+  SBits[Q]:=Bits; SScore[Q]:=Err;
+ End;
+ If SBits[PREMaxQ]<=PREBpm*Mbs Then Begin
+  SBits[PREMaxQ+1]:=SBits[PREMaxQ];
+  SScore[PREMaxQ+1]:=SScore[PREMaxQ]+1;
+  OverQ:=PREMaxQ;
+ End Else Begin
+  Q:=PREMaxQ+1;
+  While Q<128 Do Begin
+   Bits:=0; Err:=0;
+   If Q<PRE_MAX_STORED_Q Then Begin
+    Bits:=Bits+PREEstSlicePlane(Err,0,Mbs*NCb[0],PREQuants[Q]);
+    For I:=1 To 2 Do
+     Bits:=Bits+PREEstSlicePlane(Err,I,Mbs*NCb[I],PREQuantsC[Q]);
+   End Else Begin
+    PRESetCustom(Q);
+    Bits:=Bits+PREEstSlicePlane(Err,0,Mbs*NCb[0],PRECustomQ);
+    For I:=1 To 2 Do
+     Bits:=Bits+PREEstSlicePlane(Err,I,Mbs*NCb[I],PRECustomQC);
+   End;
+   If Bits<=PREBpm*Mbs Then Break;
+   Inc(Q);
+  End;
+  SBits[PREMaxQ+1]:=Bits; SScore[PREMaxQ+1]:=Err;
+  OverQ:=Q;
+ End;
+ PRENodes^[TNode+PREMaxQ+1].Quant:=OverQ;
+ BitsLimit:=MbsEnd*PREBpm;
+ For Pq:=PREMinQ To PREMaxQ+1 Do Begin
+  Prev:=TNode-PRE_TRELLIS+Pq;
+  For Q:=PREMinQ To PREMaxQ+1 Do Begin
+   Cur:=TNode+Q;
+   Bits:=PRENodes^[Prev].Bits+SBits[Q];
+   Err:=SScore[Q];
+   If Bits>BitsLimit Then Err:=PRE_SCORE_LIMIT;
+   If (PRENodes^[Prev].Score<PRE_SCORE_LIMIT) And (Err<PRE_SCORE_LIMIT) Then
+    NewScore:=PRENodes^[Prev].Score+Err
+   Else NewScore:=PRE_SCORE_LIMIT;
+   If (PRENodes^[Cur].Prev=-1) Or (PRENodes^[Cur].Score>=NewScore) Then Begin
+    PRENodes^[Cur].Bits:=Bits;
+    PRENodes^[Cur].Score:=NewScore;
+    PRENodes^[Cur].Prev:=Prev;
+   End;
+  End;
+ End;
+ Err:=PRENodes^[TNode+PREMinQ].Score;
+ Pq:=TNode+PREMinQ;
+ For Q:=PREMinQ+1 To PREMaxQ+1 Do
+  If PRENodes^[TNode+Q].Score<=Err Then Begin
+   Err:=PRENodes^[TNode+Q].Score;
+   Pq:=TNode+Q;
+  End;
+ PREFindSliceQuant:=Pq;
+End;
+
+{ une rangee de tranches (find_quant_thread) }
+Procedure PREFindRow(Y: LongInt);
+Var X,Mb,Q,Mps: LongInt;
+Begin
+ Mps:=PREMps; Q:=0; Mb:=0; X:=0;
+ While X<PREMbW Do Begin
+  While PREMbW-X<Mps Do Mps:=Mps Shr 1;
+  Q:=PREFindSliceQuant((Mb+1)*PRE_TRELLIS,X,Y,Mps);
+  Inc(X,Mps); Inc(Mb);
+ End;
+ For X:=PRESlW-1 DownTo 0 Do Begin
+  PRESliceQ^[X+Y*PRESlW]:=PRENodes^[Q].Quant;
+  Q:=PRENodes^[Q].Prev;
+ End;
+ 
+End;
+
+{ ---- encodage d'une tranche ---- }
+Procedure PREEncSlice(X,Y,Quant,Mbs: LongInt; Var Sizes: Array Of LongInt);
+Var I,Xp,Yp,Ncb,P0: LongInt; IsC: Boolean;
+Begin
+ If (PREFq=0) And (Quant>=PRE_MAX_STORED_Q) Then PRESetCustom(Quant);
+ For I:=0 To 2 Do Begin
+  IsC:=I>0;
+  If (Not IsC) Or (PRECf=3) Then Begin
+   Xp:=X Shl 4; Yp:=Y Shl 4; Ncb:=4;
+  End Else Begin
+   Xp:=X Shl 3; Yp:=Y Shl 4; Ncb:=2;
+  End;
+  PREGetSlice(I,Xp,Yp,PREPwid[I],PREH,PREBlkE,Mbs,Ncb,IsC);
+  P0:=PREOutPos;
+  If PREFq>0 Then Begin
+   If Not IsC Then Begin
+    PREEncDcs(PREBlkE,Mbs*Ncb,PREQuants[0][0]); PREEncAcs(PREBlkE,Mbs*Ncb,PREQuants[0]);
+   End Else Begin
+    PREEncDcs(PREBlkE,Mbs*Ncb,PREQuantsC[0][0]); PREEncAcs(PREBlkE,Mbs*Ncb,PREQuantsC[0]);
+   End;
+  End Else If Quant<PRE_MAX_STORED_Q Then Begin
+   If Not IsC Then Begin
+    PREEncDcs(PREBlkE,Mbs*Ncb,PREQuants[Quant][0]); PREEncAcs(PREBlkE,Mbs*Ncb,PREQuants[Quant]);
+   End Else Begin
+    PREEncDcs(PREBlkE,Mbs*Ncb,PREQuantsC[Quant][0]); PREEncAcs(PREBlkE,Mbs*Ncb,PREQuantsC[Quant]);
+   End;
+  End Else Begin
+   If Not IsC Then Begin
+    PREEncDcs(PREBlkE,Mbs*Ncb,PRECustomQ[0]); PREEncAcs(PREBlkE,Mbs*Ncb,PRECustomQ);
+   End Else Begin
+    PREEncDcs(PREBlkE,Mbs*Ncb,PRECustomQC[0]); PREEncAcs(PREBlkE,Mbs*Ncb,PRECustomQC);
+   End;
+  End;
+  PREFlushBits;
+  Sizes[I]:=PREOutPos-P0;
+ End;
+End;
+
+{ ---- image complete ---- }
+Procedure PREEncodeFrame;
+Var X,Y,Mb,I,Q,Mps,SeekPos,PicPos,FrameHdrPos,SliceSize,SliceHdr,Fl: LongInt;
+    Sizes: Array[0..3] Of LongInt;
+Begin
+ PREOutPos:=0; PREAccN:=0; PREAcc:=0;
+ PREEnsure(1024);
+ PRETBe32(0);                     { taille de l'image, ecrite a la fin }
+ PRETByte(Ord('i')); PRETByte(Ord('c')); PRETByte(Ord('p')); PRETByte(Ord('f'));
+ FrameHdrPos:=PREOutPos;
+ PRETBe16(0);                     { taille de l'en-tete d'image }
+ PRETBe16(0);                     { version }
+ For I:=1 To 4 Do Begin
+  If I<=Length(PREVendor) Then PRETByte(Ord(PREVendor[I])) Else PRETByte(Ord(' '));
+ End;
+ PRETBe16(PREW); PRETBe16(PREH);
+ PRETByte(PRECf Shl 6);
+ PRETByte(0);
+ If PREPrimaries=0 Then PRETByte(2) Else PRETByte(PREPrimaries);
+ If PRETrc=0 Then PRETByte(2) Else PRETByte(PRETrc);
+ If PREMatrix=0 Then PRETByte(2) Else PRETByte(PREMatrix);
+ PRETByte($40);                   { alpha_bits = 0 }
+ PRETByte(0);
+ If PREQuantSel<>7 Then Begin
+  PRETByte(3);
+  For I:=0 To 63 Do PRETByte(PREQuant[I]);
+  If Not PREKsCompat Then
+   For I:=0 To 63 Do PRETByte(PREQuantC[I])
+  Else
+   For I:=0 To 63 Do PRETByte(PREQuant[I]);
+ End Else PRETByte(0);
+ PREOut^[FrameHdrPos]:=(PREOutPos-FrameHdrPos) Shr 8 And 255;
+ PREOut^[FrameHdrPos+1]:=(PREOutPos-FrameHdrPos) And 255;
+ { image (progressif : une seule) }
+ PicPos:=PREOutPos;
+ PRETByte($40);
+ PRETBe32(0);
+ PRETBe16(PRESlPic);
+ PRETByte(PRELog2(PREMps) Shl 4);
+ SeekPos:=PREOutPos;
+ For I:=1 To PRESlPic*2 Do PRETByte(0);
+ If PREFq=0 Then
+  For Y:=0 To PREMbH-1 Do PREFindRow(Y);
+ For Y:=0 To PREMbH-1 Do Begin
+  Mps:=PREMps; Mb:=0; X:=0;
+  While X<PREMbW Do Begin
+   If PREFq>0 Then Q:=PREFq Else Q:=PRESliceQ^[Mb+Y*PRESlW];
+   While PREMbW-X<Mps Do Mps:=Mps Shr 1;
+   PREEnsure(300000);
+   SliceHdr:=PREOutPos;
+   PRETByte(6 Shl 3);
+   For I:=1 To 5 Do PRETByte(0);
+   PREEncSlice(X,Y,Q,Mps,Sizes);
+   PREOut^[SliceHdr+1]:=Q;
+   PREOut^[SliceHdr+2]:=Sizes[0] Shr 8 And 255; PREOut^[SliceHdr+3]:=Sizes[0] And 255;
+   PREOut^[SliceHdr+4]:=Sizes[1] Shr 8 And 255; PREOut^[SliceHdr+5]:=Sizes[1] And 255;
+   SliceSize:=6+Sizes[0]+Sizes[1]+Sizes[2];
+   PREOut^[SeekPos+2*(Mb+Y*PRESlW)]:=SliceSize Shr 8 And 255;
+   PREOut^[SeekPos+2*(Mb+Y*PRESlW)+1]:=SliceSize And 255;
+   Inc(X,Mps); Inc(Mb);
+  End;
+ End;
+ Fl:=PREOutPos-PicPos;
+ PREOut^[PicPos+1]:=Fl Shr 24 And 255; PREOut^[PicPos+2]:=Fl Shr 16 And 255;
+ PREOut^[PicPos+3]:=Fl Shr 8 And 255; PREOut^[PicPos+4]:=Fl And 255;
+ PREOut^[0]:=PREOutPos Shr 24 And 255; PREOut^[1]:=PREOutPos Shr 16 And 255;
+ PREOut^[2]:=PREOutPos Shr 8 And 255; PREOut^[3]:=PREOutPos And 255;
+End;
+
+{ ======================================================================== }
+{ Conversion I420 8 bits -> 4:2:2 / 4:4:4 10 bits, reproduisant            }
+{ `ffmpeg -i yuv420p -pix_fmt yuv422p10le|yuv444p10le` (swscale, flags par  }
+{ defaut = bicubique param 0/0.6). Port de initFilter (libswscale/utils.c) }
+{ pour la partie bicubique sans filtre source/destination, puis :          }
+{   horizontal : v = (somme src*coef14) >> 7  (borne a 32767)  (15 bits)   }
+{   vertical   : v = (somme v15*coef12 + 65536) >> 17 borne a 0..1023      }
+{ Luma : v8*4 (swscale : (v8<<7 + 16) >> 5). Positions de chroma par       }
+{ defaut de swscale (centrees) : 128 / 128 (get_local_pos).                }
+{ Le filtre vertical sur chroma 4:2:0 -> 4:2:2 est un bicubique 4 points    }
+{ (poids -0.028, 0.241, 0.872, -0.084 et symetrique), bords replies.        }
+{ ======================================================================== }
+
+Var
+ PREHPos,PREHCoef,PREVPos,PREVCoef: PPREIArr;
+ PREHFs,PREVFs: LongInt;
+ PRETmp: PPREIArr; PRETmpSz: LongInt;
+ PREPrUsed: Boolean;
+
+Procedure PREMakeFilter(XInc: Int64; SrcW,DstW,FilterAlign,One,SrcPos,DstPos: LongInt; Var FPos,Coef: PPREIArr; Var FSize: LongInt);
+Const CC=10066329;   { (int64)(0.6*(1<<24)) }
+Var Fone,XDst,D,Dd,Ddd,Cf,V,Sum,Err,Acc,One24,One30: Int64;
+    I,J,K,FS,FS2,MinFS,Xx,L2,Left,Shift,IntV: LongInt;
+    Fl,Fl2: PPREI64Arr; Cut: Int64; Cutf: Double; Mn: LongInt;
+Begin
+ One24:=Int64(1) Shl 24; One30:=Int64(1) Shl 30;
+ L2:=0; If DstW>0 Then L2:=PRELog2(SrcW Div DstW); If L2>8 Then L2:=8;
+ Fone:=Int64(1) Shl (54-L2);
+ GetMem(FPos,(DstW+4)*4);
+ If (Abs(XInc-65536)<10) And (SrcPos=DstPos) Then Begin
+  FS:=1;
+  GetMem(Fl,Int64(DstW)*FS*8);
+  For I:=0 To DstW-1 Do Begin Fl^[I]:=Fone; FPos^[I]:=I; End;
+ End Else Begin
+  If XInc<=65536 Then FS:=1+4 Else FS:=1+(4*SrcW+DstW-1) Div DstW;
+  If FS>SrcW-2 Then FS:=SrcW-2;
+  If FS<1 Then FS:=1;
+  GetMem(Fl,Int64(DstW)*FS*8);
+  XDst:=((Int64(DstPos)*XInc) Shr 7)-((Int64(SrcPos)*$10000) Shr 7);
+  For I:=0 To DstW-1 Do Begin
+   Xx:=(XDst-Int64(FS-2)*65536) Div (1 Shl 17);
+   FPos^[I]:=Xx;
+   For J:=0 To FS-1 Do Begin
+    D:=Abs((Int64(Xx)*(1 Shl 17))-XDst) Shl 13;
+    If XInc>65536 Then D:=D*DstW Div SrcW;
+    If D>=(Int64(1) Shl 31) Then Cf:=0 Else Begin
+     Dd:=(D*D) Shr 30; Ddd:=(Dd*D) Shr 30;
+     If D<(Int64(1) Shl 30) Then
+      Cf:=(12*One24-6*Int64(CC))*Ddd+(-18*One24+6*Int64(CC))*Dd+6*One24*One30
+     Else
+      Cf:=(-6*Int64(CC))*Ddd+(30*Int64(CC))*Dd+(-48*Int64(CC))*D+24*Int64(CC)*One30;
+    End;
+    Cf:=Cf Div ((Int64(1) Shl 54) Div Fone);
+    Fl^[I*FS+J]:=Cf;
+    Inc(Xx);
+   End;
+   XDst:=XDst+2*XInc;
+  End;
+ End;
+ FS2:=FS;
+ GetMem(Fl2,Int64(DstW)*FS2*8);
+ For I:=0 To DstW-1 Do Begin
+  For J:=0 To FS-1 Do Fl2^[I*FS2+J]:=Fl^[I*FS+J];
+ End;
+ FreeMem(Fl,Int64(DstW)*FS*8);
+ MinFS:=0;
+ Cutf:=0.002*Fone;
+ For I:=DstW-1 DownTo 0 Do Begin
+  Mn:=FS2; Cut:=0;
+  For J:=0 To FS2-1 Do Begin
+   Cut:=Cut+Abs(Fl2^[I*FS2]);
+   If Cut>Cutf Then Break;
+   If (I<DstW-1) And (FPos^[I]>=FPos^[I+1]) Then Break;
+   For K:=1 To FS2-1 Do Fl2^[I*FS2+K-1]:=Fl2^[I*FS2+K];
+   Fl2^[I*FS2+FS2-1]:=0;
+   Inc(FPos^[I]);
+  End;
+  Cut:=0;
+  J:=FS2-1;
+  While J>0 Do Begin
+   Cut:=Cut+Abs(Fl2^[I*FS2+J]);
+   If Cut>Cutf Then Break;
+   Dec(Mn);
+   Dec(J);
+  End;
+  If Mn>MinFS Then MinFS:=Mn;
+ End;
+ If (MinFS=1) And (FilterAlign=2) Then FilterAlign:=1;
+ FS:=(MinFS+(FilterAlign-1)) And (Not (FilterAlign-1));
+ GetMem(Fl,Int64(DstW)*FS*8);
+ For I:=0 To DstW-1 Do
+  For J:=0 To FS-1 Do
+   If J>=FS2 Then Fl^[I*FS+J]:=0 Else Fl^[I*FS+J]:=Fl2^[I*FS2+J];
+ FreeMem(Fl2,Int64(DstW)*FS2*8);
+ { bords }
+ For I:=0 To DstW-1 Do Begin
+  If FPos^[I]<0 Then Begin
+   For J:=1 To FS-1 Do Begin
+    Left:=J+FPos^[I]; If Left<0 Then Left:=0;
+    Fl^[I*FS+Left]:=Fl^[I*FS+Left]+Fl^[I*FS+J];
+    Fl^[I*FS+J]:=0;
+   End;
+   FPos^[I]:=0;
+  End;
+  If FPos^[I]+FS>SrcW Then Begin
+   Shift:=FPos^[I]; If FS-SrcW<0 Then Shift:=Shift+(FS-SrcW);
+   Acc:=0;
+   For J:=FS-1 DownTo 0 Do
+    If FPos^[I]+J>=SrcW Then Begin
+     Acc:=Acc+Fl^[I*FS+J]; Fl^[I*FS+J]:=0;
+    End;
+   For J:=FS-1 DownTo 0 Do
+    If J<Shift Then Fl^[I*FS+J]:=0 Else Fl^[I*FS+J]:=Fl^[I*FS+J-Shift];
+   Dec(FPos^[I],Shift);
+   Fl^[I*FS+SrcW-1-FPos^[I]]:=Fl^[I*FS+SrcW-1-FPos^[I]]+Acc;
+  End;
+ End;
+ { normalisation }
+ GetMem(Coef,Int64(DstW+4)*FS*4);
+ FSize:=FS;
+ For I:=0 To DstW-1 Do Begin
+  Err:=0; Sum:=0;
+  For J:=0 To FS-1 Do Sum:=Sum+Fl^[I*FS+J];
+  Sum:=(Sum+One Div 2) Div One;
+  If Sum=0 Then Sum:=1;
+  For J:=0 To FS-1 Do Begin
+   V:=Fl^[I*FS+J]+Err;
+   If V>=0 Then IntV:=(V+(Sum Shr 1)) Div Sum Else IntV:=(V-(Sum Shr 1)) Div Sum;
+   Coef^[I*FS+J]:=IntV;
+   Err:=V-Int64(IntV)*Sum;
+  End;
+ End;
+ FreeMem(Fl,Int64(DstW)*FS*8);
+End;
+
+Procedure PREFreeFilters;
+Begin
+ If PREHPos<>Nil Then Begin FreeMem(PREHPos); PREHPos:=Nil; End;
+ If PREHCoef<>Nil Then Begin FreeMem(PREHCoef); PREHCoef:=Nil; End;
+ If PREVPos<>Nil Then Begin FreeMem(PREVPos); PREVPos:=Nil; End;
+ If PREVCoef<>Nil Then Begin FreeMem(PREVCoef); PREVCoef:=Nil; End;
+End;
+
+{ Src : SrcW x SrcH octets ; Dst : DstW x DstH mots (10 bits) }
+Procedure PREUpChroma(Src: PEABuffer; SrcW,SrcH,DstW,DstH: LongInt; Dst: PPREWArr);
+Var X,Y,J,P,V: LongInt;
+Begin
+ { passe horizontale -> 15 bits }
+ For Y:=0 To SrcH-1 Do
+  For X:=0 To DstW-1 Do Begin
+   V:=0;
+   For J:=0 To PREHFs-1 Do Begin
+    P:=PREHPos^[X]+J;
+    If P<SrcW Then V:=V+Src^[Y*SrcW+P]*PREHCoef^[X*PREHFs+J];
+   End;
+   V:=PRESar(V,7);
+   If V>32767 Then V:=32767;
+   PRETmp^[Y*DstW+X]:=V;
+  End;
+ { passe verticale -> 10 bits }
+ For Y:=0 To DstH-1 Do
+  For X:=0 To DstW-1 Do Begin
+   V:=65536;
+   For J:=0 To PREVFs-1 Do Begin
+    P:=PREVPos^[Y]+J;
+    If P<SrcH Then V:=V+PRETmp^[P*DstW+X]*PREVCoef^[Y*PREVFs+J];
+   End;
+   V:=PRESar(V,17);
+   If V<0 Then V:=0;
+   If V>1023 Then V:=1023;
+   Dst^[Y*DstW+X]:=V;
+  End;
+End;
+
+Procedure PREConvert(Yuv: PEABuffer);
+Var X,Y,Cw8,Ch8: LongInt;
+Begin
+ For Y:=0 To PREH-1 Do
+  For X:=0 To PREW-1 Do PREPl[0]^[Y*PREW+X]:=Yuv^[Y*PREW+X]*4;
+ Cw8:=(PREW+1) Shr 1; Ch8:=(PREH+1) Shr 1;
+ PREUpChroma(PEABuffer(@Yuv^[PREW*PREH]),Cw8,Ch8,PRECw,PREH,PREPl[1]);
+ PREUpChroma(PEABuffer(@Yuv^[PREW*PREH+Cw8*Ch8]),Cw8,Ch8,PRECw,PREH,PREPl[2]);
+End;
+
+{ ======================================================================== }
+{ API                                                                       }
+{ ======================================================================== }
+
+Procedure PREFree;
+Var I: LongInt;
+Begin
+ If PREPrUsed Then Begin PrFree; PREPrUsed:=False; End;
+ For I:=0 To 2 Do
+  If PREPl[I]<>Nil Then Begin FreeMem(PREPl[I]); PREPl[I]:=Nil; End;
+ If PRENodes<>Nil Then Begin FreeMem(PRENodes); PRENodes:=Nil; End;
+ If PRESliceQ<>Nil Then Begin FreeMem(PRESliceQ); PRESliceQ:=Nil; End;
+ If PREOut<>Nil Then Begin FreeMem(PREOut); PREOut:=Nil; End;
+ If PRETmp<>Nil Then Begin FreeMem(PRETmp); PRETmp:=Nil; End;
+ PREFreeFilters;
+ PREOutCap:=0; PREOutPos:=0; PREOn:=False;
+End;
+
+Function PRETag: String;
+Begin
+ If (PREProf>=0) And (PREProf<=4) Then PRETag:=PRE_PTAG[PREProf] Else PRETag:='apcn';
+End;
+
+Procedure PREBegin(W,H,Fn,Fd,Bitrate,Profile: LongInt);
+Var I,J,Mps,Cnt,Rm,Cw8,Ch8: LongInt;
+Begin
+ PREFree;
+ If PREVendor='' Then PREVendor:='Lavc';
+ If W<2 Then W:=2; If H<2 Then H:=2;
+ If Fn<=0 Then Fn:=25; If Fd<=0 Then Fd:=1;
+ If Profile<0 Then Profile:=2; If Profile>4 Then Profile:=4;
+ PREW:=W; PREH:=H; PREFn:=Fn; PREFd:=Fd; PREBitrate:=Bitrate; PREProf:=Profile;
+ Mps:=PREMbsPerSlice; If Mps=0 Then Mps:=8; If Mps<1 Then Mps:=1; If Mps>PRE_MAXMBS Then Mps:=PRE_MAXMBS;
+ While Mps And (Mps-1)<>0 Do Mps:=Mps And (Mps-1);   { puissance de 2 inferieure }
+ PREMps:=Mps;
+ If Profile=4 Then PRECf:=3 Else PRECf:=2;
+ PREMbW:=(W+15) Shr 4; PREMbH:=(H+15) Shr 4;
+ PRESlW:=PREMbW Div Mps;
+ Rm:=PREMbW-PRESlW*Mps; Cnt:=0;
+ While Rm<>0 Do Begin Inc(Cnt,Rm And 1); Rm:=Rm Shr 1; End;
+ Inc(PRESlW,Cnt);
+ PRESlPic:=PREMbH*PRESlW;
+ { matrices }
+ If PREQuantSel<=0 Then Begin
+  For I:=0 To 63 Do Begin
+   PREQuant[I]:=PRE_QM[PRE_PQUANT[Profile],I];
+   PREQuantC[I]:=PRE_QM[PRE_PQUANTC[Profile],I];
+  End;
+ End Else Begin
+  For I:=0 To 63 Do Begin
+   PREQuant[I]:=PRE_QM[PREQuantSel-1,I];
+   PREQuantC[I]:=PRE_QM[PREQuantSel-1,I];
+  End;
+ End;
+ PREMinQ:=PRE_PMINQ[Profile]; PREMaxQ:=PRE_PMAXQ[Profile];
+ PREFq:=PREForceQ; If PREFq>64 Then PREFq:=64; If PREFq<0 Then PREFq:=0;
+ If PREFq=0 Then Begin
+  If PREBitsPerMb>0 Then Begin
+   PREBpmBase:=PREBitsPerMb; If PREBpmBase<128 Then PREBpmBase:=128;
+  End Else Begin
+   Cnt:=PREMbW*PREMbH;
+   I:=0;
+   While (I<3) And (PRE_MBLIM[I]<Cnt) Do Inc(I);
+   PREBpmBase:=PRE_PBR[Profile,I];
+  End;
+  PREBpm:=PREBpmBase;
+  For I:=PREMinQ To PRE_MAX_STORED_Q-1 Do
+   For J:=0 To 63 Do Begin
+    PREQuants[I][J]:=PREQuant[J]*I;
+    PREQuantsC[I][J]:=PREQuantC[J]*I;
+   End;
+  GetMem(PRESliceQ,PRESlPic*4+16);
+  GetMem(PRENodes,(PRESlW+1)*PRE_TRELLIS*SizeOf(TPRENode)+64);
+  FillChar(PRENodes^,(PRESlW+1)*PRE_TRELLIS*SizeOf(TPRENode),0);
+  For I:=PREMinQ To PREMaxQ+1 Do Begin
+   PRENodes^[I].Prev:=-1; PRENodes^[I].Bits:=0; PRENodes^[I].Score:=0;
+  End;
+ End Else Begin
+  For J:=0 To 63 Do Begin
+   PREQuants[0][J]:=PREQuant[J]*PREFq;
+   PREQuantsC[0][J]:=PREQuantC[J]*PREFq;
+  End;
+  End;
+ { plans 10 bits }
+ Cw8:=(W+1) Shr 1; Ch8:=(H+1) Shr 1;
+ If PRECf=3 Then PRECw:=W Else PRECw:=Cw8;
+ PREPlStride[0]:=W; PREPlStride[1]:=PRECw; PREPlStride[2]:=PRECw;
+ PREPlW[0]:=W; PREPlW[1]:=PRECw; PREPlW[2]:=PRECw;
+ PREPlH[0]:=H; PREPlH[1]:=H; PREPlH[2]:=H;
+ PREPwid[0]:=W;
+ If (PRECf=3) Or (Not PREKsCompat) Then Begin PREPwid[1]:=PRECw; PREPwid[2]:=PRECw; End
+ Else Begin PREPwid[1]:=W Shr 1; PREPwid[2]:=W Shr 1; End;
+ GetMem(PREPl[0],W*H*2+16);
+ GetMem(PREPl[1],PRECw*H*2+16);
+ GetMem(PREPl[2],PRECw*H*2+16);
+ { filtres de conversion }
+ PREFreeFilters;
+ PREMakeFilter(((Int64(Cw8) Shl 16)+(PRECw Shr 1)) Div PRECw,Cw8,PRECw,4,1 Shl 14,128,128,PREHPos,PREHCoef,PREHFs);
+ PREMakeFilter(((Int64(Ch8) Shl 16)+(H Shr 1)) Div H,Ch8,H,2,1 Shl 12,128,128,PREVPos,PREVCoef,PREVFs);
+ PRETmpSz:=PRECw*Ch8*4+16;
+ GetMem(PRETmp,PRETmpSz);
+ { tampon de sortie }
+ PREOutCap:=262144;
+ GetMem(PREOut,PREOutCap);
+ PREOutPos:=0;
+ PRECumTarget:=0; PRECumActual:=0; PRENFrames:=0; PRELastLen:=0;
+ PREOn:=True;
+End;
+
+Function PREFrame(Yuv: PEABuffer; Var Pkt: PEABuffer; Var PktLen: LongInt; Var IsKey: Boolean; Var Dts,Pts: LongInt): Boolean;
+Var Tgt,Budget,Def,Nmb,BestErr: Int64; BestBpm,NewBpm,Try: LongInt;
+Begin
+ PREFrame:=False;
+ If Not PREOn Then Exit;
+ PREConvert(Yuv);
+ Nmb:=PREMbW*PREMbH;
+ Tgt:=0;
+ If (PREFq=0) And (PREBitsPerMb<=0) And (PREBitrate>0) Then Begin
+  { debit cible : bits/image, avec report de l'ecart cumule (lisse sur 3 images) }
+  Tgt:=(Int64(PREBitrate)*PREFd) Div PREFn;
+  Def:=PRECumTarget-PRECumActual;
+  Budget:=Tgt+Def Div 3;
+  If Budget<Tgt Div 2 Then Budget:=Tgt Div 2;
+  If Budget>Tgt*2 Then Budget:=Tgt*2;
+  PREBpm:=Budget Div Nmb;
+  If PREBpm<64 Then PREBpm:=64;
+  If PREBpm>8192 Then PREBpm:=8192;
+ End;
+ PREEncodeFrame;
+ If (Tgt>0) And (PRENFrames=0) Then Begin
+  { premiere image : ajustement iteratif de bits_per_mb (jusqu'a 3 reessais) pour tomber a 2 % de la cible }
+  BestBpm:=PREBpm; BestErr:=Abs(Int64(PREOutPos)*8-Tgt);
+  Try:=0;
+  While (Try<3) And (BestErr*50>Tgt) Do Begin
+   Inc(Try);
+   NewBpm:=(Int64(PREBpm)*Tgt) Div (Int64(PREOutPos)*8);
+   If NewBpm<64 Then NewBpm:=64;
+   If NewBpm>8192 Then NewBpm:=8192;
+   If NewBpm=PREBpm Then Break;
+   PREBpm:=NewBpm;
+   PREEncodeFrame;
+   If Abs(Int64(PREOutPos)*8-Tgt)<BestErr Then Begin
+    BestErr:=Abs(Int64(PREOutPos)*8-Tgt); BestBpm:=PREBpm;
+   End;
+  End;
+  If PREBpm<>BestBpm Then Begin PREBpm:=BestBpm; PREEncodeFrame; End;
+ End;
+ If Tgt>0 Then Begin
+  Inc(PRECumTarget,Tgt); Inc(PRECumActual,Int64(PREOutPos)*8);
+ End;
+ Pkt:=PREOut; PktLen:=PREOutPos; PRELastLen:=PREOutPos;
+ IsKey:=True; Dts:=PRENFrames; Pts:=PRENFrames;
+ Inc(PRENFrames);
+ PREFrame:=True;
+End;
+
+{ Reconstruction : decode le dernier paquet avec le decodeur pe_prores.pas ; ecrit les plans 10 bits
+  (mots 16 bits little endian) : Y (W*H), U (PRECw*H), V (PRECw*H) = format ffmpeg yuv422p10le / yuv444p10le. }
+Procedure PREGetRecon(Dst: PEABuffer);
+Var Sv: Procedure(B: Pointer; W,H: LongInt); X,Y,V,Po: LongInt; Wd: PPREWArr;
+Begin
+ If (Not PREOn) Or (PRELastLen<=0) Then Exit;
+ Sv:=PrHook; PrHook:=Nil;
+ PrConfig(PRETag);
+ PREPrUsed:=True;
+ If PrFrame(PREOut,PRELastLen)<>0 Then Begin PrHook:=Sv; Exit; End;
+ PrHook:=Sv;
+ Wd:=PPREWArr(Dst); Po:=0;
+ For Y:=0 To PREH-1 Do For X:=0 To PREW-1 Do Begin Wd^[Po]:=PrPlaneY^[Y*PrStrideY+X]; Inc(Po); End;
+ For Y:=0 To PREH-1 Do For X:=0 To PRECw-1 Do Begin Wd^[Po]:=PrPlaneU^[Y*PrStrideC+X]; Inc(Po); End;
+ For Y:=0 To PREH-1 Do For X:=0 To PRECw-1 Do Begin Wd^[Po]:=PrPlaneV^[Y*PrStrideC+X]; Inc(Po); End;
+End;
+
 {$IFDEF FPC}
 { ====================================================================== }
 { Decodeur VP9 (profils 0 a 3, 8/10/12 bits) : port en Pascal du decodeur   }
@@ -103764,11 +104804,13 @@ Begin
  Sb:=MBegin('stbl');
  Sd:=MBegin('stsd'); M32(0); M32(1);
  If IsVideo Then Begin
-  If (MT.T^.Codec='hvc1') Or (MT.T^.Codec='hev1') Then Ent:=MBegin('hvc1') Else If MT.T^.Codec='s263' Then Ent:=MBegin('s263') Else Ent:=MBegin('avc1');
+  If (MT.T^.Codec='hvc1') Or (MT.T^.Codec='hev1') Then Ent:=MBegin('hvc1') Else If MT.T^.Codec='s263' Then Ent:=MBegin('s263') Else If InList(MT.T^.Codec,'apco,apcs,apcn,apch,ap4h') Then Ent:=MBegin(MT.T^.Codec) Else Ent:=MBegin('avc1');
   MZero(6); M16(1); MZero(16); M16(MT.T^.W); M16(MT.T^.H); M32($480000); M32($480000); M32(0); M16(1);
   MZero(32); M16($18); M16($FFFF);
+  If MT.T^.CfgLen>0 Then Begin
   If (MT.T^.Codec='hvc1') Or (MT.T^.Codec='hev1') Then Cfg:=MBegin('hvcC') Else If MT.T^.Codec='s263' Then Cfg:=MBegin('d263') Else Cfg:=MBegin('avcC');
   For I:=0 To MT.T^.CfgLen-1 Do M8(MT.T^.Cfg[I]); MEnd(Cfg);
+  End;
   MEnd(Ent);
  End Else Begin
   Ent:=MBegin('mp4a'); MZero(6); M16(1); MZero(8); M16(MT.T^.Chans); M16(16); M16(0); M16(0); M16(MT.T^.Rate); M16(0);
@@ -106038,12 +107080,66 @@ Begin
  H263EncodeTemp:=True;
 End;
 
-{ Encodeurs dont les paquets sont gardes en memoire (HEVC, H.263, ...) }
+
+{ ---- Boucle generique : fichier temporaire I420 -> encodeur (protocole XxFrame) -> paquets en memoire ---- }
+Type TEncFrameFn = Function(Yuv: PEABuffer; Var Pkt: PEABuffer; Var PktLen: LongInt; Var IsKey: Boolean; Var Dts,Pts: LongInt): Boolean;
+Var GenFrameFn,GenFlushFn: TEncFrameFn;
+
+Function GenMemEncode(Var Vo: TTrkIn; Var Mem: PBArr; Const Tag: String; Var Err: String): Boolean;
+Var I,N,Fsz,P,Len,Cap,Pl,Dts,Pts: LongInt; Got: Word; Buf,Pk: PEABuffer; Key,Ok: Boolean;
+ Procedure Put;
+ Begin
+  If N>=VJCnt+8 Then Exit;
+  If Len+Pl+16>Cap Then Begin ReallocMem(Mem,Cap*2+Pl); Cap:=Cap*2+Pl; End;
+  Move(Pk^,Mem^[Len],Pl);
+  Vo.Off^[N]:=Len; Vo.Sz^[N]:=Pl; Vo.Dur^[N]:=VJFd; Vo.Sync^[N]:=Ord(Key); Vo.Cts^[N]:=(Pts-Dts)*VJFd; Inc(Len,Pl); Inc(N);
+ End;
+Begin
+ GenMemEncode:=False; Fsz:=VJOutW*VJOutH*3 Div 2; Cap:=1 Shl 20; Len:=0; N:=0; GetMem(Mem,Cap);
+ GetMem(Buf,Fsz+16); Seek(VJTmp,0); Ok:=True;
+ FillChar(Vo,SizeOf(Vo),0); TrkAlloc(Vo,VJCnt+8);
+ For I:=0 To VJCnt-1 Do Begin
+  P:=0;
+  While P<Fsz Do Begin
+   {$I-}BlockRead(VJTmp,Buf^[P],Min(32768,Fsz-P),Got);{$I+}
+   If (IOResult<>0) Or (Got=0) Then Begin Ok:=False; Break; End;
+   Inc(P,Got);
+  End;
+  If Not Ok Then Break;
+  If GenFrameFn(Buf,Pk,Pl,Key,Dts,Pts) Then Put;
+  If (I And 1)=0 Then Begin UiTick(I,VJCnt); If Stopped Then Begin Ok:=False; Err:='Conversion annul'#233'e.'; Break; End; End;
+ End;
+ If Ok And (@GenFlushFn<>Nil) Then While GenFlushFn(Buf,Pk,Pl,Key,Dts,Pts) Do Put;
+ FreeMem(Buf,Fsz+16);
+ If Ok Then Begin
+  Vo.N:=N; Vo.Ok:=True; Vo.IsVideo:=True; Vo.Ts:=VJFn; Vo.W:=VJOutW; Vo.H:=VJOutH;
+  Vo.Codec:=Copy(Tag+'    ',1,4);
+ End Else Begin FreeMem(Mem); Mem:=Nil; TrkClear(Vo); End;
+ If (Not Ok) And (Err='') Then Err:='Lecture du fichier temporaire impossible.';
+ GenMemEncode:=Ok;
+End;
+
+Var MemEncSub: Integer;
+
+Function ProResEncodeTemp(Var Vo: TTrkIn; Var Mem: PBArr; Var Err: String): Boolean;
+Begin
+ PREBegin(VJOutW,VJOutH,VJFn,VJFd,0,MemEncSub);
+ GenFrameFn:=PREFrame; GenFlushFn:=Nil;
+ ProResEncodeTemp:=GenMemEncode(Vo,Mem,PRETag,Err);
+ PREFree;
+End;
+
+{ Encodeurs dont les paquets sont gardes en memoire (HEVC, H.263, ProRes, ...) }
 Function MemEncKind(Const Pr: TProf): Integer;
 Begin
- MemEncKind:=0;
+ MemEncKind:=0; MemEncSub:=0;
  If Pr.VC='HEVC' Then MemEncKind:=1
- Else If Pr.VC='H263' Then MemEncKind:=2;
+ Else If Pr.VC='H263' Then MemEncKind:=2
+ Else If Copy(Pr.VC,1,4)='PrRs' Then Begin
+  MemEncKind:=5;
+  If Pr.VC='PrRsPxy' Then MemEncSub:=0 Else If Pr.VC='PrRsLT' Then MemEncSub:=1
+  Else If Pr.VC='PrRs422' Then MemEncSub:=2 Else If Pr.VC='PrRsHQ' Then MemEncSub:=3 Else MemEncSub:=4;
+ End;
 End;
 
 Function MemEncodeTemp(Kind: Integer; Var Vo: TTrkIn; Var Mem: PBArr; Var Err: String): Boolean;
@@ -106052,6 +107148,7 @@ Begin
  Case Kind Of
   1: MemEncodeTemp:=HevcEncodeTemp(Vo,Mem,Err);
   2: MemEncodeTemp:=H263EncodeTemp(Vo,Mem,Err);
+  5: MemEncodeTemp:=ProResEncodeTemp(Vo,Mem,Err);
   Else Err:='Encodeur video inconnu.';
  End;
 End;
