@@ -1545,6 +1545,8 @@ Begin
  AddProf(0,'MXF DNxHD/DNxHR + PCM','MXF','DNxHD','PCM16','Auto',0,1536,48000,2);
  AddProf(0,'MXF ProRes HQ + PCM','MXF','PrRsHQ','PCM16','Auto',0,1536,48000,2);
  AddProf(0,'MKV HEVC (H.265)','MKV','HEVC','AAC','Auto',3000,160,44100,2);
+ AddProf(0,'MP4 HEVC Main10 (10 bits)','MP4','HEVC10','AAC','Auto',6000,160,44100,2);
+ AddProf(0,'MKV HEVC 10 bits (HDR)','MKV','HEVC10','AAC','Auto',8000,160,44100,2);
  AddProf(0,'AVI','AVI','MPEG4','MP3','Auto',3000,192,44100,2);
  AddProf(0,'WMV','WMV','WMV2','WMA','Auto',2500,128,44100,2);
  AddProf(0,'WebM VP8','WEBM','VP8','Vorbis','Auto',3000,128,44100,2);
@@ -65141,6 +65143,4323 @@ Begin
  Avcount_units_in_frame:=AvMax(((L_frameSize + AvSra(L_unitSize,1)) div L_unitSize),1);
  Exit;
 End;
+{$B-}
+{ ======================================================================== }
+{  pe_hdr.pas : conversion de plans natifs (8..16 bits, 4:0:0 / 4:1:1 /     }
+{  4:2:0 / 4:2:2 / 4:4:0 / 4:4:4) vers I420 8 bits ou 10 bits qui           }
+{  reproduit libswscale (FFmpeg n6.1.1, flags du CLI : bicubic), metadonnees }
+{  HDR (VUI, Matroska Colour, MP4 colr/mdcv/clli, SEI 137/144) et mappage   }
+{  de tonalite HDR -> SDR (PQ / HLG BT.2020 -> BT.709).                     }
+{  Port de : libswscale/utils.c (initFilter), swscale.c, hscale.c, output.c,}
+{  swscale_unscaled.c (planarCopyWrapper), x86/yuv2yuvX.asm (copyright (C)  }
+{  Michael Niedermayer et autres, LGPL 2.1+ ; modele du chemin SIMD x86).   }
+{  Tous les identifiants globaux commencent par Hd / THd / PHd / HD_.       }
+{ ======================================================================== }
+Type
+ THdB=Array[0..2147483000] Of Byte; PHdB=^THdB;
+ THdW=Array[0..1073741000] Of Word; PHdW=^THdW;
+ THdL=Array[0..536870000] Of LongInt; PHdL=^THdL;
+ THdSm=Array[0..1073741000] Of SmallInt; PHdSm=^THdSm;
+ THdI64=Array[0..268435000] Of Int64; PHdI64=^THdI64;
+ THdF=Array[0..268435000] Of Single; PHdF=^THdF;
+
+ { Description d'une image source native. P[0..2] = plans Y,U,V (nil pour U,V si HS<0).
+   Stride[] en OCTETS. Wide=True : echantillons Word little-endian ; False : octets.
+   HS,VS = log2 du sous-echantillonnage de chroma (4:2:0 -> 1,1 ; 4:2:2 -> 1,0 ; 4:4:4 -> 0,0 ;
+   4:4:0 -> 0,1 ; 4:1:1 -> 2,0). HS<0 = gris (pas de chroma).
+   Range : 0 = non specifie, 1 = limite (tv), 2 = plein (pc) ; comme AVFrame.color_range. }
+ THdSrc=Record
+  W,H,Bits,HS,VS,Range: LongInt;
+  Wide: Boolean;
+  P: Array[0..2] Of Pointer;
+  Stride: Array[0..2] Of LongInt;
+ End;
+
+
+Const
+ HdSwsJobs: LongInt = 1;  { nombre de tranches du CLI ffmpeg (nb_cpu+1 ; 1 = un seul fil) }
+ HdVStep: LongInt = 32;   { pas du filtre vertical SIMD : 32 (AVX2, defaut), 16 (SSE3), 8 (MMX) }
+ HdVSimd: Boolean = True; { True : modele du chemin x86 SIMD (ffmpeg par defaut sur PC) ; False : code C de reference
+                            (ARM, ou ffmpeg -sws_flags +bitexact) }
+
+Const
+ HD_DITH128: Array[0..7,0..7] Of Byte=(
+  (36,68,60,92,34,66,58,90),(100,4,124,28,98,2,122,26),(52,84,44,76,50,82,42,74),(116,20,108,12,114,18,106,10),
+  (32,64,56,88,38,70,62,94),(96,0,120,24,102,6,126,30),(48,80,40,72,54,86,46,78),(112,16,104,8,118,22,110,14));
+ { swscale_unscaled.c : dithers[shift-1][ligne&7][colonne&7] }
+ HD_DITHERS: Array[0..7,0..7,0..7] Of Byte=(
+  ((0,1,0,1,0,1,0,1),(1,0,1,0,1,0,1,0),(0,1,0,1,0,1,0,1),(1,0,1,0,1,0,1,0),(0,1,0,1,0,1,0,1),(1,0,1,0,1,0,1,0),(0,1,0,1,0,1,0,1),(1,0,1,0,1,0,1,0)),
+  ((1,2,1,2,1,2,1,2),(3,0,3,0,3,0,3,0),(1,2,1,2,1,2,1,2),(3,0,3,0,3,0,3,0),(1,2,1,2,1,2,1,2),(3,0,3,0,3,0,3,0),(1,2,1,2,1,2,1,2),(3,0,3,0,3,0,3,0)),
+  ((2,4,3,5,2,4,3,5),(6,0,7,1,6,0,7,1),(3,5,2,4,3,5,2,4),(7,1,6,0,7,1,6,0),(2,4,3,5,2,4,3,5),(6,0,7,1,6,0,7,1),(3,5,2,4,3,5,2,4),(7,1,6,0,7,1,6,0)),
+  ((4,8,7,11,4,8,7,11),(12,0,15,3,12,0,15,3),(6,10,5,9,6,10,5,9),(14,2,13,1,14,2,13,1),(4,8,7,11,4,8,7,11),(12,0,15,3,12,0,15,3),(6,10,5,9,6,10,5,9),(14,2,13,1,14,2,13,1)),
+  ((9,17,15,23,8,16,14,22),(25,1,31,7,24,0,30,6),(13,21,11,19,12,20,10,18),(29,5,27,3,28,4,26,2),(8,16,14,22,9,17,15,23),(24,0,30,6,25,1,31,7),(12,20,10,18,13,21,11,19),(28,4,26,2,29,5,27,3)),
+  ((18,34,30,46,17,33,29,45),(50,2,62,14,49,1,61,13),(26,42,22,38,25,41,21,37),(58,10,54,6,57,9,53,5),(16,32,28,44,19,35,31,47),(48,0,60,12,51,3,63,15),(24,40,20,36,27,43,23,39),(56,8,52,4,59,11,55,7)),
+  ((18,34,30,46,17,33,29,45),(50,2,62,14,49,1,61,13),(26,42,22,38,25,41,21,37),(58,10,54,6,57,9,53,5),(16,32,28,44,19,35,31,47),(48,0,60,12,51,3,63,15),(24,40,20,36,27,43,23,39),(56,8,52,4,59,11,55,7)),
+  ((36,68,60,92,34,66,58,90),(100,4,124,28,98,2,122,26),(52,84,44,76,50,82,42,74),(116,20,108,12,114,18,106,10),(32,64,56,88,38,70,62,94),(96,0,120,24,102,6,126,30),(48,80,40,72,54,86,46,78),(112,16,104,8,118,22,110,14)));
+
+Function HdSar(V: LongInt; N: LongInt): LongInt;
+Begin
+ If V>=0 Then HdSar:=V Shr N Else HdSar:=-((-V-1) Shr N)-1;
+End;
+
+Function HdSar64(V: Int64; N: LongInt): Int64;
+Begin
+ If V>=0 Then HdSar64:=V Shr N Else HdSar64:=-((-V-1) Shr N)-1;
+End;
+
+Function HdMin(A,B: LongInt): LongInt; Begin If A<B Then HdMin:=A Else HdMin:=B; End;
+Function HdMax(A,B: LongInt): LongInt; Begin If A>B Then HdMax:=A Else HdMax:=B; End;
+Function HdCeilSh(A,N: LongInt): LongInt; Begin HdCeilSh:=(A+(1 Shl N)-1) Shr N; End;
+Function HdClipN(V,Bits: LongInt): LongInt;
+Var M: LongInt;
+Begin
+ M:=(1 Shl Bits)-1;
+ If V<0 Then HdClipN:=0 Else If V>M Then HdClipN:=M Else HdClipN:=V;
+End;
+
+Function HdLog2(X: LongInt): LongInt;
+Var R: LongInt;
+Begin
+ R:=0; While X>1 Do Begin X:=X Shr 1; Inc(R); End; HdLog2:=R;
+End;
+
+Function HdRDiv(V,S: Int64): Int64;
+Begin
+ If V>=0 Then HdRDiv:=(V+(S Shr 1)) Div S Else HdRDiv:=(V-(S Shr 1)) Div S;
+End;
+
+{ libswscale/utils.c : initFilter (bicubique, parametres par defaut, sans filtre source/destination) }
+Procedure HdInitFilter(XInc,SrcW,DstW,FilterAlign,One,SrcPos,DstPos: LongInt; Var OutF: PHdL; Var OutPos: PHdL; Var OutSize: LongInt);
+Var
+ I,J,K,FilterSize,Filter2Size,MinFS,Mn,XX,Left,Shift,SizeFactor: LongInt;
+ Fone,XDst,D,DD,DDD,Coeff,CutOff,Acc,Sum,Err,V,B,C,Lim: Int64;
+ Filter,Filter2: PHdI64; FPos: PHdL; Dv,Dc,Dl: Double;
+Begin
+ Fone:=Int64(1) Shl (54-HdMin(HdLog2(SrcW Div DstW),8));
+ GetMem(FPos,(DstW+4)*4); FillChar(FPos^,(DstW+4)*4,0);
+ If (Abs(XInc-$10000)<10) And (SrcPos=DstPos) Then Begin
+  FilterSize:=1;
+  GetMem(Filter,DstW*FilterSize*8);
+  For I:=0 To DstW-1 Do Begin Filter^[I]:=Fone; FPos^[I]:=I; End;
+ End Else Begin
+  SizeFactor:=4;
+  If XInc<=(1 Shl 16) Then FilterSize:=1+SizeFactor
+  Else FilterSize:=1+(SizeFactor*SrcW+DstW-1) Div DstW;
+  FilterSize:=HdMin(FilterSize,SrcW-2);
+  FilterSize:=HdMax(FilterSize,1);
+  GetMem(Filter,DstW*FilterSize*8);
+  XDst:=((Int64(DstPos)*XInc) Shr 7)-((Int64(SrcPos)*$10000) Shr 7);
+  B:=0; C:=10066329;
+  For I:=0 To DstW-1 Do Begin
+   XX:=(XDst-Int64(FilterSize-2)*(Int64(1) Shl 16)) Div (Int64(1) Shl 17);
+   FPos^[I]:=XX;
+   For J:=0 To FilterSize-1 Do Begin
+    D:=Abs(Int64(XX)*(Int64(1) Shl 17)-XDst) Shl 13;
+    If XInc>(1 Shl 16) Then D:=(D*DstW) Div SrcW;
+    If D>=(Int64(1) Shl 31) Then Coeff:=0
+    Else Begin
+     DD:=(D*D) Shr 30; DDD:=(DD*D) Shr 30;
+     If D<(Int64(1) Shl 30) Then
+      Coeff:=(12*(Int64(1) Shl 24)-9*B-6*C)*DDD+(-18*(Int64(1) Shl 24)+12*B+6*C)*DD+(6*(Int64(1) Shl 24)-2*B)*(Int64(1) Shl 30)
+     Else
+      Coeff:=(-B-6*C)*DDD+(6*B+30*C)*DD+(-12*B-48*C)*D+(8*B+24*C)*(Int64(1) Shl 30);
+     Coeff:=Coeff Div ((Int64(1) Shl 54) Div Fone);
+    End;
+    Filter^[I*FilterSize+J]:=Coeff;
+    Inc(XX);
+   End;
+   Inc(XDst,2*Int64(XInc));
+  End;
+ End;
+ Filter2Size:=FilterSize;
+ GetMem(Filter2,DstW*Filter2Size*8);
+ Move(Filter^,Filter2^,DstW*Filter2Size*8);
+ FreeMem(Filter);
+ { (filterSize-1)/2 - (filter2Size-1)/2 = 0 sans filtre source }
+ MinFS:=0; Dv:=Fone; Dl:=0.002*Dv;
+ For I:=DstW-1 DownTo 0 Do Begin
+  Mn:=Filter2Size; CutOff:=0;
+  For J:=0 To Filter2Size-1 Do Begin
+   CutOff:=CutOff+Abs(Filter2^[I*Filter2Size]);
+   Dc:=CutOff;
+   If Dc>Dl Then Break;
+   If (I<DstW-1) And (FPos^[I]>=FPos^[I+1]) Then Break;
+   For K:=1 To Filter2Size-1 Do Filter2^[I*Filter2Size+K-1]:=Filter2^[I*Filter2Size+K];
+   Filter2^[I*Filter2Size+Filter2Size-1]:=0;
+   Inc(FPos^[I]);
+  End;
+  CutOff:=0;
+  For J:=Filter2Size-1 DownTo 1 Do Begin
+   CutOff:=CutOff+Abs(Filter2^[I*Filter2Size+J]);
+   Dc:=CutOff;
+   If Dc>Dl Then Break;
+   Dec(Mn);
+  End;
+  If Mn>MinFS Then MinFS:=Mn;
+ End;
+ If (MinFS=1) And (FilterAlign=2) Then FilterAlign:=1;
+ FilterSize:=(MinFS+(FilterAlign-1)) And Not (FilterAlign-1);
+ GetMem(Filter,DstW*FilterSize*8);
+ For I:=0 To DstW-1 Do
+  For J:=0 To FilterSize-1 Do
+   If J>=Filter2Size Then Filter^[I*FilterSize+J]:=0 Else Filter^[I*FilterSize+J]:=Filter2^[I*Filter2Size+J];
+ FreeMem(Filter2);
+ For I:=0 To DstW-1 Do Begin
+  If FPos^[I]<0 Then Begin
+   For J:=1 To FilterSize-1 Do Begin
+    Left:=HdMax(J+FPos^[I],0);
+    Filter^[I*FilterSize+Left]:=Filter^[I*FilterSize+Left]+Filter^[I*FilterSize+J];
+    Filter^[I*FilterSize+J]:=0;
+   End;
+   FPos^[I]:=0;
+  End;
+  If FPos^[I]+FilterSize>SrcW Then Begin
+   Shift:=FPos^[I]+HdMin(FilterSize-SrcW,0);
+   Acc:=0;
+   For J:=FilterSize-1 DownTo 0 Do
+    If FPos^[I]+J>=SrcW Then Begin Acc:=Acc+Filter^[I*FilterSize+J]; Filter^[I*FilterSize+J]:=0; End;
+   For J:=FilterSize-1 DownTo 0 Do Begin
+    If J<Shift Then Filter^[I*FilterSize+J]:=0 Else Filter^[I*FilterSize+J]:=Filter^[I*FilterSize+J-Shift];
+   End;
+   Dec(FPos^[I],Shift);
+   Filter^[I*FilterSize+SrcW-1-FPos^[I]]:=Filter^[I*FilterSize+SrcW-1-FPos^[I]]+Acc;
+  End;
+ End;
+ GetMem(OutF,DstW*FilterSize*4);
+ For I:=0 To DstW-1 Do Begin
+  Err:=0; Sum:=0;
+  For J:=0 To FilterSize-1 Do Sum:=Sum+Filter^[I*FilterSize+J];
+  Sum:=(Sum+One Div 2) Div One;
+  If Sum=0 Then Sum:=1;
+  For J:=0 To FilterSize-1 Do Begin
+   V:=Filter^[I*FilterSize+J]+Err;
+   Coeff:=HdRDiv(V,Sum);
+   OutF^[I*FilterSize+J]:=Coeff;
+   Err:=V-Coeff*Sum;
+  End;
+ End;
+ FreeMem(Filter);
+ OutPos:=FPos; OutSize:=FilterSize;
+End;
+
+Function HdLocalPos(ChrSub,Pos: LongInt): LongInt;
+Begin
+ If (Pos=-1) Or (Pos<=-513) Then Pos:=(128 Shl ChrSub)-128;
+ Inc(Pos,128);
+ HdLocalPos:=Pos Shr ChrSub;
+End;
+
+Function HdGet(P: Pointer; Wide: Boolean; Idx: LongInt): LongInt;
+Begin
+ If Wide Then HdGet:=PHdW(P)^[Idx] Else HdGet:=PHdB(P)^[Idx];
+End;
+
+Function HdS16(X: LongInt): LongInt;
+Begin
+ X:=X And $FFFF;
+ If X>=32768 Then HdS16:=X-65536 Else HdS16:=X;
+End;
+
+Var HdDth: Array[0..7] Of Byte;
+
+{ ligne de 15 bits -> octets (yuv2plane1_8_c) }
+Procedure HdPlane1_8(Src: PHdSm; Dst: PHdB; W,Off: LongInt);
+Var I,V: LongInt;
+Begin
+ For I:=0 To W-1 Do Begin
+  V:=HdSar(Src^[I]+HdDth[(I+Off) And 7],7);
+  If V<0 Then V:=0 Else If V>255 Then V:=255;
+  Dst^[I]:=V;
+ End;
+End;
+
+{ yuv2planeX_8_c }
+Procedure HdPlaneX_8C(Filt: PHdL; FS: LongInt; Rows: PHdL; Src: PHdSm; Stride: LongInt; W,Off: LongInt; Dst: PHdB);
+Var I,J,V: LongInt;
+Begin
+ For I:=0 To W-1 Do Begin
+  V:=LongInt(HdDth[(I+Off) And 7]) Shl 12;
+  For J:=0 To FS-1 Do Inc(V,LongInt(Src^[Rows^[J]*Stride+I])*Filt^[J]);
+  V:=HdSar(V,19);
+  If V<0 Then V:=0 Else If V>255 Then V:=255;
+  Dst^[I]:=V;
+ End;
+End;
+
+{ modele de ff_yuv2yuvX_avx2/sse3 (bloc de pas HdVStep pixels) + mmxext pour le reste :
+  accumulateur 16 bits, pmulhw, dither arrondi (d+8*(fs-1))>>4 }
+Procedure HdPlaneX_8M(Filt: PHdL; FS: LongInt; Rows: PHdL; Src: PHdSm; Stride: LongInt; W,Off: LongInt; Dst: PHdB);
+Var I,J,Done,K,Acc,Dd,V,Step: LongInt; D: Array[0..7] Of LongInt;
+Begin
+ Step:=HdVStep; If Step<8 Then Step:=8;
+ For K:=0 To 7 Do D[K]:=HdDth[(K+Off) And 7];
+ Done:=W-(W Mod Step);
+ For I:=0 To W-1 Do Begin
+  If I<Done Then Dd:=D[I And 7]
+  Else Begin K:=(I-Done) And 7; If K<4 Then Dd:=D[K] Else Dd:=D[K-4]; End;
+  Acc:=HdS16(HdSar(Dd+8*(FS-1),4));
+  For J:=0 To FS-1 Do
+   Acc:=HdS16(Acc+HdSar(LongInt(Src^[Rows^[J]*Stride+I])*HdS16(Filt^[J]),16));
+  V:=HdSar(Acc,3);
+  If V<0 Then V:=0 Else If V>255 Then V:=255;
+  Dst^[I]:=V;
+ End;
+End;
+
+Procedure HdPlane1_N(Src: PHdSm; Dst: PHdW; W,Bits: LongInt);
+Var I,Sh: LongInt;
+Begin
+ Sh:=15-Bits;
+ For I:=0 To W-1 Do Dst^[I]:=HdClipN(HdSar(Src^[I]+(1 Shl (Sh-1)),Sh),Bits);
+End;
+
+Procedure HdPlaneX_N(Filt: PHdL; FS: LongInt; Rows: PHdL; Src: PHdSm; Stride: LongInt; W,Bits: LongInt; Dst: PHdW);
+Var I,J,Sh: LongInt; V: Int64;
+Begin
+ Sh:=11+16-Bits;
+ For I:=0 To W-1 Do Begin
+  V:=Int64(1) Shl (Sh-1);
+  For J:=0 To FS-1 Do V:=V+Int64(Src^[Rows^[J]*Stride+I])*Filt^[J];
+  Dst^[I]:=HdClipN(HdSar64(V,Sh),Bits);
+ End;
+End;
+
+{ conversion en I420 par la chaine generale de swscale (cas non copie).
+  Out8 : destination octets ; sinon Out16 (mots, DBits bits). }
+Procedure HdGeneral(Var S: THdSrc; Dst: Pointer; DBits,SrcFull: LongInt);
+Var
+ W,H,Bits,HS,VS,CSW,CSH,CDW,CDH,ChrXInc,ChrYInc,Y,X,I,J,Sh,V,P,Pos,Cy,DstY,Fs,CP: LongInt;
+ Gray,Is8,Dith,LastC: Boolean;
+ HF,HPosA,VF,VPos: PHdL; HFS,VFS: LongInt;
+ HU,HV,RowY,SrcRow: PHdSm; Rows: PHdL; Fl: PHdL;
+ OffU,OffV,OffD: LongInt; PlaneY,PlaneU,PlaneV: Pointer; DWord: Boolean;
+ Src: Pointer;
+ Acc: LongInt;
+Begin
+ W:=S.W; H:=S.H; Bits:=S.Bits; HS:=S.HS; VS:=S.VS; Gray:=HS<0;
+ DWord:=DBits>8;
+ Is8:=Not DWord;
+ Dith:=Bits>8;
+ CDW:=HdCeilSh(W,1); CDH:=HdCeilSh(H,1);
+ If Gray Then Begin CSW:=W; CSH:=H; HS:=0; VS:=0; End Else Begin CSW:=HdCeilSh(W,HS); CSH:=HdCeilSh(H,VS); End;
+ ChrXInc:=((Int64(CSW) Shl 16)+(CDW Shr 1)) Div CDW;
+ ChrYInc:=((Int64(CSH) Shl 16)+(CDH Shr 1)) Div CDH;
+ { sorties }
+ If DWord Then Begin
+  PlaneY:=Dst; PlaneU:=@PHdW(Dst)^[W*H]; PlaneV:=@PHdW(Dst)^[W*H+CDW*CDH];
+ End Else Begin
+  PlaneY:=Dst; PlaneU:=@PHdB(Dst)^[W*H]; PlaneV:=@PHdB(Dst)^[W*H+CDW*CDH];
+ End;
+ { filtres de chroma }
+ HF:=Nil; HPosA:=Nil; VF:=Nil; VPos:=Nil;
+ HdInitFilter(ChrXInc,CSW,CDW,4,1 Shl 14,HdLocalPos(HS,-513),HdLocalPos(1,-513),HF,HPosA,HFS);
+ If VS=1 Then Pos:=128 Else Pos:=-513;
+ HdInitFilter(ChrYInc,CSH,CDH,2,1 Shl 12,HdLocalPos(VS,Pos),HdLocalPos(1,128),VF,VPos,VFS);
+ GetMem(HU,CSH*CDW*2+64); GetMem(HV,CSH*CDW*2+64); GetMem(RowY,W*2+64);
+ GetMem(Rows,(VFS+2)*4); GetMem(Fl,(VFS+2)*4);
+ { chroma : filtre horizontal -> 15 bits }
+ If Gray Then Begin
+  For I:=0 To CSH*CDW-1 Do Begin HU^[I]:=16384; HV^[I]:=16384; End;
+ End Else Begin
+  If Bits=8 Then Sh:=7 Else If Bits-1<15 Then Sh:=Bits-1 Else Sh:=15;
+  For P:=1 To 2 Do Begin
+   If P=1 Then Begin Src:=S.P[1]; End Else Src:=S.P[2];
+   For Y:=0 To CSH-1 Do Begin
+    For X:=0 To CDW-1 Do Begin
+     V:=0;
+     For J:=0 To HFS-1 Do Begin
+      Pos:=HdMin(HPosA^[X]+J,CSW-1);
+      If S.Wide Then V:=V+LongInt(PHdW(Src)^[(Y*S.Stride[P]) Shr 1+Pos])*HF^[X*HFS+J]
+      Else V:=V+LongInt(PHdB(Src)^[Y*S.Stride[P]+Pos])*HF^[X*HFS+J];
+     End;
+     V:=HdMin(HdSar(V,Sh),32767);
+     If SrcFull<>0 Then V:=HdSar(V*1799+4081085,11);
+     If P=1 Then HU^[Y*CDW+X]:=V Else HV^[Y*CDW+X]:=V;
+    End;
+   End;
+  End;
+ End;
+ { luma }
+ If Bits=8 Then Sh:=7 Else If Bits-1<15 Then Sh:=Bits-1 Else Sh:=15;
+ For Y:=0 To H-1 Do Begin
+  For X:=0 To W-1 Do Begin
+   If S.Wide Then V:=PHdW(S.P[0])^[(Y*S.Stride[0]) Shr 1+X] Else V:=PHdB(S.P[0])^[Y*S.Stride[0]+X];
+   V:=HdMin(HdSar(V*16384,Sh),32767);
+   If SrcFull<>0 Then V:=HdSar(V*14071+33561947,14);
+   RowY^[X]:=V;
+  End;
+  If Dith Then Move(HD_DITH128[Y And 7],HdDth,8) Else FillChar(HdDth,8,64);
+  If DWord Then HdPlane1_N(RowY,@PHdW(PlaneY)^[Y*W],W,DBits) Else HdPlane1_8(RowY,@PHdB(PlaneY)^[Y*W],W,0);
+ End;
+ { chroma : filtre vertical }
+ For Cy:=0 To CDH-1 Do Begin
+  DstY:=2*Cy;
+  If Dith Then Move(HD_DITH128[Cy And 7],HdDth,8) Else FillChar(HdDth,8,64);
+  LastC:=DstY>=H-2;
+  For P:=1 To 2 Do Begin
+   If P=1 Then Begin CP:=0; End Else CP:=3;
+   If VFS=1 Then Begin
+    If P=1 Then SrcRow:=@HU^[VPos^[Cy]*CDW] Else SrcRow:=@HV^[VPos^[Cy]*CDW];
+    If DWord Then Begin
+     If P=1 Then HdPlane1_N(SrcRow,@PHdW(PlaneU)^[Cy*CDW],CDW,DBits) Else HdPlane1_N(SrcRow,@PHdW(PlaneV)^[Cy*CDW],CDW,DBits);
+    End Else Begin
+     If P=1 Then HdPlane1_8(SrcRow,@PHdB(PlaneU)^[Cy*CDW],CDW,0) Else HdPlane1_8(SrcRow,@PHdB(PlaneV)^[Cy*CDW],CDW,3);
+    End;
+   End Else Begin
+    For J:=0 To VFS-1 Do Begin
+     Rows^[J]:=HdMin(VPos^[Cy]+J,CSH-1);
+     Fl^[J]:=VF^[Cy*VFS+J];
+    End;
+    If P=1 Then SrcRow:=HU Else SrcRow:=HV;
+    If DWord Then Begin
+     If P=1 Then HdPlaneX_N(Fl,VFS,Rows,SrcRow,CDW,CDW,DBits,@PHdW(PlaneU)^[Cy*CDW])
+     Else HdPlaneX_N(Fl,VFS,Rows,SrcRow,CDW,CDW,DBits,@PHdW(PlaneV)^[Cy*CDW]);
+    End Else Begin
+     If P=1 Then Begin
+      If LastC Or Not HdVSimd Then HdPlaneX_8C(Fl,VFS,Rows,SrcRow,CDW,CDW,0,@PHdB(PlaneU)^[Cy*CDW])
+      Else HdPlaneX_8M(Fl,VFS,Rows,SrcRow,CDW,CDW,0,@PHdB(PlaneU)^[Cy*CDW]);
+     End Else Begin
+      If LastC Or Not HdVSimd Then HdPlaneX_8C(Fl,VFS,Rows,SrcRow,CDW,CDW,3,@PHdB(PlaneV)^[Cy*CDW])
+      Else HdPlaneX_8M(Fl,VFS,Rows,SrcRow,CDW,CDW,3,@PHdB(PlaneV)^[Cy*CDW]);
+     End;
+    End;
+   End;
+  End;
+ End;
+ FreeMem(Fl); FreeMem(Rows); FreeMem(RowY); FreeMem(HV); FreeMem(HU);
+ FreeMem(VPos); FreeMem(VF); FreeMem(HPosA); FreeMem(HF);
+End;
+
+{ planarCopyWrapper : meme sous-echantillonnage de chroma (4:2:0), pas de conversion de plage }
+Procedure HdPlanarCopy(Var S: THdSrc; Dst: Pointer; DBits: LongInt);
+Var
+ W,H,CW,CH,P,PW,PH,Y,X,Shf,T,Sl,Phs,V: LongInt; Src: Pointer; Base: LongInt; DW: Boolean;
+ Dth: Array[0..7] Of Byte;
+Begin
+ W:=S.W; H:=S.H; CW:=HdCeilSh(W,1); CH:=HdCeilSh(H,1); DW:=DBits>8;
+ Sl:=HdMax((H+HdSwsJobs-1) Div HdSwsJobs,1); Sl:=(Sl+1) And Not 1;
+ Base:=0;
+ For P:=0 To 2 Do Begin
+  If P=0 Then Begin PW:=W; PH:=H; End Else Begin PW:=CW; PH:=CH; End;
+  Src:=S.P[P];
+  For Y:=0 To PH-1 Do Begin
+   If HdSwsJobs>1 Then Begin
+    If P=0 Then Phs:=Y Mod Sl Else Phs:=Y Mod (Sl Shr 1);
+   End Else Phs:=Y;
+   Shf:=S.Bits-DBits;
+   If Shf>0 Then Move(HD_DITHERS[Shf-1,Phs And 7],Dth,8);
+   For X:=0 To PW-1 Do Begin
+    If S.Wide Then V:=PHdW(Src)^[(Y*S.Stride[P]) Shr 1+X] Else V:=PHdB(Src)^[Y*S.Stride[P]+X];
+    If Shf>0 Then Begin T:=(V+Dth[X And 7]) Shr Shf; V:=T-(T Shr DBits); End
+    Else If Shf<0 Then V:=V Shl (-Shf);
+    If DW Then PHdW(Dst)^[Base+Y*PW+X]:=V Else PHdB(Dst)^[Base+Y*PW+X]:=V;
+   End;
+  End;
+  Inc(Base,PW*PH);
+ End;
+End;
+
+{ Conversion d'une image native vers I420 : DBits=8 -> octets, DBits=10 -> mots 16 bits (yuv420p10le).
+  Dst : W*H + 2*CW*CH echantillons contigus. Reproduit `ffmpeg -pix_fmt yuv420p` / `yuv420p10le`. }
+Procedure HdConvert(Var S: THdSrc; Dst: Pointer; DBits: LongInt);
+Var Full: LongInt; Gray: Boolean;
+Begin
+ Gray:=S.HS<0;
+ Full:=0;
+ If S.Range=2 Then Full:=1;
+ If Gray And (S.Range=0) Then Full:=1;
+ If (Not Gray) And (S.HS=1) And (S.VS=1) And ((Full=0) Or (S.Bits=DBits)) Then HdPlanarCopy(S,Dst,DBits)
+ Else HdGeneral(S,Dst,DBits,Full);
+End;
+
+{ Descripteurs pratiques }
+Procedure HdSetContig(Var S: THdSrc; B: Pointer; W,H,Bits,HS,VS,Range: LongInt);
+Var Bps,CW,CH: LongInt;
+Begin
+ FillChar(S,SizeOf(S),0);
+ S.W:=W; S.H:=H; S.Bits:=Bits; S.HS:=HS; S.VS:=VS; S.Range:=Range; S.Wide:=Bits>8;
+ If S.Wide Then Bps:=2 Else Bps:=1;
+ S.P[0]:=B; S.Stride[0]:=W*Bps;
+ If HS>=0 Then Begin
+  CW:=HdCeilSh(W,HS); CH:=HdCeilSh(H,VS);
+  S.P[1]:=@PHdB(B)^[W*H*Bps]; S.P[2]:=@PHdB(B)^[(W*H+CW*CH)*Bps];
+  S.Stride[1]:=CW*Bps; S.Stride[2]:=CW*Bps;
+ End;
+End;
+
+{ plans separes en mots (VP9 raw) : Y,U,V + dimensions de chroma deja connues }
+Procedure HdSetPlanes(Var S: THdSrc; Y,U,V: Pointer; W,H,CW,Bits,HS,VS,Range: LongInt; Wide: Boolean);
+Var Bps: LongInt;
+Begin
+ FillChar(S,SizeOf(S),0);
+ S.W:=W; S.H:=H; S.Bits:=Bits; S.HS:=HS; S.VS:=VS; S.Range:=Range; S.Wide:=Wide;
+ If Wide Then Bps:=2 Else Bps:=1;
+ S.P[0]:=Y; S.P[1]:=U; S.P[2]:=V;
+ S.Stride[0]:=W*Bps; S.Stride[1]:=CW*Bps; S.Stride[2]:=CW*Bps;
+End;
+
+{ ======================================================================== }
+{  Metadonnees HDR / colorimetrie                                           }
+{ ======================================================================== }
+Type
+ { Codes = ITU-T H.273 (CICP) : primaires 1=BT.709 9=BT.2020 11=DCI-P3 12=P3-D65 ;
+   transfert 1=BT.709 13=sRGB 14/15=BT.2020 16=PQ(SMPTE ST 2084) 18=HLG(ARIB STD-B67) ;
+   matrice 1=BT.709 5/6=BT.601 9=BT.2020 NCL. 2 = non specifie.
+   Unites comme dans les SEI HEVC : chromaticites en 0.00002, luminances en 0.0001 cd/m2.
+   Les primaires du mastering sont rangees dans l'ordre R,G,B (l'ordre SEI est G,B,R). }
+ THdInfo=Record
+  HaveColour: Boolean;                { colour_description presente }
+  Prim,Trc,Mat: LongInt;
+  RangeKnown,Full: Boolean;           { video_full_range_flag present / vrai }
+  BitDepth,ChromaFmt,ChromaLoc: LongInt;   { BitDepth 0 / ChromaFmt -1 / ChromaLoc -1 si inconnu (ChromaFmt : chroma_format_idc 0..3) }
+  HaveMd: Boolean;
+  MdPx,MdPy: Array[0..2] Of LongInt;  { R,G,B }
+  MdWx,MdWy,MdMaxL,MdMinL: LongInt;
+  HaveCll: Boolean;
+  MaxCll,MaxFall: LongInt;            { cd/m2 }
+ End;
+
+Var
+ HdInfo: THdInfo;                     { informations du flux courant (remplies par les analyseurs) }
+
+Procedure HdInfoClear(Var I: THdInfo);
+Begin
+ FillChar(I,SizeOf(I),0);
+ I.Prim:=2; I.Trc:=2; I.Mat:=2; I.ChromaLoc:=-1; I.ChromaFmt:=-1;
+End;
+
+Function HdIsHdr(Var I: THdInfo): Boolean;
+Begin
+ HdIsHdr:=(I.Trc=16) Or (I.Trc=18);
+End;
+
+{ ---- lecteur de bits (RBSP, octets d'echappement 00 00 03 retires) ---- }
+Var
+ HdBr: Record Buf: PHdB; Len,Pos: LongInt; Err: Boolean; End;
+
+Var HdBrRaw: Boolean;      { True : pas d'octets d'echappement (AV1) }
+
+Procedure HdBrOpen(P: PHdB; Len: LongInt);
+Var I,Z,N: LongInt;
+Begin
+ GetMem(HdBr.Buf,Len+8); N:=0; Z:=0;
+ For I:=0 To Len-1 Do Begin
+  If (Z>=2) And (P^[I]=3) And Not HdBrRaw Then Z:=0
+  Else Begin
+   HdBr.Buf^[N]:=P^[I]; Inc(N);
+   If P^[I]=0 Then Inc(Z) Else Z:=0;
+  End;
+ End;
+ FillChar(HdBr.Buf^[N],8,0);
+ HdBr.Len:=N*8; HdBr.Pos:=0; HdBr.Err:=False;
+End;
+
+Procedure HdBrClose;
+Begin
+ If HdBr.Buf<>Nil Then FreeMem(HdBr.Buf); HdBr.Buf:=Nil;
+End;
+
+Function HdBit: LongInt;
+Begin
+ If HdBr.Pos>=HdBr.Len Then Begin HdBr.Err:=True; HdBit:=0; Exit; End;
+ HdBit:=(HdBr.Buf^[HdBr.Pos Shr 3] Shr (7-(HdBr.Pos And 7))) And 1;
+ Inc(HdBr.Pos);
+End;
+
+Function HdBits(N: LongInt): LongInt;
+Var V: LongInt;
+Begin
+ V:=0;
+ While N>0 Do Begin V:=(V Shl 1) Or HdBit; Dec(N); End;
+ HdBits:=V;
+End;
+
+Function HdUe: LongInt;
+Var Z: LongInt;
+Begin
+ Z:=0;
+ While (HdBit=0) And (Not HdBr.Err) And (Z<32) Do Inc(Z);
+ If Z=0 Then HdUe:=0 Else HdUe:=(1 Shl Z)-1+HdBits(Z);
+End;
+
+Function HdSe: LongInt;
+Var K: LongInt;
+Begin
+ K:=HdUe;
+ If K And 1=1 Then HdSe:=(K+1) Shr 1 Else HdSe:=-(K Shr 1);
+End;
+
+{ vui commun H.264/HEVC jusqu'a chroma_loc_info }
+Procedure HdVuiColour(Var I: THdInfo);
+Var Idc,Fr: LongInt;
+Begin
+ If HdBit=1 Then Begin Idc:=HdBits(8); If Idc=255 Then Begin HdBits(16); HdBits(16); End; End;
+ If HdBit=1 Then HdBit;
+ If HdBit=1 Then Begin
+  HdBits(3); Fr:=HdBit;
+  I.RangeKnown:=True; I.Full:=Fr=1;
+  If HdBit=1 Then Begin I.Prim:=HdBits(8); I.Trc:=HdBits(8); I.Mat:=HdBits(8); I.HaveColour:=True; End;
+ End;
+ If HdBit=1 Then Begin I.ChromaLoc:=HdUe; HdUe; End;
+End;
+
+Procedure HdHevcPtl(MaxSub: LongInt);
+Var I: LongInt; Pp,Lp: Array[0..7] Of LongInt;
+Begin
+ HdBits(8); HdBits(32); HdBits(32); HdBits(16); HdBits(8); { 88 bits profil + 8 bits niveau }
+ For I:=0 To MaxSub-1 Do Begin Pp[I]:=HdBit; Lp[I]:=HdBit; End;
+ If MaxSub>0 Then For I:=MaxSub To 7 Do HdBits(2);
+ For I:=0 To MaxSub-1 Do Begin
+  If Pp[I]=1 Then Begin HdBits(8); HdBits(32); HdBits(32); HdBits(16); End;
+  If Lp[I]=1 Then HdBits(8);
+ End;
+End;
+
+{ SPS HEVC : P = octets du NAL SANS l'en-tete de 2 octets (ou avec : voir Skip) }
+Procedure HdParseHevcSps(P: PHdB; Len: LongInt; Var I: THdInfo);
+Var
+ MaxSub,Cf,N,K,J,Idx,Ns,Sz,Mat,Lc,PredRef: LongInt; NumDelta: Array[0..64] Of LongInt;
+ Inter: LongInt; Pcm: LongInt; LogPoc: LongInt; Used,Ud,Cnt: LongInt; Ordering: LongInt;
+Begin
+ HdBrOpen(P,Len);
+ HdBits(4); MaxSub:=HdBits(3); HdBit;
+ HdHevcPtl(MaxSub);
+ HdUe; Cf:=HdUe; I.ChromaFmt:=Cf;
+ If Cf=3 Then HdBit;
+ HdUe; HdUe;
+ If HdBit=1 Then Begin HdUe; HdUe; HdUe; HdUe; End;
+ I.BitDepth:=HdUe+8; HdUe;
+ LogPoc:=HdUe+4;
+ Ordering:=HdBit;
+ If Ordering=1 Then K:=0 Else K:=MaxSub;
+ For J:=K To MaxSub Do Begin HdUe; HdUe; HdUe; End;
+ HdUe; HdUe; HdUe; HdUe; HdUe; HdUe;
+ If HdBit=1 Then Begin
+  If HdBit=1 Then Begin
+   For Sz:=0 To 3 Do Begin
+    Mat:=0;
+    While Mat<6 Do Begin
+     If HdBit=0 Then HdUe
+     Else Begin
+      N:=1 Shl (4+(Sz Shl 1)); If N>64 Then N:=64;
+      If Sz>1 Then HdSe;
+      For K:=1 To N Do HdSe;
+     End;
+     If Sz=3 Then Inc(Mat,3) Else Inc(Mat);
+    End;
+   End;
+  End;
+ End;
+ HdBit; HdBit;
+ If HdBit=1 Then Begin HdBits(4); HdBits(4); HdUe; HdUe; HdBit; End;
+ Ns:=HdUe;
+ If Ns>64 Then Begin HdBrClose; Exit; End;
+ For Idx:=0 To Ns-1 Do Begin
+  If Idx<>0 Then Inter:=HdBit Else Inter:=0;
+  If Inter=1 Then Begin
+   HdBit; HdUe;
+   PredRef:=Idx-1;
+   Cnt:=0;
+   For J:=0 To NumDelta[PredRef] Do Begin
+    Used:=HdBit; Ud:=1;
+    If Used=0 Then Ud:=HdBit;
+    If (Used=1) Or (Ud=1) Then Inc(Cnt);
+   End;
+   NumDelta[Idx]:=Cnt;
+  End Else Begin
+   N:=HdUe; K:=HdUe;
+   If (N>16) Or (K>16) Then Begin HdBrClose; Exit; End;
+   For J:=1 To N Do Begin HdUe; HdBit; End;
+   For J:=1 To K Do Begin HdUe; HdBit; End;
+   NumDelta[Idx]:=N+K;
+  End;
+ End;
+ If HdBit=1 Then Begin
+  N:=HdUe;
+  For J:=1 To N Do Begin HdBits(LogPoc); HdBit; End;
+ End;
+ HdBit; HdBit;
+ If (HdBit=1) And (Not HdBr.Err) Then HdVuiColour(I);
+ HdBrClose;
+End;
+
+Procedure HdScalingList(Size: LongInt);
+Var J,Last,Next,D: LongInt;
+Begin
+ Last:=8; Next:=8;
+ For J:=0 To Size-1 Do Begin
+  If Next<>0 Then Begin D:=HdSe; Next:=(Last+D+256) And 255; End;
+  If Next<>0 Then Last:=Next;
+ End;
+End;
+
+{ SPS H.264 : P = octets du NAL SANS l'octet d'en-tete }
+Procedure HdParseH264Sps(P: PHdB; Len: LongInt; Var I: THdInfo);
+Var Prof,Cf,K,N,Poc,Fmo: LongInt;
+Begin
+ HdBrOpen(P,Len);
+ Prof:=HdBits(8); HdBits(8); HdBits(8); HdUe;
+ Cf:=1; I.BitDepth:=8;
+ Case Prof Of
+  100,110,122,244,44,83,86,118,128,138,139,134,135: Begin
+   Cf:=HdUe;
+   If Cf=3 Then HdBit;
+   I.BitDepth:=HdUe+8; HdUe; HdBit;
+   If HdBit=1 Then Begin
+    If Cf<>3 Then N:=8 Else N:=12;
+    For K:=0 To N-1 Do If HdBit=1 Then If K<6 Then HdScalingList(16) Else HdScalingList(64);
+   End;
+  End;
+ End;
+ I.ChromaFmt:=Cf;
+ HdUe; Poc:=HdUe;
+ If Poc=0 Then HdUe
+ Else If Poc=1 Then Begin
+  HdBit; HdSe; HdSe; N:=HdUe;
+  If N>255 Then Begin HdBrClose; Exit; End;
+  For K:=1 To N Do HdSe;
+ End;
+ HdUe; HdBit; HdUe; HdUe;
+ Fmo:=HdBit;
+ If Fmo=0 Then HdBit;
+ HdBit;
+ If HdBit=1 Then Begin HdUe; HdUe; HdUe; HdUe; End;
+ If (HdBit=1) And (Not HdBr.Err) Then HdVuiColour(I);
+ HdBrClose;
+End;
+
+{ SEI (HEVC ou H.264) : P = octets du NAL apres l'en-tete ; charges 137 (mastering display) et 144 (content light level) }
+Procedure HdParseSei(P: PHdB; Len: LongInt; Var I: THdInfo);
+Var Pos,T,Sz,K,Q: LongInt; B: PHdB; N: LongInt;
+ Function G16(O: LongInt): LongInt; Begin G16:=(B^[O] Shl 8) Or B^[O+1]; End;
+ Function G32(O: LongInt): LongInt; Begin G32:=(B^[O] Shl 24) Or (B^[O+1] Shl 16) Or (B^[O+2] Shl 8) Or B^[O+3]; End;
+Begin
+ HdBrOpen(P,Len); B:=HdBr.Buf; N:=HdBr.Len Shr 3;
+ Pos:=0;
+ While Pos+2<=N Do Begin
+  T:=0; While (Pos<N) And (B^[Pos]=255) Do Begin Inc(T,255); Inc(Pos); End;
+  If Pos>=N Then Break;
+  Inc(T,B^[Pos]); Inc(Pos);
+  Sz:=0; While (Pos<N) And (B^[Pos]=255) Do Begin Inc(Sz,255); Inc(Pos); End;
+  If Pos>=N Then Break;
+  Inc(Sz,B^[Pos]); Inc(Pos);
+  If Pos+Sz>N Then Break;
+  If (T=137) And (Sz>=24) Then Begin
+   { ordre SEI : G,B,R }
+   I.MdPx[1]:=G16(Pos); I.MdPy[1]:=G16(Pos+2);
+   I.MdPx[2]:=G16(Pos+4); I.MdPy[2]:=G16(Pos+6);
+   I.MdPx[0]:=G16(Pos+8); I.MdPy[0]:=G16(Pos+10);
+   I.MdWx:=G16(Pos+12); I.MdWy:=G16(Pos+14);
+   I.MdMaxL:=G32(Pos+16); I.MdMinL:=G32(Pos+20);
+   I.HaveMd:=True;
+  End Else If (T=144) And (Sz>=4) Then Begin
+   I.MaxCll:=G16(Pos); I.MaxFall:=G16(Pos+2); I.HaveCll:=True;
+  End;
+  Inc(Pos,Sz);
+  If (Pos<N) And (B^[Pos]=$80) Then Break;
+ End;
+ HdBrClose;
+End;
+
+{ NAL isole (avec son en-tete) : Hevc=True -> en-tete 2 octets, sinon 1 octet }
+Procedure HdParseNal(P: PHdB; Len: LongInt; Hevc: Boolean; Var I: THdInfo);
+Var T: LongInt;
+Begin
+ If Len<3 Then Exit;
+ If Hevc Then Begin
+  T:=(P^[0] Shr 1) And 63;
+  If T=33 Then HdParseHevcSps(@P^[2],Len-2,I)
+  Else If T=39 Then HdParseSei(@P^[2],Len-2,I);
+ End Else Begin
+  T:=P^[0] And 31;
+  If T=7 Then HdParseH264Sps(@P^[1],Len-1,I)
+  Else If T=6 Then HdParseSei(@P^[1],Len-1,I);
+ End;
+End;
+
+{ paquet MP4/MKV (NAL precedes de leur longueur sur LenSize octets) }
+Procedure HdScanSample(P: PHdB; Len,LenSize: LongInt; Hevc: Boolean; Var I: THdInfo);
+Var Pos,N,K: LongInt;
+Begin
+ Pos:=0;
+ While Pos+LenSize<=Len Do Begin
+  N:=0; For K:=0 To LenSize-1 Do N:=(N Shl 8) Or P^[Pos+K];
+  Inc(Pos,LenSize);
+  If (N<=0) Or (Pos+N>Len) Then Break;
+  HdParseNal(@P^[Pos],N,Hevc,I);
+  Inc(Pos,N);
+ End;
+End;
+
+{ flux Annexe B }
+Procedure HdScanAnnexB(P: PHdB; Len: LongInt; Hevc: Boolean; Var I: THdInfo);
+Var Pos,St,K: LongInt;
+Begin
+ Pos:=0; St:=-1;
+ While Pos+3<=Len Do Begin
+  If (P^[Pos]=0) And (P^[Pos+1]=0) And (P^[Pos+2]=1) Then Begin
+   If St>=0 Then Begin K:=Pos; While (K>St) And (P^[K-1]=0) Do Dec(K); HdParseNal(@P^[St],K-St,Hevc,I); End;
+   St:=Pos+3; Inc(Pos,3);
+  End Else Inc(Pos);
+ End;
+ If St>=0 Then HdParseNal(@P^[St],Len-St,Hevc,I);
+End;
+
+{ HEVCDecoderConfigurationRecord (contenu de la boite hvcC sans l'en-tete de 8 octets) }
+Procedure HdParseHvcC(P: PHdB; Len: LongInt; Var I: THdInfo);
+Var Na,A,Nn,K,Sz,Pos,Ty: LongInt;
+Begin
+ If Len<23 Then Exit;
+ Na:=P^[22]; Pos:=23;
+ For A:=1 To Na Do Begin
+  If Pos+3>Len Then Exit;
+  Ty:=P^[Pos] And 63; Nn:=(P^[Pos+1] Shl 8) Or P^[Pos+2]; Inc(Pos,3);
+  For K:=1 To Nn Do Begin
+   If Pos+2>Len Then Exit;
+   Sz:=(P^[Pos] Shl 8) Or P^[Pos+1]; Inc(Pos,2);
+   If Pos+Sz>Len Then Exit;
+   HdParseNal(@P^[Pos],Sz,True,I);
+   Inc(Pos,Sz);
+  End;
+ End;
+End;
+
+{ AVCDecoderConfigurationRecord (contenu de avcC) }
+Procedure HdParseAvcC(P: PHdB; Len: LongInt; Var I: THdInfo);
+Var Ns,K,Sz,Pos: LongInt;
+Begin
+ If Len<7 Then Exit;
+ Ns:=P^[5] And 31; Pos:=6;
+ For K:=1 To Ns Do Begin
+  If Pos+2>Len Then Exit;
+  Sz:=(P^[Pos] Shl 8) Or P^[Pos+1]; Inc(Pos,2);
+  If Pos+Sz>Len Then Exit;
+  HdParseNal(@P^[Pos],Sz,False,I);
+  Inc(Pos,Sz);
+ End;
+End;
+
+{ boite colr : contenu apres l'en-tete (type sur 4 octets 'nclx' + 3x u16 + 1 octet) }
+Procedure HdParseColr(P: PHdB; Len: LongInt; Var I: THdInfo);
+Begin
+ If (Len>=11) And (P^[0]=Ord('n')) And (P^[1]=Ord('c')) And (P^[2]=Ord('l')) And (P^[3]=Ord('x')) Then Begin
+  I.Prim:=(P^[4] Shl 8) Or P^[5]; I.Trc:=(P^[6] Shl 8) Or P^[7]; I.Mat:=(P^[8] Shl 8) Or P^[9];
+  I.Full:=(P^[10] And $80)<>0; I.RangeKnown:=True; I.HaveColour:=True;
+ End;
+End;
+
+{ boite mdcv (24 octets : primaires G,B,R, point blanc, luminances) }
+Procedure HdParseMdcv(P: PHdB; Len: LongInt; Var I: THdInfo);
+Var K: LongInt;
+ Function G16(O: LongInt): LongInt; Begin G16:=(P^[O] Shl 8) Or P^[O+1]; End;
+Begin
+ If Len<24 Then Exit;
+ I.MdPx[1]:=G16(0); I.MdPy[1]:=G16(2); I.MdPx[2]:=G16(4); I.MdPy[2]:=G16(6); I.MdPx[0]:=G16(8); I.MdPy[0]:=G16(10);
+ I.MdWx:=G16(12); I.MdWy:=G16(14);
+ I.MdMaxL:=0; For K:=0 To 3 Do I.MdMaxL:=(I.MdMaxL Shl 8) Or P^[16+K];
+ I.MdMinL:=0; For K:=0 To 3 Do I.MdMinL:=(I.MdMinL Shl 8) Or P^[20+K];
+ I.HaveMd:=True;
+End;
+
+{ boite clli (4 octets) }
+Procedure HdParseClli(P: PHdB; Len: LongInt; Var I: THdInfo);
+Begin
+ If Len<4 Then Exit;
+ I.MaxCll:=(P^[0] Shl 8) Or P^[1]; I.MaxFall:=(P^[2] Shl 8) Or P^[3]; I.HaveCll:=True;
+End;
+
+{ vpcC (VP9) : contenu apres l'en-tete de boite (FullBox : 4 octets version/flags, profil, niveau, ...) }
+Procedure HdParseVpcC(P: PHdB; Len: LongInt; Var I: THdInfo);
+Begin
+ If Len<10 Then Exit;
+ I.BitDepth:=P^[6] Shr 4; I.ChromaFmt:=(P^[6] Shr 1) And 7; I.RangeKnown:=True; I.Full:=(P^[6] And 1)=1;
+ I.Prim:=P^[7]; I.Trc:=P^[8]; I.Mat:=P^[9]; I.HaveColour:=True;
+End;
+
+{ Matroska : contenu de l'element Colour (ID $55B0) }
+Function HdEbmlFloat(P: PHdB; Sz: LongInt): Double;
+Var K: LongInt; Q: Int64; S: Single; D: Double;
+Begin
+ Q:=0; For K:=0 To Sz-1 Do Q:=(Q Shl 8) Or P^[K];
+ If Sz=4 Then Begin Move(Q,S,4); HdEbmlFloat:=S; End
+ Else If Sz=8 Then Begin Move(Q,D,8); HdEbmlFloat:=D; End
+ Else HdEbmlFloat:=0;
+End;
+
+Procedure HdParseMkvColour(P: PHdB; Len: LongInt; Var I: THdInfo);
+Var Pos,K,Sz,B: LongInt; Id: LongInt; V: Int64; Sub,SubEnd,SId,SSz: LongInt; F: Double;
+ Procedure ReadVint(Var Pos: LongInt; Lim: LongInt; IsId: Boolean; Var Val: Int64);
+ Var L,M,K2: LongInt;
+ Begin
+  Val:=0;
+  If Pos>=Lim Then Begin Pos:=Lim+1; Exit; End;
+  B:=P^[Pos]; L:=1; M:=$80;
+  While (L<=8) And ((B And M)=0) Do Begin Inc(L); M:=M Shr 1; End;
+  If L>8 Then Begin Pos:=Lim+1; Exit; End;
+  If IsId Then Val:=B Else Val:=B And (M-1);
+  For K2:=1 To L-1 Do Val:=(Val Shl 8) Or P^[Pos+K2];
+  Inc(Pos,L);
+ End;
+ Function UInt(O,N: LongInt): Int64;
+ Var K2: LongInt; R: Int64;
+ Begin R:=0; For K2:=0 To N-1 Do R:=(R Shl 8) Or P^[O+K2]; UInt:=R; End;
+Begin
+ Pos:=0;
+ While Pos<Len Do Begin
+  ReadVint(Pos,Len,True,V); Id:=V;
+  ReadVint(Pos,Len,False,V); Sz:=V;
+  If (Pos>Len) Or (Pos+Sz>Len) Then Break;
+  Case Id Of
+   $55B1: Begin I.Mat:=UInt(Pos,Sz); I.HaveColour:=True; End;
+   $55B9: Begin K:=UInt(Pos,Sz); I.RangeKnown:=K<>0; I.Full:=K=2; End;
+   $55BA: Begin I.Trc:=UInt(Pos,Sz); I.HaveColour:=True; End;
+   $55BB: Begin I.Prim:=UInt(Pos,Sz); I.HaveColour:=True; End;
+   $55BC: Begin I.MaxCll:=UInt(Pos,Sz); I.HaveCll:=True; End;
+   $55BD: I.MaxFall:=UInt(Pos,Sz);
+   $55D0: Begin
+    Sub:=Pos; SubEnd:=Pos+Sz;
+    While Sub<SubEnd Do Begin
+     ReadVint(Sub,SubEnd,True,V); SId:=V;
+     ReadVint(Sub,SubEnd,False,V); SSz:=V;
+     If (Sub>SubEnd) Or (Sub+SSz>SubEnd) Then Break;
+     F:=HdEbmlFloat(@P^[Sub],SSz);
+     Case SId Of
+      $55D1: I.MdPx[0]:=Round(F*50000); $55D2: I.MdPy[0]:=Round(F*50000);
+      $55D3: I.MdPx[1]:=Round(F*50000); $55D4: I.MdPy[1]:=Round(F*50000);
+      $55D5: I.MdPx[2]:=Round(F*50000); $55D6: I.MdPy[2]:=Round(F*50000);
+      $55D7: I.MdWx:=Round(F*50000); $55D8: I.MdWy:=Round(F*50000);
+      $55D9: Begin I.MdMaxL:=Round(F*10000); I.HaveMd:=True; End;
+      $55DA: I.MdMinL:=Round(F*10000);
+     End;
+     Inc(Sub,SSz);
+    End;
+   End;
+  End;
+  Inc(Pos,Sz);
+ End;
+End;
+
+{ en-tete de sequence AV1 : P = suite d'OBU (configOBUs de av1C ou premier paquet) }
+Procedure HdParseAv1Seq(P: PHdB; Len: LongInt; Var I: THdInfo);
+Var Pos,T,Ext,Hs,Sz,Prof,Red,Tim,Dmi,Opc,K,Idc,Lvl,Nb,BufLen,Hb,Mono,Cd,Bd,Tw,Wb,Fid,Oh,Sct,Sim,Pr,Tr,Mt: LongInt;
+ Dmp,Idp: LongInt;
+Begin
+ Pos:=0;
+ While Pos<Len Do Begin
+  T:=(P^[Pos] Shr 3) And 15; Ext:=(P^[Pos] Shr 2) And 1; Hs:=(P^[Pos] Shr 1) And 1;
+  Inc(Pos); If Ext=1 Then Inc(Pos);
+  If Hs=1 Then Begin
+   Sz:=0; K:=0;
+   While Pos<Len Do Begin Sz:=Sz Or ((P^[Pos] And 127) Shl (7*K)); Inc(K); Inc(Pos); If (P^[Pos-1] And 128)=0 Then Break; End;
+  End Else Sz:=Len-Pos;
+  If (Sz<0) Or (Pos+Sz>Len) Then Break;
+  If T=1 Then Begin
+   HdBrRaw:=True; HdBrOpen(@P^[Pos],Sz); HdBrRaw:=False;
+   Prof:=HdBits(3); HdBit; Red:=HdBit;
+   Dmi:=0; Dmp:=0; Idp:=0; BufLen:=0;
+   If Red=1 Then HdBits(5)
+   Else Begin
+    Tim:=HdBit;
+    If Tim=1 Then Begin
+     HdBits(32); HdBits(32);
+     If HdBit=1 Then Begin K:=0; While (HdBit=0) And (K<32) Do Inc(K); HdBits(K); End;
+     Dmi:=HdBit;
+     If Dmi=1 Then Begin BufLen:=HdBits(5)+1; HdBits(32); HdBits(5); HdBits(5); End;
+    End;
+    Idp:=HdBit;
+    Opc:=HdBits(5)+1;
+    For K:=1 To Opc Do Begin
+     HdBits(12); Lvl:=HdBits(5);
+     If Lvl>7 Then HdBit;
+     If Dmi=1 Then Begin
+      If HdBit=1 Then Begin HdBits(BufLen); HdBits(BufLen); HdBit; End;
+     End;
+     If Idp=1 Then Begin If HdBit=1 Then HdBits(4); End;
+    End;
+   End;
+   Wb:=HdBits(4)+1; Hb:=HdBits(4)+1; HdBits(Wb); HdBits(Hb);
+   If Red=0 Then Begin Fid:=HdBit; If Fid=1 Then Begin HdBits(4); HdBits(3); End; End;
+   HdBit; HdBit; HdBit;
+   If Red=0 Then Begin
+    HdBit; HdBit; HdBit; HdBit; Oh:=HdBit;
+    If Oh=1 Then Begin HdBit; HdBit; End;
+    If HdBit=1 Then Sct:=2 Else Sct:=HdBit;
+    If Sct>0 Then Begin If HdBit=0 Then HdBit; End;
+    If Oh=1 Then HdBits(3);
+   End;
+   HdBit; HdBit; HdBit;
+   { color_config }
+   Bd:=8;
+   If HdBit=1 Then Begin
+    Bd:=10;
+    If Prof=2 Then If HdBit=1 Then Bd:=12;
+   End;
+   If Prof=1 Then Mono:=0 Else Mono:=HdBit;
+   I.BitDepth:=Bd;
+   Pr:=2; Tr:=2; Mt:=2;
+   If HdBit=1 Then Begin Pr:=HdBits(8); Tr:=HdBits(8); Mt:=HdBits(8); I.HaveColour:=True; End;
+   I.Prim:=Pr; I.Trc:=Tr; I.Mat:=Mt;
+   If Mono=1 Then Begin I.Full:=HdBit=1; I.RangeKnown:=True; End
+   Else If (Pr=1) And (Tr=13) And (Mt=0) Then Begin I.Full:=True; I.RangeKnown:=True; End
+   Else Begin I.Full:=HdBit=1; I.RangeKnown:=True; End;
+   HdBrClose;
+   Exit;
+  End;
+  Inc(Pos,Sz);
+ End;
+End;
+
+{ ======================================================================== }
+{  Mappage de tonalite HDR -> SDR (PQ / HLG BT.2020  ->  BT.709 8 ou 10 bits)  }
+{  Chaine (en virgule flottante) : YCbCr -> R'G'B' -> lumiere lineaire (EOTF   }
+{  inverse PQ ou HLG + OOTF) -> gamut BT.2020->BT.709 -> mappage de tonalite   }
+{  (Hable / Reinhard / Mobius / ecretage) -> OETF (gamma 2.4, BT.1886 inverse)  }
+{  -> YCbCr BT.709 plage limitee. Reproduit a PSNR > 40 dB la chaine ffmpeg    }
+{  zscale=t=linear:npl=100 + tonemap + zscale=t=bt709:m=bt709:r=tv.            }
+{  Reference : libavfilter/vf_tonemap.c, colorspace.c (peak), ITU-R BT.2100,   }
+{  SMPTE ST 2084, ARIB STD-B67.                                                 }
+{ ======================================================================== }
+Const
+ HD_TM_HABLE=0; HD_TM_REINHARD=1; HD_TM_MOBIUS=2; HD_TM_CLIP=3; HD_TM_LINEAR=4;
+ HD_PQ_LUT=8192;
+
+Var
+ HdHdrMode: LongInt;       { 0 = tonalite vers SDR (defaut) ; 1 = passthrough (10 bits, metadonnees conservees) }
+ HdToneAlg: LongInt;       { HD_TM_* (defaut Hable) }
+ HdToneParam: Double;      { parametre de l'algorithme (0 = defaut ffmpeg : Reinhard 1.0 -> 0.5 ; Mobius 0.3) }
+ HdToneDesat: Double;      { desaturation des hautes lumieres (ffmpeg : 2.0 par defaut ; ici 0 comme la chaine de reference) }
+ HdTonePeak: Double;       { pic du signal en nits (0 = auto : MaxCLL, sinon luminance max du mastering, sinon 1000) }
+ HdHlgOotf: LongInt;       { 0 = gamma 1.2 par canal (zimg/ffmpeg), 1 = OOTF BT.2100 sur la luminance }
+ HdDesatSrcCoef: LongInt;  { 0 = coefficients BT.709 (defaut) ; 1 = coefficients de la matrice source (comme ffmpeg) }
+ HdPqTab: PHdF;            { table EOTF PQ en unites de 100 nits (HD_PQ_LUT+2 entrees) }
+
+Function HdPow(X,Y: Double): Double;
+Begin
+ If X<=0 Then HdPow:=0 Else HdPow:=Exp(Y*Ln(X));
+End;
+
+Function HdPqEotfExact(E: Double): Double;
+Const M1=0.1593017578125; M2=78.84375; C1=0.8359375; C2=18.8515625; C3=18.6875;
+Var P,Num,Den: Double;
+Begin
+ If E<=0 Then Begin HdPqEotfExact:=0; Exit; End;
+ If E>1 Then E:=1;
+ P:=HdPow(E,1/M2);
+ Num:=P-C1; If Num<0 Then Num:=0;
+ Den:=C2-C3*P;
+ If Den<=0 Then HdPqEotfExact:=100.0 Else HdPqEotfExact:=HdPow(Num/Den,1/M1)*100.0;
+End;
+
+Procedure HdToneInitTables;
+Var I: LongInt;
+Begin
+ If HdPqTab<>Nil Then Exit;
+ GetMem(HdPqTab,(HD_PQ_LUT+2)*4);
+ For I:=0 To HD_PQ_LUT+1 Do HdPqTab^[I]:=HdPqEotfExact(I/HD_PQ_LUT);
+End;
+
+Procedure HdToneFreeTables;
+Begin
+ If HdPqTab<>Nil Then FreeMem(HdPqTab); HdPqTab:=Nil;
+End;
+
+Function HdPqEotf(E: Double): Double;
+Var F,Fr: Double; K: LongInt;
+Begin
+ If E<0 Then Begin HdPqEotf:=-HdPqEotf(-E); Exit; End;
+ If E>=1 Then Begin HdPqEotf:=HdPqTab^[HD_PQ_LUT]; Exit; End;
+ F:=E*HD_PQ_LUT; K:=Trunc(F); Fr:=F-K;
+ HdPqEotf:=HdPqTab^[K]*(1-Fr)+HdPqTab^[K+1]*Fr;
+End;
+
+{ HLG : signal -> lumiere de scene lineaire }
+Function HdHlgInv(E: Double): Double;
+Const A=0.17883277; B=0.28466892; C=0.55991073;
+Begin
+ If E<0 Then Begin HdHlgInv:=-HdHlgInv(-E); Exit; End;
+ If E>1 Then E:=1;
+ If E<=0.5 Then HdHlgInv:=E*E/3 Else HdHlgInv:=(Exp((E-C)/A)+B)/12;
+End;
+
+Function HdHable(X: Double): Double;
+Const A=0.15; B=0.50; C=0.10; D=0.20; E=0.02; F=0.30;
+Begin
+ HdHable:=(X*(X*A+B*C)+D*E)/(X*(X*A+B)+D*F)-E/F;
+End;
+
+Function HdMobius(X,J,Peak: Double): Double;
+Var A,B,Den: Double;
+Begin
+ If X<=J Then Begin HdMobius:=X; Exit; End;
+ A:=-J*J*(Peak-1)/(J*J-2*J+Peak);
+ Den:=Peak-1; If Den<1E-6 Then Den:=1E-6;
+ B:=(J*J-2*J*Peak+Peak)/Den;
+ HdMobius:=(B*B+2*B*J+J*J)/(B-A)*(X+A)/(X+B);
+End;
+
+{ matrice 3x3 primaires source -> BT.709 (lineaire), calculee depuis les chromaticites }
+Procedure HdPrimaries(Prim: LongInt; Var X,Y: Array Of Double; Var Wx,Wy: Double);
+Begin
+ Wx:=0.3127; Wy:=0.3290;
+ Case Prim Of
+  9,10: Begin X[0]:=0.708; Y[0]:=0.292; X[1]:=0.170; Y[1]:=0.797; X[2]:=0.131; Y[2]:=0.046; End;
+  11: Begin X[0]:=0.680; Y[0]:=0.320; X[1]:=0.265; Y[1]:=0.690; X[2]:=0.150; Y[2]:=0.060; Wx:=0.314; Wy:=0.351; End;
+  12: Begin X[0]:=0.680; Y[0]:=0.320; X[1]:=0.265; Y[1]:=0.690; X[2]:=0.150; Y[2]:=0.060; End;
+  5: Begin X[0]:=0.640; Y[0]:=0.330; X[1]:=0.290; Y[1]:=0.600; X[2]:=0.150; Y[2]:=0.060; End;
+  6,7: Begin X[0]:=0.630; Y[0]:=0.340; X[1]:=0.310; Y[1]:=0.595; X[2]:=0.155; Y[2]:=0.070; End;
+ Else Begin X[0]:=0.640; Y[0]:=0.330; X[1]:=0.300; Y[1]:=0.600; X[2]:=0.150; Y[2]:=0.060; End;
+ End;
+End;
+
+Procedure HdRgb2Xyz(Prim: LongInt; Var M: Array Of Double);
+Var X,Y: Array[0..2] Of Double; Wx,Wy: Double; P: Array[0..2,0..2] Of Double; Wz: Array[0..2] Of Double;
+ S: Array[0..2] Of Double; D,I,J: LongInt; Det: Double; Inv: Array[0..2,0..2] Of Double;
+Begin
+ HdPrimaries(Prim,X,Y,Wx,Wy);
+ For I:=0 To 2 Do Begin P[0,I]:=X[I]/Y[I]; P[1,I]:=1; P[2,I]:=(1-X[I]-Y[I])/Y[I]; End;
+ Wz[0]:=Wx/Wy; Wz[1]:=1; Wz[2]:=(1-Wx-Wy)/Wy;
+ Det:=P[0,0]*(P[1,1]*P[2,2]-P[1,2]*P[2,1])-P[0,1]*(P[1,0]*P[2,2]-P[1,2]*P[2,0])+P[0,2]*(P[1,0]*P[2,1]-P[1,1]*P[2,0]);
+ Inv[0,0]:=(P[1,1]*P[2,2]-P[1,2]*P[2,1])/Det; Inv[0,1]:=(P[0,2]*P[2,1]-P[0,1]*P[2,2])/Det; Inv[0,2]:=(P[0,1]*P[1,2]-P[0,2]*P[1,1])/Det;
+ Inv[1,0]:=(P[1,2]*P[2,0]-P[1,0]*P[2,2])/Det; Inv[1,1]:=(P[0,0]*P[2,2]-P[0,2]*P[2,0])/Det; Inv[1,2]:=(P[0,2]*P[1,0]-P[0,0]*P[1,2])/Det;
+ Inv[2,0]:=(P[1,0]*P[2,1]-P[1,1]*P[2,0])/Det; Inv[2,1]:=(P[0,1]*P[2,0]-P[0,0]*P[2,1])/Det; Inv[2,2]:=(P[0,0]*P[1,1]-P[0,1]*P[1,0])/Det;
+ For I:=0 To 2 Do Begin S[I]:=0; For J:=0 To 2 Do S[I]:=S[I]+Inv[I,J]*Wz[J]; End;
+ For I:=0 To 2 Do For J:=0 To 2 Do M[I*3+J]:=P[I,J]*S[J];
+End;
+
+{ M = inverse(Rgb2Xyz(709)) * Rgb2Xyz(Prim) }
+Procedure HdGamutMatrix(Prim: LongInt; Var M: Array Of Double);
+Var A,B: Array[0..8] Of Double; Det: Double; Inv: Array[0..8] Of Double; I,J,K: LongInt;
+Begin
+ HdRgb2Xyz(Prim,A); HdRgb2Xyz(1,B);
+ Det:=B[0]*(B[4]*B[8]-B[5]*B[7])-B[1]*(B[3]*B[8]-B[5]*B[6])+B[2]*(B[3]*B[7]-B[4]*B[6]);
+ Inv[0]:=(B[4]*B[8]-B[5]*B[7])/Det; Inv[1]:=(B[2]*B[7]-B[1]*B[8])/Det; Inv[2]:=(B[1]*B[5]-B[2]*B[4])/Det;
+ Inv[3]:=(B[5]*B[6]-B[3]*B[8])/Det; Inv[4]:=(B[0]*B[8]-B[2]*B[6])/Det; Inv[5]:=(B[2]*B[3]-B[0]*B[5])/Det;
+ Inv[6]:=(B[3]*B[7]-B[4]*B[6])/Det; Inv[7]:=(B[1]*B[6]-B[0]*B[7])/Det; Inv[8]:=(B[0]*B[4]-B[1]*B[3])/Det;
+ For I:=0 To 2 Do For J:=0 To 2 Do Begin
+  M[I*3+J]:=0;
+  For K:=0 To 2 Do M[I*3+J]:=M[I*3+J]+Inv[I*3+K]*A[K*3+J];
+ End;
+End;
+
+Procedure HdLumaCoef(Mat: LongInt; Var Kr,Kb: Double);
+Begin
+ Case Mat Of
+  1: Begin Kr:=0.2126; Kb:=0.0722; End;
+  5,6: Begin Kr:=0.299; Kb:=0.114; End;
+  7: Begin Kr:=0.212; Kb:=0.087; End;
+  4: Begin Kr:=0.30; Kb:=0.11; End;
+ Else Begin Kr:=0.2627; Kb:=0.0593; End;
+ End;
+End;
+
+{ pic du signal en unites de 100 nits (ffmpeg : ff_determine_signal_peak) }
+Function HdSignalPeak(Var I: THdInfo): Double;
+Var Pk: Double;
+Begin
+ Pk:=0;
+ If HdTonePeak>0 Then Pk:=HdTonePeak/100.0
+ Else Begin
+  If I.HaveCll And (I.MaxCll>0) Then Pk:=I.MaxCll/100.0;
+  If (Pk=0) And I.HaveMd And (I.MdMaxL>0) Then Pk:=(I.MdMaxL/10000.0)/100.0;
+  If Pk=0 Then Pk:=10.0;
+ End;
+ If Pk<1.0 Then Pk:=1.0;
+ HdSignalPeak:=Pk;
+End;
+
+Procedure HdToneDefaults;
+Begin
+ HdHdrMode:=0; HdToneAlg:=HD_TM_HABLE; HdToneParam:=0; HdToneDesat:=0; HdTonePeak:=0; HdHlgOotf:=0; HdDesatSrcCoef:=0;
+End;
+
+{ HDR natif (PQ ou HLG, YCbCr) -> I420 SDR BT.709 plage limitee, DBits = 8 (octets) ou 10 (mots).
+  Les plans source peuvent avoir n'importe quel sous-echantillonnage (HS,VS = 0/1/2, ou gris). }
+Procedure HdTonemap(Var S: THdSrc; Var Inf: THdInfo; Dst: Pointer; DBits: LongInt);
+Var
+ W,H,CW,CH,CSW,CSH,HS,VS,X,Y,P,I,K,Bits,Cx,Cy0,Cy1,Pk2,CDW,CDH,Off,Mx,Shf: LongInt;
+ Kr,Kb,Kg,Kr7,Kb7,Kg7,Pk,Fy,Yb,Cbb,Crr,R,G,B,Sg,Sg0,L,Ob,S2,Mid,Dc,YOff,YRng,COff,CRng,KrD,KbD,Hable10,Gam,Dsum: Double;
+ Full,Gray,Hlg: Boolean;
+ M: Array[0..8] Of Double;
+ CbH,CrH: PHdF; CbRow,CrRow,CbAcc,CrAcc,CbCur,CrCur: PHdF; CoD,CrD: Double;
+ Src: Pointer; Wide: Boolean;
+ PlaneY,PlaneU,PlaneV: Pointer; DWord: Boolean;
+ Mat,Prim: LongInt; V: LongInt; YMax,CMax: LongInt;
+ Rl,Gl,Bl: Double;
+ Function Rd(Pl: LongInt; Row,Col: LongInt): LongInt;
+ Begin
+  If Wide Then Rd:=PHdW(S.P[Pl])^[(Row*S.Stride[Pl]) Shr 1+Col] Else Rd:=PHdB(S.P[Pl])^[Row*S.Stride[Pl]+Col];
+ End;
+ Procedure PutPix(Pl: LongInt; Idx,Val: LongInt);
+ Begin
+  If Val<0 Then Val:=0 Else If Val>(1 Shl DBits)-1 Then Val:=(1 Shl DBits)-1;
+  If Pl=0 Then Begin If DWord Then PHdW(PlaneY)^[Idx]:=Val Else PHdB(PlaneY)^[Idx]:=Val; End
+  Else If Pl=1 Then Begin If DWord Then PHdW(PlaneU)^[Idx]:=Val Else PHdB(PlaneU)^[Idx]:=Val; End
+  Else Begin If DWord Then PHdW(PlaneV)^[Idx]:=Val Else PHdB(PlaneV)^[Idx]:=Val; End;
+ End;
+Begin
+ HdToneInitTables;
+ W:=S.W; H:=S.H; Bits:=S.Bits; Wide:=S.Wide; HS:=S.HS; VS:=S.VS; Gray:=HS<0;
+ If Gray Then Begin HS:=0; VS:=0; End;
+ DWord:=DBits>8;
+ CW:=(W+1) Shr 1; CH:=(H+1) Shr 1;
+ If DWord Then Begin
+  PlaneY:=Dst; PlaneU:=@PHdW(Dst)^[W*H]; PlaneV:=@PHdW(Dst)^[W*H+CW*CH];
+ End Else Begin
+  PlaneY:=Dst; PlaneU:=@PHdB(Dst)^[W*H]; PlaneV:=@PHdB(Dst)^[W*H+CW*CH];
+ End;
+ Mat:=Inf.Mat; If (Mat=2) Or (Mat=0) Then Mat:=9;
+ Prim:=Inf.Prim; If Prim=2 Then Prim:=9;
+ Hlg:=Inf.Trc=18;
+ Full:=(S.Range=2) Or ((S.Range=0) And Inf.RangeKnown And Inf.Full);
+ HdLumaCoef(Mat,Kr,Kb); Kg:=1-Kr-Kb;
+ HdLumaCoef(1,Kr7,Kb7); Kg7:=1-Kr7-Kb7;
+ HdGamutMatrix(Prim,M);
+ Pk:=HdSignalPeak(Inf);
+ Hable10:=HdHable(Pk);
+ { parametre d'algorithme }
+ Case HdToneAlg Of
+  HD_TM_REINHARD: If HdToneParam>0 Then Gam:=(1-HdToneParam)/HdToneParam Else Gam:=1.0;
+  HD_TM_MOBIUS: If HdToneParam>0 Then Gam:=HdToneParam Else Gam:=0.3;
+ Else If HdToneParam>0 Then Gam:=HdToneParam Else Gam:=1.0;
+ End;
+ If Full Then Begin YOff:=0; YRng:=(1 Shl Bits)-1; COff:=(1 Shl (Bits-1)); CRng:=YRng; End
+ Else Begin Shf:=Bits-8; YOff:=16 Shl Shf; YRng:=219 Shl Shf; COff:=128 Shl Shf; CRng:=224 Shl Shf; End;
+ { chroma sur-echantillonnee horizontalement (co-situee, lineaire) : CSH lignes de W flottants }
+ If Gray Then Begin CSW:=1; CSH:=1; End Else Begin CSW:=(W+(1 Shl HS)-1) Shr HS; CSH:=(H+(1 Shl VS)-1) Shr VS; End;
+ GetMem(CbH,CSH*W*4+16); GetMem(CrH,CSH*W*4+16);
+ If Gray Then Begin
+  For X:=0 To W-1 Do Begin CbH^[X]:=0; CrH^[X]:=0; End;
+ End Else
+  For P:=1 To 2 Do
+   For Y:=0 To CSH-1 Do
+    For X:=0 To W-1 Do Begin
+     If HS=0 Then Fy:=Rd(P,Y,X)
+     Else Begin
+      Fy:=X/(1 Shl HS); Cx:=Trunc(Fy); Fy:=Fy-Cx;
+      Cx:=HdMin(Cx,CSW-1);
+      Fy:=Rd(P,Y,Cx)*(1-Fy)+Rd(P,Y,HdMin(Cx+1,CSW-1))*Fy;
+     End;
+     If P=1 Then CbH^[Y*W+X]:=(Fy-COff)/CRng Else CrH^[Y*W+X]:=(Fy-COff)/CRng;
+    End;
+ GetMem(CbRow,W*4+16); GetMem(CrRow,W*4+16); GetMem(CbAcc,W*4+16); GetMem(CrAcc,W*4+16);
+ GetMem(CbCur,W*4+16); GetMem(CrCur,W*4+16);
+ YMax:=(1 Shl DBits)-1;
+ KrD:=16 Shl (DBits-8); KbD:=219 Shl (DBits-8); CoD:=128 Shl (DBits-8); CrD:=224 Shl (DBits-8);
+ For Y:=0 To H-1 Do Begin
+  { chroma verticale (sitee au milieu des deux lignes pour 4:2:0) }
+  If Gray Then Begin
+   For X:=0 To W-1 Do Begin CbRow^[X]:=0; CrRow^[X]:=0; End;
+  End Else If VS=0 Then Begin
+   For X:=0 To W-1 Do Begin CbRow^[X]:=CbH^[Y*W+X]; CrRow^[X]:=CrH^[Y*W+X]; End;
+  End Else Begin
+   Fy:=(Y-0.5)/(1 Shl VS);
+   If Fy<0 Then Cy0:=-1 Else Cy0:=Trunc(Fy);
+   Fy:=Fy-Cy0;
+   Cy1:=HdMin(Cy0+1,CSH-1); If Cy0<0 Then Cy0:=0; If Cy0>CSH-1 Then Cy0:=CSH-1;
+   For X:=0 To W-1 Do Begin
+    CbRow^[X]:=CbH^[Cy0*W+X]*(1-Fy)+CbH^[Cy1*W+X]*Fy;
+    CrRow^[X]:=CrH^[Cy0*W+X]*(1-Fy)+CrH^[Cy1*W+X]*Fy;
+   End;
+  End;
+  For X:=0 To W-1 Do Begin
+   Yb:=(Rd(0,Y,X)-YOff)/YRng;
+   Cbb:=CbRow^[X]; Crr:=CrRow^[X];
+   R:=Yb+2*(1-Kr)*Crr; B:=Yb+2*(1-Kb)*Cbb; G:=(Yb-Kr*R-Kb*B)/Kg;
+   { lumiere lineaire en unites de 100 nits }
+   If Hlg Then Begin
+    Rl:=HdHlgInv(R); Gl:=HdHlgInv(G); Bl:=HdHlgInv(B);
+    If HdHlgOotf=0 Then Begin
+     If Rl<0 Then Rl:=-10*HdPow(-Rl,1.2) Else Rl:=10*HdPow(Rl,1.2);
+     If Gl<0 Then Gl:=-10*HdPow(-Gl,1.2) Else Gl:=10*HdPow(Gl,1.2);
+     If Bl<0 Then Bl:=-10*HdPow(-Bl,1.2) Else Bl:=10*HdPow(Bl,1.2);
+    End Else Begin
+     L:=0.2627*Rl+0.6780*Gl+0.0593*Bl;
+     If L>1E-9 Then L:=10*HdPow(L,0.2) Else L:=0;
+     Rl:=Rl*L; Gl:=Gl*L; Bl:=Bl*L;
+    End;
+   End Else Begin
+    Rl:=HdPqEotf(R); Gl:=HdPqEotf(G); Bl:=HdPqEotf(B);
+   End;
+   { gamut -> BT.709 }
+   R:=M[0]*Rl+M[1]*Gl+M[2]*Bl; G:=M[3]*Rl+M[4]*Gl+M[5]*Bl; B:=M[6]*Rl+M[7]*Gl+M[8]*Bl;
+   { desaturation des hautes lumieres }
+   If HdToneDesat>0 Then Begin
+    If HdDesatSrcCoef=1 Then L:=Kr*R+Kg*G+Kb*B Else L:=Kr7*R+Kg7*G+Kb7*B;
+    Ob:=L-HdToneDesat; If Ob<1E-6 Then Ob:=1E-6;
+    If L<1E-6 Then Ob:=Ob/1E-6 Else Ob:=Ob/L;
+    R:=R*(1-Ob)+L*Ob; G:=G*(1-Ob)+L*Ob; B:=B*(1-Ob)+L*Ob;
+   End;
+   { mappage de tonalite sur la composante la plus lumineuse }
+   Sg:=R; If G>Sg Then Sg:=G; If B>Sg Then Sg:=B;
+   If Sg<1E-6 Then Sg:=1E-6;
+   Sg0:=Sg;
+   Case HdToneAlg Of
+    HD_TM_HABLE: S2:=HdHable(Sg)/Hable10;
+    HD_TM_REINHARD: S2:=Sg/(Sg+Gam)*(Pk+Gam)/Pk;
+    HD_TM_MOBIUS: S2:=HdMobius(Sg,Gam,Pk);
+    HD_TM_CLIP: Begin S2:=Sg*Gam; If S2>1 Then S2:=1; If S2<0 Then S2:=0; End;
+   Else S2:=Sg*Gam/Pk;
+   End;
+   S2:=S2/Sg0;
+   R:=R*S2; G:=G*S2; B:=B*S2;
+   { OETF : gamma 1/2.4, symetrique autour de 0 }
+   If R<0 Then R:=-HdPow(-R,1/2.4) Else R:=HdPow(R,1/2.4);
+   If G<0 Then G:=-HdPow(-G,1/2.4) Else G:=HdPow(G,1/2.4);
+   If B<0 Then B:=-HdPow(-B,1/2.4) Else B:=HdPow(B,1/2.4);
+   Yb:=Kr7*R+Kg7*G+Kb7*B;
+   PutPix(0,Y*W+X,Round(KrD+KbD*Yb));
+   CbCur^[X]:=(B-Yb)/(2*(1-Kb7)); CrCur^[X]:=(R-Yb)/(2*(1-Kr7));
+  End;
+  { sous-echantillonnage 4:2:0 : moyenne verticale de 2 lignes puis filtre [1 2 1]/4 horizontal (siege gauche) }
+  If (Y And 1)=0 Then Begin
+   Move(CbCur^,CbAcc^,W*4); Move(CrCur^,CrAcc^,W*4);
+  End;
+  If ((Y And 1)=1) Or (Y=H-1) Then Begin
+   If (Y And 1)=1 Then
+    For X:=0 To W-1 Do Begin CbAcc^[X]:=(CbAcc^[X]+CbCur^[X])*0.5; CrAcc^[X]:=(CrAcc^[X]+CrCur^[X])*0.5; End;
+   For I:=0 To CW-1 Do Begin
+    X:=2*I; K:=HdMax(X-1,0); P:=HdMin(X+1,W-1);
+    Fy:=0.25*CbAcc^[K]+0.5*CbAcc^[X]+0.25*CbAcc^[P];
+    PutPix(1,(Y Shr 1)*CW+I,Round(CoD+CrD*Fy));
+    Fy:=0.25*CrAcc^[K]+0.5*CrAcc^[X]+0.25*CrAcc^[P];
+    PutPix(2,(Y Shr 1)*CW+I,Round(CoD+CrD*Fy));
+   End;
+  End;
+ End;
+ FreeMem(CbCur); FreeMem(CrCur); FreeMem(CbAcc); FreeMem(CrAcc); FreeMem(CbRow); FreeMem(CrRow);
+ FreeMem(CbH); FreeMem(CrH);
+End;
+
+{ ======================================================================== }
+{  Lecture des metadonnees des conteneurs et ecriture pour les muxeurs      }
+{ ======================================================================== }
+Const HD_MAXBOX=1048576;
+
+{ boites MP4 : cherche colr / mdcv / clli (et hvcC / av1C / vpcC) dans les entrees d'echantillon video }
+Procedure HdMp4Walk(Var F: File; Pos,Lim: LongInt; Depth: LongInt; Var I: THdInfo);
+Var Hd: Array[0..15] Of Byte; Sz,Typ,Got,Body,K,EntEnd,Cp,ChildEnd,ChSz,ChTyp: LongInt; Sz64: Int64; Buf: PHdB; Ty: String[4];
+ Function G32(O: LongInt): LongInt; Begin G32:=(LongInt(Hd[O]) Shl 24) Or (LongInt(Hd[O+1]) Shl 16) Or (LongInt(Hd[O+2]) Shl 8) Or Hd[O+3]; End;
+Begin
+ If Depth>8 Then Exit;
+ While Pos+8<=Lim Do Begin
+  {$I-}Seek(F,Pos); BlockRead(F,Hd,16,Got);{$I+}
+  If (IOResult<>0) Or (Got<8) Then Exit;
+  Sz:=G32(0); Ty:=Chr(Hd[4])+Chr(Hd[5])+Chr(Hd[6])+Chr(Hd[7]); Body:=8;
+  If Sz=1 Then Begin If Got<16 Then Exit; Sz:=G32(12); Body:=16; End Else If Sz=0 Then Sz:=Lim-Pos;
+  If (Sz<Body) Or (Pos+Sz>Lim) Then Exit;
+  If (Ty='moov') Or (Ty='trak') Or (Ty='mdia') Or (Ty='minf') Or (Ty='stbl') Then
+   HdMp4Walk(F,Pos+Body,Pos+Sz,Depth+1,I)
+  Else If Ty='stsd' Then Begin
+   { 8 octets (version, nombre d'entrees) puis l'entree : taille, type, 78 octets, boites filles }
+   EntEnd:=Pos+Sz; Cp:=Pos+Body+8;
+   {$I-}Seek(F,Cp); BlockRead(F,Hd,8,Got);{$I+}
+   If (IOResult=0) And (Got=8) Then Begin
+    ChSz:=G32(0);
+    If (ChSz>=86) And (Cp+ChSz<=EntEnd) Then Begin
+     K:=Cp+86; ChildEnd:=Cp+ChSz;
+     While K+8<=ChildEnd Do Begin
+      {$I-}Seek(F,K); BlockRead(F,Hd,8,Got);{$I+}
+      If (IOResult<>0) Or (Got<8) Then Break;
+      ChSz:=G32(0); ChTyp:=G32(4);
+      If (ChSz<8) Or (K+ChSz>ChildEnd) Then Break;
+      If ChSz-8<=HD_MAXBOX Then Begin
+       GetMem(Buf,ChSz+16);
+       {$I-}Seek(F,K+8); BlockRead(F,Buf^,ChSz-8,Got);{$I+}
+       If (IOResult=0) And (Got=ChSz-8) Then Begin
+        Case ChTyp Of
+         $636F6C72: HdParseColr(Buf,ChSz-8,I);        { colr }
+         $6D646376: HdParseMdcv(Buf,ChSz-8,I);        { mdcv }
+         $636C6C69: HdParseClli(Buf,ChSz-8,I);        { clli }
+         $68766343: HdParseHvcC(Buf,ChSz-8,I);        { hvcC }
+         $61766343: HdParseAvcC(Buf,ChSz-8,I);        { avcC }
+         $76706343: HdParseVpcC(Buf,ChSz-8,I);        { vpcC }
+         $61763143: If ChSz-8>4 Then HdParseAv1Seq(@Buf^[4],ChSz-12,I);   { av1C }
+        End;
+       End;
+       FreeMem(Buf);
+      End;
+      Inc(K,ChSz);
+     End;
+    End;
+   End;
+  End;
+  Inc(Pos,Sz);
+ End;
+End;
+
+Procedure HdScanMp4(Const Path: String; Var I: THdInfo);
+Var F: File; Old: Byte; Sz: LongInt;
+Begin
+ Old:=FileMode; FileMode:=0; Assign(F,Path);
+ {$I-}Reset(F,1);{$I+}
+ FileMode:=Old;
+ If IOResult<>0 Then Exit;
+ Sz:=FileSize(F);
+ HdMp4Walk(F,0,Sz,0,I);
+ Close(F);
+End;
+
+{ element EBML en memoire : renvoie False en fin de zone }
+Function HdEbmlNext(P: PHdB; Len: LongInt; Var Pos,Id,Sz,Body: LongInt): Boolean;
+Var B,L,M,K: LongInt;
+Begin
+ HdEbmlNext:=False;
+ If Pos>=Len Then Exit;
+ B:=P^[Pos]; L:=1; M:=$80;
+ While (L<=4) And ((B And M)=0) Do Begin Inc(L); M:=M Shr 1; End;
+ If L>4 Then Exit;
+ Id:=B; For K:=1 To L-1 Do Id:=(Id Shl 8) Or P^[Pos+K];
+ Inc(Pos,L);
+ If Pos>=Len Then Exit;
+ B:=P^[Pos]; L:=1; M:=$80;
+ While (L<=8) And ((B And M)=0) Do Begin Inc(L); M:=M Shr 1; End;
+ If L>8 Then Exit;
+ Sz:=B And (M-1); For K:=1 To L-1 Do Sz:=(Sz Shl 8) Or P^[Pos+K];
+ Inc(Pos,L);
+ If Sz<0 Then Sz:=Len-Pos;
+ If Pos+Sz>Len Then Sz:=Len-Pos;
+ Body:=Pos;
+ HdEbmlNext:=True;
+End;
+
+Procedure HdMkvTracks(P: PHdB; Len: LongInt; Var I: THdInfo);
+Var Pos,Id,Sz,Body,P2,Id2,Sz2,B2,P3,Id3,Sz3,B3,PrivOff,PrivLen,Pass,K: LongInt; CodecId: String;
+Begin
+ Pos:=0;
+ While HdEbmlNext(P,Len,Pos,Id,Sz,Body) Do Begin
+  If Id=$AE Then Begin                      { TrackEntry }
+   PrivOff:=0; PrivLen:=0; CodecId:='';
+   P2:=Body;
+   While HdEbmlNext(P,Body+Sz,P2,Id2,Sz2,B2) Do Begin
+    If Id2=$86 Then Begin CodecId:=''; For K:=0 To HdMin(Sz2,40)-1 Do CodecId:=CodecId+Chr(P^[B2+K]); End
+    Else If Id2=$63A2 Then Begin PrivOff:=B2; PrivLen:=Sz2; End;
+    P2:=B2+Sz2;
+   End;
+   If PrivLen>0 Then Begin
+    If CodecId='V_MPEGH/ISO/HEVC' Then HdParseHvcC(@P^[PrivOff],PrivLen,I)
+    Else If CodecId='V_MPEG4/ISO/AVC' Then HdParseAvcC(@P^[PrivOff],PrivLen,I)
+    Else If (CodecId='V_AV1') And (PrivLen>4) Then HdParseAv1Seq(@P^[PrivOff+4],PrivLen-4,I);
+   End;
+   P2:=Body;
+   While HdEbmlNext(P,Body+Sz,P2,Id2,Sz2,B2) Do Begin
+    If Id2=$E0 Then Begin                   { Video }
+     P3:=B2;
+     While HdEbmlNext(P,B2+Sz2,P3,Id3,Sz3,B3) Do Begin
+      If Id3=$55B0 Then HdParseMkvColour(@P^[B3],Sz3,I);
+      P3:=B3+Sz3;
+     End;
+    End;
+    P2:=B2+Sz2;
+   End;
+  End;
+  Pos:=Body+Sz;
+ End;
+End;
+
+Procedure HdScanMkv(Const Path: String; Var I: THdInfo);
+Var F: File; Old: Byte; Hd: Array[0..15] Of Byte; Got,Pos,Fs,Id,K,L,M,Sz: LongInt; Buf: PHdB; B: LongInt; Sz64: Int64;
+Begin
+ Old:=FileMode; FileMode:=0; Assign(F,Path);
+ {$I-}Reset(F,1);{$I+}
+ FileMode:=Old;
+ If IOResult<>0 Then Exit;
+ Fs:=FileSize(F); Pos:=0;
+ { parcourt les elements de niveau 0 puis ceux du segment jusqu'au premier cluster }
+ While Pos+12<=Fs Do Begin
+  {$I-}Seek(F,Pos); BlockRead(F,Hd,12,Got);{$I+}
+  If (IOResult<>0) Or (Got<12) Then Break;
+  B:=Hd[0]; L:=1; M:=$80;
+  While (L<=4) And ((B And M)=0) Do Begin Inc(L); M:=M Shr 1; End;
+  If L>4 Then Break;
+  Id:=B; For K:=1 To L-1 Do Id:=(Id Shl 8) Or Hd[K];
+  B:=Hd[L]; K:=1; M:=$80;
+  While (K<=8) And ((B And M)=0) Do Begin Inc(K); M:=M Shr 1; End;
+  If K>8 Then Break;
+  Sz64:=B And (M-1);
+  For Got:=1 To K-1 Do Sz64:=(Sz64 Shl 8) Or Hd[L+Got];
+  If Sz64>=(Int64(1) Shl (7*K))-1 Then Sz64:=Fs;       { taille inconnue }
+  If Sz64>Fs Then Sz64:=Fs;
+  Sz:=Sz64;
+  If Id=$18538067 Then Begin Inc(Pos,L+K); Continue; End;   { Segment : on descend }
+  If Id=$1F43B675 Then Break;                                { Cluster : fin des en-tetes }
+  If Id=$1654AE6B Then Begin                                 { Tracks }
+   If (Sz>0) And (Sz<=HD_MAXBOX*4) Then Begin
+    GetMem(Buf,Sz+16);
+    {$I-}Seek(F,Pos+L+K); BlockRead(F,Buf^,Sz,Got);{$I+}
+    If (IOResult=0) And (Got=Sz) Then HdMkvTracks(Buf,Sz,I);
+    FreeMem(Buf);
+   End;
+   Break;
+  End;
+  Inc(Pos,L+K+Sz);
+ End;
+ Close(F);
+End;
+
+{ ---- ecriture : boites MP4 colr / mdcv / clli ---- }
+Function HdMp4Boxes(Var I: THdInfo; Dst: PHdB): LongInt;
+Var N,K: LongInt;
+ Procedure P8(V: LongInt); Begin Dst^[N]:=V And 255; Inc(N); End;
+ Procedure P16(V: LongInt); Begin P8(V Shr 8); P8(V); End;
+ Procedure P32(V: LongInt); Begin P16(V Shr 16); P16(V); End;
+ Procedure Tag(Const S: String); Var Q: LongInt; Begin For Q:=1 To 4 Do P8(Ord(S[Q])); End;
+Begin
+ N:=0;
+ If I.HaveColour Or I.RangeKnown Then Begin
+  P32(19); Tag('colr'); Tag('nclx');
+  If I.HaveColour Then Begin P16(I.Prim); P16(I.Trc); P16(I.Mat); End Else Begin P16(2); P16(2); P16(2); End;
+  If I.RangeKnown And I.Full Then P8($80) Else P8(0);
+ End;
+ If I.HaveMd Then Begin
+  P32(32); Tag('mdcv');
+  P16(I.MdPx[1]); P16(I.MdPy[1]); P16(I.MdPx[2]); P16(I.MdPy[2]); P16(I.MdPx[0]); P16(I.MdPy[0]);
+  P16(I.MdWx); P16(I.MdWy); P32(I.MdMaxL); P32(I.MdMinL);
+ End;
+ If I.HaveCll Then Begin P32(12); Tag('clli'); P16(I.MaxCll); P16(I.MaxFall); End;
+ HdMp4Boxes:=N;
+End;
+
+{ ---- ecriture : element Matroska Colour complet (ID $55B0 + taille + contenu), 0 octet si rien a ecrire ---- }
+Function HdMkvColour(Var I: THdInfo; Dst: PHdB): LongInt;
+Var Tmp: Array[0..255] Of Byte; N,Q: LongInt;
+ Procedure T8(V: LongInt); Begin Tmp[N]:=V And 255; Inc(N); End;
+ Procedure TUint(Id,V: LongInt);
+ Var Nb: LongInt;
+ Begin
+  T8(Id Shr 8); T8(Id);
+  If V<256 Then Nb:=1 Else If V<65536 Then Nb:=2 Else Nb:=4;
+  T8($80 Or Nb);
+  If Nb=4 Then Begin T8(V Shr 24); T8(V Shr 16); End;
+  If Nb>=2 Then T8(V Shr 8);
+  T8(V);
+ End;
+ Procedure TFlt(Id: LongInt; V: Double);
+ Var B8: Array[0..7] Of Byte; K: LongInt;
+ Begin
+  T8(Id Shr 8); T8(Id); T8($88); Move(V,B8,8); For K:=7 DownTo 0 Do T8(B8[K]);
+ End;
+Begin
+ N:=0;
+ If I.HaveColour Then Begin TUint($55B1,I.Mat); End;
+ If I.RangeKnown Then Begin If I.Full Then TUint($55B9,2) Else TUint($55B9,1); End;
+ If I.HaveColour Then Begin TUint($55BA,I.Trc); TUint($55BB,I.Prim); End;
+ If I.HaveCll Then Begin TUint($55BC,I.MaxCll); TUint($55BD,I.MaxFall); End;
+ If I.HaveMd Then Begin
+  { MasteringMetadata (110 octets de contenu au plus : 10 elements de 11 octets) }
+  T8($55); T8($D0); T8($80 Or 110);
+  TFlt($55D1,I.MdPx[0]/50000); TFlt($55D2,I.MdPy[0]/50000);
+  TFlt($55D3,I.MdPx[1]/50000); TFlt($55D4,I.MdPy[1]/50000);
+  TFlt($55D5,I.MdPx[2]/50000); TFlt($55D6,I.MdPy[2]/50000);
+  TFlt($55D7,I.MdWx/50000); TFlt($55D8,I.MdWy/50000);
+  TFlt($55D9,I.MdMaxL/10000); TFlt($55DA,I.MdMinL/10000);
+ End;
+ HdMkvColour:=0;
+ If N=0 Then Exit;
+ Dst^[0]:=$55; Dst^[1]:=$B0;
+ If N<127 Then Begin Dst^[2]:=$80 Or N; Q:=3; End Else Begin Dst^[2]:=$40 Or (N Shr 8); Dst^[3]:=N And 255; Q:=4; End;
+ Move(Tmp,Dst^[Q],N);
+ HdMkvColour:=Q+N;
+End;
+
+{ ======================================================================== }
+{  Pipeline de conversion : rappels natifs des decodeurs                     }
+{ ======================================================================== }
+Type THdOut=Procedure(B: Pointer; W,H: LongInt);
+Var
+ HdActive: Boolean;        { les rappels natifs sont utilises par DecodeVideoTrack }
+ HdJob10: Boolean;         { sortie 10 bits (yuv420p10le, mots 16 bits) }
+ HdTonemapOn: Boolean;     { HDR source converti en SDR BT.709 }
+ HdSrcInfo: THdInfo;       { colorimetrie de la source }
+ HdOut8,HdOut16: THdOut;   { recepteurs : I420 8 bits / I420 10 bits en mots }
+ HdWBuf: Pointer; HdWCap: LongInt;
+ HdFrames: LongInt;
+ HdMuxMeta: Boolean;       { les muxeurs ecrivent colr/mdcv/clli (MP4) ou Colour (MKV) d'apres HdInfo }
+ HdMBuf: Array[0..511] Of Byte;
+
+Function HdRangeOf(Var I: THdInfo): LongInt;
+Begin
+ If I.RangeKnown Then Begin If I.Full Then HdRangeOf:=2 Else HdRangeOf:=1; End Else HdRangeOf:=0;
+End;
+
+Procedure HdDeliver(Var S: THdSrc);
+Var Need,DB: LongInt;
+Begin
+ If (S.W<2) Or (S.H<2) Then Exit;
+ If HdJob10 Then DB:=10 Else DB:=8;
+ Need:=S.W*S.H+2*HdCeilSh(S.W,1)*HdCeilSh(S.H,1);
+ If DB>8 Then Need:=Need*2;
+ If HdWCap<Need+64 Then Begin
+  If HdWBuf<>Nil Then FreeMem(HdWBuf);
+  HdWCap:=Need+Need Div 4+64; GetMem(HdWBuf,HdWCap);
+ End;
+ S.Range:=HdRangeOf(HdSrcInfo);
+ If HdTonemapOn And (S.Bits>8) Then HdTonemap(S,HdSrcInfo,HdWBuf,DB) Else HdConvert(S,HdWBuf,DB);
+ Inc(HdFrames);
+ If HdJob10 Then Begin If @HdOut16<>Nil Then HdOut16(HdWBuf,S.W,S.H); End
+ Else If @HdOut8<>Nil Then HdOut8(HdWBuf,S.W,S.H);
+End;
+
+{ copie un I420 8 bits contigu (cas d'un decodeur 8 bits dans une tache 10 bits) -> I420 10 bits }
+Procedure HdExpand8To10(B8: Pointer; W,H: LongInt; Dst: Pointer);
+Var S: THdSrc;
+Begin
+ HdSetContig(S,B8,W,H,8,1,1,0);
+ HdConvert(S,Dst,10);
+End;
+
+Procedure HdReduce10To8(B10: Pointer; W,H: LongInt; Dst: Pointer);
+Var S: THdSrc;
+Begin
+ HdSetContig(S,B10,W,H,10,1,1,0);
+ HdConvert(S,Dst,8);
+End;
+
+Procedure HdCbHevc(B: Pointer; W,H,Chroma,Depth: LongInt);
+Var S: THdSrc; HS,VS: LongInt;
+Begin
+ Case Chroma Of
+  0: Begin HS:=-1; VS:=-1; End;
+  1: Begin HS:=1; VS:=1; End;
+  2: Begin HS:=1; VS:=0; End;
+ Else Begin HS:=0; VS:=0; End;
+ End;
+ HdSetContig(S,B,W,H,Depth,HS,VS,0);
+ HdDeliver(S);
+End;
+
+Procedure HdCbVp9(Y,U,V: Pointer; W,H,CW,CH,SsX,SsY,Bd: LongInt);
+Var S: THdSrc;
+Begin
+ HdSetPlanes(S,Y,U,V,W,H,CW,Bd,SsX,SsY,0,True);
+ HdDeliver(S);
+End;
+
+Procedure HdCbAv1(B: Pointer; W,H,Bits,SX,SY,NP: LongInt);
+Var S: THdSrc; HS,VS: LongInt;
+Begin
+ If NP<3 Then Begin HS:=-1; VS:=-1; End Else Begin HS:=SX; VS:=SY; End;
+ HdSetContig(S,B,W,H,Bits,HS,VS,0);
+ If Not S.Wide Then Begin
+  { le decodeur AV1 fournit toujours des mots 16 bits }
+  S.Wide:=True; S.Stride[0]:=W*2;
+  If HS>=0 Then Begin S.Stride[1]:=HdCeilSh(W,HS)*2; S.Stride[2]:=S.Stride[1];
+   S.P[1]:=@PHdB(B)^[W*H*2]; S.P[2]:=@PHdB(B)^[(W*H+HdCeilSh(W,HS)*HdCeilSh(H,VS))*2]; End;
+ End;
+ HdDeliver(S);
+End;
+
+Procedure HdCbPro(B: Pointer; W,H: LongInt);
+Var S: THdSrc;
+Begin
+ FillChar(S,SizeOf(S),0);
+ S.W:=W; S.H:=H; S.Bits:=PrBits; S.Wide:=True; S.VS:=0;
+ If PrChroma444 Then S.HS:=0 Else S.HS:=1;
+ S.P[0]:=PrPlaneY; S.P[1]:=PrPlaneU; S.P[2]:=PrPlaneV;
+ S.Stride[0]:=PrStrideY*2; S.Stride[1]:=PrStrideC*2; S.Stride[2]:=PrStrideC*2;
+ If (Not HdSrcInfo.HaveColour) And (PrPrimaries>0) Then Begin
+  HdSrcInfo.Prim:=PrPrimaries; HdSrcInfo.Trc:=PrTrc; HdSrcInfo.Mat:=PrMatrix; HdSrcInfo.HaveColour:=True;
+ End;
+ HdDeliver(S);
+End;
+
+{ installe les rappels natifs pour le mode de decodage de pv.pas (6 HEVC, 7 ProRes, 11 VP9, 12 AV1) }
+Procedure HdAttach(Mode: LongInt; Cb8: THdOut);
+Begin
+ HdOut8:=Cb8;
+ Case Mode Of
+  6: Begin HvHook:=Nil; HvNativeHook:=HdCbHevc; End;
+  7: PrHook:=HdCbPro;
+  11: Begin V9Hook:=Nil; V9HookRaw:=HdCbVp9; End;
+  12: Begin AvHook:=Nil; AvHookN:=HdCbAv1; End;
+ End;
+End;
+
+Procedure HdDetach;
+Begin
+ HvNativeHook:=Nil; V9HookRaw:=Nil; AvHookN:=Nil;
+ If HdWBuf<>Nil Then Begin FreeMem(HdWBuf); HdWBuf:=Nil; HdWCap:=0; End;
+End;
+
+{ Analyse la source avant une tache video : remplit HdSrcInfo et HdInfo (colorimetrie de SORTIE).
+  Fmt = 'MP4','MOV','MKV','WEBM'... ; Codec = fourcc de la piste ('hvc1','vp09','av01',...) ; Cfg/CfgLen = configuration
+  de codec de la piste (hvcC, av1C, vpcC) telle que lue par les demultiplexeurs ; Want10 = le profil de sortie est 10 bits.
+  Retourne HdTonemapOn / HdJob10 (HdJob10 = Want10). }
+Procedure HdJobBegin(Const Path,Fmt,Codec: String; Cfg: Pointer; CfgLen: LongInt; Want10: Boolean; FirstOff,FirstSz: LongInt);
+Var F: File; Old: Byte; Buf: PHdB; Got,LenSz: LongInt;
+Begin
+ HdInfoClear(HdSrcInfo);
+ If (Fmt='MP4') Or (Fmt='MOV') Or (Fmt='M4V') Or (Fmt='3GP') Or (Fmt='3G2') Then HdScanMp4(Path,HdSrcInfo)
+ Else If (Fmt='MKV') Or (Fmt='WEBM') Then HdScanMkv(Path,HdSrcInfo);
+ If (Cfg<>Nil) And (CfgLen>0) Then Begin
+  If (Codec='hvc1') Or (Codec='hev1') Then HdParseHvcC(Cfg,CfgLen,HdSrcInfo)
+  Else If (Codec='avc1') Or (Codec='avc3') Then HdParseAvcC(Cfg,CfgLen,HdSrcInfo)
+  Else If Codec='av01' Then Begin If CfgLen>4 Then HdParseAv1Seq(@PHdB(Cfg)^[4],CfgLen-4,HdSrcInfo); End;
+ End;
+ { SEI dans le premier echantillon (mastering display / content light level / VUI repetes) }
+ If (FirstSz>16) And (FirstSz<=HD_MAXBOX*4) And (Cfg<>Nil) And (CfgLen>22) And ((Codec='hvc1') Or (Codec='hev1')) Then Begin
+  LenSz:=(PHdB(Cfg)^[21] And 3)+1;
+  Old:=FileMode; FileMode:=0; Assign(F,Path);
+  {$I-}Reset(F,1);{$I+}
+  FileMode:=Old;
+  If IOResult=0 Then Begin
+   GetMem(Buf,FirstSz+16);
+   {$I-}Seek(F,FirstOff); BlockRead(F,Buf^,FirstSz,Got);{$I+}
+   If (IOResult=0) And (Got=FirstSz) Then HdScanSample(Buf,FirstSz,LenSz,True,HdSrcInfo);
+   FreeMem(Buf); Close(F);
+  End;
+ End;
+ HdJob10:=Want10;
+ HdTonemapOn:=HdIsHdr(HdSrcInfo) And ((HdHdrMode=0) Or Not Want10);
+ HdInfo:=HdSrcInfo;
+ If HdTonemapOn Then Begin
+  { sortie SDR BT.709 limitee, sans metadonnees de mastering }
+  HdInfo.HaveColour:=True; HdInfo.Prim:=1; HdInfo.Trc:=1; HdInfo.Mat:=1; HdInfo.RangeKnown:=True; HdInfo.Full:=False;
+  HdInfo.HaveMd:=False; HdInfo.HaveCll:=False;
+ End;
+ HdFrames:=0; HdOut8:=Nil; HdOut16:=Nil; HdMuxMeta:=True;
+End;
+
+Procedure HdJobEnd;
+Begin
+ HdMuxMeta:=False; HdActive:=False;
+End;
+
+{ libelle de l'option HDR pour le dialogue }
+Function HdHdrName: String;
+Begin
+ If HdHdrMode=1 Then HdHdrName:='Passthrough' Else HdHdrName:='Tonemap SDR';
+End;
+
+{ Faut-il decoder/reencoder (au lieu de copier le flux HEVC) pour respecter le profil de sortie et l'option HDR ?
+  Oui si : HDR a convertir en SDR ; ou chroma autre que 4:2:0 ; ou profondeur de bits superieure a celle du profil. }
+Function HdNeedReenc(Want10: Boolean): Boolean;
+Begin
+ HdNeedReenc:=False;
+ If HdIsHdr(HdSrcInfo) And ((HdHdrMode=0) Or Not Want10) Then HdNeedReenc:=True
+ Else If (HdSrcInfo.ChromaFmt>=0) And (HdSrcInfo.ChromaFmt<>1) Then HdNeedReenc:=True
+ Else If Want10 And (HdSrcInfo.BitDepth>10) Then HdNeedReenc:=True
+ Else If (Not Want10) And (HdSrcInfo.BitDepth>8) Then HdNeedReenc:=True;
+End;
+{$B-}
+{ ====================================================================== }
+{ pe_hevc_enc10.pas : encodeur HEVC / H.265 (Main 8 bits ou Main10, 4:2:0)   }
+{ Ecrit pour ANYMP4.PAS. Reconstruction interne (intra, inter, transformees,}
+{ deblocage) compatible bit a bit avec FFmpeg/libde265.                      }
+{ Les tables CABAC, la matrice DCT, les tables de deblocage et de filtres    }
+{ proviennent de FFmpeg (LGPL 2.1+) et de libde265 (LGPL 3) et de la norme   }
+{ ITU-T H.265.                                                               }
+{ ====================================================================== }
+
+Const
+ HdECqp: LongInt = 26;      { QP constant (-12..51 en 10 bits, 4..51 en 8 bits), utilise si le debit est 0 }
+Type
+ THdEPx=Array[0..1073741000] Of Word; PHdEPx=^THdEPx;
+Const
+ HDE_NCTX=179;
+ { decalages des contextes CABAC (ordre de FFmpeg) }
+ HDEC_SPLITCU=2; HDEC_SKIP=6; HDEC_PREDMODE=12; HDEC_PARTMODE=13; HDEC_PREVINTRA=17; HDEC_CHROMAPRED=18;
+ HDEC_MERGEFLAG=20; HDEC_MERGEIDX=21; HDEC_INTERPRED=22; HDEC_REFIDX=27; HDEC_MVDG0=31; HDEC_MVDG1=33;
+ HDEC_MVPFLAG=35; HDEC_NORESID=36; HDEC_SPLITTR=37; HDEC_CBFLUMA=40; HDEC_CBFCHROMA=42;
+ HDEC_LASTX=53; HDEC_LASTY=71; HDEC_CSBF=89; HDEC_SIG=93; HDEC_GT1=137; HDEC_GT2=161;
+ HDE_COEFSTRIDE=1536;
+
+Type
+ THdELA=Array[0..268435000] Of LongInt;
+ PHdELA=^THdELA;
+ THdEPu=Record
+  Merge,MergeIdx,Dir,Ref0,Ref1,Mx0,My0,Mx1,My1,Mvp0,Mvp1: LongInt;
+  Dx0,Dy0,Dx1,Dy1: LongInt;       { mvd }
+  Px,Py,Pw,Ph: LongInt;           { position et taille }
+ End;
+ THdECu=Record
+  X,Y,L2: LongInt;
+  Pred: LongInt;                  { 1 intra, 2 inter }
+  Skip: LongInt;
+  Part: LongInt;                  { 0 2Nx2N, 1 2NxN, 2 Nx2N, 3 NxN }
+  Ipm: Array[0..3] Of LongInt;    { modes luma intra }
+  ChrSyn,ChrMode: LongInt;        { intra_chroma_pred_mode (0..4) et mode reel }
+  NPu: LongInt;
+  Pu: Array[0..3] Of THdEPu;
+  RqtRoot: LongInt;
+  CbfY: Array[0..3] Of LongInt;
+  CbfCb,CbfCr: LongInt;
+  SplitTr: LongInt;               { split_transform_flag (inter, profondeur 0) }
+  Co: PHdELA;                      { niveaux : luma a 0, Cb a 1024, Cr a 1280 }
+ End;
+
+Var
+ { ---- parametres de flux ---- }
+ HdEW,HdEH,HdEWp,HdEHp,HdEFn,HdEFd,HdEBitrate,HdEGop,HdECw,HdECh: LongInt;
+ HdEActive: Boolean;
+ { ---- profondeur de bits (8 ou 10) ---- }
+ HdEBd,HdEMx,HdEMid,HdEQpOff,HdEQpL,HdEQpCP: LongInt;
+ HdEUseInfo: Boolean;               { ecrit VUI / SEI HDR d'apres HdInfo (pe_hdr.pas) }
+ HdECropR,HdECropB: LongInt;
+ { ---- ecriture binaire ---- }
+ HdEBuf: PEABuffer; HdEBufCap,HdEBufLen: LongInt; HdEBitAcc,HdEBitCnt: LongInt;
+ HdEOut: PEABuffer; HdEOutCap,HdEOutLen: LongInt;
+ { ---- CABAC ---- }
+ HdELow,HdERange,HdEOuts: LongInt; HdEFirstBit: Boolean;
+ HdESt: Array[0..HDE_NCTX-1] Of Byte;
+ HdEEst: Boolean; HdECost: Double;
+ HdECostM,HdECostL: Array[0..63] Of Double;
+ { ---- tables ---- }
+ HdEZs: PHdELA;                       { adresse z-scan par bloc 4x4 }
+ HdEScanX,HdEScanY: Array[0..2,0..3,0..63] Of Byte;   { balayages : scan, log2(taille)-... }
+{ Tables generees depuis FFmpeg/libde265 (LGPL) }
+Const
+ HdELpsTab: Array[0..255] Of Byte = (
+  128,176,208,240,128,167,197,227,128,158,187,216,123,150,178,205,
+  116,142,169,195,111,135,160,185,105,128,152,175,100,122,144,166,
+  95,116,137,158,90,110,130,150,85,104,123,142,81,99,117,135,
+  77,94,111,128,73,89,105,122,69,85,100,116,66,80,95,110,
+  62,76,90,104,59,72,86,99,56,69,81,94,53,65,77,89,
+  51,62,73,85,48,59,69,80,46,56,66,76,43,53,63,72,
+  41,50,59,69,39,48,56,65,37,45,54,62,35,43,51,59,
+  33,41,48,56,32,39,46,53,30,37,43,50,29,35,41,48,
+  27,33,39,45,26,31,37,43,24,30,35,41,23,28,33,39,
+  22,27,32,37,21,26,30,35,20,24,29,33,19,23,27,31,
+  18,22,26,30,17,21,25,28,16,20,23,27,15,19,22,25,
+  14,18,21,24,14,17,20,23,13,16,19,22,12,15,18,21,
+  12,14,17,20,11,14,16,19,11,13,15,18,10,12,15,17,
+  10,12,14,16,9,11,13,15,9,11,12,14,8,10,12,14,
+  8,9,11,13,7,9,11,12,7,9,10,12,7,8,10,11,
+  6,8,9,11,6,7,9,10,6,7,8,9,2,2,2,2);
+Const
+ HdENextLps: Array[0..63] Of Byte = (
+  0,0,1,2,2,4,4,5,6,7,8,9,9,11,11,12,
+  13,13,15,15,16,16,18,18,19,19,21,21,22,22,23,24,
+  24,25,26,26,27,27,28,29,29,30,30,30,31,32,32,33,
+  33,33,34,34,35,35,35,36,36,36,37,37,37,38,38,63);
+Const
+ HdEInitTab: Array[0..536] Of Byte = (
+  153,200,139,141,157,154,154,154,154,154,154,154,154,184,154,154,
+  154,184,63,139,154,154,154,154,154,154,154,154,154,154,154,154,
+  154,154,154,154,154,153,138,138,111,141,94,138,182,154,154,139,
+  139,139,139,139,139,110,110,124,125,140,153,125,127,140,109,111,
+  143,127,111,79,108,123,63,110,110,124,125,140,153,125,127,140,
+  109,111,143,127,111,79,108,123,63,91,171,134,141,111,111,125,
+  110,110,94,124,108,124,107,125,141,179,153,125,107,125,141,179,
+  153,125,107,125,141,179,153,125,140,139,182,182,152,136,152,136,
+  153,136,139,111,136,139,111,141,111,140,92,137,138,140,152,138,
+  139,153,74,149,92,139,107,122,152,140,179,166,182,140,227,122,
+  197,138,153,136,167,152,152,154,154,154,154,154,154,154,154,154,
+  154,154,154,153,185,107,139,126,154,197,185,201,154,154,154,149,
+  154,139,154,154,154,152,139,110,122,95,79,63,31,31,153,153,
+  153,153,140,198,140,198,168,79,124,138,94,153,111,149,107,167,
+  154,154,139,139,139,139,139,139,125,110,94,110,95,79,125,111,
+  110,78,110,111,111,95,94,108,123,108,125,110,94,110,95,79,
+  125,111,110,78,110,111,111,95,94,108,123,108,121,140,61,154,
+  155,154,139,153,139,123,123,63,153,166,183,140,136,153,154,166,
+  183,140,136,153,154,166,183,140,136,153,154,170,153,123,123,107,
+  121,107,121,167,151,183,140,151,183,140,140,140,154,196,196,167,
+  154,152,167,182,182,134,149,136,153,121,136,137,169,194,166,167,
+  154,167,137,182,107,167,91,122,107,167,154,154,154,154,154,154,
+  154,154,154,154,154,154,153,160,107,139,126,154,197,185,201,154,
+  154,154,134,154,139,154,154,183,152,139,154,137,95,79,63,31,
+  31,153,153,153,153,169,198,169,198,168,79,224,167,122,153,111,
+  149,92,167,154,154,139,139,139,139,139,139,125,110,124,110,95,
+  94,125,111,111,79,125,126,111,111,79,108,123,93,125,110,124,
+  110,95,94,125,111,111,79,125,126,111,111,79,108,123,93,121,
+  140,61,154,170,154,139,153,139,123,123,63,124,166,183,140,136,
+  153,154,166,183,140,136,153,154,166,183,140,136,153,154,170,153,
+  138,138,122,121,122,121,167,151,183,140,151,183,140,140,140,154,
+  196,167,167,154,152,167,182,182,134,149,136,153,121,136,122,169,
+  208,166,167,154,152,167,182,107,167,91,107,107,167,154,154,154,
+  154,154,154,154,154,154,154,154,154);
+Const
+ HdEDctMat: Array[0..1023] Of ShortInt = (
+  64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
+  90,90,88,85,82,78,73,67,61,54,46,38,31,22,13,4,-4,-13,-22,-31,-38,-46,-54,-61,-67,-73,-78,-82,-85,-88,-90,-90,
+  90,87,80,70,57,43,25,9,-9,-25,-43,-57,-70,-80,-87,-90,-90,-87,-80,-70,-57,-43,-25,-9,9,25,43,57,70,80,87,90,
+  90,82,67,46,22,-4,-31,-54,-73,-85,-90,-88,-78,-61,-38,-13,13,38,61,78,88,90,85,73,54,31,4,-22,-46,-67,-82,-90,
+  89,75,50,18,-18,-50,-75,-89,-89,-75,-50,-18,18,50,75,89,89,75,50,18,-18,-50,-75,-89,-89,-75,-50,-18,18,50,75,89,
+  88,67,31,-13,-54,-82,-90,-78,-46,-4,38,73,90,85,61,22,-22,-61,-85,-90,-73,-38,4,46,78,90,82,54,13,-31,-67,-88,
+  87,57,9,-43,-80,-90,-70,-25,25,70,90,80,43,-9,-57,-87,-87,-57,-9,43,80,90,70,25,-25,-70,-90,-80,-43,9,57,87,
+  85,46,-13,-67,-90,-73,-22,38,82,88,54,-4,-61,-90,-78,-31,31,78,90,61,4,-54,-88,-82,-38,22,73,90,67,13,-46,-85,
+  83,36,-36,-83,-83,-36,36,83,83,36,-36,-83,-83,-36,36,83,83,36,-36,-83,-83,-36,36,83,83,36,-36,-83,-83,-36,36,83,
+  82,22,-54,-90,-61,13,78,85,31,-46,-90,-67,4,73,88,38,-38,-88,-73,-4,67,90,46,-31,-85,-78,-13,61,90,54,-22,-82,
+  80,9,-70,-87,-25,57,90,43,-43,-90,-57,25,87,70,-9,-80,-80,-9,70,87,25,-57,-90,-43,43,90,57,-25,-87,-70,9,80,
+  78,-4,-82,-73,13,85,67,-22,-88,-61,31,90,54,-38,-90,-46,46,90,38,-54,-90,-31,61,88,22,-67,-85,-13,73,82,4,-78,
+  75,-18,-89,-50,50,89,18,-75,-75,18,89,50,-50,-89,-18,75,75,-18,-89,-50,50,89,18,-75,-75,18,89,50,-50,-89,-18,75,
+  73,-31,-90,-22,78,67,-38,-90,-13,82,61,-46,-88,-4,85,54,-54,-85,4,88,46,-61,-82,13,90,38,-67,-78,22,90,31,-73,
+  70,-43,-87,9,90,25,-80,-57,57,80,-25,-90,-9,87,43,-70,-70,43,87,-9,-90,-25,80,57,-57,-80,25,90,9,-87,-43,70,
+  67,-54,-78,38,85,-22,-90,4,90,13,-88,-31,82,46,-73,-61,61,73,-46,-82,31,88,-13,-90,-4,90,22,-85,-38,78,54,-67,
+  64,-64,-64,64,64,-64,-64,64,64,-64,-64,64,64,-64,-64,64,64,-64,-64,64,64,-64,-64,64,64,-64,-64,64,64,-64,-64,64,
+  61,-73,-46,82,31,-88,-13,90,-4,-90,22,85,-38,-78,54,67,-67,-54,78,38,-85,-22,90,4,-90,13,88,-31,-82,46,73,-61,
+  57,-80,-25,90,-9,-87,43,70,-70,-43,87,9,-90,25,80,-57,-57,80,25,-90,9,87,-43,-70,70,43,-87,-9,90,-25,-80,57,
+  54,-85,-4,88,-46,-61,82,13,-90,38,67,-78,-22,90,-31,-73,73,31,-90,22,78,-67,-38,90,-13,-82,61,46,-88,4,85,-54,
+  50,-89,18,75,-75,-18,89,-50,-50,89,-18,-75,75,18,-89,50,50,-89,18,75,-75,-18,89,-50,-50,89,-18,-75,75,18,-89,50,
+  46,-90,38,54,-90,31,61,-88,22,67,-85,13,73,-82,4,78,-78,-4,82,-73,-13,85,-67,-22,88,-61,-31,90,-54,-38,90,-46,
+  43,-90,57,25,-87,70,9,-80,80,-9,-70,87,-25,-57,90,-43,-43,90,-57,-25,87,-70,-9,80,-80,9,70,-87,25,57,-90,43,
+  38,-88,73,-4,-67,90,-46,-31,85,-78,13,61,-90,54,22,-82,82,-22,-54,90,-61,-13,78,-85,31,46,-90,67,4,-73,88,-38,
+  36,-83,83,-36,-36,83,-83,36,36,-83,83,-36,-36,83,-83,36,36,-83,83,-36,-36,83,-83,36,36,-83,83,-36,-36,83,-83,36,
+  31,-78,90,-61,4,54,-88,82,-38,-22,73,-90,67,-13,-46,85,-85,46,13,-67,90,-73,22,38,-82,88,-54,-4,61,-90,78,-31,
+  25,-70,90,-80,43,9,-57,87,-87,57,-9,-43,80,-90,70,-25,-25,70,-90,80,-43,-9,57,-87,87,-57,9,43,-80,90,-70,25,
+  22,-61,85,-90,73,-38,-4,46,-78,90,-82,54,-13,-31,67,-88,88,-67,31,13,-54,82,-90,78,-46,4,38,-73,90,-85,61,-22,
+  18,-50,75,-89,89,-75,50,-18,-18,50,-75,89,-89,75,-50,18,18,-50,75,-89,89,-75,50,-18,-18,50,-75,89,-89,75,-50,18,
+  13,-38,61,-78,88,-90,85,-73,54,-31,4,22,-46,67,-82,90,-90,82,-67,46,-22,-4,31,-54,73,-85,90,-88,78,-61,38,-13,
+  9,-25,43,-57,70,-80,87,-90,90,-87,80,-70,57,-43,25,-9,-9,25,-43,57,-70,80,-87,90,-90,87,-80,70,-57,43,-25,9,
+  4,-13,22,-31,38,-46,54,-61,67,-73,78,-82,85,-88,90,-90,90,-90,88,-85,82,-78,73,-67,61,-54,46,-38,31,-22,13,-4);
+Const
+ HdETcTab: Array[0..53] Of Byte = (
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,1,1,1,1,1,1,1,1,1,2,2,2,2,3,
+  3,3,3,4,4,4,5,5,6,6,7,8,9,10,11,13,
+  14,16,18,20,22,24);
+Const
+ HdEBetaTab: Array[0..51] Of Byte = (
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  6,7,8,9,10,11,12,13,14,15,16,17,18,20,22,24,
+  26,28,30,32,34,36,38,40,42,44,46,48,50,52,54,56,
+  58,60,62,64);
+{ ---------------------------------------------------------------------- }
+{ Utilitaires                                                              }
+{ ---------------------------------------------------------------------- }
+Function HdESar(V: LongInt; N: LongInt): LongInt;
+Begin
+ If V>=0 Then HdESar:=V Shr N Else HdESar:=-((-V-1) Shr N)-1;
+End;
+
+Function HdEClip(V,Lo,Hi: LongInt): LongInt;
+Begin
+ If V<Lo Then V:=Lo; If V>Hi Then V:=Hi; HdEClip:=V;
+End;
+
+Function HdEMin(A,B: LongInt): LongInt;
+Begin If A<B Then HdEMin:=A Else HdEMin:=B; End;
+
+Function HdEMax(A,B: LongInt): LongInt;
+Begin If A>B Then HdEMax:=A Else HdEMax:=B; End;
+
+Function HdEAbs(A: LongInt): LongInt;
+Begin If A<0 Then HdEAbs:=-A Else HdEAbs:=A; End;
+
+Function HdELog2(N: LongInt): LongInt;
+Var K: LongInt;
+Begin K:=0; While (1 Shl (K+1))<=N Do Inc(K); HdELog2:=K; End;
+
+{ ---------------------------------------------------------------------- }
+{ Ecriture de bits (RBSP)                                                   }
+{ ---------------------------------------------------------------------- }
+Procedure HdEFill16(P: PHdEPx; N,V: LongInt);
+Var I: LongInt;
+Begin
+ For I:=0 To N-1 Do P^[I]:=V;
+End;
+
+{ prediction ponderee par defaut (uni / bi) a partir des echantillons intermediaires 14 bits }
+Function HdEUniP(V: LongInt): LongInt;
+Var Sh: LongInt;
+Begin
+ Sh:=14-HdEBd;
+ V:=(V+(1 Shl (Sh-1))) Shr Sh;
+ If V<0 Then V:=0 Else If V>HdEMx Then V:=HdEMx;
+ HdEUniP:=V;
+End;
+
+Function HdEBiP(A,B: LongInt): LongInt;
+Var Sh,V: LongInt;
+Begin
+ Sh:=15-HdEBd;
+ V:=(A+B+(1 Shl (Sh-1))) Shr Sh;
+ If V<0 Then V:=0 Else If V>HdEMx Then V:=HdEMx;
+ HdEBiP:=V;
+End;
+
+Procedure HdEBufEnsure(N: LongInt);
+Var NB: PEABuffer; NC: LongInt;
+Begin
+ If HdEBufLen+N+16>HdEBufCap Then Begin
+  NC:=HdEBufCap*2+N+65536;
+  GetMem(NB,NC); Move(HdEBuf^,NB^,HdEBufLen); FreeMem(HdEBuf,HdEBufCap); HdEBuf:=NB; HdEBufCap:=NC;
+ End;
+End;
+
+Procedure HdEBits(V,N: LongInt);
+Var I: LongInt;
+Begin
+ For I:=N-1 DownTo 0 Do Begin
+  HdEBitAcc:=(HdEBitAcc Shl 1) Or ((V Shr I) And 1); Inc(HdEBitCnt);
+  If HdEBitCnt=8 Then Begin
+   HdEBufEnsure(1); HdEBuf^[HdEBufLen]:=HdEBitAcc And 255; Inc(HdEBufLen); HdEBitAcc:=0; HdEBitCnt:=0;
+  End;
+ End;
+End;
+
+Procedure HdEUe(V: LongInt);
+Var N,K: LongInt;
+Begin
+ Inc(V); N:=HdELog2(V);
+ For K:=1 To N Do HdEBits(0,1);
+ HdEBits(V,N+1);
+End;
+
+Procedure HdESe(V: LongInt);
+Begin
+ If V>0 Then HdEUe(2*V-1) Else HdEUe(-2*V);
+End;
+
+Procedure HdETrail;      { rbsp_trailing_bits }
+Begin
+ HdEBits(1,1); While HdEBitCnt<>0 Do HdEBits(0,1);
+End;
+
+Procedure HdEAlignZero;
+Begin
+ While HdEBitCnt<>0 Do HdEBits(0,1);
+End;
+
+Procedure HdEOutEnsure(N: LongInt);
+Var NB: PEABuffer; NC: LongInt;
+Begin
+ If HdEOutLen+N+16>HdEOutCap Then Begin
+  NC:=HdEOutCap*2+N+65536;
+  GetMem(NB,NC); Move(HdEOut^,NB^,HdEOutLen); FreeMem(HdEOut,HdEOutCap); HdEOut:=NB; HdEOutCap:=NC;
+ End;
+End;
+
+{ Ajoute a HdEOut la NAL (en-tete 2 octets + RBSP de HdEBuf avec emulation prevention).
+  Mode 0 : precede de sa longueur sur 4 octets ; mode 1 : code de depart 00 00 00 01. }
+Procedure HdEEmitNal(NalType, Mode: LongInt);
+Var I,Z,Start,L: LongInt; B: Byte;
+Begin
+ HdEOutEnsure(HdEBufLen*2+16);
+ Start:=HdEOutLen;
+ If Mode=0 Then Begin HdEOut^[HdEOutLen]:=0; HdEOut^[HdEOutLen+1]:=0; HdEOut^[HdEOutLen+2]:=0; HdEOut^[HdEOutLen+3]:=0; Inc(HdEOutLen,4); End
+ Else Begin HdEOut^[HdEOutLen]:=0; HdEOut^[HdEOutLen+1]:=0; HdEOut^[HdEOutLen+2]:=0; HdEOut^[HdEOutLen+3]:=1; Inc(HdEOutLen,4); End;
+ L:=HdEOutLen;
+ HdEOut^[HdEOutLen]:=(NalType Shl 1) And $7E; Inc(HdEOutLen);
+ HdEOut^[HdEOutLen]:=1; Inc(HdEOutLen);
+ Z:=0;
+ For I:=0 To HdEBufLen-1 Do Begin
+  B:=HdEBuf^[I];
+  If (Z>=2) And (B<=3) Then Begin HdEOut^[HdEOutLen]:=3; Inc(HdEOutLen); Z:=0; End;
+  HdEOut^[HdEOutLen]:=B; Inc(HdEOutLen);
+  If B=0 Then Inc(Z) Else Z:=0;
+ End;
+ If Mode=0 Then Begin
+  Z:=HdEOutLen-L;
+  HdEOut^[Start]:=(Z Shr 24) And 255; HdEOut^[Start+1]:=(Z Shr 16) And 255; HdEOut^[Start+2]:=(Z Shr 8) And 255; HdEOut^[Start+3]:=Z And 255;
+ End;
+ HdEBufLen:=0; HdEBitAcc:=0; HdEBitCnt:=0;
+End;
+
+{ ---------------------------------------------------------------------- }
+{ CABAC (encodeur)                                                          }
+{ ---------------------------------------------------------------------- }
+{ SEI de prefixe : mastering display colour volume (137) et content light level (144) }
+Procedure HdEEmitSei;
+Begin
+ If Not (HdEUseInfo And (HdInfo.HaveMd Or HdInfo.HaveCll)) Then Exit;
+ HdEBufLen:=0; HdEBitAcc:=0; HdEBitCnt:=0;
+ If HdInfo.HaveMd Then Begin
+  HdEBits(137,8); HdEBits(24,8);
+  HdEBits(HdInfo.MdPx[1],16); HdEBits(HdInfo.MdPy[1],16);
+  HdEBits(HdInfo.MdPx[2],16); HdEBits(HdInfo.MdPy[2],16);
+  HdEBits(HdInfo.MdPx[0],16); HdEBits(HdInfo.MdPy[0],16);
+  HdEBits(HdInfo.MdWx,16); HdEBits(HdInfo.MdWy,16);
+  HdEBits(HdInfo.MdMaxL,32); HdEBits(HdInfo.MdMinL,32);
+ End;
+ If HdInfo.HaveCll Then Begin
+  HdEBits(144,8); HdEBits(4,8); HdEBits(HdInfo.MaxCll,16); HdEBits(HdInfo.MaxFall,16);
+ End;
+ HdETrail;
+ HdEEmitNal(39,0);
+End;
+
+Procedure HdECabacInitEnc;
+Begin
+ HdELow:=0; HdERange:=510; HdEOuts:=0; HdEFirstBit:=True;
+End;
+
+Procedure HdEPutBit(B: LongInt);
+Begin
+ If HdEFirstBit Then HdEFirstBit:=False Else HdEBits(B,1);
+ While HdEOuts>0 Do Begin HdEBits(1-B,1); Dec(HdEOuts); End;
+End;
+
+Procedure HdERenorm;
+Begin
+ While HdERange<256 Do Begin
+  If HdELow<256 Then HdEPutBit(0)
+  Else If HdELow>=512 Then Begin Dec(HdELow,512); HdEPutBit(1); End
+  Else Begin Dec(HdELow,256); Inc(HdEOuts); End;
+  HdERange:=HdERange Shl 1; HdELow:=HdELow Shl 1;
+ End;
+End;
+
+Procedure HdEBin(Ctx,Bin: LongInt);
+Var S,Ps,Mps,L: LongInt;
+Begin
+ S:=HdESt[Ctx]; Ps:=S Shr 1; Mps:=S And 1;
+ If HdEEst Then Begin
+  If Bin=Mps Then HdECost:=HdECost+HdECostM[Ps] Else HdECost:=HdECost+HdECostL[Ps];
+  Exit;
+ End;
+ L:=HdELpsTab[Ps*4+((HdERange Shr 6) And 3)];
+ Dec(HdERange,L);
+ If Bin<>Mps Then Begin
+  Inc(HdELow,HdERange); HdERange:=L;
+  If Ps=0 Then Mps:=1-Mps;
+  Ps:=HdENextLps[Ps];
+ End Else If Ps<62 Then Inc(Ps);
+ HdESt[Ctx]:=(Ps Shl 1) Or Mps;
+ HdERenorm;
+End;
+
+Procedure HdEBypass(Bin: LongInt);
+Begin
+ If HdEEst Then Begin HdECost:=HdECost+1; Exit; End;
+ HdELow:=HdELow Shl 1;
+ If Bin<>0 Then Inc(HdELow,HdERange);
+ If HdELow>=1024 Then Begin HdEPutBit(1); Dec(HdELow,1024); End
+ Else If HdELow<512 Then HdEPutBit(0)
+ Else Begin Dec(HdELow,512); Inc(HdEOuts); End;
+End;
+
+Procedure HdEBypassBits(V,N: LongInt);
+Var I: LongInt;
+Begin
+ For I:=N-1 DownTo 0 Do HdEBypass((V Shr I) And 1);
+End;
+
+Procedure HdETerm(Bin: LongInt);
+Begin
+ If HdEEst Then Exit;
+ Dec(HdERange,2);
+ If Bin<>0 Then Begin
+  Inc(HdELow,HdERange);
+  HdERange:=2; HdERenorm;
+  HdEPutBit((HdELow Shr 9) And 1);
+  HdEBits(((HdELow Shr 7) And 3) Or 1,2);
+ End Else HdERenorm;
+End;
+
+Procedure HdECtxInit(Qp, InitType: LongInt);
+Var I,V,M,N,Pre,Mps,Ps: LongInt;
+Begin
+ Qp:=HdEClip(Qp,0,51);
+ For I:=0 To HDE_NCTX-1 Do Begin
+  V:=HdEInitTab[InitType*HDE_NCTX+I];
+  M:=(V Shr 4)*5-45; N:=((V And 15) Shl 3)-16;
+  Pre:=HdEClip(HdESar(M*Qp,4)+N,1,126);
+  If Pre>63 Then Begin Mps:=1; Ps:=Pre-64; End Else Begin Mps:=0; Ps:=63-Pre; End;
+  HdESt[I]:=(Ps Shl 1) Or Mps;
+ End;
+End;
+
+Procedure HdEInitCostTab;
+Var S: LongInt; P: Double;
+Begin
+ For S:=0 To 63 Do Begin
+  P:=0.5*Exp(S*Ln(0.01875/0.5)/63);
+  HdECostL[S]:=-Ln(P)/Ln(2.0);
+  HdECostM[S]:=-Ln(1-P)/Ln(2.0);
+ End;
+End;
+
+Procedure HdEInitScans;
+Var Sc,L,Blk,I,X,Y,Stop: LongInt;
+Begin
+ For L:=0 To 3 Do Begin
+  Blk:=1 Shl L;
+  { diagonale haut-droite (6.5.3) }
+  I:=0; X:=0; Y:=0; Stop:=0;
+  While Stop=0 Do Begin
+   While Y>=0 Do Begin
+    If (X<Blk) And (Y<Blk) Then Begin HdEScanX[0,L,I]:=X; HdEScanY[0,L,I]:=Y; Inc(I); End;
+    Dec(Y); Inc(X);
+   End;
+   Y:=X; X:=0;
+   If I>=Blk*Blk Then Stop:=1;
+  End;
+  For I:=0 To Blk*Blk-1 Do Begin
+   HdEScanX[1,L,I]:=I Mod Blk; HdEScanY[1,L,I]:=I Div Blk;
+   HdEScanX[2,L,I]:=I Div Blk; HdEScanY[2,L,I]:=I Mod Blk;
+  End;
+ End;
+End;
+{ ---------------------------------------------------------------------- }
+{ Ensembles de parametres                                                  }
+{ ---------------------------------------------------------------------- }
+Var
+ HdELevel,HdEMaxRefs,HdENumReorder,HdEMaxMerge: LongInt;
+ HdEDeblock,HdENoDeblock: Boolean;
+ HdEVpsB,HdESpsB,HdEPpsB: Array[0..511] Of Byte;
+ HdEVpsL,HdESpsL,HdEPpsL: LongInt;     { longueur des NAL sans code de depart (en-tete 2 octets inclus) }
+
+Procedure HdEWriteVui;
+Begin
+ If HdEUseInfo And (HdInfo.HaveColour Or HdInfo.RangeKnown) Then Begin
+  HdEBits(1,1);                 { vui_parameters_present_flag }
+  HdEBits(0,1);                 { aspect_ratio_info_present_flag }
+  HdEBits(0,1);                 { overscan_info_present_flag }
+  HdEBits(1,1);                 { video_signal_type_present_flag }
+  HdEBits(5,3);                 { video_format : non specifie }
+  HdEBits(Ord(HdInfo.RangeKnown And HdInfo.Full),1);
+  If HdInfo.HaveColour Then Begin
+   HdEBits(1,1); HdEBits(HdInfo.Prim,8); HdEBits(HdInfo.Trc,8); HdEBits(HdInfo.Mat,8);
+  End Else HdEBits(0,1);
+  HdEBits(0,1);                 { chroma_loc_info_present_flag }
+  HdEBits(0,1);                 { neutral_chroma_indication_flag }
+  HdEBits(0,1);                 { field_seq_flag }
+  HdEBits(0,1);                 { frame_field_info_present_flag }
+  HdEBits(0,1);                 { default_display_window_flag }
+  HdEBits(0,1);                 { vui_timing_info_present_flag }
+  HdEBits(0,1);                 { bitstream_restriction_flag }
+ End Else HdEBits(0,1);
+End;
+
+Procedure HdEPtl;
+Var I: LongInt;
+Begin
+ HdEBits(0,2); HdEBits(0,1);
+ If HdEBd>8 Then Begin HdEBits(2,5); HdEBits($20000000,32); End Else Begin HdEBits(1,5); HdEBits($60000000,32); End;
+ HdEBits(1,1); HdEBits(0,1); HdEBits(0,1); HdEBits(1,1);
+ HdEBits(0,22); HdEBits(0,22);
+ HdEBits(HdELevel,8);
+End;
+
+Procedure HdEStoreNal(Var Dst: Array Of Byte; Var Len: LongInt; NalType: LongInt);
+Var I: LongInt;
+Begin
+ HdEOutLen:=0;
+ HdEEmitNal(NalType,1);
+ Len:=HdEOutLen-4;
+ For I:=0 To Len-1 Do Dst[I]:=HdEOut^[4+I];
+ HdEOutLen:=0;
+End;
+
+Procedure HdEMakeParamSets;
+Begin
+ { VPS }
+ HdEBufLen:=0; HdEBitAcc:=0; HdEBitCnt:=0;
+ HdEBits(0,4); HdEBits(1,1); HdEBits(1,1); HdEBits(0,6); HdEBits(0,3); HdEBits(1,1); HdEBits($FFFF,16);
+ HdEPtl;
+ HdEBits(1,1); HdEUe(HdEMaxRefs); HdEUe(HdENumReorder); HdEUe(0);
+ HdEBits(0,6); HdEUe(0); HdEBits(0,1); HdEBits(0,1);
+ HdETrail;
+ HdEStoreNal(HdEVpsB,HdEVpsL,32);
+ { SPS }
+ HdEBufLen:=0; HdEBitAcc:=0; HdEBitCnt:=0;
+ HdEBits(0,4); HdEBits(0,3); HdEBits(1,1);
+ HdEPtl;
+ HdEUe(0);                 { sps id }
+ HdEUe(1);                 { chroma_format_idc }
+ HdEUe(HdEWp); HdEUe(HdEHp);
+ If (HdECropR>0) Or (HdECropB>0) Then Begin
+  HdEBits(1,1); HdEUe(0); HdEUe(HdECropR Div 2); HdEUe(0); HdEUe(HdECropB Div 2);
+ End Else HdEBits(0,1);
+ HdEUe(HdEBd-8); HdEUe(HdEBd-8);        { bit depths }
+ HdEUe(4);                 { log2_max_poc_lsb - 4 }
+ HdEBits(1,1); HdEUe(HdEMaxRefs); HdEUe(HdENumReorder); HdEUe(0);
+ HdEUe(0);                 { log2_min_cb - 3 }
+ HdEUe(2);                 { diff max-min cb : CTB 32 }
+ HdEUe(0);                 { log2_min_tb - 2 }
+ HdEUe(3);                 { diff : TB max 32 }
+ HdEUe(1);                 { max_transform_hierarchy_depth_inter }
+ HdEUe(0);                 { max_transform_hierarchy_depth_intra }
+ HdEBits(0,1);             { scaling_list_enabled_flag }
+ HdEBits(0,1);             { amp_enabled_flag }
+ HdEBits(0,1);             { sample_adaptive_offset_enabled_flag }
+ HdEBits(0,1);             { pcm_enabled_flag }
+ HdEUe(0);                 { num_short_term_ref_pic_sets }
+ HdEBits(0,1);             { long_term_ref_pics_present_flag }
+ HdEBits(0,1);             { sps_temporal_mvp_enabled_flag }
+ HdEBits(1,1);             { strong_intra_smoothing_enabled_flag }
+ HdEWriteVui;
+ HdEBits(0,1);             { sps_extension_present_flag }
+ HdETrail;
+ HdEStoreNal(HdESpsB,HdESpsL,33);
+ { PPS }
+ HdEBufLen:=0; HdEBitAcc:=0; HdEBitCnt:=0;
+ HdEUe(0); HdEUe(0);
+ HdEBits(0,1);             { dependent_slice_segments_enabled_flag }
+ HdEBits(0,1);             { output_flag_present_flag }
+ HdEBits(0,3);             { num_extra_slice_header_bits }
+ HdEBits(0,1);             { sign_data_hiding_enabled_flag }
+ HdEBits(0,1);             { cabac_init_present_flag }
+ HdEUe(0); HdEUe(0);        { num_ref_idx_default_active_minus1 }
+ HdESe(0);                 { init_qp_minus26 }
+ HdEBits(0,1);             { constrained_intra_pred_flag }
+ HdEBits(0,1);             { transform_skip_enabled_flag }
+ HdEBits(0,1);             { cu_qp_delta_enabled_flag }
+ HdESe(0); HdESe(0);        { cb / cr qp offsets }
+ HdEBits(0,1);             { pps_slice_chroma_qp_offsets_present_flag }
+ HdEBits(0,1); HdEBits(0,1);{ weighted_pred, weighted_bipred }
+ HdEBits(0,1);             { transquant_bypass_enabled_flag }
+ HdEBits(0,1);             { tiles_enabled_flag }
+ HdEBits(0,1);             { entropy_coding_sync_enabled_flag }
+ HdEBits(1,1);             { pps_loop_filter_across_slices_enabled_flag }
+ HdEBits(1,1);             { deblocking_filter_control_present_flag }
+ HdEBits(0,1);             { deblocking_filter_override_enabled_flag }
+ If HdEDeblock Then Begin HdEBits(0,1); HdESe(0); HdESe(0); End Else HdEBits(1,1);
+ HdEBits(0,1);             { pps_scaling_list_data_present_flag }
+ HdEBits(0,1);             { lists_modification_present_flag }
+ HdEUe(0);                 { log2_parallel_merge_level_minus2 }
+ HdEBits(0,1);             { slice_segment_header_extension_present_flag }
+ HdEBits(0,1);             { pps_extension_present_flag }
+ HdETrail;
+ HdEStoreNal(HdEPpsB,HdEPpsL,34);
+End;
+
+{ Annexe B : VPS+SPS+PPS avec codes de depart ; retourne la longueur }
+Function HdEParamSets(Var Buf: Array Of Byte): LongInt;
+Var N,I: LongInt;
+Begin
+ N:=0;
+ Buf[N]:=0; Buf[N+1]:=0; Buf[N+2]:=0; Buf[N+3]:=1; Inc(N,4); For I:=0 To HdEVpsL-1 Do Begin Buf[N]:=HdEVpsB[I]; Inc(N); End;
+ Buf[N]:=0; Buf[N+1]:=0; Buf[N+2]:=0; Buf[N+3]:=1; Inc(N,4); For I:=0 To HdESpsL-1 Do Begin Buf[N]:=HdESpsB[I]; Inc(N); End;
+ Buf[N]:=0; Buf[N+1]:=0; Buf[N+2]:=0; Buf[N+3]:=1; Inc(N,4); For I:=0 To HdEPpsL-1 Do Begin Buf[N]:=HdEPpsB[I]; Inc(N); End;
+ HdEParamSets:=N;
+End;
+
+{ Boite hvcC complete (taille + 'hvcC' + HEVCDecoderConfigurationRecord).
+  Pour Matroska (CodecPrivate), ignorer les 8 premiers octets. }
+Function HdEHvcC(Var Buf: Array Of Byte): LongInt;
+Var N,I,Sz: LongInt;
+ Procedure P8(V: LongInt); Begin Buf[N]:=V And 255; Inc(N); End;
+ Procedure P16(V: LongInt); Begin P8(V Shr 8); P8(V); End;
+ Procedure PNal(Var Src: Array Of Byte; L, Typ: LongInt);
+ Var K: LongInt;
+ Begin
+  P8($80 Or Typ); P16(1); P16(L); For K:=0 To L-1 Do P8(Src[K]);
+ End;
+Begin
+ N:=4; P8(Ord('h')); P8(Ord('v')); P8(Ord('c')); P8(Ord('C'));
+ P8(1);                       { configurationVersion }
+ If HdEBd>8 Then P8(2) Else P8(1);   { profile space 0, tier 0, profile 1 ou 2 }
+ If HdEBd>8 Then P8($20) Else P8($60); P8(0); P8(0); P8(0);{ compatibility flags }
+ P8($90); P8(0); P8(0); P8(0); P8(0); P8(0); { constraint indicator flags (progressive, frame only) }
+ P8(HdELevel);
+ P16($F000);                  { min_spatial_segmentation_idc }
+ P8($FC);                     { parallelismType }
+ P8($FD);                     { chroma_format_idc = 1 }
+ P8($F8 Or (HdEBd-8)); P8($F8 Or (HdEBd-8));            { bit depths }
+ P16(0);                      { avgFrameRate }
+ P8((0 Shl 6) Or (1 Shl 3) Or (1 Shl 2) Or 3);
+ P8(3);                       { numOfArrays }
+ PNal(HdEVpsB,HdEVpsL,32); PNal(HdESpsB,HdESpsL,33); PNal(HdEPpsB,HdEPpsL,34);
+ Sz:=N;
+ Buf[0]:=(Sz Shr 24) And 255; Buf[1]:=(Sz Shr 16) And 255; Buf[2]:=(Sz Shr 8) And 255; Buf[3]:=Sz And 255;
+ HdEHvcC:=N;
+End;
+{ ---------------------------------------------------------------------- }
+{ Transformees, quantification                                             }
+{ ---------------------------------------------------------------------- }
+Const
+ HdEDstMat: Array[0..15] Of ShortInt = (29,55,74,84, 74,74,0,-74, 84,-29,-74,55, 55,-84,74,-29);
+ HdEQScale: Array[0..5] Of LongInt = (26214,23302,20560,18396,16384,14564);
+ HdELevScale: Array[0..5] Of LongInt = (40,45,51,57,64,72);
+ HdEQpCTab: Array[0..13] Of Byte = (29,30,31,32,33,33,34,34,35,35,36,36,37,37);
+
+Var
+ HdETmpT: Array[0..1023] Of LongInt;
+
+Var
+ HdETM: Array[0..4,0..1023] Of LongInt;   { matrices DCT 4,8,16,32 et DST 4 }
+
+Procedure HdEInitTM;
+Var T,N,K,I: LongInt;
+Begin
+ For T:=0 To 3 Do Begin
+  N:=4 Shl T;
+  For K:=0 To N-1 Do For I:=0 To N-1 Do HdETM[T,K*N+I]:=HdEDctMat[((32 Div N)*K)*32+I];
+ End;
+ For K:=0 To 3 Do For I:=0 To 3 Do HdETM[4,K*4+I]:=HdEDstMat[K*4+I];
+End;
+
+{ transformee directe 1D (papillon pair/impair) : In[0..N-1] -> Out[k*Stp] avec Stp=1 }
+Procedure HdEFwd1(Var In1: Array Of LongInt; N,L2: LongInt; Var Out1: Array Of LongInt);
+Var Cur,Ev,Od: Array[0..31] Of LongInt; Nn,Hf,I,K,T,Sc,Acc: LongInt;
+Begin
+ For I:=0 To N-1 Do Cur[I]:=In1[I];
+ Nn:=N; Sc:=1;
+ While Nn>4 Do Begin
+  Hf:=Nn Shr 1; T:=HdELog2(Nn)-2;
+  For I:=0 To Hf-1 Do Begin Ev[I]:=Cur[I]+Cur[Nn-1-I]; Od[I]:=Cur[I]-Cur[Nn-1-I]; End;
+  K:=1;
+  While K<Nn Do Begin
+   Acc:=0;
+   For I:=0 To Hf-1 Do Acc:=Acc+HdETM[T,K*Nn+I]*Od[I];
+   Out1[K*(N Div Nn)]:=Acc;
+   Inc(K,2);
+  End;
+  For I:=0 To Hf-1 Do Cur[I]:=Ev[I];
+  Nn:=Hf;
+ End;
+ For K:=0 To 3 Do Begin
+  Acc:=0;
+  For I:=0 To 3 Do Acc:=Acc+HdETM[0,K*4+I]*Cur[I];
+  Out1[K*(N Div 4)]:=Acc;
+ End;
+End;
+
+{ transformee directe : Res (N*N, ligne y, colonne x) -> Co }
+Procedure HdEFwdT(Var Res: Array Of LongInt; N,L2: LongInt; Dst: Boolean; Var Co: Array Of LongInt);
+Var X,Y,K,S1,S2,A1,A2,B,Acc: LongInt; V,O: Array[0..31] Of LongInt; Zero: Boolean;
+Begin
+ S1:=L2-1+HdEBd-8; S2:=L2+6; A1:=1 Shl (S1-1); A2:=1 Shl (S2-1);
+ If Dst Then Begin
+  For X:=0 To N-1 Do
+   For K:=0 To N-1 Do Begin
+    Acc:=0; B:=K*N;
+    For Y:=0 To N-1 Do Acc:=Acc+HdETM[4,B+Y]*Res[Y*N+X];
+    HdETmpT[K*N+X]:=HdESar(Acc+A1,S1);
+   End;
+  For Y:=0 To N-1 Do
+   For K:=0 To N-1 Do Begin
+    Acc:=0; B:=K*N;
+    For X:=0 To N-1 Do Acc:=Acc+HdETM[4,B+X]*HdETmpT[Y*N+X];
+    Co[Y*N+K]:=HdESar(Acc+A2,S2);
+   End;
+  Exit;
+ End;
+ For X:=0 To N-1 Do Begin
+  Zero:=True;
+  For Y:=0 To N-1 Do Begin V[Y]:=Res[Y*N+X]; If V[Y]<>0 Then Zero:=False; End;
+  If Zero Then Begin
+   For K:=0 To N-1 Do HdETmpT[K*N+X]:=0;
+  End Else Begin
+   HdEFwd1(V,N,L2,O);
+   For K:=0 To N-1 Do HdETmpT[K*N+X]:=HdESar(O[K]+A1,S1);
+  End;
+ End;
+ For Y:=0 To N-1 Do Begin
+  Zero:=True;
+  For X:=0 To N-1 Do Begin V[X]:=HdETmpT[Y*N+X]; If V[X]<>0 Then Zero:=False; End;
+  If Zero Then Begin
+   For K:=0 To N-1 Do Co[Y*N+K]:=0;
+  End Else Begin
+   HdEFwd1(V,N,L2,O);
+   For K:=0 To N-1 Do Co[Y*N+K]:=HdESar(O[K]+A2,S2);
+  End;
+ End;
+End;
+
+{ quantification (zone morte HM) ; retourne le nombre de coefficients non nuls }
+Function HdEQuantize(Var Co: Array Of LongInt; N,L2,Qp: LongInt; Intra: Boolean; Lev: PHdELA): LongInt;
+Var I,Qb,Nz: LongInt; Sc,Add,A: Int64; C: LongInt;
+Begin
+ Qb:=29-HdEBd-L2+Qp Div 6; Sc:=HdEQScale[Qp Mod 6];
+ If Intra Then Add:=Int64(171) Shl (Qb-9) Else Add:=Int64(85) Shl (Qb-9);
+ Nz:=0;
+ For I:=0 To N*N-1 Do Begin
+  C:=Co[I]; If C<0 Then A:=-C Else A:=C;
+  A:=(A*Sc+Add) Shr Qb;
+  If A>32767 Then A:=32767;
+  If A<>0 Then Inc(Nz);
+  If C<0 Then Lev^[I]:=-A Else Lev^[I]:=A;
+ End;
+ HdEQuantize:=Nz;
+End;
+
+{ dequantification + transformee inverse -> residu reconstruit (comme le decodeur) }
+Procedure HdEInvT(Lev: PHdELA; N,L2,Qp: LongInt; Dst: Boolean; Var Res: Array Of LongInt);
+Var X,Y,K,Sh,KMax,XMax,Sc,T,Acc,V32: LongInt; Add,V: Int64; D: Array[0..1023] Of LongInt;
+Begin
+ Sh:=L2+HdEBd-5; Sc:=HdELevScale[Qp Mod 6] Shl (Qp Div 6); Add:=Int64(1) Shl (Sh-1);
+ If Dst Then T:=4 Else T:=L2-2;
+ KMax:=-1; XMax:=-1;
+ For Y:=0 To N-1 Do
+  For X:=0 To N-1 Do Begin
+   If Lev^[Y*N+X]<>0 Then Begin
+    V:=(Int64(Lev^[Y*N+X])*16*Sc+Add);
+    If V>=0 Then V:=V Shr Sh Else V:=-((-V-1) Shr Sh)-1;
+    If V>32767 Then V:=32767; If V<-32768 Then V:=-32768;
+    D[Y*N+X]:=V;
+    If Y>KMax Then KMax:=Y; If X>XMax Then XMax:=X;
+   End Else D[Y*N+X]:=0;
+  End;
+ If KMax<0 Then Begin
+  For X:=0 To N*N-1 Do Res[X]:=0;
+  Exit;
+ End;
+ { etage vertical }
+ For X:=0 To XMax Do
+  For Y:=0 To N-1 Do Begin
+   Acc:=0;
+   For K:=0 To KMax Do Acc:=Acc+HdETM[T,K*N+Y]*D[K*N+X];
+   V32:=HdESar(Acc+64,7);
+   If V32>32767 Then V32:=32767; If V32<-32768 Then V32:=-32768;
+   HdETmpT[Y*N+X]:=V32;
+  End;
+ { etage horizontal }
+ For Y:=0 To N-1 Do
+  For X:=0 To N-1 Do Begin
+   Acc:=0;
+   For K:=0 To XMax Do Acc:=Acc+HdETM[T,K*N+X]*HdETmpT[Y*N+K];
+   Res[Y*N+X]:=HdESar(Acc+(1 Shl (19-HdEBd)),20-HdEBd);
+  End;
+End;
+
+Function HdEChromaQp(Qp: LongInt): LongInt;
+Begin
+ If Qp<30 Then HdEChromaQp:=Qp Else If Qp>43 Then HdEChromaQp:=Qp-6 Else HdEChromaQp:=HdEQpCTab[Qp-30];
+End;
+{ ---------------------------------------------------------------------- }
+{ Prediction intra                                                         }
+{ ---------------------------------------------------------------------- }
+Const
+ HdEAngTab: Array[0..34] Of ShortInt = (0,0,32,26,21,17,13,9,5,2,0,-2,-5,-9,-13,-17,-21,-26,-32,-26,-21,-17,-13,-9,-5,-2,0,2,5,9,13,17,21,26,32);
+ HdEInvAng: Array[11..25] Of SmallInt = (-4096,-1638,-910,-630,-482,-390,-315,-256,-315,-390,-482,-630,-910,-1638,-4096);
+
+Var
+ { image courante : source et reconstruction, paddees a HdEWp x HdEHp }
+ HdESrcP,HdERecP: Array[0..2] Of PHdEPx;
+ HdEStr: Array[0..2] Of LongInt;
+ HdEW4,HdEH4: LongInt;
+ HdERefRaw,HdERefFlt: Array[0..128] Of LongInt;
+ HdERefN: LongInt;
+
+Function HdEAvail(XCur,YCur,XN,YN: LongInt): Boolean;
+Begin
+ If (XN<0) Or (YN<0) Or (XN>=HdEWp) Or (YN>=HdEHp) Then HdEAvail:=False
+ Else HdEAvail:=HdEZs^[(YN Shr 2)*HdEW4+(XN Shr 2)]<=HdEZs^[(YCur Shr 2)*HdEW4+(XCur Shr 2)];
+End;
+
+{ construit les echantillons de reference (bruts et filtres) du bloc NxN de la composante CIdx,
+  origine (Xc,Yc) en coordonnees de la composante }
+Procedure HdEIntraRefs(CIdx,Xc,Yc,L2: LongInt);
+Var N,Sh,U,I,X,Y,Cnt,First,Lx,Ly,Str,T: LongInt; Av: Array[0..128] Of Boolean; Pl: PHdEPx; Ok: Boolean;
+ Strong: Boolean;
+Begin
+ N:=1 Shl L2; If CIdx=0 Then Sh:=0 Else Sh:=1;
+ U:=4 Shr Sh; Pl:=HdERecP[CIdx]; Str:=HdEStr[CIdx];
+ Lx:=Xc Shl Sh; Ly:=Yc Shl Sh; HdERefN:=N;
+ Cnt:=4*N+1;
+ { indice 0 = p[-1][2N-1] ... 2N-1 = p[-1][0], 2N = coin, 2N+1+x = p[x][-1] }
+ For I:=0 To 2*N-1 Do Begin
+  Y:=2*N-1-I;
+  Av[I]:=HdEAvail(Lx,Ly,(Xc-1) Shl Sh,(Yc+Y) Shl Sh);
+  If Av[I] Then HdERefRaw[I]:=Pl^[(Yc+Y)*Str+Xc-1];
+ End;
+ Av[2*N]:=HdEAvail(Lx,Ly,(Xc-1) Shl Sh,(Yc-1) Shl Sh);
+ If Av[2*N] Then HdERefRaw[2*N]:=Pl^[(Yc-1)*Str+Xc-1];
+ For X:=0 To 2*N-1 Do Begin
+  Av[2*N+1+X]:=HdEAvail(Lx,Ly,(Xc+X) Shl Sh,(Yc-1) Shl Sh);
+  If Av[2*N+1+X] Then HdERefRaw[2*N+1+X]:=Pl^[(Yc-1)*Str+Xc+X];
+ End;
+ { substitution }
+ First:=-1;
+ For I:=0 To Cnt-1 Do If Av[I] Then Begin First:=I; Break; End;
+ If First<0 Then Begin
+  For I:=0 To Cnt-1 Do HdERefRaw[I]:=HdEMid;
+ End Else Begin
+  If First>0 Then Begin
+   For I:=0 To First-1 Do HdERefRaw[I]:=HdERefRaw[First];
+  End;
+  For I:=First+1 To Cnt-1 Do If Not Av[I] Then HdERefRaw[I]:=HdERefRaw[I-1];
+ End;
+ { filtrage (luma seulement) }
+ For I:=0 To Cnt-1 Do HdERefFlt[I]:=HdERefRaw[I];
+ If CIdx=0 Then Begin
+  Strong:=(N=32) And (HdEAbs(HdERefRaw[2*N]+HdERefRaw[4*N]-2*HdERefRaw[3*N])<(1 Shl (HdEBd-5)))
+   And (HdEAbs(HdERefRaw[2*N]+HdERefRaw[0]-2*HdERefRaw[N])<(1 Shl (HdEBd-5)));
+  If Strong Then Begin
+   For Y:=0 To 62 Do Begin
+    HdERefFlt[63-Y]:=((63-Y)*HdERefRaw[64]+(Y+1)*HdERefRaw[0]+32) Shr 6;
+    HdERefFlt[65+Y]:=((63-Y)*HdERefRaw[64]+(Y+1)*HdERefRaw[128]+32) Shr 6;
+   End;
+  End Else Begin
+   For I:=1 To Cnt-2 Do HdERefFlt[I]:=(HdERefRaw[I-1]+2*HdERefRaw[I]+HdERefRaw[I+1]+2) Shr 2;
+  End;
+  { drapeau de strong : memorise dans HdERefFlt non modifiable ; le choix filtre/brut est dans HdEIntraPredFrom }
+ End;
+End;
+
+{ prediction pour le mode donne a partir de HdERefRaw / HdERefFlt (deja construits) }
+Procedure HdEIntraPredFrom(CIdx,L2,Mode: LongInt; Var Pr: Array Of LongInt);
+Var N,X,Y,I,Ang,Inv,IIdx,IFact,Dc,Dm,Th,Sum,K: LongInt; UseF: Boolean;
+ P: Array[0..128] Of LongInt; Rf: Array[0..160] Of LongInt; (* offset 48 *)
+ Function Lf(Yy: LongInt): LongInt; Begin Lf:=P[2*N-1-Yy]; End;
+ Function Tp(Xx: LongInt): LongInt; Begin Tp:=P[2*N+1+Xx]; End;
+Begin
+ N:=1 Shl L2;
+ UseF:=False;
+ If (CIdx=0) And (Mode<>1) And (N<>4) Then Begin
+  Dm:=HdEMin(HdEAbs(Mode-26),HdEAbs(Mode-10));
+  If N=8 Then Th:=7 Else If N=16 Then Th:=1 Else Th:=0;
+  If Dm>Th Then UseF:=True;
+ End;
+ If UseF Then For I:=0 To 4*N Do P[I]:=HdERefFlt[I] Else For I:=0 To 4*N Do P[I]:=HdERefRaw[I];
+ If Mode=0 Then Begin
+  For Y:=0 To N-1 Do For X:=0 To N-1 Do
+   Pr[Y*N+X]:=((N-1-X)*Lf(Y)+(X+1)*Tp(N)+(N-1-Y)*Tp(X)+(Y+1)*Lf(N)+N) Shr (L2+1);
+ End Else If Mode=1 Then Begin
+  Sum:=N;
+  For I:=0 To N-1 Do Sum:=Sum+Tp(I)+Lf(I);
+  Dc:=Sum Shr (L2+1);
+  For I:=0 To N*N-1 Do Pr[I]:=Dc;
+  If (CIdx=0) And (N<32) Then Begin
+   Pr[0]:=(Lf(0)+2*Dc+Tp(0)+2) Shr 2;
+   For X:=1 To N-1 Do Pr[X]:=(Tp(X)+3*Dc+2) Shr 2;
+   For Y:=1 To N-1 Do Pr[Y*N]:=(Lf(Y)+3*Dc+2) Shr 2;
+  End;
+ End Else Begin
+  Ang:=HdEAngTab[Mode];
+  If Mode>=18 Then Begin
+   For X:=0 To N Do Rf[48+X]:=Tp(X-1);
+   If Ang<0 Then Begin
+    Inv:=HdEInvAng[Mode];
+    K:=HdESar(N*Ang,5);
+    If K<-1 Then For X:=K To -1 Do Rf[48+X]:=Lf(-1+HdESar(X*Inv+128,8));
+   End Else For X:=N+1 To 2*N Do Rf[48+X]:=Tp(X-1);
+   For Y:=0 To N-1 Do Begin
+    IIdx:=HdESar((Y+1)*Ang,5); IFact:=((Y+1)*Ang) And 31;
+    If IFact<>0 Then Begin
+     For X:=0 To N-1 Do Pr[Y*N+X]:=((32-IFact)*Rf[48+X+IIdx+1]+IFact*Rf[48+X+IIdx+2]+16) Shr 5;
+    End Else For X:=0 To N-1 Do Pr[Y*N+X]:=Rf[48+X+IIdx+1];
+   End;
+   If (Mode=26) And (CIdx=0) And (N<32) Then
+    For Y:=0 To N-1 Do Pr[Y*N]:=HdEClip(Tp(0)+HdESar(Lf(Y)-Lf(-1),1),0,HdEMx);
+  End Else Begin
+   For X:=0 To N Do Rf[48+X]:=Lf(X-1);
+   If Ang<0 Then Begin
+    Inv:=HdEInvAng[Mode];
+    K:=HdESar(N*Ang,5);
+    If K<-1 Then For X:=K To -1 Do Rf[48+X]:=Tp(-1+HdESar(X*Inv+128,8));
+   End Else For X:=N+1 To 2*N Do Rf[48+X]:=Lf(X-1);
+   For X:=0 To N-1 Do Begin
+    IIdx:=HdESar((X+1)*Ang,5); IFact:=((X+1)*Ang) And 31;
+    If IFact<>0 Then Begin
+     For Y:=0 To N-1 Do Pr[Y*N+X]:=((32-IFact)*Rf[48+Y+IIdx+1]+IFact*Rf[48+Y+IIdx+2]+16) Shr 5;
+    End Else For Y:=0 To N-1 Do Pr[Y*N+X]:=Rf[48+Y+IIdx+1];
+   End;
+   If (Mode=10) And (CIdx=0) And (N<32) Then
+    For X:=0 To N-1 Do Pr[X]:=HdEClip(Lf(0)+HdESar(Tp(X)-Lf(-1),1),0,HdEMx);
+  End;
+ End;
+End;
+{ ---------------------------------------------------------------------- }
+{ Syntaxe residual_coding (ecriture ou estimation du cout)                  }
+{ ---------------------------------------------------------------------- }
+Const
+ HdECtxMap4: Array[0..15] Of Byte = (0,1,4,5,2,3,4,5,6,6,8,8,7,7,8,8);
+
+Function HdESigCtx(CIdx,L2,ScanIdx,XC,YC,PrevCsbf: LongInt): LongInt;
+Var Sc,XP,YP,XS,YS: LongInt;
+Begin
+ If L2=2 Then Sc:=HdECtxMap4[(YC Shl 2)+XC]
+ Else If (XC=0) And (YC=0) Then Sc:=0
+ Else Begin
+  XS:=XC Shr 2; YS:=YC Shr 2; XP:=XC And 3; YP:=YC And 3;
+  Case PrevCsbf Of
+   0: If XP+YP=0 Then Sc:=2 Else If XP+YP<3 Then Sc:=1 Else Sc:=0;
+   1: If YP=0 Then Sc:=2 Else If YP=1 Then Sc:=1 Else Sc:=0;
+   2: If XP=0 Then Sc:=2 Else If XP=1 Then Sc:=1 Else Sc:=0;
+  Else Sc:=2;
+  End;
+  If CIdx=0 Then Begin
+   If (XS>0) Or (YS>0) Then Inc(Sc,3);
+   If L2=3 Then Begin If ScanIdx=0 Then Inc(Sc,9) Else Inc(Sc,15); End Else Inc(Sc,21);
+  End Else Begin
+   If L2=3 Then Inc(Sc,9) Else Inc(Sc,12);
+  End;
+ End;
+ If CIdx=0 Then HdESigCtx:=Sc Else HdESigCtx:=27+Sc;
+End;
+
+Procedure HdECodeLast(CIdx,L2,V,CtxBase: LongInt; Var Pre,Suf,SufBits: LongInt);
+Var K: LongInt;
+Begin
+ If V<4 Then Begin Pre:=V; Suf:=0; SufBits:=0; End
+ Else Begin
+  K:=HdELog2(V);
+  Pre:=2*K+((V Shr (K-1)) And 1);
+  SufBits:=K-1;
+  Suf:=V-((1 Shl (K-1))*(2+(Pre And 1)));
+ End;
+End;
+
+Procedure HdERemaining(V,Rice: LongInt);
+Var Pre,R,K: LongInt;
+Begin
+ If V<(4 Shl Rice) Then Begin
+  Pre:=V Shr Rice;
+  While Pre>0 Do Begin HdEBypass(1); Dec(Pre); End;
+  HdEBypass(0);
+  HdEBypassBits(V And ((1 Shl Rice)-1),Rice);
+ End Else Begin
+  HdEBypassBits(15,4);
+  R:=V-(4 Shl Rice); K:=Rice+1;
+  While R>=(1 Shl K) Do Begin HdEBypass(1); Dec(R,1 Shl K); Inc(K); End;
+  HdEBypass(0);
+  HdEBypassBits(R,K);
+ End;
+End;
+
+{ Lev : N*N niveaux (ligne y, colonne x) ; au moins un non nul }
+Procedure HdEResidual(Lev: PHdELA; L2,CIdx,ScanIdx: LongInt);
+Var N,NSb,LogSb,I,J,Sb,Pn,X,Y,LastSb,LastPn,LastX,LastY,CX,CY,PX,PY,SbX,SbY,PrevCsbf,CtxCg,Nsig,Gt1Ctx,CtxSet,M,Rice,Nn,CtxOff,CtxSh: LongInt;
+ Csb: Array[0..7,0..7] Of Byte; Pos: Array[0..15] Of LongInt; Ab,Sg: Array[0..15] Of LongInt;
+ PreX,PreY,SufX,SufY,SbitX,SbitY,Cm,FirstG1,Lv,Base,Rem,Fl,Any,Impl,CodedSb,MaxPre,Sc,Q: LongInt;
+Begin
+ N:=1 Shl L2; LogSb:=L2-2; NSb:=1 Shl LogSb;
+ FillChar(Csb,SizeOf(Csb),0);
+ { derniere position significative dans l'ordre de balayage }
+ LastSb:=-1; LastPn:=-1;
+ For I:=NSb*NSb-1 DownTo 0 Do Begin
+  SbX:=HdEScanX[ScanIdx,LogSb,I]; SbY:=HdEScanY[ScanIdx,LogSb,I];
+  For J:=15 DownTo 0 Do Begin
+   CX:=(SbX Shl 2)+HdEScanX[ScanIdx,2,J]; CY:=(SbY Shl 2)+HdEScanY[ScanIdx,2,J];
+   If Lev^[CY*N+CX]<>0 Then Begin LastSb:=I; LastPn:=J; Break; End;
+  End;
+  If LastSb>=0 Then Break;
+ End;
+ SbX:=HdEScanX[ScanIdx,LogSb,LastSb]; SbY:=HdEScanY[ScanIdx,LogSb,LastSb];
+ LastX:=(SbX Shl 2)+HdEScanX[ScanIdx,2,LastPn]; LastY:=(SbY Shl 2)+HdEScanY[ScanIdx,2,LastPn];
+ If ScanIdx=2 Then Begin I:=LastX; LastX:=LastY; LastY:=I; End;
+ { prefixes / suffixes }
+ HdECodeLast(CIdx,L2,LastX,0,PreX,SufX,SbitX);
+ HdECodeLast(CIdx,L2,LastY,0,PreY,SufY,SbitY);
+ MaxPre:=(L2 Shl 1)-1;
+ If CIdx=0 Then Begin CtxOff:=3*(L2-2)+((L2-1) Shr 2); CtxSh:=(L2+1) Shr 2; End
+ Else Begin CtxOff:=15; CtxSh:=L2-2; End;
+ For I:=0 To PreX-1 Do HdEBin(HDEC_LASTX+CtxOff+(I Shr CtxSh),1);
+ If PreX<MaxPre Then HdEBin(HDEC_LASTX+CtxOff+(PreX Shr CtxSh),0);
+ For I:=0 To PreY-1 Do HdEBin(HDEC_LASTY+CtxOff+(I Shr CtxSh),1);
+ If PreY<MaxPre Then HdEBin(HDEC_LASTY+CtxOff+(PreY Shr CtxSh),0);
+ If PreX>3 Then HdEBypassBits(SufX,SbitX);
+ If PreY>3 Then HdEBypassBits(SufY,SbitY);
+ { sous-blocs }
+ Gt1Ctx:=1;
+ For Sb:=LastSb DownTo 0 Do Begin
+  SbX:=HdEScanX[ScanIdx,LogSb,Sb]; SbY:=HdEScanY[ScanIdx,LogSb,Sb];
+  { sous-bloc non nul ? }
+  Any:=0;
+  For J:=0 To 15 Do Begin
+   CX:=(SbX Shl 2)+HdEScanX[ScanIdx,2,J]; CY:=(SbY Shl 2)+HdEScanY[ScanIdx,2,J];
+   If Lev^[CY*N+CX]<>0 Then Any:=1;
+  End;
+  PrevCsbf:=0;
+  If SbX<NSb-1 Then PrevCsbf:=Csb[SbX+1,SbY];
+  If SbY<NSb-1 Then PrevCsbf:=PrevCsbf Or (Csb[SbX,SbY+1] Shl 1);
+  Impl:=0;
+  If (Sb<LastSb) And (Sb>0) Then Begin
+   CtxCg:=0;
+   If SbX<NSb-1 Then CtxCg:=CtxCg+Csb[SbX+1,SbY];
+   If SbY<NSb-1 Then CtxCg:=CtxCg+Csb[SbX,SbY+1];
+   Cm:=HdEMin(CtxCg,1); If CIdx>0 Then Cm:=Cm+2;
+   HdEBin(HDEC_CSBF+Cm,Any);
+   Csb[SbX,SbY]:=Any; Impl:=Any;
+  End Else Csb[SbX,SbY]:=1;
+  If Csb[SbX,SbY]=0 Then Continue;
+  { drapeaux significatifs }
+  Nsig:=0;
+  If Sb=LastSb Then Begin
+   Pos[0]:=LastPn; Nsig:=1; Nn:=LastPn-1;
+  End Else Nn:=15;
+  For J:=Nn DownTo 1 Do Begin
+   CX:=(SbX Shl 2)+HdEScanX[ScanIdx,2,J]; CY:=(SbY Shl 2)+HdEScanY[ScanIdx,2,J];
+   Fl:=Ord(Lev^[CY*N+CX]<>0);
+   HdEBin(HDEC_SIG+HdESigCtx(CIdx,L2,ScanIdx,CX,CY,PrevCsbf),Fl);
+   If Fl<>0 Then Begin Pos[Nsig]:=J; Inc(Nsig); End;
+   If Fl<>0 Then Impl:=0;
+  End;
+  If Nn>=0 Then Begin
+   { position 0 }
+   CX:=(SbX Shl 2)+HdEScanX[ScanIdx,2,0]; CY:=(SbY Shl 2)+HdEScanY[ScanIdx,2,0];
+   Fl:=Ord(Lev^[CY*N+CX]<>0);
+   If Impl=0 Then Begin
+    { coef 0 code explicitement (sauf si implicite) ; Impl vaut 1 seulement si csbf code et aucun autre significatif }
+    HdEBin(HDEC_SIG+HdESigCtx(CIdx,L2,ScanIdx,CX,CY,PrevCsbf),Fl);
+    If Fl<>0 Then Begin Pos[Nsig]:=0; Inc(Nsig); End;
+   End Else Begin
+    Pos[Nsig]:=0; Inc(Nsig);
+   End;
+  End;
+  If Nsig=0 Then Continue;
+  { niveaux }
+  For M:=0 To Nsig-1 Do Begin
+   J:=Pos[M]; CX:=(SbX Shl 2)+HdEScanX[ScanIdx,2,J]; CY:=(SbY Shl 2)+HdEScanY[ScanIdx,2,J];
+   Lv:=Lev^[CY*N+CX]; Ab[M]:=HdEAbs(Lv); If Lv<0 Then Sg[M]:=1 Else Sg[M]:=0;
+  End;
+  If (Sb>0) And (CIdx=0) Then CtxSet:=2 Else CtxSet:=0;
+  If (Sb<>LastSb) And (Gt1Ctx=0) Then Inc(CtxSet);
+  Gt1Ctx:=1; FirstG1:=-1;
+  For M:=0 To HdEMin(Nsig,8)-1 Do Begin
+   Fl:=Ord(Ab[M]>1);
+   Cm:=CtxSet*4+Gt1Ctx; If CIdx>0 Then Inc(Cm,16);
+   HdEBin(HDEC_GT1+Cm,Fl);
+   If Fl<>0 Then Begin
+    Gt1Ctx:=0; If FirstG1<0 Then FirstG1:=M;
+   End Else If (Gt1Ctx>0) And (Gt1Ctx<3) Then Inc(Gt1Ctx);
+  End;
+  If FirstG1>=0 Then Begin
+   Cm:=CtxSet; If CIdx>0 Then Inc(Cm,4);
+   HdEBin(HDEC_GT2+Cm,Ord(Ab[FirstG1]>2));
+  End;
+  For M:=0 To Nsig-1 Do HdEBypass(Sg[M]);
+  Rice:=0;
+  For M:=0 To Nsig-1 Do Begin
+   If M<8 Then Begin
+    If M=FirstG1 Then Base:=3 Else Base:=2;
+    If Ab[M]>=Base Then Begin
+     HdERemaining(Ab[M]-Base,Rice);
+     If Ab[M]>(3 Shl Rice) Then If Rice<4 Then Inc(Rice);
+    End;
+   End Else Begin
+    HdERemaining(Ab[M]-1,Rice);
+    If Ab[M]>(3 Shl Rice) Then If Rice<4 Then Inc(Rice);
+   End;
+  End;
+ End;
+End;
+
+{ estimation du cout en bits d'un bloc de niveaux (contextes figes) }
+Function HdEResBits(Lev: PHdELA; L2,CIdx,ScanIdx: LongInt): Double;
+Var Sv: Boolean; C0: Double; I,N: LongInt; Any: Boolean;
+Begin
+ N:=1 Shl (2*L2); Any:=False;
+ For I:=0 To N-1 Do If Lev^[I]<>0 Then Begin Any:=True; Break; End;
+ If Not Any Then Begin HdEResBits:=0; Exit; End;
+ Sv:=HdEEst; C0:=HdECost; HdEEst:=True; HdECost:=0;
+ HdEResidual(Lev,L2,CIdx,ScanIdx);
+ HdEResBits:=HdECost; HdEEst:=Sv; HdECost:=C0;
+End;
+Type
+ THdEPic=Record
+  P: Array[0..2] Of PHdEPx;
+  Poc: LongInt;
+  Used: Boolean;
+ End;
+Var
+ HdEPics: Array[0..7] Of THdEPic;
+ HdENPics,HdECur: LongInt;
+ HdERefL: Array[0..1,0..15] Of LongInt;      { indices d'images (HdEPics) des listes de reference }
+ HdERefPoc: Array[0..1,0..15] Of LongInt;
+ HdEDpbN: LongInt;                           { nombre d'images de reference en memoire }
+ HdEDpb: Array[0..7] Of LongInt;             { indices, de la plus recente a la plus ancienne }
+ HdEFrameNo,HdEPoc,HdESincePoc: LongInt;
+ HdEIdr: Boolean;
+ HdELastBits: LongInt;
+ HdELastKey: Boolean;
+ HdEPendLen: LongInt;
+ HdEMeanQp: Double;
+ HdEOptRefs,HdETarget,HdEQpP: LongInt; HdECxP: Double; HdEAccL: Int64;
+
+
+Var
+ HdERefPocT: Array[0..1,0..15] Of LongInt;   { POC des images de reference des listes 0/1 }
+{ ---------------------------------------------------------------------- }
+{ Cartes par bloc 4x4, syntaxe des CU                                       }
+{ ---------------------------------------------------------------------- }
+Var
+ HdEMPred,HdEMSkip,HdEMDepth,HdEMIpm,HdEMCbf,HdEMEdge: PEABuffer;
+ HdEMMv: PHdELA;            { 6 valeurs par bloc : mvx0,mvy0,mvx1,mvy1,ref0,ref1 }
+ HdESliceType,HdENumRef0,HdENumRef1,HdEQp,HdEInitType: LongInt;
+ HdELambda,HdESqrtLambda: Double;
+ HdECuL: Array[0..39] Of THdECu; HdECuN,HdEWi: LongInt;
+ HdEPool: PHdELA; HdEPoolN: LongInt;
+
+Function HdEScanFor(CIdx,L2,Mode: LongInt; Intra: Boolean): LongInt;
+Begin
+ HdEScanFor:=0;
+ If Not Intra Then Exit;
+ If (L2=2) Or ((L2=3) And (CIdx=0)) Then Begin
+  If (Mode>=6) And (Mode<=14) Then HdEScanFor:=2
+  Else If (Mode>=22) And (Mode<=30) Then HdEScanFor:=1;
+ End;
+End;
+
+Procedure HdESetMaps(Var Cu: THdECu);
+Var N4,I,J,B,K,Pi,Px,Py,Pw,Ph,X4,Y4: LongInt; V: LongInt;
+Begin
+ N4:=(1 Shl Cu.L2) Shr 2; X4:=Cu.X Shr 2; Y4:=Cu.Y Shr 2;
+ For J:=0 To N4-1 Do For I:=0 To N4-1 Do Begin
+  B:=(Y4+J)*HdEW4+X4+I;
+  HdEMPred^[B]:=Cu.Pred; HdEMSkip^[B]:=Cu.Skip; HdEMDepth^[B]:=5-Cu.L2;
+  HdEMEdge^[B]:=0;
+  If Cu.Pred=1 Then Begin
+   If (Cu.Part=3) Then Begin
+    K:=(J*2 Div N4)*2+(I*2 Div N4);   { 0..3 }
+    HdEMIpm^[B]:=Cu.Ipm[K]; HdEMCbf^[B]:=Cu.CbfY[K];
+   End Else Begin HdEMIpm^[B]:=Cu.Ipm[0]; HdEMCbf^[B]:=Cu.CbfY[0]; End;
+   HdEMMv^[B*6+4]:=-1; HdEMMv^[B*6+5]:=-1;
+   HdEMMv^[B*6]:=0; HdEMMv^[B*6+1]:=0; HdEMMv^[B*6+2]:=0; HdEMMv^[B*6+3]:=0;
+  End Else Begin
+   HdEMIpm^[B]:=1; HdEMCbf^[B]:=Cu.CbfY[0];
+  End;
+ End;
+ If Cu.Pred=2 Then
+  For Pi:=0 To Cu.NPu-1 Do Begin
+   Px:=Cu.Pu[Pi].Px Shr 2; Py:=Cu.Pu[Pi].Py Shr 2; Pw:=Cu.Pu[Pi].Pw Shr 2; Ph:=Cu.Pu[Pi].Ph Shr 2;
+   For J:=0 To Ph-1 Do For I:=0 To Pw-1 Do Begin
+    B:=(Py+J)*HdEW4+Px+I;
+    If (Cu.Pu[Pi].Dir And 1)<>0 Then Begin
+     HdEMMv^[B*6]:=Cu.Pu[Pi].Mx0; HdEMMv^[B*6+1]:=Cu.Pu[Pi].My0; HdEMMv^[B*6+4]:=Cu.Pu[Pi].Ref0;
+    End Else Begin HdEMMv^[B*6]:=0; HdEMMv^[B*6+1]:=0; HdEMMv^[B*6+4]:=-1; End;
+    If (Cu.Pu[Pi].Dir And 2)<>0 Then Begin
+     HdEMMv^[B*6+2]:=Cu.Pu[Pi].Mx1; HdEMMv^[B*6+3]:=Cu.Pu[Pi].My1; HdEMMv^[B*6+5]:=Cu.Pu[Pi].Ref1;
+    End Else Begin HdEMMv^[B*6+2]:=0; HdEMMv^[B*6+3]:=0; HdEMMv^[B*6+5]:=-1; End;
+   End;
+   { bords de PU }
+   For J:=0 To Ph-1 Do HdEMEdge^[(Py+J)*HdEW4+Px]:=HdEMEdge^[(Py+J)*HdEW4+Px] Or 2;
+   For I:=0 To Pw-1 Do HdEMEdge^[Py*HdEW4+Px+I]:=HdEMEdge^[Py*HdEW4+Px+I] Or 8;
+  End;
+ { bords de CU (transformation + prediction) }
+ For J:=0 To N4-1 Do HdEMEdge^[(Y4+J)*HdEW4+X4]:=HdEMEdge^[(Y4+J)*HdEW4+X4] Or 3;
+ For I:=0 To N4-1 Do HdEMEdge^[Y4*HdEW4+X4+I]:=HdEMEdge^[Y4*HdEW4+X4+I] Or 12;
+ { bord de TU interne : intra NxN }
+ If (Cu.Pred=1) And (Cu.Part=3) Then Begin
+  For J:=0 To N4-1 Do HdEMEdge^[(Y4+J)*HdEW4+X4+N4 Div 2]:=HdEMEdge^[(Y4+J)*HdEW4+X4+N4 Div 2] Or 1;
+  For I:=0 To N4-1 Do HdEMEdge^[(Y4+N4 Div 2)*HdEW4+X4+I]:=HdEMEdge^[(Y4+N4 Div 2)*HdEW4+X4+I] Or 4;
+ End;
+End;
+
+{ mode le plus probable : 3 candidats pour la PU en (X,Y) }
+Procedure HdEMpmCand(X,Y: LongInt; Var C: Array Of LongInt);
+Var A,B,Bi: LongInt;
+Begin
+ A:=1; B:=1;
+ If X>0 Then Begin
+  Bi:=(Y Shr 2)*HdEW4+((X-1) Shr 2);
+  If HdEMPred^[Bi]=1 Then A:=HdEMIpm^[Bi];
+ End;
+ If (Y>0) And (((Y-1) Shr 5)=(Y Shr 5)) Then Begin
+  Bi:=((Y-1) Shr 2)*HdEW4+(X Shr 2);
+  If HdEMPred^[Bi]=1 Then B:=HdEMIpm^[Bi];
+ End;
+ If A=B Then Begin
+  If A<2 Then Begin C[0]:=0; C[1]:=1; C[2]:=26; End
+  Else Begin C[0]:=A; C[1]:=2+((A+29) Mod 32); C[2]:=2+((A-2+1) Mod 32); End;
+ End Else Begin
+  C[0]:=A; C[1]:=B;
+  If (A<>0) And (B<>0) Then C[2]:=0
+  Else If (A<>1) And (B<>1) Then C[2]:=1
+  Else C[2]:=26;
+ End;
+End;
+
+Procedure HdEWriteSplitFlag(X,Y,L2,Flag: LongInt);
+Var C,Bi: LongInt;
+Begin
+ C:=0;
+ If X>0 Then Begin Bi:=(Y Shr 2)*HdEW4+((X-1) Shr 2); If HdEMDepth^[Bi]>5-L2 Then Inc(C); End;
+ If Y>0 Then Begin Bi:=((Y-1) Shr 2)*HdEW4+(X Shr 2); If HdEMDepth^[Bi]>5-L2 Then Inc(C); End;
+ HdEBin(HDEC_SPLITCU+C,Flag);
+End;
+
+Procedure HdEWriteMvdComp(Dx,Dy: LongInt);
+Var Ax,Ay,K,V: LongInt;
+ Procedure Eg1(V: LongInt);
+ Var K: LongInt;
+ Begin
+  K:=1;
+  While V>=(1 Shl K) Do Begin HdEBypass(1); Dec(V,1 Shl K); Inc(K); End;
+  HdEBypass(0); HdEBypassBits(V,K);
+ End;
+Begin
+ Ax:=HdEAbs(Dx); Ay:=HdEAbs(Dy);
+ HdEBin(HDEC_MVDG0,Ord(Ax>0)); HdEBin(HDEC_MVDG0,Ord(Ay>0));
+ If Ax>0 Then HdEBin(HDEC_MVDG1+1,Ord(Ax>1));
+ If Ay>0 Then HdEBin(HDEC_MVDG1+1,Ord(Ay>1));
+ If Ax>0 Then Begin If Ax>1 Then Eg1(Ax-2); HdEBypass(Ord(Dx<0)); End;
+ If Ay>0 Then Begin If Ay>1 Then Eg1(Ay-2); HdEBypass(Ord(Dy<0)); End;
+End;
+
+Procedure HdEWriteMergeIdx(Idx: LongInt);
+Var I: LongInt;
+Begin
+ If HdEMaxMerge<=1 Then Exit;
+ HdEBin(HDEC_MERGEIDX,Ord(Idx>0));
+ If Idx>0 Then Begin
+  For I:=1 To HdEMaxMerge-2 Do Begin
+   HdEBypass(Ord(Idx>I));
+   If Idx<=I Then Break;
+  End;
+ End;
+End;
+
+Procedure HdEWriteRefIdx(Idx,NumRef: LongInt);
+Var I,Mx: LongInt;
+Begin
+ If NumRef<=1 Then Exit;
+ Mx:=NumRef-1;
+ I:=0;
+ While I<Mx Do Begin
+  If I<2 Then HdEBin(HDEC_REFIDX+I,Ord(Idx>I)) Else HdEBypass(Ord(Idx>I));
+  If Idx<=I Then Break;
+  Inc(I);
+ End;
+End;
+
+Procedure HdEWritePu(Var Cu: THdECu; Var P: THdEPu);
+Begin
+ If P.Merge<>0 Then Begin
+  If Cu.Skip=0 Then HdEBin(HDEC_MERGEFLAG,1);
+  HdEWriteMergeIdx(P.MergeIdx);
+  Exit;
+ End;
+ HdEBin(HDEC_MERGEFLAG,0);
+ If HdESliceType=0 Then Begin
+  If P.Pw+P.Ph<>12 Then Begin
+   If P.Dir=3 Then HdEBin(HDEC_INTERPRED+(5-Cu.L2),1)
+   Else Begin HdEBin(HDEC_INTERPRED+(5-Cu.L2),0); HdEBin(HDEC_INTERPRED+4,P.Dir-1); End;
+  End Else HdEBin(HDEC_INTERPRED+4,P.Dir-1);
+ End;
+ If (P.Dir And 1)<>0 Then Begin
+  HdEWriteRefIdx(P.Ref0,HdENumRef0);
+  HdEWriteMvdComp(P.Dx0,P.Dy0);
+  HdEBin(HDEC_MVPFLAG,P.Mvp0);
+ End;
+ If (P.Dir And 2)<>0 Then Begin
+  HdEWriteRefIdx(P.Ref1,HdENumRef1);
+  HdEWriteMvdComp(P.Dx1,P.Dy1);
+  HdEBin(HDEC_MVPFLAG,P.Mvp1);
+ End;
+End;
+
+Procedure HdEWriteCu(Var Cu: THdECu);
+Var X0,Y0,L2,N,I,J,K,Bi,C,Mpm,Rem,Cnt,Np,Sc: LongInt; Cd: Array[0..2] Of LongInt; Prev: Array[0..3] Of LongInt;
+ CbfC,Cb1,Cb2,Lm,A,B2: LongInt;
+ Procedure SortCand(Var V: Array Of LongInt);
+ Var T: LongInt;
+ Begin
+  If V[0]>V[1] Then Begin T:=V[0]; V[0]:=V[1]; V[1]:=T; End;
+  If V[1]>V[2] Then Begin T:=V[1]; V[1]:=V[2]; V[2]:=T; End;
+  If V[0]>V[1] Then Begin T:=V[0]; V[0]:=V[1]; V[1]:=T; End;
+ End;
+ Procedure ResBlk(Cidx,Lg,Mode: LongInt; Lev: PHdELA);
+ Begin
+  HdEResidual(Lev,Lg,Cidx,HdEScanFor(Cidx,Lg,Mode,Cu.Pred=1));
+ End;
+Begin
+ X0:=Cu.X; Y0:=Cu.Y; L2:=Cu.L2; N:=1 Shl L2;
+ If HdESliceType<>2 Then Begin
+  C:=0;
+  If X0>0 Then C:=C+HdEMSkip^[(Y0 Shr 2)*HdEW4+((X0-1) Shr 2)];
+  If Y0>0 Then C:=C+HdEMSkip^[((Y0-1) Shr 2)*HdEW4+(X0 Shr 2)];
+  HdEBin(HDEC_SKIP+C,Cu.Skip);
+  If Cu.Skip<>0 Then Begin HdEWritePu(Cu,Cu.Pu[0]); Exit; End;
+  HdEBin(HDEC_PREDMODE,Ord(Cu.Pred=1));
+ End;
+ If Cu.Pred=1 Then Begin
+  If L2=3 Then HdEBin(HDEC_PARTMODE,Ord(Cu.Part=0));
+  If Cu.Part=3 Then Np:=4 Else Np:=1;
+  For I:=0 To Np-1 Do Begin
+   If Np=4 Then HdEMpmCand(X0+(I And 1)*(N Shr 1),Y0+(I Shr 1)*(N Shr 1),Cd) Else HdEMpmCand(X0,Y0,Cd);
+   Prev[I]:=0;
+   For K:=0 To 2 Do If Cd[K]=Cu.Ipm[I] Then Prev[I]:=1;
+   HdEBin(HDEC_PREVINTRA,Prev[I]);
+  End;
+  For I:=0 To Np-1 Do Begin
+   If Np=4 Then HdEMpmCand(X0+(I And 1)*(N Shr 1),Y0+(I Shr 1)*(N Shr 1),Cd) Else HdEMpmCand(X0,Y0,Cd);
+   If Prev[I]<>0 Then Begin
+    If Cd[0]=Cu.Ipm[I] Then HdEBypass(0)
+    Else If Cd[1]=Cu.Ipm[I] Then HdEBypassBits(2,2)
+    Else HdEBypassBits(3,2);
+   End Else Begin
+    SortCand(Cd);
+    Rem:=Cu.Ipm[I];
+    For K:=2 DownTo 0 Do If Cu.Ipm[I]>Cd[K] Then Dec(Rem);
+    HdEBypassBits(Rem,5);
+   End;
+  End;
+  If Cu.ChrSyn=4 Then HdEBin(HDEC_CHROMAPRED,0)
+  Else Begin HdEBin(HDEC_CHROMAPRED,1); HdEBypassBits(Cu.ChrSyn,2); End;
+ End Else Begin
+  { inter }
+  If L2=3 Then Begin
+   If Cu.Part=0 Then HdEBin(HDEC_PARTMODE,1)
+   Else Begin HdEBin(HDEC_PARTMODE,0); HdEBin(HDEC_PARTMODE+1,Ord(Cu.Part=1)); End;
+  End Else Begin
+   If Cu.Part=0 Then HdEBin(HDEC_PARTMODE,1)
+   Else Begin HdEBin(HDEC_PARTMODE,0); HdEBin(HDEC_PARTMODE+1,Ord(Cu.Part=1)); End;
+  End;
+  For I:=0 To Cu.NPu-1 Do HdEWritePu(Cu,Cu.Pu[I]);
+  If Not ((Cu.Part=0) And (Cu.Pu[0].Merge<>0)) Then HdEBin(HDEC_NORESID,Cu.RqtRoot);
+  If Cu.RqtRoot=0 Then Exit;
+ End;
+ { arbre de transformation }
+ If (Cu.Pred=2) And (L2<=5) And (L2>2) Then HdEBin(HDEC_SPLITTR+5-L2,Cu.SplitTr);
+ Cb1:=Cu.CbfCb; Cb2:=Cu.CbfCr;
+ If L2>2 Then Begin HdEBin(HDEC_CBFCHROMA,Cb1); HdEBin(HDEC_CBFCHROMA,Cb2); End;
+ If (Cu.Pred=1) And (Cu.Part=3) Then Begin
+  For I:=0 To 3 Do Begin
+   HdEBin(HDEC_CBFLUMA,Cu.CbfY[I]);
+   If Cu.CbfY[I]<>0 Then ResBlk(0,2,Cu.Ipm[I],@Cu.Co^[I*16]);
+   If I=3 Then Begin
+    If Cb1<>0 Then ResBlk(1,2,Cu.ChrMode,@Cu.Co^[1024]);
+    If Cb2<>0 Then ResBlk(2,2,Cu.ChrMode,@Cu.Co^[1280]);
+   End;
+  End;
+ End Else Begin
+  If (Cu.Pred=1) Or (Cb1<>0) Or (Cb2<>0) Then HdEBin(HDEC_CBFLUMA+1,Cu.CbfY[0]);
+  If (Cu.CbfY[0]<>0) Or (Cb1<>0) Or (Cb2<>0) Then Begin
+   If Cu.CbfY[0]<>0 Then ResBlk(0,L2,Cu.Ipm[0],@Cu.Co^[0]);
+   If Cb1<>0 Then ResBlk(1,L2-1,Cu.ChrMode,@Cu.Co^[1024]);
+   If Cb2<>0 Then ResBlk(2,L2-1,Cu.ChrMode,@Cu.Co^[1280]);
+  End;
+ End;
+End;
+
+Procedure HdEWriteQuad(X,Y,L2: LongInt);
+Var Sz,H: LongInt; Leaf,Inside: Boolean;
+Begin
+ Sz:=1 Shl L2;
+ If (X>=HdEWp) Or (Y>=HdEHp) Then Exit;
+ Inside:=(X+Sz<=HdEWp) And (Y+Sz<=HdEHp);
+ Leaf:=(HdECuL[HdEWi].X=X) And (HdECuL[HdEWi].Y=Y) And (HdECuL[HdEWi].L2=L2);
+ If (L2>3) And Inside Then HdEWriteSplitFlag(X,Y,L2,Ord(Not Leaf));
+ If Leaf Then Begin
+  HdESetMaps(HdECuL[HdEWi]);
+  HdEWriteCu(HdECuL[HdEWi]); Inc(HdEWi);
+ End Else Begin
+  H:=Sz Shr 1;
+  HdEWriteQuad(X,Y,L2-1); HdEWriteQuad(X+H,Y,L2-1); HdEWriteQuad(X,Y+H,L2-1); HdEWriteQuad(X+H,Y+H,L2-1);
+ End;
+End;
+{ ---------------------------------------------------------------------- }
+{ Decision de mode, reconstruction                                          }
+{ ---------------------------------------------------------------------- }
+Var
+ HdEQpC: LongInt;
+ HdEScrCur,HdEScrBest: Array[0..HDE_COEFSTRIDE-1] Of LongInt;
+ HdEBestY: Array[0..1023] Of Word; HdEBestU,HdEBestV: Array[0..255] Of Word;
+ HdESvY: Array[4..5,0..1023] Of Word; HdESvU,HdESvV: Array[4..5,0..255] Of Word;
+ HdESatdCnt: LongInt;
+
+Procedure HdECopyRec(ToBuf: Boolean; X,Y,L2: LongInt; PY,PU,PV: PHdEPx);
+Var N,J,Nc: LongInt;
+Begin
+ N:=1 Shl L2; Nc:=N Shr 1;
+ For J:=0 To N-1 Do
+  If ToBuf Then Move(HdERecP[0]^[(Y+J)*HdEStr[0]+X],PY^[J*N],N*2) Else Move(PY^[J*N],HdERecP[0]^[(Y+J)*HdEStr[0]+X],N*2);
+ For J:=0 To Nc-1 Do Begin
+  If ToBuf Then Begin
+   Move(HdERecP[1]^[((Y Shr 1)+J)*HdEStr[1]+(X Shr 1)],PU^[J*Nc],Nc*2);
+   Move(HdERecP[2]^[((Y Shr 1)+J)*HdEStr[2]+(X Shr 1)],PV^[J*Nc],Nc*2);
+  End Else Begin
+   Move(PU^[J*Nc],HdERecP[1]^[((Y Shr 1)+J)*HdEStr[1]+(X Shr 1)],Nc*2);
+   Move(PV^[J*Nc],HdERecP[2]^[((Y Shr 1)+J)*HdEStr[2]+(X Shr 1)],Nc*2);
+  End;
+ End;
+End;
+
+{ SATD 4x4 par tuiles de la difference source - prediction }
+Function HdESatd(CIdx,Xc,Yc,L2: LongInt; Var Pr: Array Of LongInt): LongInt;
+Var N,Bx,By,I,J,Tot,A,B,C,D: LongInt; M: Array[0..15] Of LongInt; T: Array[0..15] Of LongInt; Sp: PHdEPx; Str: LongInt;
+Begin
+ N:=1 Shl L2; Sp:=HdESrcP[CIdx]; Str:=HdEStr[CIdx]; Tot:=0;
+ Bx:=0;
+ While Bx<N Do Begin
+  By:=0;
+  While By<N Do Begin
+   For J:=0 To 3 Do For I:=0 To 3 Do M[J*4+I]:=Sp^[(Yc+By+J)*Str+Xc+Bx+I]-Pr[(By+J)*N+Bx+I];
+   For J:=0 To 3 Do Begin
+    A:=M[J*4]+M[J*4+3]; B:=M[J*4+1]+M[J*4+2]; C:=M[J*4+1]-M[J*4+2]; D:=M[J*4]-M[J*4+3];
+    T[J*4]:=A+B; T[J*4+2]:=A-B; T[J*4+1]:=D+C; T[J*4+3]:=D-C;
+   End;
+   For I:=0 To 3 Do Begin
+    A:=T[I]+T[12+I]; B:=T[4+I]+T[8+I]; C:=T[4+I]-T[8+I]; D:=T[I]-T[12+I];
+    Tot:=Tot+HdEAbs(A+B)+HdEAbs(A-B)+HdEAbs(D+C)+HdEAbs(D-C);
+   End;
+   Inc(By,4);
+  End;
+  Inc(Bx,4);
+ End;
+ HdESatd:=(Tot+1) Shr 1;
+End;
+
+{ code un bloc de transformation : residu = source - Pr ; ecrit la reconstruction dans le plan.
+  Fast : distorsion estimee dans le domaine des coefficients, sans reconstruction (selection de mode) }
+Procedure HdECodeTb(CIdx,Xc,Yc,L2: LongInt; Var Pr: Array Of LongInt; Intra,Dst: Boolean; Qp,ScanIdx: LongInt;
+                   Co: PHdELA; Var Cbf: LongInt; Var Dist: Double; Fast: Boolean);
+Var N,X,Y,Nz,Str,V,Sh,Sc: LongInt; Rs,Cf,Rr: Array[0..1023] OF LongInt; Sp,Rp: PHdEPx; S0,S1,Bits: Double; Q: Int64;
+Begin
+ N:=1 Shl L2; Sp:=HdESrcP[CIdx]; Rp:=HdERecP[CIdx]; Str:=HdEStr[CIdx];
+ S0:=0;
+ For Y:=0 To N-1 Do For X:=0 To N-1 Do Begin
+  V:=Sp^[(Yc+Y)*Str+Xc+X]-Pr[Y*N+X]; Rs[Y*N+X]:=V; S0:=S0+V*V;
+ End;
+ HdEFwdT(Rs,N,L2,Dst,Cf);
+ Nz:=HdEQuantize(Cf,N,L2,Qp,Intra,Co);
+ Cbf:=0; Dist:=S0;
+ If Nz>0 Then Begin
+  If Fast Then Begin
+   Sh:=L2+HdEBd-5; Sc:=HdELevScale[Qp Mod 6] Shl (Qp Div 6); S1:=0;
+   For X:=0 To N*N-1 Do Begin
+    Q:=(Int64(Co^[X])*16*Sc+(Int64(1) Shl (Sh-1)));
+    If Q>=0 Then Q:=Q Shr Sh Else Q:=-((-Q-1) Shr Sh)-1;
+    V:=Cf[X]-Q; S1:=S1+Int64(V)*V;
+   End;
+   S1:=S1*N*N/16384.0*(1 Shl (2*(HdEBd-8)));
+  End Else Begin
+   HdEInvT(Co,N,L2,Qp,Dst,Rr);
+   S1:=0;
+   For Y:=0 To N-1 Do For X:=0 To N-1 Do Begin
+    V:=Pr[Y*N+X]+Rr[Y*N+X]; If V<0 Then V:=0; If V>HdEMx Then V:=HdEMx;
+    Rr[Y*N+X]:=V;
+    V:=Sp^[(Yc+Y)*Str+Xc+X]-V; S1:=S1+V*V;
+   End;
+  End;
+  Bits:=HdEResBits(Co,L2,CIdx,ScanIdx);
+  If S0<=S1+HdELambda*Bits Then Begin
+   For X:=0 To N*N-1 Do Co^[X]:=0;
+  End Else Begin
+   Cbf:=1; Dist:=S1;
+   If Not Fast Then
+    For Y:=0 To N-1 Do For X:=0 To N-1 Do Rp^[(Yc+Y)*Str+Xc+X]:=Rr[Y*N+X];
+   Exit;
+  End;
+ End Else For X:=0 To N*N-1 Do Co^[X]:=0;
+ If Not Fast Then
+  For Y:=0 To N-1 Do For X:=0 To N-1 Do Rp^[(Yc+Y)*Str+Xc+X]:=Pr[Y*N+X];
+End;
+
+Function HdEModeBits(Mode: LongInt; Var Cd: Array Of LongInt): Double;
+Var K,Idx: LongInt; Sv: Boolean; C0: Double;
+Begin
+ Sv:=HdEEst; C0:=HdECost; HdEEst:=True; HdECost:=0;
+ Idx:=-1; For K:=0 To 2 Do If Cd[K]=Mode Then Idx:=K;
+ If Idx>=0 Then Begin HdEBin(HDEC_PREVINTRA,1); If Idx=0 Then HdEBypass(0) Else HdEBypassBits(2,2); End
+ Else Begin HdEBin(HDEC_PREVINTRA,0); HdEBypassBits(0,5); End;
+ HdEModeBits:=HdECost; HdEEst:=Sv; HdECost:=C0;
+End;
+
+Procedure HdESetIpm(X,Y,N4,Mode: LongInt);
+Var I,J,B: LongInt;
+Begin
+ For J:=0 To N4-1 Do For I:=0 To N4-1 Do Begin
+  B:=((Y Shr 2)+J)*HdEW4+(X Shr 2)+I; HdEMPred^[B]:=1; HdEMIpm^[B]:=Mode;
+ End;
+End;
+
+{ choisit le mode luma pour le TB (X,Y,L2) ; retourne le mode ; ecrit niveaux dans Co.
+  Pre-selection grossiere (modes pairs) puis raffinement +-1, puis RD complet sur les meilleurs. }
+Function HdESelectLuma(X,Y,L2: LongInt; Co: PHdELA; Var Cbf: LongInt; Var Dist: Double): LongInt;
+Var N,M,I,K,NC,Best,Kmax,Kc,Mm: LongInt; Cd: Array[0..2] Of LongInt; Pr: Array[0..1023] Of LongInt;
+ Cs: Array[0..34] Of Double; Done: Array[0..34] Of Boolean; Sel: Array[0..39] Of LongInt; Bj,Jm,D1: Double; Cb1: LongInt;
+ Used: Array[0..34] Of Boolean;
+ Procedure Eval(Md: LongInt);
+ Begin
+  If Done[Md] Then Exit;
+  Done[Md]:=True;
+  HdEIntraPredFrom(0,L2,Md,Pr);
+  Cs[Md]:=HdESatd(0,X,Y,L2,Pr);
+  If (Md=Cd[0]) Or (Md=Cd[1]) Or (Md=Cd[2]) Then Cs[Md]:=Cs[Md]+HdESqrtLambda*1.5 Else Cs[Md]:=Cs[Md]+HdESqrtLambda*6.5;
+ End;
+Begin
+ N:=1 Shl L2;
+ HdEMpmCand(X,Y,Cd);
+ HdEIntraRefs(0,X,Y,L2);
+ FillChar(Done,SizeOf(Done),0);
+ For M:=0 To 34 Do Cs[M]:=1e30;
+ If L2<=2 Then Begin
+  For M:=0 To 34 Do Eval(M);
+ End Else Begin
+  Eval(0); Eval(1);
+  M:=2; While M<=34 Do Begin Eval(M); Inc(M,2); End;
+  { raffinement autour des 3 meilleurs angulaires }
+  FillChar(Used,SizeOf(Used),0);
+  For K:=1 To 3 Do Begin
+   Best:=-1;
+   For M:=2 To 34 Do If Done[M] And (Not Used[M]) And ((Best<0) Or (Cs[M]<Cs[Best])) Then Best:=M;
+   If Best<0 Then Break;
+   Used[Best]:=True;
+   If Best>2 Then Eval(Best-1);
+   If Best<34 Then Eval(Best+1);
+  End;
+ End;
+ For K:=0 To 2 Do Eval(Cd[K]);
+ If L2<=3 Then Kmax:=4 Else Kmax:=3;
+ FillChar(Used,SizeOf(Used),0);
+ NC:=0;
+ For K:=1 To Kmax Do Begin
+  Best:=-1;
+  For M:=0 To 34 Do If (Not Used[M]) And ((Best<0) Or (Cs[M]<Cs[Best])) Then Best:=M;
+  If Cs[Best]>=1e29 Then Break;
+  Used[Best]:=True; Sel[NC]:=Best; Inc(NC);
+ End;
+ For K:=0 To 2 Do If Not Used[Cd[K]] Then Begin Used[Cd[K]]:=True; Sel[NC]:=Cd[K]; Inc(NC); End;
+ Bj:=1e30; Best:=Sel[0];
+ For K:=0 To NC-1 Do Begin
+  M:=Sel[K];
+  HdEIntraPredFrom(0,L2,M,Pr);
+  HdECodeTb(0,X,Y,L2,Pr,True,L2=2,HdEQpL,HdEScanFor(0,L2,M,True),Co,Cb1,D1,True);
+  Jm:=D1+HdELambda*(HdEModeBits(M,Cd)+HdEResBits(Co,L2,0,HdEScanFor(0,L2,M,True))*Ord(Cb1<>0));
+  If Jm<Bj Then Begin Bj:=Jm; Best:=M; End;
+ End;
+ { refaire le meilleur (niveaux + reconstruction) }
+ HdEIntraPredFrom(0,L2,Best,Pr);
+ HdECodeTb(0,X,Y,L2,Pr,True,L2=2,HdEQpL,HdEScanFor(0,L2,Best,True),Co,Cbf,Dist,False);
+ HdESelectLuma:=Best;
+End;
+
+Function HdEChromaOf(Syn,Luma: LongInt): LongInt;
+Var M: LongInt;
+Begin
+ If Syn=4 Then Begin HdEChromaOf:=Luma; Exit; End;
+ Case Syn Of 0: M:=0; 1: M:=26; 2: M:=10; Else M:=1; End;
+ If M=Luma Then M:=34;
+ HdEChromaOf:=M;
+End;
+
+{ codage chroma d'une CU intra : choix du mode puis reconstruction }
+Procedure HdEIntraChroma(Var Cu: THdECu; Var Dist: Double);
+Var L2c,N,S,K,Bs,Cm: LongInt; Pr: Array[0..1023] Of LongInt; Cst,Bc,D1,D2: Double; Xc,Yc,Cb1,Cb2: LongInt;
+Begin
+ L2c:=Cu.L2-1; N:=1 Shl L2c; Xc:=Cu.X Shr 1; Yc:=Cu.Y Shr 1;
+ Bc:=1e30; Bs:=4;
+ For S:=4 DownTo 0 Do Begin
+  Cm:=HdEChromaOf(S,Cu.Ipm[0]);
+  Cst:=0;
+  For K:=1 To 2 Do Begin
+   HdEIntraRefs(K,Xc,Yc,L2c);
+   HdEIntraPredFrom(K,L2c,Cm,Pr);
+   Cst:=Cst+HdESatd(K,Xc,Yc,L2c,Pr);
+  End;
+  If S=4 Then Cst:=Cst+HdESqrtLambda*1 Else Cst:=Cst+HdESqrtLambda*3;
+  If Cst<Bc Then Begin Bc:=Cst; Bs:=S; End;
+ End;
+ Cu.ChrSyn:=Bs; Cu.ChrMode:=HdEChromaOf(Bs,Cu.Ipm[0]);
+ Dist:=0;
+ HdEIntraRefs(1,Xc,Yc,L2c); HdEIntraPredFrom(1,L2c,Cu.ChrMode,Pr);
+ HdECodeTb(1,Xc,Yc,L2c,Pr,True,False,HdEQpCP,HdEScanFor(1,L2c,Cu.ChrMode,True),@Cu.Co^[1024],Cb1,D1,False);
+ HdEIntraRefs(2,Xc,Yc,L2c); HdEIntraPredFrom(2,L2c,Cu.ChrMode,Pr);
+ HdECodeTb(2,Xc,Yc,L2c,Pr,True,False,HdEQpCP,HdEScanFor(2,L2c,Cu.ChrMode,True),@Cu.Co^[1280],Cb2,D2,False);
+ Cu.CbfCb:=Cb1; Cu.CbfCr:=Cb2; Dist:=D1+D2;
+End;
+
+{ candidat intra : renvoie J ; Cu.Co pointe sur HdEScrCur }
+Function HdEIntraCand(X,Y,L2: LongInt; NxN: Boolean; Var Cu: THdECu): Double;
+Var N,I,H,Cb1: LongInt; D,Dt: Double; Bits: Double;
+Begin
+ N:=1 Shl L2;
+ FillChar(Cu,SizeOf(Cu),0);
+ Cu.X:=X; Cu.Y:=Y; Cu.L2:=L2; Cu.Pred:=1; Cu.Co:=@HdEScrCur;
+ FillChar(HdEScrCur,SizeOf(HdEScrCur),0);
+ Cu.NPu:=0;
+ Dt:=0;
+ If NxN Then Begin
+  Cu.Part:=3; H:=N Shr 1;
+  For I:=0 To 3 Do Begin
+   Cu.Ipm[I]:=HdESelectLuma(X+(I And 1)*H,Y+(I Shr 1)*H,2,@Cu.Co^[I*16],Cb1,D);
+   Cu.CbfY[I]:=Cb1; Dt:=Dt+D;
+   HdESetIpm(X+(I And 1)*H,Y+(I Shr 1)*H,1,Cu.Ipm[I]);
+  End;
+ End Else Begin
+  Cu.Part:=0;
+  Cu.Ipm[0]:=HdESelectLuma(X,Y,L2,@Cu.Co^[0],Cb1,D);
+  Cu.CbfY[0]:=Cb1; Dt:=Dt+D;
+ End;
+ HdEIntraChroma(Cu,D); Dt:=Dt+D;
+ HdESetMaps(Cu);
+ HdEEst:=True; HdECost:=0; HdEWriteCu(Cu); HdEEst:=False; Bits:=HdECost;
+ HdEIntraCand:=Dt+HdELambda*Bits;
+End;
+
+{ ---------------------------------------------------------------------- }
+{ Inter : compensation de mouvement, AMVP, merge, estimation                }
+{ ---------------------------------------------------------------------- }
+Const
+ HdEQpelF: Array[0..31] Of ShortInt = (0,0,0,64,0,0,0,0, -1,4,-10,58,17,-5,1,0, -1,4,-11,40,40,-11,4,-1, 0,1,-5,17,58,-10,4,-1);
+ HdEEpelF: Array[0..31] Of ShortInt = (0,64,0,0, -2,58,10,-2, -4,54,16,-2, -6,46,28,-4, -4,36,36,-4, -4,28,46,-6, -2,16,54,-4, -2,10,58,-2);
+
+Var
+ HdECbX,HdECbY,HdECbL2,HdEPuX,HdEPuY,HdEPuW,HdEPuH,HdEPartIdx,HdEPartMode: LongInt;
+ HdECurPoc: LongInt;
+ HdEMcR: Array[0..1599] Of LongInt;
+ HdEMcT: Array[0..1599] Of LongInt;
+ HdEMcA: Array[0..1,0..1023] Of LongInt;
+
+{ bloc 14 bits : Pl plan de reference (Pw x Ph), origine entiere (X0,Y0), taille Bw x Bh, fractions Fx,Fy }
+Procedure HdEMcBlk(Pl: PHdEPx; Pw,Ph,X0,Y0,Bw,Bh,Fx,Fy: LongInt; Luma: Boolean; Out: PHdELA);
+Var Nt,Bef,X,Y,I,Rw,Rh,Xs,Ys,Acc,O,Q,Sh1: LongInt; Th,Tv: Array[0..7] Of LongInt; Inside: Boolean;
+Begin
+ Sh1:=HdEMin(4,HdEBd-8);
+ If Luma Then Begin
+  Nt:=8; Bef:=3;
+  For I:=0 To 7 Do Begin Th[I]:=HdEQpelF[Fx*8+I]; Tv[I]:=HdEQpelF[Fy*8+I]; End;
+ End Else Begin
+  Nt:=4; Bef:=1;
+  For I:=0 To 3 Do Begin Th[I]:=HdEEpelF[Fx*4+I]; Tv[I]:=HdEEpelF[Fy*4+I]; End;
+ End;
+ Rw:=Bw+Nt-1; Rh:=Bh+Nt-1;
+ Inside:=(X0-Bef>=0) And (Y0-Bef>=0) And (X0-Bef+Rw<=Pw) And (Y0-Bef+Rh<=Ph);
+ If Inside Then Begin
+  For Y:=0 To Rh-1 Do Begin
+   O:=(Y0-Bef+Y)*Pw+X0-Bef; Q:=Y*Rw;
+   For X:=0 To Rw-1 Do HdEMcR[Q+X]:=Pl^[O+X];
+  End;
+ End Else Begin
+  For Y:=0 To Rh-1 Do Begin
+   Ys:=HdEClip(Y0-Bef+Y,0,Ph-1)*Pw;
+   For X:=0 To Rw-1 Do Begin
+    Xs:=HdEClip(X0-Bef+X,0,Pw-1);
+    HdEMcR[Y*Rw+X]:=Pl^[Ys+Xs];
+   End;
+  End;
+ End;
+ If (Fx=0) And (Fy=0) Then Begin
+  For Y:=0 To Bh-1 Do For X:=0 To Bw-1 Do Out^[Y*Bw+X]:=HdEMcR[(Y+Bef)*Rw+X+Bef] Shl (14-HdEBd);
+ End Else If Fy=0 Then Begin
+  If Luma Then Begin
+   For Y:=0 To Bh-1 Do Begin
+    O:=(Y+Bef)*Rw;
+    For X:=0 To Bw-1 Do Begin
+     Q:=O+X;
+     Out^[Y*Bw+X]:=HdESar(Th[0]*HdEMcR[Q]+Th[1]*HdEMcR[Q+1]+Th[2]*HdEMcR[Q+2]+Th[3]*HdEMcR[Q+3]+Th[4]*HdEMcR[Q+4]+Th[5]*HdEMcR[Q+5]+Th[6]*HdEMcR[Q+6]+Th[7]*HdEMcR[Q+7],Sh1);
+    End;
+   End;
+  End Else Begin
+   For Y:=0 To Bh-1 Do Begin
+    O:=(Y+Bef)*Rw;
+    For X:=0 To Bw-1 Do Begin
+     Q:=O+X;
+     Out^[Y*Bw+X]:=HdESar(Th[0]*HdEMcR[Q]+Th[1]*HdEMcR[Q+1]+Th[2]*HdEMcR[Q+2]+Th[3]*HdEMcR[Q+3],Sh1);
+    End;
+   End;
+  End;
+ End Else If Fx=0 Then Begin
+  If Luma Then Begin
+   For Y:=0 To Bh-1 Do For X:=0 To Bw-1 Do Begin
+    Q:=Y*Rw+X+Bef;
+    Out^[Y*Bw+X]:=HdESar(Tv[0]*HdEMcR[Q]+Tv[1]*HdEMcR[Q+Rw]+Tv[2]*HdEMcR[Q+2*Rw]+Tv[3]*HdEMcR[Q+3*Rw]+Tv[4]*HdEMcR[Q+4*Rw]+Tv[5]*HdEMcR[Q+5*Rw]+Tv[6]*HdEMcR[Q+6*Rw]+Tv[7]*HdEMcR[Q+7*Rw],Sh1);
+   End;
+  End Else Begin
+   For Y:=0 To Bh-1 Do For X:=0 To Bw-1 Do Begin
+    Q:=Y*Rw+X+Bef;
+    Out^[Y*Bw+X]:=HdESar(Tv[0]*HdEMcR[Q]+Tv[1]*HdEMcR[Q+Rw]+Tv[2]*HdEMcR[Q+2*Rw]+Tv[3]*HdEMcR[Q+3*Rw],Sh1);
+   End;
+  End;
+ End Else Begin
+  If Luma Then Begin
+   For Y:=0 To Rh-1 Do For X:=0 To Bw-1 Do Begin
+    Q:=Y*Rw+X;
+    HdEMcT[Y*Bw+X]:=HdESar(Th[0]*HdEMcR[Q]+Th[1]*HdEMcR[Q+1]+Th[2]*HdEMcR[Q+2]+Th[3]*HdEMcR[Q+3]+Th[4]*HdEMcR[Q+4]+Th[5]*HdEMcR[Q+5]+Th[6]*HdEMcR[Q+6]+Th[7]*HdEMcR[Q+7],Sh1);
+   End;
+   For Y:=0 To Bh-1 Do For X:=0 To Bw-1 Do Begin
+    Q:=Y*Bw+X;
+    Acc:=Tv[0]*HdEMcT[Q]+Tv[1]*HdEMcT[Q+Bw]+Tv[2]*HdEMcT[Q+2*Bw]+Tv[3]*HdEMcT[Q+3*Bw]+Tv[4]*HdEMcT[Q+4*Bw]+Tv[5]*HdEMcT[Q+5*Bw]+Tv[6]*HdEMcT[Q+6*Bw]+Tv[7]*HdEMcT[Q+7*Bw];
+    Out^[Q]:=HdESar(Acc,6);
+   End;
+  End Else Begin
+   For Y:=0 To Rh-1 Do For X:=0 To Bw-1 Do Begin
+    Q:=Y*Rw+X;
+    HdEMcT[Y*Bw+X]:=HdESar(Th[0]*HdEMcR[Q]+Th[1]*HdEMcR[Q+1]+Th[2]*HdEMcR[Q+2]+Th[3]*HdEMcR[Q+3],Sh1);
+   End;
+   For Y:=0 To Bh-1 Do For X:=0 To Bw-1 Do Begin
+    Q:=Y*Bw+X;
+    Acc:=Tv[0]*HdEMcT[Q]+Tv[1]*HdEMcT[Q+Bw]+Tv[2]*HdEMcT[Q+2*Bw]+Tv[3]*HdEMcT[Q+3*Bw];
+    Out^[Q]:=HdESar(Acc,6);
+   End;
+  End;
+ End;
+End;
+
+{ prediction d'une PU (luma + chroma) dans les plans de reconstruction courants }
+Procedure HdEMcPu(Var P: THdEPu);
+Var C,L,X,Y,Bx,By,Bw,Bh,Sh,Fx,Fy,Ix,Iy,Pwid,Phei,V: LongInt; Pl: PHdEPx; Used: Array[0..1] Of Boolean; Mx,My,Rf: Array[0..1] Of LongInt;
+Begin
+ Used[0]:=(P.Dir And 1)<>0; Used[1]:=(P.Dir And 2)<>0;
+ Mx[0]:=P.Mx0; My[0]:=P.My0; Rf[0]:=P.Ref0; Mx[1]:=P.Mx1; My[1]:=P.My1; Rf[1]:=P.Ref1;
+ For C:=0 To 2 Do Begin
+  If C=0 Then Begin Sh:=0; Pwid:=HdEWp; Phei:=HdEHp; End Else Begin Sh:=1; Pwid:=HdECw; Phei:=HdECh; End;
+  Bx:=P.Px Shr Sh; By:=P.Py Shr Sh; Bw:=P.Pw Shr Sh; Bh:=P.Ph Shr Sh;
+  For L:=0 To 1 Do If Used[L] Then Begin
+   Pl:=HdEPics[HdERefL[L,Rf[L]]].P[C];
+   If C=0 Then Begin
+    HdEMcBlk(Pl,Pwid,Phei,Bx+HdESar(Mx[L],2),By+HdESar(My[L],2),Bw,Bh,Mx[L] And 3,My[L] And 3,True,@HdEMcA[L]);
+   End Else Begin
+    HdEMcBlk(Pl,Pwid,Phei,Bx+HdESar(Mx[L],3),By+HdESar(My[L],3),Bw,Bh,Mx[L] And 7,My[L] And 7,False,@HdEMcA[L]);
+   End;
+  End;
+  Pl:=HdERecP[C];
+  If Used[0] And Used[1] Then Begin
+   For Y:=0 To Bh-1 Do For X:=0 To Bw-1 Do
+    Pl^[(By+Y)*HdEStr[C]+Bx+X]:=HdEBiP(HdEMcA[0,Y*Bw+X],HdEMcA[1,Y*Bw+X]);
+  End Else Begin
+   If Used[0] Then L:=0 Else L:=1;
+   For Y:=0 To Bh-1 Do For X:=0 To Bw-1 Do
+    Pl^[(By+Y)*HdEStr[C]+Bx+X]:=HdEUniP(HdEMcA[L,Y*Bw+X]);
+  End;
+ End;
+End;
+
+{ ---- voisinage de mouvement ---- }
+Function HdEPbAvail(XN,YN: LongInt): Boolean;
+Var Ok: Boolean; Sz: LongInt;
+Begin
+ Sz:=1 Shl HdECbL2;
+ If (XN>=HdECbX) And (XN<HdECbX+Sz) And (YN>=HdECbY) And (YN<HdECbY+Sz) Then Begin
+  If (HdEPuW*2=Sz) And (HdEPuH*2=Sz) And (HdEPartIdx=1) And (HdECbY+HdEPuH<=YN) And (HdECbX+HdEPuW>XN) Then Ok:=False Else Ok:=True;
+ End Else Ok:=HdEAvail(HdEPuX,HdEPuY,XN,YN);
+ If Ok Then If HdEMPred^[(YN Shr 2)*HdEW4+(XN Shr 2)]=1 Then Ok:=False;
+ HdEPbAvail:=Ok;
+End;
+
+Function HdENbIdx(XN,YN: LongInt): LongInt;
+Begin HdENbIdx:=((YN Shr 2)*HdEW4+(XN Shr 2))*6; End;
+
+Function HdESameMv(A,B: LongInt): Boolean;
+Var L: LongInt;
+Begin
+ HdESameMv:=False;
+ If (HdEMMv^[A+4]<>HdEMMv^[B+4]) Or (HdEMMv^[A+5]<>HdEMMv^[B+5]) Then Exit;
+ For L:=0 To 1 Do If HdEMMv^[A+4+L]>=0 Then
+  If (HdEMMv^[A+2*L]<>HdEMMv^[B+2*L]) Or (HdEMMv^[A+2*L+1]<>HdEMMv^[B+2*L+1]) Then Exit;
+ HdESameMv:=True;
+End;
+
+Const
+ HdECombIdx: Array[0..23] Of Byte = (0,1, 1,0, 0,2, 2,0, 1,2, 2,1, 0,3, 3,0, 1,3, 3,1, 2,3, 3,2);
+
+{ liste de candidats de fusion : L[i*6 ..] = mx0,my0,mx1,my1,ref0,ref1 }
+Procedure HdEMergeList(Var L: Array Of LongInt; Var N: LongInt);
+Var A1,B1,B0,A0,B2,Nb,I,ZeroIdx,NR,Orig,K,C0,C1: LongInt; AvA1,AvB1,AvB0,AvA0,AvB2: Boolean;
+ Procedure Add(Src: LongInt);
+ Var K: LongInt;
+ Begin For K:=0 To 5 Do L[N*6+K]:=HdEMMv^[Src+K]; Inc(N); End;
+Begin
+ N:=0;
+ AvA1:=False; AvB1:=False;
+ If Not ((HdEPartIdx=1) And (HdEPartMode=2)) Then Begin
+  AvA1:=HdEPbAvail(HdEPuX-1,HdEPuY+HdEPuH-1);
+  If AvA1 Then Add(HdENbIdx(HdEPuX-1,HdEPuY+HdEPuH-1));
+ End;
+ If Not ((HdEPartIdx=1) And (HdEPartMode=1)) Then Begin
+  AvB1:=HdEPbAvail(HdEPuX+HdEPuW-1,HdEPuY-1);
+  If AvB1 And Not (AvA1 And HdESameMv(HdENbIdx(HdEPuX+HdEPuW-1,HdEPuY-1),HdENbIdx(HdEPuX-1,HdEPuY+HdEPuH-1))) Then Add(HdENbIdx(HdEPuX+HdEPuW-1,HdEPuY-1));
+ End;
+ AvB0:=HdEPbAvail(HdEPuX+HdEPuW,HdEPuY-1);
+ If AvB0 And Not (AvB1 And HdESameMv(HdENbIdx(HdEPuX+HdEPuW,HdEPuY-1),HdENbIdx(HdEPuX+HdEPuW-1,HdEPuY-1))) Then Add(HdENbIdx(HdEPuX+HdEPuW,HdEPuY-1));
+ AvA0:=HdEPbAvail(HdEPuX-1,HdEPuY+HdEPuH);
+ If AvA0 And Not (AvA1 And HdESameMv(HdENbIdx(HdEPuX-1,HdEPuY+HdEPuH),HdENbIdx(HdEPuX-1,HdEPuY+HdEPuH-1))) Then Add(HdENbIdx(HdEPuX-1,HdEPuY+HdEPuH));
+ AvB2:=HdEPbAvail(HdEPuX-1,HdEPuY-1);
+ If AvB2 And Not (AvA1 And HdESameMv(HdENbIdx(HdEPuX-1,HdEPuY-1),HdENbIdx(HdEPuX-1,HdEPuY+HdEPuH-1)))
+   And Not (AvB1 And HdESameMv(HdENbIdx(HdEPuX-1,HdEPuY-1),HdENbIdx(HdEPuX+HdEPuW-1,HdEPuY-1))) And (N<>4) Then Add(HdENbIdx(HdEPuX-1,HdEPuY-1));
+ Orig:=N;
+ If (HdESliceType=0) And (Orig>1) And (Orig<HdEMaxMerge) Then Begin
+  K:=0;
+  While (N<HdEMaxMerge) And (K<Orig*(Orig-1)) Do Begin
+   C0:=HdECombIdx[K*2]; C1:=HdECombIdx[K*2+1];
+   If (L[C0*6+4]>=0) And (L[C1*6+5]>=0) And
+      ((HdERefPocT[0,L[C0*6+4]]<>HdERefPocT[1,L[C1*6+5]]) Or (L[C0*6]<>L[C1*6+2]) Or (L[C0*6+1]<>L[C1*6+3])) Then Begin
+    L[N*6]:=L[C0*6]; L[N*6+1]:=L[C0*6+1]; L[N*6+2]:=L[C1*6+2]; L[N*6+3]:=L[C1*6+3];
+    L[N*6+4]:=L[C0*6+4]; L[N*6+5]:=L[C1*6+5]; Inc(N);
+   End;
+   Inc(K);
+  End;
+ End;
+ If HdESliceType=1 Then NR:=HdENumRef0 Else NR:=HdEMin(HdENumRef0,HdENumRef1);
+ ZeroIdx:=0;
+ While N<HdEMaxMerge Do Begin
+  L[N*6]:=0; L[N*6+1]:=0; L[N*6+2]:=0; L[N*6+3]:=0;
+  If ZeroIdx<NR Then Begin L[N*6+4]:=ZeroIdx; L[N*6+5]:=ZeroIdx; End Else Begin L[N*6+4]:=0; L[N*6+5]:=0; End;
+  If HdESliceType=1 Then L[N*6+5]:=-1;
+  Inc(N); Inc(ZeroIdx);
+ End;
+ If N>HdEMaxMerge Then N:=HdEMaxMerge;
+End;
+
+Procedure HdEMvScale(Var Mx,My: LongInt; Td,Tb: LongInt);
+Var Tx,Sf,V: LongInt;
+Begin
+ Td:=HdEClip(Td,-128,127); Tb:=HdEClip(Tb,-128,127);
+ Tx:=(16384+HdEAbs(Td Div 2)) Div Td;
+ Sf:=HdEClip(HdESar(Tb*Tx+32,6),-4096,4095);
+ V:=Sf*Mx; Mx:=HdEClip(HdESar(V+127+Ord(V<0),8),-32768,32767);
+ V:=Sf*My; My:=HdEClip(HdESar(V+127+Ord(V<0),8),-32768,32767);
+End;
+
+{ deux candidats AMVP pour la liste LX et l'indice de reference Ri }
+Procedure HdEAmvp(Lx,Ri: LongInt; Var Cx,Cy: Array Of LongInt);
+Var A0,A1,B0,B1,B2,AvA,AvB,IsScaled,Num: LongInt; Ax,Ay,Bx,By: LongInt;
+ AvA0,AvA1,AvB0,AvB1,AvB2: Boolean; TargetPoc: LongInt;
+ Function Mx(Nb,Lst: LongInt; Var Vx,Vy: LongInt): Boolean;
+ Begin
+  Mx:=False;
+  If HdEMMv^[Nb+4+Lst]>=0 Then
+   If HdERefPocT[Lst,HdEMMv^[Nb+4+Lst]]=TargetPoc Then Begin Vx:=HdEMMv^[Nb+2*Lst]; Vy:=HdEMMv^[Nb+2*Lst+1]; Mx:=True; End;
+ End;
+ Function MxS(Nb,Lst: LongInt; Var Vx,Vy: LongInt): Boolean;
+ Var Pd: LongInt;
+ Begin
+  MxS:=False;
+  If HdEMMv^[Nb+4+Lst]>=0 Then Begin
+   Vx:=HdEMMv^[Nb+2*Lst]; Vy:=HdEMMv^[Nb+2*Lst+1];
+   If HdERefPocT[Lst,HdEMMv^[Nb+4+Lst]]<>TargetPoc Then Begin
+    Pd:=HdECurPoc-HdERefPocT[Lst,HdEMMv^[Nb+4+Lst]]; If Pd=0 Then Pd:=1;
+    HdEMvScale(Vx,Vy,Pd,HdECurPoc-TargetPoc);
+   End;
+   MxS:=True;
+  End;
+ End;
+ Function TryA(Scaled: Boolean): Boolean;
+ Begin
+  TryA:=True;
+  If Not Scaled Then Begin
+   If AvA0 Then Begin If Mx(A0,Lx,Ax,Ay) Then Exit; If Mx(A0,1-Lx,Ax,Ay) Then Exit; End;
+   If AvA1 Then Begin If Mx(A1,Lx,Ax,Ay) Then Exit; If Mx(A1,1-Lx,Ax,Ay) Then Exit; End;
+  End Else Begin
+   If AvA0 Then Begin If MxS(A0,Lx,Ax,Ay) Then Exit; If MxS(A0,1-Lx,Ax,Ay) Then Exit; End;
+   If AvA1 Then Begin If MxS(A1,Lx,Ax,Ay) Then Exit; If MxS(A1,1-Lx,Ax,Ay) Then Exit; End;
+  End;
+  TryA:=False;
+ End;
+Begin
+ TargetPoc:=HdERefPocT[Lx,Ri];
+ A0:=HdENbIdx(HdEPuX-1,HdEPuY+HdEPuH); A1:=HdENbIdx(HdEPuX-1,HdEPuY+HdEPuH-1);
+ B0:=HdENbIdx(HdEPuX+HdEPuW,HdEPuY-1); B1:=HdENbIdx(HdEPuX+HdEPuW-1,HdEPuY-1); B2:=HdENbIdx(HdEPuX-1,HdEPuY-1);
+ AvA0:=HdEPbAvail(HdEPuX-1,HdEPuY+HdEPuH); AvA1:=HdEPbAvail(HdEPuX-1,HdEPuY+HdEPuH-1);
+ AvB0:=HdEPbAvail(HdEPuX+HdEPuW,HdEPuY-1); AvB1:=HdEPbAvail(HdEPuX+HdEPuW-1,HdEPuY-1); AvB2:=HdEPbAvail(HdEPuX-1,HdEPuY-1);
+ IsScaled:=Ord(AvA0 Or AvA1);
+ Ax:=0; Ay:=0; Bx:=0; By:=0;
+ AvA:=Ord(TryA(False));
+ If AvA=0 Then AvA:=Ord(TryA(True));
+ { candidat B }
+ AvB:=1;
+ If AvB0 And (Mx(B0,Lx,Bx,By) Or Mx(B0,1-Lx,Bx,By)) Then
+ Else If AvB1 And (Mx(B1,Lx,Bx,By) Or Mx(B1,1-Lx,Bx,By)) Then
+ Else If AvB2 And (Mx(B2,Lx,Bx,By) Or Mx(B2,1-Lx,Bx,By)) Then
+ Else AvB:=0;
+ If IsScaled=0 Then Begin
+  If AvB<>0 Then Begin AvA:=1; Ax:=Bx; Ay:=By; End;
+  AvB:=0;
+  If AvB0 Then Begin AvB:=Ord(MxS(B0,Lx,Bx,By)); If AvB=0 Then AvB:=Ord(MxS(B0,1-Lx,Bx,By)); End;
+  If AvB1 And (AvB=0) Then Begin AvB:=Ord(MxS(B1,Lx,Bx,By)); If AvB=0 Then AvB:=Ord(MxS(B1,1-Lx,Bx,By)); End;
+  If AvB2 And (AvB=0) Then Begin AvB:=Ord(MxS(B2,Lx,Bx,By)); If AvB=0 Then AvB:=Ord(MxS(B2,1-Lx,Bx,By)); End;
+ End;
+ Num:=0; Cx[0]:=0; Cy[0]:=0; Cx[1]:=0; Cy[1]:=0;
+ If AvA<>0 Then Begin Cx[Num]:=Ax; Cy[Num]:=Ay; Inc(Num); End;
+ If (AvB<>0) And ((AvA=0) Or (Ax<>Bx) Or (Ay<>By)) Then Begin Cx[Num]:=Bx; Cy[Num]:=By; Inc(Num); End;
+End;
+{ ---------------------------------------------------------------------- }
+{ Estimation de mouvement et candidats inter                               }
+{ ---------------------------------------------------------------------- }
+Var
+ HdEMeBx,HdEMeBy: LongInt; HdEMeBc: Double;
+ HdEMeRi: LongInt;
+ HdEMvpX,HdEMvpY: Array[0..1] Of LongInt;
+ HdEStartX,HdEStartY: LongInt; HdEHaveStart: Boolean;
+
+Function HdEMvdBits(D: LongInt): Double;
+Begin
+ D:=HdEAbs(D);
+ If D=0 Then HdEMvdBits:=1 Else HdEMvdBits:=3+2*HdELog2(D);
+End;
+
+Function HdEMvCost(Mx,My: LongInt): Double;
+Var A,B: Double;
+Begin
+ A:=HdEMvdBits(Mx-HdEMvpX[0])+HdEMvdBits(My-HdEMvpY[0]);
+ B:=HdEMvdBits(Mx-HdEMvpX[1])+HdEMvdBits(My-HdEMvpY[1])+1;
+ If B<A Then A:=B;
+ HdEMvCost:=HdESqrtLambda*A;
+End;
+
+Function HdESadInt(Pl: PHdEPx; Rx,Ry,Limit: LongInt): LongInt;
+Var X,Y,S,Xs,Ys,V: LongInt; Sp: PHdEPx;
+Begin
+ Sp:=HdESrcP[0]; S:=0;
+ If (Rx>=0) And (Ry>=0) And (Rx+HdEPuW<=HdEWp) And (Ry+HdEPuH<=HdEHp) Then Begin
+  For Y:=0 To HdEPuH-1 Do
+   For X:=0 To HdEPuW-1 Do Begin
+    V:=Sp^[(HdEPuY+Y)*HdEWp+HdEPuX+X]-Pl^[(Ry+Y)*HdEWp+Rx+X];
+    If V<0 Then S:=S-V Else S:=S+V;
+   End;
+ End Else Begin
+  For Y:=0 To HdEPuH-1 Do Begin
+   Ys:=HdEClip(Ry+Y,0,HdEHp-1);
+   For X:=0 To HdEPuW-1 Do Begin
+    Xs:=HdEClip(Rx+X,0,HdEWp-1);
+    V:=Sp^[(HdEPuY+Y)*HdEWp+HdEPuX+X]-Pl^[Ys*HdEWp+Xs];
+    If V<0 Then S:=S-V Else S:=S+V;
+   End;
+  End;
+ End;
+ HdESadInt:=S;
+End;
+
+{ cout (SAD + debit de mouvement) du vecteur Mx,My (quart de pixel) pour la reference HdEMeRi }
+Function HdEMeEval(Mx,My: LongInt): Double;
+Var Pl: PHdEPx; S,X,Y,V,Lim: LongInt; Sp: PHdEPx;
+Begin
+ Lim:=2000000000; If HdEMeBc<1e9 Then Lim:=Trunc(HdEMeBc-HdEMvCost(Mx,My))+1; If Lim<1 Then Lim:=1;
+ Pl:=HdEPics[HdERefL[0,HdEMeRi]].P[0];
+ If ((Mx And 3)=0) And ((My And 3)=0) Then S:=HdESadInt(Pl,HdEPuX+HdESar(Mx,2),HdEPuY+HdESar(My,2),Lim)
+ Else Begin
+  HdEMcBlk(Pl,HdEWp,HdEHp,HdEPuX+HdESar(Mx,2),HdEPuY+HdESar(My,2),HdEPuW,HdEPuH,Mx And 3,My And 3,True,@HdEMcA[0]);
+  Sp:=HdESrcP[0]; S:=0;
+  For Y:=0 To HdEPuH-1 Do For X:=0 To HdEPuW-1 Do Begin
+   V:=HdEUniP(HdEMcA[0,Y*HdEPuW+X]);
+   V:=Sp^[(HdEPuY+Y)*HdEWp+HdEPuX+X]-V;
+   If V<0 Then S:=S-V Else S:=S+V;
+  End;
+ End;
+ HdEMeEval:=S+HdEMvCost(Mx,My);
+End;
+
+Procedure HdEMeTry(Mx,My: LongInt);
+Var C: Double;
+Begin
+ C:=HdEMeEval(Mx,My);
+ If C<HdEMeBc Then Begin HdEMeBc:=C; HdEMeBx:=Mx; HdEMeBy:=My; End;
+End;
+
+{ recherche de mouvement pour la PU courante ; points de depart : candidats AMVP, zero, depart memorise }
+Procedure HdESearch(Ri: LongInt);
+Var K,S,Dx,Dy,Cx,Cy,Iter,Bx0,By0: LongInt; Imp: Boolean; Xlo,Xhi,Ylo,Yhi: LongInt; Cl,Cr,Cu,Cd,Cg: Double;
+ Const Ddx: Array[0..7] Of ShortInt = (-1,0,1,-1,1,-1,0,1);
+       Ddy: Array[0..7] Of ShortInt = (-1,-1,-1,0,0,1,1,1);
+Begin
+ HdEMeRi:=Ri; HdEMeBc:=1e30;
+ Xlo:=(-HdEPuW-8-HdEPuX)*4; Xhi:=(HdEWp+8-HdEPuX)*4; Ylo:=(-HdEPuH-8-HdEPuY)*4; Yhi:=(HdEHp+8-HdEPuY)*4;
+ For K:=0 To 3 Do Begin
+  Case K Of
+   0: Begin Cx:=HdEMvpX[0]; Cy:=HdEMvpY[0]; End;
+   1: Begin Cx:=HdEMvpX[1]; Cy:=HdEMvpY[1]; End;
+   2: Begin Cx:=0; Cy:=0; End;
+  Else If HdEHaveStart Then Begin Cx:=HdEStartX; Cy:=HdEStartY; End Else Begin Cx:=0; Cy:=0; End;
+  End;
+  Cx:=HdEClip(HdESar(Cx+2,2) Shl 2,Xlo,Xhi); Cy:=HdEClip(HdESar(Cy+2,2) Shl 2,Ylo,Yhi);
+  HdEMeTry(Cx,Cy);
+ End;
+ { recherche entiere en diamants successifs }
+ S:=8;
+ While S>=1 Do Begin
+  Iter:=0;
+  Repeat
+   Bx0:=HdEMeBx; By0:=HdEMeBy; Imp:=False;
+   For K:=0 To 7 Do Begin
+    Cx:=Bx0+Ddx[K]*S*4; Cy:=By0+Ddy[K]*S*4;
+    If (Cx>=Xlo) And (Cx<=Xhi) And (Cy>=Ylo) And (Cy<=Yhi) Then Begin
+     HdEMeTry(Cx,Cy);
+    End;
+   End;
+   If (HdEMeBx<>Bx0) Or (HdEMeBy<>By0) Then Imp:=True;
+   Inc(Iter);
+  Until (Not Imp) Or (Iter>=4);
+  S:=S Div 2;
+ End;
+ { demi puis quart de pixel : croix puis diagonale la plus prometteuse }
+ For S:=2 DownTo 1 Do Begin
+  Bx0:=HdEMeBx; By0:=HdEMeBy;
+  Cl:=HdEMeEval(Bx0-S,By0); Cr:=HdEMeEval(Bx0+S,By0); Cu:=HdEMeEval(Bx0,By0-S); Cd:=HdEMeEval(Bx0,By0+S);
+  If Cl<Cr Then Dx:=-S Else Dx:=S;
+  If Cu<Cd Then Dy:=-S Else Dy:=S;
+  Cg:=HdEMeEval(Bx0+Dx,By0+Dy);
+  If Cl<HdEMeBc Then Begin HdEMeBc:=Cl; HdEMeBx:=Bx0-S; HdEMeBy:=By0; End;
+  If Cr<HdEMeBc Then Begin HdEMeBc:=Cr; HdEMeBx:=Bx0+S; HdEMeBy:=By0; End;
+  If Cu<HdEMeBc Then Begin HdEMeBc:=Cu; HdEMeBx:=Bx0; HdEMeBy:=By0-S; End;
+  If Cd<HdEMeBc Then Begin HdEMeBc:=Cd; HdEMeBx:=Bx0; HdEMeBy:=By0+S; End;
+  If Cg<HdEMeBc Then Begin HdEMeBc:=Cg; HdEMeBx:=Bx0+Dx; HdEMeBy:=By0+Dy; End;
+ End;
+End;
+
+{ decide le mouvement d'une PU ; Mode : 0 auto, 1 fusion seule, 2 AMVP seul }
+Procedure HdEDecidePu(Var Cu: THdECu; Pi,Px,Py,Pw,Ph,Mode: LongInt);
+Var Ml: Array[0..29] Of LongInt; N,I,K,Ri,BestI,BestRi,Cm,Dir,R0,R1,X,Y,V,S: LongInt; Bc,Bm,Ba,C: Double;
+ Cx,Cy: Array[0..1] Of LongInt; Bmx,Bmy: LongInt; Pu: THdEPu; Sp: PHdEPx; Pl: PHdEPx;
+ Bmv: Array[0..5] Of LongInt; Idx: LongInt; Dup: Boolean; Mvx,Mvy,Used: LongInt;
+Begin
+ HdEPuX:=Px; HdEPuY:=Py; HdEPuW:=Pw; HdEPuH:=Ph; HdEPartIdx:=Pi; HdEPartMode:=Cu.Part;
+ FillChar(Pu,SizeOf(Pu),0);
+ Pu.Px:=Px; Pu.Py:=Py; Pu.Pw:=Pw; Pu.Ph:=Ph;
+ Bm:=1e30; Ba:=1e30; BestI:=0; BestRi:=0;
+ Sp:=HdESrcP[0];
+ If Mode<>2 Then Begin
+  HdEMergeList(Ml,N);
+  For I:=0 To N-1 Do Begin
+   Dup:=False;
+   For K:=0 To I-1 Do If (Ml[K*6]=Ml[I*6]) And (Ml[K*6+1]=Ml[I*6+1]) And (Ml[K*6+2]=Ml[I*6+2]) And (Ml[K*6+3]=Ml[I*6+3]) And (Ml[K*6+4]=Ml[I*6+4]) And (Ml[K*6+5]=Ml[I*6+5]) Then Dup:=True;
+   If Dup Then Continue;
+   Pu.Merge:=1; Pu.MergeIdx:=I;
+   R0:=Ml[I*6+4]; R1:=Ml[I*6+5]; Dir:=0;
+   If R0>=0 Then Dir:=Dir Or 1; If R1>=0 Then Dir:=Dir Or 2;
+   If (Dir=3) And (Pw+Ph=12) Then Begin Dir:=1; R1:=-1; End;
+   Pu.Dir:=Dir; Pu.Ref0:=R0; Pu.Ref1:=R1; Pu.Mx0:=Ml[I*6]; Pu.My0:=Ml[I*6+1]; Pu.Mx1:=Ml[I*6+2]; Pu.My1:=Ml[I*6+3];
+   { SAD de la prediction luma }
+   S:=0;
+   For K:=0 To 1 Do If (Dir And (1 Shl K))<>0 Then Begin
+    If K=0 Then Begin Mvx:=Pu.Mx0; Mvy:=Pu.My0; Ri:=R0; End Else Begin Mvx:=Pu.Mx1; Mvy:=Pu.My1; Ri:=R1; End;
+    HdEMcBlk(HdEPics[HdERefL[K,Ri]].P[0],HdEWp,HdEHp,Px+HdESar(Mvx,2),Py+HdESar(Mvy,2),Pw,Ph,Mvx And 3,Mvy And 3,True,@HdEMcA[K]);
+   End;
+   For Y:=0 To Ph-1 Do For X:=0 To Pw-1 Do Begin
+    If Dir=3 Then V:=HdEBiP(HdEMcA[0,Y*Pw+X],HdEMcA[1,Y*Pw+X])
+    Else If Dir=1 Then V:=HdEUniP(HdEMcA[0,Y*Pw+X])
+    Else V:=HdEUniP(HdEMcA[1,Y*Pw+X]);
+    V:=Sp^[(Py+Y)*HdEWp+Px+X]-V; S:=S+HdEAbs(V);
+   End;
+   C:=S+HdESqrtLambda*(1+I);
+   If C<Bm Then Begin Bm:=C; BestI:=I; Bmv[0]:=Pu.Mx0; Bmv[1]:=Pu.My0; Bmv[2]:=Pu.Mx1; Bmv[3]:=Pu.My1; Bmv[4]:=R0; Bmv[5]:=R1; End;
+  End;
+ End;
+ Bmx:=0; Bmy:=0;
+ If Mode<>1 Then Begin
+  For Ri:=0 To HdENumRef0-1 Do Begin
+   HdEAmvp(0,Ri,Cx,Cy);
+   HdEMvpX[0]:=Cx[0]; HdEMvpY[0]:=Cy[0]; HdEMvpX[1]:=Cx[1]; HdEMvpY[1]:=Cy[1];
+   HdESearch(Ri);
+   C:=HdEMeBc+HdESqrtLambda*1.5*Ri;
+   If C<Ba Then Begin
+    Ba:=C; BestRi:=Ri; Bmx:=HdEMeBx; Bmy:=HdEMeBy;
+    HdEStartX:=Bmx; HdEStartY:=Bmy;
+    { choix du predicteur }
+    If HdEMvdBits(Bmx-Cx[0])+HdEMvdBits(Bmy-Cy[0])<=HdEMvdBits(Bmx-Cx[1])+HdEMvdBits(Bmy-Cy[1])+1 Then Idx:=0 Else Idx:=1;
+    Pu.Mvp0:=Idx; Pu.Dx0:=Bmx-Cx[Idx]; Pu.Dy0:=Bmy-Cy[Idx];
+   End;
+  End;
+ End;
+ FillChar(Pu,SizeOf(Pu)-0,0);
+ Pu.Px:=Px; Pu.Py:=Py; Pu.Pw:=Pw; Pu.Ph:=Ph;
+ If (Mode=1) Or ((Mode=0) And (Bm<=Ba)) Then Begin
+  Pu.Merge:=1; Pu.MergeIdx:=BestI;
+  Pu.Mx0:=Bmv[0]; Pu.My0:=Bmv[1]; Pu.Mx1:=Bmv[2]; Pu.My1:=Bmv[3]; Pu.Ref0:=Bmv[4]; Pu.Ref1:=Bmv[5];
+  Pu.Dir:=0; If Bmv[4]>=0 Then Pu.Dir:=1; If Bmv[5]>=0 Then Pu.Dir:=Pu.Dir Or 2;
+  If (Pu.Dir=3) And (Pw+Ph=12) Then Begin Pu.Dir:=1; Pu.Ref1:=-1; End;
+ End Else Begin
+  Pu.Merge:=0; Pu.Dir:=1; Pu.Ref0:=BestRi; Pu.Ref1:=-1; Pu.Mx0:=Bmx; Pu.My0:=Bmy;
+  HdEAmvp(0,BestRi,Cx,Cy);
+  If HdEMvdBits(Bmx-Cx[0])+HdEMvdBits(Bmy-Cy[0])<=HdEMvdBits(Bmx-Cx[1])+HdEMvdBits(Bmy-Cy[1])+1 Then Idx:=0 Else Idx:=1;
+  Pu.Mvp0:=Idx; Pu.Dx0:=Bmx-Cx[Idx]; Pu.Dy0:=Bmy-Cy[Idx];
+ End;
+ Cu.Pu[Pi]:=Pu;
+End;
+
+Procedure HdEMapPu(Var Cu: THdECu; Pi: LongInt);
+Var Sv: LongInt;
+Begin
+ { ecrit le mouvement de la PU Pi dans les cartes (pour les PU suivantes) }
+ Sv:=Cu.NPu; Cu.NPu:=Pi+1;
+ HdESetMaps(Cu);
+ Cu.NPu:=Sv;
+End;
+
+Procedure HdEPrFromPlane(CIdx,Xc,Yc,L2: LongInt; Var Pr: Array Of LongInt);
+Var N,X,Y: LongInt; Pl: PHdEPx;
+Begin
+ N:=1 Shl L2; Pl:=HdERecP[CIdx];
+ For Y:=0 To N-1 Do For X:=0 To N-1 Do Pr[Y*N+X]:=Pl^[(Yc+Y)*HdEStr[CIdx]+Xc+X];
+End;
+
+{ evalue une CU inter dont les PU sont decidees : MC, residu, cout total }
+Function HdEEvalInter(Var Cu: THdECu): Double;
+Var I,N,L2,Cb0,Cb1,Cb2: LongInt; Pr: Array[0..1023] Of LongInt; D,Dt,Bits: Double;
+Begin
+ L2:=Cu.L2;
+ For I:=0 To Cu.NPu-1 Do HdEMcPu(Cu.Pu[I]);
+ FillChar(HdEScrCur,SizeOf(HdEScrCur),0);
+ Cu.Co:=@HdEScrCur;
+ Dt:=0;
+ HdEPrFromPlane(0,Cu.X,Cu.Y,L2,Pr);
+ HdECodeTb(0,Cu.X,Cu.Y,L2,Pr,False,False,HdEQpL,0,@Cu.Co^[0],Cb0,D,False); Dt:=Dt+D;
+ HdEPrFromPlane(1,Cu.X Shr 1,Cu.Y Shr 1,L2-1,Pr);
+ HdECodeTb(1,Cu.X Shr 1,Cu.Y Shr 1,L2-1,Pr,False,False,HdEQpCP,0,@Cu.Co^[1024],Cb1,D,False); Dt:=Dt+D;
+ HdEPrFromPlane(2,Cu.X Shr 1,Cu.Y Shr 1,L2-1,Pr);
+ HdECodeTb(2,Cu.X Shr 1,Cu.Y Shr 1,L2-1,Pr,False,False,HdEQpCP,0,@Cu.Co^[1280],Cb2,D,False); Dt:=Dt+D;
+ Cu.CbfY[0]:=Cb0; Cu.CbfCb:=Cb1; Cu.CbfCr:=Cb2;
+ Cu.SplitTr:=0;
+ If (Cb0<>0) Or (Cb1<>0) Or (Cb2<>0) Then Cu.RqtRoot:=1 Else Cu.RqtRoot:=0;
+ Cu.Skip:=Ord((Cu.Part=0) And (Cu.Pu[0].Merge<>0) And (Cu.RqtRoot=0));
+ HdESetMaps(Cu);
+ HdEEst:=True; HdECost:=0; HdEWriteCu(Cu); HdEEst:=False; Bits:=HdECost;
+ HdEEvalInter:=Dt+HdELambda*Bits;
+End;
+
+{ construit et evalue une CU inter de partition Part ; Mode pour la PU unique (2Nx2N) }
+Function HdEInterCand(X,Y,L2,Part,Mode: LongInt; Var Cu: THdECu): Double;
+Var N,H: LongInt;
+Begin
+ N:=1 Shl L2;
+ FillChar(Cu,SizeOf(Cu),0);
+ Cu.X:=X; Cu.Y:=Y; Cu.L2:=L2; Cu.Pred:=2; Cu.Part:=Part; Cu.Co:=@HdEScrCur;
+ HdECbX:=X; HdECbY:=Y; HdECbL2:=L2;
+ Cu.NPu:=0; HdESetMaps(Cu);          { marque la zone inter }
+ HdEHaveStart:=False;
+ If Part=0 Then Begin
+  Cu.NPu:=1;
+  HdEDecidePu(Cu,0,X,Y,N,N,Mode);
+ End Else If Part=1 Then Begin
+  H:=N Shr 1; Cu.NPu:=2;
+  HdEDecidePu(Cu,0,X,Y,N,H,0); HdEMapPu(Cu,0);
+  HdEDecidePu(Cu,1,X,Y+H,N,H,0);
+ End Else Begin
+  H:=N Shr 1; Cu.NPu:=2;
+  HdEDecidePu(Cu,0,X,Y,H,N,0); HdEMapPu(Cu,0);
+  HdEDecidePu(Cu,1,X+H,Y,H,N,0);
+ End;
+ HdEInterCand:=HdEEvalInter(Cu);
+End;
+{ meilleure CU pour le bloc (X,Y,L2) ; Best.Co pointe sur un emplacement du pool }
+Function HdELeaf(X,Y,L2: LongInt; Var Best: THdECu): Double;
+Var Cand: THdECu; J,Bj: Double; N,K,Cnt: LongInt; BestSkip: Boolean;
+ Procedure Consider;
+ Begin
+  If J<Bj Then Begin
+   Bj:=J; Best:=Cand; Move(HdEScrCur,HdEScrBest,SizeOf(HdEScrCur));
+   HdECopyRec(True,X,Y,L2,@HdEBestY,@HdEBestU,@HdEBestV);
+   BestSkip:=(Cand.Skip<>0) Or ((Cand.Pred=2) And (Cand.RqtRoot=0));
+  End;
+ End;
+Begin
+ Bj:=1e30; N:=1 Shl L2; BestSkip:=False;
+ If HdESliceType<>2 Then Begin
+  J:=HdEInterCand(X,Y,L2,0,1,Cand); Consider;
+  If Not BestSkip Then Begin
+   J:=HdEInterCand(X,Y,L2,0,2,Cand); Consider;
+   If Not BestSkip Then Begin
+    If L2>=3 Then Begin
+     J:=HdEInterCand(X,Y,L2,1,0,Cand); Consider;
+     J:=HdEInterCand(X,Y,L2,2,0,Cand); Consider;
+    End;
+   End;
+  End;
+ End;
+ If Not BestSkip Then Begin
+  J:=HdEIntraCand(X,Y,L2,False,Cand); Consider;
+  If L2=3 Then Begin J:=HdEIntraCand(X,Y,L2,True,Cand); Consider; End;
+ End;
+ HdECopyRec(False,X,Y,L2,@HdEBestY,@HdEBestU,@HdEBestV);
+ Best.Co:=@HdEPool^[HdEPoolN*HDE_COEFSTRIDE]; Inc(HdEPoolN);
+ Move(HdEScrBest,Best.Co^,SizeOf(HdEScrBest));
+ HdESetMaps(Best);
+ HdELeaf:=Bj;
+End;
+
+Function HdESplitBits(X,Y,L2,Flag: LongInt): Double;
+Begin
+ HdEEst:=True; HdECost:=0;
+ HdEWriteSplitFlag(X,Y,L2,Flag);
+ HdEEst:=False; HdESplitBits:=HdECost;
+End;
+
+Function HdEQuad(X,Y,L2: LongInt): Double;
+Var Sz,H,N0,I: LongInt; JA,JB: Double; Cu: THdECu; Inside: Boolean;
+Begin
+ Sz:=1 Shl L2; Inside:=(X+Sz<=HdEWp) And (Y+Sz<=HdEHp);
+ JA:=1e30; JB:=1e30;
+ If Inside Then Begin
+  JA:=HdELeaf(X,Y,L2,Cu);
+  If L2>3 Then JA:=JA+HdELambda*HdESplitBits(X,Y,L2,0);
+  If (L2>3) And ((Cu.Skip<>0) Or ((Cu.Pred=2) And (Cu.RqtRoot=0))) Then Begin
+   HdECuL[HdECuN]:=Cu; Inc(HdECuN); HdEQuad:=JA; Exit;
+  End;
+ End;
+ If L2>3 Then Begin
+  If Inside Then HdECopyRec(True,X,Y,L2,@HdESvY[L2],@HdESvU[L2],@HdESvV[L2]);
+  N0:=HdECuN; JB:=0; H:=Sz Shr 1;
+  For I:=0 To 3 Do
+   If (X+(I And 1)*H<HdEWp) And (Y+(I Shr 1)*H<HdEHp) Then JB:=JB+HdEQuad(X+(I And 1)*H,Y+(I Shr 1)*H,L2-1);
+  If Inside Then Begin
+   JB:=JB+HdELambda*HdESplitBits(X,Y,L2,1);
+   If JA<=JB Then Begin
+    HdECopyRec(False,X,Y,L2,@HdESvY[L2],@HdESvU[L2],@HdESvV[L2]);
+    HdECuN:=N0; HdECuL[HdECuN]:=Cu; Inc(HdECuN);
+    HdESetMaps(Cu);
+    HdEQuad:=JA; Exit;
+   End;
+  End;
+  HdEQuad:=JB;
+ End Else Begin
+  HdECuL[HdECuN]:=Cu; Inc(HdECuN);
+  HdEQuad:=JA;
+ End;
+End;
+{ ---------------------------------------------------------------------- }
+{ Filtre de deblocage (8.7.2)                                               }
+{ ---------------------------------------------------------------------- }
+
+Function HdEMvDiff(Ax,Ay,Bx,By: LongInt): Boolean;
+Begin
+ HdEMvDiff:=(HdEAbs(Ax-Bx)>=4) Or (HdEAbs(Ay-By)>=4);
+End;
+
+{ force de bord entre deux blocs 4x4 (indices de cartes) ; EdgeBits : bit TU = 1, bit PU = 2 }
+Function HdEBs(Pb,Qb,Edge: LongInt): LongInt;
+Var Np,Nq,I: LongInt; Pp,Qp2: Array[0..1] Of LongInt; Pm,Qm: Array[0..1,0..1] Of LongInt; B1,B2: Boolean;
+Begin
+ If (HdEMPred^[Pb]=1) Or (HdEMPred^[Qb]=1) Then Begin HdEBs:=2; Exit; End;
+ If ((Edge And 1)<>0) And ((HdEMCbf^[Pb]<>0) Or (HdEMCbf^[Qb]<>0)) Then Begin HdEBs:=1; Exit; End;
+ Np:=0; Nq:=0;
+ For I:=0 To 1 Do Begin
+  If HdEMMv^[Pb*6+4+I]>=0 Then Begin
+   Pp[Np]:=HdERefPocT[I,HdEMMv^[Pb*6+4+I]]; Pm[Np,0]:=HdEMMv^[Pb*6+2*I]; Pm[Np,1]:=HdEMMv^[Pb*6+2*I+1]; Inc(Np);
+  End;
+  If HdEMMv^[Qb*6+4+I]>=0 Then Begin
+   Qp2[Nq]:=HdERefPocT[I,HdEMMv^[Qb*6+4+I]]; Qm[Nq,0]:=HdEMMv^[Qb*6+2*I]; Qm[Nq,1]:=HdEMMv^[Qb*6+2*I+1]; Inc(Nq);
+  End;
+ End;
+ HdEBs:=1;
+ If Np<>Nq Then Exit;
+ If Np=1 Then Begin
+  If Pp[0]<>Qp2[0] Then Exit;
+  If HdEMvDiff(Pm[0,0],Pm[0,1],Qm[0,0],Qm[0,1]) Then Exit;
+  HdEBs:=0; Exit;
+ End;
+ If Np=0 Then Begin HdEBs:=0; Exit; End;
+ If Not (((Pp[0]=Qp2[0]) And (Pp[1]=Qp2[1])) Or ((Pp[0]=Qp2[1]) And (Pp[1]=Qp2[0]))) Then Exit;
+ If Pp[0]<>Pp[1] Then Begin
+  If Pp[0]=Qp2[0] Then Begin
+   If HdEMvDiff(Pm[0,0],Pm[0,1],Qm[0,0],Qm[0,1]) Or HdEMvDiff(Pm[1,0],Pm[1,1],Qm[1,0],Qm[1,1]) Then Exit;
+  End Else Begin
+   If HdEMvDiff(Pm[0,0],Pm[0,1],Qm[1,0],Qm[1,1]) Or HdEMvDiff(Pm[1,0],Pm[1,1],Qm[0,0],Qm[0,1]) Then Exit;
+  End;
+  HdEBs:=0;
+ End Else Begin
+  B1:=HdEMvDiff(Pm[0,0],Pm[0,1],Qm[0,0],Qm[0,1]) Or HdEMvDiff(Pm[1,0],Pm[1,1],Qm[1,0],Qm[1,1]);
+  B2:=HdEMvDiff(Pm[0,0],Pm[0,1],Qm[1,0],Qm[1,1]) Or HdEMvDiff(Pm[1,0],Pm[1,1],Qm[0,0],Qm[0,1]);
+  If B1 And B2 Then Exit;
+  HdEBs:=0;
+ End;
+End;
+
+{ filtre 4 lignes de luma ; Q0 = indice du premier echantillon cote Q, Ac = pas a travers le bord, Al = pas le long }
+Procedure HdEFiltLuma(Pl: PHdEPx; Q0,Ac,Al,Bs: LongInt);
+Var Qi,Tc,Beta,I,P0,P1,P2,P3,Q0v,Q1,Q2,Q3,Dp0,Dp3,Dq0,Dq3,Dpq0,Dpq3,Dp,Dq,D,De,Dep,Deq,Delta,Dl,B: LongInt; Sam0,Sam3: Boolean;
+ Function Px(K,L: LongInt): LongInt; Begin Px:=Pl^[Q0+L*Al-(K+1)*Ac]; End;
+ Function Qx(K,L: LongInt): LongInt; Begin Qx:=Pl^[Q0+L*Al+K*Ac]; End;
+Begin
+ Qi:=HdEClip(HdEQp,0,51); Beta:=HdEBetaTab[Qi]*(1 Shl (HdEBd-8));
+ Qi:=HdEClip(HdEQp+2*(Bs-1),0,53); Tc:=HdETcTab[Qi]*(1 Shl (HdEBd-8));
+ Dp0:=HdEAbs(Px(2,0)-2*Px(1,0)+Px(0,0)); Dp3:=HdEAbs(Px(2,3)-2*Px(1,3)+Px(0,3));
+ Dq0:=HdEAbs(Qx(2,0)-2*Qx(1,0)+Qx(0,0)); Dq3:=HdEAbs(Qx(2,3)-2*Qx(1,3)+Qx(0,3));
+ Dpq0:=Dp0+Dq0; Dpq3:=Dp3+Dq3; Dp:=Dp0+Dp3; Dq:=Dq0+Dq3; D:=Dpq0+Dpq3;
+ If D>=Beta Then Exit;
+ Sam0:=(2*Dpq0<(Beta Shr 2)) And (HdEAbs(Px(3,0)-Px(0,0))+HdEAbs(Qx(0,0)-Qx(3,0))<(Beta Shr 3)) And (HdEAbs(Px(0,0)-Qx(0,0))<((5*Tc+1) Shr 1));
+ Sam3:=(2*Dpq3<(Beta Shr 2)) And (HdEAbs(Px(3,3)-Px(0,3))+HdEAbs(Qx(0,3)-Qx(3,3))<(Beta Shr 3)) And (HdEAbs(Px(0,3)-Qx(0,3))<((5*Tc+1) Shr 1));
+ If Sam0 And Sam3 Then De:=2 Else De:=1;
+ Dep:=Ord(Dp<((Beta+(Beta Shr 1)) Shr 3)); Deq:=Ord(Dq<((Beta+(Beta Shr 1)) Shr 3));
+ For I:=0 To 3 Do Begin
+  B:=Q0+I*Al;
+  P0:=Pl^[B-Ac]; P1:=Pl^[B-2*Ac]; P2:=Pl^[B-3*Ac]; P3:=Pl^[B-4*Ac];
+  Q0v:=Pl^[B]; Q1:=Pl^[B+Ac]; Q2:=Pl^[B+2*Ac]; Q3:=Pl^[B+3*Ac];
+  If De=2 Then Begin
+   Pl^[B-Ac]:=HdEClip((P2+2*P1+2*P0+2*Q0v+Q1+4) Shr 3,P0-2*Tc,P0+2*Tc);
+   Pl^[B-2*Ac]:=HdEClip((P2+P1+P0+Q0v+2) Shr 2,P1-2*Tc,P1+2*Tc);
+   Pl^[B-3*Ac]:=HdEClip((2*P3+3*P2+P1+P0+Q0v+4) Shr 3,P2-2*Tc,P2+2*Tc);
+   Pl^[B]:=HdEClip((P1+2*P0+2*Q0v+2*Q1+Q2+4) Shr 3,Q0v-2*Tc,Q0v+2*Tc);
+   Pl^[B+Ac]:=HdEClip((P0+Q0v+Q1+Q2+2) Shr 2,Q1-2*Tc,Q1+2*Tc);
+   Pl^[B+2*Ac]:=HdEClip((P0+Q0v+Q1+3*Q2+2*Q3+4) Shr 3,Q2-2*Tc,Q2+2*Tc);
+  End Else Begin
+   Delta:=HdESar(9*(Q0v-P0)-3*(Q1-P1)+8,4);
+   If HdEAbs(Delta)<Tc*10 Then Begin
+    Delta:=HdEClip(Delta,-Tc,Tc);
+    Pl^[B-Ac]:=HdEClip(P0+Delta,0,HdEMx);
+    Pl^[B]:=HdEClip(Q0v-Delta,0,HdEMx);
+    If Dep<>0 Then Begin
+     Dl:=HdEClip(HdESar(((P2+P0+1) Shr 1)-P1+Delta,1),-(Tc Shr 1),Tc Shr 1);
+     Pl^[B-2*Ac]:=HdEClip(P1+Dl,0,HdEMx);
+    End;
+    If Deq<>0 Then Begin
+     Dl:=HdEClip(HdESar(((Q2+Q0v+1) Shr 1)-Q1-Delta,1),-(Tc Shr 1),Tc Shr 1);
+     Pl^[B+Ac]:=HdEClip(Q1+Dl,0,HdEMx);
+    End;
+   End;
+  End;
+ End;
+End;
+
+{ filtre 2 lignes de chroma }
+Procedure HdEFiltChroma(Pl: PHdEPx; Q0,Ac,Al: LongInt);
+Var Qi,Tc,I,B,P0,P1,Q0v,Q1,Delta: LongInt;
+Begin
+ Qi:=HdEClip(HdEQpC+2,0,53); Tc:=HdETcTab[Qi]*(1 Shl (HdEBd-8));
+ For I:=0 To 1 Do Begin
+  B:=Q0+I*Al;
+  P0:=Pl^[B-Ac]; P1:=Pl^[B-2*Ac]; Q0v:=Pl^[B]; Q1:=Pl^[B+Ac];
+  Delta:=HdEClip(HdESar(((Q0v-P0) Shl 2)+P1-Q1+4,3),-Tc,Tc);
+  Pl^[B-Ac]:=HdEClip(P0+Delta,0,HdEMx);
+  Pl^[B]:=HdEClip(Q0v-Delta,0,HdEMx);
+ End;
+End;
+
+Procedure HdEDeblockPic;
+Var X,Y,Dir,Bs,Qb,Pb,Ed,Xc,Yc: LongInt;
+Begin
+ { bords verticaux }
+ For Dir:=0 To 1 Do Begin
+  Y:=0;
+  If Dir=0 Then Begin
+   For Y:=0 To HdEH4-1 Do
+    For X:=2 To HdEW4-1 Do If (X And 1)=0 Then Begin
+     Qb:=Y*HdEW4+X; Pb:=Qb-1;
+     Ed:=HdEMEdge^[Qb] And 3;
+     If Ed=0 Then Continue;
+     Bs:=HdEBs(Pb,Qb,Ed);
+     If Bs=0 Then Continue;
+     HdEFiltLuma(HdERecP[0],Y*4*HdEStr[0]+X*4,1,HdEStr[0],Bs);
+     If (Bs=2) And ((X And 3)=0) Then Begin
+      HdEFiltChroma(HdERecP[1],Y*2*HdEStr[1]+X*2,1,HdEStr[1]);
+      HdEFiltChroma(HdERecP[2],Y*2*HdEStr[2]+X*2,1,HdEStr[2]);
+     End;
+    End;
+  End Else Begin
+   For Y:=2 To HdEH4-1 Do If (Y And 1)=0 Then
+    For X:=0 To HdEW4-1 Do Begin
+     Qb:=Y*HdEW4+X; Pb:=Qb-HdEW4;
+     Ed:=(HdEMEdge^[Qb] Shr 2) And 3;
+     If Ed=0 Then Continue;
+     Bs:=HdEBs(Pb,Qb,Ed);
+     If Bs=0 Then Continue;
+     HdEFiltLuma(HdERecP[0],Y*4*HdEStr[0]+X*4,HdEStr[0],1,Bs);
+     If (Bs=2) And ((Y And 3)=0) Then Begin
+      HdEFiltChroma(HdERecP[1],Y*2*HdEStr[1]+X*2,HdEStr[1],1);
+      HdEFiltChroma(HdERecP[2],Y*2*HdEStr[2]+X*2,HdEStr[2],1);
+     End;
+    End;
+  End;
+ End;
+End;
+{ ---------------------------------------------------------------------- }
+{ Pilote : images, flux, API                                                }
+{ ---------------------------------------------------------------------- }
+Procedure HdEFree;
+Var I: LongInt;
+Begin
+ If Not HdEActive Then Exit;
+ For I:=0 To HdENPics-1 Do Begin
+  FreeMem(HdEPics[I].P[0],HdEWp*HdEHp*2); FreeMem(HdEPics[I].P[1],HdECw*HdECh*2); FreeMem(HdEPics[I].P[2],HdECw*HdECh*2);
+ End;
+ For I:=0 To 2 Do FreeMem(HdESrcP[I],HdEStr[I]*(HdEHp Shr Ord(I>0))*2);
+ FreeMem(HdEMPred,HdEW4*HdEH4); FreeMem(HdEMSkip,HdEW4*HdEH4); FreeMem(HdEMDepth,HdEW4*HdEH4); FreeMem(HdEMIpm,HdEW4*HdEH4);
+ FreeMem(HdEMCbf,HdEW4*HdEH4); FreeMem(HdEMEdge,HdEW4*HdEH4); FreeMem(HdEMMv,HdEW4*HdEH4*24);
+ FreeMem(HdEZs,HdEW4*HdEH4*4); FreeMem(HdEPool,24*HDE_COEFSTRIDE*4);
+ FreeMem(HdEBuf,HdEBufCap); FreeMem(HdEOut,HdEOutCap);
+ HdEActive:=False;
+End;
+
+Procedure HdEBegin(W,H,Fn,Fd,Bitrate,Gop: LongInt);
+Var I,X,Y,Bx,By,Z,B: LongInt; Ps: LongInt;
+Begin
+ If HdEActive Then HdEFree;
+ If (HdEBd<>8) And (HdEBd<>10) Then HdEBd:=10;
+ HdEMx:=(1 Shl HdEBd)-1; HdEMid:=1 Shl (HdEBd-1); HdEQpOff:=6*(HdEBd-8);
+ HdEW:=W; HdEH:=H; HdEFn:=Fn; HdEFd:=Fd; HdEBitrate:=Bitrate; HdEGop:=Gop;
+ HdEWp:=(W+7) And (Not 7); HdEHp:=(H+7) And (Not 7);
+ HdECw:=HdEWp Div 2; HdECh:=HdEHp Div 2;
+ HdECropR:=HdEWp-W; HdECropB:=HdEHp-H;
+ HdEW4:=HdEWp Div 4; HdEH4:=HdEHp Div 4;
+ If HdEOptRefs<1 Then HdEOptRefs:=1; HdEMaxRefs:=HdEOptRefs; HdENumReorder:=0; HdEMaxMerge:=3;
+ HdEDeblock:=Not HdENoDeblock;
+ Ps:=HdEWp*HdEHp;
+ If Ps<=552960 Then HdELevel:=90 Else If Ps<=983040 Then HdELevel:=93 Else If Ps<=2228224 Then HdELevel:=120
+ Else If Ps<=8912896 Then HdELevel:=150 Else HdELevel:=180;
+ HdENPics:=HdEMaxRefs+1;
+ For I:=0 To HdENPics-1 Do Begin
+  GetMem(HdEPics[I].P[0],HdEWp*HdEHp*2); GetMem(HdEPics[I].P[1],HdECw*HdECh*2); GetMem(HdEPics[I].P[2],HdECw*HdECh*2);
+  HdEFill16(HdEPics[I].P[0],HdEWp*HdEHp,HdEMid); HdEFill16(HdEPics[I].P[1],HdECw*HdECh,HdEMid); HdEFill16(HdEPics[I].P[2],HdECw*HdECh,HdEMid);
+  HdEPics[I].Used:=False;
+ End;
+ HdEStr[0]:=HdEWp; HdEStr[1]:=HdECw; HdEStr[2]:=HdECw;
+ For I:=0 To 2 Do GetMem(HdESrcP[I],HdEStr[I]*(HdEHp Shr Ord(I>0))*2);
+ GetMem(HdEMPred,HdEW4*HdEH4); GetMem(HdEMSkip,HdEW4*HdEH4); GetMem(HdEMDepth,HdEW4*HdEH4); GetMem(HdEMIpm,HdEW4*HdEH4);
+ GetMem(HdEMCbf,HdEW4*HdEH4); GetMem(HdEMEdge,HdEW4*HdEH4); GetMem(HdEMMv,HdEW4*HdEH4*24);
+ GetMem(HdEZs,HdEW4*HdEH4*4); GetMem(HdEPool,24*HDE_COEFSTRIDE*4);
+ { adresses z-scan }
+ For Y:=0 To HdEH4-1 Do For X:=0 To HdEW4-1 Do Begin
+  Bx:=X And 7; By:=Y And 7; Z:=0;
+  For I:=0 To 2 Do Z:=Z Or (((Bx Shr I) And 1) Shl (2*I)) Or (((By Shr I) And 1) Shl (2*I+1));
+  HdEZs^[Y*HdEW4+X]:=(((Y Shr 3)*((HdEW4+7) Shr 3)+(X Shr 3)) Shl 6)+Z;
+ End;
+ HdEBufCap:=HdEWp*HdEHp*3+65536; GetMem(HdEBuf,HdEBufCap); HdEBufLen:=0; HdEBitAcc:=0; HdEBitCnt:=0;
+ HdEOutCap:=HdEWp*HdEHp*3+65536; GetMem(HdEOut,HdEOutCap); HdEOutLen:=0;
+ HdEInitCostTab; HdEInitScans; HdEInitTM;
+ HdEMakeParamSets;
+ HdEDpbN:=0; HdEFrameNo:=0; HdEPoc:=0; HdESincePoc:=0;
+
+ If Bitrate>0 Then HdETarget:=Round(Int64(Bitrate)*Fd/Fn) Else HdETarget:=0;
+ HdEQpP:=30; HdECxP:=0; HdEAccL:=0;
+ HdEActive:=True;
+End;
+
+{ en-tete de tranche }
+Procedure HdESliceHeader(NalType: LongInt);
+Var I: LongInt;
+Begin
+ HdEBufLen:=0; HdEBitAcc:=0; HdEBitCnt:=0;
+ HdEBits(1,1);                          { first_slice_segment_in_pic_flag }
+ If NalType>=16 Then HdEBits(0,1);      { no_output_of_prior_pics_flag }
+ HdEUe(0);                              { pps id }
+ HdEUe(HdESliceType);
+ If NalType<>19 Then Begin
+  HdEBits(HdEPoc And 255,8);
+  HdEBits(0,1);                         { short_term_ref_pic_set_sps_flag }
+  HdEUe(HdEDpbN); HdEUe(0);               { num_negative_pics, num_positive_pics }
+  For I:=0 To HdEDpbN-1 Do Begin
+   If I=0 Then HdEUe(HdEPoc-HdEPics[HdEDpb[0]].Poc-1) Else HdEUe(HdEPics[HdEDpb[I-1]].Poc-HdEPics[HdEDpb[I]].Poc-1);
+   HdEBits(1,1);
+  End;
+ End;
+ If HdESliceType<>2 Then Begin
+  HdEBits(1,1); HdEUe(HdENumRef0-1);
+  If HdESliceType=0 Then HdEUe(HdENumRef1-1);
+  If HdESliceType=0 Then HdEBits(0,1);   { mvd_l1_zero_flag }
+  HdEUe(5-HdEMaxMerge);
+ End;
+ HdESe(HdEQp-26);
+ If HdEDeblock Then HdEBits(1,1);        { slice_loop_filter_across_slices_enabled_flag }
+ HdEBits(1,1); HdEAlignZero;             { byte_alignment }
+End;
+
+Procedure HdEEncodeSlice;
+Var Cx,Cy,Nx,Ny,Last: LongInt;
+Begin
+ HdECabacInitEnc; HdECtxInit(HdEQp,HdEInitType);
+ Nx:=(HdEWp+31) Div 32; Ny:=(HdEHp+31) Div 32;
+ FillChar(HdEMPred^,HdEW4*HdEH4,0); FillChar(HdEMSkip^,HdEW4*HdEH4,0); FillChar(HdEMEdge^,HdEW4*HdEH4,0);
+ FillChar(HdEMCbf^,HdEW4*HdEH4,0);
+ HdELambda:=0.57*Exp(Ln(2.0)*(HdEQp-12)/3)*(1 Shl (2*(HdEBd-8)));
+ If HdESliceType<>2 Then HdELambda:=HdELambda*0.8;
+ HdESqrtLambda:=Sqrt(HdELambda);
+ HdEQpC:=HdEChromaQp(HdEQp);
+ HdEQpL:=HdEQp+HdEQpOff; HdEQpCP:=HdEQpC+HdEQpOff;
+ For Cy:=0 To Ny-1 Do For Cx:=0 To Nx-1 Do Begin
+  HdEPoolN:=0; HdECuN:=0; HdEEst:=False;
+  HdEQuad(Cx*32,Cy*32,5);
+  HdEWi:=0; HdEWriteQuad(Cx*32,Cy*32,5);
+  If (Cy=Ny-1) And (Cx=Nx-1) Then HdETerm(1) Else HdETerm(0);
+ End;
+ HdEAlignZero;
+End;
+
+Procedure HdEEncodePicture(Qp: LongInt);
+Var NalType,I: LongInt;
+Begin
+ HdEQp:=Qp;
+ If HdEIdr Then HdEEmitSei;
+ HdECur:=-1;
+ For I:=0 To HdENPics-1 Do If Not HdEPics[I].Used Then Begin HdECur:=I; Break; End;
+ For I:=0 To 2 Do HdERecP[I]:=HdEPics[HdECur].P[I];
+ HdEPics[HdECur].Poc:=HdEPoc;
+ If HdEIdr Then Begin NalType:=19; HdESliceType:=2; End Else Begin NalType:=1; HdESliceType:=1; End;
+ If HdESliceType=2 Then HdEInitType:=0 Else HdEInitType:=1;
+ HdECurPoc:=HdEPoc;
+ If HdESliceType<>2 Then Begin
+  HdENumRef0:=HdEDpbN; HdENumRef1:=0;
+  For I:=0 To HdEDpbN-1 Do Begin HdERefL[0,I]:=HdEDpb[I]; HdERefPocT[0,I]:=HdEPics[HdEDpb[I]].Poc; End;
+ End;
+ HdESliceHeader(NalType);
+ HdEEncodeSlice;
+ HdELastBits:=HdEBufLen*8;
+ HdEEmitNal(NalType,0);
+ If HdEDeblock Then HdEDeblockPic;
+End;
+
+{ valide l'image codee comme reference }
+Procedure HdECommitPicture;
+Var I: LongInt;
+Begin
+ HdEPics[HdECur].Used:=True;
+ For I:=HdEDpbN DownTo 1 Do HdEDpb[I]:=HdEDpb[I-1];
+ HdEDpb[0]:=HdECur; Inc(HdEDpbN);
+ If HdEDpbN>HdEMaxRefs Then Begin
+  HdEPics[HdEDpb[HdEDpbN-1]].Used:=False; Dec(HdEDpbN);
+ End;
+End;
+
+Procedure HdELoadSource(Yuv: PHdEPx);
+Var X,Y,J,I,CwS,ChS,V: LongInt;
+Begin
+ For Y:=0 To HdEHp-1 Do Begin
+  J:=Y; If J>HdEH-1 Then J:=HdEH-1;
+  For X:=0 To HdEW-1 Do Begin V:=Yuv^[J*HdEW+X]; If V>HdEMx Then V:=HdEMx; HdESrcP[0]^[Y*HdEWp+X]:=V; End;
+  For X:=HdEW To HdEWp-1 Do HdESrcP[0]^[Y*HdEWp+X]:=HdESrcP[0]^[Y*HdEWp+HdEW-1];
+ End;
+ CwS:=HdEW Div 2; ChS:=HdEH Div 2;
+ For I:=1 To 2 Do
+  For Y:=0 To HdECh-1 Do Begin
+   J:=Y; If J>ChS-1 Then J:=ChS-1;
+   For X:=0 To CwS-1 Do Begin V:=Yuv^[HdEW*HdEH+(I-1)*CwS*ChS+J*CwS+X]; If V>HdEMx Then V:=HdEMx; HdESrcP[I]^[Y*HdECw+X]:=V; End;
+   For X:=CwS To HdECw-1 Do HdESrcP[I]^[Y*HdECw+X]:=HdESrcP[I]^[Y*HdECw+CwS-1];
+  End;
+End;
+
+Function HdEQstep(Qp: LongInt): Double;
+Begin HdEQstep:=Exp(Ln(2.0)*(Qp-4)/6); End;
+
+Function HdEClampQp(Q: LongInt): LongInt;
+Begin
+ If Q<4-HdEQpOff Then Q:=4-HdEQpOff; If Q>51 Then Q:=51; HdEClampQp:=Q;
+End;
+
+Function HdEClampCqp(Q: LongInt): LongInt;
+Begin
+ If Q<4-HdEQpOff Then Q:=4-HdEQpOff; If Q>51 Then Q:=51; HdEClampCqp:=Q;
+End;
+
+Function HdEFrame(Yuv: PHdEPx; Var Pkt: PEABuffer; Var PktLen: LongInt; Var IsKey: Boolean; Var Dts,Pts: LongInt): Boolean;
+Var Qp,I,Trial,Dq,Tn,Ti: LongInt; R: Double;
+Begin
+ HdEFrame:=False;
+ If Not HdEActive Then Exit;
+ HdELoadSource(Yuv);
+ HdEIdr:=(HdEFrameNo=0) Or (HdESincePoc>=HdEGop);
+ If HdEIdr Then Begin
+  For I:=0 To HdENPics-1 Do HdEPics[I].Used:=False;
+  HdEDpbN:=0; HdEPoc:=0; HdESincePoc:=0;
+ End;
+ HdEOutLen:=0;
+ If HdETarget<=0 Then Begin
+  Qp:=HdEClampCqp(HdECqp);
+  HdEEncodePicture(Qp);
+ End Else If HdEIdr Then Begin
+  { image cle : essais pour approcher ~3 fois le budget d'une image P }
+  Ti:=HdETarget*3;
+  If HdEFrameNo=0 Then Qp:=28 Else Qp:=HdEClampQp(HdEQpP-2);
+  Trial:=0;
+  Repeat
+   HdEOutLen:=0;
+   HdEEncodePicture(Qp); Inc(Trial);
+   If (HdEFrameNo>0) Or (Trial>=5) Then Break;
+   R:=HdELastBits/Ti;
+   If (R>0.8) And (R<1.25) Then Break;
+   Dq:=Round(6*Ln(R)/Ln(2.0)); If Dq=0 Then If R>1 Then Dq:=1 Else Dq:=-1;
+   If Dq>12 Then Dq:=12; If Dq<-12 Then Dq:=-12;
+   Tn:=HdEClampQp(Qp+Dq);
+   If Tn=Qp Then Break;
+   Qp:=Tn;
+  Until False;
+  If HdEFrameNo=0 Then HdEQpP:=HdEClampQp(Qp+3);
+ End Else Begin
+  Tn:=HdETarget-Round(HdEAccL/24);
+  If Tn<HdETarget Div 3 Then Tn:=HdETarget Div 3;
+  If Tn>HdETarget*2 Then Tn:=HdETarget*2;
+  Qp:=HdEQpP;
+  If HdECxP>0 Then Begin
+   Dq:=Round(4+6*Ln(HdECxP/Tn)/Ln(2.0));
+   Qp:=Dq;
+   If Qp>HdEQpP+3 Then Qp:=HdEQpP+3;
+   If Qp<HdEQpP-3 Then Qp:=HdEQpP-3;
+  End;
+  Qp:=HdEClampQp(Qp);
+  HdEEncodePicture(Qp);
+  R:=HdELastBits*HdEQstep(Qp);
+  If HdECxP<=0 Then HdECxP:=R Else HdECxP:=0.5*HdECxP+0.5*R;
+  HdEQpP:=Qp;
+ End;
+ If HdETarget>0 Then Begin
+  HdEAccL:=HdEAccL+HdELastBits-HdETarget;
+  If HdEAccL>HdETarget*60 Then HdEAccL:=HdETarget*60;
+  If HdEAccL<-HdETarget*60 Then HdEAccL:=-HdETarget*60;
+ End;
+ HdECommitPicture;
+ Pkt:=HdEOut; PktLen:=HdEOutLen; IsKey:=HdEIdr; Dts:=HdEFrameNo; Pts:=HdEFrameNo;
+ Inc(HdEFrameNo); Inc(HdEPoc); Inc(HdESincePoc);
+ HdEFrame:=True;
+End;
+
+{ copie l'image reconstruite (rognee) de la derniere image codee, YUV420 contigu }
+Procedure HdEGetRecon(Dst: PHdEPx);
+Var Y,I,Cs,Ch2: LongInt;
+Begin
+ For Y:=0 To HdEH-1 Do Move(HdEPics[HdECur].P[0]^[Y*HdEWp],Dst^[Y*HdEW],HdEW*2);
+ Cs:=HdEW Div 2; Ch2:=HdEH Div 2;
+ For I:=1 To 2 Do
+  For Y:=0 To Ch2-1 Do Move(HdEPics[HdECur].P[I]^[Y*HdECw],Dst^[HdEW*HdEH+(I-1)*Cs*Ch2+Y*Cs],Cs*2);
+End;
+
+{ Pas d'images B ni de reordonnancement : chaque HdEFrame produit exactement un paquet, donc rien a vider.
+  HdEFlush existe pour le protocole general et renvoie toujours False. }
+Function HdEFlush(Var Pkt: PEABuffer; Var PktLen: LongInt; Var IsKey: Boolean; Var Dts,Pts: LongInt): Boolean;
+Begin
+ PktLen:=0; IsKey:=False; Dts:=0; Pts:=0; Pkt:=HdEOut;
+ HdEFlush:=False;
+End;
 {$IFDEF FPC}
 { ---- AC-3 : decodeur / encodeur natif (FFMPEG.PAS, d apres FFmpeg ac3dec.c / ac3enc.c, LGPL-2.1+) ---- }
 Procedure ProcessAC3E(Const Source,Target:String; Encoding:Boolean;
@@ -115830,6 +120149,7 @@ Begin
    H4VidHook:=H4Trampoline; H4InitState; H4OutBuf:=Nil;
    If Mode=0 Then NalSz:=H4FeedAvcc(PEABuffer(@T.Cfg),T.CfgLen);
   End;
+  If HdActive Then HdAttach(Mode,H4Trampoline);
   I:=First;
   While (I<T.N) And Not VStopFlag And Not Stopped Do Begin
    If T.Sz^[I]<=0 Then Begin
@@ -115884,6 +120204,7 @@ Begin
  End Else Begin VOk:=False; VErr:=EngMsg; End;
  If VFOpen Then Begin Close(VF); VFOpen:=False; End;
  If Mode=2 Then M4VidHook:=Nil;
+ If HdActive Then HdDetach;
  If Mode=7 Then Begin PrFree; PrHook:=Nil; End
  Else If (Mode>=8) And (Mode<=10) Then Begin V6Free; V6Hook:=Nil; End
  Else If Mode=12 Then Begin AvFree; AvHook:=Nil; End
@@ -116307,6 +120628,7 @@ Begin
   End Else If MT.T^.CfgLen>0 Then Begin
   If (MT.T^.Codec='hvc1') Or (MT.T^.Codec='hev1') Then Cfg:=MBegin('hvcC') Else If MT.T^.Codec='s263' Then Cfg:=MBegin('d263') Else Cfg:=MBegin('avcC');
   For I:=0 To MT.T^.CfgLen-1 Do M8(MT.T^.Cfg[I]); MEnd(Cfg);
+  If HdMuxMeta And ((MT.T^.Codec='hvc1') Or (MT.T^.Codec='hev1')) Then Begin K:=HdMp4Boxes(HdInfo,@HdMBuf); For I:=0 To K-1 Do M8(HdMBuf[I]); End;
   End;
   MEnd(Ent);
  End Else Begin
@@ -116762,7 +121084,9 @@ Begin
   End;
   If Tr[K].T^.IsVideo Then Begin
    If Tr[K].T^.Dur^[Tr[K].First]>0 Then EUInt($23E383,Round(1.0E9*Tr[K].T^.Dur^[Tr[K].First]/Tr[K].T^.Ts));
-   I:=EBeg($E0); EUInt($B0,Tr[K].T^.W); EUInt($BA,Tr[K].T^.H); EEnd(I);
+   I:=EBeg($E0); EUInt($B0,Tr[K].T^.W); EUInt($BA,Tr[K].T^.H);
+   If HdMuxMeta And ((Tr[K].T^.Codec='hvc1') Or (Tr[K].T^.Codec='hev1')) Then Begin Sz:=HdMkvColour(HdInfo,@HdMBuf); For Mn:=0 To Sz-1 Do M8(HdMBuf[Mn]); End;
+   EEnd(I);
   End Else Begin
    I:=EBeg($E1); EFlt($B5,Tr[K].T^.Rate); EUInt($9F,Tr[K].T^.Chans); EEnd(I);
   End;
@@ -117154,7 +121478,7 @@ Begin
  Gcd:=A;
 End;
 
-Var VJAlt,VJHevc: Boolean; VJDecim: LongInt; VJMem: Integer;
+Var VJAlt,VJHevc,VJIn16: Boolean; VJDecim,VJFsz: LongInt; VJMem: Integer; VJOut16,VJIn8: PEABuffer; VJIn8Cap: LongInt;
 Function MemEncodeTemp(Kind: Integer; Var Vo: TTrkIn; Var Mem: PBArr; Var Err: String): Boolean; Forward;
 Function MemEncKind(Const Pr: TProf): Integer; Forward;
 Function AltVideoOut(Var M: TMedia; Const Pr: TProf; Const Dst: String; HaveAudio: Boolean; Var Err: String): Boolean; Forward;
@@ -117201,6 +121525,23 @@ Begin
  ImgFree(Im);
 End;
 
+{ Tache 10 bits : image I420 en mots 16 bits (VJIn16) ou en octets ; sans retouche ni mise a l'echelle la copie est directe,
+  sinon la retouche (8 bits) est appliquee sur une version 8 bits puis le resultat est elargi a 10 bits }
+Procedure ProcFrame10(B: Pointer; W,H: LongInt);
+Begin
+ If VJIn16 And (Not VJNeedEdit) And (W=VJOutW) And (H=VJOutH) And (Not Odd(W)) And (Not Odd(H)) Then Begin
+  Move(B^,VJOut16^,W*H*3); Exit;
+ End;
+ If VJIn16 Then Begin
+  If VJIn8Cap<W*H*2+64 Then Begin
+   If VJIn8<>Nil Then FreeMem(VJIn8);
+   VJIn8Cap:=W*H*2+64; GetMem(VJIn8,VJIn8Cap);
+  End;
+  HdReduce10To8(B,W,H,VJIn8); ProcFrame(VJIn8,W,H);
+ End Else ProcFrame(PEABuffer(B),W,H);
+ HdExpand8To10(VJOut,VJOutW,VJOutH,VJOut16);
+End;
+
 { Phase 1 : decodage + retouche, images ecrites dans un fichier temporaire }
 Procedure TranscodeCb(B: PEABuffer; W,H: LongInt);
 Var Ms: LongInt;
@@ -117213,18 +121554,26 @@ Begin
  If Not VJStarted Then Begin
   CalcOutDims(VJMed^,W,H,VJOutW,VJOutH);
   GetMem(VJOut,VJOutW*VJOutH*3 Div 2+64);
+  VJFsz:=VJOutW*VJOutH*3 Div 2;
+  If HdJob10 Then Begin GetMem(VJOut16,VJOutW*VJOutH*3+64); VJFsz:=VJOutW*VJOutH*3; End;
   VJTmpName:=TmpName('YUV');
   Assign(VJTmp,VJTmpName);
   {$I-}Rewrite(VJTmp,1);{$I+}
   If IOResult<>0 Then Begin VJErr:='Fichier temporaire impossible : '+VJTmpName; VStopFlag:=True; Exit; End;
   VJStarted:=True; VJCnt:=0;
  End;
- ProcFrame(B,W,H);
- {$I-}BlockWrite(VJTmp,VJOut^,VJOutW*VJOutH*3 Div 2);{$I+}
+ If HdJob10 Then ProcFrame10(B,W,H) Else ProcFrame(B,W,H);
+ {$I-}If HdJob10 Then BlockWrite(VJTmp,VJOut16^,VJFsz) Else BlockWrite(VJTmp,VJOut^,VJFsz);{$I+}
  If IOResult<>0 Then Begin VJErr:='Disque plein (fichier temporaire).'; VStopFlag:=True; Exit; End;
  Inc(VJCnt);
  If (VJIdx And 3)=0 Then UiTick(VJIdx,VJN);
  If Stopped Then VStopFlag:=True;
+End;
+
+{ recepteur des images 10 bits (mots 16 bits) fournies par pe_hdr.pas }
+Procedure TranscodeCb16(B: Pointer; W,H: LongInt);
+Begin
+ VJIn16:=True; TranscodeCb(PEABuffer(B),W,H); VJIn16:=False;
 End;
 
 { Phase 2 : encodage H.264 depuis le fichier temporaire }
@@ -117445,7 +121794,8 @@ Begin
  StartMs:=M.TrimS; EndMs:=M.TrimE;
  VJAlt:=InList(Pr.Ext,'AVI,WMV,OGV,MPG,WEBM'); VJDecim:=1;
  HvMem:=Nil; VJMem:=MemEncKind(Pr); VJHevc:=VJMem=1;
- Reenc:=VJAlt Or Not (((VJMem=0) And (DecMode=0)) Or ((VJMem=1) And (DecMode=6))) Or EditsPresent(M) Or (StartMs>0) Or ((VJResW>0) And ((VJResW<>V.W) Or (VJResH<>V.H))) Or (V.W=0);
+ HdJobBegin(M.Path,Fmt,V.Codec,@V.Cfg,V.CfgLen,Pr.VC='HEVC10',V.Off^[0],V.Sz^[0]);
+ Reenc:=VJAlt Or Not (((VJMem=0) And (DecMode=0)) Or ((VJMem=1) And (DecMode=6))) Or ((VJMem=1) And HdNeedReenc(Pr.VC='HEVC10')) Or EditsPresent(M) Or (StartMs>0) Or ((VJResW>0) And ((VJResW<>V.W) Or (VJResH<>V.H))) Or (V.W=0);
  FillChar(Tr,SizeOf(Tr),0); NT:=0; Ok:=False; APath:=''; FillChar(AOut,SizeOf(AOut),0);
  SkipV:=False;
  { ---- audio ---- }
@@ -117497,9 +121847,10 @@ Begin
   VJFn:=Fn; VJFd:=Fd; VJMed:=@M; VJIdx:=0; VJN:=V.N; VJStarted:=False; VJNeedEdit:=EditsPresent(M);
   VJBitrate:=Pr.VKb*1000; If VJBitrate<=0 Then VJBitrate:=2000000;
   VJTrimS:=StartMs; VJTrimE:=EndMs; VJErr:=''; VJOut:=Nil;
-  VFrameCb:=TranscodeCb;
-  StageLo:=10; StageHi:=50; VJStarted:=False; VJCnt:=0;
+  VFrameCb:=TranscodeCb; HdOut16:=TranscodeCb16; HdActive:=True;
+  StageLo:=10; StageHi:=50; VJStarted:=False; VJCnt:=0; VJOut16:=Nil; VJIn8:=Nil; VJIn8Cap:=0;
   Ok:=DecodeVideoTrack(DecPath,V,0,DecMode,Err);
+  HdActive:=False;
   VFrameCb:=Nil;
   If Y4<>'' Then DelFile(Y4);
   If Ok And (VJErr<>'') Then Begin Ok:=False; Err:=VJErr; End;
@@ -117514,6 +121865,8 @@ Begin
    Close(VJTmp); DelFile(VJTmpName);
   End;
   If VJOut<>Nil Then Begin FreeMem(VJOut,VJOutW*VJOutH*3 Div 2+64); VJOut:=Nil; End;
+  If VJOut16<>Nil Then Begin FreeMem(VJOut16); VJOut16:=Nil; End;
+  If VJIn8<>Nil Then Begin FreeMem(VJIn8); VJIn8:=Nil; End;
   If Ok And Not VJAlt Then Begin
    If VJMem>0 Then Begin
     Tr[0].T:=@Vo; Tr[0].First:=0; Tr[0].Last:=Vo.N-1; Tr[0].Mem:=HvMem; Tr[0].Annex:=False; NT:=1;
@@ -117534,6 +121887,7 @@ Begin
   If (APath<>'') And (APath<>M.Path) Then Begin DelFile(APath); TrkClear(AOut); End;
  End;
  TrkClear(V); TrkClear(A);
+ HdJobEnd;
  VideoJobCore:=Ok;
 End;
 
@@ -118664,6 +123018,40 @@ Begin
  HevcEncodeTemp:=Ok;
 End;
 
+{ ---- encodeur HEVC Main10 : images 16 bits (yuv420p10le) du fichier temporaire -> echantillons en memoire ---- }
+Function HevcEncodeTemp10(Var Vo: TTrkIn; Var Mem: PBArr; Var Err: String): Boolean;
+Var I,Fsz,P,Len,Cap,Pl,Dts,Pts: LongInt; Got: Word; Buf: PHdEPx; Pk: PEABuffer; Key,Ok: Boolean; Hb: Array[0..2047] Of Byte; Hl: LongInt;
+Begin
+ HevcEncodeTemp10:=False; Fsz:=VJOutW*VJOutH*3; Cap:=1 Shl 20; Len:=0; GetMem(Mem,Cap);
+ GetMem(Buf,Fsz+16); Seek(VJTmp,0); Ok:=True;
+ HdEBd:=10; HdECqp:=26; HdEOptRefs:=2; HdENoDeblock:=False; HdEUseInfo:=True;
+ HdEBegin(VJOutW,VJOutH,VJFn,VJFd,VJBitrate,Max(1,(VJFn*10) Div Max(VJFd,1)));
+ FillChar(Vo,SizeOf(Vo),0); TrkAlloc(Vo,VJCnt);
+ For I:=0 To VJCnt-1 Do Begin
+  P:=0;
+  While P<Fsz Do Begin
+   {$I-}BlockRead(VJTmp,PEABuffer(Buf)^[P],Min(32768,Fsz-P),Got);{$I+}
+   If (IOResult<>0) Or (Got=0) Then Begin Ok:=False; Break; End;
+   Inc(P,Got);
+  End;
+  If Not Ok Then Break;
+  If Not HdEFrame(Buf,Pk,Pl,Key,Dts,Pts) Then Begin Ok:=False; Err:='Encodage HEVC 10 bits impossible.'; Break; End;
+  If Len+Pl+16>Cap Then Begin ReallocMem(Mem,Cap*2+Pl); Cap:=Cap*2+Pl; End;
+  Move(Pk^,Mem^[Len],Pl);
+  Vo.Off^[I]:=Len; Vo.Sz^[I]:=Pl; Vo.Dur^[I]:=VJFd; Vo.Sync^[I]:=Ord(Key); Vo.Cts^[I]:=0; Inc(Len,Pl);
+  If (I And 1)=0 Then Begin UiTick(I,VJCnt); If Stopped Then Begin Ok:=False; Err:='Conversion annul'#233'e.'; Break; End; End;
+ End;
+ FreeMem(Buf,Fsz+16);
+ If Ok Then Begin
+  Hl:=HdEHvcC(Hb);
+  For I:=0 To Hl-9 Do Vo.Cfg[I]:=Hb[8+I]; Vo.CfgLen:=Hl-8;
+  Vo.Ok:=True; Vo.IsVideo:=True; Vo.Codec:='hvc1'; Vo.Ts:=VJFn; Vo.W:=VJOutW; Vo.H:=VJOutH;
+ End Else Begin FreeMem(Mem); Mem:=Nil; End;
+ HdEFree;
+ If (Not Ok) And (Err='') Then Err:='Lecture du fichier temporaire impossible.';
+ HevcEncodeTemp10:=Ok;
+End;
+
 { ---- Y4M a partir du fichier temporaire d'images brutes ---- }
 Function WriteY4m(Const Dst: String; Var Err: String): Boolean;
 Var FO: File; Hd: String; I,Fsz,P: LongInt; Got: Word; Buf: PEABuffer; Ok: Boolean; Fr: String;
@@ -118935,7 +123323,7 @@ End;
 Function MemEncKind(Const Pr: TProf): Integer;
 Begin
  MemEncKind:=0; MemEncSub:=0;
- If Pr.VC='HEVC' Then MemEncKind:=1
+ If (Pr.VC='HEVC') Or (Pr.VC='HEVC10') Then MemEncKind:=1
  Else If Pr.VC='H263' Then MemEncKind:=2
  Else If Pr.VC='DNxHD' Then Begin MemEncKind:=6; If Pr.VKb<=0 Then MemEncSub:=-1 Else MemEncSub:=Pr.VKb; End
  Else If Pr.VC='MJPEG' Then MemEncKind:=7
@@ -118950,7 +123338,7 @@ Function MemEncodeTemp(Kind: Integer; Var Vo: TTrkIn; Var Mem: PBArr; Var Err: S
 Begin
  MemEncodeTemp:=False;
  Case Kind Of
-  1: MemEncodeTemp:=HevcEncodeTemp(Vo,Mem,Err);
+  1: If HdJob10 Then MemEncodeTemp:=HevcEncodeTemp10(Vo,Mem,Err) Else MemEncodeTemp:=HevcEncodeTemp(Vo,Mem,Err);
   2: MemEncodeTemp:=H263EncodeTemp(Vo,Mem,Err);
   5: MemEncodeTemp:=ProResEncodeTemp(Vo,Mem,Err);
   6: MemEncodeTemp:=DnxEncodeTemp(Vo,Mem,Err);
@@ -119365,6 +123753,7 @@ Var X1,Y1,X2,Y2: Integer; Done: Boolean; E: TEvent; Id,I: Integer; V: LongInt;
   Combo(X1+200,Y1+138,120,18,S,502);
   Txt(X1+20,Y1+168,'D'#233'bit vid'#233'o (kbps) :',cBlack); Combo(X1+200,Y1+164,120,18,IStr(Profs[CurProf].VKb),503);
   Txt(X1+20,Y1+194,'Cadence (i/s) :',cBlack); Combo(X1+200,Y1+190,120,18,IStr(CustFps),504);
+  Txt(X1+20,Y1+258,'HDR (PQ/HLG) :',cBlack); Combo(X1+200,Y1+254,160,18,HdHdrName,508);
   Txt(X1+20,Y1+222,'Le d'#233'bit audio s''applique au MP3. Les r'#233'glages vid'#233'o sont conserv'#233's',cGrayD);
   Txt(X1+20,Y1+234,'pour le profil mais ne servent qu'#224' un encodeur vid'#233'o externe.',cGrayD);
   Button(X1+20,Y2-34,100,24,'Par d'#233'faut',505,bsNormal);
@@ -119385,7 +123774,8 @@ Begin
     502: Begin I:=PopupMenu(E.X-40,E.Y+4,'Auto|Mono|St'#233'r'#233'o',CustCh+1,80); If I>0 Then CustCh:=I-1; End;
     503: Begin V:=Profs[CurProf].VKb; If InputNum('D'#233'bit vid'#233'o','Kbps :',V,0,100000) Then Profs[CurProf].VKb:=V; End;
     504: Begin V:=CustFps; If InputNum('Cadence','Images par seconde :',V,1,120) Then CustFps:=V; End;
-    505: Begin CustRate:=0; CustCh:=0; CustFps:=30; InitProfiles; End;
+    508: Begin I:=PopupMenu(E.X-40,E.Y+4,'Tonemap vers SDR|Passthrough (10 bits)',HdHdrMode+1,120); If I>0 Then HdHdrMode:=I-1; End;
+    505: Begin CustRate:=0; CustCh:=0; CustFps:=30; HdHdrMode:=0; InitProfiles; End;
     506: Done:=True;
     507: Done:=True;
     Else If (E.X>=X2-18) And (E.X<=X2-3) And (E.Y>=Y1+3) And (E.Y<=Y1+18) Then Done:=True;
