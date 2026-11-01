@@ -1550,6 +1550,12 @@ Begin
  AddProf(0,'AVI','AVI','MPEG4','MP3','Auto',3000,192,44100,2);
  AddProf(0,'WMV','WMV','WMV2','WMA','Auto',2500,128,44100,2);
  AddProf(0,'WebM VP8','WEBM','VP8','Vorbis','Auto',3000,128,44100,2);
+ AddProf(0,'WebM VP9','WEBM','VP9','Vorbis','Auto',2500,128,44100,2);
+ AddProf(0,'MP4 VP9','MP4','VP9','AAC','Auto',2500,128,44100,2);
+ AddProf(0,'MKV VP9','MKV','VP9','AAC','Auto',2500,128,44100,2);
+ AddProf(0,'WebM AV1','WEBM','AV1','Vorbis','Auto',2000,128,44100,2);
+ AddProf(0,'MP4 AV1','MP4','AV1','AAC','Auto',2000,128,44100,2);
+ AddProf(0,'MKV AV1','MKV','AV1','AAC','Auto',2000,128,44100,2);
  AddProf(0,'FLV','FLV','H264','AAC','Auto',2000,128,44100,2);
  AddProf(0,'MPEG-2 PS','MPG','MPEG2','MP2','Auto',6000,192,48000,2);
  AddProf(0,'3GP','3GP','H263','AAC','352x288',512,64,22050,1);
@@ -47171,6 +47177,2358 @@ Begin
 End;
 {$INLINE OFF}
 {$ENDIF}
+Const
+ V9E_UPDBITS: Array[0..254] Of Byte=(
+  5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,
+  8,8,8,8,8,8,8,8,8,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,
+  10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,11,11,11,
+  11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,
+  11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,
+  11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,
+  11,11,11,11,11,11,11,11,11,11,11,0
+ );
+ V9E_MAPTAB: Array[0..253] Of Byte=(
+  20,21,22,23,24,25,0,26,27,28,29,30,31,32,33,34,35,36,37,1,38,39,40,41,42,43,44,45,46,47,48,49,2,50,51,52,53,54,
+  55,56,57,58,59,60,61,3,62,63,64,65,66,67,68,69,70,71,72,73,4,74,75,76,77,78,79,80,81,82,83,84,85,5,86,87,88,89,
+  90,91,92,93,94,95,96,97,6,98,99,100,101,102,103,104,105,106,107,108,109,7,110,111,112,113,114,115,116,117,118,
+  119,120,121,8,122,123,124,125,126,127,128,129,130,131,132,133,9,134,135,136,137,138,139,140,141,142,143,144,145,
+  10,146,147,148,149,150,151,152,153,154,155,156,157,11,158,159,160,161,162,163,164,165,166,167,168,169,12,170,
+  171,172,173,174,175,176,177,178,179,180,181,13,182,183,184,185,186,187,188,189,190,191,192,193,14,194,195,196,
+  197,198,199,200,201,202,203,204,205,15,206,207,208,209,210,211,212,213,214,215,216,217,16,218,219,220,221,222,
+  223,224,225,226,227,228,229,17,230,231,232,233,234,235,236,237,238,239,240,241,18,242,243,244,245,246,247,248,
+  249,250,251,252,253,19
+ );
+{$B-}
+{$J+}
+{$INLINE ON}
+{ ====================================================================== }
+{ pe_vp9_enc.pas : encodeur VP9 (profil 0 = 8 bits, profil 2 = 10 bits,    }
+{ 4:2:0) ecrit pour ANYMP4.PAS. Il REUTILISE l'etat et les fonctions du    }
+{ decodeur pe_vp9.pas (prediction intra, interpolation de mouvement,       }
+{ transformees inverses, filtre de boucle, tables de probabilites,         }
+{ adaptation arriere, contextes, candidats de vecteurs) : la reconstruction}
+{ de l'encodeur est donc, par construction, celle du decodeur. Cette part  }
+{ doit etre placee APRES pe_vp9.pas dans PARTS.                            }
+{ Reference : libvpx (BSD 3-clause, (c) The WebM Project Authors),         }
+{ vp9/encoder/vp9_bitstream.c, vp9_subexp.c, vp9_encodemv.c, vpx_dsp/       }
+{ bitwriter.h, vp9_rd.c ; norme VP9 (profil 0 et 2, 4:2:0).                 }
+{                                                                           }
+{ API :  V9EBegin(W,H,Fn,Fd,Bitrate,Gop,Bits) ; V9EFrame(Yuv,Pkt,PktLen,    }
+{        IsKey,Dts,Pts) ; V9EFlush(...) ; V9EVpcC(Buf) ; V9EGetRecon(Dst) ; }
+{        V9EFree. Parametres a regler avant V9EBegin : V9ECq, V9ERefs,      }
+{        V9ESpeed, ... (voir ci-dessous).                                   }
+{ NB : l'encodeur partage les variables globales V9* du decodeur : ne pas  }
+{ decoder simultanement avec pe_vp9.pas pendant un encodage (V9EBegin et    }
+{ V9EFree reinitialisent / liberent l'etat du decodeur).                    }
+{ ====================================================================== }
+
+Const
+ V9E_CKFY=0; V9E_CKFUV=900; V9E_CKFPART=990; V9E_CPARETO=1038; V9E_CCAT6=3078;
+ V9E_CCAT1=3096; V9E_CCAT2=3097; V9E_CCAT3=3099; V9E_CCAT4=3102; V9E_CCAT5=3106; V9E_C128=3111;
+ V9E_CSIZE=3112;
+ V9EQuantizer: Array[0..63] Of Byte=(0,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,
+  128,132,136,140,144,148,152,156,160,164,168,172,176,180,184,188,192,196,200,204,208,212,216,220,224,228,232,236,240,244,249,255);
+
+Type
+ PV9ES=^TV9ES; TV9ES=Array[0..536870911] Of LongInt;
+ PV9EF=^TV9EF; TV9EF=Array[0..268435455] Of Single;
+ PV9EL=^TV9EL; TV9EL=Array[0..268435455] Of LongInt;
+ TV9EDec=Record
+  Row,Col,Bs,Inter,Skip,Tx,YMode,UvMode,Ref0,Ref1,Filt: LongInt;
+  BMode: Array[0..3] Of LongInt;
+  Mv: Array[0..1] Of TV9Mv;
+ End;
+ TV9EItem=Record Kind,Row,Col,Lvl,Part: LongInt; Dec: TV9EDec; End;
+ TV9EPlan=Record N: LongInt; It: Array[0..159] Of TV9EItem; End;
+ TV9EBw=Record
+  Low: Int64; Range,Count,Pos,Cap: LongInt; Buf: PV9B;
+ End;
+ TV9ESnap=Record
+  Px: Array[0..2] Of PV9W;
+  A: Array[0..2,0..15] Of Byte; L: Array[0..2,0..15] Of Byte; Ap: Array[0..7] Of Byte; Lp: Array[0..7] Of Byte;
+ End;
+ TV9EHdr=Record
+  Key,RefFlags,AllowHp,Interp,LfLevel,LfSharp,Q,CompSize: LongInt;
+  RefIdx,SignBias: Array[0..2] Of LongInt;
+ End;
+
+Const
+ { ---- parametres publics (a regler avant V9EBegin) ---- }
+ V9ECq: LongInt=24;          { qualite constante 0..63 quand Bitrate=0 }
+ V9ERefs: LongInt=3;         { nombre d'images de reference utilisees (1..3) }
+ V9ESpeed: LongInt=1;        { 0 = recherche complete, 1 = rapide, 2 = tres rapide }
+ V9ELamK: Double=0.20;      { facteur du multiplicateur lagrangien }
+ V9EColorSpace: LongInt=0;   { color_space ecrit dans le flux (0 = inconnu, 1 = BT.601, 2 = BT.709) }
+ V9EColorRange: LongInt=0;   { 0 = limite, 1 = pleine }
+ V9ENoLf: Boolean=False;     { True : filtre de boucle desactive }
+ V9EPruneUser: LongInt=-1;  { avance : masque d'elagage force (-1 = selon V9ESpeed) }
+ V9EPrBits: Double=32;
+ V9EQRound: Single=0.44;    { decalage d'arrondi de la quantification (0.5 = arrondi au plus proche) }
+ V9EQTrim: Single=0.72;     { seuil d'elimination des derniers coefficients isoles de valeur 1 }
+ V9EKeyBoost: LongInt=6;
+ V9EKeyScale: Double=0.6;    { si > 0 : indice de quantification des images cle = Q * V9EKeyScale (prioritaire sur V9EKeyBoost) }
+ V9EGoldBoost: LongInt=0;    { reduction de l'indice de quantification des images qui rafraichissent GOLDEN/ALTREF (qualite constante) }
+ V9EPOff: LongInt=0;         { decalage de l'indice de quantification des images inter ordinaires (qualite constante) }
+
+Var
+ V9EPrune: LongInt;
+ { ---- etat ---- }
+ V9EOn: Boolean;
+ V9EW,V9EH,V9EBits,V9EFn,V9EFd,V9EBitrate,V9EGop,V9ECw,V9ECh,V9EFrameNo,V9EProfile: LongInt;
+ V9ESrc: Array[0..2] Of PV9W; V9ESrcSt,V9ESrcH: Array[0..2] Of LongInt;
+ V9EC: Array[0..V9E_CSIZE-1] Of Byte;
+ V9ECost: Array[0..256] Of LongInt;
+ V9EEmit: Boolean; V9ECostAcc: LongInt;
+ V9ESym: PV9ES; V9ESymN,V9ESymCap: LongInt;
+ V9EHb: Array[0..255] Of Byte; V9EHp: LongInt;
+ V9EBwC,V9EBwT: TV9EBw;
+ V9ETreeLen: Array[0..9,0..15] Of Byte;
+ V9ETreeNd: Array[0..9,0..15,0..15] Of Byte;
+ V9ETreeBt: Array[0..9,0..15,0..15] Of Byte;
+ V9EBasis: Array[0..6] Of PV9EF;
+ V9ELam: Double; V9EQidx: LongInt;
+ V9ERes: Array[0..1023] Of LongInt;
+ V9ELv: PV9EL; V9EEob: Array[0..1023] Of LongInt; V9ELvN,V9EEobN: LongInt;
+ V9EAl,V9ELl: Array[0..2,0..31] Of Byte;
+ V9ESA: Array[0..2] Of PV9B; V9ESAP: PV9B; V9ESL: Array[0..2,0..15] Of Byte; V9ESLP: Array[0..7] Of Byte;
+ V9ECA: Array[0..2] Of PV9B; V9ECL: Array[0..2] Of PV9B; V9ECAP: PV9B; V9ECLP: PV9B;
+ V9ESnaps: Array[0..3] Of TV9ESnap;
+ V9ETxm: LongInt;
+ V9EPlanB: TV9EPlan; V9ELfGuess: LongInt;
+ V9ERcUsed: Int64; V9ERcCx: Array[0..1] Of Double; V9ERcAl: Array[0..1] Of Double;
+ V9ERcLastQ,V9ERcLastBits: Array[0..1] Of LongInt; V9ERcN: Array[0..1] Of LongInt;
+ V9ERcFrames: LongInt;
+
+{ ---------------- utilitaires ---------------- }
+Function V9EIdx(Var P: Byte): LongInt;
+Var D: PtrUInt;
+Begin
+ D:=PtrUInt(@P)-PtrUInt(@V9Fc);
+ If D<PtrUInt(SizeOf(V9Fc)) Then V9EIdx:=LongInt(D)
+ Else V9EIdx:=SizeOf(V9Fc)+LongInt(PtrUInt(@P)-PtrUInt(@V9EC));
+End;
+
+Procedure V9EInitConst;
+Var I: LongInt;
+Begin
+ Move(V9KfYMode,V9EC[V9E_CKFY],900); Move(V9KfUvMode,V9EC[V9E_CKFUV],90); Move(V9KfPartProb,V9EC[V9E_CKFPART],48);
+ Move(V9Pareto,V9EC[V9E_CPARETO],2040); Move(V9Cat6Prob,V9EC[V9E_CCAT6],18);
+ Move(V9Cat1,V9EC[V9E_CCAT1],1); Move(V9Cat2,V9EC[V9E_CCAT2],2); Move(V9Cat3,V9EC[V9E_CCAT3],3);
+ Move(V9Cat4,V9EC[V9E_CCAT4],4); Move(V9Cat5,V9EC[V9E_CCAT5],5); V9EC[V9E_C128]:=128;
+ V9ECost[0]:=256*16;
+ For I:=1 To 255 Do V9ECost[I]:=Round(-Ln(I/256.0)/Ln(2.0)*256.0);
+ V9ECost[256]:=0;
+ V9Norm[0]:=0;
+End;
+
+Function V9ENorm(R: LongInt): LongInt; inline;
+Var K: LongInt;
+Begin
+ K:=0; While R<128 Do Begin R:=R*2; Inc(K); End;
+ V9ENorm:=K;
+End;
+
+{ ---------------- codeur booleen (vpx_dsp/bitwriter.h) ---------------- }
+Procedure V9EBwStart(Var B: TV9EBw; Cap: LongInt);
+Begin
+ B.Cap:=Cap; GetMem(B.Buf,Cap+64); B.Low:=0; B.Range:=255; B.Count:=-24; B.Pos:=0;
+End;
+
+Procedure V9EBwWrite(Var B: TV9EBw; Bit,Prob: LongInt);
+Var Split,Shift,Off,X: LongInt; NB: PV9B;
+Begin
+ Split:=1+(((B.Range-1)*Prob) Shr 8);
+ If Bit<>0 Then Begin B.Low:=B.Low+Split; B.Range:=B.Range-Split; End Else B.Range:=Split;
+ Shift:=V9ENorm(B.Range);
+ B.Range:=B.Range Shl Shift; B.Count:=B.Count+Shift;
+ If B.Pos+16>B.Cap Then Begin
+  GetMem(NB,B.Cap*2+64); Move(B.Buf^,NB^,B.Pos); FreeMem(B.Buf); B.Buf:=NB; B.Cap:=B.Cap*2;
+ End;
+ If B.Count>=0 Then Begin
+  Off:=Shift-B.Count;
+  If ((B.Low Shl (Off-1)) And $80000000)<>0 Then Begin
+   X:=B.Pos-1;
+   While (X>=0) And (B.Buf^[X]=255) Do Begin B.Buf^[X]:=0; Dec(X); End;
+   Inc(B.Buf^[X]);
+  End;
+  B.Buf^[B.Pos]:=(B.Low Shr (24-Off)) And 255; Inc(B.Pos);
+  B.Low:=(B.Low Shl Off) And $FFFFFF;
+  Shift:=B.Count; Dec(B.Count,8);
+ End;
+ B.Low:=(B.Low Shl Shift) And $FFFFFFFF;
+End;
+
+Procedure V9EBwLit(Var B: TV9EBw; V,N: LongInt);
+Var I: LongInt;
+Begin
+ For I:=N-1 DownTo 0 Do V9EBwWrite(B,(V Shr I) And 1,128);
+End;
+
+Procedure V9EBwStop(Var B: TV9EBw);
+Var I: LongInt;
+Begin
+ For I:=0 To 31 Do V9EBwWrite(B,0,128);
+ If (B.Buf^[B.Pos-1] And $E0)=$C0 Then Begin B.Buf^[B.Pos]:=0; Inc(B.Pos); End;
+End;
+
+Procedure V9EBwBegin(Var B: TV9EBw);
+Begin
+ B.Low:=0; B.Range:=255; B.Count:=-24; B.Pos:=0;
+ V9EBwWrite(B,0,128);
+End;
+
+{ ---------------- liste de symboles / estimation de debit ---------------- }
+Procedure V9EPut(Var P: Byte; Bit: LongInt);
+Var Pr: LongInt;
+Begin
+ If V9EEmit Then Begin
+  If V9ESymN>=V9ESymCap Then Begin
+   V9ESymCap:=V9ESymCap*2; ReallocMem(V9ESym,V9ESymCap*4);
+  End;
+  V9ESym^[V9ESymN]:=(V9EIdx(P) Shl 1) Or Bit; Inc(V9ESymN);
+ End Else Begin
+  Pr:=P; If Bit<>0 Then Pr:=256-Pr;
+  Inc(V9ECostAcc,V9ECost[Pr]);
+ End;
+End;
+
+Procedure V9EPutLit(V,N: LongInt);
+Var I: LongInt;
+Begin
+ For I:=N-1 DownTo 0 Do V9EPut(V9EC[V9E_C128],(V Shr I) And 1);
+End;
+
+{ arbres : table de chemins }
+Procedure V9EBuildTree(Ti: LongInt; Var Tree);
+Var T: ^TV9Tr; Path: Array[0..15] Of Byte; Bits: Array[0..15] Of Byte;
+ Procedure Walk(I,Dp: LongInt);
+ Var B,Nx,V,K: LongInt;
+ Begin
+  For B:=0 To 1 Do Begin
+   Nx:=T^[I+B]; Path[Dp]:=I Shr 1; Bits[Dp]:=B;
+   If Nx<=0 Then Begin
+    V:=-Nx; V9ETreeLen[Ti,V]:=Dp+1;
+    For K:=0 To Dp Do Begin V9ETreeNd[Ti,V,K]:=Path[K]; V9ETreeBt[Ti,V,K]:=Bits[K]; End;
+   End Else Walk(Nx,Dp+1);
+  End;
+ End;
+Begin
+ T:=@Tree; Walk(0,0);
+End;
+
+{ ecrit la feuille V de l'arbre Ti avec les probabilites Probs (octets) }
+Procedure V9EPutTree(Ti: LongInt; Probs: PV9B; V: LongInt);
+Var K: LongInt;
+Begin
+ For K:=0 To V9ETreeLen[Ti,V]-1 Do V9EPut(Probs^[V9ETreeNd[Ti,V,K]],V9ETreeBt[Ti,V,K]);
+End;
+
+Procedure V9EInitTrees;
+Begin
+ FillChar(V9ETreeLen,SizeOf(V9ETreeLen),0);
+ V9EBuildTree(0,V9TrIntra); V9EBuildTree(1,V9TrInter); V9EBuildTree(2,V9TrPart); V9EBuildTree(3,V9TrInterp);
+ V9EBuildTree(4,V9TrJoint); V9EBuildTree(5,V9TrClass); V9EBuildTree(6,V9TrFp);
+End;
+
+{ ---------------- en-tete non compresse ---------------- }
+Procedure V9EHPut(V,N: LongInt);
+Var I: LongInt;
+Begin
+ For I:=N-1 DownTo 0 Do Begin
+  If ((V Shr I) And 1)<>0 Then V9EHb[V9EHp Shr 3]:=V9EHb[V9EHp Shr 3] Or (128 Shr (V9EHp And 7));
+  Inc(V9EHp);
+ End;
+End;
+
+Function V9EWriteHdr(Var H: TV9EHdr): LongInt;
+Var I,Sb,MinL,MaxL,Lit: LongInt;
+Begin
+ FillChar(V9EHb,SizeOf(V9EHb),0); V9EHp:=0;
+ V9EHPut(2,2); V9EHPut(V9EProfile And 1,1); V9EHPut(V9EProfile Shr 1,1);
+ If V9EProfile=3 Then V9EHPut(0,1);
+ V9EHPut(0,1); { show_existing_frame }
+ V9EHPut(Ord(H.Key=0),1); V9EHPut(1,1); V9EHPut(0,1);
+ If H.Key<>0 Then Begin
+  V9EHPut($49,8); V9EHPut($83,8); V9EHPut($42,8);
+  If V9EProfile>=2 Then V9EHPut(Ord(V9EBits=12),1);
+  V9EHPut(V9EColorSpace,3);
+  If V9EColorSpace<>7 Then V9EHPut(V9EColorRange,1);
+  V9EHPut(V9EW-1,16); V9EHPut(V9EH-1,16); V9EHPut(0,1);
+ End Else Begin
+  V9EHPut(0,2);
+  V9EHPut(H.RefFlags,8);
+  For I:=0 To 2 Do Begin V9EHPut(H.RefIdx[I],3); V9EHPut(H.SignBias[I],1); End;
+  V9EHPut(1,1); V9EHPut(0,1);
+  V9EHPut(H.AllowHp,1);
+  If H.Interp=4 Then V9EHPut(1,1)
+  Else Begin
+   V9EHPut(0,1);
+   Case H.Interp Of 0: Lit:=1; 1: Lit:=0; 2: Lit:=2; Else Lit:=3; End;
+   V9EHPut(Lit,2);
+  End;
+ End;
+ V9EHPut(1,1); V9EHPut(0,1); { refresh_frame_context, frame_parallel_decoding_mode }
+ V9EHPut(0,2);
+ V9EHPut(H.LfLevel,6); V9EHPut(H.LfSharp,3); V9EHPut(1,1); V9EHPut(0,1);
+ V9EHPut(H.Q,8); V9EHPut(0,1); V9EHPut(0,1); V9EHPut(0,1);
+ V9EHPut(0,1); { segmentation }
+ Sb:=((V9EW+7) Shr 3+7) Shr 3;
+ MinL:=0; While (64 Shl MinL)<Sb Do Inc(MinL);
+ MaxL:=1; While (Sb Shr MaxL)>=4 Do Inc(MaxL); Dec(MaxL);
+ If MinL<>0 Then Fail('VP9 enc : largeur > 4096 non supportee.');
+ If MinL<MaxL Then V9EHPut(0,1);
+ V9EHPut(0,1);
+ V9EHPut(H.CompSize,16);
+ V9EWriteHdr:=(V9EHp+7) Shr 3;
+End;
+
+{ ---------------- transformees directes (matrices deduites des inverses du decodeur) ---------------- }
+Procedure V9EInitBasis;
+Var K,Tx,N,U,I: LongInt; Adst: Boolean; Tin,Tout: TV9Tx; B: PV9EF; Nrm: Double;
+Begin
+ For K:=0 To 6 Do Begin
+  Case K Of 0: Begin Tx:=0; Adst:=False; End; 1: Begin Tx:=0; Adst:=True; End;
+   2: Begin Tx:=1; Adst:=False; End; 3: Begin Tx:=1; Adst:=True; End;
+   4: Begin Tx:=2; Adst:=False; End; 5: Begin Tx:=2; Adst:=True; End;
+  Else Begin Tx:=3; Adst:=False; End; End;
+  N:=4 Shl Tx;
+  GetMem(B,N*N*4+16); V9EBasis[K]:=B;
+  For U:=0 To N-1 Do Begin
+   FillChar(Tin,SizeOf(Tin),0); Tin[U]:=16384;
+   Case Tx Of
+    0: If Adst Then V9Iadst4(Tin,Tout) Else V9Idct4(Tin,Tout);
+    1: If Adst Then V9Iadst8(Tin,Tout) Else V9Idct8(Tin,Tout);
+    2: If Adst Then V9Iadst16(Tin,Tout) Else V9Idct16(Tin,Tout);
+   Else V9Idct32(Tin,Tout);
+   End;
+   Nrm:=0;
+   For I:=0 To N-1 Do Nrm:=Nrm+Sqr(Tout[I]/16384.0);
+   For I:=0 To N-1 Do B^[U*N+I]:=(Tout[I]/16384.0)/Nrm;
+  End;
+ End;
+End;
+
+Procedure V9EFreeBasis;
+Var K: LongInt;
+Begin
+ For K:=0 To 6 Do If V9EBasis[K]<>Nil Then Begin FreeMem(V9EBasis[K]); V9EBasis[K]:=Nil; End;
+End;
+
+Var V9ELeeC: Array[1..5] Of Array[0..15] Of Single;
+
+Procedure V9EInitLee;
+Var K,N,I: LongInt;
+Begin
+ For K:=1 To 5 Do Begin
+  N:=1 Shl K;
+  For I:=0 To N Shr 1-1 Do V9ELeeC[K][I]:=1.0/(2.0*Cos((2*I+1)*Pi/(2.0*N)));
+ End;
+End;
+
+{ DCT-II non normalisee d'ordre N=2^K : Y[k] = somme x[n] cos((n+0.5) k pi / N) (algorithme de Lee) }
+Procedure V9EDct1(K: LongInt; X,Y: PV9EF);
+Var A,B,Ya,Yb: Array[0..15] Of Single; H,I,N: LongInt; X0,X1: Single;
+Begin
+ N:=1 Shl K;
+ If N=1 Then Begin Y^[0]:=X^[0]; Exit; End;
+ If N=2 Then Begin
+  X0:=X^[0]; X1:=X^[1];
+  Y^[0]:=X0+X1; Y^[1]:=(X0-X1)*0.70710678118;
+  Exit;
+ End;
+ H:=N Shr 1;
+ For I:=0 To H-1 Do Begin
+  A[I]:=X^[I]+X^[N-1-I]; B[I]:=(X^[I]-X^[N-1-I])*V9ELeeC[K][I];
+ End;
+ V9EDct1(K-1,@A,@Ya); V9EDct1(K-1,@B,@Yb);
+ For I:=0 To H-2 Do Begin
+  Y^[2*I]:=Ya[I]; Y^[2*I+1]:=Yb[I]+Yb[I+1];
+ End;
+ Y^[N-2]:=Ya[H-1]; Y^[N-1]:=Yb[H-1];
+End;
+
+{ Res : residu N*N (raster) ; Cf : coefficients (echelle du decodeur) }
+Procedure V9EFdct(Tx,Tt: LongInt; Cf: PV9EF);
+Var N,Y,X,U,V,Kr,Kc,Lg: LongInt; Br,Bc: PV9EF; S,Sc: Single; T1: Array[0..1023] Of Single; Rp: ^TV9EL;
+ Ri,Ro,Ci,Co: Array[0..31] Of Single;
+Begin
+ N:=4 Shl Tx;
+ If (Tx=3) Or (Tt=0) Then Begin
+  Lg:=Tx+2;
+  Rp:=@V9ERes;
+  For Y:=0 To N-1 Do Begin
+   For X:=0 To N-1 Do Ri[X]:=Rp^[Y*N+X];
+   V9EDct1(Lg,@Ri,@Ro);
+   For U:=0 To N-1 Do T1[Y*N+U]:=Ro[U];
+  End;
+  Case Tx Of 0: Sc:=16.0*4/16; 1: Sc:=32.0*4/64; 2: Sc:=64.0*4/256; Else Sc:=64.0*4/1024; End;
+  For U:=0 To N-1 Do Begin
+   For Y:=0 To N-1 Do Ci[Y]:=T1[Y*N+U];
+   V9EDct1(Lg,@Ci,@Co);
+   For V:=0 To N-1 Do Begin
+    S:=Co[V]*Sc;
+    If U=0 Then S:=S*0.70710678118;
+    If V=0 Then S:=S*0.70710678118;
+    Cf^[V*N+U]:=S;
+   End;
+  End;
+  Exit;
+ End;
+ If Tx=3 Then Begin Kr:=6; Kc:=6; End
+ Else Begin
+  Kr:=Tx*2+Ord((Tt=2) Or (Tt=3)); Kc:=Tx*2+Ord((Tt=1) Or (Tt=3));
+ End;
+ Br:=V9EBasis[Kr]; Bc:=V9EBasis[Kc];
+ Case Tx Of 0: Sc:=16.0; 1: Sc:=32.0; Else Sc:=64.0; End;
+ Rp:=@V9ERes;
+ For Y:=0 To N-1 Do
+  For U:=0 To N-1 Do Begin
+   S:=0;
+   For X:=0 To N-1 Do S:=S+Rp^[Y*N+X]*Br^[U*N+X];
+   T1[Y*N+U]:=S;
+  End;
+ For V:=0 To N-1 Do
+  For U:=0 To N-1 Do Begin
+   S:=0;
+   For Y:=0 To N-1 Do S:=S+T1[Y*N+U]*Bc^[V*N+Y];
+   Cf^[V*N+U]:=S*Sc;
+  End;
+End;
+
+
+{ ---------------- mises a jour differentielles des probabilites (vp9_subexp.c) ---------------- }
+Function V9ERecenter(V,M: LongInt): LongInt;
+Begin
+ If V>(M Shl 1) Then V9ERecenter:=V
+ Else If V>=M Then V9ERecenter:=(V-M) Shl 1
+ Else V9ERecenter:=((M-V) Shl 1)-1;
+End;
+
+Function V9ERemap(V,M: LongInt): LongInt;
+Var I: LongInt;
+Begin
+ Dec(V); Dec(M);
+ If (M Shl 1)<=255 Then I:=V9ERecenter(V,M)-1 Else I:=V9ERecenter(254-V,254-M)-1;
+ V9ERemap:=V9E_MAPTAB[I];
+End;
+
+Procedure V9EEncUniform(Var B: TV9EBw; V: LongInt);
+Const M=65;
+Begin
+ If V<M Then V9EBwLit(B,V,7)
+ Else Begin V9EBwLit(B,M+((V-M) Shr 1),7); V9EBwLit(B,(V-M) And 1,1); End;
+End;
+
+Procedure V9EWriteDiff(Var B: TV9EBw; NewP,OldP: LongInt);
+Var W: LongInt;
+Begin
+ W:=V9ERemap(NewP,OldP);
+ If W<16 Then Begin V9EBwLit(B,0,1); V9EBwLit(B,W,4); End
+ Else If W<32 Then Begin V9EBwLit(B,1,1); V9EBwLit(B,0,1); V9EBwLit(B,W-16,4); End
+ Else If W<64 Then Begin V9EBwLit(B,1,1); V9EBwLit(B,1,1); V9EBwLit(B,0,1); V9EBwLit(B,W-32,5); End
+ Else Begin V9EBwLit(B,1,1); V9EBwLit(B,1,1); V9EBwLit(B,1,1); V9EEncUniform(B,W-64); End;
+End;
+
+Function V9EBr(C0,C1,P: LongInt): Int64;
+Begin V9EBr:=Int64(C0)*V9ECost[P]+Int64(C1)*V9ECost[256-P]; End;
+
+Function V9EBinProb(C0,C1: LongInt): LongInt;
+Var Den,P: Int64;
+Begin
+ Den:=Int64(C0)+C1;
+ If Den=0 Then P:=128 Else P:=(Int64(C0)*256+(Den Shr 1)) Div Den;
+ If P>255 Then P:=255; If P<1 Then P:=1;
+ V9EBinProb:=P;
+End;
+
+{ vp9_prob_diff_update_savings_search : NewP en entree = proba ideale, en sortie = meilleure }
+Function V9ESavings(C0,C1,OldP: LongInt; Var NewP: LongInt): Int64;
+Var OldB,Best,Sv: Int64; P,Step,BestP,UpdCost: LongInt;
+Begin
+ OldB:=V9EBr(C0,C1,OldP); Best:=0; BestP:=OldP;
+ If NewP>OldP Then Step:=-1 Else Step:=1;
+ UpdCost:=V9ECost[4]-V9ECost[252];
+ If OldB>UpdCost+(5 Shl 8) Then Begin
+  P:=NewP;
+  While P<>OldP Do Begin
+   Sv:=OldB-V9EBr(C0,C1,P)-(Int64(V9E_UPDBITS[V9ERemap(P,OldP)]) Shl 8)-UpdCost;
+   If Sv>Best Then Begin Best:=Sv; BestP:=P; End;
+   Inc(P,Step);
+  End;
+ End;
+ NewP:=BestP; V9ESavings:=Best;
+End;
+
+Procedure V9ECondUpd(Var B: TV9EBw; OldP,C0,C1: LongInt);
+Var NewP: LongInt; Sv: Int64;
+Begin
+ NewP:=V9EBinProb(C0,C1);
+ Sv:=V9ESavings(C0,C1,OldP,NewP);
+ If Sv>0 Then Begin V9EBwWrite(B,1,252); V9EWriteDiff(B,NewP,OldP); End
+ Else V9EBwWrite(B,0,252);
+End;
+
+Procedure V9EUpdMv(Var B: TV9EBw; Var P: Byte; C0,C1: LongInt);
+Var NewP: LongInt; Upd: Boolean;
+Begin
+ NewP:=V9EBinProb(C0,C1) Or 1;
+ Upd:=V9EBr(C0,C1,P)+V9ECost[252]>V9EBr(C0,C1,NewP)+V9ECost[4]+7*256;
+ V9EBwWrite(B,Ord(Upd),252);
+ If Upd Then V9EBwLit(B,NewP Shr 1,7);
+End;
+
+{ comptes de branches d'un arbre (vp9_tree_probs_from_distribution) }
+Function V9ETreeCnt(Var Tree; I: LongInt; Cn: PV9L; Var B0,B1: Array Of LongInt): LongInt;
+Var T: ^TV9Tr; L,R,LC,RC: LongInt;
+Begin
+ T:=@Tree; L:=T^[I]; R:=T^[I+1];
+ If L<=0 Then LC:=Cn^[-L] Else LC:=V9ETreeCnt(Tree,L,Cn,B0,B1);
+ If R<=0 Then RC:=Cn^[-R] Else RC:=V9ETreeCnt(Tree,R,Cn,B0,B1);
+ B0[I Shr 1]:=LC; B1[I Shr 1]:=RC;
+ V9ETreeCnt:=LC+RC;
+End;
+
+Procedure V9EUpdTree(Var B: TV9EBw; Var Tree; Probs: PV9B; Cn: PV9L; NN: LongInt; Mv: Boolean);
+Var B0,B1: Array[0..15] Of LongInt; K,Dm: LongInt;
+Begin
+ FillChar(B0,SizeOf(B0),0); FillChar(B1,SizeOf(B1),0);
+ Dm:=V9ETreeCnt(Tree,0,Cn,B0,B1);
+ For K:=0 To NN-1 Do
+  If Mv Then V9EUpdMv(B,Probs^[K],B0[K],B1[K]) Else V9ECondUpd(B,Probs^[K],B0[K],B1[K]);
+End;
+
+Procedure V9EUpdCoefTx(Var B: TV9EBw; Tx: LongInt);
+Var Pl,Rf,Bn,Cx,T,N0,N1,N2,Ne,Eb,C0,C1,OldP,NewP,U: LongInt; Sv,Tot: Int64; Upd: Array[0..1] Of LongInt; Pass: LongInt;
+Begin
+ Upd[0]:=0; Upd[1]:=0; Tot:=0;
+ For Pass:=0 To 1 Do Begin
+  If Pass=1 Then Begin
+   If (Upd[1]=0) Or (Tot<0) Then Begin V9EBwLit(B,0,1); Exit; End;
+   V9EBwLit(B,1,1);
+  End;
+  For Pl:=0 To 1 Do For Rf:=0 To 1 Do For Bn:=0 To 5 Do For Cx:=0 To 5 Do Begin
+   If (Bn=0) And (Cx>=3) Then Continue;
+   N0:=V9Cnt.Coef[Tx,Pl,Rf,Bn,Cx,0]; N1:=V9Cnt.Coef[Tx,Pl,Rf,Bn,Cx,1]; N2:=V9Cnt.Coef[Tx,Pl,Rf,Bn,Cx,2];
+   Ne:=V9Cnt.Coef[Tx,Pl,Rf,Bn,Cx,3]; Eb:=V9Cnt.Eob[Tx,Pl,Rf,Bn,Cx];
+   For T:=0 To 2 Do Begin
+    Case T Of 0: Begin C0:=Ne; C1:=Eb-Ne; End; 1: Begin C0:=N0; C1:=N1+N2; End; Else Begin C0:=N1; C1:=N2; End; End;
+    OldP:=V9Fc.Coef[Tx,Pl,Rf,Bn,Cx,T];
+    NewP:=V9EBinProb(C0,C1);
+    Sv:=V9ESavings(C0,C1,OldP,NewP);
+    If (Sv>0) And (NewP<>OldP) Then U:=1 Else U:=0;
+    If Pass=0 Then Begin
+     If U<>0 Then Tot:=Tot+Sv-V9ECost[252] Else Tot:=Tot-V9ECost[252];
+     Inc(Upd[U]);
+    End Else Begin
+     V9EBwWrite(B,U,252);
+     If U<>0 Then V9EWriteDiff(B,NewP,OldP);
+    End;
+   End;
+  End;
+ End;
+End;
+
+Procedure V9EWriteCompressed;
+Var I,J,Tx,MaxTx: LongInt; B: ^TV9EBw;
+Begin
+ B:=@V9EBwC;
+ V9EBwBegin(B^);
+ V9EBwLit(B^,V9Min(V9ETxm,3),2);
+ If V9ETxm>=3 Then V9EBwLit(B^,Ord(V9ETxm=4),1);
+ If V9ETxm=4 Then Begin
+  For I:=0 To 1 Do V9ECondUpd(B^,V9Fc.Tx8[I,0],V9Cnt.Tx8[I,0],V9Cnt.Tx8[I,1]);
+  For I:=0 To 1 Do Begin
+   V9ECondUpd(B^,V9Fc.Tx16[I,0],V9Cnt.Tx16[I,0],V9Cnt.Tx16[I,1]+V9Cnt.Tx16[I,2]);
+   V9ECondUpd(B^,V9Fc.Tx16[I,1],V9Cnt.Tx16[I,1],V9Cnt.Tx16[I,2]);
+  End;
+  For I:=0 To 1 Do Begin
+   V9ECondUpd(B^,V9Fc.Tx32[I,0],V9Cnt.Tx32[I,0],V9Cnt.Tx32[I,1]+V9Cnt.Tx32[I,2]+V9Cnt.Tx32[I,3]);
+   V9ECondUpd(B^,V9Fc.Tx32[I,1],V9Cnt.Tx32[I,1],V9Cnt.Tx32[I,2]+V9Cnt.Tx32[I,3]);
+   V9ECondUpd(B^,V9Fc.Tx32[I,2],V9Cnt.Tx32[I,2],V9Cnt.Tx32[I,3]);
+  End;
+ End;
+ MaxTx:=V9TxModeMax[V9ETxm];
+ For Tx:=0 To MaxTx Do V9EUpdCoefTx(B^,Tx);
+ For I:=0 To 2 Do V9ECondUpd(B^,V9Fc.Skip[I],V9Cnt.Skip[I,0],V9Cnt.Skip[I,1]);
+ If (V9FrameType<>0) And (V9IntraOnly=0) Then Begin
+  For I:=0 To 6 Do V9EUpdTree(B^,V9TrInter,@V9Fc.InterMode[I,0],@V9Cnt.InterMode[I,0],3,False);
+  If V9Interp=4 Then
+   For I:=0 To 3 Do V9EUpdTree(B^,V9TrInterp,@V9Fc.Interp[I,0],@V9Cnt.Interp[I,0],2,False);
+  For I:=0 To 3 Do V9ECondUpd(B^,V9Fc.IntraInter[I],V9Cnt.IntraInter[I,0],V9Cnt.IntraInter[I,1]);
+  { reference_mode : jamais de prediction composee }
+  For I:=0 To 4 Do Begin
+   V9ECondUpd(B^,V9Fc.SingleRef[I,0],V9Cnt.SingleRef[I,0,0],V9Cnt.SingleRef[I,0,1]);
+   V9ECondUpd(B^,V9Fc.SingleRef[I,1],V9Cnt.SingleRef[I,1,0],V9Cnt.SingleRef[I,1,1]);
+  End;
+  For I:=0 To 3 Do V9EUpdTree(B^,V9TrIntra,@V9Fc.YMode[I,0],@V9Cnt.YMode[I,0],9,False);
+  For I:=0 To 15 Do V9EUpdTree(B^,V9TrPart,@V9Fc.Part[I,0],@V9Cnt.Part[I,0],3,False);
+  V9EUpdTree(B^,V9TrJoint,@V9Fc.Joints[0],@V9Cnt.Joints[0],3,True);
+  For I:=0 To 1 Do Begin
+   V9EUpdMv(B^,V9Fc.Comp[I].Sign,V9Cnt.Comp[I].Sign[0],V9Cnt.Comp[I].Sign[1]);
+   V9EUpdTree(B^,V9TrClass,@V9Fc.Comp[I].Classes[0],@V9Cnt.Comp[I].Classes[0],10,True);
+   V9EUpdTree(B^,V9TrC0,@V9Fc.Comp[I].Class0,@V9Cnt.Comp[I].Class0[0],1,True);
+   For J:=0 To 9 Do V9EUpdMv(B^,V9Fc.Comp[I].Bits[J],V9Cnt.Comp[I].Bits[J,0],V9Cnt.Comp[I].Bits[J,1]);
+  End;
+  For I:=0 To 1 Do Begin
+   For J:=0 To 1 Do V9EUpdTree(B^,V9TrFp,@V9Fc.Comp[I].Class0Fp[J,0],@V9Cnt.Comp[I].Class0Fp[J,0],3,True);
+   V9EUpdTree(B^,V9TrFp,@V9Fc.Comp[I].Fp[0],@V9Cnt.Comp[I].Fp[0],3,True);
+  End;
+  If V9AllowHp<>0 Then
+   For I:=0 To 1 Do Begin
+    V9EUpdMv(B^,V9Fc.Comp[I].Class0Hp,V9Cnt.Comp[I].Class0Hp[0],V9Cnt.Comp[I].Class0Hp[1]);
+    V9EUpdMv(B^,V9Fc.Comp[I].Hp,V9Cnt.Comp[I].Hp[0],V9Cnt.Comp[I].Hp[1]);
+   End;
+ End;
+ V9EBwStop(B^);
+End;
+
+{ ---------------- preparation d'un bloc (reprise de V9DecodeBlock) ---------------- }
+Function V9ELog2(V: LongInt): LongInt;
+Var K: LongInt;
+Begin K:=0; While (1 Shl K)<V Do Inc(K); V9ELog2:=K; End;
+
+Procedure V9ESetupBlock(MiRow,MiCol,Bsize: LongInt);
+Var Bw,Bh,Off,X,Y,Pl,Ssx,Ssy,Bwl,Bhl: LongInt; Mi: PV9Mi;
+Begin
+ Bwl:=V9ELog2(V9B4W[Bsize]); If Bwl<1 Then Bwl:=1;
+ Bhl:=V9ELog2(V9B4H[Bsize]); If Bhl<1 Then Bhl:=1;
+ V9MiRow:=MiRow; V9MiCol:=MiCol; V9Bsize:=Bsize; V9Bwl:=Bwl; V9Bhl:=Bhl;
+ V9BmWl:=Ord(V9B4W[Bsize]>=2); V9BmHl:=Ord(V9B4H[Bsize]>=2);
+ Bw:=1 Shl (Bwl-1); Bh:=1 Shl (Bhl-1);
+ V9XMis:=V9Min(Bw,V9MiCols-MiCol); V9YMis:=V9Min(Bh,V9MiRows-MiRow);
+ Off:=MiRow*V9MiCols+MiCol;
+ Mi:=@V9Mip^[Off]; V9Cur:=Mi;
+ Mi^.Sb:=Bsize;
+ For Y:=0 To V9YMis-1 Do For X:=0 To V9XMis-1 Do V9Grid^[Off+Y*V9MiCols+X]:=Mi;
+ For Pl:=0 To 2 Do Begin
+  If Pl=0 Then Begin Ssx:=0; Ssy:=0; End Else Begin Ssx:=V9SsX; Ssy:=V9SsY; End;
+  V9N4W[Pl]:=(Bw Shl 1) Shr Ssx; V9N4H[Pl]:=(Bh Shl 1) Shr Ssy;
+  V9N4WL[Pl]:=Bwl-Ssx; V9N4HL[Pl]:=Bhl-Ssy;
+  V9AOff[Pl]:=(MiCol*2) Shr Ssx;
+  V9LOff[Pl]:=((MiRow*2) And 15) Shr Ssy;
+ End;
+ V9EdgeT:=-((MiRow*8)*8); V9EdgeB:=((V9MiRows-Bh-MiRow)*8)*8;
+ V9EdgeL:=-((MiCol*8)*8); V9EdgeR:=((V9MiCols-Bw-MiCol)*8)*8;
+ If MiRow<>0 Then V9Above:=V9Grid^[Off-V9MiCols] Else V9Above:=Nil;
+ If MiCol>V9TileC0 Then V9Left:=V9Grid^[Off-1] Else V9Left:=Nil;
+End;
+
+Procedure V9EPutMi(Var D: TV9EDec);
+Var Mi: PV9Mi;
+Begin
+ Mi:=V9Cur;
+ Mi^.Sb:=D.Bs; Mi^.Seg:=0; Mi^.SegPred:=0; Mi^.Skip:=D.Skip; Mi^.Tx:=D.Tx;
+ If D.Inter=0 Then Begin
+  Mi^.R0:=0; Mi^.R1:=-1; Mi^.Uv:=D.UvMode; Mi^.Filt:=3;
+  If D.Bs<3 Then Begin
+   Mi^.BMode[0]:=D.BMode[0]; Mi^.BMode[1]:=D.BMode[1]; Mi^.BMode[2]:=D.BMode[2]; Mi^.BMode[3]:=D.BMode[3];
+   Mi^.Mode:=D.BMode[3];
+  End Else Mi^.Mode:=D.YMode;
+ End Else Begin
+  Mi^.R0:=D.Ref0; Mi^.R1:=D.Ref1; Mi^.Mode:=D.YMode; Mi^.Filt:=D.Filt;
+  Mi^.Mv[0]:=D.Mv[0]; Mi^.Mv[1]:=D.Mv[1]; Mi^.Uv:=0;
+ End;
+End;
+
+{ ---------------- elements de syntaxe ---------------- }
+Procedure V9EPutKfMode(Blk,M: LongInt);
+Var A,L: LongInt;
+Begin
+ A:=V9AboveBlockMode(V9Cur,V9Above,Blk); L:=V9LeftBlockMode(V9Cur,V9Left,Blk);
+ V9EPutTree(0,@V9EC[V9E_CKFY+(A*10+L)*9],M);
+End;
+
+Procedure V9EPutIntraY(Grp,M: LongInt);
+Begin
+ V9EPutTree(0,@V9Fc.YMode[Grp,0],M);
+ If V9EEmit And V9DoCnt Then Inc(V9Cnt.YMode[Grp,M]);
+End;
+
+Procedure V9EPutSkip(S: LongInt);
+Var Ctx: LongInt;
+Begin
+ Ctx:=0;
+ If V9Above<>Nil Then Inc(Ctx,V9Above^.Skip);
+ If V9Left<>Nil Then Inc(Ctx,V9Left^.Skip);
+ V9EPut(V9Fc.Skip[Ctx],S);
+ If V9EEmit And V9DoCnt Then Inc(V9Cnt.Skip[Ctx,S]);
+End;
+
+Procedure V9EPutTx(AllowSelect: Boolean; T: LongInt);
+Var MaxTx,Ctx: LongInt;
+Begin
+ MaxTx:=V9MaxTx[V9Cur^.Sb];
+ If AllowSelect And (V9ETxm=4) And (V9Cur^.Sb>=3) Then Begin
+  Ctx:=V9TxCtx;
+  Case MaxTx Of
+   1: V9EPut(V9Fc.Tx8[Ctx,0],T);
+   2: Begin
+       V9EPut(V9Fc.Tx16[Ctx,0],Ord(T>0));
+       If T>0 Then V9EPut(V9Fc.Tx16[Ctx,1],Ord(T>1));
+      End;
+  Else Begin
+       V9EPut(V9Fc.Tx32[Ctx,0],Ord(T>0));
+       If T>0 Then Begin
+        V9EPut(V9Fc.Tx32[Ctx,1],Ord(T>1));
+        If T>1 Then V9EPut(V9Fc.Tx32[Ctx,2],Ord(T>2));
+       End;
+      End;
+  End;
+  If V9EEmit And V9DoCnt Then Case MaxTx Of
+   1: Inc(V9Cnt.Tx8[Ctx,T]);
+   2: Inc(V9Cnt.Tx16[Ctx,T]);
+  Else Inc(V9Cnt.Tx32[Ctx,T]);
+  End;
+ End;
+End;
+
+Function V9ETxDefault(Sb: LongInt): LongInt;
+Begin V9ETxDefault:=V9Min(V9MaxTx[Sb],V9TxModeMax[V9ETxm]); End;
+
+{ ---------------- vecteurs de mouvement ---------------- }
+Procedure V9EPutMvComp(Ci,V: LongInt; UseHp: Boolean);
+Var P: ^TV9Nmv; Sg,Z,C,O,D,F,E,I,N: LongInt;
+Begin
+ P:=@V9Fc.Comp[Ci];
+ If V<0 Then Sg:=1 Else Sg:=0;
+ If Sg<>0 Then Z:=-V-1 Else Z:=V-1;
+ If Z>=8192 Then C:=10
+ Else Begin N:=Z Shr 3; C:=0; While N>1 Do Begin N:=N Shr 1; Inc(C); End; End;
+ If C=0 Then O:=Z Else O:=Z-(2 Shl (C+2));
+ D:=O Shr 3; F:=(O Shr 1) And 3; E:=O And 1;
+ V9EPut(P^.Sign,Sg);
+ V9EPutTree(5,@P^.Classes[0],C);
+ If C=0 Then V9EPut(P^.Class0,D)
+ Else For I:=0 To C-1 Do V9EPut(P^.Bits[I],(D Shr I) And 1);
+ If C=0 Then V9EPutTree(6,@P^.Class0Fp[D,0],F) Else V9EPutTree(6,@P^.Fp[0],F);
+ If UseHp Then Begin
+  If C=0 Then V9EPut(P^.Class0Hp,E) Else V9EPut(P^.Hp,E);
+ End;
+End;
+
+Procedure V9EPutMv(Var Mv,Ref: TV9Mv);
+Var Dr,Dc,J: LongInt; UseHp: Boolean;
+Begin
+ Dr:=Mv.R-Ref.R; Dc:=Mv.C-Ref.C;
+ J:=Ord(Dr<>0)*2+Ord(Dc<>0);
+ UseHp:=(V9AllowHp<>0) And (V9Abs(Ref.R)<64) And (V9Abs(Ref.C)<64);
+ V9EPutTree(4,@V9Fc.Joints[0],J);
+ If Dr<>0 Then V9EPutMvComp(0,Dr,UseHp);
+ If Dc<>0 Then V9EPutMvComp(1,Dc,UseHp);
+ If V9EEmit And V9DoCnt Then Begin
+  Inc(V9Cnt.Joints[J]);
+  If Dr<>0 Then V9IncMvComp(0,Dr);
+  If Dc<>0 Then V9IncMvComp(1,Dc);
+ End;
+End;
+
+{ candidats NEAREST/NEAR du bloc courant pour la reference Rf ; renvoie les vecteurs apres reduction de precision }
+Procedure V9EMvCands(Rf: LongInt; Var Nearest,Near: TV9Mv);
+Var L0,L1: TV9Mv; Cnt: LongInt;
+Begin
+ Cnt:=V9FindMvRefs(10,Rf,-1,L0,L1);
+ V9LowerMvPrec(L0); Nearest:=L0;
+ Cnt:=V9FindMvRefs(11,Rf,-1,L0,L1);
+ If Cnt=2 Then Begin V9LowerMvPrec(L1); Near:=L1; End Else Begin V9LowerMvPrec(L0); Near:=L0; End;
+End;
+
+{ ---------------- informations de mode d'un bloc ---------------- }
+Procedure V9EPutModeInfo(Var D: TV9EDec);
+Var Mi: PV9Mi; Ctx,Ctx1,Bit,Bit1,J,M: LongInt; Nr,Nn: TV9Mv;
+Begin
+ Mi:=V9Cur;
+ If (V9FrameType=0) Or (V9IntraOnly<>0) Then Begin
+  V9EPutSkip(D.Skip);
+  V9EPutTx(True,D.Tx);
+  Case D.Bs Of
+   0: Begin V9EPutKfMode(0,D.BMode[0]); V9EPutKfMode(1,D.BMode[1]); V9EPutKfMode(2,D.BMode[2]); V9EPutKfMode(3,D.BMode[3]); End;
+   1: Begin V9EPutKfMode(0,D.BMode[0]); V9EPutKfMode(1,D.BMode[1]); End;
+   2: Begin V9EPutKfMode(0,D.BMode[0]); V9EPutKfMode(2,D.BMode[2]); End;
+  Else V9EPutKfMode(0,D.YMode);
+  End;
+  V9EPutTree(0,@V9EC[V9E_CKFUV+Mi^.Mode*9],D.UvMode);
+  Exit;
+ End;
+ V9EPutSkip(D.Skip);
+ Ctx:=V9CtxIntraInter;
+ V9EPut(V9Fc.IntraInter[Ctx],D.Inter);
+ If V9EEmit And V9DoCnt Then Inc(V9Cnt.IntraInter[Ctx,D.Inter]);
+ V9EPutTx((D.Skip=0) Or (D.Inter=0),D.Tx);
+ If D.Inter=0 Then Begin
+  Case D.Bs Of
+   0: Begin V9EPutIntraY(0,D.BMode[0]); V9EPutIntraY(0,D.BMode[1]); V9EPutIntraY(0,D.BMode[2]); V9EPutIntraY(0,D.BMode[3]); End;
+   1: Begin V9EPutIntraY(0,D.BMode[0]); V9EPutIntraY(0,D.BMode[1]); End;
+   2: Begin V9EPutIntraY(0,D.BMode[0]); V9EPutIntraY(0,D.BMode[2]); End;
+  Else V9EPutIntraY(V9SizeGroup[D.Bs],D.YMode);
+  End;
+  V9EPutTree(0,@V9Fc.UvMode[Mi^.Mode,0],D.UvMode);
+  If V9EEmit And V9DoCnt Then Inc(V9Cnt.UvMode[Mi^.Mode,D.UvMode]);
+  Exit;
+ End;
+ { bloc inter, reference unique }
+ Ctx:=V9CtxSingle1;
+ Bit:=Ord(D.Ref0<>1);
+ V9EPut(V9Fc.SingleRef[Ctx,0],Bit);
+ If V9EEmit And V9DoCnt Then Inc(V9Cnt.SingleRef[Ctx,0,Bit]);
+ If Bit<>0 Then Begin
+  Ctx1:=V9CtxSingle2;
+  Bit1:=Ord(D.Ref0=3);
+  V9EPut(V9Fc.SingleRef[Ctx1,1],Bit1);
+  If V9EEmit And V9DoCnt Then Inc(V9Cnt.SingleRef[Ctx1,1,Bit1]);
+ End;
+ Ctx:=V9ModeContext;
+ M:=D.YMode-10;
+ V9EPutTree(1,@V9Fc.InterMode[Ctx,0],M);
+ If V9EEmit And V9DoCnt Then Inc(V9Cnt.InterMode[Ctx,M]);
+ If V9Interp=4 Then Begin
+  J:=V9CtxInterp;
+  V9EPutTree(3,@V9Fc.Interp[J,0],D.Filt);
+  If V9EEmit And V9DoCnt Then Inc(V9Cnt.Interp[J,D.Filt]);
+ End;
+ If D.YMode=13 Then Begin
+  V9EMvCands(D.Ref0,Nr,Nn);
+  V9EPutMv(D.Mv[0],Nr);
+ End;
+End;
+
+{ ---------------- partition ---------------- }
+Function V9EPartCtx(Ap,Lp: PV9B; MiRow,MiCol,Bsl: LongInt): LongInt;
+Var A,L: LongInt;
+Begin
+ A:=(Ap^[MiCol] Shr Bsl) And 1;
+ L:=(Lp^[MiRow And 7] Shr Bsl) And 1;
+ V9EPartCtx:=(L*2+A)+Bsl*4;
+End;
+
+{ ecrit le symbole de partition du noeud (Row,Col) de taille Bsize ; N4l2 = log2 de la largeur en unites 4x4 }
+Procedure V9EPutPartition(Ap,Lp: PV9B; MiRow,MiCol,Bsize,N4l2,Part: LongInt);
+Var N8l2,Nw,Hbs,Ctx: LongInt; HasR,HasC: Boolean; Pr: PV9B;
+Begin
+ N8l2:=N4l2-1; Nw:=1 Shl N8l2; Hbs:=Nw Shr 1;
+ HasR:=(MiRow+Hbs)<V9MiRows; HasC:=(MiCol+Hbs)<V9MiCols;
+ Ctx:=V9EPartCtx(Ap,Lp,MiRow,MiCol,N8l2);
+ If (V9FrameType=0) Or (V9IntraOnly<>0) Then Pr:=@V9EC[V9E_CKFPART+Ctx*3] Else Pr:=@V9Fc.Part[Ctx,0];
+ If HasR And HasC Then V9EPutTree(2,Pr,Part)
+ Else If (Not HasR) And HasC Then V9EPut(Pr^[1],Ord(Part=3))
+ Else If HasR And (Not HasC) Then V9EPut(Pr^[2],Ord(Part=3));
+ If V9EEmit And V9DoCnt Then Inc(V9Cnt.Part[Ctx,Part]);
+End;
+
+Procedure V9EUpdPartCtx(Ap,Lp: PV9B; MiRow,MiCol,Bsize,N4l2,Part: LongInt);
+Var Sub,Nw: LongInt;
+Begin
+ Nw:=1 Shl (N4l2-1);
+ Sub:=V9SubSize[Part*13+Bsize];
+ If (Bsize>=3) And ((Bsize=3) Or (Part<>3)) Then Begin
+  FillChar(Ap^[MiCol],Nw,V9PartCtxA[Sub]);
+  FillChar(Lp^[MiRow And 7],Nw,V9PartCtxL[Sub]);
+ End;
+End;
+
+{ ---------------- jetons de coefficients (cf. V9DecodeCoefs) ---------------- }
+Procedure V9EPutPar(Var P2: Byte; K,Bit: LongInt);
+Var Pr: LongInt;
+Begin
+ If V9EEmit Then Begin
+  If V9ESymN>=V9ESymCap Then Begin V9ESymCap:=V9ESymCap*2; ReallocMem(V9ESym,V9ESymCap*4); End;
+  V9ESym^[V9ESymN]:=((SizeOf(V9Fc)+V9E_CSIZE+V9EIdx(P2)*8+K) Shl 1) Or Bit; Inc(V9ESymN);
+ End Else Begin
+  Pr:=V9EC[V9E_CPARETO+(P2-1)*8+K]; If Bit<>0 Then Pr:=256-Pr;
+  Inc(V9ECostAcc,V9ECost[Pr]);
+ End;
+End;
+
+Procedure V9ETokens(Pl,Ref,Tx,Ctx,Tt,Eob: LongInt; Lv: PV9EL);
+Var MaxEob,Band,C,Pos,V,A,Pt,Bits,K,Base,Ex: LongInt; Probs,Pp,BT: PV9B; Sc,Nb: PV9S; Cn: Boolean;
+Begin
+ MaxEob:=16 Shl (Tx Shl 1); Pt:=Ord(Pl>0);
+ Probs:=@V9Fc.Coef[Tx,Pt,Ref,0,0,0];
+ Sc:=@V9ScanTab[V9ScanOff[Tx*4+Tt]]; Nb:=@V9NbTab[V9NbOff[Tx*4+Tt]];
+ If Tx=0 Then BT:=@V9BandTx4 Else BT:=@V9BandTx8;
+ Cn:=V9EEmit And V9DoCnt;
+ C:=0;
+ While C<MaxEob Do Begin
+  Band:=BT^[C]; Pp:=@Probs^[(Band*6+Ctx)*3];
+  If Cn Then Inc(V9Cnt.Eob[Tx,Pt,Ref,Band,Ctx]);
+  If C>=Eob Then Begin
+   V9EPut(Pp^[0],0);
+   If Cn Then Inc(V9Cnt.Coef[Tx,Pt,Ref,Band,Ctx,3]);
+   Break;
+  End;
+  V9EPut(Pp^[0],1);
+  Pos:=Sc^[C]; V:=Lv^[Pos];
+  While V=0 Do Begin
+   V9EPut(Pp^[1],0);
+   If Cn Then Inc(V9Cnt.Coef[Tx,Pt,Ref,Band,Ctx,0]);
+   V9TokCache[Pos]:=0;
+   Inc(C);
+   Ctx:=(1+V9TokCache[Nb^[2*C]]+V9TokCache[Nb^[2*C+1]]) Shr 1;
+   Band:=BT^[C]; Pp:=@Probs^[(Band*6+Ctx)*3];
+   Pos:=Sc^[C]; V:=Lv^[Pos];
+  End;
+  V9EPut(Pp^[1],1);
+  A:=V9Abs(V);
+  If A=1 Then Begin
+   V9EPut(Pp^[2],0);
+   If Cn Then Inc(V9Cnt.Coef[Tx,Pt,Ref,Band,Ctx,1]);
+   V9TokCache[Pos]:=1;
+  End Else Begin
+   V9EPut(Pp^[2],1);
+   If Cn Then Inc(V9Cnt.Coef[Tx,Pt,Ref,Band,Ctx,2]);
+   If A<=4 Then Begin
+    V9EPutPar(Pp^[2],0,0);
+    If A=2 Then Begin V9EPutPar(Pp^[2],1,0); V9TokCache[Pos]:=2; End
+    Else Begin V9EPutPar(Pp^[2],1,1); V9EPutPar(Pp^[2],2,A-3); V9TokCache[Pos]:=3; End;
+   End Else Begin
+    V9EPutPar(Pp^[2],0,1);
+    If A<=10 Then Begin
+     V9EPutPar(Pp^[2],3,0); V9TokCache[Pos]:=4;
+     If A<=6 Then Begin V9EPutPar(Pp^[2],4,0); V9EPut(V9EC[V9E_CCAT1],A-5); End
+     Else Begin
+      V9EPutPar(Pp^[2],4,1); Ex:=A-7;
+      V9EPut(V9EC[V9E_CCAT2],(Ex Shr 1) And 1); V9EPut(V9EC[V9E_CCAT2+1],Ex And 1);
+     End;
+    End Else Begin
+     V9EPutPar(Pp^[2],3,1); V9TokCache[Pos]:=5;
+     If A<=34 Then Begin
+      V9EPutPar(Pp^[2],5,0);
+      If A<=18 Then Begin
+       V9EPutPar(Pp^[2],6,0); Ex:=A-11; Base:=V9E_CCAT3; Bits:=3;
+      End Else Begin
+       V9EPutPar(Pp^[2],6,1); Ex:=A-19; Base:=V9E_CCAT4; Bits:=4;
+      End;
+     End Else Begin
+      V9EPutPar(Pp^[2],5,1);
+      If A<=66 Then Begin
+       V9EPutPar(Pp^[2],7,0); Ex:=A-35; Base:=V9E_CCAT5; Bits:=5;
+      End Else Begin
+       V9EPutPar(Pp^[2],7,1); Ex:=A-67; Base:=V9E_CCAT6+12-V9Bd; Bits:=14+(V9Bd-8);
+      End;
+     End;
+     For K:=0 To Bits-1 Do V9EPut(V9EC[Base+K],(Ex Shr (Bits-1-K)) And 1);
+    End;
+   End;
+  End;
+  V9EPut(V9EC[V9E_C128],Ord(V<0));
+  Inc(C);
+  If C<MaxEob Then Ctx:=(1+V9TokCache[Nb^[2*C]]+V9TokCache[Nb^[2*C+1]]) Shr 1;
+ End;
+End;
+
+{ ---------------- codage d'un bloc de transformee ---------------- }
+Function V9ETxType(Pl,Tx,Mode: LongInt; Inter: LongInt): LongInt;
+Begin
+ If (Pl>0) Or (Inter<>0) Or (Tx=3) Or (V9Lossless<>0) Then V9ETxType:=0 Else V9ETxType:=V9IntraTxType[Mode];
+End;
+
+Function V9EUvTx(Sb,Tx: LongInt): LongInt;
+Begin V9EUvTx:=V9UvTx[((Sb*4+Tx)*2+V9SsX)*2+V9SsY]; End;
+
+{ contexte du premier jeton a partir des tableaux locaux }
+Function V9ELocCtx(Pl,Col,Row,N: LongInt): LongInt;
+Var I: LongInt; Az,Lz: Boolean;
+Begin
+ Az:=False; Lz:=False;
+ For I:=0 To N-1 Do Begin If V9EAl[Pl,Col+I]<>0 Then Az:=True; If V9ELl[Pl,Row+I]<>0 Then Lz:=True; End;
+ V9ELocCtx:=Ord(Az)+Ord(Lz);
+End;
+
+Procedure V9ELocSet(Pl,Col,Row,N,Eob: LongInt);
+Var I,Lim: LongInt; Cv: Byte;
+Begin
+ Cv:=Ord(Eob>0);
+ If V9MaxW[Pl]<>0 Then Lim:=V9MaxW[Pl]-Col Else Lim:=N;
+ For I:=0 To N-1 Do If I<Lim Then V9EAl[Pl,Col+I]:=Cv Else V9EAl[Pl,Col+I]:=0;
+ If V9MaxH[Pl]<>0 Then Lim:=V9MaxH[Pl]-Row Else Lim:=N;
+ For I:=0 To N-1 Do If I<Lim Then V9ELl[Pl,Row+I]:=Cv Else V9ELl[Pl,Row+I]:=0;
+End;
+
+Var V9ERnd,V9ETrim: Single; V9ECf: Array[0..1023] Of Single;
+
+{ quantification d'un bloc : renvoie l'eob ; DistQ/DistZ en echelle des coefficients }
+Function V9EQuant(Pl,Tx,Tt: LongInt; Lv: PV9EL; Var DistQ,DistZ: Double): LongInt;
+Var N2,C,Pos,Q,Deq,Dq0,Dq1,Dqv,Eob,Sh: LongInt; Sc: PV9S; F,A,Stp,E: Single; Sg: Boolean;
+Begin
+ N2:=16 Shl (Tx Shl 1);
+ Sc:=@V9ScanTab[V9ScanOff[Tx*4+Tt]];
+ If Pl=0 Then Begin Dq0:=V9YDq[0,0]; Dq1:=V9YDq[0,1]; End Else Begin Dq0:=V9UvDq[0,0]; Dq1:=V9UvDq[0,1]; End;
+ If Tx=3 Then Sh:=1 Else Sh:=0;
+ FillChar(Lv^,N2*4,0);
+ Eob:=0; DistQ:=0; DistZ:=0;
+ For C:=0 To N2-1 Do Begin
+  Pos:=Sc^[C]; F:=V9ECf[Pos]; Sg:=F<0; If Sg Then A:=-F Else A:=F;
+  If C=0 Then Dqv:=Dq0 Else Dqv:=Dq1;
+  If Sh=1 Then Stp:=Dqv*0.5 Else Stp:=Dqv;
+  Q:=Trunc(A/Stp+V9ERnd);
+  If Q>16000 Then Q:=16000;
+  If Q>0 Then Begin
+   Deq:=(Q*Dqv) Shr Sh;
+   E:=A-Deq; DistQ:=DistQ+E*E;
+   If Sg Then Begin Lv^[Pos]:=-Q; V9Coef[Pos]:=-Deq; End Else Begin Lv^[Pos]:=Q; V9Coef[Pos]:=Deq; End;
+   Eob:=C+1;
+  End Else DistQ:=DistQ+A*A;
+  DistZ:=DistZ+A*A;
+ End;
+ { elimination des derniers +-1 peu significatifs }
+ While Eob>0 Do Begin
+  Pos:=Sc^[Eob-1];
+  If Abs(Lv^[Pos])<>1 Then Break;
+  F:=V9ECf[Pos]; If F<0 Then F:=-F;
+  If Eob=1 Then Dqv:=Dq0 Else Dqv:=Dq1;
+  If Sh=1 Then Stp:=Dqv*0.5 Else Stp:=Dqv;
+  If F/Stp>=V9ETrim Then Break;
+  Deq:=(Dqv) Shr Sh;
+  DistQ:=DistQ-(F-Deq)*(F-Deq)+F*F;
+  Lv^[Pos]:=0; V9Coef[Pos]:=0;
+  Dec(Eob);
+  While (Eob>0) And (Lv^[Sc^[Eob-1]]=0) Do Dec(Eob);
+ End;
+ V9EQuant:=Eob;
+End;
+
+{ code un bloc de transformee : prediction (intra), residu, quantification, reconstruction. }
+Procedure V9ECodeTx(Var D: TV9EDec; Pl,Tx,Col,Row,Mode: LongInt; ForceZero: Boolean; Var Dist: Double; Var RateT: LongInt);
+Var N,Ssx,Ssy,Y,X,Tt,Eob,Ctx,St,Sst,Rz,Rq,Acc0,Z,Dm: LongInt; Fb: ^TV9Fb; Dst,Sp: PV9W; HaveU,HaveL,HaveR: Boolean;
+ DistQ,DistZ,K,Jz,Jq: Double; Lv: PV9EL; Sse: Int64; Dff: LongInt; AnyNz: Boolean;
+Begin
+ Fb:=@V9Fb[V9NewFb];
+ N:=4 Shl Tx;
+ If Pl=0 Then Begin Ssx:=0; Ssy:=0; End Else Begin Ssx:=V9SsX; Ssy:=V9SsY; End;
+ If D.Inter=0 Then Begin
+  HaveU:=(Row<>0) Or (V9Above<>Nil);
+  HaveL:=(Col<>0) Or (V9Left<>Nil);
+  HaveR:=(Col+(1 Shl Tx))<(1 Shl V9N4WL[Pl]);
+  V9IntraBlock(Pl,Mode,Tx,Col*4,Row*4,HaveU,HaveL,HaveR);
+ End;
+ St:=Fb^.St[Pl]; Sst:=V9ESrcSt[Pl];
+ Dst:=@Fb^.P[Pl]^[(((V9MiRow*8) Shr Ssy)+Row*4)*St+((V9MiCol*8) Shr Ssx)+Col*4];
+ Sp:=@V9ESrc[Pl]^[(((V9MiRow*8) Shr Ssy)+Row*4)*Sst+((V9MiCol*8) Shr Ssx)+Col*4];
+ Lv:=@V9ELv^[V9ELvN];
+ Tt:=V9ETxType(Pl,Tx,Mode,D.Inter);
+ Eob:=0;
+ Ctx:=V9ELocCtx(Pl,Col,Row,1 Shl Tx);
+ If Not ForceZero Then Begin
+  AnyNz:=False; Sse:=0;
+  For Y:=0 To N-1 Do For X:=0 To N-1 Do Begin
+   Dff:=Sp^[Y*Sst+X]-Dst^[Y*St+X];
+   V9ERes[Y*N+X]:=Dff; Sse:=Sse+Dff*Dff;
+  End;
+  If Sse>0 Then Begin
+   { si tous les coefficients sont forcement nuls apres quantification, inutile de transformer }
+   If Pl=0 Then Z:=V9YDq[0,1] Else Z:=V9UvDq[0,1];
+   If Pl=0 Then Dm:=V9YDq[0,0] Else Dm:=V9UvDq[0,0];
+   If Dm<Z Then Z:=Dm;
+   If Sqrt(Sse)*8.0<0.5*Z Then Sse:=0;
+  End;
+  AnyNz:=Sse>0;
+  If AnyNz Then Begin
+   V9EFdct(Tx,Tt,@V9ECf);
+   Eob:=V9EQuant(Pl,Tx,Tt,Lv,DistQ,DistZ);
+   If Eob>0 Then Begin
+    If Tx=3 Then K:=1/16 Else K:=1/64;
+    Acc0:=V9ECostAcc; V9ECostAcc:=0; V9EEmit:=False;
+    V9ETokens(Pl,Ord(D.Inter<>0),Tx,Ctx,Tt,Eob,Lv);
+    Rq:=V9ECostAcc;
+    V9ECostAcc:=0;
+    V9ETokens(Pl,Ord(D.Inter<>0),Tx,Ctx,Tt,0,Lv);
+    Rz:=V9ECostAcc; V9ECostAcc:=Acc0;
+    Jq:=DistQ*K+V9ELam*Rq/256.0; Jz:=DistZ*K+V9ELam*Rz/256.0;
+    If Jz<=Jq Then Begin
+     Eob:=0; FillChar(V9Coef,N*N*4,0); FillChar(Lv^,N*N*4,0);
+    End;
+   End;
+  End;
+ End;
+ If Eob>0 Then Begin
+  V9InvTx(Tx,Tt,Eob,Dst,St);
+  Acc0:=V9ECostAcc; V9ECostAcc:=0; V9EEmit:=False;
+  V9ETokens(Pl,Ord(D.Inter<>0),Tx,Ctx,Tt,Eob,Lv);
+  Inc(RateT,V9ECostAcc); V9ECostAcc:=Acc0;
+ End Else Begin
+  FillChar(Lv^,N*N*4,0);
+  Acc0:=V9ECostAcc; V9ECostAcc:=0; V9EEmit:=False;
+  V9ETokens(Pl,Ord(D.Inter<>0),Tx,Ctx,Tt,0,Lv);
+  Inc(RateT,V9ECostAcc); V9ECostAcc:=Acc0;
+ End;
+ Sse:=0;
+ For Y:=0 To N-1 Do For X:=0 To N-1 Do Begin
+  Dff:=Sp^[Y*Sst+X]-Dst^[Y*St+X]; Sse:=Sse+Int64(Dff)*Dff;
+ End;
+ Dist:=Dist+Sse;
+ V9EEob[V9EEobN]:=Eob; Inc(V9EEobN); Inc(V9ELvN,N*N);
+ V9ELocSet(Pl,Col,Row,1 Shl Tx,Eob);
+End;
+
+{ geometrie d'un plan (comme V9DecodeBlock) }
+Procedure V9EPlaneGeom(Pl: LongInt; Var Tx,Step,MaxW,MaxH: LongInt);
+Var Ssx,Ssy,N4w,N4h: LongInt;
+Begin
+ If Pl=0 Then Begin Tx:=V9Cur^.Tx; Ssx:=0; Ssy:=0; End
+ Else Begin Tx:=V9EUvTx(V9Cur^.Sb,V9Cur^.Tx); Ssx:=V9SsX; Ssy:=V9SsY; End;
+ N4w:=V9N4W[Pl]; N4h:=V9N4H[Pl];
+ Step:=1 Shl Tx;
+ If V9EdgeR>=0 Then MaxW:=N4w Else MaxW:=N4w+SarLongint(V9EdgeR,5+Ssx);
+ If V9EdgeB>=0 Then MaxH:=N4h Else MaxH:=N4h+SarLongint(V9EdgeB,5+Ssy);
+ If V9EdgeR>=0 Then V9MaxW[Pl]:=0 Else V9MaxW[Pl]:=MaxW;
+ If V9EdgeB>=0 Then V9MaxH[Pl]:=0 Else V9MaxH[Pl]:=MaxH;
+End;
+
+{ copie les contextes de la source (SA/SL ou V9AboveCtx/V9LeftCtx) dans les tableaux locaux }
+Procedure V9ELoadCtx;
+Var Pl,I: LongInt; A,L: PV9B;
+Begin
+ For Pl:=0 To 2 Do Begin
+  A:=@V9ECA[Pl]^[V9AOff[Pl]]; L:=@V9ECL[Pl]^[V9LOff[Pl]];
+  For I:=0 To 31 Do Begin
+   If I<V9N4W[Pl] Then V9EAl[Pl,I]:=A^[I] Else V9EAl[Pl,I]:=0;
+   If I<V9N4H[Pl] Then V9ELl[Pl,I]:=L^[I] Else V9ELl[Pl,I]:=0;
+  End;
+ End;
+End;
+
+{ ecrit les contextes locaux (ou des zeros si Skip) dans les tableaux de recherche }
+Procedure V9EStoreCtx(Skip: Boolean);
+Var Pl,I: LongInt; A,L: PV9B;
+Begin
+ For Pl:=0 To 2 Do Begin
+  A:=@V9ECA[Pl]^[V9AOff[Pl]]; L:=@V9ECL[Pl]^[V9LOff[Pl]];
+  For I:=0 To V9N4W[Pl]-1 Do If Skip Then A^[I]:=0 Else A^[I]:=V9EAl[Pl,I];
+  For I:=0 To V9N4H[Pl]-1 Do If Skip Then L^[I]:=0 Else L^[I]:=V9ELl[Pl,I];
+ End;
+End;
+
+{ Code les plans de PlMask d'un bloc deja prepare (V9ESetupBlock + V9EPutMi). Retourne distorsion et debit des jetons.
+  Si Final, les contextes locaux ne sont pas charges (deja charges par l'appelant). }
+Procedure V9ECodePlanes(Var D: TV9EDec; PlMask: LongInt; ForceZero: Boolean; Var Dist: Double; Var RateT: LongInt);
+Var Pl,Tx,Step,MaxW,MaxH,Row,Col,Mode: LongInt;
+Begin
+ For Pl:=0 To 2 Do If ((PlMask Shr Pl) And 1)<>0 Then Begin
+  V9EPlaneGeom(Pl,Tx,Step,MaxW,MaxH);
+  Row:=0;
+  While Row<MaxH Do Begin
+   Col:=0;
+   While Col<MaxW Do Begin
+    Mode:=0;
+    If D.Inter=0 Then Begin
+     If Pl=0 Then Mode:=V9Cur^.Mode Else Mode:=V9Cur^.Uv;
+     If (V9Cur^.Sb<3) And (Pl=0) Then Mode:=V9Cur^.BMode[(Row Shl 1)+Col];
+    End;
+    V9ECodeTx(D,Pl,Tx,Col,Row,Mode,ForceZero,Dist,RateT);
+    Inc(Col,Step);
+   End;
+   Inc(Row,Step);
+  End;
+ End;
+End;
+
+{ evalue / code un bloc complet (tous les plans). Fixe D.Skip et D.Tx definitifs, remplit V9ELv/V9EEob,
+  met a jour le Mi, la reconstruction et (mode recherche) les contextes. Retourne J. }
+Function V9ECodeBlock(Var D: TV9EDec; ForceZero: Boolean; Search: Boolean; Var Dist: Double): Double;
+Var RateT,Rm,I,Eobt: LongInt; Acc0: LongInt; E0: Boolean;
+Begin
+ V9ESetupBlock(D.Row,D.Col,D.Bs);
+ D.Skip:=0;
+ V9EPutMi(D);
+ V9ELoadCtx;
+ V9ELvN:=0; V9EEobN:=0; Dist:=0; RateT:=0;
+ E0:=V9EEmit; V9EEmit:=False;
+ If D.Inter<>0 Then V9InterBlock;
+ V9ECodePlanes(D,7,ForceZero,Dist,RateT);
+ Eobt:=0;
+ For I:=0 To V9EEobN-1 Do Inc(Eobt,V9EEob[I]);
+ If Eobt=0 Then Begin
+  D.Skip:=1; RateT:=0;
+  If D.Inter<>0 Then D.Tx:=V9ETxDefault(D.Bs);
+ End Else D.Skip:=0;
+ V9EPutMi(D);
+ If Search Then V9EStoreCtx(D.Skip<>0);
+ Acc0:=V9ECostAcc; V9ECostAcc:=0;
+ V9EPutModeInfo(D);
+ Rm:=V9ECostAcc; V9ECostAcc:=Acc0;
+ V9EEmit:=E0;
+ V9ECodeBlock:=Dist+V9ELam*(Rm+RateT)/256.0;
+End;
+
+{ ---------------- evaluation d'un bloc intra ---------------- }
+Function V9EBlockCost(Var D: TV9EDec; PlMask: LongInt; Var Dist: Double): Double;
+{ cout approximatif (sans mise a jour des contextes de recherche) des plans de PlMask }
+Var RateT,Rm,I,Eobt,Acc0: LongInt; E0: Boolean;
+Begin
+ V9ESetupBlock(D.Row,D.Col,D.Bs);
+ D.Skip:=0;
+ V9EPutMi(D);
+ V9ELoadCtx;
+ V9ELvN:=0; V9EEobN:=0; Dist:=0; RateT:=0;
+ E0:=V9EEmit; V9EEmit:=False;
+ V9ECodePlanes(D,PlMask,False,Dist,RateT);
+ Eobt:=0;
+ For I:=0 To V9EEobN-1 Do Inc(Eobt,V9EEob[I]);
+ If Eobt=0 Then Begin D.Skip:=1; RateT:=0; End Else D.Skip:=0;
+ V9EPutMi(D);
+ Acc0:=V9ECostAcc; V9ECostAcc:=0;
+ V9EPutModeInfo(D);
+ Rm:=V9ECostAcc; V9ECostAcc:=Acc0;
+ V9EEmit:=E0;
+ V9EBlockCost:=Dist+V9ELam*(Rm+RateT)/256.0;
+End;
+
+Function V9EModeCostSub(Blk,M: LongInt): LongInt;
+Var Acc0: LongInt; E0: Boolean;
+Begin
+ E0:=V9EEmit; V9EEmit:=False; Acc0:=V9ECostAcc; V9ECostAcc:=0;
+ If (V9FrameType=0) Or (V9IntraOnly<>0) Then V9EPutKfMode(Blk,M) Else V9EPutIntraY(0,M);
+ V9EModeCostSub:=V9ECostAcc; V9ECostAcc:=Acc0; V9EEmit:=E0;
+End;
+
+Function V9EEvalIntra(Row,Col,Bs: LongInt; Var D: TV9EDec): Double;
+Const SlotFirst: Array[0..2,0..3] Of ShortInt=((0,1,2,3),(0,1,-1,-1),(0,2,-1,-1));
+ SlotCnt: Array[0..2] Of Byte=(4,2,2);
+Var MaxT,M,K,NShort,NTx,I,J,S,B,Ts,NUv: LongInt;
+ Sad: Array[0..9] Of Int64; Order: Array[0..9] Of LongInt; TxL: Array[0..3] Of LongInt;
+ Jc,Jb,Dist: Double; Bu: TV9EDec; HaveU,HaveL,HaveR: Boolean; Fb: ^TV9Fb; Dst,Sp: PV9W; Y,X,Sst,St: LongInt; Sv: Int64;
+ UvList: Array[0..9] Of LongInt; BestM,BestT: LongInt;
+ SaveA,SaveL: Array[0..2,0..31] Of Byte; SaveLv,SaveEob,Rt,Mc: LongInt; Bj: Double; Bm: LongInt; DistT: Double;
+Begin
+ FillChar(D,SizeOf(D),0);
+ D.Row:=Row; D.Col:=Col; D.Bs:=Bs; D.Inter:=0; D.Ref0:=0; D.Ref1:=-1; D.Filt:=3;
+ V9ESetupBlock(Row,Col,Bs);
+ If Bs>=3 Then Begin
+  MaxT:=V9ETxDefault(Bs);
+  Case V9ESpeed Of 0: NTx:=MaxT+1; 1: NTx:=V9Min(2,MaxT+1); Else NTx:=1; End;
+  For I:=0 To NTx-1 Do TxL[I]:=MaxT-I;
+  { classement des modes sur le premier bloc de transformee }
+  Ts:=MaxT;
+  Fb:=@V9Fb[V9NewFb]; St:=Fb^.St[0]; Sst:=V9ESrcSt[0];
+  HaveU:=V9Above<>Nil; HaveL:=V9Left<>Nil; HaveR:=(1 Shl Ts)<(1 Shl V9N4WL[0]);
+  Dst:=@Fb^.P[0]^[(Row*8)*St+Col*8]; Sp:=@V9ESrc[0]^[(Row*8)*Sst+Col*8];
+  For M:=0 To 9 Do Begin
+   V9IntraBlock(0,M,Ts,0,0,HaveU,HaveL,HaveR);
+   Sv:=0;
+   For Y:=0 To (4 Shl Ts)-1 Do For X:=0 To (4 Shl Ts)-1 Do Sv:=Sv+V9Abs(Sp^[Y*Sst+X]-Dst^[Y*St+X]);
+   Sad[M]:=Sv; Order[M]:=M;
+  End;
+  For I:=0 To 8 Do For J:=I+1 To 9 Do If Sad[Order[J]]<Sad[Order[I]] Then Begin K:=Order[I]; Order[I]:=Order[J]; Order[J]:=K; End;
+  Case V9ESpeed Of 0: NShort:=10; 1: NShort:=3; Else NShort:=2; End;
+  If ((V9EPrune And 32)<>0) And (V9FrameType<>0) And (V9IntraOnly=0) Then Begin NShort:=2; NTx:=1; End;
+  Jb:=1E30; BestM:=0; BestT:=MaxT;
+  For I:=0 To NShort-1 Do For J:=0 To NTx-1 Do Begin
+   Bu:=D; Bu.YMode:=Order[I]; Bu.UvMode:=Order[I]; Bu.Tx:=TxL[J];
+   Jc:=V9EBlockCost(Bu,1,Dist);
+   If Jc<Jb Then Begin Jb:=Jc; BestM:=Order[I]; BestT:=TxL[J]; End;
+  End;
+  D.YMode:=BestM; D.Tx:=BestT;
+ End Else Begin
+  { petits blocs : un mode par sous-bloc, choix glouton sur le premier bloc 4x4 de chaque groupe }
+  D.Tx:=0;
+  V9EPutMi(D); V9ELoadCtx; V9ELvN:=0; V9EEobN:=0;
+  Move(V9EAl,SaveA,SizeOf(V9EAl)); Move(V9ELl,SaveL,SizeOf(V9ELl));
+  V9EEmit:=False;
+  For S:=0 To SlotCnt[Bs]-1 Do Begin
+   B:=SlotFirst[Bs,S];
+   Bj:=1E30; Bm:=0;
+   For M:=0 To 9 Do Begin
+    Case Bs Of
+     0: D.BMode[B]:=M;
+     1: Begin D.BMode[B]:=M; D.BMode[B+2]:=M; End;
+    Else Begin D.BMode[B]:=M; D.BMode[B+1]:=M; End;
+    End;
+    V9EPutMi(D);
+    Move(V9EAl,SaveA,SizeOf(V9EAl)); Move(V9ELl,SaveL,SizeOf(V9ELl)); SaveLv:=V9ELvN; SaveEob:=V9EEobN;
+    DistT:=0; Rt:=0;
+    V9ECodeTx(D,0,0,B And 1,B Shr 1,M,False,DistT,Rt);
+    Mc:=V9EModeCostSub(B,M);
+    Jc:=DistT+V9ELam*(Rt+Mc)/256.0;
+    If Jc<Bj Then Begin Bj:=Jc; Bm:=M; End;
+    Move(SaveA,V9EAl,SizeOf(V9EAl)); Move(SaveL,V9ELl,SizeOf(V9ELl)); V9ELvN:=SaveLv; V9EEobN:=SaveEob;
+   End;
+   Case Bs Of
+    0: D.BMode[B]:=Bm;
+    1: Begin D.BMode[B]:=Bm; D.BMode[B+2]:=Bm; End;
+   Else Begin D.BMode[B]:=Bm; D.BMode[B+1]:=Bm; End;
+   End;
+   V9EPutMi(D);
+   { applique reellement les blocs du groupe }
+   Case Bs Of
+    0: Begin DistT:=0; Rt:=0; V9ECodeTx(D,0,0,B And 1,B Shr 1,Bm,False,DistT,Rt); End;
+    1: Begin
+        DistT:=0; Rt:=0; V9ECodeTx(D,0,0,B And 1,0,Bm,False,DistT,Rt);
+        V9ECodeTx(D,0,0,B And 1,1,Bm,False,DistT,Rt);
+       End;
+   Else Begin
+        DistT:=0; Rt:=0; V9ECodeTx(D,0,0,0,B Shr 1,Bm,False,DistT,Rt);
+        V9ECodeTx(D,0,0,1,B Shr 1,Bm,False,DistT,Rt);
+       End;
+   End;
+  End;
+  D.YMode:=D.BMode[3];
+ End;
+ { mode chroma }
+ NUv:=0;
+ If V9ESpeed=0 Then Begin For I:=0 To 9 Do UvList[I]:=I; NUv:=10; End
+ Else Begin
+  UvList[0]:=0; NUv:=1;
+  If D.YMode<>0 Then Begin UvList[NUv]:=D.YMode; Inc(NUv); End;
+  If (V9ESpeed=1) And (((V9EPrune And 16)=0) Or (V9FrameType=0)) Then
+   For I:=0 To 3 Do Begin
+    Case I Of 0: M:=1; 1: M:=2; 2: M:=9; Else M:=0; End;
+    K:=0; For J:=0 To NUv-1 Do If UvList[J]=M Then K:=1;
+    If K=0 Then Begin UvList[NUv]:=M; Inc(NUv); End;
+   End;
+ End;
+ Jb:=1E30; BestM:=0;
+ For I:=0 To NUv-1 Do Begin
+  Bu:=D; Bu.UvMode:=UvList[I];
+  Jc:=V9EBlockCost(Bu,6,Dist);
+  If Jc<Jb Then Begin Jb:=Jc; BestM:=UvList[I]; End;
+ End;
+ D.UvMode:=BestM;
+ V9EEvalIntra:=V9ECodeBlock(D,False,True,Dist);
+End;
+
+{ ---------------- recherche de partition ---------------- }
+Procedure V9ESnapSave(Var S: TV9ESnap; Lvl,Row,Col: LongInt);
+Var Pl,Y,Nw,W,H,X0,Y0,Ssx,Ssy,St,I,N4w,N4h,Ao,Lo: LongInt; Fb: ^TV9Fb;
+Begin
+ Fb:=@V9Fb[V9NewFb]; Nw:=8 Shr Lvl;
+ For Pl:=0 To 2 Do Begin
+  If Pl=0 Then Begin Ssx:=0; Ssy:=0; End Else Begin Ssx:=V9SsX; Ssy:=V9SsY; End;
+  W:=(Nw*8) Shr Ssx; H:=(Nw*8) Shr Ssy; X0:=(Col*8) Shr Ssx; Y0:=(Row*8) Shr Ssy; St:=Fb^.St[Pl];
+  For Y:=0 To H-1 Do Move(Fb^.P[Pl]^[(Y0+Y)*St+X0],S.Px[Pl]^[Y*W],W*2);
+  N4w:=(Nw*2) Shr Ssx; N4h:=(Nw*2) Shr Ssy; Ao:=(Col*2) Shr Ssx; Lo:=((Row*2) And 15) Shr Ssy;
+  For I:=0 To N4w-1 Do S.A[Pl,I]:=V9ESA[Pl]^[Ao+I];
+  For I:=0 To N4h-1 Do S.L[Pl,I]:=V9ESL[Pl,Lo+I];
+ End;
+ For I:=0 To Nw-1 Do Begin S.Ap[I]:=V9ESAP^[Col+I]; S.Lp[I]:=V9ESLP[(Row And 7)+I]; End;
+End;
+
+Procedure V9ESnapRest(Var S: TV9ESnap; Lvl,Row,Col: LongInt);
+Var Pl,Y,Nw,W,H,X0,Y0,Ssx,Ssy,St,I,N4w,N4h,Ao,Lo: LongInt; Fb: ^TV9Fb;
+Begin
+ Fb:=@V9Fb[V9NewFb]; Nw:=8 Shr Lvl;
+ For Pl:=0 To 2 Do Begin
+  If Pl=0 Then Begin Ssx:=0; Ssy:=0; End Else Begin Ssx:=V9SsX; Ssy:=V9SsY; End;
+  W:=(Nw*8) Shr Ssx; H:=(Nw*8) Shr Ssy; X0:=(Col*8) Shr Ssx; Y0:=(Row*8) Shr Ssy; St:=Fb^.St[Pl];
+  For Y:=0 To H-1 Do Move(S.Px[Pl]^[Y*W],Fb^.P[Pl]^[(Y0+Y)*St+X0],W*2);
+  N4w:=(Nw*2) Shr Ssx; N4h:=(Nw*2) Shr Ssy; Ao:=(Col*2) Shr Ssx; Lo:=((Row*2) And 15) Shr Ssy;
+  For I:=0 To N4w-1 Do V9ESA[Pl]^[Ao+I]:=S.A[Pl,I];
+  For I:=0 To N4h-1 Do V9ESL[Pl,Lo+I]:=S.L[Pl,I];
+ End;
+ For I:=0 To Nw-1 Do Begin V9ESAP^[Col+I]:=S.Ap[I]; V9ESLP[(Row And 7)+I]:=S.Lp[I]; End;
+End;
+
+Procedure V9ECtxSave(Var S: TV9ESnap; Lvl,Row,Col: LongInt);
+Var Pl,Nw,Ssx,Ssy,I,N4w,N4h,Ao,Lo: LongInt;
+Begin
+ Nw:=8 Shr Lvl;
+ For Pl:=0 To 2 Do Begin
+  If Pl=0 Then Begin Ssx:=0; Ssy:=0; End Else Begin Ssx:=V9SsX; Ssy:=V9SsY; End;
+  N4w:=(Nw*2) Shr Ssx; N4h:=(Nw*2) Shr Ssy; Ao:=(Col*2) Shr Ssx; Lo:=((Row*2) And 15) Shr Ssy;
+  For I:=0 To N4w-1 Do S.A[Pl,I]:=V9ESA[Pl]^[Ao+I];
+  For I:=0 To N4h-1 Do S.L[Pl,I]:=V9ESL[Pl,Lo+I];
+ End;
+ For I:=0 To Nw-1 Do Begin S.Ap[I]:=V9ESAP^[Col+I]; S.Lp[I]:=V9ESLP[(Row And 7)+I]; End;
+End;
+
+Procedure V9ECtxRest(Var S: TV9ESnap; Lvl,Row,Col: LongInt);
+Var Pl,Nw,Ssx,Ssy,I,N4w,N4h,Ao,Lo: LongInt;
+Begin
+ Nw:=8 Shr Lvl;
+ For Pl:=0 To 2 Do Begin
+  If Pl=0 Then Begin Ssx:=0; Ssy:=0; End Else Begin Ssx:=V9SsX; Ssy:=V9SsY; End;
+  N4w:=(Nw*2) Shr Ssx; N4h:=(Nw*2) Shr Ssy; Ao:=(Col*2) Shr Ssx; Lo:=((Row*2) And 15) Shr Ssy;
+  For I:=0 To N4w-1 Do V9ESA[Pl]^[Ao+I]:=S.A[Pl,I];
+  For I:=0 To N4h-1 Do V9ESL[Pl,Lo+I]:=S.L[Pl,I];
+ End;
+ For I:=0 To Nw-1 Do Begin V9ESAP^[Col+I]:=S.Ap[I]; V9ESLP[(Row And 7)+I]:=S.Lp[I]; End;
+End;
+
+Var V9ELeafMode: LongInt;
+Function V9EEvalInter(Row,Col,Bs: LongInt; Var D: TV9EDec): Double; Forward;
+
+Function V9EEvalLeaf(Row,Col,Bs: LongInt; Var D: TV9EDec): Double;
+Var Di: TV9EDec; Ji,Jn: Double;
+Begin
+ If (V9FrameType=0) Or (V9IntraOnly<>0) Then Begin
+  V9EEvalLeaf:=V9EEvalIntra(Row,Col,Bs,D);
+  Exit;
+ End;
+ Jn:=1E30;
+ If Bs>=3 Then Jn:=V9EEvalInter(Row,Col,Bs,D);
+ If (V9ESpeed<2) Or (Bs<3) Or True Then Begin
+  { intra : evalue sur un etat sauvegarde pour pouvoir revenir a l'inter }
+  If ((V9EPrune And 8)<>0) And (Bs>=3) And (D.Skip<>0) Then Begin
+   Ji:=V9ECodeBlock(D,True,True,Ji);
+   V9EEvalLeaf:=Jn; Exit;
+  End;
+  Ji:=V9EEvalIntra(Row,Col,Bs,Di);
+  If Ji<Jn Then Begin D:=Di; Jn:=Ji; V9EEvalLeaf:=Jn; Exit; End;
+  { l'inter est meilleur : le recoder pour retrouver l'etat }
+  Ji:=V9ECodeBlock(D,D.Skip<>0,True,Ji);
+ End;
+ V9EEvalLeaf:=Jn;
+End;
+
+Procedure V9EPlanAdd(Var P: TV9EPlan; Var Q: TV9EPlan);
+Var I: LongInt;
+Begin
+ For I:=0 To Q.N-1 Do P.It[P.N+I]:=Q.It[I];
+ Inc(P.N,Q.N);
+End;
+
+Procedure V9EApplyPlanMi(Var P: TV9EPlan);
+Var I: LongInt;
+Begin
+ For I:=0 To P.N-1 Do If P.It[I].Kind=1 Then Begin
+  V9ESetupBlock(P.It[I].Dec.Row,P.It[I].Dec.Col,P.It[I].Dec.Bs);
+  V9EPutMi(P.It[I].Dec);
+ End;
+End;
+
+Const PartOrder: Array[0..3] Of Byte=(0,3,1,2);
+Function V9ESearchNode(Row,Col,Lvl: LongInt; Var Best: TV9EPlan): Double;
+Var Bsize,N4l2,Nw,Hbs,Part,Sub,PI: LongInt; NoneSkip: Boolean; J0: Double; HasR,HasC,Allowed: Boolean; Cand,Sub1: ^TV9EPlan;
+ BestJ,J,Jl: Double; BestPart,LastPart: LongInt; D: TV9EDec; Acc0: LongInt; E0: Boolean; Ctx0: TV9ESnap;
+ Rp: LongInt;
+ Procedure Leaf(R,C,Bs: LongInt);
+ Begin
+  Jl:=V9EEvalLeaf(R,C,Bs,D);
+  J:=J+Jl;
+  Cand^.It[Cand^.N].Kind:=1; Cand^.It[Cand^.N].Row:=R; Cand^.It[Cand^.N].Col:=C; Cand^.It[Cand^.N].Dec:=D;
+  Inc(Cand^.N);
+ End;
+Begin
+ Best.N:=0;
+ If (Row>=V9MiRows) Or (Col>=V9MiCols) Then Begin V9ESearchNode:=0; Exit; End;
+ Bsize:=12-3*Lvl; N4l2:=4-Lvl; Nw:=8 Shr Lvl; Hbs:=Nw Shr 1;
+ HasR:=(Row+Hbs)<V9MiRows; HasC:=(Col+Hbs)<V9MiCols;
+ New(Cand); New(Sub1);
+ V9ECtxSave(Ctx0,Lvl,Row,Col);
+ BestJ:=1E30; BestPart:=-1; LastPart:=-1; NoneSkip:=False; J0:=1E30;
+ For PI:=0 To 3 Do Begin
+  Part:=PartOrder[PI];
+  Allowed:=True;
+  If HasR And HasC Then Allowed:=True
+  Else If (Not HasR) And HasC Then Allowed:=(Part=1) Or (Part=3)
+  Else If HasR And (Not HasC) Then Allowed:=(Part=2) Or (Part=3)
+  Else Allowed:=Part=3;
+  If Not Allowed Then Continue;
+  If V9ESpeed>=1 Then Begin
+   If ((V9EPrune And 1)<>0) And (Part<>0) And NoneSkip And (Lvl<=2) And (J0<V9ELam*V9EPrBits) Then Continue;
+   If ((V9EPrune And 2)<>0) And ((Part=1) Or (Part=2)) Then Begin
+    If (Lvl=0) Or (Lvl=3) Or (V9ESpeed>=2) Then Continue;
+   End;
+   If ((V9EPrune And 4)<>0) And (Lvl=3) And (Part<>0) And (V9FrameType<>0) And (V9IntraOnly=0) Then Continue;
+  End;
+  V9ECtxRest(Ctx0,Lvl,Row,Col);
+  Sub:=V9SubSize[Part*13+Bsize];
+  Cand^.N:=0; J:=0;
+  Cand^.It[0].Kind:=0; Cand^.It[0].Row:=Row; Cand^.It[0].Col:=Col; Cand^.It[0].Lvl:=Lvl; Cand^.It[0].Part:=Part; Cand^.N:=1;
+  E0:=V9EEmit; V9EEmit:=False; Acc0:=V9ECostAcc; V9ECostAcc:=0;
+  V9EPutPartition(V9ESAP,PV9B(@V9ESLP[0]),Row,Col,Bsize,N4l2,Part);
+  Rp:=V9ECostAcc; V9ECostAcc:=Acc0; V9EEmit:=E0;
+  J:=V9ELam*Rp/256.0;
+  If Lvl=3 Then Leaf(Row,Col,Sub)
+  Else Case Part Of
+   0: Leaf(Row,Col,Sub);
+   1: Begin Leaf(Row,Col,Sub); If HasR Then Leaf(Row+Hbs,Col,Sub); End;
+   2: Begin Leaf(Row,Col,Sub); If HasC Then Leaf(Row,Col+Hbs,Sub); End;
+  Else Begin
+    J:=J+V9ESearchNode(Row,Col,Lvl+1,Sub1^); V9EPlanAdd(Cand^,Sub1^);
+    J:=J+V9ESearchNode(Row,Col+Hbs,Lvl+1,Sub1^); V9EPlanAdd(Cand^,Sub1^);
+    J:=J+V9ESearchNode(Row+Hbs,Col,Lvl+1,Sub1^); V9EPlanAdd(Cand^,Sub1^);
+    J:=J+V9ESearchNode(Row+Hbs,Col+Hbs,Lvl+1,Sub1^); V9EPlanAdd(Cand^,Sub1^);
+   End;
+  End;
+  LastPart:=Part;
+  If Part=0 Then Begin
+   J0:=J;
+   If (Cand^.N>=2) And (Cand^.It[1].Dec.Skip<>0) Then NoneSkip:=True;
+  End;
+  If J<BestJ Then Begin
+   BestJ:=J; BestPart:=Part; Best:=Cand^;
+   V9ESnapSave(V9ESnaps[Lvl],Lvl,Row,Col);
+  End;
+ End;
+ If BestPart<>LastPart Then Begin
+  V9ESnapRest(V9ESnaps[Lvl],Lvl,Row,Col);
+  V9EApplyPlanMi(Best);
+ End;
+ V9EUpdPartCtx(V9ESAP,PV9B(@V9ESLP[0]),Row,Col,Bsize,N4l2,BestPart);
+ Dispose(Cand); Dispose(Sub1);
+ V9ESearchNode:=BestJ;
+End;
+
+{ ---------------- passe definitive : reconstruction + ecriture des symboles ---------------- }
+Procedure V9EEmitTokens(Var D: TV9EDec);
+Var Pl,Tx,Step,MaxW,MaxH,Row,Col,Mode,Tt,Ctx,N,I,Lim,Eob,Lo,Ei: LongInt; A,L: PV9B; Az,Lz: Boolean; Cv: Byte;
+Begin
+ If D.Skip<>0 Then Begin
+  For Pl:=0 To 2 Do Begin
+   FillChar(V9AboveCtx[Pl]^[V9AOff[Pl]],V9N4W[Pl],0);
+   FillChar(V9LeftCtx[Pl,V9LOff[Pl]],V9N4H[Pl],0);
+  End;
+  Exit;
+ End;
+ Lo:=0; Ei:=0;
+ For Pl:=0 To 2 Do Begin
+  V9EPlaneGeom(Pl,Tx,Step,MaxW,MaxH);
+  N:=1 Shl Tx;
+  Row:=0;
+  While Row<MaxH Do Begin
+   Col:=0;
+   While Col<MaxW Do Begin
+    Mode:=0;
+    If D.Inter=0 Then Begin
+     If Pl=0 Then Mode:=V9Cur^.Mode Else Mode:=V9Cur^.Uv;
+     If (V9Cur^.Sb<3) And (Pl=0) Then Mode:=V9Cur^.BMode[(Row Shl 1)+Col];
+    End;
+    Tt:=V9ETxType(Pl,Tx,Mode,D.Inter);
+    A:=@V9AboveCtx[Pl]^[V9AOff[Pl]+Col]; L:=@V9LeftCtx[Pl,V9LOff[Pl]+Row];
+    Az:=False; Lz:=False;
+    For I:=0 To N-1 Do Begin If A^[I]<>0 Then Az:=True; If L^[I]<>0 Then Lz:=True; End;
+    Ctx:=Ord(Az)+Ord(Lz);
+    Eob:=V9EEob[Ei];
+    V9ETokens(Pl,Ord(D.Inter<>0),Tx,Ctx,Tt,Eob,@V9ELv^[Lo]);
+    Cv:=Ord(Eob>0);
+    If V9MaxW[Pl]<>0 Then Lim:=V9MaxW[Pl]-Col Else Lim:=N;
+    For I:=0 To N-1 Do If I<Lim Then A^[I]:=Cv Else A^[I]:=0;
+    If V9MaxH[Pl]<>0 Then Lim:=V9MaxH[Pl]-Row Else Lim:=N;
+    For I:=0 To N-1 Do If I<Lim Then L^[I]:=Cv Else L^[I]:=0;
+    Inc(Lo,(4 Shl Tx)*(4 Shl Tx)); Inc(Ei);
+    Inc(Col,Step);
+   End;
+   Inc(Row,Step);
+  End;
+ End;
+End;
+
+Procedure V9ECommitLeaf(Var D: TV9EDec);
+Var Dist: Double; Mi: PV9Mi; X,Y,Q,Off: LongInt;
+Begin
+ Dist:=0;
+ Dist:=V9ECodeBlock(D,D.Skip<>0,False,Dist);
+ V9EEmit:=True;
+ V9EPutModeInfo(D);
+ V9EEmitTokens(D);
+ V9EEmit:=False;
+ If (V9FrameType<>0) And (V9IntraOnly=0) Then Begin
+  Mi:=V9Cur; Off:=D.Row*V9MiCols+D.Col;
+  For Y:=0 To V9YMis-1 Do For X:=0 To V9XMis-1 Do Begin
+   Q:=Off+Y*V9MiCols+X;
+   V9MvCur^[Q].R0:=Mi^.R0; V9MvCur^[Q].R1:=Mi^.R1;
+   V9MvCur^[Q].Mv[0]:=Mi^.Mv[0]; V9MvCur^[Q].Mv[1]:=Mi^.Mv[1];
+  End;
+ End;
+End;
+
+Procedure V9ECommitNode(Var P: TV9EPlan; Var Pos: LongInt; Row,Col,Lvl: LongInt);
+Var Bsize,N4l2,Nw,Hbs,Part: LongInt; HasR,HasC: Boolean;
+Begin
+ If (Row>=V9MiRows) Or (Col>=V9MiCols) Then Exit;
+ Part:=P.It[Pos].Part; Inc(Pos);
+ Bsize:=12-3*Lvl; N4l2:=4-Lvl; Nw:=8 Shr Lvl; Hbs:=Nw Shr 1;
+ HasR:=(Row+Hbs)<V9MiRows; HasC:=(Col+Hbs)<V9MiCols;
+ V9EEmit:=True;
+ V9EPutPartition(V9AbovePart,PV9B(@V9LeftPart[0]),Row,Col,Bsize,N4l2,Part);
+ V9EEmit:=False;
+ If Lvl=3 Then Begin V9ECommitLeaf(P.It[Pos].Dec); Inc(Pos); End
+ Else Case Part Of
+  0: Begin V9ECommitLeaf(P.It[Pos].Dec); Inc(Pos); End;
+  1: Begin
+      V9ECommitLeaf(P.It[Pos].Dec); Inc(Pos);
+      If HasR Then Begin V9ECommitLeaf(P.It[Pos].Dec); Inc(Pos); End;
+     End;
+  2: Begin
+      V9ECommitLeaf(P.It[Pos].Dec); Inc(Pos);
+      If HasC Then Begin V9ECommitLeaf(P.It[Pos].Dec); Inc(Pos); End;
+     End;
+ Else Begin
+   V9ECommitNode(P,Pos,Row,Col,Lvl+1);
+   V9ECommitNode(P,Pos,Row,Col+Hbs,Lvl+1);
+   V9ECommitNode(P,Pos,Row+Hbs,Col,Lvl+1);
+   V9ECommitNode(P,Pos,Row+Hbs,Col+Hbs,Lvl+1);
+  End;
+ End;
+ V9EUpdPartCtx(V9AbovePart,PV9B(@V9LeftPart[0]),Row,Col,Bsize,N4l2,Part);
+End;
+
+{ ---------------- source ---------------- }
+Procedure V9ELoadSource(Yuv: PEABuffer);
+Var Pl,W,H,X,Y,Off,V: LongInt; P: PV9W; Src: PV9B;
+Begin
+ Off:=0;
+ For Pl:=0 To 2 Do Begin
+  If Pl=0 Then Begin W:=V9EW; H:=V9EH; End Else Begin W:=V9ECw; H:=V9ECh; End;
+  P:=V9ESrc[Pl];
+  Src:=PV9B(@Yuv^[Off]);
+  For Y:=0 To H-1 Do Begin
+   If V9EBits=8 Then Begin
+    For X:=0 To W-1 Do P^[Y*V9ESrcSt[Pl]+X]:=Src^[Y*W+X];
+   End Else Begin
+    For X:=0 To W-1 Do Begin
+     V:=Src^[(Y*W+X)*2]+Src^[(Y*W+X)*2+1]*256;
+     If V>1023 Then V:=1023;
+     P^[Y*V9ESrcSt[Pl]+X]:=V;
+    End;
+   End;
+   For X:=W To V9ESrcSt[Pl]-1 Do P^[Y*V9ESrcSt[Pl]+X]:=P^[Y*V9ESrcSt[Pl]+W-1];
+  End;
+  For Y:=H To V9ESrcH[Pl]-1 Do Move(P^[(H-1)*V9ESrcSt[Pl]],P^[Y*V9ESrcSt[Pl]],V9ESrcSt[Pl]*2);
+  If V9EBits=8 Then Inc(Off,W*H) Else Inc(Off,W*H*2);
+ End;
+End;
+
+Function V9ESseVisible: Int64;
+Var Pl,W,H,X,Y,St,Sst: LongInt; Fb: ^TV9Fb; S: Int64; A,B: PV9W; D: LongInt;
+Begin
+ Fb:=@V9Fb[V9NewFb]; S:=0;
+ For Pl:=0 To 2 Do Begin
+  If Pl=0 Then Begin W:=V9EW; H:=V9EH; End Else Begin W:=V9ECw; H:=V9ECh; End;
+  St:=Fb^.St[Pl]; Sst:=V9ESrcSt[Pl];
+  For Y:=0 To H-1 Do Begin
+   A:=@Fb^.P[Pl]^[Y*St]; B:=@V9ESrc[Pl]^[Y*Sst];
+   For X:=0 To W-1 Do Begin D:=A^[X]-B^[X]; S:=S+D*D; End;
+  End;
+ End;
+ V9ESseVisible:=S;
+End;
+
+{ choix du niveau du filtre de boucle par essais }
+Function V9EPickLf(Var BestSse: Int64): LongInt;
+Var Bk: Array[0..2] Of PV9W; Pl,L0,Sp,L,Bl: LongInt; Fb: ^TV9Fb; Memo: Array[0..63] Of Int64; Done: Array[0..63] Of Boolean;
+ Cur: Int64;
+ Function Ev(Lv: LongInt): Int64;
+ Var Pp: LongInt;
+ Begin
+  If Lv<0 Then Lv:=0; If Lv>63 Then Lv:=63;
+  If Not Done[Lv] Then Begin
+   V9LfLevel:=Lv;
+   If Lv>0 Then V9LoopFilterFrame;
+   Memo[Lv]:=V9ESseVisible; Done[Lv]:=True;
+   For Pp:=0 To 2 Do Move(Bk[Pp]^,Fb^.P[Pp]^,Fb^.Cap[Pp]*2);
+  End;
+  Ev:=Memo[Lv];
+ End;
+Begin
+ Fb:=@V9Fb[V9NewFb];
+ For Pl:=0 To 2 Do Begin
+  GetMem(Bk[Pl],Fb^.Cap[Pl]*2+64); Move(Fb^.P[Pl]^,Bk[Pl]^,Fb^.Cap[Pl]*2);
+ End;
+ FillChar(Done,SizeOf(Done),0);
+ L0:=V9Clamp((V9ELfGuess),1,63);
+ Bl:=L0; Cur:=Ev(Bl);
+ Sp:=V9Max(2,Bl Div 3);
+ While Sp>=1 Do Begin
+  L:=Bl-Sp;
+  If (L>=0) And (Ev(L)<Cur) Then Begin Bl:=L; Cur:=Memo[L]; End
+  Else Begin
+   L:=Bl+Sp;
+   If (L<=63) And (Ev(L)<Cur) Then Begin Bl:=L; Cur:=Memo[L]; End
+   Else Sp:=Sp Div 2;
+  End;
+ End;
+ If Ev(0)<Cur Then Begin Bl:=0; Cur:=Memo[0]; End;
+ For Pl:=0 To 2 Do FreeMem(Bk[Pl]);
+ BestSse:=Cur;
+ V9EPickLf:=Bl;
+End;
+
+{ ---------------- recherche de mouvement / evaluation inter ---------------- }
+Type TV9ECand=Record Rf,Mode,Filt: LongInt; Mv: TV9Mv; J: Double; End;
+
+Function V9ERateOf(Var D: TV9EDec): LongInt;
+{ debit (1/256 bit) de l'information de mode de D (Skip et Tx tels que fixes dans D) }
+Var Acc0: LongInt; E0: Boolean;
+Begin
+ V9EPutMi(D);
+ E0:=V9EEmit; V9EEmit:=False; Acc0:=V9ECostAcc; V9ECostAcc:=0;
+ V9EPutModeInfo(D);
+ V9ERateOf:=V9ECostAcc; V9ECostAcc:=Acc0; V9EEmit:=E0;
+End;
+
+Function V9EMvRate(Var Mv,Ref: TV9Mv): LongInt;
+Var Acc0: LongInt; E0: Boolean;
+Begin
+ E0:=V9EEmit; V9EEmit:=False; Acc0:=V9ECostAcc; V9ECostAcc:=0;
+ V9EPutMv(Mv,Ref);
+ V9EMvRate:=V9ECostAcc; V9ECostAcc:=Acc0; V9EEmit:=E0;
+End;
+
+Function V9ESadBlk(Rf: Pointer; Mx,My,Bx,By,Bw,Bh,Limit: LongInt): LongInt;
+{ SAD luma entre le bloc source (Bx,By) et le bloc de reference deplace de (Mx,My) pixels entiers }
+Var Fb: ^TV9Fb; Y,X,Rs,Ss,Fw,Fh,Cy,Cx,S,D: LongInt; Sp,Rp: PV9W; Inside: Boolean;
+Begin
+ Fb:=Rf; Rs:=Fb^.St[0]; Ss:=V9ESrcSt[0]; Fw:=Fb^.W; Fh:=Fb^.H;
+ S:=0;
+ Inside:=(Bx+Mx>=0) And (By+My>=0) And (Bx+Mx+Bw<=Fw) And (By+My+Bh<=Fh);
+ For Y:=0 To Bh-1 Do Begin
+  Sp:=@V9ESrc[0]^[(By+Y)*Ss+Bx];
+  If Inside Then Begin
+   Rp:=@Fb^.P[0]^[(By+My+Y)*Rs+Bx+Mx];
+   For X:=0 To Bw-1 Do Begin D:=Sp^[X]-Rp^[X]; If D<0 Then S:=S-D Else S:=S+D; End;
+  End Else Begin
+   Cy:=By+My+Y; If Cy<0 Then Cy:=0 Else If Cy>Fh-1 Then Cy:=Fh-1;
+   Rp:=@Fb^.P[0]^[Cy*Rs];
+   For X:=0 To Bw-1 Do Begin
+    Cx:=Bx+Mx+X; If Cx<0 Then Cx:=0 Else If Cx>Fw-1 Then Cx:=Fw-1;
+    D:=Sp^[X]-Rp^[Cx]; If D<0 Then S:=S-D Else S:=S+D;
+   End;
+  End;
+  If S>=Limit Then Break;
+ End;
+ V9ESadBlk:=S;
+End;
+
+Var V9EMcBuf: Array[0..5200] Of Word; V9EMcTmp: Array[0..5200] Of Word; V9EMcOut: Array[0..4095] Of Word;
+
+{ prediction par compensation de mouvement d'un bloc W x H du plan Pl de la reference Rf
+  (copie de la logique de V9InterPlane/V9Conv pour le cas sans changement d'echelle, plus rapide) ;
+  X0,Y0 : position entiere dans le plan ; Fx,Fy : fractions en 1/16 ; resultat dans V9EMcOut (stride W) }
+{$IFDEF V9EDBG}{$R-}{$ENDIF}
+Procedure V9EMc(Fb: Pointer; Pl,X0,Y0,Fx,Fy,Kern,W,H: LongInt);
+Var Rf: ^TV9Fb; Fw,Fh,Rs,I,J,Cx,Cy,Maxv,Ss,P,Sum: LongInt; Src,Row: PV9W; K: PV9Kr; C0,C1,C2,C3,C4,C5,C6,C7: LongInt;
+ Inside: Boolean; Tp: PV9W; Op: PV9W;
+Begin
+ Rf:=Fb; Maxv:=(1 Shl V9Bd)-1;
+ If Pl=0 Then Begin Fw:=Rf^.W; Fh:=Rf^.H; End Else Begin Fw:=Rf^.CW; Fh:=Rf^.CH; End;
+ Inside:=(X0-3>=0) And (Y0-3>=0) And (X0+W+4<=Fw-1) And (Y0+H+4<=Fh-1);
+ If Inside Then Begin
+  Rs:=Rf^.St[Pl]; Src:=@Rf^.P[Pl]^[Y0*Rs+X0]; Ss:=Rs;
+ End Else Begin
+  Ss:=W+7;
+  For J:=0 To H+6 Do Begin
+   Cy:=Y0-3+J; If Cy<0 Then Cy:=0 Else If Cy>Fh-1 Then Cy:=Fh-1;
+   Row:=@Rf^.P[Pl]^[Cy*Rf^.St[Pl]];
+   For I:=0 To W+6 Do Begin
+    Cx:=X0-3+I; If Cx<0 Then Cx:=0 Else If Cx>Fw-1 Then Cx:=Fw-1;
+    V9EMcBuf[J*Ss+I]:=Row^[Cx];
+   End;
+  End;
+  Src:=@V9EMcBuf[3*Ss+3];
+ End;
+ Op:=@V9EMcOut[0];
+ If (Fx=0) And (Fy=0) Then Begin
+  For J:=0 To H-1 Do For I:=0 To W-1 Do Op^[J*W+I]:=Src^[J*Ss+I];
+  Exit;
+ End;
+ If Fy=0 Then Begin
+  K:=@V9Kern[Kern,Fx,0];
+  C0:=K^[0]; C1:=K^[1]; C2:=K^[2]; C3:=K^[3]; C4:=K^[4]; C5:=K^[5]; C6:=K^[6]; C7:=K^[7];
+  For J:=0 To H-1 Do Begin
+   Row:=@Src^[J*Ss-3];
+   For I:=0 To W-1 Do Begin
+    Sum:=Row^[I]*C0+Row^[I+1]*C1+Row^[I+2]*C2+Row^[I+3]*C3+Row^[I+4]*C4+Row^[I+5]*C5+Row^[I+6]*C6+Row^[I+7]*C7;
+    P:=SarLongint(Sum+64,7);
+    If P<0 Then P:=0 Else If P>Maxv Then P:=Maxv;
+    Op^[J*W+I]:=P;
+   End;
+  End;
+  Exit;
+ End;
+ If Fx=0 Then Begin
+  K:=@V9Kern[Kern,Fy,0];
+  C0:=K^[0]; C1:=K^[1]; C2:=K^[2]; C3:=K^[3]; C4:=K^[4]; C5:=K^[5]; C6:=K^[6]; C7:=K^[7];
+  For J:=0 To H-1 Do Begin
+   Row:=@Src^[(J-3)*Ss];
+   For I:=0 To W-1 Do Begin
+    Sum:=Row^[I]*C0+Row^[Ss+I]*C1+Row^[2*Ss+I]*C2+Row^[3*Ss+I]*C3+Row^[4*Ss+I]*C4+Row^[5*Ss+I]*C5+Row^[6*Ss+I]*C6+Row^[7*Ss+I]*C7;
+    P:=SarLongint(Sum+64,7);
+    If P<0 Then P:=0 Else If P>Maxv Then P:=Maxv;
+    Op^[J*W+I]:=P;
+   End;
+  End;
+  Exit;
+ End;
+ K:=@V9Kern[Kern,Fx,0];
+ C0:=K^[0]; C1:=K^[1]; C2:=K^[2]; C3:=K^[3]; C4:=K^[4]; C5:=K^[5]; C6:=K^[6]; C7:=K^[7];
+ Tp:=@V9EMcTmp[0];
+ For J:=0 To H+6 Do Begin
+  Row:=@Src^[(J-3)*Ss-3];
+  For I:=0 To W-1 Do Begin
+   Sum:=Row^[I]*C0+Row^[I+1]*C1+Row^[I+2]*C2+Row^[I+3]*C3+Row^[I+4]*C4+Row^[I+5]*C5+Row^[I+6]*C6+Row^[I+7]*C7;
+   P:=SarLongint(Sum+64,7);
+   If P<0 Then P:=0 Else If P>Maxv Then P:=Maxv;
+   Tp^[J*W+I]:=P;
+  End;
+ End;
+ K:=@V9Kern[Kern,Fy,0];
+ C0:=K^[0]; C1:=K^[1]; C2:=K^[2]; C3:=K^[3]; C4:=K^[4]; C5:=K^[5]; C6:=K^[6]; C7:=K^[7];
+ For J:=0 To H-1 Do Begin
+  Row:=@Tp^[J*W];
+  For I:=0 To W-1 Do Begin
+   Sum:=Row^[I]*C0+Row^[W+I]*C1+Row^[2*W+I]*C2+Row^[3*W+I]*C3+Row^[4*W+I]*C4+Row^[5*W+I]*C5+Row^[6*W+I]*C6+Row^[7*W+I]*C7;
+   P:=SarLongint(Sum+64,7);
+   If P<0 Then P:=0 Else If P>Maxv Then P:=Maxv;
+   Op^[J*W+I]:=P;
+  End;
+ End;
+End;
+
+{$IFDEF V9EDBG}{$R+}{$ENDIF}
+{ SSE de la prediction compensee en mouvement (luma, + chroma si demande) vs la source du bloc courant }
+Procedure V9EPredLuma(Rf,Filt: LongInt; Var Mv: TV9Mv; Var Sse: Int64; Chroma: Boolean);
+Var Fb: Pointer; Y,X,Sst,D,Bw,Bh,Pl,Mx,My,Mr,Mc,X0,Y0,Ssx,Ssy: LongInt; Sp: PV9W; S: Int64;
+Begin
+ Fb:=@V9Fb[V9Refs[Rf-1].Idx];
+ Mx:=V9MiCol*8; My:=V9MiRow*8;
+ Sse:=0;
+ For Pl:=0 To 2 Do Begin
+  If (Pl>0) And (Not Chroma) Then Break;
+  If Pl=0 Then Begin Ssx:=0; Ssy:=0; End Else Begin Ssx:=V9SsX; Ssy:=V9SsY; End;
+  Bw:=4*V9N4W[Pl]; Bh:=4*V9N4H[Pl];
+  Mr:=Mv.R*(1 Shl (1-Ssy)); Mc:=Mv.C*(1 Shl (1-Ssx));
+  X0:=(Mx Shr Ssx)+SarLongint(Mc,4); Y0:=(My Shr Ssy)+SarLongint(Mr,4);
+  V9EMc(Fb,Pl,X0,Y0,Mc And 15,Mr And 15,Filt,Bw,Bh);
+  Sst:=V9ESrcSt[Pl];
+  Sp:=@V9ESrc[Pl]^[(My Shr Ssy)*Sst+(Mx Shr Ssx)];
+  S:=0;
+  For Y:=0 To Bh-1 Do For X:=0 To Bw-1 Do Begin D:=Sp^[Y*Sst+X]-V9EMcOut[Y*Bw+X]; S:=S+D*D; End;
+  Inc(Sse,S);
+ End;
+End;
+
+{ recherche entiere en diamant + raffinement sous-pixel ; Mv en entree/sortie (unites 1/8) }
+Procedure V9EMotionSearch(Rf: LongInt; Var Start: Array Of TV9Mv; NStart: LongInt; Var Ref: TV9Mv; UseHp: Boolean; Var Best: TV9Mv; Var BestJ: Double);
+Var Fb: ^TV9Fb; Bx,By,Bw,Bh,I,Cr,Cc,Step,Nr,Nc,K,Dr,Dc,Imp,Rate,Lo_c,Hi_c,Lo_r,Hi_r,Rng,It: LongInt;
+ LamS,Jb,J,Jh,Jv: Double; Sh,Sv: LongInt; Sse: Int64; Mv,Cen: TV9Mv; Stp: LongInt;
+ Dirs: Array[0..7,0..1] Of ShortInt;
+ Function Jint(R,C: LongInt; Limit: Double): Double;
+ Var Sd,Lm: LongInt; M: TV9Mv; Rt: LongInt;
+ Begin
+  M.R:=R*8; M.C:=C*8;
+  Rt:=V9EMvRate(M,Ref);
+  If Limit>1E9 Then Lm:=2000000000 Else Lm:=Trunc(Limit-LamS*Rt/256.0)+1;
+  If Lm<1 Then Lm:=1;
+  Sd:=V9ESadBlk(Fb,C,R,Bx,By,Bw,Bh,Lm);
+  Jint:=Sd+LamS*Rt/256.0;
+ End;
+Begin
+ Fb:=@V9Fb[V9Refs[Rf-1].Idx];
+ Bx:=V9MiCol*8; By:=V9MiRow*8; Bw:=4*V9N4W[0]; Bh:=4*V9N4H[0];
+ LamS:=Sqrt(V9ELam)*0.95;
+ Rng:=48; If V9ESpeed>=2 Then Rng:=24;
+ Lo_c:=-(Bx+Bw+4); Hi_c:=Fb^.W-Bx+4; Lo_r:=-(By+Bh+4); Hi_r:=Fb^.H-By+4;
+ Dirs[0,0]:=-1; Dirs[0,1]:=0; Dirs[1,0]:=1; Dirs[1,1]:=0; Dirs[2,0]:=0; Dirs[2,1]:=-1; Dirs[3,0]:=0; Dirs[3,1]:=1;
+ Dirs[4,0]:=-1; Dirs[4,1]:=-1; Dirs[5,0]:=-1; Dirs[5,1]:=1; Dirs[6,0]:=1; Dirs[6,1]:=-1; Dirs[7,0]:=1; Dirs[7,1]:=1;
+ { meilleur point de depart }
+ Jb:=1E30; Cr:=0; Cc:=0;
+ For I:=0 To NStart-1 Do Begin
+  Nr:=V9Clamp((Start[I].R+(Ord(Start[I].R>=0)*4-Ord(Start[I].R<0)*3)) Div 8,Lo_r,Hi_r);
+  Nc:=V9Clamp((Start[I].C+(Ord(Start[I].C>=0)*4-Ord(Start[I].C<0)*3)) Div 8,Lo_c,Hi_c);
+  If Start[I].R<0 Then Nr:=V9Clamp(-((-Start[I].R+4) Div 8),Lo_r,Hi_r) Else Nr:=V9Clamp((Start[I].R+4) Div 8,Lo_r,Hi_r);
+  If Start[I].C<0 Then Nc:=V9Clamp(-((-Start[I].C+4) Div 8),Lo_c,Hi_c) Else Nc:=V9Clamp((Start[I].C+4) Div 8,Lo_c,Hi_c);
+  J:=Jint(Nr,Nc,1E30);
+  If J<Jb Then Begin Jb:=J; Cr:=Nr; Cc:=Nc; End;
+ End;
+ { diamant a pas decroissants }
+ Step:=16;
+ It:=0;
+ While Step>=1 Do Begin
+  Imp:=-1;
+  For K:=0 To 7 Do Begin
+   If (Step>=2) And (K>=4) And (Step>4) Then Continue;
+   Nr:=Cr+Dirs[K,0]*Step; Nc:=Cc+Dirs[K,1]*Step;
+   If (Nr<Lo_r) Or (Nr>Hi_r) Or (Nc<Lo_c) Or (Nc>Hi_c) Or (V9Abs(Nr)>Rng+64) Or (V9Abs(Nc)>Rng+64) Then Continue;
+   J:=Jint(Nr,Nc,Jb);
+   If J<Jb Then Begin Jb:=J; Imp:=K; Dr:=Nr; Dc:=Nc; End;
+  End;
+  If Imp>=0 Then Begin Cr:=Dr; Cc:=Dc; Inc(It); If It>40 Then Break; End
+  Else Step:=Step Div 2;
+ End;
+ { sous-pixel }
+ Cen.R:=Cr*8; Cen.C:=Cc*8;
+ V9Cur^.Filt:=0;
+ V9EPredLuma(Rf,0,Cen,Sse,False);
+ Rate:=V9EMvRate(Cen,Ref);
+ Jb:=Sse+V9ELam*Rate/256.0;
+ Stp:=4;
+ While Stp>=1 Do Begin
+  If (Stp=1) And (Not UseHp) Then Break;
+  { quatre voisins en croix, puis la diagonale du meilleur quadrant }
+  Jh:=Jb; Sh:=0; Jv:=Jb; Sv:=0;
+  For K:=0 To 3 Do Begin
+   Mv.R:=Cen.R+Dirs[K,0]*Stp; Mv.C:=Cen.C+Dirs[K,1]*Stp;
+   If (V9Abs(Mv.R)>=16000) Or (V9Abs(Mv.C)>=16000) Then Continue;
+   V9EPredLuma(Rf,0,Mv,Sse,False);
+   Rate:=V9EMvRate(Mv,Ref);
+   J:=Sse+V9ELam*Rate/256.0;
+   If K<2 Then Begin If J<Jv Then Begin Jv:=J; Sv:=Dirs[K,0]; End; End
+   Else Begin If J<Jh Then Begin Jh:=J; Sh:=Dirs[K,1]; End; End;
+  End;
+  If (Sh<>0) And (Sv<>0) And (V9ESpeed<2) Then Begin
+   Mv.R:=Cen.R+Sv*Stp; Mv.C:=Cen.C+Sh*Stp;
+   If (V9Abs(Mv.R)<16000) And (V9Abs(Mv.C)<16000) Then Begin
+    V9EPredLuma(Rf,0,Mv,Sse,False);
+    Rate:=V9EMvRate(Mv,Ref);
+    J:=Sse+V9ELam*Rate/256.0;
+    If (J<Jh) And (J<Jv) Then Begin Jb:=J; Cen:=Mv; Stp:=Stp Div 2; Continue; End;
+   End;
+  End;
+  If Jh<=Jv Then Begin If Sh<>0 Then Begin Cen.C:=Cen.C+Sh*Stp; Jb:=Jh; End; End
+  Else Begin Cen.R:=Cen.R+Sv*Stp; Jb:=Jv; End;
+  Stp:=Stp Div 2;
+ End;
+ Best:=Cen; BestJ:=Jb;
+End;
+
+Function V9EFiltRate(F: LongInt): LongInt;
+Var J: LongInt; E0: Boolean; Acc0: LongInt;
+Begin
+ If V9Interp<>4 Then Begin V9EFiltRate:=0; Exit; End;
+ E0:=V9EEmit; V9EEmit:=False; Acc0:=V9ECostAcc; V9ECostAcc:=0;
+ J:=V9CtxInterp;
+ V9EPutTree(3,@V9Fc.Interp[J,0],F);
+ V9EFiltRate:=V9ECostAcc; V9ECostAcc:=Acc0; V9EEmit:=E0;
+End;
+
+Function V9EEvalInter(Row,Col,Bs: LongInt; Var D: TV9EDec): Double;
+Var Cands: Array[0..15] Of TV9ECand; NC,Rf,NR,I,J,K,NTop,MaxT,Tn,T,BestTx,Rate: LongInt;
+ Z,Nearest,Near,Mv,Bmv: TV9Mv; Sse: Int64; Jc,Jb,Dist,Jt,Js,Bj: Double; Base,Dc: TV9EDec; Starts: Array[0..4] Of TV9Mv; NS: LongInt;
+ UseHp: Boolean; Tmp: TV9ECand; Fl,BestF: LongInt; Fj,Fb2: Double;
+ Used: Boolean;
+Begin
+ V9ESetupBlock(Row,Col,Bs);
+ FillChar(Base,SizeOf(Base),0);
+ Base.Row:=Row; Base.Col:=Col; Base.Bs:=Bs; Base.Inter:=1; Base.Ref1:=-1; Base.Filt:=0; Base.Skip:=1;
+ Base.Tx:=V9ETxDefault(Bs);
+ Z.R:=0; Z.C:=0;
+ NC:=0; NR:=V9Min(V9ERefs,3);
+ For Rf:=1 To NR Do Begin
+  If V9Refs[Rf-1].Idx<0 Then Continue;
+  Used:=False;
+  For I:=1 To Rf-1 Do If V9Refs[I-1].Idx=V9Refs[Rf-1].Idx Then Used:=True;
+  If Used Then Continue;
+  V9EMvCands(Rf,Nearest,Near);
+  { ZERO / NEAREST / NEAR }
+  For I:=0 To 2 Do Begin
+   Dc:=Base; Dc.Ref0:=Rf;
+   Case I Of 0: Begin Dc.YMode:=12; Mv:=Z; End; 1: Begin Dc.YMode:=10; Mv:=Nearest; End; Else Begin Dc.YMode:=11; Mv:=Near; End; End;
+   If (I=2) And (V9MvEq(Near,Nearest) Or V9MvEq(Near,Z)) Then Continue;
+   If (I=1) And V9MvEq(Nearest,Z) Then Continue;
+   Dc.Mv[0]:=Mv;
+   V9EPredLuma(Rf,0,Mv,Sse,False);
+   Rate:=V9ERateOf(Dc);
+   Cands[NC].Rf:=Rf; Cands[NC].Mode:=Dc.YMode; Cands[NC].Filt:=0; Cands[NC].Mv:=Mv; Cands[NC].J:=Sse+V9ELam*Rate/256.0;
+   Inc(NC);
+  End;
+  { NEWMV }
+  UseHp:=(V9AllowHp<>0) And (V9Abs(Nearest.R)<64) And (V9Abs(Nearest.C)<64);
+  NS:=0; Starts[NS]:=Nearest; Inc(NS); Starts[NS]:=Near; Inc(NS); Starts[NS]:=Z; Inc(NS);
+  Bj:=1E30;
+  For I:=0 To NC-1 Do If (Cands[I].Rf=Rf) And (Cands[I].J<Bj) Then Begin Bj:=Cands[I].J; Starts[3]:=Cands[I].Mv; End;
+  NS:=4;
+  { n'effectue la recherche complete que si la reference est prometteuse }
+  Bj:=1E30; For I:=0 To NC-1 Do If Cands[I].J<Bj Then Bj:=Cands[I].J;
+  Jb:=1E30; For I:=0 To NC-1 Do If Cands[I].Rf=Rf Then If Cands[I].J<Jb Then Jb:=Cands[I].J;
+  If (V9ESpeed>=1) And (Rf>1) And (Jb>Bj*1.3+V9ELam*16) Then Continue;
+  V9EMotionSearch(Rf,Starts,NS,Nearest,UseHp,Bmv,Jc);
+  If Not (V9MvEq(Bmv,Nearest)) Then Begin
+   Dc:=Base; Dc.Ref0:=Rf; Dc.YMode:=13; Dc.Mv[0]:=Bmv;
+   Rate:=V9ERateOf(Dc);
+   V9EPredLuma(Rf,0,Bmv,Sse,False);
+   Cands[NC].Rf:=Rf; Cands[NC].Mode:=13; Cands[NC].Filt:=0; Cands[NC].Mv:=Bmv; Cands[NC].J:=Sse+V9ELam*Rate/256.0;
+   Inc(NC);
+  End;
+ End;
+ If NC=0 Then Begin D:=Base; V9EEvalInter:=1E30; Exit; End;
+ { tri des candidats }
+ For I:=0 To NC-2 Do For J:=I+1 To NC-1 Do If Cands[J].J<Cands[I].J Then Begin Tmp:=Cands[I]; Cands[I]:=Cands[J]; Cands[J]:=Tmp; End;
+ Case V9ESpeed Of 0: NTop:=3; 1: NTop:=2; Else NTop:=1; End;
+ If NTop>NC Then NTop:=NC;
+ Jb:=1E30;
+ For K:=0 To NTop-1 Do Begin
+  Dc:=Base; Dc.Ref0:=Cands[K].Rf; Dc.YMode:=Cands[K].Mode; Dc.Mv[0]:=Cands[K].Mv; Dc.Filt:=0;
+  { filtre d'interpolation }
+  If (V9Interp=4) And (Not ((Dc.Mv[0].R And 7=0) And (Dc.Mv[0].C And 7=0) And (V9Abs(Dc.Mv[0].R)+V9Abs(Dc.Mv[0].C)=0))) Then Begin
+   Fb2:=1E30; BestF:=0;
+   For Fl:=0 To 2 Do Begin
+    V9EPredLuma(Dc.Ref0,Fl,Dc.Mv[0],Sse,True);
+    Fj:=Sse+V9ELam*V9EFiltRate(Fl)/256.0;
+    If Fj<Fb2 Then Begin Fb2:=Fj; BestF:=Fl; End;
+   End;
+   Dc.Filt:=BestF;
+  End Else If V9Interp<>4 Then Dc.Filt:=V9Interp;
+  { transformation : tailles candidates }
+  MaxT:=V9ETxDefault(Bs);
+  Case V9ESpeed Of 0: Tn:=MaxT+1; 1: Tn:=V9Min(2,MaxT+1); Else Tn:=1; End;
+  BestTx:=MaxT; Jt:=1E30;
+  For T:=0 To Tn-1 Do Begin
+   Dc.Tx:=MaxT-T; Dc.Skip:=0;
+   Jc:=V9ECodeBlock(Dc,False,False,Dist);
+   If Jc<Jt Then Begin Jt:=Jc; BestTx:=Dc.Tx; End Else If T>0 Then Break;
+  End;
+  Dc.Tx:=BestTx;
+  { variante sans residu }
+  Dc.Skip:=1;
+  Js:=V9ECodeBlock(Dc,True,False,Dist);
+  If Js<=Jt Then Begin Jt:=Js; Dc.Skip:=1; End Else Dc.Skip:=0;
+  If Jt<Jb Then Begin Jb:=Jt; D:=Dc; End;
+ End;
+ { etat definitif }
+ Jb:=V9ECodeBlock(D,D.Skip<>0,True,Dist);
+ V9EEvalInter:=Jb;
+End;
+
+{ ---------------- une image ---------------- }
+Var
+ V9EKeyN: LongInt;
+ V9ESaN: LongInt;
+ V9EOut: PV9B; V9EOutCap: LongInt;
+ V9ESaveFt,V9ESaveIo: LongInt; V9EFH: TV9EHdr;
+ V9ERefFlags: LongInt;
+ V9ELastSse: Int64;
+
+Procedure V9EClearCtx;
+Var Pl: LongInt;
+Begin
+ For Pl:=0 To 2 Do Begin
+  FillChar(V9ESA[Pl]^,V9ESaN,0); FillChar(V9AboveCtx[Pl]^,V9CtxN,0);
+ End;
+ FillChar(V9ESAP^,V9AlignCols+32,0); FillChar(V9AbovePart^,V9AlignCols+32,0);
+End;
+
+Procedure V9EClearLeft;
+Begin
+ FillChar(V9ESL,SizeOf(V9ESL),0); FillChar(V9ESLP,SizeOf(V9ESLP),0);
+ FillChar(V9LeftCtx,SizeOf(V9LeftCtx),0); FillChar(V9LeftPart,SizeOf(V9LeftPart),0);
+End;
+
+Function V9EEncodeFrame(Key: Boolean; Q: LongInt): LongInt;
+Var I,HL,CL,R,C,Pos,Lf,Idx,K,Pr,P2,Bit,S,Pl: LongInt; Sse: Int64; Dq: Double;
+Begin
+ If Q<1 Then Q:=1; If Q>255 Then Q:=255;
+ V9FrameType:=V9ESaveFt; V9IntraOnly:=V9ESaveIo;
+ V9NewFb:=-1;
+ For I:=0 To 11 Do If V9Fb[I].Cnt=0 Then Begin V9NewFb:=I; Break; End;
+ If V9NewFb<0 Then Fail('VP9 enc : aucun tampon libre.');
+ FillChar(V9EFH,SizeOf(V9EFH),0);
+ V9EFH.Key:=Ord(Key); V9EFH.Q:=Q; V9EFH.CompSize:=1;
+ If Not Key Then Begin
+  V9EFH.RefFlags:=V9ERefFlags;
+  For I:=0 To 2 Do V9EFH.RefIdx[I]:=I;
+  If V9ERefs<3 Then V9EFH.RefIdx[2]:=V9Min(1,V9ERefs-1)*0;
+  V9EFH.AllowHp:=Ord(Q<200);
+  V9EFH.Interp:=4;
+ End;
+ HL:=V9EWriteHdr(V9EFH);
+ V9ReadUncomp(PV9B(@V9EHb[0]),HL);
+ V9Fc:=V9FcCtx[V9CtxIdx];
+ V9UsePrevMvs:=(V9ErrorRes=0) And (V9Width=V9LastWidth) And (V9Height=V9LastHeight) And
+               (V9LastIntraOnly=0) And (V9LastShowFrame<>0) And (V9LastFrameType<>0);
+ V9ETxm:=4; V9TxMode:=4; V9RefMode:=0; V9DoCnt:=True;
+ FillChar(V9Cnt,SizeOf(V9Cnt),0);
+ V9TileC0:=0; V9TileC1:=V9MiCols;
+ Dq:=V9DcQuant(Q,0)/8.0;
+ V9ELam:=V9ELamK*Dq*Dq;
+ V9EQidx:=Q;
+ V9ESymN:=0;
+ V9EClearCtx;
+ V9ERnd:=V9EQRound; V9ETrim:=V9EQTrim;
+ R:=0;
+ While R<V9MiRows Do Begin
+  V9EClearLeft;
+  C:=0;
+  While C<V9MiCols Do Begin
+   For Pl:=0 To 2 Do Begin V9ECA[Pl]:=V9ESA[Pl]; V9ECL[Pl]:=PV9B(@V9ESL[Pl,0]); End;
+   V9EEmit:=False;
+   V9ESearchNode(R,C,0,V9EPlanB);
+   For Pl:=0 To 2 Do Begin V9ECA[Pl]:=V9AboveCtx[Pl]; V9ECL[Pl]:=PV9B(@V9LeftCtx[Pl,0]); End;
+   Pos:=0;
+   V9ECommitNode(V9EPlanB,Pos,R,C,0);
+   Inc(C,8);
+  End;
+  Inc(R,8);
+ End;
+ { filtre de boucle }
+ Dq:=V9AcQuant(Q,0);
+ V9ELfGuess:=(Trunc(Dq)*20723+1015158) Shr 18;
+ If V9Bd>8 Then V9ELfGuess:=(Trunc(Dq/ (1 Shl (V9Bd-8)))*20723+1015158) Shr 18;
+ If Key Then Dec(V9ELfGuess,4);
+ If V9ENoLf Then Lf:=0 Else Lf:=V9EPickLf(Sse);
+ V9LfLevel:=Lf;
+ If Lf>0 Then V9LoopFilterFrame;
+ V9ELastSse:=V9ESseVisible;
+ { en-tete compresse }
+ V9EWriteCompressed;
+ CL:=V9EBwC.Pos;
+ V9ReadCompressed(V9EBwC.Buf,CL);
+ { donnees de tuile }
+ V9EBwBegin(V9EBwT);
+ For I:=0 To V9ESymN-1 Do Begin
+  S:=V9ESym^[I]; Bit:=S And 1; Idx:=S Shr 1;
+  If Idx<SizeOf(V9Fc) Then Pr:=PV9B(@V9Fc)^[Idx]
+  Else If Idx<SizeOf(V9Fc)+V9E_CSIZE Then Pr:=V9EC[Idx-SizeOf(V9Fc)]
+  Else Begin
+   K:=Idx-SizeOf(V9Fc)-V9E_CSIZE; P2:=PV9B(@V9Fc)^[K Shr 3];
+   Pr:=V9EC[V9E_CPARETO+(P2-1)*8+(K And 7)];
+  End;
+  V9EBwWrite(V9EBwT,Bit,Pr);
+ End;
+ V9EBwStop(V9EBwT);
+ V9EFH.LfLevel:=Lf; V9EFH.CompSize:=CL;
+ HL:=V9EWriteHdr(V9EFH);
+ I:=HL+CL+V9EBwT.Pos;
+ If I+64>V9EOutCap Then Begin
+  If V9EOut<>Nil Then FreeMem(V9EOut);
+  V9EOutCap:=I*2+4096; GetMem(V9EOut,V9EOutCap);
+ End;
+ Move(V9EHb[0],V9EOut^[0],HL); Move(V9EBwC.Buf^,V9EOut^[HL],CL); Move(V9EBwT.Buf^,V9EOut^[HL+CL],V9EBwT.Pos);
+ V9EEncodeFrame:=I;
+End;
+
+Procedure V9EAccept;
+Var I: LongInt; M: PV9MvRefA;
+Begin
+ If (V9ErrorRes=0) And (V9Parallel=0) Then Begin
+  V9AdaptCoef;
+  If (V9FrameType<>0) And (V9IntraOnly=0) Then Begin V9AdaptMode; V9AdaptMv; End;
+ End;
+ If V9RefreshCtx<>0 Then V9FcCtx[V9CtxIdx]:=V9Fc;
+ For I:=0 To 7 Do If ((V9RefreshFlags Shr I) And 1)<>0 Then Begin
+  If V9RefMap[I]>=0 Then Dec(V9Fb[V9RefMap[I]].Cnt);
+  V9RefMap[I]:=V9NewFb; Inc(V9Fb[V9NewFb].Cnt);
+ End;
+ V9LastShowFrame:=V9ShowFrame;
+ M:=V9MvPrev; V9MvPrev:=V9MvCur; V9MvCur:=M;
+ V9LastWidth:=V9Width; V9LastHeight:=V9Height;
+ V9ESaveFt:=V9FrameType; V9ESaveIo:=V9IntraOnly;
+End;
+
+{ ---------------- interface publique ---------------- }
+
+Procedure V9EFree;
+Var Pl,K: LongInt;
+Begin
+ If V9ESym<>Nil Then FreeMem(V9ESym); V9ESym:=Nil; V9ESymCap:=0; V9ESymN:=0;
+ If V9ELv<>Nil Then FreeMem(V9ELv); V9ELv:=Nil;
+ If V9EOut<>Nil Then FreeMem(V9EOut); V9EOut:=Nil; V9EOutCap:=0;
+ If V9EBwC.Buf<>Nil Then FreeMem(V9EBwC.Buf); V9EBwC.Buf:=Nil;
+ If V9EBwT.Buf<>Nil Then FreeMem(V9EBwT.Buf); V9EBwT.Buf:=Nil;
+ For Pl:=0 To 2 Do Begin
+  If V9ESrc[Pl]<>Nil Then FreeMem(V9ESrc[Pl]); V9ESrc[Pl]:=Nil;
+  If V9ESA[Pl]<>Nil Then FreeMem(V9ESA[Pl]); V9ESA[Pl]:=Nil;
+ End;
+ If V9ESAP<>Nil Then FreeMem(V9ESAP); V9ESAP:=Nil;
+ For K:=0 To 3 Do For Pl:=0 To 2 Do Begin
+  If V9ESnaps[K].Px[Pl]<>Nil Then FreeMem(V9ESnaps[K].Px[Pl]); V9ESnaps[K].Px[Pl]:=Nil;
+ End;
+ V9EFreeBasis;
+ V9EOn:=False;
+ V9Free;
+End;
+
+Procedure V9EBegin(W,H,Fn,Fd,Bitrate,Gop,Bits: LongInt);
+Var Pl,K,Aw,Ah,Al: LongInt;
+Begin
+ V9EFree;
+ V9Init;
+ If (Bits<>8) And (Bits<>10) Then Bits:=8;
+ V9EW:=W; V9EH:=H; V9EFn:=Fn; V9EFd:=Fd; V9EBitrate:=Bitrate; V9EGop:=Gop; V9EBits:=Bits;
+ V9ECw:=(W+1) Shr 1; V9ECh:=(H+1) Shr 1;
+ If Bits=8 Then V9EProfile:=0 Else V9EProfile:=2;
+ V9EInitConst; V9EInitTrees; V9EInitBasis; V9EInitLee;
+ Aw:=(W+63) And Not 63; Ah:=(H+63) And Not 63;
+ For Pl:=0 To 2 Do Begin
+  If Pl=0 Then Begin V9ESrcSt[Pl]:=Aw; V9ESrcH[Pl]:=Ah; End Else Begin V9ESrcSt[Pl]:=Aw Shr 1; V9ESrcH[Pl]:=Ah Shr 1; End;
+  GetMem(V9ESrc[Pl],V9ESrcSt[Pl]*V9ESrcH[Pl]*2+64);
+  FillChar(V9ESrc[Pl]^,V9ESrcSt[Pl]*V9ESrcH[Pl]*2,0);
+ End;
+ { V9Init ne connait pas les dimensions : on les met en place a la premiere image cle }
+ V9ESymCap:=1 Shl 20; GetMem(V9ESym,V9ESymCap*4);
+ GetMem(V9ELv,8192*4*2);
+ V9EBwStart(V9EBwC,65536); V9EBwStart(V9EBwT,1 Shl 20);
+ V9EOutCap:=0; V9EOut:=Nil;
+ For K:=0 To 3 Do For Pl:=0 To 2 Do Begin GetMem(V9ESnaps[K].Px[Pl],4096*2+64); End;
+ Al:=(((W+7) Shr 3)+7) And Not 7; V9ESaN:=Al*2+32;
+ For Pl:=0 To 2 Do Begin
+  GetMem(V9ESA[Pl],V9ESaN+64);
+ End;
+ GetMem(V9ESAP,V9ESaN+64);
+ If V9EPruneUser>=0 Then V9EPrune:=V9EPruneUser Else Case V9ESpeed Of 0: V9EPrune:=0; 1: V9EPrune:=59; Else V9EPrune:=63; End;
+ V9EFrameNo:=0; V9EKeyN:=0; V9ERcUsed:=0; V9ERcFrames:=0; FillChar(V9ERcN,SizeOf(V9ERcN),0); V9ESaveFt:=0; V9ESaveIo:=0; V9EOn:=True;
+ V9ERefFlags:=1;
+End;
+
+{ ---------------- controle de debit ---------------- }
+Function V9EAcq(Q: LongInt): Double;
+Begin
+ If V9EBits=10 Then V9EAcq:=V9AcQ10[V9Clamp(Q,0,255)]/4.0 Else V9EAcq:=V9AcQ8[V9Clamp(Q,0,255)];
+End;
+
+Function V9EQFromStep(St: Double): LongInt;
+Var Q,B: LongInt; Bd,D: Double;
+Begin
+ B:=1; Bd:=1E30;
+ For Q:=1 To 255 Do Begin
+  D:=Abs(Ln(V9EAcq(Q)/St));
+  If D<Bd Then Begin Bd:=D; B:=Q; End;
+ End;
+ V9EQFromStep:=B;
+End;
+
+Function V9ERcTarget(Key: Boolean): Double;
+Const H=6;
+Var Tb,W,T: Double;
+Begin
+ Tb:=V9EBitrate*1.0*V9EFd/V9EFn;
+ If Key Then W:=3.5 Else W:=1;
+ T:=(Tb*(V9ERcFrames+H)-V9ERcUsed)*W/(W+H-1);
+ If T<Tb*0.15 Then T:=Tb*0.15;
+ If Key Then Begin If T>Tb*12 Then T:=Tb*12; End Else Begin If T>Tb*5 Then T:=Tb*5; End;
+ V9ERcTarget:=T;
+End;
+
+Function V9ERcPickQ(Key: Boolean; Target: Double): LongInt;
+Var K: LongInt; St: Double;
+Begin
+ K:=Ord(Not Key);
+ If V9ERcN[K]=0 Then Begin
+  If (K=1) And (V9ERcN[0]>0) Then Begin
+   V9ERcAl[1]:=V9ERcAl[0];
+   V9ERcCx[1]:=Target*Exp(V9ERcAl[1]*Ln(V9EAcq(V9ERcLastQ[0])*1.6));
+  End Else If K=0 Then Begin
+   V9ERcCx[0]:=V9EW*V9EH*10.0; V9ERcAl[0]:=1.15;
+  End;
+ End;
+ St:=Exp(Ln(V9ERcCx[K]/Target)/V9ERcAl[K]);
+ V9ERcPickQ:=V9EQFromStep(St);
+End;
+
+Procedure V9ERcUpdate(Key: Boolean; Q,Bits: LongInt);
+Var K: LongInt; A,St: Double;
+Begin
+ K:=Ord(Not Key);
+ St:=V9EAcq(Q);
+ If V9ERcN[K]>0 Then Begin
+  If (V9ERcLastQ[K]<>Q) And (Bits>0) And (V9ERcLastBits[K]>0) Then Begin
+   A:=Ln(V9ERcLastBits[K]/Bits)/Ln(St/V9EAcq(V9ERcLastQ[K]));
+   If A<0.5 Then A:=0.5; If A>2.2 Then A:=2.2;
+   V9ERcAl[K]:=0.5*V9ERcAl[K]+0.5*A;
+  End;
+ End;
+ V9ERcCx[K]:=Bits*Exp(V9ERcAl[K]*Ln(St));
+ V9ERcLastQ[K]:=Q; V9ERcLastBits[K]:=Bits; Inc(V9ERcN[K]);
+End;
+
+{ ---------------- API ---------------- }
+Function V9EFrame(Yuv: PEABuffer; Var Pkt: PEABuffer; Var PktLen: LongInt; Var IsKey: Boolean; Var Dts,Pts: LongInt): Boolean;
+Var Key: Boolean; Q,N,Len,Tries,K,QOver,QUnder,BestQ,LastQ,MaxTries: LongInt; Target,Err,BestErr,TolHi,TolLo,BOver,BUnder: Double; Bits: LongInt; Done: Boolean;
+Begin
+ V9EFrame:=False;
+ If Not V9EOn Then Exit;
+ V9ELoadSource(Yuv);
+ Key:=(V9EFrameNo=0) Or ((V9EGop>0) And (V9EFrameNo Mod V9EGop=0));
+ If Key Then V9EKeyN:=V9EFrameNo;
+ N:=V9EFrameNo-V9EKeyN;
+ V9ERefFlags:=1;
+ If (V9ERefs>=2) And ((N Mod 16)=8) Then V9ERefFlags:=V9ERefFlags Or 2;
+ If (V9ERefs>=3) And ((N Mod 16)=0) Then V9ERefFlags:=V9ERefFlags Or 4;
+ If V9EBitrate<=0 Then Begin
+  Q:=V9EQuantizer[V9Min(63,V9Max(0,V9ECq))];
+  If Q<1 Then Q:=1;
+  If Key Then Begin
+   If V9EKeyScale>0 Then Q:=V9Max(1,Round(Q*V9EKeyScale)) Else Q:=V9Max(1,Q-V9EKeyBoost);
+  End Else Begin
+   If (V9ERefFlags And 6)<>0 Then Q:=V9Max(1,Q-V9EGoldBoost) Else Q:=V9Min(255,V9Max(1,Q+V9EPOff));
+  End;
+  Len:=V9EEncodeFrame(Key,Q);
+ End Else Begin
+  Target:=V9ERcTarget(Key);
+  Q:=V9ERcPickQ(Key,Target);
+  Tries:=0; Done:=False; QOver:=0; QUnder:=256; BOver:=0; BUnder:=0; BestQ:=Q; BestErr:=1E30;
+  If Key Then MaxTries:=4 Else If V9ERcN[1]<=1 Then MaxTries:=4 Else MaxTries:=2;
+  If Key Then Begin TolHi:=1.25; TolLo:=0.75; End Else Begin TolHi:=1.3; TolLo:=0.7; End;
+  Repeat
+   Len:=V9EEncodeFrame(Key,Q); Bits:=Len*8; LastQ:=Q;
+   V9ERcUpdate(Key,Q,Bits);
+   Inc(Tries);
+   Err:=Abs(Ln((Bits+1.0)/Target));
+   If Err<BestErr Then Begin BestErr:=Err; BestQ:=Q; End;
+   If (Bits<=Target*TolHi) And (Bits>=Target*TolLo) Then Done:=True
+   Else Begin
+    If Bits>Target Then Begin If Q>QOver Then Begin QOver:=Q; BOver:=Bits; End; End
+    Else Begin If Q<QUnder Then Begin QUnder:=Q; BUnder:=Bits; End; End;
+    If Tries>=MaxTries Then Done:=True
+    Else Begin
+     If (QOver>0) And (QUnder<256) Then Begin
+      If QUnder-QOver<=1 Then Done:=True
+      Else Begin
+       K:=QOver+Round((QUnder-QOver)*Ln(BOver/Target)/Ln((BOver+1.0)/(BUnder+1.0)));
+       If K<=QOver Then K:=QOver+1; If K>=QUnder Then K:=QUnder-1;
+       Q:=K;
+      End;
+     End Else Begin
+      K:=V9ERcPickQ(Key,Target);
+      If K>Q+50 Then K:=Q+50; If K<Q-50 Then K:=Q-50;
+      If K=Q Then Done:=True Else Q:=K;
+      If (Q>=255) And (Bits>Target) Then Done:=True;
+      If (Q<=1) And (Bits<Target) Then Done:=True;
+     End;
+    End;
+   End;
+  Until Done;
+  If (LastQ<>BestQ) And (BestErr<1E29) Then Begin
+   Len:=V9EEncodeFrame(Key,BestQ); Q:=BestQ;
+  End Else Q:=LastQ;
+ End;
+ V9EAccept;
+ Inc(V9ERcUsed,Int64(Len)*8); Inc(V9ERcFrames);
+ Pkt:=PEABuffer(V9EOut); PktLen:=Len; IsKey:=Key;
+ Dts:=V9EFrameNo; Pts:=V9EFrameNo;
+ Inc(V9EFrameNo);
+ V9EFrame:=True;
+End;
+
+Function V9EFlush(Var Pkt: PEABuffer; Var PktLen: LongInt; Var IsKey: Boolean; Var Dts,Pts: LongInt): Boolean;
+Begin
+ V9EFlush:=False;
+End;
+
+{ Boite vpcC complete (taille + 'vpcC' + version/flags + VPCodecConfigurationRecord). Retourne la longueur (20 octets). }
+Function V9EVpcC(Var Buf: Array Of Byte): LongInt;
+Var Lv,I: LongInt; Ps,Sr: Int64;
+Begin
+ Ps:=Int64(V9EW)*V9EH;
+ If V9EFd<=0 Then Sr:=Ps*30 Else Sr:=Ps*V9EFn Div V9EFd;
+ Lv:=10;
+ If (Ps>36864) Or (Sr>829440) Then Lv:=11;
+ If (Ps>73728) Or (Sr>2764800) Then Lv:=20;
+ If (Ps>122880) Or (Sr>4608000) Then Lv:=21;
+ If (Ps>245760) Or (Sr>9216000) Then Lv:=30;
+ If (Ps>552960) Or (Sr>20736000) Then Lv:=31;
+ If (Ps>983040) Or (Sr>36864000) Then Lv:=40;
+ If (Ps>2228224) Or (Sr>83558400) Then Lv:=41;
+ If (Ps>2228224) Or (Sr>160432128) Then Lv:=50;
+ If (Ps>8912896) Or (Sr>311951360) Then Lv:=51;
+ If (Ps>8912896) Or (Sr>588251136) Then Lv:=52;
+ If (Ps>8912896) Or (Sr>1176502272) Then Lv:=60;
+ Buf[0]:=0; Buf[1]:=0; Buf[2]:=0; Buf[3]:=20;
+ Buf[4]:=Ord('v'); Buf[5]:=Ord('p'); Buf[6]:=Ord('c'); Buf[7]:=Ord('C');
+ Buf[8]:=1; Buf[9]:=0; Buf[10]:=0; Buf[11]:=0;
+ Buf[12]:=V9EProfile; Buf[13]:=Lv;
+ Buf[14]:=(V9EBits Shl 4) Or (1 Shl 1) Or V9EColorRange; { chromaSubsampling = 1 (4:2:0), comme FFmpeg }
+ Buf[15]:=2; Buf[16]:=2; Buf[17]:=2;
+ If V9EColorSpace=1 Then Begin Buf[15]:=6; Buf[16]:=6; Buf[17]:=6; End;
+ If V9EColorSpace=2 Then Begin Buf[15]:=1; Buf[16]:=1; Buf[17]:=1; End;
+ Buf[18]:=0; Buf[19]:=0;
+ V9EVpcC:=20;
+End;
+
+Procedure V9EGetRecon(Dst: PEABuffer);
+Var Pl,W,H,X,Y,Off: LongInt; Fb: ^TV9Fb; P: PV9W; D: PV9B;
+Begin
+ Fb:=@V9Fb[V9NewFb]; Off:=0; D:=PV9B(Dst);
+ For Pl:=0 To 2 Do Begin
+  If Pl=0 Then Begin W:=V9EW; H:=V9EH; End Else Begin W:=V9ECw; H:=V9ECh; End;
+  For Y:=0 To H-1 Do Begin
+   P:=@Fb^.P[Pl]^[Y*Fb^.St[Pl]];
+   If V9EBits=8 Then For X:=0 To W-1 Do D^[Off+Y*W+X]:=P^[X]
+   Else For X:=0 To W-1 Do Begin D^[Off+(Y*W+X)*2]:=P^[X] And 255; D^[Off+(Y*W+X)*2+1]:=P^[X] Shr 8; End;
+  End;
+  If V9EBits=8 Then Inc(Off,W*H) Else Inc(Off,W*H*2);
+ End;
+End;
+{$INLINE OFF}
 { AV1 decoder (AV1 Bitstream & Decoding Process Specification v1.0.0 with errata), port to Pascal.
   Based on the pseudo-code and tables of the AV1 specification (AOMedia, BSD-2-Clause Patent license). }
 
@@ -65370,6 +67728,2978 @@ Function Avcount_units_in_frame(L_unitSize,L_frameSize: LongInt): LongInt;
 Begin
  Avcount_units_in_frame:=AvMax(((L_frameSize + AvSra(L_unitSize,1)) div L_unitSize),1);
  Exit;
+End;
+{$B-}
+{ ====================================================================== }
+{ pe_av1_enc.pas : encodeur AV1 (profil Main, 8 bits, 4:2:0, 1 tuile)      }
+{ Ecrit pour ANYMP4.PAS. S'appuie sur le decodeur pe_av1.pas (Av*, AV_*)    }
+{ pour la reconstruction (predictions intra/inter, transformees inverses,   }
+{ filtre de boucle, CDEF, gestion des images de reference et des CDF) :     }
+{ la reconstruction de l'encodeur est donc identique, par construction, a   }
+{ celle du decodeur. Tout est ecrit d'apres la specification AV1 (AOMedia,  }
+{ BSD-2-Clause Patent) et libaom (entenc.c, BSD-2-Clause) pour l'encodeur   }
+{ arithmetique. Tous les identifiants commencent par AvE / AVE_ / TAvE.     }
+{ ATTENTION : l'encodeur partage l'etat global du decodeur (Av*) : ne pas   }
+{ decoder de l'AV1 avec pe_av1.pas pendant qu'un encodage est en cours.     }
+{ ====================================================================== }
+
+Const
+ AVE_CS=256;            { unites de cout par bit }
+ AVE_INF=$3FFFFFFF;
+
+Const
+ AveEffort: LongInt = 1;       { 0 rapide, 1 normal, 2 lent }
+
+Type
+ TAveCost=Array[0..4096] Of LongInt;
+ TAveTxb=Record
+  Plane,X4,Y4,TxSz,TxType,Eob,Off,Dist: LongInt;
+ End;
+ TAveBlk=Record
+  R,C,Bs: LongInt;
+  IsInter,Skip: LongInt;
+  YMode,UVMode,AngY,AngUV,CflU,CflV: LongInt;
+  TxSz: LongInt;
+  Ref,MvIdx,Interp: LongInt;
+  Mv: TAvPair;
+  SplitTx: LongInt;
+ End;
+ TAveRD=Record
+  D,R: LongInt;  { distorsion SSE, debit en unites de cout }
+ End;
+ TAveDbl2=Array[0..64,0..64] Of Double;
+ TAveRow=Array[0..64] Of Double; PAveRow=^TAveRow;
+ TAveF8=Array[0..7] Of SmallInt; PAveF8=^TAveF8;
+
+Var
+ AveActive: Boolean;
+ AveW,AveH,AveFn,AveFd,AveBitrate,AveGop: LongInt;
+ AveCw,AveCh: LongInt;                     { dimensions chroma }
+ AveFrameNo,AveSinceKey: LongInt;
+ AveCqp: LongInt;                          { qindex constant si Bitrate=0 (0..255) }
+ AveOptRefs: LongInt;                      { 1..3 references }
+ AveNoLf,AveNoCdef: Boolean;
+ AveWithTd: Boolean;                       { True : temporal delimiter en tete de paquet }
+ AveLambdaK: Double;
+ AveSrc: Array[0..2] Of PAvWA;             { source rembourree }
+ AveSrcS: Array[0..2] Of LongInt;
+ AveSaveHook: TAvHookP; AveSaveHookN: TAvHookN;
+ { entete / bits }
+ AveBw: PAvBA; AveBwBits: LongInt;
+ AveHdrBuf: Array[0..511] Of Byte; AveHdrLen: LongInt;
+ AveSeqBuf: Array[0..63] Of Byte; AveSeqLen: LongInt;    { OBU sequence header complet }
+ { sortie }
+ AveOut: PAvBA; AveOutCap,AveOutLen: LongInt;
+ AveRecon: PAvBA;
+ { codeur arithmetique }
+ AveEcLow: Int64; AveEcRng,AveEcCnt,AveEcOffs,AveEcCap: LongInt; AveEcPre: PAvWA;
+ AveTile: PAvBA; AveTileLen: LongInt;
+ AveDry: Boolean; AveBits: LongInt; AveRateOnly: Boolean;
+ AveCost: TAveCost;
+ { parametres de l'image }
+ AveFhType,AveFhQidx,AveFhPrimary,AveFhRefresh,AveFhHp,AveFhFilter,AveFhTxSel,AveFhRedTx,AveFhRefSel: LongInt;
+ AveFhRefIdx: Array[0..6] Of LongInt;
+ AveFhLf: Array[0..3] Of LongInt; AveFhSharp: LongInt;
+ AveFhCdefDamp,AveFhCdefYp,AveFhCdefYs,AveFhCdefUp,AveFhCdefUs: LongInt;
+ AveFhDeltaQ: LongInt;
+ AveLambda: LongInt;        { lambda en unites (cout par bit : dist = SSE) *256 / ... voir AveRdCost }
+ AveLamD: Double;           { SSE par bit }
+ AveDcQ,AveAcQ,AveDcQC,AveAcQC: LongInt;
+ { forward maps tx type -> symbole }
+ AveIntraFwd1: Array[0..15] Of ShortInt;
+ AveIntraFwd2: Array[0..15] Of ShortInt;
+ AveInterFwd1: Array[0..15] Of ShortInt;
+ AveInterFwd2: Array[0..15] Of ShortInt;
+ AveInterFwd3: Array[0..15] Of ShortInt;
+ AveMat: Array[0..2,2..6] Of ^TAveDbl2;   { matrices 1D inverse normalisee : [type][log2][k][i] }
+ AveMiCols,AveMiRows: LongInt;
+ AveFastPred: Boolean;
+ AveTune: Array[0..7] Of Double;     { reglages experimentaux (0 = defaut) }
+ AveMatOk: Boolean;
+ AveGainScale: Array[0..19] Of Double;     { echelle 2D par taille de transformee }
+
+Function AveClip(Lo,Hi,X: LongInt): LongInt;
+Begin
+ If X<Lo Then AveClip:=Lo Else If X>Hi Then AveClip:=Hi Else AveClip:=X;
+End;
+
+Function AveMin(A,B: LongInt): LongInt;
+Begin If A<B Then AveMin:=A Else AveMin:=B; End;
+
+Function AveMax(A,B: LongInt): LongInt;
+Begin If A>B Then AveMax:=A Else AveMax:=B; End;
+
+Function AveAbs(A: LongInt): LongInt;
+Begin If A<0 Then AveAbs:=-A Else AveAbs:=A; End;
+
+Function AveIlog(X: LongInt): LongInt;
+Var N: LongInt;
+Begin
+ N:=0;
+ While X>0 Do Begin Inc(N); X:=X Shr 1; End;
+ AveIlog:=N;
+End;
+
+{ ---------------- ecriture de bits (en-tetes) ---------------- }
+Procedure AveBwReset;
+Begin
+ FillChar(AveHdrBuf,SizeOf(AveHdrBuf),0);
+ AveBwBits:=0;
+End;
+
+Procedure AveBwPut(V,N: LongInt);
+Var I: LongInt;
+Begin
+ For I:=N-1 DownTo 0 Do Begin
+  If (V Shr I) And 1<>0 Then AveHdrBuf[AveBwBits Shr 3]:=AveHdrBuf[AveBwBits Shr 3] Or (128 Shr (AveBwBits And 7));
+  Inc(AveBwBits);
+ End;
+End;
+
+Procedure AveBwAlign;
+Begin
+ While AveBwBits And 7<>0 Do Inc(AveBwBits);
+End;
+
+Procedure AveBwTrailing;
+Begin
+ AveBwPut(1,1);
+ AveBwAlign;
+End;
+
+{ ecrit un entier leb128 dans B a partir de P ; retourne la nouvelle position }
+Function AveLeb(Var B: Array Of Byte; P,V: LongInt): LongInt;
+Begin
+ Repeat
+  If V>127 Then Begin B[P]:=(V And 127) Or 128; V:=V Shr 7; End
+  Else Begin B[P]:=V; V:=0; End;
+  Inc(P);
+ Until V=0;
+ AveLeb:=P;
+End;
+
+{ ---------------- codeur arithmetique (od_ec_enc de libaom) ---------------- }
+Procedure AveEcReset;
+Begin
+ AveEcLow:=0; AveEcRng:=$8000; AveEcCnt:=-9; AveEcOffs:=0;
+End;
+
+Procedure AveEcPush(V: LongInt);
+Begin
+ If AveEcOffs+4>AveEcCap Then Begin
+  AveEcCap:=AveEcCap*2+1024;
+  ReallocMem(AveEcPre,AveEcCap*2);
+ End;
+ AveEcPre^[AveEcOffs]:=V And $FFFF;
+ Inc(AveEcOffs);
+End;
+
+Procedure AveEcNorm(L: Int64; R: LongInt);
+Var D,C,S: LongInt; M: Int64;
+Begin
+ C:=AveEcCnt;
+ D:=16-AveIlog(R);
+ S:=C+D;
+ If S>=0 Then Begin
+  C:=C+16;
+  M:=(Int64(1) Shl C)-1;
+  If S>=8 Then Begin
+   AveEcPush(LongInt(L Shr C));
+   L:=L And M;
+   C:=C-8;
+   M:=M Shr 8;
+  End;
+  AveEcPush(LongInt(L Shr C));
+  S:=C+D-24;
+  L:=L And M;
+ End;
+ AveEcLow:=L Shl D; AveEcRng:=R Shl D; AveEcCnt:=S;
+End;
+
+{ Fl,Fh : "icdf" (32768-cdf) de la borne basse / haute ; S symbole ; N nombre de symboles }
+Procedure AveEcEnc(Fl,Fh,S,N: LongInt);
+Var L: Int64; R,U,V,N1: LongInt;
+Begin
+ L:=AveEcLow; R:=AveEcRng; N1:=N-1;
+ If Fl<32768 Then Begin
+  U:=(((R Shr 8)*(Fl Shr 6)) Shr 1)+4*(N1-(S-1));
+  V:=(((R Shr 8)*(Fh Shr 6)) Shr 1)+4*(N1-S);
+  L:=L+(R-U);
+  R:=U-V;
+ End Else
+  R:=R-((((R Shr 8)*(Fh Shr 6)) Shr 1)+4*(N1-S));
+ AveEcNorm(L,R);
+End;
+
+{ termine le codage ; le resultat est dans AveTile/AveTileLen }
+Procedure AveEcDone;
+Var L,E,Nm: Int64; C,S,I,Offs: LongInt; Carry: LongInt;
+Begin
+ L:=AveEcLow; C:=AveEcCnt; S:=10;
+ E:=((L+$3FFF) And (Not Int64($3FFF))) Or $4000;
+ S:=S+C;
+ If S>0 Then Begin
+  Nm:=(Int64(1) Shl (C+16))-1;
+  Repeat
+   AveEcPush(LongInt(E Shr (C+16)));
+   E:=E And Nm;
+   S:=S-8; C:=C-8; Nm:=Nm Shr 8;
+  Until S<=0;
+ End;
+ Offs:=AveEcOffs;
+ GetMem(AveTile,Offs+16);
+ Carry:=0;
+ For I:=Offs-1 DownTo 0 Do Begin
+  Carry:=AveEcPre^[I]+Carry;
+  AveTile^[I]:=Carry And 255;
+  Carry:=Carry Shr 8;
+ End;
+ AveTileLen:=Offs;
+End;
+
+{ ---------------- symboles : ecriture / estimation de debit ---------------- }
+Procedure AveSym(P: PAvWA; N,S: LongInt);
+Var Fl,Fh,Pr,I,Rate,Tmp: LongInt;
+Begin
+ If S>0 Then Pr:=P^[S]-P^[S-1] Else Pr:=P^[0];
+ If AveDry Then Begin
+  If Pr<0 Then Pr:=0;
+  Inc(AveBits,AveCost[Pr Shr 3]);
+  Exit;
+ End;
+ If S>0 Then Fl:=32768-P^[S-1] Else Fl:=32768;
+ Fh:=32768-P^[S];
+ AveEcEnc(Fl,Fh,S,N);
+ If Avdisable_cdf_update=0 Then Begin
+  Rate:=3+Ord(P^[N]>15)+Ord(P^[N]>31)+AvMin(AvFloorLog2(N),2);
+  Tmp:=0;
+  For I:=0 To N-2 Do Begin
+   If I=S Then Tmp:=32768;
+   If Tmp<P^[I] Then P^[I]:=P^[I]-((P^[I]-Tmp) Shr Rate)
+   Else P^[I]:=P^[I]+((Tmp-P^[I]) Shr Rate);
+  End;
+  If P^[N]<32 Then P^[N]:=P^[N]+1;
+ End;
+End;
+
+Procedure AveSy(Var C: Word; N,S: LongInt);
+Begin
+ AveSym(PAvWA(@C),N,S);
+End;
+
+Procedure AveSBin(Var C: Word; S: LongInt);
+Begin
+ AveSym(PAvWA(@C),2,S);
+End;
+
+{ un bit equiprobable }
+Procedure AveBool(B: LongInt);
+Begin
+ If AveDry Then Begin Inc(AveBits,AVE_CS); Exit; End;
+ If B=0 Then AveEcEnc(32768,16384,0,2) Else AveEcEnc(16384,0,1,2);
+End;
+
+Procedure AveLit(V,N: LongInt);
+Var I: LongInt;
+Begin
+ For I:=N-1 DownTo 0 Do AveBool((V Shr I) And 1);
+End;
+
+{ ---------------- en-tetes ---------------- }
+Function AveLevelIdx: LongInt;
+Var A: Int64;
+Begin
+ A:=Int64(AveW)*AveH;
+ If A<=147456 Then AveLevelIdx:=0
+ Else If A<=278784 Then AveLevelIdx:=1
+ Else If A<=665856 Then AveLevelIdx:=4
+ Else If A<=1065024 Then AveLevelIdx:=5
+ Else If A<=2359296 Then AveLevelIdx:=8
+ Else If A<=8912896 Then AveLevelIdx:=12
+ Else AveLevelIdx:=16;
+End;
+
+{ construit le sequence header OBU (avec champ de taille) dans AveSeqBuf }
+Procedure AveBuildSeq;
+Var Wb,Hb,L,P,N: LongInt;
+Begin
+ AveBwReset;
+ AveBwPut(0,3);          { seq_profile }
+ AveBwPut(0,1);          { still_picture }
+ AveBwPut(0,1);          { reduced_still_picture_header }
+ AveBwPut(0,1);          { timing_info_present_flag }
+ AveBwPut(0,1);          { initial_display_delay_present_flag }
+ AveBwPut(0,5);          { operating_points_cnt_minus_1 }
+ AveBwPut(0,12);         { operating_point_idc[0] }
+ L:=AveLevelIdx;
+ AveBwPut(L,5);          { seq_level_idx[0] }
+ If L>7 Then AveBwPut(0,1);   { seq_tier }
+ Wb:=AveIlog(AveW-1); If Wb<1 Then Wb:=1;
+ Hb:=AveIlog(AveH-1); If Hb<1 Then Hb:=1;
+ AveBwPut(Wb-1,4); AveBwPut(Hb-1,4);
+ AveBwPut(AveW-1,Wb); AveBwPut(AveH-1,Hb);
+ AveBwPut(0,1);          { frame_id_numbers_present_flag }
+ AveBwPut(0,1);          { use_128x128_superblock }
+ AveBwPut(0,1);          { enable_filter_intra }
+ AveBwPut(1,1);          { enable_intra_edge_filter }
+ AveBwPut(0,1);          { enable_interintra_compound }
+ AveBwPut(0,1);          { enable_masked_compound }
+ AveBwPut(0,1);          { enable_warped_motion }
+ AveBwPut(0,1);          { enable_dual_filter }
+ AveBwPut(0,1);          { enable_order_hint }
+ AveBwPut(0,1);          { seq_choose_screen_content_tools }
+ AveBwPut(0,1);          { seq_force_screen_content_tools }
+ AveBwPut(0,1);          { enable_superres }
+ If AveNoCdef Then AveBwPut(0,1) Else AveBwPut(1,1);   { enable_cdef }
+ AveBwPut(0,1);          { enable_restoration }
+ { color_config }
+ AveBwPut(0,1);          { high_bitdepth }
+ AveBwPut(0,1);          { mono_chrome }
+ AveBwPut(0,1);          { color_description_present_flag }
+ AveBwPut(0,1);          { color_range }
+ AveBwPut(0,2);          { chroma_sample_position }
+ AveBwPut(0,1);          { separate_uv_delta_q }
+ AveBwPut(0,1);          { film_grain_params_present }
+ AveBwTrailing;
+ N:=AveBwBits Shr 3;
+ AveSeqBuf[0]:=(1 Shl 3) Or 2;
+ P:=AveLeb(AveSeqBuf,1,N);
+ Move(AveHdrBuf[0],AveSeqBuf[P],N);
+ AveSeqLen:=P+N;
+End;
+
+
+{ ---------------- en-tete d'image (uncompressed_header) ---------------- }
+Function AveTl2(Bs,Tg: LongInt): LongInt;
+Var K: LongInt;
+Begin
+ K:=0; While (Bs Shl K)<Tg Do Inc(K);
+ AveTl2:=K;
+End;
+
+Procedure AveWriteFrameHdr;
+Var I,SbC,SbR,MinC,MaxC,MinR,MaxR,K,MinT: LongInt; Intra: Boolean;
+Begin
+ AveBwReset;
+ Intra:=AveFhType=AV_KEY_FRAME;
+ AveBwPut(0,1);                  { show_existing_frame }
+ AveBwPut(AveFhType,2);          { frame_type }
+ AveBwPut(1,1);                  { show_frame }
+ If Not Intra Then AveBwPut(0,1);{ error_resilient_mode }
+ AveBwPut(0,1);                  { disable_cdf_update }
+ AveBwPut(0,1);                  { frame_size_override_flag }
+ If Not Intra Then Begin
+  AveBwPut(AveFhPrimary,3);      { primary_ref_frame }
+  AveBwPut(AveFhRefresh,8);      { refresh_frame_flags }
+ End;
+ If Intra Then AveBwPut(0,1)     { render_and_frame_size_different }
+ Else Begin
+  For I:=0 To 6 Do AveBwPut(AveFhRefIdx[I],3);
+  AveBwPut(0,1);                 { render_and_frame_size_different }
+  AveBwPut(AveFhHp,1);           { allow_high_precision_mv }
+  If AveFhFilter=AV_SWITCHABLE Then AveBwPut(1,1)
+  Else Begin AveBwPut(0,1); AveBwPut(AveFhFilter,2); End;
+  AveBwPut(0,1);                 { is_motion_mode_switchable }
+ End;
+ AveBwPut(0,1);                  { disable_frame_end_update_cdf = 0 }
+ { tile_info : une seule tuile }
+ SbC:=(AveMiCols+15) Shr 4; SbR:=(AveMiRows+15) Shr 4;
+ MinC:=AveTl2(AV_MAX_TILE_WIDTH Shr 6,SbC);
+ MaxC:=AveTl2(1,AvMin(SbC,AV_MAX_TILE_COLS));
+ MaxR:=AveTl2(1,AvMin(SbR,AV_MAX_TILE_ROWS));
+ MinT:=AvMax(MinC,AveTl2(AV_MAX_TILE_AREA Shr 12,SbR*SbC));
+ MinR:=AvMax(MinT-MinC,0);
+ AveBwPut(1,1);                  { uniform_tile_spacing_flag }
+ If MinC<MaxC Then AveBwPut(0,1);
+ If MinR<MaxR Then AveBwPut(0,1);
+ { quantization_params }
+ AveBwPut(AveFhQidx,8);
+ AveBwPut(0,1);                  { DeltaQYDc }
+ AveBwPut(0,1); AveBwPut(0,1);   { DeltaQUDc, DeltaQUAc }
+ AveBwPut(0,1);                  { using_qmatrix }
+ AveBwPut(0,1);                  { segmentation_enabled }
+ If AveFhQidx>0 Then AveBwPut(0,1);   { delta_q_present }
+ { loop_filter_params }
+ AveBwPut(AveFhLf[0],6); AveBwPut(AveFhLf[1],6);
+ If (AveFhLf[0]<>0) Or (AveFhLf[1]<>0) Then Begin AveBwPut(AveFhLf[2],6); AveBwPut(AveFhLf[3],6); End;
+ AveBwPut(AveFhSharp,3);
+ AveBwPut(1,1);                  { loop_filter_delta_enabled }
+ AveBwPut(0,1);                  { loop_filter_delta_update }
+ { cdef_params }
+ If Not AveNoCdef Then Begin
+  AveBwPut(AveFhCdefDamp-3,2);
+  AveBwPut(0,2);                 { cdef_bits }
+  AveBwPut(AveFhCdefYp,4);
+  If AveFhCdefYs=4 Then AveBwPut(3,2) Else AveBwPut(AveFhCdefYs,2);
+  AveBwPut(AveFhCdefUp,4);
+  If AveFhCdefUs=4 Then AveBwPut(3,2) Else AveBwPut(AveFhCdefUs,2);
+ End;
+ AveBwPut(AveFhTxSel,1);         { tx_mode_select }
+ If Not Intra Then AveBwPut(0,1);{ reference_select }
+ AveBwPut(AveFhRedTx,1);         { reduced_tx_set }
+ If Not Intra Then For I:=1 To 7 Do AveBwPut(0,1);   { is_global }
+ AveBwAlign;
+ AveHdrLen:=AveBwBits Shr 3;
+End;
+
+{ boite av1C complete (taille + 'av1C' + record + configOBUs = sequence header) }
+Function AveAv1CBuild(Var Buf: Array Of Byte): LongInt;
+Var N,I: LongInt;
+Begin
+ N:=4+AveSeqLen;
+ Buf[0]:=0; Buf[1]:=0; Buf[2]:=0; Buf[3]:=8+N;
+ Buf[4]:=Ord('a'); Buf[5]:=Ord('v'); Buf[6]:=Ord('1'); Buf[7]:=Ord('C');
+ Buf[8]:=$81;
+ Buf[9]:=AveLevelIdx;                         { seq_profile 0 | level }
+ Buf[10]:=$0C;                                { tier 0, 8 bits, 4:2:0, csp 0 }
+ Buf[11]:=0;
+ For I:=0 To AveSeqLen-1 Do Buf[12+I]:=AveSeqBuf[I];
+ AveAv1CBuild:=8+N;
+End;
+
+{ ---------------- transformees directes (flottant) ---------------- }
+Procedure AveBuildMats;
+Var T,N,K,I,N0: LongInt; M: ^TAveDbl2; G: Double;
+Begin
+ For T:=0 To 2 Do For N:=2 To 6 Do AveMat[T,N]:=NIL;
+ For T:=0 To 2 Do For N:=2 To 6 Do Begin
+  If (T=1) And (N>4) Then Continue;
+  If (T=2) And (N>5) Then Continue;
+  New(M);
+  N0:=1 Shl N; G:=Sqrt(N0/2);
+  For K:=0 To N0-1 Do Begin
+   For I:=0 To 127 Do AvT[I]:=0;
+   If T=2 Then Begin
+    For I:=0 To N0-1 Do M^[K,I]:=0;
+    M^[K,K]:=1;
+   End Else Begin
+    AvT[K]:=8192;
+    If T=0 Then AvIdct(N,26) Else AvIadst(N,26);
+    For I:=0 To N0-1 Do M^[K,I]:=AvT[I]/8192.0/G;
+   End;
+  End;
+  AveMat[T,N]:=M;
+ End;
+ { echelle 2D : D = O * 2^(rowShift+4) / (gW*gH*rect) }
+ For N:=0 To 18 Do Begin
+  G:=Sqrt(AvTx_Width[N]/2.0)*Sqrt(AvTx_Height[N]/2.0);
+  If AveAbs(AvTx_Width_Log2[N]-AvTx_Height_Log2[N])=1 Then G:=G*Sqrt(0.5);
+  AveGainScale[N]:=(1 Shl (AvTransform_Row_Shift[N]+4))/G;
+ End;
+ AveMatOk:=True;
+End;
+
+Procedure AveFreeMats;
+Var T,N: LongInt;
+Begin
+ For T:=0 To 2 Do For N:=2 To 6 Do If AveMat[T,N]<>NIL Then Begin Dispose(AveMat[T,N]); AveMat[T,N]:=NIL; End;
+ AveMatOk:=False;
+End;
+
+{ type 1D (0 DCT,1 ADST,2 identite) pour la colonne (hauteur) et la ligne (largeur) d'un type de transformee 2D }
+Function AveColType(Ty: LongInt): LongInt;
+Begin
+ Case Ty Of
+  0,2,5,10: AveColType:=0;
+  1,3,4,6,7,8,12,14: AveColType:=1;
+ Else AveColType:=2;
+ End;
+End;
+
+Function AveRowType(Ty: LongInt): LongInt;
+Begin
+ Case Ty Of
+  0,1,4,11: AveRowType:=0;
+  2,3,5,6,7,8,13,15: AveRowType:=1;
+ Else AveRowType:=2;
+ End;
+End;
+
+Function AveFlipUD(Ty: LongInt): Boolean;
+Begin AveFlipUD:=(Ty=4) Or (Ty=8) Or (Ty=14) Or (Ty=6); End;
+Function AveFlipLR(Ty: LongInt): Boolean;
+Begin AveFlipLR:=(Ty=5) Or (Ty=7) Or (Ty=15) Or (Ty=6); End;
+
+Var
+ AveRes: Array[0..63,0..63] Of LongInt;      { residu pixel }
+ AveT1: Array[0..31,0..63] Of Double;        { [colonne frequentielle][ligne] }
+ AveCoefD: Array[0..1023] Of Double;         { coefficients (domaine AV1) }
+ AveRd,AveSs,AveDd: Array[0..63] Of Double;
+
+{ residu AveRes (H x W) -> AveCoefD (raster Tw x Th) ; Ty type 2D }
+Procedure AveFwd2D(TxSz,Ty: LongInt);
+Var W,H,Lw,Lh,Ow,Oh,X,Y,U,V,Tr,Tc,Hw,Hh: LongInt; S,Sc: Double; Mr,Mc: ^TAveDbl2; FU,FL: Boolean; Rr: LongInt; Zero: Boolean; Mrow: PAveRow;
+Begin
+ Lw:=AvTx_Width_Log2[TxSz]; Lh:=AvTx_Height_Log2[TxSz];
+ W:=1 Shl Lw; H:=1 Shl Lh; Hw:=W Shr 1; Hh:=H Shr 1;
+ Ow:=AveMin(32,W); Oh:=AveMin(32,H);
+ Tr:=AveRowType(Ty); Tc:=AveColType(Ty);
+ FU:=AveFlipUD(Ty); FL:=AveFlipLR(Ty);
+ Mr:=AveMat[Tr,Lw]; Mc:=AveMat[Tc,Lh];
+ Sc:=AveGainScale[TxSz];
+ { lignes : T1[u][y] = sum_x R[y][x] * Mr[u][x] }
+ For Y:=0 To H-1 Do Begin
+  If FU Then Rr:=H-1-Y Else Rr:=Y;
+  Zero:=True;
+  For X:=0 To W-1 Do Begin
+   If FL Then AveRd[X]:=AveRes[Rr,W-1-X] Else AveRd[X]:=AveRes[Rr,X];
+   If AveRd[X]<>0 Then Zero:=False;
+  End;
+  If Zero Then Begin
+   For U:=0 To Ow-1 Do AveT1[U,Y]:=0;
+  End Else If Tr=2 Then Begin
+   For U:=0 To Ow-1 Do AveT1[U,Y]:=AveRd[U];
+  End Else If Tr=0 Then Begin
+   For X:=0 To Hw-1 Do Begin AveSs[X]:=AveRd[X]+AveRd[W-1-X]; AveDd[X]:=AveRd[X]-AveRd[W-1-X]; End;
+   For U:=0 To Ow-1 Do Begin
+    Mrow:=@Mr^[U,0]; S:=0;
+    If U And 1=0 Then Begin For X:=0 To Hw-1 Do S:=S+AveSs[X]*Mrow^[X]; End
+    Else Begin For X:=0 To Hw-1 Do S:=S+AveDd[X]*Mrow^[X]; End;
+    AveT1[U,Y]:=S;
+   End;
+  End Else Begin
+   For U:=0 To Ow-1 Do Begin
+    Mrow:=@Mr^[U,0]; S:=0;
+    For X:=0 To W-1 Do S:=S+AveRd[X]*Mrow^[X];
+    AveT1[U,Y]:=S;
+   End;
+  End;
+ End;
+ { colonnes }
+ For U:=0 To Ow-1 Do Begin
+  Zero:=True;
+  For Y:=0 To H-1 Do If AveT1[U,Y]<>0 Then Begin Zero:=False; Break; End;
+  If Zero Then Begin
+   For V:=0 To Oh-1 Do AveCoefD[V*Ow+U]:=0;
+   Continue;
+  End;
+  If Tc=2 Then Begin
+   For V:=0 To Oh-1 Do AveCoefD[V*Ow+U]:=AveT1[U,V]*Sc;
+  End Else If Tc=0 Then Begin
+   For Y:=0 To Hh-1 Do Begin AveSs[Y]:=AveT1[U,Y]+AveT1[U,H-1-Y]; AveDd[Y]:=AveT1[U,Y]-AveT1[U,H-1-Y]; End;
+   For V:=0 To Oh-1 Do Begin
+    Mrow:=@Mc^[V,0]; S:=0;
+    If V And 1=0 Then Begin For Y:=0 To Hh-1 Do S:=S+AveSs[Y]*Mrow^[Y]; End
+    Else Begin For Y:=0 To Hh-1 Do S:=S+AveDd[Y]*Mrow^[Y]; End;
+    AveCoefD[V*Ow+U]:=S*Sc;
+   End;
+  End Else Begin
+   For V:=0 To Oh-1 Do Begin
+    Mrow:=@Mc^[V,0]; S:=0;
+    For Y:=0 To H-1 Do S:=S+AveT1[U,Y]*Mrow^[Y];
+    AveCoefD[V*Ow+U]:=S*Sc;
+   End;
+  End;
+ End;
+End;
+
+{ ---------------- syntaxe des coefficients ---------------- }
+
+Procedure AveGolomb(X: LongInt);
+Var N,I: LongInt;
+Begin
+ N:=AveIlog(X)-1;
+ For I:=1 To N Do AveBool(0);
+ AveBool(1);
+ For I:=N-1 DownTo 0 Do AveBool((X Shr I) And 1);
+End;
+
+Function AveAllZeroCtx(Plane,TxSz,X4,Y4,W4,H4: LongInt): LongInt;
+Var MaxX4,MaxY4,W,H,BSize,Bw,Bh,Top,Left,K,Ctx,Above: LongInt;
+Begin
+ MaxX4:=AvMiCols; MaxY4:=AvMiRows;
+ If Plane>0 Then Begin MaxX4:=MaxX4 Shr Avsubsampling_x; MaxY4:=MaxY4 Shr Avsubsampling_y; End;
+ W:=AvTx_Width[TxSz]; H:=AvTx_Height[TxSz];
+ BSize:=Avget_plane_residual_size(AvMiSize,Plane);
+ Bw:=AvBlock_Width[BSize]; Bh:=AvBlock_Height[BSize];
+ If Plane=0 Then Begin
+  Top:=0; Left:=0;
+  For K:=0 To W4-1 Do If X4+K<MaxX4 Then Top:=AvMax(Top,AvAboveLevelContext[Plane,X4+K]);
+  For K:=0 To H4-1 Do If Y4+K<MaxY4 Then Left:=AvMax(Left,AvLeftLevelContext[Plane,Y4+K]);
+  Top:=AvMin(Top,255); Left:=AvMin(Left,255);
+  If (Bw=W) And (Bh=H) Then Ctx:=0
+  Else If (Top=0) And (Left=0) Then Ctx:=1
+  Else If (Top=0) Or (Left=0) Then Ctx:=2+Ord(AvMax(Top,Left)>3)
+  Else If AvMax(Top,Left)<=3 Then Ctx:=4
+  Else If AvMin(Top,Left)<=3 Then Ctx:=5
+  Else Ctx:=6;
+ End Else Begin
+  Above:=0; Left:=0;
+  For K:=0 To W4-1 Do If X4+K<MaxX4 Then Above:=Above Or AvAboveLevelContext[Plane,X4+K] Or AvAboveDcContext[Plane,X4+K];
+  For K:=0 To H4-1 Do If Y4+K<MaxY4 Then Left:=Left Or AvLeftLevelContext[Plane,Y4+K] Or AvLeftDcContext[Plane,Y4+K];
+  Ctx:=Ord(Above<>0)+Ord(Left<>0);
+  Inc(Ctx,7);
+  If Bw*Bh>W*H Then Inc(Ctx,3);
+ End;
+ AveAllZeroCtx:=Ctx;
+End;
+
+Function AveDcSignCtx(Plane,X4,Y4,W4,H4: LongInt): LongInt;
+Var MaxX4,MaxY4,DcSign,K,Sign: LongInt;
+Begin
+ MaxX4:=AvMiCols; MaxY4:=AvMiRows;
+ If Plane>0 Then Begin MaxX4:=MaxX4 Shr Avsubsampling_x; MaxY4:=MaxY4 Shr Avsubsampling_y; End;
+ DcSign:=0;
+ For K:=0 To W4-1 Do If X4+K<MaxX4 Then Begin
+  Sign:=AvAboveDcContext[Plane,X4+K];
+  If Sign=1 Then Dec(DcSign) Else If Sign=2 Then Inc(DcSign);
+ End;
+ For K:=0 To H4-1 Do If Y4+K<MaxY4 Then Begin
+  Sign:=AvLeftDcContext[Plane,Y4+K];
+  If Sign=1 Then Dec(DcSign) Else If Sign=2 Then Inc(DcSign);
+ End;
+ If DcSign<0 Then AveDcSignCtx:=1 Else If DcSign>0 Then AveDcSignCtx:=2 Else AveDcSignCtx:=0;
+End;
+
+Function AveBrCtx(TxSz,Pos: LongInt): LongInt;
+Var AdjTxSz,Bwl,Txw,Txh,Row,Col,Mag,TxClass,Idx,RefRow,RefCol,Ctx: LongInt;
+Begin
+ AdjTxSz:=AvAdjusted_Tx_Size[TxSz];
+ Bwl:=AvTx_Width_Log2[AdjTxSz];
+ Txw:=AvTx_Width[AdjTxSz]; Txh:=AvTx_Height[AdjTxSz];
+ Row:=Pos Shr Bwl; Col:=Pos-(Row Shl Bwl);
+ Mag:=0;
+ TxClass:=AvTxClass(AvPlaneTxType);
+ For Idx:=0 To 2 Do Begin
+  RefRow:=Row+AvMag_Ref_Offset_With_Tx_Class[TxClass,Idx,0];
+  RefCol:=Col+AvMag_Ref_Offset_With_Tx_Class[TxClass,Idx,1];
+  If (RefRow>=0) And (RefCol>=0) And (RefRow<Txh) And (RefCol<(1 Shl Bwl)) Then
+   Mag:=Mag+AvMin(AvQuant[RefRow*Txw+RefCol],AV_COEFF_BASE_RANGE+AV_NUM_BASE_LEVELS+1);
+ End;
+ Mag:=AvMin((Mag+1) Shr 1,6);
+ If Pos=0 Then Ctx:=Mag
+ Else If TxClass=0 Then Begin
+  If (Row<2) And (Col<2) Then Ctx:=Mag+7 Else Ctx:=Mag+14;
+ End Else Begin
+  If TxClass=1 Then Begin
+   If Col=0 Then Ctx:=Mag+7 Else Ctx:=Mag+14;
+  End Else Begin
+   If Row=0 Then Ctx:=Mag+7 Else Ctx:=Mag+14;
+  End;
+ End;
+ AveBrCtx:=Ctx;
+End;
+
+{ symbole de type de transformee (luma) }
+Procedure AveWrTxType(TxSz,TxType: LongInt);
+Var TxSet,Sym,Dir: LongInt;
+Begin
+ TxSet:=Avget_tx_set(TxSz);
+ If Avis_inter<>0 Then Begin
+  If TxSet=AV_TX_SET_INTER_1 Then Begin
+   Sym:=AveInterFwd1[TxType];
+   AveSy(AvTCdf.Inter_Tx_Type_Set1_Cdf[AvTx_Size_Sqr[TxSz],0],16,Sym);
+  End Else If TxSet=AV_TX_SET_INTER_2 Then Begin
+   Sym:=AveInterFwd2[TxType];
+   AveSy(AvTCdf.Inter_Tx_Type_Set2_Cdf[0],12,Sym);
+  End Else Begin
+   Sym:=AveInterFwd3[TxType];
+   AveSy(AvTCdf.Inter_Tx_Type_Set3_Cdf[AvTx_Size_Sqr[TxSz],0],2,Sym);
+  End;
+ End Else Begin
+  Dir:=AvYMode;
+  If TxSet=AV_TX_SET_INTRA_1 Then Begin
+   Sym:=AveIntraFwd1[TxType];
+   AveSy(AvTCdf.Intra_Tx_Type_Set1_Cdf[AvTx_Size_Sqr[TxSz],Dir,0],7,Sym);
+  End Else Begin
+   Sym:=AveIntraFwd2[TxType];
+   AveSy(AvTCdf.Intra_Tx_Type_Set2_Cdf[AvTx_Size_Sqr[TxSz],Dir,0],5,Sym);
+  End;
+ End;
+End;
+
+{ tx type admissible (luma) pour la taille et le mode courants ? }
+Function AveTxTypeOk(TxSz,TxType: LongInt): Boolean;
+Var TxSet: LongInt;
+Begin
+ TxSet:=Avget_tx_set(TxSz);
+ If TxSet=AV_TX_SET_DCTONLY Then AveTxTypeOk:=(TxType=AV_DCT_DCT)
+ Else If Avis_inter<>0 Then Begin
+  If TxSet=AV_TX_SET_INTER_1 Then AveTxTypeOk:=AveInterFwd1[TxType]>=0
+  Else If TxSet=AV_TX_SET_INTER_2 Then AveTxTypeOk:=AveInterFwd2[TxType]>=0
+  Else AveTxTypeOk:=AveInterFwd3[TxType]>=0;
+ End Else Begin
+  If TxSet=AV_TX_SET_INTRA_1 Then AveTxTypeOk:=AveIntraFwd1[TxType]>=0
+  Else AveTxTypeOk:=AveIntraFwd2[TxType]>=0;
+ End;
+End;
+
+{ ecrit (ou estime) un bloc de transformee. Lv : niveaux signes en raster Tw x Th ; Eob>0 ou 0.
+  TxType ignore pour les plans chroma (derive). Met a jour les contextes de niveau et AvTxTypes. }
+Procedure AveWrCoefs(Plane,StartX,StartY,TxSz,Eob,TxType: LongInt; Lv: PAvLA);
+Var X4,Y4,W4,H4,TxSzCtx,Ptype,SegEob,C,I,J,Scan,Multi,EobPt,Pos,Level,Idx,Br,Rm,Cul,Dcc,Sg,Ctx,V,Rem,Sh,TxSet: LongInt;
+Begin
+ X4:=StartX Shr 2; Y4:=StartY Shr 2;
+ W4:=AvTx_Width[TxSz] Shr 2; H4:=AvTx_Height[TxSz] Shr 2;
+ TxSzCtx:=(AvTx_Size_Sqr[TxSz]+AvTx_Size_Sqr_Up[TxSz]+1) Shr 1;
+ Ptype:=Ord(Plane>0);
+ Cul:=0; Dcc:=0;
+ Ctx:=AveAllZeroCtx(Plane,TxSz,X4,Y4,W4,H4);
+ AveSBin(AvTCdf.Txb_Skip_Cdf[TxSzCtx,Ctx,0],Ord(Eob=0));
+ If Eob=0 Then Begin
+  If (Plane=0) And Not AveRateOnly Then
+   For I:=0 To W4-1 Do For J:=0 To H4-1 Do AvTxTypes^[(Y4+J)*AvMiStride+X4+I]:=AV_DCT_DCT;
+ End Else Begin
+  If Plane=0 Then Begin
+   TxSet:=Avget_tx_set(TxSz);
+   If (TxSet>0) And (Avbase_q_idx>0) Then AveWrTxType(TxSz,TxType) Else TxType:=AV_DCT_DCT;
+   If Not AveRateOnly Then
+    For I:=0 To W4-1 Do For J:=0 To H4-1 Do AvTxTypes^[(Y4+J)*AvMiStride+X4+I]:=TxType;
+   AvPlaneTxType:=TxType;
+  End Else AvPlaneTxType:=Avcompute_tx_type(Plane,TxSz,X4,Y4);
+  Scan:=Avget_scan(TxSz);
+  SegEob:=AvMin(1024,AvTx_Width[TxSz]*AvTx_Height[TxSz]);
+  If (TxSz=AV_TX_16X64) Or (TxSz=AV_TX_64X16) Then SegEob:=512;
+  FillChar(AvQuant,SegEob*4,0);
+  Multi:=(AvMin(AvTx_Width_Log2[TxSz],5)+AvMin(AvTx_Height_Log2[TxSz],5))-4;
+  If Eob=1 Then EobPt:=1 Else EobPt:=AvFloorLog2(Eob-1)+2;
+  Idx:=Ord(AvTxClass(AvPlaneTxType)<>AV_TX_CLASS_2D);
+  Case Multi Of
+   0: AveSy(AvTCdf.Eob_Pt_16_Cdf[Ptype,Idx,0],5,EobPt-1);
+   1: AveSy(AvTCdf.Eob_Pt_32_Cdf[Ptype,Idx,0],6,EobPt-1);
+   2: AveSy(AvTCdf.Eob_Pt_64_Cdf[Ptype,Idx,0],7,EobPt-1);
+   3: AveSy(AvTCdf.Eob_Pt_128_Cdf[Ptype,Idx,0],8,EobPt-1);
+   4: AveSy(AvTCdf.Eob_Pt_256_Cdf[Ptype,Idx,0],9,EobPt-1);
+   5: AveSy(AvTCdf.Eob_Pt_512_Cdf[Ptype,0],10,EobPt-1);
+  Else AveSy(AvTCdf.Eob_Pt_1024_Cdf[Ptype,0],11,EobPt-1);
+  End;
+  If EobPt>=3 Then Begin
+   Rem:=Eob-((1 Shl (EobPt-2))+1);
+   Sh:=EobPt-3;
+   AveSBin(AvTCdf.Eob_Extra_Cdf[TxSzCtx,Ptype,EobPt-3,0],(Rem Shr Sh) And 1);
+   For I:=1 To EobPt-3 Do Begin
+    Sh:=EobPt-3-I;
+    AveBool((Rem Shr Sh) And 1);
+   End;
+  End;
+  For C:=Eob-1 DownTo 0 Do Begin
+   Pos:=AvScanData[Scan+C];
+   Level:=AveAbs(Lv^[Pos]);
+   If C=Eob-1 Then Begin
+    Ctx:=AvCoeffBaseCtx(TxSz,Plane,Pos,C,1)-AV_SIG_COEF_CONTEXTS+AV_SIG_COEF_CONTEXTS_EOB;
+    AveSy(AvTCdf.Coeff_Base_Eob_Cdf[TxSzCtx,Ptype,Ctx,0],3,AveMin(Level,3)-1);
+   End Else Begin
+    Ctx:=AvCoeffBaseCtx(TxSz,Plane,Pos,C,0);
+    AveSy(AvTCdf.Coeff_Base_Cdf[TxSzCtx,Ptype,Ctx,0],4,AveMin(Level,3));
+   End;
+   If Level>AV_NUM_BASE_LEVELS Then Begin
+    Rm:=Level-(AV_NUM_BASE_LEVELS+1);
+    Ctx:=AveBrCtx(TxSz,Pos);
+    For Idx:=0 To (AV_COEFF_BASE_RANGE Div (AV_BR_CDF_SIZE-1))-1 Do Begin
+     Br:=AveMin(Rm,AV_BR_CDF_SIZE-1);
+     AveSy(AvTCdf.Coeff_Br_Cdf[AveMin(TxSzCtx,AV_TX_32X32),Ptype,Ctx,0],4,Br);
+     Rm:=Rm-Br;
+     If Br<AV_BR_CDF_SIZE-1 Then Break;
+    End;
+   End;
+   AvQuant[Pos]:=AveMin(Level,15);
+  End;
+  For C:=0 To Eob-1 Do Begin
+   Pos:=AvScanData[Scan+C];
+   V:=Lv^[Pos];
+   If V<>0 Then Begin
+    Sg:=Ord(V<0);
+    If C=0 Then Begin
+     Ctx:=AveDcSignCtx(Plane,X4,Y4,W4,H4);
+     AveSBin(AvTCdf.Dc_Sign_Cdf[Ptype,Ctx,0],Sg);
+    End Else AveBool(Sg);
+    Level:=AveAbs(V);
+    If Level>AV_NUM_BASE_LEVELS+AV_COEFF_BASE_RANGE Then AveGolomb(Level-(AV_NUM_BASE_LEVELS+AV_COEFF_BASE_RANGE));
+    If (Pos=0) Then Dcc:=2-Sg;
+    Cul:=Cul+AveMin(Level,$FFFFF);
+   End;
+  End;
+  Cul:=AveMin(63,Cul);
+ End;
+ If AveRateOnly Then Exit;
+ For I:=0 To W4-1 Do Begin
+  AvAboveLevelContext[Plane,X4+I]:=Cul;
+  AvAboveDcContext[Plane,X4+I]:=Dcc;
+ End;
+ For I:=0 To H4-1 Do Begin
+  AvLeftLevelContext[Plane,Y4+I]:=Cul;
+  AvLeftDcContext[Plane,Y4+I]:=Dcc;
+ End;
+End;
+
+{ ---------------- syntaxe des blocs ---------------- }
+
+{ positionne les globales du decodeur pour le bloc B (equivalent du debut de decode_block + mode info) }
+Procedure AveSetBlk(Var B: TAveBlk);
+Var Bw4,Bh4: LongInt;
+Begin
+ AvMiRow:=B.R; AvMiCol:=B.C; AvMiSize:=B.Bs;
+ Bw4:=AvNum_4x4_Blocks_Wide[B.Bs]; Bh4:=AvNum_4x4_Blocks_High[B.Bs];
+ If (Bh4=1) And (Avsubsampling_y<>0) And ((B.R And 1)=0) Then AvHasChroma:=0
+ Else If (Bw4=1) And (Avsubsampling_x<>0) And ((B.C And 1)=0) Then AvHasChroma:=0
+ Else AvHasChroma:=Ord(AvNumPlanes>1);
+ AvAvailU:=Avis_inside(B.R-1,B.C);
+ AvAvailL:=Avis_inside(B.R,B.C-1);
+ AvAvailUChroma:=AvAvailU; AvAvailLChroma:=AvAvailL;
+ If AvHasChroma<>0 Then Begin
+  If (Avsubsampling_y<>0) And (Bh4=1) Then AvAvailUChroma:=Avis_inside(B.R-2,B.C);
+  If (Avsubsampling_x<>0) And (Bw4=1) Then AvAvailLChroma:=Avis_inside(B.R,B.C-2);
+ End Else Begin AvAvailUChroma:=0; AvAvailLChroma:=0; End;
+ Avis_inter:=B.IsInter; AvYMode:=B.YMode; AvUVMode:=B.UVMode;
+ AvAngleDeltaY:=B.AngY; AvAngleDeltaUV:=B.AngUV;
+ AvCflAlphaU:=B.CflU; AvCflAlphaV:=B.CflV;
+ Avuse_filter_intra:=0; AvPaletteSizeY:=0; AvPaletteSizeUV:=0; Avuse_intrabc:=0;
+ Avsegment_id:=0; AvLossless:=0; Avskip_mode:=0; Avskip:=B.Skip;
+ Avmotion_mode:=AV_SIMPLE; Avcompound_type:=AV_COMPOUND_AVERAGE; Avinterintra:=0; AvIsInterIntra:=0;
+ Avcomp_group_idx:=0; Avcompound_idx:=1;
+ If B.IsInter=0 Then Begin
+  AvRefFrame[0]:=AV_INTRA_FRAME; AvRefFrame[1]:=AV_NONE;
+  AvMv[0][0]:=0; AvMv[0][1]:=0;
+ End Else Begin
+  AvRefFrame[0]:=B.Ref; AvRefFrame[1]:=AV_NONE;
+  AvMv[0]:=B.Mv;
+ End;
+ AvMv[1][0]:=0; AvMv[1][1]:=0;
+ Avinterp_filter[0]:=B.Interp; Avinterp_filter[1]:=B.Interp;
+ AvTxSize:=B.TxSz;
+End;
+
+{ premier groupe de mises a jour de tableaux de decode_block }
+Procedure AveArraysA(Var B: TAveBlk);
+Var Y,X,RL,Bw4,Bh4,I,P: LongInt;
+Begin
+ Bw4:=AvNum_4x4_Blocks_Wide[B.Bs]; Bh4:=AvNum_4x4_Blocks_High[B.Bs];
+ For Y:=0 To Bh4-1 Do For X:=0 To Bw4-1 Do Begin
+  P:=(B.R+Y)*AvMiStride+B.C+X;
+  AvYModes^[P]:=AvYMode;
+  If (AvRefFrame[0]=AV_INTRA_FRAME) And (AvHasChroma<>0) Then AvUVModes^[P]:=AvUVMode;
+  AvRefFrames^[P*2]:=AvRefFrame[0]; AvRefFrames^[P*2+1]:=AvRefFrame[1];
+  If Avis_inter<>0 Then Begin
+   AvCompGroupIdxs^[P]:=0; AvCompoundIdxs^[P]:=1;
+   AvInterpFilters^[P*2]:=Avinterp_filter[0]; AvInterpFilters^[P*2+1]:=Avinterp_filter[1];
+   AvMvs^[P*4]:=AvMv[0][0]; AvMvs^[P*4+1]:=AvMv[0][1];
+  End;
+ End;
+End;
+
+{ second groupe }
+Procedure AveArraysB(Var B: TAveBlk);
+Var Y,X,Bw4,Bh4,P,I: LongInt;
+Begin
+ Bw4:=AvNum_4x4_Blocks_Wide[B.Bs]; Bh4:=AvNum_4x4_Blocks_High[B.Bs];
+ For Y:=0 To Bh4-1 Do For X:=0 To Bw4-1 Do Begin
+  P:=(B.R+Y)*AvMiStride+B.C+X;
+  AvIsInters^[P]:=Avis_inter; AvSkipModes^[P]:=0; AvSkips^[P]:=Avskip;
+  AvTxSizes^[P]:=AvTxSize; AvMiSizes^[P]:=B.Bs; AvSegmentIds^[P]:=0;
+  AvPaletteSizes^[AvMiRowsA*AvMiStride*0+P]:=0;
+  AvPaletteSizes^[AvMiRowsA*AvMiStride+P]:=0;
+  For I:=0 To AV_FRAME_LF_COUNT-1 Do AvDeltaLFs^[P*4+I]:=0;
+ End;
+End;
+
+{ reset_block_context }
+Procedure AveResetCtx(Bw4,Bh4: LongInt);
+Var Plane,SubX,SubY,I: LongInt;
+Begin
+ For Plane:=0 To 2*AvHasChroma Do Begin
+  If Plane>0 Then Begin SubX:=Avsubsampling_x; SubY:=Avsubsampling_y; End Else Begin SubX:=0; SubY:=0; End;
+  For I:=AvSra(AvMiCol,SubX) To AvSra(AvMiCol+Bw4,SubX)-1 Do Begin
+   AvAboveLevelContext[Plane,I]:=0; AvAboveDcContext[Plane,I]:=0;
+  End;
+  For I:=AvSra(AvMiRow,SubY) To AvSra(AvMiRow+Bh4,SubY)-1 Do Begin
+   AvLeftLevelContext[Plane,I]:=0; AvLeftDcContext[Plane,I]:=0;
+  End;
+ End;
+End;
+
+{ ---- partition ---- }
+Procedure AveWrPartition(R,C,BSize,Part: LongInt; HasRows,HasCols: Boolean);
+Var N: LongInt; P: PAvWA; Psum: LongInt; T: Array[0..2] Of Word;
+Begin
+ If BSize<AV_BLOCK_8X8 Then Exit;
+ AvAvailU:=Avis_inside(R-1,C); AvAvailL:=Avis_inside(R,C-1);
+ If HasRows And HasCols Then Begin
+  Case AvMi_Width_Log2[BSize] Of
+   1: N:=4;
+   5: N:=8;
+  Else N:=10;
+  End;
+  AveSym(AvPartCdfP(BSize,R,C),N,Part);
+ End Else If HasCols Then Begin
+  P:=AvPartCdfP(BSize,R,C);
+  Psum:=AvPD(P,AV_PARTITION_VERT)+AvPD(P,AV_PARTITION_SPLIT)+AvPD(P,AV_PARTITION_HORZ_A)+AvPD(P,AV_PARTITION_VERT_A)+AvPD(P,AV_PARTITION_VERT_B);
+  If BSize<>AV_BLOCK_128X128 Then Psum:=Psum+AvPD(P,AV_PARTITION_VERT_4);
+  T[0]:=32768-Psum; T[1]:=32768; T[2]:=0;
+  AveSym(PAvWA(@T),2,Ord(Part=AV_PARTITION_SPLIT));
+ End Else If HasRows Then Begin
+  P:=AvPartCdfP(BSize,R,C);
+  Psum:=AvPD(P,AV_PARTITION_HORZ)+AvPD(P,AV_PARTITION_SPLIT)+AvPD(P,AV_PARTITION_HORZ_A)+AvPD(P,AV_PARTITION_HORZ_B)+AvPD(P,AV_PARTITION_VERT_A);
+  If BSize<>AV_BLOCK_128X128 Then Psum:=Psum+AvPD(P,AV_PARTITION_HORZ_4);
+  T[0]:=32768-Psum; T[1]:=32768; T[2]:=0;
+  AveSym(PAvWA(@T),2,Ord(Part=AV_PARTITION_SPLIT));
+ End;
+End;
+
+{ ---- mode info communs ---- }
+Procedure AveWrSkip(S: LongInt);
+Var Ctx: LongInt;
+Begin
+ Ctx:=0;
+ If AvAvailU<>0 Then Inc(Ctx,AvSkips^[(AvMiRow-1)*AvMiStride+AvMiCol]);
+ If AvAvailL<>0 Then Inc(Ctx,AvSkips^[AvMiRow*AvMiStride+AvMiCol-1]);
+ AveSBin(AvTCdf.Skip_Cdf[Ctx,0],S);
+End;
+
+Procedure AveWrIntraModes(Var B: TAveBlk; FrameIntra: Boolean);
+Var A,L,SignU,SignV,CflOk,Signs: LongInt;
+Begin
+ If FrameIntra Then Begin
+  If AvAvailU<>0 Then A:=AvIntra_Mode_Context[AvYModes^[(AvMiRow-1)*AvMiStride+AvMiCol]] Else A:=AvIntra_Mode_Context[AV_DC_PRED];
+  If AvAvailL<>0 Then L:=AvIntra_Mode_Context[AvYModes^[AvMiRow*AvMiStride+AvMiCol-1]] Else L:=AvIntra_Mode_Context[AV_DC_PRED];
+  AveSy(AvTCdf.Intra_Frame_Y_Mode_Cdf[A,L,0],13,B.YMode);
+ End Else
+  AveSy(AvTCdf.Y_Mode_Cdf[AvSize_Group[B.Bs],0],13,B.YMode);
+ If (B.Bs>=AV_BLOCK_8X8) And (Avis_directional_mode(B.YMode)<>0) Then
+  AveSy(AvTCdf.Angle_Delta_Cdf[B.YMode-AV_V_PRED,0],7,B.AngY+AV_MAX_ANGLE_DELTA);
+ If AvHasChroma<>0 Then Begin
+  CflOk:=Ord(AvMax(AvBlock_Width[B.Bs],AvBlock_Height[B.Bs])<=32);
+  If CflOk<>0 Then AveSy(AvTCdf.Uv_Mode_Cfl_Allowed_Cdf[B.YMode,0],14,B.UVMode)
+  Else AveSy(AvTCdf.Uv_Mode_Cfl_Not_Allowed_Cdf[B.YMode,0],13,B.UVMode);
+  If B.UVMode=AV_UV_CFL_PRED Then Begin
+   If B.CflU=0 Then SignU:=0 Else If B.CflU<0 Then SignU:=1 Else SignU:=2;
+   If B.CflV=0 Then SignV:=0 Else If B.CflV<0 Then SignV:=1 Else SignV:=2;
+   Signs:=SignU*3+SignV-1;
+   AveSy(AvTCdf.Cfl_Sign_Cdf[0],8,Signs);
+   If SignU<>0 Then AveSy(AvTCdf.Cfl_Alpha_Cdf[(SignU-1)*3+SignV,0],16,AveAbs(B.CflU)-1);
+   If SignV<>0 Then AveSy(AvTCdf.Cfl_Alpha_Cdf[(SignV-1)*3+SignU,0],16,AveAbs(B.CflV)-1);
+  End;
+  If (B.Bs>=AV_BLOCK_8X8) And (Avis_directional_mode(B.UVMode)<>0) Then
+   AveSy(AvTCdf.Angle_Delta_Cdf[B.UVMode-AV_V_PRED,0],7,B.AngUV+AV_MAX_ANGLE_DELTA);
+ End;
+End;
+
+{ contexte du tx_depth ; D = profondeur }
+Procedure AveWrTxDepth(MaxRectTxSize,MaxTxDepth,D: LongInt);
+Var MaxW,MaxH,AboveW,LeftH,Ctx: LongInt;
+Begin
+ MaxW:=AvTx_Width[MaxRectTxSize]; MaxH:=AvTx_Height[MaxRectTxSize];
+ If (AvAvailU<>0) And (AvIsInters^[(AvMiRow-1)*AvMiStride+AvMiCol]<>0) Then AboveW:=AvBlock_Width[AvMiSizes^[(AvMiRow-1)*AvMiStride+AvMiCol]]
+ Else If AvAvailU<>0 Then AboveW:=Avget_above_tx_width(AvMiRow,AvMiCol)
+ Else AboveW:=0;
+ If (AvAvailL<>0) And (AvIsInters^[AvMiRow*AvMiStride+AvMiCol-1]<>0) Then LeftH:=AvBlock_Height[AvMiSizes^[AvMiRow*AvMiStride+AvMiCol-1]]
+ Else If AvAvailL<>0 Then LeftH:=Avget_left_tx_height(AvMiRow,AvMiCol)
+ Else LeftH:=0;
+ Ctx:=Ord(AboveW>=MaxW)+Ord(LeftH>=MaxH);
+ Case MaxTxDepth Of
+  4: AveSy(AvTCdf.Tx_64x64_Cdf[Ctx,0],3,D);
+  3: AveSy(AvTCdf.Tx_32x32_Cdf[Ctx,0],3,D);
+  2: AveSy(AvTCdf.Tx_16x16_Cdf[Ctx,0],3,D);
+ Else AveSy(AvTCdf.Tx_8x8_Cdf[Ctx,0],2,D);
+ End;
+End;
+
+{ taille de transformee d'un bloc non-inter (ou inter saute) : retourne TxSize ; ecrit le tx_depth si necessaire }
+Procedure AveWrTxSize(Var B: TAveBlk);
+Var MaxRect,MaxDepth,D,T,Row,Col,Bw4,Bh4: LongInt;
+Begin
+ MaxRect:=AvMax_Tx_Size_Rect[B.Bs]; MaxDepth:=AvMax_Tx_Depth[B.Bs];
+ Bw4:=AvNum_4x4_Blocks_Wide[B.Bs]; Bh4:=AvNum_4x4_Blocks_High[B.Bs];
+ If (B.Bs>AV_BLOCK_4X4) And ((B.Skip=0) Or (B.IsInter=0)) And (AvTxMode=AV_TX_MODE_SELECT) Then Begin
+  { profondeur }
+  D:=0; T:=MaxRect;
+  While (T<>B.TxSz) And (D<2) Do Begin T:=AvSplit_Tx_Size[T]; Inc(D); End;
+  AveWrTxDepth(MaxRect,MaxDepth,D);
+ End;
+ For Row:=B.R To B.R+Bh4-1 Do For Col:=B.C To B.C+Bw4-1 Do AvInterTxSizes^[Row*AvMiStride+Col]:=B.TxSz;
+End;
+
+{ var-tx pour les blocs inter non sautes : separation uniforme a la profondeur Split }
+Procedure AveWrVarTx(Row,Col,TxSz,Depth,Split: LongInt);
+Var W4,H4,Sub,StepW,StepH,I,J,Above,Left,Size,MaxTxSz,SqrUp,Ctx,Fl: LongInt;
+Begin
+ If (Row>=AvMiRows) Or (Col>=AvMiCols) Then Exit;
+ If (TxSz=AV_TX_4X4) Or (Depth=AV_MAX_VARTX_DEPTH) Then Fl:=0
+ Else Begin
+  Fl:=Ord(Depth<Split);
+  Above:=Ord(Avget_above_tx_width(Row,Col)<AvTx_Width[TxSz]);
+  Left:=Ord(Avget_left_tx_height(Row,Col)<AvTx_Height[TxSz]);
+  Size:=AvMin(64,AvMax(AvBlock_Width[AvMiSize],AvBlock_Height[AvMiSize]));
+  MaxTxSz:=Avfind_tx_size(Size,Size);
+  SqrUp:=AvTx_Size_Sqr_Up[TxSz];
+  Ctx:=Ord(SqrUp<>MaxTxSz)*3+(AV_TX_SIZES-1-MaxTxSz)*6+Above+Left;
+  AveSBin(AvTCdf.Txfm_Split_Cdf[Ctx,0],Fl);
+ End;
+ W4:=AvTx_Width[TxSz] Div 4; H4:=AvTx_Height[TxSz] Div 4;
+ If Fl<>0 Then Begin
+  Sub:=AvSplit_Tx_Size[TxSz];
+  StepW:=AvTx_Width[Sub] Div 4; StepH:=AvTx_Height[Sub] Div 4;
+  I:=0;
+  While I<H4 Do Begin
+   J:=0;
+   While J<W4 Do Begin AveWrVarTx(Row+I,Col+J,Sub,Depth+1,Split); J:=J+StepW; End;
+   I:=I+StepH;
+  End;
+ End Else Begin
+  For I:=0 To H4-1 Do For J:=0 To W4-1 Do AvInterTxSizes^[(Row+I)*AvMiStride+Col+J]:=TxSz;
+  AvTxSize:=TxSz;
+ End;
+End;
+
+{ tx size d'un bloc (tous cas) }
+Procedure AveWrBlockTx(Var B: TAveBlk);
+Var MaxTx,TxW4,TxH4,Row,Col,Bw4,Bh4: LongInt;
+Begin
+ Bw4:=AvNum_4x4_Blocks_Wide[B.Bs]; Bh4:=AvNum_4x4_Blocks_High[B.Bs];
+ If (AvTxMode=AV_TX_MODE_SELECT) And (B.Bs>AV_BLOCK_4X4) And (B.IsInter<>0) And (B.Skip=0) Then Begin
+  MaxTx:=AvMax_Tx_Size_Rect[B.Bs];
+  TxW4:=AvTx_Width[MaxTx] Div 4; TxH4:=AvTx_Height[MaxTx] Div 4;
+  Row:=B.R;
+  While Row<B.R+Bh4 Do Begin
+   Col:=B.C;
+   While Col<B.C+Bw4 Do Begin AveWrVarTx(Row,Col,MaxTx,0,B.SplitTx); Col:=Col+TxW4; End;
+   Row:=Row+TxH4;
+  End;
+ End Else Begin
+  If (B.IsInter<>0) And (B.Skip<>0) Then B.TxSz:=AvMax_Tx_Size_Rect[B.Bs];
+  AveWrTxSize(B);
+  AvTxSize:=B.TxSz;
+ End;
+End;
+
+{ ---- inter ---- }
+Procedure AveInterNeighbors;
+Begin
+ AvLeftRefFrame[0]:=AvIf(AvAvailL<>0,AvRefFrames^[(AvMiRow*AvMiStride+AvMiCol-1)*2],AV_INTRA_FRAME);
+ AvAboveRefFrame[0]:=AvIf(AvAvailU<>0,AvRefFrames^[((AvMiRow-1)*AvMiStride+AvMiCol)*2],AV_INTRA_FRAME);
+ AvLeftRefFrame[1]:=AvIf(AvAvailL<>0,AvRefFrames^[(AvMiRow*AvMiStride+AvMiCol-1)*2+1],AV_NONE);
+ AvAboveRefFrame[1]:=AvIf(AvAvailU<>0,AvRefFrames^[((AvMiRow-1)*AvMiStride+AvMiCol)*2+1],AV_NONE);
+ AvLeftIntra:=Ord(AvLeftRefFrame[0]<=AV_INTRA_FRAME);
+ AvAboveIntra:=Ord(AvAboveRefFrame[0]<=AV_INTRA_FRAME);
+ AvLeftSingle:=Ord(AvLeftRefFrame[1]<=AV_INTRA_FRAME);
+ AvAboveSingle:=Ord(AvAboveRefFrame[1]<=AV_INTRA_FRAME);
+End;
+
+Procedure AveWrIsInter(V: LongInt);
+Var Ctx: LongInt;
+Begin
+ If (AvAvailU<>0) And (AvAvailL<>0) Then Begin
+  If (AvLeftIntra<>0) And (AvAboveIntra<>0) Then Ctx:=3 Else Ctx:=Ord((AvLeftIntra<>0) Or (AvAboveIntra<>0));
+ End Else If (AvAvailU<>0) Or (AvAvailL<>0) Then Begin
+  If AvAvailU<>0 Then Ctx:=2*AvAboveIntra Else Ctx:=2*AvLeftIntra;
+ End Else Ctx:=0;
+ AveSBin(AvTCdf.Is_Inter_Cdf[Ctx,0],V);
+End;
+
+Procedure AveWrRefFrame(Ref: LongInt);
+Begin
+ If Ref>=AV_BWDREF_FRAME Then Begin
+  AveSBin(AvTCdf.Single_Ref_Cdf[AvCtxSingleP1,0,0],1);
+  If Ref=AV_ALTREF_FRAME Then AveSBin(AvTCdf.Single_Ref_Cdf[AvCtxCompBwd,1,0],1)
+  Else Begin
+   AveSBin(AvTCdf.Single_Ref_Cdf[AvCtxCompBwd,1,0],0);
+   AveSBin(AvTCdf.Single_Ref_Cdf[AvCtxCompBwdP1,5,0],Ord(Ref=AV_ALTREF2_FRAME));
+  End;
+ End Else Begin
+  AveSBin(AvTCdf.Single_Ref_Cdf[AvCtxSingleP1,0,0],0);
+  If Ref>=AV_LAST3_FRAME Then Begin
+   AveSBin(AvTCdf.Single_Ref_Cdf[AvCtxCompRef,2,0],1);
+   AveSBin(AvTCdf.Single_Ref_Cdf[AvCtxCompRefP2,4,0],Ord(Ref=AV_GOLDEN_FRAME));
+  End Else Begin
+   AveSBin(AvTCdf.Single_Ref_Cdf[AvCtxCompRef,2,0],0);
+   AveSBin(AvTCdf.Single_Ref_Cdf[AvCtxCompRefP1,3,0],Ord(Ref=AV_LAST2_FRAME));
+  End;
+ End;
+End;
+
+Procedure AveWrMvComp(Comp,D: LongInt);
+Var M,Mag,Cls,Bit0,Fr,Hp,Dd,I,Low: LongInt;
+Begin
+ AveSBin(AvTCdf.Mv_Sign_Cdf[AvMvCtx,Comp,0],Ord(D<0));
+ Mag:=AveAbs(D); M:=Mag-1;
+ If M<16 Then Begin
+  AveSy(AvTCdf.Mv_Class_Cdf[AvMvCtx,Comp,0],11,0);
+  Bit0:=M Shr 3; Fr:=(M Shr 1) And 3; Hp:=M And 1;
+  AveSBin(AvTCdf.Mv_Class0_Bit_Cdf[AvMvCtx,Comp,0],Bit0);
+  AveSy(AvTCdf.Mv_Class0_Fr_Cdf[AvMvCtx,Comp,Bit0,0],4,Fr);
+  If Avallow_high_precision_mv<>0 Then AveSBin(AvTCdf.Mv_Class0_Hp_Cdf[AvMvCtx,Comp,0],Hp);
+ End Else Begin
+  Cls:=AveIlog(M)-4;
+  If Cls>10 Then Cls:=10;
+  AveSy(AvTCdf.Mv_Class_Cdf[AvMvCtx,Comp,0],11,Cls);
+  Low:=M-(2 Shl (Cls+2));
+  Dd:=Low Shr 3; Fr:=(Low Shr 1) And 3; Hp:=Low And 1;
+  For I:=0 To Cls-1 Do AveSBin(AvTCdf.Mv_Bit_Cdf[AvMvCtx,Comp,I,0],(Dd Shr I) And 1);
+  AveSy(AvTCdf.Mv_Fr_Cdf[AvMvCtx,Comp,0],4,Fr);
+  If Avallow_high_precision_mv<>0 Then AveSBin(AvTCdf.Mv_Hp_Cdf[AvMvCtx,Comp,0],Hp);
+ End;
+End;
+
+{ ecrit la difference de vecteur (diff : [0]=ligne, [1]=colonne) }
+Procedure AveWrMv(D0,D1: LongInt);
+Var J: LongInt;
+Begin
+ AvMvCtx:=0;
+ If D0<>0 Then Begin If D1<>0 Then J:=AV_MV_JOINT_HNZVNZ Else J:=AV_MV_JOINT_HZVNZ; End
+ Else Begin If D1<>0 Then J:=AV_MV_JOINT_HNZVZ Else J:=AV_MV_JOINT_ZERO; End;
+ AveSy(AvTCdf.Mv_Joint_Cdf[AvMvCtx,0],4,J);
+ If D0<>0 Then AveWrMvComp(0,D0);
+ If D1<>0 Then AveWrMvComp(1,D1);
+End;
+
+{ modes inter : Mode = AV_NEARESTMV, AV_NEARMV, AV_GLOBALMV, AV_NEWMV ; MvIdx = RefMvIdx ; NumMv = AvNumMvFound }
+Procedure AveWrInterMode(Mode,MvIdx: LongInt);
+Var Idx: LongInt;
+Begin
+ If Mode=AV_NEWMV Then Begin
+  AveSBin(AvTCdf.New_Mv_Cdf[AvNewMvContext,0],0);
+  For Idx:=0 To 1 Do
+   If AvNumMvFound>Idx+1 Then Begin
+    If MvIdx=Idx Then Begin AveSBin(AvTCdf.Drl_Mode_Cdf[AvDrlCtxStack[Idx],0],0); Break; End
+    Else AveSBin(AvTCdf.Drl_Mode_Cdf[AvDrlCtxStack[Idx],0],1);
+   End;
+ End Else Begin
+  AveSBin(AvTCdf.New_Mv_Cdf[AvNewMvContext,0],1);
+  If Mode=AV_GLOBALMV Then AveSBin(AvTCdf.Zero_Mv_Cdf[AvZeroMvContext,0],0)
+  Else Begin
+   AveSBin(AvTCdf.Zero_Mv_Cdf[AvZeroMvContext,0],1);
+   If Mode=AV_NEARESTMV Then AveSBin(AvTCdf.Ref_Mv_Cdf[AvRefMvContext,0],0)
+   Else Begin
+    AveSBin(AvTCdf.Ref_Mv_Cdf[AvRefMvContext,0],1);
+    For Idx:=1 To 2 Do
+     If AvNumMvFound>Idx+1 Then Begin
+      If MvIdx=Idx Then Begin AveSBin(AvTCdf.Drl_Mode_Cdf[AvDrlCtxStack[Idx],0],0); Break; End
+      Else AveSBin(AvTCdf.Drl_Mode_Cdf[AvDrlCtxStack[Idx],0],1);
+     End;
+   End;
+  End;
+ End;
+End;
+
+Procedure AveWrInterp(Dir,F: LongInt);
+Var Ctx,LeftT,AboveT: LongInt;
+Begin
+ Ctx:=((Dir And 1)*2+Ord(AvRefFrame[1]>AV_INTRA_FRAME))*4;
+ LeftT:=3; AboveT:=3;
+ If AvAvailL<>0 Then
+  If (AvRefFrames^[(AvMiRow*AvMiStride+AvMiCol-1)*2]=AvRefFrame[0]) Or (AvRefFrames^[(AvMiRow*AvMiStride+AvMiCol-1)*2+1]=AvRefFrame[0]) Then
+   LeftT:=AvInterpFilters^[(AvMiRow*AvMiStride+AvMiCol-1)*2+Dir];
+ If AvAvailU<>0 Then
+  If (AvRefFrames^[((AvMiRow-1)*AvMiStride+AvMiCol)*2]=AvRefFrame[0]) Or (AvRefFrames^[((AvMiRow-1)*AvMiStride+AvMiCol)*2+1]=AvRefFrame[0]) Then
+   AboveT:=AvInterpFilters^[((AvMiRow-1)*AvMiStride+AvMiCol)*2+Dir];
+ If LeftT=AboveT Then Inc(Ctx,LeftT)
+ Else If LeftT=3 Then Inc(Ctx,AboveT)
+ Else If AboveT=3 Then Inc(Ctx,LeftT)
+ Else Inc(Ctx,3);
+ AveSy(AvTCdf.Interp_Filter_Cdf[Ctx,0],3,F);
+End;
+
+{ ---------------- instantanes d'etat (essais RD) ---------------- }
+Type
+ TAveSnap=Record
+  R0,C0,N4: LongInt;
+  Pix0: Array[0..4095] Of Word;
+  Pix1,Pix2: Array[0..1023] Of Word;
+  B8: Array[0..15,0..255] Of Byte;          { tableaux d'octets par MI }
+  Rf: Array[0..511] Of ShortInt;
+  If2: Array[0..511] Of Byte;
+  Mv: Array[0..1023] Of SmallInt;
+  Lf: Array[0..2,0..255] Of Byte;
+  Ctx: Array[0..11,0..17] Of LongInt;       { contextes niveau/dc : 3 plans x (A niveau,A dc,L niveau,L dc) }
+  Bd: Array[0..2,0..34,0..34] Of LongInt;
+ End;
+ PAveSnap=^TAveSnap;
+
+Var
+ AveSn: Array[0..15] Of PAveSnap;
+ AveDist: Int64;                { distorsion cumulee du bloc en cours }
+ AveNz: LongInt;                { nombre de blocs de transformee non nuls }
+ AveQRnd: Double;               { arrondi de quantification }
+ AveCacheValid: Boolean;
+ AvePredC: Array[0..2] Of Array[0..4095] Of Word;
+
+Procedure AveMiXfer(Arr: PAvBA; Esz,R0,C0,N4: LongInt; Buf: PAvBA; Save: Boolean);
+Var R: LongInt;
+Begin
+ For R:=0 To N4-1 Do Begin
+  If Save Then Move(Arr^[((R0+R)*AvMiStride+C0)*Esz],Buf^[R*N4*Esz],N4*Esz)
+  Else Move(Buf^[R*N4*Esz],Arr^[((R0+R)*AvMiStride+C0)*Esz],N4*Esz);
+ End;
+End;
+
+Procedure AveSnapXfer(Slot: LongInt; Save: Boolean);
+Var S: PAveSnap; N4,R0,C0,P,Y,I,Cs,Pl,X0,Y0,Nw: LongInt; Pp: PAvWA; St: LongInt;
+Begin
+ S:=AveSn[Slot]; N4:=S^.N4; R0:=S^.R0; C0:=S^.C0;
+ { pixels }
+ For Pl:=0 To 2 Do Begin
+  Pp:=AvCF[Pl]; St:=AvCFS[Pl];
+  If Pl=0 Then Begin X0:=C0*4; Y0:=R0*4; Nw:=N4*4; End Else Begin X0:=C0*2; Y0:=R0*2; Nw:=N4*2; End;
+  For Y:=0 To Nw-1 Do Begin
+   If Pl=0 Then Begin
+    If Save Then Move(Pp^[(Y0+Y)*St+X0],S^.Pix0[Y*Nw],Nw*2) Else Move(S^.Pix0[Y*Nw],Pp^[(Y0+Y)*St+X0],Nw*2);
+   End Else If Pl=1 Then Begin
+    If Save Then Move(Pp^[(Y0+Y)*St+X0],S^.Pix1[Y*Nw],Nw*2) Else Move(S^.Pix1[Y*Nw],Pp^[(Y0+Y)*St+X0],Nw*2);
+   End Else Begin
+    If Save Then Move(Pp^[(Y0+Y)*St+X0],S^.Pix2[Y*Nw],Nw*2) Else Move(S^.Pix2[Y*Nw],Pp^[(Y0+Y)*St+X0],Nw*2);
+   End;
+  End;
+ End;
+ AveMiXfer(AvYModes,1,R0,C0,N4,PAvBA(@S^.B8[0]),Save);
+ AveMiXfer(AvUVModes,1,R0,C0,N4,PAvBA(@S^.B8[1]),Save);
+ AveMiXfer(AvIsInters,1,R0,C0,N4,PAvBA(@S^.B8[2]),Save);
+ AveMiXfer(AvSkips,1,R0,C0,N4,PAvBA(@S^.B8[3]),Save);
+ AveMiXfer(AvTxSizes,1,R0,C0,N4,PAvBA(@S^.B8[4]),Save);
+ AveMiXfer(AvInterTxSizes,1,R0,C0,N4,PAvBA(@S^.B8[5]),Save);
+ AveMiXfer(AvTxTypes,1,R0,C0,N4,PAvBA(@S^.B8[6]),Save);
+ AveMiXfer(AvMiSizes,1,R0,C0,N4,PAvBA(@S^.B8[7]),Save);
+ AveMiXfer(PAvBA(AvRefFrames),2,R0,C0,N4,PAvBA(@S^.Rf[0]),Save);
+ AveMiXfer(AvInterpFilters,2,R0,C0,N4,PAvBA(@S^.If2[0]),Save);
+ AveMiXfer(PAvBA(AvMvs),8,R0,C0,N4,PAvBA(@S^.Mv[0]),Save);
+ For Pl:=0 To 2 Do Begin
+  { tailles de transformee du filtre de boucle : plan Pl, indexe en MI du plan }
+  If Pl=0 Then Begin
+   For Y:=0 To N4-1 Do
+    If Save Then Move(AvLoopfilterTxSizes^[(Pl*AvMiRowsA+R0+Y)*AvMiStride+C0],S^.Lf[Pl,Y*N4],N4)
+    Else Move(S^.Lf[Pl,Y*N4],AvLoopfilterTxSizes^[(Pl*AvMiRowsA+R0+Y)*AvMiStride+C0],N4);
+  End Else Begin
+   For Y:=0 To (N4 Shr 1)-1 Do
+    If Save Then Move(AvLoopfilterTxSizes^[(Pl*AvMiRowsA+(R0 Shr 1)+Y)*AvMiStride+(C0 Shr 1)],S^.Lf[Pl,Y*(N4 Shr 1)],N4 Shr 1)
+    Else Move(S^.Lf[Pl,Y*(N4 Shr 1)],AvLoopfilterTxSizes^[(Pl*AvMiRowsA+(R0 Shr 1)+Y)*AvMiStride+(C0 Shr 1)],N4 Shr 1);
+  End;
+ End;
+ { contextes }
+ For Pl:=0 To 2 Do Begin
+  If Pl=0 Then Begin X0:=C0; Y0:=R0; Nw:=N4; End Else Begin X0:=C0 Shr 1; Y0:=R0 Shr 1; Nw:=AveMax(1,N4 Shr 1); End;
+  If Save Then Begin
+   For I:=0 To Nw-1 Do Begin
+    S^.Ctx[Pl*4,I]:=AvAboveLevelContext[Pl,X0+I]; S^.Ctx[Pl*4+1,I]:=AvAboveDcContext[Pl,X0+I];
+    S^.Ctx[Pl*4+2,I]:=AvLeftLevelContext[Pl,Y0+I]; S^.Ctx[Pl*4+3,I]:=AvLeftDcContext[Pl,Y0+I];
+   End;
+  End Else Begin
+   For I:=0 To Nw-1 Do Begin
+    AvAboveLevelContext[Pl,X0+I]:=S^.Ctx[Pl*4,I]; AvAboveDcContext[Pl,X0+I]:=S^.Ctx[Pl*4+1,I];
+    AvLeftLevelContext[Pl,Y0+I]:=S^.Ctx[Pl*4+2,I]; AvLeftDcContext[Pl,Y0+I]:=S^.Ctx[Pl*4+3,I];
+   End;
+  End;
+ End;
+ { drapeaux de blocs decodes : seule la zone du bloc est modifiee par transform_block }
+ For Pl:=0 To 2 Do Begin
+  If Pl=0 Then Begin Y0:=(R0 And 15)+1; X0:=(C0 And 15)+1; Nw:=N4; End
+  Else Begin Y0:=((R0 And 15) Shr 1)+1; X0:=((C0 And 15) Shr 1)+1; Nw:=AveMax(1,N4 Shr 1); End;
+  For Y:=Y0 To Y0+Nw-1 Do
+   If Save Then Move(AvBlockDecoded[Pl,Y,X0],S^.Bd[Pl,Y,X0],Nw*4) Else Move(S^.Bd[Pl,Y,X0],AvBlockDecoded[Pl,Y,X0],Nw*4);
+ End;
+End;
+
+Procedure AveSnapSave(Slot,R0,C0,N4: LongInt);
+Begin
+ AveSn[Slot]^.R0:=R0; AveSn[Slot]^.C0:=C0; AveSn[Slot]^.N4:=N4;
+ AveSnapXfer(Slot,True);
+End;
+
+Procedure AveSnapRestore(Slot: LongInt);
+Begin
+ AveSnapXfer(Slot,False);
+End;
+
+{ ---------------- distorsion ---------------- }
+Function AveSse(Plane,X,Y,W,H: LongInt): LongInt;
+Var I,J,D,T: LongInt; S,C: PAvWA; Ss,Cs: LongInt;
+Begin
+ S:=AveSrc[Plane]; Ss:=AveSrcS[Plane]; C:=AvCF[Plane]; Cs:=AvCFS[Plane];
+ T:=0;
+ For I:=0 To H-1 Do
+  For J:=0 To W-1 Do Begin
+   D:=S^[(Y+I)*Ss+X+J]-C^[(Y+I)*Cs+X+J];
+   T:=T+D*D;
+  End;
+ AveSse:=T;
+End;
+
+{ ---------------- quantification ---------------- }
+Var AvePruneBits: Double;
+{ Quantifie AveCoefD (raster Tw x Th) ; remplit Lv (signe), retourne eob ; Dq = distorsion (equivalent pixel) ; E2 = somme des carres des coefficients (equiv. pixel) }
+Function AveQuantTx(TxSz,Ty: LongInt; Var Lv: Array Of LongInt; Var Dq,E2: Double; Lam: Double): LongInt;
+Var Tw,Th,N,C,Pos,Scan,Last,Q,DqDen,Lvl,Eob,I: LongInt; A,Qe,E,Sc,Sc2,V,Thr0,Thr1,Mx: Double;
+Begin
+ Tw:=AveMin(32,AvTx_Width[TxSz]); Th:=AveMin(32,AvTx_Height[TxSz]);
+ N:=Tw*Th;
+ If (TxSz=AV_TX_32X32) Or (TxSz=AV_TX_16X32) Or (TxSz=AV_TX_32X16) Or (TxSz=AV_TX_16X64) Or (TxSz=AV_TX_64X16) Then DqDen:=2
+ Else If (TxSz=AV_TX_64X64) Or (TxSz=AV_TX_32X64) Or (TxSz=AV_TX_64X32) Then DqDen:=4
+ Else DqDen:=1;
+ Sc:=AveGainScale[TxSz]; Sc2:=Sqr(Sc);
+ Dq:=0; E2:=0;
+ AvPlaneTxType:=Ty;
+ Scan:=Avget_scan(TxSz);
+ { seuil de nullite : en dessous de ce seuil le niveau est 0 }
+ Thr0:=(1.0-AveQRnd)*AveDcQC/DqDen; Thr1:=(1.0-AveQRnd)*AveAcQC/DqDen;
+ Last:=-1;
+ For C:=0 To N-1 Do Begin
+  Pos:=AvScanData[Scan+C];
+  V:=AveCoefD[Pos];
+  E2:=E2+V*V;
+  If V<0 Then A:=-V Else A:=V;
+  If Pos=0 Then Begin
+   If A<Thr0 Then Begin Lv[Pos]:=0; Continue; End;
+   Q:=AveDcQC;
+  End Else Begin
+   If A<Thr1 Then Begin Lv[Pos]:=0; Continue; End;
+   Q:=AveAcQC;
+  End;
+  Qe:=Q/DqDen;
+  Lvl:=Trunc(A/Qe+AveQRnd);
+  If Lvl>0 Then Begin
+   If V<0 Then Lv[Pos]:=-Lvl Else Lv[Pos]:=Lvl;
+   Last:=C;
+  End Else Lv[Pos]:=0;
+ End;
+ E2:=E2/Sc2;
+ Eob:=Last+1;
+ { elagage des derniers coefficients isoles de valeur 1 }
+ While Eob>0 Do Begin
+  Pos:=AvScanData[Scan+Eob-1];
+  If AveAbs(Lv[Pos])<>1 Then Break;
+  V:=AveCoefD[Pos]; If V<0 Then V:=-V;
+  If Pos=0 Then Q:=AveDcQC Else Q:=AveAcQC;
+  Qe:=Q/DqDen;
+  E:=(Sqr(V)-Sqr(V-Qe))/Sc2;
+  If E<Lam*AvePruneBits Then Begin
+   Lv[Pos]:=0;
+   Dec(Eob);
+   While (Eob>0) And (Lv[AvScanData[Scan+Eob-1]]=0) Do Dec(Eob);
+  End Else Break;
+ End;
+ { distorsion }
+ For C:=0 To N-1 Do Begin
+  Pos:=AvScanData[Scan+C];
+  V:=AveCoefD[Pos];
+  If Lv[Pos]=0 Then E:=V
+  Else Begin
+   If Pos=0 Then Q:=AveDcQC Else Q:=AveAcQC;
+   I:=(AveAbs(Lv[Pos])*Q) And $FFFFFF;
+   I:=I Div DqDen;
+   If V<0 Then E:=V+I Else E:=V-I;
+  End;
+  Dq:=Dq+Sqr(E);
+ End;
+ Dq:=Dq/Sc2;
+ AveQuantTx:=Eob;
+End;
+
+Var
+ AveLvA,AveLvB: Array[0..1023] Of LongInt;
+
+{ prediction intra d'un bloc de transformee (plan, position, taille) avec le mode donne }
+Procedure AveIntraPredTx(Plane,StartX,StartY,TxSz,X,Y,Mode: LongInt);
+Var SubX,SubY,Row,Col,SbR,SbC,StepX,StepY: LongInt;
+Begin
+ If Plane>0 Then Begin SubX:=Avsubsampling_x; SubY:=Avsubsampling_y; End Else Begin SubX:=0; SubY:=0; End;
+ Row:=AvSra(StartY Shl SubY,2); Col:=AvSra(StartX Shl SubX,2);
+ SbR:=Row And 15; SbC:=Col And 15;
+ StepX:=AvSra(AvTx_Width[TxSz],2); StepY:=AvSra(AvTx_Height[TxSz],2);
+ Avpredict_intra(Plane,StartX,StartY,Ord((AvIf(Plane=0,AvAvailL,AvAvailLChroma)<>0) Or (X>0)),Ord((AvIf(Plane=0,AvAvailU,AvAvailUChroma)<>0) Or (Y>0)),
+  AvBlockDecoded[Plane,AvSra(SbR,SubY)-1+1,AvSra(SbC,SubX)+StepX+1],AvBlockDecoded[Plane,AvSra(SbR,SubY)+StepY+1,AvSra(SbC,SubX)-1+1],Mode,AvTx_Width_Log2[TxSz],AvTx_Height_Log2[TxSz]);
+End;
+
+{ ---------------- bloc de transformee ---------------- }
+{ equivalent de transform_block (prediction intra + residu), avec estimation / ecriture des coefficients }
+Procedure AveTxBlock(Plane,BaseX,BaseY,TxSz,X,Y: LongInt; ForceSkip: Boolean);
+Var StartX,StartY,SubX,SubY,Row,Col,SbMask,SbR,SbC,StepX,StepY,MaxX,MaxY,IsCfl,Mode,I,J,W,H,Eob,BestEob,Cand,NC,Ty,BestTy,Tw,Th,N,Pos: LongInt;
+ Cf,Sp: PAvWA; Cs,Ss: LongInt; Dq,E2,BestJ,J1,BestDq,BestE2,Lam,Dd,Zt: Double; Bits0,Rb,Rz: LongInt; Eres: Int64; R0: LongInt;
+ Cands: Array[0..5] Of LongInt; SaveDry: Boolean; X4,Y4,TxSet: LongInt; SkipRec: Boolean;
+Begin
+ StartX:=BaseX+4*X; StartY:=BaseY+4*Y;
+ If Plane>0 Then Begin SubX:=Avsubsampling_x; SubY:=Avsubsampling_y; End Else Begin SubX:=0; SubY:=0; End;
+ Row:=AvSra(StartY Shl SubY,2); Col:=AvSra(StartX Shl SubX,2);
+ SbMask:=15;
+ SbR:=Row And SbMask; SbC:=Col And SbMask;
+ StepX:=AvSra(AvTx_Width[TxSz],2); StepY:=AvSra(AvTx_Height[TxSz],2);
+ MaxX:=AvSra(AvMiCols*4,SubX); MaxY:=AvSra(AvMiRows*4,SubY);
+ If (StartX>=MaxX) Or (StartY>=MaxY) Then Exit;
+ W:=AvTx_Width[TxSz]; H:=AvTx_Height[TxSz];
+ If Avis_inter=0 Then Begin
+  IsCfl:=Ord((Plane>0) And (AvUVMode=AV_UV_CFL_PRED));
+  If Plane=0 Then Mode:=AvYMode Else Begin If IsCfl<>0 Then Mode:=AV_DC_PRED Else Mode:=AvUVMode; End;
+  AveIntraPredTx(Plane,StartX,StartY,TxSz,X,Y,Mode);
+  If IsCfl<>0 Then Avpredict_chroma_from_luma(Plane,StartX,StartY,TxSz);
+  If Plane=0 Then Begin AvMaxLumaW:=StartX+StepX*4; AvMaxLumaH:=StartY+StepY*4; End;
+ End;
+ Cf:=AvCF[Plane]; Cs:=AvCFS[Plane]; Sp:=AveSrc[Plane]; Ss:=AveSrcS[Plane];
+ If ForceSkip Then Dd:=AveSse(Plane,StartX,StartY,W,H)
+ Else Begin
+  { residu }
+  Eres:=0;
+  For I:=0 To H-1 Do For J:=0 To W-1 Do Begin
+   R0:=Sp^[(StartY+I)*Ss+StartX+J]-Cf^[(StartY+I)*Cs+StartX+J];
+   AveRes[I,J]:=R0; Eres:=Eres+R0*R0;
+  End;
+  SkipRec:=AveDry And (Avis_inter<>0) And (AveEffort<2);
+  Tw:=AveMin(32,W); Th:=AveMin(32,H); N:=Tw*Th;
+  X4:=StartX Shr 2; Y4:=StartY Shr 2;
+  Lam:=AveLamD;
+  SaveDry:=AveDry;
+  Eob:=0; Dq:=0; E2:=0; Ty:=AV_DCT_DCT;
+  Zt:=(1.0-AveQRnd)*AveMin(AveDcQC,AveAcQC)/4.0;
+  If 1.25*AveGainScale[TxSz]*Sqrt(Eres)<Zt Then Begin
+   { tout est quantifie a zero : essayer d'eviter la transformee }
+   Eob:=0;
+   If Plane>0 Then Ty:=Avcompute_tx_type(Plane,TxSz,X4,Y4);
+  End Else If Plane=0 Then Begin
+   NC:=0; Cands[NC]:=AV_DCT_DCT; Inc(NC);
+   TxSet:=Avget_tx_set(TxSz);
+   If (TxSet>0) And (Avbase_q_idx>0) And (AveEffort>0) Then Begin
+    If Avis_inter=0 Then Begin
+     Ty:=AvMode_To_Txfm[AvYMode];
+     If (Ty<>AV_DCT_DCT) And AveTxTypeOk(TxSz,Ty) Then Begin Cands[NC]:=Ty; Inc(NC); End;
+    End Else Begin
+     If AveTxTypeOk(TxSz,AV_ADST_ADST) And (((W<=16) And (H<=16)) Or (AveEffort>1)) Then Begin Cands[NC]:=AV_ADST_ADST; Inc(NC); End;
+     If (AveEffort>1) And AveTxTypeOk(TxSz,AV_IDTX) And (W<=16) And (H<=16) Then Begin Cands[NC]:=AV_IDTX; Inc(NC); End;
+    End;
+   End;
+   BestJ:=1E30; BestTy:=0; BestEob:=0; BestDq:=0; BestE2:=0;
+   For Cand:=0 To NC-1 Do Begin
+    Ty:=Cands[Cand];
+    AveFwd2D(TxSz,Ty);
+    Eob:=AveQuantTx(TxSz,Ty,AveLvA,Dq,E2,Lam);
+    If (NC=1) Or ((Cand=0) And (Eob=0)) Then Begin BestTy:=Ty; BestEob:=Eob; BestDq:=Dq; BestE2:=E2; Move(AveLvA,AveLvB,N*4); Break; End;
+    AveDry:=True; AveRateOnly:=True; Bits0:=AveBits;
+    AveWrCoefs(Plane,StartX,StartY,TxSz,Eob,Ty,@AveLvA);
+    Rb:=AveBits-Bits0; AveBits:=Bits0;
+    AveRateOnly:=False; AveDry:=SaveDry;
+    J1:=Dq+Lam*Rb/AVE_CS;
+    If J1<BestJ Then Begin
+     BestJ:=J1; BestTy:=Ty; BestEob:=Eob; BestDq:=Dq; BestE2:=E2; Move(AveLvA,AveLvB,N*4);
+    End;
+   End;
+   Ty:=BestTy; Eob:=BestEob; Dq:=BestDq; E2:=BestE2;
+  End Else Begin
+   Ty:=Avcompute_tx_type(Plane,TxSz,X4,Y4);
+   AveFwd2D(TxSz,Ty);
+   Eob:=AveQuantTx(TxSz,Ty,AveLvB,Dq,E2,Lam);
+  End;
+  { bloc presque vide : comparer avec le bloc nul au cout RD exact }
+  If (Eob>0) And (Eob<=8) And (AveEffort>0) And (AveTune[2]<>0) Then Begin
+   AveDry:=True; AveRateOnly:=True;
+   Bits0:=AveBits; AveWrCoefs(Plane,StartX,StartY,TxSz,Eob,Ty,@AveLvB); Rb:=AveBits-Bits0; AveBits:=Bits0;
+   Bits0:=AveBits; AveWrCoefs(Plane,StartX,StartY,TxSz,0,Ty,@AveLvB); Rz:=AveBits-Bits0; AveBits:=Bits0;
+   AveRateOnly:=False; AveDry:=SaveDry;
+   Zt:=Dq;
+   If (W>32) Or (H>32) Then If Eres>E2 Then Zt:=Zt+(Eres-E2);
+   If Eres+Lam*Rz/AVE_CS<=Zt+Lam*Rb/AVE_CS Then Eob:=0;
+  End;
+  If Eob>0 Then Begin
+   Inc(AveNz);
+   If SkipRec Then Begin
+    Dd:=Dq;
+    If (W>32) Or (H>32) Then Begin
+     { energie perdue par la mise a zero des hautes frequences }
+     If Eres>E2 Then Dd:=Dd+(Eres-E2);
+    End;
+   End Else Begin
+    FillChar(AvQuant,N*4,0);
+    For Pos:=0 To N-1 Do AvQuant[Pos]:=AveLvB[Pos];
+    AvPlaneTxType:=Ty;
+    Avreconstruct(Plane,StartX,StartY,TxSz);
+    Dd:=AveSse(Plane,StartX,StartY,W,H);
+   End;
+  End Else Dd:=Eres;
+  AveWrCoefs(Plane,StartX,StartY,TxSz,Eob,Ty,@AveLvB);
+ End;
+ AveDist:=AveDist+Round(Dd);
+ For I:=0 To StepY-1 Do
+  For J:=0 To StepX-1 Do Begin
+   AvLoopfilterTxSizes^[(Plane*AvMiRowsA+AvSra(Row,SubY)+I)*AvMiStride+AvSra(Col,SubX)+J]:=TxSz;
+   AvBlockDecoded[Plane,AvSra(SbR,SubY)+I+1,AvSra(SbC,SubX)+J+1]:=1;
+  End;
+End;
+
+{ ---------------- prediction inter rapide (essais seulement) ---------------- }
+Var
+ AveFb: Array[0..(64+8)*64-1] Of LongInt;
+
+{ filtre un bloc W x H de la reference (Rf, pas St, derniers indices Lx,Ly) a la position entiere (Ix,Iy) avec les fractions 1/16 (Fx,Fy) ;
+  F0 / F1 : jeux de filtres vertical / horizontal ; resultat (pixels 8 bits) dans Dst (pas Ds) }
+Procedure AveFilterBlock(Rf: PAvWA; St,Lx,Ly,Ix,Iy,Fx,Fy,F0,F1,W,H: LongInt; Dst: PAvWA; Ds: LongInt);
+Var R,C,T,S,Yc,Xc,Base,I: LongInt; Fh,Fv: PAveF8; Inside: Boolean; V: LongInt;
+Begin
+ If (Fx=0) And (Fy=0) Then Begin
+  For R:=0 To H-1 Do Begin
+   Yc:=Iy+R; If Yc<0 Then Yc:=0 Else If Yc>Ly Then Yc:=Ly;
+   Base:=Yc*St;
+   For C:=0 To W-1 Do Begin
+    Xc:=Ix+C; If Xc<0 Then Xc:=0 Else If Xc>Lx Then Xc:=Lx;
+    Dst^[R*Ds+C]:=Rf^[Base+Xc];
+   End;
+  End;
+  Exit;
+ End;
+ Fh:=@AvSubpel_Filters[F1,Fx,0]; Fv:=@AvSubpel_Filters[F0,Fy,0];
+ Inside:=(Ix-3>=0) And (Ix+W+4<=Lx);
+ For R:=0 To H+6 Do Begin
+  Yc:=Iy-3+R;
+  If Yc<0 Then Yc:=0 Else If Yc>Ly Then Yc:=Ly;
+  Base:=Yc*St;
+  If Fx=0 Then Begin
+   For C:=0 To W-1 Do Begin
+    Xc:=Ix+C; If Xc<0 Then Xc:=0 Else If Xc>Lx Then Xc:=Lx;
+    AveFb[R*W+C]:=Rf^[Base+Xc]*16;
+   End;
+  End Else If Inside Then Begin
+   For C:=0 To W-1 Do Begin
+    Xc:=Base+Ix+C-3;
+    S:=Fh^[0]*Rf^[Xc]+Fh^[1]*Rf^[Xc+1]+Fh^[2]*Rf^[Xc+2]+Fh^[3]*Rf^[Xc+3]+Fh^[4]*Rf^[Xc+4]+Fh^[5]*Rf^[Xc+5]+Fh^[6]*Rf^[Xc+6]+Fh^[7]*Rf^[Xc+7];
+    AveFb[R*W+C]:=SarLongint(S+4,3);
+   End;
+  End Else Begin
+   For C:=0 To W-1 Do Begin
+    S:=0;
+    For T:=0 To 7 Do Begin
+     Xc:=Ix+C-3+T;
+     If Xc<0 Then Xc:=0 Else If Xc>Lx Then Xc:=Lx;
+     S:=S+Fh^[T]*Rf^[Base+Xc];
+    End;
+    AveFb[R*W+C]:=SarLongint(S+4,3);
+   End;
+  End;
+ End;
+ For R:=0 To H-1 Do
+  For C:=0 To W-1 Do Begin
+   If Fy=0 Then V:=SarLongint(AveFb[(R+3)*W+C]+8,4)
+   Else Begin
+    S:=0;
+    For I:=0 To 7 Do S:=S+Fv^[I]*AveFb[(R+I)*W+C];
+    V:=SarLongint(S+1024,11);
+   End;
+   If V<0 Then V:=0 Else If V>255 Then V:=255;
+   Dst^[R*Ds+C]:=V;
+  End;
+End;
+
+{ choix des jeux de filtres comme dans block_inter_prediction pour les blocs de largeur / hauteur <= 4 }
+Function AveFiltSel(F,Sz: LongInt): LongInt;
+Begin
+ If Sz<=4 Then Begin
+  If (F=AV_EIGHTTAP) Or (F=AV_EIGHTTAP_SHARP) Then AveFiltSel:=4
+  Else If F=AV_EIGHTTAP_SMOOTH Then AveFiltSel:=5
+  Else AveFiltSel:=F;
+ End Else AveFiltSel:=F;
+End;
+
+{ prediction complete (luma + chroma 4:2:0) d'un bloc inter simple >= 8x8 : sert uniquement aux essais }
+Procedure AvePredFast(Var B: TAveBlk);
+Var RI,Bw,Bh,Pl,W,H,Fx,Fy,Ix,Iy,X0,Y0: LongInt; F: PAvFr; Lx,Ly: LongInt;
+Begin
+ RI:=Avref_frame_idx[B.Ref-AV_LAST_FRAME]; F:=AvSlot[RI];
+ Bw:=AvBlock_Width[B.Bs]; Bh:=AvBlock_Height[B.Bs];
+ For Pl:=0 To 2 Do Begin
+  If Pl=0 Then Begin
+   W:=Bw; H:=Bh; X0:=B.C*4; Y0:=B.R*4;
+   Fx:=(2*B.Mv[1]) And 15; Fy:=(2*B.Mv[0]) And 15;
+   Ix:=X0+SarLongint(2*B.Mv[1],4); Iy:=Y0+SarLongint(2*B.Mv[0],4);
+   Lx:=AvRefUpscaledWidth[RI]-1; Ly:=AvRefFrameHeight[RI]-1;
+  End Else Begin
+   W:=Bw Shr 1; H:=Bh Shr 1; X0:=B.C*2; Y0:=B.R*2;
+   Fx:=B.Mv[1] And 15; Fy:=B.Mv[0] And 15;
+   Ix:=X0+SarLongint(B.Mv[1],4); Iy:=Y0+SarLongint(B.Mv[0],4);
+   Lx:=((AvRefUpscaledWidth[RI]+1) Shr 1)-1; Ly:=((AvRefFrameHeight[RI]+1) Shr 1)-1;
+  End;
+  AveFilterBlock(F^.Pl[Pl],F^.Strd[Pl],Lx,Ly,Ix,Iy,Fx,Fy,AveFiltSel(B.Interp,H),AveFiltSel(B.Interp,W),W,H,@AvCF[Pl]^[Y0*AvCFS[Pl]+X0],AvCFS[Pl]);
+ End;
+End;
+
+{ ---------------- passe residuelle d'un bloc ---------------- }
+Var
+ AvePlaneMask: LongInt;     { plans traites : bit 0 Y, 1 U, 2 V }
+
+Procedure AveTxTree(StartX,StartY,W,H: LongInt; ForceSkip: Boolean);
+Var MaxX,MaxY,Row,Col,LumaTxSz,LumaW,LumaH,TxSz: LongInt;
+Begin
+ MaxX:=AvMiCols*4; MaxY:=AvMiRows*4;
+ If (StartX>=MaxX) Or (StartY>=MaxY) Then Exit;
+ Row:=StartY Shr 2; Col:=StartX Shr 2;
+ LumaTxSz:=AvInterTxSizes^[Row*AvMiStride+Col];
+ LumaW:=AvTx_Width[LumaTxSz]; LumaH:=AvTx_Height[LumaTxSz];
+ If (W<=LumaW) And (H<=LumaH) Then Begin
+  TxSz:=Avfind_tx_size(W,H);
+  AveTxBlock(0,StartX,StartY,TxSz,0,0,ForceSkip);
+ End Else If W>H Then Begin
+  AveTxTree(StartX,StartY,W Div 2,H,ForceSkip);
+  AveTxTree(StartX+W Div 2,StartY,W Div 2,H,ForceSkip);
+ End Else If W<H Then Begin
+  AveTxTree(StartX,StartY,W,H Div 2,ForceSkip);
+  AveTxTree(StartX,StartY+H Div 2,W,H Div 2,ForceSkip);
+ End Else Begin
+  AveTxTree(StartX,StartY,W Div 2,H Div 2,ForceSkip);
+  AveTxTree(StartX+W Div 2,StartY,W Div 2,H Div 2,ForceSkip);
+  AveTxTree(StartX,StartY+H Div 2,W Div 2,H Div 2,ForceSkip);
+  AveTxTree(StartX+W Div 2,StartY+H Div 2,W Div 2,H Div 2,ForceSkip);
+ End;
+End;
+
+Procedure AveResidualPass(Var B: TAveBlk; ForceSkip: Boolean);
+Var Plane,TxSz,StepX,StepY,PlaneSz,N4W,N4H,SubX,SubY,BaseX,BaseY,X,Y: LongInt;
+Begin
+ For Plane:=0 To 2*AvHasChroma Do Begin
+  If (AvePlaneMask Shr Plane) And 1=0 Then Continue;
+  TxSz:=Avget_tx_size(Plane,AvTxSize);
+  StepX:=AvSra(AvTx_Width[TxSz],2); StepY:=AvSra(AvTx_Height[TxSz],2);
+  PlaneSz:=Avget_plane_residual_size(AvMiSize,Plane);
+  N4W:=AvNum_4x4_Blocks_Wide[PlaneSz]; N4H:=AvNum_4x4_Blocks_High[PlaneSz];
+  If Plane>0 Then Begin SubX:=Avsubsampling_x; SubY:=Avsubsampling_y; End Else Begin SubX:=0; SubY:=0; End;
+  BaseX:=AvSra(AvMiCol,SubX)*4; BaseY:=AvSra(AvMiRow,SubY)*4;
+  If (Avis_inter<>0) And (Plane=0) Then
+   AveTxTree(BaseX,BaseY,N4W*4,N4H*4,ForceSkip)
+  Else Begin
+   Y:=0;
+   While Y<N4H Do Begin
+    X:=0;
+    While X<N4W Do Begin
+     AveTxBlock(Plane,BaseX,BaseY,TxSz,X,Y,ForceSkip);
+     X:=X+StepX;
+    End;
+    Y:=Y+StepY;
+   End;
+  End;
+ End;
+End;
+
+{ memorisation / rappel de la prediction inter }
+Procedure AvePredSave(R0,C0,N4: LongInt);
+Var Pl,Y,X0,Y0,Nw: LongInt;
+Begin
+ For Pl:=0 To 2 Do Begin
+  If Pl=0 Then Begin X0:=C0*4; Y0:=R0*4; Nw:=N4*4; End Else Begin X0:=C0*2; Y0:=R0*2; Nw:=N4*2; End;
+  For Y:=0 To Nw-1 Do Move(AvCF[Pl]^[(Y0+Y)*AvCFS[Pl]+X0],AvePredC[Pl][Y*Nw],Nw*2);
+ End;
+ AveCacheValid:=True;
+End;
+
+Procedure AvePredLoad(R0,C0,N4: LongInt);
+Var Pl,Y,X0,Y0,Nw: LongInt;
+Begin
+ For Pl:=0 To 2 Do Begin
+  If Pl=0 Then Begin X0:=C0*4; Y0:=R0*4; Nw:=N4*4; End Else Begin X0:=C0*2; Y0:=R0*2; Nw:=N4*2; End;
+  For Y:=0 To Nw-1 Do Move(AvePredC[Pl][Y*Nw],AvCF[Pl]^[(Y0+Y)*AvCFS[Pl]+X0],Nw*2);
+ End;
+End;
+
+Function AveRegN4(Bs: LongInt): LongInt;
+Var N: LongInt;
+Begin
+ N:=AveMax(AvNum_4x4_Blocks_Wide[Bs],AvNum_4x4_Blocks_High[Bs]);
+ If N<2 Then N:=2;
+ AveRegN4:=N;
+End;
+
+{ ---------------- codage d'un bloc (essai ou reel) ---------------- }
+Procedure AveCodeBlock(Var B: TAveBlk; FrameIntra: Boolean; Var Res: TAveRD; Var AllZero: Boolean; UseCache: Boolean);
+Var Bits0,Bw4,Bh4,Pos,N4,R0,C0: LongInt; Pm: TAvPair; Isc: LongInt;
+Begin
+ Bits0:=AveBits; AveDist:=0; AveNz:=0;
+ If (B.IsInter<>0) And (Avinterpolation_filter=AV_SWITCHABLE) And (B.YMode=AV_GLOBALMV) And (AveMin(AvBlock_Width[B.Bs],AvBlock_Height[B.Bs])>=8) Then B.Interp:=AV_EIGHTTAP;
+ AveSetBlk(B);
+ Bw4:=AvNum_4x4_Blocks_Wide[B.Bs]; Bh4:=AvNum_4x4_Blocks_High[B.Bs];
+ N4:=AveRegN4(B.Bs); R0:=B.R And -N4; C0:=B.C And -N4;
+ If Not FrameIntra Then AveInterNeighbors;
+ { mode info }
+ AveWrSkip(B.Skip);
+ If FrameIntra Then AveWrIntraModes(B,True)
+ Else Begin
+  AveWrIsInter(B.IsInter);
+  If B.IsInter<>0 Then Begin
+   AveWrRefFrame(B.Ref);
+   Avfind_mv_stack(0);
+   AveWrInterMode(B.YMode,B.MvIdx);
+   If B.YMode=AV_NEWMV Then Begin
+    Pos:=B.MvIdx; If AvNumMvFound<=1 Then Pos:=0;
+    Pm:=AvRefStackMv[Pos,0];
+    AveWrMv(B.Mv[0]-Pm[0],B.Mv[1]-Pm[1]);
+   End;
+   If (Avinterpolation_filter=AV_SWITCHABLE) And Not ((B.YMode=AV_GLOBALMV) And (AveMin(AvBlock_Width[B.Bs],AvBlock_Height[B.Bs])>=8)) Then AveWrInterp(0,B.Interp);
+  End Else AveWrIntraModes(B,False);
+ End;
+ AveWrBlockTx(B);
+ If B.Skip<>0 Then AveResetCtx(Bw4,Bh4);
+ AveArraysA(B);
+ If B.IsInter<>0 Then Begin
+  If UseCache And AveCacheValid Then AvePredLoad(R0,C0,N4)
+  Else Begin
+   If AveDry And AveFastPred And (Bw4>=2) And (Bh4>=2) Then AvePredFast(B) Else Avcompute_prediction;
+   AvePredSave(R0,C0,N4);
+  End;
+ End;
+ AveResidualPass(B,B.Skip<>0);
+ AveArraysB(B);
+ Res.D:=AveDist; Res.R:=AveBits-Bits0;
+ AllZero:=(AveNz=0);
+End;
+
+Function AveJ(D: Int64; R: LongInt): Double;
+Begin
+ AveJ:=D+AveLamD*R/AVE_CS;
+End;
+
+{ ---------------- recherche des modes intra ---------------- }
+Var
+ AveSrcPl: Array[0..2] Of LongInt;
+
+{ SSE entre source et AvPred (bloc W x H en (X,Y) du plan Plane) }
+Function AveSsePred(Plane,X,Y,W,H: LongInt): LongInt;
+Var I,J,D,T: LongInt; S: PAvWA; Ss: LongInt;
+Begin
+ S:=AveSrc[Plane]; Ss:=AveSrcS[Plane]; T:=0;
+ For I:=0 To H-1 Do For J:=0 To W-1 Do Begin
+  D:=S^[(Y+I)*Ss+X+J]-AvPred[I,J];
+  T:=T+D*D;
+ End;
+ AveSsePred:=T;
+End;
+
+Function AveYModeBits(Var B: TAveBlk; FrameIntra: Boolean; Mode: LongInt): LongInt;
+Var A,L,Bits0: LongInt;
+Begin
+ Bits0:=AveBits; AveDry:=True;
+ If FrameIntra Then Begin
+  If AvAvailU<>0 Then A:=AvIntra_Mode_Context[AvYModes^[(AvMiRow-1)*AvMiStride+AvMiCol]] Else A:=AvIntra_Mode_Context[AV_DC_PRED];
+  If AvAvailL<>0 Then L:=AvIntra_Mode_Context[AvYModes^[AvMiRow*AvMiStride+AvMiCol-1]] Else L:=AvIntra_Mode_Context[AV_DC_PRED];
+  AveSy(AvTCdf.Intra_Frame_Y_Mode_Cdf[A,L,0],13,Mode);
+ End Else AveSy(AvTCdf.Y_Mode_Cdf[AvSize_Group[B.Bs],0],13,Mode);
+ AveYModeBits:=AveBits-Bits0;
+ AveBits:=Bits0;
+End;
+
+{ prediction de bloc entier du plan 0 pour le mode M ; remplit AvPred }
+Procedure AvePredY(Var B: TAveBlk; M,Ang: LongInt);
+Var SbR,SbC,Bw4,Bh4: LongInt;
+Begin
+ AvYMode:=M; AvAngleDeltaY:=Ang;
+ SbR:=B.R And 15; SbC:=B.C And 15;
+ Bw4:=AvNum_4x4_Blocks_Wide[B.Bs]; Bh4:=AvNum_4x4_Blocks_High[B.Bs];
+ Avpredict_intra(0,B.C*4,B.R*4,AvAvailL,AvAvailU,AvBlockDecoded[0,SbR,SbC+Bw4+1],AvBlockDecoded[0,SbR+Bh4+1,SbC],M,AvTx_Width_Log2[AvMax_Tx_Size_Rect[B.Bs]] ,AvTx_Height_Log2[AvMax_Tx_Size_Rect[B.Bs]]);
+End;
+
+{ choisit les K meilleurs modes luma par proxy (SSE de la prediction du bloc entier + debit du mode) ;
+  retourne le nombre de candidats ; Cm = modes, Ca = deltas d'angle }
+Function AveRankY(Var B: TAveBlk; FrameIntra: Boolean; Var Cm,Ca: Array Of LongInt; K: LongInt): LongInt;
+Var M,I,J,N,Ang,A0,Bi,Bx,By,Tw,Th: LongInt; Cs: Array[0..12] Of Double; Td,Bestd: Double;
+Begin
+ Bx:=B.C*4; By:=B.R*4;
+ Tw:=AvTx_Width[AvMax_Tx_Size_Rect[B.Bs]]; Th:=AvTx_Height[AvMax_Tx_Size_Rect[B.Bs]];
+ For M:=0 To 12 Do Begin
+  AvePredY(B,M,0);
+  Cs[M]:=AveSsePred(0,Bx,By,Tw,Th)+AveLamD*AveYModeBits(B,FrameIntra,M)/AVE_CS;
+ End;
+ N:=0;
+ For I:=0 To K-1 Do Begin
+  Bi:=-1; Bestd:=1E30;
+  For J:=0 To 12 Do If Cs[J]<Bestd Then Begin Bestd:=Cs[J]; Bi:=J; End;
+  If Bi<0 Then Break;
+  Cm[N]:=Bi; Ca[N]:=0; Inc(N);
+  Cs[Bi]:=1E31;
+ End;
+ { raffinement de l'angle pour le meilleur mode directionnel }
+ If (B.Bs>=AV_BLOCK_8X8) And (AveEffort>0) And (N>0) Then Begin
+  For I:=0 To N-1 Do Begin
+   If Avis_directional_mode(Cm[I])<>0 Then Begin
+    AvePredY(B,Cm[I],0);
+    Bestd:=AveSsePred(0,Bx,By,Tw,Th);
+    A0:=0;
+    For Ang:=-3 To 3 Do If Ang<>0 Then Begin
+     AvePredY(B,Cm[I],Ang);
+     Td:=AveSsePred(0,Bx,By,Tw,Th);
+     If Td<Bestd*0.985 Then Begin Bestd:=Td; A0:=Ang; End;
+    End;
+    Ca[I]:=A0;
+    Break;
+   End;
+  End;
+ End;
+ AveRankY:=N;
+End;
+
+{ ---------------- plan de codage d'une superbloc ---------------- }
+Type
+ TAveRec=Record
+  Kind,Part: LongInt;
+  Blk: TAveBlk;
+ End;
+ PAveRec=^TAveRec;
+Var
+ AvePlan: Array[0..767] Of TAveRec;
+ AvePlanN: LongInt;
+ AveBest: Array[0..4] Of Array[0..511] Of TAveRec;
+ AveFrameIntra: Boolean;
+
+Procedure AveInitBlk(Var B: TAveBlk; R,C,Bs: LongInt);
+Begin
+ FillChar(B,SizeOf(B),0);
+ B.R:=R; B.C:=C; B.Bs:=Bs;
+ B.UVMode:=AV_DC_PRED;
+ B.TxSz:=AvMax_Tx_Size_Rect[Bs];
+ If AveFhFilter<>AV_SWITCHABLE Then B.Interp:=AveFhFilter Else B.Interp:=AV_EIGHTTAP;
+End;
+
+{ ---------------- evaluation complete d'un bloc : retourne J, met a jour B.Skip ---------------- }
+Function AveEvalBlock(Var B: TAveBlk; Slot: LongInt): Double;
+Var Res: TAveRD; Az: Boolean; Js,Jn: Double; N4,R0,C0: LongInt;
+Begin
+ N4:=AveRegN4(B.Bs); R0:=B.R And -N4; C0:=B.C And -N4;
+ AvePlaneMask:=7; AveDry:=True;
+ AveCacheValid:=False;
+ If B.IsInter<>0 Then Begin
+  { variante "saute" d'abord (calcule et memorise la prediction) }
+  B.Skip:=1; B.SplitTx:=0;
+  AveSnapRestore(Slot);
+  AveCodeBlock(B,AveFrameIntra,Res,Az,False);
+  Js:=AveJ(Res.D,Res.R);
+  B.Skip:=0;
+  AveSnapRestore(Slot);
+  AveCodeBlock(B,AveFrameIntra,Res,Az,True);
+  Jn:=AveJ(Res.D,Res.R);
+  If Az Or (Js<=Jn) Then Begin
+   B.Skip:=1; B.SplitTx:=0;
+   AveSnapRestore(Slot);
+   AveCodeBlock(B,AveFrameIntra,Res,Az,True);
+   AveEvalBlock:=AveJ(Res.D,Res.R);
+  End Else AveEvalBlock:=Jn;
+ End Else Begin
+  B.Skip:=0;
+  AveSnapRestore(Slot);
+  AveCodeBlock(B,AveFrameIntra,Res,Az,False);
+  Jn:=AveJ(Res.D,Res.R);
+  If Az Then Begin
+   B.Skip:=1;
+   AveSnapRestore(Slot);
+   AveCodeBlock(B,AveFrameIntra,Res,Az,False);
+   AveEvalBlock:=AveJ(Res.D,Res.R);
+  End Else AveEvalBlock:=Jn;
+ End;
+End;
+
+{ ---------------- chroma ---------------- }
+Function AveUvModeBits(Var B: TAveBlk; Mode: LongInt): LongInt;
+Var Bits0,CflOk: LongInt;
+Begin
+ Bits0:=AveBits; AveDry:=True;
+ CflOk:=Ord(AvMax(AvBlock_Width[B.Bs],AvBlock_Height[B.Bs])<=32);
+ If CflOk<>0 Then AveSy(AvTCdf.Uv_Mode_Cfl_Allowed_Cdf[B.YMode,0],14,Mode)
+ Else AveSy(AvTCdf.Uv_Mode_Cfl_Not_Allowed_Cdf[B.YMode,0],13,Mode);
+ AveUvModeBits:=AveBits-Bits0;
+ AveBits:=Bits0;
+End;
+
+Var
+ AveLumaS: Array[0..31,0..31] Of LongInt;
+
+{ calcule la luma sous-echantillonnee (comme predict_chroma_from_luma) et la moyenne }
+Function AveCflLuma(StartX,StartY,TxSz: LongInt): LongInt;
+Var W,H,I,J,Dy,Dx,LumaY,LumaX,T,V,Avg,SubX,SubY: LongInt;
+Begin
+ W:=AvTx_Width[TxSz]; H:=AvTx_Height[TxSz]; SubX:=Avsubsampling_x; SubY:=Avsubsampling_y;
+ Avg:=0;
+ For I:=0 To H-1 Do Begin
+  LumaY:=(StartY+I) Shl SubY; LumaY:=AvMin(LumaY,AvMaxLumaH-(1 Shl SubY));
+  For J:=0 To W-1 Do Begin
+   LumaX:=(StartX+J) Shl SubX; LumaX:=AvMin(LumaX,AvMaxLumaW-(1 Shl SubX));
+   T:=0;
+   For Dy:=0 To SubY Do For Dx:=0 To SubX Do T:=T+AvCF[0]^[(LumaY+Dy)*AvCFS[0]+LumaX+Dx];
+   V:=T Shl (3-SubX-SubY);
+   AveLumaS[I,J]:=V; Avg:=Avg+V;
+  End;
+ End;
+ AveCflLuma:=AvRound2(Avg,AvTx_Width_Log2[TxSz]+AvTx_Height_Log2[TxSz]);
+End;
+
+{ meilleurs alphas CfL (moindres carres) ; retourne le SSE proxy cumule U+V }
+Function AveCflProxy(Var B: TAveBlk; StartX,StartY,TxSz: LongInt): Double;
+Var Avg,Pl,I,J,W,H,Dcv,Num,Den,A,Sc,V,E: LongInt; Sse: Double; Al: Array[1..2] Of LongInt; Num64,Den64: Int64; S: PAvWA; Ss: LongInt; Tot: Double;
+Begin
+ W:=AvTx_Width[TxSz]; H:=AvTx_Height[TxSz];
+ Avg:=AveCflLuma(StartX,StartY,TxSz);
+ Tot:=0;
+ For Pl:=1 To 2 Do Begin
+  AveIntraPredTx(Pl,StartX,StartY,TxSz,0,0,AV_DC_PRED);
+  Dcv:=AvPred[0,0];
+  S:=AveSrc[Pl]; Ss:=AveSrcS[Pl];
+  Num64:=0; Den64:=0;
+  For I:=0 To H-1 Do For J:=0 To W-1 Do Begin
+   V:=AveLumaS[I,J]-Avg;
+   Num64:=Num64+Int64(S^[(StartY+I)*Ss+StartX+J]-Dcv)*V;
+   Den64:=Den64+Int64(V)*V;
+  End;
+  If Den64=0 Then A:=0
+  Else Begin
+   If Num64>=0 Then A:=Trunc((Num64*64+Den64 Div 2)/Den64) Else A:=-Trunc(((-Num64)*64+Den64 Div 2)/Den64);
+   A:=AveClip(-16,16,A);
+  End;
+  Al[Pl]:=A;
+  Sse:=0;
+  For I:=0 To H-1 Do For J:=0 To W-1 Do Begin
+   V:=AveLumaS[I,J]-Avg;
+   Sc:=AvRound2Signed(A*V,6);
+   E:=S^[(StartY+I)*Ss+StartX+J]-AvClip1(Dcv+Sc);
+   Sse:=Sse+E*E;
+  End;
+  Tot:=Tot+Sse;
+ End;
+ B.CflU:=Al[1]; B.CflV:=Al[2];
+ AveCflProxy:=Tot;
+End;
+
+{ choisit le mode chroma ; B contient le mode luma, les alphas, etc. Etat attendu : luma code (essai). Slot2 = etat apres luma. }
+Procedure AveChromaSearch(Var B: TAveBlk; Slot2: LongInt);
+Var Cand: Array[0..7] Of LongInt; Cs: Array[0..7] Of Double; NC,I,K,TxC,StartX,StartY,M,Pl,Bi,Pass: LongInt; J,BestJ,Sse: Double; Res: TAveRD; Az: Boolean;
+ CflOk: Boolean; SaveU,SaveV: LongInt; BestMode,BestU,BestV: LongInt; Used: Array[0..7] Of Boolean;
+Begin
+ If AvHasChroma=0 Then Exit;
+ TxC:=Avget_tx_size(1,0);
+ StartX:=AvSra(AvMiCol,Avsubsampling_x)*4; StartY:=AvSra(AvMiRow,Avsubsampling_y)*4;
+ CflOk:=AvMax(AvBlock_Width[B.Bs],AvBlock_Height[B.Bs])<=32;
+ NC:=0;
+ Cand[NC]:=AV_DC_PRED; Inc(NC);
+ If B.YMode<>AV_DC_PRED Then Begin Cand[NC]:=B.YMode; Inc(NC); End;
+ If (B.YMode<>AV_SMOOTH_PRED) Then Begin Cand[NC]:=AV_SMOOTH_PRED; Inc(NC); End;
+ If AveEffort>0 Then Begin
+  If (B.YMode<>AV_V_PRED) Then Begin Cand[NC]:=AV_V_PRED; Inc(NC); End;
+  If (B.YMode<>AV_H_PRED) Then Begin Cand[NC]:=AV_H_PRED; Inc(NC); End;
+ End;
+ If CflOk Then Begin Cand[NC]:=AV_UV_CFL_PRED; Inc(NC); End;
+ AvAngleDeltaUV:=0; B.AngUV:=0;
+ For I:=0 To NC-1 Do Begin
+  M:=Cand[I];
+  If M=AV_UV_CFL_PRED Then Sse:=AveCflProxy(B,StartX,StartY,TxC)
+  Else Begin
+   Sse:=0;
+   For Pl:=1 To 2 Do Begin
+    AveIntraPredTx(Pl,StartX,StartY,TxC,0,0,M);
+    Sse:=Sse+AveSsePred(Pl,StartX,StartY,AvTx_Width[TxC],AvTx_Height[TxC]);
+   End;
+  End;
+  Cs[I]:=Sse+AveLamD*AveUvModeBits(B,M)/AVE_CS;
+  If (M=AV_UV_CFL_PRED) Then Cs[I]:=Cs[I]+AveLamD*6;
+  Used[I]:=False;
+ End;
+ SaveU:=B.CflU; SaveV:=B.CflV;
+ BestJ:=1E30; BestMode:=AV_DC_PRED; BestU:=0; BestV:=0;
+ { evaluation complete des meilleurs candidats }
+ If AveEffort>0 Then K:=2 Else K:=1;
+ For Pass:=1 To K Do Begin
+  Bi:=-1; J:=1E30;
+  For I:=0 To NC-1 Do If (Not Used[I]) And (Cs[I]<J) Then Begin J:=Cs[I]; Bi:=I; End;
+  If Bi<0 Then Break;
+  Used[Bi]:=True;
+  B.UVMode:=Cand[Bi];
+  If B.UVMode=AV_UV_CFL_PRED Then Begin
+   { recalcul des alphas }
+   AveCflProxy(B,StartX,StartY,TxC);
+   If (B.CflU=0) And (B.CflV=0) Then Begin B.CflU:=1; End;
+  End Else Begin B.CflU:=0; B.CflV:=0; End;
+  If K=1 Then Begin BestMode:=B.UVMode; BestU:=B.CflU; BestV:=B.CflV; Break; End;
+  AveSnapRestore(Slot2);
+  AvePlaneMask:=6; AveDry:=True;
+  AveCodeBlock(B,AveFrameIntra,Res,Az,False);
+  J:=AveJ(Res.D,Res.R);
+  If J<BestJ Then Begin BestJ:=J; BestMode:=B.UVMode; BestU:=B.CflU; BestV:=B.CflV; End;
+ End;
+ B.UVMode:=BestMode; B.CflU:=BestU; B.CflV:=BestV;
+End;
+
+{ ---------------- recherche intra d'un bloc ---------------- }
+{ Etat : snapshot Slot = etat de base. Retourne J complet ; Best rempli. L'etat n'est pas defini au retour. }
+Function AveIntraSearch(R,C,Bs,Slot: LongInt; Var Best: TAveBlk): Double;
+Var B,Bb: TAveBlk; Cm,Ca: Array[0..7] Of LongInt; NK,K,I,D,MaxD,T: LongInt; Res: TAveRD; Az: Boolean; J,BestJ: Double;
+Begin
+ AveInitBlk(B,R,C,Bs);
+ AveSetBlk(B);
+ If Not AveFrameIntra Then AveInterNeighbors;
+ If AveEffort=0 Then K:=1 Else If AveEffort=1 Then K:=2 Else K:=3;
+ NK:=AveRankY(B,AveFrameIntra,Cm,Ca,K);
+ BestJ:=1E30; Bb:=B;
+ MaxD:=AvMax_Tx_Depth[Bs]; If MaxD>2 Then MaxD:=2;
+ If MaxD<1 Then MaxD:=0;
+ If (Bs=AV_BLOCK_4X4) Or (AvTxMode<>AV_TX_MODE_SELECT) Then MaxD:=0;
+ { luma : modes candidats avec la plus grande transformee }
+ For I:=0 To NK-1 Do Begin
+  B.YMode:=Cm[I]; B.AngY:=Ca[I]; B.TxSz:=AvMax_Tx_Size_Rect[Bs]; B.UVMode:=AV_DC_PRED; B.CflU:=0; B.CflV:=0; B.Skip:=0;
+  AveSnapRestore(Slot);
+  AveSetBlk(B);
+  AvePlaneMask:=1; AveDry:=True;
+  AveCodeBlock(B,AveFrameIntra,Res,Az,False);
+  J:=AveJ(Res.D,Res.R);
+  If J<BestJ Then Begin BestJ:=J; Bb:=B; End;
+ End;
+ { tailles de transformee plus petites pour le meilleur mode }
+ B:=Bb;
+ T:=AvMax_Tx_Size_Rect[Bs];
+ For D:=1 To MaxD Do Begin
+  T:=AvSplit_Tx_Size[T];
+  B.TxSz:=T;
+  AveSnapRestore(Slot);
+  AveSetBlk(B);
+  AvePlaneMask:=1; AveDry:=True;
+  AveCodeBlock(B,AveFrameIntra,Res,Az,False);
+  J:=AveJ(Res.D,Res.R);
+  If J<BestJ Then Begin BestJ:=J; Bb:=B; End Else If (D>=1) And (AveEffort<2) Then Break;
+ End;
+ B:=Bb;
+ { chroma }
+ If AvHasChroma<>0 Then Begin
+  AveSnapRestore(Slot);
+  AveSetBlk(B);
+  AvePlaneMask:=1; AveDry:=True;
+  AveCodeBlock(B,AveFrameIntra,Res,Az,False);
+  AveSnapSave(11,R And -AveRegN4(Bs),C And -AveRegN4(Bs),AveRegN4(Bs));
+  AveSetBlk(B);
+  AveChromaSearch(B,11);
+ End;
+ { evaluation complete }
+ B.Skip:=0;
+ AveSnapRestore(Slot);
+ J:=AveEvalBlock(B,Slot);
+ Best:=B;
+ AveIntraSearch:=J;
+End;
+
+{ ---------------- recherche inter ---------------- }
+Type
+ TAveCand=Record
+  Mode,Ref,MvIdx,Flt: LongInt;
+  Mv: TAvPair;
+  Cost: Double;
+ End;
+
+Var
+ AveMeRef: PAvWA; AveMeSt,AveMeLx,AveMeLy: LongInt;
+ AveInterD: Int64;
+ AveLamS: Double;
+ AveCands: Array[0..23] Of TAveCand; AveNCand: LongInt;
+ AveMeThr: Double; AveFixedFlt: LongInt;
+
+{ SAD d'un bloc source (Bx,By,Bw,Bh) contre la reference decalee de (Mx,My) pixels entiers }
+Function AveSadMv(Bx,By,Bw,Bh,Mx,My,Limit: LongInt): LongInt;
+Var X0,Y0,I,J,T,Row,Xc,Yc: LongInt; S,Rf: PAvWA; Ss: LongInt;
+Begin
+ X0:=Bx+Mx; Y0:=By+My;
+ S:=AveSrc[0]; Ss:=AveSrcS[0]; Rf:=AveMeRef;
+ T:=0;
+ If (X0>=0) And (Y0>=0) And (X0+Bw-1<=AveMeLx) And (Y0+Bh-1<=AveMeLy) Then Begin
+  For I:=0 To Bh-1 Do Begin
+   For J:=0 To Bw-1 Do Begin
+    Row:=S^[(By+I)*Ss+Bx+J]-Rf^[(Y0+I)*AveMeSt+X0+J];
+    If Row<0 Then T:=T-Row Else T:=T+Row;
+   End;
+   If T>Limit Then Break;
+  End;
+ End Else Begin
+  For I:=0 To Bh-1 Do Begin
+   Yc:=Y0+I; If Yc<0 Then Yc:=0 Else If Yc>AveMeLy Then Yc:=AveMeLy;
+   For J:=0 To Bw-1 Do Begin
+    Xc:=X0+J; If Xc<0 Then Xc:=0 Else If Xc>AveMeLx Then Xc:=AveMeLx;
+    Row:=S^[(By+I)*Ss+Bx+J]-Rf^[Yc*AveMeSt+Xc];
+    If Row<0 Then T:=T-Row Else T:=T+Row;
+   End;
+   If T>Limit Then Break;
+  End;
+ End;
+ AveSadMv:=T;
+End;
+
+Function AveMvBits(D0,D1: LongInt): LongInt;
+Var Bits0: LongInt; SaveDry: Boolean;
+Begin
+ SaveDry:=AveDry; AveDry:=True; Bits0:=AveBits;
+ AveWrMv(D0,D1);
+ AveMvBits:=AveBits-Bits0;
+ AveBits:=Bits0; AveDry:=SaveDry;
+End;
+
+Procedure AveSetMeRef(Ref: LongInt);
+Var RI: LongInt;
+Begin
+ RI:=Avref_frame_idx[Ref-AV_LAST_FRAME];
+ AveMeRef:=AvSlot[RI]^.Pl[0]; AveMeSt:=AvSlot[RI]^.Strd[0];
+ AveMeLx:=AvRefUpscaledWidth[RI]-1; AveMeLy:=AvRefFrameHeight[RI]-1;
+End;
+
+Var AveSadBuf: Array[0..4095] Of Word;
+
+{ SAD luma de la prediction (memes arrondis que le decodeur) pour le vecteur (Mv0 ligne, Mv1 colonne) en 1/8 pel }
+Function AveSadSubF(Var B: TAveBlk; Mv0,Mv1,Flt: LongInt): LongInt;
+Var Bw,Bh,Fx,Fy,Ix,Iy,R,C,T,D: LongInt; S0: PAvWA; Ss: LongInt;
+Begin
+ AveSetMeRef(B.Ref);
+ Bw:=AvBlock_Width[B.Bs]; Bh:=AvBlock_Height[B.Bs];
+ Fx:=(2*Mv1) And 15; Ix:=B.C*4+SarLongint(2*Mv1,4);
+ Fy:=(2*Mv0) And 15; Iy:=B.R*4+SarLongint(2*Mv0,4);
+ If (Fx=0) And (Fy=0) Then Begin
+  AveSadSubF:=AveSadMv(B.C*4,B.R*4,Bw,Bh,Ix-B.C*4,Iy-B.R*4,AVE_INF);
+  Exit;
+ End;
+ AveFilterBlock(AveMeRef,AveMeSt,AveMeLx,AveMeLy,Ix,Iy,Fx,Fy,AveFiltSel(Flt,Bh),AveFiltSel(Flt,Bw),Bw,Bh,@AveSadBuf[0],Bw);
+ S0:=AveSrc[0]; Ss:=AveSrcS[0];
+ T:=0;
+ For R:=0 To Bh-1 Do
+  For C:=0 To Bw-1 Do Begin
+   D:=S0^[(B.R*4+R)*Ss+B.C*4+C]-AveSadBuf[R*Bw+C];
+   If D<0 Then T:=T-D Else T:=T+D;
+  End;
+ AveSadSubF:=T;
+End;
+
+Function AveSadSub(Var B: TAveBlk; Mv0,Mv1: LongInt): LongInt;
+Begin
+ AveSadSub:=AveSadSubF(B,Mv0,Mv1,B.Interp);
+End;
+
+{ estimation de mouvement pour la reference B.Ref ; Pred = predicteur du NEWMV (1/8 pel) ; Mv en sortie }
+Procedure AveMotionSearch(Var B: TAveBlk; Pred0,Pred1: LongInt; Var Mv0,Mv1: LongInt);
+Var Bx,By,Bw,Bh,Range,Mx,My,BestMx,BestMy,Step,Dx,Dy,I,N,Nx,Ny,Sad,K,Improved,Hx,Hy,Iter,NS,RI: LongInt; Bc,Cc: Double; RefF: PAvFr;
+ Starts: Array[0..7,0..1] Of LongInt;
+Begin
+ Bx:=B.C*4; By:=B.R*4; Bw:=AvBlock_Width[B.Bs]; Bh:=AvBlock_Height[B.Bs];
+ RI:=Avref_frame_idx[B.Ref-AV_LAST_FRAME];
+ RefF:=AvSlot[RI];
+ AveMeRef:=RefF^.Pl[0]; AveMeSt:=RefF^.Strd[0];
+ AveMeLx:=AvRefUpscaledWidth[RI]-1;
+ AveMeLy:=AvRefFrameHeight[RI]-1;
+ If AveEffort=0 Then Range:=16 Else Range:=32;
+ If Bw*Bh<=256 Then Range:=AveMin(Range,24);
+ { points de depart : Starts[.,0] = colonne, [.,1] = ligne (pixels) }
+ NS:=0;
+ Starts[NS,0]:=0; Starts[NS,1]:=0; Inc(NS);
+ For K:=0 To AveMin(AvNumMvFound,3)-1 Do Begin
+  Starts[NS,0]:=(AvRefStackMv[K,0][1]+(AvIf(AvRefStackMv[K,0][1]>=0,4,-4))) Div 8;
+  Starts[NS,1]:=(AvRefStackMv[K,0][0]+(AvIf(AvRefStackMv[K,0][0]>=0,4,-4))) Div 8;
+  Inc(NS);
+ End;
+ BestMx:=0; BestMy:=0; Bc:=1E30;
+ For K:=0 To NS-1 Do Begin
+  Mx:=AveClip(-Range-Bw,Range+Bw,Starts[K,0]); My:=AveClip(-Range-Bh,Range+Bh,Starts[K,1]);
+  Sad:=AveSadMv(Bx,By,Bw,Bh,Mx,My,AVE_INF);
+  Cc:=Sad+AveLamS*AveMvBits(My*8-Pred0,Mx*8-Pred1)/AVE_CS;
+  If Cc<Bc Then Begin Bc:=Cc; BestMx:=Mx; BestMy:=My; End;
+ End;
+ { diamant : pas 4,2,1 }
+ Step:=4; Iter:=0;
+ While Step>=1 Do Begin
+  Improved:=0;
+  For I:=0 To 7 Do Begin
+   Case I Of
+    0: Begin Dx:=Step; Dy:=0; End;
+    1: Begin Dx:=-Step; Dy:=0; End;
+    2: Begin Dx:=0; Dy:=Step; End;
+    3: Begin Dx:=0; Dy:=-Step; End;
+    4: Begin Dx:=Step; Dy:=Step; End;
+    5: Begin Dx:=-Step; Dy:=Step; End;
+    6: Begin Dx:=Step; Dy:=-Step; End;
+   Else Begin Dx:=-Step; Dy:=-Step; End;
+   End;
+   Nx:=BestMx+Dx; Ny:=BestMy+Dy;
+   If (Nx<-Range-Bw) Or (Nx>Range+Bw) Or (Ny<-Range-Bh) Or (Ny>Range+Bh) Then Continue;
+   Sad:=AveSadMv(Bx,By,Bw,Bh,Nx,Ny,AVE_INF);
+   Cc:=Sad+AveLamS*AveMvBits(Ny*8-Pred0,Nx*8-Pred1)/AVE_CS;
+   If Cc<Bc Then Begin Bc:=Cc; BestMx:=Nx; BestMy:=Ny; Improved:=1; End;
+  End;
+  Inc(Iter);
+  If (Improved=0) Or (Iter>24) Then Begin Step:=Step Shr 1; Iter:=0; End;
+ End;
+ { sous-pixel (demi puis quart), evalue avec la vraie prediction }
+ Mv0:=BestMy*8; Mv1:=BestMx*8;
+ Sad:=AveSadSub(B,Mv0,Mv1);
+ Bc:=Sad+AveLamS*AveMvBits(Mv0-Pred0,Mv1-Pred1)/AVE_CS;
+ For Step:=1 To 2+Ord(Avallow_high_precision_mv<>0) Do Begin
+  N:=AvIf(Step=1,4,AvIf(Step=2,2,1));
+  Hx:=Mv1; Hy:=Mv0;
+  For I:=0 To 7 Do Begin
+   Case I Of
+    0: Begin Dx:=N; Dy:=0; End;
+    1: Begin Dx:=-N; Dy:=0; End;
+    2: Begin Dx:=0; Dy:=N; End;
+    3: Begin Dx:=0; Dy:=-N; End;
+    4: Begin Dx:=N; Dy:=N; End;
+    5: Begin Dx:=-N; Dy:=N; End;
+    6: Begin Dx:=N; Dy:=-N; End;
+   Else Begin Dx:=-N; Dy:=-N; End;
+   End;
+   If (AveEffort=0) And (I>3) Then Break;
+   Sad:=AveSadSub(B,Hy+Dy,Hx+Dx);
+   Cc:=Sad+AveLamS*AveMvBits(Hy+Dy-Pred0,Hx+Dx-Pred1)/AVE_CS;
+   If Cc<Bc Then Begin Bc:=Cc; Mv0:=Hy+Dy; Mv1:=Hx+Dx; End;
+  End;
+ End;
+End;
+
+{ cout rapide d'un candidat : SAD de la prediction luma + debit des symboles de mode }
+Procedure AveAddCand(Var B: TAveBlk; Mode,MvIdx,Mv0,Mv1: LongInt);
+Var I,Sad,Bits0,Pos,Bits,F,BestF,BestSad,FB,BestFB: LongInt; Pm: TAvPair; Fr: Boolean;
+Begin
+ For I:=0 To AveNCand-1 Do
+  If (AveCands[I].Ref=B.Ref) And (AveCands[I].Mv[0]=Mv0) And (AveCands[I].Mv[1]=Mv1) Then Exit;
+ If AveNCand>=24 Then Exit;
+ BestF:=AveFixedFlt; BestSad:=-1; BestFB:=0;
+ Fr:=(((2*Mv1) And 15)<>0) Or (((2*Mv0) And 15)<>0);
+ If (Avinterpolation_filter=AV_SWITCHABLE) And Fr And Not ((Mode=AV_GLOBALMV) And (AveMin(AvBlock_Width[B.Bs],AvBlock_Height[B.Bs])>=8)) Then Begin
+  For F:=0 To 2 Do Begin
+   Sad:=AveSadSubF(B,Mv0,Mv1,F);
+   Bits0:=AveBits; AveDry:=True; AveWrInterp(0,F); FB:=AveBits-Bits0; AveBits:=Bits0;
+   If (BestSad<0) Or (Sad+AveLamS*FB/AVE_CS<BestSad+AveLamS*BestFB/AVE_CS) Then Begin BestSad:=Sad; BestF:=F; BestFB:=FB; End;
+  End;
+  Sad:=BestSad;
+ End Else Begin
+  If Avinterpolation_filter=AV_SWITCHABLE Then BestF:=0;
+  Sad:=AveSadSubF(B,Mv0,Mv1,BestF);
+ End;
+ Bits0:=AveBits; AveDry:=True;
+ AveWrRefFrame(B.Ref);
+ AveWrInterMode(Mode,MvIdx);
+ If Mode=AV_NEWMV Then Begin
+  Pos:=MvIdx; If AvNumMvFound<=1 Then Pos:=0;
+  Pm:=AvRefStackMv[Pos,0];
+  AveWrMv(Mv0-Pm[0],Mv1-Pm[1]);
+ End;
+ Bits:=AveBits-Bits0; AveBits:=Bits0;
+ AveCands[AveNCand].Mode:=Mode; AveCands[AveNCand].Ref:=B.Ref; AveCands[AveNCand].MvIdx:=MvIdx; AveCands[AveNCand].Flt:=BestF;
+ AveCands[AveNCand].Mv[0]:=Mv0; AveCands[AveNCand].Mv[1]:=Mv1;
+ AveCands[AveNCand].Cost:=Sad+AveLamS*(Bits+BestFB)/AVE_CS;
+ Inc(AveNCand);
+End;
+
+Function AveInterSearch(R,C,Bs,Slot: LongInt; Var Best: TAveBlk): Double;
+Var B,Bb: TAveBlk; Ref,K,I,Bi,Nk,Mv0,Mv1,Nm: LongInt; Used: Array[0..23] Of Boolean; Bc,J,BestJ: Double; Pm: TAvPair; Used2: Boolean;
+Begin
+ AveInitBlk(B,R,C,Bs);
+ B.IsInter:=1;
+ AveNCand:=0;
+ AveLamS:=Sqrt(AveLamD);
+ For Ref:=AV_LAST_FRAME To AV_LAST_FRAME+AveOptRefs-1 Do Begin
+  { references identiques : ignorer }
+  Used2:=False;
+  For K:=AV_LAST_FRAME To Ref-1 Do
+   If AvSlot[Avref_frame_idx[K-AV_LAST_FRAME]]=AvSlot[Avref_frame_idx[Ref-AV_LAST_FRAME]] Then Used2:=True;
+  If Used2 Then Continue;
+  B.Ref:=Ref; B.YMode:=AV_NEWMV; B.MvIdx:=0;
+  AveSetBlk(B);
+  AveInterNeighbors;
+  Avfind_mv_stack(0);
+  Nm:=AvNumMvFound;
+  AveAddCand(B,AV_NEARESTMV,0,AvRefStackMv[0,0][0],AvRefStackMv[0,0][1]);
+  If Nm>=2 Then AveAddCand(B,AV_NEARMV,1,AvRefStackMv[1,0][0],AvRefStackMv[1,0][1]);
+  If Nm>=3 Then AveAddCand(B,AV_NEARMV,2,AvRefStackMv[2,0][0],AvRefStackMv[2,0][1]);
+  AveAddCand(B,AV_GLOBALMV,0,AvGlobalMvs[0][0],AvGlobalMvs[0][1]);
+  Pm:=AvRefStackMv[0,0];
+  { sans recherche si un candidat de la pile est deja tres bon }
+  Bc:=1E30;
+  For I:=0 To AveNCand-1 Do If (AveCands[I].Ref=Ref) And (AveCands[I].Cost<Bc) Then Bc:=AveCands[I].Cost;
+  If Bc>AvBlock_Width[Bs]*AvBlock_Height[Bs]*(AveAcQC/8.0)*AveMeThr Then Begin
+   AveMotionSearch(B,Pm[0],Pm[1],Mv0,Mv1);
+   AveAddCand(B,AV_NEWMV,0,Mv0,Mv1);
+  End;
+ End;
+ { meilleurs candidats : evaluation complete }
+ If AveEffort=0 Then Nk:=1 Else If AveEffort=1 Then Nk:=2 Else Nk:=3;
+ For I:=0 To 23 Do Used[I]:=False;
+ BestJ:=1E30; Bb:=B; AveInterD:=0;
+ For K:=1 To Nk Do Begin
+  Bi:=-1; Bc:=1E30;
+  For I:=0 To AveNCand-1 Do If (Not Used[I]) And (AveCands[I].Cost<Bc) Then Begin Bc:=AveCands[I].Cost; Bi:=I; End;
+  If Bi<0 Then Break;
+  Used[Bi]:=True;
+  B.Ref:=AveCands[Bi].Ref; B.YMode:=AveCands[Bi].Mode; B.MvIdx:=AveCands[Bi].MvIdx;
+  B.Mv[0]:=AveCands[Bi].Mv[0]; B.Mv[1]:=AveCands[Bi].Mv[1]; B.Interp:=AveCands[Bi].Flt;
+  B.SplitTx:=0; B.Skip:=0;
+  AveSnapRestore(Slot);
+  J:=AveEvalBlock(B,Slot);
+  If J<BestJ Then Begin BestJ:=J; Bb:=B; End;
+ End;
+ { division de la transformee }
+ If (AveEffort>0) And (Bs>AV_BLOCK_4X4) And (BestJ<1E29) Then Begin
+  B:=Bb;
+  If B.Skip=0 Then Begin
+   B.SplitTx:=1;
+   AveSnapRestore(Slot);
+   J:=AveEvalBlock(B,Slot);
+   If J<BestJ Then Begin BestJ:=J; Bb:=B; End;
+  End;
+ End;
+ { SSE du meilleur pour la decision d'essayer l'intra }
+ If BestJ<1E29 Then Begin
+  AveSnapRestore(Slot);
+  J:=AveEvalBlock(Bb,Slot);
+  AveInterD:=AveDist;
+ End;
+ Best:=Bb;
+ AveInterSearch:=BestJ;
+End;
+
+Function AveTryIntra(Var B: TAveBlk; J: Double): Boolean;
+Var Area: LongInt; Dp,Dn: Double;
+Begin
+ If J>=1E29 Then Begin AveTryIntra:=True; Exit; End;
+ Area:=AvBlock_Width[B.Bs]*AvBlock_Height[B.Bs];
+ Dp:=AveInterD/Area; Dn:=Sqr(AveAcQC/8.0)/12.0;
+ If AveEffort=0 Then AveTryIntra:=Dp>4*Dn Else AveTryIntra:=Dp>2.2*Dn;
+End;
+
+{ ---------------- plan, partition, superblocs ---------------- }
+Var
+ AvePlanI: LongInt;
+
+Procedure AvePlanAddBlk(Var B: TAveBlk);
+Begin
+ AvePlan[AvePlanN].Kind:=1; AvePlan[AvePlanN].Blk:=B; Inc(AvePlanN);
+End;
+
+Procedure AvePlanAddPart(P: LongInt);
+Begin
+ AvePlan[AvePlanN].Kind:=0; AvePlan[AvePlanN].Part:=P; Inc(AvePlanN);
+End;
+
+{ meilleur codage d'un bloc (intra et, pour les images P, inter) ; laisse l'etat = bloc code (essai) ; ajoute au plan }
+Function AveBestBlock(R,C,Bs: LongInt): Double;
+Var N4,R0,C0: LongInt; Bi,Bq,Bb: TAveBlk; Ji,Jq,J: Double;
+Begin
+ N4:=AveRegN4(Bs); R0:=R And -N4; C0:=C And -N4;
+ AveSnapSave(10,R0,C0,N4);
+ AveInitBlk(Bb,R,C,Bs);
+ If AveFrameIntra Then Begin
+  J:=AveIntraSearch(R,C,Bs,10,Bb);
+ End Else Begin
+  Jq:=AveInterSearch(R,C,Bs,10,Bq);
+  J:=Jq; Bb:=Bq;
+  If AveTryIntra(Bq,Jq) Then Begin
+   Ji:=AveIntraSearch(R,C,Bs,10,Bi);
+   If Ji<Jq Then Begin J:=Ji; Bb:=Bi; End
+   Else J:=AveEvalBlock(Bb,10);
+  End;
+ End;
+ AvePlanAddBlk(Bb);
+ AveBestBlock:=J;
+End;
+
+Function AveBestPart(R,C,Bs,Depth: LongInt): Double;
+Var N4,Half,Base,BestSlot,Mark0,BestN,BestPart,NO,I,Part,Sub,K,Bits0,Rr,Cc: LongInt; HasRows,HasCols: Boolean;
+ Opts: Array[0..4] Of LongInt; BestJ,Jopt: Double;
+Begin
+ If (R>=AvMiRows) Or (C>=AvMiCols) Then Begin AveBestPart:=0; Exit; End;
+ N4:=AvNum_4x4_Blocks_Wide[Bs]; Half:=N4 Shr 1;
+ HasRows:=(R+Half)<AvMiRows; HasCols:=(C+Half)<AvMiCols;
+ Base:=2*Depth; BestSlot:=2*Depth+1;
+ AveSnapSave(Base,R,C,N4);
+ NO:=0;
+ If HasRows And HasCols Then Begin
+  Opts[NO]:=AV_PARTITION_NONE; Inc(NO);
+  If (AveEffort>=2) Or ((AveEffort=1) And (Bs<=AV_BLOCK_32X32)) Then Begin
+   Opts[NO]:=AV_PARTITION_HORZ; Inc(NO);
+   Opts[NO]:=AV_PARTITION_VERT; Inc(NO);
+  End;
+  Opts[NO]:=AV_PARTITION_SPLIT; Inc(NO);
+ End Else If HasCols Then Begin
+  Opts[NO]:=AV_PARTITION_HORZ; Inc(NO); Opts[NO]:=AV_PARTITION_SPLIT; Inc(NO);
+ End Else If HasRows Then Begin
+  Opts[NO]:=AV_PARTITION_VERT; Inc(NO); Opts[NO]:=AV_PARTITION_SPLIT; Inc(NO);
+ End Else Begin
+  Opts[NO]:=AV_PARTITION_SPLIT; Inc(NO);
+ End;
+ Mark0:=AvePlanN;
+ BestJ:=1E30; BestN:=0; BestPart:=AV_PARTITION_SPLIT;
+ For I:=0 To NO-1 Do Begin
+  Part:=Opts[I];
+  AveSnapRestore(Base);
+  AvePlanN:=Mark0;
+  AveDry:=True; Bits0:=AveBits;
+  AveWrPartition(R,C,Bs,Part,HasRows,HasCols);
+  Jopt:=AveLamD*(AveBits-Bits0)/AVE_CS;
+  AveBits:=Bits0;
+  AvePlanAddPart(Part);
+  Sub:=AvPartition_Subsize[Part,Bs];
+  Case Part Of
+   AV_PARTITION_NONE: Jopt:=Jopt+AveBestBlock(R,C,Bs);
+   AV_PARTITION_HORZ: Begin
+    Jopt:=Jopt+AveBestBlock(R,C,Sub);
+    If HasRows Then Jopt:=Jopt+AveBestBlock(R+Half,C,Sub);
+   End;
+   AV_PARTITION_VERT: Begin
+    Jopt:=Jopt+AveBestBlock(R,C,Sub);
+    If HasCols Then Jopt:=Jopt+AveBestBlock(R,C+Half,Sub);
+   End;
+  Else Begin
+   If Bs=AV_BLOCK_8X8 Then Begin
+    For K:=0 To 3 Do Begin
+     Rr:=R+(K Shr 1); Cc:=C+(K And 1);
+     If (Rr<AvMiRows) And (Cc<AvMiCols) Then Jopt:=Jopt+AveBestBlock(Rr,Cc,AV_BLOCK_4X4);
+    End;
+   End Else Begin
+    For K:=0 To 3 Do Jopt:=Jopt+AveBestPart(R+(K Shr 1)*Half,C+(K And 1)*Half,Sub,Depth+1);
+   End;
+  End;
+  End;
+  If Jopt<BestJ Then Begin
+   BestJ:=Jopt; BestPart:=Part;
+   BestN:=AvePlanN-Mark0;
+   Move(AvePlan[Mark0],AveBest[Depth][0],BestN*SizeOf(TAveRec));
+   AveSnapSave(BestSlot,R,C,N4);
+  End;
+  { terminaison anticipee : le bloc entier est deja "saute" }
+  If (Part=AV_PARTITION_NONE) And (AveEffort<2) And (AvePlan[Mark0+1].Kind=1) And (AvePlan[Mark0+1].Blk.Skip<>0) Then Break;
+ End;
+ AveSnapRestore(BestSlot);
+ AvePlanN:=Mark0;
+ Move(AveBest[Depth][0],AvePlan[AvePlanN],BestN*SizeOf(TAveRec));
+ Inc(AvePlanN,BestN);
+ AveBestPart:=BestJ;
+End;
+
+Procedure AveCommitBlk(Var Rec: TAveRec);
+Var Res: TAveRD; Az: Boolean;
+Begin
+ AvePlaneMask:=7; AveDry:=False;
+ AveCodeBlock(Rec.Blk,AveFrameIntra,Res,Az,False);
+End;
+
+Procedure AveCommitPart(R,C,Bs: LongInt);
+Var N4,Half,Part,Sub,K,Rr,Cc: LongInt; HasRows,HasCols: Boolean;
+Begin
+ If (R>=AvMiRows) Or (C>=AvMiCols) Then Exit;
+ N4:=AvNum_4x4_Blocks_Wide[Bs]; Half:=N4 Shr 1;
+ HasRows:=(R+Half)<AvMiRows; HasCols:=(C+Half)<AvMiCols;
+ Part:=AvePlan[AvePlanI].Part; Inc(AvePlanI);
+ AveDry:=False;
+ AveWrPartition(R,C,Bs,Part,HasRows,HasCols);
+ Sub:=AvPartition_Subsize[Part,Bs];
+ Case Part Of
+  AV_PARTITION_NONE: Begin AveCommitBlk(AvePlan[AvePlanI]); Inc(AvePlanI); End;
+  AV_PARTITION_HORZ: Begin
+   AveCommitBlk(AvePlan[AvePlanI]); Inc(AvePlanI);
+   If HasRows Then Begin AveCommitBlk(AvePlan[AvePlanI]); Inc(AvePlanI); End;
+  End;
+  AV_PARTITION_VERT: Begin
+   AveCommitBlk(AvePlan[AvePlanI]); Inc(AvePlanI);
+   If HasCols Then Begin AveCommitBlk(AvePlan[AvePlanI]); Inc(AvePlanI); End;
+  End;
+ Else Begin
+  If Bs=AV_BLOCK_8X8 Then Begin
+   For K:=0 To 3 Do Begin
+    Rr:=R+(K Shr 1); Cc:=C+(K And 1);
+    If (Rr<AvMiRows) And (Cc<AvMiCols) Then Begin AveCommitBlk(AvePlan[AvePlanI]); Inc(AvePlanI); End;
+   End;
+  End Else
+   For K:=0 To 3 Do AveCommitPart(R+(K Shr 1)*Half,C+(K And 1)*Half,Sub);
+ End;
+ End;
+End;
+
+{ code la tuile unique : produit AveTile }
+Procedure AveEncodeTile;
+Var R,C,I: LongInt;
+Begin
+ AveEcReset;
+ AvTCdf:=AvCdf;
+ AveBits:=0; AveDry:=False;
+ Avclear_above_context;
+ For I:=0 To AV_FRAME_LF_COUNT-1 Do AvDeltaLF[I]:=0;
+ R:=0;
+ While R<AvMiRows Do Begin
+  Avclear_left_context;
+  C:=0;
+  While C<AvMiCols Do Begin
+   Avclear_cdef(R,C);
+   Avcdef_idx^[R*AvMiStride+C]:=0;
+   Avclear_block_decoded_flags(R,C,16);
+   AvePlanN:=0;
+   AveDry:=True;
+   AveBestPart(R,C,AV_BLOCK_64X64,0);
+   AveSnapRestore(0);
+   AvePlanI:=0;
+   AveCommitPart(R,C,AV_BLOCK_64X64);
+   C:=C+16;
+  End;
+  R:=R+16;
+ End;
+ AveDry:=False;
+ AveEcDone;
+End;
+
+{ ---------------- source, filtres, pilote d'image ---------------- }
+Var
+ AveHist: Array[0..2] Of LongInt;      { emplacements des 3 dernieres images (le plus recent d'abord) }
+ AveLastSlot: LongInt;
+ AveLastBits: LongInt;
+ AveBk: Array[0..2] Of PAvWA;          { copie de la reconstruction avant filtres }
+ AveBkN: Array[0..2] Of LongInt;
+
+Procedure AveLoadSource(Yuv: PEABuffer);
+Var P,X,Y,SW,SH,PW,PH,Sy,Sx,Off,PS: LongInt; Src: PAvBA;
+Begin
+ Off:=0;
+ For P:=0 To 2 Do Begin
+  If P=0 Then Begin SW:=AveW; SH:=AveH; End Else Begin SW:=AveCw; SH:=AveCh; End;
+  PW:=AveSrcS[P]; PH:=AveSrcPl[P];
+  Src:=PAvBA(@Yuv^[Off]);
+  For Y:=0 To PH-1 Do Begin
+   Sy:=Y; If Sy>=SH Then Sy:=SH-1;
+   For X:=0 To PW-1 Do Begin
+    Sx:=X; If Sx>=SW Then Sx:=SW-1;
+    AveSrc[P]^[Y*PW+X]:=Src^[Sy*SW+Sx];
+   End;
+  End;
+  Inc(Off,SW*SH);
+ End;
+End;
+
+Function AveFrameSse(Plane,W,H: LongInt; Cur: PAvWA; Cs: LongInt): Int64;
+Var X,Y,D: LongInt; T: Int64; S: PAvWA; Ss: LongInt; Sub: LongInt;
+Begin
+ S:=AveSrc[Plane]; Ss:=AveSrcS[Plane];
+ T:=0;
+ For Y:=0 To H-1 Do Begin
+  Sub:=0;
+  For X:=0 To W-1 Do Begin
+   D:=S^[Y*Ss+X]-Cur^[Y*Cs+X];
+   Sub:=Sub+D*D;
+  End;
+  T:=T+Sub;
+ End;
+ AveFrameSse:=T;
+End;
+
+Procedure AveBackupCur;
+Var P: LongInt;
+Begin
+ For P:=0 To 2 Do Begin
+  AveBkN[P]:=AvCur^.Strd[P]*AvCur^.Ht[P];
+  If AveBk[P]<>NIL Then FreeMem(AveBk[P]);
+  GetMem(AveBk[P],AveBkN[P]*2+16);
+  Move(AvCur^.Pl[P]^,AveBk[P]^,AveBkN[P]*2);
+ End;
+End;
+
+Procedure AveRestoreCur;
+Var P: LongInt;
+Begin
+ For P:=0 To 2 Do Move(AveBk[P]^,AvCur^.Pl[P]^,AveBkN[P]*2);
+End;
+
+Procedure AveSetCdefParams(Yp,Ys,Up,Us,Damp: LongInt);
+Begin
+ Avcdef_y_pri_strength[0]:=Yp; Avcdef_y_sec_strength[0]:=Ys;
+ Avcdef_uv_pri_strength[0]:=Up; Avcdef_uv_sec_strength[0]:=Us;
+ AvCdefDamping:=Damp; Avcdef_bits:=0;
+ AveFhCdefYp:=Yp; AveFhCdefYs:=Ys; AveFhCdefUp:=Up; AveFhCdefUs:=Us; AveFhCdefDamp:=Damp;
+End;
+
+{ choix des niveaux du filtre de boucle et des forces CDEF ; laisse AvCur dans l'etat avant filtres }
+Procedure AvePostSearch;
+Var L,Bl,Lc,Step,Dir,Cand,I,Pri,Sec,Damp,K,Budget,Guess,Mode,NCd: LongInt; Best,Base: Int64;
+ Ev: Array[0..63] Of Int64; Done: Array[0..63] Of Boolean;
+ Sy,Suv,BestY,BestUV: Int64; BYp,BYs,BUp,BUs: LongInt; PriL,SecL: Array[0..39] Of LongInt;
+Begin
+ AveFhLf[0]:=0; AveFhLf[1]:=0; AveFhLf[2]:=0; AveFhLf[3]:=0; AveFhSharp:=0;
+ Avloop_filter_level[0]:=0; Avloop_filter_level[1]:=0; Avloop_filter_level[2]:=0; Avloop_filter_level[3]:=0;
+ Avloop_filter_sharpness:=0;
+ Damp:=3+(AveFhQidx Shr 6);
+ AveSetCdefParams(0,0,0,0,Damp);
+ If AveNoLf And AveNoCdef Then Exit;
+ Budget:=3000000 Div (AveMiCols*AveMiRows*16);
+ If AveEffort>=2 Then Begin
+  If Budget>=24 Then Mode:=0 Else If Budget>=8 Then Mode:=1 Else Mode:=2;
+ End Else If AveEffort=1 Then Begin
+  If Budget>=8 Then Mode:=1 Else Mode:=2;
+ End Else Begin
+  If Budget>=16 Then Mode:=1 Else Mode:=2;
+ End;
+ If AveFhType=AV_KEY_FRAME Then Guess:=(AveDcQC*17563-421574+(1 Shl 17)) Shr 18
+ Else Guess:=(AveDcQC*20723+1015158+(1 Shl 17)) Shr 18;
+ Guess:=AveClip(0,63,Guess);
+ { --- heuristiques sans passes d'essai --- }
+ If Mode=2 Then Begin
+  If Not AveNoLf Then Begin
+   AveFhLf[0]:=Guess; AveFhLf[1]:=Guess;
+   If Guess>0 Then Begin AveFhLf[2]:=Guess; AveFhLf[3]:=Guess; End;
+   Avloop_filter_level[0]:=AveFhLf[0]; Avloop_filter_level[1]:=AveFhLf[1]; Avloop_filter_level[2]:=AveFhLf[2]; Avloop_filter_level[3]:=AveFhLf[3];
+  End;
+  If Not AveNoCdef Then Begin
+   Pri:=AveFhQidx Shr 5; If Pri>7 Then Pri:=7;
+   If AveFhQidx>90 Then Sec:=1 Else Sec:=0;
+   AveSetCdefParams(Pri,Sec,Pri Shr 1,Sec,Damp);
+  End;
+  Exit;
+ End;
+ AveBackupCur;
+ { --- filtre de boucle : luma --- }
+ If Not AveNoLf Then Begin
+  For I:=0 To 63 Do Done[I]:=False;
+  Base:=AveFrameSse(0,AveW,AveH,AveBk[0],AvCur^.Strd[0]);
+  Ev[0]:=Base; Done[0]:=True;
+  Bl:=0; Best:=Base;
+  L:=AveMax(1,Guess);
+  If Mode=0 Then Step:=8 Else Step:=AveMax(4,(L+1) Shr 1);
+  Repeat
+   For Dir:=-1 To 1 Do Begin
+    Cand:=AveClip(0,63,L+Dir*Step);
+    If Not Done[Cand] Then Begin
+     AveRestoreCur;
+     Avloop_filter_level[0]:=Cand; Avloop_filter_level[1]:=Cand;
+     AvLoopFilter;
+     Ev[Cand]:=AveFrameSse(0,AveW,AveH,AvCur^.Pl[0],AvCur^.Strd[0]); Done[Cand]:=True;
+    End;
+    If Ev[Cand]<Best Then Begin Best:=Ev[Cand]; Bl:=Cand; End;
+   End;
+   If Mode=1 Then Break;
+   If Bl=L Then Begin
+    If Step=1 Then Break;
+    Step:=Step Shr 1;
+   End Else L:=Bl;
+  Until False;
+  If (Bl>0) And (Ev[Bl]>Base-(Base Div 500)) Then Bl:=0;
+  AveFhLf[0]:=Bl; AveFhLf[1]:=Bl;
+  If Bl>0 Then Begin
+   If Mode=0 Then Begin
+    { chroma : meme niveau pour U et V }
+    For I:=0 To 63 Do Done[I]:=False;
+    AveRestoreCur;
+    Base:=AveFrameSse(1,AveCw,AveCh,AveBk[1],AvCur^.Strd[1])+AveFrameSse(2,AveCw,AveCh,AveBk[2],AvCur^.Strd[2]);
+    Ev[0]:=Base; Done[0]:=True; Best:=Base; Lc:=0;
+    L:=AveClip(1,63,Bl);
+    Step:=8;
+    Repeat
+     For Dir:=-1 To 1 Do Begin
+      Cand:=AveClip(0,63,L+Dir*Step);
+      If Not Done[Cand] Then Begin
+       AveRestoreCur;
+       Avloop_filter_level[0]:=Bl; Avloop_filter_level[1]:=Bl; Avloop_filter_level[2]:=Cand; Avloop_filter_level[3]:=Cand;
+       If Cand=0 Then Ev[0]:=Base Else Begin
+        AvLoopFilter;
+        Ev[Cand]:=AveFrameSse(1,AveCw,AveCh,AvCur^.Pl[1],AvCur^.Strd[1])+AveFrameSse(2,AveCw,AveCh,AvCur^.Pl[2],AvCur^.Strd[2]);
+       End;
+       Done[Cand]:=True;
+      End;
+      If Ev[Cand]<Best Then Begin Best:=Ev[Cand]; Lc:=Cand; End;
+     End;
+     If Lc=L Then Begin
+      If Step=1 Then Break;
+      Step:=Step Shr 1;
+     End Else L:=Lc;
+    Until False;
+    AveFhLf[2]:=Lc; AveFhLf[3]:=Lc;
+   End Else Begin AveFhLf[2]:=Bl; AveFhLf[3]:=Bl; End;
+  End;
+  Avloop_filter_level[0]:=AveFhLf[0]; Avloop_filter_level[1]:=AveFhLf[1];
+  Avloop_filter_level[2]:=AveFhLf[2]; Avloop_filter_level[3]:=AveFhLf[3];
+ End;
+ { --- CDEF --- }
+ If Not AveNoCdef Then Begin
+  AveRestoreCur;
+  If (Avloop_filter_level[0]<>0) Or (Avloop_filter_level[1]<>0) Then AvLoopFilter;
+  NCd:=0;
+  If Mode=1 Then Begin
+   PriL[0]:=2; SecL[0]:=1; PriL[1]:=5; SecL[1]:=1; PriL[2]:=8; SecL[2]:=2; PriL[3]:=12; SecL[3]:=2; PriL[4]:=0; SecL[4]:=2; NCd:=5;
+  End Else Begin
+   For Pri:=1 To 15 Do Begin
+    If (Pri=1) Or (Pri=3) Or (Pri=6) Or (Pri=10) Or ((Pri=15) And (AveEffort>0)) Or ((AveEffort>1) And ((Pri=2) Or (Pri=4) Or (Pri=5) Or (Pri=8) Or (Pri=12))) Then
+     For Sec:=0 To 3 Do Begin
+      If (Sec=3) And (AveEffort<2) Then Continue;
+      If NCd<38 Then Begin PriL[NCd]:=Pri; SecL[NCd]:=Sec; Inc(NCd); End;
+     End;
+   End;
+   PriL[NCd]:=0; SecL[NCd]:=1; Inc(NCd);
+   PriL[NCd]:=0; SecL[NCd]:=2; Inc(NCd);
+  End;
+  BestY:=AveFrameSse(0,AveW,AveH,AvCur^.Pl[0],AvCur^.Strd[0]);
+  BestUV:=AveFrameSse(1,AveCw,AveCh,AvCur^.Pl[1],AvCur^.Strd[1])+AveFrameSse(2,AveCw,AveCh,AvCur^.Pl[2],AvCur^.Strd[2]);
+  BYp:=0; BYs:=0; BUp:=0; BUs:=0;
+  Base:=BestY;
+  For K:=0 To NCd-1 Do Begin
+   Avcdef_y_pri_strength[0]:=PriL[K]; Avcdef_y_sec_strength[0]:=AvIf(SecL[K]=3,4,SecL[K]);
+   Avcdef_uv_pri_strength[0]:=PriL[K]; Avcdef_uv_sec_strength[0]:=AvIf(SecL[K]=3,4,SecL[K]);
+   AvCdefDamping:=Damp;
+   AvCdefFrame;
+   Sy:=AveFrameSse(0,AveW,AveH,AvCdefF^.Pl[0],AvCdefF^.Strd[0]);
+   Suv:=AveFrameSse(1,AveCw,AveCh,AvCdefF^.Pl[1],AvCdefF^.Strd[1])+AveFrameSse(2,AveCw,AveCh,AvCdefF^.Pl[2],AvCdefF^.Strd[2]);
+   AvFrUnref(AvCdefF);
+   If Sy<BestY Then Begin BestY:=Sy; BYp:=PriL[K]; BYs:=AvIf(SecL[K]=3,4,SecL[K]); End;
+   If Suv<BestUV Then Begin BestUV:=Suv; BUp:=PriL[K]; BUs:=AvIf(SecL[K]=3,4,SecL[K]); End;
+  End;
+  { exiger un gain minimal }
+  If BestY>Base-(Base Div 400) Then Begin BYp:=0; BYs:=0; End;
+  AveSetCdefParams(BYp,BYs,BUp,BUs,Damp);
+ End;
+ AveRestoreCur;
+End;
+
+{ ecrit un OBU : type, charge utile (Pay,PayLen) a la suite dans AveOut }
+Procedure AveOutByte(B: LongInt);
+Begin
+ If AveOutLen+2>AveOutCap Then Begin
+  AveOutCap:=AveOutCap*2+4096;
+  ReallocMem(AveOut,AveOutCap);
+ End;
+ AveOut^[AveOutLen]:=B And 255; Inc(AveOutLen);
+End;
+
+Procedure AveOutLeb(V: LongInt);
+Begin
+ Repeat
+  If V>127 Then Begin AveOutByte((V And 127) Or 128); V:=V Shr 7; End
+  Else Begin AveOutByte(V); V:=0; End;
+ Until V=0;
+End;
+
+{ encode une image ; produit le paquet dans AveOut/AveOutLen ; retourne le nombre de bits }
+Procedure AveEncodeOne(Key: Boolean; Qidx: LongInt);
+Var I,Len,P: LongInt; Tmp: Array[0..599] Of Byte; NewSlot: LongInt;
+Begin
+ If Key Then AveFhType:=AV_KEY_FRAME Else AveFhType:=AV_INTER_FRAME;
+ AveFrameIntra:=Key;
+ AveFhQidx:=AveClip(1,255,Qidx);
+ AveFhPrimary:=0;
+ If Key Then Begin
+  AveFhRefresh:=255; NewSlot:=0;
+ End Else Begin
+  NewSlot:=AveHist[2];
+  AveFhRefresh:=1 Shl NewSlot;
+  AveFhRefIdx[0]:=AveHist[0]; AveFhRefIdx[1]:=AveHist[1]; AveFhRefIdx[2]:=AveHist[2];
+  For I:=3 To 6 Do AveFhRefIdx[I]:=AveHist[0];
+ End;
+ If (AveFhQidx<128) And (AveTune[4]<>0) Then AveFhHp:=1 Else AveFhHp:=0;
+ If (AveEffort>=1) And (AveTune[1]=0) Then AveFhFilter:=AV_SWITCHABLE Else AveFhFilter:=AV_EIGHTTAP;
+ If AveFhFilter=AV_SWITCHABLE Then AveFixedFlt:=0 Else AveFixedFlt:=AveFhFilter; AveFhTxSel:=1; AveFhRedTx:=0;
+ For I:=0 To 3 Do AveFhLf[I]:=0;
+ AveFhSharp:=0;
+ AveFhCdefDamp:=3; AveFhCdefYp:=0; AveFhCdefYs:=0; AveFhCdefUp:=0; AveFhCdefUs:=0;
+ { en-tete provisoire, lu par le decodeur pour initialiser son etat }
+ AveWriteFrameHdr;
+ Tmp[0]:=(AV_OBU_FRAME_HEADER Shl 3) Or 2;
+ P:=AveLeb(Tmp,1,AveHdrLen);
+ Move(AveHdrBuf[0],Tmp[P],AveHdrLen);
+ AvOutCount:=0;
+ AvObus(PAvBA(@Tmp[0]),P+AveHdrLen);
+ { etat de tuile }
+ AvNumTiles:=AvTileCols*AvTileRows;
+ AvTileNum:=0;
+ AvMiRowStart:=AvMiRowStarts[0]; AvMiRowEnd:=AvMiRowStarts[1];
+ AvMiColStart:=AvMiColStarts[0]; AvMiColEnd:=AvMiColStarts[1];
+ AvCurrentQIndex:=Avbase_q_idx;
+ AveDcQC:=AvDcQ(Avbase_q_idx); AveAcQC:=AvAcQ(Avbase_q_idx);
+ AveLamD:=AveLambdaK*Sqr(AveAcQC);
+ AveQRnd:=0.36; AvePruneBits:=5.5;
+ If AveTune[3]>0 Then AvePruneBits:=AveTune[3];
+ If AveTune[0]>0 Then AveQRnd:=AveTune[0];
+ If AveEffort=0 Then AveMeThr:=0.5 Else AveMeThr:=0.25;
+ AveEncodeTile;
+ { fin de tuile : mise a jour des CDF }
+ If Avdisable_frame_end_update_cdf=0 Then Begin
+  AvSCdf:=AvTCdf;
+  Avframe_end_update_cdf;
+ End;
+ { filtres }
+ AvePostSearch;
+ AveWriteFrameHdr;
+ { l'etat du decodeur correspond aux valeurs ecrites (niveaux LF et CDEF deja positionnes) }
+ Avdecode_frame_wrapup;
+ AvSeenFrameHeader:=0;
+ { paquet }
+ AveOutLen:=0;
+ If AveWithTd Then Begin AveOutByte((AV_OBU_TEMPORAL_DELIMITER Shl 3) Or 2); AveOutByte(0); End;
+ If Key Then Begin
+  For I:=0 To AveSeqLen-1 Do AveOutByte(AveSeqBuf[I]);
+ End;
+ AveOutByte((AV_OBU_FRAME Shl 3) Or 2);
+ AveOutLeb(AveHdrLen+AveTileLen);
+ For I:=0 To AveHdrLen-1 Do AveOutByte(AveHdrBuf[I]);
+ If AveOutLen+AveTileLen+16>AveOutCap Then Begin AveOutCap:=AveOutLen+AveTileLen+4096; ReallocMem(AveOut,AveOutCap); End;
+ Move(AveTile^,AveOut^[AveOutLen],AveTileLen); Inc(AveOutLen,AveTileLen);
+ FreeMem(AveTile); AveTile:=NIL;
+ { references }
+ If Key Then Begin AveHist[0]:=0; AveHist[1]:=1; AveHist[2]:=2; AveLastSlot:=0; End
+ Else Begin
+  AveHist[2]:=AveHist[1]; AveHist[1]:=AveHist[0]; AveHist[0]:=NewSlot; AveLastSlot:=NewSlot;
+ End;
+ AveLastBits:=AveOutLen*8;
+End;
+
+{ ---------------- API ---------------- }
+Var
+ AveTarget,AveCxK,AveCxP,AveAccErr: Double;
+ AveQP,AveQK: LongInt;
+
+Procedure AveInitTables;
+Var I: LongInt; P: Double;
+Begin
+ For I:=0 To 4096 Do Begin
+  P:=(I+0.5)/4096.0;
+  AveCost[I]:=Round(-Ln(P)/Ln(2.0)*AVE_CS);
+ End;
+ For I:=0 To 15 Do Begin
+  AveIntraFwd1[I]:=-1; AveIntraFwd2[I]:=-1; AveInterFwd1[I]:=-1; AveInterFwd2[I]:=-1; AveInterFwd3[I]:=-1;
+ End;
+ For I:=0 To 6 Do AveIntraFwd1[AvTx_Type_Intra_Inv_Set1[I]]:=I;
+ For I:=0 To 4 Do AveIntraFwd2[AvTx_Type_Intra_Inv_Set2[I]]:=I;
+ For I:=0 To 15 Do AveInterFwd1[AvTx_Type_Inter_Inv_Set1[I]]:=I;
+ For I:=0 To 11 Do AveInterFwd2[AvTx_Type_Inter_Inv_Set2[I]]:=I;
+ For I:=0 To 1 Do AveInterFwd3[AvTx_Type_Inter_Inv_Set3[I]]:=I;
+End;
+
+Procedure AvEFree;
+Var I: LongInt;
+Begin
+ If Not AveActive Then Exit;
+ AveActive:=False;
+ For I:=0 To 2 Do Begin
+  If AveSrc[I]<>NIL Then Begin FreeMem(AveSrc[I]); AveSrc[I]:=NIL; End;
+  If AveBk[I]<>NIL Then Begin FreeMem(AveBk[I]); AveBk[I]:=NIL; End;
+ End;
+ For I:=0 To 15 Do If AveSn[I]<>NIL Then Begin Dispose(AveSn[I]); AveSn[I]:=NIL; End;
+ If AveOut<>NIL Then Begin FreeMem(AveOut); AveOut:=NIL; End;
+ If AveEcPre<>NIL Then Begin FreeMem(AveEcPre); AveEcPre:=NIL; End;
+ If AveTile<>NIL Then Begin FreeMem(AveTile); AveTile:=NIL; End;
+ If AveRecon<>NIL Then Begin FreeMem(AveRecon); AveRecon:=NIL; End;
+ AveFreeMats;
+ AvFree;
+ AvHook:=AveSaveHook; AvHookN:=AveSaveHookN;
+End;
+
+Procedure AvEBegin(W,H,Fn,Fd,Bitrate,Gop: LongInt);
+Var I,P: LongInt; Sub: LongInt;
+Begin
+ If AveActive Then AvEFree;
+ AveW:=W; AveH:=H; AveFn:=Fn; AveFd:=Fd; AveBitrate:=Bitrate; AveGop:=Gop;
+ If AveW<2 Then AveW:=2; If AveH<2 Then AveH:=2;
+ If AveFn<=0 Then AveFn:=25; If AveFd<=0 Then AveFd:=1;
+ If AveGop<1 Then AveGop:=1;
+ If AveCqp<=0 Then AveCqp:=110;
+ If AveOptRefs<1 Then AveOptRefs:=1; If AveOptRefs>3 Then AveOptRefs:=3;
+ If AveLambdaK<=0 Then AveLambdaK:=0.0013;
+ AveFastPred:=True;
+ If (AveW>4096) Or (Int64(AveW)*AveH>9437184) Then Exit;   { une seule tuile : taille maximale 4096 x 2304 }
+ AveCw:=(AveW+1) Shr 1; AveCh:=(AveH+1) Shr 1;
+ AveMiCols:=2*((AveW+7) Shr 3); AveMiRows:=2*((AveH+7) Shr 3);
+ AveInitTables;
+ AveBuildMats;
+ AveSaveHook:=AvHook; AveSaveHookN:=AvHookN; AvHook:=NIL; AvHookN:=NIL;
+ AvResetState;
+ AveBuildSeq;
+ AvOutCount:=0;
+ AvObus(PAvBA(@AveSeqBuf[0]),AveSeqLen);
+ { source }
+ For I:=0 To 2 Do Begin
+  If I=0 Then Sub:=0 Else Sub:=1;
+  AveSrcS[I]:=((AveMiCols*4) Shr Sub)+128;
+  AveSrcPl[I]:=((AveMiRows*4) Shr Sub)+128;
+  GetMem(AveSrc[I],AveSrcS[I]*AveSrcPl[I]*2+64);
+  AveBk[I]:=NIL;
+ End;
+ For I:=0 To 15 Do New(AveSn[I]);
+ AveOutCap:=65536; GetMem(AveOut,AveOutCap); AveOutLen:=0;
+ AveEcCap:=65536; GetMem(AveEcPre,AveEcCap*2);
+ AveTile:=NIL; AveRecon:=NIL;
+ AveFrameNo:=0; AveSinceKey:=0;
+ AveHist[0]:=0; AveHist[1]:=1; AveHist[2]:=2; AveLastSlot:=0;
+ AveCxK:=0; AveCxP:=0; AveAccErr:=0; AveQP:=0; AveQK:=0;
+ If AveBitrate>0 Then AveTarget:=AveBitrate*1.0*AveFd/AveFn Else AveTarget:=0;
+ AveActive:=True;
+End;
+
+Function AveQFromQstep(Qs: Double): LongInt;
+Var Q: LongInt;
+Begin
+ Q:=1;
+ While (Q<255) And (AvAcQ(Q)<Qs) Do Inc(Q);
+ AveQFromQstep:=Q;
+End;
+
+Function AvEFrame(Yuv: PEABuffer; Var Pkt: PEABuffer; Var PktLen: LongInt; Var IsKey: Boolean; Var Dts,Pts: LongInt): Boolean;
+Var Key: Boolean; Q,Trial,Q2: LongInt; Tk,Tn,R,Qs,Cx: Double; Bits: LongInt;
+Begin
+ AvEFrame:=False;
+ If Not AveActive Then Exit;
+ AveLoadSource(Yuv);
+ Key:=(AveFrameNo=0) Or (AveSinceKey>=AveGop);
+ If AveBitrate<=0 Then Begin
+  AveEncodeOne(Key,AveCqp);
+ End Else If Key Then Begin
+  Tn:=AveTarget;
+  Tk:=Tn*AveGop*3.0/(3.0+AveGop-1);
+  If Tk>Tn*8 Then Tk:=Tn*8;
+  If AveCxK>0 Then Begin
+   Qs:=AveCxK/Tk; Q:=AveQFromQstep(Qs);
+  End Else Begin
+   Qs:=AveW*1.0*AveH*60.0/Tk; Q:=AveQFromQstep(Qs);
+  End;
+  Trial:=0;
+  Repeat
+   AveEncodeOne(True,Q);
+   Inc(Trial);
+   Bits:=AveOutLen*8;
+   R:=Bits/Tk;
+   Cx:=Bits*1.0*AvAcQ(AveFhQidx);
+   If AveCxK<=0 Then AveCxK:=Cx;
+   If (AveFrameNo>0) And (Trial>=1) And (R<1.5) And (R>0.6) Then Break;
+   If (R>0.85) And (R<1.18) Then Break;
+   If (AveFrameNo=0) And (Trial>=4) Then Break;
+   If (AveFrameNo>0) And (Trial>=2) Then Break;
+   Qs:=AvAcQ(AveFhQidx)*Exp(Ln(R)/1.15);
+   Q2:=AveQFromQstep(Qs);
+   If Q2=AveFhQidx Then Break;
+   Q:=Q2;
+  Until False;
+  AveCxK:=0.5*AveCxK+0.5*Cx;
+  If AveQP=0 Then AveQP:=AveClip(1,255,AveFhQidx+12);
+ End Else Begin
+  Tn:=AveTarget-AveAccErr/16.0;
+  If Tn<AveTarget/3 Then Tn:=AveTarget/3;
+  If Tn>AveTarget*2 Then Tn:=AveTarget*2;
+  If AveCxP>0 Then Begin
+   Qs:=AveCxP/Tn; Q:=AveQFromQstep(Qs);
+   If Q>AveQP+12 Then Q:=AveQP+12;
+   If Q<AveQP-12 Then Q:=AveQP-12;
+  End Else Q:=AveQP;
+  Q:=AveClip(8,255,Q);
+  AveEncodeOne(False,Q);
+  Bits:=AveOutLen*8;
+  Cx:=Bits*1.0*AvAcQ(AveFhQidx);
+  If AveCxP<=0 Then AveCxP:=Cx Else AveCxP:=0.5*AveCxP+0.5*Cx;
+  AveQP:=AveFhQidx;
+ End;
+ If AveBitrate>0 Then Begin
+  AveAccErr:=AveAccErr+AveOutLen*8-AveTarget;
+  If AveAccErr>AveTarget*40 Then AveAccErr:=AveTarget*40;
+  If AveAccErr<-AveTarget*40 Then AveAccErr:=-AveTarget*40;
+ End;
+ If Key Then AveSinceKey:=0;
+ Inc(AveSinceKey);
+ Pkt:=PEABuffer(AveOut); PktLen:=AveOutLen; IsKey:=Key; Dts:=AveFrameNo; Pts:=AveFrameNo;
+ Inc(AveFrameNo);
+ AvEFrame:=True;
+End;
+
+Function AvEFlush(Var Pkt: PEABuffer; Var PktLen: LongInt; Var IsKey: Boolean; Var Dts,Pts: LongInt): Boolean;
+Begin
+ PktLen:=0; IsKey:=False; Dts:=0; Pts:=0; Pkt:=PEABuffer(AveOut);
+ AvEFlush:=False;
+End;
+
+Function AvEAv1C(Var Buf: Array Of Byte): LongInt;
+Begin
+ AvEAv1C:=AveAv1CBuild(Buf);
+End;
+
+{ sequence header OBU (avec champ de taille), pour un fichier .obu brut }
+Function AvESeqHdr(Var Buf: Array Of Byte): LongInt;
+Var I: LongInt;
+Begin
+ For I:=0 To AveSeqLen-1 Do Buf[I]:=AveSeqBuf[I];
+ AvESeqHdr:=AveSeqLen;
+End;
+
+{ reconstruction (rognee, I420) de la derniere image codee }
+Procedure AvEGetRecon(Dst: PEABuffer);
+Var F: PAvFr; Y,P,Off,W,H: LongInt; S: PAvWA; X: LongInt;
+Begin
+ F:=AvSlot[AveLastSlot];
+ Off:=0;
+ For P:=0 To 2 Do Begin
+  If P=0 Then Begin W:=AveW; H:=AveH; End Else Begin W:=AveCw; H:=AveCh; End;
+  S:=F^.Pl[P];
+  For Y:=0 To H-1 Do Begin
+   For X:=0 To W-1 Do PAvBA(Dst)^[Off+Y*W+X]:=S^[Y*F^.Strd[P]+X];
+  End;
+  Inc(Off,W*H);
+ End;
 End;
 {$B-}
 { ======================================================================== }
@@ -122074,14 +127404,14 @@ Begin
  Sb:=MBegin('stbl');
  Sd:=MBegin('stsd'); M32(0); M32(1);
  If IsVideo Then Begin
-  If (MT.T^.Codec='hvc1') Or (MT.T^.Codec='hev1') Then Ent:=MBegin('hvc1') Else If MT.T^.Codec='s263' Then Ent:=MBegin('s263') Else If InList(MT.T^.Codec,'apco,apcs,apcn,apch,ap4h') Then Ent:=MBegin(MT.T^.Codec) Else If (MT.T^.Codec='AVdn') Or (MT.T^.Codec='AVdh') Then Ent:=MBegin(MT.T^.Codec) Else If MT.T^.Codec='MJPG' Then Ent:=MBegin('jpeg') Else Ent:=MBegin('avc1');
+  If (MT.T^.Codec='hvc1') Or (MT.T^.Codec='hev1') Then Ent:=MBegin('hvc1') Else If MT.T^.Codec='s263' Then Ent:=MBegin('s263') Else If MT.T^.Codec='vp09' Then Ent:=MBegin('vp09') Else If MT.T^.Codec='av01' Then Ent:=MBegin('av01') Else If InList(MT.T^.Codec,'apco,apcs,apcn,apch,ap4h') Then Ent:=MBegin(MT.T^.Codec) Else If (MT.T^.Codec='AVdn') Or (MT.T^.Codec='AVdh') Then Ent:=MBegin(MT.T^.Codec) Else If MT.T^.Codec='MJPG' Then Ent:=MBegin('jpeg') Else Ent:=MBegin('avc1');
   MZero(6); M16(1); MZero(16); M16(MT.T^.W); M16(MT.T^.H); M32($480000); M32($480000); M32(0); M16(1);
   MZero(32); M16($18); M16($FFFF);
   If (MT.T^.CfgLen>0) And ((MT.T^.Codec='AVdn') Or (MT.T^.Codec='AVdh')) Then Begin
    { atomes Avid (ACLR/APRG/ARES ou ADHR) directement apres l'entree visuelle }
    For I:=0 To MT.T^.CfgLen-1 Do M8(MT.T^.Cfg[I]);
   End Else If MT.T^.CfgLen>0 Then Begin
-  If (MT.T^.Codec='hvc1') Or (MT.T^.Codec='hev1') Then Cfg:=MBegin('hvcC') Else If MT.T^.Codec='s263' Then Cfg:=MBegin('d263') Else Cfg:=MBegin('avcC');
+  If (MT.T^.Codec='hvc1') Or (MT.T^.Codec='hev1') Then Cfg:=MBegin('hvcC') Else If MT.T^.Codec='s263' Then Cfg:=MBegin('d263') Else If MT.T^.Codec='vp09' Then Cfg:=MBegin('vpcC') Else If MT.T^.Codec='av01' Then Cfg:=MBegin('av1C') Else Cfg:=MBegin('avcC');
   For I:=0 To MT.T^.CfgLen-1 Do M8(MT.T^.Cfg[I]); MEnd(Cfg);
   If HdMuxMeta And ((MT.T^.Codec='hvc1') Or (MT.T^.Codec='hev1')) Then Begin K:=HdMp4Boxes(HdInfo,@HdMBuf); For I:=0 To K-1 Do M8(HdMBuf[I]); End;
   End;
@@ -122461,6 +127791,8 @@ Begin
  If C='avc1' Then MkvCodecId:='V_MPEG4/ISO/AVC'
  Else If (C='hvc1') Or (C='hev1') Then MkvCodecId:='V_MPEGH/ISO/HEVC'
  Else If C='VP80' Then MkvCodecId:='V_VP8'
+ Else If C='vp09' Then MkvCodecId:='V_VP9'
+ Else If C='av01' Then MkvCodecId:='V_AV1'
  Else If (C='MJPG') Or (C='AVdn') Or (C='AVdh') Then MkvCodecId:='V_MS/VFW/FOURCC'
  Else If C='mp4a' Then MkvCodecId:='A_AAC'
  Else If C='vorb' Then MkvCodecId:='A_VORBIS'
@@ -124681,7 +130013,8 @@ Begin
   DelFile(Es); If Au<>'' Then DelFile(Au);
  End Else If Pr.Ext='WEBM' Then Begin
   DelFile(Y4); DelFile(Es);
-  If Not Vp8Track(V,VMem,VJBitrate,Err) Then Exit;
+  If MemEncKind(Pr)>=8 Then Begin If Not MemEncodeTemp(MemEncKind(Pr),V,VMem,Err) Then Exit; End
+  Else If Not Vp8Track(V,VMem,VJBitrate,Err) Then Exit;
   FillChar(Tr,SizeOf(Tr),0); Tr[0].T:=@V; Tr[0].First:=0; Tr[0].Last:=V.N-1; Tr[0].Mem:=VMem; NT:=1;
   If HaveAudio Then Begin
    Au:=TmpName('OGG');
@@ -124844,6 +130177,34 @@ Begin
  MJEFree;
 End;
 
+Function Vp9EncodeTemp(Var Vo: TTrkIn; Var Mem: PBArr; Var Err: String): Boolean;
+Var Hb: Array[0..63] Of Byte; I: LongInt;
+Begin
+ Vp9EncodeTemp:=False;
+ V9EBegin(VJOutW,VJOutH,VJFn,VJFd,VJBitrate,Max(1,(VJFn*10) Div Max(VJFd,1)),8);
+ GenFrameFn:=V9EFrame; GenFlushFn:=V9EFlush;
+ If GenMemEncode(Vo,Mem,'vp09',Err) Then Begin
+  V9EVpcC(Hb);
+  For I:=0 To 11 Do Vo.Cfg[I]:=Hb[8+I]; Vo.CfgLen:=12;
+  Vp9EncodeTemp:=True;
+ End;
+ V9EFree;
+End;
+
+Function Av1EncodeTemp(Var Vo: TTrkIn; Var Mem: PBArr; Var Err: String): Boolean;
+Var Hb: Array[0..255] Of Byte; I,Hl: LongInt;
+Begin
+ Av1EncodeTemp:=False;
+ AvEBegin(VJOutW,VJOutH,VJFn,VJFd,VJBitrate,Max(1,(VJFn*10) Div Max(VJFd,1)));
+ GenFrameFn:=AvEFrame; GenFlushFn:=AvEFlush;
+ If GenMemEncode(Vo,Mem,'av01',Err) Then Begin
+  Hl:=AvEAv1C(Hb);
+  If Hl>8 Then Begin For I:=0 To Hl-9 Do Vo.Cfg[I]:=Hb[8+I]; Vo.CfgLen:=Hl-8; End;
+  Av1EncodeTemp:=True;
+ End;
+ AvEFree;
+End;
+
 Function ProResEncodeTemp(Var Vo: TTrkIn; Var Mem: PBArr; Var Err: String): Boolean;
 Begin
  PREBegin(VJOutW,VJOutH,VJFn,VJFd,0,MemEncSub);
@@ -124860,6 +130221,8 @@ Begin
  Else If Pr.VC='H263' Then MemEncKind:=2
  Else If Pr.VC='DNxHD' Then Begin MemEncKind:=6; If Pr.VKb<=0 Then MemEncSub:=-1 Else MemEncSub:=Pr.VKb; End
  Else If Pr.VC='MJPEG' Then MemEncKind:=7
+ Else If Pr.VC='VP9' Then MemEncKind:=8
+ Else If Pr.VC='AV1' Then MemEncKind:=9
  Else If Copy(Pr.VC,1,4)='PrRs' Then Begin
   MemEncKind:=5;
   If Pr.VC='PrRsPxy' Then MemEncSub:=0 Else If Pr.VC='PrRsLT' Then MemEncSub:=1
@@ -124876,6 +130239,8 @@ Begin
   5: MemEncodeTemp:=ProResEncodeTemp(Vo,Mem,Err);
   6: MemEncodeTemp:=DnxEncodeTemp(Vo,Mem,Err);
   7: MemEncodeTemp:=MjpegEncodeTemp(Vo,Mem,Err);
+  8: MemEncodeTemp:=Vp9EncodeTemp(Vo,Mem,Err);
+  9: MemEncodeTemp:=Av1EncodeTemp(Vo,Mem,Err);
   Else Err:='Encodeur video inconnu.';
  End;
 End;
