@@ -1170,7 +1170,7 @@ Function MediaKind(Const E: String): Integer;
 Begin
  MediaKind:=0;
  If E='' Then Exit;
- If InList(E,'AVI,MP4,MKV,MOV,WMV,FLV,WEBM,MPG,MPEG,VOB,TS,M2TS,MTS,3GP,3G2,M4V,ASF,OGV,F4V,MXF,DAT,RM,RMVB,DIVX,VIDEO') Then MediaKind:=2
+ If InList(E,'AVI,MP4,MKV,MOV,WMV,FLV,WEBM,MPG,MPEG,VOB,TS,M2TS,MTS,TP,TRP,M2T,264,H264,AVC,HEVC,H265,265,M2V,MPV,M1V,3GP,3G2,M4V,ASF,OGV,F4V,MXF,DAT,RM,RMVB,DIVX,VIDEO') Then MediaKind:=2
  Else If InList(E,'MP3,WAV,AIF,AIFF,AIFC,VOC,MOD,AAC,M4A,FLAC,OGG,OGA,WMA,AU,AC3,DTS,MP2,MPA,MKA,OPUS,AMR,WV,M4B,RA,CAF') Then MediaKind:=1
  Else If InList(E,'GIF,BMP,PNG,JPG,JPEG,PCX,TGA,TIF,TIFF,WEBP') Then MediaKind:=3;
 End;
@@ -1537,6 +1537,10 @@ Begin
  AddProf(0,'AVI MJPEG','AVI','MJPEG','MP3','Auto',8000,192,44100,2);
  AddProf(0,'MKV MJPEG','MKV','MJPEG','AAC','Auto',8000,192,44100,2);
  AddProf(0,'MKV','MKV','H264','AAC','Auto',5000,192,44100,2);
+ AddProf(0,'TS (MPEG-TS) H.264','TS','H264','AAC','Auto',5000,192,48000,2);
+ AddProf(0,'M2TS (Blu-ray) H.264','M2TS','H264','AAC','Auto',8000,192,48000,2);
+ AddProf(0,'MTS (AVCHD) H.264','MTS','H264','AAC','Auto',8000,192,48000,2);
+ AddProf(0,'TS (MPEG-TS) HEVC','TS','HEVC','AAC','Auto',3000,160,48000,2);
  AddProf(0,'MKV HEVC (H.265)','MKV','HEVC','AAC','Auto',3000,160,44100,2);
  AddProf(0,'AVI','AVI','MPEG4','MP3','Auto',3000,192,44100,2);
  AddProf(0,'WMV','WMV','WMV2','WMA','Auto',2500,128,44100,2);
@@ -1589,7 +1593,7 @@ End;
 { Le moteur integre sait produire ces sorties }
 Function EngineOut(Const Ext: String): Boolean;
 Begin
- EngineOut:=InList(Ext,'MP3,WAV,AIF,AU,GIF,BMP,MP4,MOV,M4V,3GP,3G2,FLV,MKV,M4A,AAC,OGG,AC3,WMA');
+ EngineOut:=InList(Ext,'MP3,WAV,AIF,AU,GIF,BMP,MP4,MOV,M4V,3GP,3G2,TS,M2TS,MTS,FLV,MKV,M4A,AAC,OGG,AC3,WMA');
 End;
 
 { ====================================================================== }
@@ -2219,6 +2223,8 @@ Begin
  End;
 End;
 
+Procedure ProbeTsMedia(Var M: TMedia; Raw: Boolean); Forward;
+
 Procedure Analyze(Var M: TMedia; Const Path: String);
 Var E,Mg: String; St: LongInt;
 Begin
@@ -2254,7 +2260,8 @@ Begin
   M.Kind:=1; ProbeID3(M,St); ProbeMP3(M,St); M.Fmt:='MP3';
   If M.Title='' Then M.Title:=BaseOf(Path);
  End
- Else If (CB(0)=$47) And (CB(188)=$47) Then Begin M.Fmt:='TS'; M.Kind:=2; End
+ Else If ((CB(0)=$47) And (CB(188)=$47)) Or ((CB(4)=$47) And (CB(196)=$47)) Or ((CB(0)=$47) And (CB(204)=$47)) Then Begin M.Fmt:='TS'; M.Kind:=2; CClose; ProbeTsMedia(M,False); Exit; End
+ Else If InList(E,'264,H264,AVC,HEVC,H265,265,M2V,MPV,M1V,BIT,26L') Then Begin M.Fmt:='ES'; M.Kind:=2; CClose; ProbeTsMedia(M,True); Exit; End
  Else If (M.Kind=0) Then M.Msg:='Format non reconnu';
  CClose;
  If M.Kind=0 Then M.Kind:=MediaKind(E);
@@ -30058,6 +30065,3596 @@ Begin
  PktLen:=0; IsKey:=False; Dts:=0; Pts:=0; Pkt:=HeOut;
  HeFlush:=False;
 End;
+{ ====================================================================== }
+{ pe_rawes.pas - Flux elementaires video bruts (Annex B H.264 / HEVC,      }
+{ MPEG-1/2 ES, VC-1 AP), decoupage en unites d'acces, index, SPS/POC.     }
+{ Ecrit pour ANYMP4 (FPC 3.2.2, mode TP, sans unite, sans directive include).         }
+{ Reference : ITU-T H.264/H.265/H.262, FFmpeg n6.1.1 (libavcodec/h264_ps,  }
+{ hevc_ps, h264_parser, hevc_parser, mpegvideo_parser) - LGPL 2.1+.        }
+{ Tous les identifiants globaux commencent par RawEs / TRawEs.             }
+{ ====================================================================== }
+
+Const
+ RawEsNoPts = -4611686018427387904;   { -2^62 : horodatage absent }
+ RawEsCNone = 0;  RawEsCH264 = 1;  RawEsCHEVC = 2;  RawEsCMpeg2 = 3;  RawEsCMpeg1 = 4;  RawEsCVC1 = 5;
+ RawEsFKey = 1;       { unite d'acces cle (IDR / IRAP / image I, point de reprise) }
+ RawEsFCorrupt = 2;   { paquets TS perdus pendant cette unite }
+ RawEsFDisc = 4;      { discontinuite de la base de temps avant cette unite }
+ RawEsFEst = 8;       { horodatages estimes (absents du flux) }
+ RawEsFSeg = 256;     { interne : debut de segment d'ordre d'affichage (IDR / GOP) }
+ RawEsKindVideo = 1;  RawEsKindAudio = 2;
+ RawEsMaxAu = 67108862;
+
+Type
+ TRawEsIdx = Packed Record
+  Off: Int64; Size: LongInt; Flags: LongInt; Pts: Int64; Dts: Int64;
+ End;
+ TRawEsIdxArr = Array[0..67108862] Of TRawEsIdx;
+ PRawEsIdxArr = ^TRawEsIdxArr;
+ TRawEsIdxHdr = Packed Record
+  Magic: Array[0..3] Of Char;
+  Version, Kind, Codec, Count, P1, P2, P3, P4: LongInt;
+  FirstPts: Int64; Rsv: LongInt;
+ End;
+ TRawEsLArr = Array[0..536870910] Of LongInt;
+ PRawEsLArr = ^TRawEsLArr;
+
+ TRawEsVInfo = Record
+  Valid: Boolean;
+  Codec, Width, Height, FpsNum, FpsDen: LongInt;
+  Profile, Level, Chroma, BitDepth, SarNum, SarDen, Reorder: LongInt;
+  Interlaced: Boolean;
+  BitRate: LongInt;
+  ProfName: String[32];
+ End;
+
+ TRawEsSps = Record
+  Valid: Boolean;
+  Log2MaxFn, PocType, Log2MaxPoc, DeltaZero, OffNonRef, OffTB, NCycle, FrameMbsOnly, SepColour: LongInt;
+  Cyc: Array[0..255] Of LongInt;
+ End;
+ TRawEsPps = Record
+  Valid: Boolean;
+  SpsId, BottomPoc, DepSlice, OutFlag, ExtraBits: LongInt;
+ End;
+
+ TRawEsBr = Record
+  B: PEABuffer; NBits, Pos: LongInt; Err: Boolean;
+ End;
+
+Const
+ RawEsSarTab: Array[0..16,0..1] Of Word = ((0,1),(1,1),(12,11),(10,11),(16,11),(40,33),(24,11),(20,11),(32,11),(80,33),(18,11),(15,11),(64,33),(160,99),(4,3),(3,2),(2,1));
+ RawEsMpegFps: Array[0..8,0..1] Of Word = ((0,1),(24000,1001),(24,1),(25,1),(30000,1001),(30,1),(50,1),(60000,1001),(60,1));
+
+Procedure RawEsBrInit(Var R: TRawEsBr; P: PEABuffer; Len: LongInt);
+Begin
+ R.B:=P; R.NBits:=Len*8; R.Pos:=0; R.Err:=False;
+End;
+
+Function RawEsBrBit(Var R: TRawEsBr): LongInt;
+Begin
+ If R.Pos>=R.NBits Then Begin R.Err:=True; RawEsBrBit:=0; Exit; End;
+ RawEsBrBit:=(R.B^[R.Pos Shr 3] Shr (7-(R.Pos And 7))) And 1;
+ Inc(R.Pos);
+End;
+
+Function RawEsBrBits(Var R: TRawEsBr; N: LongInt): LongInt;
+Var V: LongInt; K: LongInt;
+Begin
+ V:=0;
+ For K:=1 To N Do V:=(V Shl 1) Or RawEsBrBit(R);
+ RawEsBrBits:=V;
+End;
+
+Function RawEsBrU32(Var R: TRawEsBr): Int64;
+Var Hi,Lo: LongInt;
+Begin
+ Hi:=RawEsBrBits(R,16); Lo:=RawEsBrBits(R,16);
+ RawEsBrU32:=Int64(Hi)*65536+Lo;
+End;
+
+Procedure RawEsBrSkip(Var R: TRawEsBr; N: LongInt);
+Begin
+ Inc(R.Pos,N);
+ If R.Pos>R.NBits Then Begin R.Err:=True; R.Pos:=R.NBits; End;
+End;
+
+Function RawEsBrUe(Var R: TRawEsBr): LongInt;
+Var Z: LongInt;
+Begin
+ Z:=0;
+ While (RawEsBrBit(R)=0) And (Not R.Err) And (Z<32) Do Inc(Z);
+ If (Z>=32) Or R.Err Then Begin R.Err:=True; RawEsBrUe:=0; Exit; End;
+ If Z=0 Then RawEsBrUe:=0 Else RawEsBrUe:=LongInt((Int64(1) Shl Z)-1+RawEsBrBits(R,Z));
+End;
+
+Function RawEsBrSe(Var R: TRawEsBr): LongInt;
+Var K: LongInt;
+Begin
+ K:=RawEsBrUe(R);
+ If (K And 1)<>0 Then RawEsBrSe:=(K+1) Div 2 Else RawEsBrSe:=-(K Div 2);
+End;
+
+{ Retire les octets d'emulation 00 00 03 ; retourne la longueur de Dst }
+Function RawEsUnescape(Src: PEABuffer; Len: LongInt; Dst: PEABuffer): LongInt;
+Var I,N,Z: LongInt; B: Byte;
+Begin
+ N:=0; Z:=0;
+ For I:=0 To Len-1 Do Begin
+  B:=Src^[I];
+  If (Z>=2) And (B=3) Then Z:=0
+  Else Begin
+   Dst^[N]:=B; Inc(N);
+   If B=0 Then Inc(Z) Else Z:=0;
+  End;
+ End;
+ RawEsUnescape:=N;
+End;
+
+Function RawEsProfName(Codec,Profile: LongInt): String;
+Begin
+ RawEsProfName:='';
+ Case Codec Of
+  RawEsCH264: Case Profile Of
+   66: RawEsProfName:='Baseline'; 77: RawEsProfName:='Main'; 88: RawEsProfName:='Extended'; 100: RawEsProfName:='High';
+   110: RawEsProfName:='High 10'; 122: RawEsProfName:='High 4:2:2'; 244: RawEsProfName:='High 4:4:4 Predictive';
+   44: RawEsProfName:='CAVLC 4:4:4'; 118: RawEsProfName:='Multiview High'; 128: RawEsProfName:='Stereo High';
+   83: RawEsProfName:='Scalable Baseline'; 86: RawEsProfName:='Scalable High';
+   Else RawEsProfName:='Profile';
+  End;
+  RawEsCHEVC: Case Profile Of
+   1: RawEsProfName:='Main'; 2: RawEsProfName:='Main 10'; 3: RawEsProfName:='Main Still Picture'; 4: RawEsProfName:='Rext'; 9: RawEsProfName:='SCC';
+   Else RawEsProfName:='Profile';
+  End;
+  RawEsCMpeg2,RawEsCMpeg1: Case Profile Of
+   1: RawEsProfName:='High'; 2: RawEsProfName:='Spatially Scalable'; 3: RawEsProfName:='SNR Scalable'; 4: RawEsProfName:='Main'; 5: RawEsProfName:='Simple';
+   Else RawEsProfName:='';
+  End;
+  RawEsCVC1: Case Profile Of 0: RawEsProfName:='Simple'; 1: RawEsProfName:='Main'; 3: RawEsProfName:='Advanced'; End;
+ End;
+End;
+
+Procedure RawEsH264Hrd(Var R: TRawEsBr);
+Var Cnt,I: LongInt;
+Begin
+ Cnt:=RawEsBrUe(R); RawEsBrSkip(R,8);
+ If Cnt>31 Then Begin R.Err:=True; Exit; End;
+ For I:=0 To Cnt Do Begin RawEsBrUe(R); RawEsBrUe(R); RawEsBrSkip(R,1); End;
+ RawEsBrSkip(R,20);
+End;
+
+Procedure RawEsH264SkipScaling(Var R: TRawEsBr; Size: LongInt);
+Var J,Last,Nxt,D: LongInt;
+Begin
+ Last:=8; Nxt:=8;
+ For J:=0 To Size-1 Do Begin
+  If Nxt<>0 Then Begin D:=RawEsBrSe(R); Nxt:=(Last+D+256) And 255; End;
+  If Nxt<>0 Then Last:=Nxt;
+ End;
+End;
+
+{ P = RBSP de la SPS H.264 SANS l'octet d'en-tete NAL, deja debarrasse des octets d'emulation }
+Function RawEsParseH264Sps(P: PEABuffer; Len: LongInt; Var V: TRawEsVInfo; Var Sp: TRawEsSps; Var SpsId: LongInt): Boolean;
+Var R: TRawEsBr; Pf,Lv,Chroma,Sep,Bd,I,N,Fmo,Mbw,Mbh,Cl,Cr,Ct,Cb,Cux,Cuy,Tmp,Nu,Ts,Cat,Idc,Sw,Sh: LongInt; Fixed: LongInt; Cons: LongInt;
+Begin
+ RawEsParseH264Sps:=False;
+ If Len<4 Then Exit;
+ RawEsBrInit(R,P,Len);
+ Pf:=RawEsBrBits(R,8); Cons:=RawEsBrBits(R,8); Lv:=RawEsBrBits(R,8); SpsId:=RawEsBrUe(R);
+ If (SpsId<0) Or (SpsId>31) Then Exit;
+ Chroma:=1; Sep:=0; Bd:=8;
+ Case Pf Of
+  100,110,122,244,44,83,86,118,128,138,139,134,135: Begin
+   Chroma:=RawEsBrUe(R);
+   If Chroma=3 Then Sep:=RawEsBrBit(R);
+   Bd:=RawEsBrUe(R)+8; RawEsBrUe(R); RawEsBrSkip(R,1);
+   If RawEsBrBit(R)<>0 Then Begin
+    If Chroma<>3 Then N:=8 Else N:=12;
+    For I:=0 To N-1 Do
+     If RawEsBrBit(R)<>0 Then Begin
+      If I<6 Then RawEsH264SkipScaling(R,16) Else RawEsH264SkipScaling(R,64);
+     End;
+   End;
+  End;
+ End;
+ FillChar(Sp,SizeOf(Sp),0);
+ Sp.Log2MaxFn:=RawEsBrUe(R)+4;
+ Sp.PocType:=RawEsBrUe(R);
+ If Sp.PocType=0 Then Sp.Log2MaxPoc:=RawEsBrUe(R)+4
+ Else If Sp.PocType=1 Then Begin
+  Sp.DeltaZero:=RawEsBrBit(R); Sp.OffNonRef:=RawEsBrSe(R); Sp.OffTB:=RawEsBrSe(R);
+  Sp.NCycle:=RawEsBrUe(R);
+  If (Sp.NCycle<0) Or (Sp.NCycle>255) Then Exit;
+  For I:=0 To Sp.NCycle-1 Do Sp.Cyc[I]:=RawEsBrSe(R);
+ End;
+ RawEsBrUe(R); RawEsBrSkip(R,1);
+ Mbw:=RawEsBrUe(R); Mbh:=RawEsBrUe(R);
+ Fmo:=RawEsBrBit(R);
+ If Fmo=0 Then RawEsBrSkip(R,1);
+ RawEsBrSkip(R,1);
+ Cl:=0; Cr:=0; Ct:=0; Cb:=0;
+ If RawEsBrBit(R)<>0 Then Begin Cl:=RawEsBrUe(R); Cr:=RawEsBrUe(R); Ct:=RawEsBrUe(R); Cb:=RawEsBrUe(R); End;
+ If R.Err Then Exit;
+ If Sep<>0 Then Cat:=0 Else Cat:=Chroma;
+ If Cat=0 Then Begin Cux:=1; Cuy:=2-Fmo; End
+ Else Begin
+  If Chroma=3 Then Cux:=1 Else Cux:=2;
+  If Chroma=1 Then Cuy:=2 Else Cuy:=1;
+  Cuy:=Cuy*(2-Fmo);
+ End;
+ Sp.Valid:=True; Sp.FrameMbsOnly:=Fmo; Sp.SepColour:=Sep;
+ FillChar(V,SizeOf(V),0);
+ V.Codec:=RawEsCH264; V.Profile:=Pf; V.Level:=Lv; V.Chroma:=Chroma; V.BitDepth:=Bd;
+ V.Width:=(Mbw+1)*16-Cux*(Cl+Cr); V.Height:=(2-Fmo)*(Mbh+1)*16-Cuy*(Ct+Cb);
+ V.Interlaced:=Fmo=0; V.SarNum:=1; V.SarDen:=1; V.Reorder:=-1;
+ V.ProfName:=RawEsProfName(RawEsCH264,Pf);
+ If (Cons<>0) And False Then ;
+ If (V.Width<=0) Or (V.Height<=0) Then Exit;
+ { VUI }
+ If RawEsBrBit(R)<>0 Then Begin
+  If RawEsBrBit(R)<>0 Then Begin
+   Idc:=RawEsBrBits(R,8);
+   If Idc=255 Then Begin Sw:=RawEsBrBits(R,16); Sh:=RawEsBrBits(R,16); If (Sw>0) And (Sh>0) Then Begin V.SarNum:=Sw; V.SarDen:=Sh; End; End
+   Else If (Idc>0) And (Idc<=16) Then Begin V.SarNum:=RawEsSarTab[Idc,0]; V.SarDen:=RawEsSarTab[Idc,1]; End;
+  End;
+  If RawEsBrBit(R)<>0 Then RawEsBrSkip(R,1);
+  If RawEsBrBit(R)<>0 Then Begin
+   RawEsBrSkip(R,4);
+   If RawEsBrBit(R)<>0 Then RawEsBrSkip(R,24);
+  End;
+  If RawEsBrBit(R)<>0 Then Begin RawEsBrUe(R); RawEsBrUe(R); End;
+  If RawEsBrBit(R)<>0 Then Begin
+   Nu:=Longint(RawEsBrU32(R)); Ts:=Longint(RawEsBrU32(R)); Fixed:=RawEsBrBit(R);
+   If (Nu>0) And (Ts>0) And (Not R.Err) Then Begin
+    V.FpsNum:=Ts; V.FpsDen:=Nu*2;
+    While ((V.FpsNum And 1)=0) And ((V.FpsDen And 1)=0) Do Begin V.FpsNum:=V.FpsNum Div 2; V.FpsDen:=V.FpsDen Div 2; End;
+   End;
+  End;
+  Tmp:=0;
+  If RawEsBrBit(R)<>0 Then Begin RawEsH264Hrd(R); Tmp:=1; End;
+  If RawEsBrBit(R)<>0 Then Begin RawEsH264Hrd(R); Tmp:=1; End;
+  If Tmp<>0 Then RawEsBrSkip(R,1);
+  RawEsBrSkip(R,1);
+  If RawEsBrBit(R)<>0 Then Begin
+   RawEsBrSkip(R,1); RawEsBrUe(R); RawEsBrUe(R); RawEsBrUe(R); RawEsBrUe(R);
+   Tmp:=RawEsBrUe(R);
+   If Not R.Err Then V.Reorder:=Tmp;
+  End;
+  If R.Err Then Begin V.FpsNum:=V.FpsNum; End;
+ End;
+ V.Valid:=True;
+ RawEsParseH264Sps:=True;
+End;
+
+Procedure RawEsHevcPtl(Var R: TRawEsBr; MaxSub: LongInt; Var Prof,Lvl: LongInt);
+Var I: LongInt; Pp,Lp: Array[0..7] Of LongInt;
+Begin
+ RawEsBrSkip(R,3); Prof:=RawEsBrBits(R,5);
+ RawEsBrSkip(R,32+4+43+1);
+ Lvl:=RawEsBrBits(R,8);
+ For I:=0 To MaxSub-1 Do Begin Pp[I]:=RawEsBrBit(R); Lp[I]:=RawEsBrBit(R); End;
+ If MaxSub>0 Then For I:=MaxSub To 7 Do RawEsBrSkip(R,2);
+ For I:=0 To MaxSub-1 Do Begin
+  If Pp[I]<>0 Then RawEsBrSkip(R,88);
+  If Lp[I]<>0 Then RawEsBrSkip(R,8);
+ End;
+End;
+
+Function RawEsHevcStRps(Var R: TRawEsBr; Idx,NumSets: LongInt; Var Nd: Array Of LongInt): Boolean;
+Var Inter,Di,Ref,J,Cnt,Used,Ud,Nn,Np,I: LongInt;
+Begin
+ RawEsHevcStRps:=False;
+ Inter:=0;
+ If Idx<>0 Then Inter:=RawEsBrBit(R);
+ If Inter<>0 Then Begin
+  Di:=1;
+  If Idx=NumSets Then Di:=RawEsBrUe(R)+1;
+  RawEsBrBit(R); RawEsBrUe(R);
+  Ref:=Idx-Di;
+  If (Ref<0) Or (Ref>=Idx) Or R.Err Then Exit;
+  Cnt:=0;
+  For J:=0 To Nd[Ref] Do Begin
+   Used:=RawEsBrBit(R); Ud:=1;
+   If Used=0 Then Ud:=RawEsBrBit(R);
+   If (Used<>0) Or (Ud<>0) Then Inc(Cnt);
+  End;
+  Nd[Idx]:=Cnt;
+ End Else Begin
+  Nn:=RawEsBrUe(R); Np:=RawEsBrUe(R);
+  If (Nn<0) Or (Nn>16) Or (Np<0) Or (Np>16) Or R.Err Then Exit;
+  For I:=1 To Nn+Np Do Begin RawEsBrUe(R); RawEsBrBit(R); End;
+  Nd[Idx]:=Nn+Np;
+ End;
+ RawEsHevcStRps:=Not R.Err;
+End;
+
+{ P = RBSP de la SPS HEVC SANS les 2 octets d'en-tete NAL }
+Function RawEsParseHevcSps(P: PEABuffer; Len: LongInt; Var V: TRawEsVInfo; Var Sp: TRawEsSps; Var SpsId: LongInt): Boolean;
+Var R: TRawEsBr; Ms,Prof,Lvl,Chroma,Sep,W,H,Cl,Cr,Ct,Cb,Bd,I,Lp,Ns,Nlt,Sw,Sh,Idc,Tmp,Cux,Cuy,Sid,SizeId,MatId,Cn,J: LongInt; Nd: Array[0..64] Of LongInt; Nu,Ts: Int64; Flag: LongInt;
+ Sub: LongInt; Reo: LongInt;
+Begin
+ RawEsParseHevcSps:=False;
+ If Len<8 Then Exit;
+ RawEsBrInit(R,P,Len);
+ RawEsBrSkip(R,4); Ms:=RawEsBrBits(R,3); RawEsBrSkip(R,1);
+ RawEsHevcPtl(R,Ms,Prof,Lvl);
+ SpsId:=RawEsBrUe(R);
+ If (SpsId<0) Or (SpsId>15) Then Exit;
+ Chroma:=RawEsBrUe(R); Sep:=0;
+ If Chroma=3 Then Sep:=RawEsBrBit(R);
+ W:=RawEsBrUe(R); H:=RawEsBrUe(R);
+ Cl:=0; Cr:=0; Ct:=0; Cb:=0;
+ If RawEsBrBit(R)<>0 Then Begin Cl:=RawEsBrUe(R); Cr:=RawEsBrUe(R); Ct:=RawEsBrUe(R); Cb:=RawEsBrUe(R); End;
+ Bd:=RawEsBrUe(R)+8; RawEsBrUe(R);
+ FillChar(Sp,SizeOf(Sp),0);
+ Sp.Log2MaxPoc:=RawEsBrUe(R)+4;
+ Sub:=RawEsBrBit(R); Reo:=-1;
+ If Sub<>0 Then I:=0 Else I:=Ms;
+ While I<=Ms Do Begin
+  RawEsBrUe(R); Tmp:=RawEsBrUe(R); RawEsBrUe(R);
+  Reo:=Tmp;
+  Inc(I);
+ End;
+ If R.Err Then Exit;
+ RawEsBrUe(R); RawEsBrUe(R); RawEsBrUe(R); RawEsBrUe(R); RawEsBrUe(R); RawEsBrUe(R);
+ If RawEsBrBit(R)<>0 Then Begin
+  If RawEsBrBit(R)<>0 Then Begin
+   For SizeId:=0 To 3 Do Begin
+    MatId:=0;
+    While MatId<6 Do Begin
+     If RawEsBrBit(R)=0 Then RawEsBrUe(R)
+     Else Begin
+      Cn:=64; If (1 Shl (4+(SizeId Shl 1)))<64 Then Cn:=1 Shl (4+(SizeId Shl 1));
+      If SizeId>1 Then RawEsBrSe(R);
+      For J:=1 To Cn Do RawEsBrSe(R);
+     End;
+     If SizeId=3 Then Inc(MatId,3) Else Inc(MatId);
+    End;
+   End;
+  End;
+ End;
+ RawEsBrSkip(R,2);
+ If RawEsBrBit(R)<>0 Then Begin RawEsBrSkip(R,8); RawEsBrUe(R); RawEsBrUe(R); RawEsBrSkip(R,1); End;
+ Ns:=RawEsBrUe(R);
+ If (Ns<0) Or (Ns>64) Or R.Err Then Exit;
+ For I:=0 To Ns-1 Do If Not RawEsHevcStRps(R,I,Ns,Nd) Then Exit;
+ If RawEsBrBit(R)<>0 Then Begin
+  Nlt:=RawEsBrUe(R);
+  If (Nlt<0) Or (Nlt>32) Then Exit;
+  For I:=1 To Nlt Do Begin RawEsBrSkip(R,Sp.Log2MaxPoc); RawEsBrSkip(R,1); End;
+ End;
+ RawEsBrSkip(R,2);
+ If R.Err Then Exit;
+ FillChar(V,SizeOf(V),0);
+ V.Codec:=RawEsCHEVC; V.Profile:=Prof; V.Level:=Lvl; V.Chroma:=Chroma; V.BitDepth:=Bd; V.Reorder:=Reo;
+ If (Sep<>0) Then Begin Cux:=1; Cuy:=1; End
+ Else Begin
+  If (Chroma=1) Or (Chroma=2) Then Cux:=2 Else Cux:=1;
+  If Chroma=1 Then Cuy:=2 Else Cuy:=1;
+ End;
+ V.Width:=W-Cux*(Cl+Cr); V.Height:=H-Cuy*(Ct+Cb);
+ V.SarNum:=1; V.SarDen:=1; V.ProfName:=RawEsProfName(RawEsCHEVC,Prof);
+ Sp.Valid:=True; Sp.SepColour:=Sep;
+ If (V.Width<=0) Or (V.Height<=0) Then Exit;
+ If RawEsBrBit(R)<>0 Then Begin
+  If RawEsBrBit(R)<>0 Then Begin
+   Idc:=RawEsBrBits(R,8);
+   If Idc=255 Then Begin Sw:=RawEsBrBits(R,16); Sh:=RawEsBrBits(R,16); If (Sw>0) And (Sh>0) Then Begin V.SarNum:=Sw; V.SarDen:=Sh; End; End
+   Else If (Idc>0) And (Idc<=16) Then Begin V.SarNum:=RawEsSarTab[Idc,0]; V.SarDen:=RawEsSarTab[Idc,1]; End;
+  End;
+  If RawEsBrBit(R)<>0 Then RawEsBrSkip(R,1);
+  If RawEsBrBit(R)<>0 Then Begin
+   RawEsBrSkip(R,4);
+   If RawEsBrBit(R)<>0 Then RawEsBrSkip(R,24);
+  End;
+  If RawEsBrBit(R)<>0 Then Begin RawEsBrUe(R); RawEsBrUe(R); End;
+  RawEsBrSkip(R,1);
+  Flag:=RawEsBrBit(R);
+  If Flag<>0 Then V.Interlaced:=True;
+  RawEsBrSkip(R,1);
+  If RawEsBrBit(R)<>0 Then Begin RawEsBrUe(R); RawEsBrUe(R); RawEsBrUe(R); RawEsBrUe(R); End;
+  If RawEsBrBit(R)<>0 Then Begin
+   Nu:=RawEsBrU32(R); Ts:=RawEsBrU32(R);
+   If (Nu>0) And (Ts>0) And (Not R.Err) And (Ts<2147483647) And (Nu<2147483647) Then Begin
+    V.FpsNum:=LongInt(Ts); V.FpsDen:=LongInt(Nu);
+    While ((V.FpsNum And 1)=0) And ((V.FpsDen And 1)=0) Do Begin V.FpsNum:=V.FpsNum Div 2; V.FpsDen:=V.FpsDen Div 2; End;
+   End;
+  End;
+ End;
+ V.Valid:=True;
+ RawEsParseHevcSps:=True;
+End;
+
+{ Entete de sequence MPEG-1/2 : P pointe apres le code 00 00 01 B3 }
+Function RawEsParseMpegSeq(P: PEABuffer; Len: LongInt; Var V: TRawEsVInfo): Boolean;
+Var Fr,Ar: LongInt;
+Begin
+ RawEsParseMpegSeq:=False;
+ If Len<8 Then Exit;
+ FillChar(V,SizeOf(V),0);
+ V.Codec:=RawEsCMpeg1;
+ V.Width:=(P^[0] Shl 4) Or (P^[1] Shr 4);
+ V.Height:=((P^[1] And 15) Shl 8) Or P^[2];
+ Ar:=P^[3] Shr 4; Fr:=P^[3] And 15;
+ If (Fr>=1) And (Fr<=8) Then Begin V.FpsNum:=RawEsMpegFps[Fr,0]; V.FpsDen:=RawEsMpegFps[Fr,1]; End;
+ V.BitRate:=LongInt((((Int64(P^[4]) Shl 10) Or (Int64(P^[5]) Shl 2) Or (P^[6] Shr 6)))*400);
+ V.SarNum:=1; V.SarDen:=1; V.Chroma:=1; V.BitDepth:=8; V.Reorder:=-1;
+ If (V.Width>0) And (V.Height>0) Then Begin V.Valid:=True; RawEsParseMpegSeq:=True; End;
+End;
+
+{ Extension de sequence (id 1) : P pointe sur l'octet qui suit le code B5 }
+Procedure RawEsParseMpegSeqExt(P: PEABuffer; Len: LongInt; Var V: TRawEsVInfo);
+Var Pl,Prog,Cf,Hx,Vx,Brx,Fn,Fd,I: LongInt;
+Begin
+ If Len<6 Then Exit;
+ If (P^[0] Shr 4)<>1 Then Exit;
+ Pl:=((P^[0] And 15) Shl 4) Or (P^[1] Shr 4);
+ Prog:=(P^[1] Shr 3) And 1; Cf:=(P^[1] Shr 1) And 3;
+ Hx:=((P^[1] And 1) Shl 1) Or (P^[2] Shr 7); Vx:=(P^[2] Shr 5) And 3;
+ Brx:=((P^[2] And 31) Shl 7) Or (P^[3] Shr 1);
+ Fn:=(P^[5] Shr 5) And 3; Fd:=P^[5] And 31;
+ V.Codec:=RawEsCMpeg2;
+ V.Profile:=(Pl Shr 4) And 7; V.Level:=Pl And 15;
+ If (Pl And $80)<>0 Then Begin V.Profile:=0; End;
+ V.Interlaced:=Prog=0; V.Chroma:=Cf;
+ V.Width:=V.Width Or (Hx Shl 12); V.Height:=V.Height Or (Vx Shl 12);
+ If (Fn<>0) Or (Fd<>0) Then Begin
+  V.FpsNum:=V.FpsNum*(Fn+1); V.FpsDen:=V.FpsDen*(Fd+1);
+ End;
+ If Brx<>0 Then V.BitRate:=V.BitRate+Brx*(1 Shl 18)*400;
+ V.ProfName:=RawEsProfName(RawEsCMpeg2,V.Profile);
+End;
+
+{ ====================================================================== }
+{ Decoupeur d'unites d'acces (flux d'octets Annex B / MPEG ES)             }
+{ ====================================================================== }
+Type
+ TRawEsMk = Record Pos,Pts,Dts: Int64; End;
+ TRawEsSplit = Record
+  Codec: LongInt;
+  WriteOut, OutOpen: Boolean; OutF: File; OutBuf: PEABuffer; OutN: LongInt;
+  Pos, Origin: Int64; GotOrigin: Boolean;
+  Z: LongInt;
+  UOpen: Boolean; UStart: Int64; UN: LongInt; UBuf: Array[0..1023] Of Byte;
+  UEsc: Array[0..1100] Of Byte;
+  Aus: PRawEsIdxArr; NAu, CapAu: LongInt; Poc: PRawEsLArr;
+  HaveAu, CurVcl, InSecond, FieldPend, GopFlag, AfterEos: Boolean;
+  PendFlags: LongInt;
+  MkN: LongInt; Mk: Array[0..63] Of TRawEsMk;
+  Vi: TRawEsVInfo; ViSet: Boolean; NSps: LongInt;
+  SpsList: Array[0..31] Of TRawEsSps; PpsList: Array[0..255] Of TRawEsPps;
+  PrevMsb, PrevLsb, PrevFn, PrevFnOff: LongInt;
+  SeqExtDone, FieldSeen: Boolean;
+ End;
+ PRawEsSplit = ^TRawEsSplit;
+
+Const
+ RawEsOutSize = 262144;
+
+Procedure RawEsOutFlush(Var S: TRawEsSplit);
+Var Act: LongInt;
+Begin
+ If S.OutOpen And (S.OutN>0) Then Begin
+  {$I-}BlockWrite(S.OutF,S.OutBuf^,S.OutN,Act);{$I+}
+  If IOResult<>0 Then Act:=-1;
+  S.OutN:=0;
+ End;
+End;
+
+Procedure RawEsOutWrite(Var S: TRawEsSplit; P: PEABuffer; Len: LongInt);
+Var Act: LongInt;
+Begin
+ If (Not S.OutOpen) Or (Len<=0) Then Exit;
+ If S.OutN+Len>RawEsOutSize Then RawEsOutFlush(S);
+ If Len>=RawEsOutSize Then Begin
+  {$I-}BlockWrite(S.OutF,P^,Len,Act);{$I+}
+  If IOResult<>0 Then Act:=-1;
+ End Else Begin
+  Move(P^,S.OutBuf^[S.OutN],Len); Inc(S.OutN,Len);
+ End;
+End;
+
+{ Initialise le decoupeur. OutPath<>'' : les octets du flux sont ecrits dans ce fichier (a partir du premier code de depart) }
+Procedure RawEsSplitInit(Var S: TRawEsSplit; Codec: LongInt; Const OutPath: String);
+Var Code: LongInt;
+Begin
+ FillChar(S,SizeOf(S),0);
+ S.Codec:=Codec;
+ If OutPath<>'' Then Begin
+  Assign(S.OutF,OutPath);
+  {$I-}Rewrite(S.OutF,1); Code:=IOResult;{$I+}
+  If Code<>0 Then Begin S.OutOpen:=False; Exit; End;
+  S.OutOpen:=True; S.WriteOut:=True;
+  GetMem(S.OutBuf,RawEsOutSize);
+ End;
+ S.CapAu:=1024;
+ GetMem(S.Aus,S.CapAu*SizeOf(TRawEsIdx));
+ GetMem(S.Poc,S.CapAu*4);
+End;
+
+Procedure RawEsSplitFree(Var S: TRawEsSplit);
+Begin
+ If S.OutOpen Then Begin
+  RawEsOutFlush(S);
+  {$I-}Close(S.OutF);{$I+}
+  If IOResult<>0 Then ;
+  S.OutOpen:=False;
+ End;
+ If S.OutBuf<>Nil Then Begin FreeMem(S.OutBuf); S.OutBuf:=Nil; End;
+ If S.Aus<>Nil Then Begin FreeMem(S.Aus); S.Aus:=Nil; End;
+ If S.Poc<>Nil Then Begin FreeMem(S.Poc); S.Poc:=Nil; End;
+ S.NAu:=0; S.CapAu:=0;
+End;
+
+Procedure RawEsAddMarker(Var S: TRawEsSplit; Pts,Dts: Int64);
+Var I: LongInt;
+Begin
+ If S.MkN>=64 Then Begin
+  For I:=1 To 63 Do S.Mk[I-1]:=S.Mk[I];
+  S.MkN:=63;
+ End;
+ S.Mk[S.MkN].Pos:=S.Pos; S.Mk[S.MkN].Pts:=Pts; S.Mk[S.MkN].Dts:=Dts;
+ Inc(S.MkN);
+End;
+
+Procedure RawEsMarkCorrupt(Var S: TRawEsSplit);
+Begin
+ If S.HaveAu And (S.NAu>0) Then S.Aus^[S.NAu-1].Flags:=S.Aus^[S.NAu-1].Flags Or RawEsFCorrupt
+ Else S.PendFlags:=S.PendFlags Or RawEsFCorrupt;
+End;
+
+Procedure RawEsMarkDisc(Var S: TRawEsSplit);
+Begin
+ S.PendFlags:=S.PendFlags Or RawEsFDisc;
+End;
+
+Procedure RawEsBeginAu(Var S: TRawEsSplit; P: Int64);
+Var I,K,Best: LongInt; A: ^TRawEsIdx;
+Begin
+ If S.NAu=0 Then P:=S.Origin;
+ If S.NAu>0 Then S.Aus^[S.NAu-1].Size:=LongInt((P-S.Origin)-S.Aus^[S.NAu-1].Off);
+ If S.NAu>=S.CapAu Then Begin
+  If S.CapAu>=RawEsMaxAu Then Exit;
+  S.CapAu:=S.CapAu*2;
+  If S.CapAu>RawEsMaxAu Then S.CapAu:=RawEsMaxAu;
+  ReallocMem(S.Aus,S.CapAu*SizeOf(TRawEsIdx));
+  ReallocMem(S.Poc,S.CapAu*4);
+ End;
+ A:=@S.Aus^[S.NAu];
+ A^.Off:=P-S.Origin; A^.Size:=0; A^.Flags:=S.PendFlags; S.PendFlags:=0;
+ A^.Pts:=RawEsNoPts; A^.Dts:=RawEsNoPts;
+ S.Poc^[S.NAu]:=0;
+ Best:=-1;
+ For I:=0 To S.MkN-1 Do If S.Mk[I].Pos<=P Then Best:=I;
+ If Best>=0 Then Begin
+  A^.Pts:=S.Mk[Best].Pts; A^.Dts:=S.Mk[Best].Dts;
+  If A^.Dts=RawEsNoPts Then A^.Dts:=A^.Pts;
+  K:=0;
+  For I:=Best+1 To S.MkN-1 Do Begin S.Mk[K]:=S.Mk[I]; Inc(K); End;
+  S.MkN:=K;
+ End;
+ Inc(S.NAu);
+ S.HaveAu:=True; S.CurVcl:=False; S.InSecond:=False;
+End;
+
+Procedure RawEsSetKey(Var S: TRawEsSplit);
+Begin
+ If S.NAu>0 Then S.Aus^[S.NAu-1].Flags:=S.Aus^[S.NAu-1].Flags Or RawEsFKey;
+End;
+
+Procedure RawEsSetSeg(Var S: TRawEsSplit);
+Begin
+ If S.NAu>0 Then S.Aus^[S.NAu-1].Flags:=S.Aus^[S.NAu-1].Flags Or RawEsFSeg;
+End;
+
+{ ---- H.264 ---- }
+Procedure RawEsH264Pps(Var S: TRawEsSplit);
+Var R: TRawEsBr; Id,Sid,E: LongInt;
+Begin
+ RawEsBrInit(R,@S.UEsc,RawEsUnescape(@S.UBuf[1],S.UN-1,@S.UEsc));
+ Id:=RawEsBrUe(R); Sid:=RawEsBrUe(R); E:=RawEsBrBit(R);
+ If R.Err Or (Id<0) Or (Id>255) Or (Sid<0) Or (Sid>31) Then Exit;
+ S.PpsList[Id].Valid:=True; S.PpsList[Id].SpsId:=Sid; S.PpsList[Id].BottomPoc:=RawEsBrBit(R);
+End;
+
+Function RawEsH264Poc(Var S: TRawEsSplit; Ref,T: LongInt): LongInt;
+Var R: TRawEsBr; Pi,Si,Fn,Field,Bottom,Lsb,Msb,Max2,Db,D0,D1,Fo,Abs,Cyc,InCyc,Exp,I,Top,Bot,Poc,N,Epc: LongInt; Sp: ^TRawEsSps; Pp: ^TRawEsPps;
+Begin
+ RawEsH264Poc:=0;
+ RawEsBrInit(R,@S.UEsc,RawEsUnescape(@S.UBuf[1],S.UN-1,@S.UEsc));
+ RawEsBrUe(R); RawEsBrUe(R); Pi:=RawEsBrUe(R);
+ If (Pi<0) Or (Pi>255) Or R.Err Then Exit;
+ Pp:=@S.PpsList[Pi]; If Not Pp^.Valid Then Exit;
+ Sp:=@S.SpsList[Pp^.SpsId]; If Not Sp^.Valid Then Exit;
+ If Sp^.SepColour<>0 Then RawEsBrSkip(R,2);
+ Fn:=RawEsBrBits(R,Sp^.Log2MaxFn); Field:=0; Bottom:=0;
+ If Sp^.FrameMbsOnly=0 Then Begin Field:=RawEsBrBit(R); If Field<>0 Then Bottom:=RawEsBrBit(R); End;
+ If Field<>0 Then S.FieldSeen:=True;
+ If T=5 Then RawEsBrUe(R);
+ If T=5 Then Begin S.PrevMsb:=0; S.PrevLsb:=0; End;
+ Case Sp^.PocType Of
+  0: Begin
+   Lsb:=RawEsBrBits(R,Sp^.Log2MaxPoc); Db:=0;
+   If (Pp^.BottomPoc<>0) And (Field=0) Then Db:=RawEsBrSe(R);
+   Max2:=1 Shl Sp^.Log2MaxPoc;
+   If (Lsb<S.PrevLsb) And ((S.PrevLsb-Lsb)>=(Max2 Div 2)) Then Msb:=S.PrevMsb+Max2
+   Else If (Lsb>S.PrevLsb) And ((Lsb-S.PrevLsb)>(Max2 Div 2)) Then Msb:=S.PrevMsb-Max2
+   Else Msb:=S.PrevMsb;
+   If Field=0 Then Begin Top:=Msb+Lsb; Bot:=Top+Db; If Bot<Top Then Poc:=Bot Else Poc:=Top; End
+   Else Poc:=Msb+Lsb;
+   If Ref<>0 Then Begin S.PrevMsb:=Msb; S.PrevLsb:=Lsb; End;
+  End;
+  1,2: Begin
+   If T=5 Then Fo:=0
+   Else If S.PrevFn>Fn Then Fo:=S.PrevFnOff+(1 Shl Sp^.Log2MaxFn)
+   Else Fo:=S.PrevFnOff;
+   If Sp^.PocType=1 Then Begin
+    D0:=0; D1:=0;
+    If Sp^.DeltaZero=0 Then Begin
+     D0:=RawEsBrSe(R);
+     If (Pp^.BottomPoc<>0) And (Field=0) Then D1:=RawEsBrSe(R);
+    End;
+    If Sp^.NCycle<>0 Then Abs:=Fo+Fn Else Abs:=0;
+    If (Ref=0) And (Abs>0) Then Dec(Abs);
+    Exp:=0;
+    If Abs>0 Then Begin
+     N:=Sp^.NCycle; Epc:=0;
+     For I:=0 To N-1 Do Inc(Epc,Sp^.Cyc[I]);
+     Cyc:=(Abs-1) Div N; InCyc:=(Abs-1) Mod N;
+     Exp:=Cyc*Epc;
+     For I:=0 To InCyc Do Inc(Exp,Sp^.Cyc[I]);
+    End;
+    If Ref=0 Then Inc(Exp,Sp^.OffNonRef);
+    If Field=0 Then Begin
+     Top:=Exp+D0; Bot:=Top+Sp^.OffTB+D1;
+     If Bot<Top Then Poc:=Bot Else Poc:=Top;
+    End Else If Bottom=0 Then Poc:=Exp+D0
+    Else Poc:=Exp+Sp^.OffTB+D0;
+   End Else Begin
+    If T=5 Then Poc:=0
+    Else If Ref=0 Then Poc:=2*(Fo+Fn)-1
+    Else Poc:=2*(Fo+Fn);
+   End;
+   S.PrevFn:=Fn; S.PrevFnOff:=Fo;
+  End;
+ End;
+ RawEsH264Poc:=Poc;
+End;
+
+Procedure RawEsUnitH264(Var S: TRawEsSplit);
+Var T,Ref,Id,I: LongInt; V: TRawEsVInfo; First,NewAu,FirstVcl: Boolean; Tmp: TRawEsSps;
+Begin
+ If S.UN<1 Then Exit;
+ If (S.UBuf[0] And $80)<>0 Then Exit;
+ T:=S.UBuf[0] And 31; Ref:=(S.UBuf[0] Shr 5) And 3;
+ Case T Of
+  1,5: Begin
+   First:=(S.UN>=2) And ((S.UBuf[1] And $80)<>0);
+   NewAu:=(Not S.HaveAu) Or (S.CurVcl And First);
+   If NewAu Then RawEsBeginAu(S,S.UStart);
+   FirstVcl:=Not S.CurVcl;
+   S.CurVcl:=True;
+   If FirstVcl And (S.NAu>0) Then Begin
+    S.Poc^[S.NAu-1]:=RawEsH264Poc(S,Ref,T);
+    If (T=5) Or (S.NAu=1) Then RawEsSetSeg(S);
+    If T=5 Then RawEsSetKey(S);
+   End;
+  End;
+  6: Begin
+   If (Not S.HaveAu) Or S.CurVcl Then RawEsBeginAu(S,S.UStart);
+   If (S.UN>=2) And (S.UBuf[1]=6) Then RawEsSetKey(S);
+  End;
+  7: Begin
+   If (Not S.HaveAu) Or S.CurVcl Then RawEsBeginAu(S,S.UStart);
+   If S.UN>=5 Then Begin
+    I:=RawEsUnescape(@S.UBuf[1],S.UN-1,@S.UEsc);
+    If RawEsParseH264Sps(@S.UEsc,I,V,Tmp,Id) Then Begin
+     If (Id>=0) And (Id<=31) Then S.SpsList[Id]:=Tmp;
+     If Not S.ViSet Then Begin S.Vi:=V; S.ViSet:=True; End;
+     Inc(S.NSps);
+    End;
+   End;
+  End;
+  8: Begin
+   If (Not S.HaveAu) Or S.CurVcl Then RawEsBeginAu(S,S.UStart);
+   If S.UN>=3 Then RawEsH264Pps(S);
+  End;
+  9,14,15,16,17,18: If (Not S.HaveAu) Or S.CurVcl Then RawEsBeginAu(S,S.UStart);
+  Else If Not S.HaveAu Then RawEsBeginAu(S,S.UStart);
+ End;
+End;
+
+{ ---- HEVC ---- }
+Procedure RawEsHevcPps(Var S: TRawEsSplit);
+Var R: TRawEsBr; Id,Sid: LongInt;
+Begin
+ RawEsBrInit(R,@S.UEsc,RawEsUnescape(@S.UBuf[2],S.UN-2,@S.UEsc));
+ Id:=RawEsBrUe(R); Sid:=RawEsBrUe(R);
+ If R.Err Or (Id<0) Or (Id>63) Or (Sid<0) Or (Sid>15) Then Exit;
+ S.PpsList[Id].Valid:=True; S.PpsList[Id].SpsId:=Sid;
+ S.PpsList[Id].DepSlice:=RawEsBrBit(R); S.PpsList[Id].OutFlag:=RawEsBrBit(R); S.PpsList[Id].ExtraBits:=RawEsBrBits(R,3);
+End;
+
+Function RawEsHevcPoc(Var S: TRawEsSplit; T: LongInt; Var Seg: Boolean): LongInt;
+Var R: TRawEsBr; Pi,I,Lsb,Msb,Max2,Tid: LongInt; Pp: ^TRawEsPps; Sp: ^TRawEsSps; Irap,NoRasl,Upd: Boolean;
+Begin
+ RawEsHevcPoc:=0; Seg:=False;
+ RawEsBrInit(R,@S.UEsc,RawEsUnescape(@S.UBuf[2],S.UN-2,@S.UEsc));
+ RawEsBrBit(R);
+ Irap:=(T>=16) And (T<=23);
+ If Irap Then RawEsBrBit(R);
+ Pi:=RawEsBrUe(R);
+ If (Pi<0) Or (Pi>63) Or R.Err Then Exit;
+ Pp:=@S.PpsList[Pi]; If Not Pp^.Valid Then Exit;
+ Sp:=@S.SpsList[Pp^.SpsId]; If Not Sp^.Valid Then Exit;
+ For I:=1 To Pp^.ExtraBits Do RawEsBrBit(R);
+ RawEsBrUe(R);
+ If Pp^.OutFlag<>0 Then RawEsBrBit(R);
+ If Sp^.SepColour<>0 Then RawEsBrSkip(R,2);
+ Tid:=(S.UBuf[1] And 7)-1;
+ NoRasl:=False;
+ If Irap Then NoRasl:=(T<=20) Or (S.NAu=1) Or S.AfterEos;
+ If (T=19) Or (T=20) Then Begin Lsb:=0; End
+ Else Lsb:=RawEsBrBits(R,Sp^.Log2MaxPoc);
+ Max2:=1 Shl Sp^.Log2MaxPoc;
+ If Irap And NoRasl Then Msb:=0
+ Else Begin
+  If (Lsb<S.PrevLsb) And ((S.PrevLsb-Lsb)>=(Max2 Div 2)) Then Msb:=S.PrevMsb+Max2
+  Else If (Lsb>S.PrevLsb) And ((Lsb-S.PrevLsb)>(Max2 Div 2)) Then Msb:=S.PrevMsb-Max2
+  Else Msb:=S.PrevMsb;
+ End;
+ Upd:=(Tid=0) And (Not ((T>=6) And (T<=9))) And (Not ((T<=14) And ((T And 1)=0)));
+ If Upd Then Begin S.PrevMsb:=Msb; S.PrevLsb:=Lsb; End;
+ Seg:=Irap And NoRasl;
+ S.AfterEos:=False;
+ RawEsHevcPoc:=Msb+Lsb;
+End;
+
+Procedure RawEsUnitHevc(Var S: TRawEsSplit);
+Var T,Id,I: LongInt; V: TRawEsVInfo; First,NewAu,FirstVcl,Seg: Boolean; P: LongInt; Tmp: TRawEsSps;
+Begin
+ If S.UN<3 Then Exit;
+ If (S.UBuf[0] And $80)<>0 Then Exit;
+ T:=(S.UBuf[0] Shr 1) And 63;
+ If (((S.UBuf[0] And 1) Shl 5) Or (S.UBuf[1] Shr 3))<>0 Then Begin
+  If Not S.HaveAu Then RawEsBeginAu(S,S.UStart);
+  Exit;
+ End;
+ If T<32 Then Begin
+  First:=(S.UBuf[2] And $80)<>0;
+  NewAu:=(Not S.HaveAu) Or (S.CurVcl And First);
+  If NewAu Then RawEsBeginAu(S,S.UStart);
+  FirstVcl:=Not S.CurVcl;
+  S.CurVcl:=True;
+  If FirstVcl And (S.NAu>0) Then Begin
+   P:=RawEsHevcPoc(S,T,Seg);
+   S.Poc^[S.NAu-1]:=P;
+   If Seg Or (S.NAu=1) Then RawEsSetSeg(S);
+   If (T>=16) And (T<=23) Then RawEsSetKey(S);
+  End;
+  Exit;
+ End;
+ Case T Of
+  32,33,34,35,39,41,42,43,44,48,49,50,51,52,53,54,55: Begin
+   If (Not S.HaveAu) Or S.CurVcl Then RawEsBeginAu(S,S.UStart);
+   If T=33 Then Begin
+    I:=RawEsUnescape(@S.UBuf[2],S.UN-2,@S.UEsc);
+    If RawEsParseHevcSps(@S.UEsc,I,V,Tmp,Id) Then Begin
+     If (Id>=0) And (Id<=15) Then S.SpsList[Id]:=Tmp;
+     If Not S.ViSet Then Begin S.Vi:=V; S.ViSet:=True; End;
+     Inc(S.NSps);
+    End;
+   End Else If T=34 Then RawEsHevcPps(S);
+  End;
+  36,37: Begin
+   If Not S.HaveAu Then RawEsBeginAu(S,S.UStart);
+   S.AfterEos:=True;
+  End;
+  Else If Not S.HaveAu Then RawEsBeginAu(S,S.UStart);
+ End;
+End;
+
+{ ---- MPEG-1/2 video ---- }
+Procedure RawEsUnitMpeg(Var S: TRawEsSplit);
+Var C,Tr,Pt,Sx: LongInt; V: TRawEsVInfo;
+Begin
+ If S.UN<1 Then Exit;
+ C:=S.UBuf[0];
+ Case C Of
+  $B3: Begin
+   If (Not S.HaveAu) Or S.CurVcl Then RawEsBeginAu(S,S.UStart);
+   S.GopFlag:=True; S.SeqExtDone:=False;
+   If (Not S.ViSet) And (S.UN>=9) Then
+    If RawEsParseMpegSeq(@S.UBuf[1],S.UN-1,V) Then Begin S.Vi:=V; S.ViSet:=True; Inc(S.NSps); End;
+  End;
+  $B8: Begin
+   If (Not S.HaveAu) Or S.CurVcl Then RawEsBeginAu(S,S.UStart);
+   S.GopFlag:=True;
+  End;
+  $00: Begin
+   If S.UN<4 Then Exit;
+   If S.FieldPend And S.HaveAu Then Begin
+    S.FieldPend:=False; S.InSecond:=True;
+   End Else Begin
+    If (Not S.HaveAu) Or S.CurVcl Then RawEsBeginAu(S,S.UStart);
+    S.InSecond:=False;
+    Tr:=(S.UBuf[1] Shl 2) Or (S.UBuf[2] Shr 6); Pt:=(S.UBuf[2] Shr 3) And 7;
+    S.Poc^[S.NAu-1]:=Tr;
+    If Pt=1 Then RawEsSetKey(S);
+    If S.GopFlag Or (S.NAu=1) Then RawEsSetSeg(S);
+    S.GopFlag:=False;
+   End;
+   S.CurVcl:=True;
+  End;
+  $B5: Begin
+   If Not S.HaveAu Then RawEsBeginAu(S,S.UStart);
+   If S.UN>=2 Then Begin
+    If ((S.UBuf[1] Shr 4)=1) And S.ViSet And (Not S.SeqExtDone) Then Begin
+     RawEsParseMpegSeqExt(@S.UBuf[1],S.UN-1,S.Vi); S.SeqExtDone:=True;
+    End;
+    If ((S.UBuf[1] Shr 4)=8) And (S.UN>=5) And S.CurVcl Then Begin
+     Sx:=S.UBuf[3] And 3;
+     If (Sx<>3) And (Not S.InSecond) Then S.FieldPend:=True;
+    End;
+   End;
+  End;
+  Else If Not S.HaveAu Then RawEsBeginAu(S,S.UStart);
+ End;
+End;
+
+{ ---- VC-1 (profil avance) ---- }
+Procedure RawEsUnitVc1(Var S: TRawEsSplit);
+Var C,W,H: LongInt;
+Begin
+ If S.UN<1 Then Exit;
+ C:=S.UBuf[0];
+ Case C Of
+  $0F: Begin
+   If (Not S.HaveAu) Or S.CurVcl Then RawEsBeginAu(S,S.UStart);
+   RawEsSetKey(S);
+   If (Not S.ViSet) And (S.UN>=8) And ((S.UBuf[1] Shr 6)=3) Then Begin
+    W:=((S.UBuf[3] Shl 4) Or (S.UBuf[4] Shr 4)); H:=(((S.UBuf[4] And 15) Shl 8) Or S.UBuf[5]);
+    FillChar(S.Vi,SizeOf(S.Vi),0);
+    S.Vi.Codec:=RawEsCVC1; S.Vi.Width:=(W+1)*2; S.Vi.Height:=(H+1)*2; S.Vi.Profile:=3; S.Vi.Level:=(S.UBuf[1] Shr 3) And 7;
+    S.Vi.SarNum:=1; S.Vi.SarDen:=1; S.Vi.Chroma:=1; S.Vi.BitDepth:=8; S.Vi.Reorder:=-1; S.Vi.ProfName:='Advanced';
+    S.Vi.Valid:=True; S.ViSet:=True;
+   End;
+  End;
+  $0E: If (Not S.HaveAu) Or S.CurVcl Then RawEsBeginAu(S,S.UStart);
+  $0D: Begin
+   If (Not S.HaveAu) Or S.CurVcl Then RawEsBeginAu(S,S.UStart);
+   S.CurVcl:=True;
+   If S.NAu=1 Then RawEsSetSeg(S);
+  End;
+  Else If Not S.HaveAu Then RawEsBeginAu(S,S.UStart);
+ End;
+End;
+
+Procedure RawEsUnitDone(Var S: TRawEsSplit);
+Begin
+ Case S.Codec Of
+  RawEsCH264: RawEsUnitH264(S);
+  RawEsCHEVC: RawEsUnitHevc(S);
+  RawEsCMpeg1,RawEsCMpeg2: RawEsUnitMpeg(S);
+  RawEsCVC1: RawEsUnitVc1(S);
+ End;
+ S.UOpen:=False;
+End;
+
+Procedure RawEsFeed(Var S: TRawEsSplit; P: PEABuffer; Len: LongInt);
+Var I,Z,WStart: LongInt; B: Byte; Zero: Byte; Pre: Array[0..3] Of Byte;
+Begin
+ Z:=S.Z; WStart:=0; Zero:=0;
+ If Not S.GotOrigin Then WStart:=Len;
+ For I:=0 To Len-1 Do Begin
+  B:=P^[I];
+  If B>1 Then Begin
+   Z:=0;
+   If S.UOpen And (S.UN<1024) Then Begin S.UBuf[S.UN]:=B; Inc(S.UN); End;
+  End Else If B=0 Then Begin
+   If Z<3 Then Inc(Z);
+   If S.UOpen And (S.UN<1024) Then Begin S.UBuf[S.UN]:=0; Inc(S.UN); End;
+  End Else Begin
+   If Z>=2 Then Begin
+    If S.UOpen Then RawEsUnitDone(S);
+    S.UStart:=S.Pos+I-2;
+    If (Z>=3) And (S.Codec=RawEsCH264) Then Dec(S.UStart);
+    If (Not S.GotOrigin) Then Begin
+     S.GotOrigin:=True; S.Origin:=S.Pos+I-2;
+     If Z>=3 Then Dec(S.Origin);
+     If S.WriteOut Then Begin
+      Pre[0]:=0; Pre[1]:=0; Pre[2]:=0; Pre[3]:=1;
+      If Z>=3 Then RawEsOutWrite(S,@Pre[0],4) Else RawEsOutWrite(S,@Pre[1],3);
+     End;
+     WStart:=I+1;
+    End;
+    S.UOpen:=True; S.UN:=0;
+   End Else If S.UOpen And (S.UN<1024) Then Begin S.UBuf[S.UN]:=1; Inc(S.UN); End;
+   Z:=0;
+  End;
+ End;
+ S.Z:=Z;
+ If S.WriteOut And S.GotOrigin And (WStart<Len) Then RawEsOutWrite(S,@P^[WStart],Len-WStart);
+ Inc(S.Pos,Len);
+End;
+
+Procedure RawEsEnd(Var S: TRawEsSplit);
+Begin
+ If S.UOpen Then RawEsUnitDone(S);
+ If S.HaveAu And (S.NAu>0) Then S.Aus^[S.NAu-1].Size:=LongInt((S.Pos-S.Origin)-S.Aus^[S.NAu-1].Off);
+ If S.OutOpen Then RawEsOutFlush(S);
+End;
+
+{ Un horodatage T(k) en 90 kHz pour l'image k a cadence Num/Den }
+Function RawEsFrameTime(K: Int64; Num,Den: LongInt): Int64;
+Begin
+ RawEsFrameTime:=(K*90000*Den+(Num Div 2)) Div Num;
+End;
+
+{ Calcule des DTS/PTS synthetiques (flux brut sans horodatage) : DTS = ordre de decodage,
+  PTS = rang d'affichage dans le segment (IDR / GOP) selon le POC / temporal_reference.
+  Retourne le retard de reordonnancement R (en images). }
+Function RawEsSynthTimes(Var S: TRawEsSplit; Num,Den: LongInt): LongInt;
+Var Seg0,I,J,N,K,Rk,Rmax,Base: LongInt; Ord: PRawEsLArr; Rank: PRawEsLArr;
+Begin
+ RawEsSynthTimes:=0;
+ N:=S.NAu;
+ If N=0 Then Exit;
+ GetMem(Rank,N*4); GetMem(Ord,N*4);
+ Seg0:=0; Rmax:=0;
+ I:=0;
+ While I<N Do Begin
+  J:=I+1;
+  While (J<N) And ((S.Aus^[J].Flags And RawEsFSeg)=0) Do Inc(J);
+  { segment [I,J) : insertion dans l'ordre d'affichage }
+  K:=0;
+  For Seg0:=I To J-1 Do Begin
+   Rk:=K;
+   While (Rk>0) And (S.Poc^[Ord^[Rk-1]]>S.Poc^[Seg0]) Do Begin Ord^[Rk]:=Ord^[Rk-1]; Dec(Rk); End;
+   Ord^[Rk]:=Seg0; Inc(K);
+  End;
+  For Rk:=0 To K-1 Do Rank^[Ord^[Rk]]:=Rk;
+  For Seg0:=I To J-1 Do If (Seg0-I)-Rank^[Seg0]>Rmax Then Rmax:=(Seg0-I)-Rank^[Seg0];
+  I:=J;
+ End;
+ { Rank relatif au debut du segment -> rang absolu }
+ I:=0;
+ While I<N Do Begin
+  J:=I+1;
+  While (J<N) And ((S.Aus^[J].Flags And RawEsFSeg)=0) Do Inc(J);
+  For Seg0:=I To J-1 Do Begin
+   S.Aus^[Seg0].Dts:=RawEsFrameTime(Seg0,Num,Den);
+   S.Aus^[Seg0].Pts:=RawEsFrameTime(I+Rank^[Seg0]+Rmax,Num,Den);
+   S.Aus^[Seg0].Flags:=S.Aus^[Seg0].Flags Or RawEsFEst;
+  End;
+  I:=J;
+ End;
+ FreeMem(Rank); FreeMem(Ord);
+ RawEsSynthTimes:=Rmax;
+End;
+
+{ ====================================================================== }
+{ Fichiers d'index (format TSIX, 48 octets d'en-tete + 32 octets / unite)  }
+{ ====================================================================== }
+Procedure RawEsWriteIdx(Const Path: String; Kind,Codec,P1,P2,P3,P4: LongInt; Idx: PRawEsIdxArr; N: LongInt);
+Var F: File; H: TRawEsIdxHdr; I: LongInt; Mn: Int64; Code,Act: LongInt;
+Begin
+ FillChar(H,SizeOf(H),0);
+ H.Magic[0]:='T'; H.Magic[1]:='S'; H.Magic[2]:='I'; H.Magic[3]:='X';
+ H.Version:=1; H.Kind:=Kind; H.Codec:=Codec; H.Count:=N; H.P1:=P1; H.P2:=P2; H.P3:=P3; H.P4:=P4;
+ Mn:=RawEsNoPts;
+ For I:=0 To N-1 Do If Idx^[I].Pts<>RawEsNoPts Then If (Mn=RawEsNoPts) Or (Idx^[I].Pts<Mn) Then Mn:=Idx^[I].Pts;
+ H.FirstPts:=Mn;
+ Assign(F,Path);
+ {$I-}Rewrite(F,1); Code:=IOResult;{$I+}
+ If Code<>0 Then Exit;
+ {$I-}
+ BlockWrite(F,H,SizeOf(H),Act);
+ If N>0 Then BlockWrite(F,Idx^,N*SizeOf(TRawEsIdx),Act);
+ Close(F);
+ {$I+}
+ If IOResult<>0 Then ;
+End;
+
+{ Lit un fichier d'index. Idx est alloue (GetMem) : liberer avec RawEsFreeIdx. }
+Function RawEsReadIdx(Const Path: String; Var H: TRawEsIdxHdr; Var Idx: PRawEsIdxArr; Var N: LongInt): Boolean;
+Var F: File; Code,Act: LongInt;
+Begin
+ RawEsReadIdx:=False; Idx:=Nil; N:=0;
+ Assign(F,Path); Code:=FileMode; FileMode:=0;
+ {$I-}Reset(F,1); Code:=IOResult;{$I+}
+ FileMode:=2;
+ If Code<>0 Then Exit;
+ {$I-}BlockRead(F,H,SizeOf(H),Act);{$I+}
+ If (IOResult<>0) Or (Act<>SizeOf(H)) Or (H.Magic[0]<>'T') Or (H.Magic[1]<>'S') Or (H.Magic[2]<>'I') Or (H.Magic[3]<>'X') Or (H.Count<0) Or (H.Count>RawEsMaxAu) Then Begin
+  {$I-}Close(F);{$I+} If IOResult<>0 Then ; Exit;
+ End;
+ GetMem(Idx,(H.Count+1)*SizeOf(TRawEsIdx));
+ If H.Count>0 Then Begin
+  {$I-}BlockRead(F,Idx^,H.Count*SizeOf(TRawEsIdx),Act);{$I+}
+  If (IOResult<>0) Or (Act<>H.Count*SizeOf(TRawEsIdx)) Then Begin
+   FreeMem(Idx); Idx:=Nil; {$I-}Close(F);{$I+} If IOResult<>0 Then ; Exit;
+  End;
+ End;
+ {$I-}Close(F);{$I+} If IOResult<>0 Then ;
+ N:=H.Count; RawEsReadIdx:=True;
+End;
+
+Procedure RawEsFreeIdx(Var Idx: PRawEsIdxArr; Var N: LongInt);
+Begin
+ If Idx<>Nil Then FreeMem(Idx);
+ Idx:=Nil; N:=0;
+End;
+
+{ ====================================================================== }
+{ Sonde et indexation d'un flux elementaire brut                            }
+{ ====================================================================== }
+Type
+ TRawEsInfo = Record
+  Ok: Boolean;
+  Codec: LongInt;            { RawEsCH264.. }
+  CodecName: String[16];     { 'h264','hevc','mpeg2video','mpeg1video','vc1' }
+  Width, Height: LongInt;
+  FpsNum, FpsDen: LongInt;   { cadence reduite (ex. 30000/1001) }
+  FpsFromStream: Boolean;    { False : 25 par defaut (pas de timing_info) }
+  Profile, Level, Chroma, BitDepth: LongInt;
+  ProfName: String[32];
+  SarNum, SarDen: LongInt;
+  Interlaced: Boolean;
+  Frames: LongInt;           { nombre d'unites d'acces }
+  Reorder: LongInt;          { retard de reordonnancement utilise pour les PTS (images) }
+  BitRate: LongInt;          { debit du flux (MPEG) ou estime }
+  FileSize: Int64;
+  DurationMs: Int64;
+ End;
+
+Function RawEsCodecName(C: LongInt): String;
+Begin
+ Case C Of
+  RawEsCH264: RawEsCodecName:='h264'; RawEsCHEVC: RawEsCodecName:='hevc';
+  RawEsCMpeg2: RawEsCodecName:='mpeg2video'; RawEsCMpeg1: RawEsCodecName:='mpeg1video'; RawEsCVC1: RawEsCodecName:='vc1';
+  Else RawEsCodecName:='unknown';
+ End;
+End;
+
+Function RawEsUpper(Const S: String): String;
+Var I: LongInt; R: String;
+Begin
+ R:=S;
+ For I:=1 To Length(R) Do If (R[I]>='a') And (R[I]<='z') Then R[I]:=Chr(Ord(R[I])-32);
+ RawEsUpper:=R;
+End;
+
+{ True si l'extension est celle d'un flux elementaire pris en charge }
+Function RawEsIsRawExt(Const Path: String): Boolean;
+Var E: String; I: LongInt;
+Begin
+ E:=''; I:=Length(Path);
+ While (I>0) And (Path[I]<>'.') And (Path[I]<>'/') And (Path[I]<>'\') Do Dec(I);
+ If (I>0) And (Path[I]='.') Then E:=RawEsUpper(Copy(Path,I,20));
+ RawEsIsRawExt:=(E='.264') Or (E='.H264') Or (E='.AVC') Or (E='.HEVC') Or (E='.H265') Or (E='.265') Or (E='.BIT') Or (E='.M2V') Or (E='.MPV') Or (E='.26L') Or (E='.M1V') Or (E='.VC1');
+End;
+
+{ Detection du codec par le contenu : premier jeu de parametres valide dans les 4 premiers Mo. }
+Function RawEsDetect(Const Path: String): LongInt;
+Var F: File; Buf: PEABuffer; Act,Code,I,Z,Total,Id,L: LongInt; Sps: TRawEsSps; V: TRawEsVInfo; Esc: Array[0..1100] Of Byte; B0,B1: Byte; Found: LongInt;
+Begin
+ RawEsDetect:=RawEsCNone;
+ Assign(F,Path); Code:=FileMode; FileMode:=0;
+ {$I-}Reset(F,1); Code:=IOResult;{$I+}
+ FileMode:=2;
+ If Code<>0 Then Exit;
+ GetMem(Buf,4194304+16);
+ {$I-}BlockRead(F,Buf^,4194304,Act);{$I+}
+ If IOResult<>0 Then Act:=0;
+ {$I-}Close(F);{$I+} If IOResult<>0 Then ;
+ Found:=RawEsCNone;
+ I:=0;
+ While (I+6<Act) And (Found=RawEsCNone) Do Begin
+  If (Buf^[I]=0) And (Buf^[I+1]=0) And (Buf^[I+2]=1) Then Begin
+   B0:=Buf^[I+3]; B1:=Buf^[I+4];
+   L:=Act-(I+3); If L>1024 Then L:=1024;
+   If (B0=$B3) And (L>=9) Then Begin
+    If RawEsParseMpegSeq(@Buf^[I+4],L-1,V) Then Found:=RawEsCMpeg1;
+    If Found=RawEsCMpeg1 Then Begin
+     Found:=RawEsCMpeg1;
+     Z:=I+4+8;
+     { extension de sequence juste apres ? alors MPEG-2 }
+     Total:=I+4;
+     While (Total+6<Act) And (Total<I+300) Do Begin
+      If (Buf^[Total]=0) And (Buf^[Total+1]=0) And (Buf^[Total+2]=1) And (Buf^[Total+3]=$B5) And ((Buf^[Total+4] Shr 4)=1) Then Begin Found:=RawEsCMpeg2; Break; End;
+      Inc(Total);
+     End;
+    End;
+   End Else If ((B0 And $9F)=7) And ((B0 And $60)<>0) Then Begin
+    Id:=RawEsUnescape(@Buf^[I+4],L-1,@Esc);
+    If RawEsParseH264Sps(@Esc,Id,V,Sps,Z) Then Found:=RawEsCH264;
+   End Else If (((B0 Shr 1) And 63)=33) And ((B0 And 1)=0) And ((B1 And 7)>=1) Then Begin
+    Id:=RawEsUnescape(@Buf^[I+5],L-2,@Esc);
+    If RawEsParseHevcSps(@Esc,Id,V,Sps,Z) Then Found:=RawEsCHEVC;
+   End Else If B0=$0F Then Found:=RawEsCNone;
+   Inc(I,3);
+  End Else Inc(I);
+ End;
+ FreeMem(Buf);
+ RawEsDetect:=Found;
+End;
+
+{ Lit tout le fichier, construit la table des unites d'acces (en memoire) avec DTS/PTS synthetiques.
+  Idx : tableau alloue (GetMem) a liberer par RawEsFreeIdx. Codec=0 : detection automatique. }
+Procedure RawEsLoad(Const Path: String; Codec: LongInt; Var Info: TRawEsInfo; Var Idx: PRawEsIdxArr; Var N: LongInt);
+Var F: File; S: ^TRawEsSplit; Buf: PEABuffer; Act,Code,R,I: LongInt; Fps0: Boolean; Dur: Int64;
+Begin
+ FillChar(Info,SizeOf(Info),0); Idx:=Nil; N:=0;
+ If Codec=RawEsCNone Then Codec:=RawEsDetect(Path);
+ If Codec=RawEsCNone Then Fail('Flux elementaire non reconnu: '+Path);
+ Assign(F,Path); Code:=FileMode; FileMode:=0;
+ {$I-}Reset(F,1); Code:=IOResult;{$I+}
+ FileMode:=2;
+ If Code<>0 Then Fail('Ouverture impossible: '+Path);
+ Info.FileSize:=FileSize(F);
+ New(S); GetMem(Buf,262144+16);
+ RawEsSplitInit(S^,Codec,'');
+ While True Do Begin
+  {$I-}BlockRead(F,Buf^,262144,Act);{$I+}
+  If (IOResult<>0) Or (Act<=0) Then Break;
+  RawEsFeed(S^,Buf,Act);
+ End;
+ {$I-}Close(F);{$I+} If IOResult<>0 Then ;
+ RawEsEnd(S^);
+ FreeMem(Buf);
+ Info.Codec:=Codec; Info.CodecName:=RawEsCodecName(Codec);
+ If S^.ViSet Then Begin
+  Info.Ok:=True;
+  Info.Width:=S^.Vi.Width; Info.Height:=S^.Vi.Height; Info.Profile:=S^.Vi.Profile; Info.Level:=S^.Vi.Level;
+  Info.Chroma:=S^.Vi.Chroma; Info.BitDepth:=S^.Vi.BitDepth; Info.ProfName:=S^.Vi.ProfName;
+  Info.SarNum:=S^.Vi.SarNum; Info.SarDen:=S^.Vi.SarDen; Info.Interlaced:=S^.Vi.Interlaced; Info.BitRate:=S^.Vi.BitRate;
+  Info.FpsNum:=S^.Vi.FpsNum; Info.FpsDen:=S^.Vi.FpsDen;
+  If S^.FieldSeen Then Info.Interlaced:=True;
+ End;
+ Fps0:=Info.FpsNum>0;
+ If Not Fps0 Then Begin Info.FpsNum:=25; Info.FpsDen:=1; End;
+ Info.FpsFromStream:=Fps0;
+ Info.Frames:=S^.NAu;
+ If S^.NAu>0 Then Begin
+  Info.Reorder:=RawEsSynthTimes(S^,Info.FpsNum,Info.FpsDen);
+  GetMem(Idx,(S^.NAu+1)*SizeOf(TRawEsIdx));
+  Move(S^.Aus^,Idx^,S^.NAu*SizeOf(TRawEsIdx));
+  For I:=0 To S^.NAu-1 Do Begin
+   Idx^[I].Flags:=Idx^[I].Flags And (Not RawEsFSeg);
+   Idx^[I].Off:=Idx^[I].Off+S^.Origin;
+  End;
+  N:=S^.NAu;
+ End;
+ Dur:=(Int64(Info.Frames)*1000*Info.FpsDen+(Info.FpsNum Div 2)) Div Info.FpsNum;
+ Info.DurationMs:=Dur;
+ If (Info.BitRate=0) And (Dur>0) Then Info.BitRate:=LongInt(Info.FileSize*8000 Div Dur);
+ RawEsSplitFree(S^);
+ Dispose(S);
+End;
+
+Procedure RawEsProbe(Const Path: String; Var Info: TRawEsInfo);
+Var Idx: PRawEsIdxArr; N: LongInt;
+Begin
+ RawEsLoad(Path,RawEsCNone,Info,Idx,N);
+ RawEsFreeIdx(Idx,N);
+End;
+
+{ Ecrit le fichier d'index (format TSIX) d'un flux brut : Off = position de l'unite d'acces dans le fichier brut lui-meme. }
+Procedure RawEsIndexFile(Const Path,IdxPath: String; Var Info: TRawEsInfo);
+Var Idx: PRawEsIdxArr; N: LongInt;
+Begin
+ RawEsLoad(Path,RawEsCNone,Info,Idx,N);
+ RawEsWriteIdx(IdxPath,RawEsKindVideo,Info.Codec,Info.Width,Info.Height,Info.FpsNum,Info.FpsDen,Idx,N);
+ RawEsFreeIdx(Idx,N);
+End;
+
+{ ====================================================================== }
+{ Ensembles de parametres, avcC / hvcC, conversions AVCC <-> Annex B        }
+{ ====================================================================== }
+Type
+ TRawEsParams = Record
+  Codec: LongInt;
+  N: LongInt;                         { nombre de NAL memorises }
+  Kind: Array[0..15] Of LongInt;      { 0 VPS (HEVC), 1 SPS, 2 PPS }
+  Off, Len: Array[0..15] Of LongInt;
+  Total: LongInt;
+  D: Array[0..8191] Of Byte;
+ End;
+
+Procedure RawEsParamsClear(Var Pr: TRawEsParams);
+Begin
+ Pr.N:=0; Pr.Total:=0; Pr.Codec:=RawEsCNone;
+End;
+
+Procedure RawEsParamsAdd(Var Pr: TRawEsParams; Kind: LongInt; Nal: PEABuffer; Len: LongInt);
+Var I: LongInt;
+Begin
+ If (Pr.N>=16) Or (Len<=0) Or (Pr.Total+Len>8192) Then Exit;
+ For I:=0 To Pr.N-1 Do
+  If (Pr.Kind[I]=Kind) And (Pr.Len[I]=Len) Then
+   If CompareByte(Pr.D[Pr.Off[I]],Nal^[0],Len)=0 Then Exit;
+ Pr.Kind[Pr.N]:=Kind; Pr.Off[Pr.N]:=Pr.Total; Pr.Len[Pr.N]:=Len;
+ Move(Nal^[0],Pr.D[Pr.Total],Len); Inc(Pr.Total,Len); Inc(Pr.N);
+End;
+
+{ Recherche le debut du NAL suivant a partir de I : retourne la position apres le code de depart (ou -1) }
+Function RawEsNextNal(Src: PEABuffer; Len,From: LongInt): LongInt;
+Var I: LongInt;
+Begin
+ RawEsNextNal:=-1;
+ I:=From;
+ While I+2<Len Do Begin
+  If (Src^[I+2]>1) Then Inc(I,3)
+  Else If (Src^[I]=0) And (Src^[I+1]=0) And (Src^[I+2]=1) Then Begin RawEsNextNal:=I+3; Exit; End
+  Else Inc(I);
+ End;
+End;
+
+{ Fin du NAL commencant en Start (les zeros de fin sont retires) }
+Function RawEsNalEnd(Src: PEABuffer; Len,Start: LongInt): LongInt;
+Var Nx,E: LongInt;
+Begin
+ Nx:=RawEsNextNal(Src,Len,Start);
+ If Nx<0 Then E:=Len Else E:=Nx-3;
+ While (E>Start) And (Src^[E-1]=0) Do Dec(E);
+ RawEsNalEnd:=E;
+End;
+
+{ Memorise les VPS/SPS/PPS rencontres dans un tampon Annex B (une unite d'acces par exemple) }
+Procedure RawEsParamsScan(Var Pr: TRawEsParams; Codec: LongInt; Src: PEABuffer; Len: LongInt);
+Var P,E,T: LongInt;
+Begin
+ Pr.Codec:=Codec;
+ P:=RawEsNextNal(Src,Len,0);
+ While P>=0 Do Begin
+  E:=RawEsNalEnd(Src,Len,P);
+  If E>P Then Begin
+   If Codec=RawEsCH264 Then Begin
+    T:=Src^[P] And 31;
+    If T=7 Then RawEsParamsAdd(Pr,1,@Src^[P],E-P) Else If T=8 Then RawEsParamsAdd(Pr,2,@Src^[P],E-P);
+   End Else If Codec=RawEsCHEVC Then Begin
+    T:=(Src^[P] Shr 1) And 63;
+    If T=32 Then RawEsParamsAdd(Pr,0,@Src^[P],E-P) Else If T=33 Then RawEsParamsAdd(Pr,1,@Src^[P],E-P) Else If T=34 Then RawEsParamsAdd(Pr,2,@Src^[P],E-P);
+   End;
+  End;
+  P:=RawEsNextNal(Src,Len,E);
+ End;
+End;
+
+{ Parametres en Annex B (codes 00 00 00 01) : VPS, SPS, PPS. Retourne la longueur. Dst >= Pr.Total+16 }
+Function RawEsParamsAnnexB(Var Pr: TRawEsParams; Dst: PEABuffer): LongInt;
+Var K,I,N: LongInt;
+Begin
+ N:=0;
+ For K:=0 To 2 Do
+  For I:=0 To Pr.N-1 Do
+   If Pr.Kind[I]=K Then Begin
+    Dst^[N]:=0; Dst^[N+1]:=0; Dst^[N+2]:=0; Dst^[N+3]:=1; Inc(N,4);
+    Move(Pr.D[Pr.Off[I]],Dst^[N],Pr.Len[I]); Inc(N,Pr.Len[I]);
+   End;
+ RawEsParamsAnnexB:=N;
+End;
+
+Procedure RawEsPut16(Dst: PEABuffer; Var N: LongInt; V: LongInt);
+Begin
+ Dst^[N]:=(V Shr 8) And 255; Dst^[N+1]:=V And 255; Inc(N,2);
+End;
+
+{ Construit le record AVCDecoderConfigurationRecord (contenu de la boite avcC), longueur de taille NAL = 4. }
+Function RawEsBuildAvcC(Var Pr: TRawEsParams; Dst: PEABuffer): LongInt;
+Var N,I,Ns,Np,F,Sid: LongInt; V: TRawEsVInfo; Sp: TRawEsSps; Esc: Array[0..1100] Of Byte; L: LongInt;
+Begin
+ N:=0; F:=-1;
+ For I:=0 To Pr.N-1 Do If (Pr.Kind[I]=1) And (F<0) Then F:=I;
+ If F<0 Then Begin RawEsBuildAvcC:=0; Exit; End;
+ Dst^[0]:=1; Dst^[1]:=Pr.D[Pr.Off[F]+1]; Dst^[2]:=Pr.D[Pr.Off[F]+2]; Dst^[3]:=Pr.D[Pr.Off[F]+3]; Dst^[4]:=$FF;
+ N:=5; Ns:=0; Np:=0;
+ For I:=0 To Pr.N-1 Do If Pr.Kind[I]=1 Then Inc(Ns) Else If Pr.Kind[I]=2 Then Inc(Np);
+ Dst^[N]:=$E0 Or (Ns And 31); Inc(N);
+ For I:=0 To Pr.N-1 Do If Pr.Kind[I]=1 Then Begin
+  RawEsPut16(Dst,N,Pr.Len[I]); Move(Pr.D[Pr.Off[I]],Dst^[N],Pr.Len[I]); Inc(N,Pr.Len[I]);
+ End;
+ Dst^[N]:=Np; Inc(N);
+ For I:=0 To Pr.N-1 Do If Pr.Kind[I]=2 Then Begin
+  RawEsPut16(Dst,N,Pr.Len[I]); Move(Pr.D[Pr.Off[I]],Dst^[N],Pr.Len[I]); Inc(N,Pr.Len[I]);
+ End;
+ Case Pr.D[Pr.Off[F]+1] Of
+  100,110,122,244,44,83,86,118,128,138,139,134,135: Begin
+   L:=RawEsUnescape(@Pr.D[Pr.Off[F]+1],Pr.Len[F]-1,@Esc);
+   If RawEsParseH264Sps(@Esc,L,V,Sp,Sid) Then Begin
+    Dst^[N]:=$FC Or (V.Chroma And 3); Dst^[N+1]:=$F8 Or ((V.BitDepth-8) And 7); Dst^[N+2]:=$F8 Or ((V.BitDepth-8) And 7); Dst^[N+3]:=0; Inc(N,4);
+   End;
+  End;
+ End;
+ RawEsBuildAvcC:=N;
+End;
+
+{ Construit le HEVCDecoderConfigurationRecord (contenu de la boite hvcC), longueur de taille NAL = 4. }
+Function RawEsBuildHvcC(Var Pr: TRawEsParams; Dst: PEABuffer): LongInt;
+Var N,I,F,K,Cnt,L,Sid,Ms: LongInt; V: TRawEsVInfo; Sp: TRawEsSps; Esc: Array[0..1100] Of Byte;
+Begin
+ F:=-1;
+ For I:=0 To Pr.N-1 Do If (Pr.Kind[I]=1) And (F<0) Then F:=I;
+ If F<0 Then Begin RawEsBuildHvcC:=0; Exit; End;
+ L:=RawEsUnescape(@Pr.D[Pr.Off[F]+2],Pr.Len[F]-2,@Esc);
+ If (L<15) Or (Not RawEsParseHevcSps(@Esc,L,V,Sp,Sid)) Then Begin RawEsBuildHvcC:=0; Exit; End;
+ Ms:=(Esc[0] Shr 1) And 7;
+ FillChar(Dst^,23,0);
+ Dst^[0]:=1;
+ Move(Esc[1],Dst^[1],12);
+ Dst^[13]:=$F0; Dst^[14]:=0;
+ Dst^[15]:=$FC; Dst^[16]:=$FC Or (V.Chroma And 3);
+ Dst^[17]:=$F8 Or ((V.BitDepth-8) And 7); Dst^[18]:=$F8 Or ((V.BitDepth-8) And 7);
+ Dst^[19]:=0; Dst^[20]:=0;
+ Dst^[21]:=((Ms+1) Shl 3) Or ((Esc[0] And 1) Shl 2) Or 3;
+ Cnt:=0;
+ For K:=0 To 2 Do Begin For I:=0 To Pr.N-1 Do If Pr.Kind[I]=K Then Begin Inc(Cnt); Break; End; End;
+ Dst^[22]:=Cnt; N:=23;
+ For K:=0 To 2 Do Begin
+  Cnt:=0;
+  For I:=0 To Pr.N-1 Do If Pr.Kind[I]=K Then Inc(Cnt);
+  If Cnt>0 Then Begin
+   Dst^[N]:=32+K; Inc(N); RawEsPut16(Dst,N,Cnt);
+   For I:=0 To Pr.N-1 Do If Pr.Kind[I]=K Then Begin
+    RawEsPut16(Dst,N,Pr.Len[I]); Move(Pr.D[Pr.Off[I]],Dst^[N],Pr.Len[I]); Inc(N,Pr.Len[I]);
+   End;
+  End;
+ End;
+ RawEsBuildHvcC:=N;
+End;
+
+{ Lit un avcC (Codec=H264) ou hvcC (Codec=HEVC) (sans en-tete de boite) : remplit Pr, retourne la taille du champ de longueur. 0 si invalide. }
+Function RawEsParseCfg(Codec: LongInt; Cfg: PEABuffer; Len: LongInt; Var Pr: TRawEsParams): LongInt;
+Var P,I,J,Cnt,Nn,Ln,K: LongInt;
+Begin
+ RawEsParseCfg:=0;
+ RawEsParamsClear(Pr); Pr.Codec:=Codec;
+ If Codec=RawEsCH264 Then Begin
+  If (Len<7) Or (Cfg^[0]<>1) Then Exit;
+  RawEsParseCfg:=(Cfg^[4] And 3)+1;
+  P:=5; Cnt:=Cfg^[P] And 31; Inc(P);
+  For I:=1 To Cnt Do Begin
+   If P+2>Len Then Exit; Ln:=(Cfg^[P] Shl 8) Or Cfg^[P+1]; Inc(P,2);
+   If P+Ln>Len Then Exit; RawEsParamsAdd(Pr,1,@Cfg^[P],Ln); Inc(P,Ln);
+  End;
+  If P>=Len Then Exit;
+  Cnt:=Cfg^[P]; Inc(P);
+  For I:=1 To Cnt Do Begin
+   If P+2>Len Then Exit; Ln:=(Cfg^[P] Shl 8) Or Cfg^[P+1]; Inc(P,2);
+   If P+Ln>Len Then Exit; RawEsParamsAdd(Pr,2,@Cfg^[P],Ln); Inc(P,Ln);
+  End;
+ End Else If Codec=RawEsCHEVC Then Begin
+  If (Len<23) Or (Cfg^[0]<>1) Then Exit;
+  RawEsParseCfg:=(Cfg^[21] And 3)+1;
+  P:=23; Cnt:=Cfg^[22];
+  For I:=1 To Cnt Do Begin
+   If P+3>Len Then Exit;
+   K:=Cfg^[P] And 63; Nn:=(Cfg^[P+1] Shl 8) Or Cfg^[P+2]; Inc(P,3);
+   For J:=1 To Nn Do Begin
+    If P+2>Len Then Exit; Ln:=(Cfg^[P] Shl 8) Or Cfg^[P+1]; Inc(P,2);
+    If P+Ln>Len Then Exit;
+    If (K>=32) And (K<=34) Then RawEsParamsAdd(Pr,K-32,@Cfg^[P],Ln);
+    Inc(P,Ln);
+   End;
+  End;
+ End;
+End;
+
+{ Convertit un echantillon AVCC/HVCC (longueurs sur LengthSize octets) en unite d'acces Annex B.
+  AddAud : insere un delimiteur d'unite d'acces (AUD) en tete s'il n'y en a pas.
+  IsKey : insere les VPS/SPS/PPS de Pr avant les tranches (si le paquet n'en contient pas deja).
+  Dst doit mesurer au moins Len + Pr.Total + 64 octets. Retourne False si le paquet est incoherent. }
+Function RawEsAvccToAnnexB(Codec: LongInt; Pkt: PEABuffer; Len,LengthSize: LongInt; Var Pr: TRawEsParams; IsKey,AddAud: Boolean; Dst: PEABuffer; Var DstLen: LongInt): Boolean;
+Var P,N,Ln,I,T,Sz: LongInt; HasAud,HasPs: Boolean;
+Begin
+ RawEsAvccToAnnexB:=False; DstLen:=0;
+ If (LengthSize<1) Or (LengthSize>4) Then Exit;
+ { premier passage : AUD / jeux de parametres deja presents ? }
+ HasAud:=False; HasPs:=False; P:=0;
+ While P+LengthSize<=Len Do Begin
+  Ln:=0; For I:=0 To LengthSize-1 Do Ln:=(Ln Shl 8) Or Pkt^[P+I];
+  Inc(P,LengthSize);
+  If (Ln<0) Or (P+Ln>Len) Then Exit;
+  If Ln>0 Then Begin
+   If Codec=RawEsCH264 Then T:=Pkt^[P] And 31 Else T:=(Pkt^[P] Shr 1) And 63;
+   If Codec=RawEsCH264 Then Begin If T=9 Then HasAud:=True; If (T=7) Or (T=8) Then HasPs:=True; End
+   Else Begin If T=35 Then HasAud:=True; If (T>=32) And (T<=34) Then HasPs:=True; End;
+  End;
+  Inc(P,Ln);
+ End;
+ N:=0;
+ If AddAud And (Not HasAud) Then Begin
+  Dst^[0]:=0; Dst^[1]:=0; Dst^[2]:=0; Dst^[3]:=1;
+  If Codec=RawEsCH264 Then Begin Dst^[4]:=9; Dst^[5]:=$F0; N:=6; End
+  Else Begin Dst^[4]:=$46; Dst^[5]:=1; Dst^[6]:=$50; N:=7; End;
+ End;
+ P:=0; Sz:=0;
+ While P+LengthSize<=Len Do Begin
+  Ln:=0; For I:=0 To LengthSize-1 Do Ln:=(Ln Shl 8) Or Pkt^[P+I];
+  Inc(P,LengthSize);
+  If Ln>0 Then Begin
+   If Codec=RawEsCH264 Then T:=Pkt^[P] And 31 Else T:=(Pkt^[P] Shr 1) And 63;
+   { jeux de parametres avant la premiere tranche, apres AUD et SEI eventuels }
+   If IsKey And (Not HasPs) And (Sz=0) Then Begin
+    If ((Codec=RawEsCH264) And (T<>9)) Or ((Codec=RawEsCHEVC) And (T<>35)) Then Begin
+     Inc(N,RawEsParamsAnnexB(Pr,@Dst^[N])); Sz:=1;
+    End;
+   End;
+   Dst^[N]:=0; Dst^[N+1]:=0; Dst^[N+2]:=0; Dst^[N+3]:=1; Inc(N,4);
+   Move(Pkt^[P],Dst^[N],Ln); Inc(N,Ln);
+  End;
+  Inc(P,Ln);
+ End;
+ DstLen:=N;
+ RawEsAvccToAnnexB:=True;
+End;
+
+{ Convertit une unite d'acces Annex B en echantillon AVCC/HVCC (longueur sur 4 octets). Les NAL AUD/VPS/SPS/PPS
+  sont retires (ils sont dans avcC/hvcC). Dst doit mesurer au moins Len + Len div 2 + 64. IsKey est renvoye
+  (IDR / IRAP). Retourne la longueur ecrite. }
+Function RawEsAnnexBToAvcc(Codec: LongInt; Src: PEABuffer; Len: LongInt; Dst: PEABuffer; Var IsKey: Boolean): LongInt;
+Var P,E,T,N: LongInt; Skip: Boolean;
+Begin
+ N:=0; IsKey:=False;
+ P:=RawEsNextNal(Src,Len,0);
+ While P>=0 Do Begin
+  E:=RawEsNalEnd(Src,Len,P);
+  If E>P Then Begin
+   If Codec=RawEsCH264 Then Begin
+    T:=Src^[P] And 31; Skip:=(T=9) Or (T=7) Or (T=8);
+    If T=5 Then IsKey:=True;
+   End Else Begin
+    T:=(Src^[P] Shr 1) And 63; Skip:=(T=35) Or ((T>=32) And (T<=34));
+    If (T>=16) And (T<=23) Then IsKey:=True;
+   End;
+   If Not Skip Then Begin
+    Dst^[N]:=((E-P) Shr 24) And 255; Dst^[N+1]:=((E-P) Shr 16) And 255; Dst^[N+2]:=((E-P) Shr 8) And 255; Dst^[N+3]:=(E-P) And 255;
+    Inc(N,4); Move(Src^[P],Dst^[N],E-P); Inc(N,E-P);
+   End;
+  End;
+  P:=RawEsNextNal(Src,Len,E);
+ End;
+ RawEsAnnexBToAvcc:=N;
+End;
+{ ====================================================================== }
+{ pe_ts.pas - Demultiplexeur / multiplexeur MPEG-TS, M2TS (BDAV 192),     }
+{ MTS (AVCHD). PAT/PMT, PES, PTS/DTS (33 bits), PCR, decoupe en unites    }
+{ d'acces, sonde rapide, extraction de flux elementaires + index.         }
+{ Necessite pe_rawes.pas (decoupeur d'unites d'acces video, SPS, index).  }
+{ Reference : ITU-T H.222.0, FFmpeg n6.1.1 libavformat/mpegts.c, mpegtsenc.c (LGPL 2.1+). }
+{ Tous les identifiants globaux commencent par TS / TTS.                  }
+{ ====================================================================== }
+
+Const
+ { codecs audio / autres (les codecs video sont RawEsC*) }
+ TSCMpeg4V = 6;
+ TSCAac = 16; TSCAacLatm = 17; TSCAc3 = 18; TSCEac3 = 19; TSCMp2 = 20; TSCMp3 = 21; TSCDts = 22; TSCLpcm = 23; TSCTrueHd = 24; TSCMp1 = 25;
+ TSCPgs = 32; TSCSub = 33; TSCOther = 63;
+ TSKindOther = 0; TSKindVideo = 1; TSKindAudio = 2; TSKindSub = 3;
+ TSMaxStreams = 48;
+ TSNoPts = RawEsNoPts;
+
+Type
+ TTSStream = Record
+  Pid, StreamType, Prog: LongInt;     { PID, stream_type de la PMT, numero de programme }
+  Kind, Codec: LongInt;               { TSKind*, RawEsC* ou TSC* }
+  CodecName: String[16];
+  Lang: String[4];                    { ISO 639-2 ('fra'), '' si absent }
+  Supported: Boolean;                 { extractible par TSExtract }
+  Note: String[48];                   { remarque (ex. 'E-AC-3 : pas de decodeur') }
+  Width, Height, FpsNum, FpsDen: LongInt;
+  Profile, Level, Chroma, BitDepth, SarNum, SarDen: LongInt;
+  ProfName: String[32];
+  Interlaced: Boolean;
+  Channels, SampleRate, BitRate, BitsPerSample, FrameSamples: LongInt;
+  FirstPts, LastPts: Int64;           { 90 kHz, TSNoPts si inconnu }
+  Frames: LongInt;                    { unites d'acces vues pendant la sonde (debut du fichier) }
+ End;
+ TTSInfo = Record
+  Ok: Boolean;
+  FileSize: Int64;
+  PacketSize, SyncOffset: LongInt;    { 188 / 192 / 204 ; 4 = M2TS avec TP_extra_header }
+  IsM2ts: Boolean;
+  NProg: LongInt;
+  ProgNum, ProgPmt: Array[0..31] Of LongInt;
+  SelProg: LongInt;                   { programme retenu (TSProgram ou le premier) }
+  NStreams: LongInt;
+  S: Array[0..TSMaxStreams-1] Of TTSStream;
+  DefVideo, DefAudio: LongInt;        { indices dans S pour le programme retenu, -1 si absent }
+  PcrPid: LongInt;
+  FirstPcr, LastPcr: Int64;           { 90 kHz (PCR base), TSNoPts si inconnu }
+  DurationMs: Int64;                  { duree (PTS, sinon PCR) en ms }
+  StartPts: Int64;                    { plus petit PTS de debut (90 kHz) }
+  UnwrapBase: Int64;                  { reference de depliage des 33 bits (usage interne) }
+  BitRate: LongInt;
+  SyncLosses, CcErrors, Discont: LongInt;   { comptes sur les zones balayees }
+ End;
+
+Var
+ TSProgram: LongInt;          { numero de programme a utiliser (0 = premier de la PAT ayant des flux video/audio) }
+ TSWriteIdx: Boolean;         { TSExtract ecrit VDst+'.idx' et ADst+'.idx' (defaut True) }
+ TSContinuous: Boolean;       { TSExtract rend les horodatages continus en cas de discontinuite (defaut True) }
+ TSDiscThresh: LongInt;       { saut (90 kHz) au dela duquel une discontinuite est declaree (defaut 900000 = 10 s) }
+ TSProbeHead: LongInt;        { octets balayes au debut par TSProbe (defaut 16 Mo) }
+ TSProbeTail: LongInt;        { octets balayes a la fin par TSProbe (defaut 2 Mo) }
+ TSMsg: String;               { dernier message d'avertissement }
+
+{ ---------------- utilitaires ---------------- }
+Var
+ TSCrcTab: Array[0..255] Of LongInt;
+ TSCrcOk: Boolean;
+
+Procedure TSCrcInit;
+Var I,K: LongInt; C: LongInt;
+Begin
+ If TSCrcOk Then Exit;
+ For I:=0 To 255 Do Begin
+  C:=I Shl 24;
+  For K:=1 To 8 Do Begin
+   If (C And LongInt($80000000))<>0 Then C:=(C Shl 1) Xor LongInt($04C11DB7) Else C:=C Shl 1;
+  End;
+  TSCrcTab[I]:=C;
+ End;
+ TSCrcOk:=True;
+End;
+
+Function TSCrc32(P: PEABuffer; Len: LongInt): LongInt;
+Var I: LongInt; C: LongInt;
+Begin
+ TSCrcInit;
+ C:=LongInt($FFFFFFFF);
+ For I:=0 To Len-1 Do C:=(C Shl 8) Xor TSCrcTab[((C Shr 24) Xor P^[I]) And 255];
+ TSCrc32:=C;
+End;
+
+Function TSCodecName(C: LongInt): String;
+Begin
+ Case C Of
+  RawEsCH264: TSCodecName:='h264'; RawEsCHEVC: TSCodecName:='hevc';
+  RawEsCMpeg2: TSCodecName:='mpeg2video'; RawEsCMpeg1: TSCodecName:='mpeg1video'; RawEsCVC1: TSCodecName:='vc1';
+  TSCMpeg4V: TSCodecName:='mpeg4';
+  TSCAac: TSCodecName:='aac'; TSCAacLatm: TSCodecName:='aac_latm'; TSCAc3: TSCodecName:='ac3'; TSCEac3: TSCodecName:='eac3';
+  TSCMp2: TSCodecName:='mp2'; TSCMp3: TSCodecName:='mp3'; TSCMp1: TSCodecName:='mp1'; TSCDts: TSCodecName:='dts';
+  TSCLpcm: TSCodecName:='pcm_bluray'; TSCTrueHd: TSCodecName:='truehd';
+  TSCPgs: TSCodecName:='hdmv_pgs_subtitle'; TSCSub: TSCodecName:='subtitle';
+  Else TSCodecName:='unknown';
+ End;
+End;
+
+{ ---------------- lecteur de paquets ---------------- }
+Const
+ TSRdBufSize = 1048576;
+
+Type
+ TTSRd = Record
+  F: File; Opened: Boolean;
+  Size: Int64;                 { taille du fichier }
+  PktSize, SyncOff: LongInt;   { taille d'une unite, position de 0x47 dans l'unite }
+  Buf: PEABuffer; BufPos: Int64; BufLen: LongInt;
+  Pos: Int64;                  { position de la prochaine unite }
+  Pk: PEABuffer;               { paquet courant : Pk^[0] = 0x47 }
+  PktPos: Int64;               { position du 0x47 courant dans le fichier }
+  Ats: LongInt;                { TP_extra_header (30 bits) si SyncOff=4 }
+  Losses: LongInt; OpenErr: Boolean;
+  TmpPkt: Array[0..203] Of Byte;
+ End;
+
+Procedure TSRdClose(Var R: TTSRd);
+Begin
+ If R.Opened Then Begin {$I-}Close(R.F);{$I+} If IOResult<>0 Then ; R.Opened:=False; End;
+ If R.Buf<>Nil Then Begin FreeMem(R.Buf); R.Buf:=Nil; End;
+End;
+
+Procedure TSRdFill(Var R: TTSRd; At: Int64);
+Var Act: LongInt;
+Begin
+ R.BufPos:=At; R.BufLen:=0;
+ If At>=R.Size Then Exit;
+ {$I-}Seek(R.F,At); BlockRead(R.F,R.Buf^,TSRdBufSize,Act);{$I+}
+ If IOResult<>0 Then Act:=0;
+ R.BufLen:=Act;
+End;
+
+{ Octet a la position P du fichier, -1 apres la fin }
+Function TSRdByte(Var R: TTSRd; P: Int64): LongInt;
+Begin
+ If (P<R.BufPos) Or (P>=R.BufPos+R.BufLen) Then Begin
+  If (P<0) Or (P>=R.Size) Then Begin TSRdByte:=-1; Exit; End;
+  TSRdFill(R,P);
+  If R.BufLen=0 Then Begin TSRdByte:=-1; Exit; End;
+ End;
+ TSRdByte:=R.Buf^[P-R.BufPos];
+End;
+
+{ Ouvre le fichier et detecte la taille de paquet et le decalage de synchronisation. False si ce n'est pas du TS. }
+Function TSRdOpen(Var R: TTSRd; Const Path: String): Boolean;
+Var Code,Act,Best,BestSz,BestOff,Sz,P,K,Cnt,I,Lim: LongInt; Sizes: Array[0..2] Of LongInt; Old: Byte;
+Begin
+ TSRdOpen:=False;
+ FillChar(R,SizeOf(R),0);
+ Assign(R.F,Path); Old:=FileMode; FileMode:=0;
+ {$I-}Reset(R.F,1); Code:=IOResult;{$I+}
+ FileMode:=Old;
+ If Code<>0 Then Begin R.OpenErr:=True; Exit; End;
+ R.Opened:=True; R.Size:=FileSize(R.F);
+ GetMem(R.Buf,TSRdBufSize+16);
+ TSRdFill(R,0);
+ Sizes[0]:=188; Sizes[1]:=192; Sizes[2]:=204;
+ Best:=0; BestSz:=188; BestOff:=0;
+ Lim:=R.BufLen; If Lim>262144 Then Lim:=262144;
+ For P:=0 To 407 Do Begin
+  If (P<Lim) And (R.Buf^[P]=$47) Then
+   For I:=0 To 2 Do Begin
+    Sz:=Sizes[I]; Cnt:=1;
+    K:=P+Sz;
+    While (K<Lim) And (R.Buf^[K]=$47) And (Cnt<256) Do Begin Inc(Cnt); Inc(K,Sz); End;
+    If (Cnt>Best) Or ((Cnt=Best) And (Sz=188) And (BestSz<>188)) Then Begin Best:=Cnt; BestSz:=Sz; BestOff:=P; End;
+   End;
+ End;
+ If (Best<5) And (R.Size>2000) Then Begin TSRdClose(R); Exit; End;
+ If (Best<2) Then Begin TSRdClose(R); Exit; End;
+ R.PktSize:=BestSz;
+ If (BestSz=192) And ((BestOff Mod 192)=4) Then R.SyncOff:=4 Else R.SyncOff:=0;
+ R.Pos:=BestOff-R.SyncOff;
+ While R.Pos<0 Do Inc(R.Pos,R.PktSize);
+ TSRdOpen:=True;
+End;
+
+Procedure TSRdSeek(Var R: TTSRd; At: Int64);
+Begin
+ R.Pos:=At;
+End;
+
+{ Verifie qu'une synchronisation plausible existe a l'unite commencant en U (3 paquets consecutifs) }
+Function TSRdSyncAt(Var R: TTSRd; U: Int64): Boolean;
+Var K: LongInt;
+Begin
+ TSRdSyncAt:=False;
+ For K:=0 To 2 Do Begin
+  If U+K*R.PktSize+R.SyncOff>=R.Size Then Begin
+   If K=0 Then Exit;
+   Break;
+  End;
+  If TSRdByte(R,U+K*R.PktSize+R.SyncOff)<>$47 Then Exit;
+ End;
+ TSRdSyncAt:=True;
+End;
+
+{ Paquet suivant. False en fin de fichier. Gere la resynchronisation. }
+Function TSRdNext(Var R: TTSRd): Boolean;
+Var U: Int64; Off: LongInt; Lost: Boolean;
+Begin
+ TSRdNext:=False;
+ Lost:=False;
+ While True Do Begin
+  U:=R.Pos;
+  If U+R.PktSize>R.Size Then Exit;
+  If (U<R.BufPos) Or (U+R.PktSize>R.BufPos+R.BufLen) Then Begin
+   TSRdFill(R,U);
+   If U+R.PktSize>R.BufPos+R.BufLen Then Exit;
+  End;
+  Off:=U-R.BufPos;
+  If R.Buf^[Off+R.SyncOff]=$47 Then Begin
+   R.Pk:=@R.Buf^[Off+R.SyncOff]; R.PktPos:=U+R.SyncOff;
+   If R.SyncOff=4 Then R.Ats:=((R.Buf^[Off] And $3F) Shl 24) Or (R.Buf^[Off+1] Shl 16) Or (R.Buf^[Off+2] Shl 8) Or R.Buf^[Off+3] Else R.Ats:=0;
+   R.Pos:=U+R.PktSize;
+   If Lost Then Inc(R.Losses);
+   TSRdNext:=True; Exit;
+  End;
+  { perte de synchronisation : chercher la prochaine position ou 3 paquets se suivent }
+  Lost:=True;
+  Inc(U);
+  While (U+R.PktSize<=R.Size) And (Not TSRdSyncAt(R,U)) Do Inc(U);
+  R.Pos:=U;
+  If U+R.PktSize>R.Size Then Exit;
+ End;
+End;
+
+{ ====================================================================== }
+{ Analyse des trames audio (ADTS, LOAS, AC-3, E-AC-3, MPEG audio, DTS)    }
+{ ====================================================================== }
+Const
+ TSAdtsRates: Array[0..12] Of LongInt = (96000,88200,64000,48000,44100,32000,24000,22050,16000,12000,11025,8000,7350);
+ TSAc3Rates: Array[0..2] Of LongInt = (48000,44100,32000);
+ TSAc3Br: Array[0..18] Of Word = (32,40,48,56,64,80,96,112,128,160,192,224,256,320,384,448,512,576,640);
+ TSAc3Ch: Array[0..7] Of Byte = (2,1,2,3,3,4,4,5);
+ TSMpaBr: Array[0..4,0..15] Of Word = (
+  (0,32,64,96,128,160,192,224,256,288,320,352,384,416,448,0),
+  (0,32,48,56,64,80,96,112,128,160,192,224,256,320,384,0),
+  (0,32,40,48,56,64,80,96,112,128,160,192,224,256,320,0),
+  (0,32,48,56,64,80,96,112,128,144,160,176,192,224,256,0),
+  (0,8,16,24,32,40,48,56,64,80,96,112,128,144,160,0));
+ TSDtsRates: Array[0..15] Of LongInt = (0,8000,16000,32000,0,0,11025,22050,44100,0,0,12000,24000,48000,0,0);
+ TSDtsCh: Array[0..15] Of Byte = (1,2,2,2,2,3,3,4,4,5,6,6,6,7,8,8);
+
+Type
+ TTSAuHdr = Record
+  Len, Samples, Rate, Ch, BitRate, Obj, Codec: LongInt;
+  Dep: Boolean;
+ End;
+
+{ Retourne 1 si une trame valide commence en P^ (Avail octets disponibles), 0 sinon, -1 s'il faut plus d'octets. }
+Function TSAuHdr(Codec: LongInt; P: PEABuffer; Avail: LongInt; Var H: TTSAuHdr): LongInt;
+Var Idx,Fs,Br,Lay,Ver,Sr,Pad,Acmod,Lfe,Bsid,Nb,Bits,Fr,Blk,Ft,Bp,Obj,K: LongInt;
+Begin
+ TSAuHdr:=0;
+ FillChar(H,SizeOf(H),0);
+ If Avail<12 Then Begin TSAuHdr:=-1; Exit; End;
+ Case Codec Of
+  TSCAac: Begin
+   If (P^[0]<>$FF) Or ((P^[1] And $F6)<>$F0) Then Exit;
+   Idx:=(P^[2] Shr 2) And 15; If Idx>12 Then Exit;
+   Fs:=((P^[3] And 3) Shl 11) Or (P^[4] Shl 3) Or (P^[5] Shr 5);
+   If (P^[1] And 1)=0 Then Begin If Fs<9 Then Exit; End Else If Fs<7 Then Exit;
+   H.Len:=Fs; H.Rate:=TSAdtsRates[Idx]; H.Ch:=((P^[2] And 1) Shl 2) Or (P^[3] Shr 6);
+   If H.Ch=7 Then H.Ch:=8;
+   H.Obj:=((P^[2] Shr 6) And 3)+1; H.Samples:=1024*((P^[6] And 3)+1); H.Codec:=TSCAac;
+   H.BitRate:=0;
+   TSAuHdr:=1;
+  End;
+  TSCAacLatm: Begin
+   If (P^[0]<>$56) Or ((P^[1] And $E0)<>$E0) Then Exit;
+   H.Len:=(((P^[1] And 31) Shl 8) Or P^[2])+3; If H.Len<4 Then Exit;
+   H.Samples:=1024; H.Codec:=TSCAacLatm;
+   { AudioMuxElement : useSameStreamMux=0 -> StreamMuxConfig (version 0, un programme, une couche) }
+   If (P^[3] And $80)=0 Then Begin
+
+    Bp:=3*8+1;
+    If ((P^[3] Shr 6) And 1)=0 Then Begin
+     { audioMuxVersion=0 }
+     Bp:=Bp+1+1+6+4+3;
+     Obj:=0; For K:=0 To 4 Do Begin Obj:=(Obj Shl 1) Or ((P^[Bp Shr 3] Shr (7-(Bp And 7))) And 1); Inc(Bp); End;
+     If (Obj<>31) Then Begin
+      Idx:=0; For K:=0 To 3 Do Begin Idx:=(Idx Shl 1) Or ((P^[Bp Shr 3] Shr (7-(Bp And 7))) And 1); Inc(Bp); End;
+      Fr:=0; For K:=0 To 3 Do Begin Fr:=(Fr Shl 1) Or ((P^[Bp Shr 3] Shr (7-(Bp And 7))) And 1); Inc(Bp); End;
+      If (Idx<=12) Then Begin H.Rate:=TSAdtsRates[Idx]; H.Ch:=Fr; If H.Ch=7 Then H.Ch:=8; H.Obj:=Obj; End;
+     End;
+    End;
+   End;
+   TSAuHdr:=1;
+  End;
+  TSCAc3,TSCEac3: Begin
+   If (P^[0]<>$0B) Or (P^[1]<>$77) Then Exit;
+   Bsid:=P^[5] Shr 3;
+   If Bsid<=10 Then Begin
+    Fs:=P^[4] Shr 6; Fr:=P^[4] And 63;
+    If (Fs=3) Or (Fr>37) Then Exit;
+    Br:=TSAc3Br[Fr Shr 1];
+    Case Fs Of
+     0: H.Len:=Br*2*2;
+     2: H.Len:=Br*3*2;
+     1: H.Len:=(Br*1536000 Div (44100*16)+(Fr And 1))*2;
+    End;
+    Acmod:=P^[6] Shr 5;
+    Bits:=3;
+    If ((Acmod And 1)<>0) And (Acmod<>1) Then Inc(Bits,2);
+    If (Acmod And 4)<>0 Then Inc(Bits,2);
+    If Acmod=2 Then Inc(Bits,2);
+    Lfe:=(((P^[6] Shl 8) Or P^[7]) Shr (15-Bits)) And 1;
+    H.Ch:=TSAc3Ch[Acmod]+Lfe; H.Rate:=TSAc3Rates[Fs]; H.Samples:=1536; H.BitRate:=Br*1000; H.Codec:=TSCAc3;
+    TSAuHdr:=1;
+   End Else If Bsid<=16 Then Begin
+    Ft:=P^[2] Shr 6;
+    Fs:=(((P^[2] And 7) Shl 8) Or P^[3])+1;
+    If Fs<3 Then Exit;
+    H.Len:=Fs*2; Fr:=P^[4] Shr 6;
+    If Fr=3 Then Begin
+     Fr:=(P^[4] Shr 4) And 3; If Fr=3 Then Exit; H.Rate:=TSAc3Rates[Fr] Div 2; Nb:=6;
+    End Else Begin
+     H.Rate:=TSAc3Rates[Fr]; Blk:=(P^[4] Shr 4) And 3; Nb:=1; If Blk=1 Then Nb:=2 Else If Blk=2 Then Nb:=3 Else If Blk=3 Then Nb:=6;
+    End;
+    H.Samples:=256*Nb; Acmod:=(P^[4] Shr 1) And 7; Lfe:=P^[4] And 1;
+    H.Ch:=TSAc3Ch[Acmod]+Lfe; H.Codec:=TSCEac3; H.Dep:=(Ft=1);
+    H.BitRate:=0;
+    TSAuHdr:=1;
+   End;
+  End;
+  TSCMp2,TSCMp3,TSCMp1: Begin
+   If (P^[0]<>$FF) Or ((P^[1] And $E0)<>$E0) Then Exit;
+   Ver:=(P^[1] Shr 3) And 3; Lay:=(P^[1] Shr 1) And 3;
+   If (Ver=1) Or (Lay=0) Then Exit;
+   Idx:=P^[2] Shr 4; Sr:=(P^[2] Shr 2) And 3;
+   If (Idx=0) Or (Idx=15) Or (Sr=3) Then Exit;
+   Pad:=(P^[2] Shr 1) And 1;
+   Lay:=4-Lay;   { 1, 2, 3 }
+   If Ver=3 Then Begin Case Sr Of 0: H.Rate:=44100; 1: H.Rate:=48000; 2: H.Rate:=32000; End; End
+   Else Begin
+    Case Sr Of 0: H.Rate:=22050; 1: H.Rate:=24000; 2: H.Rate:=16000; End;
+    If Ver=0 Then H.Rate:=H.Rate Div 2;
+   End;
+   If Ver=3 Then Br:=TSMpaBr[Lay-1,Idx]
+   Else If Lay=1 Then Br:=TSMpaBr[3,Idx] Else Br:=TSMpaBr[4,Idx];
+   If Lay=1 Then Begin H.Len:=(12*Br*1000 Div H.Rate+Pad)*4; H.Samples:=384; End
+   Else If (Lay=3) And (Ver<>3) Then Begin H.Len:=72*Br*1000 Div H.Rate+Pad; H.Samples:=576; End
+   Else Begin H.Len:=144*Br*1000 Div H.Rate+Pad; H.Samples:=1152; End;
+   H.BitRate:=Br*1000;
+   If (P^[3] Shr 6)=3 Then H.Ch:=1 Else H.Ch:=2;
+   If Lay=1 Then H.Codec:=TSCMp1 Else If Lay=2 Then H.Codec:=TSCMp2 Else H.Codec:=TSCMp3;
+   TSAuHdr:=1;
+  End;
+  TSCDts: Begin
+   If (P^[0]<>$7F) Or (P^[1]<>$FE) Or (P^[2]<>$80) Or (P^[3]<>$01) Then Exit;
+   Blk:=((P^[4] And 1) Shl 6) Or (P^[5] Shr 2);
+   Fs:=(((P^[5] And 3) Shl 12) Or (P^[6] Shl 4) Or (P^[7] Shr 4))+1;
+   Acmod:=((P^[7] And 15) Shl 2) Or (P^[8] Shr 6);
+   Sr:=(P^[8] Shr 2) And 15;
+   If (Blk<5) Or (Fs<95) Or (Fs>16384) Or (TSDtsRates[Sr]=0) Or (Acmod>15) Then Exit;
+   H.Len:=Fs; H.Samples:=(Blk+1)*32; H.Rate:=TSDtsRates[Sr]; H.Ch:=TSDtsCh[Acmod];
+   Idx:=((P^[8] And 3) Shl 3) Or (P^[9] Shr 5);
+   { LFE : bits suivants - on les ajoute si present (champ lff) }
+   Lfe:=(P^[10] Shr 1) And 3;
+   If Lfe<>0 Then Inc(H.Ch);
+   H.BitRate:=0;
+   H.Codec:=TSCDts;
+   TSAuHdr:=1;
+  End;
+ End;
+End;
+
+{ ====================================================================== }
+{ Decoupeur audio                                                          }
+{ ====================================================================== }
+Const
+ TSAuBufSize = 262144;
+ TSWavHdr = 68;
+
+Type
+ TTSAu = Record
+  Codec: LongInt;
+  WriteOut, OutOpen: Boolean; OutF: File; OutBuf: PEABuffer; OutN: LongInt; OutPos: Int64;
+  Buf: PEABuffer; N: LongInt; BufPos: Int64;
+  Pos: Int64;
+  Aus: PRawEsIdxArr; NAu, CapAu: LongInt;
+  MkN: LongInt; Mk: Array[0..63] Of TRawEsMk;
+  BaseOk: Boolean; BasePts: Int64; BaseSamples: Int64;
+  Rate, Ch, Samples, BitRate, Obj, RealCodec, Bits: LongInt; InfoSet: Boolean;
+  PendFlags: LongInt;
+  LpcmLayout: LongInt; LpcmBytes: Int64; LpcmPts: Int64; LpcmHave: Boolean;
+  FrameCount: LongInt;
+  BytesAcc, SamplesAcc: Int64;
+  PrevPts: Int64; PrevSamples: LongInt;
+ End;
+ PTSAu = ^TTSAu;
+
+Procedure TSAuOutFlush(Var A: TTSAu);
+Var Act: LongInt;
+Begin
+ If A.OutOpen And (A.OutN>0) Then Begin
+  {$I-}BlockWrite(A.OutF,A.OutBuf^,A.OutN,Act);{$I+}
+  If IOResult<>0 Then Act:=-1;
+  A.OutN:=0;
+ End;
+End;
+
+Procedure TSAuOutWrite(Var A: TTSAu; P: PEABuffer; Len: LongInt);
+Var Act: LongInt;
+Begin
+ If (Not A.OutOpen) Or (Len<=0) Then Exit;
+ If A.OutN+Len>RawEsOutSize Then TSAuOutFlush(A);
+ If Len>=RawEsOutSize Then Begin
+  {$I-}BlockWrite(A.OutF,P^,Len,Act);{$I+}
+  If IOResult<>0 Then Act:=-1;
+ End Else Begin
+  Move(P^,A.OutBuf^[A.OutN],Len); Inc(A.OutN,Len);
+ End;
+End;
+
+Procedure TSAuInit(Var A: TTSAu; Codec: LongInt; Const OutPath: String);
+Var Code: LongInt; Z: Array[0..TSWavHdr-1] Of Byte;
+Begin
+ FillChar(A,SizeOf(A),0);
+ A.Codec:=Codec; A.RealCodec:=Codec;
+ GetMem(A.Buf,TSAuBufSize+64);
+ A.CapAu:=1024;
+ GetMem(A.Aus,A.CapAu*SizeOf(TRawEsIdx));
+ If OutPath<>'' Then Begin
+  Assign(A.OutF,OutPath);
+  {$I-}Rewrite(A.OutF,1); Code:=IOResult;{$I+}
+  If Code=0 Then Begin
+   A.OutOpen:=True; A.WriteOut:=True; GetMem(A.OutBuf,RawEsOutSize);
+   If Codec=TSCLpcm Then Begin
+    FillChar(Z,SizeOf(Z),0); TSAuOutWrite(A,@Z,TSWavHdr); A.OutPos:=TSWavHdr;
+   End;
+  End;
+ End;
+End;
+
+Procedure TSAuAddMarker(Var A: TTSAu; Pts: Int64);
+Var I: LongInt;
+Begin
+ If A.MkN>=64 Then Begin
+  For I:=1 To 63 Do A.Mk[I-1]:=A.Mk[I];
+  A.MkN:=63;
+ End;
+ A.Mk[A.MkN].Pos:=A.Pos; A.Mk[A.MkN].Pts:=Pts; A.Mk[A.MkN].Dts:=Pts;
+ Inc(A.MkN);
+End;
+
+Procedure TSAuAddAu(Var A: TTSAu; Off: Int64; Size,Flags: LongInt; Pts: Int64);
+Begin
+ If A.NAu>=A.CapAu Then Begin
+  If A.CapAu>=RawEsMaxAu Then Exit;
+  A.CapAu:=A.CapAu*2; If A.CapAu>RawEsMaxAu Then A.CapAu:=RawEsMaxAu;
+  ReallocMem(A.Aus,A.CapAu*SizeOf(TRawEsIdx));
+ End;
+ A.Aus^[A.NAu].Off:=Off; A.Aus^[A.NAu].Size:=Size; A.Aus^[A.NAu].Flags:=Flags;
+ A.Aus^[A.NAu].Pts:=Pts; A.Aus^[A.NAu].Dts:=Pts;
+ Inc(A.NAu);
+End;
+
+{ Recupere le marqueur (PTS) applicable a un octet de position P ; True si trouve }
+Function TSAuTakeMarker(Var A: TTSAu; P: Int64; Var Pts: Int64): Boolean;
+Var I,K,Best: LongInt;
+Begin
+ TSAuTakeMarker:=False;
+ Best:=-1;
+ For I:=0 To A.MkN-1 Do If A.Mk[I].Pos<=P Then Best:=I;
+ If Best<0 Then Exit;
+ Pts:=A.Mk[Best].Pts;
+ K:=0;
+ For I:=Best+1 To A.MkN-1 Do Begin A.Mk[K]:=A.Mk[I]; Inc(K); End;
+ A.MkN:=K;
+ TSAuTakeMarker:=True;
+End;
+
+{ Arrondi 'au plus proche' de A*B/C (A,B,C > 0) }
+Function TSRnd(A,B,C: Int64): Int64;
+Begin
+ TSRnd:=(A*B+(C Div 2)) Div C;
+End;
+
+{ Horodatage de la trame suivante d'une meme charge PES, comme libavformat (av_add_stable pour AAC,
+  duree arrondie vers le bas pour les autres codecs). Ts = PTS de la trame precedente, Samples = ses echantillons. }
+Function TSAuNext(Codec: LongInt; Ts: Int64; Samples,Rate: LongInt): Int64;
+Var M,D,Old,OldTs: Int64;
+Begin
+ M:=Int64(Samples)*90000; D:=Rate;
+ If (Codec<>TSCAac) And (Codec<>TSCAacLatm) Then Begin TSAuNext:=Ts+M Div D; Exit; End;
+ If (M Mod D)=0 Then Begin TSAuNext:=Ts+M Div D; Exit; End;
+ Old:=TSRnd(Ts,Rate,Int64(90000)*Samples);
+ OldTs:=TSRnd(Old,M,D);
+ TSAuNext:=TSRnd(Old+1,M,D)+(Ts-OldTs);
+End;
+
+Procedure TSAuEmit(Var A: TTSAu; Const H: TTSAuHdr);
+Var Pts: Int64; Fl: LongInt;
+Begin
+ If (A.NAu>0) And H.Dep Then Begin
+  { sous-flux dependant : fait partie de l'unite precedente }
+  Inc(A.Aus^[A.NAu-1].Size,H.Len);
+  TSAuOutWrite(A,A.Buf,H.Len); Inc(A.OutPos,H.Len);
+  Exit;
+ End;
+ If (Not A.InfoSet) Or ((A.Rate=0) And (H.Rate>0)) Then Begin
+  A.Rate:=H.Rate; A.Ch:=H.Ch; A.Samples:=H.Samples; A.BitRate:=H.BitRate; A.Obj:=H.Obj; A.RealCodec:=H.Codec; A.InfoSet:=True;
+ End;
+ Pts:=TSNoPts;
+ If TSAuTakeMarker(A,A.BufPos,Pts) Then Begin A.BaseOk:=True; End
+ Else If A.BaseOk And (A.Rate>0) Then Pts:=TSAuNext(A.Codec,A.PrevPts,A.PrevSamples,A.Rate);
+ If A.BaseOk Then Begin A.PrevPts:=Pts; A.PrevSamples:=H.Samples; End;
+ Fl:=RawEsFKey Or A.PendFlags; A.PendFlags:=0;
+ If (Pts=TSNoPts) Then Fl:=Fl Or RawEsFEst;
+ TSAuAddAu(A,A.OutPos,H.Len,Fl,Pts);
+ TSAuOutWrite(A,A.Buf,H.Len); Inc(A.OutPos,H.Len);
+ Inc(A.FrameCount); Inc(A.BytesAcc,H.Len); Inc(A.SamplesAcc,H.Samples);
+End;
+
+Procedure TSAuConsume(Var A: TTSAu; K: LongInt);
+Begin
+ If K>=A.N Then Begin Inc(A.BufPos,A.N); A.N:=0; Exit; End;
+ Move(A.Buf^[K],A.Buf^[0],A.N-K);
+ Dec(A.N,K); Inc(A.BufPos,K);
+End;
+
+{ Traite les octets en attente. Final=True : fin de flux, pas de verification de la trame suivante }
+Procedure TSAuRun(Var A: TTSAu; Final: Boolean);
+Var H,H2: TTSAuHdr; R,R2,I: LongInt; Codec: LongInt; Done: Boolean;
+Begin
+ Codec:=A.Codec;
+ If Codec=TSCMp3 Then Codec:=TSCMp2;
+ Done:=False;
+ While (A.N>0) And (Not Done) Do Begin
+  R:=TSAuHdr(Codec,A.Buf,A.N,H);
+  If (R<0) And Final Then Begin
+   { derniere trame tres courte : completer par des zeros pour lire l'en-tete }
+   FillChar(A.Buf^[A.N],16,0);
+   R:=TSAuHdr(Codec,A.Buf,12,H);
+   If R=1 Then Begin If H.Len>A.N Then R:=0; End;
+   If R<>1 Then R:=-1;
+  End;
+  If R<0 Then Begin
+   If Final Then Begin TSAuConsume(A,A.N); End;
+   Break;
+  End;
+  If R=0 Then Begin
+   { chercher le prochain octet de synchronisation plausible }
+   I:=1;
+   While (I<A.N) And (A.Buf^[I]<>$FF) And (A.Buf^[I]<>$0B) And (A.Buf^[I]<>$7F) And (A.Buf^[I]<>$56) Do Inc(I);
+   TSAuConsume(A,I);
+   Continue;
+  End;
+  { R=1 : trame candidate }
+  If H.Len>A.N Then Begin
+   If Final Then Begin TSAuConsume(A,A.N); End;
+   Break;
+  End;
+  If (Not Final) And (Codec<>TSCDts) Then Begin
+   If H.Len+12>A.N Then Break;
+   R2:=TSAuHdr(Codec,@A.Buf^[H.Len],A.N-H.Len,H2);
+   If R2=0 Then Begin TSAuConsume(A,1); Continue; End;
+  End;
+  TSAuEmit(A,H);
+  TSAuConsume(A,H.Len);
+ End;
+End;
+
+Procedure TSAuPesStart(Var A: TTSAu); Forward;
+
+Procedure TSAuFeed(Var A: TTSAu; P: PEABuffer; Len: LongInt);
+Begin
+ If Len<=0 Then Exit;
+ If A.N+Len>TSAuBufSize Then Begin
+  If A.Codec=TSCLpcm Then Begin Inc(A.Pos,Len); Exit; End;
+  TSAuRun(A,False);
+  If A.N+Len>TSAuBufSize Then TSAuConsume(A,A.N);
+ End;
+ Move(P^,A.Buf^[A.N],Len); Inc(A.N,Len); Inc(A.Pos,Len);
+ If A.Codec<>TSCLpcm Then TSAuRun(A,False);
+End;
+
+{ ---- LPCM Blu-ray : une unite = une charge PES, convertie en WAV ---- }
+Procedure TSLpcmFlush(Var A: TTSAu);
+Var Lay,Nch,Src,Bits,Samples,Sz,I,J,K,O,Pk: LongInt; Out: PEABuffer; Dst: Array[0..7] Of LongInt; Pts: Int64; Bps: LongInt;
+ Rate: LongInt;
+Begin
+ If A.N<4 Then Begin A.N:=0; Exit; End;
+ Lay:=A.Buf^[2] Shr 4;
+ Case Lay Of
+  1: Nch:=1; 3: Nch:=2; 4: Nch:=3; 5: Nch:=3; 6: Nch:=4; 7: Nch:=4; 8: Nch:=5; 9: Nch:=6; 10: Nch:=7; 11: Nch:=8;
+  Else Begin A.N:=0; Exit; End;
+ End;
+ Case A.Buf^[3] Shr 6 Of 1: Bits:=16; 2: Bits:=20; 3: Bits:=24; Else Begin A.N:=0; Exit; End; End;
+ Case A.Buf^[2] And 15 Of 1: Rate:=48000; 4: Rate:=96000; 5: Rate:=192000; Else Begin A.N:=0; Exit; End; End;
+ Src:=(Nch+1) And (Not 1);
+ If Bits=16 Then Bps:=2 Else Bps:=3;
+ Sz:=Src*Bps;
+ Samples:=(A.N-4) Div Sz;
+ If Not A.InfoSet Then Begin
+  A.Rate:=Rate; A.Ch:=Nch; A.Bits:=Bits; A.LpcmLayout:=Lay; A.InfoSet:=True; A.RealCodec:=TSCLpcm; A.Samples:=0;
+  A.BitRate:=Src*Rate*Bits;
+ End;
+ If Samples>0 Then Begin
+  GetMem(Out,Samples*Nch*Bps+16);
+  O:=0;
+  For I:=0 To Samples-1 Do Begin
+   Pk:=4+I*Sz;
+   For J:=0 To Nch-1 Do Dst[J]:=J;
+   Case Lay Of
+    9: Begin Dst[3]:=4; Dst[4]:=5; Dst[5]:=3; End;
+    10: Begin Dst[3]:=5; Dst[4]:=3; Dst[5]:=4; Dst[6]:=6; End;
+    11: Begin Dst[3]:=6; Dst[4]:=4; Dst[5]:=5; Dst[6]:=7; Dst[7]:=3; End;
+   End;
+   For J:=0 To Nch-1 Do Begin
+    { sortie : canal Dst[J] recoit la source J }
+    K:=O+Dst[J]*Bps;
+    If Bps=2 Then Begin Out^[K]:=A.Buf^[Pk+J*2+1]; Out^[K+1]:=A.Buf^[Pk+J*2]; End
+    Else Begin Out^[K]:=A.Buf^[Pk+J*3+2]; Out^[K+1]:=A.Buf^[Pk+J*3+1]; Out^[K+2]:=A.Buf^[Pk+J*3]; End;
+   End;
+   Inc(O,Nch*Bps);
+  End;
+  Pts:=TSNoPts;
+  If TSAuTakeMarker(A,A.BufPos,Pts) Then Begin A.BasePts:=Pts; A.BaseSamples:=0; A.BaseOk:=True; End
+  Else If A.BaseOk Then Pts:=A.BasePts+(A.BaseSamples*90000+(Rate Div 2)) Div Rate;
+  If A.BaseOk Then Inc(A.BaseSamples,Samples);
+  TSAuAddAu(A,A.OutPos,O,RawEsFKey Or A.PendFlags,Pts); A.PendFlags:=0;
+  TSAuOutWrite(A,Out,O); Inc(A.OutPos,O); Inc(A.LpcmBytes,O);
+  Inc(A.FrameCount);
+  FreeMem(Out);
+ End;
+ Inc(A.BufPos,A.N); A.N:=0;
+End;
+
+Procedure TSAuPesStart(Var A: TTSAu);
+Begin
+ If A.Codec=TSCLpcm Then TSLpcmFlush(A);
+End;
+
+Procedure TSWriteWavHeader(Var A: TTSAu);
+Var H: Array[0..TSWavHdr-1] Of Byte; Mask,Dlen,Br,Act: LongInt; Bps: LongInt;
+ Procedure P4(O: LongInt; V: LongInt); Begin H[O]:=V And 255; H[O+1]:=(V Shr 8) And 255; H[O+2]:=(V Shr 16) And 255; H[O+3]:=(V Shr 24) And 255; End;
+ Procedure P2(O: LongInt; V: LongInt); Begin H[O]:=V And 255; H[O+1]:=(V Shr 8) And 255; End;
+Begin
+ If (Not A.OutOpen) Or (Not A.InfoSet) Then Exit;
+ FillChar(H,SizeOf(H),0);
+ If A.Bits=16 Then Bps:=2 Else Bps:=3;
+ Case A.LpcmLayout Of
+  1: Mask:=$4; 3: Mask:=$3; 4: Mask:=$7; 5: Mask:=$103; 6: Mask:=$107; 7: Mask:=$603; 8: Mask:=$607; 9: Mask:=$60F; 10: Mask:=$637; 11: Mask:=$63F;
+  Else Mask:=0;
+ End;
+ Dlen:=LongInt(A.LpcmBytes);
+ H[0]:=Ord('R'); H[1]:=Ord('I'); H[2]:=Ord('F'); H[3]:=Ord('F'); P4(4,Dlen+TSWavHdr-8);
+ H[8]:=Ord('W'); H[9]:=Ord('A'); H[10]:=Ord('V'); H[11]:=Ord('E');
+ H[12]:=Ord('f'); H[13]:=Ord('m'); H[14]:=Ord('t'); H[15]:=Ord(' '); P4(16,40);
+ P2(20,$FFFE); P2(22,A.Ch); P4(24,A.Rate); P4(28,A.Rate*A.Ch*Bps); P2(32,A.Ch*Bps); P2(34,Bps*8);
+ P2(36,22); P2(38,Bps*8); P4(40,Mask);
+ { sous-format PCM : 00000001-0000-0010-8000-00AA00389B71 }
+ H[44]:=1; H[45]:=0; H[46]:=0; H[47]:=0; H[48]:=0; H[49]:=0; H[50]:=$10; H[51]:=0; H[52]:=$80; H[53]:=0; H[54]:=0; H[55]:=$AA; H[56]:=0; H[57]:=$38; H[58]:=$9B; H[59]:=$71;
+ H[60]:=Ord('d'); H[61]:=Ord('a'); H[62]:=Ord('t'); H[63]:=Ord('a'); P4(64,Dlen);
+ {$I-}Seek(A.OutF,0); BlockWrite(A.OutF,H,TSWavHdr,Act);{$I+}
+ If IOResult<>0 Then ;
+End;
+
+Procedure TSAuEnd(Var A: TTSAu);
+Begin
+ If A.Codec=TSCLpcm Then TSLpcmFlush(A)
+ Else TSAuRun(A,True);
+ If A.OutOpen Then Begin
+  TSAuOutFlush(A);
+  If A.Codec=TSCLpcm Then TSWriteWavHeader(A);
+ End;
+End;
+
+Procedure TSAuFree(Var A: TTSAu);
+Begin
+ If A.OutOpen Then Begin
+  {$I-}Close(A.OutF);{$I+} If IOResult<>0 Then ;
+  A.OutOpen:=False;
+ End;
+ If A.OutBuf<>Nil Then Begin FreeMem(A.OutBuf); A.OutBuf:=Nil; End;
+ If A.Buf<>Nil Then Begin FreeMem(A.Buf); A.Buf:=Nil; End;
+ If A.Aus<>Nil Then Begin FreeMem(A.Aus); A.Aus:=Nil; End;
+ A.NAu:=0;
+End;
+
+{ Reconnaissance du codec audio d'un flux prive (stream_type 0x06 sans descripteur) : deux trames consecutives valides. }
+Function TSSniffAudio(P: PEABuffer; N: LongInt): LongInt;
+Const Cands: Array[0..5] Of LongInt = (TSCAac,TSCAc3,TSCMp2,TSCDts,TSCAacLatm,TSCEac3);
+Var K,I: LongInt; H,H2: TTSAuHdr; Cd: LongInt;
+Begin
+ TSSniffAudio:=0;
+ For K:=0 To 4 Do Begin
+  Cd:=Cands[K];
+  For I:=0 To N-40 Do Begin
+   If TSAuHdr(Cd,@P^[I],N-I,H)=1 Then
+    If I+H.Len+12<=N Then
+     If TSAuHdr(Cd,@P^[I+H.Len],N-I-H.Len,H2)=1 Then Begin
+      If (Cd=TSCMp2) Then TSSniffAudio:=H.Codec Else TSSniffAudio:=H.Codec;
+      Exit;
+     End;
+  End;
+ End;
+End;
+
+{ ====================================================================== }
+{ Contexte de demultiplexage : PSI (PAT/PMT), PES, horodatages             }
+{ ====================================================================== }
+Type
+ TTSSec = Record Buf: Array[0..4351] Of Byte; N: LongInt; Active: Boolean; End;
+ TTSH = Record
+  Used: Boolean; Pid, StrIdx, Kind, Codec: LongInt;
+  GotCc: Boolean; Cc: LongInt;
+  Synced, InHdr: Boolean; HdrN: LongInt; Hdr: Array[0..319] Of Byte;
+  HasTs: Boolean; LastTs: Int64;
+  FirstPts, LastPts, MinPts: Int64;
+  NPes: LongInt;
+  Sp: ^TRawEsSplit; Au: PTSAu;
+  Sniff: Boolean; SniffBuf: PEABuffer; SniffN: LongInt;
+ End;
+ PTSInfo = ^TTSInfo;
+ TTSCtx = Record
+  Rd: TTSRd;
+  Mode: LongInt;          { 1 sonde (PSI), 2 extraction, 3 fin de fichier (PTS uniquement) }
+  Slot: Array[0..8191] Of Integer;
+  H: Array[0..TSMaxStreams-1] Of TTSH; NH: LongInt;
+  Sec: Array[0..32] Of TTSSec; NSec: LongInt;
+  SecProg: Array[0..32] Of LongInt;
+  PmtDone: Array[0..31] Of Boolean;
+  G0: Int64; G0Set: Boolean;
+  NPcr: LongInt; PcrPidL, PcrProgL: Array[0..31] Of LongInt; PcrF, PcrL: Array[0..31] Of Int64; PcrSeen: Array[0..31] Of Boolean;
+  Info: PTSInfo;
+  CcErr, Disc, Tei: LongInt;
+  PatSeen: Boolean;
+  AllocSp, AllocAu: Boolean;
+ End;
+ PTSCtx = ^TTSCtx;
+
+Procedure TSCtxInit(C: PTSCtx; Info: PTSInfo; Mode: LongInt);
+Var I: LongInt;
+Begin
+ FillChar(C^,SizeOf(C^),0);
+ C^.Mode:=Mode; C^.Info:=Info;
+ C^.G0:=TSNoPts;
+End;
+
+Procedure TSCtxFree(C: PTSCtx);
+Var I: LongInt;
+Begin
+ For I:=0 To C^.NH-1 Do Begin
+  If C^.H[I].Sp<>Nil Then Begin RawEsSplitFree(C^.H[I].Sp^); Dispose(C^.H[I].Sp); C^.H[I].Sp:=Nil; End;
+  If C^.H[I].Au<>Nil Then Begin TSAuFree(C^.H[I].Au^); Dispose(C^.H[I].Au); C^.H[I].Au:=Nil; End;
+  If C^.H[I].SniffBuf<>Nil Then Begin FreeMem(C^.H[I].SniffBuf); C^.H[I].SniffBuf:=Nil; End;
+ End;
+ C^.NH:=0;
+ TSRdClose(C^.Rd);
+End;
+
+Function TSUnwrap(C: PTSCtx; Var Last: Int64; Have: Boolean; Raw: Int64): Int64;
+Var Base,D: Int64;
+Begin
+ If Not C^.G0Set Then Begin
+  C^.G0:=Raw; C^.G0Set:=True;
+  If C^.G0>=$100000000 Then C^.G0:=C^.G0-$200000000;   { comme libavformat : base > 2^32 => decalage de -2^33 }
+ End;
+ If Have Then Base:=Last Else Base:=C^.G0;
+ D:=Raw-(Base And $1FFFFFFFF);
+ While D>=$100000000 Do D:=D-$200000000;
+ While D<-$100000000 Do D:=D+$200000000;
+ TSUnwrap:=Base+D;
+End;
+
+Function TSPts(P: PEABuffer): Int64;
+Begin
+ TSPts:=(Int64((P^[0] Shr 1) And 7) Shl 30) Or (Int64(P^[1]) Shl 22) Or (Int64(P^[2] Shr 1) Shl 15) Or (Int64(P^[3]) Shl 7) Or (P^[4] Shr 1);
+End;
+
+{ ---- classification des flux ---- }
+Procedure TSClassify(Var S: TTSStream; Desc: PEABuffer; DLen: LongInt);
+Var P,Tag,L,I: LongInt; Fmt: String[4]; Ac3,Eac3,Dts,Hevc,Vc1,Aac,Sub,Ttx: Boolean;
+Begin
+ S.Kind:=TSKindOther; S.Codec:=TSCOther; S.Supported:=False; S.Note:=''; S.Lang:='';
+ Ac3:=False; Eac3:=False; Dts:=False; Hevc:=False; Vc1:=False; Aac:=False; Sub:=False; Ttx:=False;
+ P:=0;
+ While P+2<=DLen Do Begin
+  Tag:=Desc^[P]; L:=Desc^[P+1];
+  If P+2+L>DLen Then Break;
+  Case Tag Of
+   $0A: If (L>=3) And (S.Lang='') Then Begin
+         S.Lang:=Chr(Desc^[P+2])+Chr(Desc^[P+3])+Chr(Desc^[P+4]);
+         For I:=1 To 3 Do If (S.Lang[I]<' ') Or (S.Lang[I]>'~') Then S.Lang[I]:='?';
+        End;
+   $05: If L>=4 Then Begin
+         Fmt:=Chr(Desc^[P+2])+Chr(Desc^[P+3])+Chr(Desc^[P+4])+Chr(Desc^[P+5]);
+         If Fmt='AC-3' Then Ac3:=True Else If Fmt='EAC3' Then Eac3:=True Else If (Fmt='DTS1') Or (Fmt='DTS2') Or (Fmt='DTS3') Then Dts:=True
+         Else If Fmt='HEVC' Then Hevc:=True Else If Fmt='VC-1' Then Vc1:=True;
+        End;
+   $6A,$81: Ac3:=True;
+   $7A: Eac3:=True;
+   $7B: Dts:=True;
+   $7C,$2B: Aac:=True;
+   $56: Ttx:=True;
+   $59: Sub:=True;
+  End;
+  Inc(P,2+L);
+ End;
+ Case S.StreamType Of
+  $01: Begin S.Kind:=TSKindVideo; S.Codec:=RawEsCMpeg1; S.Supported:=True; End;
+  $02: Begin S.Kind:=TSKindVideo; S.Codec:=RawEsCMpeg2; S.Supported:=True; End;
+  $10: Begin S.Kind:=TSKindVideo; S.Codec:=TSCMpeg4V; S.Note:='MPEG-4 part 2 : non extrait'; End;
+  $1B: Begin S.Kind:=TSKindVideo; S.Codec:=RawEsCH264; S.Supported:=True; End;
+  $24: Begin S.Kind:=TSKindVideo; S.Codec:=RawEsCHEVC; S.Supported:=True; End;
+  $EA: Begin S.Kind:=TSKindVideo; S.Codec:=RawEsCVC1; S.Supported:=True; End;
+  $03,$04: Begin S.Kind:=TSKindAudio; S.Codec:=TSCMp2; S.Supported:=True; End;
+  $0F: Begin S.Kind:=TSKindAudio; S.Codec:=TSCAac; S.Supported:=True; End;
+  $11: Begin S.Kind:=TSKindAudio; S.Codec:=TSCAacLatm; S.Supported:=True; End;
+  $81: Begin S.Kind:=TSKindAudio; S.Codec:=TSCAc3; S.Supported:=True; End;
+  $87,$84,$A1: Begin S.Kind:=TSKindAudio; S.Codec:=TSCEac3; S.Supported:=True; S.Note:='E-AC-3 : pas de decodeur'; End;
+  $82,$85,$86,$8A,$A2: Begin S.Kind:=TSKindAudio; S.Codec:=TSCDts; S.Supported:=True; If S.StreamType<>$82 Then S.Note:='DTS-HD : noyau DTS seul'; End;
+  $80: Begin S.Kind:=TSKindAudio; S.Codec:=TSCLpcm; S.Supported:=True; End;
+  $83: Begin S.Kind:=TSKindAudio; S.Codec:=TSCTrueHd; S.Note:='TrueHD : ignore'; End;
+  $90: Begin S.Kind:=TSKindSub; S.Codec:=TSCPgs; S.Note:='PGS : ignore'; End;
+  $91,$92: Begin S.Kind:=TSKindSub; S.Codec:=TSCSub; S.Note:='sous-titres : ignore'; End;
+  $06: Begin
+   If Ac3 Then Begin S.Kind:=TSKindAudio; S.Codec:=TSCAc3; S.Supported:=True; End
+   Else If Eac3 Then Begin S.Kind:=TSKindAudio; S.Codec:=TSCEac3; S.Supported:=True; S.Note:='E-AC-3 : pas de decodeur'; End
+   Else If Dts Then Begin S.Kind:=TSKindAudio; S.Codec:=TSCDts; S.Supported:=True; End
+   Else If Aac Then Begin S.Kind:=TSKindAudio; S.Codec:=TSCAacLatm; S.Supported:=True; End
+   Else If Hevc Then Begin S.Kind:=TSKindVideo; S.Codec:=RawEsCHEVC; S.Supported:=True; End
+   Else If Vc1 Then Begin S.Kind:=TSKindVideo; S.Codec:=RawEsCVC1; S.Supported:=True; End
+   Else If Sub Or Ttx Then Begin S.Kind:=TSKindSub; S.Codec:=TSCSub; S.Note:='sous-titres : ignore'; End;
+  End;
+ End;
+ S.CodecName:=TSCodecName(S.Codec);
+End;
+
+Procedure TSMakeHandler(C: PTSCtx; StrIdx: LongInt);
+Var H: ^TTSH; S: ^TTSStream;
+Begin
+ If C^.NH>=TSMaxStreams Then Exit;
+ S:=@C^.Info^.S[StrIdx];
+ If C^.Slot[S^.Pid]<>0 Then Exit;
+ H:=@C^.H[C^.NH];
+ FillChar(H^,SizeOf(H^),0);
+ H^.Used:=True; H^.Pid:=S^.Pid; H^.StrIdx:=StrIdx; H^.Kind:=S^.Kind; H^.Codec:=S^.Codec;
+ H^.FirstPts:=TSNoPts; H^.LastPts:=TSNoPts; H^.MinPts:=TSNoPts;
+ If S^.Supported Then Begin
+  If S^.Kind=TSKindVideo Then Begin
+   New(H^.Sp); RawEsSplitInit(H^.Sp^,S^.Codec,'');
+  End Else If S^.Kind=TSKindAudio Then Begin
+   New(H^.Au); TSAuInit(H^.Au^,S^.Codec,'');
+  End;
+ End;
+ If (S^.Kind=TSKindOther) And (S^.StreamType=6) And (C^.Mode=1) Then Begin
+  H^.Sniff:=True; GetMem(H^.SniffBuf,8192+64);
+ End;
+ Inc(C^.NH);
+ C^.Slot[S^.Pid]:=C^.NH;
+End;
+
+{ ---- PSI ---- }
+Procedure TSOnPat(C: PTSCtx; B: PEABuffer; Len: LongInt);
+Var P,Pn,Pid,I,K: LongInt; Info: PTSInfo; Dup: Boolean;
+Begin
+ Info:=C^.Info;
+ If (B^[5] And 1)=0 Then Exit;
+ P:=8;
+ While P+4<=Len-4 Do Begin
+  Pn:=(B^[P] Shl 8) Or B^[P+1]; Pid:=((B^[P+2] And 31) Shl 8) Or B^[P+3];
+  Inc(P,4);
+  If Pn=0 Then Continue;
+  Dup:=False;
+  For I:=0 To Info^.NProg-1 Do If Info^.ProgNum[I]=Pn Then Dup:=True;
+  If Dup Or (Info^.NProg>=32) Or (C^.NSec>=33) Or (C^.Slot[Pid]<>0) Then Continue;
+  Info^.ProgNum[Info^.NProg]:=Pn; Info^.ProgPmt[Info^.NProg]:=Pid;
+  C^.SecProg[C^.NSec]:=Info^.NProg;
+  C^.Slot[Pid]:=-(C^.NSec+1);
+  Inc(C^.NSec); Inc(Info^.NProg);
+ End;
+ C^.PatSeen:=True;
+End;
+
+Procedure TSOnPmt(C: PTSCtx; PIdx: LongInt; B: PEABuffer; Len: LongInt);
+Var Pn,P,Pil,St,Pid,Esl,K,I: LongInt; Info: PTSInfo; S: ^TTSStream; Pcr: LongInt; Ok: Boolean;
+Begin
+ Info:=C^.Info;
+ If (B^[5] And 1)=0 Then Exit;
+ If C^.PmtDone[PIdx] Then Exit;
+ Pn:=(B^[3] Shl 8) Or B^[4];
+ If Pn<>Info^.ProgNum[PIdx] Then Exit;
+ Pcr:=((B^[8] And 31) Shl 8) Or B^[9];
+ Pil:=((B^[10] And 15) Shl 8) Or B^[11];
+ P:=12+Pil;
+ C^.PmtDone[PIdx]:=True;
+ If C^.NPcr<32 Then Begin
+  C^.PcrPidL[C^.NPcr]:=Pcr; C^.PcrProgL[C^.NPcr]:=Pn; C^.PcrSeen[C^.NPcr]:=False; Inc(C^.NPcr);
+ End;
+ While P+5<=Len-4 Do Begin
+  St:=B^[P]; Pid:=((B^[P+1] And 31) Shl 8) Or B^[P+2]; Esl:=((B^[P+3] And 15) Shl 8) Or B^[P+4];
+  Inc(P,5);
+  If P+Esl>Len-4 Then Esl:=Len-4-P;
+  If Info^.NStreams<TSMaxStreams Then Begin
+   K:=Info^.NStreams;
+   Ok:=True;
+   For I:=0 To K-1 Do If (Info^.S[I].Pid=Pid) Then Ok:=False;
+   If Ok Then Begin
+    S:=@Info^.S[K];
+    FillChar(S^,SizeOf(S^),0);
+    S^.Pid:=Pid; S^.StreamType:=St; S^.Prog:=Pn;
+    S^.FirstPts:=TSNoPts; S^.LastPts:=TSNoPts;
+    TSClassify(S^,@B^[P],Esl);
+    Inc(Info^.NStreams);
+    If (S^.Kind<>TSKindOther) Or (St=6) Then TSMakeHandler(C,K);
+    If (S^.Kind=TSKindOther) And (S^.CodecName='unknown') Then Begin
+     S^.CodecName:='unknown'; S^.Note:='type 0x'+Chr(48+(St Shr 4)+7*Ord((St Shr 4)>9))+Chr(48+(St And 15)+7*Ord((St And 15)>9));
+    End;
+   End;
+  End;
+  Inc(P,Esl);
+ End;
+End;
+
+Procedure TSOnSection(C: PTSCtx; SIdx: LongInt; B: PEABuffer; Len: LongInt);
+Begin
+ If Len<12 Then Exit;
+ If (B^[1] And $80)=0 Then Exit;
+ If TSCrc32(B,Len)<>0 Then Exit;
+ If SIdx=0 Then Begin If B^[0]=0 Then TSOnPat(C,B,Len); End
+ Else If B^[0]=2 Then TSOnPmt(C,C^.SecProg[SIdx],B,Len);
+End;
+
+Procedure TSPsiPush(C: PTSCtx; SIdx: LongInt; P: PEABuffer; Len: LongInt; Pusi: Boolean);
+Var S: ^TTSSec; Ptr,SecLen,Room: LongInt;
+Begin
+ S:=@C^.Sec[SIdx];
+ If Len<=0 Then Exit;
+ If Pusi Then Begin
+  Ptr:=P^[0];
+  If Ptr+1>Len Then Begin S^.Active:=False; S^.N:=0; Exit; End;
+  If S^.Active And (Ptr>0) Then Begin
+   Room:=4352-S^.N; If Ptr>Room Then Ptr:=Room;
+   Move(P^[1],S^.Buf[S^.N],Ptr); Inc(S^.N,Ptr);
+  End;
+  { terminer l'ancienne section, puis demarrer la nouvelle }
+  If S^.Active Then Begin
+   While S^.N>=3 Do Begin
+    If S^.Buf[0]=$FF Then Break;
+    SecLen:=(((S^.Buf[1] And 15) Shl 8) Or S^.Buf[2])+3;
+    If (SecLen>4352) Or (S^.N<SecLen) Then Break;
+    TSOnSection(C,SIdx,@S^.Buf,SecLen);
+    Move(S^.Buf[SecLen],S^.Buf[0],S^.N-SecLen); Dec(S^.N,SecLen);
+   End;
+  End;
+  Ptr:=P^[0];
+  S^.N:=0; S^.Active:=True;
+  Room:=Len-1-Ptr; If Room>4352 Then Room:=4352;
+  If Room>0 Then Begin Move(P^[1+Ptr],S^.Buf[0],Room); S^.N:=Room; End;
+ End Else If S^.Active Then Begin
+  Room:=4352-S^.N; If Len>Room Then Len:=Room;
+  Move(P^[0],S^.Buf[S^.N],Len); Inc(S^.N,Len);
+ End Else Exit;
+ While S^.N>=3 Do Begin
+  If S^.Buf[0]=$FF Then Begin S^.N:=0; S^.Active:=False; Break; End;
+  SecLen:=(((S^.Buf[1] And 15) Shl 8) Or S^.Buf[2])+3;
+  If SecLen>4352 Then Begin S^.N:=0; S^.Active:=False; Break; End;
+  If S^.N<SecLen Then Break;
+  TSOnSection(C,SIdx,@S^.Buf,SecLen);
+  Move(S^.Buf[SecLen],S^.Buf[0],S^.N-SecLen); Dec(S^.N,SecLen);
+ End;
+End;
+
+{ ---- PES ---- }
+Function TSPesNoHeader(Sid: LongInt): Boolean;
+Begin
+ TSPesNoHeader:=(Sid=$BC) Or (Sid=$BE) Or (Sid=$BF) Or (Sid=$F0) Or (Sid=$F1) Or (Sid=$FF) Or (Sid=$F2) Or (Sid=$F8);
+End;
+
+Procedure TSSniffFeed(C: PTSCtx; Var H: TTSH; P: PEABuffer; Len: LongInt);
+Var Cd: LongInt; S: ^TTSStream;
+Begin
+ If H.SniffN+Len>8192 Then Len:=8192-H.SniffN;
+ If Len>0 Then Begin Move(P^,H.SniffBuf^[H.SniffN],Len); Inc(H.SniffN,Len); End;
+ If H.SniffN>=8192 Then Begin
+  Cd:=TSSniffAudio(H.SniffBuf,H.SniffN);
+  H.Sniff:=False;
+  If Cd<>0 Then Begin
+   S:=@C^.Info^.S[H.StrIdx];
+   S^.Kind:=TSKindAudio; S^.Codec:=Cd; S^.CodecName:=TSCodecName(Cd); S^.Supported:=True; S^.Note:='';
+   If Cd=TSCEac3 Then S^.Note:='E-AC-3 : pas de decodeur';
+   H.Kind:=TSKindAudio; H.Codec:=Cd;
+   New(H.Au); TSAuInit(H.Au^,Cd,'');
+   TSAuFeed(H.Au^,H.SniffBuf,H.SniffN);
+  End;
+  FreeMem(H.SniffBuf); H.SniffBuf:=Nil; H.SniffN:=0;
+ End;
+End;
+
+Procedure TSEsFeed(C: PTSCtx; Var H: TTSH; P: PEABuffer; Len: LongInt);
+Begin
+ If Len<=0 Then Exit;
+ If H.Sniff Then TSSniffFeed(C,H,P,Len)
+ Else If H.Sp<>Nil Then RawEsFeed(H.Sp^,P,Len)
+ Else If H.Au<>Nil Then TSAuFeed(H.Au^,P,Len);
+End;
+
+{ L'en-tete PES de H.Hdr est complet (Total octets) : analyse des horodatages et enregistrement du marqueur }
+Procedure TSPesHeader(C: PTSCtx; Var H: TTSH; Total: LongInt);
+Var Pf: LongInt; Pts,Dts,Raw: Int64; HasPts,HasDts: Boolean; S: ^TTSStream;
+Begin
+ HasPts:=False; HasDts:=False; Pts:=TSNoPts; Dts:=TSNoPts;
+ If (Not TSPesNoHeader(H.Hdr[3])) And (Total>=14) Then Begin
+  Pf:=H.Hdr[7] Shr 6;
+  If (Pf>=2) And ((H.Hdr[9] And $F0)<>0) And (Total>=14) Then Begin
+   Raw:=TSPts(@H.Hdr[9]);
+   Pts:=TSUnwrap(C,H.LastTs,H.HasTs,Raw); HasPts:=True;
+   H.LastTs:=Pts; H.HasTs:=True;
+   If (Pf=3) And (Total>=19) Then Begin
+    Raw:=TSPts(@H.Hdr[14]);
+    Dts:=TSUnwrap(C,H.LastTs,H.HasTs,Raw); HasDts:=True;
+    If Dts>Pts+$100000000 Then Dts:=Dts-$200000000;
+    H.LastTs:=Dts;
+   End;
+  End;
+ End;
+ Inc(H.NPes);
+ If HasPts Then Begin
+  If (H.FirstPts=TSNoPts) Then H.FirstPts:=Pts;
+  If (H.MinPts=TSNoPts) Or ((H.NPes<=64) And (Pts<H.MinPts)) Then H.MinPts:=Pts;
+  If (H.LastPts=TSNoPts) Or (Pts>H.LastPts) Then H.LastPts:=Pts;
+  If C^.Mode<>3 Then Begin
+   If H.Sp<>Nil Then RawEsAddMarker(H.Sp^,Pts,Dts)
+   Else If H.Au<>Nil Then TSAuAddMarker(H.Au^,Pts);
+  End;
+ End;
+End;
+
+Procedure TSHandlePes(C: PTSCtx; Var H: TTSH; Pay: PEABuffer; Len: LongInt; Pusi: Boolean);
+Var Take,Total,Rest,Off: LongInt;
+Begin
+ If Pusi Then Begin
+  If (H.Au<>Nil) And (C^.Mode<>3) Then TSAuPesStart(H.Au^);
+  H.InHdr:=True; H.HdrN:=0; H.Synced:=True;
+ End Else If Not H.Synced Then Exit;
+ Off:=0;
+ If H.InHdr Then Begin
+  Take:=Len; If H.HdrN+Take>320 Then Take:=320-H.HdrN;
+  Move(Pay^[0],H.Hdr[H.HdrN],Take); Inc(H.HdrN,Take);
+  If H.HdrN>=3 Then
+   If (H.Hdr[0]<>0) Or (H.Hdr[1]<>0) Or (H.Hdr[2]<>1) Then Begin H.InHdr:=False; H.Synced:=False; Exit; End;
+  If H.HdrN<6 Then Exit;
+  If TSPesNoHeader(H.Hdr[3]) Then Total:=6
+  Else Begin
+   If H.HdrN<9 Then Exit;
+   Total:=9+H.Hdr[8];
+  End;
+  If H.HdrN<Total Then Exit;
+  { H.HdrN>=Total : octets d'en-tete pris (Take) ; ceux au-dela de Total sont de la charge utile }
+  H.InHdr:=False;
+  TSPesHeader(C,H,Total);
+  Rest:=H.HdrN-Total;
+  If C^.Mode<>3 Then TSEsFeed(C,H,@H.Hdr[Total],Rest);
+  Off:=Take;
+  If Off<Len Then If C^.Mode<>3 Then TSEsFeed(C,H,@Pay^[Off],Len-Off);
+  Exit;
+ End;
+ If C^.Mode<>3 Then TSEsFeed(C,H,Pay,Len);
+End;
+
+{ Traite le paquet courant du lecteur }
+Procedure TSProcessPacket(C: PTSCtx);
+Var P: PEABuffer; Pid,Afc,Cc,Off,Alen,Fl,Sl,K,I: LongInt; Pusi,Disc,HasPay: Boolean; H: ^TTSH; Pcr,Dd: Int64;
+Begin
+ P:=C^.Rd.Pk;
+ If (P^[1] And $80)<>0 Then Begin Inc(C^.Tei); Exit; End;
+ Pid:=((P^[1] And 31) Shl 8) Or P^[2];
+ If Pid=$1FFF Then Exit;
+ Pusi:=(P^[1] And $40)<>0;
+ Afc:=(P^[3] Shr 4) And 3;
+ Cc:=P^[3] And 15;
+ Off:=4; Disc:=False;
+ HasPay:=(Afc And 1)<>0;
+ If (Afc And 2)<>0 Then Begin
+  Alen:=P^[4];
+  If Alen>183 Then Exit;
+  If Alen>0 Then Begin
+   Fl:=P^[5];
+   Disc:=(Fl And $80)<>0;
+   If ((Fl And $10)<>0) And (Alen>=7) And (C^.NPcr>0) Then Begin
+    For I:=0 To C^.NPcr-1 Do
+     If C^.PcrPidL[I]=Pid Then Begin
+      Pcr:=(Int64(P^[6]) Shl 25) Or (Int64(P^[7]) Shl 17) Or (Int64(P^[8]) Shl 9) Or (Int64(P^[9]) Shl 1) Or (P^[10] Shr 7);
+      If Not C^.PcrSeen[I] Then Begin C^.PcrF[I]:=Pcr; C^.PcrSeen[I]:=True; C^.PcrL[I]:=Pcr; End
+      Else Begin
+       Dd:=Pcr-(C^.PcrL[I] And $1FFFFFFFF);
+       While Dd>=$100000000 Do Dd:=Dd-$200000000;
+       While Dd<-$100000000 Do Dd:=Dd+$200000000;
+       C^.PcrL[I]:=C^.PcrL[I]+Dd;
+      End;
+     End;
+   End;
+  End;
+  Off:=5+Alen;
+ End;
+ Sl:=C^.Slot[Pid];
+ If Sl=0 Then Exit;
+ If Sl<0 Then Begin
+  If HasPay And (Off<188) And (C^.Mode=1) Then TSPsiPush(C,-Sl-1,@P^[Off],188-Off,Pusi);
+  Exit;
+ End;
+ H:=@C^.H[Sl-1];
+ If Disc Then Begin
+  Inc(C^.Disc);
+  If C^.Mode=2 Then Begin
+   If H^.Sp<>Nil Then RawEsMarkDisc(H^.Sp^) Else If H^.Au<>Nil Then H^.Au^.PendFlags:=H^.Au^.PendFlags Or RawEsFDisc;
+  End;
+ End;
+ If Not HasPay Then Exit;
+ If H^.GotCc Then Begin
+  If Cc=H^.Cc Then Begin If Not Disc Then Exit; End
+  Else If Cc<>((H^.Cc+1) And 15) Then Begin
+   If Not Disc Then Begin
+    Inc(C^.CcErr);
+    If C^.Mode=2 Then Begin
+     If H^.Sp<>Nil Then RawEsMarkCorrupt(H^.Sp^) Else If H^.Au<>Nil Then H^.Au^.PendFlags:=H^.Au^.PendFlags Or RawEsFCorrupt;
+    End;
+    If H^.InHdr Then Begin H^.InHdr:=False; H^.Synced:=False; End;
+   End;
+  End;
+ End;
+ H^.Cc:=Cc; H^.GotCc:=True;
+ If Off>=188 Then Exit;
+ TSHandlePes(C,H^,@P^[Off],188-Off,Pusi);
+End;
+
+{ ====================================================================== }
+{ Sonde rapide                                                             }
+{ ====================================================================== }
+Type
+ TTSExtStat = Record
+  VideoAus, AudioAus: LongInt;
+  VideoBytes, AudioBytes: Int64;
+  VFirstPts, VLastPts, AFirstPts, ALastPts: Int64;
+  VCodec, ACodec: LongInt;
+  CcErrors, Discont, SyncLosses, Tei: LongInt;
+  VDiscEvents, ADiscEvents: LongInt;
+  AStartPts: Int64;          { PTS de la premiere unite audio (synchro A/V) }
+  VStartPts: Int64;          { plus petit PTS video }
+ End;
+
+Var
+ TSExt: TTSExtStat;
+ TSCx: PTSCtx;
+
+Function TSGcd(A,B: LongInt): LongInt;
+Var T: LongInt;
+Begin
+ While B<>0 Do Begin T:=A Mod B; A:=B; B:=T; End;
+ TSGcd:=A;
+End;
+
+Procedure TSCleanup;
+Begin
+ If TSCx<>Nil Then Begin TSCtxFree(TSCx); Dispose(TSCx); TSCx:=Nil; End;
+End;
+
+Procedure TSFail(Const Msg: String);
+Begin
+ TSCleanup;
+ Fail(Msg);
+End;
+
+Function TSProbeDone(C: PTSCtx): Boolean;
+Var I,Np: LongInt; H: ^TTSH; Ok: Boolean;
+Begin
+ TSProbeDone:=False;
+ If (Not C^.PatSeen) Or (C^.NH=0) Then Exit;
+ Np:=0;
+ For I:=0 To C^.Info^.NProg-1 Do If C^.PmtDone[I] Then Inc(Np);
+ If Np<C^.Info^.NProg Then Exit;
+ For I:=0 To C^.NH-1 Do Begin
+  H:=@C^.H[I];
+  If H^.Sniff Then Exit;
+  If C^.Info^.S[H^.StrIdx].Supported Then Begin
+   If H^.NPes=0 Then Exit;
+   If H^.Sp<>Nil Then Begin
+    If Not H^.Sp^.ViSet Then Exit;
+    If (H^.Sp^.Vi.FpsNum=0) And (H^.Sp^.NAu<24) Then Exit;
+   End;
+   If H^.Au<>Nil Then Begin
+    If Not H^.Au^.InfoSet Then Exit;
+   End;
+  End;
+ End;
+ TSProbeDone:=True;
+End;
+
+Function TSFrameDur(Var S: TTSStream): Int64;
+Begin
+ TSFrameDur:=0;
+ If (S.Kind=TSKindVideo) And (S.FpsNum>0) Then TSFrameDur:=(Int64(90000)*S.FpsDen+(S.FpsNum Div 2)) Div S.FpsNum
+ Else If (S.Kind=TSKindAudio) And (S.SampleRate>0) And (S.FrameSamples>0) Then TSFrameDur:=(Int64(S.FrameSamples)*90000+(S.SampleRate Div 2)) Div S.SampleRate;
+End;
+
+{ Estimation de la cadence a partir des DTS des unites d'acces }
+Procedure TSEstimateFps(Var Sp: TRawEsSplit; Var Num,Den: LongInt);
+Var I,N,Cnt: LongInt; D: Array[0..63] Of Int64; T: Int64; J,K: LongInt; M: Int64; G: LongInt;
+Begin
+ Num:=0; Den:=1; Cnt:=0;
+ N:=Sp.NAu; If N>200 Then N:=200;
+ For I:=1 To N-1 Do
+  If (Sp.Aus^[I].Dts<>TSNoPts) And (Sp.Aus^[I-1].Dts<>TSNoPts) And (Cnt<64) Then Begin
+   T:=Sp.Aus^[I].Dts-Sp.Aus^[I-1].Dts;
+   If (T>0) And (T<900000) Then Begin D[Cnt]:=T; Inc(Cnt); End;
+  End;
+ If Cnt<6 Then Exit;
+ For J:=1 To Cnt-1 Do Begin
+  T:=D[J]; K:=J-1;
+  While (K>=0) And (D[K]>T) Do Begin D[K+1]:=D[K]; Dec(K); End;
+  D[K+1]:=T;
+ End;
+ M:=D[Cnt Div 2];
+ G:=TSGcd(90000,LongInt(M));
+ Num:=90000 Div G; Den:=LongInt(M) Div G;
+End;
+
+Procedure TSFinishInfo(C: PTSCtx);
+Var I,J,K,Sel,Np,Pi: LongInt; Info: PTSInfo; H: ^TTSH; S: ^TTSStream; Mn,Mx,E,Fd,St: Int64; En,Nm,Dn: LongInt; Has: Boolean; Cn: Boolean;
+Begin
+ Info:=C^.Info;
+ { programme retenu }
+ Sel:=-1;
+ If TSProgram>0 Then
+  For I:=0 To Info^.NProg-1 Do If Info^.ProgNum[I]=TSProgram Then Sel:=I;
+ If Sel<0 Then
+  For I:=0 To Info^.NProg-1 Do
+   If Sel<0 Then
+    For J:=0 To Info^.NStreams-1 Do
+     If (Info^.S[J].Prog=Info^.ProgNum[I]) And ((Info^.S[J].Kind=TSKindVideo) Or (Info^.S[J].Kind=TSKindAudio)) Then Begin Sel:=I; Break; End;
+ If (Sel<0) And (Info^.NProg>0) Then Sel:=0;
+ If Sel>=0 Then Info^.SelProg:=Info^.ProgNum[Sel];
+ { parametres des flux }
+ For I:=0 To C^.NH-1 Do Begin
+  H:=@C^.H[I]; S:=@Info^.S[H^.StrIdx];
+  S^.FirstPts:=H^.MinPts; S^.LastPts:=H^.LastPts;
+  If H^.Sp<>Nil Then Begin
+   S^.Frames:=H^.Sp^.NAu;
+   If H^.Sp^.ViSet Then Begin
+    With H^.Sp^.Vi Do Begin
+     S^.Width:=Width; S^.Height:=Height; S^.FpsNum:=FpsNum; S^.FpsDen:=FpsDen; S^.Profile:=Profile; S^.Level:=Level;
+     S^.Chroma:=Chroma; S^.BitDepth:=BitDepth; S^.SarNum:=SarNum; S^.SarDen:=SarDen; S^.ProfName:=ProfName; S^.Interlaced:=Interlaced;
+     S^.BitRate:=BitRate;
+    End;
+    TSEstimateFps(H^.Sp^,Nm,Dn);
+    If H^.Sp^.FieldSeen Then Begin S^.Interlaced:=True; If Nm>0 Then Dn:=Dn*2; End;
+    If Nm>0 Then Begin
+     If S^.FpsNum=0 Then Begin S^.FpsNum:=Nm; S^.FpsDen:=Dn; End
+     Else Begin
+      { VUI different d'un facteur 2 de la mesure : la mesure l'emporte }
+      Fd:=Int64(S^.FpsNum)*Dn; En:=S^.FpsDen*Nm;
+      If (Fd*10>En*19) Or (Fd*10<En*6) Then Begin S^.FpsNum:=Nm; S^.FpsDen:=Dn; End;
+     End;
+    End;
+   End;
+  End;
+  If H^.Au<>Nil Then Begin
+   S^.Frames:=H^.Au^.FrameCount;
+   If H^.Au^.InfoSet Then Begin
+    S^.Channels:=H^.Au^.Ch; S^.SampleRate:=H^.Au^.Rate; S^.BitRate:=H^.Au^.BitRate; S^.FrameSamples:=H^.Au^.Samples; S^.Profile:=H^.Au^.Obj;
+    S^.BitsPerSample:=H^.Au^.Bits;
+    If (S^.BitRate=0) And (H^.Au^.SamplesAcc>0) Then S^.BitRate:=LongInt(H^.Au^.BytesAcc*8*H^.Au^.Rate Div H^.Au^.SamplesAcc);
+    If H^.Au^.RealCodec<>S^.Codec Then Begin
+     If (S^.Codec=TSCMp2) Or (S^.Codec=TSCMp3) Or (S^.Codec=TSCMp1) Or (S^.Codec=TSCAc3) Then Begin S^.Codec:=H^.Au^.RealCodec; S^.CodecName:=TSCodecName(S^.Codec); End;
+     If S^.Codec=TSCEac3 Then S^.Note:='E-AC-3 : pas de decodeur';
+    End;
+    If (S^.Codec=TSCAac) Then Begin
+     Case S^.Profile Of 1: S^.ProfName:='Main'; 2: S^.ProfName:='LC'; 3: S^.ProfName:='SSR'; 4: S^.ProfName:='LTP'; End;
+    End;
+    If S^.Codec=TSCLpcm Then S^.FrameSamples:=0;
+   End;
+  End;
+ End;
+ { flux par defaut }
+ Info^.DefVideo:=-1; Info^.DefAudio:=-1;
+ For I:=0 To Info^.NStreams-1 Do
+  If Info^.S[I].Prog=Info^.SelProg Then Begin
+   If (Info^.S[I].Kind=TSKindVideo) And Info^.S[I].Supported And (Info^.DefVideo<0) Then Info^.DefVideo:=I;
+   If (Info^.S[I].Kind=TSKindAudio) And Info^.S[I].Supported And (Info^.DefAudio<0) Then Info^.DefAudio:=I;
+  End;
+ { PCR du programme retenu : le premier PCR_PID connu }
+ Info^.FirstPcr:=TSNoPts; Info^.LastPcr:=TSNoPts; Info^.PcrPid:=-1;
+ For I:=0 To C^.NPcr-1 Do
+  If C^.PcrSeen[I] And (Info^.PcrPid<0) And (C^.PcrProgL[I]=Info^.SelProg) Then Begin
+   Has:=True;
+   Info^.PcrPid:=C^.PcrPidL[I]; Info^.FirstPcr:=C^.PcrF[I]; Info^.LastPcr:=C^.PcrL[I];
+  End;
+ { duree }
+ Mn:=TSNoPts; Mx:=TSNoPts;
+ For I:=0 To Info^.NStreams-1 Do
+  If (Info^.S[I].Prog=Info^.SelProg) And (Info^.S[I].FirstPts<>TSNoPts) And ((Info^.S[I].Kind=TSKindVideo) Or (Info^.S[I].Kind=TSKindAudio)) Then Begin
+   If (Mn=TSNoPts) Or (Info^.S[I].FirstPts<Mn) Then Mn:=Info^.S[I].FirstPts;
+   E:=Info^.S[I].LastPts+TSFrameDur(Info^.S[I]);
+   If (Mx=TSNoPts) Or (E>Mx) Then Mx:=E;
+  End;
+ Info^.StartPts:=Mn;
+ Info^.DurationMs:=0;
+ If (Mn<>TSNoPts) And (Mx>Mn) Then Info^.DurationMs:=(Mx-Mn)*1000 Div 90000
+ Else If (Info^.FirstPcr<>TSNoPts) And (Info^.LastPcr>Info^.FirstPcr) Then Info^.DurationMs:=(Info^.LastPcr-Info^.FirstPcr)*1000 Div 90000;
+ If Info^.DurationMs>0 Then Info^.BitRate:=LongInt(Info^.FileSize*8000 Div Info^.DurationMs);
+ Info^.CcErrors:=C^.CcErr; Info^.Discont:=C^.Disc; Info^.SyncLosses:=C^.Rd.Losses;
+ Info^.UnwrapBase:=C^.G0;
+ Info^.Ok:=(Info^.NStreams>0);
+End;
+
+Procedure TSProbe(Const Path: String; Var Info: TTSInfo);
+Var C: PTSCtx; Cnt,Start0,Lim,I: LongInt; HeadEnd,P: Int64; Done: Boolean; Un: Int64;
+Begin
+ TSCleanup;
+ FillChar(Info,SizeOf(Info),0);
+ Info.DefVideo:=-1; Info.DefAudio:=-1; Info.FirstPcr:=TSNoPts; Info.LastPcr:=TSNoPts; Info.StartPts:=TSNoPts;
+ If TSProbeHead<=0 Then TSProbeHead:=16777216;
+ If TSProbeTail<=0 Then TSProbeTail:=2097152;
+ New(C); TSCx:=C;
+ TSCtxInit(C,@Info,1);
+ If Not TSRdOpen(C^.Rd,Path) Then Begin
+  If C^.Rd.OpenErr Then TSFail('Ouverture impossible: '+Path);
+  TSFail('Pas un flux MPEG-TS (synchronisation 0x47 introuvable): '+Path);
+ End;
+ Info.FileSize:=C^.Rd.Size; Info.PacketSize:=C^.Rd.PktSize; Info.SyncOffset:=C^.Rd.SyncOff; Info.IsM2ts:=C^.Rd.SyncOff=4;
+ Un:=C^.Rd.Pos;
+ C^.Slot[0]:=-1; C^.NSec:=1;
+ Cnt:=0; HeadEnd:=Un+TSProbeHead; Done:=False;
+ While TSRdNext(C^.Rd) Do Begin
+  TSProcessPacket(C);
+  Inc(Cnt);
+  If (Cnt And 255)=0 Then Begin
+   If TSProbeDone(C) Then Begin Done:=True; Break; End;
+   If C^.Rd.Pos>HeadEnd Then Break;
+  End;
+ End;
+ If (Not C^.PatSeen) Or (Info.NStreams=0) Then TSFail('PAT/PMT introuvables dans '+Path);
+ { fin du fichier : derniers horodatages }
+ P:=C^.Rd.Size-TSProbeTail;
+ If P>C^.Rd.Pos Then Begin
+  P:=P-((P-Un) Mod C^.Rd.PktSize);
+  If P>C^.Rd.Pos Then Begin
+   C^.Mode:=3;
+   For I:=0 To C^.NH-1 Do Begin C^.H[I].Synced:=False; C^.H[I].InHdr:=False; C^.H[I].GotCc:=False; End;
+   TSRdSeek(C^.Rd,P);
+   While TSRdNext(C^.Rd) Do TSProcessPacket(C);
+  End;
+ End Else If (C^.Rd.Pos<C^.Rd.Size) Then Begin
+  { lecture jusqu'a la fin (petit fichier ou sonde arretee tot) : balayage de la queue }
+  P:=C^.Rd.Size-TSProbeTail; If P<C^.Rd.Pos Then P:=C^.Rd.Pos;
+  P:=P-((P-Un) Mod C^.Rd.PktSize);
+  If P<Un Then P:=Un;
+  C^.Mode:=3;
+  For I:=0 To C^.NH-1 Do Begin C^.H[I].Synced:=False; C^.H[I].InHdr:=False; C^.H[I].GotCc:=False; End;
+  TSRdSeek(C^.Rd,P);
+  While TSRdNext(C^.Rd) Do TSProcessPacket(C);
+ End;
+ TSFinishInfo(C);
+ Info.Ok:=Info.NStreams>0;
+ TSCleanup;
+End;
+
+{ ====================================================================== }
+{ Extraction des flux elementaires                                        }
+{ ====================================================================== }
+Var
+ TSEvDelta: Array[0..255] Of Int64;
+ TSEvN, TSEvUse: LongInt;
+
+{ Complete les horodatages manquants (estimes) }
+Procedure TSFillTimes(A: PRawEsIdxArr; N: LongInt; DefDur: Int64);
+Var I,Fa,La,Pv,Nx: LongInt; D: Int64; Off: Int64;
+Begin
+ If N<=0 Then Exit;
+ Fa:=-1; La:=-1;
+ For I:=0 To N-1 Do If A^[I].Dts<>TSNoPts Then Begin If Fa<0 Then Fa:=I; La:=I; End;
+ If Fa<0 Then Begin
+  For I:=0 To N-1 Do If A^[I].Pts<>TSNoPts Then Begin A^[I].Dts:=A^[I].Pts; If Fa<0 Then Fa:=I; La:=I; End;
+ End;
+ If Fa<0 Then Begin
+  For I:=0 To N-1 Do Begin A^[I].Dts:=I*DefDur; A^[I].Pts:=A^[I].Dts; A^[I].Flags:=A^[I].Flags Or RawEsFEst; End;
+  Exit;
+ End;
+ If La>Fa Then D:=(A^[La].Dts-A^[Fa].Dts) Div (La-Fa) Else D:=DefDur;
+ If D<=0 Then D:=DefDur;
+ If D<=0 Then D:=3600;
+ Pv:=-1;
+ For I:=0 To N-1 Do Begin
+  If A^[I].Dts<>TSNoPts Then Begin
+   If A^[I].Pts=TSNoPts Then Begin A^[I].Pts:=A^[I].Dts; A^[I].Flags:=A^[I].Flags Or RawEsFEst; End;
+   Pv:=I;
+  End Else Begin
+   A^[I].Flags:=A^[I].Flags Or RawEsFEst;
+   If Pv>=0 Then Begin
+    A^[I].Dts:=A^[Pv].Dts+(I-Pv)*D;
+    If A^[Pv].Pts<>TSNoPts Then Off:=A^[Pv].Pts-A^[Pv].Dts Else Off:=0;
+    If A^[I].Pts=TSNoPts Then A^[I].Pts:=A^[I].Dts+Off;
+   End Else Begin
+    Nx:=I; While (Nx<N) And (A^[Nx].Dts=TSNoPts) Do Inc(Nx);
+    A^[I].Dts:=A^[Nx].Dts-(Nx-I)*D;
+    If A^[Nx].Pts<>TSNoPts Then Off:=A^[Nx].Pts-A^[Nx].Dts Else Off:=0;
+    If A^[I].Pts=TSNoPts Then A^[I].Pts:=A^[I].Dts+Off;
+   End;
+  End;
+ End;
+End;
+
+{ Detecte les discontinuites de la base de temps et (Continuous) rend les horodatages continus.
+  Master : calcule et memorise les corrections (video) ; sinon reutilise celles de la video. Retourne le nombre d'evenements. }
+Function TSFixDisc(A: PRawEsIdxArr; N: LongInt; Master,Continuous: Boolean): LongInt;
+Var I,Ev: LongInt; Cum,PrevRaw,Raw,Jump,D,Dl,Cn,Own,NewCum,Cand: Int64; Anom,Fd: Boolean; Cnt: LongInt;
+Begin
+ TSFixDisc:=0; Cnt:=0;
+ If N<2 Then Exit;
+ { duree moyenne }
+ D:=0; Cn:=0;
+ For I:=1 To N-1 Do Begin
+  Jump:=A^[I].Dts-A^[I-1].Dts;
+  If (Jump>0) And (Jump<TSDiscThresh) Then Begin D:=D+Jump; Inc(Cn); End;
+ End;
+ If Cn>0 Then D:=D Div Cn Else D:=3600;
+ Cum:=0; PrevRaw:=A^[0].Dts; Ev:=0;
+ For I:=1 To N-1 Do Begin
+  Raw:=A^[I].Dts;
+  Jump:=Raw-PrevRaw;
+  Fd:=(A^[I].Flags And RawEsFDisc)<>0;
+  Anom:=(Jump<0) Or (Jump>TSDiscThresh) Or (Fd And (Jump>4*D));
+  PrevRaw:=Raw;
+  If Anom Then Begin
+   A^[I].Flags:=A^[I].Flags Or RawEsFDisc;
+   Inc(Cnt);
+   { correction : l'unite I doit suivre l'unite I-1 (deja corrigee) d'une duree moyenne }
+   Own:=A^[I-1].Dts+D-Raw;
+   NewCum:=Own;
+   If Master Then Begin
+    If TSEvN<256 Then Begin TSEvDelta[TSEvN]:=Own-Cum; Inc(TSEvN); End;
+   End Else If TSEvUse<TSEvN Then Begin
+    { la meme correction que la video (synchro A/V), sauf si elle rend l'audio non monotone }
+    Cand:=Cum+TSEvDelta[TSEvUse]; Inc(TSEvUse);
+    If Raw+Cand>A^[I-1].Dts Then NewCum:=Cand;
+   End;
+   If Continuous Then Cum:=NewCum;
+  End;
+  If Continuous And (Cum<>0) Then Begin
+   A^[I].Dts:=A^[I].Dts+Cum;
+   If A^[I].Pts<>TSNoPts Then A^[I].Pts:=A^[I].Pts+Cum;
+  End;
+ End;
+ TSFixDisc:=Cnt;
+End;
+
+Procedure TSExtract(Const Path: String; VideoPid, AudioPid: LongInt; Const VDst, ADst: String);
+Var Info: TTSInfo; C: PTSCtx; Vi,Ai,I,Hv,Ha: LongInt; H: ^TTSH; S: ^TTSStream; Dur: Int64; Cnt: LongInt; Mn: Int64;
+Begin
+ TSProbe(Path,Info);
+ FillChar(TSExt,SizeOf(TSExt),0);
+ TSExt.VFirstPts:=TSNoPts; TSExt.VLastPts:=TSNoPts; TSExt.AFirstPts:=TSNoPts; TSExt.ALastPts:=TSNoPts; TSExt.AStartPts:=TSNoPts; TSExt.VStartPts:=TSNoPts;
+ Vi:=-1; Ai:=-1;
+ If VideoPid=-2 Then Vi:=Info.DefVideo
+ Else If VideoPid>=0 Then Begin
+  For I:=0 To Info.NStreams-1 Do If Info.S[I].Pid=VideoPid Then Vi:=I;
+  If Vi<0 Then Fail('PID video introuvable: '+HexStr(VideoPid,4));
+ End;
+ If AudioPid=-2 Then Ai:=Info.DefAudio
+ Else If AudioPid>=0 Then Begin
+  For I:=0 To Info.NStreams-1 Do If Info.S[I].Pid=AudioPid Then Ai:=I;
+  If Ai<0 Then Fail('PID audio introuvable: '+HexStr(AudioPid,4));
+ End;
+ If (Vi>=0) And ((Info.S[Vi].Kind<>TSKindVideo) Or (Not Info.S[Vi].Supported)) Then Fail('Flux video non pris en charge (PID '+HexStr(Info.S[Vi].Pid,4)+', '+Info.S[Vi].CodecName+')');
+ If (Ai>=0) And ((Info.S[Ai].Kind<>TSKindAudio) Or (Not Info.S[Ai].Supported)) Then Fail('Flux audio non pris en charge (PID '+HexStr(Info.S[Ai].Pid,4)+', '+Info.S[Ai].CodecName+')');
+ If (Vi<0) And (Ai<0) Then Fail('Aucun flux a extraire');
+ New(C); TSCx:=C;
+ TSCtxInit(C,@Info,2);
+ If Not TSRdOpen(C^.Rd,Path) Then TSFail('Ouverture impossible: '+Path);
+ C^.G0:=Info.UnwrapBase; C^.G0Set:=Info.UnwrapBase<>TSNoPts;
+ Hv:=-1; Ha:=-1;
+ If Vi>=0 Then Begin
+  TSMakeHandler(C,Vi); Hv:=C^.NH-1;
+  H:=@C^.H[Hv];
+  RawEsSplitFree(H^.Sp^);
+  RawEsSplitInit(H^.Sp^,Info.S[Vi].Codec,VDst);
+  If Not H^.Sp^.OutOpen Then TSFail('Creation impossible: '+VDst);
+ End;
+ If Ai>=0 Then Begin
+  TSMakeHandler(C,Ai); Ha:=C^.NH-1;
+  H:=@C^.H[Ha];
+  TSAuFree(H^.Au^);
+  TSAuInit(H^.Au^,Info.S[Ai].Codec,ADst);
+  If Not H^.Au^.OutOpen Then TSFail('Creation impossible: '+ADst);
+ End;
+ While TSRdNext(C^.Rd) Do TSProcessPacket(C);
+ TSExt.CcErrors:=C^.CcErr; TSExt.Discont:=C^.Disc; TSExt.SyncLosses:=C^.Rd.Losses; TSExt.Tei:=C^.Tei;
+ TSEvN:=0; TSEvUse:=0;
+ If TSDiscThresh<=0 Then TSDiscThresh:=900000;
+ If Hv>=0 Then Begin
+  H:=@C^.H[Hv]; S:=@Info.S[Vi];
+  RawEsEnd(H^.Sp^);
+  If (S^.FpsNum>0) Then Dur:=(Int64(90000)*S^.FpsDen+(S^.FpsNum Div 2)) Div S^.FpsNum Else Dur:=3600;
+  Cnt:=H^.Sp^.NAu;
+  TSFillTimes(H^.Sp^.Aus,Cnt,Dur);
+  TSExt.VDiscEvents:=TSFixDisc(H^.Sp^.Aus,Cnt,True,TSContinuous);
+  Mn:=TSNoPts;
+  For I:=0 To Cnt-1 Do Begin
+   H^.Sp^.Aus^[I].Flags:=H^.Sp^.Aus^[I].Flags And (Not RawEsFSeg);
+   If (Mn=TSNoPts) Or (H^.Sp^.Aus^[I].Pts<Mn) Then Mn:=H^.Sp^.Aus^[I].Pts;
+  End;
+  TSExt.VideoAus:=Cnt; TSExt.VideoBytes:=H^.Sp^.Pos-H^.Sp^.Origin; TSExt.VCodec:=S^.Codec; TSExt.VStartPts:=Mn;
+  If Cnt>0 Then Begin TSExt.VFirstPts:=H^.Sp^.Aus^[0].Pts; TSExt.VLastPts:=H^.Sp^.Aus^[Cnt-1].Pts; End;
+  If TSWriteIdx Then RawEsWriteIdx(VDst+'.idx',RawEsKindVideo,S^.Codec,S^.Width,S^.Height,S^.FpsNum,S^.FpsDen,H^.Sp^.Aus,Cnt);
+ End;
+ If Ha>=0 Then Begin
+  H:=@C^.H[Ha]; S:=@Info.S[Ai];
+  TSAuEnd(H^.Au^);
+  If H^.Au^.InfoSet Then Begin S^.SampleRate:=H^.Au^.Rate; S^.Channels:=H^.Au^.Ch; S^.FrameSamples:=H^.Au^.Samples; S^.BitsPerSample:=H^.Au^.Bits; End;
+  If (S^.SampleRate>0) And (S^.FrameSamples>0) Then Dur:=(Int64(S^.FrameSamples)*90000) Div S^.SampleRate Else Dur:=1920;
+  Cnt:=H^.Au^.NAu;
+  TSFillTimes(H^.Au^.Aus,Cnt,Dur);
+  TSExt.ADiscEvents:=TSFixDisc(H^.Au^.Aus,Cnt,Hv<0,TSContinuous);
+  TSExt.AudioAus:=Cnt; TSExt.AudioBytes:=H^.Au^.OutPos; TSExt.ACodec:=H^.Au^.RealCodec;
+  If Cnt>0 Then Begin TSExt.AFirstPts:=H^.Au^.Aus^[0].Pts; TSExt.ALastPts:=H^.Au^.Aus^[Cnt-1].Pts; TSExt.AStartPts:=TSExt.AFirstPts; End;
+  If TSWriteIdx Then RawEsWriteIdx(ADst+'.idx',RawEsKindAudio,H^.Au^.RealCodec,S^.SampleRate,S^.Channels,S^.FrameSamples,S^.BitsPerSample,H^.Au^.Aus,Cnt);
+ End;
+ TSCleanup;
+End;
+
+{ ====================================================================== }
+{ Multiplexeur MPEG-TS / M2TS / MTS                                        }
+{ ====================================================================== }
+Const
+ TSMuxOutSize = 65536;
+
+Var
+ { options (a regler avant TSMuxOpen) }
+ TSMuxFmt: LongInt;          { 0 = d'apres l'extension (.ts 188 octets ; .m2ts/.mts 192 octets avec TP_extra_header), 1 = 188, 2 = 192 }
+ TSMuxVPid, TSMuxAPid, TSMuxPmtPid, TSMuxProgram: LongInt;   { defauts : 0x100, 0x101, 0x1000, 1 (m2ts/mts : 0x1011, 0x1100, 0x100, 1) ; 0 = defaut }
+ TSMuxBitrate: LongInt;      { debit constant (bit/s) avec paquets nuls ; 0 = debit variable }
+ TSMuxVbrRate: LongInt;      { debit supposé pour l'horloge PCR en mode variable (defaut 20 000 000) }
+ TSMuxPcrPeriod: LongInt;    { periode PCR en ms (defaut 20, maximum 40) }
+ TSMuxPatPeriod: LongInt;    { periode PAT/PMT en ms (defaut 100) }
+ TSMuxOffset: Int64;         { decalage ajoute aux PTS/DTS en sortie, 90 kHz (defaut 126000 = 1.4 s) }
+ TSMuxDelay: Int64;          { avance du PCR sur le DTS du 1er octet d'une unite, 90 kHz (defaut 63000 = 0.7 s) }
+ TSMuxBase: Int64;           { reference des horodatages d'entree, ramenee a TSMuxOffset en sortie }
+ TSMuxUseBase: Boolean;      { False (defaut) : TSMuxBase = horodatage du premier echantillon recu ; True : TSMuxBase impose }
+ TSMuxLang: String;          { langue audio ISO 639 (3 lettres, defaut 'und') }
+ TSMuxService, TSMuxProvider: String;   { noms (SDT) }
+ TSMuxNoSdt: Boolean;        { True : ne pas ecrire la table SDT (defaut False = SDT ecrite) }
+ TSMuxAc3Dvb: Boolean;       { AC-3 en mode DVB (type 0x06 + descripteur 0x6A) au lieu d'ATSC (0x81) ; defaut False }
+
+Type
+ TTSMux = Record
+  Open: Boolean; F: File; OutBuf: PEABuffer; OutN: LongInt;
+  PktSz: LongInt; M2ts: Boolean;
+  VCodec, ACodec: LongInt; VPid, APid, PmtPid, PcrPid, Prog: LongInt;
+  Cc: Array[0..8191] Of Byte;
+  Clock: Int64; Rate: Int64; PktTime: Int64;
+  LastPcr, LastPat, LastSdt: Int64;
+  PcrPer, PatPer: Int64;
+  Started: Boolean;
+  Pr: TRawEsParams; LenSize: LongInt; AvccMode: Boolean;
+  AscSet: Boolean; AscObj, AscSr, AscCh: LongInt;
+  Scratch: PEABuffer; ScratchCap: LongInt;
+  PesBuf: PEABuffer; PesCap: LongInt;
+  Packets, Nulls, PcrCount: Int64;
+  BaseSet: Boolean; Base: Int64;
+  Err: Boolean;
+ End;
+
+Var
+ TSM: TTSMux;
+ TSMuxStats: Record Packets, NullPackets, PcrPackets, Bytes: Int64; End;
+
+Procedure TSMuxFlush;
+Var Act: LongInt;
+Begin
+ If TSM.Open And (TSM.OutN>0) Then Begin
+  {$I-}BlockWrite(TSM.F,TSM.OutBuf^,TSM.OutN,Act);{$I+}
+  If (IOResult<>0) Or (Act<>TSM.OutN) Then TSM.Err:=True;
+  TSM.OutN:=0;
+ End;
+End;
+
+{ Ecrit un paquet de 188 octets (Pk) ; en mode m2ts ajoute le TP_extra_header. Avance l'horloge. }
+Procedure TSMuxEmit(Pk: PEABuffer);
+Var A: LongInt;
+Begin
+ If TSM.OutN+TSM.PktSz>TSMuxOutSize Then TSMuxFlush;
+ If TSM.M2ts Then Begin
+  A:=LongInt(TSM.Clock And $3FFFFFFF);
+  TSM.OutBuf^[TSM.OutN]:=(A Shr 24) And $3F; TSM.OutBuf^[TSM.OutN+1]:=(A Shr 16) And 255;
+  TSM.OutBuf^[TSM.OutN+2]:=(A Shr 8) And 255; TSM.OutBuf^[TSM.OutN+3]:=A And 255;
+  Inc(TSM.OutN,4);
+ End;
+ Move(Pk^,TSM.OutBuf^[TSM.OutN],188); Inc(TSM.OutN,188);
+ Inc(TSM.Clock,TSM.PktTime);
+ Inc(TSM.Packets);
+End;
+
+Procedure TSMuxPutPcr(Q: PEABuffer; Pcr: Int64);
+Var Base,Ext: Int64;
+Begin
+ Base:=Pcr Div 300; Ext:=Pcr Mod 300;
+ Base:=Base And $1FFFFFFFF;
+ Q^[0]:=(Base Shr 25) And 255; Q^[1]:=(Base Shr 17) And 255; Q^[2]:=(Base Shr 9) And 255; Q^[3]:=(Base Shr 1) And 255;
+ Q^[4]:=((Base And 1) Shl 7) Or $7E Or ((Ext Shr 8) And 1); Q^[5]:=Ext And 255;
+End;
+
+{ Paquet nul }
+Procedure TSMuxNull;
+Var Pk: Array[0..187] Of Byte;
+Begin
+ FillChar(Pk,188,$FF);
+ Pk[0]:=$47; Pk[1]:=$1F; Pk[2]:=$FF; Pk[3]:=$10;
+ TSMuxEmit(@Pk);
+ Inc(TSM.Nulls);
+End;
+
+{ Paquet PCR seul (champ d'adaptation sans charge utile) sur le PID de reference }
+Procedure TSMuxPcrOnly;
+Var Pk: Array[0..187] Of Byte;
+Begin
+ FillChar(Pk,188,$FF);
+ Pk[0]:=$47; Pk[1]:=(TSM.PcrPid Shr 8) And $1F; Pk[2]:=TSM.PcrPid And 255;
+ Pk[3]:=$20 Or ((TSM.Cc[TSM.PcrPid]+15) And 15);
+ Pk[4]:=183; Pk[5]:=$10;
+ TSMuxPutPcr(@Pk[6],TSM.Clock);
+ TSM.LastPcr:=TSM.Clock;
+ TSMuxEmit(@Pk);
+ Inc(TSM.PcrCount);
+End;
+
+{ Ecrit une section PSI (table complete avec CRC) dans un ou plusieurs paquets }
+Procedure TSMuxSection(Pid: LongInt; Sec: PEABuffer; Len: LongInt);
+Var Pk: Array[0..187] Of Byte; P,N: LongInt;
+Begin
+ P:=0;
+ While P<Len Do Begin
+  FillChar(Pk,188,$FF);
+  Pk[0]:=$47; Pk[1]:=(Pid Shr 8) And $1F; Pk[2]:=Pid And 255;
+  Pk[3]:=$10 Or (TSM.Cc[Pid] And 15); TSM.Cc[Pid]:=(TSM.Cc[Pid]+1) And 15;
+  If P=0 Then Begin
+   Pk[1]:=Pk[1] Or $40; Pk[4]:=0; N:=183;
+   If Len<N Then N:=Len;
+   Move(Sec^[0],Pk[5],N);
+  End Else Begin
+   N:=184; If Len-P<N Then N:=Len-P;
+   Move(Sec^[P],Pk[4],N);
+  End;
+  Inc(P,N);
+  TSMuxEmit(@Pk);
+ End;
+End;
+
+Procedure TSMuxFinishSec(Var S: Array Of Byte; Len: LongInt);
+Var C: LongInt;
+Begin
+ C:=TSCrc32(@S,Len-4);
+ S[Len-4]:=(C Shr 24) And 255; S[Len-3]:=(C Shr 16) And 255; S[Len-2]:=(C Shr 8) And 255; S[Len-1]:=C And 255;
+End;
+
+Procedure TSMuxWritePsi;
+Var S: Array[0..511] Of Byte; N,Sl,Pil,Dl,Ps: LongInt; Lang: String;
+Begin
+ { PAT }
+ FillChar(S,SizeOf(S),0);
+ S[0]:=0; S[1]:=$B0; S[3]:=0; S[4]:=1; S[5]:=$C1; S[6]:=0; S[7]:=0;
+ S[8]:=(TSM.Prog Shr 8) And 255; S[9]:=TSM.Prog And 255; S[10]:=$E0 Or ((TSM.PmtPid Shr 8) And $1F); S[11]:=TSM.PmtPid And 255;
+ Sl:=16; S[2]:=Sl-3;
+ TSMuxFinishSec(S,Sl);
+ TSMuxSection(0,@S,Sl);
+ { PMT }
+ FillChar(S,SizeOf(S),0);
+ S[0]:=2; S[3]:=(TSM.Prog Shr 8) And 255; S[4]:=TSM.Prog And 255; S[5]:=$C1; S[6]:=0; S[7]:=0;
+ S[8]:=$E0 Or ((TSM.PcrPid Shr 8) And $1F); S[9]:=TSM.PcrPid And 255;
+ N:=12;
+ If TSM.M2ts Then Begin
+  S[N]:=5; S[N+1]:=4; S[N+2]:=Ord('H'); S[N+3]:=Ord('D'); S[N+4]:=Ord('M'); S[N+5]:=Ord('V'); Inc(N,6);
+  S[N]:=$88; S[N+1]:=4; S[N+2]:=$0F; S[N+3]:=$FF; S[N+4]:=$FC; S[N+5]:=$FC; Inc(N,6);
+ End;
+ Pil:=N-12;
+ S[10]:=$F0 Or ((Pil Shr 8) And 15); S[11]:=Pil And 255;
+ If TSM.VCodec<>0 Then Begin
+  Case TSM.VCodec Of RawEsCH264: S[N]:=$1B; RawEsCHEVC: S[N]:=$24; RawEsCMpeg2: S[N]:=2; RawEsCMpeg1: S[N]:=1; Else S[N]:=2; End;
+  S[N+1]:=$E0 Or ((TSM.VPid Shr 8) And $1F); S[N+2]:=TSM.VPid And 255;
+  Ps:=N+3; Inc(N,5); Dl:=N;
+  If TSM.VCodec=RawEsCHEVC Then Begin S[N]:=5; S[N+1]:=4; S[N+2]:=Ord('H'); S[N+3]:=Ord('E'); S[N+4]:=Ord('V'); S[N+5]:=Ord('C'); Inc(N,6); End;
+  S[Ps]:=$F0 Or (((N-Dl) Shr 8) And 15); S[Ps+1]:=(N-Dl) And 255;
+ End;
+ If TSM.ACodec<>0 Then Begin
+  Case TSM.ACodec Of
+   TSCAac: S[N]:=$0F;
+   TSCAc3: If TSMuxAc3Dvb Then S[N]:=6 Else S[N]:=$81;
+   Else S[N]:=3;
+  End;
+  S[N+1]:=$E0 Or ((TSM.APid Shr 8) And $1F); S[N+2]:=TSM.APid And 255;
+  Ps:=N+3; Inc(N,5); Dl:=N;
+  If TSM.ACodec=TSCAc3 Then Begin
+   S[N]:=5; S[N+1]:=4; S[N+2]:=Ord('A'); S[N+3]:=Ord('C'); S[N+4]:=Ord('-'); S[N+5]:=Ord('3'); Inc(N,6);
+   If TSMuxAc3Dvb Then Begin S[N]:=$6A; S[N+1]:=1; S[N+2]:=0; Inc(N,3); End;
+  End;
+  Lang:=TSMuxLang; If Length(Lang)<3 Then Lang:='und';
+  S[N]:=$0A; S[N+1]:=4; S[N+2]:=Ord(Lang[1]); S[N+3]:=Ord(Lang[2]); S[N+4]:=Ord(Lang[3]); S[N+5]:=0; Inc(N,6);
+  S[Ps]:=$F0 Or (((N-Dl) Shr 8) And 15); S[Ps+1]:=(N-Dl) And 255;
+ End;
+ Inc(N,4);
+ Sl:=N;
+ S[1]:=$B0 Or (((Sl-3) Shr 8) And 15); S[2]:=(Sl-3) And 255;
+ TSMuxFinishSec(S,Sl);
+ TSMuxSection(TSM.PmtPid,@S,Sl);
+End;
+
+Procedure TSMuxWriteSdt;
+Var S: Array[0..255] Of Byte; N,L1,L2,I,Dl: LongInt; Pn,Sn: String;
+Begin
+ Pn:=TSMuxProvider; If Length(Pn)>60 Then Pn:=Copy(Pn,1,60);
+ Sn:=TSMuxService; If Length(Sn)>60 Then Sn:=Copy(Sn,1,60);
+ FillChar(S,SizeOf(S),0);
+ S[0]:=$42; S[3]:=0; S[4]:=1; S[5]:=$C1; S[6]:=0; S[7]:=0; S[8]:=$FF; S[9]:=1; S[10]:=$FF;
+ S[11]:=(TSM.Prog Shr 8) And 255; S[12]:=TSM.Prog And 255; S[13]:=$FC;
+ N:=16;
+ S[N]:=$48; S[N+1]:=3+Length(Pn)+Length(Sn); S[N+2]:=1; S[N+3]:=Length(Pn); Inc(N,4);
+ For I:=1 To Length(Pn) Do Begin S[N]:=Ord(Pn[I]); Inc(N); End;
+ S[N]:=Length(Sn); Inc(N);
+ For I:=1 To Length(Sn) Do Begin S[N]:=Ord(Sn[I]); Inc(N); End;
+ Dl:=N-16;
+ S[14]:=$80 Or ((Dl Shr 8) And 15); S[15]:=Dl And 255;
+ Inc(N,4);
+ S[1]:=$F0 Or (((N-3) Shr 8) And 15); S[2]:=(N-3) And 255;
+ TSMuxFinishSec(S,N);
+ TSMuxSection($11,@S,N);
+End;
+
+{ Ecrit les tables periodiques et les PCR dus ; avance l'horloge sans charge utile jusqu'a Target }
+Procedure TSMuxAdvance(Target: Int64);
+Var NextEv: Int64;
+Begin
+ While True Do Begin
+  If (TSM.Clock-TSM.LastPat)>=TSM.PatPer Then Begin
+   TSMuxWritePsi; TSM.LastPat:=TSM.Clock;
+   If (Not TSMuxNoSdt) And ((TSM.Clock-TSM.LastSdt)>=TSM.PatPer*5) Then Begin TSMuxWriteSdt; TSM.LastSdt:=TSM.Clock; End;
+  End;
+  If (TSM.Clock-TSM.LastPcr)>=TSM.PcrPer Then Begin TSMuxPcrOnly; End;
+  If TSM.Clock>=Target Then Break;
+  If TSMuxBitrate>0 Then Begin
+   { debit constant : remplissage par des paquets nuls }
+   If ((TSM.Clock-TSM.LastPat)<TSM.PatPer) And ((TSM.Clock-TSM.LastPcr)<TSM.PcrPer) Then TSMuxNull;
+  End Else Begin
+   NextEv:=Target;
+   If TSM.LastPat+TSM.PatPer<NextEv Then NextEv:=TSM.LastPat+TSM.PatPer;
+   If TSM.LastPcr+TSM.PcrPer<NextEv Then NextEv:=TSM.LastPcr+TSM.PcrPer;
+   If NextEv>TSM.Clock Then TSM.Clock:=NextEv;
+  End;
+ End;
+End;
+
+Function TSMuxExt(Const Path: String): String;
+Var I: LongInt; E: String;
+Begin
+ E:=''; I:=Length(Path);
+ While (I>0) And (Path[I]<>'.') And (Path[I]<>'/') And (Path[I]<>'\') Do Dec(I);
+ If (I>0) And (Path[I]='.') Then E:=RawEsUpper(Copy(Path,I,20));
+ TSMuxExt:=E;
+End;
+
+Procedure TSMuxOpen(Const Path: String; VCodec,ACodec: LongInt);
+Var Code: LongInt; E: String; Old: Byte;
+Begin
+ If TSM.Open Then Begin
+  { fermeture d'un multiplexage precedent oublie }
+  TSMuxFlush; {$I-}Close(TSM.F);{$I+} If IOResult<>0 Then ; TSM.Open:=False;
+  If TSM.OutBuf<>Nil Then FreeMem(TSM.OutBuf);
+  If TSM.Scratch<>Nil Then FreeMem(TSM.Scratch);
+  If TSM.PesBuf<>Nil Then FreeMem(TSM.PesBuf);
+ End;
+ FillChar(TSM,SizeOf(TSM),0);
+ E:=TSMuxExt(Path);
+ TSM.M2ts:=(E='.M2TS') Or (E='.MTS');
+ If TSMuxFmt=1 Then TSM.M2ts:=False Else If TSMuxFmt=2 Then TSM.M2ts:=True;
+ If TSM.M2ts Then TSM.PktSz:=192 Else TSM.PktSz:=188;
+ TSM.VCodec:=VCodec; TSM.ACodec:=ACodec;
+ If TSMuxVPid>0 Then TSM.VPid:=TSMuxVPid Else If TSM.M2ts Then TSM.VPid:=$1011 Else TSM.VPid:=$100;
+ If TSMuxAPid>0 Then TSM.APid:=TSMuxAPid Else If TSM.M2ts Then TSM.APid:=$1100 Else TSM.APid:=$101;
+ If TSMuxPmtPid>0 Then TSM.PmtPid:=TSMuxPmtPid Else If TSM.M2ts Then TSM.PmtPid:=$100 Else TSM.PmtPid:=$1000;
+ If TSMuxProgram>0 Then TSM.Prog:=TSMuxProgram Else TSM.Prog:=1;
+ If VCodec<>0 Then TSM.PcrPid:=TSM.VPid Else TSM.PcrPid:=TSM.APid;
+ If (VCodec=0) And (ACodec=0) Then Fail('TSMuxOpen: aucun flux');
+ If TSMuxBitrate>0 Then TSM.Rate:=TSMuxBitrate
+ Else Begin If TSMuxVbrRate>0 Then TSM.Rate:=TSMuxVbrRate Else TSM.Rate:=20000000; End;
+ TSM.PktTime:=(Int64(188)*8*27000000+(TSM.Rate Div 2)) Div TSM.Rate;
+ If TSM.PktTime<1 Then TSM.PktTime:=1;
+ If TSMuxPcrPeriod<=0 Then TSMuxPcrPeriod:=20;
+ If TSMuxPcrPeriod>40 Then TSMuxPcrPeriod:=40;
+ If TSMuxPatPeriod<=0 Then TSMuxPatPeriod:=100;
+ TSM.PcrPer:=Int64(TSMuxPcrPeriod)*27000; TSM.PatPer:=Int64(TSMuxPatPeriod)*27000;
+ If TSMuxOffset=0 Then TSMuxOffset:=126000;
+ If TSMuxDelay=0 Then TSMuxDelay:=63000;
+ If TSMuxProvider='' Then TSMuxProvider:='ANYMP4';
+ If TSMuxService='' Then TSMuxService:='Service01';
+ TSM.Base:=TSMuxBase; TSM.BaseSet:=TSMuxUseBase;
+ Assign(TSM.F,Path);
+ {$I-}Rewrite(TSM.F,1); Code:=IOResult;{$I+}
+ If Code<>0 Then Fail('Creation impossible: '+Path);
+ TSM.Open:=True;
+ GetMem(TSM.OutBuf,TSMuxOutSize+512);
+ TSM.ScratchCap:=65536; GetMem(TSM.Scratch,TSM.ScratchCap);
+ TSM.PesCap:=65536; GetMem(TSM.PesBuf,TSM.PesCap);
+ RawEsParamsClear(TSM.Pr);
+ TSM.LenSize:=4;
+End;
+
+{ Configuration video : record avcC (H.264) ou hvcC (HEVC) sans en-tete de boite. Apres cet appel, TSMuxVideo
+  attend des echantillons AVCC/HVCC (longueurs sur LenSize octets) ; sans cet appel il attend de l'Annex B. }
+Procedure TSMuxSetVideoConfig(Cfg: PEABuffer; CfgLen: LongInt);
+Var L: LongInt;
+Begin
+ L:=RawEsParseCfg(TSM.VCodec,Cfg,CfgLen,TSM.Pr);
+ If L=0 Then Fail('TSMuxSetVideoConfig: avcC/hvcC invalide');
+ TSM.LenSize:=L; TSM.AvccMode:=True;
+End;
+
+{ Configuration AAC : AudioSpecificConfig (2 octets ou plus). Apres cet appel, TSMuxAudio attend des trames AAC
+  brutes (sans ADTS) auxquelles un en-tete ADTS est ajoute. Sans cet appel : trames ADTS. }
+Procedure TSMuxSetAudioConfig(Asc: PEABuffer; AscLen: LongInt);
+Var Obj,Sr,Ch: LongInt;
+Begin
+ If AscLen<2 Then Fail('TSMuxSetAudioConfig: AudioSpecificConfig trop court');
+ Obj:=Asc^[0] Shr 3;
+ Sr:=((Asc^[0] And 7) Shl 1) Or (Asc^[1] Shr 7);
+ Ch:=(Asc^[1] Shr 3) And 15;
+ If (Obj=0) Or (Obj>4) Or (Sr>12) Then Fail('TSMuxSetAudioConfig: profil AAC non pris en charge');
+ TSM.AscSet:=True; TSM.AscObj:=Obj; TSM.AscSr:=Sr; TSM.AscCh:=Ch;
+End;
+
+Procedure TSMuxGrowPes(N: LongInt);
+Begin
+ If N>TSM.PesCap Then Begin
+  TSM.PesCap:=N+N Div 2+1024;
+  ReallocMem(TSM.PesBuf,TSM.PesCap);
+ End;
+End;
+
+Procedure TSMuxPutTs(Q: PEABuffer; Marker: LongInt; V: Int64);
+Begin
+ V:=V And $1FFFFFFFF;
+ Q^[0]:=(Marker Shl 4) Or (((V Shr 30) And 7) Shl 1) Or 1;
+ Q^[1]:=(V Shr 22) And 255;
+ Q^[2]:=(((V Shr 15) And 127) Shl 1) Or 1;
+ Q^[3]:=(V Shr 7) And 255;
+ Q^[4]:=((V And 127) Shl 1) Or 1;
+End;
+
+{ Ecrit une unite PES : Data = charge utile (Len octets) deja prete ; Pts/Dts en sortie (90 kHz) }
+Procedure TSMuxPes(Pid,Sid: LongInt; Data: PEABuffer; Len: LongInt; Pts,Dts: Int64; HasDts,IsKey,IsVideo: Boolean);
+Var Hl,Total,P,N,Cap,Af,Stuff,Pl: LongInt; Pk: Array[0..187] Of Byte; First,NeedPcr,UsePcr: Boolean; Pes: PEABuffer; Target: Int64;
+Begin
+ { en-tete PES }
+ If HasDts Then Hl:=19 Else Hl:=14;
+ Total:=Hl+Len;
+ TSMuxGrowPes(Total+16);
+ Pes:=TSM.PesBuf;
+ Pes^[0]:=0; Pes^[1]:=0; Pes^[2]:=1; Pes^[3]:=Sid;
+ If IsVideo Or (Total-6>65535) Then Begin Pes^[4]:=0; Pes^[5]:=0; End
+ Else Begin Pes^[4]:=((Total-6) Shr 8) And 255; Pes^[5]:=(Total-6) And 255; End;
+ Pes^[6]:=$84;
+ If HasDts Then Begin Pes^[7]:=$C0; Pes^[8]:=10; TSMuxPutTs(@Pes^[9],3,Pts); TSMuxPutTs(@Pes^[14],1,Dts); End
+ Else Begin Pes^[7]:=$80; Pes^[8]:=5; TSMuxPutTs(@Pes^[9],2,Pts); End;
+ Move(Data^[0],Pes^[Hl],Len);
+ { instant d'emission : PCR avance de TSMuxDelay sur le DTS }
+ If HasDts Then Target:=Dts*300-TSMuxDelay*300 Else Target:=Pts*300-TSMuxDelay*300;
+ If Not TSM.Started Then Begin
+  TSM.Started:=True;
+  If Target<0 Then Target:=0;
+  TSM.Clock:=Target;
+  TSM.LastPcr:=TSM.Clock-TSM.PcrPer; TSM.LastPat:=TSM.Clock-TSM.PatPer; TSM.LastSdt:=TSM.Clock-TSM.PatPer*5;
+ End;
+ If Target>TSM.Clock Then TSMuxAdvance(Target) Else TSMuxAdvance(TSM.Clock);
+ { paquets TS }
+ P:=0; First:=True;
+ While P<Total Do Begin
+  FillChar(Pk,188,$FF);
+  Pk[0]:=$47; Pk[1]:=(Pid Shr 8) And $1F; Pk[2]:=Pid And 255;
+  If First Then Pk[1]:=Pk[1] Or $40;
+  UsePcr:=(Pid=TSM.PcrPid) And ((TSM.Clock-TSM.LastPcr)>=TSM.PcrPer);
+  Af:=0;
+  If UsePcr Then Af:=8
+  Else If First And IsVideo And IsKey Then Af:=2;
+  Cap:=184-Af;
+  If Total-P<Cap Then Begin
+   Stuff:=Cap-(Total-P);
+   If Af=0 Then Begin
+    { adaptation de bourrage seule }
+    If Stuff=1 Then Af:=1 Else Af:=Stuff;
+    Cap:=184-Af;
+   End Else Begin Af:=Af+Stuff; Cap:=184-Af; End;
+  End;
+  Pl:=Cap; If Total-P<Pl Then Pl:=Total-P;
+  If Af>0 Then Begin
+   Pk[3]:=$30 Or (TSM.Cc[Pid] And 15);
+   Pk[4]:=Af-1;
+   If Af>1 Then Begin
+    Pk[5]:=0;
+    If First And IsVideo And IsKey Then Pk[5]:=Pk[5] Or $40;
+    If UsePcr Then Begin Pk[5]:=Pk[5] Or $10; TSMuxPutPcr(@Pk[6],TSM.Clock); End;
+   End;
+   Move(Pes^[P],Pk[4+Af],Pl);
+  End Else Begin
+   Pk[3]:=$10 Or (TSM.Cc[Pid] And 15);
+   Move(Pes^[P],Pk[4],Pl);
+  End;
+  If UsePcr Then Begin TSM.LastPcr:=TSM.Clock; Inc(TSM.PcrCount); End;
+  TSM.Cc[Pid]:=(TSM.Cc[Pid]+1) And 15;
+  TSMuxEmit(@Pk);
+  Inc(P,Pl); First:=False;
+  { tables periodiques au milieu de grosses unites }
+  If (P<Total) And ((TSM.Clock-TSM.LastPat)>=TSM.PatPer) Then Begin
+   TSMuxWritePsi; TSM.LastPat:=TSM.Clock;
+  End;
+ End;
+End;
+
+Procedure TSMuxGrowScratch(N: LongInt);
+Begin
+ If N>TSM.ScratchCap Then Begin
+  TSM.ScratchCap:=N+N Div 2+1024;
+  ReallocMem(TSM.Scratch,TSM.ScratchCap);
+ End;
+End;
+
+Function TSMuxIn(T: Int64): Int64;
+Begin
+ If Not TSM.BaseSet Then Begin TSM.Base:=T; TSM.BaseSet:=True; End;
+ TSMuxIn:=T-TSM.Base+TSMuxOffset;
+End;
+
+{ Un echantillon video. Pts/Dts en 90 kHz (horloge d'entree), IsKey = image cle. }
+Procedure TSMuxVideo(Pkt: PEABuffer; Len: LongInt; Pts,Dts: Int64; IsKey: Boolean);
+Var N,P,E,T,Need: LongInt; HasAud,HasPs: Boolean; Pre: Array[0..7] Of Byte; OPts,ODts: Int64; Pr: Boolean;
+Begin
+ If (Not TSM.Open) Or (TSM.VCodec=0) Then Exit;
+ If Dts=TSNoPts Then Dts:=Pts;
+ If Pts=TSNoPts Then Pts:=Dts;
+ ODts:=TSMuxIn(Dts); OPts:=Pts-Dts+ODts;
+ If (TSM.VCodec<>RawEsCH264) And (TSM.VCodec<>RawEsCHEVC) Then Begin
+  TSMuxPes(TSM.VPid,$E0,Pkt,Len,OPts,ODts,OPts<>ODts,IsKey,True);
+  Exit;
+ End;
+ TSMuxGrowScratch(Len+TSM.Pr.Total+Len Div 2+256);
+ If TSM.AvccMode Then Begin
+  If Not RawEsAvccToAnnexB(TSM.VCodec,Pkt,Len,TSM.LenSize,TSM.Pr,IsKey,True,TSM.Scratch,N) Then Fail('TSMuxVideo: echantillon AVCC invalide');
+ End Else Begin
+  { Annex B : AUD en tete si absent, jeux de parametres devant les images cles }
+  If IsKey Then RawEsParamsScan(TSM.Pr,TSM.VCodec,Pkt,Len);
+  HasAud:=False; HasPs:=False;
+  P:=RawEsNextNal(Pkt,Len,0);
+  While P>=0 Do Begin
+   If TSM.VCodec=RawEsCH264 Then T:=Pkt^[P] And 31 Else T:=(Pkt^[P] Shr 1) And 63;
+   If TSM.VCodec=RawEsCH264 Then Begin If T=9 Then HasAud:=True; If (T=7) Or (T=8) Then HasPs:=True; End
+   Else Begin If T=35 Then HasAud:=True; If (T>=32) And (T<=34) Then HasPs:=True; End;
+   P:=RawEsNextNal(Pkt,Len,P);
+  End;
+  N:=0;
+  If Not HasAud Then Begin
+   TSM.Scratch^[0]:=0; TSM.Scratch^[1]:=0; TSM.Scratch^[2]:=0; TSM.Scratch^[3]:=1;
+   If TSM.VCodec=RawEsCH264 Then Begin TSM.Scratch^[4]:=9; TSM.Scratch^[5]:=$F0; N:=6; End
+   Else Begin TSM.Scratch^[4]:=$46; TSM.Scratch^[5]:=1; TSM.Scratch^[6]:=$50; N:=7; End;
+  End;
+  If IsKey And (Not HasPs) And (TSM.Pr.N>0) Then Inc(N,RawEsParamsAnnexB(TSM.Pr,@TSM.Scratch^[N]));
+  Move(Pkt^[0],TSM.Scratch^[N],Len); Inc(N,Len);
+ End;
+ TSMuxPes(TSM.VPid,$E0,TSM.Scratch,N,OPts,ODts,OPts<>ODts,IsKey,True);
+End;
+
+{ Une trame audio (ou plusieurs) : ADTS (ou AAC brut apres TSMuxSetAudioConfig), AC-3, MP2/MP3 }
+Procedure TSMuxAudio(Pkt: PEABuffer; Len: LongInt; Pts: Int64);
+Var N,Fl: LongInt; OPts: Int64; Sid: LongInt;
+Begin
+ If (Not TSM.Open) Or (TSM.ACodec=0) Then Exit;
+ OPts:=TSMuxIn(Pts);
+ TSMuxGrowScratch(Len+16);
+ N:=0;
+ If (TSM.ACodec=TSCAac) And TSM.AscSet Then Begin
+  Fl:=Len+7;
+  TSM.Scratch^[0]:=$FF; TSM.Scratch^[1]:=$F1;
+  TSM.Scratch^[2]:=((TSM.AscObj-1) Shl 6) Or (TSM.AscSr Shl 2) Or ((TSM.AscCh Shr 2) And 1);
+  TSM.Scratch^[3]:=((TSM.AscCh And 3) Shl 6) Or ((Fl Shr 11) And 3);
+  TSM.Scratch^[4]:=(Fl Shr 3) And 255;
+  TSM.Scratch^[5]:=((Fl And 7) Shl 5) Or $1F;
+  TSM.Scratch^[6]:=$FC;
+  N:=7;
+ End;
+ Move(Pkt^[0],TSM.Scratch^[N],Len); Inc(N,Len);
+ If TSM.ACodec=TSCAc3 Then Sid:=$BD Else Sid:=$C0;
+ TSMuxPes(TSM.APid,Sid,TSM.Scratch,N,OPts,OPts,False,True,False);
+End;
+
+Procedure TSMuxClose;
+Begin
+ If Not TSM.Open Then Exit;
+ TSMuxFlush;
+ TSMuxStats.Packets:=TSM.Packets; TSMuxStats.NullPackets:=TSM.Nulls; TSMuxStats.PcrPackets:=TSM.PcrCount;
+ TSMuxStats.Bytes:=TSM.Packets*TSM.PktSz;
+ {$I-}Close(TSM.F);{$I+}
+ If IOResult<>0 Then ;
+ TSM.Open:=False;
+ If TSM.OutBuf<>Nil Then Begin FreeMem(TSM.OutBuf); TSM.OutBuf:=Nil; End;
+ If TSM.Scratch<>Nil Then Begin FreeMem(TSM.Scratch); TSM.Scratch:=Nil; End;
+ If TSM.PesBuf<>Nil Then Begin FreeMem(TSM.PesBuf); TSM.PesBuf:=Nil; End;
+End;
+{$IFDEF FPC}
+{ Colle entre le demultiplexeur TS / flux bruts (pe_ts.pas, pe_rawes.pas) et le programme :
+  sonde, extraction video convertie en echantillons AVCC/HVCC, extraction audio.
+  Toutes ces procedures sont appelees par RunEng (Fail -> LongJmp). }
+Var
+ TsGInfo: TTSInfo; TsGRaw: TRawEsInfo;
+ TsGVCodec: LongInt;                      { RawEsC* du flux video extrait }
+ TsGW,TsGH,TsGFpsN,TsGFpsD: LongInt;
+ TsGN: LongInt;
+ TsGOff,TsGSz,TsGDur,TsGCts,TsGKey: PRawEsLArr;
+ TsGCfg: Array[0..2047] Of Byte; TsGCfgLen: LongInt;
+ TsGEsPath: String;                       { fichier d'echantillons video (AVCC converti, ou ES MPEG) }
+ TsGTemp: Boolean;                        { TsGEsPath est un fichier temporaire a supprimer }
+ TsGAud: LongInt;                         { TSC* du flux audio extrait }
+ TsGAudCh,TsGAudRate: LongInt;
+ TsGAStart,TsGVStart: Int64;
+ TsGHead: Boolean;                        { True : n'utiliser que le debut du fichier (apercu) }
+
+Procedure TsGFree;
+Begin
+ If TsGN>0 Then Begin
+  FreeMem(TsGOff,TsGN*4+16); FreeMem(TsGSz,TsGN*4+16); FreeMem(TsGDur,TsGN*4+16); FreeMem(TsGCts,TsGN*4+16); FreeMem(TsGKey,TsGN*4+16);
+ End;
+ TsGN:=0;
+End;
+
+Procedure TsRd(Pos: LongInt; B: PEABuffer; Len: LongInt);
+Var P,C: LongInt;
+Begin
+ P:=0;
+ While P<Len Do Begin
+  C:=Len-P; If C>32768 Then C:=32768;
+  ReadAt(Pos+P,B^[P],C); Inc(P,C);
+ End;
+End;
+
+Procedure TsWr(B: PEABuffer; Len: LongInt);
+Var P,C: LongInt;
+Begin
+ P:=0;
+ While P<Len Do Begin
+  C:=Len-P; If C>32768 Then C:=32768;
+  WriteBytes(B^[P],C); Inc(P,C);
+ End;
+End;
+
+Procedure TsEngProbe(Const Src: String; Raw: Boolean);
+Begin
+ If Raw Then RawEsProbe(Src,TsGRaw) Else TSProbe(Src,TsGInfo);
+End;
+
+{ Raw=False : Src = TS ; Raw=True : Src = flux elementaire. Dst = nom de base des fichiers temporaires. }
+Procedure TsEngVideo(Const Src,Dst: String; Raw: Boolean);
+Var
+ Hdr: TRawEsIdxHdr; Idx: PRawEsIdxArr; N,I,MaxSz,Len,Pos,CvLen: LongInt; Buf,Cv: PEABuffer;
+ Pr: TRawEsParams; Key: Boolean; Es,Cvf: String; Codec: LongInt; Ok: Boolean; Dt: Int64;
+Begin
+ TsGFree; TsGTemp:=False; TsGCfgLen:=0; TsGEsPath:='';
+ Idx:=Nil; N:=0;
+ If Raw Then Begin
+  RawEsLoad(Src,0,TsGRaw,Idx,N);
+  Codec:=TsGRaw.Codec; TsGW:=TsGRaw.Width; TsGH:=TsGRaw.Height; TsGFpsN:=TsGRaw.FpsNum; TsGFpsD:=TsGRaw.FpsDen;
+  Es:=Src;
+ End Else Begin
+  Es:=Dst+'.es';
+  TSWriteIdx:=True;
+  TSExtract(Src,-2,-1,Es,'');
+  Ok:=RawEsReadIdx(Es+'.idx',Hdr,Idx,N);
+  If Not Ok Then Fail('Aucun flux video dans ce fichier TS.');
+  Codec:=Hdr.Codec; TsGW:=Hdr.P1; TsGH:=Hdr.P2; TsGFpsN:=Hdr.P3; TsGFpsD:=Hdr.P4;
+  TsGVStart:=TSExt.VStartPts;
+  DelFile(Es+'.idx');
+ End;
+ If (N<=0) Or (Idx=Nil) Then Fail('Aucune image video trouvee.');
+ TsGVCodec:=Codec;
+ TsGN:=N;
+ GetMem(TsGOff,N*4+16); GetMem(TsGSz,N*4+16); GetMem(TsGDur,N*4+16); GetMem(TsGCts,N*4+16); GetMem(TsGKey,N*4+16);
+ For I:=0 To N-1 Do Begin
+  If I<N-1 Then Dt:=Idx^[I+1].Dts-Idx^[I].Dts Else If I>0 Then Dt:=Idx^[I].Dts-Idx^[I-1].Dts Else Dt:=3600;
+  If (Dt<=0) Or (Dt>900000) Then Dt:=3600;
+  TsGDur^[I]:=Dt; TsGCts^[I]:=Idx^[I].Pts-Idx^[I].Dts; If TsGCts^[I]<0 Then TsGCts^[I]:=0;
+  TsGKey^[I]:=Idx^[I].Flags And 1;
+ End;
+ If (Codec=RawEsCH264) Or (Codec=RawEsCHEVC) Then Begin
+  { conversion Annex B -> echantillons AVCC / HVCC (longueur sur 4 octets), parametres dans avcC / hvcC }
+  MaxSz:=0; For I:=0 To N-1 Do If Idx^[I].Size>MaxSz Then MaxSz:=Idx^[I].Size;
+  GetMem(Buf,MaxSz+64); GetMem(Cv,MaxSz+MaxSz Div 2+256);
+  RawEsParamsClear(Pr);
+  OpenRead(Es);
+  Cvf:=Dst+'.avc'; OpenWrite(Cvf);
+  Pos:=0;
+  For I:=0 To N-1 Do Begin
+   Len:=Idx^[I].Size;
+   TsRd(Idx^[I].Off,Buf,Len);
+   If (Pr.N<3) Or (I<64) Then RawEsParamsScan(Pr,Codec,Buf,Len);
+   CvLen:=RawEsAnnexBToAvcc(Codec,Buf,Len,Cv,Key);
+   If CvLen<=0 Then Begin CvLen:=0; End;
+   If CvLen>0 Then TsWr(Cv,CvLen);
+   TsGOff^[I]:=Pos; TsGSz^[I]:=CvLen; Inc(Pos,CvLen);
+   If Key Then TsGKey^[I]:=1;
+   If (I And 255)=0 Then EngTick(I,N);
+  End;
+  CloseRead; CloseWrite;
+  FreeMem(Buf,MaxSz+64); FreeMem(Cv,MaxSz+MaxSz Div 2+256);
+  If Not Raw Then DelFile(Es);
+  If Codec=RawEsCH264 Then TsGCfgLen:=RawEsBuildAvcC(Pr,@TsGCfg) Else TsGCfgLen:=RawEsBuildHvcC(Pr,@TsGCfg);
+  If TsGCfgLen<=0 Then Fail('Parametres de sequence (SPS/PPS) introuvables dans le flux video.');
+  TsGEsPath:=Cvf; TsGTemp:=True;
+ End Else Begin
+  { MPEG-1/2 (VC-1 non pris en charge) : le flux elementaire sert de source au decodeur }
+  For I:=0 To N-1 Do Begin TsGOff^[I]:=Idx^[I].Off; TsGSz^[I]:=Idx^[I].Size; End;
+  TsGEsPath:=Es; TsGTemp:=Not Raw;
+ End;
+ RawEsFreeIdx(Idx,N);
+End;
+
+Procedure TsEngAudio(Const Src,Dst: String);
+Begin
+ TSWriteIdx:=False;
+ TSExtract(Src,-1,-2,'',Dst);
+ TSWriteIdx:=True;
+ TsGAud:=TSExt.ACodec; TsGAStart:=TSExt.AStartPts; TsGVStart:=TSExt.VStartPts;
+End;
+{$ENDIF}
 { ====================================================================== }
 { pe_disc.pas : supports optiques en image (ISO 9660 / Joliet / UDF) ou en }
 { dossier : DVD-Video (VIDEO_TS) et Blu-ray (BDMV).                        }
@@ -105027,7 +108624,7 @@ End;
 { Colle entre l'interface et les moteurs audio                             }
 { ====================================================================== }
 Const
- ekMP3 = 1; ekAIFF = 2; ekVOC = 3; ekMOD = 4; ekEncMP3 = 5; ekAAC = 6; ekEncAAC = 7; ekAC3 = 8; ekEncAC3 = 9; ekOgg = 10; ekEncVorbis = 11; ekVorbisPk = 12; ekDca = 13; ekWma = 14; ekEncWma = 15; ekEncMpeg4 = 16; ekEncTheora = 17; ekEncWmv = 18; ekEncMpeg1 = 19; ekDecVid = 20; ekMpa = 21; ekEncMp2 = 22; ekWmaAvi = 23; ekAsfSpool = 24; ekOpusPk = 25; ekOpusOgg = 26; ekEncH263 = 27;
+ ekMP3 = 1; ekAIFF = 2; ekVOC = 3; ekMOD = 4; ekEncMP3 = 5; ekAAC = 6; ekEncAAC = 7; ekAC3 = 8; ekEncAC3 = 9; ekOgg = 10; ekEncVorbis = 11; ekVorbisPk = 12; ekDca = 13; ekWma = 14; ekEncWma = 15; ekEncMpeg4 = 16; ekEncTheora = 17; ekEncWmv = 18; ekEncMpeg1 = 19; ekDecVid = 20; ekMpa = 21; ekEncMp2 = 22; ekWmaAvi = 23; ekAsfSpool = 24; ekOpusPk = 25; ekOpusOgg = 26; ekEncH263 = 27; ekTsProbe = 28; ekRawProbe = 29; ekTsVideo = 30; ekRawVideo = 31; ekTsAudio = 32;
 
 Type
  TByteArr = Array[0..32767] Of Byte;
@@ -105108,6 +108705,11 @@ Begin
    ekEncAC3: ProcessAC3E(Src,Dst,True,Arg);
    ekOgg: VGDecodeOgg(Src,Dst);
    ekOpusPk: OpDecodeFile(Src,Dst);
+   ekTsProbe: TsEngProbe(Src,False);
+   ekRawProbe: TsEngProbe(Src,True);
+   ekTsVideo: TsEngVideo(Src,Dst,False);
+   ekRawVideo: TsEngVideo(Src,Dst,True);
+   ekTsAudio: TsEngAudio(Src,Dst);
    ekEncH263: Begin H3ERv:=0; InputPath:=Src; HasVideoBitrate:=True; VideoBitrate:=Abs(Arg)*1000; EncodeH263(Src,Dst,Arg<0); End;
    ekOpusOgg: OpDecodeOgg(Src,Dst);
    ekEncVorbis: Begin VGStrictExp:=True; EncodeVorbisNative(Src,Dst); End;
@@ -105145,7 +108747,8 @@ Begin
   End;
   RunEng:=True;
  End Else Begin
-  If (Kind=ekAAC) Or (Kind=ekEncAAC) Or (Kind>=ekAC3) Then AacCleanup(True);
+  If (Kind>=ekTsProbe) And (Kind<=ekTsAudio) Then TSCleanup;
+  If (Kind=ekAAC) Or (Kind=ekEncAAC) Or ((Kind>=ekAC3) And (Kind<ekTsProbe)) Then AacCleanup(True);
   If EngSpool<>'' Then Begin DelFile(EngSpool); EngSpool:=''; End;
   NtCleanup;
   If EngMsg='' Then EngMsg:='Erreur de conversion.';
@@ -105155,6 +108758,44 @@ Begin
  Err:='Moteur audio indisponible dans la version Turbo Pascal.'; RunEng:=False;
  {$ENDIF}
 End;
+
+{$IFDEF FPC}
+{ Sonde d'un fichier TS / M2TS / MTS (Raw=False) ou d'un flux elementaire brut (Raw=True) }
+Procedure ProbeTsMedia(Var M: TMedia; Raw: Boolean);
+Var Err: String; S: TTSStream; I: LongInt;
+ Function VName(Const C: String): String;
+ Begin
+  If C='h264' Then VName:='H.264' Else If C='hevc' Then VName:='HEVC' Else If C='mpeg2video' Then VName:='MPEG-2'
+  Else If C='mpeg1video' Then VName:='MPEG-1' Else If C='vc1' Then VName:='VC-1' Else VName:=C;
+ End;
+ Function AName(Const C: String): String;
+ Begin
+  If C='aac' Then AName:='AAC' Else If C='aac_latm' Then AName:='AAC LATM' Else If C='ac3' Then AName:='AC3'
+  Else If C='eac3' Then AName:='E-AC3' Else If C='mp2' Then AName:='MP2' Else If C='mp3' Then AName:='MP3'
+  Else If C='dts' Then AName:='DTS' Else If C='pcm_bluray' Then AName:='LPCM' Else AName:=C;
+ End;
+Begin
+ Err:='';
+ If Raw Then Begin
+  If Not RunEng(ekRawProbe,M.Path,'',0,Err) Then Begin M.Msg:=Copy(Err,1,90); M.Kind:=0; Exit; End;
+  M.Fmt:='ES'; M.VCodec:=VName(TsGRaw.CodecName); M.W:=TsGRaw.Width; M.H:=TsGRaw.Height;
+  If TsGRaw.FpsDen>0 Then M.FpsX100:=Round(TsGRaw.FpsNum*100.0/TsGRaw.FpsDen);
+  M.DurMs:=TsGRaw.DurationMs; M.Frames:=TsGRaw.Frames; M.KBps:=TsGRaw.BitRate Div 1000;
+  M.Kind:=2; Exit;
+ End;
+ If Not RunEng(ekTsProbe,M.Path,'',0,Err) Then Begin M.Msg:=Copy(Err,1,90); M.Kind:=0; M.Fmt:='TS'; Exit; End;
+ M.Fmt:='TS'; M.DurMs:=TsGInfo.DurationMs;
+ If TsGInfo.DefVideo>=0 Then Begin
+  S:=TsGInfo.S[TsGInfo.DefVideo]; M.VCodec:=VName(S.CodecName); M.W:=S.Width; M.H:=S.Height;
+  If S.FpsDen>0 Then M.FpsX100:=Round(S.FpsNum*100.0/S.FpsDen);
+  M.Kind:=2;
+ End Else M.Kind:=1;
+ If TsGInfo.DefAudio>=0 Then Begin
+  S:=TsGInfo.S[TsGInfo.DefAudio]; M.ACodec:=AName(S.CodecName); M.Chans:=S.Channels; M.Rate:=S.SampleRate; M.KBps:=S.BitRate Div 1000;
+ End;
+ If (M.Kind=2) And (M.W=0) Then M.Msg:='Flux video sans dimensions';
+End;
+{$ENDIF}
 
 { ---------------------------------------------------------------------- }
 { Fichiers WAV                                                              }
@@ -105842,6 +109483,23 @@ Begin
    End;
    DelFile(T2);
   End;
+ End
+ {$ENDIF}
+ {$IFDEF FPC}
+ Else If F='TS' Then Begin
+  T1:=TmpName('AUD'); T2:=TmpName('WAV');
+  If RunEng(ekTsAudio,M.Path,T1,0,Err) Then Begin
+   Case TsGAud Of
+    TSCAac: If RunEng(ekAAC,T1,T2,0,Err) Then GetPcm:=MakeCanon(T2,Dst,Err);
+    TSCAc3: If RunEng(ekAC3,T1,T2,0,Err) Then GetPcm:=MakeCanon(T2,Dst,Err);
+    TSCMp2,TSCMp1: If RunEng(ekMpa,T1,T2,0,Err) Then GetPcm:=MakeCanon(T2,Dst,Err);
+    TSCMp3: If RunEng(ekMP3,T1,T2,0,Err) Then GetPcm:=MakeCanon(T2,Dst,Err);
+    TSCDts: If RunEng(ekDca,T1,T2,0,Err) Then GetPcm:=MakeCanon(T2,Dst,Err);
+    TSCLpcm: GetPcm:=NormalizeWav(T1,Dst,Err);
+    Else Err:='Audio TS non pris en charge (E-AC-3, TrueHD, AAC LATM) ou absent.';
+   End;
+  End;
+  DelFile(T1); DelFile(T2);
  End
  {$ENDIF}
  Else If F='AC3' Then Begin
@@ -107278,7 +110936,7 @@ Begin
    StageLo:=0; StageHi:=100;
    DoConvert:=RunImageJob(M,Pr,Dst,Err);
   End Else Err:='Le d'#233'codeur vid'#233'o n''est pas inclus : seules les images BMP/GIF peuvent '#234'tre converties en image.';
- End Else If InList(Pr.Ext,'MP4,MOV,M4V,3GP,3G2,FLV,MKV,AVI,WMV,OGV,MPG,WEBM') Then Begin
+ End Else If InList(Pr.Ext,'MP4,MOV,M4V,3GP,3G2,TS,M2TS,MTS,FLV,MKV,AVI,WMV,OGV,MPG,WEBM') Then Begin
   {$IFDEF FPC}
   If M.Kind=1 Then Err:='Un fichier audio ne peut pas devenir une vid'#233'o. Choisissez un profil Audio.'
   Else If (M.Kind=3) Or (M.Fmt='GIF') Then Begin StageLo:=0; StageHi:=90; DoConvert:=ImageVideoJob(M,Pr,Dst,Err); End
@@ -107743,6 +111401,9 @@ Var
  VFOpen: Boolean;
  VOk: Boolean;
  VErr: String;
+
+Function TsVideoTracks(Const Path: String; Raw,Head: Boolean; Var V: TTrkIn; Var Err: String): Boolean; Forward;
+Procedure TsDropFiles; Forward;
 
 Procedure TrkClear(Var T: TTrkIn);
 Begin
@@ -108624,17 +112285,18 @@ Begin
  Else If Fmt='FLV' Then Ok:=FlvTracks(Path,V,A,Err)
  Else If Fmt='AVI' Then Begin Ok:=AviTracks(Path,V,Err); FillChar(A,SizeOf(A),0); End
  Else If InList(Fmt,'MKV,WEBM') Then Ok:=MkvTracks(Path,V,A,Err)
+ Else If InList(Fmt,'TS,ES') Then Begin Ok:=TsVideoTracks(Path,Fmt='ES',True,V,Err); FillChar(A,SizeOf(A),0); End
  Else Begin VideoFirstFrame:=Y4mFirstFrame(Path,Fmt,''); Exit; End;
  If Not Ok Then Exit;
  Md:=VideoMode(Fmt,V);
- If V.Ok And (Md<0) Then Begin VideoFirstFrame:=Y4mFirstFrame(Path,Fmt,V.Codec); TrkClear(V); TrkClear(A); Exit; End;
+ If V.Ok And (Md<0) Then Begin VideoFirstFrame:=Y4mFirstFrame(Path,Fmt,V.Codec); TrkClear(V); TrkClear(A); TsDropFiles; Exit; End;
  If V.Ok And (Md>=0) Then Begin
   VFrameCb:=FFCallback; SaveStop:=Stopped; Stopped:=False;
-  Ok:=DecodeVideoTrack(Path,V,0,Md,Err);
+  If InList(Fmt,'TS,ES') Then Ok:=DecodeVideoTrack(TsGEsPath,V,0,Md,Err) Else Ok:=DecodeVideoTrack(Path,V,0,Md,Err);
   Stopped:=SaveStop;
   VFrameCb:=Nil;
  End;
- TrkClear(V); TrkClear(A);
+ TrkClear(V); TrkClear(A); TsDropFiles;
  VideoFirstFrame:=FFImg;
 End;
 
@@ -109530,6 +113192,126 @@ Begin
  ExtractMkv:=True;
 End;
 {$ENDIF}
+{$IFDEF FPC}
+{ ---------------------------------------------------------------------- }
+{ MPEG-TS / M2TS / MTS et flux elementaires bruts : entree video et sortie TS }
+{ ---------------------------------------------------------------------- }
+Procedure TsDropFiles;
+Begin
+ If TsGTemp And (TsGEsPath<>'') Then DelFile(TsGEsPath);
+ TsGEsPath:=''; TsGTemp:=False; TsGFree;
+End;
+
+{ Head=True : seuls les premiers Mo du fichier sont utilises (miniature, apercu). }
+Function TsVideoTracks(Const Path: String; Raw,Head: Boolean; Var V: TTrkIn; Var Err: String): Boolean;
+Var Src,Base,HeadF: String; I,Rd,Sz: LongInt; Ok: Boolean; F,G: File; Buf: PBArr; Got: Word;
+Begin
+ TsVideoTracks:=False; TsDropFiles; Src:=Path; HeadF:='';
+ If Head Then Begin
+  HeadF:=TmpName('TSH');
+  If OpenSrc(Path,F) And CreateOut(HeadF,G,Err) Then Begin
+   Sz:=Min(FileSize(F),12000000); GetMem(Buf,32768); Rd:=0;
+   While Rd<Sz Do Begin
+    {$I-}BlockRead(F,Buf^,32768,Got);{$I+}
+    If (IOResult<>0) Or (Got=0) Then Break;
+    BlockWrite(G,Buf^,Got); Inc(Rd,Got);
+   End;
+   FreeMem(Buf,32768); Close(F); Close(G); Src:=HeadF;
+  End Else HeadF:='';
+ End;
+ Base:=TmpName('TSX');
+ If Raw Then Ok:=RunEng(ekRawVideo,Src,Base,0,Err) Else Ok:=RunEng(ekTsVideo,Src,Base,0,Err);
+ If (HeadF<>'') And (Not (Raw And (TsGEsPath=Src))) Then DelFile(HeadF);
+ If (HeadF<>'') And Raw And (TsGEsPath=Src) Then TsGTemp:=True;
+ If Not Ok Then Begin TsDropFiles; Exit; End;
+ FillChar(V,SizeOf(V),0); TrkAlloc(V,TsGN);
+ For I:=0 To TsGN-1 Do Begin
+  V.Off^[I]:=TsGOff^[I]; V.Sz^[I]:=TsGSz^[I]; V.Dur^[I]:=TsGDur^[I]; V.Cts^[I]:=TsGCts^[I]; V.Sync^[I]:=TsGKey^[I];
+ End;
+ V.Ok:=True; V.IsVideo:=True; V.Ts:=90000; V.W:=TsGW; V.H:=TsGH;
+ If TsGVCodec=RawEsCH264 Then V.Codec:='avc1'
+ Else If TsGVCodec=RawEsCHEVC Then V.Codec:='hvc1'
+ Else If TsGVCodec=RawEsCMpeg1 Then V.Codec:='mpg1'
+ Else If TsGVCodec=RawEsCMpeg2 Then V.Codec:='mpg2'
+ Else Begin TrkClear(V); TsDropFiles; Err:='Codec video non pris en charge dans ce flux (VC-1).'; Exit; End;
+ If TsGCfgLen>0 Then Begin
+  If TsGCfgLen>SizeOf(V.Cfg) Then TsGCfgLen:=SizeOf(V.Cfg);
+  Move(TsGCfg,V.Cfg,TsGCfgLen); V.CfgLen:=TsGCfgLen;
+ End;
+ TsGFree;
+ TsVideoTracks:=True;
+End;
+
+{ ---------------------------------------------------------------------- }
+{ Multiplexeur MPEG-TS (.ts) / BDAV (.m2ts) / AVCHD (.mts)                   }
+{ ---------------------------------------------------------------------- }
+Function MuxTs(Const Dst: String; Var Tr: Array Of TMuxTrk; NT: Integer; Var Err: String): Boolean;
+Var
+ K,I,Len,Nxt,Total,Cnt: LongInt; Idx: Array[0..1] Of LongInt; Dp: Array[0..1] Of Int64;
+ Ok,Open: Boolean; Buf: PBArr; Vi,Ai: Integer; VC,AC: LongInt; Pts,Dts: Int64; Cod: String; MinC: Int64;
+Begin
+ MuxTs:=False; Ok:=True; Open:=False; Vi:=-1; Ai:=-1; VC:=0; AC:=0;
+ For K:=0 To NT-1 Do Begin
+  If Tr[K].T^.IsVideo Then Vi:=K Else Ai:=K;
+  If Tr[K].Mem=Nil Then Begin
+   If Not OpenSrc(Tr[K].Path,Tr[K].F) Then Begin Err:='Source illisible.'; Ok:=False; End Else Tr[K].Opened:=True;
+  End;
+ End;
+ If Vi<0 Then Begin Err:='Le format TS exige une piste video.'; Ok:=False; End
+ Else Begin
+  Cod:=Tr[Vi].T^.Codec;
+  If Cod='avc1' Then VC:=RawEsCH264 Else If (Cod='hvc1') Or (Cod='hev1') Then VC:=RawEsCHEVC
+  Else Begin Err:='Codec video '+Cod+' non pris en charge dans un fichier TS (H.264 ou HEVC).'; Ok:=False; End;
+ End;
+ If Ok And (Ai>=0) Then Begin
+  Cod:=Tr[Ai].T^.Codec;
+  If Cod='mp4a' Then AC:=TSCAac Else If Cod='ac-3' Then AC:=TSCAc3 Else If Cod='mp3 ' Then AC:=TSCMp2
+  Else Begin Err:='Codec audio '+Cod+' non pris en charge dans un fichier TS.'; Ok:=False; End;
+ End;
+ If Ok Then Begin
+  EngMsg:=''; EngFirst:=0;
+  If SetJmp(EngJmp)=0 Then Begin
+   TSMuxOpen(Dst,VC,AC); Open:=True;
+   TSMuxSetVideoConfig(PEABuffer(@Tr[Vi].T^.Cfg),Tr[Vi].T^.CfgLen);
+   If (AC=TSCAac) And (Tr[Ai].T^.CfgLen>=2) Then TSMuxSetAudioConfig(PEABuffer(@Tr[Ai].T^.Cfg),Tr[Ai].T^.CfgLen);
+   MinC:=0;
+   For I:=Tr[Vi].First To Tr[Vi].Last Do If Tr[Vi].T^.Cts^[I]<MinC Then MinC:=Tr[Vi].T^.Cts^[I];
+   For K:=0 To NT-1 Do Begin Idx[K]:=Tr[K].First; Dp[K]:=0; End;
+   Total:=0; For K:=0 To NT-1 Do Inc(Total,Tr[K].Last-Tr[K].First+1);
+   Cnt:=0;
+   While Ok And ((Idx[0]<=Tr[0].Last) Or ((NT>1) And (Idx[1]<=Tr[1].Last))) Do Begin
+    Nxt:=-1;
+    For K:=0 To NT-1 Do If Idx[K]<=Tr[K].Last Then Begin
+     If (Nxt<0) Or (Dp[K]*1000.0/Tr[K].T^.Ts<Dp[Nxt]*1000.0/Tr[Nxt].T^.Ts) Then Nxt:=K;
+    End;
+    K:=Nxt;
+    Buf:=MuxFetch(Tr[K],Idx[K],Len);
+    Dts:=Round(Dp[K]*90000.0/Tr[K].T^.Ts);
+    If Tr[K].T^.IsVideo Then Begin
+     Pts:=Round((Dp[K]+Tr[K].T^.Cts^[Idx[K]]-MinC)*90000.0/Tr[K].T^.Ts);
+     If Pts<Dts Then Pts:=Dts;
+     TSMuxVideo(PEABuffer(Buf),Len,Pts,Dts,Tr[K].T^.Sync^[Idx[K]]<>0);
+    End Else TSMuxAudio(PEABuffer(Buf),Len,Dts);
+    Inc(Dp[K],Tr[K].T^.Dur^[Idx[K]]); Inc(Idx[K]); Inc(Cnt);
+    If (Cnt And 31)=0 Then Begin
+     UiTick(Cnt,Max(1,Total));
+     If Stopped Then Ok:=False;
+    End;
+   End;
+   TSMuxClose; Open:=False;
+  End Else Begin
+   Ok:=False; Err:=EngMsg; If Err='' Then Err:='Erreur de multiplexage TS.';
+   TSMuxClose;
+  End;
+ End;
+ If Ok Then MuxTs:=True
+ Else Begin
+  If Err='' Then If Stopped Then Err:='Conversion annul'#233'e.' Else Err:='Erreur de multiplexage.';
+  DelFile(Dst);
+ End;
+ For K:=0 To NT-1 Do If Tr[K].Opened Then Begin Close(Tr[K].F); Tr[K].Opened:=False; End;
+End;
+{$ENDIF}
 
 { ====================================================================== }
 { Taches video : copie de flux, transcodage H.264, image -> video, AAC      }
@@ -109701,6 +113483,7 @@ Begin
  If Ext='FLV' Then MuxOut:=MuxFlv(Dst,Tr,NT,Err)
  Else If Ext='MKV' Then MuxOut:=MuxMkv(Dst,'matroska',Tr,NT,Err)
  Else If Ext='WEBM' Then MuxOut:=MuxMkv(Dst,'webm',Tr,NT,Err)
+ Else If InList(Ext,'TS,M2TS,MTS') Then MuxOut:=MuxTs(Dst,Tr,NT,Err)
  Else MuxOut:=MuxMp4(Dst,BrandFor(Ext,False),Tr,NT,Err);
 End;
 
@@ -109805,13 +113588,13 @@ Begin
 End;
 
 { MP4/MOV/FLV H.264 -> MP4 (copie de flux ou transcodage) }
-Function VideoJob(Var M: TMedia; Const Pr: TProf; Const Dst: String; Var Err: String): Boolean;
+Function VideoJobCore(Var M: TMedia; Const Pr: TProf; Const Dst: String; Var Err: String): Boolean;
 Var
  V,A,Vo: TTrkIn; Ok,HaveA,Reenc,AFlv: Boolean; Fmt: String; Tr: Array[0..1] of TMuxTrk; NT: Integer;
  AFirst,ALast,First,Last,I,Fn,Fd,StartMs,EndMs,K: LongInt; AOut: TTrkIn; APath: String; Acc: Int64; SkipV: Boolean;
  Rw,Rh: LongInt; DecMode: Integer; AltHaveA: Boolean; Y4,DecPath: String; HvMem: PBArr;
 Begin
- VideoJob:=False; Fmt:=M.Fmt;
+ VideoJobCore:=False; Fmt:=M.Fmt;
  Y4:=''; DecPath:=M.Path; FillChar(A,SizeOf(A),0);
  If InList(Fmt,'WMV,ASF,OGV,OGG,MPG,MPEG,M2V,M1V,DAT,VOB') Then Begin
   K:=Y4mSource(M,Fmt,M.VCodec,Y4,Err);
@@ -109823,6 +113606,7 @@ Begin
  Else If Fmt='FLV' Then Ok:=FlvTracks(M.Path,V,A,Err)
  Else If Fmt='AVI' Then Begin Ok:=AviTracks(M.Path,V,Err); FillChar(A,SizeOf(A),0); End
  Else If InList(Fmt,'MKV,WEBM') Then Ok:=MkvTracks(M.Path,V,A,Err)
+ Else If InList(Fmt,'TS,ES') Then Begin Ok:=TsVideoTracks(M.Path,Fmt='ES',False,V,Err); FillChar(A,SizeOf(A),0); DecPath:=TsGEsPath; End
  Else Begin Err:='Conteneur vid'#233'o non pris en charge : '+Fmt+' (MP4, MOV, M4V, 3GP, FLV, AVI, MKV, WMV, MPEG, OGV).'; Exit; End;
  If Not Ok Then Exit;
  If Not V.Ok Then Begin TrkClear(V); TrkClear(A); Err:='Aucune piste vid'#233'o dans ce fichier.'; Exit; End;
@@ -109878,7 +113662,7 @@ Begin
    End;
    If Last<First Then Last:=First;
   End;
-  Tr[0].T:=@V; Tr[0].First:=First; Tr[0].Last:=Last; Tr[0].Path:=M.Path; NT:=1;
+  Tr[0].T:=@V; Tr[0].First:=First; Tr[0].Last:=Last; Tr[0].Path:=DecPath; NT:=1;
   If HaveA Then Begin
    Tr[1].T:=@AOut; Tr[1].First:=AFirst; Tr[1].Last:=ALast; Tr[1].Path:=APath; NT:=2;
   End;
@@ -109927,7 +113711,13 @@ Begin
   If (APath<>'') And (APath<>M.Path) Then Begin DelFile(APath); TrkClear(AOut); End;
  End;
  TrkClear(V); TrkClear(A);
- VideoJob:=Ok;
+ VideoJobCore:=Ok;
+End;
+
+Function VideoJob(Var M: TMedia; Const Pr: TProf; Const Dst: String; Var Err: String): Boolean;
+Begin
+ VideoJob:=VideoJobCore(M,Pr,Dst,Err);
+ TsDropFiles;
 End;
 
 { Image / GIF anime -> video MP4 (H.264) }
@@ -110839,7 +114629,8 @@ Begin
   If U='FSV1' Then K:=6;
  End Else If (Fmt='OGV') Or (Fmt='OGG') Then Begin
   If (U='THEORA') Or (U='') Then K:=5;
- End Else If InList(Fmt,'MPG,MPEG,M2V,M1V,DAT,VOB') Then K:=4;
+ End Else If InList(Fmt,'MPG,MPEG,M2V,M1V,DAT,VOB') Then K:=4
+ Else If InList(Fmt,'TS,ES') And InList(U,'MPG1,MPG2') Then Begin K:=4; Src:=TsGEsPath; End;
  If K=0 Then Exit;
  Y4:=TmpName('Y4M'); Es:='';
  If K=4 Then Begin
@@ -110890,9 +114681,11 @@ Begin
  Else If Fmt='FLV' Then Begin
   If U='FSV1' Then K:=6;
  End Else If (Fmt='OGV') Or (Fmt='OGG') Then K:=5
- Else If InList(Fmt,'MPG,MPEG,M2V,M1V,DAT,VOB') Then K:=4;
+ Else If InList(Fmt,'MPG,MPEG,M2V,M1V,DAT,VOB') Then K:=4
+ Else If InList(Fmt,'TS,ES') And InList(U,'MPG1,MPG2') Then Begin K:=4; Src:=TsGEsPath; End;
  If K=0 Then Exit;
- If K=4 Then Begin
+ If (K=4) And InList(Fmt,'TS,ES') Then Begin End
+ Else If K=4 Then Begin
   { debut du fichier seulement }
   If COpen(Path) Then Begin
    If (CB(0)=0) And (CB(1)=0) And (CB(2)=1) And (CB(3)=$BA) Then Begin
@@ -110988,6 +114781,7 @@ Begin
   Else If Fmt='FLV' Then Ok:=FlvTracks(M.Path,V,A,Err)
   Else If Fmt='AVI' Then Ok:=AviTracks(M.Path,V,Err)
   Else If InList(Fmt,'MKV,WEBM') Then Ok:=MkvTracks(M.Path,V,A,Err)
+  Else If InList(Fmt,'TS,ES') Then Begin Ok:=TsVideoTracks(M.Path,Fmt='ES',True,V,Err); DecPath:=TsGEsPath; End
   Else Begin Info('Lecture indisponible pour ce format.'); Dirty:=True; Exit; End;
   If (Not Ok) Or (Not V.Ok) Then Begin If Err='' Then Err:='Aucune piste vid'#233'o.'; Info(Err); TrkClear(V); TrkClear(A); Dirty:=True; Exit; End;
   DecMode:=VideoMode(Fmt,V);
@@ -111008,7 +114802,7 @@ Begin
  Ok:=DecodeVideoTrack(DecPath,V,0,DecMode,Err);
  VFrameCb:=Nil; VStopFlag:=False;
  If Y4<>'' Then DelFile(Y4);
- TrkClear(V); TrkClear(A);
+ TrkClear(V); TrkClear(A); TsDropFiles;
  Dirty:=True;
 End;
 
