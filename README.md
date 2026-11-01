@@ -3,7 +3,7 @@ Suite de commande écrit en Turbo Pascal/Free Pascal des commandes FFMPEG ou rel
 
 Aperçu de AnyMP4 :
 
-<img width="637" height="485" alt="image" src="https://github.com/user-attachments/assets/bfcce22f-6f3c-4b7e-8102-da1aa7f10562" />
+<img width="640" height="480" alt="image" src="https://github.com/user-attachments/assets/f4c290c3-4fa7-43cd-917b-644fd9b62db9" />
 
 <h3>Liste des fichiers</h3>
 
