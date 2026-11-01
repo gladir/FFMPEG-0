@@ -5,6 +5,25 @@ Aperçu de AnyMP4 :
 
 <img width="637" height="485" alt="image" src="https://github.com/user-attachments/assets/bfcce22f-6f3c-4b7e-8102-da1aa7f10562" />
 
+<h3>Liste des fichiers</h3>
+
+Voici la liste des différents fichiers proposés dans Speech-to-Text-0 :
+
+<table>
+	<tr>
+		<th>Nom</th>
+		<th>Description</th>
+	</tr>
+	<tr>
+    <td><b>ANYMP4.PAS</b></td>
+    <td>Cette commande permet de lancer un clone AnyMP4.</td>
+  </tr>
+  <tr>	
+    <td><b>FFMPEG.PAS</b></td>
+    <td>Cette commande permet de manipuler, convertir, encoder, décoder, enregistrer et diffuser des fichiers audio et vidéo.</td>
+  </tr>
+</table>
+
 ## ANYMP4.PAS
 
 Clone graphique (Free Pascal / PtcGraph, 640x480) du convertisseur AnyMP4 Video Converter Ultimate : onglets
