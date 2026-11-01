@@ -1,6 +1,10 @@
 # FFMPEG-0
 Cette commande, ecrite en Pascal, permet de manipuler, convertir, encoder, décoder, enregistrer et diffuser des fichiers audio et vidéo.
 
+Aperçu de AnyMP4 :
+
+<img width="637" height="485" alt="image" src="https://github.com/user-attachments/assets/bfcce22f-6f3c-4b7e-8102-da1aa7f10562" />
+
 ## ANYMP4.PAS
 
 Clone graphique (Free Pascal / PtcGraph, 640x480) du convertisseur AnyMP4 Video Converter Ultimate : onglets
