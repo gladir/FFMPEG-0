@@ -3,7 +3,7 @@
   @version: 1.00
   @website(https://www.gladir.com/ffmpeg-0)
   @abstract(Target: Turbo Pascal 7, Free Pascal
-  @description: Clone de l'application ANYMP4 (Convertisseur Video Ultimate).
+  @description: Clone de l'application ANYMPEG (Convertisseur Video Ultimate).
    Interface graphique complete. Video MP4/MOV/M4V/3GP (H.264 + AAC) : lecture,
    copie de flux, transcodage, miniatures. Moteurs audio (MP3, AAC, WAV, AIFF, VOC, MOD,
    encodeur MP3) adaptes de FFMPEG.PAS, extraction audio AVI/FLV/MP4/MOV/M4A, FLAC natif,
@@ -11,7 +11,7 @@
    Les moteurs (decodeur/encodeur H.264, MP3, AAC-LC, AIFF, VOC, MOD, encodeur MP3,
    primitives ADPCM) proviennent de FFMPEG.PAS et sont adaptes de FFmpeg (LGPL-2.1+). }
 
-Program ANYMP4;
+Program ANYMPEG;
 
 {$IFDEF FPC}
  {$MODE TP}
@@ -1065,7 +1065,7 @@ End;
 Procedure Info(Const Msg: String);
 Var R: Integer;
 Begin
- R:=MsgBox('AnyMP4',Msg,'OK');
+ R:=MsgBox('AnyMpeg',Msg,'OK');
 End;
 
 { Saisie d'une chaine. Retourne True si valide. }
@@ -27773,7 +27773,7 @@ End;
 {$B-}
 { ====================================================================== }
 { pe_hevc_enc.pas : encodeur HEVC / H.265 (profil Main, 8 bits, 4:2:0)     }
-{ Ecrit pour ANYMP4.PAS. Reconstruction interne (intra, inter, transformees,}
+{ Ecrit pour ANYMPEG.PAS. Reconstruction interne (intra, inter, transformees,}
 { deblocage) compatible bit a bit avec FFmpeg/libde265.                      }
 { Les tables CABAC, la matrice DCT, les tables de deblocage et de filtres    }
 { proviennent de FFmpeg (LGPL 2.1+) et de libde265 (LGPL 3) et de la norme   }
@@ -30309,7 +30309,7 @@ End;
 { ====================================================================== }
 { pe_rawes.pas - Flux elementaires video bruts (Annex B H.264 / HEVC,      }
 { MPEG-1/2 ES, VC-1 AP), decoupage en unites d'acces, index, SPS/POC.     }
-{ Ecrit pour ANYMP4 (FPC 3.2.2, mode TP, sans unite, sans directive include).         }
+{ Ecrit pour ANYMPEG (FPC 3.2.2, mode TP, sans unite, sans directive include).         }
 { Reference : ITU-T H.264/H.265/H.262, FFmpeg n6.1.1 (libavcodec/h264_ps,  }
 { hevc_ps, h264_parser, hevc_parser, mpegvideo_parser) - LGPL 2.1+.        }
 { Tous les identifiants globaux commencent par RawEs / TRawEs.             }
@@ -33560,7 +33560,7 @@ Begin
  TSM.PcrPer:=Int64(TSMuxPcrPeriod)*27000; TSM.PatPer:=Int64(TSMuxPatPeriod)*27000;
  If TSMuxOffset=0 Then TSMuxOffset:=126000;
  If TSMuxDelay=0 Then TSMuxDelay:=63000;
- If TSMuxProvider='' Then TSMuxProvider:='ANYMP4';
+ If TSMuxProvider='' Then TSMuxProvider:='ANYMPEG';
  If TSMuxService='' Then TSMuxService:='Service01';
  TSM.Base:=TSMuxBase; TSM.BaseSet:=TSMuxUseBase;
  Assign(TSM.F,Path);
@@ -36138,8 +36138,8 @@ Begin
  Company:=MxfCfg.Company;
  If Company='' Then Begin If MxfCfg.Bitexact Then Company:='FFmpeg' Else Company:='Gladir'; End;
  Product:=MxfCfg.Product;
- If Product='' Then Begin If MxfCfg.Bitexact Then Product:='OP1a Muxer' Else Product:='ANYMP4 MXF OP1a Muxer'; End;
- If MxfCfg.Bitexact Then Begin Platform:='Lavf'; Version:='0.0.0'; End Else Begin Platform:='ANYMP4 Pascal'; Version:='1.0.0'; End;
+ If Product='' Then Begin If MxfCfg.Bitexact Then Product:='OP1a Muxer' Else Product:='ANYMPEG MXF OP1a Muxer'; End;
+ If MxfCfg.Bitexact Then Begin Platform:='Lavf'; Version:='0.0.0'; End Else Begin Platform:='ANYMPEG Pascal'; Version:='1.0.0'; End;
  MxfPKey13($013000);
  MxfPTag($3C0A,16); MxfPUuid(MXF_T_IDENT,0);
  MxfPTag($3C09,16); MxfPUuid(MXF_T_IDENT,1);
@@ -47206,7 +47206,7 @@ Const
 {$INLINE ON}
 { ====================================================================== }
 { pe_vp9_enc.pas : encodeur VP9 (profil 0 = 8 bits, profil 2 = 10 bits,    }
-{ 4:2:0) ecrit pour ANYMP4.PAS. Il REUTILISE l'etat et les fonctions du    }
+{ 4:2:0) ecrit pour ANYMPEG.PAS. Il REUTILISE l'etat et les fonctions du    }
 { decodeur pe_vp9.pas (prediction intra, interpolation de mouvement,       }
 { transformees inverses, filtre de boucle, tables de probabilites,         }
 { adaptation arriere, contextes, candidats de vecteurs) : la reconstruction}
@@ -67749,7 +67749,7 @@ End;
 {$B-}
 { ====================================================================== }
 { pe_av1_enc.pas : encodeur AV1 (profil Main, 8 bits, 4:2:0, 1 tuile)      }
-{ Ecrit pour ANYMP4.PAS. S'appuie sur le decodeur pe_av1.pas (Av*, AV_*)    }
+{ Ecrit pour ANYMPEG.PAS. S'appuie sur le decodeur pe_av1.pas (Av*, AV_*)    }
 { pour la reconstruction (predictions intra/inter, transformees inverses,   }
 { filtre de boucle, CDEF, gestion des images de reference et des CDF) :     }
 { la reconstruction de l'encodeur est donc identique, par construction, a   }
@@ -72418,7 +72418,7 @@ End;
 {$B-}
 { ====================================================================== }
 { pe_hevc_enc10.pas : encodeur HEVC / H.265 (Main 8 bits ou Main10, 4:2:0)   }
-{ Ecrit pour ANYMP4.PAS. Reconstruction interne (intra, inter, transformees,}
+{ Ecrit pour ANYMPEG.PAS. Reconstruction interne (intra, inter, transformees,}
 { deblocage) compatible bit a bit avec FFmpeg/libde265.                      }
 { Les tables CABAC, la matrice DCT, les tables de deblocage et de filtres    }
 { proviennent de FFmpeg (LGPL 2.1+) et de libde265 (LGPL 3) et de la norme   }
@@ -125977,7 +125977,7 @@ Var I: Integer;
 Begin
  Rect(0,0,ScrW-1,17,cPanel); HLn(0,ScrW-1,17,cSteel);
  Disc(12,9,6,cBlue); Txt(9,6,'A',cWhite);
- Txt(24,5,'AnyMP4',cNavy);
+ Txt(24,5,'AnyMpeg',cNavy);
  For I:=1 To 5 Do Begin
   If I=Active Then Begin Rect(MenuX[I]-4,1,MenuX[I]+MenuW[I]+3,16,cBlue); Txt(MenuX[I],5,Names[I],cWhite); End
   Else Txt(MenuX[I],5,Names[I],cBlack);
@@ -126194,7 +126194,7 @@ Begin
  Txt(X+TextW(S3)+116,258,'pour lancer',cBlack);
  HotAdd(70,106,500,184,hAdd);
  Para(12,302,616,
-  'AnyMP4 Convertisseur Vid'#233'o Ultimate - Votre convertisseur, '#233'diteur et am'#233'lioreur tout-en-un aliment'#233' par 14 ans d''innovation. Lib'#233'rez la magie de l''IA sur plus de 500 '+
+  'AnyMpeg Convertisseur Vid'#233'o Ultimate - Votre convertisseur, '#233'diteur et am'#233'lioreur tout-en-un aliment'#233' par 14 ans d''innovation. Lib'#233'rez la magie de l''IA sur plus de 500 '+
   'formats pour la vid'#233'o, l''audio, DVD et les images.',cGrayD);
 End;
 
@@ -127946,7 +127946,7 @@ Begin
  SegStart:=Seg+8;
  { Info }
  Te:=EBeg($1549A966);
- EUInt($2AD7B1,1000000); EFlt($4489,DurMs); EStr($4D80,'ANYMP4'); EStr($5741,'ANYMP4');
+ EUInt($2AD7B1,1000000); EFlt($4489,DurMs); EStr($4D80,'ANYMPEG'); EStr($5741,'ANYMPEG');
  EEnd(Te);
  { Tracks }
  Tk:=EBeg($1654AE6B);
@@ -128294,7 +128294,7 @@ Begin
   End;
  End;
  If Ok Then Begin
-  Cfg.Company:='Gladir'; Cfg.Product:='ANYMP4';
+  Cfg.Company:='Gladir'; Cfg.Product:='ANYMPEG';
   If Not MxfMuxOpen(Dst,Cfg) Then Begin Err:='MXF : '+MxfMsg; Ok:=False; End Else Open:=True;
  End;
  If Ok Then Begin
@@ -130903,12 +130903,12 @@ End;
 Procedure AboutDlg;
 Var R: Integer;
 Begin
- R:=MsgBox(#192+' propos de AnyMP4','AnyMP4 Convertisseur Vid'#233'o Ultimate (clone Pascal) 1.00|'+
+ R:=MsgBox(#192+' propos de AnyMpeg','AnyMpeg Convertisseur Vid'#233'o Ultimate (clone Pascal) 1.00|'+
   'Sylvain Maltais - https://www.gladir.com/ffmpeg-0|'+
   'Video : decodeur H.264 (CAVLC/CABAC, I/P/B) et encodeur H.264 + muxeur MP4 (FFMPEG.PAS).|'+
   'Moteurs int'#233'gr'#233's (FFMPEG.PAS) : MP3, AAC-LC (decodeur et encodeur), AIFF, VOC, MOD.|'+
   'Extraction audio : AVI, FLV, MP4/MOV/M4A ; FLAC natif. Images : BMP, GIF anim'#233' (LZW).|'+
-  'Aucune d'#233'pendance externe : tout est dans ANYMP4.PAS.','OK');
+  'Aucune d'#233'pendance externe : tout est dans ANYMPEG.PAS.','OK');
 End;
 
 { ---- enregistrement hors ligne : cle de 4 groupes de 5 caracteres ; le dernier caractere est une somme de controle ---- }
@@ -130945,7 +130945,7 @@ End;
 Procedure SaveCfg;
 Var F: Text; S: String;
 Begin
- Assign(F,'ANYMP4.INI');
+ Assign(F,'ANYMPEG.INI');
  {$I-}Rewrite(F);{$I+}
  If IOResult<>0 Then Exit;
  WriteLn(F,'OutDir=',OutDir);
@@ -130963,7 +130963,7 @@ End;
 Procedure LoadCfg;
 Var F: Text; L,K,V: String; P: Integer;
 Begin
- Assign(F,'ANYMP4.INI');
+ Assign(F,'ANYMPEG.INI');
  {$I-}Reset(F);{$I+}
  If IOResult<>0 Then Exit;
  While Not Eof(F) Do Begin
@@ -131007,7 +131007,7 @@ End;
 Procedure UpdateDlg;
 Var R: Integer;
 Begin
- R:=MsgBox('Mises '#224' jour','AnyMP4 (clone) version 1.0 (2026).|Ce programme fonctionne hors ligne : il n''ouvre aucune connexion r'#233'seau|et ne peut donc pas rechercher de nouvelle version.','OK');
+ R:=MsgBox('Mises '#224' jour','AnyMpeg (clone) version 1.0 (2026).|Ce programme fonctionne hors ligne : il n''ouvre aucune connexion r'#233'seau|et ne peut donc pas rechercher de nouvelle version.','OK');
 End;
 
 { ====================================================================== }
@@ -132095,9 +132095,9 @@ Begin
  { Un flux distinct conserve la sortie console, meme avec les unites Crt. }
  Assign(HelpOutput,'');
  Rewrite(HelpOutput);
- WriteLn(HelpOutput,'ANYMP4 - Cette commande permet de lancer le convertisseur video et audio graphique.');
+ WriteLn(HelpOutput,'ANYMPEG - Cette commande permet de lancer le convertisseur video et audio graphique.');
  WriteLn(HelpOutput);
- WriteLn(HelpOutput,'Syntaxe : ANYMP4 [-maxscreen] [<fichier> ...] [/? | -h | --help]');
+ WriteLn(HelpOutput,'Syntaxe : ANYMPEG [-maxscreen] [<fichier> ...] [/? | -h | --help]');
  WriteLn(HelpOutput);
  WriteLn(HelpOutput,'  Sans option          Lance l''application graphique en 640x480.');
  WriteLn(HelpOutput,'  -h, --help           Affichent egalement cette aide.');
