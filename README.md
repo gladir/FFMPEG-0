@@ -1,7 +1,7 @@
 # FFMPEG-0
 Suite de commande écrit en Turbo Pascal/Free Pascal des commandes FFMPEG ou relation avec celle-ci.
 
-Aperçu de AnyMP4 :
+Aperçu de AnyMpeg :
 
 <img width="640" height="480" alt="image" src="https://github.com/user-attachments/assets/f4c290c3-4fa7-43cd-917b-644fd9b62db9" />
 
@@ -16,7 +16,7 @@ Voici la liste des différents fichiers proposés dans FFMPEG-0 :
 	</tr>
 	<tr>
     <td><b>ANYMP4.PAS</b></td>
-    <td>Cette commande permet de lancer un clone AnyMP4.</td>
+    <td>Cette commande permet de lancer AnyMpeg.</td>
   </tr>
   <tr>	
     <td><b>FFMPEG.PAS</b></td>
